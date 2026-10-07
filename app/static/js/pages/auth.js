@@ -9,7 +9,7 @@ export function render(root, { path, query, session }) {
     <div class="auth-wrap">
       <div class="auth-card">
         <div class="brand"><img src="/favicon.svg" alt="">${app}</div>
-        <p class="muted" style="text-align:center;margin:0">${isSignup ? 'Create your account' : 'Sign in to request and stream music'}</p>
+        <p class="muted" style="text-align:center;margin:0">${isSignup ? 'Create your account' : 'Sign in to request music and manage the library'}</p>
         <div id="auth-err" class="error-box hidden" style="margin-top:16px"></div>
         ${isSignup ? signupForm(mode, query.invite) : loginForm()}
         <p class="small muted" style="text-align:center;margin:18px 0 0">

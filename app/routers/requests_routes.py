@@ -5,7 +5,7 @@ from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 
 from .. import auth, config, db, worker
-from ..services import notify, spotify
+from ..services import notify
 
 router = APIRouter(prefix="/api/requests", tags=["requests"])
 
@@ -20,10 +20,6 @@ class NewRequest(BaseModel):
     cover_url: str | None = None
     url: str | None = None
     length: float | None = None
-
-
-class BulkTracks(BaseModel):
-    url: str
 
 
 def _quota(user: dict, n: int = 1) -> None:
@@ -47,6 +43,11 @@ def _create(user: dict, body: NewRequest, parent_id: int | None = None, notify_a
         raise HTTPException(400, "A MusicBrainz id is required")
     elif body.kind == "track" and not (body.mbid or (body.artist and body.title)):
         raise HTTPException(400, "Track needs a MusicBrainz id or artist + title")
+    if body.kind == "track" and not body.mbid:
+        dup = db.one("SELECT id, status FROM requests WHERE kind='track' AND lower(artist)=lower(?) AND lower(title)=lower(?) AND status NOT IN ('failed','denied','cancelled')",
+                     (body.artist, body.title))
+        if dup:
+            raise HTTPException(409, f"Already requested (#{dup['id']}, {dup['status']})")
     if body.mbid:
         dup = db.one("SELECT id, status FROM requests WHERE mbid=? AND kind=? AND status NOT IN ('failed','denied','cancelled')", (body.mbid, body.kind))
         if dup:
@@ -98,32 +99,6 @@ async def create(body: NewRequest, user=Depends(auth.current_user)):
     if r["status"] == "pending":
         await notify.send("🎵 New request awaiting approval", f"{user['username']} requested {body.kind}: {r['title'] or r['artist'] or r['url']}", body.cover_url)
     return r
-
-
-@router.post("/import")
-async def bulk_import(body: BulkTracks, user=Depends(auth.current_user)):
-    """Import a Spotify playlist/album as individual track requests."""
-    if not spotify.parse(body.url):
-        raise HTTPException(400, "Only Spotify URLs are imported track-by-track; use a URL download for others")
-    data = await spotify.tracks(body.url)
-    _quota(user, 1)
-    approved = user["role"] == "admin" or user.get("auto_approve") or config.get("auto_approve")
-    now = time.time()
-    parent = db.execute(
-        "INSERT INTO requests (user_id, kind, artist, title, url, status, message, detail, created_at, updated_at) VALUES (?,?,?,?,?,?,?,?,?,?)",
-        (user["id"], "playlist", "Spotify", data["name"], body.url, "completed" if approved else "pending",
-         f"{len(data['tracks'])} tracks", "{}", now, now),
-    )
-    n = 0
-    for t in data["tracks"]:
-        db.execute(
-            "INSERT INTO requests (user_id, kind, artist, title, album, cover_url, status, detail, parent_id, created_at, updated_at) VALUES (?,?,?,?,?,?,?,?,?,?,?)",
-            (user["id"], "track", t["artist"], t["title"], t["album"], t["cover"], "queued" if approved else "pending",
-             json.dumps({"length": t["length"]}), parent, now, now),
-        )
-        n += 1
-    db.log("info", f"{user['username']} imported Spotify {data.get('kind', 'playlist')} '{data['name']}' ({n} tracks)")
-    return {"id": parent, "count": n}
 
 
 def _get_owned(rid: int, user: dict) -> dict:

@@ -109,7 +109,6 @@ def test_library_endpoints(client, env):
     aid = albums["items"][0]["id"]
     detail = client.get(f"/api/library/albums/{aid}").json()
     tid = detail["tracks"][0]["id"]
-    assert client.get(f"/api/library/tracks/{tid}/stream").status_code == 200
     z = client.get(f"/api/library/albums/{aid}/download")
     assert z.status_code == 200 and z.content[:2] == b"PK"
     r = client.post("/api/library/tags", json={"track_ids": [tid], "values": {"title": "Renamed"}}, headers=H)

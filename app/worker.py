@@ -1,12 +1,13 @@
 """Request pipeline: Lidarr → slskd → yt-dlp, with import + tagging."""
 import asyncio
 import os
+import re
 import shutil
 import time
 import traceback
 
 from . import config, db
-from .services import library, lidarr, musicbrainz as mb, notify, slskd, tagger, ytdlp
+from .services import library, lidarr, musicbrainz as mb, notify, slskd, streamrip, tagger, ytdlp
 
 ACTIVE = ("queued", "searching", "downloading", "monitoring", "importing")
 _running: dict[int, asyncio.Task] = {}
@@ -48,6 +49,11 @@ async def complete(r: dict, message: str, new_paths: list[str] | None = None) ->
     if new_paths:
         await library.index_paths(new_paths)
     upd(r, status="completed", progress=100, message=message)
+    try:
+        from .services import playlists
+        playlists.rematch()
+    except Exception:  # noqa: BLE001
+        traceback.print_exc()
     db.log("info", f"Request completed: {label(r)} ({message})")
     await notify.send("✅ Now available", f"{label(r)}\n{message}", r.get("cover_url"))
     if new_paths:
@@ -72,7 +78,7 @@ async def next_source(r: dict, reason: str = "") -> None:
     src = srcs.pop(0)
     d["sources"] = srcs
     upd(r, source=src, progress=0, status="searching", message=f"Trying {src}…")
-    await {"lidarr": start_lidarr, "slskd": start_slskd, "ytdlp": start_ytdlp}[src](r)
+    await {"lidarr": start_lidarr, "slskd": start_slskd, "ytdlp": start_ytdlp, "streamrip": start_streamrip}[src](r)
 
 
 async def start(r: dict) -> None:
@@ -81,6 +87,13 @@ async def start(r: dict) -> None:
         upd(r, status="completed")
         return
     if r["kind"] == "url":
+        if re.search(r"qobuz\.com|tidal\.com|deezer\.com", r["url"] or ""):
+            if not streamrip.enabled():
+                await fail(r, "Qobuz/Tidal/Deezer links need streamrip enabled in Settings → Downloaders")
+                return
+            upd(r, source="streamrip", status="downloading", message="Downloading with streamrip…")
+            await run_streamrip_url(r)
+            return
         upd(r, source="ytdlp", status="downloading", message="Starting download…")
         await run_url(r)
         return
@@ -100,7 +113,8 @@ async def start(r: dict) -> None:
             await expand_artist(r)
         return
     order = [s.strip() for s in config.get("source_order").split(",") if s.strip()]
-    avail = {"lidarr": lidarr.enabled() and r["kind"] == "album" and r["mbid"], "slskd": slskd.enabled(), "ytdlp": ytdlp.enabled()}
+    avail = {"lidarr": lidarr.enabled() and r["kind"] == "album" and r["mbid"], "slskd": slskd.enabled(),
+             "ytdlp": ytdlp.enabled(), "streamrip": streamrip.enabled()}
     d["sources"] = [s for s in order if avail.get(s)]
     d["log"] = []
     await next_source(r)
@@ -286,11 +300,91 @@ async def import_slskd(r: dict, c: dict) -> None:
         await fail(r, f"Downloaded files not found under {config.get('slskd_download_path')} – check the shared volume mapping")
         return
     root = config.get("slskd_download_path")
-    if r["kind"] == "album":
-        new = await tagger.import_album_files(paths, r["artist"], r["album"] or r["title"], r["mbid"], root)
-    else:
-        new = [await tagger.import_single(paths[0], r["artist"], r["title"], r["mbid"], root)]
-    await complete(r, f"Downloaded from Soulseek ({c['format'].upper()})", new)
+    note = ""
+    try:
+        if r["kind"] == "album":
+            new = await tagger.import_album_files(paths, r["artist"], r["album"] or r["title"], r["mbid"], root)
+        else:
+            p, note = await tagger.import_single(paths[0], r["artist"], r["title"], r["mbid"], root, r["detail"].get("length"))
+            new = [p]
+    except tagger.VerificationFailed as e:
+        _discard(paths, root)
+        db.log("warning", f"Rejected download from {c['username']} for {label(r)}: {e}")
+        upd(r, status="downloading", message=f"Rejected {c['username']}'s files: {e}")
+        await _slskd_try_next(r, f"wrong audio ({e})")
+        return
+    await complete(r, f"Downloaded from Soulseek ({c['format'].upper()})" + (f" – {note}" if note else ""), new)
+
+
+def _discard(paths: list[str], root: str) -> None:
+    for p in paths:
+        try:
+            os.remove(p)
+        except OSError:
+            pass
+        tagger.prune_empty(os.path.dirname(p), root)
+
+
+# ---- streamrip (Qobuz / Tidal / Deezer) ---------------------------------------
+
+_rip_sem = asyncio.Semaphore(1)
+
+
+async def _isrc_for(r: dict) -> str | None:
+    d = r["detail"]
+    if d.get("isrc"):
+        return d["isrc"]
+    if r["kind"] == "track" and r["mbid"]:
+        try:
+            d["isrc"] = (await mb.recording(r["mbid"])).get("isrc")
+        except Exception:  # noqa: BLE001
+            pass
+    return d.get("isrc")
+
+
+async def start_streamrip(r: dict) -> None:
+    async with _rip_sem:
+        _check(r["id"])
+        upd(r, status="searching", message="Looking for an exact lossless match…")
+        if r["kind"] == "album":
+            rel = await _release_info(r)
+            first_isrc = None
+            if rel and r["mbid"]:
+                try:
+                    full = await mb.release(rel["id"])
+                    first_isrc = next((t["isrc"] for t in full["tracks"] if t.get("isrc")), None)
+                except Exception:  # noqa: BLE001
+                    pass
+            urls = await streamrip.resolve_album(r["artist"], r["album"] or r["title"], len(rel["tracks"]) if rel else None, first_isrc)
+        else:
+            urls = await streamrip.resolve_track(r["artist"], r["title"], await _isrc_for(r), r["detail"].get("length"))
+        if not urls:
+            await next_source(r, "not found on Deezer/Tidal")
+            return
+        last_err = ""
+        for url in urls:
+            _check(r["id"])
+            out = os.path.join(_staging(r), "streamrip")
+            shutil.rmtree(out, ignore_errors=True)
+            upd(r, status="downloading", message=f"streamrip: {url}")
+            try:
+                files = await streamrip.download(url, out)
+                upd(r, status="importing", progress=100, message="Verifying, tagging and importing…")
+                if r["kind"] == "album":
+                    new = await tagger.import_album_files(files, r["artist"], r["album"] or r["title"], r["mbid"], out)
+                    note = ""
+                else:
+                    p, note = await tagger.import_single(files[0], r["artist"], r["title"], r["mbid"], out, r["detail"].get("length"))
+                    new = [p]
+                shutil.rmtree(_staging(r), ignore_errors=True)
+                svc = "Deezer" if "deezer" in url else "Tidal" if "tidal" in url else "Qobuz"
+                await complete(r, f"Downloaded from {svc} via streamrip" + (f" – {note}" if note else ""), new)
+                return
+            except (RuntimeError, tagger.VerificationFailed) as e:
+                last_err = str(e)
+                db.log("warning", f"streamrip failed for {label(r)} ({url}): {e}")
+        shutil.rmtree(_staging(r), ignore_errors=True)
+        await next_source(r, f"streamrip: {last_err[:150]}")
 
 
 # ---- yt-dlp -----------------------------------------------------------------
@@ -314,9 +408,14 @@ async def start_ytdlp(r: dict) -> None:
             if not res["files"]:
                 await next_source(r, "yt-dlp produced no audio")
                 return
-            new = await tagger.import_single(res["files"][0], r["artist"], r["title"], r["mbid"], out)
+            try:
+                new, note = await tagger.import_single(res["files"][0], r["artist"], r["title"], r["mbid"], out, r["detail"].get("length"))
+            except tagger.VerificationFailed as e:
+                shutil.rmtree(out, ignore_errors=True)
+                await next_source(r, f"YouTube match was the wrong audio ({e})")
+                return
             shutil.rmtree(out, ignore_errors=True)
-            await complete(r, "Downloaded from YouTube", [new])
+            await complete(r, "Downloaded from YouTube" + (f" – {note}" if note else ""), [new])
             return
         rel = await _release_info(r)
         if not rel:
@@ -340,8 +439,13 @@ async def start_ytdlp(r: dict) -> None:
             shutil.rmtree(out, ignore_errors=True)
             await next_source(r, f"YouTube missing {len(missing)}/{n} tracks")
             return
-        upd(r, status="importing", progress=100, message="Tagging and importing…")
-        new = await tagger.import_album_files(files, r["artist"], r["album"] or r["title"], r["mbid"], out)
+        upd(r, status="importing", progress=100, message="Verifying, tagging and importing…")
+        try:
+            new = await tagger.import_album_files(files, r["artist"], r["album"] or r["title"], r["mbid"], out)
+        except tagger.VerificationFailed as e:
+            shutil.rmtree(out, ignore_errors=True)
+            await next_source(r, f"YouTube matches were wrong ({e})")
+            return
         shutil.rmtree(out, ignore_errors=True)
         await complete(r, "Downloaded from YouTube" + (f" ({len(missing)} track(s) missing)" if missing else ""), new)
 
@@ -372,7 +476,7 @@ async def run_url(r: dict) -> None:
         new = []
         if len(res["files"]) > 1 and len(albums) == 1:
             artist = entries[0].get("artist") or r["artist"] or "Unknown Artist"
-            new = await tagger.import_album_files(res["files"], artist, albums.pop(), None, out)
+            new = await tagger.import_album_files(res["files"], artist, albums.pop(), None, out, reject=False)
         else:
             for path in res["files"]:
                 t = library.read_tags(path)
@@ -382,9 +486,33 @@ async def run_url(r: dict) -> None:
                     artist, title = base.split(" - ", 1)
                 if " - " in title and artist and title.lower().startswith(artist.lower() + " - "):
                     title = title.split(" - ", 1)[1]
-                new.append(await tagger.import_single(path, artist or "Unknown Artist", title, None, out))
+                try:
+                    p, _ = await tagger.import_single(path, artist or "Unknown Artist", title, None, out, reject=False)
+                    new.append(p)
+                except tagger.VerificationFailed as e:
+                    db.log("warning", f"Skipped {os.path.basename(path)}: {e}")
         shutil.rmtree(out, ignore_errors=True)
         await complete(r, f"Downloaded {len(new)} file(s)", new)
+
+
+async def run_streamrip_url(r: dict) -> None:
+    async with _rip_sem:
+        out = _staging(r)
+        files = await streamrip.download(r["url"], out)
+        upd(r, status="importing", message="Tagging and importing…")
+        groups: dict[str, list] = {}
+        for f in files:
+            groups.setdefault(os.path.dirname(f), []).append(f)
+        new = []
+        for folder, fs in groups.items():
+            t = library.read_tags(fs[0])
+            if len(fs) > 1:
+                new += await tagger.import_album_files(fs, t["albumartist"], t["album"] or "", None, out, reject=False)
+            else:
+                p, _ = await tagger.import_single(fs[0], t["artist"], t["title"], None, out, reject=False)
+                new.append(p)
+        shutil.rmtree(out, ignore_errors=True)
+        await complete(r, f"Downloaded {len(new)} file(s) via streamrip", new)
 
 
 # ---- loop -------------------------------------------------------------------
@@ -425,6 +553,7 @@ def recover() -> None:
 async def loop() -> None:
     recover()
     last_scan = 0.0
+    last_sync = time.time() - 60 * 60  # first sync shortly after start
     while not _stop.is_set():
         try:
             for r in db.query(f"SELECT id FROM requests WHERE status IN ({','.join('?' * len(ACTIVE))}) ORDER BY id", ACTIVE):
@@ -438,6 +567,11 @@ async def loop() -> None:
             if interval and time.time() - last_scan > interval and not library.state["scanning"]:
                 last_scan = time.time()
                 asyncio.create_task(library.scan())
+            sync_every = int(config.get("sync_interval_minutes")) * 60
+            if sync_every and time.time() - last_sync > sync_every:
+                last_sync = time.time()
+                from .services import sync
+                asyncio.create_task(sync.sync_all())
             db.execute("DELETE FROM sessions WHERE expires_at < ?", (time.time(),))
         except Exception:  # noqa: BLE001
             traceback.print_exc()

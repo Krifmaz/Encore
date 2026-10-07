@@ -27,7 +27,7 @@ class PasswordChange(BaseModel):
 
 def _set_cookie(resp: Response, request: Request, token: str, max_age: int):
     secure = request.url.scheme == "https" or request.headers.get("x-forwarded-proto") == "https"
-    resp.set_cookie(auth.COOKIE, token, max_age=max_age, httponly=True, samesite="strict", secure=secure, path="/")
+    resp.set_cookie(auth.COOKIE, token, max_age=max_age, httponly=True, samesite="lax", secure=secure, path="/")
 
 
 @router.get("/info")

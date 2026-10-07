@@ -4,7 +4,7 @@ import shutil
 from fastapi import APIRouter, Depends, HTTPException
 
 from .. import __version__, auth, config, db
-from ..services import lidarr, musicbrainz as mb, notify, slskd, spotify, ytdlp
+from ..services import acoustid, lidarr, musicbrainz as mb, notify, slskd, sources, streamrip, ytdlp
 
 router = APIRouter(prefix="/api/system", tags=["system"])
 
@@ -28,7 +28,8 @@ async def status(user=Depends(auth.current_user)):
     res["ytdlp"] = {"ok": ytdlp.enabled(), "version": ytdlp.version(), "enabled": ytdlp.enabled()}
     res["lidarr"] = res.get("lidarr", {"ok": False, "enabled": False})
     res["slskd"] = res.get("slskd", {"ok": False, "enabled": False})
-    res["spotify"] = {"ok": spotify.enabled(), "enabled": spotify.enabled()}
+    res["acoustid"] = {"ok": acoustid.available(), "enabled": acoustid.available()}
+    res["streamrip"] = {"ok": streamrip.enabled(), "enabled": bool(config.get("streamrip_enabled"))}
     res["ffmpeg"] = {"ok": bool(shutil.which("ffmpeg"))}
     try:
         du = shutil.disk_usage(config.get("library_path"))
@@ -58,8 +59,26 @@ async def test(service: str, user=Depends(auth.admin_user)):
             done = await notify.refresh_media_servers()
             return {"ok": bool(done), "message": ("Refreshed " + ", ".join(done)) if done else "No media servers configured"}
         if service == "spotify":
-            await spotify._auth()
-            return {"ok": True, "message": "Spotify credentials valid"}
+            tok = await sources._spotify_app_token()
+            return {"ok": bool(tok), "message": "Spotify credentials valid" if tok else "Spotify rejected the Client ID/Secret"}
+        if service == "tidal":
+            await sources._tidal_token()
+            return {"ok": True, "message": "Tidal credentials valid"}
+        if service == "streamrip":
+            if not streamrip.binary():
+                return {"ok": False, "message": "streamrip is not installed in this container (use the default Docker image or set its path)"}
+            path = await streamrip.apply_credentials()
+            proc = await asyncio.create_subprocess_exec(streamrip.binary(), "--version", stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.STDOUT)
+            out, _ = await proc.communicate()
+            return {"ok": proc.returncode == 0, "message": f"{out.decode(errors='replace').strip()[:120]} · credentials written to {path}. "
+                    "For Tidal, sign in once from a terminal: docker exec -it encore streamrip --config-path /config/streamrip/config.toml url <any tidal link>"}
+        if service == "acoustid":
+            if not acoustid.available():
+                return {"ok": False, "message": "Needs an API key and the fpcalc tool (included in the Docker image)"}
+            from ..services.http import client
+            r = await client().get("https://api.acoustid.org/v2/lookup", params={"client": config.get("acoustid_api_key"), "trackid": "9ff43b6a-4f16-427c-93c2-92307ca505e0"})
+            ok = r.json().get("status") == "ok"
+            return {"ok": ok, "message": "AcoustID key valid" if ok else r.json().get("error", {}).get("message", "invalid key")}
     except Exception as e:  # noqa: BLE001
         return {"ok": False, "message": str(e)[:300]}
     raise HTTPException(404, "Unknown service")

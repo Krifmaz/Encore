@@ -87,6 +87,59 @@ CREATE INDEX IF NOT EXISTS idx_tracks_album ON tracks(album_id);
 CREATE INDEX IF NOT EXISTS idx_tracks_rg ON tracks(mb_releasegroupid);
 CREATE INDEX IF NOT EXISTS idx_tracks_rec ON tracks(mb_trackid);
 
+CREATE TABLE IF NOT EXISTS dup_ignore (key TEXT PRIMARY KEY, created_at REAL);
+
+CREATE TABLE IF NOT EXISTS playlists (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id INTEGER NOT NULL,
+    name TEXT NOT NULL,
+    description TEXT,
+    kind TEXT NOT NULL DEFAULT 'playlist',   -- playlist | liked
+    source TEXT,                             -- spotify | deezer | tidal | youtube | ... | merged | manual
+    source_url TEXT,
+    follow INTEGER NOT NULL DEFAULT 0,       -- re-import from source periodically
+    sync_targets TEXT NOT NULL DEFAULT '[]', -- ["jellyfin","plex","navidrome","listenbrainz"]
+    cover_url TEXT,
+    created_at REAL NOT NULL,
+    updated_at REAL NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS playlist_items (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    playlist_id INTEGER NOT NULL REFERENCES playlists(id) ON DELETE CASCADE,
+    position INTEGER NOT NULL,
+    title TEXT, artist TEXT, album TEXT, duration REAL,
+    isrc TEXT, mbid TEXT, cover_url TEXT,
+    source TEXT, source_id TEXT,
+    track_id INTEGER,                        -- matched library track
+    match_reason TEXT,
+    request_id INTEGER,
+    added_at REAL NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_pli_pl ON playlist_items(playlist_id, position);
+
+CREATE TABLE IF NOT EXISTS connections (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id INTEGER NOT NULL,
+    service TEXT NOT NULL,
+    account TEXT,
+    data TEXT NOT NULL DEFAULT '{}',
+    sync_likes INTEGER NOT NULL DEFAULT 1,
+    sync_playlists INTEGER NOT NULL DEFAULT 1,
+    last_sync REAL,
+    last_error TEXT,
+    created_at REAL NOT NULL,
+    UNIQUE(user_id, service)
+);
+
+-- last state seen on each service, to turn diffs into likes/unlikes
+CREATE TABLE IF NOT EXISTS sync_state (
+    connection_id INTEGER NOT NULL,
+    scope TEXT NOT NULL,
+    value TEXT NOT NULL,
+    PRIMARY KEY (connection_id, scope)
+);
+
 CREATE TABLE IF NOT EXISTS activity (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     ts REAL NOT NULL,
@@ -104,6 +157,23 @@ def connect():
     _conn.execute("PRAGMA journal_mode=WAL")
     _conn.execute("PRAGMA foreign_keys=ON")
     _conn.executescript(SCHEMA)
+    migrate()
+
+
+MIGRATIONS = {
+    "tracks": [("isrc", "TEXT"), ("acoustid_id", "TEXT"), ("verify_status", "TEXT"), ("verify_detail", "TEXT"), ("verified_at", "REAL")],
+    "playlists": [("remote_ids", "TEXT DEFAULT '{}'")],
+}
+
+
+def migrate():
+    for table, cols in MIGRATIONS.items():
+        have = {r["name"] for r in query(f"PRAGMA table_info({table})")}
+        for name, typ in cols:
+            if name not in have:
+                execute(f"ALTER TABLE {table} ADD COLUMN {name} {typ}")
+    execute("CREATE INDEX IF NOT EXISTS idx_tracks_isrc ON tracks(isrc)")
+    execute("CREATE INDEX IF NOT EXISTS idx_tracks_acoustid ON tracks(acoustid_id)")
 
 
 def query(sql: str, params=()) -> list[dict]:

@@ -1,7 +1,7 @@
 from fastapi import APIRouter, Depends, HTTPException
 
 from .. import auth, db
-from ..services import library, musicbrainz as mb, spotify, ytdlp
+from ..services import library, musicbrainz as mb, ytdlp
 
 router = APIRouter(prefix="/api/discover", tags=["discover"], dependencies=[Depends(auth.current_user)])
 
@@ -85,11 +85,6 @@ async def album(rgid: str):
 
 @router.get("/probe")
 async def probe(url: str):
-    if spotify.parse(url):
-        if not spotify.enabled():
-            raise HTTPException(400, "Spotify import needs a Client ID/Secret in Settings → Integrations")
-        data = await spotify.tracks(url)
-        return {"source": "spotify", "title": data["name"], "count": len(data["tracks"]), "tracks": data["tracks"][:500], "is_playlist": True}
     try:
         info = await ytdlp.probe(url)
     except Exception as e:  # noqa: BLE001

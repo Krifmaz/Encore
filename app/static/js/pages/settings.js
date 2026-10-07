@@ -28,7 +28,27 @@ const SECTIONS = [
     S('embed_cover', 'Embed cover art in files', 'bool'),
   ] },
   { id: 'pipeline', title: 'Download pipeline', fields: [
-    S('source_order', 'Source order', 'text', { full: true, help: 'Comma-separated: lidarr, slskd, ytdlp. Each source is tried in turn until one succeeds. Lidarr only handles albums.' }),
+    S('source_order', 'Source order', 'text', { full: true, help: 'Comma-separated: lidarr, streamrip, slskd, ytdlp. Each source is tried in turn until one succeeds. Lidarr only handles albums.' }),
+  ] },
+  { id: 'verify', title: 'Verification & duplicates', test: 'acoustid', fields: [
+    S('acoustid_api_key', 'AcoustID API key', 'password', { full: true, help: 'Free – register an application at acoustid.org/new-application. Used to fingerprint audio and confirm each file is the right song/version.' }),
+    S('verify_on_import', 'Fingerprint every download before import', 'bool'),
+    S('reject_mismatch', 'Reject downloads whose audio is a different song/version (and try the next source)', 'bool'),
+    S('dedupe_on_import', 'Never import a second copy of a song (keep the better-quality file)', 'bool'),
+  ] },
+  { id: 'streamrip', title: 'Qobuz / Tidal / Deezer (streamrip)', test: 'streamrip', testLabel: 'Test & write config', fields: [
+    S('streamrip_enabled', 'Enable streamrip source', 'bool', { help: 'Downloads lossless from your own paid accounts. Respect each service’s terms – use at your own risk.' }),
+    S('streamrip_sources', 'Services to search (in order)', 'text', { help: 'deezer, tidal (Qobuz links work in the Downloader)' }),
+    S('streamrip_quality', 'Max quality', 'select', { options: [[1, 'MP3 320 / AAC'], [2, 'CD – 16-bit FLAC'], [3, 'Hi-res ≤ 24/96'], [4, 'Hi-res max']] }),
+    S('streamrip_deezer_arl', 'Deezer ARL cookie', 'password', { full: true, help: 'From deezer.com → browser dev tools → Cookies → arl' }),
+    S('streamrip_qobuz_user', 'Qobuz user id'),
+    S('streamrip_qobuz_token', 'Qobuz auth token', 'password', { help: 'play.qobuz.com → dev tools → Network → user/login response' }),
+    S('streamrip_bin', 'streamrip executable (optional)', 'text', { help: 'Leave empty to auto-detect' }),
+    S('streamrip_command', 'Command template (advanced)', 'text', { full: true }),
+  ] },
+  { id: 'sync', title: 'Playlists & sync', fields: [
+    S('sync_interval_minutes', 'Sync likes & playlists every (minutes)', 'number', { help: '0 disables automatic sync' }),
+    S('auto_request_followed', 'Automatically download new tracks in followed playlists', 'bool'),
   ] },
   { id: 'lidarr', title: 'Lidarr', test: 'lidarr', fields: [
     S('lidarr_enabled', 'Enable Lidarr', 'bool'),
@@ -56,12 +76,15 @@ const SECTIONS = [
     S('ytdlp_quality', 'MP3/M4A quality', 'text', { help: 'Bitrate like 320, or 0 for best VBR' }),
     S('ytdlp_cookies', 'cookies.txt contents (optional)', 'textarea', { full: true, secret: true, help: 'Netscape cookie file for age-restricted or members-only content' }),
   ] },
-  { id: 'spotify', title: 'Spotify import', test: 'spotify', fields: [
-    S('spotify_client_id', 'Client ID', 'text', { help: 'Create an app at developer.spotify.com – used only to read playlists' }),
-    S('spotify_client_secret', 'Client secret', 'password'),
+  { id: 'spotify', title: 'Integrations', test: 'spotify', testLabel: 'Test Spotify', fields: [
+    S('spotify_client_id', 'Spotify Client ID', 'text', { help: 'developer.spotify.com – add <Public URL>/api/connections/spotify/callback as redirect URI. Development-mode apps allow 5 users and need a Premium owner (2026 rules); without it, public playlists still import via the embed fallback.' }),
+    S('spotify_client_secret', 'Spotify Client secret', 'password'),
+    S('tidal_client_id', 'Tidal Client ID', 'text', { help: 'developer.tidal.com – redirect URI <Public URL>/api/connections/tidal/callback' }),
+    S('tidal_client_secret', 'Tidal Client secret', 'password'),
+    S('lastfm_api_key', 'Last.fm API key', 'text', { help: 'last.fm/api/account/create – for importing loved tracks' }),
   ] },
   { id: 'media', title: 'Media servers', test: 'mediaservers', testLabel: 'Trigger refresh', fields: [
-    S('navidrome_url', 'Navidrome URL'), S('navidrome_user', 'Navidrome user'), S('navidrome_password', 'Navidrome password', 'password'),
+    S('navidrome_url', 'Navidrome URL', 'text', { help: 'URLs here let users link their own accounts on the Connections page; the admin credentials below are only used to trigger library rescans' }), S('navidrome_user', 'Navidrome user'), S('navidrome_password', 'Navidrome password', 'password'),
     S('jellyfin_url', 'Jellyfin URL'), S('jellyfin_api_key', 'Jellyfin API key', 'password'),
     S('plex_url', 'Plex URL'), S('plex_token', 'Plex token', 'password'),
   ] },
@@ -171,7 +194,7 @@ export async function render(view, ctx) {
       <ul class="muted" style="margin:0;padding-left:18px;line-height:1.8">
         <li>Only expose <b>this app</b> publicly (ideally behind HTTPS via a reverse proxy). Keep Lidarr and slskd on your internal Docker network – Encore talks to them for your users.</li>
         <li>Sign-ups are <b>${esc(values.signup_mode)}</b>. Manage access under <a href="#/admin/invites" style="color:var(--accent)">Invites</a> and <a href="#/admin/users" style="color:var(--accent)">Users</a>.</li>
-        <li>Sessions are HTTP-only, SameSite=Strict cookies; login is rate-limited per IP.</li>
+        <li>Sessions are HTTP-only SameSite cookies, every change needs a CSRF header, and failed logins are rate-limited per IP.</li>
       </ul>
     </div>`;
     panel.querySelector('#cp').onclick = () => copyText(panel.querySelector('#key').textContent);

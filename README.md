@@ -4,17 +4,20 @@ A self-hosted music request and library app. Your users sign in, search the whol
 
 ## Features
 
-- **Accounts**: login and sign-up with invite-only, open or closed modes. The admin panel manages users, roles, weekly request limits, auto-approve, password resets and session revocation. Invite links can have a use count and an expiry date.
-- **Discover**: search artists, albums and songs on MusicBrainz. Artist pages show the full discography with *In library* and *Requested* badges. Any album or song can be requested with one click.
-- **Request pipeline**: each request is tried against **Lidarr → Soulseek → yt-dlp** in the order you choose, and falls back to the next source automatically.
-  - **Lidarr**: adds the artist and monitors and searches only the requested album.
-  - **slskd**: ranks results by track count, FLAC/MP3 preference, bitrate, folder name, free upload slots and speed. Stalled or failing users are skipped.
-  - **yt-dlp**: matches each MusicBrainz track on YouTube, preferring official "Topic" uploads with the right length.
-- **Downloader**: paste any URL from YouTube, YouTube Music, SoundCloud, Bandcamp, Mixcloud or the roughly 1,800 other yt-dlp sites. A Spotify playlist or album link becomes one request per track.
-- **Library**: browse albums, artists and songs, with a built-in web player and album zip downloads.
-- **MusicBrainz tagging**: match any album against MusicBrainz and review an old → new preview before tags are written. Writes full tags (MBIDs, ISRC, label, barcode and more) and cover art, then renames files using your template. *Auto-tag untagged* handles the whole library in bulk. Manual tag editing is also built in.
-- **Integrations**: refreshes Navidrome, Jellyfin or Plex after an import. Notifications go to Discord, ntfy or a generic webhook. An API key enables automation, with Swagger docs at `/api/docs`.
-- Dark and light themes, a mobile-friendly layout, and installable as a PWA.
+- **Accounts**: login and sign-up with invite-only, open or closed modes. The admin panel manages users, roles, weekly request limits, auto-approve, password resets and session revocation.
+- **Discover**: search MusicBrainz for artists, albums and songs, with *In library* and *Requested* badges. Request anything with one click.
+- **Request pipeline**: each request tries **Lidarr → Qobuz/Tidal/Deezer (streamrip) → Soulseek → YouTube** in an order you choose, falling back automatically. Exact ISRCs are used whenever the source provides them.
+- **Downloader**: a Spotify, Apple Music, Deezer, Tidal or Qobuz link (playlist, album or track) is matched track by track, and each song is fetched from the best source. YouTube, SoundCloud, Bandcamp, Mixcloud and about 1,800 other sites download directly.
+- **Playlists and Liked Songs**:
+  - Import from Spotify (including private playlists and Liked Songs once you connect your account), Deezer, Tidal, Apple Music, Qobuz, YouTube Music, SoundCloud, Bandcamp, ListenBrainz, or a pasted "Artist – Title" list.
+  - Merge playlists, follow a source so new tracks are pulled in automatically, and "Download missing" in one click.
+- **Sync everywhere**: each user connects their own accounts on the *Connections* page. Liked songs sync two-way (likes *and* un-likes) between Jellyfin/Finamp, Plex/Plexamp, Navidrome and ListenBrainz. Playlists are mirrored to whichever servers you tick.
+- **Correct versions, no duplicates**:
+  - One version-aware matcher is used everywhere. It tells originals apart from remixes (including *which* remixer), live, acoustic, radio and extended edits, instrumentals, slowed/sped-up versions, re-recordings ("Taylor's Version") and covers by other artists. Remasters and "feat." credits count as the same song.
+  - Downloads are fingerprinted with **AcoustID/Chromaprint** before import. Wrong audio is rejected and the next source is tried.
+  - A song that's already in the library is not imported a second time; a better-quality file replaces the old one. The *Duplicates* tab finds identical copies already in the library, and *Wrong audio* lists files whose content doesn't match their tags.
+- **Library**: browse albums, artists and songs, match albums to MusicBrainz with an old → new preview, write full tags and cover art, rename files using your template, bulk auto-tag, edit tags by hand, and download albums as zips.
+- **Integrations**: Navidrome/Jellyfin/Plex rescans after imports, Discord/ntfy/webhook notifications, and an API key with Swagger docs at `/api/docs`.
 
 ## Quick start
 
@@ -54,6 +57,18 @@ web:
 
 **Lidarr**: copy the API key from *Settings → General*, and add `/music` as a root folder. Encore picks the quality and metadata profiles; you can change them in Settings → Lidarr.
 
+**Optional keys** (Settings):
+
+| Feature | Where to get it |
+|---|---|
+| Audio verification | Free AcoustID application key: acoustid.org/new-application |
+| Qobuz/Tidal/Deezer lossless | Your own subscription. Enter the Deezer ARL or Qobuz token in *Settings → streamrip*. Tidal needs a one-time sign-in: `docker exec -it encore streamrip --config-path /config/streamrip/config.toml url <tidal link>`. These services' terms may not allow downloading, so use at your own risk. |
+| Spotify account connection | developer.spotify.com app with redirect `<Public URL>/api/connections/spotify/callback`. Since Feb 2026, development-mode apps need a Premium owner and allow 5 users. Public playlists still import without it, via the embed page. |
+| Tidal import | developer.tidal.com app (redirect `<Public URL>/api/connections/tidal/callback`) |
+| Last.fm loved tracks | last.fm/api/account/create |
+
+Set **Settings → General → Public URL** (for example `https://music.example.com`) so the OAuth logins and invite links work.
+
 ## Keeping it private
 
 - Publish **only Encore** (port 8080). The compose file keeps Lidarr's and slskd's web UIs off the public internet. slskd only exposes its Soulseek peer port.
@@ -64,7 +79,7 @@ web:
       reverse_proxy encore:8080
   }
   ```
-- Sign-ups default to **invite only**. Sessions use HttpOnly, SameSite=Strict cookies, mutating requests need a CSRF header, and failed logins are rate-limited per IP.
+- Sign-ups default to **invite only**. Sessions use HttpOnly SameSite=Lax cookies, every mutating request needs a CSRF header, and failed logins are rate-limited per IP.
 
 ## Configuration
 
@@ -81,7 +96,10 @@ Every option can be changed in the UI. Environment variables only seed the first
 | `LIDARR_URL` / `LIDARR_API_KEY` / `LIDARR_ENABLED` | | |
 | `SLSKD_URL` / `SLSKD_API_KEY` / `SLSKD_ENABLED` / `SLSKD_DOWNLOAD_PATH` | | |
 | `YTDLP_AUTO_UPDATE` | `true` | Upgrades yt-dlp at every container start |
-| `SPOTIFY_CLIENT_ID` / `SPOTIFY_CLIENT_SECRET` | | Playlist import |
+| `SPOTIFY_CLIENT_ID` / `SPOTIFY_CLIENT_SECRET`, `TIDAL_CLIENT_ID` / `TIDAL_CLIENT_SECRET`, `LASTFM_API_KEY` | | Account connections and imports |
+| `ACOUSTID_API_KEY` | | Audio fingerprint verification |
+| `STREAMRIP_ENABLED`, `STREAMRIP_DEEZER_ARL`, `STREAMRIP_QOBUZ_USER` / `STREAMRIP_QOBUZ_TOKEN` | off | Qobuz/Tidal/Deezer source |
+| `ENCORE_SYNC_INTERVAL` | 15 | Minutes between like/playlist syncs |
 | `NAVIDROME_*`, `JELLYFIN_*`, `PLEX_*` | | Library refresh after imports |
 | `DISCORD_WEBHOOK`, `NTFY_URL`, `WEBHOOK_URL` | | Notifications |
 
@@ -93,4 +111,4 @@ ENCORE_CONFIG_DIR=./data ENCORE_LIBRARY_PATH=~/Music uvicorn app.main:app --relo
 cd tests && pytest -q
 ```
 
-The backend uses FastAPI, SQLite and mutagen. The frontend is plain ES modules with no build step.
+The backend uses FastAPI, SQLite, mutagen and Chromaprint, and needs Python 3.14 if you want streamrip. The frontend is plain ES modules with no build step.

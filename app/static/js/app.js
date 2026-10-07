@@ -1,6 +1,5 @@
 import { api } from './api.js';
 import { esc, icon, qs, toast } from './ui.js';
-import * as player from './player.js';
 import * as authPages from './pages/auth.js';
 import * as home from './pages/home.js';
 import * as discover from './pages/discover.js';
@@ -11,6 +10,8 @@ import * as activityPage from './pages/activity.js';
 import * as adminPage from './pages/admin.js';
 import * as settingsPage from './pages/settings.js';
 import * as accountPage from './pages/account.js';
+import * as playlistsPage from './pages/playlists.js';
+import * as connectionsPage from './pages/connections.js';
 
 export const session = { user: null, info: null };
 
@@ -22,6 +23,9 @@ const routes = [
   [/^\/library$/, libraryPage.render],
   [/^\/library\/album\/([\w-]+)$/, libraryPage.renderAlbum],
   [/^\/requests$/, requestsPage.render],
+  [/^\/playlists$/, playlistsPage.render],
+  [/^\/playlists\/(\d+)$/, playlistsPage.renderPlaylist],
+  [/^\/connections$/, connectionsPage.render],
   [/^\/download$/, downloadPage.render],
   [/^\/activity$/, activityPage.render, true],
   [/^\/admin\/users$/, adminPage.renderUsers, true],
@@ -66,7 +70,9 @@ function renderShell() {
           ${navLink('/search', icon.search, 'Discover')}
           ${navLink('/library', icon.library, 'Library')}
           ${navLink('/requests', icon.inbox, 'Requests', '<span class="badge warn hidden" id="pending-badge"></span>')}
+          ${navLink('/playlists', icon.list, 'Playlists')}
           ${navLink('/download', icon.download, 'Downloader')}
+          ${navLink('/connections', icon.link, 'Connections')}
           ${admin ? `<div class="nav-label">Admin</div>
             ${navLink('/activity', icon.activity, 'Activity')}
             ${navLink('/admin/users', icon.users, 'Users')}
@@ -120,16 +126,19 @@ async function route() {
     const href = a.dataset.nav;
     a.classList.toggle('active', href === '/' ? path === '/' : path.startsWith(href));
   });
-  const view = qs('#view');
+  // every navigation renders into a fresh container, so a slow page that finishes after the user
+  // has moved on writes into a detached element instead of clobbering the current page
+  const view = document.createElement('div');
+  qs('#view').replaceChildren(view);
   for (const [re, fn, adminOnly] of routes) {
     const m = path.match(re);
     if (!m) continue;
     if (adminOnly && session.user.role !== 'admin') break;
-    view.innerHTML = '';
     window.scrollTo(0, 0);
     try {
-      await fn(view, { params: m.slice(1), query, user: session.user, onLeave: (f) => cleanup.push(f), navigate });
+      await fn(view, { params: m.slice(1), query, user: session.user, onLeave: (f) => (view.isConnected ? cleanup.push(f) : f()), navigate });
     } catch (e) {
+      if (!view.isConnected) return;
       console.error(e);
       view.innerHTML = `<div class="error-box">${esc(e.message || e)}</div>`;
     }
@@ -147,7 +156,6 @@ export async function boot() {
   try { session.user = await api.get('/auth/me'); } catch { session.user = null; }
   if (session.user) {
     renderShell();
-    if (!document.getElementById('player')) player.mount();
     refreshPendingBadge();
     setInterval(refreshPendingBadge, 30000);
   }

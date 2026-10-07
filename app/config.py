@@ -29,8 +29,22 @@ DEFAULTS: dict[str, tuple[str | None, object, bool]] = {
     "autotag_threshold": ("ENCORE_AUTOTAG_THRESHOLD", 0.8, False),
     "save_cover": ("ENCORE_SAVE_COVER", True, False),
     "embed_cover": ("ENCORE_EMBED_COVER", True, False),
+    # verification
+    "acoustid_api_key": ("ACOUSTID_API_KEY", "", True),
+    "verify_on_import": ("ENCORE_VERIFY_ON_IMPORT", True, False),
+    "reject_mismatch": ("ENCORE_REJECT_MISMATCH", True, False),
+    "dedupe_on_import": ("ENCORE_DEDUPE_ON_IMPORT", True, False),
     # pipeline
-    "source_order": ("ENCORE_SOURCE_ORDER", "lidarr,slskd,ytdlp", False),
+    "source_order": ("ENCORE_SOURCE_ORDER", "lidarr,streamrip,slskd,ytdlp", False),
+    # streamrip (Qobuz / Tidal / Deezer with your own subscription)
+    "streamrip_enabled": ("STREAMRIP_ENABLED", False, False),
+    "streamrip_bin": ("STREAMRIP_BIN", "", False),
+    "streamrip_sources": ("STREAMRIP_SOURCES", "deezer,tidal", False),
+    "streamrip_quality": ("STREAMRIP_QUALITY", 2, False),
+    "streamrip_command": ("STREAMRIP_COMMAND", "{bin} --config-path {config} --folder {folder} --quality {quality} --no-db --no-progress url {url}", False),
+    "streamrip_deezer_arl": ("STREAMRIP_DEEZER_ARL", "", True),
+    "streamrip_qobuz_user": ("STREAMRIP_QOBUZ_USER", "", False),
+    "streamrip_qobuz_token": ("STREAMRIP_QOBUZ_TOKEN", "", True),
     # musicbrainz
     "musicbrainz_url": ("MUSICBRAINZ_URL", "https://musicbrainz.org", False),
     "musicbrainz_rate": ("MUSICBRAINZ_RATE", 1.0, False),
@@ -58,9 +72,16 @@ DEFAULTS: dict[str, tuple[str | None, object, bool]] = {
     "ytdlp_format": ("YTDLP_FORMAT", "mp3", False),  # mp3 | m4a | opus | flac | best
     "ytdlp_quality": ("YTDLP_QUALITY", "320", False),
     "ytdlp_cookies": ("YTDLP_COOKIES", "", True),
-    # spotify (playlist import)
+    # streaming services (playlist import / account connections)
     "spotify_client_id": ("SPOTIFY_CLIENT_ID", "", False),
     "spotify_client_secret": ("SPOTIFY_CLIENT_SECRET", "", True),
+    "tidal_client_id": ("TIDAL_CLIENT_ID", "", False),
+    "tidal_client_secret": ("TIDAL_CLIENT_SECRET", "", True),
+    "lastfm_api_key": ("LASTFM_API_KEY", "", False),
+    # sync
+    "sync_interval_minutes": ("ENCORE_SYNC_INTERVAL", 15, False),
+    "auto_request_followed": ("ENCORE_AUTO_REQUEST_FOLLOWED", False, False),
+    "plex_client_id": (None, "", False),
     # media servers
     "navidrome_url": ("NAVIDROME_URL", "", False),
     "navidrome_user": ("NAVIDROME_USER", "", False),

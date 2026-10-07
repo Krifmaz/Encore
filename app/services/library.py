@@ -78,11 +78,12 @@ def read_tags(path: str) -> dict:
         "mb_releasegroupid": _first(tags, "musicbrainz_releasegroupid"),
         "mb_artistid": _first(tags, "musicbrainz_artistid"),
         "mb_albumartistid": _first(tags, "musicbrainz_albumartistid"),
+        "isrc": ((_first(tags, "isrc", "tsrc") or "").upper().replace("-", "") or None),
     }
 
 
 COLS = ["title", "artist", "album", "albumartist", "track", "disc", "year", "genre", "duration", "bitrate", "format",
-        "mb_trackid", "mb_albumid", "mb_releasegroupid", "mb_artistid", "mb_albumartistid"]
+        "mb_trackid", "mb_albumid", "mb_releasegroupid", "mb_artistid", "mb_albumartistid", "isrc"]
 
 
 def index_file(path: str, st=None) -> None:
@@ -93,7 +94,7 @@ def index_file(path: str, st=None) -> None:
     vals = [t[c] for c in COLS]
     if existing:
         db.execute(
-            f"UPDATE tracks SET album_id=?, mtime=?, size=?, {', '.join(c + '=?' for c in COLS)} WHERE id=?",
+            f"UPDATE tracks SET album_id=?, mtime=?, size=?, {', '.join(c + '=?' for c in COLS)}, verify_status=NULL WHERE id=?",
             (aid, st.st_mtime, st.st_size, *vals, existing["id"]),
         )
     else:
@@ -232,6 +233,7 @@ def extract_embedded(path: str) -> bytes | None:
 def stats() -> dict:
     s = db.one("SELECT COUNT(*) tracks, COUNT(DISTINCT album_id) albums, COUNT(DISTINCT albumartist) artists, COALESCE(SUM(size),0) size, COALESCE(SUM(duration),0) duration FROM tracks")
     s["untagged_albums"] = db.one("SELECT COUNT(DISTINCT album_id) n FROM tracks WHERE mb_albumid IS NULL OR mb_albumid=''")["n"]
+    s["verify_counts"] = {r["verify_status"] or "unchecked": r["n"] for r in db.query("SELECT verify_status, COUNT(*) n FROM tracks GROUP BY verify_status")}
     s["formats"] = db.query("SELECT format, COUNT(*) n FROM tracks GROUP BY format ORDER BY n DESC")
     return s
 

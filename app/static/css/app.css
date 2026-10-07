@@ -17,7 +17,7 @@
   --radius: 14px;
   --shadow: 0 10px 30px rgba(0, 0, 0, .35);
   --sidebar: 236px;
-  --player: 76px;
+  --player: 0px;
   color-scheme: dark;
 }
 :root[data-theme="light"] {
@@ -243,23 +243,6 @@ table.table { width: 100%; border-collapse: collapse; }
 .toast.ok { border-left-color: var(--ok); }
 .toast.err { border-left-color: var(--err); }
 
-/* ---------- player ---------- */
-.player {
-  position: fixed; left: 0; right: 0; bottom: 0; height: var(--player); z-index: 50;
-  background: color-mix(in srgb, var(--bg-2) 88%, transparent); backdrop-filter: blur(16px);
-  border-top: 1px solid var(--border); display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1.4fr) minmax(0, 1fr); align-items: center; gap: 18px; padding: 0 20px;
-}
-.player .now { display: flex; align-items: center; gap: 12px; min-width: 0; }
-.player .now img, .player .now .thumb { width: 48px; height: 48px; border-radius: 8px; }
-.player .ctrls { display: flex; flex-direction: column; align-items: center; gap: 4px; }
-.player .ctrls .row { gap: 6px; }
-.player .seek { display: flex; align-items: center; gap: 10px; width: 100%; font-size: 11px; color: var(--faint); }
-.player input[type=range] { flex: 1; accent-color: var(--accent); height: 4px; }
-.player .right { display: flex; justify-content: flex-end; align-items: center; gap: 8px; }
-.player .right input { max-width: 110px; }
-.play-btn { width: 38px; height: 38px; border-radius: 50%; background: var(--text); color: var(--bg); border: 0; display: grid; place-items: center; cursor: pointer; }
-.play-btn svg { width: 18px; height: 18px; }
-
 /* ---------- misc ---------- */
 .empty { text-align: center; padding: 50px 20px; color: var(--muted); }
 .empty svg { width: 46px; height: 46px; color: var(--faint); margin-bottom: 10px; }
@@ -283,9 +266,6 @@ table.table { width: 100%; border-collapse: collapse; }
 @media (max-width: 960px) {
   .settings-grid { grid-template-columns: 1fr; }
   .settings-nav { position: static; flex-direction: row; overflow-x: auto; }
-  .player { grid-template-columns: minmax(0, 1fr) auto; }
-  .player .right { display: none; }
-  .player .seek { display: none; }
 }
 @media (max-width: 760px) {
   .shell { grid-template-columns: 1fr; }

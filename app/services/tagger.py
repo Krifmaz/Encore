@@ -11,6 +11,37 @@ from .. import config, db
 from . import library, musicbrainz as mb
 from .http import client
 
+
+class VerificationFailed(Exception):
+    """Downloaded audio turned out to be a different song/version."""
+
+
+async def _verify(path: str, title: str, artist: str, length: float | None, recording_id: str | None) -> dict | None:
+    from . import acoustid, verify
+    if not (config.get("verify_on_import") and acoustid.available()):
+        return None
+    try:
+        return await verify.check_file(path, title, artist, length, recording_id)
+    except Exception as e:  # noqa: BLE001
+        db.log("warning", f"Verification of {os.path.basename(path)} failed: {e}")
+        return None
+
+
+def _record_verification(results: dict[str, dict]) -> None:
+    import time as _t
+    for path, res in results.items():
+        if res:
+            db.execute("UPDATE tracks SET verify_status=?, verify_detail=?, acoustid_id=?, verified_at=? WHERE path=?",
+                       (res["status"], res["detail"], res.get("acoustid"), _t.time(), path))
+
+
+def _existing_copy(vals: dict, exclude: set[str]) -> dict | None:
+    from .matcher import LibraryIndex, describe
+    idx = LibraryIndex(db.query("SELECT id, path, title, artist, album, album_id, duration, isrc, mb_trackid, format, bitrate, verify_status FROM tracks"))
+    want = describe(vals.get("title"), vals.get("artist"), length=vals.get("length"), isrc=vals.get("isrc"), mbid=vals.get("musicbrainz_trackid"))
+    hit, _ = idx.find(want)
+    return hit if hit and hit["path"] not in exclude else None
+
 TAG_KEYS = {
     "title": "title", "artist": "artist", "album": "album", "albumartist": "albumartist",
     "tracknumber": "tracknumber", "discnumber": "discnumber", "date": "date", "genre": "genre",
@@ -375,8 +406,18 @@ async def auto_match(paths: list[str], artist: str, album: str, rgid: str | None
     return None
 
 
-async def import_single(path: str, artist: str, title: str, recording_id: str | None = None, source_root: str | None = None) -> str:
-    """Tag a single track (from MB recording if possible) and move it into the library."""
+async def import_single(path: str, artist: str, title: str, recording_id: str | None = None,
+                        source_root: str | None = None, length: float | None = None, reject: bool = True) -> tuple[str, str]:
+    """Verify, tag (from MB recording if possible), de-duplicate and move a single track into the library.
+
+    Returns (final path, note)."""
+    check = await _verify(path, title, artist, length, recording_id)
+    if check and check["status"] == "mismatch" and reject and config.get("reject_mismatch"):
+        try:
+            os.remove(path)
+        except OSError:
+            pass
+        raise VerificationFailed(check["detail"])
     vals = {"title": title, "artist": artist, "albumartist": artist}
     cover = None
     try:
@@ -399,6 +440,15 @@ async def import_single(path: str, artist: str, title: str, recording_id: str | 
     except Exception as e:  # noqa: BLE001
         db.log("warning", f"MusicBrainz lookup failed for {artist} - {title}: {e}")
     ext = os.path.splitext(path)[1]
+    from .verify import delete_tracks, quality
+    existing = _existing_copy(vals, {path}) if config.get("dedupe_on_import") else None
+    if existing:
+        new_q = library.read_tags(path)
+        # only replace the existing file if the new one is strictly better (verified / lossless / bitrate / tagged)
+        if quality({**new_q, "verify_status": (check or {}).get("status")})[:4] <= quality(existing)[:4]:
+            os.remove(path)
+            prune_empty(os.path.dirname(path), source_root or config.get("staging_path"))
+            return existing["path"], "already in library – kept existing copy"
 
     def _go():
         write_tags(path, {k: v for k, v in vals.items() if k in TAG_KEYS}, cover)
@@ -407,10 +457,19 @@ async def import_single(path: str, artist: str, title: str, recording_id: str | 
         prune_empty(os.path.dirname(path), source_root or config.get("staging_path"))
         return new
 
-    return await asyncio.to_thread(_go)
+    new = await asyncio.to_thread(_go)
+    await library.index_paths([new])
+    _record_verification({new: check})
+    note = ""
+    if existing:
+        nt = db.one("SELECT id FROM tracks WHERE path=?", (new,))
+        await asyncio.to_thread(delete_tracks, [existing["id"]], nt["id"] if nt else None)
+        note = "replaced a lower-quality copy"
+    return new, note
 
 
-async def import_album_files(paths: list[str], artist: str, album: str, rgid: str | None, source_root: str) -> list[str]:
+async def import_album_files(paths: list[str], artist: str, album: str, rgid: str | None, source_root: str,
+                             reject: bool = True) -> list[str]:
     """Tag + move a downloaded album. Falls back to existing tags when MB match is weak."""
     pv = None
     if config.get("autotag_on_import"):
@@ -418,8 +477,27 @@ async def import_album_files(paths: list[str], artist: str, album: str, rgid: st
             pv = await auto_match(paths, artist, album, rgid)
         except Exception as e:  # noqa: BLE001
             db.log("warning", f"Auto-tag failed for {artist} - {album}: {e}")
+    checks: dict[str, dict] = {}
     if pv:
-        return await apply_preview(pv, True, source_root)
+        mism = []
+        for row in pv["rows"]:
+            v = row.get("values")
+            if not v:
+                continue
+            res = await _verify(row["path"], v["title"], v["artist"], None, v.get("musicbrainz_trackid"))
+            checks[row["path"]] = res
+            if res and res["status"] == "mismatch":
+                mism.append(f"{v['title']}: {res['detail']}")
+        if mism and reject and config.get("reject_mismatch") and len(mism) > max(1, len(paths) // 4):
+            raise VerificationFailed(f"{len(mism)} of {len(paths)} files are not what they claim – e.g. {mism[0]}")
+        old_to_new = {}
+        new = await apply_preview(pv, True, source_root)
+        for row, p in zip(pv["rows"], new):
+            old_to_new[p] = checks.get(row["path"])
+        await library.index_paths(new)
+        _record_verification(old_to_new)
+        await _drop_superseded_singles(new)
+        return new
 
     def _go():
         out = []
@@ -433,7 +511,33 @@ async def import_album_files(paths: list[str], artist: str, album: str, rgid: st
         return out
 
     db.log("warning", f"No confident MusicBrainz match for {artist} - {album}; imported with existing tags")
-    return await asyncio.to_thread(_go)
+    new = await asyncio.to_thread(_go)
+    await library.index_paths(new)
+    await _drop_superseded_singles(new)
+    return new
+
+
+async def _drop_superseded_singles(new_paths: list[str]) -> None:
+    """An album import makes loose single-track copies of the same recordings redundant."""
+    if not config.get("dedupe_on_import"):
+        return
+    from .matcher import LibraryIndex, describe
+    from .verify import delete_tracks
+    new_set = set(new_paths)
+    singles = db.query("""SELECT t.id, t.path, t.title, t.artist, t.album, t.album_id, t.duration, t.isrc, t.mb_trackid, t.format, t.bitrate
+                         FROM tracks t JOIN (SELECT album_id FROM tracks GROUP BY album_id HAVING COUNT(*)=1) s ON s.album_id=t.album_id""")
+    singles = [s for s in singles if s["path"] not in new_set]
+    if not singles:
+        return
+    idx = LibraryIndex(singles)
+    for p in new_paths:
+        t = db.one("SELECT id, title, artist, duration, isrc, mb_trackid FROM tracks WHERE path=?", (p,))
+        if not t:
+            continue
+        hit, _ = idx.find(describe(t["title"], t["artist"], length=t["duration"], isrc=t["isrc"], mbid=t["mb_trackid"]))
+        if hit:
+            await asyncio.to_thread(delete_tracks, [hit["id"]], t["id"])
+            db.log("info", f"Removed loose single '{hit['artist']} – {hit['title']}' now that the album is in the library")
 
 
 def edit_tags(track_ids: list[int], values: dict) -> list[str]:

@@ -1,6 +1,7 @@
 import asyncio
 import os
 import tempfile
+import time
 import zipfile
 
 from fastapi import APIRouter, Depends, HTTPException
@@ -9,7 +10,7 @@ from starlette.background import BackgroundTask
 from pydantic import BaseModel
 
 from .. import auth, config, db
-from ..services import library, tagger
+from ..services import acoustid, library, tagger, verify
 
 router = APIRouter(prefix="/api/library", tags=["library"])
 
@@ -36,7 +37,8 @@ class TagEdit(BaseModel):
 
 @router.get("/stats")
 def stats(user=Depends(auth.current_user)):
-    return {**library.stats(), "scan": library.state, "bulk": _bulk}
+    return {**library.stats(), "scan": library.state, "bulk": _bulk, "verify": verify.state,
+            "acoustid": acoustid.available()}
 
 
 @router.post("/scan")
@@ -93,7 +95,7 @@ def tracks(q: str = "", limit: int = 200, offset: int = 0, user=Depends(auth.cur
     if q:
         where = "WHERE title LIKE ? OR artist LIKE ? OR album LIKE ?"
         params += [f"%{q}%"] * 3
-    return db.query(f"SELECT id, title, artist, album, albumartist, album_id, track, disc, year, duration, format, bitrate FROM tracks {where} ORDER BY lower(artist), lower(album), disc, track LIMIT ? OFFSET ?",
+    return db.query(f"SELECT id, title, artist, album, albumartist, album_id, track, disc, year, duration, format, bitrate, verify_status, verify_detail FROM tracks {where} ORDER BY lower(artist), lower(album), disc, track LIMIT ? OFFSET ?",
                     (*params, min(limit, 1000), offset))
 
 
@@ -164,15 +166,6 @@ async def download_album(album_id: str, user=Depends(auth.current_user)):
     tmp = await asyncio.to_thread(build)
     name = tagger.clean(f"{rows[0]['albumartist']} - {rows[0]['album']}") + ".zip"
     return FileResponse(tmp, media_type="application/zip", filename=name, background=BackgroundTask(os.remove, tmp))
-
-
-@router.get("/tracks/{track_id}/stream")
-def stream(track_id: int, user=Depends(auth.current_user)):
-    t = db.one("SELECT path, format FROM tracks WHERE id=?", (track_id,))
-    if not t or not os.path.isfile(t["path"]):
-        raise HTTPException(404, "Track not found")
-    types = {"mp3": "audio/mpeg", "flac": "audio/flac", "m4a": "audio/mp4", "mp4": "audio/mp4", "ogg": "audio/ogg", "opus": "audio/ogg", "wav": "audio/wav", "aac": "audio/aac"}
-    return FileResponse(t["path"], media_type=types.get(t["format"], "application/octet-stream"))
 
 
 @router.get("/albums/{album_id}/match")
@@ -274,3 +267,67 @@ async def _run_bulk():
         db.log("info", f"Bulk auto-tag finished: {_bulk['tagged']} tagged, {_bulk['skipped']} need manual matching")
     finally:
         _bulk.update(running=False, current="")
+
+
+# ---- verification & duplicates ----------------------------------------------
+
+class DupResolve(BaseModel):
+    key: str
+    keep: int
+    delete: list[int]
+
+
+@router.post("/verify")
+async def start_verify(all: bool = False, user=Depends(auth.admin_user)):
+    if not acoustid.available():
+        raise HTTPException(400, "Add an AcoustID API key in Settings → Verification (and make sure fpcalc is installed)")
+    if verify.state["running"]:
+        raise HTTPException(409, "Verification already running")
+    asyncio.create_task(verify.verify_library(only_new=not all))
+    return {"ok": True}
+
+
+@router.post("/tracks/{track_id}/verify")
+async def verify_one(track_id: int, user=Depends(auth.admin_user)):
+    t = db.one("SELECT id, path, title, artist, duration, mb_trackid FROM tracks WHERE id=?", (track_id,))
+    if not t:
+        raise HTTPException(404, "Track not found")
+    if not acoustid.available():
+        raise HTTPException(400, "AcoustID is not configured")
+    return await verify.verify_track(t)
+
+
+@router.get("/mismatches")
+def mismatches(user=Depends(auth.admin_user)):
+    return db.query("""SELECT id, title, artist, album, album_id, verify_status, verify_detail FROM tracks
+                       WHERE verify_status='mismatch' ORDER BY lower(artist), lower(album)""")
+
+
+@router.get("/duplicates")
+async def duplicates(user=Depends(auth.admin_user)):
+    return await asyncio.to_thread(verify.find_duplicates)
+
+
+@router.post("/duplicates/resolve")
+async def resolve_duplicates(body: DupResolve, user=Depends(auth.admin_user)):
+    if body.keep in body.delete:
+        raise HTTPException(400, "Can't keep and delete the same track")
+    n = await asyncio.to_thread(verify.delete_tracks, body.delete, body.keep)
+    db.log("info", f"{user['username']} removed {n} duplicate file(s)")
+    return {"deleted": n}
+
+
+@router.post("/duplicates/resolve-all")
+async def resolve_all(user=Depends(auth.admin_user)):
+    groups = await asyncio.to_thread(verify.find_duplicates)
+    n = 0
+    for g in groups:
+        n += await asyncio.to_thread(verify.delete_tracks, [t["id"] for t in g["tracks"] if t["id"] != g["keep"]], g["keep"])
+    db.log("info", f"{user['username']} auto-resolved {len(groups)} duplicate groups ({n} files removed)")
+    return {"groups": len(groups), "deleted": n}
+
+
+@router.post("/duplicates/ignore")
+def ignore_duplicates(body: dict, user=Depends(auth.admin_user)):
+    db.execute("INSERT OR IGNORE INTO dup_ignore VALUES (?,?)", (body.get("key", ""), time.time()))
+    return {"ok": True}

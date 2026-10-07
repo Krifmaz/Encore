@@ -1,12 +1,7 @@
 import { api } from '../api.js';
 import { art, confirmDialog, debounce, emptyState, esc, fmt, icon, modal, skeletonGrid, toast } from '../ui.js';
-import * as player from '../player.js';
 import { bindTiles, libraryTile } from './common.js';
-
-export async function playAlbum(id, start = 0) {
-  const a = await api.get(`/library/albums/${id}`);
-  player.playQueue(a.tracks.map(t => ({ ...t, album_id: id })), start);
-}
+import { addToPlaylistModal } from './playlists.js';
 
 const PAGE = 120;
 
@@ -22,12 +17,13 @@ export async function render(view, ctx) {
       ${admin ? `<div class="row wrap">
         <button class="btn sm" id="scan-btn">${icon.refresh}Scan</button>
         <button class="btn sm" id="autotag-btn">${icon.tag}Auto-tag untagged</button>
+        <button class="btn sm" id="verify-btn">${icon.shield}Verify audio</button>
       </div>` : ''}
     </div>
     <div id="bulk" class="hidden card" style="margin-bottom:16px"></div>
     <div class="row wrap" style="margin-bottom:18px">
       <div class="tabs" id="lib-tabs">
-        ${[['albums', 'Albums'], ['artists', 'Artists'], ['tracks', 'Songs']].map(([k, l]) => `<button data-t="${k}" class="${k === st.tab ? 'active' : ''}">${l}</button>`).join('')}
+        ${[['albums', 'Albums'], ['artists', 'Artists'], ['tracks', 'Songs'], ...(admin ? [['duplicates', 'Duplicates'], ['issues', 'Wrong audio']] : [])].map(([k, l]) => `<button data-t="${k}" class="${k === st.tab ? 'active' : ''}">${l}</button>`).join('')}
       </div>
       <div class="search grow" style="max-width:360px">${icon.search}<input class="input" id="lib-q" placeholder="Filter library…" value="${esc(st.q)}"></div>
       <select class="input" id="lib-sort" style="width:auto">
@@ -53,6 +49,9 @@ export async function render(view, ctx) {
     const sortEl = view.querySelector('#lib-sort'), filtEl = view.querySelector('#lib-filter');
     sortEl.classList.toggle('hidden', st.tab !== 'albums');
     filtEl.classList.toggle('hidden', st.tab !== 'albums');
+    view.querySelector('#lib-q').parentElement.classList.toggle('hidden', ['duplicates', 'issues'].includes(st.tab));
+    if (st.tab === 'duplicates') return renderDuplicates(body, view, more, load);
+    if (st.tab === 'issues') return renderIssues(body, view, more);
     if (st.tab === 'albums') {
       const res = await api.get(`/library/albums?q=${encodeURIComponent(st.q)}&sort=${st.sort}&filter=${st.filter}&artist=${encodeURIComponent(st.artist)}&limit=${PAGE}&offset=${st.offset}`);
       const html = res.items.map(libraryTile).join('');
@@ -74,13 +73,12 @@ export async function render(view, ctx) {
     } else {
       const rows = await api.get(`/library/tracks?q=${encodeURIComponent(st.q)}&limit=300&offset=${append ? st.offset : 0}`);
       const html = rows.map((t, i) => `<tr data-i="${i}">
-        <td class="num"><button class="btn ghost icon sm" data-play-track="${t.id}">${icon.play.replace('<svg', '<svg width="14"')}</button></td>
         <td><div style="font-weight:600">${esc(t.title)}</div><div class="small muted">${esc(t.artist)}</div></td>
         <td class="hide-sm"><a href="#/library/album/${esc(t.album_id)}">${esc(t.album || '')}</a></td>
-        <td class="hide-sm"><span class="badge">${esc((t.format || '').toUpperCase())}${t.bitrate ? ' ' + t.bitrate + 'k' : ''}</span></td>
+        <td class="hide-sm"><span class="badge">${esc((t.format || '').toUpperCase())}${t.bitrate ? ' ' + t.bitrate + 'k' : ''}</span> ${verifyBadge(t)}</td>
         <td class="muted">${fmt.dur(t.duration)}</td></tr>`).join('');
       if (!append) {
-        body.innerHTML = rows.length ? `<div class="card flat"><div class="table-wrap"><table class="table"><thead><tr><th></th><th>Title</th><th class="hide-sm">Album</th><th class="hide-sm">Format</th><th>Time</th></tr></thead><tbody>${html}</tbody></table></div></div>` : emptyState(icon.music, 'No songs found');
+        body.innerHTML = rows.length ? `<div class="card flat"><div class="table-wrap"><table class="table"><thead><tr><th>Title</th><th class="hide-sm">Album</th><th class="hide-sm">Format</th><th>Time</th></tr></thead><tbody>${html}</tbody></table></div></div>` : emptyState(icon.music, 'No songs found');
         body._tracks = rows;
       } else {
         body.querySelector('tbody').insertAdjacentHTML('beforeend', html);
@@ -92,13 +90,6 @@ export async function render(view, ctx) {
     }
   };
 
-  body.addEventListener('click', (e) => {
-    const b = e.target.closest('[data-play-track]');
-    if (!b) return;
-    const tracks = body._tracks || [];
-    const idx = tracks.findIndex(t => String(t.id) === b.dataset.playTrack);
-    player.playQueue(tracks.slice(idx, idx + 200), 0);
-  });
   view.querySelector('#lib-tabs').onclick = (e) => {
     const t = e.target.closest('[data-t]');
     if (!t) return;
@@ -116,11 +107,15 @@ export async function render(view, ctx) {
     const poll = async () => {
       const s = await api.get('/library/stats');
       const scanning = s.scan.scanning, b = s.bulk;
-      bulk.classList.toggle('hidden', !scanning && !b.running);
+      bulk.classList.toggle('hidden', !scanning && !b.running && !s.verify.running);
+      const vc = s.verify_counts || {};
+      view.querySelector('#verify-btn').innerHTML = `${icon.shield}Verify audio${vc.unchecked ? ` <span class="badge">${fmt.num(vc.unchecked)} unchecked</span>` : ''}${vc.mismatch ? ` <span class="badge err">${vc.mismatch} wrong</span>` : ''}`;
+      view.querySelector('#verify-btn').dataset.acoustid = s.acoustid ? '1' : '';
       if (scanning) bulk.innerHTML = `<div class="row"><span class="spinner"></span><b>Scanning library</b><span class="muted">${s.scan.progress} / ${s.scan.total} files</span></div><div class="progress mt"><i style="width:${s.scan.total ? s.scan.progress / s.scan.total * 100 : 0}%"></i></div>`;
+      else if (s.verify.running) bulk.innerHTML = `<div class="row"><span class="spinner"></span><b>Verifying audio fingerprints</b><span class="muted ellipsis">${s.verify.done} / ${s.verify.total} · ${s.verify.verified} ok · ${s.verify.mismatch} wrong · ${s.verify.unknown} unknown · ${esc(s.verify.current)}</span></div><div class="progress mt"><i style="width:${s.verify.total ? s.verify.done / s.verify.total * 100 : 0}%"></i></div>`;
       else if (b.running) bulk.innerHTML = `<div class="row"><span class="spinner"></span><b>Auto-tagging</b><span class="muted ellipsis">${b.done} / ${b.total} · ${b.tagged} tagged · ${b.skipped} skipped · ${esc(b.current)}</span></div><div class="progress mt"><i style="width:${b.total ? b.done / b.total * 100 : 0}%"></i></div>`;
       view.querySelector('#autotag-btn').innerHTML = `${icon.tag}Auto-tag untagged${s.untagged_albums ? ` <span class="badge warn">${s.untagged_albums}</span>` : ''}`;
-      return scanning || b.running;
+      return scanning || b.running || s.verify.running;
     };
     let wasBusy = await poll();
     const timer = setInterval(async () => {
@@ -132,12 +127,87 @@ export async function render(view, ctx) {
     view.querySelector('#scan-btn').onclick = async () => {
       try { await api.post('/library/scan'); toast('Library scan started', 'ok'); wasBusy = true; poll(); } catch (e) { toast(e.message, 'err'); }
     };
+    view.querySelector('#verify-btn').onclick = async (e) => {
+      if (!e.currentTarget.dataset.acoustid) {
+        toast('Add a free AcoustID API key in Settings → Verification first', 'err');
+        return;
+      }
+      if (!await confirmDialog('Verify audio', 'Every unchecked file is fingerprinted and compared against AcoustID/MusicBrainz, so wrong songs, remixes posing as originals, covers and mislabeled tracks get flagged. Takes ~0.4s per track.', 'Start')) return;
+      try { await api.post('/library/verify'); toast('Verification started', 'ok'); wasBusy = true; poll(); } catch (err) { toast(err.message, 'err'); }
+    };
     view.querySelector('#autotag-btn').onclick = async () => {
       if (!await confirmDialog('Auto-tag library', 'Every album without MusicBrainz tags will be matched automatically. Confident matches get retagged and renamed using your naming template; the rest are left for manual matching.', 'Start')) return;
       try { await api.post('/library/autotag'); toast('Auto-tagging started', 'ok'); wasBusy = true; poll(); } catch (e) { toast(e.message, 'err'); }
     };
   }
   await load();
+}
+
+function verifyBadge(t) {
+  if (t.verify_status === 'verified') return `<span class="badge ok" title="${esc(t.verify_detail || '')}">✓ verified</span>`;
+  if (t.verify_status === 'mismatch') return `<span class="badge err" title="${esc(t.verify_detail || '')}">wrong audio</span>`;
+  return '';
+}
+
+async function renderDuplicates(body, view, more, reload) {
+  more.classList.add('hidden');
+  body.innerHTML = '<div class="empty"><span class="spinner"></span><p class="muted">Comparing fingerprints, ISRCs, MusicBrainz ids and tags…</p></div>';
+  const groups = await api.get('/library/duplicates');
+  view.querySelector('#lib-sub').textContent = `${groups.length} duplicate group(s)`;
+  if (!groups.length) {
+    body.innerHTML = emptyState(icon.check, 'No duplicates found', 'Remixes, live versions, covers and edits are kept apart – only true copies of the same recording are listed here. Run “Verify audio” to also catch copies with different tags.');
+    return;
+  }
+  body.innerHTML = `
+    <div class="card row wrap between" style="margin-bottom:16px">
+      <div class="muted small">The best copy (verified → lossless → bitrate → tagged) is preselected to keep. Playlists pointing at removed copies are moved to the kept one.</div>
+      <button class="btn danger" id="dup-all">${icon.trash}Resolve all ${groups.length}</button>
+    </div>
+    ${groups.map(g => `<div class="card flat mt" data-key="${esc(g.key)}">
+      <div class="row between" style="padding:12px 16px;border-bottom:1px solid var(--border)">
+        <div><b>${esc(g.tracks[0].artist)} – ${esc(g.tracks[0].title)}</b> <span class="badge accent">${esc(g.reason)}</span></div>
+        <div class="row"><button class="btn sm ghost" data-ignore>Not duplicates</button><button class="btn sm danger" data-resolve>Delete unchecked</button></div>
+      </div>
+      <div class="list">${g.tracks.map(t => `<label class="list-item" style="cursor:pointer">
+        <input type="radio" name="keep-${esc(g.key)}" value="${t.id}" ${t.id === g.keep ? 'checked' : ''}>
+        <div class="grow"><div class="ellipsis">${esc(t.title)} <span class="muted">· ${esc(t.album || '')}</span></div>
+          <div class="small faint ellipsis">${esc(t.relpath)}</div></div>
+        <span class="badge">${esc((t.format || '').toUpperCase())}${t.bitrate ? ' ' + t.bitrate + 'k' : ''}</span>
+        ${verifyBadge(t)}<span class="small muted">${fmt.dur(t.duration)} · ${fmt.size(t.size)}</span>
+      </label>`).join('')}</div></div>`).join('')}`;
+  body.querySelector('#dup-all').onclick = async () => {
+    if (!await confirmDialog('Resolve all duplicates', `Delete the lower-quality copies in ${groups.length} groups? Files are removed from disk.`, 'Delete copies', true)) return;
+    const r = await api.post('/library/duplicates/resolve-all');
+    toast(`Removed ${r.deleted} duplicate file(s)`, 'ok');
+    reload();
+  };
+  body.onclick = async (e) => {
+    const card = e.target.closest('[data-key]');
+    if (!card) return;
+    const key = card.dataset.key;
+    if (e.target.closest('[data-ignore]')) {
+      await api.post('/library/duplicates/ignore', { key });
+      card.remove();
+    } else if (e.target.closest('[data-resolve]')) {
+      const keep = +card.querySelector('input:checked').value;
+      const del = [...card.querySelectorAll('input')].map(i => +i.value).filter(v => v !== keep);
+      await api.post('/library/duplicates/resolve', { key, keep, delete: del });
+      toast(`Removed ${del.length} copy/copies`, 'ok');
+      card.remove();
+    }
+  };
+}
+
+async function renderIssues(body, view, more) {
+  more.classList.add('hidden');
+  const rows = await api.get('/library/mismatches');
+  view.querySelector('#lib-sub').textContent = `${rows.length} file(s) whose audio doesn't match their tags`;
+  body.innerHTML = rows.length ? `<div class="card flat"><div class="list">${rows.map(t => `<div class="list-item">
+      <div class="grow"><div><b>${esc(t.artist)} – ${esc(t.title)}</b> <span class="muted">· <a href="#/library/album/${esc(t.album_id)}">${esc(t.album || '')}</a></span></div>
+      <div class="small" style="color:var(--err)">${esc(t.verify_detail || '')}</div></div>
+      <a class="btn sm" href="#/library/album/${esc(t.album_id)}">${icon.tag}Fix</a>
+    </div>`).join('')}</div></div>`
+    : emptyState(icon.shield, 'Nothing flagged', 'Run “Verify audio” to fingerprint your library.');
 }
 
 export async function renderAlbum(view, ctx) {
@@ -161,8 +231,7 @@ export async function renderAlbum(view, ctx) {
           ${untagged ? `<span class="badge warn">${untagged} track(s) not MusicBrainz-tagged</span>` : '<span class="badge ok">MusicBrainz tagged</span>'}
         </div>
         <div class="row wrap mt">
-          <button class="btn primary" id="play-all">${icon.play}Play</button>
-          <button class="btn" id="queue-all">${icon.list}Queue</button>
+          <button class="btn" id="add-pl">${icon.list}Add to playlist</button>
           <a class="btn" href="/api/library/albums/${esc(id)}/download">${icon.download}Download</a>
           ${a.mb_releasegroupid ? `<a class="btn ghost" href="#/album/${esc(a.mb_releasegroupid)}">${icon.disc}Release info</a>` : ''}
           ${admin ? `<button class="btn" id="match-btn">${icon.tag}Match MusicBrainz</button>
@@ -172,24 +241,33 @@ export async function renderAlbum(view, ctx) {
       </div>
     </div>
     <div class="card flat"><div class="table-wrap"><table class="table tracklist">
-      <thead><tr><th class="num">#</th><th>Title</th><th class="hide-sm">Artist</th><th class="hide-sm">Format</th><th>Time</th></tr></thead>
-      <tbody>${a.tracks.map((t, i) => `<tr data-i="${i}" style="cursor:pointer">
+      <thead><tr><th class="num">#</th><th>Title</th><th class="hide-sm">Artist</th><th class="hide-sm">Format</th><th>Time</th><th></th></tr></thead>
+      <tbody>${a.tracks.map((t, i) => `<tr data-i="${i}">
         <td class="num">${multi ? t.disc + '-' : ''}${t.track || '–'}</td>
         <td><div style="font-weight:600">${esc(t.title)}</div>${admin ? `<div class="small faint ellipsis" style="max-width:520px">${esc(t.relpath)}</div>` : ''}</td>
         <td class="hide-sm muted">${esc(t.artist)}</td>
-        <td class="hide-sm"><span class="badge">${esc((t.format || '').toUpperCase())}${t.bitrate ? ' ' + t.bitrate + 'k' : ''}</span>${t.mb_trackid ? '' : ' <span class="badge warn" title="No MusicBrainz id">?</span>'}</td>
-        <td class="muted">${fmt.dur(t.duration)}</td></tr>`).join('')}</tbody>
+        <td class="hide-sm"><span class="badge">${esc((t.format || '').toUpperCase())}${t.bitrate ? ' ' + t.bitrate + 'k' : ''}</span>${t.mb_trackid ? '' : ' <span class="badge warn" title="No MusicBrainz id">?</span>'} ${verifyBadge(t)}</td>
+        <td class="muted">${fmt.dur(t.duration)}</td>
+        <td style="text-align:right;white-space:nowrap"><button class="btn sm ghost" data-like="${t.id}" title="Like (syncs to Finamp/Plexamp)">${icon.heart}</button><button class="btn sm ghost" data-addpl="${t.id}" title="Add to playlist">${icon.plus}</button></td></tr>`).join('')}</tbody>
     </table></div></div>`;
-  const queueTracks = a.tracks.map(t => ({ ...t, album_id: id }));
-  view.querySelector('#play-all').onclick = () => player.playQueue(queueTracks, 0);
-  view.querySelector('#queue-all').onclick = () => { player.enqueue(queueTracks); toast('Added to queue', 'ok'); };
-  view.querySelector('tbody').onclick = (e) => {
-    const tr = e.target.closest('tr[data-i]');
-    if (tr) player.playQueue(queueTracks, +tr.dataset.i);
-  };
-  const highlight = (cur) => view.querySelectorAll('tbody tr').forEach((tr, i) => tr.classList.toggle('playing', cur && cur.id === a.tracks[i].id));
-  ctx.onLeave(player.onChange(highlight));
-  highlight(player.current());
+  view.querySelector('#add-pl').onclick = () => addToPlaylistModal(a.tracks.map(t => t.id));
+  const liked = new Set(await api.get('/likes'));
+  const paintLikes = () => view.querySelectorAll('[data-like]').forEach(b => {
+    const on = liked.has(+b.dataset.like);
+    b.style.color = on ? 'var(--accent-2)' : '';
+    b.querySelector('svg').setAttribute('fill', on ? 'currentColor' : 'none');
+  });
+  paintLikes();
+  view.querySelector('tbody').addEventListener('click', async (e) => {
+    const lb = e.target.closest('[data-like]');
+    if (lb) {
+      const tid = +lb.dataset.like;
+      if (liked.has(tid)) { await api.del(`/likes/${tid}`); liked.delete(tid); } else { await api.post(`/likes/${tid}`); liked.add(tid); }
+      paintLikes();
+    }
+    const ab = e.target.closest('[data-addpl]');
+    if (ab) addToPlaylistModal([+ab.dataset.addpl]);
+  });
   if (!admin) return;
   view.querySelector('#match-btn').onclick = () => matchModal(id, a, ctx);
   view.querySelector('#edit-btn').onclick = () => editModal(id, a, ctx);
