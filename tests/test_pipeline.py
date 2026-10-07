@@ -88,7 +88,7 @@ def test_failed_source_falls_through(env, monkeypatch):
     from app.services import notify, slskd
     db.connect()
     config.load()
-    config.set_many({"slskd_enabled": True, "slskd_api_key": "k", "ytdlp_enabled": False})
+    config.set_many({"slskd_enabled": True, "slskd_api_key": "k", "ytdlp_enabled": False, "album_upgrade": "off"})
 
     async def search(q, timeout_s=None):
         return []

@@ -294,3 +294,55 @@ async def recording(rid: str) -> dict:
 async def ping() -> bool:
     await _get("artist", {"query": "test", "limit": 1})
     return True
+
+
+async def recordings_for_isrc(isrc: str) -> list[str]:
+    try:
+        d = await _get(f"isrc/{isrc}")
+    except Exception:  # noqa: BLE001
+        return []
+    return [r["id"] for r in d.get("recordings", [])]
+
+
+async def album_for_recording(rid: str, allow_ep: bool = True) -> dict | None:
+    """The official studio album (or EP) a recording first appeared on, if any.
+
+    Compilations, live albums, soundtracks, remix albums and DJ mixes are skipped, so asking for one song
+    never pulls in "Now That's What I Call Music" or a greatest-hits collection.
+    """
+    d = await _get(f"recording/{rid}", {"inc": "releases+release-groups+artist-credits"})
+    artist_ids = {c.get("artist", {}).get("id") for c in d.get("artist-credit", [])}
+    types = ("Album", "EP") if allow_ep else ("Album",)
+    best, best_key = None, None
+    for rel in d.get("releases", []):
+        rg = rel.get("release-group") or {}
+        if rel.get("status") not in (None, "Official"):
+            continue
+        if rg.get("primary-type") not in types or rg.get("secondary-types"):
+            continue
+        # skip releases by other artists (e.g. "Various Artists" or a featured artist's album)
+        rel_artists = {c.get("artist", {}).get("id") for c in rel.get("artist-credit", [])} or artist_ids
+        if artist_ids and not (rel_artists & artist_ids):
+            continue
+        key = (rg.get("primary-type") != "Album", rg.get("first-release-date") or rel.get("date") or "9999")
+        if best_key is None or key < best_key:
+            best, best_key = rg, key
+    if not best:
+        return None
+    return {"id": best["id"], "title": best.get("title"), "type": best.get("primary-type"),
+            "artist": credit(d.get("artist-credit")), "year": (best.get("first-release-date") or "")[:4],
+            "cover": cover_rg(best["id"])}
+
+
+async def resolve_recording(artist: str, title: str, length: float | None = None, isrc: str | None = None) -> str | None:
+    """Find the MusicBrainz recording for a song, version-aware (a remix won't resolve to the original)."""
+    from . import matcher
+    if isrc:
+        ids = await recordings_for_isrc(isrc)
+        if ids:
+            return ids[0]
+    want = matcher.describe(title, artist, length=length)
+    for r in await search_recordings(title, 10, artist=artist):
+        if matcher.compare(want, matcher.describe(r["title"], r["artist"], length=r["length"] or None)).match:
+            return r["id"]
+    return None

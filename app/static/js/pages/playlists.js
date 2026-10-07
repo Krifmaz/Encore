@@ -2,11 +2,11 @@ import { api } from '../api.js';
 import { art, confirmDialog, emptyState, esc, icon, modal, statusBadge, toast } from '../ui.js';
 
 const SRC = {
-  spotify: 'Spotify', deezer: 'Deezer', tidal: 'Tidal', qobuz: 'Qobuz', apple: 'Apple Music', ytdlp: 'YouTube / SoundCloud',
+  spotify: 'Spotify', ytmusic: 'YouTube Music', deezer: 'Deezer', tidal: 'Tidal', qobuz: 'Qobuz', apple: 'Apple Music', ytdlp: 'YouTube / SoundCloud',
   listenbrainz: 'ListenBrainz', web: 'Web', text: 'Pasted list', merged: 'Merged', manual: 'Encore', library: 'Encore',
   jellyfin: 'Jellyfin', plex: 'Plex', navidrome: 'Navidrome',
 };
-const TARGETS = { jellyfin: 'Jellyfin / Finamp', plex: 'Plex / Plexamp', navidrome: 'Navidrome', listenbrainz: 'ListenBrainz' };
+const TARGETS = { jellyfin: 'Jellyfin / Finamp', plex: 'Plex / Plexamp', navidrome: 'Navidrome', ytmusic: 'YouTube Music', listenbrainz: 'ListenBrainz' };
 
 function plCard(p) {
   const pct = p.total ? Math.round(p.matched / p.total * 100) : 0;
@@ -25,8 +25,8 @@ export function importModal(ctx, { url = '', into = null } = {}) {
     title: into ? 'Add tracks from a link' : 'Import playlist',
     wide: true,
     body: `<div class="tabs" id="imp-tabs"><button data-m="url" class="active">From a link</button><button data-m="text">Paste a list</button></div>
-      <div class="mt" id="imp-url"><input class="input" id="imp-link" value="${esc(url)}" placeholder="Spotify, Deezer, Tidal, Apple Music, Qobuz, YouTube (Music), SoundCloud, Bandcamp, ListenBrainz…">
-        <p class="small faint" style="margin:6px 0 0">Connect Spotify/Tidal on the Connections page to import private playlists and Liked Songs (e.g. <span class="mono">https://open.spotify.com/collection/tracks</span>).</p></div>
+      <div class="mt" id="imp-url"><input class="input" id="imp-link" value="${esc(url)}" placeholder="YouTube Music, Spotify, Deezer, Tidal, Apple Music, Qobuz, YouTube (Music), SoundCloud, Bandcamp, ListenBrainz…">
+        <p class="small faint" style="margin:6px 0 0">Connect Spotify/Tidal on the Connections page to import private playlists and Liked Songs (e.g. <span class="mono">https://music.youtube.com/playlist?list=LM</span> or <span class="mono">https://open.spotify.com/collection/tracks</span>).</p></div>
       <div class="mt hidden" id="imp-text"><textarea class="input" id="imp-lines" rows="8" placeholder="One per line:  Artist - Title"></textarea></div>
       <div class="row wrap mt">
         ${into ? '' : `<input class="input" id="imp-name" placeholder="Playlist name (optional)" style="max-width:280px">

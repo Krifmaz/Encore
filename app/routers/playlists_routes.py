@@ -114,7 +114,7 @@ def patch_playlist(pid: int, body: PlaylistPatch, user=Depends(auth.current_user
     if body.follow is not None:
         fields["follow"] = int(body.follow and bool(pl["source_url"]))
     if body.sync_targets is not None:
-        allowed = {"jellyfin", "plex", "navidrome", "listenbrainz"}
+        allowed = {"jellyfin", "plex", "navidrome", "listenbrainz", "ytmusic"}
         src = pl["source"]
         fields["sync_targets"] = json.dumps([t for t in body.sync_targets if t in allowed and t != src])
     if fields:
@@ -249,6 +249,7 @@ class ConnectBody(BaseModel):
     password: str | None = None
     token: str | None = None
     profile: str | None = None
+    headers: str | None = None
 
 
 class ConnPatch(BaseModel):
@@ -262,7 +263,7 @@ def list_connections(user=Depends(auth.current_user)):
     avail = {
         "jellyfin": bool(config.get("jellyfin_url")), "plex": bool(config.get("plex_url")),
         "navidrome": bool(config.get("navidrome_url")), "spotify": bool(config.get("spotify_client_id")),
-        "tidal": bool(config.get("tidal_client_id")), "deezer": True, "listenbrainz": True,
+        "tidal": bool(config.get("tidal_client_id")), "deezer": True, "listenbrainz": True, "ytmusic": True,
         "lastfm": bool(config.get("lastfm_api_key")),
     }
     return {"connections": have, "available": avail, "services": {k: {"label": v[0], "kind": v[1]} for k, v in connections.SERVICES.items()},
@@ -284,9 +285,14 @@ async def connect(service: str, body: ConnectBody, user=Depends(auth.current_use
             return await connections.connect_deezer(user["id"], body.profile or "")
         if service == "plex":
             return await connections.plex_pin_start()
+        if service == "ytmusic":
+            from ..services import ytmusic
+            if body.headers:
+                return await ytmusic.connect_browser(user["id"], body.headers)
+            return await ytmusic.oauth_start()
         if service in ("spotify", "tidal"):
             return {"url": connections.oauth_start(user["id"], service)}
-    except connections.ConnectionError_ as e:
+    except (connections.ConnectionError_, RuntimeError) as e:
         raise HTTPException(400, str(e))
     raise HTTPException(404, "Unknown service")
 
@@ -296,6 +302,15 @@ async def plex_check(body: dict, user=Depends(auth.current_user)):
     try:
         return await connections.plex_pin_check(user["id"], int(body.get("pin_id", 0)))
     except connections.ConnectionError_ as e:
+        raise HTTPException(400, str(e))
+
+
+@router.post("/connections/ytmusic/check")
+async def ytmusic_check(body: dict, user=Depends(auth.current_user)):
+    from ..services import ytmusic
+    try:
+        return await ytmusic.oauth_check(user["id"], body.get("device_code", ""))
+    except RuntimeError as e:
         raise HTTPException(400, str(e))
 
 

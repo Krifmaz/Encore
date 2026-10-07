@@ -6,6 +6,7 @@ const INFO = {
   jellyfin: { what: 'Two-way favourites (Finamp ♥) and playlist sync', form: 'userpass' },
   plex: { what: 'Two-way loves (Plexamp ♥) and playlist sync', form: 'plex' },
   navidrome: { what: 'Two-way stars and playlist sync', form: 'userpass' },
+  ytmusic: { what: 'Two-way likes (👍) and playlist sync; import your library & Liked Music', form: 'ytmusic' },
   spotify: { what: 'Import private playlists & Liked Songs; likes flow into Encore', form: 'oauth' },
   tidal: { what: 'Import playlists & collection; likes flow into Encore', form: 'oauth' },
   deezer: { what: 'Import your public favourites & playlists', form: 'profile' },
@@ -78,6 +79,7 @@ async function connect(svc) {
     try { const r = await api.post(`/connections/${svc}`, {}); location.href = r.url; } catch (e) { toast(e.message, 'err'); }
     return;
   }
+  if (form === 'ytmusic') return connectYTMusic();
   if (form === 'plex') {
     try {
       const r = await api.post('/connections/plex', {});
@@ -113,11 +115,53 @@ async function connect(svc) {
   };
 }
 
+function connectYTMusic() {
+  const m = modal({
+    title: 'Connect YouTube Music',
+    wide: true,
+    body: `<div class="tabs" id="ytm-tabs"><button data-m="code" class="active">Sign in with a code</button><button data-m="headers">Paste browser headers</button></div>
+      <div id="ytm-code" class="mt"><p class="muted" style="margin-top:0">You'll get a short code to enter at google.com/device with the Google account you use for YouTube Music.</p>
+        <button class="btn primary" id="ytm-start">${icon.link}Get code</button><div id="ytm-out" class="mt"></div></div>
+      <div id="ytm-headers" class="mt hidden">
+        <ol class="small muted" style="margin-top:0;line-height:1.7"><li>Open music.youtube.com in a desktop browser while signed in, press F12 → Network.</li>
+          <li>Click around, find a <span class="mono">browse</span> request (POST), right-click → Copy → <b>Copy request headers</b>.</li><li>Paste below.</li></ol>
+        <textarea class="input mono" id="ytm-raw" rows="8" placeholder="accept: */*\ncookie: …"></textarea>
+        <button class="btn primary mt" id="ytm-save">Connect</button></div>`,
+  });
+  const el = (s) => m.el.querySelector(s);
+  el('#ytm-tabs').onclick = (e) => {
+    const b = e.target.closest('[data-m]');
+    if (!b) return;
+    m.el.querySelectorAll('#ytm-tabs button').forEach(x => x.classList.toggle('active', x === b));
+    el('#ytm-code').classList.toggle('hidden', b.dataset.m !== 'code');
+    el('#ytm-headers').classList.toggle('hidden', b.dataset.m !== 'headers');
+  };
+  el('#ytm-save').onclick = async () => {
+    try {
+      const r = await api.post('/connections/ytmusic', { headers: el('#ytm-raw').value });
+      toast(`YouTube Music connected (${r.account})`, 'ok'); m.close(); window.dispatchEvent(new HashChangeEvent('hashchange'));
+    } catch (e) { toast(e.message, 'err'); }
+  };
+  el('#ytm-start').onclick = async (ev) => {
+    ev.target.disabled = true;
+    try {
+      const c = await api.post('/connections/ytmusic', {});
+      el('#ytm-out').innerHTML = `<div class="row wrap"><span>Go to</span><a class="btn sm" target="_blank" rel="noopener" href="${esc(c.url)}">${esc(c.url)}</a><span>and enter</span>
+        <span class="code" style="font-size:20px;letter-spacing:.15em">${esc(c.user_code)}</span></div><p class="small muted"><span class="spinner"></span> Waiting for you to approve…</p>`;
+      for (let i = 0; i < 180 && document.body.contains(m.el); i++) {
+        await new Promise(res => setTimeout(res, (c.interval || 5) * 1000));
+        const r = await api.post('/connections/ytmusic/check', { device_code: c.device_code }).catch(() => ({ done: false }));
+        if (r.done) { toast(`YouTube Music connected (${r.account})`, 'ok'); m.close(); window.dispatchEvent(new HashChangeEvent('hashchange')); return; }
+      }
+    } catch (e) { toast(e.message, 'err'); ev.target.disabled = false; }
+  };
+}
+
 async function remotePlaylists(svc, label, ctx) {
   const m = modal({ title: `Playlists on ${esc(label)}`, wide: true, body: '<div class="empty"><span class="spinner"></span></div>' });
   try {
     const rows = await api.get(`/connections/${svc}/playlists`);
-    const liked = { spotify: 'https://open.spotify.com/collection/tracks', deezer: null };
+    const liked = { spotify: 'https://open.spotify.com/collection/tracks', ytmusic: 'https://music.youtube.com/playlist?list=LM', deezer: null };
     m.el.querySelector('.modal-body').innerHTML = `
       ${liked[svc] ? `<button class="btn mt" id="liked" style="margin:0 0 12px">♥ Import Liked Songs</button>` : ''}
       <div class="card flat"><div class="list">${rows.map(p => `<div class="list-item" data-rid="${esc(p.id)}" data-url="${esc(p.url || '')}" data-name="${esc(p.name)}">

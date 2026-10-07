@@ -53,6 +53,6 @@ def test_detect():
     assert detect("https://open.spotify.com/playlist/37i9") == "spotify"
     assert detect("https://www.deezer.com/en/playlist/123") == "deezer"
     assert detect("https://tidal.com/browse/playlist/abc-def") == "tidal"
-    assert detect("https://music.youtube.com/playlist?list=PL") == "ytdlp"
+    assert detect("https://music.youtube.com/playlist?list=PL") == "ytmusic"
     assert detect("https://artist.bandcamp.com/album/x") == "ytdlp"
     assert detect("https://music.apple.com/us/playlist/x/pl.123") == "apple"

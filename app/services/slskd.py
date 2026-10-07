@@ -134,15 +134,18 @@ def _contains(hay: str, needle: str) -> float:
     return sum(1 for w in words if f" {w} " in hay_n) / len(words)
 
 
-def _format_score(files: list[dict]) -> float | None:
+def _format_score(files: list[dict], lossless_only: bool = False) -> float | None:
     pref = config.get("slskd_preferred_format")
     min_br = int(config.get("slskd_min_bitrate"))
     exts = {_ext(f["filename"]) for f in files}
     if len(exts) > 1:
         return None
     ext = exts.pop()
+    if lossless_only and ext not in LOSSLESS:
+        return None
     if ext in LOSSLESS:
-        return {"flac": 30, "mp3": 8, "any": 25}.get(pref, 25)
+        hires = all((f.get("bitDepth") or 16) >= 24 for f in files)
+        return {"flac": 30, "mp3": 8, "any": 25}.get(pref, 25) + (6 if hires and pref != "mp3" else 0)
     br = min((f.get("bitRate") or 0) for f in files)
     if br and br < min_br:
         return None
@@ -154,7 +157,7 @@ def _format_score(files: list[dict]) -> float | None:
     return base
 
 
-def rank_album(responses: list[dict], artist: str, album: str, track_count: int | None) -> list[dict]:
+def rank_album(responses: list[dict], artist: str, album: str, track_count: int | None, lossless_only: bool = False) -> list[dict]:
     candidates = []
     for resp in responses:
         dirs: dict[str, list] = {}
@@ -164,7 +167,7 @@ def rank_album(responses: list[dict], artist: str, album: str, track_count: int 
             d = f["filename"].replace("\\", "/").rsplit("/", 1)[0]
             dirs.setdefault(d, []).append(f)
         for d, files in dirs.items():
-            fmt = _format_score(files)
+            fmt = _format_score(files, lossless_only)
             if fmt is None:
                 continue
             n = len(files)
@@ -206,13 +209,13 @@ def rank_album(responses: list[dict], artist: str, album: str, track_count: int 
     return unique[: int(config.get("slskd_max_candidates"))]
 
 
-def rank_track(responses: list[dict], artist: str, title: str, length: float | None) -> list[dict]:
+def rank_track(responses: list[dict], artist: str, title: str, length: float | None, lossless_only: bool = False) -> list[dict]:
     candidates = []
     for resp in responses:
         for f in resp.get("files", []):
             if _ext(f["filename"]) not in AUDIO_EXT:
                 continue
-            fmt = _format_score([f])
+            fmt = _format_score([f], lossless_only)
             if fmt is None:
                 continue
             name = f["filename"].replace("\\", "/")

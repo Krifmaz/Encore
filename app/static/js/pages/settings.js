@@ -48,7 +48,7 @@ const SECTIONS = [
   ] },
   { id: 'sync', title: 'Playlists & sync', fields: [
     S('sync_interval_minutes', 'Sync likes & playlists every (minutes)', 'number', { help: '0 disables automatic sync' }),
-    S('auto_request_followed', 'Automatically download new tracks in followed playlists', 'bool'),
+    S('auto_request_followed', 'Automatically download new tracks in followed playlists (more rules under Admin → Auto-download)', 'bool'),
   ] },
   { id: 'lidarr', title: 'Lidarr', test: 'lidarr', fields: [
     S('lidarr_enabled', 'Enable Lidarr', 'bool'),
@@ -70,11 +70,11 @@ const SECTIONS = [
     S('slskd_stall_minutes', 'Give up on a stalled user after (minutes)', 'number'),
     S('slskd_max_candidates', 'Max users to try per request', 'number'),
   ] },
-  { id: 'ytdlp', title: 'YouTube / SoundCloud (yt-dlp)', fields: [
+  { id: 'ytdlp', title: 'YouTube Music / SoundCloud (yt-dlp)', fields: [
     S('ytdlp_enabled', 'Enable yt-dlp as a fallback source', 'bool'),
-    S('ytdlp_format', 'Audio format', 'select', { options: [['mp3', 'MP3'], ['m4a', 'M4A (AAC)'], ['opus', 'Opus'], ['flac', 'FLAC (re-encoded)'], ['best', 'Original (no re-encode)']] }),
+    S('ytdlp_format', 'Audio format', 'select', { options: [['best', 'Original stream – best quality, no re-encode (recommended)'], ['m4a', 'M4A (AAC, re-encoded)'], ['mp3', 'MP3 (re-encoded)'], ['opus', 'Opus']] }),
     S('ytdlp_quality', 'MP3/M4A quality', 'text', { help: 'Bitrate like 320, or 0 for best VBR' }),
-    S('ytdlp_cookies', 'cookies.txt contents (optional)', 'textarea', { full: true, secret: true, help: 'Netscape cookie file for age-restricted or members-only content' }),
+    S('ytdlp_cookies', 'cookies.txt contents (optional)', 'textarea', { full: true, secret: true, help: 'Netscape cookie file from music.youtube.com. With a YouTube Music Premium account this unlocks 256 kbps audio. Export from a private window so the cookies don’t rotate.' }),
   ] },
   { id: 'spotify', title: 'Integrations', test: 'spotify', testLabel: 'Test Spotify', fields: [
     S('spotify_client_id', 'Spotify Client ID', 'text', { help: 'developer.spotify.com – add <Public URL>/api/connections/spotify/callback as redirect URI. Development-mode apps allow 5 users and need a Premium owner (2026 rules); without it, public playlists still import via the embed fallback.' }),
@@ -82,6 +82,8 @@ const SECTIONS = [
     S('tidal_client_id', 'Tidal Client ID', 'text', { help: 'developer.tidal.com – redirect URI <Public URL>/api/connections/tidal/callback' }),
     S('tidal_client_secret', 'Tidal Client secret', 'password'),
     S('lastfm_api_key', 'Last.fm API key', 'text', { help: 'last.fm/api/account/create – for importing loved tracks' }),
+    S('ytmusic_client_id', 'YouTube Music OAuth Client ID', 'text', { help: 'Google Cloud → YouTube Data API v3 → OAuth client of type “TVs and Limited Input devices”. Lets users sign in to YouTube Music with a code (they can also paste browser headers instead).' }),
+    S('ytmusic_client_secret', 'YouTube Music OAuth Client secret', 'password'),
   ] },
   { id: 'media', title: 'Media servers', test: 'mediaservers', testLabel: 'Trigger refresh', fields: [
     S('navidrome_url', 'Navidrome URL', 'text', { help: 'URLs here let users link their own accounts on the Connections page; the admin credentials below are only used to trigger library rescans' }), S('navidrome_user', 'Navidrome user'), S('navidrome_password', 'Navidrome password', 'password'),

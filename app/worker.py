@@ -7,7 +7,7 @@ import time
 import traceback
 
 from . import config, db
-from .services import library, lidarr, musicbrainz as mb, notify, slskd, streamrip, tagger, ytdlp
+from .services import library, lidarr, musicbrainz as mb, notify, slskd, streamrip, tagger, ytdlp, ytmusic
 
 ACTIVE = ("queued", "searching", "downloading", "monitoring", "importing")
 _running: dict[int, asyncio.Task] = {}
@@ -61,6 +61,9 @@ async def complete(r: dict, message: str, new_paths: list[str] | None = None) ->
 
 
 async def fail(r: dict, message: str) -> None:
+    if r["detail"].get("lossless_only"):
+        upd(r, status="failed", message="No lossless copy available yet – will try again later")
+        return
     upd(r, status="failed", message=message)
     db.log("error", f"Request failed: {label(r)} – {message}")
     await notify.send("❌ Request failed", f"{label(r)}\n{message}", r.get("cover_url"))
@@ -78,6 +81,9 @@ async def next_source(r: dict, reason: str = "") -> None:
     src = srcs.pop(0)
     d["sources"] = srcs
     upd(r, source=src, progress=0, status="searching", message=f"Trying {src}…")
+    if src == "slskd_lossless":
+        await start_slskd(r, lossless_only=True)
+        return
     await {"lidarr": start_lidarr, "slskd": start_slskd, "ytdlp": start_ytdlp, "streamrip": start_streamrip}[src](r)
 
 
@@ -97,12 +103,14 @@ async def start(r: dict) -> None:
         upd(r, source="ytdlp", status="downloading", message="Starting download…")
         await run_url(r)
         return
-    # already have it?
-    if r["kind"] == "album" and (library.has_release_group(r["mbid"]) or library.has_album(r["artist"], r["album"] or r["title"])):
+    # already have it? (lossless upgrade requests replace what's there)
+    if r["kind"] == "album" and not d.get("lossless_only") and (library.has_release_group(r["mbid"]) or library.has_album(r["artist"], r["album"] or r["title"])):
         await complete(r, "Already in library")
         return
-    if r["kind"] == "track" and library.has_track(r["mbid"], r["artist"], r["title"]):
+    if r["kind"] == "track" and _track_in_library(r):
         await complete(r, "Already in library")
+        return
+    if r["kind"] == "track" and await try_album_upgrade(r):
         return
     if r["kind"] == "artist":
         if lidarr.enabled():
@@ -113,9 +121,16 @@ async def start(r: dict) -> None:
             await expand_artist(r)
         return
     order = [s.strip() for s in config.get("source_order").split(",") if s.strip()]
+    if config.get("quality_first") or d.get("lossless_only"):
+        # every lossless option first (in the admin's order), then lossy fallbacks
+        lossless = [s for s in order if s == "streamrip"] + (["slskd_lossless"] if "slskd" in order else [])
+        order = lossless + [s for s in order if s not in ("streamrip",)]
+    if d.get("lossless_only"):
+        order = [s for s in order if s in ("streamrip", "slskd_lossless")]
     avail = {"lidarr": lidarr.enabled() and r["kind"] == "album" and r["mbid"], "slskd": slskd.enabled(),
-             "ytdlp": ytdlp.enabled(), "streamrip": streamrip.enabled()}
-    d["sources"] = [s for s in order if avail.get(s)]
+             "slskd_lossless": slskd.enabled(), "ytdlp": ytdlp.enabled(), "streamrip": streamrip.enabled()}
+    seen: set = set()
+    d["sources"] = [s for s in order if avail.get(s) and not (s in seen or seen.add(s))]
     d["log"] = []
     await next_source(r)
 
@@ -135,6 +150,98 @@ async def expand_artist(r: dict) -> None:
         )
         n += 1
     await complete(r, f"Queued {n} album request(s) from the discography")
+
+
+# ---- song → whole album ------------------------------------------------------
+
+def _track_in_library(r: dict) -> bool:
+    from .services.matcher import LibraryIndex, describe
+    d = r["detail"]
+    hit, _ = LibraryIndex.load().find(describe(r["title"], r["artist"], length=d.get("length"), isrc=d.get("isrc"),
+                                               mbid=r["mbid"] or d.get("recording")))
+    return bool(hit)
+
+
+async def try_album_upgrade(r: dict) -> bool:
+    """If the song belongs to an official album, fetch the whole album instead (best quality available)."""
+    d = r["detail"]
+    mode = config.get("album_upgrade")
+    if mode == "off" or d.get("no_album"):
+        return False
+    upd(r, status="searching", message="Looking up which album this song is on…")
+    try:
+        rid = r["mbid"] or await mb.resolve_recording(r["artist"], r["title"], d.get("length"), d.get("isrc"))
+        alb = await mb.album_for_recording(rid, allow_ep=mode == "album_ep") if rid else None
+    except Exception as e:  # noqa: BLE001
+        db.log("warning", f"Album lookup failed for {label(r)}: {e}")
+        alb, rid = None, None
+    d["recording"] = rid
+    if not alb or library.has_release_group(alb["id"]):
+        d["no_album"] = True
+        upd(r)
+        return False
+    existing = db.one("SELECT id FROM requests WHERE kind='album' AND mbid=? AND status NOT IN ('failed','denied','cancelled')", (alb["id"],))
+    if existing:
+        aid = existing["id"]
+    else:
+        now = time.time()
+        aid = db.execute(
+            "INSERT INTO requests (user_id, kind, mbid, artist, title, album, year, cover_url, status, message, detail, created_at, updated_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            (r["user_id"], "album", alb["id"], alb["artist"] or r["artist"], alb["title"], alb["title"], alb["year"], alb["cover"],
+             "queued", f"Full album for “{r['title']}”", "{}", now, now))
+        db.log("info", f"“{r['title']}” is on {alb['type'].lower()} “{alb['title']}” – downloading the whole {alb['type'].lower()}")
+    d["album_request"] = aid
+    upd(r, status="monitoring", source="album", cover_url=r.get("cover_url") or alb["cover"],
+        message=f"Getting the whole {alb['type'].lower()} “{alb['title']}”")
+    return True
+
+
+async def poll_album(r: dict) -> None:
+    d = r["detail"]
+    a = db.get_request(d.get("album_request") or 0)
+    if a and a["status"] == "completed":
+        if _track_in_library(r):
+            await complete(r, f"Downloaded with the album “{a['title']}”")
+            return
+        reason = "the album didn't contain this exact version"
+    elif not a or a["status"] in ("failed", "denied", "cancelled"):
+        reason = "the album couldn't be downloaded"
+    else:
+        if a["progress"] != r["progress"] or a["message"] != d.get("last_msg"):
+            d["last_msg"] = a["message"]
+            upd(r, progress=a["progress"], message=f"Album “{a['title']}”: {a['message'] or a['status']}")
+        return
+    d["no_album"] = True
+    upd(r, status="queued", source=None, message=f"Getting the song on its own ({reason})")
+
+
+# ---- lossless upgrades ---------------------------------------------------------
+
+async def queue_lossy_upgrades(limit: int = 20) -> int:
+    """Re-request MusicBrainz-tagged albums that are only in lossy quality, lossless sources only."""
+    days = int(config.get("upgrade_lossy_days"))
+    rows = db.query("""SELECT mb_releasegroupid rg, MAX(albumartist) artist, MAX(album) album, MAX(year) year FROM tracks
+                       WHERE mb_releasegroupid IS NOT NULL GROUP BY album_id
+                       HAVING SUM(CASE WHEN format IN ('flac','wav','alac','aiff','ape','wv') THEN 1 ELSE 0 END) = 0""")
+    n = 0
+    now = time.time()
+    for a in rows:
+        if n >= limit:
+            break
+        last = db.one("SELECT value FROM sync_state WHERE connection_id=0 AND scope=?", (f"upg:{a['rg']}",))
+        if last and now - float(last["value"]) < days * 86400:
+            continue
+        if db.one("SELECT 1 FROM requests WHERE mbid=? AND status IN ('queued','searching','downloading','monitoring','importing','pending')", (a["rg"],)):
+            continue
+        db.execute("INSERT OR REPLACE INTO sync_state VALUES (0,?,?)", (f"upg:{a['rg']}", str(now)))
+        db.execute(
+            "INSERT INTO requests (user_id, kind, mbid, artist, title, album, year, cover_url, status, message, detail, created_at, updated_at) VALUES (NULL,'album',?,?,?,?,?,?,'queued',?,?,?,?)",
+            (a["rg"], a["artist"], a["album"], a["album"], a["year"], mb.cover_rg(a["rg"]), "Lossless upgrade",
+             '{"lossless_only": true}', now, now))
+        n += 1
+    if n:
+        db.log("info", f"Queued {n} album(s) for a lossless upgrade")
+    return n
 
 
 # ---- Lidarr -----------------------------------------------------------------
@@ -211,8 +318,8 @@ def _q(*parts: str) -> str:
     return " ".join(s.split())
 
 
-async def start_slskd(r: dict) -> None:
-    upd(r, status="searching", message="Searching Soulseek…")
+async def start_slskd(r: dict, lossless_only: bool = False) -> None:
+    upd(r, status="searching", message="Searching Soulseek for lossless…" if lossless_only else "Searching Soulseek…")
     if r["kind"] == "album":
         rel = await _release_info(r)
         n = len(rel["tracks"]) if rel else None
@@ -220,16 +327,16 @@ async def start_slskd(r: dict) -> None:
         cands = []
         for query in (_q(r["artist"], album), _q(album)):
             responses = await slskd.search(query)
-            cands = slskd.rank_album(responses, r["artist"], album, n)
+            cands = slskd.rank_album(responses, r["artist"], album, n, lossless_only)
             if cands:
                 break
     else:
         length = r["detail"].get("length")
         responses = await slskd.search(_q(r["artist"], r["title"]))
-        cands = slskd.rank_track(responses, r["artist"], r["title"], length)
+        cands = slskd.rank_track(responses, r["artist"], r["title"], length, lossless_only)
     _check(r["id"])
     if not cands:
-        await next_source(r, "no suitable results on Soulseek")
+        await next_source(r, "no lossless results on Soulseek" if lossless_only else "no suitable results on Soulseek")
         return
     r["detail"]["slskd"] = {"candidates": cands, "idx": -1}
     await _slskd_try_next(r)
@@ -398,8 +505,9 @@ async def start_ytdlp(r: dict) -> None:
         _check(r["id"])
         out = _staging(r)
         if r["kind"] == "track":
-            upd(r, status="searching", message="Searching YouTube…")
-            url = await ytdlp.find_best(r["artist"], r["title"], r["detail"].get("length"))
+            upd(r, status="searching", message="Searching YouTube Music…")
+            hit = await ytmusic.find_song(r["artist"], r["title"], r["detail"].get("length"))
+            url = f"https://music.youtube.com/watch?v={hit['videoId']}" if hit else await ytdlp.find_best(r["artist"], r["title"], r["detail"].get("length"))
             if not url:
                 await next_source(r, "no match on YouTube")
                 return
@@ -415,9 +523,28 @@ async def start_ytdlp(r: dict) -> None:
                 await next_source(r, f"YouTube match was the wrong audio ({e})")
                 return
             shutil.rmtree(out, ignore_errors=True)
-            await complete(r, "Downloaded from YouTube" + (f" – {note}" if note else ""), [new])
+            await complete(r, ("Downloaded from YouTube Music" if hit else "Downloaded from YouTube") + (f" – {note}" if note else ""), [new])
             return
         rel = await _release_info(r)
+        album_title = r["album"] or r["title"]
+        # whole official album from YouTube Music in one go
+        upd(r, status="searching", message="Searching YouTube Music for the album…")
+        yt_album = await ytmusic.find_album(r["artist"], album_title, len(rel["tracks"]) if rel else None)
+        if yt_album and yt_album["playlist_url"]:
+            upd(r, status="downloading", message=f"YouTube Music album: {yt_album['title']}")
+            try:
+                res = await ytdlp.download(yt_album["playlist_url"], os.path.join(out, "album"), _progress_hook(r), playlist=True)
+                if res["files"] and (not rel or len(res["files"]) >= len(rel["tracks"]) - max(1, len(rel["tracks"]) // 5)):
+                    upd(r, status="importing", progress=100, message="Verifying, tagging and importing…")
+                    new = await tagger.import_album_files(res["files"], r["artist"], album_title, r["mbid"], out)
+                    shutil.rmtree(out, ignore_errors=True)
+                    await complete(r, "Downloaded from YouTube Music", new)
+                    return
+            except tagger.VerificationFailed as e:
+                db.log("warning", f"YouTube Music album for {label(r)} rejected: {e}")
+            except Exception as e:  # noqa: BLE001
+                db.log("warning", f"YouTube Music album download failed for {label(r)}: {e}")
+            shutil.rmtree(out, ignore_errors=True)
         if not rel:
             await next_source(r, "no MusicBrainz tracklist for this album")
             return
@@ -427,7 +554,8 @@ async def start_ytdlp(r: dict) -> None:
             _check(r["id"])
             upd(r, status="downloading", progress=round(i / n * 100, 1), message=f"YouTube: track {i + 1}/{n} – {t['title']}")
             try:
-                url = await ytdlp.find_best(t["artist"] or r["artist"], t["title"], t["length"])
+                hit = await ytmusic.find_song(t["artist"] or r["artist"], t["title"], t["length"])
+                url = f"https://music.youtube.com/watch?v={hit['videoId']}" if hit else await ytdlp.find_best(t["artist"] or r["artist"], t["title"], t["length"])
                 res = await ytdlp.download(url, os.path.join(out, f"{i + 1:02d}")) if url else {"files": []}
                 files += res["files"]
                 if not res["files"]:
@@ -526,8 +654,10 @@ async def step(rid: int) -> None:
             await start(r)
         elif r["source"] == "lidarr" and r["status"] in ("monitoring", "downloading"):
             await poll_lidarr(r)
-        elif r["source"] == "slskd" and r["status"] == "downloading":
+        elif r["source"] in ("slskd", "slskd_lossless") and r["status"] == "downloading":
             await poll_slskd(r)
+        elif r["source"] == "album" and r["status"] == "monitoring":
+            await poll_album(r)
         elif r["status"] in ("searching", "importing"):
             pass  # handled inside a running task; stale states are reset on startup
     except Cancelled:
@@ -545,7 +675,7 @@ async def step(rid: int) -> None:
 def recover() -> None:
     """Reset requests that were mid-task when the app stopped."""
     for r in db.query("SELECT id, status, source FROM requests WHERE status IN ('searching','importing','downloading')"):
-        if r["status"] == "downloading" and r["source"] in ("slskd", "lidarr"):
+        if r["status"] == "downloading" and r["source"] in ("slskd", "slskd_lossless", "lidarr"):
             continue
         db.update_request(r["id"], status="queued", message="Restarted after app restart", detail="{}")
 
@@ -554,6 +684,7 @@ async def loop() -> None:
     recover()
     last_scan = 0.0
     last_sync = time.time() - 60 * 60  # first sync shortly after start
+    last_upgrade = time.time()
     while not _stop.is_set():
         try:
             for r in db.query(f"SELECT id FROM requests WHERE status IN ({','.join('?' * len(ACTIVE))}) ORDER BY id", ACTIVE):
@@ -567,6 +698,9 @@ async def loop() -> None:
             if interval and time.time() - last_scan > interval and not library.state["scanning"]:
                 last_scan = time.time()
                 asyncio.create_task(library.scan())
+            if config.get("upgrade_lossy") and time.time() - last_upgrade > 6 * 3600:
+                last_upgrade = time.time()
+                asyncio.create_task(queue_lossy_upgrades())
             sync_every = int(config.get("sync_interval_minutes")) * 60
             if sync_every and time.time() - last_sync > sync_every:
                 last_sync = time.time()
@@ -586,7 +720,7 @@ async def cancel(rid: int) -> None:
     if not r:
         return
     st = r["detail"].get("slskd")
-    if r["source"] == "slskd" and st and st.get("idx", -1) >= 0:
+    if r["source"] in ("slskd", "slskd_lossless") and st and st.get("idx", -1) >= 0:
         c = st["candidates"][st["idx"]]
         for f in await slskd.user_downloads(c["username"]):
             if f.get("filename") in {x["filename"] for x in c["files"]}:

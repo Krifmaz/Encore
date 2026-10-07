@@ -142,3 +142,53 @@ def regen_api_key():
 @router.get("/activity")
 def activity(limit: int = 200):
     return db.query("SELECT * FROM activity ORDER BY id DESC LIMIT ?", (min(limit, 1000),))
+
+
+# ---- auto-download -----------------------------------------------------------------
+
+AUTO_KEYS = ["auto_request_followed", "auto_request_likes", "album_upgrade", "quality_first", "upgrade_lossy",
+             "upgrade_lossy_days", "sync_interval_minutes", "auto_approve", "source_order"]
+
+
+class AutoDownload(BaseModel):
+    settings: dict = {}
+    users: dict[str, bool] = {}
+
+
+@router.get("/autodownload")
+def get_autodownload():
+    stats = db.one("""SELECT
+        SUM(CASE WHEN detail LIKE '%"auto": true%' AND status IN ('queued','searching','downloading','monitoring','importing') THEN 1 ELSE 0 END) auto_active,
+        SUM(CASE WHEN source='album' AND status='monitoring' THEN 1 ELSE 0 END) album_waiting,
+        SUM(CASE WHEN kind='album' AND detail LIKE '%lossless_only%' AND status IN ('queued','searching','downloading','importing') THEN 1 ELSE 0 END) upgrades_active,
+        SUM(CASE WHEN kind='album' AND detail LIKE '%lossless_only%' AND status='completed' THEN 1 ELSE 0 END) upgrades_done
+        FROM requests""")
+    lossy = db.one("""SELECT COUNT(*) n FROM (SELECT album_id FROM tracks GROUP BY album_id
+        HAVING SUM(CASE WHEN format IN ('flac','wav','alac','aiff','ape','wv') THEN 1 ELSE 0 END) = 0)""")["n"]
+    users = db.query("""SELECT u.id, u.username, u.auto_download, u.role,
+        (SELECT COUNT(*) FROM playlists p WHERE p.user_id=u.id AND p.follow=1) followed,
+        (SELECT COUNT(*) FROM connections c WHERE c.user_id=u.id) connections
+        FROM users u WHERE u.disabled=0 ORDER BY u.username""")
+    return {"settings": {k: config.get(k) for k in AUTO_KEYS}, "users": users, "stats": {**stats, "lossy_albums": lossy}}
+
+
+@router.put("/autodownload")
+def put_autodownload(body: AutoDownload):
+    config.set_many({k: v for k, v in body.settings.items() if k in AUTO_KEYS})
+    for uid, on in body.users.items():
+        db.execute("UPDATE users SET auto_download=? WHERE id=?", (int(on), int(uid)))
+    return get_autodownload()
+
+
+@router.post("/autodownload/upgrade-now")
+async def upgrade_now():
+    from .. import worker
+    return {"queued": await worker.queue_lossy_upgrades(limit=50)}
+
+
+@router.post("/autodownload/run-now")
+async def run_now():
+    import asyncio
+    from ..services import sync
+    asyncio.create_task(sync.sync_all())
+    return {"ok": True}

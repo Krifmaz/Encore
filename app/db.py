@@ -163,6 +163,7 @@ def connect():
 MIGRATIONS = {
     "tracks": [("isrc", "TEXT"), ("acoustid_id", "TEXT"), ("verify_status", "TEXT"), ("verify_detail", "TEXT"), ("verified_at", "REAL")],
     "playlists": [("remote_ids", "TEXT DEFAULT '{}'")],
+    "users": [("auto_download", "INTEGER NOT NULL DEFAULT 1")],
 }
 
 

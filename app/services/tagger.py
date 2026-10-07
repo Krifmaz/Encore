@@ -496,7 +496,7 @@ async def import_album_files(paths: list[str], artist: str, album: str, rgid: st
             old_to_new[p] = checks.get(row["path"])
         await library.index_paths(new)
         _record_verification(old_to_new)
-        await _drop_superseded_singles(new)
+        await _drop_superseded(new)
         return new
 
     def _go():
@@ -513,31 +513,36 @@ async def import_album_files(paths: list[str], artist: str, album: str, rgid: st
     db.log("warning", f"No confident MusicBrainz match for {artist} - {album}; imported with existing tags")
     new = await asyncio.to_thread(_go)
     await library.index_paths(new)
-    await _drop_superseded_singles(new)
+    await _drop_superseded(new)
     return new
 
 
-async def _drop_superseded_singles(new_paths: list[str]) -> None:
-    """An album import makes loose single-track copies of the same recordings redundant."""
+async def _drop_superseded(new_paths: list[str]) -> None:
+    """After an album import, remove copies it makes redundant: loose singles of the same recordings,
+    and any lower-quality copy (e.g. a YouTube/MP3 version replaced by FLAC). Playlists follow the new file."""
     if not config.get("dedupe_on_import"):
         return
     from .matcher import LibraryIndex, describe
-    from .verify import delete_tracks
+    from .verify import delete_tracks, quality
     new_set = set(new_paths)
-    singles = db.query("""SELECT t.id, t.path, t.title, t.artist, t.album, t.album_id, t.duration, t.isrc, t.mb_trackid, t.format, t.bitrate
-                         FROM tracks t JOIN (SELECT album_id FROM tracks GROUP BY album_id HAVING COUNT(*)=1) s ON s.album_id=t.album_id""")
-    singles = [s for s in singles if s["path"] not in new_set]
-    if not singles:
+    sizes = {r["album_id"]: r["n"] for r in db.query("SELECT album_id, COUNT(*) n FROM tracks GROUP BY album_id")}
+    others = [t for t in db.query("""SELECT id, path, title, artist, album, album_id, duration, isrc, mb_trackid, format, bitrate, verify_status
+                                     FROM tracks""") if t["path"] not in new_set]
+    if not others:
         return
-    idx = LibraryIndex(singles)
+    idx = LibraryIndex(others)
     for p in new_paths:
-        t = db.one("SELECT id, title, artist, duration, isrc, mb_trackid FROM tracks WHERE path=?", (p,))
+        t = db.one("SELECT id, title, artist, duration, isrc, mb_trackid, format, bitrate, verify_status, path FROM tracks WHERE path=?", (p,))
         if not t:
             continue
         hit, _ = idx.find(describe(t["title"], t["artist"], length=t["duration"], isrc=t["isrc"], mbid=t["mb_trackid"]))
-        if hit:
+        if not hit:
+            continue
+        loose_single = sizes.get(hit["album_id"], 0) == 1
+        if loose_single or quality(t)[:4] > quality(hit)[:4]:
             await asyncio.to_thread(delete_tracks, [hit["id"]], t["id"])
-            db.log("info", f"Removed loose single '{hit['artist']} – {hit['title']}' now that the album is in the library")
+            why = "loose single" if loose_single else "lower-quality copy"
+            db.log("info", f"Removed {why} of “{hit['artist']} – {hit['title']}” – replaced by the new album import")
 
 
 def edit_tags(track_ids: list[int], values: dict) -> list[str]:

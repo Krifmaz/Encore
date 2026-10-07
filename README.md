@@ -6,7 +6,11 @@ A self-hosted music request and library app. Your users sign in, search the whol
 
 - **Accounts**: login and sign-up with invite-only, open or closed modes. The admin panel manages users, roles, weekly request limits, auto-approve, password resets and session revocation.
 - **Discover**: search MusicBrainz for artists, albums and songs, with *In library* and *Requested* badges. Request anything with one click.
-- **Request pipeline**: each request tries **Lidarr → Qobuz/Tidal/Deezer (streamrip) → Soulseek → YouTube** in an order you choose, falling back automatically. Exact ISRCs are used whenever the source provides them.
+- **Request pipeline**: with *highest quality first* on, each request tries **Qobuz/Tidal/Deezer (streamrip) → FLAC on Soulseek (24-bit preferred) → Lidarr → MP3 on Soulseek → YouTube Music**, falling back automatically. Exact ISRCs are used whenever the source provides them.
+- **Whole albums**: when a requested song is on an official studio album or EP, Encore downloads the whole release instead, in the best quality any source has. Compilations, live albums and soundtracks are never used. If the album doesn't have that exact version (say, a remix), the song is fetched on its own.
+- **Lossless upgrades**: albums you only have as MP3 or YouTube rips can be re-checked periodically. A lossless copy replaces the old files, and playlists follow it automatically.
+- **YouTube Music**: playlists, albums and your Liked Music import with proper artist and album data. Connect your account for two-way 👍 sync and playlist push. Songs and whole albums are downloaded from official YouTube Music uploads in the original stream quality (256 kbps with Premium cookies).
+- **Admin → Auto-download** controls what downloads on its own (liked songs from any app, new tracks in followed playlists), the album and quality rules, lossless upgrades, and which users have it switched on.
 - **Downloader**: a Spotify, Apple Music, Deezer, Tidal or Qobuz link (playlist, album or track) is matched track by track, and each song is fetched from the best source. YouTube, SoundCloud, Bandcamp, Mixcloud and about 1,800 other sites download directly.
 - **Playlists and Liked Songs**:
   - Import from Spotify (including private playlists and Liked Songs once you connect your account), Deezer, Tidal, Apple Music, Qobuz, YouTube Music, SoundCloud, Bandcamp, ListenBrainz, or a pasted "Artist – Title" list.
@@ -66,6 +70,8 @@ web:
 | Spotify account connection | developer.spotify.com app with redirect `<Public URL>/api/connections/spotify/callback`. Since Feb 2026, development-mode apps need a Premium owner and allow 5 users. Public playlists still import without it, via the embed page. |
 | Tidal import | developer.tidal.com app (redirect `<Public URL>/api/connections/tidal/callback`) |
 | Last.fm loved tracks | last.fm/api/account/create |
+| YouTube Music sign-in | Google Cloud, YouTube Data API v3, an OAuth client of type *TVs and Limited Input devices*. Users can paste browser request headers instead. |
+| YouTube Music Premium audio (256 kbps) | Paste a `cookies.txt` exported from music.youtube.com under *Settings → YouTube Music*. |
 
 Set **Settings → General → Public URL** (for example `https://music.example.com`) so the OAuth logins and invite links work.
 

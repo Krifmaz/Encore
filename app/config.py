@@ -29,6 +29,12 @@ DEFAULTS: dict[str, tuple[str | None, object, bool]] = {
     "autotag_threshold": ("ENCORE_AUTOTAG_THRESHOLD", 0.8, False),
     "save_cover": ("ENCORE_SAVE_COVER", True, False),
     "embed_cover": ("ENCORE_EMBED_COVER", True, False),
+    # auto-download (admin → Auto-download)
+    "album_upgrade": ("ENCORE_ALBUM_UPGRADE", "album_ep", False),     # off | album | album_ep
+    "quality_first": ("ENCORE_QUALITY_FIRST", True, False),           # lossless sources before lossy ones
+    "auto_request_likes": ("ENCORE_AUTO_REQUEST_LIKES", False, False),
+    "upgrade_lossy": ("ENCORE_UPGRADE_LOSSY", False, False),           # periodically look for lossless copies
+    "upgrade_lossy_days": ("ENCORE_UPGRADE_LOSSY_DAYS", 7, False),
     # verification
     "acoustid_api_key": ("ACOUSTID_API_KEY", "", True),
     "verify_on_import": ("ENCORE_VERIFY_ON_IMPORT", True, False),
@@ -69,7 +75,7 @@ DEFAULTS: dict[str, tuple[str | None, object, bool]] = {
     "slskd_max_candidates": ("SLSKD_MAX_CANDIDATES", 4, False),
     # yt-dlp
     "ytdlp_enabled": ("YTDLP_ENABLED", True, False),
-    "ytdlp_format": ("YTDLP_FORMAT", "mp3", False),  # mp3 | m4a | opus | flac | best
+    "ytdlp_format": ("YTDLP_FORMAT", "best", False),  # best (original stream) | mp3 | m4a | opus
     "ytdlp_quality": ("YTDLP_QUALITY", "320", False),
     "ytdlp_cookies": ("YTDLP_COOKIES", "", True),
     # streaming services (playlist import / account connections)
@@ -78,6 +84,8 @@ DEFAULTS: dict[str, tuple[str | None, object, bool]] = {
     "tidal_client_id": ("TIDAL_CLIENT_ID", "", False),
     "tidal_client_secret": ("TIDAL_CLIENT_SECRET", "", True),
     "lastfm_api_key": ("LASTFM_API_KEY", "", False),
+    "ytmusic_client_id": ("YTMUSIC_CLIENT_ID", "", False),
+    "ytmusic_client_secret": ("YTMUSIC_CLIENT_SECRET", "", True),
     # sync
     "sync_interval_minutes": ("ENCORE_SYNC_INTERVAL", 15, False),
     "auto_request_followed": ("ENCORE_AUTO_REQUEST_FOLLOWED", False, False),

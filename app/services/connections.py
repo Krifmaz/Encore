@@ -14,6 +14,7 @@ SERVICES = {
     "jellyfin": ("Jellyfin / Finamp", "media"),
     "plex": ("Plex / Plexamp", "media"),
     "navidrome": ("Navidrome / Subsonic", "media"),
+    "ytmusic": ("YouTube Music", "stream"),
     "spotify": ("Spotify", "stream"),
     "tidal": ("Tidal", "stream"),
     "deezer": ("Deezer", "stream"),

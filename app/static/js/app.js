@@ -12,6 +12,7 @@ import * as settingsPage from './pages/settings.js';
 import * as accountPage from './pages/account.js';
 import * as playlistsPage from './pages/playlists.js';
 import * as connectionsPage from './pages/connections.js';
+import * as autoPage from './pages/autodownload.js';
 
 export const session = { user: null, info: null };
 
@@ -31,6 +32,7 @@ const routes = [
   [/^\/admin\/users$/, adminPage.renderUsers, true],
   [/^\/admin\/invites$/, adminPage.renderInvites, true],
   [/^\/settings$/, settingsPage.render, true],
+  [/^\/admin\/autodownload$/, autoPage.render, true],
   [/^\/account$/, accountPage.render],
 ];
 
@@ -77,6 +79,7 @@ function renderShell() {
             ${navLink('/activity', icon.activity, 'Activity')}
             ${navLink('/admin/users', icon.users, 'Users')}
             ${navLink('/admin/invites', icon.ticket, 'Invites')}
+            ${navLink('/admin/autodownload', icon.download, 'Auto-download')}
             ${navLink('/settings', icon.settings, 'Settings')}` : ''}
         </nav>
         <div class="sidebar-foot">

@@ -178,8 +178,10 @@ def merge(user_id: int, ids: list[int], name: str) -> dict:
     return res
 
 
-def request_missing(user: dict, pid: int) -> int:
-    """Create track requests for every item that's not in the library yet."""
+def request_missing(user: dict, pid: int, auto: bool = False) -> int:
+    """Create track requests for every item that's not in the library yet.
+
+    auto=True is used by admin-enabled auto-download rules and skips the approval queue."""
     from ..routers.requests_routes import NewRequest, _create
     from fastapi import HTTPException
     n = 0
@@ -194,10 +196,14 @@ def request_missing(user: dict, pid: int) -> int:
             if e.status_code == 409:
                 continue
             raise
+        req = db.get_request(rid)
         if r["isrc"]:
-            req = db.get_request(rid)
             req["detail"]["isrc"] = r["isrc"]
-            db.update_request(rid, detail=req["detail"])
+        if auto:
+            req["detail"]["auto"] = True
+        db.update_request(rid, detail=req["detail"])
+        if auto and req["status"] == "pending":
+            db.update_request(rid, status="queued", message="Auto-download")
         db.execute("UPDATE playlist_items SET request_id=? WHERE id=?", (rid, r["id"]))
         n += 1
     return n

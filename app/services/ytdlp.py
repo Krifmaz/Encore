@@ -26,26 +26,19 @@ def _base_opts(outdir: str, progress=None, playlist=False) -> dict:
         "no_warnings": True,
         "noprogress": True,
         "ignoreerrors": playlist,
-        "writethumbnail": True,
+        "writethumbnail": False,  # cover art comes from MusicBrainz/Cover Art Archive at import
         "restrictfilenames": False,
         "windowsfilenames": True,
         "postprocessors": [],
         "retries": 5,
         "fragment_retries": 5,
     }
-    if fmt != "best":
-        pp = {"key": "FFmpegExtractAudio", "preferredcodec": fmt}
-        if fmt in ("mp3", "m4a"):
-            pp["preferredquality"] = config.get("ytdlp_quality") or "0"
-        opts["postprocessors"].append(pp)
-    opts["postprocessors"] += [
-        {"key": "FFmpegMetadata", "add_metadata": True},
-        {"key": "EmbedThumbnail", "already_have_thumbnail": False},
-    ]
-    if fmt in ("opus", "best", "flac"):
-        # thumbnails can't always be embedded into these containers; keep it non-fatal
-        opts["postprocessors"] = [p for p in opts["postprocessors"] if p["key"] != "EmbedThumbnail"]
-        opts["writethumbnail"] = False
+    # "best" keeps YouTube's original stream (Opus/AAC, 256 kbps with Premium cookies) – no lossy re-encode
+    pp = {"key": "FFmpegExtractAudio", "preferredcodec": fmt}
+    if fmt in ("mp3", "m4a"):
+        pp["preferredquality"] = config.get("ytdlp_quality") or "0"
+    opts["postprocessors"].append(pp)
+    opts["postprocessors"].append({"key": "FFmpegMetadata", "add_metadata": True})
     cookies = config.get("ytdlp_cookies")
     if cookies:
         fd, path = tempfile.mkstemp(suffix=".txt", prefix="encore-cookies-")

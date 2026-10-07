@@ -5,12 +5,14 @@ import { importModal } from './playlists.js';
 
 // links that only describe tracks (no downloadable audio) → resolved track-by-track
 const METADATA_ONLY = /open\.spotify\.com|spotify\.link|^spotify:|music\.apple\.com|listenbrainz\.org/i;
+// YouTube Music playlists are best matched track-by-track too (so albums can be upgraded to lossless)
+const PREFER_IMPORT = /music\.youtube\.com\/(playlist|browse)/i;
 const STREAMRIP = /qobuz\.com|tidal\.com|deezer\.com|deezer\.page\.link/i;
 
 export async function render(view, ctx) {
   view.innerHTML = `
     <h1>Downloader</h1>
-    <p class="muted" style="margin:6px 0 20px">Paste any link. <b>Spotify, Apple Music, Deezer, Tidal and Qobuz</b> playlists/albums are matched track-by-track (exact ISRC when available) and each song is fetched from the best source: Qobuz/Tidal/Deezer lossless → Soulseek → YouTube.
+    <p class="muted" style="margin:6px 0 20px">Paste any link. <b>YouTube Music, Spotify, Apple Music, Deezer, Tidal and Qobuz</b> playlists/albums are matched track-by-track (exact ISRC when available) and each song is fetched from the best source: Qobuz/Tidal/Deezer lossless → Soulseek → YouTube.
       <b>YouTube, SoundCloud, Bandcamp, Mixcloud</b> and ~1,800 other sites download directly. Every file is fingerprint-verified and de-duplicated before it hits the library.</p>
     <form class="card stack" id="dl-form">
       <div class="row wrap">
@@ -33,6 +35,8 @@ export async function render(view, ctx) {
     const u = urlIn.value.trim();
     direct.disabled = METADATA_ONLY.test(u);
     direct.title = direct.disabled ? 'This service has no downloadable audio – use “Import as playlist”' : STREAMRIP.test(u) ? 'Rip this exact release with streamrip' : '';
+    view.querySelector('#as-playlist').classList.toggle('primary', METADATA_ONLY.test(u) || PREFER_IMPORT.test(u) || STREAMRIP.test(u) || !u);
+    direct.classList.toggle('primary', !!u && !view.querySelector('#as-playlist').classList.contains('primary'));
   };
   urlIn.addEventListener('input', update);
 

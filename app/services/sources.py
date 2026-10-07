@@ -35,6 +35,7 @@ def detect(url: str) -> str | None:
         ("qobuz", r"qobuz\.com"),
         ("apple", r"music\.apple\.com"),
         ("listenbrainz", r"listenbrainz\.org/playlist"),
+        ("ytmusic", r"music\.youtube\.com"),
         ("ytdlp", r"youtube\.com|youtu\.be|soundcloud\.com|bandcamp\.com|mixcloud\.com|audiomack\.com|vimeo\.com"),
     ]
     for name, pat in rules:
@@ -45,7 +46,7 @@ def detect(url: str) -> str | None:
 
 async def fetch(url: str, user_id: int | None = None) -> dict:
     kind = detect(url)
-    fn = {"spotify": spotify, "deezer": deezer, "tidal": tidal, "qobuz": web_jsonld, "apple": apple,
+    fn = {"spotify": spotify, "ytmusic": ytmusic_fetch, "deezer": deezer, "tidal": tidal, "qobuz": web_jsonld, "apple": apple,
           "listenbrainz": listenbrainz, "ytdlp": ytdlp_playlist, "web": web_jsonld}.get(kind)
     if not fn:
         raise SourceError("Unsupported link")
@@ -457,7 +458,19 @@ async def listenbrainz(url: str, user_id: int | None = None) -> dict:
     return {"name": pl.get("title"), "description": pl.get("annotation") or "", "cover": None, "tracks": tracks}
 
 
-# ---- YouTube / YouTube Music / SoundCloud / Bandcamp / … via yt-dlp ---------------------
+# ---- YouTube Music (proper artist/album metadata, private playlists & Liked when connected) ----
+
+async def ytmusic_fetch(url: str, user_id: int | None = None) -> dict:
+    from . import ytmusic
+    try:
+        return await ytmusic.fetch(url, user_id)
+    except ValueError:
+        return await ytdlp_playlist(url, user_id)
+    except RuntimeError as e:
+        raise SourceError(str(e))
+
+
+# ---- YouTube / SoundCloud / Bandcamp / … via yt-dlp ---------------------
 
 async def ytdlp_playlist(url: str, user_id: int | None = None) -> dict:
     import yt_dlp

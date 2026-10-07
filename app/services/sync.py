@@ -437,6 +437,71 @@ async def _tidal_tracks(token: str, ids: list[str], country: str) -> list[dict]:
     return out
 
 
+class YTMusic(Adapter):
+    """YouTube Music account: two-way likes (👍) and playlist push."""
+    can_push_likes = can_push_playlists = True
+    MAX_LOOKUPS = 150  # song searches per sync, keeps us well clear of rate limits
+
+    def __init__(self, conn):
+        super().__init__(conn)
+        from . import ytmusic
+        self.m = ytmusic
+        self.yt = ytmusic.for_connection(conn)
+        self.lookups = 0
+
+    async def likes(self):
+        d = await self.m.run(self.yt.get_liked_songs, 5000)
+        out = []
+        for x in d.get("tracks", []):
+            t = self.m._t(x)
+            out.append(t)
+        # remember videoIds of liked songs we can match, so pushes don't need searches
+        return out
+
+    async def _vid(self, track_id):
+        cached = self.m._cache_get(track_id)
+        if cached:
+            return None if cached == "-" else cached
+        if self.lookups >= self.MAX_LOOKUPS:
+            return None
+        self.lookups += 1
+        return await self.m.video_for_track(track_id)
+
+    async def set_like(self, track_id, liked):
+        vid = await self._vid(track_id)
+        if not vid:
+            return False
+        await self.m.run(self.yt.rate_song, vid, "LIKE" if liked else "INDIFFERENT")
+        return True
+
+    async def playlists(self):
+        rows = await self.m.run(self.yt.get_library_playlists, None)
+        return [{"id": p["playlistId"], "name": p["title"], "url": f"https://music.youtube.com/playlist?list={p['playlistId']}"}
+                for p in rows if p.get("playlistId") not in ("LM", "SE")]
+
+    async def push_playlist(self, name, track_ids, remote_id):
+        vids = []
+        for t in track_ids:
+            v = await self._vid(t)
+            if v:
+                vids.append(v)
+        if remote_id:
+            try:
+                cur = await self.m.run(self.yt.get_playlist, remote_id, None)
+                have = [x for x in cur.get("tracks", []) if x.get("videoId")]
+                if [x["videoId"] for x in have] == vids:
+                    return remote_id
+                if have:
+                    await self.m.run(self.yt.remove_playlist_items, remote_id, have)
+                if vids:
+                    await self.m.run(self.yt.add_playlist_items, remote_id, vids, None, True)
+                return remote_id
+            except Exception:  # noqa: BLE001
+                pass
+        res = await self.m.run(self.yt.create_playlist, name, "Synced by Encore", "PRIVATE", vids)
+        return res if isinstance(res, str) else None
+
+
 class Deezer(Adapter):
     async def likes(self):
         return (await sources.deezer(f"https://www.deezer.com/profile/{self.d['user_id']}/loved"))["tracks"]
@@ -462,7 +527,7 @@ class LastFM(Adapter):
         return out
 
 
-ADAPTERS = {"jellyfin": Jellyfin, "plex": Plex, "navidrome": Navidrome, "listenbrainz": ListenBrainz,
+ADAPTERS = {"jellyfin": Jellyfin, "plex": Plex, "navidrome": Navidrome, "listenbrainz": ListenBrainz, "ytmusic": YTMusic,
             "spotify": Spotify, "tidal": Tidal, "deezer": Deezer, "lastfm": LastFM}
 
 
@@ -497,6 +562,7 @@ async def sync_user(user_id: int, log: list | None = None) -> dict:
 
     # 1. pull likes from every service and apply diffs to Encore's Liked Songs
     remote_now: dict[int, set] = {}
+    liked_rows: dict[int, dict] = {}
     for c in conns:
         if not c["sync_likes"]:
             continue
@@ -523,6 +589,16 @@ async def sync_user(user_id: int, log: list | None = None) -> dict:
                     db.execute("DELETE FROM playlist_items WHERE id=?", (it["id"],))
                     stats["liked_removed"] += 1
         remote_now[c["id"]] = set(keys)
+        liked_rows[c["id"]] = keys
+
+    # 1b. auto-download liked songs that aren't in the library yet
+    if config.get("auto_request_likes"):
+        owner = db.one("SELECT * FROM users WHERE id=? AND disabled=0 AND auto_download=1", (user_id,))
+        if owner:
+            n = playlists.request_missing(owner, liked["id"], auto=True)
+            if n:
+                db.log("info", f"Auto-download: {n} liked song(s) for {owner['username']}")
+                stats["requested"] = n
 
     # 2. push Encore's liked songs back out to services that accept likes
     liked_tracks = {it["track_id"] for it in playlists.items(liked["id"]) if it["track_id"]}
@@ -531,6 +607,12 @@ async def sync_user(user_id: int, log: list | None = None) -> dict:
         if not (c["sync_likes"] and a.can_push_likes) or c["id"] not in remote_now:
             continue
         have = {int(k[2:]) for k in remote_now[c["id"]] if k.startswith("t:")}
+        if c["service"] == "ytmusic":
+            # keep YT videoIds of matched likes so we never search for them again
+            from . import ytmusic as _ytm
+            for k, row in liked_rows.get(c["id"], {}).items():
+                if k.startswith("t:") and row.get("source_id"):
+                    _ytm._cache_set(int(k[2:]), row["source_id"])
         try:
             for tid in liked_tracks - have:
                 if await a.set_like(tid, True):
@@ -616,9 +698,11 @@ async def sync_all() -> None:
                     if added:
                         db.log("info", f"Playlist '{pl['name']}': {added} new track(s) from {pl['source']}")
                     if config.get("auto_request_followed"):
-                        owner = db.one("SELECT * FROM users WHERE id=? AND disabled=0", (pl["user_id"],))
+                        owner = db.one("SELECT * FROM users WHERE id=? AND disabled=0 AND auto_download=1", (pl["user_id"],))
                         if owner:
-                            playlists.request_missing(owner, pl["id"])
+                            n = playlists.request_missing(owner, pl["id"], auto=True)
+                            if n:
+                                db.log("info", f"Auto-download: {n} new track(s) from followed playlist '{pl['name']}'")
                 except Exception as e:  # noqa: BLE001
                     db.log("warning", f"Couldn't refresh playlist '{pl['name']}': {e}")
             playlists.rematch()
