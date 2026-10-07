@@ -3,9 +3,8 @@ import asyncio
 import time
 
 from .. import __version__, config
-from .http import client
+from .http import client, loop_local
 
-_lock = asyncio.Lock()
 _last = 0.0
 _cache: dict[str, tuple[float, dict]] = {}
 CACHE_TTL = 3600
@@ -26,7 +25,7 @@ async def _get(path: str, params: dict | None = None) -> dict:
     global _last
     base = config.get("musicbrainz_url").rstrip("/")
     for attempt in range(4):
-        async with _lock:
+        async with loop_local("musicbrainz", asyncio.Lock):
             wait = (1.0 / max(config.get("musicbrainz_rate"), 0.1)) - (time.time() - _last)
             if wait > 0:
                 await asyncio.sleep(wait)

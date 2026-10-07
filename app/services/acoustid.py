@@ -5,34 +5,62 @@ import shutil
 import time
 
 from .. import config
-from .http import client
+from .http import client, loop_local
 
 API = "https://api.acoustid.org/v2/lookup"
-_lock = asyncio.Lock()
 _last = 0.0
 
 
+_ffmpeg_cp: bool | None = None
+
+
+def _ffmpeg_chromaprint() -> bool:
+    """ffmpeg builds with --enable-chromaprint can fingerprint without fpcalc."""
+    global _ffmpeg_cp
+    if _ffmpeg_cp is None:
+        import subprocess
+        try:
+            out = subprocess.run(["ffmpeg", "-hide_banner", "-muxers"], capture_output=True, text=True, timeout=10).stdout
+            _ffmpeg_cp = " chromaprint " in out
+        except Exception:  # noqa: BLE001
+            _ffmpeg_cp = False
+    return _ffmpeg_cp
+
+
+def can_fingerprint() -> bool:
+    return bool(shutil.which("fpcalc") or (shutil.which("ffprobe") and _ffmpeg_chromaprint()))
+
+
 def available() -> bool:
-    return bool(shutil.which("fpcalc") and config.get("acoustid_api_key"))
+    return bool(config.get("acoustid_api_key") and can_fingerprint())
+
+
+async def _run(*cmd) -> tuple[int, bytes]:
+    proc = await asyncio.create_subprocess_exec(*cmd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
+    out, _ = await proc.communicate()
+    return proc.returncode, out
 
 
 async def fingerprint(path: str) -> tuple[float, str] | None:
-    if not shutil.which("fpcalc"):
+    if shutil.which("fpcalc"):
+        code, out = await _run("fpcalc", "-json", "-length", "120", path)
+        if code != 0:
+            return None
+        data = json.loads(out)
+        return float(data["duration"]), data["fingerprint"]
+    if not can_fingerprint():
         return None
-    proc = await asyncio.create_subprocess_exec(
-        "fpcalc", "-json", "-length", "120", path,
-        stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
-    out, _ = await proc.communicate()
-    if proc.returncode != 0:
+    code, dur = await _run("ffprobe", "-v", "error", "-show_entries", "format=duration", "-of", "csv=p=0", path)
+    code2, fp = await _run("ffmpeg", "-v", "error", "-i", path, "-t", "120", "-f", "chromaprint", "-fp_format", "base64", "-")
+    if code or code2 or not fp.strip():
         return None
-    data = json.loads(out)
-    return float(data["duration"]), data["fingerprint"]
+    return float(dur.strip() or 0), fp.decode().strip()
 
 
 async def lookup(duration: float, fp: str) -> list[dict]:
     """Returns [{acoustid, score, recordings:[{id,title,artist,length,release_groups:[...]}]}]."""
     global _last
-    async with _lock:  # AcoustID allows 3 requests/second
+    async with loop_local("acoustid", asyncio.Lock):  # AcoustID allows 3 requests/second
         wait = 0.34 - (time.time() - _last)
         if wait > 0:
             await asyncio.sleep(wait)

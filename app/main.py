@@ -23,10 +23,11 @@ async def lifespan(app: FastAPI):
             os.makedirs(p, exist_ok=True)
         except OSError:
             pass
-    task = asyncio.create_task(worker.loop())
+    task = asyncio.create_task(worker.loop()) if os.environ.get("ENCORE_WORKER", "1") != "0" else None
     yield
     worker._stop.set()
-    task.cancel()
+    if task:
+        task.cancel()
     await http.close()
 
 

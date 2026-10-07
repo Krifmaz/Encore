@@ -14,9 +14,8 @@ import traceback
 
 from .. import config, db
 from . import connections, matcher, playlists, sources
-from .http import client
+from .http import client, loop_local
 
-_lock = asyncio.Lock()
 state = {"running": False, "last": None}
 
 
@@ -686,9 +685,10 @@ async def fetch_remote_playlist(pl: dict) -> dict:
 
 
 async def sync_all() -> None:
-    if _lock.locked():
+    lock = loop_local("sync", asyncio.Lock)
+    if lock.locked():
         return
-    async with _lock:
+    async with lock:
         state["running"] = True
         try:
             # refresh followed playlists first so new tracks get synced in the same pass

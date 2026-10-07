@@ -7,11 +7,11 @@ import time
 import traceback
 
 from . import config, db
+from .services.http import loop_local
 from .services import library, lidarr, musicbrainz as mb, notify, slskd, streamrip, tagger, ytdlp, ytmusic
 
 ACTIVE = ("queued", "searching", "downloading", "monitoring", "importing")
 _running: dict[int, asyncio.Task] = {}
-_yt_sem = asyncio.Semaphore(2)
 _stop = asyncio.Event()
 
 
@@ -335,6 +335,8 @@ async def start_slskd(r: dict, lossless_only: bool = False) -> None:
         responses = await slskd.search(_q(r["artist"], r["title"]))
         cands = slskd.rank_track(responses, r["artist"], r["title"], length, lossless_only)
     _check(r["id"])
+    tried = set(r["detail"].get("slskd_tried", []))
+    cands = [c for c in cands if f"{c['username']}|{c['directory']}" not in tried]
     if not cands:
         await next_source(r, "no lossless results on Soulseek" if lossless_only else "no suitable results on Soulseek")
         return
@@ -346,6 +348,7 @@ async def _slskd_try_next(r: dict, reason: str = "") -> None:
     st = r["detail"]["slskd"]
     if st["idx"] >= 0:
         c = st["candidates"][st["idx"]]
+        r["detail"].setdefault("slskd_tried", []).append(f"{c['username']}|{c['directory']}")
         for f in await slskd.user_downloads(c["username"]):
             if f.get("filename") in {x["filename"] for x in c["files"]} and not f.get("state", "").startswith("Completed"):
                 await slskd.cancel(c["username"], f["id"])
@@ -368,7 +371,12 @@ async def poll_slskd(r: dict) -> None:
     st = r["detail"]["slskd"]
     c = st["candidates"][st["idx"]]
     wanted = {f["filename"] for f in c["files"]}
-    transfers = [f for f in await slskd.user_downloads(c["username"]) if f.get("filename") in wanted]
+    # one entry per file: re-queued files show up again in slskd's list, the newest one counts
+    latest: dict = {}
+    for f in await slskd.user_downloads(c["username"]):
+        if f.get("filename") in wanted:
+            latest[f["filename"]] = f
+    transfers = list(latest.values())
     if not transfers:
         if time.time() - st["started"] > 120:
             await _slskd_try_next(r, "transfers disappeared")
@@ -434,7 +442,6 @@ def _discard(paths: list[str], root: str) -> None:
 
 # ---- streamrip (Qobuz / Tidal / Deezer) ---------------------------------------
 
-_rip_sem = asyncio.Semaphore(1)
 
 
 async def _isrc_for(r: dict) -> str | None:
@@ -450,7 +457,7 @@ async def _isrc_for(r: dict) -> str | None:
 
 
 async def start_streamrip(r: dict) -> None:
-    async with _rip_sem:
+    async with loop_local("streamrip", lambda: asyncio.Semaphore(1)):
         _check(r["id"])
         upd(r, status="searching", message="Looking for an exact lossless match…")
         if r["kind"] == "album":
@@ -501,7 +508,7 @@ def _staging(r: dict) -> str:
 
 
 async def start_ytdlp(r: dict) -> None:
-    async with _yt_sem:
+    async with loop_local("ytdlp", lambda: asyncio.Semaphore(2)):
         _check(r["id"])
         out = _staging(r)
         if r["kind"] == "track":
@@ -591,7 +598,7 @@ def _progress_hook(r: dict):
 
 
 async def run_url(r: dict) -> None:
-    async with _yt_sem:
+    async with loop_local("ytdlp", lambda: asyncio.Semaphore(2)):
         out = _staging(r)
         res = await ytdlp.download(r["url"], out, _progress_hook(r), playlist=True)
         _check(r["id"])
@@ -624,7 +631,7 @@ async def run_url(r: dict) -> None:
 
 
 async def run_streamrip_url(r: dict) -> None:
-    async with _rip_sem:
+    async with loop_local("streamrip", lambda: asyncio.Semaphore(1)):
         out = _staging(r)
         files = await streamrip.download(r["url"], out)
         upd(r, status="importing", message="Tagging and importing…")

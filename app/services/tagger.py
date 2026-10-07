@@ -372,14 +372,25 @@ async def retag_album(album_id: str, release_id: str, rename: bool | None = None
     paths = [t["path"] for t in old]
     pv = await preview(paths, release_id)
     new_paths = await apply_preview(pv, rename)
-    for p in paths:
-        db.execute("DELETE FROM tracks WHERE path=?", (p,))
+    relink([r["path"] for r in pv["rows"]], new_paths)
     await library.index_paths(new_paths)
     cached = os.path.join(db.DATA_DIR, "covers", album_id + ".jpg")
     if os.path.exists(cached):
         os.remove(cached)
     db.log("info", f"Tagged album '{pv['release']['title']}' by {pv['release']['artist']} from MusicBrainz")
     return new_paths
+
+
+def relink(old_paths: list[str], new_paths: list[str]) -> None:
+    """Files were renamed/moved: keep their library rows (and so likes/playlist entries) by updating the path."""
+    for old, new in zip(old_paths, new_paths):
+        if old == new:
+            continue
+        clash = db.one("SELECT id FROM tracks WHERE path=?", (new,))
+        if clash:
+            db.execute("UPDATE playlist_items SET track_id=(SELECT id FROM tracks WHERE path=?) WHERE track_id=?", (old, clash["id"]))
+            db.execute("DELETE FROM tracks WHERE id=?", (clash["id"],))
+        db.execute("UPDATE tracks SET path=? WHERE path=?", (new, old))
 
 
 async def auto_match(paths: list[str], artist: str, album: str, rgid: str | None = None) -> dict | None:

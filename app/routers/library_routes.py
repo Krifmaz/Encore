@@ -227,6 +227,7 @@ async def delete_album(album_id: str, user=Depends(auth.admin_user)):
         except OSError:
             pass
         dirs.add(os.path.dirname(r["path"]))
+        db.execute("UPDATE playlist_items SET track_id=NULL WHERE track_id=(SELECT id FROM tracks WHERE path=?)", (r["path"],))
         db.execute("DELETE FROM tracks WHERE path=?", (r["path"],))
     for d in dirs:
         tagger.prune_empty(d, config.get("library_path"))
@@ -254,8 +255,7 @@ async def _run_bulk():
                 pv = await tagger.auto_match(paths, a["artist"] if a["artist"] != "Unknown Artist" else "", a["album"] or "")
                 if pv:
                     new = await tagger.apply_preview(pv)
-                    for p in paths:
-                        db.execute("DELETE FROM tracks WHERE path=?", (p,))
+                    tagger.relink([r["path"] for r in pv["rows"]], new)
                     await library.index_paths(new)
                     _bulk["tagged"] += 1
                 else:

@@ -11,7 +11,6 @@ from .. import config, db
 AUDIO_EXT = {".flac", ".mp3", ".m4a", ".mp4", ".aac", ".ogg", ".opus", ".wav", ".aiff", ".aif", ".wma", ".ape", ".wv", ".alac"}
 COVER_NAMES = ("cover", "folder", "front", "album", "artwork")
 state = {"scanning": False, "progress": 0, "total": 0, "last_scan": None, "message": ""}
-_scan_lock = asyncio.Lock()
 
 
 def _first(tags, *keys):
@@ -90,18 +89,26 @@ def index_file(path: str, st=None) -> None:
     st = st or os.stat(path)
     t = read_tags(path)
     aid = album_key(t["albumartist"], t["album"], path)
-    existing = db.one("SELECT id, added_at FROM tracks WHERE path=?", (path,))
+    existing = db.one("SELECT id, added_at, mtime, size FROM tracks WHERE path=?", (path,))
     vals = [t[c] for c in COLS]
     if existing:
         db.execute(
-            f"UPDATE tracks SET album_id=?, mtime=?, size=?, {', '.join(c + '=?' for c in COLS)}, verify_status=NULL WHERE id=?",
+            f"UPDATE tracks SET album_id=?, mtime=?, size=?, {', '.join(c + '=?' for c in COLS)} WHERE id=?",
             (aid, st.st_mtime, st.st_size, *vals, existing["id"]),
         )
+        if (existing["mtime"], existing["size"]) != (st.st_mtime, st.st_size) and not _verified_recently(existing["id"], st.st_mtime):
+            db.execute("UPDATE tracks SET verify_status=NULL WHERE id=?", (existing["id"],))
     else:
         db.execute(
             f"INSERT INTO tracks (path, album_id, mtime, size, {', '.join(COLS)}, added_at) VALUES (?,?,?,?,{','.join('?' * len(COLS))},?)",
             (path, aid, st.st_mtime, st.st_size, *vals, time.time()),
         )
+
+
+def _verified_recently(track_id: int, mtime: float) -> bool:
+    """Tag writes change mtime but not the audio; keep a verification made after the last change."""
+    r = db.one("SELECT verified_at FROM tracks WHERE id=?", (track_id,))
+    return bool(r and r["verified_at"] and r["verified_at"] >= mtime - 1)
 
 
 def _scan_sync(root: str, full: bool) -> tuple[int, int]:
@@ -131,7 +138,15 @@ def _scan_sync(root: str, full: bool) -> tuple[int, int]:
             db.log("warning", f"Could not read {path}: {e}")
     removed = [p for p in known if p not in seen]
     for p in removed:
+        # playlist entries / likes of vanished files get re-linked by the next rematch
+        db.execute("UPDATE playlist_items SET track_id=NULL WHERE track_id=(SELECT id FROM tracks WHERE path=?)", (p,))
         db.execute("DELETE FROM tracks WHERE path=?", (p,))
+    if removed or changed:
+        try:
+            from . import playlists
+            playlists.rematch()
+        except Exception:  # noqa: BLE001
+            pass
     return changed, len(removed)
 
 
@@ -140,7 +155,8 @@ async def scan(full: bool = False, root: str | None = None) -> dict:
     if not os.path.isdir(root):
         state["message"] = f"Library path {root} does not exist"
         return state
-    async with _scan_lock:
+    from .http import loop_local
+    async with loop_local("scan", asyncio.Lock):
         state.update(scanning=True, progress=0, total=0, message="Scanning…")
         try:
             changed, removed = await asyncio.to_thread(_scan_sync, root, full)

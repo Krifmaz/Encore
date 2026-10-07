@@ -17,11 +17,11 @@ async def send(title: str, message: str, image: str | None = None) -> None:
         except Exception as e:  # noqa: BLE001
             db.log("warning", f"Discord notification failed: {e}")
     if config.get("ntfy_url"):
-        headers = {"Title": title.encode("utf-8").decode("latin-1", "ignore"), "Tags": "musical_note"}
-        if config.get("ntfy_token"):
-            headers["Authorization"] = f"Bearer {config.get('ntfy_token')}"
+        # title/tags as query parameters: HTTP headers can't carry emoji or accented characters
+        headers = {"Authorization": f"Bearer {config.get('ntfy_token')}"} if config.get("ntfy_token") else {}
         try:
-            await c.post(config.get("ntfy_url"), content=message.encode(), headers=headers)
+            await c.post(config.get("ntfy_url"), content=message.encode(), headers=headers,
+                         params={"title": title, "tags": "musical_note"})
         except Exception as e:  # noqa: BLE001
             db.log("warning", f"ntfy notification failed: {e}")
     if config.get("webhook_url"):

@@ -4,7 +4,7 @@ import os
 from conftest import make_audio
 
 
-def test_scan_and_tag_roundtrip(env):
+def test_scan_and_tag_roundtrip(env, monkeypatch):
     from app import config, db
     from app.services import library, tagger
     db.connect()
@@ -35,8 +35,8 @@ def test_scan_and_tag_roundtrip(env):
     async def no_cover(*a):
         return None
 
-    tagger.mb.release = fake_release
-    tagger.fetch_cover = no_cover
+    monkeypatch.setattr(tagger.mb, "release", fake_release)
+    monkeypatch.setattr(tagger, "fetch_cover", no_cover)
     album_id = db.one("SELECT album_id FROM tracks WHERE album='LP'")["album_id"]
     pv = asyncio.run(tagger.preview([t["path"] for t in db.query("SELECT path FROM tracks WHERE album_id=?", (album_id,))], "rel-1"))
     assert pv["confidence"] > 0.85
