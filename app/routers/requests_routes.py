@@ -1,0 +1,198 @@
+import json
+import time
+
+from fastapi import APIRouter, Depends, HTTPException
+from pydantic import BaseModel
+
+from .. import auth, config, db, worker
+from ..services import notify, spotify
+
+router = APIRouter(prefix="/api/requests", tags=["requests"])
+
+
+class NewRequest(BaseModel):
+    kind: str  # artist | album | track | url
+    mbid: str | None = None
+    artist: str | None = None
+    title: str | None = None
+    album: str | None = None
+    year: str | None = None
+    cover_url: str | None = None
+    url: str | None = None
+    length: float | None = None
+
+
+class BulkTracks(BaseModel):
+    url: str
+
+
+def _quota(user: dict, n: int = 1) -> None:
+    if user["role"] == "admin":
+        return
+    limit = user.get("request_limit") or 0
+    if not limit:
+        return
+    used = db.one("SELECT COUNT(*) n FROM requests WHERE user_id=? AND created_at > ? AND parent_id IS NULL", (user["id"], time.time() - 7 * 86400))["n"]
+    if used + n > limit:
+        raise HTTPException(429, f"Weekly request limit reached ({limit}). Ask an admin to raise it.")
+
+
+def _create(user: dict, body: NewRequest, parent_id: int | None = None, notify_admin: bool = True) -> int:
+    if body.kind not in ("artist", "album", "track", "url"):
+        raise HTTPException(400, "Invalid request kind")
+    if body.kind == "url":
+        if not body.url or not body.url.startswith(("http://", "https://")):
+            raise HTTPException(400, "A valid http(s) URL is required")
+    elif body.kind in ("artist", "album") and not body.mbid:
+        raise HTTPException(400, "A MusicBrainz id is required")
+    elif body.kind == "track" and not (body.mbid or (body.artist and body.title)):
+        raise HTTPException(400, "Track needs a MusicBrainz id or artist + title")
+    if body.mbid:
+        dup = db.one("SELECT id, status FROM requests WHERE mbid=? AND kind=? AND status NOT IN ('failed','denied','cancelled')", (body.mbid, body.kind))
+        if dup:
+            raise HTTPException(409, f"Already requested (#{dup['id']}, {dup['status']})")
+    approved = user["role"] == "admin" or user.get("auto_approve") or config.get("auto_approve")
+    now = time.time()
+    detail = {"length": body.length} if body.length else {}
+    rid = db.execute(
+        "INSERT INTO requests (user_id, kind, mbid, artist, title, album, year, cover_url, url, status, message, detail, parent_id, created_at, updated_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+        (user["id"], body.kind, body.mbid, body.artist, body.title or body.album, body.album, body.year, body.cover_url, body.url,
+         "queued" if approved else "pending", "" if approved else "Waiting for admin approval", json.dumps(detail), parent_id, now, now),
+    )
+    what = body.title or body.album or body.artist or body.url
+    db.log("info", f"{user['username']} requested {body.kind}: {what}")
+    return rid
+
+
+@router.get("")
+def list_requests(status: str | None = None, mine: bool = False, limit: int = 200, user=Depends(auth.current_user)):
+    sql = "SELECT r.*, u.username FROM requests r LEFT JOIN users u ON u.id=r.user_id WHERE 1=1"
+    params: list = []
+    if user["role"] != "admin" or mine:
+        sql += " AND r.user_id=?"
+        params.append(user["id"])
+    if status == "active":
+        sql += " AND r.status IN ('pending','queued','searching','downloading','monitoring','importing')"
+    elif status:
+        sql += " AND r.status=?"
+        params.append(status)
+    sql += " ORDER BY r.id DESC LIMIT ?"
+    params.append(min(limit, 1000))
+    rows = db.query(sql, params)
+    for r in rows:
+        d = json.loads(r.pop("detail") or "{}")
+        r["log"] = d.get("log", [])
+        r["candidate"] = None
+        s = d.get("slskd")
+        if s and 0 <= s.get("idx", -1) < len(s.get("candidates", [])):
+            c = s["candidates"][s["idx"]]
+            r["candidate"] = {"username": c["username"], "format": c["format"], "directory": c["directory"].split("\\")[-1].split("/")[-1], "files": len(c["files"])}
+    return rows
+
+
+@router.post("")
+async def create(body: NewRequest, user=Depends(auth.current_user)):
+    _quota(user)
+    rid = _create(user, body)
+    r = db.get_request(rid)
+    if r["status"] == "pending":
+        await notify.send("🎵 New request awaiting approval", f"{user['username']} requested {body.kind}: {r['title'] or r['artist'] or r['url']}", body.cover_url)
+    return r
+
+
+@router.post("/import")
+async def bulk_import(body: BulkTracks, user=Depends(auth.current_user)):
+    """Import a Spotify playlist/album as individual track requests."""
+    if not spotify.parse(body.url):
+        raise HTTPException(400, "Only Spotify URLs are imported track-by-track; use a URL download for others")
+    data = await spotify.tracks(body.url)
+    _quota(user, 1)
+    approved = user["role"] == "admin" or user.get("auto_approve") or config.get("auto_approve")
+    now = time.time()
+    parent = db.execute(
+        "INSERT INTO requests (user_id, kind, artist, title, url, status, message, detail, created_at, updated_at) VALUES (?,?,?,?,?,?,?,?,?,?)",
+        (user["id"], "playlist", "Spotify", data["name"], body.url, "completed" if approved else "pending",
+         f"{len(data['tracks'])} tracks", "{}", now, now),
+    )
+    n = 0
+    for t in data["tracks"]:
+        db.execute(
+            "INSERT INTO requests (user_id, kind, artist, title, album, cover_url, status, detail, parent_id, created_at, updated_at) VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+            (user["id"], "track", t["artist"], t["title"], t["album"], t["cover"], "queued" if approved else "pending",
+             json.dumps({"length": t["length"]}), parent, now, now),
+        )
+        n += 1
+    db.log("info", f"{user['username']} imported Spotify {data.get('kind', 'playlist')} '{data['name']}' ({n} tracks)")
+    return {"id": parent, "count": n}
+
+
+def _get_owned(rid: int, user: dict) -> dict:
+    r = db.get_request(rid)
+    if not r:
+        raise HTTPException(404, "Request not found")
+    if user["role"] != "admin" and r["user_id"] != user["id"]:
+        raise HTTPException(403, "Not your request")
+    return r
+
+
+def _children(rid: int) -> list[int]:
+    return [x["id"] for x in db.query("SELECT id FROM requests WHERE parent_id=?", (rid,))]
+
+
+@router.post("/{rid}/approve")
+def approve(rid: int, admin=Depends(auth.admin_user)):
+    for i in [rid, *_children(rid)]:
+        r = db.get_request(i)
+        if r and r["status"] == "pending":
+            db.update_request(i, status="completed" if r["kind"] == "playlist" else "queued", message="Approved")
+    return {"ok": True}
+
+
+@router.post("/{rid}/deny")
+def deny(rid: int, admin=Depends(auth.admin_user)):
+    for i in [rid, *_children(rid)]:
+        r = db.get_request(i)
+        if r and r["status"] == "pending":
+            db.update_request(i, status="denied", message=f"Denied by {admin['username']}")
+    return {"ok": True}
+
+
+@router.post("/{rid}/retry")
+def retry(rid: int, user=Depends(auth.current_user)):
+    r = _get_owned(rid, user)
+    if r["kind"] == "playlist":
+        for c in db.query("SELECT id FROM requests WHERE parent_id=? AND status IN ('failed','cancelled')", (rid,)):
+            db.update_request(c["id"], status="queued", progress=0, message="Retrying", source=None)
+        return {"ok": True}
+    if r["status"] not in ("failed", "cancelled", "completed"):
+        raise HTTPException(400, "Only finished requests can be retried")
+    if r["status"] == "cancelled" and user["role"] != "admin" and not (user.get("auto_approve") or config.get("auto_approve")):
+        raise HTTPException(403, "Ask an admin to retry")
+    db.update_request(rid, status="queued", progress=0, message="Retrying", source=None, detail={"length": r["detail"].get("length")} if r["detail"].get("length") else {})
+    return {"ok": True}
+
+
+@router.post("/{rid}/cancel")
+async def cancel(rid: int, user=Depends(auth.current_user)):
+    _get_owned(rid, user)  # permission check
+    for i in [rid, *_children(rid)]:
+        c = db.get_request(i)
+        if c and c["status"] in ("pending", *worker.ACTIVE):
+            await worker.cancel(i)
+            db.update_request(i, status="cancelled", message=f"Cancelled by {user['username']}")
+    return {"ok": True}
+
+
+@router.delete("/{rid}")
+async def delete(rid: int, user=Depends(auth.current_user)):
+    r = _get_owned(rid, user)
+    if r["status"] in worker.ACTIVE:
+        await worker.cancel(rid)
+    db.execute("DELETE FROM requests WHERE id=? OR parent_id=?", (rid, rid))
+    return {"ok": True}
+
+
+@router.post("/clear")
+def clear_finished(user=Depends(auth.admin_user)):
+    db.execute("DELETE FROM requests WHERE status IN ('completed','denied','cancelled')")
+    return {"ok": True}

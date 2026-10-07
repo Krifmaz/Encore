@@ -1,0 +1,296 @@
+"""MusicBrainz web service client with rate limiting and caching."""
+import asyncio
+import time
+
+from .. import __version__, config
+from .http import client
+
+_lock = asyncio.Lock()
+_last = 0.0
+_cache: dict[str, tuple[float, dict]] = {}
+CACHE_TTL = 3600
+
+
+def _ua() -> str:
+    contact = config.get("contact_email") or "https://github.com/krifmaz/test"
+    return f"Encore/{__version__} ( {contact} )"
+
+
+async def _get(path: str, params: dict | None = None) -> dict:
+    params = dict(params or {})
+    params["fmt"] = "json"
+    key = path + "?" + "&".join(f"{k}={v}" for k, v in sorted(params.items()))
+    hit = _cache.get(key)
+    if hit and hit[0] > time.time():
+        return hit[1]
+    global _last
+    base = config.get("musicbrainz_url").rstrip("/")
+    for attempt in range(4):
+        async with _lock:
+            wait = (1.0 / max(config.get("musicbrainz_rate"), 0.1)) - (time.time() - _last)
+            if wait > 0:
+                await asyncio.sleep(wait)
+            _last = time.time()
+            r = await client().get(f"{base}/ws/2/{path}", params=params, headers={"User-Agent": _ua()})
+        if r.status_code == 503:
+            await asyncio.sleep(1.5 * (attempt + 1))
+            continue
+        r.raise_for_status()
+        data = r.json()
+        _cache[key] = (time.time() + CACHE_TTL, data)
+        if len(_cache) > 3000:
+            for k in list(_cache)[:500]:
+                _cache.pop(k, None)
+        return data
+    raise RuntimeError("MusicBrainz is rate limiting requests, try again shortly")
+
+
+def esc(s: str) -> str:
+    out = []
+    for ch in s or "":
+        if ch in '+-&|!(){}[]^"~*?:\\/':
+            out.append("\\" + ch)
+        else:
+            out.append(ch)
+    return "".join(out)
+
+
+def credit(ac: list | None) -> str:
+    if not ac:
+        return ""
+    return "".join((c.get("name") or c.get("artist", {}).get("name", "")) + c.get("joinphrase", "") for c in ac)
+
+
+def credit_id(ac: list | None) -> str | None:
+    if ac:
+        return ac[0].get("artist", {}).get("id")
+    return None
+
+
+def cover_rg(rgid: str, size: int = 250) -> str:
+    return f"https://coverartarchive.org/release-group/{rgid}/front-{size}"
+
+
+def cover_release(rid: str, size: int = 250) -> str:
+    return f"https://coverartarchive.org/release/{rid}/front-{size}"
+
+
+# ---- search -----------------------------------------------------------------
+
+async def search_artists(q: str, limit: int = 20) -> list[dict]:
+    data = await _get("artist", {"query": q, "limit": limit})
+    return [
+        {
+            "id": a["id"],
+            "name": a["name"],
+            "disambiguation": a.get("disambiguation", ""),
+            "type": a.get("type", ""),
+            "country": a.get("country", ""),
+            "score": a.get("score", 0),
+            "begin": (a.get("life-span") or {}).get("begin", ""),
+            "tags": [t["name"] for t in sorted(a.get("tags", []), key=lambda t: -t.get("count", 0))[:4]],
+        }
+        for a in data.get("artists", [])
+    ]
+
+
+def _rg(rg: dict) -> dict:
+    return {
+        "id": rg["id"],
+        "title": rg.get("title", ""),
+        "artist": credit(rg.get("artist-credit")),
+        "artist_id": credit_id(rg.get("artist-credit")),
+        "type": rg.get("primary-type") or "",
+        "secondary": rg.get("secondary-types", []),
+        "year": (rg.get("first-release-date") or "")[:4],
+        "score": rg.get("score", 0),
+        "cover": cover_rg(rg["id"]),
+    }
+
+
+async def search_albums(q: str, limit: int = 25) -> list[dict]:
+    data = await _get("release-group", {"query": q, "limit": limit})
+    return [_rg(rg) for rg in data.get("release-groups", [])]
+
+
+async def search_recordings(q: str, limit: int = 25, artist: str | None = None) -> list[dict]:
+    query = q
+    if artist:
+        query = f'recording:"{esc(q)}" AND artist:"{esc(artist)}"'
+    data = await _get("recording", {"query": query, "limit": limit})
+    out = []
+    for r in data.get("recordings", []):
+        rel = (r.get("releases") or [{}])[0]
+        rg = rel.get("release-group") or {}
+        out.append({
+            "id": r["id"],
+            "title": r.get("title", ""),
+            "artist": credit(r.get("artist-credit")),
+            "artist_id": credit_id(r.get("artist-credit")),
+            "length": (r.get("length") or 0) / 1000,
+            "album": rel.get("title", ""),
+            "release_id": rel.get("id"),
+            "release_group_id": rg.get("id"),
+            "year": (rel.get("date") or r.get("first-release-date") or "")[:4],
+            "score": r.get("score", 0),
+            "cover": cover_rg(rg["id"]) if rg.get("id") else None,
+        })
+    return out
+
+
+async def search_releases(artist: str, album: str, limit: int = 15) -> list[dict]:
+    q = f'release:"{esc(album)}"'
+    if artist:
+        q += f' AND artist:"{esc(artist)}"'
+    data = await _get("release", {"query": q, "limit": limit})
+    out = []
+    for r in data.get("releases", []):
+        out.append({
+            "id": r["id"],
+            "title": r.get("title", ""),
+            "artist": credit(r.get("artist-credit")),
+            "date": r.get("date", ""),
+            "country": r.get("country", ""),
+            "status": r.get("status", ""),
+            "track_count": r.get("track-count", 0),
+            "formats": ", ".join(sorted({m.get("format") or "?" for m in r.get("media", [])})),
+            "release_group_id": (r.get("release-group") or {}).get("id"),
+            "type": (r.get("release-group") or {}).get("primary-type", ""),
+            "score": r.get("score", 0),
+            "label": ", ".join(li.get("label", {}).get("name", "") for li in r.get("label-info", []) if li.get("label")),
+            "cover": cover_release(r["id"]),
+        })
+    return out
+
+
+# ---- lookups ----------------------------------------------------------------
+
+async def artist(mbid: str) -> dict:
+    a = await _get(f"artist/{mbid}", {"inc": "tags+url-rels"})
+    rgs = []
+    offset = 0
+    while True:
+        page = await _get("release-group", {"artist": mbid, "limit": 100, "offset": offset})
+        rgs += page.get("release-groups", [])
+        offset += 100
+        if offset >= page.get("release-group-count", 0) or offset >= 500:
+            break
+    groups = [_rg({**rg, "artist-credit": [{"name": a["name"], "artist": {"id": mbid}}]}) for rg in rgs]
+    groups.sort(key=lambda g: g["year"] or "9999", reverse=True)
+    links = {}
+    for rel in a.get("relations", []):
+        url = (rel.get("url") or {}).get("resource")
+        if url:
+            links[rel.get("type", "link")] = url
+    return {
+        "id": a["id"],
+        "name": a["name"],
+        "disambiguation": a.get("disambiguation", ""),
+        "type": a.get("type", ""),
+        "country": a.get("country", ""),
+        "begin": (a.get("life-span") or {}).get("begin", ""),
+        "tags": [t["name"] for t in sorted(a.get("tags", []), key=lambda t: -t.get("count", 0))[:8]],
+        "links": links,
+        "release_groups": groups,
+    }
+
+
+async def release_group(rgid: str) -> dict:
+    rg = await _get(f"release-group/{rgid}", {"inc": "artist-credits+releases+tags"})
+    return {
+        **_rg(rg),
+        "tags": [t["name"] for t in sorted(rg.get("tags", []), key=lambda t: -t.get("count", 0))[:5]],
+        "releases": rg.get("releases", []),
+    }
+
+
+async def best_release_for_group(rgid: str, track_count: int | None = None) -> str | None:
+    """Pick the most canonical release in a release group (optionally matching a track count)."""
+    data = await _get("release", {"release-group": rgid, "inc": "media", "limit": 100})
+    releases = data.get("releases", [])
+    if not releases:
+        return None
+
+    def score(r):
+        tc = sum(m.get("track-count", 0) for m in r.get("media", []))
+        s = 0.0
+        if track_count:
+            s -= abs(tc - track_count) * 10
+        if r.get("status") == "Official":
+            s += 5
+        fmts = {m.get("format") for m in r.get("media", [])}
+        if "Digital Media" in fmts:
+            s += 3
+        if "CD" in fmts:
+            s += 2
+        if r.get("country") in ("XW", "US", "GB"):
+            s += 1
+        s -= (int((r.get("date") or "9999")[:4] or 9999) - 1900) / 1000.0
+        return s
+
+    return max(releases, key=score)["id"]
+
+
+async def release(rid: str) -> dict:
+    r = await _get(f"release/{rid}", {"inc": "recordings+artist-credits+release-groups+labels+genres+isrcs"})
+    rg = r.get("release-group") or {}
+    tracks = []
+    media = r.get("media", [])
+    for m in media:
+        for t in m.get("tracks", []):
+            rec = t.get("recording") or {}
+            tracks.append({
+                "disc": m.get("position", 1),
+                "track": int(t.get("position") or t.get("number") or 0),
+                "title": t.get("title") or rec.get("title", ""),
+                "artist": credit(t.get("artist-credit") or rec.get("artist-credit")),
+                "artist_id": credit_id(t.get("artist-credit") or rec.get("artist-credit")),
+                "length": (t.get("length") or rec.get("length") or 0) / 1000,
+                "recording_id": rec.get("id"),
+                "track_id": t.get("id"),
+                "isrc": (rec.get("isrcs") or [None])[0],
+            })
+    genres = [g["name"] for g in sorted(r.get("genres", []) + rg.get("genres", []), key=lambda g: -g.get("count", 0))]
+    return {
+        "id": r["id"],
+        "title": r.get("title", ""),
+        "artist": credit(r.get("artist-credit")),
+        "artist_id": credit_id(r.get("artist-credit")),
+        "date": r.get("date") or rg.get("first-release-date") or "",
+        "year": (rg.get("first-release-date") or r.get("date") or "")[:4],
+        "country": r.get("country", ""),
+        "status": r.get("status", ""),
+        "release_group_id": rg.get("id"),
+        "type": rg.get("primary-type", ""),
+        "label": ", ".join(li.get("label", {}).get("name", "") for li in r.get("label-info", []) if li.get("label")),
+        "catalog": ", ".join(li.get("catalog-number") or "" for li in r.get("label-info", []) if li.get("catalog-number")),
+        "barcode": r.get("barcode") or "",
+        "disc_count": len(media),
+        "genre": genres[0].title() if genres else "",
+        "tracks": tracks,
+        "cover": cover_release(r["id"], 500),
+    }
+
+
+async def recording(rid: str) -> dict:
+    r = await _get(f"recording/{rid}", {"inc": "artist-credits+releases+release-groups+isrcs"})
+    rels = r.get("releases", [])
+    rel = rels[0] if rels else {}
+    rg = rel.get("release-group") or {}
+    return {
+        "id": r["id"],
+        "title": r.get("title", ""),
+        "artist": credit(r.get("artist-credit")),
+        "artist_id": credit_id(r.get("artist-credit")),
+        "length": (r.get("length") or 0) / 1000,
+        "album": rel.get("title", ""),
+        "release_id": rel.get("id"),
+        "release_group_id": rg.get("id"),
+        "year": (r.get("first-release-date") or rel.get("date") or "")[:4],
+        "isrc": (r.get("isrcs") or [None])[0],
+    }
+
+
+async def ping() -> bool:
+    await _get("artist", {"query": "test", "limit": 1})
+    return True

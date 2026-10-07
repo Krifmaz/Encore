@@ -1,0 +1,138 @@
+"""Settings stored in the database, seeded from environment variables."""
+import json
+import os
+import secrets
+
+from . import db
+
+# key: (env var, default, secret?)
+DEFAULTS: dict[str, tuple[str | None, object, bool]] = {
+    # general
+    "app_name": ("ENCORE_APP_NAME", "Encore", False),
+    "base_url": ("ENCORE_BASE_URL", "", False),
+    "signup_mode": ("ENCORE_SIGNUP_MODE", "invite", False),  # invite | open | closed
+    "auto_approve": ("ENCORE_AUTO_APPROVE", False, False),
+    "default_request_limit": ("ENCORE_REQUEST_LIMIT", 0, False),  # per 7 days, 0 = unlimited
+    "session_days": ("ENCORE_SESSION_DAYS", 30, False),
+    # library
+    "library_path": ("ENCORE_LIBRARY_PATH", "/music", False),
+    "staging_path": ("ENCORE_STAGING_PATH", "/downloads/encore", False),
+    "scan_interval_minutes": ("ENCORE_SCAN_INTERVAL", 60, False),
+    "rename_on_import": ("ENCORE_RENAME_ON_IMPORT", True, False),
+    "naming_template": (
+        "ENCORE_NAMING_TEMPLATE",
+        "{albumartist}/{album} ({year})/{discprefix}{track:02d} - {title}",
+        False,
+    ),
+    "single_template": ("ENCORE_SINGLE_TEMPLATE", "{artist}/Singles/{artist} - {title}", False),
+    "autotag_on_import": ("ENCORE_AUTOTAG", True, False),
+    "autotag_threshold": ("ENCORE_AUTOTAG_THRESHOLD", 0.8, False),
+    "save_cover": ("ENCORE_SAVE_COVER", True, False),
+    "embed_cover": ("ENCORE_EMBED_COVER", True, False),
+    # pipeline
+    "source_order": ("ENCORE_SOURCE_ORDER", "lidarr,slskd,ytdlp", False),
+    # musicbrainz
+    "musicbrainz_url": ("MUSICBRAINZ_URL", "https://musicbrainz.org", False),
+    "musicbrainz_rate": ("MUSICBRAINZ_RATE", 1.0, False),
+    "contact_email": ("ENCORE_CONTACT_EMAIL", "", False),
+    # lidarr
+    "lidarr_enabled": ("LIDARR_ENABLED", False, False),
+    "lidarr_url": ("LIDARR_URL", "http://lidarr:8686", False),
+    "lidarr_api_key": ("LIDARR_API_KEY", "", True),
+    "lidarr_root_folder": ("LIDARR_ROOT_FOLDER", "", False),
+    "lidarr_quality_profile": ("LIDARR_QUALITY_PROFILE", 0, False),
+    "lidarr_metadata_profile": ("LIDARR_METADATA_PROFILE", 0, False),
+    "lidarr_timeout_minutes": ("LIDARR_TIMEOUT", 60, False),
+    # slskd
+    "slskd_enabled": ("SLSKD_ENABLED", False, False),
+    "slskd_url": ("SLSKD_URL", "http://slskd:5030", False),
+    "slskd_api_key": ("SLSKD_API_KEY", "", True),
+    "slskd_download_path": ("SLSKD_DOWNLOAD_PATH", "/downloads/slskd", False),
+    "slskd_preferred_format": ("SLSKD_PREFERRED_FORMAT", "flac", False),  # flac | mp3 | any
+    "slskd_min_bitrate": ("SLSKD_MIN_BITRATE", 192, False),
+    "slskd_search_timeout": ("SLSKD_SEARCH_TIMEOUT", 15, False),
+    "slskd_stall_minutes": ("SLSKD_STALL_MINUTES", 20, False),
+    "slskd_max_candidates": ("SLSKD_MAX_CANDIDATES", 4, False),
+    # yt-dlp
+    "ytdlp_enabled": ("YTDLP_ENABLED", True, False),
+    "ytdlp_format": ("YTDLP_FORMAT", "mp3", False),  # mp3 | m4a | opus | flac | best
+    "ytdlp_quality": ("YTDLP_QUALITY", "320", False),
+    "ytdlp_cookies": ("YTDLP_COOKIES", "", True),
+    # spotify (playlist import)
+    "spotify_client_id": ("SPOTIFY_CLIENT_ID", "", False),
+    "spotify_client_secret": ("SPOTIFY_CLIENT_SECRET", "", True),
+    # media servers
+    "navidrome_url": ("NAVIDROME_URL", "", False),
+    "navidrome_user": ("NAVIDROME_USER", "", False),
+    "navidrome_password": ("NAVIDROME_PASSWORD", "", True),
+    "jellyfin_url": ("JELLYFIN_URL", "", False),
+    "jellyfin_api_key": ("JELLYFIN_API_KEY", "", True),
+    "plex_url": ("PLEX_URL", "", False),
+    "plex_token": ("PLEX_TOKEN", "", True),
+    # notifications
+    "discord_webhook": ("DISCORD_WEBHOOK", "", True),
+    "ntfy_url": ("NTFY_URL", "", False),
+    "ntfy_token": ("NTFY_TOKEN", "", True),
+    "webhook_url": ("WEBHOOK_URL", "", True),
+    # api
+    "api_key": (None, "", True),
+}
+
+_cache: dict[str, object] = {}
+
+
+def _coerce(default, raw):
+    if isinstance(default, bool):
+        if isinstance(raw, bool):
+            return raw
+        return str(raw).strip().lower() in ("1", "true", "yes", "on")
+    if isinstance(default, int):
+        try:
+            return int(float(raw))
+        except (TypeError, ValueError):
+            return default
+    if isinstance(default, float):
+        try:
+            return float(raw)
+        except (TypeError, ValueError):
+            return default
+    return "" if raw is None else str(raw)
+
+
+def load() -> None:
+    stored = {r["key"]: json.loads(r["value"]) for r in db.query("SELECT key, value FROM settings")}
+    for key, (env, default, _) in DEFAULTS.items():
+        if key in stored:
+            _cache[key] = _coerce(default, stored[key])
+        elif env and os.environ.get(env) is not None:
+            _cache[key] = _coerce(default, os.environ[env])
+            db.execute("INSERT OR REPLACE INTO settings VALUES (?,?)", (key, json.dumps(_cache[key])))
+        else:
+            _cache[key] = default
+    if not _cache.get("api_key"):
+        set_many({"api_key": secrets.token_hex(24)})
+
+
+def get(key: str):
+    return _cache.get(key, DEFAULTS.get(key, (None, None, False))[1])
+
+
+def set_many(values: dict) -> None:
+    for key, val in values.items():
+        if key not in DEFAULTS:
+            continue
+        val = _coerce(DEFAULTS[key][1], val)
+        _cache[key] = val
+        db.execute("INSERT OR REPLACE INTO settings VALUES (?,?)", (key, json.dumps(val)))
+
+
+def public_dump() -> dict:
+    """All settings, secrets masked (unset secrets come back empty)."""
+    out = {}
+    for key, (_, _, secret) in DEFAULTS.items():
+        val = get(key)
+        out[key] = ("••••••••" if val else "") if secret and key != "api_key" else val
+    return out
+
+
+MASK = "••••••••"
