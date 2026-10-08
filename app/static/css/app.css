@@ -252,13 +252,18 @@ body.has-player { --player: var(--player-h); }
   border-top: 1px solid var(--border); display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1.4fr) minmax(0, 1fr);
   align-items: center; gap: 18px; padding: 0 20px;
 }
-.player .p-mini { display: none; }
 .player .now { display: flex; align-items: center; gap: 12px; min-width: 0; }
 .player .now .thumb { width: 48px; height: 48px; border-radius: 8px; }
 .player .ctrls { display: flex; flex-direction: column; align-items: center; gap: 4px; }
 .player .ctrls .row { gap: 6px; }
 .player .seek { display: flex; align-items: center; gap: 10px; width: 100%; font-size: 11px; color: var(--faint); }
-.player input[type=range] { flex: 1; accent-color: var(--accent); height: 4px; min-width: 0; }
+.player input[type=range] { flex: 1; min-width: 0; accent-color: var(--accent); }
+.player #seek { -webkit-appearance: none; appearance: none; height: 22px; background: transparent; cursor: pointer; touch-action: none; --p: 0%; }
+.player #seek::-webkit-slider-runnable-track { height: 5px; border-radius: 99px; background: linear-gradient(90deg, var(--accent) var(--p), var(--border) var(--p)); }
+.player #seek::-moz-range-track { height: 5px; border-radius: 99px; background: linear-gradient(90deg, var(--accent) var(--p), var(--border) var(--p)); }
+.player #seek::-webkit-slider-thumb { -webkit-appearance: none; width: 15px; height: 15px; margin-top: -5px; border-radius: 50%; background: var(--text); border: 0; }
+.player #seek::-moz-range-thumb { width: 15px; height: 15px; border-radius: 50%; background: var(--text); border: 0; }
+.player .seek span { min-width: 34px; text-align: center; font-variant-numeric: tabular-nums; }
 .player .right { display: flex; justify-content: flex-end; align-items: center; gap: 8px; min-width: 0; }
 .player .right input { max-width: 100px; }
 .play-btn { width: 40px; height: 40px; border-radius: 50%; background: var(--text); color: var(--bg); border: 0; display: grid; place-items: center; cursor: pointer; flex: none; }
@@ -292,12 +297,18 @@ body.has-player { --player: var(--player-h); }
   .settings-nav { position: static; flex-direction: row; overflow-x: auto; }
 }
 @media (max-width: 960px) {
-  .player { grid-template-columns: minmax(0, 1fr) auto auto; gap: 8px; padding: 0 12px; }
-  .player .seek, .player .right input, .player .right .faint { display: none; }
+  /* phones/tablets: the seek bar gets its own full-width row so it's easy to drag with a finger */
+  body.has-player { --player: 112px; }
+  .player { height: 112px; grid-template-columns: minmax(0, 1fr) auto auto; grid-template-rows: auto 1fr; gap: 0 8px; padding: 6px 12px 8px; }
+  .player .ctrls { display: contents; }
+  .player .seek { grid-column: 1 / -1; grid-row: 1; display: flex; }
+  .player .seek #seek { height: 32px; }
+  .player .seek #seek::-webkit-slider-thumb { width: 20px; height: 20px; margin-top: -7.5px; }
+  .player .now { grid-column: 1; grid-row: 2; }
+  .player .ctrls .row { grid-column: 2; grid-row: 2; }
+  .player .right { grid-column: 3; grid-row: 2; }
+  .player .right input, .player .right .faint, .player .right .badge { display: none; }
   .player .ctrls .row .btn.icon#p-prev { display: none; }
-  .player .p-mini { display: block; position: absolute; left: 0; right: 0; top: 0; height: 3px; background: var(--border); }
-  .player .p-mini i { display: block; height: 100%; background: var(--grad); }
-  .player .right .badge { display: none; }
 }
 @media (max-width: 900px) {
   .shell { grid-template-columns: 1fr; }

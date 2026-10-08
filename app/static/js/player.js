@@ -2,7 +2,7 @@
 // can't decode (ALAC/APE/WavPack/AIFF/WMA) are converted to FLAC on the fly by the server.
 import { art, esc, fmt, icon } from './ui.js';
 
-const state = { queue: [], index: -1, transcoded: false };
+const state = { queue: [], index: -1, transcoded: false, offset: 0, dragging: false };
 const listeners = new Set();
 let audio = null;
 
@@ -21,11 +21,17 @@ export function enqueue(tracks) {
   if (state.index < 0) { state.index = 0; load(); } else render();
 }
 
-function load(transcode = false) {
+// formats browsers can't decode → the server converts to FLAC; the player then seeks via the server
+const CONVERT = new Set(['ape', 'wv', 'aiff', 'aif', 'wma', 'alac', 'dsf', 'dff', 'tta', 'mpc']);
+
+function load(transcode = false, offset = 0) {
   const t = current();
   if (!t) return;
+  if (CONVERT.has((t.format || '').toLowerCase())) transcode = true;
   state.transcoded = transcode;
-  audio.src = `/api/library/tracks/${t.id}/stream${transcode ? '?transcode=1' : ''}`;
+  state.offset = offset;   // converted streams restart at the seek point, so their clock starts at `offset`
+  state.dragging = false;
+  audio.src = `/api/library/tracks/${t.id}/stream${transcode ? `?transcode=1${offset ? `&t=${offset.toFixed(1)}` : ''}` : ''}`;
   audio.play().catch(() => {});
   if ('mediaSession' in navigator) {
     navigator.mediaSession.metadata = new MediaMetadata({
@@ -38,10 +44,25 @@ function load(transcode = false) {
   emit();
 }
 
+function duration() {
+  if (state.transcoded) return current()?.duration || 0;
+  return audio.duration && isFinite(audio.duration) ? audio.duration : current()?.duration || 0;
+}
+const position = () => state.offset + (audio.currentTime || 0);
+
+export function seekTo(sec) {
+  const dur = duration();
+  if (!current() || !dur) return;
+  sec = Math.max(0, Math.min(sec, dur - 0.25));
+  if (state.transcoded) load(true, sec);      // ask the server to start the conversion at that point
+  else audio.currentTime = sec;
+  updateTime();
+}
+
 export function toggle() { if (current()) (audio.paused ? audio.play() : audio.pause()); }
 export function next() { if (state.index < state.queue.length - 1) { state.index++; load(); } }
 export function prev() {
-  if (audio.currentTime > 3 || state.index === 0) { audio.currentTime = 0; return; }
+  if (position() > 3 || state.index === 0) { seekTo(0); return; }
   state.index--; load();
 }
 
@@ -60,7 +81,7 @@ export function mount() {
   audio.addEventListener('timeupdate', updateTime);
   audio.addEventListener('loadedmetadata', updateTime);
   // the browser couldn't decode the original (e.g. ALAC in .m4a) → ask the server for FLAC
-  audio.addEventListener('error', () => { if (current() && !state.transcoded) load(true); });
+  audio.addEventListener('error', () => { if (current() && !state.transcoded) load(true, position()); });
   if ('mediaSession' in navigator) {
     navigator.mediaSession.setActionHandler('play', () => audio.play());
     navigator.mediaSession.setActionHandler('pause', () => audio.pause());
@@ -68,22 +89,32 @@ export function mount() {
     navigator.mediaSession.setActionHandler('previoustrack', prev);
   }
   document.addEventListener('keydown', (e) => {
-    if (e.code === 'Space' && current() && !/INPUT|TEXTAREA|SELECT|BUTTON/.test(document.activeElement.tagName)) {
-      e.preventDefault(); toggle();
-    }
+    const ae = document.activeElement;
+    if (!current() || (/INPUT|TEXTAREA|SELECT|BUTTON/.test(ae.tagName) && ae.id !== 'seek')) return;
+    if (e.code === 'Space') { e.preventDefault(); toggle(); }
+    if (e.code === 'ArrowRight') { e.preventDefault(); seekTo(position() + 10); }
+    if (e.code === 'ArrowLeft') { e.preventDefault(); seekTo(position() - 10); }
   });
+  if ('mediaSession' in navigator) {
+    try {
+      navigator.mediaSession.setActionHandler('seekto', (d) => seekTo(d.seekTime));
+      navigator.mediaSession.setActionHandler('seekforward', (d) => seekTo(position() + (d.seekOffset || 10)));
+      navigator.mediaSession.setActionHandler('seekbackward', (d) => seekTo(position() - (d.seekOffset || 10)));
+    } catch { /* older browsers */ }
+  }
   render();
 }
 
 function updateTime() {
   const seek = document.getElementById('seek');
   if (!seek) return;
-  const dur = audio.duration && isFinite(audio.duration) ? audio.duration : current()?.duration || 0;
-  if (!seek.matches(':active')) seek.value = dur ? (audio.currentTime / dur) * 1000 : 0;
-  document.getElementById('t-cur').textContent = fmt.dur(audio.currentTime);
+  const dur = duration();
+  if (!state.dragging) {
+    seek.value = dur ? (position() / dur) * 1000 : 0;
+    document.getElementById('t-cur').textContent = fmt.dur(position());
+  }
+  seek.style.setProperty('--p', `${seek.value / 10}%`);
   document.getElementById('t-dur').textContent = fmt.dur(dur);
-  const bar = document.getElementById('p-mini');
-  if (bar) bar.style.width = `${dur ? (audio.currentTime / dur) * 100 : 0}%`;
 }
 
 function quality(t) {
@@ -104,7 +135,6 @@ function render() {
     return;
   }
   el.innerHTML = `
-    <div class="p-mini"><i id="p-mini"></i></div>
     <div class="now">
       <div class="thumb">${art(`/api/library/albums/${t.album_id}/cover`, t.album || t.title)}</div>
       <div class="grow">
@@ -130,10 +160,20 @@ function render() {
   el.querySelector('#p-toggle').onclick = toggle;
   el.querySelector('#p-next').onclick = next;
   el.querySelector('#p-prev').onclick = prev;
-  el.querySelector('#seek').oninput = (e) => {
-    const dur = audio.duration && isFinite(audio.duration) ? audio.duration : 0;
-    if (dur) audio.currentTime = (e.target.value / 1000) * dur;
-  };
+  // dragging: move the thumb + time label freely, jump when the finger/mouse is released
+  const seek = el.querySelector('#seek');
+  const startDrag = () => { state.dragging = true; };
+  seek.addEventListener('pointerdown', startDrag);
+  seek.addEventListener('touchstart', startDrag, { passive: true });
+  seek.addEventListener('input', () => {
+    state.dragging = true;
+    document.getElementById('t-cur').textContent = fmt.dur((seek.value / 1000) * duration());
+    seek.style.setProperty('--p', `${seek.value / 10}%`);
+  });
+  const commit = () => { if (state.dragging) { state.dragging = false; seekTo((seek.value / 1000) * duration()); } };
+  seek.addEventListener('change', commit);
+  seek.addEventListener('pointerup', commit);
+  seek.addEventListener('touchend', commit);
   el.querySelector('#vol').oninput = (e) => {
     audio.volume = e.target.value;
     try { localStorage.setItem('encore.volume', audio.volume); } catch { /* ignore */ }

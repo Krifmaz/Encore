@@ -252,15 +252,16 @@ def _needs_transcode(path: str, fmt: str) -> bool:
 
 
 @router.get("/tracks/{track_id}/stream")
-async def stream(track_id: int, transcode: bool = False, user=Depends(auth.current_user)):
+async def stream(track_id: int, transcode: bool = False, t: float = 0, user=Depends(auth.current_user)):
     """Original file for formats browsers play natively (seekable, bit-perfect); others → FLAC on the fly."""
-    t = db.one("SELECT path, format FROM tracks WHERE id=?", (track_id,))
-    if not t or not os.path.isfile(t["path"]):
+    track = db.one("SELECT path, format FROM tracks WHERE id=?", (track_id,))
+    if not track or not os.path.isfile(track["path"]):
         raise HTTPException(404, "Track not found")
-    if not transcode and not await asyncio.to_thread(_needs_transcode, t["path"], t["format"]):
-        return FileResponse(t["path"], media_type=BROWSER_TYPES[t["format"]], headers={"Cache-Control": "private, max-age=3600"})
+    if not transcode and not await asyncio.to_thread(_needs_transcode, track["path"], track["format"]):
+        return FileResponse(track["path"], media_type=BROWSER_TYPES[track["format"]], headers={"Cache-Control": "private, max-age=3600"})
     proc = await asyncio.create_subprocess_exec(
-        "ffmpeg", "-v", "error", "-i", t["path"], "-map", "0:a:0", "-c:a", "flac", "-f", "flac", "pipe:1",
+        "ffmpeg", "-v", "error", *(["-ss", f"{max(t, 0):.2f}"] if t else []), "-i", track["path"],
+        "-map", "0:a:0", "-c:a", "flac", "-f", "flac", "pipe:1",
         stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.DEVNULL)
 
     async def body():
