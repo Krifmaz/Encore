@@ -140,6 +140,21 @@ CREATE TABLE IF NOT EXISTS sync_state (
     PRIMARY KEY (connection_id, scope)
 );
 
+CREATE TABLE IF NOT EXISTS follows (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id INTEGER NOT NULL,
+    mbid TEXT NOT NULL,
+    name TEXT NOT NULL,
+    types TEXT NOT NULL DEFAULT '["Album","EP"]',
+    seen TEXT NOT NULL DEFAULT '[]',        -- release groups already handled
+    last_checked REAL,
+    last_found REAL,
+    found_count INTEGER NOT NULL DEFAULT 0,
+    last_error TEXT,
+    created_at REAL NOT NULL,
+    UNIQUE(user_id, mbid)
+);
+
 CREATE TABLE IF NOT EXISTS activity (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     ts REAL NOT NULL,

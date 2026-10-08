@@ -784,3 +784,57 @@ def test_stream_original_and_flac_transcode(world):
     assert r.status_code == 206 and len(r.content) == 100              # seekable
     r = c.get(f"/api/library/tracks/{tid}/stream?transcode=1")
     assert r.status_code == 200 and r.content[:4] == b"fLaC" and r.headers["x-transcoded"] == "flac"
+
+
+def test_follow_artist_new_releases(world, monkeypatch):
+    from app import db
+    c = world.client
+    monkeypatch.setitem(fakenet.RGS, "rg-future", fakenet.rg("rg-future", "Next Year", date="2999-01-01"))
+    # new-only: existing releases are marked seen, nothing requested
+    f = c.post("/api/follows", json={"mbid": "a-fake", "types": ["Album", "EP"]}, headers=H).json()
+    assert f["requested"] == 0 and not db.query("SELECT id FROM requests")
+    row = c.get("/api/follows").json()[0]
+    assert row["name"] == "Fake Band" and row["known_releases"] == 3, "future release not counted as seen"
+    assert c.get("/api/discover/artist/a-fake").json()["follow"]["id"] == f["id"]
+    assert c.post("/api/follows/check", headers=H).json() == {"new_releases": 0}
+    # a brand-new album appears → requested and queued (admin gets auto-download)
+    monkeypatch.setitem(fakenet.RGS, "rg-new", fakenet.rg("rg-new", "Brand New", date="2026-01-01"))
+    monkeypatch.setitem(fakenet.RGS, "rg-new-single", fakenet.rg("rg-new-single", "New Single", "Single", date="2026-01-01"))
+    assert c.post("/api/follows/check", headers=H).json() == {"new_releases": 1}
+    reqs = db.query("SELECT title, status, kind, mbid FROM requests")
+    assert [(r["title"], r["status"], r["kind"], r["mbid"]) for r in reqs] == [("Brand New", "queued", "album", "rg-new")]
+    assert c.post("/api/follows/check", headers=H).json() == {"new_releases": 0}, "never requested twice"
+    # announced release is picked up once it is out
+    fakenet.RGS["rg-future"]["first-release-date"] = "2020-02-02"
+    assert c.post("/api/follows/check", headers=H).json() == {"new_releases": 1}
+    # types can be changed; unfollow removes it
+    assert c.patch(f"/api/follows/{f['id']}", json={"types": ["Single", "Bogus"]}, headers=H).json()["types"] == ["Single"]
+    assert c.delete(f"/api/follows/{f['id']}", headers=H).json()["ok"]
+    assert c.get("/api/follows").json() == [] and c.get("/api/discover/artist/a-fake").json()["follow"] is None
+
+
+def test_follow_backfill_and_library_artists(world):
+    import time
+
+    from app import db
+    c = world.client
+    # backfill: missing studio album requested, singles and compilations are not
+    r = c.post("/api/follows", json={"mbid": "a-fake", "backfill": True}, headers=H).json()
+    assert r["requested"] == 1
+    assert [x["title"] for x in db.query("SELECT title FROM requests")] == ["Fake Album"]
+    c.delete(f"/api/follows/{r['id']}", headers=H)
+    # follow everyone in the library (artist matched by exact name on MusicBrainz)
+    fakenet.make_audio(str(world.library / "Fake Band" / "x.mp3"), "Alpha", album="Fake Album")
+    assert c.post("/api/library/scan", headers=H).status_code == 200
+    for _ in range(50):
+        if db.one("SELECT COUNT(*) n FROM tracks")["n"]:
+            break
+        time.sleep(0.1)
+    assert c.post("/api/follows/library", headers=H).status_code == 200
+    for _ in range(50):
+        st = c.get("/api/follows/library").json()
+        if not st.get("running"):
+            break
+        time.sleep(0.1)
+    assert st["followed"] == 1, st
+    assert [f["mbid"] for f in c.get("/api/follows").json()] == ["a-fake"]

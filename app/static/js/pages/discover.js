@@ -1,6 +1,7 @@
 import { api } from '../api.js';
 import { art, availability, debounce, emptyState, esc, fmt, icon, skeletonGrid, statusBadge } from '../ui.js';
 import { albumTile, bindTiles, submitRequest } from './common.js';
+import { followModal } from './following.js';
 
 const reqBtn = (attrs, label = 'Request') => `<button class="btn sm primary" ${attrs}>${icon.plus}${label}</button>`;
 
@@ -110,7 +111,8 @@ export async function renderArtist(view, ctx) {
         ${a.disambiguation ? `<p class="muted" style="margin:0 0 10px">${esc(a.disambiguation)}</p>` : ''}
         <div class="chips">${a.tags.map(t => `<span class="badge">${esc(t)}</span>`).join('')}</div>
         <div class="row wrap mt">
-          ${a.request_status ? statusBadge(a.request_status) : `<button class="btn primary" data-req-artist='${esc(JSON.stringify({ mbid: a.id, artist: a.name, cover_url: firstCover }))}'>${icon.plus}Request discography</button>`}
+          <button class="btn ${a.follow ? '' : 'primary'}" id="follow-btn">${a.follow ? `${icon.check}Following` : `${icon.plus}Follow`}</button>
+          ${a.request_status ? statusBadge(a.request_status) : `<button class="btn" data-req-artist='${esc(JSON.stringify({ mbid: a.id, artist: a.name, cover_url: firstCover }))}'>${icon.download}Request discography</button>`}
           <span class="badge ${owned ? 'ok' : ''}">${owned} / ${a.release_groups.length} releases in library</span>
           ${a.library_albums.length ? `<a class="btn sm" href="#/library?artist=${encodeURIComponent(a.name)}">${icon.library}Open in library</a>` : ''}
           <a class="btn sm ghost" target="_blank" rel="noopener" href="https://musicbrainz.org/artist/${esc(a.id)}">${icon.external}MusicBrainz</a>
@@ -123,6 +125,7 @@ export async function renderArtist(view, ctx) {
     ${!keys.length ? emptyState(icon.disc, 'No releases on MusicBrainz') : ''}`;
   bindTiles(view, ctx.navigate);
   bindRequestButtons(view);
+  view.querySelector('#follow-btn').onclick = () => followModal(a, () => window.dispatchEvent(new HashChangeEvent('hashchange')));
 }
 
 export async function renderAlbum(view, ctx) {

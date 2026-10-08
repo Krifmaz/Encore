@@ -33,6 +33,8 @@ DEFAULTS: dict[str, tuple[str | None, object, bool]] = {
     "album_upgrade": ("ENCORE_ALBUM_UPGRADE", "album_ep", False),     # off | album | album_ep
     "quality_first": ("ENCORE_QUALITY_FIRST", True, False),           # lossless sources before lossy ones
     "auto_request_likes": ("ENCORE_AUTO_REQUEST_LIKES", False, False),
+    "auto_request_follows": ("ENCORE_AUTO_REQUEST_FOLLOWS", True, False),  # new releases of followed artists
+    "follow_check_hours": ("ENCORE_FOLLOW_CHECK_HOURS", 12, False),
     "upgrade_lossy": ("ENCORE_UPGRADE_LOSSY", False, False),           # periodically look for lossless copies
     "upgrade_lossy_days": ("ENCORE_UPGRADE_LOSSY_DAYS", 7, False),
     # verification

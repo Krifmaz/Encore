@@ -21,6 +21,9 @@ export async function render(view) {
       <div class="card stack" style="flex:1;min-width:320px">
         <h2>What gets downloaded automatically</h2>
         ${sw('auto_request_likes', 'Liked songs', 'A song liked in Finamp, Plexamp, YouTube Music, Spotify, Tidal, Deezer… that isn’t in the library yet gets downloaded.')}
+        ${sw('auto_request_follows', 'New releases from followed artists', 'Albums/EPs that artists on the Following page release are downloaded as soon as MusicBrainz lists them (Lidarr-style monitoring).')}
+        <label class="field"><span>Check followed artists every</span>
+          <div class="row"><input class="input" type="number" min="0" data-k="follow_check_hours" value="${esc(s.follow_check_hours)}" style="width:110px"><span class="muted">hours (0 = never)</span></div></label>
         ${sw('auto_request_followed', 'New tracks in followed playlists', 'Playlists set to “Follow source” pull new tracks every sync and download the missing ones.')}
         ${sw('auto_approve', 'Skip the approval queue for everyone', 'Off: users’ manual requests wait for an admin. Auto-downloads for enabled users are always approved.')}
         <label class="field"><span>Check for new likes / playlist tracks every</span>
@@ -45,8 +48,8 @@ export async function render(view) {
       </div>
     </div>
     <div class="section-head"><h2>Users</h2><span class="small muted">Who auto-downloads are enabled for</span></div>
-    <div class="card flat"><div class="table-wrap"><table class="table"><thead><tr><th>User</th><th>Followed playlists</th><th>Connected accounts</th><th>Auto-download</th></tr></thead><tbody>
-      ${d.users.map(u => `<tr><td><b>${esc(u.username)}</b> ${u.role === 'admin' ? '<span class="badge">admin</span>' : ''}</td><td>${u.followed}</td><td>${u.connections}</td>
+    <div class="card flat"><div class="table-wrap"><table class="table"><thead><tr><th>User</th><th>Followed playlists</th><th>Followed artists</th><th>Connected accounts</th><th>Auto-download</th></tr></thead><tbody>
+      ${d.users.map(u => `<tr><td><b>${esc(u.username)}</b> ${u.role === 'admin' ? '<span class="badge">admin</span>' : ''}</td><td>${u.followed}</td><td>${u.follows}</td><td>${u.connections}</td>
         <td><label class="switch"><input type="checkbox" data-user="${u.id}" ${u.auto_download ? 'checked' : ''}><i></i></label></td></tr>`).join('')}
     </tbody></table></div></div>`;
   view.querySelector('[data-k="album_upgrade"]').value = s.album_upgrade;

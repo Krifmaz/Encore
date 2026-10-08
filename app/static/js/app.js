@@ -15,6 +15,7 @@ import * as playlistsPage from './pages/playlists.js';
 import * as connectionsPage from './pages/connections.js';
 import * as autoPage from './pages/autodownload.js';
 import * as diagPage from './pages/diagnostics.js';
+import * as followingPage from './pages/following.js';
 
 export const session = { user: null, info: null };
 
@@ -29,6 +30,7 @@ const routes = [
   [/^\/playlists$/, playlistsPage.render],
   [/^\/playlists\/(\d+)$/, playlistsPage.renderPlaylist],
   [/^\/connections$/, connectionsPage.render],
+  [/^\/following$/, followingPage.render],
   [/^\/download$/, downloadPage.render],
   [/^\/activity$/, activityPage.render, true],
   [/^\/admin\/users$/, adminPage.renderUsers, true],
@@ -76,6 +78,7 @@ function renderShell() {
           ${navLink('/library', icon.library, 'Library')}
           ${navLink('/requests', icon.inbox, 'Requests', '<span class="badge warn hidden" id="pending-badge"></span>')}
           ${navLink('/playlists', icon.list, 'Playlists')}
+          ${navLink('/following', icon.users, 'Following')}
           ${navLink('/download', icon.download, 'Downloader')}
           ${navLink('/connections', icon.link, 'Connections')}
           ${admin ? `<div class="nav-label">Admin</div>

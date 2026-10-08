@@ -722,6 +722,7 @@ async def loop() -> None:
     last_scan = 0.0
     last_sync = time.time() - 60 * 60  # first sync shortly after start
     last_upgrade = time.time()
+    last_follow = time.time() - 23 * 3600  # first new-release check shortly after start
     while not _stop.is_set():
         try:
             for r in db.query(f"SELECT id FROM requests WHERE status IN ({','.join('?' * len(ACTIVE))}) ORDER BY id", ACTIVE):
@@ -738,6 +739,11 @@ async def loop() -> None:
             if config.get("upgrade_lossy") and time.time() - last_upgrade > 6 * 3600:
                 last_upgrade = time.time()
                 asyncio.create_task(queue_lossy_upgrades())
+            follow_every = int(config.get("follow_check_hours")) * 3600
+            if follow_every and time.time() - last_follow > follow_every:
+                last_follow = time.time()
+                from .services import follows
+                asyncio.create_task(follows.check_all())
             sync_every = int(config.get("sync_interval_minutes")) * 60
             if sync_every and time.time() - last_sync > sync_every:
                 last_sync = time.time()

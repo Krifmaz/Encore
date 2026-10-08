@@ -147,7 +147,7 @@ def activity(limit: int = 200):
 
 # ---- auto-download -----------------------------------------------------------------
 
-AUTO_KEYS = ["auto_request_followed", "auto_request_likes", "album_upgrade", "quality_first", "upgrade_lossy",
+AUTO_KEYS = ["auto_request_followed", "auto_request_likes", "auto_request_follows", "follow_check_hours", "album_upgrade", "quality_first", "upgrade_lossy",
              "upgrade_lossy_days", "sync_interval_minutes", "auto_approve", "source_order"]
 
 
@@ -168,7 +168,8 @@ def get_autodownload():
         HAVING SUM(CASE WHEN format IN ('flac','wav','alac','aiff','ape','wv') THEN 1 ELSE 0 END) = 0)""")["n"]
     users = db.query("""SELECT u.id, u.username, u.auto_download, u.role,
         (SELECT COUNT(*) FROM playlists p WHERE p.user_id=u.id AND p.follow=1) followed,
-        (SELECT COUNT(*) FROM connections c WHERE c.user_id=u.id) connections
+        (SELECT COUNT(*) FROM connections c WHERE c.user_id=u.id) connections,
+        (SELECT COUNT(*) FROM follows f WHERE f.user_id=u.id) follows
         FROM users u WHERE u.disabled=0 ORDER BY u.username""")
     return {"settings": {k: config.get(k) for k in AUTO_KEYS}, "users": users, "stats": {**stats, "lossy_albums": lossy}}
 

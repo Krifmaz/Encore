@@ -15,12 +15,12 @@ def _ua() -> str:
     return f"Encore/{__version__} ( {contact} )"
 
 
-async def _get(path: str, params: dict | None = None) -> dict:
+async def _get(path: str, params: dict | None = None, fresh: bool = False) -> dict:
     params = dict(params or {})
     params["fmt"] = "json"
     key = path + "?" + "&".join(f"{k}={v}" for k, v in sorted(params.items()))
     hit = _cache.get(key)
-    if hit and hit[0] > time.time():
+    if hit and hit[0] > time.time() and not fresh:
         return hit[1]
     global _last
     base = config.get("musicbrainz_url").rstrip("/")
@@ -102,6 +102,7 @@ def _rg(rg: dict) -> dict:
         "type": rg.get("primary-type") or "",
         "secondary": rg.get("secondary-types", []),
         "year": (rg.get("first-release-date") or "")[:4],
+        "date": rg.get("first-release-date") or "",
         "score": rg.get("score", 0),
         "cover": cover_rg(rg["id"]),
     }
@@ -164,12 +165,12 @@ async def search_releases(artist: str, album: str, limit: int = 15) -> list[dict
 
 # ---- lookups ----------------------------------------------------------------
 
-async def artist(mbid: str) -> dict:
-    a = await _get(f"artist/{mbid}", {"inc": "tags+url-rels"})
+async def artist(mbid: str, fresh: bool = False) -> dict:
+    a = await _get(f"artist/{mbid}", {"inc": "tags+url-rels"}, fresh)
     rgs = []
     offset = 0
     while True:
-        page = await _get("release-group", {"artist": mbid, "limit": 100, "offset": offset})
+        page = await _get("release-group", {"artist": mbid, "limit": 100, "offset": offset}, fresh)
         rgs += page.get("release-groups", [])
         offset += 100
         if offset >= page.get("release-group-count", 0) or offset >= 500:

@@ -52,13 +52,15 @@ async def search(q: str, type: str = "all"):
 
 
 @router.get("/artist/{mbid}")
-async def artist(mbid: str):
+async def artist(mbid: str, user=Depends(auth.current_user)):
     try:
         a = await mb.artist(mbid)
     except Exception as e:  # noqa: BLE001
         raise HTTPException(502, f"MusicBrainz error: {e}")
     annotate_albums(a["release_groups"])
     a["request_status"] = _req_status([mbid]).get(mbid)
+    f = db.one("SELECT id, types FROM follows WHERE user_id=? AND mbid=?", (user["id"], mbid))
+    a["follow"] = {"id": f["id"], "types": __import__("json").loads(f["types"])} if f else None
     a["library_albums"] = db.query(
         "SELECT album_id, album, year, COUNT(*) tracks FROM tracks WHERE mb_albumartistid=? OR lower(albumartist)=lower(?) GROUP BY album_id ORDER BY year DESC",
         (mbid, a["name"]),
