@@ -33,7 +33,7 @@ A self-hosted music request and library app. Your users sign in, search the whol
 ## Quick start
 
 ```bash
-git clone https://github.com/krifmaz/test encore && cd encore
+git clone https://github.com/Krifmaz/Encore encore && cd encore
 cp .env.example .env        # set paths, admin password, API keys
 docker compose up -d --build
 ```
