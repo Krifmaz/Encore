@@ -67,6 +67,11 @@ async def test(service: str, user=Depends(auth.admin_user)):
         if service == "tidal":
             await sources._tidal_token()
             return {"ok": True, "message": "Tidal credentials valid"}
+        if service == "hifi":
+            from ..services import hifi
+            if not hifi.endpoints():
+                return {"ok": False, "message": "Enter the URL of your HiFi API instance"}
+            return await hifi.status()
         if service == "streamrip":
             if not streamrip.binary():
                 return {"ok": False, "message": "streamrip is not installed in this container (use the default Docker image or set its path)"}

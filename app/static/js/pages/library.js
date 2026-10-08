@@ -378,8 +378,8 @@ function matchModal(id, a, ctx) {
     body: `<div class="tabs" id="mprov" style="margin-bottom:12px;max-width:100%">${[['musicbrainz', 'MusicBrainz'], ['deezer', 'Deezer'], ['apple', 'Apple Music'], ['discogs', 'Discogs'], ['fingerprint', 'By audio (AcoustID)']].map(([k, l]) => `<button type="button" data-p="${k}" class="${k === 'musicbrainz' ? 'active' : ''}">${l}</button>`).join('')}</div>
       <p class="small muted" id="mprov-help" style="margin:-4px 0 10px"></p>
       <form class="row wrap" id="mq">
-        <input class="input grow" name="artist" value="${esc(a.albumartist)}" placeholder="Artist" style="max-width:260px">
-        <input class="input grow" name="album" value="${esc(a.album || '')}" placeholder="Album">
+        <input class="input grow" name="artist" value="${esc(a.albumartist_orig ?? a.albumartist)}" placeholder="Artist" style="max-width:260px">
+        <input class="input grow" name="album" value="${esc(a.album_orig ?? a.album ?? '')}" placeholder="Album">
         <button class="btn" type="submit">${icon.search}Search</button>
         <input class="input" name="rid" placeholder="…or paste a MusicBrainz / Deezer / Apple / Discogs link" style="max-width:340px">
       </form>
@@ -473,10 +473,12 @@ function matchModal(id, a, ctx) {
     else if (dc) preview(`discogs:${dc[1][0]}${dc[2]}`);
     else search(f.get('artist'), f.get('album'));
   };
-  search(a.albumartist === 'Unknown Artist' ? '' : a.albumartist, a.album || '');
+  const artist0 = a.albumartist_orig ?? a.albumartist;
+  search(artist0 === 'Unknown Artist' ? '' : artist0, a.album_orig ?? a.album ?? '');
 }
 
-function editModal(id, a, ctx) {
+async function editModal(id, _shown, ctx) {
+  const a = await api.get(`/library/albums/${id}?raw=true`);   // real tags, never localized display names
   const m = modal({
     title: 'Edit tags',
     wide: true,

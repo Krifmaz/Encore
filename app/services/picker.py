@@ -2,7 +2,7 @@
 import re
 
 from .. import config
-from . import lidarr, matcher, slskd, streamrip, ytmusic
+from . import hifi, lidarr, matcher, slskd, streamrip, ytmusic
 from .http import client
 
 LOSSLESS = {"flac", "alac", "wav", "aiff", "aif", "ape", "wv"}
@@ -14,6 +14,8 @@ def available() -> list[dict]:
         out.append({"id": "slskd", "name": "Soulseek"})
     if streamrip.enabled() and "deezer" in config.get("streamrip_sources"):
         out.append({"id": "deezer", "name": "Deezer"})
+    if hifi.enabled():
+        out.append({"id": "hifi", "name": "TIDAL (HiFi API)"})
     if config.get("ytdlp_enabled"):
         out.append({"id": "ytmusic", "name": "YouTube Music"})
     if lidarr.enabled():
@@ -130,6 +132,22 @@ async def search_ytmusic(kind: str, artist: str, title: str, query: str, track_c
     return out
 
 
+async def search_hifi(kind: str, artist: str, title: str, query: str, track_count: int | None, length: float | None) -> list[dict]:
+    q = {"LOSSLESS": "FLAC 16-bit", "HI_RES_LOSSLESS": "FLAC hi-res", "HI_RES": "MQA", "HIGH": "AAC 320"}
+    if kind == "album":
+        res = await hifi.search_albums(query)
+        out = [{"source": "hifi", "key": f"hifi:a{a['id']}", "title": a["title"], "subtitle": a["artist"], "quality": q.get(a["quality"], a["quality"] or "FLAC"),
+                "lossless": a["quality"] != "HIGH", "tracks": a.get("tracks"), "size": None, "info": a.get("date", ""), "cover": a.get("cover"),
+                "score": _match(title, artist, a["title"], a["artist"]), "payload": {"kind": "album", "id": a["id"], "title": a["title"]}} for a in res]
+    else:
+        res = await hifi.search_tracks(query)
+        out = [{"source": "hifi", "key": f"hifi:t{t['id']}", "title": t["title"], "subtitle": f"{t['artist']} · {t['album']}", "quality": q.get(t["quality"], t["quality"] or "FLAC"),
+                "lossless": t["quality"] != "HIGH", "tracks": 1, "size": None, "duration": t.get("duration"), "info": t.get("isrc") or "", "cover": t.get("cover"),
+                "score": _match(title, artist, t["title"], t["artist"], length, t.get("duration")), "payload": {"kind": "track", "id": t["id"], "title": t["title"]}} for t in res]
+    out.sort(key=lambda c: -c["score"])
+    return out
+
+
 async def search_lidarr(kind: str, artist: str, title: str, mbid: str | None, artist_mbid: str | None) -> list[dict]:
     if kind != "album" or not mbid:
         raise ValueError("Lidarr searches whole albums only")
@@ -162,6 +180,8 @@ async def search(source: str, kind: str, artist: str, title: str, query: str | N
         return await search_deezer(kind, artist, title, q, track_count, length)
     if source == "ytmusic":
         return await search_ytmusic(kind, artist, title, q, track_count, length)
+    if source == "hifi":
+        return await search_hifi(kind, artist, title, q, track_count, length)
     if source == "lidarr":
         return await search_lidarr(kind, artist, title, mbid, artist_mbid)
     raise ValueError(f"Unknown source {source}")

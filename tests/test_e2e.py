@@ -1204,3 +1204,56 @@ def test_scheduled_tasks(world):
     assert st["result"].startswith("1 leftover") and "1 old request" in st["result"] and not os.path.exists(stale)
     assert c.post("/api/admin/tasks/nope/run", headers=H).status_code == 404
     assert scheduler._first_delay("scan") == 30
+
+
+def test_localized_names_per_user(world):
+    from app import db
+    from app.services import tagger
+    c = world.client
+    d = world.library / "ヨアソビ" / "夜に駆ける"
+    for i, t in enumerate(["夜に駆ける", "群青"], 1):
+        p = fakenet.make_audio(str(d / f"0{i}.flac"), t, artist="ヨアソビ", album="夜に駆ける", track=i, seconds=5 + i)
+        tagger.write_tags(p, {"albumartist": "ヨアソビ", "musicbrainz_albumid": "r-jp", "musicbrainz_albumartistid": "a-jp", "musicbrainz_artistid": "a-jp"})
+    fakenet.make_audio(str(world.library / "Москва" / "x" / "01.flac"), "Привет", artist="Москва", album="Город", track=1, seconds=9)
+    world.run(__import__("app.services.library", fromlist=["x"]).scan)
+
+    assert {t["title"] for t in c.get("/api/library/tracks").json()} == {"夜に駆ける", "群青", "Привет"}, "off by default"
+    p = c.put("/api/auth/prefs", json={"localize": True, "lang": "en", "latin": True}, headers=H).json()
+    assert p == {"localize": True, "lang": "en", "latin": True}
+    from app.services import localize
+    world.run(localize.localize_library, "en", True)
+    tr = {t["title_orig"]: t for t in c.get("/api/library/tracks").json()}
+    assert tr["夜に駆ける"]["title"] == "Racing into the Night" and tr["群青"]["title"] == "Gunjo"     # official English tracklist
+    assert tr["夜に駆ける"]["artist"] == "YOASOBI"                                                    # MusicBrainz alias
+    assert tr["Привет"]["title"] == "Privet" and tr["Привет"]["artist"] == "Moskva"                  # romanized
+    albums = {a["album"] for a in c.get("/api/library/albums").json()["items"]}
+    assert albums == {"Racing into the Night", "Gorod"}
+    aid = db.one("SELECT album_id FROM tracks WHERE album='夜に駆ける'")["album_id"]
+    assert c.get(f"/api/library/albums/{aid}").json()["album"] == "Racing into the Night"
+    assert c.get(f"/api/library/albums/{aid}?raw=true").json()["album"] == "夜に駆ける", "the tag editor sees the real tags"
+
+    # Japanese in Latin letters → the romaji tracklist
+    c.put("/api/auth/prefs", json={"lang": "ja"}, headers=H)
+    world.run(localize.localize_library, "ja", True)
+    assert {t["title"] for t in c.get("/api/library/tracks").json()} >= {"Yoru ni Kakeru", "Gunjou"}
+    assert c.put("/api/auth/prefs", json={"lang": "xx"}, headers=H).status_code == 400
+    c.put("/api/auth/prefs", json={"localize": False}, headers=H)
+    assert "夜に駆ける" in {t["title"] for t in c.get("/api/library/tracks").json()}
+    import mutagen
+    assert mutagen.File(str(d / "01.flac"), easy=True)["title"] == ["夜に駆ける"], "files are never changed"
+
+
+def test_hifi_api_source_and_picker(world):
+    from app import config, db
+    c = world.client
+    config.set_many({"hifi_enabled": True, "hifi_api_url": "http://nonexistent-hifi.test, http://hifi.test", "source_order": "lidarr,streamrip,slskd,ytdlp"})
+    assert c.post("/api/system/test/hifi", headers=H).json()["ok"], "second endpoint answers after the first fails"
+    r = world.drive(world.req(kind="track", mbid="rec-delta", artist="Fake Band", title="Delta"))
+    assert r["status"] == "completed" and "TIDAL" in r["message"] and r["source"] == "hifi", r
+    r = world.drive(world.req(kind="album", mbid="rg-album", artist="Fake Band", title="Fake Album"))
+    assert r["status"] == "completed" and "TIDAL" in r["message"], r
+    assert {t["title"]: t["format"] for t in db.query("SELECT title, format FROM tracks")} == {"Alpha": "flac", "Beta": "flac", "Gamma": "flac", "Delta": "flac"}
+    assert db.one("SELECT source FROM tracks WHERE title='Alpha'")["source"] == "TIDAL"
+    res = c.post("/api/picker/search", json={"source": "hifi", "kind": "album", "artist": "Fake Band", "title": "Fake Album"}, headers=H).json()
+    assert res[0]["payload"] == {"kind": "album", "id": 777, "title": "Fake Album"} and res[0]["lossless"]
+    assert "hifi" in [s["id"] for s in c.get("/api/picker/sources").json()["sources"]]

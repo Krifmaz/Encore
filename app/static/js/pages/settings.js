@@ -29,7 +29,7 @@ const SECTIONS = [
     S('embed_cover', 'Embed cover art in files', 'bool'),
   ] },
   { id: 'pipeline', title: 'Download pipeline', fields: [
-    S('source_order', 'Source order', 'text', { full: true, help: 'Comma-separated: lidarr, streamrip, slskd, ytdlp. Each source is tried in turn until one succeeds. Lidarr only handles albums.' }),
+    S('source_order', 'Source order', 'text', { full: true, help: 'Comma-separated: lidarr, streamrip, hifi, slskd, ytdlp. Each source is tried in turn until one succeeds. Lidarr only handles albums.' }),
   ] },
   { id: 'verify', title: 'Verification & duplicates', test: 'acoustid', fields: [
     S('acoustid_api_key', 'AcoustID API key', 'password', { full: true, help: 'Free – register an application at acoustid.org/new-application. Used to fingerprint audio and confirm each file is the right song/version.' }),
@@ -46,6 +46,11 @@ const SECTIONS = [
     S('streamrip_qobuz_token', 'Qobuz auth token', 'password', { help: 'play.qobuz.com → dev tools → Network → user/login response' }),
     S('streamrip_bin', 'streamrip executable (optional)', 'text', { help: 'Leave empty to auto-detect' }),
     S('streamrip_command', 'Command template (advanced)', 'text', { full: true }),
+  ] },
+  { id: 'hifi', title: 'TIDAL via HiFi API (Monochrome)', test: 'hifi', fields: [
+    S('hifi_enabled', 'Enable HiFi API source', 'bool', { help: 'Lossless TIDAL downloads through a HiFi API instance – the backend Monochrome uses. Run your own instance with your own TIDAL subscription.' }),
+    S('hifi_api_url', 'HiFi API URL(s)', 'text', { full: true, help: 'e.g. http://hifi-api:8000 – several can be given, comma-separated; they are tried in order' }),
+    S('hifi_quality', 'Quality', 'select', { options: [['LOSSLESS', 'Lossless – 16-bit FLAC'], ['HI_RES_LOSSLESS', 'Hi-res FLAC (up to 24/192)'], ['HIGH', 'AAC 320']] }),
   ] },
   { id: 'sync', title: 'Playlists & sync', fields: [
     S('sync_interval_minutes', 'Sync likes & playlists every (minutes)', 'number', { help: '0 disables automatic sync' }),

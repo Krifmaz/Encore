@@ -8,7 +8,7 @@ import traceback
 
 from . import config, db
 from .services.http import loop_local
-from .services import library, lidarr, musicbrainz as mb, notify, slskd, streamrip, tagger, ytdlp, ytmusic
+from .services import hifi, library, lidarr, musicbrainz as mb, notify, slskd, streamrip, tagger, ytdlp, ytmusic
 
 ACTIVE = ("queued", "searching", "downloading", "monitoring", "importing")
 _running: dict[int, asyncio.Task] = {}
@@ -102,7 +102,7 @@ async def next_source(r: dict, reason: str = "") -> None:
     if src == "slskd_lossless":
         await start_slskd(r, lossless_only=True)
         return
-    await {"lidarr": start_lidarr, "slskd": start_slskd, "ytdlp": start_ytdlp, "streamrip": start_streamrip}[src](r)
+    await {"lidarr": start_lidarr, "slskd": start_slskd, "ytdlp": start_ytdlp, "streamrip": start_streamrip, "hifi": start_hifi}[src](r)
 
 
 async def start(r: dict) -> None:
@@ -144,14 +144,16 @@ async def start(r: dict) -> None:
     if r["kind"] == "album" and not r["mbid"] and d.get("ext"):
         await _release_info(r)      # Deezer/Apple tracklist: used for matching downloads and tagging
     order = [s.strip() for s in config.get("source_order").split(",") if s.strip()]
+    if "hifi" not in order and hifi.enabled():      # older saved orders predate this source
+        order.insert(order.index("slskd") if "slskd" in order else len(order), "hifi")
     if config.get("quality_first") or d.get("lossless_only"):
         # every lossless option first (in the admin's order), then lossy fallbacks
-        lossless = [s for s in order if s == "streamrip"] + (["slskd_lossless"] if "slskd" in order else [])
-        order = lossless + [s for s in order if s not in ("streamrip",)]
+        lossless = [s for s in order if s in ("streamrip", "hifi")] + (["slskd_lossless"] if "slskd" in order else [])
+        order = lossless + [s for s in order if s not in ("streamrip", "hifi")]
     if d.get("lossless_only"):
-        order = [s for s in order if s in ("streamrip", "slskd_lossless")]
+        order = [s for s in order if s in ("streamrip", "hifi", "slskd_lossless")]
     avail = {"lidarr": lidarr.enabled() and r["kind"] == "album" and r["mbid"], "slskd": slskd.enabled(),
-             "slskd_lossless": slskd.enabled(), "ytdlp": ytdlp.enabled(), "streamrip": streamrip.enabled()}
+             "slskd_lossless": slskd.enabled(), "ytdlp": ytdlp.enabled(), "streamrip": streamrip.enabled(), "hifi": hifi.enabled()}
     seen: set = set()
     d["sources"] = [s for s in order if avail.get(s) and not (s in seen or seen.add(s))]
     d["log"] = []
@@ -362,6 +364,9 @@ async def start_pick(r: dict) -> None:
     elif src in ("ytmusic", "link"):
         upd(r, source="ytdlp")
         await start_ytdlp(r, pick_url=p["payload"]["url"])
+    elif src == "hifi":
+        upd(r, source="hifi")
+        await start_hifi(r, pick=p["payload"])
     elif src == "lidarr":
         pl = p["payload"]
         await lidarr.grab(pl["guid"], pl["indexerId"])
@@ -595,6 +600,56 @@ async def start_streamrip(r: dict, urls: list[str] | None = None) -> None:
                 db.log("warning", f"streamrip failed for {label(r)} ({url}): {e}")
         shutil.rmtree(_staging(r), ignore_errors=True)
         await next_source(r, f"streamrip: {last_err[:150]}")
+
+
+# ---- HiFi API (Monochrome's TIDAL backend) -------------------------------------------
+
+async def start_hifi(r: dict, pick: dict | None = None) -> None:
+    async with loop_local("hifi", lambda: asyncio.Semaphore(1)):
+        _check(r["id"])
+        out = os.path.join(_staging(r), "hifi")
+        shutil.rmtree(out, ignore_errors=True)
+        try:
+            if r["kind"] == "track":
+                if pick and pick.get("kind") == "track":
+                    t = {"id": pick["id"], "title": pick.get("title") or r["title"]}
+                else:
+                    upd(r, status="searching", message="Searching TIDAL (HiFi API)…")
+                    t = await hifi.find_track(r["artist"], r["title"], await _isrc_for(r), r["detail"].get("length"))
+                if not t:
+                    await next_source(r, "not found on TIDAL (HiFi API)")
+                    return
+                upd(r, status="downloading", message=f"TIDAL: {t['title']}")
+                f = await hifi.download_track(t["id"], out, f"{r['artist']} - {t['title']}")
+                upd(r, status="importing", progress=100, message="Verifying, tagging and importing…")
+                p, note = await tagger.import_single(f, r["artist"], r["title"], r["mbid"], out, r["detail"].get("length"))
+                new = [p]
+            else:
+                rel = await _release_info(r)
+                if pick and pick.get("kind") == "album":
+                    alb = {"id": pick["id"], "title": pick.get("title") or r["album"] or r["title"]}
+                else:
+                    upd(r, status="searching", message="Searching TIDAL (HiFi API)…")
+                    alb = await hifi.find_album(r["artist"], r["album"] or r["title"], len(rel["tracks"]) if rel else None)
+                if not alb:
+                    await next_source(r, "album not found on TIDAL (HiFi API)")
+                    return
+                tracks = await hifi.album_tracks(alb["id"])
+                files = []
+                for i, t in enumerate(tracks):
+                    _check(r["id"])
+                    upd(r, status="downloading", progress=round(i / max(len(tracks), 1) * 100, 1), message=f"TIDAL: {i + 1}/{len(tracks)} – {t['title']}")
+                    files.append(await hifi.download_track(t["id"], out, f"{(t.get('disc') or 1)}-{(t.get('track') or i + 1):02d} {t['title']}"))
+                upd(r, status="importing", progress=100, message="Verifying, tagging and importing…")
+                new = await tagger.import_album_files(files, r["artist"], r["album"] or r["title"], r["mbid"], out, source_meta=_source_meta(r))
+                note = ""
+        except (RuntimeError, tagger.VerificationFailed) as e:
+            shutil.rmtree(_staging(r), ignore_errors=True)
+            await next_source(r, f"HiFi API: {str(e)[:150]}")
+            return
+        shutil.rmtree(_staging(r), ignore_errors=True)
+        await complete(r, "Downloaded lossless from TIDAL (HiFi API)" + (f" – {note}" if note else ""), new,
+                       {"source": "TIDAL", "detail": "via HiFi API"})
 
 
 # ---- yt-dlp -----------------------------------------------------------------

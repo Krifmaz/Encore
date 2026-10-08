@@ -109,6 +109,39 @@ def me(user=Depends(auth.current_user)):
     return {**user, "requests_this_week": used}
 
 
+class Prefs(BaseModel):
+    localize: bool | None = None
+    lang: str | None = None
+    latin: bool | None = None
+
+
+@router.get("/prefs")
+def get_prefs(user=Depends(auth.current_user)):
+    from ..services import localize
+    return {**localize.prefs(user), "languages": localize.LANGS, "job": localize.state}
+
+
+@router.put("/prefs")
+async def put_prefs(body: Prefs, user=Depends(auth.current_user)):
+    """Per-user display preferences (localized names). Nothing in the files changes."""
+    import asyncio
+    import json
+
+    from ..services import localize
+    p = localize.prefs(user)
+    if body.lang is not None:
+        if body.lang not in localize.LANGS:
+            raise HTTPException(400, "Unsupported language")
+        p["lang"] = body.lang
+    for k in ("localize", "latin"):
+        if getattr(body, k) is not None:
+            p[k] = getattr(body, k)
+    db.execute("UPDATE users SET prefs=? WHERE id=?", (json.dumps(p), user["id"]))
+    if p["localize"]:
+        asyncio.create_task(localize.localize_library(p["lang"], p["latin"]))
+    return p
+
+
 @router.post("/password")
 def change_password(body: PasswordChange, request: Request, user=Depends(auth.current_user)):
     full = db.one("SELECT * FROM users WHERE id=?", (user["id"],))

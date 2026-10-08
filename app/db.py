@@ -140,6 +140,8 @@ CREATE TABLE IF NOT EXISTS sync_state (
     PRIMARY KEY (connection_id, scope)
 );
 
+CREATE TABLE IF NOT EXISTS loc (kind TEXT NOT NULL, original TEXT NOT NULL, lang TEXT NOT NULL, value TEXT NOT NULL, source TEXT,
+    PRIMARY KEY (kind, original, lang));
 CREATE TABLE IF NOT EXISTS task_runs (key TEXT PRIMARY KEY, last_run REAL, duration REAL, result TEXT, error TEXT);
 CREATE TABLE IF NOT EXISTS plays (
     id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER NOT NULL, track_id INTEGER, artist TEXT, title TEXT, album TEXT,
@@ -184,7 +186,7 @@ MIGRATIONS = {
     "tracks": [("isrc", "TEXT"), ("acoustid_id", "TEXT"), ("verify_status", "TEXT"), ("verify_detail", "TEXT"), ("verified_at", "REAL"),
                ("source", "TEXT"), ("source_detail", "TEXT"), ("source_url", "TEXT"), ("request_id", "INTEGER"), ("downloaded_at", "REAL")],
     "playlists": [("remote_ids", "TEXT DEFAULT '{}'")],
-    "users": [("auto_download", "INTEGER NOT NULL DEFAULT 1")],
+    "users": [("auto_download", "INTEGER NOT NULL DEFAULT 1"), ("prefs", "TEXT NOT NULL DEFAULT '{}'")],
 }
 
 

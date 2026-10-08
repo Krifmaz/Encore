@@ -140,8 +140,20 @@ def mb_artist_search(query: str = ""):
                          "life-span": {"begin": "2010"}, "tags": [{"name": "electronic", "count": 2}]}] if "fake" in query.lower() else []}
 
 
+JP_RELEASE = {"id": "r-jp", "title": "夜に駆ける", "media": [{"tracks": [{"title": "夜に駆ける"}, {"title": "群青"}]}],
+              "relations": [{"type": "transl-tracklisting", "direction": "backward",
+                             "release": {"id": "r-jp-en", "text-representation": {"language": "eng", "script": "Latn"}}},
+                            {"type": "transl-tracklisting", "direction": "backward",
+                             "release": {"id": "r-jp-romaji", "text-representation": {"language": "jpn", "script": "Latn"}}}]}
+JP_PSEUDO = {"r-jp-en": {"id": "r-jp-en", "title": "Racing into the Night", "media": [{"tracks": [{"title": "Racing into the Night"}, {"title": "Gunjo"}]}]},
+             "r-jp-romaji": {"id": "r-jp-romaji", "title": "Yoru ni Kakeru", "media": [{"tracks": [{"title": "Yoru ni Kakeru"}, {"title": "Gunjou"}]}]}}
+
+
 @app.get("/mb.test/ws/2/artist/{aid}")
 def mb_artist(aid: str):
+    if aid == "a-jp":
+        return {"id": aid, "name": "ヨアソビ", "sort-name": "YOASOBI", "aliases": [{"name": "YOASOBI", "locale": "en", "primary": True, "type": "Artist name"},
+                                                                               {"name": "ヨアソビ", "locale": "ja", "primary": True, "type": "Artist name"}]}
     return {"id": aid, "name": ARTIST["name"], "type": "Group", "country": "GB", "life-span": {"begin": "2010"},
             "tags": [{"name": "electronic", "count": 2}], "relations": [{"type": "bandcamp", "url": {"resource": "https://fake.bandcamp.com"}},
                                                      {"type": "wikidata", "url": {"resource": "https://www.wikidata.org/wiki/Q42"}},
@@ -178,6 +190,10 @@ def _release_browse(query, rgid):
 
 @app.get("/mb.test/ws/2/release/{rid}")
 def mb_release(rid: str):
+    if rid == "r-jp":
+        return JP_RELEASE
+    if rid in JP_PSEUDO:
+        return JP_PSEUDO[rid]
     return release_json(rid)
 
 
@@ -539,6 +555,51 @@ def dz_user_tracks(uid: str):
 @app.get(DZ + "/user/{uid}/playlists")
 def dz_user_pls(uid: str):
     return {"data": [{"id": 55, "title": "Deezer Mix", "link": "https://www.deezer.com/playlist/55"}]}
+
+
+# ================================================================= HiFi API (Monochrome) ==
+HF = "/hifi.test"
+HF_TRACKS = {5001 + i: (t, s, isrc) for i, (t, _, s, isrc) in enumerate(ALBUM_TRACKS + [SINGLE])}
+
+
+def hf_track(tid):
+    t, s, isrc = HF_TRACKS[tid]
+    return {"id": tid, "title": t, "duration": s, "isrc": isrc, "audioQuality": "LOSSLESS", "trackNumber": tid - 5000, "volumeNumber": 1,
+            "artist": {"name": ARTIST["name"]}, "artists": [{"name": ARTIST["name"]}], "album": {"title": "Fake Album", "cover": "aaaa-bbbb"}}
+
+
+@app.get(HF + "/search/")
+def hf_search(s: str = "", i: str = "", al: str = ""):
+    if al:
+        return {"version": "2.0", "data": {"albums": {"items": [{"id": 777, "title": "Fake Album", "numberOfTracks": 3, "audioQuality": "LOSSLESS",
+                                                                  "artists": [{"name": ARTIST["name"]}], "releaseDate": "2020-01-01", "cover": "aaaa-bbbb"}]
+                                                       if "fake album" in al.lower() else []}}}
+    if i:
+        return {"version": "2.0", "data": {"items": [hf_track(k) for k, v in HF_TRACKS.items() if v[2] == i]}}
+    return {"version": "2.0", "data": {"items": [hf_track(k) for k, v in HF_TRACKS.items() if v[0].lower() in s.lower()]}}
+
+
+@app.get(HF + "/album/")
+def hf_album(id: int):
+    return {"version": "2.0", "data": {"id": id, "title": "Fake Album", "items": [{"item": hf_track(k), "type": "track"} for k in (5001, 5002, 5003)]}}
+
+
+@app.get(HF + "/track/")
+def hf_stream(id: int, quality: str = "LOSSLESS"):
+    import base64 as b64
+    m = {"mimeType": "audio/flac", "codecs": "flac", "encryptionType": "NONE", "urls": [f"http://hifi.test/file/{id}.flac"]}
+    return {"version": "2.0", "data": {"trackId": id, "audioQuality": quality, "manifestMimeType": "application/vnd.tidal.bts",
+                                       "manifest": b64.b64encode(json.dumps(m).encode()).decode()}}
+
+
+@app.get(HF + "/file/{name}")
+def hf_file(name: str):
+    import tempfile
+    tid = int(name.split(".")[0])
+    t, s, isrc = HF_TRACKS[tid]
+    p = make_audio(os.path.join(tempfile.mkdtemp(), "x.flac"), t, album="Fake Album" if tid < 5004 else "", track=tid - 5000, seconds=s, isrc=isrc)
+    with open(p, "rb") as fh:
+        return Response(fh.read(), media_type="audio/flac")
 
 
 # ================================================================= LRCLIB =============

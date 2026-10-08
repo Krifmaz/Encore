@@ -43,6 +43,7 @@ DEFAULTS: dict[str, tuple[str | None, object, bool]] = {
     "task_verify_enabled": (None, False, False), "task_verify_minutes": (None, 1440, False),
     "task_cleanup_enabled": (None, True, False), "task_cleanup_minutes": (None, 1440, False),
     "task_cleanup_days": (None, 14, False),
+    "task_localize_enabled": (None, True, False), "task_localize_minutes": (None, 1440, False),
     "task_lossy_minutes": (None, 360, False),
     "task_discover_minutes": (None, 360, False),
     "lyrics_on_import": ("ENCORE_LYRICS_ON_IMPORT", True, False),
@@ -59,9 +60,12 @@ DEFAULTS: dict[str, tuple[str | None, object, bool]] = {
     "reject_mismatch": ("ENCORE_REJECT_MISMATCH", True, False),
     "dedupe_on_import": ("ENCORE_DEDUPE_ON_IMPORT", True, False),
     # pipeline
-    "source_order": ("ENCORE_SOURCE_ORDER", "lidarr,streamrip,slskd,ytdlp", False),
+    "source_order": ("ENCORE_SOURCE_ORDER", "lidarr,streamrip,hifi,slskd,ytdlp", False),
     # streamrip (Qobuz / Tidal / Deezer with your own subscription)
     "streamrip_enabled": ("STREAMRIP_ENABLED", False, False),
+    "hifi_enabled": ("HIFI_ENABLED", False, False),                    # Monochrome's backend: a HiFi API instance
+    "hifi_api_url": ("HIFI_API_URL", "", False),                       # one or more, comma-separated
+    "hifi_quality": ("HIFI_QUALITY", "LOSSLESS", False),               # LOSSLESS (16-bit FLAC) | HI_RES_LOSSLESS | HIGH
     "streamrip_bin": ("STREAMRIP_BIN", "", False),
     "streamrip_sources": ("STREAMRIP_SOURCES", "deezer,tidal", False),
     "streamrip_quality": ("STREAMRIP_QUALITY", 2, False),
