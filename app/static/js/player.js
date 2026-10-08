@@ -96,8 +96,13 @@ function render() {
   const el = document.getElementById('player');
   if (!el) return;
   const t = current();
-  el.classList.toggle('hidden', !t);
-  if (!t) return;
+  document.body.classList.add('has-player');
+  if (!t) {
+    el.innerHTML = `<div class="now"><div class="thumb"><div class="ph">${icon.music.replace('<svg', '<svg width="20"')}</div></div>
+      <div class="grow"><div style="font-weight:650" class="faint">Nothing playing</div>
+      <div class="small muted ellipsis">Open an album in <a href="#/library" style="color:var(--accent)">Library</a> and press ▶ Play</div></div></div>`;
+    return;
+  }
   el.innerHTML = `
     <div class="p-mini"><i id="p-mini"></i></div>
     <div class="now">
@@ -135,7 +140,7 @@ function render() {
   };
   el.querySelector('#p-close').onclick = () => {
     audio.pause(); audio.removeAttribute('src'); state.queue = []; state.index = -1;
-    document.body.classList.remove('has-player'); render(); emit();
+    render(); emit();
   };
   updateTime();
 }

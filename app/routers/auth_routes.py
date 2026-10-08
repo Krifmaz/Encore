@@ -32,7 +32,11 @@ def _set_cookie(resp: Response, request: Request, token: str, max_age: int):
 
 @router.get("/info")
 def info():
-    return {"app_name": config.get("app_name"), "signup_mode": config.get("signup_mode")}
+    import os
+
+    from .. import __version__
+    return {"app_name": config.get("app_name"), "signup_mode": config.get("signup_mode"),
+            "version": __version__, "build": os.environ.get("ENCORE_BUILD", "dev")[:7]}
 
 
 @router.get("/invite/{code}")

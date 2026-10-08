@@ -45,12 +45,18 @@ async def security_headers(request: Request, call_next):
     resp.headers.setdefault("Referrer-Policy", "same-origin")
     if request.url.path.startswith("/api/"):
         resp.headers.setdefault("Cache-Control", "no-store")
+    else:
+        # app files: browsers must re-check on every load (cheap 304s), so updates show up immediately
+        resp.headers.setdefault("Cache-Control", "no-cache")
     return resp
+
+
+BUILD = os.environ.get("ENCORE_BUILD", "dev")
 
 
 @app.get("/api/health")
 def health():
-    return {"ok": True, "version": __version__}
+    return {"ok": True, "version": __version__, "build": BUILD}
 
 
 @app.exception_handler(404)

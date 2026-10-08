@@ -25,6 +25,9 @@ RUN pip install -r requirements.txt
 
 # Optional Qobuz/Tidal/Deezer downloader (uses your own subscription). Build with
 # --build-arg INSTALL_STREAMRIP=false to leave it out.
+ARG ENCORE_BUILD=dev
+ENV ENCORE_BUILD=${ENCORE_BUILD}
+
 ARG INSTALL_STREAMRIP=true
 ARG STREAMRIP_REF=v2.4.9
 RUN if [ "$INSTALL_STREAMRIP" = "true" ]; then \

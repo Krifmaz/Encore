@@ -12,7 +12,10 @@ router = APIRouter(prefix="/api/system", tags=["system"])
 async def _check(name, coro):
     try:
         res = await asyncio.wait_for(coro, 10)
-        return name, {"ok": True, "version": (res or {}).get("version") if isinstance(res, dict) else None}
+        ver = (res or {}).get("version") if isinstance(res, dict) else None
+        if isinstance(ver, dict):  # slskd reports {"full": "0.21.0.0", …}
+            ver = ver.get("full") or ver.get("current")
+        return name, {"ok": True, "version": ver}
     except Exception as e:  # noqa: BLE001
         return name, {"ok": False, "error": str(e)[:200]}
 

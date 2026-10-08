@@ -89,7 +89,7 @@ function renderShell() {
         <div class="sidebar-foot">
           <a href="#/account" class="row grow" style="min-width:0">
             <div class="avatar">${esc(u.username[0])}</div>
-            <div class="grow"><div class="ellipsis" style="font-weight:650">${esc(u.username)}</div><div class="small faint">${admin ? 'Administrator' : 'Member'}</div></div>
+            <div class="grow"><div class="ellipsis" style="font-weight:650">${esc(u.username)}</div><div class="small faint" title="Encore version / build">${admin ? 'Admin' : 'Member'} · v${esc(session.info?.version || '')}${session.info?.build && session.info.build !== 'dev' ? ' · ' + esc(session.info.build) : ''}</div></div>
           </a>
           <button class="btn ghost icon" id="theme-btn" title="Toggle theme">${document.documentElement.dataset.theme === 'light' ? icon.moon : icon.sun}</button>
           <button class="btn ghost icon" id="logout-btn" title="Sign out">${icon.logout}</button>
