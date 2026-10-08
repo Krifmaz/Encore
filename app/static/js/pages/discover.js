@@ -12,7 +12,13 @@ function trackRow(t) {
       <div class="small muted ellipsis"><a href="#/artist/${esc(t.artist_id)}">${esc(t.artist)}</a>${t.album ? ` · ${t.release_group_id ? `<a href="#/album/${esc(t.release_group_id)}">${esc(t.album)}</a>` : esc(t.album)}` : ''}${t.year ? ' · ' + esc(t.year) : ''}</div>
     </div>
     <span class="small faint hide-sm">${t.length ? fmt.dur(t.length) : ''}</span>
-    ${availability(t) || reqBtn(`data-req-track='${esc(JSON.stringify({ mbid: t.id, artist: t.artist, title: t.title, album: t.album, cover_url: t.cover, year: t.year, length: t.length }))}'`)}
+    ${availability(t) || (() => {
+      const j = { mbid: t.id, artist: t.artist, title: t.title, album: t.album, cover_url: t.cover, year: t.year, length: t.length };
+      return `<div class="row req-group" style="gap:6px">
+        <button class="btn sm primary" title="Just this song" data-req-track='${esc(JSON.stringify({ ...j, album_mode: 'song' }))}'>${icon.plus}Song</button>
+        <button class="btn sm" title="Request the song and download the whole album it's on, in the best quality available" data-req-track='${esc(JSON.stringify({ ...j, album_mode: 'album' }))}'>${icon.disc}+ Album</button>
+      </div>`;
+    })()}
   </div>`;
 }
 
@@ -148,7 +154,7 @@ export async function renderAlbum(view, ctx) {
         <td class="hide-sm muted">${esc(t.artist)}</td>
         <td class="muted">${fmt.dur(t.length)}</td>
         <td style="text-align:right">${t.in_library ? '<span class="badge ok">In library</span>'
-          : a.in_library || a.request_status ? '' : `<button class="btn sm" data-req-track='${esc(JSON.stringify({ mbid: t.recording_id, artist: t.artist, title: t.title, album: a.title, cover_url: a.cover, year: a.year, length: t.length }))}'>${icon.plus}Track</button>`}</td>
+          : a.in_library || a.request_status ? '' : `<button class="btn sm" data-req-track='${esc(JSON.stringify({ mbid: t.recording_id, artist: t.artist, title: t.title, album: a.title, cover_url: a.cover, year: a.year, length: t.length, album_mode: 'song' }))}'>${icon.plus}Track</button>`}</td>
       </tr>`).join('')}</tbody></table></div></div>` : emptyState(icon.disc, 'No track listing available')}`;
   bindRequestButtons(view);
 }

@@ -1,5 +1,6 @@
 import { api } from '../api.js';
 import { art, confirmDialog, emptyState, esc, icon, modal, statusBadge, toast } from '../ui.js';
+import * as player from '../player.js';
 
 const SRC = {
   spotify: 'Spotify', ytmusic: 'YouTube Music', deezer: 'Deezer', tidal: 'Tidal', qobuz: 'Qobuz', apple: 'Apple Music', ytdlp: 'YouTube / SoundCloud',
@@ -32,6 +33,9 @@ export function importModal(ctx, { url = '', into = null } = {}) {
         ${into ? '' : `<input class="input" id="imp-name" placeholder="Playlist name (optional)" style="max-width:280px">
         <label class="switch"><input type="checkbox" id="imp-follow"><i></i>Keep following (pull new tracks)</label>`}
         <label class="switch"><input type="checkbox" id="imp-req"><i></i>Download missing tracks</label>
+        <select class="input" id="imp-album" style="width:auto" title="When a song is part of an album">
+          <option value="">Albums: admin default</option><option value="song">Just the songs</option><option value="album">Whole albums</option>
+        </select>
         <button class="btn" id="imp-preview">${icon.search}Preview</button>
       </div>
       <div id="imp-out" class="mt"></div>`,
@@ -71,6 +75,7 @@ export function importModal(ctx, { url = '', into = null } = {}) {
       const r = await api.post('/playlists/import', {
         ...body(), into, name: el('#imp-name')?.value.trim() || null,
         follow: el('#imp-follow')?.checked || false, request_missing: el('#imp-req').checked,
+        album_mode: el('#imp-album').value || null,
       });
       toast(`Imported ${r.added} track(s)${r.duplicates_skipped ? `, skipped ${r.duplicates_skipped} duplicate(s)` : ''}${r.requested ? `, requested ${r.requested}` : ''}`, 'ok');
       m.close();
@@ -149,7 +154,8 @@ export async function renderPlaylist(view, ctx) {
         <div class="muted">${pl.total} tracks · <b style="color:var(--ok)">${pl.matched}</b> in library · ${pl.total - pl.matched} missing</div>
         <div class="progress mt" style="max-width:360px"><i style="width:${pl.total ? pl.matched / pl.total * 100 : 0}%"></i></div>
         <div class="row wrap mt">
-          ${missing ? `<button class="btn primary" id="req">${icon.download}Download ${missing} missing</button>` : ''}
+          ${pl.matched ? `<button class="btn primary" id="pl-play">${icon.play}Play</button>` : ''}
+          ${missing ? `<button class="btn ${pl.matched ? '' : 'primary'}" id="req">${icon.download}Download ${missing} missing</button>` : ''}
           <button class="btn" id="add">${icon.plus}Add from link</button>
           <button class="btn" id="dedupe">${icon.check}Remove duplicates</button>
           <button class="btn" id="rematch">${icon.refresh}Re-check library</button>
@@ -183,7 +189,10 @@ export async function renderPlaylist(view, ctx) {
     ${pl.items.length ? '' : emptyState(icon.music, 'Empty playlist', 'Add tracks from an album page or from a link.')}`;
   const reload = () => window.dispatchEvent(new HashChangeEvent('hashchange'));
   const act = async (fn, msg) => { try { const r = await fn(); toast(msg(r), 'ok'); reload(); } catch (e) { toast(e.message, 'err'); } };
-  view.querySelector('#req')?.addEventListener('click', () => act(() => api.post(`/playlists/${id}/request-missing`), r => `Requested ${r.requested} track(s)`));
+  const playable = pl.items.filter(i => i.track_id).map(i => ({ id: i.track_id, title: i.title, artist: i.artist, album: i.album, album_id: i.album_id, format: i.format, bitrate: i.bitrate, duration: i.duration }));
+  view.querySelector('#pl-play')?.addEventListener('click', () => player.playQueue(playable, 0));
+  view.querySelector('#req')?.addEventListener('click', () => albumChoice('Download missing songs', (mode) =>
+    act(() => api.post(`/playlists/${id}/request-missing`, { album_mode: mode }), r => `Requested ${r.requested} track(s)`)));
   view.querySelector('#dedupe').onclick = () => act(() => api.post(`/playlists/${id}/dedupe`), r => r.removed ? `Removed ${r.removed} duplicate(s)` : 'No duplicates');
   view.querySelector('#rematch').onclick = () => act(() => api.post(`/playlists/${id}/rematch`), r => `${r.matched} newly matched`);
   view.querySelector('#refresh')?.addEventListener('click', () => act(() => api.post(`/playlists/${id}/refresh`), r => `${r.added} new track(s)`));
@@ -211,6 +220,24 @@ export async function renderPlaylist(view, ctx) {
     const tr = b.closest('[data-item]');
     await api.del(`/playlists/${id}/items/${tr.dataset.item}`);
     tr.remove();
+  };
+}
+
+export function albumChoice(title, go) {
+  const m = modal({
+    title: esc(title),
+    body: `<p class="muted" style="margin-top:0">When a song is part of an album:</p>
+      <div class="stack">
+        <button class="btn" data-m="song">${icon.music}Just the song</button>
+        <button class="btn" data-m="album">${icon.disc}Download the whole album (best quality available)</button>
+        <button class="btn ghost" data-m="">Use the admin default</button>
+      </div>`,
+  });
+  m.el.querySelector('.stack').onclick = (e) => {
+    const b = e.target.closest('[data-m]');
+    if (!b) return;
+    m.close();
+    go(b.dataset.m || null);
   };
 }
 

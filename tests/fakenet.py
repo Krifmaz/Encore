@@ -22,7 +22,7 @@ SINGLE = ("Delta", "rec-delta", 8, "QZAAA0000004")
 WRONG_SECONDS = 11  # audio of this length fingerprints as a different song
 DURATION_TO_REC = {5: "rec-alpha", 6: "rec-beta", 7: "rec-gamma", 8: "rec-delta"}
 REC_TITLES = {"rec-alpha": "Alpha", "rec-beta": "Beta", "rec-gamma": "Gamma", "rec-delta": "Delta"}
-JPEG = bytes.fromhex("ffd8ffe000104a46494600010100000100010000ffdb004300") + b"\x08" * 64 + bytes.fromhex("ffd9")
+JPEG = bytes.fromhex("ffd8ffe000104a46494600010100000100010000ffdb004300") + b"\x08" * 4000 + bytes.fromhex("ffd9")
 
 
 def make_audio(path: str, title: str, artist: str = "Fake Band", album: str = "", track: int = 1, seconds: int = 5, isrc: str = ""):
@@ -444,6 +444,21 @@ def dz_user_pls(uid: str):
     return {"data": [{"id": 55, "title": "Deezer Mix", "link": "https://www.deezer.com/playlist/55"}]}
 
 
+# ================================================================= iTunes =============
+@app.get("/itunes.apple.com/search")
+def itunes(term: str, entity: str = "album"):
+    if "obscure" not in term.lower():
+        return {"results": []}
+    key = "collectionName" if entity == "album" else "trackName"
+    return {"results": [{"artistName": "Obscure Artist", key: "Hidden Gem", "artworkUrl100": "https://is1-ssl.mzstatic.com/image/thumb/x/100x100bb.jpg"}]}
+
+
+@app.get("/is1-ssl.mzstatic.com/{path:path}")
+def itunes_art(path: str):
+    NET.calls.append(("ART", "itunes", path))
+    return Response(JPEG, media_type="image/jpeg")
+
+
 # ================================================================= Spotify ============
 def sp_track(t, s, isrc, tid):
     return {"id": tid, "type": "track", "name": t, "duration_ms": s * 1000, "external_ids": {"isrc": isrc},
@@ -458,6 +473,12 @@ async def sp_token(request: Request):
     if f.get("grant_type") == "authorization_code":
         return {"access_token": "user-token", "refresh_token": "r1", "expires_in": 3600}
     return {"access_token": "user-token-2", "expires_in": 3600}
+
+
+@app.get("/api.spotify.com/v1/tracks/{tid}")
+def sp_track_get(tid: str):
+    t, _, sec, isrc = {"sp1": ALBUM_TRACKS[0], "sp4": SINGLE}.get(tid, ALBUM_TRACKS[1])
+    return sp_track(t, sec, isrc, tid)
 
 
 @app.get("/api.spotify.com/v1/me")

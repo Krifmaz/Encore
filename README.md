@@ -11,6 +11,7 @@ A self-hosted music request and library app. Your users sign in, search the whol
 - **Lossless upgrades**: albums you only have as MP3 or YouTube rips can be re-checked periodically. A lossless copy replaces the old files, and playlists follow it automatically.
 - **YouTube Music**: playlists, albums and your Liked Music import with proper artist and album data. Connect your account for two-way 👍 sync and playlist push. Songs and whole albums are downloaded from official YouTube Music uploads in the original stream quality (256 kbps with Premium cookies).
 - **Admin → Auto-download** controls what downloads on its own (liked songs from any app, new tracks in followed playlists), the album and quality rules, lossless upgrades, and which users have it switched on.
+- **Song or whole album, per request**: in Discover, *Song* or *+ Album*. In the Downloader, *Just the song / Get the whole album / Admin default*, which also applies to playlist imports.
 - **Downloader**: a Spotify, Apple Music, Deezer, Tidal or Qobuz link (playlist, album or track) is matched track by track, and each song is fetched from the best source. YouTube, SoundCloud, Bandcamp, Mixcloud and about 1,800 other sites download directly.
 - **Playlists and Liked Songs**:
   - Import from Spotify (including private playlists and Liked Songs once you connect your account), Deezer, Tidal, Apple Music, Qobuz, YouTube Music, SoundCloud, Bandcamp, ListenBrainz, or a pasted "Artist – Title" list.
@@ -20,6 +21,9 @@ A self-hosted music request and library app. Your users sign in, search the whol
   - One version-aware matcher is used everywhere. It tells originals apart from remixes (including *which* remixer), live, acoustic, radio and extended edits, instrumentals, slowed/sped-up versions, re-recordings ("Taylor's Version") and covers by other artists. Remasters and "feat." credits count as the same song.
   - Downloads are fingerprinted with **AcoustID/Chromaprint** before import. Wrong audio is rejected and the next source is tried.
   - A song that's already in the library is not imported a second time; a better-quality file replaces the old one. The *Duplicates* tab finds identical copies already in the library, and *Wrong audio* lists files whose content doesn't match their tags.
+- **Web player**: play albums, songs and playlists in the browser. MP3, FLAC, AAC and Opus stream as the original file, with no conversion and full seeking. ALAC, APE, WavPack, AIFF and WMA are converted to FLAC on the fly, which keeps them lossless.
+- **Where it came from**: every downloaded track shows its source on the album page (Soulseek user and folder, YouTube Music link, Deezer/Tidal/Qobuz release, Lidarr or a direct link) and when it was downloaded.
+- **Artwork for everything**: Cover Art Archive first, then the request's own cover, then Deezer, iTunes or YouTube Music. Art is embedded in the files so Finamp and Plexamp show it too. *Library → Find missing artwork* fixes existing albums.
 - **Library**: browse albums, artists and songs, match albums to MusicBrainz with an old → new preview, write full tags and cover art, rename files using your template, bulk auto-tag, edit tags by hand, and download albums as zips.
 - **Integrations**: Navidrome/Jellyfin/Plex rescans after imports, Discord/ntfy/webhook notifications, and an API key with Swagger docs at `/api/docs`.
 

@@ -20,6 +20,8 @@ class NewRequest(BaseModel):
     cover_url: str | None = None
     url: str | None = None
     length: float | None = None
+    isrc: str | None = None
+    album_mode: str | None = None   # None/"auto" = admin default · "song" = just this song · "album" = whole album
 
 
 def _quota(user: dict, n: int = 1) -> None:
@@ -55,6 +57,10 @@ def _create(user: dict, body: NewRequest, parent_id: int | None = None, notify_a
     approved = user["role"] == "admin" or user.get("auto_approve") or config.get("auto_approve")
     now = time.time()
     detail = {"length": body.length} if body.length else {}
+    if body.isrc:
+        detail["isrc"] = body.isrc
+    if body.album_mode in ("song", "album"):
+        detail["album_mode"] = body.album_mode
     rid = db.execute(
         "INSERT INTO requests (user_id, kind, mbid, artist, title, album, year, cover_url, url, status, message, detail, parent_id, created_at, updated_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
         (user["id"], body.kind, body.mbid, body.artist, body.title or body.album, body.album, body.year, body.cover_url, body.url,
@@ -99,6 +105,37 @@ async def create(body: NewRequest, user=Depends(auth.current_user)):
     if r["status"] == "pending":
         await notify.send("🎵 New request awaiting approval", f"{user['username']} requested {body.kind}: {r['title'] or r['artist'] or r['url']}", body.cover_url)
     return r
+
+
+class FromLink(BaseModel):
+    url: str
+    album_mode: str | None = None
+
+
+@router.post("/from-link")
+async def from_link(body: FromLink, user=Depends(auth.current_user)):
+    """Request every song behind a link (one song, an album or a playlist) from the best source –
+    optionally pulling each song's whole album."""
+    from ..services import sources
+    try:
+        data = await sources.fetch(body.url, user["id"])
+    except sources.SourceError as e:
+        raise HTTPException(400, str(e))
+    _quota(user)
+    made, skipped = [], 0
+    for t in data["tracks"][:500]:
+        try:
+            rid = _create(user, NewRequest(kind="track", artist=t["artist"], title=t["title"], album=t.get("album"),
+                                           cover_url=t.get("cover"), length=t.get("duration"), isrc=t.get("isrc"),
+                                           mbid=t.get("mbid"), album_mode=body.album_mode))
+            made.append(rid)
+        except HTTPException as e:
+            if e.status_code != 409:
+                raise
+            skipped += 1
+    window_status = db.get_request(made[0])["status"] if made else None
+    return {"requested": len(made), "already_requested": skipped, "name": data.get("name"), "status": window_status,
+            "ids": made}
 
 
 def _get_owned(rid: int, user: dict) -> dict:

@@ -1,4 +1,5 @@
 import { api } from './api.js';
+import * as player from './player.js';
 import { esc, icon, qs, toast } from './ui.js';
 import * as authPages from './pages/auth.js';
 import * as home from './pages/home.js';
@@ -162,6 +163,7 @@ export async function boot() {
   try { session.user = await api.get('/auth/me'); } catch { session.user = null; }
   if (session.user) {
     renderShell();
+    player.mount();
     refreshPendingBadge();
     setInterval(refreshPendingBadge, 30000);
   }

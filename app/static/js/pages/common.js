@@ -7,7 +7,7 @@ export async function submitRequest(body, btn) {
     const r = await api.post('/requests', body);
     toast(r.status === 'pending' ? 'Request sent – waiting for approval' : 'Request queued', 'ok');
     window.dispatchEvent(new CustomEvent('encore:requests-changed'));
-    if (btn) btn.outerHTML = statusBadge(r.status);
+    if (btn) (btn.closest('.req-group') || btn).outerHTML = statusBadge(r.status);
     return r;
   } catch (e) {
     toast(e.message, 'err');
@@ -31,6 +31,7 @@ export function libraryTile(a) {
   return `<div class="tile" data-href="/library/album/${esc(a.id)}">
     <div class="art">${art(`/api/library/albums/${a.id}/cover`, a.album)}
       ${a.untagged ? '<div class="corner"><span class="badge warn" title="Some tracks lack MusicBrainz tags">Untagged</span></div>' : ''}
+      <div class="overlay"><button class="fab" data-play-album="${esc(a.id)}" aria-label="Play">${icon.play}</button></div>
     </div>
     <div class="t ellipsis" title="${esc(a.album)}">${esc(a.album || 'Unknown album')}</div>
     <div class="s ellipsis">${esc(a.albumartist)}${a.year ? ' · ' + esc(a.year) : ''}</div>
@@ -39,6 +40,13 @@ export function libraryTile(a) {
 
 export function bindTiles(root, navigate) {
   root.addEventListener('click', async (e) => {
+    const play = e.target.closest('[data-play-album]');
+    if (play) {
+      e.stopPropagation();
+      const { playAlbum } = await import('./library.js');
+      playAlbum(play.dataset.playAlbum);
+      return;
+    }
     if (e.target.closest('button, a, input')) return;
     const tile = e.target.closest('[data-href]');
     if (tile) navigate(tile.dataset.href);

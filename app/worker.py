@@ -45,9 +45,22 @@ def label(r: dict) -> str:
 
 # ---- lifecycle --------------------------------------------------------------
 
-async def complete(r: dict, message: str, new_paths: list[str] | None = None) -> None:
+def record_origin(paths: list[str], origin: dict | None, request_id: int | None, since: float = 0) -> None:
+    """Remember where each file came from (shown on the album page). Files that were already in the library
+    (kept instead of a new duplicate) keep their original origin."""
+    if not origin:
+        return
+    now = time.time()
+    for p in paths:
+        db.execute("""UPDATE tracks SET source=?, source_detail=?, source_url=?, request_id=?, downloaded_at=?
+                      WHERE path=? AND (downloaded_at IS NULL OR downloaded_at >= ?) AND added_at >= ?""",
+                   (origin.get("source"), origin.get("detail"), origin.get("url"), request_id, now, p, since, since - 1))
+
+
+async def complete(r: dict, message: str, new_paths: list[str] | None = None, origin: dict | None = None) -> None:
     if new_paths:
         await library.index_paths(new_paths)
+        record_origin(new_paths, origin, r["id"], r.get("created_at") or 0)
     upd(r, status="completed", progress=100, message=message)
     try:
         from .services import playlists
@@ -165,7 +178,7 @@ def _track_in_library(r: dict) -> bool:
 async def try_album_upgrade(r: dict) -> bool:
     """If the song belongs to an official album, fetch the whole album instead (best quality available)."""
     d = r["detail"]
-    mode = config.get("album_upgrade")
+    mode = {"song": "off", "album": "album_ep"}.get(d.get("album_mode") or "", config.get("album_upgrade"))
     if mode == "off" or d.get("no_album"):
         return False
     upd(r, status="searching", message="Looking up which album this song is on…")
@@ -282,6 +295,9 @@ async def poll_lidarr(r: dict) -> None:
     stats = alb.get("statistics") or {}
     if stats.get("trackFileCount", 0) > 0 and stats.get("percentOfTracks", 0) >= 99:
         await library.scan()
+        now = time.time()
+        db.execute("""UPDATE tracks SET source='Lidarr', source_detail=?, request_id=?, downloaded_at=?
+                      WHERE mb_releasegroupid=? AND source IS NULL""", (f"Lidarr album #{st['album_id']}", r["id"], now, r["mbid"]))
         await complete(r, "Downloaded and imported by Lidarr")
         return
     q = [x for x in await lidarr.queue() if x["album"] == alb.get("title")]
@@ -428,7 +444,8 @@ async def import_slskd(r: dict, c: dict) -> None:
         upd(r, status="downloading", message=f"Rejected {c['username']}'s files: {e}")
         await _slskd_try_next(r, f"wrong audio ({e})")
         return
-    await complete(r, f"Downloaded from Soulseek ({c['format'].upper()})" + (f" – {note}" if note else ""), new)
+    await complete(r, f"Downloaded from Soulseek ({c['format'].upper()})" + (f" – {note}" if note else ""), new,
+                   {"source": "Soulseek", "detail": f"user {c['username']} · {c['directory'].replace(chr(92), '/')}"})
 
 
 def _discard(paths: list[str], root: str) -> None:
@@ -492,7 +509,8 @@ async def start_streamrip(r: dict) -> None:
                     new = [p]
                 shutil.rmtree(_staging(r), ignore_errors=True)
                 svc = "Deezer" if "deezer" in url else "Tidal" if "tidal" in url else "Qobuz"
-                await complete(r, f"Downloaded from {svc} via streamrip" + (f" – {note}" if note else ""), new)
+                await complete(r, f"Downloaded from {svc} via streamrip" + (f" – {note}" if note else ""), new,
+                               {"source": svc, "detail": "via streamrip", "url": url})
                 return
             except (RuntimeError, tagger.VerificationFailed) as e:
                 last_err = str(e)
@@ -518,6 +536,8 @@ async def start_ytdlp(r: dict) -> None:
             if not url:
                 await next_source(r, "no match on YouTube")
                 return
+            if hit and hit.get("cover") and not r.get("cover_url"):
+                tagger.COVER_HINT.set(hit["cover"])
             upd(r, status="downloading", message=f"Downloading {url}")
             res = await ytdlp.download(url, out, _progress_hook(r))
             if not res["files"]:
@@ -530,7 +550,8 @@ async def start_ytdlp(r: dict) -> None:
                 await next_source(r, f"YouTube match was the wrong audio ({e})")
                 return
             shutil.rmtree(out, ignore_errors=True)
-            await complete(r, ("Downloaded from YouTube Music" if hit else "Downloaded from YouTube") + (f" – {note}" if note else ""), [new])
+            await complete(r, ("Downloaded from YouTube Music" if hit else "Downloaded from YouTube") + (f" – {note}" if note else ""), [new],
+                           {"source": "YouTube Music" if hit else "YouTube", "url": url})
             return
         rel = await _release_info(r)
         album_title = r["album"] or r["title"]
@@ -545,7 +566,8 @@ async def start_ytdlp(r: dict) -> None:
                     upd(r, status="importing", progress=100, message="Verifying, tagging and importing…")
                     new = await tagger.import_album_files(res["files"], r["artist"], album_title, r["mbid"], out)
                     shutil.rmtree(out, ignore_errors=True)
-                    await complete(r, "Downloaded from YouTube Music", new)
+                    await complete(r, "Downloaded from YouTube Music", new,
+                                   {"source": "YouTube Music", "detail": f"album {yt_album['title']}", "url": yt_album["playlist_url"]})
                     return
             except tagger.VerificationFailed as e:
                 db.log("warning", f"YouTube Music album for {label(r)} rejected: {e}")
@@ -582,7 +604,8 @@ async def start_ytdlp(r: dict) -> None:
             await next_source(r, f"YouTube matches were wrong ({e})")
             return
         shutil.rmtree(out, ignore_errors=True)
-        await complete(r, "Downloaded from YouTube" + (f" ({len(missing)} track(s) missing)" if missing else ""), new)
+        await complete(r, "Downloaded from YouTube" + (f" ({len(missing)} track(s) missing)" if missing else ""), new,
+                       {"source": "YouTube Music", "detail": "matched track by track"})
 
 
 def _progress_hook(r: dict):
@@ -607,6 +630,8 @@ async def run_url(r: dict) -> None:
             return
         upd(r, status="importing", message="Tagging and importing…")
         entries = res["entries"]
+        if len(entries) == 1 and entries[0].get("thumbnail") and not r.get("cover_url"):
+            tagger.COVER_HINT.set(entries[0]["thumbnail"])
         albums = {e.get("album") for e in entries if e.get("album")}
         new = []
         if len(res["files"]) > 1 and len(albums) == 1:
@@ -627,7 +652,10 @@ async def run_url(r: dict) -> None:
                 except tagger.VerificationFailed as e:
                     db.log("warning", f"Skipped {os.path.basename(path)}: {e}")
         shutil.rmtree(out, ignore_errors=True)
-        await complete(r, f"Downloaded {len(new)} file(s)", new)
+        from urllib.parse import urlsplit
+        host = urlsplit(r["url"]).hostname or "link"
+        await complete(r, f"Downloaded {len(new)} file(s)", new,
+                       {"source": "YouTube Music" if "music.youtube" in host else host.removeprefix("www."), "detail": "direct link", "url": r["url"]})
 
 
 async def run_streamrip_url(r: dict) -> None:
@@ -647,7 +675,8 @@ async def run_streamrip_url(r: dict) -> None:
                 p, _ = await tagger.import_single(fs[0], t["artist"], t["title"], None, out, reject=False)
                 new.append(p)
         shutil.rmtree(out, ignore_errors=True)
-        await complete(r, f"Downloaded {len(new)} file(s) via streamrip", new)
+        svc = "Deezer" if "deezer" in r["url"] else "Tidal" if "tidal" in r["url"] else "Qobuz"
+        await complete(r, f"Downloaded {len(new)} file(s) via streamrip", new, {"source": svc, "detail": "via streamrip", "url": r["url"]})
 
 
 # ---- loop -------------------------------------------------------------------
@@ -656,6 +685,7 @@ async def step(rid: int) -> None:
     r = db.get_request(rid)
     if not r or r["status"] not in ACTIVE:
         return
+    tagger.COVER_HINT.set(r.get("cover_url"))
     try:
         if r["status"] == "queued":
             await start(r)

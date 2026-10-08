@@ -715,3 +715,72 @@ def test_lidarr_test_returns_message_and_options_and_diagnostics(world):
     d = c.get("/api/system/diagnostics").json()
     lid = next(x for x in d["checks"] if x["name"] == "Lidarr")
     assert not lid["ok"] and "Can't find host" in lid["detail"]
+
+
+def test_one_song_but_whole_album_from_a_link(world):
+    from app import config, db
+    c = world.client
+    config.set_many({"slskd_enabled": True, "album_upgrade": "off"})   # admin default: songs only…
+    r = c.post("/api/requests/from-link", json={"url": "https://open.spotify.com/track/sp1", "album_mode": "album"}, headers=H).json()
+    assert r["requested"] == 1
+    tid = r["ids"][0]
+    world.drive(tid, 2)
+    t = db.get_request(tid)
+    assert t["detail"]["album_mode"] == "album" and t["source"] == "album", t   # …but this request pulls the album
+    album = db.one("SELECT * FROM requests WHERE kind='album'")
+    assert album["mbid"] == "rg-album"
+    world.drive(album["id"])
+    assert world.drive(tid)["status"] == "completed" and len(tracks(db)) == 3
+    # and the reverse: admin default = albums, this request = just the song
+    config.set_many({"album_upgrade": "album_ep", "slskd_enabled": False, "streamrip_enabled": True})
+    r = c.post("/api/requests/from-link", json={"url": "https://open.spotify.com/track/sp4", "album_mode": "song"}, headers=H).json()
+    assert world.drive(r["ids"][0])["status"] == "completed"
+    assert db.one("SELECT COUNT(*) n FROM requests WHERE kind='album'")["n"] == 1
+
+
+def test_origin_is_recorded_and_shown(world):
+    from app import config, db
+    c = world.client
+    config.set_many({"slskd_enabled": True})
+    world.drive(world.req(kind="album", mbid="rg-album", artist="Fake Band", title="Fake Album"))
+    aid = db.one("SELECT album_id FROM tracks LIMIT 1")["album_id"]
+    t = c.get(f"/api/library/albums/{aid}").json()["tracks"][0]
+    assert t["source"] == "Soulseek" and "peer" in t["source_detail"] and t["downloaded_at"] and t["request_id"]
+    config.set_many({"slskd_enabled": False, "ytdlp_enabled": True})
+    world.drive(world.req(kind="track", mbid="rec-delta", artist="Fake Band", title="Delta"))
+    d = db.one("SELECT * FROM tracks WHERE title='Delta'")
+    assert d["source"] == "YouTube Music" and d["source_url"] == "https://music.youtube.com/watch?v=vid-delta"
+
+
+def test_artwork_fallback_for_releases_musicbrainz_lacks(world):
+    from app import db
+    from app.services import library, tagger
+    c = world.client
+    stage = world.library.parent / "staging"
+    f = make_audio(str(stage / "gem.opus"), "Hidden Gem", artist="Obscure Artist", seconds=9)
+    p, _ = world.run(tagger.import_single, f, "Obscure Artist", "Hidden Gem", None, str(stage), None, False)
+    assert library.extract_embedded(p), "cover from iTunes embedded into the file"
+    aid = db.one("SELECT album_id FROM tracks WHERE path=?", (p,))["album_id"]
+    assert c.get(f"/api/library/albums/{aid}/cover").status_code == 200
+    # a second single in the same Singles folder never borrows the first one's cover.jpg
+    assert not os.path.exists(os.path.join(os.path.dirname(p), "cover.jpg"))
+    # bulk "find missing artwork" endpoint runs
+    assert c.post("/api/library/artwork", headers=H).status_code == 200
+
+
+def test_stream_original_and_flac_transcode(world):
+    from app import db
+    c = world.client
+    make_audio(str(world.library / "A" / "B" / "01.mp3"), "Song", album="B")
+    c.post("/api/library/scan", headers=H)
+    for _ in range(50):
+        if db.one("SELECT id FROM tracks"):
+            break
+        time.sleep(0.1)
+    tid = db.one("SELECT id FROM tracks")["id"]
+    r = c.get(f"/api/library/tracks/{tid}/stream")
+    assert r.status_code == 200 and r.headers["content-type"] == "audio/mpeg"
+    r = c.get(f"/api/library/tracks/{tid}/stream", headers={"Range": "bytes=0-99"})
+    assert r.status_code == 206 and len(r.content) == 100              # seekable
+    r = c.get(f"/api/library/tracks/{tid}/stream?transcode=1")
+    assert r.status_code == 200 and r.content[:4] == b"fLaC" and r.headers["x-transcoded"] == "flac"

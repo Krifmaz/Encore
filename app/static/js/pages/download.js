@@ -19,9 +19,18 @@ export async function render(view, ctx) {
         <div class="search grow">${icon.link}<input class="input" name="url" placeholder="https://…" required autocomplete="off"></div>
         <button class="btn" type="button" id="probe">Preview</button>
       </div>
+      <div class="row wrap">
+        <span class="small muted">If a song is on an album:</span>
+        <div class="tabs" id="album-mode">
+          <button type="button" data-m="song">Just the song</button>
+          <button type="button" data-m="album">Get the whole album</button>
+          <button type="button" data-m="">Admin default</button>
+        </div>
+      </div>
       <div class="row wrap" id="dl-actions">
-        <button class="btn primary" type="button" id="as-playlist">${icon.list}Import as playlist & download missing</button>
-        <button class="btn" type="submit" id="direct">${icon.download}Download this link as-is</button>
+        <button class="btn primary" type="button" id="get-songs" title="Every song behind the link is fetched from the best source (lossless first)">${icon.download}Get the song(s)</button>
+        <button class="btn" type="button" id="as-playlist">${icon.list}Import as playlist</button>
+        <button class="btn" type="submit" id="direct">${icon.link}Download link as-is</button>
       </div>
       <div id="probe-out"></div>
     </form>
@@ -35,10 +44,39 @@ export async function render(view, ctx) {
     const u = urlIn.value.trim();
     direct.disabled = METADATA_ONLY.test(u);
     direct.title = direct.disabled ? 'This service has no downloadable audio – use “Import as playlist”' : STREAMRIP.test(u) ? 'Rip this exact release with streamrip' : '';
-    view.querySelector('#as-playlist').classList.toggle('primary', METADATA_ONLY.test(u) || PREFER_IMPORT.test(u) || STREAMRIP.test(u) || !u);
-    direct.classList.toggle('primary', !!u && !view.querySelector('#as-playlist').classList.contains('primary'));
   };
   urlIn.addEventListener('input', update);
+  void PREFER_IMPORT;
+
+  let albumMode = 'song';
+  try { albumMode = localStorage.getItem('encore.albumMode') ?? 'song'; } catch { /* ignore */ }
+  const paintMode = () => view.querySelectorAll('#album-mode button').forEach(b => b.classList.toggle('active', b.dataset.m === albumMode));
+  paintMode();
+  view.querySelector('#album-mode').onclick = (e) => {
+    const b = e.target.closest('[data-m]');
+    if (!b) return;
+    albumMode = b.dataset.m;
+    try { localStorage.setItem('encore.albumMode', albumMode); } catch { /* ignore */ }
+    paintMode();
+  };
+
+  view.querySelector('#get-songs').onclick = async (e) => {
+    const url = urlIn.value.trim();
+    if (!url) return urlIn.focus();
+    const btn = e.currentTarget;
+    btn.disabled = true;
+    btn.innerHTML = '<span class="spinner"></span> Looking up…';
+    try {
+      const r = await api.post('/requests/from-link', { url, album_mode: albumMode || null });
+      toast(`${r.requested} song(s) requested${r.already_requested ? `, ${r.already_requested} already requested` : ''}${albumMode === 'album' ? ' – whole albums will be fetched' : ''}`, 'ok');
+      urlIn.value = '';
+      out.innerHTML = '';
+      window.dispatchEvent(new CustomEvent('encore:requests-changed'));
+      load();
+    } catch (err) { toast(err.message, 'err'); }
+    btn.disabled = false;
+    btn.innerHTML = `${icon.download}Get the song(s)`;
+  };
 
   view.querySelector('#as-playlist').onclick = () => {
     const url = urlIn.value.trim();
@@ -47,6 +85,8 @@ export async function render(view, ctx) {
     setTimeout(() => {
       const req = document.querySelector('#imp-req');
       if (req) req.checked = true;
+      const sel = document.querySelector('#imp-album');
+      if (sel) sel.value = albumMode;
       document.querySelector('#imp-preview')?.click();
     }, 50);
   };
@@ -82,8 +122,8 @@ export async function render(view, ctx) {
 
   const list = view.querySelector('#dl-list');
   const load = async () => {
-    const rows = (await api.get('/requests?mine=true&limit=100')).filter(r => r.kind === 'url');
-    list.innerHTML = rows.length ? `<div class="list">${rows.map(r => requestRow(r)).join('')}</div>` : '<div class="empty muted">No direct downloads yet – imported playlists show up under Playlists and Requests.</div>';
+    const rows = (await api.get('/requests?mine=true&limit=100')).filter(r => r.kind === 'url' || r.kind === 'track' || r.kind === 'album').slice(0, 30);
+    list.innerHTML = rows.length ? `<div class="list">${rows.map(r => requestRow(r)).join('')}</div>` : '<div class="empty muted">Nothing yet – paste a link above.</div>';
   };
   bindRequestActions(list, load);
   await load();

@@ -2,6 +2,19 @@ import { api } from '../api.js';
 import { art, confirmDialog, debounce, emptyState, esc, fmt, icon, modal, skeletonGrid, toast } from '../ui.js';
 import { bindTiles, libraryTile } from './common.js';
 import { addToPlaylistModal } from './playlists.js';
+import * as player from '../player.js';
+
+export async function playAlbum(id, start = 0) {
+  const a = await api.get(`/library/albums/${id}`);
+  player.playQueue(a.tracks.map(t => ({ ...t, album_id: id })), start);
+}
+
+function sourceLine(t) {
+  if (!t.source) return '';
+  const when = t.downloaded_at ? ` · ${fmt.ago(t.downloaded_at)}` : '';
+  const link = t.source_url ? ` · <a href="${esc(t.source_url)}" target="_blank" rel="noopener noreferrer" style="color:var(--accent)">link</a>` : '';
+  return `<div class="small faint ellipsis" style="max-width:520px" title="${esc([t.source, t.source_detail].filter(Boolean).join(' – '))}">⬇ ${esc(t.source)}${t.source_detail ? ' · ' + esc(t.source_detail) : ''}${link}${when}</div>`;
+}
 
 const PAGE = 120;
 
@@ -18,6 +31,7 @@ export async function render(view, ctx) {
         <button class="btn sm" id="scan-btn">${icon.refresh}Scan</button>
         <button class="btn sm" id="autotag-btn">${icon.tag}Auto-tag untagged</button>
         <button class="btn sm" id="verify-btn">${icon.shield}Verify audio</button>
+        <button class="btn sm" id="art-all">${icon.disc}Find missing artwork</button>
       </div>` : ''}
     </div>
     <div id="bulk" class="hidden card" style="margin-bottom:16px"></div>
@@ -73,12 +87,13 @@ export async function render(view, ctx) {
     } else {
       const rows = await api.get(`/library/tracks?q=${encodeURIComponent(st.q)}&limit=300&offset=${append ? st.offset : 0}`);
       const html = rows.map((t, i) => `<tr data-i="${i}">
+        <td class="num"><button class="btn ghost icon sm" data-play-track="${t.id}" aria-label="Play">${icon.play.replace('<svg', '<svg width="14"')}</button></td>
         <td><div style="font-weight:600">${esc(t.title)}</div><div class="small muted">${esc(t.artist)}</div></td>
         <td class="hide-sm"><a href="#/library/album/${esc(t.album_id)}">${esc(t.album || '')}</a></td>
         <td class="hide-sm"><span class="badge">${esc((t.format || '').toUpperCase())}${t.bitrate ? ' ' + t.bitrate + 'k' : ''}</span> ${verifyBadge(t)}</td>
         <td class="muted">${fmt.dur(t.duration)}</td></tr>`).join('');
       if (!append) {
-        body.innerHTML = rows.length ? `<div class="card flat"><div class="table-wrap"><table class="table"><thead><tr><th>Title</th><th class="hide-sm">Album</th><th class="hide-sm">Format</th><th>Time</th></tr></thead><tbody>${html}</tbody></table></div></div>` : emptyState(icon.music, 'No songs found');
+        body.innerHTML = rows.length ? `<div class="card flat"><div class="table-wrap"><table class="table"><thead><tr><th></th><th>Title</th><th class="hide-sm">Album</th><th class="hide-sm">Format</th><th>Time</th></tr></thead><tbody>${html}</tbody></table></div></div>` : emptyState(icon.music, 'No songs found');
         body._tracks = rows;
       } else {
         body.querySelector('tbody').insertAdjacentHTML('beforeend', html);
@@ -90,6 +105,13 @@ export async function render(view, ctx) {
     }
   };
 
+  body.addEventListener('click', (e) => {
+    const b = e.target.closest('[data-play-track]');
+    if (!b) return;
+    const tracks = body._tracks || [];
+    const idx = tracks.findIndex(t => String(t.id) === b.dataset.playTrack);
+    player.playQueue(tracks.slice(idx, idx + 200), 0);
+  });
   view.querySelector('#lib-tabs').onclick = (e) => {
     const t = e.target.closest('[data-t]');
     if (!t) return;
@@ -107,15 +129,16 @@ export async function render(view, ctx) {
     const poll = async () => {
       const s = await api.get('/library/stats');
       const scanning = s.scan.scanning, b = s.bulk;
-      bulk.classList.toggle('hidden', !scanning && !b.running && !s.verify.running);
+      bulk.classList.toggle('hidden', !scanning && !b.running && !s.verify.running && !(s.artwork && s.artwork.running));
       const vc = s.verify_counts || {};
       view.querySelector('#verify-btn').innerHTML = `${icon.shield}Verify audio${vc.unchecked ? ` <span class="badge">${fmt.num(vc.unchecked)} unchecked</span>` : ''}${vc.mismatch ? ` <span class="badge err">${vc.mismatch} wrong</span>` : ''}`;
       view.querySelector('#verify-btn').dataset.acoustid = s.acoustid ? '1' : '';
       if (scanning) bulk.innerHTML = `<div class="row"><span class="spinner"></span><b>Scanning library</b><span class="muted">${s.scan.progress} / ${s.scan.total} files</span></div><div class="progress mt"><i style="width:${s.scan.total ? s.scan.progress / s.scan.total * 100 : 0}%"></i></div>`;
+      else if (s.artwork && s.artwork.running) bulk.innerHTML = `<div class="row"><span class="spinner"></span><b>Finding artwork</b><span class="muted">${s.artwork.done} / ${s.artwork.total} · ${s.artwork.found} found</span></div><div class="progress mt"><i style="width:${s.artwork.total ? s.artwork.done / s.artwork.total * 100 : 0}%"></i></div>`;
       else if (s.verify.running) bulk.innerHTML = `<div class="row"><span class="spinner"></span><b>Verifying audio fingerprints</b><span class="muted ellipsis">${s.verify.done} / ${s.verify.total} · ${s.verify.verified} ok · ${s.verify.mismatch} wrong · ${s.verify.unknown} unknown · ${esc(s.verify.current)}</span></div><div class="progress mt"><i style="width:${s.verify.total ? s.verify.done / s.verify.total * 100 : 0}%"></i></div>`;
       else if (b.running) bulk.innerHTML = `<div class="row"><span class="spinner"></span><b>Auto-tagging</b><span class="muted ellipsis">${b.done} / ${b.total} · ${b.tagged} tagged · ${b.skipped} skipped · ${esc(b.current)}</span></div><div class="progress mt"><i style="width:${b.total ? b.done / b.total * 100 : 0}%"></i></div>`;
       view.querySelector('#autotag-btn').innerHTML = `${icon.tag}Auto-tag untagged${s.untagged_albums ? ` <span class="badge warn">${s.untagged_albums}</span>` : ''}`;
-      return scanning || b.running || s.verify.running;
+      return scanning || b.running || s.verify.running || !!(s.artwork && s.artwork.running);
     };
     let wasBusy = await poll();
     const timer = setInterval(async () => {
@@ -126,6 +149,9 @@ export async function render(view, ctx) {
     ctx.onLeave(() => clearInterval(timer));
     view.querySelector('#scan-btn').onclick = async () => {
       try { await api.post('/library/scan'); toast('Library scan started', 'ok'); wasBusy = true; poll(); } catch (e) { toast(e.message, 'err'); }
+    };
+    view.querySelector('#art-all').onclick = async () => {
+      try { await api.post('/library/artwork'); toast('Looking for missing covers (Cover Art Archive, Deezer, iTunes)…', 'ok'); wasBusy = true; poll(); } catch (err) { toast(err.message, 'err'); }
     };
     view.querySelector('#verify-btn').onclick = async (e) => {
       if (!e.currentTarget.dataset.acoustid) {
@@ -231,11 +257,14 @@ export async function renderAlbum(view, ctx) {
           ${untagged ? `<span class="badge warn">${untagged} track(s) not MusicBrainz-tagged</span>` : '<span class="badge ok">MusicBrainz tagged</span>'}
         </div>
         <div class="row wrap mt">
+          <button class="btn primary" id="play-all">${icon.play}Play</button>
+          <button class="btn" id="queue-all">${icon.list}Queue</button>
           <button class="btn" id="add-pl">${icon.list}Add to playlist</button>
           <a class="btn" href="/api/library/albums/${esc(id)}/download">${icon.download}Download</a>
           ${a.mb_releasegroupid ? `<a class="btn ghost" href="#/album/${esc(a.mb_releasegroupid)}">${icon.disc}Release info</a>` : ''}
           ${admin ? `<button class="btn" id="match-btn">${icon.tag}Match MusicBrainz</button>
             <button class="btn" id="edit-btn">${icon.edit}Edit tags</button>
+            <button class="btn" id="art-btn" title="Find cover art online and embed it into the files">${icon.disc}Find artwork</button>
             <button class="btn danger ghost" id="del-btn">${icon.trash}</button>` : ''}
         </div>
       </div>
@@ -244,13 +273,19 @@ export async function renderAlbum(view, ctx) {
       <thead><tr><th class="num">#</th><th>Title</th><th class="hide-sm">Artist</th><th class="hide-sm">Format</th><th>Time</th><th></th></tr></thead>
       <tbody>${a.tracks.map((t, i) => `<tr data-i="${i}">
         <td class="num">${multi ? t.disc + '-' : ''}${t.track || '–'}</td>
-        <td><div style="font-weight:600">${esc(t.title)}</div>${admin ? `<div class="small faint ellipsis" style="max-width:520px">${esc(t.relpath)}</div>` : ''}</td>
+        <td><div style="font-weight:600">${esc(t.title)}</div>${admin ? `<div class="small faint ellipsis" style="max-width:520px">${esc(t.relpath)}</div>` : ''}${sourceLine(t)}</td>
         <td class="hide-sm muted">${esc(t.artist)}</td>
         <td class="hide-sm"><span class="badge">${esc((t.format || '').toUpperCase())}${t.bitrate ? ' ' + t.bitrate + 'k' : ''}</span>${t.mb_trackid ? '' : ' <span class="badge warn" title="No MusicBrainz id">?</span>'} ${verifyBadge(t)}</td>
         <td class="muted">${fmt.dur(t.duration)}</td>
         <td style="text-align:right;white-space:nowrap"><button class="btn sm ghost" data-like="${t.id}" title="Like (syncs to Finamp/Plexamp)">${icon.heart}</button><button class="btn sm ghost" data-addpl="${t.id}" title="Add to playlist">${icon.plus}</button></td></tr>`).join('')}</tbody>
     </table></div></div>`;
   view.querySelector('#add-pl').onclick = () => addToPlaylistModal(a.tracks.map(t => t.id));
+  const queueTracks = a.tracks.map(t => ({ ...t, album_id: id }));
+  view.querySelector('#play-all').onclick = () => player.playQueue(queueTracks, 0);
+  view.querySelector('#queue-all').onclick = () => { player.enqueue(queueTracks); toast('Added to queue', 'ok'); };
+  const highlight = (cur) => view.querySelectorAll('tbody tr').forEach((tr, i) => tr.classList.toggle('playing', !!cur && cur.id === a.tracks[i].id));
+  ctx.onLeave(player.onChange(highlight));
+  highlight(player.current());
   const liked = new Set(await api.get('/likes'));
   const paintLikes = () => view.querySelectorAll('[data-like]').forEach(b => {
     const on = liked.has(+b.dataset.like);
@@ -267,9 +302,21 @@ export async function renderAlbum(view, ctx) {
     }
     const ab = e.target.closest('[data-addpl]');
     if (ab) addToPlaylistModal([+ab.dataset.addpl]);
+    if (!lb && !ab && !e.target.closest('a, button')) {
+      const tr = e.target.closest('tr[data-i]');
+      if (tr) player.playQueue(queueTracks, +tr.dataset.i);
+    }
   });
   if (!admin) return;
   view.querySelector('#match-btn').onclick = () => matchModal(id, a, ctx);
+  view.querySelector('#art-btn').onclick = async (e) => {
+    e.currentTarget.disabled = true;
+    try {
+      const r = await api.post(`/library/albums/${id}/artwork`);
+      toast(`Artwork embedded in ${r.embedded} file(s)`, 'ok');
+      window.dispatchEvent(new HashChangeEvent('hashchange'));
+    } catch (err) { toast(err.message, 'err'); e.currentTarget.disabled = false; }
+  };
   view.querySelector('#edit-btn').onclick = () => editModal(id, a, ctx);
   view.querySelector('#del-btn').onclick = async () => {
     if (!await confirmDialog('Delete album', `Permanently delete "${a.album}" (${a.tracks.length} files) from disk?`, 'Delete', true)) return;

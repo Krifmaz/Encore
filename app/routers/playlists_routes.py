@@ -19,6 +19,7 @@ class ImportBody(BaseModel):
     follow: bool = False
     into: int | None = None          # merge into an existing playlist
     request_missing: bool = False
+    album_mode: str | None = None    # song | album | None (admin default)
 
 
 class PlaylistPatch(BaseModel):
@@ -82,7 +83,7 @@ async def import_playlist(body: ImportBody, user=Depends(auth.current_user)):
         res = playlists.create(user["id"], body.name or data["name"] or "Imported playlist", data["tracks"], data["source"],
                                body.url, data.get("description") or "", data.get("cover"), body.follow and bool(body.url))
     if body.request_missing:
-        res["requested"] = playlists.request_missing(user, res["id"])
+        res["requested"] = playlists.request_missing(user, res["id"], album_mode=body.album_mode)
     db.log("info", f"{user['username']} imported '{data['name']}' from {data['source']} ({len(data['tracks'])} tracks, {res['duplicates_skipped']} duplicates skipped)")
     return res
 
@@ -147,11 +148,11 @@ def rematch(pid: int, user=Depends(auth.current_user)):
 
 
 @router.post("/playlists/{pid}/request-missing")
-def request_missing(pid: int, user=Depends(auth.current_user)):
+def request_missing(pid: int, body: dict | None = None, user=Depends(auth.current_user)):
     _own(pid, user)
     from .requests_routes import _quota
     _quota(user)
-    n = playlists.request_missing(user, pid)
+    n = playlists.request_missing(user, pid, album_mode=(body or {}).get("album_mode"))
     return {"requested": n}
 
 

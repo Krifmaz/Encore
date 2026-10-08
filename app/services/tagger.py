@@ -1,5 +1,6 @@
 """MusicBrainz matching, tag writing, cover art and renaming."""
 import asyncio
+import contextvars
 import os
 import re
 import shutil
@@ -142,6 +143,84 @@ async def fetch_cover(release_id: str | None, rgid: str | None = None) -> bytes 
                 return r.content
         except Exception:
             continue
+    return None
+
+
+# ---- artwork for releases MusicBrainz doesn't know ---------------------------------
+
+
+# set by the worker around an import: the cover URL that came with the request (Spotify/Deezer/YT Music…)
+COVER_HINT: contextvars.ContextVar = contextvars.ContextVar("cover_hint", default=None)
+
+_IMG_MAGIC = (b"\xff\xd8\xff", b"\x89PNG", b"RIFF")
+
+
+async def _get_image(url: str) -> bytes | None:
+    try:
+        r = await client().get(url, timeout=15)
+    except Exception:  # noqa: BLE001
+        return None
+    if r.status_code == 200 and r.content[:4].startswith(_IMG_MAGIC) and len(r.content) > 1500:
+        return r.content
+    return None
+
+
+def _big(url: str) -> str:
+    """Ask image CDNs for a large version."""
+    url = re.sub(r"=w\d+-h\d+[^&?/]*$", "=w1200-h1200-l90-rj", url)                  # YouTube Music / Google
+    url = re.sub(r"/\d+x\d+(bb)?\.(jpg|png|webp)$", r"/1200x1200bb.jpg", url)         # Apple/iTunes
+    url = re.sub(r"/(\d+)x\1-\d+-\d+-\d+-\d+\.jpg$", "/1000x1000-000000-80-0-0.jpg", url)  # Deezer
+    return url
+
+
+async def _square(data: bytes) -> bytes:
+    """YouTube video thumbnails are 16:9 – crop the middle square."""
+    proc = await asyncio.create_subprocess_exec(
+        "ffmpeg", "-v", "error", "-i", "pipe:0", "-vf", "crop='min(iw,ih)':'min(iw,ih)'", "-f", "image2", "-c:v", "mjpeg", "pipe:1",
+        stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
+    out, _ = await proc.communicate(data)
+    return out if proc.returncode == 0 and out else data
+
+
+async def find_art(artist: str, album: str | None = None, title: str | None = None, hint: str | None = None) -> tuple[bytes, str] | None:
+    """Cover art when MusicBrainz has none: the request's own cover, then Deezer, then iTunes, then YouTube.
+
+    Search hits must match the artist and album/title so we never embed the wrong artwork. Returns (bytes, where)."""
+    hint = hint or COVER_HINT.get()
+    if hint and "ytimg.com" not in hint:
+        data = await _get_image(_big(hint)) or await _get_image(hint)
+        if data:
+            return data, "request"
+    want_artist = artist or ""
+    for name, q in (("album", album), ("track", title)):
+        if not q:
+            continue
+        try:
+            r = await client().get(f"https://api.deezer.com/search/{name}", params={"q": f'artist:"{want_artist}" {name}:"{q}"', "limit": 5})
+            for hit in r.json().get("data", []):
+                h_artist = (hit.get("artist") or {}).get("name", "")
+                h_title = hit.get("title", "")
+                alb = hit if name == "album" else (hit.get("album") or {})
+                if sim(h_artist, want_artist) >= 0.8 and sim(h_title, q) >= 0.75 and alb.get("cover_xl"):
+                    data = await _get_image(alb["cover_xl"])
+                    if data:
+                        return data, "Deezer"
+        except Exception:  # noqa: BLE001
+            pass
+        try:
+            r = await client().get("https://itunes.apple.com/search", params={"term": f"{want_artist} {q}", "entity": "album" if name == "album" else "song", "limit": 5})
+            for hit in r.json().get("results", []):
+                h_title = hit.get("collectionName" if name == "album" else "trackName", "")
+                if sim(hit.get("artistName", ""), want_artist) >= 0.8 and sim(h_title, q) >= 0.75 and hit.get("artworkUrl100"):
+                    data = await _get_image(_big(hit["artworkUrl100"]))
+                    if data:
+                        return data, "iTunes"
+        except Exception:  # noqa: BLE001
+            pass
+    if hint:
+        data = await _get_image(_big(hint)) or await _get_image(hint)
+        if data:
+            return await _square(data), "YouTube"
     return None
 
 
@@ -341,6 +420,9 @@ async def apply_preview(pv: dict, rename: bool | None = None, source_root: str |
     rename = config.get("rename_on_import") if rename is None else rename
     rel = pv["release"]
     cover = await fetch_cover(rel["id"], rel.get("release_group_id"))
+    if not cover:
+        art = await find_art(rel["artist"], rel["title"])
+        cover = art[0] if art else None
     new_paths, old_dirs = [], set()
 
     def _go():
@@ -450,6 +532,9 @@ async def import_single(path: str, artist: str, title: str, recording_id: str | 
             cover = await fetch_cover(rec["release_id"], rec["release_group_id"])
     except Exception as e:  # noqa: BLE001
         db.log("warning", f"MusicBrainz lookup failed for {artist} - {title}: {e}")
+    if not cover:
+        art = await find_art(vals["artist"], vals.get("album"), vals["title"])
+        cover = art[0] if art else None
     ext = os.path.splitext(path)[1]
     from .verify import delete_tracks, quality
     existing = _existing_copy(vals, {path}) if config.get("dedupe_on_import") else None
@@ -510,15 +595,28 @@ async def import_album_files(paths: list[str], artist: str, album: str, rgid: st
         await _drop_superseded(new)
         return new
 
+    art = await find_art(artist, album)
+    cover = art[0] if art else None
+
     def _go():
         out = []
         for p in paths:
             t = library.read_tags(p)
             vals = {**t, "albumartist": t["albumartist"] if t["albumartist"] != "Unknown Artist" else artist,
                     "album": t["album"] or album}
+            if cover and config.get("embed_cover"):
+                try:
+                    embed_cover(p, cover)
+                except Exception:  # noqa: BLE001
+                    pass
             dest = render_path(vals, os.path.splitext(p)[1])
             out.append(move_file(p, dest))
             prune_empty(os.path.dirname(p), source_root)
+        if cover and config.get("save_cover") and out:
+            d = os.path.dirname(out[0])
+            if all(os.path.dirname(x) == d for x in out) and not os.path.exists(os.path.join(d, "cover.jpg")):
+                with open(os.path.join(d, "cover.jpg"), "wb") as fh:
+                    fh.write(cover)
         return out
 
     db.log("warning", f"No confident MusicBrainz match for {artist} - {album}; imported with existing tags")

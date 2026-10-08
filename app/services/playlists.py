@@ -178,7 +178,7 @@ def merge(user_id: int, ids: list[int], name: str) -> dict:
     return res
 
 
-def request_missing(user: dict, pid: int, auto: bool = False) -> int:
+def request_missing(user: dict, pid: int, auto: bool = False, album_mode: str | None = None) -> int:
     """Create track requests for every item that's not in the library yet.
 
     auto=True is used by admin-enabled auto-download rules and skips the approval queue."""
@@ -189,7 +189,7 @@ def request_missing(user: dict, pid: int, auto: bool = False) -> int:
         if r["track_id"] or r["request_id"]:
             continue
         body = NewRequest(kind="track", mbid=r["mbid"], artist=r["artist"], title=r["title"], album=r["album"],
-                          cover_url=r["cover_url"], length=r["duration"])
+                          cover_url=r["cover_url"], length=r["duration"], isrc=r["isrc"], album_mode=album_mode)
         try:
             rid = _create(user, body, notify_admin=False)
         except HTTPException as e:

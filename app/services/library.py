@@ -2,6 +2,7 @@
 import asyncio
 import hashlib
 import os
+import re
 import time
 
 import mutagen
@@ -181,11 +182,16 @@ def find_cover(album_id: str) -> str | None:
     dirs = []
     for t in tracks:
         d = os.path.dirname(t["path"])
-        if d not in dirs:
+        if d in dirs:
+            continue
+        # a folder holding several albums (e.g. "Singles") can't have one cover.jpg for all of them
+        shared = db.one("SELECT COUNT(DISTINCT album_id) n FROM tracks WHERE path LIKE ? AND path NOT LIKE ?",
+                        (d.rstrip("/") + "/%", d.rstrip("/") + "/%/%"))["n"] > 1
+        if not shared:
             dirs.append(d)
-            parent = os.path.dirname(d)
-            if parent not in dirs:
-                dirs.append(parent)  # multi-disc layouts: Album/CD1/…
+        parent = os.path.dirname(d)
+        if re.match(r"(?i)^(cd|disc|disk)\s*\d+", os.path.basename(d)) and parent not in dirs:
+            dirs.append(parent)  # multi-disc layouts: Album/CD1/…
     for d in dirs:
         try:
             names = os.listdir(d)
@@ -196,7 +202,7 @@ def find_cover(album_id: str) -> str | None:
             for n in images:
                 if n.lower().startswith(pref):
                     return os.path.join(d, n)
-        if images and d == os.path.dirname(tracks[0]["path"]):
+        if images and d == os.path.dirname(tracks[0]["path"]) and not any(n.lower().startswith("artist") for n in images[:1]):
             return os.path.join(d, images[0])
     # embedded art → cache
     cache_dir = os.path.join(db.DATA_DIR, "covers")

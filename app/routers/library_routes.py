@@ -5,7 +5,7 @@ import time
 import zipfile
 
 from fastapi import APIRouter, Depends, HTTPException
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, StreamingResponse
 from starlette.background import BackgroundTask
 from pydantic import BaseModel
 
@@ -37,7 +37,7 @@ class TagEdit(BaseModel):
 
 @router.get("/stats")
 def stats(user=Depends(auth.current_user)):
-    return {**library.stats(), "scan": library.state, "bulk": _bulk, "verify": verify.state,
+    return {**library.stats(), "scan": library.state, "bulk": _bulk, "verify": verify.state, "artwork": _art_job,
             "acoustid": acoustid.available()}
 
 
@@ -130,9 +130,7 @@ _cover_misses: set[str] = set()
 async def cover(album_id: str, user=Depends(auth.current_user)):
     path = await asyncio.to_thread(library.find_cover, album_id)
     if not path and album_id not in _cover_misses:
-        # fall back to the Cover Art Archive for MusicBrainz-tagged albums
-        t = db.one("SELECT mb_albumid, mb_releasegroupid FROM tracks WHERE album_id=? AND (mb_albumid IS NOT NULL OR mb_releasegroupid IS NOT NULL) LIMIT 1", (album_id,))
-        data = await tagger.fetch_cover(t["mb_albumid"], t["mb_releasegroupid"]) if t else None
+        data = await _lookup_art(album_id)
         if data:
             path = os.path.join(db.DATA_DIR, "covers", album_id + ".jpg")
             os.makedirs(os.path.dirname(path), exist_ok=True)
@@ -143,6 +141,75 @@ async def cover(album_id: str, user=Depends(auth.current_user)):
     if not path:
         raise HTTPException(404, "No cover")
     return FileResponse(path, headers={"Cache-Control": "private, max-age=86400"})
+
+
+async def _lookup_art(album_id: str) -> bytes | None:
+    """Cover Art Archive for MusicBrainz-tagged albums, otherwise Deezer/iTunes by artist + album/title."""
+    t = db.one("SELECT mb_albumid, mb_releasegroupid, albumartist, album, title, COUNT(*) OVER () n FROM tracks WHERE album_id=? LIMIT 1", (album_id,))
+    if not t:
+        return None
+    data = await tagger.fetch_cover(t["mb_albumid"], t["mb_releasegroupid"]) if (t["mb_albumid"] or t["mb_releasegroupid"]) else None
+    if not data:
+        art = await tagger.find_art(t["albumartist"], t["album"], t["title"] if t["n"] == 1 else None)
+        data = art[0] if art else None
+    return data
+
+
+async def _embed_album_art(album_id: str, data: bytes) -> int:
+    rows = db.query("SELECT path FROM tracks WHERE album_id=?", (album_id,))
+
+    def _go():
+        n = 0
+        for r in rows:
+            try:
+                tagger.embed_cover(r["path"], data)
+                n += 1
+            except Exception:  # noqa: BLE001
+                pass
+        return n
+    n = await asyncio.to_thread(_go)
+    await library.index_paths([r["path"] for r in rows])
+    cache = os.path.join(db.DATA_DIR, "covers", album_id + ".jpg")
+    os.makedirs(os.path.dirname(cache), exist_ok=True)
+    with open(cache, "wb") as fh:
+        fh.write(data)
+    _cover_misses.discard(album_id)
+    return n
+
+
+@router.post("/albums/{album_id}/artwork")
+async def album_artwork(album_id: str, user=Depends(auth.admin_user)):
+    """Find artwork online and embed it into the files (so Finamp/Plexamp show it too)."""
+    data = await _lookup_art(album_id)
+    if not data:
+        raise HTTPException(404, "No artwork found on Cover Art Archive, Deezer or iTunes")
+    return {"embedded": await _embed_album_art(album_id, data)}
+
+
+_art_job = {"running": False, "done": 0, "total": 0, "found": 0}
+
+
+@router.post("/artwork")
+async def missing_artwork(user=Depends(auth.admin_user)):
+    if _art_job["running"]:
+        raise HTTPException(409, "Already running")
+
+    async def run():
+        ids = [r["album_id"] for r in db.query("SELECT DISTINCT album_id FROM tracks")]
+        missing = [a for a in ids if not await asyncio.to_thread(library.find_cover, a)]
+        _art_job.update(running=True, done=0, total=len(missing), found=0)
+        try:
+            for a in missing:
+                data = await _lookup_art(a)
+                if data:
+                    await _embed_album_art(a, data)
+                    _art_job["found"] += 1
+                _art_job["done"] += 1
+            db.log("info", f"Artwork: found {_art_job['found']} of {_art_job['total']} missing covers")
+        finally:
+            _art_job["running"] = False
+    asyncio.create_task(run())
+    return {"ok": True}
 
 
 @router.get("/albums/{album_id}/download")
@@ -166,6 +233,44 @@ async def download_album(album_id: str, user=Depends(auth.current_user)):
     tmp = await asyncio.to_thread(build)
     name = tagger.clean(f"{rows[0]['albumartist']} - {rows[0]['album']}") + ".zip"
     return FileResponse(tmp, media_type="application/zip", filename=name, background=BackgroundTask(os.remove, tmp))
+
+
+BROWSER_TYPES = {"mp3": "audio/mpeg", "flac": "audio/flac", "m4a": "audio/mp4", "mp4": "audio/mp4", "aac": "audio/aac",
+                 "ogg": "audio/ogg", "opus": "audio/ogg", "oga": "audio/ogg", "wav": "audio/wav", "webm": "audio/webm"}
+
+
+def _needs_transcode(path: str, fmt: str) -> bool:
+    if fmt not in BROWSER_TYPES:
+        return True                       # ape, wv, aiff, wma, alac files, …
+    if fmt in ("m4a", "mp4"):
+        try:
+            import mutagen
+            return getattr(mutagen.File(path).info, "codec", "") == "alac"   # Apple Lossless in .m4a
+        except Exception:  # noqa: BLE001
+            return False
+    return False
+
+
+@router.get("/tracks/{track_id}/stream")
+async def stream(track_id: int, transcode: bool = False, user=Depends(auth.current_user)):
+    """Original file for formats browsers play natively (seekable, bit-perfect); others → FLAC on the fly."""
+    t = db.one("SELECT path, format FROM tracks WHERE id=?", (track_id,))
+    if not t or not os.path.isfile(t["path"]):
+        raise HTTPException(404, "Track not found")
+    if not transcode and not await asyncio.to_thread(_needs_transcode, t["path"], t["format"]):
+        return FileResponse(t["path"], media_type=BROWSER_TYPES[t["format"]], headers={"Cache-Control": "private, max-age=3600"})
+    proc = await asyncio.create_subprocess_exec(
+        "ffmpeg", "-v", "error", "-i", t["path"], "-map", "0:a:0", "-c:a", "flac", "-f", "flac", "pipe:1",
+        stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.DEVNULL)
+
+    async def body():
+        try:
+            while chunk := await proc.stdout.read(1 << 16):
+                yield chunk
+        finally:
+            if proc.returncode is None:
+                proc.kill()
+    return StreamingResponse(body(), media_type="audio/flac", headers={"X-Transcoded": "flac"})
 
 
 @router.get("/albums/{album_id}/match")
