@@ -1,0 +1,43 @@
+# Encore all-in-one: slskd, Lidarr, Prowlarr, qBittorrent and SABnzbd run INSIDE the Encore container,
+# set up and connected automatically. One container, one port, everything behind your Encore login
+# (admin → Built-in services → Open).
+#
+# Torrents and Soulseek should go through a VPN, so this example runs Encore inside gluetun's network.
+# Without a VPN: delete the gluetun service, remove `network_mode`, and move `ports` to encore.
+services:
+  gluetun:
+    image: qmcgaw/gluetun:latest
+    container_name: gluetun
+    cap_add: [NET_ADMIN]
+    devices: ["/dev/net/tun:/dev/net/tun"]
+    restart: unless-stopped
+    environment:
+      - VPN_SERVICE_PROVIDER=${VPN_SERVICE_PROVIDER:-mullvad}
+      - VPN_TYPE=wireguard
+      - WIREGUARD_PRIVATE_KEY=${WIREGUARD_PRIVATE_KEY:-}
+      - WIREGUARD_ADDRESSES=${WIREGUARD_ADDRESSES:-}
+      - FIREWALL_VPN_INPUT_PORTS=50300,6881     # incoming Soulseek + torrent peers (needs port forwarding at your VPN)
+    ports:
+      - "8080:8080"                             # Encore (and every built-in UI through it)
+
+  encore:
+    image: ghcr.io/krifmaz/encore:aio
+    container_name: encore
+    restart: unless-stopped
+    network_mode: service:gluetun
+    depends_on: [gluetun]
+    environment:
+      - PUID=${PUID:-1000}
+      - PGID=${PGID:-1000}
+      - TZ=${TZ:-UTC}
+      - ENCORE_ADMIN_PASSWORD=${ENCORE_ADMIN_PASSWORD:-}
+      - ENCORE_EMBEDDED=all                      # or e.g. slskd,lidarr,prowlarr,qbittorrent
+      - ENCORE_LIBRARY_PATH=/music
+      - ENCORE_STAGING_PATH=/downloads/encore
+      - SOULSEEK_USERNAME=${SOULSEEK_USERNAME:-}  # or enter it later in Encore
+      - SOULSEEK_PASSWORD=${SOULSEEK_PASSWORD:-}
+      - ACOUSTID_API_KEY=${ACOUSTID_API_KEY:-}
+    volumes:
+      - ${APPDATA:-/opt/appdata}/encore:/config  # Encore + every built-in service's settings
+      - ${MUSIC_DIR:-/srv/media/music}:/music
+      - ${DOWNLOADS_DIR:-/srv/downloads}:/downloads

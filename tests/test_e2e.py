@@ -1257,3 +1257,49 @@ def test_hifi_api_source_and_picker(world):
     res = c.post("/api/picker/search", json={"source": "hifi", "kind": "album", "artist": "Fake Band", "title": "Fake Album"}, headers=H).json()
     assert res[0]["payload"] == {"kind": "album", "id": 777, "title": "Fake Album"} and res[0]["lossless"]
     assert "hifi" in [s["id"] for s in c.get("/api/picker/sources").json()["sources"]]
+
+
+def test_builtin_services_config_and_proxy(world, monkeypatch, tmp_path):
+    import xml.etree.ElementTree as ET
+
+    from app import config
+    from app.services import embedded
+    c = world.client
+    monkeypatch.setenv("ENCORE_DOWNLOADS_PATH", str(tmp_path / "dl"))
+    assert c.get("/api/admin/services").json()["enabled"] is False
+    monkeypatch.setenv("ENCORE_EMBEDDED", "all")
+    monkeypatch.setenv("ENCORE_EMBEDDED_ROOT", str(tmp_path / "none"))
+    assert embedded.wanted() == ["qbittorrent", "sabnzbd", "slskd", "lidarr", "prowlarr"]
+
+    # configs: localhost only, behind /svc/<name>, keys stable across restarts, Encore pointed at them
+    config.set_many({"embedded_slsk_username": "me", "embedded_slsk_password": 'pa"ss'})
+    k1 = embedded.prepare("slskd")["slskd"]
+    assert embedded.prepare("slskd")["slskd"] == k1 and config.get("slskd_api_key") == k1
+    assert config.get("slskd_url") == "http://127.0.0.1:5030/svc/slskd" and config.get("slskd_enabled")
+    yml = open(os.path.join(embedded.data_dir("slskd"), "slskd.yml")).read()
+    assert "ip_address: 127.0.0.1" in yml and 'password: "pa\\"ss"' in yml and "disabled: true" in yml
+    lk = embedded.prepare("lidarr")["lidarr"]
+    assert embedded.prepare("lidarr")["lidarr"] == lk and config.get("lidarr_url") == "http://127.0.0.1:8686/svc/lidarr"
+    x = ET.parse(os.path.join(embedded.data_dir("lidarr"), "config.xml")).getroot()
+    assert x.find("BindAddress").text == "127.0.0.1" and x.find("AuthenticationMethod").text == "External" and x.find("UrlBase").text == "/svc/lidarr"
+    sk = embedded.prepare("sabnzbd")["sabnzbd"]
+    assert embedded.prepare("sabnzbd")["sabnzbd"] == sk
+    embedded.prepare("qbittorrent")
+    conf = open(os.path.join(embedded.data_dir("qbittorrent"), "qBittorrent", "config", "qBittorrent.conf")).read()
+    assert "WebUI\\Address=127.0.0.1" in conf and "WebUI\\LocalHostAuth=false" in conf
+    world.run(embedded.start)
+    st = {s["key"]: s for s in c.get("/api/admin/services").json()["services"]}
+    assert st["lidarr"]["status"] == "missing" and "aio" in st["lidarr"]["error"]
+
+    # proxy: admins only, same-origin writes only
+    www = __import__("urllib.parse").parse.urlsplit(world.web)
+    monkeypatch.setitem(embedded.SERVICES["lidarr"], "port", www.port)
+    web_root = world.library.parent / "www" / "svc" / "lidarr"
+    web_root.mkdir(parents=True, exist_ok=True)
+    (web_root / "index.html").write_text("<title>Lidarr</title>")
+    r = c.get("/svc/lidarr/index.html")
+    assert r.status_code == 200 and "<title>Lidarr</title>" in r.text
+    anon = __import__("fastapi.testclient", fromlist=["TestClient"]).TestClient(c.app)
+    assert anon.get("/svc/lidarr/index.html", follow_redirects=False).status_code == 307
+    assert c.post("/svc/lidarr/api/x", headers={"origin": "https://evil.example"}).status_code == 403
+    assert c.get("/svc/nope/").status_code == 404

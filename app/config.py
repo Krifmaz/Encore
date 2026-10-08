@@ -63,6 +63,11 @@ DEFAULTS: dict[str, tuple[str | None, object, bool]] = {
     "source_order": ("ENCORE_SOURCE_ORDER", "lidarr,streamrip,hifi,slskd,ytdlp", False),
     # streamrip (Qobuz / Tidal / Deezer with your own subscription)
     "streamrip_enabled": ("STREAMRIP_ENABLED", False, False),
+    # built-in services (all-in-one image, ENCORE_EMBEDDED)
+    "embedded_slsk_username": ("SOULSEEK_USERNAME", "", False),
+    "embedded_slsk_password": ("SOULSEEK_PASSWORD", "", True),
+    "embedded_slsk_port": ("SOULSEEK_PORT", 50300, False),
+    "embedded_torrent_port": ("TORRENT_PORT", 6881, False),
     "hifi_enabled": ("HIFI_ENABLED", False, False),                    # Monochrome's backend: a HiFi API instance
     "hifi_api_url": ("HIFI_API_URL", "", False),                       # one or more, comma-separated
     "hifi_quality": ("HIFI_QUALITY", "LOSSLESS", False),               # LOSSLESS (16-bit FLAC) | HI_RES_LOSSLESS | HIGH
