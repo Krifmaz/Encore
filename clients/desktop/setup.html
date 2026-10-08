@@ -1,0 +1,32 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<meta http-equiv="Content-Security-Policy" content="default-src 'self'; style-src 'unsafe-inline'; script-src 'unsafe-inline'; img-src 'self'">
+<title>Encore</title>
+<style>
+  :root { color-scheme: dark; }
+  body { margin: 0; min-height: 100vh; display: grid; place-items: center; background: #0b0b12; color: #e7e7ef; font: 15px/1.5 system-ui, -apple-system, Segoe UI, Roboto, sans-serif; }
+  .card { width: min(440px, calc(100vw - 32px)); background: #14141f; border: 1px solid #262636; border-radius: 18px; padding: 28px; box-sizing: border-box; }
+  .logo { width: 56px; height: 56px; border-radius: 14px; background: linear-gradient(135deg, #a78bfa, #ec4899); display: grid; place-items: center; margin-bottom: 14px; }
+  h1 { margin: 0 0 6px; font-size: 22px; } p { margin: 0 0 18px; color: #9a9ab0; }
+  input { width: 100%; box-sizing: border-box; padding: 12px 14px; border-radius: 10px; border: 1px solid #2c2c3e; background: #0f0f18; color: inherit; font: inherit; }
+  button { margin-top: 12px; width: 100%; padding: 12px; border: 0; border-radius: 10px; background: linear-gradient(135deg, #a78bfa, #ec4899); color: #fff; font: inherit; font-weight: 650; cursor: pointer; }
+  button:disabled { opacity: .6; } .err { color: #f87171; margin-top: 12px; min-height: 1.5em; font-size: 14px; }
+</style></head>
+<body><form class="card" id="f">
+  <div class="logo"><svg width="30" height="30" viewBox="0 0 64 64"><path d="M26 44a6 6 0 1 1-4-5.66V18l20-4v24a6 6 0 1 1-4-5.66V20.9l-12 2.4z" fill="#fff"/></svg></div>
+  <h1>Connect to your Encore</h1>
+  <p>Enter the address you open Encore at in your browser.</p>
+  <input id="u" placeholder="http://192.168.1.10:8080" autofocus autocomplete="url" spellcheck="false">
+  <button id="b">Connect</button>
+  <div class="err" id="e"></div>
+</form>
+<script>
+  const f = document.getElementById('f'), u = document.getElementById('u'), b = document.getElementById('b'), e = document.getElementById('e');
+  window.EncoreNative.getServer().then(s => { if (s) u.value = s; });
+  f.onsubmit = async (ev) => {
+    ev.preventDefault();
+    b.disabled = true; b.textContent = 'Connecting…'; e.textContent = '';
+    const r = await window.EncoreNative.setServer(u.value);
+    if (!r.ok) { e.textContent = r.error; b.disabled = false; b.textContent = 'Connect'; }
+  };
+</script></body></html>

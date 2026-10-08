@@ -20,6 +20,9 @@ export async function render(view, ctx) {
       </form>
     </div>
     <div class="card stack mt" id="loc" style="max-width:720px"></div>
+    <div class="card stack mt" style="max-width:720px"><h3>Apps</h3>
+      <p class="small muted" style="margin:0">Android app and desktop apps for Windows, macOS and Linux: <a href="https://github.com/Krifmaz/Encore/releases" target="_blank" rel="noopener">download from the Releases page</a>. On a phone you can also use your browser's <b>Add to Home screen</b>.</p>
+      ${window.EncoreNative?.changeServer ? '<button class="btn" id="change-server" style="width:fit-content">Change server…</button>' : ''}</div>
     <div class="section-head"><h2>Active sessions</h2></div>
     <div class="card flat" id="sessions"></div>`;
   view.querySelector('#pw').onsubmit = async (e) => {
@@ -31,6 +34,7 @@ export async function render(view, ctx) {
       loadSessions();
     } catch (err) { toast(err.message, 'err'); }
   };
+  view.querySelector('#change-server')?.addEventListener('click', () => window.EncoreNative.changeServer());
   const loc = view.querySelector('#loc');
   const paintLoc = async () => {
     const p = await api.get('/auth/prefs');

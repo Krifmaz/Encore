@@ -1221,6 +1221,13 @@ def test_localized_names_per_user(world):
     p = c.put("/api/auth/prefs", json={"localize": True, "lang": "en", "latin": True}, headers=H).json()
     assert p == {"localize": True, "lang": "en", "latin": True}
     from app.services import localize
+
+    def settle():
+        for _ in range(100):                # the prefs change started a lookup in the background
+            if not localize.state["running"]:
+                return
+            __import__("time").sleep(0.05)
+    settle()
     world.run(localize.localize_library, "en", True)
     tr = {t["title_orig"]: t for t in c.get("/api/library/tracks").json()}
     assert tr["夜に駆ける"]["title"] == "Racing into the Night" and tr["群青"]["title"] == "Gunjo"     # official English tracklist
@@ -1234,6 +1241,7 @@ def test_localized_names_per_user(world):
 
     # Japanese in Latin letters → the romaji tracklist
     c.put("/api/auth/prefs", json={"lang": "ja"}, headers=H)
+    settle()
     world.run(localize.localize_library, "ja", True)
     assert {t["title"] for t in c.get("/api/library/tracks").json()} >= {"Yoru ni Kakeru", "Gunjou"}
     assert c.put("/api/auth/prefs", json={"lang": "xx"}, headers=H).status_code == 400

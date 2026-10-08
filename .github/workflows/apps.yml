@@ -1,0 +1,90 @@
+name: apps
+
+# Android APK + desktop apps (Windows, macOS, Linux). Published to the rolling "apps-latest" release
+# from the default branch; every run also keeps them as workflow artifacts.
+on:
+  push:
+    branches: ["**"]
+    paths: ["clients/**", ".github/workflows/apps.yml", "app/static/icons/**"]
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  android:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: "8.10.2"
+      - name: Build APK
+        env:
+          ENCORE_VERSION_CODE: ${{ github.run_number }}
+          ENCORE_VERSION_NAME: 1.0.${{ github.run_number }}
+        run: gradle -p clients/android assembleRelease --no-daemon
+      - run: cp clients/android/app/build/outputs/apk/release/app-release.apk Encore-android.apk
+      - uses: actions/upload-artifact@v4
+        with:
+          name: Encore-android
+          path: Encore-android.apk
+
+  desktop:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    defaults:
+      run:
+        working-directory: clients/desktop
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: clients/desktop/package-lock.json
+      - run: npm ci
+      - name: Build
+        env:
+          CSC_IDENTITY_AUTO_DISCOVERY: "false"     # unsigned builds (macOS: right-click → Open the first time)
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: npx electron-builder --publish never
+      - uses: actions/upload-artifact@v4
+        with:
+          name: Encore-desktop-${{ runner.os }}
+          path: |
+            clients/desktop/dist/*.AppImage
+            clients/desktop/dist/*.deb
+            clients/desktop/dist/*.exe
+            clients/desktop/dist/*.dmg
+            clients/desktop/dist/*.zip
+          if-no-files-found: ignore
+
+  release:
+    needs: [android, desktop]
+    if: github.ref == format('refs/heads/{0}', github.event.repository.default_branch) || startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: out
+          merge-multiple: true
+      - uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ startsWith(github.ref, 'refs/tags/v') && github.ref_name || 'apps-latest' }}
+          name: ${{ startsWith(github.ref, 'refs/tags/v') && format('Encore {0}', github.ref_name) || 'Encore apps (latest)' }}
+          target_commitish: ${{ github.sha }}
+          make_latest: "true"
+          body: |
+            Apps for your Encore server – install, then enter the address you open Encore at (e.g. http://192.168.1.10:8080).
+            * **Android**: `Encore-android.apk` (allow installing from your browser/files app when asked). Share a Spotify/YouTube Music link to Encore to download it.
+            * **Windows**: the `Setup` .exe (or the portable .exe) · **macOS**: the .dmg (unsigned: right-click → Open the first time) · **Linux**: .AppImage or .deb
+          files: out/**

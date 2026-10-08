@@ -11,7 +11,19 @@ let audio = null;
 let lyr = { id: null, lines: [], plain: '', loading: false };
 
 export function onChange(fn) { listeners.add(fn); return () => listeners.delete(fn); }
-const emit = () => listeners.forEach(fn => { try { fn(current()); } catch { /* ignore */ } });
+const emit = () => { listeners.forEach(fn => { try { fn(current()); } catch { /* ignore */ } }); native(); };
+
+// Android / desktop apps: tell them what's playing (notification + lock screen + tray), and let them control us.
+function native() {
+  const n = window.EncoreNative;
+  if (!n?.nowPlaying || !audio) return;
+  const t = current();
+  try {
+    n.nowPlaying(JSON.stringify(t ? { title: t.title || '', artist: t.artist || '', album: t.album || '', playing: !audio.paused,
+      art: cover(t) ? new URL(cover(t), location.href).href : '' } : { stopped: true }));
+  } catch { /* ignore */ }
+}
+window.encorePlayer = { toggle: () => toggle(), next: () => next(), prev: () => prev(), open: () => setFull(true) };
 export function current() { return state.queue[state.index] || null; }
 export function queue() { return { tracks: state.queue, index: state.index }; }
 
@@ -156,8 +168,8 @@ export function mount() {
   document.body.appendChild(full);
   try { audio.volume = parseFloat(localStorage.getItem('encore.volume') ?? '0.9'); } catch { /* ignore */ }
   audio.addEventListener('ended', () => { logPlay(); next(true); });
-  audio.addEventListener('play', () => { render(); });
-  audio.addEventListener('pause', () => { render(); });
+  audio.addEventListener('play', () => { render(); native(); });
+  audio.addEventListener('pause', () => { render(); native(); });
   audio.addEventListener('timeupdate', () => { updateTime(); logPlay(); syncLyrics(); });
   audio.addEventListener('loadedmetadata', updateTime);
   // the browser couldn't decode the original (e.g. ALAC in .m4a) → ask the server for FLAC

@@ -59,6 +59,12 @@ Each service listens on localhost only. Open its web UI from **Admin → Built-i
 
 GitHub Actions publishes `ghcr.io/krifmaz/encore:latest` and the all-in-one `ghcr.io/krifmaz/encore:aio` (amd64 and arm64). If the repository is private, the image is too – run `docker login ghcr.io` once with a token that has `read:packages`.
 
+## Apps
+
+- **Android**: download `Encore-android.apk` from the [Releases page](https://github.com/Krifmaz/Encore/releases), install it, and enter your server address (e.g. `http://192.168.1.10:8080`). Music keeps playing with the screen off, with lock-screen and notification controls. *Share → Encore* from Spotify, YouTube Music or a browser downloads that link.
+- **Desktop** (Windows, macOS, Linux): same Releases page. Media keys work, there's a tray with play/pause/next, and it remembers your server.
+- **Any phone**: open Encore in the browser and choose *Add to Home screen*. On HTTPS it installs as an app.
+
 ## Wiring up the services
 
 Encore, Lidarr and slskd must see the **same files at the same paths**:

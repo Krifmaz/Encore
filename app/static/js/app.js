@@ -195,6 +195,9 @@ export async function refreshUser() {
 }
 
 window.addEventListener('hashchange', route);
+if ('serviceWorker' in navigator && (location.protocol === 'https:' || location.hostname === 'localhost')) {
+  navigator.serviceWorker.register('/sw.js').catch(() => {});
+}
 // any element with data-pv='{"artist","title",…}' plays a 30-second preview of a song you don't have
 document.addEventListener('click', async (e) => {
   const b = e.target.closest('[data-pv]');

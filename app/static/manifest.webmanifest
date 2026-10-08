@@ -1,1 +1,24 @@
-{"name":"Encore","short_name":"Encore","start_url":"/","display":"standalone","background_color":"#0b0b12","theme_color":"#0b0b12","icons":[{"src":"/favicon.svg","sizes":"any","type":"image/svg+xml"}]}
+{
+  "name": "Encore",
+  "short_name": "Encore",
+  "description": "Your music server: request, download and play your library.",
+  "id": "/",
+  "start_url": "/",
+  "scope": "/",
+  "display": "standalone",
+  "orientation": "any",
+  "background_color": "#0b0b12",
+  "theme_color": "#0b0b12",
+  "categories": ["music", "entertainment"],
+  "icons": [
+    {"src": "/icons/icon-192.png", "sizes": "192x192", "type": "image/png"},
+    {"src": "/icons/icon-512.png", "sizes": "512x512", "type": "image/png"},
+    {"src": "/icons/maskable-512.png", "sizes": "512x512", "type": "image/png", "purpose": "maskable"},
+    {"src": "/favicon.svg", "sizes": "any", "type": "image/svg+xml"}
+  ],
+  "shortcuts": [
+    {"name": "Library", "url": "/#/library", "icons": [{"src": "/icons/icon-192.png", "sizes": "192x192"}]},
+    {"name": "For you", "url": "/#/for-you", "icons": [{"src": "/icons/icon-192.png", "sizes": "192x192"}]},
+    {"name": "Downloader", "url": "/#/download", "icons": [{"src": "/icons/icon-192.png", "sizes": "192x192"}]}
+  ]
+}
