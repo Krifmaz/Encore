@@ -3,6 +3,7 @@ import * as player from '../player.js';
 import { art, availability, confirmDialog, debounce, emptyState, esc, fmt, icon, skeletonGrid, statusBadge, toast } from '../ui.js';
 import { albumTile, bindTiles, libraryTile, submitRequest } from './common.js';
 import { followModal } from './following.js';
+import { pickerModal } from './picker.js';
 
 const reqBtn = (attrs, label = 'Request') => `<button class="btn sm primary" ${attrs}>${icon.plus}${label}</button>`;
 
@@ -247,6 +248,7 @@ export async function renderAlbum(view, ctx) {
         <div class="chips mt">${(a.tags || []).map(t => `<span class="badge">${esc(t)}</span>`).join('')}</div>
         <div class="row wrap mt">
           ${availability(a) || `<button class="btn primary" data-req-album='${esc(JSON.stringify({ mbid: a.id, artist: a.artist, title: a.title, album: a.title, year: a.year, cover_url: a.cover }))}'>${icon.plus}Request album</button>`}
+          <button class="btn" id="pick-album" title="Search every source and choose the exact download">${icon.search}Pick download</button>
           <a class="btn sm ghost" target="_blank" rel="noopener" href="https://musicbrainz.org/release-group/${esc(a.id)}">${icon.external}MusicBrainz</a>
         </div>
       </div>
@@ -258,8 +260,20 @@ export async function renderAlbum(view, ctx) {
         <td>${esc(t.title)}</td>
         <td class="hide-sm muted">${esc(t.artist)}</td>
         <td class="muted">${fmt.dur(t.length)}</td>
-        <td style="text-align:right">${t.in_library ? '<span class="badge ok">In library</span>'
+        <td style="text-align:right;white-space:nowrap"><button class="btn sm ghost icon" data-pick-track="${esc(t.recording_id)}" title="Pick a download for this song" aria-label="Pick a download">${icon.search}</button>
+          ${t.in_library ? '<span class="badge ok">In library</span>'
           : a.in_library || a.request_status ? '' : `<button class="btn sm" data-req-track='${esc(JSON.stringify({ mbid: t.recording_id, artist: t.artist, title: t.title, album: a.title, cover_url: a.cover, year: a.year, length: t.length, album_mode: 'song' }))}'>${icon.plus}Track</button>`}</td>
       </tr>`).join('')}</tbody></table></div></div>` : emptyState(icon.disc, 'No track listing available')}`;
   bindRequestButtons(view);
+  const reload = () => window.dispatchEvent(new HashChangeEvent('hashchange'));
+  view.querySelector('#pick-album').onclick = () => pickerModal({
+    kind: 'album', mbid: a.id, artist: a.artist, artist_mbid: a.artist_id, title: a.title, album: a.title, year: a.year,
+    cover_url: a.cover, track_count: rel ? rel.tracks.length : null, onDone: reload,
+  });
+  view.addEventListener('click', (e) => {
+    const b = e.target.closest('[data-pick-track]');
+    if (!b) return;
+    const t = rel.tracks.find(x => x.recording_id === b.dataset.pickTrack);
+    pickerModal({ kind: 'track', mbid: t.recording_id, artist: t.artist, title: t.title, album: a.title, year: a.year, cover_url: a.cover, length: t.length, onDone: reload });
+  });
 }

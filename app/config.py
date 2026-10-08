@@ -12,6 +12,7 @@ DEFAULTS: dict[str, tuple[str | None, object, bool]] = {
     "base_url": ("ENCORE_BASE_URL", "", False),
     "signup_mode": ("ENCORE_SIGNUP_MODE", "invite", False),  # invite | open | closed
     "auto_approve": ("ENCORE_AUTO_APPROVE", False, False),
+    "manual_search": ("ENCORE_MANUAL_SEARCH", "everyone", False),   # who may use the manual download picker: everyone | admins
     "default_request_limit": ("ENCORE_REQUEST_LIMIT", 0, False),  # per 7 days, 0 = unlimited
     "session_days": ("ENCORE_SESSION_DAYS", 30, False),
     # library

@@ -88,6 +88,11 @@ async def monitor_and_search(album_id: int) -> None:
     await _req("POST", "command", json={"name": "AlbumSearch", "albumIds": [album_id]})
 
 
+async def grab(guid: str, indexer_id: int) -> None:
+    """Send one specific release (from an interactive search) to the download client."""
+    await _req("POST", "release", json={"guid": guid, "indexerId": indexer_id})
+
+
 async def refresh_artist(artist_id: int) -> None:
     await _req("POST", "command", json={"name": "RefreshArtist", "artistId": artist_id})
 

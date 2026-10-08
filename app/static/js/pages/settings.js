@@ -9,6 +9,7 @@ const SECTIONS = [
     S('base_url', 'Public URL', 'text', { help: 'e.g. https://music.example.com – used in links & notifications' }),
     S('signup_mode', 'Sign-up mode', 'select', { options: [['invite', 'Invite only'], ['open', 'Open to anyone'], ['closed', 'Closed']] }),
     S('auto_approve', 'Auto-approve all requests', 'bool', { help: 'Otherwise only admins and users with auto-approve skip the approval queue' }),
+    S('manual_search', 'Manual download picker', 'select', { options: [['everyone', 'Everyone'], ['admins', 'Admins only']], help: 'Who can search the sources and pick an exact download' }),
     S('default_request_limit', 'Default weekly request limit for new users', 'number', { help: '0 = unlimited' }),
     S('session_days', 'Stay signed in for (days)', 'number'),
     S('contact_email', 'Contact email for MusicBrainz', 'text', { help: 'MusicBrainz asks API clients to identify themselves' }),

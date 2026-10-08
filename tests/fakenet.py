@@ -310,6 +310,24 @@ async def lidarr_command(request: Request):
     return {"id": len(NET.lidarr["commands"])}
 
 
+@app.get(L + "/release")
+def lidarr_releases(albumId: int):
+    return [{"guid": "g-flac", "indexerId": 1, "title": "Fake Band - Fake Album (2020) [FLAC]", "indexer": "FakeIndexer", "protocol": "torrent",
+             "size": 300_000_000, "seeders": 12, "approved": True, "quality": {"quality": {"name": "FLAC"}}, "rejections": []},
+            {"guid": "g-mp3", "indexerId": 1, "title": "Fake Band - Fake Album MP3", "indexer": "FakeIndexer", "protocol": "usenet",
+             "size": 90_000_000, "approved": False, "quality": {"quality": {"name": "MP3-320"}}, "rejections": ["Not wanted in profile"]}]
+
+
+@app.post(L + "/release")
+async def lidarr_grab(request: Request):
+    body = await request.json()
+    NET.lidarr["commands"].append(f"grab:{body['guid']}")
+    for i, (t, rec, s, isrc) in enumerate(ALBUM_TRACKS, 1):
+        make_audio(os.path.join(NET.library_path, "Fake Band", "Fake Album (2020)", f"{i:02d} - {t}.flac"), t, album="Fake Album", track=i, seconds=s)
+    NET.lidarr["albums"]["rg-album"]["statistics"] = {"trackFileCount": 3, "percentOfTracks": 100}
+    return {}
+
+
 @app.get(L + "/queue")
 def lidarr_queue():
     return {"records": []}
@@ -345,6 +363,8 @@ def slskd_responses(sid: str):
     if "album" in text:
         out.append({"username": "peer", "hasFreeUploadSlot": True, "queueLength": 0, "uploadSpeed": 2_000_000,
                     "files": [{"filename": f, "size": 1000, "bitDepth": 16} for f in SLSK_ALBUM]})
+        out.append({"username": "mp3peer", "hasFreeUploadSlot": False, "queueLength": 3, "uploadSpeed": 500_000,
+                    "files": [{"filename": f.replace("[FLAC]", "[MP3]").replace(".flac", ".mp3"), "size": 800, "bitRate": 320} for f in SLSK_ALBUM]})
     if "delta" in text:
         out.append({"username": "peer2", "hasFreeUploadSlot": True, "queueLength": 0, "uploadSpeed": 1_000_000,
                     "files": [{"filename": "Music\\Fake Band\\Fake Band - Delta.flac", "size": 1000, "length": 8}]})
@@ -416,7 +436,7 @@ def dz_search_album(q: str):
 @app.get(DZ + "/search/track")
 def dz_search_track(q: str):
     return {"data": [dz_track(i, t, sec, code, 789 if i == 3 else 123) for i, (t, _, sec, code) in enumerate(ALBUM_TRACKS + [SINGLE])
-                     if f'track:"{t.lower()}"' in q.lower()]}
+                     if f'track:"{t.lower()}"' in q.lower() or ("track:" not in q and t.lower() in q.lower())]}
 
 
 @app.get(DZ + "/playlist/{pid}")

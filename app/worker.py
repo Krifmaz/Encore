@@ -116,6 +116,9 @@ async def start(r: dict) -> None:
         upd(r, source="ytdlp", status="downloading", message="Starting download…")
         await run_url(r)
         return
+    if d.get("pick"):
+        await start_pick(r)
+        return
     # already have it? (lossless upgrade requests replace what's there)
     if r["kind"] == "album" and not d.get("lossless_only") and (library.has_release_group(r["mbid"]) or library.has_album(r["artist"], r["album"] or r["title"])):
         await complete(r, "Already in library")
@@ -313,6 +316,34 @@ async def poll_lidarr(r: dict) -> None:
 
 # ---- slskd ------------------------------------------------------------------
 
+async def start_pick(r: dict) -> None:
+    """Manual pick: download exactly the chosen result – no fallback to other sources."""
+    d = r["detail"]
+    p = d["pick"]
+    d["sources"], d["log"] = [], []
+    src = p["source"]
+    if src == "slskd":
+        d["slskd"] = {"candidates": [p["payload"]], "idx": -1}
+        upd(r, source="slskd")
+        await _slskd_try_next(r)
+    elif src == "deezer" or (src == "link" and re.search(r"qobuz\.com|tidal\.com|deezer\.com", p["payload"]["url"])):
+        if not streamrip.enabled():
+            await fail(r, "Qobuz/Tidal/Deezer links need streamrip enabled in Settings → Downloaders")
+            return
+        upd(r, source="streamrip")
+        await start_streamrip(r, urls=[p["payload"]["url"]])
+    elif src in ("ytmusic", "link"):
+        upd(r, source="ytdlp")
+        await start_ytdlp(r, pick_url=p["payload"]["url"])
+    elif src == "lidarr":
+        pl = p["payload"]
+        await lidarr.grab(pl["guid"], pl["indexerId"])
+        d["lidarr"] = {"stage": "search", "album_id": pl["album_id"], "started": time.time()}
+        upd(r, source="lidarr", status="monitoring", message=f"Lidarr is grabbing {p.get('title') or 'the chosen release'}…")
+    else:
+        await fail(r, f"Unknown source {src}")
+
+
 async def _release_info(r: dict) -> dict | None:
     d = r["detail"]
     if "release" not in d and r["kind"] == "album" and r["mbid"]:
@@ -473,11 +504,13 @@ async def _isrc_for(r: dict) -> str | None:
     return d.get("isrc")
 
 
-async def start_streamrip(r: dict) -> None:
+async def start_streamrip(r: dict, urls: list[str] | None = None) -> None:
     async with loop_local("streamrip", lambda: asyncio.Semaphore(1)):
         _check(r["id"])
         upd(r, status="searching", message="Looking for an exact lossless match…")
-        if r["kind"] == "album":
+        if urls:
+            pass
+        elif r["kind"] == "album":
             rel = await _release_info(r)
             first_isrc = None
             if rel and r["mbid"]:
@@ -525,14 +558,18 @@ def _staging(r: dict) -> str:
     return os.path.join(config.get("staging_path"), f"request-{r['id']}")
 
 
-async def start_ytdlp(r: dict) -> None:
+async def start_ytdlp(r: dict, pick_url: str | None = None) -> None:
     async with loop_local("ytdlp", lambda: asyncio.Semaphore(2)):
         _check(r["id"])
         out = _staging(r)
         if r["kind"] == "track":
             upd(r, status="searching", message="Searching YouTube Music…")
-            hit = await ytmusic.find_song(r["artist"], r["title"], r["detail"].get("length"))
-            url = f"https://music.youtube.com/watch?v={hit['videoId']}" if hit else await ytdlp.find_best(r["artist"], r["title"], r["detail"].get("length"))
+            if pick_url:
+                hit = {"videoId": None} if "music.youtube.com" in pick_url else None
+                url = pick_url
+            else:
+                hit = await ytmusic.find_song(r["artist"], r["title"], r["detail"].get("length"))
+                url = f"https://music.youtube.com/watch?v={hit['videoId']}" if hit else await ytdlp.find_best(r["artist"], r["title"], r["detail"].get("length"))
             if not url:
                 await next_source(r, "no match on YouTube")
                 return
@@ -557,12 +594,15 @@ async def start_ytdlp(r: dict) -> None:
         album_title = r["album"] or r["title"]
         # whole official album from YouTube Music in one go
         upd(r, status="searching", message="Searching YouTube Music for the album…")
-        yt_album = await ytmusic.find_album(r["artist"], album_title, len(rel["tracks"]) if rel else None)
+        if pick_url:
+            yt_album = {"title": r["detail"]["pick"].get("title") or album_title, "playlist_url": pick_url}
+        else:
+            yt_album = await ytmusic.find_album(r["artist"], album_title, len(rel["tracks"]) if rel else None)
         if yt_album and yt_album["playlist_url"]:
             upd(r, status="downloading", message=f"YouTube Music album: {yt_album['title']}")
             try:
                 res = await ytdlp.download(yt_album["playlist_url"], os.path.join(out, "album"), _progress_hook(r), playlist=True)
-                if res["files"] and (not rel or len(res["files"]) >= len(rel["tracks"]) - max(1, len(rel["tracks"]) // 5)):
+                if res["files"] and (pick_url or not rel or len(res["files"]) >= len(rel["tracks"]) - max(1, len(rel["tracks"]) // 5)):
                     upd(r, status="importing", progress=100, message="Verifying, tagging and importing…")
                     new = await tagger.import_album_files(res["files"], r["artist"], album_title, r["mbid"], out)
                     shutil.rmtree(out, ignore_errors=True)
@@ -574,6 +614,9 @@ async def start_ytdlp(r: dict) -> None:
             except Exception as e:  # noqa: BLE001
                 db.log("warning", f"YouTube Music album download failed for {label(r)}: {e}")
             shutil.rmtree(out, ignore_errors=True)
+            if pick_url:
+                await next_source(r, "the chosen YouTube album could not be downloaded or didn't match")
+                return
         if not rel:
             await next_source(r, "no MusicBrainz tracklist for this album")
             return

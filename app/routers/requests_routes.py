@@ -35,7 +35,7 @@ def _quota(user: dict, n: int = 1) -> None:
         raise HTTPException(429, f"Weekly request limit reached ({limit}). Ask an admin to raise it.")
 
 
-def _create(user: dict, body: NewRequest, parent_id: int | None = None, notify_admin: bool = True) -> int:
+def _create(user: dict, body: NewRequest, parent_id: int | None = None, notify_admin: bool = True, extra: dict | None = None) -> int:
     if body.kind not in ("artist", "album", "track", "url"):
         raise HTTPException(400, "Invalid request kind")
     if body.kind == "url":
@@ -45,12 +45,12 @@ def _create(user: dict, body: NewRequest, parent_id: int | None = None, notify_a
         raise HTTPException(400, "A MusicBrainz id is required")
     elif body.kind == "track" and not (body.mbid or (body.artist and body.title)):
         raise HTTPException(400, "Track needs a MusicBrainz id or artist + title")
-    if body.kind == "track" and not body.mbid:
+    if body.kind == "track" and not body.mbid and not extra:
         dup = db.one("SELECT id, status FROM requests WHERE kind='track' AND lower(artist)=lower(?) AND lower(title)=lower(?) AND status NOT IN ('failed','denied','cancelled')",
                      (body.artist, body.title))
         if dup:
             raise HTTPException(409, f"Already requested (#{dup['id']}, {dup['status']})")
-    if body.mbid:
+    if body.mbid and not extra:
         dup = db.one("SELECT id, status FROM requests WHERE mbid=? AND kind=? AND status NOT IN ('failed','denied','cancelled')", (body.mbid, body.kind))
         if dup:
             raise HTTPException(409, f"Already requested (#{dup['id']}, {dup['status']})")
@@ -61,6 +61,7 @@ def _create(user: dict, body: NewRequest, parent_id: int | None = None, notify_a
         detail["isrc"] = body.isrc
     if body.album_mode in ("song", "album"):
         detail["album_mode"] = body.album_mode
+    detail.update(extra or {})
     rid = db.execute(
         "INSERT INTO requests (user_id, kind, mbid, artist, title, album, year, cover_url, url, status, message, detail, parent_id, created_at, updated_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
         (user["id"], body.kind, body.mbid, body.artist, body.title or body.album, body.album, body.year, body.cover_url, body.url,
@@ -89,6 +90,8 @@ def list_requests(status: str | None = None, mine: bool = False, limit: int = 20
     for r in rows:
         d = json.loads(r.pop("detail") or "{}")
         r["log"] = d.get("log", [])
+        r["length"] = d.get("length")
+        r["picked"] = bool(d.get("pick"))
         r["candidate"] = None
         s = d.get("slskd")
         if s and 0 <= s.get("idx", -1) < len(s.get("candidates", [])):

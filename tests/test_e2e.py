@@ -858,3 +858,58 @@ def test_artist_page_full_discography_extras_and_library(world):
     assert len(c.get("/api/discover/artist/a-fake/library-tracks?name=Fake%20Band").json()) == 2
     assert c.get("/api/discover/artist-lookup?name=fake band").json() == {"mbid": "a-fake"}
     assert c.get("/api/discover/artist-lookup?name=Nobody Here").status_code == 404
+
+
+def test_manual_download_picker(world):
+    from app import config, db
+    c = world.client
+    config.set_many({"slskd_enabled": True, "streamrip_enabled": True, "ytdlp_enabled": True, "lidarr_enabled": True})
+    assert [s["id"] for s in c.get("/api/picker/sources").json()["sources"]] == ["slskd", "deezer", "ytmusic", "lidarr"]
+    album = {"kind": "album", "artist": "Fake Band", "title": "Fake Album", "mbid": "rg-album", "artist_mbid": "a-fake", "track_count": 3}
+
+    # Soulseek: every folder is listed (best first) – pick the MP3 one on purpose
+    res = c.post("/api/picker/search", json={"source": "slskd", **album}, headers=H).json()
+    assert [(x["payload"]["username"], x["quality"], x["tracks"]) for x in res] == [("peer", "FLAC 16-bit", 3), ("mp3peer", "MP3 320k", 3)]
+    req = {"kind": "album", "mbid": "rg-album", "artist": "Fake Band", "title": "Fake Album", "album": "Fake Album"}
+    p = c.post("/api/picker/pick", json={"source": "slskd", "payload": res[1]["payload"], "title": res[1]["title"], "request": req}, headers=H).json()
+    r = world.drive(p["id"])
+    assert r["status"] == "completed" and "Soulseek (MP3)" in r["message"], r
+    assert {t["format"] for t in tracks(db)} == {"mp3"}
+    assert "mp3peer" in db.one("SELECT source_detail FROM tracks LIMIT 1")["source_detail"]
+
+    # Deezer song (via streamrip) for an existing queued request → old one is replaced
+    old = world.req(kind="track", mbid="rec-delta", artist="Fake Band", title="Delta")
+    res = c.post("/api/picker/search", json={"source": "deezer", "kind": "track", "artist": "Fake Band", "title": "Delta", "length": 8}, headers=H).json()
+    assert res[0]["title"] == "Delta" and res[0]["lossless"]
+    p = c.post("/api/picker/pick", json={"source": "deezer", "payload": res[0]["payload"], "request_id": old}, headers=H).json()
+    assert db.get_request(old)["status"] == "cancelled"
+    r = world.drive(p["id"])
+    assert r["status"] == "completed" and "Deezer" in r["message"], r
+
+    # YouTube Music album → resolved to its playlist
+    res = c.post("/api/picker/search", json={"source": "ytmusic", **album}, headers=H).json()
+    assert res[0]["payload"] == {"browseId": "MPREb_fake"}
+    db.execute("DELETE FROM tracks")
+    p = c.post("/api/picker/pick", json={"source": "ytmusic", "payload": res[0]["payload"], "request": req}, headers=H).json()
+    r = world.drive(p["id"])
+    assert r["status"] == "completed" and "YouTube Music" in r["message"], r
+
+    # Lidarr interactive search → grab that exact release
+    first = c.post("/api/picker/search", json={"source": "lidarr", **album}, headers=H)
+    assert first.status_code == 400 and "try again" in first.json()["detail"]   # Lidarr adds + loads the artist first
+    res = c.post("/api/picker/search", json={"source": "lidarr", **album}, headers=H).json()
+    assert [x["quality"] for x in res] == ["FLAC", "MP3-320"] and res[1]["warning"] == "Not wanted in profile"
+    p = c.post("/api/picker/pick", json={"source": "lidarr", "payload": res[0]["payload"], "title": res[0]["title"], "request": req}, headers=H).json()
+    r = world.drive(p["id"])
+    assert r["status"] == "completed" and "grab:g-flac" in NET.lidarr["commands"], r
+
+    # any link
+    p = c.post("/api/picker/pick", json={"source": "link", "payload": {"url": f"{world.web}/gamma.mp3"},
+                                         "request": {"kind": "track", "artist": "Fake Band", "title": "Gamma", "length": 7}}, headers=H).json()
+    r = world.drive(p["id"])
+    assert r["status"] == "completed", r
+    assert c.post("/api/picker/pick", json={"source": "link", "payload": {"url": "nope"}, "request": req}, headers=H).status_code == 400
+
+    # can be limited to admins
+    config.set_many({"manual_search": "admins"})
+    assert c.get("/api/picker/sources").json()["allowed"] is True

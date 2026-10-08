@@ -76,6 +76,7 @@ export function requestRow(r, { admin = false } = {}) {
     <div class="row">
       ${statusBadge(r.status)}
       ${admin && r.status === 'pending' ? `<button class="btn sm primary" data-act="approve">${icon.check}Approve</button><button class="btn sm danger" data-act="deny">Deny</button>` : ''}
+      ${['album', 'track'].includes(r.kind) && r.status !== 'completed' ? `<button class="btn sm" data-act="pick" data-req='${esc(JSON.stringify({ request_id: r.id, kind: r.kind, mbid: r.mbid, artist: r.artist, title: r.title, album: r.album, length: r.length }))}' title="Search the sources and pick the exact download">${icon.search}Pick</button>` : ''}
       ${['failed', 'cancelled'].includes(r.status) || (r.kind === 'playlist') ? `<button class="btn sm" data-act="retry" title="Retry">${icon.refresh}</button>` : ''}
       ${['pending', 'queued', 'searching', 'downloading', 'monitoring', 'importing'].includes(r.status) ? `<button class="btn sm" data-act="cancel" title="Cancel">${icon.x}</button>` : ''}
       ${!active ? `<button class="btn sm ghost" data-act="delete" title="Remove">${icon.trash}</button>` : ''}
@@ -89,6 +90,11 @@ export function bindRequestActions(root, reload) {
     if (!b) return;
     const id = b.closest('[data-id]').dataset.id;
     const act = b.dataset.act;
+    if (act === 'pick') {
+      const { pickerModal } = await import('./picker.js');
+      pickerModal({ ...JSON.parse(b.dataset.req), onDone: reload });
+      return;
+    }
     b.disabled = true;
     try {
       if (act === 'delete') await api.del(`/requests/${id}`);

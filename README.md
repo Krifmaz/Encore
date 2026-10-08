@@ -13,6 +13,7 @@ A self-hosted music request and library app. Your users sign in, search the whol
 - **Lossless upgrades**: albums you only have as MP3 or YouTube rips can be re-checked periodically. A lossless copy replaces the old files, and playlists follow it automatically.
 - **YouTube Music**: playlists, albums and your Liked Music import with proper artist and album data. Connect your account for two-way 👍 sync and playlist push. Songs and whole albums are downloaded from official YouTube Music uploads in the original stream quality (256 kbps with Premium cookies).
 - **Admin → Auto-download** controls what downloads on its own (liked songs from any app, new tracks in followed playlists), the album and quality rules, lossless upgrades, and which users have it switched on.
+- **Manual download picker** (like Lidarr's interactive search): *Pick download* on any album or song, or *Pick* on a request. It searches Soulseek, Deezer, YouTube Music and Lidarr's indexers at once and shows each result's quality, bit depth, size, file count and uploader queue/speed. You choose the exact one, or paste any link. Admins can limit it to admins in Settings.
 - **Song or whole album, per request**: in Discover, *Song* or *+ Album*. In the Downloader, *Just the song / Get the whole album / Admin default*, which also applies to playlist imports.
 - **Downloader**: a Spotify, Apple Music, Deezer, Tidal or Qobuz link (playlist, album or track) is matched track by track, and each song is fetched from the best source. YouTube, SoundCloud, Bandcamp, Mixcloud and about 1,800 other sites download directly.
 - **Playlists and Liked Songs**:
@@ -120,6 +121,7 @@ Every option can be changed in the UI. Environment variables only seed the first
 | `ENCORE_ADMIN_USER` / `ENCORE_ADMIN_PASSWORD` | admin / random | First admin account |
 | `ENCORE_LIBRARY_PATH` | `/music` | Music library inside the container |
 | `ENCORE_SIGNUP_MODE` | `invite` | `invite`, `open` or `closed` |
+| `ENCORE_MANUAL_SEARCH` | `everyone` | Who can use the manual download picker: `everyone` or `admins` |
 | `ENCORE_SOURCE_ORDER` | `lidarr,slskd,ytdlp` | Order sources are tried in |
 | `ENCORE_NAMING_TEMPLATE` | `{albumartist}/{album} ({year})/{discprefix}{track:02d} - {title}` | Rename template |
 | `LIDARR_URL` / `LIDARR_API_KEY` / `LIDARR_ENABLED` | | |
