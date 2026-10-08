@@ -213,6 +213,9 @@ table.table { width: 100%; border-collapse: collapse; }
 .detail-head .cover { width: 220px; height: 220px; border-radius: 16px; overflow: hidden; flex: none; position: relative; background: var(--panel-2); box-shadow: var(--shadow); }
 .detail-head .cover img { width: 100%; height: 100%; object-fit: cover; }
 .detail-head.artist .cover { border-radius: 50%; }
+.bio { margin-bottom: 8px; padding: 16px 18px 10px; }
+.bio p { margin: 0 0 8px; line-height: 1.6; max-width: 80ch; }
+.clamp { display: -webkit-box; -webkit-line-clamp: 3; line-clamp: 3; -webkit-box-orient: vertical; overflow: hidden; }
 .detail-head .kicker { font-size: 12px; text-transform: uppercase; letter-spacing: .1em; color: var(--muted); font-weight: 700; }
 .detail-head h1 { font-size: 40px; margin: 6px 0 10px; }
 .chips { display: flex; flex-wrap: wrap; gap: 6px; }

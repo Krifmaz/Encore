@@ -1,7 +1,7 @@
 from fastapi import APIRouter, Depends, HTTPException
 
 from .. import auth, db
-from ..services import library, musicbrainz as mb, ytdlp
+from ..services import artistinfo, library, musicbrainz as mb, ytdlp
 
 router = APIRouter(prefix="/api/discover", tags=["discover"], dependencies=[Depends(auth.current_user)])
 
@@ -62,10 +62,48 @@ async def artist(mbid: str, user=Depends(auth.current_user)):
     f = db.one("SELECT id, types FROM follows WHERE user_id=? AND mbid=?", (user["id"], mbid))
     a["follow"] = {"id": f["id"], "types": __import__("json").loads(f["types"])} if f else None
     a["library_albums"] = db.query(
-        "SELECT album_id, album, year, COUNT(*) tracks FROM tracks WHERE mb_albumartistid=? OR lower(albumartist)=lower(?) GROUP BY album_id ORDER BY year DESC",
+        """SELECT album_id, album, albumartist, year, COUNT(*) tracks, MAX(mb_releasegroupid) rgid FROM tracks
+           WHERE mb_albumartistid=? OR lower(albumartist)=lower(?) GROUP BY album_id ORDER BY year DESC""",
         (mbid, a["name"]),
     )
+    a["library_tracks"] = db.one(
+        "SELECT COUNT(*) n FROM tracks WHERE mb_albumartistid=? OR mb_artistid=? OR lower(albumartist)=lower(?) OR lower(artist)=lower(?)",
+        (mbid, mbid, a["name"], a["name"]))["n"]
     return a
+
+
+@router.get("/artist/{mbid}/extras")
+async def artist_extras(mbid: str, user=Depends(auth.current_user)):
+    """Photo, Wikipedia bio and popular tracks (best-effort, loaded after the page)."""
+    try:
+        a = await mb.artist(mbid)
+    except Exception as e:  # noqa: BLE001
+        raise HTTPException(502, f"MusicBrainz error: {e}")
+    return await artistinfo.extras(mbid, a["name"], a["links"])
+
+
+@router.get("/artist/{mbid}/library-tracks")
+def artist_library_tracks(mbid: str, name: str = "", user=Depends(auth.current_user)):
+    """Every track by this artist in the library, for Play / Shuffle."""
+    return db.query("""SELECT id, title, artist, album, album_id, format, duration FROM tracks
+                       WHERE mb_albumartistid=? OR mb_artistid=? OR lower(albumartist)=lower(?) OR lower(artist)=lower(?)
+                       ORDER BY year DESC, lower(album), disc, track LIMIT 5000""", (mbid, mbid, name, name))
+
+
+@router.get("/artist-lookup")
+async def artist_lookup(name: str, user=Depends(auth.current_user)):
+    """Find the MusicBrainz artist for a library artist name (tag first, then an exact-name search)."""
+    row = db.one("SELECT MAX(mb_albumartistid) id FROM tracks WHERE lower(albumartist)=lower(?)", (name,))
+    if row and row["id"]:
+        return {"mbid": row["id"]}
+    try:
+        hits = await mb.search_artists(name, 5)
+    except Exception as e:  # noqa: BLE001
+        raise HTTPException(502, f"MusicBrainz error: {e}")
+    exact = [h for h in hits if h["name"].lower() == name.lower()]
+    if not exact:
+        raise HTTPException(404, "No MusicBrainz artist with that name")
+    return {"mbid": max(exact, key=lambda h: h.get("score", 0))["id"]}
 
 
 @router.get("/album/{rgid}")

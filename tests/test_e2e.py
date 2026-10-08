@@ -838,3 +838,23 @@ def test_follow_backfill_and_library_artists(world):
         time.sleep(0.1)
     assert st["followed"] == 1, st
     assert [f["mbid"] for f in c.get("/api/follows").json()] == ["a-fake"]
+
+
+def test_artist_page_full_discography_extras_and_library(world):
+    from app.services import artistinfo
+    artistinfo._cache.clear()
+    c = world.client
+    fakenet.make_audio(str(world.library / "Fake Band" / "Fake Album" / "01.flac"), "Alpha", album="Fake Album")
+    fakenet.make_audio(str(world.library / "Fake Band" / "Basement Tapes" / "01.mp3"), "Demo One", album="Basement Tapes")
+    world.run(__import__("app.services.library", fromlist=["x"]).scan)
+    a = c.get("/api/discover/artist/a-fake").json()
+    assert {r["id"] for r in a["release_groups"]} == {"rg-album", "rg-single", "rg-comp"}, "every release type is listed"
+    assert {r["album"] for r in a["library_albums"]} == {"Fake Album", "Basement Tapes"} and a["library_tracks"] == 2
+    assert [r["in_library"] for r in a["release_groups"] if r["id"] == "rg-album"] == [True]
+    x = c.get("/api/discover/artist/a-fake/extras").json()
+    assert x["image"].endswith("1000x1000.jpg") and x["bio"].startswith("Fake Band is") and x["bio_url"].endswith("/Fake_Band")
+    assert [t["title"] for t in x["top"]][:2] == ["Alpha", "Beta"] and x["top"][0]["library"]["title"] == "Alpha"
+    assert x["top"][1]["library"] is None and x["top"][-1]["title"] == "Unreleased Gem"
+    assert len(c.get("/api/discover/artist/a-fake/library-tracks?name=Fake%20Band").json()) == 2
+    assert c.get("/api/discover/artist-lookup?name=fake band").json() == {"mbid": "a-fake"}
+    assert c.get("/api/discover/artist-lookup?name=Nobody Here").status_code == 404

@@ -1,6 +1,7 @@
 import { api } from '../api.js';
-import { art, availability, debounce, emptyState, esc, fmt, icon, skeletonGrid, statusBadge } from '../ui.js';
-import { albumTile, bindTiles, submitRequest } from './common.js';
+import * as player from '../player.js';
+import { art, availability, confirmDialog, debounce, emptyState, esc, fmt, icon, skeletonGrid, statusBadge, toast } from '../ui.js';
+import { albumTile, bindTiles, libraryTile, submitRequest } from './common.js';
 import { followModal } from './following.js';
 
 const reqBtn = (attrs, label = 'Request') => `<button class="btn sm primary" ${attrs}>${icon.plus}${label}</button>`;
@@ -89,6 +90,9 @@ export async function renderSearch(view, ctx) {
   results.innerHTML = html || emptyState(icon.search, `No results for “${esc(q)}”`);
 }
 
+const ORDER = ['Album', 'EP', 'Single', 'Compilation', 'Live', 'Soundtrack', 'Remix', 'DJ-mix', 'Mixtape/Street', 'Demo', 'Other', 'Broadcast', 'Interview', 'Spokenword', 'Audiobook'];
+const reqBody = (rg) => ({ kind: 'album', mbid: rg.id, artist: rg.artist, title: rg.title, album: rg.title, year: rg.year, cover_url: rg.cover });
+
 export async function renderArtist(view, ctx) {
   view.innerHTML = '<div class="skeleton" style="height:220px"></div>' + skeletonGrid(8);
   const a = await api.get(`/discover/artist/${ctx.params[0]}`);
@@ -97,35 +101,133 @@ export async function renderArtist(view, ctx) {
     const key = rg.secondary.length ? rg.secondary[0] : (rg.type || 'Other');
     (groups[key] ||= []).push(rg);
   }
-  const order = ['Album', 'EP', 'Single', 'Compilation', 'Live', 'Soundtrack', 'Remix', 'DJ-mix', 'Mixtape/Street', 'Demo', 'Other', 'Broadcast', 'Interview', 'Spokenword', 'Audiobook'];
-  const keys = Object.keys(groups).sort((x, y) => (order.indexOf(x) + 1 || 99) - (order.indexOf(y) + 1 || 99));
+  const keys = Object.keys(groups).sort((x, y) => (ORDER.indexOf(x) + 1 || 99) - (ORDER.indexOf(y) + 1 || 99));
   const owned = a.release_groups.filter(r => r.in_library).length;
   const firstCover = a.release_groups.find(r => r.type === 'Album' && !r.secondary.length)?.cover;
   const links = Object.entries(a.links || {}).filter(([k]) => ['official homepage', 'bandcamp', 'soundcloud', 'youtube', 'streaming', 'free streaming', 'wikidata', 'discogs', 'last.fm'].includes(k)).slice(0, 6);
+  // library albums MusicBrainz doesn't list (bootlegs, untagged rips…) still show up
+  const rgIds = new Set(a.release_groups.map(r => r.id));
+  const titles = new Set(a.release_groups.map(r => r.title.toLowerCase()));
+  const localOnly = a.library_albums.filter(l => !(l.rgid && rgIds.has(l.rgid)) && !titles.has((l.album || '').toLowerCase()));
+  let filter = 'all';
+  try { filter = localStorage.getItem('encore.artistFilter') || 'all'; } catch { /* ignore */ }
+
   view.innerHTML = `
     <div class="detail-head artist">
-      <div class="cover">${art(firstCover, a.name)}</div>
+      <div class="cover" id="artist-photo">${art(firstCover, a.name)}</div>
       <div class="grow">
         <div class="kicker">${esc(a.type || 'Artist')}${a.country ? ' · ' + esc(a.country) : ''}${a.begin ? ' · since ' + esc(a.begin.slice(0, 4)) : ''}</div>
         <h1>${esc(a.name)}</h1>
         ${a.disambiguation ? `<p class="muted" style="margin:0 0 10px">${esc(a.disambiguation)}</p>` : ''}
         <div class="chips">${a.tags.map(t => `<span class="badge">${esc(t)}</span>`).join('')}</div>
         <div class="row wrap mt">
-          <button class="btn ${a.follow ? '' : 'primary'}" id="follow-btn">${a.follow ? `${icon.check}Following` : `${icon.plus}Follow`}</button>
+          ${a.library_tracks ? `<button class="btn primary" id="play-artist">${icon.play}Play</button><button class="btn" id="shuffle-artist">Shuffle</button>` : ''}
+          <button class="btn ${a.follow || a.library_tracks ? '' : 'primary'}" id="follow-btn">${a.follow ? `${icon.check}Following` : `${icon.plus}Follow`}</button>
           ${a.request_status ? statusBadge(a.request_status) : `<button class="btn" data-req-artist='${esc(JSON.stringify({ mbid: a.id, artist: a.name, cover_url: firstCover }))}'>${icon.download}Request discography</button>`}
+        </div>
+        <div class="row wrap mt small">
           <span class="badge ${owned ? 'ok' : ''}">${owned} / ${a.release_groups.length} releases in library</span>
-          ${a.library_albums.length ? `<a class="btn sm" href="#/library?artist=${encodeURIComponent(a.name)}">${icon.library}Open in library</a>` : ''}
+          ${a.library_tracks ? `<span class="badge">${a.library_tracks} tracks</span>` : ''}
           <a class="btn sm ghost" target="_blank" rel="noopener" href="https://musicbrainz.org/artist/${esc(a.id)}">${icon.external}MusicBrainz</a>
           ${links.map(([k, u]) => `<a class="btn sm ghost" target="_blank" rel="noopener noreferrer" href="${esc(u)}">${esc(k)}</a>`).join('')}
         </div>
       </div>
     </div>
-    ${keys.map(k => `<div class="section-head"><h2>${esc(k)}s <span class="faint small">${groups[k].length}</span></h2></div>
-      <div class="grid">${groups[k].map(rg => albumTile(rg, { href: `/album/${rg.id}`, actions: albumActions(rg), sub: esc([rg.year, rg.type].filter(Boolean).join(' · ')) })).join('')}</div>`).join('')}
-    ${!keys.length ? emptyState(icon.disc, 'No releases on MusicBrainz') : ''}`;
+    <div id="artist-bio"></div>
+    <div id="artist-top"></div>
+    ${a.library_albums.length ? `<div class="section-head"><h2>In your library <span class="faint small">${a.library_albums.length}</span></h2></div>
+      <div class="grid">${a.library_albums.map(l => libraryTile({ id: l.album_id, album: l.album, albumartist: l.albumartist, year: l.year })).join('')}</div>` : ''}
+    <div class="section-head"><h2>Discography <span class="faint small">${a.release_groups.length}</span></h2>
+      <div class="tabs" id="disco-filter">${[['all', 'All'], ['missing', 'Missing'], ['owned', 'In library']].map(([k, l]) => `<button data-f="${k}">${l}</button>`).join('')}</div>
+    </div>
+    <div id="disco"></div>
+    ${localOnly.length ? `<div class="section-head"><h2>Only in your library <span class="faint small">${localOnly.length}</span></h2></div>
+      <p class="small muted" style="margin:-6px 0 12px">Albums MusicBrainz doesn't list for this artist (or not matched yet).</p>
+      <div class="grid">${localOnly.map(l => libraryTile({ id: l.album_id, album: l.album, albumartist: l.albumartist, year: l.year })).join('')}</div>` : ''}`;
+
+  const disco = view.querySelector('#disco');
+  const paint = () => {
+    view.querySelectorAll('#disco-filter button').forEach(b => b.classList.toggle('active', b.dataset.f === filter));
+    const keep = rg => filter === 'all' || (filter === 'owned' ? rg.in_library : !rg.in_library);
+    const html = keys.map(k => {
+      const list = groups[k].filter(keep);
+      if (!list.length) return '';
+      const missing = groups[k].filter(rg => !rg.in_library && !rg.request_status);
+      return `<div class="section-head"><h3>${esc(k)}s <span class="faint small">${list.length}</span></h3>
+          ${missing.length ? `<button class="btn sm" data-req-missing="${esc(k)}">${icon.download}Request ${missing.length} missing</button>` : ''}</div>
+        <div class="grid">${list.map(rg => albumTile(rg, { href: `/album/${rg.id}`, actions: albumActions(rg), sub: esc([rg.date || rg.year, rg.secondary.length ? rg.type : ''].filter(Boolean).join(' · ')) })).join('')}</div>`;
+    }).join('');
+    disco.innerHTML = html || emptyState(icon.disc, a.release_groups.length ? (filter === 'owned' ? 'Nothing from this artist in the library yet' : 'You have everything 🎉') : 'No releases on MusicBrainz');
+  };
+  paint();
+  view.querySelector('#disco-filter').onclick = (e) => {
+    const b = e.target.closest('[data-f]');
+    if (!b) return;
+    filter = b.dataset.f;
+    try { localStorage.setItem('encore.artistFilter', filter); } catch { /* ignore */ }
+    paint();
+  };
+  disco.addEventListener('click', async (e) => {
+    const b = e.target.closest('[data-req-missing]');
+    if (!b) return;
+    const missing = groups[b.dataset.reqMissing].filter(rg => !rg.in_library && !rg.request_status);
+    if (!await confirmDialog(`Request ${missing.length} ${b.dataset.reqMissing.toLowerCase()}(s)?`, missing.map(rg => rg.title).join(' · '), 'Request')) return;
+    b.disabled = true;
+    let ok = 0;
+    for (const rg of missing) {
+      try { const r = await api.post('/requests', reqBody(rg)); rg.request_status = r.status; ok++; } catch (err) { toast(err.message, 'err'); if (/limit/i.test(err.message)) break; }
+    }
+    toast(`${ok} release(s) requested`, 'ok');
+    window.dispatchEvent(new CustomEvent('encore:requests-changed'));
+    paint();
+  });
   bindTiles(view, ctx.navigate);
   bindRequestButtons(view);
   view.querySelector('#follow-btn').onclick = () => followModal(a, () => window.dispatchEvent(new HashChangeEvent('hashchange')));
+  const playAll = async (shuffle) => {
+    let t = await api.get(`/discover/artist/${a.id}/library-tracks?name=${encodeURIComponent(a.name)}`);
+    if (shuffle) t = t.map(x => [Math.random(), x]).sort((p, q) => p[0] - q[0]).map(p => p[1]);
+    player.playQueue(t, 0);
+  };
+  view.querySelector('#play-artist')?.addEventListener('click', () => playAll(false));
+  view.querySelector('#shuffle-artist')?.addEventListener('click', () => playAll(true));
+
+  // photo, bio and popular tracks load after the page (Deezer + Wikipedia, best-effort)
+  api.get(`/discover/artist/${a.id}/extras`).then(x => {
+    if (!view.isConnected) return;
+    if (x.image) view.querySelector('#artist-photo').innerHTML = art(x.image, a.name);
+    if (x.bio) {
+      view.querySelector('#artist-bio').innerHTML = `<div class="card flat bio"><p class="clamp" id="bio-text">${esc(x.bio)}</p>
+        <div class="row small"><button class="btn sm ghost" id="bio-more">Show more</button>${x.bio_url ? `<a class="muted" target="_blank" rel="noopener" href="${esc(x.bio_url)}">Wikipedia</a>` : ''}</div></div>`;
+      view.querySelector('#bio-more').onclick = (e) => { const c = view.querySelector('#bio-text').classList.toggle('clamp'); e.target.textContent = c ? 'Show more' : 'Show less'; };
+    }
+    if (x.top?.length) {
+      const top = x.top;
+      const playable = top.filter(t => t.library).map(t => t.library);
+      view.querySelector('#artist-top').innerHTML = `<div class="section-head"><h2>Popular</h2></div>
+        <div class="card flat"><div class="table-wrap"><table class="table"><tbody>${top.map((t, i) => `<tr>
+          <td class="num">${t.library ? `<button class="btn ghost icon sm" data-top-play="${i}" aria-label="Play">${icon.play.replace('<svg', '<svg width="14"')}</button>` : i + 1}</td>
+          <td><div class="row" style="gap:10px"><div class="thumb">${art(t.cover, t.album)}</div><div><div style="font-weight:600">${esc(t.title)} ${t.version ? `<span class="muted">${esc(t.version)}</span>` : ''}</div><div class="small muted">${esc(t.album)}</div></div></div></td>
+          <td class="muted hide-sm">${fmt.dur(t.duration)}</td>
+          <td style="text-align:right">${t.library ? '<span class="badge ok">In library</span>' : `<button class="btn sm" data-req-track='${esc(JSON.stringify({ artist: a.name, title: t.title + (t.version ? ' ' + t.version : ''), album: t.album, cover_url: t.cover, length: t.duration, isrc: t.isrc || undefined, album_mode: 'song' }))}'>${icon.plus}Track</button>`}</td>
+        </tr>`).join('')}</tbody></table></div></div>`;
+      view.querySelector('#artist-top').onclick = (e) => {
+        const b = e.target.closest('[data-top-play]');
+        if (b) player.playQueue(playable, playable.indexOf(top[+b.dataset.topPlay].library));
+      };
+    }
+  }).catch(() => { /* extras are optional */ });
+}
+
+/** Library artist → full artist page (resolved through MusicBrainz), falling back to the library filter. */
+export async function renderArtistByName(view, ctx) {
+  const name = decodeURIComponent(ctx.params[0]);
+  view.innerHTML = '<div class="skeleton" style="height:220px"></div>';
+  let to = `#/library?artist=${encodeURIComponent(name)}`;
+  try { to = `#/artist/${(await api.get(`/discover/artist-lookup?name=${encodeURIComponent(name)}`)).mbid}`; } catch { /* not on MusicBrainz */ }
+  if (!view.isConnected) return;
+  history.replaceState(null, '', to);           // no extra history entry, so Back skips the redirect
+  window.dispatchEvent(new HashChangeEvent('hashchange'));
 }
 
 export async function renderAlbum(view, ctx) {

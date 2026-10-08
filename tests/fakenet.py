@@ -143,7 +143,8 @@ def mb_artist_search(query: str = ""):
 @app.get("/mb.test/ws/2/artist/{aid}")
 def mb_artist(aid: str):
     return {"id": aid, "name": ARTIST["name"], "type": "Group", "country": "GB", "life-span": {"begin": "2010"},
-            "tags": [{"name": "electronic", "count": 2}], "relations": [{"type": "bandcamp", "url": {"resource": "https://fake.bandcamp.com"}}]}
+            "tags": [{"name": "electronic", "count": 2}], "relations": [{"type": "bandcamp", "url": {"resource": "https://fake.bandcamp.com"}},
+                                                     {"type": "wikidata", "url": {"resource": "https://www.wikidata.org/wiki/Q42"}}]}
 
 
 @app.get("/mb.test/ws/2/release-group")
@@ -427,6 +428,29 @@ def dz_playlist(pid: str):
 def dz_playlist_tracks(pid: str):
     return {"data": [dz_track(0, "Alpha", 5, ALBUM_TRACKS[0][3]), {**dz_track(9, "Alpha", 5, None), "title_version": "(Club Remix)"},
                      dz_track(3, "Delta", 8, SINGLE[3], 789)]}
+
+
+@app.get(DZ + "/search/artist")
+def dz_search_artist(q: str):
+    return {"data": [{"id": 77, "name": ARTIST["name"], "nb_fan": 1234, "picture_xl": "https://e-cdns-images.dzcdn.net/images/artist/abc/1000x1000.jpg"},
+                     {"id": 78, "name": "Fake Band Tribute", "nb_fan": 5, "picture_xl": ""}] if "fake" in q.lower() else []}
+
+
+@app.get(DZ + "/artist/{aid}/top")
+def dz_artist_top(aid: str, limit: int = 10):
+    return {"data": [{**dz_track(i, t, sec, code), "title_short": t, "rank": 900000 - i} for i, (t, _, sec, code) in enumerate(ALBUM_TRACKS)]
+            + [{**dz_track(9, "Unreleased Gem", 200, None), "title_short": "Unreleased Gem"}]}
+
+
+@app.get("/www.wikidata.org/wiki/Special:EntityData/{qid}.json")
+def wikidata(qid: str):
+    return {"entities": {qid: {"sitelinks": {"enwiki": {"title": "Fake Band"}}}}}
+
+
+@app.get("/en.wikipedia.org/api/rest_v1/page/summary/{title}")
+def wiki_summary(title: str):
+    return {"extract": "Fake Band is an English electronic group formed in 2010.",
+            "content_urls": {"desktop": {"page": f"https://en.wikipedia.org/wiki/{title}"}}}
 
 
 @app.get(DZ + "/user/{uid}")

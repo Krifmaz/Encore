@@ -173,7 +173,7 @@ async def artist(mbid: str, fresh: bool = False) -> dict:
         page = await _get("release-group", {"artist": mbid, "limit": 100, "offset": offset}, fresh)
         rgs += page.get("release-groups", [])
         offset += 100
-        if offset >= page.get("release-group-count", 0) or offset >= 500:
+        if offset >= page.get("release-group-count", 0) or offset >= 2000:
             break
     groups = [_rg({**rg, "artist-credit": [{"name": a["name"], "artist": {"id": mbid}}]}) for rg in rgs]
     groups.sort(key=lambda g: g["year"] or "9999", reverse=True)

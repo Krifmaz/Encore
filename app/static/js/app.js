@@ -23,6 +23,7 @@ const routes = [
   [/^\/$/, home.render],
   [/^\/search$/, discover.renderSearch],
   [/^\/artist\/([\w-]+)$/, discover.renderArtist],
+  [/^\/artist-name\/(.+)$/, discover.renderArtistByName],
   [/^\/album\/([\w-]+)$/, discover.renderAlbum],
   [/^\/library$/, libraryPage.render],
   [/^\/library\/album\/([\w-]+)$/, libraryPage.renderAlbum],

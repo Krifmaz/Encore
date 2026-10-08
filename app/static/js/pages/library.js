@@ -79,7 +79,7 @@ export async function render(view, ctx) {
       more.classList.add('hidden');
       view.querySelector('#lib-sub').textContent = `${fmt.num(rows.length)} artists`;
       body.innerHTML = rows.length ? `<div class="grid">${rows.map(a => `
-        <div class="tile round" data-href="/library?artist=${encodeURIComponent(a.name)}">
+        <div class="tile round" data-href="${a.mbid ? `/artist/${esc(a.mbid)}` : `/artist-name/${encodeURIComponent(a.name)}`}">
           <div class="art">${art(`/api/library/albums/${a.cover_album}/cover`, a.name)}</div>
           <div class="t ellipsis" style="text-align:center">${esc(a.name)}</div>
           <div class="s" style="text-align:center">${a.albums} album${a.albums === 1 ? '' : 's'} · ${a.tracks} tracks</div>
@@ -249,7 +249,7 @@ export async function renderAlbum(view, ctx) {
       <div class="grow">
         <div class="kicker">Album · In your library</div>
         <h1>${esc(a.album || 'Unknown album')}</h1>
-        <div class="muted"><a href="#/library?artist=${encodeURIComponent(a.albumartist)}" style="color:var(--text);font-weight:650">${esc(a.albumartist)}</a>
+        <div class="muted"><a href="#/artist-name/${encodeURIComponent(a.albumartist)}" style="color:var(--text);font-weight:650">${esc(a.albumartist)}</a>
           ${a.year ? ' · ' + esc(a.year) : ''} · ${a.tracks.length} tracks · ${fmt.longDur(a.duration)} · ${fmt.size(a.size)}</div>
         <div class="chips mt">
           <span class="badge">${esc(formats)}</span>
