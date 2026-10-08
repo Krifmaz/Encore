@@ -284,3 +284,16 @@ table.table { width: 100%; border-collapse: collapse; }
   .hero { padding: 22px; }
   .hide-sm { display: none; }
 }
+
+/* settings: test results + value sources */
+.test-result { display: flex; align-items: flex-start; gap: 10px; padding: 11px 14px; border-radius: 10px; margin-bottom: 16px;
+  border: 1px solid var(--border); background: var(--panel-2); font-weight: 550; }
+.test-result svg { width: 18px; height: 18px; flex: none; margin-top: 1px; }
+.test-result.ok { color: var(--ok); border-color: rgba(34,197,94,.35); background: rgba(34,197,94,.1); }
+.test-result.err { color: var(--err); border-color: rgba(239,68,68,.35); background: rgba(239,68,68,.1); }
+.test-result span { word-break: break-word; }
+small.src { color: var(--muted); }
+small.src.env { color: var(--info); }
+small.src a { color: var(--accent); }
+.input:disabled, select.input:disabled { opacity: .65; cursor: not-allowed; }
+.diag-raw { margin-top: 8px; white-space: pre-wrap; max-height: 220px; overflow: auto; }

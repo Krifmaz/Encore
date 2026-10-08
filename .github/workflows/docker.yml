@@ -35,10 +35,12 @@ jobs:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Image name (lower-case owner)/encore
+        run: echo "IMAGE=ghcr.io/${GITHUB_REPOSITORY_OWNER,,}/encore" >> "$GITHUB_ENV"
       - id: meta
         uses: docker/metadata-action@v5
         with:
-          images: ghcr.io/${{ github.repository }}
+          images: ${{ env.IMAGE }}
           tags: |
             type=ref,event=branch
             type=semver,pattern={{version}}

@@ -3,7 +3,8 @@ FROM ${BASE_IMAGE}
 
 LABEL org.opencontainers.image.title="Encore" \
       org.opencontainers.image.description="Self-hosted music requests + library manager for Lidarr, slskd and yt-dlp" \
-      org.opencontainers.image.source="https://github.com/krifmaz/test"
+      org.opencontainers.image.source="https://github.com/krifmaz/test" \
+      org.opencontainers.image.url="https://github.com/krifmaz/test"
 
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
@@ -15,7 +16,7 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
     TZ=UTC
 
 RUN apt-get update \
- && apt-get install -y --no-install-recommends ffmpeg libchromaprint-tools tini ca-certificates tzdata \
+ && apt-get install -y --no-install-recommends ffmpeg libchromaprint-tools curl tini ca-certificates tzdata \
  && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app

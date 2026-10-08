@@ -128,22 +128,44 @@ def _coerce(default, raw):
     return "" if raw is None else str(raw)
 
 
+def _clean_env(raw: str) -> str:
+    """Compose list syntax keeps quotes literally (- KEY="abc"), and copy/paste adds whitespace."""
+    v = raw.strip()
+    if len(v) >= 2 and v[0] == v[-1] and v[0] in "\"'":
+        v = v[1:-1].strip()
+    return v
+
+
+_env: dict[str, object] = {}
+
+
 def load() -> None:
+    """Environment variables always win (shown as locked in the UI); otherwise the value saved in the UI."""
     stored = {r["key"]: json.loads(r["value"]) for r in db.query("SELECT key, value FROM settings")}
+    _env.clear()
     for key, (env, default, _) in DEFAULTS.items():
-        if key in stored:
-            _cache[key] = _coerce(default, stored[key])
-        elif env and os.environ.get(env) is not None:
-            _cache[key] = _coerce(default, os.environ[env])
-            db.execute("INSERT OR REPLACE INTO settings VALUES (?,?)", (key, json.dumps(_cache[key])))
-        else:
-            _cache[key] = default
+        raw = os.environ.get(env) if env else None
+        if raw is not None and _clean_env(raw) != "":
+            _env[key] = _coerce(default, _clean_env(raw))
+        _cache[key] = _coerce(default, stored[key]) if key in stored else default
     if not _cache.get("api_key"):
         set_many({"api_key": secrets.token_hex(24)})
 
 
 def get(key: str):
+    if key in _env:
+        return _env[key]
     return _cache.get(key, DEFAULTS.get(key, (None, None, False))[1])
+
+
+def source(key: str) -> str:
+    if key in _env:
+        return "env"
+    return "ui" if db.one("SELECT 1 FROM settings WHERE key=?", (key,)) else "default"
+
+
+def env_locked(key: str) -> bool:
+    return key in _env
 
 
 def set_many(values: dict) -> None:
@@ -155,13 +177,30 @@ def set_many(values: dict) -> None:
         db.execute("INSERT OR REPLACE INTO settings VALUES (?,?)", (key, json.dumps(val)))
 
 
+MASK = "••••"
+
+
+def mask(val) -> str:
+    """Secrets are never sent to the browser; show length + last 4 so you can tell which key is loaded."""
+    s = str(val or "")
+    if not s:
+        return ""
+    tail = s[-4:] if len(s) >= 12 else ""
+    return f"{MASK}{tail} ({len(s)} chars)"
+
+
+def is_masked(v) -> bool:
+    return isinstance(v, str) and v.startswith(MASK)
+
+
 def public_dump() -> dict:
-    """All settings, secrets masked (unset secrets come back empty)."""
+    """All settings (secrets masked) plus where each value comes from."""
     out = {}
-    for key, (_, _, secret) in DEFAULTS.items():
+    meta = {}
+    saved = {r["key"] for r in db.query("SELECT key FROM settings")}
+    for key, (env, _, secret) in DEFAULTS.items():
         val = get(key)
-        out[key] = ("••••••••" if val else "") if secret and key != "api_key" else val
+        out[key] = mask(val) if secret and key != "api_key" else val
+        meta[key] = {"source": "env" if key in _env else "ui" if key in saved else "default", "env": env}
+    out["_meta"] = meta
     return out
-
-
-MASK = "••••••••"

@@ -80,7 +80,7 @@ async def test(service: str, user=Depends(auth.admin_user)):
             ok = r.json().get("status") == "ok"
             return {"ok": ok, "message": "AcoustID key valid" if ok else r.json().get("error", {}).get("message", "invalid key")}
     except Exception as e:  # noqa: BLE001
-        return {"ok": False, "message": str(e)[:300]}
+        return {"ok": False, "message": (str(e) or type(e).__name__)[:400]}
     raise HTTPException(404, "Unknown service")
 
 

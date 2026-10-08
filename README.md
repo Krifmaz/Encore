@@ -37,7 +37,7 @@ Then go to **Settings** to configure the services and use **Test connection**. I
 
 ### Prebuilt image
 
-GitHub Actions publishes `ghcr.io/krifmaz/test:latest` (amd64 and arm64). Use `image:` in place of `build: .` if you prefer.
+GitHub Actions publishes `ghcr.io/krifmaz/encore:latest` (amd64 and arm64). If the repository is private, the image is too – run `docker login ghcr.io` once with a token that has `read:packages`.
 
 ## Wiring up the services
 
@@ -48,7 +48,7 @@ Encore, Lidarr and slskd must see the **same files at the same paths**:
 | Music library | `/music` | `/music` (root folder) | `/music` (read-only share) |
 | Downloads | `/downloads` | `/downloads` | `/downloads` |
 
-**slskd** saves to `/downloads/slskd`, and Encore imports from there. Add an API key to `config/slskd/slskd.yml`:
+**slskd** saves to `/downloads/slskd`, and Encore imports from there. Add an API key to `slskd.yml` (in slskd's `/app` folder). Limit the key to private networks, which covers every Docker network:
 
 ```yaml
 web:
@@ -56,8 +56,11 @@ web:
     api_keys:
       encore:
         key: <same value as SLSKD_API_KEY>
-        cidr: 0.0.0.0/0,::/0
+        cidr: 10.0.0.0/8,172.16.0.0/12,192.168.0.0/16
 ```
+
+- **slskd behind gluetun** (`network_mode: container:gluetun-slsk`): slskd has no hostname of its own, so use the VPN container's name, e.g. `SLSKD_URL=http://gluetun-slsk:5030`.
+- **slskd permissions:** slskd ignores `PUID`/`PGID`. Run it with `user: "1000:1000"` and `chown -R 1000:1000` its config, downloads and incomplete folders, or it can't write to them.
 
 **Lidarr**: copy the API key from *Settings → General*, and add `/music` as a root folder. Encore picks the quality and metadata profiles; you can change them in Settings → Lidarr.
 
@@ -74,6 +77,20 @@ web:
 | YouTube Music Premium audio (256 kbps) | Paste a `cookies.txt` exported from music.youtube.com under *Settings → YouTube Music*. |
 
 Set **Settings → General → Public URL** (for example `https://music.example.com`) so the OAuth logins and invite links work.
+
+## Troubleshooting
+
+**Admin → Diagnostics** runs every connection, folder-permission and tool check from inside the container and shows the raw responses, with keys hidden. *Copy report* gives you text you can paste into a bug report. `curl` is also included in the image: `docker exec -it encore curl -s http://lidarr:8686/ping`.
+
+| Symptom | Fix |
+|---|---|
+| A setting won't change in the UI | It's set by an environment variable (the field shows 🔒 and the variable name). Environment variables always win, so change it in your compose file. |
+| `401 … API key rejected` (slskd) | The key in Encore doesn't match `web.authentication.api_keys` in `slskd.yml`, or the key's `cidr` doesn't include Encore's IP. Don't put quotes around values in `- KEY=value` lines. |
+| `Can't find host 'slskd'` | Use the service or container name on the same Docker network. Behind gluetun, use the gluetun container's name. |
+| slskd: `/incomplete` (or downloads) not writable | Run slskd with `user: "1000:1000"` and `chown -R 1000:1000` its folders. |
+| slskd won't start after an update: "permissions" error | Since slskd 0.26.0 the top-level `permissions:` key moved to `transfers.download.destination.permissions` (slskd PR #1756), and an old config stops slskd from starting. Move the block. The mode now also applies to folders. |
+| Folder not writable by Encore | Diagnostics shows the folder owner and Encore's uid. Match them with `PUID`/`PGID` or `chown`. |
+| Config ends up somewhere odd under Portainer | Use absolute host paths (`/opt/appdata/encore:/config`), not `./encore`. |
 
 ## Keeping it private
 

@@ -124,7 +124,8 @@ def get_settings():
 
 @router.put("/settings")
 def put_settings(values: dict):
-    clean = {k: v for k, v in values.items() if k in config.DEFAULTS and v != config.MASK and k != "api_key"}
+    clean = {k: v for k, v in values.items()
+             if k in config.DEFAULTS and not config.is_masked(v) and k != "api_key" and not config.env_locked(k)}
     if "signup_mode" in clean and clean["signup_mode"] not in ("invite", "open", "closed"):
         raise HTTPException(400, "signup_mode must be invite, open or closed")
     config.set_many(clean)

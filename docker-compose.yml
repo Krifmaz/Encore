@@ -1,9 +1,16 @@
 # Encore + Lidarr + slskd. Only Encore is published to the outside world;
 # Lidarr and slskd stay on the private "music" network.
+#
+# Paths are absolute on purpose: relative paths (./config) resolve to odd places
+# under Portainer and other stack managers. Change APPDATA/MUSIC_DIR/DOWNLOADS_DIR
+# in .env (or edit the defaults below).
+#
+# Environment variables always win over values saved in Encore's Settings page.
+# Don't wrap values in quotes in list syntax (- KEY=value, not - KEY="value").
 services:
   encore:
-    build: .
-    image: ghcr.io/krifmaz/test:latest
+    image: ghcr.io/krifmaz/encore:latest
+    # build: .                          # or build from this repo instead
     container_name: encore
     restart: unless-stopped
     ports:
@@ -21,7 +28,7 @@ services:
       - LIDARR_URL=http://lidarr:8686
       - LIDARR_API_KEY=${LIDARR_API_KEY:-}
       - SLSKD_ENABLED=true
-      - SLSKD_URL=http://slskd:5030
+      - SLSKD_URL=http://slskd:5030     # behind gluetun: http://<gluetun container name>:5030
       - SLSKD_API_KEY=${SLSKD_API_KEY:-}
       - SLSKD_DOWNLOAD_PATH=/downloads/slskd
       - ACOUSTID_API_KEY=${ACOUSTID_API_KEY:-}
@@ -30,9 +37,9 @@ services:
       - STREAMRIP_ENABLED=${STREAMRIP_ENABLED:-false}
       - STREAMRIP_DEEZER_ARL=${STREAMRIP_DEEZER_ARL:-}
     volumes:
-      - ./config/encore:/config
-      - ${MUSIC_DIR:-./music}:/music
-      - ${DOWNLOADS_DIR:-./downloads}:/downloads
+      - ${APPDATA:-/opt/appdata}/encore:/config
+      - ${MUSIC_DIR:-/srv/media/music}:/music
+      - ${DOWNLOADS_DIR:-/srv/downloads}:/downloads
     networks: [music]
 
   lidarr:
@@ -44,10 +51,10 @@ services:
       - PGID=${PGID:-1000}
       - TZ=${TZ:-UTC}
     volumes:
-      - ./config/lidarr:/config
-      - ${MUSIC_DIR:-./music}:/music          # set /music as Lidarr's root folder
-      - ${DOWNLOADS_DIR:-./downloads}:/downloads
-    # No published ports: reach it via an SSH tunnel/VPN, or uncomment for LAN-only setup.
+      - ${APPDATA:-/opt/appdata}/lidarr:/config
+      - ${MUSIC_DIR:-/srv/media/music}:/music          # set /music as Lidarr's root folder
+      - ${DOWNLOADS_DIR:-/srv/downloads}:/downloads
+    # No published ports: reach it via an SSH tunnel/VPN, or uncomment for LAN-only access.
     # ports: ["127.0.0.1:8686:8686"]
     networks: [music]
 
@@ -55,6 +62,8 @@ services:
     image: slskd/slskd:latest
     container_name: slskd
     restart: unless-stopped
+    # slskd ignores PUID/PGID – it runs as this user. Make its folders match:
+    #   sudo chown -R 1000:1000 /opt/appdata/slskd /srv/downloads/slskd /srv/downloads/slskd-incomplete
     user: "${PUID:-1000}:${PGID:-1000}"
     environment:
       - SLSKD_REMOTE_CONFIGURATION=true
@@ -63,14 +72,27 @@ services:
       - SLSKD_DOWNLOADS_DIR=/downloads/slskd
       - SLSKD_INCOMPLETE_DIR=/downloads/slskd-incomplete
       - SLSKD_SHARED_DIR=/music
-      # Add the API key Encore uses in ./config/slskd/slskd.yml (see README → slskd)
+      # Add the API key Encore uses to slskd.yml (see README → slskd)
     volumes:
-      - ./config/slskd:/app
-      - ${MUSIC_DIR:-./music}:/music:ro
-      - ${DOWNLOADS_DIR:-./downloads}:/downloads
+      - ${APPDATA:-/opt/appdata}/slskd:/app
+      - ${MUSIC_DIR:-/srv/media/music}:/music:ro
+      - ${DOWNLOADS_DIR:-/srv/downloads}:/downloads
     ports:
       - "50300:50300"   # Soulseek peer port (needed for good speeds); the web UI stays private
     networks: [music]
+
+  # ── Running slskd through a VPN instead? ──────────────────────────────────
+  # Put slskd in gluetun's network namespace and point Encore at gluetun:
+  #
+  # gluetun-slsk:
+  #   image: qmcgaw/gluetun
+  #   cap_add: [NET_ADMIN]
+  #   environment: [VPN_SERVICE_PROVIDER=..., FIREWALL_VPN_INPUT_PORTS=50300]
+  #   networks: [music]
+  # slskd:
+  #   network_mode: "container:gluetun-slsk"   # remove `networks:` and `ports:` from slskd
+  #
+  # …and in Encore: SLSKD_URL=http://gluetun-slsk:5030
 
 networks:
   music:

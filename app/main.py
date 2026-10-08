@@ -7,7 +7,7 @@ from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 
 from . import __version__, auth, config, db, worker
-from .routers import admin, auth_routes, discover, library_routes, playlists_routes, requests_routes, system
+from .routers import admin, auth_routes, diagnostics, discover, library_routes, playlists_routes, requests_routes, system
 from .services import http
 
 STATIC = os.path.join(os.path.dirname(__file__), "static")
@@ -33,7 +33,7 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(title="Encore", version=__version__, lifespan=lifespan, docs_url="/api/docs", redoc_url=None, openapi_url="/api/openapi.json")
 
-for r in (auth_routes, admin, discover, requests_routes, library_routes, playlists_routes, system):
+for r in (auth_routes, admin, discover, requests_routes, library_routes, playlists_routes, system, diagnostics):
     app.include_router(r.router)
 
 

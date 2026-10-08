@@ -13,6 +13,7 @@ import * as accountPage from './pages/account.js';
 import * as playlistsPage from './pages/playlists.js';
 import * as connectionsPage from './pages/connections.js';
 import * as autoPage from './pages/autodownload.js';
+import * as diagPage from './pages/diagnostics.js';
 
 export const session = { user: null, info: null };
 
@@ -33,6 +34,7 @@ const routes = [
   [/^\/admin\/invites$/, adminPage.renderInvites, true],
   [/^\/settings$/, settingsPage.render, true],
   [/^\/admin\/autodownload$/, autoPage.render, true],
+  [/^\/admin\/diagnostics$/, diagPage.render, true],
   [/^\/account$/, accountPage.render],
 ];
 
@@ -80,7 +82,8 @@ function renderShell() {
             ${navLink('/admin/users', icon.users, 'Users')}
             ${navLink('/admin/invites', icon.ticket, 'Invites')}
             ${navLink('/admin/autodownload', icon.download, 'Auto-download')}
-            ${navLink('/settings', icon.settings, 'Settings')}` : ''}
+            ${navLink('/settings', icon.settings, 'Settings')}
+            ${navLink('/admin/diagnostics', icon.shield, 'Diagnostics')}` : ''}
         </nav>
         <div class="sidebar-foot">
           <a href="#/account" class="row grow" style="min-width:0">

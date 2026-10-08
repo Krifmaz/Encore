@@ -861,3 +861,20 @@ async def ntfy(path: str, request: Request):
 async def hook(path: str, request: Request):
     NET.notifications.append(("webhook", (await request.json())["title"]))
     return {}
+
+
+class Transport:
+    """httpx transport into the fake internet; unknown hosts fail like real DNS does."""
+
+    def __init__(self):
+        import httpx
+        self._inner = httpx.ASGITransport(app=app)
+
+    async def handle_async_request(self, request):
+        import httpx
+        if request.url.host.startswith("nonexistent"):
+            raise httpx.ConnectError("[Errno -2] Name or service not known", request=request)
+        return await self._inner.handle_async_request(request)
+
+    async def aclose(self):
+        await self._inner.aclose()

@@ -1,6 +1,6 @@
 """Lidarr v1 API client."""
 from .. import config
-from .http import client
+from .http import client, explain
 
 
 class LidarrError(Exception):
@@ -13,9 +13,12 @@ def enabled() -> bool:
 
 async def _req(method: str, path: str, **kw):
     url = config.get("lidarr_url").rstrip("/") + "/api/v1/" + path.lstrip("/")
-    r = await client().request(method, url, headers={"X-Api-Key": config.get("lidarr_api_key")}, **kw)
+    try:
+        r = await client().request(method, url, headers={"X-Api-Key": config.get("lidarr_api_key")}, **kw)
+    except Exception as e:  # noqa: BLE001
+        raise LidarrError(explain("Lidarr", url, exc=e))
     if r.status_code >= 400:
-        raise LidarrError(f"Lidarr {method} {path} → {r.status_code}: {r.text[:300]}")
+        raise LidarrError(explain("Lidarr", url, r.status_code, r.text))
     return r.json() if r.content else None
 
 

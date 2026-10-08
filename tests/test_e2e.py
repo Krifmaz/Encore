@@ -7,7 +7,6 @@ import sys
 import threading
 import time
 
-import httpx
 import pytest
 
 import fakenet
@@ -94,7 +93,7 @@ def world(env, monkeypatch, tmp_path):
     for p in (lib, slsk, stage):
         p.mkdir(exist_ok=True)
     NET.library_path, NET.slskd_path = str(lib), str(slsk)
-    monkeypatch.setattr(http_mod, "transport", httpx.ASGITransport(app=fakenet.app))
+    monkeypatch.setattr(http_mod, "transport", fakenet.Transport())
     http_mod._clients.clear()
     musicbrainz._cache.clear()
 
@@ -698,3 +697,21 @@ def test_import_media_server_playlist_and_follow(world):
     # can't push a playlist back to the server it follows
     out = c.patch(f"/api/playlists/{r['id']}", json={"sync_targets": ["jellyfin", "plex"]}, headers=H).json()
     assert out["sync_targets"] == ["plex"]
+
+
+def test_lidarr_test_returns_message_and_options_and_diagnostics(world):
+    from app import config
+    c = world.client
+    r = c.post("/api/system/test/lidarr", headers=H).json()
+    assert r["ok"] and r["message"].startswith("Lidarr") and r["options"]["quality_profiles"]
+    config.set_many({"slskd_api_key": "wrong"})
+    r = c.post("/api/system/test/slskd", headers=H).json()
+    assert r["ok"] is True  # fake slskd doesn't check keys – friendly 401 text covered in test_auth
+    d = c.get("/api/system/diagnostics").json()
+    names = {x["name"]: x for x in d["checks"]}
+    assert names["Lidarr"]["ok"] and names["Lidarr"]["status"] == 200 and "lk" not in names["Lidarr"]["request"]
+    assert names["Music library"]["ok"] and names["ffmpeg"]["ok"]
+    config.set_many({"lidarr_url": "http://nonexistent-host-xyz:8686"})
+    d = c.get("/api/system/diagnostics").json()
+    lid = next(x for x in d["checks"] if x["name"] == "Lidarr")
+    assert not lid["ok"] and "Can't find host" in lid["detail"]

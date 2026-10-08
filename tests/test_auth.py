@@ -69,9 +69,9 @@ def test_settings_mask_secrets(client):
     login(client)
     client.put("/api/admin/settings", json={"lidarr_api_key": "secret123"}, headers=H)
     s = client.get("/api/admin/settings").json()
-    assert s["lidarr_api_key"] == "••••••••"
+    assert s["lidarr_api_key"] == "••••" + " (9 chars)" and s["_meta"]["lidarr_api_key"]["source"] == "ui"
     # saving the mask back must not overwrite the secret
-    client.put("/api/admin/settings", json={"lidarr_api_key": "••••••••"}, headers=H)
+    client.put("/api/admin/settings", json={"lidarr_api_key": s["lidarr_api_key"]}, headers=H)
     from app import config
     assert config.get("lidarr_api_key") == "secret123"
 
@@ -114,3 +114,33 @@ def test_library_endpoints(client, env):
     r = client.post("/api/library/tags", json={"track_ids": [tid], "values": {"title": "Renamed"}}, headers=H)
     assert r.status_code == 200
     assert client.get(f"/api/library/albums/{r.json()['album_id']}").json()["tracks"][0]["title"] == "Renamed"
+
+
+def test_env_wins_strips_quotes_and_locks(env, monkeypatch):
+    long_key = "a" * 60 + "WXYZ"
+    monkeypatch.setenv("SLSKD_API_KEY", f' "{long_key}" ')     # compose list syntax keeps the quotes
+    from fastapi.testclient import TestClient
+
+    from app import config
+    from app.main import app
+    with TestClient(app) as c:
+        login(c)
+        config.set_many({"slskd_api_key": "stale-ui-value"})       # an old value saved in the UI…
+        assert config.get("slskd_api_key") == long_key             # …never beats the environment
+        s = c.get("/api/admin/settings").json()
+        assert s["slskd_api_key"] == "••••WXYZ (64 chars)"
+        assert s["_meta"]["slskd_api_key"] == {"source": "env", "env": "SLSKD_API_KEY"}
+        c.put("/api/admin/settings", json={"slskd_api_key": "typed-in-ui", "slskd_url": "http://x:5030"}, headers=H)
+        assert config.get("slskd_api_key") == long_key and config.get("slskd_url") == "http://x:5030"
+        d = c.get("/api/system/diagnostics").json()
+        row = next(r for r in d["settings"] if r["key"] == "slskd_api_key")
+        assert row["source"] == "env" and long_key not in str(d)
+
+
+def test_friendly_errors():
+    import httpx
+
+    from app.services.http import explain
+    assert "web.authentication.api_keys" in explain("slskd", "http://slskd:5030/api/v0/application", 401, "")
+    assert "gluetun" in explain("slskd", "http://slskd:5030/x", exc=httpx.ConnectError("[Errno -2] Name or service not known"))
+    assert "Settings → General" in explain("Lidarr", "http://lidarr:8686/api/v1/system/status", 401, "")

@@ -6,7 +6,7 @@ import uuid
 from difflib import SequenceMatcher
 
 from .. import config
-from .http import client
+from .http import client, explain
 
 AUDIO_EXT = {"flac", "mp3", "m4a", "aac", "ogg", "opus", "wav", "alac", "aiff", "wma", "ape", "wv"}
 LOSSLESS = {"flac", "wav", "alac", "aiff", "ape", "wv"}
@@ -24,9 +24,12 @@ def enabled() -> bool:
 
 async def _req(method: str, path: str, **kw):
     url = config.get("slskd_url").rstrip("/") + "/api/v0/" + path.lstrip("/")
-    r = await client().request(method, url, headers={"X-API-Key": config.get("slskd_api_key")}, **kw)
+    try:
+        r = await client().request(method, url, headers={"X-API-Key": config.get("slskd_api_key")}, **kw)
+    except Exception as e:  # noqa: BLE001
+        raise SlskdError(explain("slskd", url, exc=e))
     if r.status_code >= 400:
-        raise SlskdError(f"slskd {method} {path} → {r.status_code}: {r.text[:300]}")
+        raise SlskdError(explain("slskd", url, r.status_code, r.text))
     try:
         return r.json() if r.content else None
     except ValueError:

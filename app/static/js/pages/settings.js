@@ -98,14 +98,29 @@ const SECTIONS = [
   ] },
 ];
 
-const MASK = '••••••••';
+const MASK = '••••';
+const isMasked = (v) => typeof v === 'string' && v.startsWith(MASK);
 
-function field(f, v, opts) {
+function sourceNote(f, v, meta) {
+  const m = meta[f.key] || {};
+  const secret = f.type === 'password' || f.secret;
+  if (m.source === 'env') {
+    return `<small class="src env">🔒 Set by <span class="mono">${esc(m.env)}</span> in your compose/env${secret && v ? ` · ${esc(v)}` : ''} – change it there (environment always wins)</small>`;
+  }
+  if (secret && v) return `<small class="src">Saved in Encore · ${esc(v)} · <a href="#" data-clear="${f.key}">clear</a></small>`;
+  if (secret) return `<small class="src">Not set${m.env ? ` – or set <span class="mono">${esc(m.env)}</span> in your compose file` : ''}</small>`;
+  if (m.source === 'ui') return '';
+  return m.env ? `<small class="src faint">Default · env var <span class="mono">${esc(m.env)}</span></small>` : '';
+}
+
+function field(f, v, opts, meta = {}) {
   const id = `f-${f.key}`;
-  const help = f.help ? `<small>${esc(f.help)}</small>` : '';
+  const locked = (meta[f.key] || {}).source === 'env';
+  const dis = locked ? 'disabled' : '';
+  const help = (f.help ? `<small>${esc(f.help)}</small>` : '') + sourceNote(f, v, meta);
   const cls = f.full || f.type === 'textarea' ? 'full' : '';
   if (f.type === 'bool') {
-    return `<div class="field ${cls}" style="justify-content:center"><label class="switch"><input type="checkbox" data-k="${f.key}" ${v ? 'checked' : ''}><i></i>${esc(f.label)}</label>${help}</div>`;
+    return `<div class="field ${cls}" style="justify-content:center"><label class="switch"><input type="checkbox" data-k="${f.key}" ${v ? 'checked' : ''} ${dis}><i></i>${esc(f.label)}</label>${help}</div>`;
   }
   if (f.type === 'select') {
     let options = f.options;
@@ -115,15 +130,20 @@ function field(f, v, opts) {
       if (v && !options.some(o => String(o[0]) === String(v))) options.unshift([v, `${v}`]);
       options.unshift([f.key === 'lidarr_root_folder' ? '' : 0, 'Lidarr default (first)']);
     }
-    return `<label class="field ${cls}"><span>${esc(f.label)}</span><select class="input" data-k="${f.key}" id="${id}">
+    return `<label class="field ${cls}"><span>${esc(f.label)}</span><select class="input" data-k="${f.key}" id="${id}" ${dis}>
       ${options.map(([val, lab]) => `<option value="${esc(val)}" ${String(val) === String(v) ? 'selected' : ''}>${esc(lab)}</option>`).join('')}</select>${help}</label>`;
   }
   if (f.type === 'textarea') {
-    return `<label class="field ${cls}"><span>${esc(f.label)}</span><textarea class="input mono" data-k="${f.key}" placeholder="${v === MASK ? 'Saved – paste to replace' : ''}"></textarea>${help}</label>`;
+    return `<label class="field ${cls}"><span>${esc(f.label)}</span><textarea class="input mono" data-k="${f.key}" ${dis} placeholder="${v ? 'Saved – paste to replace' : ''}"></textarea>${help}</label>`;
   }
-  const type = f.type === 'password' ? 'password' : f.type === 'number' ? 'number' : 'text';
+  if (f.type === 'password') {
+    // secrets are never sent to the browser: empty input = keep the saved value
+    return `<label class="field ${cls}"><span>${esc(f.label)}</span><input class="input" type="password" data-k="${f.key}" value="" ${dis}
+      autocomplete="new-password" placeholder="${locked ? 'set by environment' : v ? 'saved – paste a new value to replace' : 'not set'}">${help}</label>`;
+  }
+  const type = f.type === 'number' ? 'number' : 'text';
   return `<label class="field ${cls}"><span>${esc(f.label)}</span><input class="input" type="${type}" data-k="${f.key}" ${f.step ? `step="${f.step}"` : ''}
-    value="${esc(v ?? '')}" autocomplete="off" ${f.type === 'password' ? 'placeholder="not set"' : ''}>${help}</label>`;
+    value="${esc(v ?? '')}" autocomplete="off" ${dis}>${help}</label>`;
 }
 
 export async function render(view, ctx) {
@@ -138,7 +158,7 @@ export async function render(view, ctx) {
     </div>`;
   const panel = view.querySelector('#panel');
 
-  const show = async (id) => {
+  const show = async (id, flash = null) => {
     current = id;
     view.querySelectorAll('.settings-nav button').forEach(b => b.classList.toggle('active', b.dataset.s === id));
     if (id === 'api') return showApi();
@@ -146,42 +166,68 @@ export async function render(view, ctx) {
     if (id === 'lidarr' && values.lidarr_api_key && !lidarrOpts) {
       try { lidarrOpts = await api.get('/system/lidarr/options'); } catch { lidarrOpts = null; }
     }
+    const meta = values._meta || {};
     panel.innerHTML = `<div class="card">
       <div class="row between" style="margin-bottom:18px"><h2>${esc(sec.title)}</h2>
         ${sec.test ? `<button class="btn sm" id="test">${icon.refresh}${esc(sec.testLabel || 'Test connection')}</button>` : ''}</div>
       <div id="test-out"></div>
-      <div class="form-grid">${sec.fields.map(f => field(f, values[f.key], lidarrOpts)).join('')}</div>
+      <div class="form-grid">${sec.fields.map(f => field(f, values[f.key], lidarrOpts, meta)).join('')}</div>
       <div class="row mt-lg" style="justify-content:flex-end"><button class="btn primary" id="save">${icon.check}Save</button></div>
     </div>
     ${id === 'pipeline' ? pipelineHelp() : ''}`;
+    const out = panel.querySelector('#test-out');
+    const paint = (r) => {
+      out.innerHTML = `<div class="test-result ${r.ok ? 'ok' : 'err'}">${r.ok ? icon.check : icon.x}<span>${esc(r.message || (r.ok ? 'Connected' : 'Failed'))}</span></div>`;
+    };
+    if (flash) paint(flash);
     panel.querySelector('#save').onclick = () => save(sec);
+    panel.querySelectorAll('[data-clear]').forEach(a => a.addEventListener('click', async (e) => {
+      e.preventDefault();
+      await api.put('/admin/settings', { [a.dataset.clear]: '' }).then(v => { values = v; });
+      toast('Cleared', 'ok');
+      show(id);
+    }));
     const t = panel.querySelector('#test');
     if (t) t.onclick = async () => {
-      await save(sec, true);
       t.disabled = true;
-      const out = panel.querySelector('#test-out');
-      out.innerHTML = '<span class="spinner"></span>';
-      const r = await api.post(`/system/test/${sec.test}`);
-      out.innerHTML = `<div class="${r.ok ? 'badge ok' : 'error-box'}" style="margin-bottom:16px">${esc(r.message)}</div>`;
-      if (r.options) { lidarrOpts = r.options; show('lidarr'); }
+      out.innerHTML = '<div class="test-result"><span class="spinner"></span><span>Testing…</span></div>';
+      let r;
+      try {
+        await save(sec, true);
+        r = await api.post(`/system/test/${sec.test}`);
+      } catch (e) {
+        r = { ok: false, message: e.message || 'Test failed' };
+      }
+      if (r.options) {
+        // Lidarr returned its profiles/root folders: redraw the dropdowns, keep the result visible
+        lidarrOpts = r.options;
+        await show(id, r);
+      } else {
+        paint(r);
+      }
       t.disabled = false;
     };
   };
 
   const save = async (sec, quiet = false) => {
     const body = {};
+    const meta = values._meta || {};
     panel.querySelectorAll('[data-k]').forEach(el => {
       const f = sec.fields.find(x => x.key === el.dataset.k);
+      if ((meta[f.key] || {}).source === 'env') return;            // locked by environment
       if (el.type === 'checkbox') body[f.key] = el.checked;
-      else if (el.value === MASK) { /* unchanged secret */ }
-      else if (f.secret && el.value === '') { /* textarea secrets: empty keeps the saved value */ }
-      else body[f.key] = el.value;
+      else if ((f.type === 'password' || f.secret) && el.value.trim() === '') { /* keep saved secret */ }
+      else if (isMasked(el.value)) { /* never echo a mask back */ }
+      else body[f.key] = f.type === 'password' || f.secret ? el.value.trim() : el.value;
     });
     try {
       values = await api.put('/admin/settings', body);
       if (!quiet) toast('Settings saved', 'ok');
       if (sec.id === 'general' && body.app_name) document.title = body.app_name;
-    } catch (e) { toast(e.message, 'err'); }
+    } catch (e) {
+      toast(e.message, 'err');
+      if (quiet) throw e;
+    }
   };
 
   const showApi = async () => {
