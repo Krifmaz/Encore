@@ -71,6 +71,11 @@ async def complete(r: dict, message: str, new_paths: list[str] | None = None, or
     await notify.send("✅ Now available", f"{label(r)}\n{message}", r.get("cover_url"))
     if new_paths:
         await notify.refresh_media_servers()
+        if config.get("lyrics_on_import"):
+            ids = [t["id"] for t in db.query(f"SELECT id FROM tracks WHERE path IN ({','.join('?' * len(new_paths))})", new_paths)]
+            if ids:
+                from .services import lyrics
+                asyncio.create_task(lyrics.fetch_missing(ids, limit=len(ids)))
 
 
 async def fail(r: dict, message: str) -> None:

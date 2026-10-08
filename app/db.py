@@ -140,6 +140,10 @@ CREATE TABLE IF NOT EXISTS sync_state (
     PRIMARY KEY (connection_id, scope)
 );
 
+CREATE TABLE IF NOT EXISTS plays (
+    id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER NOT NULL, track_id INTEGER, artist TEXT, title TEXT, album TEXT,
+    seconds REAL NOT NULL DEFAULT 0, played_at REAL NOT NULL);
+CREATE INDEX IF NOT EXISTS idx_plays_user ON plays(user_id, played_at);
 CREATE TABLE IF NOT EXISTS follows (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     user_id INTEGER NOT NULL,

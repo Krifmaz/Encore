@@ -335,3 +335,101 @@ def library_tags(limit: int = 30) -> list[str]:
     rows = db.query("SELECT lower(genre) g, COUNT(*) n FROM tracks WHERE genre IS NOT NULL AND genre!='' GROUP BY lower(genre) ORDER BY n DESC LIMIT ?", (limit,))
     return [r["g"] for r in rows]
 
+
+
+# ---- 30-second previews (no download needed) --------------------------------------------------
+
+async def preview_track(artist: str, title: str, isrc: str | None = None, length: float | None = None) -> dict | None:
+    """A short preview clip for a song that isn't in the library: Deezer (by ISRC, then search), else iTunes."""
+    async def go():
+        from . import matcher
+        if isrc:
+            try:
+                t = (await client().get(f"https://api.deezer.com/track/isrc:{isrc}")).json()
+                if t.get("preview"):
+                    return {"preview_url": t["preview"], "cover": (t.get("album") or {}).get("cover_medium"), "source": "Deezer"}
+            except Exception:  # noqa: BLE001
+                pass
+        want = matcher.describe(title, artist, length=length)
+        try:
+            r = await client().get("https://api.deezer.com/search/track", params={"q": f'artist:"{artist}" track:"{title}"', "limit": 10})
+            for t in r.json().get("data", []):
+                full = (t.get("title") or "") + (f" {t['title_version']}" if t.get("title_version") and t["title_version"].lower() not in (t.get("title") or "").lower() else "")
+                if t.get("preview") and matcher.compare(want, matcher.describe(full, (t.get("artist") or {}).get("name"), length=t.get("duration"))).match:
+                    return {"preview_url": t["preview"], "cover": (t.get("album") or {}).get("cover_medium"), "source": "Deezer"}
+        except Exception:  # noqa: BLE001
+            pass
+        try:
+            r = await client().get("https://itunes.apple.com/search", params={"term": f"{artist} {title}", "entity": "song", "limit": 10})
+            for t in r.json().get("results", []):
+                if t.get("previewUrl") and matcher.compare(want, matcher.describe(t.get("trackName"), t.get("artistName"))).match:
+                    return {"preview_url": t["previewUrl"], "cover": (t.get("artworkUrl100") or "").replace("100x100", "300x300") or None, "source": "Apple"}
+        except Exception:  # noqa: BLE001
+            pass
+        return None
+    return await _cached(f"pv:{isrc or _norm(artist + title)}", 6 * 3600, go)
+
+
+async def preview_album(artist: str = "", title: str = "", deezer_id: int | None = None) -> dict:
+    """Preview clips for every song on an album (Deezer), so it can be heard before requesting it."""
+    async def go():
+        from . import catalog
+        aid = deezer_id
+        if not aid:
+            r = await client().get("https://api.deezer.com/search/album", params={"q": f'artist:"{artist}" album:"{title}"', "limit": 10})
+            hits = [a for a in r.json().get("data", []) if catalog.similar(a.get("title", ""), title) >= 0.85
+                    and _norm((a.get("artist") or {}).get("name")) == _norm(artist)]
+            if not hits:
+                return {"tracks": [], "source": None}
+            aid = hits[0]["id"]
+        a = (await client().get(f"https://api.deezer.com/album/{aid}")).json()
+        tr = (await client().get(f"https://api.deezer.com/album/{aid}/tracks", params={"limit": 300})).json().get("data", [])
+        cover = a.get("cover_medium")
+        return {"source": "Deezer", "album": a.get("title"), "cover": cover,
+                "tracks": [{"title": t.get("title") or "", "artist": (t.get("artist") or {}).get("name", ""), "album": a.get("title") or title,
+                            "preview_url": t.get("preview"), "cover": cover, "duration": t.get("duration"), "isrc": t.get("isrc")}
+                           for t in tr if t.get("preview")]}
+    return await _cached(f"pva:{deezer_id or _norm(artist + title)}", 6 * 3600, go)
+
+
+# ---- new releases from artists you follow or have ------------------------------------------------
+
+async def new_releases(user_id: int, days: int = 120, limit: int = 24) -> list[dict]:
+    """Recent albums/EPs/singles (Deezer release dates) by followed artists and the library's top artists."""
+    from datetime import date, timedelta
+
+    from . import catalog
+    followed = [r["name"] for r in db.query("SELECT name FROM follows WHERE user_id=?", (user_id,))]
+    top = [r["n"] for r in db.query("""SELECT MAX(albumartist) n FROM tracks WHERE albumartist NOT IN ('', 'Unknown Artist', 'Various Artists')
+                                         GROUP BY lower(albumartist) ORDER BY COUNT(*) DESC LIMIT 40""")]
+    names = list(dict.fromkeys(followed + top))[:60]
+    cutoff = (date.today() - timedelta(days=days)).isoformat()
+    sem = asyncio.Semaphore(5)
+
+    async def one(name):
+        async def go():
+            async with sem:
+                try:
+                    aid = await catalog.deezer_artist(name, [])
+                    return await catalog.deezer_albums(aid) if aid else []
+                except Exception:  # noqa: BLE001
+                    return []
+        albums = await _cached(f"nr:{_norm(name)}", 12 * 3600, go)
+        return [{**a, "artist": name} for a in albums if a["date"] and a["date"] >= cutoff and a["date"] <= date.today().isoformat()]
+
+    out = [x for lst in await asyncio.gather(*[one(n) for n in names]) for x in lst]
+    have = {_norm(n) for n in followed}
+    seen, res = set(), []
+    for a in sorted(out, key=lambda a: a["date"], reverse=True):
+        key = (_norm(a["artist"]), catalog.norm(a["title"]))
+        if key in seen:
+            continue
+        seen.add(key)
+        dz = next((s for s in a["sources"] if s["name"] == "Deezer"), None)
+        res.append({"title": a["title"], "artist": a["artist"], "date": a["date"], "type": a["type"], "cover": a["cover"],
+                    "followed": _norm(a["artist"]) in have, "preview_album": f"dz:{dz['id']}" if dz else None,
+                    "in_library": bool(db.one("SELECT 1 FROM tracks WHERE lower(album)=lower(?) AND lower(albumartist)=lower(?) LIMIT 1", (a["title"], a["artist"]))),
+                    "mbid": None})
+        if len(res) >= limit:
+            break
+    return res

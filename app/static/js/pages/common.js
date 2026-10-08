@@ -1,5 +1,5 @@
 import { api } from '../api.js';
-import { art, esc, fmt, icon, statusBadge, toast } from '../ui.js';
+import { art, confirmDialog, esc, fmt, icon, popMenu, statusBadge, toast } from '../ui.js';
 
 export async function submitRequest(body, btn) {
   if (btn) btn.disabled = true;
@@ -79,7 +79,7 @@ export function requestRow(r, { admin = false } = {}) {
       ${['album', 'track'].includes(r.kind) && r.status !== 'completed' ? `<button class="btn sm" data-act="pick" data-req='${esc(JSON.stringify({ request_id: r.id, kind: r.kind, mbid: r.mbid, artist: r.artist, title: r.title, album: r.album, length: r.length }))}' title="Search the sources and pick the exact download">${icon.search}Pick</button>` : ''}
       ${['failed', 'cancelled'].includes(r.status) || (r.kind === 'playlist') ? `<button class="btn sm" data-act="retry" title="Retry">${icon.refresh}</button>` : ''}
       ${['pending', 'queued', 'searching', 'downloading', 'monitoring', 'importing'].includes(r.status) ? `<button class="btn sm" data-act="cancel" title="Cancel">${icon.x}</button>` : ''}
-      ${!active ? `<button class="btn sm ghost" data-act="delete" title="Remove">${icon.trash}</button>` : ''}
+      ${!active ? `<button class="btn sm ghost icon" data-act="menu" data-status="${esc(r.status)}" aria-label="More">${icon.more}</button>` : ''}
     </div>
   </div>`;
 }
@@ -90,6 +90,24 @@ export function bindRequestActions(root, reload) {
     if (!b) return;
     const id = b.closest('[data-id]').dataset.id;
     const act = b.dataset.act;
+    if (act === 'menu') {
+      const { session } = await import('../app.js');
+      const st = b.dataset.status;
+      const del = async (files) => {
+        if (files && !await confirmDialog('Delete files', st === 'completed' ? 'Permanently delete the songs this request downloaded from the library?' : 'Delete the leftover/partial files of this download?', 'Delete', true)) return;
+        try {
+          const r = await api.del(`/requests/${id}${files ? '?files=true' : ''}`);
+          if (files) toast(`${r.deleted_files} file(s) deleted`, 'ok');
+          window.dispatchEvent(new CustomEvent('encore:requests-changed'));
+          await reload();
+        } catch (err) { toast(err.message, 'err'); }
+      };
+      popMenu(b, [
+        { label: 'Remove from list', icon: icon.x, onClick: () => del(false) },
+        session.user?.role === 'admin' ? { label: st === 'completed' ? 'Delete downloaded files' : 'Delete leftover files', icon: icon.trash, danger: true, onClick: () => del(true) } : null,
+      ]);
+      return;
+    }
     if (act === 'pick') {
       const { pickerModal } = await import('./picker.js');
       pickerModal({ ...JSON.parse(b.dataset.req), onDone: reload });
@@ -105,5 +123,28 @@ export function bindRequestActions(root, reload) {
       toast(err.message, 'err');
       b.disabled = false;
     }
+  });
+}
+
+/** "Clear" button menu for download lists: clear finished entries, optionally deleting their files. */
+export function clearMenu(anchor, reload, { mine = true } = {}) {
+  import('../app.js').then(({ session }) => {
+    const admin = session.user?.role === 'admin';
+    const go = async (statuses, files, label) => {
+      if (files && !await confirmDialog('Delete files', `${label}: this permanently deletes the files from disk.`, 'Delete', true)) return;
+      try {
+        const r = await api.post('/requests/clear', { statuses, files, mine });
+        toast(`${r.removed} cleared${files ? ` · ${r.deleted_files} file(s) deleted` : ''}`, 'ok');
+        window.dispatchEvent(new CustomEvent('encore:requests-changed'));
+        reload();
+      } catch (e) { toast(e.message, 'err'); }
+    };
+    popMenu(anchor, [
+      { label: 'Clear completed', icon: icon.check, onClick: () => go(['completed'], false) },
+      { label: 'Clear failed & cancelled', icon: icon.x, onClick: () => go(['failed', 'cancelled', 'denied'], false) },
+      ...(admin ? ['-',
+        { label: 'Clear failed & cancelled + delete their files', icon: icon.trash, danger: true, onClick: () => go(['failed', 'cancelled', 'denied'], true, 'Failed & cancelled') },
+        { label: 'Clear completed + delete the songs', icon: icon.trash, danger: true, onClick: () => go(['completed'], true, 'Completed downloads') }] : []),
+    ]);
   });
 }

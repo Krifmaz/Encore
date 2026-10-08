@@ -38,6 +38,8 @@ export const icon = {
   shield: P('<path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/>'),
   heart: P('<path d="M20.84 4.61a5.5 5.5 0 0 0-7.78 0L12 5.67l-1.06-1.06a5.5 5.5 0 0 0-7.78 7.78l1.06 1.06L12 21.23l7.78-7.78 1.06-1.06a5.5 5.5 0 0 0 0-7.78z"/>'),
   spark: P('<path d="M12 3l1.9 5.6L19.5 10l-5.6 1.9L12 17.5l-1.9-5.6L4.5 10l5.6-1.4z"/><path d="M19 15l.8 2.2L22 18l-2.2.8L19 21l-.8-2.2L16 18l2.2-.8z"/>'),
+  more: P('<circle cx="12" cy="5" r="1.6"/><circle cx="12" cy="12" r="1.6"/><circle cx="12" cy="19" r="1.6"/>'),
+  shuffle: P('<path d="M16 3h5v5M4 20 21 3M21 16v5h-5M15 15l6 6M4 4l5 5"/>'),
   list: P('<path d="M8 6h13M8 12h13M8 18h13M3 6h.01M3 12h.01M3 18h.01"/>'),
 };
 
@@ -165,4 +167,39 @@ export function skeletonGrid(n = 12) {
 export async function copyText(t) {
   try { await navigator.clipboard.writeText(t); toast('Copied to clipboard', 'ok'); }
   catch { toast('Copy failed – select and copy manually', 'err'); }
+}
+
+/**
+ * Small action menu ("⋯"). items: [{ label, icon?, onClick, danger?, href?, download? } | '-'].
+ * Pops up next to the button on desktop, slides up as a sheet on phones.
+ */
+export function popMenu(anchor, items) {
+  document.querySelectorAll('.menu-pop, .menu-bg').forEach(n => n.remove());
+  const bg = document.createElement('div');
+  bg.className = 'menu-bg';
+  const el = document.createElement('div');
+  el.className = 'menu-pop';
+  el.setAttribute('role', 'menu');
+  el.innerHTML = items.filter(Boolean).map((it, i) => it === '-' ? '<hr>'
+    : it.href ? `<a role="menuitem" class="${it.danger ? 'danger' : ''}" href="${esc(it.href)}" ${it.download ? 'download' : ''} data-i="${i}">${it.icon || ''}<span>${esc(it.label)}</span></a>`
+    : `<button role="menuitem" class="${it.danger ? 'danger' : ''}" data-i="${i}">${it.icon || ''}<span>${esc(it.label)}</span></button>`).join('');
+  const close = () => { el.remove(); bg.remove(); document.removeEventListener('keydown', onKey); };
+  const onKey = (e) => { if (e.key === 'Escape') close(); };
+  bg.onclick = close;
+  el.onclick = (e) => {
+    const b = e.target.closest('[data-i]');
+    if (!b) return;
+    const it = items.filter(Boolean)[+b.dataset.i];
+    close();
+    if (it.onClick) { e.preventDefault(); it.onClick(); }
+  };
+  document.addEventListener('keydown', onKey);
+  document.body.append(bg, el);
+  if (!matchMedia('(max-width: 760px)').matches) {
+    const r = anchor.getBoundingClientRect();
+    const w = el.offsetWidth, h = el.offsetHeight;
+    el.style.left = Math.max(8, Math.min(r.right - w, innerWidth - w - 8)) + 'px';
+    el.style.top = (r.bottom + h + 8 > innerHeight ? Math.max(8, r.top - h - 6) : r.bottom + 6) + 'px';
+  }
+  return close;
 }

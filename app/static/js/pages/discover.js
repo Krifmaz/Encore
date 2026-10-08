@@ -10,7 +10,7 @@ const reqBtn = (attrs, label = 'Request') => `<button class="btn sm primary" ${a
 
 function trackRow(t) {
   return `<div class="list-item">
-    <div class="thumb">${art(t.cover, t.album || t.title)}</div>
+    ${t.in_library ? `<div class="thumb">${art(t.cover, t.album || t.title)}</div>` : `<button class="thumb play-thumb" title="30-second preview" aria-label="Preview" data-pv='${esc(JSON.stringify({ artist: t.artist, title: t.title, album: t.album, cover: t.cover, length: t.length }))}'>${art(t.cover, t.album || t.title)}<i>${icon.play}</i></button>`}
     <div class="grow">
       <div class="ellipsis" style="font-weight:600">${esc(t.title)}</div>
       <div class="small muted ellipsis"><a href="#/artist/${esc(t.artist_id)}">${esc(t.artist)}</a>${t.album ? ` · ${t.release_group_id ? `<a href="#/album/${esc(t.release_group_id)}">${esc(t.album)}</a>` : esc(t.album)}` : ''}${t.year ? ' · ' + esc(t.year) : ''}</div>
@@ -269,7 +269,8 @@ export async function renderArtist(view, ctx) {
       const playable = top.filter(t => t.library).map(t => t.library);
       view.querySelector('#artist-top').innerHTML = `<div class="section-head"><h2>Popular</h2></div>
         <div class="card flat"><div class="table-wrap"><table class="table"><tbody>${top.map((t, i) => `<tr>
-          <td class="num">${t.library ? `<button class="btn ghost icon sm" data-top-play="${i}" aria-label="Play">${icon.play.replace('<svg', '<svg width="14"')}</button>` : i + 1}</td>
+          <td class="num">${t.library ? `<button class="btn ghost icon sm" data-top-play="${i}" aria-label="Play">${icon.play.replace('<svg', '<svg width="14"')}</button>`
+            : `<button class="btn ghost icon sm faint" title="30-second preview" aria-label="Preview" data-pv='${esc(JSON.stringify({ artist: a.name, title: t.title, album: t.album, cover: t.cover, isrc: t.isrc, length: t.duration }))}'>${icon.play.replace('<svg', '<svg width="14"')}</button>`}</td>
           <td><div class="row" style="gap:10px"><div class="thumb">${art(t.cover, t.album)}</div><div><div style="font-weight:600">${esc(t.title)} ${t.version ? `<span class="muted">${esc(t.version)}</span>` : ''}</div><div class="small muted">${esc(t.album)}</div></div></div></td>
           <td class="muted hide-sm">${fmt.dur(t.duration)}</td>
           <td style="text-align:right;white-space:nowrap"><button class="btn sm ghost icon" data-more-top="${i}" title="More like this" aria-label="More like this">${icon.spark}</button>
@@ -313,6 +314,7 @@ export async function renderAlbum(view, ctx) {
         <div class="chips mt">${(a.tags || []).map(t => `<span class="badge">${esc(t)}</span>`).join('')}</div>
         <div class="row wrap mt">
           ${availability(a) || `<button class="btn primary" data-req-album='${esc(JSON.stringify({ mbid: a.id, artist: a.artist, title: a.title, album: a.title, year: a.year, cover_url: a.cover }))}'>${icon.plus}Request album</button>`}
+          ${a.in_library ? '' : `<button class="btn" id="preview-album" title="Hear 30 seconds of every song">${icon.play}Preview</button>`}
           <button class="btn" id="pick-album" title="Search every source and choose the exact download">${icon.search}Pick download</button>
           <a class="btn sm ghost" target="_blank" rel="noopener" href="https://musicbrainz.org/release-group/${esc(a.id)}">${icon.external}MusicBrainz</a>
         </div>
@@ -321,7 +323,7 @@ export async function renderAlbum(view, ctx) {
     ${rel ? `<div class="card flat"><div class="table-wrap"><table class="table">
       <thead><tr><th class="num">#</th><th>Title</th><th class="hide-sm">Artist</th><th>Length</th><th></th></tr></thead>
       <tbody>${rel.tracks.map(t => `<tr>
-        <td class="num">${multi ? t.disc + '-' : ''}${t.track}</td>
+        <td class="num">${t.in_library ? `${multi ? t.disc + '-' : ''}${t.track}` : `<button class="btn ghost icon sm" title="30-second preview" aria-label="Preview" data-pv='${esc(JSON.stringify({ artist: t.artist, title: t.title, album: a.title, cover: a.cover, length: t.length }))}'>${icon.play.replace('<svg', '<svg width="14"')}</button>`}</td>
         <td>${esc(t.title)}</td>
         <td class="hide-sm muted">${esc(t.artist)}</td>
         <td class="muted">${fmt.dur(t.length)}</td>
@@ -331,6 +333,7 @@ export async function renderAlbum(view, ctx) {
       </tr>`).join('')}</tbody></table></div></div>` : emptyState(icon.disc, 'No track listing available')}`;
   bindRequestButtons(view);
   const reload = () => window.dispatchEvent(new HashChangeEvent('hashchange'));
+  view.querySelector('#preview-album')?.addEventListener('click', async () => (await import('./preview.js')).previewAlbum('', a.artist, a.title));
   view.querySelector('#pick-album').onclick = () => pickerModal({
     kind: 'album', mbid: a.id, artist: a.artist, artist_mbid: a.artist_id, title: a.title, album: a.title, year: a.year,
     cover_url: a.cover, track_count: rel ? rel.tracks.length : null, onDone: reload,

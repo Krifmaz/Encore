@@ -1034,3 +1034,107 @@ def test_discovery_for_you_similar_and_genres(world, monkeypatch):
     assert [r["title"] for r in db.query("SELECT title FROM requests WHERE kind='track' ORDER BY id")] == ["Strange Song", "Odd Song"]
     assert world.run(discovery.auto_discover) == 0, "same playlist is never processed twice"
     del worker
+
+
+def test_library_sorting_files_lyrics_plays_stats_and_cleanup(world, monkeypatch):
+    import datetime
+    import time as _t
+
+    from app import config, db
+    from app.services import discovery
+    c = world.client
+    lib = world.library
+    fakenet.make_audio(str(lib / "Fake Band" / "Fake Album (2020)" / "01 - Alpha.mp3"), "Alpha", album="Fake Album", track=1, seconds=5)
+    fakenet.make_audio(str(lib / "Fake Band" / "Fake Album (2020)" / "02 - Beta.mp3"), "Beta", album="Fake Album", track=2, seconds=6)
+    fakenet.make_audio(str(lib / "Fake Band" / "Fake Album (2020)" / "03 - Gamma.mp3"), "Gamma", album="Fake Album", track=3, seconds=7)
+    _t.sleep(1.1)
+    fakenet.make_audio(str(lib / "Fake Band" / "Delta" / "01 - Delta.mp3"), "Delta", album="Delta", track=1, seconds=8)
+    world.run(__import__("app.services.library", fromlist=["x"]).scan)
+
+    # albums vs singles, sort + direction
+    assert [a["album"] for a in c.get("/api/library/albums?kind=albums").json()["items"]] == ["Fake Album"]
+    assert [a["album"] for a in c.get("/api/library/albums?kind=singles").json()["items"]] == ["Delta"]
+    assert [a["album"] for a in c.get("/api/library/albums?sort=album&dir=asc").json()["items"]] == ["Delta", "Fake Album"]
+    assert [a["album"] for a in c.get("/api/library/albums?sort=album&dir=desc").json()["items"]] == ["Fake Album", "Delta"]
+    assert [t["title"] for t in c.get("/api/library/tracks?sort=title&dir=desc").json()] == ["Gamma", "Delta", "Beta", "Alpha"]
+    assert [t["title"] for t in c.get("/api/library/tracks?sort=duration").json()][0] == "Delta"
+    assert c.get("/api/library/artists?sort=tracks&dir=desc").json()[0]["tracks"] == 4
+
+    alpha = db.one("SELECT id, path FROM tracks WHERE title='Alpha'")
+    r = c.get(f"/api/library/tracks/{alpha['id']}/file")
+    assert r.status_code == 200 and "Fake%20Band%20-%20Alpha.mp3" in r.headers["content-disposition"]
+
+    # lyrics: synced → .lrc, plain → .txt, nothing → None
+    ly = c.get(f"/api/library/tracks/{alpha['id']}/lyrics").json()
+    assert ly["synced"] and "[00:02.00] Second line" in ly["lyrics"] and os.path.exists(alpha["path"][:-4] + ".lrc")
+    assert c.get(f"/api/library/tracks/{alpha['id']}/lyrics?fetch=false").json()["source"] == "file"
+    beta = db.one("SELECT id, path FROM tracks WHERE title='Beta'")
+    assert c.get(f"/api/library/tracks/{beta['id']}/lyrics").json() == {"lyrics": "Only plain words", "synced": False, "source": "LRCLIB"}
+    assert os.path.exists(beta["path"][:-4] + ".txt")
+    album_id = db.one("SELECT album_id FROM tracks WHERE title='Gamma'")["album_id"]
+    assert c.post(f"/api/library/albums/{album_id}/lyrics", headers=H).json() == {"checked": 1, "found": 0}
+
+    # plays, shuffle, stats, leaderboard
+    for _ in range(3):
+        assert c.post("/api/library/plays", json={"track_id": alpha["id"], "seconds": 31}, headers=H).status_code == 200
+    me = c.get("/api/stats/me").json()
+    assert me["me"]["plays"] == 3 and me["me"]["top_artist"] == "Fake Band" and me["library"]["tracks"] == 4 and me["fun"]
+    lb = c.get("/api/stats/leaderboard").json()
+    assert lb["boards"]["plays"]["rows"][0] == {"username": "admin", "value": 3, "me": True}
+    assert lb["top_songs"][0]["title"] == "Alpha" and any("lossless" in f["label"] for f in lb["facts"])
+    sh = c.get(f"/api/library/shuffle?limit=10&exclude={alpha['id']}").json()
+    assert len(sh) == 3 and alpha["id"] not in [t["id"] for t in sh]
+
+    # storage
+    st = c.get("/api/library/storage").json()
+    assert st["library"]["tracks"] == 4 and st["formats"][0]["format"] == "MP3" and st["disk"]["total"] > 0
+
+    # previews: Deezer by ISRC, by search; album previews; new releases
+    p = c.get("/api/discover/preview?artist=Fake%20Band&title=Beta").json()
+    assert p["preview_url"].endswith(".mp3") and p["source"] == "Deezer"
+    assert c.get("/api/discover/preview?artist=Nobody&title=Nothing").status_code == 404
+    pa = c.get("/api/discover/preview-album?artist=Fake%20Band&title=Fake%20Album").json()
+    assert pa["source"] == "Deezer" and len(pa["tracks"]) == 3
+    recent = (datetime.date.today() - datetime.timedelta(days=10)).isoformat()
+    monkeypatch.setitem(fakenet.DZ_ALBUMS, 950, {"title": "Brand New Thing", "record_type": "album", "release_date": recent, "upc": "", "isrcs": ["QZNEW0000001"], "titles": ["New One"]})
+    discovery._cache.clear()
+    nr = c.get("/api/discover/new-releases").json()["releases"]
+    assert [(r["title"], r["preview_album"]) for r in nr] == [("Brand New Thing", "dz:950")]
+    assert len(c.get("/api/discover/preview-album?key=dz:950").json()["tracks"]) == 1
+
+    # any link: streaming links are matched, everything else downloads as-is
+    r = c.post("/api/requests/link", json={"url": "https://www.deezer.com/playlist/55"}, headers=H).json()
+    assert r["mode"] == "matched" and r["requested"] >= 1
+    r = c.post("/api/requests/link", json={"url": "https://soundcloud.com/someone/song"}, headers=H).json()
+    assert r["mode"] == "direct" and db.get_request(r["ids"][0])["kind"] == "url"
+    assert c.post("/api/requests/link", json={"url": "not a link"}, headers=H).status_code == 400
+
+    # clean-up: delete a song, clear finished downloads and their files
+    assert c.delete(f"/api/library/tracks/{alpha['id']}", headers=H).json()["ok"]
+    assert not os.path.exists(alpha["path"]) and not os.path.exists(alpha["path"][:-4] + ".lrc")
+    db.execute("UPDATE requests SET status='failed'")
+    rid = db.one("SELECT id FROM requests ORDER BY id DESC LIMIT 1")["id"]
+    stage = os.path.join(config.get("staging_path"), f"request-{rid}")
+    os.makedirs(stage, exist_ok=True)
+    open(os.path.join(stage, "partial.part"), "w").close()
+    r = c.post("/api/requests/clear", json={"statuses": ["failed"], "files": True}, headers=H).json()
+    assert r["removed"] >= 2 and r["deleted_files"] >= 1 and not os.path.exists(stage)
+    assert not db.query("SELECT id FROM requests WHERE status='failed' AND parent_id IS NULL")
+
+
+def test_manual_artwork_pick_and_upload(world):
+    import base64
+
+    import mutagen
+    from app import db
+    c = world.client
+    fakenet.make_audio(str(world.library / "Fake Band" / "Fake Album (2020)" / "01 - Alpha.flac"), "Alpha", album="Fake Album", track=1, seconds=5)
+    world.run(__import__("app.services.library", fromlist=["x"]).scan)
+    t = db.one("SELECT album_id, path FROM tracks")
+    cands = c.get(f"/api/library/albums/{t['album_id']}/art-candidates").json()
+    assert "Deezer" in {x["source"] for x in cands} and cands[0]["url"]
+    r = c.post(f"/api/library/albums/{t['album_id']}/art", json={"data": "data:image/jpeg;base64," + base64.b64encode(fakenet.JPEG).decode()}, headers=H)
+    assert r.json() == {"embedded": 1}
+    assert mutagen.File(t["path"]).pictures[0].data == fakenet.JPEG
+    assert os.path.exists(os.path.join(os.path.dirname(t["path"]), "cover.jpg"))
+    assert c.post(f"/api/library/albums/{t['album_id']}/art", json={"data": base64.b64encode(b"not an image").decode()}, headers=H).status_code == 400

@@ -1,6 +1,6 @@
 import { api } from '../api.js';
 import { emptyState, esc, icon } from '../ui.js';
-import { bindRequestActions, requestRow } from './common.js';
+import { bindRequestActions, clearMenu, requestRow } from './common.js';
 
 export async function render(view, ctx) {
   const admin = ctx.user.role === 'admin';
@@ -41,7 +41,7 @@ export async function render(view, ctx) {
   };
   if (admin) {
     view.querySelector('#mine').onchange = (e) => { mine = e.target.checked; load(); };
-    view.querySelector('#clear').onclick = async () => { await api.post('/requests/clear'); load(); };
+    view.querySelector('#clear').onclick = (e) => clearMenu(e.currentTarget, load, { mine });
   }
   const me = await api.get('/auth/me');
   if (me.request_limit && me.role !== 'admin') {

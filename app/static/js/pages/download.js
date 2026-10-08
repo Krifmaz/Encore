@@ -1,6 +1,6 @@
 import { api } from '../api.js';
 import { art, esc, fmt, icon, toast } from '../ui.js';
-import { bindRequestActions, requestRow, submitRequest } from './common.js';
+import { bindRequestActions, clearMenu, requestRow, submitRequest } from './common.js';
 import { importModal } from './playlists.js';
 
 // links that only describe tracks (no downloadable audio) → resolved track-by-track
@@ -12,7 +12,7 @@ const STREAMRIP = /qobuz\.com|tidal\.com|deezer\.com|deezer\.page\.link/i;
 export async function render(view, ctx) {
   view.innerHTML = `
     <h1>Downloader</h1>
-    <p class="muted" style="margin:6px 0 20px">Paste any link. <b>YouTube Music, Spotify, Apple Music, Deezer, Tidal and Qobuz</b> playlists/albums are matched track-by-track (exact ISRC when available) and each song is fetched from the best source: Qobuz/Tidal/Deezer lossless → Soulseek → YouTube.
+    <p class="muted" style="margin:6px 0 20px">Paste a link from anywhere. <b>Spotify, Apple Music, YouTube Music, Deezer, Tidal, Qobuz, Amazon Music</b> songs, albums and playlists are matched song by song (exact ISRC when available) and fetched from the best source you have – lossless first.
       <b>YouTube, SoundCloud, Bandcamp, Mixcloud</b> and ~1,800 other sites download directly. Every file is fingerprint-verified and de-duplicated before it hits the library.</p>
     <form class="card stack" id="dl-form">
       <div class="row wrap">
@@ -28,13 +28,13 @@ export async function render(view, ctx) {
         </div>
       </div>
       <div class="row wrap" id="dl-actions">
-        <button class="btn primary" type="button" id="get-songs" title="Every song behind the link is fetched from the best source (lossless first)">${icon.download}Get the song(s)</button>
+        <button class="btn primary" type="submit" id="get-songs" title="Works with any link: matched to the best source, or downloaded directly">${icon.download}Download</button>
         <button class="btn" type="button" id="as-playlist">${icon.list}Import as playlist</button>
-        <button class="btn" type="submit" id="direct">${icon.link}Download link as-is</button>
+        <button class="btn ghost" type="button" id="direct" title="Skip matching and download exactly this link">${icon.link}Exactly this link</button>
       </div>
       <div id="probe-out"></div>
     </form>
-    <div class="section-head"><h2>Recent downloads</h2></div>
+    <div class="section-head"><h2>Recent downloads</h2><button class="btn sm" id="dl-clear">${icon.trash}Clear…</button></div>
     <div class="card flat" id="dl-list"></div>`;
   const form = view.querySelector('#dl-form');
   const out = view.querySelector('#probe-out');
@@ -60,23 +60,25 @@ export async function render(view, ctx) {
     paintMode();
   };
 
-  view.querySelector('#get-songs').onclick = async (e) => {
+  const smart = async (e) => {
+    e?.preventDefault?.();
     const url = urlIn.value.trim();
     if (!url) return urlIn.focus();
-    const btn = e.currentTarget;
+    const btn = view.querySelector('#get-songs');
     btn.disabled = true;
     btn.innerHTML = '<span class="spinner"></span> Looking up…';
     try {
-      const r = await api.post('/requests/from-link', { url, album_mode: albumMode || null });
-      toast(`${r.requested} song(s) requested${r.already_requested ? `, ${r.already_requested} already requested` : ''}${albumMode === 'album' ? ' – whole albums will be fetched' : ''}`, 'ok');
+      const r = await api.post('/requests/link', { url, album_mode: albumMode || null });
+      toast(r.mode === 'direct' ? 'Downloading' : `${r.requested} song(s) requested${r.already_requested ? `, ${r.already_requested} already requested` : ''}${albumMode === 'album' ? ' – whole albums will be fetched' : ''}`, 'ok');
       urlIn.value = '';
       out.innerHTML = '';
       window.dispatchEvent(new CustomEvent('encore:requests-changed'));
       load();
     } catch (err) { toast(err.message, 'err'); }
     btn.disabled = false;
-    btn.innerHTML = `${icon.download}Get the song(s)`;
+    btn.innerHTML = `${icon.download}Download`;
   };
+  form.onsubmit = smart;
 
   view.querySelector('#as-playlist').onclick = () => {
     const url = urlIn.value.trim();
@@ -106,9 +108,10 @@ export async function render(view, ctx) {
     } catch (e) { out.innerHTML = `<div class="error-box">${esc(e.message)}</div>`; }
   };
 
-  form.onsubmit = async (e) => {
+  direct.onclick = async (e) => {
     e.preventDefault();
     const url = urlIn.value.trim();
+    if (!url) return urlIn.focus();
     if (METADATA_ONLY.test(url)) return view.querySelector('#as-playlist').click();
     direct.disabled = true;
     try {
@@ -126,6 +129,7 @@ export async function render(view, ctx) {
     list.innerHTML = rows.length ? `<div class="list">${rows.map(r => requestRow(r)).join('')}</div>` : '<div class="empty muted">Nothing yet – paste a link above.</div>';
   };
   bindRequestActions(list, load);
+  view.querySelector('#dl-clear').onclick = (e) => clearMenu(e.currentTarget, load);
   await load();
   const t = setInterval(load, 4000);
   ctx.onLeave(() => clearInterval(t));

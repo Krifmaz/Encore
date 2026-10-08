@@ -9,10 +9,11 @@ const KIND = { 'weekly-exploration': 'New music picked for you every Monday', 'd
 /** One song row: play it if it's in the library, otherwise request it. */
 function trackRow(t, i) {
   return `<tr data-i="${i}">
-    <td class="num">${t.library ? `<button class="btn ghost icon sm" data-play="${i}" aria-label="Play">${icon.play.replace('<svg', '<svg width="14"')}</button>` : i + 1}</td>
+    <td class="num">${t.library ? `<button class="btn ghost icon sm" data-play="${i}" aria-label="Play">${icon.play.replace('<svg', '<svg width="14"')}</button>`
+      : `<button class="btn ghost icon sm faint" title="30-second preview" aria-label="Preview" data-pv='${esc(JSON.stringify({ artist: t.artist, title: t.title, album: t.album, cover: t.cover, isrc: t.isrc, length: t.length }))}'>${icon.play.replace('<svg', '<svg width="14"')}</button>`}</td>
     <td><div class="row" style="gap:10px"><div class="thumb">${art(t.cover, t.album || t.title)}</div>
       <div style="min-width:0"><div class="ellipsis" style="font-weight:600">${esc(t.title)}</div>
-      <div class="small muted ellipsis">${t.artist_mbid ? `<a href="#/artist/${esc(t.artist_mbid)}">${esc(t.artist)}</a>` : `<a href="#/artist-name/${encodeURIComponent(t.artist)}">${esc(t.artist)}</a>`}${t.album ? ' · ' + esc(t.album) : ''}</div></div></div></td>
+      <div class="small muted ellipsis">${t.library ? '' : '<span class="badge" style="padding:0 6px;font-size:10px">preview</span> '}${t.artist_mbid ? `<a href="#/artist/${esc(t.artist_mbid)}">${esc(t.artist)}</a>` : `<a href="#/artist-name/${encodeURIComponent(t.artist)}">${esc(t.artist)}</a>`}${t.album ? ' · ' + esc(t.album) : ''}</div></div></div></td>
     <td class="muted hide-sm">${t.length ? fmt.dur(t.length) : ''}</td>
     <td style="text-align:right;white-space:nowrap">
       <button class="btn sm ghost icon" data-more="${i}" title="More like this" aria-label="More like this">${icon.spark}</button>
@@ -29,7 +30,7 @@ function bindTracks(root, tracks) {
     const p = e.target.closest('[data-play]');
     if (p) {
       const playable = tracks.filter(t => t.library).map(t => t.library);
-      return player.playQueue(playable, playable.indexOf(tracks[+p.dataset.play].library));
+      return player.playQueue(playable, playable.indexOf(tracks[+p.dataset.play].library), { context: 'list' });
     }
     const m = e.target.closest('[data-more]');
     if (m) { const t = tracks[+m.dataset.more]; return moreLikeThis(t.artist, t.title, t.mbid); }

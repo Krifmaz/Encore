@@ -417,7 +417,7 @@ DZ = "/api.deezer.com"
 
 
 def dz_track(i, t, s, isrc, album_id=123):
-    return {"id": 1000 + i, "title": t, "duration": s, "isrc": isrc, "artist": {"name": ARTIST["name"]},
+    return {"id": 1000 + i, "title": t, "duration": s, "isrc": isrc, "artist": {"name": ARTIST["name"]}, "preview": f"https://cdns-preview.dzcdn.net/{1000 + i}.mp3",
             "album": {"id": album_id, "title": "Fake Album", "cover_xl": "https://coverartarchive.org/x.jpg"}}
 
 
@@ -433,8 +433,10 @@ def dz_track_get(tid: str):
 
 
 @app.get(DZ + "/search/album")
-def dz_search_album(q: str):
-    return {"data": [{"id": 123, "title": "Fake Album", "nb_tracks": 3, "artist": {"name": ARTIST["name"]}}] if "fake album" in q.lower() else []}
+def dz_search_album(q: str, limit: int = 15):
+    return {"data": [{"id": 123, "title": "Fake Album", "nb_tracks": 3, "artist": {"name": ARTIST["name"]},
+                      "cover_xl": "https://e-cdns-images.dzcdn.net/images/cover/123/1000x1000.jpg", "cover_medium": "https://e-cdns-images.dzcdn.net/images/cover/123/250x250.jpg"}]
+            if "fake album" in q.lower() or "fake band fake album" in q.lower() else []}
 
 
 @app.get(DZ + "/search/track")
@@ -473,7 +475,7 @@ DZ_ALBUMS = {
 def dz_album_tracks(aid):
     a = DZ_ALBUMS[aid]
     titles = a.get("titles") or [REC_TITLES.get(next((rec for t, rec, s, i in ALBUM_TRACKS + [SINGLE] if i == isrc), ""), "x") for isrc in a["isrcs"]]
-    return [{"id": aid * 10 + n, "title": t, "isrc": isrc, "duration": 5 + n, "track_position": n + 1, "disk_number": 1,
+    return [{"id": aid * 10 + n, "title": t, "isrc": isrc, "duration": 5 + n, "track_position": n + 1, "disk_number": 1, "preview": f"https://cdns-preview.dzcdn.net/a{aid}-{n}.mp3",
              "artist": {"name": ARTIST["name"]}} for n, (t, isrc) in enumerate(zip(titles, a["isrcs"]))]
 
 
@@ -487,7 +489,7 @@ def dz_artist_albums(aid: int, limit: int = 100):
 @app.get(DZ + "/album/{aid}")
 def dz_album(aid: int):
     a = DZ_ALBUMS[aid]
-    return {"id": aid, "title": a["title"], "upc": a["upc"], "tracks": {"data": [{k: v for k, v in t.items() if k != "isrc"} for t in dz_album_tracks(aid)]}}
+    return {"id": aid, "title": a["title"], "upc": a["upc"], "cover_medium": f"https://e-cdns-images.dzcdn.net/images/cover/{aid}/250x250.jpg", "tracks": {"data": [{k: v for k, v in t.items() if k != "isrc"} for t in dz_album_tracks(aid)]}}
 
 
 @app.get(DZ + "/album/{aid}/tracks")
@@ -536,6 +538,22 @@ def dz_user_tracks(uid: str):
 @app.get(DZ + "/user/{uid}/playlists")
 def dz_user_pls(uid: str):
     return {"data": [{"id": 55, "title": "Deezer Mix", "link": "https://www.deezer.com/playlist/55"}]}
+
+
+# ================================================================= LRCLIB =============
+@app.get("/lrclib.net/api/get")
+def lrclib_get(track_name: str, artist_name: str, album_name: str = "", duration: int = 0):
+    if track_name == "Alpha":
+        return {"id": 1, "trackName": "Alpha", "artistName": artist_name, "duration": 5, "instrumental": False,
+                "plainLyrics": "First line\nSecond line", "syncedLyrics": "[00:00.50] First line\n[00:02.00] Second line"}
+    return JSONResponse({"code": 404, "message": "Failed to find specified track"}, 404)
+
+
+@app.get("/lrclib.net/api/search")
+def lrclib_search(track_name: str = "", artist_name: str = "", q: str = ""):
+    if track_name == "Beta":
+        return [{"id": 2, "trackName": "Beta", "artistName": artist_name, "duration": 6, "instrumental": False, "plainLyrics": "Only plain words", "syncedLyrics": None}]
+    return []
 
 
 # ================================================================= Discogs ============

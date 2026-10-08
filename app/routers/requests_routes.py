@@ -154,6 +154,35 @@ async def from_link(body: FromLink, user=Depends(auth.current_user)):
             "ids": made}
 
 
+class LinkBody(BaseModel):
+    url: str
+    album_mode: str | None = None
+
+
+# links that only describe music (no downloadable audio) → matched song by song and fetched from the best source
+_METADATA_ONLY = r"open\.spotify\.com|spotify\.link|^spotify:|music\.apple\.com|listenbrainz\.org|last\.fm/|tidal\.com|qobuz\.com|deezer\.com|deezer\.page\.link|music\.amazon\.|music\.youtube\.com/(playlist|browse)"
+
+
+@router.post("/link")
+async def link(body: LinkBody, user=Depends(auth.current_user)):
+    """One box for any link: streaming-service links are matched song by song (best quality from any source);
+    Qobuz/Tidal/Deezer rip directly when streamrip is set up; everything else (YouTube, SoundCloud, Bandcamp,
+    Mixcloud and ~1,800 more sites) downloads as-is with yt-dlp."""
+    import re
+
+    from ..services import streamrip
+    url = body.url.strip()
+    if not url.startswith(("http://", "https://", "spotify:")):
+        raise HTTPException(400, "Paste a full link (https://…)")
+    rip = re.search(r"qobuz\.com|tidal\.com|deezer\.com", url) and streamrip.enabled()
+    if re.search(_METADATA_ONLY, url, re.I) and not rip:
+        r = await from_link(FromLink(url=url, album_mode=body.album_mode), user)
+        return {**r, "mode": "matched"}
+    _quota(user)
+    rid = _create(user, NewRequest(kind="url", url=url))
+    return {"requested": 1, "already_requested": 0, "ids": [rid], "status": db.get_request(rid)["status"], "mode": "direct"}
+
+
 def _get_owned(rid: int, user: dict) -> dict:
     r = db.get_request(rid)
     if not r:
@@ -211,16 +240,73 @@ async def cancel(rid: int, user=Depends(auth.current_user)):
     return {"ok": True}
 
 
+def _delete_files(r: dict) -> int:
+    """Remove what a request left on disk: imported songs (completed) and staging/partial files (failed/cancelled)."""
+    import os
+    import shutil
+
+    from ..services import verify
+    n = 0
+    ids = [t["id"] for t in db.query("SELECT id FROM tracks WHERE request_id IN (SELECT id FROM requests WHERE id=? OR parent_id=?)", (r["id"], r["id"]))]
+    if ids:
+        n += verify.delete_tracks(ids)
+    for rid in [r["id"], *_children(r["id"])]:
+        stage = os.path.join(config.get("staging_path"), f"request-{rid}")
+        if os.path.isdir(stage):
+            shutil.rmtree(stage, ignore_errors=True)
+            n += 1
+    st = (r["detail"] or {}).get("slskd") or {}
+    if 0 <= st.get("idx", -1) < len(st.get("candidates", [])) and r["status"] != "completed":
+        from ..services import slskd, tagger
+        for f in st["candidates"][st["idx"]]["files"]:
+            p = slskd.local_path(f["filename"])
+            if p and os.path.exists(p):
+                os.remove(p)
+                tagger.prune_empty(os.path.dirname(p), config.get("slskd_download_path"))
+                n += 1
+    return n
+
+
 @router.delete("/{rid}")
-async def delete(rid: int, user=Depends(auth.current_user)):
+async def delete(rid: int, files: bool = False, user=Depends(auth.current_user)):
+    """Remove a request from the list; files=true also deletes what it downloaded (admins only)."""
     r = _get_owned(rid, user)
+    if files and user["role"] != "admin":
+        raise HTTPException(403, "Only admins can delete files")
     if r["status"] in worker.ACTIVE:
         await worker.cancel(rid)
+    n = _delete_files(r) if files else 0
     db.execute("DELETE FROM requests WHERE id=? OR parent_id=?", (rid, rid))
-    return {"ok": True}
+    if n:
+        db.log("info", f"{user['username']} deleted request #{rid} and {n} file(s)")
+    return {"ok": True, "deleted_files": n}
+
+
+class ClearBody(BaseModel):
+    statuses: list[str] = ["completed", "denied", "cancelled"]
+    files: bool = False
+    mine: bool = False
 
 
 @router.post("/clear")
-def clear_finished(user=Depends(auth.admin_user)):
-    db.execute("DELETE FROM requests WHERE status IN ('completed','denied','cancelled')")
-    return {"ok": True}
+async def clear_finished(body: ClearBody | None = None, user=Depends(auth.current_user)):
+    """Clear finished requests from the list (all users' for admins), optionally deleting their files."""
+    body = body or ClearBody()
+    statuses = [s for s in body.statuses if s in ("completed", "failed", "denied", "cancelled")]
+    if not statuses:
+        raise HTTPException(400, "Nothing to clear")
+    if body.files and user["role"] != "admin":
+        raise HTTPException(403, "Only admins can delete files")
+    sql = f"SELECT id FROM requests WHERE parent_id IS NULL AND status IN ({','.join('?' * len(statuses))})"
+    params: list = list(statuses)
+    if user["role"] != "admin" or body.mine:
+        sql += " AND user_id=?"
+        params.append(user["id"])
+    removed = files = 0
+    for row in db.query(sql, params):
+        r = db.get_request(row["id"])
+        if body.files:
+            files += _delete_files(r)
+        db.execute("DELETE FROM requests WHERE id=? OR parent_id=?", (r["id"], r["id"]))
+        removed += 1
+    return {"ok": True, "removed": removed, "deleted_files": files}

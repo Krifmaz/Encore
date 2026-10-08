@@ -1,12 +1,12 @@
 import { api } from '../api.js';
-import { art, confirmDialog, debounce, emptyState, esc, fmt, icon, modal, skeletonGrid, toast } from '../ui.js';
+import { art, confirmDialog, debounce, emptyState, esc, fmt, icon, modal, popMenu, skeletonGrid, toast } from '../ui.js';
 import { bindTiles, libraryTile } from './common.js';
 import { addToPlaylistModal } from './playlists.js';
 import * as player from '../player.js';
 
 export async function playAlbum(id, start = 0) {
   const a = await api.get(`/library/albums/${id}`);
-  player.playQueue(a.tracks.map(t => ({ ...t, album_id: id })), start);
+  player.playQueue(a.tracks.map(t => ({ ...t, album_id: id })), start, { context: 'album' });
 }
 
 function sourceLine(t) {
@@ -18,10 +18,35 @@ function sourceLine(t) {
 
 const PAGE = 120;
 
+/** "⋯" for one song: play next / queue / playlist / download the file / more like this / delete. */
+export function trackMenu(anchor, t, { admin = false, onDeleted } = {}) {
+  popMenu(anchor, [
+    { label: 'Play next', icon: icon.next, onClick: () => { player.playNext([t]); toast('Plays next', 'ok'); } },
+    { label: 'Add to queue', icon: icon.list, onClick: () => { player.enqueue([t]); toast('Added to queue', 'ok'); } },
+    { label: 'Add to playlist', icon: icon.plus, onClick: () => addToPlaylistModal([t.id]) },
+    { label: 'More like this', icon: icon.spark, onClick: async () => (await import('./foryou.js')).moreLikeThis(t.artist, t.title, t.mb_trackid) },
+    { label: 'Lyrics', icon: icon.music, onClick: async () => (await import('./lyrics.js')).lyricsModal(t) },
+    { label: 'Download this song', icon: icon.download, href: `/api/library/tracks/${t.id}/file`, download: true },
+    t.album_id ? { label: 'Go to album', icon: icon.disc, href: `#/library/album/${t.album_id}` } : null,
+    ...(admin ? ['-', { label: 'Delete song from disk', icon: icon.trash, danger: true, onClick: async () => {
+      if (!await confirmDialog('Delete song', `Permanently delete "${t.title}" from disk?`, 'Delete', true)) return;
+      try { await api.del(`/library/tracks/${t.id}`); toast('Song deleted', 'ok'); onDeleted?.(); } catch (e) { toast(e.message, 'err'); }
+    } }] : []),
+  ]);
+}
+
+const SORT_OPTS = {
+  albums: [['added', 'Date added'], ['released', 'Release date'], ['album', 'Title A–Z'], ['artist', 'Artist A–Z'], ['duration', 'Length'], ['size', 'Size']],
+  artists: [['name', 'Name A–Z'], ['added', 'Date added'], ['albums', 'Most albums'], ['tracks', 'Most songs']],
+  tracks: [['added', 'Date added'], ['released', 'Release date'], ['title', 'Title A–Z'], ['artist', 'Artist A–Z'], ['album', 'Album A–Z'], ['duration', 'Length']],
+};
+SORT_OPTS.singles = SORT_OPTS.albums;
+const DESC_FIRST = new Set(['added', 'released', 'duration', 'size', 'albums', 'tracks']);
+
 export async function render(view, ctx) {
   const admin = ctx.user.role === 'admin';
   const st = {
-    tab: ctx.query.tab || 'albums', q: ctx.query.q || '', sort: ctx.query.sort || 'name',
+    tab: ctx.query.tab || 'albums', q: ctx.query.q || '', sort: ctx.query.sort || '', dir: ctx.query.dir || '',
     filter: ctx.query.filter || '', artist: ctx.query.artist || '', offset: 0,
   };
   view.innerHTML = `
@@ -37,13 +62,11 @@ export async function render(view, ctx) {
     <div id="bulk" class="hidden card" style="margin-bottom:16px"></div>
     <div class="row wrap" style="margin-bottom:18px">
       <div class="tabs" id="lib-tabs">
-        ${[['albums', 'Albums'], ['artists', 'Artists'], ['tracks', 'Songs'], ...(admin ? [['duplicates', 'Duplicates'], ['issues', 'Wrong audio']] : [])].map(([k, l]) => `<button data-t="${k}" class="${k === st.tab ? 'active' : ''}">${l}</button>`).join('')}
+        ${[['albums', 'Albums'], ['singles', 'Singles'], ['artists', 'Artists'], ['tracks', 'Songs'], ...(admin ? [['duplicates', 'Duplicates'], ['issues', 'Wrong audio']] : [])].map(([k, l]) => `<button data-t="${k}" class="${k === st.tab ? 'active' : ''}">${l}</button>`).join('')}
       </div>
       <div class="search grow" style="max-width:360px">${icon.search}<input class="input" id="lib-q" placeholder="Filter library…" value="${esc(st.q)}"></div>
-      <select class="input" id="lib-sort" style="width:auto">
-        <option value="name">Sort: Artist</option><option value="album">Sort: Album</option>
-        <option value="year">Sort: Year</option><option value="added">Sort: Recently added</option>
-      </select>
+      <div class="row" style="gap:6px"><select class="input" id="lib-sort" style="width:auto"></select>
+        <button class="btn sm dir-btn" id="lib-dir" title="Ascending / descending"></button></div>
       <select class="input" id="lib-filter" style="width:auto">
         <option value="">All albums</option><option value="untagged">Needs tagging</option>
         <option value="tagged">MusicBrainz tagged</option><option value="lossless">Lossless only</option>
@@ -54,28 +77,45 @@ export async function render(view, ctx) {
     <div class="row mt" style="justify-content:center"><button class="btn hidden" id="more">Load more</button></div>`;
   const body = view.querySelector('#lib-body');
   const more = view.querySelector('#more');
-  view.querySelector('#lib-sort').value = st.sort;
+  let saved = {};
+  try { saved = JSON.parse(localStorage.getItem('encore.libSort') || '{}'); } catch { /* ignore */ }
+  const sortEl = view.querySelector('#lib-sort'), dirEl = view.querySelector('#lib-dir');
+  const paintSort = () => {
+    const opts = SORT_OPTS[st.tab];
+    sortEl.parentElement.classList.toggle('hidden', !opts);
+    if (!opts) return;
+    const cur = (st.tab === ctx.query.tab && st.sort) || saved[st.tab]?.sort || opts[0][0];
+    st.sort = opts.some(o => o[0] === cur) ? cur : opts[0][0];
+    st.dir = saved[st.tab]?.sort === st.sort && saved[st.tab]?.dir ? saved[st.tab].dir : (DESC_FIRST.has(st.sort) ? 'desc' : 'asc');
+    sortEl.innerHTML = opts.map(([k, l]) => `<option value="${k}">Sort: ${l}</option>`).join('');
+    sortEl.value = st.sort;
+    dirEl.textContent = st.dir === 'asc' ? '↑' : '↓';
+  };
+  const saveSort = () => {
+    saved[st.tab] = { sort: st.sort, dir: st.dir };
+    try { localStorage.setItem('encore.libSort', JSON.stringify(saved)); } catch { /* ignore */ }
+  };
+  paintSort();
   view.querySelector('#lib-filter').value = st.filter;
   bindTiles(body, ctx.navigate);
 
   const load = async (append = false) => {
     if (!append) { st.offset = 0; body.innerHTML = skeletonGrid(12); }
-    const sortEl = view.querySelector('#lib-sort'), filtEl = view.querySelector('#lib-filter');
-    sortEl.classList.toggle('hidden', st.tab !== 'albums');
-    filtEl.classList.toggle('hidden', st.tab !== 'albums');
+    const filtEl = view.querySelector('#lib-filter');
+    filtEl.classList.toggle('hidden', !['albums', 'singles'].includes(st.tab));
     view.querySelector('#lib-q').parentElement.classList.toggle('hidden', ['duplicates', 'issues'].includes(st.tab));
     if (st.tab === 'duplicates') return renderDuplicates(body, view, more, load);
     if (st.tab === 'issues') return renderIssues(body, view, more);
-    if (st.tab === 'albums') {
-      const res = await api.get(`/library/albums?q=${encodeURIComponent(st.q)}&sort=${st.sort}&filter=${st.filter}&artist=${encodeURIComponent(st.artist)}&limit=${PAGE}&offset=${st.offset}`);
+    if (st.tab === 'albums' || st.tab === 'singles') {
+      const res = await api.get(`/library/albums?q=${encodeURIComponent(st.q)}&sort=${st.sort}&dir=${st.dir}&kind=${st.tab}&filter=${st.filter}&artist=${encodeURIComponent(st.artist)}&limit=${PAGE}&offset=${st.offset}`);
       const html = res.items.map(libraryTile).join('');
       if (append) body.querySelector('.grid').insertAdjacentHTML('beforeend', html);
       else body.innerHTML = res.items.length ? `<div class="grid">${html}</div>` : emptyState(icon.library, 'No albums found', st.filter === 'untagged' ? 'Everything is tagged 🎉' : '');
       st.offset += res.items.length;
       more.classList.toggle('hidden', st.offset >= res.total);
-      view.querySelector('#lib-sub').textContent = `${fmt.num(res.total)} albums`;
+      view.querySelector('#lib-sub').textContent = `${fmt.num(res.total)} ${st.tab}`;
     } else if (st.tab === 'artists') {
-      const rows = await api.get(`/library/artists?q=${encodeURIComponent(st.q)}`);
+      const rows = await api.get(`/library/artists?q=${encodeURIComponent(st.q)}&sort=${st.sort}&dir=${st.dir}`);
       more.classList.add('hidden');
       view.querySelector('#lib-sub').textContent = `${fmt.num(rows.length)} artists`;
       body.innerHTML = rows.length ? `<div class="grid">${rows.map(a => `
@@ -85,15 +125,17 @@ export async function render(view, ctx) {
           <div class="s" style="text-align:center">${a.albums} album${a.albums === 1 ? '' : 's'} · ${a.tracks} tracks</div>
         </div>`).join('')}</div>` : emptyState(icon.users, 'No artists found');
     } else {
-      const rows = await api.get(`/library/tracks?q=${encodeURIComponent(st.q)}&limit=300&offset=${append ? st.offset : 0}`);
-      const html = rows.map((t, i) => `<tr data-i="${i}">
-        <td class="num"><button class="btn ghost icon sm" data-play-track="${t.id}" aria-label="Play">${icon.play.replace('<svg', '<svg width="14"')}</button></td>
-        <td><div style="font-weight:600">${esc(t.title)}</div><div class="small muted">${esc(t.artist)}</div></td>
+      const rows = await api.get(`/library/tracks?q=${encodeURIComponent(st.q)}&sort=${st.sort}&dir=${st.dir}&limit=300&offset=${append ? st.offset : 0}`);
+      const base = append ? (body._tracks || []).length : 0;
+      const html = rows.map((t, i) => `<tr data-i="${base + i}">
+        <td style="width:52px"><button class="thumb play-thumb" data-play-track="${t.id}" aria-label="Play">${art(`/api/library/albums/${t.album_id}/cover`, t.album || t.title)}<i>${icon.play}</i></button></td>
+        <td><div style="font-weight:600" class="ellipsis">${esc(t.title)}</div><div class="small muted ellipsis">${esc(t.artist)}<span class="show-sm"> · ${esc(t.album || '')}</span></div></td>
         <td class="hide-sm"><a href="#/library/album/${esc(t.album_id)}">${esc(t.album || '')}</a></td>
         <td class="hide-sm"><span class="badge">${esc((t.format || '').toUpperCase())}${t.bitrate ? ' ' + t.bitrate + 'k' : ''}</span> ${verifyBadge(t)}</td>
-        <td class="muted">${fmt.dur(t.duration)}</td></tr>`).join('');
+        <td class="muted hide-sm">${fmt.dur(t.duration)}</td>
+        <td style="text-align:right"><button class="btn sm ghost icon" data-tmenu="${base + i}" aria-label="More">${icon.more}</button></td></tr>`).join('');
       if (!append) {
-        body.innerHTML = rows.length ? `<div class="card flat"><div class="table-wrap"><table class="table"><thead><tr><th></th><th>Title</th><th class="hide-sm">Album</th><th class="hide-sm">Format</th><th>Time</th></tr></thead><tbody>${html}</tbody></table></div></div>` : emptyState(icon.music, 'No songs found');
+        body.innerHTML = rows.length ? `<div class="card flat"><div class="table-wrap"><table class="table"><thead><tr><th></th><th>Title</th><th class="hide-sm">Album</th><th class="hide-sm">Format</th><th class="hide-sm">Time</th><th></th></tr></thead><tbody>${html}</tbody></table></div></div>` : emptyState(icon.music, 'No songs found');
         body._tracks = rows;
       } else {
         body.querySelector('tbody').insertAdjacentHTML('beforeend', html);
@@ -106,21 +148,25 @@ export async function render(view, ctx) {
   };
 
   body.addEventListener('click', (e) => {
+    const mb = e.target.closest('[data-tmenu]');
+    if (mb) return trackMenu(mb, body._tracks[+mb.dataset.tmenu], { admin, onDeleted: () => load() });
     const b = e.target.closest('[data-play-track]');
     if (!b) return;
     const tracks = body._tracks || [];
     const idx = tracks.findIndex(t => String(t.id) === b.dataset.playTrack);
-    player.playQueue(tracks.slice(idx, idx + 200), 0);
+    player.playQueue([tracks[idx]], 0, { context: 'single' });   // a single song: library shuffle continues after it
   });
   view.querySelector('#lib-tabs').onclick = (e) => {
     const t = e.target.closest('[data-t]');
     if (!t) return;
     st.tab = t.dataset.t;
     view.querySelectorAll('#lib-tabs button').forEach(b => b.classList.toggle('active', b === t));
+    paintSort();
     load();
   };
   view.querySelector('#lib-q').addEventListener('input', debounce((e) => { st.q = e.target.value.trim(); load(); }, 300));
-  view.querySelector('#lib-sort').onchange = (e) => { st.sort = e.target.value; load(); };
+  sortEl.onchange = (e) => { st.sort = e.target.value; st.dir = DESC_FIRST.has(st.sort) ? 'desc' : 'asc'; dirEl.textContent = st.dir === 'asc' ? '↑' : '↓'; saveSort(); load(); };
+  dirEl.onclick = () => { st.dir = st.dir === 'asc' ? 'desc' : 'asc'; dirEl.textContent = st.dir === 'asc' ? '↑' : '↓'; saveSort(); load(); };
   view.querySelector('#lib-filter').onchange = (e) => { st.filter = e.target.value; load(); };
   more.onclick = () => load(true);
 
@@ -258,14 +304,8 @@ export async function renderAlbum(view, ctx) {
         </div>
         <div class="row wrap mt">
           <button class="btn primary" id="play-all">${icon.play}Play</button>
-          <button class="btn" id="queue-all">${icon.list}Queue</button>
-          <button class="btn" id="add-pl">${icon.list}Add to playlist</button>
-          <a class="btn" href="/api/library/albums/${esc(id)}/download">${icon.download}Download</a>
-          ${a.mb_releasegroupid ? `<a class="btn ghost" href="#/album/${esc(a.mb_releasegroupid)}">${icon.disc}Release info</a>` : ''}
-          ${admin ? `<button class="btn" id="match-btn">${icon.tag}Match MusicBrainz</button>
-            <button class="btn" id="edit-btn">${icon.edit}Edit tags</button>
-            <button class="btn" id="art-btn" title="Find cover art online and embed it into the files">${icon.disc}Find artwork</button>
-            <button class="btn danger ghost" id="del-btn">${icon.trash}</button>` : ''}
+          <button class="btn" id="shuffle-all">${icon.shuffle}Shuffle</button>
+          <button class="btn icon" id="album-menu" aria-label="More options" title="More options">${icon.more}</button>
         </div>
       </div>
     </div>
@@ -277,12 +317,34 @@ export async function renderAlbum(view, ctx) {
         <td class="hide-sm muted">${esc(t.artist)}</td>
         <td class="hide-sm"><span class="badge">${esc((t.format || '').toUpperCase())}${t.bitrate ? ' ' + t.bitrate + 'k' : ''}</span>${t.mb_trackid ? '' : ' <span class="badge warn" title="No MusicBrainz id">?</span>'} ${verifyBadge(t)}</td>
         <td class="muted">${fmt.dur(t.duration)}</td>
-        <td style="text-align:right;white-space:nowrap"><button class="btn sm ghost" data-like="${t.id}" title="Like (syncs to Finamp/Plexamp)">${icon.heart}</button><button class="btn sm ghost" data-addpl="${t.id}" title="Add to playlist">${icon.plus}</button></td></tr>`).join('')}</tbody>
+        <td style="text-align:right;white-space:nowrap"><button class="btn sm ghost" data-like="${t.id}" title="Like (syncs to Finamp/Plexamp)">${icon.heart}</button><button class="btn sm ghost icon" data-tmenu="${i}" aria-label="More">${icon.more}</button></td></tr>`).join('')}</tbody>
     </table></div></div>`;
-  view.querySelector('#add-pl').onclick = () => addToPlaylistModal(a.tracks.map(t => t.id));
   const queueTracks = a.tracks.map(t => ({ ...t, album_id: id }));
-  view.querySelector('#play-all').onclick = () => player.playQueue(queueTracks, 0);
-  view.querySelector('#queue-all').onclick = () => { player.enqueue(queueTracks); toast('Added to queue', 'ok'); };
+  view.querySelector('#play-all').onclick = () => player.playQueue(queueTracks, 0, { context: 'album' });
+  view.querySelector('#shuffle-all').onclick = () => player.playQueue([...queueTracks].sort(() => Math.random() - 0.5), 0, { context: 'album' });
+  const reload = () => window.dispatchEvent(new HashChangeEvent('hashchange'));
+  view.querySelector('#album-menu').onclick = (e) => popMenu(e.currentTarget, [
+    { label: 'Add to queue', icon: icon.list, onClick: () => { player.enqueue(queueTracks); toast('Added to queue', 'ok'); } },
+    { label: 'Play next', icon: icon.next, onClick: () => { player.playNext(queueTracks); toast('Plays next', 'ok'); } },
+    { label: 'Add to playlist', icon: icon.plus, onClick: () => addToPlaylistModal(a.tracks.map(t => t.id)) },
+    { label: 'Download album (zip)', icon: icon.download, href: `/api/library/albums/${id}/download` },
+    { label: 'Lyrics for all songs', icon: icon.music, onClick: async () => (await import('./lyrics.js')).fetchAlbumLyrics(id) },
+    a.mb_releasegroupid ? { label: 'Release info', icon: icon.disc, href: `#/album/${a.mb_releasegroupid}` } : null,
+    ...(admin ? ['-',
+      { label: 'Tag / match metadata', icon: icon.tag, onClick: () => matchModal(id, a, ctx) },
+      { label: 'Edit tags', icon: icon.edit, onClick: () => editModal(id, a, ctx) },
+      { label: 'Change artwork…', icon: icon.disc, onClick: async () => (await import('./artwork.js')).artworkModal(id, a, reload) },
+      { label: 'Find artwork automatically', icon: icon.refresh, onClick: async () => {
+        try { const r = await api.post(`/library/albums/${id}/artwork`); toast(`Artwork embedded in ${r.embedded} file(s)`, 'ok'); reload(); } catch (err) { toast(err.message, 'err'); }
+      } },
+      '-',
+      { label: 'Delete album from disk', icon: icon.trash, danger: true, onClick: async () => {
+        if (!await confirmDialog('Delete album', `Permanently delete "${a.album}" (${a.tracks.length} files) from disk?`, 'Delete', true)) return;
+        await api.del(`/library/albums/${id}`);
+        toast('Album deleted', 'ok');
+        ctx.navigate('/library');
+      } }] : []),
+  ]);
   const highlight = (cur) => view.querySelectorAll('tbody tr').forEach((tr, i) => tr.classList.toggle('playing', !!cur && cur.id === a.tracks[i].id));
   ctx.onLeave(player.onChange(highlight));
   highlight(player.current());
@@ -300,30 +362,13 @@ export async function renderAlbum(view, ctx) {
       if (liked.has(tid)) { await api.del(`/likes/${tid}`); liked.delete(tid); } else { await api.post(`/likes/${tid}`); liked.add(tid); }
       paintLikes();
     }
-    const ab = e.target.closest('[data-addpl]');
-    if (ab) addToPlaylistModal([+ab.dataset.addpl]);
-    if (!lb && !ab && !e.target.closest('a, button')) {
+    const tm = e.target.closest('[data-tmenu]');
+    if (tm) return trackMenu(tm, queueTracks[+tm.dataset.tmenu], { admin, onDeleted: reload });
+    if (!lb && !e.target.closest('a, button')) {
       const tr = e.target.closest('tr[data-i]');
-      if (tr) player.playQueue(queueTracks, +tr.dataset.i);
+      if (tr) player.playQueue(queueTracks, +tr.dataset.i, { context: 'album' });
     }
   });
-  if (!admin) return;
-  view.querySelector('#match-btn').onclick = () => matchModal(id, a, ctx);
-  view.querySelector('#art-btn').onclick = async (e) => {
-    e.currentTarget.disabled = true;
-    try {
-      const r = await api.post(`/library/albums/${id}/artwork`);
-      toast(`Artwork embedded in ${r.embedded} file(s)`, 'ok');
-      window.dispatchEvent(new HashChangeEvent('hashchange'));
-    } catch (err) { toast(err.message, 'err'); e.currentTarget.disabled = false; }
-  };
-  view.querySelector('#edit-btn').onclick = () => editModal(id, a, ctx);
-  view.querySelector('#del-btn').onclick = async () => {
-    if (!await confirmDialog('Delete album', `Permanently delete "${a.album}" (${a.tracks.length} files) from disk?`, 'Delete', true)) return;
-    await api.del(`/library/albums/${id}`);
-    toast('Album deleted', 'ok');
-    ctx.navigate('/library');
-  };
 }
 
 function matchModal(id, a, ctx) {

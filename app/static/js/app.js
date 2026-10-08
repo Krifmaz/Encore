@@ -17,6 +17,8 @@ import * as autoPage from './pages/autodownload.js';
 import * as diagPage from './pages/diagnostics.js';
 import * as followingPage from './pages/following.js';
 import * as forYouPage from './pages/foryou.js';
+import * as storagePage from './pages/storage.js';
+import * as leaderboardPage from './pages/leaderboard.js';
 
 export const session = { user: null, info: null };
 
@@ -43,6 +45,8 @@ const routes = [
   [/^\/admin\/autodownload$/, autoPage.render, true],
   [/^\/admin\/diagnostics$/, diagPage.render, true],
   [/^\/account$/, accountPage.render],
+  [/^\/storage$/, storagePage.render],
+  [/^\/leaderboard$/, leaderboardPage.render],
 ];
 
 let cleanup = [];
@@ -85,6 +89,7 @@ function renderShell() {
           ${navLink('/playlists', icon.list, 'Playlists')}
           ${navLink('/following', icon.users, 'Following')}
           ${navLink('/download', icon.download, 'Downloader')}
+          ${navLink('/leaderboard', icon.activity, 'Leaderboard')}
           ${navLink('/connections', icon.link, 'Connections')}
           ${admin ? `<div class="nav-label">Admin</div>
             ${navLink('/activity', icon.activity, 'Activity')}
@@ -94,7 +99,8 @@ function renderShell() {
             ${navLink('/settings', icon.settings, 'Settings')}
             ${navLink('/admin/diagnostics', icon.shield, 'Diagnostics')}` : ''}
         </nav>
-        <div class="sidebar-foot">
+        <div id="storage-mini" style="margin-top:auto"></div>
+        <div class="sidebar-foot" style="margin-top:0">
           <a href="#/account" class="row grow" style="min-width:0">
             <div class="avatar">${esc(u.username[0])}</div>
             <div class="grow"><div class="ellipsis" style="font-weight:650">${esc(u.username)}</div><div class="small faint" title="Encore version / build">${admin ? 'Admin' : 'Member'} · v${esc(session.info?.version || '')}${session.info?.build && session.info.build !== 'dev' ? ' · ' + esc(session.info.build) : ''}</div></div>
@@ -109,6 +115,9 @@ function renderShell() {
       </main>
     </div>`;
   qs('#logout-btn').onclick = async () => { await api.post('/auth/logout'); location.reload(); };
+  const meter = () => storagePage.sidebarMeter(qs('#storage-mini'));
+  meter();
+  setInterval(meter, 5 * 60 * 1000);
   qs('#theme-btn').onclick = themeToggle;
   qs('#menu-btn').onclick = (e) => { e.stopPropagation(); qs('#sidebar').classList.toggle('open'); };
   document.addEventListener('click', (e) => {
@@ -183,6 +192,14 @@ export async function refreshUser() {
 }
 
 window.addEventListener('hashchange', route);
+// any element with data-pv='{"artist","title",…}' plays a 30-second preview of a song you don't have
+document.addEventListener('click', async (e) => {
+  const b = e.target.closest('[data-pv]');
+  if (!b) return;
+  e.preventDefault();
+  e.stopPropagation();
+  (await import('./pages/preview.js')).previewTrack(JSON.parse(b.dataset.pv));
+}, true);
 window.addEventListener('encore:unauthorized', () => {
   if (session.user) { session.user = null; toast('Your session expired – please sign in again', 'err'); location.hash = '#/login'; location.reload(); }
 });

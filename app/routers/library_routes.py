@@ -1,5 +1,6 @@
 import asyncio
 import os
+import re
 import tempfile
 import time
 import zipfile
@@ -14,13 +15,29 @@ from ..services import acoustid, library, tagger, verify
 
 router = APIRouter(prefix="/api/library", tags=["library"])
 
+# sort key → (SQL expression, default direction); "dir" flips it
 SORTS = {
-    "name": "lower(albumartist), year, lower(album)",
-    "album": "lower(album)",
-    "year": "year DESC, lower(albumartist)",
-    "added": "added DESC",
-    "artist": "lower(albumartist), year",
+    "name": ("lower(albumartist) {d}, year, lower(album)", "asc"),
+    "artist": ("lower(albumartist) {d}, year", "asc"),
+    "album": ("lower(album) {d}", "asc"),
+    "year": ("year {d}, lower(albumartist)", "desc"),
+    "released": ("year {d}, lower(albumartist)", "desc"),
+    "added": ("added {d}", "desc"),
+    "duration": ("duration {d}", "desc"),
+    "size": ("size {d}", "desc"),
 }
+TRACK_SORTS = {
+    "artist": "lower(artist) {d}, lower(album), disc, track", "title": "lower(title) {d}", "album": "lower(album) {d}, disc, track",
+    "added": "added_at {d}", "released": "year {d}, lower(artist)", "duration": "duration {d}",
+}
+ARTIST_SORTS = {"name": "lower(albumartist) {d}", "albums": "albums {d}", "tracks": "tracks {d}", "added": "added {d}"}
+
+
+def _order(table: dict, key: str, direction: str, default: str) -> str:
+    v = table.get(key) or table[default]
+    expr, dflt = v if isinstance(v, tuple) else (v, "asc")
+    d = direction if direction in ("asc", "desc") else dflt
+    return expr.format(d=d.upper())
 
 _bulk = {"running": False, "done": 0, "total": 0, "tagged": 0, "skipped": 0, "current": ""}
 
@@ -49,8 +66,52 @@ async def scan(full: bool = False, user=Depends(auth.admin_user)):
     return {"ok": True}
 
 
+_storage_cache: dict = {}
+
+
+def _dir_size(path: str) -> int:
+    total = 0
+    for dp, _, fs in os.walk(path or "/nonexistent"):
+        for f in fs:
+            try:
+                total += os.path.getsize(os.path.join(dp, f))
+            except OSError:
+                pass
+    return total
+
+
+@router.get("/storage")
+async def storage(user=Depends(auth.current_user)):
+    """Disk usage at a glance: disk, library by format/artist, biggest albums, download folders."""
+    import shutil
+    hit = _storage_cache.get("v")
+    if hit and hit[0] > time.time():
+        return hit[1]
+    lib = config.get("library_path")
+    try:
+        du = shutil.disk_usage(lib)
+        disk = {"total": du.total, "used": du.used, "free": du.free}
+    except OSError:
+        disk = None
+    dl = {"soulseek": config.get("slskd_download_path"), "staging": config.get("staging_path")}
+    sizes = await asyncio.gather(*[asyncio.to_thread(_dir_size, p) for p in dl.values()])
+    out = {
+        "disk": disk,
+        "library": db.one("SELECT COALESCE(SUM(size),0) size, COUNT(*) tracks, COUNT(DISTINCT album_id) albums FROM tracks"),
+        "formats": db.query("SELECT upper(format) format, COUNT(*) tracks, COALESCE(SUM(size),0) size FROM tracks GROUP BY format ORDER BY size DESC"),
+        "artists": db.query("""SELECT MAX(albumartist) name, COALESCE(SUM(size),0) size, COUNT(*) tracks FROM tracks
+                               GROUP BY lower(albumartist) ORDER BY size DESC LIMIT 15"""),
+        "albums": db.query("""SELECT album_id id, MAX(album) album, MAX(albumartist) albumartist, COALESCE(SUM(size),0) size, COUNT(*) tracks
+                              FROM tracks GROUP BY album_id ORDER BY size DESC LIMIT 12"""),
+        "downloads": [{"name": k, "size": v} for k, v in zip(dl, sizes)],
+    }
+    _storage_cache["v"] = (time.time() + 60, out)
+    return out
+
+
 @router.get("/albums")
-def albums(q: str = "", sort: str = "name", filter: str = "", artist: str = "", limit: int = 120, offset: int = 0, user=Depends(auth.current_user)):
+def albums(q: str = "", sort: str = "name", filter: str = "", artist: str = "", limit: int = 120, offset: int = 0,
+           dir: str = "", kind: str = "", user=Depends(auth.current_user)):
     where, params = ["1=1"], []
     if q:
         where.append("(album LIKE ? OR albumartist LIKE ? OR artist LIKE ?)")
@@ -65,38 +126,118 @@ def albums(q: str = "", sort: str = "name", filter: str = "", artist: str = "", 
         having = "HAVING SUM(CASE WHEN mb_albumid IS NULL OR mb_albumid='' THEN 1 ELSE 0 END) = 0"
     elif filter == "lossless":
         having = "HAVING SUM(CASE WHEN format IN ('flac','wav','alac','aiff','ape','wv') THEN 1 ELSE 0 END) = COUNT(*)"
+    if kind in ("albums", "singles"):   # singles/loose songs = releases with 1–2 tracks
+        cond = "COUNT(*) <= 2" if kind == "singles" else "COUNT(*) > 2"
+        having = f"{having} AND {cond}" if having else f"HAVING {cond}"
     sql = f"""SELECT album_id AS id, MAX(album) album, MAX(albumartist) albumartist, MAX(year) year, MAX(genre) genre,
               COUNT(*) tracks, SUM(duration) duration, SUM(size) size, MAX(added_at) added,
               GROUP_CONCAT(DISTINCT format) formats, MAX(mb_albumid) mb_albumid, MAX(mb_releasegroupid) mb_releasegroupid,
               SUM(CASE WHEN mb_albumid IS NULL OR mb_albumid='' THEN 1 ELSE 0 END) untagged
               FROM tracks WHERE {' AND '.join(where)} GROUP BY album_id {having}
-              ORDER BY {SORTS.get(sort, SORTS['name'])} LIMIT ? OFFSET ?"""
+              ORDER BY {_order(SORTS, sort, dir, 'name')} LIMIT ? OFFSET ?"""
     rows = db.query(sql, (*params, min(limit, 500), offset))
     total = db.one(f"SELECT COUNT(*) n FROM (SELECT album_id FROM tracks WHERE {' AND '.join(where)} GROUP BY album_id {having})", params)["n"]
     return {"total": total, "items": rows}
 
 
 @router.get("/artists")
-def artists(q: str = "", user=Depends(auth.current_user)):
+def artists(q: str = "", sort: str = "name", dir: str = "", user=Depends(auth.current_user)):
     params = []
     where = ""
     if q:
         where = "WHERE albumartist LIKE ?"
         params.append(f"%{q}%")
     return db.query(f"""SELECT albumartist AS name, COUNT(DISTINCT album_id) albums, COUNT(*) tracks,
-        MAX(mb_albumartistid) mbid, MIN(album_id) cover_album, SUM(size) size
-        FROM tracks {where} GROUP BY lower(albumartist) ORDER BY lower(albumartist) LIMIT 2000""", params)
+        MAX(mb_albumartistid) mbid, MIN(album_id) cover_album, SUM(size) size, MAX(added_at) added
+        FROM tracks {where} GROUP BY lower(albumartist) ORDER BY {_order(ARTIST_SORTS, sort, dir, 'name')} LIMIT 2000""", params)
 
 
 @router.get("/tracks")
-def tracks(q: str = "", limit: int = 200, offset: int = 0, user=Depends(auth.current_user)):
+def tracks(q: str = "", limit: int = 200, offset: int = 0, sort: str = "artist", dir: str = "", user=Depends(auth.current_user)):
     params: list = []
     where = ""
     if q:
         where = "WHERE title LIKE ? OR artist LIKE ? OR album LIKE ?"
         params += [f"%{q}%"] * 3
-    return db.query(f"SELECT id, title, artist, album, albumartist, album_id, track, disc, year, duration, format, bitrate, verify_status, verify_detail FROM tracks {where} ORDER BY lower(artist), lower(album), disc, track LIMIT ? OFFSET ?",
-                    (*params, min(limit, 1000), offset))
+    d = dir if dir in ("asc", "desc") else ("desc" if sort in ("added", "released", "duration") else "asc")
+    order = TRACK_SORTS.get(sort, TRACK_SORTS["artist"]).format(d=d.upper())
+    return db.query(f"""SELECT id, title, artist, album, albumartist, album_id, track, disc, year, duration, format, bitrate, verify_status, verify_detail, added_at
+                        FROM tracks {where} ORDER BY {order} LIMIT ? OFFSET ?""", (*params, min(limit, 1000), offset))
+
+
+@router.get("/tracks/{tid}/file")
+def track_file(tid: int, user=Depends(auth.current_user)):
+    """Download one song's file (no zip, no album)."""
+    t = db.one("SELECT path, artist, title FROM tracks WHERE id=?", (tid,))
+    if not t or not os.path.exists(t["path"]):
+        raise HTTPException(404, "File not found")
+    ext = os.path.splitext(t["path"])[1]
+    name = re.sub(r'[\\/:*?"<>|]+', "_", f"{t['artist']} - {t['title']}{ext}")
+    return FileResponse(t["path"], filename=name)
+
+
+@router.get("/tracks/{tid}/lyrics")
+async def track_lyrics(tid: int, fetch: bool = True, force: bool = False, user=Depends(auth.current_user)):
+    from ..services import lyrics
+    t = db.one("SELECT id, path, artist, title, album, duration FROM tracks WHERE id=?", (tid,))
+    if not t:
+        raise HTTPException(404, "Track not found")
+    if not fetch:
+        text, synced = lyrics.sidecar(t["path"])
+        return {"lyrics": text, "synced": synced, "source": "file" if text else None}
+    try:
+        return await lyrics.fetch_for_track(t, force)
+    except Exception as e:  # noqa: BLE001
+        raise HTTPException(502, f"Lyrics lookup failed: {e}")
+
+
+@router.post("/albums/{album_id}/lyrics")
+async def album_lyrics(album_id: str, user=Depends(auth.current_user)):
+    from ..services import lyrics
+    ids = [t["id"] for t in db.query("SELECT id FROM tracks WHERE album_id=?", (album_id,))]
+    return await lyrics.fetch_missing(ids, limit=len(ids) or 1)
+
+
+@router.get("/shuffle")
+def shuffle(limit: int = 50, exclude: str = "", user=Depends(auth.current_user)):
+    """Random songs from the whole library – what plays after your queue ends."""
+    ex = [int(x) for x in exclude.split(",") if x.strip().isdigit()][:500]
+    sql = "SELECT id, title, artist, album, album_id, format, bitrate, duration FROM tracks"
+    if ex:
+        sql += f" WHERE id NOT IN ({','.join('?' * len(ex))})"
+    return db.query(sql + " ORDER BY RANDOM() LIMIT ?", (*ex, min(limit, 200)))
+
+
+class PlayBody(BaseModel):
+    track_id: int
+    seconds: float = 0
+
+
+@router.post("/plays")
+def log_play(body: PlayBody, user=Depends(auth.current_user)):
+    """Count a play (sent by the web player after 30 s or half the song)."""
+    t = db.one("SELECT artist, title, album FROM tracks WHERE id=?", (body.track_id,))
+    if not t:
+        raise HTTPException(404, "Track not found")
+    db.execute("INSERT INTO plays (user_id, track_id, artist, title, album, seconds, played_at) VALUES (?,?,?,?,?,?,?)",
+               (user["id"], body.track_id, t["artist"], t["title"], t["album"], max(0, min(body.seconds, 7200)), time.time()))
+    return {"ok": True}
+
+
+@router.delete("/tracks/{tid}")
+def delete_track(tid: int, user=Depends(auth.admin_user)):
+    """Permanently delete one song's file (and its lyrics file)."""
+    t = db.one("SELECT path, artist, title FROM tracks WHERE id=?", (tid,))
+    if not t:
+        raise HTTPException(404, "Track not found")
+    for side in (".lrc", ".txt"):
+        try:
+            os.remove(os.path.splitext(t["path"])[0] + side)
+        except OSError:
+            pass
+    verify.delete_tracks([tid])
+    db.log("info", f"{user['username']} deleted {t['artist']} – {t['title']}")
+    return {"ok": True}
 
 
 @router.get("/recent")
@@ -173,8 +314,57 @@ async def _embed_album_art(album_id: str, data: bytes) -> int:
     os.makedirs(os.path.dirname(cache), exist_ok=True)
     with open(cache, "wb") as fh:
         fh.write(data)
+    dirs = {os.path.dirname(r["path"]) for r in rows}
+    if config.get("save_cover") and len(dirs) == 1:
+        try:
+            with open(os.path.join(dirs.pop(), "cover.jpg"), "wb") as fh:
+                fh.write(data)
+        except OSError:
+            pass
     _cover_misses.discard(album_id)
     return n
+
+
+@router.get("/albums/{album_id}/art-candidates")
+async def art_candidates(album_id: str, q: str = "", user=Depends(auth.admin_user)):
+    """Cover art choices from every catalogue (Cover Art Archive, Deezer, Apple Music, YouTube Music, Discogs)."""
+    from ..services import art_search
+    a = db.one("SELECT MAX(albumartist) artist, MAX(album) album, MAX(mb_releasegroupid) rg, MAX(mb_albumid) rel FROM tracks WHERE album_id=?", (album_id,))
+    if not a or not a["artist"]:
+        raise HTTPException(404, "Album not found")
+    return await art_search.candidates(a["artist"], q or a["album"] or "", a["rg"], a["rel"])
+
+
+class ArtBody(BaseModel):
+    url: str | None = None
+    data: str | None = None      # base64 image (upload)
+
+
+@router.post("/albums/{album_id}/art")
+async def set_album_art(album_id: str, body: ArtBody, user=Depends(auth.admin_user)):
+    """Use a chosen or uploaded picture as the album's cover: embedded in every file + cover.jpg."""
+    import base64
+
+    from ..services.http import client
+    if body.data:
+        try:
+            data = base64.b64decode(body.data.split(",", 1)[-1])
+        except ValueError:
+            raise HTTPException(400, "Invalid image")
+    elif body.url and body.url.startswith(("http://", "https://")):
+        r = await client().get(body.url, follow_redirects=True)
+        if r.status_code >= 400:
+            raise HTTPException(502, f"Could not download the picture ({r.status_code})")
+        data = r.content
+    else:
+        raise HTTPException(400, "Choose a picture or upload one")
+    if not (data[:3] == b"\xff\xd8\xff" or data[:8] == b"\x89PNG\r\n\x1a\n"):
+        raise HTTPException(400, "Only JPEG and PNG pictures can be embedded")
+    if len(data) > 15 * 1024 * 1024:
+        raise HTTPException(400, "Picture is larger than 15 MB")
+    n = await _embed_album_art(album_id, data)
+    db.log("info", f"{user['username']} changed the artwork of album {album_id}")
+    return {"embedded": n}
 
 
 @router.post("/albums/{album_id}/artwork")
@@ -328,10 +518,11 @@ async def delete_album(album_id: str, user=Depends(auth.admin_user)):
     rows = db.query("SELECT path FROM tracks WHERE album_id=?", (album_id,))
     dirs = set()
     for r in rows:
-        try:
-            os.remove(r["path"])
-        except OSError:
-            pass
+        for p in (r["path"], os.path.splitext(r["path"])[0] + ".lrc", os.path.splitext(r["path"])[0] + ".txt"):
+            try:
+                os.remove(p)
+            except OSError:
+                pass
         dirs.add(os.path.dirname(r["path"]))
         db.execute("UPDATE playlist_items SET track_id=NULL WHERE track_id=(SELECT id FROM tracks WHERE path=?)", (r["path"],))
         db.execute("DELETE FROM tracks WHERE path=?", (r["path"],))

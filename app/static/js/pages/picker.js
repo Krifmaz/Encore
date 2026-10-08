@@ -1,6 +1,6 @@
 // Manual download picker: search every source, see quality/size/uploader, download the exact result you choose.
 import { api } from '../api.js';
-import { esc, fmt, icon, modal, toast } from '../ui.js';
+import { art, esc, fmt, icon, modal, toast } from '../ui.js';
 
 const NAMES = { slskd: 'Soulseek', deezer: 'Deezer', ytmusic: 'YouTube Music', lidarr: 'Lidarr' };
 
@@ -18,11 +18,12 @@ export async function pickerModal(opts) {
     wide: true,
     body: `
       <form class="row wrap" id="pk-form">
-        <div class="search grow">${icon.search}<input class="input" name="q" value="${esc([opts.artist, opts.title || opts.album].filter(Boolean).join(' '))}" autocomplete="off"></div>
+        <div class="search grow" style="min-width:0">${icon.search}<input class="input" name="q" type="search" enterkeyhint="search" value="${esc([opts.artist, opts.title || opts.album].filter(Boolean).join(' '))}" placeholder="Search, or paste a YouTube Music / Bandcamp / any link" autocomplete="off"></div>
         <button class="btn primary">Search</button>
       </form>
+      <div id="pk-linkhint"></div>
       <div class="row wrap mt" style="justify-content:space-between">
-        <div class="tabs" id="pk-tabs"></div>
+        <div class="tabs" id="pk-tabs" style="max-width:100%"></div>
         <label class="row small" style="gap:6px"><input type="checkbox" id="pk-lossless"> Lossless only</label>
       </div>
       <div id="pk-out" class="mt" style="min-height:200px"></div>
@@ -44,15 +45,18 @@ export async function pickerModal(opts) {
       .map(([k, l, n]) => `<button data-t="${k}" class="${state.tab === k ? 'active' : ''}">${esc(l)} ${state.loading.has(k) || (k === 'all' && state.loading.size) ? '<span class="spinner" style="width:12px;height:12px"></span>' : `<span class="faint">${n}</span>`}</button>`).join('');
   };
 
-  const row = (x, i) => `<tr>
-      <td><div style="font-weight:600;word-break:break-word">${esc(x.title)}</div>
-        <div class="small muted" style="word-break:break-word">${esc(x.subtitle || '')}</div>
-        ${x.warning ? `<div class="small" style="color:var(--warn)">${esc(x.warning)}</div>` : ''}</td>
-      <td><span class="badge ${x.lossless ? 'ok' : ''}">${esc(x.quality || '?')}</span></td>
-      <td class="hide-sm muted small">${x.tracks ? `${x.tracks} file${x.tracks === 1 ? '' : 's'}` : ''}${x.duration ? ` · ${fmt.dur(x.duration)}` : ''}${x.size ? `<br>${fmt.size(x.size)}` : ''}</td>
-      <td class="hide-sm small muted">${esc(x.info || '')}</td>
-      <td style="text-align:right"><button class="btn sm primary" data-pick="${esc(x.source)}:${i}">${icon.download}Get</button></td>
-    </tr>`;
+  const row = (x, i) => `<div class="pick-row">
+      ${x.cover ? `<div class="thumb">${art(x.cover, x.title)}</div>` : ''}
+      <div class="grow">
+        <div class="pt">${esc(x.title)}</div>
+        ${x.subtitle && x.subtitle !== x.title ? `<div class="ps">${esc(x.subtitle)}</div>` : ''}
+        <div class="pm"><span class="badge ${x.lossless ? 'ok' : ''}">${esc(x.quality || '?')}</span>
+          ${x.tracks ? `<span>${x.tracks} file${x.tracks === 1 ? '' : 's'}</span>` : ''}${x.duration ? `<span>${fmt.dur(x.duration)}</span>` : ''}${x.size ? `<span>${fmt.size(x.size)}</span>` : ''}
+          ${x.info ? `<span>${esc(x.info)}</span>` : ''}</div>
+        ${x.warning ? `<div class="small" style="color:var(--warn)">${esc(x.warning)}</div>` : ''}
+      </div>
+      <button class="btn sm primary" data-pick="${esc(x.source)}:${i}">${icon.download}Get</button>
+    </div>`;
 
   const section = (src) => {
     let list = state.results[src] || [];
@@ -62,8 +66,7 @@ export async function pickerModal(opts) {
     if (state.loading.has(src)) return head + `<div class="muted small"><span class="spinner"></span> Searching ${esc(NAMES[src])}…${src === 'slskd' ? ' (Soulseek takes a few seconds)' : ''}</div>`;
     if (!list.length) return head + '<div class="muted small">No results.</div>';
     const shown = state.tab === 'all' ? list.slice(0, 8) : list.slice(0, 150);
-    return head + `<div class="table-wrap"><table class="table"><thead><tr><th>Result</th><th>Quality</th><th class="hide-sm">Files</th><th class="hide-sm">Details</th><th></th></tr></thead>
-      <tbody>${shown.map(x => row(x, state.results[src].indexOf(x))).join('')}</tbody></table></div>
+    return head + `<div>${shown.map(x => row(x, state.results[src].indexOf(x))).join('')}</div>
       ${state.tab === 'all' && list.length > shown.length ? `<button class="btn sm ghost mt" data-t="${src}">Show all ${list.length} from ${esc(NAMES[src])}</button>` : ''}`;
   };
 
@@ -109,7 +112,22 @@ export async function pickerModal(opts) {
     }
   });
   el.querySelector('#pk-lossless').onchange = (e) => { state.lossless = e.target.checked; paint(); };
-  el.querySelector('#pk-form').onsubmit = (e) => { e.preventDefault(); run(new FormData(e.target).get('q')); };
+  const isUrl = (v) => /^https?:\/\/\S+$/i.test(v.trim());
+  const qIn = el.querySelector('input[name=q]');
+  const hint = () => {
+    const v = qIn.value.trim();
+    el.querySelector('#pk-linkhint').innerHTML = isUrl(v) ? `<div class="pick-row" style="border:1px solid var(--accent);border-radius:12px;margin-top:10px;padding:10px 12px">
+        <div class="grow"><div class="pt">Download this link</div><div class="ps">${esc(v)}</div></div>
+        <button class="btn sm primary" id="pk-getlink">${icon.download}Get</button></div>` : '';
+    el.querySelector('#pk-getlink')?.addEventListener('click', (e) => download('link', { url: v }, v, e.currentTarget));
+  };
+  qIn.addEventListener('input', hint);
+  el.querySelector('#pk-form').onsubmit = (e) => {
+    e.preventDefault();
+    const v = new FormData(e.target).get('q').trim();
+    if (isUrl(v)) return download('link', { url: v }, v, e.target.querySelector('button'));
+    run(v);
+  };
   el.querySelector('#pk-link').onsubmit = (e) => {
     e.preventDefault();
     const url = new FormData(e.target).get('url').trim();

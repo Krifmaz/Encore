@@ -1,63 +1,106 @@
 import { api } from '../api.js';
-import { esc, fmt, icon, emptyState } from '../ui.js';
+import { art, emptyState, esc, fmt, icon, toast } from '../ui.js';
 import { bindRequestActions, bindTiles, libraryTile, requestRow } from './common.js';
 
 export async function render(view, ctx) {
-  const admin = ctx.user.role === 'admin';
   const hour = new Date().getHours();
   const greet = hour < 12 ? 'Good morning' : hour < 18 ? 'Good afternoon' : 'Good evening';
   view.innerHTML = `
     <section class="hero">
       <h1>${greet}, ${esc(ctx.user.username)}</h1>
-      <p class="muted" style="margin:6px 0 0">Find any artist, album or song and request it – or browse what's already here.</p>
-      <form class="search" id="home-search">${icon.search}<input class="input" name="q" placeholder="Search artists, albums, songs…" autocomplete="off"></form>
+      <p class="muted" style="margin:6px 0 0">Find any artist, album or song – or paste a link from anywhere.</p>
+      <form class="search" id="home-search">${icon.search}<input class="input" name="q" type="search" enterkeyhint="search" placeholder="Search artists, albums, songs…" autocomplete="off"></form>
+      <form class="search" id="home-link" style="margin-top:10px">${icon.link}<input class="input" name="url" type="url" enterkeyhint="go" placeholder="…or paste a song, album or playlist link to download" autocomplete="off"></form>
     </section>
     <div class="stats mt" id="stats"></div>
-    ${admin ? '<div class="section-head"><h2>Services</h2><a class="btn sm" href="#/settings">Configure</a></div><div class="row wrap" id="services"><span class="spinner"></span></div>' : ''}
-    <div class="section-head"><h2>Your active requests</h2><a class="btn sm" href="#/requests">All requests</a></div>
-    <div class="card flat" id="reqs"><div class="empty"><span class="spinner"></span></div></div>
-    <div class="section-head"><h2>Recently added</h2><a class="btn sm" href="#/library?sort=added">Library</a></div>
+    <div id="new-releases"></div>
+    <div id="fy-preview"></div>
+    <div id="reqs-wrap" class="hidden"><div class="section-head"><h2>Your downloads in progress</h2><a class="btn sm" href="#/requests">All requests</a></div>
+      <div class="card flat" id="reqs"></div></div>
+    <div class="section-head"><h2>Recently added</h2><a class="btn sm" href="#/library?tab=albums&sort=added&dir=desc">Library</a></div>
     <div id="recent"></div>`;
   view.querySelector('#home-search').onsubmit = (e) => {
     e.preventDefault();
     const q = new FormData(e.target).get('q').trim();
     if (q) ctx.navigate(`/search?q=${encodeURIComponent(q)}`);
   };
-  bindTiles(view.querySelector('#recent'), ctx.navigate);
+  view.querySelector('#home-link').onsubmit = async (e) => {
+    e.preventDefault();
+    const input = e.target.querySelector('input');
+    const url = input.value.trim();
+    if (!url) return;
+    input.disabled = true;
+    try {
+      const r = await api.post('/requests/link', { url });
+      toast(r.mode === 'matched' ? `${r.requested} song(s) requested${r.name ? ' from ' + r.name : ''}${r.already_requested ? `, ${r.already_requested} already requested` : ''}` : 'Download started', 'ok');
+      input.value = '';
+      window.dispatchEvent(new CustomEvent('encore:requests-changed'));
+      loadReqs();
+    } catch (err) { toast(err.message, 'err'); }
+    input.disabled = false;
+  };
+  bindTiles(view, ctx.navigate);
 
   const loadReqs = async () => {
-    const rows = (await api.get('/requests?status=active&mine=true&limit=8'));
-    view.querySelector('#reqs').innerHTML = rows.length ? `<div class="list">${rows.map(r => requestRow(r)).join('')}</div>`
-      : emptyState(icon.inbox, 'No active requests', 'Search for something you want to hear.');
+    const rows = await api.get('/requests?status=active&mine=true&limit=8');
+    view.querySelector('#reqs-wrap').classList.toggle('hidden', !rows.length);
+    view.querySelector('#reqs').innerHTML = rows.length ? `<div class="list">${rows.map(r => requestRow(r)).join('')}</div>` : '';
   };
   bindRequestActions(view.querySelector('#reqs'), loadReqs);
 
-  const [stats, recent] = await Promise.all([api.get('/library/stats'), api.get('/library/recent?limit=12'), loadReqs()]);
-  view.querySelector('#stats').innerHTML = `
-    <div class="stat"><b>${fmt.num(stats.artists)}</b><span>Artists</span></div>
-    <div class="stat"><b>${fmt.num(stats.albums)}</b><span>Albums</span></div>
-    <div class="stat"><b>${fmt.num(stats.tracks)}</b><span>Tracks</span></div>
-    <div class="stat"><b>${fmt.size(stats.size)}</b><span>${fmt.longDur(stats.duration)} of music</span></div>`;
+  // fun stats
+  api.get('/stats/me').then(s => {
+    view.querySelector('#stats').innerHTML = `
+      <div class="stat"><b>${fmt.num(s.library.tracks)}</b><span>songs in the library</span></div>
+      <div class="stat"><b>${fmt.longDur(s.library.duration)}</b><span>to listen to${s.library.duration > 86400 ? ` · ${(s.library.duration / 86400).toFixed(1)} days non-stop` : ''}</span></div>
+      <div class="stat"><b>${fmt.num(s.me.plays)}</b><span>songs you played${s.me.listened ? ` · ${fmt.longDur(s.me.listened)}` : ''}</span></div>
+      <div class="stat"><b>${fmt.num(s.me.requests)}</b><span>things you requested${s.me.rank ? ` · #${s.me.rank} on the <a href="#/leaderboard">leaderboard</a>` : ''}</span></div>
+      ${s.me.top_artist ? `<div class="stat"><b class="ellipsis" style="display:block">${esc(s.me.top_artist)}</b><span>your most played artist</span></div>` : ''}
+      ${s.fun ? `<div class="stat"><b>${esc(s.fun.value)}</b><span>${esc(s.fun.label)}</span></div>` : ''}`;
+  }).catch(() => {});
+
+  // new releases from followed + library artists (with 30-second previews)
+  api.get('/discover/new-releases?limit=12').then(d => {
+    if (!d.releases.length || !view.isConnected) return;
+    view.querySelector('#new-releases').innerHTML = `<div class="section-head"><h2>New releases</h2><span class="small muted">from artists you follow or have</span></div>
+      <div class="grid">${d.releases.map(r => `<div class="tile" data-href="${r.mbid ? `/album/${esc(r.mbid)}` : `/artist-name/${encodeURIComponent(r.artist)}`}">
+        <div class="art">${art(r.cover, r.title)}
+          <div class="corner">${r.in_library ? '<span class="badge ok">In library</span>' : r.followed ? '<span class="badge accent">Following</span>' : ''}</div>
+          <div class="overlay">${r.preview_album ? `<button class="fab" data-preview-album="${esc(r.preview_album)}" title="Preview">${icon.play}</button>` : ''}</div></div>
+        <div class="t ellipsis" title="${esc(r.title)}">${esc(r.title)}</div>
+        <div class="s ellipsis">${esc(r.artist)} · ${esc(r.date)}${r.type && r.type !== 'Album' ? ' · ' + esc(r.type) : ''}</div></div>`).join('')}</div>`;
+    view.querySelector('#new-releases').addEventListener('click', async (e) => {
+      const p = e.target.closest('[data-preview-album]');
+      if (!p) return;
+      e.stopPropagation();
+      (await import('./preview.js')).previewAlbum(p.dataset.previewAlbum);
+    });
+  }).catch(() => {});
+
+  // a taste of For you
+  api.get('/discover/for-you').then(d => {
+    const pl = d.playlists?.[0];
+    if (!pl || !view.isConnected) return;
+    const tr = pl.tracks.slice(0, 6);
+    view.querySelector('#fy-preview').innerHTML = `<div class="section-head"><h2>For you</h2><a class="btn sm" href="#/for-you">See all</a></div>
+      <div class="card flat"><div class="list">${tr.map((t, i) => `<div class="list-item">
+        <button class="thumb play-thumb" data-fy="${i}" aria-label="${t.library ? 'Play' : 'Preview'}">${art(t.cover, t.title)}<i>${icon.play}</i></button>
+        <div class="grow" style="min-width:0"><div class="ellipsis" style="font-weight:600">${esc(t.title)}</div><div class="small muted ellipsis">${esc(t.artist)}</div></div>
+        ${t.library ? '<span class="badge ok">In library</span>' : '<span class="badge">preview</span>'}</div>`).join('')}</div></div>`;
+    view.querySelector('#fy-preview').addEventListener('click', async (e) => {
+      const b = e.target.closest('[data-fy]');
+      if (!b) return;
+      const t = tr[+b.dataset.fy];
+      const player = await import('../player.js');
+      if (t.library) player.playQueue([t.library], 0, { context: 'single' });
+      else (await import('./preview.js')).previewTrack(t);
+    });
+  }).catch(() => {});
+
+  const [recent] = await Promise.all([api.get('/library/recent?limit=12'), loadReqs()]);
   view.querySelector('#recent').innerHTML = recent.length
     ? `<div class="grid">${recent.map(libraryTile).join('')}</div>`
-    : emptyState(icon.library, 'Your library is empty', admin ? 'Point the library path at your music folder in Settings, or make some requests.' : 'Request some music to get started.');
-
+    : emptyState(icon.library, 'Your library is empty', 'Search above or paste a link to get started.');
   const timer = setInterval(loadReqs, 5000);
   ctx.onLeave(() => clearInterval(timer));
-
-  if (admin) {
-    try {
-      const st = await api.get('/system/status');
-      const label = { musicbrainz: 'MusicBrainz', lidarr: 'Lidarr', slskd: 'slskd', ytdlp: 'yt-dlp', spotify: 'Spotify', ffmpeg: 'ffmpeg' };
-      view.querySelector('#services').innerHTML = Object.entries(label).map(([k, name]) => {
-        const s = st.services[k] || {};
-        const off = s.enabled === false;
-        return `<div class="card row" style="padding:10px 14px" title="${esc(s.error || '')}">
-          <span class="dot ${off ? '' : s.ok ? 'ok' : 'err'}"></span><b>${name}</b>
-          <span class="small faint">${off ? 'not configured' : s.ok ? esc(s.version || 'connected') : 'unreachable'}</span></div>`;
-      }).join('') + (st.disk ? `<div class="card row" style="padding:10px 14px"><b>Disk</b><span class="small faint">${fmt.size(st.disk.free)} free of ${fmt.size(st.disk.total)}</span></div>` : '');
-    } catch (e) {
-      view.querySelector('#services').innerHTML = `<span class="muted">${esc(e.message)}</span>`;
-    }
-  }
 }
