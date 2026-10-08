@@ -32,6 +32,8 @@ class FakeYTM:
 
     def search(self, q, filter=None, scope=None, limit=20, *a):
         ql = q.lower()
+        if filter == "artists":
+            return [{"artist": "Fake Band", "browseId": "UCfake"}] if "fake band" in ql else []
         if filter == "albums":
             return [{"browseId": "MPREb_fake", "title": "Fake Album", "artists": [{"name": "Fake Band"}]}] if "fake album" in ql else []
         out = [self._song(t, s) for t, _, s, _ in ALBUM_TRACKS + [fakenet.SINGLE] if t.lower() in ql]
@@ -39,7 +41,15 @@ class FakeYTM:
             out.insert(0, self._song("Alpha (Fan Remix)", 5, "vid-fanremix"))  # must never be picked for "Alpha"
         return out
 
+    def get_artist(self, channel):
+        return {"albums": {"results": [{"title": "Fake Album", "year": "2020", "browseId": "MPREb_fake"},
+                                       {"title": "YT Mixtape", "year": "2022", "browseId": "MPREb_mix", "type": "Album"}]},
+                "singles": {"results": [{"title": "Delta", "year": "2021", "browseId": "MPREb_delta"}]}}
+
     def get_album(self, bid):
+        if bid == "MPREb_mix":
+            return {"title": "YT Mixtape", "audioPlaylistId": "OLAK5uy_mix", "thumbnails": [],
+                    "tracks": [{**self._song("Mix One", 15, "vid-mix1"), "trackNumber": 1}]}
         return {"title": "Fake Album", "audioPlaylistId": "OLAK5uy_fake", "thumbnails": [],
                 "tracks": [self._song(t, s) for t, _, s, _ in ALBUM_TRACKS]}
 
@@ -143,10 +153,15 @@ else:
     secs = {t.lower(): s for t, _, s, _ in ALBUM_TRACKS + [fakenet.SINGLE]}
 
     async def download(url, outdir, progress=None, playlist=False):
+        if "bandcamp.com" in url:
+            return {"files": [make_audio(f"{outdir}/Fake Band - Basement Demos - 0{i} {t}.mp3", t, album="Basement Demos", track=i, seconds=15 + i)
+                              for i, t in enumerate(["Demo One", "Demo Two"], 1)], "entries": []}
         if "music.youtube.com" not in url:
             return await real_download(url, outdir, progress, playlist)
         files = []
-        if "OLAK5uy_fake" in url:
+        if "OLAK5uy_mix" in url:
+            files.append(make_audio(f"{outdir}/1 - Fake Band - Mix One.opus", "Mix One", album="", track=1, seconds=15))
+        elif "OLAK5uy_fake" in url:
             for i, (t, _, s, _) in enumerate(ALBUM_TRACKS, 1):
                 files.append(make_audio(f"{outdir}/{i} - Fake Band - {t}.opus", t, album="Fake Album", track=i, seconds=s))
         else:
@@ -923,10 +938,19 @@ def test_catalog_merge_fills_musicbrainz_gaps(world):
     c = world.client
     rel = c.get("/api/discover/artist/a-fake/catalog").json()["releases"]
     got = {r["title"]: r for r in rel}
-    # Deluxe edition (title), "Delta" single (title), Renamed In Store (UPC = MB barcode), Hits Vol 1 (ISRC → MB compilation) are matched
-    assert set(got) == {"Lost Tapes", "Apple Exclusive"}, list(got)
+    # Deluxe edition (title), "Delta" single (title), Renamed In Store (UPC = MB barcode), Hits Vol 1 (ISRC → MB compilation) are matched;
+    # Fake Album on YouTube Music / Bandcamp / Discogs too; a compilation the artist only appears on is ignored
+    assert set(got) == {"Lost Tapes", "Apple Exclusive", "YT Mixtape", "Basement Demos", "Live At The Fake Club"}, list(got)
     lost = got["Lost Tapes"]
-    assert [s["name"] for s in lost["sources"]] == ["Deezer", "Apple Music"] and lost["type"] == "EP" and lost["upc"] == "0000111222"
+    assert [s["name"] for s in lost["sources"]] == ["Deezer", "Apple Music", "Discogs"] and lost["type"] == "EP" and lost["upc"] == "0000111222"
+    assert lost["ext"] == {"deezer": 900, "apple": 602, "discogs": "r3", "upc": "0000111222"}
+    assert got["YT Mixtape"]["ext"] == {"ytm": "MPREb_mix"} and got["Basement Demos"]["ext"] == {"bandcamp": "https://fake.bandcamp.com/album/basement-demos"}
+    assert got["Basement Demos"]["date"] == "2022-06-12" and got["Basement Demos"]["tracks"] == 2 and got["Basement Demos"]["cover"].endswith("basement-demos_10.jpg")
+    live = got["Live At The Fake Club"]
+    assert live["ext"] == {"discogs": "r2"} and live["date"] == "1999" and live["sources"][0]["url"] == "https://www.discogs.com/release/2"
+    from app.services import catalog
+    assert [(t["title"], t["length"]) for t in world.run(catalog.tracklist, {"discogs": "r2"})] == [("Alpha (Live)", 245), ("Beta (Live)", 3723)]
+    assert [(t["title"], t["length"]) for t in world.run(catalog.tracklist, {"bandcamp": "https://fake.bandcamp.com/album/basement-demos"})] == [("Demo One", 10), ("Demo Two", 11)]
     assert lost["harmony"].startswith("https://harmony.pulsewidth.org.uk/release?url=https%3A%2F%2Fwww.deezer.com%2Falbum%2F900") and "gtin=0000111222" in lost["harmony"]
     assert got["Apple Exclusive"]["type"] == "Single" and got["Apple Exclusive"]["sources"][0]["name"] == "Apple Music"
 
@@ -948,6 +972,16 @@ def test_catalog_merge_fills_musicbrainz_gaps(world):
     assert world.run(worker.retag_external) == 0, "still not in MusicBrainz → left as is"
     assert any(r["title"] == "Lost Tapes" and r["in_library"] for r in c.get("/api/discover/artist/a-fake/catalog").json()["releases"])
     assert c.post("/api/requests", json={"kind": "album", "artist": "x", "title": "y"}, headers=H).status_code == 400
+
+    # YouTube Music- and Bandcamp-only releases download from exactly that release
+    config.set_many({"ytdlp_enabled": True, "streamrip_enabled": False})
+    r = world.drive(world.req(kind="album", artist="Fake Band", title="YT Mixtape", album="YT Mixtape", year="2022", ext=got["YT Mixtape"]["ext"]))
+    assert r["status"] == "completed" and "YouTube Music" in r["message"], r
+    r = world.drive(world.req(kind="album", artist="Fake Band", title="Basement Demos", album="Basement Demos", year="2022", ext=got["Basement Demos"]["ext"]))
+    assert r["status"] == "completed" and "Bandcamp" in r["message"], r
+    albums = {t["title"]: t["album"] for t in db.query("SELECT title, album FROM tracks")}
+    assert {k: albums.get(k) for k in ("Mix One", "Demo One", "Demo Two")} == {"Mix One": "YT Mixtape", "Demo One": "Basement Demos", "Demo Two": "Basement Demos"}
+    assert db.one("SELECT source FROM tracks WHERE title='Demo One'")["source"] == "Bandcamp"
 
     config.set_many({"discover_catalog_merge": False})
     assert c.get("/api/discover/artist/a-fake/catalog").json() == {"enabled": False, "releases": []}

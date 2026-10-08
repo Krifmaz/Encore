@@ -144,7 +144,8 @@ def mb_artist_search(query: str = ""):
 def mb_artist(aid: str):
     return {"id": aid, "name": ARTIST["name"], "type": "Group", "country": "GB", "life-span": {"begin": "2010"},
             "tags": [{"name": "electronic", "count": 2}], "relations": [{"type": "bandcamp", "url": {"resource": "https://fake.bandcamp.com"}},
-                                                     {"type": "wikidata", "url": {"resource": "https://www.wikidata.org/wiki/Q42"}}]}
+                                                     {"type": "wikidata", "url": {"resource": "https://www.wikidata.org/wiki/Q42"}},
+                                                     {"type": "discogs", "url": {"resource": "https://www.discogs.com/artist/999-Fake-Band"}}]}
 
 
 @app.get("/mb.test/ws/2/release-group")
@@ -535,6 +536,48 @@ def dz_user_tracks(uid: str):
 @app.get(DZ + "/user/{uid}/playlists")
 def dz_user_pls(uid: str):
     return {"data": [{"id": 55, "title": "Deezer Mix", "link": "https://www.deezer.com/playlist/55"}]}
+
+
+# ================================================================= Discogs ============
+@app.get("/api.discogs.com/artists/{aid}/releases")
+def discogs_releases(aid: int, page: int = 1, per_page: int = 100, sort: str = ""):
+    return {"pagination": {"pages": 1}, "releases": [
+        {"id": 1, "type": "master", "role": "Main", "title": "Fake Album", "year": 2020, "thumb": ""},
+        {"id": 2, "type": "release", "role": "Main", "title": "Live At The Fake Club", "year": 1999, "format": "Vinyl, LP", "thumb": "https://i.discogs.com/2.jpg"},
+        {"id": 3, "type": "release", "role": "Main", "title": "Lost Tapes", "year": 2023, "format": "Cass, EP"},
+        {"id": 4, "type": "release", "role": "Appearance", "title": "Someone Else's Comp", "year": 2010, "format": "CD, Comp"}]}
+
+
+@app.get("/api.discogs.com/releases/{rid}")
+def discogs_release(rid: int):
+    return {"id": rid, "title": "Live At The Fake Club", "tracklist": [
+        {"position": "A", "type_": "heading", "title": "Side A"}, {"position": "A1", "type_": "track", "title": "Alpha (Live)", "duration": "4:05"},
+        {"position": "B1", "type_": "track", "title": "Beta (Live)", "duration": "1:02:03"}]}
+
+
+# ================================================================= Bandcamp ===========
+BC = "/fake.bandcamp.com"
+
+
+@app.get(BC + "/music")
+def bc_music():
+    return HTMLResponse("""<ol id="music-grid">
+      <li data-item-id="album-1" class="music-grid-item"><a href="/album/fake-album"><div class="art"><img src="https://f4.bcbits.com/img/a1_2.jpg"></div>
+        <p class="title">Fake Album</p></a></li>
+      <li data-item-id="album-2" class="music-grid-item"><a href="/album/basement-demos"><div class="art"><img class="lazy" data-original="https://f4.bcbits.com/img/a2_2.jpg"></div>
+        <p class="title">
+            Basement Demos
+        <br><span class="artist-override">Fake Band</span></p></a></li></ol>""")
+
+
+@app.get(BC + "/album/{slug}")
+def bc_album(slug: str):
+    t = {"fake-album": ("Fake Album", "01 Jan 2020 00:00:00 GMT", ["Alpha", "Beta", "Gamma"]),
+         "basement-demos": ("Basement Demos", "12 Jun 2022 00:00:00 GMT", ["Demo One", "Demo Two"])}[slug]
+    ld = {"@type": "MusicAlbum", "name": t[0], "datePublished": t[1], "numTracks": len(t[2]), "image": f"https://f4.bcbits.com/img/{slug}_10.jpg",
+          "track": {"itemListElement": [{"position": i + 1, "item": {"@type": "MusicRecording", "name": n, "duration": f"P00H00M{10 + i:02d}S"}}
+                                        for i, n in enumerate(t[2])]}}
+    return HTMLResponse(f'<html><script type="application/ld+json">{json.dumps(ld)}</script></html>')
 
 
 # ================================================================= iTunes =============

@@ -634,8 +634,18 @@ async def start_ytdlp(r: dict, pick_url: str | None = None) -> None:
         album_title = r["album"] or r["title"]
         # whole official album from YouTube Music in one go
         upd(r, status="searching", message="Searching YouTube Music for the album…")
+        ext = r["detail"].get("ext") or {}
         if pick_url:
             yt_album = {"title": r["detail"]["pick"].get("title") or album_title, "playlist_url": pick_url}
+        elif ext.get("ytm") or ext.get("bandcamp"):
+            # release MusicBrainz lacks: download exactly the YouTube Music / Bandcamp release it was found on
+            yt_album = {"title": album_title, "playlist_url": ext.get("bandcamp")}
+            if ext.get("ytm"):
+                try:
+                    pl = (await ytmusic.run(ytmusic.anon().get_album, ext["ytm"])).get("audioPlaylistId")
+                    yt_album["playlist_url"] = f"https://music.youtube.com/playlist?list={pl}" if pl else yt_album["playlist_url"]
+                except Exception as e:  # noqa: BLE001
+                    db.log("warning", f"YouTube Music album lookup failed for {label(r)}: {e}")
         else:
             yt_album = await ytmusic.find_album(r["artist"], album_title, len(rel["tracks"]) if rel else None)
         if yt_album and yt_album["playlist_url"]:
@@ -643,11 +653,12 @@ async def start_ytdlp(r: dict, pick_url: str | None = None) -> None:
             try:
                 res = await ytdlp.download(yt_album["playlist_url"], os.path.join(out, "album"), _progress_hook(r), playlist=True)
                 if res["files"] and (pick_url or not rel or len(res["files"]) >= len(rel["tracks"]) - max(1, len(rel["tracks"]) // 5)):
+                    via = "Bandcamp" if "bandcamp.com" in yt_album["playlist_url"] else "YouTube Music"
                     upd(r, status="importing", progress=100, message="Verifying, tagging and importing…")
                     new = await tagger.import_album_files(res["files"], r["artist"], album_title, r["mbid"], out, source_meta=_source_meta(r))
                     shutil.rmtree(out, ignore_errors=True)
-                    await complete(r, "Downloaded from YouTube Music", new,
-                                   {"source": "YouTube Music", "detail": f"album {yt_album['title']}", "url": yt_album["playlist_url"]})
+                    await complete(r, f"Downloaded from {via}", new,
+                                   {"source": via, "detail": f"album {yt_album['title']}", "url": yt_album["playlist_url"]})
                     return
             except tagger.VerificationFailed as e:
                 db.log("warning", f"YouTube Music album for {label(r)} rejected: {e}")

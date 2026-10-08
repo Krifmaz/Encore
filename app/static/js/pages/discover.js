@@ -227,9 +227,9 @@ export async function renderArtist(view, ctx) {
     if (!x.releases.length) { ext.innerHTML = ''; return; }
     const rel = x.releases;
     const extBody = (m) => ({ kind: 'album', artist: a.name, title: m.title, album: m.title, year: m.year, cover_url: m.cover,
-      ext: { deezer: m.sources.find(s => s.name === 'Deezer')?.id, apple: m.sources.find(s => s.name === 'Apple Music')?.id, upc: m.upc } });
+      ext: m.ext });
     ext.innerHTML = `<div class="section-head" style="margin-top:28px"><div><h3>Not in MusicBrainz <span class="faint small">${rel.length}</span></h3>
-        <div class="small muted">Found on ${[...new Set(rel.flatMap(m => m.sources.map(s => s.name)))].join(' and ')}. Requests skip Lidarr and download from Soulseek/streamrip/YouTube; files are tagged from the store's data.
+        <div class="small muted">Found on ${[...new Set(rel.flatMap(m => m.sources.map(s => s.name)))].join(', ').replace(/, ([^,]*)$/, ' and $1')}. Requests skip Lidarr and download from Soulseek, streamrip, YouTube Music or Bandcamp; files are tagged from the source's data.
         Add them to MusicBrainz with Harmony and Encore re-tags them automatically.</div></div></div>
       <div class="grid">${rel.map((m, i) => `<div class="tile">
         <div class="art">${art(m.cover, m.title)}
