@@ -447,3 +447,10 @@ body.np-open { overflow: hidden; }
 .art-pick { background: none; border: 1px solid transparent; border-radius: 12px; padding: 6px; cursor: pointer; text-align: left; color: inherit; }
 .art-pick:hover { border-color: var(--accent); }
 .art-pick.busy { opacity: .5; pointer-events: none; }
+/* show/hide for passwords and keys */
+.pw-wrap { position: relative; display: block; min-width: 0; }
+.row > .pw-wrap:not(.grow) { flex: 0 1 auto; }
+.pw-wrap > input { width: 100%; padding-right: 42px; }
+.eye-btn { display: inline-grid; place-items: center; width: 34px; height: 34px; border: 0; border-radius: 8px; background: transparent; color: var(--muted); cursor: pointer; flex: none; }
+.pw-wrap > .eye-btn { position: absolute; right: 4px; top: 50%; transform: translateY(-50%); }
+.eye-btn:hover { color: var(--text); background: var(--panel-2); }

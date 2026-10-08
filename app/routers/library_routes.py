@@ -439,7 +439,24 @@ BROWSER_TYPES = {"mp3": "audio/mpeg", "flac": "audio/flac", "m4a": "audio/mp4", 
                  "ogg": "audio/ogg", "opus": "audio/ogg", "oga": "audio/ogg", "wav": "audio/wav", "webm": "audio/webm"}
 
 
+_codec_cache: dict[tuple, bool] = {}
+
+
 def _needs_transcode(path: str, fmt: str) -> bool:
+    if fmt in ("m4a", "mp4"):
+        try:
+            key = (path, os.path.getmtime(path))
+        except OSError:
+            return False
+        if key not in _codec_cache:
+            _codec_cache[key] = _needs_transcode_uncached(path, fmt)
+            if len(_codec_cache) > 20000:
+                _codec_cache.clear()
+        return _codec_cache[key]
+    return _needs_transcode_uncached(path, fmt)
+
+
+def _needs_transcode_uncached(path: str, fmt: str) -> bool:
     if fmt not in BROWSER_TYPES:
         return True                       # ape, wv, aiff, wma, alac files, …
     if fmt in ("m4a", "mp4"):
@@ -457,11 +474,12 @@ async def stream(track_id: int, transcode: bool = False, t: float = 0, user=Depe
     track = db.one("SELECT path, format FROM tracks WHERE id=?", (track_id,))
     if not track or not os.path.isfile(track["path"]):
         raise HTTPException(404, "Track not found")
-    if not transcode and not await asyncio.to_thread(_needs_transcode, track["path"], track["format"]):
+    if not transcode and (track["format"] not in ("m4a", "mp4") or not await asyncio.to_thread(_needs_transcode, track["path"], track["format"])) \
+            and track["format"] in BROWSER_TYPES:
         return FileResponse(track["path"], media_type=BROWSER_TYPES[track["format"]], headers={"Cache-Control": "private, max-age=3600"})
     proc = await asyncio.create_subprocess_exec(
-        "ffmpeg", "-v", "error", *(["-ss", f"{max(t, 0):.2f}"] if t else []), "-i", track["path"],
-        "-map", "0:a:0", "-c:a", "flac", "-f", "flac", "pipe:1",
+        "ffmpeg", "-v", "error", "-nostdin", *(["-ss", f"{max(t, 0):.2f}"] if t else []), "-i", track["path"],
+        "-map", "0:a:0", "-c:a", "flac", "-compression_level", "0", "-f", "flac", "-flush_packets", "1", "pipe:1",
         stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.DEVNULL)
 
     async def body():

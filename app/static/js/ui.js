@@ -203,3 +203,66 @@ export function popMenu(anchor, items) {
   }
   return close;
 }
+
+// ---- show / hide for anything sensitive ----------------------------------------------------------
+// Every <input type="password"> gets an eye button automatically (also ones added later), and any
+// element with data-secret shows dots until its eye is pressed. Inline SVG, no extra requests.
+const EYE = '<svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M2 12s3.6-7 10-7 10 7 10 7-3.6 7-10 7S2 12 2 12z"/><circle cx="12" cy="12" r="3"/></svg>';
+const EYE_OFF = '<svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M17.9 17.9A10.4 10.4 0 0 1 12 19c-6.4 0-10-7-10-7a18.5 18.5 0 0 1 5.1-5.9M9.9 5.2A9.6 9.6 0 0 1 12 5c6.4 0 10 7 10 7a18.6 18.6 0 0 1-2.2 3.2M14.1 14.1a3 3 0 1 1-4.2-4.2"/><path d="m2 2 20 20"/></svg>';
+
+function eyeButton(onToggle) {
+  const b = document.createElement('button');
+  b.type = 'button';
+  b.className = 'eye-btn';
+  b.setAttribute('aria-label', 'Show');
+  b.title = 'Show';
+  b.innerHTML = EYE;
+  let shown = false;
+  b.addEventListener('click', (e) => {
+    e.preventDefault();
+    e.stopPropagation();
+    shown = !shown;
+    b.innerHTML = shown ? EYE_OFF : EYE;
+    b.title = shown ? 'Hide' : 'Show';
+    b.setAttribute('aria-label', b.title);
+    onToggle(shown);
+  });
+  return b;
+}
+
+function wrapPassword(input) {
+  input.dataset.eye = '1';
+  const wrap = document.createElement('span');
+  wrap.className = 'pw-wrap' + (input.classList.contains('grow') ? ' grow' : '');
+  if (input.style.maxWidth) wrap.style.maxWidth = input.style.maxWidth;
+  input.parentNode.insertBefore(wrap, input);
+  wrap.appendChild(input);
+  wrap.appendChild(eyeButton((shown) => { input.type = shown ? 'text' : 'password'; }));
+}
+
+/** Show a secret value as dots with an eye toggle (value kept in el.dataset.value). */
+export function setSecretText(el, value) {
+  el.dataset.value = value;
+  const btn = el.nextElementSibling?.classList.contains('eye-btn') ? el.nextElementSibling : null;
+  el.textContent = el.dataset.shown === '1' ? value : '•'.repeat(Math.min(Math.max(value.length, 8), 32));
+  if (!btn) {
+    el.dataset.eye = '1';
+    el.after(eyeButton((shown) => { el.dataset.shown = shown ? '1' : ''; el.textContent = shown ? el.dataset.value : '•'.repeat(Math.min(Math.max(el.dataset.value.length, 8), 32)); }));
+  }
+}
+
+function enhanceSecrets(root) {
+  if (!root.querySelectorAll) return;
+  root.querySelectorAll('input[type=password]:not([data-eye])').forEach(wrapPassword);
+  root.querySelectorAll('[data-secret]:not([data-eye])').forEach(el => setSecretText(el, el.dataset.value ?? el.textContent));
+}
+
+if (typeof document !== 'undefined') {
+  const start = () => {
+    enhanceSecrets(document.body);
+    new MutationObserver((muts) => {
+      for (const m of muts) m.addedNodes.forEach(n => { if (n.nodeType === 1) enhanceSecrets(n.matches?.('input[type=password]') ? n.parentNode : n); });
+    }).observe(document.body, { childList: true, subtree: true });
+  };
+  if (document.body) start(); else document.addEventListener('DOMContentLoaded', start);
+}

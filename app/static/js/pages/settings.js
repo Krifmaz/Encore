@@ -1,5 +1,5 @@
 import { api } from '../api.js';
-import { copyText, esc, icon, toast } from '../ui.js';
+import { copyText, esc, icon, setSecretText, toast } from '../ui.js';
 
 const S = (key, label, type = 'text', extra = {}) => ({ key, label, type, ...extra });
 
@@ -87,7 +87,7 @@ const SECTIONS = [
     S('spotify_client_secret', 'Spotify Client secret', 'password'),
     S('tidal_client_id', 'Tidal Client ID', 'text', { help: 'developer.tidal.com – redirect URI <Public URL>/api/connections/tidal/callback' }),
     S('tidal_client_secret', 'Tidal Client secret', 'password'),
-    S('lastfm_api_key', 'Last.fm API key', 'text', { help: 'last.fm/api/account/create (free) – loved tracks, similar artists/songs, genre pages' }),
+    S('lastfm_api_key', 'Last.fm API key', 'password', { help: 'last.fm/api/account/create (free) – loved tracks, similar artists/songs, genre pages' }),
     S('discogs_token', 'Discogs personal access token', 'password', { help: 'discogs.com/settings/developers (free) – finds vinyl, bootlegs and old releases MusicBrainz is missing' }),
     S('ytmusic_client_id', 'YouTube Music OAuth Client ID', 'text', { help: 'Google Cloud → YouTube Data API v3 → OAuth client of type “TVs and Limited Input devices”. Lets users sign in to YouTube Music with a code (they can also paste browser headers instead).' }),
     S('ytmusic_client_secret', 'YouTube Music OAuth Client secret', 'password'),
@@ -281,7 +281,7 @@ export async function render(view, ctx) {
     panel.innerHTML = `<div class="card stack">
       <h2>API access</h2>
       <p class="muted" style="margin:0">Use this key in an <span class="kbd">X-Api-Key</span> header to automate requests (e.g. from scripts or Home Assistant). It acts as the first admin account. Full API docs at <a href="/api/docs" target="_blank" style="color:var(--accent)">/api/docs</a>.</p>
-      <div class="row"><div class="code grow" id="key">${esc(api_key)}</div><button class="btn" id="cp">${icon.copy}</button><button class="btn danger" id="regen">${icon.refresh}Regenerate</button></div>
+      <div class="row"><div class="code grow" id="key" data-secret data-value="${esc(api_key)}"></div><button class="btn" id="cp">${icon.copy}</button><button class="btn danger" id="regen">${icon.refresh}Regenerate</button></div>
     </div>
     <div class="card stack mt">
       <h2>Security notes</h2>
@@ -291,10 +291,10 @@ export async function render(view, ctx) {
         <li>Sessions are HTTP-only SameSite cookies, every change needs a CSRF header, and failed logins are rate-limited per IP.</li>
       </ul>
     </div>`;
-    panel.querySelector('#cp').onclick = () => copyText(panel.querySelector('#key').textContent);
+    panel.querySelector('#cp').onclick = () => copyText(panel.querySelector('#key').dataset.value);
     panel.querySelector('#regen').onclick = async () => {
       const r = await api.post('/admin/settings/api-key');
-      panel.querySelector('#key').textContent = r.api_key;
+      setSecretText(panel.querySelector('#key'), r.api_key);
       toast('New API key generated', 'ok');
     };
   };

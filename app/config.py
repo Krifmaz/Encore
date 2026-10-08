@@ -110,7 +110,7 @@ DEFAULTS: dict[str, tuple[str | None, object, bool]] = {
     "spotify_client_secret": ("SPOTIFY_CLIENT_SECRET", "", True),
     "tidal_client_id": ("TIDAL_CLIENT_ID", "", False),
     "tidal_client_secret": ("TIDAL_CLIENT_SECRET", "", True),
-    "lastfm_api_key": ("LASTFM_API_KEY", "", False),
+    "lastfm_api_key": ("LASTFM_API_KEY", "", True),
     "discogs_token": ("DISCOGS_TOKEN", "", True),
     "ytmusic_client_id": ("YTMUSIC_CLIENT_ID", "", False),
     "ytmusic_client_secret": ("YTMUSIC_CLIENT_SECRET", "", True),

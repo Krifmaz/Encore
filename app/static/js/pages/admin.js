@@ -53,7 +53,7 @@ export async function renderUsers(view, ctx) {
     if (b.dataset.a === 'pw') {
       const m = modal({
         title: `Reset password for ${esc(name)}`,
-        body: '<label class="field"><span>New password</span><input class="input" type="text" id="np" minlength="8" autocomplete="off"></label><p class="small muted">All of their sessions will be signed out.</p>',
+        body: '<label class="field"><span>New password</span><input class="input" type="password" id="np" minlength="8" autocomplete="new-password"></label><p class="small muted">All of their sessions will be signed out.</p>',
         footer: '<button class="btn" data-close>Cancel</button><button class="btn primary" id="ok">Set password</button>',
       });
       m.el.querySelector('#ok').onclick = async () => { await patch(id, { password: m.el.querySelector('#np').value }); m.close(); };
@@ -65,7 +65,7 @@ export async function renderUsers(view, ctx) {
       body: `<form class="stack" id="nu">
         <label class="field"><span>Username</span><input class="input" name="username" required minlength="3"></label>
         <label class="field"><span>Email (optional)</span><input class="input" name="email" type="email"></label>
-        <label class="field"><span>Password</span><input class="input" name="password" required minlength="8"></label>
+        <label class="field"><span>Password</span><input class="input" type="password" name="password" required minlength="8" autocomplete="new-password"></label>
         <label class="field"><span>Role</span><select class="input" name="role"><option value="user">User</option><option value="admin">Admin</option></select></label>
       </form>`,
       footer: '<button class="btn" data-close>Cancel</button><button class="btn primary" id="ok">Create</button>',

@@ -8,6 +8,7 @@ import { art, esc, fmt, icon } from './ui.js';
 const state = { queue: [], index: -1, transcoded: false, offset: 0, dragging: false, context: 'list', repeat: 'off', full: false, pane: 'now', logged: false };
 const listeners = new Set();
 let audio = null;
+let spare = null;   // second <audio> that pre-buffers the next song, so skipping is instant
 let lyr = { id: null, lines: [], plain: '', loading: false };
 
 export function onChange(fn) { listeners.add(fn); return () => listeners.delete(fn); }
@@ -39,13 +40,13 @@ export function playQueue(tracks, start = 0, { context = 'list' } = {}) {
 
 export function enqueue(tracks) {
   state.queue.push(...tracks);
-  if (state.index < 0) { state.index = 0; load(); } else { render(); emit(); }
+  if (state.index < 0) { state.index = 0; load(); } else { render(); emit(); preloadNext(); }
 }
 
 export function playNext(tracks) {
   if (state.index < 0) return playQueue(tracks);
   state.queue.splice(state.index + 1, 0, ...tracks);
-  render(); emit();
+  render(); emit(); preloadNext();
 }
 
 /** 30-second preview of a song that isn't in the library (Deezer/iTunes preview URL). */
@@ -56,15 +57,33 @@ export function preview(t) {
 // formats browsers can't decode → the server converts to FLAC; the player then seeks via the server
 const CONVERT = new Set(['ape', 'wv', 'aiff', 'aif', 'wma', 'alac', 'dsf', 'dff', 'tta', 'mpc']);
 
+const streamUrl = (t, transcode = false, offset = 0) => t.preview ? t.preview_url
+  : `/api/library/tracks/${t.id}/stream${transcode ? `?transcode=1${offset ? `&t=${offset.toFixed(1)}` : ''}` : ''}`;
+const convert = (t) => !t.preview && CONVERT.has((t.format || '').toLowerCase());
+
 function load(transcode = false, offset = 0) {
   const t = current();
   if (!t) return;
-  if (CONVERT.has((t.format || '').toLowerCase())) transcode = true;
+  if (convert(t)) transcode = true;
   state.transcoded = !t.preview && transcode;
   state.offset = offset;   // converted streams restart at the seek point, so their clock starts at `offset`
   state.dragging = false;
   if (!offset) state.logged = false;
-  audio.src = t.preview ? t.preview_url : `/api/library/tracks/${t.id}/stream${state.transcoded ? `?transcode=1${offset ? `&t=${offset.toFixed(1)}` : ''}` : ''}`;
+  const url = streamUrl(t, state.transcoded, offset);
+  if (!offset && spare && spare.dataset.url === url) {
+    // already buffered in the background: swap players and start right away
+    const old = audio;
+    audio = spare;
+    spare = old;
+    old.pause();
+    old.removeAttribute('src');
+    delete old.dataset.url;
+    audio.volume = old.volume;
+    audio.currentTime = 0;
+  } else {
+    audio.src = url;
+  }
+  audio.dataset.url = url;
   audio.play().catch(() => {});
   if ('mediaSession' in navigator) {
     navigator.mediaSession.metadata = new MediaMetadata({
@@ -76,6 +95,41 @@ function load(transcode = false, offset = 0) {
   render();
   emit();
   if (state.full) loadLyrics();
+  topUp();
+  setTimeout(preloadNext, 1500);      // let the current song get going first
+}
+
+/** Start buffering the song that plays next. */
+function preloadNext() {
+  if (!spare) return;
+  const n = state.queue[state.index + 1];
+  if (!n) return;
+  const url = streamUrl(n, convert(n));
+  if (spare.dataset.url === url) return;
+  spare.dataset.url = url;
+  spare.src = url;
+  spare.load();
+}
+
+/** Near the end of the queue: fetch the library shuffle ahead of time, so the next song is ready too. */
+let topping = false;
+async function topUp() {
+  if (topping || state.context === 'preview' || state.index < state.queue.length - 2) return;
+  let enabled = true;
+  try { enabled = localStorage.getItem('encore.autoplay') !== 'off'; } catch { /* ignore */ }
+  if (!enabled) return;
+  topping = true;
+  try {
+    const recent = state.queue.slice(-150).map(t => t.id).filter(id => typeof id === 'number');
+    let more = await api.get(`/library/shuffle?limit=50&exclude=${recent.join(',')}`);
+    if (!more.length) more = await api.get('/library/shuffle?limit=50');   // small library: allow repeats
+    if (more.length) {
+      state.queue.push(...more);
+      render(); emit();
+      preloadNext();
+    }
+  } catch { /* offline: next() tries again */ }
+  topping = false;
 }
 
 function duration() {
@@ -112,7 +166,8 @@ async function continueWithLibrary() {
   if (!enabled) return false;
   try {
     const recent = state.queue.slice(-150).map(t => t.id).filter(id => typeof id === 'number');
-    const more = await api.get(`/library/shuffle?limit=50&exclude=${recent.join(',')}`);
+    let more = await api.get(`/library/shuffle?limit=50&exclude=${recent.join(',')}`);
+    if (!more.length) more = await api.get('/library/shuffle?limit=50');
     if (!more.length) return false;
     state.queue.push(...more);
     state.context = 'library';
@@ -130,18 +185,18 @@ function removeAt(i) {
   if (i === state.index) return;
   state.queue.splice(i, 1);
   if (i < state.index) state.index--;
-  render(); emit();
+  render(); emit(); preloadNext();
 }
 function moveTo(from, to) {
   if (from === state.index || to <= state.index || to >= state.queue.length) return;
   const [t] = state.queue.splice(from, 1);
   state.queue.splice(to, 0, t);
-  render(); emit();
+  render(); emit(); preloadNext();
 }
 function shuffleUpNext() {
   const rest = state.queue.slice(state.index + 1).sort(() => Math.random() - 0.5);
   state.queue.splice(state.index + 1, rest.length, ...rest);
-  render(); emit();
+  render(); emit(); preloadNext();
 }
 
 function logPlay() {
@@ -156,8 +211,11 @@ function logPlay() {
 
 export function mount() {
   if (document.getElementById('player')) return;
-  audio = document.getElementById('audio') || Object.assign(document.createElement('audio'), { id: 'audio', preload: 'none' });
+  audio = document.getElementById('audio') || Object.assign(document.createElement('audio'), { id: 'audio' });
   if (!audio.isConnected) document.body.appendChild(audio);
+  spare = Object.assign(document.createElement('audio'), { id: 'audio-next', preload: 'auto' });
+  document.body.appendChild(spare);
+  audio.preload = 'auto';
   const el = document.createElement('div');
   el.className = 'player';
   el.id = 'player';
@@ -166,14 +224,19 @@ export function mount() {
   full.className = 'np-full hidden';
   full.id = 'np-full';
   document.body.appendChild(full);
-  try { audio.volume = parseFloat(localStorage.getItem('encore.volume') ?? '0.9'); } catch { /* ignore */ }
-  audio.addEventListener('ended', () => { logPlay(); next(true); });
-  audio.addEventListener('play', () => { render(); native(); });
-  audio.addEventListener('pause', () => { render(); native(); });
-  audio.addEventListener('timeupdate', () => { updateTime(); logPlay(); syncLyrics(); });
-  audio.addEventListener('loadedmetadata', updateTime);
+  let vol = 0.9;
+  try { vol = parseFloat(localStorage.getItem('encore.volume') ?? '0.9'); } catch { /* ignore */ }
+  audio.volume = spare.volume = vol;
+  // both elements get the listeners; only the one currently playing counts
+  const on = (type, fn) => [audio, spare].forEach(a => a.addEventListener(type, (e) => { if (e.target === audio) fn(e); }));
+  on('ended', () => { logPlay(); next(true); });
+  on('play', () => { render(); native(); });
+  on('pause', () => { render(); native(); });
+  on('timeupdate', () => { updateTime(); logPlay(); syncLyrics(); });
+  on('loadedmetadata', updateTime);
   // the browser couldn't decode the original (e.g. ALAC in .m4a) → ask the server for FLAC
-  audio.addEventListener('error', () => { if (current() && !state.transcoded && !current().preview) load(true, position()); });
+  on('error', () => { if (current() && !state.transcoded && !current().preview && audio.getAttribute('src')) load(true, position()); });
+  spare.addEventListener('error', () => { delete spare.dataset.url; });
   if ('mediaSession' in navigator) {
     navigator.mediaSession.setActionHandler('play', () => audio.play());
     navigator.mediaSession.setActionHandler('pause', () => audio.pause());
@@ -284,11 +347,11 @@ function render() {
   el.querySelector('#p-queue').onclick = () => { state.pane = 'queue'; setFull(true); };
   bindSeek(el.querySelector('#seek'), 't-cur');
   el.querySelector('#vol').oninput = (e) => {
-    audio.volume = e.target.value;
+    audio.volume = spare.volume = e.target.value;
     try { localStorage.setItem('encore.volume', audio.volume); } catch { /* ignore */ }
   };
   el.querySelector('#p-close').onclick = () => {
-    audio.pause(); audio.removeAttribute('src'); state.queue = []; state.index = -1;
+    audio.pause(); audio.removeAttribute('src'); spare.removeAttribute('src'); delete spare.dataset.url; state.queue = []; state.index = -1;
     render(); emit();
   };
   updateTime();
@@ -350,7 +413,7 @@ function renderFull() {
   f.querySelector('#f-shuffle').onclick = shuffleUpNext;
   f.querySelector('#f-repeat').onclick = () => { state.repeat = { off: 'all', all: 'one', one: 'off' }[state.repeat]; renderFull(); };
   f.querySelector('#f-auto').onchange = (e) => { try { localStorage.setItem('encore.autoplay', e.target.checked ? 'on' : 'off'); } catch { /* ignore */ } renderFull(); };
-  f.querySelector('#fvol').oninput = (e) => { audio.volume = e.target.value; const v = document.getElementById('vol'); if (v) v.value = audio.volume; };
+  f.querySelector('#fvol').oninput = (e) => { audio.volume = spare.volume = e.target.value; const v = document.getElementById('vol'); if (v) v.value = audio.volume; };
   bindSeek(f.querySelector('#fseek'), 'f-cur');
   f.querySelector('.np-list').onclick = (e) => {
     const rm = e.target.closest('[data-rm]');
