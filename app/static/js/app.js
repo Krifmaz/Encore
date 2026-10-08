@@ -16,12 +16,15 @@ import * as connectionsPage from './pages/connections.js';
 import * as autoPage from './pages/autodownload.js';
 import * as diagPage from './pages/diagnostics.js';
 import * as followingPage from './pages/following.js';
+import * as forYouPage from './pages/foryou.js';
 
 export const session = { user: null, info: null };
 
 const routes = [
   [/^\/$/, home.render],
   [/^\/search$/, discover.renderSearch],
+  [/^\/for-you$/, forYouPage.render],
+  [/^\/tag\/(.+)$/, forYouPage.renderTag],
   [/^\/artist\/([\w-]+)$/, discover.renderArtist],
   [/^\/artist-name\/(.+)$/, discover.renderArtistByName],
   [/^\/album\/([\w-]+)$/, discover.renderAlbum],
@@ -76,6 +79,7 @@ function renderShell() {
         <nav class="nav">
           ${navLink('/', icon.home, 'Home')}
           ${navLink('/search', icon.search, 'Discover')}
+          ${navLink('/for-you', icon.spark, 'For you')}
           ${navLink('/library', icon.library, 'Library')}
           ${navLink('/requests', icon.inbox, 'Requests', '<span class="badge warn hidden" id="pending-badge"></span>')}
           ${navLink('/playlists', icon.list, 'Playlists')}

@@ -565,7 +565,7 @@ async def import_single(path: str, artist: str, title: str, recording_id: str | 
 
 
 async def import_album_files(paths: list[str], artist: str, album: str, rgid: str | None, source_root: str,
-                             reject: bool = True) -> list[str]:
+                             reject: bool = True, source_meta: dict | None = None) -> list[str]:
     """Tag + move a downloaded album. Falls back to existing tags when MB match is weak."""
     pv = None
     if config.get("autotag_on_import"):
@@ -598,12 +598,36 @@ async def import_album_files(paths: list[str], artist: str, album: str, rgid: st
     art = await find_art(artist, album)
     cover = art[0] if art else None
 
+    src_tracks = list((source_meta or {}).get("tracks") or [])
+
+    def _source_track(t: dict, i: int) -> dict | None:
+        """The Deezer/Apple track a file is: closest title, else same disc+number, else same position."""
+        best = max(src_tracks, key=lambda x: sim(x["title"], t["title"]), default=None)
+        if best and sim(best["title"], t["title"]) >= 0.8:
+            return best
+        same = [x for x in src_tracks if t["track"] and x.get("track") == t["track"] and (x.get("disc") or 1) == (t["disc"] or 1)]
+        if same and len({x.get("track") for x in src_tracks}) == len(src_tracks):
+            return same[0]
+        return src_tracks[i] if len(src_tracks) == len(paths) else None
+
     def _go():
         out = []
-        for p in paths:
+        for i, p in enumerate(sorted(paths)):
             t = library.read_tags(p)
             vals = {**t, "albumartist": t["albumartist"] if t["albumartist"] != "Unknown Artist" else artist,
                     "album": t["album"] or album}
+            st = _source_track(t, i) if src_tracks else None
+            if source_meta:
+                # not in MusicBrainz: tag from the store's metadata (left untagged in MB terms → shows under "Needs tagging")
+                vals.update(album=album, albumartist=artist, year=source_meta.get("year") or t["year"])
+                if st:
+                    vals.update(title=st["title"], artist=st.get("artist") or artist, track=st.get("track"), disc=st.get("disc") or 1)
+                try:
+                    write_tags(p, {"title": vals["title"], "artist": vals["artist"], "album": album, "albumartist": artist,
+                                   "tracknumber": vals.get("track"), "discnumber": vals.get("disc"), "date": vals.get("year"),
+                                   "isrc": (st or {}).get("isrc"), "barcode": source_meta.get("upc")})
+                except Exception as e:  # noqa: BLE001
+                    db.log("warning", f"Could not tag {os.path.basename(p)}: {e}")
             if cover and config.get("embed_cover"):
                 try:
                     embed_cover(p, cover)

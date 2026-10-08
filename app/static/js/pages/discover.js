@@ -3,6 +3,7 @@ import * as player from '../player.js';
 import { art, availability, confirmDialog, debounce, emptyState, esc, fmt, icon, skeletonGrid, statusBadge, toast } from '../ui.js';
 import { albumTile, bindTiles, libraryTile, submitRequest } from './common.js';
 import { followModal } from './following.js';
+import { artistCard, moreLikeThis } from './foryou.js';
 import { pickerModal } from './picker.js';
 
 const reqBtn = (attrs, label = 'Request') => `<button class="btn sm primary" ${attrs}>${icon.plus}${label}</button>`;
@@ -52,43 +53,59 @@ export function bindRequestButtons(root) {
 }
 
 export async function renderSearch(view, ctx) {
-  const q = ctx.query.q || '';
-  const type = ctx.query.type || 'all';
+  let q = ctx.query.q || '';
+  let type = ctx.query.type || 'all';
   view.innerHTML = `
     <div class="row wrap between" style="margin-bottom:18px">
       <h1>Discover</h1>
+      <a class="btn sm" href="#/for-you">${icon.spark}For you</a>
     </div>
-    <form class="search" id="s-form" style="max-width:720px">${icon.search}<input class="input" name="q" value="${esc(q)}" placeholder="Search MusicBrainz for artists, albums, songs…" autofocus autocomplete="off"></form>
+    <form class="search" id="s-form" style="max-width:720px">${icon.search}<input class="input" name="q" type="search" enterkeyhint="search" value="${esc(q)}" placeholder="Search MusicBrainz for artists, albums, songs…" autocomplete="off"></form>
     <div class="tabs mt" id="s-tabs">
-      ${[['all', 'Top results'], ['artist', 'Artists'], ['album', 'Albums'], ['track', 'Songs']].map(([k, l]) => `<button data-t="${k}" class="${k === type ? 'active' : ''}">${l}</button>`).join('')}
+      ${[['all', 'Top results'], ['artist', 'Artists'], ['album', 'Albums'], ['track', 'Songs']].map(([k, l]) => `<button type="button" data-t="${k}">${l}</button>`).join('')}
     </div>
     <div id="results" class="mt-lg"></div>`;
   const input = view.querySelector('input[name=q]');
-  input.setSelectionRange(q.length, q.length);
-  const go = (nq, nt = type) => ctx.navigate(`/search?q=${encodeURIComponent(nq)}&type=${nt}`);
-  view.querySelector('#s-form').onsubmit = (e) => { e.preventDefault(); go(input.value.trim()); };
-  input.addEventListener('input', debounce(() => { if (input.value.trim().length > 2) go(input.value.trim()); }, 650));
-  view.querySelector('#s-tabs').onclick = (e) => { const t = e.target.closest('[data-t]'); if (t) go(input.value.trim(), t.dataset.t); };
+  if (!q || !matchMedia('(pointer: coarse)').matches) { input.focus(); input.setSelectionRange(q.length, q.length); }
   const results = view.querySelector('#results');
   bindTiles(results, ctx.navigate);
   bindRequestButtons(results);
-  if (!q) {
-    results.innerHTML = emptyState(icon.search, 'Search the entire MusicBrainz catalogue', 'Everything you find can be requested with one click.');
-    return;
-  }
-  results.innerHTML = skeletonGrid(12);
-  const data = await api.get(`/discover/search?q=${encodeURIComponent(q)}&type=${type}`);
-  let html = '';
-  if (data.artists.length) {
-    html += `<div class="section-head"><h2>Artists</h2></div><div class="grid">${data.artists.slice(0, type === 'all' ? 6 : 60).map(artistTile).join('')}</div>`;
-  }
-  if (data.albums.length) {
-    html += `<div class="section-head"><h2>Albums</h2></div><div class="grid">${data.albums.map(a => albumTile(a, { href: `/album/${a.id}`, actions: albumActions(a) })).join('')}</div>`;
-  }
-  if (data.tracks.length) {
-    html += `<div class="section-head"><h2>Songs</h2></div><div class="card flat"><div class="list">${data.tracks.map(trackRow).join('')}</div></div>`;
-  }
-  results.innerHTML = html || emptyState(icon.search, `No results for “${esc(q)}”`);
+  let seq = 0;
+  // results update in place – the page (and the search box with the phone keyboard) is never rebuilt while typing
+  const run = async () => {
+    view.querySelectorAll('#s-tabs button').forEach(b => b.classList.toggle('active', b.dataset.t === type));
+    history.replaceState(null, '', `#/search?q=${encodeURIComponent(q)}&type=${type}`);
+    const mine = ++seq;
+    if (!q) {
+      results.innerHTML = emptyState(icon.search, 'Search the entire MusicBrainz catalogue', 'Everything you find can be requested with one click.');
+      return;
+    }
+    results.innerHTML = skeletonGrid(12);
+    let data;
+    try { data = await api.get(`/discover/search?q=${encodeURIComponent(q)}&type=${type}`); } catch (e) {
+      if (mine === seq) results.innerHTML = `<div class="error-box">${esc(e.message)}</div>`;
+      return;
+    }
+    if (mine !== seq || !view.isConnected) return;   // a newer search is already running
+    let html = '';
+    if (data.artists.length) {
+      html += `<div class="section-head"><h2>Artists</h2></div><div class="grid">${data.artists.slice(0, type === 'all' ? 6 : 60).map(artistTile).join('')}</div>`;
+    }
+    if (data.albums.length) {
+      html += `<div class="section-head"><h2>Albums</h2></div><div class="grid">${data.albums.map(a => albumTile(a, { href: `/album/${a.id}`, actions: albumActions(a) })).join('')}</div>`;
+    }
+    if (data.tracks.length) {
+      html += `<div class="section-head"><h2>Songs</h2></div><div class="card flat"><div class="list">${data.tracks.map(trackRow).join('')}</div></div>`;
+    }
+    results.innerHTML = html || emptyState(icon.search, `No results for “${esc(q)}”`);
+  };
+  view.querySelector('#s-form').onsubmit = (e) => { e.preventDefault(); q = input.value.trim(); input.blur(); run(); };
+  input.addEventListener('input', debounce(() => {
+    const v = input.value.trim();
+    if (v.length > 2 && v !== q) { q = v; run(); }
+  }, 650));
+  view.querySelector('#s-tabs').onclick = (e) => { const t = e.target.closest('[data-t]'); if (t) { type = t.dataset.t; q = input.value.trim(); run(); } };
+  await run();
 }
 
 const ORDER = ['Album', 'EP', 'Single', 'Compilation', 'Live', 'Soundtrack', 'Remix', 'DJ-mix', 'Mixtape/Street', 'Demo', 'Other', 'Broadcast', 'Interview', 'Spokenword', 'Audiobook'];
@@ -120,7 +137,7 @@ export async function renderArtist(view, ctx) {
         <div class="kicker">${esc(a.type || 'Artist')}${a.country ? ' · ' + esc(a.country) : ''}${a.begin ? ' · since ' + esc(a.begin.slice(0, 4)) : ''}</div>
         <h1>${esc(a.name)}</h1>
         ${a.disambiguation ? `<p class="muted" style="margin:0 0 10px">${esc(a.disambiguation)}</p>` : ''}
-        <div class="chips">${a.tags.map(t => `<span class="badge">${esc(t)}</span>`).join('')}</div>
+        <div class="chips">${a.tags.map(t => `<a class="badge" href="#/tag/${encodeURIComponent(t)}">${esc(t)}</a>`).join('')}</div>
         <div class="row wrap mt">
           ${a.library_tracks ? `<button class="btn primary" id="play-artist">${icon.play}Play</button><button class="btn" id="shuffle-artist">Shuffle</button>` : ''}
           <button class="btn ${a.follow || a.library_tracks ? '' : 'primary'}" id="follow-btn">${a.follow ? `${icon.check}Following` : `${icon.plus}Follow`}</button>
@@ -142,6 +159,8 @@ export async function renderArtist(view, ctx) {
       <div class="tabs" id="disco-filter">${[['all', 'All'], ['missing', 'Missing'], ['owned', 'In library']].map(([k, l]) => `<button data-f="${k}">${l}</button>`).join('')}</div>
     </div>
     <div id="disco"></div>
+    <div id="ext-releases"></div>
+    <div id="similar"></div>
     ${localOnly.length ? `<div class="section-head"><h2>Only in your library <span class="faint small">${localOnly.length}</span></h2></div>
       <p class="small muted" style="margin:-6px 0 12px">Albums MusicBrainz doesn't list for this artist (or not matched yet).</p>
       <div class="grid">${localOnly.map(l => libraryTile({ id: l.album_id, album: l.album, albumartist: l.albumartist, year: l.year })).join('')}</div>` : ''}`;
@@ -193,6 +212,49 @@ export async function renderArtist(view, ctx) {
   view.querySelector('#play-artist')?.addEventListener('click', () => playAll(false));
   view.querySelector('#shuffle-artist')?.addEventListener('click', () => playAll(true));
 
+  // similar artists (Last.fm → ListenBrainz → Deezer)
+  api.get(`/discover/artist/${a.id}/similar`).then(x => {
+    if (!view.isConnected || !x.artists.length) return;
+    view.querySelector('#similar').innerHTML = `<div class="section-head"><h2>Similar artists <span class="faint small">${esc(x.source)}</span></h2></div>
+      <div class="grid">${x.artists.map(artistCard).join('')}</div>`;
+  }).catch(() => {});
+
+  // releases on Deezer / Apple Music that MusicBrainz doesn't list
+  const ext = view.querySelector('#ext-releases');
+  ext.innerHTML = '<div class="small muted mt"><span class="spinner"></span> Checking Deezer and Apple Music for releases MusicBrainz is missing…</div>';
+  api.get(`/discover/artist/${a.id}/catalog`).then(x => {
+    if (!view.isConnected) return;
+    if (!x.releases.length) { ext.innerHTML = ''; return; }
+    const rel = x.releases;
+    const extBody = (m) => ({ kind: 'album', artist: a.name, title: m.title, album: m.title, year: m.year, cover_url: m.cover,
+      ext: { deezer: m.sources.find(s => s.name === 'Deezer')?.id, apple: m.sources.find(s => s.name === 'Apple Music')?.id, upc: m.upc } });
+    ext.innerHTML = `<div class="section-head" style="margin-top:28px"><div><h3>Not in MusicBrainz <span class="faint small">${rel.length}</span></h3>
+        <div class="small muted">Found on ${[...new Set(rel.flatMap(m => m.sources.map(s => s.name)))].join(' and ')}. Requests skip Lidarr and download from Soulseek/streamrip/YouTube; files are tagged from the store's data.
+        Add them to MusicBrainz with Harmony and Encore re-tags them automatically.</div></div></div>
+      <div class="grid">${rel.map((m, i) => `<div class="tile">
+        <div class="art">${art(m.cover, m.title)}
+          <div class="corner">${m.in_library ? '<span class="badge ok">In library</span>' : m.request_status ? statusBadge(m.request_status) : '<span class="badge warn">Not in MusicBrainz</span>'}</div>
+          <div class="overlay">${m.in_library || m.request_status ? '' : `<button class="fab" data-ext-req="${i}" title="Request">${icon.plus}</button>`}</div></div>
+        <div class="t ellipsis" title="${esc(m.title)}">${esc(m.title)}</div>
+        <div class="s ellipsis">${esc([m.date || m.year, m.type, m.tracks ? m.tracks + ' tracks' : ''].filter(Boolean).join(' · '))}</div>
+        <div class="row small" style="gap:8px;flex-wrap:wrap;margin-top:4px">
+          ${m.sources.map(s => `<a class="muted" target="_blank" rel="noopener" href="${esc(s.url)}">${esc(s.name)}</a>`).join('')}
+          <a target="_blank" rel="noopener" href="${esc(m.harmony)}" title="Import into MusicBrainz with Harmony">Add to MB</a>
+          <a href="#" data-ext-pick="${i}" title="Pick the exact download">Pick</a>
+        </div></div>`).join('')}</div>`;
+    ext.onclick = async (e) => {
+      const r = e.target.closest('[data-ext-req]');
+      if (r) { e.stopPropagation(); const res = await submitRequest(extBody(rel[+r.dataset.extReq]), r); if (res) rel[+r.dataset.extReq].request_status = res.status; return; }
+      const p = e.target.closest('[data-ext-pick]');
+      if (p) {
+        e.preventDefault();
+        const m = rel[+p.dataset.extPick];
+        const b = extBody(m);
+        pickerModal({ kind: 'album', artist: a.name, title: m.title, album: m.title, year: m.year, cover_url: m.cover, track_count: m.tracks, ext: b.ext });
+      }
+    };
+  }).catch(() => { ext.innerHTML = ''; });
+
   // photo, bio and popular tracks load after the page (Deezer + Wikipedia, best-effort)
   api.get(`/discover/artist/${a.id}/extras`).then(x => {
     if (!view.isConnected) return;
@@ -210,9 +272,12 @@ export async function renderArtist(view, ctx) {
           <td class="num">${t.library ? `<button class="btn ghost icon sm" data-top-play="${i}" aria-label="Play">${icon.play.replace('<svg', '<svg width="14"')}</button>` : i + 1}</td>
           <td><div class="row" style="gap:10px"><div class="thumb">${art(t.cover, t.album)}</div><div><div style="font-weight:600">${esc(t.title)} ${t.version ? `<span class="muted">${esc(t.version)}</span>` : ''}</div><div class="small muted">${esc(t.album)}</div></div></div></td>
           <td class="muted hide-sm">${fmt.dur(t.duration)}</td>
-          <td style="text-align:right">${t.library ? '<span class="badge ok">In library</span>' : `<button class="btn sm" data-req-track='${esc(JSON.stringify({ artist: a.name, title: t.title + (t.version ? ' ' + t.version : ''), album: t.album, cover_url: t.cover, length: t.duration, isrc: t.isrc || undefined, album_mode: 'song' }))}'>${icon.plus}Track</button>`}</td>
+          <td style="text-align:right;white-space:nowrap"><button class="btn sm ghost icon" data-more-top="${i}" title="More like this" aria-label="More like this">${icon.spark}</button>
+            ${t.library ? '<span class="badge ok">In library</span>' : `<button class="btn sm" data-req-track='${esc(JSON.stringify({ artist: a.name, title: t.title + (t.version ? ' ' + t.version : ''), album: t.album, cover_url: t.cover, length: t.duration, isrc: t.isrc || undefined, album_mode: 'song' }))}'>${icon.plus}Track</button>`}</td>
         </tr>`).join('')}</tbody></table></div></div>`;
       view.querySelector('#artist-top').onclick = (e) => {
+        const ml = e.target.closest('[data-more-top]');
+        if (ml) return moreLikeThis(a.name, top[+ml.dataset.moreTop].title, null);
         const b = e.target.closest('[data-top-play]');
         if (b) player.playQueue(playable, playable.indexOf(top[+b.dataset.topPlay].library));
       };
@@ -260,7 +325,7 @@ export async function renderAlbum(view, ctx) {
         <td>${esc(t.title)}</td>
         <td class="hide-sm muted">${esc(t.artist)}</td>
         <td class="muted">${fmt.dur(t.length)}</td>
-        <td style="text-align:right;white-space:nowrap"><button class="btn sm ghost icon" data-pick-track="${esc(t.recording_id)}" title="Pick a download for this song" aria-label="Pick a download">${icon.search}</button>
+        <td style="text-align:right;white-space:nowrap"><button class="btn sm ghost icon" data-more-track="${esc(t.recording_id)}" title="More like this" aria-label="More like this">${icon.spark}</button><button class="btn sm ghost icon" data-pick-track="${esc(t.recording_id)}" title="Pick a download for this song" aria-label="Pick a download">${icon.search}</button>
           ${t.in_library ? '<span class="badge ok">In library</span>'
           : a.in_library || a.request_status ? '' : `<button class="btn sm" data-req-track='${esc(JSON.stringify({ mbid: t.recording_id, artist: t.artist, title: t.title, album: a.title, cover_url: a.cover, year: a.year, length: t.length, album_mode: 'song' }))}'>${icon.plus}Track</button>`}</td>
       </tr>`).join('')}</tbody></table></div></div>` : emptyState(icon.disc, 'No track listing available')}`;
@@ -271,6 +336,8 @@ export async function renderAlbum(view, ctx) {
     cover_url: a.cover, track_count: rel ? rel.tracks.length : null, onDone: reload,
   });
   view.addEventListener('click', (e) => {
+    const ml = e.target.closest('[data-more-track]');
+    if (ml) { const t = rel.tracks.find(x => x.recording_id === ml.dataset.moreTrack); return moreLikeThis(t.artist, t.title, t.recording_id); }
     const b = e.target.closest('[data-pick-track]');
     if (!b) return;
     const t = rel.tracks.find(x => x.recording_id === b.dataset.pickTrack);

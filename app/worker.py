@@ -136,6 +136,8 @@ async def start(r: dict) -> None:
         else:
             await expand_artist(r)
         return
+    if r["kind"] == "album" and not r["mbid"] and d.get("ext"):
+        await _release_info(r)      # Deezer/Apple tracklist: used for matching downloads and tagging
     order = [s.strip() for s in config.get("source_order").split(",") if s.strip()]
     if config.get("quality_first") or d.get("lossless_only"):
         # every lossless option first (in the admin's order), then lossy fallbacks
@@ -232,6 +234,26 @@ async def poll_album(r: dict) -> None:
 
 
 # ---- lossless upgrades ---------------------------------------------------------
+
+async def retag_external() -> int:
+    """Albums imported from Deezer/Apple metadata (not in MusicBrainz at the time): once someone adds the
+    release to MusicBrainz (e.g. through Harmony), re-tag it properly. Runs daily."""
+    done = 0
+    rows = db.query("""SELECT t.album_id, MIN(t.albumartist) artist, MIN(t.album) album FROM tracks t JOIN requests r ON r.id=t.request_id
+                       WHERE (t.mb_albumid IS NULL OR t.mb_albumid='') AND r.mbid IS NULL AND r.detail LIKE '%"ext"%'
+                       GROUP BY t.album_id LIMIT 25""")
+    for a in rows:
+        paths = [t["path"] for t in db.query("SELECT path FROM tracks WHERE album_id=?", (a["album_id"],))]
+        try:
+            pv = await tagger.auto_match(paths, a["artist"], a["album"])
+            if pv:
+                await tagger.apply_preview(pv, True)
+                db.log("info", f"{a['artist']} – {a['album']} is in MusicBrainz now: re-tagged")
+                done += 1
+        except Exception as e:  # noqa: BLE001
+            db.log("warning", f"Re-tag of {a['album']} failed: {e}")
+    return done
+
 
 async def queue_lossy_upgrades(limit: int = 20) -> int:
     """Re-request MusicBrainz-tagged albums that are only in lossy quality, lossless sources only."""
@@ -346,6 +368,14 @@ async def start_pick(r: dict) -> None:
 
 async def _release_info(r: dict) -> dict | None:
     d = r["detail"]
+    if "release" not in d and r["kind"] == "album" and not r["mbid"] and d.get("ext"):
+        from .services import catalog   # not in MusicBrainz: tracklist from Deezer/Apple
+        try:
+            tracks = await catalog.tracklist(d["ext"])
+            d["release"] = {"id": None, "tracks": tracks} if tracks else None
+        except Exception as e:  # noqa: BLE001
+            db.log("warning", f"Tracklist lookup failed for {label(r)}: {e}")
+            d["release"] = None
     if "release" not in d and r["kind"] == "album" and r["mbid"]:
         try:
             rid = await mb.best_release_for_group(r["mbid"])
@@ -355,6 +385,14 @@ async def _release_info(r: dict) -> dict | None:
             db.log("warning", f"MusicBrainz release lookup failed: {e}")
             d["release"] = None
     return d.get("release")
+
+
+def _source_meta(r: dict) -> dict | None:
+    """Tracklist/year from Deezer or Apple for releases MusicBrainz doesn't have (used to tag the files)."""
+    d = r["detail"]
+    if r["mbid"] or not d.get("ext"):
+        return None
+    return {"tracks": (d.get("release") or {}).get("tracks") or [], "year": r.get("year"), "upc": d["ext"].get("upc")}
 
 
 def _q(*parts: str) -> str:
@@ -465,7 +503,7 @@ async def import_slskd(r: dict, c: dict) -> None:
     note = ""
     try:
         if r["kind"] == "album":
-            new = await tagger.import_album_files(paths, r["artist"], r["album"] or r["title"], r["mbid"], root)
+            new = await tagger.import_album_files(paths, r["artist"], r["album"] or r["title"], r["mbid"], root, source_meta=_source_meta(r))
         else:
             p, note = await tagger.import_single(paths[0], r["artist"], r["title"], r["mbid"], root, r["detail"].get("length"))
             new = [p]
@@ -508,6 +546,8 @@ async def start_streamrip(r: dict, urls: list[str] | None = None) -> None:
     async with loop_local("streamrip", lambda: asyncio.Semaphore(1)):
         _check(r["id"])
         upd(r, status="searching", message="Looking for an exact lossless match…")
+        if not urls and r["detail"].get("ext", {}).get("deezer") and "deezer" in config.get("streamrip_sources"):
+            urls = [f"https://www.deezer.com/album/{r['detail']['ext']['deezer']}"]
         if urls:
             pass
         elif r["kind"] == "album":
@@ -535,7 +575,7 @@ async def start_streamrip(r: dict, urls: list[str] | None = None) -> None:
                 files = await streamrip.download(url, out)
                 upd(r, status="importing", progress=100, message="Verifying, tagging and importing…")
                 if r["kind"] == "album":
-                    new = await tagger.import_album_files(files, r["artist"], r["album"] or r["title"], r["mbid"], out)
+                    new = await tagger.import_album_files(files, r["artist"], r["album"] or r["title"], r["mbid"], out, source_meta=_source_meta(r))
                     note = ""
                 else:
                     p, note = await tagger.import_single(files[0], r["artist"], r["title"], r["mbid"], out, r["detail"].get("length"))
@@ -604,7 +644,7 @@ async def start_ytdlp(r: dict, pick_url: str | None = None) -> None:
                 res = await ytdlp.download(yt_album["playlist_url"], os.path.join(out, "album"), _progress_hook(r), playlist=True)
                 if res["files"] and (pick_url or not rel or len(res["files"]) >= len(rel["tracks"]) - max(1, len(rel["tracks"]) // 5)):
                     upd(r, status="importing", progress=100, message="Verifying, tagging and importing…")
-                    new = await tagger.import_album_files(res["files"], r["artist"], album_title, r["mbid"], out)
+                    new = await tagger.import_album_files(res["files"], r["artist"], album_title, r["mbid"], out, source_meta=_source_meta(r))
                     shutil.rmtree(out, ignore_errors=True)
                     await complete(r, "Downloaded from YouTube Music", new,
                                    {"source": "YouTube Music", "detail": f"album {yt_album['title']}", "url": yt_album["playlist_url"]})
@@ -641,7 +681,7 @@ async def start_ytdlp(r: dict, pick_url: str | None = None) -> None:
             return
         upd(r, status="importing", progress=100, message="Verifying, tagging and importing…")
         try:
-            new = await tagger.import_album_files(files, r["artist"], r["album"] or r["title"], r["mbid"], out)
+            new = await tagger.import_album_files(files, r["artist"], r["album"] or r["title"], r["mbid"], out, source_meta=_source_meta(r))
         except tagger.VerificationFailed as e:
             shutil.rmtree(out, ignore_errors=True)
             await next_source(r, f"YouTube matches were wrong ({e})")
@@ -766,6 +806,8 @@ async def loop() -> None:
     last_sync = time.time() - 60 * 60  # first sync shortly after start
     last_upgrade = time.time()
     last_follow = time.time() - 23 * 3600  # first new-release check shortly after start
+    last_daily = time.time() - 23 * 3600
+    last_discover = time.time() - 5 * 3600
     while not _stop.is_set():
         try:
             for r in db.query(f"SELECT id FROM requests WHERE status IN ({','.join('?' * len(ACTIVE))}) ORDER BY id", ACTIVE):
@@ -787,6 +829,13 @@ async def loop() -> None:
                 last_follow = time.time()
                 from .services import follows
                 asyncio.create_task(follows.check_all())
+            if time.time() - last_daily > 24 * 3600:
+                last_daily = time.time()
+                asyncio.create_task(retag_external())
+            if config.get("discover_auto_count") and time.time() - last_discover > 6 * 3600:
+                last_discover = time.time()
+                from .services import discovery
+                asyncio.create_task(discovery.auto_discover())
             sync_every = int(config.get("sync_interval_minutes")) * 60
             if sync_every and time.time() - last_sync > sync_every:
                 last_sync = time.time()

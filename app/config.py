@@ -36,6 +36,8 @@ DEFAULTS: dict[str, tuple[str | None, object, bool]] = {
     "auto_request_likes": ("ENCORE_AUTO_REQUEST_LIKES", False, False),
     "auto_request_follows": ("ENCORE_AUTO_REQUEST_FOLLOWS", True, False),  # new releases of followed artists
     "follow_check_hours": ("ENCORE_FOLLOW_CHECK_HOURS", 12, False),
+    "discover_auto_count": ("ENCORE_DISCOVER_AUTO_COUNT", 0, False),   # top N new songs from each Weekly Exploration (0 = off)
+    "discover_catalog_merge": ("ENCORE_CATALOG_MERGE", True, False),   # show Deezer/Apple releases MusicBrainz lacks
     "upgrade_lossy": ("ENCORE_UPGRADE_LOSSY", False, False),           # periodically look for lossless copies
     "upgrade_lossy_days": ("ENCORE_UPGRADE_LOSSY_DAYS", 7, False),
     # verification

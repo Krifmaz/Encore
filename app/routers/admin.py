@@ -148,7 +148,7 @@ def activity(limit: int = 200):
 # ---- auto-download -----------------------------------------------------------------
 
 AUTO_KEYS = ["auto_request_followed", "auto_request_likes", "auto_request_follows", "follow_check_hours", "album_upgrade", "quality_first", "upgrade_lossy",
-             "upgrade_lossy_days", "sync_interval_minutes", "auto_approve", "source_order"]
+             "upgrade_lossy_days", "sync_interval_minutes", "auto_approve", "source_order", "discover_auto_count", "discover_catalog_merge"]
 
 
 class AutoDownload(BaseModel):

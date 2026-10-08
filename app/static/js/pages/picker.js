@@ -88,7 +88,7 @@ export async function pickerModal(opts) {
 
   const download = async (source, payload, title, btn) => {
     btn.disabled = true;
-    const req = { kind, mbid: opts.mbid || null, artist: opts.artist, title: opts.title || opts.album, album: opts.album || (kind === 'album' ? opts.title : null), year: opts.year, cover_url: opts.cover_url, length: opts.length, isrc: opts.isrc, album_mode: 'song' };
+    const req = { kind, mbid: opts.mbid || null, artist: opts.artist, title: opts.title || opts.album, album: opts.album || (kind === 'album' ? opts.title : null), year: opts.year, cover_url: opts.cover_url, length: opts.length, isrc: opts.isrc, album_mode: 'song', ext: opts.ext || undefined };
     try {
       const r = await api.post('/picker/pick', { source, payload, title, ...(opts.request_id ? { request_id: opts.request_id } : { request: req }) });
       toast(r.status === 'pending' ? 'Sent for approval – your pick will be used' : 'Downloading your pick', 'ok');

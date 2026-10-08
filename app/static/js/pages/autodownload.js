@@ -24,6 +24,9 @@ export async function render(view) {
         ${sw('auto_request_follows', 'New releases from followed artists', 'Albums/EPs that artists on the Following page release are downloaded as soon as MusicBrainz lists them (Lidarr-style monitoring).')}
         <label class="field"><span>Check followed artists every</span>
           <div class="row"><input class="input" type="number" min="0" data-k="follow_check_hours" value="${esc(s.follow_check_hours)}" style="width:110px"><span class="muted">hours (0 = never)</span></div></label>
+        <label class="field"><span>Auto-discover: from each user’s ListenBrainz <i>Weekly Exploration</i>, download the top</span>
+          <div class="row"><input class="input" type="number" min="0" max="50" data-k="discover_auto_count" value="${esc(s.discover_auto_count)}" style="width:110px"><span class="muted">new songs every week (0 = off)</span></div></label>
+        ${sw('discover_catalog_merge', 'Show releases MusicBrainz is missing', 'Artist pages also list albums/EPs/singles found on Deezer and Apple Music that aren’t in MusicBrainz, so they can be requested.')}
         ${sw('auto_request_followed', 'New tracks in followed playlists', 'Playlists set to “Follow source” pull new tracks every sync and download the missing ones.')}
         ${sw('auto_approve', 'Skip the approval queue for everyone', 'Off: users’ manual requests wait for an admin. Auto-downloads for enabled users are always approved.')}
         <label class="field"><span>Check for new likes / playlist tracks every</span>

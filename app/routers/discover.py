@@ -1,7 +1,7 @@
 from fastapi import APIRouter, Depends, HTTPException
 
-from .. import auth, db
-from ..services import artistinfo, library, musicbrainz as mb, ytdlp
+from .. import auth, config, db
+from ..services import artistinfo, catalog, discovery, library, musicbrainz as mb, ytdlp
 
 router = APIRouter(prefix="/api/discover", tags=["discover"], dependencies=[Depends(auth.current_user)])
 
@@ -88,6 +88,57 @@ def artist_library_tracks(mbid: str, name: str = "", user=Depends(auth.current_u
     return db.query("""SELECT id, title, artist, album, album_id, format, duration FROM tracks
                        WHERE mb_albumartistid=? OR mb_artistid=? OR lower(albumartist)=lower(?) OR lower(artist)=lower(?)
                        ORDER BY year DESC, lower(album), disc, track LIMIT 5000""", (mbid, mbid, name, name))
+
+
+@router.get("/artist/{mbid}/similar")
+async def artist_similar(mbid: str, user=Depends(auth.current_user)):
+    """Similar artists: Last.fm → ListenBrainz → Deezer."""
+    try:
+        a = await mb.artist(mbid)
+    except Exception as e:  # noqa: BLE001
+        raise HTTPException(502, f"MusicBrainz error: {e}")
+    return await discovery.similar_artists(mbid, a["name"])
+
+
+@router.get("/artist/{mbid}/catalog")
+async def artist_catalog(mbid: str, user=Depends(auth.current_user)):
+    """Releases on Deezer / Apple Music that MusicBrainz doesn't list for this artist."""
+    if not config.get("discover_catalog_merge"):
+        return {"enabled": False, "releases": []}
+    try:
+        a = await mb.artist(mbid)
+    except Exception as e:  # noqa: BLE001
+        raise HTTPException(502, f"MusicBrainz error: {e}")
+    return {"enabled": True, "releases": catalog.annotate([dict(x) for x in await catalog.merged(a)])}
+
+
+@router.get("/for-you")
+async def for_you(user=Depends(auth.current_user)):
+    try:
+        return await discovery.for_you(user)
+    except Exception as e:  # noqa: BLE001
+        raise HTTPException(502, f"ListenBrainz error: {e}")
+
+
+@router.get("/similar-tracks")
+async def similar_tracks(artist: str, title: str, mbid: str | None = None, user=Depends(auth.current_user)):
+    try:
+        return await discovery.similar_tracks(artist, title, mbid)
+    except Exception as e:  # noqa: BLE001
+        raise HTTPException(502, str(e))
+
+
+@router.get("/tags")
+async def tags(user=Depends(auth.current_user)):
+    return {"top": await discovery.top_tags(), "library": discovery.library_tags()}
+
+
+@router.get("/tag/{name}")
+async def tag(name: str, page: int = 1, user=Depends(auth.current_user)):
+    try:
+        return await discovery.tag(name, max(1, page))
+    except Exception as e:  # noqa: BLE001
+        raise HTTPException(502, str(e))
 
 
 @router.get("/artist-lookup")

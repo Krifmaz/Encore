@@ -110,6 +110,9 @@ folder = a[a.index('--folder') + 1]; url = a[-1]
 if 'album/123' in url:
     for i, (t, r, s, isrc) in enumerate(ALBUM_TRACKS, 1):
         make_audio(f'{{folder}}/Fake Band - Fake Album (2020) [FLAC]/{{i:02d}}. {{t}}.flac', t, album='Fake Album', track=i, seconds=s, isrc=isrc)
+elif 'album/900' in url:   # a release MusicBrainz doesn't have, files without tags
+    for i, t in enumerate(['Lost One', 'Lost Two'], 1):
+        make_audio(f'{{folder}}/Lost Tapes/{{i:02d}}. {{t}}.flac', t, artist='', album='', seconds=12 + i)
 elif 'track/' in url:
     t, r, s, isrc = (ALBUM_TRACKS + [SINGLE])[int(url.rsplit('/', 1)[1]) - 1000]
     make_audio(f'{{folder}}/Fake Band - {{t}}/01. {{t}}.flac', t, seconds=s, isrc=isrc)
@@ -913,3 +916,87 @@ def test_manual_download_picker(world):
     # can be limited to admins
     config.set_many({"manual_search": "admins"})
     assert c.get("/api/picker/sources").json()["allowed"] is True
+
+
+def test_catalog_merge_fills_musicbrainz_gaps(world):
+    from app import config, db
+    c = world.client
+    rel = c.get("/api/discover/artist/a-fake/catalog").json()["releases"]
+    got = {r["title"]: r for r in rel}
+    # Deluxe edition (title), "Delta" single (title), Renamed In Store (UPC = MB barcode), Hits Vol 1 (ISRC → MB compilation) are matched
+    assert set(got) == {"Lost Tapes", "Apple Exclusive"}, list(got)
+    lost = got["Lost Tapes"]
+    assert [s["name"] for s in lost["sources"]] == ["Deezer", "Apple Music"] and lost["type"] == "EP" and lost["upc"] == "0000111222"
+    assert lost["harmony"].startswith("https://harmony.pulsewidth.org.uk/release?url=https%3A%2F%2Fwww.deezer.com%2Falbum%2F900") and "gtin=0000111222" in lost["harmony"]
+    assert got["Apple Exclusive"]["type"] == "Single" and got["Apple Exclusive"]["sources"][0]["name"] == "Apple Music"
+
+    # request it: no Lidarr, straight from Deezer via streamrip, tagged from Deezer's metadata
+    config.set_many({"streamrip_enabled": True, "lidarr_enabled": True})
+    body = {"kind": "album", "artist": "Fake Band", "title": "Lost Tapes", "album": "Lost Tapes", "year": "2023",
+            "ext": {"deezer": 900, "apple": 602, "upc": "0000111222"}}
+    r = world.drive(world.req(**body))
+    assert r["status"] == "completed" and "Deezer" in r["message"], r
+    assert r["source"] != "lidarr"
+    ts = db.query("SELECT title, artist, album, albumartist, track, year, mb_albumid, path FROM tracks ORDER BY track")
+    assert [(t["title"], t["album"], t["albumartist"], t["track"], t["year"]) for t in ts] == [
+        ("Lost One", "Lost Tapes", "Fake Band", 1, "2023"), ("Lost Two", "Lost Tapes", "Fake Band", 2, "2023")]
+    assert not ts[0]["mb_albumid"], "stays flagged as not in MusicBrainz"
+    import mutagen
+    assert mutagen.File(ts[0]["path"], easy=True)["isrc"] == ["QZLOST000001"]
+    assert c.post("/api/requests", json=body, headers=H).status_code == 409
+    from app import worker
+    assert world.run(worker.retag_external) == 0, "still not in MusicBrainz → left as is"
+    assert any(r["title"] == "Lost Tapes" and r["in_library"] for r in c.get("/api/discover/artist/a-fake/catalog").json()["releases"])
+    assert c.post("/api/requests", json={"kind": "album", "artist": "x", "title": "y"}, headers=H).status_code == 400
+
+    config.set_many({"discover_catalog_merge": False})
+    assert c.get("/api/discover/artist/a-fake/catalog").json() == {"enabled": False, "releases": []}
+
+
+def test_discovery_for_you_similar_and_genres(world, monkeypatch):
+    from app import config, db, worker
+    from app.services import discovery
+    c = world.client
+    discovery._cache.clear()
+    assert c.get("/api/discover/for-you").json() == {"connected": False, "playlists": []}
+    assert c.post("/api/connections/listenbrainz", json={"token": "lb-token"}, headers=H).status_code == 200
+    fakenet.make_audio(str(world.library / "Fake Band" / "Fake Album" / "02 - Beta.flac"), "Beta", album="Fake Album", track=2, seconds=6)
+    world.run(__import__("app.services.library", fromlist=["x"]).scan)
+
+    d = c.get("/api/discover/for-you").json()
+    assert d["user"] == "lbuser" and [p["kind"] for p in d["playlists"]] == ["weekly-exploration", "daily-jams"]
+    wx = d["playlists"][0]["tracks"]
+    assert [(t["title"], bool(t["library"])) for t in wx] == [("Beta", True), ("Strange Song", False), ("Odd Song", False), ("Third Song", False)]
+    assert wx[1]["mbid"] == "rec-strange" and wx[1]["artist_mbid"] == "a-other" and wx[1]["cover"].endswith("/rel-x/42-250.jpg")
+
+    # similar artists: Last.fm first, then ListenBrainz, then Deezer
+    s = c.get("/api/discover/artist/a-fake/similar").json()
+    assert s["source"] == "Last.fm" and [(a["name"], a["mbid"]) for a in s["artists"]] == [("Other Artist", "a-other"), ("No Id Artist", None)]
+    discovery._cache.clear()
+    config.set_many({"lastfm_api_key": ""})
+    s = c.get("/api/discover/artist/a-fake/similar").json()
+    assert s["source"] == "ListenBrainz" and [a["name"] for a in s["artists"]] == ["Other Artist"]
+    discovery._cache.clear()
+    monkeypatch.setattr(discovery, "LB_LABS", "http://nonexistent-labs.test")
+    s = c.get("/api/discover/artist/a-fake/similar").json()
+    assert s["source"] == "Deezer" and s["artists"][0]["name"] == "Deezer Neighbour"
+
+    # "more like this": Deezer radio without a Last.fm key, Last.fm with one
+    m = c.get("/api/discover/similar-tracks?artist=Fake%20Band&title=Alpha").json()
+    assert m["source"] == "Deezer radio" and [(t["title"], bool(t["library"])) for t in m["tracks"]] == [("Beta", True), ("Radio Song", False)]
+    discovery._cache.clear()
+    config.set_many({"lastfm_api_key": "lfm"})
+    m = c.get("/api/discover/similar-tracks?artist=Fake%20Band&title=Alpha&mbid=rec-alpha").json()
+    assert m["source"] == "Last.fm" and m["tracks"][0]["title"] == "Gamma"
+
+    # genres
+    g = c.get("/api/discover/tag/shoegaze").json()
+    assert g["source"] == "Last.fm" and g["summary"] == "shoegaze is a genre." and g["artists"][0] == {**g["artists"][0], "name": "Fake Band", "in_library": True}
+    assert "shoegaze" in c.get("/api/discover/tags").json()["top"]
+
+    # auto-discover: top N new songs from Weekly Exploration, once per playlist
+    config.set_many({"discover_auto_count": 2})
+    assert world.run(discovery.auto_discover) == 2
+    assert [r["title"] for r in db.query("SELECT title FROM requests WHERE kind='track' ORDER BY id")] == ["Strange Song", "Odd Song"]
+    assert world.run(discovery.auto_discover) == 0, "same playlist is never processed twice"
+    del worker

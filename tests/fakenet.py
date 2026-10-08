@@ -162,7 +162,10 @@ def mb_rg_one(rid: str):
 
 
 @app.get("/mb.test/ws/2/release")
-def mb_release_q(query: str = ""):
+def mb_release_q(query: str = "", artist: str = "", offset: int = 0):
+    if artist:   # browse by artist (barcodes for catalog matching)
+        rels = [{**release_json(rid, False), "barcode": "5099000001" if rid == "r-album" else ""} for rid in RELEASES]
+        return {"releases": rels, "release-count": len(rels)}
     return _release_browse(query, None)
 
 
@@ -456,6 +459,52 @@ def dz_search_artist(q: str):
                      {"id": 78, "name": "Fake Band Tribute", "nb_fan": 5, "picture_xl": ""}] if "fake" in q.lower() else []}
 
 
+DZ_ALBUMS = {
+    123: {"title": "Fake Album (Deluxe Edition)", "record_type": "album", "release_date": "2020-01-01", "upc": "", "isrcs": [t[3] for t in ALBUM_TRACKS]},
+    789: {"title": "Delta", "record_type": "single", "release_date": "2021-05-05", "upc": "", "isrcs": [SINGLE[3]]},
+    900: {"title": "Lost Tapes", "record_type": "ep", "release_date": "2023-03-03", "upc": "0000111222", "isrcs": ["QZLOST000001", "QZLOST000002"],
+          "titles": ["Lost One", "Lost Two"]},
+    901: {"title": "Renamed In Store", "record_type": "album", "release_date": "2019-09-09", "upc": "05099000001", "isrcs": [ALBUM_TRACKS[0][3]]},
+    902: {"title": "Hits Compilation Vol 1", "record_type": "compile", "release_date": "2018-01-01", "upc": "0000999", "isrcs": [ALBUM_TRACKS[0][3]]},
+}
+
+
+def dz_album_tracks(aid):
+    a = DZ_ALBUMS[aid]
+    titles = a.get("titles") or [REC_TITLES.get(next((rec for t, rec, s, i in ALBUM_TRACKS + [SINGLE] if i == isrc), ""), "x") for isrc in a["isrcs"]]
+    return [{"id": aid * 10 + n, "title": t, "isrc": isrc, "duration": 5 + n, "track_position": n + 1, "disk_number": 1,
+             "artist": {"name": ARTIST["name"]}} for n, (t, isrc) in enumerate(zip(titles, a["isrcs"]))]
+
+
+@app.get(DZ + "/artist/{aid}/albums")
+def dz_artist_albums(aid: int, limit: int = 100):
+    return {"data": [{"id": k, "title": v["title"], "record_type": v["record_type"], "release_date": v["release_date"],
+                      "cover_medium": f"https://e-cdns-images.dzcdn.net/images/cover/{k}/250x250.jpg", "nb_tracks": len(v["isrcs"])}
+                     for k, v in DZ_ALBUMS.items()] if aid == 77 else []}
+
+
+@app.get(DZ + "/album/{aid}")
+def dz_album(aid: int):
+    a = DZ_ALBUMS[aid]
+    return {"id": aid, "title": a["title"], "upc": a["upc"], "tracks": {"data": [{k: v for k, v in t.items() if k != "isrc"} for t in dz_album_tracks(aid)]}}
+
+
+@app.get(DZ + "/album/{aid}/tracks")
+def dz_album_tracks_get(aid: int, limit: int = 500):
+    return {"data": dz_album_tracks(aid)}
+
+
+@app.get(DZ + "/artist/{aid}/related")
+def dz_related(aid: int, limit: int = 20):
+    return {"data": [{"id": 88, "name": "Deezer Neighbour", "picture_medium": "https://e-cdns-images.dzcdn.net/images/artist/n/250x250.jpg", "nb_fan": 10}]}
+
+
+@app.get(DZ + "/artist/{aid}/radio")
+def dz_radio(aid: int, limit: int = 25):
+    return {"data": [{**dz_track(1, "Beta", 6, ALBUM_TRACKS[1][3]), "title_short": "Beta"},
+                     {**dz_track(9, "Radio Song", 200, "QZRAD0000001"), "title_short": "Radio Song"}]}
+
+
 @app.get(DZ + "/artist/{aid}/top")
 def dz_artist_top(aid: str, limit: int = 10):
     return {"data": [{**dz_track(i, t, sec, code), "title_short": t, "rank": 900000 - i} for i, (t, _, sec, code) in enumerate(ALBUM_TRACKS)]
@@ -489,8 +538,27 @@ def dz_user_pls(uid: str):
 
 
 # ================================================================= iTunes =============
+APPLE_ALBUMS = [(601, "Fake Album", "2020-01-01T08:00:00Z", 3), (602, "Lost Tapes - EP", "2023-03-03T08:00:00Z", 2),
+                (603, "Apple Exclusive - Single", "2024-04-04T08:00:00Z", 1)]
+
+
+@app.get("/itunes.apple.com/lookup")
+def itunes_lookup(id: int, entity: str = "album", limit: int = 200):
+    if id == 555 and entity == "album":
+        return {"results": [{"wrapperType": "artist", "artistId": 555, "artistName": ARTIST["name"]}] + [
+            {"wrapperType": "collection", "collectionId": cid, "collectionName": t, "releaseDate": d, "trackCount": n,
+             "artworkUrl100": f"https://is1-ssl.mzstatic.com/image/thumb/{cid}/100x100bb.jpg", "collectionViewUrl": f"https://music.apple.com/us/album/{cid}"}
+            for cid, t, d, n in APPLE_ALBUMS]}
+    if id == 603 and entity == "song":
+        return {"results": [{"wrapperType": "collection"}, {"wrapperType": "track", "trackName": "Exclusive", "artistName": ARTIST["name"],
+                                                             "trackNumber": 1, "discNumber": 1, "trackTimeMillis": 7000}]}
+    return {"results": []}
+
+
 @app.get("/itunes.apple.com/search")
 def itunes(term: str, entity: str = "album"):
+    if entity == "musicArtist":
+        return {"results": [{"artistId": 555, "artistName": ARTIST["name"]}] if "fake band" in term.lower() else []}
     if "obscure" not in term.lower():
         return {"results": []}
     key = "collectionName" if entity == "album" else "trackName"
@@ -633,10 +701,42 @@ def lb_validate(request: Request):
 
 @app.get(LB + "/playlist/{pid}")
 def lb_playlist(pid: str):
+    if pid in LB_FOR_YOU:
+        return {"playlist": {"title": LB_FOR_YOU[pid][0], "track": lb_jspf_tracks(pid)}}
     if pid in NET.lb["playlists"]:
         return {"playlist": {"title": "x", "track": NET.lb["playlists"][pid]}}
     return {"playlist": {"title": "LB Playlist", "track": [{"title": "Beta", "creator": "Fake Band",
                                                             "identifier": ["https://musicbrainz.org/recording/rec-beta"]}]}}
+
+
+LB_FOR_YOU = {
+    "lbx-1": ("Weekly Exploration for lbuser, week of 2026-10-05 Mon", "weekly-exploration", [
+        ("Beta", "Fake Band", "rec-beta", "a-fake"), ("Strange Song", "Other Artist", "rec-strange", "a-other"),
+        ("Odd Song", "Other Artist", "rec-odd", "a-other"), ("Third Song", "Third Artist", "rec-third", "a-third")]),
+    "lbd-1": ("Daily Jams for lbuser, 2026-10-08 Wed", "daily-jams", [("Alpha", "Fake Band", "rec-alpha", "a-fake")]),
+}
+
+
+@app.get(LB + "/user/{user}/playlists/createdfor")
+def lb_createdfor(user: str, count: int = 25):
+    if user != "lbuser":
+        return JSONResponse({"error": "Cannot find user"}, 404)
+    return {"playlists": [{"playlist": {"identifier": f"https://listenbrainz.org/playlist/{pid}", "title": t, "date": "2026-10-05T00:00:00Z",
+                                        "extension": {"https://musicbrainz.org/doc/jspf#playlist": {"additional_metadata": {"algorithm_metadata": {"source_patch": k}}}}}}
+                          for pid, (t, k, _) in LB_FOR_YOU.items()], "playlist_count": len(LB_FOR_YOU)}
+
+
+def lb_jspf_tracks(pid):
+    return [{"title": t, "creator": a, "album": "", "identifier": [f"https://musicbrainz.org/recording/{rec}"], "duration": 200000,
+             "extension": {"https://musicbrainz.org/doc/jspf#track": {"artist_identifiers": [f"https://musicbrainz.org/artist/{aid}"],
+                                                                      "additional_metadata": {"caa_release_mbid": "rel-x", "caa_id": 42}}}}
+            for t, a, rec, aid in LB_FOR_YOU[pid][2]]
+
+
+@app.get("/labs.api.listenbrainz.org/similar-artists/json")
+def lb_labs_similar(algorithm: str, artist_mbids: str):
+    return [[{"type": "markup", "data": "x"}], [{"artist_mbid": artist_mbids, "name": "Fake Band", "score": 999},
+                                               {"artist_mbid": "a-other", "name": "Other Artist", "score": 50}]]
 
 
 @app.get(LB + "/feedback/user/{user}/get-feedback")
@@ -673,9 +773,23 @@ async def lb_add(pid: str, request: Request):
 
 
 @app.get("/ws.audioscrobbler.com/2.0/")
-def lastfm(method: str, user: str = ""):
+def lastfm(method: str, user: str = "", tag: str = "", artist: str = "", mbid: str = "", track: str = ""):
     if method == "user.getinfo":
         return {"user": {"name": user}}
+    if method == "artist.getsimilar":
+        if mbid and mbid != "a-fake":
+            return {"error": 6, "message": "The artist you supplied could not be found"}
+        return {"similarartists": {"artist": [{"name": "Other Artist", "mbid": "a-other", "match": "0.9"},
+                                              {"name": "No Id Artist", "mbid": "", "match": "0.5"}]}}
+    if method == "track.getsimilar":
+        return {"similartracks": {"track": [{"name": "Gamma", "artist": {"name": "Fake Band"}, "mbid": "rec-gamma", "duration": 7},
+                                            {"name": "Strange Song", "artist": {"name": "Other Artist"}, "mbid": "", "duration": 200}]}}
+    if method == "tag.gettopartists":
+        return {"topartists": {"artist": [{"name": "Fake Band", "mbid": "a-fake"}, {"name": "Other Artist", "mbid": ""}]}}
+    if method == "tag.getinfo":
+        return {"tag": {"name": tag, "wiki": {"summary": f"{tag} is a genre. <a href=\"https://last.fm\">Read more on Last.fm</a>."}}}
+    if method.lower() == "tag.gettoptags":
+        return {"toptags": {"tag": [{"name": "electronic"}, {"name": "shoegaze"}]}}
     return {"lovedtracks": {"track": [{"name": "Delta", "artist": {"name": "Fake Band"}, "mbid": ""}], "@attr": {"totalPages": "1"}}}
 
 

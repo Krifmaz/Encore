@@ -177,11 +177,12 @@ async def artist(mbid: str, fresh: bool = False) -> dict:
             break
     groups = [_rg({**rg, "artist-credit": [{"name": a["name"], "artist": {"id": mbid}}]}) for rg in rgs]
     groups.sort(key=lambda g: g["year"] or "9999", reverse=True)
-    links = {}
+    links, urls = {}, []
     for rel in a.get("relations", []):
         url = (rel.get("url") or {}).get("resource")
         if url:
             links[rel.get("type", "link")] = url
+            urls.append(url)
     return {
         "id": a["id"],
         "name": a["name"],
@@ -191,8 +192,36 @@ async def artist(mbid: str, fresh: bool = False) -> dict:
         "begin": (a.get("life-span") or {}).get("begin", ""),
         "tags": [t["name"] for t in sorted(a.get("tags", []), key=lambda t: -t.get("count", 0))[:8]],
         "links": links,
+        "urls": urls,
         "release_groups": groups,
     }
+
+
+async def artist_barcodes(mbid: str) -> dict[str, str]:
+    """barcode (UPC/EAN) → release-group id for every release by the artist."""
+    out: dict[str, str] = {}
+    offset = 0
+    while offset < 400:
+        page = await _get("release", {"artist": mbid, "inc": "release-groups", "limit": 100, "offset": offset})
+        for rel in page.get("releases", []):
+            bc = (rel.get("barcode") or "").lstrip("0")
+            if bc and rel.get("release-group"):
+                out[bc] = rel["release-group"]["id"]
+        offset += 100
+        if offset >= page.get("release-count", 0):
+            break
+    return out
+
+
+async def release_groups_for_isrc(isrc: str) -> set[str]:
+    out: set[str] = set()
+    for rid in (await recordings_for_isrc(isrc))[:2]:
+        try:
+            d = await _get(f"recording/{rid}", {"inc": "releases+release-groups"})
+        except Exception:  # noqa: BLE001
+            continue
+        out |= {(rel.get("release-group") or {}).get("id") for rel in d.get("releases", [])} - {None}
+    return out
 
 
 async def release_group(rgid: str) -> dict:

@@ -22,6 +22,7 @@ class NewRequest(BaseModel):
     length: float | None = None
     isrc: str | None = None
     album_mode: str | None = None   # None/"auto" = admin default · "song" = just this song · "album" = whole album
+    ext: dict | None = None         # release MusicBrainz doesn't list: {"deezer": id, "apple": id, "upc": ...}
 
 
 def _quota(user: dict, n: int = 1) -> None:
@@ -41,6 +42,13 @@ def _create(user: dict, body: NewRequest, parent_id: int | None = None, notify_a
     if body.kind == "url":
         if not body.url or not body.url.startswith(("http://", "https://")):
             raise HTTPException(400, "A valid http(s) URL is required")
+    elif body.kind == "album" and not body.mbid and body.ext and (body.ext.get("deezer") or body.ext.get("apple")):
+        if not (body.artist and (body.title or body.album)):
+            raise HTTPException(400, "Artist and album title are required")
+        dup = db.one("""SELECT id, status FROM requests WHERE kind='album' AND mbid IS NULL AND lower(artist)=lower(?) AND lower(title)=lower(?)
+                        AND status NOT IN ('failed','denied','cancelled')""", (body.artist, body.title or body.album))
+        if dup and not extra:
+            raise HTTPException(409, f"Already requested (#{dup['id']}, {dup['status']})")
     elif body.kind in ("artist", "album") and not body.mbid:
         raise HTTPException(400, "A MusicBrainz id is required")
     elif body.kind == "track" and not (body.mbid or (body.artist and body.title)):
@@ -61,6 +69,8 @@ def _create(user: dict, body: NewRequest, parent_id: int | None = None, notify_a
         detail["isrc"] = body.isrc
     if body.album_mode in ("song", "album"):
         detail["album_mode"] = body.album_mode
+    if body.ext:
+        detail["ext"] = {k: body.ext[k] for k in ("deezer", "apple", "upc") if body.ext.get(k)}
     detail.update(extra or {})
     rid = db.execute(
         "INSERT INTO requests (user_id, kind, mbid, artist, title, album, year, cover_url, url, status, message, detail, parent_id, created_at, updated_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",

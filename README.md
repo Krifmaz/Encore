@@ -8,6 +8,9 @@ A self-hosted music request and library app. Your users sign in, search the whol
 - **Discover**: search MusicBrainz for artists, albums and songs, with *In library* and *Requested* badges. Request anything with one click.
 - **Request pipeline**: with *highest quality first* on, each request tries **Qobuz/Tidal/Deezer (streamrip) → FLAC on Soulseek (24-bit preferred) → Lidarr → MP3 on Soulseek → YouTube Music**, falling back automatically. Exact ISRCs are used whenever the source provides them.
 - **Whole albums**: when a requested song is on an official studio album or EP, Encore downloads the whole release instead, in the best quality any source has. Compilations, live albums and soundtracks are never used. If the album doesn't have that exact version (say, a remix), the song is fetched on its own.
+- **For you**: your ListenBrainz *Weekly Exploration* and *Daily Jams* playlists, with songs you own marked and playable and everything else one click to request. *Admin → Auto-download* can grab the top N new songs from each week's exploration list automatically. Recommendations need listening history, so point Navidrome (built-in), Jellyfin/Finamp (ListenBrainz plugin) or Plexamp at ListenBrainz first.
+- **Similar artists and "More like this"**: similar artists come from Last.fm, falling back to ListenBrainz and then Deezer. ✨ on any song shows similar tracks from Last.fm, or a Deezer radio without a key. Genre tags open genre pages with top artists from Last.fm, or from MusicBrainz without a key.
+- **Fills MusicBrainz gaps**: artist pages also check Deezer and Apple Music. Releases are matched by barcode (UPC), then ISRC, then title, year and track count; anything MusicBrainz doesn't list shows as *Not in MusicBrainz*. Those requests skip Lidarr (it can't monitor them) and download from Soulseek, streamrip or YouTube, tagged from the store's data. *Add to MB* opens Harmony to import the release into MusicBrainz, and Encore re-tags it automatically once it's there.
 - **Artist pages**: the full MusicBrainz discography (albums, EPs, singles, compilations, live, soundtracks, remixes…) with *All / Missing / In library* filters and *Request N missing* per section. Each page also shows the artist photo, a Wikipedia bio, popular tracks (play the ones you have, request the rest), your library albums including ones MusicBrainz doesn't list, and Play/Shuffle. Library artists open the same page.
 - **Follow artists** (replaces Lidarr's monitoring): follow an artist and Encore checks MusicBrainz for new albums/EPs (singles optional) every 12 hours, then downloads them automatically in the best quality. Optionally grab the back catalogue you're missing, or follow every artist in your library in one click (*Following* page).
 - **Lossless upgrades**: albums you only have as MP3 or YouTube rips can be re-checked periodically. A lossless copy replaces the old files, and playlists follow it automatically.
@@ -79,7 +82,7 @@ web:
 | Qobuz/Tidal/Deezer lossless | Your own subscription. Enter the Deezer ARL or Qobuz token in *Settings → streamrip*. Tidal needs a one-time sign-in: `docker exec -it encore streamrip --config-path /config/streamrip/config.toml url <tidal link>`. These services' terms may not allow downloading, so use at your own risk. |
 | Spotify account connection | developer.spotify.com app with redirect `<Public URL>/api/connections/spotify/callback`. Since Feb 2026, development-mode apps need a Premium owner and allow 5 users. Public playlists still import without it, via the embed page. |
 | Tidal import | developer.tidal.com app (redirect `<Public URL>/api/connections/tidal/callback`) |
-| Last.fm loved tracks | last.fm/api/account/create |
+| Last.fm loved tracks, similar artists/tracks, genres | last.fm/api/account/create (free) |
 | YouTube Music sign-in | Google Cloud, YouTube Data API v3, an OAuth client of type *TVs and Limited Input devices*. Users can paste browser request headers instead. |
 | YouTube Music Premium audio (256 kbps) | Paste a `cookies.txt` exported from music.youtube.com under *Settings → YouTube Music*. |
 
@@ -121,6 +124,8 @@ Every option can be changed in the UI. Environment variables only seed the first
 | `ENCORE_ADMIN_USER` / `ENCORE_ADMIN_PASSWORD` | admin / random | First admin account |
 | `ENCORE_LIBRARY_PATH` | `/music` | Music library inside the container |
 | `ENCORE_SIGNUP_MODE` | `invite` | `invite`, `open` or `closed` |
+| `ENCORE_DISCOVER_AUTO_COUNT` | 0 | Songs to auto-request from each Weekly Exploration (0 = off) |
+| `ENCORE_CATALOG_MERGE` | `true` | Show Deezer/Apple releases MusicBrainz lacks |
 | `ENCORE_MANUAL_SEARCH` | `everyone` | Who can use the manual download picker: `everyone` or `admins` |
 | `ENCORE_SOURCE_ORDER` | `lidarr,slskd,ytdlp` | Order sources are tried in |
 | `ENCORE_NAMING_TEMPLATE` | `{albumartist}/{album} ({year})/{discprefix}{track:02d} - {title}` | Rename template |
