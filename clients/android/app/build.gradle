@@ -14,12 +14,12 @@ android {
         versionName System.getenv("ENCORE_VERSION_NAME") ?: "1.0.0"
     }
 
-    signingConfigs {
-        // CI passes a real keystore (ANDROID_KEYSTORE_*); otherwise the debug key is used so the APK still installs
-        release {
-            def ks = System.getenv("ANDROID_KEYSTORE_FILE")
-            if (ks) {
-                storeFile file(ks)
+    def keystore = System.getenv("ANDROID_KEYSTORE_FILE")
+    if (keystore) {
+        // a real key from CI secrets; without one the debug key signs the APK so it still installs
+        signingConfigs {
+            release {
+                storeFile file(keystore)
                 storePassword System.getenv("ANDROID_KEYSTORE_PASSWORD")
                 keyAlias System.getenv("ANDROID_KEY_ALIAS")
                 keyPassword System.getenv("ANDROID_KEY_PASSWORD")
@@ -30,7 +30,7 @@ android {
     buildTypes {
         release {
             minifyEnabled false
-            signingConfig System.getenv("ANDROID_KEYSTORE_FILE") ? signingConfigs.release : signingConfigs.debug
+            signingConfig keystore ? signingConfigs.release : signingConfigs.debug
         }
     }
 

@@ -28,7 +28,7 @@ jobs:
         env:
           ENCORE_VERSION_CODE: ${{ github.run_number }}
           ENCORE_VERSION_NAME: 1.0.${{ github.run_number }}
-        run: gradle -p clients/android assembleRelease --no-daemon
+        run: gradle -p clients/android assembleRelease --no-daemon --stacktrace
       - run: cp clients/android/app/build/outputs/apk/release/app-release.apk Encore-android.apk
       - uses: actions/upload-artifact@v4
         with:
@@ -68,23 +68,53 @@ jobs:
             clients/desktop/dist/*.zip
           if-no-files-found: ignore
 
-  release:
-    needs: [android, desktop]
-    if: github.ref == format('refs/heads/{0}', github.event.repository.default_branch) || startsWith(github.ref, 'refs/tags/v')
+  # version tags also attach the Docker images as files (docker load -i …) for offline installs
+  docker:
+    if: startsWith(github.ref, 'refs/tags/v')
     runs-on: ubuntu-latest
     steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-buildx-action@v3
+      - name: Build image files (amd64)
+        run: |
+          V=${GITHUB_REF_NAME#v}
+          for target in default aio; do
+            name=encore-$V-amd64; [ "$target" = aio ] && name=encore-aio-$V-amd64
+            tag=ghcr.io/krifmaz/encore:$V; [ "$target" = aio ] && tag=ghcr.io/krifmaz/encore:$V-aio
+            docker buildx build --platform linux/amd64 --target $target --build-arg ENCORE_BUILD=${GITHUB_SHA} -t $tag -o type=docker,dest=$name.tar .
+            gzip -1 $name.tar
+          done
+      - uses: actions/upload-artifact@v4
+        with:
+          name: Encore-docker
+          path: "*.tar.gz"
+
+  release:
+    needs: [android, desktop, docker]
+    if: always() && needs.android.result == 'success' && needs.desktop.result == 'success' && needs.docker.result != 'failure' && (github.ref == format('refs/heads/{0}', github.event.repository.default_branch) || startsWith(github.ref, 'refs/tags/v'))
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          path: src
       - uses: actions/download-artifact@v4
         with:
           path: out
           merge-multiple: true
+      - run: cp src/docker-compose.yml src/docker-compose.aio.yml out/
       - uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ startsWith(github.ref, 'refs/tags/v') && github.ref_name || 'apps-latest' }}
-          name: ${{ startsWith(github.ref, 'refs/tags/v') && format('Encore {0}', github.ref_name) || 'Encore apps (latest)' }}
+          name: ${{ startsWith(github.ref, 'refs/tags/v') && format('Encore {0}', github.ref_name) || 'Encore (latest)' }}
           target_commitish: ${{ github.sha }}
           make_latest: "true"
           body: |
-            Apps for your Encore server – install, then enter the address you open Encore at (e.g. http://192.168.1.10:8080).
+            ### Server (Docker)
+            * `docker pull ghcr.io/krifmaz/encore:${{ startsWith(github.ref, 'refs/tags/v') && github.ref_name || 'latest' }}` – Encore (use with your own Lidarr/slskd) · compose file: `docker-compose.yml`
+            * `docker pull ghcr.io/krifmaz/encore:aio` – all-in-one with slskd, Lidarr, Prowlarr, qBittorrent and SABnzbd built in · compose file: `docker-compose.aio.yml`
+            * Offline install (version releases): `docker load -i encore-<version>-amd64.tar.gz` (or the `encore-aio-…` file)
+
+            ### Apps – install, then enter the address you open Encore at (e.g. http://192.168.1.10:8080)
             * **Android**: `Encore-android.apk` (allow installing from your browser/files app when asked). Share a Spotify/YouTube Music link to Encore to download it.
-            * **Windows**: the `Setup` .exe (or the portable .exe) · **macOS**: the .dmg (unsigned: right-click → Open the first time) · **Linux**: .AppImage or .deb
-          files: out/**
+            * **Windows**: `Encore-Setup-….exe` (installer) or `Encore-Portable-….exe` · **macOS**: the .dmg (unsigned: right-click → Open the first time) · **Linux**: .AppImage or .deb
+          files: out/*
