@@ -194,3 +194,35 @@ async def run_now():
     from ..services import sync
     asyncio.create_task(sync.sync_all())
     return {"ok": True}
+
+
+
+# ---- scheduled tasks ---------------------------------------------------------------------------
+
+class TaskPatch(BaseModel):
+    enabled: bool | None = None
+    minutes: int | None = None
+
+
+@router.get("/tasks")
+def list_tasks(admin=Depends(auth.admin_user)):
+    from ..services import scheduler
+    return {"tasks": scheduler.listing(), "cleanup_days": config.get("task_cleanup_days")}
+
+
+@router.patch("/tasks/{key}")
+def patch_task(key: str, body: TaskPatch, admin=Depends(auth.admin_user)):
+    from ..services import scheduler
+    if key not in scheduler.BY_KEY:
+        raise HTTPException(404, "No such task")
+    return scheduler.update(key, body.enabled, body.minutes)
+
+
+@router.post("/tasks/{key}/run")
+async def run_task(key: str, admin=Depends(auth.admin_user)):
+    from ..services import scheduler
+    if key not in scheduler.BY_KEY:
+        raise HTTPException(404, "No such task")
+    if not scheduler.run_now(key):
+        raise HTTPException(409, "Already running")
+    return {"ok": True}

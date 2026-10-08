@@ -148,6 +148,44 @@ function field(f, v, opts, meta = {}) {
     value="${esc(v ?? '')}" autocomplete="off" ${dis}>${help}</label>`;
 }
 
+const EVERY = [[15, '15 minutes'], [30, '30 minutes'], [60, 'hour'], [180, '3 hours'], [360, '6 hours'], [720, '12 hours'], [1440, 'day'], [10080, 'week']];
+const ago = (t) => { if (!t) return 'never'; const s = Date.now() / 1000 - t; return s < 90 ? 'just now' : s < 5400 ? `${Math.round(s / 60)} min ago` : s < 129600 ? `${Math.round(s / 3600)} h ago` : `${Math.round(s / 86400)} days ago`; };
+const until = (t) => { if (!t) return ''; const s = t - Date.now() / 1000; return s <= 60 ? 'any moment' : s < 5400 ? `in ${Math.round(s / 60)} min` : s < 129600 ? `in ${Math.round(s / 3600)} h` : `in ${Math.round(s / 86400)} days`; };
+
+/** Settings → Scheduled tasks: every background job, with on/off, interval, last result and Run now. */
+async function renderTasks(panel) {
+  const d = await api.get('/admin/tasks');
+  panel.innerHTML = `<div class="card"><div class="row between" style="margin-bottom:8px"><h2>Scheduled tasks</h2><button class="btn sm" id="t-refresh">${icon.refresh}Refresh</button></div>
+    <p class="muted small" style="margin:0 0 14px">Background jobs Encore runs on its own. Switch them off, change how often they run, or run one now.</p>
+    <div class="list">${d.tasks.map(t => `<div class="list-item" style="align-items:flex-start;flex-wrap:wrap;gap:12px" data-k="${t.key}">
+      <label class="switch" style="margin-top:2px" title="${t.locked ? 'Set by an environment variable' : ''}"><input type="checkbox" data-on ${t.enabled ? 'checked' : ''} ${t.locked ? 'disabled' : ''}><i></i></label>
+      <div class="grow" style="min-width:220px"><div style="font-weight:650">${esc(t.name)}${t.locked ? ' <span title="Set by an environment variable">🔒</span>' : ''}</div>
+        <div class="small muted">${esc(t.desc)}</div>
+        <div class="small faint" style="margin-top:4px">Last run ${ago(t.last_run)}${t.duration ? ` · took ${t.duration < 60 ? Math.round(t.duration) + ' s' : Math.round(t.duration / 60) + ' min'}` : ''}${t.running ? ' · <b style="color:var(--accent)">running…</b>' : ''}
+          ${t.error ? ` · <span style="color:var(--err)">${esc(t.error)}</span>` : t.result && !t.running ? ` · ${esc(t.result)}` : ''}${t.enabled && t.next_run && !t.running ? ` · next ${until(t.next_run)}` : ''}</div></div>
+      <div class="row" style="gap:8px"><span class="small muted">every</span>
+        <select class="input" data-every style="width:auto" ${t.locked ? 'disabled' : ''}>${[...new Set([...EVERY.map(e => e[0]), t.minutes])].sort((a, b) => a - b).map(m => `<option value="${m}" ${m === t.minutes ? 'selected' : ''}>${(EVERY.find(e => e[0] === m) || [0, m + ' minutes'])[1]}</option>`).join('')}</select>
+        <button class="btn sm" data-run ${t.running ? 'disabled' : ''}>${icon.play}Run now</button></div>
+    </div>`).join('')}</div>
+    <div class="row mt" style="gap:8px"><span class="small muted">Clean up finished downloads older than</span>
+      <input class="input" type="number" min="1" id="t-days" value="${d.cleanup_days}" style="width:90px"><span class="small muted">days</span></div></div>`;
+  panel.querySelector('#t-refresh').onclick = () => renderTasks(panel);
+  panel.querySelector('#t-days').onchange = async (e) => { await api.put('/admin/settings', { task_cleanup_days: +e.target.value }); toast('Saved', 'ok'); };
+  panel.querySelectorAll('[data-k]').forEach(row => {
+    const k = row.dataset.k;
+    row.querySelector('[data-on]').onchange = async (e) => {
+      try { await api.patch(`/admin/tasks/${k}`, { enabled: e.target.checked }); toast(e.target.checked ? 'Enabled' : 'Disabled', 'ok'); renderTasks(panel); } catch (err) { toast(err.message, 'err'); }
+    };
+    row.querySelector('[data-every]').onchange = async (e) => {
+      try { await api.patch(`/admin/tasks/${k}`, { minutes: +e.target.value }); toast('Saved', 'ok'); renderTasks(panel); } catch (err) { toast(err.message, 'err'); }
+    };
+    row.querySelector('[data-run]').onclick = async (e) => {
+      e.currentTarget.disabled = true;
+      try { await api.post(`/admin/tasks/${k}/run`); toast('Started', 'ok'); setTimeout(() => renderTasks(panel), 1500); } catch (err) { toast(err.message, 'err'); }
+    };
+  });
+}
+
 export async function render(view, ctx) {
   let values = await api.get('/admin/settings');
   let lidarrOpts = null;
@@ -155,7 +193,7 @@ export async function render(view, ctx) {
   view.innerHTML = `
     <h1 style="margin-bottom:18px">Settings</h1>
     <div class="settings-grid">
-      <nav class="settings-nav">${SECTIONS.map(s => `<button data-s="${s.id}">${esc(s.title)}</button>`).join('')}<button data-s="api">API & security</button></nav>
+      <nav class="settings-nav">${SECTIONS.map(s => `<button data-s="${s.id}">${esc(s.title)}</button>`).join('')}<button data-s="tasks">Scheduled tasks</button><button data-s="api">API & security</button></nav>
       <div id="panel"></div>
     </div>`;
   const panel = view.querySelector('#panel');
@@ -164,6 +202,7 @@ export async function render(view, ctx) {
     current = id;
     view.querySelectorAll('.settings-nav button').forEach(b => b.classList.toggle('active', b.dataset.s === id));
     if (id === 'api') return showApi();
+    if (id === 'tasks') return renderTasks(panel);
     const sec = SECTIONS.find(s => s.id === id);
     if (id === 'lidarr' && values.lidarr_api_key && !lidarrOpts) {
       try { lidarrOpts = await api.get('/system/lidarr/options'); } catch { lidarrOpts = null; }

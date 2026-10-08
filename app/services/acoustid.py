@@ -82,6 +82,7 @@ async def lookup(duration: float, fp: str) -> list[dict]:
                 "artist": "".join(a.get("name", "") + (a.get("joinphrase") or "") for a in rec.get("artists", []) or []),
                 "length": rec.get("duration"),
                 "release_groups": [g.get("title") for g in rec.get("releasegroups", []) or []][:3],
+                "release_group_ids": [g.get("id") for g in rec.get("releasegroups", []) or [] if g.get("id")],
             })
         out.append({"acoustid": res.get("id"), "score": res.get("score", 0), "recordings": recs})
     out.sort(key=lambda x: -x["score"])

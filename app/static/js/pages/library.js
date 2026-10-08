@@ -373,28 +373,51 @@ export async function renderAlbum(view, ctx) {
 
 function matchModal(id, a, ctx) {
   const m = modal({
-    title: 'Match on MusicBrainz',
+    title: 'Tag this album',
     wide: true,
-    body: `<form class="row wrap" id="mq">
+    body: `<div class="tabs" id="mprov" style="margin-bottom:12px;max-width:100%">${[['musicbrainz', 'MusicBrainz'], ['deezer', 'Deezer'], ['apple', 'Apple Music'], ['discogs', 'Discogs'], ['fingerprint', 'By audio (AcoustID)']].map(([k, l]) => `<button type="button" data-p="${k}" class="${k === 'musicbrainz' ? 'active' : ''}">${l}</button>`).join('')}</div>
+      <p class="small muted" id="mprov-help" style="margin:-4px 0 10px"></p>
+      <form class="row wrap" id="mq">
         <input class="input grow" name="artist" value="${esc(a.albumartist)}" placeholder="Artist" style="max-width:260px">
         <input class="input grow" name="album" value="${esc(a.album || '')}" placeholder="Album">
         <button class="btn" type="submit">${icon.search}Search</button>
-        <input class="input" name="rid" placeholder="…or paste a MusicBrainz release URL/ID" style="max-width:340px">
+        <input class="input" name="rid" placeholder="…or paste a MusicBrainz / Deezer / Apple / Discogs link" style="max-width:340px">
       </form>
       <div id="mres" class="mt"></div>`,
   });
   const res = m.el.querySelector('#mres');
+  let provider = 'musicbrainz';
+  const HELP = {
+    musicbrainz: 'Full MusicBrainz tags (ids that Lidarr, Picard and Jellyfin use).',
+    deezer: 'Titles, track numbers, ISRCs, label, barcode and cover from Deezer – for releases MusicBrainz lacks or gets wrong.',
+    apple: 'Titles, track numbers, genre and a large cover from Apple Music.',
+    discogs: 'Vinyl, cassettes, bootlegs and old releases (needs a Discogs token in Settings).',
+    fingerprint: 'Ignores names: identifies each song by its audio, then finds the release most of them are on (needs an AcoustID key).',
+  };
+  const paintProv = () => {
+    m.el.querySelectorAll('#mprov button').forEach(b => b.classList.toggle('active', b.dataset.p === provider));
+    m.el.querySelector('#mprov-help').textContent = HELP[provider];
+  };
+  m.el.querySelector('#mprov').onclick = (e) => {
+    const b = e.target.closest('[data-p]');
+    if (!b) return;
+    provider = b.dataset.p;
+    paintProv();
+    const f = new FormData(m.el.querySelector('#mq'));
+    search(f.get('artist'), f.get('album'));
+  };
+  paintProv();
   const search = async (artist, album) => {
-    res.innerHTML = '<div class="empty"><span class="spinner"></span></div>';
+    res.innerHTML = `<div class="empty"><span class="spinner"></span>${provider === 'fingerprint' ? ' Listening to every song… this takes a few seconds per song' : ''}</div>`;
     try {
-      const d = await api.get(`/library/albums/${id}/match?artist=${encodeURIComponent(artist)}&album=${encodeURIComponent(album)}`);
+      const d = await api.get(`/library/albums/${id}/match?provider=${provider}&artist=${encodeURIComponent(artist)}&album=${encodeURIComponent(album)}`);
       res.innerHTML = d.candidates.length ? `<p class="small muted">Your files: ${d.track_count} tracks. Pick the matching release:</p>
         <div class="card flat"><div class="list">${d.candidates.map(c => `
         <div class="list-item" style="cursor:pointer" data-rid="${esc(c.id)}">
           <div class="thumb">${art(c.cover, c.title)}</div>
           <div class="grow"><div style="font-weight:600" class="ellipsis">${esc(c.title)} <span class="muted">· ${esc(c.artist)}</span></div>
-            <div class="small muted">${esc([c.date, c.country, c.formats, c.label, c.status, c.type].filter(Boolean).join(' · '))}</div></div>
-          <span class="badge ${c.track_count === d.track_count ? 'ok' : 'warn'}">${c.track_count} tracks</span>
+            <div class="small muted">${esc([c.provider, c.date, c.country, c.formats, c.label, c.status, c.type].filter(Boolean).join(' · '))}</div></div>
+          ${c.track_count ? `<span class="badge ${c.track_count === d.track_count ? 'ok' : 'warn'}">${c.track_count} tracks</span>` : ''}
           <span class="badge ${c.match > .85 ? 'ok' : c.match > .6 ? 'warn' : 'err'}">${Math.round(c.match * 100)}%</span>
         </div>`).join('')}</div></div>` : emptyState(icon.search, 'No releases found', 'Try editing the artist/album, or paste a release ID.');
     } catch (e) { res.innerHTML = `<div class="error-box">${esc(e.message)}</div>`; }
@@ -411,11 +434,11 @@ function matchModal(id, a, ctx) {
           <span class="badge ${pv.confidence > .85 ? 'ok' : pv.confidence > .6 ? 'warn' : 'err'}">Confidence ${Math.round(pv.confidence * 100)}%</span>
         </div>
         <div class="card flat"><div class="table-wrap"><table class="table">
-          <thead><tr><th>Current</th><th>→ MusicBrainz</th><th>New path</th></tr></thead>
+          <thead><tr><th>Current</th><th>→ ${esc(r.provider || 'MusicBrainz')}</th><th class="hide-sm">New path</th></tr></thead>
           <tbody>${pv.rows.map(row => `<tr>
             <td><div>${esc(row.old_track ?? '–')}. ${esc(row.old_title)}</div><div class="small faint">${esc(row.old_artist)}</div></td>
             <td>${row.new_title ? `<div class="${row.new_title !== row.old_title ? 'diff-new' : ''}">${row.new_disc > 1 ? row.new_disc + '-' : ''}${row.new_track}. ${esc(row.new_title)}</div><div class="small faint">${esc(row.new_artist)}</div>` : '<span class="badge err">no match – left untouched</span>'}</td>
-            <td class="small mono faint">${esc(row.new_path || '')}</td></tr>`).join('')}</tbody>
+            <td class="small mono faint hide-sm">${esc(row.new_path || '')}</td></tr>`).join('')}</tbody>
         </table></div></div>
         <div class="row between mt">
           <label class="switch"><input type="checkbox" id="rename" checked><i></i>Rename & move files using naming template</label>
@@ -427,7 +450,7 @@ function matchModal(id, a, ctx) {
         e.target.innerHTML = '<span class="spinner"></span> Writing tags…';
         try {
           const out = await api.post(`/library/albums/${id}/retag`, { release_id: rid, rename: res.querySelector('#rename').checked });
-          toast('Album tagged from MusicBrainz', 'ok');
+          toast(`Album tagged from ${r.provider || 'MusicBrainz'}`, 'ok');
           m.close();
           if (out.album_id && out.album_id !== id) ctx.navigate(`/library/album/${out.album_id}`);
           else window.dispatchEvent(new HashChangeEvent('hashchange'));
@@ -439,8 +462,16 @@ function matchModal(id, a, ctx) {
   m.el.querySelector('#mq').onsubmit = (e) => {
     e.preventDefault();
     const f = new FormData(e.target);
-    const rid = (f.get('rid') || '').match(/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/i);
-    if (rid) preview(rid[0]); else search(f.get('artist'), f.get('album'));
+    const link = (f.get('rid') || '').trim();
+    const mbid = link.match(/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/i);
+    const dz = link.match(/deezer\.com\/(?:\w+\/)?album\/(\d+)/);
+    const ap = link.match(/apple\.com\/.*?\/album\/(?:[^/]+\/)?(?:id)?(\d+)/);
+    const dc = link.match(/discogs\.com\/(?:[^/]+\/)?(release|master)\/(\d+)/);
+    if (mbid) preview(mbid[0]);
+    else if (dz) preview(`deezer:${dz[1]}`);
+    else if (ap) preview(`apple:${ap[1]}`);
+    else if (dc) preview(`discogs:${dc[1][0]}${dc[2]}`);
+    else search(f.get('artist'), f.get('album'));
   };
   search(a.albumartist === 'Unknown Artist' ? '' : a.albumartist, a.album || '');
 }

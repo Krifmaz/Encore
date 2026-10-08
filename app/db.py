@@ -140,6 +140,7 @@ CREATE TABLE IF NOT EXISTS sync_state (
     PRIMARY KEY (connection_id, scope)
 );
 
+CREATE TABLE IF NOT EXISTS task_runs (key TEXT PRIMARY KEY, last_run REAL, duration REAL, result TEXT, error TEXT);
 CREATE TABLE IF NOT EXISTS plays (
     id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER NOT NULL, track_id INTEGER, artist TEXT, title TEXT, album TEXT,
     seconds REAL NOT NULL DEFAULT 0, played_at REAL NOT NULL);

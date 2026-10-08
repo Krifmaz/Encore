@@ -1138,3 +1138,69 @@ def test_manual_artwork_pick_and_upload(world):
     assert mutagen.File(t["path"]).pictures[0].data == fakenet.JPEG
     assert os.path.exists(os.path.join(os.path.dirname(t["path"]), "cover.jpg"))
     assert c.post(f"/api/library/albums/{t['album_id']}/art", json={"data": base64.b64encode(b"not an image").decode()}, headers=H).status_code == 400
+
+
+def test_tag_album_from_deezer_apple_and_fingerprint(world):
+    import mutagen
+    from app import db
+    c = world.client
+    d = world.library / "Unknown" / "rip"
+    for i, (t, _, s, _) in enumerate(fakenet.ALBUM_TRACKS, 1):
+        fakenet.make_audio(str(d / f"track{i}.flac"), f"Track {i:02d}", artist="Unknown", album="", track=i, seconds=s)
+    world.run(__import__("app.services.library", fromlist=["x"]).scan)
+    aid = db.one("SELECT album_id FROM tracks LIMIT 1")["album_id"]
+
+    # by audio: names are useless, fingerprints find the release
+    fp = c.get(f"/api/library/albums/{aid}/match?provider=fingerprint&artist=&album=").json()
+    assert fp["candidates"][0]["id"] == "r-album" and fp["candidates"][0]["provider"].startswith("Fingerprint · 3/3")
+
+    # Deezer: tag + rename from Deezer's metadata (no MusicBrainz ids)
+    dz = c.get(f"/api/library/albums/{aid}/match?provider=deezer&artist=Fake%20Band&album=Fake%20Album").json()
+    assert dz["candidates"][0]["id"] == "deezer:123"
+    pv = c.get(f"/api/library/albums/{aid}/preview?release_id=deezer:123").json()
+    assert pv["release"]["provider"] == "Deezer" and [r["new_title"] for r in pv["rows"]] == ["Alpha", "Beta", "Gamma"]
+    out = c.post(f"/api/library/albums/{aid}/retag", json={"release_id": "deezer:123", "rename": True}, headers=H).json()
+    rows = db.query("SELECT title, album, albumartist, track, path, mb_albumid FROM tracks ORDER BY track")
+    assert [(r["title"], r["album"], r["albumartist"], r["track"]) for r in rows] == [
+        ("Alpha", "Fake Album (Deluxe Edition)", "Fake Band", 1), ("Beta", "Fake Album (Deluxe Edition)", "Fake Band", 2), ("Gamma", "Fake Album (Deluxe Edition)", "Fake Band", 3)]
+    assert not rows[0]["mb_albumid"] and "Fake Band/Fake Album (Deluxe Edition)" in rows[0]["path"]
+    assert mutagen.File(rows[0]["path"], easy=True)["isrc"] == ["QZAAA0000001"]
+
+    # Apple Music
+    aid = out["album_id"]
+    ap = c.get(f"/api/library/albums/{aid}/preview?release_id=apple:601").json()
+    assert ap["release"]["provider"] == "Apple Music" and ap["release"]["genre"] == "Electronic" and ap["confidence"] > 0.8
+    assert c.get(f"/api/library/albums/{aid}/match?provider=discogs&artist=x&album=y").status_code == 400   # no token
+    assert c.get(f"/api/library/albums/{aid}/match?provider=nope").status_code == 400
+
+
+def test_scheduled_tasks(world):
+    import time as _t
+
+    from app import config, db
+    from app.services import scheduler
+    c = world.client
+    tasks = {t["key"]: t for t in c.get("/api/admin/tasks").json()["tasks"]}
+    assert {"scan", "sync", "follows", "lossy", "discover", "lyrics", "artwork", "retag", "verify", "cleanup"} <= set(tasks)
+    assert tasks["scan"]["enabled"] is False and tasks["scan"]["locked"] is True       # ENCORE_SCAN_INTERVAL=0 in the environment wins
+    assert tasks["sync"]["enabled"] is False and tasks["lyrics"]["enabled"] is True
+    # switching on a task whose old setting used 0 = off restores a sensible interval
+    assert c.patch("/api/admin/tasks/sync", json={"enabled": True}, headers=H).json()["minutes"] == 15
+    assert c.patch("/api/admin/tasks/sync", json={"minutes": 180}, headers=H).json()["minutes"] == 180 and config.get("sync_interval_minutes") == 180
+    assert c.patch("/api/admin/tasks/follows", json={"minutes": 360}, headers=H).json()["minutes"] == 360 and config.get("follow_check_hours") == 6
+    assert c.patch("/api/admin/tasks/lyrics", json={"enabled": False}, headers=H).json()["enabled"] is False
+    # run now: cleanup removes stale staging folders and old finished requests
+    stale = os.path.join(config.get("staging_path"), "request-999")
+    os.makedirs(stale)
+    os.utime(stale, (_t.time() - 7200, _t.time() - 7200))
+    db.execute("INSERT INTO requests (user_id, kind, artist, title, status, detail, created_at, updated_at) VALUES (1,'track','a','old','completed','{}',?,?)",
+               (_t.time() - 40 * 86400, _t.time() - 40 * 86400))
+    assert c.post("/api/admin/tasks/cleanup/run", headers=H).json()["ok"]
+    for _ in range(50):
+        st = {t["key"]: t for t in c.get("/api/admin/tasks").json()["tasks"]}["cleanup"]
+        if not st["running"] and st["result"] != "running…":
+            break
+        _t.sleep(0.1)
+    assert st["result"].startswith("1 leftover") and "1 old request" in st["result"] and not os.path.exists(stale)
+    assert c.post("/api/admin/tasks/nope/run", headers=H).status_code == 404
+    assert scheduler._first_delay("scan") == 30

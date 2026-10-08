@@ -818,12 +818,6 @@ def recover() -> None:
 
 async def loop() -> None:
     recover()
-    last_scan = 0.0
-    last_sync = time.time() - 60 * 60  # first sync shortly after start
-    last_upgrade = time.time()
-    last_follow = time.time() - 23 * 3600  # first new-release check shortly after start
-    last_daily = time.time() - 23 * 3600
-    last_discover = time.time() - 5 * 3600
     while not _stop.is_set():
         try:
             for r in db.query(f"SELECT id FROM requests WHERE status IN ({','.join('?' * len(ACTIVE))}) ORDER BY id", ACTIVE):
@@ -833,30 +827,8 @@ async def loop() -> None:
                 _running[r["id"]] = asyncio.create_task(step(r["id"]))
             for k in [k for k, t in _running.items() if t.done()]:
                 _running.pop(k, None)
-            interval = int(config.get("scan_interval_minutes")) * 60
-            if interval and time.time() - last_scan > interval and not library.state["scanning"]:
-                last_scan = time.time()
-                asyncio.create_task(library.scan())
-            if config.get("upgrade_lossy") and time.time() - last_upgrade > 6 * 3600:
-                last_upgrade = time.time()
-                asyncio.create_task(queue_lossy_upgrades())
-            follow_every = int(config.get("follow_check_hours")) * 3600
-            if follow_every and time.time() - last_follow > follow_every:
-                last_follow = time.time()
-                from .services import follows
-                asyncio.create_task(follows.check_all())
-            if time.time() - last_daily > 24 * 3600:
-                last_daily = time.time()
-                asyncio.create_task(retag_external())
-            if config.get("discover_auto_count") and time.time() - last_discover > 6 * 3600:
-                last_discover = time.time()
-                from .services import discovery
-                asyncio.create_task(discovery.auto_discover())
-            sync_every = int(config.get("sync_interval_minutes")) * 60
-            if sync_every and time.time() - last_sync > sync_every:
-                last_sync = time.time()
-                from .services import sync
-                asyncio.create_task(sync.sync_all())
+            from .services import scheduler
+            scheduler.tick()
             db.execute("DELETE FROM sessions WHERE expires_at < ?", (time.time(),))
         except Exception:  # noqa: BLE001
             traceback.print_exc()

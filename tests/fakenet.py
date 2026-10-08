@@ -222,7 +222,8 @@ async def acoustid_lookup(request: Request):
     if dur == WRONG_SECONDS:
         recs = [{"id": "rec-other", "title": "Totally Different Song", "artists": [{"name": "Someone Else"}], "duration": 11}]
     elif rec:
-        recs = [{"id": rec, "title": REC_TITLES[rec], "artists": [{"name": ARTIST["name"]}], "duration": dur}]
+        rgs = [{"id": r["rg"], "title": RGS[r["rg"]]["title"]} for r in RELEASES.values() if any(t[1] == rec for t in r["tracks"])]
+        recs = [{"id": rec, "title": REC_TITLES[rec], "artists": [{"name": ARTIST["name"]}], "duration": dur, "releasegroups": rgs}]
     else:
         return {"status": "ok", "results": []}
     return {"status": "ok", "results": [{"id": f"ac-{dur}", "score": 0.97, "recordings": recs}]}
@@ -610,6 +611,11 @@ def itunes_lookup(id: int, entity: str = "album", limit: int = 200):
             {"wrapperType": "collection", "collectionId": cid, "collectionName": t, "releaseDate": d, "trackCount": n,
              "artworkUrl100": f"https://is1-ssl.mzstatic.com/image/thumb/{cid}/100x100bb.jpg", "collectionViewUrl": f"https://music.apple.com/us/album/{cid}"}
             for cid, t, d, n in APPLE_ALBUMS]}
+    if id == 601 and entity == "song":
+        return {"results": [{"wrapperType": "collection", "collectionName": "Fake Album", "artistName": ARTIST["name"], "releaseDate": "2020-01-01T08:00:00Z",
+                             "primaryGenreName": "Electronic", "artworkUrl100": "https://is1-ssl.mzstatic.com/image/thumb/601/100x100bb.jpg"}] + [
+            {"wrapperType": "track", "trackName": t, "artistName": ARTIST["name"], "trackNumber": i, "discNumber": 1, "trackTimeMillis": s * 1000}
+            for i, (t, _, s, _) in enumerate(ALBUM_TRACKS, 1)]}
     if id == 603 and entity == "song":
         return {"results": [{"wrapperType": "collection"}, {"wrapperType": "track", "trackName": "Exclusive", "artistName": ARTIST["name"],
                                                              "trackNumber": 1, "discNumber": 1, "trackTimeMillis": 7000}]}

@@ -346,6 +346,14 @@ def map_files(files: list[dict], tracks: list[dict]) -> tuple[list[tuple[dict, d
 
 
 def release_values(rel: dict, t: dict) -> dict:
+    if rel.get("provider") and rel["provider"] != "MusicBrainz":
+        mbkeys = ("musicbrainz_trackid", "musicbrainz_releasetrackid", "musicbrainz_albumid", "musicbrainz_releasegroupid",
+                  "musicbrainz_artistid", "musicbrainz_albumartistid", "musicbrainz_albumtype", "musicbrainz_albumstatus")
+        return {k: v for k, v in _release_values(rel, t).items() if k not in mbkeys}
+    return _release_values(rel, t)
+
+
+def _release_values(rel: dict, t: dict) -> dict:
     return {
         "title": t["title"],
         "artist": t["artist"] or rel["artist"],
@@ -379,22 +387,25 @@ def release_values(rel: dict, t: dict) -> dict:
 WRITE_KEYS = [k for k in TAG_KEYS]
 
 
-async def candidates_for_album(album_id: str, query_artist: str | None = None, query_album: str | None = None) -> dict:
+async def candidates_for_album(album_id: str, query_artist: str | None = None, query_album: str | None = None, provider: str = "musicbrainz") -> dict:
     tracks = db.query("SELECT * FROM tracks WHERE album_id=? ORDER BY disc, track, path", (album_id,))
     if not tracks:
         raise ValueError("Album not found")
     artist = query_artist if query_artist is not None else tracks[0]["albumartist"]
     album = query_album if query_album is not None else (tracks[0]["album"] or os.path.basename(os.path.dirname(tracks[0]["path"])))
-    results = await mb.search_releases(artist if artist != "Unknown Artist" else "", album, 20)
+    from . import meta_providers
     n = len(tracks)
+    results = await meta_providers.search(provider, artist if artist != "Unknown Artist" else "", album, n, [t["path"] for t in tracks])
     for r in results:
-        r["match"] = round(r["score"] / 100 * 0.5 + (0.5 if r["track_count"] == n else max(0, 0.5 - abs(r["track_count"] - n) * 0.1)), 3)
+        tc = r.get("track_count") or n
+        r["match"] = round(r["score"] / 100 * 0.5 + (0.5 if tc == n else max(0, 0.5 - abs(tc - n) * 0.1)), 3)
     results.sort(key=lambda r: -r["match"])
-    return {"artist": artist, "album": album, "track_count": n, "candidates": results}
+    return {"artist": artist, "album": album, "track_count": n, "candidates": results, "provider": provider}
 
 
 async def preview(paths: list[str], release_id: str, single: bool = False) -> dict:
-    rel = await mb.release(release_id)
+    from . import meta_providers
+    rel = await meta_providers.release(release_id)
     files = []
     for p in paths:
         t = await asyncio.to_thread(library.read_tags, p)
@@ -419,7 +430,8 @@ async def preview(paths: list[str], release_id: str, single: bool = False) -> di
 async def apply_preview(pv: dict, rename: bool | None = None, source_root: str | None = None) -> list[str]:
     rename = config.get("rename_on_import") if rename is None else rename
     rel = pv["release"]
-    cover = await fetch_cover(rel["id"], rel.get("release_group_id"))
+    cover = await _get_image(rel["cover_url"]) if rel.get("cover_url") else None
+    cover = cover or (await fetch_cover(rel["id"], rel.get("release_group_id")) if rel.get("provider") in (None, "MusicBrainz") else None)
     if not cover:
         art = await find_art(rel["artist"], rel["title"])
         cover = art[0] if art else None
@@ -459,7 +471,7 @@ async def retag_album(album_id: str, release_id: str, rename: bool | None = None
     cached = os.path.join(db.DATA_DIR, "covers", album_id + ".jpg")
     if os.path.exists(cached):
         os.remove(cached)
-    db.log("info", f"Tagged album '{pv['release']['title']}' by {pv['release']['artist']} from MusicBrainz")
+    db.log("info", f"Tagged album '{pv['release']['title']}' by {pv['release']['artist']} from {pv['release'].get('provider') or 'MusicBrainz'}")
     return new_paths
 
 

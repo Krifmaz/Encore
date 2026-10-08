@@ -36,6 +36,15 @@ DEFAULTS: dict[str, tuple[str | None, object, bool]] = {
     "auto_request_likes": ("ENCORE_AUTO_REQUEST_LIKES", False, False),
     "auto_request_follows": ("ENCORE_AUTO_REQUEST_FOLLOWS", True, False),  # new releases of followed artists
     "follow_check_hours": ("ENCORE_FOLLOW_CHECK_HOURS", 12, False),
+    # scheduled tasks (Settings → Scheduled tasks); older interval settings above still apply to their tasks
+    "task_lyrics_enabled": (None, True, False), "task_lyrics_minutes": (None, 720, False),
+    "task_artwork_enabled": (None, True, False), "task_artwork_minutes": (None, 1440, False),
+    "task_retag_enabled": (None, True, False), "task_retag_minutes": (None, 1440, False),
+    "task_verify_enabled": (None, False, False), "task_verify_minutes": (None, 1440, False),
+    "task_cleanup_enabled": (None, True, False), "task_cleanup_minutes": (None, 1440, False),
+    "task_cleanup_days": (None, 14, False),
+    "task_lossy_minutes": (None, 360, False),
+    "task_discover_minutes": (None, 360, False),
     "lyrics_on_import": ("ENCORE_LYRICS_ON_IMPORT", True, False),
     "lyrics_save_files": ("ENCORE_LYRICS_SAVE_FILES", True, False),   # .lrc / .txt next to each song
     "lyrics_embed": ("ENCORE_LYRICS_EMBED", False, False),

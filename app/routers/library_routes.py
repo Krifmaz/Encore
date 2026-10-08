@@ -379,26 +379,33 @@ async def album_artwork(album_id: str, user=Depends(auth.admin_user)):
 _art_job = {"running": False, "done": 0, "total": 0, "found": 0}
 
 
+async def find_missing_artwork() -> str:
+    if _art_job["running"]:
+        return "already running"
+    _art_job.update(running=True, done=0, total=0, found=0)
+    try:
+        ids = [r["album_id"] for r in db.query("SELECT DISTINCT album_id FROM tracks")]
+        missing = [a for a in ids if not await asyncio.to_thread(library.find_cover, a)]
+        _art_job["total"] = len(missing)
+        for a in missing:
+            data = await _lookup_art(a)
+            if data:
+                await _embed_album_art(a, data)
+                _art_job["found"] += 1
+            _art_job["done"] += 1
+        msg = f"found {_art_job['found']} of {_art_job['total']} missing covers"
+        if missing:
+            db.log("info", f"Artwork: {msg}")
+        return msg
+    finally:
+        _art_job["running"] = False
+
+
 @router.post("/artwork")
 async def missing_artwork(user=Depends(auth.admin_user)):
     if _art_job["running"]:
         raise HTTPException(409, "Already running")
-
-    async def run():
-        ids = [r["album_id"] for r in db.query("SELECT DISTINCT album_id FROM tracks")]
-        missing = [a for a in ids if not await asyncio.to_thread(library.find_cover, a)]
-        _art_job.update(running=True, done=0, total=len(missing), found=0)
-        try:
-            for a in missing:
-                data = await _lookup_art(a)
-                if data:
-                    await _embed_album_art(a, data)
-                    _art_job["found"] += 1
-                _art_job["done"] += 1
-            db.log("info", f"Artwork: found {_art_job['found']} of {_art_job['total']} missing covers")
-        finally:
-            _art_job["running"] = False
-    asyncio.create_task(run())
+    asyncio.create_task(find_missing_artwork())
     return {"ok": True}
 
 
@@ -465,13 +472,16 @@ async def stream(track_id: int, transcode: bool = False, t: float = 0, user=Depe
 
 
 @router.get("/albums/{album_id}/match")
-async def match(album_id: str, artist: str | None = None, album: str | None = None, user=Depends(auth.admin_user)):
+async def match(album_id: str, artist: str | None = None, album: str | None = None, provider: str = "musicbrainz", user=Depends(auth.admin_user)):
+    from ..services import meta_providers
+    if provider not in meta_providers.PROVIDERS:
+        raise HTTPException(400, "Unknown metadata source")
     try:
-        return await tagger.candidates_for_album(album_id, artist, album)
+        return await tagger.candidates_for_album(album_id, artist, album, provider)
     except ValueError as e:
-        raise HTTPException(404, str(e))
+        raise HTTPException(400 if "Album not found" not in str(e) else 404, str(e))
     except Exception as e:  # noqa: BLE001
-        raise HTTPException(502, f"MusicBrainz error: {e}")
+        raise HTTPException(502, f"{meta_providers.PROVIDERS[provider]} error: {e}")
 
 
 @router.get("/albums/{album_id}/preview")
@@ -482,7 +492,7 @@ async def preview(album_id: str, release_id: str, user=Depends(auth.admin_user))
     try:
         pv = await tagger.preview(paths, release_id)
     except Exception as e:  # noqa: BLE001
-        raise HTTPException(502, f"MusicBrainz error: {e}")
+        raise HTTPException(502, f"Metadata lookup failed: {e}")
     lib = config.get("library_path").rstrip("/") + "/"
     for row in pv["rows"]:
         row.pop("values", None)
