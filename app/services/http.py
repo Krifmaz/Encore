@@ -20,7 +20,7 @@ def client() -> httpx.AsyncClient:
             timeout=httpx.Timeout(30.0, connect=10.0),
             follow_redirects=True,
             transport=transport,
-            headers={"User-Agent": f"Encore/{__version__} ( https://github.com/krifmaz/test )"},
+            headers={"User-Agent": f"Encore/{__version__} ( https://github.com/Krifmaz/Encore )"},
         )
         _clients[key] = c
     return c

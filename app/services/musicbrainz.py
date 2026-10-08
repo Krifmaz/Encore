@@ -11,7 +11,7 @@ CACHE_TTL = 3600
 
 
 def _ua() -> str:
-    contact = config.get("contact_email") or "https://github.com/krifmaz/test"
+    contact = config.get("contact_email") or "https://github.com/Krifmaz/Encore"
     return f"Encore/{__version__} ( {contact} )"
 
 
