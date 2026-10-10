@@ -134,12 +134,9 @@ async def start(r: dict) -> None:
     if r["kind"] == "track" and await try_album_upgrade(r):
         return
     if r["kind"] == "artist":
-        if lidarr.enabled():
-            upd(r, source="lidarr", status="searching", message="Adding artist to Lidarr…")
-            a = await lidarr.ensure_artist(r["mbid"], monitor_all=True)
-            await complete(r, f"Added to Lidarr – monitoring all albums ({a.get('artistName', r['artist'])})")
-        else:
-            await expand_artist(r)
+        # always one request per release, so each goes through every source (Lidarr alone does nothing
+        # without indexers, and the discography would silently never arrive)
+        await expand_artist(r)
         return
     if r["kind"] == "album" and not r["mbid"] and d.get("ext"):
         await _release_info(r)      # Deezer/Apple tracklist: used for matching downloads and tagging
@@ -166,7 +163,8 @@ async def start(r: dict) -> None:
 async def expand_artist(r: dict) -> None:
     upd(r, status="searching", message="Looking up discography…")
     art = await mb.artist(r["mbid"])
-    albums = [g for g in art["release_groups"] if g["type"] in ("Album", "EP") and not g["secondary"]]
+    kinds = {"Album", "EP"} | ({"Single"} if config.get("discography_singles") else set())
+    albums = [g for g in art["release_groups"] if g["type"] in kinds and not g["secondary"]]
     now = time.time()
     n = 0
     for g in albums:
@@ -177,7 +175,7 @@ async def expand_artist(r: dict) -> None:
             (r["user_id"], "album", g["id"], art["name"], g["title"], g["title"], g["year"], g["cover"], "queued", "{}", r["id"], now, now),
         )
         n += 1
-    await complete(r, f"Queued {n} album request(s) from the discography")
+    await complete(r, f"Queued {n} release(s) from the discography" if n else "Nothing new – you already have (or requested) every release")
 
 
 # ---- song → whole album ------------------------------------------------------

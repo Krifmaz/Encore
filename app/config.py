@@ -61,6 +61,7 @@ DEFAULTS: dict[str, tuple[str | None, object, bool]] = {
     "reject_mismatch": ("ENCORE_REJECT_MISMATCH", True, False),
     "dedupe_on_import": ("ENCORE_DEDUPE_ON_IMPORT", True, False),
     # pipeline
+    "discography_singles": ("ENCORE_DISCOGRAPHY_SINGLES", True, False),   # "request discography" includes singles
     "ytdlp_last_resort": ("ENCORE_YTDLP_LAST_RESORT", True, False),
     "source_order": ("ENCORE_SOURCE_ORDER", "lidarr,streamrip,hifi,slskd,ytdlp", False),
     # streamrip (Qobuz / Tidal / Deezer with your own subscription)

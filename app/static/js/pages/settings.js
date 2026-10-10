@@ -34,6 +34,7 @@ const SECTIONS = [
     S('embed_cover', 'Embed cover art in files', 'bool'),
   ] },
   { id: 'pipeline', title: 'Download pipeline', fields: [
+    S('discography_singles', 'Requesting a whole discography includes singles (not just albums and EPs)', 'bool'),
     S('source_order', 'Source order', 'text', { full: true, help: 'Comma-separated: lidarr, streamrip, hifi, slskd, ytdlp. Each source is tried in turn until one succeeds. Lidarr only handles albums.' }),
   ] },
   { id: 'verify', title: 'Verification & duplicates', test: 'acoustid', fields: [

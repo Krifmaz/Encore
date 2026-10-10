@@ -644,15 +644,16 @@ def test_admin_autodownload_lossy_upgrade(world):
 
 def test_artist_requests_lidarr_and_discography(world):
     from app import config, db
+    # even with Lidarr on, a discography becomes one request per release (each tries every source)
     config.set_many({"lidarr_enabled": True})
     r = world.drive(world.req(kind="artist", mbid="a-fake", artist="Fake Band"))
-    assert r["status"] == "completed" and "monitoring all albums" in r["message"]
-    assert NET.lidarr["artists"][1]["addOptions"]["monitor"] == "all"
-    config.set_many({"lidarr_enabled": False})
+    kids = db.query("SELECT title FROM requests WHERE parent_id=?", (r["id"],))
+    assert r["status"] == "completed" and len(kids) == 2, (r, kids)
+    config.set_many({"lidarr_enabled": False, "discography_singles": False})
     db.execute("DELETE FROM requests")
     r = world.drive(world.req(kind="artist", mbid="a-fake", artist="Fake Band"))
     kids = db.query("SELECT title FROM requests WHERE parent_id=?", (r["id"],))
-    assert [k["title"] for k in kids] == ["Fake Album"], "only studio albums/EPs, no singles or compilations"
+    assert [k["title"] for k in kids] == ["Fake Album"], "albums/EPs only when singles are off; never compilations"
 
 
 def test_failed_transfer_moves_to_next_user_and_failure_notifies(world, monkeypatch):
@@ -1216,3 +1217,13 @@ def test_hifi_api_source_and_picker(world):
     assert "hifi" in [s["id"] for s in c.get("/api/picker/sources").json()["sources"]]
 
 
+
+
+def test_artist_discography_request_queues_albums(world):
+    from app import config, db
+    config.set_many({"slskd_enabled": True})
+    rid = world.req(kind="artist", mbid="art-1", artist="Fake Band")
+    r = world.drive(rid)
+    kids = db.query("SELECT kind, title, status FROM requests WHERE parent_id=?", (rid,))
+    assert r["status"] == "completed" and kids, (r, kids, [a["message"] for a in db.query("SELECT message FROM activity ORDER BY id DESC LIMIT 5")])
+    assert all(k["kind"] == "album" for k in kids)
