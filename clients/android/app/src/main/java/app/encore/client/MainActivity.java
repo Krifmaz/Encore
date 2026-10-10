@@ -27,6 +27,10 @@ import android.webkit.WebView;
 import android.webkit.WebViewClient;
 import android.widget.EditText;
 import android.widget.FrameLayout;
+import android.widget.ProgressBar;
+import android.view.Gravity;
+import android.view.View;
+import android.webkit.WebResourceResponse;
 import android.widget.Toast;
 
 import org.json.JSONObject;
@@ -46,6 +50,7 @@ public class MainActivity extends Activity {
     private WebView web;
     private ValueCallback<Uri[]> fileCallback;
     private String pendingShare;
+    private ProgressBar loading;
 
     @Override
     protected void onCreate(Bundle state) {
@@ -54,7 +59,16 @@ public class MainActivity extends Activity {
         web = new WebView(this);
         web.setBackgroundColor(0xFF0B0B12);
         FrameLayout root = new FrameLayout(this);
+        root.setBackgroundColor(0xFF0B0B12);
         root.addView(web, new ViewGroup.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
+        loading = new ProgressBar(this);
+        root.addView(loading, new FrameLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT, Gravity.CENTER));
+        // Android 15 draws apps edge-to-edge: keep the page clear of the status bar and gesture bar
+        root.setOnApplyWindowInsetsListener((v, insets) -> {
+            v.setPadding(insets.getSystemWindowInsetLeft(), insets.getSystemWindowInsetTop(),
+                    insets.getSystemWindowInsetRight(), insets.getSystemWindowInsetBottom());
+            return insets.consumeSystemWindowInsets();
+        });
         setContentView(root);
 
         WebSettings s = web.getSettings();
@@ -81,12 +95,20 @@ public class MainActivity extends Activity {
             public void onPageStarted(WebView view, String url, Bitmap favicon) { }
 
             @Override
+            public void onReceivedHttpError(WebView view, WebResourceRequest req, WebResourceResponse res) {
+                // the saved address now answers with an error (moved port, other service, proxy down): ask again
+                if (req.isForMainFrame() && res.getStatusCode() >= 400) askServer(server() + " answered " + res.getStatusCode());
+            }
+
+            @Override
             public void onPageFinished(WebView view, String url) {
+                loading.setVisibility(View.GONE);
                 if (pendingShare != null) { shareLink(pendingShare); pendingShare = null; }
             }
 
             @Override
             public void onReceivedError(WebView view, WebResourceRequest req, WebResourceError err) {
+                if (req.isForMainFrame()) loading.setVisibility(View.GONE);
                 if (req.isForMainFrame()) askServer("Can't reach " + server() + " – " + err.getDescription());
             }
         });
@@ -159,6 +181,9 @@ public class MainActivity extends Activity {
             runOnUiThread(() -> {
                 if (!good) { askServer("No Encore server answered at " + base); return; }
                 getSharedPreferences(PREFS, MODE_PRIVATE).edit().putString("server", base).apply();
+                loading.setVisibility(View.VISIBLE);
+                web.clearCache(false);
+                web.clearHistory();
                 web.loadUrl(base);
             });
         }).start();

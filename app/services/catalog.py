@@ -410,7 +410,10 @@ async def merged(artist: dict) -> list[dict]:
 def annotate(items: list[dict]) -> list[dict]:
     from .. import db
     for m in items:
-        m["in_library"] = library.has_album(m["artist"], m["title"])
+        row = db.one("SELECT album_id FROM tracks WHERE lower(album)=lower(?) AND (lower(albumartist)=lower(?) OR lower(artist)=lower(?)) LIMIT 1",
+                     (m["title"], m["artist"], m["artist"])) if m.get("title") else None
+        m["in_library"] = bool(row)
+        m["library_album_id"] = row["album_id"] if row else None
         r = db.one("""SELECT status FROM requests WHERE kind='album' AND mbid IS NULL AND lower(artist)=lower(?) AND lower(title)=lower(?)
                       AND status NOT IN ('failed','denied','cancelled') ORDER BY id DESC""", (m["artist"], m["title"]))
         m["request_status"] = r["status"] if r else None

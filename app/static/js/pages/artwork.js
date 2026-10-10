@@ -18,6 +18,9 @@ export function artworkModal(albumId, a, onDone) {
       const r = await api.post(`/library/albums/${albumId}/art`, body);
       toast(`Artwork embedded in ${r.embedded} file(s)`, 'ok');
       m.close();
+      // show the new picture everywhere on the page right away
+      const v = Date.now();
+      document.querySelectorAll(`img[src*="/albums/${albumId}/cover"]`).forEach(img => { img.src = img.src.replace(/[?&]v=\d+/, '') + (img.src.includes('?') ? '&' : '?') + 'v=' + v; });
       onDone?.();
     } catch (e) { toast(e.message, 'err'); el?.classList.remove('busy'); }
   };

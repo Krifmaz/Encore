@@ -1,6 +1,6 @@
 import { api } from '../api.js';
 import * as player from '../player.js';
-import { art, availability, confirmDialog, debounce, emptyState, esc, fmt, icon, skeletonGrid, statusBadge, toast } from '../ui.js';
+import { art, availability, confirmDialog, debounce, emptyState, esc, fmt, icon, modal, skeletonGrid, statusBadge, toast } from '../ui.js';
 import { albumTile, bindTiles, libraryTile, submitRequest } from './common.js';
 import { followModal } from './following.js';
 import { artistCard, moreLikeThis } from './foryou.js';
@@ -231,7 +231,7 @@ export async function renderArtist(view, ctx) {
     ext.innerHTML = `<div class="section-head" style="margin-top:28px"><div><h3>Not in MusicBrainz <span class="faint small">${rel.length}</span></h3>
         <div class="small muted">Found on ${[...new Set(rel.flatMap(m => m.sources.map(s => s.name)))].join(', ').replace(/, ([^,]*)$/, ' and $1')}. Requests skip Lidarr and download from Soulseek, streamrip, YouTube Music or Bandcamp; files are tagged from the source's data.
         Add them to MusicBrainz with Harmony and Encore re-tags them automatically.</div></div></div>
-      <div class="grid">${rel.map((m, i) => `<div class="tile">
+      <div class="grid">${rel.map((m, i) => `<div class="tile" data-ext-open="${i}">
         <div class="art">${art(m.cover, m.title)}
           <div class="corner">${m.in_library ? '<span class="badge ok">In library</span>' : m.request_status ? statusBadge(m.request_status) : '<span class="badge warn">Not in MusicBrainz</span>'}</div>
           <div class="overlay">${m.in_library || m.request_status ? '' : `<button class="fab" data-ext-req="${i}" title="Request">${icon.plus}</button>`}</div></div>
@@ -246,6 +246,17 @@ export async function renderArtist(view, ctx) {
       const r = e.target.closest('[data-ext-req]');
       if (r) { e.stopPropagation(); const res = await submitRequest(extBody(rel[+r.dataset.extReq]), r); if (res) rel[+r.dataset.extReq].request_status = res.status; return; }
       const p = e.target.closest('[data-ext-pick]');
+      const open = !p && !e.target.closest('a, button') && e.target.closest('[data-ext-open]');
+      if (open) {
+        const m = rel[+open.dataset.extOpen];
+        if (m.library_album_id) { ctx.navigate(`/library/album/${m.library_album_id}`); return; }
+        const tracks = await api.post('/discover/catalog/tracks', m.ext).catch(err => { toast(err.message, 'err'); return null; });
+        if (!tracks) return;
+        modal({ title: m.title, body: tracks.length ? `<div class="table-wrap"><table class="table"><tbody>${tracks.map(t => `<tr>
+            <td class="num">${t.track || ''}</td><td><div class="ellipsis" style="font-weight:600">${esc(t.title)}</div>${t.artist ? `<div class="small muted ellipsis">${esc(t.artist)}</div>` : ''}</td>
+            <td class="muted" style="width:56px">${fmt.dur(t.length)}</td></tr>`).join('')}</tbody></table></div>` : '<p class="muted">No track list available.</p>' });
+        return;
+      }
       if (p) {
         e.preventDefault();
         const m = rel[+p.dataset.extPick];

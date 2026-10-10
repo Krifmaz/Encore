@@ -100,6 +100,15 @@ async def artist_similar(mbid: str, user=Depends(auth.current_user)):
     return await discovery.similar_artists(mbid, a["name"])
 
 
+@router.post("/catalog/tracks")
+async def catalog_tracks(ext: dict, user=Depends(auth.current_user)):
+    """Track list of a release that isn't on MusicBrainz (Deezer / Apple / YouTube Music / Bandcamp / Discogs)."""
+    try:
+        return await catalog.tracklist(ext)
+    except Exception as e:  # noqa: BLE001
+        raise HTTPException(502, f"Could not load the track list: {e}")
+
+
 @router.get("/artist/{mbid}/catalog")
 async def artist_catalog(mbid: str, user=Depends(auth.current_user)):
     """Releases on Deezer / Apple Music that MusicBrainz doesn't list for this artist."""

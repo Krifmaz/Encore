@@ -39,3 +39,23 @@
 - Prowlarr: query its Torznab/Newznab API directly and send to the user's own qBittorrent/SABnzbd –
   only worth keeping if torrents/usenet are used. Writing our own indexer scrapers instead of Prowlarr
   is not worth it (Prowlarr maintains hundreds of indexer definitions).
+
+## Added 2026-10-10
+- Artist discographies: tapping an album doesn't open its track list.
+- Artwork fetching is slow or never happens.
+- Search: understand plain sentences / loose phrasing ("that song by X about Y").
+- Fullscreen player: the close X and Now playing / Lyrics / Up next tabs sit under the
+  status bar on Android (same safe-area fix as the hamburger menu).
+- Library → Songs on mobile: the table is wider than the screen, so the ⋯ menu only shows after
+  swiping sideways. Fit rows to the screen width, with ⋯ always visible.
+- Mini player artwork is cropped or zoomed (shows a sliver of the cover instead of the whole square).
+
+## Done 2026-10-10
+- Album art fills its frame everywhere (thumbs, mini player, fullscreen, tiles).
+- Songs list fits phone width; ⋯ always visible.
+- Status bar overlap: Android app pads for system bars; web uses safe-area insets.
+- Duplicates: re-imports no longer create "(2)/(3)" copies – the better file is kept.
+- "Not in MusicBrainz" albums open their track list (or the library album if owned).
+- New artwork shows immediately; failed art lookups retry after 30 min instead of never.
+- Android: loading spinner instead of black screen; asks for the server again when the saved one
+  answers with an error; "Change server" link on the sign-in page.

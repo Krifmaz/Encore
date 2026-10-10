@@ -123,7 +123,7 @@ export function initials(s) {
 export function art(src, label, cls = '') {
   const ph = `<div class="ph">${esc(initials(label))}</div>`;
   if (!src) return ph;
-  return `${ph}<img class="${cls}" src="${esc(src)}" alt="" loading="lazy" onerror="this.remove()" style="position:relative">`;
+  return `${ph}<img class="${cls}" src="${esc(src)}" alt="" loading="lazy" onerror="this.remove()">`;
 }
 
 export const STATUS = {

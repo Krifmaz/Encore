@@ -454,3 +454,25 @@ body.np-open { overflow: hidden; }
 .eye-btn { display: inline-grid; place-items: center; width: 34px; height: 34px; border: 0; border-radius: 8px; background: transparent; color: var(--muted); cursor: pointer; flex: none; }
 .pw-wrap > .eye-btn { position: absolute; right: 4px; top: 50%; transform: translateY(-50%); }
 .eye-btn:hover { color: var(--text); background: var(--panel-2); }
+
+/* every cover image fills its square frame (thumbs, tiles, mini player, fullscreen, detail heads) */
+.thumb > img, .tile .art > img, .np-art > img, .play-thumb > img, .detail-head .cover > img {
+  position: absolute; inset: 0; width: 100%; height: 100%; object-fit: cover;
+}
+
+/* phones / Android app: keep fixed controls clear of the status bar and gesture bar */
+.main { padding-top: max(16px, env(safe-area-inset-top)); }
+.np-top { padding-top: max(14px, env(safe-area-inset-top)); }
+.sidebar { padding-top: max(18px, env(safe-area-inset-top)); }
+.player { padding-bottom: max(10px, env(safe-area-inset-bottom)); }
+
+/* track tables never scroll sideways on phones: ⋯ menu always visible */
+@media (max-width: 760px) {
+  .table-wrap { overflow-x: hidden; }
+  table.table { table-layout: fixed; }
+  .table th, .table td { padding: 10px 8px; }
+  .table th:first-child, .table td:first-child { width: 60px; }
+  .table th:last-child, .table td:last-child { width: 44px; text-align: right; }
+  .table th.hide-sm, .table td.hide-sm { display: none; }
+  .table td .ellipsis, .table td { overflow: hidden; text-overflow: ellipsis; }
+}

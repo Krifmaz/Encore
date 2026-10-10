@@ -267,13 +267,13 @@ def album(album_id: str, raw: bool = False, user=Depends(auth.current_user)):
     }
 
 
-_cover_misses: set[str] = set()
+_cover_misses: dict[str, float] = {}   # album_id -> when the last lookup found nothing (retried after 30 min)
 
 
 @router.get("/albums/{album_id}/cover")
 async def cover(album_id: str, user=Depends(auth.current_user)):
     path = await asyncio.to_thread(library.find_cover, album_id)
-    if not path and album_id not in _cover_misses:
+    if not path and time.time() - _cover_misses.get(album_id, 0) > 1800:
         data = await _lookup_art(album_id)
         if data:
             path = os.path.join(db.DATA_DIR, "covers", album_id + ".jpg")
@@ -281,10 +281,10 @@ async def cover(album_id: str, user=Depends(auth.current_user)):
             with open(path, "wb") as fh:
                 fh.write(data)
         else:
-            _cover_misses.add(album_id)
+            _cover_misses[album_id] = time.time()
     if not path:
         raise HTTPException(404, "No cover")
-    return FileResponse(path, headers={"Cache-Control": "private, max-age=86400"})
+    return FileResponse(path, headers={"Cache-Control": "private, no-cache"})   # revalidate (cheap 304) so new art shows at once
 
 
 async def _lookup_art(album_id: str) -> bytes | None:
@@ -324,7 +324,7 @@ async def _embed_album_art(album_id: str, data: bytes) -> int:
                 fh.write(data)
         except OSError:
             pass
-    _cover_misses.discard(album_id)
+    _cover_misses.pop(album_id, None)
     return n
 
 

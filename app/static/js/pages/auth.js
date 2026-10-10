@@ -17,8 +17,10 @@ export function render(root, { path, query, session }) {
             : mode === 'closed' ? 'Sign-ups are closed. Ask the admin for an account.'
             : `New here? <a href="#/signup" style="color:var(--accent)">${mode === 'invite' ? 'Sign up with an invite' : 'Create an account'}</a>`}
         </p>
+        ${window.EncoreNative?.changeServer ? `<p class="small muted" style="text-align:center;margin:10px 0 0"><a href="#" id="change-server" style="color:var(--accent)">Change server</a></p>` : ''}
       </div>
     </div>`;
+  root.querySelector('#change-server')?.addEventListener('click', (e) => { e.preventDefault(); window.EncoreNative.changeServer(); });
   const form = root.querySelector('form');
   if (!form) return;
   const err = root.querySelector('#auth-err');

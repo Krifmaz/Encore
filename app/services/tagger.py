@@ -265,10 +265,30 @@ def render_path(values: dict, ext: str, single: bool = False) -> str:
     return os.path.join(config.get("library_path"), *parts) + ext.lower()
 
 
-def move_file(src: str, dest: str) -> str:
+_LOSSLESS = {"flac", "alac", "wav", "aiff", "aif", "ape", "wv"}
+
+
+def _file_rank(path: str) -> tuple:
+    try:
+        t = library.read_tags(path)
+    except Exception:  # noqa: BLE001
+        return (0, 0, 0)
+    return (t["format"] in _LOSSLESS, t["bitrate"] or 0, os.path.getsize(path))
+
+
+def move_file(src: str, dest: str, replace_same: bool = False) -> str:
+    """Move src to dest. Imports pass replace_same: a file already at dest is the same song (same
+    artist/album/track/title path), so keep only the better of the two instead of adding "(2)" copies."""
     if os.path.abspath(src) == os.path.abspath(dest):
         return src
     os.makedirs(os.path.dirname(dest), exist_ok=True)
+    if replace_same and os.path.exists(dest):
+        if _file_rank(src) > _file_rank(dest):
+            shutil.move(src, dest + ".encore-new")
+            os.replace(dest + ".encore-new", dest)
+        else:
+            os.remove(src)
+        return dest
     base, ext = os.path.splitext(dest)
     i = 2
     while os.path.exists(dest):
@@ -447,7 +467,7 @@ async def apply_preview(pv: dict, rename: bool | None = None, source_root: str |
             write_tags(path, vals, cover)
             if rename:
                 old_dirs.add(os.path.dirname(path))
-                path = move_file(path, row["new_path"])
+                path = move_file(path, row["new_path"], replace_same=source_root is not None)
             new_paths.append(path)
         if cover and config.get("save_cover") and new_paths:
             d = os.path.dirname(new_paths[0])
@@ -561,7 +581,7 @@ async def import_single(path: str, artist: str, title: str, recording_id: str | 
     def _go():
         write_tags(path, {k: v for k, v in vals.items() if k in TAG_KEYS}, cover)
         dest = render_path(vals, ext, single=True)
-        new = move_file(path, dest)
+        new = move_file(path, dest, replace_same=True)
         prune_empty(os.path.dirname(path), source_root or config.get("staging_path"))
         return new
 
@@ -646,7 +666,7 @@ async def import_album_files(paths: list[str], artist: str, album: str, rgid: st
                 except Exception:  # noqa: BLE001
                     pass
             dest = render_path(vals, os.path.splitext(p)[1])
-            out.append(move_file(p, dest))
+            out.append(move_file(p, dest, replace_same=True))
             prune_empty(os.path.dirname(p), source_root)
         if cover and config.get("save_cover") and out:
             d = os.path.dirname(out[0])
