@@ -54,7 +54,7 @@ class TagEdit(BaseModel):
 
 @router.get("/stats")
 def stats(user=Depends(auth.current_user)):
-    return {**library.stats(), "scan": library.state, "bulk": _bulk, "verify": verify.state, "artwork": _art_job,
+    return {**library.stats(), "scan": library.state, "bulk": _bulk, "verify": verify.state, "artwork": _art_job, "organize": _organize_state(),
             "acoustid": acoustid.available()}
 
 
@@ -570,6 +570,21 @@ async def delete_album(album_id: str, user=Depends(auth.admin_user)):
     for d in dirs:
         tagger.prune_empty(d, config.get("library_path"))
     db.log("info", f"{user['username']} deleted album {album_id} ({len(rows)} files)")
+    return {"ok": True}
+
+
+def _organize_state():
+    from ..services import organize
+    return organize.state
+
+
+@router.post("/organize")
+async def organize_files(fill_missing: bool = True, user=Depends(auth.admin_user)):
+    """Move every file to the naming template (Artist/Album/NN Title), filling missing tags first."""
+    from ..services import organize
+    if organize.state["running"]:
+        raise HTTPException(409, "Already organizing")
+    asyncio.create_task(organize.organize_library(fill_missing))
     return {"ok": True}
 
 

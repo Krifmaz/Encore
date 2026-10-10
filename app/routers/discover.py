@@ -26,21 +26,41 @@ def annotate_albums(items: list[dict]) -> list[dict]:
 
 @router.get("/search")
 async def search(q: str, type: str = "all"):
+    """Plain words or whole sentences ("the song blinding lights by the weeknd", "that song that goes …")."""
+    import asyncio
+
+    from ..services import nlsearch
     q = q.strip()
     if len(q) < 2:
         return {"artists": [], "albums": [], "tracks": []}
+    p = nlsearch.parse(q)
+    words = p["q"] if p["sentence"] else q
     try:
-        out = {"artists": [], "albums": [], "tracks": []}
+        out = {"artists": [], "albums": [], "tracks": [], "understood": p if p["sentence"] else None}
         if type in ("all", "artist"):
-            out["artists"] = await mb.search_artists(q, 12 if type == "all" else 30)
+            out["artists"] = await mb.search_artists(p["artist"] or words, 12 if type == "all" else 30)
             names = {a["name"].lower() for a in out["artists"]}
             have = {r["n"] for r in db.query("SELECT DISTINCT lower(albumartist) n FROM tracks")} & names
             for a in out["artists"]:
                 a["in_library"] = a["name"].lower() in have
         if type in ("all", "album"):
-            out["albums"] = annotate_albums(await mb.search_albums(q, 18 if type == "all" else 40))
+            aq = f'releasegroup:"{mb.esc(p["title"])}" AND artist:"{mb.esc(p["artist"])}"' if p["title"] and p["artist"] else words
+            out["albums"] = annotate_albums(await mb.search_albums(aq, 18 if type == "all" else 40))
         if type in ("all", "track"):
-            tracks = await mb.search_recordings(q, 15 if type == "all" else 40)
+            n = 15 if type == "all" else 40
+            if p["title"] and p["artist"]:
+                tracks = await mb.search_recordings(p["title"], n, artist=p["artist"])
+            elif p["lyrics"]:
+                tracks = []
+            else:
+                tracks = await mb.search_recordings(words, n)
+            if p["sentence"] and (p["lyrics"] or len(tracks) < 3):
+                # loose wording or lyrics: let Deezer / LRCLIB guess the song, then find it on MusicBrainz
+                guesses = await (nlsearch.lyric_tracks(p["lyrics"]) if p["lyrics"] else nlsearch.deezer_tracks(q))
+                found = await asyncio.gather(*[mb.search_recordings(t, 2, artist=a) for t, a in guesses[:4]], return_exceptions=True)
+                seen = {t["id"] for t in tracks}
+                extra = [t for lst in found if isinstance(lst, list) for t in lst[:1] if not (t["id"] in seen or seen.add(t["id"]))]
+                tracks = extra + tracks if p["lyrics"] else tracks + extra
             st = _req_status([t["id"] for t in tracks])
             for t in tracks:
                 t["in_library"] = library.has_track(t["id"], t["artist"], t["title"])

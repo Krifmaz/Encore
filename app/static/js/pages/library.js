@@ -1,5 +1,5 @@
 import { api } from '../api.js';
-import { art, confirmDialog, debounce, emptyState, esc, fmt, icon, modal, popMenu, skeletonGrid, toast } from '../ui.js';
+import { art, confirmDialog, copyText, debounce, emptyState, esc, fmt, icon, modal, popMenu, skeletonGrid, toast } from '../ui.js';
 import { bindTiles, libraryTile } from './common.js';
 import { addToPlaylistModal } from './playlists.js';
 import * as player from '../player.js';
@@ -26,6 +26,15 @@ export function trackMenu(anchor, t, { admin = false, onDeleted } = {}) {
     { label: 'Add to playlist', icon: icon.plus, onClick: () => addToPlaylistModal([t.id]) },
     { label: 'More like this', icon: icon.spark, onClick: async () => (await import('./foryou.js')).moreLikeThis(t.artist, t.title, t.mb_trackid) },
     { label: 'Lyrics', icon: icon.music, onClick: async () => (await import('./lyrics.js')).lyricsModal(t) },
+    { label: 'Share link', icon: icon.external, onClick: async () => {
+      try {
+        const r = await api.post(`/library/tracks/${t.id}/share`);
+        const url = new URL(r.path, location.href).href;
+        if (navigator.share) { try { await navigator.share({ title: t.title, text: `${t.title} – ${t.artist}`, url }); return; } catch { /* cancelled → copy */ } }
+        await copyText(url);
+        toast('Link copied – anyone with it can play this song', 'ok');
+      } catch (e) { toast(e.message, 'err'); }
+    } },
     { label: 'Download this song', icon: icon.download, href: `/api/library/tracks/${t.id}/file`, download: true },
     t.album_id ? { label: 'Go to album', icon: icon.disc, href: `#/library/album/${t.album_id}` } : null,
     ...(admin ? ['-', { label: 'Delete song from disk', icon: icon.trash, danger: true, onClick: async () => {
@@ -56,6 +65,7 @@ export async function render(view, ctx) {
       ${admin ? `<div class="row wrap">
         <button class="btn sm" id="scan-btn">${icon.refresh}Scan</button>
         <button class="btn sm" id="autotag-btn">${icon.tag}Auto-tag untagged</button>
+        <button class="btn sm" id="organize-btn" title="Move every file into Artist/Album/NN Title folders (your naming template), filling in missing tags first">${icon.disc}Organize files</button>
         <button class="btn sm" id="verify-btn">${icon.shield}Verify audio</button>
         <button class="btn sm" id="art-all">${icon.disc}Find missing artwork</button>
       </div>` : ''}
@@ -177,16 +187,18 @@ export async function render(view, ctx) {
     const poll = async () => {
       const s = await api.get('/library/stats');
       const scanning = s.scan.scanning, b = s.bulk;
-      bulk.classList.toggle('hidden', !scanning && !b.running && !s.verify.running && !(s.artwork && s.artwork.running));
+      const org = s.organize || {};
+      bulk.classList.toggle('hidden', !scanning && !b.running && !s.verify.running && !(s.artwork && s.artwork.running) && !org.running);
       const vc = s.verify_counts || {};
       view.querySelector('#verify-btn').innerHTML = `${icon.shield}Verify audio${vc.unchecked ? ` <span class="badge">${fmt.num(vc.unchecked)} unchecked</span>` : ''}${vc.mismatch ? ` <span class="badge err">${vc.mismatch} wrong</span>` : ''}`;
       view.querySelector('#verify-btn').dataset.acoustid = s.acoustid ? '1' : '';
       if (scanning) bulk.innerHTML = `<div class="row"><span class="spinner"></span><b>Scanning library</b><span class="muted">${s.scan.progress} / ${s.scan.total} files</span></div><div class="progress mt"><i style="width:${s.scan.total ? s.scan.progress / s.scan.total * 100 : 0}%"></i></div>`;
       else if (s.artwork && s.artwork.running) bulk.innerHTML = `<div class="row"><span class="spinner"></span><b>Finding artwork</b><span class="muted">${s.artwork.done} / ${s.artwork.total} · ${s.artwork.found} found</span></div><div class="progress mt"><i style="width:${s.artwork.total ? s.artwork.done / s.artwork.total * 100 : 0}%"></i></div>`;
       else if (s.verify.running) bulk.innerHTML = `<div class="row"><span class="spinner"></span><b>Verifying audio fingerprints</b><span class="muted ellipsis">${s.verify.done} / ${s.verify.total} · ${s.verify.verified} ok · ${s.verify.mismatch} wrong · ${s.verify.unknown} unknown · ${esc(s.verify.current)}</span></div><div class="progress mt"><i style="width:${s.verify.total ? s.verify.done / s.verify.total * 100 : 0}%"></i></div>`;
+      else if (org.running) bulk.innerHTML = `<div class="row"><span class="spinner"></span><b>Organizing files</b><span class="muted ellipsis">${org.done} / ${org.total} · ${org.moved} moved · ${org.fixed} re-tagged · ${esc(org.current)}</span></div><div class="progress mt"><i style="width:${org.total ? org.done / org.total * 100 : 0}%"></i></div>`;
       else if (b.running) bulk.innerHTML = `<div class="row"><span class="spinner"></span><b>Auto-tagging</b><span class="muted ellipsis">${b.done} / ${b.total} · ${b.tagged} tagged · ${b.skipped} skipped · ${esc(b.current)}</span></div><div class="progress mt"><i style="width:${b.total ? b.done / b.total * 100 : 0}%"></i></div>`;
       view.querySelector('#autotag-btn').innerHTML = `${icon.tag}Auto-tag untagged${s.untagged_albums ? ` <span class="badge warn">${s.untagged_albums}</span>` : ''}`;
-      return scanning || b.running || s.verify.running || !!(s.artwork && s.artwork.running);
+      return scanning || b.running || s.verify.running || !!(s.artwork && s.artwork.running) || !!org.running;
     };
     let wasBusy = await poll();
     const timer = setInterval(async () => {
@@ -195,6 +207,10 @@ export async function render(view, ctx) {
       wasBusy = busy;
     }, 2500);
     ctx.onLeave(() => clearInterval(timer));
+    view.querySelector('#organize-btn').onclick = async () => {
+      if (!await confirmDialog('Organize files', 'Every song is moved into folders from its tags using your naming template (Settings → Library, tagging & IDs), e.g. Artist/Album (Year)/01 - Title. Missing tags are filled in first from the file name, AcoustID and Deezer. Playlists and likes keep working.', 'Organize')) return;
+      try { await api.post('/library/organize'); toast('Organizing…', 'ok'); setTimeout(() => window.dispatchEvent(new HashChangeEvent('hashchange')), 800); } catch (e) { toast(e.message, 'err'); }
+    };
     view.querySelector('#scan-btn').onclick = async () => {
       try { await api.post('/library/scan'); toast('Library scan started', 'ok'); wasBusy = true; poll(); } catch (e) { toast(e.message, 'err'); }
     };

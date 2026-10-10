@@ -65,3 +65,10 @@
   dropdown page picker on phones, no sideways tab bar.
 - Password reset by email: SMTP settings + test, "Forgot password?" on sign-in, email on Account page.
 - Removed: localized names, 30-second previews.
+- Share a song: ⋯ → Share link; the public page plays only that song (no login, no way into the library).
+- Search understands sentences ("the song X by Y", "radiohead album …", "that song that goes …" via lyrics).
+- Library → Organize files: Artist/Album (Year)/NN Title from tags; missing tags filled from the file
+  name, AcoustID and Deezer first.
+- Removed the built-in services (aio image: slskd, Lidarr, Prowlarr, qBittorrent, SABnzbd).
+  Lidarr/slskd still work as your own external containers.
+- Android: built-in server screen with saved servers (add / open / remove), no clearing app data.

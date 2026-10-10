@@ -1,0 +1,50 @@
+<!doctype html>
+<html lang="en"><head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<style>
+  :root { color-scheme: dark; --bg: #0b0b12; --panel: #161622; --panel2: #1e1e2e; --border: #2a2a3d; --text: #f3f3f8; --muted: #9a9ab0; --accent: #8b5cf6; --err: #ef4444; }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--text); font: 16px/1.45 system-ui, sans-serif; padding: 28px 18px; }
+  h1 { font-size: 28px; margin: 6px 0 4px; } p { color: var(--muted); margin: 0 0 20px; }
+  .list { display: flex; flex-direction: column; gap: 10px; margin-bottom: 22px; }
+  .srv { display: flex; align-items: center; gap: 10px; background: var(--panel); border: 1px solid var(--border); border-radius: 14px; padding: 14px; }
+  .srv.cur { border-color: var(--accent); }
+  .srv .u { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-weight: 600; }
+  button { font: inherit; border: 0; border-radius: 12px; padding: 12px 16px; background: var(--panel2); color: var(--text); }
+  button.primary { background: linear-gradient(135deg, #8b5cf6, #ec4899); font-weight: 650; }
+  button.x { background: transparent; color: var(--muted); padding: 8px 10px; }
+  input { width: 100%; font: inherit; padding: 14px; border-radius: 12px; border: 1px solid var(--border); background: var(--panel); color: var(--text); margin-bottom: 10px; }
+  .err { color: var(--err); min-height: 1.4em; margin-bottom: 8px; }
+  .row { display: flex; gap: 10px; } .row > * { flex: 1; }
+  .muted { color: var(--muted); font-size: 14px; }
+</style></head>
+<body>
+  <h1>Encore</h1>
+  <p>Choose your Encore server, or add one – the address you open Encore at in your browser.</p>
+  <div class="list" id="list"></div>
+  <input id="url" type="url" inputmode="url" autocapitalize="off" autocorrect="off" spellcheck="false" placeholder="http://192.168.1.10:8080 or https://music.example.com">
+  <div class="err" id="err"></div>
+  <button class="primary" id="add" style="width:100%">Connect</button>
+  <div class="muted" style="margin-top:14px">Changed port or address? Just add the new one here – saved servers stay until you remove them.</div>
+<script>
+  const $ = (id) => document.getElementById(id);
+  const esc = (s) => String(s).replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+  const busy = (on) => { document.querySelectorAll('button').forEach(b => b.disabled = on); $('add').textContent = on ? 'Connecting…' : 'Connect'; };
+  function paint() {
+    const d = JSON.parse(EncoreNative.servers());
+    $('list').innerHTML = d.list.map((u, i) => `<div class="srv ${u === d.current ? 'cur' : ''}"><div class="u">${esc(u)}</div>
+      <button data-go="${i}">Open</button><button class="x" data-rm="${i}" aria-label="Remove">✕</button></div>`).join('');
+    $('list').onclick = (e) => {
+      const go = e.target.closest('[data-go]'), rm = e.target.closest('[data-rm]');
+      if (go) { busy(true); $('err').textContent = ''; EncoreNative.connect(d.list[+go.dataset.go]); }
+      if (rm) { EncoreNative.removeServer(d.list[+rm.dataset.rm]); paint(); }
+    };
+    const err = new URLSearchParams(location.search).get('err');
+    if (err) $('err').textContent = err;
+  }
+  window.onConnectError = (msg) => { busy(false); $('err').textContent = msg; };
+  $('add').onclick = () => { const u = $('url').value.trim(); if (!u) return; busy(true); $('err').textContent = ''; EncoreNative.connect(u); };
+  $('url').onkeydown = (e) => { if (e.key === 'Enter') $('add').click(); };
+  paint();
+</script>
+</body></html>

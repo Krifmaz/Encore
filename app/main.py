@@ -7,8 +7,8 @@ from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 
 from . import __version__, auth, config, db, worker
-from .routers import admin, auth_routes, diagnostics, discover, follows_routes, library_routes, picker_routes, playlists_routes, requests_routes, stats_routes, svc_proxy, system
-from .services import embedded, http
+from .routers import admin, auth_routes, diagnostics, discover, follows_routes, library_routes, picker_routes, playlists_routes, requests_routes, share_routes, stats_routes, system
+from .services import http
 
 STATIC = os.path.join(os.path.dirname(__file__), "static")
 
@@ -23,11 +23,9 @@ async def lifespan(app: FastAPI):
             os.makedirs(p, exist_ok=True)
         except OSError:
             pass
-    await embedded.start()      # built-in slskd/Lidarr/Prowlarr/qBittorrent/SABnzbd (all-in-one image)
     task = asyncio.create_task(worker.loop()) if os.environ.get("ENCORE_WORKER", "1") != "0" else None
     yield
     worker._stop.set()
-    await embedded.stop()
     if task:
         task.cancel()
     await http.close()
@@ -35,7 +33,7 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(title="Encore", version=__version__, lifespan=lifespan, docs_url="/api/docs", redoc_url=None, openapi_url="/api/openapi.json")
 
-for r in (auth_routes, admin, discover, requests_routes, library_routes, playlists_routes, system, diagnostics, follows_routes, picker_routes, stats_routes, svc_proxy):
+for r in (auth_routes, admin, discover, requests_routes, library_routes, playlists_routes, system, diagnostics, follows_routes, picker_routes, stats_routes, share_routes):
     app.include_router(r.router)
 
 
@@ -43,13 +41,10 @@ for r in (auth_routes, admin, discover, requests_routes, library_routes, playlis
 async def security_headers(request: Request, call_next):
     resp = await call_next(request)
     resp.headers.setdefault("X-Content-Type-Options", "nosniff")
-    if not request.url.path.startswith("/svc/"):
-        resp.headers.setdefault("X-Frame-Options", "DENY")
+    resp.headers.setdefault("X-Frame-Options", "DENY")
     resp.headers.setdefault("Referrer-Policy", "same-origin")
     if request.url.path.startswith("/api/"):
         resp.headers.setdefault("Cache-Control", "no-store")
-    elif request.url.path.startswith("/svc/"):
-        pass    # the built-in services set their own caching
     else:
         # app files: browsers must re-check on every load (cheap 304s), so updates show up immediately
         resp.headers.setdefault("Cache-Control", "no-cache")

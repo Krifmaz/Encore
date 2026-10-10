@@ -78,12 +78,8 @@ jobs:
       - name: Build image files (amd64)
         run: |
           V=${GITHUB_REF_NAME#v}
-          for target in default aio; do
-            name=encore-$V-amd64; [ "$target" = aio ] && name=encore-aio-$V-amd64
-            tag=ghcr.io/krifmaz/encore:$V; [ "$target" = aio ] && tag=ghcr.io/krifmaz/encore:$V-aio
-            docker buildx build --platform linux/amd64 --target $target --build-arg ENCORE_BUILD=${GITHUB_SHA} -t $tag -o type=docker,dest=$name.tar .
-            gzip -1 $name.tar
-          done
+          docker buildx build --platform linux/amd64 --target default --build-arg ENCORE_BUILD=${GITHUB_SHA} -t ghcr.io/krifmaz/encore:$V -o type=docker,dest=encore-$V-amd64.tar .
+          gzip -1 encore-$V-amd64.tar
       - uses: actions/upload-artifact@v4
         with:
           name: Encore-docker
@@ -101,7 +97,7 @@ jobs:
         with:
           path: out
           merge-multiple: true
-      - run: cp src/docker-compose.yml src/docker-compose.aio.yml out/
+      - run: cp src/docker-compose.yml out/
       - uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ startsWith(github.ref, 'refs/tags/v') && github.ref_name || 'apps-latest' }}
@@ -110,9 +106,8 @@ jobs:
           make_latest: "true"
           body: |
             ### Server (Docker)
-            * `docker pull ghcr.io/krifmaz/encore:${{ startsWith(github.ref, 'refs/tags/v') && github.ref_name || 'latest' }}` – Encore (use with your own Lidarr/slskd) · compose file: `docker-compose.yml`
-            * `docker pull ghcr.io/krifmaz/encore:aio` – all-in-one with slskd, Lidarr, Prowlarr, qBittorrent and SABnzbd built in · compose file: `docker-compose.aio.yml`
-            * Offline install (version releases): `docker load -i encore-<version>-amd64.tar.gz` (or the `encore-aio-…` file)
+            * `docker pull ghcr.io/krifmaz/encore:${{ startsWith(github.ref, 'refs/tags/v') && github.ref_name || 'latest' }}` · compose file: `docker-compose.yml`
+            * Offline install (version releases): `docker load -i encore-<version>-amd64.tar.gz`
 
             ### Apps – install, then enter the address you open Encore at (e.g. http://192.168.1.10:8080)
             * **Android**: `Encore-android.apk` (allow installing from your browser/files app when asked). Share a Spotify/YouTube Music link to Encore to download it.

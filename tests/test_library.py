@@ -86,3 +86,57 @@ def test_map_files_by_title_without_numbers():
     pairs, conf = map_files(files, tracks)
     assert pairs[0][1]["title"] == "Beta" and pairs[1][1]["title"] == "Alpha"
     assert conf > 0.8
+
+
+def test_organize_moves_files_and_fills_tags(env, monkeypatch):
+    from app import config, db
+    from app.services import library, organize
+    db.connect()
+    config.load()
+    music = str(env / "music")
+    make_audio(f"{music}/dump/01 - Opening.mp3", title="Opening", artist="Band", album="Record", track=1)
+    make_audio(f"{music}/dump/Loner - Lost Song.mp3", title="", artist="", album="", track=0)
+    asyncio.run(library.scan())
+
+    async def fake_deezer(artist, title):
+        return {"album": "Found Album", "year": "2020", "track": 4} if title == "Lost Song" else {}
+    monkeypatch.setattr(organize, "_deezer", fake_deezer)
+    msg = asyncio.run(organize.organize_library())
+    assert "2 moved" in msg
+    paths = sorted(r["path"][len(music):] for r in db.query("SELECT path FROM tracks"))
+    assert paths[0].startswith("/Band/Record") and paths[0].endswith("01 - Opening.mp3")
+    assert paths[1].startswith("/Loner/Found Album (2020)") and paths[1].endswith("04 - Lost Song.mp3")
+    assert not os.path.exists(f"{music}/dump")
+    assert db.one("SELECT title FROM tracks WHERE path LIKE '%Lost Song%'")["title"] == "Lost Song"
+
+
+def test_sentence_search_parsing():
+    from app.services.nlsearch import parse
+    p = parse("the song blinding lights by the weeknd")
+    assert (p["title"], p["artist"], p["kind"]) == ("blinding lights", "the weeknd", "track")
+    assert parse("that song that goes is this the real life")["lyrics"] == "is this the real life"
+    assert parse("play some music by daft punk")["q"] == "daft punk"
+    assert not parse("Blinding Lights")["sentence"]
+
+
+def test_share_link_plays_only_that_song(client, env):
+    import asyncio as aio
+
+    from app import db
+    from app.services import library
+    music = str(env / "music")
+    make_audio(f"{music}/A/B/01 - One.mp3", title="One", artist="A", album="B", track=1)
+    make_audio(f"{music}/A/B/02 - Two.mp3", title="Two", artist="A", album="B", track=2)
+    aio.run(library.scan())
+    one = db.one("SELECT id FROM tracks WHERE title='One'")["id"]
+    H = {"X-Requested-With": "encore"}
+    client.post("/api/auth/login", json={"username": "admin", "password": "adminpass123"})
+    tok = client.post(f"/api/library/tracks/{one}/share", headers=H).json()["token"]
+    client.cookies.clear()
+    assert client.get(f"/api/share/{tok}").json()["title"] == "One"
+    assert client.get(f"/api/share/{tok}/stream").status_code == 200
+    assert client.get(f"/s/{tok}").status_code == 200
+    assert client.get("/api/share/nope").status_code == 404
+    # the link opens nothing else
+    assert client.get(f"/api/library/tracks/{one}/stream").status_code == 401
+    assert client.get("/api/library/tracks?limit=5").status_code == 401

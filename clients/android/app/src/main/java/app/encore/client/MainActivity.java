@@ -2,7 +2,6 @@ package app.encore.client;
 
 import android.Manifest;
 import android.app.Activity;
-import android.app.AlertDialog;
 import android.app.DownloadManager;
 import android.content.Context;
 import android.content.Intent;
@@ -13,7 +12,6 @@ import android.net.Uri;
 import android.os.Build;
 import android.os.Bundle;
 import android.os.Environment;
-import android.text.InputType;
 import android.view.ViewGroup;
 import android.webkit.CookieManager;
 import android.webkit.JavascriptInterface;
@@ -25,7 +23,6 @@ import android.webkit.WebResourceRequest;
 import android.webkit.WebSettings;
 import android.webkit.WebView;
 import android.webkit.WebViewClient;
-import android.widget.EditText;
 import android.widget.FrameLayout;
 import android.widget.ProgressBar;
 import android.view.Gravity;
@@ -85,6 +82,7 @@ public class MainActivity extends Activity {
             @Override
             public boolean shouldOverrideUrlLoading(WebView view, WebResourceRequest req) {
                 Uri u = req.getUrl();
+                if ("file".equals(u.getScheme())) return false;
                 Uri home = Uri.parse(server());
                 if (u.getHost() != null && u.getHost().equals(home.getHost()) && u.getPort() == home.getPort()) return false;
                 startActivity(new Intent(Intent.ACTION_VIEW, u));   // external links open in the browser
@@ -97,19 +95,19 @@ public class MainActivity extends Activity {
             @Override
             public void onReceivedHttpError(WebView view, WebResourceRequest req, WebResourceResponse res) {
                 // the saved address now answers with an error (moved port, other service, proxy down): ask again
-                if (req.isForMainFrame() && res.getStatusCode() >= 400) askServer(server() + " answered " + res.getStatusCode());
+                if (req.isForMainFrame() && !req.getUrl().toString().startsWith(PICKER) && res.getStatusCode() >= 400) askServer(server() + " answered " + res.getStatusCode());
             }
 
             @Override
             public void onPageFinished(WebView view, String url) {
                 loading.setVisibility(View.GONE);
-                if (pendingShare != null) { shareLink(pendingShare); pendingShare = null; }
+                if (pendingShare != null && !url.startsWith(PICKER)) { shareLink(pendingShare); pendingShare = null; }
             }
 
             @Override
             public void onReceivedError(WebView view, WebResourceRequest req, WebResourceError err) {
                 if (req.isForMainFrame()) loading.setVisibility(View.GONE);
-                if (req.isForMainFrame()) askServer("Can't reach " + server() + " – " + err.getDescription());
+                if (req.isForMainFrame() && !req.getUrl().toString().startsWith(PICKER)) askServer("Can't reach " + server() + " – " + err.getDescription());
             }
         });
         web.setWebChromeClient(new WebChromeClient() {
@@ -149,38 +147,45 @@ public class MainActivity extends Activity {
         return getSharedPreferences(PREFS, MODE_PRIVATE).getString("server", "");
     }
 
-    /** First start (or the server can't be reached): ask for the Encore address, check it, save it. */
+    static final String PICKER = "file:///android_asset/servers.html";
+
+    /** First start, "Change server", or the saved server can't be reached: the built-in server screen. */
     void askServer(String problem) {
-        EditText input = new EditText(this);
-        input.setInputType(InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_VARIATION_URI);
-        input.setHint("http://192.168.1.10:8080");
-        input.setText(server());
-        new AlertDialog.Builder(this)
-                .setTitle(problem == null ? "Your Encore server" : "Server not reachable")
-                .setMessage(problem == null ? "Enter the address you open Encore at in your browser." : problem)
-                .setView(input)
-                .setCancelable(!server().isEmpty())
-                .setPositiveButton("Connect", (d, w) -> check(input.getText().toString().trim()))
-                .setNegativeButton(problem == null ? "Cancel" : "Retry", (d, w) -> { if (!server().isEmpty()) web.loadUrl(server()); else askServer(null); })
-                .show();
+        loading.setVisibility(View.GONE);
+        web.loadUrl(PICKER + (problem == null ? "" : "?err=" + Uri.encode(problem)));
+    }
+
+    org.json.JSONArray saved() {
+        try { return new org.json.JSONArray(getSharedPreferences(PREFS, MODE_PRIVATE).getString("servers", "[]")); }
+        catch (Exception e) { return new org.json.JSONArray(); }
+    }
+
+    void remember(String base) {
+        org.json.JSONArray list = saved(), out = new org.json.JSONArray();
+        out.put(base);
+        for (int i = 0; i < list.length(); i++) if (!base.equals(list.optString(i))) out.put(list.optString(i));
+        getSharedPreferences(PREFS, MODE_PRIVATE).edit().putString("servers", out.toString()).putString("server", base).apply();
     }
 
     void check(String raw) {
         String url = raw.matches("^https?://.*") ? raw : "http://" + raw;
         final String base = url.replaceAll("/+$", "");
         new Thread(() -> {
-            boolean ok = false;
+            String err = null;
             try {
                 HttpURLConnection c = (HttpURLConnection) new URL(base + "/api/health").openConnection();
                 c.setConnectTimeout(6000);
                 c.setReadTimeout(6000);
-                ok = c.getResponseCode() == 200;
+                int code = c.getResponseCode();
+                if (code != 200) err = base + " answered " + code + " – is that your Encore address?";
                 c.disconnect();
-            } catch (Exception ignored) { }
-            final boolean good = ok;
+            } catch (Exception e) {
+                err = "No Encore server answered at " + base;
+            }
+            final String problem = err;
             runOnUiThread(() -> {
-                if (!good) { askServer("No Encore server answered at " + base); return; }
-                getSharedPreferences(PREFS, MODE_PRIVATE).edit().putString("server", base).apply();
+                if (problem != null) { web.evaluateJavascript("window.onConnectError && onConnectError(" + JSONObject.quote(problem) + ")", null); return; }
+                remember(base);
                 loading.setVisibility(View.VISIBLE);
                 web.clearCache(false);
                 web.clearHistory();
@@ -256,6 +261,25 @@ public class MainActivity extends Activity {
                 i.putExtra("cookie", CookieManager.getInstance().getCookie(server()));
                 if (Build.VERSION.SDK_INT >= 26) startForegroundService(i); else startService(i);
             } catch (Exception ignored) { }
+        }
+
+        @JavascriptInterface
+        public String servers() {
+            try {
+                org.json.JSONArray list = saved();
+                if (list.length() == 0 && !server().isEmpty()) list.put(server());
+                return new JSONObject().put("list", list).put("current", server()).toString();
+            } catch (Exception e) { return "{\"list\":[],\"current\":\"\"}"; }
+        }
+
+        @JavascriptInterface
+        public void connect(String url) { runOnUiThread(() -> check(url.trim())); }
+
+        @JavascriptInterface
+        public void removeServer(String url) {
+            org.json.JSONArray list = saved(), out = new org.json.JSONArray();
+            for (int i = 0; i < list.length(); i++) if (!url.equals(list.optString(i))) out.put(list.optString(i));
+            getSharedPreferences(PREFS, MODE_PRIVATE).edit().putString("servers", out.toString()).apply();
         }
 
         @JavascriptInterface

@@ -19,7 +19,6 @@ import * as followingPage from './pages/following.js';
 import * as forYouPage from './pages/foryou.js';
 import * as storagePage from './pages/storage.js';
 import * as leaderboardPage from './pages/leaderboard.js';
-import * as servicesPage from './pages/services.js';
 
 export const session = { user: null, info: null };
 
@@ -45,7 +44,6 @@ const routes = [
   [/^\/settings$/, settingsPage.render, true],
   [/^\/admin\/autodownload$/, autoPage.render, true],
   [/^\/admin\/diagnostics$/, diagPage.render, true],
-  [/^\/admin\/services$/, servicesPage.render, true],
   [/^\/account$/, accountPage.render],
   [/^\/storage$/, storagePage.render],
   [/^\/leaderboard$/, leaderboardPage.render],
@@ -99,7 +97,6 @@ function renderShell() {
             ${navLink('/admin/invites', icon.ticket, 'Invites')}
             ${navLink('/admin/autodownload', icon.download, 'Auto-download')}
             ${navLink('/settings', icon.settings, 'Settings')}
-            ${navLink('/admin/services', icon.settings, 'Built-in services')}
             ${navLink('/admin/diagnostics', icon.shield, 'Diagnostics')}` : ''}
         </nav>
         <div id="storage-mini" style="flex:none"></div>

@@ -45,19 +45,9 @@ Open `http://your-server:8080` and sign in with `ENCORE_ADMIN_USER` / `ENCORE_AD
 
 Then go to **Settings** to configure the services and use **Test connection**. Invite people from **Invites**.
 
-### All-in-one: no Lidarr/slskd containers needed
-
-`ghcr.io/krifmaz/encore:aio` runs **slskd, Lidarr, Prowlarr, qBittorrent and SABnzbd inside Encore**. They are configured and connected to each other on first start:
-
-- Encore talks to slskd and Lidarr.
-- Lidarr gets `/music` as its root folder, with qBittorrent and SABnzbd as download clients.
-- Prowlarr is linked to Lidarr, so indexers you add there sync automatically.
-
-Each service listens on localhost only. Open its web UI from **Admin → Built-in services**; it runs behind your Encore admin login. Left for you to do: your Soulseek login (on that page), indexers in Prowlarr, and a Usenet server in SABnzbd's wizard. See [`docker-compose.aio.yml`](docker-compose.aio.yml), which routes everything through gluetun for a VPN. Pick which services to run with `ENCORE_EMBEDDED=all` or a list such as `slskd,lidarr,prowlarr,qbittorrent`.
-
 ### Prebuilt image
 
-GitHub Actions publishes `ghcr.io/krifmaz/encore:latest` and the all-in-one `ghcr.io/krifmaz/encore:aio` (amd64 and arm64). If the repository is private, the image is too – run `docker login ghcr.io` once with a token that has `read:packages`.
+GitHub Actions publishes `ghcr.io/krifmaz/encore:latest` (amd64 and arm64). If the repository is private, the image is too – run `docker login ghcr.io` once with a token that has `read:packages`.
 
 ## Apps
 
@@ -141,7 +131,6 @@ Every option can be changed in the UI. Environment variables only seed the first
 | `ENCORE_ADMIN_USER` / `ENCORE_ADMIN_PASSWORD` | admin / random | First admin account |
 | `ENCORE_LIBRARY_PATH` | `/music` | Music library inside the container |
 | `ENCORE_SIGNUP_MODE` | `invite` | `invite`, `open` or `closed` |
-| `ENCORE_EMBEDDED` | (off; `all` in the aio image) | Built-in services to run: `all` or `slskd,lidarr,prowlarr,qbittorrent,sabnzbd` |
 | `SOULSEEK_USERNAME` / `SOULSEEK_PASSWORD` | | Soulseek login for the built-in slskd |
 | `HIFI_ENABLED` / `HIFI_API_URL` / `HIFI_QUALITY` | off | TIDAL lossless via your own HiFi API instance (Monochrome's backend) |
 | `ENCORE_DISCOVER_AUTO_COUNT` | 0 | Songs to auto-request from each Weekly Exploration (0 = off) |

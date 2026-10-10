@@ -56,25 +56,3 @@ jobs:
           labels: ${{ steps.meta.outputs.labels }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
-      # all-in-one image: same tags with an -aio suffix, plus :aio for the default branch
-      - id: meta_aio
-        uses: docker/metadata-action@v5
-        with:
-          images: ${{ env.IMAGE }}
-          flavor: suffix=-aio,onlatest=true
-          tags: |
-            type=ref,event=branch
-            type=semver,pattern={{version}}
-            type=raw,value=latest,enable={{is_default_branch}}
-            type=raw,value=aio,suffix=,enable={{is_default_branch}}
-      - uses: docker/build-push-action@v6
-        with:
-          context: .
-          target: aio
-          platforms: linux/amd64,linux/arm64
-          push: ${{ github.event_name != 'pull_request' }}
-          tags: ${{ steps.meta_aio.outputs.tags }}
-          build-args: ENCORE_BUILD=${{ github.sha }}
-          labels: ${{ steps.meta_aio.outputs.labels }}
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
