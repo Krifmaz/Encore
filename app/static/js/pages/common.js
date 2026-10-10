@@ -104,7 +104,7 @@ export function bindRequestActions(root, reload) {
       };
       popMenu(b, [
         { label: 'Remove from list', icon: icon.x, onClick: () => del(false) },
-        session.user?.role === 'admin' ? { label: st === 'completed' ? 'Delete downloaded files' : 'Delete leftover files', icon: icon.trash, danger: true, onClick: () => del(true) } : null,
+        ['admin', 'owner'].includes(session.user?.role) ? { label: st === 'completed' ? 'Delete downloaded files' : 'Delete leftover files', icon: icon.trash, danger: true, onClick: () => del(true) } : null,
       ]);
       return;
     }
@@ -129,7 +129,7 @@ export function bindRequestActions(root, reload) {
 /** "Clear" button menu for download lists: clear finished entries, optionally deleting their files. */
 export function clearMenu(anchor, reload, { mine = true } = {}) {
   import('../app.js').then(({ session }) => {
-    const admin = session.user?.role === 'admin';
+    const admin = ['admin', 'owner'].includes(session.user?.role);
     const go = async (statuses, files, label) => {
       if (files && !await confirmDialog('Delete files', `${label}: this permanently deletes the files from disk.`, 'Delete', true)) return;
       try {

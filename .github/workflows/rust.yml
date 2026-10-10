@@ -1,0 +1,19 @@
+name: rust
+on:
+  push:
+    paths: ["server/**", ".github/workflows/rust.yml"]
+  pull_request:
+    paths: ["server/**"]
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: server
+      - run: cargo build --locked
+        working-directory: server
+      - run: cargo test --locked
+        working-directory: server

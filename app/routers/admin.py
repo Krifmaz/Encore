@@ -53,7 +53,7 @@ def users():
 @router.get("/permissions")
 def permissions():
     """What each permission means, and how many users have it."""
-    users = [u for u in db.query("SELECT id, role, auto_approve, perms FROM users WHERE role != 'admin'")]
+    users = [u for u in db.query("SELECT id, role, auto_approve, perms FROM users WHERE role = 'user'")]
     return {"perms": [{"key": k, "label": v, "on": sum(1 for u in users if auth.perms_of(u)[k]), "of": len(users)} for k, v in auth.PERMS.items()]}
 
 
@@ -63,7 +63,7 @@ def bulk_permission(body: BulkPerm):
     import json
     if body.perm not in auth.PERMS:
         raise HTTPException(400, "Unknown permission")
-    for u in db.query("SELECT id, perms FROM users WHERE role != 'admin'"):
+    for u in db.query("SELECT id, perms FROM users WHERE role = 'user'"):
         if body.perm == "auto_approve":
             db.execute("UPDATE users SET auto_approve=? WHERE id=?", (int(body.value), u["id"]))
             continue

@@ -8,9 +8,9 @@ export async function render(view, ctx) {
     <div class="row wrap gap-lg" style="align-items:flex-start">
       <div class="card stack" style="flex:1;min-width:280px">
         <div class="row"><div class="avatar" style="width:52px;height:52px;font-size:22px">${esc(me.username[0])}</div>
-          <div><h2>${esc(me.username)}</h2><div class="muted small">${me.role === 'admin' ? 'Administrator' : 'Member'} · joined ${fmt.ago(me.created_at)}</div></div></div>
-        <div class="small muted">Requests this week: <b>${me.requests_this_week}</b>${me.request_limit && me.role !== 'admin' ? ` of ${me.request_limit}` : ''}
-          ${me.auto_approve || me.role === 'admin' ? ' · <span class="badge ok">auto-approved</span>' : ''}</div>
+          <div><h2>${esc(me.username)}</h2><div class="muted small">${['admin', 'owner'].includes(me.role) ? 'Administrator' : 'Member'} · joined ${fmt.ago(me.created_at)}</div></div></div>
+        <div class="small muted">Requests this week: <b>${me.requests_this_week}</b>${me.request_limit && !['admin', 'owner'].includes(me.role) ? ` of ${me.request_limit}` : ''}
+          ${me.auto_approve || ['admin', 'owner'].includes(me.role) ? ' · <span class="badge ok">auto-approved</span>' : ''}</div>
       </div>
       <form class="card stack" id="pw" style="flex:1;min-width:280px">
         <h3>Change password</h3>

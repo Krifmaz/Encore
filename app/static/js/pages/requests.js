@@ -3,7 +3,7 @@ import { emptyState, esc, icon } from '../ui.js';
 import { bindRequestActions, clearMenu, requestRow } from './common.js';
 
 export async function render(view, ctx) {
-  const admin = ctx.user.role === 'admin';
+  const admin = ['admin', 'owner'].includes(ctx.user.role);
   let filter = ctx.query.status || (admin ? 'all' : 'all');
   let mine = !admin;
   view.innerHTML = `
@@ -44,7 +44,7 @@ export async function render(view, ctx) {
     view.querySelector('#clear').onclick = (e) => clearMenu(e.currentTarget, load, { mine });
   }
   const me = await api.get('/auth/me');
-  if (me.request_limit && me.role !== 'admin') {
+  if (me.request_limit && !['admin', 'owner'].includes(me.role)) {
     view.querySelector('#quota').textContent = `${me.requests_this_week} of ${me.request_limit} requests used this week`;
   }
   await load();

@@ -68,7 +68,7 @@ function navLink(href, ic, label, extra = '') {
 
 function renderShell() {
   const u = session.user;
-  const admin = u.role === 'admin';
+  const admin = ['admin', 'owner'].includes(u.role);
   const appName = esc(session.info?.app_name || 'Encore');
   document.title = session.info?.app_name || 'Encore';
   qs('#app').innerHTML = `
@@ -114,7 +114,7 @@ function renderShell() {
 }
 
 async function refreshPendingBadge() {
-  if (session.user?.role !== 'admin') return;
+  if (!['admin', 'owner'].includes(session.user?.role)) return;
   try {
     const rows = await api.get('/requests?status=pending&limit=500');
     const b = qs('#pending-badge');
@@ -144,7 +144,7 @@ async function route() {
   for (const [re, fn, adminOnly] of routes) {
     const m = path.match(re);
     if (!m) continue;
-    if (adminOnly && session.user.role !== 'admin') break;
+    if (adminOnly && !['admin', 'owner'].includes(session.user.role)) break;
     window.scrollTo(0, 0);
     try {
       await fn(view, { params: m.slice(1), query, user: session.user, onLeave: (f) => (view.isConnected ? cleanup.push(f) : f()), navigate });

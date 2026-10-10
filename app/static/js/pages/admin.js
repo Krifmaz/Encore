@@ -32,13 +32,13 @@ export async function renderUsers(view, ctx) {
         <td><div class="row"><div class="avatar">${esc(u.username[0])}</div><div><div style="font-weight:650">${esc(u.username)} ${u.id === ctx.user.id ? '<span class="badge">you</span>' : ''} ${u.disabled ? '<span class="badge err">disabled</span>' : ''}</div>
           <div class="small faint">${[u.email && esc(u.email), u.invite_code && `invite ${esc(u.invite_code)}`, `joined ${fmt.ago(u.created_at)}`].filter(Boolean).join(' · ')}</div></div></div></td>
         <td><select class="input" data-f="role" style="width:auto;padding:6px 10px" ${u.id === ctx.user.id ? 'disabled' : ''}>
-          <option value="user" ${u.role === 'user' ? 'selected' : ''}>User</option><option value="admin" ${u.role === 'admin' ? 'selected' : ''}>Admin</option></select></td>
+          <option value="user" ${u.role === 'user' ? 'selected' : ''}>User</option><option value="admin" ${['admin', 'owner'].includes(u.role) ? 'selected' : ''}>Admin</option></select></td>
         <td class="hide-sm">${u.request_count}</td>
         <td class="hide-sm"><input class="input" data-f="request_limit" type="number" min="0" value="${u.request_limit || ''}" placeholder="∞" style="width:80px;padding:6px 10px"></td>
         <td><label class="switch"><input type="checkbox" data-f="auto_approve" ${u.auto_approve ? 'checked' : ''}><i></i></label></td>
         <td class="hide-sm small muted">${fmt.ago(u.last_login)}</td>
         <td style="text-align:right;white-space:nowrap">
-          ${u.role !== 'admin' ? `<button class="btn sm" data-a="perms" title="Permissions">${icon.settings}</button>` : ''}
+          ${!['admin', 'owner'].includes(u.role) ? `<button class="btn sm" data-a="perms" title="Permissions">${icon.settings}</button>` : ''}
           <button class="btn sm" data-a="pw" title="Reset password">${icon.shield}</button>
           ${u.id !== ctx.user.id ? `<button class="btn sm" data-a="toggle">${u.disabled ? 'Enable' : 'Disable'}</button>
           <button class="btn sm danger ghost" data-a="del" title="Delete">${icon.trash}</button>` : ''}
@@ -140,7 +140,7 @@ export async function renderInvites(view, ctx) {
         return `<tr data-id="${i.id}" data-code="${esc(i.code)}">
           <td><span class="mono" style="font-weight:700;${dead ? 'text-decoration:line-through;opacity:.5' : ''}">${esc(i.code)}</span>${i.note ? `<div class="small faint">${esc(i.note)}</div>` : ''}</td>
           <td>${i.uses} / ${i.max_uses}</td>
-          <td class="hide-sm">${i.role === 'admin' ? '<span class="badge warn">admin</span>' : 'user'}</td>
+          <td class="hide-sm">${['admin', 'owner'].includes(i.role) ? '<span class="badge warn">admin</span>' : 'user'}</td>
           <td class="hide-sm small muted">${i.expires_at ? (i.expires_at < now ? 'expired' : new Date(i.expires_at * 1000).toLocaleDateString()) : 'never'}</td>
           <td class="hide-sm small muted">${esc(i.used_by || '—')}</td>
           <td style="text-align:right;white-space:nowrap">${dead ? '' : `<button class="btn sm" data-a="copy">${icon.copy}Copy link</button>`}

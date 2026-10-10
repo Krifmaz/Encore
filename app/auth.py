@@ -77,7 +77,7 @@ def client_ip(request: Request) -> str:
 
 
 def ensure_admin() -> None:
-    if db.one("SELECT id FROM users WHERE role='admin'"):
+    if db.one("SELECT id FROM users WHERE role IN ('admin','owner')"):
         return
     username = os.environ.get("ENCORE_ADMIN_USER", "admin")
     password = os.environ.get("ENCORE_ADMIN_PASSWORD")
@@ -99,7 +99,10 @@ def ensure_admin() -> None:
 def _user_from_request(request: Request) -> dict | None:
     api_key = request.headers.get("x-api-key")
     if api_key and config.get("api_key") and secrets.compare_digest(api_key, config.get("api_key")):
-        return db.one("SELECT * FROM users WHERE role='admin' AND disabled=0 ORDER BY id LIMIT 1")
+        u = db.one("SELECT * FROM users WHERE role IN ('admin','owner') AND disabled=0 ORDER BY id LIMIT 1")
+        if u:
+            u["role"] = "admin"
+        return u
     token = request.cookies.get(COOKIE)
     if not token:
         return None
@@ -107,6 +110,8 @@ def _user_from_request(request: Request) -> dict | None:
     if not s or s["expires_at"] < time.time():
         return None
     user = db.one("SELECT * FROM users WHERE id=? AND disabled=0", (s["user_id"],))
+    if user and user["role"] == "owner":
+        user["role"] = "admin"      # the Rust server's owner is an admin here (safe to switch back)
     return user
 
 

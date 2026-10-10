@@ -6,3 +6,4 @@ config/
 data/
 .env
 .pytest_cache/
+server/target/

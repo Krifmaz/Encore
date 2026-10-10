@@ -239,7 +239,7 @@ const EMBEDDED = {
 };
 
 export async function render(view, ctx) {
-  const admin = ctx.user?.role === 'admin';
+  const admin = ['admin', 'owner'].includes(ctx.user?.role);
   let values = admin ? await api.get('/admin/settings') : {};
   let lidarrOpts = null;
   let current = ctx.query.s ? groupOf(ctx.query.s) : 'account';

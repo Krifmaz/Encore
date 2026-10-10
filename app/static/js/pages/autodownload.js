@@ -52,7 +52,7 @@ export async function render(view) {
     </div>
     <div class="section-head"><h2>Users</h2><span class="small muted">Who auto-downloads are enabled for</span></div>
     <div class="card flat"><div class="table-wrap"><table class="table"><thead><tr><th>User</th><th>Followed playlists</th><th>Followed artists</th><th>Connected accounts</th><th>Auto-download</th></tr></thead><tbody>
-      ${d.users.map(u => `<tr><td><b>${esc(u.username)}</b> ${u.role === 'admin' ? '<span class="badge">admin</span>' : ''}</td><td>${u.followed}</td><td>${u.follows}</td><td>${u.connections}</td>
+      ${d.users.map(u => `<tr><td><b>${esc(u.username)}</b> ${['admin', 'owner'].includes(u.role) ? '<span class="badge">admin</span>' : ''}</td><td>${u.followed}</td><td>${u.follows}</td><td>${u.connections}</td>
         <td><label class="switch"><input type="checkbox" data-user="${u.id}" ${u.auto_download ? 'checked' : ''}><i></i></label></td></tr>`).join('')}
     </tbody></table></div></div>`;
   view.querySelector('[data-k="album_upgrade"]').value = s.album_upgrade;

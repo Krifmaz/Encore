@@ -102,7 +102,7 @@ SORT_OPTS.singles = SORT_OPTS.albums;
 const DESC_FIRST = new Set(['added', 'released', 'duration', 'size', 'albums', 'tracks']);
 
 export async function render(view, ctx) {
-  const admin = ctx.user.role === 'admin';
+  const admin = ['admin', 'owner'].includes(ctx.user.role);
   const st = {
     tab: ctx.query.tab || 'albums', q: ctx.query.q || '', sort: ctx.query.sort || '', dir: ctx.query.dir || '',
     filter: ctx.query.filter || '', artist: ctx.query.artist || '', offset: 0,
@@ -359,7 +359,7 @@ async function renderIssues(body, view, more) {
 }
 
 export async function renderAlbum(view, ctx) {
-  const admin = ctx.user.role === 'admin';
+  const admin = ['admin', 'owner'].includes(ctx.user.role);
   const id = ctx.params[0];
   const a = await api.get(`/library/albums/${id}`);
   const multi = new Set(a.tracks.map(t => t.disc)).size > 1;
