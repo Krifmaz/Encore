@@ -140,3 +140,36 @@ def test_share_link_plays_only_that_song(client, env):
     # the link opens nothing else
     assert client.get(f"/api/library/tracks/{one}/stream").status_code == 401
     assert client.get("/api/library/tracks?limit=5").status_code == 401
+
+
+def test_fix_song_splits_version_and_remove_artist(client, env):
+    import asyncio as aio
+
+    from app import db
+    from app.services import library
+    music = str(env / "music")
+    make_audio(f"{music}/Picco/BE (2026)/01 - BE a mASTer.mp3", title="BE a mASTer", artist="Picco", album="BE", track=1)
+    make_audio(f"{music}/Picco/BE (2026)/01 - BE a mASTer (2).mp3", title="BE a mASTer", artist="Picco", album="BE", track=1)
+    make_audio(f"{music}/Wrong Guy/X/01 - Oops.mp3", title="Oops", artist="Wrong Guy", album="X", track=1)
+    aio.run(library.scan())
+    H = {"X-Requested-With": "encore"}
+    client.post("/api/auth/login", json={"username": "admin", "password": "adminpass123"})
+    tid = db.one("SELECT id FROM tracks WHERE path LIKE '%(2).mp3'")["id"]
+    r = client.post(f"/api/library/tracks/{tid}/fix", json={"values": {"title": "BE a mASTer (Sped Up)", "album": "BE a mASTer (Sped Up)", "albumartist": "Picco"}}, headers=H)
+    assert r.status_code == 200, r.text
+    p = db.one("SELECT path, title FROM tracks WHERE id=?", (tid,))
+    assert p["title"] == "BE a mASTer (Sped Up)" and "BE a mASTer (Sped Up)" in p["path"] and os.path.isfile(p["path"])
+    assert db.one("SELECT COUNT(*) n FROM tracks WHERE title='BE a mASTer'")["n"] == 1
+    # an artist added by mistake goes away completely
+    r = client.delete("/api/library/artists?name=Wrong%20Guy", headers=H).json()
+    assert r["removed"] == 1 and not os.path.exists(f"{music}/Wrong Guy")
+
+
+def test_fingerprint_similarity():
+    from app.services.acoustid import similarity
+    import random
+    rnd = random.Random(1)
+    a = [rnd.getrandbits(32) for _ in range(300)]
+    assert similarity(a, a) == 1.0
+    assert similarity(a, a[3:]) == 1.0                       # offset alignment
+    assert similarity(a, [rnd.getrandbits(32) for _ in range(300)]) < 0.6

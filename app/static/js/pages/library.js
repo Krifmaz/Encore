@@ -37,11 +37,59 @@ export function trackMenu(anchor, t, { admin = false, onDeleted } = {}) {
     } },
     { label: 'Download this song', icon: icon.download, href: `/api/library/tracks/${t.id}/file`, download: true },
     t.album_id ? { label: 'Go to album', icon: icon.disc, href: `#/library/album/${t.album_id}` } : null,
+    admin ? { label: 'Fix this song…', icon: icon.tag, onClick: () => fixSongModal(t) } : null,
     ...(admin || (window.encoreSession?.user?.perms?.fix && t.request_id) ? ['-', { label: admin ? 'Delete song from disk' : 'Wrong song – remove it', icon: icon.trash, danger: true, onClick: async () => {
       if (!await confirmDialog('Delete song', `Permanently delete "${t.title}" from disk?`, 'Delete', true)) return;
       try { await api.del(`/library/tracks/${t.id}`); toast('Song deleted', 'ok'); onDeleted?.(); } catch (e) { toast(e.message, 'err'); }
     } }] : []),
   ]);
+}
+
+/** Correct one song (wrong match, or a different version that got lumped in as a duplicate). */
+export function fixSongModal(t) {
+  const F = [['title', 'Title', t.title], ['artist', 'Artist', t.artist], ['album', 'Album', t.album || ''], ['albumartist', 'Album artist', t.albumartist || t.artist],
+    ['tracknumber', 'Track #', t.track || ''], ['date', 'Year', t.year || '']];
+  const m = modal({
+    title: 'Fix this song',
+    wide: true,
+    body: `<p class="small muted" style="margin-top:0">Change what this file is. Give a different version its own title (e.g. “… (Remix)”) or album so it stops counting as a duplicate. The file is moved to match and is never merged with another song.</p>
+      <div class="form-grid">${F.map(([k, l, v]) => `<label class="field"><span>${l}</span><input class="input" data-k="${k}" value="${esc(v)}"></label>`).join('')}</div>
+      <label class="switch mt"><input type="checkbox" id="fx-move" checked><i></i>Move the file to match (Artist/Album/NN Title)</label>
+      <div class="row mt" style="gap:8px"><button class="btn sm" id="fx-id">${icon.shield}Identify by its audio</button><span class="small muted" id="fx-msg"></span></div>
+      <div id="fx-res" class="mt"></div>`,
+    footer: '<button class="btn" data-close>Cancel</button><button class="btn primary" id="fx-save">Save</button>',
+  });
+  const el = (q) => m.el.querySelector(q);
+  el('#fx-id').onclick = async (e) => {
+    e.target.disabled = true;
+    el('#fx-msg').innerHTML = '<span class="spinner"></span> Listening…';
+    try {
+      const res = await api.get(`/library/tracks/${t.id}/identify`);
+      el('#fx-msg').textContent = res.length ? 'Pick what it really is:' : 'No match for this audio.';
+      el('#fx-res').innerHTML = `<div class="list">${res.map((r, i) => `<button class="list-item" data-r="${i}" style="text-align:left;width:100%;border:0;background:none;color:inherit;cursor:pointer">
+        <div class="grow"><div style="font-weight:600">${esc(r.title)}</div><div class="small muted">${esc(r.artist)}${r.album ? ' · ' + esc(r.album) : ''}</div></div><span class="badge ok">${r.score}%</span></button>`).join('')}</div>`;
+      el('#fx-res').onclick = (ev) => {
+        const b = ev.target.closest('[data-r]');
+        if (!b) return;
+        const r = res[+b.dataset.r];
+        el('[data-k=title]').value = r.title; el('[data-k=artist]').value = r.artist;
+        if (r.album) el('[data-k=album]').value = r.album;
+        toast('Filled in – check and save', 'ok');
+      };
+    } catch (err) { el('#fx-msg').textContent = err.message; }
+    e.target.disabled = false;
+  };
+  el('#fx-save').onclick = async (e) => {
+    e.target.disabled = true;
+    const values = Object.fromEntries([...m.el.querySelectorAll('[data-k]')].map(i => [i.dataset.k, i.value]));
+    try {
+      const r = await api.post(`/library/tracks/${t.id}/fix`, { values, move: el('#fx-move').checked });
+      toast('Song fixed', 'ok');
+      m.close();
+      if (r.album_id && location.hash.includes('/library/album/') && !location.hash.endsWith(r.album_id)) location.hash = `#/library/album/${r.album_id}`;
+      else window.dispatchEvent(new HashChangeEvent('hashchange'));
+    } catch (err) { toast(err.message, 'err'); e.target.disabled = false; }
+  };
 }
 
 const SORT_OPTS = {
@@ -132,7 +180,8 @@ export async function render(view, ctx) {
       view.querySelector('#lib-sub').textContent = `${fmt.num(rows.length)} artists`;
       body.innerHTML = rows.length ? `<div class="grid">${rows.map(a => `
         <div class="tile round" data-href="${a.mbid ? `/artist/${esc(a.mbid)}` : `/artist-name/${encodeURIComponent(a.name)}`}">
-          <div class="art">${art(`/api/library/albums/${a.cover_album}/cover`, a.name)}</div>
+          <div class="art">${art(`/api/library/albums/${a.cover_album}/cover`, a.name)}
+            ${admin ? `<div class="overlay"><button class="fab" data-rm-artist="${esc(a.name)}" title="Remove this artist from the library">${icon.trash}</button></div>` : ''}</div>
           <div class="t ellipsis" style="text-align:center">${esc(a.name)}</div>
           <div class="s" style="text-align:center">${a.albums} album${a.albums === 1 ? '' : 's'} · ${a.tracks} tracks</div>
         </div>`).join('')}</div>` : emptyState(icon.users, 'No artists found');
@@ -159,7 +208,15 @@ export async function render(view, ctx) {
     }
   };
 
-  body.addEventListener('click', (e) => {
+  body.addEventListener('click', async (e) => {
+    const rm = e.target.closest('[data-rm-artist]');
+    if (rm) {
+      e.stopPropagation();
+      const name = rm.dataset.rmArtist;
+      if (!await confirmDialog('Remove artist', `Delete every album by “${name}” from disk, unfollow them and cancel their pending downloads? Use this for artists that were added by a wrong download.`, 'Remove', true)) return;
+      try { const r = await api.del(`/library/artists?name=${encodeURIComponent(name)}`); toast(`Removed ${r.removed} song(s)`, 'ok'); load(); } catch (err) { toast(err.message, 'err'); }
+      return;
+    }
     const mb = e.target.closest('[data-tmenu]');
     if (mb) return trackMenu(mb, body._tracks[+mb.dataset.tmenu], { admin, onDeleted: () => load() });
     const b = e.target.closest('[data-play-track]');

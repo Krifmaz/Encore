@@ -14,6 +14,7 @@ def env(tmp_path, monkeypatch):
     monkeypatch.setenv("ENCORE_STAGING_PATH", str(tmp_path / "staging"))
     monkeypatch.setenv("ENCORE_ADMIN_PASSWORD", "adminpass123")
     monkeypatch.setenv("ENCORE_SCAN_INTERVAL", "0")
+    monkeypatch.setenv("ENCORE_UPGRADE_CHECK_AUDIO", "false")   # fake test audio differs between copies of a song
     import importlib
 
     from app import auth, db

@@ -90,6 +90,23 @@ async def _fill(t: dict) -> dict:
     return fix, t
 
 
+async def organize_track(track_id: int) -> str | None:
+    """Move one song to where its tags say it belongs (after a manual fix)."""
+    t = db.one("SELECT id, path, title, artist, album, albumartist, track, disc, year, genre, album_id FROM tracks WHERE id=?", (track_id,))
+    if not t or not os.path.isfile(t["path"]):
+        return None
+    n = db.one("SELECT COUNT(*) n FROM tracks WHERE album_id=?", (t["album_id"],))["n"]
+    dest = tagger.render_path(t, os.path.splitext(t["path"])[1], single=n == 1 and not (t["album"] or "").strip())
+    if os.path.abspath(dest) == os.path.abspath(t["path"]):
+        return t["path"]
+    old_dir = os.path.dirname(t["path"])
+    new = await asyncio.to_thread(tagger.move_file, t["path"], dest, False)    # never merges: the user just said it's different
+    tagger.relink([t["path"]], [new])
+    tagger.prune_empty(old_dir, config.get("library_path"))
+    await library.index_paths([new])
+    return new
+
+
 async def organize_library(fill_missing: bool = True) -> str:
     if state["running"]:
         return "already running"

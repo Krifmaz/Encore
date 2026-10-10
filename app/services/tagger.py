@@ -276,13 +276,25 @@ def _file_rank(path: str) -> tuple:
     return (t["format"] in _LOSSLESS, t["bitrate"] or 0, os.path.getsize(path))
 
 
+def _may_replace(src: str, dest: str) -> bool:
+    """Only swap files that hold the same recording: a wrong song with the same name must never replace a
+    good file (it is kept next to it instead). Without fingerprinting tools we trust the names."""
+    if not config.get("upgrade_check_audio"):
+        return True
+    from . import acoustid
+    same = acoustid.same_audio_sync(src, dest)
+    if same is False:
+        db.log("warning", f"Kept both {os.path.basename(dest)} and the new download – the audio is a different recording")
+    return same is not False
+
+
 def move_file(src: str, dest: str, replace_same: bool = False) -> str:
     """Move src to dest. Imports pass replace_same: a file already at dest is the same song (same
     artist/album/track/title path), so keep only the better of the two instead of adding "(2)" copies."""
     if os.path.abspath(src) == os.path.abspath(dest):
         return src
     os.makedirs(os.path.dirname(dest), exist_ok=True)
-    if replace_same and os.path.exists(dest):
+    if replace_same and os.path.exists(dest) and _may_replace(src, dest):
         if _file_rank(src) > _file_rank(dest):
             shutil.move(src, dest + ".encore-new")
             os.replace(dest + ".encore-new", dest)
@@ -571,6 +583,10 @@ async def import_single(path: str, artist: str, title: str, recording_id: str | 
     ext = os.path.splitext(path)[1]
     from .verify import delete_tracks, quality
     existing = _existing_copy(vals, {path}) if config.get("dedupe_on_import") else None
+    if existing and config.get("upgrade_check_audio") and os.path.isfile(existing["path"]):
+        from . import acoustid
+        if await acoustid.same_audio(path, existing["path"]) is False:
+            existing = None      # same name, different recording (another version): import it as its own song
     if existing:
         new_q = library.read_tags(path)
         # only replace the existing file if the new one is strictly better (verified / lossless / bitrate / tagged)
@@ -705,6 +721,10 @@ async def _drop_superseded(new_paths: list[str]) -> None:
         if not hit:
             continue
         loose_single = sizes.get(hit["album_id"], 0) == 1
+        if (loose_single or quality(t)[:4] > quality(hit)[:4]) and config.get("upgrade_check_audio") and os.path.isfile(hit["path"]):
+            from . import acoustid
+            if await acoustid.same_audio(p, hit["path"]) is False:
+                continue        # looks like the same song by name, but the audio differs: keep both
         if loose_single or quality(t)[:4] > quality(hit)[:4]:
             await asyncio.to_thread(delete_tracks, [hit["id"]], t["id"])
             why = "loose single" if loose_single else "lower-quality copy"

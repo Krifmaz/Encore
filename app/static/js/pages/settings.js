@@ -41,6 +41,7 @@ const SECTIONS = [
     S('verify_on_import', 'Fingerprint every download before import', 'bool'),
     S('reject_mismatch', 'Reject downloads whose audio is a different song/version (and try the next source)', 'bool'),
     S('dedupe_on_import', 'Never import a second copy of a song (keep the better-quality file)', 'bool'),
+    S('upgrade_check_audio', 'Before replacing a song with a better copy, compare the audio – a different recording is kept as its own song', 'bool'),
   ] },
   { id: 'streamrip', title: 'Qobuz / Tidal / Deezer (streamrip)', test: 'streamrip', testLabel: 'Test & write config', fields: [
     S('streamrip_enabled', 'Enable streamrip source', 'bool', { help: 'Downloads lossless from your own paid accounts. Respect each service’s terms – use at your own risk.' }),

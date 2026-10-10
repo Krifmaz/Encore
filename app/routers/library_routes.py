@@ -585,6 +585,73 @@ async def delete_album(album_id: str, user=Depends(auth.admin_user)):
     return {"ok": True}
 
 
+@router.get("/tracks/{track_id}/identify")
+async def identify_track(track_id: int, user=Depends(auth.admin_user)):
+    """What this file really is, by its audio (AcoustID) – to fix a wrong match."""
+    t = db.one("SELECT path FROM tracks WHERE id=?", (track_id,))
+    if not t:
+        raise HTTPException(404, "Track not found")
+    if not acoustid.available():
+        raise HTTPException(400, "Add an AcoustID API key (Settings → API keys) to identify songs by their audio")
+    res = await acoustid.identify(t["path"])
+    out, seen = [], set()
+    for r in (res or {}).get("results", []):
+        for rec in r["recordings"]:
+            key = (rec["title"], rec["artist"])
+            if rec.get("title") and key not in seen:
+                seen.add(key)
+                out.append({"title": rec["title"], "artist": rec["artist"], "album": (rec["release_groups"] or [""])[0],
+                            "score": round(r["score"] * 100), "mbid": rec["id"]})
+    return out[:12]
+
+
+class TrackFix(BaseModel):
+    values: dict
+    move: bool = True
+
+
+@router.post("/tracks/{track_id}/fix")
+async def fix_track(track_id: int, body: TrackFix, user=Depends(auth.admin_user)):
+    """Correct one song: write its tags, then (optionally) move it to where those tags say it belongs.
+    It is never merged into another file – use this to split a different version out of a 'duplicate'."""
+    from ..services import organize
+    t = db.one("SELECT path FROM tracks WHERE id=?", (track_id,))
+    if not t:
+        raise HTTPException(404, "Track not found")
+    vals = {k: str(v).strip() for k, v in body.values.items() if v is not None}
+    try:
+        await asyncio.to_thread(tagger.edit_tags, [track_id], vals)
+    except Exception as e:  # noqa: BLE001
+        raise HTTPException(500, f"Could not write tags: {e}")
+    await library.index_paths([t["path"]])
+    new = await organize.organize_track(track_id) if body.move else t["path"]
+    row = db.one("SELECT album_id FROM tracks WHERE path=?", (new or t["path"],))
+    db.log("info", f"{user['username']} fixed {vals.get('artist', '')} – {vals.get('title', '')}")
+    return {"ok": True, "album_id": row["album_id"] if row else None}
+
+
+@router.delete("/artists")
+async def delete_artist(name: str, user=Depends(auth.admin_user)):
+    """Remove an artist that never should have been added (e.g. by a wrong download): their files,
+    follow and pending requests. Songs by them on other artists' albums stay."""
+    rows = db.query("SELECT id, path FROM tracks WHERE lower(albumartist)=lower(?) OR (lower(artist)=lower(?) AND (albumartist IS NULL OR albumartist='' OR albumartist='Unknown Artist'))",
+                     (name, name))
+    dirs = {os.path.dirname(r["path"]) for r in rows}
+    for r in rows:
+        for side in (".lrc", ".txt"):
+            try:
+                os.remove(os.path.splitext(r["path"])[0] + side)
+            except OSError:
+                pass
+    verify.delete_tracks([r["id"] for r in rows])
+    for d in dirs:
+        tagger.prune_empty(d, config.get("library_path"))
+    db.execute("DELETE FROM follows WHERE lower(name)=lower(?)", (name,))
+    db.execute("UPDATE requests SET status='cancelled', message='Artist removed' WHERE lower(artist)=lower(?) AND status IN ('pending','queued')", (name,))
+    db.log("info", f"{user['username']} removed artist {name} ({len(rows)} songs)")
+    return {"ok": True, "removed": len(rows)}
+
+
 def _organize_state():
     from ..services import organize
     return organize.state

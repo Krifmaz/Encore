@@ -95,3 +95,47 @@ async def identify(path: str) -> dict | None:
         return None
     results = await lookup(*fp)
     return {"duration": fp[0], "results": results}
+
+
+# ---- same recording? (used before replacing a file with a "better" copy) ------------------------
+
+def _raw_fp(path: str, seconds: int = 90) -> list[int] | None:
+    """Raw Chromaprint fingerprint (list of 32-bit ints) – no AcoustID account needed."""
+    import struct
+    import subprocess
+    try:
+        if shutil.which("fpcalc"):
+            out = subprocess.run(["fpcalc", "-raw", "-json", "-length", str(seconds), path], capture_output=True, timeout=120)
+            return json.loads(out.stdout)["fingerprint"] if out.returncode == 0 else None
+        if shutil.which("ffmpeg") and _ffmpeg_chromaprint():
+            out = subprocess.run(["ffmpeg", "-v", "error", "-i", path, "-t", str(seconds), "-f", "chromaprint", "-fp_format", "raw", "-"],
+                                 capture_output=True, timeout=120)
+            b = out.stdout
+            return list(struct.unpack(f"<{len(b) // 4}I", b[:len(b) // 4 * 4])) if out.returncode == 0 and b else None
+    except Exception:  # noqa: BLE001
+        return None
+    return None
+
+
+def similarity(a: list[int], b: list[int]) -> float:
+    """0..1 – share of matching fingerprint bits at the best alignment (same recording ≳ 0.8, different < 0.65)."""
+    best = 0.0
+    for off in range(-80, 81):               # up to ~10 s of extra intro/silence on either copy
+        pairs = [(a[i], b[i + off]) for i in range(max(0, -off), min(len(a), len(b) - off))]
+        if len(pairs) < 20:
+            continue
+        diff = sum(bin(x ^ y).count("1") for x, y in pairs)
+        best = max(best, 1 - diff / (32 * len(pairs)))
+    return best
+
+
+def same_audio_sync(a: str, b: str) -> bool | None:
+    """True/False when both files could be fingerprinted, None when we can't tell."""
+    fa, fb = _raw_fp(a), _raw_fp(b)
+    if not fa or not fb:
+        return None
+    return similarity(fa, fb) >= 0.75
+
+
+async def same_audio(a: str, b: str) -> bool | None:
+    return await asyncio.to_thread(same_audio_sync, a, b)
