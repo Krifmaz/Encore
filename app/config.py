@@ -62,6 +62,13 @@ DEFAULTS: dict[str, tuple[str | None, object, bool]] = {
     "dedupe_on_import": ("ENCORE_DEDUPE_ON_IMPORT", True, False),
     # pipeline
     "discography_singles": ("ENCORE_DISCOGRAPHY_SINGLES", True, False),   # "request discography" includes singles
+    # what every new member starts with (each account can be changed afterwards)
+    "new_user_auto_approve": ("ENCORE_NEW_USER_AUTO_APPROVE", False, False),
+    "new_user_auto_approve_playlists": ("ENCORE_NEW_USER_AUTO_APPROVE_PLAYLISTS", False, False),
+    "new_user_pick": ("ENCORE_NEW_USER_PICK", True, False),
+    "new_user_fix": ("ENCORE_NEW_USER_FIX", True, False),
+    "new_user_storage": ("ENCORE_NEW_USER_STORAGE", True, False),
+    "new_user_auto_download": ("ENCORE_NEW_USER_AUTO_DOWNLOAD", True, False),
     "ytdlp_last_resort": ("ENCORE_YTDLP_LAST_RESORT", True, False),
     "source_order": ("ENCORE_SOURCE_ORDER", "lidarr,streamrip,hifi,slskd,ytdlp", False),
     # streamrip (Qobuz / Tidal / Deezer with your own subscription)

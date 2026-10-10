@@ -244,6 +244,36 @@
   "default": true,
   "secret": false
  },
+ "new_user_auto_approve": {
+  "env": "ENCORE_NEW_USER_AUTO_APPROVE",
+  "default": false,
+  "secret": false
+ },
+ "new_user_auto_approve_playlists": {
+  "env": "ENCORE_NEW_USER_AUTO_APPROVE_PLAYLISTS",
+  "default": false,
+  "secret": false
+ },
+ "new_user_pick": {
+  "env": "ENCORE_NEW_USER_PICK",
+  "default": true,
+  "secret": false
+ },
+ "new_user_fix": {
+  "env": "ENCORE_NEW_USER_FIX",
+  "default": true,
+  "secret": false
+ },
+ "new_user_storage": {
+  "env": "ENCORE_NEW_USER_STORAGE",
+  "default": true,
+  "secret": false
+ },
+ "new_user_auto_download": {
+  "env": "ENCORE_NEW_USER_AUTO_DOWNLOAD",
+  "default": true,
+  "secret": false
+ },
  "ytdlp_last_resort": {
   "env": "ENCORE_YTDLP_LAST_RESORT",
   "default": true,

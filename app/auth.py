@@ -48,13 +48,22 @@ def validate_credentials(username: str, password: str) -> None:
         raise HTTPException(400, "Password must be at least 8 characters")
 
 
+def new_user_defaults() -> tuple[bool, bool, dict]:
+    """(auto_approve, auto_download, perms) every new member starts with – Settings → Users & permissions."""
+    import json as _json  # noqa: F401
+    return (bool(config.get("new_user_auto_approve")), bool(config.get("new_user_auto_download")),
+            {k: bool(config.get(f"new_user_{k}")) for k in ("auto_approve_playlists", "pick", "fix", "storage")})
+
+
 def create_user(username, password, role="user", email=None, invite_id=None) -> int:
+    import json as _json
     validate_credentials(username, password)
     if db.one("SELECT id FROM users WHERE username=?", (username,)):
         raise HTTPException(409, "Username already taken")
+    auto, dl, perms = new_user_defaults()
     return db.execute(
-        "INSERT INTO users (username, email, password_hash, role, invite_id, auto_approve, created_at) VALUES (?,?,?,?,?,?,?)",
-        (username, email, hash_password(password), role, invite_id, 1 if role == "admin" else 0, time.time()),
+        "INSERT INTO users (username, email, password_hash, role, invite_id, auto_approve, auto_download, perms, created_at) VALUES (?,?,?,?,?,?,?,?,?)",
+        (username, email, hash_password(password), role, invite_id, 1 if role != "user" or auto else 0, int(dl), _json.dumps(perms), time.time()),
     )
 
 

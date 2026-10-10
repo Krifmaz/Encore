@@ -43,7 +43,8 @@ async def verify_track(t: dict) -> dict:
 async def verify_library(only_new: bool = True) -> None:
     if state["running"]:
         return
-    where = "WHERE verify_status IS NULL" if only_new else ""
+    # songs you confirmed yourself ("manual") are never second-guessed by the fingerprint check
+    where = "WHERE verify_status IS NULL" if only_new else "WHERE verify_status IS NOT 'manual'"
     rows = db.query(f"SELECT id, path, title, artist, duration, mb_trackid FROM tracks {where} ORDER BY id")
     state.update(running=True, done=0, total=len(rows), verified=0, mismatch=0, unknown=0, current="")
     try:
@@ -71,7 +72,7 @@ LOSSLESS = {"flac", "wav", "alac", "aiff", "aif", "ape", "wv"}
 
 def quality(t: dict) -> tuple:
     return (
-        t.get("verify_status") == "verified",
+        t.get("verify_status") in ("verified", "manual"),
         t.get("format") in LOSSLESS,
         t.get("bitrate") or 0,
         bool(t.get("mb_trackid")),

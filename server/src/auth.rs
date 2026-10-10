@@ -148,10 +148,16 @@ pub fn create_user(st: &AppState, username: &str, password: &str, role: &str, em
     if st.db.one("SELECT id FROM users WHERE username=?", p![username])?.is_some() {
         return Err(err(409, "Username already taken"));
     }
-    let auto = if role == "user" { 0 } else { 1 };
+    // what every new member starts with (Settings → Users & permissions → New members start with)
+    let c = &st.cfg;
+    let auto = if role != "user" || c.bool("new_user_auto_approve") { 1 } else { 0 };
+    let perms = json!({
+        "auto_approve_playlists": c.bool("new_user_auto_approve_playlists"),
+        "pick": c.bool("new_user_pick"), "fix": c.bool("new_user_fix"), "storage": c.bool("new_user_storage"),
+    });
     Ok(st.db.execute(
-        "INSERT INTO users (username, email, password_hash, role, invite_id, auto_approve, created_at) VALUES (?,?,?,?,?,?,?)",
-        p![username, email, hash_password(password), role, invite_id, auto, now()],
+        "INSERT INTO users (username, email, password_hash, role, invite_id, auto_approve, auto_download, perms, created_at) VALUES (?,?,?,?,?,?,?,?,?)",
+        p![username, email, hash_password(password), role, invite_id, auto, c.bool("new_user_auto_download") as i64, perms.to_string(), now()],
     )?)
 }
 

@@ -9,7 +9,9 @@ export async function renderUsers(view, ctx) {
     </div>
     <div class="card flat" id="users"></div>
     <div class="section-head"><h2>Permissions for everyone</h2><span class="small muted">applies to every non-admin user; fine-tune one user with the gear in their row</span></div>
-    <div class="card flat" id="bulk-perms"></div>`;
+    <div class="card flat" id="bulk-perms"></div>
+    <div class="section-head"><h2>New members start with</h2><span class="small muted">copied onto every new account (sign-up, invite or added here); change one person later with their gear</span></div>
+    <div class="card" id="new-defaults"></div>`;
   const box = view.querySelector('#users');
   const bulkBox = view.querySelector('#bulk-perms');
   const loadBulk = async () => {
@@ -24,6 +26,19 @@ export async function renderUsers(view, ctx) {
     try { await api.post('/admin/users/bulk', { perm: b.dataset.bulk, value: b.dataset.v === '1' }); toast('Updated for everyone', 'ok'); loadBulk(); load(); } catch (err) { toast(err.message, 'err'); }
   };
   loadBulk();
+  const NEW = [['new_user_auto_approve', 'Requests skip the approval queue'], ['new_user_auto_approve_playlists', 'Playlist downloads skip the approval queue'],
+    ['new_user_pick', 'Pick the exact version to download'], ['new_user_fix', 'Fix their own downloads'], ['new_user_storage', 'See server storage'],
+    ['new_user_auto_download', 'Auto-download (likes, followed playlists and artists)']];
+  const defBox = view.querySelector('#new-defaults');
+  api.get('/admin/settings').then(v => {
+    defBox.innerHTML = `<div class="stack">${NEW.map(([k, l]) => `<label class="switch"><input type="checkbox" data-nd="${k}" ${v[k] ? 'checked' : ''}><i></i>${esc(l)}</label>`).join('')}
+      <label class="field" style="max-width:260px"><span>Weekly request limit (0 = unlimited)</span><input class="input" type="number" min="0" data-nd="default_request_limit" value="${esc(v.default_request_limit ?? 0)}"></label></div>`;
+    defBox.onchange = async (e) => {
+      const k = e.target.dataset.nd;
+      if (!k) return;
+      try { await api.put('/admin/settings', { [k]: e.target.type === 'checkbox' ? e.target.checked : +e.target.value }); toast('Saved for new members', 'ok'); } catch (err) { toast(err.message, 'err'); }
+    };
+  }).catch(() => { defBox.textContent = ''; });
   const load = async () => {
     const users = await api.get('/admin/users');
     box.innerHTML = `<div class="table-wrap"><table class="table"><thead><tr>

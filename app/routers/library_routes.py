@@ -552,7 +552,41 @@ async def retag(album_id: str, body: Retag, user=Depends(auth.admin_user)):
     except Exception as e:  # noqa: BLE001
         raise HTTPException(500, f"Tagging failed: {e}")
     t = db.one("SELECT album_id FROM tracks WHERE path=?", (paths[0],)) if paths else None
+    if paths:
+        # you picked this release yourself (MusicBrainz, Deezer, Apple, Discogs…): that's your confirmation,
+        # so the fingerprint check stops calling it "wrong audio"
+        _mark_manual(paths, user)
     return {"ok": True, "album_id": t["album_id"] if t else None}
+
+
+def _mark_manual(paths: list[str], user: dict) -> None:
+    for p in paths:
+        db.execute("UPDATE tracks SET verify_status='manual', verify_detail=?, verified_at=? WHERE path=?",
+                   (f"Confirmed by {user['username']}", time.time(), p))
+
+
+class ManualVerify(BaseModel):
+    track_ids: list[int]
+    correct: bool = True
+
+
+@router.post("/verify-manual")
+def verify_manual(body: ManualVerify, user=Depends(auth.current_user)):
+    """'This is the right song' – overrides the fingerprint check (e.g. matched to Deezer, not MusicBrainz).
+    Admins for any song; users with the fix permission for songs they requested."""
+    for tid in body.track_ids:
+        t = db.one("SELECT path, request_id FROM tracks WHERE id=?", (tid,))
+        if not t:
+            continue
+        if user["role"] != "admin":
+            owner = db.one("SELECT user_id FROM requests WHERE id=?", (t["request_id"],)) if t["request_id"] else None
+            if not (auth.can(user, "fix") and owner and owner["user_id"] == user["id"]):
+                raise HTTPException(403, "You can only confirm songs you requested")
+        if body.correct:
+            _mark_manual([t["path"]], user)
+        else:
+            db.execute("UPDATE tracks SET verify_status=NULL, verify_detail=NULL WHERE id=?", (tid,))
+    return {"ok": True}
 
 
 @router.post("/tags")

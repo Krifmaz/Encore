@@ -39,6 +39,9 @@ export function trackMenu(anchor, t, { admin = false, onDeleted } = {}) {
     player.canSaveOffline() ? { label: 'Save for offline', icon: icon.download, onClick: () => { player.saveOffline([t]); toast('Saving to this phone…', 'ok'); } } : null,
     t.album_id ? { label: 'Go to album', icon: icon.disc, href: `#/library/album/${t.album_id}` } : null,
     admin ? { label: 'Fix this song…', icon: icon.tag, onClick: () => fixSongModal(t) } : null,
+    (admin || (window.encoreSession?.user?.perms?.fix && t.request_id)) ? (t.verify_status === 'manual'
+      ? { label: 'Undo “confirmed”', icon: icon.x, onClick: async () => { await api.post('/library/verify-manual', { track_ids: [t.id], correct: false }); toast('Will be checked again', 'ok'); onDeleted?.(); } }
+      : { label: 'This is the right song', icon: icon.check, onClick: async () => { try { await api.post('/library/verify-manual', { track_ids: [t.id] }); toast('Marked as confirmed – the audio check won’t flag it again', 'ok'); onDeleted?.(); } catch (e) { toast(e.message, 'err'); } } }) : null,
     ...(admin || (window.encoreSession?.user?.perms?.fix && t.request_id) ? ['-', { label: admin ? 'Delete song from disk' : 'Wrong song – remove it', icon: icon.trash, danger: true, onClick: async () => {
       if (!await confirmDialog('Delete song', `Permanently delete "${t.title}" from disk?`, 'Delete', true)) return;
       try { await api.del(`/library/tracks/${t.id}`); toast('Song deleted', 'ok'); onDeleted?.(); } catch (e) { toast(e.message, 'err'); }
@@ -292,6 +295,7 @@ export async function render(view, ctx) {
 }
 
 function verifyBadge(t) {
+  if (t.verify_status === 'manual') return `<span class="badge ok" title="${esc(t.verify_detail || 'Confirmed by hand')}">✓ confirmed</span>`;
   if (t.verify_status === 'verified') return `<span class="badge ok" title="${esc(t.verify_detail || '')}">✓ verified</span>`;
   if (t.verify_status === 'mismatch') return `<span class="badge err" title="${esc(t.verify_detail || '')}">wrong audio</span>`;
   return '';
@@ -404,6 +408,7 @@ export async function renderAlbum(view, ctx) {
     { label: 'Play next', icon: icon.next, onClick: () => { player.playNext(queueTracks); toast('Plays next', 'ok'); } },
     { label: 'Add to playlist', icon: icon.plus, onClick: () => addToPlaylistModal(a.tracks.map(t => t.id)) },
     player.canSaveOffline() ? { label: 'Save album for offline', icon: icon.download, onClick: () => { player.saveOffline(queueTracks); toast(`Saving ${queueTracks.length} song(s) to this phone…`, 'ok'); } } : null,
+    admin ? { label: 'All songs are right (confirm)', icon: icon.check, onClick: async () => { await api.post('/library/verify-manual', { track_ids: a.tracks.map(t => t.id) }); toast('Album confirmed', 'ok'); reload(); } } : null,
     { label: 'Download album (zip)', icon: icon.download, href: `/api/library/albums/${id}/download` },
     { label: 'Lyrics for all songs', icon: icon.music, onClick: async () => (await import('./lyrics.js')).fetchAlbumLyrics(id) },
     a.mb_releasegroupid ? { label: 'Release info', icon: icon.disc, href: `#/album/${a.mb_releasegroupid}` } : null,
