@@ -87,6 +87,20 @@ const streamUrl = (t, transcode = false, offset = 0) => t.preview ? t.preview_ur
   : `/api/library/tracks/${t.id}/stream${transcode ? `?transcode=1${offset ? `&t=${offset.toFixed(1)}` : ''}` : ''}`;
 const convert = (t) => !t.preview && CONVERT.has((t.format || '').toLowerCase());
 
+/** Android app: keep songs on the phone so they play with no server. */
+export const canSaveOffline = () => !!window.EncoreNative?.saveOffline;
+export function saveOffline(tracks) {
+  for (const t of tracks) {
+    if (typeof t.id !== 'number') continue;
+    const conv = convert(t);
+    window.EncoreNative.saveOffline(JSON.stringify({
+      id: String(t.id), title: t.title || '', artist: t.artist || '', album: t.album || '', ext: conv ? 'flac' : (t.format || 'audio'),
+      url: new URL(`/api/library/tracks/${t.id}/stream${conv ? '?transcode=true' : ''}`, location.href).href,
+      art: t.album_id ? new URL(`/api/library/albums/${t.album_id}/cover?s=600`, location.href).href : '',
+    }));
+  }
+}
+
 function load(transcode = false, offset = 0) {
   const t = current();
   if (!t) return;

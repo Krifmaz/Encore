@@ -1,0 +1,95 @@
+<!doctype html>
+<html lang="en"><head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<style>
+  :root { color-scheme: dark; --bg: #0b0b12; --panel: #161622; --panel2: #1e1e2e; --border: #2a2a3d; --text: #f3f3f8; --muted: #9a9ab0; --accent: #8b5cf6; --warn: #f59e0b; }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--text); font: 15px/1.45 system-ui, sans-serif; padding: 0 0 150px; }
+  .banner { position: sticky; top: 0; z-index: 2; background: #2b1d05; color: #fcd34d; padding: 12px 16px; display: flex; gap: 10px; align-items: center; border-bottom: 1px solid #4a3410; }
+  .banner .t { flex: 1; font-size: 14px; }
+  button { font: inherit; border: 0; border-radius: 10px; padding: 9px 13px; background: var(--panel2); color: var(--text); }
+  button.primary { background: linear-gradient(135deg, #8b5cf6, #ec4899); font-weight: 650; }
+  h1 { font-size: 26px; margin: 18px 16px 4px; } .muted { color: var(--muted); }
+  .sub { margin: 0 16px 14px; font-size: 14px; }
+  .row { display: flex; align-items: center; gap: 12px; padding: 10px 16px; }
+  .row.cur { background: var(--panel); }
+  .art { width: 48px; height: 48px; border-radius: 8px; background: var(--panel2) center/cover; flex: none; }
+  .meta { flex: 1; min-width: 0; } .meta div { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .x { background: none; color: var(--muted); padding: 6px 8px; }
+  .player { position: fixed; left: 0; right: 0; bottom: 0; background: var(--panel); border-top: 1px solid var(--border); padding: 10px 14px 14px; }
+  .player .now { display: flex; align-items: center; gap: 10px; margin-bottom: 8px; }
+  .ctr { display: flex; justify-content: center; gap: 14px; }
+  input[type=range] { width: 100%; accent-color: var(--accent); }
+  svg { width: 20px; height: 20px; fill: none; stroke: currentColor; stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; display: block; }
+  .empty { padding: 40px 20px; text-align: center; }
+</style></head>
+<body>
+  <div class="banner"><svg viewBox="0 0 24 24"><path d="M1 1l22 22M16.7 11.1A10.9 10.9 0 0 1 19 12.6M5 12.6a10.9 10.9 0 0 1 5.2-2.5M10.7 5A16 16 0 0 1 22.6 9M1.4 9a15.9 15.9 0 0 1 4.7-2.9M8.5 16.1a6 6 0 0 1 7 0M12 20h.01"/></svg>
+    <div class="t" id="why">Not connected to your Encore server – playing music saved on this phone.</div>
+    <button class="primary" id="retry">Retry</button></div>
+  <h1>Offline</h1>
+  <div class="sub muted" id="count"></div>
+  <div id="list"></div>
+  <div class="sub"><button id="server">Change server</button></div>
+  <div class="player" id="player" hidden>
+    <div class="now"><div class="art" id="p-art"></div><div class="meta"><div id="p-title" style="font-weight:650"></div><div class="muted" id="p-artist"></div></div></div>
+    <input type="range" id="seek" min="0" max="1000" value="0">
+    <div class="ctr">
+      <button id="prev" aria-label="Previous"><svg viewBox="0 0 24 24"><path d="M19 20L9 12l10-8v16zM5 19V5"/></svg></button>
+      <button class="primary" id="play" aria-label="Play/pause"><svg viewBox="0 0 24 24" id="pi"><path d="M6 4l14 8-14 8z"/></svg></button>
+      <button id="next" aria-label="Next"><svg viewBox="0 0 24 24"><path d="M5 4l10 8-10 8V4zM19 5v14"/></svg></button>
+      <button id="shuf" aria-label="Shuffle"><svg viewBox="0 0 24 24"><path d="M16 3h5v5M4 20L21 3M21 16v5h-5M15 15l6 6M4 4l5 5"/></svg></button>
+    </div>
+  </div>
+  <audio id="a"></audio>
+<script>
+  const $ = (id) => document.getElementById(id);
+  const esc = (s) => String(s ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+  const err = new URLSearchParams(location.search).get('err');
+  if (err) $('why').textContent = err + ' – playing music saved on this phone.';
+  let songs = [], queue = [], idx = -1;
+  const a = $('a');
+  const PLAY = '<path d="M6 4l14 8-14 8z"/>', PAUSE = '<path d="M6 4h4v16H6zM14 4h4v16h-4z"/>';
+  function load() {
+    songs = JSON.parse(EncoreNative.offlineList());
+    $('count').textContent = songs.length ? `${songs.length} song(s) saved on this phone` : '';
+    $('list').innerHTML = songs.length ? songs.map((s, i) => `<div class="row ${queue[idx] && queue[idx].id === s.id ? 'cur' : ''}" data-i="${i}">
+      <div class="art" style="background-image:url('${esc(s.art || '')}')"></div>
+      <div class="meta"><div>${esc(s.title)}</div><div class="muted">${esc(s.artist)}${s.album ? ' · ' + esc(s.album) : ''}</div></div>
+      <button class="x" data-rm="${esc(s.id)}" aria-label="Remove">✕</button></div>`).join('')
+      : '<div class="empty muted">Nothing saved yet. When you\'re connected, use ⋯ → “Save for offline” on songs or albums.</div>';
+  }
+  function play(list, i) {
+    queue = list; idx = i;
+    const s = queue[idx]; if (!s) return;
+    a.src = s.file; a.play();
+    $('player').hidden = false;
+    $('p-title').textContent = s.title; $('p-artist').textContent = s.artist;
+    $('p-art').style.backgroundImage = s.art ? `url('${s.art}')` : '';
+    load(); report();
+  }
+  function report() {
+    const s = queue[idx];
+    try { EncoreNative.nowPlaying(JSON.stringify(s ? { title: s.title, artist: s.artist, album: s.album || '', art: '', playing: !a.paused } : { stopped: true })); } catch (e) {}
+  }
+  const next = () => { if (idx < queue.length - 1) play(queue, idx + 1); };
+  const prev = () => { if (a.currentTime > 3 || idx === 0) a.currentTime = 0; else play(queue, idx - 1); };
+  const toggle = () => { if (!queue.length) return; a.paused ? a.play() : a.pause(); };
+  window.encorePlayer = { toggle, next, prev, open: () => {} };
+  a.onended = next;
+  a.onplay = a.onpause = () => { $('pi').innerHTML = a.paused ? PLAY : PAUSE; report(); };
+  a.ontimeupdate = () => { if (a.duration) $('seek').value = a.currentTime / a.duration * 1000; };
+  $('seek').oninput = (e) => { if (a.duration) a.currentTime = e.target.value / 1000 * a.duration; };
+  $('play').onclick = toggle; $('next').onclick = next; $('prev').onclick = prev;
+  $('shuf').onclick = () => { const l = [...songs].sort(() => Math.random() - 0.5); play(l, 0); };
+  $('list').onclick = (e) => {
+    const rm = e.target.closest('[data-rm]');
+    if (rm) { EncoreNative.removeOffline(rm.dataset.rm); load(); return; }
+    const r = e.target.closest('[data-i]');
+    if (r) play(songs, +r.dataset.i);
+  };
+  $('retry').onclick = () => EncoreNative.retryServer();
+  $('server').onclick = () => EncoreNative.changeServer();
+  load();
+</script>
+</body></html>

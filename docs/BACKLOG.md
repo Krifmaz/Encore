@@ -72,3 +72,13 @@
 - Removed the built-in services (aio image: slskd, Lidarr, Prowlarr, qBittorrent, SABnzbd).
   Lidarr/slskd still work as your own external containers.
 - Android: built-in server screen with saved servers (add / open / remove), no clearing app data.
+- Settings hub (Account, Connections, Users & permissions, Invites, server pages, Auto-download, Tasks,
+  Diagnostics, API & security, About/version); gear next to your name; all keys on one page, hidden.
+- Activity → Downloader page; Following → For you page.
+- Permissions per user + all on/off: auto-approve, auto-approve playlists, pick exact versions, fix their
+  own downloads (incl. removing a wrong song they requested), see storage.
+- Artwork: cover path remembered, small cached thumbnails – no network for songs you already have.
+- Upgrades compare the audio first; a different recording is kept as its own song.
+- Fix this song (edit / identify by audio, file moved, never merged); remove wrongly added artists.
+- Android offline: Save song/album for offline; when the server is down the app opens the offline
+  player with a "Not connected" banner; web app shows a connection banner too.

@@ -72,6 +72,7 @@ public class MainActivity extends Activity {
         s.setJavaScriptEnabled(true);
         s.setDomStorageEnabled(true);
         s.setMediaPlaybackRequiresUserGesture(false);
+        s.setAllowFileAccess(true);   // the built-in offline page plays files saved in app storage
         s.setMixedContentMode(WebSettings.MIXED_CONTENT_COMPATIBILITY_MODE);
         s.setUserAgentString(s.getUserAgentString() + " EncoreAndroid/" + BuildConfig.VERSION_NAME);
         CookieManager.getInstance().setAcceptCookie(true);
@@ -95,19 +96,19 @@ public class MainActivity extends Activity {
             @Override
             public void onReceivedHttpError(WebView view, WebResourceRequest req, WebResourceResponse res) {
                 // the saved address now answers with an error (moved port, other service, proxy down): ask again
-                if (req.isForMainFrame() && !req.getUrl().toString().startsWith(PICKER) && res.getStatusCode() >= 400) askServer(server() + " answered " + res.getStatusCode());
+                if (req.isForMainFrame() && !req.getUrl().toString().startsWith("file:") && res.getStatusCode() >= 400) unreachable(server() + " answered " + res.getStatusCode());
             }
 
             @Override
             public void onPageFinished(WebView view, String url) {
                 loading.setVisibility(View.GONE);
-                if (pendingShare != null && !url.startsWith(PICKER)) { shareLink(pendingShare); pendingShare = null; }
+                if (pendingShare != null && !url.startsWith("file:")) { shareLink(pendingShare); pendingShare = null; }
             }
 
             @Override
             public void onReceivedError(WebView view, WebResourceRequest req, WebResourceError err) {
                 if (req.isForMainFrame()) loading.setVisibility(View.GONE);
-                if (req.isForMainFrame() && !req.getUrl().toString().startsWith(PICKER)) askServer("Can't reach " + server() + " – " + err.getDescription());
+                if (req.isForMainFrame() && !req.getUrl().toString().startsWith("file:")) unreachable("Can't reach " + server());
             }
         });
         web.setWebChromeClient(new WebChromeClient() {
@@ -148,6 +149,52 @@ public class MainActivity extends Activity {
     }
 
     static final String PICKER = "file:///android_asset/servers.html";
+    static final String OFFLINE = "file:///android_asset/offline.html";
+
+    // ---- offline music: files the user saved, kept in app storage, playable with no server ----
+    java.io.File offlineDir() { java.io.File d = new java.io.File(getFilesDir(), "offline"); d.mkdirs(); return d; }
+
+    org.json.JSONArray offlineIndex() {
+        try (java.io.FileInputStream in = new java.io.FileInputStream(new java.io.File(offlineDir(), "index.json"))) {
+            java.io.ByteArrayOutputStream b = new java.io.ByteArrayOutputStream();
+            byte[] buf = new byte[8192];
+            int n;
+            while ((n = in.read(buf)) > 0) b.write(buf, 0, n);
+            return new org.json.JSONArray(b.toString("UTF-8"));
+        } catch (Exception e) { return new org.json.JSONArray(); }
+    }
+
+    synchronized void writeOfflineIndex(org.json.JSONArray a) {
+        try (java.io.FileOutputStream o = new java.io.FileOutputStream(new java.io.File(offlineDir(), "index.json"))) {
+            o.write(a.toString().getBytes("UTF-8"));
+        } catch (Exception ignored) { }
+    }
+
+    boolean download(String url, java.io.File out) {
+        try {
+            HttpURLConnection c = (HttpURLConnection) new URL(url).openConnection();
+            String cookie = CookieManager.getInstance().getCookie(url);
+            if (cookie != null) c.setRequestProperty("Cookie", cookie);
+            c.setConnectTimeout(10000);
+            c.setReadTimeout(60000);
+            if (c.getResponseCode() != 200) { c.disconnect(); return false; }
+            java.io.File tmp = new java.io.File(out.getPath() + ".part");
+            try (java.io.InputStream in = c.getInputStream(); java.io.OutputStream o = new java.io.FileOutputStream(tmp)) {
+                byte[] buf = new byte[1 << 16];
+                int n;
+                while ((n = in.read(buf)) > 0) o.write(buf, 0, n);
+            }
+            c.disconnect();
+            return tmp.renameTo(out);
+        } catch (Exception e) { return false; }
+    }
+
+    /** No server: offline music if there is any, otherwise the server screen. */
+    void unreachable(String problem) {
+        loading.setVisibility(View.GONE);
+        if (offlineIndex().length() > 0) web.loadUrl(OFFLINE + "?err=" + Uri.encode(problem));
+        else askServer(problem);
+    }
 
     /** First start, "Change server", or the saved server can't be reached: the built-in server screen. */
     void askServer(String problem) {
@@ -271,6 +318,68 @@ public class MainActivity extends Activity {
                 return new JSONObject().put("list", list).put("current", server()).toString();
             } catch (Exception e) { return "{\"list\":[],\"current\":\"\"}"; }
         }
+
+        /** Save a song for offline listening: {id, title, artist, album, url, art} (url/art absolute). */
+        @JavascriptInterface
+        public void saveOffline(String json) {
+            new Thread(() -> {
+                boolean ok = false;
+                String title = "";
+                try {
+                    JSONObject o = new JSONObject(json);
+                    String id = o.getString("id").replaceAll("[^A-Za-z0-9_-]", "");
+                    title = o.optString("title");
+                    String ext = o.optString("ext", "audio").replaceAll("[^a-z0-9]", "");
+                    java.io.File f = new java.io.File(offlineDir(), id + "." + ext);
+                    ok = f.exists() || download(o.getString("url"), f);
+                    java.io.File art = new java.io.File(offlineDir(), id + ".jpg");
+                    if (ok && !o.optString("art").isEmpty() && !art.exists()) download(o.getString("art"), art);
+                    if (ok) {
+                        synchronized (MainActivity.this) {
+                            org.json.JSONArray idx = offlineIndex(), out = new org.json.JSONArray();
+                            for (int i = 0; i < idx.length(); i++) if (!id.equals(idx.getJSONObject(i).optString("id"))) out.put(idx.getJSONObject(i));
+                            out.put(new JSONObject().put("id", id).put("title", title).put("artist", o.optString("artist")).put("album", o.optString("album"))
+                                    .put("file", Uri.fromFile(f).toString()).put("art", art.exists() ? Uri.fromFile(art).toString() : ""));
+                            writeOfflineIndex(out);
+                        }
+                    }
+                } catch (Exception ignored) { }
+                final boolean done = ok;
+                final String t = title;
+                runOnUiThread(() -> Toast.makeText(MainActivity.this, done ? "Saved for offline: " + t : "Couldn't save " + t, Toast.LENGTH_SHORT).show());
+            }).start();
+        }
+
+        @JavascriptInterface
+        public String offlineList() { return offlineIndex().toString(); }
+
+        @JavascriptInterface
+        public String offlineIds() {
+            org.json.JSONArray idx = offlineIndex(), ids = new org.json.JSONArray();
+            for (int i = 0; i < idx.length(); i++) ids.put(idx.optJSONObject(i).optString("id"));
+            return ids.toString();
+        }
+
+        @JavascriptInterface
+        public void removeOffline(String id) {
+            synchronized (MainActivity.this) {
+                org.json.JSONArray idx = offlineIndex(), out = new org.json.JSONArray();
+                for (int i = 0; i < idx.length(); i++) {
+                    JSONObject o = idx.optJSONObject(i);
+                    if (id.equals(o.optString("id"))) {
+                        new java.io.File(Uri.parse(o.optString("file")).getPath()).delete();
+                        new java.io.File(offlineDir(), id + ".jpg").delete();
+                    } else out.put(o);
+                }
+                writeOfflineIndex(out);
+            }
+        }
+
+        @JavascriptInterface
+        public void openOffline() { runOnUiThread(() -> web.loadUrl(OFFLINE)); }
+
+        @JavascriptInterface
+        public void retryServer() { runOnUiThread(() -> { loading.setVisibility(View.VISIBLE); web.loadUrl(server()); }); }
 
         @JavascriptInterface
         public void connect(String url) { runOnUiThread(() -> check(url.trim())); }

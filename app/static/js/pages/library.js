@@ -36,6 +36,7 @@ export function trackMenu(anchor, t, { admin = false, onDeleted } = {}) {
       } catch (e) { toast(e.message, 'err'); }
     } },
     { label: 'Download this song', icon: icon.download, href: `/api/library/tracks/${t.id}/file`, download: true },
+    player.canSaveOffline() ? { label: 'Save for offline', icon: icon.download, onClick: () => { player.saveOffline([t]); toast('Saving to this phone…', 'ok'); } } : null,
     t.album_id ? { label: 'Go to album', icon: icon.disc, href: `#/library/album/${t.album_id}` } : null,
     admin ? { label: 'Fix this song…', icon: icon.tag, onClick: () => fixSongModal(t) } : null,
     ...(admin || (window.encoreSession?.user?.perms?.fix && t.request_id) ? ['-', { label: admin ? 'Delete song from disk' : 'Wrong song – remove it', icon: icon.trash, danger: true, onClick: async () => {
@@ -402,6 +403,7 @@ export async function renderAlbum(view, ctx) {
     { label: 'Add to queue', icon: icon.list, onClick: () => { player.enqueue(queueTracks); toast('Added to queue', 'ok'); } },
     { label: 'Play next', icon: icon.next, onClick: () => { player.playNext(queueTracks); toast('Plays next', 'ok'); } },
     { label: 'Add to playlist', icon: icon.plus, onClick: () => addToPlaylistModal(a.tracks.map(t => t.id)) },
+    player.canSaveOffline() ? { label: 'Save album for offline', icon: icon.download, onClick: () => { player.saveOffline(queueTracks); toast(`Saving ${queueTracks.length} song(s) to this phone…`, 'ok'); } } : null,
     { label: 'Download album (zip)', icon: icon.download, href: `/api/library/albums/${id}/download` },
     { label: 'Lyrics for all songs', icon: icon.music, onClick: async () => (await import('./lyrics.js')).fetchAlbumLyrics(id) },
     a.mb_releasegroupid ? { label: 'Release info', icon: icon.disc, href: `#/album/${a.mb_releasegroupid}` } : null,

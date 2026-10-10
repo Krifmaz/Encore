@@ -186,5 +186,17 @@ window.addEventListener('encore:unauthorized', () => {
   if (session.user) { session.user = null; toast('Your session expired – please sign in again', 'err'); location.hash = '#/login'; location.reload(); }
 });
 window.addEventListener('encore:requests-changed', refreshPendingBadge);
+// connection banner: shown while the device is offline or the server stops answering
+function connBanner(on, text = 'Not connected – check your internet or server') {
+  let b = document.getElementById('conn-banner');
+  if (!on) { b?.remove(); return; }
+  if (!b) { b = document.createElement('div'); b.id = 'conn-banner'; document.body.appendChild(b); }
+  b.innerHTML = `${icon.x}<span>${esc(text)}</span>${window.EncoreNative?.openOffline ? '<button class="btn sm" id="go-offline">Offline music</button>' : ''}`;
+  b.querySelector('#go-offline')?.addEventListener('click', () => window.EncoreNative.openOffline());
+}
+window.addEventListener('offline', () => connBanner(true));
+window.addEventListener('online', () => connBanner(false));
+window.addEventListener('encore:server-down', () => connBanner(true, 'The Encore server isn\'t answering'));
+window.addEventListener('encore:server-up', () => connBanner(false));
 
 boot();

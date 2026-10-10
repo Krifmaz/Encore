@@ -497,3 +497,8 @@ details.settings-card[open] .chev svg { transform: rotate(180deg); }
 .settings-nav .nav-label { margin: 12px 12px 4px; }
 .sidebar-foot .btn.icon { padding: 6px; }
 .sidebar-foot { gap: 2px; }
+
+#conn-banner { position: fixed; top: 0; left: 0; right: 0; z-index: 200; display: flex; align-items: center; gap: 10px; padding: 8px 14px;
+  padding-top: max(8px, env(safe-area-inset-top)); background: #2b1d05; color: #fcd34d; font-size: 14px; font-weight: 600; border-bottom: 1px solid #4a3410; }
+#conn-banner svg { width: 16px; height: 16px; flex: none; }
+#conn-banner span { flex: 1; }

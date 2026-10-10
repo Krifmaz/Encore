@@ -8,7 +8,14 @@ async function request(method, path, body) {
     opts.headers['Content-Type'] = 'application/json';
     opts.body = JSON.stringify(body);
   }
-  const res = await fetch('/api' + path, opts);
+  let res;
+  try {
+    res = await fetch('/api' + path, opts);
+  } catch (e) {
+    window.dispatchEvent(new CustomEvent('encore:server-down'));
+    throw new ApiError(0, 'Not connected to the server');
+  }
+  window.dispatchEvent(new CustomEvent(res.status >= 502 && res.status <= 504 ? 'encore:server-down' : 'encore:server-up'));
   let data = null;
   const text = await res.text();
   try { data = text ? JSON.parse(text) : null; } catch { data = text; }
