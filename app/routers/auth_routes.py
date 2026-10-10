@@ -106,7 +106,7 @@ def logout(request: Request, response: Response):
 @router.get("/me")
 def me(user=Depends(auth.current_user)):
     used = db.one("SELECT COUNT(*) n FROM requests WHERE user_id=? AND created_at > ? AND parent_id IS NULL", (user["id"], time.time() - 7 * 86400))["n"]
-    return {**user, "requests_this_week": used}
+    return {**user, "perms": auth.perms_of(user), "requests_this_week": used}
 
 
 class Profile(BaseModel):

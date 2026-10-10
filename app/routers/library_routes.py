@@ -83,6 +83,8 @@ def _dir_size(path: str) -> int:
 @router.get("/storage")
 async def storage(user=Depends(auth.current_user)):
     """Disk usage at a glance: disk, library by format/artist, biggest albums, download folders."""
+    if not auth.can(user, "storage"):
+        raise HTTPException(403, "Storage isn't shared with your account")
     import shutil
     hit = _storage_cache.get("v")
     if hit and hit[0] > time.time():
@@ -161,7 +163,7 @@ def tracks(q: str = "", limit: int = 200, offset: int = 0, sort: str = "artist",
         params += [f"%{q}%"] * 3
     d = dir if dir in ("asc", "desc") else ("desc" if sort in ("added", "released", "duration") else "asc")
     order = TRACK_SORTS.get(sort, TRACK_SORTS["artist"]).format(d=d.upper())
-    return db.query(f"""SELECT id, title, artist, album, albumartist, album_id, track, disc, year, duration, format, bitrate, verify_status, verify_detail, added_at
+    return db.query(f"""SELECT id, title, artist, album, albumartist, album_id, track, disc, year, duration, format, bitrate, verify_status, verify_detail, request_id, added_at
                         FROM tracks {where} ORDER BY {order} LIMIT ? OFFSET ?""", (*params, min(limit, 1000), offset))
 
 
@@ -238,11 +240,16 @@ def log_play(body: PlayBody, user=Depends(auth.current_user)):
 
 
 @router.delete("/tracks/{tid}")
-def delete_track(tid: int, user=Depends(auth.admin_user)):
-    """Permanently delete one song's file (and its lyrics file)."""
-    t = db.one("SELECT path, artist, title FROM tracks WHERE id=?", (tid,))
+def delete_track(tid: int, user=Depends(auth.current_user)):
+    """Permanently delete one song's file (and its lyrics file). Users with the "fix" permission may delete
+    songs that came from their own requests (e.g. the wrong song was downloaded)."""
+    t = db.one("SELECT path, artist, title, request_id FROM tracks WHERE id=?", (tid,))
     if not t:
         raise HTTPException(404, "Track not found")
+    if user["role"] != "admin":
+        owner = db.one("SELECT user_id FROM requests WHERE id=?", (t["request_id"],)) if t["request_id"] else None
+        if not (auth.can(user, "fix") and owner and owner["user_id"] == user["id"]):
+            raise HTTPException(403, "You can only remove songs you requested")
     for side in (".lrc", ".txt"):
         try:
             os.remove(os.path.splitext(t["path"])[0] + side)
@@ -281,7 +288,9 @@ _cover_misses: dict[str, float] = {}   # album_id -> when the last lookup found 
 
 
 @router.get("/albums/{album_id}/cover")
-async def cover(album_id: str, user=Depends(auth.current_user)):
+async def cover(album_id: str, s: int = 0, user=Depends(auth.current_user)):
+    """The album's picture: folder image or embedded art (cached), looked up online only if the files have none.
+    s=<pixels> returns a cached small version for lists and tiles."""
     path = await asyncio.to_thread(library.find_cover, album_id)
     if not path and time.time() - _cover_misses.get(album_id, 0) > 1800:
         data = await _lookup_art(album_id)
@@ -294,6 +303,8 @@ async def cover(album_id: str, user=Depends(auth.current_user)):
             _cover_misses[album_id] = time.time()
     if not path:
         raise HTTPException(404, "No cover")
+    if s:
+        path = await asyncio.to_thread(library.thumbnail, path, album_id, s)
     return FileResponse(path, headers={"Cache-Control": "private, no-cache"})   # revalidate (cheap 304) so new art shows at once
 
 
@@ -335,6 +346,7 @@ async def _embed_album_art(album_id: str, data: bytes) -> int:
         except OSError:
             pass
     _cover_misses.pop(album_id, None)
+    library.forget_cover(album_id)
     return n
 
 

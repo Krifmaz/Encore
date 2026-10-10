@@ -5,10 +5,25 @@ export async function renderUsers(view, ctx) {
   view.innerHTML = `
     <div class="row wrap between" style="margin-bottom:18px">
       <div><h1>Users</h1><div class="small muted">Manage who can access your library and what they can request.</div></div>
-      <div class="row"><a class="btn" href="#/admin/invites">${icon.ticket}Invites</a><button class="btn primary" id="add">${icon.plus}Add user</button></div>
+      <div class="row"><a class="btn" href="#/settings?s=invites">${icon.ticket}Invites</a><button class="btn primary" id="add">${icon.plus}Add user</button></div>
     </div>
-    <div class="card flat" id="users"></div>`;
+    <div class="card flat" id="users"></div>
+    <div class="section-head"><h2>Permissions for everyone</h2><span class="small muted">applies to every non-admin user; fine-tune one user with the gear in their row</span></div>
+    <div class="card flat" id="bulk-perms"></div>`;
   const box = view.querySelector('#users');
+  const bulkBox = view.querySelector('#bulk-perms');
+  const loadBulk = async () => {
+    const d = await api.get('/admin/permissions');
+    bulkBox.innerHTML = `<div class="list">${d.perms.map(p => `<div class="list-item" style="flex-wrap:wrap">
+      <div class="grow" style="min-width:200px"><div style="font-weight:600">${esc(p.label)}</div><div class="small muted">${p.on} of ${p.of} user(s) have it</div></div>
+      <div class="row" style="gap:6px;flex:none"><button class="btn sm" data-bulk="${p.key}" data-v="1">All on</button><button class="btn sm" data-bulk="${p.key}" data-v="0">All off</button></div></div>`).join('')}</div>`;
+  };
+  bulkBox.onclick = async (e) => {
+    const b = e.target.closest('[data-bulk]');
+    if (!b) return;
+    try { await api.post('/admin/users/bulk', { perm: b.dataset.bulk, value: b.dataset.v === '1' }); toast('Updated for everyone', 'ok'); loadBulk(); load(); } catch (err) { toast(err.message, 'err'); }
+  };
+  loadBulk();
   const load = async () => {
     const users = await api.get('/admin/users');
     box.innerHTML = `<div class="table-wrap"><table class="table"><thead><tr>
@@ -23,6 +38,7 @@ export async function renderUsers(view, ctx) {
         <td><label class="switch"><input type="checkbox" data-f="auto_approve" ${u.auto_approve ? 'checked' : ''}><i></i></label></td>
         <td class="hide-sm small muted">${fmt.ago(u.last_login)}</td>
         <td style="text-align:right;white-space:nowrap">
+          ${u.role !== 'admin' ? `<button class="btn sm" data-a="perms" title="Permissions">${icon.settings}</button>` : ''}
           <button class="btn sm" data-a="pw" title="Reset password">${icon.shield}</button>
           ${u.id !== ctx.user.id ? `<button class="btn sm" data-a="toggle">${u.disabled ? 'Enable' : 'Disable'}</button>
           <button class="btn sm danger ghost" data-a="del" title="Delete">${icon.trash}</button>` : ''}
@@ -46,6 +62,20 @@ export async function renderUsers(view, ctx) {
     const tr = b.closest('[data-id]');
     const id = tr.dataset.id;
     const name = tr.querySelector('[style*="font-weight:650"]').textContent.trim().split(' ')[0];
+    if (b.dataset.a === 'perms') {
+      const [users, d] = await Promise.all([api.get('/admin/users'), api.get('/admin/permissions')]);
+      const u = users.find(x => String(x.id) === String(id));
+      const m = modal({
+        title: `Permissions – ${esc(name)}`,
+        body: `<div class="stack">${d.perms.map(p => `<label class="switch"><input type="checkbox" data-p="${p.key}" ${u.perms[p.key] ? 'checked' : ''}><i></i>${esc(p.label)}</label>`).join('')}</div>`,
+        footer: '<button class="btn" data-close>Cancel</button><button class="btn primary" id="ok">Save</button>',
+      });
+      m.el.querySelector('#ok').onclick = async () => {
+        const perms = Object.fromEntries([...m.el.querySelectorAll('[data-p]')].map(x => [x.dataset.p, x.checked]));
+        await patch(id, { perms }); m.close(); loadBulk();
+      };
+      return;
+    }
     if (b.dataset.a === 'toggle') patch(id, { disabled: b.textContent.trim() === 'Disable' });
     if (b.dataset.a === 'del' && await confirmDialog('Delete user', `Delete ${name}? Their requests stay in history.`, 'Delete', true)) {
       await api.del(`/admin/users/${id}`); load();

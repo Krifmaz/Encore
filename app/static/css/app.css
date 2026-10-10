@@ -486,3 +486,14 @@ body.np-open { overflow: hidden; }
 div.field { display: flex; flex-direction: column; gap: 6px; }
 div.field small { display: block; color: var(--faint); font-size: 12px; }
 @media (max-width: 760px) { .form-grid { grid-template-columns: 1fr; } }
+
+/* pages shown inside another page (Activity in Downloader, Following in For you, admin pages in Settings) */
+.embedded h1, #panel h1 { font-size: 22px; }
+.mt-lg { margin-top: 28px; }
+details.settings-card > summary { list-style: none; cursor: pointer; }
+details.settings-card > summary::-webkit-details-marker { display: none; }
+details.settings-card .chev svg { width: 18px; height: 18px; transition: transform .15s; color: var(--muted); }
+details.settings-card[open] .chev svg { transform: rotate(180deg); }
+.settings-nav .nav-label { margin: 12px 12px 4px; }
+.sidebar-foot .btn.icon { padding: 6px; }
+.sidebar-foot { gap: 2px; }

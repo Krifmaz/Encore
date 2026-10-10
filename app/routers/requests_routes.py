@@ -223,6 +223,8 @@ def retry(rid: int, user=Depends(auth.current_user)):
         return {"ok": True}
     if r["status"] not in ("failed", "cancelled", "completed"):
         raise HTTPException(400, "Only finished requests can be retried")
+    if user["role"] != "admin" and not auth.can(user, "fix"):
+        raise HTTPException(403, "Ask an admin to retry")
     if r["status"] == "cancelled" and user["role"] != "admin" and not (user.get("auto_approve") or config.get("auto_approve")):
         raise HTTPException(403, "Ask an admin to retry")
     db.update_request(rid, status="queued", progress=0, message="Retrying", source=None, detail={"length": r["detail"].get("length")} if r["detail"].get("length") else {})

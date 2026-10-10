@@ -133,4 +133,11 @@ export async function render(view, ctx) {
   await load();
   const t = setInterval(load, 4000);
   ctx.onLeave(() => clearInterval(t));
+  if (ctx.user?.role === 'admin') {
+    // transfers, Lidarr queue and the server log live here too (was the Activity page)
+    const act = document.createElement('div');
+    act.className = 'embedded mt-lg';
+    view.appendChild(act);
+    (await import('./activity.js')).render(act, ctx);
+  }
 }

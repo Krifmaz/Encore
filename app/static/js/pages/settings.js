@@ -1,5 +1,10 @@
 import { api } from '../api.js';
 import { copyText, esc, icon, setSecretText, toast } from '../ui.js';
+import * as accountPage from './account.js';
+import * as connectionsPage from './connections.js';
+import * as adminPage from './admin.js';
+import * as autoPage from './autodownload.js';
+import * as diagPage from './diagnostics.js';
 
 const S = (key, label, type = 'text', extra = {}) => ({ key, label, type, ...extra });
 
@@ -114,9 +119,20 @@ const SECTIONS = [
   ] },
 ];
 
+// Every key, token and password lives on one page; the other pages keep the non-secret options.
+const KEY_FIELD = (f) => f.type === 'password' || f.secret || /client_id$|qobuz_user$/.test(f.key);
+const KEYS = { id: 'keys', title: 'API keys & passwords', fields: [] };
+for (const sec of SECTIONS) {
+  const keys = sec.fields.filter(KEY_FIELD);
+  keys.forEach(f => KEYS.fields.push({ ...f, label: `${f.label} – ${sec.title}`, full: true }));
+  sec.fields = sec.fields.filter(f => !KEY_FIELD(f));
+}
+SECTIONS.push(KEYS);
+
 // Settings pages: related cards together, in an order that reads top to bottom.
 const GROUPS = [
   { id: 'general', title: 'General', sections: ['general'] },
+  { id: 'keys', title: 'API keys & passwords', sections: ['keys'] },
   { id: 'downloads', title: 'Downloads & sources', sections: ['pipeline', 'slskd', 'ytdlp', 'hifi', 'streamrip', 'lidarr'] },
   { id: 'tagging', title: 'Library, tagging & IDs', sections: ['library', 'verify'] },
   { id: 'accounts', title: 'Email & notifications', sections: ['email', 'notify'] },
@@ -131,9 +147,9 @@ function sourceNote(f, v, meta) {
   const m = meta[f.key] || {};
   const secret = f.type === 'password' || f.secret;
   if (m.source === 'env') {
-    return `<small class="src env">🔒 Set by <span class="mono">${esc(m.env)}</span> in your compose/env${secret && v ? ` · ${esc(v)}` : ''} – change it there (environment always wins)</small>`;
+    return `<small class="src env">🔒 Set by <span class="mono">${esc(m.env)}</span> in your compose/env – change it there (environment always wins)</small>`;
   }
-  if (secret && v) return `<small class="src">Saved in Encore · ${esc(v)} · <a href="#" data-clear="${f.key}">clear</a></small>`;
+  if (secret && v) return `<small class="src">Saved ✓ (hidden) · <a href="#" data-clear="${f.key}">clear</a></small>`;
   if (secret) return `<small class="src">Not set${m.env ? ` – or set <span class="mono">${esc(m.env)}</span> in your compose file` : ''}</small>`;
   if (m.source === 'ui') return '';
   return m.env ? `<small class="src faint">Default · env var <span class="mono">${esc(m.env)}</span></small>` : '';
@@ -210,16 +226,37 @@ async function renderTasks(panel) {
   });
 }
 
+// Pages that are whole screens of their own, shown inside Settings
+const EMBEDDED = {
+  account: (el, ctx) => accountPage.render(el, ctx),
+  connections: (el, ctx) => connectionsPage.render(el, ctx),
+  users: (el, ctx) => adminPage.renderUsers(el, ctx),
+  invites: (el, ctx) => adminPage.renderInvites(el, ctx),
+  autodownload: (el) => autoPage.render(el),
+  diagnostics: (el) => diagPage.render(el),
+};
+
 export async function render(view, ctx) {
-  let values = await api.get('/admin/settings');
+  const admin = ctx.user?.role === 'admin';
+  let values = admin ? await api.get('/admin/settings') : {};
   let lidarrOpts = null;
-  let current = groupOf(ctx.query.s || 'general');
-  const pages = [...GROUPS.map(g => [g.id, g.title]), ['tasks', 'Scheduled tasks'], ['api', 'API & security']];
+  let current = ctx.query.s ? groupOf(ctx.query.s) : 'account';
+  const nav = [
+    ['You', [['account', 'Account'], ['connections', 'Connections']]],
+    ...(admin ? [
+      ['People', [['users', 'Users & permissions'], ['invites', 'Invites']]],
+      ['Server', [...GROUPS.map(g => [g.id, g.title]), ['autodownload', 'Auto-download'], ['tasks', 'Scheduled tasks']]],
+      ['System', [['diagnostics', 'Diagnostics'], ['api', 'API & security']]],
+    ] : []),
+    ['', [['about', 'About']]],
+  ];
+  const pages = nav.flatMap(([, items]) => items);
+  if (!pages.some(([id]) => id === current)) current = 'account';
   view.innerHTML = `
     <h1 style="margin-bottom:18px">Settings</h1>
-    <select class="input settings-select" aria-label="Settings page">${pages.map(([id, t]) => `<option value="${id}">${esc(t)}</option>`).join('')}</select>
+    <select class="input settings-select" aria-label="Settings page">${nav.map(([label, items]) => `<optgroup label="${esc(label || 'Encore')}">${items.map(([id, t]) => `<option value="${id}">${esc(t)}</option>`).join('')}</optgroup>`).join('')}</select>
     <div class="settings-grid">
-      <nav class="settings-nav">${pages.map(([id, t]) => `<button data-s="${id}">${esc(t)}</button>`).join('')}</nav>
+      <nav class="settings-nav">${nav.map(([label, items]) => `${label ? `<div class="nav-label">${esc(label)}</div>` : '<div style="height:10px"></div>'}${items.map(([id, t]) => `<button data-s="${id}">${esc(t)}</button>`).join('')}`).join('')}</nav>
       <div id="panel"></div>
     </div>`;
   const panel = view.querySelector('#panel');
@@ -228,6 +265,9 @@ export async function render(view, ctx) {
     current = id;
     view.querySelectorAll('.settings-nav button').forEach(b => b.classList.toggle('active', b.dataset.s === id));
     view.querySelector('.settings-select').value = id;
+    history.replaceState(null, '', `#/settings?s=${id}`);
+    if (EMBEDDED[id]) { panel.innerHTML = '<div class="skeleton" style="height:200px"></div>'; return EMBEDDED[id](panel, ctx); }
+    if (id === 'about') return showAbout();
     if (id === 'api') return showApi();
     if (id === 'tasks') return renderTasks(panel);
     const group = GROUPS.find(g => g.id === id) || GROUPS[0];
@@ -236,13 +276,14 @@ export async function render(view, ctx) {
       try { lidarrOpts = await api.get('/system/lidarr/options'); } catch { lidarrOpts = null; }
     }
     const meta = values._meta || {};
-    panel.innerHTML = secs.map(sec => `<div class="card settings-card" data-sec="${sec.id}">
-      <div class="row between" style="margin-bottom:14px;gap:10px;flex-wrap:wrap"><h2>${esc(sec.title)}</h2>
-        ${sec.test ? `<button class="btn sm" data-test>${icon.refresh}${esc(sec.testLabel || 'Test connection')}</button>` : ''}</div>
+    panel.innerHTML = secs.map((sec, i) => `<details class="card settings-card" data-sec="${sec.id}" ${i === 0 || secs.length === 1 || (flash && flash.sec === sec.id) ? 'open' : ''}>
+      <summary class="row between" style="gap:10px;flex-wrap:wrap"><h2>${esc(sec.title)}</h2>
+        <span class="row" style="gap:8px">${sec.test ? `<button class="btn sm" data-test>${icon.refresh}${esc(sec.testLabel || 'Test connection')}</button>` : ''}<span class="chev">${icon.chevron || '▾'}</span></span></summary>
+      <div style="height:14px"></div>
       <div data-out>${flash && flash.sec === sec.id ? `<div class="test-result ${flash.ok ? 'ok' : 'err'}">${flash.ok ? icon.check : icon.x}<span>${esc(flash.message || '')}</span></div>` : ''}</div>
       <div class="form-grid">${sec.fields.map(f => field(f, values[f.key], lidarrOpts, meta)).join('')}</div>
       <div class="row mt" style="justify-content:flex-end"><button class="btn primary" data-save>${icon.check}Save</button></div>
-    </div>`).join('') + (group.id === 'downloads' ? pipelineHelp() : '');
+    </details>`).join('') + (group.id === 'downloads' ? pipelineHelp() : '');
     panel.querySelectorAll('[data-sec]').forEach(card => {
       const sec = SECTIONS.find(x => x.id === card.dataset.sec);
       const out = card.querySelector('[data-out]');
@@ -255,7 +296,9 @@ export async function render(view, ctx) {
         show(id);
       }));
       const t = card.querySelector('[data-test]');
-      if (t) t.onclick = async () => {
+      if (t) t.onclick = async (ev) => {
+        ev.preventDefault();
+        card.open = true;
         t.disabled = true;
         out.innerHTML = '<div class="test-result"><span class="spinner"></span><span>Testing…</span></div>';
         let r;
@@ -291,6 +334,14 @@ export async function render(view, ctx) {
       toast(e.message, 'err');
       if (quiet) throw e;
     }
+  };
+
+  const showAbout = async () => {
+    const info = (await import('../app.js')).session.info || {};
+    panel.innerHTML = `<div class="card stack"><h2>About Encore</h2>
+      <div class="row wrap" style="gap:24px"><div><div class="small muted">Version</div><div style="font-weight:700;font-size:20px">v${esc(info.version || '?')}</div></div>
+        <div><div class="small muted">Build</div><div class="mono">${esc(info.build || 'dev')}</div></div></div>
+      <div class="small muted">Apps for Android, Windows, macOS and Linux: <a href="https://github.com/Krifmaz/Encore/releases" target="_blank" rel="noopener">github.com/Krifmaz/Encore/releases</a></div></div>`;
   };
 
   const showApi = async () => {

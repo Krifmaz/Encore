@@ -177,7 +177,61 @@ async def index_paths(paths: list[str]) -> None:
     await asyncio.to_thread(_go)
 
 
+_cover_memo: dict[str, str] = {}   # album_id -> picture path found last time (checked to still exist)
+
+
+def forget_cover(album_id: str | None = None) -> None:
+    """New art was saved (or files moved): look again next time."""
+    if album_id is None:
+        _cover_memo.clear()
+    else:
+        _cover_memo.pop(album_id, None)
+        for f in _thumbs(album_id):
+            try:
+                os.remove(f)
+            except OSError:
+                pass
+
+
+def _thumbs(album_id: str) -> list[str]:
+    d = os.path.join(db.DATA_DIR, "covers", "thumbs")
+    try:
+        return [os.path.join(d, n) for n in os.listdir(d) if n.startswith(album_id + "_")]
+    except OSError:
+        return []
+
+
+def thumbnail(path: str, album_id: str, size: int) -> str:
+    """A small JPEG of the cover for lists and tiles (originals can be several MB). Cached on disk."""
+    size = max(64, min(int(size), 1200))
+    out = os.path.join(db.DATA_DIR, "covers", "thumbs", f"{album_id}_{size}.jpg")
+    try:
+        if os.path.isfile(out) and os.path.getmtime(out) >= os.path.getmtime(path):
+            return out
+        from PIL import Image
+        os.makedirs(os.path.dirname(out), exist_ok=True)
+        with Image.open(path) as im:
+            im = im.convert("RGB")
+            if max(im.size) > size:
+                im.thumbnail((size, size), Image.LANCZOS)
+            im.save(out + ".tmp", "JPEG", quality=85, optimize=True)
+        os.replace(out + ".tmp", out)
+        return out
+    except Exception:  # noqa: BLE001 – no Pillow / odd image: serve the original
+        return path
+
+
 def find_cover(album_id: str) -> str | None:
+    hit = _cover_memo.get(album_id)
+    if hit and os.path.isfile(hit):
+        return hit
+    found = _find_cover(album_id)
+    if found:
+        _cover_memo[album_id] = found
+    return found
+
+
+def _find_cover(album_id: str) -> str | None:
     tracks = db.query("SELECT path FROM tracks WHERE album_id=? ORDER BY disc, track LIMIT 50", (album_id,))
     dirs = []
     for t in tracks:

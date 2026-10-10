@@ -2,7 +2,7 @@
 import json
 import time
 
-from .. import db
+from .. import auth, db
 from . import matcher
 
 
@@ -202,8 +202,8 @@ def request_missing(user: dict, pid: int, auto: bool = False, album_mode: str | 
         if auto:
             req["detail"]["auto"] = True
         db.update_request(rid, detail=req["detail"])
-        if auto and req["status"] == "pending":
-            db.update_request(rid, status="queued", message="Auto-download")
+        if req["status"] == "pending" and (auto or auth.can(user, "auto_approve_playlists")):
+            db.update_request(rid, status="queued", message="Auto-download" if auto else "Auto-approved (playlist)")
         db.execute("UPDATE playlist_items SET request_id=? WHERE id=?", (rid, r["id"]))
         n += 1
     return n

@@ -23,6 +23,12 @@ class UserUpdate(BaseModel):
     request_limit: int | None = None
     email: str | None = None
     password: str | None = None
+    perms: dict | None = None
+
+
+class BulkPerm(BaseModel):
+    perm: str
+    value: bool
 
 
 class InviteCreate(BaseModel):
@@ -35,11 +41,36 @@ class InviteCreate(BaseModel):
 @router.get("/users")
 def users():
     rows = db.query("""
-        SELECT u.id, u.username, u.email, u.role, u.disabled, u.auto_approve, u.request_limit, u.created_at, u.last_login,
+        SELECT u.id, u.username, u.email, u.role, u.disabled, u.auto_approve, u.request_limit, u.created_at, u.last_login, u.perms,
                i.code AS invite_code,
                (SELECT COUNT(*) FROM requests r WHERE r.user_id=u.id AND r.parent_id IS NULL) AS request_count
         FROM users u LEFT JOIN invites i ON i.id=u.invite_id ORDER BY u.created_at""")
+    for r in rows:
+        r["perms"] = auth.perms_of(r)
     return rows
+
+
+@router.get("/permissions")
+def permissions():
+    """What each permission means, and how many users have it."""
+    users = [u for u in db.query("SELECT id, role, auto_approve, perms FROM users WHERE role != 'admin'")]
+    return {"perms": [{"key": k, "label": v, "on": sum(1 for u in users if auth.perms_of(u)[k]), "of": len(users)} for k, v in auth.PERMS.items()]}
+
+
+@router.post("/users/bulk")
+def bulk_permission(body: BulkPerm):
+    """Turn one permission on or off for every regular user at once."""
+    import json
+    if body.perm not in auth.PERMS:
+        raise HTTPException(400, "Unknown permission")
+    for u in db.query("SELECT id, perms FROM users WHERE role != 'admin'"):
+        if body.perm == "auto_approve":
+            db.execute("UPDATE users SET auto_approve=? WHERE id=?", (int(body.value), u["id"]))
+            continue
+        p = json.loads(u["perms"] or "{}")
+        p[body.perm] = body.value
+        db.execute("UPDATE users SET perms=? WHERE id=?", (json.dumps(p), u["id"]))
+    return {"ok": True}
 
 
 @router.post("/users")
@@ -71,6 +102,15 @@ def update_user(uid: int, body: UserUpdate, admin=Depends(auth.admin_user)):
         fields["request_limit"] = body.request_limit or None
     if body.email is not None:
         fields["email"] = body.email or None
+    if body.perms is not None:
+        import json
+        p = json.loads(u.get("perms") or "{}")
+        for k, v in body.perms.items():
+            if k == "auto_approve":
+                fields["auto_approve"] = int(bool(v))
+            elif k in auth.PERMS:
+                p[k] = bool(v)
+        fields["perms"] = json.dumps(p)
     if body.password:
         auth.validate_credentials(u["username"], body.password)
         fields["password_hash"] = auth.hash_password(body.password)

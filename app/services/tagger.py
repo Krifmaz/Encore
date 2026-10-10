@@ -491,6 +491,7 @@ async def retag_album(album_id: str, release_id: str, rename: bool | None = None
     cached = os.path.join(db.DATA_DIR, "covers", album_id + ".jpg")
     if os.path.exists(cached):
         os.remove(cached)
+    library.forget_cover(album_id)
     db.log("info", f"Tagged album '{pv['release']['title']}' by {pv['release']['artist']} from {pv['release'].get('provider') or 'MusicBrainz'}")
     return new_paths
 

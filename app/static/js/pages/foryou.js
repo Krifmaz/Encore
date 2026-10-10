@@ -81,7 +81,9 @@ export function artistCard(a) {
 export async function render(view, ctx) {
   view.innerHTML = `<h1>For you</h1><p class="muted" style="margin:6px 0 20px">Recommendations from your ListenBrainz listening history. Songs you already have play right here; request the rest in one click.</p>
     <div id="fy-body"><div class="skeleton" style="height:300px"></div></div>
-    <div class="section-head"><h2>Browse by genre</h2></div><div id="fy-tags" class="chips"></div>`;
+    <div class="section-head"><h2>Browse by genre</h2></div><div id="fy-tags" class="chips"></div>
+    <div id="fy-following" class="embedded mt-lg"></div>`;
+  import('./following.js').then(m => m.render(view.querySelector('#fy-following'))).catch(() => {});
   api.get('/discover/tags').then(t => {
     const lib = t.library.slice(0, 15);
     view.querySelector('#fy-tags').innerHTML = [...lib.map(g => [g, true]), ...t.top.filter(g => !lib.includes(g.toLowerCase())).map(g => [g, false])]

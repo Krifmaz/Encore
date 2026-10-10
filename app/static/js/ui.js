@@ -38,6 +38,7 @@ export const icon = {
   shield: P('<path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/>'),
   heart: P('<path d="M20.84 4.61a5.5 5.5 0 0 0-7.78 0L12 5.67l-1.06-1.06a5.5 5.5 0 0 0-7.78 7.78l1.06 1.06L12 21.23l7.78-7.78 1.06-1.06a5.5 5.5 0 0 0 0-7.78z"/>'),
   spark: P('<path d="M12 3l1.9 5.6L19.5 10l-5.6 1.9L12 17.5l-1.9-5.6L4.5 10l5.6-1.4z"/><path d="M19 15l.8 2.2L22 18l-2.2.8L19 21l-.8-2.2L16 18l2.2-.8z"/>'),
+  chevron: P('<polyline points="6 9 12 15 18 9"/>'),
   more: P('<circle cx="12" cy="5" r="1.6"/><circle cx="12" cy="12" r="1.6"/><circle cx="12" cy="19" r="1.6"/>'),
   shuffle: P('<path d="M16 3h5v5M4 20 21 3M21 16v5h-5M15 15l6 6M4 4l5 5"/>'),
   list: P('<path d="M8 6h13M8 12h13M8 18h13M3 6h.01M3 12h.01M3 18h.01"/>'),
@@ -123,6 +124,8 @@ export function initials(s) {
 export function art(src, label, cls = '') {
   const ph = `<div class="ph">${esc(initials(label))}</div>`;
   if (!src) return ph;
+  // library covers: a small cached version for lists/tiles, a large one for big views
+  if (/\/api\/(library\/albums\/[^/]+|share\/[^/]+)\/cover$/.test(src)) src += `?s=${cls === 'big' ? 1000 : 400}`;
   return `${ph}<img class="${cls}" src="${esc(src)}" alt="" loading="lazy" onerror="this.remove()">`;
 }
 

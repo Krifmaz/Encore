@@ -130,3 +130,34 @@ def admin_user(user: dict = Depends(current_user)) -> dict:
 
 def public_user(u: dict) -> dict:
     return {k: v for k, v in u.items() if k != "password_hash"}
+
+
+# What a regular user may do. Admins can do everything. auto_approve is its own column (older).
+PERMS = {
+    "auto_approve": "Requests skip the approval queue",
+    "auto_approve_playlists": "Playlist downloads skip the approval queue",
+    "pick": "Pick the exact version to download (their own requests)",
+    "fix": "Fix their own downloads: retry, re-pick, delete a wrong song they requested",
+    "storage": "See server storage",
+}
+
+
+def perm_defaults() -> dict:
+    from . import config as _config
+    return {"auto_approve": False, "auto_approve_playlists": False, "pick": _config.get("manual_search") != "admins",
+            "fix": True, "storage": True}
+
+
+def perms_of(user: dict) -> dict:
+    import json as _json
+    try:
+        p = _json.loads(user.get("perms") or "{}")
+    except ValueError:
+        p = {}
+    out = {**perm_defaults(), **{k: bool(v) for k, v in p.items() if k in PERMS}}
+    out["auto_approve"] = bool(user.get("auto_approve"))
+    return out
+
+
+def can(user: dict, key: str) -> bool:
+    return user.get("role") == "admin" or perms_of(user).get(key, False)

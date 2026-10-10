@@ -7,20 +7,14 @@ import * as discover from './pages/discover.js';
 import * as libraryPage from './pages/library.js';
 import * as requestsPage from './pages/requests.js';
 import * as downloadPage from './pages/download.js';
-import * as activityPage from './pages/activity.js';
-import * as adminPage from './pages/admin.js';
 import * as settingsPage from './pages/settings.js';
-import * as accountPage from './pages/account.js';
 import * as playlistsPage from './pages/playlists.js';
-import * as connectionsPage from './pages/connections.js';
-import * as autoPage from './pages/autodownload.js';
-import * as diagPage from './pages/diagnostics.js';
-import * as followingPage from './pages/following.js';
 import * as forYouPage from './pages/foryou.js';
 import * as storagePage from './pages/storage.js';
 import * as leaderboardPage from './pages/leaderboard.js';
 
 export const session = { user: null, info: null };
+window.encoreSession = session;
 
 const routes = [
   [/^\/$/, home.render],
@@ -35,16 +29,16 @@ const routes = [
   [/^\/requests$/, requestsPage.render],
   [/^\/playlists$/, playlistsPage.render],
   [/^\/playlists\/(\d+)$/, playlistsPage.renderPlaylist],
-  [/^\/connections$/, connectionsPage.render],
-  [/^\/following$/, followingPage.render],
+  [/^\/connections$/, (v, c) => redirect('connections')],
+  [/^\/following$/, (v, c) => navigate('/for-you')],
   [/^\/download$/, downloadPage.render],
-  [/^\/activity$/, activityPage.render, true],
-  [/^\/admin\/users$/, adminPage.renderUsers, true],
-  [/^\/admin\/invites$/, adminPage.renderInvites, true],
-  [/^\/settings$/, settingsPage.render, true],
-  [/^\/admin\/autodownload$/, autoPage.render, true],
-  [/^\/admin\/diagnostics$/, diagPage.render, true],
-  [/^\/account$/, accountPage.render],
+  [/^\/activity$/, (v, c) => navigate('/download')],
+  [/^\/admin\/users$/, () => redirect('users')],
+  [/^\/admin\/invites$/, () => redirect('invites')],
+  [/^\/settings$/, settingsPage.render],
+  [/^\/admin\/autodownload$/, () => redirect('autodownload')],
+  [/^\/admin\/diagnostics$/, () => redirect('diagnostics')],
+  [/^\/account$/, () => redirect('account')],
   [/^\/storage$/, storagePage.render],
   [/^\/leaderboard$/, leaderboardPage.render],
 ];
@@ -52,6 +46,7 @@ const routes = [
 let cleanup = [];
 
 export function navigate(path) { location.hash = '#' + path; }
+const redirect = (page) => { history.replaceState(null, '', `#/settings?s=${page}`); window.dispatchEvent(new HashChangeEvent('hashchange')); };
 
 function parseHash() {
   const raw = location.hash.slice(1) || '/';
@@ -87,24 +82,16 @@ function renderShell() {
           ${navLink('/library', icon.library, 'Library')}
           ${navLink('/requests', icon.inbox, 'Requests', '<span class="badge warn hidden" id="pending-badge"></span>')}
           ${navLink('/playlists', icon.list, 'Playlists')}
-          ${navLink('/following', icon.users, 'Following')}
           ${navLink('/download', icon.download, 'Downloader')}
           ${navLink('/leaderboard', icon.activity, 'Leaderboard')}
-          ${navLink('/connections', icon.link, 'Connections')}
-          ${admin ? `<div class="nav-label">Admin</div>
-            ${navLink('/activity', icon.activity, 'Activity')}
-            ${navLink('/admin/users', icon.users, 'Users')}
-            ${navLink('/admin/invites', icon.ticket, 'Invites')}
-            ${navLink('/admin/autodownload', icon.download, 'Auto-download')}
-            ${navLink('/settings', icon.settings, 'Settings')}
-            ${navLink('/admin/diagnostics', icon.shield, 'Diagnostics')}` : ''}
         </nav>
         <div id="storage-mini" style="flex:none"></div>
         <div class="sidebar-foot" style="margin-top:0">
-          <a href="#/account" class="row grow" style="min-width:0">
+          <a href="#/settings?s=account" class="row grow" style="min-width:0">
             <div class="avatar">${esc(u.username[0])}</div>
-            <div class="grow"><div class="ellipsis" style="font-weight:650">${esc(u.username)}</div><div class="small faint" title="Encore version / build">${admin ? 'Admin' : 'Member'} · v${esc(session.info?.version || '')}${session.info?.build && session.info.build !== 'dev' ? ' · ' + esc(session.info.build) : ''}</div></div>
+            <div class="grow"><div class="ellipsis" style="font-weight:650">${esc(u.username)}</div><div class="small faint">${admin ? 'Admin' : 'Member'}</div></div>
           </a>
+          <a class="btn ghost icon" href="#/settings" title="Settings" aria-label="Settings">${icon.settings}</a>
           <button class="btn ghost icon" id="theme-btn" title="Toggle theme">${document.documentElement.dataset.theme === 'light' ? icon.moon : icon.sun}</button>
           <button class="btn ghost icon" id="logout-btn" title="Sign out">${icon.logout}</button>
         </div>

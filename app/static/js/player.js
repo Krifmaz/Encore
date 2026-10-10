@@ -398,7 +398,7 @@ function renderFull() {
     </div>
     <div class="np-body pane-${state.pane}">
       <section class="np-main">
-        <div class="np-art">${art(cover(t), t.album || t.title)}</div>
+        <div class="np-art">${art(cover(t), t.album || t.title, "big")}</div>
         <div class="np-meta">
           <h2 class="ellipsis">${esc(t.title)}</h2>
           <div class="muted ellipsis">${t.preview ? esc(t.artist) : `<a href="#/artist-name/${encodeURIComponent(t.artist || '')}">${esc(t.artist)}</a>`}${t.album ? ` · ${t.album_id ? `<a href="#/library/album/${esc(t.album_id)}">${esc(t.album)}</a>` : esc(t.album)}` : ''}</div>

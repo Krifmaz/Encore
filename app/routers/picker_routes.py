@@ -10,8 +10,8 @@ router = APIRouter(prefix="/api/picker", tags=["picker"])
 
 
 def _allowed(user: dict) -> None:
-    if config.get("manual_search") == "admins" and user["role"] != "admin":
-        raise HTTPException(403, "Manual search is limited to admins")
+    if not auth.can(user, "pick"):
+        raise HTTPException(403, "Ask an admin for permission to pick downloads")
 
 
 class SearchBody(BaseModel):
@@ -36,7 +36,7 @@ class PickBody(BaseModel):
 
 @router.get("/sources")
 def sources(user=Depends(auth.current_user)):
-    return {"sources": picker.available(), "allowed": config.get("manual_search") != "admins" or user["role"] == "admin"}
+    return {"sources": picker.available(), "allowed": auth.can(user, "pick")}
 
 
 @router.post("/search")

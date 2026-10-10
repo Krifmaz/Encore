@@ -37,7 +37,7 @@ export function trackMenu(anchor, t, { admin = false, onDeleted } = {}) {
     } },
     { label: 'Download this song', icon: icon.download, href: `/api/library/tracks/${t.id}/file`, download: true },
     t.album_id ? { label: 'Go to album', icon: icon.disc, href: `#/library/album/${t.album_id}` } : null,
-    ...(admin ? ['-', { label: 'Delete song from disk', icon: icon.trash, danger: true, onClick: async () => {
+    ...(admin || (window.encoreSession?.user?.perms?.fix && t.request_id) ? ['-', { label: admin ? 'Delete song from disk' : 'Wrong song – remove it', icon: icon.trash, danger: true, onClick: async () => {
       if (!await confirmDialog('Delete song', `Permanently delete "${t.title}" from disk?`, 'Delete', true)) return;
       try { await api.del(`/library/tracks/${t.id}`); toast('Song deleted', 'ok'); onDeleted?.(); } catch (e) { toast(e.message, 'err'); }
     } }] : []),
@@ -309,7 +309,7 @@ export async function renderAlbum(view, ctx) {
   const untagged = a.tracks.filter(t => !t.mb_albumid).length;
   view.innerHTML = `
     <div class="detail-head">
-      <div class="cover">${art(`/api/library/albums/${id}/cover`, a.album)}</div>
+      <div class="cover">${art(`/api/library/albums/${id}/cover`, a.album, "big")}</div>
       <div class="grow">
         <div class="kicker">Album · In your library</div>
         <h1>${esc(a.album || 'Unknown album')}</h1>
