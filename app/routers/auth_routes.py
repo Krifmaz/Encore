@@ -109,37 +109,77 @@ def me(user=Depends(auth.current_user)):
     return {**user, "requests_this_week": used}
 
 
-class Prefs(BaseModel):
-    localize: bool | None = None
-    lang: str | None = None
-    latin: bool | None = None
+class Profile(BaseModel):
+    email: str = ""
 
 
-@router.get("/prefs")
-def get_prefs(user=Depends(auth.current_user)):
-    from ..services import localize
-    return {**localize.prefs(user), "languages": localize.LANGS, "job": localize.state}
+@router.put("/profile")
+def update_profile(body: Profile, user=Depends(auth.current_user)):
+    """Your email address – used for password-reset links."""
+    em = body.email.strip()
+    if em and ("@" not in em or len(em) > 200 or " " in em):
+        raise HTTPException(400, "That doesn't look like an email address")
+    db.execute("UPDATE users SET email=? WHERE id=?", (em or None, user["id"]))
+    return {"email": em}
 
 
-@router.put("/prefs")
-async def put_prefs(body: Prefs, user=Depends(auth.current_user)):
-    """Per-user display preferences (localized names). Nothing in the files changes."""
-    import asyncio
-    import json
+class ForgotBody(BaseModel):
+    login: str
 
-    from ..services import localize
-    p = localize.prefs(user)
-    if body.lang is not None:
-        if body.lang not in localize.LANGS:
-            raise HTTPException(400, "Unsupported language")
-        p["lang"] = body.lang
-    for k in ("localize", "latin"):
-        if getattr(body, k) is not None:
-            p[k] = getattr(body, k)
-    db.execute("UPDATE users SET prefs=? WHERE id=?", (json.dumps(p), user["id"]))
-    if p["localize"]:
-        asyncio.create_task(localize.localize_library(p["lang"], p["latin"]))
-    return p
+
+class ResetBody(BaseModel):
+    token: str
+    password: str
+
+
+_RESET_TTL = 3600
+
+
+@router.post("/forgot")
+async def forgot_password(body: ForgotBody, request: Request):
+    """Email a one-hour reset link. Always answers the same, so it can't be used to find accounts."""
+    import hashlib
+    import secrets as _secrets
+
+    from ..services import email
+    if not email.enabled():
+        raise HTTPException(400, "Password reset by email isn't set up – ask your admin to reset it")
+    if auth.rate_limited(f"forgot:{auth.client_ip(request)}", limit=5, window=900):
+        raise HTTPException(429, "Too many attempts – wait a few minutes")
+    key = body.login.strip()
+    u = db.one("SELECT id, username, email FROM users WHERE (lower(username)=lower(?) OR lower(email)=lower(?)) AND email IS NOT NULL AND email != ''",
+               (key, key))
+    if u:
+        token = _secrets.token_urlsafe(32)
+        digest = hashlib.sha256(token.encode()).hexdigest()
+        db.execute("INSERT OR REPLACE INTO password_resets VALUES (?,?,?)", (u["id"], digest, time.time() + _RESET_TTL))
+        base = (config.get("base_url") or str(request.base_url)).rstrip("/")
+        try:
+            await email.send(u["email"], f"Reset your {config.get('app_name')} password",
+                             f"Hi {u['username']},\n\nOpen this link within an hour to choose a new password:\n{base}/#/reset?token={u['id']}.{token}\n\n"
+                             "If you didn't ask for this, ignore this email – your password stays the same.")
+        except Exception as e:  # noqa: BLE001
+            db.log("error", f"Password reset email to {u['username']} failed: {e}")
+    return {"ok": True, "message": "If that account has an email address, a reset link is on its way."}
+
+
+@router.post("/reset")
+def reset_password(body: ResetBody):
+    import hashlib
+    import hmac
+    uid, _, token = body.token.partition(".")
+    saved = db.one("SELECT digest, expires_at FROM password_resets WHERE user_id=?", (int(uid),)) if uid.isdigit() else None
+    if not saved or saved["expires_at"] < time.time() or not hmac.compare_digest(saved["digest"], hashlib.sha256(token.encode()).hexdigest()):
+        raise HTTPException(400, "This reset link is invalid or expired – request a new one")
+    u = db.one("SELECT id, username FROM users WHERE id=?", (int(uid),))
+    if not u:
+        raise HTTPException(400, "This reset link is invalid or expired – request a new one")
+    auth.validate_credentials(u["username"], body.password)
+    db.execute("UPDATE users SET password_hash=? WHERE id=?", (auth.hash_password(body.password), u["id"]))
+    db.execute("DELETE FROM sessions WHERE user_id=?", (u["id"],))
+    db.execute("DELETE FROM password_resets WHERE user_id=?", (u["id"],))
+    db.log("info", f"{u['username']} reset their password by email")
+    return {"ok": True}
 
 
 @router.post("/password")

@@ -162,6 +162,19 @@ CREATE TABLE IF NOT EXISTS follows (
     UNIQUE(user_id, mbid)
 );
 
+CREATE TABLE IF NOT EXISTS password_resets (
+    user_id INTEGER PRIMARY KEY,
+    digest TEXT NOT NULL,
+    expires_at REAL NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS shares (
+    token TEXT PRIMARY KEY,
+    track_id INTEGER NOT NULL,
+    user_id INTEGER NOT NULL,
+    created_at REAL NOT NULL
+);
+
 CREATE TABLE IF NOT EXISTS activity (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     ts REAL NOT NULL,

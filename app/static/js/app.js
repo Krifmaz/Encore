@@ -198,14 +198,6 @@ window.addEventListener('hashchange', route);
 if ('serviceWorker' in navigator && (location.protocol === 'https:' || location.hostname === 'localhost')) {
   navigator.serviceWorker.register('/sw.js').catch(() => {});
 }
-// any element with data-pv='{"artist","title",…}' plays a 30-second preview of a song you don't have
-document.addEventListener('click', async (e) => {
-  const b = e.target.closest('[data-pv]');
-  if (!b) return;
-  e.preventDefault();
-  e.stopPropagation();
-  (await import('./pages/preview.js')).previewTrack(JSON.parse(b.dataset.pv));
-}, true);
 window.addEventListener('encore:unauthorized', () => {
   if (session.user) { session.user = null; toast('Your session expired – please sign in again', 'err'); location.hash = '#/login'; location.reload(); }
 });

@@ -51,7 +51,8 @@ export async function render(view, ctx) {
   };
   view.innerHTML = `
     <div class="row wrap between" style="margin-bottom:18px">
-      <div><h1>Library</h1><div class="muted small" id="lib-sub"></div></div>
+      <div class="row" style="gap:12px;align-items:center"><div><h1>Library</h1><div class="muted small" id="lib-sub"></div></div>
+        <button class="btn primary sm" id="shuffle-lib" title="Play everything in random order – no song twice this session">${icon.shuffle}Shuffle</button></div>
       ${admin ? `<div class="row wrap">
         <button class="btn sm" id="scan-btn">${icon.refresh}Scan</button>
         <button class="btn sm" id="autotag-btn">${icon.tag}Auto-tag untagged</button>
@@ -75,6 +76,7 @@ export async function render(view, ctx) {
     </div>
     <div id="lib-body"></div>
     <div class="row mt" style="justify-content:center"><button class="btn hidden" id="more">Load more</button></div>`;
+  view.querySelector('#shuffle-lib').onclick = async () => { if (!await player.shuffleLibrary()) toast('Your library is empty', 'err'); };
   const body = view.querySelector('#lib-body');
   const more = view.querySelector('#more');
   let saved = {};
@@ -379,7 +381,7 @@ function matchModal(id, a, ctx) {
       <p class="small muted" id="mprov-help" style="margin:-4px 0 10px"></p>
       <form class="row wrap" id="mq">
         <input class="input grow" name="artist" value="${esc(a.albumartist_orig ?? a.albumartist)}" placeholder="Artist" style="max-width:260px">
-        <input class="input grow" name="album" value="${esc(a.album_orig ?? a.album ?? '')}" placeholder="Album">
+        <input class="input grow" name="album" value="${esc(a.album ?? '')}" placeholder="Album">
         <button class="btn" type="submit">${icon.search}Search</button>
         <input class="input" name="rid" placeholder="…or paste a MusicBrainz / Deezer / Apple / Discogs link" style="max-width:340px">
       </form>
@@ -474,11 +476,11 @@ function matchModal(id, a, ctx) {
     else search(f.get('artist'), f.get('album'));
   };
   const artist0 = a.albumartist_orig ?? a.albumartist;
-  search(artist0 === 'Unknown Artist' ? '' : artist0, a.album_orig ?? a.album ?? '');
+  search(artist0 === 'Unknown Artist' ? '' : artist0, a.album ?? '');
 }
 
 async function editModal(id, _shown, ctx) {
-  const a = await api.get(`/library/albums/${id}?raw=true`);   // real tags, never localized display names
+  const a = await api.get(`/library/albums/${id}`);
   const m = modal({
     title: 'Edit tags',
     wide: true,

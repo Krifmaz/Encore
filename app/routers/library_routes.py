@@ -11,7 +11,7 @@ from starlette.background import BackgroundTask
 from pydantic import BaseModel
 
 from .. import auth, config, db
-from ..services import acoustid, library, localize, tagger, verify
+from ..services import acoustid, library, tagger, verify
 
 router = APIRouter(prefix="/api/library", tags=["library"])
 
@@ -135,7 +135,7 @@ def albums(q: str = "", sort: str = "name", filter: str = "", artist: str = "", 
               SUM(CASE WHEN mb_albumid IS NULL OR mb_albumid='' THEN 1 ELSE 0 END) untagged
               FROM tracks WHERE {' AND '.join(where)} GROUP BY album_id {having}
               ORDER BY {_order(SORTS, sort, dir, 'name')} LIMIT ? OFFSET ?"""
-    rows = localize.apply(db.query(sql, (*params, min(limit, 500), offset)), user, ("album", "albumartist"))
+    rows = db.query(sql, (*params, min(limit, 500), offset))
     total = db.one(f"SELECT COUNT(*) n FROM (SELECT album_id FROM tracks WHERE {' AND '.join(where)} GROUP BY album_id {having})", params)["n"]
     return {"total": total, "items": rows}
 
@@ -147,9 +147,9 @@ def artists(q: str = "", sort: str = "name", dir: str = "", user=Depends(auth.cu
     if q:
         where = "WHERE albumartist LIKE ?"
         params.append(f"%{q}%")
-    return localize.apply(db.query(f"""SELECT albumartist AS name, COUNT(DISTINCT album_id) albums, COUNT(*) tracks,
+    return db.query(f"""SELECT albumartist AS name, COUNT(DISTINCT album_id) albums, COUNT(*) tracks,
         MAX(mb_albumartistid) mbid, MIN(album_id) cover_album, SUM(size) size, MAX(added_at) added
-        FROM tracks {where} GROUP BY lower(albumartist) ORDER BY {_order(ARTIST_SORTS, sort, dir, 'name')} LIMIT 2000""", params), user, ("name",))
+        FROM tracks {where} GROUP BY lower(albumartist) ORDER BY {_order(ARTIST_SORTS, sort, dir, 'name')} LIMIT 2000""", params)
 
 
 @router.get("/tracks")
@@ -161,8 +161,8 @@ def tracks(q: str = "", limit: int = 200, offset: int = 0, sort: str = "artist",
         params += [f"%{q}%"] * 3
     d = dir if dir in ("asc", "desc") else ("desc" if sort in ("added", "released", "duration") else "asc")
     order = TRACK_SORTS.get(sort, TRACK_SORTS["artist"]).format(d=d.upper())
-    return localize.apply(db.query(f"""SELECT id, title, artist, album, albumartist, album_id, track, disc, year, duration, format, bitrate, verify_status, verify_detail, added_at
-                        FROM tracks {where} ORDER BY {order} LIMIT ? OFFSET ?""", (*params, min(limit, 1000), offset)), user)
+    return db.query(f"""SELECT id, title, artist, album, albumartist, album_id, track, disc, year, duration, format, bitrate, verify_status, verify_detail, added_at
+                        FROM tracks {where} ORDER BY {order} LIMIT ? OFFSET ?""", (*params, min(limit, 1000), offset))
 
 
 @router.get("/tracks/{tid}/file")
@@ -205,7 +205,20 @@ def shuffle(limit: int = 50, exclude: str = "", user=Depends(auth.current_user))
     sql = "SELECT id, title, artist, album, album_id, format, bitrate, duration FROM tracks"
     if ex:
         sql += f" WHERE id NOT IN ({','.join('?' * len(ex))})"
-    return localize.apply(db.query(sql + " ORDER BY RANDOM() LIMIT ?", (*ex, min(limit, 200))), user)
+    return db.query(sql + " ORDER BY RANDOM() LIMIT ?", (*ex, min(limit, 200)))
+
+
+class ShuffleBody(BaseModel):
+    limit: int = 50
+    exclude: list[int] = []
+
+
+@router.post("/shuffle")
+def shuffle_post(body: ShuffleBody, user=Depends(auth.current_user)):
+    """Same as GET, for long exclude lists (everything already played this listening session)."""
+    ex = set(body.exclude[:20000])
+    rows = db.query("SELECT id, title, artist, album, album_id, format, bitrate, duration FROM tracks ORDER BY RANDOM()")
+    return [r for r in rows if r["id"] not in ex][:min(body.limit, 200)]
 
 
 class PlayBody(BaseModel):
@@ -242,13 +255,12 @@ def delete_track(tid: int, user=Depends(auth.admin_user)):
 
 @router.get("/recent")
 def recent(limit: int = 18, user=Depends(auth.current_user)):
-    return localize.apply(db.query("""SELECT album_id AS id, MAX(album) album, MAX(albumartist) albumartist, MAX(year) year, MAX(added_at) added, COUNT(*) tracks
-        FROM tracks GROUP BY album_id ORDER BY added DESC LIMIT ?""", (limit,)), user, ("album", "albumartist"))
+    return db.query("""SELECT album_id AS id, MAX(album) album, MAX(albumartist) albumartist, MAX(year) year, MAX(added_at) added, COUNT(*) tracks
+        FROM tracks GROUP BY album_id ORDER BY added DESC LIMIT ?""", (limit,))
 
 
 @router.get("/albums/{album_id}")
 def album(album_id: str, raw: bool = False, user=Depends(auth.current_user)):
-    """raw=true skips localized names (used by the tag editor so translations never end up in the files)."""
     rows = db.query("SELECT * FROM tracks WHERE album_id=? ORDER BY disc, track, path", (album_id,))
     if not rows:
         raise HTTPException(404, "Album not found")
@@ -257,11 +269,9 @@ def album(album_id: str, raw: bool = False, user=Depends(auth.current_user)):
         r["relpath"] = r["path"][len(lib):] if r["path"].startswith(lib) else r["path"]
         if user["role"] != "admin":
             r.pop("path")
-    if not raw:
-        localize.apply(rows, user)
     first = rows[0]
     return {
-        "id": album_id, "album": first["album"], "album_orig": first.get("album_orig"), "albumartist_orig": first.get("albumartist_orig"), "albumartist": first["albumartist"], "year": first["year"], "genre": first["genre"],
+        "id": album_id, "album": first["album"], "albumartist": first["albumartist"], "year": first["year"], "genre": first["genre"],
         "mb_albumid": first["mb_albumid"], "mb_releasegroupid": first["mb_releasegroupid"], "mb_albumartistid": first["mb_albumartistid"],
         "tracks": rows, "duration": sum(r["duration"] or 0 for r in rows), "size": sum(r["size"] or 0 for r in rows),
     }

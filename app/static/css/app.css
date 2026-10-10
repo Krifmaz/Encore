@@ -313,7 +313,8 @@ body.has-player { --player: var(--player-h); }
 /* ---------- responsive ---------- */
 @media (max-width: 960px) {
   .settings-grid { grid-template-columns: 1fr; }
-  .settings-nav { position: static; flex-direction: row; overflow-x: auto; }
+  .settings-nav { display: none; }
+  .settings-select { display: block !important; margin-bottom: 16px; }
 }
 @media (max-width: 960px) {
   /* phones/tablets: the seek bar gets its own full-width row so it's easy to drag with a finger */
@@ -476,3 +477,12 @@ body.np-open { overflow: hidden; }
   .table th.hide-sm, .table td.hide-sm { display: none; }
   .table td .ellipsis, .table td { overflow: hidden; text-overflow: ellipsis; }
 }
+
+/* settings: page picker for phones, stacked cards, help text on its own line */
+.settings-select { display: none; }
+.settings-card + .settings-card { margin-top: 16px; }
+.field .switch { align-items: flex-start; line-height: 1.35; }
+.field .switch i { margin-top: 1px; }
+div.field { display: flex; flex-direction: column; gap: 6px; }
+div.field small { display: block; color: var(--faint); font-size: 12px; }
+@media (max-width: 760px) { .form-grid { grid-template-columns: 1fr; } }

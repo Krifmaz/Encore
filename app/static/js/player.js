@@ -11,6 +11,32 @@ let audio = null;
 let spare = null;   // second <audio> that pre-buffers the next song, so skipping is instant
 let lyr = { id: null, lines: [], plain: '', loading: false };
 
+// Songs heard this listening session (this tab): shuffles never repeat one until the whole library has played.
+const played = new Set((() => { try { return JSON.parse(sessionStorage.getItem('encore.played') || '[]'); } catch { return []; } })());
+function markPlayed(t) {
+  if (!t || typeof t.id !== 'number' || played.has(t.id)) return;
+  played.add(t.id);
+  try { sessionStorage.setItem('encore.played', JSON.stringify([...played])); } catch { /* ignore */ }
+}
+/** Random library songs not yet heard (or queued) this session; when everything has played, start a fresh round. */
+async function freshShuffle(limit = 50) {
+  const queued = state.queue.map(t => t.id).filter(id => typeof id === 'number');
+  let more = await api.post('/library/shuffle', { limit, exclude: [...new Set([...played, ...queued])] });
+  if (!more.length) {
+    played.clear();
+    try { sessionStorage.removeItem('encore.played'); } catch { /* ignore */ }
+    const cur = current()?.id;
+    more = (await api.post('/library/shuffle', { limit, exclude: typeof cur === 'number' ? [cur] : [] }));
+  }
+  return more;
+}
+/** The Shuffle button: play the whole library in random order, no song twice this session. */
+export async function shuffleLibrary() {
+  const first = await freshShuffle(50);
+  if (first.length) playQueue(first, 0, { context: 'library' });
+  return first.length;
+}
+
 export function onChange(fn) { listeners.add(fn); return () => listeners.delete(fn); }
 const emit = () => { listeners.forEach(fn => { try { fn(current()); } catch { /* ignore */ } }); native(); };
 
@@ -64,6 +90,7 @@ const convert = (t) => !t.preview && CONVERT.has((t.format || '').toLowerCase())
 function load(transcode = false, offset = 0) {
   const t = current();
   if (!t) return;
+  markPlayed(t);
   if (convert(t)) transcode = true;
   state.transcoded = !t.preview && transcode;
   state.offset = offset;   // converted streams restart at the seek point, so their clock starts at `offset`
@@ -120,9 +147,7 @@ async function topUp() {
   if (!enabled) return;
   topping = true;
   try {
-    const recent = state.queue.slice(-150).map(t => t.id).filter(id => typeof id === 'number');
-    let more = await api.get(`/library/shuffle?limit=50&exclude=${recent.join(',')}`);
-    if (!more.length) more = await api.get('/library/shuffle?limit=50');   // small library: allow repeats
+    const more = await freshShuffle(50);
     if (more.length) {
       state.queue.push(...more);
       render(); emit();
@@ -165,9 +190,7 @@ async function continueWithLibrary() {
   try { enabled = localStorage.getItem('encore.autoplay') !== 'off'; } catch { /* ignore */ }
   if (!enabled) return false;
   try {
-    const recent = state.queue.slice(-150).map(t => t.id).filter(id => typeof id === 'number');
-    let more = await api.get(`/library/shuffle?limit=50&exclude=${recent.join(',')}`);
-    if (!more.length) more = await api.get('/library/shuffle?limit=50');
+    const more = await freshShuffle(50);
     if (!more.length) return false;
     state.queue.push(...more);
     state.context = 'library';

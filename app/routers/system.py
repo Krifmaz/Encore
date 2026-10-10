@@ -55,6 +55,13 @@ async def test(service: str, user=Depends(auth.admin_user)):
         if service == "musicbrainz":
             await mb.ping()
             return {"ok": True, "message": "MusicBrainz reachable"}
+        if service == "email":
+            from ..services import email
+            to = (db.one("SELECT email FROM users WHERE id=?", (user["id"],)) or {}).get("email") or config.get("smtp_from")
+            if not to:
+                return {"ok": False, "message": "Add an email address to your account (Account page) to receive the test"}
+            await email.send(to, f"{config.get('app_name')} test email", "Email works – password resets will be sent from this address.")
+            return {"ok": True, "message": f"Sent to {to}"}
         if service == "notify":
             await notify.send("🔔 Test notification", f"{config.get('app_name')} notifications are working")
             return {"ok": True, "message": "Sent"}

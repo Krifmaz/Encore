@@ -43,7 +43,7 @@ DEFAULTS: dict[str, tuple[str | None, object, bool]] = {
     "task_verify_enabled": (None, False, False), "task_verify_minutes": (None, 1440, False),
     "task_cleanup_enabled": (None, True, False), "task_cleanup_minutes": (None, 1440, False),
     "task_cleanup_days": (None, 14, False),
-    "task_localize_enabled": (None, True, False), "task_localize_minutes": (None, 1440, False),
+    
     "task_lossy_minutes": (None, 360, False),
     "task_discover_minutes": (None, 360, False),
     "lyrics_on_import": ("ENCORE_LYRICS_ON_IMPORT", True, False),
@@ -60,6 +60,7 @@ DEFAULTS: dict[str, tuple[str | None, object, bool]] = {
     "reject_mismatch": ("ENCORE_REJECT_MISMATCH", True, False),
     "dedupe_on_import": ("ENCORE_DEDUPE_ON_IMPORT", True, False),
     # pipeline
+    "ytdlp_last_resort": ("ENCORE_YTDLP_LAST_RESORT", True, False),
     "source_order": ("ENCORE_SOURCE_ORDER", "lidarr,streamrip,hifi,slskd,ytdlp", False),
     # streamrip (Qobuz / Tidal / Deezer with your own subscription)
     "streamrip_enabled": ("STREAMRIP_ENABLED", False, False),
@@ -127,6 +128,12 @@ DEFAULTS: dict[str, tuple[str | None, object, bool]] = {
     "plex_url": ("PLEX_URL", "", False),
     "plex_token": ("PLEX_TOKEN", "", True),
     # notifications
+    "smtp_host": ("SMTP_HOST", "", False),
+    "smtp_port": ("SMTP_PORT", 587, False),
+    "smtp_user": ("SMTP_USER", "", False),
+    "smtp_password": ("SMTP_PASSWORD", "", True),
+    "smtp_from": ("SMTP_FROM", "", False),
+    "smtp_security": ("SMTP_SECURITY", "starttls", False),   # starttls | ssl | none
     "discord_webhook": ("DISCORD_WEBHOOK", "", True),
     "ntfy_url": ("NTFY_URL", "", False),
     "ntfy_token": ("NTFY_TOKEN", "", True),

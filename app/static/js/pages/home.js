@@ -59,22 +59,16 @@ export async function render(view, ctx) {
       ${s.fun ? `<div class="stat"><b>${esc(s.fun.value)}</b><span>${esc(s.fun.label)}</span></div>` : ''}`;
   }).catch(() => {});
 
-  // new releases from followed + library artists (with 30-second previews)
+  // new releases from followed + library artists
   api.get('/discover/new-releases?limit=12').then(d => {
     if (!d.releases.length || !view.isConnected) return;
     view.querySelector('#new-releases').innerHTML = `<div class="section-head"><h2>New releases</h2><span class="small muted">from artists you follow or have</span></div>
       <div class="grid">${d.releases.map(r => `<div class="tile" data-href="${r.mbid ? `/album/${esc(r.mbid)}` : `/artist-name/${encodeURIComponent(r.artist)}`}">
         <div class="art">${art(r.cover, r.title)}
           <div class="corner">${r.in_library ? '<span class="badge ok">In library</span>' : r.followed ? '<span class="badge accent">Following</span>' : ''}</div>
-          <div class="overlay">${r.preview_album ? `<button class="fab" data-preview-album="${esc(r.preview_album)}" title="Preview">${icon.play}</button>` : ''}</div></div>
+</div>
         <div class="t ellipsis" title="${esc(r.title)}">${esc(r.title)}</div>
         <div class="s ellipsis">${esc(r.artist)} · ${esc(r.date)}${r.type && r.type !== 'Album' ? ' · ' + esc(r.type) : ''}</div></div>`).join('')}</div>`;
-    view.querySelector('#new-releases').addEventListener('click', async (e) => {
-      const p = e.target.closest('[data-preview-album]');
-      if (!p) return;
-      e.stopPropagation();
-      (await import('./preview.js')).previewAlbum(p.dataset.previewAlbum);
-    });
   }).catch(() => {});
 
   // a taste of For you
@@ -84,16 +78,15 @@ export async function render(view, ctx) {
     const tr = pl.tracks.slice(0, 6);
     view.querySelector('#fy-preview').innerHTML = `<div class="section-head"><h2>For you</h2><a class="btn sm" href="#/for-you">See all</a></div>
       <div class="card flat"><div class="list">${tr.map((t, i) => `<div class="list-item">
-        <button class="thumb play-thumb" data-fy="${i}" aria-label="${t.library ? 'Play' : 'Preview'}">${art(t.cover, t.title)}<i>${icon.play}</i></button>
+        ${t.library ? `<button class="thumb play-thumb" data-fy="${i}" aria-label="Play">${art(t.cover, t.title)}<i>${icon.play}</i></button>` : `<div class="thumb">${art(t.cover, t.title)}</div>`}
         <div class="grow" style="min-width:0"><div class="ellipsis" style="font-weight:600">${esc(t.title)}</div><div class="small muted ellipsis">${esc(t.artist)}</div></div>
-        ${t.library ? '<span class="badge ok">In library</span>' : '<span class="badge">preview</span>'}</div>`).join('')}</div></div>`;
+        ${t.library ? '<span class="badge ok">In library</span>' : ''}</div>`).join('')}</div></div>`;
     view.querySelector('#fy-preview').addEventListener('click', async (e) => {
       const b = e.target.closest('[data-fy]');
       if (!b) return;
       const t = tr[+b.dataset.fy];
       const player = await import('../player.js');
       if (t.library) player.playQueue([t.library], 0, { context: 'single' });
-      else (await import('./preview.js')).previewTrack(t);
     });
   }).catch(() => {});
 

@@ -48,8 +48,6 @@ TASKS = [
      "on": _flag("task_retag_enabled"), "every": _minutes("task_retag_minutes")},
     {"key": "verify", "name": "Verify audio fingerprints", "desc": "Fingerprint unchecked songs with AcoustID and flag wrong audio.",
      "on": _flag("task_verify_enabled"), "every": _minutes("task_verify_minutes")},
-    {"key": "localize", "name": "Localized names", "desc": "Look up translated/romanized song and artist names for users who switched them on (Account page).",
-     "on": _flag("task_localize_enabled"), "every": _minutes("task_localize_minutes")},
     {"key": "cleanup", "name": "Clean up", "desc": "Remove finished downloads older than the cleanup age from the list and delete leftover staging files.",
      "on": _flag("task_cleanup_enabled"), "every": _minutes("task_cleanup_minutes")},
 ]
@@ -115,9 +113,6 @@ async def _run(key: str) -> str:
         return verify.state.get("message") or f"{verify.state.get('verified', 0)} verified, {verify.state.get('mismatch', 0)} wrong"
     if key == "cleanup":
         return await _cleanup()
-    if key == "localize":
-        from . import localize
-        return await localize.localize_all_users()
     raise ValueError(key)
 
 

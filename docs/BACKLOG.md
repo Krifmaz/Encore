@@ -59,3 +59,9 @@
 - New artwork shows immediately; failed art lookups retry after 30 min instead of never.
 - Android: loading spinner instead of black screen; asks for the server again when the saved one
   answers with an error; "Change server" link on the sign-in page.
+- Shuffle button on Library; shuffles never repeat a song within a listening session.
+- YouTube Music is always the last download source (setting, on by default).
+- Settings regrouped (Downloads & sources / Library, tagging & IDs / Email & notifications / …);
+  dropdown page picker on phones, no sideways tab bar.
+- Password reset by email: SMTP settings + test, "Forgot password?" on sign-in, email on Account page.
+- Removed: localized names, 30-second previews.

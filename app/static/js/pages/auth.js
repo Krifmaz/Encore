@@ -1,7 +1,50 @@
 import { api } from '../api.js';
 import { esc } from '../ui.js';
 
+function resetPage(root, query, app) {
+  root.innerHTML = `<div class="auth-wrap"><div class="auth-card">
+      <div class="brand"><img src="/favicon.svg" alt="">${app}</div>
+      <p class="muted" style="text-align:center;margin:0">Choose a new password</p>
+      <form>
+        <label class="field"><span>New password</span><input class="input" type="password" name="password" autocomplete="new-password" minlength="8" required autofocus></label>
+        <label class="field"><span>Repeat it</span><input class="input" type="password" name="password2" autocomplete="new-password" required></label>
+        <div class="error-box hidden" id="auth-err"></div>
+        <button class="btn primary" type="submit" style="padding:12px">Save new password</button>
+      </form></div></div>`;
+  const form = root.querySelector('form'), err = root.querySelector('#auth-err');
+  form.onsubmit = async (e) => {
+    e.preventDefault();
+    const d = Object.fromEntries(new FormData(form));
+    err.classList.add('hidden');
+    try {
+      if (d.password !== d.password2) throw new Error('Passwords do not match');
+      await api.post('/auth/reset', { token: query.token || '', password: d.password });
+      form.outerHTML = '<div class="test-result ok"><span>Password changed – sign in with your new password.</span></div><a class="btn primary" href="#/login" style="justify-content:center">Sign in</a>';
+    } catch (ex) { err.textContent = ex.message; err.classList.remove('hidden'); }
+  };
+}
+
+function forgotForm(root) {
+  const card = root.querySelector('.auth-card form');
+  card.outerHTML = `<form id="forgot">
+    <p class="small muted" style="margin:0">Enter your username or email. If your account has an email address, we'll send a reset link.</p>
+    <label class="field"><span>Username or email</span><input class="input" name="login" required autofocus></label>
+    <div class="error-box hidden" id="forgot-err"></div>
+    <button class="btn primary" type="submit" style="padding:12px">Send reset link</button>
+    <a href="#/login" class="small muted" style="text-align:center" onclick="location.reload()">Back to sign in</a></form>`;
+  const f = root.querySelector('#forgot'), err = root.querySelector('#forgot-err');
+  f.onsubmit = async (e) => {
+    e.preventDefault();
+    err.classList.add('hidden');
+    try {
+      const r = await api.post('/auth/forgot', Object.fromEntries(new FormData(f)));
+      f.innerHTML = `<div class="test-result ok"><span>${esc(r.message)}</span></div>`;
+    } catch (ex) { err.textContent = ex.message; err.classList.remove('hidden'); }
+  };
+}
+
 export function render(root, { path, query, session }) {
+  if (path === '/reset') return resetPage(root, query, esc(session.info?.app_name || 'Encore'));
   const mode = session.info?.signup_mode || 'invite';
   const isSignup = path === '/signup' || (query.invite && path !== '/login');
   const app = esc(session.info?.app_name || 'Encore');
@@ -20,6 +63,7 @@ export function render(root, { path, query, session }) {
         ${window.EncoreNative?.changeServer ? `<p class="small muted" style="text-align:center;margin:10px 0 0"><a href="#" id="change-server" style="color:var(--accent)">Change server</a></p>` : ''}
       </div>
     </div>`;
+  root.querySelector('#forgot-link')?.addEventListener('click', (e) => { e.preventDefault(); forgotForm(root); });
   root.querySelector('#change-server')?.addEventListener('click', (e) => { e.preventDefault(); window.EncoreNative.changeServer(); });
   const form = root.querySelector('form');
   if (!form) return;
@@ -53,6 +97,7 @@ function loginForm() {
     <label class="field"><span>Username</span><input class="input" name="username" autocomplete="username" required autofocus></label>
     <label class="field"><span>Password</span><input class="input" type="password" name="password" autocomplete="current-password" required></label>
     <button class="btn primary" type="submit" style="padding:12px">Sign in</button>
+    <a href="#" id="forgot-link" class="small muted" style="text-align:center">Forgot password?</a>
   </form>`;
 }
 

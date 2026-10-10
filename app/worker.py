@@ -152,8 +152,11 @@ async def start(r: dict) -> None:
         order = lossless + [s for s in order if s not in ("streamrip", "hifi")]
     if d.get("lossless_only"):
         order = [s for s in order if s in ("streamrip", "hifi", "slskd_lossless")]
+    elif config.get("ytdlp_last_resort"):
+        # downloads should basically never fail: YouTube Music is always the final fallback
+        order = [s for s in order if s != "ytdlp"] + ["ytdlp"]
     avail = {"lidarr": lidarr.enabled() and r["kind"] == "album" and r["mbid"], "slskd": slskd.enabled(),
-             "slskd_lossless": slskd.enabled(), "ytdlp": ytdlp.enabled(), "streamrip": streamrip.enabled(), "hifi": hifi.enabled()}
+             "slskd_lossless": slskd.enabled(), "ytdlp": ytdlp.enabled() or bool(config.get("ytdlp_last_resort")), "streamrip": streamrip.enabled(), "hifi": hifi.enabled()}
     seen: set = set()
     d["sources"] = [s for s in order if avail.get(s) and not (s in seen or seen.add(s))]
     d["log"] = []

@@ -144,3 +144,30 @@ def test_friendly_errors():
     assert "web.authentication.api_keys" in explain("slskd", "http://slskd:5030/api/v0/application", 401, "")
     assert "gluetun" in explain("slskd", "http://slskd:5030/x", exc=httpx.ConnectError("[Errno -2] Name or service not known"))
     assert "Settings → General" in explain("Lidarr", "http://lidarr:8686/api/v1/system/status", 401, "")
+
+
+def test_password_reset_by_email(client, monkeypatch):
+    from app import config
+    from app.services import email
+    sent = []
+    monkeypatch.setattr(email, "_send", lambda to, subject, text: sent.append((to, text)))
+    login(client)
+    # not configured → a clear error
+    assert client.post("/api/auth/forgot", json={"login": "admin"}, headers=H).status_code == 400
+    config.set_many({"smtp_host": "smtp.example.com"})
+    assert client.put("/api/auth/profile", json={"email": "nope"}, headers=H).status_code == 400
+    assert client.put("/api/auth/profile", json={"email": "admin@example.com"}, headers=H).status_code == 200
+    client.cookies.clear()
+    # unknown accounts get the same answer and no mail
+    assert client.post("/api/auth/forgot", json={"login": "nobody"}, headers=H).json()["ok"]
+    assert not sent
+    client.post("/api/auth/forgot", json={"login": "admin@example.com"}, headers=H)
+    to, text = sent[0]
+    assert to == "admin@example.com"
+    token = text.split("token=")[1].split()[0]
+    assert client.post("/api/auth/reset", json={"token": token + "x", "password": "newpassword123"}, headers=H).status_code == 400
+    assert client.post("/api/auth/reset", json={"token": token, "password": "newpassword123"}, headers=H).status_code == 200
+    # one use only; the new password works, the old one doesn't
+    assert client.post("/api/auth/reset", json={"token": token, "password": "otherpassword1"}, headers=H).status_code == 400
+    assert client.post("/api/auth/login", json={"username": "admin", "password": "adminpass123"}).status_code == 401
+    login(client, p="newpassword123")

@@ -150,23 +150,6 @@ async def tag(name: str, page: int = 1, user=Depends(auth.current_user)):
         raise HTTPException(502, str(e))
 
 
-@router.get("/preview")
-async def preview(artist: str, title: str, isrc: str | None = None, length: float | None = None, user=Depends(auth.current_user)):
-    """30-second preview clip for a song you don't have yet."""
-    p = await discovery.preview_track(artist, title, isrc, length)
-    if not p:
-        raise HTTPException(404, "No preview available for this song")
-    return p
-
-
-@router.get("/preview-album")
-async def preview_album(artist: str = "", title: str = "", key: str = "", user=Depends(auth.current_user)):
-    dz = int(key[3:]) if key.startswith("dz:") and key[3:].isdigit() else None
-    if not dz and not (artist and title):
-        raise HTTPException(400, "artist + title or key needed")
-    return await discovery.preview_album(artist, title, dz)
-
-
 @router.get("/new-releases")
 async def new_releases(limit: int = 24, user=Depends(auth.current_user)):
     try:

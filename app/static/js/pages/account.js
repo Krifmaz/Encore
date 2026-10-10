@@ -19,7 +19,12 @@ export async function render(view, ctx) {
         <button class="btn primary" type="submit">Update password</button>
       </form>
     </div>
-    <div class="card stack mt" id="loc" style="max-width:720px"></div>
+    <form class="card stack mt" id="email-form" style="max-width:720px">
+      <h3>Email</h3>
+      <p class="small muted" style="margin:0">Used only to send you a link if you forget your password.</p>
+      <div class="row wrap" style="gap:10px"><input class="input grow" type="email" name="email" value="${esc(me.email || '')}" placeholder="you@example.com" autocomplete="email" style="min-width:220px">
+        <button class="btn primary" type="submit">Save</button></div>
+    </form>
     <div class="card stack mt" style="max-width:720px"><h3>Apps</h3>
       <p class="small muted" style="margin:0">Android app and desktop apps for Windows, macOS and Linux: <a href="https://github.com/Krifmaz/Encore/releases" target="_blank" rel="noopener">download from the Releases page</a>. On a phone you can also use your browser's <b>Add to Home screen</b>.</p>
       ${window.EncoreNative?.changeServer ? '<button class="btn" id="change-server" style="width:fit-content">Change server…</button>' : ''}</div>
@@ -35,26 +40,10 @@ export async function render(view, ctx) {
     } catch (err) { toast(err.message, 'err'); }
   };
   view.querySelector('#change-server')?.addEventListener('click', () => window.EncoreNative.changeServer());
-  const loc = view.querySelector('#loc');
-  const paintLoc = async () => {
-    const p = await api.get('/auth/prefs');
-    loc.innerHTML = `<h3>Song & artist names</h3>
-      <p class="small muted" style="margin:0">Show names in your language where a translation or transliteration exists (MusicBrainz aliases and official translated tracklists), otherwise romanized. Only changes what <b>you</b> see – files and other users are untouched.</p>
-      <label class="switch"><input type="checkbox" id="loc-on" ${p.localize ? 'checked' : ''}><i></i>Localize song and artist names</label>
-      <div class="row wrap ${p.localize ? '' : 'hidden'}" id="loc-opts" style="gap:12px">
-        <label class="field" style="margin:0"><span>Language</span><select class="input" id="loc-lang">${Object.entries(p.languages).map(([k, l]) => `<option value="${k}" ${k === p.lang ? 'selected' : ''}>${esc(l)}</option>`).join('')}</select></label>
-        <label class="switch" style="margin-top:18px"><input type="checkbox" id="loc-latin" ${p.latin ? 'checked' : ''}><i></i>Latin letters (romanize Japanese, Korean, Cyrillic…)</label>
-      </div>
-      ${p.job.running ? `<div class="small muted"><span class="spinner"></span> Looking up names… ${p.job.done}/${p.job.total}</div>` : ''}`;
-    const save = async (body) => {
-      try { await api.put('/auth/prefs', body); toast('Saved – names update as they are looked up', 'ok'); setTimeout(paintLoc, 400); } catch (err) { toast(err.message, 'err'); }
-    };
-    loc.querySelector('#loc-on').onchange = (e) => save({ localize: e.target.checked });
-    loc.querySelector('#loc-lang').onchange = (e) => save({ lang: e.target.value });
-    loc.querySelector('#loc-latin').onchange = (e) => save({ latin: e.target.checked });
-    if (p.job.running) setTimeout(() => view.isConnected && paintLoc(), 2000);
+  view.querySelector('#email-form').onsubmit = async (e) => {
+    e.preventDefault();
+    try { await api.put('/auth/profile', { email: e.target.email.value }); toast('Email saved', 'ok'); } catch (err) { toast(err.message, 'err'); }
   };
-  paintLoc();
   const box = view.querySelector('#sessions');
   const loadSessions = async () => {
     const rows = await api.get('/auth/sessions');

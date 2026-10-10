@@ -77,7 +77,8 @@ const SECTIONS = [
     S('slskd_max_candidates', 'Max users to try per request', 'number'),
   ] },
   { id: 'ytdlp', title: 'YouTube Music / SoundCloud (yt-dlp)', fields: [
-    S('ytdlp_enabled', 'Enable yt-dlp as a fallback source', 'bool'),
+    S('ytdlp_enabled', 'Enable yt-dlp as a source', 'bool'),
+    S('ytdlp_last_resort', 'Always try YouTube Music last, so downloads (almost) never fail', 'bool'),
     S('ytdlp_format', 'Audio format', 'select', { options: [['best', 'Original stream – best quality, no re-encode (recommended)'], ['m4a', 'M4A (AAC, re-encoded)'], ['mp3', 'MP3 (re-encoded)'], ['opus', 'Opus']] }),
     S('ytdlp_quality', 'MP3/M4A quality', 'text', { help: 'Bitrate like 320, or 0 for best VBR' }),
     S('ytdlp_cookies', 'cookies.txt contents (optional)', 'textarea', { full: true, secret: true, help: 'Netscape cookie file from music.youtube.com. With a YouTube Music Premium account this unlocks 256 kbps audio. Export from a private window so the cookies don’t rotate.' }),
@@ -97,6 +98,14 @@ const SECTIONS = [
     S('jellyfin_url', 'Jellyfin URL'), S('jellyfin_api_key', 'Jellyfin API key', 'password'),
     S('plex_url', 'Plex URL'), S('plex_token', 'Plex token', 'password'),
   ] },
+  { id: 'email', title: 'Email', test: 'email', testLabel: 'Send test email', fields: [
+    S('smtp_host', 'SMTP server', 'text', { help: 'e.g. smtp.fastmail.com – used for password-reset emails' }),
+    S('smtp_port', 'Port', 'number', { help: '587 (STARTTLS) or 465 (SSL)' }),
+    S('smtp_user', 'Username'),
+    S('smtp_password', 'Password', 'password'),
+    S('smtp_from', 'From address', 'text', { help: 'e.g. Encore <music@example.com>' }),
+    S('smtp_security', 'Security', 'select', { options: [['starttls', 'STARTTLS'], ['ssl', 'SSL/TLS'], ['none', 'None']] }),
+  ] },
   { id: 'notify', title: 'Notifications', test: 'notify', testLabel: 'Send test', fields: [
     S('discord_webhook', 'Discord webhook URL', 'password', { full: true }),
     S('ntfy_url', 'ntfy topic URL', 'text', { help: 'e.g. https://ntfy.sh/my-music' }),
@@ -104,6 +113,16 @@ const SECTIONS = [
     S('webhook_url', 'Generic webhook (JSON POST)', 'password', { full: true }),
   ] },
 ];
+
+// Settings pages: related cards together, in an order that reads top to bottom.
+const GROUPS = [
+  { id: 'general', title: 'General', sections: ['general'] },
+  { id: 'downloads', title: 'Downloads & sources', sections: ['pipeline', 'slskd', 'ytdlp', 'hifi', 'streamrip', 'lidarr'] },
+  { id: 'tagging', title: 'Library, tagging & IDs', sections: ['library', 'verify'] },
+  { id: 'accounts', title: 'Email & notifications', sections: ['email', 'notify'] },
+  { id: 'connections', title: 'Services & sync', sections: ['spotify', 'sync', 'media'] },
+];
+const groupOf = (id) => (GROUPS.find(g => g.id === id || g.sections.includes(id)) || {}).id || id;
 
 const MASK = '••••';
 const isMasked = (v) => typeof v === 'string' && v.startsWith(MASK);
@@ -194,11 +213,13 @@ async function renderTasks(panel) {
 export async function render(view, ctx) {
   let values = await api.get('/admin/settings');
   let lidarrOpts = null;
-  let current = ctx.query.s || 'general';
+  let current = groupOf(ctx.query.s || 'general');
+  const pages = [...GROUPS.map(g => [g.id, g.title]), ['tasks', 'Scheduled tasks'], ['api', 'API & security']];
   view.innerHTML = `
     <h1 style="margin-bottom:18px">Settings</h1>
+    <select class="input settings-select" aria-label="Settings page">${pages.map(([id, t]) => `<option value="${id}">${esc(t)}</option>`).join('')}</select>
     <div class="settings-grid">
-      <nav class="settings-nav">${SECTIONS.map(s => `<button data-s="${s.id}">${esc(s.title)}</button>`).join('')}<button data-s="tasks">Scheduled tasks</button><button data-s="api">API & security</button></nav>
+      <nav class="settings-nav">${pages.map(([id, t]) => `<button data-s="${id}">${esc(t)}</button>`).join('')}</nav>
       <div id="panel"></div>
     </div>`;
   const panel = view.querySelector('#panel');
@@ -206,60 +227,56 @@ export async function render(view, ctx) {
   const show = async (id, flash = null) => {
     current = id;
     view.querySelectorAll('.settings-nav button').forEach(b => b.classList.toggle('active', b.dataset.s === id));
+    view.querySelector('.settings-select').value = id;
     if (id === 'api') return showApi();
     if (id === 'tasks') return renderTasks(panel);
-    const sec = SECTIONS.find(s => s.id === id);
-    if (id === 'lidarr' && values.lidarr_api_key && !lidarrOpts) {
+    const group = GROUPS.find(g => g.id === id) || GROUPS[0];
+    const secs = group.sections.map(sid => SECTIONS.find(x => x.id === sid));
+    if (secs.some(x => x.id === 'lidarr') && values.lidarr_api_key && !lidarrOpts) {
       try { lidarrOpts = await api.get('/system/lidarr/options'); } catch { lidarrOpts = null; }
     }
     const meta = values._meta || {};
-    panel.innerHTML = `<div class="card">
-      <div class="row between" style="margin-bottom:18px"><h2>${esc(sec.title)}</h2>
-        ${sec.test ? `<button class="btn sm" id="test">${icon.refresh}${esc(sec.testLabel || 'Test connection')}</button>` : ''}</div>
-      <div id="test-out"></div>
+    panel.innerHTML = secs.map(sec => `<div class="card settings-card" data-sec="${sec.id}">
+      <div class="row between" style="margin-bottom:14px;gap:10px;flex-wrap:wrap"><h2>${esc(sec.title)}</h2>
+        ${sec.test ? `<button class="btn sm" data-test>${icon.refresh}${esc(sec.testLabel || 'Test connection')}</button>` : ''}</div>
+      <div data-out>${flash && flash.sec === sec.id ? `<div class="test-result ${flash.ok ? 'ok' : 'err'}">${flash.ok ? icon.check : icon.x}<span>${esc(flash.message || '')}</span></div>` : ''}</div>
       <div class="form-grid">${sec.fields.map(f => field(f, values[f.key], lidarrOpts, meta)).join('')}</div>
-      <div class="row mt-lg" style="justify-content:flex-end"><button class="btn primary" id="save">${icon.check}Save</button></div>
-    </div>
-    ${id === 'pipeline' ? pipelineHelp() : ''}`;
-    const out = panel.querySelector('#test-out');
-    const paint = (r) => {
-      out.innerHTML = `<div class="test-result ${r.ok ? 'ok' : 'err'}">${r.ok ? icon.check : icon.x}<span>${esc(r.message || (r.ok ? 'Connected' : 'Failed'))}</span></div>`;
-    };
-    if (flash) paint(flash);
-    panel.querySelector('#save').onclick = () => save(sec);
-    panel.querySelectorAll('[data-clear]').forEach(a => a.addEventListener('click', async (e) => {
-      e.preventDefault();
-      await api.put('/admin/settings', { [a.dataset.clear]: '' }).then(v => { values = v; });
-      toast('Cleared', 'ok');
-      show(id);
-    }));
-    const t = panel.querySelector('#test');
-    if (t) t.onclick = async () => {
-      t.disabled = true;
-      out.innerHTML = '<div class="test-result"><span class="spinner"></span><span>Testing…</span></div>';
-      let r;
-      try {
-        await save(sec, true);
-        r = await api.post(`/system/test/${sec.test}`);
-      } catch (e) {
-        r = { ok: false, message: e.message || 'Test failed' };
-      }
-      if (r.options) {
-        // Lidarr returned its profiles/root folders: redraw the dropdowns, keep the result visible
-        lidarrOpts = r.options;
-        await show(id, r);
-      } else {
-        paint(r);
-      }
-      t.disabled = false;
-    };
+      <div class="row mt" style="justify-content:flex-end"><button class="btn primary" data-save>${icon.check}Save</button></div>
+    </div>`).join('') + (group.id === 'downloads' ? pipelineHelp() : '');
+    panel.querySelectorAll('[data-sec]').forEach(card => {
+      const sec = SECTIONS.find(x => x.id === card.dataset.sec);
+      const out = card.querySelector('[data-out]');
+      const paint = (r) => { out.innerHTML = `<div class="test-result ${r.ok ? 'ok' : 'err'}">${r.ok ? icon.check : icon.x}<span>${esc(r.message || (r.ok ? 'Connected' : 'Failed'))}</span></div>`; };
+      card.querySelector('[data-save]').onclick = () => save(sec, false, card);
+      card.querySelectorAll('[data-clear]').forEach(a => a.addEventListener('click', async (e) => {
+        e.preventDefault();
+        await api.put('/admin/settings', { [a.dataset.clear]: '' }).then(v => { values = v; });
+        toast('Cleared', 'ok');
+        show(id);
+      }));
+      const t = card.querySelector('[data-test]');
+      if (t) t.onclick = async () => {
+        t.disabled = true;
+        out.innerHTML = '<div class="test-result"><span class="spinner"></span><span>Testing…</span></div>';
+        let r;
+        try {
+          await save(sec, true, card);
+          r = await api.post(`/system/test/${sec.test}`);
+        } catch (e) {
+          r = { ok: false, message: e.message || 'Test failed' };
+        }
+        if (r.options) { lidarrOpts = r.options; await show(id, { ...r, sec: sec.id }); } else paint(r);
+        t.disabled = false;
+      };
+    });
   };
 
-  const save = async (sec, quiet = false) => {
+  const save = async (sec, quiet = false, root = panel) => {
     const body = {};
     const meta = values._meta || {};
-    panel.querySelectorAll('[data-k]').forEach(el => {
+    root.querySelectorAll('[data-k]').forEach(el => {
       const f = sec.fields.find(x => x.key === el.dataset.k);
+      if (!f) return;
       if ((meta[f.key] || {}).source === 'env') return;            // locked by environment
       if (el.type === 'checkbox') body[f.key] = el.checked;
       else if ((f.type === 'password' || f.secret) && el.value.trim() === '') { /* keep saved secret */ }
@@ -300,6 +317,7 @@ export async function render(view, ctx) {
   };
 
   view.querySelector('.settings-nav').onclick = (e) => { const b = e.target.closest('[data-s]'); if (b) show(b.dataset.s); };
+  view.querySelector('.settings-select').onchange = (e) => show(e.target.value);
   show(current);
 }
 
