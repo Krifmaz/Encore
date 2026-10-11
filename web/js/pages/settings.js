@@ -9,7 +9,7 @@ import * as diagPage from './diagnostics.js';
 const S = (key, label, type = 'text', extra = {}) => ({ key, label, type, ...extra });
 
 const SECTIONS = [
-  { id: 'general', title: 'General', fields: [
+  { id: 'general', title: 'General', desc: "Your server's name and address, who can sign up, and how requests are approved.", fields: [
     S('app_name', 'App name'),
     S('base_url', 'Public URL', 'text', { help: 'e.g. https://music.example.com – used in links & notifications' }),
     S('signup_mode', 'Sign-up mode', 'select', { options: [['invite', 'Invite only'], ['open', 'Open to anyone'], ['closed', 'Closed']] }),
@@ -21,7 +21,7 @@ const SECTIONS = [
     S('musicbrainz_url', 'MusicBrainz server', 'text', { help: 'Use your own mirror for faster lookups' }),
     S('musicbrainz_rate', 'MusicBrainz requests / second', 'number', { step: '0.1', help: 'Keep at 1 for the public server' }),
   ] },
-  { id: 'library', title: 'Library & tagging', fields: [
+  { id: 'library', title: 'Library & tagging', desc: 'Where your music lives, and how downloaded files are tagged, named and organised.', fields: [
     S('library_path', 'Music library path', 'text', { help: 'Inside the container (mount your music folder here)' }),
     S('staging_path', 'Staging path for yt-dlp downloads'),
     S('scan_interval_minutes', 'Rescan library every (minutes)', 'number', { help: '0 disables periodic scans' }),
@@ -33,18 +33,18 @@ const SECTIONS = [
     S('save_cover', 'Save cover.jpg in album folders', 'bool'),
     S('embed_cover', 'Embed cover art in files', 'bool'),
   ] },
-  { id: 'pipeline', title: 'Download pipeline', fields: [
+  { id: 'pipeline', title: 'Download pipeline', desc: 'Which sources are searched for a request, and in what order. The first one that has it wins.', fields: [
     S('discography_singles', 'Requesting a whole discography includes singles (not just albums and EPs)', 'bool'),
     S('source_order', 'Source order', 'text', { full: true, help: 'The one place to set what is searched, in order, comma-separated: qobuz, tidal, deezer (all through streamrip), slskd (Soulseek), torznab (torrents/Usenet, albums only), ytdlp (YouTube Music). Leave one out to never use it.' }),
   ] },
-  { id: 'verify', title: 'Verification & duplicates', test: 'acoustid', fields: [
+  { id: 'verify', title: 'Verification & duplicates', desc: "Listens to each download and checks it's really the song you asked for, not a remix, live or wrong track.", test: 'acoustid', fields: [
     S('acoustid_api_key', 'AcoustID API key', 'password', { full: true, help: 'Free – register an application at acoustid.org/new-application. Used to fingerprint audio and confirm each file is the right song/version.' }),
     S('verify_on_import', 'Fingerprint every download before import', 'bool'),
     S('reject_mismatch', 'Reject downloads whose audio is a different song/version (and try the next source)', 'bool'),
     S('dedupe_on_import', 'Never import a second copy of a song (keep the better-quality file)', 'bool'),
     S('upgrade_check_audio', 'Before replacing a song with a better copy, compare the audio – a different recording is kept as its own song', 'bool'),
   ] },
-  { id: 'streamrip', title: 'Qobuz / Tidal / Deezer (streamrip)', test: 'streamrip', testLabel: 'Test & write config', fields: [
+  { id: 'streamrip', title: 'Qobuz / Tidal / Deezer (streamrip)', desc: 'Searches Qobuz, Tidal and Deezer with your own accounts and downloads lossless (FLAC). Usually the best quality.', test: 'streamrip', testLabel: 'Test & write config', fields: [
     S('streamrip_enabled', 'Enable streamrip source', 'bool', { help: 'Downloads lossless from your own paid accounts. Respect each service’s terms – use at your own risk.' }),
     S('streamrip_quality', 'Max quality', 'select', { options: [[1, 'MP3 320 / AAC'], [2, 'CD – 16-bit FLAC'], [3, 'Hi-res ≤ 24/96'], [4, 'Hi-res max']] }),
     S('streamrip_deezer_arl', 'Deezer ARL cookie', 'password', { full: true, help: 'From deezer.com → browser dev tools → Cookies → arl' }),
@@ -53,11 +53,11 @@ const SECTIONS = [
     S('streamrip_bin', 'streamrip executable (optional)', 'text', { help: 'Leave empty to auto-detect' }),
     S('streamrip_command', 'Command template (advanced)', 'text', { full: true }),
   ] },
-  { id: 'sync', title: 'Playlists & sync', fields: [
+  { id: 'sync', title: 'Playlists & sync', desc: 'Keeps liked songs and playlists in step with Spotify, YouTube Music, Jellyfin, Plex and the rest.', fields: [
     S('sync_interval_minutes', 'Sync likes & playlists every (minutes)', 'number', { help: '0 disables automatic sync' }),
     S('auto_request_followed', 'Automatically download new tracks in followed playlists (more rules under Admin → Auto-download)', 'bool'),
   ] },
-  { id: 'torznab', title: 'Torrents & Usenet (Prowlarr)', test: 'torznab', fields: [
+  { id: 'torznab', title: 'Torrents & Usenet (Prowlarr)', desc: 'Searches your torrent and Usenet indexers (through Prowlarr) for whole albums and sends them to qBittorrent or SABnzbd.', test: 'torznab', fields: [
     S('torznab_enabled', 'Search torrent and Usenet indexers through Prowlarr', 'bool', { help: 'Albums only. Prowlarr searches every indexer you added there; torrents go to qBittorrent, Usenet to SABnzbd.' }),
     S('prowlarr_url', 'Prowlarr URL', 'text', { help: 'Internal address, e.g. http://prowlarr:9696' }),
     S('prowlarr_api_key', 'Prowlarr API key', 'password', { help: 'Prowlarr → Settings → General → API Key' }),
@@ -73,7 +73,7 @@ const SECTIONS = [
     S('sab_category', 'SABnzbd category'),
     S('sab_download_path', 'Usenet download folder (as mounted in this container)', 'text', { full: true }),
   ] },
-  { id: 'slskd', title: 'Soulseek (slskd)', test: 'slskd', fields: [
+  { id: 'slskd', title: 'Soulseek (slskd)', desc: 'Searches the Soulseek file-sharing network – great for FLAC and rare releases.', test: 'slskd', fields: [
     S('slskd_enabled', 'Enable slskd', 'bool'),
     S('slskd_url', 'URL', 'text', { help: 'Internal address, e.g. http://slskd:5030' }),
     S('slskd_api_key', 'API key', 'password', { help: 'Set in slskd.yml under web.authentication.api_keys' }),
@@ -84,14 +84,14 @@ const SECTIONS = [
     S('slskd_stall_minutes', 'Give up on a stalled user after (minutes)', 'number'),
     S('slskd_max_candidates', 'Max users to try per request', 'number'),
   ] },
-  { id: 'ytdlp', title: 'YouTube Music & links (yt-dlp)', test: 'ytdlp', testLabel: 'Test cookies', fields: [
+  { id: 'ytdlp', title: 'YouTube Music & links (yt-dlp)', desc: 'Last-resort source: finds the song on YouTube Music. Also downloads links you paste in the Downloader (YouTube, SoundCloud, Bandcamp…).', test: 'ytdlp', testLabel: 'Test cookies', fields: [
     S('ytdlp_enabled', 'Enable yt-dlp as a source', 'bool', { help: 'Searches YouTube Music for requests, and downloads links you paste in the Downloader from YouTube, SoundCloud, Bandcamp, Mixcloud and ~1,800 other sites.' }),
     S('ytdlp_last_resort', 'Always try YouTube Music last, so downloads (almost) never fail', 'bool'),
     S('ytdlp_format', 'Audio format', 'select', { options: [['best', 'Original stream – best quality, no re-encode (recommended)'], ['m4a', 'M4A (AAC, re-encoded)'], ['mp3', 'MP3 (re-encoded)'], ['opus', 'Opus']] }),
     S('ytdlp_quality', 'MP3/M4A quality', 'text', { help: 'Bitrate like 320, or 0 for best VBR' }),
     S('ytdlp_cookies', 'cookies.txt contents (optional)', 'textarea', { full: true, secret: true, help: 'Netscape cookie file from music.youtube.com. With a YouTube Music Premium account this unlocks 256 kbps audio. Export from a private window so the cookies don’t rotate.' }),
   ] },
-  { id: 'spotify', title: 'Integrations', test: 'spotify', testLabel: 'Test Spotify', fields: [
+  { id: 'spotify', title: 'Integrations', desc: 'API keys that let users connect their Spotify, Tidal, Last.fm, Discogs and YouTube Music accounts, and power recommendations.', test: 'spotify', testLabel: 'Test Spotify', fields: [
     S('spotify_client_id', 'Spotify Client ID', 'text', { help: 'developer.spotify.com – add <Public URL>/api/connections/spotify/callback as redirect URI. Development-mode apps allow 5 users and need a Premium owner (2026 rules); without it, public playlists still import via the embed fallback.' }),
     S('spotify_client_secret', 'Spotify Client secret', 'password'),
     S('tidal_client_id', 'Tidal Client ID', 'text', { help: 'developer.tidal.com – redirect URI <Public URL>/api/connections/tidal/callback' }),
@@ -102,12 +102,12 @@ const SECTIONS = [
     S('ytmusic_client_id', 'YouTube Music OAuth Client ID', 'text', { help: 'Google Cloud → YouTube Data API v3 → OAuth client of type “TVs and Limited Input devices”. Lets users sign in to YouTube Music with a code (they can also paste browser headers instead).' }),
     S('ytmusic_client_secret', 'YouTube Music OAuth Client secret', 'password'),
   ] },
-  { id: 'media', title: 'Media servers', test: 'mediaservers', testLabel: 'Trigger refresh', fields: [
+  { id: 'media', title: 'Media servers', desc: 'Tells Navidrome, Jellyfin or Plex to rescan after new music arrives, so it shows up there right away.', test: 'mediaservers', testLabel: 'Trigger refresh', fields: [
     S('navidrome_url', 'Navidrome URL', 'text', { help: 'URLs here let users link their own accounts on the Connections page; the admin credentials below are only used to trigger library rescans' }), S('navidrome_user', 'Navidrome user'), S('navidrome_password', 'Navidrome password', 'password'),
     S('jellyfin_url', 'Jellyfin URL'), S('jellyfin_api_key', 'Jellyfin API key', 'password'),
     S('plex_url', 'Plex URL'), S('plex_token', 'Plex token', 'password'),
   ] },
-  { id: 'email', title: 'Email', test: 'email', testLabel: 'Send test email', fields: [
+  { id: 'email', title: 'Email', desc: 'Lets Encore send password-reset and sign-in emails.', test: 'email', testLabel: 'Send test email', fields: [
     S('smtp_host', 'SMTP server', 'text', { help: 'e.g. smtp.fastmail.com – used for password-reset emails' }),
     S('smtp_port', 'Port', 'number', { help: '587 (STARTTLS) or 465 (SSL)' }),
     S('smtp_user', 'Username'),
@@ -115,7 +115,7 @@ const SECTIONS = [
     S('smtp_from', 'From address', 'text', { help: 'e.g. Encore <music@example.com>' }),
     S('smtp_security', 'Security', 'select', { options: [['starttls', 'STARTTLS'], ['ssl', 'SSL/TLS'], ['none', 'None']] }),
   ] },
-  { id: 'notify', title: 'Notifications', test: 'notify', testLabel: 'Send test', fields: [
+  { id: 'notify', title: 'Notifications', desc: 'Get a message on Discord, ntfy or any webhook when downloads finish or fail.', test: 'notify', testLabel: 'Send test', fields: [
     S('discord_webhook', 'Discord webhook URL', 'password', { full: true }),
     S('ntfy_url', 'ntfy topic URL', 'text', { help: 'e.g. https://ntfy.sh/my-music' }),
     S('ntfy_token', 'ntfy access token', 'password'),
@@ -279,7 +279,7 @@ export async function render(view, ctx) {
     }
     const meta = values._meta || {};
     panel.innerHTML = secs.map((sec, i) => `<details class="card settings-card" data-sec="${sec.id}" ${i === 0 || secs.length === 1 || (flash && flash.sec === sec.id) ? 'open' : ''}>
-      <summary class="row between" style="gap:10px;flex-wrap:wrap"><h2>${esc(sec.title)}</h2>
+      <summary class="row between" style="gap:10px;flex-wrap:nowrap;align-items:flex-start"><div style="min-width:0"><h2>${esc(sec.title)}</h2>${sec.desc ? `<div class="small muted" style="margin-top:4px;font-weight:400">${esc(sec.desc)}</div>` : ''}</div>
         <span class="row" style="gap:8px">${sec.test ? `<button class="btn sm" data-test>${icon.refresh}${esc(sec.testLabel || 'Test connection')}</button>` : ''}<span class="chev">${icon.chevron || '▾'}</span></span></summary>
       <div style="height:14px"></div>
       <div data-out>${flash && flash.sec === sec.id ? `<div class="test-result ${flash.ok ? 'ok' : 'err'}">${flash.ok ? icon.check : icon.x}<span>${esc(flash.message || '')}</span></div>` : ''}</div>
