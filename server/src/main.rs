@@ -69,6 +69,7 @@ pub fn app(st: AppState) -> Router {
         .merge(routes::playlists::router())
         .merge(routes::follows::router())
         .merge(routes::stats::router())
+        .merge(routes::remote::router())
         .with_state(st)
         .fallback_service(spa)
         .layer(middleware::from_fn(security_headers))

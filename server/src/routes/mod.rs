@@ -3,6 +3,7 @@ pub mod auth;
 pub mod library;
 pub mod picker;
 pub mod playlists;
+pub mod remote;
 pub mod requests;
 pub mod stats;
 pub mod system;

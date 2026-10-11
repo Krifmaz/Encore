@@ -247,6 +247,7 @@ async function renderTasks(panel) {
 // Pages that are whole screens of their own, shown inside Settings
 const EMBEDDED = {
   account: (el, ctx) => accountPage.render(el, ctx),
+  appearance: (el, ctx) => renderAppearance(el, ctx),
   connections: (el, ctx) => connectionsPage.render(el, ctx),
   users: (el, ctx) => adminPage.renderUsers(el, ctx),
   invites: (el, ctx) => adminPage.renderInvites(el, ctx),
@@ -260,13 +261,12 @@ export async function render(view, ctx) {
   let lidarrOpts = null;
   let current = ctx.query.s ? groupOf(ctx.query.s) : 'account';
   const nav = [
-    ['You', [['account', 'Account'], ['connections', 'Connections']]],
+    ['You', [['account', 'Account'], ['appearance', 'Appearance'], ['connections', 'Connections']]],
     ...(admin ? [
       ['People', [['users', 'Users & permissions'], ['invites', 'Invites']]],
       ['Server', [...GROUPS.map(g => [g.id, g.title]), ['autodownload', 'Auto-download'], ['tasks', 'Scheduled tasks']]],
       ['System', [['diagnostics', 'Diagnostics'], ['api', 'API & security']]],
     ] : []),
-    ['', [['about', 'About']]],
   ];
   const pages = nav.flatMap(([, items]) => items);
   if (!pages.some(([id]) => id === current)) current = 'account';
@@ -285,7 +285,7 @@ export async function render(view, ctx) {
     view.querySelector('.settings-select').value = id;
     history.replaceState(null, '', `#/settings?s=${id}`);
     if (EMBEDDED[id]) { panel.innerHTML = '<div class="skeleton" style="height:200px"></div>'; return EMBEDDED[id](panel, ctx); }
-    if (id === 'about') return showAbout();
+    if (id === 'about') return show('general');
     if (id === 'api') return showApi();
     if (id === 'tasks') return renderTasks(panel);
     const group = GROUPS.find(g => g.id === id) || GROUPS[0];
@@ -303,7 +303,7 @@ export async function render(view, ctx) {
       <div data-out>${flash && flash.sec === sec.id ? `<div class="test-result ${flash.ok ? 'ok' : 'err'}">${flash.ok ? icon.check : icon.x}<span>${esc(flash.message || '')}</span></div>` : ''}</div>
       <div class="form-grid">${sec.fields.map(f => field(f, values[f.key], lidarrOpts, meta)).join('')}</div>
       <div class="row mt" style="justify-content:flex-end"><button class="btn primary" data-save>${icon.check}Save</button></div>
-    </details>`).join('') + (group.id === 'downloads' ? pipelineHelp() : '');
+    </details>`).join('') + (group.id === 'downloads' ? pipelineHelp() : '') + (group.id === 'general' ? await aboutCard() : '');
     panel.querySelectorAll('[data-sec]').forEach(card => {
       const sec = SECTIONS.find(x => x.id === card.dataset.sec);
       const out = card.querySelector('[data-out]');
@@ -356,14 +356,6 @@ export async function render(view, ctx) {
     }
   };
 
-  const showAbout = async () => {
-    const info = (await import('../app.js')).session.info || {};
-    panel.innerHTML = `<div class="card stack"><h2>About Encore</h2>
-      <div class="row wrap" style="gap:24px"><div><div class="small muted">Version</div><div style="font-weight:700;font-size:20px">v${esc(info.version || '?')}</div></div>
-        <div><div class="small muted">Build</div><div class="mono">${esc(info.build || 'dev')}</div></div></div>
-      <div class="small muted">Apps for Android, Windows, macOS and Linux: <a href="https://github.com/Krifmaz/Encore/releases" target="_blank" rel="noopener">github.com/Krifmaz/Encore/releases</a></div></div>`;
-  };
-
   const showApi = async () => {
     const { api_key } = await api.get('/system/api-key');
     panel.innerHTML = `<div class="card stack">
@@ -390,6 +382,46 @@ export async function render(view, ctx) {
   view.querySelector('.settings-nav').onclick = (e) => { const b = e.target.closest('[data-s]'); if (b) show(b.dataset.s); };
   view.querySelector('.settings-select').onchange = (e) => show(e.target.value);
   show(current);
+}
+
+/** Version, build and app downloads – shown at the bottom of General (and of Account for members). */
+export async function aboutCard() {
+  const info = (await import('../app.js')).session.info || {};
+  const server = info.server === 'rust' ? 'Encore 2 (Rust)' : 'Encore 1 (Python)';
+  return `<div class="card stack mt"><h2>About Encore</h2>
+    <div class="row wrap" style="gap:24px"><div><div class="small muted">Version</div><div style="font-weight:700;font-size:20px">v${esc(info.version || '?')}</div></div>
+      <div><div class="small muted">Server</div><div>${esc(server)}</div></div>
+      <div><div class="small muted">Build</div><div class="mono">${esc(info.build || 'dev')}</div></div></div>
+    <div class="small muted">Apps for Android, Windows, macOS and Linux: <a href="https://github.com/Krifmaz/Encore/releases" target="_blank" rel="noopener">github.com/Krifmaz/Encore/releases</a></div></div>`;
+}
+
+/** Settings → Appearance: theme, accent colour, faded/solid background, content width. */
+async function renderAppearance(el) {
+  const appearance = await import('../appearance.js');
+  const { session } = await import('../app.js');
+  const serverPrefs = (session.info?.features || []).includes('theme');
+  let p = appearance.current();
+  const seg = (key, opts) => `<div class="seg" data-key="${key}">${opts.map(([v, l]) => `<button type="button" data-v="${v}" class="${p[key] === v ? 'on' : ''}">${l}</button>`).join('')}</div>`;
+  const paint = () => {
+    el.innerHTML = `<div class="card stack">
+      <h2>Appearance</h2>
+      <p class="small muted" style="margin:0">${serverPrefs ? 'Saved to your account, so it follows you to every device.' : 'Saved on this device.'}</p>
+      <div class="stack" style="gap:6px"><h3>Theme</h3>${seg('theme', [['dark', 'Dark'], ['light', 'Light'], ['system', 'Match device']])}</div>
+      <div class="stack" style="gap:8px"><h3>Accent colour</h3>
+        <div class="swatches">${appearance.ACCENTS.map(a => `<button type="button" class="swatch ${p.accent === a.id ? 'on' : ''}" data-accent="${a.id}" title="${esc(a.name)}" aria-label="${esc(a.name)}" style="background:linear-gradient(135deg, ${a.a}, ${a.b})"></button>`).join('')}
+          <label class="swatch ${p.accent === 'custom' ? 'on' : ''}" title="Pick any colour" style="background:conic-gradient(red, yellow, lime, cyan, blue, magenta, red)"><input type="color" id="custom" value="${esc(p.custom)}"></label></div></div>
+      <div class="stack" style="gap:6px"><h3>Background</h3>${seg('background', [['fade', 'Faded colour'], ['solid', 'Solid']])}</div>
+      <div class="stack" style="gap:6px"><h3>Width</h3>${seg('width', [['comfortable', 'Comfortable'], ['wide', 'Full width']])}
+        <span class="small muted">Comfortable keeps pages from stretching across very wide screens.</span></div>
+      <div class="row"><button class="btn primary" type="button">${icon.check}Example button</button><span class="badge accent">Example badge</span></div>
+    </div>`;
+    el.querySelectorAll('.seg button').forEach(b => b.onclick = () => set({ [b.closest('.seg').dataset.key]: b.dataset.v }));
+    el.querySelectorAll('[data-accent]').forEach(b => b.onclick = () => set({ accent: b.dataset.accent }));
+    el.querySelector('#custom').oninput = (e) => { p = { ...p, accent: 'custom', custom: e.target.value }; appearance.apply(p); };
+    el.querySelector('#custom').onchange = (e) => set({ accent: 'custom', custom: e.target.value });
+  };
+  const set = (patch) => { p = { ...p, ...patch }; appearance.save(p, { serverPrefs }); paint(); };
+  paint();
 }
 
 function pipelineHelp() {

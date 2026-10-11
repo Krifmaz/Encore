@@ -1,3 +1,5 @@
+import * as appearance from './appearance.js';
+import * as remote from './remote.js';
 import { api } from './api.js';
 import * as player from './player.js';
 import { esc, icon, qs, toast } from './ui.js';
@@ -54,12 +56,13 @@ function parseHash() {
   return { path, query: Object.fromEntries(new URLSearchParams(q)) };
 }
 
-function themeToggle() {
-  const cur = document.documentElement.dataset.theme === 'light' ? 'dark' : 'light';
-  document.documentElement.dataset.theme = cur;
-  try { localStorage.setItem('encore.theme', cur); } catch { /* ignore */ }
-  renderShell();
-  route();
+
+/** Profile picture (Encore 2) or the first letter of the name. */
+export function avatarHtml(u, size = 32) {
+  const style = size !== 32 ? ` style="width:${size}px;height:${size}px;font-size:${Math.round(size * 0.42)}px"` : '';
+  return u.avatar_at
+    ? `<img class="avatar" src="/api/users/${u.id}/avatar?v=${Math.round(u.avatar_at)}" alt=""${style}>`
+    : `<div class="avatar"${style}>${esc((u.username || '?')[0])}</div>`;
 }
 
 function navLink(href, ic, label, extra = '') {
@@ -88,11 +91,10 @@ function renderShell() {
         <div id="storage-mini" style="flex:none"></div>
         <div class="sidebar-foot" style="margin-top:0">
           <a href="#/settings?s=account" class="row grow" style="min-width:0">
-            <div class="avatar">${esc(u.username[0])}</div>
+            ${avatarHtml(u)}
             <div class="grow"><div class="ellipsis" style="font-weight:650">${esc(u.username)}</div><div class="small faint">${admin ? 'Admin' : 'Member'}</div></div>
           </a>
           <a class="btn ghost icon" href="#/settings" title="Settings" aria-label="Settings">${icon.settings}</a>
-          <button class="btn ghost icon" id="theme-btn" title="Toggle theme">${document.documentElement.dataset.theme === 'light' ? icon.moon : icon.sun}</button>
           <button class="btn ghost icon" id="logout-btn" title="Sign out">${icon.logout}</button>
         </div>
       </aside>
@@ -105,7 +107,6 @@ function renderShell() {
   const meter = () => storagePage.sidebarMeter(qs('#storage-mini'));
   meter();
   setInterval(meter, 5 * 60 * 1000);
-  qs('#theme-btn').onclick = themeToggle;
   qs('#menu-btn').onclick = (e) => { e.stopPropagation(); qs('#sidebar').classList.toggle('open'); };
   document.addEventListener('click', (e) => {
     const sb = qs('#sidebar');
@@ -159,14 +160,13 @@ async function route() {
 }
 
 export async function boot() {
-  try {
-    const t = localStorage.getItem('encore.theme');
-    if (t) document.documentElement.dataset.theme = t;
-  } catch { /* ignore */ }
+  appearance.apply();
   try { session.info = await api.get('/auth/info'); } catch { session.info = {}; }
   try { session.user = await api.get('/auth/me'); } catch { session.user = null; }
+  if (session.user) appearance.adoptAccount(session.user);
   if (session.user) {
     renderShell();
+    remote.start(session);
     player.mount();
     refreshPendingBadge();
     setInterval(refreshPendingBadge, 30000);
@@ -176,6 +176,8 @@ export async function boot() {
 
 export async function refreshUser() {
   session.user = await api.get('/auth/me');
+  renderShell();
+  route();
 }
 
 window.addEventListener('hashchange', route);

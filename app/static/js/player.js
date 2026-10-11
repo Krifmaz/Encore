@@ -52,6 +52,44 @@ function native() {
 }
 window.encorePlayer = { toggle: () => toggle(), next: () => next(), prev: () => prev(), open: () => setFull(true) };
 export function current() { return state.queue[state.index] || null; }
+
+// ---- remote control (Encore 2): what this device is playing, and commands from your other devices ----
+const slim = (t) => ({ id: t.id, title: t.title, artist: t.artist, album: t.album, album_id: t.album_id, format: t.format, duration: t.duration });
+export function snapshot() {
+  const t = current();
+  if (!t || !audio) return { playing: false };
+  return { ...slim(t), cover: cover(t), playing: !audio.paused, position: position(), duration: duration(), volume: audio.volume,
+           index: state.index, queue: state.queue.filter(x => typeof x.id === 'number').slice(0, 300).map(slim) };
+}
+export function setVolume(v) {
+  if (!audio) return;
+  audio.volume = spare.volume = Math.max(0, Math.min(1, Number(v)));
+  try { localStorage.setItem('encore.volume', audio.volume); } catch { /* ignore */ }
+  const el = document.getElementById('vol');
+  if (el) el.value = audio.volume;
+}
+export function command(c) {
+  switch (c.action) {
+    case 'toggle': return toggle();
+    case 'play': return current() && audio.play();
+    case 'pause': return audio?.pause();
+    case 'stop': audio?.pause(); return;
+    case 'next': return next();
+    case 'prev': return prev();
+    case 'seek': return seekTo(Number(c.value) || 0);
+    case 'volume': return setVolume(c.value);
+    case 'play_queue':
+      if (!Array.isArray(c.tracks) || !c.tracks.length) return;
+      playQueue(c.tracks, c.index || 0, { context: 'list' });
+      if (c.position > 1) {
+        const at = Number(c.position);
+        const once = () => { seekTo(at); audio.removeEventListener('loadedmetadata', once); };
+        audio.addEventListener('loadedmetadata', once);
+      }
+      return;
+    default:
+  }
+}
 export function queue() { return { tracks: state.queue, index: state.index }; }
 
 const cover = (t) => t.preview ? t.cover : t.album_id ? `/api/library/albums/${t.album_id}/cover` : t.cover;
@@ -349,7 +387,9 @@ function render() {
   if (!t) {
     el.innerHTML = `<div class="now"><div class="thumb"><div class="ph">${icon.music.replace('<svg', '<svg width="20"')}</div></div>
       <div class="grow"><div style="font-weight:650" class="faint">Nothing playing</div>
-      <div class="small muted ellipsis">Open an album in <a href="#/library" style="color:var(--accent)">Library</a> and press ▶ Play</div></div></div>`;
+      <div class="small muted ellipsis">Open an album in <a href="#/library" style="color:var(--accent)">Library</a> and press ▶ Play</div></div></div>
+      ${window.encoreRemote ? `<div class="right"><button class="btn ghost icon" id="p-devices" aria-label="Other devices" title="Play on or control your other devices">${icon.devices}</button></div>` : ''}`;
+    el.querySelector('#p-devices')?.addEventListener('click', () => window.encoreRemote.open());
     if (state.full) setFull(false);
     return;
   }
@@ -372,6 +412,7 @@ function render() {
     <div class="right">
       <span class="badge" title="${state.transcoded ? 'Converted to FLAC for your browser (lossless)' : t.preview ? 'A 30-second preview – not in your library' : 'Original file, no conversion'}">${esc(quality(t))}</span>
       <button class="btn ghost icon" id="p-queue" aria-label="Up next" title="Up next">${icon.list}</button>
+      ${window.encoreRemote ? `<button class="btn ghost icon" id="p-devices" aria-label="Other devices" title="Play on or control your other devices">${icon.devices}</button>` : ''}
       <span class="faint vol-ic">${icon.volume.replace('<svg', '<svg width="18"')}</span>
       <input type="range" id="vol" min="0" max="1" step="0.01" value="${audio.volume}">
       <button class="btn ghost icon" id="p-close" aria-label="Close player">${icon.x}</button>
@@ -382,6 +423,7 @@ function render() {
   el.querySelector('#p-open').onclick = () => { state.pane = 'now'; setFull(true); };
   el.querySelector('#p-open').onkeydown = (e) => { if (e.key === 'Enter') setFull(true); };
   el.querySelector('#p-queue').onclick = () => { state.pane = 'queue'; setFull(true); };
+  el.querySelector('#p-devices')?.addEventListener('click', () => window.encoreRemote.open());
   bindSeek(el.querySelector('#seek'), 't-cur');
   el.querySelector('#vol').oninput = (e) => {
     audio.volume = spare.volume = e.target.value;

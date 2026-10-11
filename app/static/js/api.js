@@ -1,5 +1,5 @@
 export class ApiError extends Error {
-  constructor(status, message) { super(message); this.status = status; }
+  constructor(status, message, data = null) { super(message); this.status = status; this.data = data; }
 }
 
 async function request(method, path, body) {
@@ -25,7 +25,7 @@ async function request(method, path, body) {
     }
     let msg = (data && data.detail) || res.statusText || 'Request failed';
     if (Array.isArray(msg)) msg = msg.map(m => m.msg).join(', ');
-    throw new ApiError(res.status, msg);
+    throw new ApiError(res.status, msg, data);
   }
   return data;
 }
