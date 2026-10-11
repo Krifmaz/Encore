@@ -197,6 +197,8 @@ function connBanner(on, text = 'Not connected – check your internet or server'
   b.querySelector('#go-offline')?.addEventListener('click', () => window.EncoreNative.openOffline());
 }
 window.addEventListener('offline', () => connBanner(true));
+// the desktop / Android app reports things it did on our behalf (e.g. "Saved for offline: …")
+window.addEventListener('encore-native', (e) => { if (e.detail?.text) toast(e.detail.text, e.detail.kind || 'ok'); });
 window.addEventListener('online', () => connBanner(false));
 window.addEventListener('encore:server-down', () => connBanner(true, 'The Encore server isn\'t answering'));
 window.addEventListener('encore:server-up', () => connBanner(false));

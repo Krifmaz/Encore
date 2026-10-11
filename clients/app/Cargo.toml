@@ -1,0 +1,39 @@
+[package]
+name = "encore-app"
+version = "0.0.0"
+description = "Encore desktop and Android app: your Encore music server in its own window, with media keys, a tray and lock-screen controls"
+authors = ["Encore"]
+license = "MIT"
+edition = "2021"
+rust-version = "1.85"
+
+# One crate for every platform: the desktop binary uses main.rs, Android loads the library.
+[lib]
+name = "encore_app_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2.7", features = [] }
+
+[dependencies]
+tauri = { version = "2.12", features = ["tray-icon", "image-png", "protocol-asset"] }
+tauri-plugin-opener = "2.7"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json", "stream"] }
+tokio = { version = "1", features = ["fs", "io-util", "time", "macros"] }
+futures-util = "0.3"
+url = "2"
+percent-encoding = "2"
+
+[target.'cfg(not(any(target_os = "android", target_os = "ios")))'.dependencies]
+tauri-plugin-single-instance = "2.5"
+tauri-plugin-window-state = "2.5"
+souvlaki = { version = "0.8", default-features = false, features = ["use_zbus"] }
+
+[profile.release]
+opt-level = "s"
+lto = true
+codegen-units = 1
+strip = true
+panic = "abort"

@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-offline-ids"
+description = "Enables the offline_ids command without any pre-configured scope."
+commands.allow = ["offline_ids"]
+
+[[permission]]
+identifier = "deny-offline-ids"
+description = "Denies the offline_ids command without any pre-configured scope."
+commands.deny = ["offline_ids"]

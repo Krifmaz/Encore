@@ -18,9 +18,9 @@ function deviceId() {
 /** A readable name: "Android app", "Chrome on Windows", "Safari on iPhone" … (or the one you gave it) */
 function deviceName() {
   try { const own = localStorage.getItem('encore.device.name'); if (own) return own; } catch { /* ignore */ }
-  if (window.EncoreNative?.saveOffline) return 'Android app';
   const ua = navigator.userAgent;
-  if (/Electron/.test(ua)) return `Desktop app (${/Mac/.test(ua) ? 'Mac' : /Windows/.test(ua) ? 'Windows' : 'Linux'})`;
+  if (/EncoreAndroid/.test(ua) || window.EncoreNative?.saveOffline) return 'Android app';
+  if (/EncoreDesktop|Electron/.test(ua) || window.EncoreNative?.platform === 'desktop') return `Desktop app (${/Mac/.test(ua) ? 'Mac' : /Windows/.test(ua) ? 'Windows' : 'Linux'})`;
   const os = /iPhone/.test(ua) ? 'iPhone' : /iPad/.test(ua) ? 'iPad' : /Android/.test(ua) ? 'Android' : /Mac/.test(ua) ? 'Mac' : /Windows/.test(ua) ? 'Windows' : /Linux/.test(ua) ? 'Linux' : 'device';
   const br = /Edg\//.test(ua) ? 'Edge' : /Firefox\//.test(ua) ? 'Firefox' : /Chrome\//.test(ua) ? 'Chrome' : /Safari\//.test(ua) ? 'Safari' : 'Browser';
   return `${br} on ${os}`;

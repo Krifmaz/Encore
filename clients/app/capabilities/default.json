@@ -1,0 +1,12 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "default",
+  "description": "The app's own pages (server picker, offline player): every command.",
+  "windows": ["main"],
+  "local": true,
+  "permissions": [
+    "core:default",
+    "allow-now-playing", "allow-page-alive", "allow-servers", "allow-connect", "allow-remove-server", "allow-change-server",
+    "allow-retry-server", "allow-open-offline", "allow-offline-list", "allow-offline-ids", "allow-remove-offline", "allow-save-offline"
+  ]
+}

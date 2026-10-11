@@ -86,8 +86,8 @@
 ## Later: more Rust (noted 2026-10-11, not scheduled)
 Goal: get the codebase as close to 100% Rust as is practical (~97–99%; CSS, HTML, Dockerfile and
 scripts always stay).
-1. **Desktop app → Tauri** (replaces Electron/JavaScript). Worth doing first: ~10× smaller download,
-   far less memory. Keep media keys, tray controls and the saved-server screen.
+1. ~~**Desktop app → Tauri**~~ – done 2026-10-11 (`clients/app`, Rust; Electron removed). Media keys, OS media
+   controls with cover, tray, saved servers, dead-server picker.
 2. **Android app → Tauri 2 mobile** (replaces most of the Java). Background playback, lock-screen and
    notification controls still need a small native Android plugin.
 3. **Web interface → Rust/WebAssembly** (Leptos or Dioxus), only if 100% Rust is the goal: a full

@@ -64,7 +64,7 @@ Every release, with notes, the Android/desktop apps and Linux binaries, is on th
 ## Apps
 
 - **Android**: download `Encore-android.apk` from the [Releases page](https://github.com/Krifmaz/Encore/releases), install it, and enter your server address (e.g. `http://192.168.1.10:8080`). Music keeps playing with the screen off, with lock-screen and notification controls. *Share → Encore* from Spotify, YouTube Music or a browser downloads that link.
-- **Desktop** (Windows, macOS, Linux): same Releases page. Media keys work, there's a tray with play/pause/next, and it remembers your server.
+- **Desktop** (Windows, macOS, Linux): same Releases page – a small Rust app (Tauri) that opens your server in its own window. Media keys and the system's media controls work (lock screen, Now Playing, MPRIS), there's a tray with what's playing and play/pause/next, and it remembers your servers. The macOS build is unsigned: right-click → Open the first time.
 - **Any phone**: open Encore in the browser and choose *Add to Home screen*. On HTTPS it installs as an app.
 
 ## Wiring up the services
@@ -172,4 +172,4 @@ ENCORE_CONFIG_DIR=../data ENCORE_STATIC_DIR=../web ENCORE_LIBRARY_PATH=~/Music E
 
 - `server/`: the Rust server (axum, SQLite, lofty for tags, Chromaprint via `fpcalc`). yt-dlp and streamrip are run as programs; the Docker image includes them.
 - `web/`: the web app, plain ES modules with no build step. Edit and reload.
-- `clients/`: the Android and desktop apps.
+- `clients/app/`: the desktop app (Rust, Tauri) – `cargo tauri dev` in that folder. `clients/android/`: the Android app.
