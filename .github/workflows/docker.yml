@@ -4,6 +4,8 @@ on:
   push:
     branches: ["**"]
     tags: ["v*"]
+    # the Python image only rebuilds when the Python app changes (not for Rust/docs-only pushes)
+    paths-ignore: ["server/**", "docs/**", ".github/workflows/rust.yml", "clients/**"]
   pull_request:
 
 permissions:

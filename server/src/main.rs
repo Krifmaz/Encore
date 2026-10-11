@@ -5,6 +5,8 @@ mod db;
 mod email;
 mod error;
 mod library;
+mod mb;
+mod nlsearch;
 mod routes;
 mod state;
 
@@ -42,6 +44,7 @@ pub fn app(st: AppState) -> Router {
         .merge(routes::auth::router())
         .merge(routes::admin::router())
         .merge(routes::library::router())
+        .merge(routes::discover::router())
         .with_state(st)
         .fallback_service(spa)
         .layer(middleware::from_fn(security_headers))
@@ -57,7 +60,7 @@ pub fn build_state() -> anyhow::Result<AppState> {
         .user_agent(format!("Encore/{} ( {} )", env!("CARGO_PKG_VERSION"), cfg.str("contact_email")))
         .timeout(std::time::Duration::from_secs(30))
         .build()?;
-    let st = AppState { db, cfg, http, limits: Arc::new(auth::RateLimiter::default()), static_dir, library: library::Library::default() };
+    let st = AppState { db, cfg, http, limits: Arc::new(auth::RateLimiter::default()), static_dir, library: library::Library::default(), mb: Default::default(), cache: Default::default() };
     auth::ensure_owner(&st)?;
     Ok(st)
 }

@@ -350,3 +350,18 @@ pub fn prune_empty(path: &Path, stop: &Path) {
         }
     }
 }
+
+pub fn has_release_group(db: &Db, rgid: &str) -> bool {
+    !rgid.is_empty() && db.one("SELECT 1 FROM tracks WHERE mb_releasegroupid=? LIMIT 1", p![rgid]).ok().flatten().is_some()
+}
+
+pub fn has_album(db: &Db, artist: &str, album: &str) -> bool {
+    !album.is_empty() && db.one("SELECT 1 FROM tracks WHERE lower(album)=lower(?) AND (lower(albumartist)=lower(?) OR lower(artist)=lower(?)) LIMIT 1", p![album, artist, artist]).ok().flatten().is_some()
+}
+
+pub fn has_track(db: &Db, mbid: &str, artist: &str, title: &str) -> bool {
+    if !mbid.is_empty() && db.one("SELECT 1 FROM tracks WHERE mb_trackid=? LIMIT 1", p![mbid]).ok().flatten().is_some() {
+        return true;
+    }
+    db.one("SELECT 1 FROM tracks WHERE lower(title)=lower(?) AND (lower(artist)=lower(?) OR lower(albumartist)=lower(?)) LIMIT 1", p![title, artist, artist]).ok().flatten().is_some()
+}

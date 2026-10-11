@@ -395,14 +395,14 @@ async def preview_album(artist: str = "", title: str = "", deezer_id: int | None
 # ---- new releases from artists you follow or have ------------------------------------------------
 
 async def new_releases(user_id: int, days: int = 120, limit: int = 24) -> list[dict]:
-    """Recent albums/EPs/singles (Deezer release dates) by followed artists and the library's top artists."""
+    """Recent albums/EPs/singles (Deezer release dates) by artists in your library – nothing from outside it."""
     from datetime import date, timedelta
 
     from . import catalog
     followed = [r["name"] for r in db.query("SELECT name FROM follows WHERE user_id=?", (user_id,))]
     top = [r["n"] for r in db.query("""SELECT MAX(albumartist) n FROM tracks WHERE albumartist NOT IN ('', 'Unknown Artist', 'Various Artists')
-                                         GROUP BY lower(albumartist) ORDER BY COUNT(*) DESC LIMIT 40""")]
-    names = list(dict.fromkeys(followed + top))[:60]
+                                         GROUP BY lower(albumartist) ORDER BY COUNT(*) DESC LIMIT 60""")]
+    names = top[:60]
     cutoff = (date.today() - timedelta(days=days)).isoformat()
     sem = asyncio.Semaphore(5)
 
