@@ -7,7 +7,7 @@ plugins {
 
 android {
     namespace = "app.encore.client.media"
-    compileSdk = 37
+    compileSdk = 36
 
     defaultConfig {
         minSdk = 24
