@@ -112,6 +112,8 @@ jobs:
   docker:
     needs: [version, test]
     runs-on: ubuntu-latest
+    env:
+      DOCKER_BUILD_RECORD_UPLOAD: false
     steps:
       - uses: actions/checkout@v4
       - uses: docker/setup-buildx-action@v3
@@ -155,8 +157,15 @@ jobs:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
+      # only our files (the Docker build record artifact can't be downloaded this way)
       - uses: actions/download-artifact@v4
         with:
+          pattern: server-*
+          path: out
+          merge-multiple: true
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: Encore-*
           path: out
           merge-multiple: true
       - name: Files and notes
