@@ -82,3 +82,13 @@
 - Fix this song (edit / identify by audio, file moved, never merged); remove wrongly added artists.
 - Android offline: Save song/album for offline; when the server is down the app opens the offline
   player with a "Not connected" banner; web app shows a connection banner too.
+
+## Later: more Rust (noted 2026-10-11, not scheduled)
+Goal: get the codebase as close to 100% Rust as is practical (~97–99%; CSS, HTML, Dockerfile and
+scripts always stay).
+1. **Desktop app → Tauri** (replaces Electron/JavaScript). Worth doing first: ~10× smaller download,
+   far less memory. Keep media keys, tray controls and the saved-server screen.
+2. **Android app → Tauri 2 mobile** (replaces most of the Java). Background playback, lock-screen and
+   notification controls still need a small native Android plugin.
+3. **Web interface → Rust/WebAssembly** (Leptos or Dioxus), only if 100% Rust is the goal: a full
+   rewrite of the UI with no visible change for users and a slightly slower first load.
