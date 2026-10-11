@@ -76,7 +76,7 @@ pub struct Outcome {
     pub error: Option<String>,
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn now_playing<R: Runtime>(app: AppHandle<R>, json: String) {
     let np: NowPlaying = serde_json::from_str(&json).unwrap_or_default();
     if let Ok(mut l) = app.state::<State>().last.lock() {
@@ -85,9 +85,13 @@ pub fn now_playing<R: Runtime>(app: AppHandle<R>, json: String) {
     crate::platform::now_playing(&app, np);
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn page_alive<R: Runtime>(app: AppHandle<R>, url: String, encore: bool) {
     server::page_alive(&app, &url, encore);
+    #[cfg(mobile)]
+    if encore {
+        crate::mobile::deliver_share(&app);
+    }
 }
 
 #[tauri::command]

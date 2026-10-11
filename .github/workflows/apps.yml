@@ -24,22 +24,42 @@ permissions:
 
 jobs:
   android:
+    # Tauri (Rust) app: clients/app built for Android (arm64 + arm32). Signed with the runner's debug key unless
+    # ANDROID_KEYSTORE_FILE/PASSWORD, ANDROID_KEY_ALIAS/PASSWORD are set (then updates install in place).
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-java@v4
         with:
           distribution: temurin
-          java-version: "17"
-      - uses: gradle/actions/setup-gradle@v4
+          java-version: "21"
+      - uses: android-actions/setup-android@v3
         with:
-          gradle-version: "8.10.2"
+          packages: "platform-tools platforms;android-37 build-tools;37.0.0 ndk;29.0.13846066"
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-linux-android,armv7-linux-androideabi
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: clients/app
+          key: android
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: tauri-cli@2.12.2
       - name: Build APK
+        working-directory: clients/app
         env:
-          ENCORE_VERSION_CODE: ${{ inputs.code || github.run_number }}
-          ENCORE_VERSION_NAME: ${{ inputs.version || format('dev.{0}', github.run_number) }}
-        run: gradle -p clients/android assembleRelease --no-daemon --stacktrace
-      - run: cp clients/android/app/build/outputs/apk/release/app-release.apk "Encore-android${{ inputs.version && format('-{0}', inputs.version) || '' }}.apk"
+          ENCORE_VERSION: ${{ inputs.version || format('dev.{0}', github.run_number) }}
+        run: |
+          export NDK_HOME="$ANDROID_HOME/ndk/29.0.13846066"
+          cargo tauri android build --ci --apk --target aarch64 --target armv7 \
+            --config '{"version":"${{ inputs.semver || '0.0.1' }}","bundle":{"android":{"versionCode":${{ inputs.code || github.run_number }}}}}'
+      - name: Collect
+        run: |
+          V="${{ inputs.version || format('dev.{0}', github.run_number) }}"
+          APK=$(find clients/app/gen/android/app/build/outputs/apk -name '*release*.apk' | head -1)
+          [ -n "$APK" ] || { echo "no APK built"; find clients/app/gen/android/app/build/outputs -type f; exit 1; }
+          cp "$APK" "Encore-android-$V.apk" && ls -la Encore-android-*.apk
       - uses: actions/upload-artifact@v4
         with:
           name: Encore-android

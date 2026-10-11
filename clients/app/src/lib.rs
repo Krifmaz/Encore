@@ -51,6 +51,10 @@ pub fn run() {
                 .with_state_flags(tauri_plugin_window_state::StateFlags::SIZE | tauri_plugin_window_state::StateFlags::POSITION | tauri_plugin_window_state::StateFlags::MAXIMIZED)
                 .build());
     }
+    #[cfg(mobile)]
+    {
+        builder = builder.plugin(tauri_plugin_encore_media::init());
+    }
     let builder = builder
         .plugin(tauri_plugin_opener::init())
         .invoke_handler(tauri::generate_handler![

@@ -1,0 +1,15 @@
+[package]
+name = "tauri-plugin-encore-media"
+version = "0.1.0"
+description = "Encore on Android: media notification / lock-screen controls, Share → Encore, downloads"
+edition = "2021"
+license = "MIT"
+links = "tauri-plugin-encore-media"
+
+[build-dependencies]
+tauri-plugin = { version = "2.7", features = ["build"] }
+
+[dependencies]
+tauri = "2.12"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
