@@ -71,8 +71,27 @@ jobs:
         working-directory: server
       - run: for f in $(find web/js -name '*.js'); do node --input-type=module --check < "$f" || { echo "syntax error in $f"; exit 1; }; done
 
+  # the web app in Rust/WebAssembly (web-rs) → static/next, packed into the Linux tarballs (the image builds it itself)
+  ui:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: web-rs
+      - run: curl -fsSL https://github.com/trunk-rs/trunk/releases/download/v0.21.14/trunk-x86_64-unknown-linux-gnu.tar.gz | tar -xz -C /usr/local/bin trunk
+      - run: trunk build --release
+        working-directory: web-rs
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ui-next
+          path: web-rs/dist
+
   server:
-    needs: [version, test]
+    needs: [version, test, ui]
     runs-on: ubuntu-latest
     strategy:
       matrix:
@@ -99,6 +118,10 @@ jobs:
           CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER: aarch64-linux-gnu-gcc
           CC_aarch64_unknown_linux_gnu: aarch64-linux-gnu-gcc
         run: cargo build --release --locked --target ${{ matrix.target }}
+      - uses: actions/download-artifact@v4
+        with:
+          name: ui-next
+          path: web/next
       - name: Package
         run: |
           V=${{ needs.version.outputs.version }}

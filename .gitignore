@@ -8,3 +8,4 @@ data/
 .pytest_cache/
 server/target/
 .claude/worktrees/
+web/next/
