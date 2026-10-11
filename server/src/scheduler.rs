@@ -220,6 +220,9 @@ pub async fn retag_external(st: &AppState) -> usize {
         WHERE (t.mb_albumid IS NULL OR t.mb_albumid='') AND r.mbid IS NULL AND r.detail LIKE '%\"ext\"%' GROUP BY t.album_id LIMIT 25", p![]).unwrap_or_default();
     let mut done = 0;
     for a in rows {
+        if tagger::is_manual(st, &a.s("artist"), &a.s("album")) {
+            continue; // fixed by hand
+        }
         let paths: Vec<PathBuf> = st.db.query("SELECT path FROM tracks WHERE album_id=?", p![a.s("album_id")]).unwrap_or_default().iter().map(|r| PathBuf::from(r.s("path"))).collect();
         let res: anyhow::Result<bool> = async {
             let Some(pv) = tagger::auto_match(st, &paths, &a.s("artist"), &a.s("album"), None).await? else { return Ok(false) };

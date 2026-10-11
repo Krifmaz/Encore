@@ -244,10 +244,25 @@ async fn album_lyrics(State(st): State<AppState>, User(_): User, Path(id): Path<
 struct TagEdit {
     track_ids: Vec<i64>,
     values: Map<String, Value>,
+    /// move the files to match the new names (naming template)
+    #[serde(default)]
+    rename: bool,
+    /// keep automatic tagging away from this album afterwards (default on)
+    #[serde(default = "yes")]
+    lock: bool,
 }
 
 async fn edit_tags(State(st): State<AppState>, Admin(_): Admin, Json(b): Json<TagEdit>) -> ApiResult<Json<Value>> {
-    let paths = tagger::edit_tags(&st, &b.track_ids, &b.values).map_err(|e| err(500, format!("Could not write tags: {e}")))?;
+    let mut paths = tagger::edit_tags(&st, &b.track_ids, &b.values).map_err(|e| err(500, format!("Could not write tags: {e}")))?;
+    if b.lock {
+        for p in &paths {
+            let t = crate::library::read_tags(&p.to_string_lossy());
+            tagger::mark_manual(&st, &t.s("albumartist"), &t.s("album"));
+        }
+    }
+    if b.rename {
+        paths = tagger::rename_to_tags(&st, &paths).await;
+    }
     tagger::index_paths(&st, &paths);
     Ok(Json(json!({ "ok": true, "album_id": paths.first().map(|p| album_of(&st, p)).unwrap_or(Value::Null) })))
 }
@@ -263,6 +278,10 @@ async fn run_bulk(st: AppState) {
         let label = format!("{} – {}", a.s("artist"), a.s("album"));
         jobs::set("bulk", json!({ "current": label }));
         let paths: Vec<PathBuf> = st.db.query("SELECT path FROM tracks WHERE album_id=?", p![a.s("album_id")]).unwrap_or_default().iter().map(|r| PathBuf::from(r.s("path"))).collect();
+        if tagger::is_manual(&st, &a.s("artist"), &a.s("album")) {
+            jobs::add("bulk", "skipped", 1);
+            continue;
+        }
         let artist = if a.s("artist") == "Unknown Artist" { String::new() } else { a.s("artist") };
         let res: anyhow::Result<bool> = async {
             let Some(pv) = tagger::auto_match(&st, &paths, &artist, &a.s("album"), None).await? else { return Ok(false) };
@@ -350,6 +369,8 @@ async fn fix_track(State(st): State<AppState>, Admin(u): Admin, Path(id): Path<i
         .map(|(k, v)| { let s = match v { Value::String(s) => s, x => x.to_string() }; (k, json!(s.trim())) }).collect();
     tagger::edit_tags(&st, &[id], &vals).map_err(|e| err(500, format!("Could not write tags: {e}")))?;
     let old = PathBuf::from(t.s("path"));
+    let now_tags = crate::library::read_tags(&old.to_string_lossy());
+    tagger::mark_manual(&st, &now_tags.s("albumartist"), &now_tags.s("album"));
     tagger::index_paths(&st, std::slice::from_ref(&old));
     let new = if b.r#move { organize::organize_track(&st, id).await.unwrap_or(old) } else { old };
     st.db.log("info", &format!("{} fixed {} – {}", u.s("username"), vals.get("artist").and_then(|v| v.as_str()).unwrap_or(""), vals.get("title").and_then(|v| v.as_str()).unwrap_or("")));

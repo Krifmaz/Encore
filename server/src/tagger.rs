@@ -371,6 +371,43 @@ pub fn relink(st: &AppState, old: &[PathBuf], new: &[PathBuf]) {
 }
 
 /// Manual tag edit for library tracks. → the files written
+fn manual_key(artist: &str, album: &str) -> String {
+    format!("{}\u{1f}{}", artist.trim().to_lowercase(), album.trim().to_lowercase())
+}
+
+/// Fixed by hand (Edit details)? Then automatic re-tagging must not touch it.
+pub fn is_manual(st: &AppState, artist: &str, album: &str) -> bool {
+    st.db.one("SELECT 1 x FROM manual_albums WHERE key=?", p![manual_key(artist, album)]).ok().flatten().is_some()
+}
+
+pub fn mark_manual(st: &AppState, artist: &str, album: &str) {
+    let _ = st.db.execute("INSERT OR REPLACE INTO manual_albums (key, edited_at) VALUES (?,?)", p![manual_key(artist, album), now()]);
+}
+
+/// After a hand edit: move the files to where the naming template puts the new names.
+pub async fn rename_to_tags(st: &AppState, paths: &[PathBuf]) -> Vec<PathBuf> {
+    let mut out = vec![];
+    for p in paths {
+        let tags = read_tags(&p.to_string_lossy());
+        let ext = p.extension().map(|e| format!(".{}", e.to_string_lossy())).unwrap_or_default();
+        let dest = render_path(st, &tags, &ext, false);
+        match move_file(st, p, &dest, false).await {
+            Ok(n) => {
+                if let Some(dir) = p.parent() {
+                    library::prune_empty(dir, Path::new(&st.cfg.str("library_path")));
+                }
+                out.push(n)
+            }
+            Err(e) => {
+                st.db.log("warning", &format!("Could not move {}: {e}", p.display()));
+                out.push(p.clone());
+            }
+        }
+    }
+    relink(st, paths, &out);
+    out
+}
+
 pub fn edit_tags(st: &AppState, ids: &[i64], values: &serde_json::Map<String, Value>) -> anyhow::Result<Vec<PathBuf>> {
     const ALLOWED: [&str; 8] = ["title", "artist", "album", "albumartist", "tracknumber", "discnumber", "date", "genre"];
     let vals: Row = values.iter().filter(|(k, v)| ALLOWED.contains(&k.as_str()) && !v.is_null()).map(|(k, v)| (k.clone(), v.clone())).collect();
@@ -659,10 +696,60 @@ pub async fn import_single(st: &AppState, path: &Path, artist: &str, title: &str
 /// Tag + move a downloaded album. Falls back to the files' own tags (or the store's track list for releases
 /// MusicBrainz doesn't have) when there is no confident MusicBrainz match.
 #[allow(clippy::too_many_arguments)]
+/// Is a downloaded album the one that was asked for? Judged from the tags the files arrived with:
+/// Err(reason) when it is clearly something else (another artist, or songs that aren't on the album).
+/// Files without usable tags, or names in another script, count as "can't tell" – never a rejection.
+pub fn check_release(files: &[Row], artist: &str, album: &str, expected_titles: &[String]) -> Result<(), String> {
+    let want_artist = tnorm(artist);
+    let skip = |a: &str| { let n = tnorm(a); n.is_empty() || n == "unknown artist" || n == "various artists" || n == "va" };
+    let artist_ok = |a: &str| {
+        let n = tnorm(a);
+        n.contains(&want_artist) || want_artist.contains(&n) || sim(a, artist) >= 0.75
+            || a.split([',', '&', ';', '/']).flat_map(|x| x.split(" x ")).any(|part| { let p = tnorm(part); !p.is_empty() && (p == want_artist || sim(part, artist) >= 0.8) })
+    };
+    let half = (files.len() / 2).max(1);
+    if !want_artist.is_empty() {
+        let tagged: Vec<String> = files.iter().map(|f| { let aa = f.s("albumartist"); if skip(&aa) { f.s("artist") } else { aa } })
+            .filter(|a| !skip(a)).collect();
+        if tagged.len() >= half {
+            let hits = tagged.iter().filter(|a| artist_ok(a)).count();
+            if hits * 10 < tagged.len() * 3 {
+                let mut counts: std::collections::HashMap<&str, usize> = Default::default();
+                tagged.iter().for_each(|a| *counts.entry(a.as_str()).or_default() += 1);
+                let top = counts.into_iter().max_by_key(|x| x.1).map(|x| x.0).unwrap_or("someone else");
+                return Err(format!("the download is by “{top}”, not {artist}"));
+            }
+        }
+    }
+    let expected: Vec<&String> = expected_titles.iter().filter(|t| !tnorm(t).is_empty()).collect();
+    if !expected.is_empty() {
+        let titled: Vec<String> = files.iter().map(|f| f.s("title")).filter(|t| !tnorm(t).is_empty()).collect();
+        if titled.len() >= half.max(2) {
+            let hits = titled.iter().filter(|t| expected.iter().any(|e| sim(t, e) >= 0.75)).count();
+            let album_tag_ok = files.iter().any(|f| !tnorm(&f.s("album")).is_empty() && sim(&f.s("album"), album) >= 0.75);
+            if hits * 10 < titled.len() * 4 && !album_tag_ok {
+                let odd = titled.iter().find(|t| !expected.iter().any(|e| sim(t, e) >= 0.75)).cloned().unwrap_or_default();
+                return Err(format!("its songs aren't on “{album}” (e.g. “{odd}”)"));
+            }
+        }
+    }
+    Ok(())
+}
+
 pub async fn import_album_files(st: &AppState, paths: &[PathBuf], artist: &str, album: &str, rgid: Option<&str>, source_root: &Path,
                                 reject: bool, source_meta: Option<&Value>, hint: Option<&str>) -> anyhow::Result<Vec<PathBuf>> {
     let mut paths = paths.to_vec();
     paths.sort();
+    // what the files say they are, before anything is rewritten
+    let originals: Vec<Row> = paths.iter().map(|p| read_tags(&p.to_string_lossy())).collect();
+    let mut source_meta = source_meta;
+    if let Err(why) = check_release(&originals, artist, album, &[]) {
+        if reject {
+            return Err(Rejected(format!("Wrong release: {why}")).into());
+        }
+        // a manual pick: import it as what it is, never relabelled as the request
+        source_meta = None;
+    }
     let pv = if st.cfg.bool("autotag_on_import") {
         match auto_match(st, &paths, artist, album, rgid).await {
             Ok(p) => p,
@@ -674,6 +761,19 @@ pub async fn import_album_files(st: &AppState, paths: &[PathBuf], artist: &str, 
     } else {
         None
     };
+    // the songs must belong to the album we're about to label them as
+    let expected: Vec<String> = match &pv {
+        Some(pv) => pv["rows"].as_array().cloned().unwrap_or_default().iter().filter_map(|r| r["values"]["title"].as_str().map(String::from)).collect(),
+        None => source_meta.and_then(|m| m["tracks"].as_array().cloned()).unwrap_or_default().iter().filter_map(|t| t["title"].as_str().map(String::from)).collect(),
+    };
+    let mut pv = pv;
+    if let Err(why) = check_release(&originals, artist, album, &expected) {
+        if reject {
+            return Err(Rejected(format!("Wrong release: {why}")).into());
+        }
+        pv = None;
+        source_meta = None;
+    }
     if let Some(pv) = pv {
         let mut checks = vec![];
         let mut mism = vec![];
@@ -702,7 +802,12 @@ pub async fn import_album_files(st: &AppState, paths: &[PathBuf], artist: &str, 
         drop_superseded(st, &new).await;
         return Ok(new);
     }
-    let cover = find_art(st, artist, Some(album), None, hint).await.map(|x| x.0);
+    // the requested album's cover only goes on files that are tagged as that album
+    let cover = if source_meta.is_some() || originals.iter().any(|t| sim(&t.s("album"), album) >= 0.75) {
+        find_art(st, artist, Some(album), None, hint).await.map(|x| x.0)
+    } else {
+        None
+    };
     let src_tracks: Vec<Value> = source_meta.and_then(|m| m["tracks"].as_array().cloned()).unwrap_or_default();
     let unique_numbers = src_tracks.iter().map(|x| x["track"].as_i64()).collect::<std::collections::HashSet<_>>().len() == src_tracks.len();
     let mut out = vec![];
@@ -720,7 +825,7 @@ pub async fn import_album_files(st: &AppState, paths: &[PathBuf], artist: &str, 
             let stt = src_tracks.iter().max_by(|a, b| sim(a["title"].as_str().unwrap_or(""), &t.s("title")).partial_cmp(&sim(b["title"].as_str().unwrap_or(""), &t.s("title"))).unwrap_or(std::cmp::Ordering::Equal))
                 .filter(|b| sim(b["title"].as_str().unwrap_or(""), &t.s("title")) >= 0.8)
                 .or_else(|| (unique_numbers && t.i("track") > 0).then(|| src_tracks.iter().find(|x| x["track"].as_i64() == Some(t.i("track")) && x["disc"].as_i64().unwrap_or(1) == t.i("disc").max(1))).flatten())
-                .or_else(|| (src_tracks.len() == paths.len()).then(|| &src_tracks[i]))
+                .or_else(|| (src_tracks.len() == paths.len() && tnorm(&t.s("title")).is_empty()).then(|| &src_tracks[i]))
                 .cloned();
             let year = meta["year"].as_str().filter(|y| !y.is_empty()).map(String::from).unwrap_or(t.s("year"));
             vals.insert("album".into(), json!(album));
@@ -791,6 +896,29 @@ pub async fn drop_superseded(st: &AppState, new_paths: &[PathBuf]) {
 mod tests {
     use super::*;
     #[test]
+    fn wrong_release_is_caught() {
+        use crate::db::Row;
+        let f = |artist: &str, album: &str, title: &str| -> Row {
+            let mut r = Row::new();
+            r.insert("artist".into(), serde_json::json!(artist));
+            r.insert("albumartist".into(), serde_json::json!(artist));
+            r.insert("album".into(), serde_json::json!(album));
+            r.insert("title".into(), serde_json::json!(title));
+            r
+        };
+        let right = vec![f("Daft Punk", "Discovery", "One More Time"), f("Daft Punk", "Discovery", "Aerodynamic")];
+        assert!(super::check_release(&right, "Daft Punk", "Discovery", &["One More Time".into(), "Aerodynamic".into()]).is_ok());
+        let other = vec![f("Justice", "Cross", "Genesis"), f("Justice", "Cross", "Let There Be Light")];
+        assert!(super::check_release(&other, "Daft Punk", "Discovery", &[]).is_err());
+        let wrong_songs = vec![f("Daft Punk", "Homework", "Da Funk"), f("Daft Punk", "Homework", "Around the World")];
+        assert!(super::check_release(&wrong_songs, "Daft Punk", "Discovery", &["One More Time".into(), "Aerodynamic".into()]).is_err());
+        let untagged = vec![Row::new(), Row::new()];
+        assert!(super::check_release(&untagged, "Daft Punk", "Discovery", &["One More Time".into()]).is_ok());
+        let feat = vec![f("TAK feat. Hatsune Miku", "PPPP", "PPPP")];
+        assert!(super::check_release(&feat, "TAK", "PPPP", &[]).is_ok());
+    }
+
+    #[test]
     fn templates() {
         let data: std::collections::HashMap<&str, String> = [("albumartist", "A".to_string()), ("album", "B".into()), ("year", "2020".into()), ("discprefix", "".into()), ("title", "T".into())].into_iter().collect();
         let nums: std::collections::HashMap<&str, i64> = [("track", 3), ("disc", 1)].into_iter().collect();
@@ -815,10 +943,10 @@ mod import_tests {
         std::env::set_var("MUSICBRAINZ_URL", "http://127.0.0.1:9");
         let st = crate::build_state().unwrap();
         let mut files = vec![];
-        for (i, f) in [440, 660].iter().enumerate() {
+        for (i, (f, name)) in [(440, "first"), (660, "Second (album version)")].iter().enumerate() {
             let p = dl.join(format!("{:02} track.flac", i + 1));
             let ok = std::process::Command::new("ffmpeg").args(["-v", "error", "-y", "-f", "lavfi", "-i", &format!("sine=frequency={f}:duration=3")])
-                .args(["-metadata", &format!("title=Song {}", i + 1), "-metadata", "artist=Tester", "-metadata", &format!("track={}", i + 1)]).arg(&p).status();
+                .args(["-metadata", &format!("title={name}"), "-metadata", "artist=Tester", "-metadata", &format!("track={}", i + 1)]).arg(&p).status();
             if !ok.map(|s| s.success()).unwrap_or(false) {
                 return; // no ffmpeg here
             }

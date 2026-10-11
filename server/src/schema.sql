@@ -167,3 +167,9 @@ CREATE TABLE IF NOT EXISTS activity (
     level TEXT NOT NULL,
     message TEXT NOT NULL
 );
+
+-- albums whose tags someone fixed by hand: automatic tagging leaves them alone
+CREATE TABLE IF NOT EXISTS manual_albums (
+    key TEXT PRIMARY KEY,
+    edited_at REAL
+);

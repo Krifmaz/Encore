@@ -38,7 +38,7 @@ export function trackMenu(anchor, t, { admin = false, onDeleted } = {}) {
     { label: 'Download this song', icon: icon.download, href: `/api/library/tracks/${t.id}/file`, download: true },
     player.canSaveOffline() ? { label: 'Save for offline', icon: icon.download, onClick: () => { player.saveOffline([t]); toast('Saving to this phone…', 'ok'); } } : null,
     t.album_id ? { label: 'Go to album', icon: icon.disc, href: `#/library/album/${t.album_id}` } : null,
-    admin ? { label: 'Fix this song…', icon: icon.tag, onClick: () => fixSongModal(t) } : null,
+    admin ? { label: 'Edit song details…', icon: icon.edit, onClick: () => fixSongModal(t) } : null,
     (admin || (window.encoreSession?.user?.perms?.fix && t.request_id)) ? (t.verify_status === 'manual'
       ? { label: 'Undo “confirmed”', icon: icon.x, onClick: async () => { await api.post('/library/verify-manual', { track_ids: [t.id], correct: false }); toast('Will be checked again', 'ok'); onDeleted?.(); } }
       : { label: 'This is the right song', icon: icon.check, onClick: async () => { try { await api.post('/library/verify-manual', { track_ids: [t.id] }); toast('Marked as confirmed – the audio check won’t flag it again', 'ok'); onDeleted?.(); } catch (e) { toast(e.message, 'err'); } } }) : null,
@@ -54,7 +54,7 @@ export function fixSongModal(t) {
   const F = [['title', 'Title', t.title], ['artist', 'Artist', t.artist], ['album', 'Album', t.album || ''], ['albumartist', 'Album artist', t.albumartist || t.artist],
     ['tracknumber', 'Track #', t.track || ''], ['date', 'Year', t.year || '']];
   const m = modal({
-    title: 'Fix this song',
+    title: 'Edit song details',
     wide: true,
     body: `<p class="small muted" style="margin-top:0">Change what this file is. Give a different version its own title (e.g. “… (Remix)”) or album so it stops counting as a duplicate. The file is moved to match and is never merged with another song.</p>
       <div class="form-grid">${F.map(([k, l, v]) => `<label class="field"><span>${l}</span><input class="input" data-k="${k}" value="${esc(v)}"></label>`).join('')}</div>
@@ -385,6 +385,7 @@ export async function renderAlbum(view, ctx) {
         <div class="row wrap mt">
           <button class="btn primary" id="play-all">${icon.play}Play</button>
           <button class="btn" id="shuffle-all">${icon.shuffle}Shuffle</button>
+          ${admin ? `<button class="btn" id="album-edit" title="Change the album, artist and song names">${icon.edit}Edit details</button>` : ''}
           <button class="btn icon" id="album-menu" aria-label="More options" title="More options">${icon.more}</button>
         </div>
       </div>
@@ -403,6 +404,7 @@ export async function renderAlbum(view, ctx) {
   view.querySelector('#play-all').onclick = () => player.playQueue(queueTracks, 0, { context: 'album' });
   view.querySelector('#shuffle-all').onclick = () => player.playQueue([...queueTracks].sort(() => Math.random() - 0.5), 0, { context: 'album' });
   const reload = () => window.dispatchEvent(new HashChangeEvent('hashchange'));
+  view.querySelector('#album-edit')?.addEventListener('click', () => editModal(id, a, ctx));
   view.querySelector('#album-menu').onclick = (e) => popMenu(e.currentTarget, [
     { label: 'Add to queue', icon: icon.list, onClick: () => { player.enqueue(queueTracks); toast('Added to queue', 'ok'); } },
     { label: 'Play next', icon: icon.next, onClick: () => { player.playNext(queueTracks); toast('Plays next', 'ok'); } },
@@ -414,7 +416,7 @@ export async function renderAlbum(view, ctx) {
     a.mb_releasegroupid ? { label: 'Release info', icon: icon.disc, href: `#/album/${a.mb_releasegroupid}` } : null,
     ...(admin ? ['-',
       { label: 'Tag / match metadata', icon: icon.tag, onClick: () => matchModal(id, a, ctx) },
-      { label: 'Edit tags', icon: icon.edit, onClick: () => editModal(id, a, ctx) },
+      { label: 'Edit details (album, artist, songs)', icon: icon.edit, onClick: () => editModal(id, a, ctx) },
       { label: 'Change artwork…', icon: icon.disc, onClick: async () => (await import('./artwork.js')).artworkModal(id, a, reload) },
       { label: 'Find artwork automatically', icon: icon.refresh, onClick: async () => {
         try { const r = await api.post(`/library/albums/${id}/artwork`); toast(`Artwork embedded in ${r.embedded} file(s)`, 'ok'); reload(); } catch (err) { toast(err.message, 'err'); }
@@ -562,9 +564,10 @@ function matchModal(id, a, ctx) {
 async function editModal(id, _shown, ctx) {
   const a = await api.get(`/library/albums/${id}`);
   const m = modal({
-    title: 'Edit tags',
+    title: 'Edit details',
     wide: true,
-    body: `<div class="form-grid">
+    body: `<p class="small muted" style="margin-top:0">Type what this album really is. The names are written into the files, and automatic tagging won't change them back.</p>
+      <div class="form-grid">
         <label class="field"><span>Album artist</span><input class="input" name="albumartist" value="${esc(a.albumartist)}"></label>
         <label class="field"><span>Album</span><input class="input" name="album" value="${esc(a.album || '')}"></label>
         <label class="field"><span>Year / date</span><input class="input" name="date" value="${esc(a.year || '')}"></label>
@@ -576,8 +579,9 @@ async function editModal(id, _shown, ctx) {
         <td style="width:70px"><input class="input" name="tracknumber" value="${esc(t.track || '')}"></td>
         <td><input class="input" name="title" value="${esc(t.title)}"></td>
         <td><input class="input" name="artist" value="${esc(t.artist)}"></td></tr>`).join('')}
-      </tbody></table></div></div>`,
-    footer: '<button class="btn" data-close>Cancel</button><button class="btn primary" id="save">Save tags</button>',
+      </tbody></table></div></div>
+      <label class="switch mt"><input type="checkbox" id="ed-rename" checked><i></i>Move and rename the files to match (naming template)</label>`,
+    footer: '<button class="btn" data-close>Cancel</button><button class="btn primary" id="save">Save</button>',
   });
   m.el.querySelector('#save').onclick = async (e) => {
     e.target.disabled = true;
@@ -593,7 +597,8 @@ async function editModal(id, _shown, ctx) {
           out = await api.post('/library/tags', { track_ids: [t.id], values: v });
         }
       }
-      toast('Tags saved', 'ok');
+      if (m.el.querySelector('#ed-rename').checked) out = await api.post('/library/tags', { track_ids: ids, values: {}, rename: true });
+      toast('Saved', 'ok');
       m.close();
       if (out.album_id && out.album_id !== id) ctx.navigate(`/library/album/${out.album_id}`);
       else window.dispatchEvent(new HashChangeEvent('hashchange'));
