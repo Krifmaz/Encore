@@ -71,6 +71,19 @@ impl Config {
         for (k, env, default, secret) in [
             ("email_login", Some("ENCORE_EMAIL_LOGIN"), json!(true), false),
             ("torznab_enabled", Some("TORZNAB_ENABLED"), json!(false), false),
+            ("prowlarr_url", Some("PROWLARR_URL"), json!(""), false),
+            ("prowlarr_api_key", Some("PROWLARR_API_KEY"), json!(""), true),
+            ("torznab_min_seeders", Some("TORZNAB_MIN_SEEDERS"), json!(2), false),
+            ("torznab_timeout_minutes", Some("TORZNAB_TIMEOUT_MINUTES"), json!(120), false),
+            ("qbit_url", Some("QBIT_URL"), json!(""), false),
+            ("qbit_user", Some("QBIT_USER"), json!("admin"), false),
+            ("qbit_password", Some("QBIT_PASSWORD"), json!(""), true),
+            ("qbit_category", Some("QBIT_CATEGORY"), json!("encore"), false),
+            ("qbit_download_path", Some("QBIT_DOWNLOAD_PATH"), json!("/downloads/torrents"), false),
+            ("sab_url", Some("SAB_URL"), json!(""), false),
+            ("sab_api_key", Some("SAB_API_KEY"), json!(""), true),
+            ("sab_category", Some("SAB_CATEGORY"), json!("encore"), false),
+            ("sab_download_path", Some("SAB_DOWNLOAD_PATH"), json!("/downloads/usenet"), false),
         ] {
             if !defs.iter().any(|(n, _)| n == k) {
                 defs.push((k.to_string(), Def { env: env.map(String::from), default, secret }));

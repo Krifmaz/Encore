@@ -21,7 +21,7 @@ hex = "0.4"
 subtle = "2"
 totp-rs = { version = "5", features = ["gen_secret", "otpauth", "qr"] }
 lettre = { version = "0.11", default-features = false, features = ["builder", "smtp-transport", "tokio1", "tokio1-rustls-tls", "hostname"] }
-reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "rustls-tls-native-roots", "stream"] }
+reqwest = { version = "0.12", default-features = false, features = ["multipart", "json", "rustls-tls", "rustls-tls-native-roots", "stream"] }
 image = { version = "0.25", default-features = false, features = ["jpeg", "png", "webp"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
@@ -36,6 +36,8 @@ tokio-util = { version = "0.7.20", features = ["io"] }
 futures-util = "0.3.34"
 tower = { version = "0.5", features = ["util"] }
 regex = "1.13.1"
+fancy-regex = "0.19.2"
+unicode-normalization = "0.1.25"
 
 [profile.release]
 lto = "thin"

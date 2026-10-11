@@ -36,41 +36,12 @@ pub fn norm(title: &str) -> String {
     t.chars().filter(|c| c.is_alphanumeric() || *c == '_').collect()
 }
 
-/// difflib.SequenceMatcher.ratio() (Ratcliff/Obershelp, without the junk heuristic).
-fn ratio(a: &[char], b: &[char]) -> f64 {
-    fn matches(a: &[char], b: &[char]) -> usize {
-        if a.is_empty() || b.is_empty() {
-            return 0;
-        }
-        let (mut best, mut bi, mut bj) = (0, 0, 0);
-        let mut prev = vec![0usize; b.len() + 1];
-        for i in 0..a.len() {
-            let mut cur = vec![0usize; b.len() + 1];
-            for j in 0..b.len() {
-                if a[i] == b[j] {
-                    cur[j + 1] = prev[j] + 1;
-                    if cur[j + 1] > best {
-                        (best, bi, bj) = (cur[j + 1], i + 1 - cur[j + 1], j + 1 - cur[j + 1]);
-                    }
-                }
-            }
-            prev = cur;
-        }
-        if best == 0 {
-            return 0;
-        }
-        best + matches(&a[..bi], &b[..bj]) + matches(&a[bi + best..], &b[bj + best..])
-    }
-    let total = a.len() + b.len();
-    if total == 0 { 1.0 } else { 2.0 * matches(a, b) as f64 / total as f64 }
-}
-
 pub fn similar(a: &str, b: &str) -> f64 {
     let (a, b) = (norm(a), norm(b));
     if a.is_empty() || b.is_empty() {
         return 0.0;
     }
-    if a == b { 1.0 } else { ratio(&a.chars().collect::<Vec<_>>(), &b.chars().collect::<Vec<_>>()) }
+    crate::matcher::sim(&a, &b)
 }
 
 fn harmony_url(urls: &[String], upc: Option<&str>) -> String {

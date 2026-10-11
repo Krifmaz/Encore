@@ -6,8 +6,10 @@ mod email;
 mod error;
 mod library;
 mod mb;
+mod matcher;
 mod nlsearch;
 mod routes;
+mod sources;
 mod state;
 
 use axum::extract::Request;
