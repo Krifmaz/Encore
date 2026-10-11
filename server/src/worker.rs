@@ -1,7 +1,7 @@
 //! Request pipeline: every enabled source in the admin's order (streamrip, HiFi API, Soulseek,
 //! Prowlarr → qBittorrent/SABnzbd, YouTube), each download verified, tagged and imported.
 use crate::db::{now, Row, RowExt};
-use crate::sources::{hifi, slskd, streamrip, torznab, ytdlp, ytmusic};
+use crate::sources::{slskd, streamrip, torznab, ytdlp, ytmusic};
 use crate::state::AppState;
 use crate::tagger::{self, Rejected};
 use crate::{library, mb, notify, p};
@@ -14,7 +14,6 @@ use tokio::sync::Semaphore;
 
 pub const ACTIVE: [&str; 5] = ["queued", "searching", "downloading", "monitoring", "importing"];
 static STREAMRIP: Semaphore = Semaphore::const_new(1);
-static HIFI: Semaphore = Semaphore::const_new(1);
 static YTDLP: Semaphore = Semaphore::const_new(2);
 static RIP_LINK: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"qobuz\.com|tidal\.com|deezer\.com").unwrap());
 
@@ -184,7 +183,6 @@ async fn next_source(st: &AppState, r: &mut Req, reason: &str) -> anyhow::Result
             "torznab" => start_torznab(st, r, false).await,
             "ytdlp" => start_ytdlp(st, r, None).await,
             "streamrip" => start_streamrip(st, r, None).await,
-            "hifi" => start_hifi(st, r, None).await,
             other => Ok(Out::Next(format!("unknown source {other}"))),
         };
         match res {
@@ -197,8 +195,12 @@ async fn next_source(st: &AppState, r: &mut Req, reason: &str) -> anyhow::Result
 }
 
 fn source_order(st: &AppState, r: &Req) -> Vec<String> {
-    let mut order: Vec<String> = st.cfg.str("source_order").split(',').map(|s| s.trim().replace("lidarr", "torznab")).filter(|s| !s.is_empty()).collect();
-    for (src, before) in [("hifi", "slskd"), ("torznab", "ytdlp")] {
+    // (HiFi API was removed – streamrip covers TIDAL)
+    let mut order: Vec<String> = st.cfg.str("source_order").split(',').map(|s| s.trim().to_lowercase().replace("lidarr", "torznab"))
+        // qobuz / tidal / deezer are streamrip services: the first one marks where streamrip runs
+        .map(|s| if streamrip::SERVICES.contains(&s.as_str()) { "streamrip".to_string() } else { s })
+        .filter(|s| !s.is_empty() && s != "hifi").collect();
+    for (src, before) in [("torznab", "ytdlp")] {
         if !order.iter().any(|s| s == src) {
             // saved orders that predate this source
             let at = order.iter().position(|s| s == before).unwrap_or(order.len());
@@ -208,15 +210,15 @@ fn source_order(st: &AppState, r: &Req) -> Vec<String> {
     let lossless_only = r.d["lossless_only"].as_bool().unwrap_or(false);
     if st.cfg.bool("quality_first") || lossless_only {
         // every lossless option first (in the admin's order), then lossy fallbacks
-        let mut lossless: Vec<String> = order.iter().filter(|s| *s == "streamrip" || *s == "hifi").cloned().collect();
+        let mut lossless: Vec<String> = order.iter().filter(|s| *s == "streamrip").cloned().collect();
         if order.iter().any(|s| s == "slskd") {
             lossless.push("slskd_lossless".into());
         }
-        lossless.extend(order.iter().filter(|s| *s != "streamrip" && *s != "hifi").cloned());
+        lossless.extend(order.iter().filter(|s| *s != "streamrip").cloned());
         order = lossless;
     }
     if lossless_only {
-        order.retain(|s| ["streamrip", "hifi", "slskd_lossless"].contains(&s.as_str()));
+        order.retain(|s| ["streamrip", "slskd_lossless"].contains(&s.as_str()));
     } else if st.cfg.bool("ytdlp_last_resort") {
         // downloads should basically never fail: YouTube Music is always the final fallback
         order.retain(|s| s != "ytdlp");
@@ -228,7 +230,6 @@ fn source_order(st: &AppState, r: &Req) -> Vec<String> {
         "slskd" | "slskd_lossless" => slskd::enabled(st),
         "ytdlp" => ytdlp::enabled(st) || st.cfg.bool("ytdlp_last_resort"),
         "streamrip" => streamrip::enabled(st),
-        "hifi" => hifi::enabled(st),
         _ => false,
     };
     let mut seen = std::collections::HashSet::new();
@@ -490,10 +491,6 @@ async fn start_pick(st: &AppState, r: &mut Req) -> anyhow::Result<()> {
         "ytmusic" | "link" => {
             upd(st, r, &[("source", json!("ytdlp"))]);
             start_ytdlp(st, r, Some(url)).await?
-        }
-        "hifi" => {
-            upd(st, r, &[("source", json!("hifi"))]);
-            start_hifi(st, r, Some(pick["payload"].clone())).await?
         }
         other => Out::Next(format!("unknown source {other}")),
     };
@@ -796,7 +793,7 @@ async fn start_streamrip(st: &AppState, r: &mut Req, urls: Option<Vec<String>>) 
     upd(st, r, &[("status", json!("searching")), ("message", json!("Looking for an exact lossless match…"))]);
     let mut urls = urls.unwrap_or_default();
     if urls.is_empty() {
-        if let (Some(dz), true) = (r.d["ext"]["deezer"].as_i64().map(|x| x.to_string()).or(r.d["ext"]["deezer"].as_str().map(String::from)), st.cfg.str("streamrip_sources").contains("deezer")) {
+        if let (Some(dz), true) = (r.d["ext"]["deezer"].as_i64().map(|x| x.to_string()).or(r.d["ext"]["deezer"].as_str().map(String::from)), streamrip::services(st).iter().any(|s| s == "deezer")) {
             urls.push(format!("https://www.deezer.com/album/{dz}"));
         }
     }
@@ -847,64 +844,6 @@ async fn start_streamrip(st: &AppState, r: &mut Req, urls: Option<Vec<String>>) 
     }
     rm(&staging(st, r));
     Ok(Out::Next(format!("streamrip: {}", last.chars().take(150).collect::<String>())))
-}
-
-// ---- HiFi API (TIDAL) ---------------------------------------------------------------------------
-
-async fn start_hifi(st: &AppState, r: &mut Req, pick: Option<Value>) -> anyhow::Result<Out> {
-    let _slot = HIFI.acquire().await?;
-    check(st, r.id)?;
-    let out = staging(st, r).join("hifi");
-    rm(&out);
-    let res: anyhow::Result<Option<(Vec<PathBuf>, String)>> = async {
-        if r.s("kind") == "track" {
-            let t = match pick.as_ref().filter(|p| p["kind"] == "track") {
-                Some(p) => Some(json!({ "id": p["id"], "title": p["title"].as_str().map(String::from).unwrap_or(r.s("title")) })),
-                None => {
-                    upd(st, r, &[("status", json!("searching")), ("message", json!("Searching TIDAL (HiFi API)…"))]);
-                    let isrc = isrc_for(st, r).await;
-                    hifi::find_track(st, &r.s("artist"), &r.s("title"), isrc.as_deref(), r.length()).await?
-                }
-            };
-            let Some(t) = t else { return Ok(None) };
-            let title = t["title"].as_str().unwrap_or("").to_string();
-            upd(st, r, &[("status", json!("downloading")), ("message", json!(format!("TIDAL: {title}")))]);
-            let f = hifi::download_track(st, &t["id"], &out, &format!("{} - {title}", r.s("artist"))).await?;
-            upd(st, r, &[("status", json!("importing")), ("progress", json!(100)), ("message", json!("Verifying, tagging and importing…"))]);
-            return import(st, r, &[f], &out).await.map(Some);
-        }
-        let rel = release_info(st, r).await;
-        let alb = match pick.as_ref().filter(|p| p["kind"] == "album") {
-            Some(p) => Some(p.clone()),
-            None => {
-                upd(st, r, &[("status", json!("searching")), ("message", json!("Searching TIDAL (HiFi API)…"))]);
-                hifi::find_album(st, &r.s("artist"), &r.album_title(), n_tracks(&rel)).await?
-            }
-        };
-        let Some(alb) = alb else { return Ok(None) };
-        let tracks = hifi::album_tracks(st, &alb["id"]).await?;
-        let mut files = vec![];
-        for (i, t) in tracks.iter().enumerate() {
-            check(st, r.id)?;
-            let title = t["title"].as_str().unwrap_or("");
-            upd(st, r, &[("status", json!("downloading")), ("progress", json!((i as f64 / tracks.len().max(1) as f64 * 1000.0).round() / 10.0)),
-                         ("message", json!(format!("TIDAL: {}/{} – {title}", i + 1, tracks.len())))]);
-            let name = format!("{}-{:02} {title}", t["disc"].as_i64().unwrap_or(1), t["track"].as_i64().unwrap_or(i as i64 + 1));
-            files.push(hifi::download_track(st, &t["id"], &out, &name).await?);
-        }
-        upd(st, r, &[("status", json!("importing")), ("progress", json!(100)), ("message", json!("Verifying, tagging and importing…"))]);
-        import(st, r, &files, &out).await.map(Some)
-    }.await;
-    rm(&staging(st, r));
-    match res {
-        Ok(Some((new, note))) => {
-            complete(st, r, &with_note("Downloaded lossless from TIDAL (HiFi API)", &note), &new, json!({ "source": "TIDAL", "detail": "via HiFi API" })).await;
-            Ok(Out::Done)
-        }
-        Ok(None) => Ok(Out::Next(if r.s("kind") == "track" { "not found on TIDAL (HiFi API)" } else { "album not found on TIDAL (HiFi API)" }.into())),
-        Err(e) if e.is::<Cancelled>() => Err(e),
-        Err(e) => Ok(Out::Next(format!("HiFi API: {}", e.to_string().chars().take(150).collect::<String>()))),
-    }
 }
 
 // ---- YouTube (yt-dlp) ---------------------------------------------------------------------------

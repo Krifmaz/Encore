@@ -4,7 +4,7 @@ use crate::db::{now, RowExt};
 use crate::error::{err, ApiResult};
 use crate::matcher::{compare, describe};
 use crate::routes::requests::{create_request, get_owned, quota, NewRequest};
-use crate::sources::{hifi, slskd, streamrip, torznab, ytmusic};
+use crate::sources::{slskd, streamrip, torznab, ytmusic};
 use crate::state::AppState;
 use crate::{p, worker};
 use axum::extract::State;
@@ -30,11 +30,8 @@ fn available(st: &AppState) -> Vec<Value> {
     if torznab::enabled(st) {
         out.push(json!({ "id": "torznab", "name": "Torrents & Usenet" }));
     }
-    if streamrip::enabled(st) && st.cfg.str("streamrip_sources").contains("deezer") {
+    if streamrip::enabled(st) && streamrip::services(st).iter().any(|s| s == "deezer") {
         out.push(json!({ "id": "deezer", "name": "Deezer" }));
-    }
-    if hifi::enabled(st) {
-        out.push(json!({ "id": "hifi", "name": "TIDAL (HiFi API)" }));
     }
     if st.cfg.bool("ytdlp_enabled") {
         out.push(json!({ "id": "ytmusic", "name": "YouTube Music" }));
@@ -207,27 +204,6 @@ async fn search_ytmusic(st: &AppState, b: &SearchBody, q: &str) -> anyhow::Resul
     }).collect())
 }
 
-async fn search_hifi(st: &AppState, b: &SearchBody, q: &str) -> anyhow::Result<Vec<Value>> {
-    let ql = |x: &str| match x { "LOSSLESS" => "FLAC 16-bit", "HI_RES_LOSSLESS" => "FLAC hi-res", "HI_RES" => "MQA", "HIGH" => "AAC 320", "" => "FLAC", o => o }.to_string();
-    let mut out: Vec<Value> = if b.kind == "album" {
-        hifi::search_albums(st, q).await?.iter().map(|a| {
-            let (t, ar, qq) = (a["title"].as_str().unwrap_or(""), a["artist"].as_str().unwrap_or(""), a["quality"].as_str().unwrap_or(""));
-            json!({ "source": "hifi", "key": format!("hifi:a{}", a["id"]), "title": t, "subtitle": ar, "quality": ql(qq), "lossless": qq != "HIGH",
-                "tracks": a["tracks"], "size": null, "info": a["date"], "cover": a["cover"], "score": score(&b.title, &b.artist, t, ar, None, None),
-                "payload": { "kind": "album", "id": a["id"], "title": t } })
-        }).collect()
-    } else {
-        hifi::search_tracks(st, q, None).await?.iter().map(|x| {
-            let (t, ar, qq) = (x["title"].as_str().unwrap_or(""), x["artist"].as_str().unwrap_or(""), x["quality"].as_str().unwrap_or(""));
-            json!({ "source": "hifi", "key": format!("hifi:t{}", x["id"]), "title": t, "subtitle": format!("{ar} · {}", x["album"].as_str().unwrap_or("")),
-                "quality": ql(qq), "lossless": qq != "HIGH", "tracks": 1, "size": null, "duration": x["duration"], "info": x["isrc"].as_str().unwrap_or(""),
-                "cover": x["cover"], "score": score(&b.title, &b.artist, t, ar, b.length, x["duration"].as_f64()), "payload": { "kind": "track", "id": x["id"], "title": t } })
-        }).collect()
-    };
-    out.sort_by(|a, b| b["score"].as_f64().partial_cmp(&a["score"].as_f64()).unwrap_or(std::cmp::Ordering::Equal));
-    Ok(out)
-}
-
 async fn search(State(st): State<AppState>, User(u): User, Json(b): Json<SearchBody>) -> ApiResult<Json<Value>> {
     if !auth::can(&st, &u, "pick") {
         return Err(err(403, "Ask an admin for permission to pick downloads"));
@@ -242,7 +218,6 @@ async fn search(State(st): State<AppState>, User(u): User, Json(b): Json<SearchB
         "torznab" => search_torznab(&st, &b, &q).await,
         "deezer" => search_deezer(&st, &b, &q).await,
         "ytmusic" => search_ytmusic(&st, &b, &q).await,
-        "hifi" => search_hifi(&st, &b, &q).await,
         other => return Err(err(400, format!("Unknown source {other}"))),
     };
     res.map(|v| Json(json!(v))).map_err(|e| err(502, format!("{} search failed: {}", b.source, e.to_string().chars().take(160).collect::<String>())))

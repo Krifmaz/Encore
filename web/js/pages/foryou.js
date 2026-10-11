@@ -2,7 +2,7 @@
 import { api } from '../api.js';
 import * as player from '../player.js';
 import { art, emptyState, esc, fmt, icon, modal, statusBadge, toast } from '../ui.js';
-import { bindTiles, submitRequest } from './common.js';
+import { albumTile, bindTiles, submitRequest } from './common.js';
 
 const KIND = { 'weekly-exploration': 'New music picked for you every Monday', 'daily-jams': 'Songs you love, refreshed daily', 'weekly-jams': 'Your favourites from the past weeks', lastfm: 'Similar to your most played songs on Last.fm' };
 
@@ -101,9 +101,12 @@ export async function render(view, ctx) {
     return;
   }
   // Last.fm: shown as one more list of songs, plus artists you might like
-  if (lf?.tracks?.length) d.playlists.push({ id: null, title: 'Songs for you', kind: 'lastfm', tracks: lf.tracks });
+  if (lf?.tracks?.length) d.playlists.unshift({ id: null, title: 'Songs for you', kind: 'lastfm', tracks: lf.tracks });
   body.innerHTML = (d.errors || []).map(e => `<div class="error-box" style="margin-bottom:12px">${esc(e)}</div>`).join('') + (lf?.artists?.length ? `<div class="section-head"><div><h2>Artists for you</h2>
-      <div class="small muted">Similar to what ${esc(lf.user)} plays most on Last.fm</div></div></div><div class="grid" id="fy-artists">${lf.artists.map(artistCard).join('')}</div>` : '') + d.playlists.map((p, pi) => {
+      <div class="small muted">Similar to what ${esc(lf.user)} plays most on Last.fm</div></div></div><div class="grid" id="fy-artists">${lf.artists.map(artistCard).join('')}</div>` : '')
+    + (lf?.albums?.length ? `<div class="section-head"><div><h2>Albums for you</h2><div class="small muted">The best-known album of artists you might like</div></div></div>
+      <div class="grid" id="fy-albums">${lf.albums.map(a => albumTile(a, { href: `/search?q=${encodeURIComponent(`${a.artist} ${a.title}`)}&type=album` })).join('')}</div>` : '')
+    + d.playlists.map((p, pi) => {
     const missing = p.tracks.filter(t => !t.library && !t.request_status).length;
     const owned = p.tracks.filter(t => t.library).length;
     return `<div class="section-head"><div><h2>${esc(p.title)}</h2><div class="small muted">${esc(KIND[p.kind] || '')}${p.tracks.length ? ` · ${owned}/${p.tracks.length} in library` : ''}</div></div>
@@ -114,6 +117,7 @@ export async function render(view, ctx) {
   }).join('');
   body.querySelectorAll('table[data-pl]').forEach(tb => bindTracks(tb, d.playlists[+tb.dataset.pl].tracks));
   if (lf?.artists?.length) bindTiles(body.querySelector('#fy-artists'), ctx.navigate);
+  if (lf?.albums?.length) bindTiles(body.querySelector('#fy-albums'), ctx.navigate);
   body.addEventListener('click', (e) => {
     const r = e.target.closest('[data-req-pl]');
     if (r) return requestAll(d.playlists[+r.dataset.reqPl].tracks.filter(t => !t.library && !t.request_status), r).then(() => render(view, ctx));

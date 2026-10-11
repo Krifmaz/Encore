@@ -92,7 +92,7 @@ function renderShell() {
         <div class="sidebar-foot" style="margin-top:0">
           <a href="#/settings?s=account" class="row grow" style="min-width:0">
             ${avatarHtml(u)}
-            <div class="grow"><div class="ellipsis" style="font-weight:650">${esc(u.username)}</div><div class="small faint">${admin ? 'Admin' : 'Member'}</div></div>
+            <div class="grow"><div class="ellipsis" style="font-weight:650">${esc(u.username)}</div><div class="small faint">${u.role === 'owner' ? 'Owner' : admin ? 'Admin' : 'Member'}</div></div>
           </a>
           <a class="btn ghost icon" href="#/settings" title="Settings" aria-label="Settings">${icon.settings}</a>
           <button class="btn ghost icon" id="logout-btn" title="Sign out">${icon.logout}</button>

@@ -22,7 +22,8 @@ pub fn binary(st: &AppState) -> Option<String> {
     if !custom.is_empty() {
         return which(&custom);
     }
-    which("streamrip").or_else(|| which("rip"))
+    // the Docker image puts it in /opt/tools/bin – found there even if PATH was overridden
+    which("streamrip").or_else(|| which("rip")).or_else(|| which("/opt/tools/bin/rip"))
 }
 
 pub fn enabled(st: &AppState) -> bool {
@@ -124,8 +125,18 @@ async fn tidal_by_isrc(st: &AppState, isrc: &str, albums: bool) -> anyhow::Resul
     })
 }
 
-fn services(st: &AppState) -> Vec<String> {
-    st.cfg.str("streamrip_sources").split(',').map(|s| s.trim().to_string()).filter(|s| !s.is_empty()).collect()
+pub const SERVICES: [&str; 3] = ["qobuz", "tidal", "deezer"];
+
+/// The streamrip services to search, in the order they appear in the one Source order setting
+/// (e.g. "tidal, deezer, slskd, ytdlp"). Older setups that just say "streamrip" keep their old list.
+pub fn services(st: &AppState) -> Vec<String> {
+    let order: Vec<String> = st.cfg.str("source_order").split(',').map(|s| s.trim().to_lowercase()).filter(|s| !s.is_empty()).collect();
+    let picked: Vec<String> = order.iter().filter(|s| SERVICES.contains(&s.as_str())).cloned().collect();
+    if !picked.is_empty() {
+        return picked;
+    }
+    let legacy: Vec<String> = st.cfg.str("streamrip_sources").split(',').map(|s| s.trim().to_lowercase()).filter(|s| SERVICES.contains(&s.as_str())).collect();
+    if legacy.is_empty() { vec!["tidal".into(), "deezer".into()] } else { legacy }
 }
 
 pub async fn resolve_album(st: &AppState, artist: &str, album: &str, track_count: Option<usize>, first_isrc: Option<&str>) -> Vec<String> {

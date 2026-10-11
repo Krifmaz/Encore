@@ -88,7 +88,11 @@ pub fn build_state() -> anyhow::Result<AppState> {
     let cfg = config::Config::load(db.clone())?;
     let static_dir = PathBuf::from(std::env::var("ENCORE_STATIC_DIR").unwrap_or_else(|_| "/app/static".into()));
     let http = reqwest::Client::builder()
-        .user_agent(format!("Encore/{} ( {} )", crate::VERSION, cfg.str("contact_email")))
+        // MetaBrainz (ListenBrainz, MusicBrainz) turn away clients without a way to contact them
+        .user_agent({
+            let contact = cfg.str("contact_email");
+            format!("Encore/{} ( {} )", crate::VERSION, if contact.trim().is_empty() { "https://github.com/Krifmaz/Encore".to_string() } else { contact })
+        })
         .timeout(std::time::Duration::from_secs(30))
         .build()?;
     let st = AppState { db, cfg, http, limits: Arc::new(auth::RateLimiter::default()), static_dir, library: library::Library::default(), mb: Default::default(), cache: Default::default(), tasks: Default::default() };

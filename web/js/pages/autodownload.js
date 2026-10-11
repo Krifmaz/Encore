@@ -43,8 +43,7 @@ export async function render(view) {
         <label class="field"><span>Retry each lossy album every</span>
           <div class="row"><input class="input" type="number" min="1" data-k="upgrade_lossy_days" value="${esc(s.upgrade_lossy_days)}" style="width:110px"><span class="muted">days</span>
           <button class="btn sm" id="upg">${icon.refresh}Look for upgrades now</button></div></label>
-        <label class="field"><span>Source order</span><input class="input" data-k="source_order" value="${esc(s.source_order)}">
-          <small>streamrip, hifi, slskd, torznab (torrents/Usenet), ytdlp (YouTube Music). With “highest quality first” lossless options always go first.</small></label>
+        <div class="small muted">Which sources are searched, and in what order: <a href="#/settings?s=downloads">Settings → Downloads & sources → Download pipeline</a>.</div>
       </div>
     </div>
     <div class="section-head"><h2>Users</h2><span class="small muted">Who auto-downloads are enabled for</span></div>

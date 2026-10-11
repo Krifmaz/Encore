@@ -35,7 +35,7 @@ const SECTIONS = [
   ] },
   { id: 'pipeline', title: 'Download pipeline', fields: [
     S('discography_singles', 'Requesting a whole discography includes singles (not just albums and EPs)', 'bool'),
-    S('source_order', 'Source order', 'text', { full: true, help: 'Comma-separated: streamrip, hifi, slskd, torznab, ytdlp. Each source is tried in turn until one succeeds. torznab (torrents/Usenet) only handles albums.' }),
+    S('source_order', 'Source order', 'text', { full: true, help: 'The one place to set what is searched, in order, comma-separated: qobuz, tidal, deezer (all through streamrip), slskd (Soulseek), torznab (torrents/Usenet, albums only), ytdlp (YouTube Music). Leave one out to never use it.' }),
   ] },
   { id: 'verify', title: 'Verification & duplicates', test: 'acoustid', fields: [
     S('acoustid_api_key', 'AcoustID API key', 'password', { full: true, help: 'Free – register an application at acoustid.org/new-application. Used to fingerprint audio and confirm each file is the right song/version.' }),
@@ -46,18 +46,12 @@ const SECTIONS = [
   ] },
   { id: 'streamrip', title: 'Qobuz / Tidal / Deezer (streamrip)', test: 'streamrip', testLabel: 'Test & write config', fields: [
     S('streamrip_enabled', 'Enable streamrip source', 'bool', { help: 'Downloads lossless from your own paid accounts. Respect each service’s terms – use at your own risk.' }),
-    S('streamrip_sources', 'Services to search (in order)', 'text', { help: 'deezer, tidal (Qobuz links work in the Downloader)' }),
     S('streamrip_quality', 'Max quality', 'select', { options: [[1, 'MP3 320 / AAC'], [2, 'CD – 16-bit FLAC'], [3, 'Hi-res ≤ 24/96'], [4, 'Hi-res max']] }),
     S('streamrip_deezer_arl', 'Deezer ARL cookie', 'password', { full: true, help: 'From deezer.com → browser dev tools → Cookies → arl' }),
     S('streamrip_qobuz_user', 'Qobuz user id'),
     S('streamrip_qobuz_token', 'Qobuz auth token', 'password', { help: 'play.qobuz.com → dev tools → Network → user/login response' }),
     S('streamrip_bin', 'streamrip executable (optional)', 'text', { help: 'Leave empty to auto-detect' }),
     S('streamrip_command', 'Command template (advanced)', 'text', { full: true }),
-  ] },
-  { id: 'hifi', title: 'TIDAL via HiFi API (Monochrome)', test: 'hifi', fields: [
-    S('hifi_enabled', 'Enable HiFi API source', 'bool', { help: 'Lossless TIDAL downloads through a HiFi API instance – the backend Monochrome uses. Run your own instance with your own TIDAL subscription.' }),
-    S('hifi_api_url', 'HiFi API URL(s)', 'text', { full: true, help: 'e.g. http://hifi-api:8000 – several can be given, comma-separated; they are tried in order' }),
-    S('hifi_quality', 'Quality', 'select', { options: [['LOSSLESS', 'Lossless – 16-bit FLAC'], ['HI_RES_LOSSLESS', 'Hi-res FLAC (up to 24/192)'], ['HIGH', 'AAC 320']] }),
   ] },
   { id: 'sync', title: 'Playlists & sync', fields: [
     S('sync_interval_minutes', 'Sync likes & playlists every (minutes)', 'number', { help: '0 disables automatic sync' }),
@@ -132,7 +126,7 @@ const SECTIONS = [
 // Settings pages: related cards together, in an order that reads top to bottom.
 const GROUPS = [
   { id: 'general', title: 'General', sections: ['general'] },
-  { id: 'downloads', title: 'Downloads & sources', sections: ['pipeline', 'slskd', 'torznab', 'ytdlp', 'hifi', 'streamrip'] },
+  { id: 'downloads', title: 'Downloads & sources', sections: ['pipeline', 'slskd', 'torznab', 'ytdlp', 'streamrip'] },
   { id: 'tagging', title: 'Library, tagging & IDs', sections: ['library', 'verify'] },
   { id: 'accounts', title: 'Email & notifications', sections: ['email', 'notify'] },
   { id: 'services', title: 'Services & sync', sections: ['spotify', 'sync', 'media'] },
@@ -457,7 +451,7 @@ function pipelineHelp() {
   return `<div class="card mt"><h3>How requests are fulfilled</h3>
     <ol class="muted" style="line-height:1.9;padding-left:18px;margin:10px 0 0">
       <li><b>Library check</b> – if the album/track is already in your library (by MusicBrainz id or name) it's marked available instantly.</li>
-      <li><b>streamrip / HiFi API</b> – lossless from Qobuz, Tidal or Deezer with your own accounts, matched by ISRC.</li>
+      <li><b>streamrip</b> – lossless from Qobuz, Tidal or Deezer with your own accounts, matched by ISRC.</li>
       <li><b>Torrents & Usenet</b> – Prowlarr searches your indexers; the best album release goes to qBittorrent or SABnzbd and is imported when it finishes. If it stalls past the timeout, the next release or source is tried.</li>
       <li><b>Soulseek</b> – slskd searches the network, results are ranked by track count, format, bitrate, folder name and the uploader's free slots/speed. Stalled or failed users are skipped automatically.</li>
       <li><b>yt-dlp</b> – each track from the MusicBrainz tracklist is matched on YouTube (preferring official "Topic" uploads with matching length).</li>

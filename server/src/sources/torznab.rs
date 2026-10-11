@@ -40,9 +40,12 @@ pub async fn status(st: &AppState) -> Value {
         _ => None,
     };
     let Some(n) = indexers else { return json!({ "ok": false, "message": "Prowlarr not reachable or wrong API key" }) };
-    let q = if qbit_ready(st) { qbit_login(st).await.map(|_| "qBittorrent ok".to_string()).unwrap_or_else(|e| e.to_string()) } else { "no qBittorrent".into() };
-    let s = if sab_ready(st) { sab(st, &[("mode", "version")]).await.map(|_| "SABnzbd ok".to_string()).unwrap_or_else(|e| e.to_string()) } else { "no SABnzbd".into() };
-    json!({ "ok": n > 0, "message": format!("{n} indexer(s) in Prowlarr · {q} · {s}") })
+    st.cache_put("qbit_sid", Value::Null, 1); // always a fresh login when testing
+    let (mut ok, q) = (n > 0, if qbit_ready(st) { qbit_login(st).await.map(|_| "qBittorrent ok".to_string()) } else { Ok("no qBittorrent".into()) });
+    let s = if sab_ready(st) { sab(st, &[("mode", "version")]).await.map(|_| "SABnzbd ok".to_string()) } else { Ok("no SABnzbd".into()) };
+    ok &= q.is_ok() && s.is_ok();
+    let txt = |r: anyhow::Result<String>| r.unwrap_or_else(|e| e.to_string());
+    json!({ "ok": ok, "message": format!("{n} indexer(s) in Prowlarr · {} · {}", txt(q), txt(s)) })
 }
 
 static NON_ALNUM: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"[^a-z0-9]+").unwrap());
@@ -112,32 +115,40 @@ pub fn rank_album(st: &AppState, results: &[Value], artist: &str, album: &str, l
 
 // ---- qBittorrent ---------------------------------------------------------------------------------
 
+/// Log in to qBittorrent's Web API. Returns the session cookie as "name=value": older versions call
+/// it SID, 5.1+ QBT_SID_<port>. Empty when qBittorrent skips auth for this network.
 async fn qbit_login(st: &AppState) -> anyhow::Result<String> {
-    if let Some(v) = st.cache_get("qbit_sid") {
+    if let Some(v) = st.cache_get("qbit_sid").filter(|v| v.is_string()) {
         return Ok(v.as_str().unwrap_or("").to_string());
     }
-    let r = st.http.post(format!("{}/api/v2/auth/login", base(st, "qbit_url"))).header("Referer", base(st, "qbit_url"))
+    let url = base(st, "qbit_url");
+    let r = st.http.post(format!("{url}/api/v2/auth/login")).header("Referer", &url).header("Origin", &url)
         .form(&[("username", st.cfg.str("qbit_user")), ("password", st.cfg.str("qbit_password"))]).send().await
         .map_err(|e| anyhow::anyhow!("qBittorrent unreachable: {e}"))?;
-    let sid = r.headers().get_all("set-cookie").iter().filter_map(|h| h.to_str().ok())
-        .find_map(|c| c.split(';').next().and_then(|kv| kv.strip_prefix("SID=")).map(String::from));
+    let status = r.status().as_u16();
+    let cookie = r.headers().get_all("set-cookie").iter().filter_map(|h| h.to_str().ok())
+        .filter_map(|c| c.split(';').next().map(|kv| kv.trim().to_string()))
+        .find(|kv| kv.starts_with("SID=") || kv.starts_with("QBT_SID"));
     let body = r.text().await.unwrap_or_default();
-    let sid = match sid {
-        Some(s) => s,
-        None if body.trim() == "Ok." => String::new(), // auth bypassed for this network
-        None => anyhow::bail!("qBittorrent login failed (check user/password)"),
+    let cookie = match cookie {
+        Some(c) => c,
+        None if (200..300).contains(&status) && (body.trim() == "Ok." || body.trim().is_empty()) => String::new(),
+        None if status == 403 => anyhow::bail!("qBittorrent refused the login (HTTP 403) – too many failed attempts ban the IP for a while; also check Web UI → \"Enable Host header validation\" / CSRF settings"),
+        None if body.trim() == "Fails." => anyhow::bail!("qBittorrent login failed: wrong username or password"),
+        None => anyhow::bail!("qBittorrent login failed (HTTP {status}: {})", body.trim().chars().take(120).collect::<String>()),
     };
-    st.cache_put("qbit_sid", json!(sid), 1800);
-    Ok(sid)
+    st.cache_put("qbit_sid", json!(cookie), 1800);
+    Ok(cookie)
 }
 
 async fn qbit(st: &AppState, path: &str, form: Option<reqwest::multipart::Form>, query: &[(&str, String)]) -> anyhow::Result<reqwest::Response> {
     let sid = qbit_login(st).await?;
     let url = format!("{}/api/v2/{path}", base(st, "qbit_url"));
     let rb = match form { Some(f) => st.http.post(&url).multipart(f), None => st.http.get(&url).query(query) };
-    let r = rb.header("Cookie", format!("SID={sid}")).header("Referer", base(st, "qbit_url")).send().await?;
+    let rb = if sid.is_empty() { rb } else { rb.header("Cookie", sid) };
+    let r = rb.header("Referer", base(st, "qbit_url")).send().await?;
     if r.status().as_u16() == 403 {
-        st.cache_put("qbit_sid", Value::Null, 0);
+        st.cache_put("qbit_sid", Value::Null, 1);
         anyhow::bail!("qBittorrent refused the session, retrying next time");
     }
     Ok(r.error_for_status()?)

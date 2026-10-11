@@ -13,7 +13,11 @@ pub fn enabled(st: &AppState) -> bool {
 }
 
 pub fn bin() -> String {
-    std::env::var("ENCORE_YTDLP").unwrap_or_else(|_| "yt-dlp".into())
+    std::env::var("ENCORE_YTDLP").unwrap_or_else(|_| {
+        let bundled = "/opt/tools/bin/yt-dlp";
+        let on_path = std::env::var("PATH").map(|p| p.split(':').any(|d| Path::new(d).join("yt-dlp").is_file())).unwrap_or(false);
+        if !on_path && Path::new(bundled).is_file() { bundled.into() } else { "yt-dlp".into() }
+    })
 }
 
 pub async fn version() -> Option<String> {
@@ -109,10 +113,51 @@ pub async fn download(st: &AppState, url: &str, outdir: &Path, playlist: bool, p
         let q = st.cfg.str("ytdlp_quality");
         args.extend(["--audio-quality".into(), if q.is_empty() { "0".into() } else { q }]);
     }
-    args.extend(cookie_args(st, outdir));
-    args.push("--".into());
-    args.push(url.into());
-    let mut child = Command::new(bin()).args(&args).stdout(Stdio::piped()).stderr(Stdio::piped()).kill_on_drop(true).spawn()
+    args.extend(js_runtime_args().await);
+    // YouTube sometimes hides every audio format from one kind of client ("Requested format is not
+    // available"): try again as other clients, without cookies, and on the other YouTube host
+    let alt_host = if url.contains("music.youtube.com") { Some(url.replace("music.youtube.com", "www.youtube.com")) }
+        else if url.contains("www.youtube.com/watch") || url.contains("://youtube.com/watch") { Some(url.replace("://youtube.com", "://www.youtube.com").replace("www.youtube.com", "music.youtube.com")) }
+        else { None };
+    let attempts: Vec<(String, Vec<String>, bool)> = [
+        Some((url.to_string(), vec![], true)),
+        Some((url.to_string(), vec!["--extractor-args".into(), "youtube:player_client=default,tv,web_music,mweb".into()], false)),
+        alt_host.map(|u| (u, vec!["--extractor-args".into(), "youtube:player_client=default,tv,web_music,mweb".into()], false)),
+    ].into_iter().flatten().collect();
+    let mut last_err = String::new();
+    for (i, (u, extra, cookies)) in attempts.iter().enumerate() {
+        let mut a = args.clone();
+        a.extend(extra.iter().cloned());
+        if *cookies {
+            a.extend(cookie_args(st, outdir));
+        }
+        a.push("--".into());
+        a.push(u.clone());
+        match run(&a, outdir, &before, progress).await {
+            Ok(d) => return Ok(d),
+            Err(e) => {
+                last_err = e.to_string();
+                let retry = ["Requested format is not available", "Sign in to confirm", "Only images are available", "nsig", "n challenge", "This video is not available"]
+                    .iter().any(|k| last_err.contains(k));
+                if !retry || i + 1 == attempts.len() {
+                    break;
+                }
+            }
+        }
+    }
+    anyhow::bail!("{last_err}")
+}
+
+/// yt-dlp needs a JavaScript runtime for YouTube since late 2025. The Docker image ships Node.js.
+async fn js_runtime_args() -> Vec<String> {
+    let has_node = std::env::var("PATH").map(|p| p.split(':').any(|d| Path::new(d).join("node").is_file())).unwrap_or(false);
+    let has_deno = std::env::var("PATH").map(|p| p.split(':').any(|d| Path::new(d).join("deno").is_file())).unwrap_or(false);
+    let new_enough = version().await.is_some_and(|v| v.as_str() >= "2025.11");
+    if has_node && !has_deno && new_enough { vec!["--js-runtimes".into(), "node".into()] } else { vec![] }
+}
+
+async fn run(args: &[String], outdir: &Path, before: &std::collections::HashSet<PathBuf>, progress: Option<&(dyn Fn(f64) + Send + Sync)>) -> anyhow::Result<Download> {
+    let mut child = Command::new(bin()).args(args).stdout(Stdio::piped()).stderr(Stdio::piped()).kill_on_drop(true).spawn()
         .map_err(|e| anyhow::anyhow!("yt-dlp is not installed ({e})"))?;
     let mut lines = BufReader::new(child.stdout.take().unwrap()).lines();
     let stderr = child.stderr.take().unwrap();
@@ -158,7 +203,10 @@ pub async fn download(st: &AppState, url: &str, outdir: &Path, playlist: bool, p
         }
     }
     files.sort();
-    if files.is_empty() && !status.success() {
+    if files.is_empty() {
+        if status.success() {
+            anyhow::bail!("yt-dlp finished without an audio file");
+        }
         anyhow::bail!("{}", if err.is_empty() { "yt-dlp failed".into() } else { err.chars().take(300).collect::<String>() });
     }
     Ok(Download { files, entries })

@@ -2,7 +2,7 @@
 use crate::auth::{Admin, User};
 use crate::db::RowExt;
 use crate::error::{err, ApiResult};
-use crate::sources::{hifi, slskd, streamrip, torznab, ytdlp};
+use crate::sources::{slskd, streamrip, torznab, ytdlp};
 use crate::state::AppState;
 use crate::{acoustid, email, notify, p};
 use axum::extract::{Path, Query, State};
@@ -52,7 +52,6 @@ async fn status(State(st): State<AppState>, User(_): User) -> ApiResult<Json<Val
         "lidarr": { "ok": false, "enabled": false },
         "acoustid": { "ok": acoustid::available(&st), "enabled": acoustid::available(&st) },
         "streamrip": { "ok": streamrip::enabled(&st), "enabled": st.cfg.bool("streamrip_enabled") },
-        "hifi": { "ok": hifi::enabled(&st), "enabled": st.cfg.bool("hifi_enabled") },
         "ffmpeg": { "ok": which("ffmpeg") },
     });
     Ok(Json(json!({ "version": crate::VERSION, "server": "rust", "services": services, "disk": disk(&st.cfg.str("library_path")), "app_name": st.cfg.str("app_name") })))
@@ -104,9 +103,6 @@ async fn test(State(st): State<AppState>, Admin(u): Admin, Path(service): Path<S
             "tidal" => {
                 streamrip::tidal_token(&st).await?;
                 msg(true, "Tidal credentials valid")
-            }
-            "hifi" => {
-                if hifi::endpoints(&st).is_empty() { msg(false, "Enter the URL of your HiFi API instance") } else { hifi::status(&st).await }
             }
             "streamrip" => match streamrip::binary(&st) {
                 None => msg(false, "streamrip is not installed in this container (use the default Docker image or set its path)"),

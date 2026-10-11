@@ -1,5 +1,4 @@
 //! Download sources.
-pub mod hifi;
 pub mod links;
 pub mod slskd;
 pub mod streamrip;

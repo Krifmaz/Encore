@@ -69,7 +69,7 @@ impl Config {
             .filter(|(k, _)| !k.starts_with("lidarr_")) // Lidarr is replaced by Prowlarr → qBittorrent/SABnzbd
             .map(|(k, mut d)| {
                 if k == "source_order" {
-                    d.default = json!("streamrip,hifi,slskd,torznab,ytdlp");
+                    d.default = json!("tidal,deezer,slskd,torznab,ytdlp");
                 }
                 (k, d)
             })

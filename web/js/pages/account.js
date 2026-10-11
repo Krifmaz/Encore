@@ -9,8 +9,8 @@ export async function render(view, ctx) {
   const admin = ['admin', 'owner'].includes(me.role);
   view.innerHTML = `
     <h1 style="margin-bottom:18px">Account</h1>
-    <div class="row wrap gap-lg" style="align-items:flex-start">
-      <div class="card stack" style="flex:1;min-width:280px">
+    <div class="stack" style="max-width:720px;gap:16px">
+      <div class="card stack">
         <div class="row">${avatarHtml(me, 52)}
           <div class="grow"><h2>${esc(me.username)}</h2><div class="muted small">${me.role === 'owner' ? 'Owner' : admin ? 'Administrator' : 'Member'} · joined ${fmt.ago(me.created_at)}</div></div></div>
         ${has('avatar') ? `<div class="row wrap" style="gap:8px"><label class="btn sm">${icon.upload || icon.plus}Change picture<input type="file" id="avatar-file" accept="image/*" hidden></label>
@@ -18,7 +18,7 @@ export async function render(view, ctx) {
         <div class="small muted">Requests this week: <b>${me.requests_this_week}</b>${me.request_limit && !['admin', 'owner'].includes(me.role) ? ` of ${me.request_limit}` : ''}
           ${me.auto_approve || ['admin', 'owner'].includes(me.role) ? ' · <span class="badge ok">auto-approved</span>' : ''}</div>
       </div>
-      <form class="card stack" id="pw" style="flex:1;min-width:280px">
+      <form class="card stack" id="pw">
         <h3>Change password</h3>
         <label class="field"><span>Current password</span><input class="input" type="password" name="current" autocomplete="current-password" required></label>
         <label class="field"><span>New password</span><input class="input" type="password" name="new" autocomplete="new-password" minlength="8" required></label>

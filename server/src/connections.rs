@@ -259,9 +259,26 @@ pub async fn connect_navidrome(st: &AppState, uid: i64, user: &str, password: &s
 // ---- ListenBrainz / Last.fm / Deezer -------------------------------------------------------------
 
 pub async fn connect_listenbrainz(st: &AppState, uid: i64, token: &str) -> anyhow::Result<Value> {
-    let d: Value = st.http.get("https://api.listenbrainz.org/1/validate-token").header("Authorization", format!("Token {token}")).send().await?.json().await?;
+    let token = token.trim().trim_matches('"');
+    if token.is_empty() {
+        anyhow::bail!("Paste your ListenBrainz user token (listenbrainz.org → Settings → User token)");
+    }
+    // the documented header first, then the older ?token= form
+    let mut d = Value::Null;
+    let mut status = 0;
+    for with_header in [true, false] {
+        let rb = st.http.get("https://api.listenbrainz.org/1/validate-token");
+        let rb = if with_header { rb.header("Authorization", format!("Token {token}")) } else { rb.query(&[("token", token)]) };
+        let r = rb.send().await?;
+        status = r.status().as_u16();
+        d = r.json().await.unwrap_or(Value::Null);
+        if d["valid"].as_bool().unwrap_or(false) {
+            break;
+        }
+    }
     if !d["valid"].as_bool().unwrap_or(false) {
-        anyhow::bail!("ListenBrainz token is not valid");
+        let why = d["message"].as_str().or(d["error"].as_str()).map(String::from).unwrap_or_else(|| format!("HTTP {status}"));
+        anyhow::bail!("ListenBrainz didn't accept the token: {why}");
     }
     let name = d["user_name"].as_str().unwrap_or("").to_string();
     save(st, uid, "listenbrainz", &name, &json!({ "token": token, "user": name }))?;

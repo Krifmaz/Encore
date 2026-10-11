@@ -2,7 +2,7 @@
 import { api } from '../api.js';
 import { art, esc, fmt, icon, modal, toast } from '../ui.js';
 
-const NAMES = { slskd: 'Soulseek', deezer: 'Deezer', hifi: 'TIDAL (HiFi API)', ytmusic: 'YouTube Music', lidarr: 'Lidarr' };
+const NAMES = { slskd: 'Soulseek', deezer: 'Deezer', ytmusic: 'YouTube Music', lidarr: 'Lidarr' };
 
 /**
  * opts: { kind: 'album'|'track', artist, title, album, mbid, artist_mbid, track_count, length, year, cover_url, isrc, request_id }

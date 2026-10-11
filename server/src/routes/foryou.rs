@@ -21,6 +21,7 @@ const JSPF_TR: &str = "https://musicbrainz.org/doc/jspf#track";
 pub fn router() -> Router<AppState> {
     Router::new()
         .route("/api/discover/for-you", get(for_you))
+        .route("/api/discover/artist-picture", get(artist_picture))
         .route("/api/discover/artist/{mbid}/similar", get(artist_similar))
         .route("/api/discover/artist/{mbid}/extras", get(artist_extras))
         .route("/api/discover/similar-tracks", get(similar_tracks))
@@ -39,7 +40,33 @@ fn st_(v: &Value) -> String {
 }
 
 async fn getj(st: &AppState, url: &str, q: &[(&str, String)]) -> anyhow::Result<Value> {
-    Ok(st.http.get(url).query(q).send().await?.error_for_status()?.json().await?)
+    if !url.contains("api.deezer.com") {
+        return Ok(st.http.get(url).query(q).send().await?.error_for_status()?.json().await?);
+    }
+    // Deezer allows ~50 requests per 5 s and answers "Quota limit exceeded" (HTTP 200) beyond that:
+    // space requests out, and wait + retry when it says so
+    for attempt in 0..4 {
+        deezer_pace().await;
+        let d: Value = st.http.get(url).query(q).send().await?.error_for_status()?.json().await?;
+        match d["error"]["code"].as_i64() {
+            None => return Ok(d),
+            Some(4) | Some(700) if attempt < 3 => tokio::time::sleep(std::time::Duration::from_millis(1500 * (attempt + 1))).await,
+            Some(_) => anyhow::bail!("Deezer: {}", d["error"]["message"].as_str().unwrap_or("error")),
+        }
+    }
+    anyhow::bail!("Deezer is busy – try again in a moment")
+}
+
+/// At most ~8 Deezer requests a second from this server.
+async fn deezer_pace() {
+    static NEXT: std::sync::LazyLock<tokio::sync::Mutex<tokio::time::Instant>> =
+        std::sync::LazyLock::new(|| tokio::sync::Mutex::new(tokio::time::Instant::now()));
+    let mut next = NEXT.lock().await;
+    let now = tokio::time::Instant::now();
+    if *next > now {
+        tokio::time::sleep_until(*next).await;
+    }
+    *next = tokio::time::Instant::now().max(*next) + std::time::Duration::from_millis(125);
 }
 
 fn library_artists(st: &AppState) -> HashSet<String> {
@@ -181,6 +208,23 @@ async fn lastfm_for_you(st: &AppState, user: &str) -> anyhow::Result<Value> {
         ranked.sort_by(|a, b| (a.1["in_library"].as_bool(), -a.0).partial_cmp(&(b.1["in_library"].as_bool(), -b.0)).unwrap_or(std::cmp::Ordering::Equal));
         let artists = with_pictures(st, ranked.into_iter().take(18).map(|x| x.1).collect()).await;
 
+        // albums: the best-known album of each recommended artist you don't have yet
+        let picks: Vec<String> = artists.iter().filter(|a| a["in_library"] != json!(true)).take(12).map(|a| st_(&a["name"])).collect();
+        let tops = futures_util::future::join_all(picks.iter().map(|n| async move {
+            lastfm(st, "artist.gettopalbums", &[("artist", n.clone()), ("limit", "3".into()), ("autocorrect", "1".into())]).await
+        })).await;
+        let mut albums = vec![];
+        for d in tops.into_iter().flatten() {
+            let best = d["topalbums"]["album"].as_array().cloned().unwrap_or_default().into_iter()
+                .find(|al| { let t = st_(&al["name"]); !t.is_empty() && t != "(null)" });
+            if let Some(al) = best {
+                let (title, artist) = (st_(&al["name"]), st_(&al["artist"]["name"]));
+                let cover = al["image"].as_array().and_then(|i| i.iter().rev().find_map(|x| x["#text"].as_str().filter(|u| !u.is_empty()).map(String::from)));
+                let owned = st.db.one("SELECT 1 x FROM tracks WHERE lower(albumartist)=lower(?) AND lower(album)=lower(?) LIMIT 1", p![artist, title]).ok().flatten().is_some();
+                albums.push(json!({ "title": title, "artist": artist, "cover": cover, "in_library": owned }));
+            }
+        }
+
         // songs: similar to your most played tracks of the last month
         let tt = lastfm(st, "user.gettoptracks", &[("user", user.into()), ("period", "1month".into()), ("limit", "10".into())]).await.unwrap_or(json!({}));
         let seeds: Vec<(String, String)> = tt["toptracks"]["track"].as_array().cloned().unwrap_or_default().iter()
@@ -204,7 +248,7 @@ async fn lastfm_for_you(st: &AppState, user: &str) -> anyhow::Result<Value> {
             }
         }
         tracks.truncate(30);
-        Ok(json!({ "user": user, "artists": artists, "tracks": tracks }))
+        Ok(json!({ "user": user, "artists": artists, "albums": albums, "tracks": tracks }))
     }).await
 }
 
@@ -269,21 +313,51 @@ async fn deezer_artist(st: &AppState, name: &str) -> anyhow::Result<Option<Value
         .filter(|a| norm(a["name"].as_str().unwrap_or("")) == norm(name)).max_by_key(|a| a["nb_fan"].as_i64().unwrap_or(0)))
 }
 
+/// An artist's photo from Deezer. Found: kept a week; not on Deezer: asked again tomorrow;
+/// Deezer busy or down: not remembered at all, so the next view tries again.
 async fn deezer_picture(st: &AppState, name: &str) -> Value {
-    cached(st, &format!("dzpic:{}", norm(name)), 7 * 86400, || async {
-        let pic = deezer_artist(st, name).await.ok().flatten().and_then(|a| a["picture_medium"].as_str().map(String::from));
-        Ok(pic.filter(|p| !p.contains("/artist//")).map(|p| json!(p)).unwrap_or(Value::Null))
-    }).await.unwrap_or(Value::Null)
+    let key = format!("dzpic:{}", norm(name));
+    if let Some(v) = st.cache_get(&key) {
+        return v;
+    }
+    match deezer_artist(st, name).await {
+        Ok(a) => {
+            let pic = a.and_then(|a| a["picture_medium"].as_str().map(String::from)).filter(|p| !p.contains("/artist//"));
+            let v = pic.map(|p| json!(p)).unwrap_or(Value::Null);
+            st.cache_put(&key, v.clone(), if v.is_null() { 86400 } else { 7 * 86400 });
+            v
+        }
+        Err(_) => Value::Null,
+    }
 }
 
+/// Fill in artist photos without making the page wait: known ones directly, the rest as a link the
+/// browser loads on its own (/api/discover/artist-picture), so cards appear at once and photos follow.
 async fn with_pictures(st: &AppState, items: Vec<Value>) -> Vec<Value> {
-    use futures_util::StreamExt;
-    futures_util::stream::iter(items.into_iter().map(|mut a| async move {
+    items.into_iter().map(|mut a| {
         if a["image"].as_str().unwrap_or("").is_empty() {
-            a["image"] = deezer_picture(st, a["name"].as_str().unwrap_or("")).await;
+            let name = a["name"].as_str().unwrap_or("").to_string();
+            a["image"] = match st.cache_get(&format!("dzpic:{}", norm(&name))) {
+                Some(v) => v,
+                None => json!(format!("/api/discover/artist-picture?name={}", urlencoding::encode(&name))),
+            };
         }
         a
-    })).buffered(5).collect().await
+    }).collect()
+}
+
+#[derive(Deserialize)]
+struct PictureQ {
+    name: String,
+}
+
+/// The photo for one artist (a redirect to Deezer's image), or 404 – the page then shows the initial.
+async fn artist_picture(State(st): State<AppState>, User(_): User, Query(q): Query<PictureQ>) -> axum::response::Response {
+    use axum::response::IntoResponse;
+    match deezer_picture(&st, &q.name).await.as_str() {
+        Some(url) => ([(axum::http::header::CACHE_CONTROL, "private, max-age=86400")], axum::response::Redirect::temporary(url)).into_response(),
+        None => (axum::http::StatusCode::NOT_FOUND, [(axum::http::header::CACHE_CONTROL, "no-store")]).into_response(),
+    }
 }
 
 fn mark_library(st: &AppState, mut res: Value) -> Value {

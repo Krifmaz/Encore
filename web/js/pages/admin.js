@@ -41,13 +41,14 @@ export async function renderUsers(view, ctx) {
   }).catch(() => { defBox.textContent = ''; });
   const load = async () => {
     const users = await api.get('/admin/users');
+    const { avatarHtml } = await import('../app.js');
     box.innerHTML = `<div class="table-wrap"><table class="table"><thead><tr>
       <th>User</th><th>Role</th><th class="hide-sm">Requests</th><th class="hide-sm">Weekly limit</th><th>Auto-approve</th><th class="hide-sm">Last seen</th><th></th></tr></thead><tbody>
       ${users.map(u => `<tr data-id="${u.id}">
-        <td><div class="row"><div class="avatar">${esc(u.username[0])}</div><div><div style="font-weight:650">${esc(u.username)} ${u.id === ctx.user.id ? '<span class="badge">you</span>' : ''} ${u.disabled ? '<span class="badge err">disabled</span>' : ''}</div>
+        <td><div class="row">${avatarHtml(u)}<div><div style="font-weight:650">${esc(u.username)} ${u.id === ctx.user.id ? '<span class="badge">you</span>' : ''} ${u.disabled ? '<span class="badge err">disabled</span>' : ''}</div>
           <div class="small faint">${[u.email && esc(u.email), u.invite_code && `invite ${esc(u.invite_code)}`, `joined ${fmt.ago(u.created_at)}`].filter(Boolean).join(' · ')}</div></div></div></td>
-        <td><select class="input" data-f="role" style="width:auto;padding:6px 10px" ${u.id === ctx.user.id ? 'disabled' : ''}>
-          <option value="user" ${u.role === 'user' ? 'selected' : ''}>User</option><option value="admin" ${['admin', 'owner'].includes(u.role) ? 'selected' : ''}>Admin</option></select></td>
+        <td>${u.role === 'owner' ? '<span class="badge accent">Owner</span>' : `<select class="input" data-f="role" style="width:auto;padding:6px 10px" ${u.id === ctx.user.id ? 'disabled' : ''}>
+          <option value="user" ${u.role === 'user' ? 'selected' : ''}>User</option><option value="admin" ${u.role === 'admin' ? 'selected' : ''}>Admin</option></select>`}</td>
         <td class="hide-sm">${u.request_count}</td>
         <td class="hide-sm"><input class="input" data-f="request_limit" type="number" min="0" value="${u.request_limit || ''}" placeholder="∞" style="width:80px;padding:6px 10px"></td>
         <td><label class="switch"><input type="checkbox" data-f="auto_approve" ${u.auto_approve ? 'checked' : ''}><i></i></label></td>

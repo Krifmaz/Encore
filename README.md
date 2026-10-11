@@ -8,7 +8,7 @@ Encore 2 is a single Rust program with the web app built in: fast, small, and no
 
 - **Accounts**: login and sign-up with invite-only, open or closed modes. The admin panel manages users, roles, weekly request limits, auto-approve, password resets and session revocation.
 - **Discover**: search MusicBrainz for artists, albums and songs, with *In library* and *Requested* badges. Request anything with one click.
-- **Request pipeline**: with *highest quality first* on, each request tries **Qobuz/Tidal/Deezer (streamrip) → TIDAL via HiFi API → FLAC on Soulseek (24-bit preferred) → torrents/Usenet via Prowlarr → MP3 on Soulseek → YouTube Music**, falling back automatically. Exact ISRCs are used whenever the source provides them.
+- **Request pipeline**: with *highest quality first* on, each request tries **Qobuz/Tidal/Deezer (streamrip) → FLAC on Soulseek (24-bit preferred) → torrents/Usenet via Prowlarr → MP3 on Soulseek → YouTube Music**, falling back automatically. Exact ISRCs are used whenever the source provides them.
 - **Whole albums**: when a requested song is on an official studio album or EP, Encore downloads the whole release instead, in the best quality any source has. Compilations, live albums and soundtracks are never used. If the album doesn't have that exact version (say, a remix), the song is fetched on its own.
 - **For you**: your ListenBrainz *Weekly Exploration* and *Daily Jams* playlists, plus *Artists for you* and *Songs for you* built from what you play most on Last.fm. Songs you own are playable, everything else is one click to request. *Admin → Auto-download* can grab the top N new songs from each week's exploration list automatically.
 - **Scrobbling**: what you play in Encore is scrobbled to Last.fm and ListenBrainz ("now playing" when a song starts, a scrobble after half the song or 4 minutes). Each user switches it on or off on the *Connections* page.
@@ -147,11 +147,10 @@ Every option can be changed in the UI. Environment variables only seed the first
 | `ENCORE_LIBRARY_PATH` | `/music` | Music library inside the container |
 | `ENCORE_SIGNUP_MODE` | `invite` | `invite`, `open` or `closed` |
 | `SOULSEEK_USERNAME` / `SOULSEEK_PASSWORD` | | Soulseek login for the built-in slskd |
-| `HIFI_ENABLED` / `HIFI_API_URL` / `HIFI_QUALITY` | off | TIDAL lossless via your own HiFi API instance (Monochrome's backend) |
 | `ENCORE_DISCOVER_AUTO_COUNT` | 0 | Songs to auto-request from each Weekly Exploration (0 = off) |
 | `ENCORE_CATALOG_MERGE` | `true` | Show Deezer/Apple releases MusicBrainz lacks |
 | `ENCORE_MANUAL_SEARCH` | `everyone` | Who can use the manual download picker: `everyone` or `admins` |
-| `ENCORE_SOURCE_ORDER` | `streamrip,hifi,slskd,torznab,ytdlp` | Order sources are tried in |
+| `ENCORE_SOURCE_ORDER` | `tidal,deezer,slskd,torznab,ytdlp` | The one search order: `qobuz`, `tidal`, `deezer` (through streamrip), `slskd`, `torznab`, `ytdlp` |
 | `ENCORE_NAMING_TEMPLATE` | `{albumartist}/{album} ({year})/{discprefix}{track:02d} - {title}` | Rename template |
 | `TORZNAB_ENABLED`, `PROWLARR_URL` / `PROWLARR_API_KEY`, `QBIT_URL` / `QBIT_USER` / `QBIT_PASSWORD`, `SAB_URL` / `SAB_API_KEY` | | Torrents & Usenet through Prowlarr |
 | `SLSKD_URL` / `SLSKD_API_KEY` / `SLSKD_ENABLED` / `SLSKD_DOWNLOAD_PATH` | | |

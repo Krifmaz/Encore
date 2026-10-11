@@ -86,8 +86,24 @@ pub async fn check_file(st: &AppState, path: &Path, title: &str, artist: &str, l
     }
     let top = &recs[0];
     let v = compare(&want, &d(top), false);
+    let top_title = top["title"].as_str().unwrap_or("");
+    // Can't judge, so don't reject: titles in different scripts ("ちゅきちゅきポコポコポン" vs
+    // "CHUKICHUKI POKOPOKO-PON") or an instrumental/karaoke whose fingerprint AcoustID files under the
+    // vocal version (the backing track is the same audio to Chromaprint).
+    let lc = title.to_lowercase();
+    let vocal_less = ["instrumental", "karaoke", "off vocal", "inst.", "(inst)"].iter().any(|k| lc.contains(k));
+    if latin(title) != latin(top_title) || (vocal_less && v.reason.to_lowercase().contains("instrumental") || vocal_less && v.reason.to_lowercase().contains("karaoke")) {
+        return Ok(json!({ "status": "unknown", "acoustid": aid, "actual": top,
+            "detail": format!("AcoustID knows this audio as “{} – {}” – can't compare reliably, kept", top["artist"].as_str().unwrap_or(""), top_title) }));
+    }
     Ok(json!({ "status": "mismatch", "acoustid": aid, "actual": top,
         "detail": format!("audio is “{} – {}” ({})", top["artist"].as_str().unwrap_or(""), top["title"].as_str().unwrap_or(""), v.reason) }))
+}
+
+/// Mostly Latin letters? (false for Japanese, Korean, Cyrillic … titles)
+fn latin(s: &str) -> bool {
+    let letters: Vec<char> = s.chars().filter(|c| c.is_alphabetic()).collect();
+    letters.is_empty() || letters.iter().filter(|c| (**c as u32) < 0x250).count() * 2 >= letters.len()
 }
 
 // ---- same recording? (before replacing a file with a "better" copy) -------------------------------
@@ -125,6 +141,13 @@ pub async fn same_audio(a: &Path, b: &Path) -> Option<bool> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn scripts() {
+        assert!(super::latin("CHUKICHUKI POKOPOKO-PON"));
+        assert!(!super::latin("ちゅきちゅきポコポコポン"));
+        assert!(super::latin("Café del Mar"));
+    }
+
     #[test]
     fn similarity() {
         let a: Vec<u32> = (0..200u32).map(|i| i.wrapping_mul(2654435761)).collect();
