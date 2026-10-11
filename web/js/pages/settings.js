@@ -44,7 +44,7 @@ const SECTIONS = [
     S('dedupe_on_import', 'Never import a second copy of a song (keep the better-quality file)', 'bool'),
     S('upgrade_check_audio', 'Before replacing a song with a better copy, compare the audio – a different recording is kept as its own song', 'bool'),
   ] },
-  { id: 'streamrip', title: 'Qobuz / Tidal / Deezer (streamrip)', desc: 'Searches Qobuz, Tidal and Deezer with your own accounts and downloads lossless (FLAC). Usually the best quality.', test: 'streamrip', testLabel: 'Test & write config', fields: [
+  { id: 'streamrip', title: 'Qobuz / Tidal / Deezer (streamrip)', desc: 'Searches Qobuz, Tidal and Deezer with your own accounts and downloads lossless (FLAC). Usually the best quality. streamrip is only used for these three: its SoundCloud support would give the same quality as yt-dlp, so SoundCloud links go through yt-dlp.', test: 'streamrip', testLabel: 'Test & write config', fields: [
     S('streamrip_enabled', 'Enable streamrip source', 'bool', { help: 'Downloads lossless from your own paid accounts. Respect each service’s terms – use at your own risk.' }),
     S('streamrip_quality', 'Max quality', 'select', { options: [[1, 'MP3 320 / AAC'], [2, 'CD – 16-bit FLAC'], [3, 'Hi-res ≤ 24/96'], [4, 'Hi-res max']] }),
     S('streamrip_deezer_arl', 'Deezer ARL cookie', 'password', { full: true, help: 'From deezer.com → browser dev tools → Cookies → arl' }),
@@ -84,7 +84,7 @@ const SECTIONS = [
     S('slskd_stall_minutes', 'Give up on a stalled user after (minutes)', 'number'),
     S('slskd_max_candidates', 'Max users to try per request', 'number'),
   ] },
-  { id: 'ytdlp', title: 'YouTube Music & links (yt-dlp)', desc: 'Last-resort source: finds the song on YouTube Music. Also downloads links you paste in the Downloader (YouTube, SoundCloud, Bandcamp…).', test: 'ytdlp', testLabel: 'Test cookies', fields: [
+  { id: 'ytdlp', title: 'YouTube Music & links (yt-dlp)', desc: 'Last-resort source: finds the song on YouTube Music. yt-dlp also downloads SoundCloud links you paste in the Downloader, along with YouTube, Bandcamp, Mixcloud and about 1,800 other sites.', test: 'ytdlp', testLabel: 'Test cookies', fields: [
     S('ytdlp_enabled', 'Enable yt-dlp as a source', 'bool', { help: 'Searches YouTube Music for requests, and downloads links you paste in the Downloader from YouTube, SoundCloud, Bandcamp, Mixcloud and ~1,800 other sites.' }),
     S('ytdlp_last_resort', 'Always try YouTube Music last, so downloads (almost) never fail', 'bool'),
     S('ytdlp_format', 'Audio format', 'select', { options: [['best', 'Original stream – best quality, no re-encode (recommended)'], ['m4a', 'M4A (AAC, re-encoded)'], ['mp3', 'MP3 (re-encoded)'], ['opus', 'Opus']] }),
@@ -94,7 +94,7 @@ const SECTIONS = [
   { id: 'spotify', title: 'Integrations', desc: 'API keys that let users connect their Spotify, Tidal, Last.fm, Discogs and YouTube Music accounts, and power recommendations.', test: 'spotify', testLabel: 'Test Spotify', fields: [
     S('spotify_client_id', 'Spotify Client ID', 'text', { help: 'developer.spotify.com – add <Public URL>/api/connections/spotify/callback as redirect URI. Development-mode apps allow 5 users and need a Premium owner (2026 rules); without it, public playlists still import via the embed fallback.' }),
     S('spotify_client_secret', 'Spotify Client secret', 'password'),
-    S('tidal_client_id', 'Tidal Client ID', 'text', { help: 'developer.tidal.com – redirect URI <Public URL>/api/connections/tidal/callback' }),
+    S('tidal_client_id', 'Tidal Client ID', 'text', { help: 'Only for looking up Tidal albums/songs by ISRC and for the Tidal connection. Get one at developer.tidal.com → Dashboard → Create new app (any name), redirect URI <Public URL>/api/connections/tidal/callback, then copy the Client ID and Client secret here. Downloads from Tidal use your own account instead: Downloads & sources → streamrip → Sign in to Tidal.' }),
     S('tidal_client_secret', 'Tidal Client secret', 'password'),
     S('lastfm_api_key', 'Last.fm API key', 'password', { help: 'last.fm/api/account/create (free) – loved tracks, similar artists/songs, genre pages, For you' }),
     S('lastfm_shared_secret', 'Last.fm shared secret', 'password', { help: 'Shown next to the API key. Needed for scrobbling: users sign in with Last.fm on the Connections page.' }),
@@ -284,11 +284,13 @@ export async function render(view, ctx) {
       <div style="height:14px"></div>
       <div data-out>${flash && flash.sec === sec.id ? `<div class="test-result ${flash.ok ? 'ok' : 'err'}">${flash.ok ? icon.check : icon.x}<span>${esc(flash.message || '')}</span></div>` : ''}</div>
       <div class="form-grid">${sec.fields.map(f => field(f, values[f.key], lidarrOpts, meta)).join('')}</div>
+      ${sec.id === 'streamrip' ? tidalBlock() : ''}
       <div class="row mt" style="justify-content:flex-end"><button class="btn primary" data-save>${icon.check}Save</button></div>
     </details>`).join('') + (group.id === 'downloads' ? pipelineHelp() : '') + (group.id === 'general' ? await apiCard() + await aboutCard() : '');
     panel.querySelectorAll('[data-sec]').forEach(card => {
       const sec = SECTIONS.find(x => x.id === card.dataset.sec);
       const out = card.querySelector('[data-out]');
+      if (sec.id === 'streamrip') bindTidal(card);
       const paint = (r) => { out.innerHTML = `<div class="test-result ${r.ok ? 'ok' : 'err'}">${r.ok ? icon.check : icon.x}<span>${esc(r.message || (r.ok ? 'Connected' : 'Failed'))}</span></div>`; };
       card.querySelector('[data-save]').onclick = () => save(sec, false, card);
       card.querySelectorAll('[data-clear]').forEach(a => a.addEventListener('click', async (e) => {
@@ -386,6 +388,47 @@ export async function render(view, ctx) {
   view.querySelector('.settings-nav').onclick = (e) => { const b = e.target.closest('[data-s]'); if (b) show(b.dataset.s); };
   view.querySelector('.settings-select').onchange = (e) => show(e.target.value);
   show(current);
+}
+
+// Tidal downloads need your Tidal account, not an API key: streamrip signs in once through a link
+// (device code). The server runs that flow; this block shows the link and waits for the approval.
+function tidalBlock() {
+  return `<div class="card flat mt" id="tidal-login" style="padding:12px 14px">
+    <div class="row between wrap" style="gap:8px">
+      <div style="min-width:0"><b>Tidal account</b><div class="small muted" id="tidal-state">Checking…</div></div>
+      <button class="btn sm" id="tidal-signin" type="button">${icon.link}Sign in to Tidal</button>
+    </div>
+    <div class="small mt" id="tidal-out" hidden></div>
+  </div>`;
+}
+
+function bindTidal(card) {
+  const state = card.querySelector('#tidal-state'), out = card.querySelector('#tidal-out'), btn = card.querySelector('#tidal-signin');
+  if (!state) return;
+  const paint = (r) => {
+    state.textContent = r.signed_in ? 'Signed in – Tidal downloads use this account.' : 'Not signed in – Tidal needs a one-time sign-in with your own Tidal account (no API key).';
+    btn.innerHTML = `${icon.link}${r.signed_in ? 'Sign in again' : 'Sign in to Tidal'}`;
+    if (r.status === 'waiting' && r.url) {
+      out.hidden = false;
+      out.innerHTML = `Open <a href="${esc(r.url)}" target="_blank" rel="noopener" style="color:var(--accent)">${esc(r.url)}</a> in a browser, approve in your Tidal account, then come back here. <span class="spinner" style="width:10px;height:10px;border-width:2px"></span> Waiting…`;
+    } else if (r.status === 'done') { out.hidden = false; out.innerHTML = `<span class="badge ok">${icon.check} ${esc(r.message)}</span>`; }
+    else if (r.status === 'failed') { out.hidden = false; out.innerHTML = `<span class="badge err">${esc(r.message || 'Sign-in failed')}</span>`; }
+  };
+  let timer = null;
+  const poll = async () => {
+    if (!card.isConnected) return clearInterval(timer);
+    try { const r = await api.get('/system/streamrip/tidal-login'); paint(r); if (r.status !== 'waiting') { clearInterval(timer); timer = null; btn.disabled = false; } } catch { /* next tick */ }
+  };
+  api.get('/system/streamrip/tidal-login').then(paint).catch(() => { state.textContent = 'Status unavailable'; });
+  btn.onclick = async () => {
+    btn.disabled = true;
+    out.hidden = false; out.innerHTML = '<span class="spinner" style="width:10px;height:10px;border-width:2px"></span> Starting streamrip…';
+    try {
+      const r = await api.post('/system/streamrip/tidal-login');
+      paint(r);
+      if (r.status === 'waiting') { if (r.url) window.open(r.url, '_blank', 'noopener'); timer = setInterval(poll, 3000); } else btn.disabled = false;
+    } catch (e) { out.innerHTML = `<span class="badge err">${esc(e.message)}</span>`; btn.disabled = false; }
+  };
 }
 
 /** Version, build and app downloads – shown at the bottom of General (and of Account for members). */

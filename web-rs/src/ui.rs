@@ -131,7 +131,7 @@ pub fn modal(o: ModalOpts) -> Modal {
     let kl = key_listener.clone();
     let close_fn: Rc<dyn Fn()> = Rc::new(move || { bg2.remove(); kl.borrow_mut().take(); });
     let c = close_fn.clone();
-    *key_listener.borrow_mut() = Some(EventListener::new(&document(), "keydown", move |e| { if dom::key(e) == "Escape" { c(); } }));
+    *key_listener.borrow_mut() = Some(dom::listen(&document(), "keydown", move |e| { if dom::key(e) == "Escape" { c(); } }));
     let c = close_fn.clone();
     let bg3 = bg.clone();
     on(&bg, "mousedown", move |e| { let is_bg = e.target().map(|t| { let bt: &web_sys::EventTarget = bg3.as_ref(); &t == bt }).unwrap_or(false); if is_bg { c(); } });
@@ -348,7 +348,7 @@ pub fn pop_menu(anchor: &Element, items: Vec<Option<MenuItem>>) {
     let (el2, bg2, kl) = (el.clone(), bg.clone(), key_listener.clone());
     let close: Rc<dyn Fn()> = Rc::new(move || { el2.remove(); bg2.remove(); kl.borrow_mut().take(); });
     let c = close.clone();
-    *key_listener.borrow_mut() = Some(EventListener::new(&document(), "keydown", move |e| { if dom::key(e) == "Escape" { c(); } }));
+    *key_listener.borrow_mut() = Some(dom::listen(&document(), "keydown", move |e| { if dom::key(e) == "Escape" { c(); } }));
     let c = close.clone();
     on(&bg, "click", move |_| c());
     let items = Rc::new(items);

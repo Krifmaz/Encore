@@ -7,6 +7,12 @@ use wasm_bindgen::{JsCast, JsValue};
 use web_sys::{Element, Event, EventTarget, HtmlElement, HtmlInputElement};
 
 pub use gloo_events::EventListener;
+use gloo_events::EventListenerOptions;
+
+/// `addEventListener` the way JavaScript does it by default: not passive, so `preventDefault()` works.
+pub fn listen<F: FnMut(&Event) + 'static>(target: &EventTarget, ev: &str, f: F) -> EventListener {
+    EventListener::new_with_options(target, ev.to_string(), EventListenerOptions::enable_prevent_default(), f)
+}
 pub use gloo_timers::callback::{Interval, Timeout};
 
 pub fn window() -> web_sys::Window { web_sys::window().expect("window") }
@@ -124,15 +130,15 @@ pub fn clear_page() { PAGE.with(|p| p.borrow_mut().clear()); }
 
 /// `el.addEventListener(ev, f)` for the current page.
 pub fn on<F: FnMut(&Event) + 'static>(target: &EventTarget, ev: &str, f: F) {
-    keep(EventListener::new(target, ev.to_string(), f));
+    keep(listen(target, ev, f));
 }
 /// `el.addEventListener(ev, f)` kept for the whole session.
 pub fn on_forever<F: FnMut(&Event) + 'static>(target: &EventTarget, ev: &str, f: F) {
-    keep_forever(EventListener::new(target, ev.to_string(), f));
+    keep_forever(listen(target, ev, f));
 }
 /// A listener you keep yourself (dropping it removes it).
 pub fn listener<F: FnMut(&Event) + 'static>(target: &EventTarget, ev: &str, f: F) -> EventListener {
-    EventListener::new(target, ev.to_string(), f)
+    listen(target, ev, f)
 }
 /// `window.addEventListener`.
 pub fn on_window<F: FnMut(&Event) + 'static>(ev: &str, f: F) { on_forever(&window(), ev, f); }

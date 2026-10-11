@@ -15,6 +15,7 @@ pub fn router() -> Router<AppState> {
     Router::new()
         .route("/api/system/status", get(status))
         .route("/api/system/test/{service}", post(test))
+        .route("/api/system/streamrip/tidal-login", post(tidal_login_start).get(tidal_login_status))
         .route("/api/system/downloads", get(downloads))
         .route("/api/system/downloads/slskd/clear", post(clear_slskd))
         .route("/api/discover/probe", get(probe))
@@ -55,6 +56,18 @@ async fn status(State(st): State<AppState>, User(_): User) -> ApiResult<Json<Val
         "ffmpeg": { "ok": which("ffmpeg") },
     });
     Ok(Json(json!({ "version": crate::VERSION, "server": "rust", "services": services, "disk": disk(&st.cfg.str("library_path")), "app_name": st.cfg.str("app_name") })))
+}
+
+/// Settings → streamrip → "Sign in to Tidal": starts the one-time account sign-in and returns the link to open.
+async fn tidal_login_start(State(st): State<AppState>, Admin(_): Admin) -> ApiResult<Json<Value>> {
+    match streamrip::tidal_login_start(&st).await {
+        Ok(v) => Ok(Json(v)),
+        Err(e) => Ok(Json(json!({ "status": "failed", "message": e.to_string(), "signed_in": streamrip::tidal_signed_in(&st) }))),
+    }
+}
+
+async fn tidal_login_status(State(st): State<AppState>, Admin(_): Admin) -> ApiResult<Json<Value>> {
+    Ok(Json(streamrip::tidal_login_status(&st)))
 }
 
 fn msg(ok: bool, m: impl Into<String>) -> Value {
@@ -110,7 +123,8 @@ async fn test(State(st): State<AppState>, Admin(u): Admin, Path(service): Path<S
                     let path = streamrip::apply_credentials(&st).await?;
                     let o = tokio::process::Command::new(bin).arg("--version").output().await?;
                     let v: String = String::from_utf8_lossy(&[o.stdout, o.stderr].concat()).trim().chars().take(120).collect();
-                    msg(o.status.success(), format!("{v} · credentials written to {}. For Tidal, sign in once from a terminal: docker exec -it encore streamrip --config-path /config/streamrip/config.toml url <any tidal link>", path.display()))
+                    let tidal = if streamrip::tidal_signed_in(&st) { "Tidal: signed in" } else { "Tidal: not signed in yet – use “Sign in to Tidal” below" };
+                    msg(o.status.success(), format!("{v} · credentials written to {} · {tidal}", path.display()))
                 }
             },
             "acoustid" => {

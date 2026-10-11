@@ -246,3 +246,131 @@ pub async fn download(st: &AppState, url: &str, folder: &Path) -> anyhow::Result
     }
     Ok(files)
 }
+
+// ---- Tidal account sign-in (device code) -------------------------------------------------------
+// Tidal has no API key for downloads: streamrip signs in with your own account once, through a link you
+// open in a browser. We run that flow here so it works from Settings instead of a terminal.
+
+#[derive(Clone, Debug, Default)]
+pub struct TidalLogin {
+    /// "starting" | "waiting" | "done" | "failed"
+    pub status: String,
+    pub url: Option<String>,
+    pub message: String,
+}
+
+static TIDAL_LOGIN: std::sync::Mutex<Option<TidalLogin>> = std::sync::Mutex::new(None);
+
+fn tidal_state() -> TidalLogin {
+    TIDAL_LOGIN.lock().map(|g| g.clone().unwrap_or_default()).unwrap_or_default()
+}
+
+fn tidal_set(f: impl FnOnce(&mut TidalLogin)) {
+    if let Ok(mut g) = TIDAL_LOGIN.lock() {
+        let mut s = g.take().unwrap_or_default();
+        f(&mut s);
+        *g = Some(s);
+    }
+}
+
+/// streamrip's config has a Tidal access token (the account is signed in).
+pub fn tidal_signed_in(st: &AppState) -> bool {
+    let Ok(text) = std::fs::read_to_string(config_path(st)) else { return false };
+    let Some(i) = text.find("[tidal]") else { return false };
+    let body = &text[i..];
+    let body = &body[..body[1..].find("\n[").map(|n| n + 1).unwrap_or(body.len())];
+    body.lines().any(|l| {
+        let l = l.trim();
+        l.starts_with("access_token") && l.split_once('=').map(|(_, v)| v.trim().trim_matches('"').len() > 10).unwrap_or(false)
+    })
+}
+
+/// Current sign-in state for the settings page.
+pub fn tidal_login_status(st: &AppState) -> Value {
+    let s = tidal_state();
+    serde_json::json!({ "status": s.status, "url": s.url, "message": s.message, "signed_in": tidal_signed_in(st) })
+}
+
+/// Start the sign-in: run streamrip on a Tidal link with no token, catch the link.tidal.com URL it prints,
+/// and watch for the token it writes. Returns once the URL is known (or it failed).
+pub async fn tidal_login_start(st: &AppState) -> anyhow::Result<Value> {
+    let Some(bin) = binary(st) else { anyhow::bail!("streamrip is not installed in this container") };
+    let cfg = apply_credentials(st).await?;
+    // a fresh sign-in: blank any old token so streamrip asks again
+    if let Ok(text) = std::fs::read_to_string(&cfg) {
+        let text = set_toml(&text, "tidal", "access_token", "\"\"");
+        let text = set_toml(&text, "tidal", "refresh_token", "\"\"");
+        std::fs::write(&cfg, text)?;
+    }
+    tidal_set(|s| { *s = TidalLogin { status: "starting".into(), url: None, message: "Starting streamrip…".into() }; });
+    let mut child = tokio::process::Command::new(&bin)
+        .args(["--config-path", &cfg.to_string_lossy(), "--no-db", "--no-progress", "url", "https://tidal.com/browse/track/1"])
+        .env("NO_COLOR", "1").env("TERM", "dumb").env("COLUMNS", "400").env("BROWSER", "true")
+        .stdin(std::process::Stdio::null()).stdout(std::process::Stdio::piped()).stderr(std::process::Stdio::piped())
+        .spawn()?;
+    let stdout = child.stdout.take();
+    let stderr = child.stderr.take();
+    let link = Regex::new(r"(https?://)?link\.tidal\.com/[A-Za-z0-9]+").unwrap();
+    let st2 = st.clone();
+    tokio::spawn(async move {
+        use tokio::io::AsyncBufReadExt;
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<String>();
+        if let Some(o) = stdout {
+            let tx = tx.clone();
+            tokio::spawn(async move {
+                let mut lines = tokio::io::BufReader::new(o).lines();
+                while let Ok(Some(l)) = lines.next_line().await { let _ = tx.send(l); }
+            });
+        }
+        if let Some(e) = stderr {
+            let tx = tx.clone();
+            tokio::spawn(async move {
+                let mut lines = tokio::io::BufReader::new(e).lines();
+                while let Ok(Some(l)) = lines.next_line().await { let _ = tx.send(l); }
+            });
+        }
+        drop(tx);
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(330);
+        let mut last = String::new();
+        loop {
+            let line = tokio::select! {
+                l = rx.recv() => l,
+                _ = tokio::time::sleep_until(deadline) => {
+                    tidal_set(|s| { s.status = "failed".into(); s.message = "Timed out – the link is only valid for 5 minutes. Try again.".into(); });
+                    let _ = child.kill().await;
+                    return;
+                }
+            };
+            let Some(line) = line else { break };
+            let text = line.trim().to_string();
+            if let Some(m) = link.find(&text) {
+                let u = m.as_str();
+                let u = if u.starts_with("http") { u.to_string() } else { format!("https://{u}") };
+                tidal_set(|s| { s.status = "waiting".into(); s.url = Some(u); s.message = "Open the link, approve in your Tidal account, then come back here.".into(); });
+            } else if !text.is_empty() {
+                last = text.chars().take(200).collect();
+            }
+            if tidal_signed_in(&st2) {
+                tidal_set(|s| { s.status = "done".into(); s.message = "Signed in to Tidal – downloads from Tidal use this account now.".into(); });
+                let _ = child.kill().await;
+                return;
+            }
+        }
+        let _ = child.wait().await;
+        if tidal_signed_in(&st2) {
+            tidal_set(|s| { s.status = "done".into(); s.message = "Signed in to Tidal – downloads from Tidal use this account now.".into(); });
+        } else {
+            tidal_set(|s| { s.status = "failed".into(); s.message = if last.is_empty() { "streamrip stopped before signing in".into() } else { format!("streamrip: {last}") }; });
+        }
+    });
+    // wait for the link (streamrip needs a moment to start)
+    for _ in 0..60 {
+        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+        let s = tidal_state();
+        if s.url.is_some() || s.status == "failed" || s.status == "done" {
+            return Ok(tidal_login_status(st));
+        }
+    }
+    tidal_set(|s| { if s.status == "starting" { s.status = "failed".into(); s.message = "streamrip did not show a sign-in link (check the Diagnostics page)".into(); } });
+    Ok(tidal_login_status(st))
+}
