@@ -18,7 +18,7 @@ switching back to the Python image still works (it treats the new *owner* role a
 |---|---|---|
 | R0 | Server, database, settings, sign-in, users, invites, settings API. New: **owner** role, **2FA** (authenticator app), **email sign-in links**, **sign out everywhere**, **profile pictures**, readable device names | done |
 | R1 | Library: scan, covers + thumbnails, streaming/transcoding, shuffle, likes, share links, storage, organize | done (lyrics lookup, artwork search, organize, duplicates come with R4) |
-| R2 | Discover: MusicBrainz, sentence search, artist/album pages, catalog merge, For you, new releases (library artists only) | core done (search, artist, album, new releases); For you, similar artists, genre pages, catalog merge, artist photo/bio next |
+| R2 | Discover: MusicBrainz, sentence search, artist/album pages, catalog merge, For you, new releases (library artists only) | done (YouTube Music in the catalog merge and link probe move to R3 with yt-dlp) |
 | R3 | Requests + worker + sources: slskd, yt-dlp, streamrip, HiFi API, **Torznab/Newznab → qBittorrent/SABnzbd**, picker | |
 | R4 | Tagging/import, fingerprints, AcoustID, lyrics, artwork | |
 | R5 | Playlists, connections & sync, follows, auto-download, scheduler, notifications, diagnostics, stats | |

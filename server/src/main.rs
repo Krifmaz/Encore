@@ -45,6 +45,8 @@ pub fn app(st: AppState) -> Router {
         .merge(routes::admin::router())
         .merge(routes::library::router())
         .merge(routes::discover::router())
+        .merge(routes::foryou::router())
+        .merge(routes::catalog::router())
         .with_state(st)
         .fallback_service(spa)
         .layer(middleware::from_fn(security_headers))

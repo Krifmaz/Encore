@@ -228,3 +228,39 @@ pub async fn release(st: &AppState, rid: &str) -> anyhow::Result<Value> {
         "tracks": tracks, "cover": format!("https://coverartarchive.org/release/{}/front-500", s(&r, "id")),
     }))
 }
+
+/// barcode (UPC/EAN, leading zeros dropped) → release-group id for every release by the artist.
+pub async fn artist_barcodes(st: &AppState, mbid: &str) -> anyhow::Result<HashMap<String, String>> {
+    let mut out = HashMap::new();
+    let mut offset = 0;
+    while offset < 400 {
+        let page = st.mb.get(st, "release", &[("artist", mbid.into()), ("inc", "release-groups".into()), ("limit", "100".into()), ("offset", offset.to_string())]).await?;
+        for rel in page["releases"].as_array().cloned().unwrap_or_default() {
+            let bc = rel["barcode"].as_str().unwrap_or("").trim_start_matches('0').to_string();
+            if let (false, Some(g)) = (bc.is_empty(), rel["release-group"]["id"].as_str()) {
+                out.insert(bc, g.to_string());
+            }
+        }
+        offset += 100;
+        if offset >= page["release-count"].as_i64().unwrap_or(0) {
+            break;
+        }
+    }
+    Ok(out)
+}
+
+pub async fn release_groups_for_isrc(st: &AppState, isrc: &str) -> std::collections::HashSet<String> {
+    let mut out = std::collections::HashSet::new();
+    let Ok(d) = st.mb.get(st, &format!("isrc/{isrc}"), &[]).await else { return out };
+    for r in d["recordings"].as_array().cloned().unwrap_or_default().iter().take(2) {
+        let Some(rid) = r["id"].as_str() else { continue };
+        if let Ok(d) = st.mb.get(st, &format!("recording/{rid}"), &[("inc", "releases+release-groups".into())]).await {
+            for rel in d["releases"].as_array().cloned().unwrap_or_default() {
+                if let Some(g) = rel["release-group"]["id"].as_str() {
+                    out.insert(g.to_string());
+                }
+            }
+        }
+    }
+    out
+}
