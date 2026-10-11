@@ -359,9 +359,24 @@ pub fn has_album(db: &Db, artist: &str, album: &str) -> bool {
     !album.is_empty() && db.one("SELECT 1 FROM tracks WHERE lower(album)=lower(?) AND (lower(albumartist)=lower(?) OR lower(artist)=lower(?)) LIMIT 1", p![album, artist, artist]).ok().flatten().is_some()
 }
 
-pub fn has_track(db: &Db, mbid: &str, artist: &str, title: &str) -> bool {
-    if !mbid.is_empty() && db.one("SELECT 1 FROM tracks WHERE mb_trackid=? LIMIT 1", p![mbid]).ok().flatten().is_some() {
-        return true;
+
+/// The library album for a MusicBrainz release group (or artist + title), so it can be played.
+pub fn album_id_for(db: &Db, rgid: &str, artist: &str, album: &str) -> Option<String> {
+    let mut row = if rgid.is_empty() { None } else { db.one("SELECT album_id FROM tracks WHERE mb_releasegroupid=? LIMIT 1", p![rgid]).ok().flatten() };
+    if row.is_none() && !album.is_empty() {
+        row = db.one("SELECT album_id FROM tracks WHERE lower(album)=lower(?) AND (lower(albumartist)=lower(?) OR lower(artist)=lower(?)) LIMIT 1", p![album, artist, artist]).ok().flatten();
     }
-    db.one("SELECT 1 FROM tracks WHERE lower(title)=lower(?) AND (lower(artist)=lower(?) OR lower(albumartist)=lower(?)) LIMIT 1", p![title, artist, artist]).ok().flatten().is_some()
+    row.map(|r| r.s("album_id"))
+}
+
+/// The library copy of a song (best quality first), so it can be played.
+pub fn find_track(db: &Db, mbid: &str, artist: &str, title: &str) -> Option<Row> {
+    const COLS: &str = "SELECT id, title, artist, album, album_id, format, duration FROM tracks";
+    const ORDER: &str = " ORDER BY CASE WHEN format IN ('flac','alac','wav','aiff') THEN 0 ELSE 1 END LIMIT 1";
+    if !mbid.is_empty() {
+        if let Ok(Some(r)) = db.one(&format!("{COLS} WHERE mb_trackid=?{ORDER}"), p![mbid]) {
+            return Some(r);
+        }
+    }
+    db.one(&format!("{COLS} WHERE lower(title)=lower(?) AND (lower(artist)=lower(?) OR lower(albumartist)=lower(?)){ORDER}"), p![title, artist, artist]).ok().flatten()
 }

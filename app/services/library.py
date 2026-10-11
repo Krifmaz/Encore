@@ -334,3 +334,20 @@ def has_track(mbid: str | None, artist: str, title: str) -> bool:
         "SELECT 1 FROM tracks WHERE lower(title)=lower(?) AND (lower(artist)=lower(?) OR lower(albumartist)=lower(?)) LIMIT 1",
         (title, artist, artist),
     ))
+
+
+def album_id_for(rgid: str | None, artist: str, album: str) -> str | None:
+    """The library album for a MusicBrainz release group (or artist + title), so it can be played."""
+    row = db.one("SELECT album_id FROM tracks WHERE mb_releasegroupid=? LIMIT 1", (rgid,)) if rgid else None
+    if not row and album:
+        row = db.one("SELECT album_id FROM tracks WHERE lower(album)=lower(?) AND (lower(albumartist)=lower(?) OR lower(artist)=lower(?)) LIMIT 1",
+                     (album, artist, artist))
+    return row["album_id"] if row else None
+
+
+def find_track(mbid: str | None, artist: str, title: str) -> dict | None:
+    """The library copy of a song (best quality first), so it can be played."""
+    cols = "SELECT id, title, artist, album, album_id, format, duration FROM tracks"
+    order = " ORDER BY CASE WHEN format IN ('flac','alac','wav','aiff') THEN 0 ELSE 1 END LIMIT 1"
+    row = db.one(f"{cols} WHERE mb_trackid=?{order}", (mbid,)) if mbid else None
+    return row or db.one(f"{cols} WHERE lower(title)=lower(?) AND (lower(artist)=lower(?) OR lower(albumartist)=lower(?)){order}", (title, artist, artist))

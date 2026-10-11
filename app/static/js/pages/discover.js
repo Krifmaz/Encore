@@ -10,7 +10,7 @@ const reqBtn = (attrs, label = 'Request') => `<button class="btn sm primary" ${a
 
 function trackRow(t) {
   return `<div class="list-item">
-    ${t.in_library ? `<div class="thumb">${art(t.cover, t.album || t.title)}</div>` : `<div class="thumb">${art(t.cover, t.album || t.title)}</div>`}
+    ${t.library ? `<button class="thumb play-thumb" data-play-song='${esc(JSON.stringify(t.library))}' title="Play" aria-label="Play">${art(t.cover, t.album || t.title)}<i>${icon.play}</i></button>` : `<div class="thumb">${art(t.cover, t.album || t.title)}</div>`}
     <div class="grow">
       <div class="ellipsis" style="font-weight:600">${esc(t.title)}</div>
       <div class="small muted ellipsis"><a href="#/artist/${esc(t.artist_id)}">${esc(t.artist)}</a>${t.album ? ` · ${t.release_group_id ? `<a href="#/album/${esc(t.release_group_id)}">${esc(t.album)}</a>` : esc(t.album)}` : ''}${t.year ? ' · ' + esc(t.year) : ''}</div>
@@ -37,6 +37,8 @@ function artistTile(a) {
 }
 
 function albumActions(a) {
+  // owned: play it straight from the library
+  if (a.library_album_id) return `<button class="fab" title="Play" aria-label="Play" data-play-album="${esc(a.library_album_id)}">${icon.play}</button>`;
   if (a.in_library || a.request_status) return '';
   return `<button class="fab" title="Request album" data-req-album='${esc(JSON.stringify({ mbid: a.id, artist: a.artist, title: a.title, album: a.title, year: a.year, cover_url: a.cover }))}'>${icon.plus}</button>`;
 }
@@ -234,7 +236,7 @@ export async function renderArtist(view, ctx) {
       <div class="grid">${rel.map((m, i) => `<div class="tile" data-ext-open="${i}">
         <div class="art">${art(m.cover, m.title)}
           <div class="corner">${m.in_library ? '<span class="badge ok">In library</span>' : m.request_status ? statusBadge(m.request_status) : '<span class="badge warn">Not in MusicBrainz</span>'}</div>
-          <div class="overlay">${m.in_library || m.request_status ? '' : `<button class="fab" data-ext-req="${i}" title="Request">${icon.plus}</button>`}</div></div>
+          <div class="overlay">${m.library_album_id ? `<button class="fab" data-play-album="${esc(m.library_album_id)}" title="Play" aria-label="Play">${icon.play}</button>` : m.in_library || m.request_status ? '' : `<button class="fab" data-ext-req="${i}" title="Request">${icon.plus}</button>`}</div></div>
         <div class="t ellipsis" title="${esc(m.title)}">${esc(m.title)}</div>
         <div class="s ellipsis">${esc([m.date || m.year, m.type, m.tracks ? m.tracks + ' tracks' : ''].filter(Boolean).join(' · '))}</div>
         <div class="row small" style="gap:8px;flex-wrap:wrap;margin-top:4px">
@@ -324,7 +326,8 @@ export async function renderAlbum(view, ctx) {
           ${a.year ? ' · ' + esc(a.year) : ''}${rel ? ` · ${rel.tracks.length} tracks · ${fmt.longDur(total)}` : ''}${rel?.label ? ' · ' + esc(rel.label) : ''}</div>
         <div class="chips mt">${(a.tags || []).map(t => `<span class="badge">${esc(t)}</span>`).join('')}</div>
         <div class="row wrap mt">
-          ${availability(a) || `<button class="btn primary" data-req-album='${esc(JSON.stringify({ mbid: a.id, artist: a.artist, title: a.title, album: a.title, year: a.year, cover_url: a.cover }))}'>${icon.plus}Request album</button>`}
+          ${a.library_album_id ? `<button class="btn primary" id="play-owned">${icon.play}Play</button><button class="btn" id="shuffle-owned">${icon.shuffle || icon.play}Shuffle</button><a class="btn" href="#/library/album/${esc(a.library_album_id)}">${icon.disc}Open in library</a>` : ''}
+          ${a.library_album_id ? '' : availability(a) || `<button class="btn primary" data-req-album='${esc(JSON.stringify({ mbid: a.id, artist: a.artist, title: a.title, album: a.title, year: a.year, cover_url: a.cover }))}'>${icon.plus}Request album</button>`}
           <button class="btn" id="pick-album" title="Search every source and choose the exact download">${icon.search}Pick download</button>
           <a class="btn sm ghost" target="_blank" rel="noopener" href="https://musicbrainz.org/release-group/${esc(a.id)}">${icon.external}MusicBrainz</a>
         </div>
@@ -333,8 +336,8 @@ export async function renderAlbum(view, ctx) {
     ${rel ? `<div class="card flat"><div class="table-wrap"><table class="table">
       <thead><tr><th class="num">#</th><th>Title</th><th class="hide-sm">Artist</th><th>Length</th><th></th></tr></thead>
       <tbody>${rel.tracks.map(t => `<tr>
-        <td class="num">${t.in_library ? `${multi ? t.disc + '-' : ''}${t.track}` : `${multi ? t.disc + '-' : ''}${t.track}`}</td>
-        <td>${esc(t.title)}</td>
+        <td class="num">${t.library ? `<button class="btn ghost icon sm" data-play-row="${esc(t.recording_id)}" title="Play" aria-label="Play">${icon.play.replace('<svg', '<svg width="14"')}</button>` : `${multi ? t.disc + '-' : ''}${t.track}`}</td>
+        <td>${t.library ? `<a href="#" data-play-row="${esc(t.recording_id)}" style="color:var(--text)">${esc(t.title)}</a>` : esc(t.title)}</td>
         <td class="hide-sm muted">${esc(t.artist)}</td>
         <td class="muted">${fmt.dur(t.length)}</td>
         <td style="text-align:right;white-space:nowrap"><button class="btn sm ghost icon" data-more-track="${esc(t.recording_id)}" title="More like this" aria-label="More like this">${icon.spark}</button><button class="btn sm ghost icon" data-pick-track="${esc(t.recording_id)}" title="Pick a download for this song" aria-label="Pick a download">${icon.search}</button>
@@ -347,7 +350,19 @@ export async function renderAlbum(view, ctx) {
     kind: 'album', mbid: a.id, artist: a.artist, artist_mbid: a.artist_id, title: a.title, album: a.title, year: a.year,
     cover_url: a.cover, track_count: rel ? rel.tracks.length : null, onDone: reload,
   });
+  // songs you own play right here, in album order, then on through the rest of the owned songs
+  const owned = rel ? rel.tracks.filter(t => t.library) : [];
+  const queue = owned.map(t => t.library);
+  const playOwned = (i, shuffle = false) => {
+    if (!queue.length) return toast('None of these songs are in your library yet', 'err');
+    const q = shuffle ? [...queue].sort(() => Math.random() - 0.5) : queue;
+    player.playQueue(q, i, { context: 'album' });
+  };
+  view.querySelector('#play-owned')?.addEventListener('click', () => playOwned(0));
+  view.querySelector('#shuffle-owned')?.addEventListener('click', () => playOwned(0, true));
   view.addEventListener('click', (e) => {
+    const pr = e.target.closest('[data-play-row]');
+    if (pr) { e.preventDefault(); return playOwned(owned.findIndex(t => t.recording_id === pr.dataset.playRow)); }
     const ml = e.target.closest('[data-more-track]');
     if (ml) { const t = rel.tracks.find(x => x.recording_id === ml.dataset.moreTrack); return moreLikeThis(t.artist, t.title, t.recording_id); }
     const b = e.target.closest('[data-pick-track]');

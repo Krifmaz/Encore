@@ -47,6 +47,13 @@ export function bindTiles(root, navigate) {
       playAlbum(play.dataset.playAlbum);
       return;
     }
+    const song = e.target.closest('[data-play-song]');
+    if (song) {
+      e.stopPropagation();
+      const player = await import('../player.js');
+      player.playQueue([JSON.parse(song.dataset.playSong)], 0);
+      return;
+    }
     if (e.target.closest('button, a, input')) return;
     const tile = e.target.closest('[data-href]');
     if (tile) navigate(tile.dataset.href);

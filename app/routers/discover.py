@@ -19,7 +19,8 @@ def _req_status(mbids: list[str]) -> dict:
 def annotate_albums(items: list[dict]) -> list[dict]:
     st = _req_status([i["id"] for i in items])
     for i in items:
-        i["in_library"] = library.has_release_group(i["id"]) or library.has_album(i["artist"], i["title"])
+        i["library_album_id"] = library.album_id_for(i["id"], i["artist"], i["title"])
+        i["in_library"] = bool(i["library_album_id"])
         i["request_status"] = st.get(i["id"])
     return items
 
@@ -63,7 +64,8 @@ async def search(q: str, type: str = "all"):
                 tracks = extra + tracks if p["lyrics"] else tracks + extra
             st = _req_status([t["id"] for t in tracks])
             for t in tracks:
-                t["in_library"] = library.has_track(t["id"], t["artist"], t["title"])
+                t["library"] = library.find_track(t["id"], t["artist"], t["title"])
+                t["in_library"] = bool(t["library"])
                 t["request_status"] = st.get(t["id"])
             out["tracks"] = tracks
         return out
@@ -206,7 +208,8 @@ async def album(rgid: str):
     annotate_albums([rg])
     if rel:
         for t in rel["tracks"]:
-            t["in_library"] = library.has_track(t["recording_id"], t["artist"], t["title"])
+            t["library"] = library.find_track(t["recording_id"], t["artist"], t["title"])
+            t["in_library"] = bool(t["library"])
     rg["release"] = rel
     return rg
 

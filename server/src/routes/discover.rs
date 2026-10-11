@@ -2,7 +2,7 @@
 use crate::auth::User;
 use crate::db::RowExt;
 use crate::error::{err, ApiError, ApiResult};
-use crate::library::{has_album, has_release_group, has_track};
+use crate::library::has_album;
 use crate::state::AppState;
 use crate::{mb, nlsearch, p};
 use axum::extract::{Path, Query, State};
@@ -39,8 +39,9 @@ fn annotate_albums(st: &AppState, items: &mut [Value]) {
     let rs = req_status(st, &ids);
     for i in items.iter_mut() {
         let id = i["id"].as_str().unwrap_or("").to_string();
-        let have = has_release_group(&st.db, &id) || has_album(&st.db, i["artist"].as_str().unwrap_or(""), i["title"].as_str().unwrap_or(""));
-        i["in_library"] = json!(have);
+        let lib = crate::library::album_id_for(&st.db, &id, i["artist"].as_str().unwrap_or(""), i["title"].as_str().unwrap_or(""));
+        i["in_library"] = json!(lib.is_some());
+        i["library_album_id"] = json!(lib);
         i["request_status"] = rs.get(&id).map(|s| json!(s)).unwrap_or(Value::Null);
     }
 }
@@ -129,7 +130,9 @@ async fn search(State(st): State<AppState>, User(_): User, Query(sq): Query<Sear
         let rs = req_status(&st, &ids);
         for t in tracks.iter_mut() {
             let id = t["id"].as_str().unwrap_or("").to_string();
-            t["in_library"] = json!(has_track(&st.db, &id, t["artist"].as_str().unwrap_or(""), t["title"].as_str().unwrap_or("")));
+            let lib = crate::library::find_track(&st.db, &id, t["artist"].as_str().unwrap_or(""), t["title"].as_str().unwrap_or(""));
+            t["in_library"] = json!(lib.is_some());
+            t["library"] = json!(lib);
             t["request_status"] = rs.get(&id).map(|s| json!(s)).unwrap_or(Value::Null);
         }
         out["tracks"] = json!(tracks);
@@ -189,7 +192,9 @@ async fn album(State(st): State<AppState>, User(_): User, Path(rgid): Path<Strin
     if let Some(r) = rel.as_mut() {
         if let Some(ts) = r["tracks"].as_array_mut() {
             for t in ts.iter_mut() {
-                t["in_library"] = json!(has_track(&st.db, t["recording_id"].as_str().unwrap_or(""), t["artist"].as_str().unwrap_or(""), t["title"].as_str().unwrap_or("")));
+                let lib = crate::library::find_track(&st.db, t["recording_id"].as_str().unwrap_or(""), t["artist"].as_str().unwrap_or(""), t["title"].as_str().unwrap_or(""));
+                t["in_library"] = json!(lib.is_some());
+                t["library"] = json!(lib);
             }
         }
     }
