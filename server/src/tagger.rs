@@ -151,7 +151,7 @@ fn tag_file(st: &AppState, path: &Path, vals: &Row, cover: Option<&[u8]>) {
 
 // ---- cover art ----------------------------------------------------------------------------------
 
-async fn get_image(st: &AppState, url: &str) -> Option<Vec<u8>> {
+pub async fn get_image(st: &AppState, url: &str) -> Option<Vec<u8>> {
     let r = st.http.get(url).timeout(std::time::Duration::from_secs(15)).send().await.ok()?;
     if !r.status().is_success() {
         return None;
@@ -346,13 +346,57 @@ pub async fn move_file(st: &AppState, src: &Path, dest: &Path, replace_same: boo
     Ok(d)
 }
 
-fn index_paths(st: &AppState, paths: &[PathBuf]) {
+pub fn index_paths(st: &AppState, paths: &[PathBuf]) {
     for p in paths {
         if let Err(e) = library::index_file(&st.db, &p.to_string_lossy()) {
             st.db.log("warning", &format!("Could not index {}: {e}", p.display()));
         }
     }
     st.library.forget_cover(None);
+}
+
+/// Files were renamed/moved: keep their library rows (and so likes/playlist entries) by updating the path.
+pub fn relink(st: &AppState, old: &[PathBuf], new: &[PathBuf]) {
+    for (o, n) in old.iter().zip(new) {
+        if o == n {
+            continue;
+        }
+        let (o, n) = (o.to_string_lossy(), n.to_string_lossy());
+        if let Ok(Some(clash)) = st.db.one("SELECT id FROM tracks WHERE path=?", p![n]) {
+            let _ = st.db.execute("UPDATE playlist_items SET track_id=(SELECT id FROM tracks WHERE path=?) WHERE track_id=?", p![o, clash.i("id")]);
+            let _ = st.db.execute("DELETE FROM tracks WHERE id=?", p![clash.i("id")]);
+        }
+        let _ = st.db.execute("UPDATE tracks SET path=? WHERE path=?", p![n, o]);
+    }
+}
+
+/// Manual tag edit for library tracks. → the files written
+pub fn edit_tags(st: &AppState, ids: &[i64], values: &serde_json::Map<String, Value>) -> anyhow::Result<Vec<PathBuf>> {
+    const ALLOWED: [&str; 8] = ["title", "artist", "album", "albumartist", "tracknumber", "discnumber", "date", "genre"];
+    let vals: Row = values.iter().filter(|(k, v)| ALLOWED.contains(&k.as_str()) && !v.is_null()).map(|(k, v)| (k.clone(), v.clone())).collect();
+    let mut out = vec![];
+    for id in ids {
+        if let Some(t) = st.db.one("SELECT path FROM tracks WHERE id=?", p![id])? {
+            let pth = PathBuf::from(t.s("path"));
+            write_tags(&pth, &vals, None)?;
+            out.push(pth);
+        }
+    }
+    Ok(out)
+}
+
+/// Tag an album from a chosen release (any provider) and move it to the naming template.
+pub async fn retag_album(st: &AppState, album_id: &str, release_id: &str, rename: Option<bool>) -> anyhow::Result<Vec<PathBuf>> {
+    let old: Vec<PathBuf> = st.db.query("SELECT path FROM tracks WHERE album_id=? ORDER BY disc, track, path", p![album_id])?.iter().map(|r| PathBuf::from(r.s("path"))).collect();
+    let pv = preview(st, &old, release_id, false).await?;
+    let new = apply_preview(st, &pv, rename.unwrap_or(st.cfg.bool("rename_on_import")), None, None).await?;
+    let rows: Vec<PathBuf> = pv["rows"].as_array().cloned().unwrap_or_default().iter().map(|r| PathBuf::from(r["path"].as_str().unwrap_or(""))).collect();
+    relink(st, &rows, &new);
+    index_paths(st, &new);
+    let _ = std::fs::remove_file(st.data_dir().join("covers").join(format!("{album_id}.jpg")));
+    st.db.log("info", &format!("Tagged album '{}' by {} from {}", pv["release"]["title"].as_str().unwrap_or(""), pv["release"]["artist"].as_str().unwrap_or(""),
+        pv["release"]["provider"].as_str().unwrap_or("MusicBrainz")));
+    Ok(new)
 }
 
 // ---- matching -----------------------------------------------------------------------------------
@@ -417,12 +461,16 @@ pub fn release_values(rel: &Value, t: &Value) -> Row {
     ] {
         m.insert(k.into(), v);
     }
+    if rel["provider"].as_str().is_some_and(|p| p != "MusicBrainz") {
+        // Deezer/Apple/Discogs metadata: no MusicBrainz ids
+        m.retain(|k, _| !k.starts_with("musicbrainz_"));
+    }
     m
 }
 
 /// Files → MusicBrainz release: per-file new values and paths, plus a confidence.
 pub async fn preview(st: &AppState, paths: &[PathBuf], release_id: &str, single: bool) -> anyhow::Result<Value> {
-    let rel = mb::release(st, release_id).await?;
+    let rel = crate::meta::release(st, release_id).await?;
     let files: Vec<Row> = paths.iter().map(|p| read_tags(&p.to_string_lossy())).collect();
     let tracks = rel["tracks"].as_array().cloned().unwrap_or_default();
     let (assign, conf) = map_files(&files, &tracks);
@@ -448,7 +496,10 @@ pub async fn preview(st: &AppState, paths: &[PathBuf], release_id: &str, single:
 
 pub async fn apply_preview(st: &AppState, pv: &Value, rename: bool, source_root: Option<&Path>, hint: Option<&str>) -> anyhow::Result<Vec<PathBuf>> {
     let rel = &pv["release"];
-    let mut cover = fetch_cover(st, rel["id"].as_str(), rel["release_group_id"].as_str()).await;
+    let mut cover = match rel["cover_url"].as_str() { Some(u) => get_image(st, u).await, None => None };
+    if cover.is_none() && rel["provider"].as_str().is_none_or(|p| p == "MusicBrainz") {
+        cover = fetch_cover(st, rel["id"].as_str(), rel["release_group_id"].as_str()).await;
+    }
     if cover.is_none() {
         cover = find_art(st, rel["artist"].as_str().unwrap_or(""), rel["title"].as_str(), None, hint).await.map(|x| x.0);
     }

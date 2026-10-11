@@ -74,7 +74,7 @@ async fn getj(st: &AppState, url: &str, q: &[(&str, String)]) -> anyhow::Result<
     Ok(st.http.get(url).query(q).send().await?.error_for_status()?.json().await?)
 }
 
-fn discogs_req(st: &AppState, url: &str) -> reqwest::RequestBuilder {
+pub fn discogs_req(st: &AppState, url: &str) -> reqwest::RequestBuilder {
     let mut r = st.http.get(url);
     let tok = st.cfg.str("discogs_token");
     if !tok.is_empty() {
@@ -261,7 +261,7 @@ async fn bandcamp_albums(st: &AppState, base: &str) -> anyhow::Result<Vec<Value>
 
 // ---- tracklists (requesting a release MusicBrainz doesn't have) --------------------------------
 
-fn dur(v: &Value) -> Value {
+pub fn dur(v: &Value) -> Value {
     if let Some(n) = v.as_f64() {
         return json!(n);
     }

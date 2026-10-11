@@ -4,6 +4,7 @@ pub mod library;
 pub mod picker;
 pub mod requests;
 pub mod system;
+pub mod tagging;
 pub mod discover;
 pub mod foryou;
 pub mod catalog;

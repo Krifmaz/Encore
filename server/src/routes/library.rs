@@ -83,7 +83,7 @@ async fn stats(State(st): State<AppState>, User(_): User) -> Json<Value> {
     s["scan"] = json!(scan);
     s["acoustid"] = json!(!st.cfg.str("acoustid_api_key").is_empty());
     for k in ["bulk", "verify", "artwork", "organize"] {
-        s[k] = json!({ "running": false });
+        s[k] = crate::jobs::get(k);
     }
     Json(s)
 }
@@ -381,20 +381,19 @@ async fn stream(State(st): State<AppState>, User(_): User, Path(id): Path<i64>, 
 #[serde(default)]
 struct LyricsQ {
     fetch: Option<bool>,
+    force: Option<bool>,
 }
 
-/// Lyrics saved next to the song (.lrc synced, .txt plain). Looking them up online comes with tagging (phase R4).
-async fn lyrics(State(st): State<AppState>, User(_): User, Path(id): Path<i64>, Query(_q): Query<LyricsQ>) -> ApiResult<Json<Value>> {
-    let t = st.db.one("SELECT path FROM tracks WHERE id=?", p![id])?.ok_or_else(|| err(404, "Track not found"))?;
-    let path = FsPath::new(&t.s("path")).to_path_buf();
-    for (ext, synced) in [("lrc", true), ("txt", false)] {
-        if let Ok(text) = std::fs::read_to_string(path.with_extension(ext)) {
-            if !text.trim().is_empty() {
-                return Ok(Json(json!({ "lyrics": text, "synced": synced, "source": "file" })));
-            }
-        }
+/// Lyrics next to the song (.lrc synced, .txt plain), looked up on LRCLIB and saved when missing.
+async fn lyrics(State(st): State<AppState>, User(_): User, Path(id): Path<i64>, Query(q): Query<LyricsQ>) -> ApiResult<Json<Value>> {
+    let t = st.db.one("SELECT id, path, artist, title, album, duration FROM tracks WHERE id=?", p![id])?.ok_or_else(|| err(404, "Track not found"))?;
+    if !q.fetch.unwrap_or(true) {
+        return Ok(Json(match crate::lyrics::sidecar(FsPath::new(&t.s("path"))) {
+            Some((text, synced)) => json!({ "lyrics": text, "synced": synced, "source": "file" }),
+            None => json!({ "lyrics": null, "synced": false, "source": null }),
+        }));
     }
-    Ok(Json(json!({ "lyrics": null, "synced": false, "source": null })))
+    crate::lyrics::fetch_for_track(&st, &t, q.force.unwrap_or(false)).await.map(Json).map_err(|e| err(502, format!("Lyrics lookup failed: {e}")))
 }
 
 async fn album(State(st): State<AppState>, User(u): User, Path(id): Path<String>) -> ApiResult<Json<Value>> {

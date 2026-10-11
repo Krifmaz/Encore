@@ -130,6 +130,13 @@ async fn complete(st: &AppState, r: &mut Req, message: &str, new: &[PathBuf], or
     notify::send(st, "✅ Now available", &format!("{}\n{message}", r.label()), r.hint().as_deref()).await;
     if !new.is_empty() {
         notify::refresh_media_servers(st).await;
+        if st.cfg.bool("lyrics_on_import") {
+            let ids: Vec<i64> = new.iter().filter_map(|p| st.db.one("SELECT id FROM tracks WHERE path=?", p![p.to_string_lossy()]).ok().flatten()).map(|r| r.i("id")).collect();
+            let st = st.clone();
+            tokio::spawn(async move {
+                crate::lyrics::fetch_missing(&st, Some(&ids), ids.len()).await;
+            });
+        }
     }
 }
 

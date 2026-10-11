@@ -4,12 +4,17 @@ mod auth;
 mod config;
 mod db;
 mod email;
+mod dupes;
 mod error;
+mod jobs;
 mod library;
+mod lyrics;
 mod mb;
+mod meta;
 mod matcher;
 mod nlsearch;
 mod notify;
+mod organize;
 mod routes;
 mod sources;
 mod state;
@@ -56,6 +61,7 @@ pub fn app(st: AppState) -> Router {
         .merge(routes::requests::router())
         .merge(routes::picker::router())
         .merge(routes::system::router())
+        .merge(routes::tagging::router())
         .with_state(st)
         .fallback_service(spa)
         .layer(middleware::from_fn(security_headers))
