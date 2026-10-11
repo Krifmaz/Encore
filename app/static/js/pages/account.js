@@ -25,6 +25,12 @@ export async function render(view, ctx) {
         <button class="btn primary" type="submit">Update password</button>
       </form>
     </div>
+    ${has('rename') ? `<form class="card stack mt" id="name-form" style="max-width:720px">
+      <h3>Username</h3>
+      <p class="small muted" style="margin:0">What you sign in with and what others see. 3–32 letters, numbers, . _ -</p>
+      <div class="row wrap" style="gap:10px"><input class="input grow" name="username" value="${esc(me.username)}" autocomplete="username" minlength="3" maxlength="32" required style="min-width:220px">
+        <button class="btn primary" type="submit">Save</button></div>
+    </form>` : ''}
     <form class="card stack mt" id="email-form" style="max-width:720px">
       <h3>Email</h3>
       <p class="small muted" style="margin:0">Used only to send you a link if you forget your password.</p>
@@ -50,6 +56,14 @@ export async function render(view, ctx) {
     } catch (err) { toast(err.message, 'err'); }
   };
   view.querySelector('#change-server')?.addEventListener('click', () => window.EncoreNative.changeServer());
+  view.querySelector('#name-form')?.addEventListener('submit', async (e) => {
+    e.preventDefault();
+    try {
+      const r = await api.put('/auth/profile', { username: e.target.username.value.trim() });
+      toast(`You're now ${r.username}`, 'ok');
+      await refreshUser?.();
+    } catch (err) { toast(err.message, 'err'); }
+  });
   view.querySelector('#email-form').onsubmit = async (e) => {
     e.preventDefault();
     try { await api.put('/auth/profile', { email: e.target.email.value }); toast('Email saved', 'ok'); } catch (err) { toast(err.message, 'err'); }

@@ -77,7 +77,7 @@ function renderShell() {
   qs('#app').innerHTML = `
     <div class="shell">
       <aside class="sidebar" id="sidebar">
-        <a class="brand" href="#/"><img src="/favicon.svg" alt="">${appName}</a>
+        <a class="brand" href="#/">${appearance.logo()}${appName}</a>
         <nav class="nav">
           ${navLink('/', icon.home, 'Home')}
           ${navLink('/search', icon.search, 'Discover')}

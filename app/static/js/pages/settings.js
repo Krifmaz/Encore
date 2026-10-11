@@ -1,5 +1,5 @@
 import { api } from '../api.js';
-import { copyText, esc, icon, setSecretText, toast } from '../ui.js';
+import { copyText, esc, EYE, EYE_OFF, icon, setSecretText, toast } from '../ui.js';
 import * as accountPage from './account.js';
 import * as connectionsPage from './connections.js';
 import * as adminPage from './admin.js';
@@ -99,7 +99,7 @@ const SECTIONS = [
     S('slskd_stall_minutes', 'Give up on a stalled user after (minutes)', 'number'),
     S('slskd_max_candidates', 'Max users to try per request', 'number'),
   ] },
-  { id: 'ytdlp', title: 'YouTube Music / SoundCloud (yt-dlp)', fields: [
+  { id: 'ytdlp', title: 'YouTube Music / SoundCloud (yt-dlp)', test: 'ytdlp', testLabel: 'Test cookies', fields: [
     S('ytdlp_enabled', 'Enable yt-dlp as a source', 'bool'),
     S('ytdlp_last_resort', 'Always try YouTube Music last, so downloads (almost) never fail', 'bool'),
     S('ytdlp_format', 'Audio format', 'select', { options: [['best', 'Original stream – best quality, no re-encode (recommended)'], ['m4a', 'M4A (AAC, re-encoded)'], ['mp3', 'MP3 (re-encoded)'], ['opus', 'Opus']] }),
@@ -137,28 +137,19 @@ const SECTIONS = [
   ] },
 ];
 
-// Every key, token and password lives on one page; the other pages keep the non-secret options.
-const KEY_FIELD = (f) => f.type === 'password' || f.secret || /client_id$|qobuz_user$/.test(f.key);
-const KEYS = { id: 'keys', title: 'API keys & passwords', fields: [] };
-for (const sec of SECTIONS) {
-  const keys = sec.fields.filter(KEY_FIELD);
-  keys.forEach(f => KEYS.fields.push({ ...f, label: `${f.label} – ${sec.title}`, full: true }));
-  sec.fields = sec.fields.filter(f => !KEY_FIELD(f));
-}
-SECTIONS.push(KEYS);
-
 // Settings pages: related cards together, in an order that reads top to bottom.
 const GROUPS = [
   { id: 'general', title: 'General', sections: ['general'] },
-  { id: 'keys', title: 'API keys & passwords', sections: ['keys'] },
   { id: 'downloads', title: 'Downloads & sources', sections: ['pipeline', 'slskd', 'torznab', 'ytdlp', 'hifi', 'streamrip', 'lidarr'] },
   { id: 'tagging', title: 'Library, tagging & IDs', sections: ['library', 'verify'] },
   { id: 'accounts', title: 'Email & notifications', sections: ['email', 'notify'] },
-  { id: 'connections', title: 'Services & sync', sections: ['spotify', 'sync', 'media'] },
+  { id: 'services', title: 'Services & sync', sections: ['spotify', 'sync', 'media'] },
 ];
 const groupOf = (id) => (GROUPS.find(g => g.id === id || g.sections.includes(id)) || {}).id || id;
 
 const MASK = '••••';
+let REVEAL = false;   // server can hand a saved secret back to the eye/copy buttons
+const secretOf = async (key) => (await api.get(`/admin/settings/secret/${encodeURIComponent(key)}`)).value;
 const isMasked = (v) => typeof v === 'string' && v.startsWith(MASK);
 
 function sourceNote(f, v, meta) {
@@ -193,13 +184,17 @@ function field(f, v, opts, meta = {}) {
     return `<label class="field ${cls}"><span>${esc(f.label)}</span><select class="input" data-k="${f.key}" id="${id}" ${dis}>
       ${options.map(([val, lab]) => `<option value="${esc(val)}" ${String(val) === String(v) ? 'selected' : ''}>${esc(lab)}</option>`).join('')}</select>${help}</label>`;
   }
+  const reveal = REVEAL && v && !locked;
   if (f.type === 'textarea') {
-    return `<label class="field ${cls}"><span>${esc(f.label)}</span><textarea class="input mono" data-k="${f.key}" ${dis} placeholder="${v ? 'Saved – paste to replace' : ''}"></textarea>${help}</label>`;
+    const btns = reveal ? `<span class="row" style="gap:8px"><button type="button" class="btn sm" data-reveal="${f.key}">${EYE}Show saved</button><button type="button" class="btn sm" data-copy="${f.key}">${icon.copy}Copy</button></span>` : '';
+    return `<label class="field ${cls}"><span>${esc(f.label)}</span><textarea class="input mono" data-k="${f.key}" ${dis} placeholder="${v ? 'Saved – paste to replace' : ''}"></textarea>${btns}${help}</label>`;
   }
   if (f.type === 'password') {
-    // secrets are never sent to the browser: empty input = keep the saved value
-    return `<label class="field ${cls}"><span>${esc(f.label)}</span><input class="input" type="password" data-k="${f.key}" value="" ${dis}
-      autocomplete="new-password" placeholder="${locked ? 'set by environment' : v ? 'saved – paste a new value to replace' : 'not set'}">${help}</label>`;
+    // secrets are only sent to the browser when you press the eye/copy button: empty input = keep the saved value
+    const input = `<input class="input" type="password" data-k="${f.key}" value="" ${dis} ${reveal ? 'data-eye="1"' : ''}
+      autocomplete="new-password" placeholder="${locked ? 'set by environment' : v ? 'saved – paste a new value to replace' : 'not set'}">`;
+    const wrapped = reveal ? `<span class="pw-wrap secret">${input}<button type="button" class="eye-btn" data-reveal="${f.key}" title="Show" aria-label="Show">${EYE}</button><button type="button" class="eye-btn" data-copy="${f.key}" title="Copy" aria-label="Copy">${icon.copy}</button></span>` : input;
+    return `<label class="field ${cls}"><span>${esc(f.label)}</span>${wrapped}${help}</label>`;
   }
   const type = f.type === 'number' ? 'number' : 'text';
   return `<label class="field ${cls}"><span>${esc(f.label)}</span><input class="input" type="${type}" data-k="${f.key}" ${f.step ? `step="${f.step}"` : ''}
@@ -258,6 +253,8 @@ const EMBEDDED = {
 export async function render(view, ctx) {
   const admin = ['admin', 'owner'].includes(ctx.user?.role);
   let values = admin ? await api.get('/admin/settings') : {};
+  const { session } = await import('../app.js');
+  REVEAL = (session.info?.features || []).includes('reveal');
   let lidarrOpts = null;
   let current = ctx.query.s ? groupOf(ctx.query.s) : 'account';
   const nav = [
@@ -265,7 +262,7 @@ export async function render(view, ctx) {
     ...(admin ? [
       ['People', [['users', 'Users & permissions'], ['invites', 'Invites']]],
       ['Server', [...GROUPS.map(g => [g.id, g.title]), ['autodownload', 'Auto-download'], ['tasks', 'Scheduled tasks']]],
-      ['System', [['diagnostics', 'Diagnostics'], ['api', 'API & security']]],
+      ['System', [['diagnostics', 'Diagnostics']]],
     ] : []),
   ];
   const pages = nav.flatMap(([, items]) => items);
@@ -285,8 +282,7 @@ export async function render(view, ctx) {
     view.querySelector('.settings-select').value = id;
     history.replaceState(null, '', `#/settings?s=${id}`);
     if (EMBEDDED[id]) { panel.innerHTML = '<div class="skeleton" style="height:200px"></div>'; return EMBEDDED[id](panel, ctx); }
-    if (id === 'about') return show('general');
-    if (id === 'api') return showApi();
+    if (id === 'about' || id === 'api' || id === 'keys') return show('general');
     if (id === 'tasks') return renderTasks(panel);
     const group = GROUPS.find(g => g.id === id) || GROUPS[0];
     // only what this server has: Encore 2 (Rust) has Prowlarr instead of Lidarr
@@ -303,7 +299,7 @@ export async function render(view, ctx) {
       <div data-out>${flash && flash.sec === sec.id ? `<div class="test-result ${flash.ok ? 'ok' : 'err'}">${flash.ok ? icon.check : icon.x}<span>${esc(flash.message || '')}</span></div>` : ''}</div>
       <div class="form-grid">${sec.fields.map(f => field(f, values[f.key], lidarrOpts, meta)).join('')}</div>
       <div class="row mt" style="justify-content:flex-end"><button class="btn primary" data-save>${icon.check}Save</button></div>
-    </details>`).join('') + (group.id === 'downloads' ? pipelineHelp() : '') + (group.id === 'general' ? await aboutCard() : '');
+    </details>`).join('') + (group.id === 'downloads' ? pipelineHelp() : '') + (group.id === 'general' ? await apiCard() + await aboutCard() : '');
     panel.querySelectorAll('[data-sec]').forEach(card => {
       const sec = SECTIONS.find(x => x.id === card.dataset.sec);
       const out = card.querySelector('[data-out]');
@@ -314,6 +310,29 @@ export async function render(view, ctx) {
         await api.put('/admin/settings', { [a.dataset.clear]: '' }).then(v => { values = v; });
         toast('Cleared', 'ok');
         show(id);
+      }));
+      card.querySelectorAll('[data-reveal]').forEach(b => b.addEventListener('click', async (e) => {
+        e.preventDefault();
+        const input = card.querySelector(`[data-k="${b.dataset.reveal}"]`);
+        const hidden = input.tagName === 'TEXTAREA' ? !input.dataset.shown : input.type === 'password';
+        try {
+          if (hidden) {
+            if (!input.value) { input.value = await secretOf(b.dataset.reveal); input.dataset.revealed = '1'; }
+            if (input.tagName !== 'TEXTAREA') input.type = 'text';
+            input.dataset.shown = '1';
+          } else {
+            if (input.dataset.revealed) { input.value = ''; delete input.dataset.revealed; }
+            if (input.tagName !== 'TEXTAREA') input.type = 'password';
+            delete input.dataset.shown;
+          }
+          if (b.classList.contains('eye-btn')) { b.innerHTML = hidden ? EYE_OFF : EYE; b.title = hidden ? 'Hide' : 'Show'; }
+          else b.innerHTML = hidden ? `${EYE_OFF}Hide` : `${EYE}Show saved`;
+        } catch (err) { toast(err.message, 'err'); }
+      }));
+      card.querySelectorAll('[data-copy]').forEach(b => b.addEventListener('click', async (e) => {
+        e.preventDefault();
+        const input = card.querySelector(`[data-k="${b.dataset.copy}"]`);
+        try { copyText(input.value || await secretOf(b.dataset.copy)); } catch (err) { toast(err.message, 'err'); }
       }));
       const t = card.querySelector('[data-test]');
       if (t) t.onclick = async (ev) => {
@@ -356,27 +375,26 @@ export async function render(view, ctx) {
     }
   };
 
-  const showApi = async () => {
-    const { api_key } = await api.get('/system/api-key');
-    panel.innerHTML = `<div class="card stack">
-      <h2>API access</h2>
-      <p class="muted" style="margin:0">Use this key in an <span class="kbd">X-Api-Key</span> header to automate requests (e.g. from scripts or Home Assistant). It acts as the first admin account. Full API docs at <a href="/api/docs" target="_blank" style="color:var(--accent)">/api/docs</a>.</p>
-      <div class="row"><div class="code grow" id="key" data-secret data-value="${esc(api_key)}"></div><button class="btn" id="cp">${icon.copy}</button><button class="btn danger" id="regen">${icon.refresh}Regenerate</button></div>
-    </div>
-    <div class="card stack mt">
-      <h2>Security notes</h2>
-      <ul class="muted" style="margin:0;padding-left:18px;line-height:1.8">
-        <li>Only expose <b>this app</b> publicly (ideally behind HTTPS via a reverse proxy). Keep Lidarr and slskd on your internal Docker network – Encore talks to them for your users.</li>
-        <li>Sign-ups are <b>${esc(values.signup_mode)}</b>. Manage access under <a href="#/admin/invites" style="color:var(--accent)">Invites</a> and <a href="#/admin/users" style="color:var(--accent)">Users</a>.</li>
-        <li>Sessions are HTTP-only SameSite cookies, every change needs a CSRF header, and failed logins are rate-limited per IP.</li>
-      </ul>
+  // Encore's own API key, at the bottom of General (only the owner may see it on Encore 2)
+  const apiCard = async () => {
+    let key;
+    try { key = (await api.get('/system/api-key')).api_key; } catch { return ''; }
+    setTimeout(() => {
+      const card = panel.querySelector('#api-card');
+      if (!card) return;
+      card.querySelector('#cp').onclick = () => copyText(card.querySelector('#key').dataset.value);
+      card.querySelector('#regen').onclick = async () => {
+        if (!confirm('Make a new API key? Scripts using the old one stop working.')) return;
+        const r = await api.post('/admin/settings/api-key');
+        setSecretText(card.querySelector('#key'), r.api_key);
+        toast('New API key generated', 'ok');
+      };
+    });
+    return `<div class="card stack mt" id="api-card">
+      <h2>Encore API key</h2>
+      <p class="muted small" style="margin:0">Send it in an <span class="kbd">X-Api-Key</span> header to automate Encore (scripts, Home Assistant…). It acts as the owner account – keep it private. API docs: <a href="/api/docs" target="_blank" style="color:var(--accent)">/api/docs</a>.</p>
+      <div class="row wrap"><div class="code grow" id="key" data-secret data-value="${esc(key)}"></div><button class="btn" id="cp" title="Copy">${icon.copy}</button><button class="btn danger" id="regen">${icon.refresh}Regenerate</button></div>
     </div>`;
-    panel.querySelector('#cp').onclick = () => copyText(panel.querySelector('#key').dataset.value);
-    panel.querySelector('#regen').onclick = async () => {
-      const r = await api.post('/admin/settings/api-key');
-      setSecretText(panel.querySelector('#key'), r.api_key);
-      toast('New API key generated', 'ok');
-    };
   };
 
   view.querySelector('.settings-nav').onclick = (e) => { const b = e.target.closest('[data-s]'); if (b) show(b.dataset.s); };
@@ -406,10 +424,19 @@ async function renderAppearance(el) {
     el.innerHTML = `<div class="card stack">
       <h2>Appearance</h2>
       <p class="small muted" style="margin:0">${serverPrefs ? 'Saved to your account, so it follows you to every device.' : 'Saved on this device.'}</p>
-      <div class="stack" style="gap:6px"><h3>Theme</h3>${seg('theme', [['dark', 'Dark'], ['light', 'Light'], ['system', 'Match device']])}</div>
+      <div class="stack" style="gap:8px"><h3>Presets</h3>
+        <div class="presets">${appearance.PRESETS.map(x => {
+          const bg = { oled: '#000', light: '#f6f6fb', dark: '#0b0b12' }[x.theme];
+          const ac = appearance.ACCENTS.find(a => a.id === x.accent) || { a: x.custom, b: x.custom };
+          const on = p.theme === x.theme && p.accent === x.accent && p.background === x.background && (x.accent !== 'custom' || p.custom === x.custom);
+          return `<button type="button" class="preset ${on ? 'on' : ''}" data-preset="${x.id}"><i style="background:linear-gradient(135deg, ${ac.a} 0 22%, ${ac.b} 22% 34%, ${bg} 34%)"></i>${esc(x.name)}</button>`;
+        }).join('')}</div></div>
+      <div class="stack" style="gap:6px"><h3>Theme</h3>${seg('theme', [['dark', 'Dark'], ['oled', 'OLED black'], ['light', 'Light'], ['system', 'Match device']])}</div>
       <div class="stack" style="gap:8px"><h3>Accent colour</h3>
-        <div class="swatches">${appearance.ACCENTS.map(a => `<button type="button" class="swatch ${p.accent === a.id ? 'on' : ''}" data-accent="${a.id}" title="${esc(a.name)}" aria-label="${esc(a.name)}" style="background:linear-gradient(135deg, ${a.a}, ${a.b})"></button>`).join('')}
-          <label class="swatch ${p.accent === 'custom' ? 'on' : ''}" title="Pick any colour" style="background:conic-gradient(red, yellow, lime, cyan, blue, magenta, red)"><input type="color" id="custom" value="${esc(p.custom)}"></label></div></div>
+        <div class="swatches">${appearance.ACCENTS.map(a => `<button type="button" class="swatch ${p.accent === a.id ? 'on' : ''}" data-accent="${a.id}" title="${esc(a.name)}" aria-label="${esc(a.name)}" style="background:linear-gradient(135deg, ${a.a}, ${a.b})"></button>`).join('')}</div>
+        <div class="custom-colour"><span class="small muted">Any colour:</span><input type="color" id="custom" value="${esc(p.custom)}" title="Pick any colour">
+          <input class="input" id="custom-hex" value="${esc(p.custom)}" maxlength="7" spellcheck="false" aria-label="Hex colour">
+          ${p.accent === 'custom' ? '<span class="badge accent">in use</span>' : ''}</div></div>
       <div class="stack" style="gap:6px"><h3>Background</h3>${seg('background', [['fade', 'Faded colour'], ['solid', 'Solid']])}</div>
       <div class="stack" style="gap:6px"><h3>Width</h3>${seg('width', [['comfortable', 'Comfortable'], ['wide', 'Full width']])}
         <span class="small muted">Comfortable keeps pages from stretching across very wide screens.</span></div>
@@ -417,8 +444,18 @@ async function renderAppearance(el) {
     </div>`;
     el.querySelectorAll('.seg button').forEach(b => b.onclick = () => set({ [b.closest('.seg').dataset.key]: b.dataset.v }));
     el.querySelectorAll('[data-accent]').forEach(b => b.onclick = () => set({ accent: b.dataset.accent }));
-    el.querySelector('#custom').oninput = (e) => { p = { ...p, accent: 'custom', custom: e.target.value }; appearance.apply(p); };
+    el.querySelectorAll('[data-preset]').forEach(b => b.onclick = () => {
+      const { id, name, ...look } = appearance.PRESETS.find(x => x.id === b.dataset.preset);
+      set(look);
+    });
+    el.querySelector('#custom').oninput = (e) => { p = { ...p, accent: 'custom', custom: e.target.value }; el.querySelector('#custom-hex').value = e.target.value; appearance.apply(p); };
     el.querySelector('#custom').onchange = (e) => set({ accent: 'custom', custom: e.target.value });
+    el.querySelector('#custom-hex').onchange = (e) => {
+      let v = e.target.value.trim();
+      if (!v.startsWith('#')) v = '#' + v;
+      if (/^#([0-9a-f]{3}|[0-9a-f]{6})$/i.test(v)) set({ accent: 'custom', custom: v.length === 4 ? '#' + [...v.slice(1)].map(c => c + c).join('') : v.toLowerCase() });
+      else toast('Use a hex colour like #ff7a00', 'err');
+    };
   };
   const set = (patch) => { p = { ...p, ...patch }; appearance.save(p, { serverPrefs }); paint(); };
   paint();

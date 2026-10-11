@@ -21,6 +21,7 @@ pub fn router() -> Router<AppState> {
         .route("/api/admin/invites/{iid}", delete(delete_invite))
         .route("/api/admin/settings", get(get_settings).put(put_settings))
         .route("/api/admin/settings/api-key", post(regen_api_key))
+        .route("/api/admin/settings/secret/{key}", get(reveal_secret))
         .route("/api/admin/activity", get(activity))
         .route("/api/system/api-key", get(api_key))
         .route("/api/system/activity", get(activity))
@@ -265,6 +266,16 @@ async fn put_settings(State(st): State<AppState>, Admin(me): Admin, Json(values)
 /// The API key acts as the owner – only the owner may see or change it.
 async fn api_key(State(st): State<AppState>, Owner(_): Owner) -> Json<Value> {
     Json(json!({ "api_key": st.cfg.str("api_key") }))
+}
+
+/// One saved secret in plain text, for the eye/copy buttons in Settings. Owner only, and logged.
+async fn reveal_secret(State(st): State<AppState>, Owner(me): Owner, Path(key): Path<String>) -> ApiResult<Json<Value>> {
+    if st.cfg.def(&key).is_none() {
+        return Err(err(404, "Unknown setting"));
+    }
+    st.db.log("info", &format!("{} viewed the saved {key}", me.s("username")));
+    let v = st.cfg.get(&key);
+    Ok(Json(json!({ "key": key, "value": v.as_str().map(String::from).unwrap_or_else(|| v.to_string()) })))
 }
 
 async fn regen_api_key(State(st): State<AppState>, Owner(_): Owner) -> Json<Value> {

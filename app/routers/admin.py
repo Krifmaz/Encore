@@ -173,6 +173,16 @@ def put_settings(values: dict):
     return config.public_dump()
 
 
+@router.get("/settings/secret/{key}")
+def reveal_secret(key: str, user=Depends(auth.admin_user)):
+    """One saved secret in plain text, for the eye/copy buttons in Settings."""
+    if key not in config.DEFAULTS:
+        raise HTTPException(404, "Unknown setting")
+    db.log("info", f"{user['username']} viewed the saved {key}")
+    v = config.get(key)
+    return {"key": key, "value": v if isinstance(v, str) else str(v)}
+
+
 @router.post("/settings/api-key")
 def regen_api_key():
     key = secrets.token_hex(24)

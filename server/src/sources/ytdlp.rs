@@ -34,6 +34,54 @@ fn cookie_args(st: &AppState, dir: &Path) -> Vec<String> {
     }
 }
 
+/// Settings → test: do the saved cookies still sign in to YouTube Music?
+pub async fn test_cookies(st: &AppState) -> anyhow::Result<Value> {
+    let ver = version().await;
+    let tool = match &ver {
+        Some(v) => format!("yt-dlp {v}"),
+        None => "yt-dlp is not installed in this container".into(),
+    };
+    let raw = st.cfg.str("ytdlp_cookies");
+    if raw.trim().is_empty() {
+        return Ok(json!({ "ok": ver.is_some(), "message": format!("{tool} · no cookies saved – downloads still work, at 128 kbps without Premium") }));
+    }
+    let now = crate::db::now() as i64;
+    let (mut pairs, mut expired, mut total) = (vec![], 0, 0);
+    for line in raw.lines() {
+        let line = line.strip_prefix("#HttpOnly_").unwrap_or(line);
+        if line.starts_with('#') || line.trim().is_empty() {
+            continue;
+        }
+        let f: Vec<&str> = line.split('\t').collect();
+        if f.len() < 7 || !f[0].contains("youtube.com") {
+            continue;
+        }
+        total += 1;
+        let exp: i64 = f[4].trim().parse().unwrap_or(0);
+        if exp != 0 && exp < now {
+            expired += 1;
+            continue;
+        }
+        pairs.push(format!("{}={}", f[5], f[6].trim_end()));
+    }
+    if total == 0 {
+        return Ok(json!({ "ok": false, "message": "No youtube.com cookies found – paste the whole Netscape cookies.txt exported from music.youtube.com" }));
+    }
+    if pairs.is_empty() {
+        return Ok(json!({ "ok": false, "message": format!("All {total} youtube.com cookies have expired – export them again") }));
+    }
+    let html = st.http.get("https://music.youtube.com/").header("Cookie", pairs.join("; ")).header("Accept-Language", "en")
+        .header("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/129.0 Safari/537.36")
+        .send().await?.text().await?;
+    let logged_in = html.contains("\"LOGGED_IN\":true");
+    let note = if expired > 0 { format!(" ({expired} expired cookies ignored)") } else { String::new() };
+    Ok(json!({ "ok": logged_in && ver.is_some(), "message": if logged_in {
+        format!("{tool} · cookies work – signed in to YouTube Music{note}")
+    } else {
+        format!("{tool} · YouTube did not accept these cookies (signed out or rotated){note}. Export them again from a private window and close it right after.")
+    } }))
+}
+
 pub struct Download {
     pub files: Vec<PathBuf>,
     pub entries: Vec<Value>,

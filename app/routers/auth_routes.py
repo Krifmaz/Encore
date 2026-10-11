@@ -36,7 +36,7 @@ def info():
 
     from .. import __version__
     return {"app_name": config.get("app_name"), "signup_mode": config.get("signup_mode"),
-            "version": __version__, "build": os.environ.get("ENCORE_BUILD", "dev")[:7]}
+            "version": __version__, "build": os.environ.get("ENCORE_BUILD", "dev")[:7], "features": ["rename", "reveal"]}
 
 
 @router.get("/invite/{code}")
@@ -110,17 +110,29 @@ def me(user=Depends(auth.current_user)):
 
 
 class Profile(BaseModel):
-    email: str = ""
+    email: str | None = None
+    username: str | None = None
 
 
 @router.put("/profile")
 def update_profile(body: Profile, user=Depends(auth.current_user)):
-    """Your email address – used for password-reset links."""
-    em = body.email.strip()
-    if em and ("@" not in em or len(em) > 200 or " " in em):
-        raise HTTPException(400, "That doesn't look like an email address")
-    db.execute("UPDATE users SET email=? WHERE id=?", (em or None, user["id"]))
-    return {"email": em}
+    """Your email address (for password-reset links) and/or a new username."""
+    out = {"email": user.get("email") or "", "username": user["username"]}
+    name = (body.username or "").strip()
+    if name and name != user["username"]:
+        auth.validate_credentials(name, "x" * 8)
+        if db.one("SELECT id FROM users WHERE lower(username)=lower(?) AND id!=?", (name, user["id"])):
+            raise HTTPException(409, "That username is taken")
+        db.execute("UPDATE users SET username=? WHERE id=?", (name, user["id"]))
+        db.log("info", f"{user['username']} is now called {name}")
+        out["username"] = name
+    if body.email is not None:
+        em = body.email.strip()
+        if em and ("@" not in em or len(em) > 200 or " " in em):
+            raise HTTPException(400, "That doesn't look like an email address")
+        db.execute("UPDATE users SET email=? WHERE id=?", (em or None, user["id"]))
+        out["email"] = em
+    return out
 
 
 class ForgotBody(BaseModel):

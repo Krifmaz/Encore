@@ -135,3 +135,44 @@ async def probe(url: str) -> dict:
         "extractor": info.get("extractor_key"),
         "duration": info.get("duration"),
     }
+
+
+async def test_cookies() -> dict:
+    """Settings → test: do the saved cookies still sign in to YouTube Music?"""
+    import time
+    from .http import client
+    ver = version()
+    tool = f"yt-dlp {ver}" if ver else "yt-dlp is not installed"
+    raw = config.get("ytdlp_cookies") or ""
+    if not raw.strip():
+        return {"ok": bool(ver), "message": f"{tool} · no cookies saved – downloads still work, at 128 kbps without Premium"}
+    pairs, expired, total = [], 0, 0
+    for line in raw.splitlines():
+        if line.startswith("#HttpOnly_"):
+            line = line[len("#HttpOnly_"):]
+        if not line.strip() or line.startswith("#"):
+            continue
+        f = line.split("\t")
+        if len(f) < 7 or "youtube.com" not in f[0]:
+            continue
+        total += 1
+        try:
+            exp = int(f[4] or 0)
+        except ValueError:
+            exp = 0
+        if exp and exp < time.time():
+            expired += 1
+            continue
+        pairs.append(f"{f[5]}={f[6].rstrip()}")
+    if not total:
+        return {"ok": False, "message": "No youtube.com cookies found – paste the whole Netscape cookies.txt exported from music.youtube.com"}
+    if not pairs:
+        return {"ok": False, "message": f"All {total} youtube.com cookies have expired – export them again"}
+    r = await client().get("https://music.youtube.com/", headers={
+        "Cookie": "; ".join(pairs), "Accept-Language": "en",
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/129.0 Safari/537.36"})
+    note = f" ({expired} expired cookies ignored)" if expired else ""
+    if '"LOGGED_IN":true' in r.text:
+        return {"ok": bool(ver), "message": f"{tool} · cookies work – signed in to YouTube Music{note}"}
+    return {"ok": False, "message": f"{tool} · YouTube did not accept these cookies (signed out or rotated){note}. "
+            "Export them again from a private window and close it right after."}

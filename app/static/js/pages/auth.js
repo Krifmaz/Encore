@@ -1,9 +1,10 @@
 import { api } from '../api.js';
+import { logo } from '../appearance.js';
 import { esc } from '../ui.js';
 
 function resetPage(root, query, app) {
   root.innerHTML = `<div class="auth-wrap"><div class="auth-card">
-      <div class="brand"><img src="/favicon.svg" alt="">${app}</div>
+      <div class="brand">${logo()}${app}</div>
       <p class="muted" style="text-align:center;margin:0">Choose a new password</p>
       <form>
         <label class="field"><span>New password</span><input class="input" type="password" name="password" autocomplete="new-password" minlength="8" required autofocus></label>
@@ -46,7 +47,7 @@ function forgotForm(root) {
 /** Sign-in link from an email (Encore 2). Accounts with two-step sign-in also enter their code. */
 function magicPage(root, query, app) {
   root.innerHTML = `<div class="auth-wrap"><div class="auth-card">
-      <div class="brand"><img src="/favicon.svg" alt="">${app}</div>
+      <div class="brand">${logo()}${app}</div>
       <p class="muted" style="text-align:center;margin:0" id="magic-msg">Signing you in…</p>
       <form class="hidden" id="magic-code"><label class="field"><span>Code from your authenticator app</span>
         <input class="input" name="code" inputmode="numeric" autocomplete="one-time-code" maxlength="8" required></label>
@@ -104,7 +105,7 @@ export function render(root, { path, query, session }) {
   root.innerHTML = `
     <div class="auth-wrap">
       <div class="auth-card">
-        <div class="brand"><img src="/favicon.svg" alt="">${app}</div>
+        <div class="brand">${logo()}${app}</div>
         <p class="muted" style="text-align:center;margin:0">${isSignup ? 'Create your account' : 'Sign in to request music and manage the library'}</p>
         <div id="auth-err" class="error-box hidden" style="margin-top:16px"></div>
         ${isSignup ? signupForm(mode, query.invite) : loginForm(session.info?.email_login)}

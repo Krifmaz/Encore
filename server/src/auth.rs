@@ -52,12 +52,17 @@ pub fn verify_password(pw: &str, hashed: &str) -> bool {
     bcrypt::verify(b, hashed).unwrap_or(false)
 }
 
-pub fn validate_credentials(username: &str, password: &str) -> ApiResult<()> {
+pub fn validate_username(username: &str) -> ApiResult<()> {
     let ok_name = (3..=32).contains(&username.chars().count())
         && username.chars().all(|c| c.is_alphanumeric() || c == '_' || c == '-' || c == '.');
     if !ok_name {
         return Err(err(400, "Username must be 3-32 characters: letters, numbers, . _ -"));
     }
+    Ok(())
+}
+
+pub fn validate_credentials(username: &str, password: &str) -> ApiResult<()> {
+    validate_username(username)?;
     if password.chars().count() < 8 {
         return Err(err(400, "Password must be at least 8 characters"));
     }

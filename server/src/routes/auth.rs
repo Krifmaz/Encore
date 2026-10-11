@@ -63,7 +63,7 @@ async fn info(State(st): State<AppState>) -> Json<Value> {
         "build": std::env::var("ENCORE_BUILD").unwrap_or_else(|_| "dev".into()).chars().take(7).collect::<String>(),
         "server": "rust",
         // the web app turns features on only when the server has them
-        "features": ["owner", "totp", "email_login", "logout_all", "avatar", "theme", "remote"],
+        "features": ["owner", "totp", "email_login", "logout_all", "avatar", "theme", "remote", "rename", "reveal"],
         "email_login": email::enabled(&st) && st.cfg.bool("email_login"),
     }))
 }
@@ -192,15 +192,30 @@ async fn me(State(st): State<AppState>, User(u): User) -> ApiResult<Json<Value>>
 #[derive(Deserialize)]
 struct Profile {
     email: Option<String>,
+    username: Option<String>,
 }
 
+/// Your email address (for password-reset links) and/or a new username.
 async fn profile(State(st): State<AppState>, User(u): User, Json(b): Json<Profile>) -> ApiResult<Json<Value>> {
-    let em = b.email.unwrap_or_default().trim().to_string();
-    if !em.is_empty() && (!em.contains('@') || em.len() > 200 || em.contains(' ')) {
-        return Err(err(400, "That doesn't look like an email address"));
+    let uid = u.i("id");
+    let mut out = json!({ "email": u.s("email"), "username": u.s("username") });
+    if let Some(name) = b.username.map(|n| n.trim().to_string()).filter(|n| *n != u.s("username")) {
+        auth::validate_username(&name)?;
+        if st.db.one("SELECT id FROM users WHERE lower(username)=lower(?) AND id!=?", p![name, uid])?.is_some() {
+            return Err(err(409, "That username is taken"));
+        }
+        st.db.execute("UPDATE users SET username=? WHERE id=?", p![name, uid])?;
+        st.db.log("info", &format!("{} is now called {name}", u.s("username")));
+        out["username"] = json!(name);
     }
-    st.db.execute("UPDATE users SET email=? WHERE id=?", p![if em.is_empty() { None } else { Some(em.clone()) }, u.i("id")])?;
-    Ok(Json(json!({ "email": em })))
+    if let Some(em) = b.email.map(|e| e.trim().to_string()) {
+        if !em.is_empty() && (!em.contains('@') || em.len() > 200 || em.contains(' ')) {
+            return Err(err(400, "That doesn't look like an email address"));
+        }
+        st.db.execute("UPDATE users SET email=? WHERE id=?", p![if em.is_empty() { None } else { Some(em.clone()) }, uid])?;
+        out["email"] = json!(em);
+    }
+    Ok(Json(out))
 }
 
 /// Personal preferences (appearance etc.). Stored as JSON; unknown keys are kept.

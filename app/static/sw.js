@@ -1,7 +1,7 @@
 // Encore service worker: makes the web app installable and opens instantly.
 // The app shell is served network-first (always fresh when the server is reachable) with a cached
 // fallback; API calls, streams and the built-in services are never cached.
-const CACHE = 'encore-shell-v3';
+const CACHE = 'encore-shell-v4';
 const SHELL = ['/', '/index.html', '/css/app.css', '/js/app.js', '/favicon.svg', '/manifest.webmanifest', '/icons/icon-192.png'];
 
 self.addEventListener('install', (e) => {

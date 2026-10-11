@@ -93,10 +93,14 @@ async fn test(State(st): State<AppState>, Admin(u): Admin, Path(service): Path<S
             }
             "spotify" => {
                 let (cid, sec) = (st.cfg.str("spotify_client_id"), st.cfg.str("spotify_client_secret"));
+                if cid.is_empty() || sec.is_empty() {
+                    return Ok(msg(false, "Enter both the Spotify Client ID and Client secret, then test again"));
+                }
                 let ok = st.http.post("https://accounts.spotify.com/api/token").basic_auth(cid, Some(sec)).form(&[("grant_type", "client_credentials")])
                     .send().await.map(|r| r.status().is_success()).unwrap_or(false);
                 msg(ok, if ok { "Spotify credentials valid" } else { "Spotify rejected the Client ID/Secret" })
             }
+            "ytdlp" | "youtube" => ytdlp::test_cookies(&st).await?,
             "tidal" => {
                 streamrip::tidal_token(&st).await?;
                 msg(true, "Tidal credentials valid")

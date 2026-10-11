@@ -120,6 +120,8 @@ Set **Settings → General → Public URL** (for example `https://music.example.
   }
   ```
 - Sign-ups default to **invite only**. Sessions use HttpOnly SameSite=Lax cookies, every mutating request needs a CSRF header, and failed logins are rate-limited per IP.
+- The **Encore API key** (Settings → General, bottom) acts as the owner account. Send it as an `X-Api-Key` header; regenerate it if it leaks.
+- Saved keys and passwords are never sent to the browser with the settings. The eye and copy buttons fetch one at a time, only for the owner, and each view is written to the activity log. Values set by environment variables can't be viewed or changed in the UI.
 
 ## Configuration
 

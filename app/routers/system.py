@@ -68,7 +68,11 @@ async def test(service: str, user=Depends(auth.admin_user)):
         if service == "mediaservers":
             done = await notify.refresh_media_servers()
             return {"ok": bool(done), "message": ("Refreshed " + ", ".join(done)) if done else "No media servers configured"}
+        if service in ("ytdlp", "youtube"):
+            return await ytdlp.test_cookies()
         if service == "spotify":
+            if not (config.get("spotify_client_id") and config.get("spotify_client_secret")):
+                return {"ok": False, "message": "Enter both the Spotify Client ID and Client secret, then test again"}
             tok = await sources._spotify_app_token()
             return {"ok": bool(tok), "message": "Spotify credentials valid" if tok else "Spotify rejected the Client ID/Secret"}
         if service == "tidal":
