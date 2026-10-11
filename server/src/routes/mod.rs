@@ -2,6 +2,7 @@ pub mod admin;
 pub mod auth;
 pub mod library;
 pub mod picker;
+pub mod playlists;
 pub mod requests;
 pub mod system;
 pub mod tagging;

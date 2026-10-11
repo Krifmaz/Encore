@@ -133,3 +133,103 @@ pub async fn find_album(st: &AppState, artist: &str, album_title: &str, track_co
     }
     None
 }
+
+// ---- signed-in calls (a user's YouTube Music connection) -----------------------------------------
+
+/// Call YouTube Music as the user: pasted browser cookies (SAPISIDHASH) or a Google sign-in token.
+pub async fn authed(st: &AppState, data: &Value, endpoint: &str, mut body: Value) -> anyhow::Result<Value> {
+    body["context"] = json!({ "client": { "clientName": "WEB_REMIX", "clientVersion": "1.20250101.01.00", "hl": "en", "gl": "US" } });
+    let mut rb = st.http.post(format!("{API}/{endpoint}?prettyPrint=false")).header("Origin", "https://music.youtube.com")
+        .header("X-Origin", "https://music.youtube.com").header("Referer", "https://music.youtube.com/").json(&body);
+    if data["mode"] == "browser" {
+        let h = &data["headers"];
+        let cookie = h["cookie"].as_str().unwrap_or("");
+        let sapisid = cookie.split(';').map(|c| c.trim()).find_map(|c| c.strip_prefix("__Secure-3PAPISID=").or(c.strip_prefix("SAPISID="))).unwrap_or("");
+        let ts = crate::db::now() as i64;
+        use sha1::{Digest, Sha1};
+        let hash = hex::encode(Sha1::digest(format!("{ts} {sapisid} https://music.youtube.com").as_bytes()));
+        rb = rb.header("Cookie", cookie).header("Authorization", format!("SAPISIDHASH {ts}_{hash}"))
+            .header("X-Goog-AuthUser", h["x-goog-authuser"].as_str().unwrap_or("0"));
+    } else {
+        let tok = data["token"]["access_token"].as_str().unwrap_or("");
+        rb = rb.bearer_auth(tok);
+    }
+    let r = rb.send().await?;
+    if !r.status().is_success() {
+        anyhow::bail!("YouTube Music answered {}", r.status().as_u16());
+    }
+    Ok(r.json().await?)
+}
+
+/// Google sign-in tokens expire hourly: refresh (and store) before calls.
+pub async fn fresh_data(st: &AppState, conn: &crate::db::Row) -> anyhow::Result<Value> {
+    use crate::db::RowExt;
+    let mut d = conn["data"].clone();
+    if d["mode"] != "oauth" || d["token"]["expires_at"].as_f64().unwrap_or(0.0) > crate::db::now() + 60.0 {
+        return Ok(d);
+    }
+    let rt = d["token"]["refresh_token"].as_str().unwrap_or("").to_string();
+    let t: Value = st.http.post("https://oauth2.googleapis.com/token").form(&[("client_id", st.cfg.str("ytmusic_client_id")), ("client_secret", st.cfg.str("ytmusic_client_secret")),
+        ("refresh_token", rt), ("grant_type", "refresh_token".into())]).send().await?.json().await?;
+    let Some(access) = t["access_token"].as_str() else { anyhow::bail!("YouTube Music sign-in expired – reconnect") };
+    d["token"]["access_token"] = json!(access);
+    d["token"]["expires_at"] = json!(crate::db::now() as i64 + t["expires_in"].as_i64().unwrap_or(3600));
+    crate::connections::update_data(st, conn.i("id"), &d);
+    Ok(d)
+}
+
+fn continuation(v: &Value) -> Option<String> {
+    let mut c = vec![];
+    walk(v, "continuation", &mut c);
+    c.into_iter().find_map(|x| x.as_str().map(String::from))
+        .or_else(|| { let mut t = vec![]; walk(v, "token", &mut t); t.into_iter().find_map(|x| x.as_str().map(String::from)) })
+}
+
+/// All rows of a signed-in browse page (liked songs, a playlist …), following continuations.
+pub async fn browse_rows(st: &AppState, data: &Value, browse_id: &str, max_pages: usize) -> anyhow::Result<Vec<Value>> {
+    let mut d = authed(st, data, "browse", json!({ "browseId": browse_id })).await?;
+    let mut out = vec![];
+    for _ in 0..max_pages {
+        let mut rows = vec![];
+        walk(&d, "musicResponsiveListItemRenderer", &mut rows);
+        let n = rows.len();
+        out.extend(rows.into_iter().map(|r| {
+            let mut i = item(r);
+            i["setVideoId"] = r["playlistItemData"]["playlistSetVideoId"].clone();
+            i
+        }));
+        let Some(tok) = continuation(&d).filter(|_| n > 0) else { break };
+        d = authed(st, data, "browse", json!({ "continuation": tok })).await?;
+    }
+    Ok(out)
+}
+
+pub async fn library_playlists(st: &AppState, data: &Value) -> anyhow::Result<Vec<Value>> {
+    let d = authed(st, data, "browse", json!({ "browseId": "FEmusic_liked_playlists" })).await?;
+    let mut items = vec![];
+    walk(&d, "musicTwoRowItemRenderer", &mut items);
+    Ok(items.iter().filter_map(|x| {
+        let bid = x["navigationEndpoint"]["browseEndpoint"]["browseId"].as_str()?;
+        let id = bid.strip_prefix("VL")?;
+        if id == "LM" || id == "SE" {
+            return None;
+        }
+        Some(json!({ "id": id, "name": x["title"]["runs"][0]["text"], "url": format!("https://music.youtube.com/playlist?list={id}") }))
+    }).collect())
+}
+
+pub async fn rate(st: &AppState, data: &Value, video: &str, like: bool) -> anyhow::Result<()> {
+    authed(st, data, if like { "like/like" } else { "like/removelike" }, json!({ "target": { "videoId": video } })).await.map(|_| ())
+}
+
+pub async fn create_playlist(st: &AppState, data: &Value, name: &str, videos: &[String]) -> anyhow::Result<Option<String>> {
+    let d = authed(st, data, "playlist/create", json!({ "title": name, "description": "Synced by Encore", "privacyStatus": "PRIVATE", "videoIds": videos })).await?;
+    Ok(d["playlistId"].as_str().map(String::from))
+}
+
+pub async fn edit_playlist(st: &AppState, data: &Value, id: &str, actions: Vec<Value>) -> anyhow::Result<()> {
+    if actions.is_empty() {
+        return Ok(());
+    }
+    authed(st, data, "browse/edit_playlist", json!({ "playlistId": id, "actions": actions })).await.map(|_| ())
+}

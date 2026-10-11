@@ -126,6 +126,9 @@ async fn complete(st: &AppState, r: &mut Req, message: &str, new: &[PathBuf], or
         record_origin(st, new, &origin, r.id, r.row.f("created_at"));
     }
     upd(st, r, &[("status", json!("completed")), ("progress", json!(100)), ("message", json!(message))]);
+    if !new.is_empty() {
+        crate::playlists::rematch(st, None, true); // playlists pick up the new songs
+    }
     st.db.log("info", &format!("Request completed: {} ({message})", r.label()));
     notify::send(st, "✅ Now available", &format!("{}\n{message}", r.label()), r.hint().as_deref()).await;
     if !new.is_empty() {

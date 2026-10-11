@@ -2,6 +2,7 @@
 mod acoustid;
 mod auth;
 mod config;
+mod connections;
 mod db;
 mod email;
 mod dupes;
@@ -15,8 +16,10 @@ mod matcher;
 mod nlsearch;
 mod notify;
 mod organize;
+mod playlists;
 mod routes;
 mod sources;
+mod sync;
 mod state;
 mod tagger;
 mod worker;
@@ -62,6 +65,7 @@ pub fn app(st: AppState) -> Router {
         .merge(routes::picker::router())
         .merge(routes::system::router())
         .merge(routes::tagging::router())
+        .merge(routes::playlists::router())
         .with_state(st)
         .fallback_service(spa)
         .layer(middleware::from_fn(security_headers))
