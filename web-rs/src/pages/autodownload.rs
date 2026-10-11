@@ -79,7 +79,7 @@ pub fn render(view: Element, _ctx: Ctx) -> PageFuture {
         <label class="field"><span>Retry each lossy album every</span>
           <div class="row"><input class="input" type="number" min="1" data-k="upgrade_lossy_days" value="{upgrade_lossy_days}" style="width:110px"><span class="muted">days</span>
           <button class="btn sm" id="upg">{refresh}Look for upgrades now</button></div></label>
-        <div class="small muted">Which sources are searched, and in what order: <a href="#/settings?s=downloads">Settings → Downloads & sources → Download pipeline</a>.</div>
+        <div class="small muted">Which sources are searched, and in what order: <a href="#/settings?s=pipeline">Settings → Apps & sources → Download pipeline</a>.</div>
       </div>
     </div>
     <div class="section-head"><h2>Users</h2><span class="small muted">Who auto-downloads are enabled for</span></div>

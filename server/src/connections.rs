@@ -289,7 +289,7 @@ pub async fn connect_listenbrainz(st: &AppState, uid: i64, token: &str) -> anyho
 pub fn lastfm_start(st: &AppState) -> anyhow::Result<String> {
     let key = st.cfg.str("lastfm_api_key");
     if key.is_empty() || st.cfg.str("lastfm_shared_secret").is_empty() {
-        anyhow::bail!("The admin needs to add the Last.fm API key and shared secret in Settings → Services & sync");
+        anyhow::bail!("The admin needs to add the Last.fm API key and shared secret in Settings → Apps & sources → Integrations");
     }
     let cb = redirect_uri(st, "lastfm")?;
     Ok(format!("https://www.last.fm/api/auth/?api_key={}&cb={}", urlencoding::encode(&key), urlencoding::encode(&cb)))

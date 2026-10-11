@@ -66,6 +66,7 @@ Every release, with notes, the Android/desktop apps and Linux binaries, is on th
 - **Android**: download `Encore-android-<version>.apk` from the [Releases page](https://github.com/Krifmaz/Encore/releases), install it, and pick your server (e.g. `http://192.168.1.10:8080`). It is the same Rust app as the desktop one (Tauri) plus a small Kotlin plugin for the media notification: music keeps playing with the screen off, with lock-screen and notification controls; *Share → Encore* from Spotify, YouTube Music or a browser downloads that link; songs and albums can be saved for offline listening, and when the server is away the app opens its offline player.
 - **Desktop** (Windows, macOS, Linux): same Releases page – a small Rust app (Tauri) that opens your server in its own window. Media keys and the system's media controls work (lock screen, Now Playing, MPRIS), there's a tray with what's playing and play/pause/next, and it remembers your servers. The macOS build is unsigned: right-click → Open the first time.
 - **Any phone**: open Encore in the browser and choose *Add to Home screen*. On HTTPS it installs as an app.
+- **Rust web interface (preview)**: the web app rewritten in Rust/WebAssembly is served at `/next/` beside the standard one – Settings → General → About has the link there and back. Same sign-in, same features; it becomes the default once it matches.
 
 ## Wiring up the services
 
@@ -90,7 +91,7 @@ web:
 - **slskd behind gluetun** (`network_mode: container:gluetun-slsk`): slskd has no hostname of its own, so use the VPN container's name, e.g. `SLSKD_URL=http://gluetun-slsk:5030`.
 - **slskd permissions:** slskd ignores `PUID`/`PGID`. Run it with `user: "1000:1000"` and `chown -R 1000:1000` its config, downloads and incomplete folders, or it can't write to them.
 
-**Torrents & Usenet (optional)**: add your indexers to Prowlarr, then in *Settings → Downloads & sources → Torrents & Usenet* enter the Prowlarr URL and API key, plus qBittorrent and/or SABnzbd. Encore searches Prowlarr, sends the best album release to the right client, and imports it when it finishes. This replaces Lidarr.
+**Torrents & Usenet (optional)**: add your indexers to Prowlarr, then in *Settings → Apps & sources → Torrents & Usenet* enter the Prowlarr URL and API key, plus qBittorrent and/or SABnzbd. Encore searches Prowlarr, sends the best album release to the right client, and imports it when it finishes. This replaces Lidarr.
 
 **Optional keys** (Settings):
 

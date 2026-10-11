@@ -19,7 +19,7 @@ pub fn lastfm_sig(params: &[(&str, String)], secret: &str) -> String {
 pub async fn lastfm_signed(st: &AppState, method: &str, mut params: Vec<(&str, String)>) -> anyhow::Result<Value> {
     let (key, secret) = (st.cfg.str("lastfm_api_key"), st.cfg.str("lastfm_shared_secret"));
     if key.is_empty() || secret.is_empty() {
-        anyhow::bail!("The admin needs to add the Last.fm API key and shared secret in Settings → Services & sync");
+        anyhow::bail!("The admin needs to add the Last.fm API key and shared secret in Settings → Apps & sources → Integrations");
     }
     params.push(("method", method.into()));
     params.push(("api_key", key));

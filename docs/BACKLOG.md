@@ -61,7 +61,7 @@
   answers with an error; "Change server" link on the sign-in page.
 - Shuffle button on Library; shuffles never repeat a song within a listening session.
 - YouTube Music is always the last download source (setting, on by default).
-- Settings regrouped (Downloads & sources / Library, tagging & IDs / Email & notifications / …);
+- Settings regrouped (General / Apps & sources with one drop-down per app / Email & notifications / Auto-download / Scheduled tasks);
   dropdown page picker on phones, no sideways tab bar.
 - Password reset by email: SMTP settings + test, "Forgot password?" on sign-in, email on Account page.
 - Removed: localized names, 30-second previews.
@@ -88,7 +88,9 @@ Goal: get the codebase as close to 100% Rust as is practical (~97–99%; CSS, HT
 scripts always stay).
 1. ~~**Desktop app → Tauri**~~ – done 2026-10-11 (`clients/app`, Rust; Electron removed). Media keys, OS media
    controls with cover, tray, saved servers, dead-server picker.
-2. **Android app → Tauri 2 mobile** (replaces most of the Java). Background playback, lock-screen and
-   notification controls still need a small native Android plugin.
-3. **Web interface → Rust/WebAssembly** (Leptos or Dioxus), only if 100% Rust is the goal: a full
-   rewrite of the UI with no visible change for users and a slightly slower first load.
+2. ~~**Android app → Tauri 2 mobile**~~ – done 2026-10-11 (same `clients/app`; a small Kotlin plugin for the
+   media notification, share intents, downloads and the offline cookie). CI signs with a generated debug key
+   until a release keystore is configured.
+3. **Web interface → Rust/WebAssembly** – written 2026-10-11 (`web-rs`, plain web-sys, no framework): every
+   page, the player and remote ported 1:1 and served at `/next/` beside the JS UI (link in Settings → About).
+   Left: use it for a while, fix what differs from the JS UI, then make it the default and drop `web/js`.

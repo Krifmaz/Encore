@@ -1,11 +1,9 @@
 name: test-and-build
 
-# Encore: the Rust server + web app. Every push runs the tests and checks that the Docker image builds.
-# Images are only published by the release workflow: :latest (releases) and :edge (pre-releases).
+# Encore: the Rust server + web app. Runs the tests and checks that the Docker image builds – on pull
+# requests and by hand only, to keep Actions minutes down. Images are only published by the release
+# workflow: :latest (releases) and :edge (pre-releases).
 on:
-  push:
-    branches: ["**"]
-    paths-ignore: ["docs/**", "clients/**", "**.md"]
   pull_request:
   workflow_dispatch:
 

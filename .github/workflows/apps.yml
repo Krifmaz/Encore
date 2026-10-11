@@ -1,11 +1,9 @@
 name: apps
 
-# Android APK + desktop apps (Windows, macOS, Linux). Pushes build them as workflow artifacts (CI);
-# the release workflow calls this with a version and attaches them to the release.
+# Android APK + desktop apps (Windows, macOS, Linux). Never runs on push – the macOS runner alone costs
+# 10× Actions minutes. Start it by hand (Actions → apps → Run workflow) or through the release workflow
+# with "apps" ticked, which attaches the installers to the release.
 on:
-  push:
-    branches: ["**"]
-    paths: ["clients/**", ".github/workflows/apps.yml"]
   workflow_dispatch:
   workflow_call:
     inputs:
@@ -46,10 +44,20 @@ jobs:
       - uses: taiki-e/install-action@v2
         with:
           tool: tauri-cli@2.12.2
+      - name: Signing key
+        # the Gradle release config falls back to the debug key, which a fresh runner doesn't have yet
+        run: |
+          mkdir -p ~/.android
+          [ -f ~/.android/debug.keystore ] || keytool -genkeypair -v -keystore ~/.android/debug.keystore -storepass android \
+            -alias androiddebugkey -keypass android -dname "CN=Android Debug,O=Android,C=US" -keyalg RSA -keysize 2048 -validity 10000
       - name: Build APK
         working-directory: clients/app
         env:
           ENCORE_VERSION: ${{ inputs.version || format('dev.{0}', github.run_number) }}
+          ANDROID_KEYSTORE_FILE: ${{ secrets.ANDROID_KEYSTORE_FILE }}
+          ANDROID_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          ANDROID_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+          ANDROID_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
         run: |
           export NDK_HOME="$ANDROID_HOME/ndk/29.0.13846066"
           cargo tauri android build --ci --apk --target aarch64 --target armv7 \

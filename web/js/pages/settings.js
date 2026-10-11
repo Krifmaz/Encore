@@ -53,8 +53,8 @@ const SECTIONS = [
     S('streamrip_bin', 'streamrip executable (optional)', 'text', { help: 'Leave empty to auto-detect' }),
     S('streamrip_command', 'Command template (advanced)', 'text', { full: true }),
   ] },
-  { id: 'sync', title: 'Playlists & sync', desc: 'Keeps liked songs and playlists in step with Spotify, YouTube Music, Jellyfin, Plex and the rest.', fields: [
-    S('sync_interval_minutes', 'Sync likes & playlists every (minutes)', 'number', { help: '0 disables automatic sync' }),
+  { id: 'sync', title: 'Playlists & sync', desc: 'Keeps liked songs and playlists in step with Spotify, YouTube Music, Jellyfin, Plex and the rest. Runs as the “Sync likes & playlists” task above.', fields: [
+    S('sync_interval_minutes', 'Sync likes & playlists every (minutes)', 'number', { help: '0 disables automatic sync – same as the task\u2019s “every” above' }),
     S('auto_request_followed', 'Automatically download new tracks in followed playlists (more rules under Admin → Auto-download)', 'bool'),
   ] },
   { id: 'torznab', title: 'Torrents & Usenet (Prowlarr)', desc: 'Searches your torrent and Usenet indexers (through Prowlarr) for whole albums and sends them to qBittorrent or SABnzbd.', test: 'torznab', fields: [
@@ -94,7 +94,7 @@ const SECTIONS = [
   { id: 'spotify', title: 'Integrations', desc: 'API keys that let users connect their Spotify, Tidal, Last.fm, Discogs and YouTube Music accounts, and power recommendations.', test: 'spotify', testLabel: 'Test Spotify', fields: [
     S('spotify_client_id', 'Spotify Client ID', 'text', { help: 'developer.spotify.com – add <Public URL>/api/connections/spotify/callback as redirect URI. Development-mode apps allow 5 users and need a Premium owner (2026 rules); without it, public playlists still import via the embed fallback.' }),
     S('spotify_client_secret', 'Spotify Client secret', 'password'),
-    S('tidal_client_id', 'Tidal Client ID', 'text', { help: 'Only for looking up Tidal albums/songs by ISRC and for the Tidal connection. Get one at developer.tidal.com → Dashboard → Create new app (any name), redirect URI <Public URL>/api/connections/tidal/callback, then copy the Client ID and Client secret here. Downloads from Tidal use your own account instead: Downloads & sources → streamrip → Sign in to Tidal.' }),
+    S('tidal_client_id', 'Tidal Client ID', 'text', { help: 'Only for looking up Tidal albums/songs by ISRC and for the Tidal connection. Get one at developer.tidal.com → Dashboard → Create new app (any name), redirect URI <Public URL>/api/connections/tidal/callback, then copy the Client ID and Client secret here. Downloads from Tidal use your own account instead: Apps & sources → Qobuz / Tidal / Deezer (streamrip) → Sign in to Tidal.' }),
     S('tidal_client_secret', 'Tidal Client secret', 'password'),
     S('lastfm_api_key', 'Last.fm API key', 'password', { help: 'last.fm/api/account/create (free) – loved tracks, similar artists/songs, genre pages, For you' }),
     S('lastfm_shared_secret', 'Last.fm shared secret', 'password', { help: 'Shown next to the API key. Needed for scrobbling: users sign in with Last.fm on the Connections page.' }),
@@ -124,14 +124,21 @@ const SECTIONS = [
 ];
 
 // Settings pages: related cards together, in an order that reads top to bottom.
+// One nav entry per group; `parts` splits a long group into labelled runs of per-app cards.
+// `aliases` keep old #/settings?s= links working.
 const GROUPS = [
   { id: 'general', title: 'General', sections: ['general'] },
-  { id: 'downloads', title: 'Downloads & sources', sections: ['pipeline', 'slskd', 'torznab', 'ytdlp', 'streamrip'] },
-  { id: 'tagging', title: 'Library, tagging & IDs', sections: ['library', 'verify'] },
+  { id: 'apps', title: 'Apps & sources', aliases: ['downloads', 'tagging', 'services'], parts: [
+    ['Download sources', ['pipeline', 'streamrip', 'torznab', 'slskd', 'ytdlp']],
+    ['Library & tagging', ['library', 'verify']],
+    ['Services', ['spotify', 'media']],
+  ] },
   { id: 'accounts', title: 'Email & notifications', sections: ['email', 'notify'] },
-  { id: 'services', title: 'Services & sync', sections: ['spotify', 'sync', 'media'] },
+  { id: 'autodownload', title: 'Auto-download', sections: [] },
+  { id: 'tasks', title: 'Scheduled tasks', sections: ['sync'] },
 ];
-const groupOf = (id) => (GROUPS.find(g => g.id === id || g.sections.includes(id)) || {}).id || id;
+GROUPS.forEach(g => { g.sections = g.sections || g.parts.flatMap(([, ids]) => ids); });
+const groupOf = (id) => (GROUPS.find(g => g.id === id || (g.aliases || []).includes(id) || g.sections.includes(id)) || {}).id || id;
 
 const MASK = '••••';
 let REVEAL = false;   // server can hand a saved secret back to the eye/copy buttons
@@ -243,11 +250,12 @@ export async function render(view, ctx) {
   REVEAL = (session.info?.features || []).includes('reveal');
   let lidarrOpts = null;
   let current = ctx.query.s ? groupOf(ctx.query.s) : 'account';
+  let focus = ctx.query.s && current !== ctx.query.s ? ctx.query.s : null;   // #/settings?s=<section> opens that card
   const nav = [
     ['You', [['account', 'Account'], ['appearance', 'Appearance'], ['connections', 'Connections']]],
     ...(admin ? [
       ['People', [['users', 'Users & permissions'], ['invites', 'Invites']]],
-      ['Server', [...GROUPS.map(g => [g.id, g.title]), ['autodownload', 'Auto-download'], ['tasks', 'Scheduled tasks']]],
+      ['Server', GROUPS.map(g => [g.id, g.title])],
       ['System', [['diagnostics', 'Diagnostics']]],
     ] : []),
   ];
@@ -269,7 +277,6 @@ export async function render(view, ctx) {
     history.replaceState(null, '', `#/settings?s=${id}`);
     if (EMBEDDED[id]) { panel.innerHTML = '<div class="skeleton" style="height:200px"></div>'; return EMBEDDED[id](panel, ctx); }
     if (id === 'about' || id === 'api' || id === 'keys') return show('general');
-    if (id === 'tasks') return renderTasks(panel);
     const group = GROUPS.find(g => g.id === id) || GROUPS[0];
     // only what this server has: Encore 2 (Rust) has Prowlarr instead of Lidarr
     const secs = group.sections.map(sid => SECTIONS.find(x => x.id === sid))
@@ -278,7 +285,7 @@ export async function render(view, ctx) {
       try { lidarrOpts = await api.get('/system/lidarr/options'); } catch { lidarrOpts = null; }
     }
     const meta = values._meta || {};
-    panel.innerHTML = secs.map((sec, i) => `<details class="card settings-card" data-sec="${sec.id}" ${i === 0 || secs.length === 1 || (flash && flash.sec === sec.id) ? 'open' : ''}>
+    const card = (sec, open) => `<details class="card settings-card" data-sec="${sec.id}" ${open ? 'open' : ''}>
       <summary class="row between" style="gap:10px;flex-wrap:nowrap;align-items:flex-start"><div style="min-width:0"><h2>${esc(sec.title)}</h2>${sec.desc ? `<div class="small muted" style="margin-top:4px;font-weight:400">${esc(sec.desc)}</div>` : ''}</div>
         <span class="row" style="gap:8px">${sec.test ? `<button class="btn sm" data-test>${icon.refresh}${esc(sec.testLabel || 'Test connection')}</button>` : ''}<span class="chev">${icon.chevron || '▾'}</span></span></summary>
       <div style="height:14px"></div>
@@ -286,7 +293,22 @@ export async function render(view, ctx) {
       <div class="form-grid">${sec.fields.map(f => field(f, values[f.key], lidarrOpts, meta)).join('')}</div>
       ${sec.id === 'streamrip' ? tidalBlock() : ''}
       <div class="row mt" style="justify-content:flex-end"><button class="btn primary" data-save>${icon.check}Save</button></div>
-    </details>`).join('') + (group.id === 'downloads' ? pipelineHelp() : '') + (group.id === 'general' ? await apiCard() + await aboutCard() : '');
+    </details>`;
+    // the first card starts open (unless a link asked for a specific one); every app is its own drop-down
+    let first = true;
+    const body = (group.parts || [['', group.sections]]).map(([label, ids]) => {
+      const list = secs.filter(sec => ids.includes(sec.id));
+      if (!list.length) return '';
+      return (label ? `<div class="nav-label" style="padding:18px 4px 8px">${esc(label)}</div>` : '') + list.map(sec => {
+        const open = (first && !focus) || secs.length === 1 || (flash && flash.sec === sec.id) || focus === sec.id;
+        first = false;
+        return card(sec, open);
+      }).join('');
+    }).join('');
+    panel.innerHTML = (group.id === 'tasks' ? '<div id="tasks-host" style="margin-bottom:16px"></div>' : '') + body
+      + (group.id === 'apps' ? pipelineHelp() : '') + (group.id === 'general' ? await apiCard() + await aboutCard() : '');
+    if (group.id === 'tasks') renderTasks(panel.querySelector('#tasks-host'));
+    if (focus) { const c = panel.querySelector(`[data-sec="${focus}"]`); focus = null; if (c) c.scrollIntoView({ block: 'start' }); }
     panel.querySelectorAll('[data-sec]').forEach(card => {
       const sec = SECTIONS.find(x => x.id === card.dataset.sec);
       const out = card.querySelector('[data-out]');
@@ -439,7 +461,8 @@ export async function aboutCard() {
     <div class="row wrap" style="gap:24px"><div><div class="small muted">Version</div><div style="font-weight:700;font-size:20px">v${esc(info.version || '?')}</div></div>
       <div><div class="small muted">Server</div><div>${esc(server)}</div></div>
       <div><div class="small muted">Build</div><div class="mono">${esc(info.build || 'dev')}</div></div></div>
-    <div class="small muted">Apps for Android, Windows, macOS and Linux: <a href="https://github.com/Krifmaz/Encore/releases" target="_blank" rel="noopener">github.com/Krifmaz/Encore/releases</a></div></div>`;
+    <div class="small muted">Apps for Android, Windows, macOS and Linux: <a href="https://github.com/Krifmaz/Encore/releases" target="_blank" rel="noopener">github.com/Krifmaz/Encore/releases</a></div>
+    <div class="small muted">Interface: JavaScript · <a href="/next/${esc(location.hash || '#/')}">Try the new Rust (WebAssembly) interface</a> – a preview of the same app rewritten in Rust; it uses your current sign-in and this link brings you back.</div></div>`;
 }
 
 /** Settings → Appearance: theme, accent colour, faded/solid background, content width. */

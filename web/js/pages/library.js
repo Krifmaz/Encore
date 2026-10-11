@@ -269,7 +269,7 @@ export async function render(view, ctx) {
     }, 2500);
     ctx.onLeave(() => clearInterval(timer));
     view.querySelector('#organize-btn').onclick = async () => {
-      if (!await confirmDialog('Organize files', 'Every song is moved into folders from its tags using your naming template (Settings → Library, tagging & IDs), e.g. Artist/Album (Year)/01 - Title. Missing tags are filled in first from the file name, AcoustID and Deezer. Playlists and likes keep working.', 'Organize')) return;
+      if (!await confirmDialog('Organize files', 'Every song is moved into folders from its tags using your naming template (Settings → Apps & sources → Library & tagging), e.g. Artist/Album (Year)/01 - Title. Missing tags are filled in first from the file name, AcoustID and Deezer. Playlists and likes keep working.', 'Organize')) return;
       try { await api.post('/library/organize'); toast('Organizing…', 'ok'); setTimeout(() => window.dispatchEvent(new HashChangeEvent('hashchange')), 800); } catch (e) { toast(e.message, 'err'); }
     };
     view.querySelector('#scan-btn').onclick = async () => {

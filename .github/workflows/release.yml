@@ -3,6 +3,8 @@ name: release
 # Every release is kept – nothing is overwritten. Versions are the release date (America/Detroit) plus
 # the edition of that day: 2026.10.11.1, 2026.10.11.2 … Pre-releases end in -edge.
 #   Start one: Actions → release → Run workflow (tick "pre-release" for an edge build), or push a tag v2026.10.11.1.
+#   Tick "apps" to also build the desktop installers and the Android APK (the macOS runner costs 10× minutes,
+#   so they are off by default and a release without them is just the server + Docker image).
 #   Docker: :<version> always; :edge gets every release and pre-release, :latest only full releases.
 #   Notes: docs/releases/<version>.md if it exists, otherwise the commit list since the previous release.
 on:
@@ -10,6 +12,10 @@ on:
     inputs:
       prerelease:
         description: "Pre-release (edge)"
+        type: boolean
+        default: false
+      apps:
+        description: "Also build desktop + Android apps (slow, costs macOS minutes)"
         type: boolean
         default: false
   push:
@@ -167,6 +173,7 @@ jobs:
 
   apps:
     needs: [version, test]
+    if: inputs.apps
     uses: ./.github/workflows/apps.yml
     with:
       version: ${{ needs.version.outputs.version }}
@@ -175,6 +182,7 @@ jobs:
 
   publish:
     needs: [version, server, docker, apps]
+    if: always() && needs.server.result == 'success' && needs.docker.result == 'success' && (needs.apps.result == 'success' || needs.apps.result == 'skipped')
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -187,11 +195,14 @@ jobs:
           path: out
           merge-multiple: true
       - uses: actions/download-artifact@v4
+        if: needs.apps.result == 'success'
         with:
           pattern: Encore-*
           path: out
           merge-multiple: true
       - name: Files and notes
+        env:
+          APPS: ${{ needs.apps.result }}
         run: |
           V=${{ needs.version.outputs.version }}; SV=${{ needs.version.outputs.semver }}
           # desktop installers carry the npm version in their names – show the real one
@@ -208,15 +219,17 @@ jobs:
           ### Install
           * **Docker**: \`ghcr.io/krifmaz/encore:$V\` (or \`:latest\` for the newest release, \`:edge\` for the newest of any kind) · compose file attached
           * **Linux without Docker**: \`encore-$V-linux-x86_64.tar.gz\` / \`-aarch64\` – run \`ENCORE_CONFIG_DIR=./config ENCORE_STATIC_DIR=./static ./encore\`
+          EOT
+          if [ "$APPS" = success ]; then cat >> notes.md <<EOT
           * **Android**: \`Encore-android-$V.apk\` · **Windows**: \`Encore-Setup-$V.exe\` · **macOS**: the .dmg (unsigned: right-click → Open the first time) · **Linux desktop**: .AppImage or .deb
           EOT
+          else echo "* **Apps**: the desktop and Android apps were not rebuilt for this release – use the newest release that has them." >> notes.md; fi
           sed -i 's/^          //' notes.md
-      - uses: softprops/action-gh-release@v2
-        with:
-          tag_name: v${{ needs.version.outputs.version }}
-          name: Encore ${{ needs.version.outputs.version }}
-          target_commitish: ${{ github.sha }}
-          prerelease: ${{ needs.version.outputs.prerelease == 'true' }}
-          make_latest: ${{ needs.version.outputs.prerelease == 'true' && 'false' || 'true' }}
-          body_path: notes.md
-          files: out/*
+      - name: Publish
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          V: ${{ needs.version.outputs.version }}
+          PRE: ${{ needs.version.outputs.prerelease }}
+        run: |
+          if [ "$PRE" = true ]; then FLAGS="--prerelease"; else FLAGS="--latest"; fi
+          gh release create "v$V" out/* --title "Encore $V" --notes-file notes.md --target "$GITHUB_SHA" $FLAGS
