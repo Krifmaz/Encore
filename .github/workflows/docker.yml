@@ -1,7 +1,7 @@
 name: test-and-build
 
 # Encore: the Rust server + web app. Tests run on every push; the default branch publishes the
-# in-between image :edge (linux/amd64 + arm64). :latest / :beta / :<version> come from the release workflow.
+# untested in-between image :dev (linux/amd64 + arm64). :latest / :edge / :<version> come from the release workflow.
 on:
   push:
     branches: ["**"]
@@ -57,7 +57,7 @@ jobs:
           images: ${{ env.IMAGE }}
           tags: |
             type=ref,event=branch
-            type=raw,value=edge,enable={{is_default_branch}}
+            type=raw,value=dev,enable={{is_default_branch}}
       - uses: docker/build-push-action@v6
         with:
           context: .
@@ -66,7 +66,7 @@ jobs:
           tags: ${{ steps.meta.outputs.tags }}
           build-args: |
             ENCORE_BUILD=${{ github.sha }}
-            ENCORE_VERSION=edge
+            ENCORE_VERSION=dev
           labels: ${{ steps.meta.outputs.labels }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
