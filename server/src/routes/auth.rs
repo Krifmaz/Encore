@@ -59,7 +59,7 @@ async fn info(State(st): State<AppState>) -> Json<Value> {
     Json(json!({
         "app_name": st.cfg.str("app_name"),
         "signup_mode": st.cfg.str("signup_mode"),
-        "version": env!("CARGO_PKG_VERSION"),
+        "version": crate::VERSION,
         "build": std::env::var("ENCORE_BUILD").unwrap_or_else(|_| "dev".into()).chars().take(7).collect::<String>(),
         "server": "rust",
         // the web app turns features on only when the server has them

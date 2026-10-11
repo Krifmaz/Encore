@@ -1,0 +1,189 @@
+name: release
+
+# Every release is kept – nothing is overwritten. Versions are the release date (America/Detroit) plus
+# the edition of that day: 2026.10.11.1, 2026.10.11.2 … Pre-releases end in -beta.
+#   Start one: Actions → release → Run workflow (tick "pre-release" for a beta), or push a tag v2026.10.11.1.
+#   Docker: :<version> always, :latest for releases, :beta for releases and pre-releases.
+#   Notes: docs/releases/<version>.md if it exists, otherwise the commit list since the previous release.
+on:
+  workflow_dispatch:
+    inputs:
+      prerelease:
+        description: "Pre-release (beta)"
+        type: boolean
+        default: false
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+  packages: write
+
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+jobs:
+  version:
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.v.outputs.version }}
+      prerelease: ${{ steps.v.outputs.prerelease }}
+      semver: ${{ steps.v.outputs.semver }}
+      code: ${{ steps.v.outputs.code }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - id: v
+        env:
+          PRE: ${{ inputs.prerelease }}
+        run: |
+          if [ "$GITHUB_REF_TYPE" = "tag" ]; then
+            V="${GITHUB_REF_NAME#v}"
+          else
+            D=$(TZ=America/Detroit date +%Y.%m.%d)
+            N=$(git tag -l "v$D.*" | sed 's/^v//; s/-.*//' | awk -F. '{print $4}' | sort -n | tail -1)
+            N=$(( ${N:-0} + 1 ))
+            V="$D.$N"
+            [ "$PRE" = "true" ] && V="$V-beta"
+          fi
+          echo "$V" | grep -Eq '^[0-9]{4}\.[0-9]{2}\.[0-9]{2}\.[0-9]+(-[a-z0-9.]+)?$' || { echo "bad version $V (want YYYY.MM.DD.N[-beta])"; exit 1; }
+          BASE="${V%%-*}"; SUFFIX="${V#"$BASE"}"
+          IFS=. read -r Y M D N <<< "$BASE"
+          echo "version=$V" >> "$GITHUB_OUTPUT"
+          echo "prerelease=$([ -n "$SUFFIX" ] && echo true || echo false)" >> "$GITHUB_OUTPUT"
+          # semver for npm/electron (no leading zeros): 2026.10.1101
+          echo "semver=$Y.$((10#$M)).$((10#$D * 100 + N))$SUFFIX" >> "$GITHUB_OUTPUT"
+          # Android versionCode, always increasing: YYMMDDNN
+          echo "code=$(printf '%d%02d%02d%02d' $((Y - 2000)) $((10#$M)) $((10#$D)) $N)" >> "$GITHUB_OUTPUT"
+          echo "Version $V"
+
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: server
+      - run: cargo test --locked
+        working-directory: server
+      - run: for f in $(find web/js -name '*.js'); do node --input-type=module --check < "$f" || { echo "syntax error in $f"; exit 1; }; done
+
+  server:
+    needs: [version, test]
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        include:
+          - arch: x86_64
+            target: x86_64-unknown-linux-gnu
+          - arch: aarch64
+            target: aarch64-unknown-linux-gnu
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: server
+          key: ${{ matrix.target }}
+      - if: matrix.arch == 'aarch64'
+        run: sudo apt-get update && sudo apt-get install -y gcc-aarch64-linux-gnu
+      - name: Build
+        working-directory: server
+        env:
+          ENCORE_VERSION: ${{ needs.version.outputs.version }}
+          CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER: aarch64-linux-gnu-gcc
+          CC_aarch64_unknown_linux_gnu: aarch64-linux-gnu-gcc
+        run: cargo build --release --locked --target ${{ matrix.target }}
+      - name: Package
+        run: |
+          V=${{ needs.version.outputs.version }}
+          mkdir -p out/encore && cp server/target/${{ matrix.target }}/release/encore out/encore/ && cp -r web out/encore/static
+          tar -C out -czf encore-$V-linux-${{ matrix.arch }}.tar.gz encore
+      - uses: actions/upload-artifact@v4
+        with:
+          name: server-${{ matrix.arch }}
+          path: "*.tar.gz"
+
+  docker:
+    needs: [version, test]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Tags
+        id: tags
+        run: |
+          I="ghcr.io/${GITHUB_REPOSITORY_OWNER,,}/encore"
+          T="$I:${{ needs.version.outputs.version }},$I:beta"
+          [ "${{ needs.version.outputs.prerelease }}" = "false" ] && T="$T,$I:latest"
+          echo "tags=$T" >> "$GITHUB_OUTPUT"
+      - uses: docker/build-push-action@v6
+        with:
+          context: .
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: ${{ steps.tags.outputs.tags }}
+          build-args: |
+            ENCORE_BUILD=${{ github.sha }}
+            ENCORE_VERSION=${{ needs.version.outputs.version }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+  apps:
+    needs: [version, test]
+    uses: ./.github/workflows/apps.yml
+    with:
+      version: ${{ needs.version.outputs.version }}
+      semver: ${{ needs.version.outputs.semver }}
+      code: ${{ needs.version.outputs.code }}
+
+  publish:
+    needs: [version, server, docker, apps]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/download-artifact@v4
+        with:
+          path: out
+          merge-multiple: true
+      - name: Files and notes
+        run: |
+          V=${{ needs.version.outputs.version }}; SV=${{ needs.version.outputs.semver }}
+          # desktop installers carry the npm version in their names – show the real one
+          for f in out/*"$SV"*; do [ -e "$f" ] && mv "$f" "${f//$SV/$V}"; done
+          cp docker-compose.yml out/
+          ls -la out
+          if [ -f "docs/releases/$V.md" ]; then cp "docs/releases/$V.md" notes.md; else
+            PREV=$(git tag -l 'v[0-9]*' --sort=-creatordate | head -1)
+            { echo "## Changes"; git log --no-merges --pretty='- %s' ${PREV:+$PREV..}HEAD | head -60; } > notes.md
+          fi
+          cat >> notes.md <<EOT
+
+          ---
+          ### Install
+          * **Docker**: \`ghcr.io/krifmaz/encore:$V\` (or \`:latest\` for the newest release, \`:beta\` to include pre-releases) · compose file attached
+          * **Linux without Docker**: \`encore-$V-linux-x86_64.tar.gz\` / \`-aarch64\` – run \`ENCORE_CONFIG_DIR=./config ENCORE_STATIC_DIR=./static ./encore\`
+          * **Android**: \`Encore-android-$V.apk\` · **Windows**: \`Encore-Setup-$V.exe\` · **macOS**: the .dmg (unsigned: right-click → Open the first time) · **Linux desktop**: .AppImage or .deb
+          EOT
+          sed -i 's/^          //' notes.md
+      - uses: softprops/action-gh-release@v2
+        with:
+          tag_name: v${{ needs.version.outputs.version }}
+          name: Encore ${{ needs.version.outputs.version }}
+          target_commitish: ${{ github.sha }}
+          prerelease: ${{ needs.version.outputs.prerelease == 'true' }}
+          make_latest: ${{ needs.version.outputs.prerelease == 'true' && 'false' || 'true' }}
+          body_path: notes.md
+          files: out/*

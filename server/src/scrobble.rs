@@ -70,7 +70,7 @@ async fn send(st: &AppState, uid: i64, t: &Row, listened_at: Option<i64>) {
     }
     if let Some(d) = connections::get(st, uid, "listenbrainz").as_ref().and_then(wants) {
         if let Some(token) = d["token"].as_str().filter(|s| !s.is_empty()) {
-            let mut info = json!({ "media_player": "Encore", "submission_client": "Encore", "submission_client_version": env!("CARGO_PKG_VERSION") });
+            let mut info = json!({ "media_player": "Encore", "submission_client": "Encore", "submission_client_version": crate::VERSION });
             if dur > 0 {
                 info["duration_ms"] = json!(dur * 1000);
             }

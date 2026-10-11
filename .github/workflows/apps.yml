@@ -1,16 +1,26 @@
 name: apps
 
-# Android APK + desktop apps (Windows, macOS, Linux). Published to the rolling "apps-latest" release
-# from the default branch; every run also keeps them as workflow artifacts.
+# Android APK + desktop apps (Windows, macOS, Linux). Pushes build them as workflow artifacts (CI);
+# the release workflow calls this with a version and attaches them to the release.
 on:
   push:
     branches: ["**"]
     paths: ["clients/**", ".github/workflows/apps.yml", "web/icons/**"]
-    tags: ["v*"]
   workflow_dispatch:
+  workflow_call:
+    inputs:
+      version:
+        type: string
+        required: true
+      semver:
+        type: string
+        required: true
+      code:
+        type: string
+        required: true
 
 permissions:
-  contents: write
+  contents: read
 
 jobs:
   android:
@@ -26,14 +36,14 @@ jobs:
           gradle-version: "8.10.2"
       - name: Build APK
         env:
-          ENCORE_VERSION_CODE: ${{ github.run_number }}
-          ENCORE_VERSION_NAME: 1.0.${{ github.run_number }}
+          ENCORE_VERSION_CODE: ${{ inputs.code || github.run_number }}
+          ENCORE_VERSION_NAME: ${{ inputs.version || format('dev.{0}', github.run_number) }}
         run: gradle -p clients/android assembleRelease --no-daemon --stacktrace
-      - run: cp clients/android/app/build/outputs/apk/release/app-release.apk Encore-android.apk
+      - run: cp clients/android/app/build/outputs/apk/release/app-release.apk "Encore-android${{ inputs.version && format('-{0}', inputs.version) || '' }}.apk"
       - uses: actions/upload-artifact@v4
         with:
           name: Encore-android
-          path: Encore-android.apk
+          path: Encore-android*.apk
 
   desktop:
     strategy:
@@ -52,6 +62,9 @@ jobs:
           cache: npm
           cache-dependency-path: clients/desktop/package-lock.json
       - run: npm ci
+      - name: Version
+        if: inputs.semver
+        run: npm pkg set version=${{ inputs.semver }}
       - name: Build
         env:
           CSC_IDENTITY_AUTO_DISCOVERY: "false"     # unsigned builds (macOS: right-click → Open the first time)
@@ -67,49 +80,3 @@ jobs:
             clients/desktop/dist/*.dmg
             clients/desktop/dist/*.zip
           if-no-files-found: ignore
-
-  # version tags also attach the Docker images as files (docker load -i …) for offline installs
-  docker:
-    if: startsWith(github.ref, 'refs/tags/v')
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: docker/setup-buildx-action@v3
-      - name: Build image files (amd64)
-        run: |
-          V=${GITHUB_REF_NAME#v}
-          docker buildx build --platform linux/amd64 --target default --build-arg ENCORE_BUILD=${GITHUB_SHA} -t ghcr.io/krifmaz/encore:$V -o type=docker,dest=encore-$V-amd64.tar .
-          gzip -1 encore-$V-amd64.tar
-      - uses: actions/upload-artifact@v4
-        with:
-          name: Encore-docker
-          path: "*.tar.gz"
-
-  release:
-    needs: [android, desktop, docker]
-    if: always() && needs.android.result == 'success' && needs.desktop.result == 'success' && needs.docker.result != 'failure' && (github.ref == format('refs/heads/{0}', github.event.repository.default_branch) || startsWith(github.ref, 'refs/tags/v'))
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          path: src
-      - uses: actions/download-artifact@v4
-        with:
-          path: out
-          merge-multiple: true
-      - run: cp src/docker-compose.yml out/
-      - uses: softprops/action-gh-release@v2
-        with:
-          tag_name: ${{ startsWith(github.ref, 'refs/tags/v') && github.ref_name || 'apps-latest' }}
-          name: ${{ startsWith(github.ref, 'refs/tags/v') && format('Encore {0}', github.ref_name) || 'Encore (latest)' }}
-          target_commitish: ${{ github.sha }}
-          make_latest: "true"
-          body: |
-            ### Server (Docker)
-            * `docker pull ghcr.io/krifmaz/encore:${{ startsWith(github.ref, 'refs/tags/v') && github.ref_name || 'latest' }}` · compose file: `docker-compose.yml`
-            * Offline install (version releases): `docker load -i encore-<version>-amd64.tar.gz`
-
-            ### Apps – install, then enter the address you open Encore at (e.g. http://192.168.1.10:8080)
-            * **Android**: `Encore-android.apk` (allow installing from your browser/files app when asked). Share a Spotify/YouTube Music link to Encore to download it.
-            * **Windows**: `Encore-Setup-….exe` (installer) or `Encore-Portable-….exe` · **macOS**: the .dmg (unsigned: right-click → Open the first time) · **Linux**: .AppImage or .deb
-          files: out/*

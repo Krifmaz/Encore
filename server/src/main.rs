@@ -1,4 +1,10 @@
 //! Encore server.
+/// Release version (e.g. 2026.10.11.1), set by the release build; local builds use Cargo's.
+pub const VERSION: &str = match option_env!("ENCORE_VERSION") {
+    Some(v) => v,
+    None => env!("CARGO_PKG_VERSION"),
+};
+
 mod acoustid;
 mod auth;
 mod config;
@@ -56,7 +62,7 @@ pub fn app(st: AppState) -> Router {
     let static_dir = st.static_dir.clone();
     let spa = ServeDir::new(&static_dir).fallback(ServeFile::new(static_dir.join("index.html")));
     Router::new()
-        .route("/api/health", get(|| async { Json(json!({ "ok": true, "version": env!("CARGO_PKG_VERSION"), "server": "rust" })) }))
+        .route("/api/health", get(|| async { Json(json!({ "ok": true, "version": crate::VERSION, "server": "rust" })) }))
         .merge(routes::auth::router())
         .merge(routes::admin::router())
         .merge(routes::library::router())
@@ -82,7 +88,7 @@ pub fn build_state() -> anyhow::Result<AppState> {
     let cfg = config::Config::load(db.clone())?;
     let static_dir = PathBuf::from(std::env::var("ENCORE_STATIC_DIR").unwrap_or_else(|_| "/app/static".into()));
     let http = reqwest::Client::builder()
-        .user_agent(format!("Encore/{} ( {} )", env!("CARGO_PKG_VERSION"), cfg.str("contact_email")))
+        .user_agent(format!("Encore/{} ( {} )", crate::VERSION, cfg.str("contact_email")))
         .timeout(std::time::Duration::from_secs(30))
         .build()?;
     let st = AppState { db, cfg, http, limits: Arc::new(auth::RateLimiter::default()), static_dir, library: library::Library::default(), mb: Default::default(), cache: Default::default(), tasks: Default::default() };
@@ -96,7 +102,7 @@ async fn main() -> anyhow::Result<()> {
     let st = build_state()?;
     let port: u16 = std::env::var("ENCORE_PORT").ok().and_then(|p| p.parse().ok()).unwrap_or(8080);
     let addr = SocketAddr::from(([0, 0, 0, 0], port));
-    tracing::info!("Encore {} listening on {addr}", env!("CARGO_PKG_VERSION"));
+    tracing::info!("Encore {} listening on {addr}", crate::VERSION);
     // library scan at start; later scans (and every other background job) come from the scheduler
     {
         let st = st.clone();

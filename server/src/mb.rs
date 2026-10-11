@@ -29,7 +29,7 @@ impl Mb {
         let base = if base.is_empty() { "https://musicbrainz.org".to_string() } else { base.trim_end_matches('/').to_string() };
         let gap = Duration::from_secs_f64(1.0 / st.cfg.float("musicbrainz_rate").max(0.1));
         let contact = st.cfg.str("contact_email");
-        let ua = format!("Encore/{} ( {} )", env!("CARGO_PKG_VERSION"), if contact.is_empty() { "https://github.com/Krifmaz/Encore".into() } else { contact });
+        let ua = format!("Encore/{} ( {} )", crate::VERSION, if contact.is_empty() { "https://github.com/Krifmaz/Encore".into() } else { contact });
         for attempt in 0..4 {
             {
                 let mut last = self.last.lock().await;

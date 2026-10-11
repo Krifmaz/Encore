@@ -9,10 +9,12 @@ RUN if [ "$TARGETARCH" = "arm64" ]; then \
 ENV CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER=aarch64-linux-gnu-gcc \
     CC_aarch64_unknown_linux_gnu=aarch64-linux-gnu-gcc \
     AR_aarch64_unknown_linux_gnu=aarch64-linux-gnu-ar
+ARG ENCORE_VERSION=
 WORKDIR /src
 COPY server/Cargo.toml server/Cargo.lock ./
 COPY server/src ./src
 RUN case "$TARGETARCH" in arm64) T=aarch64-unknown-linux-gnu ;; *) T=x86_64-unknown-linux-gnu ;; esac \
+ && { [ -n "$ENCORE_VERSION" ] || unset ENCORE_VERSION; } \
  && cargo build --release --locked --target "$T" && cp "target/$T/release/encore" /encore
 
 FROM debian:trixie-slim
@@ -40,7 +42,9 @@ COPY web /app/static
 COPY docker/entrypoint.sh /entrypoint.sh
 RUN chmod +x /entrypoint.sh && mkdir -p /config /music /downloads
 ARG ENCORE_BUILD=dev
+ARG ENCORE_VERSION=
 ENV ENCORE_BUILD=${ENCORE_BUILD}
+LABEL org.opencontainers.image.version="${ENCORE_VERSION}"
 VOLUME /config
 EXPOSE 8080
 HEALTHCHECK --interval=30s --timeout=5s --start-period=20s --retries=3 CMD curl -fsS http://127.0.0.1:8080/api/health || exit 1

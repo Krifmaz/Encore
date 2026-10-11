@@ -55,7 +55,7 @@ async fn status(State(st): State<AppState>, User(_): User) -> ApiResult<Json<Val
         "hifi": { "ok": hifi::enabled(&st), "enabled": st.cfg.bool("hifi_enabled") },
         "ffmpeg": { "ok": which("ffmpeg") },
     });
-    Ok(Json(json!({ "version": env!("CARGO_PKG_VERSION"), "server": "rust", "services": services, "disk": disk(&st.cfg.str("library_path")), "app_name": st.cfg.str("app_name") })))
+    Ok(Json(json!({ "version": crate::VERSION, "server": "rust", "services": services, "disk": disk(&st.cfg.str("library_path")), "app_name": st.cfg.str("app_name") })))
 }
 
 fn msg(ok: bool, m: impl Into<String>) -> Value {
