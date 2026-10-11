@@ -35,7 +35,7 @@ const SECTIONS = [
   ] },
   { id: 'pipeline', title: 'Download pipeline', fields: [
     S('discography_singles', 'Requesting a whole discography includes singles (not just albums and EPs)', 'bool'),
-    S('source_order', 'Source order', 'text', { full: true, help: 'Comma-separated: lidarr, streamrip, hifi, slskd, ytdlp. Each source is tried in turn until one succeeds. Lidarr only handles albums.' }),
+    S('source_order', 'Source order', 'text', { full: true, help: 'Comma-separated: streamrip, hifi, slskd, torznab (Encore 2) or lidarr, ytdlp. Each source is tried in turn until one succeeds. torznab/Lidarr only handle albums.' }),
   ] },
   { id: 'verify', title: 'Verification & duplicates', test: 'acoustid', fields: [
     S('acoustid_api_key', 'AcoustID API key', 'password', { full: true, help: 'Free – register an application at acoustid.org/new-application. Used to fingerprint audio and confirm each file is the right song/version.' }),
@@ -71,6 +71,22 @@ const SECTIONS = [
     S('lidarr_quality_profile', 'Quality profile', 'select', { options: [], dynamic: 'quality_profiles' }),
     S('lidarr_metadata_profile', 'Metadata profile', 'select', { options: [], dynamic: 'metadata_profiles' }),
     S('lidarr_timeout_minutes', 'Fall back to next source after (minutes)', 'number'),
+  ] },
+  { id: 'torznab', title: 'Torrents & Usenet (Prowlarr)', test: 'torznab', fields: [
+    S('torznab_enabled', 'Search torrent and Usenet indexers through Prowlarr', 'bool', { help: 'Albums only. Prowlarr searches every indexer you added there; torrents go to qBittorrent, Usenet to SABnzbd.' }),
+    S('prowlarr_url', 'Prowlarr URL', 'text', { help: 'Internal address, e.g. http://prowlarr:9696' }),
+    S('prowlarr_api_key', 'Prowlarr API key', 'password', { help: 'Prowlarr → Settings → General → API Key' }),
+    S('torznab_min_seeders', 'Minimum seeders', 'number'),
+    S('torznab_timeout_minutes', 'Try the next release after a stall of (minutes)', 'number'),
+    S('qbit_url', 'qBittorrent URL', 'text', { help: 'e.g. http://qbittorrent:8080 (leave empty to skip torrents)' }),
+    S('qbit_user', 'qBittorrent user'),
+    S('qbit_password', 'qBittorrent password', 'password'),
+    S('qbit_category', 'qBittorrent category'),
+    S('qbit_download_path', 'Torrent download folder (same path in both containers)', 'text', { full: true }),
+    S('sab_url', 'SABnzbd URL', 'text', { help: 'e.g. http://sabnzbd:8080 (leave empty to skip Usenet)' }),
+    S('sab_api_key', 'SABnzbd API key', 'password'),
+    S('sab_category', 'SABnzbd category'),
+    S('sab_download_path', 'Usenet download folder (as mounted in this container)', 'text', { full: true }),
   ] },
   { id: 'slskd', title: 'Soulseek (slskd)', test: 'slskd', fields: [
     S('slskd_enabled', 'Enable slskd', 'bool'),
@@ -135,7 +151,7 @@ SECTIONS.push(KEYS);
 const GROUPS = [
   { id: 'general', title: 'General', sections: ['general'] },
   { id: 'keys', title: 'API keys & passwords', sections: ['keys'] },
-  { id: 'downloads', title: 'Downloads & sources', sections: ['pipeline', 'slskd', 'ytdlp', 'hifi', 'streamrip', 'lidarr'] },
+  { id: 'downloads', title: 'Downloads & sources', sections: ['pipeline', 'slskd', 'torznab', 'ytdlp', 'hifi', 'streamrip', 'lidarr'] },
   { id: 'tagging', title: 'Library, tagging & IDs', sections: ['library', 'verify'] },
   { id: 'accounts', title: 'Email & notifications', sections: ['email', 'notify'] },
   { id: 'connections', title: 'Services & sync', sections: ['spotify', 'sync', 'media'] },
@@ -273,7 +289,9 @@ export async function render(view, ctx) {
     if (id === 'api') return showApi();
     if (id === 'tasks') return renderTasks(panel);
     const group = GROUPS.find(g => g.id === id) || GROUPS[0];
-    const secs = group.sections.map(sid => SECTIONS.find(x => x.id === sid));
+    // only what this server has: Encore 2 (Rust) has Prowlarr instead of Lidarr
+    const secs = group.sections.map(sid => SECTIONS.find(x => x.id === sid))
+      .map(sec => ({ ...sec, fields: sec.fields.filter(f => f.key in values) })).filter(sec => sec.fields.length);
     if (secs.some(x => x.id === 'lidarr') && values.lidarr_api_key && !lidarrOpts) {
       try { lidarrOpts = await api.get('/system/lidarr/options'); } catch { lidarrOpts = null; }
     }

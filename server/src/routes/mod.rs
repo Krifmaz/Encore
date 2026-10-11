@@ -1,6 +1,9 @@
 pub mod admin;
 pub mod auth;
 pub mod library;
+pub mod picker;
+pub mod requests;
+pub mod system;
 pub mod discover;
 pub mod foryou;
 pub mod catalog;

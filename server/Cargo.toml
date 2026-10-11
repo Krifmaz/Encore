@@ -38,6 +38,7 @@ tower = { version = "0.5", features = ["util"] }
 regex = "1.13.1"
 fancy-regex = "0.19.2"
 unicode-normalization = "0.1.25"
+md5 = "0.8.1"
 
 [profile.release]
 lto = "thin"

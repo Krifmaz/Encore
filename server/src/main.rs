@@ -1,4 +1,5 @@
 //! Encore server.
+mod acoustid;
 mod auth;
 mod config;
 mod db;
@@ -8,9 +9,12 @@ mod library;
 mod mb;
 mod matcher;
 mod nlsearch;
+mod notify;
 mod routes;
 mod sources;
 mod state;
+mod tagger;
+mod worker;
 
 use axum::extract::Request;
 use axum::http::{header, HeaderValue};
@@ -49,6 +53,9 @@ pub fn app(st: AppState) -> Router {
         .merge(routes::discover::router())
         .merge(routes::foryou::router())
         .merge(routes::catalog::router())
+        .merge(routes::requests::router())
+        .merge(routes::picker::router())
+        .merge(routes::system::router())
         .with_state(st)
         .fallback_service(spa)
         .layer(middleware::from_fn(security_headers))
@@ -64,7 +71,7 @@ pub fn build_state() -> anyhow::Result<AppState> {
         .user_agent(format!("Encore/{} ( {} )", env!("CARGO_PKG_VERSION"), cfg.str("contact_email")))
         .timeout(std::time::Duration::from_secs(30))
         .build()?;
-    let st = AppState { db, cfg, http, limits: Arc::new(auth::RateLimiter::default()), static_dir, library: library::Library::default(), mb: Default::default(), cache: Default::default() };
+    let st = AppState { db, cfg, http, limits: Arc::new(auth::RateLimiter::default()), static_dir, library: library::Library::default(), mb: Default::default(), cache: Default::default(), tasks: Default::default() };
     auth::ensure_owner(&st)?;
     Ok(st)
 }
@@ -90,7 +97,26 @@ async fn main() -> anyhow::Result<()> {
             }
         });
     }
+    tokio::spawn(worker::run(st.clone()));
     let listener = tokio::net::TcpListener::bind(addr).await?;
     axum::serve(listener, app(st).into_make_service_with_connect_info::<SocketAddr>()).await?;
     Ok(())
+}
+
+#[cfg(test)]
+pub static TEST_ENV: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn routes_do_not_clash() {
+        let _env = super::TEST_ENV.lock().unwrap_or_else(|e| e.into_inner());
+        // axum panics on overlapping routes when the router is built
+        let dir = std::env::temp_dir().join(format!("encore-routes-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::env::set_var("ENCORE_CONFIG_DIR", &dir);
+        let st = super::build_state().unwrap();
+        let _ = super::app(st);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }

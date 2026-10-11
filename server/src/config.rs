@@ -66,6 +66,13 @@ impl Config {
         let mut defs: Vec<(String, Def)> = raw
             .into_iter()
             .map(|(k, v)| (k, Def { env: v["env"].as_str().map(String::from), default: v["default"].clone(), secret: v["secret"].as_bool().unwrap_or(false) }))
+            .filter(|(k, _)| !k.starts_with("lidarr_")) // Lidarr is replaced by Prowlarr → qBittorrent/SABnzbd
+            .map(|(k, mut d)| {
+                if k == "source_order" {
+                    d.default = json!("streamrip,hifi,slskd,torznab,ytdlp");
+                }
+                (k, d)
+            })
             .collect();
         // settings added by the Rust server
         for (k, env, default, secret) in [

@@ -20,6 +20,7 @@ pub struct AppState {
     pub library: Library,
     pub mb: Mb,
     pub cache: Arc<Mutex<HashMap<String, (Instant, Value)>>>,
+    pub tasks: crate::worker::Tasks,
 }
 
 impl AppState {

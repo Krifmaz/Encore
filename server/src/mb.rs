@@ -264,3 +264,89 @@ pub async fn release_groups_for_isrc(st: &AppState, isrc: &str) -> std::collecti
     }
     out
 }
+
+pub fn cover_release(id: &str, size: u32) -> String {
+    format!("https://coverartarchive.org/release/{id}/front-{size}")
+}
+
+pub async fn search_releases(st: &AppState, artist: &str, album: &str, limit: usize) -> anyhow::Result<Vec<Value>> {
+    let mut q = format!("release:\"{}\"", esc(album));
+    if !artist.is_empty() {
+        q += &format!(" AND artist:\"{}\"", esc(artist));
+    }
+    let d = st.mb.get(st, "release", &[("query", q), ("limit", limit.to_string())]).await?;
+    Ok(d["releases"].as_array().cloned().unwrap_or_default().iter().map(|r| {
+        let id = s(r, "id");
+        json!({ "id": id, "title": s(r, "title"), "artist": credit(&r["artist-credit"]), "date": s(r, "date"), "country": s(r, "country"),
+            "status": s(r, "status"), "track_count": r["track-count"].as_i64().unwrap_or(0), "release_group_id": r["release-group"]["id"],
+            "type": s(&r["release-group"], "primary-type"), "score": r["score"].as_i64().unwrap_or(0), "cover": cover_release(&id, 250) })
+    }).collect())
+}
+
+pub async fn recording(st: &AppState, rid: &str) -> anyhow::Result<Value> {
+    let r = st.mb.get(st, &format!("recording/{rid}"), &[("inc", "artist-credits+releases+release-groups+isrcs".into())]).await?;
+    let rel = r["releases"].as_array().and_then(|a| a.first()).cloned().unwrap_or_default();
+    let year: String = { let d = s(&r, "first-release-date"); if d.is_empty() { s(&rel, "date") } else { d } }.chars().take(4).collect();
+    Ok(json!({ "id": s(&r, "id"), "title": s(&r, "title"), "artist": credit(&r["artist-credit"]), "artist_id": credit_id(&r["artist-credit"]),
+        "length": r["length"].as_f64().unwrap_or(0.0) / 1000.0, "album": s(&rel, "title"), "release_id": rel.get("id").cloned().unwrap_or(Value::Null),
+        "release_group_id": rel["release-group"].get("id").cloned().unwrap_or(Value::Null), "year": year,
+        "isrc": r["isrcs"].as_array().and_then(|a| a.first()).cloned().unwrap_or(Value::Null) }))
+}
+
+pub async fn recordings_for_isrc(st: &AppState, isrc: &str) -> Vec<String> {
+    let Ok(d) = st.mb.get(st, &format!("isrc/{isrc}"), &[]).await else { return vec![] };
+    d["recordings"].as_array().cloned().unwrap_or_default().iter().filter_map(|r| r["id"].as_str().map(String::from)).collect()
+}
+
+/// The official studio album (or EP) a recording first appeared on. Compilations, live albums, soundtracks,
+/// remix albums and other artists' releases are skipped.
+pub async fn album_for_recording(st: &AppState, rid: &str, allow_ep: bool) -> anyhow::Result<Option<Value>> {
+    let d = st.mb.get(st, &format!("recording/{rid}"), &[("inc", "releases+release-groups+artist-credits".into())]).await?;
+    let ids = |ac: &Value| -> std::collections::HashSet<String> {
+        ac.as_array().map(|a| a.iter().filter_map(|c| c["artist"]["id"].as_str().map(String::from)).collect()).unwrap_or_default()
+    };
+    let artist_ids = ids(&d["artist-credit"]);
+    let mut best: Option<((bool, String), Value)> = None;
+    for rel in d["releases"].as_array().cloned().unwrap_or_default() {
+        let g = &rel["release-group"];
+        if !(rel["status"].is_null() || rel["status"] == "Official") {
+            continue;
+        }
+        let pt = s(g, "primary-type");
+        if !(pt == "Album" || (allow_ep && pt == "EP")) || g["secondary-types"].as_array().is_some_and(|a| !a.is_empty()) {
+            continue;
+        }
+        let ra = ids(&rel["artist-credit"]);
+        let ra = if ra.is_empty() { artist_ids.clone() } else { ra };
+        if !artist_ids.is_empty() && ra.is_disjoint(&artist_ids) {
+            continue;
+        }
+        let date = { let x = s(g, "first-release-date"); if x.is_empty() { let y = s(&rel, "date"); if y.is_empty() { "9999".into() } else { y } } else { x } };
+        let key = (pt != "Album", date);
+        if best.as_ref().is_none_or(|(k, _)| key < *k) {
+            best = Some((key, g.clone()));
+        }
+    }
+    Ok(best.map(|(_, g)| {
+        let id = s(&g, "id");
+        json!({ "id": id, "title": s(&g, "title"), "type": s(&g, "primary-type"), "artist": credit(&d["artist-credit"]),
+            "year": s(&g, "first-release-date").chars().take(4).collect::<String>(), "cover": cover_rg(&id, 250) })
+    }))
+}
+
+/// The MusicBrainz recording for a song, version-aware (a remix won't resolve to the original).
+pub async fn resolve_recording(st: &AppState, artist: &str, title: &str, length: Option<f64>, isrc: Option<&str>) -> anyhow::Result<Option<String>> {
+    if let Some(i) = isrc.filter(|i| !i.is_empty()) {
+        if let Some(id) = recordings_for_isrc(st, i).await.into_iter().next() {
+            return Ok(Some(id));
+        }
+    }
+    let want = crate::matcher::describe(title, artist, "", length, None, None);
+    for r in search_recordings(st, title, 10, Some(artist)).await? {
+        let l = r["length"].as_f64().filter(|l| *l > 0.0);
+        if crate::matcher::compare(&want, &crate::matcher::describe(r["title"].as_str().unwrap_or(""), r["artist"].as_str().unwrap_or(""), "", l, None, None), true).matched {
+            return Ok(r["id"].as_str().map(String::from));
+        }
+    }
+    Ok(None)
+}

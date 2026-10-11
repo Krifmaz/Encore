@@ -1,0 +1,432 @@
+//! /api/requests: ask for artists, albums, songs or any link; approve, retry, cancel, clear.
+use crate::auth::{self, Admin, User};
+use crate::db::{now, Row, RowExt};
+use crate::error::{err, ApiError, ApiResult};
+use crate::state::AppState;
+use crate::worker::{self, ACTIVE};
+use crate::{library, notify, p};
+use axum::extract::{Path, Query, State};
+use axum::routing::{delete, get, post};
+use axum::{Json, Router};
+use regex::Regex;
+use serde::Deserialize;
+use serde_json::{json, Value};
+use std::sync::LazyLock;
+
+pub fn router() -> Router<AppState> {
+    Router::new()
+        .route("/api/requests", get(list).post(create))
+        .route("/api/requests/from-link", post(from_link))
+        .route("/api/requests/link", post(link))
+        .route("/api/requests/clear", post(clear))
+        .route("/api/requests/{rid}", delete(remove))
+        .route("/api/requests/{rid}/approve", post(approve))
+        .route("/api/requests/{rid}/deny", post(deny))
+        .route("/api/requests/{rid}/retry", post(retry))
+        .route("/api/requests/{rid}/cancel", post(cancel))
+}
+
+const EXT_SOURCES: [&str; 5] = ["deezer", "apple", "ytm", "bandcamp", "discogs"];
+
+#[derive(Deserialize, Default, Clone)]
+#[serde(default)]
+pub struct NewRequest {
+    pub kind: String,
+    pub mbid: Option<String>,
+    pub artist: Option<String>,
+    pub title: Option<String>,
+    pub album: Option<String>,
+    pub year: Option<String>,
+    pub cover_url: Option<String>,
+    pub url: Option<String>,
+    pub length: Option<f64>,
+    pub isrc: Option<String>,
+    pub album_mode: Option<String>,
+    pub ext: Option<Value>,
+}
+
+fn nz(s: &Option<String>) -> Option<&str> {
+    s.as_deref().filter(|x| !x.is_empty())
+}
+
+pub fn quota(st: &AppState, u: &Row, n: i64) -> ApiResult<()> {
+    if auth::is_admin(u) {
+        return Ok(());
+    }
+    let limit = u.i("request_limit");
+    if limit == 0 {
+        return Ok(());
+    }
+    let used = st.db.one("SELECT COUNT(*) n FROM requests WHERE user_id=? AND created_at > ? AND parent_id IS NULL", p![u.i("id"), now() - 7.0 * 86400.0])?.map(|r| r.i("n")).unwrap_or(0);
+    if used + n > limit {
+        return Err(err(429, format!("Weekly request limit reached ({limit}). Ask an admin to raise it.")));
+    }
+    Ok(())
+}
+
+fn dup(st: &AppState, sql: &str, params: Vec<Value>) -> ApiResult<()> {
+    if let Some(d) = st.db.one(sql, params)? {
+        return Err(err(409, format!("Already requested (#{}, {})", d.i("id"), d.s("status"))));
+    }
+    Ok(())
+}
+
+pub fn create_request(st: &AppState, u: &Row, b: &NewRequest, parent: Option<i64>, extra: Option<Value>) -> ApiResult<i64> {
+    let has_extra = extra.is_some();
+    let ext_ok = b.ext.as_ref().is_some_and(|e| EXT_SOURCES.iter().any(|k| !e[k].is_null() && e[k] != ""));
+    let (artist, title) = (nz(&b.artist), nz(&b.title).or(nz(&b.album)));
+    match b.kind.as_str() {
+        "url" => {
+            if !b.url.as_deref().is_some_and(|u| u.starts_with("http://") || u.starts_with("https://")) {
+                return Err(err(400, "A valid http(s) URL is required"));
+            }
+        }
+        "album" if nz(&b.mbid).is_none() && ext_ok => {
+            if artist.is_none() || title.is_none() {
+                return Err(err(400, "Artist and album title are required"));
+            }
+            if !has_extra {
+                dup(st, "SELECT id, status FROM requests WHERE kind='album' AND mbid IS NULL AND lower(artist)=lower(?) AND lower(title)=lower(?)
+                         AND status NOT IN ('failed','denied','cancelled')", p![artist, title])?;
+            }
+        }
+        "artist" | "album" if nz(&b.mbid).is_none() => return Err(err(400, "A MusicBrainz id is required")),
+        "track" if nz(&b.mbid).is_none() && (artist.is_none() || nz(&b.title).is_none()) => return Err(err(400, "Track needs a MusicBrainz id or artist + title")),
+        "artist" | "album" | "track" => {}
+        _ => return Err(err(400, "Invalid request kind")),
+    }
+    if b.kind == "track" && nz(&b.mbid).is_none() && !has_extra {
+        dup(st, "SELECT id, status FROM requests WHERE kind='track' AND lower(artist)=lower(?) AND lower(title)=lower(?) AND status NOT IN ('failed','denied','cancelled')",
+            p![artist, b.title])?;
+    }
+    if let (Some(m), false) = (nz(&b.mbid), has_extra) {
+        dup(st, "SELECT id, status FROM requests WHERE mbid=? AND kind=? AND status NOT IN ('failed','denied','cancelled')", p![m, b.kind])?;
+    }
+    let approved = auth::is_admin(u) || u.b("auto_approve") || st.cfg.bool("auto_approve");
+    let mut detail = json!({});
+    if let Some(l) = b.length.filter(|l| *l > 0.0) {
+        detail["length"] = json!(l);
+    }
+    if let Some(i) = nz(&b.isrc) {
+        detail["isrc"] = json!(i);
+    }
+    if let Some(m) = b.album_mode.as_deref().filter(|m| *m == "song" || *m == "album") {
+        detail["album_mode"] = json!(m);
+    }
+    if let Some(e) = &b.ext {
+        let mut keep = serde_json::Map::new();
+        for k in EXT_SOURCES.iter().chain(["upc"].iter()) {
+            if !e[*k].is_null() && e[*k] != "" {
+                keep.insert(k.to_string(), e[*k].clone());
+            }
+        }
+        detail["ext"] = Value::Object(keep);
+    }
+    if let Some(Value::Object(x)) = extra {
+        for (k, v) in x {
+            detail[k] = v;
+        }
+    }
+    let t = now();
+    let id = st.db.execute(
+        "INSERT INTO requests (user_id, kind, mbid, artist, title, album, year, cover_url, url, status, message, detail, parent_id, created_at, updated_at)
+         VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+        p![u.i("id"), b.kind, nz(&b.mbid), artist, title, nz(&b.album), nz(&b.year), nz(&b.cover_url), nz(&b.url),
+           if approved { "queued" } else { "pending" }, if approved { "" } else { "Waiting for admin approval" }, detail.to_string(), parent, t, t])?;
+    let what = title.or(artist).or(nz(&b.url)).unwrap_or("");
+    st.db.log("info", &format!("{} requested {}: {what}", u.s("username"), b.kind));
+    Ok(id)
+}
+
+fn get_request(st: &AppState, id: i64) -> ApiResult<Value> {
+    let mut r = st.db.one("SELECT * FROM requests WHERE id=?", p![id])?.ok_or_else(|| err(404, "Request not found"))?;
+    let d: Value = serde_json::from_str(&r.s("detail")).unwrap_or(json!({}));
+    r.insert("detail".into(), d);
+    Ok(Value::Object(r))
+}
+
+#[derive(Deserialize, Default)]
+#[serde(default)]
+struct ListQ {
+    status: Option<String>,
+    mine: bool,
+    limit: Option<i64>,
+}
+
+async fn list(State(st): State<AppState>, User(u): User, Query(q): Query<ListQ>) -> ApiResult<Json<Value>> {
+    let mut sql = "SELECT r.*, u.username FROM requests r LEFT JOIN users u ON u.id=r.user_id WHERE 1=1".to_string();
+    let mut params = vec![];
+    if !auth::is_admin(&u) || q.mine {
+        sql += " AND r.user_id=?";
+        params.push(json!(u.i("id")));
+    }
+    match q.status.as_deref() {
+        Some("active") => sql += " AND r.status IN ('pending','queued','searching','downloading','monitoring','importing')",
+        Some(s) if !s.is_empty() => {
+            sql += " AND r.status=?";
+            params.push(json!(s));
+        }
+        _ => {}
+    }
+    sql += " ORDER BY r.id DESC LIMIT ?";
+    params.push(json!(q.limit.unwrap_or(200).min(1000)));
+    let rows = st.db.query(&sql, params)?;
+    let out: Vec<Value> = rows.into_iter().map(|mut r| {
+        let d: Value = serde_json::from_str(&r.s("detail")).unwrap_or(json!({}));
+        r.remove("detail");
+        r.insert("log".into(), d.get("log").cloned().unwrap_or(json!([])));
+        r.insert("length".into(), d["length"].clone());
+        r.insert("picked".into(), json!(d["pick"].is_object()));
+        let mut cand = Value::Null;
+        let idx = d["slskd"]["idx"].as_i64().unwrap_or(-1);
+        if let Some(c) = d["slskd"]["candidates"].as_array().and_then(|a| a.get(idx.max(0) as usize)).filter(|_| idx >= 0) {
+            let dir = c["directory"].as_str().unwrap_or("").replace('\\', "/");
+            cand = json!({ "username": c["username"], "format": c["format"], "directory": dir.rsplit('/').next().unwrap_or(""),
+                           "files": c["files"].as_array().map(|a| a.len()).unwrap_or(0) });
+        }
+        let tidx = d["torznab"]["idx"].as_i64().unwrap_or(-1);
+        if let Some(c) = d["torznab"]["candidates"].as_array().and_then(|a| a.get(tidx.max(0) as usize)).filter(|_| tidx >= 0) {
+            cand = json!({ "username": c["indexer"], "format": if c["lossless"].as_bool().unwrap_or(false) { "flac" } else { "" }, "directory": c["title"], "files": null });
+        }
+        r.insert("candidate".into(), cand);
+        Value::Object(r)
+    }).collect();
+    Ok(Json(json!(out)))
+}
+
+async fn create(State(st): State<AppState>, User(u): User, Json(b): Json<NewRequest>) -> ApiResult<Json<Value>> {
+    quota(&st, &u, 1)?;
+    let id = create_request(&st, &u, &b, None, None)?;
+    let r = get_request(&st, id)?;
+    if r["status"] == "pending" {
+        let what = [&r["title"], &r["artist"], &r["url"]].iter().find_map(|v| v.as_str().filter(|s| !s.is_empty())).unwrap_or("").to_string();
+        let (st2, who, kind, cover) = (st.clone(), u.s("username"), b.kind.clone(), b.cover_url.clone());
+        tokio::spawn(async move {
+            notify::send(&st2, "🎵 New request awaiting approval", &format!("{who} requested {kind}: {what}"), cover.as_deref()).await;
+        });
+    }
+    Ok(Json(r))
+}
+
+#[derive(Deserialize)]
+struct LinkBody {
+    url: String,
+    album_mode: Option<String>,
+}
+
+/// Request every song behind a link (one song, an album or a playlist) from the best source.
+async fn from_link_inner(st: &AppState, u: &Row, url: &str, album_mode: Option<String>) -> ApiResult<Value> {
+    let data = crate::sources::links::fetch(st, url).await.map_err(|e| err(400, e.to_string()))?;
+    quota(st, u, 1)?;
+    let (mut made, mut skipped) = (vec![], 0);
+    for t in data["tracks"].as_array().cloned().unwrap_or_default().iter().take(500) {
+        let s = |k: &str| t[k].as_str().filter(|x| !x.is_empty()).map(String::from);
+        let b = NewRequest { kind: "track".into(), artist: s("artist"), title: s("title"), album: s("album"), cover_url: s("cover"),
+            length: t["duration"].as_f64(), isrc: s("isrc"), mbid: s("mbid"), album_mode: album_mode.clone(), ..Default::default() };
+        match create_request(st, u, &b, None, None) {
+            Ok(id) => made.push(id),
+            Err(e) if e.status.as_u16() == 409 => skipped += 1,
+            Err(e) => return Err(e),
+        }
+    }
+    let status = match made.first() { Some(id) => get_request(st, *id)?["status"].clone(), None => Value::Null };
+    Ok(json!({ "requested": made.len(), "already_requested": skipped, "name": data["name"], "status": status, "ids": made }))
+}
+
+async fn from_link(State(st): State<AppState>, User(u): User, Json(b): Json<LinkBody>) -> ApiResult<Json<Value>> {
+    Ok(Json(from_link_inner(&st, &u, b.url.trim(), b.album_mode).await?))
+}
+
+// links that only describe music (no downloadable audio) → matched song by song
+static METADATA_ONLY: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"(?i)open\.spotify\.com|spotify\.link|^spotify:|music\.apple\.com|listenbrainz\.org|last\.fm/|tidal\.com|qobuz\.com|deezer\.com|deezer\.page\.link|music\.amazon\.|music\.youtube\.com/(playlist|browse)").unwrap());
+static RIP: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"qobuz\.com|tidal\.com|deezer\.com").unwrap());
+
+/// One box for any link: streaming-service links are matched song by song (best quality from any source);
+/// Qobuz/Tidal/Deezer rip directly when streamrip is set up; everything else downloads as-is with yt-dlp.
+async fn link(State(st): State<AppState>, User(u): User, Json(b): Json<LinkBody>) -> ApiResult<Json<Value>> {
+    let url = b.url.trim().to_string();
+    if !(url.starts_with("http://") || url.starts_with("https://") || url.starts_with("spotify:")) {
+        return Err(err(400, "Paste a full link (https://…)"));
+    }
+    let rip = RIP.is_match(&url) && crate::sources::streamrip::enabled(&st);
+    if METADATA_ONLY.is_match(&url) && !rip {
+        let mut r = from_link_inner(&st, &u, &url, b.album_mode).await?;
+        r["mode"] = json!("matched");
+        return Ok(Json(r));
+    }
+    quota(&st, &u, 1)?;
+    let id = create_request(&st, &u, &NewRequest { kind: "url".into(), url: Some(url), ..Default::default() }, None, None)?;
+    Ok(Json(json!({ "requested": 1, "already_requested": 0, "ids": [id], "status": get_request(&st, id)?["status"], "mode": "direct" })))
+}
+
+pub fn get_owned(st: &AppState, id: i64, u: &Row) -> ApiResult<Value> {
+    let r = get_request(st, id)?;
+    if !auth::is_admin(u) && r["user_id"].as_i64() != Some(u.i("id")) {
+        return Err(err(403, "Not your request"));
+    }
+    Ok(r)
+}
+
+fn family(st: &AppState, id: i64) -> Vec<i64> {
+    let mut v = vec![id];
+    v.extend(st.db.query("SELECT id FROM requests WHERE parent_id=?", p![id]).unwrap_or_default().into_iter().map(|r| r.i("id")));
+    v
+}
+
+fn set(st: &AppState, id: i64, status: &str, message: &str) -> Result<i64, ApiError> {
+    Ok(st.db.execute("UPDATE requests SET status=?, message=?, updated_at=? WHERE id=?", p![status, message, now(), id])?)
+}
+
+async fn approve(State(st): State<AppState>, Admin(_): Admin, Path(rid): Path<i64>) -> ApiResult<Json<Value>> {
+    for i in family(&st, rid) {
+        if let Ok(r) = get_request(&st, i) {
+            if r["status"] == "pending" {
+                set(&st, i, if r["kind"] == "playlist" { "completed" } else { "queued" }, "Approved")?;
+            }
+        }
+    }
+    Ok(Json(json!({ "ok": true })))
+}
+
+async fn deny(State(st): State<AppState>, Admin(a): Admin, Path(rid): Path<i64>) -> ApiResult<Json<Value>> {
+    for i in family(&st, rid) {
+        if let Ok(r) = get_request(&st, i) {
+            if r["status"] == "pending" {
+                set(&st, i, "denied", &format!("Denied by {}", a.s("username")))?;
+            }
+        }
+    }
+    Ok(Json(json!({ "ok": true })))
+}
+
+async fn retry(State(st): State<AppState>, User(u): User, Path(rid): Path<i64>) -> ApiResult<Json<Value>> {
+    let r = get_owned(&st, rid, &u)?;
+    let reset = "UPDATE requests SET status='queued', progress=0, message='Retrying', source=NULL, detail=?, updated_at=? WHERE id=?";
+    if r["kind"] == "playlist" {
+        for c in st.db.query("SELECT id FROM requests WHERE parent_id=? AND status IN ('failed','cancelled')", p![rid])? {
+            st.db.execute(reset, p!["{}", now(), c.i("id")])?;
+        }
+        return Ok(Json(json!({ "ok": true })));
+    }
+    let status = r["status"].as_str().unwrap_or("");
+    if !["failed", "cancelled", "completed"].contains(&status) {
+        return Err(err(400, "Only finished requests can be retried"));
+    }
+    let admin = auth::is_admin(&u);
+    if !admin && !auth::can(&st, &u, "fix") {
+        return Err(err(403, "Ask an admin to retry"));
+    }
+    if status == "cancelled" && !admin && !(u.b("auto_approve") || st.cfg.bool("auto_approve")) {
+        return Err(err(403, "Ask an admin to retry"));
+    }
+    let keep = match r["detail"]["length"].as_f64() { Some(l) => json!({ "length": l }), None => json!({}) };
+    st.db.execute(reset, p![keep.to_string(), now(), rid])?;
+    Ok(Json(json!({ "ok": true })))
+}
+
+async fn cancel(State(st): State<AppState>, User(u): User, Path(rid): Path<i64>) -> ApiResult<Json<Value>> {
+    get_owned(&st, rid, &u)?;
+    for i in family(&st, rid) {
+        if let Ok(c) = get_request(&st, i) {
+            let s = c["status"].as_str().unwrap_or("");
+            if s == "pending" || ACTIVE.contains(&s) {
+                worker::cancel(&st, i).await;
+                set(&st, i, "cancelled", &format!("Cancelled by {}", u.s("username")))?;
+            }
+        }
+    }
+    Ok(Json(json!({ "ok": true })))
+}
+
+/// Remove what a request left on disk: imported songs (completed) and staging/partial files.
+fn delete_files(st: &AppState, r: &Value) -> usize {
+    let id = r["id"].as_i64().unwrap_or(0);
+    let ids: Vec<i64> = st.db.query("SELECT id FROM tracks WHERE request_id IN (SELECT id FROM requests WHERE id=? OR parent_id=?)", p![id, id])
+        .unwrap_or_default().into_iter().map(|t| t.i("id")).collect();
+    let mut n = library::delete_tracks(&st.db, &ids, None);
+    for i in family(st, id) {
+        let stage = std::path::PathBuf::from(st.cfg.str("staging_path")).join(format!("request-{i}"));
+        if stage.is_dir() {
+            let _ = std::fs::remove_dir_all(&stage);
+            n += 1;
+        }
+    }
+    let idx = r["detail"]["slskd"]["idx"].as_i64().unwrap_or(-1);
+    if let (Some(c), true) = (r["detail"]["slskd"]["candidates"].get(idx.max(0) as usize), idx >= 0 && r["status"] != "completed") {
+        let root = std::path::PathBuf::from(st.cfg.str("slskd_download_path"));
+        for f in c["files"].as_array().cloned().unwrap_or_default() {
+            if let Some(pth) = crate::sources::slskd::local_path(st, f["filename"].as_str().unwrap_or("")) {
+                let _ = std::fs::remove_file(&pth);
+                library::prune_empty(pth.parent().unwrap(), &root);
+                n += 1;
+            }
+        }
+    }
+    n
+}
+
+#[derive(Deserialize, Default)]
+#[serde(default)]
+struct FilesQ {
+    files: bool,
+}
+
+/// Remove a request from the list; files=true also deletes what it downloaded (admins only).
+async fn remove(State(st): State<AppState>, User(u): User, Path(rid): Path<i64>, Query(q): Query<FilesQ>) -> ApiResult<Json<Value>> {
+    let r = get_owned(&st, rid, &u)?;
+    if q.files && !auth::is_admin(&u) {
+        return Err(err(403, "Only admins can delete files"));
+    }
+    if ACTIVE.contains(&r["status"].as_str().unwrap_or("")) {
+        worker::cancel(&st, rid).await;
+    }
+    let n = if q.files { delete_files(&st, &r) } else { 0 };
+    st.db.execute("DELETE FROM requests WHERE id=? OR parent_id=?", p![rid, rid])?;
+    if n > 0 {
+        st.db.log("info", &format!("{} deleted request #{rid} and {n} file(s)", u.s("username")));
+    }
+    Ok(Json(json!({ "ok": true, "deleted_files": n })))
+}
+
+#[derive(Deserialize)]
+#[serde(default)]
+struct ClearBody {
+    statuses: Vec<String>,
+    files: bool,
+    mine: bool,
+}
+impl Default for ClearBody {
+    fn default() -> Self {
+        ClearBody { statuses: vec!["completed".into(), "denied".into(), "cancelled".into()], files: false, mine: false }
+    }
+}
+
+/// Clear finished requests from the list (everyone's for admins), optionally deleting their files.
+async fn clear(State(st): State<AppState>, User(u): User, body: Option<Json<ClearBody>>) -> ApiResult<Json<Value>> {
+    let b = body.map(|j| j.0).unwrap_or_default();
+    let statuses: Vec<String> = b.statuses.into_iter().filter(|s| ["completed", "failed", "denied", "cancelled"].contains(&s.as_str())).collect();
+    if statuses.is_empty() {
+        return Err(err(400, "Nothing to clear"));
+    }
+    if b.files && !auth::is_admin(&u) {
+        return Err(err(403, "Only admins can delete files"));
+    }
+    let mut sql = format!("SELECT id FROM requests WHERE parent_id IS NULL AND status IN ({})", vec!["?"; statuses.len()].join(","));
+    let mut params: Vec<Value> = statuses.iter().map(|s| json!(s)).collect();
+    if !auth::is_admin(&u) || b.mine {
+        sql += " AND user_id=?";
+        params.push(json!(u.i("id")));
+    }
+    let (mut removed, mut files) = (0, 0);
+    for row in st.db.query(&sql, params)? {
+        let id = row.i("id");
+        if b.files {
+            if let Ok(r) = get_request(&st, id) {
+                files += delete_files(&st, &r);
+            }
+        }
+        st.db.execute("DELETE FROM requests WHERE id=? OR parent_id=?", p![id, id])?;
+        removed += 1;
+    }
+    Ok(Json(json!({ "ok": true, "removed": removed, "deleted_files": files })))
+}
