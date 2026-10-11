@@ -61,7 +61,10 @@ async fn security_headers(req: Request, next: Next) -> Response {
 pub fn app(st: AppState) -> Router {
     let static_dir = st.static_dir.clone();
     let spa = ServeDir::new(&static_dir).fallback(ServeFile::new(static_dir.join("index.html")));
+    // the Rust/WebAssembly web app (web-rs, built by trunk into static/next) – same routes, same look
+    let next = ServeDir::new(static_dir.join("next")).fallback(ServeFile::new(static_dir.join("next").join("index.html")));
     Router::new()
+        .nest_service("/next", next)
         .route("/api/health", get(|| async { Json(json!({ "ok": true, "version": crate::VERSION, "server": "rust" })) }))
         .merge(routes::auth::router())
         .merge(routes::admin::router())

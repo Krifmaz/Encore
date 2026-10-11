@@ -21,5 +21,5 @@ self.addEventListener('fetch', (e) => {
       caches.open(CACHE).then(c => c.put(e.request, copy));
     }
     return res;
-  }).catch(() => caches.match(e.request).then(hit => hit || caches.match('/index.html'))));
+  }).catch(() => caches.match(e.request).then(hit => hit || caches.match(url.pathname.startsWith('/next/') ? '/next/index.html' : '/index.html'))));
 });
