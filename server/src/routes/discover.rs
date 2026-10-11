@@ -258,6 +258,9 @@ fn ymd(secs: i64) -> String {
     let y = yoe + era * 400 + if m <= 2 { 1 } else { 0 };
     format!("{y:04}-{m:02}-{d:02}")
 }
+pub fn today() -> String {
+    chrono_today()
+}
 fn chrono_today() -> String {
     ymd(crate::db::now() as i64)
 }

@@ -21,7 +21,7 @@ switching back to the Python image still works (it treats the new *owner* role a
 | R2 | Discover: MusicBrainz, sentence search, artist/album pages, catalog merge, For you, new releases (library artists only) | done (YouTube Music in the catalog merge and link probe move to R3 with yt-dlp) |
 | R3 | Requests + worker + sources: slskd, yt-dlp, streamrip, HiFi API, **Torznab/Newznab → qBittorrent/SABnzbd**, picker | done (requests, worker, picker, all sources incl. Prowlarr → qBittorrent/SABnzbd; import/tagging/fingerprints/artwork pulled in from R4) |
 | R4 | Tagging/import, fingerprints, AcoustID, lyrics, artwork | done (match/retag from MusicBrainz, Deezer, Apple, Discogs or fingerprints; artwork picker; lyrics; fix a song; organize; duplicates; verify) |
-| R5 | Playlists, connections & sync, follows, auto-download, scheduler, notifications, diagnostics, stats | |
+| R5 | Playlists, connections & sync, follows, auto-download, scheduler, notifications, diagnostics, stats | done (playlists, connections + two-way sync, follows, auto-download, scheduled tasks, notifications, diagnostics, stats; full API parity except Lidarr) |
 | R6 | Play on other devices (remotes), appearance settings, Docker/CI cutover, remove Python | |
 
 ## Running it

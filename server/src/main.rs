@@ -18,6 +18,7 @@ mod notify;
 mod organize;
 mod playlists;
 mod routes;
+mod scheduler;
 mod sources;
 mod sync;
 mod state;
@@ -66,6 +67,8 @@ pub fn app(st: AppState) -> Router {
         .merge(routes::system::router())
         .merge(routes::tagging::router())
         .merge(routes::playlists::router())
+        .merge(routes::follows::router())
+        .merge(routes::stats::router())
         .with_state(st)
         .fallback_service(spa)
         .layer(middleware::from_fn(security_headers))
@@ -93,19 +96,10 @@ async fn main() -> anyhow::Result<()> {
     let port: u16 = std::env::var("ENCORE_PORT").ok().and_then(|p| p.parse().ok()).unwrap_or(8080);
     let addr = SocketAddr::from(([0, 0, 0, 0], port));
     tracing::info!("Encore {} listening on {addr}", env!("CARGO_PKG_VERSION"));
-    // library scan at start, then every scan_interval_minutes (0 = only when asked)
+    // library scan at start; later scans (and every other background job) come from the scheduler
     {
         let st = st.clone();
-        tokio::spawn(async move {
-            loop {
-                st.library.scan(st.db.clone(), st.cfg.str("library_path"), false).await;
-                let m = st.cfg.int("scan_interval_minutes");
-                if m <= 0 {
-                    break;
-                }
-                tokio::time::sleep(std::time::Duration::from_secs(m as u64 * 60)).await;
-            }
-        });
+        tokio::spawn(async move { st.library.scan(st.db.clone(), st.cfg.str("library_path"), false).await });
     }
     tokio::spawn(worker::run(st.clone()));
     let listener = tokio::net::TcpListener::bind(addr).await?;

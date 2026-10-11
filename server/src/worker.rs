@@ -1171,6 +1171,7 @@ pub async fn run(st: AppState) {
                 tasks.insert(id, h.abort_handle());
             }
         }
+        crate::scheduler::tick(&st);
         let _ = st.db.execute("DELETE FROM sessions WHERE expires_at < ?", p![now()]);
         tokio::time::sleep(std::time::Duration::from_secs(5)).await;
     }
