@@ -84,8 +84,8 @@ const SECTIONS = [
     S('slskd_stall_minutes', 'Give up on a stalled user after (minutes)', 'number'),
     S('slskd_max_candidates', 'Max users to try per request', 'number'),
   ] },
-  { id: 'ytdlp', title: 'YouTube Music / SoundCloud (yt-dlp)', test: 'ytdlp', testLabel: 'Test cookies', fields: [
-    S('ytdlp_enabled', 'Enable yt-dlp as a source', 'bool'),
+  { id: 'ytdlp', title: 'YouTube Music & links (yt-dlp)', test: 'ytdlp', testLabel: 'Test cookies', fields: [
+    S('ytdlp_enabled', 'Enable yt-dlp as a source', 'bool', { help: 'Searches YouTube Music for requests, and downloads links you paste in the Downloader from YouTube, SoundCloud, Bandcamp, Mixcloud and ~1,800 other sites.' }),
     S('ytdlp_last_resort', 'Always try YouTube Music last, so downloads (almost) never fail', 'bool'),
     S('ytdlp_format', 'Audio format', 'select', { options: [['best', 'Original stream – best quality, no re-encode (recommended)'], ['m4a', 'M4A (AAC, re-encoded)'], ['mp3', 'MP3 (re-encoded)'], ['opus', 'Opus']] }),
     S('ytdlp_quality', 'MP3/M4A quality', 'text', { help: 'Bitrate like 320, or 0 for best VBR' }),
