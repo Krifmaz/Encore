@@ -1,15 +1,17 @@
 name: test-and-build
 
+# Encore: the Rust server + web app. Tests run on every push; the image is published as :latest
+# (and :<branch>, :<version> for v* tags) for linux/amd64 and linux/arm64.
 on:
   push:
     branches: ["**"]
     tags: ["v*"]
-    # the Python image only rebuilds when the Python app changes (not for Rust/docs-only pushes)
-    paths-ignore: ["server/**", "docs/**", ".github/workflows/rust.yml", "clients/**"]
+    paths-ignore: ["docs/**", "clients/**", "**.md"]
   pull_request:
+  workflow_dispatch:
 
 permissions:
-  contents: read
+  contents: write
   packages: write
 
 jobs:
@@ -17,19 +19,30 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
         with:
-          python-version: "3.14"
-      - run: sudo apt-get update && sudo apt-get install -y ffmpeg libchromaprint-tools
-      - run: pip install -r requirements.txt -r requirements-dev.txt
-      - run: cd tests && python -m pytest -q
+          workspaces: server
+      - run: cargo test --locked
+        working-directory: server
+      - name: Check the web app's JavaScript parses
+        run: for f in $(find web/js -name '*.js'); do node --input-type=module --check < "$f" || { echo "syntax error in $f"; exit 1; }; done
+      - run: cargo build --release --locked
+        working-directory: server
+      - name: Package (Linux x86_64)
+        run: |
+          mkdir -p out/encore && cp server/target/release/encore out/encore/ && cp -r web out/encore/static
+          tar -C out -czf encore-linux-x86_64.tar.gz encore
+      - uses: actions/upload-artifact@v4
+        with:
+          name: encore-linux
+          path: encore-linux-x86_64.tar.gz
 
   docker:
     needs: test
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: docker/setup-qemu-action@v3
       - uses: docker/setup-buildx-action@v3
       - uses: docker/login-action@v3
         if: github.event_name != 'pull_request'
@@ -47,10 +60,10 @@ jobs:
             type=ref,event=branch
             type=semver,pattern={{version}}
             type=raw,value=latest,enable={{is_default_branch}}
+            type=raw,value=rust-preview,enable={{is_default_branch}}
       - uses: docker/build-push-action@v6
         with:
           context: .
-          target: default
           platforms: linux/amd64,linux/arm64
           push: ${{ github.event_name != 'pull_request' }}
           tags: ${{ steps.meta.outputs.tags }}
@@ -58,3 +71,26 @@ jobs:
           labels: ${{ steps.meta.outputs.labels }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
+
+  # Linux binary + web app as a download, for running without Docker (default branch only)
+  release:
+    needs: test
+    if: github.event_name == 'push' && github.ref == format('refs/heads/{0}', github.event.repository.default_branch)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: encore-linux
+      - uses: softprops/action-gh-release@v2
+        with:
+          tag_name: server-latest
+          name: Encore server (latest build)
+          target_commitish: ${{ github.sha }}
+          prerelease: true
+          make_latest: "false"
+          files: encore-linux-x86_64.tar.gz
+          body: |
+            Latest Encore server build from the default branch.
+
+            * Docker (recommended): `ghcr.io/krifmaz/encore:latest` (port 8080, mount /config)
+            * Linux binary: `encore-linux-x86_64.tar.gz` – run `ENCORE_CONFIG_DIR=./config ENCORE_STATIC_DIR=./static ./encore`

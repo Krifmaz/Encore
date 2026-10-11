@@ -140,15 +140,13 @@ async fn search(State(st): State<AppState>, User(_): User, Query(sq): Query<Sear
     Ok(Json(out))
 }
 
-async fn artist(State(st): State<AppState>, User(u): User, Path(mbid): Path<String>) -> ApiResult<Json<Value>> {
+async fn artist(State(st): State<AppState>, User(_u): User, Path(mbid): Path<String>) -> ApiResult<Json<Value>> {
     let mut a = mb::artist(&st, &mbid).await.map_err(mb_err)?;
     if let Some(groups) = a["release_groups"].as_array_mut() {
         annotate_albums(&st, groups);
     }
     let name = a["name"].as_str().unwrap_or("").to_string();
     a["request_status"] = req_status(&st, std::slice::from_ref(&mbid)).remove(&mbid).map(|s| json!(s)).unwrap_or(Value::Null);
-    a["follow"] = st.db.one("SELECT id, types FROM follows WHERE user_id=? AND mbid=?", p![u.i("id"), mbid])?
-        .map(|f| json!({ "id": f.i("id"), "types": serde_json::from_str::<Value>(&f.s("types")).unwrap_or(json!([])) })).unwrap_or(Value::Null);
     a["library_albums"] = json!(st.db.query(
         "SELECT album_id, album, albumartist, year, COUNT(*) tracks, MAX(mb_releasegroupid) rgid FROM tracks
          WHERE mb_albumartistid=? OR lower(albumartist)=lower(?) GROUP BY album_id ORDER BY year DESC", p![mbid, name])?);
@@ -257,9 +255,6 @@ fn ymd(secs: i64) -> String {
     let m = if mp < 10 { mp + 3 } else { mp - 9 };
     let y = yoe + era * 400 + if m <= 2 { 1 } else { 0 };
     format!("{y:04}-{m:02}-{d:02}")
-}
-pub fn today() -> String {
-    chrono_today()
 }
 fn chrono_today() -> String {
     ymd(crate::db::now() as i64)

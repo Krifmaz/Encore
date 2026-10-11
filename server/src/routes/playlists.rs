@@ -304,7 +304,10 @@ async fn connect(State(st): State<AppState>, User(u): User, Path(service): Path<
         "jellyfin" => connections::connect_jellyfin(&st, uid, &s(&b.username), &b.password.clone().unwrap_or_default()).await,
         "navidrome" => connections::connect_navidrome(&st, uid, &s(&b.username), &b.password.clone().unwrap_or_default()).await,
         "listenbrainz" => connections::connect_listenbrainz(&st, uid, &s(&b.token)).await,
-        "lastfm" => connections::connect_lastfm(&st, uid, &s(&b.username)).await,
+        "lastfm" => match s(&b.username) {
+            n if !n.is_empty() => connections::connect_lastfm(&st, uid, &n).await,
+            _ => connections::lastfm_start(&st).map(|url| json!({ "url": url })),
+        },
         "deezer" => connections::connect_deezer(&st, uid, &s(&b.profile)).await,
         "plex" => connections::plex_pin_start(&st).await,
         "ytmusic" => match b.headers.as_deref().filter(|h| !h.trim().is_empty()) {
@@ -330,6 +333,7 @@ async fn ytmusic_check(State(st): State<AppState>, User(u): User, Json(b): Json<
 #[serde(default)]
 struct CallbackQ {
     code: String,
+    token: String,
     state: String,
     error: String,
 }
@@ -338,7 +342,12 @@ async fn callback(State(st): State<AppState>, User(u): User, Path(service): Path
     if !q.error.is_empty() {
         return Redirect::to(&format!("/#/connections?error={}", urlencoding::encode(&q.error))).into_response();
     }
-    match connections::oauth_finish(&st, &service, &q.code, &q.state, u.i("id")).await {
+    let done = if service == "lastfm" {
+        connections::lastfm_finish(&st, u.i("id"), &q.token).await.map(|_| ())
+    } else {
+        connections::oauth_finish(&st, &service, &q.code, &q.state, u.i("id")).await.map(|_| ())
+    };
+    match done {
         Ok(_) => Redirect::to(&format!("/#/connections?connected={service}")).into_response(),
         Err(e) => Redirect::to(&format!("/#/connections?error={}", urlencoding::encode(&e.to_string().chars().take(200).collect::<String>()))).into_response(),
     }
@@ -347,6 +356,7 @@ async fn callback(State(st): State<AppState>, User(u): User, Path(service): Path
 #[derive(Deserialize, Default)]
 #[serde(default)]
 struct ConnPatch {
+    scrobble: Option<bool>,
     sync_likes: Option<bool>,
     sync_playlists: Option<bool>,
 }
@@ -355,6 +365,11 @@ async fn patch_connection(State(st): State<AppState>, User(u): User, Path(servic
     let c = connections::get(&st, u.i("id"), &service).ok_or_else(|| err(404, "Not connected"))?;
     if let Some(v) = b.sync_likes {
         st.db.execute("UPDATE connections SET sync_likes=? WHERE id=?", p![v as i64, c.i("id")])?;
+    }
+    if let Some(v) = b.scrobble {
+        let mut d: Value = serde_json::from_str(&c.s("data")).unwrap_or(json!({}));
+        d["scrobble"] = json!(v);
+        connections::update_data(&st, c.i("id"), &d);
     }
     if let Some(v) = b.sync_playlists {
         st.db.execute("UPDATE connections SET sync_playlists=? WHERE id=?", p![v as i64, c.i("id")])?;

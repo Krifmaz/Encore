@@ -77,6 +77,7 @@ impl Config {
         // settings added by the Rust server
         for (k, env, default, secret) in [
             ("email_login", Some("ENCORE_EMAIL_LOGIN"), json!(true), false),
+            ("lastfm_shared_secret", Some("LASTFM_SHARED_SECRET"), json!(""), true),
             ("torznab_enabled", Some("TORZNAB_ENABLED"), json!(false), false),
             ("prowlarr_url", Some("PROWLARR_URL"), json!(""), false),
             ("prowlarr_api_key", Some("PROWLARR_API_KEY"), json!(""), true),

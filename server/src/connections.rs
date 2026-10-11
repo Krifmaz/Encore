@@ -48,6 +48,12 @@ pub fn public(c: &Row) -> Value {
     for k in ["id", "service", "account", "sync_likes", "sync_playlists", "last_sync", "last_error", "created_at"] {
         v[k] = c.get(k).cloned().unwrap_or(Value::Null);
     }
+    if kind == "scrobble" {
+        // can this connection scrobble (Last.fm needs a signed-in session, not just a username), and is it on?
+        let d: Value = serde_json::from_str(&c.s("data")).unwrap_or(json!({}));
+        v["can_scrobble"] = json!(svc == "listenbrainz" || d["sk"].as_str().is_some_and(|s| !s.is_empty()));
+        v["scrobble"] = json!(d["scrobble"] != json!(false));
+    }
     v
 }
 
@@ -259,6 +265,23 @@ pub async fn connect_listenbrainz(st: &AppState, uid: i64, token: &str) -> anyho
     }
     let name = d["user_name"].as_str().unwrap_or("").to_string();
     save(st, uid, "listenbrainz", &name, &json!({ "token": token, "user": name }))?;
+    Ok(json!({ "account": name }))
+}
+
+/// Last.fm sign-in (needs the shared secret): the user approves Encore on last.fm and comes back with a token.
+pub fn lastfm_start(st: &AppState) -> anyhow::Result<String> {
+    let key = st.cfg.str("lastfm_api_key");
+    if key.is_empty() || st.cfg.str("lastfm_shared_secret").is_empty() {
+        anyhow::bail!("The admin needs to add the Last.fm API key and shared secret in Settings → Services & sync");
+    }
+    let cb = redirect_uri(st, "lastfm")?;
+    Ok(format!("https://www.last.fm/api/auth/?api_key={}&cb={}", urlencoding::encode(&key), urlencoding::encode(&cb)))
+}
+
+pub async fn lastfm_finish(st: &AppState, uid: i64, token: &str) -> anyhow::Result<Value> {
+    let d = crate::scrobble::lastfm_signed(st, "auth.getSession", vec![("token", token.to_string())]).await?;
+    let (Some(name), Some(sk)) = (d["session"]["name"].as_str(), d["session"]["key"].as_str()) else { anyhow::bail!("Last.fm didn't return a session") };
+    save(st, uid, "lastfm", name, &json!({ "user": name, "sk": sk, "scrobble": true }))?;
     Ok(json!({ "account": name }))
 }
 

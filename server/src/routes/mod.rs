@@ -9,6 +9,5 @@ pub mod stats;
 pub mod system;
 pub mod tagging;
 pub mod discover;
-pub mod follows;
 pub mod foryou;
 pub mod catalog;

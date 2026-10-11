@@ -19,6 +19,7 @@ mod organize;
 mod playlists;
 mod routes;
 mod scheduler;
+mod scrobble;
 mod sources;
 mod sync;
 mod state;
@@ -67,7 +68,6 @@ pub fn app(st: AppState) -> Router {
         .merge(routes::system::router())
         .merge(routes::tagging::router())
         .merge(routes::playlists::router())
-        .merge(routes::follows::router())
         .merge(routes::stats::router())
         .merge(routes::remote::router())
         .with_state(st)

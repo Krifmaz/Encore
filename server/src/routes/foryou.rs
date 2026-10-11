@@ -145,20 +145,105 @@ pub fn lb_user(st: &AppState, user_id: i64) -> Option<String> {
     d["user"].as_str().filter(|s| !s.is_empty()).map(String::from)
 }
 
+fn lastfm_user(st: &AppState, user_id: i64) -> Option<String> {
+    let c = st.db.one("SELECT data FROM connections WHERE user_id=? AND service='lastfm'", p![user_id]).ok()??;
+    let d: Value = serde_json::from_str(&c.s("data")).ok()?;
+    d["user"].as_str().filter(|s| !s.is_empty()).map(String::from)
+}
+
+/// Last.fm has no personal recommendations API, so: your top artists/songs of the last months →
+/// their similar artists/songs, weighted by how much you play them, minus what you already know.
+async fn lastfm_for_you(st: &AppState, user: &str) -> anyhow::Result<Value> {
+    cached(st, &format!("lffy:{}", user.to_lowercase()), 6 * 3600, || async {
+        let top = lastfm(st, "user.gettopartists", &[("user", user.into()), ("period", "3month".into()), ("limit", "30".into())]).await?;
+        let top: Vec<String> = top["topartists"]["artist"].as_array().cloned().unwrap_or_default().iter().map(|a| st_(&a["name"])).filter(|n| !n.is_empty()).collect();
+        let known: HashSet<String> = top.iter().map(|n| norm(n)).collect();
+        let lib = library_artists(st);
+        let seeds: Vec<String> = top.iter().take(8).cloned().collect();
+        let sims = futures_util::future::join_all(seeds.iter().map(|a| async move { lastfm(st, "artist.getsimilar", &[("artist", a.clone()), ("limit", "25".into()), ("autocorrect", "1".into())]).await })).await;
+        let mut score: std::collections::HashMap<String, (f64, Value)> = Default::default();
+        for (rank, d) in sims.into_iter().enumerate() {
+            let Ok(d) = d else { continue };
+            let weight = 1.0 / (1.0 + rank as f64 * 0.25);
+            for a in d["similarartists"]["artist"].as_array().cloned().unwrap_or_default() {
+                let name = st_(&a["name"]);
+                if name.is_empty() || known.contains(&norm(&name)) {
+                    continue;
+                }
+                let m = a["match"].as_str().and_then(|s| s.parse::<f64>().ok()).or(a["match"].as_f64()).unwrap_or(0.0);
+                let e = score.entry(norm(&name)).or_insert((0.0, json!({ "name": name, "mbid": a["mbid"].as_str().filter(|s| !s.is_empty()),
+                    "in_library": lib.contains(&name.to_lowercase()) })));
+                e.0 += m * weight;
+            }
+        }
+        let mut ranked: Vec<(f64, Value)> = score.into_values().collect();
+        // artists you don't have yet first
+        ranked.sort_by(|a, b| (a.1["in_library"].as_bool(), -a.0).partial_cmp(&(b.1["in_library"].as_bool(), -b.0)).unwrap_or(std::cmp::Ordering::Equal));
+        let artists = with_pictures(st, ranked.into_iter().take(18).map(|x| x.1).collect()).await;
+
+        // songs: similar to your most played tracks of the last month
+        let tt = lastfm(st, "user.gettoptracks", &[("user", user.into()), ("period", "1month".into()), ("limit", "10".into())]).await.unwrap_or(json!({}));
+        let seeds: Vec<(String, String)> = tt["toptracks"]["track"].as_array().cloned().unwrap_or_default().iter()
+            .map(|t| (st_(&t["artist"]["name"]), st_(&t["name"]))).filter(|(a, t)| !a.is_empty() && !t.is_empty()).take(6).collect();
+        let seen: HashSet<String> = seeds.iter().map(|(a, t)| format!("{}|{}", norm(a), norm(t))).collect();
+        let sims = futures_util::future::join_all(seeds.iter().map(|(a, t)| async move { lastfm(st, "track.getsimilar", &[("artist", a.clone()), ("track", t.clone()), ("limit", "12".into()), ("autocorrect", "1".into())]).await })).await;
+        let mut tracks = vec![];
+        let mut have = seen.clone();
+        // take turns between seeds so one song doesn't fill the list
+        let lists: Vec<Vec<Value>> = sims.into_iter().map(|d| d.ok().and_then(|d| d["similartracks"]["track"].as_array().cloned()).unwrap_or_default()).collect();
+        for i in 0..12 {
+            for l in &lists {
+                if let Some(t) = l.get(i) {
+                    let (artist, title) = (st_(&t["artist"]["name"]), st_(&t["name"]));
+                    if title.is_empty() || !have.insert(format!("{}|{}", norm(&artist), norm(&title))) {
+                        continue;
+                    }
+                    tracks.push(json!({ "title": title, "artist": artist, "album": "", "mbid": t["mbid"].as_str().filter(|s| !s.is_empty()),
+                        "length": t["duration"].as_f64().filter(|d| *d > 0.0) }));
+                }
+            }
+        }
+        tracks.truncate(30);
+        Ok(json!({ "user": user, "artists": artists, "tracks": tracks }))
+    }).await
+}
+
 async fn for_you(State(st): State<AppState>, User(u): User) -> ApiResult<Json<Value>> {
-    let Some(name) = lb_user(&st, u.i("id")) else { return Ok(Json(json!({ "connected": false, "playlists": [] }))) };
-    let mut pls = lb_playlists(&st, &name).await.map_err(|e| err(502, format!("ListenBrainz error: {e}")))?;
-    let order = |k: &str| match k { "weekly-exploration" => 0, "daily-jams" => 1, "weekly-jams" => 2, _ => 9 };
-    pls.sort_by_key(|p| order(p["kind"].as_str().unwrap_or("")));
-    let results = futures_util::future::join_all(pls.iter().map(|p| lb_playlist_tracks(&st, p["id"].as_str().unwrap_or("")))).await;
+    let lb = lb_user(&st, u.i("id"));
+    let lf = lastfm_user(&st, u.i("id")).filter(|_| !st.cfg.str("lastfm_api_key").is_empty());
+    if lb.is_none() && lf.is_none() {
+        return Ok(Json(json!({ "connected": false, "playlists": [] })));
+    }
     let mut out = vec![];
-    for (mut p, tr) in pls.into_iter().zip(results) {
-        if let Ok(tr) = tr {
-            p["tracks"] = json!(annotate_tracks(&st, tr));
-            out.push(p);
+    let mut errors = vec![];
+    if let Some(name) = &lb {
+        match lb_playlists(&st, name).await {
+            Ok(mut pls) => {
+                let order = |k: &str| match k { "weekly-exploration" => 0, "daily-jams" => 1, "weekly-jams" => 2, _ => 9 };
+                pls.sort_by_key(|p| order(p["kind"].as_str().unwrap_or("")));
+                let results = futures_util::future::join_all(pls.iter().map(|p| lb_playlist_tracks(&st, p["id"].as_str().unwrap_or("")))).await;
+                for (mut p, tr) in pls.into_iter().zip(results) {
+                    if let Ok(tr) = tr {
+                        p["tracks"] = json!(annotate_tracks(&st, tr));
+                        out.push(p);
+                    }
+                }
+            }
+            Err(e) => errors.push(format!("ListenBrainz: {e}")),
         }
     }
-    Ok(Json(json!({ "connected": true, "user": name, "playlists": out })))
+    let mut lastfm = Value::Null;
+    if let Some(name) = &lf {
+        match lastfm_for_you(&st, name).await {
+            Ok(mut v) => {
+                let tr: Vec<Value> = v["tracks"].as_array().cloned().unwrap_or_default();
+                v["tracks"] = json!(annotate_tracks(&st, tr));
+                lastfm = v;
+            }
+            Err(e) => errors.push(format!("Last.fm: {e}")),
+        }
+    }
+    Ok(Json(json!({ "connected": true, "user": lb, "playlists": out, "lastfm": lastfm, "errors": errors })))
 }
 
 // ---- similar artists / songs ------------------------------------------------------------------

@@ -28,6 +28,7 @@ pub fn router() -> Router<AppState> {
         .route("/api/library/recent", get(recent))
         .route("/api/library/shuffle", get(shuffle_get).post(shuffle_post))
         .route("/api/library/plays", post(plays))
+        .route("/api/library/now-playing", post(now_playing))
         .route("/api/library/tracks/{id}", axum::routing::delete(delete_track))
         .route("/api/library/tracks/{id}/file", get(track_file))
         .route("/api/library/tracks/{id}/stream", get(stream))
@@ -274,9 +275,17 @@ struct PlayBody {
 
 async fn plays(State(st): State<AppState>, User(u): User, Json(b): Json<PlayBody>) -> ApiResult<Json<Value>> {
     let t = st.db.one("SELECT artist, title, album FROM tracks WHERE id=?", p![b.track_id])?.ok_or_else(|| err(404, "Track not found"))?;
+    let secs = b.seconds.clamp(0.0, 7200.0);
     st.db.execute("INSERT INTO plays (user_id, track_id, artist, title, album, seconds, played_at) VALUES (?,?,?,?,?,?,?)",
-        p![u.i("id"), b.track_id, t.s("artist"), t.s("title"), t.s("album"), b.seconds.clamp(0.0, 7200.0), now()])?;
+        p![u.i("id"), b.track_id, t.s("artist"), t.s("title"), t.s("album"), secs, now()])?;
+    crate::scrobble::scrobble(&st, u.i("id"), b.track_id, (now() - secs) as i64);
     Ok(Json(json!({ "ok": true })))
+}
+
+/// A song started: shows as "now playing" on Last.fm / ListenBrainz.
+async fn now_playing(State(st): State<AppState>, User(u): User, Json(b): Json<PlayBody>) -> Json<Value> {
+    crate::scrobble::now_playing(&st, u.i("id"), b.track_id);
+    Json(json!({ "ok": true }))
 }
 
 /// Users with the "fix" permission may act on songs that came from their own requests.

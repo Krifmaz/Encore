@@ -1,5 +1,9 @@
 # Encore 2 – Rust server
 
+> **Status (2026-10-11): done.** All phases are complete. The Rust server is `ghcr.io/krifmaz/encore:latest`,
+> the Python server has been removed from the repository, and the web app moved from `app/static` to `web/`.
+> Encore 1 (Python) remains in git history; its last image tag still runs on the same database.
+
 The Rust server (`server/`) replaces the Python one step by step. It uses **the same database file and
 settings**, and serves the same web app, so upgrading keeps every user, playlist, request and setting – and
 switching back to the Python image still works (it treats the new *owner* role as admin).

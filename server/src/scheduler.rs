@@ -8,10 +8,9 @@ use std::path::PathBuf;
 use std::sync::LazyLock;
 
 /// (key, name, description)
-pub const TASKS: [(&str, &str, &str); 10] = [
+pub const TASKS: [(&str, &str, &str); 9] = [
     ("scan", "Scan the library", "Pick up files added, changed or removed outside Encore."),
     ("sync", "Sync likes & playlists", "Two-way liked songs and playlist sync with Jellyfin, Plex, Navidrome, ListenBrainz, Spotify…"),
-    ("follows", "Check followed artists", "Look for new releases from artists on the Following page and request them."),
     ("lossy", "Lossless upgrades", "Re-check albums you only have as MP3/YouTube rips for a lossless copy."),
     ("discover", "Auto-discover", "Request the top songs of each user's ListenBrainz Weekly Exploration (count set in Auto-download)."),
     ("lyrics", "Fetch missing lyrics", "Download lyrics (.lrc) from LRCLIB for songs that don't have any yet."),
@@ -28,7 +27,6 @@ fn keys(key: &str) -> (&'static str, &'static str, i64) {
     match key {
         "scan" => ("", "scan_interval_minutes", 1),
         "sync" => ("", "sync_interval_minutes", 1),
-        "follows" => ("", "follow_check_hours", 60),
         "lossy" => ("upgrade_lossy", "task_lossy_minutes", 1),
         "discover" => ("discover_auto_count", "task_discover_minutes", 1),
         "lyrics" => ("task_lyrics_enabled", "task_lyrics_minutes", 1),
@@ -42,7 +40,7 @@ fn keys(key: &str) -> (&'static str, &'static str, i64) {
 fn enabled(st: &AppState, key: &str) -> bool {
     let (flag, mins, _) = keys(key);
     match key {
-        "scan" | "sync" | "follows" => st.cfg.int(mins) > 0,
+        "scan" | "sync" => st.cfg.int(mins) > 0,
         "discover" => st.cfg.int(flag) > 0,
         _ => st.cfg.bool(flag),
     }
@@ -61,11 +59,11 @@ pub fn update(st: &AppState, key: &str, on: Option<bool>, mins: Option<i64>) {
     }
     if let Some(on) = on {
         match key {
-            "scan" | "sync" | "follows" => {
+            "scan" | "sync" => {
                 if !on {
                     st.cfg.set_many(&json!({ mk: 0 }));
                 } else if st.cfg.int(mk) <= 0 {
-                    let default = match key { "sync" => 15, "follows" => 720, _ => 60 };
+                    let default = match key { "sync" => 15, _ => 60 };
                     st.cfg.set_many(&json!({ mk: default / scale }));
                 }
             }
@@ -123,7 +121,7 @@ pub fn tick(st: &AppState) {
         }
         let every = minutes(st, key).max(1) as f64 * 60.0;
         // after a restart the first runs are staggered instead of all at once
-        let first = match key { "scan" => 30.0, "sync" => 120.0, "follows" => 600.0, "cleanup" => 900.0, _ => 1800.0 };
+        let first = match key { "scan" => 30.0, "sync" => 120.0, "cleanup" => 900.0, _ => 1800.0 };
         let last = state(st, key).get("last_run").and_then(|v| v.as_f64()).unwrap_or(*BOOT - every + first);
         if t - last >= every {
             run_now(st, key);
@@ -141,7 +139,6 @@ async fn run(st: &AppState, key: &str) -> anyhow::Result<String> {
             crate::sync::sync_all(st.clone()).await;
             "done".into()
         }
-        "follows" => format!("{} new release(s)", crate::routes::follows::check_all(st, None).await),
         "lossy" => format!("{} upgrade(s) queued", queue_lossy_upgrades(st, 20)?),
         "discover" => format!("{} song(s) requested", auto_discover(st).await),
         "lyrics" => {

@@ -1,5 +1,5 @@
-# Encore + Lidarr + slskd. Only Encore is published to the outside world;
-# Lidarr and slskd stay on the private "music" network.
+# Encore + slskd. Only Encore is published to the outside world; slskd stays on the private "music" network.
+# Torrents/Usenet: add Prowlarr + qBittorrent/SABnzbd to this network and fill in Settings → Torrents & Usenet.
 #
 # Paths are absolute on purpose: relative paths (./config) resolve to odd places
 # under Portainer and other stack managers. Change APPDATA/MUSIC_DIR/DOWNLOADS_DIR
@@ -24,9 +24,6 @@ services:
       - ENCORE_CONTACT_EMAIL=${ENCORE_CONTACT_EMAIL:-}
       - ENCORE_LIBRARY_PATH=/music
       - ENCORE_STAGING_PATH=/downloads/encore
-      - LIDARR_ENABLED=true
-      - LIDARR_URL=http://lidarr:8686
-      - LIDARR_API_KEY=${LIDARR_API_KEY:-}
       - SLSKD_ENABLED=true
       - SLSKD_URL=http://slskd:5030     # behind gluetun: http://<gluetun container name>:5030
       - SLSKD_API_KEY=${SLSKD_API_KEY:-}
@@ -40,22 +37,6 @@ services:
       - ${APPDATA:-/opt/appdata}/encore:/config
       - ${MUSIC_DIR:-/srv/media/music}:/music
       - ${DOWNLOADS_DIR:-/srv/downloads}:/downloads
-    networks: [music]
-
-  lidarr:
-    image: lscr.io/linuxserver/lidarr:latest
-    container_name: lidarr
-    restart: unless-stopped
-    environment:
-      - PUID=${PUID:-1000}
-      - PGID=${PGID:-1000}
-      - TZ=${TZ:-UTC}
-    volumes:
-      - ${APPDATA:-/opt/appdata}/lidarr:/config
-      - ${MUSIC_DIR:-/srv/media/music}:/music          # set /music as Lidarr's root folder
-      - ${DOWNLOADS_DIR:-/srv/downloads}:/downloads
-    # No published ports: reach it via an SSH tunnel/VPN, or uncomment for LAN-only access.
-    # ports: ["127.0.0.1:8686:8686"]
     networks: [music]
 
   slskd:

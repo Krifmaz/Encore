@@ -2,9 +2,9 @@
 set -e
 
 # Keep yt-dlp fresh – sites change their players constantly.
-if [ "${YTDLP_AUTO_UPDATE:-true}" = "true" ]; then
+if [ "${YTDLP_AUTO_UPDATE:-true}" = "true" ] && [ "$(id -u)" = "0" ]; then
   echo "[encore] updating yt-dlp…"
-  pip install -q -U yt-dlp 2>/dev/null || echo "[encore] yt-dlp update failed, using bundled version"
+  /opt/tools/bin/pip install -q -U "yt-dlp[default]" 2>/dev/null || echo "[encore] yt-dlp update failed, using bundled version"
 fi
 
 # Run as PUID/PGID (like linuxserver.io images) unless started as a non-root user.

@@ -30,7 +30,7 @@ struct Device {
 /// user id → device id → device
 static DEVICES: LazyLock<Mutex<HashMap<i64, HashMap<String, Device>>>> = LazyLock::new(Default::default);
 const ALIVE: f64 = 15.0;
-const ACTIONS: [&str; 9] = ["toggle", "play", "pause", "next", "prev", "seek", "volume", "play_queue", "stop"];
+const ACTIONS: [&str; 11] = ["toggle", "play", "pause", "next", "prev", "seek", "volume", "play_queue", "enqueue", "play_next", "stop"];
 
 #[derive(Deserialize)]
 struct Beat {
@@ -62,8 +62,10 @@ async fn heartbeat(User(u): User, Json(b): Json<Beat>) -> ApiResult<Json<Value>>
 async fn devices(User(u): User) -> Json<Value> {
     let t = now();
     let all = DEVICES.lock().unwrap();
-    let list: Vec<Value> = all.get(&u.i("id")).map(|m| m.iter().filter(|(_, d)| t - d.seen < ALIVE)
+    let mut list: Vec<Value> = all.get(&u.i("id")).map(|m| m.iter().filter(|(_, d)| t - d.seen < ALIVE)
         .map(|(id, d)| json!({ "id": id, "name": d.name, "state": d.state, "seen": d.seen })).collect()).unwrap_or_default();
+    // a stable order, so the list doesn't jump around between refreshes
+    list.sort_by(|a, b| (a["name"].as_str(), a["id"].as_str()).cmp(&(b["name"].as_str(), b["id"].as_str())));
     Json(json!(list))
 }
 

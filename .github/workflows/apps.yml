@@ -5,7 +5,7 @@ name: apps
 on:
   push:
     branches: ["**"]
-    paths: ["clients/**", ".github/workflows/apps.yml", "app/static/icons/**"]
+    paths: ["clients/**", ".github/workflows/apps.yml", "web/icons/**"]
     tags: ["v*"]
   workflow_dispatch:
 

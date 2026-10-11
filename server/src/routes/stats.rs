@@ -251,7 +251,7 @@ fn torznab_on(st: &AppState) -> bool {
 
 // ---- auto-download (admin) ----------------------------------------------------------------------
 
-const AUTO_KEYS: [&str; 13] = ["auto_request_followed", "auto_request_likes", "auto_request_follows", "follow_check_hours", "album_upgrade", "quality_first",
+const AUTO_KEYS: [&str; 11] = ["auto_request_followed", "auto_request_likes", "album_upgrade", "quality_first",
     "upgrade_lossy", "upgrade_lossy_days", "sync_interval_minutes", "auto_approve", "source_order", "discover_auto_count", "discover_catalog_merge"];
 
 async fn get_auto(State(st): State<AppState>, Admin(_): Admin) -> ApiResult<Json<Value>> {
@@ -266,8 +266,7 @@ async fn get_auto(State(st): State<AppState>, Admin(_): Admin) -> ApiResult<Json
     stats.insert("lossy_albums".into(), json!(lossy));
     let users = st.db.query("SELECT u.id, u.username, u.auto_download, u.role,
         (SELECT COUNT(*) FROM playlists p WHERE p.user_id=u.id AND p.follow=1) followed,
-        (SELECT COUNT(*) FROM connections c WHERE c.user_id=u.id) connections,
-        (SELECT COUNT(*) FROM follows f WHERE f.user_id=u.id) follows
+        (SELECT COUNT(*) FROM connections c WHERE c.user_id=u.id) connections
         FROM users u WHERE u.disabled=0 ORDER BY u.username", p![])?;
     let settings: serde_json::Map<String, Value> = AUTO_KEYS.iter().map(|k| (k.to_string(), st.cfg.get(k))).collect();
     Ok(Json(json!({ "settings": settings, "users": users, "stats": stats })))
