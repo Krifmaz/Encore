@@ -3,7 +3,7 @@ name: release
 # Every release is kept – nothing is overwritten. Versions are the release date (America/Detroit) plus
 # the edition of that day: 2026.10.11.1, 2026.10.11.2 … Pre-releases end in -edge.
 #   Start one: Actions → release → Run workflow (tick "pre-release" for an edge build), or push a tag v2026.10.11.1.
-#   Docker: :<version> always, :latest for releases, :edge for pre-releases and releases (never older than :latest).
+#   Docker: :<version> always, plus :latest for releases or :edge for pre-releases.
 #   Notes: docs/releases/<version>.md if it exists, otherwise the commit list since the previous release.
 on:
   workflow_dispatch:
@@ -124,8 +124,8 @@ jobs:
         id: tags
         run: |
           I="ghcr.io/${GITHUB_REPOSITORY_OWNER,,}/encore"
-          T="$I:${{ needs.version.outputs.version }},$I:edge"
-          [ "${{ needs.version.outputs.prerelease }}" = "false" ] && T="$T,$I:latest"
+          # two channels: releases → :latest, pre-releases → :edge
+          T="$I:${{ needs.version.outputs.version }},$I:$([ "${{ needs.version.outputs.prerelease }}" = "true" ] && echo edge || echo latest)"
           echo "tags=$T" >> "$GITHUB_OUTPUT"
       - uses: docker/build-push-action@v6
         with:
@@ -173,7 +173,7 @@ jobs:
 
           ---
           ### Install
-          * **Docker**: \`ghcr.io/krifmaz/encore:$V\` (or \`:latest\` for the newest release, \`:edge\` to include pre-releases) · compose file attached
+          * **Docker**: \`ghcr.io/krifmaz/encore:$V\` (or \`:latest\` for the newest release, \`:edge\` for the newest pre-release) · compose file attached
           * **Linux without Docker**: \`encore-$V-linux-x86_64.tar.gz\` / \`-aarch64\` – run \`ENCORE_CONFIG_DIR=./config ENCORE_STATIC_DIR=./static ./encore\`
           * **Android**: \`Encore-android-$V.apk\` · **Windows**: \`Encore-Setup-$V.exe\` · **macOS**: the .dmg (unsigned: right-click → Open the first time) · **Linux desktop**: .AppImage or .deb
           EOT
