@@ -4,6 +4,7 @@ mod config;
 mod db;
 mod email;
 mod error;
+mod library;
 mod routes;
 mod state;
 
@@ -40,6 +41,7 @@ pub fn app(st: AppState) -> Router {
         .route("/api/health", get(|| async { Json(json!({ "ok": true, "version": env!("CARGO_PKG_VERSION"), "server": "rust" })) }))
         .merge(routes::auth::router())
         .merge(routes::admin::router())
+        .merge(routes::library::router())
         .with_state(st)
         .fallback_service(spa)
         .layer(middleware::from_fn(security_headers))
@@ -55,7 +57,7 @@ pub fn build_state() -> anyhow::Result<AppState> {
         .user_agent(format!("Encore/{} ( {} )", env!("CARGO_PKG_VERSION"), cfg.str("contact_email")))
         .timeout(std::time::Duration::from_secs(30))
         .build()?;
-    let st = AppState { db, cfg, http, limits: Arc::new(auth::RateLimiter::default()), static_dir };
+    let st = AppState { db, cfg, http, limits: Arc::new(auth::RateLimiter::default()), static_dir, library: library::Library::default() };
     auth::ensure_owner(&st)?;
     Ok(st)
 }
@@ -67,6 +69,20 @@ async fn main() -> anyhow::Result<()> {
     let port: u16 = std::env::var("ENCORE_PORT").ok().and_then(|p| p.parse().ok()).unwrap_or(8080);
     let addr = SocketAddr::from(([0, 0, 0, 0], port));
     tracing::info!("Encore {} listening on {addr}", env!("CARGO_PKG_VERSION"));
+    // library scan at start, then every scan_interval_minutes (0 = only when asked)
+    {
+        let st = st.clone();
+        tokio::spawn(async move {
+            loop {
+                st.library.scan(st.db.clone(), st.cfg.str("library_path"), false).await;
+                let m = st.cfg.int("scan_interval_minutes");
+                if m <= 0 {
+                    break;
+                }
+                tokio::time::sleep(std::time::Duration::from_secs(m as u64 * 60)).await;
+            }
+        });
+    }
     let listener = tokio::net::TcpListener::bind(addr).await?;
     axum::serve(listener, app(st).into_make_service_with_connect_info::<SocketAddr>()).await?;
     Ok(())

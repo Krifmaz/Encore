@@ -1,6 +1,7 @@
 use crate::auth::RateLimiter;
 use crate::config::Config;
 use crate::db::Db;
+use crate::library::Library;
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -11,6 +12,7 @@ pub struct AppState {
     pub http: reqwest::Client,
     pub limits: Arc<RateLimiter>,
     pub static_dir: PathBuf,
+    pub library: Library,
 }
 
 impl AppState {
