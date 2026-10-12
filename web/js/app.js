@@ -167,6 +167,7 @@ export async function boot() {
   try { session.info = await api.get('/auth/info'); } catch { session.info = {}; }
   try { session.user = await api.get('/auth/me'); } catch { session.user = null; }
   if (session.user) { appearance.adoptAccount(session.user); playback.adoptAccount(session.user); }
+  else appearance.apply(appearance.BRAND);
   if (session.user) {
     renderShell();
     remote.start(session);
@@ -179,6 +180,8 @@ export async function boot() {
 
 export async function refreshUser() {
   session.user = await api.get('/auth/me');
+  appearance.apply();
+  appearance.adoptAccount(session.user);
   renderShell();
   route();
 }

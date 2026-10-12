@@ -7,6 +7,7 @@ use std::cell::Cell;
 
 pub struct Accent { pub id: &'static str, pub name: &'static str, pub a: &'static str, pub b: &'static str }
 pub const ACCENTS: &[Accent] = &[
+    Accent { id: "logo", name: "Logo", a: "#f0ead6", b: "#d6c49a" },
     Accent { id: "violet", name: "Violet", a: "#8b5cf6", b: "#ec4899" },
     Accent { id: "encore", name: "Encore", a: "#f2a7e4", b: "#9fd2fb" },
     Accent { id: "lilac", name: "Lilac", a: "#b48cf2", b: "#7cc4fa" },
@@ -36,14 +37,17 @@ pub fn logo(size: u32) -> String {
 
 pub struct Preset { pub id: &'static str, pub name: &'static str, pub theme: &'static str, pub accent: &'static str, pub custom: Option<&'static str>, pub background: &'static str }
 pub const PRESETS: &[Preset] = &[
-    Preset { id: "default", name: "Encore dark", theme: "dark", accent: "violet", custom: None, background: "fade" },
+    Preset { id: "encore", name: "Encore", theme: "encore", accent: "logo", custom: None, background: "solid" },
+    Preset { id: "default", name: "Violet dark", theme: "dark", accent: "violet", custom: None, background: "fade" },
     Preset { id: "oled", name: "OLED black", theme: "oled", accent: "violet", custom: None, background: "solid" },
     Preset { id: "pastel", name: "Pastel", theme: "dark", accent: "encore", custom: None, background: "fade" },
     Preset { id: "light", name: "Daylight", theme: "light", accent: "sky", custom: None, background: "fade" },
     Preset { id: "mono", name: "Mono", theme: "oled", accent: "custom", custom: Some("#e5e5e5"), background: "solid" },
 ];
 
-pub fn defaults() -> Value { json!({ "theme": "dark", "accent": "violet", "custom": "#8b5cf6", "background": "fade" }) }
+pub fn defaults() -> Value { json!({ "theme": "encore", "accent": "logo", "custom": "#f0ead6", "background": "solid" }) }
+/// Signed out (sign-in page, setup, shared links) Encore always wears the logo's colours; your own look comes back on sign-in.
+pub fn brand() -> Value { defaults() }
 const KEY: &str = "encore.appearance";
 
 fn rgb(hex: &str) -> (u8, u8, u8) {
@@ -100,7 +104,7 @@ pub fn apply(p: &Value) {
     let root = document().document_element().expect("html");
     let theme = p.s("theme");
     let dark = if theme == "system" { dom::matches_media("(prefers-color-scheme: dark)") } else { theme != "light" };
-    dom::set_data(&root, "theme", if !dark { "light" } else if theme == "oled" { "oled" } else { "dark" });
+    dom::set_data(&root, "theme", if !dark { "light" } else if theme == "oled" { "oled" } else if theme == "encore" { "encore" } else { "dark" });
     if theme == "system" && !MQ.with(|m| m.get()) {
         MQ.with(|m| m.set(true));
         if let Ok(Some(mq)) = dom::window().match_media("(prefers-color-scheme: dark)") {

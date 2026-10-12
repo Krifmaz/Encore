@@ -25,6 +25,17 @@
   --player-h: 76px;
   color-scheme: dark;
 }
+:root[data-theme="encore"] {
+  /* the logo's colours: charcoal and cream */
+  --bg: #161617;
+  --bg-2: #1c1c1e;
+  --panel: #222224;
+  --panel-2: #2a2a2d;
+  --border: #353538;
+  --text: #f0ead6;
+  --muted: #aaa493;
+  --faint: #77725f;
+}
 :root[data-theme="oled"] {
   /* true black: pixels switch off on OLED screens */
   --bg: #000;

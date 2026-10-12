@@ -3,6 +3,7 @@
 import { api } from './api.js';
 
 export const ACCENTS = [
+  { id: 'logo', name: 'Logo', a: '#f0ead6', b: '#d6c49a' },        // the logo's cream
   { id: 'violet', name: 'Violet', a: '#8b5cf6', b: '#ec4899' },
   { id: 'encore', name: 'Encore', a: '#f2a7e4', b: '#9fd2fb' },     // the logo's pink → blue
   { id: 'lilac', name: 'Lilac', a: '#b48cf2', b: '#7cc4fa' },
@@ -25,14 +26,17 @@ export function logo(size = 30) {
 
 /** One-tap looks; any of them can be tweaked afterwards (theme, colour, background). */
 export const PRESETS = [
-  { id: 'default', name: 'Encore dark', theme: 'dark', accent: 'violet', background: 'fade' },
+  { id: 'encore', name: 'Encore', theme: 'encore', accent: 'logo', background: 'solid' },
+  { id: 'default', name: 'Violet dark', theme: 'dark', accent: 'violet', background: 'fade' },
   { id: 'oled', name: 'OLED black', theme: 'oled', accent: 'violet', background: 'solid' },
   { id: 'pastel', name: 'Pastel', theme: 'dark', accent: 'encore', background: 'fade' },
   { id: 'light', name: 'Daylight', theme: 'light', accent: 'sky', background: 'fade' },
   { id: 'mono', name: 'Mono', theme: 'oled', accent: 'custom', custom: '#e5e5e5', background: 'solid' },
 ];
 
-export const DEFAULTS = { theme: 'dark', accent: 'violet', custom: '#8b5cf6', background: 'fade' };
+export const DEFAULTS = { theme: 'encore', accent: 'logo', custom: '#f0ead6', background: 'solid' };
+// signed out (sign-in page, setup, shared links) Encore always wears the logo's colours; your own look comes back on sign-in
+export const BRAND = { ...DEFAULTS };
 const KEY = 'encore.appearance';
 
 const rgb = (hex) => {
@@ -69,7 +73,7 @@ let mq;
 export function apply(p = current()) {
   const root = document.documentElement;
   const dark = p.theme === 'system' ? matchMedia('(prefers-color-scheme: dark)').matches : p.theme !== 'light';
-  root.dataset.theme = !dark ? 'light' : p.theme === 'oled' ? 'oled' : 'dark';
+  root.dataset.theme = !dark ? 'light' : p.theme === 'oled' ? 'oled' : p.theme === 'encore' ? 'encore' : 'dark';
   if (p.theme === 'system' && !mq) {
     mq = matchMedia('(prefers-color-scheme: dark)');
     mq.addEventListener('change', () => apply(current()));

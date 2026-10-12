@@ -276,6 +276,7 @@ pub async fn boot() {
     set_info(api::get("/auth/info").await.unwrap_or_else(|_| serde_json::json!({})));
     set_user(api::get("/auth/me").await.ok());
     if let Some(u) = user() { appearance::adopt_account(&u); crate::playback::adopt_account(&u); }
+    else { appearance::apply(&appearance::brand()); }
     if user().is_some() {
         render_shell();
         remote::start();
@@ -288,7 +289,11 @@ pub async fn boot() {
 
 /// `refreshUser()`.
 pub async fn refresh_user() {
-    if let Ok(u) = api::get("/auth/me").await { set_user(Some(u)); }
+    if let Ok(u) = api::get("/auth/me").await {
+        appearance::apply(&appearance::current());
+        appearance::adopt_account(&u);
+        set_user(Some(u));
+    }
     render_shell();
     route();
 }
