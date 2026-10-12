@@ -27,6 +27,7 @@ mod routes;
 mod scheduler;
 mod scrobble;
 mod sources;
+mod soulseek;
 mod sync;
 mod state;
 mod tagger;
@@ -116,6 +117,7 @@ async fn main() -> anyhow::Result<()> {
         tokio::spawn(async move { st.library.scan(st.db.clone(), st.cfg.str("library_path"), false).await });
     }
     tokio::spawn(worker::run(st.clone()));
+    tokio::spawn(soulseek::supervisor(st.clone()));
     let listener = tokio::net::TcpListener::bind(addr).await?;
     axum::serve(listener, app(st).into_make_service_with_connect_info::<SocketAddr>()).await?;
     Ok(())

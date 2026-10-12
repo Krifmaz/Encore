@@ -79,7 +79,18 @@ async fn test(State(st): State<AppState>, Admin(u): Admin, Path(service): Path<S
         Ok(match service.as_str() {
             "slskd" => {
                 let s = slskd::status(&st).await?;
-                msg(true, format!("slskd {} – server {}", s["version"]["full"].as_str().unwrap_or(""), s["server"]["state"].as_str().unwrap_or("unknown")))
+                if s["soulseek"].is_object() {
+                    let x = &s["soulseek"];
+                    let ok = x["logged_in"].as_bool().unwrap_or(false);
+                    let err = x["error"].as_str().unwrap_or("");
+                    let text = if ok {
+                        format!("Built-in Soulseek client signed in as {} · sharing {} files in {} folders · port {}{}", x["username"].as_str().unwrap_or(""),
+                            x["shares"]["files"], x["shares"]["dirs"], x["listen_port"], if x["parent"].is_string() { "" } else { " · no distributed parent yet (searches from others arrive once one is found)" })
+                    } else if !err.is_empty() { format!("Not signed in: {err}") } else { "Connecting to the Soulseek server…".to_string() };
+                    msg(ok, text)
+                } else {
+                    msg(true, format!("slskd {} – server {}", s["version"]["full"].as_str().unwrap_or(""), s["server"]["state"].as_str().unwrap_or("unknown")))
+                }
             }
             "musicbrainz" => {
                 st.mb.get(&st, "artist", &[("query", "test".into()), ("limit", "1".into())]).await?;

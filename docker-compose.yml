@@ -1,4 +1,5 @@
-# Encore + slskd. Only Encore is published to the outside world; slskd stays on the private "music" network.
+# Encore with its built-in Soulseek client. Only Encore is published to the outside world (web UI + Soulseek peer port).
+# The slskd service below is optional: Encore talks to the Soulseek network itself, so you only need it if you prefer slskd.
 # Torrents/Usenet: add Prowlarr + qBittorrent/SABnzbd to this network and fill in Settings → Torrents & Usenet.
 #
 # Paths are absolute on purpose: relative paths (./config) resolve to odd places
@@ -15,6 +16,7 @@ services:
     restart: unless-stopped
     ports:
       - "8080:8080"
+      - "2234:2234"   # Soulseek peer port for the built-in client (forward it on your router)
     environment:
       - PUID=${PUID:-1000}
       - PGID=${PGID:-1000}
@@ -28,6 +30,9 @@ services:
       - SLSKD_URL=http://slskd:5030     # behind gluetun: http://<gluetun container name>:5030
       - SLSKD_API_KEY=${SLSKD_API_KEY:-}
       - SLSKD_DOWNLOAD_PATH=/downloads/slskd
+      - SOULSEEK_USERNAME=${SOULSEEK_USERNAME:-}
+      - SOULSEEK_PASSWORD=${SOULSEEK_PASSWORD:-}
+      - SOULSEEK_PORT=2234
       - ACOUSTID_API_KEY=${ACOUSTID_API_KEY:-}
       - YTMUSIC_CLIENT_ID=${YTMUSIC_CLIENT_ID:-}
       - YTMUSIC_CLIENT_SECRET=${YTMUSIC_CLIENT_SECRET:-}
@@ -39,28 +44,30 @@ services:
       - ${DOWNLOADS_DIR:-/srv/downloads}:/downloads
     networks: [music]
 
-  slskd:
-    image: slskd/slskd:latest
-    container_name: slskd
-    restart: unless-stopped
-    # slskd ignores PUID/PGID – it runs as this user. Make its folders match:
-    #   sudo chown -R 1000:1000 /opt/appdata/slskd /srv/downloads/slskd /srv/downloads/slskd-incomplete
-    user: "${PUID:-1000}:${PGID:-1000}"
-    environment:
-      - SLSKD_REMOTE_CONFIGURATION=true
-      - SLSKD_SLSK_USERNAME=${SLSK_USERNAME:-}
-      - SLSKD_SLSK_PASSWORD=${SLSK_PASSWORD:-}
-      - SLSKD_DOWNLOADS_DIR=/downloads/slskd
-      - SLSKD_INCOMPLETE_DIR=/downloads/slskd-incomplete
-      - SLSKD_SHARED_DIR=/music
-      # Add the API key Encore uses to slskd.yml (see README → slskd)
-    volumes:
-      - ${APPDATA:-/opt/appdata}/slskd:/app
-      - ${MUSIC_DIR:-/srv/media/music}:/music:ro
-      - ${DOWNLOADS_DIR:-/srv/downloads}:/downloads
-    ports:
-      - "50300:50300"   # Soulseek peer port (needed for good speeds); the web UI stays private
-    networks: [music]
+  # ── Optional: slskd instead of the built-in client ────────────────────────
+  # Uncomment to use slskd instead and set SOULSEEK_CLIENT=slskd in Encore.
+  # slskd:
+  #   image: slskd/slskd:latest
+  #   container_name: slskd
+  #   restart: unless-stopped
+  #   # slskd ignores PUID/PGID – it runs as this user. Make its folders match:
+  #   #   sudo chown -R 1000:1000 /opt/appdata/slskd /srv/downloads/slskd /srv/downloads/slskd-incomplete
+  #   user: "${PUID:-1000}:${PGID:-1000}"
+  #   environment:
+  #     - SLSKD_REMOTE_CONFIGURATION=true
+  #     - SLSKD_SLSK_USERNAME=${SLSK_USERNAME:-}
+  #     - SLSKD_SLSK_PASSWORD=${SLSK_PASSWORD:-}
+  #     - SLSKD_DOWNLOADS_DIR=/downloads/slskd
+  #     - SLSKD_INCOMPLETE_DIR=/downloads/slskd-incomplete
+  #     - SLSKD_SHARED_DIR=/music
+  #     # Add the API key Encore uses to slskd.yml (see README → Using slskd instead)
+  #   volumes:
+  #     - ${APPDATA:-/opt/appdata}/slskd:/app
+  #     - ${MUSIC_DIR:-/srv/media/music}:/music:ro
+  #     - ${DOWNLOADS_DIR:-/srv/downloads}:/downloads
+  #   ports:
+  #     - "50300:50300"   # Soulseek peer port (needed for good speeds); the web UI stays private
+  #   networks: [music]
 
   # ── Running slskd through a VPN instead? ──────────────────────────────────
   # Put slskd in gluetun's network namespace and point Encore at gluetun:

@@ -461,6 +461,7 @@ dependencies = [
  "bcrypt",
  "cookie",
  "fancy-regex",
+ "flate2",
  "futures-util",
  "hex",
  "image",

@@ -73,11 +73,17 @@ const SECTIONS = [
     S('sab_category', 'SABnzbd category'),
     S('sab_download_path', 'Usenet download folder (as mounted in this container)', 'text', { full: true }),
   ] },
-  { id: 'slskd', title: 'Soulseek (slskd)', desc: 'Searches the Soulseek file-sharing network – great for FLAC and rare releases.', test: 'slskd', fields: [
-    S('slskd_enabled', 'Enable slskd', 'bool'),
-    S('slskd_url', 'URL', 'text', { help: 'Internal address, e.g. http://slskd:5030' }),
-    S('slskd_api_key', 'API key', 'password', { help: 'Set in slskd.yml under web.authentication.api_keys' }),
-    S('slskd_download_path', 'slskd downloads folder (as mounted in this container)', 'text', { full: true }),
+  { id: 'slskd', title: 'Soulseek', desc: 'Searches the Soulseek file-sharing network – great for FLAC and rare releases. Built in: no slskd container needed – enter any username and password and an account is created at the first sign-in. Forward the port for the best speeds.', test: 'slskd', fields: [
+    S('slskd_enabled', 'Enable Soulseek', 'bool'),
+    S('soulseek_client', 'Client', 'select', { options: [['auto', 'Built-in when a username is set, else slskd'], ['builtin', 'Built-in client'], ['slskd', 'slskd (external)']] }),
+    S('soulseek_username', 'Soulseek username', 'text', { help: 'New name + password = new account. Don’t use the same login in slskd or another client at the same time.' }),
+    S('soulseek_password', 'Soulseek password', 'password'),
+    S('soulseek_port', 'Listen port', 'number', { help: 'TCP port the built-in client listens on – forward it on your router (and publish it in Docker) so users behind firewalls can send to you' }),
+    S('soulseek_share', 'Share your library on Soulseek (recommended)', 'bool', { help: 'The network runs on sharing; many users refuse downloads to people who share nothing. Only the library folder is shared, read-only.' }),
+    S('soulseek_upload_slots', 'Upload slots', 'number'),
+    S('slskd_url', 'slskd URL', 'text', { help: 'Only for the slskd client, e.g. http://slskd:5030' }),
+    S('slskd_api_key', 'slskd API key', 'password', { help: 'Only for the slskd client: web.authentication.api_keys in slskd.yml' }),
+    S('slskd_download_path', 'Downloads folder (as mounted in this container)', 'text', { full: true }),
     S('slskd_preferred_format', 'Preferred format', 'select', { options: [['flac', 'FLAC / lossless'], ['mp3', 'MP3'], ['any', 'Best available']] }),
     S('slskd_min_bitrate', 'Minimum MP3 bitrate (kbps)', 'number'),
     S('slskd_search_timeout', 'Search time (seconds)', 'number'),
@@ -519,7 +525,7 @@ function pipelineHelp() {
       <li><b>Library check</b> – if the album/track is already in your library (by MusicBrainz id or name) it's marked available instantly.</li>
       <li><b>streamrip</b> – lossless from Qobuz, Tidal or Deezer with your own accounts, matched by ISRC.</li>
       <li><b>Torrents & Usenet</b> – Prowlarr searches your indexers; the best album release goes to qBittorrent or SABnzbd and is imported when it finishes. If it stalls past the timeout, the next release or source is tried.</li>
-      <li><b>Soulseek</b> – slskd searches the network, results are ranked by track count, format, bitrate, folder name and the uploader's free slots/speed. Stalled or failed users are skipped automatically.</li>
+      <li><b>Soulseek</b> – the built-in client (or slskd) searches the network, results are ranked by track count, format, bitrate, folder name and the uploader's free slots/speed. Stalled or failed users are skipped automatically.</li>
       <li><b>yt-dlp</b> – each track from the MusicBrainz tracklist is matched on YouTube (preferring official "Topic" uploads with matching length).</li>
       <li><b>Import</b> – files are matched to the MusicBrainz release, tagged (incl. MBIDs, ISRCs, cover art), renamed with your template, and your media servers are refreshed.</li>
     </ol></div>`;

@@ -1,4 +1,6 @@
-//! slskd (Soulseek) API client + result ranking.
+//! Soulseek for the worker and the picker: result ranking, and the transport behind it – the built-in
+//! client (`crate::soulseek`) or an external slskd through its API, chosen in Settings.
+use crate::soulseek;
 use crate::state::AppState;
 use regex::Regex;
 use serde_json::{json, Value};
@@ -10,7 +12,18 @@ pub const DONE_OK: &str = "Succeeded";
 pub const DONE_BAD: [&str; 6] = ["Errored", "Rejected", "TimedOut", "Cancelled", "Aborted", "Failed"];
 
 pub fn enabled(st: &AppState) -> bool {
+    if soulseek::wanted(st) {
+        return soulseek::configured(st);
+    }
     st.cfg.bool("slskd_enabled") && !st.cfg.str("slskd_url").is_empty() && !st.cfg.str("slskd_api_key").is_empty()
+}
+
+fn native(st: &AppState) -> anyhow::Result<soulseek::client::Client> {
+    if !soulseek::configured(st) {
+        anyhow::bail!("Soulseek: set a username and password in Settings → Apps & sources → Soulseek (an account is created on first login)");
+    }
+    soulseek::ensure(st);
+    soulseek::client().ok_or_else(|| anyhow::anyhow!("Soulseek client is not running"))
 }
 
 async fn req(st: &AppState, method: reqwest::Method, path: &str, body: Option<Value>, query: &[(&str, &str)]) -> anyhow::Result<Value> {
@@ -30,12 +43,22 @@ async fn req(st: &AppState, method: reqwest::Method, path: &str, body: Option<Va
 }
 
 pub async fn status(st: &AppState) -> anyhow::Result<Value> {
+    if soulseek::wanted(st) {
+        let c = native(st)?;
+        let s = c.status();
+        let state = if s["logged_in"].as_bool() == Some(true) { "Connected, LoggedIn" } else if s["connected"].as_bool() == Some(true) { "Connecting" } else { "Disconnected" };
+        return Ok(json!({ "version": { "full": "built-in" }, "server": { "state": state }, "soulseek": s }));
+    }
     req(st, reqwest::Method::GET, "application", None, &[]).await
 }
 
 /// Run a search and wait for it to finish. Returns the responses.
 pub async fn search(st: &AppState, text: &str) -> anyhow::Result<Vec<Value>> {
     let timeout = st.cfg.int("slskd_search_timeout").max(5);
+    if soulseek::wanted(st) {
+        let c = native(st)?;
+        return Ok(c.search(text, timeout as u64).await?.iter().map(soulseek::client::result_json).collect());
+    }
     let sid = uuid();
     req(st, reqwest::Method::POST, "searches", Some(json!({
         "id": sid, "searchText": text, "searchTimeout": timeout * 1000, "responseLimit": 200, "fileLimit": 20000,
@@ -60,12 +83,20 @@ fn uuid() -> String {
 }
 
 pub async fn enqueue(st: &AppState, username: &str, files: &[Value]) -> anyhow::Result<()> {
+    if soulseek::wanted(st) {
+        let list: Vec<(String, u64)> = files.iter().map(|f| (f["filename"].as_str().unwrap_or("").to_string(), f["size"].as_u64().unwrap_or(0))).collect();
+        native(st)?.enqueue(username, &list)?;
+        return Ok(());
+    }
     let body: Vec<Value> = files.iter().map(|f| json!({ "filename": f["filename"], "size": f["size"] })).collect();
     req(st, reqwest::Method::POST, &format!("transfers/downloads/{}", urlencoding::encode(username)), Some(json!(body)), &[]).await?;
     Ok(())
 }
 
 pub async fn user_downloads(st: &AppState, username: &str) -> Vec<Value> {
+    if soulseek::wanted(st) {
+        return soulseek::client().map(|c| c.downloads().into_iter().filter(|d| d["username"] == username).collect()).unwrap_or_default();
+    }
     let Ok(d) = req(st, reqwest::Method::GET, &format!("transfers/downloads/{}", urlencoding::encode(username)), None, &[]).await else { return vec![] };
     d["directories"].as_array().cloned().unwrap_or_default().iter().flat_map(|d| d["files"].as_array().cloned().unwrap_or_default()).collect()
 }
@@ -75,6 +106,10 @@ fn tail(s: &str) -> String {
 }
 
 pub async fn all_downloads(st: &AppState) -> anyhow::Result<Vec<Value>> {
+    if soulseek::wanted(st) {
+        return Ok(native(st)?.downloads().into_iter().map(|f| json!({ "id": f["id"], "username": f["username"], "filename": f["basename"], "directory": f["directory"],
+            "state": f["state"], "progress": f["percentComplete"], "size": f["size"], "speed": f["averageSpeed"] })).collect());
+    }
     let d = req(st, reqwest::Method::GET, "transfers/downloads", None, &[]).await?;
     let mut out = vec![];
     for u in d.as_array().cloned().unwrap_or_default() {
@@ -90,10 +125,18 @@ pub async fn all_downloads(st: &AppState) -> anyhow::Result<Vec<Value>> {
 }
 
 pub async fn cancel(st: &AppState, username: &str, file_id: &str) {
+    if soulseek::wanted(st) {
+        if let Some(c) = soulseek::client() { c.cancel(username, file_id); }
+        return;
+    }
     let _ = req(st, reqwest::Method::DELETE, &format!("transfers/downloads/{}/{file_id}", urlencoding::encode(username)), None, &[("remove", "true")]).await;
 }
 
 pub async fn clear_completed(st: &AppState) -> anyhow::Result<()> {
+    if soulseek::wanted(st) {
+        native(st)?.clear_completed();
+        return Ok(());
+    }
     req(st, reqwest::Method::DELETE, "transfers/downloads/all/completed", None, &[]).await.map(|_| ())
 }
 
@@ -252,6 +295,12 @@ pub fn rank_track(st: &AppState, responses: &[Value], artist: &str, title: &str,
 /// Locate a finished download on the shared volume.
 pub fn local_path(st: &AppState, remote: &str) -> Option<std::path::PathBuf> {
     let root = std::path::PathBuf::from(st.cfg.str("slskd_download_path"));
+    if soulseek::wanted(st) {
+        let p = soulseek::client::local_file_for(&root, remote); // the built-in client's own layout (sanitised names)
+        if p.is_file() {
+            return Some(p);
+        }
+    }
     let n = remote.replace('\\', "/");
     let parts: Vec<&str> = n.split('/').collect();
     let base = *parts.last()?;

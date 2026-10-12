@@ -394,6 +394,36 @@
   "default": false,
   "secret": false
  },
+ "soulseek_client": {
+  "env": "SOULSEEK_CLIENT",
+  "default": "auto",
+  "secret": false
+ },
+ "soulseek_username": {
+  "env": "SOULSEEK_USERNAME",
+  "default": "",
+  "secret": false
+ },
+ "soulseek_password": {
+  "env": "SOULSEEK_PASSWORD",
+  "default": "",
+  "secret": true
+ },
+ "soulseek_port": {
+  "env": "SOULSEEK_PORT",
+  "default": 2234,
+  "secret": false
+ },
+ "soulseek_share": {
+  "env": "SOULSEEK_SHARE",
+  "default": true,
+  "secret": false
+ },
+ "soulseek_upload_slots": {
+  "env": "SOULSEEK_UPLOAD_SLOTS",
+  "default": 2,
+  "secret": false
+ },
  "slskd_url": {
   "env": "SLSKD_URL",
   "default": "http://slskd:5030",
