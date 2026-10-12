@@ -267,7 +267,7 @@ pub async fn refresh_followed(st: &AppState, pl: &Row) -> anyhow::Result<(usize,
     let data = if ["jellyfin", "plex", "navidrome"].contains(&pl.s("source").as_str()) {
         crate::sync::fetch_remote_playlist(st, pl).await?
     } else {
-        crate::sources::links::fetch(st, &pl.s("source_url")).await?
+        crate::sources::links::fetch_as(st, &pl.s("source_url"), Some(pl.i("user_id"))).await?
     };
     add_tracks(st, pl.i("id"), data["tracks"].as_array().map(|a| a.as_slice()).unwrap_or(&[]), &pl.s("source"))
 }

@@ -180,7 +180,7 @@ fn lastfm_user(st: &AppState, user_id: i64) -> Option<String> {
 
 /// Last.fm has no personal recommendations API, so: your top artists/songs of the last months →
 /// their similar artists/songs, weighted by how much you play them, minus what you already know.
-async fn lastfm_for_you(st: &AppState, user: &str) -> anyhow::Result<Value> {
+async fn lastfm_for_you(st: &AppState, user: &str, uid: i64) -> anyhow::Result<Value> {
     cached(st, &format!("lffy:{}", user.to_lowercase()), 6 * 3600, || async {
         let top = lastfm(st, "user.gettopartists", &[("user", user.into()), ("period", "3month".into()), ("limit", "30".into())]).await?;
         let top: Vec<String> = top["topartists"]["artist"].as_array().cloned().unwrap_or_default().iter().map(|a| st_(&a["name"])).filter(|n| !n.is_empty()).collect();
@@ -225,10 +225,26 @@ async fn lastfm_for_you(st: &AppState, user: &str) -> anyhow::Result<Value> {
             }
         }
 
-        // songs: similar to your most played tracks of the last month
-        let tt = lastfm(st, "user.gettoptracks", &[("user", user.into()), ("period", "1month".into()), ("limit", "10".into())]).await.unwrap_or(json!({}));
-        let seeds: Vec<(String, String)> = tt["toptracks"]["track"].as_array().cloned().unwrap_or_default().iter()
-            .map(|t| (st_(&t["artist"]["name"]), st_(&t["name"]))).filter(|(a, t)| !a.is_empty() && !t.is_empty()).take(6).collect();
+        // songs: similar to your most played tracks – last month on Last.fm, else longer, else what you
+        // played in Encore, else the top songs of the artists you play most (a fresh account has no scrobbles yet)
+        let mut seeds: Vec<(String, String)> = vec![];
+        for period in ["1month", "3month", "overall"] {
+            let tt = lastfm(st, "user.gettoptracks", &[("user", user.into()), ("period", period.into()), ("limit", "10".into())]).await.unwrap_or(json!({}));
+            seeds = tt["toptracks"]["track"].as_array().cloned().unwrap_or_default().iter()
+                .map(|t| (st_(&t["artist"]["name"]), st_(&t["name"]))).filter(|(a, t)| !a.is_empty() && !t.is_empty()).take(6).collect();
+            if !seeds.is_empty() { break; }
+        }
+        if seeds.is_empty() {
+            seeds = st.db.query("SELECT artist, title, COUNT(*) n FROM plays WHERE user_id=? AND artist<>'' AND title<>'' AND played_at > ? GROUP BY lower(artist), lower(title) ORDER BY n DESC LIMIT 6",
+                p![uid, crate::db::now() - 90.0 * 86400.0]).unwrap_or_default().into_iter().map(|r| (r.s("artist"), r.s("title"))).collect();
+        }
+        if seeds.is_empty() {
+            for n in top.iter().take(3).cloned() {
+                if let Ok(d) = lastfm(st, "artist.gettoptracks", &[("artist", n.clone()), ("limit", "2".into()), ("autocorrect", "1".into())]).await {
+                    seeds.extend(d["toptracks"]["track"].as_array().cloned().unwrap_or_default().iter().map(|t| (n.clone(), st_(&t["name"]))).filter(|(_, t)| !t.is_empty()));
+                }
+            }
+        }
         let seen: HashSet<String> = seeds.iter().map(|(a, t)| format!("{}|{}", norm(a), norm(t))).collect();
         let sims = futures_util::future::join_all(seeds.iter().map(|(a, t)| async move { lastfm(st, "track.getsimilar", &[("artist", a.clone()), ("track", t.clone()), ("limit", "12".into()), ("autocorrect", "1".into())]).await })).await;
         let mut tracks = vec![];
@@ -278,7 +294,7 @@ async fn for_you(State(st): State<AppState>, User(u): User) -> ApiResult<Json<Va
     }
     let mut lastfm = Value::Null;
     if let Some(name) = &lf {
-        match lastfm_for_you(&st, name).await {
+        match lastfm_for_you(&st, name, u.i("id")).await {
             Ok(mut v) => {
                 let tr: Vec<Value> = v["tracks"].as_array().cloned().unwrap_or_default();
                 v["tracks"] = json!(annotate_tracks(&st, tr));

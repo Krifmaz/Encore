@@ -66,25 +66,25 @@ struct ImportBody {
     album_mode: Option<String>,
 }
 
-async fn fetch_source(st: &AppState, b: &ImportBody) -> ApiResult<Value> {
+async fn fetch_source(st: &AppState, b: &ImportBody, uid: i64) -> ApiResult<Value> {
     match b.text.as_deref().filter(|t| !t.trim().is_empty()) {
         Some(t) => links::parse_text(t).map_err(bad),
-        None => links::fetch(st, b.url.as_deref().unwrap_or("")).await.map_err(bad),
+        None => links::fetch_as(st, b.url.as_deref().unwrap_or(""), Some(uid)).await.map_err(bad),
     }
 }
 
-async fn preview(State(st): State<AppState>, User(_): User, Json(b): Json<ImportBody>) -> ApiResult<Json<Value>> {
-    let data = fetch_source(&st, &b).await?;
+async fn preview(State(st): State<AppState>, User(u): User, Json(b): Json<ImportBody>) -> ApiResult<Json<Value>> {
+    let data = fetch_source(&st, &b, u.i("id")).await?;
     let mut rows: Vec<Row> = data["tracks"].as_array().cloned().unwrap_or_default().into_iter().filter_map(|v| v.as_object().cloned()).collect();
     let matched = playlists::match_rows(&mut rows, &LibraryIndex::load(&st.db));
     let (_, dupes) = playlists::dedupe_rows(rows.clone());
     rows.truncate(300);
-    Ok(Json(json!({ "name": data["name"], "source": data["source"], "cover": data["cover"], "description": data["description"],
+    Ok(Json(json!({ "name": data["name"], "source": data["source"], "cover": data["cover"], "description": data["description"], "warning": data["warning"],
         "count": data["tracks"].as_array().map(|a| a.len()).unwrap_or(0), "in_library": matched, "duplicates": dupes, "tracks": rows })))
 }
 
 async fn import_inner(st: &AppState, u: &Row, b: ImportBody) -> ApiResult<Value> {
-    let data = fetch_source(st, &b).await?;
+    let data = fetch_source(st, &b, u.i("id")).await?;
     let tracks = data["tracks"].as_array().cloned().unwrap_or_default();
     let source = data["source"].as_str().unwrap_or("web").to_string();
     let mut res = match b.into {

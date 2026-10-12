@@ -32,9 +32,14 @@ pub fn detect(url: &str) -> Option<&'static str> {
 }
 
 pub async fn fetch(st: &AppState, url: &str) -> anyhow::Result<Value> {
+    fetch_as(st, url, None).await
+}
+
+/// Like `fetch`, with the signed-in user's own service connections (private playlists, full length).
+pub async fn fetch_as(st: &AppState, url: &str, uid: Option<i64>) -> anyhow::Result<Value> {
     let kind = detect(url).ok_or_else(|| anyhow::anyhow!("Unsupported link"))?;
     let mut data = match kind {
-        "spotify" => spotify(st, url).await?,
+        "spotify" => spotify(st, url, uid).await?,
         "deezer" => deezer(st, url).await?,
         "tidal" => tidal(st, url).await?,
         "apple" => apple(st, url).await?,
@@ -216,25 +221,40 @@ async fn spotify_embed(st: &AppState, kind: &str, id: &str) -> anyhow::Result<Va
     Ok(json!({ "name": name, "description": "", "cover": entity["coverArt"]["sources"][0]["url"], "tracks": tracks }))
 }
 
-async fn spotify(st: &AppState, url: &str) -> anyhow::Result<Value> {
+async fn spotify(st: &AppState, url: &str, uid: Option<i64>) -> anyhow::Result<Value> {
     let url = resolve_short(st, url).await;
     let re = Regex::new(r"(?:open\.spotify\.com/(?:intl-[\w-]+/)?(?:user/[^/]+/)?|spotify:)(playlist|album|track|artist|collection)[/:]?([A-Za-z0-9]*)").unwrap();
     let c = re.captures(&url).ok_or_else(|| anyhow::anyhow!("Not a Spotify playlist/album/track link"))?;
     let (kind, id) = (c[1].to_string(), c[2].to_string());
     let mut errors = vec![];
-    if kind != "collection" {
-        if let Some(tok) = spotify_app_token(st).await {
-            match spotify_api(st, &tok, &kind, &id).await {
-                Ok(v) => return Ok(v),
-                Err(e) => errors.push(e.to_string()),
-            }
+    // the user's own sign-in sees private playlists and every track; the app's credentials see public ones;
+    // the public embed page is the last resort and stops at 100 tracks
+    let mut tokens = vec![];
+    if let Some(uid) = uid {
+        if let Some(t) = crate::connections::spotify_token(st, uid).await {
+            tokens.push(("your Spotify sign-in", t));
         }
-    } else {
+    }
+    if kind == "collection" && tokens.is_empty() {
         anyhow::bail!("Liked Songs need your Spotify account connected (Connections page)");
+    }
+    if let Some(t) = spotify_app_token(st).await {
+        tokens.push(("the Spotify app credentials", t));
+    }
+    for (via, tok) in &tokens {
+        match spotify_api(st, tok, &kind, &id).await {
+            Ok(v) => return Ok(v),
+            Err(e) => errors.push(format!("{via}: {e}")),
+        }
     }
     match spotify_embed(st, &kind, &id).await {
         Ok(mut v) => {
             v["description"] = json!("Imported without Spotify login – connect Spotify for ISRCs and >100-track playlists");
+            v["warning"] = json!(if errors.is_empty() {
+                "Read from Spotify's public page, which stops at 100 tracks and has no ISRCs. Add the Spotify app credentials in Settings and connect your account on the Connections page for the whole playlist.".to_string()
+            } else {
+                format!("Spotify's API refused ({}), so only the public page could be read – it stops at 100 tracks. Connect your Spotify account on the Connections page (your Spotify app is in development mode: add yourself under its User Management).", errors.join("; "))
+            });
             Ok(v)
         }
         Err(e) => {

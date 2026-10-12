@@ -216,7 +216,7 @@ struct LinkBody {
 
 /// Request every song behind a link (one song, an album or a playlist) from the best source.
 async fn from_link_inner(st: &AppState, u: &Row, url: &str, album_mode: Option<String>) -> ApiResult<Value> {
-    let data = crate::sources::links::fetch(st, url).await.map_err(|e| err(400, e.to_string()))?;
+    let data = crate::sources::links::fetch_as(st, url, Some(u.i("id"))).await.map_err(|e| err(400, e.to_string()))?;
     quota(st, u, 1)?;
     let (mut made, mut skipped) = (vec![], 0);
     for t in data["tracks"].as_array().cloned().unwrap_or_default().iter().take(500) {

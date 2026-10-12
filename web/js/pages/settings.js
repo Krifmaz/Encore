@@ -105,7 +105,7 @@ const SECTIONS = [
     S('tidal_client_secret', 'Tidal Client secret', 'password'),
     S('lastfm_api_key', 'Last.fm API key', 'password', { help: 'last.fm/api/account/create (free) – loved tracks, similar artists/songs, genre pages, For you' }),
     S('lastfm_shared_secret', 'Last.fm shared secret', 'password', { help: 'Shown next to the API key. Needed for scrobbling: users sign in with Last.fm on the Connections page.' }),
-    S('discogs_token', 'Discogs personal access token', 'password', { help: 'discogs.com/settings/developers (free) – finds vinyl, bootlegs and old releases MusicBrainz is missing' }),
+    S('discogs_token', 'Discogs personal access token', 'password', { help: 'discogs.com/settings/developers → “Generate new token” and paste that personal access token here (not an application’s Consumer Key/Secret – no app is needed). Finds vinyl, bootlegs and old releases MusicBrainz is missing.' }),
     S('ytmusic_client_id', 'YouTube Music OAuth Client ID', 'text', { help: 'Google Cloud → YouTube Data API v3 → OAuth client of type “TVs and Limited Input devices”. Lets users sign in to YouTube Music with a code (they can also paste browser headers instead).' }),
     S('ytmusic_client_secret', 'YouTube Music OAuth Client secret', 'password'),
   ] },

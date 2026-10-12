@@ -129,8 +129,9 @@ pub fn import_modal(url: &str, into: Option<i64>) {
           <b>{name}</b><span class="badge">{src}</span>
           <span class="badge">{count} tracks</span><span class="badge ok">{in_library} already in library</span>
           {dups}</div>
-        <div class="card flat" style="max-height:300px;overflow:auto"><div class="list">{tracks}</div></div>"#,
+        {warning}<div class="card flat" style="max-height:300px;overflow:auto"><div class="list">{tracks}</div></div>"#,
                             name = esc(&p.s("name")), src = esc(&src_label(&p)), count = p.s("count"), in_library = p.s("in_library"),
+                            warning = if p.truthy("warning") { format!(r#"<div class="error-box" style="margin-bottom:10px">{}</div>"#, esc(&p.s("warning"))) } else { String::new() },
                             dups = if p.truthy("duplicates") { format!(r#"<span class="badge warn">{} duplicate(s) will be skipped</span>"#, p.s("duplicates")) } else { String::new() },
                         );
                         if let Some(out) = m3.qs("#imp-out") { dom::set_html(&out, &html); }

@@ -62,6 +62,7 @@ export function importModal(ctx, { url = '', into = null } = {}) {
           <b>${esc(p.name)}</b><span class="badge">${esc(SRC[p.source] || p.source)}</span>
           <span class="badge">${p.count} tracks</span><span class="badge ok">${p.in_library} already in library</span>
           ${p.duplicates ? `<span class="badge warn">${p.duplicates} duplicate(s) will be skipped</span>` : ''}</div>
+        ${p.warning ? `<div class="error-box" style="margin-bottom:10px">${esc(p.warning)}</div>` : ''}
         <div class="card flat" style="max-height:300px;overflow:auto"><div class="list">${p.tracks.map(t => `<div class="list-item" style="padding:7px 14px">
           <div class="grow ellipsis">${esc(t.artist)} – ${esc(t.title)} <span class="faint small">${t.album ? '· ' + esc(t.album) : ''}</span></div>
           ${t.isrc ? '<span class="badge" title="Has ISRC – exact matching">ISRC</span>' : ''}
