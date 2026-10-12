@@ -27,7 +27,8 @@ android {
     }
     signingConfigs {
         create("release") {
-            val ks = System.getenv("ANDROID_KEYSTORE_FILE")
+            // CI passes unset secrets as empty strings: treat those as "no release key"
+            val ks = System.getenv("ANDROID_KEYSTORE_FILE")?.takeIf { it.isNotBlank() }
             if (ks != null) {
                 storeFile = file(ks)
                 storePassword = System.getenv("ANDROID_KEYSTORE_PASSWORD")
