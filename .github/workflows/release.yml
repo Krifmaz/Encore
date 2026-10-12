@@ -4,7 +4,8 @@ name: release
 # the edition of that day: 2026.10.11.1, 2026.10.11.2 … Pre-releases end in -edge.
 #   Start one: Actions → release → Run workflow (tick "pre-release" for an edge build), or push a tag v2026.10.11.1.
 #   Tick "apps" to also build the desktop installers and the Android APK (the macOS runner costs 10× minutes,
-#   so they are off by default and a release without them is just the server + Docker image).
+#   so they are off by default and a release without them is just the server + Docker image). They can be
+#   built on your own machine instead and attached to the release: scripts/release-apps.sh.
 #   Docker: :<version> always; :edge gets every release and pre-release, :latest only full releases.
 #   Notes: docs/releases/<version>.md if it exists, otherwise the commit list since the previous release.
 on:

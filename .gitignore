@@ -9,3 +9,4 @@ data/
 server/target/
 .claude/worktrees/
 web/next/
+/out/
