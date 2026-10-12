@@ -12,13 +12,14 @@ use serde_json::{json, Value};
 ///                    minutes) when the connection can't keep up
 ///          'original' – always the original file, whatever the connection does
 ///          'saver'  – always the smaller AAC stream (mobile data, slow links)
-/// kbps:    bitrate of the smaller stream (96 / 160 / 256)
+/// kbps:    bitrate of the smaller stream – fixed at 96 (not a user choice)
 /// preload: buffer the next song while this one plays (off on very slow connections)
 /// autoplay: when the queue ends, keep going with a shuffle of the whole library
-pub fn defaults() -> Value { json!({ "quality": "auto", "kbps": 256, "preload": true, "autoplay": true }) }
+pub fn defaults() -> Value { json!({ "quality": "auto", "kbps": 96, "preload": true, "autoplay": true }) }
 const KEY: &str = "encore.playback";
 const QUALITIES: [&str; 3] = ["auto", "original", "saver"];
-const RATES: [i64; 3] = [96, 160, 256];
+/// the smaller stream is always 96 kbps; older saved choices (160 / 256) are ignored
+const SMALL_KBPS: i64 = 96;
 
 fn clean(p: &Value) -> Value {
     let mut c = defaults();
@@ -27,9 +28,7 @@ fn clean(p: &Value) -> Value {
     }
     let quality = c.s("quality");
     if !QUALITIES.contains(&quality.as_str()) { c["quality"] = json!("auto"); }
-    // `+c.kbps` – a number or a numeric string
-    let kbps = c.g("kbps").as_i64().or_else(|| c.g("kbps").as_str().and_then(|s| s.trim().parse::<i64>().ok())).unwrap_or(0);
-    c["kbps"] = json!(if RATES.contains(&kbps) { kbps } else { 256 });
+    c["kbps"] = json!(SMALL_KBPS);
     c["preload"] = json!(c.g("preload") != &json!(false));
     c["autoplay"] = json!(c.g("autoplay") != &json!(false));
     c

@@ -7,7 +7,7 @@ import { api } from './api.js';
 import * as playback from './playback.js';
 import { art, esc, fmt, icon, popMenu, shareTrack, toast } from './ui.js';
 
-const state = { queue: [], index: -1, transcoded: false, lossy: false, offset: 0, dragging: false, context: 'list', repeat: 'off', full: false, pane: 'now', logged: false,
+const state = { queue: [], index: -1, transcoded: false, lossy: false, dsp: false, dspRate: 0, offset: 0, dragging: false, context: 'list', repeat: 'off', full: false, pane: 'now', logged: false,
   stalls: [], stallAt: 0, seekAt: 0, switched: false, lastPreloadCheck: 0, slowStart: null };
 const listeners = new Set();
 let audio = null;
@@ -18,7 +18,11 @@ let lossyUntil = 0;          // Auto quality: songs started before this time use
 let liked = null;            // Set of liked track ids, fetched the first time a heart is drawn
 let ctx = null;              // AudioContext, only to read the device's output sample rate
 const INFO = new Map();      // track id → /info (codec, sample rate, bit depth …)
-window.addEventListener('encore:playback-prefs', (e) => { prefs = e.detail; if (!prefs.preload) cancelPreload(); else maybePreload(true); if (state.full) renderFull(); });
+let dspInfo = null;          // GET /api/playback/dsp: is server-side Cadenza processing on, and may this account use it
+let dspFailed = false;       // a processed stream failed this session: play originals until the page reloads
+let dspToasted = false;
+function fetchDsp() { api.get('/playback/dsp').then(i => { dspInfo = i; }).catch(() => { dspInfo = null; }); }
+window.addEventListener('encore:playback-prefs', (e) => { prefs = e.detail; fetchDsp(); if (!prefs.preload) cancelPreload(); else maybePreload(true); if (state.full) renderFull(); });
 window.addEventListener('storage', (e) => { if (e.key === 'encore.playback') prefs = playback.current(); });
 
 // Songs heard this listening session (this tab): shuffles never repeat one until the whole library has played.
@@ -204,12 +208,33 @@ function canPlay(format) {
 
 // the smaller stream's codec: AAC where the browser decodes it, Opus elsewhere (Chromium builds, Firefox on Linux)
 const LOSSY = (() => { try { const a = document.createElement('audio'); return a.canPlayType('audio/aac') ? 'aac' : a.canPlayType('audio/ogg; codecs=opus') ? 'opus' : 'aac'; } catch { return 'aac'; } })();
-/** transcode: FLAC made by the server · lossy: the smaller stream · offset: where a server-made stream starts */
-function streamUrl(t, { transcode = false, lossy = false, offset = 0 } = {}) {
+/** The rate asked of the server's Cadenza: this device's output rate, 0 (= the highest the server allows) or a fixed rate. */
+function dspRequestRate() {
+  if (prefs.dsp_rate === 'device') return Math.round(outputRate()) || 0;
+  if (prefs.dsp_rate === 'auto') return 0;
+  return Number(prefs.dsp_rate) || 0;
+}
+/** The rate the server will send (its rule: at most max_rate, never below the file's; 0 → the highest multiple of the file's rate). */
+function dspOutRate(t) {
+  const src = INFO.get(t?.id)?.sample_rate || 44100;
+  const max = dspInfo?.max_rate || 192000;
+  const want = dspRequestRate();
+  let r = want > 0 ? Math.min(want, max) : src;
+  if (want <= 0) while (r * 2 <= max) r *= 2;
+  return Math.max(r, src);
+}
+/** Upsample this library song on the server? Only when switched on and allowed; Data saver / Auto's fallback win. */
+const wantDsp = (t, lossy) => !!(prefs.dsp && dspInfo?.allowed && t && !t.preview && typeof t.id === 'number' && !lossy && !dspFailed);
+/** transcode: FLAC made by the server · lossy: the smaller stream · dsp: upsampled by the server's Cadenza · offset: where a server-made stream starts */
+function streamUrl(t, { transcode = false, lossy = false, dsp = false, offset = 0 } = {}) {
   if (t.preview) return t.preview_url;
   const q = [];
   if (lossy) q.push(`q=${LOSSY}`, `kbps=${prefs.kbps}`);
-  else if (transcode) q.push('transcode=1');
+  else if (dsp) {
+    q.push('dsp=1', `rate=${dspRequestRate()}`);
+    if (prefs.dsp_filter) q.push(`filter=${encodeURIComponent(prefs.dsp_filter)}`);
+    q.push(`dither=${encodeURIComponent(prefs.dsp_dither)}`);
+  } else if (transcode) q.push('transcode=1');
   if (offset) q.push(`t=${offset.toFixed(1)}`);
   return `/api/library/tracks/${t.id}/stream${q.length ? '?' + q.join('&') : ''}`;
 }
@@ -231,14 +256,17 @@ export function saveOffline(tracks) {
   }
 }
 
-function load({ transcode = false, offset = 0, lossy = null } = {}) {
+function load({ transcode = false, offset = 0, lossy = null, dsp = null } = {}) {
   const t = current();
   if (!t) return;
   markPlayed(t);
   if (convert(t)) transcode = true;
   if (lossy === null) lossy = wantLossy(t);
   state.lossy = !t.preview && lossy;
-  state.transcoded = !t.preview && (transcode || lossy);
+  state.dsp = (dsp === null ? wantDsp(t, state.lossy) : dsp) && wantDsp(t, state.lossy);
+  state.dspRate = state.dsp ? dspOutRate(t) : 0;
+  if (state.dsp && !INFO.has(t.id)) trackInfo(t).then(() => { if (current() === t && state.dsp) { state.dspRate = dspOutRate(t); render(); emit(); } });
+  state.transcoded = !t.preview && (transcode || lossy || state.dsp);
   state.offset = offset;   // server-made streams restart at the seek point, so their clock starts at `offset`
   state.dragging = false;
   if (!offset) {
@@ -248,7 +276,7 @@ function load({ transcode = false, offset = 0, lossy = null } = {}) {
     // "now playing" on Last.fm / ListenBrainz (Encore 2)
     if (typeof t.id === 'number' && state.announced !== t) { state.announced = t; api.post('/library/now-playing', { track_id: t.id }).catch(() => {}); }
   }
-  const url = streamUrl(t, { transcode: state.transcoded && !state.lossy, lossy: state.lossy, offset });
+  const url = streamUrl(t, { transcode: state.transcoded && !state.lossy && !state.dsp, lossy: state.lossy, dsp: state.dsp, offset });
   if (!offset && spare && spare.dataset.url === url) {
     // already buffered in the background: swap players and start right away
     const old = audio;
@@ -302,7 +330,8 @@ function maybePreload(force = false) {
   if (!spare || !prefs.preload || link) return;
   const n = state.queue[state.index + 1];
   if (!n) return;
-  const url = streamUrl(n, { transcode: convert(n), lossy: wantLossy(n) });
+  const nLossy = wantLossy(n);
+  const url = streamUrl(n, { transcode: convert(n), lossy: nLossy, dsp: wantDsp(n, nLossy) });
   if (spare.dataset.url === url) return;
   const t = current();
   if (!force) {
@@ -376,7 +405,7 @@ export function seekTo(sec) {
   if (!current() || !dur) return;
   sec = Math.max(0, Math.min(sec, dur - 0.25));
   state.seekAt = Date.now();
-  if (state.transcoded) load({ transcode: true, lossy: state.lossy, offset: sec });      // ask the server to start the stream at that point
+  if (state.transcoded) load({ transcode: true, lossy: state.lossy, dsp: state.dsp, offset: sec });      // ask the server to start the stream at that point
   else audio.currentTime = sec;
   updateTime();
   emit();
@@ -499,9 +528,12 @@ function transport() {
   if (!t) return null;
   if (t.preview) return { kind: 'preview', text: 'A 30-second preview from the catalogue (lossy) – not your file' };
   if (state.lossy) return { kind: `${LOSSY}-${prefs.kbps}`, text: `${LOSSY.toUpperCase()} ${prefs.kbps} kbps (lossy) – ${prefs.quality === 'saver' ? 'Data saver is on' : 'the connection could not keep up with the original'}` };
+  if (state.dsp) return { kind: `cadenza-${state.dspRate}`, text: `Upsampled on the server by Cadenza to 24-bit / ${khz(state.dspRate)} kHz (lossless FLAC)` };
   if (state.transcoded) return { kind: 'flac', text: `Converted to FLAC by the server (lossless) – browsers can't play ${(t.format || '').toUpperCase()}` };
   return { kind: 'original', text: 'The original file, byte for byte – nothing was converted or resampled on the way' };
 }
+/** This device's output sample rate in Hz (0 if unknown) – Settings → Playback shows it for "Match this device". */
+export function deviceRate() { return outputRate(); }
 function outputRate() {
   try { if (!ctx) ctx = new (window.AudioContext || window.webkitAudioContext)(); return ctx.sampleRate; } catch { return 0; }
 }
@@ -526,7 +558,7 @@ async function signalPath() {
   rows.push(['Source', sourceLine(t, info), info?.lossless === false ? 'A lossy file: what the file lost is gone before Encore touches it' : '']);
   if (link) {
     const sig = link.state?.signal || {};
-    rows.push([`Encore → ${esc(link.name)}`, sig.transport === 'original' ? 'The original file, byte for byte' : sig.transport ? (sig.transport === 'flac' ? 'Converted to FLAC by the server (lossless)' : /^(aac|opus)-/.test(sig.transport) ? `${sig.transport.split('-')[0].toUpperCase()} ${sig.transport.split('-')[1]} kbps (lossy)` : sig.transport) : 'Not reported by that device', '']);
+    rows.push([`Encore → ${esc(link.name)}`, sig.transport === 'original' ? 'The original file, byte for byte' : sig.transport ? (sig.transport === 'flac' ? 'Converted to FLAC by the server (lossless)' : sig.transport.startsWith('cadenza-') ? `Upsampled on the server by Cadenza (${khz(Number(sig.transport.slice(8)) || 0)} kHz)` : /^(aac|opus)-/.test(sig.transport) ? `${sig.transport.split('-')[0].toUpperCase()} ${sig.transport.split('-')[1]} kbps (lossy)` : sig.transport) : 'Not reported by that device', '']);
     rows.push([esc(link.name), sig.output_rate ? `Plays through its browser audio at ${khz(sig.output_rate)} kHz` : 'Playing there', '']);
   } else {
     const tr = transport();
@@ -538,14 +570,24 @@ async function signalPath() {
       resampled ? `Your device resamples ${khz(src)} → ${khz(out)} kHz. A browser can't hand bits straight to the DAC; for true bit-perfect output play through a Cadenza device or an exclusive-mode player.` : out && src ? 'Same rate as the file – no resampling in the browser. Whether the operating system mixes it with other sounds is up to your audio settings.' : '']);
   }
   const pure = !link && transport()?.kind === 'original' && info?.lossless !== false;
+  const cadenza = !link && (transport()?.kind || '').startsWith('cadenza');
   m.el.querySelector('.modal-body').innerHTML = `
     <div class="stack" style="gap:12px">
       ${rows.map(([k, v, note]) => `<div class="stack" style="gap:2px"><div class="small muted">${k}</div><div style="font-weight:600">${esc(v)}</div>${note ? `<div class="small muted">${esc(note)}</div>` : ''}</div>`).join('')}
-      <div class="card" style="padding:12px"><b>${link ? 'Playing on another device' : pure ? 'Pure playback from Encore' : 'Not the untouched file'}</b>
+      <div class="card" style="padding:12px"><b>${link ? 'Playing on another device' : cadenza ? 'Processed by Cadenza on the server' : pure ? 'Pure playback from Encore' : 'Not the untouched file'}</b>
         <div class="small muted" style="margin-top:4px">${link ? 'The rows above are what that device reports. Open Encore there for its own signal path.'
+          : cadenza ? 'Encore upsampled the file on the server with Cadenza and sent lossless 24-bit FLAC. Turn it off under Settings → Playback → Server processing to get the untouched file.'
           : pure ? 'Encore sent the file exactly as it is stored. Everything after that – volume, mixing, resampling – is your browser and operating system.'
           : 'Encore converted this stream (see above). Settings → Playback → Quality → Original keeps the file untouched even when the connection is slow.'}</div></div>
     </div>`;
+}
+
+/** The server's Cadenza is off, busy or failed: the same spot again without processing, and no more processing this session. */
+function dspFallback() {
+  dspFailed = true;
+  const at = position();
+  if (!dspToasted) { dspToasted = true; toast("Server processing isn't available right now – playing the original", ''); }
+  load({ transcode: at > 0.5, offset: at > 0.5 ? at : 0, dsp: false });
 }
 
 export function mount() {
@@ -579,8 +621,13 @@ export function mount() {
   on('progress', () => { const now = Date.now(); if (now - state.lastPreloadCheck > 2000) { state.lastPreloadCheck = now; maybePreload(); } });
   on('waiting', stalled);
   on('loadedmetadata', updateTime);
+  // the server's Cadenza is off, busy or failed → the same spot again without processing, and no more processing this session
   // the browser couldn't decode the original (e.g. ALAC in .m4a) → ask the server for FLAC
-  on('error', () => { if (current() && !state.transcoded && !current().preview && audio.getAttribute('src')) load({ transcode: true, offset: position() }); });
+  on('error', () => {
+    if (!current() || !audio.getAttribute('src')) return;
+    if (state.dsp) return dspFallback();
+    if (!state.transcoded && !current().preview) load({ transcode: true, offset: position() });
+  });
   spare.addEventListener('error', () => { delete spare.dataset.url; });
   if ('mediaSession' in navigator) {
     navigator.mediaSession.setActionHandler('play', () => audio.play());
@@ -604,6 +651,7 @@ export function mount() {
   });
   window.addEventListener('hashchange', () => { if (state.full) setFull(false); });
   window.addEventListener('encore:likes', () => { liked = null; likes().then(paintLikes); });
+  fetchDsp();
   render();
 }
 
@@ -636,12 +684,14 @@ function quality(t) {
   if (t.preview) return '30 s preview';
   const f = (t.format || '').toUpperCase();
   if (state.lossy) return `${f} → ${LOSSY.toUpperCase()} ${prefs.kbps}k`;
+  if (state.dsp) return `${f} → Cadenza ${khz(state.dspRate)} kHz`;
   return state.transcoded ? `${f} → FLAC` : `${f}${t.bitrate ? ' ' + t.bitrate + 'k' : ''}`;
 }
 function qualityTitle(t) {
   if (t?.remote) return `What ${link?.name || 'that device'} is playing`;
   if (t?.preview) return 'A 30-second preview – not in your library';
   if (state.lossy) return 'A smaller lossy stream, because the connection could not keep up (or Data saver is on)';
+  if (state.dsp) return 'Upsampled on the server by Cadenza (lossless 24-bit FLAC)';
   return state.transcoded ? 'Converted to FLAC for your browser (lossless)' : 'Original file, no conversion';
 }
 

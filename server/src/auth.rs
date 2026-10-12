@@ -111,6 +111,7 @@ pub const PERMS: &[(&str, &str)] = &[
     ("pick", "Pick the exact version to download (their own requests)"),
     ("fix", "Fix their own downloads: retry, re-pick, delete a wrong song they requested"),
     ("storage", "See server storage"),
+    ("server_dsp", "Use server-side Cadenza processing for their streams (costs server CPU)"),
 ];
 
 pub fn perms_of(st: &AppState, u: &Row) -> Map<String, Value> {
@@ -120,6 +121,7 @@ pub fn perms_of(st: &AppState, u: &Row) -> Map<String, Value> {
     out.insert("pick".into(), json!(st.cfg.str("manual_search") != "admins"));
     out.insert("fix".into(), json!(true));
     out.insert("storage".into(), json!(true));
+    out.insert("server_dsp".into(), json!(false));
     for (k, v) in saved {
         if PERMS.iter().any(|(p, _)| *p == k) {
             out.insert(k, json!(v.as_bool().unwrap_or(false)));

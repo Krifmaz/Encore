@@ -118,6 +118,12 @@ const SECTIONS = [
     S('roon_enabled', 'Enable Roon', 'bool', { help: 'Roon Core (or Nucleus / ROCK) on the same network. Roon 1.8 or newer.' }),
     S('roon_host', 'Roon Core address', 'text', { help: 'Leave empty to find the Core on the network. Running Encore in Docker? Multicast does not cross the bridge network – enter the Core’s IP here (add :port if it is not 9330).' }),
   ] },
+  { id: 'cadenza', title: 'Server processing (Cadenza)', desc: 'Lets permitted users have their streams upsampled on this server by Cadenza (long-filter upsampling, dither and noise shaping, lossless 24-bit FLAC out). Off by default: it costs real processor time per stream. Allow users under People → Users & permissions.', test: 'cadenza', testLabel: 'Test', fields: [
+    S('cadenza_server_enabled', 'Enable server processing', 'bool'),
+    S('cadenza_max_streams', 'Streams at once', 'number', { help: 'Processed streams the whole server runs at the same time; more are played as the original.' }),
+    S('cadenza_max_rate', 'Highest output rate', 'select', { options: [[96000, '96 kHz'], [192000, '192 kHz'], [384000, '384 kHz'], [768000, '768 kHz']] }),
+    S('cadenza_max_taps', 'Longest filter', 'select', { options: [[16384, '16k taps (light)'], [65536, '64k taps'], [262144, '256k taps'], [1048576, '1M taps (heavy)']] }),
+  ] },
   { id: 'email', title: 'Email', desc: 'Lets Encore send password-reset and sign-in emails.', test: 'email', testLabel: 'Send test email', fields: [
     S('smtp_host', 'SMTP server', 'text', { help: 'e.g. smtp.fastmail.com – used for password-reset emails' }),
     S('smtp_port', 'Port', 'number', { help: '587 (STARTTLS) or 465 (SSL)' }),
@@ -142,7 +148,7 @@ const GROUPS = [
   { id: 'apps', title: 'Apps & sources', aliases: ['downloads', 'tagging', 'services'], parts: [
     ['Download sources', ['pipeline', 'streamrip', 'torznab', 'slskd', 'ytdlp']],
     ['Library & tagging', ['library', 'verify']],
-    ['Services', ['spotify', 'media', 'roon']],
+    ['Services', ['spotify', 'media', 'roon', 'cadenza']],
   ] },
   { id: 'accounts', title: 'Email & notifications', sections: ['email', 'notify'] },
   { id: 'autodownload', title: 'Auto-download', sections: [] },
@@ -477,18 +483,39 @@ export async function aboutCard() {
     <div class="small muted">Interface: JavaScript · <a href="/next/${esc(location.hash || '#/')}">Try the new Rust (WebAssembly) interface</a> – a preview of the same app rewritten in Rust; it uses your current sign-in and this link brings you back.</div></div>`;
 }
 
-/** Settings → Playback: stream quality, buffering, what happens when the queue ends, and the engine switches of a linked Cadenza device. */
+/** Settings → Playback: stream quality, buffering, what happens when the queue ends, server-side Cadenza processing of streams
+ * (where an admin switched it on and allowed the account; greyed out otherwise) and the switches of a linked Cadenza device. */
 async function renderPlayback(el) {
   const playback = await import('../playback.js');
   const player = await import('../player.js');
   const { session } = await import('../app.js');
   const serverPrefs = (session.info?.features || []).includes('theme');
   let p = playback.current();
+  // server-side Cadenza: on for this server, and allowed for this account? (fetched once per visit to the tab)
+  let dsp;
+  try { dsp = await api.get('/playback/dsp'); } catch { dsp = { enabled: false }; }
+  const khz = (hz) => String(Math.round(hz / 100) / 10);
+  const DSP_RATES = [88200, 96000, 176400, 192000, 352800, 384000, 705600, 768000];
+  const opt = (v, l, cur) => `<option value="${esc(v)}" ${String(v) === String(cur) ? 'selected' : ''}>${esc(l)}</option>`;
+  const dspHtml = () => {
+    const greyed = `<div class="stack" style="gap:8px;opacity:.45;pointer-events:none" aria-disabled="true"><label class="row" style="gap:8px;align-items:center"><input type="checkbox" disabled> Upsample my streams on the server</label><label class="stack" style="gap:4px"><span class="small muted">Upsampling filter</span><select class="input" disabled><option>–</option></select></label><label class="stack" style="gap:4px"><span class="small muted">Dither / noise shaping</span><select class="input" disabled><option>–</option></select></label><label class="stack" style="gap:4px"><span class="small muted">Output rate</span><select class="input" disabled><option>–</option></select></label></div>`;
+    if (!dsp?.enabled) return `${greyed}<span class="small muted">Turned off on this server. Cadenza upsampling for streams uses the server's processor, so an admin has to switch it on (Settings → Apps & sources → Server processing) and allow your account.</span>`;
+    if (!dsp.allowed) return `${greyed}<span class="small muted">Your account isn't allowed to use the server's processing. Ask an admin.</span>`;
+    const dev = player.deviceRate();
+    const off = p.dsp ? '' : 'disabled';
+    const rates = [['device', dev ? `Match this device (${khz(dev)} kHz)` : 'Match this device'], ['auto', 'Highest the server allows'],
+      ...DSP_RATES.filter(r => r <= (dsp.max_rate || 0)).map(r => [r, `${khz(r)} kHz`])];
+    return `<label class="row" style="gap:8px;align-items:center"><input type="checkbox" id="pb-dsp" ${p.dsp ? 'checked' : ''}> Upsample my streams on the server</label>
+        <label class="stack" style="gap:4px"><span class="small muted">Upsampling filter</span><select class="input" id="pb-dsp-filter" ${off}>${opt('', 'Server default', p.dsp_filter)}${(dsp.filters || []).map(([v, l]) => opt(v, l, p.dsp_filter)).join('')}</select></label>
+        <label class="stack" style="gap:4px"><span class="small muted">Dither / noise shaping</span><select class="input" id="pb-dsp-dither" ${off}>${(dsp.dithers || []).map(([v, l]) => opt(v, l, p.dsp_dither)).join('')}</select></label>
+        <label class="stack" style="gap:4px"><span class="small muted">Output rate</span><select class="input" id="pb-dsp-rate" ${off}>${rates.map(([v, l]) => opt(v, l, p.dsp_rate)).join('')}</select></label>
+        <span class="small muted">The server's Cadenza upsamples the original file and sends lossless 24-bit FLAC. It uses more data (about 4.6 Mbit/s at 96 kHz, 9.2 Mbit/s at 192 kHz) and the server's processor; Data saver and Auto's fallback still win when the connection can't keep up.</span>`;
+  };
   const seg = (key, opts) => `<div class="seg" data-key="${key}">${opts.map(([v, l]) => `<button type="button" data-v="${v}" class="${String(p[key]) === String(v) ? 'on' : ''}">${l}</button>`).join('')}</div>`;
   const QUALITY_HELP = {
-    auto: "The original file. When the connection can't keep up, the rest of the song and the next ten minutes come as the smaller stream, then the original is tried again.",
+    auto: "The original file. When the connection can't keep up, the rest of the song and the next ten minutes come as a smaller AAC 96 kbps (Opus 96 kbps in browsers without AAC) stream, then the original is tried again.",
     original: "Always the original file, even if it stutters on a slow connection. Formats a browser can't play are converted to FLAC (lossless).",
-    saver: 'Always the smaller stream – for mobile data and slow links.',
+    saver: 'Always a smaller AAC 96 kbps (Opus 96 kbps in browsers without AAC) stream – for mobile data and slow links.',
   };
   const paint = () => {
     const link = player.linked();
@@ -498,8 +525,6 @@ async function renderPlayback(el) {
       <p class="small muted" style="margin:0">${serverPrefs ? 'Saved to your account, so it follows you to every device.' : 'Saved on this device.'}</p>
       <div class="stack" style="gap:6px"><h3>Quality</h3>${seg('quality', [['auto', 'Auto'], ['original', 'Original'], ['saver', 'Data saver']])}
         <span class="small muted">${QUALITY_HELP[p.quality]}</span></div>
-      <div class="stack" style="gap:6px"><h3>Smaller stream</h3>${seg('kbps', [[96, 'AAC 96 kbps'], [160, 'AAC 160 kbps'], [256, 'AAC 256 kbps']])}
-        <span class="small muted">What Auto falls back to and what Data saver always uses. The server makes it from the original on the fly.</span></div>
       <div class="stack" style="gap:6px"><h3>Buffering</h3>
         <label class="row" style="gap:8px;align-items:center"><input type="checkbox" id="pb-preload" ${p.preload ? 'checked' : ''}> Pre-load the next song while this one plays</label>
         <span class="small muted">The next song is fetched once the current one is safely buffered, so it starts without a gap. Turn it off on a very slow connection to leave all the bandwidth to the song playing.</span></div>
@@ -507,12 +532,21 @@ async function renderPlayback(el) {
         <label class="row" style="gap:8px;align-items:center"><input type="checkbox" id="pb-autoplay" ${p.autoplay ? 'checked' : ''}> Keep going with a shuffle of the whole library</label></div>
       <div class="stack" style="gap:6px"><h3>Pure playback</h3>
         <span class="small muted">Encore streams the original file untouched – the quality badge on the player opens the <b>Signal path</b>, which shows what the file is, what was sent and what this device does with it. A browser hands the sound to the operating system, which mixes it with other sounds and may resample it; bit-perfect output needs an exclusive-mode engine.</span></div>
-      <div class="stack" style="gap:6px"><h3>Engine${eng ? ` · ${esc(eng.name || link.name)}` : ''}</h3>
-        ${eng ? engineHtml(eng) : `<span class="small muted">${link ? `${esc(link.name)} has no engine switches.` : 'No engine device is linked.'} A <b>Cadenza</b> device (Encore's open playback engine: exclusive-mode output, bit-perfect switch, upsampling filters, dither and noise shaping) shows its switches here once you link to it under <b>Your devices</b>.</span>`}</div>
+      <div class="stack" style="gap:6px"><h3>Server processing (Cadenza)</h3>
+        ${dspHtml()}</div>
+      <div class="stack" style="gap:6px"><h3>Cadenza engine${eng ? ` · ${esc(eng.name || link.name)}` : ''}</h3>
+        ${eng ? engineHtml(eng) : `<div class="stack" style="gap:8px;opacity:.45;pointer-events:none" aria-disabled="true"><label class="row" style="gap:8px;align-items:center"><input type="checkbox" disabled> Bit-perfect – send the file to the DAC untouched (no upsampling, dither or volume)</label><label class="stack" style="gap:4px"><span class="small muted">Upsampling filter</span><select class="input" disabled><option>–</option></select></label><label class="stack" style="gap:4px"><span class="small muted">Dither / noise shaping</span><select class="input" disabled><option>–</option></select></label><label class="stack" style="gap:4px"><span class="small muted">Output rate</span><select class="input" disabled><option>–</option></select></label></div><span class="small muted">For a Cadenza device on your own hardware – a computer or a small box next to your DAC – which plays straight into the DAC. Link to it under <b>Your devices</b> to use these switches. To upsample streams on this server instead, see Server processing above.</span>`}</div>
     </div>`;
     el.querySelectorAll('.seg[data-key] button').forEach(b => b.onclick = () => set({ [b.closest('.seg').dataset.key]: b.dataset.v }));
     el.querySelector('#pb-preload').onchange = (e) => set({ preload: e.target.checked });
     el.querySelector('#pb-autoplay').onchange = (e) => set({ autoplay: e.target.checked });
+    const dspBox = el.querySelector('#pb-dsp');
+    if (dspBox) {
+      dspBox.onchange = (e) => set({ dsp: e.target.checked });
+      el.querySelector('#pb-dsp-filter').onchange = (e) => set({ dsp_filter: e.target.value });
+      el.querySelector('#pb-dsp-dither').onchange = (e) => set({ dsp_dither: e.target.value });
+      el.querySelector('#pb-dsp-rate').onchange = (e) => set({ dsp_rate: /^\d+$/.test(e.target.value) ? Number(e.target.value) : e.target.value });
+    }
     el.querySelectorAll('[data-eng]').forEach(c => c.onchange = (e) => {
       const v = c.type === 'checkbox' ? e.target.checked : e.target.value;
       link.send({ action: 'engine', set: { [c.dataset.eng]: v } });

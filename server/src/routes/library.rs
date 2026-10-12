@@ -362,17 +362,37 @@ pub struct StreamQ {
     q: String,
     /// bitrate of the lossy stream in kbps (64–320, default 256)
     kbps: u32,
+    /// upsample on the server with Cadenza (admin switch + `server_dsp` permission; never on share links)
+    #[serde(deserialize_with = "flag")]
+    dsp: bool,
+    /// Cadenza output rate in Hz (0 = the highest multiple of the source rate the server allows)
+    rate: u32,
+    /// Cadenza filter id (empty = server default)
+    filter: String,
+    /// Cadenza dither id (default TPDF)
+    dither: String,
+}
+
+/// A query switch: `1`, `true`, `yes` or `on` (an empty or missing value is off).
+fn flag<'de, D: serde::Deserializer<'de>>(d: D) -> Result<bool, D::Error> {
+    let s = String::deserialize(d)?;
+    Ok(matches!(s.trim().to_ascii_lowercase().as_str(), "1" | "true" | "yes" | "on"))
 }
 
 /// The original file when the browser can play it (seekable, bit-perfect); otherwise FLAC made on the fly,
-/// or – when the player asks for it – a lossy AAC stream the connection can keep up with.
-pub async fn stream_track(st: &AppState, id: i64, q: &StreamQ, req: Request) -> ApiResult<Response> {
+/// or – when the player asks for it – a lossy AAC stream the connection can keep up with, or a stream
+/// upsampled on the server by Cadenza. `user` is None for share links, which never get server processing.
+pub async fn stream_track(st: &AppState, id: i64, q: &StreamQ, req: Request, user: Option<&crate::db::Row>) -> ApiResult<Response> {
     let tr = st.db.one("SELECT path, format FROM tracks WHERE id=?", p![id])?.ok_or_else(|| err(404, "Track not found"))?;
     let (path, fmt) = (tr.s("path"), tr.s("format"));
     if !FsPath::new(&path).is_file() {
         return Err(err(404, "Track not found"));
     }
     let lossy = matches!(q.q.as_str(), "aac" | "lossy" | "opus");
+    // the lossy stream (Data saver / Auto's fallback) wins over server processing
+    if let (true, false, Some(u)) = (q.dsp, lossy, user) {
+        return dsp_stream(st, path, q, u).await;
+    }
     let alac = if fmt == "m4a" || fmt == "mp4" { let p2 = path.clone(); tokio::task::spawn_blocking(move || is_alac(&p2)).await.unwrap_or(false) } else { false };
     if let (false, false, false, Some(ct)) = (q.transcode, lossy, alac, browser_type(&fmt)) {
         let mut r = serve_file(&path, req, Some(ct), None).await?;
@@ -416,8 +436,32 @@ pub async fn stream_track(st: &AppState, id: i64, q: &StreamQ, req: Request) -> 
     Ok(r)
 }
 
-async fn stream(State(st): State<AppState>, User(_): User, Path(id): Path<i64>, Query(q): Query<StreamQ>, req: Request) -> ApiResult<Response> {
-    stream_track(&st, id, &q, req).await
+async fn stream(State(st): State<AppState>, User(u): User, Path(id): Path<i64>, Query(q): Query<StreamQ>, req: Request) -> ApiResult<Response> {
+    stream_track(&st, id, &q, req, Some(&u)).await
+}
+
+/// Cadenza on the server: lossless 24-bit FLAC at the chosen rate.
+async fn dsp_stream(st: &AppState, path: String, q: &StreamQ, u: &crate::db::Row) -> ApiResult<Response> {
+    let lim = crate::dsp::Limits::of(st);
+    if !lim.enabled {
+        return Err(err(403, "Server processing is turned off on this server"));
+    }
+    if !auth::can(st, u, "server_dsp") {
+        return Err(err(403, "Your account can't use server processing"));
+    }
+    let slot = crate::dsp::try_acquire(lim.max_streams).ok_or_else(|| err(503, "Server processing is busy – playing the original"))?;
+    let p2 = path.clone();
+    let info = tokio::task::spawn_blocking(move || audio_info(&p2)).await.unwrap_or(json!({}));
+    let input = crate::dsp::input_format(&info);
+    let job = crate::dsp::Job {
+        rate: crate::dsp::target_rate(input.rate, q.rate, lim.max_rate),
+        filter: crate::dsp::choose_filter(&q.filter, lim.max_taps),
+        dither: crate::dsp::choose_dither(&q.dither),
+        seek: if q.t.is_finite() { q.t.max(0.0) } else { 0.0 },
+        path,
+        input,
+    };
+    crate::dsp::stream(crate::dsp::cache(st), job, slot).await
 }
 
 /// What's in the file, for the player's signal path: codec, sample rate, bit depth, channels, bitrate.
@@ -727,7 +771,8 @@ async fn shared(State(st): State<AppState>, Path(token): Path<String>) -> ApiRes
 
 async fn shared_stream(State(st): State<AppState>, Path(token): Path<String>, Query(q): Query<StreamQ>, req: Request) -> ApiResult<Response> {
     let t = shared_track(&st, &token)?;
-    stream_track(&st, t.i("id"), &q, req).await
+    // share links play the file (or a plain conversion) – never server processing
+    stream_track(&st, t.i("id"), &q, req, None).await
 }
 
 async fn shared_cover(State(st): State<AppState>, Path(token): Path<String>, Query(q): Query<CoverQ>, req: Request) -> ApiResult<Response> {

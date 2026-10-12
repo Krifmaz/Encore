@@ -653,5 +653,25 @@
   "env": null,
   "default": "",
   "secret": false
+ },
+ "cadenza_server_enabled": {
+  "env": "CADENZA_SERVER_ENABLED",
+  "default": false,
+  "secret": false
+ },
+ "cadenza_max_streams": {
+  "env": "CADENZA_MAX_STREAMS",
+  "default": 2,
+  "secret": false
+ },
+ "cadenza_max_rate": {
+  "env": "CADENZA_MAX_RATE",
+  "default": 192000,
+  "secret": false
+ },
+ "cadenza_max_taps": {
+  "env": "CADENZA_MAX_TAPS",
+  "default": 65536,
+  "secret": false
  }
 }

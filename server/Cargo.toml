@@ -41,8 +41,18 @@ unicode-normalization = "0.1.25"
 md5 = "0.8.1"
 flate2 = "1"
 tokio-tungstenite = "0.26"
+cadenza-dsp = { git = "https://github.com/Krifmaz/cadenza", rev = "ba0a02f90d0ba58f81ba9449bee451e8468aedfa" }
 
 [profile.release]
 lto = "thin"
 codegen-units = 4
 strip = true
+
+# Cadenza's filter design and FFT resampling run in real time while streaming: keep them optimised
+# even in debug builds (an unoptimised resampler can't keep up with a 64k-tap filter).
+[profile.dev.package.cadenza-dsp]
+opt-level = 3
+[profile.dev.package.rustfft]
+opt-level = 3
+[profile.dev.package.realfft]
+opt-level = 3

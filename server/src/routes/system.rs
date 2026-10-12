@@ -117,6 +117,16 @@ async fn test(State(st): State<AppState>, Admin(u): Admin, Path(service): Path<S
                     _ => r["message"].as_str().unwrap_or("Not connected").to_string(),
                 })
             }
+            "cadenza" => {
+                if !st.cfg.bool("cadenza_server_enabled") {
+                    msg(false, "Turned off")
+                } else {
+                    match crate::dsp::self_test(&st).await {
+                        Ok(m) => msg(true, m),
+                        Err(e) => msg(false, format!("Cadenza: {e}")),
+                    }
+                }
+            }
             "notify" => {
                 notify::send(&st, "🔔 Test notification", &format!("{} notifications are working", st.cfg.str("app_name")), None).await;
                 msg(true, "Sent")

@@ -2,6 +2,7 @@ pub mod admin;
 pub mod auth;
 pub mod library;
 pub mod picker;
+pub mod playback;
 pub mod playlists;
 pub mod remote;
 pub mod roon;

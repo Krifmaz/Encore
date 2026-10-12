@@ -789,9 +789,9 @@ fn render_playback(el: Element, _ctx: Ctx) -> PageFuture {
 }
 
 const QUALITY_HELP: [(&str, &str); 3] = [
-    ("auto", "The original file. When the connection can't keep up, the rest of the song and the next ten minutes come as the smaller stream, then the original is tried again."),
+    ("auto", "The original file. When the connection can't keep up, the rest of the song and the next ten minutes come as a smaller AAC 96 kbps (Opus 96 kbps in browsers without AAC) stream, then the original is tried again."),
     ("original", "Always the original file, even if it stutters on a slow connection. Formats a browser can't play are converted to FLAC (lossless)."),
-    ("saver", "Always the smaller stream – for mobile data and slow links."),
+    ("saver", "Always a smaller AAC 96 kbps (Opus 96 kbps in browsers without AAC) stream – for mobile data and slow links."),
 ];
 
 /// `seg()` of the JS renderPlayback: compares as strings, so the numeric kbps matches its button.
@@ -832,16 +832,14 @@ fn paint_playback(st: &Rc<Look>) {
     let help = QUALITY_HELP.iter().find(|(k, _)| *k == p.s("quality")).map(|(_, h)| *h).unwrap_or("undefined");
     let engine_block = match (&eng, &link) {
         (Some(e), Some(_)) => engine_html(e),
-        _ => format!(r#"<span class="small muted">{} A <b>Cadenza</b> device (Encore's open playback engine: exclusive-mode output, bit-perfect switch, upsampling filters, dither and noise shaping) shows its switches here once you link to it under <b>Your devices</b>.</span>"#,
-            match &link { Some(l) => format!("{} has no engine switches.", esc(&l.name)), None => "No engine device is linked.".to_string() }),
+        // not linked to a Cadenza device: greyed out – Cadenza never processes streams on the server
+        _ => r#"<div class="stack" style="gap:8px;opacity:.45;pointer-events:none" aria-disabled="true"><label class="row" style="gap:8px;align-items:center"><input type="checkbox" disabled> Bit-perfect – send the file to the DAC untouched (no upsampling, dither or volume)</label><label class="stack" style="gap:4px"><span class="small muted">Upsampling filter</span><select class="input" disabled><option>–</option></select></label><label class="stack" style="gap:4px"><span class="small muted">Dither / noise shaping</span><select class="input" disabled><option>–</option></select></label><label class="stack" style="gap:4px"><span class="small muted">Output rate</span><select class="input" disabled><option>–</option></select></label></div><span class="small muted">Not used for streaming. Cadenza never runs on the Encore server, so music streamed to a browser or phone is never upsampled there and never costs the server any processing. Cadenza runs on your own computer, or a small box next to your DAC, and plays straight into the DAC. Install it there and link to it under <b>Your devices</b> to use these switches.</span>"#.to_string(),
     };
     dom::set_html(&st.el, &format!(r##"<div class="card stack">
       <h2>Playback</h2>
       <p class="small muted" style="margin:0">{saved}</p>
       <div class="stack" style="gap:6px"><h3>Quality</h3>{quality}
         <span class="small muted">{help}</span></div>
-      <div class="stack" style="gap:6px"><h3>Smaller stream</h3>{kbps}
-        <span class="small muted">What Auto falls back to and what Data saver always uses. The server makes it from the original on the fly.</span></div>
       <div class="stack" style="gap:6px"><h3>Buffering</h3>
         <label class="row" style="gap:8px;align-items:center"><input type="checkbox" id="pb-preload" {preload}> Pre-load the next song while this one plays</label>
         <span class="small muted">The next song is fetched once the current one is safely buffered, so it starts without a gap. Turn it off on a very slow connection to leave all the bandwidth to the song playing.</span></div>
@@ -849,12 +847,11 @@ fn paint_playback(st: &Rc<Look>) {
         <label class="row" style="gap:8px;align-items:center"><input type="checkbox" id="pb-autoplay" {autoplay}> Keep going with a shuffle of the whole library</label></div>
       <div class="stack" style="gap:6px"><h3>Pure playback</h3>
         <span class="small muted">Encore streams the original file untouched – the quality badge on the player opens the <b>Signal path</b>, which shows what the file is, what was sent and what this device does with it. A browser hands the sound to the operating system, which mixes it with other sounds and may resample it; bit-perfect output needs an exclusive-mode engine.</span></div>
-      <div class="stack" style="gap:6px"><h3>Engine{eng_name}</h3>
+      <div class="stack" style="gap:6px"><h3>Cadenza engine{eng_name}</h3>
         {engine_block}</div>
     </div>"##,
         saved = if st.server_prefs { "Saved to your account, so it follows you to every device." } else { "Saved on this device." },
         quality = seg_str(&p, "quality", &[("auto", "Auto"), ("original", "Original"), ("saver", "Data saver")]),
-        kbps = seg_str(&p, "kbps", &[("96", "AAC 96 kbps"), ("160", "AAC 160 kbps"), ("256", "AAC 256 kbps")]),
         preload = if p.truthy("preload") { "checked" } else { "" },
         autoplay = if p.truthy("autoplay") { "checked" } else { "" },
         eng_name = match (&eng, &link) { (Some(e), Some(l)) => format!(" · {}", esc(&if e.truthy("name") { e.s("name") } else { l.name.clone() })), _ => String::new() }));

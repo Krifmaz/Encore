@@ -10,6 +10,7 @@ mod auth;
 mod config;
 mod connections;
 mod db;
+mod dsp;
 mod email;
 mod dupes;
 mod error;
@@ -84,6 +85,7 @@ pub fn app(st: AppState) -> Router {
         .merge(routes::stats::router())
         .merge(routes::remote::router())
         .merge(routes::roon::router())
+        .merge(routes::playback::router())
         .with_state(st)
         .fallback_service(spa)
         .layer(middleware::from_fn(security_headers))
