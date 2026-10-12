@@ -106,6 +106,17 @@ async fn test(State(st): State<AppState>, Admin(u): Admin, Path(service): Path<S
                     msg(true, format!("Sent to {to}"))
                 }
             }
+            "roon" => {
+                let r = crate::roon::status(&st);
+                let phase = r["phase"].as_str().unwrap_or("");
+                let zones = crate::roon::zones();
+                let names: Vec<String> = zones.iter().map(|z| z["name"].as_str().unwrap_or("").to_string()).collect();
+                msg(phase == "connected", match phase {
+                    "connected" => format!("{} · {} zone(s): {}", r["message"].as_str().unwrap_or(""), zones.len(), names.join(", ")),
+                    "off" => "Turn Roon on and save first".to_string(),
+                    _ => r["message"].as_str().unwrap_or("Not connected").to_string(),
+                })
+            }
             "notify" => {
                 notify::send(&st, "🔔 Test notification", &format!("{} notifications are working", st.cfg.str("app_name")), None).await;
                 msg(true, "Sent")

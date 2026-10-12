@@ -114,6 +114,10 @@ const SECTIONS = [
     S('jellyfin_url', 'Jellyfin URL'), S('jellyfin_api_key', 'Jellyfin API key', 'password'),
     S('plex_url', 'Plex URL'), S('plex_token', 'Plex token', 'password'),
   ] },
+  { id: 'roon', title: 'Roon', desc: 'Encore as a Roon extension: your Roon zones show up under Your devices with what they play, transport and volume, and “Play in Roon” starts a search result in a zone. Enable it here, then approve Encore once in Roon → Settings → Extensions.', test: 'roon', testLabel: 'Test connection', fields: [
+    S('roon_enabled', 'Enable Roon', 'bool', { help: 'Roon Core (or Nucleus / ROCK) on the same network. Roon 1.8 or newer.' }),
+    S('roon_host', 'Roon Core address', 'text', { help: 'Leave empty to find the Core on the network. Running Encore in Docker? Multicast does not cross the bridge network – enter the Core’s IP here (add :port if it is not 9330).' }),
+  ] },
   { id: 'email', title: 'Email', desc: 'Lets Encore send password-reset and sign-in emails.', test: 'email', testLabel: 'Send test email', fields: [
     S('smtp_host', 'SMTP server', 'text', { help: 'e.g. smtp.fastmail.com – used for password-reset emails' }),
     S('smtp_port', 'Port', 'number', { help: '587 (STARTTLS) or 465 (SSL)' }),
@@ -138,7 +142,7 @@ const GROUPS = [
   { id: 'apps', title: 'Apps & sources', aliases: ['downloads', 'tagging', 'services'], parts: [
     ['Download sources', ['pipeline', 'streamrip', 'torznab', 'slskd', 'ytdlp']],
     ['Library & tagging', ['library', 'verify']],
-    ['Services', ['spotify', 'media']],
+    ['Services', ['spotify', 'media', 'roon']],
   ] },
   { id: 'accounts', title: 'Email & notifications', sections: ['email', 'notify'] },
   { id: 'autodownload', title: 'Auto-download', sections: [] },

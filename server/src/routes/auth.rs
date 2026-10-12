@@ -60,6 +60,9 @@ async fn info(State(st): State<AppState>) -> Json<Value> {
     if crate::sources::slskd::enabled(&st) {
         features.push("soulseek"); // the Soulseek page (search, browse, transfers)
     }
+    if st.cfg.bool("roon_enabled") {
+        features.push("roon"); // Roon zones in the devices list
+    }
     Json(json!({
         "app_name": st.cfg.str("app_name"),
         "signup_mode": st.cfg.str("signup_mode"),

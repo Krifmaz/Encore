@@ -147,14 +147,36 @@ export function open() {
     };
   };
   const byId = (id) => devices.find(d => d.id === id);
+  // Roon zones (when Roon is enabled): shown before the Encore devices, refreshed with them
+  const roonOn = (window.encoreSession?.info?.features || []).includes('roon');
+  let zones = [];
+  const zoneCard = (z) => {
+    const np = z.now_playing;
+    const vol = (z.outputs || []).find(o => o.volume)?.volume;
+    const v = vol ? Math.max(0, Math.min(1, (vol.value - vol.min) / ((vol.max - vol.min) || 1))) : null;
+    return `<div class="card stack" data-zone="${esc(z.zone_id)}" style="gap:10px">
+        <div class="row between"><b>${icon.devices.replace('<svg', '<svg width="16" style="vertical-align:-3px;margin-right:6px"')}${esc(z.name)} <span class="badge" style="margin-left:6px">Roon</span></b>
+          <button class="btn sm" data-z="search" title="Search Roon's library and play the first match here">Play in Roon…</button></div>
+        ${np ? `<div class="row" style="gap:12px">
+          <div class="thumb" style="width:52px;height:52px">${art(np.image_key ? `/api/roon/image/${encodeURIComponent(np.image_key)}?s=104` : '', np.line1 || '')}</div>
+          <div class="grow"><div class="ellipsis" style="font-weight:650">${esc(np.line1 || '')}</div><div class="small muted ellipsis">${esc(np.line2 || '')}${np.line3 ? ' · ' + esc(np.line3) : ''}</div>
+            <div class="small faint">${z.state === 'playing' ? 'Playing' : z.state === 'paused' ? 'Paused' : z.state === 'loading' ? 'Loading' : 'Stopped'}${np.length ? ` · ${fmt.dur(np.seek_position || 0)} / ${fmt.dur(np.length)}` : ''}</div></div></div>`
+        : '<div class="small muted">Nothing playing</div>'}
+        <div class="row wrap" style="gap:8px">
+          <button class="btn sm ghost icon" data-z="prev" aria-label="Previous" ${z.is_previous_allowed ? '' : 'disabled'}>${icon.prev}</button>
+          <button class="btn sm" data-z="toggle">${z.state === 'playing' ? icon.pause + 'Pause' : icon.play + 'Play'}</button>
+          <button class="btn sm ghost icon" data-z="next" aria-label="Next" ${z.is_next_allowed ? '' : 'disabled'}>${icon.next}</button>
+          ${v !== null ? `<input type="range" min="0" max="1" step="0.02" value="${v}" data-zvol title="Volume" style="width:110px;accent-color:var(--accent)">` : ''}
+        </div></div>`;
+  };
   const paint = () => {
     if (!list.isConnected) { clearInterval(timer); onDevices = null; return; }
-    if (!devices.length) {
-      list.innerHTML = `<p class="muted" style="margin:0">No other devices right now. Open Encore on your phone, computer or the apps (signed in as you) and they show up here.</p>`;
+    if (!devices.length && !zones.length) {
+      list.innerHTML = `<p class="muted" style="margin:0">No other devices right now. Open Encore on your phone, computer or the apps (signed in as you) and they show up here.${roonOn ? ' Roon zones appear once Encore is connected to your Roon Core (Settings → Apps & sources → Roon).' : ''}</p>`;
       return;
     }
     const l = player.linked();
-    list.innerHTML = devices.map((d) => {
+    list.innerHTML = zones.map(zoneCard).join('') + devices.map((d) => {
       const s = d.state || {};
       const isLinked = l?.id === d.id;
       const remoteOfMe = s.remote_of === ME;
@@ -179,10 +201,36 @@ export function open() {
         </div>`}</div>`;
     }).join('');
   };
+  const refreshZones = async () => {
+    if (!roonOn || !list.isConnected) return;
+    try { const z = await api.get('/roon/zones'); if (JSON.stringify(z) !== JSON.stringify(zones)) { zones = z; paint(); } } catch { /* Roon away */ }
+  };
   const refresh = async () => {
     if (!list.isConnected) { clearInterval(timer); onDevices = null; return; }
     try { gotDevices(await api.get('/remote/devices')); } catch { devices = []; paint(); }
+    refreshZones();
   };
+  list.addEventListener('click', async (e) => {
+    const b = e.target.closest('[data-z]');
+    if (!b) return;
+    const id = b.closest('[data-zone]').dataset.zone;
+    const z = zones.find(x => x.zone_id === id);
+    try {
+      if (b.dataset.z === 'search') {
+        const q = prompt(`Play in Roon (${z?.name || 'zone'}): artist, album or song`, '');
+        if (!q || !q.trim()) return;
+        const r = await api.post(`/roon/zones/${encodeURIComponent(id)}/play`, { query: q.trim() });
+        toast(`Playing ${r.playing} in ${z?.name || 'Roon'}`, 'ok');
+      } else {
+        await api.post(`/roon/zones/${encodeURIComponent(id)}/command`, { action: b.dataset.z });
+      }
+      setTimeout(refreshZones, 500);
+    } catch (err) { toast(err.message, 'err'); }
+  });
+  list.addEventListener('change', (e) => {
+    const v = e.target.closest('[data-zvol]');
+    if (v) api.post(`/roon/zones/${encodeURIComponent(v.closest('[data-zone]').dataset.zone)}/command`, { action: 'volume', value: Number(v.value) }).catch(err => toast(err.message, 'err'));
+  });
   list.addEventListener('click', (e) => {
     const b = e.target.closest('[data-a]');
     if (!b) return;
@@ -217,6 +265,6 @@ export function open() {
   onDevices = paint;
   paintMe();
   refresh();
-  // pushed updates repaint the list; this is the fallback when the stream is down
-  timer = setInterval(() => { if (!streaming()) refresh(); }, 2000);
+  // pushed updates repaint the list; this is the fallback when the stream is down (Roon zones are always polled)
+  timer = setInterval(() => { if (!streaming()) refresh(); else refreshZones(); }, 2000);
 }

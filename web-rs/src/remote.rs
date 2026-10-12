@@ -285,40 +285,127 @@ fn device_card(d: &Value, devices: &[Value], l: Option<&player::Link>, me: &str)
         ui::icon_attr("devices", r#"width="16" style="vertical-align:-3px;margin-right:6px""#), esc(&d.s("name")))
 }
 
+/// One Roon zone in the Devices window (the JS `zoneCard`).
+fn zone_card(z: &Value) -> String {
+    let np = z.g("now_playing");
+    let vol = z.a("outputs").into_iter().find(|o| o.g("volume").is_object()).map(|o| o.o("volume"));
+    let v = vol.map(|vol| { let (min, max) = (vol.f("min"), vol.f("max")); let span = if max - min == 0.0 { 1.0 } else { max - min }; ((vol.f("value") - min) / span).clamp(0.0, 1.0) });
+    let state = z.s("state");
+    let now = if np.is_object() {
+        let img = if np.truthy("image_key") { format!("/api/roon/image/{}?s=104", String::from(js_sys::encode_uri_component(&np.s("image_key")))) } else { String::new() };
+        format!(r#"<div class="row" style="gap:12px">
+          <div class="thumb" style="width:52px;height:52px">{}</div>
+          <div class="grow"><div class="ellipsis" style="font-weight:650">{}</div><div class="small muted ellipsis">{}{}</div>
+            <div class="small faint">{}{}</div></div></div>"#,
+            art(&img, &np.s("line1"), ""), esc(&np.s("line1")), esc(&np.s("line2")), if np.truthy("line3") { format!(" · {}", esc(&np.s("line3"))) } else { String::new() },
+            match state.as_str() { "playing" => "Playing", "paused" => "Paused", "loading" => "Loading", _ => "Stopped" },
+            if np.truthy("length") { format!(" · {} / {}", fmt::dur(np.f("seek_position")), fmt::dur(np.f("length"))) } else { String::new() })
+    } else { r#"<div class="small muted">Nothing playing</div>"#.to_string() };
+    format!(r#"<div class="card stack" data-zone="{}" style="gap:10px">
+        <div class="row between"><b>{}{} <span class="badge" style="margin-left:6px">Roon</span></b>
+          <button class="btn sm" data-z="search" title="Search Roon's library and play the first match here">Play in Roon…</button></div>
+        {now}
+        <div class="row wrap" style="gap:8px">
+          <button class="btn sm ghost icon" data-z="prev" aria-label="Previous" {}>{}</button>
+          <button class="btn sm" data-z="toggle">{}</button>
+          <button class="btn sm ghost icon" data-z="next" aria-label="Next" {}>{}</button>
+          {}
+        </div></div>"#,
+        esc(&z.s("zone_id")), ui::icon_attr("devices", r#"width="16" style="vertical-align:-3px;margin-right:6px""#), esc(&z.s("name")),
+        if z.truthy("is_previous_allowed") { "" } else { "disabled" }, icon("prev"),
+        if state == "playing" { format!("{}Pause", icon("pause")) } else { format!("{}Play", icon("play")) },
+        if z.truthy("is_next_allowed") { "" } else { "disabled" }, icon("next"),
+        v.map(|v| format!(r#"<input type="range" min="0" max="1" step="0.02" value="{}" data-zvol title="Volume" style="width:110px;accent-color:var(--accent)">"#, v)).unwrap_or_default())
+}
+
 /// The Devices window: what every other device is playing, with controls, and Link / Unlink.
 pub fn open() {
     let m = ui::modal(ModalOpts::new("Your devices", r#"<div id="dev-me" class="stack" style="margin-bottom:12px"></div><div id="dev-list" class="stack"><div class="skeleton" style="height:90px"></div></div>"#));
     let (Some(list), Some(me_box)) = (m.qs("#dev-list"), m.qs("#dev-me")) else { return };
     let timer: Rc<RefCell<Option<dom::Interval>>> = Rc::new(RefCell::new(None));
+    // Roon zones (when Roon is enabled): shown before the Encore devices, refreshed with them
+    let roon_on = app::has_feature("roon");
+    let zones: Rc<RefCell<Vec<Value>>> = Rc::new(RefCell::new(Vec::new()));
 
     // paint(): the list from DEVICES (what the server last pushed or we last fetched)
     let paint: Rc<dyn Fn()> = {
-        let (list, timer) = (list.clone(), timer.clone());
+        let (list, timer, zones) = (list.clone(), timer.clone(), zones.clone());
         Rc::new(move || {
             if !list.is_connected() { timer.borrow_mut().take(); ON_DEVICES.with(|o| *o.borrow_mut() = None); return; }
             let my = me();
             let devs = DEVICES.with(|d| d.borrow().clone());
-            if devs.is_empty() {
-                dom::set_html(&list, r#"<p class="muted" style="margin:0">No other devices right now. Open Encore on your phone, computer or the apps (signed in as you) and they show up here.</p>"#);
+            let zs = zones.borrow();
+            if devs.is_empty() && zs.is_empty() {
+                dom::set_html(&list, &format!(r#"<p class="muted" style="margin:0">No other devices right now. Open Encore on your phone, computer or the apps (signed in as you) and they show up here.{}</p>"#,
+                    if roon_on { " Roon zones appear once Encore is connected to your Roon Core (Settings → Apps & sources → Roon)." } else { "" }));
                 return;
             }
             let l = player::linked();
-            dom::set_html(&list, &devs.iter().map(|d| device_card(d, &devs, l.as_ref(), &my)).collect::<String>());
+            dom::set_html(&list, &format!("{}{}", zs.iter().map(zone_card).collect::<String>(), devs.iter().map(|d| device_card(d, &devs, l.as_ref(), &my)).collect::<String>()));
+        })
+    };
+    let refresh_zones: Rc<dyn Fn()> = {
+        let (list, zones, paint) = (list.clone(), zones.clone(), paint.clone());
+        Rc::new(move || {
+            if !roon_on || !list.is_connected() { return; }
+            let (zones, paint) = (zones.clone(), paint.clone());
+            dom::spawn(async move {
+                // Roon away: keep what we had
+                if let Ok(z) = api::get("/roon/zones").await {
+                    let items = z.items();
+                    if serde_json::to_string(&items).ok() != serde_json::to_string(&*zones.borrow()).ok() { *zones.borrow_mut() = items; paint(); }
+                }
+            });
         })
     };
     let refresh: Rc<dyn Fn()> = {
-        let (list, timer, paint) = (list.clone(), timer.clone(), paint.clone());
+        let (list, timer, paint, refresh_zones) = (list.clone(), timer.clone(), paint.clone(), refresh_zones.clone());
         Rc::new(move || {
-            let (list, timer, paint) = (list.clone(), timer.clone(), paint.clone());
+            let (list, timer, paint, refresh_zones) = (list.clone(), timer.clone(), paint.clone(), refresh_zones.clone());
             dom::spawn(async move {
                 if !list.is_connected() { timer.borrow_mut().take(); ON_DEVICES.with(|o| *o.borrow_mut() = None); return; }
                 match api::get("/remote/devices").await {
                     Ok(v) => got_devices(v.items()),
                     Err(_) => { DEVICES.with(|d| d.borrow_mut().clear()); paint(); }
                 }
+                refresh_zones();
             });
         })
     };
+    {
+        let (zones, refresh_zones) = (zones.clone(), refresh_zones.clone());
+        dom::on(&list, "click", move |e| {
+            let Some(b) = dom::closest(e, "[data-z]") else { return };
+            let id = dom::closest_of(&b, "[data-zone]").map(|c| dom::data(&c, "zone")).unwrap_or_default();
+            let name = zones.borrow().iter().find(|x| x.s("zone_id") == id).map(|z| z.s("name"));
+            let what = dom::data(&b, "z");
+            let refresh_zones = refresh_zones.clone();
+            dom::spawn(async move {
+                let r = if what == "search" {
+                    let Some(q) = dom::prompt(&format!("Play in Roon ({}): artist, album or song", name.clone().unwrap_or_else(|| "zone".into())), "") else { return };
+                    if q.trim().is_empty() { return; }
+                    match api::post(&format!("/roon/zones/{}/play", String::from(js_sys::encode_uri_component(&id))), json!({ "query": q.trim() })).await {
+                        Ok(r) => { toast(&format!("Playing {} in {}", r.s("playing"), name.unwrap_or_else(|| "Roon".into())), "ok"); Ok(()) }
+                        Err(e) => Err(e),
+                    }
+                } else {
+                    api::post(&format!("/roon/zones/{}/command", String::from(js_sys::encode_uri_component(&id))), json!({ "action": what })).await.map(|_| ())
+                };
+                match r {
+                    Ok(()) => dom::timeout(500, move || refresh_zones()),
+                    Err(e) => toast(&e.message, "err"),
+                }
+            });
+        });
+        dom::on(&list, "change", move |e| {
+            let Some(v) = dom::closest(e, "[data-zvol]") else { return };
+            let id = dom::closest_of(&v, "[data-zone]").map(|c| dom::data(&c, "zone")).unwrap_or_default();
+            let n: f64 = dom::value(&v).trim().parse().unwrap_or(0.0);
+            dom::spawn(async move {
+                if let Err(e) = api::post(&format!("/roon/zones/{}/command", String::from(js_sys::encode_uri_component(&id))), json!({ "action": "volume", "value": n })).await { toast(&e.message, "err"); }
+            });
+        });
+    }
 
     let send: Rc<dyn Fn(String, Value)> = {
         let refresh = refresh.clone();
@@ -412,7 +499,7 @@ pub fn open() {
     ON_DEVICES.with(|o| *o.borrow_mut() = Some(paint.clone()));
     paint_me();
     refresh();
-    // pushed updates repaint the list; this is the fallback when the stream is down
-    let r = refresh.clone();
-    *timer.borrow_mut() = Some(dom::Interval::new(2000, move || { if !streaming() { r(); } }));
+    // pushed updates repaint the list; this is the fallback when the stream is down (Roon zones are always polled)
+    let (r, rz) = (refresh.clone(), refresh_zones.clone());
+    *timer.borrow_mut() = Some(dom::Interval::new(2000, move || { if !streaming() { r(); } else { rz(); } }));
 }

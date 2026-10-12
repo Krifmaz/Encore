@@ -23,6 +23,7 @@ mod nlsearch;
 mod notify;
 mod organize;
 mod playlists;
+mod roon;
 mod routes;
 mod scheduler;
 mod scrobble;
@@ -82,6 +83,7 @@ pub fn app(st: AppState) -> Router {
         .merge(routes::playlists::router())
         .merge(routes::stats::router())
         .merge(routes::remote::router())
+        .merge(routes::roon::router())
         .with_state(st)
         .fallback_service(spa)
         .layer(middleware::from_fn(security_headers))
@@ -121,6 +123,7 @@ async fn main() -> anyhow::Result<()> {
     }
     tokio::spawn(worker::run(st.clone()));
     tokio::spawn(soulseek::supervisor(st.clone()));
+    tokio::spawn(roon::supervisor(st.clone()));
     let listener = tokio::net::TcpListener::bind(addr).await?;
     axum::serve(listener, app(st).into_make_service_with_connect_info::<SocketAddr>()).await?;
     Ok(())

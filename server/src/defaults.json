@@ -633,5 +633,25 @@
   "env": null,
   "default": "",
   "secret": true
+ },
+ "roon_enabled": {
+  "env": "ROON_ENABLED",
+  "default": false,
+  "secret": false
+ },
+ "roon_host": {
+  "env": "ROON_HOST",
+  "default": "",
+  "secret": false
+ },
+ "roon_token": {
+  "env": null,
+  "default": "",
+  "secret": true
+ },
+ "roon_core_id": {
+  "env": null,
+  "default": "",
+  "secret": false
  }
 }

@@ -40,6 +40,7 @@ fancy-regex = "0.19.2"
 unicode-normalization = "0.1.25"
 md5 = "0.8.1"
 flate2 = "1"
+tokio-tungstenite = "0.26"
 
 [profile.release]
 lto = "thin"
