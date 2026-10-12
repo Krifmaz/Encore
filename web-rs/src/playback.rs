@@ -15,7 +15,13 @@ use serde_json::{json, Value};
 /// kbps:    bitrate of the smaller stream – fixed at 96 (not a user choice)
 /// preload: buffer the next song while this one plays (off on very slow connections)
 /// autoplay: when the queue ends, keep going with a shuffle of the whole library
-pub fn defaults() -> Value { json!({ "quality": "auto", "kbps": 96, "preload": true, "autoplay": true }) }
+/// dsp:     have the server upsample streams with Cadenza (only where an admin switched it on and allowed the account)
+/// dsp_filter: Cadenza upsampling filter id ('' = the server's default)
+/// dsp_dither: Cadenza dither / noise shaping id
+/// dsp_rate: 'device' (this device's output rate), 'auto' (highest the server allows) or a rate in Hz
+pub fn defaults() -> Value {
+    json!({ "quality": "auto", "kbps": 96, "preload": true, "autoplay": true, "dsp": false, "dsp_filter": "", "dsp_dither": "tpdf", "dsp_rate": "device" })
+}
 const KEY: &str = "encore.playback";
 const QUALITIES: [&str; 3] = ["auto", "original", "saver"];
 /// the smaller stream is always 96 kbps; older saved choices (160 / 256) are ignored
@@ -31,7 +37,30 @@ fn clean(p: &Value) -> Value {
     c["kbps"] = json!(SMALL_KBPS);
     c["preload"] = json!(c.g("preload") != &json!(false));
     c["autoplay"] = json!(c.g("autoplay") != &json!(false));
+    c["dsp"] = json!(c.g("dsp") == &json!(true));
+    if !c.g("dsp_filter").is_string() { c["dsp_filter"] = json!(""); }
+    if c.st("dsp_dither").is_none() { c["dsp_dither"] = json!("tpdf"); }
+    let rate = c.g("dsp_rate");
+    if rate != &json!("device") && rate != &json!("auto") {
+        // `Number(x)`, kept only when it is a positive integer
+        let r = js_number(rate);
+        c["dsp_rate"] = if r.is_finite() && r.fract() == 0.0 && r > 0.0 {
+            if r <= i64::MAX as f64 { json!(r as i64) } else { json!(r) }
+        } else { json!("device") };
+    }
     c
+}
+
+/// JavaScript's `Number(x)` for a JSON value (NaN where JS gives NaN).
+fn js_number(v: &Value) -> f64 {
+    match v {
+        Value::Null => 0.0,
+        Value::Bool(b) => if *b { 1.0 } else { 0.0 },
+        Value::Number(n) => n.as_f64().unwrap_or(f64::NAN),
+        Value::String(s) => { let t = s.trim(); if t.is_empty() { 0.0 } else { t.parse::<f64>().unwrap_or(f64::NAN) } }
+        Value::Array(a) => match a.as_slice() { [] => 0.0, [x] if !x.is_array() && !x.is_object() => js_number(x), _ => f64::NAN },
+        Value::Object(_) => f64::NAN,
+    }
 }
 
 pub fn current() -> Value {
