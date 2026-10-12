@@ -578,12 +578,12 @@ async function renderAppearance(el) {
       <p class="small muted" style="margin:0">${serverPrefs ? 'Saved to your account, so it follows you to every device.' : 'Saved on this device.'}</p>
       <div class="stack" style="gap:8px"><h3>Presets</h3>
         <div class="presets">${appearance.PRESETS.map(x => {
-          const bg = { oled: '#000', light: '#f6f6fb', dark: '#0b0b12' }[x.theme];
+          const bg = { encore: '#161617', oled: '#000', light: '#f6f6fb', dark: '#0b0b12' }[x.theme];
           const ac = appearance.ACCENTS.find(a => a.id === x.accent) || { a: x.custom, b: x.custom };
           const on = p.theme === x.theme && p.accent === x.accent && p.background === x.background && (x.accent !== 'custom' || p.custom === x.custom);
           return `<button type="button" class="preset ${on ? 'on' : ''}" data-preset="${x.id}"><i style="background:linear-gradient(135deg, ${ac.a} 0 22%, ${ac.b} 22% 34%, ${bg} 34%)"></i>${esc(x.name)}</button>`;
         }).join('')}</div></div>
-      <div class="stack" style="gap:6px"><h3>Theme</h3>${seg('theme', [['dark', 'Dark'], ['oled', 'OLED black'], ['light', 'Light'], ['system', 'Match device']])}</div>
+      <div class="stack" style="gap:6px"><h3>Theme</h3>${seg('theme', [['encore', 'Encore'], ['dark', 'Dark'], ['oled', 'OLED black'], ['light', 'Light'], ['system', 'Match device']])}</div>
       <div class="stack" style="gap:8px"><h3>Accent colour</h3>
         <div class="swatches">${appearance.ACCENTS.map(a => `<button type="button" class="swatch ${p.accent === a.id ? 'on' : ''}" data-accent="${a.id}" title="${esc(a.name)}" aria-label="${esc(a.name)}" style="background:linear-gradient(135deg, ${a.a}, ${a.b})"></button>`).join('')}</div>
         <div class="custom-colour"><span class="small muted">Any colour:</span><input type="color" id="custom" value="${esc(p.custom)}" title="Pick any colour">

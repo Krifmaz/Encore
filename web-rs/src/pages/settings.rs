@@ -985,7 +985,7 @@ fn seg(p: &Value, key: &str, opts: &[(&str, &str)]) -> String {
 fn paint_appearance(st: &Rc<Look>) {
     let p = st.p.borrow().clone();
     let presets: String = appearance::PRESETS.iter().map(|x| {
-        let bg = match x.theme { "oled" => "#000", "light" => "#f6f6fb", "dark" => "#0b0b12", _ => "undefined" };
+        let bg = match x.theme { "encore" => "#161617", "oled" => "#000", "light" => "#f6f6fb", "dark" => "#0b0b12", _ => "undefined" };
         let (a, b) = match appearance::ACCENTS.iter().find(|a| a.id == x.accent) {
             Some(ac) => (ac.a, ac.b),
             None => { let c = x.custom.unwrap_or("undefined"); (c, c) }
@@ -1012,7 +1012,7 @@ fn paint_appearance(st: &Rc<Look>) {
       <div class="row"><button class="btn primary" type="button">{check}Example button</button><span class="badge accent">Example badge</span></div>
     </div>"##,
         saved = if st.server_prefs { "Saved to your account, so it follows you to every device." } else { "Saved on this device." },
-        theme = seg(&p, "theme", &[("dark", "Dark"), ("oled", "OLED black"), ("light", "Light"), ("system", "Match device")]),
+        theme = seg(&p, "theme", &[("encore", "Encore"), ("dark", "Dark"), ("oled", "OLED black"), ("light", "Light"), ("system", "Match device")]),
         in_use = if p.s("accent") == "custom" { r##"<span class="badge accent">in use</span>"## } else { "" },
         background = seg(&p, "background", &[("fade", "Faded colour"), ("solid", "Solid")]),
         check = icon("check")));
