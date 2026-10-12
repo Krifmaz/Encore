@@ -143,7 +143,7 @@ const SECTIONS: &[Section] = &[
         s("ytdlp_quality", "MP3/M4A quality", "text").help("Bitrate like 320, or 0 for best VBR"),
         s("ytdlp_cookies", "cookies.txt contents (optional)", "textarea").full().secret().help("Netscape cookie file from music.youtube.com. With a YouTube Music Premium account this unlocks 256 kbps audio. Export from a private window so the cookies don’t rotate."),
     ] },
-    Section { id: "spotify", title: "Integrations", desc: "API keys that let users connect their Spotify, Tidal, Last.fm, Discogs and YouTube Music accounts, and power recommendations.", test: Some("spotify"), test_label: Some("Test Spotify"), fields: &[
+    Section { id: "spotify", title: "Integrations", desc: "API keys that let users connect their Spotify, Tidal, Last.fm, Discogs and YouTube Music accounts, and power recommendations.", test: Some("spotify"), test_label: Some("Test all"), fields: &[
         s("spotify_client_id", "Spotify Client ID", "text").help("developer.spotify.com – add <Public URL>/api/connections/spotify/callback as redirect URI. Development-mode apps allow 5 users and need a Premium owner (2026 rules); without it, public playlists still import via the embed fallback."),
         s("spotify_client_secret", "Spotify Client secret", "password"),
         s("tidal_client_id", "Tidal Client ID", "text").help("Only for looking up Tidal albums/songs by ISRC and for the Tidal connection. Get one at developer.tidal.com → Dashboard → Create new app (any name), redirect URI <Public URL>/api/connections/tidal/callback, then copy the Client ID and Client secret here. Downloads from Tidal use your own account instead: Apps & sources → Qobuz / Tidal / Deezer (streamrip) → Sign in to Tidal."),

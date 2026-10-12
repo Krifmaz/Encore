@@ -115,13 +115,61 @@ async fn test(State(st): State<AppState>, Admin(u): Admin, Path(service): Path<S
                 msg(!done.is_empty(), if done.is_empty() { "No media servers configured".into() } else { format!("Refreshed {}", done.join(", ")) })
             }
             "spotify" => {
+                // every integration that has a key filled in, one line each
+                let mut parts = vec![];
+                let mut all_ok = true;
+                let mut say = |name: &str, r: Result<String, String>| match r {
+                    Ok(m) => parts.push(format!("{name} ✓ {m}").trim_end().to_string()),
+                    Err(e) => { all_ok = false; parts.push(format!("{name} ✗ {e}")); }
+                };
                 let (cid, sec) = (st.cfg.str("spotify_client_id"), st.cfg.str("spotify_client_secret"));
-                if cid.is_empty() || sec.is_empty() {
-                    return Ok(msg(false, "Enter both the Spotify Client ID and Client secret, then test again"));
+                if !cid.is_empty() || !sec.is_empty() {
+                    say("Spotify", if cid.is_empty() || sec.is_empty() { Err("needs both Client ID and secret".into()) } else {
+                        match st.http.post("https://accounts.spotify.com/api/token").basic_auth(&cid, Some(&sec)).form(&[("grant_type", "client_credentials")]).send().await {
+                            Ok(r) if r.status().is_success() => Ok(String::new()),
+                            Ok(r) => Err(format!("rejected ({})", r.status().as_u16())),
+                            Err(e) => Err(e.to_string()),
+                        }
+                    });
                 }
-                let ok = st.http.post("https://accounts.spotify.com/api/token").basic_auth(cid, Some(sec)).form(&[("grant_type", "client_credentials")])
-                    .send().await.map(|r| r.status().is_success()).unwrap_or(false);
-                msg(ok, if ok { "Spotify credentials valid" } else { "Spotify rejected the Client ID/Secret" })
+                if !st.cfg.str("tidal_client_id").is_empty() || !st.cfg.str("tidal_client_secret").is_empty() {
+                    say("Tidal", streamrip::tidal_token(&st).await.map(|_| String::new()).map_err(|e| e.to_string().replace("Tidal needs a ", "needs a ")));
+                }
+                let (lk, ls) = (st.cfg.str("lastfm_api_key"), st.cfg.str("lastfm_shared_secret"));
+                if !lk.is_empty() || !ls.is_empty() {
+                    say("Last.fm", if lk.is_empty() { Err("API key missing".into()) } else if ls.is_empty() {
+                        match st.http.get("https://ws.audioscrobbler.com/2.0/").query(&[("method", "artist.getinfo"), ("artist", "Cher"), ("api_key", lk.as_str()), ("format", "json")]).send().await {
+                            Ok(r) => { let d: Value = r.json().await.unwrap_or(Value::Null); if d["error"].is_null() { Ok("key (add the shared secret for scrobbling)".into()) } else { Err(d["message"].as_str().unwrap_or("rejected").to_string()) } }
+                            Err(e) => Err(e.to_string()),
+                        }
+                    } else {
+                        // a signed call proves the secret too
+                        crate::scrobble::lastfm_signed(&st, "auth.getToken", vec![]).await.map(|_| "key + secret".to_string()).map_err(|e| e.to_string().replace("Last.fm: ", ""))
+                    });
+                }
+                let dt = st.cfg.str("discogs_token");
+                if !dt.is_empty() {
+                    say("Discogs", match st.http.get("https://api.discogs.com/oauth/identity").header("Authorization", format!("Discogs token={dt}")).header("User-Agent", "Encore/2 (+https://github.com/Krifmaz/Encore)").send().await {
+                        Ok(r) if r.status().is_success() => { let d: Value = r.json().await.unwrap_or(Value::Null); Ok(format!("as {}", d["username"].as_str().unwrap_or("?"))) }
+                        Ok(r) if r.status().as_u16() == 401 => Err("token rejected – use Generate new token on discogs.com/settings/developers".into()),
+                        Ok(r) => Err(format!("Discogs returned {}", r.status().as_u16())),
+                        Err(e) => Err(e.to_string()),
+                    });
+                }
+                let (yc, ys) = (st.cfg.str("ytmusic_client_id"), st.cfg.str("ytmusic_client_secret"));
+                if !yc.is_empty() || !ys.is_empty() {
+                    say("YouTube Music", if yc.is_empty() || ys.is_empty() { Err("needs both the OAuth Client ID and secret".into()) } else {
+                        match st.http.post("https://oauth2.googleapis.com/device/code").form(&[("client_id", yc.as_str()), ("scope", "https://www.googleapis.com/auth/youtube")]).send().await {
+                            Ok(r) if r.status().is_success() => Ok("client ID (the secret is checked when a user signs in)".into()),
+                            Ok(r) => { let d: Value = r.json().await.unwrap_or(Value::Null); Err(format!("{} – is the client of type “TVs and Limited Input devices”?", d["error"].as_str().unwrap_or("rejected"))) }
+                            Err(e) => Err(e.to_string()),
+                        }
+                    });
+                }
+                if parts.is_empty() {
+                    return Ok(msg(false, "Nothing to test yet – fill in at least one integration's keys, save, then test"));
+                }
+                msg(all_ok, parts.join(" · "))
             }
             "ytdlp" | "youtube" => ytdlp::test_cookies(&st).await?,
             "tidal" => {

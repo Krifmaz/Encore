@@ -203,9 +203,9 @@ async fn lastfm_for_you(st: &AppState, user: &str, uid: i64) -> anyhow::Result<V
                 e.0 += m * weight;
             }
         }
-        let mut ranked: Vec<(f64, Value)> = score.into_values().collect();
-        // artists you don't have yet first
-        ranked.sort_by(|a, b| (a.1["in_library"].as_bool(), -a.0).partial_cmp(&(b.1["in_library"].as_bool(), -b.0)).unwrap_or(std::cmp::Ordering::Equal));
+        // discovery only: artists you already have are not recommendations
+        let mut ranked: Vec<(f64, Value)> = score.into_values().filter(|x| x.1["in_library"] != json!(true)).collect();
+        ranked.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
         let artists = with_pictures(st, ranked.into_iter().take(18).map(|x| x.1).collect()).await;
 
         // albums: the best-known album of each recommended artist you don't have yet
@@ -221,7 +221,9 @@ async fn lastfm_for_you(st: &AppState, user: &str, uid: i64) -> anyhow::Result<V
                 let (title, artist) = (st_(&al["name"]), st_(&al["artist"]["name"]));
                 let cover = al["image"].as_array().and_then(|i| i.iter().rev().find_map(|x| x["#text"].as_str().filter(|u| !u.is_empty()).map(String::from)));
                 let owned = st.db.one("SELECT 1 x FROM tracks WHERE lower(albumartist)=lower(?) AND lower(album)=lower(?) LIMIT 1", p![artist, title]).ok().flatten().is_some();
-                albums.push(json!({ "title": title, "artist": artist, "cover": cover, "in_library": owned }));
+                if !owned {
+                    albums.push(json!({ "title": title, "artist": artist, "cover": cover, "in_library": false }));
+                }
             }
         }
 
@@ -258,6 +260,10 @@ async fn lastfm_for_you(st: &AppState, user: &str, uid: i64) -> anyhow::Result<V
                     if title.is_empty() || !have.insert(format!("{}|{}", norm(&artist), norm(&title))) {
                         continue;
                     }
+                    // discovery only: skip what the library already has
+                    if st.db.one("SELECT 1 x FROM tracks WHERE lower(artist)=lower(?) AND lower(title)=lower(?) LIMIT 1", p![artist, title]).ok().flatten().is_some() {
+                        continue;
+                    }
                     tracks.push(json!({ "title": title, "artist": artist, "album": "", "mbid": t["mbid"].as_str().filter(|s| !s.is_empty()),
                         "length": t["duration"].as_f64().filter(|d| *d > 0.0) }));
                 }
@@ -279,13 +285,16 @@ async fn for_you(State(st): State<AppState>, User(u): User) -> ApiResult<Json<Va
     if let Some(name) = &lb {
         match lb_playlists(&st, name).await {
             Ok(mut pls) => {
-                let order = |k: &str| match k { "weekly-exploration" => 0, "daily-jams" => 1, "weekly-jams" => 2, _ => 9 };
-                pls.sort_by_key(|p| order(p["kind"].as_str().unwrap_or("")));
+                // For you is discovery: the Jams lists are songs you already love, so they stay on ListenBrainz
+                pls.retain(|p| !matches!(p["kind"].as_str().unwrap_or(""), "daily-jams" | "weekly-jams"));
                 let results = futures_util::future::join_all(pls.iter().map(|p| lb_playlist_tracks(&st, p["id"].as_str().unwrap_or("")))).await;
                 for (mut p, tr) in pls.into_iter().zip(results) {
                     if let Ok(tr) = tr {
-                        p["tracks"] = json!(annotate_tracks(&st, tr));
-                        out.push(p);
+                        let tr: Vec<Value> = annotate_tracks(&st, tr).into_iter().filter(|t| t["library"].is_null()).collect();
+                        if !tr.is_empty() {
+                            p["tracks"] = json!(tr);
+                            out.push(p);
+                        }
                     }
                 }
             }
@@ -297,7 +306,7 @@ async fn for_you(State(st): State<AppState>, User(u): User) -> ApiResult<Json<Va
         match lastfm_for_you(&st, name, u.i("id")).await {
             Ok(mut v) => {
                 let tr: Vec<Value> = v["tracks"].as_array().cloned().unwrap_or_default();
-                v["tracks"] = json!(annotate_tracks(&st, tr));
+                v["tracks"] = json!(annotate_tracks(&st, tr).into_iter().filter(|t| t["library"].is_null()).collect::<Vec<_>>());
                 lastfm = v;
             }
             Err(e) => errors.push(format!("Last.fm: {e}")),

@@ -222,7 +222,7 @@ pub fn render(view: Element, ctx: Ctx) -> PageFuture {
         let mut playlists = d.a("playlists");
         if playlists.is_empty() && !truthy(&lf) {
             set_html(&body, &format!(r#"<div class="card">{}</div>"#, empty_state(&icon("spark"), "No recommendations yet",
-                &format!("ListenBrainz builds Weekly Exploration and Daily Jams once {} has a few weeks of listens. Check that your players scrobble to ListenBrainz.", esc(&d.s("user"))))));
+                &format!("ListenBrainz builds Weekly Exploration once {} has a few weeks of listens. Check that your players scrobble to ListenBrainz.", esc(&d.s("user"))))));
             return Ok(());
         }
         // Last.fm: shown as one more list of songs, plus artists you might like

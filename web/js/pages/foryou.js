@@ -97,7 +97,7 @@ export async function render(view, ctx) {
   }
   const lf = d.lastfm;
   if (!d.playlists.length && !lf) {
-    body.innerHTML = `<div class="card">${emptyState(icon.spark, 'No recommendations yet', `ListenBrainz builds Weekly Exploration and Daily Jams once ${esc(d.user)} has a few weeks of listens. Check that your players scrobble to ListenBrainz.`)}</div>`;
+    body.innerHTML = `<div class="card">${emptyState(icon.spark, 'No recommendations yet', `ListenBrainz builds Weekly Exploration once ${esc(d.user)} has a few weeks of listens. Check that your players scrobble to ListenBrainz.`)}</div>`;
     return;
   }
   // Last.fm: shown as one more list of songs, plus artists you might like
