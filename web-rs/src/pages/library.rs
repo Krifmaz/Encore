@@ -14,7 +14,6 @@ use serde_json::{Map, Value};
 use std::cell::{Cell, RefCell};
 use std::collections::HashSet;
 use std::rc::Rc;
-use wasm_bindgen::{JsCast, JsValue};
 use web_sys::Element;
 
 const PAGE: usize = 120;
@@ -64,15 +63,6 @@ fn shuffled(tracks: &[Value]) -> Vec<Value> {
 }
 /// `Math.round(x * 100)`.
 fn round_pct(x: f64) -> i64 { js_sys::Math::round(x * 100.0) as i64 }
-/// `e.message` of a thrown JS value.
-fn js_err_msg(v: &JsValue) -> String {
-    v.dyn_ref::<js_sys::Error>().map(|e| String::from(e.message())).unwrap_or_else(|| v.as_string().unwrap_or_default())
-}
-/// `navigator.share` when the browser has it.
-fn navigator_share() -> Option<js_sys::Function> {
-    let nav: JsValue = dom::window().navigator().into();
-    js_sys::Reflect::get(&nav, &"share".into()).ok().and_then(|f| f.dyn_into::<js_sys::Function>().ok())
-}
 /// `[...root.querySelectorAll('input')]` → `{ [name]: value.trim() }`.
 fn input_values(root: &Element, sel: &str) -> Map<String, Value> {
     let mut m = Map::new();
@@ -98,7 +88,9 @@ fn source_line(t: &Value) -> String {
     let link = if t.truthy("source_url") {
         format!(r##" · <a href="{}" target="_blank" rel="noopener noreferrer" style="color:var(--accent)">link</a>"##, esck(t, "source_url"))
     } else { String::new() };
-    let who = if t.truthy("requested_by") { format!(" · requested by {}", esck(t, "requested_by")) } else { String::new() };
+    let who = if t.truthy("requested_by") {
+        format!(" · requested by {}{}", esck(t, "requested_by"), if t.truthy("requested_at") { format!(" on {}", ui::fmt::day(t.f("requested_at"))) } else { String::new() })
+    } else { String::new() };
     format!(r##"<div class="small faint ellipsis" style="max-width:520px" title="{}">⬇ {}{}{link}{when}{who}</div>"##,
         esc(&join_truthy(t, &["source", "source_detail"], " – ")), esck(t, "source"),
         if t.truthy("source_detail") { format!(" · {}", esck(t, "source_detail")) } else { String::new() })
@@ -118,7 +110,7 @@ pub fn track_menu(anchor: &Element, t: &Value, admin: bool, on_deleted: Option<R
     { let t = t.clone(); items.push(MenuItem::new("Add to playlist", &icon("plus"), move || playlists::add_to_playlist_modal(vec![t.i("id")]))); }
     { let t = t.clone(); items.push(MenuItem::new("More like this", &icon("spark"), move || foryou::more_like_this(&t.s("artist"), &t.s("title"), &t.s("mb_trackid")))); }
     { let t = t.clone(); items.push(MenuItem::new("Lyrics", &icon("music"), move || lyrics::lyrics_modal(&t))); }
-    { let t = t.clone(); items.push(MenuItem::new("Share link", &icon("external"), move || dom::spawn(share_link(t.clone())))); }
+    { let t = t.clone(); items.push(MenuItem::new("Share link", &icon("external"), move || dom::spawn(ui::share_track((*t).clone())))); }
     items.push(MenuItem::link("Download this song", &icon("download"), &format!("/api/library/tracks/{}/file", t.s("id")), true));
     if player::can_save_offline() {
         let t = t.clone();
@@ -164,35 +156,6 @@ pub fn track_menu(anchor: &Element, t: &Value, admin: bool, on_deleted: Option<R
         }));
     }
     pop_menu(anchor, items);
-}
-
-/// The "Share link" entry: a share URL from the server, the native share sheet when there is one, else the clipboard.
-async fn share_link(t: Rc<Value>) {
-    match api::post_empty(&format!("/library/tracks/{}/share", t.s("id"))).await {
-        Ok(r) => {
-            let href = dom::location().href().unwrap_or_default();
-            let url = match web_sys::Url::new_with_base(&r.s("path"), &href) {
-                Ok(u) => u.href(),
-                Err(e) => { toast(&js_err_msg(&e), "err"); return; }
-            };
-            if let Some(share) = navigator_share() {
-                let data = js_sys::Object::new();
-                let _ = js_sys::Reflect::set(&data, &"title".into(), &t.s("title").into());
-                let _ = js_sys::Reflect::set(&data, &"text".into(), &format!("{} – {}", t.s("title"), t.s("artist")).into());
-                let _ = js_sys::Reflect::set(&data, &"url".into(), &url.as_str().into());
-                let nav: JsValue = dom::window().navigator().into();
-                if let Ok(p) = share.call1(&nav, &data) {
-                    if let Ok(p) = p.dyn_into::<js_sys::Promise>() {
-                        if wasm_bindgen_futures::JsFuture::from(p).await.is_ok() { return; }
-                    }
-                }
-                // cancelled → copy
-            }
-            ui::copy_text(&url);
-            toast("Link copied – anyone with it can play this song", "ok");
-        }
-        Err(e) => toast(&e.message, "err"),
-    }
 }
 
 // ---- fixSongModal ----
@@ -798,6 +761,13 @@ pub fn render_album(view: Element, ctx: Ctx) -> PageFuture {
         let formats = formats.join(" / ");
         let untagged = tracks.iter().filter(|t| !t.truthy("mb_albumid")).count();
         let requesters = { let mut v: Vec<String> = vec![]; for t in &tracks { let w = t.s("requested_by"); if !w.is_empty() && !v.contains(&w) { v.push(w); } } v.join(", ") };
+        // `Math.min(...dates)` – infinity when there are none
+        let earliest = |key: &str| tracks.iter().filter(|t| t.truthy(key)).map(|t| t.f(key)).fold(f64::INFINITY, f64::min);
+        let (requested_at, added_at) = (earliest("requested_at"), earliest("added_at"));
+        let history = [
+            if requesters.is_empty() { String::new() } else { format!("Requested by {}{}", esc(&requesters), if requested_at.is_finite() { format!(" on {}", ui::fmt::day(requested_at)) } else { String::new() }) },
+            if added_at.is_finite() { format!("{} {}", if requesters.is_empty() { "Added" } else { "added" }, ui::fmt::day(added_at)) } else { String::new() },
+        ].into_iter().filter(|x| !x.is_empty()).collect::<Vec<_>>().join(" · ");
         let rows: String = tracks.iter().enumerate().map(|(i, t)| format!(r##"<tr data-i="{i}">
         <td class="num">{disc}{track}</td>
         <td><div style="font-weight:600">{title}</div>{relpath}{source}</td>
@@ -841,7 +811,7 @@ pub fn render_album(view: Element, ctx: Ctx) -> PageFuture {
             album = esc(&or_str(&a, "album", "Unknown album")), artist_enc = enc(&a.s("albumartist")), artist = esck(&a, "albumartist"),
             year = if a.truthy("year") { format!(" · {}", esck(&a, "year")) } else { String::new() },
             n = tracks.len(), dur = ui::fmt::long_dur(a.f("duration")), size = ui::fmt::size(a.f("size")),
-            requested = if requesters.is_empty() { String::new() } else { format!(r##"<div class="small muted" style="margin-top:4px">Requested by {}</div>"##, esc(&requesters)) },
+            requested = if history.is_empty() { String::new() } else { format!(r##"<div class="small muted" style="margin-top:4px">{history}</div>"##) },
             formats = esc(&formats),
             genre = if a.truthy("genre") { format!(r##"<span class="badge">{}</span>"##, esck(&a, "genre")) } else { String::new() },
             tagged = if untagged > 0 { format!(r##"<span class="badge warn">{untagged} track(s) not MusicBrainz-tagged</span>"##) } else { r##"<span class="badge ok">MusicBrainz tagged</span>"##.to_string() },

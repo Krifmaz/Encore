@@ -56,7 +56,7 @@ fi
 case "$(uname -s)" in
   Linux*)  OS=linux; BUNDLES=deb,appimage,rpm; ARGS=""
            pkg-config --exists webkit2gtk-4.1 2>/dev/null || echo "note: webkit2gtk-4.1 not found – on Debian/Ubuntu: sudo apt install libwebkit2gtk-4.1-dev libgtk-3-dev libayatana-appindicator3-dev librsvg2-dev patchelf" ;;
-  Darwin*) OS=mac; BUNDLES=dmg; ARGS="--target universal-apple-darwin"
+  Darwin*) OS=mac; BUNDLES=app; ARGS="--target universal-apple-darwin"
            run rustup target add aarch64-apple-darwin x86_64-apple-darwin ;;
   *)       OS=windows; BUNDLES=nsis; ARGS="" ;;
 esac
@@ -69,6 +69,13 @@ if [ "$DESKTOP" = 1 ]; then
   echo "== desktop ($OS)"
   # shellcheck disable=SC2086
   (cd clients/app && run cargo tauri build --ci --bundles "$BUNDLES" $ARGS --config "{\"version\":\"$SEMVER\"}")
+  if [ "$OS" = mac ]; then
+    # a plain hdiutil image of the .app (Tauri's own dmg step needs a Finder session)
+    APP=$(find clients/app/target -path '*/release/bundle/macos/*.app' -maxdepth 6 -type d | head -1)
+    STAGE=$(mktemp -d); cp -R "$APP" "$STAGE/"; ln -s /Applications "$STAGE/Applications"
+    mkdir -p "$(dirname "$APP")/../dmg"
+    run hdiutil create -volname "Encore" -srcfolder "$STAGE" -ov -format UDZO "$(dirname "$APP")/../dmg/Encore_${SEMVER}_universal.dmg"
+  fi
   { find clients/app/target -path '*/release/bundle/*' -type f \( -name '*.AppImage' -o -name '*.deb' -o -name '*.rpm' -o -name '*-setup.exe' -o -name '*.dmg' \) -print 2>/dev/null || true; } | while read -r f; do
     case "$f" in
       *.AppImage) cp "$f" "out/Encore-$V-linux-x86_64.AppImage" ;;

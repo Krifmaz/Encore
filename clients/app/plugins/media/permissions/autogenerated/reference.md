@@ -62,6 +62,32 @@ Denies the now_playing command without any pre-configured scope.
 <tr>
 <td>
 
+`encore-media:allow-set-server`
+
+</td>
+<td>
+
+Enables the set_server command without any pre-configured scope.
+
+</td>
+</tr>
+
+<tr>
+<td>
+
+`encore-media:deny-set-server`
+
+</td>
+<td>
+
+Denies the set_server command without any pre-configured scope.
+
+</td>
+</tr>
+
+<tr>
+<td>
+
 `encore-media:allow-take-share`
 
 </td>

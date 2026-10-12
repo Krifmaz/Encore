@@ -1,5 +1,6 @@
 //! Android side of the Encore app: a small Kotlin plugin (android/) that shows the media notification with
-//! lock-screen controls while music plays, receives "Share → Encore" links and saves webview downloads.
+//! lock-screen controls while music plays, receives "Share → Encore" links, saves webview downloads and hosts
+//! the Android Auto car service (CarService: the library as a browse tree, played natively).
 //! On other platforms this plugin does nothing.
 
 use serde::{Deserialize, Serialize};
@@ -49,6 +50,11 @@ impl<R: Runtime> Media<R> {
     /// The webview's cookies for `url` (the Encore session), as a Cookie header value.
     pub fn cookie(&self, url: &str) -> String {
         self.0.run_mobile_plugin::<CookieResponse>("cookie", UrlArgs { url }).map(|r| r.cookie).unwrap_or_default()
+    }
+
+    /// Tell the car service (Android Auto) which server to play from.
+    pub fn set_server(&self, url: &str) {
+        let _ = self.0.run_mobile_plugin::<()>("setServer", UrlArgs { url });
     }
 }
 

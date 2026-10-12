@@ -9,6 +9,7 @@ pub mod appearance;
 pub mod dom;
 pub mod json;
 pub mod pages;
+pub mod playback;
 pub mod player;
 pub mod remote;
 pub mod ui;

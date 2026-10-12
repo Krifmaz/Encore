@@ -24,3 +24,11 @@ pub fn deliver_share<R: Runtime>(app: &AppHandle<R>) {
         let _ = w.eval(js);
     }
 }
+
+/// The car service (Android Auto) plays from the server the app is connected to.
+pub fn remember_server<R: Runtime>(app: &AppHandle<R>, base: &str) {
+    if base.is_empty() { return; }
+    if let Some(m) = app.try_state::<Media<R>>() {
+        m.set_server(base);
+    }
+}

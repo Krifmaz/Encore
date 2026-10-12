@@ -1,5 +1,7 @@
 // Use any signed-in device as a remote for the others (Encore 2): every open app checks in every couple of
-// seconds with what it's playing and runs the commands other devices sent it.
+// seconds with what it's playing and runs the commands other devices sent it. With the server's event stream
+// open, commands and the other devices' state arrive the moment they change instead of at the next check-in,
+// and this device checks in right away whenever its own playback changes – so a remote feels instant.
 import { api } from './api.js';
 import * as player from './player.js';
 import { art, esc, fmt, icon, modal, toast } from './ui.js';
@@ -28,6 +30,12 @@ function deviceName() {
 
 const ME = deviceId();
 const CHAIN = 'encore.link';
+let devices = [];          // the other devices, as the server last told us (pushed, or fetched)
+let onDevices = null;      // the open Devices window repaints through this
+const seen = [];           // commands already run (each one can arrive pushed and again on the next check-in)
+let es = null;             // the server's event stream
+let beatTimer = null;
+let missed = 0;
 
 // Linked: this device is locked as a remote for another one until you unlink.
 function savedLink() { try { return JSON.parse(localStorage.getItem(CHAIN) || 'null'); } catch { return null; } }
@@ -44,24 +52,60 @@ export function unlink() {
   try { localStorage.removeItem(CHAIN); } catch { /* ignore */ }
   player.setLink(null);
   toast('Unlinked – music plays on this device again', 'ok');
+  beat();
 }
 
-let missed = 0;
+/** Run a command another device sent us – once, however many ways it arrived. */
+function runCommand(c) {
+  if (!c) return;
+  if (c.seq != null) {
+    if (seen.includes(c.seq)) return;
+    seen.push(c.seq);
+    if (seen.length > 200) seen.splice(0, 100);
+  }
+  if (c.action === 'play_queue' && c.from) toast(`Music sent here from ${c.from}`, 'ok');
+  player.command(c);
+}
+
+/** The other devices changed (pushed by the server, or fetched). */
+function gotDevices(list) {
+  devices = (list || []).filter(d => d.id !== ME);
+  const link = player.linked();
+  if (link) {
+    const d = devices.find(x => x.id === link.id);
+    missed = d ? 0 : missed + 1;
+    if (d) player.linkState(d.state, true); else if (missed > 1) player.linkState(link.state, false);
+  }
+  onDevices?.();
+}
+
 async function beat() {
   const link = player.linked();
   try {
     const state = link ? { playing: false, remote_of: link.id } : player.snapshot();
     const r = await api.post('/remote/heartbeat', { id: ME, name: deviceName(), state });
-    for (const c of r.commands || []) {
-      if (c.action === 'play_queue' && c.from) toast(`Music sent here from ${c.from}`, 'ok');
-      player.command(c);
-    }
-    if (link) {
-      const d = (await api.get('/remote/devices')).find(x => x.id === link.id);
-      missed = d ? 0 : missed + 1;
-      if (d) player.linkState(d.state, true); else if (missed > 1) player.linkState(link.state, false);
-    }
+    for (const c of r.commands || []) runCommand(c);
+    // with the event stream open the server pushes the others' state; linked, we still ask so a device that went quiet shows as offline
+    if (link || !streaming()) gotDevices(await api.get('/remote/devices'));
   } catch { /* offline – try again next time */ }
+}
+/** Check in right away (debounced): something about this device's playback just changed. */
+function beatSoon() {
+  clearTimeout(beatTimer);
+  beatTimer = setTimeout(beat, 150);
+}
+
+const streaming = () => !!es && es.readyState === 1;
+/** Open the server's event stream: our commands as they are sent, every other device's state as it changes. */
+function connect() {
+  if (es || typeof EventSource === 'undefined') return;
+  es = new EventSource(`/api/remote/events?device=${encodeURIComponent(ME)}`);
+  es.addEventListener('command', (e) => { try { runCommand(JSON.parse(e.data).command); } catch { /* ignore */ } });
+  es.addEventListener('devices', (e) => { try { gotDevices(JSON.parse(e.data).devices); } catch { /* ignore */ } });
+  es.onerror = () => {
+    // the browser reconnects on its own; when it gives up (signed out, server gone) try again later – the heartbeat covers the gap
+    if (es?.readyState === 2) { es = null; setTimeout(connect, 30000); }
+  };
 }
 
 export function start(session) {
@@ -70,6 +114,8 @@ export function start(session) {
   window.encoreRemote = { open, unlink };
   const l = savedLink();
   if (l) player.setLink({ ...l, state: {}, online: true, send: (c) => sendTo(l.id, c).catch(e => toast(e.message, 'err')) });
+  connect();
+  player.onChange(beatSoon);
   const loop = () => {
     const busy = player.linked() || player.snapshot().playing;
     beat().finally(() => setTimeout(loop, document.hidden && !busy ? 6000 : 2000));
@@ -84,14 +130,14 @@ export function open() {
   const list = m.el.querySelector('#dev-list');
   const meBox = m.el.querySelector('#dev-me');
   const send = async (id, body) => {
-    try { await sendTo(id, body); setTimeout(refresh, 400); } catch (e) { toast(e.message, 'err'); }
+    try { await sendTo(id, body); if (!streaming()) setTimeout(refresh, 400); } catch (e) { toast(e.message, 'err'); }
   };
   const paintMe = () => {
     const l = player.linked();
     meBox.innerHTML = `<div class="row wrap between" style="gap:8px"><div class="small muted">This device: <b style="color:var(--text)">${esc(deviceName())}</b> <a href="#" id="dev-rename" class="small">rename</a></div>
       ${l ? `<button class="btn sm" id="dev-unlink">${icon.link}Unlink from ${esc(l.name)}</button>` : ''}</div>
       ${l ? `<div class="small muted">🔗 Linked: everything you play here goes to <b>${esc(l.name)}</b>. Unlink to listen on this device.</div>` : ''}`;
-    meBox.querySelector('#dev-unlink')?.addEventListener('click', () => { unlink(); paintMe(); refresh(); });
+    meBox.querySelector('#dev-unlink')?.addEventListener('click', () => { unlink(); paintMe(); paint(); });
     meBox.querySelector('#dev-rename').onclick = (e) => {
       e.preventDefault();
       const n = prompt('Name this device (shown on your other devices)', deviceName());
@@ -100,11 +146,9 @@ export function open() {
       paintMe(); beat();
     };
   };
-  let devices = [];
   const byId = (id) => devices.find(d => d.id === id);
-  const refresh = async () => {
-    if (!list.isConnected) return clearInterval(timer);
-    try { devices = (await api.get('/remote/devices')).filter(d => d.id !== ME); } catch { devices = []; }
+  const paint = () => {
+    if (!list.isConnected) { clearInterval(timer); onDevices = null; return; }
     if (!devices.length) {
       list.innerHTML = `<p class="muted" style="margin:0">No other devices right now. Open Encore on your phone, computer or the apps (signed in as you) and they show up here.</p>`;
       return;
@@ -118,7 +162,7 @@ export function open() {
         : s.title ? `<div class="row" style="gap:12px">
           <div class="thumb" style="width:52px;height:52px">${art(s.cover, s.album || s.title)}</div>
           <div class="grow"><div class="ellipsis" style="font-weight:650">${esc(s.title)}</div><div class="small muted ellipsis">${esc(s.artist || '')}${s.album ? ' · ' + esc(s.album) : ''}</div>
-            <div class="small faint">${s.playing ? 'Playing' : 'Paused'} · ${fmt.dur(s.position || 0)} / ${fmt.dur(s.duration || 0)}</div></div></div>`
+            <div class="small faint">${s.playing ? 'Playing' : 'Paused'} · ${fmt.dur(s.position || 0)} / ${fmt.dur(s.duration || 0)}${s.signal?.label ? ' · ' + esc(s.signal.label) : ''}</div></div></div>`
         : '<div class="small muted">Nothing playing</div>';
       return `<div class="card stack ${isLinked ? 'linked' : ''}" data-id="${esc(d.id)}" style="gap:10px">
         <div class="row between"><b>${icon.devices.replace('<svg', '<svg width="16" style="vertical-align:-3px;margin-right:6px"')}${esc(d.name)}</b>
@@ -135,14 +179,18 @@ export function open() {
         </div>`}</div>`;
     }).join('');
   };
+  const refresh = async () => {
+    if (!list.isConnected) { clearInterval(timer); onDevices = null; return; }
+    try { gotDevices(await api.get('/remote/devices')); } catch { devices = []; paint(); }
+  };
   list.addEventListener('click', (e) => {
     const b = e.target.closest('[data-a]');
     if (!b) return;
     const d = byId(b.closest('[data-id]').dataset.id);
     if (!d) return;
     const a = b.dataset.a;
-    if (a === 'link') { linkTo(d); paintMe(); return refresh(); }
-    if (a === 'unlink') { unlink(); paintMe(); return refresh(); }
+    if (a === 'link') { linkTo(d); paintMe(); return paint(); }
+    if (a === 'unlink') { unlink(); paintMe(); return paint(); }
     if (a === 'here') {
       const s = d.state || {};
       if (!s.queue?.length) return;
@@ -166,7 +214,9 @@ export function open() {
     const v = e.target.closest('[data-vol]');
     if (v) send(v.closest('[data-id]').dataset.id, { action: 'volume', value: Number(v.value) });
   });
+  onDevices = paint;
   paintMe();
   refresh();
-  timer = setInterval(refresh, 2000);
+  // pushed updates repaint the list; this is the fallback when the stream is down
+  timer = setInterval(() => { if (!streaming()) refresh(); }, 2000);
 }

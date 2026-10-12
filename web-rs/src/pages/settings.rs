@@ -421,6 +421,7 @@ fn embedded(id: &str) -> Option<app::PageFn> {
     Some(match id {
         "account" => account::render,
         "appearance" => render_appearance,
+        "playback" => render_playback,
         "connections" => connections::render,
         "users" => admin::render_users,
         "invites" => admin::render_invites,
@@ -717,7 +718,7 @@ pub fn render(view: Element, ctx: Ctx) -> PageFuture {
         let s = ctx.q("s");
         let mut current = if s.is_empty() { "account".to_string() } else { group_of(&s) };
         let mut nav: Vec<(&str, Vec<(&str, &str)>)> = vec![
-            ("You", vec![("account", "Account"), ("appearance", "Appearance"), ("connections", "Connections")]),
+            ("You", vec![("account", "Account"), ("appearance", "Appearance"), ("playback", "Playback"), ("connections", "Connections")]),
         ];
         if admin {
             nav.push(("People", vec![("users", "Users & permissions"), ("invites", "Invites")]));
@@ -773,10 +774,134 @@ pub async fn about_card() -> String {
         esc(&version), esc(server), esc(&build), esc(&{ let h = dom::hash(); if h.is_empty() { "#/".to_string() } else { h } }))
 }
 
+/// Settings → Playback: stream quality, buffering, what happens when the queue ends, and the engine switches of a linked Cadenza device.
+fn render_playback(el: Element, _ctx: Ctx) -> PageFuture {
+    Box::pin(async move {
+        let server_prefs = app::has_feature("theme");
+        let st = Rc::new(Look { el, p: RefCell::new(crate::playback::current()), server_prefs });
+        paint_playback(&st);
+        Ok(())
+    })
+}
+
+const QUALITY_HELP: [(&str, &str); 3] = [
+    ("auto", "The original file. When the connection can't keep up, the rest of the song and the next ten minutes come as the smaller stream, then the original is tried again."),
+    ("original", "Always the original file, even if it stutters on a slow connection. Formats a browser can't play are converted to FLAC (lossless)."),
+    ("saver", "Always the smaller stream – for mobile data and slow links."),
+];
+
+/// `seg()` of the JS renderPlayback: compares as strings, so the numeric kbps matches its button.
+fn seg_str(p: &Value, key: &str, opts: &[(&str, &str)]) -> String {
+    let cur = js_string(p.g(key));
+    format!(r##"<div class="seg" data-key="{key}">{}</div>"##,
+        opts.iter().map(|(v, l)| format!(r##"<button type="button" data-v="{v}" class="{}">{l}</button>"##, if cur == *v { "on" } else { "" })).collect::<String>())
+}
+
+/// A linked engine device describes its switches in its state: { name, bitperfect, filter, filters[], dither, dithers[], rate, rates[], output }
+fn engine_html(e: &Value) -> String {
+    let select = |key: &str, label: &str, list: &str, cur: &Value| -> String {
+        if !e.g(list).is_array() { return String::new(); }
+        let opts: String = e.a(list).iter().map(|o| {
+            let (v, l) = (o.items().first().cloned().unwrap_or(Value::Null), o.items().get(1).cloned().unwrap_or(Value::Null));
+            format!(r#"<option value="{}" {}>{}</option>"#, esc(&js_string(&v)), if js_string(&v) == js_string(cur) { "selected" } else { "" }, esc(&js_string(&l)))
+        }).collect();
+        format!(r#"<label class="stack" style="gap:4px"><span class="small muted">{label}</span><select class="input" data-eng="{key}" {}>{opts}</select></label>"#, if e.truthy("bitperfect") { "disabled" } else { "" })
+    };
+    format!(r#"<div class="stack" style="gap:8px">
+      <label class="row" style="gap:8px;align-items:center"><input type="checkbox" data-eng="bitperfect" {}> Bit-perfect – send the file to the DAC untouched (no upsampling, dither or volume)</label>
+      {}
+      {}
+      {}
+      {}
+    </div>"#,
+        if e.truthy("bitperfect") { "checked" } else { "" },
+        select("filter", "Upsampling filter", "filters", e.g("filter")),
+        select("dither", "Dither / noise shaping", "dithers", e.g("dither")),
+        select("rate", "Output rate", "rates", e.g("rate")),
+        if e.truthy("output") { format!(r#"<span class="small muted">Output: {}</span>"#, esc(&e.s("output"))) } else { String::new() })
+}
+
+fn paint_playback(st: &Rc<Look>) {
+    let p = st.p.borrow().clone();
+    let link = crate::player::linked();
+    let eng = link.as_ref().map(|l| l.state.g("engine").clone()).filter(|e| crate::json::truthy(e));
+    let help = QUALITY_HELP.iter().find(|(k, _)| *k == p.s("quality")).map(|(_, h)| *h).unwrap_or("undefined");
+    let engine_block = match (&eng, &link) {
+        (Some(e), Some(_)) => engine_html(e),
+        _ => format!(r#"<span class="small muted">{} A <b>Cadenza</b> device (Encore's open playback engine: exclusive-mode output, bit-perfect switch, upsampling filters, dither and noise shaping) shows its switches here once you link to it under <b>Your devices</b>.</span>"#,
+            match &link { Some(l) => format!("{} has no engine switches.", esc(&l.name)), None => "No engine device is linked.".to_string() }),
+    };
+    dom::set_html(&st.el, &format!(r##"<div class="card stack">
+      <h2>Playback</h2>
+      <p class="small muted" style="margin:0">{saved}</p>
+      <div class="stack" style="gap:6px"><h3>Quality</h3>{quality}
+        <span class="small muted">{help}</span></div>
+      <div class="stack" style="gap:6px"><h3>Smaller stream</h3>{kbps}
+        <span class="small muted">What Auto falls back to and what Data saver always uses. The server makes it from the original on the fly.</span></div>
+      <div class="stack" style="gap:6px"><h3>Buffering</h3>
+        <label class="row" style="gap:8px;align-items:center"><input type="checkbox" id="pb-preload" {preload}> Pre-load the next song while this one plays</label>
+        <span class="small muted">The next song is fetched once the current one is safely buffered, so it starts without a gap. Turn it off on a very slow connection to leave all the bandwidth to the song playing.</span></div>
+      <div class="stack" style="gap:6px"><h3>When the queue ends</h3>
+        <label class="row" style="gap:8px;align-items:center"><input type="checkbox" id="pb-autoplay" {autoplay}> Keep going with a shuffle of the whole library</label></div>
+      <div class="stack" style="gap:6px"><h3>Pure playback</h3>
+        <span class="small muted">Encore streams the original file untouched – the quality badge on the player opens the <b>Signal path</b>, which shows what the file is, what was sent and what this device does with it. A browser hands the sound to the operating system, which mixes it with other sounds and may resample it; bit-perfect output needs an exclusive-mode engine.</span></div>
+      <div class="stack" style="gap:6px"><h3>Engine{eng_name}</h3>
+        {engine_block}</div>
+    </div>"##,
+        saved = if st.server_prefs { "Saved to your account, so it follows you to every device." } else { "Saved on this device." },
+        quality = seg_str(&p, "quality", &[("auto", "Auto"), ("original", "Original"), ("saver", "Data saver")]),
+        kbps = seg_str(&p, "kbps", &[("96", "AAC 96 kbps"), ("160", "AAC 160 kbps"), ("256", "AAC 256 kbps")]),
+        preload = if p.truthy("preload") { "checked" } else { "" },
+        autoplay = if p.truthy("autoplay") { "checked" } else { "" },
+        eng_name = match (&eng, &link) { (Some(e), Some(l)) => format!(" · {}", esc(&if e.truthy("name") { e.s("name") } else { l.name.clone() })), _ => String::new() }));
+    {
+        let st2 = st.clone();
+        dom::on_each(&st.el, ".seg[data-key] button", "click", move |b, _| {
+            let Some(sg) = dom::closest_of(b, ".seg") else { return };
+            set_playback(&st2, json!({ dom::data(&sg, "key"): dom::data(b, "v") }));
+        });
+    }
+    if let Some(c) = dom::qs_in(&st.el, "#pb-preload") {
+        let (st2, c2) = (st.clone(), c.clone());
+        dom::on(&c, "change", move |_| set_playback(&st2, json!({ "preload": dom::checked(&c2) })));
+    }
+    if let Some(c) = dom::qs_in(&st.el, "#pb-autoplay") {
+        let (st2, c2) = (st.clone(), c.clone());
+        dom::on(&c, "change", move |_| set_playback(&st2, json!({ "autoplay": dom::checked(&c2) })));
+    }
+    if let Some(l) = link {
+        let l = Rc::new(l);
+        dom::on_each(&st.el, "[data-eng]", "change", move |c, _| {
+            let is_check = c.get_attribute("type").as_deref() == Some("checkbox");
+            let v = if is_check { json!(dom::checked(c)) } else { json!(dom::value(c)) };
+            (l.send)(json!({ "action": "engine", "set": { dom::data(c, "eng"): v } }));
+            toast(&format!("Sent to {}", l.name), "ok");
+        });
+    }
+}
+
+fn set_playback(st: &Rc<Look>, patch: Value) {
+    let p = {
+        let mut cur = st.p.borrow_mut();
+        if let (Some(dst), Some(src)) = (cur.as_object_mut(), patch.as_object()) {
+            for (k, v) in src { dst.insert(k.clone(), v.clone()); }
+        }
+        cur.clone()
+    };
+    let server_prefs = st.server_prefs;
+    let st2 = st.clone();
+    dom::spawn(async move {
+        let c = crate::playback::save(&p, server_prefs).await;
+        *st2.p.borrow_mut() = c;
+        paint_playback(&st2);
+    });
+    paint_playback(st);
+}
+
 /// The state of the JS `renderAppearance` closure: the panel, `p` and `serverPrefs`.
 struct Look { el: Element, p: RefCell<Value>, server_prefs: bool }
 
-/// Settings → Appearance: theme, accent colour, faded/solid background, content width.
+/// Settings → Appearance: theme, accent colour, faded/solid background.
 fn render_appearance(el: Element, _ctx: Ctx) -> PageFuture {
     Box::pin(async move {
         let server_prefs = app::has_feature("theme");
@@ -818,15 +943,12 @@ fn paint_appearance(st: &Rc<Look>) {
           <input class="input" id="custom-hex" value="{custom}" maxlength="7" spellcheck="false" aria-label="Hex colour">
           {in_use}</div></div>
       <div class="stack" style="gap:6px"><h3>Background</h3>{background}</div>
-      <div class="stack" style="gap:6px"><h3>Width</h3>{width}
-        <span class="small muted">Comfortable keeps pages from stretching across very wide screens.</span></div>
       <div class="row"><button class="btn primary" type="button">{check}Example button</button><span class="badge accent">Example badge</span></div>
     </div>"##,
         saved = if st.server_prefs { "Saved to your account, so it follows you to every device." } else { "Saved on this device." },
         theme = seg(&p, "theme", &[("dark", "Dark"), ("oled", "OLED black"), ("light", "Light"), ("system", "Match device")]),
         in_use = if p.s("accent") == "custom" { r##"<span class="badge accent">in use</span>"## } else { "" },
         background = seg(&p, "background", &[("fade", "Faded colour"), ("solid", "Solid")]),
-        width = seg(&p, "width", &[("comfortable", "Comfortable"), ("wide", "Full width")]),
         check = icon("check")));
     {
         let st2 = st.clone();

@@ -13,7 +13,7 @@
   --accent-2-rgb: 236, 72, 153;
   --on-accent: #fff;
   --grad: linear-gradient(135deg, var(--accent), var(--accent-2));
-  --content: 1180px;
+  --content: min(100%, max(1180px, 68vw));   /* sizes to the screen: full width on phones, ~1180px on laptops, wider on big monitors */
   --ok: #22c55e;
   --warn: #f59e0b;
   --err: #ef4444;
@@ -120,9 +120,8 @@ img.avatar { object-fit: cover; background: var(--panel-2); }
 .custom-colour input.input { width: 110px; font-family: ui-monospace, monospace; }
 .seg button.on { background: var(--panel-2); color: var(--text); font-weight: 650; }
 .main { min-width: 0; overflow-x: clip; padding: 26px 32px calc(var(--player) + 40px); }
-/* content stays a comfortable width on big screens (Settings → Appearance → Width) */
+/* content sizes to the screen (see --content) */
 .main > #view { max-width: var(--content); margin-left: auto; margin-right: auto; }
-:root[data-width="wide"] { --content: none; }
 /* faded background: a soft wash of the accent colour */
 :root[data-bg="fade"] body {
   background: radial-gradient(1100px 560px at 12% -8%, rgba(var(--accent-rgb), .16), transparent 62%),
@@ -330,6 +329,9 @@ body.has-player { --player: var(--player-h); }
 .player .seek span { min-width: 34px; text-align: center; font-variant-numeric: tabular-nums; }
 .player .right { display: flex; justify-content: flex-end; align-items: center; gap: 8px; min-width: 0; }
 .player .right input { max-width: 100px; }
+.btn.like.on { color: var(--accent); }
+.btn.like.on svg { fill: currentColor; }
+button.badge { font: inherit; font-size: 11px; cursor: pointer; }
 .play-btn { width: 40px; height: 40px; border-radius: 50%; background: var(--text); color: var(--bg); border: 0; display: grid; place-items: center; cursor: pointer; flex: none; }
 .play-btn svg { width: 18px; height: 18px; }
 .tracklist tr.playing td { color: var(--accent); }
@@ -376,7 +378,8 @@ body.has-player { --player: var(--player-h); }
   .player .now { grid-column: 1; grid-row: 2; }
   .player .ctrls .row { grid-column: 2; grid-row: 2; }
   .player .right { grid-column: 3; grid-row: 2; }
-  .player .right input, .player .right .faint, .player .right .badge { display: none; }
+  /* phones: the bar keeps play, next, up next and ⋯ – like, share, devices and volume live in the full-screen player */
+  .player .right input, .player .right .faint, .player .right .badge, .player .right #p-close, .player .right #p-devices, .player .right .like, .player .right #p-unlink { display: none; }
   .player .ctrls .row .btn.icon#p-prev { display: none; }
 }
 @media (max-width: 900px) {
@@ -445,7 +448,13 @@ small.src a { color: var(--accent); }
 .np-full .np-backdrop { position: absolute; inset: -40px; background: var(--np-bg) center / cover no-repeat; filter: blur(60px) saturate(1.3); opacity: .35; pointer-events: none; }
 .np-full > *:not(.np-backdrop) { position: relative; }
 body.np-open { overflow: hidden; }
-.np-top { display: grid; grid-template-columns: 44px 1fr 44px; align-items: center; padding: 14px 18px; gap: 10px; }
+.np-top { display: grid; grid-template-columns: 44px 1fr auto; align-items: center; padding: 14px 18px; gap: 10px; }
+.np-device { gap: 6px; max-width: 46vw; }
+.np-device span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.np-device svg:last-child { width: 14px; height: 14px; }
+.np-actions { display: flex; align-items: center; justify-content: center; gap: 18px; }
+.np-gap { width: 36px; height: 36px; flex: none; }
+.np-quality { background: transparent; }
 .np-tabs { justify-self: center; }
 .np-body { flex: 1; min-height: 0; display: grid; grid-template-columns: minmax(0, 1.1fr) minmax(0, 1fr); gap: 32px; padding: 8px 40px 28px; }
 .np-main { display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 16px; min-height: 0; }
@@ -481,7 +490,7 @@ body.np-open { overflow: hidden; }
 .np-item:hover { background: color-mix(in srgb, var(--panel-2) 80%, transparent); }
 .np-item .thumb { width: 42px; height: 42px; }
 @media (max-width: 760px) {
-  .np-top { padding: 10px 10px; grid-template-columns: 40px 1fr 8px; }
+  .np-top { padding: 10px 10px; grid-template-columns: 40px 1fr auto; }
   .np-tabs button { padding: 6px 10px; font-size: 13px; }
   .np-body { display: block; padding: 6px 18px 18px; overflow-y: auto; }
   .np-body .np-main, .np-body .np-lyrics, .np-body .np-queue { display: none !important; }

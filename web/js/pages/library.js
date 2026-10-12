@@ -1,5 +1,5 @@
 import { api } from '../api.js';
-import { art, confirmDialog, copyText, debounce, emptyState, esc, fmt, icon, modal, popMenu, skeletonGrid, toast } from '../ui.js';
+import { art, confirmDialog, debounce, emptyState, esc, fmt, icon, modal, popMenu, shareTrack, skeletonGrid, toast } from '../ui.js';
 import { bindTiles, libraryTile } from './common.js';
 import { addToPlaylistModal } from './playlists.js';
 import * as player from '../player.js';
@@ -13,7 +13,7 @@ function sourceLine(t) {
   if (!t.source) return '';
   const when = t.downloaded_at ? ` · ${fmt.ago(t.downloaded_at)}` : '';
   const link = t.source_url ? ` · <a href="${esc(t.source_url)}" target="_blank" rel="noopener noreferrer" style="color:var(--accent)">link</a>` : '';
-  const who = t.requested_by ? ` · requested by ${esc(t.requested_by)}` : '';
+  const who = t.requested_by ? ` · requested by ${esc(t.requested_by)}${t.requested_at ? ' on ' + fmt.day(t.requested_at) : ''}` : '';
   return `<div class="small faint ellipsis" style="max-width:520px" title="${esc([t.source, t.source_detail].filter(Boolean).join(' – '))}">⬇ ${esc(t.source)}${t.source_detail ? ' · ' + esc(t.source_detail) : ''}${link}${when}${who}</div>`;
 }
 
@@ -27,15 +27,7 @@ export function trackMenu(anchor, t, { admin = false, onDeleted } = {}) {
     { label: 'Add to playlist', icon: icon.plus, onClick: () => addToPlaylistModal([t.id]) },
     { label: 'More like this', icon: icon.spark, onClick: async () => (await import('./foryou.js')).moreLikeThis(t.artist, t.title, t.mb_trackid) },
     { label: 'Lyrics', icon: icon.music, onClick: async () => (await import('./lyrics.js')).lyricsModal(t) },
-    { label: 'Share link', icon: icon.external, onClick: async () => {
-      try {
-        const r = await api.post(`/library/tracks/${t.id}/share`);
-        const url = new URL(r.path, location.href).href;
-        if (navigator.share) { try { await navigator.share({ title: t.title, text: `${t.title} – ${t.artist}`, url }); return; } catch { /* cancelled → copy */ } }
-        await copyText(url);
-        toast('Link copied – anyone with it can play this song', 'ok');
-      } catch (e) { toast(e.message, 'err'); }
-    } },
+    { label: 'Share link', icon: icon.external, onClick: () => shareTrack(t) },
     { label: 'Download this song', icon: icon.download, href: `/api/library/tracks/${t.id}/file`, download: true },
     player.canSaveOffline() ? { label: 'Save for offline', icon: icon.download, onClick: () => { player.saveOffline([t]); toast('Saving to this phone…', 'ok'); } } : null,
     t.album_id ? { label: 'Go to album', icon: icon.disc, href: `#/library/album/${t.album_id}` } : null,
@@ -371,6 +363,9 @@ export async function renderAlbum(view, ctx) {
   const formats = [...new Set(a.tracks.map(t => (t.format || '').toUpperCase()))].join(' / ');
   const untagged = a.tracks.filter(t => !t.mb_albumid).length;
   const requesters = [...new Set(a.tracks.map(t => t.requested_by).filter(Boolean))].join(', ');
+  const requestedAt = Math.min(...a.tracks.map(t => t.requested_at).filter(Boolean));
+  const addedAt = Math.min(...a.tracks.map(t => t.added_at).filter(Boolean));
+  const history = [requesters ? `Requested by ${esc(requesters)}${isFinite(requestedAt) ? ` on ${fmt.day(requestedAt)}` : ''}` : '', isFinite(addedAt) ? `${requesters ? 'added' : 'Added'} ${fmt.day(addedAt)}` : ''].filter(Boolean).join(' · ');
   view.innerHTML = `
     <div class="detail-head">
       <div class="cover">${art(`/api/library/albums/${id}/cover`, a.album, "big")}</div>
@@ -379,7 +374,7 @@ export async function renderAlbum(view, ctx) {
         <h1>${esc(a.album || 'Unknown album')}</h1>
         <div class="muted"><a href="#/artist-name/${encodeURIComponent(a.albumartist)}" style="color:var(--text);font-weight:650">${esc(a.albumartist)}</a>
           ${a.year ? ' · ' + esc(a.year) : ''} · ${a.tracks.length} tracks · ${fmt.longDur(a.duration)} · ${fmt.size(a.size)}</div>
-        ${requesters ? `<div class="small muted" style="margin-top:4px">Requested by ${esc(requesters)}</div>` : ''}
+        ${history ? `<div class="small muted" style="margin-top:4px">${history}</div>` : ''}
         <div class="chips mt">
           <span class="badge">${esc(formats)}</span>
           ${a.genre ? `<span class="badge">${esc(a.genre)}</span>` : ''}

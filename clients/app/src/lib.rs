@@ -64,6 +64,8 @@ pub fn run() {
         .setup(move |app| {
             let settings = config::load(app.handle());
             let start = if settings.server.is_empty() { None } else { tauri::Url::parse(&format!("{}/", settings.server)).ok() };
+            #[cfg(mobile)]
+            mobile::remember_server(app.handle(), &settings.server);
             app.manage(State { settings: Mutex::new(settings), http, armed: AtomicBool::new(false), generation: AtomicU64::new(0), last: Mutex::new(Default::default()), art: Mutex::new(Default::default()) });
 
             let url = match &start { Some(u) => WebviewUrl::External(u.clone()), None => WebviewUrl::App("index.html".into()) };

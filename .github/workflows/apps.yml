@@ -89,7 +89,7 @@ jobs:
             bundles: nsis
             args: ""
           - os: macos-latest
-            bundles: dmg
+            bundles: app
             args: --target universal-apple-darwin
     runs-on: ${{ matrix.os }}
     steps:
@@ -111,6 +111,19 @@ jobs:
         env:
           ENCORE_VERSION: ${{ inputs.version || format('dev.{0}', github.run_number) }}
         run: cargo tauri build --ci --bundles ${{ matrix.bundles }} ${{ matrix.args }} --config '{"version":"${{ inputs.semver || '0.0.1' }}"}'
+      # Tauri's bundle_dmg.sh drives Finder with AppleScript to lay out the window, which fails on the hosted Mac
+      # runners (no Finder session) – a plain hdiutil image of the .app works everywhere
+      - name: Disk image (macOS)
+        if: runner.os == 'macOS'
+        shell: bash
+        run: |
+          APP=$(find clients/app/target -path '*/release/bundle/macos/*.app' -maxdepth 6 -type d | head -1)
+          [ -n "$APP" ] || { echo "no .app bundle"; exit 1; }
+          STAGE=$(mktemp -d)
+          cp -R "$APP" "$STAGE/"
+          ln -s /Applications "$STAGE/Applications"
+          mkdir -p "$(dirname "$APP")/../dmg"
+          hdiutil create -volname "Encore" -srcfolder "$STAGE" -ov -format UDZO "$(dirname "$APP")/../dmg/Encore_${{ inputs.semver || '0.0.1' }}_universal.dmg"
       - name: Collect
         shell: bash
         run: |

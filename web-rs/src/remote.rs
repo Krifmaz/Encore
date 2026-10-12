@@ -1,7 +1,9 @@
 //! Port of web/js/remote.js – see docs/ui-rewrite/CONTRACT.md
 //!
 //! Use any signed-in device as a remote for the others (Encore 2): every open app checks in every couple of
-//! seconds with what it's playing and runs the commands other devices sent it.
+//! seconds with what it's playing and runs the commands other devices sent it. With the server's event stream
+//! open, commands and the other devices' state arrive the moment they change instead of at the next check-in,
+//! and this device checks in right away whenever its own playback changes – so a remote feels instant.
 
 use crate::dom;
 use crate::json::J;
@@ -11,6 +13,7 @@ use serde_json::{json, Value};
 use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 use wasm_bindgen::closure::Closure;
+use wasm_bindgen::JsCast;
 
 const KEY: &str = "encore.device";
 const NAME_KEY: &str = "encore.device.name";
@@ -22,6 +25,16 @@ thread_local! {
     static MISSED: Cell<u32> = const { Cell::new(0) };
     /// `const ME = deviceId()` – computed once, on first use.
     static ME: String = device_id();
+    /// the other devices, as the server last told us (pushed, or fetched)
+    static DEVICES: RefCell<Vec<Value>> = const { RefCell::new(Vec::new()) };
+    /// the open Devices window repaints through this
+    static ON_DEVICES: RefCell<Option<Rc<dyn Fn()>>> = const { RefCell::new(None) };
+    /// commands already run (each one can arrive pushed and again on the next check-in)
+    static SEEN: RefCell<Vec<i64>> = const { RefCell::new(Vec::new()) };
+    /// the server's event stream
+    static ES: RefCell<Option<web_sys::EventSource>> = const { RefCell::new(None) };
+    static BEAT_TIMER: RefCell<Option<dom::Timeout>> = const { RefCell::new(None) };
+    static ON_CHANGE: RefCell<Option<player::OnChange>> = const { RefCell::new(None) };
 }
 
 fn me() -> String { ME.with(|m| m.clone()) }
@@ -103,6 +116,39 @@ pub fn unlink() {
     dom::ls_remove(CHAIN);
     player::set_link(None);
     toast("Unlinked – music plays on this device again", "ok");
+    dom::spawn(beat());
+}
+
+/// Run a command another device sent us – once, however many ways it arrived.
+fn run_command(c: Value) {
+    if !crate::json::truthy(&c) { return; }
+    if !c.is_nullish("seq") {
+        let seq = c.i("seq");
+        let dup = SEEN.with(|s| {
+            let mut s = s.borrow_mut();
+            if s.contains(&seq) { return true; }
+            s.push(seq);
+            if s.len() > 200 { s.drain(0..100); }
+            false
+        });
+        if dup { return; }
+    }
+    if c.s("action") == "play_queue" && c.truthy("from") { toast(&format!("Music sent here from {}", c.s("from")), "ok"); }
+    player::command(c);
+}
+
+/// The other devices changed (pushed by the server, or fetched).
+fn got_devices(list: Vec<Value>) {
+    let my = me();
+    DEVICES.with(|d| *d.borrow_mut() = list.into_iter().filter(|d| d.s("id") != my).collect());
+    if let Some(link) = player::linked() {
+        let d = DEVICES.with(|d| d.borrow().iter().find(|x| x.s("id") == link.id).cloned());
+        MISSED.with(|m| m.set(if d.is_some() { 0 } else { m.get() + 1 }));
+        if let Some(d) = d { player::link_state(d.g("state").clone(), true); }
+        else if MISSED.with(|m| m.get()) > 1 { player::link_state(link.state.clone(), false); }
+    }
+    let f = ON_DEVICES.with(|o| o.borrow().clone());
+    if let Some(f) = f { f(); }
 }
 
 async fn beat() {
@@ -110,17 +156,39 @@ async fn beat() {
     // any failure: offline – try again next time
     let state = match &link { Some(l) => json!({ "playing": false, "remote_of": l.id }), None => player::snapshot() };
     let Ok(r) = api::post("/remote/heartbeat", json!({ "id": me(), "name": device_name(), "state": state })).await else { return };
-    for c in r.a("commands") {
-        if c.s("action") == "play_queue" && c.truthy("from") { toast(&format!("Music sent here from {}", c.s("from")), "ok"); }
-        player::command(c);
+    for c in r.a("commands") { run_command(c); }
+    // with the event stream open the server pushes the others' state; linked, we still ask so a device that went quiet shows as offline
+    if link.is_some() || !streaming() {
+        if let Ok(list) = api::get("/remote/devices").await { got_devices(list.items()); }
     }
-    if let Some(link) = link {
-        let Ok(list) = api::get("/remote/devices").await else { return };
-        let d = list.items().into_iter().find(|x| x.s("id") == link.id);
-        MISSED.with(|m| m.set(if d.is_some() { 0 } else { m.get() + 1 }));
-        if let Some(d) = d { player::link_state(d.g("state").clone(), true); }
-        else if MISSED.with(|m| m.get()) > 1 { player::link_state(link.state.clone(), false); }
-    }
+}
+/// Check in right away (debounced): something about this device's playback just changed.
+fn beat_soon() {
+    let t = dom::Timeout::new(150, || dom::spawn(beat()));
+    BEAT_TIMER.with(|b| *b.borrow_mut() = Some(t));   // dropping the old one cancels it
+}
+
+fn streaming() -> bool { ES.with(|e| e.borrow().as_ref().is_some_and(|es| es.ready_state() == 1)) }
+/// Open the server's event stream: our commands as they are sent, every other device's state as it changes.
+fn connect() {
+    if ES.with(|e| e.borrow().is_some()) || js_sys::Reflect::get(&js_sys::global(), &"EventSource".into()).map(|v| v.is_undefined()).unwrap_or(true) { return; }
+    let Ok(es) = web_sys::EventSource::new(&format!("/api/remote/events?device={}", String::from(js_sys::encode_uri_component(&me())))) else { return };
+    let data = |e: &web_sys::Event| -> Option<Value> {
+        let m = e.dyn_ref::<web_sys::MessageEvent>()?;
+        let s = m.data().as_string()?;
+        serde_json::from_str::<Value>(&s).ok()
+    };
+    dom::on_forever(&es, "command", move |e| { if let Some(v) = data(e) { run_command(v.g("command").clone()); } });
+    dom::on_forever(&es, "devices", move |e| { if let Some(v) = data(e) { got_devices(v.a("devices")); } });
+    dom::on_forever(&es, "error", |_| {
+        // the browser reconnects on its own; when it gives up (signed out, server gone) try again later – the heartbeat covers the gap
+        let closed = ES.with(|e| e.borrow().as_ref().is_some_and(|es| es.ready_state() == 2));
+        if closed {
+            ES.with(|e| *e.borrow_mut() = None);
+            dom::Timeout::new(30000, connect).forget();
+        }
+    });
+    ES.with(|e| *e.borrow_mut() = Some(es));
 }
 
 pub fn start() {
@@ -133,6 +201,8 @@ pub fn start() {
         let id = l.s("id");
         player::set_link(Some(player::Link { id: id.clone(), name: l.s("name"), state: json!({}), online: true, send: link_sender(id) }));
     }
+    connect();
+    ON_CHANGE.with(|o| *o.borrow_mut() = Some(player::on_change(|_| beat_soon())));
     run_loop();
 }
 
@@ -170,13 +240,15 @@ fn device_card(d: &Value, devices: &[Value], l: Option<&player::Link>, me: &str)
         };
         format!(r#"<div class="small muted">🔗 Remote for {}</div>"#, esc(&who))
     } else if s.truthy("title") {
+        let label = s.g("signal").s("label");
         format!(r#"<div class="row" style="gap:12px">
           <div class="thumb" style="width:52px;height:52px">{}</div>
           <div class="grow"><div class="ellipsis" style="font-weight:650">{}</div><div class="small muted ellipsis">{}{}</div>
-            <div class="small faint">{} · {} / {}</div></div></div>"#,
+            <div class="small faint">{} · {} / {}{}</div></div></div>"#,
             art(&s.s("cover"), &if s.truthy("album") { s.s("album") } else { s.s("title") }, ""),
             esc(&s.s("title")), esc(&s.s("artist")), if s.truthy("album") { format!(" · {}", esc(&s.s("album"))) } else { String::new() },
-            if s.truthy("playing") { "Playing" } else { "Paused" }, fmt::dur(s.f("position")), fmt::dur(s.f("duration")))
+            if s.truthy("playing") { "Playing" } else { "Paused" }, fmt::dur(s.f("position")), fmt::dur(s.f("duration")),
+            if label.is_empty() { String::new() } else { format!(" · {}", esc(&label)) })
     } else {
         r#"<div class="small muted">Nothing playing</div>"#.to_string()
     };
@@ -218,30 +290,31 @@ pub fn open() {
     let m = ui::modal(ModalOpts::new("Your devices", r#"<div id="dev-me" class="stack" style="margin-bottom:12px"></div><div id="dev-list" class="stack"><div class="skeleton" style="height:90px"></div></div>"#));
     let (Some(list), Some(me_box)) = (m.qs("#dev-list"), m.qs("#dev-me")) else { return };
     let timer: Rc<RefCell<Option<dom::Interval>>> = Rc::new(RefCell::new(None));
-    let devices: Rc<RefCell<Vec<Value>>> = Rc::new(RefCell::new(Vec::new()));
 
-    let refresh: Rc<dyn Fn()> = {
-        let (list, timer, devices) = (list.clone(), timer.clone(), devices.clone());
+    // paint(): the list from DEVICES (what the server last pushed or we last fetched)
+    let paint: Rc<dyn Fn()> = {
+        let (list, timer) = (list.clone(), timer.clone());
         Rc::new(move || {
-            let (list, timer, devices) = (list.clone(), timer.clone(), devices.clone());
+            if !list.is_connected() { timer.borrow_mut().take(); ON_DEVICES.with(|o| *o.borrow_mut() = None); return; }
+            let my = me();
+            let devs = DEVICES.with(|d| d.borrow().clone());
+            if devs.is_empty() {
+                dom::set_html(&list, r#"<p class="muted" style="margin:0">No other devices right now. Open Encore on your phone, computer or the apps (signed in as you) and they show up here.</p>"#);
+                return;
+            }
+            let l = player::linked();
+            dom::set_html(&list, &devs.iter().map(|d| device_card(d, &devs, l.as_ref(), &my)).collect::<String>());
+        })
+    };
+    let refresh: Rc<dyn Fn()> = {
+        let (list, timer, paint) = (list.clone(), timer.clone(), paint.clone());
+        Rc::new(move || {
+            let (list, timer, paint) = (list.clone(), timer.clone(), paint.clone());
             dom::spawn(async move {
-                if !list.is_connected() { timer.borrow_mut().take(); return; }
-                let my = me();
-                let found = match api::get("/remote/devices").await {
-                    Ok(v) => v.items().into_iter().filter(|d| d.s("id") != my).collect::<Vec<_>>(),
-                    Err(_) => Vec::new(),
-                };
-                *devices.borrow_mut() = found;
-                let html = {
-                    let devs = devices.borrow();
-                    if devs.is_empty() { None } else {
-                        let l = player::linked();
-                        Some(devs.iter().map(|d| device_card(d, &devs, l.as_ref(), &my)).collect::<String>())
-                    }
-                };
-                match html {
-                    None => dom::set_html(&list, r#"<p class="muted" style="margin:0">No other devices right now. Open Encore on your phone, computer or the apps (signed in as you) and they show up here.</p>"#),
-                    Some(h) => dom::set_html(&list, &h),
+                if !list.is_connected() { timer.borrow_mut().take(); ON_DEVICES.with(|o| *o.borrow_mut() = None); return; }
+                match api::get("/remote/devices").await {
+                    Ok(v) => got_devices(v.items()),
+                    Err(_) => { DEVICES.with(|d| d.borrow_mut().clear()); paint(); }
                 }
             });
         })
@@ -253,7 +326,7 @@ pub fn open() {
             let refresh = refresh.clone();
             dom::spawn(async move {
                 match send_to(id, body).await {
-                    Ok(_) => dom::timeout(400, move || refresh()),
+                    Ok(_) => { if !streaming() { dom::timeout(400, move || refresh()); } }
                     Err(e) => toast(&e.message, "err"),
                 }
             });
@@ -264,7 +337,7 @@ pub fn open() {
     type PaintMe = Rc<RefCell<Option<Rc<dyn Fn()>>>>;
     let paint_me_cell: PaintMe = Rc::new(RefCell::new(None));
     let paint_me: Rc<dyn Fn()> = {
-        let (me_box, refresh, cell) = (me_box.clone(), refresh.clone(), paint_me_cell.clone());
+        let (me_box, paint, cell) = (me_box.clone(), paint.clone(), paint_me_cell.clone());
         Rc::new(move || {
             let l = player::linked();
             dom::set_html(&me_box, &format!(r##"<div class="row wrap between" style="gap:8px"><div class="small muted">This device: <b style="color:var(--text)">{}</b> <a href="#" id="dev-rename" class="small">rename</a></div>
@@ -275,8 +348,8 @@ pub fn open() {
                 l.as_ref().map(|l| format!(r#"<div class="small muted">🔗 Linked: everything you play here goes to <b>{}</b>. Unlink to listen on this device.</div>"#, esc(&l.name))).unwrap_or_default()));
             let again = { let cell = cell.clone(); move || { let f = cell.borrow().clone(); if let Some(f) = f { f() } } };
             if let Some(b) = dom::qs_in(&me_box, "#dev-unlink") {
-                let (again, refresh) = (again.clone(), refresh.clone());
-                dom::on(&b, "click", move |_| { unlink(); again(); refresh(); });
+                let (again, paint) = (again.clone(), paint.clone());
+                dom::on(&b, "click", move |_| { unlink(); again(); paint(); });
             }
             if let Some(a) = dom::qs_in(&me_box, "#dev-rename") {
                 dom::on(&a, "click", move |e| {
@@ -293,16 +366,16 @@ pub fn open() {
     *paint_me_cell.borrow_mut() = Some(paint_me.clone());
 
     {
-        let (devices, send, paint_me, refresh, m) = (devices.clone(), send.clone(), paint_me.clone(), refresh.clone(), m.clone());
+        let (send, paint_me, paint, m) = (send.clone(), paint_me.clone(), paint.clone(), m.clone());
         dom::on(&list, "click", move |e| {
             let Some(b) = dom::closest(e, "[data-a]") else { return };
             let id = dom::closest_of(&b, "[data-id]").map(|c| dom::data(&c, "id")).unwrap_or_default();
-            let d = devices.borrow().iter().find(|d| d.s("id") == id).cloned();
+            let d = DEVICES.with(|d| d.borrow().iter().find(|d| d.s("id") == id).cloned());
             let Some(d) = d else { return };
             let a = dom::data(&b, "a");
             match a.as_str() {
-                "link" => { link_to(d); paint_me(); refresh(); }
-                "unlink" => { unlink(); paint_me(); refresh(); }
+                "link" => { link_to(d); paint_me(); paint(); }
+                "unlink" => { unlink(); paint_me(); paint(); }
                 "here" => {
                     let s = d.o("state");
                     let queue = s.a("queue");
@@ -336,8 +409,10 @@ pub fn open() {
             send(id, json!({ "action": "volume", "value": value }));
         });
     }
+    ON_DEVICES.with(|o| *o.borrow_mut() = Some(paint.clone()));
     paint_me();
     refresh();
+    // pushed updates repaint the list; this is the fallback when the stream is down
     let r = refresh.clone();
-    *timer.borrow_mut() = Some(dom::Interval::new(2000, move || r()));
+    *timer.borrow_mut() = Some(dom::Interval::new(2000, move || { if !streaming() { r(); } }));
 }

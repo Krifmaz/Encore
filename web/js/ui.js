@@ -1,3 +1,4 @@
+import { api } from './api.js';
 export const esc = (s) => String(s ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 export const qs = (sel, el = document) => el.querySelector(sel);
 export const qsa = (sel, el = document) => [...el.querySelectorAll(sel)];
@@ -114,6 +115,7 @@ export const fmt = {
     return new Date(ts * 1000).toLocaleDateString();
   },
   date(ts) { return ts ? new Date(ts * 1000).toLocaleString() : '—'; },
+  day(ts) { return ts ? new Date(ts * 1000).toLocaleDateString(undefined, { year: 'numeric', month: 'short', day: 'numeric' }) : '—'; },
   num(n) { return (n || 0).toLocaleString(); },
 };
 
@@ -166,6 +168,17 @@ export function emptyState(ic, title, text = '') {
 
 export function skeletonGrid(n = 12) {
   return `<div class="grid">${Array.from({ length: n }, () => '<div><div class="skeleton" style="aspect-ratio:1"></div><div class="skeleton" style="height:14px;margin-top:10px;width:70%"></div></div>').join('')}</div>`;
+}
+
+/** Share a library song: the system share sheet where there is one, otherwise the link goes to the clipboard. */
+export async function shareTrack(t) {
+  try {
+    const r = await api.post(`/library/tracks/${t.id}/share`);
+    const url = new URL(r.path, location.href).href;
+    if (navigator.share) { try { await navigator.share({ title: t.title, text: `${t.title} – ${t.artist}`, url }); return; } catch { /* cancelled → copy */ } }
+    await copyText(url);
+    toast('Link copied – anyone with it can play this song', 'ok');
+  } catch (e) { toast(e.message, 'err'); }
 }
 
 export async function copyText(t) {

@@ -11,5 +11,18 @@
             android:name="app.encore.client.media.PlaybackService"
             android:exported="false"
             android:foregroundServiceType="mediaPlayback" />
+        <!-- Android Auto / media browsers: the library as a browse tree, played natively (Media3) -->
+        <service
+            android:name="app.encore.client.media.CarService"
+            android:exported="true"
+            android:foregroundServiceType="mediaPlayback">
+            <intent-filter>
+                <action android:name="androidx.media3.session.MediaLibraryService" />
+                <action android:name="android.media.browse.MediaBrowserService" />
+            </intent-filter>
+        </service>
+        <meta-data
+            android:name="com.google.android.gms.car.application"
+            android:resource="@xml/automotive_app_desc" />
     </application>
 </manifest>

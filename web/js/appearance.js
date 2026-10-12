@@ -1,4 +1,4 @@
-// Appearance: theme, accent colour, background style and content width. Applied before the app draws
+// Appearance: theme, accent colour and background style. Applied before the app draws
 // (from this device's copy), then synced with the account on servers that store preferences (Encore 2).
 import { api } from './api.js';
 
@@ -32,7 +32,7 @@ export const PRESETS = [
   { id: 'mono', name: 'Mono', theme: 'oled', accent: 'custom', custom: '#e5e5e5', background: 'solid' },
 ];
 
-export const DEFAULTS = { theme: 'dark', accent: 'violet', custom: '#8b5cf6', background: 'fade', width: 'comfortable' };
+export const DEFAULTS = { theme: 'dark', accent: 'violet', custom: '#8b5cf6', background: 'fade' };
 const KEY = 'encore.appearance';
 
 const rgb = (hex) => {
@@ -83,7 +83,6 @@ export function apply(p = current()) {
   root.style.setProperty('--accent-2-rgb', rgb(b).join(', '));
   root.style.setProperty('--on-accent', (luminance(a) + luminance(b)) / 2 > 0.45 ? '#16161f' : '#fff');
   root.dataset.bg = p.background === 'solid' ? 'solid' : 'fade';
-  root.dataset.width = p.width === 'wide' ? 'wide' : 'comfortable';
   document.querySelector('meta[name=theme-color]')?.setAttribute('content', getComputedStyle(root).getPropertyValue('--bg').trim() || '#0b0b12');
 }
 

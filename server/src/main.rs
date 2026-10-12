@@ -44,6 +44,7 @@ use state::AppState;
 use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::Arc;
+use tower_http::compression::predicate::{DefaultPredicate, NotForContentType, Predicate};
 use tower_http::compression::CompressionLayer;
 use tower_http::services::{ServeDir, ServeFile};
 
@@ -84,7 +85,8 @@ pub fn app(st: AppState) -> Router {
         .with_state(st)
         .fallback_service(spa)
         .layer(middleware::from_fn(security_headers))
-        .layer(CompressionLayer::new())
+        // gzip for JSON and pages – never for audio: it only burns CPU and gets in the way of range requests
+        .layer(CompressionLayer::new().compress_when(DefaultPredicate::new().and(NotForContentType::new("audio/"))))
 }
 
 pub fn build_state() -> anyhow::Result<AppState> {

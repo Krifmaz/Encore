@@ -1,4 +1,4 @@
-//! Port of web/js/appearance.js: theme, accent colour, background style and content width.
+//! Port of web/js/appearance.js: theme, accent colour and background style.
 
 use crate::dom::{self, document, ls_get, ls_set};
 use crate::json::J;
@@ -43,7 +43,7 @@ pub const PRESETS: &[Preset] = &[
     Preset { id: "mono", name: "Mono", theme: "oled", accent: "custom", custom: Some("#e5e5e5"), background: "solid" },
 ];
 
-pub fn defaults() -> Value { json!({ "theme": "dark", "accent": "violet", "custom": "#8b5cf6", "background": "fade", "width": "comfortable" }) }
+pub fn defaults() -> Value { json!({ "theme": "dark", "accent": "violet", "custom": "#8b5cf6", "background": "fade" }) }
 const KEY: &str = "encore.appearance";
 
 fn rgb(hex: &str) -> (u8, u8, u8) {
@@ -119,7 +119,6 @@ pub fn apply(p: &Value) {
     dom::set_style(&root, "--accent-2-rgb", &format!("{br}, {bg}, {bb}"));
     dom::set_style(&root, "--on-accent", if (luminance(&a) + luminance(&b)) / 2.0 > 0.45 { "#16161f" } else { "#fff" });
     dom::set_data(&root, "bg", if p.s("background") == "solid" { "solid" } else { "fade" });
-    dom::set_data(&root, "width", if p.s("width") == "wide" { "wide" } else { "comfortable" });
     if let Some(meta) = dom::qs("meta[name=theme-color]") {
         let bg = dom::window().get_computed_style(&root).ok().flatten().and_then(|cs| cs.get_property_value("--bg").ok()).map(|s| s.trim().to_string()).unwrap_or_default();
         let _ = meta.set_attribute("content", if bg.is_empty() { "#0b0b12" } else { &bg });

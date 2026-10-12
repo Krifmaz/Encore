@@ -171,6 +171,8 @@ pub async fn connect<R: Runtime>(app: &AppHandle<R>, raw: &str) -> Result<(), St
         s.remember(&base);
         config::save(app, &s);
     }
+    #[cfg(mobile)]
+    crate::mobile::remember_server(app, &base);
     open_server(app);
     Ok(())
 }

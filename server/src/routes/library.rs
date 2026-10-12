@@ -32,6 +32,9 @@ pub fn router() -> Router<AppState> {
         .route("/api/library/tracks/{id}", axum::routing::delete(delete_track))
         .route("/api/library/tracks/{id}/file", get(track_file))
         .route("/api/library/tracks/{id}/stream", get(stream))
+        .route("/api/library/tracks/{id}/info", get(track_info))
+        .route("/api/library/tracks/{id}", get(track))
+        .route("/api/library/plays/recent", get(recent_plays))
         .route("/api/library/tracks/{id}/lyrics", get(lyrics))
         .route("/api/library/tracks/{id}/share", post(share))
         .route("/api/library/albums/{id}", get(album).delete(delete_album))
@@ -350,40 +353,126 @@ fn is_alac(path: &str) -> bool {
 
 #[derive(Deserialize, Default)]
 #[serde(default)]
-struct StreamQ {
+pub struct StreamQ {
+    /// convert to FLAC (formats a browser can't play)
     transcode: bool,
+    /// start a converted stream at this many seconds (the player seeks converted streams through the server)
     t: f64,
+    /// "aac": a smaller lossy stream for connections that can't keep up (Settings → Playback)
+    q: String,
+    /// bitrate of the lossy stream in kbps (64–320, default 256)
+    kbps: u32,
 }
 
-/// The original file when the browser can play it (seekable, bit-perfect); otherwise FLAC made on the fly.
-pub async fn stream_track(st: &AppState, id: i64, q_transcode: bool, t: f64, req: Request) -> ApiResult<Response> {
+/// The original file when the browser can play it (seekable, bit-perfect); otherwise FLAC made on the fly,
+/// or – when the player asks for it – a lossy AAC stream the connection can keep up with.
+pub async fn stream_track(st: &AppState, id: i64, q: &StreamQ, req: Request) -> ApiResult<Response> {
     let tr = st.db.one("SELECT path, format FROM tracks WHERE id=?", p![id])?.ok_or_else(|| err(404, "Track not found"))?;
     let (path, fmt) = (tr.s("path"), tr.s("format"));
     if !FsPath::new(&path).is_file() {
         return Err(err(404, "Track not found"));
     }
+    let lossy = matches!(q.q.as_str(), "aac" | "lossy" | "opus");
     let alac = if fmt == "m4a" || fmt == "mp4" { let p2 = path.clone(); tokio::task::spawn_blocking(move || is_alac(&p2)).await.unwrap_or(false) } else { false };
-    if let (false, false, Some(ct)) = (q_transcode, alac, browser_type(&fmt)) {
+    if let (false, false, false, Some(ct)) = (q.transcode, lossy, alac, browser_type(&fmt)) {
         let mut r = serve_file(&path, req, Some(ct), None).await?;
         r.headers_mut().insert(header::CACHE_CONTROL, HeaderValue::from_static("private, max-age=3600"));
+        r.headers_mut().insert(header::HeaderName::from_static("x-encore-stream"), HeaderValue::from_static("original"));
         return Ok(r);
     }
     let mut cmd = tokio::process::Command::new("ffmpeg");
     cmd.args(["-v", "error", "-nostdin"]);
-    if t > 0.0 {
-        cmd.args(["-ss", &format!("{t:.2}")]);
+    if q.t > 0.0 {
+        cmd.args(["-ss", &format!("{:.2}", q.t)]);
     }
-    cmd.args(["-i", &path, "-map", "0:a:0", "-c:a", "flac", "-compression_level", "0", "-f", "flac", "-flush_packets", "1", "pipe:1"])
-        .stdout(std::process::Stdio::piped()).stderr(std::process::Stdio::null()).kill_on_drop(true);
+    cmd.args(["-i", &path, "-map", "0:a:0"]);
+    // DSD has no PCM sample rate: decode it to 24-bit / 176.4 kHz, the usual DSD → PCM choice and a rate browsers play
+    if matches!(fmt.as_str(), "dsf" | "dff") && !lossy {
+        cmd.args(["-af", "aresample=176400", "-sample_fmt", "s32"]);
+    }
+    let (ct, tag) = if lossy {
+        let kbps = if q.kbps == 0 { 256 } else { q.kbps.clamp(64, 320) };
+        if q.q == "opus" {
+            // Opus in Ogg for browsers without an AAC decoder (Chromium builds, Firefox on Linux)
+            cmd.args(["-c:a", "libopus", "-b:a", &format!("{kbps}k"), "-vbr", "on", "-f", "ogg", "-flush_packets", "1", "pipe:1"]);
+            ("audio/ogg", format!("opus-{kbps}"))
+        } else {
+            // AAC in an ADTS stream: starts fast and needs no container index
+            cmd.args(["-c:a", "aac", "-b:a", &format!("{kbps}k"), "-f", "adts", "-flush_packets", "1", "pipe:1"]);
+            ("audio/aac", format!("aac-{kbps}"))
+        }
+    } else {
+        cmd.args(["-c:a", "flac", "-compression_level", "0", "-f", "flac", "-flush_packets", "1", "pipe:1"]);
+        ("audio/flac", "flac".to_string())
+    };
+    cmd.stdout(std::process::Stdio::piped()).stderr(std::process::Stdio::null()).kill_on_drop(true);
     let mut child = cmd.spawn().map_err(|e| err(500, format!("ffmpeg: {e}")))?;
     let out = child.stdout.take().ok_or_else(|| err(500, "ffmpeg gave no output"))?;
     // the child is killed when the response (and with it the stream) is dropped
     let stream = futures_util::StreamExt::map(tokio_util::io::ReaderStream::new(out), move |c| { let _keep = &child; c });
-    Ok(([(header::CONTENT_TYPE, "audio/flac"), (header::HeaderName::from_static("x-transcoded"), "flac")], Body::from_stream(stream)).into_response())
+    let mut r = ([(header::CONTENT_TYPE, ct)], Body::from_stream(stream)).into_response();
+    r.headers_mut().insert(header::HeaderName::from_static("x-transcoded"), HeaderValue::from_str(&tag).unwrap_or(HeaderValue::from_static("flac")));
+    r.headers_mut().insert(header::HeaderName::from_static("x-encore-stream"), HeaderValue::from_str(&tag).unwrap_or(HeaderValue::from_static("flac")));
+    Ok(r)
 }
 
 async fn stream(State(st): State<AppState>, User(_): User, Path(id): Path<i64>, Query(q): Query<StreamQ>, req: Request) -> ApiResult<Response> {
-    stream_track(&st, id, q.transcode, q.t, req).await
+    stream_track(&st, id, &q, req).await
+}
+
+/// What's in the file, for the player's signal path: codec, sample rate, bit depth, channels, bitrate.
+pub fn audio_info(path: &str) -> Value {
+    use lofty::file::AudioFile;
+    use lofty::prelude::*;
+    let Ok(f) = lofty::read_from_path(path) else { return json!({}) };
+    let p = f.properties();
+    let ft = format!("{:?}", f.file_type()).to_lowercase();
+    let lossless = matches!(ft.as_str(), "flac" | "wav" | "aiff" | "ape" | "wavpack") || ft == "mp4" && is_alac(path);
+    let codec = match ft.as_str() {
+        "mpeg" => "mp3", "mp4" => if lossless { "alac" } else { "aac" }, "vorbis" => "ogg vorbis", "wavpack" => "wavpack", "ape" => "ape",
+        other => other,
+    };
+    json!({
+        "codec": codec,
+        "sample_rate": p.sample_rate(), "bit_depth": p.bit_depth(), "channels": p.channels(),
+        "bitrate": p.audio_bitrate().or(p.overall_bitrate()), "duration": p.duration().as_secs_f64(), "lossless": lossless,
+    })
+}
+
+/// One song as the lists return it (the car player rebuilds its queue from ids).
+async fn track(State(st): State<AppState>, User(u): User, Path(id): Path<i64>) -> ApiResult<Json<Value>> {
+    let mut t = st.db.one("SELECT id, title, artist, album, albumartist, album_id, track, disc, year, duration, format, bitrate, path FROM tracks WHERE id=?", p![id])?.ok_or_else(|| err(404, "Track not found"))?;
+    if !auth::is_admin(&u) { t.remove("path"); }
+    Ok(Json(Value::Object(t)))
+}
+
+#[derive(Deserialize, Default)]
+#[serde(default)]
+struct LimitQ {
+    limit: i64,
+}
+
+/// What this user played most recently (one row per song, newest first).
+async fn recent_plays(State(st): State<AppState>, User(u): User, Query(q): Query<LimitQ>) -> ApiResult<Json<Value>> {
+    let limit = if q.limit <= 0 { 50 } else { q.limit.min(200) };
+    let rows = st.db.query(
+        "SELECT t.id, t.title, t.artist, t.album, t.albumartist, t.album_id, t.track, t.disc, t.year, t.duration, t.format, t.bitrate, MAX(p.played_at) played_at \
+         FROM plays p JOIN tracks t ON t.id=p.track_id WHERE p.user_id=? GROUP BY t.id ORDER BY played_at DESC LIMIT ?",
+        p![u.i("id"), limit],
+    )?;
+    Ok(Json(json!(rows)))
+}
+
+async fn track_info(State(st): State<AppState>, User(_): User, Path(id): Path<i64>) -> ApiResult<Json<Value>> {
+    let t = st.db.one("SELECT id, path, format, size, bitrate, duration FROM tracks WHERE id=?", p![id])?.ok_or_else(|| err(404, "Track not found"))?;
+    let path = t.s("path");
+    let mut info = tokio::task::spawn_blocking(move || audio_info(&path)).await.unwrap_or(json!({}));
+    info["id"] = json!(t.i("id"));
+    info["format"] = json!(t.s("format"));
+    info["size"] = json!(t.i("size"));
+    if info["bitrate"].is_null() { info["bitrate"] = json!(t.i("bitrate")); }
+    if info["duration"].is_null() { info["duration"] = json!(t.f("duration")); }
+    Ok(Json(info))
 }
 
 #[derive(Deserialize, Default)]
@@ -407,7 +496,7 @@ async fn lyrics(State(st): State<AppState>, User(_): User, Path(id): Path<i64>, 
 
 async fn album(State(st): State<AppState>, User(u): User, Path(id): Path<String>) -> ApiResult<Json<Value>> {
     // who asked for it: the request that brought the file in, when there was one
-    let rows = st.db.query("SELECT t.*, u.username requested_by FROM tracks t LEFT JOIN requests r ON r.id=t.request_id LEFT JOIN users u ON u.id=r.user_id WHERE t.album_id=? ORDER BY t.disc, t.track, t.path", p![id])?;
+    let rows = st.db.query("SELECT t.*, u.username requested_by, r.created_at requested_at FROM tracks t LEFT JOIN requests r ON r.id=t.request_id LEFT JOIN users u ON u.id=r.user_id WHERE t.album_id=? ORDER BY t.disc, t.track, t.path", p![id])?;
     if rows.is_empty() {
         return Err(err(404, "Album not found"));
     }
@@ -616,17 +705,29 @@ async fn share(State(st): State<AppState>, User(u): User, Path(id): Path<i64>) -
 
 fn shared_track(st: &AppState, token: &str) -> ApiResult<crate::db::Row> {
     let s = st.db.one("SELECT track_id FROM shares WHERE token=?", p![token])?.ok_or_else(|| err(404, "This link doesn't work any more"))?;
-    st.db.one("SELECT id, title, artist, album, album_id, duration, format FROM tracks WHERE id=?", p![s.i("track_id")])?.ok_or_else(|| err(404, "This link doesn't work any more"))
+    st.db.one("SELECT id, title, artist, album, albumartist, album_id, year, track, duration, format, bitrate, path FROM tracks WHERE id=?", p![s.i("track_id")])?.ok_or_else(|| err(404, "This link doesn't work any more"))
+}
+
+/// Everything the share page shows about the song (no file paths).
+async fn shared_meta(st: &AppState, token: &str) -> ApiResult<Value> {
+    let t = shared_track(st, token)?;
+    let path = t.s("path");
+    let info = tokio::task::spawn_blocking(move || audio_info(&path)).await.unwrap_or(json!({}));
+    Ok(json!({
+        "title": t.get("title"), "artist": t.get("artist"), "album": t.get("album"), "albumartist": t.get("albumartist"), "year": t.get("year"), "track": t.get("track"),
+        "duration": t.get("duration"), "format": t.get("format"), "bitrate": t.get("bitrate"),
+        "sample_rate": info["sample_rate"], "bit_depth": info["bit_depth"], "channels": info["channels"], "lossless": info["lossless"],
+        "app_name": st.cfg.str("app_name"),
+    }))
 }
 
 async fn shared(State(st): State<AppState>, Path(token): Path<String>) -> ApiResult<Json<Value>> {
-    let t = shared_track(&st, &token)?;
-    Ok(Json(json!({ "title": t.get("title"), "artist": t.get("artist"), "album": t.get("album"), "duration": t.get("duration"), "app_name": st.cfg.str("app_name") })))
+    Ok(Json(shared_meta(&st, &token).await?))
 }
 
 async fn shared_stream(State(st): State<AppState>, Path(token): Path<String>, Query(q): Query<StreamQ>, req: Request) -> ApiResult<Response> {
     let t = shared_track(&st, &token)?;
-    stream_track(&st, t.i("id"), q.transcode, q.t, req).await
+    stream_track(&st, t.i("id"), &q, req).await
 }
 
 async fn shared_cover(State(st): State<AppState>, Path(token): Path<String>, Query(q): Query<CoverQ>, req: Request) -> ApiResult<Response> {
@@ -634,6 +735,86 @@ async fn shared_cover(State(st): State<AppState>, Path(token): Path<String>, Que
     cover_response(&st, &t.s("album_id"), q.s, req).await
 }
 
-async fn share_page(State(st): State<AppState>, req: Request) -> ApiResult<Response> {
-    serve_file(&st.static_dir.join("share.html").to_string_lossy(), req, Some("text/html; charset=utf-8"), None).await
+/// "FLAC · 16-bit / 44.1 kHz" / "MP3 · 320 kbps" – the one-line quality description shared pages and link previews use.
+pub fn quality_line(m: &Value) -> String {
+    let fmt = m["format"].as_str().unwrap_or("").to_uppercase();
+    let mut parts = vec![];
+    if !fmt.is_empty() { parts.push(fmt); }
+    if m["lossless"].as_bool().unwrap_or(false) {
+        if let (Some(b), Some(r)) = (m["bit_depth"].as_u64(), m["sample_rate"].as_u64()) {
+            parts.push(format!("{b}-bit / {} kHz", trim_khz(r)));
+        } else if let Some(r) = m["sample_rate"].as_u64() {
+            parts.push(format!("{} kHz", trim_khz(r)));
+        }
+    } else if let Some(k) = m["bitrate"].as_u64().filter(|k| *k > 0) {
+        parts.push(format!("{k} kbps"));
+    }
+    parts.join(" · ")
+}
+
+fn trim_khz(hz: u64) -> String {
+    let k = hz as f64 / 1000.0;
+    let s = format!("{k:.1}");
+    s.trim_end_matches('0').trim_end_matches('.').to_string()
+}
+
+fn mmss(secs: f64) -> String {
+    let s = secs.max(0.0).round() as u64;
+    format!("{}:{:02}", s / 60, s % 60)
+}
+
+/// The share page, with Open Graph / Twitter tags filled in on the server so chat apps show the song,
+/// artist, album and cover in the link preview before anyone opens it.
+async fn share_page(State(st): State<AppState>, Path(token): Path<String>, req: Request) -> ApiResult<Response> {
+    let html = tokio::fs::read_to_string(st.static_dir.join("share.html")).await.map_err(|_| err(404, "Not found"))?;
+    let meta = match shared_meta(&st, &token).await {
+        Ok(m) => m,
+        Err(_) => return Ok(([(header::CONTENT_TYPE, "text/html; charset=utf-8")], html.replace("<!--META-->", "")).into_response()),
+    };
+    // absolute URLs for the preview image and audio: the public URL from Settings, else what the browser asked for
+    let base = {
+        let b = st.cfg.str("base_url");
+        if !b.trim().is_empty() { b.trim_end_matches('/').to_string() } else {
+            let h = req.headers();
+            let host = h.get("x-forwarded-host").or(h.get(header::HOST)).and_then(|v| v.to_str().ok()).unwrap_or("localhost");
+            let proto = h.get("x-forwarded-proto").and_then(|v| v.to_str().ok()).unwrap_or(if host.starts_with("localhost") || host.starts_with("127.") { "http" } else { "https" });
+            format!("{proto}://{host}")
+        }
+    };
+    let e = |v: &Value| crate::routes::html_escape(v.as_str().unwrap_or(""));
+    let title = format!("{} – {}", e(&meta["title"]), e(&meta["artist"]));
+    let mut desc = vec![];
+    if let Some(a) = meta["album"].as_str().filter(|a| !a.is_empty()) {
+        desc.push(match meta["year"].as_str().filter(|y| !y.is_empty()) { Some(y) => format!("{} ({})", crate::routes::html_escape(a), crate::routes::html_escape(y)), None => crate::routes::html_escape(a) });
+    }
+    let q = quality_line(&meta);
+    if !q.is_empty() { desc.push(q); }
+    if let Some(d) = meta["duration"].as_f64().filter(|d| *d > 0.0) { desc.push(mmss(d)); }
+    desc.push(format!("Shared from {}", e(&meta["app_name"])));
+    let tok = crate::routes::html_escape(&token);
+    let tags = format!(
+        r#"<title>{title}</title>
+<meta property="og:type" content="music.song">
+<meta property="og:site_name" content="{app}">
+<meta property="og:title" content="{title}">
+<meta property="og:description" content="{desc}">
+<meta property="og:url" content="{base}/s/{tok}">
+<meta property="og:image" content="{base}/api/share/{tok}/cover?s=600">
+<meta property="og:image:width" content="600"><meta property="og:image:height" content="600">
+<meta property="og:audio" content="{base}/api/share/{tok}/stream">
+<meta property="og:audio:type" content="{mime}">
+<meta property="music:musician" content="{artist}">
+<meta property="music:album" content="{album}">
+<meta property="music:duration" content="{dur}">
+<meta name="twitter:card" content="summary_large_image">
+<meta name="twitter:title" content="{title}">
+<meta name="twitter:description" content="{desc}">
+<meta name="twitter:image" content="{base}/api/share/{tok}/cover?s=600">
+<meta name="description" content="{desc}">"#,
+        app = e(&meta["app_name"]), desc = desc.join(" · "), artist = e(&meta["artist"]), album = e(&meta["album"]),
+        dur = meta["duration"].as_f64().unwrap_or(0.0).round() as u64,
+        mime = browser_type(meta["format"].as_str().unwrap_or("")).unwrap_or("audio/flac"),
+    );
+    let html = html.replace("<title>Shared song</title>", "").replace("<!--META-->", &tags);
+    Ok(([(header::CONTENT_TYPE, "text/html; charset=utf-8"), (header::CACHE_CONTROL, "no-cache")], html).into_response())
 }

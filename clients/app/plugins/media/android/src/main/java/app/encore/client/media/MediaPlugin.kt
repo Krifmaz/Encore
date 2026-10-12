@@ -39,7 +39,8 @@ class UrlArgs {
 
 /**
  * The Android half of the Encore app (the Rust side is clients/app/src/mobile.rs): the media notification with
- * lock-screen controls, "Share → Encore" links, downloads from the web app, and the webview's cookies.
+ * lock-screen controls, "Share → Encore" links, downloads from the web app, the webview's cookies, and the
+ * server address the car service (CarService, Android Auto) plays from.
  */
 @TauriPlugin
 class MediaPlugin(private val activity: Activity) : Plugin(activity) {
@@ -98,10 +99,19 @@ class MediaPlugin(private val activity: Activity) : Plugin(activity) {
         activity.runOnUiThread { w.evaluateJavascript(shareJs(link), null) }
     }
 
+    /** The server the app connected to – the car service plays from it with no web view open. */
+    @Command
+    fun setServer(invoke: Invoke) {
+        val a = invoke.parseArgs(UrlArgs::class.java)
+        EncoreApi.setServer(activity, a.url)
+        invoke.resolve()
+    }
+
     /** Show, update or (stopped) remove the media notification. */
     @Command
     fun nowPlaying(invoke: Invoke) {
         val a = invoke.parseArgs(NowPlayingArgs::class.java)
+        if (a.playing) CarService.instance?.pauseFromWebView()   // one player at a time
         val i = Intent(activity, PlaybackService::class.java)
         if (a.stopped) {
             activity.stopService(i)

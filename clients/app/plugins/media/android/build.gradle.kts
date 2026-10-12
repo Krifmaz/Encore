@@ -29,6 +29,10 @@ kotlin {
 dependencies {
     implementation("androidx.core:core-ktx:1.13.1")
     implementation("androidx.media:media:1.7.0")
+    // Android Auto / car playback (CarService)
+    implementation("androidx.media3:media3-exoplayer:1.8.0")
+    implementation("androidx.media3:media3-session:1.8.0")
+    implementation("androidx.media3:media3-datasource:1.8.0")
     implementation("com.fasterxml.jackson.core:jackson-databind:2.15.3")
     implementation(project(":tauri-android"))
 }

@@ -34,6 +34,7 @@ web-sys = { version = "0.3", features = [
   "MutationObserver", "MutationObserverInit", "MutationRecord", "Screen", "ScreenOrientation", "DocumentFragment", "Text",
   "TimeRanges", "HtmlLabelElement", "HtmlDivElement", "InputEvent", "DragEvent", "DataTransfer", "ProgressEvent",
   "WheelEvent", "FocusEvent", "console", "FileReader", "AnimationEvent", "TransitionEvent", "VisibilityState", "Crypto", "Performance",
+  "EventSource", "MessageEvent", "AudioContext", "BaseAudioContext", "StorageEvent",
 ] }
 
 [profile.release]

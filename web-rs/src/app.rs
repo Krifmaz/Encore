@@ -275,7 +275,7 @@ pub async fn boot() {
     appearance::apply(&appearance::current());
     set_info(api::get("/auth/info").await.unwrap_or_else(|_| serde_json::json!({})));
     set_user(api::get("/auth/me").await.ok());
-    if let Some(u) = user() { appearance::adopt_account(&u); }
+    if let Some(u) = user() { appearance::adopt_account(&u); crate::playback::adopt_account(&u); }
     if user().is_some() {
         render_shell();
         remote::start();

@@ -243,6 +243,7 @@ async function renderTasks(panel) {
 const EMBEDDED = {
   account: (el, ctx) => accountPage.render(el, ctx),
   appearance: (el, ctx) => renderAppearance(el, ctx),
+  playback: (el, ctx) => renderPlayback(el, ctx),
   connections: (el, ctx) => connectionsPage.render(el, ctx),
   users: (el, ctx) => adminPage.renderUsers(el, ctx),
   invites: (el, ctx) => adminPage.renderInvites(el, ctx),
@@ -259,7 +260,7 @@ export async function render(view, ctx) {
   let current = ctx.query.s ? groupOf(ctx.query.s) : 'account';
   let focus = ctx.query.s && current !== ctx.query.s ? ctx.query.s : null;   // #/settings?s=<section> opens that card
   const nav = [
-    ['You', [['account', 'Account'], ['appearance', 'Appearance'], ['connections', 'Connections']]],
+    ['You', [['account', 'Account'], ['appearance', 'Appearance'], ['playback', 'Playback'], ['connections', 'Connections']]],
     ...(admin ? [
       ['People', [['users', 'Users & permissions'], ['invites', 'Invites']]],
       ['Server', GROUPS.map(g => [g.id, g.title])],
@@ -472,7 +473,61 @@ export async function aboutCard() {
     <div class="small muted">Interface: JavaScript · <a href="/next/${esc(location.hash || '#/')}">Try the new Rust (WebAssembly) interface</a> – a preview of the same app rewritten in Rust; it uses your current sign-in and this link brings you back.</div></div>`;
 }
 
-/** Settings → Appearance: theme, accent colour, faded/solid background, content width. */
+/** Settings → Playback: stream quality, buffering, what happens when the queue ends, and the engine switches of a linked Cadenza device. */
+async function renderPlayback(el) {
+  const playback = await import('../playback.js');
+  const player = await import('../player.js');
+  const { session } = await import('../app.js');
+  const serverPrefs = (session.info?.features || []).includes('theme');
+  let p = playback.current();
+  const seg = (key, opts) => `<div class="seg" data-key="${key}">${opts.map(([v, l]) => `<button type="button" data-v="${v}" class="${String(p[key]) === String(v) ? 'on' : ''}">${l}</button>`).join('')}</div>`;
+  const QUALITY_HELP = {
+    auto: "The original file. When the connection can't keep up, the rest of the song and the next ten minutes come as the smaller stream, then the original is tried again.",
+    original: "Always the original file, even if it stutters on a slow connection. Formats a browser can't play are converted to FLAC (lossless).",
+    saver: 'Always the smaller stream – for mobile data and slow links.',
+  };
+  const paint = () => {
+    const link = player.linked();
+    const eng = link?.state?.engine;
+    el.innerHTML = `<div class="card stack">
+      <h2>Playback</h2>
+      <p class="small muted" style="margin:0">${serverPrefs ? 'Saved to your account, so it follows you to every device.' : 'Saved on this device.'}</p>
+      <div class="stack" style="gap:6px"><h3>Quality</h3>${seg('quality', [['auto', 'Auto'], ['original', 'Original'], ['saver', 'Data saver']])}
+        <span class="small muted">${QUALITY_HELP[p.quality]}</span></div>
+      <div class="stack" style="gap:6px"><h3>Smaller stream</h3>${seg('kbps', [[96, 'AAC 96 kbps'], [160, 'AAC 160 kbps'], [256, 'AAC 256 kbps']])}
+        <span class="small muted">What Auto falls back to and what Data saver always uses. The server makes it from the original on the fly.</span></div>
+      <div class="stack" style="gap:6px"><h3>Buffering</h3>
+        <label class="row" style="gap:8px;align-items:center"><input type="checkbox" id="pb-preload" ${p.preload ? 'checked' : ''}> Pre-load the next song while this one plays</label>
+        <span class="small muted">The next song is fetched once the current one is safely buffered, so it starts without a gap. Turn it off on a very slow connection to leave all the bandwidth to the song playing.</span></div>
+      <div class="stack" style="gap:6px"><h3>When the queue ends</h3>
+        <label class="row" style="gap:8px;align-items:center"><input type="checkbox" id="pb-autoplay" ${p.autoplay ? 'checked' : ''}> Keep going with a shuffle of the whole library</label></div>
+      <div class="stack" style="gap:6px"><h3>Pure playback</h3>
+        <span class="small muted">Encore streams the original file untouched – the quality badge on the player opens the <b>Signal path</b>, which shows what the file is, what was sent and what this device does with it. A browser hands the sound to the operating system, which mixes it with other sounds and may resample it; bit-perfect output needs an exclusive-mode engine.</span></div>
+      <div class="stack" style="gap:6px"><h3>Engine${eng ? ` · ${esc(eng.name || link.name)}` : ''}</h3>
+        ${eng ? engineHtml(eng) : `<span class="small muted">${link ? `${esc(link.name)} has no engine switches.` : 'No engine device is linked.'} A <b>Cadenza</b> device (Encore's open playback engine: exclusive-mode output, bit-perfect switch, upsampling filters, dither and noise shaping) shows its switches here once you link to it under <b>Your devices</b>.</span>`}</div>
+    </div>`;
+    el.querySelectorAll('.seg[data-key] button').forEach(b => b.onclick = () => set({ [b.closest('.seg').dataset.key]: b.dataset.v }));
+    el.querySelector('#pb-preload').onchange = (e) => set({ preload: e.target.checked });
+    el.querySelector('#pb-autoplay').onchange = (e) => set({ autoplay: e.target.checked });
+    el.querySelectorAll('[data-eng]').forEach(c => c.onchange = (e) => {
+      const v = c.type === 'checkbox' ? e.target.checked : e.target.value;
+      link.send({ action: 'engine', set: { [c.dataset.eng]: v } });
+      toast('Sent to ' + link.name, 'ok');
+    });
+  };
+  /** A linked engine device describes its switches in its state: { name, bitperfect, filter, filters[], dither, dithers[], rate, rates[], output } */
+  const engineHtml = (e) => `<div class="stack" style="gap:8px">
+      <label class="row" style="gap:8px;align-items:center"><input type="checkbox" data-eng="bitperfect" ${e.bitperfect ? 'checked' : ''}> Bit-perfect – send the file to the DAC untouched (no upsampling, dither or volume)</label>
+      ${Array.isArray(e.filters) ? `<label class="stack" style="gap:4px"><span class="small muted">Upsampling filter</span><select class="input" data-eng="filter" ${e.bitperfect ? 'disabled' : ''}>${e.filters.map(([v, l]) => `<option value="${esc(v)}" ${v === e.filter ? 'selected' : ''}>${esc(l)}</option>`).join('')}</select></label>` : ''}
+      ${Array.isArray(e.dithers) ? `<label class="stack" style="gap:4px"><span class="small muted">Dither / noise shaping</span><select class="input" data-eng="dither" ${e.bitperfect ? 'disabled' : ''}>${e.dithers.map(([v, l]) => `<option value="${esc(v)}" ${v === e.dither ? 'selected' : ''}>${esc(l)}</option>`).join('')}</select></label>` : ''}
+      ${Array.isArray(e.rates) ? `<label class="stack" style="gap:4px"><span class="small muted">Output rate</span><select class="input" data-eng="rate" ${e.bitperfect ? 'disabled' : ''}>${e.rates.map(([v, l]) => `<option value="${esc(v)}" ${String(v) === String(e.rate) ? 'selected' : ''}>${esc(l)}</option>`).join('')}</select></label>` : ''}
+      ${e.output ? `<span class="small muted">Output: ${esc(e.output)}</span>` : ''}
+    </div>`;
+  const set = (patch) => { playback.save({ ...p, ...patch }, { serverPrefs }).then(c => { p = c; paint(); }); p = { ...p, ...patch }; paint(); };
+  paint();
+}
+
+/** Settings → Appearance: theme, accent colour, faded/solid background. */
 async function renderAppearance(el) {
   const appearance = await import('../appearance.js');
   const { session } = await import('../app.js');
@@ -497,8 +552,6 @@ async function renderAppearance(el) {
           <input class="input" id="custom-hex" value="${esc(p.custom)}" maxlength="7" spellcheck="false" aria-label="Hex colour">
           ${p.accent === 'custom' ? '<span class="badge accent">in use</span>' : ''}</div></div>
       <div class="stack" style="gap:6px"><h3>Background</h3>${seg('background', [['fade', 'Faded colour'], ['solid', 'Solid']])}</div>
-      <div class="stack" style="gap:6px"><h3>Width</h3>${seg('width', [['comfortable', 'Comfortable'], ['wide', 'Full width']])}
-        <span class="small muted">Comfortable keeps pages from stretching across very wide screens.</span></div>
       <div class="row"><button class="btn primary" type="button">${icon.check}Example button</button><span class="badge accent">Example badge</span></div>
     </div>`;
     el.querySelectorAll('.seg button').forEach(b => b.onclick = () => set({ [b.closest('.seg').dataset.key]: b.dataset.v }));

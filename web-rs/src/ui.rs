@@ -201,6 +201,15 @@ pub mod fmt {
         if ts <= 0.0 { return "—".into(); }
         js_sys::Date::new(&wasm_bindgen::JsValue::from_f64(ts * 1000.0)).to_locale_string("default", &wasm_bindgen::JsValue::UNDEFINED).into()
     }
+    /// `fmt.day(ts)`: `toLocaleDateString(undefined, { year: 'numeric', month: 'short', day: 'numeric' })`.
+    pub fn day(ts: f64) -> String {
+        if ts <= 0.0 { return "—".into(); }
+        let opts = js_sys::Object::new();
+        let _ = js_sys::Reflect::set(&opts, &"year".into(), &"numeric".into());
+        let _ = js_sys::Reflect::set(&opts, &"month".into(), &"short".into());
+        let _ = js_sys::Reflect::set(&opts, &"day".into(), &"numeric".into());
+        js_sys::Date::new(&wasm_bindgen::JsValue::from_f64(ts * 1000.0)).to_locale_date_string("default", &opts).into()
+    }
     /// `fmt.num(n)`: `(n || 0).toLocaleString()`.
     pub fn num(n: f64) -> String {
         js_sys::Number::from(n).to_locale_string("default").into()
@@ -289,6 +298,40 @@ pub fn skeleton_grid(n: usize) -> String {
 }
 
 /// `copyText(t)`.
+/// `navigator.share` when the browser has it.
+fn navigator_share() -> Option<js_sys::Function> {
+    let nav: wasm_bindgen::JsValue = dom::window().navigator().into();
+    js_sys::Reflect::get(&nav, &"share".into()).ok().and_then(|f| f.dyn_into::<js_sys::Function>().ok())
+}
+/// Share a library song: the system share sheet where there is one, otherwise the link goes to the clipboard.
+pub async fn share_track(t: Value) {
+    match crate::api::post_empty(&format!("/library/tracks/{}/share", t.s("id"))).await {
+        Ok(r) => {
+            let href = dom::location().href().unwrap_or_default();
+            let url = match web_sys::Url::new_with_base(&r.s("path"), &href) {
+                Ok(u) => u.href(),
+                Err(e) => { toast(&e.dyn_ref::<js_sys::Error>().map(|e| String::from(e.message())).unwrap_or_else(|| e.as_string().unwrap_or_default()), "err"); return; }
+            };
+            if let Some(share) = navigator_share() {
+                let data = js_sys::Object::new();
+                let _ = js_sys::Reflect::set(&data, &"title".into(), &t.s("title").into());
+                let _ = js_sys::Reflect::set(&data, &"text".into(), &format!("{} – {}", t.s("title"), t.s("artist")).into());
+                let _ = js_sys::Reflect::set(&data, &"url".into(), &url.as_str().into());
+                let nav: wasm_bindgen::JsValue = dom::window().navigator().into();
+                if let Ok(p) = share.call1(&nav, &data) {
+                    if let Ok(p) = p.dyn_into::<js_sys::Promise>() {
+                        if wasm_bindgen_futures::JsFuture::from(p).await.is_ok() { return; }
+                    }
+                }
+                // cancelled → copy
+            }
+            copy_text(&url);
+            toast("Link copied – anyone with it can play this song", "ok");
+        }
+        Err(e) => toast(&e.message, "err"),
+    }
+}
+
 pub fn copy_text(t: &str) {
     let t = t.to_string();
     dom::spawn(async move {
