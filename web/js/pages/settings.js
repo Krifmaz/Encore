@@ -79,6 +79,7 @@ const SECTIONS = [
     S('soulseek_username', 'Soulseek username', 'text', { help: 'New name + password = new account. Don’t use the same login in slskd or another client at the same time.' }),
     S('soulseek_password', 'Soulseek password', 'password'),
     S('soulseek_port', 'Listen port', 'number', { help: 'TCP port the built-in client listens on – forward it on your router (and publish it in Docker) so users behind firewalls can send to you' }),
+    S('soulseek_port_file', 'Listen port from a file (VPN port forwarding)', 'text', { help: 'Behind gluetun: mount its folder and point this at forwarded_port – the port the VPN assigned is used and followed when it changes' }),
     S('soulseek_share', 'Share your library on Soulseek (recommended)', 'bool', { help: 'The network runs on sharing; many users refuse downloads to people who share nothing. Only the library folder is shared, read-only.' }),
     S('soulseek_upload_slots', 'Upload slots', 'number'),
     S('slskd_url', 'slskd URL', 'text', { help: 'Only for the slskd client, e.g. http://slskd:5030' }),

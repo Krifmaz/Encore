@@ -69,18 +69,29 @@ services:
   #     - "50300:50300"   # Soulseek peer port (needed for good speeds); the web UI stays private
   #   networks: [music]
 
-  # ── Running slskd through a VPN instead? ──────────────────────────────────
-  # Put slskd in gluetun's network namespace and point Encore at gluetun:
+  # ── Soulseek through a VPN? ───────────────────────────────────────────────
+  # Run Encore inside gluetun's network namespace. The VPN's forwarded port becomes the Soulseek
+  # listen port automatically (SOULSEEK_PORT_FILE), the web UI is published through gluetun:
   #
-  # gluetun-slsk:
+  # gluetun:
   #   image: qmcgaw/gluetun
   #   cap_add: [NET_ADMIN]
-  #   environment: [VPN_SERVICE_PROVIDER=..., FIREWALL_VPN_INPUT_PORTS=50300]
-  #   networks: [music]
-  # slskd:
-  #   network_mode: "container:gluetun-slsk"   # remove `networks:` and `ports:` from slskd
-  #
-  # …and in Encore: SLSKD_URL=http://gluetun-slsk:5030
+  #   devices: [/dev/net/tun:/dev/net/tun]
+  #   ports: ["8080:8080"]                       # Encore's web UI, published here instead
+  #   environment:
+  #     - VPN_SERVICE_PROVIDER=protonvpn         # any provider with port forwarding
+  #     - VPN_TYPE=wireguard
+  #     - WIREGUARD_PRIVATE_KEY=${WIREGUARD_PRIVATE_KEY}
+  #     - PORT_FORWARD_ONLY=on
+  #     - VPN_PORT_FORWARDING=on
+  #     - VPN_PORT_FORWARDING_STATUS_FILE=/gluetun/forwarded_port
+  #     - FIREWALL_INPUT_PORTS=8080              # let the web UI in through the VPN container
+  #   volumes: ["${APPDATA:-/opt/appdata}/gluetun:/gluetun"]
+  # encore:
+  #   network_mode: "container:gluetun"          # and remove `ports:` and `networks:` from encore
+  #   environment: [..., SOULSEEK_PORT_FILE=/gluetun/forwarded_port]
+  #   volumes: [..., "${APPDATA:-/opt/appdata}/gluetun:/gluetun:ro"]
+  #   depends_on: { gluetun: { condition: service_healthy, restart: true } }
 
 networks:
   music:

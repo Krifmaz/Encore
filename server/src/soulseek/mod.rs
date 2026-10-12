@@ -43,11 +43,23 @@ fn settings(st: &AppState) -> Settings {
         username: st.cfg.str("soulseek_username").trim().to_string(),
         password: st.cfg.str("soulseek_password"),
         server: std::env::var("SOULSEEK_SERVER").ok().filter(|s| !s.trim().is_empty()).unwrap_or_else(|| client::DEFAULT_SERVER.to_string()),
-        listen_port: st.cfg.int("soulseek_port").clamp(1, 65535) as u16,
+        listen_port: listen_port(st),
         download_dir: Path::new(&st.cfg.str("slskd_download_path")).to_path_buf(),
         upload_slots: st.cfg.int("soulseek_upload_slots").clamp(1, 20) as usize,
         share: st.cfg.bool("soulseek_share"),
     }
+}
+
+/// The port we listen on: the configured one, or the one a VPN wrote to a file (gluetun's
+/// forwarded_port) – that file is re-read every supervisor tick, so a changed port restarts the client.
+fn listen_port(st: &AppState) -> u16 {
+    let file = st.cfg.str("soulseek_port_file");
+    if !file.trim().is_empty() {
+        if let Some(p) = std::fs::read_to_string(file.trim()).ok().and_then(|s| s.trim().parse::<u16>().ok()).filter(|p| *p > 0) {
+            return p;
+        }
+    }
+    st.cfg.int("soulseek_port").clamp(1, 65535) as u16
 }
 
 /// The library as a share list, straight from the tracks table.

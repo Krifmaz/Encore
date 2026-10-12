@@ -91,6 +91,7 @@ Encore and the download clients must see the **same files at the same paths**:
   ```
 
   - **slskd behind gluetun** (`network_mode: container:gluetun-slsk`): slskd has no hostname of its own, so use the VPN container's name, e.g. `SLSKD_URL=http://gluetun-slsk:5030`.
+- **Built-in client through a VPN**: run Encore in gluetun's network namespace (`network_mode: container:gluetun`, publish 8080 on gluetun with `FIREWALL_INPUT_PORTS=8080`) and set `SOULSEEK_PORT_FILE=/gluetun/forwarded_port` with gluetun's folder mounted read-only – the port the VPN forwards is used as the Soulseek listen port and followed when it changes. The commented block in `docker-compose.yml` has the full example.
   - **slskd permissions:** slskd ignores `PUID`/`PGID`. Run it with `user: "1000:1000"` and `chown -R 1000:1000` its config, downloads and incomplete folders, or it can't write to them.
   - Since slskd 0.26.0 the top-level `permissions:` key in `slskd.yml` moved to `transfers.download.destination.permissions`; an old config stops slskd from starting (see Troubleshooting).
 

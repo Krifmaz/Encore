@@ -414,6 +414,11 @@
   "default": 2234,
   "secret": false
  },
+ "soulseek_port_file": {
+  "env": "SOULSEEK_PORT_FILE",
+  "default": "",
+  "secret": false
+ },
  "soulseek_share": {
   "env": "SOULSEEK_SHARE",
   "default": true,
