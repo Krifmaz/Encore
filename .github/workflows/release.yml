@@ -1,8 +1,10 @@
 name: release
 
-# Every release is kept – nothing is overwritten. Versions are the release date (America/Detroit) plus
-# the edition of that day: 2026.10.11.1, 2026.10.11.2 … Pre-releases end in -edge.
-#   Start one: Actions → release → Run workflow (tick "pre-release" for an edge build), or push a tag v2026.10.11.1.
+# One rolling release: every run writes over the GitHub release tagged "edge" (new files, new notes, new
+# commit). Versions are the release date (America/Detroit) plus the edition of that day: 2026.10.11.1,
+# 2026.10.11.2 … Pre-releases end in -edge. Each version also gets a plain git tag, for the counter and
+# for "what changed since".
+#   Start one: Actions → release → Run workflow (tick "pre-release" for an edge build).
 #   Tick "apps" to also build the desktop installers and the Android APK (the macOS runner costs 10× minutes,
 #   so they are off by default and a release without them is just the server + Docker image). They can be
 #   built on your own machine instead and attached to the release: scripts/release-apps.sh.
@@ -19,8 +21,6 @@ on:
         description: "Also build desktop + Android apps (slow, costs macOS minutes)"
         type: boolean
         default: false
-  push:
-    tags: ["v*"]
 
 permissions:
   contents: write
@@ -218,19 +218,27 @@ jobs:
 
           ---
           ### Install
-          * **Docker**: \`ghcr.io/krifmaz/encore:$V\` (or \`:latest\` for the newest release, \`:edge\` for the newest of any kind) · compose file attached
+          * **Docker**: \`ghcr.io/krifmaz/encore:edge\` (this build; \`:$V\` pins it, \`:latest\` is the newest full release) · compose file attached
           * **Linux without Docker**: \`encore-$V-linux-x86_64.tar.gz\` / \`-aarch64\` – run \`ENCORE_CONFIG_DIR=./config ENCORE_STATIC_DIR=./static ./encore\`
           EOT
           if [ "$APPS" = success ]; then cat >> notes.md <<EOT
           * **Android**: \`Encore-android-$V.apk\` · **Windows**: \`Encore-Setup-$V.exe\` · **macOS**: the .dmg (unsigned: right-click → Open the first time) · **Linux desktop**: .AppImage or .deb
           EOT
-          else echo "* **Apps**: the desktop and Android apps were not rebuilt for this release – use the newest release that has them." >> notes.md; fi
+          else echo "* **Apps**: the desktop and Android apps were not rebuilt for this release – the ones attached are from the last build that made them." >> notes.md; fi
           sed -i 's/^          //' notes.md
-      - name: Publish
+      - name: Publish (one rolling release, written over)
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           V: ${{ needs.version.outputs.version }}
           PRE: ${{ needs.version.outputs.prerelease }}
+          APPS: ${{ needs.apps.result }}
         run: |
+          # the version counter and "changes since" live in plain git tags (a push with GITHUB_TOKEN starts no run)
+          git tag "v$V" "$GITHUB_SHA" && git push origin "v$V"
+          # keep the app installers from the last run that built them when this run didn't
+          if [ "$APPS" != success ] && gh release view edge >/dev/null 2>&1; then
+            gh release download edge --dir out --pattern 'Encore-*' 2>/dev/null || true
+          fi
           if [ "$PRE" = true ]; then FLAGS="--prerelease"; else FLAGS="--latest"; fi
-          gh release create "v$V" out/* --title "Encore $V" --notes-file notes.md --target "$GITHUB_SHA" $FLAGS
+          gh release delete edge --yes --cleanup-tag 2>/dev/null || true
+          gh release create edge out/* --title "Encore $V" --notes-file notes.md --target "$GITHUB_SHA" $FLAGS

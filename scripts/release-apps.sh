@@ -4,8 +4,8 @@
 # minutes. Each OS builds its own installer (Windows → .exe, Linux → .AppImage/.deb/.rpm,
 # macOS → .dmg); Android builds anywhere the SDK + NDK are installed.
 #
-#   scripts/release-apps.sh                      # newest release on GitHub, desktop + Android, upload
-#   scripts/release-apps.sh 2026.10.12.1-edge    # a specific version (the release is created if missing)
+#   scripts/release-apps.sh                      # version of the rolling "edge" release, desktop + Android, upload
+#   scripts/release-apps.sh 2026.10.12.1-edge    # name the files after this version instead
 #   scripts/release-apps.sh --android            # only the APK; --desktop for only the installer
 #   scripts/release-apps.sh --no-upload          # just build into out/
 #   scripts/release-apps.sh --dry-run            # show what would run
@@ -31,10 +31,10 @@ for a in "$@"; do
 done
 run() { echo "+ $*"; [ "$DRY" = 1 ] || "$@"; }
 
-# ---- version: given, or the newest release on GitHub -------------------------------------------
+# ---- version: given, or the one the rolling release carries in its title ("Encore 2026.10.12.1-edge")
 if [ -z "$V" ]; then
-  V=$(gh release list --limit 1 --json tagName -q '.[0].tagName' 2>/dev/null | sed 's/^v//') || true
-  [ -n "$V" ] || { echo "No release found – pass the version, e.g. $0 2026.10.12.1-edge"; exit 1; }
+  V=$(gh release view edge --json name -q .name 2>/dev/null | sed 's/^Encore //') || true
+  [ -n "$V" ] || { echo "No edge release found – pass the version, e.g. $0 2026.10.12.1-edge"; exit 1; }
 fi
 echo "$V" | grep -Eq '^[0-9]{4}\.[0-9]{2}\.[0-9]{2}\.[0-9]+(-[a-z0-9.]+)?$' || { echo "bad version $V (want YYYY.MM.DD.N[-edge])"; exit 1; }
 BASE="${V%%-*}"; SUFFIX="${V#"$BASE"}"
@@ -108,8 +108,8 @@ echo "== built"
 ls -la out 2>/dev/null || true
 [ "$UPLOAD" = 1 ] || exit 0
 
-# ---- attach to the release -----------------------------------------------------------------------
-TAG="v$V"
+# ---- attach to the rolling release ----------------------------------------------------------------
+TAG=edge
 if ! gh release view "$TAG" >/dev/null 2>&1; then
   NOTES=(--generate-notes); [ -f "docs/releases/$V.md" ] && NOTES=(--notes-file "docs/releases/$V.md")
   FLAGS=(); [ "$PRE" = 1 ] && FLAGS=(--prerelease)
@@ -117,6 +117,10 @@ if ! gh release view "$TAG" >/dev/null 2>&1; then
 fi
 FILES=(out/*"$V"*)
 [ -e "${FILES[0]}" ] || { echo "nothing to upload"; exit 1; }
+# older installers of other versions go: the release only ever carries one set
+for old in $(gh release view "$TAG" --json assets -q '.assets[].name' | grep -E '^Encore-(Setup-|android-|[0-9])' | grep -v -- "$V" || true); do
+  run gh release delete-asset "$TAG" "$old" --yes
+done
 run gh release upload "$TAG" "${FILES[@]}" --clobber
 
 # the workflow's notes say the apps were not rebuilt when it ran without them – correct that line

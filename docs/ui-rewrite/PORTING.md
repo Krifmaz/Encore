@@ -52,7 +52,7 @@ raw strings whenever the HTML contains `"#`, e.g. `href="#/library"`).
 1. Read the JS file completely, the toolkit files, CONTRACT.md and the stub you replace (web-rs/src/…).
 2. Write the Rust module. Keep the `//!` header (replace "TODO: port of" with "Port of"). Keep every `pub fn` of the contract with
    exactly those signatures; everything else private. Mirror the JS function names in snake_case.
-3. `cd web-rs && CARGO_TARGET_DIR=/home/user/test/web-rs/target-shared cargo check --target wasm32-unknown-unknown` – fix every
+3. `cd web-rs && cargo check --target wasm32-unknown-unknown` – fix every
    error AND warning that is in your file (errors in other stubs are not yours). If you truly need a web-sys feature that is
    missing, add it to Cargo.toml and mention it in your result.
 4. Re-read the JS once more against your Rust: every string, every class, every branch. Note anything you could not port.

@@ -59,7 +59,7 @@ GitHub Actions publishes `ghcr.io/krifmaz/encore` for amd64 and arm64:
 | `:edge` | The newest build, pre-release or release – always the newest Encore |
 | `:2026.10.11.1` … | One exact release (versions are the release date plus the edition of that day; pre-releases end in `-edge`) |
 
-Every release, with notes, the Android/desktop apps and Linux binaries, is on the [Releases page](https://github.com/Krifmaz/Encore/releases). If the repository is private, the image is too – run `docker login ghcr.io` once with a token that has `read:packages`.
+There is one GitHub release, tagged `edge`, and every build writes over it: the newest notes, server archives, compose file and Android/desktop installers are always at [github.com/Krifmaz/Encore/releases/tag/edge](https://github.com/Krifmaz/Encore/releases/tag/edge). Older versions stay reachable as Docker tags and git tags. If the repository is private, the image is too – run `docker login ghcr.io` once with a token that has `read:packages`.
 
 ## Apps
 
