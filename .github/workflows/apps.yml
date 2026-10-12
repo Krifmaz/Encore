@@ -45,10 +45,13 @@ jobs:
         with:
           tool: tauri-cli@2.12.2
       - name: Signing key
-        # the Gradle release config falls back to the debug key, which a fresh runner doesn't have yet
+        # the Gradle release config falls back to the debug key, which a fresh runner doesn't have yet.
+        # Gradle looks for it under $XDG_CONFIG_HOME/.android on the runner, so pin the folder explicitly.
         run: |
-          mkdir -p ~/.android
-          [ -f ~/.android/debug.keystore ] || keytool -genkeypair -v -keystore ~/.android/debug.keystore -storepass android \
+          D="$HOME/.android"
+          echo "ANDROID_USER_HOME=$D" >> "$GITHUB_ENV"
+          mkdir -p "$D"
+          [ -f "$D/debug.keystore" ] || keytool -genkeypair -v -keystore "$D/debug.keystore" -storepass android \
             -alias androiddebugkey -keypass android -dname "CN=Android Debug,O=Android,C=US" -keyalg RSA -keysize 2048 -validity 10000
       - name: Build APK
         working-directory: clients/app

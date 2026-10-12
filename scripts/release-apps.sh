@@ -92,10 +92,11 @@ if [ "$ANDROID" = 1 ]; then
   fi
   command -v java >/dev/null || { echo "java not found – install a JDK 17 or newer"; exit 1; }
   run rustup target add aarch64-linux-android armv7-linux-androideabi
-  # the Gradle release config falls back to the debug key; make sure one exists
-  if [ -z "${ANDROID_KEYSTORE_FILE:-}" ] && [ ! -f "$HOME/.android/debug.keystore" ]; then
-    mkdir -p "$HOME/.android"
-    run keytool -genkeypair -v -keystore "$HOME/.android/debug.keystore" -storepass android -alias androiddebugkey -keypass android \
+  # the Gradle release config falls back to the debug key; make sure one exists where Gradle looks
+  export ANDROID_USER_HOME="${ANDROID_USER_HOME:-$HOME/.android}"
+  if [ -z "${ANDROID_KEYSTORE_FILE:-}" ] && [ ! -f "$ANDROID_USER_HOME/debug.keystore" ]; then
+    mkdir -p "$ANDROID_USER_HOME"
+    run keytool -genkeypair -v -keystore "$ANDROID_USER_HOME/debug.keystore" -storepass android -alias androiddebugkey -keypass android \
       -dname "CN=Android Debug,O=Android,C=US" -keyalg RSA -keysize 2048 -validity 10000
   fi
   (cd clients/app && run cargo tauri android build --ci --apk --target aarch64 --target armv7 \
