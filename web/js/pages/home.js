@@ -1,5 +1,5 @@
 import { api } from '../api.js';
-import { art, emptyState, esc, fmt, icon, toast } from '../ui.js';
+import { art, emptyState, esc, fmt, icon, modal, toast } from '../ui.js';
 import { bindRequestActions, bindTiles, libraryTile, requestRow } from './common.js';
 
 export async function render(view, ctx) {
@@ -13,6 +13,7 @@ export async function render(view, ctx) {
       <form class="search" id="home-link" style="margin-top:10px">${icon.link}<input class="input" name="url" type="url" enterkeyhint="go" placeholder="…or paste a song, album or playlist link to download" autocomplete="off"></form>
     </section>
     <div class="stats mt" id="stats"></div>
+    <div id="made-for-you"></div>
     <div id="new-releases"></div>
     <div id="fy-preview"></div>
     <div id="reqs-wrap" class="hidden"><div class="section-head"><h2>Your downloads in progress</h2><a class="btn sm" href="#/requests">All requests</a></div>
@@ -57,6 +58,38 @@ export async function render(view, ctx) {
       <div class="stat"><b>${fmt.num(s.me.requests)}</b><span>things you requested${s.me.rank ? ` · #${s.me.rank} on the <a href="#/leaderboard">leaderboard</a>` : ''}</span></div>
       ${s.me.top_artist ? `<div class="stat"><b class="ellipsis" style="display:block">${esc(s.me.top_artist)}</b><span>your most played artist</span></div>` : ''}
       ${s.fun ? `<div class="stat"><b>${esc(s.fun.value)}</b><span>${esc(s.fun.label)}</span></div>` : ''}`;
+  }).catch(() => {});
+
+  // ListenBrainz's own playlists for you – only once ListenBrainz is connected
+  api.get('/discover/made-for-you').then(async d => {
+    if (!d.connected || !d.playlists?.length || !view.isConnected) return;
+    const fy = await import('./foryou.js');
+    const playOwned = (p) => import('../player.js').then(pl => pl.playQueue(p.tracks.filter(t => t.library).map(t => t.library), 0, { context: 'list' }));
+    const tile = (p, i) => `<div class="tile" data-mfy="${i}">
+      <div class="art">${p.covers.length >= 4 ? `<div class="collage">${p.covers.slice(0, 4).map(c => `<div class="cell">${art(c, p.title)}</div>`).join('')}</div>` : p.covers.length ? art(p.covers[0], p.title) : `<div class="ph">${icon.spark}</div>`}
+        <div class="corner"><span class="badge">${p.owned}/${p.total} in library</span></div>
+        <div class="overlay">${p.owned ? `<button class="fab" data-mfy-play="${i}" aria-label="Play">${icon.play}</button>` : ''}</div></div>
+      <div class="t ellipsis" title="${esc(p.title)}">${esc(p.title)}</div>
+      <div class="s ellipsis">${esc(fy.KIND[p.kind] || 'From ListenBrainz')}</div></div>`;
+    const el = view.querySelector('#made-for-you');
+    el.innerHTML = `<div class="section-head"><div><h2>Made for you</h2><div class="small muted">ListenBrainz builds these from what ${esc(d.user)} listens to</div></div>
+        <a class="btn sm ghost" target="_blank" rel="noopener" href="https://listenbrainz.org/user/${encodeURIComponent(d.user)}/playlists/" title="On ListenBrainz">${icon.external}</a></div>
+      <div class="grid">${d.playlists.map(tile).join('')}</div>`;
+    el.addEventListener('click', (e) => {
+      const b = e.target.closest('[data-mfy-play]');
+      if (b) { e.stopPropagation(); return playOwned(d.playlists[+b.dataset.mfyPlay]); }
+      const t = e.target.closest('[data-mfy]');
+      if (!t) return;
+      const p = d.playlists[+t.dataset.mfy];
+      const missing = p.tracks.filter(x => !x.library && !x.request_status);
+      const m = modal({ title: p.title, wide: true, body: `<div class="row wrap" style="justify-content:space-between;margin-bottom:10px"><span class="small muted">${esc(fy.KIND[p.kind] || '')} · ${p.owned}/${p.total} in library</span>
+          <span class="row">${p.owned ? `<button class="btn sm" id="mfy-play">${icon.play}Play owned</button>` : ''}${missing.length ? `<button class="btn sm primary" id="mfy-req">${icon.download}Request ${missing.length} missing</button>` : ''}</span></div>
+        <div class="table-wrap"><table class="table"><tbody>${p.tracks.map(fy.trackRow).join('')}</tbody></table></div>` });
+      const body = m.el.querySelector('.modal-body');
+      fy.bindTracks(body, p.tracks);
+      body.querySelector('#mfy-play')?.addEventListener('click', () => playOwned(p));
+      body.querySelector('#mfy-req')?.addEventListener('click', (e) => fy.requestAll(missing, e.currentTarget));
+    });
   }).catch(() => {});
 
   // new releases from library artists

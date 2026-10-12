@@ -14,10 +14,10 @@ use wasm_bindgen::JsValue;
 use web_sys::Element;
 
 /// A track the way the JS held it: one shared object, mutated in place (`t.request_status = …`).
-type Track = Rc<RefCell<Value>>;
-type Tracks = Rc<Vec<Track>>;
-fn shared(tracks: Vec<Value>) -> Tracks { Rc::new(tracks.into_iter().map(|t| Rc::new(RefCell::new(t))).collect()) }
-fn is_missing(t: &Track) -> bool { let t = t.borrow(); !t.truthy("library") && !t.truthy("request_status") }
+pub(crate) type Track = Rc<RefCell<Value>>;
+pub(crate) type Tracks = Rc<Vec<Track>>;
+pub(crate) fn shared(tracks: Vec<Value>) -> Tracks { Rc::new(tracks.into_iter().map(|t| Rc::new(RefCell::new(t))).collect()) }
+pub(crate) fn is_missing(t: &Track) -> bool { let t = t.borrow(); !t.truthy("library") && !t.truthy("request_status") }
 fn in_library(t: &Track) -> bool { t.borrow().truthy("library") }
 
 /// `${n}` of a JS number (2.5 → "2.5", 100 → "100", NaN → "NaN").
@@ -29,7 +29,7 @@ fn js_num(n: f64) -> String {
 fn js_number(s: &str) -> f64 { js_sys::Number::new(&JsValue::from_str(s)).value_of() }
 
 /// `KIND[kind] || ''`.
-fn kind(k: &str) -> &'static str {
+pub(crate) fn kind(k: &str) -> &'static str {
     match k {
         "weekly-exploration" => "New music picked for you every Monday",
         "daily-jams" => "Songs you love, refreshed daily",
@@ -40,7 +40,7 @@ fn kind(k: &str) -> &'static str {
 }
 
 /// One song row: play it if it's in the library, otherwise request it.
-fn track_row(t: &Value, i: usize) -> String {
+pub(crate) fn track_row(t: &Value, i: usize) -> String {
     let title = t.s("title");
     let artist = t.s("artist");
     let album = t.s("album");
@@ -92,7 +92,7 @@ fn set_request_status(t: &Track, r: &Value) {
 }
 
 /// Wire play / request / more-like-this on a table of track rows.
-fn bind_tracks(root: &Element, tracks: Tracks) {
+pub(crate) fn bind_tracks(root: &Element, tracks: Tracks) {
     dom::on(root, "click", move |e| {
         if let Some(p) = dom::closest(e, "[data-play]") {
             let Ok(i) = dom::data(&p, "play").parse::<usize>() else { return };
@@ -159,7 +159,7 @@ pub fn more_like_this(artist: &str, title: &str, mbid: &str) {
 }
 
 /// `requestAll(tracks, btn)`: request every track in turn; stops at the request limit.
-async fn request_all(tracks: Vec<Track>, btn: Element) {
+pub(crate) async fn request_all(tracks: Vec<Track>, btn: Element) {
     dom::set_disabled(&btn, true);
     let mut ok = 0;
     for t in &tracks {

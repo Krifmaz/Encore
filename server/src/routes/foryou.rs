@@ -21,6 +21,7 @@ const JSPF_TR: &str = "https://musicbrainz.org/doc/jspf#track";
 pub fn router() -> Router<AppState> {
     Router::new()
         .route("/api/discover/for-you", get(for_you))
+        .route("/api/discover/made-for-you", get(made_for_you))
         .route("/api/discover/artist-picture", get(artist_picture))
         .route("/api/discover/artist/{mbid}/similar", get(artist_similar))
         .route("/api/discover/artist/{mbid}/extras", get(artist_extras))
@@ -272,6 +273,42 @@ async fn lastfm_for_you(st: &AppState, user: &str, uid: i64) -> anyhow::Result<V
         tracks.truncate(30);
         Ok(json!({ "user": user, "artists": artists, "albums": albums, "tracks": tracks }))
     }).await
+}
+
+/// ListenBrainz's own playlists for this user (Daily Jams, Weekly Jams, Weekly Exploration), for the home page.
+async fn made_for_you(State(st): State<AppState>, User(u): User) -> ApiResult<Json<Value>> {
+    let Some(name) = lb_user(&st, u.i("id")) else { return Ok(Json(json!({ "connected": false, "playlists": [] }))) };
+    let mut out = vec![];
+    let mut error = Value::Null;
+    match lb_playlists(&st, &name).await {
+        Ok(mut pls) => {
+            let order = |k: &str| match k { "daily-jams" => 0, "weekly-jams" => 1, "weekly-exploration" => 2, _ => 9 };
+            pls.sort_by_key(|p| order(p["kind"].as_str().unwrap_or("")));
+            let results = futures_util::future::join_all(pls.iter().map(|p| lb_playlist_tracks(&st, p["id"].as_str().unwrap_or("")))).await;
+            for (mut p, tr) in pls.into_iter().zip(results) {
+                let Ok(tr) = tr else { continue };
+                let tr = annotate_tracks(&st, tr);
+                let owned = tr.iter().filter(|t| !t["library"].is_null()).count();
+                // up to four distinct covers for the tile – our own for owned songs, Cover Art Archive otherwise
+                let mut covers: Vec<String> = vec![];
+                for t in &tr {
+                    let own = st_(&t["library"]["album_id"]);
+                    let c = if !own.is_empty() { format!("/api/library/albums/{own}/cover") } else { st_(&t["cover"]) };
+                    if !c.is_empty() && !covers.contains(&c) {
+                        covers.push(c);
+                    }
+                    if covers.len() == 4 { break; }
+                }
+                p["owned"] = json!(owned);
+                p["total"] = json!(tr.len());
+                p["covers"] = json!(covers);
+                p["tracks"] = json!(tr);
+                out.push(p);
+            }
+        }
+        Err(e) => error = json!(format!("ListenBrainz: {e}")),
+    }
+    Ok(Json(json!({ "connected": true, "user": name, "playlists": out, "error": error })))
 }
 
 async fn for_you(State(st): State<AppState>, User(u): User) -> ApiResult<Json<Value>> {

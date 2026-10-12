@@ -5,7 +5,8 @@ use crate::dom::{self, EventListener};
 use crate::json::{json, J};
 use crate::pages::common::{bind_request_actions, bind_tiles, library_tile, request_row};
 use crate::player;
-use crate::ui::{self, art, empty_state, esc, icon, toast};
+use crate::pages::foryou;
+use crate::ui::{self, art, empty_state, esc, icon, modal, toast, ModalOpts};
 use gloo_events::EventListenerOptions;
 use serde_json::Value;
 use std::rc::Rc;
@@ -41,6 +42,7 @@ pub fn render(view: Element, ctx: Ctx) -> PageFuture {
       <form class="search" id="home-link" style="margin-top:10px">{link}<input class="input" name="url" type="url" enterkeyhint="go" placeholder="…or paste a song, album or playlist link to download" autocomplete="off"></form>
     </section>
     <div class="stats mt" id="stats"></div>
+    <div id="made-for-you"></div>
     <div id="new-releases"></div>
     <div id="fy-preview"></div>
     <div id="reqs-wrap" class="hidden"><div class="section-head"><h2>Your downloads in progress</h2><a class="btn sm" href="#/requests">All requests</a></div>
@@ -145,6 +147,76 @@ pub fn render(view: Element, ctx: Ctx) -> PageFuture {
                     date = esc(&r.s("date")),
                     kind = if r.truthy("type") && r.s("type") != "Album" { format!(" · {}", esc(&r.s("type"))) } else { String::new() },
                 )).collect::<String>()));
+            });
+        }
+
+        // ListenBrainz's own playlists for you – only once ListenBrainz is connected
+        {
+            let v = view.clone();
+            dom::spawn(async move {
+                let Ok(d) = api::get("/discover/made-for-you").await else { return };
+                let pls: Vec<Value> = d.a("playlists");
+                if !d.truthy("connected") || pls.is_empty() || !v.is_connected() { return; }
+                let user = d.s("user");
+                let tile = |p: &Value, i: usize| -> String {
+                    let covers: Vec<String> = p.a("covers").iter().map(|c| c.as_str().unwrap_or("").to_string()).collect();
+                    let art_html = if covers.len() >= 4 {
+                        format!(r#"<div class="collage">{}</div>"#, covers.iter().take(4).map(|c| format!(r#"<div class="cell">{}</div>"#, art(c, &p.s("title"), ""))).collect::<String>())
+                    } else if let Some(c) = covers.first() {
+                        art(c, &p.s("title"), "")
+                    } else {
+                        format!(r#"<div class="ph">{}</div>"#, icon("spark"))
+                    };
+                    let k = foryou::kind(&p.s("kind"));
+                    format!(r#"<div class="tile" data-mfy="{i}">
+      <div class="art">{art_html}
+        <div class="corner"><span class="badge">{owned}/{total} in library</span></div>
+        <div class="overlay">{play}</div></div>
+      <div class="t ellipsis" title="{title}">{title}</div>
+      <div class="s ellipsis">{kind}</div></div>"#,
+                        owned = p.s("owned"), total = p.s("total"),
+                        play = if p.truthy("owned") { format!(r#"<button class="fab" data-mfy-play="{i}" aria-label="Play">{}</button>"#, icon("play")) } else { String::new() },
+                        title = esc(&p.s("title")), kind = esc(if k.is_empty() { "From ListenBrainz" } else { k }))
+                };
+                let Some(el) = dom::qs_in(&v, "#made-for-you") else { return };
+                dom::set_html(&el, &format!(r##"<div class="section-head"><div><h2>Made for you</h2><div class="small muted">ListenBrainz builds these from what {} listens to</div></div>
+        <a class="btn sm ghost" target="_blank" rel="noopener" href="https://listenbrainz.org/user/{}/playlists/" title="On ListenBrainz">{}</a></div>
+      <div class="grid">{}</div>"##, esc(&user), String::from(js_sys::encode_uri_component(&user)), icon("external"),
+                    pls.iter().enumerate().map(|(i, p)| tile(p, i)).collect::<String>()));
+                let pls = Rc::new(pls);
+                let play_owned = |p: &Value| player::play_queue(p.a("tracks").iter().filter(|t| t.truthy("library")).map(|t| t.g("library").clone()).collect(), 0, "list");
+                dom::on(&el, "click", move |e| {
+                    if let Some(b) = dom::closest(e, "[data-mfy-play]") {
+                        dom::stop(e);
+                        if let Some(p) = dom::data(&b, "mfy-play").parse::<usize>().ok().and_then(|i| pls.get(i)) { play_owned(p); }
+                        return;
+                    }
+                    let Some(t) = dom::closest(e, "[data-mfy]") else { return };
+                    let Some(p) = dom::data(&t, "mfy").parse::<usize>().ok().and_then(|i| pls.get(i)).cloned() else { return };
+                    let tracks = foryou::shared(p.a("tracks"));
+                    let missing: Vec<foryou::Track> = tracks.iter().filter(|t| foryou::is_missing(t)).cloned().collect();
+                    let k = foryou::kind(&p.s("kind"));
+                    let m = modal(ModalOpts::new(&p.s("title"), &format!(r#"<div class="row wrap" style="justify-content:space-between;margin-bottom:10px"><span class="small muted">{} · {}/{} in library</span>
+          <span class="row">{}{}</span></div>
+        <div class="table-wrap"><table class="table"><tbody>{}</tbody></table></div>"#,
+                        esc(k), p.s("owned"), p.s("total"),
+                        if p.truthy("owned") { format!(r#"<button class="btn sm" id="mfy-play">{}Play owned</button>"#, icon("play")) } else { String::new() },
+                        if !missing.is_empty() { format!(r#"<button class="btn sm primary" id="mfy-req">{}Request {} missing</button>"#, icon("download"), missing.len()) } else { String::new() },
+                        tracks.iter().enumerate().map(|(i, t)| foryou::track_row(&t.borrow(), i)).collect::<String>())).wide(true));
+                    let Some(body) = m.qs(".modal-body") else { return };
+                    foryou::bind_tracks(&body, tracks);
+                    if let Some(b) = dom::qs_in(&body, "#mfy-play") {
+                        let p = p.clone();
+                        dom::on(&b, "click", move |_| play_owned(&p));
+                    }
+                    if let Some(b) = dom::qs_in(&body, "#mfy-req") {
+                        let (missing, btn) = (missing.clone(), b.clone());
+                        dom::on(&b, "click", move |e| {
+                            let (missing, btn) = (missing.clone(), dom::target_el(e).and_then(|t| dom::closest_of(&t, "button")).unwrap_or(btn.clone()));
+                            dom::spawn(async move { foryou::request_all(missing, btn).await });
+                        });
+                    }
+                });
             });
         }
 

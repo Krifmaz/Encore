@@ -214,6 +214,10 @@ label.field small { color: var(--faint); font-size: 12px; }
 }
 .tile:hover .art { transform: translateY(-3px); }
 .tile .art img { width: 100%; height: 100%; object-fit: cover; }
+.tile .art .collage { position: absolute; inset: 0; display: grid; grid-template-columns: 1fr 1fr; grid-template-rows: 1fr 1fr; }
+.tile .art .collage .cell { position: relative; overflow: hidden; }
+.tile .art .collage .ph { font-size: 20px; }
+.tile .art .ph svg { width: 34px; height: 34px; }
 .tile .art .ph, .ph {
   position: absolute; inset: 0; display: grid; place-items: center;
   background: linear-gradient(135deg, var(--panel-2), var(--border)); color: var(--faint); font-size: 34px; font-weight: 800;

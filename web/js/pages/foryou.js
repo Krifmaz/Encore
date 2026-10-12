@@ -4,10 +4,10 @@ import * as player from '../player.js';
 import { art, emptyState, esc, fmt, icon, modal, statusBadge, toast } from '../ui.js';
 import { albumTile, bindTiles, submitRequest } from './common.js';
 
-const KIND = { 'weekly-exploration': 'New music picked for you every Monday', 'daily-jams': 'Songs you love, refreshed daily', 'weekly-jams': 'Your favourites from the past weeks', lastfm: 'Similar to your most played songs on Last.fm' };
+export const KIND = { 'weekly-exploration': 'New music picked for you every Monday', 'daily-jams': 'Songs you love, refreshed daily', 'weekly-jams': 'Your favourites from the past weeks', lastfm: 'Similar to your most played songs on Last.fm' };
 
 /** One song row: play it if it's in the library, otherwise request it. */
-function trackRow(t, i) {
+export function trackRow(t, i) {
   return `<tr data-i="${i}">
     <td class="num">${t.library ? `<button class="btn ghost icon sm" data-play="${i}" aria-label="Play">${icon.play.replace('<svg', '<svg width="14"')}</button>`
       : ''}</td>
@@ -25,7 +25,7 @@ function trackRow(t, i) {
 const reqBody = (t) => ({ kind: 'track', mbid: t.mbid || null, artist: t.artist, title: t.title, album: t.album || null, cover_url: t.cover, length: t.length, isrc: t.isrc || undefined });
 
 /** Wire play / request / more-like-this on a table of track rows. */
-function bindTracks(root, tracks) {
+export function bindTracks(root, tracks) {
   root.addEventListener('click', async (e) => {
     const p = e.target.closest('[data-play]');
     if (p) {
@@ -58,7 +58,7 @@ export async function moreLikeThis(artist, title, mbid) {
   } catch (e) { m.el.querySelector('.modal-body').innerHTML = `<div class="error-box">${esc(e.message)}</div>`; }
 }
 
-async function requestAll(tracks, btn) {
+export async function requestAll(tracks, btn) {
   btn.disabled = true;
   let ok = 0;
   for (const t of tracks) {
