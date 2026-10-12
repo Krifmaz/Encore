@@ -35,6 +35,9 @@ web-sys = { version = "0.3", features = [
   "TimeRanges", "HtmlLabelElement", "HtmlDivElement", "InputEvent", "DragEvent", "DataTransfer", "ProgressEvent",
   "WheelEvent", "FocusEvent", "console", "FileReader", "AnimationEvent", "TransitionEvent", "VisibilityState", "Crypto", "Performance",
   "EventSource", "MessageEvent", "AudioContext", "BaseAudioContext", "StorageEvent",
+  "AudioNode", "AudioParam", "BiquadFilterNode", "BiquadFilterType", "GainNode", "DelayNode", "StereoPannerNode", "ChannelSplitterNode",
+  "ChannelMergerNode", "MediaElementAudioSourceNode", "AudioDestinationNode", "ChannelCountMode", "ChannelInterpretation", "AudioContextState",
+  "RequestCache",
 ] }
 
 [profile.release]

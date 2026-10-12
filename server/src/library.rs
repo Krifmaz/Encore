@@ -320,6 +320,7 @@ pub fn delete_tracks(db: &Db, ids: &[i64], replacement: Option<i64>) -> usize {
         }
         let _ = db.execute("UPDATE playlist_items SET track_id=? WHERE track_id=?", p![replacement, id]);
         let _ = db.execute("DELETE FROM tracks WHERE id=?", p![id]);
+        crate::dsp::render::forget_track(&db.data_dir, *id);
         n += 1;
     }
     n

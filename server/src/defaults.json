@@ -673,5 +673,10 @@
   "env": "CADENZA_MAX_TAPS",
   "default": 65536,
   "secret": false
+ },
+ "cadenza_cache_mb": {
+  "env": "CADENZA_CACHE_MB",
+  "default": 4096,
+  "secret": false
  }
 }

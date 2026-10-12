@@ -14,6 +14,11 @@ const state = { queue: [], index: -1, transcoded: false, lossy: false, rung: 0, 
 const listeners = new Set();
 let audio = null;
 let spare = null;   // second <audio> that pre-buffers the next song, so skipping is instant
+// A third <audio>, never wrapped in Web Audio: once the effects graph exists, 30-second previews (third-party
+// URLs, often without CORS) play on it – through the graph they would fail or be silent. `parked` is the
+// wrapped element set aside while it plays.
+let plain = null;
+let parked = null;
 let lyr = { id: null, lines: [], plain: '', loading: false };
 let prefs = playback.current();
 let userVol = 0.9;           // the volume slider: the ceiling of every fade
@@ -256,10 +261,15 @@ function streamUrl(t, { transcode = false, rung = 0, dsp = false, offset = 0 } =
 const convert = (t) => !t.preview && (CONVERT.has((t.format || '').toLowerCase()) || !canPlay(t.format));
 /** kbit/s of a Cadenza stream at `rate` (24-bit stereo FLAC, roughly 65 % of the raw PCM). */
 const dspKbps = (rate) => Math.round(rate * 48 * 0.65 / 1000);
-/** kbit/s the song needs as the "original" rung: the file's bitrate, or the Cadenza stream's when the server upsamples it. */
+/** kbit/s the song needs as the "original" rung: the Cadenza stream's when the server upsamples it, else the file's. */
 function origKbps(t) {
   if (!t || t.preview) return 0;
   if (wantDsp(t, false)) return dspKbps(dspOutRate(t));
+  return fileKbps(t);
+}
+/** kbit/s of the file itself (0 = unknown, counted as 1411). */
+function fileKbps(t) {
+  if (!t || t.preview) return 0;
   if (t.bitrate > 0) return t.bitrate;
   const i = INFO.get(t.id);
   if (i?.bitrate > 0) return i.bitrate;
@@ -324,16 +334,26 @@ function load({ transcode = false, offset = 0, rung = null, dsp = null, resume =
     if (typeof t.id === 'number' && state.announced !== t) { state.announced = t; api.post('/library/now-playing', { track_id: t.id }).catch(() => {}); }
   }
   const url = streamUrl(t, { transcode: state.transcoded && !state.lossy && !state.dsp, rung: state.rung, dsp: state.dsp, offset: serverOffset });
-  if (!offset && spare && spare.dataset.url === url) {
+  const usePlain = !!(t.preview && fx.built);
+  if (!offset && !usePlain && spare && spare.dataset.url === url) {
     // already buffered in the background: swap players and start right away
     const old = audio;
     audio = spare;
-    spare = old;
+    // the preview element never pre-loads: the parked wrapped one takes the spare's place
+    spare = old === plain ? parked : old;
+    if (old === plain) parked = null;
     if (!fading) { old.pause(); old.removeAttribute('src'); }
     delete old.dataset.url;
     audio.currentTime = 0;
     setFadeGain(audio, fading ? 0 : 1);
   } else {
+    if (usePlain !== (audio === plain)) {
+      // a preview with the effects graph built plays on the never-wrapped element; anything else on a wrapped one
+      const old = audio;
+      old.pause(); old.removeAttribute('src'); delete old.dataset.url;
+      if (usePlain) { parked = old; audio = plain; } else { audio = parked; parked = null; }
+      setFadeGain(audio, 1);
+    }
     // without the pre-render cache a pre-buffered processed stream holds one of the server's Cadenza slots: free it first
     if (state.dsp && !dspCacheOn() && spare?.dataset.url?.includes('dsp=1')) cancelPreload();
     audio.src = url;
@@ -386,16 +406,15 @@ function fullyBuffered() {
 function maybePreload(force = false) {
   if (!spare || !prefs.preload || link || fade) return;
   const n = state.queue[state.index + 1];
-  if (!n) return;
+  if (!n || (n.preview && fx.built)) return;   // a preview plays on the never-wrapped element, not the spare
   const url = startUrl(n);
   if (spare.dataset.url === url) return;
   const t = current();
   const remaining = duration() - position();
   const quiet = Date.now() - state.stallAt > 15000;
-  if (url.includes('dsp=1') && dspCacheOn()) {
+  if (url.includes('dsp=1') && dspCacheOn() && state.dsp) {
     // a processed next song: ask the server to render it ahead, and buffer it only once that render exists
     // (cached or in progress) – then the pre-load takes no extra processing slot
-    if (!state.dsp) return;
     const s = dspCache.get(n.id);
     if (s !== 'cached' && s !== 'rendering') {
       if (Date.now() - (dspAsked.get(n.id) || 0) > 15000) prepareDsp(n).then(() => maybePreload(force));
@@ -480,7 +499,7 @@ function addSample(kbps) {
 function streamKbps() {
   if (state.rung > 0) return state.rung;
   if (state.dsp) return null;   // Cadenza renders at its own speed: its download rate says nothing about the connection
-  return origKbps(current()) || 1411;
+  return fileKbps(current()) || 1411;
 }
 /** Every 2 s: how far the buffer grew × the stream's bitrate ÷ the time it took. Returns whether a download is in progress. */
 function sampleProgress() {
@@ -491,6 +510,7 @@ function sampleProgress() {
   const downloading = audio.networkState === 2 && !(isFinite(d) && d > 0 && end >= d - 0.5);
   const url = audio.dataset.url || '';
   const kbps = streamKbps();
+  // only while the element is still downloading: a finished download would read as a slow link
   if (est.el !== audio || est.url !== url || !downloading || !kbps) {
     est.el = audio; est.url = url; est.end = end; est.wall = now;
     return downloading;
@@ -503,7 +523,24 @@ function sampleProgress() {
   addSample(grown * kbps / secs);
   return true;
 }
-/** Nothing downloading and the estimate is older than 20 s: time a 128 KB piece of the current or next song. */
+/** Probe sizes: 128 KB, and when that arrives in under 0.25 s (too fast to time), 1 MB, then 4 MB. */
+const PROBE_SIZES = [131072, 1048576, 4194304];
+/** Fetch the first `size` bytes of a song, timed: { bytes, secs }, or null when the server refuses. */
+async function probeOnce(id, size) {
+  const t0 = performance.now();
+  const r = await fetch(`/api/library/tracks/${id}/stream`, { headers: { Range: `bytes=0-${size - 1}` }, credentials: 'same-origin', cache: 'no-store' });
+  if (r.status !== 206 && r.status !== 200) { r.body?.cancel().catch(() => {}); return null; }
+  let bytes = 0;
+  const reader = r.body.getReader();
+  while (bytes < size) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    bytes += value.byteLength;
+  }
+  reader.cancel().catch(() => {});
+  return { bytes: Math.min(bytes, size), secs: (performance.now() - t0) / 1000 };
+}
+/** Nothing downloading and the estimate is older than 20 s: time a piece of the current or next song. */
 async function probe() {
   const now = Date.now();
   if (est.probing || now - est.at < 20000 || now - est.probeAt < 20000) return;
@@ -512,19 +549,18 @@ async function probe() {
   est.probing = true;
   est.probeAt = now;
   try {
-    const t0 = performance.now();
-    const r = await fetch(`/api/library/tracks/${t.id}/stream`, { headers: { Range: 'bytes=0-131071' }, credentials: 'same-origin', cache: 'no-store' });
-    if (r.status !== 206 && r.status !== 200) { r.body?.cancel().catch(() => {}); return; }
-    let bytes = 0;
-    const reader = r.body.getReader();
-    while (bytes < 131072) {
-      const { done, value } = await reader.read();
-      if (done) break;
-      bytes += value.byteLength;
+    for (const size of PROBE_SIZES) {
+      const p = await probeOnce(t.id, size);
+      if (!p) return;
+      const kbps = playback.rateOf(p.bytes, p.secs);
+      if (kbps !== null) { addSample(kbps); return; }
+      if (p.bytes < size || size === PROBE_SIZES[PROBE_SIZES.length - 1]) {
+        // still under 0.25 s (the whole song, or 4 MB): "at least this fast" – it may lift the estimate, never lower it
+        const atLeast = p.bytes * 8 / 1000 / 0.25;
+        if (est.kbps === null || est.kbps < atLeast) addSample(atLeast);
+        return;
+      }
     }
-    reader.cancel().catch(() => {});
-    const kbps = playback.rateOf(Math.min(bytes, 131072), (performance.now() - t0) / 1000);
-    if (kbps !== null) addSample(kbps);
   } catch { /* offline: try again later */ } finally { est.probing = false; }
 }
 function adaptTick() {
@@ -553,7 +589,9 @@ function decide() {
   const up = l.find(r => playback.needed(r, orig) * 1.5 <= est.kbps);
   if (up === undefined || l.indexOf(up) >= ci) { est.upSince = 0; return; }
   if (!est.upSince) { est.upSince = now; return; }
-  if (now - est.upSince >= 15000 && bufferedAhead() > 10) { est.upSince = 0; switchRung(up); }
+  // safe to reload: 10 s in hand, or a server-made stream the browser has finished fetching (it shows little of it as buffered)
+  const safe = bufferedAhead() > 10 || (state.transcoded && audio.networkState !== 2);
+  if (now - est.upSince >= 15000 && safe) { est.upSince = 0; switchRung(up); }
 }
 
 // ---- server-side Cadenza: render ahead -----------------------------------------------------------
@@ -623,51 +661,59 @@ function endFade() {
 function setFadeGain(el, g) {
   if (!el) return;
   const s = fx.sources.get(el);
-  if (s) { s.gain.gain.value = g; el.volume = userVol; } else el.volume = userVol * g;
+  if (s?.gain.gain) { s.gain.gain.value = g; el.volume = userVol; } else el.volume = userVol * g;
 }
 
 // ---- sound effects on this device (Web Audio) ----------------------------------------------------
 // Built the first time an effect is switched on; until then the <audio> elements play straight out, untouched.
 // An element wrapped in a MediaElementSource can only be heard through the graph, so once built the graph stays
 // and turns into a pass-through when the effects are switched off.
-const fx = { built: false, sources: new Map(), input: null, key: '', eq: [], cross: [], trim: null, pan: null, nodes: [] };
+const fx = { built: false, broken: false, sources: new Map(), input: null, key: '', eq: [], cross: [], trim: null, pan: null, nodes: [] };
 const dbGain = (v) => Math.pow(10, v / 20);
 const XFEED_DB = { light: -9, medium: -6, strong: -4.5 };
 function ensureFx() {
   if (fx.built) return true;
-  if (!audio || !spare) return false;
+  // a preview playing now stays out of the graph (it is built at the next library song)
+  if (!audio || !spare || current()?.preview) return false;
   outputRate();
   if (!ctx) return false;
   try {
     fx.input = ctx.createGain();
     for (const el of [audio, spare]) {
-      el.crossOrigin = 'anonymous';   // a cross-origin preview must allow CORS to be heard through Web Audio
+      el.crossOrigin = 'anonymous';
       const src = ctx.createMediaElementSource(el);
-      const gain = ctx.createGain();
-      src.connect(gain);
-      fx.sources.set(el, { src, gain, on: false });
+      // kept at once: an element can be wrapped only once, and from now on is heard only through the graph
+      const s = { src, gain: src, on: false };
+      fx.sources.set(el, s);
+      s.gain = ctx.createGain();
+      src.connect(s.gain);
     }
-    fx.built = true;
-  } catch { return fx.built; }
+  } catch {
+    if (!fx.sources.size) { fx.input = null; return false; }   // nothing wrapped: the elements still play straight out
+    // half built: keep what is wrapped audible through a plain pass-through
+    fx.broken = true;
+  }
+  fx.built = true;
   fx.key = '';
-  applyFx();
+  if (fx.broken) { try { fx.input?.connect(ctx.destination); } catch { /* ignore */ } } else applyFx();
   route();
   resumeFx();
   return true;
 }
-function resumeFx() { if (fx.built && ctx?.state === 'suspended') ctx.resume().catch(() => {}); }
+/** Resume the graph's context on play: suspended by the autoplay policy, or 'interrupted' (Safari after a call or Siri). */
+function resumeFx() { if (fx.built && ctx && ctx.state !== 'running') ctx.resume().catch(() => {}); }
 /** Only the element playing (and the one fading out) feeds the graph. */
 function route() {
   if (!fx.built) return;
   for (const [el, s] of fx.sources) {
     const want = el === audio || (fade && el === fade.out);
-    if (want && !s.on) { s.gain.connect(fx.input); s.on = true; }
+    if (want && !s.on) { s.gain.connect(fx.input || ctx.destination); s.on = true; }
     else if (!want && s.on) { s.gain.disconnect(); s.on = false; }
   }
 }
 /** Bring the graph in line with the settings: rewire only when its shape changes, otherwise just set the values. */
 function applyFx() {
-  if (!fx.built) return;
+  if (!fx.built || fx.broken) return;
   const on = playback.fxActive(prefs);
   const bands = on ? playback.eqBands(prefs) : [];
   const mono = on && prefs.mono;
@@ -707,6 +753,10 @@ function applyFx() {
       if (mono) {
         const m = add(ctx.createGain());
         m.channelCount = 1; m.channelCountMode = 'explicit'; m.channelInterpretation = 'speakers';
+        // back to two equal channels, so the panner sees stereo and stays at unity in the middle (a mono input would
+        // take the panner's mono law: −3 dB)
+        const up = add(ctx.createGain());
+        up.channelCount = 2; up.channelCountMode = 'explicit'; up.channelInterpretation = 'speakers';
       }
       fx.pan = add(ctx.createStereoPanner());
     }
@@ -909,8 +959,8 @@ function outputRate() {
   try { if (!ctx) ctx = new (window.AudioContext || window.webkitAudioContext)(); return ctx.sampleRate; } catch { return 0; }
 }
 const khz = (hz) => String(Math.round(hz / 100) / 10);
-/** kbit/s → "4.2" / "12" (Mbit/s) */
-const mbit = (kbps) => kbps < 10000 ? (kbps / 1000).toFixed(1) : String(Math.round(kbps / 1000));
+/** kbit/s → "0.25" / "4.2" / "12" (Mbit/s) */
+const mbit = (kbps) => kbps < 1000 ? (kbps / 1000).toFixed(2) : kbps < 10000 ? (kbps / 1000).toFixed(1) : String(Math.round(kbps / 1000));
 function sourceLine(t, info) {
   if (!info) return `${(t.format || '').toUpperCase()}${t.bitrate ? ` · ${t.bitrate} kbps` : ''}`;
   const parts = [(info.codec || t.format || '').toUpperCase()];
@@ -976,6 +1026,8 @@ export function mount() {
   if (!audio.isConnected) document.body.appendChild(audio);
   spare = Object.assign(document.createElement('audio'), { id: 'audio-next', preload: 'auto' });
   document.body.appendChild(spare);
+  plain = Object.assign(document.createElement('audio'), { id: 'audio-preview', preload: 'auto' });
+  document.body.appendChild(plain);
   audio.preload = 'auto';
   const el = document.createElement('div');
   el.className = 'player';
@@ -988,9 +1040,9 @@ export function mount() {
   let vol = 0.9;
   try { vol = parseFloat(localStorage.getItem('encore.volume') ?? '0.9'); } catch { /* ignore */ }
   userVol = Number.isFinite(vol) ? Math.max(0, Math.min(1, vol)) : 0.9;
-  audio.volume = spare.volume = userVol;
-  // both elements get the listeners; only the one currently playing counts
-  const on = (type, fn) => [audio, spare].forEach(a => a.addEventListener(type, (e) => { if (e.target === audio) fn(e); }));
+  audio.volume = spare.volume = plain.volume = userVol;
+  // every element gets the listeners; only the one currently playing counts
+  const on = (type, fn) => [audio, spare, plain].forEach(a => a.addEventListener(type, (e) => { if (e.target === audio) fn(e); }));
   on('ended', () => { logPlay(); next(true); });
   on('play', () => { resumeFx(); if (fade) fade.out.play().catch(() => {}); render(); emit(); });
   on('pause', () => { if (fade) fade.out.pause(); render(); emit(); });

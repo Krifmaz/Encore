@@ -168,6 +168,7 @@ const SECTIONS: &[Section] = &[
         s("cadenza_max_streams", "Streams at once", "number").help("Processed streams the whole server runs at the same time; more are played as the original."),
         s("cadenza_max_rate", "Highest output rate", "select").options(&[("96000", "96 kHz"), ("192000", "192 kHz"), ("384000", "384 kHz"), ("768000", "768 kHz")]),
         s("cadenza_max_taps", "Longest filter", "select").options(&[("16384", "16k taps (light)"), ("65536", "64k taps"), ("262144", "256k taps"), ("1048576", "1M taps (heavy)")]),
+        s("cadenza_cache_mb", "Cache size (MB)", "number").help("Each song is rendered once and kept on disk, so seeking and skipping need no new processing and the next song is ready before it plays. The least recently played renders make room. 0 = no cache (every stream is processed live)."),
     ] },
     Section { id: "email", title: "Email", desc: "Lets Encore send password-reset and sign-in emails.", test: Some("email"), test_label: Some("Send test email"), fields: &[
         s("smtp_host", "SMTP server", "text").help("e.g. smtp.fastmail.com – used for password-reset emails"),
@@ -587,10 +588,11 @@ fn show(hub: &Rc<Hub>, id: String, flash: Option<Value>) -> Pin<Box<dyn Future<O
         <span class="row" style="gap:8px">{test}<span class="chev">{chev}</span></span></summary>
       <div style="height:14px"></div>
       <div data-out>{flash_html}</div>
-      <div class="form-grid">{fields_html}</div>{tidal}
+      <div class="form-grid">{fields_html}</div>{tidal}{cadenza}
       <div class="row mt" style="justify-content:flex-end"><button class="btn primary" data-save>{check}Save</button></div>
     </details>"##,
                 tidal = if sec.id == "streamrip" { tidal_block() } else { String::new() },
+                cadenza = if sec.id == "cadenza" { cadenza_cache_block() } else { String::new() },
                 sid = sec.id, open = if open { "open" } else { "" }, title = esc(sec.title), check = icon("check"))
         };
         let mut html = if group.id == "tasks" { r##"<div id="tasks-host" style="margin-bottom:16px"></div>"##.to_string() } else { String::new() };
@@ -616,6 +618,7 @@ fn show(hub: &Rc<Hub>, id: String, flash: Option<Value>) -> Pin<Box<dyn Future<O
             let Some(sec) = SECTIONS.iter().find(|x| x.id == sec_id) else { continue };
             let Some(out) = dom::qs_in(&card, "[data-out]") else { continue };
             if sec.id == "streamrip" { bind_tidal(&hub.view, &card); }
+            if sec.id == "cadenza" { bind_cadenza_cache(&card); }
             let paint: Rc<dyn Fn(&Value)> = { let out = out.clone(); Rc::new(move |r: &Value| dom::set_html(&out, &test_result(r))) };
             if let Some(b) = dom::qs_in(&card, "[data-save]") {
                 let (hub2, card2) = (hub.clone(), card.clone());
@@ -799,9 +802,9 @@ fn render_playback(el: Element, _ctx: Ctx) -> PageFuture {
 }
 
 const QUALITY_HELP: [(&str, &str); 3] = [
-    ("auto", "The original file. When the connection can't keep up, the rest of the song and the next ten minutes come as a smaller AAC 96 kbps (Opus 96 kbps in browsers without AAC) stream, then the original is tried again."),
+    ("auto", "The original file. Encore measures your connection while it plays and steps the stream down as far as it needs to keep the music playing – down to 32 kbps – then back up as soon as the connection allows."),
     ("original", "Always the original file, even if it stutters on a slow connection. Formats a browser can't play are converted to FLAC (lossless)."),
-    ("saver", "Always a smaller AAC 96 kbps (Opus 96 kbps in browsers without AAC) stream – for mobile data and slow links."),
+    ("saver", "Always a small 96 kbps stream (AAC, or Opus in browsers without AAC) – for mobile data and slow links."),
 ];
 
 /// `seg()` of the JS renderPlayback: compares as strings, so the numeric kbps matches its button.
@@ -869,8 +872,129 @@ fn dsp_html(p: &Value, dsp: &Value) -> String {
         format!(r#"<label class="stack" style="gap:4px"><span class="small muted">Dither / noise shaping</span><select class="input" id="pb-dsp-dither" {off}>{}</select></label>"#, pairs("dithers", p.g("dsp_dither"))),
         format!(r#"<label class="stack" style="gap:4px"><span class="small muted">Output rate</span><select class="input" id="pb-dsp-rate" {off}>{}</select></label>"#,
             rates.iter().map(|(v, l)| dsp_opt(v, &json!(l), p.g("dsp_rate"))).collect::<String>()),
-        r#"<span class="small muted">The server's Cadenza upsamples the original file and sends lossless 24-bit FLAC. It uses more data (about 4.6 Mbit/s at 96 kHz, 9.2 Mbit/s at 192 kHz) and the server's processor; Data saver and Auto's fallback still win when the connection can't keep up.</span>"#.to_string(),
+        r#"<span class="small muted">The server's Cadenza upsamples the original file and sends lossless 24-bit FLAC. It uses more data (about 4.6 Mbit/s at 96 kHz, 9.2 Mbit/s at 192 kHz) and the server's processor; Data saver and Auto still step down to a lighter stream when the connection can't keep up.</span>"#.to_string(),
     ].join("\n        ")
+}
+
+/// `${v > 0 ? '+' : ''}${v} dB`
+fn sign_db(v: f64) -> String { format!("{}{} dB", if v > 0.0 { "+" } else { "" }, v) }
+fn fade_text(v: f64) -> String { if v > 0.0 { format!("{v} s") } else { "Off".into() } }
+/// `+input.value` as a JSON number (NaN → null, which clean() turns into the default).
+fn num_json(s: &str) -> Value { let t = s.trim(); let n = if t.is_empty() { 0.0 } else { t.parse::<f64>().unwrap_or(f64::NAN) }; crate::playback::jnum(n) }
+fn num_of(s: &str) -> f64 { let t = s.trim(); if t.is_empty() { 0.0 } else { t.parse::<f64>().unwrap_or(f64::NAN) } }
+/// The bands on screen: the preset's own until you edit one (then the preset is Custom).
+fn sound_bands(p: &Value) -> Vec<Value> { crate::playback::eq_bands(p) }
+fn band_row(b: &Value, i: usize) -> String {
+    let n = i + 1;
+    format!(r#"<tr data-i="{i}">
+      <td><select class="input" data-f="type" aria-label="Band {n} type">{types}</select></td>
+      <td><input class="input" type="number" data-f="freq" min="20" max="20000" step="1" value="{freq}" aria-label="Band {n} frequency (Hz)"></td>
+      <td><input class="input" type="number" data-f="gain" min="-24" max="24" step="0.5" value="{gain}" aria-label="Band {n} gain (dB)"></td>
+      <td><input class="input" type="number" data-f="q" min="0.1" max="18" step="0.1" value="{q}" aria-label="Band {n} Q"></td>
+      <td><button type="button" class="btn ghost icon sm" data-rm-band="{i}" aria-label="Remove band" title="Remove band">✕</button></td></tr>"#,
+        types = crate::playback::EQ_TYPES.iter().map(|(v, l)| dsp_opt(&json!(v), &json!(l), b.g("type"))).collect::<String>(),
+        freq = js_string(b.g("freq")), gain = js_string(b.g("gain")), q = js_string(b.g("q")))
+}
+fn sound_html(p: &Value) -> String {
+    let list = sound_bands(p);
+    let on = p.truthy("fx_on");
+    let presets: String = crate::playback::EQ_PRESETS.iter().map(|x| dsp_opt(&json!(x.id), &json!(x.label), p.g("eq_preset"))).collect::<String>()
+        + &if p.s("eq_preset") == "custom" { dsp_opt(&json!("custom"), &json!("Custom"), p.g("eq_preset")) } else { String::new() };
+    let rows = if list.is_empty() { r#"<tr><td colspan="5" class="small muted">No bands.</td></tr>"#.to_string() } else { list.iter().enumerate().map(|(i, b)| band_row(b, i)).collect() };
+    format!(r#"<label class="row" style="gap:8px;align-items:center"><input type="checkbox" id="pb-fx" {fx_checked}> Use sound effects</label>
+      <fieldset class="stack" id="pb-fx-box" style="gap:8px;border:0;padding:0;margin:0;min-width:0;{fx_style}" {fx_disabled}>
+        <label class="stack" style="gap:4px"><span class="small muted">Equalizer preset</span><select class="input" id="pb-eq-preset">{presets}</select></label>
+        <label class="stack" style="gap:4px"><span class="small muted">Preamp <b id="pb-eq-preamp-v">{preamp_text}</b></span><input type="range" id="pb-eq-preamp" min="-24" max="12" step="0.5" value="{preamp}"></label>
+        <div style="overflow-x:auto"><table class="eq-bands" style="width:100%;border-collapse:collapse">
+          <thead><tr class="small muted" style="text-align:left"><th>Type</th><th>Frequency (Hz)</th><th>Gain (dB)</th><th>Q</th><th></th></tr></thead>
+          <tbody>{rows}</tbody></table></div>
+        <div class="row"><button type="button" class="btn sm" id="pb-eq-add" {add_disabled}>{plus}Add band</button></div>
+        <label class="stack" style="gap:4px"><span class="small muted">Crossfeed</span><select class="input" id="pb-crossfeed">{crossfeed}</select></label>
+        <span class="small muted">For headphones: mixes a little of each channel into the other, like speakers in a room.</span>
+        <label class="stack" style="gap:4px"><span class="small muted">Balance <b id="pb-balance-v">{balance_text}</b></span><input type="range" id="pb-balance" min="-100" max="100" step="1" value="{balance}"></label>
+        <label class="row" style="gap:8px;align-items:center"><input type="checkbox" id="pb-mono" {mono}> Mono</label>
+      </fieldset>
+      <span class="small muted">Runs in this browser or app – it costs your server nothing. Works with every quality setting. Turning it on means the sound is no longer the untouched file (the Signal path says so).</span>
+      <label class="stack" style="gap:4px"><span class="small muted">Crossfade <b id="pb-crossfade-v">{fade_text}</b></span><input type="range" id="pb-crossfade" min="0" max="12" step="1" value="{crossfade}"></label>
+      <label class="row" style="gap:8px;align-items:center"><input type="checkbox" id="pb-crossfade-gapless" {gapless}> Keep albums gapless (no fade between songs from the same album)</label>
+      <span class="small muted">Blends the end of one song into the start of the next.</span>"#,
+        fx_checked = if on { "checked" } else { "" },
+        fx_style = if on { "" } else { "opacity:.45" },
+        fx_disabled = if on { "" } else { "disabled" },
+        preamp_text = sign_db(p.f("eq_preamp")), preamp = js_string(p.g("eq_preamp")),
+        add_disabled = if list.len() >= 10 { "disabled" } else { "" }, plus = icon("plus"),
+        crossfeed = crate::playback::CROSSFEED.iter().map(|(v, l)| dsp_opt(&json!(v), &json!(l), p.g("crossfeed"))).collect::<String>(),
+        balance_text = crate::playback::balance_text(p.f("balance")), balance = js_string(p.g("balance")),
+        mono = if p.truthy("mono") { "checked" } else { "" },
+        fade_text = fade_text(p.f("crossfade")), crossfade = js_string(p.g("crossfade")),
+        gapless = if p.truthy("crossfade_album_gapless") { "checked" } else { "" })
+}
+fn bind_sound(st: &Rc<Look>) {
+    let el = st.el.clone();
+    let check = |sel: &str, key: &'static str| {
+        if let Some(c) = dom::qs_in(&el, sel) {
+            let (st2, c2) = (st.clone(), c.clone());
+            dom::on(&c, "change", move |_| set_playback(&st2, json!({ key: dom::checked(&c2) })));
+        }
+    };
+    check("#pb-fx", "fx_on");
+    check("#pb-mono", "mono");
+    check("#pb-crossfade-gapless", "crossfade_album_gapless");
+    if let Some(c) = dom::qs_in(&el, "#pb-eq-preset") {
+        let (st2, c2) = (st.clone(), c.clone());
+        dom::on(&c, "change", move |_| {
+            let v = dom::value(&c2);
+            if let Some(x) = crate::playback::EQ_PRESETS.iter().find(|y| y.id == v) {
+                set_playback(&st2, json!({ "eq_preset": x.id, "eq_bands": crate::playback::preset_bands_json(x), "eq_preamp": crate::playback::jnum(x.preamp) }));
+            }
+        });
+    }
+    // a range slider: its value shows while dragging, and is saved when let go
+    let slider = |sel: &str, label: &'static str, key: &'static str, text: fn(f64) -> String| {
+        let Some(r) = dom::qs_in(&el, sel) else { return };
+        let (el2, r2) = (el.clone(), r.clone());
+        dom::on(&r, "input", move |_| { if let Some(v) = dom::qs_in(&el2, label) { dom::set_text(&v, &text(num_of(&dom::value(&r2)))); } });
+        let (st2, r2) = (st.clone(), r.clone());
+        dom::on(&r, "change", move |_| set_playback(&st2, json!({ key: num_json(&dom::value(&r2)) })));
+    };
+    slider("#pb-eq-preamp", "#pb-eq-preamp-v", "eq_preamp", sign_db);
+    slider("#pb-balance", "#pb-balance-v", "balance", crate::playback::balance_text);
+    slider("#pb-crossfade", "#pb-crossfade-v", "crossfade", fade_text);
+    {
+        let st2 = st.clone();
+        dom::on_each(&el, ".eq-bands tr[data-i] [data-f]", "change", move |c, _| {
+            let mut list = sound_bands(&st2.p.borrow());
+            let Some(tr) = dom::closest_of(c, "tr") else { return };
+            let i = num_of(&dom::data(&tr, "i")) as usize;
+            let f = dom::data(c, "f");
+            let v = if f == "type" { json!(dom::value(c)) } else { num_json(&dom::value(c)) };
+            if let Some(b) = list.get_mut(i) { b[f.as_str()] = v; }
+            set_playback(&st2, json!({ "eq_preset": "custom", "eq_bands": list }));
+        });
+    }
+    {
+        let st2 = st.clone();
+        dom::on_each(&el, "[data-rm-band]", "click", move |b, _| {
+            let mut list = sound_bands(&st2.p.borrow());
+            let i = num_of(&dom::data(b, "rmBand")) as usize;
+            if i < list.len() { list.remove(i); }
+            set_playback(&st2, json!({ "eq_preset": "custom", "eq_bands": list }));
+        });
+    }
+    if let Some(b) = dom::qs_in(&el, "#pb-eq-add") {
+        let st2 = st.clone();
+        dom::on(&b, "click", move |_| {
+            let mut list = sound_bands(&st2.p.borrow());
+            if list.len() < 10 {
+                list.push(json!({ "type": "peaking", "freq": 1000, "gain": 0, "q": 1 }));
+                set_playback(&st2, json!({ "eq_preset": "custom", "eq_bands": list }));
+            }
+        });
+    }
+    if let Some(c) = dom::qs_in(&el, "#pb-crossfeed") {
+        let (st2, c2) = (st.clone(), c.clone());
+        dom::on(&c, "change", move |_| set_playback(&st2, json!({ "crossfeed": dom::value(&c2) })));
+    }
 }
 
 fn paint_playback(st: &Rc<Look>) {
@@ -893,6 +1017,8 @@ fn paint_playback(st: &Rc<Look>) {
         <span class="small muted">The next song is fetched once the current one is safely buffered, so it starts without a gap. Turn it off on a very slow connection to leave all the bandwidth to the song playing.</span></div>
       <div class="stack" style="gap:6px"><h3>When the queue ends</h3>
         <label class="row" style="gap:8px;align-items:center"><input type="checkbox" id="pb-autoplay" {autoplay}> Keep going with a shuffle of the whole library</label></div>
+      <div class="stack" style="gap:6px"><h3>Sound (on this device)</h3>
+        {sound}</div>
       <div class="stack" style="gap:6px"><h3>Pure playback</h3>
         <span class="small muted">Encore streams the original file untouched – the quality badge on the player opens the <b>Signal path</b>, which shows what the file is, what was sent and what this device does with it. A browser hands the sound to the operating system, which mixes it with other sounds and may resample it; bit-perfect output needs an exclusive-mode engine.</span></div>
       <div class="stack" style="gap:6px"><h3>Server processing (Cadenza)</h3>
@@ -904,6 +1030,7 @@ fn paint_playback(st: &Rc<Look>) {
         quality = seg_str(&p, "quality", &[("auto", "Auto"), ("original", "Original"), ("saver", "Data saver")]),
         preload = if p.truthy("preload") { "checked" } else { "" },
         autoplay = if p.truthy("autoplay") { "checked" } else { "" },
+        sound = sound_html(&p),
         dsp_block = dsp_html(&p, &st.dsp),
         eng_name = match (&eng, &link) { (Some(e), Some(l)) => format!(" · {}", esc(&if e.truthy("name") { e.s("name") } else { l.name.clone() })), _ => String::new() }));
     {
@@ -921,6 +1048,7 @@ fn paint_playback(st: &Rc<Look>) {
         let (st2, c2) = (st.clone(), c.clone());
         dom::on(&c, "change", move |_| set_playback(&st2, json!({ "autoplay": dom::checked(&c2) })));
     }
+    bind_sound(st);
     if let Some(c) = dom::qs_in(&st.el, "#pb-dsp") {
         let (st2, c2) = (st.clone(), c.clone());
         dom::on(&c, "change", move |_| set_playback(&st2, json!({ "dsp": dom::checked(&c2) })));
@@ -1089,6 +1217,55 @@ fn set_appearance(st: &Rc<Look>, patch: Value) {
     let server_prefs = st.server_prefs;
     dom::spawn(async move { appearance::save(&p, server_prefs).await; });
     paint_appearance(st);
+}
+
+// Server processing: how full the Cadenza pre-render cache is, how fast it renders, and a button to empty it.
+fn cadenza_cache_block() -> String {
+    format!(r##"<div class="card flat mt" id="cadenza-cache" style="padding:12px 14px">
+    <div class="row between wrap" style="gap:8px">
+      <div style="min-width:0"><b>Pre-render cache</b><div class="small muted" id="cadenza-cache-state">Checking…</div></div>
+      <button class="btn sm" id="cadenza-cache-clear" type="button">{}Clear cache</button>
+    </div>
+  </div>"##, icon("trash"))
+}
+
+/// "Cache: 812 MB of 4096 MB · 23 songs · renders at 6.2× real time" (the factor only once a render has finished).
+pub fn cadenza_cache_text(c: &Value) -> String {
+    if !c.is_object() { return "Cache: not available on this server".into(); }
+    let mb = |v: f64| { let r = crate::playback::js_round(if v.is_finite() { v } else { 0.0 }); format!("{}", r as i64) };
+    let n = c.f("files");
+    let n = if n.is_finite() { n } else { 0.0 };
+    let f = c.f("last_factor");
+    format!("Cache: {} MB of {} MB · {} {}{}", mb(c.f("used_mb")), mb(c.f("max_mb")), n, if n == 1.0 { "song" } else { "songs" },
+        if f > 0.0 { format!(" · renders at {}× real time", crate::player::to_fixed1(f)) } else { String::new() })
+}
+
+fn bind_cadenza_cache(card: &Element) {
+    let (Some(state), Some(btn)) = (dom::qs_in(card, "#cadenza-cache-state"), dom::qs_in(card, "#cadenza-cache-clear")) else { return };
+    let refresh: Rc<dyn Fn()> = {
+        let state = state.clone();
+        Rc::new(move || {
+            let state = state.clone();
+            dom::spawn(async move {
+                match api::get("/playback/dsp").await {
+                    Ok(d) => dom::set_text(&state, &cadenza_cache_text(d.g("cache"))),
+                    Err(_) => dom::set_text(&state, "Status unavailable"),
+                }
+            });
+        })
+    };
+    refresh();
+    let btn2 = btn.clone();
+    dom::on(&btn, "click", move |e| {
+        dom::prevent(e);
+        let (btn, refresh) = (btn2.clone(), refresh.clone());
+        dom::set_disabled(&btn, true);
+        dom::spawn(async move {
+            match api::post_empty("/playback/dsp/cache/clear").await { Ok(_) => toast("Cache cleared", "ok"), Err(err) => toast(&err.message, "err") }
+            dom::set_disabled(&btn, false);
+            refresh();
+        });
+    });
 }
 
 // Tidal downloads need your Tidal account, not an API key: streamrip signs in once through a link

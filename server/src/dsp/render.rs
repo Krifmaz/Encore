@@ -144,6 +144,21 @@ impl Ctx {
         }
         slot
     }
+
+    /// The limit for renders nobody is waiting on (ahead of time, after a seek, queued): one slot
+    /// below the server's, so a playing request (a seek, a skip) always finds one free.
+    fn background_max(&self) -> usize {
+        if self.max_streams >= 2 {
+            self.max_streams - 1
+        } else {
+            self.max_streams
+        }
+    }
+
+    /// A slot for a render nobody is waiting on, when one is free below [`Ctx::background_max`].
+    fn background_slot(&self) -> Option<Slot> {
+        self.slots.try_acquire(self.background_max())
+    }
 }
 
 pub fn max_mb(st: &AppState) -> u64 {
@@ -206,8 +221,11 @@ pub enum Found {
 }
 
 fn find(ctx: &Ctx, jobs: &HashMap<String, Arc<Render>>, key: &str) -> Found {
+    // a cancelled render is about to fail: never follow it (get_or_start replaces it)
     if let Some(j) = jobs.get(key) {
-        return Found::Rendering(j.clone());
+        if !j.cancel.load(Ordering::SeqCst) {
+            return Found::Rendering(j.clone());
+        }
     }
     let f = ctx.flac(key);
     if f.is_file() {
@@ -231,7 +249,11 @@ pub fn get_or_start(ctx: &Ctx, spec: &Spec, user: i64, slot: Option<Slot>) -> (F
             Found::Nothing => {}
             other => return (other, false),
         }
-        let (tx, _) = watch::channel(Status { phase: Phase::Queued, secs: 0.0, label: String::new() });
+        // a leftover from an interrupted (or cancelled) render must not be followed; a cancelled
+        // job still in the table is replaced, and won't remove its successor's entry or file
+        let _ = std::fs::remove_file(ctx.part(&key));
+        let phase = if slot.is_some() { Phase::Running } else { Phase::Queued };
+        let (tx, _) = watch::channel(Status { phase, secs: 0.0, label: String::new() });
         let job = Arc::new(Render {
             key: key.clone(),
             user,
@@ -278,27 +300,38 @@ fn enforce_user_cap(user: i64) {
 async fn run(ctx: Ctx, job: Arc<Render>, spec: Spec) {
     let key = job.key.clone();
     let ok = render(&ctx, &job, &spec).await;
-    if !ok {
-        let _ = std::fs::remove_file(ctx.part(&key));
-        job.update(|s| s.phase = Phase::Failed);
+    {
+        let mut jobs = JOBS.lock().unwrap();
+        // a cancelled job may have been replaced by a new render of the same key: leave that one alone
+        let current = jobs.get(&key).is_some_and(|j| Arc::ptr_eq(j, &job));
+        if !ok {
+            if current {
+                let _ = std::fs::remove_file(ctx.part(&key));
+            }
+            job.update(|s| s.phase = Phase::Failed);
+        }
+        if current {
+            jobs.remove(&key);
+        }
     }
-    JOBS.lock().unwrap().remove(&key);
     if ok {
         evict(&ctx.dir, ctx.max_bytes);
     }
 }
 
 async fn render(ctx: &Ctx, job: &Arc<Render>, spec: &Spec) -> bool {
-    // wait for a slot (a request that needs this song now may hand one over)
+    // wait for a slot (a request that needs this song now may hand one over); the phase changes
+    // under the gift lock, so a gift can't arrive after the render took its own slot
     let slot = loop {
         if job.cancel.load(Ordering::SeqCst) || !(ctx.keep_going)() {
             return false;
         }
-        if let Some(s) = job.gift.lock().unwrap().take() {
-            break s;
-        }
-        if let Some(s) = ctx.slots.try_acquire(ctx.max_streams) {
-            break s;
+        {
+            let mut gift = job.gift.lock().unwrap();
+            if let Some(s) = gift.take().or_else(|| ctx.background_slot()) {
+                job.update(|s| s.phase = Phase::Running);
+                break s;
+            }
         }
         tokio::time::sleep(Duration::from_millis(200)).await;
     };
@@ -306,7 +339,6 @@ async fn render(ctx: &Ctx, job: &Arc<Render>, spec: &Spec) -> bool {
         return false;
     }
     let part = ctx.part(&job.key);
-    let _ = std::fs::remove_file(&part);
     let rate = spec.rate as f64;
     let started = Instant::now();
     let progress: super::Progress = {
@@ -316,6 +348,8 @@ async fn render(ctx: &Ctx, job: &Arc<Render>, spec: &Spec) -> bool {
         let mut alive = true;
         Box::new(move |frames| {
             job.update(|s| s.secs = frames as f64 / rate);
+            #[cfg(test)]
+            std::thread::sleep(Duration::from_millis(tests::PACE_MS.load(Ordering::SeqCst)));
             if last_check.elapsed() > Duration::from_millis(500) {
                 last_check = Instant::now();
                 alive = keep();
@@ -323,7 +357,6 @@ async fn render(ctx: &Ctx, job: &Arc<Render>, spec: &Spec) -> bool {
             alive && !job.cancel.load(Ordering::SeqCst)
         })
     };
-    job.update(|s| s.phase = Phase::Running);
     let mut chain = match spawn_chain(ctx.coeff.clone(), spec.live(0.0), Output::File(part.clone()), Some(progress)) {
         Ok(c) => c,
         Err(_) => return false,
@@ -361,7 +394,7 @@ async fn render(ctx: &Ctx, job: &Arc<Render>, spec: &Spec) -> bool {
     {
         // rename and leave the job table together, so a request never sees neither
         let _jobs = JOBS.lock().unwrap();
-        if std::fs::rename(&part, ctx.flac(&job.key)).is_err() {
+        if job.cancel.load(Ordering::SeqCst) || std::fs::rename(&part, ctx.flac(&job.key)).is_err() {
             return false;
         }
         job.update(|s| s.phase = Phase::Done);
@@ -390,11 +423,27 @@ impl Drop for Follower {
 
 /// The growing `.part` file from byte 0: what's there, then more as the render writes it, until it
 /// finishes (ends with an error when the render fails, so the player doesn't take a cut-off song as complete).
-pub fn follow(ctx: &Ctx, job: Arc<Render>) -> std::io::Result<impl futures_util::Stream<Item = std::io::Result<Bytes>> + Send + 'static> {
-    let f = std::fs::File::open(ctx.part(&job.key)).or_else(|_| std::fs::File::open(ctx.flac(&job.key)))?;
-    let file = tokio::fs::File::from_std(f);
-    let rx = job.tx.subscribe();
+pub async fn follow(ctx: &Ctx, job: Arc<Render>) -> std::io::Result<impl futures_util::Stream<Item = std::io::Result<Bytes>> + Send + 'static> {
+    let mut rx = job.tx.subscribe();
     let guard = Follower::new(job);
+    // a render waiting for its slot has no file yet
+    let deadline = Instant::now() + Duration::from_secs(60);
+    let f = loop {
+        let phase = rx.borrow_and_update().phase;
+        if phase == Phase::Failed {
+            return Err(std::io::Error::other("render stopped"));
+        }
+        if phase != Phase::Queued {
+            if let Ok(f) = std::fs::File::open(ctx.part(&guard.0.key)).or_else(|_| std::fs::File::open(ctx.flac(&guard.0.key))) {
+                break f;
+            }
+        }
+        if Instant::now() > deadline {
+            return Err(std::io::Error::other("render did not start"));
+        }
+        let _ = tokio::time::timeout(Duration::from_millis(50), rx.changed()).await;
+    };
+    let file = tokio::fs::File::from_std(f);
     let state = (file, rx, guard, vec![0u8; 256 * 1024], false);
     Ok(futures_util::stream::unfold(state, |(mut file, mut rx, guard, mut buf, finished)| async move {
         loop {
@@ -453,7 +502,7 @@ async fn serve_cached(path: PathBuf, key: &str, ctx: &Ctx, spec: &Spec, req: Req
 /// past it (decoded and re-encoded losslessly so the stream starts there, like a live seek).
 async fn serve_following(ctx: &Ctx, job: Arc<Render>, spec: &Spec, t: f64) -> ApiResult<Response> {
     let status = job.status();
-    let stream = follow(ctx, job).map_err(|e| err(500, format!("render: {e}")))?;
+    let stream = follow(ctx, job).await.map_err(|e| err(500, format!("render: {e}")))?;
     let mut r = if t > 0.0 {
         let mut cmd = tokio::process::Command::new("ffmpeg");
         cmd.args(["-v", "error", "-nostdin", "-f", "flac", "-i", "pipe:0", "-ss", &format!("{t:.2}"), "-map", "0:a:0"]);
@@ -499,9 +548,8 @@ pub async fn serve(ctx: &Ctx, spec: &Spec, user: i64, t: f64, req: Request) -> A
         Found::Nothing => {}
     }
     if t > 0.0 {
-        // a seek into a song nobody rendered yet: render it in the background (if a slot is free
-        // now, otherwise when one is) and play this request live
-        get_or_start(ctx, spec, user, ctx.slots.try_acquire(ctx.max_streams));
+        // a seek into a song nobody rendered yet: the caller plays this request live (taking its
+        // slot first) and then starts the render with [`start_background`]
         return Ok(None);
     }
     let slot = ctx.slot_with_retry().await.ok_or_else(|| err(503, "Server processing is busy – playing the original"))?;
@@ -519,16 +567,51 @@ async fn serve_job(ctx: &Ctx, job: Arc<Render>, spec: &Spec, t: f64) -> ApiResul
     if job.status().phase == Phase::Queued && job.gift.lock().unwrap().is_none() {
         // waiting for a slot, but someone wants it now: hand it one
         let slot = ctx.slot_with_retry().await.ok_or_else(|| err(503, "Server processing is busy – playing the original"))?;
-        if job.status().phase == Phase::Queued {
-            *job.gift.lock().unwrap() = Some(slot);
+        let mut gift = job.gift.lock().unwrap();
+        if job.status().phase == Phase::Queued && gift.is_none() {
+            *gift = Some(slot);
         }
     }
     serve_following(ctx, job, spec, t).await.map(Some)
 }
 
+/// After a live seek took its slot: render the song in the background (with a slot below
+/// [`Ctx::background_max`] if one is free, otherwise once one is), unless it is already rendered or rendering.
+pub fn start_background(ctx: &Ctx, spec: &Spec, user: i64) {
+    if matches!(lookup(ctx, &spec.key()), Found::Nothing) {
+        get_or_start(ctx, spec, user, ctx.background_slot());
+    }
+}
+
+/// No slot for a live seek: when a render of this song is running (faster than real time), wait
+/// up to 15 s for it to reach `t` and follow it from there instead of answering 503.
+pub async fn wait_for_render(ctx: &Ctx, spec: &Spec, t: f64) -> ApiResult<Option<Response>> {
+    let Found::Rendering(job) = lookup(ctx, &spec.key()) else { return Ok(None) };
+    let deadline = Instant::now() + Duration::from_secs(15);
+    let mut rx = job.tx.subscribe();
+    loop {
+        if job.cancel.load(Ordering::SeqCst) {
+            return Ok(None);
+        }
+        let s = rx.borrow_and_update().clone();
+        match s.phase {
+            Phase::Failed => return Ok(None),
+            // a queued render has no slot either: it won't get anywhere in time
+            Phase::Queued => return Ok(None),
+            _ if reached(&job, t) => return serve_following(ctx, job, spec, t).await.map(Some),
+            _ => {}
+        }
+        if Instant::now() > deadline {
+            return Ok(None);
+        }
+        let _ = tokio::time::timeout(Duration::from_millis(250), rx.changed()).await;
+    }
+}
+
 /// `POST /api/playback/dsp/prepare`: render ahead. Returns cached | rendering | queued | busy.
 pub fn prepare(ctx: &Ctx, spec: &Spec, user: i64) -> Value {
-    let state = match get_or_start(ctx, spec, user, ctx.slots.try_acquire(ctx.max_streams)) {
+    // ahead of time: never the last free slot, which a seek or skip in the playing song may need
+    let state = match get_or_start(ctx, spec, user, ctx.background_slot()) {
         (Found::Cached(p), _) => {
             touch(&p);
             return json!({"state": "cached"});
@@ -867,6 +950,9 @@ fn read_at(f: &mut std::fs::File, at: u64, buf: &mut [u8]) -> std::io::Result<us
 mod tests {
     use super::*;
 
+    /// milliseconds each processing block waits, so a render in a test lasts long enough to join
+    pub static PACE_MS: AtomicU64 = AtomicU64::new(0);
+
     fn tmp(name: &str) -> PathBuf {
         let d = std::env::temp_dir().join(format!("encore-render-test-{name}-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&d);
@@ -989,6 +1075,7 @@ mod tests {
         let d = tmp("shared");
         let ctx = test_ctx(&d);
         let spec = test_spec(&d, 990_001);
+        PACE_MS.store(20, Ordering::SeqCst);
         let req = || Request::builder().uri("/x").body(Body::empty()).unwrap();
         // two requests for the same key while it renders: one job, one slot
         let a = serve(&ctx, &spec, 1, 0.0, req()).await.unwrap().expect("served");
@@ -997,7 +1084,8 @@ mod tests {
         assert_eq!(b.headers()["x-encore-dsp"], "rendering");
         assert_eq!(TEST_SLOTS.active(), 1);
         assert_eq!(JOBS.lock().unwrap().keys().filter(|k| **k == spec.key()).count(), 1);
-        let (ba, bb) = (collect(a).await, collect(b).await);
+        let (ba, bb) = tokio::join!(collect(a), collect(b));
+        PACE_MS.store(0, Ordering::SeqCst);
         assert!(ba.len() > 100_000 && ba == bb && &ba[..4] == b"fLaC");
         // finished: cached, served as a file with Range support
         for _ in 0..100 {
@@ -1013,7 +1101,8 @@ mod tests {
         assert_eq!(c.headers()["x-encore-dsp"], "cached");
         assert_eq!(c.headers()["content-length"], "131072");
         assert!(c.headers()["content-range"].to_str().unwrap().starts_with("bytes 0-131071/"));
-        assert_eq!(collect(c).await, ba[..131_072].to_vec());
+        // same audio (the header differs: final STREAMINFO and the seek table)
+        assert_eq!(collect(c).await[9_000..], ba[9_000..131_072]);
         // the stored file got its seek table and decodes to the full length
         let out = std::process::Command::new("ffprobe")
             .args(["-v", "error", "-show_entries", "format=duration", "-of", "default=nw=1:nk=1"])
@@ -1042,7 +1131,53 @@ mod tests {
         assert!(jobs.get(&specs[0].key()).is_none(), "oldest stopped");
         assert!(jobs.get(&specs[1].key()).is_some() && jobs.get(&specs[2].key()).is_some());
         drop(jobs);
-        clear(&ctx.dir);
+        for s in &specs {
+            if let Some(j) = JOBS.lock().unwrap().get(&s.key()) {
+                j.cancel();
+            }
+        }
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn render_ahead_leaves_a_slot_for_playing_requests() {
+        if !have_ffmpeg() {
+            return;
+        }
+        static TWO: Slots = Slots::new();
+        let d = tmp("reserve");
+        let ctx = Ctx { slots: &TWO, max_streams: 2, ..test_ctx(&d) };
+        // the playing song holds one slot: rendering the next one ahead must not take the last
+        let playing = TWO.try_acquire(2).expect("slot");
+        let next = test_spec(&d, 990_200);
+        assert_eq!(prepare(&ctx, &next, 7)["state"], "queued");
+        tokio::time::sleep(Duration::from_millis(500)).await;
+        assert_eq!(TWO.active(), 1, "the queued render left the last slot free");
+        assert_eq!(JOBS.lock().unwrap().get(&next.key()).unwrap().status().phase, Phase::Queued);
+        // a cancelled render is never followed: a new request starts a fresh one in its place
+        let old = match lookup(&ctx, &next.key()) {
+            Found::Rendering(j) => j,
+            _ => panic!("rendering"),
+        };
+        old.cancel();
+        assert!(matches!(lookup(&ctx, &next.key()), Found::Nothing));
+        let (fresh, started) = get_or_start(&ctx, &next, 7, None);
+        assert!(started);
+        let Found::Rendering(fresh) = fresh else { panic!("rendering") };
+        assert!(!Arc::ptr_eq(&old, &fresh));
+        // the old job ends without removing its replacement
+        tokio::time::sleep(Duration::from_millis(500)).await;
+        assert!(JOBS.lock().unwrap().get(&next.key()).is_some_and(|j| Arc::ptr_eq(j, &fresh)));
+        // the playing song's slot frees: the queued render may now run
+        drop(playing);
+        for _ in 0..100 {
+            if ctx.flac(&next.key()).is_file() {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        assert!(ctx.flac(&next.key()).is_file());
+        assert!(TWO.active() <= 1);
         let _ = std::fs::remove_dir_all(&d);
     }
 }

@@ -1,7 +1,9 @@
 //! Port of web/js/player.js – see docs/ui-rewrite/CONTRACT.md
 //! Web player: streams the original file (bit-perfect for MP3/FLAC/AAC/Opus); formats a browser
-//! can't decode (ALAC/APE/WavPack/AIFF/WMA) are converted to FLAC on the fly by the server, and when the
-//! connection can't keep up (Settings → Playback → Auto) the rest of the song comes as a smaller AAC stream.
+//! can't decode (ALAC/APE/WavPack/AIFF/WMA) are converted to FLAC on the fly by the server. On Auto quality it
+//! measures the connection and steps the stream down (256 → 32 kbps AAC/Opus) and back up as the bandwidth allows.
+//! Optional sound effects (EQ, crossfeed, balance, mono) run in this browser through Web Audio, and crossfade
+//! blends one song into the next with the two <audio> elements.
 //! Tap the bar for the full-screen player (lyrics + Up next). When the queue runs out it keeps going
 //! with a shuffle of the whole library: a single song → straight into the shuffle, an album → after its last song.
 
@@ -29,6 +31,8 @@ struct State {
     index: i64,
     transcoded: bool,
     lossy: bool,
+    /// kbps of the lossy stream playing (0 = not lossy: the original, FLAC or Cadenza)
+    rung: i64,
     /// upsampled by the server's Cadenza, and the rate it sends
     dsp: bool,
     dsp_rate: f64,
@@ -43,14 +47,16 @@ struct State {
     stalls: Vec<f64>,
     stall_at: f64,
     seek_at: f64,
-    switched: bool,
+    /// when Auto last stepped down because of a stall, and when the rung last changed mid-song
+    step_at: f64,
+    switched_at: f64,
     last_preload_check: f64,
     slow_start: Option<Timeout>,
 }
 impl Default for State {
     fn default() -> Self {
-        Self { queue: vec![], index: -1, transcoded: false, lossy: false, dsp: false, dsp_rate: 0.0, offset: 0.0, dragging: false, context: "list".into(), repeat: "off".into(), full: false, pane: "now".into(), logged: false, announced: None,
-            stalls: vec![], stall_at: 0.0, seek_at: 0.0, switched: false, last_preload_check: 0.0, slow_start: None }
+        Self { queue: vec![], index: -1, transcoded: false, lossy: false, rung: 0, dsp: false, dsp_rate: 0.0, offset: 0.0, dragging: false, context: "list".into(), repeat: "off".into(), full: false, pane: "now".into(), logged: false, announced: None,
+            stalls: vec![], stall_at: 0.0, seek_at: 0.0, step_at: 0.0, switched_at: 0.0, last_preload_check: 0.0, slow_start: None }
     }
 }
 
@@ -70,6 +76,11 @@ thread_local! {
     static AUDIO: RefCell<Option<HtmlMediaElement>> = const { RefCell::new(None) };
     /// second <audio> that pre-buffers the next song, so skipping is instant
     static SPARE: RefCell<Option<HtmlMediaElement>> = const { RefCell::new(None) };
+    /// a third <audio>, never wrapped in Web Audio: once the effects graph exists, 30-second previews (third-party
+    /// URLs, often without CORS) play on it – through the graph they would fail or be silent
+    static PLAIN: RefCell<Option<HtmlMediaElement>> = const { RefCell::new(None) };
+    /// the wrapped element set aside while PLAIN plays
+    static PARKED: RefCell<Option<HtmlMediaElement>> = const { RefCell::new(None) };
     static LYR: RefCell<Lyr> = RefCell::new(Lyr::default());
     /// Songs heard this listening session (this tab): shuffles never repeat one until the whole library has played.
     static PLAYED: RefCell<Vec<i64>> = RefCell::new(load_played());
@@ -85,23 +96,35 @@ thread_local! {
     static EXPOSED: Cell<bool> = const { Cell::new(false) };
     /// `let prefs = playback.current()`
     static PREFS: RefCell<Value> = RefCell::new(playback::current());
-    /// Auto quality: songs started before this time use the smaller stream
-    static LOSSY_UNTIL: Cell<f64> = const { Cell::new(0.0) };
+    /// the volume slider: the ceiling of every fade
+    static USER_VOL: Cell<f64> = const { Cell::new(0.9) };
+    /// when the "Connection is slow" toast last showed (at most once a minute)
+    static SLOW_TOAST_AT: Cell<f64> = const { Cell::new(0.0) };
     /// liked track ids, fetched the first time a heart is drawn
     static LIKED: RefCell<Option<HashSet<i64>>> = const { RefCell::new(None) };
-    /// AudioContext, only to read the device's output sample rate
+    /// AudioContext: reads the device's output sample rate, and runs the sound effects when they are on
     static CTX: RefCell<Option<web_sys::AudioContext>> = const { RefCell::new(None) };
     /// track id → /info (codec, sample rate, bit depth …)
     static INFO: RefCell<HashMap<i64, Value>> = RefCell::new(HashMap::new());
     /// what this browser says it can decode, by file format
     static PLAYABLE: RefCell<HashMap<String, bool>> = RefCell::new(HashMap::new());
-    /// the smaller stream's codec: AAC where the browser decodes it, Opus elsewhere (Chromium builds, Firefox on Linux)
+    /// the lighter streams' codec: AAC where the browser decodes it, Opus elsewhere (Chromium builds, Firefox on Linux)
     static LOSSY: String = detect_lossy();
     /// GET /api/playback/dsp: is server-side Cadenza processing on, and may this account use it
     static DSP_INFO: RefCell<Option<Value>> = const { RefCell::new(None) };
     /// a processed stream failed this session: play originals until the page reloads
     static DSP_FAILED: Cell<bool> = const { Cell::new(false) };
     static DSP_TOASTED: Cell<bool> = const { Cell::new(false) };
+    /// track id → what the server's pre-render cache says: 'cached' | 'rendering' | 'queued' | 'busy'
+    static DSP_CACHE: RefCell<HashMap<i64, String>> = RefCell::new(HashMap::new());
+    /// track id → when we last asked (prepare)
+    static DSP_ASKED: RefCell<HashMap<i64, f64>> = RefCell::new(HashMap::new());
+    /// the bandwidth estimate (Auto quality)
+    static EST: RefCell<Est> = RefCell::new(Est::new());
+    /// the crossfade in progress
+    static FADE: RefCell<Option<Fade>> = const { RefCell::new(None) };
+    /// the sound-effects graph (Web Audio)
+    static FX: RefCell<Fx> = RefCell::new(Fx::default());
 }
 
 fn fetch_dsp() {
@@ -111,17 +134,36 @@ fn fetch_dsp() {
     });
 }
 fn dsp_info() -> Value { DSP_INFO.with(|d| d.borrow().clone()).unwrap_or(Value::Null) }
+fn dsp_key(p: &Value) -> Value { json!([p.g("dsp"), p.g("dsp_filter"), p.g("dsp_dither"), p.g("dsp_rate")]) }
+/// New settings: a different Cadenza setup forgets what the render cache said; the effects follow at once.
+fn new_prefs(p: Value) {
+    if dsp_key(&p) != dsp_key(&prefs()) {
+        DSP_CACHE.with(|m| m.borrow_mut().clear());
+        DSP_ASKED.with(|m| m.borrow_mut().clear());
+    }
+    PREFS.with(|x| *x.borrow_mut() = p);
+    if playback::fx_active(&prefs()) { ensure_fx(); }
+    apply_fx();
+}
+fn dsp_state(id: i64) -> String { DSP_CACHE.with(|m| m.borrow().get(&id).cloned()).unwrap_or_default() }
+fn dsp_asked(id: i64) -> f64 { DSP_ASKED.with(|m| m.borrow().get(&id).copied()).unwrap_or(0.0) }
+fn user_vol() -> f64 { USER_VOL.with(|v| v.get()) }
+fn fading() -> bool { FADE.with(|f| f.borrow().is_some()) }
+/// `a === b` for two elements.
+fn same_el(a: &HtmlMediaElement, b: &HtmlMediaElement) -> bool { let x: &JsValue = a.as_ref(); let y: &JsValue = b.as_ref(); x == y }
 
 fn st<R>(f: impl FnOnce(&State) -> R) -> R { STATE.with(|s| f(&s.borrow())) }
 fn st_mut<R>(f: impl FnOnce(&mut State) -> R) -> R { STATE.with(|s| f(&mut s.borrow_mut())) }
 fn audio() -> Option<HtmlMediaElement> { AUDIO.with(|a| a.borrow().clone()) }
 fn spare() -> Option<HtmlMediaElement> { SPARE.with(|a| a.borrow().clone()) }
+fn plain() -> Option<HtmlMediaElement> { PLAIN.with(|a| a.borrow().clone()) }
+fn is_plain(el: &HtmlMediaElement) -> bool { plain().is_some_and(|p| same_el(&p, el)) }
+fn fx_built() -> bool { FX.with(|f| f.borrow().built) }
 /// `state.queue[state.index] || null` (the queue entry itself, for identity checks).
 fn cur() -> Option<Rc<Value>> { st(|s| if s.index < 0 { None } else { s.queue.get(s.index as usize).cloned() }) }
 fn is_linked() -> bool { LINK.with(|l| l.borrow().is_some()) }
 fn is_local() -> bool { LOCAL.with(|l| l.get()) }
 fn prefs() -> Value { PREFS.with(|p| p.borrow().clone()) }
-fn kbps() -> i64 { prefs().i("kbps") }
 fn lossy_codec() -> String { LOSSY.with(|l| l.clone()) }
 /// `${n}` of a JS number ("0.9", "1", "52.3").
 fn js_num(v: f64) -> String { v.to_string() }
@@ -141,7 +183,7 @@ fn abs_url(u: &str) -> String {
     web_sys::Url::new_with_base(u, &base).map(|x| x.href()).unwrap_or_default()
 }
 /// `(x).toFixed(1)` – exact decimal expansion, ties (k.25 / k.75) rounded up like JS.
-fn to_fixed1(x: f64) -> String {
+pub(crate) fn to_fixed1(x: f64) -> String {
     let q = x * 4.0;
     if x.is_finite() && q.fract() == 0.0 && (q as i64).rem_euclid(2) == 1 {
         let n = (x * 10.0).round() as i64;
@@ -390,7 +432,7 @@ pub fn snapshot() -> Value {
     m.insert("playing".into(), json!(!a.paused()));
     m.insert("position".into(), json!(position()));
     m.insert("duration".into(), json!(duration()));
-    m.insert("volume".into(), json!(a.volume()));
+    m.insert("volume".into(), json!(user_vol()));
     let rate = CTX.with(|c| c.borrow().as_ref().map(|c| c.sample_rate() as f64));
     m.insert("signal".into(), json!({ "label": quality(&t), "transport": transport().map(|(k, _)| k), "output_rate": rate }));
     m.insert("index".into(), json!(st(|s| s.index)));
@@ -400,12 +442,12 @@ pub fn snapshot() -> Value {
 }
 fn local_volume(v: f64) {
     let (Some(a), Some(sp)) = (audio(), spare()) else { return };
-    let vol = 0f64.max(1f64.min(v));
-    a.set_volume(vol);
-    sp.set_volume(vol);
-    dom::ls_set("encore.volume", &js_num(a.volume()));
+    let vol = if v.is_finite() { 0f64.max(1f64.min(v)) } else { 0.9 };
+    USER_VOL.with(|u| u.set(vol));
+    if fading() { step_fade(); } else { set_fade_gain(&a, 1.0); set_fade_gain(&sp, 1.0); }
+    dom::ls_set("encore.volume", &js_num(vol));
     for id in ["vol", "fvol"] {
-        if let Some(el) = by_id(id) { if num(&dom::value(&el)) != a.volume() { dom::set_value(&el, &js_num(a.volume())); } }
+        if let Some(el) = by_id(id) { if num(&dom::value(&el)) != vol { dom::set_value(&el, &js_num(vol)); } }
     }
     emit();
 }
@@ -551,15 +593,17 @@ fn dsp_out_rate(t: &Value) -> f64 {
     if want <= 0.0 { while r * 2.0 <= max { r *= 2.0; } }
     r.max(src)
 }
-/// Upsample this library song on the server? Only when switched on and allowed; Data saver / Auto's fallback win.
+/// Upsample this library song on the server? Only when switched on and allowed; Data saver and Auto's lighter streams win.
 fn want_dsp(t: &Value, lossy: bool) -> bool {
     prefs().truthy("dsp") && dsp_info().truthy("allowed") && !t.truthy("preview") && t.g("id").is_number() && !lossy && !DSP_FAILED.with(|f| f.get())
 }
-/// transcode: FLAC made by the server · lossy: the smaller stream · dsp: upsampled by the server's Cadenza · offset: where a server-made stream starts
-fn stream_url(t: &Value, transcode: bool, lossy: bool, dsp: bool, offset: f64) -> String {
+/// The server keeps finished Cadenza renders (pre-render cache): seeking and the next song need no new job.
+fn dsp_cache_on() -> bool { dsp_info().g("cache").f("max_mb") > 0.0 }
+/// transcode: FLAC made by the server · rung: kbps of the lossy stream (0 = not lossy) · dsp: upsampled by the server's Cadenza · offset: where a server-made stream starts
+fn stream_url(t: &Value, transcode: bool, rung: i64, dsp: bool, offset: f64) -> String {
     if t.truthy("preview") { return t.s("preview_url"); }
     let mut q: Vec<String> = vec![];
-    if lossy { q.push(format!("q={}", lossy_codec())); q.push(format!("kbps={}", kbps())); }
+    if rung > 0 { q.push(format!("q={}", lossy_codec())); q.push(format!("kbps={rung}")); }
     else if dsp {
         let p = prefs();
         q.push("dsp=1".into());
@@ -572,10 +616,36 @@ fn stream_url(t: &Value, transcode: bool, lossy: bool, dsp: bool, offset: f64) -
     format!("/api/library/tracks/{}/stream{}", t.s("id"), if q.is_empty() { String::new() } else { format!("?{}", q.join("&")) })
 }
 fn convert(t: &Value) -> bool { !t.truthy("preview") && (CONVERT.contains(&t.s("format").to_lowercase().as_str()) || !can_play(&t.s("format"))) }
-/// Should this song start as the smaller stream? Data saver always; Auto for a while after the connection fell behind.
-fn want_lossy(t: &Value) -> bool {
-    let p = prefs();
-    !t.truthy("preview") && (p.s("quality") == "saver" || (p.s("quality") == "auto" && now_ms() < LOSSY_UNTIL.with(|l| l.get())))
+/// kbit/s of a Cadenza stream at `rate` (24-bit stereo FLAC, roughly 65 % of the raw PCM).
+fn dsp_kbps(rate: f64) -> f64 { playback::js_round(rate * 48.0 * 0.65 / 1000.0) }
+/// kbit/s the song needs as the "original" rung: the Cadenza stream's when the server upsamples it, else the file's.
+fn orig_kbps(t: Option<&Value>) -> f64 {
+    let Some(t) = t else { return 0.0 };
+    if t.truthy("preview") { return 0.0; }
+    if want_dsp(t, false) { return dsp_kbps(dsp_out_rate(t)); }
+    file_kbps(Some(t))
+}
+/// kbit/s of the file itself (0 = unknown, counted as 1411).
+fn file_kbps(t: Option<&Value>) -> f64 {
+    let Some(t) = t else { return 0.0 };
+    if t.truthy("preview") { return 0.0; }
+    if t.f("bitrate") > 0.0 { return t.f("bitrate"); }
+    let i = INFO.with(|m| m.borrow().get(&t.i("id")).map(|i| i.f("bitrate"))).unwrap_or(0.0);
+    if t.g("id").is_number() && i > 0.0 { return i; }
+    if t.f("size") > 0.0 && t.f("duration") > 0.0 { playback::js_round(t.f("size") * 8.0 / 1000.0 / t.f("duration")) } else { 0.0 }
+}
+fn est_kbps() -> Option<f64> { EST.with(|e| e.borrow().kbps) }
+/// Which rung a song starts on: Original never converts, Data saver is fixed at 96 kbps, Auto follows the estimated bandwidth.
+fn rung_for(t: &Value) -> i64 {
+    let q = prefs().s("quality");
+    if t.truthy("preview") || q == "original" { return 0; }
+    if q == "saver" { return playback::SAVER_KBPS; }
+    playback::choose_rung(est_kbps(), orig_kbps(Some(t)))
+}
+/// The URL a song starts with (what the spare element pre-loads, and what load() asks for at a song start).
+fn start_url(t: &Value) -> String {
+    let rung = rung_for(t);
+    stream_url(t, convert(t) && rung == 0, rung, want_dsp(t, rung > 0), 0.0)
 }
 
 /// Android app: keep songs on the phone so they play with no server.
@@ -596,13 +666,27 @@ pub fn save_offline(tracks: Vec<Value>) {
     }
 }
 
-fn load(transcode: bool, offset: f64, lossy: Option<bool>, dsp: Option<bool>) {
+fn load(transcode: bool, offset: f64, rung: Option<i64>, dsp: Option<bool>) {
+    load_opts(LoadOpts { transcode, offset, rung, dsp, ..Default::default() });
+}
+/// rung: kbps of the lossy stream (None = what the song should start on) · dsp: None = whatever the settings say
+/// resume: the same song continues (a quality switch or a seek) – no new play / now-playing · fade: crossfade into it
+#[derive(Default)]
+struct LoadOpts { transcode: bool, offset: f64, rung: Option<i64>, dsp: Option<bool>, resume: bool, fade: bool }
+/// Start the current song (or restart it at `offset`).
+fn load_opts(o: LoadOpts) {
     let Some(t) = cur() else { return };
+    if !o.fade { end_fade(); }
+    let offset = o.offset;
+    let start = !truthy_num(offset) && !o.resume;
     mark_played(&t);
-    let transcode = transcode || convert(&t);
-    let lossy = lossy.unwrap_or_else(|| want_lossy(&t));
-    let is_lossy = !t.truthy("preview") && lossy;
-    let is_dsp = dsp.unwrap_or(true) && want_dsp(&t, is_lossy);
+    let transcode = o.transcode || convert(&t);
+    let prev_rung = st(|s| s.rung);
+    let rung = if t.truthy("preview") { 0 } else { o.rung.unwrap_or_else(|| rung_for(&t)) };
+    st_mut(|s| s.rung = rung);
+    if start && !t.truthy("preview") && prefs().s("quality") == "auto" { note_rung_change(prev_rung, rung); }
+    let is_lossy = rung > 0;
+    let is_dsp = o.dsp.unwrap_or(true) && want_dsp(&t, is_lossy);
     let dsp_rate = if is_dsp { dsp_out_rate(&t) } else { 0.0 };
     st_mut(|s| { s.lossy = is_lossy; s.dsp = is_dsp; s.dsp_rate = dsp_rate; });
     if is_dsp && !INFO.with(|m| m.borrow().contains_key(&t.i("id"))) {
@@ -616,14 +700,17 @@ fn load(transcode: bool, offset: f64, lossy: Option<bool>, dsp: Option<bool>) {
             }
         });
     }
-    let transcoded = !t.truthy("preview") && (transcode || lossy || is_dsp);
+    let transcoded = !t.truthy("preview") && (transcode || is_lossy || is_dsp);
+    // server-made streams restart at the seek point (their clock starts at `offset`); the original file and a
+    // pre-rendered Cadenza file are whole files the browser seeks in itself
+    let server_offset = if transcoded && !(is_dsp && dsp_state(t.i("id")) == "cached") { offset } else { 0.0 };
     st_mut(|s| {
         s.transcoded = transcoded;
-        s.offset = offset;   // server-made streams restart at the seek point, so their clock starts at `offset`
+        s.offset = server_offset;
         s.dragging = false;
     });
-    if !truthy_num(offset) {
-        st_mut(|s| { s.logged = false; s.stalls.clear(); s.switched = false; });
+    if start {
+        st_mut(|s| { s.logged = false; s.stalls.clear(); s.step_at = 0.0; });
         // "now playing" on Last.fm / ListenBrainz (Encore 2)
         if t.g("id").is_number() && !st(|s| s.announced.as_ref().is_some_and(|a| Rc::ptr_eq(a, &t))) {
             st_mut(|s| s.announced = Some(t.clone()));
@@ -631,37 +718,59 @@ fn load(transcode: bool, offset: f64, lossy: Option<bool>, dsp: Option<bool>) {
             dom::spawn(async move { let _ = api::post("/library/now-playing", json!({ "track_id": id })).await; });
         }
     }
-    let url = stream_url(&t, transcoded && !is_lossy && !is_dsp, is_lossy, is_dsp, offset);
+    let url = stream_url(&t, transcoded && !is_lossy && !is_dsp, rung, is_dsp, server_offset);
     let (Some(mut a), Some(sp)) = (audio(), spare()) else { return };
-    if !truthy_num(offset) && dom::data_opt(&sp, "url").as_deref() == Some(url.as_str()) {
+    let use_plain = t.truthy("preview") && fx_built();
+    if !truthy_num(offset) && !use_plain && dom::data_opt(&sp, "url").as_deref() == Some(url.as_str()) {
         // already buffered in the background: swap players and start right away
         let old = a;
         a = sp;
         AUDIO.with(|x| *x.borrow_mut() = Some(a.clone()));
-        SPARE.with(|x| *x.borrow_mut() = Some(old.clone()));
-        let _ = old.pause();
-        let _ = old.remove_attribute("src");
+        // the preview element never pre-loads: the parked wrapped one takes the spare's place
+        let next_spare = if is_plain(&old) { PARKED.with(|x| x.borrow_mut().take()).unwrap_or_else(|| old.clone()) } else { old.clone() };
+        SPARE.with(|x| *x.borrow_mut() = Some(next_spare));
+        if !o.fade { let _ = old.pause(); let _ = old.remove_attribute("src"); }
         let _ = old.remove_attribute("data-url");
-        a.set_volume(old.volume());
         a.set_current_time(0.0);
+        set_fade_gain(&a, if o.fade { 0.0 } else { 1.0 });
     } else {
-        // a pre-buffered processed stream holds one of the server's Cadenza slots: free it first
-        if is_dsp && dom::data_opt(&sp, "url").is_some_and(|u| u.contains("dsp=1")) { cancel_preload(); }
+        if use_plain != is_plain(&a) {
+            // a preview with the effects graph built plays on the never-wrapped element; anything else on a wrapped one
+            let old = a.clone();
+            let _ = old.pause(); let _ = old.remove_attribute("src"); let _ = old.remove_attribute("data-url");
+            let next = if use_plain { PARKED.with(|x| *x.borrow_mut() = Some(old.clone())); plain() } else { PARKED.with(|x| x.borrow_mut().take()) };
+            if let Some(n) = next {
+                a = n;
+                AUDIO.with(|x| *x.borrow_mut() = Some(a.clone()));
+                set_fade_gain(&a, 1.0);
+            }
+        }
+        // without the pre-render cache a pre-buffered processed stream holds one of the server's Cadenza slots: free it first
+        if is_dsp && !dsp_cache_on() && dom::data_opt(&sp, "url").is_some_and(|u| u.contains("dsp=1")) { cancel_preload(); }
         a.set_src(&url);
     }
     dom::set_data(&a, "url", &url);
+    if truthy_num(offset) && !truthy_num(server_offset) {
+        let el = a.clone();
+        if el.ready_state() >= 1 { el.set_current_time(offset); }
+        else { EventListener::once(&a, "loadedmetadata", move |_| el.set_current_time(offset)).forget(); }
+    }
+    if playback::fx_active(&prefs()) { ensure_fx(); }
+    route();
+    resume_fx();
     play(&a);
     st_mut(|s| s.slow_start = None);
-    if !truthy_num(offset) && !is_lossy && !t.truthy("preview") && prefs().s("quality") == "auto" {
-        // can't even get going: six seconds in and nothing has played yet → the smaller stream from the start
+    if start && !t.truthy("preview") && prefs().s("quality") == "auto" {
+        // can't even get going: six seconds in and nothing has played yet → one rung down
         let t2 = t.clone();
         let timer = Timeout::new(6000, move || {
             let same = cur().is_some_and(|c| Rc::ptr_eq(&c, &t2));
             let stuck = audio().is_some_and(|a| !a.paused() && a.current_time() < 0.5 && a.ready_state() < 3);
-            if same && stuck { downgrade(); }
+            if same && stuck { step_down_now(); }
         });
         st_mut(|s| s.slow_start = Some(timer));
     }
+    if start && is_dsp && dsp_cache_on() { prepare_ahead(&t); }
     if has_media_session() { set_media_metadata(&t); }
     dom::add_class(&body(), "has-player");
     render();
@@ -692,16 +801,29 @@ fn fully_buffered() -> bool {
 /// Start buffering the song that plays next – once this one is safely ahead, never while it's short of bandwidth.
 fn maybe_preload(force: bool) {
     let Some(sp) = spare() else { return };
-    if !prefs().truthy("preload") || is_linked() { return; }
+    if !prefs().truthy("preload") || is_linked() || fading() { return; }
     let n = st(|s| if s.index + 1 < 0 { None } else { s.queue.get((s.index + 1) as usize).cloned() });
     let Some(n) = n else { return };
-    let n_lossy = want_lossy(&n);
-    let url = stream_url(&n, convert(&n), n_lossy, want_dsp(&n, n_lossy), 0.0);
+    if n.truthy("preview") && fx_built() { return; }   // a preview plays on the never-wrapped element, not the spare
+    let url = start_url(&n);
     if dom::data_opt(&sp, "url").as_deref() == Some(url.as_str()) { return; }
-    if !force {
-        let t = cur();
-        let remaining = duration() - position();
-        let quiet = now_ms() - st(|s| s.stall_at) > 15000.0;
+    let t = cur();
+    let remaining = duration() - position();
+    let quiet = now_ms() - st(|s| s.stall_at) > 15000.0;
+    if url.contains("dsp=1") && dsp_cache_on() && st(|s| s.dsp) {
+        // a processed next song: ask the server to render it ahead, and buffer it only once that render exists
+        // (cached or in progress) – then the pre-load takes no extra processing slot
+        let id = n.i("id");
+        let s = dsp_state(id);
+        if s != "cached" && s != "rendering" {
+            if now_ms() - dsp_asked(id) > 15000.0 {
+                let n2 = n.clone();
+                dom::spawn(async move { prepare_dsp(&n2).await; maybe_preload(force); });
+            }
+            return;
+        }
+        if !force && !(fully_buffered() || (quiet && buffered_ahead() > 45.0) || remaining < 40.0) { return; }
+    } else if !force {
         let ok = if t.as_ref().is_some_and(|t| t.truthy("preview")) || st(|s| s.transcoded) { remaining < 40.0 }
             else { fully_buffered() || (quiet && buffered_ahead() > 45.0) || remaining < 30.0 };
         if !ok { return; }
@@ -713,35 +835,520 @@ fn maybe_preload(force: bool) {
 fn preload_next() { maybe_preload(true); }
 fn cancel_preload() {
     let Some(sp) = spare() else { return };
-    if dom::data_opt(&sp, "url").is_none() { return; }
+    if dom::data_opt(&sp, "url").is_none() || fading() { return; }
     let _ = sp.remove_attribute("src");
     let _ = sp.remove_attribute("data-url");
     sp.load();
 }
-/// The browser ran out of buffer mid-song. Give it the bandwidth back, and on Auto quality drop to the smaller stream.
+/// The browser ran out of buffer mid-song. Give it the bandwidth back, and on Auto quality step the stream down.
 fn stalled() {
     let now = now_ms();
     let paused = audio().map(|a| a.paused()).unwrap_or(true);
-    if now - st(|s| s.seek_at) < 3000.0 || position() < 1.0 || paused { return; }   // a seek or the start, not a slow link
+    if now - st(|s| s.seek_at) < 3000.0 || position() < 1.0 || paused { return; }   // a seek, a switch or the start, not a slow link
     st_mut(|s| { s.stall_at = now; s.stalls.push(now); });
     if !fully_buffered() { cancel_preload(); }
-    if prefs().s("quality") != "auto" || st(|s| s.lossy) || cur().is_some_and(|t| t.truthy("preview")) || st(|s| s.switched) { return; }
+    if prefs().s("quality") != "auto" || cur().is_some_and(|t| t.truthy("preview")) { return; }
+    // stalling again within 90 s of stepping down: the new rung isn't small enough either
+    let step_at = st(|s| s.step_at);
+    if truthy_num(step_at) && now - step_at < 90000.0 { step_down_now(); return; }
     let recent = st(|s| s.stalls.iter().filter(|x| now - **x < 90000.0).count());
-    if recent >= 2 { downgrade(); return; }
+    if recent >= 2 { step_down_now(); return; }
     // one long stall counts too: still waiting four seconds later
     Timeout::new(4000, move || {
         let waiting = audio().is_some_and(|a| !a.paused() && a.ready_state() < 3);
-        if waiting && st(|s| s.stall_at == now && !s.switched) { downgrade(); }
+        if waiting && st(|s| s.stall_at == now) { step_down_now(); }
     }).forget();
 }
-fn downgrade() {
+/// Auto: a stall forces one rung down right away, and the estimate drops to 60 % of what the rung needed.
+fn step_down_now() {
     let Some(t) = cur() else { return };
-    if t.truthy("preview") || st(|s| s.lossy) { return; }
-    st_mut(|s| s.switched = true);
-    LOSSY_UNTIL.with(|l| l.set(now_ms() + 10.0 * 60000.0));
-    load(true, position(), Some(true), None);
-    toast(&format!("Connection can't keep up – playing a smaller {} kbps stream for a while (Settings → Playback)", kbps()), "");
+    if t.truthy("preview") || prefs().s("quality") != "auto" { return; }
     st_mut(|s| s.slow_start = None);
+    let orig = orig_kbps(Some(&t));
+    let rung = st(|s| s.rung);
+    let lower = playback::step_down(rung, orig);
+    if lower == rung { return; }   // already at 32 kbps
+    EST.with(|e| {
+        let mut e = e.borrow_mut();
+        e.kbps = Some(0.6 * playback::needed(rung, orig));
+        e.at = now_ms();
+        e.fresh = false;
+        e.up_since = 0.0;
+    });
+    st_mut(|s| { s.stalls.clear(); s.step_at = now_ms(); });
+    switch_rung(lower);
+}
+/// Reload the song at the current position on another rung.
+fn switch_rung(rung: i64) {
+    if cur().is_none() { return; }
+    let at = position();
+    note_rung_change(st(|s| s.rung), rung);
+    let now = now_ms();
+    st_mut(|s| { s.switched_at = now; s.seek_at = now; });
+    load_opts(LoadOpts { rung: Some(rung), offset: at, resume: true, transcode: rung > 0, ..Default::default() });
+}
+fn note_rung_change(was: i64, now: i64) {
+    if was == now { return; }
+    if now > 0 && (was == 0 || now < was) {
+        if now_ms() - SLOW_TOAST_AT.with(|c| c.get()) > 60000.0 {
+            SLOW_TOAST_AT.with(|c| c.set(now_ms()));
+            toast(&format!("Connection is slow – lowering quality to {now} kbps to keep playing"), "");
+        }
+    } else if now == 0 { toast("Connection recovered – back to the original file", "ok"); }
+}
+
+// ---- the bandwidth estimate (Auto quality) -----------------------------------------------------
+// An exponentially weighted average of measured throughput in kbit/s: from how fast the playing song's buffer
+// grows, from a small probe when nothing is downloading, and – until the first sample – the browser's own guess.
+struct Est { kbps: Option<f64>, at: f64, fresh: bool, up_since: f64, el: Option<HtmlMediaElement>, url: String, end: f64, wall: f64, probing: bool, probe_at: f64 }
+impl Est {
+    fn new() -> Self {
+        let mut e = Est { kbps: None, at: 0.0, fresh: false, up_since: 0.0, el: None, url: String::new(), end: 0.0, wall: 0.0, probing: false, probe_at: 0.0 };
+        // `navigator.connection?.downlink` (Mbit/s) – untyped, the Network Information API isn't in every browser
+        let d = js_sys::Reflect::get(&dom::window().navigator(), &"connection".into()).ok()
+            .filter(|c| c.is_object())
+            .and_then(|c| js_sys::Reflect::get(&c, &"downlink".into()).ok())
+            .and_then(|v| v.as_f64());
+        if let Some(d) = d { if d > 0.0 { e.kbps = Some(d * 1000.0); e.at = now_ms(); } }
+        e
+    }
+}
+fn perf_now() -> f64 { dom::window().performance().map(|p| p.now()).unwrap_or_else(now_ms) }
+fn add_sample(kbps: f64) {
+    if !(kbps >= 0.0) || !kbps.is_finite() { return; }
+    EST.with(|e| {
+        let mut e = e.borrow_mut();
+        e.kbps = Some(playback::ewma(e.kbps, kbps));
+        e.at = now_ms();
+        e.fresh = true;
+    });
+}
+/// kbit/s of the stream the element is playing (None when the server, not the network, sets the pace).
+fn stream_kbps() -> Option<f64> {
+    let (rung, dsp) = st(|s| (s.rung, s.dsp));
+    if rung > 0 { return Some(rung as f64); }
+    if dsp { return None; }   // Cadenza renders at its own speed: its download rate says nothing about the connection
+    let o = file_kbps(cur().as_deref());
+    Some(if truthy_num(o) { o } else { 1411.0 })
+}
+/// Every 2 s: how far the buffer grew × the stream's bitrate ÷ the time it took. Returns whether a download is in progress.
+fn sample_progress() -> bool {
+    let Some(a) = audio() else { return false };
+    let now = perf_now();
+    let b = a.buffered();
+    let end = if b.length() > 0 { b.end(b.length() - 1).unwrap_or(0.0) } else { 0.0 };
+    let d = a.duration();
+    let downloading = a.network_state() == 2 && !(d.is_finite() && d > 0.0 && end >= d - 0.5);
+    let url = dom::data(&a, "url");
+    let kbps = stream_kbps();
+    let same = EST.with(|e| { let e = e.borrow(); e.el.as_ref().is_some_and(|x| same_el(x, &a)) && e.url == url });
+    // only while the element is still downloading: a finished download would read as a slow link
+    let kbps = kbps.filter(|k| truthy_num(*k));
+    let Some(kbps) = kbps.filter(|_| same && downloading) else {
+        EST.with(|e| { let mut e = e.borrow_mut(); e.el = Some(a.clone()); e.url = url; e.end = end; e.wall = now; });
+        return downloading;
+    };
+    let (secs, grown) = EST.with(|e| {
+        let mut e = e.borrow_mut();
+        let r = ((now - e.wall) / 1000.0, end - e.end);
+        e.end = end; e.wall = now;
+        r
+    });
+    if secs < 0.25 || grown < 0.0 { return true; }
+    if grown == 0.0 && buffered_ahead() > 30.0 { return true; }   // the browser holding back with a full buffer, not a slow link
+    add_sample(grown * kbps / secs);
+    true
+}
+/// Probe sizes: 128 KB, and when that arrives in under 0.25 s (too fast to time), 1 MB, then 4 MB.
+const PROBE_SIZES: [f64; 3] = [131072.0, 1048576.0, 4194304.0];
+/// Nothing downloading and the estimate is older than 20 s: time a piece of the current or next song.
+fn probe() {
+    let now = now_ms();
+    let busy = EST.with(|e| { let e = e.borrow(); e.probing || now - e.at < 20000.0 || now - e.probe_at < 20000.0 });
+    if busy { return; }
+    let cands = st(|s| {
+        let c = if s.index < 0 { None } else { s.queue.get(s.index as usize).cloned() };
+        let n = if s.index + 1 < 0 { None } else { s.queue.get((s.index + 1) as usize).cloned() };
+        [c, n]
+    });
+    let Some(t) = cands.into_iter().flatten().find(|x| !x.truthy("preview") && x.g("id").is_number() && !convert(x)) else { return };
+    EST.with(|e| { let mut e = e.borrow_mut(); e.probing = true; e.probe_at = now; });
+    let id = t.s("id");
+    dom::spawn(async move {
+        for (i, &size) in PROBE_SIZES.iter().enumerate() {
+            let Some((bytes, secs)) = probe_once(&id, size).await else { break };
+            if let Some(kbps) = playback::rate_of(bytes, secs) { add_sample(kbps); break; }
+            if bytes < size || i == PROBE_SIZES.len() - 1 {
+                // still under 0.25 s (the whole song, or 4 MB): "at least this fast" – it may lift the estimate, never lower it
+                let at_least = bytes * 8.0 / 1000.0 / 0.25;
+                if est_kbps().is_none_or(|k| k < at_least) { add_sample(at_least); }
+                break;
+            }
+        }
+        EST.with(|e| e.borrow_mut().probing = false);
+    });
+}
+async fn js_await(p: JsValue) -> Option<JsValue> {
+    let p = p.dyn_into::<js_sys::Promise>().ok()?;
+    wasm_bindgen_futures::JsFuture::from(p).await.ok()
+}
+fn js_get(o: &JsValue, key: &str) -> JsValue { js_sys::Reflect::get(o, &key.into()).unwrap_or(JsValue::UNDEFINED) }
+fn js_call0(o: &JsValue, name: &str) -> Option<JsValue> {
+    js_get(o, name).dyn_into::<js_sys::Function>().ok()?.call0(o).ok()
+}
+/// `fetch(stream, { headers: { Range: 'bytes=0-<size - 1>' }, credentials: 'same-origin', cache: 'no-store' })`, timed:
+/// (bytes, seconds); None when offline or refused.
+async fn probe_once(id: &str, size: f64) -> Option<(f64, f64)> {
+    let init = web_sys::RequestInit::new();
+    init.set_credentials(web_sys::RequestCredentials::SameOrigin);
+    init.set_cache(web_sys::RequestCache::NoStore);
+    let headers = web_sys::Headers::new().ok()?;
+    headers.set("Range", &format!("bytes=0-{}", js_num(size - 1.0))).ok()?;
+    init.set_headers(&headers);
+    let t0 = perf_now();
+    let r = js_await(dom::window().fetch_with_str_and_init(&format!("/api/library/tracks/{id}/stream"), &init).into()).await?;
+    let r: web_sys::Response = r.dyn_into().ok()?;
+    let body = js_get(r.as_ref(), "body");
+    if r.status() != 206 && r.status() != 200 {
+        if body.is_object() { if let Some(p) = js_call0(&body, "cancel") { let _ = js_await(p).await; } }
+        return None;
+    }
+    if !body.is_object() { return None; }
+    let reader = js_call0(&body, "getReader")?;
+    let mut bytes = 0f64;
+    while bytes < size {
+        let Some(chunk) = js_call0(&reader, "read") else { break };
+        let Some(res) = js_await(chunk).await else { break };
+        if js_get(&res, "done").is_truthy() { break; }
+        bytes += js_get(&js_get(&res, "value"), "byteLength").as_f64().unwrap_or(0.0);
+    }
+    if let Some(p) = js_call0(&reader, "cancel") { dom::spawn(async move { let _ = js_await(p).await; }); }
+    Some((bytes.min(size), (perf_now() - t0) / 1000.0))
+}
+fn adapt_tick() {
+    if is_linked() || audio().is_none() { return; }
+    let Some(t) = cur() else { return };
+    if t.truthy("preview") { return; }
+    let downloading = sample_progress();
+    if audio().is_some_and(|a| a.paused()) { EST.with(|e| e.borrow_mut().up_since = 0.0); return; }
+    if !downloading { probe(); }
+    if prefs().s("quality") == "auto" { decide(); }
+}
+/// Auto: follow the estimate – down at once (when the buffer is short), up when it has held 1.5× the higher rung's need for 15 s.
+fn decide() {
+    let t = cur();
+    let orig = orig_kbps(t.as_deref());
+    let l = playback::ladder(orig);
+    let rung = st(|s| s.rung);
+    let ci = l.iter().position(|&r| r == rung);
+    let (fresh, est) = EST.with(|e| { let mut e = e.borrow_mut(); let f = e.fresh; e.fresh = false; (f, e.kbps) });
+    let (Some(est), Some(ci)) = (est, ci) else { return };
+    let now = now_ms();
+    let target = playback::choose_rung(Some(est), orig);
+    let ti = l.iter().position(|&r| r == target).unwrap_or(0);
+    if ti > ci {
+        EST.with(|e| e.borrow_mut().up_since = 0.0);
+        if fresh && now - st(|s| s.switched_at) > 10000.0 && !fully_buffered() && buffered_ahead() < 20.0 { switch_rung(l[ti]); }
+        return;
+    }
+    let up = l.iter().copied().find(|&r| playback::needed(r, orig) * 1.5 <= est);
+    let Some(up) = up.filter(|u| l.iter().position(|r| r == u).unwrap_or(0) < ci) else { EST.with(|e| e.borrow_mut().up_since = 0.0); return };
+    let since = EST.with(|e| e.borrow().up_since);
+    if !truthy_num(since) { EST.with(|e| e.borrow_mut().up_since = now); return; }
+    // safe to reload: 10 s in hand, or a server-made stream the browser has finished fetching (it shows little of it as buffered)
+    let safe = buffered_ahead() > 10.0 || (st(|s| s.transcoded) && audio().is_some_and(|a| a.network_state() != 2));
+    if now - since >= 15000.0 && safe { EST.with(|e| e.borrow_mut().up_since = 0.0); switch_rung(up); }
+}
+
+// ---- server-side Cadenza: render ahead -----------------------------------------------------------
+/// Ask the server to render a song ahead (or say how far it is): 'cached' | 'rendering' | 'queued' | 'busy'.
+async fn prepare_dsp(t: &Value) -> Option<String> {
+    if !t.g("id").is_number() { return None; }
+    let id = t.i("id");
+    DSP_ASKED.with(|m| m.borrow_mut().insert(id, now_ms()));
+    let p = prefs();
+    match api::post("/playback/dsp/prepare", json!({ "track_id": t.g("id"), "rate": playback::jnum(dsp_request_rate()), "filter": p.g("dsp_filter"), "dither": p.g("dsp_dither") })).await {
+        Ok(r) => {
+            let s = r.g("state").as_str().unwrap_or("").to_string();
+            DSP_CACHE.with(|m| m.borrow_mut().insert(id, s.clone()));
+            Some(s)
+        }
+        Err(_) => None,
+    }
+}
+/// The current song started as a processed stream: learn whether it is pre-rendered, and have the next one rendered now.
+fn prepare_ahead(t: &Value) {
+    let t2 = t.clone();
+    dom::spawn(async move { prepare_dsp(&t2).await; });
+    let n = st(|s| if s.index + 1 < 0 { None } else { s.queue.get((s.index + 1) as usize).cloned() });
+    if let Some(n) = n {
+        if want_dsp(&n, rung_for(&n) > 0) {
+            dom::spawn(async move { prepare_dsp(&n).await; maybe_preload(false); });
+        }
+    }
+}
+fn dsp_note(s: &str) -> &'static str { match s { "cached" => " (pre-rendered)", "rendering" | "queued" => " (rendering ahead)", _ => "" } }
+
+// ---- crossfade ---------------------------------------------------------------------------------
+// The spare element already holds the next song: start it `crossfade` seconds before this one ends and blend
+// the two with an equal-power curve (Web Audio gains when the effects graph runs, element volume otherwise).
+struct Fade { out: HtmlMediaElement, len: f64, timer: Option<Interval> }
+fn maybe_crossfade() {
+    let p = prefs();
+    let cf = p.f("crossfade");
+    if !truthy_num(cf) || fading() || is_linked() || st(|s| s.repeat == "one" || s.dragging) || audio().is_none_or(|a| a.paused()) { return; }
+    let (t, n) = st(|s| (
+        if s.index < 0 { None } else { s.queue.get(s.index as usize).cloned() },
+        if s.index + 1 < 0 { None } else { s.queue.get((s.index + 1) as usize).cloned() },
+    ));
+    let (Some(t), Some(n)) = (t, n) else { return };
+    let d = duration();
+    if !truthy_num(d) || d < 2.0 * cf { return; }
+    let remaining = d - position();
+    if remaining > cf || remaining < 1.0 { return; }
+    if p.truthy("crossfade_album_gapless") && !t.is_nullish("album_id") && t.g("album_id") == n.g("album_id") { return; }
+    let Some(sp) = spare() else { return };
+    let su = dom::data_opt(&sp, "url");
+    if su.is_none() || su.as_deref() != Some(start_url(&n).as_str()) || sp.ready_state() < 3 { return; }
+    let Some(out) = audio() else { return };
+    log_play();
+    FADE.with(|f| *f.borrow_mut() = Some(Fade { out, len: remaining, timer: None }));
+    st_mut(|s| s.index += 1);
+    load_opts(LoadOpts { fade: true, ..Default::default() });
+    let timer = Interval::new(50, step_fade);
+    FADE.with(|f| if let Some(f) = f.borrow_mut().as_mut() { f.timer = Some(timer); });
+}
+fn step_fade() {
+    let Some((out, len)) = FADE.with(|f| f.borrow().as_ref().map(|f| (f.out.clone(), f.len))) else { return };
+    let Some(a) = audio() else { return };
+    let x = 1f64.min(a.current_time() / len);
+    let x = if x.is_nan() { 0.0 } else { x };
+    set_fade_gain(&out, (x * std::f64::consts::PI / 2.0).cos());
+    set_fade_gain(&a, (x * std::f64::consts::PI / 2.0).sin());
+    if x >= 1.0 || out.ended() { end_fade(); }
+}
+/// Finish (or cut short – next/prev/seek) a crossfade: the old song stops, the new one plays at full volume.
+fn end_fade() {
+    let Some(f) = FADE.with(|f| f.borrow_mut().take()) else { return };
+    // the interval may be the caller: let it go once this turn is over
+    if let Some(timer) = f.timer { dom::spawn(async move { drop(timer); }); }
+    let out = f.out;
+    let _ = out.pause();
+    let _ = out.remove_attribute("src");
+    let _ = out.remove_attribute("data-url");
+    out.load();
+    set_fade_gain(&out, 1.0);
+    if let Some(a) = audio() { set_fade_gain(&a, 1.0); }
+    route();
+    maybe_preload(false);
+}
+/// The fade level of one element: a Web Audio gain when it is routed through the effects graph, else its volume (under the slider).
+fn set_fade_gain(el: &HtmlMediaElement, g: f64) {
+    let gain = FX.with(|fx| fx.borrow().sources.iter().find(|s| same_el(&s.el, el)).and_then(|s| s.gain.clone()));
+    match gain {
+        Some(n) => { n.gain().set_value(g as f32); el.set_volume(user_vol()); }
+        None => el.set_volume(user_vol() * g),
+    }
+}
+
+// ---- sound effects on this device (Web Audio) ----------------------------------------------------
+// Built the first time an effect is switched on; until then the <audio> elements play straight out, untouched.
+// An element wrapped in a MediaElementSource can only be heard through the graph, so once built the graph stays
+// and turns into a pass-through when the effects are switched off.
+/// `out` feeds the graph: the fade gain, or the source itself when no gain could be made
+struct FxSource { el: HtmlMediaElement, out: web_sys::AudioNode, gain: Option<web_sys::GainNode>, on: bool }
+#[derive(Default)]
+struct Fx {
+    built: bool,
+    /// half built (a node could not be made): what is wrapped plays through a plain pass-through
+    broken: bool,
+    sources: Vec<FxSource>,
+    input: Option<web_sys::GainNode>,
+    key: String,
+    eq: Vec<web_sys::BiquadFilterNode>,
+    cross: Vec<web_sys::GainNode>,
+    trim: Option<web_sys::GainNode>,
+    pan: Option<web_sys::StereoPannerNode>,
+    nodes: Vec<web_sys::AudioNode>,
+}
+fn db_gain(v: f64) -> f64 { 10f64.powf(v / 20.0) }
+fn xfeed_db(x: &str) -> f64 { match x { "light" => -9.0, "medium" => -6.0, "strong" => -4.5, _ => -6.0 } }
+fn biquad_type(t: &str) -> web_sys::BiquadFilterType {
+    use web_sys::BiquadFilterType as B;
+    match t { "lowshelf" => B::Lowshelf, "highshelf" => B::Highshelf, "lowpass" => B::Lowpass, "highpass" => B::Highpass, "notch" => B::Notch, _ => B::Peaking }
+}
+fn audio_ctx() -> Option<web_sys::AudioContext> { CTX.with(|c| c.borrow().clone()) }
+fn ensure_fx() -> bool {
+    if fx_built() { return true; }
+    // a preview playing now stays out of the graph (it is built at the next library song)
+    if cur().is_some_and(|t| t.truthy("preview")) { return false; }
+    let (Some(a), Some(sp)) = (audio(), spare()) else { return false };
+    output_rate();
+    let Some(ctx) = audio_ctx() else { return false };
+    let built = (|| -> Result<(), JsValue> {
+        let input = ctx.create_gain()?;
+        FX.with(|f| f.borrow_mut().input = Some(input));
+        for el in [a, sp] {
+            el.set_cross_origin(Some("anonymous"));
+            let src = ctx.create_media_element_source(&el)?;
+            // kept at once: an element can be wrapped only once, and from now on is heard only through the graph
+            let i = FX.with(|f| { let mut f = f.borrow_mut(); f.sources.push(FxSource { el, out: src.clone().into(), gain: None, on: false }); f.sources.len() - 1 });
+            let gain = ctx.create_gain()?;
+            src.connect_with_audio_node(&gain)?;
+            FX.with(|f| { let mut f = f.borrow_mut(); f.sources[i].out = gain.clone().into(); f.sources[i].gain = Some(gain); });
+        }
+        Ok(())
+    })();
+    let ok = built.is_ok();
+    let wrapped = FX.with(|f| {
+        let mut f = f.borrow_mut();
+        if f.sources.is_empty() { f.input = None; return false; }   // nothing wrapped: the elements still play straight out
+        f.built = true;
+        f.broken = !ok;
+        f.key = String::new();
+        true
+    });
+    if !wrapped { return false; }
+    if ok { apply_fx(); }
+    else if let Some(i) = FX.with(|f| f.borrow().input.clone()) { let _ = i.connect_with_audio_node(&ctx.destination()); }   // half built: a pass-through
+    route();
+    resume_fx();
+    true
+}
+/// Resume the graph's context on play: suspended by the autoplay policy, or 'interrupted' (Safari after a call or Siri).
+fn resume_fx() {
+    if !fx_built() { return; }
+    if let Some(ctx) = audio_ctx() {
+        if ctx.state() != web_sys::AudioContextState::Running {
+            if let Ok(p) = ctx.resume() { dom::spawn(async move { let _ = wasm_bindgen_futures::JsFuture::from(p).await; }); }
+        }
+    }
+}
+/// Only the element playing (and the one fading out) feeds the graph.
+fn route() {
+    let a = audio();
+    let out = FADE.with(|f| f.borrow().as_ref().map(|f| f.out.clone()));
+    FX.with(|f| {
+        let mut f = f.borrow_mut();
+        if !f.built { return; }
+        let input: web_sys::AudioNode = match (f.input.clone(), audio_ctx()) {
+            (Some(i), _) => i.into(),
+            (None, Some(c)) => c.destination().into(),
+            _ => return,
+        };
+        for s in f.sources.iter_mut() {
+            let want = a.as_ref().is_some_and(|a| same_el(&s.el, a)) || out.as_ref().is_some_and(|o| same_el(&s.el, o));
+            if want && !s.on { let _ = s.out.connect_with_audio_node(&input); s.on = true; }
+            else if !want && s.on { let _ = s.out.disconnect(); s.on = false; }
+        }
+    });
+}
+/// Bring the graph in line with the settings: rewire only when its shape changes, otherwise just set the values.
+fn apply_fx() {
+    if FX.with(|f| { let f = f.borrow(); !f.built || f.broken }) { return; }
+    let Some(ctx) = audio_ctx() else { return };
+    let p = prefs();
+    let on = playback::fx_active(&p);
+    let bands = if on { playback::eq_bands(&p) } else { vec![] };
+    let mono = on && p.truthy("mono");
+    let xfeed = if on && !mono { p.s("crossfeed") } else { "off".to_string() };
+    let key = json!([on, bands.iter().map(|b| b.g("type").clone()).collect::<Vec<_>>(), xfeed != "off", mono]).to_string();
+    FX.with(|f| {
+        let mut fx = f.borrow_mut();
+        let Some(input) = fx.input.clone() else { return };
+        if key != fx.key {
+            fx.key = key;
+            let _ = input.disconnect();
+            for n in fx.nodes.drain(..) { let _ = n.disconnect(); }
+            fx.eq.clear(); fx.cross.clear(); fx.trim = None; fx.pan = None;
+            let wired = (|fx: &mut Fx| -> Result<(), JsValue> {
+                let mut last: web_sys::AudioNode = input.clone().into();
+                let add = |fx: &mut Fx, last: &mut web_sys::AudioNode, n: web_sys::AudioNode| -> Result<(), JsValue> {
+                    fx.nodes.push(n.clone());
+                    last.connect_with_audio_node(&n)?;
+                    *last = n;
+                    Ok(())
+                };
+                if on {
+                    for b in &bands {
+                        let f = ctx.create_biquad_filter()?;
+                        f.set_type(biquad_type(&b.s("type")));
+                        add(fx, &mut last, f.clone().into())?;
+                        fx.eq.push(f);
+                    }
+                    if xfeed != "off" {
+                        // each channel gets a low-passed, slightly delayed, quieter copy of the other one
+                        let pre = ctx.create_gain()?;
+                        pre.set_channel_count(2);
+                        pre.set_channel_count_mode(web_sys::ChannelCountMode::Explicit);
+                        pre.set_channel_interpretation(web_sys::ChannelInterpretation::Speakers);
+                        add(fx, &mut last, pre.clone().into())?;
+                        let split = ctx.create_channel_splitter_with_number_of_outputs(2)?;
+                        let merge = ctx.create_channel_merger_with_number_of_inputs(2)?;
+                        fx.nodes.push(split.clone().into());
+                        fx.nodes.push(merge.clone().into());
+                        pre.connect_with_audio_node(&split)?;
+                        split.connect_with_audio_node_and_output_and_input(&merge, 0, 0)?;
+                        split.connect_with_audio_node_and_output_and_input(&merge, 1, 1)?;
+                        for (from, to) in [(0u32, 1u32), (1, 0)] {
+                            let lp = ctx.create_biquad_filter()?;
+                            lp.set_type(web_sys::BiquadFilterType::Lowpass);
+                            lp.frequency().set_value(700.0);
+                            lp.q().set_value(0.5);
+                            let dl = ctx.create_delay_with_max_delay_time(0.01)?;
+                            dl.delay_time().set_value(0.0003);
+                            let g = ctx.create_gain()?;
+                            fx.nodes.push(lp.clone().into());
+                            fx.nodes.push(dl.clone().into());
+                            fx.nodes.push(g.clone().into());
+                            split.connect_with_audio_node_and_output(&lp, from)?;
+                            lp.connect_with_audio_node(&dl)?;
+                            dl.connect_with_audio_node(&g)?;
+                            g.connect_with_audio_node_and_output_and_input(&merge, 0, to)?;
+                            fx.cross.push(g);
+                        }
+                        last = merge.into();
+                        let trim = ctx.create_gain()?;
+                        add(fx, &mut last, trim.clone().into())?;
+                        fx.trim = Some(trim);
+                    }
+                    if mono {
+                        let m = ctx.create_gain()?;
+                        m.set_channel_count(1);
+                        m.set_channel_count_mode(web_sys::ChannelCountMode::Explicit);
+                        m.set_channel_interpretation(web_sys::ChannelInterpretation::Speakers);
+                        add(fx, &mut last, m.into())?;
+                        // back to two equal channels, so the panner sees stereo and stays at unity in the middle (a mono input would
+                        // take the panner's mono law: −3 dB)
+                        let up = ctx.create_gain()?;
+                        up.set_channel_count(2);
+                        up.set_channel_count_mode(web_sys::ChannelCountMode::Explicit);
+                        up.set_channel_interpretation(web_sys::ChannelInterpretation::Speakers);
+                        add(fx, &mut last, up.into())?;
+                    }
+                    let pan = ctx.create_stereo_panner()?;
+                    add(fx, &mut last, pan.clone().into())?;
+                    fx.pan = Some(pan);
+                }
+                last.connect_with_audio_node(&ctx.destination())?;
+                Ok(())
+            })(&mut fx);
+            if wired.is_err() { dom::console_error("Sound effects: could not build the audio graph"); }
+        }
+        input.gain().set_value(if on { db_gain(p.f("eq_preamp")) as f32 } else { 1.0 });
+        for (f, b) in fx.eq.iter().zip(bands.iter()) {
+            f.set_type(biquad_type(&b.s("type")));
+            f.frequency().set_value(b.f("freq") as f32);
+            f.gain().set_value(b.f("gain") as f32);
+            f.q().set_value(b.f("q") as f32);
+        }
+        if !fx.cross.is_empty() {
+            let g = db_gain(xfeed_db(&xfeed));
+            for n in &fx.cross { n.gain().set_value(g as f32); }
+            if let Some(t) = &fx.trim { t.gain().set_value((1.0 / (1.0 + g)) as f32); }
+        }
+        if let Some(pan) = &fx.pan { pan.pan().set_value((p.f("balance") / 100.0) as f32); }
+    });
 }
 
 /// Near the end of the queue: fetch the library shuffle ahead of time, so the next song is ready too.
@@ -782,11 +1389,36 @@ pub fn seek_to(sec: f64) {
     let dur = duration();
     if cur().is_none() || !truthy_num(dur) { return; }
     let sec = sec.min(dur - 0.25).max(0.0);
+    end_fade();
     st_mut(|s| s.seek_at = now_ms());
-    if st(|s| s.transcoded) { let (lossy, dsp) = st(|s| (s.lossy, s.dsp)); load(true, sec, Some(lossy), Some(dsp)); }      // ask the server to start the stream at that point
-    else if let Some(a) = audio() { a.set_current_time(sec); }
+    let Some(t) = cur() else { return };
+    let id = t.i("id");
+    if st(|s| s.dsp) && dsp_cache_on() && dsp_state(id) != "cached" && now_ms() - dsp_asked(id) > 3000.0 {
+        // maybe the render has finished since: then the browser seeks in the pre-rendered file itself
+        dom::spawn(async move {
+            prepare_dsp(&t).await;
+            if cur().is_some_and(|c| Rc::ptr_eq(&c, &t)) { seek_now(sec); }
+        });
+    } else { seek_now(sec); }
     update_time();
     emit();
+}
+/// Whole files (the original, a pre-rendered Cadenza file) seek in the browser; server-made streams restart at the point.
+fn seek_now(sec: f64) {
+    let Some(a) = audio() else { return };
+    let cached = st(|s| s.dsp) && cur().is_some_and(|t| dsp_state(t.i("id")) == "cached");
+    let mut local = !st(|s| s.transcoded);
+    if cached && st(|s| s.offset) == 0.0 {
+        let s = a.seekable();
+        local = s.length() > 0 && s.end(s.length() - 1).map(|e| e >= sec - 0.5).unwrap_or(false);
+    }
+    st_mut(|s| s.seek_at = now_ms());
+    if local { a.set_current_time(sec); }
+    else {
+        let (rung, dsp) = st(|s| (s.rung, s.dsp));
+        load_opts(LoadOpts { transcode: true, rung: Some(rung), dsp: Some(dsp), offset: sec, resume: true, ..Default::default() });
+    }
+    update_time();
 }
 
 pub fn toggle() {
@@ -800,6 +1432,7 @@ pub fn toggle() {
         return;
     }
     if cur().is_some() {
+        resume_fx();
         if let Some(a) = audio() { if a.paused() { play(&a); } else { let _ = a.pause(); } }
     }
 }
@@ -956,14 +1589,15 @@ async fn track_info(t: &Value) -> Option<Value> {
 fn transport() -> Option<(String, String)> {
     let t = cur()?;
     if t.truthy("preview") { return Some(("preview".into(), "A 30-second preview from the catalogue (lossy) – not your file".into())); }
-    if st(|s| s.lossy) {
+    let rung = st(|s| s.rung);
+    if rung > 0 {
         let codec = lossy_codec();
-        let why = if prefs().s("quality") == "saver" { "Data saver is on" } else { "the connection could not keep up with the original" };
-        return Some((format!("{codec}-{}", kbps()), format!("{} {} kbps (lossy) – {why}", codec.to_uppercase(), kbps())));
+        let why = if prefs().s("quality") == "saver" { "(Data saver is on)" } else { "(adaptive – the connection could not keep up)" };
+        return Some((format!("{codec}-{rung}"), format!("{} {rung} kbps, lossy {why}", codec.to_uppercase())));
     }
     if st(|s| s.dsp) {
         let r = st(|s| s.dsp_rate);
-        return Some((format!("cadenza-{}", js_num(r)), format!("Upsampled on the server by Cadenza to 24-bit / {} kHz (lossless FLAC)", khz(r))));
+        return Some((format!("cadenza-{}", js_num(r)), format!("Upsampled on the server by Cadenza to 24-bit / {} kHz (lossless FLAC){}", khz(r), dsp_note(&dsp_state(t.i("id"))))));
     }
     if st(|s| s.transcoded) { return Some(("flac".into(), format!("Converted to FLAC by the server (lossless) – browsers can't play {}", t.s("format").to_uppercase()))); }
     Some(("original".into(), "The original file, byte for byte – nothing was converted or resampled on the way".into()))
@@ -979,6 +1613,10 @@ fn output_rate() -> f64 {
 }
 /// `String(Math.round(hz / 100) / 10)`.
 pub(crate) fn khz(hz: f64) -> String { js_num((hz / 100.0).round() / 10.0) }
+/// kbit/s → "0.25" / "4.2" / "12" (Mbit/s)
+fn mbit(kbps: f64) -> String {
+    if kbps < 1000.0 { format!("{:.2}", kbps / 1000.0) } else if kbps < 10000.0 { to_fixed1(kbps / 1000.0) } else { js_num(playback::js_round(kbps / 1000.0)) }
+}
 fn source_line(t: &Value, info: Option<&Value>) -> String {
     let Some(info) = info else {
         return format!("{}{}", t.s("format").to_uppercase(), if t.truthy("bitrate") { format!(" · {} kbps", t.s("bitrate")) } else { String::new() });
@@ -998,10 +1636,12 @@ async fn signal_path() {
     let Some(t) = now_track() else { return };
     let m = crate::ui::modal(ModalOpts::new("Signal path", r#"<div class="skeleton" style="height:120px"></div>"#));
     let info = track_info(&t).await;
+    if linked().is_none() && st(|s| s.dsp) && dsp_cache_on() && cur().is_some_and(|c| *c == t) { prepare_dsp(&t).await; }   // pre-rendered yet?
     let mut rows: Vec<(String, String, String)> = vec![];
     rows.push(("Source".into(), source_line(&t, info.as_ref()), if info.as_ref().is_some_and(|i| i.g("lossless") == &json!(false)) { "A lossy file: what the file lost is gone before Encore touches it".into() } else { String::new() }));
     let linked = linked();
     let pure;
+    let mut untouched = false;
     let cadenza = linked.is_none() && transport().is_some_and(|(k, _)| k.starts_with("cadenza"));
     if let Some(l) = &linked {
         let sig = l.state.o("signal");
@@ -1017,7 +1657,8 @@ async fn signal_path() {
         pure = false;
     } else {
         let tr = transport();
-        rows.push(("Encore → this device".into(), tr.as_ref().map(|(_, x)| x.clone()).unwrap_or_default(), String::new()));
+        let net = match est_kbps() { Some(k) if k > 0.0 => format!(" · connection ≈ {} Mbit/s", mbit(k)), _ => String::new() };
+        rows.push(("Encore → this device".into(), format!("{}{net}", tr.as_ref().map(|(_, x)| x.clone()).unwrap_or_default()), String::new()));
         let out = output_rate();
         let src = info.as_ref().map(|i| i.f("sample_rate")).unwrap_or(0.0);
         let resampled = truthy_num(out) && truthy_num(src) && out != src;
@@ -1026,7 +1667,11 @@ async fn signal_path() {
             if resampled { format!("Your device resamples {} → {} kHz. A browser can't hand bits straight to the DAC; for true bit-perfect output play through a Cadenza device or an exclusive-mode player.", khz(src), khz(out)) }
             else if truthy_num(out) && truthy_num(src) { "Same rate as the file – no resampling in the browser. Whether the operating system mixes it with other sounds is up to your audio settings.".into() }
             else { String::new() }));
-        pure = tr.as_ref().is_some_and(|(k, _)| k == "original") && !info.as_ref().is_some_and(|i| i.g("lossless") == &json!(false));
+        let effects = playback::effects_summary(&prefs(), true);
+        if !effects.is_empty() { rows.push(("Effects on this device".into(), effects, String::new())); }
+        let tr = transport();
+        untouched = tr.as_ref().is_some_and(|(k, _)| k == "original") && !info.as_ref().is_some_and(|i| i.g("lossless") == &json!(false));
+        pure = untouched && !playback::fx_active(&prefs());
     }
     let Some(body_el) = m.qs(".modal-body") else { return };
     let rows_html: String = rows.iter().map(|(k, v, note)| format!(r#"<div class="stack" style="gap:2px"><div class="small muted">{k}</div><div style="font-weight:600">{}</div>{}</div>"#,
@@ -1037,6 +1682,8 @@ async fn signal_path() {
         ("Processed by Cadenza on the server", "Encore upsampled the file on the server with Cadenza and sent lossless 24-bit FLAC. Turn it off under Settings → Playback → Server processing to get the untouched file.")
     } else if pure {
         ("Pure playback from Encore", "Encore sent the file exactly as it is stored. Everything after that – volume, mixing, resampling – is your browser and operating system.")
+    } else if untouched {
+        ("Not the untouched file", "Encore sent the file untouched; this device adds the effects you chose under Settings → Playback → Sound.")
     } else {
         ("Not the untouched file", "Encore converted this stream (see above). Settings → Playback → Quality → Original keeps the file untouched even when the connection is slow.")
     };
@@ -1055,7 +1702,8 @@ fn is_current_audio(e: &Event) -> bool {
 }
 /// `const on = (type, fn) => [audio, spare].forEach(a => a.addEventListener(type, e => { if (e.target === audio) fn(e); }))`.
 fn on_both(a: &HtmlMediaElement, sp: &HtmlMediaElement, ty: &str, f: Rc<dyn Fn(&Event)>) {
-    for x in [a, sp] {
+    let pl = plain();
+    for x in [Some(a), Some(sp), pl.as_ref()].into_iter().flatten() {
         let f = f.clone();
         dom::on_forever(x, ty, move |e| { if is_current_audio(e) { f(e); } });
     }
@@ -1089,6 +1737,10 @@ pub fn mount() {
     sp.set_id("audio-next");
     sp.set_preload("auto");
     let _ = body().append_child(&sp);
+    let pl: HtmlMediaElement = dom::create("audio").dyn_into::<HtmlMediaElement>().expect("audio");
+    pl.set_id("audio-preview");
+    pl.set_preload("auto");
+    let _ = body().append_child(&pl);
     a.set_preload("auto");
     let el = dom::create("div");
     el.set_class_name("player");
@@ -1099,15 +1751,28 @@ pub fn mount() {
     full.set_id("np-full");
     let _ = body().append_child(&full);
     let vol = js_sys::parse_float(&dom::ls_get("encore.volume").unwrap_or_else(|| "0.9".into()));
-    // `audio.volume = spare.volume = vol` (the setter rejects anything outside 0..1)
-    if vol.is_finite() && (0.0..=1.0).contains(&vol) { a.set_volume(vol); sp.set_volume(vol); }
+    let vol = if vol.is_finite() { vol.clamp(0.0, 1.0) } else { 0.9 };
+    USER_VOL.with(|u| u.set(vol));
+    a.set_volume(vol);
+    sp.set_volume(vol);
+    pl.set_volume(vol);
     AUDIO.with(|x| *x.borrow_mut() = Some(a.clone()));
     SPARE.with(|x| *x.borrow_mut() = Some(sp.clone()));
-    // both elements get the listeners; only the one currently playing counts
+    PLAIN.with(|x| *x.borrow_mut() = Some(pl.clone()));
+    // the first bandwidth guess (navigator.connection.downlink) is taken now, at load, as in the JS UI
+    EST.with(|_| ());
+    // every element gets the listeners; only the one currently playing counts
     on_both(&a, &sp, "ended", Rc::new(|_| { log_play(); next(true); }));
-    on_both(&a, &sp, "play", Rc::new(|_| { render(); emit(); }));
-    on_both(&a, &sp, "pause", Rc::new(|_| { render(); emit(); }));
-    on_both(&a, &sp, "timeupdate", Rc::new(|_| { update_time(); log_play(); sync_lyrics(false); preload_tick(); }));
+    on_both(&a, &sp, "play", Rc::new(|_| {
+        resume_fx();
+        if let Some(out) = FADE.with(|f| f.borrow().as_ref().map(|f| f.out.clone())) { play(&out); }
+        render(); emit();
+    }));
+    on_both(&a, &sp, "pause", Rc::new(|_| {
+        if let Some(out) = FADE.with(|f| f.borrow().as_ref().map(|f| f.out.clone())) { let _ = out.pause(); }
+        render(); emit();
+    }));
+    on_both(&a, &sp, "timeupdate", Rc::new(|_| { update_time(); log_play(); sync_lyrics(false); maybe_crossfade(); preload_tick(); }));
     on_both(&a, &sp, "progress", Rc::new(|_| preload_tick()));
     on_both(&a, &sp, "waiting", Rc::new(|_| stalled()));
     on_both(&a, &sp, "loadedmetadata", Rc::new(|_| update_time()));
@@ -1148,16 +1813,17 @@ pub fn mount() {
     dom::on_window("hashchange", |_| { if st(|s| s.full) { set_full(false); } });
     dom::on_window("encore:likes", |_| { LIKED.with(|l| *l.borrow_mut() = None); dom::spawn(async { likes().await; paint_likes(); }); });
     dom::on_window("encore:playback-prefs", |_| {
-        PREFS.with(|p| *p.borrow_mut() = playback::current());
+        new_prefs(playback::current());
         fetch_dsp();
         if !prefs().truthy("preload") { cancel_preload(); } else { maybe_preload(true); }
         if st(|s| s.full) { render_full(); }
     });
     dom::on_window("storage", |e| {
         let key = e.dyn_ref::<web_sys::StorageEvent>().and_then(|s| s.key());
-        if key.as_deref() == Some("encore.playback") { PREFS.with(|p| *p.borrow_mut() = playback::current()); }
+        if key.as_deref() == Some("encore.playback") { new_prefs(playback::current()); }
     });
     fetch_dsp();
+    dom::interval_forever(2000, adapt_tick);
     render();
 }
 
@@ -1199,7 +1865,8 @@ fn quality(t: &Value) -> String {
     }
     if t.truthy("preview") { return "30 s preview".into(); }
     let f = t.s("format").to_uppercase();
-    if st(|s| s.lossy) { return format!("{f} → {} {}k", lossy_codec().to_uppercase(), kbps()); }
+    let rung = st(|s| s.rung);
+    if rung > 0 { return format!("{f} → {} {rung}k", lossy_codec().to_uppercase()); }
     if st(|s| s.dsp) { return format!("{f} → Cadenza {} kHz", khz(st(|s| s.dsp_rate))); }
     if st(|s| s.transcoded) { format!("{f} → FLAC") }
     else { format!("{f}{}", if t.truthy("bitrate") { format!(" {}k", t.s("bitrate")) } else { String::new() }) }
@@ -1207,7 +1874,8 @@ fn quality(t: &Value) -> String {
 fn quality_title(t: &Value) -> String {
     if t.truthy("remote") { return format!("What {} is playing", { let n = link_name(); if n.is_empty() { "that device".to_string() } else { n } }); }
     if t.truthy("preview") { return "A 30-second preview – not in your library".into(); }
-    if st(|s| s.lossy) { return "A smaller lossy stream, because the connection could not keep up (or Data saver is on)".into(); }
+    let rung = st(|s| s.rung);
+    if rung > 0 { return if prefs().s("quality") == "saver" { "Data saver: a small 96 kbps stream".into() } else { format!("Adaptive quality: {rung} kbps while the connection can't keep up with the original") }; }
     if st(|s| s.dsp) { return "Upsampled on the server by Cadenza (lossless 24-bit FLAC)".into(); }
     if st(|s| s.transcoded) { "Converted to FLAC for your browser (lossless)".into() } else { "Original file, no conversion".into() }
 }
@@ -1252,7 +1920,7 @@ fn right_html(t: Option<&Value>, closable: bool) -> String {
     let badge = match t { Some(t) if !t.truthy("preview") => format!(r#"<span class="badge hide-sm" title="{}">{}</span>"#, esc(&quality_title(t)), esc(&quality(t))), _ => String::new() };
     let like = if can_like(t) { like_button("p-like", if t.is_some_and(is_liked) { "on" } else { "" }) } else { String::new() };
     let devices = if has_encore_remote() { format!(r#"<button class="btn ghost icon" id="p-devices" aria-label="Other devices" title="Play on or control your other devices">{}</button>"#, icon("devices")) } else { String::new() };
-    let vol = if is_linked() { let s = link_state_value(); if s.is_nullish("volume") { "0.9".to_string() } else { s.s("volume") } } else { js_num(audio().map(|a| a.volume()).unwrap_or(0.9)) };
+    let vol = if is_linked() { let s = link_state_value(); if s.is_nullish("volume") { "0.9".to_string() } else { s.s("volume") } } else { js_num(user_vol()) };
     format!(r#"<div class="right">
       {badge}
       {like}
@@ -1377,6 +2045,7 @@ fn render() {
     bind_right(&mut ls, &el);
     if let Some(seek) = qs_in(&el, "#seek") { bind_seek(&mut ls, &seek, "t-cur"); }
     wire(&mut ls, &el, "#p-close", "click", |_| {
+        end_fade();
         if let (Some(a), Some(sp)) = (audio(), spare()) {
             let _ = a.pause();
             let _ = a.remove_attribute("src");
@@ -1411,7 +2080,7 @@ fn render_full() {
     };
     let up_next: Vec<Value> = q.iter().skip((idx + 1).max(0) as usize).cloned().collect();
     let playing = now_playing();
-    let volume = if link.is_some() { if s.is_nullish("volume") { "0.9".to_string() } else { s.s("volume") } } else { js_num(audio().map(|a| a.volume()).unwrap_or(0.9)) };
+    let volume = if link.is_some() { if s.is_nullish("volume") { "0.9".to_string() } else { s.s("volume") } } else { js_num(user_vol()) };
     let autoplay = prefs().truthy("autoplay");
     dom::set_style(&f, "--np-bg", &format!(r#"url("{}")"#, cover(&t)));
     let tab = |p: &str, label: &str| format!(r#"<button data-pane="{p}" class="{}">{label}</button>"#, if pane == p { "active" } else { "" });

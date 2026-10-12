@@ -314,7 +314,7 @@ fn safe_name(s: &str) -> String {
     s.chars().map(|c| if "\\/:*?\"<>|".contains(c) || c.is_control() { '_' } else { c }).collect::<String>().trim().to_string()
 }
 
-async fn serve_file(path: &str, req: Request, content_type: Option<&str>, download_name: Option<String>) -> ApiResult<Response> {
+pub(crate) async fn serve_file(path: &str, req: Request, content_type: Option<&str>, download_name: Option<String>) -> ApiResult<Response> {
     let mut svc = ServeFile::new(path);
     if let Some(ct) = content_type {
         svc = ServeFile::new_with_mime(path, &ct.parse().map_err(|_| err(500, "bad mime"))?);
@@ -358,7 +358,7 @@ pub struct StreamQ {
     transcode: bool,
     /// start a converted stream at this many seconds (the player seeks converted streams through the server)
     t: f64,
-    /// "aac": a smaller lossy stream for connections that can't keep up (Settings → Playback)
+    /// "aac"/"opus": a lossy stream at `kbps` (Auto's adaptive rungs 256–32, or Data saver's 96)
     q: String,
     /// bitrate of the lossy stream in kbps (32–320, default 256; the player steps down to 32 when the connection is slow)
     kbps: u32,
@@ -391,7 +391,7 @@ pub async fn stream_track(st: &AppState, id: i64, q: &StreamQ, req: Request, use
     let lossy = matches!(q.q.as_str(), "aac" | "lossy" | "opus");
     // the lossy stream (Data saver / Auto's fallback) wins over server processing
     if let (true, false, Some(u)) = (q.dsp, lossy, user) {
-        return dsp_stream(st, path, q, u).await;
+        return dsp_stream(st, id, path, q, u, req).await;
     }
     let alac = if fmt == "m4a" || fmt == "mp4" { let p2 = path.clone(); tokio::task::spawn_blocking(move || is_alac(&p2)).await.unwrap_or(false) } else { false };
     if let (false, false, false, Some(ct)) = (q.transcode, lossy, alac, browser_type(&fmt)) {
@@ -440,8 +440,11 @@ async fn stream(State(st): State<AppState>, User(u): User, Path(id): Path<i64>, 
     stream_track(&st, id, &q, req, Some(&u)).await
 }
 
-/// Cadenza on the server: lossless 24-bit FLAC at the chosen rate.
-async fn dsp_stream(st: &AppState, path: String, q: &StreamQ, u: &crate::db::Row) -> ApiResult<Response> {
+/// Cadenza on the server: lossless 24-bit FLAC at the chosen rate. With the render cache on
+/// (`cadenza_cache_mb` > 0) the song is rendered once to a file and served from it
+/// (`x-encore-dsp: cached` – a plain file with Range support – or `rendering` while it is being made);
+/// otherwise, or for a seek past what a running render has reached, it is processed live (`live`).
+async fn dsp_stream(st: &AppState, id: i64, path: String, q: &StreamQ, u: &crate::db::Row, req: Request) -> ApiResult<Response> {
     let lim = crate::dsp::Limits::of(st);
     if !lim.enabled {
         return Err(err(403, "Server processing is turned off on this server"));
@@ -449,31 +452,32 @@ async fn dsp_stream(st: &AppState, path: String, q: &StreamQ, u: &crate::db::Row
     if !auth::can(st, u, "server_dsp") {
         return Err(err(403, "Your account can't use server processing"));
     }
-    // A seek or track change often arrives before the old connection's drop has freed its slot,
-    // so wait briefly for one before saying the server is busy.
-    let mut slot = crate::dsp::try_acquire(lim.max_streams);
-    if lim.max_streams > 0 {
-        for _ in 0..30 {
-            if slot.is_some() {
-                break;
-            }
-            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-            slot = crate::dsp::try_acquire(lim.max_streams);
+    let spec = crate::dsp::render::Spec::new(st, id, path, q.rate, &q.filter, &q.dither).await;
+    let t = if q.t.is_finite() { q.t.max(0.0) } else { 0.0 };
+    let ctx = crate::dsp::render::Ctx::of(st);
+    if let Some(ctx) = &ctx {
+        if let Some(r) = crate::dsp::render::serve(ctx, &spec, u.i("id"), t, req).await? {
+            return Ok(r);
         }
     }
-    let slot = slot.ok_or_else(|| err(503, "Server processing is busy – playing the original"))?;
-    let p2 = path.clone();
-    let info = tokio::task::spawn_blocking(move || audio_info(&p2)).await.unwrap_or(json!({}));
-    let input = crate::dsp::input_format(&info);
-    let job = crate::dsp::Job {
-        rate: crate::dsp::target_rate(input.rate, q.rate, lim.max_rate),
-        filter: crate::dsp::choose_filter(&q.filter, lim.max_taps),
-        dither: crate::dsp::choose_dither(&q.dither),
-        seek: if q.t.is_finite() { q.t.max(0.0) } else { 0.0 },
-        path,
-        input,
+    // A seek or track change often arrives before the old connection's drop has freed its slot,
+    // so wait briefly for one before saying the server is busy.
+    let Some(slot) = crate::dsp::acquire_with_retry(lim.max_streams).await else {
+        // no slot: a render of this song that is running (faster than real time) soon reaches the seek
+        if let Some(ctx) = &ctx {
+            if let Some(r) = crate::dsp::render::wait_for_render(ctx, &spec, t).await? {
+                return Ok(r);
+            }
+        }
+        return Err(err(503, "Server processing is busy – playing the original"));
     };
-    crate::dsp::stream(crate::dsp::cache(st), job, slot).await
+    // this request has its slot: now render the song in the background for later seeks
+    if let Some(ctx) = &ctx {
+        crate::dsp::render::start_background(ctx, &spec, u.i("id"));
+    }
+    let mut r = crate::dsp::stream(crate::dsp::cache(st), spec.live(t), slot).await?;
+    r.headers_mut().insert(header::CACHE_CONTROL, HeaderValue::from_static("private, no-cache"));
+    Ok(r)
 }
 
 /// What's in the file, for the player's signal path: codec, sample rate, bit depth, channels, bitrate.
