@@ -1,29 +1,40 @@
 // Web player: streams the original file (bit-perfect for MP3/FLAC/AAC/Opus); formats a browser
-// can't decode (ALAC/APE/WavPack/AIFF/WMA) are converted to FLAC on the fly by the server, and when the
-// connection can't keep up (Settings → Playback → Auto) the rest of the song comes as a smaller AAC stream.
+// can't decode (ALAC/APE/WavPack/AIFF/WMA) are converted to FLAC on the fly by the server. On Auto quality it
+// measures the connection and steps the stream down (256 → 32 kbps AAC/Opus) and back up as the bandwidth allows.
+// Optional sound effects (EQ, crossfeed, balance, mono) run in this browser through Web Audio, and crossfade
+// blends one song into the next with the two <audio> elements.
 // Tap the bar for the full-screen player (lyrics + Up next). When the queue runs out it keeps going
 // with a shuffle of the whole library: a single song → straight into the shuffle, an album → after its last song.
 import { api } from './api.js';
 import * as playback from './playback.js';
 import { art, esc, fmt, icon, popMenu, shareTrack, toast } from './ui.js';
 
-const state = { queue: [], index: -1, transcoded: false, lossy: false, dsp: false, dspRate: 0, offset: 0, dragging: false, context: 'list', repeat: 'off', full: false, pane: 'now', logged: false,
-  stalls: [], stallAt: 0, seekAt: 0, switched: false, lastPreloadCheck: 0, slowStart: null };
+const state = { queue: [], index: -1, transcoded: false, lossy: false, rung: 0, dsp: false, dspRate: 0, offset: 0, dragging: false, context: 'list', repeat: 'off', full: false, pane: 'now', logged: false,
+  stalls: [], stallAt: 0, seekAt: 0, stepAt: 0, switchedAt: 0, lastPreloadCheck: 0, slowStart: null };
 const listeners = new Set();
 let audio = null;
 let spare = null;   // second <audio> that pre-buffers the next song, so skipping is instant
 let lyr = { id: null, lines: [], plain: '', loading: false };
 let prefs = playback.current();
-let lossyUntil = 0;          // Auto quality: songs started before this time use the smaller stream
+let userVol = 0.9;           // the volume slider: the ceiling of every fade
 let liked = null;            // Set of liked track ids, fetched the first time a heart is drawn
 let ctx = null;              // AudioContext, only to read the device's output sample rate
 const INFO = new Map();      // track id → /info (codec, sample rate, bit depth …)
 let dspInfo = null;          // GET /api/playback/dsp: is server-side Cadenza processing on, and may this account use it
 let dspFailed = false;       // a processed stream failed this session: play originals until the page reloads
 let dspToasted = false;
+const dspCache = new Map();  // track id → what the server's pre-render cache says: 'cached' | 'rendering' | 'queued' | 'busy'
+const dspAsked = new Map();  // track id → when we last asked (prepare)
 function fetchDsp() { api.get('/playback/dsp').then(i => { dspInfo = i; }).catch(() => { dspInfo = null; }); }
-window.addEventListener('encore:playback-prefs', (e) => { prefs = e.detail; fetchDsp(); if (!prefs.preload) cancelPreload(); else maybePreload(true); if (state.full) renderFull(); });
-window.addEventListener('storage', (e) => { if (e.key === 'encore.playback') prefs = playback.current(); });
+const dspKey = (p) => JSON.stringify([p.dsp, p.dsp_filter, p.dsp_dither, p.dsp_rate]);
+function newPrefs(p) {
+  if (dspKey(p) !== dspKey(prefs)) { dspCache.clear(); dspAsked.clear(); }
+  prefs = p;
+  if (playback.fxActive(prefs)) ensureFx();
+  applyFx();
+}
+window.addEventListener('encore:playback-prefs', (e) => { newPrefs(e.detail); fetchDsp(); if (!prefs.preload) cancelPreload(); else maybePreload(true); if (state.full) renderFull(); });
+window.addEventListener('storage', (e) => { if (e.key === 'encore.playback') newPrefs(playback.current()); });
 
 // Songs heard this listening session (this tab): shuffles never repeat one until the whole library has played.
 const played = new Set((() => { try { return JSON.parse(sessionStorage.getItem('encore.played') || '[]'); } catch { return []; } })());
@@ -113,15 +124,17 @@ const slim = (t) => ({ id: t.id, title: t.title, artist: t.artist, album: t.albu
 export function snapshot() {
   const t = current();
   if (!t || !audio) return { playing: false };
-  return { ...slim(t), cover: cover(t), playing: !audio.paused, position: position(), duration: duration(), volume: audio.volume,
+  return { ...slim(t), cover: cover(t), playing: !audio.paused, position: position(), duration: duration(), volume: userVol,
            signal: { label: quality(t), transport: transport()?.kind || null, output_rate: ctx?.sampleRate || null },
            index: state.index, queue: state.queue.filter(x => typeof x.id === 'number').slice(0, 300).map(slim) };
 }
 function localVolume(v) {
   if (!audio) return;
-  audio.volume = spare.volume = Math.max(0, Math.min(1, Number(v)));
-  try { localStorage.setItem('encore.volume', audio.volume); } catch { /* ignore */ }
-  for (const id of ['vol', 'fvol']) { const el = document.getElementById(id); if (el && +el.value !== audio.volume) el.value = audio.volume; }
+  const n = Number(v);
+  userVol = Math.max(0, Math.min(1, Number.isFinite(n) ? n : 0.9));
+  if (fade) stepFade(); else { setFadeGain(audio, 1); setFadeGain(spare, 1); }
+  try { localStorage.setItem('encore.volume', userVol); } catch { /* ignore */ }
+  for (const id of ['vol', 'fvol']) { const el = document.getElementById(id); if (el && +el.value !== userVol) el.value = userVol; }
   emit();
 }
 export function setVolume(v) {
@@ -206,7 +219,7 @@ function canPlay(format) {
   return PLAYABLE[f];
 }
 
-// the smaller stream's codec: AAC where the browser decodes it, Opus elsewhere (Chromium builds, Firefox on Linux)
+// the lighter streams' codec: AAC where the browser decodes it, Opus elsewhere (Chromium builds, Firefox on Linux)
 const LOSSY = (() => { try { const a = document.createElement('audio'); return a.canPlayType('audio/aac') ? 'aac' : a.canPlayType('audio/ogg; codecs=opus') ? 'opus' : 'aac'; } catch { return 'aac'; } })();
 /** The rate asked of the server's Cadenza: this device's output rate, 0 (= the highest the server allows) or a fixed rate. */
 function dspRequestRate() {
@@ -223,13 +236,15 @@ function dspOutRate(t) {
   if (want <= 0) while (r * 2 <= max) r *= 2;
   return Math.max(r, src);
 }
-/** Upsample this library song on the server? Only when switched on and allowed; Data saver / Auto's fallback win. */
+/** Upsample this library song on the server? Only when switched on and allowed; Data saver and Auto's lighter streams win. */
 const wantDsp = (t, lossy) => !!(prefs.dsp && dspInfo?.allowed && t && !t.preview && typeof t.id === 'number' && !lossy && !dspFailed);
-/** transcode: FLAC made by the server · lossy: the smaller stream · dsp: upsampled by the server's Cadenza · offset: where a server-made stream starts */
-function streamUrl(t, { transcode = false, lossy = false, dsp = false, offset = 0 } = {}) {
+/** The server keeps finished Cadenza renders (pre-render cache): seeking and the next song need no new job. */
+const dspCacheOn = () => (dspInfo?.cache?.max_mb || 0) > 0;
+/** transcode: FLAC made by the server · rung: kbps of the lossy stream (0 = not lossy) · dsp: upsampled by the server's Cadenza · offset: where a server-made stream starts */
+function streamUrl(t, { transcode = false, rung = 0, dsp = false, offset = 0 } = {}) {
   if (t.preview) return t.preview_url;
   const q = [];
-  if (lossy) q.push(`q=${LOSSY}`, `kbps=${prefs.kbps}`);
+  if (rung > 0) q.push(`q=${LOSSY}`, `kbps=${rung}`);
   else if (dsp) {
     q.push('dsp=1', `rate=${dspRequestRate()}`);
     if (prefs.dsp_filter) q.push(`filter=${encodeURIComponent(prefs.dsp_filter)}`);
@@ -239,8 +254,28 @@ function streamUrl(t, { transcode = false, lossy = false, dsp = false, offset = 
   return `/api/library/tracks/${t.id}/stream${q.length ? '?' + q.join('&') : ''}`;
 }
 const convert = (t) => !t.preview && (CONVERT.has((t.format || '').toLowerCase()) || !canPlay(t.format));
-/** Should this song start as the smaller stream? Data saver always; Auto for a while after the connection fell behind. */
-const wantLossy = (t) => !t.preview && (prefs.quality === 'saver' || (prefs.quality === 'auto' && Date.now() < lossyUntil));
+/** kbit/s of a Cadenza stream at `rate` (24-bit stereo FLAC, roughly 65 % of the raw PCM). */
+const dspKbps = (rate) => Math.round(rate * 48 * 0.65 / 1000);
+/** kbit/s the song needs as the "original" rung: the file's bitrate, or the Cadenza stream's when the server upsamples it. */
+function origKbps(t) {
+  if (!t || t.preview) return 0;
+  if (wantDsp(t, false)) return dspKbps(dspOutRate(t));
+  if (t.bitrate > 0) return t.bitrate;
+  const i = INFO.get(t.id);
+  if (i?.bitrate > 0) return i.bitrate;
+  return t.size > 0 && t.duration > 0 ? Math.round(t.size * 8 / 1000 / t.duration) : 0;
+}
+/** Which rung a song starts on: Original never converts, Data saver is fixed at 96 kbps, Auto follows the estimated bandwidth. */
+function rungFor(t) {
+  if (!t || t.preview || prefs.quality === 'original') return 0;
+  if (prefs.quality === 'saver') return playback.SAVER_KBPS;
+  return playback.chooseRung(est.kbps, origKbps(t));
+}
+/** The URL a song starts with (what the spare element pre-loads, and what load() asks for at a song start). */
+function startUrl(t) {
+  const rung = rungFor(t);
+  return streamUrl(t, { transcode: convert(t) && rung === 0, rung, dsp: wantDsp(t, rung > 0) });
+}
 
 /** Android app: keep songs on the phone so they play with no server. */
 export const canSaveOffline = () => !!window.EncoreNative?.saveOffline;
@@ -256,49 +291,69 @@ export function saveOffline(tracks) {
   }
 }
 
-function load({ transcode = false, offset = 0, lossy = null, dsp = null } = {}) {
+/**
+ * Start the current song (or restart it at `offset`).
+ * rung: kbps of the lossy stream (null = what the song should start on) · dsp: null = whatever the settings say
+ * resume: the same song continues (a quality switch or a seek) – no new play / now-playing · fade: crossfade into it
+ */
+function load({ transcode = false, offset = 0, rung = null, dsp = null, resume = false, fade: fading = false } = {}) {
   const t = current();
   if (!t) return;
+  if (!fading) endFade();
+  const start = !offset && !resume;
   markPlayed(t);
   if (convert(t)) transcode = true;
-  if (lossy === null) lossy = wantLossy(t);
-  state.lossy = !t.preview && lossy;
+  const prevRung = state.rung;
+  state.rung = t.preview ? 0 : (rung === null ? rungFor(t) : rung);
+  if (start && !t.preview && prefs.quality === 'auto') noteRungChange(prevRung, state.rung);
+  state.lossy = state.rung > 0;
   state.dsp = (dsp === null ? wantDsp(t, state.lossy) : dsp) && wantDsp(t, state.lossy);
   state.dspRate = state.dsp ? dspOutRate(t) : 0;
   if (state.dsp && !INFO.has(t.id)) trackInfo(t).then(() => { if (current() === t && state.dsp) { state.dspRate = dspOutRate(t); render(); emit(); } });
-  state.transcoded = !t.preview && (transcode || lossy || state.dsp);
-  state.offset = offset;   // server-made streams restart at the seek point, so their clock starts at `offset`
+  state.transcoded = !t.preview && (transcode || state.lossy || state.dsp);
+  // server-made streams restart at the seek point (their clock starts at `offset`); the original file and a
+  // pre-rendered Cadenza file are whole files the browser seeks in itself
+  const serverOffset = state.transcoded && !(state.dsp && dspCache.get(t.id) === 'cached') ? offset : 0;
+  state.offset = serverOffset;
   state.dragging = false;
-  if (!offset) {
+  if (start) {
     state.logged = false;
     state.stalls = [];
-    state.switched = false;
+    state.stepAt = 0;
     // "now playing" on Last.fm / ListenBrainz (Encore 2)
     if (typeof t.id === 'number' && state.announced !== t) { state.announced = t; api.post('/library/now-playing', { track_id: t.id }).catch(() => {}); }
   }
-  const url = streamUrl(t, { transcode: state.transcoded && !state.lossy && !state.dsp, lossy: state.lossy, dsp: state.dsp, offset });
+  const url = streamUrl(t, { transcode: state.transcoded && !state.lossy && !state.dsp, rung: state.rung, dsp: state.dsp, offset: serverOffset });
   if (!offset && spare && spare.dataset.url === url) {
     // already buffered in the background: swap players and start right away
     const old = audio;
     audio = spare;
     spare = old;
-    old.pause();
-    old.removeAttribute('src');
+    if (!fading) { old.pause(); old.removeAttribute('src'); }
     delete old.dataset.url;
-    audio.volume = old.volume;
     audio.currentTime = 0;
+    setFadeGain(audio, fading ? 0 : 1);
   } else {
-    // a pre-buffered processed stream holds one of the server's Cadenza slots: free it first
-    if (state.dsp && spare?.dataset.url?.includes('dsp=1')) cancelPreload();
+    // without the pre-render cache a pre-buffered processed stream holds one of the server's Cadenza slots: free it first
+    if (state.dsp && !dspCacheOn() && spare?.dataset.url?.includes('dsp=1')) cancelPreload();
     audio.src = url;
   }
   audio.dataset.url = url;
+  if (offset && !serverOffset) {
+    const el = audio;
+    const go = () => { try { el.currentTime = offset; } catch { /* not seekable yet */ } };
+    if (el.readyState >= 1) go(); else el.addEventListener('loadedmetadata', go, { once: true });
+  }
+  if (playback.fxActive(prefs)) ensureFx();
+  route();
+  resumeFx();
   audio.play().catch(() => {});
   clearTimeout(state.slowStart);
-  if (!offset && !state.lossy && !t.preview && prefs.quality === 'auto') {
-    // can't even get going: six seconds in and nothing has played yet → the smaller stream from the start
-    state.slowStart = setTimeout(() => { if (current() === t && !audio.paused && audio.currentTime < 0.5 && audio.readyState < 3) downgrade(); }, 6000);
+  if (start && !t.preview && prefs.quality === 'auto') {
+    // can't even get going: six seconds in and nothing has played yet → one rung down
+    state.slowStart = setTimeout(() => { if (current() === t && !audio.paused && audio.currentTime < 0.5 && audio.readyState < 3) stepDownNow(); }, 6000);
   }
+  if (start && state.dsp && dspCacheOn()) prepareAhead(t);
   if ('mediaSession' in navigator) {
     navigator.mediaSession.metadata = new MediaMetadata({
       title: t.title || '', artist: t.artist || '', album: t.album || '',
@@ -329,16 +384,25 @@ function fullyBuffered() {
 }
 /** Start buffering the song that plays next – once this one is safely ahead, never while it's short of bandwidth. */
 function maybePreload(force = false) {
-  if (!spare || !prefs.preload || link) return;
+  if (!spare || !prefs.preload || link || fade) return;
   const n = state.queue[state.index + 1];
   if (!n) return;
-  const nLossy = wantLossy(n);
-  const url = streamUrl(n, { transcode: convert(n), lossy: nLossy, dsp: wantDsp(n, nLossy) });
+  const url = startUrl(n);
   if (spare.dataset.url === url) return;
   const t = current();
-  if (!force) {
-    const remaining = duration() - position();
-    const quiet = Date.now() - state.stallAt > 15000;
+  const remaining = duration() - position();
+  const quiet = Date.now() - state.stallAt > 15000;
+  if (url.includes('dsp=1') && dspCacheOn()) {
+    // a processed next song: ask the server to render it ahead, and buffer it only once that render exists
+    // (cached or in progress) – then the pre-load takes no extra processing slot
+    if (!state.dsp) return;
+    const s = dspCache.get(n.id);
+    if (s !== 'cached' && s !== 'rendering') {
+      if (Date.now() - (dspAsked.get(n.id) || 0) > 15000) prepareDsp(n).then(() => maybePreload(force));
+      return;
+    }
+    if (!force && !(fullyBuffered() || (quiet && bufferedAhead() > 45) || remaining < 40)) return;
+  } else if (!force) {
     const ok = (t?.preview || state.transcoded) ? remaining < 40 : (fullyBuffered() || (quiet && bufferedAhead() > 45) || remaining < 30);
     if (!ok) return;
   }
@@ -348,32 +412,320 @@ function maybePreload(force = false) {
 }
 const preloadNext = () => maybePreload(true);
 function cancelPreload() {
-  if (!spare?.dataset.url) return;
+  if (!spare?.dataset.url || fade) return;
   spare.removeAttribute('src');
   delete spare.dataset.url;
   spare.load();
 }
-/** The browser ran out of buffer mid-song. Give it the bandwidth back, and on Auto quality drop to the smaller stream. */
+/** The browser ran out of buffer mid-song. Give it the bandwidth back, and on Auto quality step the stream down. */
 function stalled() {
   const now = Date.now();
-  if (now - state.seekAt < 3000 || position() < 1 || audio.paused) return;   // a seek or the start, not a slow link
+  if (now - state.seekAt < 3000 || position() < 1 || audio.paused) return;   // a seek, a switch or the start, not a slow link
   state.stallAt = now;
   state.stalls.push(now);
   if (!fullyBuffered()) cancelPreload();
-  if (prefs.quality !== 'auto' || state.lossy || current()?.preview || state.switched) return;
+  if (prefs.quality !== 'auto' || current()?.preview) return;
+  // stalling again within 90 s of stepping down: the new rung isn't small enough either
+  if (state.stepAt && now - state.stepAt < 90000) return stepDownNow();
   const recent = state.stalls.filter(s => now - s < 90000);
-  if (recent.length >= 2) return downgrade();
+  if (recent.length >= 2) return stepDownNow();
   // one long stall counts too: still waiting four seconds later
-  setTimeout(() => { if (!audio.paused && audio.readyState < 3 && state.stallAt === now && !state.switched) downgrade(); }, 4000);
+  setTimeout(() => { if (!audio.paused && audio.readyState < 3 && state.stallAt === now) stepDownNow(); }, 4000);
 }
-function downgrade() {
+/** Auto: a stall forces one rung down right away, and the estimate drops to 60 % of what the rung needed. */
+function stepDownNow() {
   const t = current();
-  if (!t || t.preview || state.lossy) return;
-  state.switched = true;
-  lossyUntil = Date.now() + 10 * 60000;
-  load({ transcode: true, lossy: true, offset: position() });
-  toast(`Connection can't keep up – playing a smaller ${prefs.kbps} kbps stream for a while (Settings → Playback)`, '');
+  if (!t || t.preview || prefs.quality !== 'auto') return;
   clearTimeout(state.slowStart);
+  const orig = origKbps(t);
+  const lower = playback.stepDown(state.rung, orig);
+  if (lower === state.rung) return;   // already at 32 kbps
+  est.kbps = 0.6 * playback.needed(state.rung, orig);
+  est.at = Date.now();
+  est.fresh = false;
+  est.upSince = 0;
+  state.stalls = [];
+  state.stepAt = Date.now();
+  switchRung(lower);
+}
+/** Reload the song at the current position on another rung. */
+function switchRung(rung) {
+  const t = current();
+  if (!t) return;
+  const at = position();
+  noteRungChange(state.rung, rung);
+  state.switchedAt = state.seekAt = Date.now();
+  load({ rung, offset: at, resume: true, transcode: rung > 0 });
+}
+let slowToastAt = 0;
+function noteRungChange(was, now) {
+  if (was === now) return;
+  if (now > 0 && (was === 0 || now < was)) {
+    if (Date.now() - slowToastAt > 60000) { slowToastAt = Date.now(); toast(`Connection is slow – lowering quality to ${now} kbps to keep playing`, ''); }
+  } else if (now === 0) toast('Connection recovered – back to the original file', 'ok');
+}
+
+// ---- the bandwidth estimate (Auto quality) -----------------------------------------------------
+// An exponentially weighted average of measured throughput in kbit/s: from how fast the playing song's buffer
+// grows, from a small probe when nothing is downloading, and – until the first sample – the browser's own guess.
+const est = { kbps: null, at: 0, fresh: false, upSince: 0, el: null, url: '', end: 0, wall: 0, probing: false, probeAt: 0 };
+try { const d = navigator.connection?.downlink; if (d > 0) { est.kbps = d * 1000; est.at = Date.now(); } } catch { /* no Network Information API */ }
+function addSample(kbps) {
+  if (!(kbps >= 0) || !isFinite(kbps)) return;
+  est.kbps = playback.ewma(est.kbps, kbps);
+  est.at = Date.now();
+  est.fresh = true;
+}
+/** kbit/s of the stream the element is playing (null when the server, not the network, sets the pace). */
+function streamKbps() {
+  if (state.rung > 0) return state.rung;
+  if (state.dsp) return null;   // Cadenza renders at its own speed: its download rate says nothing about the connection
+  return origKbps(current()) || 1411;
+}
+/** Every 2 s: how far the buffer grew × the stream's bitrate ÷ the time it took. Returns whether a download is in progress. */
+function sampleProgress() {
+  const now = performance.now();
+  let end = 0;
+  try { const b = audio.buffered; if (b.length) end = b.end(b.length - 1); } catch { /* no ranges */ }
+  const d = audio.duration;
+  const downloading = audio.networkState === 2 && !(isFinite(d) && d > 0 && end >= d - 0.5);
+  const url = audio.dataset.url || '';
+  const kbps = streamKbps();
+  if (est.el !== audio || est.url !== url || !downloading || !kbps) {
+    est.el = audio; est.url = url; est.end = end; est.wall = now;
+    return downloading;
+  }
+  const secs = (now - est.wall) / 1000;
+  const grown = end - est.end;
+  est.end = end; est.wall = now;
+  if (secs < 0.25 || grown < 0) return true;
+  if (grown === 0 && bufferedAhead() > 30) return true;   // the browser holding back with a full buffer, not a slow link
+  addSample(grown * kbps / secs);
+  return true;
+}
+/** Nothing downloading and the estimate is older than 20 s: time a 128 KB piece of the current or next song. */
+async function probe() {
+  const now = Date.now();
+  if (est.probing || now - est.at < 20000 || now - est.probeAt < 20000) return;
+  const t = [current(), state.queue[state.index + 1]].find(x => x && !x.preview && typeof x.id === 'number' && !convert(x));
+  if (!t) return;
+  est.probing = true;
+  est.probeAt = now;
+  try {
+    const t0 = performance.now();
+    const r = await fetch(`/api/library/tracks/${t.id}/stream`, { headers: { Range: 'bytes=0-131071' }, credentials: 'same-origin', cache: 'no-store' });
+    if (r.status !== 206 && r.status !== 200) { r.body?.cancel().catch(() => {}); return; }
+    let bytes = 0;
+    const reader = r.body.getReader();
+    while (bytes < 131072) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      bytes += value.byteLength;
+    }
+    reader.cancel().catch(() => {});
+    const kbps = playback.rateOf(Math.min(bytes, 131072), (performance.now() - t0) / 1000);
+    if (kbps !== null) addSample(kbps);
+  } catch { /* offline: try again later */ } finally { est.probing = false; }
+}
+function adaptTick() {
+  if (link || !audio || !current() || current().preview) return;
+  const downloading = sampleProgress();
+  if (audio.paused) { est.upSince = 0; return; }
+  if (!downloading) probe();
+  if (prefs.quality === 'auto') decide();
+}
+/** Auto: follow the estimate – down at once (when the buffer is short), up when it has held 1.5× the higher rung's need for 15 s. */
+function decide() {
+  const t = current();
+  const orig = origKbps(t);
+  const l = playback.ladder(orig);
+  const ci = l.indexOf(state.rung);
+  const fresh = est.fresh;
+  est.fresh = false;
+  if (est.kbps === null || ci < 0) return;
+  const now = Date.now();
+  const ti = l.indexOf(playback.chooseRung(est.kbps, orig));
+  if (ti > ci) {
+    est.upSince = 0;
+    if (fresh && now - state.switchedAt > 10000 && !fullyBuffered() && bufferedAhead() < 20) switchRung(l[ti]);
+    return;
+  }
+  const up = l.find(r => playback.needed(r, orig) * 1.5 <= est.kbps);
+  if (up === undefined || l.indexOf(up) >= ci) { est.upSince = 0; return; }
+  if (!est.upSince) { est.upSince = now; return; }
+  if (now - est.upSince >= 15000 && bufferedAhead() > 10) { est.upSince = 0; switchRung(up); }
+}
+
+// ---- server-side Cadenza: render ahead -----------------------------------------------------------
+/** Ask the server to render a song ahead (or say how far it is): 'cached' | 'rendering' | 'queued' | 'busy'. */
+async function prepareDsp(t) {
+  if (!t || typeof t.id !== 'number') return null;
+  dspAsked.set(t.id, Date.now());
+  try {
+    const r = await api.post('/playback/dsp/prepare', { track_id: t.id, rate: dspRequestRate(), filter: prefs.dsp_filter, dither: prefs.dsp_dither });
+    const s = typeof r?.state === 'string' ? r.state : '';
+    dspCache.set(t.id, s);
+    return s;
+  } catch { return null; }
+}
+/** The current song started as a processed stream: learn whether it is pre-rendered, and have the next one rendered now. */
+function prepareAhead(t) {
+  prepareDsp(t);
+  const n = state.queue[state.index + 1];
+  if (n && wantDsp(n, rungFor(n) > 0)) prepareDsp(n).then(() => maybePreload());
+}
+const dspNote = (s) => s === 'cached' ? ' (pre-rendered)' : s === 'rendering' || s === 'queued' ? ' (rendering ahead)' : '';
+
+// ---- crossfade ---------------------------------------------------------------------------------
+// The spare element already holds the next song: start it `crossfade` seconds before this one ends and blend
+// the two with an equal-power curve (Web Audio gains when the effects graph runs, element volume otherwise).
+let fade = null;   // { out: the element fading out, len: seconds, timer }
+function maybeCrossfade() {
+  const cf = prefs.crossfade;
+  if (!cf || fade || link || state.repeat === 'one' || audio.paused || state.dragging) return;
+  const t = current(), n = state.queue[state.index + 1];
+  if (!t || !n) return;
+  const d = duration();
+  if (!d || d < 2 * cf) return;
+  const remaining = d - position();
+  if (remaining > cf || remaining < 1) return;
+  if (prefs.crossfade_album_gapless && t.album_id != null && t.album_id === n.album_id) return;
+  if (!spare.dataset.url || spare.dataset.url !== startUrl(n) || spare.readyState < 3) return;
+  logPlay();
+  fade = { out: audio, len: remaining, timer: null };
+  state.index++;
+  load({ fade: true });
+  fade.timer = setInterval(stepFade, 50);
+}
+function stepFade() {
+  if (!fade) return;
+  const x = Math.min(1, (audio.currentTime || 0) / fade.len);
+  setFadeGain(fade.out, Math.cos(x * Math.PI / 2));
+  setFadeGain(audio, Math.sin(x * Math.PI / 2));
+  if (x >= 1 || fade.out.ended) endFade();
+}
+/** Finish (or cut short – next/prev/seek) a crossfade: the old song stops, the new one plays at full volume. */
+function endFade() {
+  if (!fade) return;
+  clearInterval(fade.timer);
+  const out = fade.out;
+  fade = null;
+  out.pause();
+  out.removeAttribute('src');
+  delete out.dataset.url;
+  try { out.load(); } catch { /* ignore */ }
+  setFadeGain(out, 1);
+  setFadeGain(audio, 1);
+  route();
+  maybePreload();
+}
+/** The fade level of one element: a Web Audio gain when it is routed through the effects graph, else its volume (under the slider). */
+function setFadeGain(el, g) {
+  if (!el) return;
+  const s = fx.sources.get(el);
+  if (s) { s.gain.gain.value = g; el.volume = userVol; } else el.volume = userVol * g;
+}
+
+// ---- sound effects on this device (Web Audio) ----------------------------------------------------
+// Built the first time an effect is switched on; until then the <audio> elements play straight out, untouched.
+// An element wrapped in a MediaElementSource can only be heard through the graph, so once built the graph stays
+// and turns into a pass-through when the effects are switched off.
+const fx = { built: false, sources: new Map(), input: null, key: '', eq: [], cross: [], trim: null, pan: null, nodes: [] };
+const dbGain = (v) => Math.pow(10, v / 20);
+const XFEED_DB = { light: -9, medium: -6, strong: -4.5 };
+function ensureFx() {
+  if (fx.built) return true;
+  if (!audio || !spare) return false;
+  outputRate();
+  if (!ctx) return false;
+  try {
+    fx.input = ctx.createGain();
+    for (const el of [audio, spare]) {
+      el.crossOrigin = 'anonymous';   // a cross-origin preview must allow CORS to be heard through Web Audio
+      const src = ctx.createMediaElementSource(el);
+      const gain = ctx.createGain();
+      src.connect(gain);
+      fx.sources.set(el, { src, gain, on: false });
+    }
+    fx.built = true;
+  } catch { return fx.built; }
+  fx.key = '';
+  applyFx();
+  route();
+  resumeFx();
+  return true;
+}
+function resumeFx() { if (fx.built && ctx?.state === 'suspended') ctx.resume().catch(() => {}); }
+/** Only the element playing (and the one fading out) feeds the graph. */
+function route() {
+  if (!fx.built) return;
+  for (const [el, s] of fx.sources) {
+    const want = el === audio || (fade && el === fade.out);
+    if (want && !s.on) { s.gain.connect(fx.input); s.on = true; }
+    else if (!want && s.on) { s.gain.disconnect(); s.on = false; }
+  }
+}
+/** Bring the graph in line with the settings: rewire only when its shape changes, otherwise just set the values. */
+function applyFx() {
+  if (!fx.built) return;
+  const on = playback.fxActive(prefs);
+  const bands = on ? playback.eqBands(prefs) : [];
+  const mono = on && prefs.mono;
+  const xfeed = on && !mono ? prefs.crossfeed : 'off';
+  const key = JSON.stringify([on, bands.map(b => b.type), xfeed !== 'off', mono]);
+  if (key !== fx.key) {
+    fx.key = key;
+    try { fx.input.disconnect(); } catch { /* not connected */ }
+    fx.nodes.forEach(n => { try { n.disconnect(); } catch { /* ignore */ } });
+    fx.nodes = []; fx.eq = []; fx.cross = []; fx.trim = null; fx.pan = null;
+    let last = fx.input;
+    const add = (n) => { fx.nodes.push(n); last.connect(n); last = n; return n; };
+    if (on) {
+      for (const b of bands) fx.eq.push(add(Object.assign(ctx.createBiquadFilter(), { type: b.type })));
+      if (xfeed !== 'off') {
+        // each channel gets a low-passed, slightly delayed, quieter copy of the other one
+        const pre = add(ctx.createGain());
+        pre.channelCount = 2; pre.channelCountMode = 'explicit'; pre.channelInterpretation = 'speakers';
+        const split = ctx.createChannelSplitter(2), merge = ctx.createChannelMerger(2);
+        fx.nodes.push(split, merge);
+        pre.connect(split);
+        split.connect(merge, 0, 0);
+        split.connect(merge, 1, 1);
+        for (const [from, to] of [[0, 1], [1, 0]]) {
+          const lp = Object.assign(ctx.createBiquadFilter(), { type: 'lowpass' });
+          lp.frequency.value = 700; lp.Q.value = 0.5;
+          const dl = ctx.createDelay(0.01);
+          dl.delayTime.value = 0.0003;
+          const g = ctx.createGain();
+          fx.nodes.push(lp, dl, g);
+          split.connect(lp, from); lp.connect(dl); dl.connect(g); g.connect(merge, 0, to);
+          fx.cross.push(g);
+        }
+        last = merge;
+        fx.trim = add(ctx.createGain());
+      }
+      if (mono) {
+        const m = add(ctx.createGain());
+        m.channelCount = 1; m.channelCountMode = 'explicit'; m.channelInterpretation = 'speakers';
+      }
+      fx.pan = add(ctx.createStereoPanner());
+    }
+    last.connect(ctx.destination);
+  }
+  fx.input.gain.value = on ? dbGain(prefs.eq_preamp) : 1;
+  fx.eq.forEach((f, i) => {
+    const b = bands[i];
+    f.type = b.type;
+    f.frequency.value = b.freq;
+    f.gain.value = b.gain;
+    f.Q.value = b.q;
+  });
+  if (fx.cross.length) {
+    const g = dbGain(XFEED_DB[xfeed] ?? -6);
+    fx.cross.forEach(n => { n.gain.value = g; });
+    fx.trim.gain.value = 1 / (1 + g);
+  }
+  if (fx.pan) fx.pan.pan.value = prefs.balance / 100;
 }
 
 /** Near the end of the queue: fetch the library shuffle ahead of time, so the next song is ready too. */
@@ -406,16 +758,33 @@ export function seekTo(sec) {
   const dur = duration();
   if (!current() || !dur) return;
   sec = Math.max(0, Math.min(sec, dur - 0.25));
+  endFade();
   state.seekAt = Date.now();
-  if (state.transcoded) load({ transcode: true, lossy: state.lossy, dsp: state.dsp, offset: sec });      // ask the server to start the stream at that point
-  else audio.currentTime = sec;
+  const t = current();
+  if (state.dsp && dspCacheOn() && dspCache.get(t.id) !== 'cached' && Date.now() - (dspAsked.get(t.id) || 0) > 3000) {
+    // maybe the render has finished since: then the browser seeks in the pre-rendered file itself
+    prepareDsp(t).then(() => { if (current() === t) seekNow(sec); });
+  } else seekNow(sec);
   updateTime();
   emit();
+}
+/** Whole files (the original, a pre-rendered Cadenza file) seek in the browser; server-made streams restart at the point. */
+function seekNow(sec) {
+  const t = current();
+  const cached = state.dsp && dspCache.get(t?.id) === 'cached';
+  let local = !state.transcoded;
+  if (cached && state.offset === 0) {
+    try { const s = audio.seekable; local = s.length > 0 && s.end(s.length - 1) >= sec - 0.5; } catch { local = false; }
+  }
+  state.seekAt = Date.now();
+  if (local) audio.currentTime = sec;
+  else load({ transcode: true, rung: state.rung, dsp: state.dsp, offset: sec, resume: true });
+  updateTime();
 }
 
 export function toggle() {
   if (viaLink({ action: 'toggle' })) { if (link.state) link.state.playing = !link.state.playing; render(); if (state.full) renderFull(); return; }
-  if (current()) (audio.paused ? audio.play() : audio.pause());
+  if (current()) { resumeFx(); (audio.paused ? audio.play() : audio.pause()); }
 }
 
 export async function next(auto = false) {
@@ -529,8 +898,8 @@ function transport() {
   const t = current();
   if (!t) return null;
   if (t.preview) return { kind: 'preview', text: 'A 30-second preview from the catalogue (lossy) – not your file' };
-  if (state.lossy) return { kind: `${LOSSY}-${prefs.kbps}`, text: `${LOSSY.toUpperCase()} ${prefs.kbps} kbps (lossy) – ${prefs.quality === 'saver' ? 'Data saver is on' : 'the connection could not keep up with the original'}` };
-  if (state.dsp) return { kind: `cadenza-${state.dspRate}`, text: `Upsampled on the server by Cadenza to 24-bit / ${khz(state.dspRate)} kHz (lossless FLAC)` };
+  if (state.rung > 0) return { kind: `${LOSSY}-${state.rung}`, text: `${LOSSY.toUpperCase()} ${state.rung} kbps, lossy ${prefs.quality === 'saver' ? '(Data saver is on)' : '(adaptive – the connection could not keep up)'}` };
+  if (state.dsp) return { kind: `cadenza-${state.dspRate}`, text: `Upsampled on the server by Cadenza to 24-bit / ${khz(state.dspRate)} kHz (lossless FLAC)${dspNote(dspCache.get(t.id))}` };
   if (state.transcoded) return { kind: 'flac', text: `Converted to FLAC by the server (lossless) – browsers can't play ${(t.format || '').toUpperCase()}` };
   return { kind: 'original', text: 'The original file, byte for byte – nothing was converted or resampled on the way' };
 }
@@ -540,6 +909,8 @@ function outputRate() {
   try { if (!ctx) ctx = new (window.AudioContext || window.webkitAudioContext)(); return ctx.sampleRate; } catch { return 0; }
 }
 const khz = (hz) => String(Math.round(hz / 100) / 10);
+/** kbit/s → "4.2" / "12" (Mbit/s) */
+const mbit = (kbps) => kbps < 10000 ? (kbps / 1000).toFixed(1) : String(Math.round(kbps / 1000));
 function sourceLine(t, info) {
   if (!info) return `${(t.format || '').toUpperCase()}${t.bitrate ? ` · ${t.bitrate} kbps` : ''}`;
   const parts = [(info.codec || t.format || '').toUpperCase()];
@@ -556,6 +927,7 @@ async function signalPath() {
   if (!t) return;
   const m = modal({ title: 'Signal path', body: '<div class="skeleton" style="height:120px"></div>' });
   const info = await trackInfo(t);
+  if (!link && state.dsp && dspCacheOn() && current() === t) await prepareDsp(t);   // pre-rendered yet?
   const rows = [];
   rows.push(['Source', sourceLine(t, info), info?.lossless === false ? 'A lossy file: what the file lost is gone before Encore touches it' : '']);
   if (link) {
@@ -564,14 +936,19 @@ async function signalPath() {
     rows.push([esc(link.name), sig.output_rate ? `Plays through its browser audio at ${khz(sig.output_rate)} kHz` : 'Playing there', '']);
   } else {
     const tr = transport();
-    rows.push(['Encore → this device', tr?.text || '', '']);
+    const net = est.kbps > 0 ? ` · connection ≈ ${mbit(est.kbps)} Mbit/s` : '';
+    rows.push(['Encore → this device', (tr?.text || '') + net, '']);
     const out = outputRate();
     const src = info?.sample_rate;
     const resampled = out && src && out !== src;
     rows.push(['This device', out ? `Browser audio → the system mixer at ${khz(out)} kHz${window.EncoreNative ? '' : ''}` : 'Browser audio → the system mixer',
       resampled ? `Your device resamples ${khz(src)} → ${khz(out)} kHz. A browser can't hand bits straight to the DAC; for true bit-perfect output play through a Cadenza device or an exclusive-mode player.` : out && src ? 'Same rate as the file – no resampling in the browser. Whether the operating system mixes it with other sounds is up to your audio settings.' : '']);
+    const effects = playback.effectsSummary(prefs);
+    if (effects) rows.push(['Effects on this device', effects, '']);
   }
-  const pure = !link && transport()?.kind === 'original' && info?.lossless !== false;
+  const effected = !link && playback.fxActive(prefs);
+  const untouched = !link && transport()?.kind === 'original' && info?.lossless !== false;
+  const pure = untouched && !effected;
   const cadenza = !link && (transport()?.kind || '').startsWith('cadenza');
   m.el.querySelector('.modal-body').innerHTML = `
     <div class="stack" style="gap:12px">
@@ -580,6 +957,7 @@ async function signalPath() {
         <div class="small muted" style="margin-top:4px">${link ? 'The rows above are what that device reports. Open Encore there for its own signal path.'
           : cadenza ? 'Encore upsampled the file on the server with Cadenza and sent lossless 24-bit FLAC. Turn it off under Settings → Playback → Server processing to get the untouched file.'
           : pure ? 'Encore sent the file exactly as it is stored. Everything after that – volume, mixing, resampling – is your browser and operating system.'
+          : untouched ? 'Encore sent the file untouched; this device adds the effects you chose under Settings → Playback → Sound.'
           : 'Encore converted this stream (see above). Settings → Playback → Quality → Original keeps the file untouched even when the connection is slow.'}</div></div>
     </div>`;
 }
@@ -609,14 +987,15 @@ export function mount() {
   document.body.appendChild(full);
   let vol = 0.9;
   try { vol = parseFloat(localStorage.getItem('encore.volume') ?? '0.9'); } catch { /* ignore */ }
-  audio.volume = spare.volume = vol;
+  userVol = Number.isFinite(vol) ? Math.max(0, Math.min(1, vol)) : 0.9;
+  audio.volume = spare.volume = userVol;
   // both elements get the listeners; only the one currently playing counts
   const on = (type, fn) => [audio, spare].forEach(a => a.addEventListener(type, (e) => { if (e.target === audio) fn(e); }));
   on('ended', () => { logPlay(); next(true); });
-  on('play', () => { render(); emit(); });
-  on('pause', () => { render(); emit(); });
+  on('play', () => { resumeFx(); if (fade) fade.out.play().catch(() => {}); render(); emit(); });
+  on('pause', () => { if (fade) fade.out.pause(); render(); emit(); });
   on('timeupdate', () => {
-    updateTime(); logPlay(); syncLyrics();
+    updateTime(); logPlay(); syncLyrics(); maybeCrossfade();
     const now = Date.now();
     if (now - state.lastPreloadCheck > 2000) { state.lastPreloadCheck = now; maybePreload(); }
   });
@@ -654,6 +1033,7 @@ export function mount() {
   window.addEventListener('hashchange', () => { if (state.full) setFull(false); });
   window.addEventListener('encore:likes', () => { liked = null; likes().then(paintLikes); });
   fetchDsp();
+  setInterval(adaptTick, 2000);
   render();
 }
 
@@ -685,14 +1065,14 @@ function quality(t) {
   if (t.remote) return link?.state?.signal?.label || (t.format || '').toUpperCase();
   if (t.preview) return '30 s preview';
   const f = (t.format || '').toUpperCase();
-  if (state.lossy) return `${f} → ${LOSSY.toUpperCase()} ${prefs.kbps}k`;
+  if (state.rung > 0) return `${f} → ${LOSSY.toUpperCase()} ${state.rung}k`;
   if (state.dsp) return `${f} → Cadenza ${khz(state.dspRate)} kHz`;
   return state.transcoded ? `${f} → FLAC` : `${f}${t.bitrate ? ' ' + t.bitrate + 'k' : ''}`;
 }
 function qualityTitle(t) {
   if (t?.remote) return `What ${link?.name || 'that device'} is playing`;
   if (t?.preview) return 'A 30-second preview – not in your library';
-  if (state.lossy) return 'A smaller lossy stream, because the connection could not keep up (or Data saver is on)';
+  if (state.rung > 0) return prefs.quality === 'saver' ? 'Data saver: a small 96 kbps stream' : `Adaptive quality: ${state.rung} kbps while the connection can't keep up with the original`;
   if (state.dsp) return 'Upsampled on the server by Cadenza (lossless 24-bit FLAC)';
   return state.transcoded ? 'Converted to FLAC for your browser (lossless)' : 'Original file, no conversion';
 }
@@ -735,7 +1115,7 @@ function rightHtml(t, { closable }) {
       <button class="btn ghost icon" id="p-queue" aria-label="Up next" title="Up next">${icon.list}</button>
       ${window.encoreRemote ? `<button class="btn ghost icon" id="p-devices" aria-label="Other devices" title="Play on or control your other devices">${icon.devices}</button>` : ''}
       <span class="faint vol-ic">${icon.volume.replace('<svg', '<svg width="18"')}</span>
-      <input type="range" id="vol" min="0" max="1" step="0.01" value="${link ? (link.state?.volume ?? 0.9) : audio.volume}">
+      <input type="range" id="vol" min="0" max="1" step="0.01" value="${link ? (link.state?.volume ?? 0.9) : userVol}">
       ${closable ? `<button class="btn ghost icon" id="p-close" aria-label="Close player">${icon.x}</button>` : ''}
     </div>`;
 }
@@ -826,7 +1206,7 @@ function render() {
   bindRight(el);
   bindSeek(el.querySelector('#seek'), 't-cur');
   el.querySelector('#p-close').onclick = () => {
-    audio.pause(); audio.removeAttribute('src'); spare.removeAttribute('src'); delete spare.dataset.url; state.queue = []; state.index = -1;
+    endFade(); audio.pause(); audio.removeAttribute('src'); spare.removeAttribute('src'); delete spare.dataset.url; state.queue = []; state.index = -1;
     render(); emit();
   };
   updateTime();
@@ -848,7 +1228,7 @@ function renderFull() {
   const idx = link ? (s.index ?? -1) : state.index;
   const upNext = q.slice(idx + 1);
   const playing = nowPlaying();
-  const volume = link ? (s.volume ?? 0.9) : audio.volume;
+  const volume = link ? (s.volume ?? 0.9) : userVol;
   f.style.setProperty('--np-bg', `url("${cover(t) || ''}")`);
   f.innerHTML = `
     <div class="np-backdrop"></div>

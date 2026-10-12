@@ -123,6 +123,7 @@ const SECTIONS = [
     S('cadenza_max_streams', 'Streams at once', 'number', { help: 'Processed streams the whole server runs at the same time; more are played as the original.' }),
     S('cadenza_max_rate', 'Highest output rate', 'select', { options: [[96000, '96 kHz'], [192000, '192 kHz'], [384000, '384 kHz'], [768000, '768 kHz']] }),
     S('cadenza_max_taps', 'Longest filter', 'select', { options: [[16384, '16k taps (light)'], [65536, '64k taps'], [262144, '256k taps'], [1048576, '1M taps (heavy)']] }),
+    S('cadenza_cache_mb', 'Cache size (MB)', 'number', { help: 'Each song is rendered once and kept on disk, so seeking and skipping need no new processing and the next song is ready before it plays. The least recently played renders make room. 0 = no cache (every stream is processed live).' }),
   ] },
   { id: 'email', title: 'Email', desc: 'Lets Encore send password-reset and sign-in emails.', test: 'email', testLabel: 'Send test email', fields: [
     S('smtp_host', 'SMTP server', 'text', { help: 'e.g. smtp.fastmail.com – used for password-reset emails' }),
@@ -310,6 +311,7 @@ export async function render(view, ctx) {
       <div data-out>${flash && flash.sec === sec.id ? `<div class="test-result ${flash.ok ? 'ok' : 'err'}">${flash.ok ? icon.check : icon.x}<span>${esc(flash.message || '')}</span></div>` : ''}</div>
       <div class="form-grid">${sec.fields.map(f => field(f, values[f.key], lidarrOpts, meta)).join('')}</div>
       ${sec.id === 'streamrip' ? tidalBlock() : ''}
+      ${sec.id === 'cadenza' ? cadenzaCacheBlock() : ''}
       <div class="row mt" style="justify-content:flex-end"><button class="btn primary" data-save>${icon.check}Save</button></div>
     </details>`;
     // the first card starts open (unless a link asked for a specific one); every app is its own drop-down
@@ -331,6 +333,7 @@ export async function render(view, ctx) {
       const sec = SECTIONS.find(x => x.id === card.dataset.sec);
       const out = card.querySelector('[data-out]');
       if (sec.id === 'streamrip') bindTidal(card);
+      if (sec.id === 'cadenza') bindCadenzaCache(card);
       const paint = (r) => { out.innerHTML = `<div class="test-result ${r.ok ? 'ok' : 'err'}">${r.ok ? icon.check : icon.x}<span>${esc(r.message || (r.ok ? 'Connected' : 'Failed'))}</span></div>`; };
       card.querySelector('[data-save]').onclick = () => save(sec, false, card);
       card.querySelectorAll('[data-clear]').forEach(a => a.addEventListener('click', async (e) => {
@@ -442,6 +445,39 @@ function tidalBlock() {
   </div>`;
 }
 
+// Server processing: how full the Cadenza pre-render cache is, how fast it renders, and a button to empty it.
+function cadenzaCacheBlock() {
+  return `<div class="card flat mt" id="cadenza-cache" style="padding:12px 14px">
+    <div class="row between wrap" style="gap:8px">
+      <div style="min-width:0"><b>Pre-render cache</b><div class="small muted" id="cadenza-cache-state">Checking…</div></div>
+      <button class="btn sm" id="cadenza-cache-clear" type="button">${icon.trash}Clear cache</button>
+    </div>
+  </div>`;
+}
+
+/** "Cache: 812 MB of 4096 MB · 23 songs · renders at 6.2× real time" (the factor only once a render has finished). */
+export function cadenzaCacheText(c) {
+  if (!c || typeof c !== 'object') return 'Cache: not available on this server';
+  const mb = (v) => String(Math.round(Number(v) || 0));
+  const n = Number(c.files) || 0;
+  const f = Number(c.last_factor);
+  return `Cache: ${mb(c.used_mb)} MB of ${mb(c.max_mb)} MB · ${n} ${n === 1 ? 'song' : 'songs'}${f > 0 ? ` · renders at ${f.toFixed(1)}× real time` : ''}`;
+}
+
+function bindCadenzaCache(card) {
+  const state = card.querySelector('#cadenza-cache-state'), btn = card.querySelector('#cadenza-cache-clear');
+  if (!state) return;
+  const refresh = () => api.get('/playback/dsp').then(d => { state.textContent = cadenzaCacheText(d?.cache); }).catch(() => { state.textContent = 'Status unavailable'; });
+  refresh();
+  btn.onclick = async (e) => {
+    e.preventDefault();
+    btn.disabled = true;
+    try { await api.post('/playback/dsp/cache/clear'); toast('Cache cleared', 'ok'); } catch (err) { toast(err.message, 'err'); }
+    btn.disabled = false;
+    refresh();
+  };
+}
+
 function bindTidal(card) {
   const state = card.querySelector('#tidal-state'), out = card.querySelector('#tidal-out'), btn = card.querySelector('#tidal-signin');
   if (!state) return;
@@ -509,13 +545,77 @@ async function renderPlayback(el) {
         <label class="stack" style="gap:4px"><span class="small muted">Upsampling filter</span><select class="input" id="pb-dsp-filter" ${off}>${opt('', 'Server default', p.dsp_filter)}${(dsp.filters || []).map(([v, l]) => opt(v, l, p.dsp_filter)).join('')}</select></label>
         <label class="stack" style="gap:4px"><span class="small muted">Dither / noise shaping</span><select class="input" id="pb-dsp-dither" ${off}>${(dsp.dithers || []).map(([v, l]) => opt(v, l, p.dsp_dither)).join('')}</select></label>
         <label class="stack" style="gap:4px"><span class="small muted">Output rate</span><select class="input" id="pb-dsp-rate" ${off}>${rates.map(([v, l]) => opt(v, l, p.dsp_rate)).join('')}</select></label>
-        <span class="small muted">The server's Cadenza upsamples the original file and sends lossless 24-bit FLAC. It uses more data (about 4.6 Mbit/s at 96 kHz, 9.2 Mbit/s at 192 kHz) and the server's processor; Data saver and Auto's fallback still win when the connection can't keep up.</span>`;
+        <span class="small muted">The server's Cadenza upsamples the original file and sends lossless 24-bit FLAC. It uses more data (about 4.6 Mbit/s at 96 kHz, 9.2 Mbit/s at 192 kHz) and the server's processor; Data saver and Auto still step down to a lighter stream when the connection can't keep up.</span>`;
   };
   const seg = (key, opts) => `<div class="seg" data-key="${key}">${opts.map(([v, l]) => `<button type="button" data-v="${v}" class="${String(p[key]) === String(v) ? 'on' : ''}">${l}</button>`).join('')}</div>`;
   const QUALITY_HELP = {
-    auto: "The original file. When the connection can't keep up, the rest of the song and the next ten minutes come as a smaller AAC 96 kbps (Opus 96 kbps in browsers without AAC) stream, then the original is tried again.",
+    auto: 'The original file. Encore measures your connection while it plays and steps the stream down as far as it needs to keep the music playing – down to 32 kbps – then back up as soon as the connection allows.',
     original: "Always the original file, even if it stutters on a slow connection. Formats a browser can't play are converted to FLAC (lossless).",
-    saver: 'Always a smaller AAC 96 kbps (Opus 96 kbps in browsers without AAC) stream – for mobile data and slow links.',
+    saver: 'Always a small 96 kbps stream (AAC, or Opus in browsers without AAC) – for mobile data and slow links.',
+  };
+  // sound effects on this device: the bands on screen are the preset's own until you edit one (then the preset is Custom)
+  const bands = () => playback.eqBands(p).map(b => ({ ...b }));
+  const sign = (v) => `${v > 0 ? '+' : ''}${v} dB`;
+  const fadeText = (v) => v > 0 ? `${v} s` : 'Off';
+  const bandRow = (b, i) => `<tr data-i="${i}">
+      <td><select class="input" data-f="type" aria-label="Band ${i + 1} type">${playback.EQ_TYPES.map(([v, l]) => opt(v, l, b.type)).join('')}</select></td>
+      <td><input class="input" type="number" data-f="freq" min="20" max="20000" step="1" value="${b.freq}" aria-label="Band ${i + 1} frequency (Hz)"></td>
+      <td><input class="input" type="number" data-f="gain" min="-24" max="24" step="0.5" value="${b.gain}" aria-label="Band ${i + 1} gain (dB)"></td>
+      <td><input class="input" type="number" data-f="q" min="0.1" max="18" step="0.1" value="${b.q}" aria-label="Band ${i + 1} Q"></td>
+      <td><button type="button" class="btn ghost icon sm" data-rm-band="${i}" aria-label="Remove band" title="Remove band">✕</button></td></tr>`;
+  const soundHtml = () => {
+    const list = bands();
+    return `<label class="row" style="gap:8px;align-items:center"><input type="checkbox" id="pb-fx" ${p.fx_on ? 'checked' : ''}> Use sound effects</label>
+      <fieldset class="stack" id="pb-fx-box" style="gap:8px;border:0;padding:0;margin:0;min-width:0;${p.fx_on ? '' : 'opacity:.45'}" ${p.fx_on ? '' : 'disabled'}>
+        <label class="stack" style="gap:4px"><span class="small muted">Equalizer preset</span><select class="input" id="pb-eq-preset">${playback.EQ_PRESETS.map(x => opt(x.id, x.label, p.eq_preset)).join('')}${p.eq_preset === 'custom' ? opt('custom', 'Custom', p.eq_preset) : ''}</select></label>
+        <label class="stack" style="gap:4px"><span class="small muted">Preamp <b id="pb-eq-preamp-v">${sign(p.eq_preamp)}</b></span><input type="range" id="pb-eq-preamp" min="-24" max="12" step="0.5" value="${p.eq_preamp}"></label>
+        <div style="overflow-x:auto"><table class="eq-bands" style="width:100%;border-collapse:collapse">
+          <thead><tr class="small muted" style="text-align:left"><th>Type</th><th>Frequency (Hz)</th><th>Gain (dB)</th><th>Q</th><th></th></tr></thead>
+          <tbody>${list.length ? list.map(bandRow).join('') : '<tr><td colspan="5" class="small muted">No bands.</td></tr>'}</tbody></table></div>
+        <div class="row"><button type="button" class="btn sm" id="pb-eq-add" ${list.length >= 10 ? 'disabled' : ''}>${icon.plus}Add band</button></div>
+        <label class="stack" style="gap:4px"><span class="small muted">Crossfeed</span><select class="input" id="pb-crossfeed">${playback.CROSSFEED.map(([v, l]) => opt(v, l, p.crossfeed)).join('')}</select></label>
+        <span class="small muted">For headphones: mixes a little of each channel into the other, like speakers in a room.</span>
+        <label class="stack" style="gap:4px"><span class="small muted">Balance <b id="pb-balance-v">${playback.balanceText(p.balance)}</b></span><input type="range" id="pb-balance" min="-100" max="100" step="1" value="${p.balance}"></label>
+        <label class="row" style="gap:8px;align-items:center"><input type="checkbox" id="pb-mono" ${p.mono ? 'checked' : ''}> Mono</label>
+      </fieldset>
+      <span class="small muted">Runs in this browser or app – it costs your server nothing. Works with every quality setting. Turning it on means the sound is no longer the untouched file (the Signal path says so).</span>
+      <label class="stack" style="gap:4px"><span class="small muted">Crossfade <b id="pb-crossfade-v">${fadeText(p.crossfade)}</b></span><input type="range" id="pb-crossfade" min="0" max="12" step="1" value="${p.crossfade}"></label>
+      <label class="row" style="gap:8px;align-items:center"><input type="checkbox" id="pb-crossfade-gapless" ${p.crossfade_album_gapless ? 'checked' : ''}> Keep albums gapless (no fade between songs from the same album)</label>
+      <span class="small muted">Blends the end of one song into the start of the next.</span>`;
+  };
+  const bindSound = () => {
+    el.querySelector('#pb-fx').onchange = (e) => set({ fx_on: e.target.checked });
+    el.querySelector('#pb-eq-preset').onchange = (e) => {
+      const x = playback.EQ_PRESETS.find(y => y.id === e.target.value);
+      if (x) set({ eq_preset: x.id, eq_bands: x.bands.map(b => ({ ...b })), eq_preamp: x.preamp });
+    };
+    const preamp = el.querySelector('#pb-eq-preamp');
+    preamp.oninput = () => { el.querySelector('#pb-eq-preamp-v').textContent = sign(+preamp.value); };
+    preamp.onchange = () => set({ eq_preamp: +preamp.value });
+    el.querySelectorAll('.eq-bands tr[data-i] [data-f]').forEach(c => c.onchange = () => {
+      const list = bands();
+      const i = +c.closest('tr').dataset.i;
+      list[i] = { ...list[i], [c.dataset.f]: c.dataset.f === 'type' ? c.value : +c.value };
+      set({ eq_preset: 'custom', eq_bands: list });
+    });
+    el.querySelectorAll('[data-rm-band]').forEach(b => b.onclick = () => {
+      const list = bands();
+      list.splice(+b.dataset.rmBand, 1);
+      set({ eq_preset: 'custom', eq_bands: list });
+    });
+    el.querySelector('#pb-eq-add').onclick = () => {
+      const list = bands();
+      if (list.length < 10) set({ eq_preset: 'custom', eq_bands: [...list, { type: 'peaking', freq: 1000, gain: 0, q: 1 }] });
+    };
+    el.querySelector('#pb-crossfeed').onchange = (e) => set({ crossfeed: e.target.value });
+    const bal = el.querySelector('#pb-balance');
+    bal.oninput = () => { el.querySelector('#pb-balance-v').textContent = playback.balanceText(+bal.value); };
+    bal.onchange = () => set({ balance: +bal.value });
+    el.querySelector('#pb-mono').onchange = (e) => set({ mono: e.target.checked });
+    const cf = el.querySelector('#pb-crossfade');
+    cf.oninput = () => { el.querySelector('#pb-crossfade-v').textContent = fadeText(+cf.value); };
+    cf.onchange = () => set({ crossfade: +cf.value });
+    el.querySelector('#pb-crossfade-gapless').onchange = (e) => set({ crossfade_album_gapless: e.target.checked });
   };
   const paint = () => {
     const link = player.linked();
@@ -530,6 +630,8 @@ async function renderPlayback(el) {
         <span class="small muted">The next song is fetched once the current one is safely buffered, so it starts without a gap. Turn it off on a very slow connection to leave all the bandwidth to the song playing.</span></div>
       <div class="stack" style="gap:6px"><h3>When the queue ends</h3>
         <label class="row" style="gap:8px;align-items:center"><input type="checkbox" id="pb-autoplay" ${p.autoplay ? 'checked' : ''}> Keep going with a shuffle of the whole library</label></div>
+      <div class="stack" style="gap:6px"><h3>Sound (on this device)</h3>
+        ${soundHtml()}</div>
       <div class="stack" style="gap:6px"><h3>Pure playback</h3>
         <span class="small muted">Encore streams the original file untouched – the quality badge on the player opens the <b>Signal path</b>, which shows what the file is, what was sent and what this device does with it. A browser hands the sound to the operating system, which mixes it with other sounds and may resample it; bit-perfect output needs an exclusive-mode engine.</span></div>
       <div class="stack" style="gap:6px"><h3>Server processing (Cadenza)</h3>
@@ -540,6 +642,7 @@ async function renderPlayback(el) {
     el.querySelectorAll('.seg[data-key] button').forEach(b => b.onclick = () => set({ [b.closest('.seg').dataset.key]: b.dataset.v }));
     el.querySelector('#pb-preload').onchange = (e) => set({ preload: e.target.checked });
     el.querySelector('#pb-autoplay').onchange = (e) => set({ autoplay: e.target.checked });
+    bindSound();
     const dspBox = el.querySelector('#pb-dsp');
     if (dspBox) {
       dspBox.onchange = (e) => set({ dsp: e.target.checked });

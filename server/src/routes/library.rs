@@ -360,7 +360,7 @@ pub struct StreamQ {
     t: f64,
     /// "aac": a smaller lossy stream for connections that can't keep up (Settings → Playback)
     q: String,
-    /// bitrate of the lossy stream in kbps (64–320, default 256)
+    /// bitrate of the lossy stream in kbps (32–320, default 256; the player steps down to 32 when the connection is slow)
     kbps: u32,
     /// upsample on the server with Cadenza (admin switch + `server_dsp` permission; never on share links)
     #[serde(deserialize_with = "flag")]
@@ -411,10 +411,10 @@ pub async fn stream_track(st: &AppState, id: i64, q: &StreamQ, req: Request, use
         cmd.args(["-af", "aresample=176400", "-sample_fmt", "s32"]);
     }
     let (ct, tag) = if lossy {
-        let kbps = if q.kbps == 0 { 256 } else { q.kbps.clamp(64, 320) };
+        let kbps = if q.kbps == 0 { 256 } else { q.kbps.clamp(32, 320) };
         if q.q == "opus" {
             // Opus in Ogg for browsers without an AAC decoder (Chromium builds, Firefox on Linux)
-            cmd.args(["-c:a", "libopus", "-b:a", &format!("{kbps}k"), "-vbr", "on", "-f", "ogg", "-flush_packets", "1", "pipe:1"]);
+            cmd.args(["-c:a", "libopus", "-b:a", &format!("{kbps}k"), "-vbr", "on", "-application", "audio", "-f", "ogg", "-flush_packets", "1", "pipe:1"]);
             ("audio/ogg", format!("opus-{kbps}"))
         } else {
             // AAC in an ADTS stream: starts fast and needs no container index
