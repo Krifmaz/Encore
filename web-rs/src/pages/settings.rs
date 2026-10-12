@@ -163,6 +163,12 @@ const SECTIONS: &[Section] = &[
         s("roon_enabled", "Enable Roon", "bool").help("Roon Core (or Nucleus / ROCK) on the same network. Roon 1.8 or newer."),
         s("roon_host", "Roon Core address", "text").help("Leave empty to find the Core on the network. Running Encore in Docker? Multicast does not cross the bridge network – enter the Core’s IP here (add :port if it is not 9330)."),
     ] },
+    Section { id: "cadenza", title: "Server processing (Cadenza)", desc: "Lets permitted users have their streams upsampled on this server by Cadenza (long-filter upsampling, dither and noise shaping, lossless 24-bit FLAC out). Off by default: it costs real processor time per stream. Allow users under People → Users & permissions.", test: Some("cadenza"), test_label: Some("Test"), fields: &[
+        s("cadenza_server_enabled", "Enable server processing", "bool"),
+        s("cadenza_max_streams", "Streams at once", "number").help("Processed streams the whole server runs at the same time; more are played as the original."),
+        s("cadenza_max_rate", "Highest output rate", "select").options(&[("96000", "96 kHz"), ("192000", "192 kHz"), ("384000", "384 kHz"), ("768000", "768 kHz")]),
+        s("cadenza_max_taps", "Longest filter", "select").options(&[("16384", "16k taps (light)"), ("65536", "64k taps"), ("262144", "256k taps"), ("1048576", "1M taps (heavy)")]),
+    ] },
     Section { id: "email", title: "Email", desc: "Lets Encore send password-reset and sign-in emails.", test: Some("email"), test_label: Some("Send test email"), fields: &[
         s("smtp_host", "SMTP server", "text").help("e.g. smtp.fastmail.com – used for password-reset emails"),
         s("smtp_port", "Port", "number").help("587 (STARTTLS) or 465 (SSL)"),
@@ -190,7 +196,7 @@ const GROUPS: &[Group] = &[
     Group { id: "apps", title: "Apps & sources", aliases: &["downloads", "tagging", "services"], parts: &[
         ("Download sources", &["pipeline", "streamrip", "torznab", "slskd", "ytdlp"]),
         ("Library & tagging", &["library", "verify"]),
-        ("Services", &["spotify", "media", "roon"]),
+        ("Services", &["spotify", "media", "roon", "cadenza"]),
     ] },
     Group { id: "accounts", title: "Email & notifications", aliases: &[], parts: &[("", &["email", "notify"])] },
     Group { id: "autodownload", title: "Auto-download", aliases: &[], parts: &[] },
@@ -778,11 +784,15 @@ pub async fn about_card() -> String {
         esc(&version), esc(server), esc(&build), esc(&{ let h = dom::hash(); if h.is_empty() { "#/".to_string() } else { h } }))
 }
 
-/// Settings → Playback: stream quality, buffering, what happens when the queue ends, and the engine switches of a linked Cadenza device.
+/// Settings → Playback: stream quality, buffering, what happens when the queue ends, server-side Cadenza processing of streams
+/// (where an admin switched it on and allowed the account; greyed out otherwise) and the switches of a linked Cadenza device.
 fn render_playback(el: Element, _ctx: Ctx) -> PageFuture {
     Box::pin(async move {
         let server_prefs = app::has_feature("theme");
-        let st = Rc::new(Look { el, p: RefCell::new(crate::playback::current()), server_prefs });
+        let p = crate::playback::current();
+        // server-side Cadenza: on for this server, and allowed for this account? (fetched once per visit to the tab)
+        let dsp = api::get("/playback/dsp").await.unwrap_or_else(|_| json!({ "enabled": false }));
+        let st = Rc::new(Look { el, p: RefCell::new(p), server_prefs, dsp });
         paint_playback(&st);
         Ok(())
     })
@@ -825,6 +835,44 @@ fn engine_html(e: &Value) -> String {
         if e.truthy("output") { format!(r#"<span class="small muted">Output: {}</span>"#, esc(&e.s("output"))) } else { String::new() })
 }
 
+const DSP_RATES: [i64; 8] = [88200, 96000, 176400, 192000, 352800, 384000, 705600, 768000];
+
+/// `opt()` of the JS renderPlayback: compares as strings, so a numeric rate matches its option.
+fn dsp_opt(v: &Value, l: &Value, cur: &Value) -> String {
+    format!(r#"<option value="{}" {}>{}</option>"#, escv(v), if js_string(v) == js_string(cur) { "selected" } else { "" }, escv(l))
+}
+
+/// `dspHtml()` of the JS renderPlayback: the Server processing section, greyed out unless switched on and allowed.
+fn dsp_html(p: &Value, dsp: &Value) -> String {
+    let greyed = r#"<div class="stack" style="gap:8px;opacity:.45;pointer-events:none" aria-disabled="true"><label class="row" style="gap:8px;align-items:center"><input type="checkbox" disabled> Upsample my streams on the server</label><label class="stack" style="gap:4px"><span class="small muted">Upsampling filter</span><select class="input" disabled><option>–</option></select></label><label class="stack" style="gap:4px"><span class="small muted">Dither / noise shaping</span><select class="input" disabled><option>–</option></select></label><label class="stack" style="gap:4px"><span class="small muted">Output rate</span><select class="input" disabled><option>–</option></select></label></div>"#;
+    if !dsp.truthy("enabled") { return format!(r#"{greyed}<span class="small muted">Turned off on this server. Cadenza upsampling for streams uses the server's processor, so an admin has to switch it on (Settings → Apps & sources → Server processing) and allow your account.</span>"#); }
+    if !dsp.truthy("allowed") { return format!(r#"{greyed}<span class="small muted">Your account isn't allowed to use the server's processing. Ask an admin.</span>"#); }
+    let dev = crate::player::device_rate();
+    let off = if p.truthy("dsp") { "" } else { "disabled" };
+    let max_rate = dsp.f("max_rate");
+    let max_rate = if max_rate.is_nan() { 0.0 } else { max_rate };
+    let mut rates: Vec<(Value, String)> = vec![
+        (json!("device"), if dev != 0.0 && !dev.is_nan() { format!("Match this device ({} kHz)", crate::player::khz(dev)) } else { "Match this device".to_string() }),
+        (json!("auto"), "Highest the server allows".to_string()),
+    ];
+    rates.extend(DSP_RATES.iter().filter(|r| (**r as f64) <= max_rate).map(|r| (json!(r), format!("{} kHz", crate::player::khz(*r as f64)))));
+    let pairs = |key: &str, cur: &Value| -> String {
+        dsp.a(key).iter().map(|o| {
+            let it = o.items();
+            dsp_opt(it.first().unwrap_or(&Value::Null), it.get(1).unwrap_or(&Value::Null), cur)
+        }).collect()
+    };
+    [
+        format!(r#"<label class="row" style="gap:8px;align-items:center"><input type="checkbox" id="pb-dsp" {}> Upsample my streams on the server</label>"#, if p.truthy("dsp") { "checked" } else { "" }),
+        format!(r#"<label class="stack" style="gap:4px"><span class="small muted">Upsampling filter</span><select class="input" id="pb-dsp-filter" {off}>{}{}</select></label>"#,
+            dsp_opt(&json!(""), &json!("Server default"), p.g("dsp_filter")), pairs("filters", p.g("dsp_filter"))),
+        format!(r#"<label class="stack" style="gap:4px"><span class="small muted">Dither / noise shaping</span><select class="input" id="pb-dsp-dither" {off}>{}</select></label>"#, pairs("dithers", p.g("dsp_dither"))),
+        format!(r#"<label class="stack" style="gap:4px"><span class="small muted">Output rate</span><select class="input" id="pb-dsp-rate" {off}>{}</select></label>"#,
+            rates.iter().map(|(v, l)| dsp_opt(v, &json!(l), p.g("dsp_rate"))).collect::<String>()),
+        r#"<span class="small muted">The server's Cadenza upsamples the original file and sends lossless 24-bit FLAC. It uses more data (about 4.6 Mbit/s at 96 kHz, 9.2 Mbit/s at 192 kHz) and the server's processor; Data saver and Auto's fallback still win when the connection can't keep up.</span>"#.to_string(),
+    ].join("\n        ")
+}
+
 fn paint_playback(st: &Rc<Look>) {
     let p = st.p.borrow().clone();
     let link = crate::player::linked();
@@ -832,8 +880,8 @@ fn paint_playback(st: &Rc<Look>) {
     let help = QUALITY_HELP.iter().find(|(k, _)| *k == p.s("quality")).map(|(_, h)| *h).unwrap_or("undefined");
     let engine_block = match (&eng, &link) {
         (Some(e), Some(_)) => engine_html(e),
-        // not linked to a Cadenza device: greyed out – Cadenza never processes streams on the server
-        _ => r#"<div class="stack" style="gap:8px;opacity:.45;pointer-events:none" aria-disabled="true"><label class="row" style="gap:8px;align-items:center"><input type="checkbox" disabled> Bit-perfect – send the file to the DAC untouched (no upsampling, dither or volume)</label><label class="stack" style="gap:4px"><span class="small muted">Upsampling filter</span><select class="input" disabled><option>–</option></select></label><label class="stack" style="gap:4px"><span class="small muted">Dither / noise shaping</span><select class="input" disabled><option>–</option></select></label><label class="stack" style="gap:4px"><span class="small muted">Output rate</span><select class="input" disabled><option>–</option></select></label></div><span class="small muted">Not used for streaming. Cadenza never runs on the Encore server, so music streamed to a browser or phone is never upsampled there and never costs the server any processing. Cadenza runs on your own computer, or a small box next to your DAC, and plays straight into the DAC. Install it there and link to it under <b>Your devices</b> to use these switches.</span>"#.to_string(),
+        // not linked to a Cadenza device: greyed out
+        _ => r#"<div class="stack" style="gap:8px;opacity:.45;pointer-events:none" aria-disabled="true"><label class="row" style="gap:8px;align-items:center"><input type="checkbox" disabled> Bit-perfect – send the file to the DAC untouched (no upsampling, dither or volume)</label><label class="stack" style="gap:4px"><span class="small muted">Upsampling filter</span><select class="input" disabled><option>–</option></select></label><label class="stack" style="gap:4px"><span class="small muted">Dither / noise shaping</span><select class="input" disabled><option>–</option></select></label><label class="stack" style="gap:4px"><span class="small muted">Output rate</span><select class="input" disabled><option>–</option></select></label></div><span class="small muted">For a Cadenza device on your own hardware – a computer or a small box next to your DAC – which plays straight into the DAC. Link to it under <b>Your devices</b> to use these switches. To upsample streams on this server instead, see Server processing above.</span>"#.to_string(),
     };
     dom::set_html(&st.el, &format!(r##"<div class="card stack">
       <h2>Playback</h2>
@@ -847,6 +895,8 @@ fn paint_playback(st: &Rc<Look>) {
         <label class="row" style="gap:8px;align-items:center"><input type="checkbox" id="pb-autoplay" {autoplay}> Keep going with a shuffle of the whole library</label></div>
       <div class="stack" style="gap:6px"><h3>Pure playback</h3>
         <span class="small muted">Encore streams the original file untouched – the quality badge on the player opens the <b>Signal path</b>, which shows what the file is, what was sent and what this device does with it. A browser hands the sound to the operating system, which mixes it with other sounds and may resample it; bit-perfect output needs an exclusive-mode engine.</span></div>
+      <div class="stack" style="gap:6px"><h3>Server processing (Cadenza)</h3>
+        {dsp_block}</div>
       <div class="stack" style="gap:6px"><h3>Cadenza engine{eng_name}</h3>
         {engine_block}</div>
     </div>"##,
@@ -854,6 +904,7 @@ fn paint_playback(st: &Rc<Look>) {
         quality = seg_str(&p, "quality", &[("auto", "Auto"), ("original", "Original"), ("saver", "Data saver")]),
         preload = if p.truthy("preload") { "checked" } else { "" },
         autoplay = if p.truthy("autoplay") { "checked" } else { "" },
+        dsp_block = dsp_html(&p, &st.dsp),
         eng_name = match (&eng, &link) { (Some(e), Some(l)) => format!(" · {}", esc(&if e.truthy("name") { e.s("name") } else { l.name.clone() })), _ => String::new() }));
     {
         let st2 = st.clone();
@@ -869,6 +920,20 @@ fn paint_playback(st: &Rc<Look>) {
     if let Some(c) = dom::qs_in(&st.el, "#pb-autoplay") {
         let (st2, c2) = (st.clone(), c.clone());
         dom::on(&c, "change", move |_| set_playback(&st2, json!({ "autoplay": dom::checked(&c2) })));
+    }
+    if let Some(c) = dom::qs_in(&st.el, "#pb-dsp") {
+        let (st2, c2) = (st.clone(), c.clone());
+        dom::on(&c, "change", move |_| set_playback(&st2, json!({ "dsp": dom::checked(&c2) })));
+        for (sel, key) in [("#pb-dsp-filter", "dsp_filter"), ("#pb-dsp-dither", "dsp_dither"), ("#pb-dsp-rate", "dsp_rate")] {
+            let Some(c) = dom::qs_in(&st.el, sel) else { continue };
+            let (st2, c2) = (st.clone(), c.clone());
+            dom::on(&c, "change", move |_| {
+                let v = dom::value(&c2);
+                // the rate is stored as a number when it is one
+                let v = if key == "dsp_rate" && !v.is_empty() && v.bytes().all(|b| b.is_ascii_digit()) { v.parse::<f64>().map(|n| json!(n as i64)).unwrap_or(json!(v)) } else { json!(v) };
+                set_playback(&st2, json!({ key: v }));
+            });
+        }
     }
     if let Some(l) = link {
         let l = Rc::new(l);
@@ -900,13 +965,13 @@ fn set_playback(st: &Rc<Look>, patch: Value) {
 }
 
 /// The state of the JS `renderAppearance` closure: the panel, `p` and `serverPrefs`.
-struct Look { el: Element, p: RefCell<Value>, server_prefs: bool }
+struct Look { el: Element, p: RefCell<Value>, server_prefs: bool, dsp: Value }
 
 /// Settings → Appearance: theme, accent colour, faded/solid background.
 fn render_appearance(el: Element, _ctx: Ctx) -> PageFuture {
     Box::pin(async move {
         let server_prefs = app::has_feature("theme");
-        let st = Rc::new(Look { el, p: RefCell::new(appearance::current()), server_prefs });
+        let st = Rc::new(Look { el, p: RefCell::new(appearance::current()), server_prefs, dsp: Value::Null });
         paint_appearance(&st);
         Ok(())
     })

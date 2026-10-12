@@ -288,6 +288,8 @@ function load({ transcode = false, offset = 0, lossy = null, dsp = null } = {}) 
     audio.volume = old.volume;
     audio.currentTime = 0;
   } else {
+    // a pre-buffered processed stream holds one of the server's Cadenza slots: free it first
+    if (state.dsp && spare?.dataset.url?.includes('dsp=1')) cancelPreload();
     audio.src = url;
   }
   audio.dataset.url = url;

@@ -449,7 +449,19 @@ async fn dsp_stream(st: &AppState, path: String, q: &StreamQ, u: &crate::db::Row
     if !auth::can(st, u, "server_dsp") {
         return Err(err(403, "Your account can't use server processing"));
     }
-    let slot = crate::dsp::try_acquire(lim.max_streams).ok_or_else(|| err(503, "Server processing is busy – playing the original"))?;
+    // A seek or track change often arrives before the old connection's drop has freed its slot,
+    // so wait briefly for one before saying the server is busy.
+    let mut slot = crate::dsp::try_acquire(lim.max_streams);
+    if lim.max_streams > 0 {
+        for _ in 0..30 {
+            if slot.is_some() {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+            slot = crate::dsp::try_acquire(lim.max_streams);
+        }
+    }
+    let slot = slot.ok_or_else(|| err(503, "Server processing is busy – playing the original"))?;
     let p2 = path.clone();
     let info = tokio::task::spawn_blocking(move || audio_info(&p2)).await.unwrap_or(json!({}));
     let input = crate::dsp::input_format(&info);
