@@ -600,6 +600,11 @@ async fn poll_slskd(st: &AppState, r: &mut Req) -> anyhow::Result<()> {
     }
     let t = now();
     if latest.is_empty() {
+        // the transfer list can be cleared from the Soulseek page: finished files on disk still count
+        if !wanted.is_empty() && wanted.iter().all(|n| slskd::local_path(st, n).is_some()) {
+            upd(st, r, &[("status", json!("importing")), ("progress", json!(100)), ("message", json!("Importing…"))]);
+            return import_slskd(st, r, &c).await;
+        }
         if t - r.d["slskd"]["started"].as_f64().unwrap_or(t) > 120.0 {
             let o = slskd_try_next(st, r, "transfers disappeared").await?;
             return after_slskd(st, r, o).await;

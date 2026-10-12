@@ -1,6 +1,6 @@
 //! Integration test: two built-in clients on 127.0.0.1 against a fake Soulseek server – alice shares
 //! one file, bob finds it and downloads it directly, through a server relay, and resuming a .part file.
-use super::client::{local_file_for, part_file_for, Client, Settings};
+use super::client::{dir_json, local_file_for, part_file_for, Client, Settings};
 use super::proto as p;
 use super::shares::{self, Item, Shares};
 use serde_json::Value;
@@ -247,6 +247,47 @@ async fn search_and_download_direct() {
     assert_eq!(d["percentComplete"], 100.0);
     env.assert_file();
     assert!(env.server.relays().is_empty(), "everything went direct: {:?}", env.server.relays());
+    env.finish().await;
+}
+
+/// The Soulseek page's way of searching: start it, then poll until the client says it is over.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn search_by_polling() {
+    let env = Env::new("poll", false).await;
+    let t = env.b.search_start("one more time").unwrap();
+    assert!(env.b.search_results(t.wrapping_add(2), 1).is_none(), "a token we never issued has nothing");
+    wait_for("alice's answer", 5, || env.b.search_results(t, 60).map(|(r, _)| !r.is_empty()).unwrap_or(false)).await;
+    let (_, done) = env.b.search_results(t, 60).unwrap();
+    assert!(!done, "one answer doesn't end a 60 s search");
+    wait_for("the search to be over", 5, || env.b.search_results(t, 1).map(|(_, d)| d).unwrap_or(false)).await;
+    let (results, done) = env.b.search_results(t, 1).unwrap();
+    assert!(done);
+    assert_eq!(results.len(), 1, "{results:?}");
+    assert_eq!(results[0].user, "alice");
+    assert_eq!(results[0].files[0].name, env.remote);
+    env.finish().await;
+}
+
+/// bob asks alice for her whole share list: one folder, the one file, with its full remote name.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn browse_a_users_shares() {
+    let env = Env::new("browse", false).await;
+    let dirs = env.b.browse("alice").await.unwrap();
+    assert_eq!(dirs.len(), 1, "{dirs:?}");
+    assert_eq!(dirs[0].name, format!("{}\\Daft Punk\\Discovery", shares::ROOT));
+    assert_eq!(dirs[0].files.len(), 1);
+    assert_eq!(dirs[0].files[0].name, env.remote);
+    assert_eq!(dirs[0].files[0].size, env.bytes.len() as u64);
+    let j = dir_json(&dirs[0]);
+    assert_eq!(j["name"], dirs[0].name);
+    assert_eq!(j["files"][0]["filename"], env.remote);
+    assert_eq!(j["files"][0]["bitRate"], 900);
+    assert_eq!(j["files"][0]["length"], 320);
+    // the second look rides the "P" connection the first one opened
+    assert_eq!(env.b.browse("alice").await.unwrap(), dirs);
+    // nobody of that name: a quick, clear failure rather than the 45 s wait
+    let e = env.b.browse("nobody").await.unwrap_err().to_string();
+    assert!(e.contains("nobody"), "{e}");
     env.finish().await;
 }
 

@@ -81,7 +81,9 @@ pub fn create_request(st: &AppState, u: &Row, b: &NewRequest, parent: Option<i64
                 return Err(err(400, "A valid http(s) URL is required"));
             }
         }
-        "album" if nz(&b.mbid).is_none() && ext_ok => {
+        // an album with no MusicBrainz id is fine when another catalogue knows it, or when a manual
+        // pick (extra) says exactly what to download – a Soulseek folder, say
+        "album" if nz(&b.mbid).is_none() && (ext_ok || has_extra) => {
             if artist.is_none() || title.is_none() {
                 return Err(err(400, "Artist and album title are required"));
             }

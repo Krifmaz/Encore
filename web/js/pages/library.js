@@ -13,7 +13,8 @@ function sourceLine(t) {
   if (!t.source) return '';
   const when = t.downloaded_at ? ` · ${fmt.ago(t.downloaded_at)}` : '';
   const link = t.source_url ? ` · <a href="${esc(t.source_url)}" target="_blank" rel="noopener noreferrer" style="color:var(--accent)">link</a>` : '';
-  return `<div class="small faint ellipsis" style="max-width:520px" title="${esc([t.source, t.source_detail].filter(Boolean).join(' – '))}">⬇ ${esc(t.source)}${t.source_detail ? ' · ' + esc(t.source_detail) : ''}${link}${when}</div>`;
+  const who = t.requested_by ? ` · requested by ${esc(t.requested_by)}` : '';
+  return `<div class="small faint ellipsis" style="max-width:520px" title="${esc([t.source, t.source_detail].filter(Boolean).join(' – '))}">⬇ ${esc(t.source)}${t.source_detail ? ' · ' + esc(t.source_detail) : ''}${link}${when}${who}</div>`;
 }
 
 const PAGE = 120;
@@ -369,6 +370,7 @@ export async function renderAlbum(view, ctx) {
   const multi = new Set(a.tracks.map(t => t.disc)).size > 1;
   const formats = [...new Set(a.tracks.map(t => (t.format || '').toUpperCase()))].join(' / ');
   const untagged = a.tracks.filter(t => !t.mb_albumid).length;
+  const requesters = [...new Set(a.tracks.map(t => t.requested_by).filter(Boolean))].join(', ');
   view.innerHTML = `
     <div class="detail-head">
       <div class="cover">${art(`/api/library/albums/${id}/cover`, a.album, "big")}</div>
@@ -377,6 +379,7 @@ export async function renderAlbum(view, ctx) {
         <h1>${esc(a.album || 'Unknown album')}</h1>
         <div class="muted"><a href="#/artist-name/${encodeURIComponent(a.albumartist)}" style="color:var(--text);font-weight:650">${esc(a.albumartist)}</a>
           ${a.year ? ' · ' + esc(a.year) : ''} · ${a.tracks.length} tracks · ${fmt.longDur(a.duration)} · ${fmt.size(a.size)}</div>
+        ${requesters ? `<div class="small muted" style="margin-top:4px">Requested by ${esc(requesters)}</div>` : ''}
         <div class="chips mt">
           <span class="badge">${esc(formats)}</span>
           ${a.genre ? `<span class="badge">${esc(a.genre)}</span>` : ''}

@@ -560,3 +560,35 @@ details.settings-card[open] .chev svg { transform: rotate(180deg); }
 .card.linked { border-color: var(--accent); }
 .linked-to { display: inline-flex; align-items: center; gap: 5px; color: var(--accent); font-weight: 600; }
 .linked-to svg, #p-unlink svg { width: 14px; height: 14px; }
+
+/* ---------- Soulseek page ---------- */
+.slsk-status .dot { vertical-align: middle; margin-right: 2px; }
+.slsk-user > summary, details.slsk-folder > summary { list-style: none; cursor: pointer; }
+.slsk-user > summary::-webkit-details-marker, details.slsk-folder > summary::-webkit-details-marker { display: none; }
+.slsk-user > summary { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; padding: 12px 16px; }
+.slsk-user > summary:hover, details.slsk-folder > summary:hover { background: var(--panel-2); }
+.slsk-user[open] > summary { border-bottom: 1px solid var(--border); }
+.slsk-user .chev svg, .slsk-folder .chev svg { width: 18px; height: 18px; flex: none; color: var(--muted); transition: transform .15s; }
+.slsk-user[open] > summary .chev svg, details.slsk-folder[open] > summary .chev svg { transform: rotate(180deg); }
+.slsk-folder { padding: 12px 16px; border-bottom: 1px solid var(--border); }
+.slsk-folder:last-child { border-bottom: 0; }
+details.slsk-folder { padding: 0; }
+details.slsk-folder > summary { padding: 12px 16px; }
+details.slsk-folder > .slsk-files { padding: 0 16px 12px; }
+.slsk-folder-head { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+.slsk-folder-head .grow { min-width: 0; }
+.slsk-folder-head .name { font-weight: 600; overflow-wrap: anywhere; }
+.slsk-folder-head .path { font-size: 12px; color: var(--faint); overflow-wrap: anywhere; }
+.slsk-files { margin-top: 8px; }
+.slsk-file { display: flex; align-items: center; gap: 10px; padding: 5px 0; border-top: 1px solid var(--border); font-size: 13px; min-width: 0; }
+.slsk-file label { display: flex; align-items: center; gap: 10px; flex: 1; min-width: 0; cursor: pointer; }
+.slsk-file input { flex: none; margin: 0; accent-color: var(--accent); }
+.slsk-file .name { overflow-wrap: anywhere; }
+.slsk-file .meta { display: flex; align-items: center; gap: 8px; flex: none; color: var(--muted); font-size: 12px; white-space: nowrap; }
+#br-list { display: flex; flex-direction: column; gap: 8px; }
+#br-list .slsk-folder { border: 1px solid var(--border); border-radius: 12px; overflow: hidden; }
+@media (max-width: 760px) {
+  .slsk-file .meta .len { display: none; }
+  /* uploads have no trailing action column: undo the phone-table rule that squeezes the last column */
+  .slsk-ul .table th:last-child, .slsk-ul .table td:last-child { width: auto; text-align: left; }
+}

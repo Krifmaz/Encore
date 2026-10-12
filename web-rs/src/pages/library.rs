@@ -98,7 +98,8 @@ fn source_line(t: &Value) -> String {
     let link = if t.truthy("source_url") {
         format!(r##" · <a href="{}" target="_blank" rel="noopener noreferrer" style="color:var(--accent)">link</a>"##, esck(t, "source_url"))
     } else { String::new() };
-    format!(r##"<div class="small faint ellipsis" style="max-width:520px" title="{}">⬇ {}{}{link}{when}</div>"##,
+    let who = if t.truthy("requested_by") { format!(" · requested by {}", esck(t, "requested_by")) } else { String::new() };
+    format!(r##"<div class="small faint ellipsis" style="max-width:520px" title="{}">⬇ {}{}{link}{when}{who}</div>"##,
         esc(&join_truthy(t, &["source", "source_detail"], " – ")), esck(t, "source"),
         if t.truthy("source_detail") { format!(" · {}", esck(t, "source_detail")) } else { String::new() })
 }
@@ -796,6 +797,7 @@ pub fn render_album(view: Element, ctx: Ctx) -> PageFuture {
         for t in &tracks { let f = t.s("format").to_uppercase(); if !formats.contains(&f) { formats.push(f); } }
         let formats = formats.join(" / ");
         let untagged = tracks.iter().filter(|t| !t.truthy("mb_albumid")).count();
+        let requesters = { let mut v: Vec<String> = vec![]; for t in &tracks { let w = t.s("requested_by"); if !w.is_empty() && !v.contains(&w) { v.push(w); } } v.join(", ") };
         let rows: String = tracks.iter().enumerate().map(|(i, t)| format!(r##"<tr data-i="{i}">
         <td class="num">{disc}{track}</td>
         <td><div style="font-weight:600">{title}</div>{relpath}{source}</td>
@@ -817,6 +819,7 @@ pub fn render_album(view: Element, ctx: Ctx) -> PageFuture {
         <h1>{album}</h1>
         <div class="muted"><a href="#/artist-name/{artist_enc}" style="color:var(--text);font-weight:650">{artist}</a>
           {year} · {n} tracks · {dur} · {size}</div>
+        {requested}
         <div class="chips mt">
           <span class="badge">{formats}</span>
           {genre}
@@ -838,6 +841,7 @@ pub fn render_album(view: Element, ctx: Ctx) -> PageFuture {
             album = esc(&or_str(&a, "album", "Unknown album")), artist_enc = enc(&a.s("albumartist")), artist = esck(&a, "albumartist"),
             year = if a.truthy("year") { format!(" · {}", esck(&a, "year")) } else { String::new() },
             n = tracks.len(), dur = ui::fmt::long_dur(a.f("duration")), size = ui::fmt::size(a.f("size")),
+            requested = if requesters.is_empty() { String::new() } else { format!(r##"<div class="small muted" style="margin-top:4px">Requested by {}</div>"##, esc(&requesters)) },
             formats = esc(&formats),
             genre = if a.truthy("genre") { format!(r##"<span class="badge">{}</span>"##, esck(&a, "genre")) } else { String::new() },
             tagged = if untagged > 0 { format!(r##"<span class="badge warn">{untagged} track(s) not MusicBrainz-tagged</span>"##) } else { r##"<span class="badge ok">MusicBrainz tagged</span>"##.to_string() },

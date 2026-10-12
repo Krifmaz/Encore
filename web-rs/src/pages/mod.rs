@@ -20,4 +20,5 @@ pub mod picker;
 pub mod playlists;
 pub mod requests;
 pub mod settings;
+pub mod soulseek;
 pub mod storage;

@@ -56,6 +56,10 @@ fn time_dur(secs: i64) -> cookie::time::Duration {
 }
 
 async fn info(State(st): State<AppState>) -> Json<Value> {
+    let mut features = vec!["owner", "totp", "email_login", "logout_all", "avatar", "theme", "remote", "rename", "reveal"];
+    if crate::sources::slskd::enabled(&st) {
+        features.push("soulseek"); // the Soulseek page (search, browse, transfers)
+    }
     Json(json!({
         "app_name": st.cfg.str("app_name"),
         "signup_mode": st.cfg.str("signup_mode"),
@@ -63,7 +67,7 @@ async fn info(State(st): State<AppState>) -> Json<Value> {
         "build": std::env::var("ENCORE_BUILD").unwrap_or_else(|_| "dev".into()).chars().take(7).collect::<String>(),
         "server": "rust",
         // the web app turns features on only when the server has them
-        "features": ["owner", "totp", "email_login", "logout_all", "avatar", "theme", "remote", "rename", "reveal"],
+        "features": features,
         "email_login": email::enabled(&st) && st.cfg.bool("email_login"),
     }))
 }

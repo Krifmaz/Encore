@@ -75,6 +75,7 @@ pub fn app(st: AppState) -> Router {
         .merge(routes::catalog::router())
         .merge(routes::requests::router())
         .merge(routes::picker::router())
+        .merge(routes::soulseek::router())
         .merge(routes::system::router())
         .merge(routes::tagging::router())
         .merge(routes::playlists::router())

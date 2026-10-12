@@ -34,6 +34,7 @@ const routes = [
   [/^\/connections$/, (v, c) => redirect('connections')],
   [/^\/following$/, () => navigate('/for-you')],
   [/^\/download$/, downloadPage.render],
+  [/^\/soulseek$/, async (v, c) => (await import('./pages/soulseek.js')).render(v, c)],
   [/^\/activity$/, (v, c) => navigate('/download')],
   [/^\/admin\/users$/, () => redirect('users')],
   [/^\/admin\/invites$/, () => redirect('invites')],
@@ -86,6 +87,7 @@ function renderShell() {
           ${navLink('/requests', icon.inbox, 'Requests', '<span class="badge warn hidden" id="pending-badge"></span>')}
           ${navLink('/playlists', icon.list, 'Playlists')}
           ${navLink('/download', icon.download, 'Downloader')}
+          ${(session.info?.features || []).includes('soulseek') ? navLink('/soulseek', icon.users, 'Soulseek') : ''}
           ${navLink('/leaderboard', icon.activity, 'Leaderboard')}
         </nav>
         <div id="storage-mini" style="flex:none"></div>

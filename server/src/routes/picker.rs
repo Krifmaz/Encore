@@ -269,16 +269,23 @@ async fn pick(State(st): State<AppState>, User(u): User, Json(mut b): Json<PickB
     } else {
         return Err(err(400, "Nothing to download"));
     };
+    let label = b.title.clone().or(b.payload["title"].as_str().map(String::from)).unwrap_or_default();
+    let (id, status) = create_pick(&st, &u, &req, &b.source, b.payload, &label)?;
+    Ok(Json(json!({ "id": id, "status": status })))
+}
+
+/// The request behind a manual pick: the worker downloads exactly `payload` from `source`, then tags
+/// and imports it like any other request. Returns (id, status).
+pub fn create_pick(st: &AppState, u: &crate::db::Row, req: &NewRequest, source: &str, payload: Value, label: &str) -> ApiResult<(i64, String)> {
     if req.kind != "album" && req.kind != "track" {
         return Err(err(400, "Manual picks work for albums and songs"));
     }
-    let label = b.title.clone().or(b.payload["title"].as_str().map(String::from)).unwrap_or_default();
-    let id = create_request(&st, &u, &req, None, Some(json!({ "pick": { "source": b.source, "payload": b.payload, "title": label } })))?;
+    let id = create_request(st, u, req, None, Some(json!({ "pick": { "source": source, "payload": payload, "title": label } })))?;
     let status = st.db.one("SELECT status FROM requests WHERE id=?", p![id])?.map(|r| r.s("status")).unwrap_or_default();
     if status == "queued" {
         let msg: String = if label.is_empty() { "Manual pick".into() } else { format!("Manual pick: {label}").chars().take(200).collect() };
         st.db.execute("UPDATE requests SET message=? WHERE id=?", p![msg, id])?;
     }
-    st.db.log("info", &format!("{} manually picked {} result for {}: {label}", u.s("username"), b.source, req.title.or(req.album).unwrap_or_default()));
-    Ok(Json(json!({ "id": id, "status": status })))
+    st.db.log("info", &format!("{} manually picked {source} result for {}: {label}", u.s("username"), req.title.clone().or(req.album.clone()).unwrap_or_default()));
+    Ok((id, status))
 }

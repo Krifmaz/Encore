@@ -89,6 +89,7 @@ fn match_route(path: &str) -> Option<(&'static str, Vec<String>)> {
         "/connections" => ("redirect:connections", vec![]),
         "/following" => ("nav:/for-you", vec![]),
         "/download" => ("download", vec![]),
+        "/soulseek" => ("soulseek", vec![]),
         "/activity" => ("nav:/download", vec![]),
         "/admin/users" => ("redirect:users", vec![]),
         "/admin/invites" => ("redirect:invites", vec![]),
@@ -125,6 +126,7 @@ fn page_for(name: &str) -> Option<PageFn> {
         "playlists" => pages::playlists::render,
         "playlist" => pages::playlists::render_playlist,
         "download" => pages::download::render,
+        "soulseek" => pages::soulseek::render,
         "settings" => pages::settings::render,
         "storage" => pages::storage::render,
         "leaderboard" => pages::leaderboard::render,
@@ -168,6 +170,7 @@ fn render_shell() {
           {requests}
           {playlists}
           {download}
+          {soulseek}
           {leaderboard}
         </nav>
         <div id="storage-mini" style="flex:none"></div>
@@ -193,6 +196,7 @@ fn render_shell() {
         requests = nav_link("/requests", &icon("inbox"), "Requests", r#"<span class="badge warn hidden" id="pending-badge"></span>"#),
         playlists = nav_link("/playlists", &icon("list"), "Playlists", ""),
         download = nav_link("/download", &icon("download"), "Downloader", ""),
+        soulseek = if has_feature("soulseek") { nav_link("/soulseek", &icon("users"), "Soulseek", "") } else { String::new() },
         leaderboard = nav_link("/leaderboard", &icon("activity"), "Leaderboard", ""),
         avatar = avatar_html(&u, 32),
         username = esc(&u.s("username")),

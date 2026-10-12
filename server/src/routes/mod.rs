@@ -5,6 +5,7 @@ pub mod picker;
 pub mod playlists;
 pub mod remote;
 pub mod requests;
+pub mod soulseek;
 pub mod stats;
 pub mod system;
 pub mod tagging;

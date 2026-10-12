@@ -406,7 +406,8 @@ async fn lyrics(State(st): State<AppState>, User(_): User, Path(id): Path<i64>, 
 }
 
 async fn album(State(st): State<AppState>, User(u): User, Path(id): Path<String>) -> ApiResult<Json<Value>> {
-    let rows = st.db.query("SELECT * FROM tracks WHERE album_id=? ORDER BY disc, track, path", p![id])?;
+    // who asked for it: the request that brought the file in, when there was one
+    let rows = st.db.query("SELECT t.*, u.username requested_by FROM tracks t LEFT JOIN requests r ON r.id=t.request_id LEFT JOIN users u ON u.id=r.user_id WHERE t.album_id=? ORDER BY t.disc, t.track, t.path", p![id])?;
     if rows.is_empty() {
         return Err(err(404, "Album not found"));
     }

@@ -7,7 +7,7 @@
 //! connection, send the transfer token, we send the byte offset to resume from, and the file streams
 //! over. Uploads are the same dance from the other side. Peers that can't reach each other directly
 //! ask the server to tell the other side to connect instead (ConnectToPeer + PierceFireWall).
-use super::proto::{self as p, DistribMsg, FileEntry, InitMsg, PeerMsg, SearchResult, ServerMsg};
+use super::proto::{self as p, Dir, DistribMsg, FileEntry, InitMsg, PeerMsg, SearchResult, ServerMsg};
 use super::shares::Shares;
 use serde_json::{json, Value};
 use std::collections::HashMap;
@@ -25,6 +25,8 @@ const CONNECT_TIMEOUT: Duration = Duration::from_secs(6);
 const INDIRECT_TIMEOUT: Duration = Duration::from_secs(15);
 const PEER_IDLE: Duration = Duration::from_secs(90);
 const READ_TIMEOUT: Duration = Duration::from_secs(60);
+/// Share lists are big and some clients build them on request.
+const BROWSE_TIMEOUT: Duration = Duration::from_secs(45);
 const MAX_RESULTS_PER_SEARCH: usize = 250;
 const MAX_FILES_PER_ANSWER: usize = 100;
 
@@ -125,6 +127,8 @@ struct Inner {
     uploads: Mutex<Vec<Upload>>,
     transfer_waits: Mutex<HashMap<u32, oneshot::Sender<Result<(), String>>>>,
     file_waits: Mutex<HashMap<(String, u32), oneshot::Sender<TcpStream>>>,
+    /// browse() callers waiting for a user's ShareFileList (it carries no token, so keyed by user)
+    browse_waits: Mutex<HashMap<String, Vec<oneshot::Sender<Vec<Dir>>>>>,
     answers: Arc<Semaphore>,
     next_id: AtomicU64,
     upload_speed: Mutex<(u64, f64)>, // bytes, seconds of recent uploads
@@ -202,7 +206,7 @@ impl Client {
             settings, shares: RwLock::new(Arc::new(shares)), server_tx: Mutex::new(None), state: Mutex::new(ConnState::default()),
             searches: Default::default(), addr_waiters: Default::default(), indirect: Default::default(), peers: Default::default(),
             downloads: Default::default(), uploads: Default::default(), transfer_waits: Default::default(), file_waits: Default::default(),
-            answers: Arc::new(Semaphore::new(12)), next_id: AtomicU64::new(1), upload_speed: Mutex::new((0, 0.0)), stop, parent_gen: AtomicU64::new(0),
+            browse_waits: Default::default(), answers: Arc::new(Semaphore::new(12)), next_id: AtomicU64::new(1), upload_speed: Mutex::new((0, 0.0)), stop, parent_gen: AtomicU64::new(0),
         });
         let c = Client { inner };
         tokio::spawn(c.clone().listen());
@@ -215,6 +219,7 @@ impl Client {
         self.inner.stop.send_replace(true); // stores even when no task has subscribed yet
         *self.inner.server_tx.lock().unwrap() = None;
         self.inner.peers.lock().unwrap().clear();
+        self.inner.browse_waits.lock().unwrap().clear(); // waiters fail now instead of at their timeout
     }
 
     pub fn settings(&self) -> &Settings { &self.inner.settings }
@@ -239,22 +244,45 @@ impl Client {
             "shares": { "dirs": sh.dir_count(), "files": sh.file_count(), "enabled": self.inner.settings.share }, "downloads": dl, "uploads": ul })
     }
 
-    /// Search the network for `secs` seconds; results in the order they came.
-    pub async fn search(&self, text: &str, secs: u64) -> anyhow::Result<Vec<SearchResult>> {
+    fn need_login(&self) -> anyhow::Result<()> {
         if !self.logged_in() {
             anyhow::bail!("Soulseek: not logged in ({})", { let e = self.state().error; if e.is_empty() { "connecting".into() } else { e } });
         }
+        Ok(())
+    }
+
+    /// Send a search to the network; answers collect under the returned token for `search_results`.
+    /// Entries live 300 s, so a page can poll one at leisure.
+    pub fn search_start(&self, text: &str) -> anyhow::Result<u32> {
+        self.need_login()?;
         let t = token();
-        // the entry goes away with this future, even when the HTTP request that started it is dropped
-        struct Guard(Arc<Inner>, u32);
-        impl Drop for Guard { fn drop(&mut self) { self.0.searches.lock().unwrap().remove(&self.1); } }
-        let guard = Guard(self.inner.clone(), t);
         {
             let mut s = self.inner.searches.lock().unwrap();
             s.retain(|_, x| x.started.elapsed() < Duration::from_secs(300));
             s.insert(t, Search { results: vec![], started: Instant::now() });
         }
-        self.inner.send_server(p::file_search(t, text));
+        if !self.inner.send_server(p::file_search(t, text)) {
+            self.inner.searches.lock().unwrap().remove(&t);
+            anyhow::bail!("not connected to the Soulseek server");
+        }
+        Ok(t)
+    }
+
+    /// What a search has gathered so far, and whether it is over: `secs` have passed or the result
+    /// cap is reached. None once the entry has expired (or was never ours).
+    pub fn search_results(&self, token: u32, secs: u64) -> Option<(Vec<SearchResult>, bool)> {
+        let s = self.inner.searches.lock().unwrap();
+        let x = s.get(&token)?;
+        Some((x.results.clone(), x.started.elapsed() >= Duration::from_secs(secs) || x.results.len() >= MAX_RESULTS_PER_SEARCH))
+    }
+
+    /// Search the network for `secs` seconds; results in the order they came.
+    pub async fn search(&self, text: &str, secs: u64) -> anyhow::Result<Vec<SearchResult>> {
+        let t = self.search_start(text)?;
+        // the entry goes away with this future, even when the HTTP request that started it is dropped
+        struct Guard(Arc<Inner>, u32);
+        impl Drop for Guard { fn drop(&mut self) { self.0.searches.lock().unwrap().remove(&self.1); } }
+        let guard = Guard(self.inner.clone(), t);
         let deadline = Instant::now() + Duration::from_secs(secs.max(3));
         while Instant::now() < deadline {
             tokio::time::sleep(Duration::from_millis(500)).await;
@@ -265,6 +293,34 @@ impl Client {
         let out = self.inner.searches.lock().unwrap().get_mut(&t).map(|s| std::mem::take(&mut s.results)).unwrap_or_default();
         drop(guard);
         Ok(out)
+    }
+
+    /// A user's whole share list (folders with files), as they send it.
+    pub async fn browse(&self, user: &str) -> anyhow::Result<Vec<Dir>> {
+        self.need_login()?;
+        let tx = self.peer(user).await?;
+        let (wtx, wrx) = oneshot::channel();
+        {
+            let mut m = self.inner.browse_waits.lock().unwrap();
+            let ws = m.entry(user.to_string()).or_default();
+            ws.retain(|w| !w.is_closed()); // callers that gave up (request dropped) leave dead senders behind
+            ws.push(wtx);
+        }
+        if tx.send(p::get_share_file_list()).is_err() {
+            self.inner.peers.lock().unwrap().remove(user);
+            anyhow::bail!("lost the connection to {user}");
+        }
+        match tokio::time::timeout(BROWSE_TIMEOUT, wrx).await {
+            Ok(Ok(dirs)) => Ok(dirs),
+            Ok(Err(_)) => anyhow::bail!("the Soulseek client stopped"),
+            Err(_) => {
+                // our receiver is gone, so our sender reads as closed: drop it, keep anyone else's
+                if let Some(ws) = self.inner.browse_waits.lock().unwrap().get_mut(user) {
+                    ws.retain(|w| !w.is_closed());
+                }
+                anyhow::bail!("{user} did not send their file list within {} s", BROWSE_TIMEOUT.as_secs())
+            }
+        }
     }
 
     /// Queue files from one user. Each becomes a download that the worker polls through `downloads()`.
@@ -729,7 +785,14 @@ impl Client {
                     }
                 }
             }
-            PeerMsg::ShareFileList { .. } | PeerMsg::UserInfoReply { .. } | PeerMsg::FolderContentsReply { .. } | PeerMsg::Other(_) => {}
+            PeerMsg::ShareFileList { dirs, .. } => {
+                if let Some(ws) = inner.browse_waits.lock().unwrap().remove(user) {
+                    for w in ws {
+                        let _ = w.send(dirs.clone());
+                    }
+                }
+            }
+            PeerMsg::UserInfoReply { .. } | PeerMsg::FolderContentsReply { .. } | PeerMsg::Other(_) => {}
         }
     }
 
@@ -1093,16 +1156,31 @@ impl Client {
     }
 }
 
+/// One file in slskd's shape; `name` is the full remote path.
+fn file_json(name: &str, f: &FileEntry) -> Value {
+    json!({
+        "filename": name, "size": f.size, "extension": f.ext,
+        "bitRate": f.attr(p::ATTR_BITRATE), "length": f.attr(p::ATTR_DURATION), "sampleRate": f.attr(p::ATTR_SAMPLE_RATE), "bitDepth": f.attr(p::ATTR_BIT_DEPTH),
+        "isVariableBitRate": f.attr(p::ATTR_VBR).map(|v| v == 1) })
+}
+
 /// Convert a search result to the JSON shape the slskd code paths consume.
 pub fn result_json(r: &SearchResult) -> Value {
     json!({
         "username": r.user, "hasFreeUploadSlot": r.free_slot, "uploadSpeed": r.upload_speed, "queueLength": r.queue_length,
         "fileCount": r.files.len(),
-        "files": r.files.iter().map(|f| json!({
-            "filename": f.name, "size": f.size, "extension": f.ext,
-            "bitRate": f.attr(p::ATTR_BITRATE), "length": f.attr(p::ATTR_DURATION), "sampleRate": f.attr(p::ATTR_SAMPLE_RATE), "bitDepth": f.attr(p::ATTR_BIT_DEPTH),
-            "isVariableBitRate": f.attr(p::ATTR_VBR).map(|v| v == 1) })).collect::<Vec<_>>(),
+        "files": r.files.iter().map(|f| file_json(&f.name, f)).collect::<Vec<_>>(),
     })
+}
+
+/// A browsed folder in the shape of slskd's GET /users/{u}/browse `directories[]`. Share lists
+/// carry bare file names (Encore's own carry full paths); either way the JSON gets the full path,
+/// which is what a download is queued by.
+pub fn dir_json(d: &Dir) -> Value {
+    let files: Vec<Value> = d.files.iter().map(|f| {
+        if f.name.contains('\\') { file_json(&f.name, f) } else { file_json(&format!("{}\\{}", d.name.trim_end_matches('\\'), f.name), f) }
+    }).collect();
+    json!({ "name": d.name, "fileCount": files.len(), "files": files })
 }
 
 pub fn local_file_for(dir: &Path, remote: &str) -> PathBuf {

@@ -27,10 +27,18 @@ fn native(st: &AppState) -> anyhow::Result<soulseek::client::Client> {
 }
 
 async fn req(st: &AppState, method: reqwest::Method, path: &str, body: Option<Value>, query: &[(&str, &str)]) -> anyhow::Result<Value> {
+    req_within(st, method, path, body, query, None).await
+}
+
+/// `timeout` overrides the http client's 30 s for calls slskd itself waits on a peer for.
+async fn req_within(st: &AppState, method: reqwest::Method, path: &str, body: Option<Value>, query: &[(&str, &str)], timeout: Option<std::time::Duration>) -> anyhow::Result<Value> {
     let url = format!("{}/api/v0/{}", st.cfg.str("slskd_url").trim_end_matches('/'), path.trim_start_matches('/'));
     let mut rb = st.http.request(method, &url).header("X-API-Key", st.cfg.str("slskd_api_key")).query(query);
     if let Some(b) = body {
         rb = rb.json(&b);
+    }
+    if let Some(t) = timeout {
+        rb = rb.timeout(t);
     }
     let r = rb.send().await.map_err(|e| anyhow::anyhow!("slskd unreachable at {url}: {e}"))?;
     let status = r.status();
@@ -52,17 +60,24 @@ pub async fn status(st: &AppState) -> anyhow::Result<Value> {
     req(st, reqwest::Method::GET, "application", None, &[]).await
 }
 
+pub fn search_timeout(st: &AppState) -> i64 {
+    st.cfg.int("slskd_search_timeout").max(5)
+}
+
+fn search_body(sid: &str, text: &str, timeout: i64) -> Value {
+    json!({ "id": sid, "searchText": text, "searchTimeout": timeout * 1000, "responseLimit": 200, "fileLimit": 20000,
+        "filterResponses": true, "minimumResponseFileCount": 1 })
+}
+
 /// Run a search and wait for it to finish. Returns the responses.
 pub async fn search(st: &AppState, text: &str) -> anyhow::Result<Vec<Value>> {
-    let timeout = st.cfg.int("slskd_search_timeout").max(5);
+    let timeout = search_timeout(st);
     if soulseek::wanted(st) {
         let c = native(st)?;
         return Ok(c.search(text, timeout as u64).await?.iter().map(soulseek::client::result_json).collect());
     }
     let sid = uuid();
-    req(st, reqwest::Method::POST, "searches", Some(json!({
-        "id": sid, "searchText": text, "searchTimeout": timeout * 1000, "responseLimit": 200, "fileLimit": 20000,
-        "filterResponses": true, "minimumResponseFileCount": 1 })), &[]).await?;
+    req(st, reqwest::Method::POST, "searches", Some(search_body(&sid, text, timeout)), &[]).await?;
     for _ in 0..timeout + 20 {
         tokio::time::sleep(std::time::Duration::from_secs(1)).await;
         if let Ok(s) = req(st, reqwest::Method::GET, &format!("searches/{sid}"), None, &[]).await {
@@ -80,6 +95,61 @@ fn uuid() -> String {
     let b: [u8; 16] = rand::random();
     let h = hex::encode(b);
     format!("{}-{}-4{}-a{}-{}", &h[0..8], &h[8..12], &h[13..16], &h[17..20], &h[20..32])
+}
+
+/// Start a search for a page to poll with `search_poll`. The id is the built-in client's token or
+/// the uuid slskd was given; both run for `slskd_search_timeout` seconds.
+pub async fn search_start(st: &AppState, text: &str) -> anyhow::Result<String> {
+    if soulseek::wanted(st) {
+        return Ok(native(st)?.search_start(text)?.to_string());
+    }
+    let sid = uuid();
+    req(st, reqwest::Method::POST, "searches", Some(search_body(&sid, text, search_timeout(st))), &[]).await?;
+    Ok(sid)
+}
+
+/// The responses a search has so far (slskd shape) and whether it is over. "expired" once the
+/// built-in client has forgotten the token.
+pub async fn search_poll(st: &AppState, id: &str) -> anyhow::Result<(Vec<Value>, bool)> {
+    if soulseek::wanted(st) {
+        let token: u32 = id.parse().map_err(|_| anyhow::anyhow!("not a search id"))?;
+        let (res, done) = native(st)?.search_results(token, search_timeout(st) as u64).ok_or_else(|| anyhow::anyhow!("search expired"))?;
+        return Ok((res.iter().map(soulseek::client::result_json).collect(), done));
+    }
+    let s = req(st, reqwest::Method::GET, &format!("searches/{id}"), None, &[]).await
+        .map_err(|e| if e.to_string().contains("returned 404") { anyhow::anyhow!("search expired") } else { e })?;
+    let res = req(st, reqwest::Method::GET, &format!("searches/{id}/responses"), None, &[]).await?;
+    Ok((res.as_array().cloned().unwrap_or_default(), s["isComplete"].as_bool().unwrap_or(false)))
+}
+
+/// Forget a polled search. slskd keeps them until told; the built-in client drops its own after 300 s.
+pub async fn search_end(st: &AppState, id: &str) {
+    if !soulseek::wanted(st) {
+        let _ = req(st, reqwest::Method::DELETE, &format!("searches/{id}"), None, &[]).await;
+    }
+}
+
+/// A user's share list as slskd's browse gives it: [{ name, files: [{ filename (full path), size, bitRate, … }] }].
+pub async fn browse(st: &AppState, user: &str) -> anyhow::Result<Vec<Value>> {
+    if soulseek::wanted(st) {
+        return Ok(native(st)?.browse(user).await?.iter().map(soulseek::client::dir_json).collect());
+    }
+    let b = req_within(st, reqwest::Method::GET, &format!("users/{}/browse", urlencoding::encode(user)), None, &[], Some(std::time::Duration::from_secs(50))).await
+        .map_err(|e| if e.to_string().contains("timed out") { anyhow::anyhow!("{user} did not send their file list within 45 s") } else { e })?;
+    // most clients list bare file names under the folder; downloads need the full remote path
+    let mut dirs = b["directories"].as_array().cloned().unwrap_or_default();
+    for d in &mut dirs {
+        let dir = d["name"].as_str().unwrap_or("").trim_end_matches('\\').to_string();
+        if let Some(files) = d["files"].as_array_mut() {
+            for f in files {
+                let name = f["filename"].as_str().unwrap_or("").to_string();
+                if !name.contains('\\') && !name.contains('/') && !dir.is_empty() {
+                    f["filename"] = json!(format!("{dir}\\{name}"));
+                }
+            }
+        }
+    }
+    Ok(dirs)
 }
 
 pub async fn enqueue(st: &AppState, username: &str, files: &[Value]) -> anyhow::Result<()> {
@@ -108,16 +178,19 @@ fn tail(s: &str) -> String {
 pub async fn all_downloads(st: &AppState) -> anyhow::Result<Vec<Value>> {
     if soulseek::wanted(st) {
         return Ok(native(st)?.downloads().into_iter().map(|f| json!({ "id": f["id"], "username": f["username"], "filename": f["basename"], "directory": f["directory"],
-            "state": f["state"], "progress": f["percentComplete"], "size": f["size"], "speed": f["averageSpeed"] })).collect());
+            "state": f["state"], "progress": f["percentComplete"], "size": f["size"], "speed": f["averageSpeed"],
+            "path": f["filename"], "bytes": f["bytesTransferred"], "error": f["error"] })).collect());
     }
     let d = req(st, reqwest::Method::GET, "transfers/downloads", None, &[]).await?;
     let mut out = vec![];
     for u in d.as_array().cloned().unwrap_or_default() {
         for dir in u["directories"].as_array().cloned().unwrap_or_default() {
             for f in dir["files"].as_array().cloned().unwrap_or_default() {
+                // path/bytes/error: the full remote name and the raw counters, for the Soulseek page
                 out.push(json!({ "id": f["id"], "username": u["username"], "filename": tail(f["filename"].as_str().unwrap_or("")),
                     "directory": tail(dir["directory"].as_str().unwrap_or("")), "state": f["state"].as_str().unwrap_or(""),
-                    "progress": (f["percentComplete"].as_f64().unwrap_or(0.0) * 10.0).round() / 10.0, "size": f["size"], "speed": f["averageSpeed"] }));
+                    "progress": (f["percentComplete"].as_f64().unwrap_or(0.0) * 10.0).round() / 10.0, "size": f["size"], "speed": f["averageSpeed"],
+                    "path": f["filename"], "bytes": f["bytesTransferred"], "error": f["exception"] }));
             }
         }
     }
