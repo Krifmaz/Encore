@@ -15,28 +15,61 @@ use std::process::Stdio;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
-/// Processed streams running right now, whole server.
-static ACTIVE: AtomicUsize = AtomicUsize::new(0);
+pub mod render;
 
-/// One processed stream's place in the server-wide limit; frees it when dropped.
-pub struct Slot(());
+/// A server-wide count of running Cadenza jobs (live streams and cache renders share it).
+pub struct Slots(AtomicUsize);
+
+impl Slots {
+    pub const fn new() -> Slots {
+        Slots(AtomicUsize::new(0))
+    }
+
+    /// Take a slot when fewer than `max` jobs are running.
+    pub fn try_acquire(&'static self, max: usize) -> Option<Slot> {
+        self.0.fetch_update(Ordering::SeqCst, Ordering::SeqCst, |n| (n < max).then_some(n + 1)).ok().map(|_| Slot(self))
+    }
+
+    pub fn active(&self) -> usize {
+        self.0.load(Ordering::SeqCst)
+    }
+}
+
+/// Processed streams and renders running right now, whole server.
+static SLOTS: Slots = Slots::new();
+
+/// One job's place in the server-wide limit; frees it when dropped.
+pub struct Slot(&'static Slots);
 
 impl Drop for Slot {
     fn drop(&mut self) {
-        ACTIVE.fetch_sub(1, Ordering::SeqCst);
+        self.0 .0.fetch_sub(1, Ordering::SeqCst);
     }
 }
 
 /// Take a slot when fewer than `max` processed streams are running.
 pub fn try_acquire(max: usize) -> Option<Slot> {
-    ACTIVE
-        .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |n| (n < max).then_some(n + 1))
-        .ok()
-        .map(|_| Slot(()))
+    SLOTS.try_acquire(max)
+}
+
+/// [`try_acquire`], waiting up to 1.5 s: a seek or track change often arrives before the old
+/// connection's drop has freed its slot.
+pub async fn acquire_with_retry(max: usize) -> Option<Slot> {
+    let mut slot = try_acquire(max);
+    if max > 0 {
+        for _ in 0..30 {
+            if slot.is_some() {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+            slot = try_acquire(max);
+        }
+    }
+    slot
 }
 
 pub fn active() -> usize {
-    ACTIVE.load(Ordering::SeqCst)
+    SLOTS.active()
 }
 
 /// The admin's limits (Settings → Apps & sources → Server processing).
@@ -156,9 +189,30 @@ fn config(job: &Job) -> PipelineConfig {
 /// Bytes of interleaved f64 per processing block (about 0.1 s of stereo 44.1 kHz).
 const BLOCK_BYTES: usize = 64 * 1024;
 
-/// Decode with ffmpeg → cadenza-dsp → ffmpeg FLAC encoder, streamed as the response body. Both
-/// ffmpeg processes are killed and the slot is freed when the body ends or is dropped.
-pub async fn stream(cache: CoefficientCache, job: Job, slot: Slot) -> ApiResult<Response> {
+/// Where the FLAC encoder writes: a pipe (live streaming) or a file (cache render: ffmpeg can then
+/// seek back and finish STREAMINFO and the seek table).
+pub enum Output {
+    Pipe,
+    File(std::path::PathBuf),
+}
+
+/// A running decoder → Cadenza → encoder chain.
+pub struct Chain {
+    pub decoder: tokio::process::Child,
+    pub encoder: tokio::process::Child,
+    /// the encoder's stdout ([`Output::Pipe`] only)
+    pub out: Option<tokio::process::ChildStdout>,
+    /// the signal path label once the pipeline is built, or why it couldn't be
+    pub ready: tokio::sync::oneshot::Receiver<Result<String, String>>,
+    /// true when the whole input went through (false: an error, or `progress` said stop)
+    pub done: tokio::task::JoinHandle<bool>,
+}
+
+/// Called after each block with the output frames written so far; returning false stops the chain.
+pub type Progress = Box<dyn FnMut(u64) -> bool + Send>;
+
+/// Decode with ffmpeg → cadenza-dsp → ffmpeg FLAC encoder (24-bit at `job.rate`).
+pub fn spawn_chain(cache: CoefficientCache, job: Job, output: Output, mut progress: Option<Progress>) -> ApiResult<Chain> {
     let ch = job.input.channels as usize;
     let mut dec = tokio::process::Command::new("ffmpeg");
     dec.args(["-v", "error", "-nostdin"]);
@@ -169,24 +223,31 @@ pub async fn stream(cache: CoefficientCache, job: Job, slot: Slot) -> ApiResult<
     dec.stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::null()).kill_on_drop(true);
     let mut enc = tokio::process::Command::new("ffmpeg");
     enc.args(["-v", "error", "-nostdin", "-f", "s32le", "-ar", &job.rate.to_string(), "-ac", &ch.to_string(), "-i", "pipe:0"]);
-    enc.args(["-c:a", "flac", "-sample_fmt", "s32", "-bits_per_raw_sample", "24", "-compression_level", "0", "-f", "flac", "-flush_packets", "1", "pipe:1"]);
-    enc.stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::null()).kill_on_drop(true);
+    enc.args(["-c:a", "flac", "-sample_fmt", "s32", "-bits_per_raw_sample", "24", "-compression_level", "0", "-f", "flac", "-flush_packets", "1"]);
+    match &output {
+        Output::Pipe => {
+            enc.arg("pipe:1").stdout(Stdio::piped());
+        }
+        Output::File(p) => {
+            enc.arg("-y").arg(p).stdout(Stdio::null());
+        }
+    }
+    enc.stdin(Stdio::piped()).stderr(Stdio::null()).kill_on_drop(true);
 
     let mut decoder = dec.spawn().map_err(|e| err(500, format!("ffmpeg: {e}")))?;
     let mut encoder = enc.spawn().map_err(|e| err(500, format!("ffmpeg: {e}")))?;
     let mut dec_out = decoder.stdout.take().ok_or_else(|| err(500, "ffmpeg gave no output"))?;
     let mut enc_in = encoder.stdin.take().ok_or_else(|| err(500, "ffmpeg took no input"))?;
-    let enc_out = encoder.stdout.take().ok_or_else(|| err(500, "ffmpeg gave no output"))?;
+    let out = encoder.stdout.take();
 
-    let (ready_tx, ready_rx) = tokio::sync::oneshot::channel::<Result<String, String>>();
+    let (ready_tx, ready) = tokio::sync::oneshot::channel::<Result<String, String>>();
     let rt = tokio::runtime::Handle::current();
-    let rate = job.rate;
-    tokio::task::spawn_blocking(move || {
+    let done = tokio::task::spawn_blocking(move || {
         let mut pipe = match Pipeline::new(job.input.clone(), config(&job), &cache) {
             Ok(p) => p,
             Err(e) => {
                 let _ = ready_tx.send(Err(e.to_string()));
-                return;
+                return false;
             }
         };
         let _ = ready_tx.send(Ok(pipe.signal_path().label));
@@ -195,10 +256,12 @@ pub async fn stream(cache: CoefficientCache, job: Job, slot: Slot) -> ApiResult<
         let mut pending: Vec<u8> = Vec::with_capacity(BLOCK_BYTES + frame);
         let mut samples: Vec<f64> = Vec::with_capacity(BLOCK_BYTES / 8);
         let mut bytes: Vec<u8> = Vec::new();
-        let mut write = |ints: Vec<i32>, bytes: &mut Vec<u8>| -> bool {
+        let mut frames_out: u64 = 0;
+        let mut write = |ints: Vec<i32>, bytes: &mut Vec<u8>, frames_out: &mut u64| -> bool {
             if ints.is_empty() {
                 return true;
             }
+            *frames_out += (ints.len() / ch.max(1)) as u64;
             bytes.clear();
             bytes.reserve(ints.len() * 4);
             // cadenza-dsp quantises 24-bit output to ±2^23: shift up to full-scale s32
@@ -209,7 +272,8 @@ pub async fn stream(cache: CoefficientCache, job: Job, slot: Slot) -> ApiResult<
         };
         loop {
             let n = match rt.block_on(dec_out.read(&mut buf)) {
-                Ok(0) | Err(_) => break,
+                Ok(0) => break,
+                Err(_) => return false,
                 Ok(n) => n,
             };
             pending.extend_from_slice(&buf[..n]);
@@ -220,35 +284,59 @@ pub async fn stream(cache: CoefficientCache, job: Job, slot: Slot) -> ApiResult<
             samples.clear();
             samples.extend(pending[..whole].chunks_exact(8).map(|b| f64::from_le_bytes(b.try_into().unwrap())));
             pending.drain(..whole);
-            if !write(pipe.process(&samples), &mut bytes) {
-                return; // the listener went away
+            if !write(pipe.process(&samples), &mut bytes, &mut frames_out) {
+                return false; // the listener went away
+            }
+            if let Some(p) = progress.as_mut() {
+                if !p(frames_out) {
+                    return false;
+                }
             }
         }
-        write(pipe.flush(), &mut bytes);
+        let ok = write(pipe.flush(), &mut bytes, &mut frames_out);
+        if let Some(p) = progress.as_mut() {
+            p(frames_out);
+        }
+        ok
         // dropping the encoder's stdin ends its stream
     });
+    Ok(Chain { decoder, encoder, out, ready, done })
+}
 
-    let label = match ready_rx.await {
+/// The stream headers every Cadenza response carries.
+pub fn stream_headers(h: &mut axum::http::HeaderMap, rate: u32, label: &str, how: &'static str, offset: f64) {
+    if let Ok(v) = HeaderValue::from_str(&format!("cadenza-{rate}")) {
+        h.insert(HeaderName::from_static("x-encore-stream"), v.clone());
+        h.insert(HeaderName::from_static("x-transcoded"), v);
+    }
+    if let Ok(v) = HeaderValue::from_str(&ascii_label(label)) {
+        h.insert(HeaderName::from_static("x-cadenza-path"), v);
+    }
+    h.insert(HeaderName::from_static("x-encore-dsp"), HeaderValue::from_static(how));
+    if let Ok(v) = HeaderValue::from_str(&format!("{}", (offset * 100.0).round() / 100.0)) {
+        h.insert(HeaderName::from_static("x-encore-dsp-offset"), v);
+    }
+}
+
+/// Live Cadenza: the chain's output is the response body (starting at `job.seek`). Both ffmpeg
+/// processes are killed and the slot is freed when the body ends or is dropped.
+pub async fn stream(cache: CoefficientCache, job: Job, slot: Slot) -> ApiResult<Response> {
+    let (rate, seek) = (job.rate, job.seek);
+    let mut chain = spawn_chain(cache, job, Output::Pipe, None)?;
+    let label = match (&mut chain.ready).await {
         Ok(Ok(l)) => l,
         Ok(Err(e)) => return Err(err(500, format!("Cadenza: {e}"))),
         Err(_) => return Err(err(500, "Cadenza stopped")),
     };
+    let enc_out = chain.out.take().ok_or_else(|| err(500, "ffmpeg gave no output"))?;
     // the children (kill_on_drop) and the slot live exactly as long as the body
-    let keep = (decoder, encoder, slot);
+    let keep = (chain, slot);
     let body = futures_util::StreamExt::map(tokio_util::io::ReaderStream::new(enc_out), move |c| {
         let _keep = &keep;
         c
     });
-    let tag = format!("cadenza-{rate}");
     let mut r = ([(header::CONTENT_TYPE, "audio/flac")], Body::from_stream(body)).into_response();
-    let h = r.headers_mut();
-    if let Ok(v) = HeaderValue::from_str(&tag) {
-        h.insert(HeaderName::from_static("x-encore-stream"), v.clone());
-        h.insert(HeaderName::from_static("x-transcoded"), v);
-    }
-    if let Ok(v) = HeaderValue::from_str(&ascii_label(&label)) {
-        h.insert(HeaderName::from_static("x-cadenza-path"), v);
-    }
+    stream_headers(r.headers_mut(), rate, &label, "live", seek);
     Ok(r)
 }
 
@@ -272,7 +360,10 @@ pub async fn self_test(st: &AppState) -> Result<String, String> {
     })
     .await
     .map_err(|e| e.to_string())??;
-    Ok(format!("Cadenza ready · up to {} kHz · {}/{} streams in use", lim.max_rate / 1000, active(), lim.max_streams))
+    let mut msg = format!("Cadenza ready · up to {} kHz · {}/{} streams in use", lim.max_rate / 1000, active(), lim.max_streams);
+    msg.push_str(" · ");
+    msg.push_str(&render::usage_text(st));
+    Ok(msg)
 }
 
 #[cfg(test)]
