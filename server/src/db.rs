@@ -185,7 +185,13 @@ impl Db {
         };
         let path = self.data_dir.join("encore.db");
         // close the current connection (this checkpoints and removes the WAL), then swap the file
-        let placeholder = Connection::open_in_memory()?;
+        let placeholder = match Connection::open_in_memory() {
+            Ok(c) => c,
+            Err(e) => {
+                let _ = std::fs::remove_file(&tmp);
+                return Err(e.into());
+            }
+        };
         drop(std::mem::replace(&mut *guard, placeholder));
         for suffix in ["-wal", "-shm"] {
             let _ = std::fs::remove_file(format!("{}{suffix}", path.display()));
