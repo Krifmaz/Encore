@@ -385,7 +385,8 @@ fn is_alac(path: &str) -> bool {
 #[derive(Deserialize, Default)]
 #[serde(default)]
 pub struct StreamQ {
-    /// convert to FLAC (formats a browser can't play)
+    /// convert to FLAC (formats a browser can't play); `1/true/yes/on` like `dsp`
+    #[serde(deserialize_with = "flag")]
     transcode: bool,
     /// start a converted stream at this many seconds (the player seeks converted streams through the server)
     t: f64,

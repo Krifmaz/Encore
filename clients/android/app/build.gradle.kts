@@ -12,7 +12,7 @@ val encoreVersionCode: Int = providers.gradleProperty("encoreVersionCode").orEls
 // Without a keystore the release build is signed with the debug key; CI decides whether that is allowed
 // (the release pipeline fails when any of the four secrets is missing).
 val keystorePath: String? = System.getenv("ANDROID_KEYSTORE_PATH")?.takeIf { it.isNotBlank() }
-val hasReleaseKey: Boolean = keystorePath != null && file(keystorePath).isFile
+val hasReleaseKey: Boolean = keystorePath?.let { file(it).isFile } == true
 
 android {
     namespace = "app.encore.android"

@@ -2,14 +2,14 @@
 [versions]
 agp = "9.4.0"
 kotlin = "2.4.21"                 # also in the root build.gradle.kts buildscript classpath
-composeBom = "2026.09.00"         # Compose 1.12.x, material3 1.4.0
-activityCompose = "1.10.1"
+composeBom = "2026.06.01"         # Compose 1.11.4, material3 1.4.0 (2026.09.00 = Compose 1.12 needs compileSdk 37, see README)
+activityCompose = "1.13.0"
 media3 = "1.11.1"
 okhttp = "5.5.0"
 kotlinxSerialization = "1.11.0"
 kotlinxCoroutines = "1.11.0"
 coil = "3.6.3"
-datastore = "1.1.1"               # plain DataStore for M1; Tink-encrypted store follows (PLAN §4.2)
+datastore = "1.2.1"               # plain DataStore for M1; Tink-encrypted store follows (PLAN §4.2)
 
 [libraries]
 androidx-compose-bom = { group = "androidx.compose", name = "compose-bom", version.ref = "composeBom" }

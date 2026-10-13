@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- Platform themes only (no AppCompat): Compose draws everything; this is the window behind it. -->
+    <style name="Theme.Encore" parent="@android:style/Theme.Material.NoActionBar">
+        <item name="android:windowBackground">@color/encore_bg</item>
+        <item name="android:colorBackground">@color/encore_bg</item>
+        <item name="android:statusBarColor">@android:color/transparent</item>
+        <item name="android:navigationBarColor">@android:color/transparent</item>
+    </style>
+
+    <style name="Theme.Encore.Translucent" parent="@android:style/Theme.Translucent.NoTitleBar">
+        <item name="android:windowAnimationStyle">@null</item>
+    </style>
+</resources>

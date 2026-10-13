@@ -1,12 +1,24 @@
 name: apps
 
 # Android APK + desktop apps (Windows, macOS, Linux). Never runs on push – the macOS runner alone costs
-# 10× Actions minutes. Start it by hand (Actions → apps → Run workflow) or through the release workflow
-# with "apps" ticked, which attaches the installers to the release.
+# 10× Actions minutes. Start it by hand (Actions → apps → Run workflow; "only" picks a single job) or through
+# the release workflow with "apps" ticked, which attaches the installers to the release. The release's Android
+# APK is the native app (android-native); the legacy Tauri android job only runs by hand.
 on:
   workflow_dispatch:
+    inputs:
+      only:
+        description: "Build only this job (all = every job below)"
+        type: choice
+        options: [all, android-native, android, desktop]
+        default: all
   workflow_call:
     inputs:
+      only:
+        # release.yml doesn't pass it: a release builds every release job (the Tauri android job never runs here)
+        type: string
+        required: false
+        default: all
       version:
         type: string
         required: true
@@ -20,10 +32,112 @@ on:
 permissions:
   contents: read
 
+# A release calls this file with inputs.version set; a manual run leaves it empty (version dev.<run number>).
 jobs:
+  android-native:
+    # Native Kotlin app: clients/android (docs/android-native/PLAN.md §11). This is the APK a release attaches as
+    # Encore-android-<version>.apk. Signed with the permanent release key from the ANDROID_KEYSTORE_BASE64,
+    # ANDROID_KEYSTORE_PASSWORD, ANDROID_KEY_ALIAS, ANDROID_KEY_PASSWORD secrets. Without them a release fails;
+    # a manual run warns and signs with the runner's debug key (installs, but won't update a release build).
+    if: inputs.only == '' || inputs.only == 'all' || inputs.only == 'android-native'
+    runs-on: ubuntu-latest
+    env:
+      ENCORE_VERSION: ${{ inputs.version || format('dev.{0}', github.run_number) }}
+      ENCORE_CODE: ${{ inputs.code || github.run_number }}
+      IS_RELEASE: ${{ inputs.version != '' }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "21"
+      - uses: android-actions/setup-android@v3
+        with:
+          packages: "platform-tools platforms;android-36 build-tools;36.0.0"
+      # M2 (Cadenza on the phone) adds the Rust side here, PLAN §11 steps 3–5:
+      #   ndk;29.0.13846066 in the packages above
+      # - uses: dtolnay/rust-toolchain@stable
+      #   with:
+      #     targets: aarch64-linux-android,armv7-linux-androideabi,x86_64-linux-android
+      # - uses: Swatinem/rust-cache@v2
+      #   with:
+      #     workspaces: clients/android/cadenza/rust
+      #     key: android-native
+      # - run: cargo install cargo-ndk --version 4.1.2 --locked
+      # (github.com/Krifmaz/cadenza is public, so no deploy key – decision D2)
+      - name: Gradle version
+        # no gradlew/wrapper jar is committed: run the Gradle the wrapper properties name, so bumping the
+        # wrapper (clients/android/gradle/wrapper/gradle-wrapper.properties) bumps CI too
+        id: gradle
+        run: |
+          G=$(sed -n 's/^distributionUrl=.*gradle-\([0-9][0-9.]*\)-\(bin\|all\)\.zip.*/\1/p' clients/android/gradle/wrapper/gradle-wrapper.properties)
+          [ -n "$G" ] || { echo "::error::no Gradle version in clients/android/gradle/wrapper/gradle-wrapper.properties"; exit 1; }
+          echo "Gradle $G"
+          echo "version=$G" >> "$GITHUB_OUTPUT"
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: ${{ steps.gradle.outputs.version }}
+      - name: Signing key
+        env:
+          KS_B64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+          KS_PASS: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+          KEY_PASS: ${{ secrets.ANDROID_KEY_PASSWORD }}
+        run: |
+          MISSING=""
+          [ -n "$KS_B64" ]    || MISSING="$MISSING ANDROID_KEYSTORE_BASE64"
+          [ -n "$KS_PASS" ]   || MISSING="$MISSING ANDROID_KEYSTORE_PASSWORD"
+          [ -n "$KEY_ALIAS" ] || MISSING="$MISSING ANDROID_KEY_ALIAS"
+          [ -n "$KEY_PASS" ]  || MISSING="$MISSING ANDROID_KEY_PASSWORD"
+          if [ -z "$MISSING" ]; then
+            KS="$RUNNER_TEMP/release.jks"
+            printf '%s' "$KS_B64" | base64 -d > "$KS" || { echo "::error::ANDROID_KEYSTORE_BASE64 is not valid base64 (create it with: base64 -w0 release.jks)"; exit 1; }
+            [ -s "$KS" ] || { echo "::error::ANDROID_KEYSTORE_BASE64 decodes to an empty file"; exit 1; }
+            {
+              echo "ANDROID_KEYSTORE_PATH=$KS"
+              echo "ANDROID_KEYSTORE_PASSWORD=$KS_PASS"
+              echo "ANDROID_KEY_ALIAS=$KEY_ALIAS"
+              echo "ANDROID_KEY_PASSWORD=$KEY_PASS"
+            } >> "$GITHUB_ENV"
+            echo "Release key: $KS (alias $KEY_ALIAS)"
+            exit 0
+          fi
+          if [ "$IS_RELEASE" = true ]; then
+            echo "::error title=Android signing::missing secret(s):$MISSING. A release must be signed with the permanent release key, or phones can't update. Add them under Settings → Secrets and variables → Actions."
+            exit 1
+          fi
+          echo "::warning title=Android signing::missing secret(s):$MISSING – this APK is signed with the runner's throw-away debug key. It installs fresh but can't update (or be updated by) a release build."
+          # the release build type falls back to the debug key; make sure the runner has one where AGP looks
+          D="$HOME/.android"
+          echo "ANDROID_USER_HOME=$D" >> "$GITHUB_ENV"
+          mkdir -p "$D"
+          [ -f "$D/debug.keystore" ] || keytool -genkeypair -v -keystore "$D/debug.keystore" -storepass android \
+            -alias androiddebugkey -keypass android -dname "CN=Android Debug,O=Android,C=US" -keyalg RSA -keysize 2048 -validity 10000
+      - name: Build APK
+        run: |
+          gradle -p clients/android --no-daemon --stacktrace :app:assembleRelease \
+            "-PencoreVersionName=$ENCORE_VERSION" "-PencoreVersionCode=$ENCORE_CODE"
+      - name: Collect
+        run: |
+          APK=$(find clients/android/app/build/outputs/apk/release -name '*.apk' ! -name '*unsigned*' | head -1)
+          [ -n "$APK" ] || { echo "::error::no signed release APK built"; find clients/android/app/build/outputs -type f; exit 1; }
+          "$ANDROID_HOME/build-tools/36.0.0/apksigner" verify --print-certs "$APK"
+          cp "$APK" "Encore-android-$ENCORE_VERSION.apk" && ls -la Encore-android-*.apk
+      - name: Remove signing key
+        if: always()
+        run: rm -f "$RUNNER_TEMP/release.jks"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: Encore-android-native
+          path: Encore-android-*.apk
+          if-no-files-found: error
+
   android:
-    # Tauri (Rust) app: clients/app built for Android (arm64 + arm32). Signed with the runner's debug key unless
-    # ANDROID_KEYSTORE_FILE/PASSWORD, ANDROID_KEY_ALIAS/PASSWORD are set (then updates install in place).
+    # LEGACY Tauri (Rust) app: clients/app built for Android (arm64 + arm32), kept until the native app has shipped
+    # (deleted in M7, PLAN §11). Manual runs only: a release (workflow_call) attaches the native APK instead, so
+    # this job is skipped there. Its artifact is Encore-android-legacy. Signed like android-native when the
+    # ANDROID_KEYSTORE_* secrets are set, otherwise with the runner's debug key.
+    if: inputs.version == '' && (inputs.only == 'all' || inputs.only == 'android')
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -45,9 +159,29 @@ jobs:
         with:
           tool: tauri-cli@2.12.2
       - name: Signing key
-        # the Gradle release config falls back to the debug key, which a fresh runner doesn't have yet.
-        # Gradle looks for it under $XDG_CONFIG_HOME/.android on the runner, so pin the folder explicitly.
+        # clients/app/gen/android reads ANDROID_KEYSTORE_FILE as a path to the keystore, so decode the base64
+        # secret to a file and pass that path (the old setup passed the secret itself, which never worked).
+        # Without the secrets the Gradle release config falls back to the debug key, which a fresh runner doesn't
+        # have yet. Gradle looks for it under $XDG_CONFIG_HOME/.android on the runner, so pin the folder explicitly.
+        env:
+          KS_B64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+          KS_PASS: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+          KEY_PASS: ${{ secrets.ANDROID_KEY_PASSWORD }}
         run: |
+          if [ -n "$KS_B64" ] && [ -n "$KS_PASS" ] && [ -n "$KEY_ALIAS" ] && [ -n "$KEY_PASS" ]; then
+            KS="$RUNNER_TEMP/release.jks"
+            printf '%s' "$KS_B64" | base64 -d > "$KS"
+            {
+              echo "ANDROID_KEYSTORE_FILE=$KS"
+              echo "ANDROID_KEYSTORE_PASSWORD=$KS_PASS"
+              echo "ANDROID_KEY_ALIAS=$KEY_ALIAS"
+              echo "ANDROID_KEY_PASSWORD=$KEY_PASS"
+            } >> "$GITHUB_ENV"
+            echo "Release key: $KS"
+          else
+            echo "::warning title=Android signing (legacy)::ANDROID_KEYSTORE_* secrets incomplete – signing with the runner's debug key"
+          fi
           D="$HOME/.android"
           echo "ANDROID_USER_HOME=$D" >> "$GITHUB_ENV"
           mkdir -p "$D"
@@ -57,10 +191,6 @@ jobs:
         working-directory: clients/app
         env:
           ENCORE_VERSION: ${{ inputs.version || format('dev.{0}', github.run_number) }}
-          ANDROID_KEYSTORE_FILE: ${{ secrets.ANDROID_KEYSTORE_FILE }}
-          ANDROID_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
-          ANDROID_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
-          ANDROID_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
         run: |
           export NDK_HOME="$ANDROID_HOME/ndk/29.0.13846066"
           cargo tauri android build --ci --apk --target aarch64 --target armv7 \
@@ -70,14 +200,18 @@ jobs:
           V="${{ inputs.version || format('dev.{0}', github.run_number) }}"
           APK=$(find clients/app/gen/android/app/build/outputs/apk -name '*release*.apk' | head -1)
           [ -n "$APK" ] || { echo "no APK built"; find clients/app/gen/android/app/build/outputs -type f; exit 1; }
-          cp "$APK" "Encore-android-$V.apk" && ls -la Encore-android-*.apk
+          cp "$APK" "Encore-android-legacy-$V.apk" && ls -la Encore-android-legacy-*.apk
+      - name: Remove signing key
+        if: always()
+        run: rm -f "$RUNNER_TEMP/release.jks"
       - uses: actions/upload-artifact@v4
         with:
-          name: Encore-android
-          path: Encore-android*.apk
+          name: Encore-android-legacy
+          path: Encore-android-legacy-*.apk
 
   desktop:
     # Tauri (Rust) app: clients/app. Unsigned installers – macOS: right-click → Open the first time.
+    if: inputs.only == '' || inputs.only == 'all' || inputs.only == 'desktop'
     strategy:
       fail-fast: false
       matrix:

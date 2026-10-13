@@ -1,0 +1,5 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Android Auto: Encore is a media app (browse + play through EncorePlaybackService) -->
+<automotiveApp>
+    <uses name="media" />
+</automotiveApp>
