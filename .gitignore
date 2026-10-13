@@ -2,8 +2,8 @@ __pycache__/
 *.pyc
 .venv/
 venv/
-config/
-data/
+/config/
+/data/
 .env
 .pytest_cache/
 server/target/

@@ -1,0 +1,282 @@
+package app.encore.android.data.api
+
+import app.encore.android.data.session.AuthKind
+import app.encore.android.data.session.Session
+import app.encore.android.data.session.SessionStore
+import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.JsonElement
+import kotlinx.serialization.json.JsonObject
+import okhttp3.HttpUrl.Companion.toHttpUrlOrNull
+import okhttp3.MediaType.Companion.toMediaType
+import okhttp3.OkHttpClient
+import okhttp3.Request
+import okhttp3.RequestBody
+import okhttp3.RequestBody.Companion.toRequestBody
+import java.io.IOException
+import java.net.URLEncoder
+
+/** An HTTP error from the server, with its `detail` message and the JSON body (e.g. `{two_factor: true}`). */
+class ApiException(val code: Int, message: String, val body: JsonObject?) : IOException(message)
+
+sealed interface LoginResult {
+    data class Success(val session: Session, val user: User) : LoginResult
+    /** The account has 2FA: ask for the authenticator code and send it again. */
+    data class NeedsCode(val message: String) : LoginResult
+    data class Failed(val message: String) : LoginResult
+}
+
+/**
+ * The Encore REST API (server/src/routes). Every call is blocking: callers run it on Dispatchers.IO or on the
+ * playback service's executor. Responses are parsed leniently (see Models.kt).
+ */
+class EncoreApi(private val client: OkHttpClient, private val store: SessionStore) {
+    val json: Json = Json { ignoreUnknownKeys = true }
+    private val jsonType = "application/json; charset=utf-8".toMediaType()
+
+    /** The signed-in server ("" when signed out). */
+    val base: String get() = store.current?.server ?: ""
+
+    fun url(path: String): String = base + path
+
+    fun coverUrl(albumId: String, size: Int = 600): String = url("/api/library/albums/${enc(albumId)}/cover?s=$size")
+
+    /** The stream of a song (PLAN §6.2): the original file when Android decodes it, FLAC made by the server otherwise. */
+    fun streamUrl(trackId: Long, format: String): String =
+        url("/api/library/tracks/$trackId/stream" + if (needsTranscode(format)) "?transcode=true" else "")
+
+    // ---- server picker / sign-in ------------------------------------------------------------------------
+
+    /** Finds the server behind what the user typed: https first, then http; checks /api/health. */
+    fun probe(input: String): String {
+        val raw = input.trim().trimEnd('/')
+        if (raw.isEmpty()) throw IOException("Enter your server's address")
+        val candidates = if (raw.startsWith("http://") || raw.startsWith("https://")) listOf(raw) else listOf("https://$raw", "http://$raw")
+        var last: Exception? = null
+        for (c in candidates) {
+            // OkHttp's form (lower-case host, no default port) so AuthInterceptor matches later requests
+            val norm = c.toHttpUrlOrNull()?.toString()?.trimEnd('/')
+            if (norm == null) {
+                last = IOException("That isn't a valid address")
+                continue
+            }
+            try {
+                val o = call("GET", norm + "/api/health", null) as? JsonObject
+                if (o != null && (o.bool("ok") || o.str("version").isNotEmpty())) return norm
+                last = IOException("That isn't an Encore server")
+            } catch (e: Exception) {
+                last = e
+            }
+        }
+        throw IOException(last?.message ?: "Can't reach that server")
+    }
+
+    fun info(server: String): AuthInfo = AuthInfo.from(call("GET", "$server/api/auth/info", null) as? JsonObject ?: JsonObject(emptyMap()))
+
+    /**
+     * Signs in. With the server's `app_tokens` feature the body carries `app: {device_id, device_name}` and the
+     * reply is `{user, token}` (a long-lived bearer token); otherwise the web session cookie is kept.
+     */
+    fun login(server: String, info: AuthInfo, username: String, password: String, code: String?, deviceId: String, deviceName: String): LoginResult {
+        val body = LoginBody(
+            username = username.trim(),
+            password = password,
+            code = code?.replace(" ", "")?.takeIf { it.isNotEmpty() },
+            app = if (info.appTokens) AppDevice(deviceId, deviceName) else null,
+        )
+        val req = Request.Builder()
+            .url("$server/api/auth/login")
+            .post(json.encodeToString(LoginBody.serializer(), body).toRequestBody(jsonType))
+            .header("Accept", "application/json")
+            .build()
+        try {
+            client.newCall(req).execute().use { res ->
+                val text = res.body.string()
+                val parsed = parseObject(text)
+                if (!res.isSuccessful) {
+                    val detail = parsed?.str("detail")?.ifEmpty { null } ?: "Sign-in failed (HTTP ${res.code})"
+                    return if (res.code == 401 && parsed?.bool("two_factor") == true) LoginResult.NeedsCode(detail) else LoginResult.Failed(detail)
+                }
+                val token = parsed?.str("token") ?: ""
+                if (token.isNotEmpty()) {
+                    val user = User.from(parsed?.obj("user") ?: JsonObject(emptyMap()))
+                    return LoginResult.Success(Session(server, token, AuthKind.BEARER, user.username.ifEmpty { username.trim() }), user)
+                }
+                // cookie session: the reply is the user, the token is in Set-Cookie
+                val cookie = res.headers("Set-Cookie").firstOrNull { it.trim().startsWith("encore_session=") }
+                    ?.trim()?.removePrefix("encore_session=")?.substringBefore(';')?.trim() ?: ""
+                if (cookie.isEmpty()) return LoginResult.Failed("The server didn't start a session")
+                val user = User.from(parsed ?: JsonObject(emptyMap()))
+                return LoginResult.Success(Session(server, cookie, AuthKind.COOKIE, user.username.ifEmpty { username.trim() }), user)
+            }
+        } catch (e: IOException) {
+            return LoginResult.Failed(e.message ?: "Can't reach the server")
+        }
+    }
+
+    fun logout() {
+        try { post("/api/auth/logout", JsonObject(emptyMap())) } catch (_: Exception) {}
+    }
+
+    fun me(): User = User.from(getObject("/api/auth/me"))
+
+    // ---- library ---------------------------------------------------------------------------------------
+
+    fun albums(sort: String = "name", offset: Int = 0, limit: Int = 120, q: String = "", artist: String = ""): List<Album> {
+        val qs = StringBuilder("/api/library/albums?sort=").append(enc(sort)).append("&limit=").append(limit).append("&offset=").append(offset)
+        if (q.isNotEmpty()) qs.append("&q=").append(enc(q))
+        if (artist.isNotEmpty()) qs.append("&artist=").append(enc(artist))
+        return get(qs.toString()).objects().mapNotNull { Album.from(it) }
+    }
+
+    fun album(id: String): AlbumDetail {
+        val o = getObject("/api/library/albums/${enc(id)}")
+        val tracks = o.arr("tracks").objectsOf().mapNotNull { Track.from(it) }
+        val album = Album(
+            id = id,
+            title = o.str("album").ifEmpty { "Unknown album" },
+            artist = o.str("albumartist"),
+            year = o.str("year").take(4),
+            trackCount = tracks.size,
+            formats = tracks.map { it.format }.distinct().joinToString(","),
+        )
+        return AlbumDetail(album, tracks, o.dbl("duration"))
+    }
+
+    fun artists(q: String = ""): List<Artist> =
+        get("/api/library/artists?sort=name" + if (q.isNotEmpty()) "&q=${enc(q)}" else "").objects().mapNotNull { Artist.from(it) }
+
+    fun tracks(q: String = "", offset: Int = 0, limit: Int = 200, sort: String = "artist"): List<Track> {
+        val qs = StringBuilder("/api/library/tracks?sort=").append(enc(sort)).append("&limit=").append(limit).append("&offset=").append(offset)
+        if (q.isNotEmpty()) qs.append("&q=").append(enc(q))
+        return get(qs.toString()).objects().mapNotNull { Track.from(it) }
+    }
+
+    fun track(id: Long): Track? = Track.from(getObject("/api/library/tracks/$id"))
+
+    fun recentAlbums(limit: Int = 30): List<Album> = get("/api/library/recent?limit=$limit").objects().mapNotNull { Album.from(it) }
+
+    fun recentPlays(limit: Int = 50): List<Track> = get("/api/library/plays/recent?limit=$limit").objects().mapNotNull { Track.from(it) }
+
+    fun shuffle(limit: Int, exclude: List<Long>): List<Track> {
+        val body = json.encodeToJsonElement(ShuffleBody.serializer(), ShuffleBody(limit, exclude.takeLast(5000)))
+        return post("/api/library/shuffle", body).objects().mapNotNull { Track.from(it) }
+    }
+
+    /** Made for you (ListenBrainz playlists): raw rows, `tracks[].library` is the library match. */
+    fun madeForYou(): List<JsonObject> = getObject("/api/discover/made-for-you").arr("playlists").objectsOf()
+
+    // ---- play log (same rules and endpoints as web/js/player.js) -----------------------------------------
+
+    fun nowPlaying(trackId: Long) {
+        post("/api/library/now-playing", json.encodeToJsonElement(PlayBody.serializer(), PlayBody(trackId)))
+    }
+
+    fun logPlay(trackId: Long, seconds: Double) {
+        post("/api/library/plays", json.encodeToJsonElement(PlayBody.serializer(), PlayBody(trackId, seconds)))
+    }
+
+    // ---- likes and playlists ---------------------------------------------------------------------------
+
+    fun likes(): Set<Long> {
+        val out = HashSet<Long>()
+        val arr = get("/api/likes")
+        if (arr is kotlinx.serialization.json.JsonArray) {
+            for (e in arr) {
+                val v = (e as? kotlinx.serialization.json.JsonPrimitive)?.content?.toDoubleOrNull()
+                if (v != null) out.add(v.toLong())
+            }
+        }
+        return out
+    }
+
+    fun like(trackId: Long) { post("/api/likes/$trackId", JsonObject(emptyMap())) }
+
+    fun unlike(trackId: Long) { call("DELETE", url("/api/likes/$trackId"), null) }
+
+    fun playlists(): List<Playlist> = get("/api/playlists").objects().mapNotNull { Playlist.from(it) }
+
+    fun playlist(id: Long): PlaylistDetail {
+        val o = getObject("/api/playlists/$id")
+        val pl = Playlist.from(o) ?: Playlist(id, o.str("name"), o.str("kind"), 0, 0, "")
+        val rows = (o.arr("items") ?: o.arr("tracks")).objectsOf().map { r ->
+            PlaylistRow(r.str("title"), r.str("artist"), Track.fromPlaylistItem(r))
+        }
+        return PlaylistDetail(pl, rows)
+    }
+
+    // ---- requests --------------------------------------------------------------------------------------
+
+    /** "Share to Encore": request whatever a link points at (POST /api/requests/link). Returns a short status line. */
+    fun requestLink(link: String): String {
+        val o = post("/api/requests/link", json.encodeToJsonElement(LinkBody.serializer(), LinkBody(link))) as? JsonObject
+            ?: return "Requested"
+        val n = o.int("requested")
+        val already = o.int("already_requested")
+        return when {
+            n > 0 -> if (n == 1) "Requested in Encore" else "Requested $n songs in Encore"
+            already > 0 -> "Already requested"
+            else -> "Nothing to request in that link"
+        }
+    }
+
+    // ---- plumbing --------------------------------------------------------------------------------------
+
+    fun get(path: String): JsonElement? = call("GET", url(path), null)
+
+    fun getObject(path: String): JsonObject = get(path) as? JsonObject ?: JsonObject(emptyMap())
+
+    fun post(path: String, body: JsonElement): JsonElement? = call("POST", url(path), body)
+
+    /** Raw GET of a server path (covers): the caller closes the response. */
+    fun rawGet(path: String): okhttp3.Response {
+        if (base.isEmpty()) throw IOException("Not signed in")
+        return client.newCall(Request.Builder().url(url(path)).build()).execute()
+    }
+
+    private fun call(method: String, fullUrl: String, body: JsonElement?): JsonElement? {
+        if (!fullUrl.startsWith("http")) throw IOException("Not signed in")
+        val rb: RequestBody? = when {
+            body != null -> json.encodeToString(JsonElement.serializer(), body).toRequestBody(jsonType)
+            method == "POST" || method == "PUT" || method == "DELETE" -> "".toRequestBody(jsonType)
+            else -> null
+        }
+        val req = Request.Builder().url(fullUrl).method(method, rb).header("Accept", "application/json").build()
+        client.newCall(req).execute().use { res ->
+            val text = res.body.string()
+            if (!res.isSuccessful) {
+                val o = parseObject(text)
+                val detail = o?.str("detail")?.ifEmpty { null } ?: "HTTP ${res.code}"
+                throw ApiException(res.code, detail, o)
+            }
+            if (text.isBlank()) return null
+            return try { json.parseToJsonElement(text) } catch (e: Exception) { throw IOException("Unexpected reply from the server") }
+        }
+    }
+
+    private fun parseObject(text: String): JsonObject? =
+        try { json.parseToJsonElement(text) as? JsonObject } catch (_: Exception) { null }
+
+    companion object {
+        /**
+         * Formats the server sends as they are (server/src/routes/library.rs `browser_type`) and ExoPlayer decodes
+         * natively: FLAC, MP3, AAC/M4A, Ogg/Opus, WAV. Everything else (DSD, APE, WavPack, WMA, AIFF, TTA, MPC …)
+         * is asked for as FLAC with `transcode=1`. ALAC inside .m4a is converted by the server on its own.
+         */
+        private val ORIGINAL_OK = setOf("mp3", "flac", "m4a", "mp4", "aac", "ogg", "opus", "oga", "wav", "webm")
+
+        fun needsTranscode(format: String): Boolean {
+            val f = format.lowercase()
+            return f.isNotEmpty() && f !in ORIGINAL_OK
+        }
+
+        fun enc(s: String): String = URLEncoder.encode(s, "UTF-8").replace("+", "%20")
+    }
+}
+
+/** A JSON array (possibly null) as its objects. */
+internal fun kotlinx.serialization.json.JsonArray?.objectsOf(): List<JsonObject> {
+    if (this == null) return emptyList()
+    val out = ArrayList<JsonObject>(size)
+    for (e in this) if (e is JsonObject) out.add(e)
+    return out
+}
