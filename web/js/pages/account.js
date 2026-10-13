@@ -12,25 +12,27 @@ export async function render(view, ctx) {
     <div class="stack" style="max-width:720px;gap:16px">
       <div class="card stack">
         <div class="row">${avatarHtml(me, 52)}
-          <div class="grow"><h2>${esc(me.username)}</h2><div class="muted small">${me.role === 'owner' ? 'Owner' : admin ? 'Administrator' : 'Member'} · joined ${fmt.ago(me.created_at)}</div></div></div>
+          <div class="grow"><div class="row" style="gap:6px;align-items:center"><h2>${esc(me.username)}</h2>${has('rename') ? `<button class="btn ghost icon sm" type="button" id="name-edit" title="Change username" aria-label="Change username">${icon.edit}</button>` : ''}</div><div class="muted small">${me.role === 'owner' ? 'Owner' : admin ? 'Administrator' : 'Member'} · joined ${fmt.ago(me.created_at)}</div></div></div>
+        ${has('rename') ? `<form class="stack" id="name-form" hidden>
+          <div class="row wrap" style="gap:10px"><input class="input grow" name="username" value="${esc(me.username)}" autocomplete="username" minlength="3" maxlength="32" required style="min-width:220px">
+            <button class="btn primary" type="submit">Save</button><button class="btn ghost" type="button" id="name-cancel">Cancel</button></div>
+          <p class="small muted" style="margin:0">What you sign in with and what others see. 3–32 letters, numbers, . _ -</p>
+          ${me.email ? '' : `<p class="small" id="name-warn" style="margin:0;color:var(--warn)">⚠ There's no email on this account, so your username is the only way you'll be able to sign in – make it one you'll remember. Add an email below to be able to reset your password.</p>`}
+        </form>` : ''}
         ${has('avatar') ? `<div class="row wrap" style="gap:8px"><label class="btn sm">${icon.upload || icon.plus}Change picture<input type="file" id="avatar-file" accept="image/*" hidden></label>
           ${me.avatar_at ? '<button class="btn sm ghost" id="avatar-remove">Remove</button>' : ''}</div>` : ''}
         <div class="small muted">Requests this week: <b>${me.requests_this_week}</b>${me.request_limit && !['admin', 'owner'].includes(me.role) ? ` of ${me.request_limit}` : ''}
           ${me.auto_approve || ['admin', 'owner'].includes(me.role) ? ' · <span class="badge ok">auto-approved</span>' : ''}</div>
       </div>
-      <form class="card stack" id="pw">
-        <h3>Change password</h3>
-        <label class="field"><span>Current password</span><input class="input" type="password" name="current" autocomplete="current-password" required></label>
-        <label class="field"><span>New password</span><input class="input" type="password" name="new" autocomplete="new-password" minlength="8" required></label>
-        <button class="btn primary" type="submit">Update password</button>
-      </form>
+      <div class="card stack" id="pw-card">
+        <div class="row" style="align-items:center"><h3 class="grow">Password</h3><button class="btn sm" type="button" id="pw-toggle">Change password</button></div>
+        <form class="stack" id="pw" hidden>
+          <label class="field"><span>Current password</span><input class="input" type="password" name="current" autocomplete="current-password" required></label>
+          <label class="field"><span>New password</span><input class="input" type="password" name="new" autocomplete="new-password" minlength="8" required></label>
+          <button class="btn primary" type="submit">Update password</button>
+        </form>
+      </div>
     </div>
-    ${has('rename') ? `<form class="card stack mt" id="name-form" style="max-width:720px">
-      <h3>Username</h3>
-      <p class="small muted" style="margin:0">What you sign in with and what others see. 3–32 letters, numbers, . _ -</p>
-      <div class="row wrap" style="gap:10px"><input class="input grow" name="username" value="${esc(me.username)}" autocomplete="username" minlength="3" maxlength="32" required style="min-width:220px">
-        <button class="btn primary" type="submit">Save</button></div>
-    </form>` : ''}
     <form class="card stack mt" id="email-form" style="max-width:720px">
       <h3>Email</h3>
       <p class="small muted" style="margin:0">Used only to send you a link if you forget your password.</p>
@@ -46,12 +48,20 @@ export async function render(view, ctx) {
     <div class="section-head"><h2>Active sessions</h2>${has('logout_all') ? `<button class="btn sm danger" id="logout-all">${icon.logout}Sign out everywhere</button>` : ''}</div>
     <div class="card flat" id="sessions"></div>
     ${admin ? '' : await (await import('./settings.js')).aboutCard()}`;
+  // username: the pencil opens the editor (with a warning when there's no email to fall back on)
+  const nameForm = view.querySelector('#name-form');
+  view.querySelector('#name-edit')?.addEventListener('click', () => { nameForm.hidden = !nameForm.hidden; if (!nameForm.hidden) nameForm.username.focus(); });
+  view.querySelector('#name-cancel')?.addEventListener('click', () => { nameForm.hidden = true; nameForm.username.value = me.username; });
+  // password: a button that opens the form
+  const pwForm = view.querySelector('#pw'), pwToggle = view.querySelector('#pw-toggle');
+  const pwShow = (on) => { pwForm.hidden = !on; pwToggle.textContent = on ? 'Cancel' : 'Change password'; if (on) pwForm.current.focus(); else pwForm.reset(); };
+  pwToggle.onclick = () => pwShow(pwForm.hidden);
   view.querySelector('#pw').onsubmit = async (e) => {
     e.preventDefault();
     try {
       await api.post('/auth/password', Object.fromEntries(new FormData(e.target)));
       toast('Password updated – other sessions signed out', 'ok');
-      e.target.reset();
+      pwShow(false);
       loadSessions();
     } catch (err) { toast(err.message, 'err'); }
   };

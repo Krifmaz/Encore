@@ -25,13 +25,15 @@ pub fn render(view: Element, ctx: Ctx) -> PageFuture {
           {}</div>"##, if me.truthy("avatar_at") { r#"<button class="btn sm ghost" id="avatar-remove">Remove</button>"# } else { "" })
         } else { String::new() };
         let rename = if has("rename") {
-            format!(r##"<form class="card stack mt" id="name-form" style="max-width:720px">
-      <h3>Username</h3>
-      <p class="small muted" style="margin:0">What you sign in with and what others see. 3–32 letters, numbers, . _ -</p>
-      <div class="row wrap" style="gap:10px"><input class="input grow" name="username" value="{}" autocomplete="username" minlength="3" maxlength="32" required style="min-width:220px">
-        <button class="btn primary" type="submit">Save</button></div>
-    </form>"##, esc(&me.s("username")))
+            format!(r##"<form class="stack" id="name-form" hidden>
+          <div class="row wrap" style="gap:10px"><input class="input grow" name="username" value="{}" autocomplete="username" minlength="3" maxlength="32" required style="min-width:220px">
+            <button class="btn primary" type="submit">Save</button><button class="btn ghost" type="button" id="name-cancel">Cancel</button></div>
+          <p class="small muted" style="margin:0">What you sign in with and what others see. 3–32 letters, numbers, . _ -</p>
+          {}
+        </form>"##, esc(&me.s("username")),
+                if me.truthy("email") { String::new() } else { r#"<p class="small" id="name-warn" style="margin:0;color:var(--warn)">⚠ There's no email on this account, so your username is the only way you'll be able to sign in – make it one you'll remember. Add an email below to be able to reset your password.</p>"#.to_string() })
         } else { String::new() };
+        let name_edit = if has("rename") { format!(r#"<button class="btn ghost icon sm" type="button" id="name-edit" title="Change username" aria-label="Change username">{}</button>"#, icon("edit")) } else { String::new() };
         let twofa = if has("totp") {
             format!(r##"<div class="card stack mt" style="max-width:720px" id="twofa"><h3>Two-step sign-in</h3>
       <p class="small muted" style="margin:0">{}</p>
@@ -46,19 +48,21 @@ pub fn render(view: Element, ctx: Ctx) -> PageFuture {
     <div class="stack" style="max-width:720px;gap:16px">
       <div class="card stack">
         <div class="row">{avatar}
-          <div class="grow"><h2>{username}</h2><div class="muted small">{role} · joined {joined}</div></div></div>
+          <div class="grow"><div class="row" style="gap:6px;align-items:center"><h2>{username}</h2>{name_edit}</div><div class="muted small">{role} · joined {joined}</div></div></div>
+        {rename}
         {avatar_block}
         <div class="small muted">Requests this week: <b>{requests}</b>{limit}
           {auto}</div>
       </div>
-      <form class="card stack" id="pw">
-        <h3>Change password</h3>
-        <label class="field"><span>Current password</span><input class="input" type="password" name="current" autocomplete="current-password" required></label>
-        <label class="field"><span>New password</span><input class="input" type="password" name="new" autocomplete="new-password" minlength="8" required></label>
-        <button class="btn primary" type="submit">Update password</button>
-      </form>
+      <div class="card stack" id="pw-card">
+        <div class="row" style="align-items:center"><h3 class="grow">Password</h3><button class="btn sm" type="button" id="pw-toggle">Change password</button></div>
+        <form class="stack" id="pw" hidden>
+          <label class="field"><span>Current password</span><input class="input" type="password" name="current" autocomplete="current-password" required></label>
+          <label class="field"><span>New password</span><input class="input" type="password" name="new" autocomplete="new-password" minlength="8" required></label>
+          <button class="btn primary" type="submit">Update password</button>
+        </form>
+      </div>
     </div>
-    {rename}
     <form class="card stack mt" id="email-form" style="max-width:720px">
       <h3>Email</h3>
       <p class="small muted" style="margin:0">Used only to send you a link if you forget your password.</p>
@@ -104,19 +108,54 @@ pub fn render(view: Element, ctx: Ctx) -> PageFuture {
             })
         };
 
+        // username: the pencil opens the editor (with a warning when there's no email to fall back on)
+        {
+            let v = view.clone();
+            dom::on_sel(&view, "#name-edit", "click", move |_| {
+                let Some(f) = dom::qs_in(&v, "#name-form").and_then(|f| f.dyn_into::<web_sys::HtmlElement>().ok()) else { return };
+                f.set_hidden(!f.hidden());
+                if !f.hidden() { if let Some(i) = dom::qs_in(&v, "#name-form [name=username]") { dom::focus(&i); } }
+            });
+            let v = view.clone();
+            let name = me.s("username");
+            dom::on_sel(&view, "#name-cancel", "click", move |_| {
+                if let Some(f) = dom::qs_in(&v, "#name-form").and_then(|f| f.dyn_into::<web_sys::HtmlElement>().ok()) { f.set_hidden(true); }
+                if let Some(i) = dom::qs_in(&v, "#name-form [name=username]") { dom::set_value(&i, &name); }
+            });
+        }
+        // password: a button that opens the form
+        let pw_show: Rc<dyn Fn(bool)> = {
+            let v = view.clone();
+            Rc::new(move |on: bool| {
+                let Some(f) = dom::qs_in(&v, "#pw").and_then(|f| f.dyn_into::<HtmlFormElement>().ok()) else { return };
+                f.set_hidden(!on);
+                if let Some(t) = dom::qs_in(&v, "#pw-toggle") { dom::set_text(&t, if on { "Cancel" } else { "Change password" }); }
+                if on { if let Some(i) = dom::qs_in(&v, "#pw [name=current]") { dom::focus(&i); } } else { f.reset(); }
+            })
+        };
+        {
+            let v = view.clone();
+            let show = pw_show.clone();
+            dom::on_sel(&view, "#pw-toggle", "click", move |_| {
+                let hidden = dom::qs_in(&v, "#pw").and_then(|f| f.dyn_into::<web_sys::HtmlElement>().ok()).map(|f| f.hidden()).unwrap_or(true);
+                show(hidden);
+            });
+        }
         {
             let ls = load_sessions.clone();
+            let show = pw_show.clone();
             dom::on_sel(&view, "#pw", "submit", move |e| {
                 dom::prevent(e);
                 let Some(form) = dom::target_el(e) else { return };
                 let ls = ls.clone();
+                let show = show.clone();
                 dom::spawn(async move {
                     // Object.fromEntries(new FormData(form)): the two named inputs
                     let body = json!({ "current": dom::value_of(&form, "[name=current]"), "new": dom::value_of(&form, "[name=new]") });
                     match api::post("/auth/password", body).await {
                         Ok(_) => {
                             toast("Password updated – other sessions signed out", "ok");
-                            if let Some(f) = form.dyn_ref::<HtmlFormElement>() { f.reset(); }
+                            show(false);
                             ls();
                         }
                         Err(err) => toast(&err.message, "err"),

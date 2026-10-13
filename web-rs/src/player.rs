@@ -1800,6 +1800,20 @@ pub fn mount() {
         let ae = document().active_element();
         if dom::key(e) == "Escape" && st(|s| s.full) { if dom::qs(".modal-bg, .menu-pop").is_none() { set_full(false); } return; }   // a window on top closes first
         let linked = is_linked();
+        // Space is play/pause anywhere except while typing – even when a player button has focus
+        // (otherwise the browser "presses" the focused button again, e.g. Previous, which restarts the song)
+        let typing = ae.as_ref().map(|a| {
+            let tag = a.tag_name();
+            let ty = a.get_attribute("type").unwrap_or_default().to_lowercase();
+            let editable = a.dyn_ref::<web_sys::HtmlElement>().map(|h| h.is_content_editable()).unwrap_or(false);
+            (tag == "INPUT" && !["range", "checkbox", "radio", "button", "submit"].contains(&ty.as_str())) || tag == "TEXTAREA" || tag == "SELECT" || editable
+        }).unwrap_or(false);
+        let space = e.dyn_ref::<KeyboardEvent>().map(|k| k.code() == "Space").unwrap_or(false);
+        if space && !typing && dom::qs(".modal-bg").is_none() {
+            e.prevent_default();
+            if cur().is_some() || linked { toggle(); }
+            return;
+        }
         let (tag, id) = ae.map(|a| (a.tag_name(), a.id())).unwrap_or_default();
         let is_field = ["INPUT", "TEXTAREA", "SELECT", "BUTTON"].iter().any(|k| tag.contains(k));
         if (cur().is_none() && !linked) || (is_field && !id.contains("seek")) { return; }
@@ -1810,6 +1824,13 @@ pub fn mount() {
         if code == "ArrowLeft" { e.prevent_default(); seek_to(at - 10.0); }
     });
     dom::keep_forever(keydown);
+    // the button press itself happens on keyup – swallow it too
+    let keyup = EventListener::new_with_options(&document(), "keyup", EventListenerOptions::enable_prevent_default(), |e: &Event| {
+        let on_button = document().active_element().map(|a| a.tag_name() == "BUTTON").unwrap_or(false);
+        let space = e.dyn_ref::<KeyboardEvent>().map(|k| k.code() == "Space").unwrap_or(false);
+        if space && on_button && dom::qs(".modal-bg").is_none() { e.prevent_default(); }
+    });
+    dom::keep_forever(keyup);
     dom::on_window("hashchange", |_| { if st(|s| s.full) { set_full(false); } });
     dom::on_window("encore:likes", |_| { LIKED.with(|l| *l.borrow_mut() = None); dom::spawn(async { likes().await; paint_likes(); }); });
     dom::on_window("encore:playback-prefs", |_| {
@@ -1917,7 +1938,7 @@ fn update_linked_time() {
 
 /// The extra buttons on the right of the bar: like, ⋯, up next, devices, volume (and close when playing here).
 fn right_html(t: Option<&Value>, closable: bool) -> String {
-    let badge = match t { Some(t) if !t.truthy("preview") => format!(r#"<span class="badge hide-sm" title="{}">{}</span>"#, esc(&quality_title(t)), esc(&quality(t))), _ => String::new() };
+    let badge = match t { Some(t) if !t.truthy("preview") => format!(r#"<button class="badge hide-sm" id="p-signal" type="button" title="{} – click for the signal path">{}</button>"#, esc(&quality_title(t)), esc(&quality(t))), _ => String::new() };
     let like = if can_like(t) { like_button("p-like", if t.is_some_and(is_liked) { "on" } else { "" }) } else { String::new() };
     let devices = if has_encore_remote() { format!(r#"<button class="btn ghost icon" id="p-devices" aria-label="Other devices" title="Play on or control your other devices">{}</button>"#, icon("devices")) } else { String::new() };
     let vol = if is_linked() { let s = link_state_value(); if s.is_nullish("volume") { "0.9".to_string() } else { s.s("volume") } } else { js_num(user_vol()) };
@@ -1939,6 +1960,7 @@ fn bind_right(ls: &mut Vec<EventListener>, el: &Element) {
     wire(ls, el, "#p-more", "click", |e| { if let Some(b) = dom::closest(e, "#p-more") { more_menu(&b); } });
     wire(ls, el, "#p-queue", "click", |_| { st_mut(|s| s.pane = "queue".into()); set_full(true); });
     wire(ls, el, "#p-devices", "click", |_| remote_open());
+    wire(ls, el, "#p-signal", "click", |_| dom::spawn(signal_path()));
     if is_linked() {
         wire(ls, el, "#vol", "change", |e| { if let Some(v) = dom::target_el(e) { set_volume(num(&dom::value(&v))); } });
     } else {
@@ -2000,14 +2022,28 @@ fn render() {
     dom::add_class(&body(), "has-player");
     let Some(t) = t else {
         let devices = if has_encore_remote() {
-            format!(r#"<div class="right"><button class="btn ghost icon" id="p-devices" aria-label="Other devices" title="Play on or control your other devices">{}</button></div>"#, icon("devices"))
+            format!(r#"<button class="btn ghost icon" id="p-devices" aria-label="Other devices" title="Play on or control your other devices">{}</button>"#, icon("devices"))
         } else { String::new() };
         set_html(&el, &format!(r##"<div class="now"><div class="thumb"><div class="ph">{music}</div></div>
       <div class="grow"><div style="font-weight:650" class="faint">Nothing playing</div>
       <div class="small muted ellipsis">Open an album in <a href="#/library" style="color:var(--accent)">Library</a> and press ▶ Play</div></div></div>
-      {devices}"##, music = icon_attr("music", r#"width="20""#)));
+      <div class="ctrls idle">
+        <div class="row">
+          <button class="btn ghost icon" id="p-prev" aria-label="Previous" disabled>{prev}</button>
+          <button class="play-btn" id="p-toggle" aria-label="Play/Pause" disabled>{play}</button>
+          <button class="btn ghost icon" id="p-next" aria-label="Next" disabled>{next}</button>
+        </div>
+        <div class="seek"><span>0:00</span><input type="range" min="0" max="1000" value="0" disabled aria-label="Seek"><span>0:00</span></div>
+      </div>
+      <div class="right">
+        {devices}
+        <span class="faint vol-ic">{volume}</span>
+        <input type="range" id="vol" min="0" max="1" step="0.01" value="{vol}">
+      </div>"##, music = icon_attr("music", r#"width="20""#), prev = icon("prev"), play = icon("play"), next = icon("next"),
+            volume = icon_attr("volume", r#"width="18""#), vol = js_num(user_vol())));
         let mut ls = Vec::new();
         wire(&mut ls, &el, "#p-devices", "click", |_| remote_open());
+        wire(&mut ls, &el, "#vol", "input", |e| { if let Some(v) = dom::target_el(e) { local_volume(num(&dom::value(&v))); } });
         set_bar(ls);
         if st(|s| s.full) { set_full(false); }
         return;

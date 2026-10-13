@@ -4,13 +4,13 @@
 <meta http-equiv="Content-Security-Policy" content="default-src 'self' ipc: http://ipc.localhost; style-src 'unsafe-inline'; script-src 'unsafe-inline'; img-src 'self' data:">
 <title>Encore</title>
 <style>
-  :root { color-scheme: dark; --bg: #0b0b12; --panel: #161622; --panel2: #1e1e2e; --border: #2a2a3d; --text: #f3f3f8; --muted: #9a9ab0; --accent: #8b5cf6; --err: #ef4444; }
+  :root { color-scheme: dark; --bg: #161617; --panel: #222224; --panel2: #2a2a2d; --border: #353538; --text: #f0ead6; --muted: #aaa493; --accent: #f0ead6; --err: #ef4444; }
   * { box-sizing: border-box; }
   html, body { height: 100%; }
   body { margin: 0; background: var(--bg); color: var(--text); font: 16px/1.45 system-ui, -apple-system, Segoe UI, Roboto, sans-serif; display: grid; place-items: center;
          padding: calc(20px + env(safe-area-inset-top)) 18px calc(20px + env(safe-area-inset-bottom)); }
   .card { width: min(480px, 100%); }
-  .logo { width: 56px; height: 56px; border-radius: 14px; background: linear-gradient(135deg, #a78bfa, #ec4899); display: grid; place-items: center; margin-bottom: 14px; }
+  .logo { margin-bottom: 14px; display: block; }
   h1 { font-size: 26px; margin: 0 0 4px; } p { color: var(--muted); margin: 0 0 20px; }
   .list { display: flex; flex-direction: column; gap: 10px; margin-bottom: 18px; }
   .srv { display: flex; align-items: center; gap: 10px; background: var(--panel); border: 1px solid var(--border); border-radius: 14px; padding: 12px 14px; }
@@ -18,7 +18,7 @@
   .srv .u { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-weight: 600; }
   button { font: inherit; border: 0; border-radius: 12px; padding: 11px 16px; background: var(--panel2); color: var(--text); cursor: pointer; }
   button:disabled { opacity: .6; cursor: default; }
-  button.primary { background: linear-gradient(135deg, #8b5cf6, #ec4899); font-weight: 650; width: 100%; padding: 13px; }
+  button.primary { background: linear-gradient(135deg, #f0ead6, #d6c49a); color: #16161f; font-weight: 650; width: 100%; padding: 13px; }
   button.x { background: transparent; color: var(--muted); padding: 8px 10px; }
   input { width: 100%; font: inherit; padding: 13px 14px; border-radius: 12px; border: 1px solid var(--border); background: var(--panel); color: var(--text); margin-bottom: 10px; }
   .err { color: var(--err); min-height: 1.4em; margin-bottom: 8px; font-size: 14px; }
@@ -27,7 +27,7 @@
 </style></head>
 <body>
 <form class="card" id="f">
-  <div class="logo"><svg width="30" height="30" viewBox="0 0 64 64"><path d="M26 44a6 6 0 1 1-4-5.66V18l20-4v24a6 6 0 1 1-4-5.66V20.9l-12 2.4z" fill="#fff"/></svg></div>
+  <div class="logo"><svg width="48" height="48" viewBox="16 15 580 580" aria-hidden="true"><path d="M249.205 114.329 L510.699 32.377 C510.699 32.377 525.463 25.913 538.636 31.22 C551.81 36.528 551.358 49.709 551.358 49.709 L550.464 99.763 C550.464 99.763 550.049 113.161 538.636 121.587 C527.224 130.012 514.95 133.407 514.95 133.407 L308.537 197.811 C298.175 201.165 275.923 206.119 273.697 229.869 C273.697 229.869 275.227 403.645 275.227 443.582 C275.227 493.942 241.622 582.872 154.358 582.872 C65.76 582.872 47.709 513.389 47.709 470.406 C47.709 412.557 102.003 373.129 140.138 369.574 C178.273 366.019 204.127 385.087 204.127 385.087 L201.373 166.271 C199.204 125.931 244.035 116.052 249.205 114.329 Z" fill="#f0ead6"/><path d="M345.928 420.623 C345.928 420.623 518.078 368.274 535.733 363.243 C553.388 358.212 564.789 368.142 564.274 383.837 L564.274 419.323 C564.274 449.986 539.212 459.963 525.178 464.079 L348.687 519.256 C329.357 525.979 320.186 517.423 320.186 498.97 L320.186 446.803 C320.186 430.002 326.687 425.907 345.928 420.623 Z" fill="#f0ead6"/><path d="M339.143 254.402 L494.664 206.043 C507.578 202.394 520.795 206.043 520.795 221.613 L520.795 239.527 C520.795 274.769 508.753 302.967 450.793 319.539 L341.142 356.25 C330.333 359.74 319.414 354.699 320.186 340.976 L319.414 282.394 C319.414 269.641 322.93 259.403 339.143 254.402 Z" fill="#f0ead6"/></svg></div>
   <h1>Encore</h1>
   <p>Choose your Encore server, or add one – the address you open Encore at in your browser.</p>
   <div class="list" id="list"></div>

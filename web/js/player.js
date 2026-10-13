@@ -1076,11 +1076,23 @@ export function mount() {
   document.addEventListener('keydown', (e) => {
     const ae = document.activeElement;
     if (e.key === 'Escape' && state.full) { if (!document.querySelector('.modal-bg, .menu-pop')) setFull(false); return; }   // a window on top closes first
+    // Space is play/pause anywhere except while typing – even when a player button has focus
+    // (otherwise the browser "presses" the focused button again, e.g. Previous, which restarts the song)
+    const typing = (ae.tagName === 'INPUT' && !/^(range|checkbox|radio|button|submit)$/.test(ae.type)) || /TEXTAREA|SELECT/.test(ae.tagName) || ae.isContentEditable;
+    if (e.code === 'Space' && !typing && !document.querySelector('.modal-bg')) {
+      e.preventDefault();
+      if (current() || link) toggle();
+      return;
+    }
     if ((!current() && !link) || (/INPUT|TEXTAREA|SELECT|BUTTON/.test(ae.tagName) && !/seek/.test(ae.id))) return;
-    if (e.code === 'Space') { e.preventDefault(); toggle(); }
     const at = link ? (link.state?.position || 0) : position();
     if (e.code === 'ArrowRight') { e.preventDefault(); seekTo(at + 10); }
     if (e.code === 'ArrowLeft') { e.preventDefault(); seekTo(at - 10); }
+  });
+  // the button press itself happens on keyup – swallow it too
+  document.addEventListener('keyup', (e) => {
+    const ae = document.activeElement;
+    if (e.code === 'Space' && ae.tagName === 'BUTTON' && !document.querySelector('.modal-bg')) e.preventDefault();
   });
   window.addEventListener('hashchange', () => { if (state.full) setFull(false); });
   window.addEventListener('encore:likes', () => { liked = null; likes().then(paintLikes); });
@@ -1161,7 +1173,7 @@ function updateLinkedTime() {
 /** The extra buttons on the right of the bar: like, ⋯, up next, devices, volume (and close when playing here). */
 function rightHtml(t, { closable }) {
   return `<div class="right">
-      ${t && !t.preview ? `<span class="badge hide-sm" title="${esc(qualityTitle(t))}">${esc(quality(t))}</span>` : ''}
+      ${t && !t.preview ? `<button class="badge hide-sm" id="p-signal" type="button" title="${esc(qualityTitle(t))} – click for the signal path">${esc(quality(t))}</button>` : ''}
       ${canLike(t) ? likeButton('p-like', isLiked(t) ? 'on' : '') : ''}
       <button class="btn ghost icon" id="p-more" aria-label="More" title="More">${icon.more}</button>
       <button class="btn ghost icon" id="p-queue" aria-label="Up next" title="Up next">${icon.list}</button>
@@ -1176,6 +1188,7 @@ function bindRight(el) {
   el.querySelector('#p-more')?.addEventListener('click', (e) => moreMenu(e.currentTarget));
   el.querySelector('#p-queue')?.addEventListener('click', () => { state.pane = 'queue'; setFull(true); });
   el.querySelector('#p-devices')?.addEventListener('click', () => window.encoreRemote.open());
+  el.querySelector('#p-signal')?.addEventListener('click', signalPath);
   const vol = el.querySelector('#vol');
   if (vol) {
     if (link) vol.onchange = (e) => setVolume(e.target.value);
@@ -1228,8 +1241,21 @@ function render() {
     el.innerHTML = `<div class="now"><div class="thumb"><div class="ph">${icon.music.replace('<svg', '<svg width="20"')}</div></div>
       <div class="grow"><div style="font-weight:650" class="faint">Nothing playing</div>
       <div class="small muted ellipsis">Open an album in <a href="#/library" style="color:var(--accent)">Library</a> and press ▶ Play</div></div></div>
-      ${window.encoreRemote ? `<div class="right"><button class="btn ghost icon" id="p-devices" aria-label="Other devices" title="Play on or control your other devices">${icon.devices}</button></div>` : ''}`;
+      <div class="ctrls idle">
+        <div class="row">
+          <button class="btn ghost icon" id="p-prev" aria-label="Previous" disabled>${icon.prev}</button>
+          <button class="play-btn" id="p-toggle" aria-label="Play/Pause" disabled>${icon.play}</button>
+          <button class="btn ghost icon" id="p-next" aria-label="Next" disabled>${icon.next}</button>
+        </div>
+        <div class="seek"><span>0:00</span><input type="range" min="0" max="1000" value="0" disabled aria-label="Seek"><span>0:00</span></div>
+      </div>
+      <div class="right">
+        ${window.encoreRemote ? `<button class="btn ghost icon" id="p-devices" aria-label="Other devices" title="Play on or control your other devices">${icon.devices}</button>` : ''}
+        <span class="faint vol-ic">${icon.volume.replace('<svg', '<svg width="18"')}</span>
+        <input type="range" id="vol" min="0" max="1" step="0.01" value="${userVol}">
+      </div>`;
     el.querySelector('#p-devices')?.addEventListener('click', () => window.encoreRemote.open());
+    el.querySelector('#vol').oninput = (e) => localVolume(e.target.value);
     if (state.full) setFull(false);
     return;
   }

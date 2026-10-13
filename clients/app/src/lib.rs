@@ -81,7 +81,7 @@ pub fn run() {
                 let ext = app.handle().clone();
                 let dl = app.handle().clone();
                 w = w.inner_size(1280.0, 860.0).min_inner_size(380.0, 500.0)
-                    .background_color(tauri::window::Color(11, 11, 18, 255))
+                    .background_color(tauri::window::Color(22, 22, 23, 255))
                     // window.open / target=_blank → the browser
                     .on_new_window(move |u, _features| { server::open_external(&ext, u.as_str()); tauri::webview::NewWindowResponse::Deny })
                     // file downloads from the web app (album zips, exports) → the Downloads folder

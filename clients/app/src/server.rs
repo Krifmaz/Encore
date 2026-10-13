@@ -15,10 +15,23 @@ fn is_app_page(u: &Url) -> bool {
     u.scheme() == "tauri" || u.host_str() == Some("tauri.localhost") || u.scheme() == "about" || u.scheme() == "blob" || u.scheme() == "data"
 }
 
-/// `u` belongs to the Encore server at `base` (same scheme, host and port, under its path).
+/// `u` belongs to the Encore server at `base`: same host and path, and the same port – or the
+/// http ↔ https upgrade a reverse proxy does (http://host → https://host), which is the same server.
 pub fn on_server(base: &str, u: &Url) -> bool {
     let Ok(b) = Url::parse(base) else { return false };
-    u.scheme() == b.scheme() && u.host_str() == b.host_str() && u.port_or_known_default() == b.port_or_known_default() && u.path().starts_with(b.path().trim_end_matches('/'))
+    let same_port = u.scheme() == b.scheme() && u.port_or_known_default() == b.port_or_known_default();
+    let upgraded = matches!(u.scheme(), "http" | "https") && matches!(b.scheme(), "http" | "https") && u.port().is_none() && b.port().is_none();
+    u.host_str() == b.host_str() && (same_port || upgraded) && u.path().starts_with(b.path().trim_end_matches('/'))
+}
+
+/// The server address a URL of it stands for: scheme://host[:port] plus any sub-path before /api/ or /#.
+fn base_of(u: &Url) -> String {
+    let mut path = u.path().to_string();
+    if let Some(i) = path.find("/api/") { path.truncate(i); }
+    // the Rust web interface lives at /next/ on the same server
+    if let Some(i) = path.find("/next/").or_else(|| path.ends_with("/next").then(|| path.len() - 5)) { path.truncate(i); }
+    let path = path.trim_end_matches('/');
+    format!("{}{}", u.origin().ascii_serialization(), path)
 }
 
 /// Navigation policy: our pages and the server stay in the window, everything else opens in the browser.
@@ -28,6 +41,11 @@ pub fn allow_navigation<R: Runtime>(app: &AppHandle<R>, u: &Url) -> bool {
     }
     let server = app.state::<State>().settings.lock().map(|s| s.server.clone()).unwrap_or_default();
     if !server.is_empty() && on_server(&server, u) {
+        return true;
+    }
+    // while the server page is still coming up, redirects (http → https, a sign-in portal in front of
+    // Encore) stay in the window; only links clicked in a running Encore go to the browser
+    if app.state::<State>().armed.load(Ordering::SeqCst) && matches!(u.scheme(), "http" | "https") {
         return true;
     }
     open_external(app, u.as_str());
@@ -41,15 +59,17 @@ pub fn open_external<R: Runtime>(app: &AppHandle<R>, url: &str) {
     }
 }
 
-/// GET /api/health: Ok(()) when an Encore server answers, otherwise the message to show.
-pub async fn probe(http: &reqwest::Client, base: &str) -> Result<(), String> {
+/// GET /api/health: Ok(the address it really answers at, after redirects) when an Encore server
+/// answers, otherwise the message to show.
+pub async fn probe(http: &reqwest::Client, base: &str) -> Result<String, String> {
     let r = http.get(format!("{base}/api/health")).timeout(std::time::Duration::from_secs(6)).send().await
         .map_err(|_| format!("No Encore server answered at {base}"))?;
     if !r.status().is_success() {
         return Err(format!("{base} answered {} – is that your Encore address?", r.status().as_u16()));
     }
+    let real = base_of(r.url());
     let ok = r.json::<serde_json::Value>().await.ok().and_then(|v| v.get("ok").and_then(|o| o.as_bool())).unwrap_or(false);
-    if ok { Ok(()) } else { Err(format!("{base} answered, but it isn't an Encore server")) }
+    if ok { Ok(real) } else { Err(format!("{base} answered, but it isn't an Encore server")) }
 }
 
 pub fn main_window<R: Runtime>(app: &AppHandle<R>) -> Option<tauri::WebviewWindow<R>> {
@@ -111,7 +131,7 @@ pub fn arm<R: Runtime>(app: &AppHandle<R>) {
         let server = st.settings.lock().map(|s| s.server.clone()).unwrap_or_default();
         match probe(&st.http, &server).await {
             Err(problem) => unreachable(&app, &problem),
-            Ok(()) => {
+            Ok(_) => {
                 // the server is fine, the page is just slow – give it a while longer
                 tokio::time::sleep(std::time::Duration::from_secs(20)).await;
                 let st = app.state::<State>();
@@ -139,6 +159,20 @@ pub fn page_alive<R: Runtime>(app: &AppHandle<R>, url: &str, encore: bool) {
     }
     let server = st.settings.lock().map(|s| s.server.clone()).unwrap_or_default();
     let Ok(u) = Url::parse(url) else { return };
+    if encore && matches!(u.scheme(), "http" | "https") {
+        // Encore came up – if a redirect moved it (http → https, another host), remember where it really is
+        let real = base_of(&u);
+        let real = real.split("/#").next().unwrap_or(&real).to_string();
+        if real != server && !real.is_empty() {
+            if let Ok(mut s) = st.settings.lock() {
+                s.forget(&server);
+                s.remember(&real);
+                config::save(app, &s);
+            }
+        }
+        disarm(app);
+        return;
+    }
     if !on_server(&server, &u) {
         return;
     }
@@ -164,7 +198,17 @@ pub async fn connect<R: Runtime>(app: &AppHandle<R>, raw: &str) -> Result<(), St
         return Err("Enter your server address".into());
     }
     let http = app.state::<State>().http.clone();
-    probe(&http, &base).await?;
+    // no scheme typed: try https first (a domain behind a reverse proxy), then plain http (a LAN address)
+    let typed_scheme = raw.trim().starts_with("http://") || raw.trim().starts_with("https://");
+    let base = if typed_scheme {
+        probe(&http, &base).await?
+    } else {
+        let https = format!("https://{}", &base["http://".len()..]);
+        match probe(&http, &https).await {
+            Ok(real) => real,
+            Err(_) => probe(&http, &base).await?,
+        }
+    };
     {
         let st = app.state::<State>();
         let mut s = st.settings.lock().map_err(|_| "settings busy")?;

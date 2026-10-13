@@ -22,7 +22,7 @@
   --shadow: 0 10px 30px rgba(0, 0, 0, .35);
   --sidebar: 236px;
   --player: 0px;
-  --player-h: 76px;
+  --player-h: 84px;
   color-scheme: dark;
 }
 :root[data-theme="encore"] {
@@ -60,6 +60,7 @@
   color-scheme: light;
 }
 * { box-sizing: border-box; }
+[hidden] { display: none !important; }   /* the hidden attribute wins over .stack / .row display rules */
 html, body { margin: 0; height: 100%; }
 body {
   background: var(--bg);
@@ -328,7 +329,7 @@ body.has-player { --player: var(--player-h); }
 }
 .player .now { display: flex; align-items: center; gap: 12px; min-width: 0; }
 .player .now .thumb { width: 48px; height: 48px; border-radius: 8px; }
-.player .ctrls { display: flex; flex-direction: column; align-items: center; gap: 4px; }
+.player .ctrls { display: flex; flex-direction: column; align-items: center; gap: 2px; padding: 6px 0; }   /* breathing room above the play button */
 .player .ctrls .row { gap: 6px; }
 .player .seek { display: flex; align-items: center; gap: 10px; width: 100%; font-size: 11px; color: var(--faint); }
 .player input[type=range] { flex: 1; min-width: 0; accent-color: var(--accent); }
@@ -339,6 +340,9 @@ body.has-player { --player: var(--player-h); }
 .player #seek::-moz-range-thumb { width: 15px; height: 15px; border-radius: 50%; background: var(--text); border: 0; }
 .player .seek span { min-width: 34px; text-align: center; font-variant-numeric: tabular-nums; }
 .player .right { display: flex; justify-content: flex-end; align-items: center; gap: 8px; min-width: 0; }
+.player > .right { grid-column: 3; }
+.player #p-signal { cursor: pointer; font: inherit; font-size: 12px; }
+.player .ctrls.idle button:disabled, .player .ctrls.idle input:disabled { opacity: .35; cursor: default; }   /* stays on the far right even when the middle (controls) is empty, e.g. nothing playing */
 .player .right input { max-width: 100px; }
 .btn.like.on { color: var(--accent); }
 .btn.like.on svg { fill: currentColor; }
@@ -360,7 +364,7 @@ button.badge { font: inherit; font-size: 11px; cursor: pointer; }
 .settings-grid > #panel { min-width: 0; }
 /* never taller than the space above the player bar – scrolls on its own instead of hiding the last items */
 .settings-nav { position: sticky; top: 20px; display: flex; flex-direction: column; gap: 2px;
-  max-height: calc(100vh - var(--player) - 40px); overflow-y: auto; overscroll-behavior: contain; scrollbar-width: thin; }
+  max-height: calc(100vh - var(--player) - 96px); overflow-y: auto; overscroll-behavior: contain; scrollbar-width: thin; }   /* 96px: the page title above it, so the last tab clears the player bar before the page scrolls */
 .settings-nav button { flex: none; }
 .settings-nav button { text-align: left; border: 0; background: transparent; padding: 9px 12px; border-radius: 9px; color: var(--muted); cursor: pointer; font-weight: 600; }
 .settings-nav button.active { background: var(--panel-2); color: var(--text); }
