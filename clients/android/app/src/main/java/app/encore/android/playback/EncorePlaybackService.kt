@@ -863,7 +863,7 @@ class EncorePlaybackService : MediaLibraryService() {
             putString(MediaConstants.EXTRAS_KEY_ERROR_RESOLUTION_ACTION_LABEL_COMPAT, "Sign in to Encore on your phone")
             putParcelable(MediaConstants.EXTRAS_KEY_ERROR_RESOLUTION_ACTION_INTENT_COMPAT, pi)
         }
-        return LibraryResult.ofError(LibraryResult.RESULT_ERROR_SESSION_AUTHENTICATION_EXPIRED, LibraryParams.Builder().setExtras(extras).build())
+        return LibraryResult.ofError<T>(LibraryResult.RESULT_ERROR_SESSION_AUTHENTICATION_EXPIRED, LibraryParams.Builder().setExtras(extras).build())
     }
 
     private fun rememberAll(items: List<MediaItem>) {
