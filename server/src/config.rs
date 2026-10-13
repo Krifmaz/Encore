@@ -94,6 +94,9 @@ impl Config {
             ("sab_api_key", Some("SAB_API_KEY"), json!(""), true),
             ("sab_category", Some("SAB_CATEGORY"), json!("encore"), false),
             ("sab_download_path", Some("SAB_DOWNLOAD_PATH"), json!("/downloads/usenet"), false),
+            // daily database backups (Settings → Scheduled tasks; the copies are under config/backups)
+            ("task_backup_enabled", Some("TASK_BACKUP_ENABLED"), json!(true), false),
+            ("task_backup_minutes", Some("TASK_BACKUP_MINUTES"), json!(1440), false),
         ] {
             if !defs.iter().any(|(n, _)| n == k) {
                 defs.push((k.to_string(), Def { env: env.map(String::from), default, secret }));

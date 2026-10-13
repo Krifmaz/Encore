@@ -7,6 +7,7 @@ pub const VERSION: &str = match option_env!("ENCORE_VERSION") {
 
 mod acoustid;
 mod auth;
+mod backup;
 mod config;
 mod connections;
 mod db;
@@ -114,7 +115,25 @@ pub fn build_state() -> anyhow::Result<AppState> {
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     tracing_subscriber::fmt().with_env_filter(tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into())).init();
-    let st = build_state()?;
+    let st = match build_state() {
+        Ok(st) => st,
+        Err(e) => {
+            if let Some(n) = e.downcast_ref::<db::NewerDatabase>() {
+                // an older image was started against a newer database: say so plainly and leave it alone
+                tracing::error!("{n}");
+                eprintln!("\n{n}\n");
+                std::process::exit(db::EXIT_NEWER_DB);
+            }
+            return Err(e);
+        }
+    };
+    // a copy of the database at least once a day, even when the server is restarted all the time
+    if backup::newest(st.data_dir()).map(|b| db::now() - b.time > 86400.0).unwrap_or(true) {
+        match st.db.backup(backup::Kind::Scheduled) {
+            Ok(b) => { st.db.log("info", &format!("Database backed up to backups/{}", b.name)); backup::prune(st.data_dir()); }
+            Err(e) => tracing::warn!("startup backup failed: {e}"),
+        }
+    }
     let port: u16 = std::env::var("ENCORE_PORT").ok().and_then(|p| p.parse().ok()).unwrap_or(8080);
     let addr = SocketAddr::from(([0, 0, 0, 0], port));
     tracing::info!("Encore {} listening on {addr}", crate::VERSION);

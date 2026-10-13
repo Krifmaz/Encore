@@ -66,6 +66,14 @@ GitHub Actions publishes `ghcr.io/krifmaz/encore` for amd64 and arm64:
 
 Every release is a normal GitHub release, tagged `v<version>` (plain MAJOR.MINOR.PATCH numbers), with the notes, server archives, compose file and Android/desktop installers attached: [github.com/Krifmaz/Encore/releases](https://github.com/Krifmaz/Encore/releases). If the repository is private, the image is too – run `docker login ghcr.io` once with a token that has `read:packages`.
 
+### Backups
+
+Encore backs up its database by itself: a copy is taken **before every upgrade** that changes the database, **once a day**, and before a restore. They live in `/config/backups` in the container (`config/encore/backups` on the host with the compose file above) as `encore-YYYYMMDD-HHMMSS.db`, with `-before-upgrade` on the pre-upgrade ones. The last 7 days are kept, then one a week for 8 weeks, plus the last 3 pre-upgrade copies. **Settings → Diagnostics → Backups** lists them with *Back up now*, *Download*, *Restore…* and *Upload a backup…* – download one now and then and keep it somewhere else.
+
+To restore: *Diagnostics → Backups → Restore…* (Encore takes a safety copy of the current data first, then reopens the database – everything saved since that backup is replaced). Or, with the container stopped, copy the file over `config/encore/encore.db` (and delete `encore.db-wal` / `encore.db-shm` if they exist) and start it again.
+
+A database written by a newer Encore is never touched by an older one: the server stops with `This database was written by a newer Encore (schema N, this server knows M) …` (exit code 3) and tells you to start the newer image again or restore a backup. `:latest` now always means the newest release, so switching back to it after trying a pinned tag never runs an older server against a newer database.
+
 ## Apps
 
 - **Android**: download `Encore-android-<version>.apk` from the [Releases page](https://github.com/Krifmaz/Encore/releases), install it, and pick your server (e.g. `http://192.168.1.10:8080`). It is the same Rust app as the desktop one (Tauri) plus a small Kotlin plugin for the media notification: music keeps playing with the screen off, with lock-screen and notification controls; *Share → Encore* from Spotify, YouTube Music or a browser downloads that link; songs and albums can be saved for offline listening, and when the server is away the app opens its offline player.

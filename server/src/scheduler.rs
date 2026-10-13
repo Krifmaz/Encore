@@ -8,7 +8,7 @@ use std::path::PathBuf;
 use std::sync::LazyLock;
 
 /// (key, name, description)
-pub const TASKS: [(&str, &str, &str); 9] = [
+pub const TASKS: [(&str, &str, &str); 10] = [
     ("scan", "Scan the library", "Pick up files added, changed or removed outside Encore."),
     ("sync", "Sync likes & playlists", "Two-way liked songs and playlist sync with Jellyfin, Plex, Navidrome, ListenBrainz, Spotify…"),
     ("lossy", "Lossless upgrades", "Re-check albums you only have as MP3/YouTube rips for a lossless copy."),
@@ -18,6 +18,7 @@ pub const TASKS: [(&str, &str, &str); 9] = [
     ("retag", "Re-tag albums added to MusicBrainz", "Albums tagged from Deezer/Apple/Discogs get proper MusicBrainz tags once they appear there."),
     ("verify", "Verify audio fingerprints", "Fingerprint unchecked songs with AcoustID and flag wrong audio."),
     ("cleanup", "Clean up", "Remove finished downloads older than the cleanup age from the list and delete leftover staging files."),
+    ("backup", "Back up the database", "Copy the database to config/backups (kept for 7 days, then one a week for 8 weeks, plus the last 3 pre-upgrade copies)."),
 ];
 
 static BOOT: LazyLock<f64> = LazyLock::new(now);
@@ -33,6 +34,7 @@ fn keys(key: &str) -> (&'static str, &'static str, i64) {
         "artwork" => ("task_artwork_enabled", "task_artwork_minutes", 1),
         "retag" => ("task_retag_enabled", "task_retag_minutes", 1),
         "verify" => ("task_verify_enabled", "task_verify_minutes", 1),
+        "backup" => ("task_backup_enabled", "task_backup_minutes", 1),
         _ => ("task_cleanup_enabled", "task_cleanup_minutes", 1),
     }
 }
@@ -122,7 +124,13 @@ pub fn tick(st: &AppState) {
         let every = minutes(st, key).max(1) as f64 * 60.0;
         // after a restart the first runs are staggered instead of all at once
         let first = match key { "scan" => 30.0, "sync" => 120.0, "cleanup" => 900.0, _ => 1800.0 };
-        let last = state(st, key).get("last_run").and_then(|v| v.as_f64()).unwrap_or(*BOOT - every + first);
+        let mut last = state(st, key).get("last_run").and_then(|v| v.as_f64()).unwrap_or(*BOOT - every + first);
+        if key == "backup" {
+            // a copy taken at start (or by hand) counts: no second one half an hour later
+            if let Some(b) = crate::backup::newest(st.data_dir()) {
+                last = last.max(b.time);
+            }
+        }
         if t - last >= every {
             run_now(st, key);
         }
@@ -154,6 +162,12 @@ async fn run(st: &AppState, key: &str) -> anyhow::Result<String> {
             dupes::verify_library(st.clone(), true).await;
             let j = jobs::get("verify");
             format!("{} verified, {} wrong", j["verified"], j["mismatch"])
+        }
+        "backup" => {
+            let b = st.db.backup(crate::backup::Kind::Scheduled)?;
+            st.db.log("info", &format!("Database backed up to backups/{}", b.name));
+            let gone = crate::backup::prune(st.data_dir());
+            format!("backups/{}{}", b.name, if gone.is_empty() { String::new() } else { format!(", {} old backup(s) removed", gone.len()) })
         }
         _ => cleanup(st)?,
     })

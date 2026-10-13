@@ -1,5 +1,5 @@
 import { api } from '../api.js';
-import { copyText, esc, fmt, icon } from '../ui.js';
+import { confirmDialog, copyText, esc, fmt, icon, toast } from '../ui.js';
 
 const KIND = { service: 'Connections', path: 'Folders & permissions', tool: 'Tools in the container' };
 
@@ -9,8 +9,62 @@ export async function render(view) {
       <div><h1>Diagnostics</h1><div class="small muted">Runs every connection, folder and tool check from inside the Encore container and shows the raw answers. Keys are hidden.</div></div>
       <div class="row"><button class="btn" id="copy" disabled>${icon.copy}Copy report</button><button class="btn primary" id="run">${icon.refresh}Run checks</button></div>
     </div>
-    <div id="diag"><div class="empty"><span class="spinner"></span></div></div>`;
+    <div id="diag"><div class="empty"><span class="spinner"></span></div></div>
+    <div class="section-head"><h2>Backups</h2>
+      <div class="row"><label class="btn sm">${icon.upload || icon.plus}Upload a backup…<input type="file" id="bk-upload" accept=".db,.sqlite,.sqlite3,application/vnd.sqlite3,application/x-sqlite3" hidden></label><button class="btn sm primary" id="bk-now">Back up now</button></div>
+    </div>
+    <div class="card flat">
+      <div class="small muted" style="margin-bottom:10px">Encore keeps copies of its database here (daily, and before every upgrade). Download one now and then to keep it somewhere else.</div>
+      <div id="backups"><div class="empty"><span class="spinner"></span></div></div>
+    </div>`;
   const box = view.querySelector('#diag');
+  const bk = view.querySelector('#backups');
+  const drawBackups = (d) => {
+    bk.innerHTML = d.backups.length ? `<div class="table-wrap"><table class="table"><thead><tr><th>Name</th><th>Size</th><th>Date</th><th>Kind</th><th></th></tr></thead><tbody>
+      ${d.backups.map(b => `<tr><td class="mono small">${esc(b.name)}</td><td class="small">${fmt.size(b.size)}</td><td class="small">${fmt.date(b.time)}</td><td><span class="badge">${esc(b.kind)}</span></td>
+        <td><div class="row" style="justify-content:flex-end;gap:6px"><a class="btn sm" href="/api/system/backups/${encodeURIComponent(b.name)}" download="${esc(b.name)}">${icon.download}Download</a><button class="btn sm" data-restore="${esc(b.name)}">Restore…</button></div></td></tr>`).join('')}
+    </tbody></table></div>` : '<div class="empty muted small">No backups yet – the first one is taken a day after the first start, or press Back up now.</div>';
+    bk.querySelectorAll('[data-restore]').forEach(b => b.onclick = async () => {
+      const name = b.dataset.restore;
+      const ok = await confirmDialog('Restore this backup?', `Encore replaces its current database with ${name}. A safety copy of the current data is taken first, then the server reopens the database: everything saved since that backup (library index, requests, playlists, settings and sign-ins) is replaced, and this page reloads – you may have to sign in again.`, 'Restore', true);
+      if (!ok) return;
+      bk.innerHTML = '<div class="empty"><span class="spinner"></span><p class="muted">Restoring – the server reopens its database, this page reloads in a moment…</p></div>';
+      try {
+        await api.post(`/system/backups/${encodeURIComponent(name)}/restore`);
+      } catch (e) {
+        toast(e.message, 'err');
+        return loadBackups();
+      }
+      toast('Backup restored', 'ok');
+      setTimeout(() => location.reload(), 2500);
+    });
+  };
+  const loadBackups = async () => {
+    try { drawBackups(await api.get('/system/backups')); } catch (e) { bk.innerHTML = `<div class="empty muted small">${esc(e.message)}</div>`; }
+  };
+  view.querySelector('#bk-now').onclick = async (e) => {
+    e.target.disabled = true;
+    try {
+      const d = await api.post('/system/backups');
+      toast(`Backed up to backups/${d.created.name}`, 'ok');
+      drawBackups(d);
+    } catch (err) { toast(err.message, 'err'); }
+    e.target.disabled = false;
+  };
+  view.querySelector('#bk-upload').addEventListener('change', async (e) => {
+    const f = e.target.files[0];
+    if (!f) return;
+    e.target.value = '';
+    bk.innerHTML = '<div class="empty"><span class="spinner"></span><p class="muted">Uploading and checking…</p></div>';
+    const fd = new FormData();
+    fd.append('file', f);
+    const r = await fetch('/api/system/backups/upload', { method: 'POST', body: fd, headers: { 'X-Requested-With': 'encore' }, credentials: 'same-origin' });
+    if (!r.ok) { toast((await r.json().catch(() => ({}))).detail || 'Upload failed', 'err'); return loadBackups(); }
+    const d = await r.json();
+    toast(`Saved as backups/${d.created.name}`, 'ok');
+    drawBackups(d);
+  });
+  loadBackups();
   let last = null;
   const run = async () => {
     box.innerHTML = '<div class="empty"><span class="spinner"></span><p class="muted">Checking…</p></div>';

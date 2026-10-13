@@ -2,12 +2,13 @@
 use crate::api::{self, ApiError};
 use crate::app::{Ctx, PageFuture};
 use crate::dom;
-use crate::json::{js_string, J};
-use crate::ui::{copy_text, esc, esck, fmt, icon};
-use serde_json::Value;
+use crate::json::{js_string, truthy, J};
+use crate::ui::{confirm_dialog, copy_text, esc, esck, fmt, icon, toast};
+use serde_json::{json, Value};
 use std::cell::RefCell;
 use std::rc::Rc;
-use web_sys::Element;
+use wasm_bindgen::JsCast;
+use web_sys::{Element, FormData, HtmlInputElement};
 
 const KIND: [(&str, &str); 3] = [("service", "Connections"), ("path", "Folders & permissions"), ("tool", "Tools in the container")];
 
@@ -26,8 +27,72 @@ pub fn render(view: Element, _ctx: Ctx) -> PageFuture {
       <div><h1>Diagnostics</h1><div class="small muted">Runs every connection, folder and tool check from inside the Encore container and shows the raw answers. Keys are hidden.</div></div>
       <div class="row"><button class="btn" id="copy" disabled>{copy}Copy report</button><button class="btn primary" id="run">{refresh}Run checks</button></div>
     </div>
-    <div id="diag"><div class="empty"><span class="spinner"></span></div></div>"#, copy = icon("copy"), refresh = icon("refresh")));
+    <div id="diag"><div class="empty"><span class="spinner"></span></div></div>
+    <div class="section-head"><h2>Backups</h2>
+      <div class="row"><label class="btn sm">{up}Upload a backup…<input type="file" id="bk-upload" accept=".db,.sqlite,.sqlite3,application/vnd.sqlite3,application/x-sqlite3" hidden></label><button class="btn sm primary" id="bk-now">Back up now</button></div>
+    </div>
+    <div class="card flat">
+      <div class="small muted" style="margin-bottom:10px">Encore keeps copies of its database here (daily, and before every upgrade). Download one now and then to keep it somewhere else.</div>
+      <div id="backups"><div class="empty"><span class="spinner"></span></div></div>
+    </div>"#, copy = icon("copy"), refresh = icon("refresh"),
+            // `icon.upload || icon.plus`
+            up = { let u = icon("upload"); if u.is_empty() { icon("plus") } else { u } }));
         let Some(diag) = dom::qs_in(&view, "#diag") else { return Err("#diag is missing".into()) };
+        let Some(bk) = dom::qs_in(&view, "#backups") else { return Err("#backups is missing".into()) };
+        {
+            let bk2 = bk.clone();
+            dom::on_sel(&view, "#bk-now", "click", move |e| {
+                let Some(btn) = dom::target_el(e) else { return };
+                let bk = bk2.clone();
+                dom::spawn(async move {
+                    dom::set_disabled(&btn, true);
+                    match api::post_empty("/system/backups").await {
+                        Ok(d) => {
+                            toast(&format!("Backed up to backups/{}", d.g("created").s("name")), "ok");
+                            draw_backups(&bk, &d);
+                        }
+                        Err(err) => toast(&err.message, "err"),
+                    }
+                    dom::set_disabled(&btn, false);
+                });
+            });
+        }
+        {
+            let bk2 = bk.clone();
+            dom::on_sel(&view, "#bk-upload", "change", move |e| {
+                let Some(input) = dom::target_el(e).and_then(|t| t.dyn_into::<HtmlInputElement>().ok()) else { return };
+                let Some(f) = input.files().and_then(|l| l.get(0)) else { return };
+                input.set_value("");
+                let bk = bk2.clone();
+                dom::spawn(async move {
+                    dom::set_html(&bk, r#"<div class="empty"><span class="spinner"></span><p class="muted">Uploading and checking…</p></div>"#);
+                    let Ok(fd) = FormData::new() else { return };
+                    let _ = fd.append_with_blob("file", &f);
+                    let req = gloo_net::http::RequestBuilder::new("/api/system/backups/upload")
+                        .method(gloo_net::http::Method::POST)
+                        .header("X-Requested-With", "encore")
+                        .credentials(web_sys::RequestCredentials::SameOrigin)
+                        .body(fd);
+                    let Ok(req) = req else { return };
+                    let Ok(r) = req.send().await else { return };
+                    if !r.ok() {
+                        // (await r.json().catch(() => ({}))).detail || 'Upload failed'
+                        let data: Value = r.text().await.ok().and_then(|t| serde_json::from_str(&t).ok()).unwrap_or_else(|| json!({}));
+                        let detail = data.g("detail");
+                        toast(&if truthy(detail) { js_string(detail) } else { "Upload failed".to_string() }, "err");
+                        load_backups(&bk).await;
+                        return;
+                    }
+                    let d: Value = r.text().await.ok().and_then(|t| serde_json::from_str(&t).ok()).unwrap_or(Value::Null);
+                    toast(&format!("Saved as backups/{}", d.g("created").s("name")), "ok");
+                    draw_backups(&bk, &d);
+                });
+            });
+        }
+        {
+            let bk = bk.clone();
+            dom::spawn(async move { load_backups(&bk).await });
+        }
         let last: Rc<RefCell<Option<Value>>> = Rc::new(RefCell::new(None));
         {
             let (v, d, l) = (view.clone(), diag.clone(), last.clone());
@@ -48,6 +113,47 @@ pub fn render(view: Element, _ctx: Ctx) -> PageFuture {
         run(view, diag, last).await.map_err(|e| e.message)?;
         Ok(())
     })
+}
+
+/// The JS `drawBackups`: the Backups table with Download / Restore… per row.
+fn draw_backups(bk: &Element, d: &Value) {
+    let list = d.a("backups");
+    if list.is_empty() {
+        dom::set_html(bk, r#"<div class="empty muted small">No backups yet – the first one is taken a day after the first start, or press Back up now.</div>"#);
+    } else {
+        let rows: String = list.iter().map(|b| format!(r#"<tr><td class="mono small">{name}</td><td class="small">{size}</td><td class="small">{date}</td><td><span class="badge">{kind}</span></td>
+        <td><div class="row" style="justify-content:flex-end;gap:6px"><a class="btn sm" href="/api/system/backups/{href}" download="{name}">{dl}Download</a><button class="btn sm" data-restore="{name}">Restore…</button></div></td></tr>"#,
+            name = esck(b, "name"), size = fmt::size(b.f("size")), date = fmt::date(b.f("time")), kind = esck(b, "kind"),
+            href = String::from(js_sys::encode_uri_component(&b.s("name"))), dl = icon("download"))).collect();
+        dom::set_html(bk, &format!(r#"<div class="table-wrap"><table class="table"><thead><tr><th>Name</th><th>Size</th><th>Date</th><th>Kind</th><th></th></tr></thead><tbody>
+      {rows}
+    </tbody></table></div>"#));
+    }
+    let bk2 = bk.clone();
+    dom::on_each(bk, "[data-restore]", "click", move |el, _| {
+        let name = dom::data(el, "restore");
+        let bk = bk2.clone();
+        dom::spawn(async move {
+            let ok = confirm_dialog("Restore this backup?", &format!("Encore replaces its current database with {name}. A safety copy of the current data is taken first, then the server reopens the database: everything saved since that backup (library index, requests, playlists, settings and sign-ins) is replaced, and this page reloads – you may have to sign in again."), "Restore", true).await;
+            if !ok { return; }
+            dom::set_html(&bk, r#"<div class="empty"><span class="spinner"></span><p class="muted">Restoring – the server reopens its database, this page reloads in a moment…</p></div>"#);
+            if let Err(e) = api::post_empty(&format!("/system/backups/{}/restore", String::from(js_sys::encode_uri_component(&name)))).await {
+                toast(&e.message, "err");
+                load_backups(&bk).await;
+                return;
+            }
+            toast("Backup restored", "ok");
+            dom::timeout(2500, dom::reload);
+        });
+    });
+}
+
+/// The JS `loadBackups`.
+async fn load_backups(bk: &Element) {
+    match api::get("/system/backups").await {
+        Ok(d) => draw_backups(bk, &d),
+        Err(e) => dom::set_html(bk, &format!(r#"<div class="empty muted small">{}</div>"#, esc(&e.message))),
+    }
 }
 
 /// The JS `run`: fetch the checks and draw them into `#diag` (the result is kept in `last` for the report).

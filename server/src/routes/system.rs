@@ -1,11 +1,15 @@
-//! /api/system: service status, connection tests, downloader queues; /api/discover/probe.
+//! /api/system: service status, connection tests, downloader queues, database backups; /api/discover/probe.
 use crate::auth::{Admin, User};
+use crate::backup;
 use crate::db::RowExt;
 use crate::error::{err, ApiResult};
 use crate::sources::{slskd, streamrip, torznab, ytdlp};
 use crate::state::AppState;
 use crate::{acoustid, email, notify, p};
-use axum::extract::{Path, Query, State};
+use axum::body::Body;
+use axum::extract::{DefaultBodyLimit, Multipart, Path, Query, State};
+use axum::http::header;
+use axum::response::Response;
 use axum::routing::{get, post};
 use axum::{Json, Router};
 use serde::Deserialize;
@@ -18,7 +22,120 @@ pub fn router() -> Router<AppState> {
         .route("/api/system/streamrip/tidal-login", post(tidal_login_start).get(tidal_login_status))
         .route("/api/system/downloads", get(downloads))
         .route("/api/system/downloads/slskd/clear", post(clear_slskd))
+        .route("/api/system/backups", get(backups).post(backup_now))
+        .route("/api/system/backups/upload", post(backup_upload).layer(DefaultBodyLimit::max(4 << 30)))
+        .route("/api/system/backups/{name}", get(backup_download))
+        .route("/api/system/backups/{name}/restore", post(backup_restore))
         .route("/api/discover/probe", get(probe))
+}
+
+// ---- database backups (Settings → Diagnostics → Backups) ----------------------------------------
+
+fn backups_json(st: &AppState) -> Value {
+    json!({ "backups": backup::list(st.data_dir()).iter().map(|b| b.json()).collect::<Vec<_>>(), "dir": backup::dir(st.data_dir()), "schema": crate::db::SCHEMA_VERSION })
+}
+
+async fn backups(State(st): State<AppState>, Admin(_): Admin) -> ApiResult<Json<Value>> {
+    Ok(Json(backups_json(&st)))
+}
+
+/// "Back up now".
+async fn backup_now(State(st): State<AppState>, Admin(u): Admin) -> ApiResult<Json<Value>> {
+    let db = st.db.clone();
+    let b = tokio::task::spawn_blocking(move || db.backup(backup::Kind::Scheduled)).await.map_err(|e| err(500, e.to_string()))??;
+    st.db.log("info", &format!("{} backed up the database to backups/{}", u.s("username"), b.name));
+    backup::prune(st.data_dir());
+    let mut out = backups_json(&st);
+    out["created"] = b.json();
+    Ok(Json(out))
+}
+
+/// The backup file itself, for safekeeping somewhere else.
+async fn backup_download(State(st): State<AppState>, Admin(_): Admin, Path(name): Path<String>) -> ApiResult<Response> {
+    if !backup::valid_name(&name) {
+        return Err(err(400, "Not a backup name"));
+    }
+    let path = backup::dir(st.data_dir()).join(&name);
+    let f = tokio::fs::File::open(&path).await.map_err(|_| err(404, "No such backup"))?;
+    let len = f.metadata().await.map(|m| m.len()).unwrap_or(0);
+    let body = Body::from_stream(tokio_util::io::ReaderStream::new(f));
+    Response::builder()
+        .header(header::CONTENT_TYPE, "application/vnd.sqlite3")
+        .header(header::CONTENT_LENGTH, len)
+        .header(header::CONTENT_DISPOSITION, format!("attachment; filename=\"{name}\""))
+        .body(body)
+        .map_err(|e| err(500, e.to_string()))
+}
+
+/// Replace the database with a backup: a safety copy of the current one is taken first.
+async fn backup_restore(State(st): State<AppState>, Admin(u): Admin, Path(name): Path<String>) -> ApiResult<Json<Value>> {
+    if !backup::valid_name(&name) {
+        return Err(err(400, "Not a backup name"));
+    }
+    let path = backup::dir(st.data_dir()).join(&name);
+    if !path.is_file() {
+        return Err(err(404, "No such backup"));
+    }
+    let db = st.db.clone();
+    let safety = tokio::task::spawn_blocking(move || db.restore(&path)).await.map_err(|e| err(500, e.to_string()))?.map_err(|e| err(400, e.to_string()))?;
+    // everything cached from the old database is stale now
+    st.cfg.reload()?;
+    st.cache.lock().unwrap().clear();
+    crate::auth::ensure_owner(&st)?;
+    st.db.log("warning", &format!("{} restored the database from backups/{} (the data from before is in backups/{})", u.s("username"), name, safety.name));
+    tracing::info!("database restored from backups/{name} by {}", u.s("username"));
+    let mut out = backups_json(&st);
+    out["ok"] = json!(true);
+    out["safety"] = safety.json();
+    Ok(Json(out))
+}
+
+/// "Upload a backup…": the file is kept as a backup once it proves to be a sound SQLite database.
+async fn backup_upload(State(st): State<AppState>, Admin(u): Admin, mut form: Multipart) -> ApiResult<Json<Value>> {
+    let dir = backup::dir(st.data_dir());
+    std::fs::create_dir_all(&dir).map_err(|e| err(500, e.to_string()))?;
+    let tmp = dir.join(format!("upload-{}.part", crate::auth::random_hex(8)));
+    let mut size: u64 = 0;
+    let mut head: Vec<u8> = Vec::new();
+    {
+        use tokio::io::AsyncWriteExt;
+        let mut out = tokio::fs::File::create(&tmp).await.map_err(|e| err(500, e.to_string()))?;
+        while let Some(mut f) = form.next_field().await.map_err(|e| err(400, e.to_string()))? {
+            if size > 0 {
+                break;
+            }
+            while let Some(chunk) = f.chunk().await.map_err(|e| err(400, e.to_string()))? {
+                if head.len() < 16 {
+                    head.extend_from_slice(&chunk[..chunk.len().min(16 - head.len())]);
+                }
+                size += chunk.len() as u64;
+                if let Err(e) = out.write_all(&chunk).await {
+                    let _ = tokio::fs::remove_file(&tmp).await;
+                    return Err(err(500, e.to_string()));
+                }
+            }
+        }
+        let _ = out.flush().await;
+    }
+    if size == 0 || head.len() < 16 || head.as_slice() != backup::SQLITE_HEADER {
+        let _ = std::fs::remove_file(&tmp);
+        return Err(err(400, "That file isn't a SQLite database (an Encore backup is encore-….db)"));
+    }
+    let check = tmp.clone();
+    let version = match tokio::task::spawn_blocking(move || backup::validate_file(&check)).await.map_err(|e| err(500, e.to_string()))? {
+        Ok(v) => v,
+        Err(e) => {
+            let _ = std::fs::remove_file(&tmp);
+            return Err(err(400, format!("That database doesn't pass SQLite's integrity check: {e}")));
+        }
+    };
+    let name = backup::file_name(backup::Kind::Uploaded, crate::db::now());
+    std::fs::rename(&tmp, dir.join(&name)).map_err(|e| err(500, e.to_string()))?;
+    st.db.log("info", &format!("{} uploaded a database backup as backups/{name}", u.s("username")));
+    tracing::info!("backup uploaded as backups/{name} ({size} bytes, schema {version})");
+    let mut out = backups_json(&st);
+    out["created"] = json!({ "name": name, "size": size, "time": crate::db::now(), "kind": backup::Kind::Uploaded.label(), "schema": version });
+    Ok(Json(out))
 }
 
 fn which(name: &str) -> bool {
