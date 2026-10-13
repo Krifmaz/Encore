@@ -1,4 +1,4 @@
-//! Settings: defaults (shared with the previous server via defaults.json), overridden by values saved in
+//! Settings: defaults (defaults.json, shared with older servers), overridden by values saved in
 //! the UI, overridden by environment variables (shown as locked in the UI).
 use crate::db::Db;
 use crate::p;
@@ -74,7 +74,7 @@ impl Config {
                 (k, d)
             })
             .collect();
-        // settings added by the Rust server
+        // settings added by newer servers
         for (k, env, default, secret) in [
             ("email_login", Some("ENCORE_EMAIL_LOGIN"), json!(true), false),
             // the native app's sign-in: counted from the last use (sliding), unlike session_days

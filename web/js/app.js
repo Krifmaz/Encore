@@ -59,7 +59,7 @@ function parseHash() {
 }
 
 
-/** Profile picture (Encore 2) or the first letter of the name. */
+/** Profile picture or the first letter of the name. */
 export function avatarHtml(u, size = 32) {
   const style = size !== 32 ? ` style="width:${size}px;height:${size}px;font-size:${Math.round(size * 0.42)}px"` : '';
   return u.avatar_at

@@ -83,7 +83,7 @@ function native() {
 window.encorePlayer = { toggle: () => toggle(), next: () => next(), prev: () => prev(), open: () => setFull(true) };
 export function current() { return state.queue[state.index] || null; }
 
-// ---- linked: this device is locked as a remote for another one (Encore 2) ----
+// ---- linked: this device is locked as a remote for another one ----
 // Everything you play or press here goes to that device; nothing plays locally until you unlink.
 let link = null;   // { id, name, state, online, send(cmd) }
 let local = false; // true while running a command another device sent us (never forward those)
@@ -124,7 +124,7 @@ const nowTrack = () => link ? remoteTrack() : current();
 const nowPosition = () => link ? (link.state?.position || 0) : position();
 const nowPlaying = () => link ? !!link.state?.playing : !!(audio && !audio.paused);
 
-// ---- remote control (Encore 2): what this device is playing, and commands from your other devices ----
+// ---- remote control: what this device is playing, and commands from your other devices ----
 const slim = (t) => ({ id: t.id, title: t.title, artist: t.artist, album: t.album, album_id: t.album_id, format: t.format, duration: t.duration });
 export function snapshot() {
   const t = current();
@@ -330,7 +330,7 @@ function load({ transcode = false, offset = 0, rung = null, dsp = null, resume =
     state.logged = false;
     state.stalls = [];
     state.stepAt = 0;
-    // "now playing" on Last.fm / ListenBrainz (Encore 2)
+    // "now playing" on Last.fm / ListenBrainz
     if (typeof t.id === 'number' && state.announced !== t) { state.announced = t; api.post('/library/now-playing', { track_id: t.id }).catch(() => {}); }
   }
   const url = streamUrl(t, { transcode: state.transcoded && !state.lossy && !state.dsp, rung: state.rung, dsp: state.dsp, offset: serverOffset });

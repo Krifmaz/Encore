@@ -1,5 +1,5 @@
 // Appearance: theme, accent colour and background style. Applied before the app draws
-// (from this device's copy), then synced with the account on servers that store preferences (Encore 2).
+// (from this device's copy), then synced with the account on servers that store preferences.
 import { api } from './api.js';
 
 export const ACCENTS = [

@@ -1,6 +1,6 @@
 name: test-and-build
 
-# Encore: the Rust server + web app. Runs the tests and checks that the Docker image builds – on pull
+# Encore: the server + web app. Runs the tests and checks that the Docker image builds – on pull
 # requests and by hand only, to keep Actions minutes down. Images are only published by the release
 # workflow: :latest (releases) and :edge (pre-releases).
 on:

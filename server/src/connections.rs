@@ -1,5 +1,5 @@
 //! Per-user account connections (streaming services + media servers) and their credentials.
-//! Stored data has the same shape as Encore 1, so connections keep working when switching servers.
+//! Stored data has the same shape as on older servers, so connections keep working after an upgrade.
 use crate::db::{now, Row, RowExt};
 use crate::p;
 use crate::state::AppState;

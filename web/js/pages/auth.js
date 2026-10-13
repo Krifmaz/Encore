@@ -44,7 +44,7 @@ function forgotForm(root) {
   };
 }
 
-/** Sign-in link from an email (Encore 2). Accounts with two-step sign-in also enter their code. */
+/** Sign-in link from an email. Accounts with two-step sign-in also enter their code. */
 function magicPage(root, query, app) {
   root.innerHTML = `<div class="auth-wrap"><div class="auth-card">
       <div class="brand">${logo()}${app}</div>

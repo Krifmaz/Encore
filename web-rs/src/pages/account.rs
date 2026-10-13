@@ -197,7 +197,7 @@ pub fn render(view: Element, ctx: Ctx) -> PageFuture {
                 }
             });
         });
-        // profile picture (Encore 2)
+        // profile picture
         dom::on_sel(&view, "#avatar-file", "change", |e| {
             let Some(f) = dom::target_el(e).and_then(|t| t.dyn_into::<HtmlInputElement>().ok()).and_then(|i| i.files()).and_then(|l| l.get(0)) else { return };
             dom::spawn(async move {
@@ -224,7 +224,7 @@ pub fn render(view: Element, ctx: Ctx) -> PageFuture {
         dom::on_sel(&view, "#avatar-remove", "click", |_| dom::spawn(async {
             if api::del("/auth/avatar").await.is_ok() { dom::spawn(app::refresh_user()); }
         }));
-        // two-step sign-in (Encore 2)
+        // two-step sign-in
         {
             let (v, c) = (view.clone(), ctx.clone());
             dom::on_sel(&view, "#twofa-on", "click", move |_| {

@@ -78,7 +78,7 @@ export async function render(view, ctx) {
     e.preventDefault();
     try { await api.put('/auth/profile', { email: e.target.email.value }); toast('Email saved', 'ok'); } catch (err) { toast(err.message, 'err'); }
   };
-  // profile picture (Encore 2)
+  // profile picture
   view.querySelector('#avatar-file')?.addEventListener('change', async (e) => {
     const f = e.target.files[0];
     if (!f) return;
@@ -90,7 +90,7 @@ export async function render(view, ctx) {
     refreshUser();
   });
   view.querySelector('#avatar-remove')?.addEventListener('click', async () => { await api.del('/auth/avatar'); refreshUser(); });
-  // two-step sign-in (Encore 2)
+  // two-step sign-in
   view.querySelector('#twofa-on')?.addEventListener('click', async () => {
     let s;
     try { s = await api.post('/auth/2fa/setup'); } catch (e) { return toast(e.message, 'err'); }

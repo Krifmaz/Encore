@@ -1,4 +1,4 @@
-//! SQLite, shared with the previous Python server: same file, same tables, so upgrading keeps everything.
+//! SQLite, same file and tables as older servers, so upgrading keeps everything.
 //! Rows come back as JSON objects, which is what the API returns anyway.
 use rusqlite::types::{Value as SqlValue, ValueRef};
 use rusqlite::{params_from_iter, Connection};
@@ -32,7 +32,7 @@ const MIGRATIONS: &[(&str, &str, &str)] = &[
     ("users", "auto_download", "INTEGER NOT NULL DEFAULT 1"),
     ("users", "prefs", "TEXT NOT NULL DEFAULT '{}'"),
     ("users", "perms", "TEXT NOT NULL DEFAULT '{}'"),
-    // Rust server additions
+    // columns added by newer servers
     ("users", "totp_secret", "TEXT"),
     ("users", "totp_enabled", "INTEGER NOT NULL DEFAULT 0"),
     ("users", "avatar_at", "REAL"),

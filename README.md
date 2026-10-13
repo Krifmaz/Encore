@@ -2,7 +2,7 @@
 
 A self-hosted music request and library app. Your users sign in, search the whole MusicBrainz catalogue, request artists, albums or songs, and play what is already in your library. All of it happens in one modern web UI. Behind the scenes, Encore has its own Soulseek client and runs your torrent/Usenet indexers (through Prowlarr), streamrip and yt-dlp for you. Only Encore needs to be reachable from the internet.
 
-Encore 2 is a single Rust program with the web app built in: fast, small, and no Lidarr needed.
+Encore is a single Rust program with the web app built in: fast, small, and no Lidarr needed.
 
 ## Features
 
@@ -126,7 +126,7 @@ Set **Settings → General → Public URL** (for example `https://music.example.
 | Symptom | Fix |
 |---|---|
 | A setting won't change in the UI | It's set by an environment variable (the field shows 🔒 and the variable name). Environment variables always win, so change it in your compose file. |
-| Coming from Encore 1 (Python) | Just switch the image to `:latest` and keep the same `/config`: the database is shared. Lidarr settings are ignored; set up Prowlarr instead if you want torrents/Usenet. |
+| Upgrading from an older Encore image | Switch the image to `:latest` and keep the same `/config`: the database is shared. Lidarr settings are ignored; set up Prowlarr instead if you want torrents/Usenet. |
 | Soulseek: `Not signed in: login refused: INVALIDPASS` | The username already exists on Soulseek with another password. Pick a new username (the account is created at the first sign-in) or enter the right password. |
 | `401 … API key rejected` (slskd) | The key in Encore doesn't match `web.authentication.api_keys` in `slskd.yml`, or the key's `cidr` doesn't include Encore's IP. Don't put quotes around values in `- KEY=value` lines. |
 | `Can't find host 'slskd'` | Use the service or container name on the same Docker network. Behind gluetun, use the gluetun container's name. |
@@ -188,7 +188,7 @@ cargo test
 ENCORE_CONFIG_DIR=../data ENCORE_STATIC_DIR=../web ENCORE_LIBRARY_PATH=~/Music ENCORE_PORT=8080 cargo run
 ```
 
-- `server/`: the Rust server (axum, SQLite, lofty for tags, Chromaprint via `fpcalc`). yt-dlp and streamrip are run as programs; the Docker image includes them.
+- `server/`: the server (Rust: axum, SQLite, lofty for tags, Chromaprint via `fpcalc`). yt-dlp and streamrip are run as programs; the Docker image includes them.
 - `web/`: the web app, plain ES modules with no build step. Edit and reload.
 - `clients/app/`: the desktop and Android app (Rust, Tauri) – `cargo tauri dev` or `cargo tauri android dev` in that folder; `plugins/media/` is the Kotlin half (media notification, share intent, downloads).
 - **Building the apps for a release on your own machine** (no Actions minutes): `scripts/release-apps.sh` builds this OS's installer plus the Android APK and attaches them to the newest GitHub release (`scripts/release-apps.sh 2026.10.12.1-edge` for a specific one; `--android` / `--desktop` for one of the two, `--no-upload` to only build into `out/`). Windows builds the `.exe` from Git Bash, Linux the `.AppImage`/`.deb`/`.rpm`, a Mac the `.dmg`; the APK builds anywhere the Android SDK + NDK and a JDK are installed. Needs the `gh` CLI signed in.

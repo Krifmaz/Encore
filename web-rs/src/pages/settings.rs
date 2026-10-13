@@ -499,7 +499,7 @@ impl Hub {
         }
     }
 
-    // Encore's own API key, at the bottom of General (only the owner may see it on Encore 2)
+    // Encore's own API key, at the bottom of General (only the owner may see it)
     async fn api_card(&self) -> String {
         let key = match api::get("/system/api-key").await { Ok(r) => r.s("api_key"), Err(_) => return String::new() };
         let panel = self.panel.clone();
@@ -548,7 +548,7 @@ fn show(hub: &Rc<Hub>, id: String, flash: Option<Value>) -> Pin<Box<dyn Future<O
         }
         if id == "about" || id == "api" || id == "keys" { return show(&hub, "general".to_string(), None).await; }
         let group = GROUPS.iter().find(|g| g.id == id).unwrap_or(&GROUPS[0]);
-        // only what this server has: Encore 2 (Rust) has Prowlarr instead of Lidarr
+        // only what this server has: Encore has Prowlarr instead of Lidarr
         let secs: Vec<(&'static Section, Vec<Field>)> = {
             let values = hub.values.borrow();
             group.sections()
@@ -776,7 +776,7 @@ pub fn render(view: Element, ctx: Ctx) -> PageFuture {
 /// Version, build and app downloads – shown at the bottom of General (and of Account for members).
 pub async fn about_card() -> String {
     let info = app::info();
-    let server = if info.s("server") == "rust" { "Encore 2 (Rust)" } else { "Encore 1 (Python)" };
+    let server = "Encore";
     let version = { let v = info.g("version"); if truthy(v) { js_string(v) } else { "?".to_string() } };
     let build = { let v = info.g("build"); if truthy(v) { js_string(v) } else { "dev".to_string() } };
     format!(r##"<div class="card stack mt"><h2>About Encore</h2>

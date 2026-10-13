@@ -7,7 +7,7 @@ This document replaces reading the file. Everything below (markup, text, keys, U
 
 ## 1. Purpose and exports
 
-The persistent bottom player bar (`#player`), the full-screen "now playing" view (`#np-full`, tabs Now playing / Lyrics / Up next), the play queue, two `<audio>` elements (current + pre-buffered next), library-shuffle continuation when the queue ends, synced lyrics, play logging/scrobble triggers, MediaSession, native-app bridge (`window.EncoreNative`), and the "linked remote" mode where this device only sends commands to another device (Encore 2 remote).
+The persistent bottom player bar (`#player`), the full-screen "now playing" view (`#np-full`, tabs Now playing / Lyrics / Up next), the play queue, two `<audio>` elements (current + pre-buffered next), library-shuffle continuation when the queue ends, synced lyrics, play logging/scrobble triggers, MediaSession, native-app bridge (`window.EncoreNative`), and the "linked remote" mode where this device only sends commands to another device (remote).
 
 ### Exports
 

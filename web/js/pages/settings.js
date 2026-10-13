@@ -298,7 +298,7 @@ export async function render(view, ctx) {
     if (EMBEDDED[id]) { panel.innerHTML = '<div class="skeleton" style="height:200px"></div>'; return EMBEDDED[id](panel, ctx); }
     if (id === 'about' || id === 'api' || id === 'keys') return show('general');
     const group = GROUPS.find(g => g.id === id) || GROUPS[0];
-    // only what this server has: Encore 2 (Rust) has Prowlarr instead of Lidarr
+    // only what this server has: Encore has Prowlarr instead of Lidarr
     const secs = group.sections.map(sid => SECTIONS.find(x => x.id === sid))
       .map(sec => ({ ...sec, fields: sec.fields.filter(f => f.key in values) })).filter(sec => sec.fields.length);
     if (secs.some(x => x.id === 'lidarr') && values.lidarr_api_key && !lidarrOpts) {
@@ -407,7 +407,7 @@ export async function render(view, ctx) {
     }
   };
 
-  // Encore's own API key, at the bottom of General (only the owner may see it on Encore 2)
+  // Encore's own API key, at the bottom of General (only the owner may see it)
   const apiCard = async () => {
     let key;
     try { key = (await api.get('/system/api-key')).api_key; } catch { return ''; }
@@ -511,7 +511,7 @@ function bindTidal(card) {
 /** Version, build and app downloads – shown at the bottom of General (and of Account for members). */
 export async function aboutCard() {
   const info = (await import('../app.js')).session.info || {};
-  const server = info.server === 'rust' ? 'Encore 2 (Rust)' : 'Encore 1 (Python)';
+  const server = 'Encore';
   return `<div class="card stack mt"><h2>About Encore</h2>
     <div class="row wrap" style="gap:24px"><div><div class="small muted">Version</div><div style="font-weight:700;font-size:20px">v${esc(info.version || '?')}</div></div>
       <div><div class="small muted">Server</div><div>${esc(server)}</div></div>

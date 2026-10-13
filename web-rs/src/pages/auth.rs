@@ -99,7 +99,7 @@ fn forgot_form(root: &Element) {
     });
 }
 
-/// Sign-in link from an email (Encore 2). Accounts with two-step sign-in also enter their code.
+/// Sign-in link from an email. Accounts with two-step sign-in also enter their code.
 fn magic_page(root: &Element, query: &HashMap<String, String>, app: &str) {
     dom::set_html(root, &format!(r#"<div class="auth-wrap"><div class="auth-card">
       <div class="brand">{}{app}</div>

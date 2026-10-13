@@ -1,5 +1,5 @@
 //! The music library: scan files into the database, read tags, find covers, make thumbnails.
-//! Album ids are computed exactly like Encore 1 (sha1 of "albumartist|album"), so links keep working.
+//! Album ids are computed exactly like older servers did (sha1 of "albumartist|album"), so links keep working.
 use crate::db::{now, Db, Row, RowExt};
 use crate::p;
 use lofty::file::{AudioFile, TaggedFileExt};
@@ -48,7 +48,7 @@ fn num(s: Option<String>) -> Option<i64> {
     s.and_then(|v| v.split('/').next().and_then(|n| n.trim().parse().ok()))
 }
 
-/// Tags of one file, same shape as Encore 1 (missing artist/album fall back to the folder names).
+/// Tags of one file, same shape as on older servers (missing artist/album fall back to the folder names).
 pub fn read_tags(path: &str) -> Row {
     let tagged = lofty::read_from_path(path).ok();
     let tag = tagged.as_ref().and_then(|t| t.primary_tag().or_else(|| t.first_tag()));

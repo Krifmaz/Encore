@@ -341,7 +341,7 @@ fn expose_global() {
 }
 pub fn current() -> Option<Value> { cur().map(|t| (*t).clone()) }
 
-// ---- linked: this device is locked as a remote for another one (Encore 2) ----
+// ---- linked: this device is locked as a remote for another one ----
 // Everything you play or press here goes to that device; nothing plays locally until you unlink.
 fn via_link(c: Value) -> bool {
     if is_local() { return false; }
@@ -416,7 +416,7 @@ fn now_track() -> Option<Value> { if is_linked() { remote_track() } else { curre
 fn now_position() -> f64 { if is_linked() { link_state_value().f("position") } else { position() } }
 fn now_playing() -> bool { if is_linked() { link_state_value().truthy("playing") } else { audio().is_some_and(|a| !a.paused()) } }
 
-// ---- remote control (Encore 2): what this device is playing, and commands from your other devices ----
+// ---- remote control: what this device is playing, and commands from your other devices ----
 const SLIM_KEYS: [&str; 7] = ["id", "title", "artist", "album", "album_id", "format", "duration"];
 fn slim(t: &Value) -> Value {
     let mut m = Map::new();
@@ -711,7 +711,7 @@ fn load_opts(o: LoadOpts) {
     });
     if start {
         st_mut(|s| { s.logged = false; s.stalls.clear(); s.step_at = 0.0; });
-        // "now playing" on Last.fm / ListenBrainz (Encore 2)
+        // "now playing" on Last.fm / ListenBrainz
         if t.g("id").is_number() && !st(|s| s.announced.as_ref().is_some_and(|a| Rc::ptr_eq(a, &t))) {
             st_mut(|s| s.announced = Some(t.clone()));
             let id = t.g("id").clone();

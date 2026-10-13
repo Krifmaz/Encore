@@ -1,4 +1,4 @@
-# Encore (Rust server + web app). Builds for linux/amd64 and linux/arm64; the arm64 binary is
+# Encore (server + web app, one Rust binary). Builds for linux/amd64 and linux/arm64; the arm64 binary is
 # cross-compiled on the build machine (fast), not emulated.
 FROM --platform=$BUILDPLATFORM rust:1-slim-trixie AS build
 ARG TARGETARCH

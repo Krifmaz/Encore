@@ -1,4 +1,4 @@
-// Use any signed-in device as a remote for the others (Encore 2): every open app checks in every couple of
+// Use any signed-in device as a remote for the others: every open app checks in every couple of
 // seconds with what it's playing and runs the commands other devices sent it. With the server's event stream
 // open, commands and the other devices' state arrive the moment they change instead of at the next check-in,
 // and this device checks in right away whenever its own playback changes – so a remote feels instant.
