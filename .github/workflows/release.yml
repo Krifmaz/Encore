@@ -1,9 +1,9 @@
 name: release
 
 # One rolling release: every run writes over the GitHub release tagged "edge" (new files, new notes, new
-# commit). Versions are the release date (America/Detroit) plus the edition of that day: 2026.10.11.1,
-# 2026.10.11.2 … Pre-releases end in -edge. Each version also gets a plain git tag, for the counter and
-# for "what changed since".
+# commit). Versions are plain MAJOR.MINOR.PATCH: a pre-release (edge build) bumps PATCH of the newest
+# version, a full release bumps MINOR; or type the version by hand (e.g. 1.0.0). Each version also gets a
+# plain git tag (best effort) for "what changed since".
 #   Start one: Actions → release → Run workflow (tick "pre-release" for an edge build).
 #   Tick "apps" to also build the desktop installers and the Android APK (the macOS runner costs 10× minutes,
 #   so they are off by default and a release without them is just the server + Docker image). They can be
@@ -14,9 +14,13 @@ on:
   workflow_dispatch:
     inputs:
       prerelease:
-        description: "Pre-release (edge)"
+        description: "Pre-release (edge build): bumps the patch number"
         type: boolean
         default: false
+      version:
+        description: "Version to release (MAJOR.MINOR.PATCH); empty = next number automatically"
+        type: string
+        default: ""
       apps:
         description: "Also build desktop + Android apps (slow, costs macOS minutes)"
         type: boolean
@@ -50,30 +54,34 @@ jobs:
       - id: v
         env:
           PRE: ${{ inputs.prerelease }}
+          WANT: ${{ inputs.version }}
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
+          semver() { echo "$1" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+$'; }
           if [ "$GITHUB_REF_TYPE" = "tag" ]; then
             V="${GITHUB_REF_NAME#v}"
+          elif [ -n "$WANT" ]; then
+            V="${WANT#v}"
           else
-            D=$(TZ=America/Detroit date +%Y.%m.%d)
-            N=$(git tag -l "v$D.*" | sed 's/^v//; s/-.*//' | awk -F. '{print $4}' | sort -n | tail -1)
-            # the version tag can't always be pushed (GitHub refuses the token when workflow files changed), so the
-            # current edge release's title is the second source of today's counter
-            R=$(gh release view edge --json name -q .name 2>/dev/null | sed -n "s/^Encore $D\.\([0-9]*\).*/\1/p")
-            [ "${R:-0}" -gt "${N:-0}" ] && N=$R
-            N=$(( ${N:-0} + 1 ))
-            V="$D.$N"
-            [ "$PRE" = "true" ] && V="$V-edge"
+            # the newest version so far: git tags and the rolling release's title (the tag can't always be pushed)
+            LAST=$( { git tag -l 'v[0-9]*.[0-9]*.[0-9]*' | sed 's/^v//'; gh release view edge --json name -q .name 2>/dev/null | sed -n 's/^Encore \([0-9][0-9.]*\).*/\1/p'; } \
+                    | grep -E '^[0-9]+\.[0-9]+\.[0-9]+$' | sort -t. -k1,1n -k2,2n -k3,3n | tail -1)
+            if [ -z "$LAST" ]; then
+              V="0.20.0"                               # the first numbered release after the date-based ones
+            else
+              IFS=. read -r A B C <<< "$LAST"
+              if [ "$PRE" = "true" ]; then V="$A.$B.$((C + 1))"; else V="$A.$((B + 1)).0"; fi
+            fi
           fi
-          echo "$V" | grep -Eq '^[0-9]{4}\.[0-9]{2}\.[0-9]{2}\.[0-9]+(-[a-z0-9.]+)?$' || { echo "bad version $V (want YYYY.MM.DD.N[-edge])"; exit 1; }
-          BASE="${V%%-*}"; SUFFIX="${V#"$BASE"}"
-          IFS=. read -r Y M D N <<< "$BASE"
+          semver "$V" || { echo "bad version $V (want MAJOR.MINOR.PATCH)"; exit 1; }
+          IFS=. read -r A B C <<< "$V"
           echo "version=$V" >> "$GITHUB_OUTPUT"
-          echo "prerelease=$([ -n "$SUFFIX" ] && echo true || echo false)" >> "$GITHUB_OUTPUT"
-          # semver for npm/electron (no leading zeros): 2026.10.1101
-          echo "semver=$Y.$((10#$M)).$((10#$D * 100 + N))$SUFFIX" >> "$GITHUB_OUTPUT"
-          # Android versionCode, always increasing: YYMMDDNN
-          echo "code=$(printf '%d%02d%02d%02d' $((Y - 2000)) $((10#$M)) $((10#$D)) $N)" >> "$GITHUB_OUTPUT"
+          echo "prerelease=$PRE" >> "$GITHUB_OUTPUT"
+          # desktop installers (Tauri) take the same semver
+          echo "semver=$V" >> "$GITHUB_OUTPUT"
+          # Android versionCode, always increasing and above the old date-based codes (26101302 …):
+          # 260000000 + major*1000000 + minor*10000 + patch*10
+          echo "code=$(( 260000000 + A * 1000000 + B * 10000 + C * 10 ))" >> "$GITHUB_OUTPUT"
           echo "Version $V"
 
   test:
@@ -273,4 +281,5 @@ jobs:
           fi
           if [ "$PRE" = true ]; then FLAGS="--prerelease"; else FLAGS="--latest"; fi
           gh release delete edge --yes --cleanup-tag 2>/dev/null || true
-          gh release create edge out/* --title "Encore $V" --notes-file notes.md --target "$GITHUB_SHA" $FLAGS
+          TITLE="Encore $V"; [ "$PRE" = true ] && TITLE="$TITLE (edge)"
+          gh release create edge out/* --title "$TITLE" --notes-file notes.md --target "$GITHUB_SHA" $FLAGS

@@ -5,7 +5,7 @@
 # macOS → .dmg); Android builds anywhere the SDK + NDK are installed.
 #
 #   scripts/release-apps.sh                      # version of the rolling "edge" release, desktop + Android, upload
-#   scripts/release-apps.sh 2026.10.12.1-edge    # name the files after this version instead
+#   scripts/release-apps.sh 0.20.3               # name the files after this version instead
 #   scripts/release-apps.sh --android            # only the APK; --desktop for only the installer
 #   scripts/release-apps.sh --no-upload          # just build into out/
 #   scripts/release-apps.sh --dry-run            # show what would run
@@ -31,17 +31,17 @@ for a in "$@"; do
 done
 run() { echo "+ $*"; [ "$DRY" = 1 ] || "$@"; }
 
-# ---- version: given, or the one the rolling release carries in its title ("Encore 2026.10.12.1-edge")
+# ---- version: given, or the one the rolling release carries in its title ("Encore 0.20.3 (edge)")
 if [ -z "$V" ]; then
-  V=$(gh release view edge --json name -q .name 2>/dev/null | sed 's/^Encore //') || true
-  [ -n "$V" ] || { echo "No edge release found – pass the version, e.g. $0 2026.10.12.1-edge"; exit 1; }
+  V=$(gh release view edge --json name -q .name 2>/dev/null | sed 's/^Encore //; s/ (edge)$//') || true
+  [ -n "$V" ] || { echo "No edge release found – pass the version, e.g. $0 0.20.3"; exit 1; }
+  PRE=$(gh release view edge --json isPrerelease -q .isPrerelease 2>/dev/null | grep -q true && echo 1 || echo 0)
 fi
-echo "$V" | grep -Eq '^[0-9]{4}\.[0-9]{2}\.[0-9]{2}\.[0-9]+(-[a-z0-9.]+)?$' || { echo "bad version $V (want YYYY.MM.DD.N[-edge])"; exit 1; }
-BASE="${V%%-*}"; SUFFIX="${V#"$BASE"}"
-IFS=. read -r Y M D N <<< "$BASE"
-SEMVER="$Y.$((10#$M)).$((10#$D * 100 + N))$SUFFIX"                          # same rule as the release workflow
-CODE=$(printf '%d%02d%02d%02d' $((Y - 2000)) $((10#$M)) $((10#$D)) $N)      # Android versionCode
-PRE=$([ -n "$SUFFIX" ] && echo 1 || echo 0)
+echo "$V" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+$' || { echo "bad version $V (want MAJOR.MINOR.PATCH)"; exit 1; }
+IFS=. read -r A B C <<< "$V"
+SEMVER="$V"                                                   # same rule as the release workflow
+CODE=$(( 260000000 + A * 1000000 + B * 10000 + C * 10 ))      # Android versionCode
+PRE=${PRE:-0}
 echo "Version $V (app version $SEMVER, Android code $CODE)"
 
 # ---- tools ---------------------------------------------------------------------------------------
