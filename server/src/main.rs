@@ -128,7 +128,7 @@ async fn main() -> anyhow::Result<()> {
         }
     };
     // a copy of the database at least once a day, even when the server is restarted all the time
-    if backup::newest(st.data_dir()).map(|b| db::now() - b.time > 86400.0).unwrap_or(true) {
+    if backup::newest_copy(st.data_dir()).map(|b| db::now() - b.time > 86400.0).unwrap_or(true) {
         match st.db.backup(backup::Kind::Scheduled) {
             Ok(b) => { st.db.log("info", &format!("Database backed up to backups/{}", b.name)); backup::prune(st.data_dir()); }
             Err(e) => tracing::warn!("startup backup failed: {e}"),

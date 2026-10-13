@@ -119,7 +119,7 @@ pub fn render(view: Element, _ctx: Ctx) -> PageFuture {
 fn draw_backups(bk: &Element, d: &Value) {
     let list = d.a("backups");
     if list.is_empty() {
-        dom::set_html(bk, r#"<div class="empty muted small">No backups yet – the first one is taken a day after the first start, or press Back up now.</div>"#);
+        dom::set_html(bk, r#"<div class="empty muted small">No backups yet – press Back up now, or check the log: Encore takes one at every start when none exists.</div>"#);
     } else {
         let rows: String = list.iter().map(|b| format!(r#"<tr><td class="mono small">{name}</td><td class="small">{size}</td><td class="small">{date}</td><td><span class="badge">{kind}</span></td>
         <td><div class="row" style="justify-content:flex-end;gap:6px"><a class="btn sm" href="/api/system/backups/{href}" download="{name}">{dl}Download</a><button class="btn sm" data-restore="{name}">Restore…</button></div></td></tr>"#,

@@ -169,6 +169,11 @@ pub fn newest(data_dir: &Path) -> Option<Info> {
     list(data_dir).into_iter().next()
 }
 
+/// The newest copy of this server's own database (uploads don't count: they are someone else's data).
+pub fn newest_copy(data_dir: &Path) -> Option<Info> {
+    list(data_dir).into_iter().find(|b| b.kind != Kind::Uploaded)
+}
+
 /// Copies the open database to a new backup file with SQLite's `VACUUM INTO` (a consistent snapshot,
 /// WAL included) and returns it. Logged at info level.
 pub fn create(conn: &Connection, data_dir: &Path, kind: Kind) -> anyhow::Result<Info> {
@@ -193,7 +198,12 @@ pub fn create(conn: &Connection, data_dir: &Path, kind: Kind) -> anyhow::Result<
         let _ = std::fs::remove_file(&tmp);
         anyhow::bail!("backup is not readable: {e}");
     }
+    // VACUUM INTO doesn't fsync its output: make sure the copy (and its directory entry) survive a power loss
+    std::fs::File::open(&tmp)?.sync_all()?;
     std::fs::rename(&tmp, &path)?;
+    if let Ok(dir) = std::fs::File::open(&d) {
+        let _ = dir.sync_all();
+    }
     let size = std::fs::metadata(&path).map(|m| m.len()).unwrap_or(0);
     tracing::info!("database backed up to {} ({} bytes, {})", path.display(), size, kind.label());
     Ok(Info { name, path, size, time: t, kind })
@@ -352,6 +362,12 @@ mod tests {
         assert_eq!(l.len(), 1);
         assert_eq!(l[0].kind, Kind::BeforeUpgrade);
         assert_eq!(newest(&dir).unwrap().name, b.name);
+        // an uploaded file is newer but is not a copy of this database
+        let up = dir.join("backups").join(file_name(Kind::Uploaded, b.time + 60.0));
+        std::fs::copy(&b.path, &up).unwrap();
+        assert_eq!(newest(&dir).unwrap().kind, Kind::Uploaded);
+        assert_eq!(newest_copy(&dir).unwrap().name, b.name);
+        std::fs::remove_file(&up).unwrap();
         // an old file is pruned, the newest stays
         let old = dir.join("backups").join(file_name(Kind::Scheduled, 1_000_000_000.0));
         std::fs::copy(&b.path, &old).unwrap();

@@ -23,7 +23,7 @@ export async function render(view) {
     bk.innerHTML = d.backups.length ? `<div class="table-wrap"><table class="table"><thead><tr><th>Name</th><th>Size</th><th>Date</th><th>Kind</th><th></th></tr></thead><tbody>
       ${d.backups.map(b => `<tr><td class="mono small">${esc(b.name)}</td><td class="small">${fmt.size(b.size)}</td><td class="small">${fmt.date(b.time)}</td><td><span class="badge">${esc(b.kind)}</span></td>
         <td><div class="row" style="justify-content:flex-end;gap:6px"><a class="btn sm" href="/api/system/backups/${encodeURIComponent(b.name)}" download="${esc(b.name)}">${icon.download}Download</a><button class="btn sm" data-restore="${esc(b.name)}">Restore…</button></div></td></tr>`).join('')}
-    </tbody></table></div>` : '<div class="empty muted small">No backups yet – the first one is taken a day after the first start, or press Back up now.</div>';
+    </tbody></table></div>` : '<div class="empty muted small">No backups yet – press Back up now, or check the log: Encore takes one at every start when none exists.</div>';
     bk.querySelectorAll('[data-restore]').forEach(b => b.onclick = async () => {
       const name = b.dataset.restore;
       const ok = await confirmDialog('Restore this backup?', `Encore replaces its current database with ${name}. A safety copy of the current data is taken first, then the server reopens the database: everything saved since that backup (library index, requests, playlists, settings and sign-ins) is replaced, and this page reloads – you may have to sign in again.`, 'Restore', true);

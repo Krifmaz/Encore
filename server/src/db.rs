@@ -1,7 +1,7 @@
 //! SQLite, same file and tables as older servers, so upgrading keeps everything.
 //! Rows come back as JSON objects, which is what the API returns anyway.
 use rusqlite::types::{Value as SqlValue, ValueRef};
-use rusqlite::{params_from_iter, Connection};
+use rusqlite::{params_from_iter, Connection, OpenFlags};
 use serde_json::{Map, Value};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
@@ -127,17 +127,24 @@ impl Db {
         std::fs::create_dir_all(data_dir)?;
         let path = data_dir.join("encore.db");
         let existing = path.is_file() && std::fs::metadata(&path).map(|m| m.len() > 0).unwrap_or(false);
-        let conn = Connection::open(&path)?;
+        let mut upgrade_from = None;
         if existing {
-            // only look at the version before anything else happens to the file
-            let found: i64 = conn.query_row("PRAGMA user_version", [], |r| r.get(0))?;
+            // only look at the version before anything else happens to the file: a read-only connection
+            // never recovers or checkpoints a WAL left by a newer server, so "nothing was changed" holds
+            let ro = Connection::open_with_flags(&path, OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX)?;
+            let found: i64 = ro.query_row("PRAGMA user_version", [], |r| r.get(0))?;
+            drop(ro);
             if found > SCHEMA_VERSION {
                 return Err(NewerDatabase { found, known: SCHEMA_VERSION, backups: crate::backup::dir(data_dir) }.into());
             }
             if found < SCHEMA_VERSION {
-                tracing::info!("database schema {found} → {SCHEMA_VERSION}: backing up first");
-                crate::backup::create(&conn, data_dir, crate::backup::Kind::BeforeUpgrade)?;
+                upgrade_from = Some(found);
             }
+        }
+        let conn = Connection::open(&path)?;
+        if let Some(found) = upgrade_from {
+            tracing::info!("database schema {found} → {SCHEMA_VERSION}: backing up first");
+            crate::backup::create(&conn, data_dir, crate::backup::Kind::BeforeUpgrade)?;
         }
         prepare(&conn)?;
         Ok(Db { conn: Arc::new(Mutex::new(conn)), data_dir: data_dir.to_path_buf() })
@@ -162,8 +169,20 @@ impl Db {
         if version > SCHEMA_VERSION {
             anyhow::bail!("That backup was written by a newer Encore (schema {version}, this server knows {SCHEMA_VERSION})");
         }
+        // the copy can fail (disk full, permissions): do it before the live connection is touched
+        let tmp = self.data_dir.join("encore.db.restoring");
+        if let Err(e) = std::fs::copy(from, &tmp) {
+            let _ = std::fs::remove_file(&tmp);
+            return Err(e.into());
+        }
         let mut guard = self.conn.lock().unwrap();
-        let safety = crate::backup::create(&guard, &self.data_dir, crate::backup::Kind::BeforeRestore)?;
+        let safety = match crate::backup::create(&guard, &self.data_dir, crate::backup::Kind::BeforeRestore) {
+            Ok(s) => s,
+            Err(e) => {
+                let _ = std::fs::remove_file(&tmp);
+                return Err(e);
+            }
+        };
         let path = self.data_dir.join("encore.db");
         // close the current connection (this checkpoints and removes the WAL), then swap the file
         let placeholder = Connection::open_in_memory()?;
@@ -171,14 +190,44 @@ impl Db {
         for suffix in ["-wal", "-shm"] {
             let _ = std::fs::remove_file(format!("{}{suffix}", path.display()));
         }
-        let tmp = self.data_dir.join("encore.db.restoring");
-        std::fs::copy(from, &tmp)?;
-        std::fs::rename(&tmp, &path)?;
-        let conn = Connection::open(&path)?;
-        prepare(&conn)?;
-        *guard = conn;
-        tracing::info!("database restored from {} (safety copy: {})", from.display(), safety.name);
-        Ok(safety)
+        let swap = std::fs::rename(&tmp, &path);
+        let reopen = Connection::open(&path).map_err(anyhow::Error::from).and_then(|c| prepare(&c).map(|_| c));
+        match (swap, reopen) {
+            (Ok(()), Ok(conn)) => {
+                *guard = conn;
+                tracing::info!("database restored from {} (safety copy: {})", from.display(), safety.name);
+                Ok(safety)
+            }
+            (swap, reopen) => {
+                // whatever is on disk now (the old file or the restored one): put a real connection to
+                // it back behind the lock before reporting, so the server keeps working
+                let reason = swap.err().map(|e| e.to_string()).or_else(|| reopen.err().map(|e| e.to_string())).unwrap_or_default();
+                let _ = std::fs::remove_file(&tmp);
+                match Connection::open(&path) {
+                    Ok(c) => {
+                        if let Err(e) = prepare(&c) {
+                            // the restored file can't be migrated: go back to the data from before
+                            tracing::warn!("restored database could not be prepared ({e}); putting back {}", safety.name);
+                            drop(c);
+                            if let Err(e) = std::fs::copy(&safety.path, &path) {
+                                tracing::error!("could not put {} back: {e}", safety.name);
+                            }
+                            for suffix in ["-wal", "-shm"] {
+                                let _ = std::fs::remove_file(format!("{}{suffix}", path.display()));
+                            }
+                            if let Ok(c) = Connection::open(&path) {
+                                let _ = prepare(&c);
+                                *guard = c;
+                            }
+                        } else {
+                            *guard = c;
+                        }
+                    }
+                    Err(e) => tracing::error!("database could not be reopened after a failed restore: {e}"),
+                }
+                anyhow::bail!("restore failed ({reason}); the data from before is in backups/{}", safety.name)
+            }
+        }
     }
 
     pub fn execute_batch(&self, sql: &str) -> rusqlite::Result<()> {
@@ -294,6 +343,9 @@ mod tests {
             c.pragma_update(None, "user_version", SCHEMA_VERSION + 3).unwrap();
             c.execute_batch("CREATE TABLE from_the_future (x)").unwrap();
         }
+        // a WAL "the newer server" left behind must not be recovered or checkpointed by the check
+        let wal = d.join("encore.db-wal");
+        std::fs::write(&wal, b"not a real wal, must be left alone").unwrap();
         let before = std::fs::read(d.join("encore.db")).unwrap();
         let err = Db::open(&d).err().expect("must refuse");
         let n = err.downcast_ref::<NewerDatabase>().expect("typed error");
@@ -303,6 +355,7 @@ mod tests {
         assert!(text.contains("Nothing was changed"));
         assert!(text.contains(&crate::backup::dir(&d).display().to_string()));
         assert_eq!(std::fs::read(d.join("encore.db")).unwrap(), before);
+        assert_eq!(std::fs::read(&wal).unwrap(), b"not a real wal, must be left alone");
         assert!(crate::backup::list(&d).is_empty());
         let _ = std::fs::remove_dir_all(&d);
     }
@@ -328,6 +381,32 @@ mod tests {
         Connection::open(&future).unwrap().pragma_update(None, "user_version", SCHEMA_VERSION + 1).unwrap();
         assert!(db.restore(&future).unwrap_err().to_string().contains("newer Encore"));
         assert!(db.restore(&d.join("missing.db")).is_err());
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn a_failed_restore_leaves_a_working_database() {
+        let d = tmp("restore-fail");
+        let db = Db::open(&d).unwrap();
+        db.execute("INSERT INTO settings VALUES ('k', 'before')", p![]).unwrap();
+        // a sound SQLite file whose tracks table can't be migrated (no album_id → the index fails)
+        let bad = d.join("bad.db");
+        {
+            let c = Connection::open(&bad).unwrap();
+            c.execute_batch("CREATE TABLE tracks (id); PRAGMA user_version = 1;").unwrap();
+        }
+        let err = db.restore(&bad).unwrap_err().to_string();
+        assert!(err.contains("restore failed"), "{err}");
+        assert!(err.contains("before-restore"), "{err}");
+        // the connection behind the lock is a real one again, with the data from before
+        assert_eq!(db.one("SELECT value FROM settings WHERE key='k'", p![]).unwrap().unwrap().s("value"), "before");
+        assert_eq!(db.user_version().unwrap(), SCHEMA_VERSION);
+        assert!(!d.join("encore.db.restoring").exists());
+        // a missing source fails before anything is touched: no safety copy, nothing changed
+        let n = crate::backup::list(&d).len();
+        assert!(db.restore(&d.join("missing.db")).is_err());
+        assert_eq!(crate::backup::list(&d).len(), n);
+        assert_eq!(db.one("SELECT value FROM settings WHERE key='k'", p![]).unwrap().unwrap().s("value"), "before");
         let _ = std::fs::remove_dir_all(&d);
     }
 }

@@ -127,7 +127,7 @@ pub fn tick(st: &AppState) {
         let mut last = state(st, key).get("last_run").and_then(|v| v.as_f64()).unwrap_or(*BOOT - every + first);
         if key == "backup" {
             // a copy taken at start (or by hand) counts: no second one half an hour later
-            if let Some(b) = crate::backup::newest(st.data_dir()) {
+            if let Some(b) = crate::backup::newest_copy(st.data_dir()) {
                 last = last.max(b.time);
             }
         }
@@ -164,7 +164,9 @@ async fn run(st: &AppState, key: &str) -> anyhow::Result<String> {
             format!("{} verified, {} wrong", j["verified"], j["mismatch"])
         }
         "backup" => {
-            let b = st.db.backup(crate::backup::Kind::Scheduled)?;
+            // VACUUM INTO of a big library takes seconds: not on a runtime worker thread
+            let db = st.db.clone();
+            let b = tokio::task::spawn_blocking(move || db.backup(crate::backup::Kind::Scheduled)).await??;
             st.db.log("info", &format!("Database backed up to backups/{}", b.name));
             let gone = crate::backup::prune(st.data_dir());
             format!("backups/{}{}", b.name, if gone.is_empty() { String::new() } else { format!(", {} old backup(s) removed", gone.len()) })

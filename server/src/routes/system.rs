@@ -2,7 +2,7 @@
 use crate::auth::{Admin, User};
 use crate::backup;
 use crate::db::RowExt;
-use crate::error::{err, ApiResult};
+use crate::error::{err, ApiError, ApiResult};
 use crate::sources::{slskd, streamrip, torznab, ytdlp};
 use crate::state::AppState;
 use crate::{acoustid, email, notify, p};
@@ -97,7 +97,8 @@ async fn backup_upload(State(st): State<AppState>, Admin(u): Admin, mut form: Mu
     let tmp = dir.join(format!("upload-{}.part", crate::auth::random_hex(8)));
     let mut size: u64 = 0;
     let mut head: Vec<u8> = Vec::new();
-    {
+    // every way out of the streaming loop with an error removes the .part file (prune never would)
+    let streamed: Result<(), ApiError> = async {
         use tokio::io::AsyncWriteExt;
         let mut out = tokio::fs::File::create(&tmp).await.map_err(|e| err(500, e.to_string()))?;
         while let Some(mut f) = form.next_field().await.map_err(|e| err(400, e.to_string()))? {
@@ -109,13 +110,17 @@ async fn backup_upload(State(st): State<AppState>, Admin(u): Admin, mut form: Mu
                     head.extend_from_slice(&chunk[..chunk.len().min(16 - head.len())]);
                 }
                 size += chunk.len() as u64;
-                if let Err(e) = out.write_all(&chunk).await {
-                    let _ = tokio::fs::remove_file(&tmp).await;
-                    return Err(err(500, e.to_string()));
-                }
+                out.write_all(&chunk).await.map_err(|e| err(500, e.to_string()))?;
             }
         }
-        let _ = out.flush().await;
+        out.flush().await.map_err(|e| err(500, e.to_string()))?;
+        out.sync_all().await.map_err(|e| err(500, e.to_string()))?;
+        Ok(())
+    }
+    .await;
+    if let Err(e) = streamed {
+        let _ = tokio::fs::remove_file(&tmp).await;
+        return Err(e);
     }
     if size == 0 || head.len() < 16 || head.as_slice() != backup::SQLITE_HEADER {
         let _ = std::fs::remove_file(&tmp);
@@ -130,7 +135,13 @@ async fn backup_upload(State(st): State<AppState>, Admin(u): Admin, mut form: Mu
         }
     };
     let name = backup::file_name(backup::Kind::Uploaded, crate::db::now());
-    std::fs::rename(&tmp, dir.join(&name)).map_err(|e| err(500, e.to_string()))?;
+    if let Err(e) = std::fs::rename(&tmp, dir.join(&name)) {
+        let _ = std::fs::remove_file(&tmp);
+        return Err(err(500, e.to_string()));
+    }
+    if let Ok(d) = std::fs::File::open(&dir) {
+        let _ = d.sync_all();
+    }
     st.db.log("info", &format!("{} uploaded a database backup as backups/{name}", u.s("username")));
     tracing::info!("backup uploaded as backups/{name} ({size} bytes, schema {version})");
     let mut out = backups_json(&st);
