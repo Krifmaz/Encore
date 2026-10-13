@@ -61,11 +61,10 @@ GitHub Actions publishes `ghcr.io/krifmaz/encore` for amd64 and arm64:
 
 | Tag | What it is |
 |---|---|
-| `:latest` | The newest full release |
-| `:edge` | The newest build, pre-release or release – always the newest Encore |
-| `:0.20.1` … | One exact release (edge builds bump the last number, full releases the middle one) |
+| `:latest` | The newest release |
+| `:0.20.1` … | One exact release |
 
-There is one GitHub release, tagged `edge`, and every build writes over it: the newest notes, server archives, compose file and Android/desktop installers are always at [github.com/Krifmaz/Encore/releases/tag/edge](https://github.com/Krifmaz/Encore/releases/tag/edge). Older versions stay reachable as Docker tags and git tags. If the repository is private, the image is too – run `docker login ghcr.io` once with a token that has `read:packages`.
+Every release is a normal GitHub release, tagged `v<version>` (plain MAJOR.MINOR.PATCH numbers), with the notes, server archives, compose file and Android/desktop installers attached: [github.com/Krifmaz/Encore/releases](https://github.com/Krifmaz/Encore/releases). If the repository is private, the image is too – run `docker login ghcr.io` once with a token that has `read:packages`.
 
 ## Apps
 
@@ -191,4 +190,4 @@ ENCORE_CONFIG_DIR=../data ENCORE_STATIC_DIR=../web ENCORE_LIBRARY_PATH=~/Music E
 - `server/`: the server (Rust: axum, SQLite, lofty for tags, Chromaprint via `fpcalc`). yt-dlp and streamrip are run as programs; the Docker image includes them.
 - `web/`: the web app, plain ES modules with no build step. Edit and reload.
 - `clients/app/`: the desktop and Android app (Rust, Tauri) – `cargo tauri dev` or `cargo tauri android dev` in that folder; `plugins/media/` is the Kotlin half (media notification, share intent, downloads).
-- **Building the apps for a release on your own machine** (no Actions minutes): `scripts/release-apps.sh` builds this OS's installer plus the Android APK and attaches them to the newest GitHub release (`scripts/release-apps.sh 2026.10.12.1-edge` for a specific one; `--android` / `--desktop` for one of the two, `--no-upload` to only build into `out/`). Windows builds the `.exe` from Git Bash, Linux the `.AppImage`/`.deb`/`.rpm`, a Mac the `.dmg`; the APK builds anywhere the Android SDK + NDK and a JDK are installed. Needs the `gh` CLI signed in.
+- **Building the apps for a release on your own machine** (no Actions minutes): `scripts/release-apps.sh` builds this OS's installer plus the Android APK and attaches them to the newest GitHub release (`scripts/release-apps.sh 0.20.3` for a specific one; `--android` / `--desktop` for one of the two, `--no-upload` to only build into `out/`). Windows builds the `.exe` from Git Bash, Linux the `.AppImage`/`.deb`/`.rpm`, a Mac the `.dmg`; the APK builds anywhere the Android SDK + NDK and a JDK are installed. Needs the `gh` CLI signed in.

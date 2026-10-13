@@ -2,7 +2,7 @@ name: test-and-build
 
 # Encore: the server + web app. Runs the tests and checks that the Docker image builds – on pull
 # requests and by hand only, to keep Actions minutes down. Images are only published by the release
-# workflow: :latest (releases) and :edge (pre-releases).
+# workflow: :latest and :<version>.
 on:
   pull_request:
   workflow_dispatch:

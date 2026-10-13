@@ -4,7 +4,7 @@
 # minutes. Each OS builds its own installer (Windows → .exe, Linux → .AppImage/.deb/.rpm,
 # macOS → .dmg); Android builds anywhere the SDK + NDK are installed.
 #
-#   scripts/release-apps.sh                      # version of the rolling "edge" release, desktop + Android, upload
+#   scripts/release-apps.sh                      # version of the newest release, desktop + Android, upload
 #   scripts/release-apps.sh 0.20.3               # name the files after this version instead
 #   scripts/release-apps.sh --android            # only the APK; --desktop for only the installer
 #   scripts/release-apps.sh --no-upload          # just build into out/
@@ -31,17 +31,15 @@ for a in "$@"; do
 done
 run() { echo "+ $*"; [ "$DRY" = 1 ] || "$@"; }
 
-# ---- version: given, or the one the rolling release carries in its title ("Encore 0.20.3 (edge)")
+# ---- version: given, or the newest release's (tag v0.20.3)
 if [ -z "$V" ]; then
-  V=$(gh release view edge --json name -q .name 2>/dev/null | sed 's/^Encore //; s/ (edge)$//') || true
-  [ -n "$V" ] || { echo "No edge release found – pass the version, e.g. $0 0.20.3"; exit 1; }
-  PRE=$(gh release view edge --json isPrerelease -q .isPrerelease 2>/dev/null | grep -q true && echo 1 || echo 0)
+  V=$(gh release view --json tagName -q .tagName 2>/dev/null | sed 's/^v//') || true
+  [ -n "$V" ] || { echo "No release found – pass the version, e.g. $0 0.20.3"; exit 1; }
 fi
 echo "$V" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+$' || { echo "bad version $V (want MAJOR.MINOR.PATCH)"; exit 1; }
 IFS=. read -r A B C <<< "$V"
 SEMVER="$V"                                                   # same rule as the release workflow
 CODE=$(( 260000000 + A * 1000000 + B * 10000 + C * 10 ))      # Android versionCode
-PRE=${PRE:-0}
 echo "Version $V (app version $SEMVER, Android code $CODE)"
 
 # ---- tools ---------------------------------------------------------------------------------------
@@ -116,12 +114,11 @@ echo "== built"
 ls -la out 2>/dev/null || true
 [ "$UPLOAD" = 1 ] || exit 0
 
-# ---- attach to the rolling release ----------------------------------------------------------------
-TAG=edge
+# ---- attach to the release of this version ------------------------------------------------------
+TAG="v$V"
 if ! gh release view "$TAG" >/dev/null 2>&1; then
   NOTES=(--generate-notes); [ -f "docs/releases/$V.md" ] && NOTES=(--notes-file "docs/releases/$V.md")
-  FLAGS=(); [ "$PRE" = 1 ] && FLAGS=(--prerelease)
-  run gh release create "$TAG" --title "Encore $V" "${NOTES[@]}" "${FLAGS[@]}"
+  run gh release create "$TAG" --title "Encore $V" "${NOTES[@]}" --latest
 fi
 FILES=(out/*"$V"*)
 [ -e "${FILES[0]}" ] || { echo "nothing to upload"; exit 1; }

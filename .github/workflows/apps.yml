@@ -53,18 +53,28 @@ jobs:
           java-version: "21"
       - uses: android-actions/setup-android@v3
         with:
-          packages: "platform-tools platforms;android-36 build-tools;36.0.0"
-      # M2 (Cadenza on the phone) adds the Rust side here, PLAN §11 steps 3–5:
-      #   ndk;29.0.13846066 in the packages above
-      # - uses: dtolnay/rust-toolchain@stable
-      #   with:
-      #     targets: aarch64-linux-android,armv7-linux-androideabi,x86_64-linux-android
-      # - uses: Swatinem/rust-cache@v2
-      #   with:
-      #     workspaces: clients/android/cadenza/rust
-      #     key: android-native
-      # - run: cargo install cargo-ndk --version 4.1.2 --locked
-      # (github.com/Krifmaz/cadenza is public, so no deploy key – decision D2)
+          packages: "platform-tools platforms;android-36 build-tools;36.0.0 ndk;29.0.13846066"
+      # Cadenza on the phone (M2, PLAN §11 steps 3–5): Rust + Android targets + cargo-ndk, so the Gradle task
+      # :cadenza:cargoNdkBuild builds libencore_cadenza.so (arm64-v8a, armeabi-v7a) into the APK. Without these
+      # steps the task is skipped with a warning and the APK still builds (the player uses its Kotlin DSP).
+      # github.com/Krifmaz/cadenza is public, so no deploy key (decision D2).
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-linux-android,armv7-linux-androideabi
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: clients/android/cadenza/rust
+          key: android-native
+      - name: cargo-ndk
+        run: cargo install cargo-ndk --version 4.1.2 --locked
+      - name: NDK for cargo-ndk
+        # cargo-ndk also finds $ANDROID_HOME/ndk/<newest> on its own; be explicit so a second NDK can't win
+        run: |
+          NDK="$ANDROID_HOME/ndk/29.0.13846066"
+          [ -d "$NDK" ] || { echo "::error::NDK not found at $NDK"; ls "$ANDROID_HOME/ndk" || true; exit 1; }
+          echo "ANDROID_NDK_HOME=$NDK" >> "$GITHUB_ENV"
+      - name: Cadenza JNI crate tests (host)
+        run: cargo test --manifest-path clients/android/cadenza/rust/Cargo.toml
       - name: Gradle version
         # no gradlew/wrapper jar is committed: run the Gradle the wrapper properties name, so bumping the
         # wrapper (clients/android/gradle/wrapper/gradle-wrapper.properties) bumps CI too
@@ -122,6 +132,10 @@ jobs:
           APK=$(find clients/android/app/build/outputs/apk/release -name '*.apk' ! -name '*unsigned*' | head -1)
           [ -n "$APK" ] || { echo "::error::no signed release APK built"; find clients/android/app/build/outputs -type f; exit 1; }
           "$ANDROID_HOME/build-tools/36.0.0/apksigner" verify --print-certs "$APK"
+          # Cadenza must be in a release APK (the Gradle task only skips when cargo-ndk is missing, which it isn't here)
+          for abi in arm64-v8a armeabi-v7a; do
+            unzip -l "$APK" | grep -q "lib/$abi/libencore_cadenza.so" || { echo "::error::lib/$abi/libencore_cadenza.so is missing from the APK (did :cadenza:cargoNdkBuild run?)"; unzip -l "$APK" | grep ' lib/' || true; exit 1; }
+          done
           cp "$APK" "Encore-android-$ENCORE_VERSION.apk" && ls -la Encore-android-*.apk
       - name: Remove signing key
         if: always()
