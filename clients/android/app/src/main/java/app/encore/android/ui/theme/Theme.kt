@@ -1,13 +1,20 @@
 package app.encore.android.ui.theme
 
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.ColorScheme
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.Shapes
 import androidx.compose.material3.Surface
 import androidx.compose.material3.darkColorScheme
 import androidx.compose.material3.lightColorScheme
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.CompositionLocalProvider
+import androidx.compose.runtime.Immutable
+import androidx.compose.runtime.ReadOnlyComposable
+import androidx.compose.runtime.staticCompositionLocalOf
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.unit.dp
 import app.encore.android.data.session.ThemeChoice
 
 // The logo's colours (web/css/app.css :root[data-theme="encore"]): charcoal and cream.
@@ -22,91 +29,146 @@ object EncoreColors {
     val Muted = Color(0xFFAAA493)
     val Faint = Color(0xFF77725F)
 
-    /** The accent: cream into gold, as on the logo. */
+    // app.css :root status colours (--ok, --warn, --err, --info); the same in every theme
+    val Ok = Color(0xFF22C55E)
+    val Warn = Color(0xFFF59E0B)
+    val Err = Color(0xFFEF4444)
+    val Info = Color(0xFF38BDF8)
+
+    /** The accent: cream into gold, as on the logo (the web's --grad for this theme). */
     val AccentGradient: Brush = Brush.linearGradient(listOf(Cream, CreamDeep))
 }
 
-private val EncoreScheme: ColorScheme = darkColorScheme(
-    primary = EncoreColors.Cream,
-    onPrimary = EncoreColors.Background,
-    primaryContainer = EncoreColors.SurfaceContainerHigh,
-    onPrimaryContainer = EncoreColors.Cream,
-    secondary = EncoreColors.CreamDeep,
-    onSecondary = EncoreColors.Background,
-    secondaryContainer = EncoreColors.SurfaceContainerHigh,
-    onSecondaryContainer = EncoreColors.Cream,
-    tertiary = EncoreColors.CreamDeep,
-    onTertiary = EncoreColors.Background,
-    background = EncoreColors.Background,
-    onBackground = EncoreColors.Cream,
-    surface = EncoreColors.Surface,
-    onSurface = EncoreColors.Cream,
-    surfaceVariant = EncoreColors.SurfaceContainer,
-    onSurfaceVariant = EncoreColors.Muted,
-    surfaceContainerLowest = EncoreColors.Background,
-    surfaceContainerLow = EncoreColors.Surface,
-    surfaceContainer = EncoreColors.SurfaceContainer,
-    surfaceContainerHigh = EncoreColors.SurfaceContainerHigh,
-    surfaceContainerHighest = EncoreColors.Outline,
-    outline = EncoreColors.Outline,
-    outlineVariant = EncoreColors.Faint,
+/**
+ * The web's CSS variables for one theme (app.css `:root[data-theme=…]`), so screens can use the same tokens the
+ * web player does: --bg, --bg-2, --panel, --panel-2, --border, --text, --muted, --faint, --accent / --accent-2.
+ */
+@Immutable
+data class EncorePalette(
+    val bg: Color,
+    val bg2: Color,
+    val panel: Color,
+    val panel2: Color,
+    val border: Color,
+    val text: Color,
+    val muted: Color,
+    val faint: Color,
+    val accent: Color,
+    val accent2: Color,
+    val onAccent: Color,
+    val dark: Boolean,
+) {
+    /** `--grad`: accent into accent-2 (cream → gold on the dark themes). */
+    val gradient: Brush get() = Brush.linearGradient(listOf(accent, accent2))
+}
+
+val EncorePaletteDark: EncorePalette = EncorePalette(
+    bg = EncoreColors.Background,
+    bg2 = EncoreColors.Surface,
+    panel = EncoreColors.SurfaceContainer,
+    panel2 = EncoreColors.SurfaceContainerHigh,
+    border = EncoreColors.Outline,
+    text = EncoreColors.Cream,
+    muted = EncoreColors.Muted,
+    faint = EncoreColors.Faint,
+    accent = EncoreColors.Cream,
+    accent2 = EncoreColors.CreamDeep,
+    onAccent = EncoreColors.Background,
+    dark = true,
 )
 
-// web/css/app.css :root[data-theme="oled"]: true black, so pixels switch off.
-private val OledScheme: ColorScheme = darkColorScheme(
-    primary = EncoreColors.Cream,
-    onPrimary = Color.Black,
-    primaryContainer = Color(0xFF17171B),
-    onPrimaryContainer = EncoreColors.Cream,
-    secondary = EncoreColors.CreamDeep,
-    onSecondary = Color.Black,
-    secondaryContainer = Color(0xFF17171B),
-    onSecondaryContainer = EncoreColors.Cream,
-    tertiary = EncoreColors.CreamDeep,
-    onTertiary = Color.Black,
-    background = Color.Black,
-    onBackground = EncoreColors.Cream,
-    surface = Color.Black,
-    onSurface = EncoreColors.Cream,
-    surfaceVariant = Color(0xFF0B0B0D),
-    onSurfaceVariant = Color(0xFF9A9AA8),
-    surfaceContainerLowest = Color.Black,
-    surfaceContainerLow = Color.Black,
-    surfaceContainer = Color(0xFF0B0B0D),
-    surfaceContainerHigh = Color(0xFF17171B),
-    surfaceContainerHighest = Color(0xFF232329),
-    outline = Color(0xFF232329),
-    outlineVariant = Color(0xFF66666F),
+// app.css :root[data-theme="oled"]: true black, so pixels switch off.
+val EncorePaletteOled: EncorePalette = EncorePalette(
+    bg = Color.Black,
+    bg2 = Color.Black,
+    panel = Color(0xFF0B0B0D),
+    panel2 = Color(0xFF17171B),
+    border = Color(0xFF232329),
+    text = EncoreColors.Cream,
+    muted = Color(0xFF9A9AA8),
+    faint = Color(0xFF66666F),
+    accent = EncoreColors.Cream,
+    accent2 = EncoreColors.CreamDeep,
+    onAccent = Color.Black,
+    dark = true,
 )
 
-// web/css/app.css :root[data-theme="light"]; the accent turns charcoal so it reads on white.
-private val LightScheme: ColorScheme = lightColorScheme(
-    primary = Color(0xFF2A2A2D),
-    onPrimary = EncoreColors.Cream,
-    primaryContainer = Color(0xFFF0F0F7),
-    onPrimaryContainer = Color(0xFF16161F),
-    secondary = Color(0xFF8A7A4E),
-    onSecondary = Color.White,
-    secondaryContainer = Color(0xFFF0F0F7),
-    onSecondaryContainer = Color(0xFF16161F),
-    tertiary = Color(0xFF8A7A4E),
-    onTertiary = Color.White,
-    background = Color(0xFFF6F6FB),
-    onBackground = Color(0xFF16161F),
-    surface = Color(0xFFFFFFFF),
-    onSurface = Color(0xFF16161F),
-    surfaceVariant = Color(0xFFF0F0F7),
-    onSurfaceVariant = Color(0xFF5D5D75),
-    surfaceContainerLowest = Color(0xFFFFFFFF),
-    surfaceContainerLow = Color(0xFFFAFAFD),
-    surfaceContainer = Color(0xFFF0F0F7),
-    surfaceContainerHigh = Color(0xFFE9E9F2),
-    surfaceContainerHighest = Color(0xFFE2E2EE),
-    outline = Color(0xFFE2E2EE),
-    outlineVariant = Color(0xFF8D8DA5),
+// app.css :root[data-theme="light"]; the accent turns charcoal so it reads on white.
+val EncorePaletteLight: EncorePalette = EncorePalette(
+    bg = Color(0xFFF6F6FB),
+    bg2 = Color(0xFFFFFFFF),
+    panel = Color(0xFFFFFFFF),
+    panel2 = Color(0xFFF0F0F7),
+    border = Color(0xFFE2E2EE),
+    text = Color(0xFF16161F),
+    muted = Color(0xFF5D5D75),
+    faint = Color(0xFF8D8DA5),
+    accent = Color(0xFF2A2A2D),
+    accent2 = Color(0xFF8A7A4E),
+    onAccent = EncoreColors.Cream,
+    dark = false,
+)
+
+val LocalEncorePalette = staticCompositionLocalOf { EncorePaletteDark }
+
+/** The current theme's web tokens (`MaterialTheme.colorScheme` carries the same colours for Material widgets). */
+val MaterialTheme.palette: EncorePalette
+    @Composable
+    @ReadOnlyComposable
+    get() = LocalEncorePalette.current
+
+private fun schemeOf(p: EncorePalette): ColorScheme {
+    val base = if (p.dark) darkColorScheme() else lightColorScheme()
+    return base.copy(
+        primary = p.accent,
+        onPrimary = p.onAccent,
+        primaryContainer = p.panel2,
+        onPrimaryContainer = p.text,
+        secondary = p.accent2,
+        onSecondary = p.onAccent,
+        secondaryContainer = p.panel2,
+        onSecondaryContainer = p.text,
+        tertiary = p.accent2,
+        onTertiary = p.onAccent,
+        background = p.bg,
+        onBackground = p.text,
+        surface = p.bg2,
+        onSurface = p.text,
+        surfaceVariant = p.panel,
+        onSurfaceVariant = p.muted,
+        surfaceContainerLowest = p.bg,
+        surfaceContainerLow = p.bg2,
+        surfaceContainer = p.panel,
+        surfaceContainerHigh = p.panel2,
+        surfaceContainerHighest = p.border,
+        surfaceTint = Color.Transparent,
+        outline = p.border,
+        outlineVariant = p.faint,
+        error = EncoreColors.Err,
+        onError = Color.White,
+    )
+}
+
+private val EncoreScheme: ColorScheme = schemeOf(EncorePaletteDark)
+private val OledScheme: ColorScheme = schemeOf(EncorePaletteOled)
+private val LightScheme: ColorScheme = schemeOf(EncorePaletteLight)
+
+/** app.css: --radius 14px for cards, 12px for tiles / menus, 10px for buttons and inputs, 8px for thumbs. */
+val EncoreShapes: Shapes = Shapes(
+    extraSmall = RoundedCornerShape(8.dp),
+    small = RoundedCornerShape(10.dp),
+    medium = RoundedCornerShape(12.dp),
+    large = RoundedCornerShape(14.dp),
+    extraLarge = RoundedCornerShape(20.dp),
 )
 
 fun isDarkTheme(theme: ThemeChoice): Boolean = theme != ThemeChoice.LIGHT
+
+fun paletteOf(theme: ThemeChoice): EncorePalette = when (theme) {
+    ThemeChoice.ENCORE -> EncorePaletteDark
+    ThemeChoice.OLED -> EncorePaletteOled
+    ThemeChoice.LIGHT -> EncorePaletteLight
+}
 
 @Composable
 fun EncoreTheme(theme: ThemeChoice, content: @Composable () -> Unit) {
@@ -115,8 +177,10 @@ fun EncoreTheme(theme: ThemeChoice, content: @Composable () -> Unit) {
         ThemeChoice.OLED -> OledScheme
         ThemeChoice.LIGHT -> LightScheme
     }
-    // A Surface at the root sets the content colour for every Text (without it, Compose's default is black)
-    MaterialTheme(colorScheme = scheme) {
-        Surface(color = scheme.background, contentColor = scheme.onBackground, content = content)
+    CompositionLocalProvider(LocalEncorePalette provides paletteOf(theme)) {
+        // A Surface at the root sets the content colour for every Text (without it, Compose's default is black)
+        MaterialTheme(colorScheme = scheme, typography = EncoreTypography, shapes = EncoreShapes) {
+            Surface(color = scheme.background, contentColor = scheme.onBackground, content = content)
+        }
     }
 }
