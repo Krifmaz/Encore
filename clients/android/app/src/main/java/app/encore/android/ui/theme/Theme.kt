@@ -2,6 +2,7 @@ package app.encore.android.ui.theme
 
 import androidx.compose.material3.ColorScheme
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.Surface
 import androidx.compose.material3.darkColorScheme
 import androidx.compose.material3.lightColorScheme
 import androidx.compose.runtime.Composable
@@ -114,5 +115,8 @@ fun EncoreTheme(theme: ThemeChoice, content: @Composable () -> Unit) {
         ThemeChoice.OLED -> OledScheme
         ThemeChoice.LIGHT -> LightScheme
     }
-    MaterialTheme(colorScheme = scheme, content = content)
+    // A Surface at the root sets the content colour for every Text (without it, Compose's default is black)
+    MaterialTheme(colorScheme = scheme) {
+        Surface(color = scheme.background, contentColor = scheme.onBackground, content = content)
+    }
 }
