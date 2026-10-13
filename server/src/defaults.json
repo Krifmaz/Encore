@@ -281,7 +281,7 @@
  },
  "source_order": {
   "env": "ENCORE_SOURCE_ORDER",
-  "default": "lidarr,streamrip,hifi,slskd,ytdlp",
+  "default": "qobuz,tidal,deezer,slskd,torznab,ytdlp",
   "secret": false
  },
  "streamrip_enabled": {

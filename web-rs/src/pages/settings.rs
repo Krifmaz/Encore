@@ -80,7 +80,7 @@ const SECTIONS: &[Section] = &[
     ] },
     Section { id: "pipeline", title: "Download pipeline", desc: "Which sources are searched for a request, and in what order. The first one that has it wins.", test: None, test_label: None, fields: &[
         s("discography_singles", "Requesting a whole discography includes singles (not just albums and EPs)", "bool"),
-        s("source_order", "Source order", "text").full().help("The one place to set what is searched, in order, comma-separated: qobuz, tidal, deezer (all through streamrip), slskd (Soulseek), torznab (torrents/Usenet, albums only), ytdlp (YouTube Music). Leave one out to never use it."),
+        s("source_order", "Source order", "text").full().help("The one place to set what is searched, in order, comma-separated: qobuz, tidal, deezer (all through streamrip), slskd (Soulseek), torznab (torrents/Usenet, albums only), ytdlp (YouTube Music). Leave one out to never use it; sources you haven't set up are skipped. Recommended (the default): qobuz, tidal, deezer, slskd, torznab, ytdlp – exact hi-res/lossless releases first, then Soulseek, then torrents/Usenet for whole albums, YouTube Music last."),
     ] },
     Section { id: "verify", title: "Verification & duplicates", desc: "Listens to each download and checks it's really the song you asked for, not a remix, live or wrong track.", test: Some("acoustid"), test_label: None, fields: &[
         s("acoustid_api_key", "AcoustID API key", "password").full().help("Free – register an application at acoustid.org/new-application. Used to fingerprint audio and confirm each file is the right song/version."),
