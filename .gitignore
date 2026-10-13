@@ -10,3 +10,4 @@ server/target/
 .claude/worktrees/
 web/next/
 /out/
+/android-signing-key/
