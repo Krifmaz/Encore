@@ -50,12 +50,17 @@ jobs:
       - id: v
         env:
           PRE: ${{ inputs.prerelease }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           if [ "$GITHUB_REF_TYPE" = "tag" ]; then
             V="${GITHUB_REF_NAME#v}"
           else
             D=$(TZ=America/Detroit date +%Y.%m.%d)
             N=$(git tag -l "v$D.*" | sed 's/^v//; s/-.*//' | awk -F. '{print $4}' | sort -n | tail -1)
+            # the version tag can't always be pushed (GitHub refuses the token when workflow files changed), so the
+            # current edge release's title is the second source of today's counter
+            R=$(gh release view edge --json name -q .name 2>/dev/null | sed -n "s/^Encore $D\.\([0-9]*\).*/\1/p")
+            [ "${R:-0}" -gt "${N:-0}" ] && N=$R
             N=$(( ${N:-0} + 1 ))
             V="$D.$N"
             [ "$PRE" = "true" ] && V="$V-edge"
@@ -260,7 +265,8 @@ jobs:
           APPS: ${{ needs.apps.result }}
         run: |
           # the version counter and "changes since" live in plain git tags (a push with GITHUB_TOKEN starts no run)
-          git tag "v$V" "$GITHUB_SHA" && git push origin "v$V"
+          # best effort: GitHub refuses a tag push from this token when the commits touched workflow files
+          git tag "v$V" "$GITHUB_SHA" && { git push origin "v$V" || echo "::warning::could not push tag v$V (the release still carries the version)"; }
           # keep the app installers from the last run that built them when this run didn't
           if [ "$APPS" != success ] && gh release view edge >/dev/null 2>&1; then
             gh release download edge --dir out --pattern 'Encore-*' 2>/dev/null || true
