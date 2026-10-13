@@ -856,7 +856,7 @@ class EncorePlaybackService : MediaLibraryService() {
      * Not signed in (or the session expired): Android Auto shows this message with a button that opens the app
      * on the phone, instead of a bare "can't use this app right now".
      */
-    private fun <T> signInError(): LibraryResult<T> {
+    private fun <T : Any> signInError(): LibraryResult<T> {
         val open = Intent(this, MainActivity::class.java).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_SINGLE_TOP)
         val pi = PendingIntent.getActivity(this, 1, open, PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT)
         val extras = Bundle().apply {
