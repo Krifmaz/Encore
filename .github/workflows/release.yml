@@ -244,7 +244,7 @@ jobs:
             mv keep/* out/ 2>/dev/null || true
           fi
           # desktop installers carry the npm version in their names – show the real one
-          for f in out/*"$SV"*; do [ -e "$f" ] && mv "$f" "${f//$SV/$V}"; done
+          if [ "$SV" != "$V" ]; then for f in out/*"$SV"*; do [ -e "$f" ] && mv "$f" "${f//$SV/$V}"; done; fi
           cp docker-compose.yml out/
           ls -la out
           if [ -f "docs/releases/$V.md" ]; then cp "docs/releases/$V.md" notes.md; else
