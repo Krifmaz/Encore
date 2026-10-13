@@ -13,6 +13,16 @@ use std::rc::Rc;
 use wasm_bindgen::JsCast;
 use web_sys::{Element, FormData, HtmlFormElement, HtmlInputElement};
 
+/// "Encore app · Pixel 9 Pro · last used 2h ago" for the native app's sign-ins, the browser otherwise.
+fn session_title(s: &Value) -> String {
+    if s.s("kind") == "app" {
+        let last = format!("last used {}", fmt::ago(if s.f("last_seen_at") > 0.0 { s.f("last_seen_at") } else { s.f("created_at") }));
+        ["Encore app", s.st("device_name").unwrap_or(""), last.as_str()].iter().filter(|p| !p.is_empty()).copied().collect::<Vec<_>>().join(" · ")
+    } else {
+        s.st("device_name").or(s.st("user_agent")).unwrap_or("Unknown device").to_string()
+    }
+}
+
 pub fn render(view: Element, ctx: Ctx) -> PageFuture {
     Box::pin(async move {
         let me = api::get("/auth/me").await.map_err(|e| e.message)?;
@@ -99,7 +109,7 @@ pub fn render(view: Element, ctx: Ctx) -> PageFuture {
       <div class="small muted">{} · signed in {}</div></div>
       {}</div>"##,
                         esc(&s.s("id")),
-                        esc(s.st("device_name").or(s.st("user_agent")).unwrap_or("Unknown device")),
+                        esc(&session_title(s)),
                         esc(&s.s("ip")),
                         fmt::ago(s.f("created_at")),
                         if s.truthy("current") { r#"<span class="badge ok">This device</span>"#.to_string() } else { format!(r#"<button class="btn sm danger">{}Revoke</button>"#, icon("logout")) },

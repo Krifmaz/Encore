@@ -77,6 +77,8 @@ impl Config {
         // settings added by the Rust server
         for (k, env, default, secret) in [
             ("email_login", Some("ENCORE_EMAIL_LOGIN"), json!(true), false),
+            // the native app's sign-in: counted from the last use (sliding), unlike session_days
+            ("app_session_days", Some("ENCORE_APP_SESSION_DAYS"), json!(365), false),
             ("lastfm_shared_secret", Some("LASTFM_SHARED_SECRET"), json!(""), true),
             ("torznab_enabled", Some("TORZNAB_ENABLED"), json!(false), false),
             ("prowlarr_url", Some("PROWLARR_URL"), json!(""), false),

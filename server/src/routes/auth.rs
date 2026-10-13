@@ -6,7 +6,7 @@ use crate::error::{err, ApiResult};
 use crate::state::AppState;
 use crate::{email, p};
 use axum::extract::{Multipart, Path, State};
-use axum::http::header;
+use axum::http::{header, HeaderMap};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{delete, get, post, put};
 use axum::{Json, Router};
@@ -41,6 +41,9 @@ pub fn router() -> Router<AppState> {
         .route("/api/users/{id}/avatar", get(avatar))
 }
 
+/// Raised when native clients can rely on something new (see /api/auth/info `api`).
+pub const API_LEVEL: i64 = 2;
+
 fn session_cookie(token: String, max_age: i64, https: bool) -> Cookie<'static> {
     Cookie::build((auth::COOKIE, token))
         .path("/")
@@ -56,7 +59,7 @@ fn time_dur(secs: i64) -> cookie::time::Duration {
 }
 
 async fn info(State(st): State<AppState>) -> Json<Value> {
-    let mut features = vec!["owner", "totp", "email_login", "logout_all", "avatar", "theme", "remote", "rename", "reveal"];
+    let mut features = vec!["owner", "totp", "email_login", "logout_all", "avatar", "theme", "remote", "rename", "reveal", "app_tokens"];
     if crate::sources::slskd::enabled(&st) {
         features.push("soulseek"); // the Soulseek page (search, browse, transfers)
     }
@@ -69,6 +72,8 @@ async fn info(State(st): State<AppState>) -> Json<Value> {
         "version": crate::VERSION,
         "build": std::env::var("ENCORE_BUILD").unwrap_or_else(|_| "dev".into()).chars().take(7).collect::<String>(),
         "server": "rust",
+        // API level for native clients: 2 = app tokens (bearer), GET /api/library/tracks?ids=
+        "api": API_LEVEL,
         // the web app turns features on only when the server has them
         "features": features,
         "email_login": email::enabled(&st) && st.cfg.bool("email_login"),
@@ -93,6 +98,15 @@ struct Login {
     username: String,
     password: String,
     code: Option<String>,
+    app: Option<AppDevice>,
+}
+
+/// Sent by the native app instead of taking a cookie: it gets a bearer token for this device.
+#[derive(Deserialize)]
+struct AppDevice {
+    device_id: String,
+    #[serde(default)]
+    device_name: Option<String>,
 }
 
 fn totp_for(secret_b32: &str, account: &str, issuer: &str) -> Option<TOTP> {
@@ -100,13 +114,27 @@ fn totp_for(secret_b32: &str, account: &str, issuer: &str) -> Option<TOTP> {
     TOTP::new(Algorithm::SHA1, 6, 1, 30, bytes, Some(issuer.to_string()), account.to_string()).ok()
 }
 
-fn start_session(st: &AppState, jar: CookieJar, c: &ClientInfo, uid: i64) -> ApiResult<(CookieJar, Json<Value>)> {
-    let (token, max_age) = auth::create_session(st, uid, &c.ua, &c.ip)?;
+/// Browsers get a cookie and the user; the app (`app` field) gets `{user, token}` and no cookie.
+fn start_session(st: &AppState, jar: CookieJar, c: &ClientInfo, uid: i64, app: Option<&AppDevice>) -> ApiResult<(CookieJar, Json<Value>)> {
     let u = st.db.one("SELECT * FROM users WHERE id=?", p![uid])?.ok_or_else(|| err(404, "User not found"))?;
+    if let Some(a) = app {
+        let token = auth::create_app_session(st, uid, &c.ua, &c.ip, &a.device_id, a.device_name.as_deref().unwrap_or(""))?;
+        return Ok((jar, Json(json!({ "user": auth::public_user(st, &u), "token": token }))));
+    }
+    let (token, max_age) = auth::create_session(st, uid, &c.ua, &c.ip)?;
     Ok((jar.add(session_cookie(token, max_age, c.https)), Json(auth::public_user(st, &u))))
 }
 
+/// A missing device id is a client bug: say so before anything is created.
+fn check_app(app: &Option<AppDevice>) -> ApiResult<()> {
+    match app {
+        Some(a) if a.device_id.trim().is_empty() => Err(err(400, "app.device_id is required")),
+        _ => Ok(()),
+    }
+}
+
 async fn login(State(st): State<AppState>, c: ClientInfo, jar: CookieJar, Json(b): Json<Login>) -> ApiResult<(CookieJar, Json<Value>)> {
+    check_app(&b.app)?;
     let key = format!("login:{}", c.ip);
     if st.limits.limited(&key, 10, 300.0, false) {
         return Err(err(429, "Too many attempts – wait a few minutes"));
@@ -131,7 +159,7 @@ async fn login(State(st): State<AppState>, c: ClientInfo, jar: CookieJar, Json(b
             return Err(err(401, "That code didn't match – try the newest one").with(json!({ "two_factor": true })));
         }
     }
-    start_session(&st, jar, &c, user.i("id"))
+    start_session(&st, jar, &c, user.i("id"), b.app.as_ref())
 }
 
 #[derive(Deserialize)]
@@ -140,9 +168,11 @@ struct Signup {
     password: String,
     email: Option<String>,
     invite: Option<String>,
+    app: Option<AppDevice>,
 }
 
 async fn signup(State(st): State<AppState>, c: ClientInfo, jar: CookieJar, Json(b): Json<Signup>) -> ApiResult<(CookieJar, Json<Value>)> {
+    check_app(&b.app)?;
     let mode = st.cfg.str("signup_mode");
     if st.limits.limited(&format!("signup:{}", c.ip), 5, 3600.0, true) {
         return Err(err(429, "Too many sign-ups from this address"));
@@ -169,12 +199,16 @@ async fn signup(State(st): State<AppState>, c: ClientInfo, jar: CookieJar, Json(
         st.db.execute("UPDATE users SET request_limit=? WHERE id=?", p![limit, uid])?;
     }
     st.db.log("info", &format!("New user signed up: {}", b.username.trim()));
-    start_session(&st, jar, &c, uid)
+    start_session(&st, jar, &c, uid, b.app.as_ref())
 }
 
-async fn logout(State(st): State<AppState>, jar: CookieJar) -> ApiResult<(CookieJar, Json<Value>)> {
+async fn logout(State(st): State<AppState>, headers: HeaderMap, jar: CookieJar) -> ApiResult<(CookieJar, Json<Value>)> {
+    if let Some(t) = auth::bearer(&headers) {
+        st.db.execute("DELETE FROM sessions WHERE token=? AND kind='app'", p![auth::app_token_key(&t)])?;
+        return Ok((jar, Json(json!({ "ok": true }))));
+    }
     if let Some(t) = jar.get(auth::COOKIE) {
-        st.db.execute("DELETE FROM sessions WHERE token=?", p![t.value()])?;
+        st.db.execute("DELETE FROM sessions WHERE token=? AND kind='web'", p![t.value()])?;
     }
     Ok((jar.remove(Cookie::build(auth::COOKIE).path("/")), Json(json!({ "ok": true }))))
 }
@@ -251,24 +285,39 @@ struct PasswordChange {
     new: String,
 }
 
-async fn change_password(State(st): State<AppState>, User(u): User, jar: CookieJar, Json(b): Json<PasswordChange>) -> ApiResult<Json<Value>> {
+async fn change_password(State(st): State<AppState>, User(u): User, headers: HeaderMap, Json(b): Json<PasswordChange>) -> ApiResult<Json<Value>> {
     let full = st.db.one("SELECT * FROM users WHERE id=?", p![u.i("id")])?.ok_or_else(|| err(404, "User not found"))?;
     if !auth::verify_password(&b.current, &full.s("password_hash")) {
         return Err(err(400, "Current password is incorrect"));
     }
     auth::validate_credentials(&full.s("username"), &b.new)?;
     st.db.execute("UPDATE users SET password_hash=? WHERE id=?", p![auth::hash_password(&b.new), u.i("id")])?;
-    let cur = jar.get(auth::COOKIE).map(|c| c.value().to_string()).unwrap_or_default();
+    let cur = auth::session_key(&headers).unwrap_or_default();
     st.db.execute("DELETE FROM sessions WHERE user_id=? AND token != ?", p![u.i("id"), cur])?;
     Ok(Json(json!({ "ok": true })))
 }
 
-async fn sessions(State(st): State<AppState>, User(u): User, jar: CookieJar) -> ApiResult<Json<Value>> {
-    let cur = jar.get(auth::COOKIE).map(|c| c.value().to_string()).unwrap_or_default();
-    let rows = st.db.query("SELECT token, created_at, expires_at, user_agent, ip FROM sessions WHERE user_id=? ORDER BY created_at DESC", p![u.i("id")])?;
+/// Short id of a session for the list and for revoking. Web sessions: the first 10 characters of the
+/// cookie. App sessions: "sha256:" + the first 10 hex digits of the digest (the shared prefix alone
+/// would make app ids of one user collide).
+fn session_id(token: &str) -> String {
+    let n = if token.starts_with("sha256:") { 17 } else { 10 };
+    token.chars().take(n).collect()
+}
+
+async fn sessions(State(st): State<AppState>, User(u): User, headers: HeaderMap) -> ApiResult<Json<Value>> {
+    let cur = auth::session_key(&headers).unwrap_or_default();
+    let rows = st.db.query(
+        "SELECT token, created_at, expires_at, user_agent, ip, kind, device_name, last_seen_at FROM sessions WHERE user_id=? AND expires_at >= ? ORDER BY COALESCE(last_seen_at, created_at) DESC",
+        p![u.i("id"), now()],
+    )?;
     Ok(Json(json!(rows.iter().map(|r| {
         let t = r.s("token");
-        json!({ "id": t.chars().take(10).collect::<String>(), "current": t == cur, "created_at": r.get("created_at"), "user_agent": r.get("user_agent"), "ip": r.get("ip"), "device": device_name(&r.s("user_agent")) })
+        json!({
+            "id": session_id(&t), "current": t == cur, "created_at": r.get("created_at"), "user_agent": r.get("user_agent"), "ip": r.get("ip"),
+            "device": device_name(&r.s("user_agent")), "kind": if r.s("kind") == "app" { "app" } else { "web" },
+            "device_name": r.get("device_name"), "last_seen_at": r.get("last_seen_at"),
+        })
     }).collect::<Vec<_>>())))
 }
 
@@ -283,7 +332,11 @@ pub fn device_name(ua: &str) -> String {
 }
 
 async fn revoke_session(State(st): State<AppState>, User(u): User, Path(sid): Path<String>) -> ApiResult<Json<Value>> {
-    st.db.execute("DELETE FROM sessions WHERE user_id=? AND substr(token,1,10)=?", p![u.i("id"), sid])?;
+    // a short id can't match a whole session family: ids are 10 (web) or 17 ("sha256:…", app) characters
+    if sid.chars().count() < 10 {
+        return Err(err(400, "Unknown session"));
+    }
+    st.db.execute("DELETE FROM sessions WHERE user_id=? AND substr(token,1,?)=?", p![u.i("id"), sid.chars().count() as i64, sid])?;
     Ok(Json(json!({ "ok": true })))
 }
 
@@ -373,9 +426,11 @@ async fn email_link(State(st): State<AppState>, c: ClientInfo, Json(b): Json<Log
 struct MagicBody {
     token: String,
     code: Option<String>,
+    app: Option<AppDevice>,
 }
 
 async fn magic(State(st): State<AppState>, c: ClientInfo, jar: CookieJar, Json(b): Json<MagicBody>) -> ApiResult<(CookieJar, Json<Value>)> {
+    check_app(&b.app)?;
     let digest = auth::sha256_hex(&b.token);
     st.db.execute("DELETE FROM login_links WHERE expires_at < ?", p![now()])?;
     let link = st.db.one("SELECT user_id FROM login_links WHERE digest=?", p![digest])?.ok_or_else(|| err(400, "This sign-in link is invalid or expired"))?;
@@ -388,7 +443,7 @@ async fn magic(State(st): State<AppState>, c: ClientInfo, jar: CookieJar, Json(b
         }
     }
     st.db.execute("DELETE FROM login_links WHERE digest=?", p![digest])?;
-    start_session(&st, jar, &c, u.i("id"))
+    start_session(&st, jar, &c, u.i("id"), b.app.as_ref())
 }
 
 // ---- authenticator app (TOTP) -------------------------------------------------------------------
@@ -479,3 +534,7 @@ async fn avatar(State(st): State<AppState>, MaybeUser(viewer): MaybeUser, Path(i
     let data = tokio::fs::read(avatar_path(&st, id)).await.map_err(|_| err(404, "No picture"))?;
     Ok(([(header::CONTENT_TYPE, "image/jpeg"), (header::CACHE_CONTROL, "private, max-age=86400")], data).into_response())
 }
+
+#[cfg(test)]
+#[path = "auth_tests.rs"]
+mod tests;

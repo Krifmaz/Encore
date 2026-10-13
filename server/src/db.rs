@@ -36,6 +36,11 @@ const MIGRATIONS: &[(&str, &str, &str)] = &[
     ("users", "totp_secret", "TEXT"),
     ("users", "totp_enabled", "INTEGER NOT NULL DEFAULT 0"),
     ("users", "avatar_at", "REAL"),
+    // app tokens (bearer sign-in for the native app): web sessions keep kind='web'
+    ("sessions", "kind", "TEXT NOT NULL DEFAULT 'web'"),
+    ("sessions", "device_id", "TEXT"),
+    ("sessions", "device_name", "TEXT"),
+    ("sessions", "last_seen_at", "REAL"),
 ];
 
 pub fn now() -> f64 {
@@ -93,6 +98,7 @@ impl Db {
         self.execute_batch(
             "CREATE INDEX IF NOT EXISTS idx_tracks_isrc ON tracks(isrc);
              CREATE INDEX IF NOT EXISTS idx_tracks_acoustid ON tracks(acoustid_id);
+             CREATE INDEX IF NOT EXISTS sessions_user_device ON sessions(user_id, device_id);
              CREATE TABLE IF NOT EXISTS login_links (digest TEXT PRIMARY KEY, user_id INTEGER NOT NULL, expires_at REAL NOT NULL);",
         )?;
         Ok(())

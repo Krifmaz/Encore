@@ -205,6 +205,28 @@ struct SimpleQ {
     dir: String,
     limit: Option<i64>,
     offset: i64,
+    /// `/tracks?ids=1,2,3`: these songs, in this order (unknown ids are left out)
+    ids: Option<String>,
+}
+
+/// Most songs one `/tracks?ids=` call returns (a restored queue is fetched in pages of this size).
+const MAX_IDS: usize = 300;
+
+const TRACK_COLS: &str = "id, title, artist, album, albumartist, album_id, track, disc, year, duration, format, bitrate, verify_status, verify_detail, request_id, added_at";
+
+/// Parses `1,2,3` (duplicates dropped, order kept).
+fn parse_ids(raw: &str) -> ApiResult<Vec<i64>> {
+    let mut out: Vec<i64> = Vec::new();
+    for part in raw.split(',').map(str::trim).filter(|p| !p.is_empty()) {
+        let id: i64 = part.parse().map_err(|_| err(400, format!("Not a song id: {}", part.chars().take(20).collect::<String>())))?;
+        if !out.contains(&id) {
+            out.push(id);
+        }
+    }
+    if out.len() > MAX_IDS {
+        return Err(err(400, format!("At most {MAX_IDS} ids per call")));
+    }
+    Ok(out)
 }
 
 async fn artists(State(st): State<AppState>, User(_): User, Query(a): Query<SimpleQ>) -> ApiResult<Json<Value>> {
@@ -217,6 +239,16 @@ async fn artists(State(st): State<AppState>, User(_): User, Query(a): Query<Simp
 }
 
 async fn tracks(State(st): State<AppState>, User(_): User, Query(a): Query<SimpleQ>) -> ApiResult<Json<Value>> {
+    if let Some(raw) = a.ids.as_deref() {
+        let ids = parse_ids(raw)?;
+        if ids.is_empty() {
+            return Ok(Json(json!([])));
+        }
+        let marks = vec!["?"; ids.len()].join(",");
+        let rows = st.db.query(&format!("SELECT {TRACK_COLS} FROM tracks WHERE id IN ({marks})"), ids.iter().map(|i| json!(i)).collect())?;
+        let mut by_id: std::collections::HashMap<i64, crate::db::Row> = rows.into_iter().map(|r| (r.i("id"), r)).collect();
+        return Ok(Json(json!(ids.iter().filter_map(|i| by_id.remove(i)).collect::<Vec<_>>())));
+    }
     let mut params = vec![];
     let wh = if a.q.is_empty() { "" } else {
         let l = format!("%{}%", a.q);
@@ -226,8 +258,7 @@ async fn tracks(State(st): State<AppState>, User(_): User, Query(a): Query<Simpl
     params.push(json!(a.limit.unwrap_or(200).clamp(1, 1000)));
     params.push(json!(a.offset.max(0)));
     Ok(Json(json!(st.db.query(&format!(
-        "SELECT id, title, artist, album, albumartist, album_id, track, disc, year, duration, format, bitrate, verify_status, verify_detail, request_id, added_at
-         FROM tracks {wh} ORDER BY {} LIMIT ? OFFSET ?", order(TRACK_SORTS, &a.sort, &a.dir, "artist")
+        "SELECT {TRACK_COLS} FROM tracks {wh} ORDER BY {} LIMIT ? OFFSET ?", order(TRACK_SORTS, &a.sort, &a.dir, "artist")
     ), params)?)))
 }
 

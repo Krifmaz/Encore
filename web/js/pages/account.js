@@ -123,7 +123,7 @@ export async function render(view, ctx) {
   const loadSessions = async () => {
     const rows = await api.get('/auth/sessions');
     box.innerHTML = `<div class="list">${rows.map(s => `<div class="list-item" data-sid="${esc(s.id)}">
-      <div class="grow"><div class="ellipsis" style="font-weight:600">${esc(s.device_name || s.user_agent || 'Unknown device')}</div>
+      <div class="grow"><div class="ellipsis" style="font-weight:600">${esc(s.kind === 'app' ? ['Encore app', s.device_name, `last used ${fmt.ago(s.last_seen_at || s.created_at)}`].filter(Boolean).join(' · ') : (s.device_name || s.user_agent || 'Unknown device'))}</div>
       <div class="small muted">${esc(s.ip || '')} · signed in ${fmt.ago(s.created_at)}</div></div>
       ${s.current ? '<span class="badge ok">This device</span>' : `<button class="btn sm danger">${icon.logout}Revoke</button>`}</div>`).join('')}</div>`;
   };

@@ -17,6 +17,7 @@ const SECTIONS = [
     S('manual_search', 'Manual download picker', 'select', { options: [['everyone', 'Everyone'], ['admins', 'Admins only']], help: 'Who can search the sources and pick an exact download' }),
     S('default_request_limit', 'Default weekly request limit for new users', 'number', { help: '0 = unlimited' }),
     S('session_days', 'Stay signed in for (days)', 'number'),
+    S('app_session_days', 'Keep the Encore app signed in for (days)', 'number', { help: 'Counted from the last time the app was used' }),
     S('contact_email', 'Contact email for MusicBrainz', 'text', { help: 'MusicBrainz asks API clients to identify themselves' }),
     S('musicbrainz_url', 'MusicBrainz server', 'text', { help: 'Use your own mirror for faster lookups' }),
     S('musicbrainz_rate', 'MusicBrainz requests / second', 'number', { step: '0.1', help: 'Keep at 1 for the public server' }),

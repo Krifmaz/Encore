@@ -8,7 +8,7 @@ use crate::p;
 use crate::state::AppState;
 use axum::extract::FromRequestParts;
 use axum::http::request::Parts;
-use axum::http::Method;
+use axum::http::{header, HeaderMap, Method};
 use axum_extra::extract::CookieJar;
 use rand::Rng;
 use serde_json::{json, Map, Value};
@@ -172,9 +172,63 @@ pub fn create_session(st: &AppState, user_id: i64, ua: &str, ip: &str) -> ApiRes
     let token = random_token(32);
     let max_age = st.cfg.int("session_days").max(1) * 86400;
     let ua: String = ua.chars().take(200).collect();
-    st.db.execute("INSERT INTO sessions VALUES (?,?,?,?,?,?)", p![token, user_id, now(), now() + max_age as f64, ua, ip])?;
+    st.db.execute(
+        "INSERT INTO sessions (token, user_id, created_at, expires_at, user_agent, ip, kind) VALUES (?,?,?,?,?,?,'web')",
+        p![token, user_id, now(), now() + max_age as f64, ua, ip],
+    )?;
     st.db.execute("UPDATE users SET last_login=? WHERE id=?", p![now(), user_id])?;
     Ok((token, max_age))
+}
+
+// ---- app tokens (native app, `Authorization: Bearer`) -------------------------------------------
+
+/// How an app token is stored: only its digest, so a copy of the database can't sign anyone in.
+pub fn app_token_key(token: &str) -> String {
+    format!("sha256:{}", sha256_hex(token))
+}
+
+/// App sessions live this long after their last use.
+pub fn app_session_secs(st: &AppState) -> i64 {
+    st.cfg.int("app_session_days").max(1) * 86400
+}
+
+/// `last_seen_at`/`expires_at` are refreshed at most this often (one write per device per day).
+pub const APP_SEEN_EVERY: f64 = 86400.0;
+
+/// Signs a device in to the app: returns the raw token (shown once). A new sign-in from the same
+/// `device_id` replaces that device's previous app session.
+pub fn create_app_session(st: &AppState, user_id: i64, ua: &str, ip: &str, device_id: &str, device_name: &str) -> ApiResult<String> {
+    let device_id: String = device_id.trim().chars().take(100).collect();
+    if device_id.is_empty() {
+        return Err(err(400, "app.device_id is required"));
+    }
+    let device_name: String = device_name.trim().chars().take(100).collect();
+    let token = random_token(32);
+    let ua: String = ua.chars().take(200).collect();
+    let t = now();
+    st.db.execute("DELETE FROM sessions WHERE user_id=? AND kind='app' AND device_id=?", p![user_id, device_id])?;
+    st.db.execute(
+        "INSERT INTO sessions (token, user_id, created_at, expires_at, user_agent, ip, kind, device_id, device_name, last_seen_at) VALUES (?,?,?,?,?,?,'app',?,?,?)",
+        p![app_token_key(&token), user_id, t, t + app_session_secs(st) as f64, ua, ip, device_id, if device_name.is_empty() { None } else { Some(device_name) }, t],
+    )?;
+    st.db.execute("UPDATE users SET last_login=? WHERE id=?", p![t, user_id])?;
+    Ok(token)
+}
+
+/// The bearer token of the request, if it has one (`Authorization: Bearer <token>`).
+pub fn bearer(headers: &HeaderMap) -> Option<String> {
+    let v = headers.get(header::AUTHORIZATION)?.to_str().ok()?.trim();
+    let (scheme, token) = v.split_once(' ')?;
+    let token = token.trim();
+    (scheme.eq_ignore_ascii_case("bearer") && !token.is_empty()).then(|| token.to_string())
+}
+
+/// The `sessions.token` value of the session making the request (bearer digest, or the cookie).
+pub fn session_key(headers: &HeaderMap) -> Option<String> {
+    if let Some(t) = bearer(headers) {
+        return Some(app_token_key(&t));
+    }
+    CookieJar::from_headers(headers).get(COOKIE).map(|c| c.value().to_string())
 }
 
 /// First start: make sure there is an owner (the first admin becomes the owner on upgrade).
@@ -218,23 +272,52 @@ pub fn client_ip(parts: &Parts) -> String {
         .unwrap_or_default()
 }
 
-fn user_from_parts(st: &AppState, parts: &Parts) -> ApiResult<Option<Row>> {
+/// How a request signed in. Only cookies need the CSRF header: a browser never adds the other two on its own.
+#[derive(Clone, Copy, PartialEq, Debug)]
+enum Via {
+    ApiKey,
+    Bearer,
+    Cookie,
+}
+
+fn user_from_parts(st: &AppState, parts: &Parts) -> ApiResult<Option<(Row, Via)>> {
     if let Some(key) = parts.headers.get("x-api-key").and_then(|v| v.to_str().ok()) {
         let want = st.cfg.str("api_key");
         if !want.is_empty() && ct_eq(key, &want) {
-            return Ok(st.db.one("SELECT * FROM users WHERE role IN ('owner','admin') AND disabled=0 ORDER BY role='owner' DESC, id LIMIT 1", p![])?);
+            let u = st.db.one("SELECT * FROM users WHERE role IN ('owner','admin') AND disabled=0 ORDER BY role='owner' DESC, id LIMIT 1", p![])?;
+            return Ok(u.map(|u| (u, Via::ApiKey)));
         }
+    }
+    // a bearer token is used on its own: a wrong or expired one is a 401, never a fall back to the cookie
+    if let Some(token) = bearer(&parts.headers) {
+        let key = app_token_key(&token);
+        let Some(s) = st.db.one("SELECT * FROM sessions WHERE token=? AND kind='app'", p![key])? else { return Ok(None) };
+        let t = now();
+        if s.f("expires_at") < t {
+            return Ok(None);
+        }
+        let Some(u) = st.db.one("SELECT * FROM users WHERE id=? AND disabled=0", p![s.i("user_id")])? else { return Ok(None) };
+        // sliding expiry, written at most once a day per device
+        if t - s.f("last_seen_at") > APP_SEEN_EVERY {
+            let ua: String = parts.headers.get(header::USER_AGENT).and_then(|v| v.to_str().ok()).unwrap_or("").chars().take(200).collect();
+            st.db.execute(
+                "UPDATE sessions SET last_seen_at=?, expires_at=?, ip=?, user_agent=CASE WHEN ?='' THEN user_agent ELSE ? END WHERE token=?",
+                p![t, t + app_session_secs(st) as f64, client_ip(parts), ua, ua, key],
+            )?;
+        }
+        return Ok(Some((u, Via::Bearer)));
     }
     let jar = CookieJar::from_headers(&parts.headers);
     let Some(token) = jar.get(COOKIE).map(|c| c.value().to_string()) else { return Ok(None) };
-    let Some(s) = st.db.one("SELECT * FROM sessions WHERE token=?", p![token])? else { return Ok(None) };
+    let Some(s) = st.db.one("SELECT * FROM sessions WHERE token=? AND kind='web'", p![token])? else { return Ok(None) };
     if s.f("expires_at") < now() {
         return Ok(None);
     }
-    Ok(st.db.one("SELECT * FROM users WHERE id=? AND disabled=0", p![s.i("user_id")])?)
+    Ok(st.db.one("SELECT * FROM users WHERE id=? AND disabled=0", p![s.i("user_id")])?.map(|u| (u, Via::Cookie)))
 }
 
-/// The signed-in user. Mutating cookie requests must carry `X-Requested-With: encore` (CSRF).
+/// The signed-in user. Mutating cookie requests must carry `X-Requested-With: encore` (CSRF); API-key and
+/// bearer requests are exempt.
 pub struct User(pub Row);
 pub struct Admin(pub Row);
 pub struct Owner(pub Row);
@@ -244,9 +327,8 @@ pub struct MaybeUser(pub Option<Row>);
 impl FromRequestParts<AppState> for User {
     type Rejection = ApiError;
     async fn from_request_parts(parts: &mut Parts, st: &AppState) -> Result<Self, Self::Rejection> {
-        let Some(mut u) = user_from_parts(st, parts)? else { return Err(err(401, "Not authenticated")) };
-        let api = parts.headers.contains_key("x-api-key");
-        if !matches!(parts.method, Method::GET | Method::HEAD | Method::OPTIONS) && !api {
+        let Some((mut u, via)) = user_from_parts(st, parts)? else { return Err(err(401, "Not authenticated")) };
+        if !matches!(parts.method, Method::GET | Method::HEAD | Method::OPTIONS) && via == Via::Cookie {
             let ok = parts.headers.get("x-requested-with").and_then(|v| v.to_str().ok()) == Some("encore");
             if !ok {
                 return Err(err(403, "Missing CSRF header"));
@@ -282,7 +364,7 @@ impl FromRequestParts<AppState> for Owner {
 impl FromRequestParts<AppState> for MaybeUser {
     type Rejection = ApiError;
     async fn from_request_parts(parts: &mut Parts, st: &AppState) -> Result<Self, Self::Rejection> {
-        Ok(MaybeUser(user_from_parts(st, parts)?))
+        Ok(MaybeUser(user_from_parts(st, parts)?.map(|(u, _)| u)))
     }
 }
 

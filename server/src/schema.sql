@@ -20,8 +20,16 @@ CREATE TABLE IF NOT EXISTS sessions (
     created_at REAL NOT NULL,
     expires_at REAL NOT NULL,
     user_agent TEXT,
-    ip TEXT
+    ip TEXT,
+    -- 'web' (cookie; token is the raw cookie value) or 'app' (bearer; token is "sha256:" + hex digest,
+    -- the raw token is shown to the app once). App sessions slide: expires_at moves on with use.
+    kind TEXT NOT NULL DEFAULT 'web',
+    device_id TEXT,      -- stable per app install (a UUID the app generates)
+    device_name TEXT,    -- "Pixel 9 Pro"
+    last_seen_at REAL
 );
+-- index sessions_user_device ON sessions(user_id, device_id) is created in db.rs::migrate (after old
+-- databases got the column)
 
 CREATE TABLE IF NOT EXISTS invites (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
