@@ -180,6 +180,8 @@ jobs:
       version: ${{ needs.version.outputs.version }}
       semver: ${{ needs.version.outputs.semver }}
       code: ${{ needs.version.outputs.code }}
+    # the Android release key lives in repository secrets; a called workflow only sees them when passed on
+    secrets: inherit
 
   publish:
     needs: [version, server, docker, apps]
