@@ -90,4 +90,7 @@ dependencies {
     implementation(libs.kotlinx.coroutines.android)
     implementation(libs.coil.compose)
     implementation(libs.coil.network.okhttp)
+
+    // Cadenza on the phone (JNI binding + libencore_cadenza.so when built with cargo-ndk); CadenzaEngine adapts it
+    implementation(project(":cadenza"))
 }

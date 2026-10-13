@@ -18,3 +18,4 @@ dependencyResolutionManagement {
 
 rootProject.name = "encore-android"
 include(":app")
+include(":cadenza") // Cadenza on the phone: JNI binding + libencore_cadenza.so (cargo-ndk), see cadenza/build.gradle.kts

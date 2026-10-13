@@ -35,6 +35,8 @@ import androidx.compose.material3.TopAppBarScrollBehavior
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.MutableState
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.setValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.ui.Alignment
@@ -51,6 +53,7 @@ import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
 import app.encore.android.R
 import app.encore.android.data.api.Album
 import app.encore.android.data.api.Track
@@ -173,7 +176,7 @@ fun ArtPlaceholder(label: String?, modifier: Modifier = Modifier, letterSize: Dp
                 initialOf(label),
                 color = p.faint,
                 fontWeight = FontWeight.ExtraBold,
-                fontSize = androidx.compose.ui.unit.TextUnit(letterSize.value * 0.9f, androidx.compose.ui.unit.TextUnitType.Sp),
+                fontSize = (letterSize.value * 0.9f).sp,
             )
         }
     }
@@ -254,7 +257,7 @@ fun Avatar(name: String, url: String?, imageLoader: ImageLoader, size: Dp = 32.d
             (name.ifEmpty { "?" }).substring(0, 1).uppercase(),
             color = p.onAccent,
             fontWeight = FontWeight.Bold,
-            fontSize = androidx.compose.ui.unit.TextUnit(size.value * 0.45f, androidx.compose.ui.unit.TextUnitType.Sp),
+            fontSize = (size.value * 0.45f).sp,
         )
         if (!url.isNullOrEmpty()) {
             AsyncImage(model = url, contentDescription = null, imageLoader = imageLoader, modifier = Modifier.fillMaxSize(), contentScale = ContentScale.Crop)
@@ -276,7 +279,7 @@ fun SectionTitle(text: String, modifier: Modifier = Modifier) {
 
 /** The web's `.section-head`: an h2 (with an optional line under it) and an optional small button on the right. */
 @Composable
-fun SectionHead(title: String, subtitle: String? = null, action: String? = null, onAction: (() -> Unit)? = null, modifier: Modifier = Modifier) {
+fun SectionHead(title: String, subtitle: String? = null, modifier: Modifier = Modifier, action: String? = null, onAction: (() -> Unit)? = null) {
     Row(
         modifier.fillMaxWidth().padding(start = Gutter, end = Gutter, top = 24.dp, bottom = 12.dp),
         verticalAlignment = Alignment.CenterVertically,
@@ -295,16 +298,18 @@ fun SectionHead(title: String, subtitle: String? = null, action: String? = null,
 @Composable
 fun Badge(text: String, kind: String = "", modifier: Modifier = Modifier, onClick: (() -> Unit)? = null) {
     val p = MaterialTheme.palette
-    val (fg, border, bg) = when (kind) {
-        "ok" -> Triple(EncoreColors.Ok, EncoreColors.Ok.copy(alpha = 0.35f), EncoreColors.Ok.copy(alpha = 0.10f))
-        "warn" -> Triple(EncoreColors.Warn, EncoreColors.Warn.copy(alpha = 0.35f), EncoreColors.Warn.copy(alpha = 0.10f))
-        "err" -> Triple(EncoreColors.Err, EncoreColors.Err.copy(alpha = 0.35f), EncoreColors.Err.copy(alpha = 0.10f))
-        "info" -> Triple(EncoreColors.Info, EncoreColors.Info.copy(alpha = 0.35f), EncoreColors.Info.copy(alpha = 0.10f))
-        "accent" -> Triple(p.text, p.accent.copy(alpha = 0.4f), p.accent.copy(alpha = 0.14f))
-        else -> Triple(p.muted, p.border, p.panel2)
+    val tone: Color? = when (kind) {
+        "ok" -> EncoreColors.Ok
+        "warn" -> EncoreColors.Warn
+        "err" -> EncoreColors.Err
+        "info" -> EncoreColors.Info
+        else -> null
     }
+    val fg: Color = if (kind == "accent") p.text else tone ?: p.muted
+    val edge: Color = if (kind == "accent") p.accent.copy(alpha = 0.4f) else tone?.copy(alpha = 0.35f) ?: p.border
+    val bg: Color = if (kind == "accent") p.accent.copy(alpha = 0.14f) else tone?.copy(alpha = 0.10f) ?: p.panel2
     val shape = RoundedCornerShape(99.dp)
-    var m = modifier.clip(shape).background(bg).border(1.dp, border, shape)
+    var m = modifier.clip(shape).background(bg).border(1.dp, edge, shape)
     if (onClick != null) m = m.clickable(onClick = onClick)
     Box(m.padding(horizontal = 9.dp, vertical = 2.dp)) {
         Text(text, style = MaterialTheme.typography.labelSmall, color = fg, maxLines = 1, overflow = TextOverflow.Ellipsis)
@@ -410,7 +415,7 @@ fun Tile(
         )
         Text(
             subtitle,
-            style = MaterialTheme.typography.bodySmall.copy(fontSize = 13.sp13),
+            style = MaterialTheme.typography.bodySmall.copy(fontSize = 13.sp),
             color = MaterialTheme.palette.muted,
             maxLines = 1,
             overflow = TextOverflow.Ellipsis,
@@ -420,7 +425,7 @@ fun Tile(
         if (!subtitle2.isNullOrEmpty()) {
             Text(
                 subtitle2,
-                style = MaterialTheme.typography.bodySmall.copy(fontSize = 13.sp13),
+                style = MaterialTheme.typography.bodySmall.copy(fontSize = 13.sp),
                 color = MaterialTheme.palette.faint,
                 maxLines = 1,
                 overflow = TextOverflow.Ellipsis,
@@ -430,9 +435,6 @@ fun Tile(
         }
     }
 }
-
-private val Int.sp13: androidx.compose.ui.unit.TextUnit
-    get() = androidx.compose.ui.unit.TextUnit(this.toFloat(), androidx.compose.ui.unit.TextUnitType.Sp)
 
 /** An album tile (the web's `libraryTile`): cover, title, "artist · year". */
 @Composable

@@ -20,6 +20,8 @@ object MediaItems {
     const val EXTRA_FORMAT = "format"
     const val EXTRA_DURATION = "duration"
     const val EXTRA_ALBUM_ARTIST = "albumartist"
+    const val EXTRA_BITRATE = "bitrate"
+    const val EXTRA_YEAR = "year"
 
     fun trackId(mediaId: String): Long? =
         if (mediaId.startsWith("track:")) mediaId.removePrefix("track:").substringBefore("|").toLongOrNull() else null
@@ -38,6 +40,8 @@ object MediaItems {
             putString(EXTRA_FORMAT, t.format)
             putDouble(EXTRA_DURATION, t.durationSec)
             putString(EXTRA_ALBUM_ARTIST, t.albumArtist)
+            putInt(EXTRA_BITRATE, t.bitrate)
+            putString(EXTRA_YEAR, t.year)
         }
         val md = MediaMetadata.Builder()
             .setTitle(t.title)
@@ -54,7 +58,8 @@ object MediaItems {
         if (t.albumId.isNotEmpty()) md.setArtworkUri(coverUri(t.albumId))
         return MediaItem.Builder()
             .setMediaId("track:${t.id}" + (if (parent != null) "|$parent" else ""))
-            .setUri(api.streamUrl(t.id, t.format))
+            // the bare stream address: StreamResolver adds the quality / transcode / Cadenza query when it loads
+            .setUri(api.streamUrl(t.id, ""))
             .setMediaMetadata(md.build())
             .build()
     }
@@ -66,8 +71,8 @@ object MediaItems {
     fun withUri(api: EncoreApi, item: MediaItem): MediaItem? {
         if (item.localConfiguration != null) return item
         val id = trackId(item.mediaId) ?: return null
-        val format = item.mediaMetadata.extras?.getString(EXTRA_FORMAT) ?: return null
-        return item.buildUpon().setUri(api.streamUrl(id, format)).build()
+        if (item.mediaMetadata.extras?.getString(EXTRA_FORMAT) == null) return null
+        return item.buildUpon().setUri(api.streamUrl(id, "")).build()
     }
 
     /** The song as a Track again (queue snapshots, resumption). */
@@ -84,10 +89,10 @@ object MediaItems {
             albumId = x?.getString(EXTRA_ALBUM_ID) ?: "",
             trackNo = m.trackNumber ?: 0,
             disc = m.discNumber ?: 0,
-            year = "",
+            year = x?.getString(EXTRA_YEAR) ?: "",
             durationSec = x?.getDouble(EXTRA_DURATION) ?: 0.0,
             format = x?.getString(EXTRA_FORMAT) ?: "",
-            bitrate = 0,
+            bitrate = x?.getInt(EXTRA_BITRATE) ?: 0,
         )
     }
 }

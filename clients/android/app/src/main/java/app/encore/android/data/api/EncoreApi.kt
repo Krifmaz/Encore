@@ -119,6 +119,38 @@ class EncoreApi(private val client: OkHttpClient, private val store: SessionStor
 
     fun me(): User = User.from(getObject("/api/auth/me"))
 
+    /** GET /api/auth/me as it comes (perms, prefs.playback …). */
+    fun meRaw(): JsonObject = getObject("/api/auth/me")
+
+    /** PUT /api/auth/prefs {playback}: the account keeps the playback settings (web/js/playback.js save()). */
+    fun putPlaybackPrefs(playback: JsonObject) {
+        call("PUT", url("/api/auth/prefs"), JsonObject(mapOf("playback" to playback)))
+    }
+
+    // ---- playback (server-side Cadenza, signal path, lyrics, share) --------------------------------------
+
+    /** GET /api/playback/dsp: whether the server upsamples streams for this account, and the choices on offer. */
+    fun dspInfo(): app.encore.android.data.prefs.DspInfo = app.encore.android.data.prefs.DspInfo.from(getObject("/api/playback/dsp"))
+
+    /** POST /api/playback/dsp/prepare: render a song ahead; returns `cached | rendering | queued | busy` ("" if unknown). */
+    fun dspPrepare(trackId: Long, rate: Int, filter: String, dither: String): String {
+        val body = json.encodeToJsonElement(DspPrepareBody.serializer(), DspPrepareBody(trackId, rate, filter, dither))
+        return (post("/api/playback/dsp/prepare", body) as? JsonObject)?.str("state") ?: ""
+    }
+
+    /** GET /api/library/tracks/{id}/info: codec, sample rate, bit depth, channels, bitrate, lossless (the signal path's Source row). */
+    fun trackInfo(trackId: Long): JsonObject = getObject("/api/library/tracks/$trackId/info")
+
+    /** GET /api/library/tracks/{id}/lyrics: `{lyrics, synced, source, instrumental?}` (looked up on LRCLIB and saved when missing). */
+    fun lyrics(trackId: Long, force: Boolean = false): JsonObject = getObject("/api/library/tracks/$trackId/lyrics" + if (force) "?force=true" else "")
+
+    /** POST /api/library/tracks/{id}/share → the public link (`base + path`, as the web player builds it). */
+    fun shareLink(trackId: Long): String {
+        val o = post("/api/library/tracks/$trackId/share", JsonObject(emptyMap())) as? JsonObject ?: throw IOException("Couldn't create the link")
+        val path = o.str("path")
+        return if (path.isNotEmpty()) url(path) else o.str("url")
+    }
+
     // ---- library ---------------------------------------------------------------------------------------
 
     fun albums(sort: String = "name", offset: Int = 0, limit: Int = 120, q: String = "", artist: String = ""): List<Album> {

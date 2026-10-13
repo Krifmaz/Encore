@@ -199,3 +199,12 @@ data class ShuffleBody(val limit: Int, val exclude: List<Long>)
 
 @Serializable
 data class LinkBody(val url: String)
+
+/** POST /api/playback/dsp/prepare – render a song ahead on the server's Cadenza. */
+@Serializable
+data class DspPrepareBody(
+    @SerialName("track_id") val trackId: Long,
+    val rate: Int,
+    val filter: String,
+    val dither: String,
+)
