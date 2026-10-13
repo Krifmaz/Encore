@@ -33,7 +33,6 @@ import app.encore.android.data.api.Track
 import app.encore.android.data.session.AuthState
 import app.encore.android.data.session.Session
 import app.encore.android.ui.components.AddToPlaylistSheet
-import app.encore.android.ui.components.EmptyState
 import app.encore.android.ui.components.MenuEntry
 import app.encore.android.ui.components.PopMenu
 import app.encore.android.ui.components.ToastHost
@@ -70,8 +69,8 @@ import app.encore.android.ui.theme.palette
 /**
  * Places the app can go; tabs are the roots, the rest stack on top of the current tab.
  *
- * The features part reaches For you / Requests / Leaderboard / Account from the Home avatar menu through the
- * entries below; its screens replace the `PlaceholderScreen` branches in [MainScreen] (one line each).
+ * For you / Requests / Leaderboard / Account open from the Home avatar menu through the entries below; Discover's
+ * artist and album catalog pages and the request picker stack like any other screen.
  */
 sealed interface Screen {
     data class Album(val id: String) : Screen
@@ -291,14 +290,5 @@ private fun TrackMenu(nav: Nav, req: TrackMenuRequest, onDismiss: () -> Unit) {
                 if (t.albumArtist.isNotEmpty() || t.artist.isNotEmpty()) MenuEntry("Go to artist", R.drawable.ic_person) { nav.open(Screen.Artist(t.albumArtist.ifEmpty { t.artist })) } else null,
             ),
         )
-    }
-}
-
-/** Where a features-part screen goes until it lands. */
-@Composable
-private fun PlaceholderScreen(nav: Nav, title: String) {
-    Column(Modifier.fillMaxSize()) {
-        app.encore.android.ui.screens.BackBar(title, nav.back)
-        EmptyState(R.drawable.ic_spark, "$title is on its way", "This page is part of the next milestone.")
     }
 }

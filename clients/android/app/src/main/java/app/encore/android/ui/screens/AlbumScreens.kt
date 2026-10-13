@@ -43,6 +43,7 @@ import androidx.compose.ui.unit.sp
 import app.encore.android.R
 import app.encore.android.data.api.Album
 import app.encore.android.data.api.AlbumDetail
+import app.encore.android.data.api.EncoreApi
 import app.encore.android.data.api.Track
 import app.encore.android.ui.Nav
 import app.encore.android.ui.Screen
@@ -103,7 +104,7 @@ private fun JsonObject.d(key: String): Double = (this[key] as? JsonPrimitive)?.c
  * `requested_at` and `added_at`, which web/js/pages/library.js turns into the history line.
  */
 private fun loadAlbumPage(nav: Nav, id: String): AlbumPage {
-    val o = nav.graph.api.getObject("/api/library/albums/$id")
+    val o = nav.graph.api.getObject("/api/library/albums/${EncoreApi.enc(id)}")
     val rows = (o["tracks"] as? JsonArray)?.mapNotNull { it as? JsonObject } ?: emptyList()
     val tracks = rows.mapNotNull { Track.from(it) }
     val album = Album(

@@ -147,6 +147,11 @@ shuffle library").
   so `CoverProvider` fetches each cover once with the app's client and serves it from the cache.
 - Auto hides apps that weren't installed from Play unless "Unknown sources" is on in Auto's developer settings
   (decision D3: GitHub releases only).
+- Not signed in (or the session expired): `onGetLibraryRoot` still returns the root, because Media3 does not
+  replicate an error from that call and Auto would only show "can't use this app right now". Browsing the root
+  (`onGetChildren`) then returns `RESULT_ERROR_SESSION_AUTHENTICATION_EXPIRED` with the
+  `EXTRAS_KEY_ERROR_RESOLUTION_ACTION_*_COMPAT` extras, so Auto shows "Sign in to Encore on your phone" with a
+  button that opens the app.
 
 ## Libraries (all pinned in `gradle/libs.versions.toml`)
 

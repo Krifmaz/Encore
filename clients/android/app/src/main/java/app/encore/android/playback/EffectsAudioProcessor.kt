@@ -101,7 +101,7 @@ class EffectsAudioProcessor(private val engine: DspEngine) : BaseAudioProcessor(
         return ((seed ushr 40).toInt() and 0xFFFF) / 65536f - 0.5f
     }
 
-    override fun onFlush() {
+    override fun onFlush(streamMetadata: AudioProcessor.StreamMetadata) {
         try { engine.flush() } catch (_: Throwable) {}
     }
 

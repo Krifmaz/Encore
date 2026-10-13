@@ -91,7 +91,7 @@ fun RequestsScreen(nav: Nav) {
 
     suspend fun load() {
         try {
-            val m = me ?: withContext(Dispatchers.IO) { features.me() }.also { me = it; if (!it.isAdmin) mine = true }
+            val m = me ?: withContext(Dispatchers.IO) { features.me() }.also { me = it; if (!it.isAdmin && !mine) mine = true }
             rows = withContext(Dispatchers.IO) { features.requests(FILTERS[filter].first, mine && m.isAdmin) }
             error = null
         } catch (e: CancellationException) {

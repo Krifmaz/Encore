@@ -57,6 +57,7 @@ import app.encore.android.data.repo.SessionRow
 import app.encore.android.data.repo.TotpSetup
 import app.encore.android.data.repo.formatAgo
 import app.encore.android.data.session.Session
+import app.encore.android.playback.ResumeStore
 import app.encore.android.ui.Nav
 import app.encore.android.ui.components.Avatar
 import app.encore.android.ui.components.Badge
@@ -351,18 +352,24 @@ fun AccountScreen(nav: Nav, session: Session) {
             "Every phone, computer and app signed in to your account is signed out – including this one.",
             "Sign out everywhere", danger = true, onDismiss = { confirmLogoutAll = false },
         ) {
+            nav.player.stopAndClear()
+            ResumeStore(context).clear()
             scope.launch {
                 try { withContext(Dispatchers.IO) { features.logoutAll() } } catch (_: Exception) {}
                 graph.likes.clear()
+                graph.prefs.clear()
                 graph.store.signOut()
             }
         }
     }
     if (confirmSignOut) {
         ConfirmDialog("Sign out?", "You can sign in again any time.", "Sign out", onDismiss = { confirmSignOut = false }) {
+            nav.player.stopAndClear()
+            ResumeStore(context).clear()
             scope.launch {
                 try { withContext(Dispatchers.IO) { graph.api.logout() } } catch (_: Exception) {}
                 graph.likes.clear()
+                graph.prefs.clear()
                 graph.store.signOut()
             }
         }

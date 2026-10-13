@@ -722,15 +722,16 @@ class EncorePlaybackService : MediaLibraryService() {
             return Futures.immediateFuture(SessionResult(SessionResult.RESULT_ERROR_NOT_SUPPORTED))
         }
 
+        /**
+         * Always hands out the root, signed in or not: Media3 exempts this call from library-error replication and
+         * the legacy stub turns an error here into a refused MediaBrowser connection ("can't use this app right
+         * now"). The sign-in message comes from [onGetChildren] on the root instead, which Auto does show.
+         */
         override fun onGetLibraryRoot(session: MediaLibrarySession, browser: MediaSession.ControllerInfo, params: LibraryParams?): ListenableFuture<LibraryResult<MediaItem>> {
             val f = SettableFuture.create<LibraryResult<MediaItem>>()
             io.execute {
                 try { runBlocking { graph.store.awaitLoaded() } } catch (_: Exception) {}
-                if (graph.store.current == null) {
-                    f.set(signInError())
-                } else {
-                    f.set(LibraryResult.ofItem(tree.root(), params))
-                }
+                f.set(LibraryResult.ofItem(tree.root(), params))
             }
             return f
         }
@@ -859,8 +860,8 @@ class EncorePlaybackService : MediaLibraryService() {
         val open = Intent(this, MainActivity::class.java).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_SINGLE_TOP)
         val pi = PendingIntent.getActivity(this, 1, open, PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT)
         val extras = Bundle().apply {
-            putString(MediaConstants.EXTRAS_KEY_ERROR_RESOLUTION_ACTION_LABEL, "Sign in to Encore on your phone")
-            putParcelable(MediaConstants.EXTRAS_KEY_ERROR_RESOLUTION_ACTION_INTENT, pi)
+            putString(MediaConstants.EXTRAS_KEY_ERROR_RESOLUTION_ACTION_LABEL_COMPAT, "Sign in to Encore on your phone")
+            putParcelable(MediaConstants.EXTRAS_KEY_ERROR_RESOLUTION_ACTION_INTENT_COMPAT, pi)
         }
         return LibraryResult.ofError(LibraryResult.RESULT_ERROR_SESSION_AUTHENTICATION_EXPIRED, LibraryParams.Builder().setExtras(extras).build())
     }
