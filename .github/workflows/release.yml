@@ -21,6 +21,11 @@ on:
         description: "Also build desktop + Android apps (slow, costs macOS minutes)"
         type: boolean
         default: false
+      only:
+        description: "Build only part of it: 'android' = just the Android APK, swapped into the current edge release (server, Docker and desktop stay as they are)"
+        type: choice
+        options: [all, android]
+        default: all
 
 permissions:
   contents: write
@@ -99,6 +104,7 @@ jobs:
 
   server:
     needs: [version, test, ui]
+    if: inputs.only != 'android'
     runs-on: ubuntu-latest
     strategy:
       matrix:
@@ -141,6 +147,7 @@ jobs:
 
   docker:
     needs: [version, test]
+    if: inputs.only != 'android'
     runs-on: ubuntu-latest
     env:
       DOCKER_BUILD_RECORD_UPLOAD: false
@@ -174,18 +181,23 @@ jobs:
 
   apps:
     needs: [version, test]
-    if: inputs.apps
+    if: inputs.apps || inputs.only == 'android'
     uses: ./.github/workflows/apps.yml
     with:
       version: ${{ needs.version.outputs.version }}
       semver: ${{ needs.version.outputs.semver }}
       code: ${{ needs.version.outputs.code }}
+      only: ${{ inputs.only == 'android' && 'android-native' || 'all' }}
     # the Android release key lives in repository secrets; a called workflow only sees them when passed on
     secrets: inherit
 
   publish:
     needs: [version, server, docker, apps]
-    if: always() && needs.server.result == 'success' && needs.docker.result == 'success' && (needs.apps.result == 'success' || needs.apps.result == 'skipped')
+    if: >-
+      always() && (
+        (inputs.only == 'android' && needs.apps.result == 'success') ||
+        (inputs.only != 'android' && needs.server.result == 'success' && needs.docker.result == 'success' && (needs.apps.result == 'success' || needs.apps.result == 'skipped'))
+      )
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -193,6 +205,7 @@ jobs:
           fetch-depth: 0
       # only our files (the Docker build record artifact can't be downloaded this way)
       - uses: actions/download-artifact@v4
+        if: inputs.only != 'android'
         with:
           pattern: server-*
           path: out
@@ -206,8 +219,16 @@ jobs:
       - name: Files and notes
         env:
           APPS: ${{ needs.apps.result }}
+          ONLY: ${{ inputs.only }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           V=${{ needs.version.outputs.version }}; SV=${{ needs.version.outputs.semver }}
+          if [ "$ONLY" = android ]; then
+            # Android only: keep every other file of the current edge release, swap in the new APK
+            mkdir -p keep && gh release download edge --dir keep 2>/dev/null || true
+            rm -f keep/Encore-android-*.apk keep/docker-compose.yml
+            mv keep/* out/ 2>/dev/null || true
+          fi
           # desktop installers carry the npm version in their names – show the real one
           for f in out/*"$SV"*; do [ -e "$f" ] && mv "$f" "${f//$SV/$V}"; done
           cp docker-compose.yml out/
@@ -223,7 +244,10 @@ jobs:
           * **Docker**: \`ghcr.io/krifmaz/encore:edge\` (this build; \`:$V\` pins it, \`:latest\` is the newest full release) · compose file attached
           * **Linux without Docker**: \`encore-$V-linux-x86_64.tar.gz\` / \`-aarch64\` – run \`ENCORE_CONFIG_DIR=./config ENCORE_STATIC_DIR=./static ./encore\`
           EOT
-          if [ "$APPS" = success ]; then cat >> notes.md <<EOT
+          if [ "$ONLY" = android ]; then cat >> notes.md <<EOT
+          * **Android**: \`Encore-android-$V.apk\` (this build) · the server, Docker image and desktop apps are from the previous release
+          EOT
+          elif [ "$APPS" = success ]; then cat >> notes.md <<EOT
           * **Android**: \`Encore-android-$V.apk\` · **Windows**: \`Encore-Setup-$V.exe\` · **macOS**: the .dmg (unsigned: right-click → Open the first time) · **Linux desktop**: .AppImage or .deb
           EOT
           else echo "* **Apps**: the desktop and Android apps were not rebuilt for this release – the ones attached are from the last build that made them." >> notes.md; fi
