@@ -53,7 +53,7 @@ export async function render(view, ctx) {
   api.get('/stats/me').then(s => {
     view.querySelector('#stats').innerHTML = `
       <div class="stat"><b>${fmt.num(s.library.tracks)}</b><span>songs in the library</span></div>
-      <div class="stat"><b>${fmt.longDur(s.library.duration)}</b><span>to listen to${s.library.duration > 86400 ? ` · ${(s.library.duration / 86400).toFixed(1)} days non-stop` : ''}</span></div>
+      <div class="stat"><b>${fmt.longDur(s.library.duration)}</b><span>of nonstop listening</span></div>
       <div class="stat"><b>${fmt.num(s.me.plays)}</b><span>songs you played${s.me.listened ? ` · ${fmt.longDur(s.me.listened)}` : ''}</span></div>
       <div class="stat"><b>${fmt.num(s.me.requests)}</b><span>things you requested${s.me.rank ? ` · #${s.me.rank} on the <a href="#/leaderboard">leaderboard</a>` : ''}</span></div>
       ${s.me.top_artist ? `<div class="stat"><b class="ellipsis" style="display:block">${esc(s.me.top_artist)}</b><span>your most played artist</span></div>` : ''}

@@ -95,9 +95,17 @@ export const fmt = {
     const h = Math.floor(s / 3600), m = Math.floor((s % 3600) / 60), sec = s % 60;
     return h ? `${h}:${String(m).padStart(2, '0')}:${String(sec).padStart(2, '0')}` : `${m}:${String(sec).padStart(2, '0')}`;
   },
+  // "1 yr 4 mo 22 days 8 hr 24 min"; zero units are left out. A month is 30 days, a year 365.
   longDur(s) {
-    const h = Math.floor(s / 3600), m = Math.round((s % 3600) / 60);
-    return h ? `${h} hr ${m} min` : `${m} min`;
+    let m = Math.round((s || 0) / 60);
+    const parts = [];
+    for (const [size, one, many] of [[525600, 'yr', 'yr'], [43200, 'mo', 'mo'], [1440, 'day', 'days'], [60, 'hr', 'hr']]) {
+      const n = Math.floor(m / size);
+      m -= n * size;
+      if (n) parts.push(`${n} ${n === 1 ? one : many}`);
+    }
+    if (m || !parts.length) parts.push(`${m} min`);
+    return parts.join(' ');
   },
   size(b) {
     if (!b) return '0 B';

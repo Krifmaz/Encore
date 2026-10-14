@@ -172,11 +172,18 @@ pub mod fmt {
         let (h, m, sec) = (s / 3600, (s % 3600) / 60, s % 60);
         if h > 0 { format!("{h}:{m:02}:{sec:02}") } else { format!("{m}:{sec:02}") }
     }
-    /// `fmt.longDur(s)`: "2 hr 5 min" / "12 min".
+    /// `fmt.longDur(s)`: "1 yr 4 mo 22 days 8 hr 24 min"; zero units are left out.
+    /// A month is 30 days, a year 365.
     pub fn long_dur(s: f64) -> String {
-        let h = (s / 3600.0).floor() as i64;
-        let m = ((s % 3600.0) / 60.0).round() as i64;
-        if h > 0 { format!("{h} hr {m} min") } else { format!("{m} min") }
+        let mut m = (s.max(0.0) / 60.0).round() as i64;
+        let mut parts = Vec::new();
+        for (size, one, many) in [(525_600, "yr", "yr"), (43_200, "mo", "mo"), (1440, "day", "days"), (60, "hr", "hr")] {
+            let n = m / size;
+            m -= n * size;
+            if n > 0 { parts.push(format!("{n} {}", if n == 1 { one } else { many })); }
+        }
+        if m > 0 || parts.is_empty() { parts.push(format!("{m} min")); }
+        parts.join(" ")
     }
     /// `fmt.size(b)`.
     pub fn size(b: f64) -> String {

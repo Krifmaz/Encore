@@ -106,14 +106,13 @@ pub fn render(view: Element, ctx: Ctx) -> PageFuture {
                 let duration = lib.f("duration");
                 dom::set_html(&el, &format!(r##"
       <div class="stat"><b>{tracks}</b><span>songs in the library</span></div>
-      <div class="stat"><b>{long_dur}</b><span>to listen to{days}</span></div>
+      <div class="stat"><b>{long_dur}</b><span>of nonstop listening</span></div>
       <div class="stat"><b>{plays}</b><span>songs you played{listened}</span></div>
       <div class="stat"><b>{requests}</b><span>things you requested{rank}</span></div>
       {top_artist}
       {fun}"##,
                     tracks = ui::fmt::num(lib.f("tracks")),
                     long_dur = ui::fmt::long_dur(duration),
-                    days = if duration > 86400.0 { format!(" · {:.1} days non-stop", duration / 86400.0) } else { String::new() },
                     plays = ui::fmt::num(me.f("plays")),
                     listened = if me.truthy("listened") { format!(" · {}", ui::fmt::long_dur(me.f("listened"))) } else { String::new() },
                     requests = ui::fmt::num(me.f("requests")),
