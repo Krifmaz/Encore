@@ -960,7 +960,8 @@ async function renderPlayback(el) {
         <label class="row" style="gap:8px;align-items:center"><input type="checkbox" id="pb-preload" ${p.preload ? 'checked' : ''}> Pre-load the next song while this one plays</label>
         <span class="small muted">The next song is fetched once the current one is safely buffered, so it starts without a gap. Turn it off on a very slow connection to leave all the bandwidth to the song playing.</span></div>
       <div class="stack" style="gap:6px"><h3>When the queue ends</h3>
-        <label class="row" style="gap:8px;align-items:center"><input type="checkbox" id="pb-autoplay" ${p.autoplay ? 'checked' : ''}> Keep going with a shuffle of the whole library</label></div>
+        <label class="row" style="gap:8px;align-items:center"><input type="checkbox" id="pb-autoplay" ${p.autoplay ? 'checked' : ''}> Keep going with a shuffle of the whole library</label>
+        <label class="row" style="gap:8px;align-items:center"><input type="checkbox" id="pb-resume" ${p.resume ? 'checked' : ''}> Resume where I left off when the app opens</label></div>
       <div class="stack" style="gap:6px"><h3>Sound (on this device)</h3>
         ${soundHtml()}</div>
       <div class="stack" style="gap:6px"><h3>Pure playback</h3>
@@ -973,6 +974,7 @@ async function renderPlayback(el) {
     el.querySelectorAll('.seg[data-key] button').forEach(b => b.onclick = () => set({ [b.closest('.seg').dataset.key]: b.dataset.v }));
     el.querySelector('#pb-preload').onchange = (e) => set({ preload: e.target.checked });
     el.querySelector('#pb-autoplay').onchange = (e) => set({ autoplay: e.target.checked });
+    el.querySelector('#pb-resume').onchange = (e) => set({ resume: e.target.checked });
     bindSound();
     const dspBox = el.querySelector('#pb-dsp');
     if (dspBox) {

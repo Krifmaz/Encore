@@ -217,6 +217,7 @@ fun PlaybackSettingsScreen(nav: Nav, onBack: () -> Unit) {
 
             H3("When the queue ends")
             CheckRow("Keep going with a shuffle of the whole library", prefs.autoplay) { on -> set { it.copy(autoplay = on) } }
+            CheckRow("Resume where I left off when the app opens", prefs.resume) { on -> set { it.copy(resume = on) } }
 
             H3("Sound (on this device)")
             SoundSection(prefs, bitPerfect, set)

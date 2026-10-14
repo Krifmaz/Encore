@@ -185,6 +185,15 @@ class EncoreApi(private val client: OkHttpClient, private val store: SessionStor
 
     fun track(id: Long): Track? = Track.from(getObject("/api/library/tracks/$id"))
 
+    /** GET /api/library/tracks?ids=1,2,3: these songs in this order (unknown ids left out), 300 per call. */
+    fun tracksByIds(ids: List<Long>): List<Track> {
+        val out = ArrayList<Track>(ids.size)
+        for (chunk in ids.distinct().chunked(300)) {
+            out.addAll(get("/api/library/tracks?ids=" + chunk.joinToString(",")).objects().mapNotNull { Track.from(it) })
+        }
+        return out
+    }
+
     fun recentAlbums(limit: Int = 30): List<Album> = get("/api/library/recent?limit=$limit").objects().mapNotNull { Album.from(it) }
 
     fun recentPlays(limit: Int = 50): List<Track> = get("/api/library/plays/recent?limit=$limit").objects().mapNotNull { Track.from(it) }
@@ -234,6 +243,19 @@ class EncoreApi(private val client: OkHttpClient, private val store: SessionStor
             PlaylistRow(r.str("title"), r.str("artist"), Track.fromPlaylistItem(r))
         }
         return PlaylistDetail(pl, rows)
+    }
+
+    // ---- pick up where you left off (server/src/routes/remote.rs) -----------------------------------------
+
+    /** GET /api/remote/spot: the account's last playback spot with its song, or null (none, or an older server). */
+    fun spot(): PlaybackSpot? = (get("/api/remote/spot") as? JsonObject)?.let { PlaybackSpot.from(it) }
+
+    /** DELETE /api/remote/spot */
+    fun clearSpot() { call("DELETE", url("/api/remote/spot"), null) }
+
+    /** POST /api/remote/{device}/command, e.g. `{action: "pause"}` (the web's remote commands). */
+    fun remoteCommand(deviceId: String, action: String) {
+        post("/api/remote/${enc(deviceId)}/command", JsonObject(mapOf("action" to kotlinx.serialization.json.JsonPrimitive(action))))
     }
 
     // ---- requests --------------------------------------------------------------------------------------
@@ -311,4 +333,58 @@ internal fun kotlinx.serialization.json.JsonArray?.objectsOf(): List<JsonObject>
     val out = ArrayList<JsonObject>(size)
     for (e in this) if (e is JsonObject) out.add(e)
     return out
+}
+
+/**
+ * GET /api/remote/spot: where the account last listened – the song (`track_id`, with its title / artist / album /
+ * duration), `position` in seconds, the queue ids and the index in it, the device that played it, whether it was
+ * playing, `updated_at` (epoch seconds), and whether that device is online now (and playing, by its latest check-in).
+ */
+data class PlaybackSpot(
+    val trackId: Long,
+    val positionSec: Double,
+    val queue: List<Long>,
+    val index: Int,
+    val deviceId: String,
+    val deviceName: String,
+    val playing: Boolean,
+    val devicePlaying: Boolean,
+    val online: Boolean,
+    val updatedAt: Double,
+    /** `updated_at` as the server sent it: what a closed bar remembers (the web keeps `String(updated_at)`). */
+    val updatedAtRaw: String,
+    val title: String,
+    val artist: String,
+    val album: String,
+    val albumId: String,
+    val durationSec: Double,
+) {
+    companion object {
+        fun from(o: JsonObject): PlaybackSpot? {
+            val id = o.long("track_id")
+            if (id <= 0L) return null
+            val queue = (o["queue"] as? kotlinx.serialization.json.JsonArray)?.mapNotNull { e ->
+                (e as? kotlinx.serialization.json.JsonPrimitive)?.content?.toDoubleOrNull()?.toLong()
+            } ?: emptyList()
+            val playing = o.bool("playing")
+            return PlaybackSpot(
+                trackId = id,
+                positionSec = o.dbl("position").coerceAtLeast(0.0),
+                queue = queue,
+                index = if (o.containsKey("index")) o.int("index") else o.int("idx"),
+                deviceId = o.str("device_id"),
+                deviceName = o.str("device_name"),
+                playing = playing,
+                devicePlaying = if (o.containsKey("device_playing")) o.bool("device_playing") else playing,
+                online = o.bool("online"),
+                updatedAt = o.dbl("updated_at"),
+                updatedAtRaw = o.str("updated_at"),
+                title = o.str("title"),
+                artist = o.str("artist"),
+                album = o.str("album"),
+                albumId = o.str("album_id"),
+                durationSec = o.dbl("duration"),
+            )
+        }
+    }
 }

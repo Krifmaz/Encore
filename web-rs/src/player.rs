@@ -125,6 +125,14 @@ thread_local! {
     static FADE: RefCell<Option<Fade>> = const { RefCell::new(None) };
     /// the sound-effects graph (Web Audio)
     static FX: RefCell<Fx> = RefCell::new(Fx::default());
+    /// a restored spot sits paused and hasn't played yet: its position may not be applied yet, so it isn't saved over
+    static HELD: Cell<bool> = const { Cell::new(false) };
+    /// where the held song was restored to (the original file only seeks there once its metadata is in)
+    static HELD_AT: Cell<f64> = const { Cell::new(0.0) };
+    /// music actually played since the last save: only then is saved_at moved on
+    static PLAYED_SINCE: Cell<bool> = const { Cell::new(false) };
+    /// when saveSpot last wrote (every 5 s while playing)
+    static SPOT_SAVED_AT: Cell<f64> = const { Cell::new(0.0) };
 }
 
 fn fetch_dsp() {
@@ -430,13 +438,13 @@ pub fn snapshot() -> Value {
     let cov = cover_v(&t);
     if t.truthy("preview") || !t.truthy("album_id") { if t.has("cover") { m.insert("cover".into(), cov); } } else { m.insert("cover".into(), cov); }
     m.insert("playing".into(), json!(!a.paused()));
-    m.insert("position".into(), json!(position()));
+    m.insert("position".into(), json!(spot_position()));
     m.insert("duration".into(), json!(duration()));
     m.insert("volume".into(), json!(user_vol()));
     let rate = CTX.with(|c| c.borrow().as_ref().map(|c| c.sample_rate() as f64));
     m.insert("signal".into(), json!({ "label": quality(&t), "transport": transport().map(|(k, _)| k), "output_rate": rate }));
-    m.insert("index".into(), json!(st(|s| s.index)));
-    let q: Vec<Value> = st(|s| s.queue.iter().filter(|x| x.g("id").is_number()).take(300).map(|x| slim(x)).collect());
+    let (q, index) = lib_window();
+    m.insert("index".into(), json!(index));
     m.insert("queue".into(), Value::Array(q));
     Value::Object(m)
 }
@@ -671,11 +679,15 @@ fn load(transcode: bool, offset: f64, rung: Option<i64>, dsp: Option<bool>) {
 }
 /// rung: kbps of the lossy stream (None = what the song should start on) · dsp: None = whatever the settings say
 /// resume: the same song continues (a quality switch or a seek) – no new play / now-playing · fade: crossfade into it
+/// hold: load it paused (a restored spot) – it starts when you press play
 #[derive(Default)]
-struct LoadOpts { transcode: bool, offset: f64, rung: Option<i64>, dsp: Option<bool>, resume: bool, fade: bool }
+struct LoadOpts { transcode: bool, offset: f64, rung: Option<i64>, dsp: Option<bool>, resume: bool, fade: bool, hold: bool }
 /// Start the current song (or restart it at `offset`).
 fn load_opts(o: LoadOpts) {
     let Some(t) = cur() else { return };
+    HELD.with(|h| h.set(o.hold));
+    HELD_AT.with(|h| h.set(if o.hold { o.offset } else { 0.0 }));
+    if o.hold { PLAYED_SINCE.with(|p| p.set(false)); } else if !o.resume { PLAYED_SINCE.with(|p| p.set(true)); }
     if !o.fade { end_fade(); }
     let offset = o.offset;
     let start = !truthy_num(offset) && !o.resume;
@@ -711,12 +723,7 @@ fn load_opts(o: LoadOpts) {
     });
     if start {
         st_mut(|s| { s.logged = false; s.stalls.clear(); s.step_at = 0.0; });
-        // "now playing" on Last.fm / ListenBrainz
-        if t.g("id").is_number() && !st(|s| s.announced.as_ref().is_some_and(|a| Rc::ptr_eq(a, &t))) {
-            st_mut(|s| s.announced = Some(t.clone()));
-            let id = t.g("id").clone();
-            dom::spawn(async move { let _ = api::post("/library/now-playing", json!({ "track_id": id })).await; });
-        }
+        if !o.hold { announce(&t); }
     }
     let url = stream_url(&t, transcoded && !is_lossy && !is_dsp, rung, is_dsp, server_offset);
     let (Some(mut a), Some(sp)) = (audio(), spare()) else { return };
@@ -758,9 +765,9 @@ fn load_opts(o: LoadOpts) {
     if playback::fx_active(&prefs()) { ensure_fx(); }
     route();
     resume_fx();
-    play(&a);
+    if !o.hold { play(&a); }
     st_mut(|s| s.slow_start = None);
-    if start && !t.truthy("preview") && prefs().s("quality") == "auto" {
+    if start && !o.hold && !t.truthy("preview") && prefs().s("quality") == "auto" {
         // can't even get going: six seconds in and nothing has played yet → one rung down
         let t2 = t.clone();
         let timer = Timeout::new(6000, move || {
@@ -775,8 +782,87 @@ fn load_opts(o: LoadOpts) {
     dom::add_class(&body(), "has-player");
     render();
     emit();
+    if !o.hold { save_spot(true); }
     if st(|s| s.full) { load_lyrics(); }
     top_up();
+}
+/// "now playing" on Last.fm / ListenBrainz – once per song start.
+fn announce(t: &Rc<Value>) {
+    if t.g("id").is_number() && !st(|s| s.announced.as_ref().is_some_and(|a| Rc::ptr_eq(a, t))) {
+        st_mut(|s| s.announced = Some(t.clone()));
+        let id = t.g("id").clone();
+        dom::spawn(async move { let _ = api::post("/library/now-playing", json!({ "track_id": id })).await; });
+    }
+}
+
+// ---- remember where you left off: this device's queue and spot, put back paused when the app opens --------
+const RESUME: &str = "encore.resume";
+fn is_lib(x: &Value) -> bool { json::truthy(x) && !x.truthy("preview") && x.g("id").is_number() }
+/// Save the queue and the spot (every 5 s while playing; at once on pause, a new song and when the page goes away).
+fn save_spot(force: bool) {
+    if is_linked() || HELD.with(|h| h.get()) || audio().is_none() { return; }
+    let Some(t) = cur() else { return };
+    if !is_lib(&t) { return; }
+    let now = now_ms();
+    if !force && now - SPOT_SAVED_AT.with(|c| c.get()) < 5000.0 { return; }
+    SPOT_SAVED_AT.with(|c| c.set(now));
+    let (queue, index) = lib_window();
+    let (context, repeat) = st(|s| (s.context.clone(), s.repeat.clone()));
+    // saved_at is when music last played here: a pause or a page closed while paused keeps the old one, so a
+    // song played on another device since still wins when the app opens again
+    let saved_at = if PLAYED_SINCE.with(|p| p.get()) { now / 1000.0 } else {
+        saved_spot().map(|s| s.f("saved_at")).filter(|x| x.is_finite() && *x != 0.0).unwrap_or(now / 1000.0)
+    };
+    if audio().is_some_and(|a| a.paused()) { PLAYED_SINCE.with(|p| p.set(false)); }
+    dom::ls_set(RESUME, &json!({ "queue": queue, "index": index, "position": position(), "shuffle": context == "library",
+        "repeat": repeat, "context": context, "saved_at": saved_at }).to_string());
+}
+/// The library songs of the queue – at most 300, around the current song – and where the current song is in them.
+fn lib_window() -> (Vec<Value>, i64) {
+    let (mut queue, mut index) = st(|s| {
+        let q: Vec<Value> = s.queue.iter().filter(|x| is_lib(x)).map(|x| slim(x)).collect();
+        let i = s.queue.iter().take(s.index.max(0) as usize).filter(|x| is_lib(x)).count() as i64;
+        (q, i)
+    });
+    if queue.len() > 300 {
+        let from = (index - 50).min(queue.len() as i64 - 300).max(0) as usize;
+        queue = queue[from..from + 300].to_vec();
+        index -= from as i64;
+    }
+    (queue, index)
+}
+/// Where the song is – for a held (restored) song whose file hasn't loaded yet, where it was restored to.
+fn spot_position() -> f64 {
+    let at = HELD_AT.with(|h| h.get());
+    if HELD.with(|h| h.get()) && at != 0.0 && audio().is_some_and(|a| a.ready_state() < 1) { at } else { position() }
+}
+/// What saveSpot saved on this device: { queue, index, position, shuffle, repeat, context, saved_at } – None when nothing is saved.
+pub fn saved_spot() -> Option<Value> {
+    let s = serde_json::from_str::<Value>(&dom::ls_get(RESUME).unwrap_or_default()).ok()?;
+    if s.g("queue").as_array().is_some_and(|q| q.iter().any(is_lib)) { Some(s) } else { None }
+}
+/// Put a saved spot back: the queue, paused at the song and position you left off (one tap plays).
+pub fn restore(s: Option<Value>) -> bool {
+    let Some(s) = s else { return false };
+    if is_linked() || cur().is_some() || audio().is_none() || !s.g("queue").is_array() { return false; }
+    let q: Vec<Value> = s.a("queue").into_iter().filter(is_lib).collect();
+    if q.is_empty() { return false; }
+    let ctx = s.s("context");
+    let context = if ["album", "single", "list", "library"].contains(&ctx.as_str()) { ctx } else if s.truthy("shuffle") { "library".to_string() } else { "list".to_string() };
+    let repeat = s.s("repeat");
+    let index = s.f("index");
+    st_mut(|x| {
+        let n = q.len() as i64;
+        x.queue = q.into_iter().map(Rc::new).collect();
+        x.index = (if index.is_finite() { index as i64 } else { 0 }).min(n - 1).max(0);
+        x.context = context;
+        if ["off", "all", "one"].contains(&repeat.as_str()) { x.repeat = repeat; }
+    });
+    let dur = cur().map(|t| t.f("duration")).unwrap_or(0.0);
+    let at = s.f("position");
+    let offset = if at > 1.0 && !(dur > 0.0 && at > dur - 2.0) { at } else { 0.0 };
+    load_opts(LoadOpts { offset, hold: true, ..Default::default() });
+    true
 }
 
 // ---- keeping the music going on a weak connection ---------------------------------------------
@@ -1389,6 +1475,7 @@ pub fn seek_to(sec: f64) {
     let dur = duration();
     if cur().is_none() || !truthy_num(dur) { return; }
     let sec = sec.min(dur - 0.25).max(0.0);
+    if HELD.with(|h| h.get()) { HELD_AT.with(|h| h.set(sec)); }
     end_fade();
     st_mut(|s| s.seek_at = now_ms());
     let Some(t) = cur() else { return };
@@ -1777,15 +1864,23 @@ pub fn mount() {
     // every element gets the listeners; only the one currently playing counts
     on_both(&a, &sp, "ended", Rc::new(|_| { log_play(); next(true); }));
     on_both(&a, &sp, "play", Rc::new(|_| {
+        HELD.with(|h| h.set(false));
+        HELD_AT.with(|h| h.set(0.0));
+        PLAYED_SINCE.with(|p| p.set(true));
+        if let Some(t) = cur() { announce(&t); }
         resume_fx();
         if let Some(out) = FADE.with(|f| f.borrow().as_ref().map(|f| f.out.clone())) { play(&out); }
         render(); emit();
     }));
     on_both(&a, &sp, "pause", Rc::new(|_| {
         if let Some(out) = FADE.with(|f| f.borrow().as_ref().map(|f| f.out.clone())) { let _ = out.pause(); }
-        render(); emit();
+        render(); emit(); save_spot(true);
     }));
-    on_both(&a, &sp, "timeupdate", Rc::new(|_| { update_time(); log_play(); sync_lyrics(false); maybe_crossfade(); preload_tick(); }));
+    on_both(&a, &sp, "timeupdate", Rc::new(|_| {
+        update_time(); log_play(); sync_lyrics(false); maybe_crossfade();
+        if audio().is_some_and(|a| !a.paused()) { save_spot(false); }
+        preload_tick();
+    }));
     on_both(&a, &sp, "progress", Rc::new(|_| preload_tick()));
     on_both(&a, &sp, "waiting", Rc::new(|_| stalled()));
     on_both(&a, &sp, "loadedmetadata", Rc::new(|_| update_time()));
@@ -1796,7 +1891,10 @@ pub fn mount() {
         let has_src = audio().and_then(|a| a.get_attribute("src")).is_some_and(|s| !s.is_empty());
         if !has_src { return; }
         if st(|s| s.dsp) { dsp_fallback(); return; }
-        if !st(|s| s.transcoded) && !t.truthy("preview") { load(true, position(), None, None); }
+        // a restored song stays paused until you press play
+        if !st(|s| s.transcoded) && !t.truthy("preview") {
+            load_opts(LoadOpts { transcode: true, offset: spot_position(), hold: HELD.with(|h| h.get()), ..Default::default() });
+        }
     }));
     dom::on_forever(&sp, "error", |_| { if let Some(s) = spare() { let _ = s.remove_attribute("data-url"); } });
     if has_media_session() {
@@ -1845,6 +1943,7 @@ pub fn mount() {
     });
     dom::keep_forever(keyup);
     dom::on_window("hashchange", |_| { if st(|s| s.full) { set_full(false); } });
+    dom::on_window("pagehide", |_| save_spot(true));
     dom::on_window("encore:likes", |_| { LIKED.with(|l| *l.borrow_mut() = None); dom::spawn(async { likes().await; paint_likes(); }); });
     dom::on_window("encore:playback-prefs", |_| {
         new_prefs(playback::current());
@@ -1864,9 +1963,10 @@ pub fn mount() {
 /// The server's Cadenza is off, busy or failed: the same spot again without processing, and no more processing this session.
 fn dsp_fallback() {
     DSP_FAILED.with(|f| f.set(true));
-    let at = position();
+    let at = spot_position();
     if !DSP_TOASTED.with(|t| t.replace(true)) { toast("Server processing isn't available right now – playing the original", ""); }
-    load(at > 0.5, if at > 0.5 { at } else { 0.0 }, None, Some(false));
+    // a restored song stays paused until you press play
+    load_opts(LoadOpts { transcode: at > 0.5, offset: if at > 0.5 { at } else { 0.0 }, dsp: Some(false), hold: HELD.with(|h| h.get()), ..Default::default() });
 }
 
 pub fn set_full(on: bool) {
@@ -2102,6 +2202,9 @@ fn render() {
             let _ = sp.remove_attribute("data-url");
         }
         st_mut(|s| { s.queue.clear(); s.index = -1; });
+        HELD.with(|h| h.set(false));
+        HELD_AT.with(|h| h.set(0.0));
+        dom::ls_remove(RESUME);
         render(); emit();
     });
     set_bar(ls);

@@ -187,6 +187,8 @@ private fun MainScreen(graph: AppGraph, player: PlayerConnection, session: Sessi
             containerColor = p.bg,
             bottomBar = {
                 Column {
+                    // "Continue <song> from 2:31 · was playing on <device>": pick up where another device left off
+                    SpotBar(nav, session)
                     if (nowPlaying != null) MiniPlayer(nav, onOpen = { showPlayer = true })
                     Box(Modifier.fillMaxWidth().height(1.dp).background(p.border))
                     NavigationBar(containerColor = p.bg2, tonalElevation = 0.dp) {

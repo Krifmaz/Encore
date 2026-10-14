@@ -3,6 +3,7 @@
 // open, commands and the other devices' state arrive the moment they change instead of at the next check-in,
 // and this device checks in right away whenever its own playback changes – so a remote feels instant.
 import { api } from './api.js';
+import * as playback from './playback.js';
 import * as player from './player.js';
 import { art, esc, fmt, icon, modal, toast } from './ui.js';
 
@@ -56,6 +57,7 @@ export const engineOff = () => { try { return localStorage.getItem(ENGINE_OFF) =
 
 export function linkTo(d, { silent = false } = {}) {
   const name = shownName(d);
+  hideSpot();
   if (isEngine(d.id)) { try { localStorage.removeItem(ENGINE_OFF); } catch { /* ignore */ } }
   try { localStorage.setItem(CHAIN, JSON.stringify({ id: d.id, name })); } catch { /* ignore */ }
   player.setLink({ id: d.id, name, state: d.state || {}, online: true,
@@ -163,6 +165,98 @@ export function start(session) {
     beat().finally(() => setTimeout(loop, document.hidden && !busy ? 6000 : 2000));
   };
   loop();
+}
+
+// ---- pick up where you left off ------------------------------------------------------------------
+// The server keeps your last spot (song, position, queue, and the device that played it). When the app opens
+// with nothing playing, this device's own spot comes back paused – or, when another device played since,
+// a bar offers to continue that here.
+const DISMISSED = 'encore.spot.dismissed';
+const WEEK = 7 * 24 * 3600;
+let spotOff = null;
+
+/** At start (after the player is mounted): put back where you left off, when Settings → Playback allows it. */
+export async function resume(session) {
+  if (!playback.current().resume || player.current() || player.linked()) return;
+  const local = player.savedSpot();
+  let spot = null;
+  if ((session.info?.features || []).includes('remote')) {
+    try { spot = await api.get('/remote/spot'); } catch { spot = null; }
+  }
+  if (player.current() || player.linked()) return;
+  const at = Number(spot?.updated_at) || 0;
+  const other = !!spot && spot.track_id != null && !!spot.title && spot.device_id !== ME && Date.now() / 1000 - at < WEEK;
+  // another device played since this one saved its spot: offer that one (unless you closed this very spot before)
+  if (other && !(local && Number(local.saved_at) >= at)) {
+    let gone = null;
+    try { gone = localStorage.getItem(DISMISSED); } catch { /* ignore */ }
+    if (gone !== String(spot.updated_at)) { showSpot(spot); return; }
+  }
+  player.restore(local);
+}
+
+function hideSpot() {
+  document.getElementById('spot-bar')?.remove();
+  spotOff?.();
+  spotOff = null;
+}
+
+/** "Continue <song> from 2:31 · was playing on <device>" with Play here and ×. */
+function showSpot(s) {
+  hideSpot();
+  const bar = document.createElement('div');
+  bar.id = 'spot-bar';
+  bar.setAttribute('role', 'status');
+  bar.innerHTML = `<span>Continue <b>${esc(s.title)}</b> from ${fmt.dur(Number(s.position) || 0)} · was playing on ${esc(s.device_name || 'another device')}</span>
+    <button class="btn sm primary" id="spot-play">Play here</button>
+    <button class="btn ghost icon sm" id="spot-close" aria-label="Close" title="Close">${icon.x}</button>`;
+  document.body.appendChild(bar);
+  bar.querySelector('#spot-play').onclick = () => playSpot(s);
+  bar.querySelector('#spot-close').onclick = () => {
+    try { localStorage.setItem(DISMISSED, String(s.updated_at)); } catch { /* ignore */ }
+    hideSpot();
+    // back to this device's own spot, as if the bar had never been offered
+    if (!player.current() && !player.linked()) player.restore(player.savedSpot());
+  };
+  // something else started here, or this device became a remote: the offer is gone
+  spotOff = player.onChange((t) => { if (t || player.linked()) hideSpot(); });
+}
+
+/** Play here: the other device's queue, at its song and position, on this device – and that device pauses. */
+async function playSpot(s) {
+  const btn = document.getElementById('spot-play');
+  if (btn) btn.disabled = true;
+  try {
+    let ids = (Array.isArray(s.queue) ? s.queue : []).filter(Number.isInteger).slice(0, 300);
+    if (!ids.includes(s.track_id)) ids = [s.track_id];
+    const got = await api.get(`/library/tracks?ids=${ids.join(',')}`);
+    // back in the queue's own order, repeats included (the server sends each song once)
+    const byId = new Map((Array.isArray(got) ? got : []).map(t => [t.id, t]));
+    const idx = Number(s.index ?? s.idx);
+    const tracks = [];
+    let index = -1;
+    ids.forEach((id, i) => {
+      const t = byId.get(id);
+      if (!t) return;
+      if (i === idx && id === s.track_id) index = tracks.length;
+      tracks.push(t);
+    });
+    if (index < 0) index = tracks.findIndex(t => t.id === s.track_id);
+    hideSpot();
+    if (index < 0) return toast('That song is no longer in your library', 'err');
+    let at = Number(s.position) || 0;
+    // still playing there: it has moved on since its last check-in
+    if (s.online && s.playing && (s.device_playing ?? true)) {
+      at += Math.max(0, Date.now() / 1000 - (Number(s.updated_at) || 0));
+      sendTo(s.device_id, { action: 'pause' }).catch(() => {});
+    }
+    const dur = Number(tracks[index].duration) || 0;
+    if (dur && at > dur - 2) at = 0;
+    player.command({ action: 'play_queue', tracks, index, position: at });
+  } catch (e) {
+    if (btn) btn.disabled = false;
+    toast(e.message, 'err');
+  }
 }
 
 /** The Devices window: what every other device is playing, with controls, and Link / Unlink. */

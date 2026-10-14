@@ -177,6 +177,7 @@ export async function boot() {
     renderShell();
     remote.start(session);
     player.mount();
+    remote.resume(session);
     refreshPendingBadge();
     setInterval(refreshPendingBadge, 30000);
   }

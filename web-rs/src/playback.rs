@@ -14,6 +14,7 @@ use serde_json::{json, Value};
 ///          'saver'    – always the small 96 kbps stream (mobile data, slow links)
 /// preload: buffer the next song while this one plays (off on very slow connections)
 /// autoplay: when the queue ends, keep going with a shuffle of the whole library
+/// resume:  when the app opens, pick up where you left off (this device's queue and spot, or another device's)
 /// dsp:     have the server upsample streams with Cadenza (only where an admin switched it on and allowed the account)
 /// dsp_filter: Cadenza upsampling filter id ('' = the server's default)
 /// dsp_dither: Cadenza dither / noise shaping id
@@ -24,7 +25,7 @@ use serde_json::{json, Value};
 /// balance: -100 (left) … +100 (right) · mono: sum both channels
 /// crossfade: seconds the end of one song blends into the next (0 = off) · crossfade_album_gapless: no fade within an album
 pub fn defaults() -> Value {
-    json!({ "quality": "auto", "preload": true, "autoplay": true, "dsp": false, "dsp_filter": "", "dsp_dither": "tpdf", "dsp_rate": "device",
+    json!({ "quality": "auto", "preload": true, "autoplay": true, "resume": true, "dsp": false, "dsp_filter": "", "dsp_dither": "tpdf", "dsp_rate": "device",
         "fx_on": false, "eq_preset": "flat", "eq_bands": [], "eq_preamp": 0, "crossfeed": "off", "balance": 0, "mono": false,
         "crossfade": 0, "crossfade_album_gapless": true })
 }
@@ -156,6 +157,7 @@ pub fn clean(p: &Value) -> Value {
     if !QUALITIES.contains(&quality.as_str()) { c["quality"] = json!("auto"); }
     c["preload"] = json!(c.g("preload") != &json!(false));
     c["autoplay"] = json!(c.g("autoplay") != &json!(false));
+    c["resume"] = json!(c.g("resume") != &json!(false));
     c["dsp"] = json!(c.g("dsp") == &json!(true));
     if !c.g("dsp_filter").is_string() { c["dsp_filter"] = json!(""); }
     if c.st("dsp_dither").is_none() { c["dsp_dither"] = json!("tpdf"); }

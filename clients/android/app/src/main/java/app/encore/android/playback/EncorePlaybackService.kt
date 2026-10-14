@@ -117,6 +117,11 @@ class EncorePlaybackService : MediaLibraryService() {
     private var transcodeRetried: Long? = null
     private val dspAsked = ConcurrentHashMap<Long, Long>()
 
+    /** The last queue was put back paused at start and hasn't played yet (main thread only): no now-playing, no autoplay. */
+    private var held = false
+    /** when the tick last saved the resume position (epoch ms) */
+    private var resumeSavedAt = 0L
+
     // autoplay: songs played in this listening session never come back in the shuffle
     private val played = LinkedHashSet<Long>()
     private var fetchingMore = false
@@ -203,6 +208,7 @@ class EncorePlaybackService : MediaLibraryService() {
         routeUsb()
         graph.prefs.sync()
         main.post(adaptTick)
+        restoreAtStart()
     }
 
     override fun onGetSession(controllerInfo: MediaSession.ControllerInfo): MediaLibrarySession = session
@@ -450,7 +456,7 @@ class EncorePlaybackService : MediaLibraryService() {
             currentId = id
             if (mediaItem != null && id != null) {
                 MediaItems.toTrack(mediaItem)?.let { resolver.remember(streamTrack(it)) }
-                announce(id)
+                if (!held) announce(id)
                 played.add(id)
                 val v = resolver.variantOf(id) ?: resolver.startVariant(resolver.track(id) ?: streamTrack(MediaItems.toTrack(mediaItem)!!)).also { resolver.force(id, it) }
                 if (prefs.quality == "auto") noteRungChange(previousRung, v.rung)
@@ -463,11 +469,18 @@ class EncorePlaybackService : MediaLibraryService() {
             }
             publish()
             saveResume()
-            maybeAutoplay()
+            if (!held) maybeAutoplay()
         }
 
         override fun onIsPlayingChanged(isPlaying: Boolean) {
             main.removeCallbacks(tick)
+            if (isPlaying && held) {
+                // the queue put back at start plays now: it counts as playing here from this moment
+                held = false
+                currentId?.let { announce(it) }
+                saveResume()
+                maybeAutoplay()
+            }
             if (isPlaying) main.post(tick) else saveResumePosition()
         }
 
@@ -520,6 +533,13 @@ class EncorePlaybackService : MediaLibraryService() {
         override fun run() {
             if (released) return
             checkPlay()
+            // the resume spot every 5 s while playing, so it stays newer than another device's even when
+            // playback here ends without a pause or a song change (the process killed)
+            val now = System.currentTimeMillis()
+            if (player.isPlaying && now - resumeSavedAt >= 5000L) {
+                resumeSavedAt = now
+                saveResumePosition()
+            }
             if (player.isPlaying) main.postDelayed(this, 1000L)
         }
     }
@@ -832,14 +852,34 @@ class EncorePlaybackService : MediaLibraryService() {
             val tracks = ArrayList<Track>()
             for (i in 0 until player.mediaItemCount) MediaItems.toTrack(player.getMediaItemAt(i))?.let { tracks.add(it) }
             if (tracks.isEmpty()) return
-            resume.save(tracks, player.currentMediaItemIndex, absPositionMs())
+            resume.save(tracks, player.currentMediaItemIndex, absPositionMs(), touch = !held)
         } catch (_: Exception) {}
     }
 
     private fun saveResumePosition() {
         try {
-            if (player.mediaItemCount > 0) resume.savePosition(player.currentMediaItemIndex, absPositionMs())
+            if (player.mediaItemCount > 0) resume.savePosition(player.currentMediaItemIndex, absPositionMs(), touch = !held)
         } catch (_: Exception) {}
+    }
+
+    /**
+     * Settings → Playback "Resume where I left off when the app opens": the last queue on this phone comes back
+     * paused at its song and position (nothing plays until you press play). Off: the player starts empty.
+     */
+    private fun restoreAtStart() {
+        if (!prefs.resume) return
+        io.execute {
+            try { runBlocking { graph.store.awaitLoaded() } } catch (_: Exception) {}
+            if (graph.store.current == null) return@execute
+            val snap = resume.load() ?: return@execute
+            val items = snap.tracks.map { MediaItems.track(graph.api, it) }
+            main.post {
+                if (released || !prefs.resume || player.mediaItemCount > 0) return@post
+                rememberAll(items)
+                held = true
+                player.setMediaItems(items, snap.index, snap.positionMs)
+            }
+        }
     }
 
     // ---- the session -----------------------------------------------------------------------------------------

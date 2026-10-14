@@ -10,6 +10,7 @@ import { api } from './api.js';
  *          'saver'    – always the small 96 kbps stream (mobile data, slow links)
  * preload: buffer the next song while this one plays (off on very slow connections)
  * autoplay: when the queue ends, keep going with a shuffle of the whole library
+ * resume:  when the app opens, pick up where you left off (this device's queue and spot, or another device's)
  * dsp:     have the server upsample streams with Cadenza (only where an admin switched it on and allowed the account)
  * dsp_filter: Cadenza upsampling filter id ('' = the server's default)
  * dsp_dither: Cadenza dither / noise shaping id
@@ -20,7 +21,7 @@ import { api } from './api.js';
  * balance: -100 (left) … +100 (right) · mono: sum both channels
  * crossfade: seconds the end of one song blends into the next (0 = off) · crossfade_album_gapless: no fade within an album
  */
-export const DEFAULTS = { quality: 'auto', preload: true, autoplay: true, dsp: false, dsp_filter: '', dsp_dither: 'tpdf', dsp_rate: 'device',
+export const DEFAULTS = { quality: 'auto', preload: true, autoplay: true, resume: true, dsp: false, dsp_filter: '', dsp_dither: 'tpdf', dsp_rate: 'device',
   fx_on: false, eq_preset: 'flat', eq_bands: [], eq_preamp: 0, crossfeed: 'off', balance: 0, mono: false,
   crossfade: 0, crossfade_album_gapless: true };
 const KEY = 'encore.playback';
@@ -119,6 +120,7 @@ export function clean(p) {
   if (!QUALITIES.has(c.quality)) c.quality = DEFAULTS.quality;
   c.preload = c.preload !== false;
   c.autoplay = c.autoplay !== false;
+  c.resume = c.resume !== false;
   c.dsp = c.dsp === true;
   c.dsp_filter = typeof c.dsp_filter === 'string' ? c.dsp_filter : DEFAULTS.dsp_filter;
   c.dsp_dither = typeof c.dsp_dither === 'string' && c.dsp_dither ? c.dsp_dither : DEFAULTS.dsp_dither;

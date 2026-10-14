@@ -286,6 +286,7 @@ pub async fn boot() {
         render_shell();
         remote::start();
         player::mount();
+        remote::resume();
         dom::spawn(refresh_pending_badge());
         dom::interval_forever(30000, || dom::spawn(refresh_pending_badge()));
     }

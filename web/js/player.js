@@ -129,9 +129,21 @@ const slim = (t) => ({ id: t.id, title: t.title, artist: t.artist, album: t.albu
 export function snapshot() {
   const t = current();
   if (!t || !audio) return { playing: false };
-  return { ...slim(t), cover: cover(t), playing: !audio.paused, position: position(), duration: duration(), volume: userVol,
+  const { queue, index } = libWindow();
+  return { ...slim(t), cover: cover(t), playing: !audio.paused, position: spotPosition(), duration: duration(), volume: userVol,
            signal: { label: quality(t), transport: transport()?.kind || null, output_rate: ctx?.sampleRate || null },
-           index: state.index, queue: state.queue.filter(x => typeof x.id === 'number').slice(0, 300).map(slim) };
+           index, queue: queue.map(slim) };
+}
+/** The library songs of the queue – at most 300, around the current song – and where the current song is in them. */
+function libWindow() {
+  let queue = state.queue.filter(isLib);
+  let index = state.queue.slice(0, state.index).filter(isLib).length;
+  if (queue.length > 300) {
+    const from = Math.max(0, Math.min(index - 50, queue.length - 300));
+    queue = queue.slice(from, from + 300);
+    index -= from;
+  }
+  return { queue, index };
 }
 function localVolume(v) {
   if (!audio) return;
@@ -305,10 +317,14 @@ export function saveOffline(tracks) {
  * Start the current song (or restart it at `offset`).
  * rung: kbps of the lossy stream (null = what the song should start on) · dsp: null = whatever the settings say
  * resume: the same song continues (a quality switch or a seek) – no new play / now-playing · fade: crossfade into it
+ * hold: load it paused (a restored spot) – it starts when you press play
  */
-function load({ transcode = false, offset = 0, rung = null, dsp = null, resume = false, fade: fading = false } = {}) {
+function load({ transcode = false, offset = 0, rung = null, dsp = null, resume = false, fade: fading = false, hold = false } = {}) {
   const t = current();
   if (!t) return;
+  held = hold;
+  heldAt = hold ? offset : 0;
+  if (hold) playedSince = false; else if (!resume) playedSince = true;
   if (!fading) endFade();
   const start = !offset && !resume;
   markPlayed(t);
@@ -330,8 +346,7 @@ function load({ transcode = false, offset = 0, rung = null, dsp = null, resume =
     state.logged = false;
     state.stalls = [];
     state.stepAt = 0;
-    // "now playing" on Last.fm / ListenBrainz
-    if (typeof t.id === 'number' && state.announced !== t) { state.announced = t; api.post('/library/now-playing', { track_id: t.id }).catch(() => {}); }
+    if (!hold) announce(t);
   }
   const url = streamUrl(t, { transcode: state.transcoded && !state.lossy && !state.dsp, rung: state.rung, dsp: state.dsp, offset: serverOffset });
   const usePlain = !!(t.preview && fx.built);
@@ -367,9 +382,9 @@ function load({ transcode = false, offset = 0, rung = null, dsp = null, resume =
   if (playback.fxActive(prefs)) ensureFx();
   route();
   resumeFx();
-  audio.play().catch(() => {});
+  if (!hold) audio.play().catch(() => {});
   clearTimeout(state.slowStart);
-  if (start && !t.preview && prefs.quality === 'auto') {
+  if (start && !hold && !t.preview && prefs.quality === 'auto') {
     // can't even get going: six seconds in and nothing has played yet → one rung down
     state.slowStart = setTimeout(() => { if (current() === t && !audio.paused && audio.currentTime < 0.5 && audio.readyState < 3) stepDownNow(); }, 6000);
   }
@@ -383,8 +398,64 @@ function load({ transcode = false, offset = 0, rung = null, dsp = null, resume =
   document.body.classList.add('has-player');
   render();
   emit();
+  if (!hold) saveSpot(true);
   if (state.full) loadLyrics();
   topUp();
+}
+/** "now playing" on Last.fm / ListenBrainz – once per song start. */
+function announce(t) {
+  if (t && typeof t.id === 'number' && state.announced !== t) { state.announced = t; api.post('/library/now-playing', { track_id: t.id }).catch(() => {}); }
+}
+
+// ---- remember where you left off: this device's queue and spot, put back paused when the app opens --------
+const RESUME = 'encore.resume';
+let held = false;      // a restored spot sits paused and hasn't played yet: its position may not be applied yet, so it isn't saved over
+let heldAt = 0;        // where the held song was restored to (the original file only seeks there once its metadata is in)
+let playedSince = false; // music actually played since the last save: only then is saved_at moved on
+let spotSavedAt = 0;
+const isLib = (x) => !!x && !x.preview && typeof x.id === 'number';
+/** Save the queue and the spot (every 5 s while playing; at once on pause, a new song and when the page goes away). */
+function saveSpot(force = false) {
+  if (link || held || !audio) return;
+  const t = current();
+  if (!isLib(t)) return;
+  const now = Date.now();
+  if (!force && now - spotSavedAt < 5000) return;
+  spotSavedAt = now;
+  const { queue, index } = libWindow();
+  // saved_at is when music last played here: a pause or a page closed while paused keeps the old one, so a
+  // song played on another device since still wins when the app opens again
+  const savedAt = playedSince ? now / 1000 : (Number(savedSpot()?.saved_at) || now / 1000);
+  if (audio.paused) playedSince = false;
+  try {
+    localStorage.setItem(RESUME, JSON.stringify({ queue: queue.map(slim), index, position: position(), shuffle: state.context === 'library',
+      repeat: state.repeat, context: state.context, saved_at: savedAt }));
+  } catch { /* private mode */ }
+}
+/** Where the song is – for a held (restored) song whose file hasn't loaded yet, where it was restored to. */
+function spotPosition() {
+  return held && heldAt && audio.readyState < 1 ? heldAt : position();
+}
+/** What saveSpot saved on this device: { queue, index, position, shuffle, repeat, context, saved_at } – null when nothing is saved. */
+export function savedSpot() {
+  try {
+    const s = JSON.parse(localStorage.getItem(RESUME) || 'null');
+    return s && Array.isArray(s.queue) && s.queue.some(isLib) ? s : null;
+  } catch { return null; }
+}
+/** Put a saved spot back: the queue, paused at the song and position you left off (one tap plays). */
+export function restore(s = savedSpot()) {
+  if (!s || link || current() || !audio || !Array.isArray(s.queue)) return false;
+  const q = s.queue.filter(isLib);
+  if (!q.length) return false;
+  state.queue = q;
+  state.index = Math.max(0, Math.min(Number(s.index) || 0, q.length - 1));
+  state.context = ['album', 'single', 'list', 'library'].includes(s.context) ? s.context : s.shuffle ? 'library' : 'list';
+  if (['off', 'all', 'one'].includes(s.repeat)) state.repeat = s.repeat;
+  const t = current();
+  const at = Number(s.position) || 0;
+  load({ offset: at > 1 && !(t.duration > 0 && at > t.duration - 2) ? at : 0, hold: true });
+  return true;
 }
 
 // ---- keeping the music going on a weak connection ---------------------------------------------
@@ -808,6 +879,7 @@ export function seekTo(sec) {
   const dur = duration();
   if (!current() || !dur) return;
   sec = Math.max(0, Math.min(sec, dur - 0.25));
+  if (held) heldAt = sec;
   endFade();
   state.seekAt = Date.now();
   const t = current();
@@ -1022,9 +1094,10 @@ async function signalPath() {
 /** The server's Cadenza is off, busy or failed: the same spot again without processing, and no more processing this session. */
 function dspFallback() {
   dspFailed = true;
-  const at = position();
+  const at = spotPosition();
   if (!dspToasted) { dspToasted = true; toast("Server processing isn't available right now – playing the original", ''); }
-  load({ transcode: at > 0.5, offset: at > 0.5 ? at : 0, dsp: false });
+  // a restored song stays paused until you press play
+  load({ transcode: at > 0.5, offset: at > 0.5 ? at : 0, dsp: false, hold: held });
 }
 
 export function mount() {
@@ -1051,10 +1124,11 @@ export function mount() {
   // every element gets the listeners; only the one currently playing counts
   const on = (type, fn) => [audio, spare, plain].forEach(a => a.addEventListener(type, (e) => { if (e.target === audio) fn(e); }));
   on('ended', () => { logPlay(); next(true); });
-  on('play', () => { resumeFx(); if (fade) fade.out.play().catch(() => {}); render(); emit(); });
-  on('pause', () => { if (fade) fade.out.pause(); render(); emit(); });
+  on('play', () => { held = false; heldAt = 0; playedSince = true; announce(current()); resumeFx(); if (fade) fade.out.play().catch(() => {}); render(); emit(); });
+  on('pause', () => { if (fade) fade.out.pause(); render(); emit(); saveSpot(true); });
   on('timeupdate', () => {
     updateTime(); logPlay(); syncLyrics(); maybeCrossfade();
+    if (!audio.paused) saveSpot();
     const now = Date.now();
     if (now - state.lastPreloadCheck > 2000) { state.lastPreloadCheck = now; maybePreload(); }
   });
@@ -1066,7 +1140,7 @@ export function mount() {
   on('error', () => {
     if (!current() || !audio.getAttribute('src')) return;
     if (state.dsp) return dspFallback();
-    if (!state.transcoded && !current().preview) load({ transcode: true, offset: position() });
+    if (!state.transcoded && !current().preview) load({ transcode: true, offset: spotPosition(), hold: held });
   });
   spare.addEventListener('error', () => { delete spare.dataset.url; });
   if ('mediaSession' in navigator) {
@@ -1102,6 +1176,7 @@ export function mount() {
     if (e.code === 'Space' && ae.tagName === 'BUTTON' && !document.querySelector('.modal-bg')) e.preventDefault();
   });
   window.addEventListener('hashchange', () => { if (state.full) setFull(false); });
+  window.addEventListener('pagehide', () => saveSpot(true));
   window.addEventListener('encore:likes', () => { liked = null; likes().then(paintLikes); });
   fetchDsp();
   setInterval(adaptTick, 2000);
@@ -1292,6 +1367,8 @@ function render() {
   bindSeek(el.querySelector('#seek'), 't-cur');
   el.querySelector('#p-close').onclick = () => {
     endFade(); audio.pause(); audio.removeAttribute('src'); spare.removeAttribute('src'); delete spare.dataset.url; state.queue = []; state.index = -1;
+    held = false; heldAt = 0;
+    try { localStorage.removeItem(RESUME); } catch { /* ignore */ }
     render(); emit();
   };
   updateTime();

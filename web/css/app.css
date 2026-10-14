@@ -580,6 +580,16 @@ details.settings-card[open] .chev svg { transform: rotate(180deg); }
 #conn-banner svg { width: 16px; height: 16px; flex: none; }
 #conn-banner span { flex: 1; }
 
+/* pick up where you left off: a slim bar just above the player */
+#spot-bar { position: fixed; left: 12px; right: 12px; bottom: calc(var(--player) + 10px); z-index: 49; max-width: 640px; margin: 0 auto;
+  display: flex; align-items: center; gap: 10px; padding: 6px 6px 6px 14px; border-radius: 12px; font-size: 14px;
+  background: color-mix(in srgb, var(--bg-2) 94%, transparent); backdrop-filter: blur(16px); border: 1px solid var(--border);
+  box-shadow: 0 6px 24px rgba(0, 0, 0, .25); }
+#spot-bar span { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+#spot-bar .btn { flex: none; }
+body.np-open #spot-bar { display: none; }
+@media (max-width: 600px) { #spot-bar span { white-space: normal; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; font-size: 13px; } }
+
 /* remote link: this device controls another one */
 .card.linked { border-color: var(--accent); }
 .linked-to { display: inline-flex; align-items: center; gap: 5px; color: var(--accent); font-weight: 600; }

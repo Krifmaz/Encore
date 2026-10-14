@@ -213,6 +213,18 @@ class PlayerConnection(private val context: Context, private val api: EncoreApi)
         }
     }
 
+    /** Play `tracks` from `index` at `positionMs` (picking up another device's spot). */
+    fun playFrom(tracks: List<Track>, index: Int, positionMs: Long) {
+        if (tracks.isEmpty()) return
+        val start = index.coerceIn(0, tracks.size - 1)
+        val items = tracks.map { MediaItems.track(api, it) }
+        withController { c ->
+            c.setMediaItems(items, start, positionMs.coerceAtLeast(0L))
+            c.prepare()
+            c.play()
+        }
+    }
+
     fun playNext(track: Track) {
         withController { c ->
             val at = if (c.mediaItemCount == 0) 0 else c.currentMediaItemIndex + 1

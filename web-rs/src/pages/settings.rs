@@ -1137,7 +1137,8 @@ fn paint_playback(st: &Rc<Look>) {
         <label class="row" style="gap:8px;align-items:center"><input type="checkbox" id="pb-preload" {preload}> Pre-load the next song while this one plays</label>
         <span class="small muted">The next song is fetched once the current one is safely buffered, so it starts without a gap. Turn it off on a very slow connection to leave all the bandwidth to the song playing.</span></div>
       <div class="stack" style="gap:6px"><h3>When the queue ends</h3>
-        <label class="row" style="gap:8px;align-items:center"><input type="checkbox" id="pb-autoplay" {autoplay}> Keep going with a shuffle of the whole library</label></div>
+        <label class="row" style="gap:8px;align-items:center"><input type="checkbox" id="pb-autoplay" {autoplay}> Keep going with a shuffle of the whole library</label>
+        <label class="row" style="gap:8px;align-items:center"><input type="checkbox" id="pb-resume" {resume}> Resume where I left off when the app opens</label></div>
       <div class="stack" style="gap:6px"><h3>Sound (on this device)</h3>
         {sound}</div>
       <div class="stack" style="gap:6px"><h3>Pure playback</h3>
@@ -1151,6 +1152,7 @@ fn paint_playback(st: &Rc<Look>) {
         quality = seg_str(&p, "quality", &[("auto", "Auto"), ("original", "Original"), ("saver", "Data saver")]),
         preload = if p.truthy("preload") { "checked" } else { "" },
         autoplay = if p.truthy("autoplay") { "checked" } else { "" },
+        resume = if p.truthy("resume") { "checked" } else { "" },
         sound = sound_html(&p),
         dsp_block = dsp_html(&p, &st.dsp),
         eng_name = eng_title));
@@ -1168,6 +1170,10 @@ fn paint_playback(st: &Rc<Look>) {
     if let Some(c) = dom::qs_in(&st.el, "#pb-autoplay") {
         let (st2, c2) = (st.clone(), c.clone());
         dom::on(&c, "change", move |_| set_playback(&st2, json!({ "autoplay": dom::checked(&c2) })));
+    }
+    if let Some(c) = dom::qs_in(&st.el, "#pb-resume") {
+        let (st2, c2) = (st.clone(), c.clone());
+        dom::on(&c, "change", move |_| set_playback(&st2, json!({ "resume": dom::checked(&c2) })));
     }
     bind_sound(st);
     if let Some(c) = dom::qs_in(&st.el, "#pb-dsp") {

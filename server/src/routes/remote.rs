@@ -3,11 +3,14 @@
 //! and picks up commands; nothing is stored on disk. Devices that keep an event stream open
 //! (`/api/remote/events`) get commands and the other devices' state pushed the moment they change,
 //! so a remote feels instant instead of waiting for the next check-in.
+//! The one thing kept on disk is each user's last playback spot (`/api/remote/spot`), written from the
+//! check-ins, so any device can pick up where another one left off.
 use crate::auth::User;
 use crate::db::{now, RowExt};
 use crate::error::{err, ApiResult};
+use crate::p;
 use crate::state::AppState;
-use axum::extract::{Path, Query};
+use axum::extract::{Path, Query, State};
 use axum::response::sse::{Event, KeepAlive, Sse};
 use axum::routing::{get, post};
 use axum::{Json, Router};
@@ -25,6 +28,7 @@ pub fn router() -> Router<AppState> {
     Router::new()
         .route("/api/remote/heartbeat", post(heartbeat))
         .route("/api/remote/devices", get(devices))
+        .route("/api/remote/spot", get(spot).delete(clear_spot))
         .route("/api/remote/events", get(events))
         .route("/api/remote/{device}/command", post(command))
 }
@@ -58,6 +62,79 @@ static SEQ: AtomicU64 = AtomicU64::new(1);
 const ALIVE: f64 = 15.0;
 const ACTIONS: [&str; 12] = ["toggle", "play", "pause", "next", "prev", "seek", "volume", "play_queue", "enqueue", "play_next", "stop", "engine"];
 
+/// The last spot written per user, so check-ins only touch the database every SPOT_EVERY seconds
+/// (and at once when the song changes or playback stops or starts).
+struct Last {
+    at: f64,
+    track: i64,
+    playing: bool,
+    device: String,
+}
+static SPOT_LAST: LazyLock<Mutex<HashMap<i64, Last>>> = LazyLock::new(Default::default);
+const SPOT_EVERY: f64 = 10.0;
+const SPOT_QUEUE_MAX: usize = 300;
+
+/// Whether a check-in should write the spot. A playing device writes on its first check-in, on a song
+/// change and every SPOT_EVERY seconds. Another playing device takes over once the last writer has
+/// stopped or gone quiet for SPOT_EVERY seconds, so two devices playing at once still write at most
+/// once per SPOT_EVERY between them. A paused device only writes when it is the one that wrote last and
+/// it just paused or changed song, so an app that opens paused on an old song doesn't overwrite what
+/// another device is playing.
+fn spot_due(last: Option<&Last>, device: &str, track: i64, playing: bool, t: f64) -> bool {
+    match last {
+        None => playing,
+        Some(l) if playing && l.device != device => !l.playing || t - l.at >= SPOT_EVERY,
+        Some(l) if playing => l.track != track || !l.playing || t - l.at >= SPOT_EVERY,
+        Some(l) => l.device == device && (l.playing || l.track != track),
+    }
+}
+
+/// Library track ids of a check-in's queue (numbers or objects with a numeric `id`), at most
+/// SPOT_QUEUE_MAX, and where the current song is in them.
+fn spot_queue(state: &Value, track: i64) -> (Vec<i64>, usize) {
+    let mut ids: Vec<i64> = state["queue"].as_array().map(|q| q.iter()
+        .filter_map(|x| x.as_i64().or_else(|| x["id"].as_i64())).take(SPOT_QUEUE_MAX).collect()).unwrap_or_default();
+    let at = state["index"].as_u64().map(|i| i as usize).filter(|&i| ids.get(i) == Some(&track))
+        .or_else(|| ids.iter().position(|&x| x == track));
+    match at {
+        Some(i) => (ids, i),
+        None => {
+            ids = vec![track];
+            (ids, 0)
+        }
+    }
+}
+
+/// Writes the user's spot from a check-in when it is due (see `spot_due`).
+fn record_spot(st: &AppState, user: i64, device: &str, name: &str, state: &Value) {
+    // a remote for another device isn't playing anything itself; only library songs can be picked up elsewhere
+    if state["remote_of"].as_str().is_some_and(|r| !r.is_empty()) {
+        return;
+    }
+    let Some(track) = state["id"].as_i64() else { return };
+    let playing = state["playing"].as_bool().unwrap_or(false);
+    let t = now();
+    {
+        let mut last = SPOT_LAST.lock().unwrap();
+        if !spot_due(last.get(&user), device, track, playing, t) {
+            return;
+        }
+        last.insert(user, Last { at: t, track, playing, device: device.to_string() });
+    }
+    let (queue, idx) = spot_queue(state, track);
+    let position = state["position"].as_f64().filter(|p| p.is_finite() && *p >= 0.0).unwrap_or(0.0);
+    let r = st.db.execute(
+        "INSERT INTO playback_spot (user_id, track_id, position, queue, idx, device_id, device_name, playing, updated_at) VALUES (?,?,?,?,?,?,?,?,?)
+         ON CONFLICT(user_id) DO UPDATE SET track_id=excluded.track_id, position=excluded.position, queue=excluded.queue, idx=excluded.idx,
+         device_id=excluded.device_id, device_name=excluded.device_name, playing=excluded.playing, updated_at=excluded.updated_at",
+        p![user, track, position, json!(queue).to_string(), idx, device, name, playing, t],
+    );
+    if let Err(e) = r {
+        tracing::warn!("could not save the playback spot: {e}");
+        SPOT_LAST.lock().unwrap().remove(&user);
+    }
+}
+
 #[derive(Deserialize)]
 struct Beat {
     id: String,
@@ -81,16 +158,19 @@ fn announce(hub: &Hub, t: f64) {
     }
 }
 
-async fn heartbeat(User(u): User, Json(b): Json<Beat>) -> ApiResult<Json<Value>> {
+async fn heartbeat(State(st): State<AppState>, User(u): User, Json(b): Json<Beat>) -> ApiResult<Json<Value>> {
     if b.id.is_empty() || b.id.len() > 64 {
         return Err(err(400, "Bad device id"));
     }
     let t = now();
+    let user = u.i("id");
+    let name: String = b.name.chars().take(60).collect();
+    record_spot(&st, user, &b.id, &name, &b.state);
     let mut all = HUBS.lock().unwrap();
-    let hub = all.entry(u.i("id")).or_default();
+    let hub = all.entry(user).or_default();
     hub.devices.retain(|_, d| t - d.seen < 600.0 || d.push.as_ref().is_some_and(|p| !p.is_closed()));
     let d = hub.devices.entry(b.id).or_insert(Device { name: String::new(), state: Value::Null, seen: t, commands: vec![], push: None });
-    d.name = b.name.chars().take(60).collect();
+    d.name = name;
     let mut state = b.state;
     if state.to_string().len() > 64_000 {
         state["queue"] = json!([]); // keep it small
@@ -109,6 +189,44 @@ async fn devices(User(u): User) -> Json<Value> {
     let t = now();
     let all = HUBS.lock().unwrap();
     Json(json!(all.get(&u.i("id")).map(|h| online(h, t)).unwrap_or_default()))
+}
+
+/// The user's last playback spot with its song, and whether the device that wrote it is online now
+/// (and playing, going by its latest check-in) – or null.
+async fn spot(State(st): State<AppState>, User(u): User) -> ApiResult<Json<Value>> {
+    let user = u.i("id");
+    let Some(mut row) = st.db.one(
+        "SELECT s.track_id, s.position, s.queue, s.idx, s.device_id, s.device_name, s.playing, s.updated_at,
+                t.title, t.artist, t.album, t.album_id, t.duration
+         FROM playback_spot s JOIN tracks t ON t.id = s.track_id WHERE s.user_id = ?",
+        p![user],
+    )? else {
+        return Ok(Json(Value::Null));
+    };
+    let queue: Value = serde_json::from_str(&row.s("queue")).unwrap_or_else(|_| json!([]));
+    let device = row.s("device_id");
+    let t = now();
+    let live = {
+        let all = HUBS.lock().unwrap();
+        all.get(&user).and_then(|h| h.devices.get(&device)).filter(|d| t - d.seen < ALIVE)
+            .map(|d| d.state["playing"].as_bool().unwrap_or(false))
+    };
+    let index = row.i("idx");
+    let playing = row.b("playing");
+    row.remove("idx");
+    row.insert("index".into(), json!(index));
+    row.insert("queue".into(), queue);
+    row.insert("playing".into(), json!(playing));
+    row.insert("online".into(), json!(live.is_some()));
+    row.insert("device_playing".into(), json!(live.unwrap_or(false)));
+    Ok(Json(Value::Object(row)))
+}
+
+async fn clear_spot(State(st): State<AppState>, User(u): User) -> ApiResult<Json<Value>> {
+    let user = u.i("id");
+    st.db.execute("DELETE FROM playback_spot WHERE user_id = ?", p![user])?;
+    SPOT_LAST.lock().unwrap().remove(&user);
+    Ok(Json(json!({ "ok": true })))
 }
 
 async fn command(User(u): User, Path(device): Path<String>, Json(mut c): Json<Value>) -> ApiResult<Json<Value>> {
@@ -170,8 +288,45 @@ async fn events(User(u): User, Query(q): Query<EventsQ>) -> ApiResult<Sse<impl S
 }
 
 #[cfg(test)]
+#[path = "remote_tests.rs"]
+mod spot_tests;
+
+#[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn spot_is_written_on_changes_and_otherwise_every_ten_seconds() {
+        let l = Last { at: 100.0, track: 1, playing: true, device: "a".into() };
+        assert!(spot_due(None, "a", 1, true, 0.0));
+        assert!(!spot_due(None, "a", 1, false, 0.0)); // an app that opens paused doesn't claim the spot
+        assert!(!spot_due(Some(&l), "a", 1, true, 105.0));
+        assert!(spot_due(Some(&l), "a", 1, true, 110.0));
+        assert!(spot_due(Some(&l), "a", 2, true, 101.0)); // song change
+        assert!(spot_due(Some(&l), "a", 1, false, 101.0)); // pause
+        assert!(!spot_due(Some(&l), "b", 1, true, 101.0)); // another device plays while "a" still does: waits its turn
+        assert!(!spot_due(Some(&l), "b", 7, true, 101.0)); // even with a different song
+        assert!(spot_due(Some(&l), "b", 1, true, 110.0)); // "a" has gone quiet
+        assert!(!spot_due(Some(&l), "b", 7, false, 101.0)); // another device sits paused
+        let paused = Last { playing: false, ..l };
+        assert!(!spot_due(Some(&paused), "a", 1, false, 500.0));
+        assert!(spot_due(Some(&paused), "a", 2, false, 101.0)); // skipped while paused
+        assert!(spot_due(Some(&paused), "a", 1, true, 101.0)); // resumed
+        assert!(spot_due(Some(&paused), "b", 1, true, 101.0)); // another device plays after "a" stopped
+    }
+
+    #[test]
+    fn spot_queue_keeps_library_ids_and_finds_the_current_song() {
+        let s = json!({ "index": 1, "queue": [{ "id": 5 }, { "id": 6 }, { "title": "stream" }, 7] });
+        assert_eq!(spot_queue(&s, 6), (vec![5, 6, 7], 1));
+        // an index from before non-library songs were dropped: found by id instead
+        let s = json!({ "index": 3, "queue": [{ "id": 5 }, { "title": "x" }, { "id": 6 }, { "id": 7 }] });
+        assert_eq!(spot_queue(&s, 7), (vec![5, 6, 7], 2));
+        assert_eq!(spot_queue(&json!({}), 9), (vec![9], 0));
+        let big: Vec<i64> = (1..=400).collect();
+        let (q, i) = spot_queue(&json!({ "queue": big, "index": 0 }), 1);
+        assert_eq!((q.len(), i), (300, 0));
+    }
 
     #[test]
     fn online_hides_devices_that_never_checked_in_and_sorts_by_name() {

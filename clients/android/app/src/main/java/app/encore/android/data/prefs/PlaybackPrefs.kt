@@ -22,6 +22,7 @@ data class EqPreset(val id: String, val label: String, val preamp: Double, val b
  *          "saver" – always the small 96 kbps stream (mobile data, slow links)
  * preload: buffer the next song while this one plays (off on very slow connections)
  * autoplay: when the queue ends, keep going with a shuffle of the whole library
+ * resume: when the app opens, pick up where you left off (this phone's queue and spot, or another device's)
  * dsp: have the server upsample streams with Cadenza (only where an admin switched it on and allowed the account)
  * dspFilter: Cadenza upsampling filter id ("" = the server's default) · dspDither: dither / noise shaping id
  * dspRate: "device" (this device's output rate), "auto" (highest the server allows) or a rate in Hz as text
@@ -35,6 +36,7 @@ data class PlaybackPrefs(
     val quality: String = "auto",
     val preload: Boolean = true,
     val autoplay: Boolean = true,
+    val resume: Boolean = true,
     val dsp: Boolean = false,
     val dspFilter: String = "",
     val dspDither: String = "tpdf",
@@ -78,6 +80,7 @@ data class PlaybackPrefs(
         m["quality"] = JsonPrimitive(quality)
         m["preload"] = JsonPrimitive(preload)
         m["autoplay"] = JsonPrimitive(autoplay)
+        m["resume"] = JsonPrimitive(resume)
         m["dsp"] = JsonPrimitive(dsp)
         m["dsp_filter"] = JsonPrimitive(dspFilter)
         m["dsp_dither"] = JsonPrimitive(dspDither)
@@ -193,6 +196,7 @@ data class PlaybackPrefs(
                 quality = text(o["quality"])?.takeIf { it in QUALITIES } ?: d.quality,
                 preload = bool(o["preload"]) != false,
                 autoplay = bool(o["autoplay"]) != false,
+                resume = bool(o["resume"]) != false,
                 dsp = bool(o["dsp"]) == true,
                 dspFilter = text(o["dsp_filter"]) ?: d.dspFilter,
                 dspDither = text(o["dsp_dither"])?.takeIf { it.isNotEmpty() } ?: d.dspDither,
