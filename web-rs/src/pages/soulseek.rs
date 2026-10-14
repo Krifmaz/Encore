@@ -164,6 +164,7 @@ fn status_html(s: &Value, error: &str) -> String {
     let mut parts = vec![format!(r#"<span class="dot ok"></span> Signed in as <b>{}</b>"#,
         esc(&if s.truthy("username") { s.s("username") } else { "?".to_string() }))];
     parts.push(if s.g("shares").truthy("files") { format!("sharing {}", plural(s.g("shares").f("files"), "file")) } else { "sharing nothing".to_string() });
+    if !s["scanning"].is_null() { parts.push(format!("scanning shares {}%", esc(&s.s("scanning")))); }
     if s.truthy("port") { parts.push(format!("port {}", esc(&s.s("port")))); }
     if s.truthy("error") { parts.push(format!(r#"<span style="color:var(--warn)">{}</span>"#, esc(&s.s("error")))); }
     parts.join(" · ")

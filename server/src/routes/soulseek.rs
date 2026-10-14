@@ -87,10 +87,11 @@ async fn status(State(st): State<AppState>, User(u): User) -> ApiResult<Json<Val
     let mut out = json!({ "enabled": slskd::enabled(&st), "configured": slskd_managed::configured(&st), "client": "managed",
         "state": state, "version": m["version"].clone(), "installed": installed, "vpn": m["vpn"], "hint": "",
         "logged_in": false, "username": "", "error": m["error"].as_str().unwrap_or(""),
-        "shares": { "dirs": 0, "files": 0 }, "port": m["listen_port"], "parent": null, "downloads": 0, "uploads": 0 });
+        "shares": { "dirs": 0, "files": 0 }, "port": m["listen_port"], "scanning": m["scanning"], "parent": null, "downloads": 0, "uploads": 0 });
     if installed.is_none() {
         out["hint"] = json!("Install or update it under Download tools");
     }
+
     if !slskd::enabled(&st) || state != "running" {
         return Ok(Json(out));
     }

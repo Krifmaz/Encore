@@ -221,7 +221,7 @@ async fn status(State(st): State<AppState>, User(me): User) -> ApiResult<Json<Va
                 Ok(Ok(v)) => {
                     let server = v["server"]["state"].as_str().unwrap_or("").to_string();
                     let ok = v["server"]["isLoggedIn"].as_bool().unwrap_or_else(|| server.contains("LoggedIn"));
-                    json!({ "ok": ok, "state": "running", "version": m["version"], "server": server, "error": if ok { Value::Null } else { json!(format!("Soulseek server: {server}")) } })
+                    json!({ "ok": ok, "state": "running", "version": m["version"], "scanning": m["scanning"], "server": server, "error": if ok { Value::Null } else { json!(format!("Soulseek server: {server}")) } })
                 }
                 Ok(Err(e)) => json!({ "ok": false, "state": "running", "version": m["version"], "error": e.to_string() }),
                 Err(_) => json!({ "ok": false, "state": "running", "version": m["version"], "error": "timed out" }),
@@ -329,7 +329,8 @@ async fn test(State(st): State<AppState>, Admin(u): Admin, Path(service): Path<S
                     let server = s["server"]["state"].as_str().unwrap_or("unknown");
                     let ok = s["server"]["isLoggedIn"].as_bool().unwrap_or_else(|| server.contains("LoggedIn"));
                     let port = m["listen_port"].as_u64().map(|p| format!(" · port {p}")).unwrap_or_default();
-                    msg(ok, format!("Soulseek engine{ver} running · server: {server}{port} · {vpn}"))
+                    let scan = m["scanning"].as_u64().map(|p| format!(" · scanning shares {p}%")).unwrap_or_default();
+                    msg(ok, format!("Soulseek engine{ver} running{scan} · server: {server}{port} · {vpn}"))
                 }
             }
             "musicbrainz" => {

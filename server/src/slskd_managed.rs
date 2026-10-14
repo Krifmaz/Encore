@@ -44,6 +44,8 @@ struct Status {
     error: Option<String>,
     listen_port: Option<u16>,
     vpn: bool,
+    /// the share scan's progress (percent) while slskd builds its share list
+    scan: Option<u8>,
 }
 
 static STATUS: LazyLock<Mutex<Status>> = LazyLock::new(|| Mutex::new(Status { state: "off", ..Default::default() }));
@@ -53,7 +55,7 @@ static INSTALLING: AtomicBool = AtomicBool::new(false);
 /// {state: off|not_installed|starting|running|crashed|waiting_vpn, version, pid, error, listen_port, vpn}
 pub fn status() -> Value {
     let s = STATUS.lock().unwrap().clone();
-    json!({ "state": s.state, "version": s.version, "pid": s.pid, "error": s.error, "listen_port": s.listen_port, "vpn": s.vpn })
+    json!({ "state": s.state, "version": s.version, "pid": s.pid, "error": s.error, "listen_port": s.listen_port, "vpn": s.vpn, "scanning": s.scan })
 }
 
 fn set_status(f: impl FnOnce(&mut Status)) {
@@ -509,8 +511,39 @@ fn pipe<R: AsyncRead + Unpin + Send + 'static>(r: R, log: Arc<RunLog>) {
         let mut lines = BufReader::new(r).lines();
         while let Ok(Some(l)) = lines.next_line().await {
             log.line(&l);
+            on_line(&l);
         }
     });
+}
+
+/// What slskd's own output tells us: it is up once the application has started (its API can be slow
+/// to answer while a big share scan runs), and how far the share scan is.
+fn on_line(l: &str) {
+    if l.contains("Application started") {
+        set_status(|s| {
+            if s.state == "starting" {
+                s.state = "running";
+                s.error = None;
+            }
+        });
+    }
+    if let Some(p) = scan_percent(l) {
+        set_status(|s| s.scan = (p < 100).then_some(p));
+    } else if l.contains("Share scan started") {
+        set_status(|s| s.scan = Some(0));
+    } else if l.to_lowercase().contains("scan completed") || l.to_lowercase().contains("scan failed") {
+        set_status(|s| s.scan = None);
+    }
+}
+
+/// "Scanned 11% of shared directories. Found 7115 files so far." → 11
+fn scan_percent(l: &str) -> Option<u8> {
+    let rest = &l[l.find("Scanned ")? + 8..];
+    let (n, tail) = rest.split_once('%')?;
+    if !tail.trim_start().starts_with("of shared") {
+        return None;
+    }
+    n.trim().parse::<u8>().ok()
 }
 
 fn signal(pid: u32, sig: &str) {
@@ -627,7 +660,7 @@ impl Runner {
         self.next_start = None;
         let pid = self.child.as_ref().and_then(|c| c.id());
         set_status(|s| {
-            *s = Status { state: "starting", version: Some(plan.version.clone()), pid, error: None, listen_port: Some(plan.listen_port), vpn: plan.vpn };
+            *s = Status { state: "starting", version: Some(plan.version.clone()), pid, error: None, listen_port: Some(plan.listen_port), vpn: plan.vpn, scan: None };
         });
     }
 
@@ -738,8 +771,8 @@ async fn want(st: &AppState) -> Want {
 
 /// slskd's API answers (any answer: it is up).
 async fn answers(st: &AppState) -> bool {
-    st.http.get(format!("{}/api/v0/application", base_url())).header("X-API-Key", api_key(st)).timeout(Duration::from_secs(3)).send().await
-        .map(|r| r.status().as_u16() < 500).unwrap_or(false)
+    st.http.get(format!("{}/api/v0/application", base_url())).header("X-API-Key", api_key(st)).timeout(Duration::from_secs(10)).send().await
+        .is_ok()
 }
 
 /// Keeps slskd in step with the settings: installs nothing by itself unless tools_auto_slskd is on.

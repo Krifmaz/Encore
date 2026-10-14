@@ -77,6 +77,7 @@ function statusHtml(s, error) {
   if (!s.logged_in) return `<span class="dot err"></span> <span style="color:var(--warn)">Not signed in${s.error ? ` – ${esc(s.error)}` : ''}</span> · ${settings}`;
   const parts = [`<span class="dot ok"></span> Signed in as <b>${esc(s.username || '?')}</b>`];
   parts.push(s.shares?.files ? `sharing ${plural(s.shares.files, 'file')}` : 'sharing nothing');
+  if (s.scanning != null) parts.push(`scanning shares ${esc(s.scanning)}%`);
   if (s.port) parts.push(`port ${esc(s.port)}`);
   if (s.error) parts.push(`<span style="color:var(--warn)">${esc(s.error)}</span>`);
   return parts.join(' · ');
