@@ -38,12 +38,19 @@ RUN apt-get update \
 # streamrip (Qobuz/Tidal/Deezer with your own subscription). Build with --build-arg INSTALL_STREAMRIP=false to skip it.
 ARG INSTALL_STREAMRIP=true
 ARG STREAMRIP_REF=v2.4.9
-RUN python3 -m venv /opt/tools && /opt/tools/bin/pip install --no-cache-dir "yt-dlp[default]" \
+# The streamrip fork needs Python 3.14+, newer than Debian's python3, so uv fetches a standalone 3.14 for the
+# tools' venv. No silent fallback to PyPI's streamrip 2.1.0: its Tidal client was revoked, so a failed install
+# must fail the build instead of shipping a streamrip that cannot sign in to Tidal.
+ENV UV_PYTHON_INSTALL_DIR=/opt/python UV_NO_CACHE=1
+RUN python3 -m venv /opt/uv && /opt/uv/bin/pip install --no-cache-dir uv \
+ && /opt/uv/bin/uv venv --seed --python 3.14 /opt/tools \
+ && /opt/uv/bin/uv pip install --python /opt/tools/bin/python "yt-dlp[default]" \
  && if [ "$INSTALL_STREAMRIP" = "true" ]; then \
-      /opt/tools/bin/pip install --no-cache-dir "https://github.com/Stensel8/streamrip/archive/refs/tags/${STREAMRIP_REF}.zip" \
-      || /opt/tools/bin/pip install --no-cache-dir streamrip; \
-      /opt/tools/bin/rip --version || { echo "streamrip failed to install"; exit 1; }; \
-    fi
+      /opt/uv/bin/uv pip install --python /opt/tools/bin/python "https://github.com/Stensel8/streamrip/archive/refs/tags/${STREAMRIP_REF}.zip" \
+      && /opt/tools/bin/rip --version | tee /dev/stderr | grep -q "${STREAMRIP_REF#v}" \
+      || { echo "streamrip ${STREAMRIP_REF} failed to install"; exit 1; }; \
+    fi \
+ && rm -rf /opt/uv
 ENV PATH=/opt/tools/bin:$PATH \
     ENCORE_CONFIG_DIR=/config ENCORE_STATIC_DIR=/app/static ENCORE_PORT=8080 \
     PUID=1000 PGID=1000 TZ=UTC
