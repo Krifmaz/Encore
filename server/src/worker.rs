@@ -717,7 +717,7 @@ async fn torznab_try_next(st: &AppState, r: &mut Req, reason: &str) -> anyhow::R
                 r.d["torznab"]["started"] = json!(t);
                 r.d["torznab"]["last_change"] = json!(t);
                 r.d["torznab"]["last_progress"] = json!(0);
-                let via = if c["protocol"] == "usenet" { "SABnzbd" } else { "qBittorrent" };
+                let via = torznab::client_name(st, c["protocol"].as_str().unwrap_or("torrent"));
                 upd(st, r, &[("status", json!("downloading")), ("progress", json!(0)),
                              ("message", json!(format!("{via}: {} ({})", c["title"].as_str().unwrap_or(""), c["indexer"].as_str().unwrap_or(""))))]);
                 return Ok(Out::Wait);

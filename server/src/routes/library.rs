@@ -13,7 +13,9 @@ use axum::routing::{get, post};
 use axum::{Json, Router};
 use serde::Deserialize;
 use serde_json::{json, Value};
+use std::collections::HashMap;
 use std::path::Path as FsPath;
+use std::sync::Arc;
 use tower::ServiceExt;
 use tower_http::services::ServeFile;
 
@@ -25,6 +27,7 @@ pub fn router() -> Router<AppState> {
         .route("/api/library/albums", get(albums))
         .route("/api/library/artists", get(artists).delete(delete_artist))
         .route("/api/library/tracks", get(tracks))
+        .route("/api/library/artist-tracks", get(artist_tracks))
         .route("/api/library/recent", get(recent))
         .route("/api/library/shuffle", get(shuffle_get).post(shuffle_post))
         .route("/api/library/plays", post(plays))
@@ -37,6 +40,8 @@ pub fn router() -> Router<AppState> {
         .route("/api/library/plays/recent", get(recent_plays))
         .route("/api/library/tracks/{id}/lyrics", get(lyrics))
         .route("/api/library/tracks/{id}/share", post(share))
+        .route("/api/library/albums/{id}/share", post(share_album))
+        .route("/api/library/artists/share", post(share_artist))
         .route("/api/library/albums/{id}", get(album).delete(delete_album))
         .route("/api/library/albums/{id}/cover", get(cover))
         .route("/api/library/albums/{id}/download", get(album_zip))
@@ -47,6 +52,7 @@ pub fn router() -> Router<AppState> {
         .route("/api/share/{token}", get(shared))
         .route("/api/share/{token}/stream", get(shared_stream))
         .route("/api/share/{token}/cover", get(shared_cover))
+        .route("/api/share/{token}/video.mp4", get(shared_video))
         .route("/s/{token}", get(share_page))
 }
 
@@ -73,12 +79,6 @@ const TRACK_SORTS: &[(&str, &str, &str)] = &[
     ("added", "added_at {d}", "desc"),
     ("released", "year {d}, lower(artist)", "desc"),
     ("duration", "duration {d}", "desc"),
-];
-const ARTIST_SORTS: &[(&str, &str, &str)] = &[
-    ("name", "lower(albumartist) {d}", "asc"),
-    ("albums", "albums {d}", "desc"),
-    ("tracks", "tracks {d}", "desc"),
-    ("added", "added {d}", "desc"),
 ];
 
 async fn stats(State(st): State<AppState>, User(_): User) -> Json<Value> {
@@ -158,14 +158,25 @@ struct AlbumQ {
 async fn albums(State(st): State<AppState>, User(_): User, Query(a): Query<AlbumQ>) -> ApiResult<Json<Value>> {
     let mut wh = vec!["1=1".to_string()];
     let mut params: Vec<Value> = vec![];
-    if !a.q.is_empty() {
-        wh.push("(album LIKE ? OR albumartist LIKE ? OR artist LIKE ?)".into());
-        let like = format!("%{}%", a.q);
-        params.extend([json!(like), json!(like), json!(like)]);
+    // a search is ranked in memory (exact > starts with > a word starts with > contains, accents ignored)
+    let ranked = (!a.q.trim().is_empty()).then(|| {
+        let mut r = crate::artists::index(&st.db).search_albums(&a.q);
+        r.truncate(30000);
+        r
+    });
+    if let Some(r) = &ranked {
+        wh.push(format!("album_id IN ({})", crate::artists::marks(r.len())));
+        params.extend(r.iter().map(|(id, _)| json!(id)));
+        if r.is_empty() {
+            params.push(json!(""));
+            wh.push("0".into());
+        }
     }
     if !a.artist.is_empty() {
-        wh.push("lower(albumartist)=lower(?)".into());
-        params.push(json!(a.artist));
+        // every spelling of the artist, its aliases and the collaborations it is part of
+        let (cond, ps) = crate::artists::album_filter(&st.db, &a.artist);
+        wh.push(cond);
+        params.extend(ps);
     }
     let mut having: Vec<&str> = vec![];
     match a.filter.as_str() {
@@ -181,6 +192,22 @@ async fn albums(State(st): State<AppState>, User(_): User, Query(a): Query<Album
     }
     let having = if having.is_empty() { String::new() } else { format!("HAVING {}", having.join(" AND ")) };
     let w = wh.join(" AND ");
+    if let Some(r) = ranked {
+        let sql = format!(
+            "SELECT album_id AS id, MAX(album) album, MAX(albumartist) albumartist, MAX(year) year, MAX(genre) genre,
+                    COUNT(*) tracks, SUM(duration) duration, SUM(size) size, MAX(added_at) added,
+                    GROUP_CONCAT(DISTINCT format) formats, MAX(mb_albumid) mb_albumid, MAX(mb_releasegroupid) mb_releasegroupid,
+                    SUM(CASE WHEN mb_albumid IS NULL OR mb_albumid='' THEN 1 ELSE 0 END) untagged
+             FROM tracks WHERE {w} GROUP BY album_id {having} ORDER BY {}",
+            order(ALBUM_SORTS, &a.sort, &a.dir, "name")
+        );
+        let tier: std::collections::HashMap<String, u8> = r.into_iter().collect();
+        let mut items = st.db.query(&sql, params)?;
+        items.sort_by_key(|i| tier.get(&i.s("id")).copied().unwrap_or(9));   // stable: the sort breaks ties
+        let total = items.len();
+        let items: Vec<_> = items.into_iter().skip(a.offset.max(0) as usize).take(a.limit.unwrap_or(120).clamp(1, 500) as usize).collect();
+        return Ok(Json(json!({ "total": total, "items": items })));
+    }
     let sql = format!(
         "SELECT album_id AS id, MAX(album) album, MAX(albumartist) albumartist, MAX(year) year, MAX(genre) genre,
                 COUNT(*) tracks, SUM(duration) duration, SUM(size) size, MAX(added_at) added,
@@ -229,14 +256,30 @@ fn parse_ids(raw: &str) -> ApiResult<Vec<i64>> {
     Ok(out)
 }
 
+/// Artists (merged spellings, collaborations split into their artists, see `artists`). With `q`: ranked
+/// by name / alias, then artists whose albums or songs match; each has "match".
 async fn artists(State(st): State<AppState>, User(_): User, Query(a): Query<SimpleQ>) -> ApiResult<Json<Value>> {
-    let (wh, params) = if a.q.is_empty() { ("", p![]) } else { ("WHERE albumartist LIKE ?", p![format!("%{}%", a.q)]) };
-    Ok(Json(json!(st.db.query(&format!(
-        "SELECT albumartist AS name, COUNT(DISTINCT album_id) albums, COUNT(*) tracks, MAX(mb_albumartistid) mbid, MIN(album_id) cover_album,
-                SUM(size) size, MAX(added_at) added FROM tracks {wh} GROUP BY lower(albumartist) ORDER BY {} LIMIT 2000",
-        order(ARTIST_SORTS, &a.sort, &a.dir, "name")
-    ), params)?)))
+    let idx = crate::artists::index(&st.db);
+    let limit = a.limit.unwrap_or(2000).clamp(1, 2000) as usize;
+    if a.q.trim().is_empty() {
+        return Ok(Json(json!(idx.list(&a.sort, &a.dir).into_iter().skip(a.offset.max(0) as usize).take(limit).collect::<Vec<_>>())));
+    }
+    Ok(Json(json!(idx.search_artists(&a.q, limit))))
 }
+
+/// Every song of a library artist (all spellings, aliases and collaborations), for Play / Shuffle.
+async fn artist_tracks(State(st): State<AppState>, User(_): User, Query(q): Query<NameQ>) -> ApiResult<Json<Value>> {
+    if q.name.trim().is_empty() {
+        return Ok(Json(json!([])));
+    }
+    let (cond, params) = crate::artists::track_filter(&st.db, &q.name);
+    Ok(Json(json!(st.db.query(&format!(
+        "SELECT {TRACK_COLS} FROM tracks WHERE {cond} ORDER BY year DESC, lower(album), disc, track LIMIT 5000"), params)?)))
+}
+
+#[cfg(test)]
+#[path = "search_tests.rs"]
+mod search_tests;
 
 async fn tracks(State(st): State<AppState>, User(_): User, Query(a): Query<SimpleQ>) -> ApiResult<Json<Value>> {
     if let Some(raw) = a.ids.as_deref() {
@@ -249,12 +292,19 @@ async fn tracks(State(st): State<AppState>, User(_): User, Query(a): Query<Simpl
         let mut by_id: std::collections::HashMap<i64, crate::db::Row> = rows.into_iter().map(|r| (r.i("id"), r)).collect();
         return Ok(Json(json!(ids.iter().filter_map(|i| by_id.remove(i)).collect::<Vec<_>>())));
     }
+    if !a.q.trim().is_empty() {
+        // ranked in memory, the same song twice shown once (see artists::Index::search_tracks)
+        let ids: Vec<i64> = crate::artists::index(&st.db).search_tracks(&a.q, &a.sort, &a.dir).into_iter()
+            .skip(a.offset.max(0) as usize).take(a.limit.unwrap_or(200).clamp(1, 1000) as usize).collect();
+        if ids.is_empty() {
+            return Ok(Json(json!([])));
+        }
+        let rows = st.db.query(&format!("SELECT {TRACK_COLS} FROM tracks WHERE id IN ({})", crate::artists::marks(ids.len())), ids.iter().map(|i| json!(i)).collect())?;
+        let mut by_id: std::collections::HashMap<i64, crate::db::Row> = rows.into_iter().map(|r| (r.i("id"), r)).collect();
+        return Ok(Json(json!(ids.iter().filter_map(|i| by_id.remove(i)).collect::<Vec<_>>())));
+    }
     let mut params = vec![];
-    let wh = if a.q.is_empty() { "" } else {
-        let l = format!("%{}%", a.q);
-        params.extend([json!(l), json!(l), json!(l)]);
-        "WHERE title LIKE ? OR artist LIKE ? OR album LIKE ?"
-    };
+    let wh = "";
     params.push(json!(a.limit.unwrap_or(200).clamp(1, 1000)));
     params.push(json!(a.offset.max(0)));
     Ok(Json(json!(st.db.query(&format!(
@@ -689,11 +739,24 @@ struct NameQ {
     name: String,
 }
 
-/// Remove an artist added by mistake (e.g. a wrong download): files, follow, pending requests.
+/// Remove an artist added by mistake (e.g. a wrong download): files, follow, pending requests. Every
+/// spelling the library merged into the artist goes (its own and its alias spellings); albums it made
+/// with other artists stay, since they belong to those artists too.
 async fn delete_artist(State(st): State<AppState>, Admin(u): Admin, Query(q): Query<NameQ>) -> ApiResult<Json<Value>> {
-    let rows = st.db.query(
-        "SELECT id, path FROM tracks WHERE lower(albumartist)=lower(?) OR (lower(artist)=lower(?) AND (albumartist IS NULL OR albumartist='' OR albumartist='Unknown Artist'))",
-        p![q.name, q.name],
+    let idx = crate::artists::index(&st.db);
+    // (an alias that is also another artist's name, kept apart by MusicBrainz, stays with that artist)
+    let mut names: Vec<String> = idx.find(&q.name).map(|a| a.spellings.iter().chain(a.aliases.iter().filter(|x| idx.find(x).is_some_and(|b| b.key == a.key))).cloned().collect()).unwrap_or_default();
+    drop(idx);
+    if !names.iter().any(|n| n.to_lowercase() == q.name.to_lowercase()) {
+        names.push(q.name.clone());
+    }
+    let lower: Vec<Value> = names.iter().map(|n| json!(n.to_lowercase())).collect();
+    let m = crate::artists::marks(lower.len());
+    let mut params = lower.clone();
+    params.extend(lower.iter().cloned());
+    let rows = st.db.query(&format!(
+        "SELECT id, path FROM tracks WHERE lower(albumartist) IN ({m}) OR (lower(artist) IN ({m}) AND (albumartist IS NULL OR albumartist='' OR albumartist='Unknown Artist'))"),
+        params,
     )?;
     let ids: Vec<i64> = rows.iter().map(|r| r.i("id")).collect();
     delete_tracks(&st.db, &ids, None);
@@ -703,8 +766,9 @@ async fn delete_artist(State(st): State<AppState>, Admin(u): Admin, Query(q): Qu
             prune_empty(d, FsPath::new(&stop));
         }
     }
-    st.db.execute("DELETE FROM follows WHERE lower(name)=lower(?)", p![q.name])?;
-    st.db.execute("UPDATE requests SET status='cancelled', message='Artist removed' WHERE lower(artist)=lower(?) AND status IN ('pending','queued')", p![q.name])?;
+    st.db.execute(&format!("DELETE FROM follows WHERE lower(name) IN ({m})"), lower.clone())?;
+    st.db.execute(&format!("UPDATE requests SET status='cancelled', message='Artist removed' WHERE lower(artist) IN ({m}) AND status IN ('pending','queued')"), lower)?;
+    crate::artists::invalidate(&st.db);
     st.db.log("info", &format!("{} removed artist {} ({} songs)", u.s("username"), q.name, rows.len()));
     Ok(Json(json!({ "ok": true, "removed": rows.len() })))
 }
@@ -779,15 +843,23 @@ async fn unlike(State(st): State<AppState>, User(u): User, Path(id): Path<i64>) 
 
 // ---- share links ----------------------------------------------------------------------------------
 
-async fn share(State(st): State<AppState>, User(u): User, Path(id): Path<i64>) -> ApiResult<Json<Value>> {
-    if st.db.one("SELECT 1 FROM tracks WHERE id=?", p![id])?.is_none() {
-        return Err(err(404, "Track not found"));
-    }
-    let token = match st.db.one("SELECT token FROM shares WHERE track_id=? AND user_id=?", p![id, u.i("id")])? {
-        Some(r) => r.s("token"),
+fn link_gone() -> crate::error::ApiError {
+    err(404, "This link doesn't work any more")
+}
+
+/// The link for one thing a user shares: one token per user and song / album / artist.
+fn share_link(st: &AppState, uid: i64, kind: &str, track_id: i64, r: &str) -> ApiResult<Json<Value>> {
+    let found = if kind == "track" {
+        st.db.one("SELECT token FROM shares WHERE track_id=? AND user_id=? AND COALESCE(kind,'track')='track'", p![track_id, uid])?
+    } else {
+        st.db.one("SELECT token FROM shares WHERE kind=? AND ref=? AND user_id=?", p![kind, r, uid])?
+    };
+    let token = match found {
+        Some(row) => row.s("token"),
         None => {
             let t = auth::random_token(12);
-            st.db.execute("INSERT INTO shares VALUES (?,?,?,?)", p![t, id, u.i("id"), now()])?;
+            st.db.execute("INSERT INTO shares (token, track_id, user_id, created_at, kind, ref) VALUES (?,?,?,?,?,?)",
+                p![t, track_id, uid, now(), kind, if kind == "track" { Value::Null } else { json!(r) }])?;
             t
         }
     };
@@ -795,21 +867,139 @@ async fn share(State(st): State<AppState>, User(u): User, Path(id): Path<i64>) -
     Ok(Json(json!({ "token": token, "path": format!("/s/{token}"), "url": format!("{}/s/{token}", base.trim_end_matches('/')) })))
 }
 
-fn shared_track(st: &AppState, token: &str) -> ApiResult<crate::db::Row> {
-    let s = st.db.one("SELECT track_id FROM shares WHERE token=?", p![token])?.ok_or_else(|| err(404, "This link doesn't work any more"))?;
-    st.db.one("SELECT id, title, artist, album, albumartist, album_id, year, track, duration, format, bitrate, path FROM tracks WHERE id=?", p![s.i("track_id")])?.ok_or_else(|| err(404, "This link doesn't work any more"))
+async fn share(State(st): State<AppState>, User(u): User, Path(id): Path<i64>) -> ApiResult<Json<Value>> {
+    if st.db.one("SELECT 1 FROM tracks WHERE id=?", p![id])?.is_none() {
+        return Err(err(404, "Track not found"));
+    }
+    share_link(&st, u.i("id"), "track", id, "")
 }
 
-/// Everything the share page shows about the song (no file paths).
+async fn share_album(State(st): State<AppState>, User(u): User, Path(id): Path<String>) -> ApiResult<Json<Value>> {
+    if st.db.one("SELECT 1 FROM tracks WHERE album_id=? LIMIT 1", p![id])?.is_none() {
+        return Err(err(404, "Album not found"));
+    }
+    share_link(&st, u.i("id"), "album", 0, &id)
+}
+
+#[derive(Deserialize, Default)]
+#[serde(default)]
+struct ShareArtistB {
+    name: String,
+}
+
+/// An artist link names the artist as the library shows it (any spelling or alias finds it).
+async fn share_artist(State(st): State<AppState>, User(u): User, Json(b): Json<ShareArtistB>) -> ApiResult<Json<Value>> {
+    let name = b.name.trim();
+    if name.is_empty() {
+        return Err(err(400, "Which artist?"));
+    }
+    let display = match crate::artists::index(&st.db).find(name) {
+        Some(a) if !a.name.is_empty() => a.name.clone(),
+        _ => {
+            if st.db.one("SELECT 1 FROM tracks WHERE lower(albumartist)=lower(?) OR lower(artist)=lower(?) LIMIT 1", p![name, name])?.is_none() {
+                return Err(err(404, "Artist not found"));
+            }
+            name.to_string()
+        }
+    };
+    share_link(&st, u.i("id"), "artist", 0, &display)
+}
+
+/// What a token points at: kind "track" (track_id), "album" (ref = album id) or "artist" (ref = name).
+struct Shared {
+    kind: String,
+    r: String,
+    track_id: i64,
+}
+
+fn share_row(st: &AppState, token: &str) -> ApiResult<Shared> {
+    let s = st.db.one("SELECT track_id, COALESCE(kind,'track') kind, COALESCE(ref,'') ref FROM shares WHERE token=?", p![token])?.ok_or_else(link_gone)?;
+    Ok(Shared { kind: s.s("kind"), r: s.s("ref"), track_id: s.i("track_id") })
+}
+
+const SHARE_COLS: &str = "id, title, artist, album, albumartist, album_id, year, track, disc, duration, format, bitrate, path";
+
+/// Most songs an artist link lists.
+const SHARE_ARTIST_MAX: usize = 100;
+
+/// The songs a link plays, in page order: the song; the album's songs; the artist's songs (every
+/// spelling, alias and collaboration), most played first, else newest albums first.
+fn shared_tracks(st: &AppState, s: &Shared) -> ApiResult<Vec<crate::db::Row>> {
+    let rows = match s.kind.as_str() {
+        "album" => st.db.query(&format!("SELECT {SHARE_COLS} FROM tracks WHERE album_id=? ORDER BY disc, track, lower(title) LIMIT 500"), p![s.r])?,
+        "artist" => {
+            let (cond, params) = crate::artists::track_filter(&st.db, &s.r);
+            st.db.query(&format!(
+                "SELECT {SHARE_COLS} FROM tracks LEFT JOIN (SELECT track_id, COUNT(*) n FROM plays WHERE track_id IS NOT NULL GROUP BY track_id) pc ON pc.track_id=tracks.id
+                 WHERE {cond} ORDER BY COALESCE(pc.n,0) DESC, year DESC, lower(album), disc, track LIMIT {SHARE_ARTIST_MAX}"), params)?
+        }
+        _ => st.db.query(&format!("SELECT {SHARE_COLS} FROM tracks WHERE id=?"), p![s.track_id])?,
+    };
+    if rows.is_empty() {
+        return Err(link_gone());
+    }
+    Ok(rows)
+}
+
+/// Whether a song belongs to what the link shares: the song, a song of the album, or of the artist.
+fn shared_has(st: &AppState, s: &Shared, id: i64) -> ApiResult<bool> {
+    Ok(match s.kind.as_str() {
+        "album" => st.db.one("SELECT 1 FROM tracks WHERE album_id=? AND id=?", p![s.r, id])?.is_some(),
+        "artist" => {
+            let (cond, mut params) = crate::artists::track_filter(&st.db, &s.r);
+            params.push(json!(id));
+            st.db.one(&format!("SELECT 1 FROM tracks WHERE {cond} AND id=?"), params)?.is_some()
+        }
+        _ => id == s.track_id && st.db.one("SELECT 1 FROM tracks WHERE id=?", p![id])?.is_some(),
+    })
+}
+
+/// The album whose cover stands for the link: the album, the artist's picture as the library shows it
+/// (its cover album), or the song's album.
+fn shared_cover_album(st: &AppState, s: &Shared, tracks: &[crate::db::Row]) -> String {
+    match s.kind.as_str() {
+        "album" => s.r.clone(),
+        "artist" => crate::artists::index(&st.db).find(&s.r).map(|a| a.cover_album.clone()).filter(|c| !c.is_empty()).unwrap_or_else(|| tracks[0].s("album_id")),
+        _ => tracks[0].s("album_id"),
+    }
+}
+
+/// Everything the share page shows (no file paths). Songs: the song and its quality; albums and
+/// artists: title, artist, year and the song list.
 async fn shared_meta(st: &AppState, token: &str) -> ApiResult<Value> {
-    let t = shared_track(st, token)?;
-    let path = t.s("path");
-    let info = tokio::task::spawn_blocking(move || audio_info(&path)).await.unwrap_or(json!({}));
+    let s = share_row(st, token)?;
+    let tracks = shared_tracks(st, &s)?;
+    let app = st.cfg.str("app_name");
+    if s.kind != "album" && s.kind != "artist" {
+        let t = &tracks[0];
+        let path = t.s("path");
+        let info = tokio::task::spawn_blocking(move || audio_info(&path)).await.unwrap_or(json!({}));
+        return Ok(json!({
+            "kind": "track",
+            "title": t.get("title"), "artist": t.get("artist"), "album": t.get("album"), "albumartist": t.get("albumartist"), "year": t.get("year"), "track": t.get("track"),
+            "duration": t.get("duration"), "format": t.get("format"), "bitrate": t.get("bitrate"),
+            "sample_rate": info["sample_rate"], "bit_depth": info["bit_depth"], "channels": info["channels"], "lossless": info["lossless"],
+            "app_name": app,
+        }));
+    }
+    let list: Vec<Value> = tracks.iter().map(|t| json!({
+        "id": t.get("id"), "title": t.get("title"), "artist": t.get("artist"), "album": t.get("album"),
+        "track": t.get("track"), "disc": t.get("disc"), "duration": t.get("duration"),
+    })).collect();
+    let duration: f64 = tracks.iter().map(|t| t.f("duration")).sum();
+    let first = &tracks[0];
+    let (title, artist, album, year) = if s.kind == "album" {
+        let year = tracks.iter().map(|t| t.s("year")).filter(|y| !y.is_empty()).max().unwrap_or_default();
+        let aa = first.s("albumartist");
+        (first.s("album"), if aa.is_empty() { first.s("artist") } else { aa }, first.s("album"), year)
+    } else {
+        let name = crate::artists::index(&st.db).find(&s.r).map(|a| a.name.clone()).filter(|n| !n.is_empty()).unwrap_or_else(|| s.r.clone());
+        (name.clone(), name, String::new(), String::new())
+    };
     Ok(json!({
-        "title": t.get("title"), "artist": t.get("artist"), "album": t.get("album"), "albumartist": t.get("albumartist"), "year": t.get("year"), "track": t.get("track"),
-        "duration": t.get("duration"), "format": t.get("format"), "bitrate": t.get("bitrate"),
-        "sample_rate": info["sample_rate"], "bit_depth": info["bit_depth"], "channels": info["channels"], "lossless": info["lossless"],
-        "app_name": st.cfg.str("app_name"),
+        "kind": s.kind, "title": title, "artist": artist, "album": album, "year": year,
+        "duration": duration, "count": list.len(), "tracks": list,
+        "format": first.get("format"), "app_name": app,
     }))
 }
 
@@ -817,15 +1007,193 @@ async fn shared(State(st): State<AppState>, Path(token): Path<String>) -> ApiRes
     Ok(Json(shared_meta(&st, &token).await?))
 }
 
-async fn shared_stream(State(st): State<AppState>, Path(token): Path<String>, Query(q): Query<StreamQ>, req: Request) -> ApiResult<Response> {
-    let t = shared_track(&st, &token)?;
+#[derive(Deserialize, Default)]
+#[serde(default)]
+struct SharedTrackQ {
+    /// album / artist links: which of the listed songs (default the first)
+    track: Option<i64>,
+}
+
+async fn shared_stream(State(st): State<AppState>, Path(token): Path<String>, Query(q): Query<StreamQ>, Query(w): Query<SharedTrackQ>, req: Request) -> ApiResult<Response> {
+    let s = share_row(&st, &token)?;
+    // only songs of what the link shares (checked on its own: the artist list changes with plays, so a
+    // song a page shows may have left the top songs since)
+    let id = match w.track {
+        Some(id) if shared_has(&st, &s, id)? => id,
+        Some(_) => return Err(err(404, "Track not found")),
+        None => shared_tracks(&st, &s)?[0].i("id"),
+    };
     // share links play the file (or a plain conversion) – never server processing
-    stream_track(&st, t.i("id"), &q, req, None).await
+    stream_track(&st, id, &q, req, None).await
 }
 
 async fn shared_cover(State(st): State<AppState>, Path(token): Path<String>, Query(q): Query<CoverQ>, req: Request) -> ApiResult<Response> {
-    let t = shared_track(&st, &token)?;
-    cover_response(&st, &t.s("album_id"), q.s, req).await
+    let s = share_row(&st, &token)?;
+    let tracks = shared_tracks(&st, &s)?;
+    cover_response(&st, &shared_cover_album(&st, &s, &tracks), q.s, req).await
+}
+
+/// Largest preview video: chat apps (Discord) embed files up to 8 MB.
+const SHARE_VIDEO_MAX: u64 = 8 * 1000 * 1000;
+
+/// AAC bitrate (kbps) and length (seconds) of the preview video: the whole song at 128 kbps when it fits
+/// a 7.5 MB budget (room for the still picture and the container), else 96 kbps, else cut at the budget.
+pub(crate) fn share_video_budget(duration: f64) -> (u32, f64) {
+    const BUDGET_BITS: f64 = 7_500_000.0 * 8.0;
+    const VIDEO_KBPS: f64 = 48.0;
+    let d = if duration > 0.0 { duration } else { f64::MAX };
+    for kbps in [128u32, 96] {
+        if d * (kbps as f64 + VIDEO_KBPS) * 1000.0 <= BUDGET_BITS {
+            return (kbps, d);
+        }
+    }
+    (96, BUDGET_BITS / ((96.0 + VIDEO_KBPS) * 1000.0))
+}
+
+/// Preview videos made at the same time (each runs ffmpeg for up to a few minutes).
+static SHARE_VIDEO_SLOTS: tokio::sync::Semaphore = tokio::sync::Semaphore::const_new(2);
+/// One build per link at a time: later requests for the link wait for it and use its file.
+static SHARE_VIDEO_BUILDS: std::sync::Mutex<Option<HashMap<String, Arc<tokio::sync::Mutex<()>>>>> = std::sync::Mutex::new(None);
+/// How long a failed build is remembered before it is tried again.
+const SHARE_VIDEO_RETRY: std::time::Duration = std::time::Duration::from_secs(3600);
+
+/// "mtime-size" of a file, "0" when it isn't there.
+fn file_version(p: &std::path::Path) -> String {
+    std::fs::metadata(p).ok().map(|m| {
+        let t = m.modified().ok().and_then(|m| m.duration_since(std::time::UNIX_EPOCH).ok()).map(|d| d.as_secs()).unwrap_or(0);
+        format!("{t}-{}", m.len())
+    }).unwrap_or_else(|| "0".into())
+}
+
+/// The "playable" link preview: the cover as a 600x600 still and the first listed song as AAC, in an
+/// MP4 that starts playing before it has fully loaded. Cached under <config>/cache/share-video/ by
+/// token, song, file and cover version; None when ffmpeg can't make it (remembered for an hour). The
+/// build runs in its own task, so a caller that stops waiting (a chat app that gave up) doesn't stop it.
+async fn share_video(st: &AppState, token: &str) -> Option<std::path::PathBuf> {
+    let (st, token) = (st.clone(), token.to_string());
+    tokio::spawn(async move { share_video_build(&st, &token).await }).await.ok().flatten()
+}
+
+async fn share_video_build(st: &AppState, token: &str) -> Option<std::path::PathBuf> {
+    let s = share_row(st, token).ok()?;
+    let tracks = shared_tracks(st, &s).ok()?;
+    let t = &tracks[0];
+    let audio = t.s("path");
+    let meta = std::fs::metadata(&audio).ok()?;
+    let mtime = meta.modified().ok().and_then(|m| m.duration_since(std::time::UNIX_EPOCH).ok()).map(|d| d.as_secs()).unwrap_or(0);
+    let aid = shared_cover_album(st, &s, &tracks);
+    let st2 = st.clone();
+    let cover = tokio::task::spawn_blocking(move || st2.library.find_cover(&st2.db, &aid)).await.ok().flatten();
+    let cover_v = cover.as_deref().map(file_version).unwrap_or_else(|| "none".into());
+    let dir = st.db.data_dir.join("cache").join("share-video");
+    std::fs::create_dir_all(&dir).ok()?;
+    let stem = format!("{token}.{}.{mtime}.{}.{cover_v}", t.i("id"), meta.len());
+    let out = dir.join(format!("{stem}.mp4"));
+    let failed = dir.join(format!("{stem}.fail"));
+    let failed_lately = || std::fs::metadata(&failed).ok().and_then(|m| m.modified().ok()).and_then(|m| m.elapsed().ok()).is_some_and(|age| age < SHARE_VIDEO_RETRY);
+    if out.is_file() {
+        return Some(out);
+    }
+    if failed_lately() {
+        return None;
+    }
+    // one build per link: wait for one that is running, then use what it made
+    let lock = {
+        let mut g = SHARE_VIDEO_BUILDS.lock().unwrap_or_else(|e| e.into_inner());
+        g.get_or_insert_with(HashMap::new).entry(token.to_string()).or_default().clone()
+    };
+    let res = {
+        let _one = lock.lock().await;
+        if out.is_file() {
+            Some(out.clone())
+        } else if failed_lately() {
+            None
+        } else {
+            let _slot = SHARE_VIDEO_SLOTS.acquire().await.ok()?;
+            share_video_tidy(st, &dir, token);
+            let made = share_video_make(&dir, cover.as_deref(), &audio, t.f("duration"), &out).await;
+            if made.is_none() {
+                let _ = std::fs::write(&failed, b"");
+            }
+            made
+        }
+    };
+    {
+        let mut g = SHARE_VIDEO_BUILDS.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(m) = g.as_mut() {
+            // nobody else holds it: forget the lock
+            if m.get(token).is_some_and(|l| Arc::strong_count(l) <= 2) {
+                m.remove(token);
+            }
+        }
+    }
+    res
+}
+
+/// Before a build: drops this link's older videos (song, file or cover changed), videos of links that
+/// no longer exist, and half-made files a stopped build left behind.
+fn share_video_tidy(st: &AppState, dir: &std::path::Path, token: &str) {
+    let Ok(rd) = std::fs::read_dir(dir) else { return };
+    let mut known: HashMap<String, bool> = HashMap::new();
+    let prefix = format!("{token}.");
+    for e in rd.flatten() {
+        let name = e.file_name().to_string_lossy().into_owned();
+        let gone = if name.starts_with('.') {
+            name.ends_with(".tmp.mp4") && e.metadata().ok().and_then(|m| m.modified().ok()).and_then(|m| m.elapsed().ok()).is_some_and(|a| a.as_secs() > 900)
+        } else if name.starts_with(&prefix) {
+            true
+        } else {
+            let tok = name.split('.').next().unwrap_or("").to_string();
+            !*known.entry(tok.clone()).or_insert_with(|| st.db.one("SELECT 1 FROM shares WHERE token=?", p![tok]).ok().flatten().is_some())
+        };
+        if gone {
+            let _ = std::fs::remove_file(e.path());
+        }
+    }
+}
+
+/// Runs ffmpeg: the cover (or a dark square) and the song into `out`.
+async fn share_video_make(dir: &std::path::Path, cover: Option<&std::path::Path>, audio: &str, duration: f64, out: &std::path::Path) -> Option<std::path::PathBuf> {
+    let (kbps, secs) = share_video_budget(duration);
+    let tmp = dir.join(format!(".{}.tmp.mp4", auth::random_token(6)));
+    // H.264 when this ffmpeg has it (what chat apps play), else ffmpeg's default MP4 video codec
+    for vcodec in [Some("libx264"), None] {
+        let mut cmd = tokio::process::Command::new("ffmpeg");
+        cmd.args(["-v", "error", "-nostdin", "-y"]);
+        match cover {
+            Some(c) => { cmd.args(["-loop", "1", "-framerate", "1", "-i"]).arg(c); }
+            None => { cmd.args(["-f", "lavfi", "-i", "color=c=0x161622:s=600x600:r=1"]); }
+        }
+        cmd.arg("-i").arg(audio);
+        cmd.args(["-map", "0:v:0", "-map", "1:a:0", "-vf", "scale=600:600:force_original_aspect_ratio=increase,crop=600:600,format=yuv420p", "-r", "1", "-g", "10"]);
+        if let Some(v) = vcodec {
+            cmd.args(["-c:v", v, "-tune", "stillimage"]);
+        }
+        cmd.args(["-c:a", "aac", "-b:a", &format!("{kbps}k"), "-ac", "2", "-t", &format!("{secs:.2}"), "-shortest", "-movflags", "+faststart", "-f", "mp4"]).arg(&tmp);
+        cmd.stdin(std::process::Stdio::null()).stdout(std::process::Stdio::null()).stderr(std::process::Stdio::null()).kill_on_drop(true);
+        let ok = tokio::time::timeout(std::time::Duration::from_secs(300), cmd.status()).await.ok().and_then(|r| r.ok()).map(|s| s.success()).unwrap_or(false);
+        let size = std::fs::metadata(&tmp).map(|m| m.len()).unwrap_or(0);
+        if ok && size > 0 && size <= SHARE_VIDEO_MAX && std::fs::rename(&tmp, out).is_ok() {
+            return Some(out.to_path_buf());
+        }
+        let _ = std::fs::remove_file(&tmp);
+        if ok {
+            break; // made but too big: another codec won't help
+        }
+    }
+    None
+}
+
+/// Only in "playable" mode: the other modes never start ffmpeg for a public link.
+async fn shared_video(State(st): State<AppState>, Path(token): Path<String>, req: Request) -> ApiResult<Response> {
+    share_row(&st, &token)?;
+    if st.cfg.str("share_preview").trim() != "playable" {
+        return Err(err(404, "No video for this link"));
+    }
+    let path = share_video(&st, &token).await.ok_or_else(|| err(404, "No video for this link"))?;
+    let mut r = serve_file(&path.to_string_lossy(), req, Some("video/mp4"), None).await?;
+    r.headers_mut().insert(header::CACHE_CONTROL, HeaderValue::from_static("public, max-age=3600"));
+    Ok(r)
 }
 
 /// "FLAC · 16-bit / 44.1 kHz" / "MP3 · 320 kbps" – the one-line quality description shared pages and link previews use.
@@ -856,8 +1224,13 @@ fn mmss(secs: f64) -> String {
     format!("{}:{:02}", s / 60, s % 60)
 }
 
+/// Seconds the share page waits for its preview video.
+const SHARE_PAGE_VIDEO_WAIT: u64 = 6;
+
 /// The share page, with Open Graph / Twitter tags filled in on the server so chat apps show the song,
-/// artist, album and cover in the link preview before anyone opens it.
+/// album or artist with its cover in the link preview before anyone opens it. The `share_preview`
+/// setting picks the card: "small" (small cover), "large" (big picture) or "playable" (a video with
+/// the cover and the song, falling back to "small" when it can't be made).
 async fn share_page(State(st): State<AppState>, Path(token): Path<String>, req: Request) -> ApiResult<Response> {
     let html = tokio::fs::read_to_string(st.static_dir.join("share.html")).await.map_err(|_| err(404, "Not found"))?;
     let meta = match shared_meta(&st, &token).await {
@@ -874,20 +1247,55 @@ async fn share_page(State(st): State<AppState>, Path(token): Path<String>, req: 
             format!("{proto}://{host}")
         }
     };
-    let e = |v: &Value| crate::routes::html_escape(v.as_str().unwrap_or(""));
-    let title = format!("{} – {}", e(&meta["title"]), e(&meta["artist"]));
+    let mode = st.cfg.str("share_preview");
+    // a chat app waits a few seconds for the page: past that, the small card now and the video (still
+    // being made in the background) next time
+    let video = mode.trim() == "playable"
+        && tokio::time::timeout(std::time::Duration::from_secs(SHARE_PAGE_VIDEO_WAIT), share_video(&st, &token)).await.ok().flatten().is_some();
+    Ok(([(header::CONTENT_TYPE, "text/html; charset=utf-8"), (header::CACHE_CONTROL, "no-cache")], share_page_html(&html, &meta, &base, &token, mode.trim(), video)).into_response())
+}
+
+/// The page with its preview tags (see `share_page`); `video`: the preview video exists.
+pub(crate) fn share_page_html(html: &str, meta: &Value, base: &str, token: &str, mode: &str, video: bool) -> String {
+    use crate::routes::html_escape as esc;
+    let e = |v: &Value| esc(v.as_str().unwrap_or(""));
+    let kind = meta["kind"].as_str().unwrap_or("track");
+    let ystr = match &meta["year"] { Value::String(s) => s.clone(), Value::Number(n) => n.to_string(), _ => String::new() };
+    let title = match kind {
+        "artist" => e(&meta["title"]),
+        _ => format!("{} – {}", e(&meta["title"]), e(&meta["artist"])),
+    };
     let mut desc = vec![];
-    if let Some(a) = meta["album"].as_str().filter(|a| !a.is_empty()) {
-        desc.push(match meta["year"].as_str().filter(|y| !y.is_empty()) { Some(y) => format!("{} ({})", crate::routes::html_escape(a), crate::routes::html_escape(y)), None => crate::routes::html_escape(a) });
+    match kind {
+        "album" | "artist" => {
+            if kind == "album" && !ystr.is_empty() { desc.push(esc(&ystr)); }
+            if kind == "artist" { desc.push("Artist".to_string()); }
+            let n = meta["count"].as_u64().unwrap_or(0);
+            desc.push(format!("{n} {}", if n == 1 { "song" } else { "songs" }));
+            if kind == "album" {
+                if let Some(d) = meta["duration"].as_f64().filter(|d| *d > 0.0) { desc.push(mmss(d)); }
+            }
+        }
+        _ => {
+            if let Some(a) = meta["album"].as_str().filter(|a| !a.is_empty()) {
+                desc.push(if ystr.is_empty() { esc(a) } else { format!("{} ({})", esc(a), esc(&ystr)) });
+            }
+            let q = quality_line(meta);
+            if !q.is_empty() { desc.push(q); }
+            if let Some(d) = meta["duration"].as_f64().filter(|d| *d > 0.0) { desc.push(mmss(d)); }
+        }
     }
-    let q = quality_line(&meta);
-    if !q.is_empty() { desc.push(q); }
-    if let Some(d) = meta["duration"].as_f64().filter(|d| *d > 0.0) { desc.push(mmss(d)); }
     desc.push(format!("Shared from {}", e(&meta["app_name"])));
-    let tok = crate::routes::html_escape(&token);
-    let tags = format!(
+    let desc = desc.join(" · ");
+    let tok = esc(token);
+    let base = esc(base);
+    let app = e(&meta["app_name"]);
+    let og_type = if video { "video.other" } else { match kind { "album" => "music.album", "artist" => "profile", _ => "music.song" } };
+    let card = if video { "player" } else if mode == "large" { "summary_large_image" } else { "summary" };
+    let mime = browser_type(meta["format"].as_str().unwrap_or("")).unwrap_or("audio/flac");
+    let mut tags = format!(
         r#"<title>{title}</title>
-<meta property="og:type" content="music.song">
+<meta property="og:type" content="{og_type}">
 <meta property="og:site_name" content="{app}">
 <meta property="og:title" content="{title}">
 <meta property="og:description" content="{desc}">
@@ -896,18 +1304,35 @@ async fn share_page(State(st): State<AppState>, Path(token): Path<String>, req: 
 <meta property="og:image:width" content="600"><meta property="og:image:height" content="600">
 <meta property="og:audio" content="{base}/api/share/{tok}/stream">
 <meta property="og:audio:type" content="{mime}">
-<meta property="music:musician" content="{artist}">
-<meta property="music:album" content="{album}">
-<meta property="music:duration" content="{dur}">
-<meta name="twitter:card" content="summary_large_image">
+"#);
+    match kind {
+        "album" => tags.push_str(&format!("<meta property=\"music:musician\" content=\"{}\">\n", e(&meta["artist"]))),
+        "artist" => {}
+        _ => tags.push_str(&format!(
+            "<meta property=\"music:musician\" content=\"{}\">\n<meta property=\"music:album\" content=\"{}\">\n<meta property=\"music:duration\" content=\"{}\">\n",
+            e(&meta["artist"]), e(&meta["album"]), meta["duration"].as_f64().unwrap_or(0.0).round() as u64)),
+    }
+    if video {
+        tags.push_str(&format!(
+            r#"<meta property="og:video" content="{base}/api/share/{tok}/video.mp4">
+<meta property="og:video:secure_url" content="{base}/api/share/{tok}/video.mp4">
+<meta property="og:video:type" content="video/mp4">
+<meta property="og:video:width" content="600"><meta property="og:video:height" content="600">
+<meta name="twitter:player" content="{base}/s/{tok}">
+<meta name="twitter:player:width" content="600"><meta name="twitter:player:height" content="600">
+<meta name="twitter:player:stream" content="{base}/api/share/{tok}/video.mp4">
+<meta name="twitter:player:stream:content_type" content="video/mp4">
+"#));
+    }
+    tags.push_str(&format!(
+        r#"<meta name="twitter:card" content="{card}">
 <meta name="twitter:title" content="{title}">
 <meta name="twitter:description" content="{desc}">
 <meta name="twitter:image" content="{base}/api/share/{tok}/cover?s=600">
-<meta name="description" content="{desc}">"#,
-        app = e(&meta["app_name"]), desc = desc.join(" · "), artist = e(&meta["artist"]), album = e(&meta["album"]),
-        dur = meta["duration"].as_f64().unwrap_or(0.0).round() as u64,
-        mime = browser_type(meta["format"].as_str().unwrap_or("")).unwrap_or("audio/flac"),
-    );
-    let html = html.replace("<title>Shared song</title>", "").replace("<!--META-->", &tags);
-    Ok(([(header::CONTENT_TYPE, "text/html; charset=utf-8"), (header::CACHE_CONTROL, "no-cache")], html).into_response())
+<meta name="description" content="{desc}">"#));
+    html.replace("<title>Shared song</title>", "").replace("<!--META-->", &tags)
 }
+
+#[cfg(test)]
+#[path = "share_tests.rs"]
+mod share_tests;

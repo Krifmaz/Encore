@@ -6,6 +6,7 @@ pub const VERSION: &str = match option_env!("ENCORE_VERSION") {
 };
 
 mod acoustid;
+mod artists;
 mod auth;
 mod backup;
 mod config;
@@ -58,7 +59,10 @@ async fn security_headers(req: Request, next: Next) -> Response {
     let mut resp = next.run(req).await;
     let h = resp.headers_mut();
     h.entry("x-content-type-options").or_insert(HeaderValue::from_static("nosniff"));
-    h.entry("x-frame-options").or_insert(HeaderValue::from_static("DENY"));
+    // share pages may be framed: X shows a "player" card by loading the page in a frame
+    if !path.starts_with("/s/") {
+        h.entry("x-frame-options").or_insert(HeaderValue::from_static("DENY"));
+    }
     h.entry("referrer-policy").or_insert(HeaderValue::from_static("same-origin"));
     let cache = if path.starts_with("/api/") { "no-store" } else { "no-cache" };   // app files: cheap 304s, updates show at once
     h.entry(header::CACHE_CONTROL).or_insert(HeaderValue::from_static(cache));
@@ -145,6 +149,7 @@ async fn main() -> anyhow::Result<()> {
         tokio::spawn(async move { st.library.scan(st.db.clone(), st.cfg.str("library_path"), false).await });
     }
     tokio::spawn(worker::run(st.clone()));
+    tokio::spawn(artists::alias_worker(st.clone()));
     tokio::spawn(vpn::supervisor(st.clone()));
     tokio::spawn(slskd_managed::supervisor(st.clone()));
     tokio::spawn(roon::supervisor(st.clone()));

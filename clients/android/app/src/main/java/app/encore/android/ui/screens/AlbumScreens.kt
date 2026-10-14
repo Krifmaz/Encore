@@ -30,10 +30,12 @@ import androidx.compose.material3.TopAppBarDefaults
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.shadow
 import androidx.compose.ui.input.nestedscroll.nestedScroll
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
@@ -53,6 +55,7 @@ import app.encore.android.ui.components.Cover
 import app.encore.android.ui.components.EncoreButton
 import app.encore.android.ui.components.EncoreTopBar
 import app.encore.android.ui.components.Gutter
+import app.encore.android.ui.components.Loadable
 import app.encore.android.ui.components.LoadableContent
 import app.encore.android.ui.components.MenuEntry
 import app.encore.android.ui.components.MoreButton
@@ -63,7 +66,11 @@ import app.encore.android.ui.components.formatDay
 import app.encore.android.ui.components.formatLongDuration
 import app.encore.android.ui.components.formatSize
 import app.encore.android.ui.components.rememberLoad
+import app.encore.android.ui.components.shareLinkOf
 import app.encore.android.ui.theme.palette
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
@@ -144,12 +151,32 @@ fun AlbumScreen(nav: Nav, albumId: String) {
     val nowPlaying by nav.player.nowPlaying.collectAsState()
     val loader = rememberLoad(albumId) { loadAlbumPage(nav, albumId) }
     val p = MaterialTheme.palette
+    val context = LocalContext.current
+    val scope = rememberCoroutineScope()
     val scrollBehavior = TopAppBarDefaults.enterAlwaysScrollBehavior()
+    // the album's public link, like the player's "Share link" for a song
+    fun shareAlbum(title: String, artist: String) {
+        shareLinkOf(
+            context, scope,
+            subject = title,
+            text = listOf(title, artist).filter { it.isNotEmpty() }.joinToString(" – "),
+            toast = "Link copied – anyone with it can play this album",
+        ) { api.shareAlbumLink(albumId) }
+    }
     Scaffold(
         modifier = Modifier.fillMaxSize().nestedScroll(scrollBehavior.nestedScrollConnection),
         containerColor = p.bg,
         contentWindowInsets = WindowInsets(0, 0, 0, 0),
-        topBar = { EncoreTopBar("", scrollBehavior = scrollBehavior, onBack = nav.back) },
+        topBar = {
+            EncoreTopBar("", scrollBehavior = scrollBehavior, onBack = nav.back) {
+                IconButton(onClick = {
+                    val a = (loader.state.value as? Loadable.Ready)?.value?.detail?.album
+                    shareAlbum(a?.title ?: "", a?.artist ?: "")
+                }) {
+                    Icon(painterResource(R.drawable.ic_share), contentDescription = "Share link")
+                }
+            }
+        },
     ) { padding ->
         LoadableContent(loader) { page ->
             val detail = page.detail
@@ -208,6 +235,7 @@ fun AlbumScreen(nav: Nav, albumId: String) {
                                     MenuEntry("Add to queue", R.drawable.ic_queue_music) { tracks.forEach { nav.player.addToQueue(it) }; Toasts.show("Added to queue", "ok") },
                                     MenuEntry("Play next", R.drawable.ic_skip_next) { tracks.asReversed().forEach { nav.player.playNext(it) }; Toasts.show("Plays next", "ok") },
                                     MenuEntry("Add to playlist", R.drawable.ic_playlist_add) { nav.addToPlaylist(tracks.map { it.id }) },
+                                    MenuEntry("Share link", R.drawable.ic_share) { shareAlbum(album.title, album.artist) },
                                 ),
                             )
                         }
@@ -253,12 +281,34 @@ fun ArtistScreen(nav: Nav, name: String) {
     val api = nav.graph.api
     val loader = rememberLoad(name) { api.albums(sort = "released", artist = name, limit = 200) }
     val p = MaterialTheme.palette
+    val context = LocalContext.current
+    val scope = rememberCoroutineScope()
     val scrollBehavior = TopAppBarDefaults.enterAlwaysScrollBehavior()
+    // GET /api/library/artist-tracks?name= (every spelling, alias and collaboration of this artist), then play
+    fun playAll(shuffle: Boolean) {
+        scope.launch {
+            val songs = try { withContext(Dispatchers.IO) { api.artistTracks(name) } } catch (e: Exception) { Toasts.show(e.message ?: "Couldn't load the songs", "err"); return@launch }
+            if (songs.isEmpty()) Toasts.show("Nothing by this artist in your library", "err") else nav.player.play(songs, shuffle = shuffle)
+        }
+    }
     Scaffold(
         modifier = Modifier.fillMaxSize().nestedScroll(scrollBehavior.nestedScrollConnection),
         containerColor = p.bg,
         contentWindowInsets = WindowInsets(0, 0, 0, 0),
-        topBar = { EncoreTopBar(name, scrollBehavior = scrollBehavior, onBack = nav.back) },
+        topBar = {
+            EncoreTopBar(name, scrollBehavior = scrollBehavior, onBack = nav.back) {
+                IconButton(onClick = {
+                    shareLinkOf(
+                        context, scope,
+                        subject = name,
+                        text = name,
+                        toast = "Link copied – anyone with it can play this artist",
+                    ) { api.shareArtistLink(name) }
+                }) {
+                    Icon(painterResource(R.drawable.ic_share), contentDescription = "Share link")
+                }
+            }
+        },
     ) { padding ->
         LoadableContent(loader) { albums ->
             val songs = albums.sumOf { it.trackCount }
@@ -284,8 +334,13 @@ fun ArtistScreen(nav: Nav, name: String) {
                             "${albums.size} album${if (albums.size == 1) "" else "s"} · $songs tracks",
                             style = MaterialTheme.typography.bodyMedium,
                             color = p.muted,
-                            modifier = Modifier.padding(top = 2.dp, bottom = 10.dp),
+                            modifier = Modifier.padding(top = 2.dp),
                         )
+                        // the catalog artist page's Play / Shuffle
+                        Row(Modifier.padding(top = 14.dp, bottom = 10.dp), horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
+                            EncoreButton("Play", iconRes = R.drawable.ic_play, primary = true) { playAll(false) }
+                            EncoreButton("Shuffle", iconRes = R.drawable.ic_shuffle) { playAll(true) }
+                        }
                     }
                 }
                 items(albums, key = { it.id }) { a ->

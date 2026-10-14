@@ -30,11 +30,13 @@ struct Field {
     step: Option<&'static str>,
     options: &'static [(&'static str, &'static str)],
     dynamic: Option<&'static str>,
+    /// `when: [key, [values]]`: shown only while the select `key` has one of the values.
+    when: Option<(&'static str, &'static [&'static str])>,
 }
 
 /// `S(key, label, type = 'text', extra = {})` – the `extra` keys are the builder methods below.
 const fn s(key: &'static str, label: &'static str, kind: &'static str) -> Field {
-    Field { key, label, kind, help: None, full: false, secret: false, step: None, options: &[], dynamic: None }
+    Field { key, label, kind, help: None, full: false, secret: false, step: None, options: &[], dynamic: None, when: None }
 }
 impl Field {
     const fn help(mut self, h: &'static str) -> Self { self.help = Some(h); self }
@@ -42,6 +44,7 @@ impl Field {
     const fn secret(mut self) -> Self { self.secret = true; self }
     const fn step(mut self, st: &'static str) -> Self { self.step = Some(st); self }
     const fn options(mut self, o: &'static [(&'static str, &'static str)]) -> Self { self.options = o; self }
+    const fn when(mut self, key: &'static str, values: &'static [&'static str]) -> Self { self.when = Some((key, values)); self }
 }
 
 struct Section {
@@ -57,6 +60,7 @@ const SECTIONS: &[Section] = &[
     Section { id: "general", title: "General", desc: "Your server's name and address, who can sign up, and how requests are approved.", test: None, test_label: None, fields: &[
         s("app_name", "App name", "text"),
         s("base_url", "Public URL", "text").help("e.g. https://music.example.com – used in links & notifications"),
+        s("share_preview", "Shared link preview", "select").options(&[("small", "Small card (small cover)"), ("large", "Big picture"), ("playable", "Playable card (play button and seek bar)")]).help("How shared links look in Discord, X and other chat apps"),
         s("signup_mode", "Sign-up mode", "select").options(&[("invite", "Invite only"), ("open", "Open to anyone"), ("closed", "Closed")]),
         s("auto_approve", "Auto-approve all requests", "bool").help("Otherwise only admins and users with auto-approve skip the approval queue"),
         s("manual_search", "Manual download picker", "select").options(&[("everyone", "Everyone"), ("admins", "Admins only")]).help("Who can search the sources and pick an exact download"),
@@ -103,21 +107,46 @@ const SECTIONS: &[Section] = &[
         s("sync_interval_minutes", "Sync likes & playlists every (minutes)", "number").help("0 disables automatic sync – same as the task’s “every” above"),
         s("auto_request_followed", "Automatically download new tracks in followed playlists (more rules under Admin → Auto-download)", "bool"),
     ] },
-    Section { id: "torznab", title: "Torrents & Usenet (Prowlarr)", desc: "Searches your torrent and Usenet indexers (through Prowlarr) for whole albums and sends them to qBittorrent or SABnzbd.", test: Some("torznab"), test_label: None, fields: &[
-        s("torznab_enabled", "Search torrent and Usenet indexers through Prowlarr", "bool").help("Albums only. Prowlarr searches every indexer you added there; torrents go to qBittorrent, Usenet to SABnzbd."),
+    Section { id: "torznab", title: "Torrents & Usenet (Prowlarr)", desc: "Searches your torrent and Usenet indexers (through Prowlarr) for whole albums and sends them to your torrent client (qBittorrent, Transmission, Deluge or rTorrent) or Usenet client (SABnzbd or NZBGet), or drops them into a watch folder.", test: Some("torznab"), test_label: None, fields: &[
+        s("torznab_enabled", "Search torrent and Usenet indexers through Prowlarr", "bool").help("Albums only. Prowlarr searches every indexer you added there; torrents go to the torrent client below, Usenet to the Usenet client."),
         s("prowlarr_url", "Prowlarr URL", "text").help("Internal address, e.g. http://prowlarr:9696"),
         s("prowlarr_api_key", "Prowlarr API key", "password").help("Prowlarr → Settings → General → API Key"),
         s("torznab_min_seeders", "Minimum seeders", "number"),
         s("torznab_timeout_minutes", "Try the next release after a stall of (minutes)", "number"),
-        s("qbit_url", "qBittorrent URL", "text").help("e.g. http://qbittorrent:8080 (leave empty to skip torrents)"),
-        s("qbit_user", "qBittorrent user", "text"),
-        s("qbit_password", "qBittorrent password", "password"),
-        s("qbit_category", "qBittorrent category", "text"),
-        s("qbit_download_path", "Torrent download folder (same path in both containers)", "text").full(),
-        s("sab_url", "SABnzbd URL", "text").help("e.g. http://sabnzbd:8080 (leave empty to skip Usenet)"),
-        s("sab_api_key", "SABnzbd API key", "password"),
-        s("sab_category", "SABnzbd category", "text"),
-        s("sab_download_path", "Usenet download folder (as mounted in this container)", "text").full(),
+        s("torrent_client", "Torrent client", "select").options(&[("qbittorrent", "qBittorrent"), ("transmission", "Transmission"), ("deluge", "Deluge"), ("rtorrent", "rTorrent / ruTorrent"), ("blackhole", "Blackhole folder (any client with a watch folder)")]),
+        s("qbit_url", "qBittorrent URL", "text").help("e.g. http://qbittorrent:8080 (leave empty to skip torrents)").when("torrent_client", &["qbittorrent"]),
+        s("qbit_user", "qBittorrent user", "text").when("torrent_client", &["qbittorrent"]),
+        s("qbit_password", "qBittorrent password", "password").when("torrent_client", &["qbittorrent"]),
+        s("qbit_category", "qBittorrent category", "text").when("torrent_client", &["qbittorrent"]),
+        s("qbit_download_path", "Torrent download folder (same path in both containers)", "text").full().when("torrent_client", &["qbittorrent"]),
+        s("transmission_url", "Transmission URL", "text").help("e.g. http://transmission:9091 (leave empty to skip torrents)").when("torrent_client", &["transmission"]),
+        s("transmission_user", "Transmission user", "text").help("Leave empty when Transmission asks for no login").when("torrent_client", &["transmission"]),
+        s("transmission_password", "Transmission password", "password").when("torrent_client", &["transmission"]),
+        s("transmission_label", "Transmission label", "text").help("Transmission 4.0 or newer").when("torrent_client", &["transmission"]),
+        s("transmission_download_path", "Torrent download folder (same path in both containers)", "text").full().when("torrent_client", &["transmission"]),
+        s("deluge_url", "Deluge Web UI URL", "text").help("e.g. http://deluge:8112 (leave empty to skip torrents)").when("torrent_client", &["deluge"]),
+        s("deluge_password", "Deluge Web UI password", "password").when("torrent_client", &["deluge"]),
+        s("deluge_label", "Deluge label", "text").help("Needs the Label plugin; skipped when it is off").when("torrent_client", &["deluge"]),
+        s("deluge_download_path", "Torrent download folder (same path in both containers)", "text").full().when("torrent_client", &["deluge"]),
+        s("rtorrent_url", "rTorrent XML-RPC URL", "text").full().help("e.g. http://rutorrent:8080/RPC2 or http://rutorrent/plugins/httprpc/action.php (leave empty to skip torrents)").when("torrent_client", &["rtorrent"]),
+        s("rtorrent_user", "rTorrent user", "text").help("Leave empty when the address asks for no login").when("torrent_client", &["rtorrent"]),
+        s("rtorrent_password", "rTorrent password", "password").when("torrent_client", &["rtorrent"]),
+        s("rtorrent_label", "rTorrent label (shown in ruTorrent)", "text").when("torrent_client", &["rtorrent"]),
+        s("rtorrent_download_path", "Torrent download folder (same path in both containers)", "text").full().when("torrent_client", &["rtorrent"]),
+        s("torrent_blackhole_watch", "Torrent watch folder", "text").full().help("Encore drops .torrent and .magnet files here for your client to pick up").when("torrent_client", &["blackhole"]),
+        s("torrent_blackhole_completed", "Finished torrents folder", "text").full().help("Where your client puts finished downloads, as mounted in this container").when("torrent_client", &["blackhole"]),
+        s("nzb_client", "Usenet client", "select").options(&[("sabnzbd", "SABnzbd"), ("nzbget", "NZBGet"), ("blackhole", "Blackhole folder (any client with a watch folder)")]),
+        s("sab_url", "SABnzbd URL", "text").help("e.g. http://sabnzbd:8080 (leave empty to skip Usenet)").when("nzb_client", &["sabnzbd"]),
+        s("sab_api_key", "SABnzbd API key", "password").when("nzb_client", &["sabnzbd"]),
+        s("sab_category", "SABnzbd category", "text").when("nzb_client", &["sabnzbd"]),
+        s("sab_download_path", "Usenet download folder (as mounted in this container)", "text").full().when("nzb_client", &["sabnzbd"]),
+        s("nzbget_url", "NZBGet URL", "text").help("e.g. http://nzbget:6789 (leave empty to skip Usenet)").when("nzb_client", &["nzbget"]),
+        s("nzbget_user", "NZBGet user", "text").when("nzb_client", &["nzbget"]),
+        s("nzbget_password", "NZBGet password", "password").when("nzb_client", &["nzbget"]),
+        s("nzbget_category", "NZBGet category", "text").when("nzb_client", &["nzbget"]),
+        s("nzbget_download_path", "Usenet download folder (as mounted in this container)", "text").full().when("nzb_client", &["nzbget"]),
+        s("nzb_blackhole_watch", "Usenet watch folder", "text").full().help("Encore drops .nzb files here for your client to pick up").when("nzb_client", &["blackhole"]),
+        s("nzb_blackhole_completed", "Finished Usenet downloads folder", "text").full().help("Where your client puts finished downloads, as mounted in this container").when("nzb_client", &["blackhole"]),
     ] },
     Section { id: "slskd", title: "Soulseek", desc: "Searches the Soulseek file-sharing network – great for FLAC and rare releases. Encore runs Soulseek for you: enter any username and password and an account is created at the first sign-in. Forward the port for the best speeds.", test: Some("slskd"), test_label: None, fields: &[
         s("slskd_enabled", "Enable Soulseek", "bool"),
@@ -591,7 +620,7 @@ fn show(hub: &Rc<Hub>, id: String, flash: Option<Value>) -> Pin<Box<dyn Future<O
                 }
                 _ => String::new(),
             };
-            let fields_html = fields_html(fields, |f| field(f, values.g(f.key), lidarr_opts.as_ref(), &meta));
+            let fields_html = fields_html(fields, |f| show_when(f, field(f, values.g(f.key), lidarr_opts.as_ref(), &meta), &values));
             format!(r##"<details class="card settings-card" data-sec="{sid}" {open}>
       <summary class="row between" style="gap:10px;flex-wrap:nowrap;align-items:flex-start"><div style="min-width:0"><h2>{title}</h2>{desc}</div>
         <span class="row" style="gap:8px">{test}<span class="chev">{chev}</span></span></summary>
@@ -633,6 +662,7 @@ fn show(hub: &Rc<Hub>, id: String, flash: Option<Value>) -> Pin<Box<dyn Future<O
             if sec.id == "streamrip" { bind_tidal(&hub.view, &card); }
             if sec.id == "cadenza" { bind_cadenza_cache(&hub, &card); }
             if sec.id == "slskd" { bind_vpn(&hub, sec, &card); bind_soulseek(&hub, &card); }
+            bind_show_when(&card);
             let paint: Rc<dyn Fn(&Value)> = { let out = out.clone(); Rc::new(move |r: &Value| dom::set_html(&out, &test_result(r))) };
             if let Some(b) = dom::qs_in(&card, "[data-save]") {
                 let (hub2, card2) = (hub.clone(), card.clone());
@@ -1384,6 +1414,23 @@ fn set_appearance(st: &Rc<Look>, patch: Value) {
     paint_appearance(st);
 }
 
+// A field with `when(key, values)` only shows while the select `key` has one of the values
+// (Torrents & Usenet: only the chosen client's fields). The same markup as showWhen in web/js/pages/settings.js.
+fn show_when(f: &Field, html: String, values: &Value) -> String {
+    let Some((k, vals)) = f.when else { return html };
+    let on = vals.contains(&js_string(values.g(k)).as_str());
+    html.replacen(r#" class="field "#, &format!(r#" data-when="{k}" data-when-in="{}"{} class="field "#, vals.join(" "), if on { "" } else { " hidden" }), 1)
+}
+fn bind_show_when(card: &Element) {
+    let card2 = card.clone();
+    dom::on_each(card, "select[data-k]", "change", move |sel, _| {
+        let (k, v) = (dom::data(sel, "k"), dom::value(sel));
+        for el in dom::qsa_in(&card2, &format!(r#"[data-when="{k}"]"#)) {
+            dom::hide(&el, !dom::data(&el, "whenIn").split(' ').any(|x| x == v));
+        }
+    });
+}
+
 // The settings grid of a card. The vpn_ fields (Soulseek) get a sub-block of their own, in place,
 // with the tunnel's state and Test VPN under them.
 fn fields_html(fields: &[Field], one: impl Fn(&Field) -> String) -> String {
@@ -2028,7 +2075,7 @@ fn pipeline_help() -> String {
     <ol class="muted" style="line-height:1.9;padding-left:18px;margin:10px 0 0">
       <li><b>Library check</b> – if the album/track is already in your library (by MusicBrainz id or name) it's marked available instantly.</li>
       <li><b>streamrip</b> – lossless from Qobuz, Tidal or Deezer with your own accounts, matched by ISRC.</li>
-      <li><b>Torrents & Usenet</b> – Prowlarr searches your indexers; the best album release goes to qBittorrent or SABnzbd and is imported when it finishes. If it stalls past the timeout, the next release or source is tried.</li>
+      <li><b>Torrents & Usenet</b> – Prowlarr searches your indexers; the best album release goes to your torrent or Usenet client and is imported when it finishes. If it stalls past the timeout, the next release or source is tried.</li>
       <li><b>Soulseek</b> – Encore searches the network, results are ranked by track count, format, bitrate, folder name and the uploader's free slots/speed. Stalled or failed users are skipped automatically.</li>
       <li><b>yt-dlp</b> – each track from the MusicBrainz tracklist is matched on YouTube (preferring official "Topic" uploads with matching length).</li>
       <li><b>Import</b> – files are matched to the MusicBrainz release, tagged (incl. MBIDs, ISRCs, cover art), renamed with your template, and your media servers are refreshed.</li>

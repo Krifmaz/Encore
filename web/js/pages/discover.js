@@ -1,6 +1,6 @@
 import { api } from '../api.js';
 import * as player from '../player.js';
-import { art, availability, confirmDialog, debounce, emptyState, esc, fmt, icon, modal, skeletonGrid, statusBadge, toast } from '../ui.js';
+import { art, availability, confirmDialog, debounce, emptyState, esc, fmt, icon, modal, shareArtist, skeletonGrid, statusBadge, toast } from '../ui.js';
 import { albumTile, bindTiles, libraryTile, submitRequest } from './common.js';
 import { artistCard, moreLikeThis } from './foryou.js';
 import { pickerModal } from './picker.js';
@@ -140,7 +140,7 @@ export async function renderArtist(view, ctx) {
         ${a.disambiguation ? `<p class="muted" style="margin:0 0 10px">${esc(a.disambiguation)}</p>` : ''}
         <div class="chips">${a.tags.map(t => `<a class="badge" href="#/tag/${encodeURIComponent(t)}">${esc(t)}</a>`).join('')}</div>
         <div class="row wrap mt">
-          ${a.library_tracks ? `<button class="btn primary" id="play-artist">${icon.play}Play</button><button class="btn" id="shuffle-artist">Shuffle</button>` : ''}
+          ${a.library_tracks ? `<button class="btn primary" id="play-artist">${icon.play}Play</button><button class="btn" id="shuffle-artist">Shuffle</button><button class="btn" id="share-artist" title="Share link">${icon.external}Share</button>` : ''}
           ${a.request_status ? statusBadge(a.request_status) : `<button class="btn" data-req-artist='${esc(JSON.stringify({ mbid: a.id, artist: a.name, cover_url: firstCover }))}'>${icon.download}Request discography</button>`}
         </div>
         <div class="row wrap mt small">
@@ -210,6 +210,7 @@ export async function renderArtist(view, ctx) {
   };
   view.querySelector('#play-artist')?.addEventListener('click', () => playAll(false));
   view.querySelector('#shuffle-artist')?.addEventListener('click', () => playAll(true));
+  view.querySelector('#share-artist')?.addEventListener('click', () => shareArtist(a.name));
 
   // similar artists (Last.fm → ListenBrainz → Deezer)
   api.get(`/discover/artist/${a.id}/similar`).then(x => {

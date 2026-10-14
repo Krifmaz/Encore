@@ -106,7 +106,7 @@ Encore writes the engine's settings (`/config/slskd/slskd.yml`) from its own eve
     ports: ["8080:8080"]
   ```
 
-**Torrents & Usenet (optional)**: add your indexers to Prowlarr, then in *Settings → Apps & sources → Torrents & Usenet* enter the Prowlarr URL and API key, plus qBittorrent and/or SABnzbd. Encore searches Prowlarr, sends the best album release to the right client, and imports it when it finishes. This replaces Lidarr.
+**Torrents & Usenet (optional)**: add your indexers to Prowlarr, then in *Settings → Apps & sources → Torrents & Usenet* enter the Prowlarr URL and API key, then pick your torrent client (qBittorrent, Transmission, Deluge, rTorrent/ruTorrent, or a blackhole watch folder for anything else) and/or Usenet client (SABnzbd, NZBGet, or a blackhole folder); only the chosen client's fields are shown. Encore searches Prowlarr, sends the best album release to the right client, and imports it when it finishes. This replaces Lidarr.
 
 **Optional keys** (Settings):
 
@@ -168,6 +168,14 @@ Every option can be changed in the UI. Environment variables only seed the first
 | `ENCORE_SOURCE_ORDER` | `qobuz,tidal,deezer,slskd,torznab,ytdlp` | The one search order: `qobuz`, `tidal`, `deezer` (through streamrip), `slskd`, `torznab`, `ytdlp` |
 | `ENCORE_NAMING_TEMPLATE` | `{albumartist}/{album} ({year})/{discprefix}{track:02d} - {title}` | Rename template |
 | `TORZNAB_ENABLED`, `PROWLARR_URL` / `PROWLARR_API_KEY`, `QBIT_URL` / `QBIT_USER` / `QBIT_PASSWORD`, `SAB_URL` / `SAB_API_KEY` | | Torrents & Usenet through Prowlarr |
+| `TORRENT_CLIENT` | `qbittorrent` | Where torrents go: `qbittorrent`, `transmission`, `deluge`, `rtorrent` or `blackhole` |
+| `TRANSMISSION_URL` / `TRANSMISSION_USER` / `TRANSMISSION_PASSWORD` / `TRANSMISSION_LABEL` / `TRANSMISSION_DOWNLOAD_PATH` | / / / `encore` / `/downloads/torrents` | Transmission (RPC at `/transmission/rpc`) |
+| `DELUGE_URL` / `DELUGE_PASSWORD` / `DELUGE_LABEL` / `DELUGE_DOWNLOAD_PATH` | / / `encore` / `/downloads/torrents` | Deluge Web UI (the label needs the Label plugin) |
+| `RTORRENT_URL` / `RTORRENT_USER` / `RTORRENT_PASSWORD` / `RTORRENT_LABEL` / `RTORRENT_DOWNLOAD_PATH` | / / / `encore` / `/downloads/torrents` | rTorrent XML-RPC address, e.g. ruTorrent's `/RPC2` |
+| `TORRENT_BLACKHOLE_WATCH` / `TORRENT_BLACKHOLE_COMPLETED` | `/downloads/watch` / `/downloads/torrents` | Blackhole: Encore drops `.torrent`/`.magnet` files into the watch folder and imports the same name from the finished folder |
+| `NZB_CLIENT` | `sabnzbd` | Where NZBs go: `sabnzbd`, `nzbget` or `blackhole` |
+| `NZBGET_URL` / `NZBGET_USER` / `NZBGET_PASSWORD` / `NZBGET_CATEGORY` / `NZBGET_DOWNLOAD_PATH` | / `nzbget` / / `encore` / `/downloads/usenet` | NZBGet (JSON-RPC) |
+| `NZB_BLACKHOLE_WATCH` / `NZB_BLACKHOLE_COMPLETED` | `/downloads/watch` / `/downloads/usenet` | Usenet blackhole: `.nzb` files into the watch folder, finished downloads from the completed folder |
 | `SLSKD_ENABLED` | `false` | Master switch for Soulseek |
 | `SOULSEEK_USERNAME` / `SOULSEEK_PASSWORD` | | Soulseek login; a new username and password create the account at the first sign-in |
 | `SOULSEEK_PORT` | 2234 | TCP port Soulseek listens on – forward it on your router |

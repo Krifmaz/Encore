@@ -9,6 +9,11 @@
   "default": "",
   "secret": false
  },
+ "share_preview": {
+  "env": "SHARE_PREVIEW",
+  "default": "small",
+  "secret": false
+ },
  "signup_mode": {
   "env": "ENCORE_SIGNUP_MODE",
   "default": "invite",

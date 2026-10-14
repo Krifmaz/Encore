@@ -1,5 +1,5 @@
 import { api } from '../api.js';
-import { art, confirmDialog, debounce, emptyState, esc, fmt, icon, modal, popMenu, shareTrack, skeletonGrid, toast } from '../ui.js';
+import { art, confirmDialog, debounce, emptyState, esc, fmt, icon, modal, popMenu, shareAlbum, shareArtist, shareTrack, skeletonGrid, toast } from '../ui.js';
 import { bindTiles, libraryTile } from './common.js';
 import { addToPlaylistModal } from './playlists.js';
 import * as player from '../player.js';
@@ -127,11 +127,12 @@ export async function render(view, ctx) {
         <option value="">All albums</option><option value="untagged">Needs tagging</option>
         <option value="tagged">MusicBrainz tagged</option><option value="lossless">Lossless only</option>
       </select>
-      ${st.artist ? `<span class="badge accent">${esc(st.artist)} <a href="#/library" style="margin-left:4px">✕</a></span>` : ''}
+      ${st.artist ? `<span class="badge accent">${esc(st.artist)} <a href="#/library" style="margin-left:4px">✕</a></span><button class="btn sm" id="artist-share" title="Share link">${icon.external}Share</button>` : ''}
     </div>
     <div id="lib-body"></div>
     <div class="row mt" style="justify-content:center"><button class="btn hidden" id="more">Load more</button></div>`;
   view.querySelector('#shuffle-lib').onclick = async () => { if (!await player.shuffleLibrary()) toast('Your library is empty', 'err'); };
+  view.querySelector('#artist-share')?.addEventListener('click', () => shareArtist(st.artist));
   const body = view.querySelector('#lib-body');
   const more = view.querySelector('#more');
   let saved = {};
@@ -383,6 +384,7 @@ export async function renderAlbum(view, ctx) {
         <div class="row wrap mt">
           <button class="btn primary" id="play-all">${icon.play}Play</button>
           <button class="btn" id="shuffle-all">${icon.shuffle}Shuffle</button>
+          <button class="btn" id="album-share" title="Share link">${icon.external}Share</button>
           ${admin ? `<button class="btn" id="album-edit" title="Change the album, artist and song names">${icon.edit}Edit details</button>` : ''}
           <button class="btn icon" id="album-menu" aria-label="More options" title="More options">${icon.more}</button>
         </div>
@@ -403,10 +405,12 @@ export async function renderAlbum(view, ctx) {
   view.querySelector('#shuffle-all').onclick = () => player.playQueue([...queueTracks].sort(() => Math.random() - 0.5), 0, { context: 'album' });
   const reload = () => window.dispatchEvent(new HashChangeEvent('hashchange'));
   view.querySelector('#album-edit')?.addEventListener('click', () => editModal(id, a, ctx));
+  view.querySelector('#album-share').onclick = () => shareAlbum(id, a);
   view.querySelector('#album-menu').onclick = (e) => popMenu(e.currentTarget, [
     { label: 'Add to queue', icon: icon.list, onClick: () => { player.enqueue(queueTracks); toast('Added to queue', 'ok'); } },
     { label: 'Play next', icon: icon.next, onClick: () => { player.playNext(queueTracks); toast('Plays next', 'ok'); } },
     { label: 'Add to playlist', icon: icon.plus, onClick: () => addToPlaylistModal(a.tracks.map(t => t.id)) },
+    { label: 'Share link', icon: icon.external, onClick: () => shareAlbum(id, a) },
     player.canSaveOffline() ? { label: 'Save album for offline', icon: icon.download, onClick: () => { player.saveOffline(queueTracks); toast(`Saving ${queueTracks.length} song(s) to this phone…`, 'ok'); } } : null,
     admin ? { label: 'All songs are right (confirm)', icon: icon.check, onClick: async () => { await api.post('/library/verify-manual', { track_ids: a.tracks.map(t => t.id) }); toast('Album confirmed', 'ok'); reload(); } } : null,
     { label: 'Download album (zip)', icon: icon.download, href: `/api/library/albums/${id}/download` },

@@ -16,6 +16,7 @@ const SECTIONS = [
   { id: 'general', title: 'General', desc: "Your server's name and address, who can sign up, and how requests are approved.", fields: [
     S('app_name', 'App name'),
     S('base_url', 'Public URL', 'text', { help: 'e.g. https://music.example.com – used in links & notifications' }),
+    S('share_preview', 'Shared link preview', 'select', { options: [['small', 'Small card (small cover)'], ['large', 'Big picture'], ['playable', 'Playable card (play button and seek bar)']], help: 'How shared links look in Discord, X and other chat apps' }),
     S('signup_mode', 'Sign-up mode', 'select', { options: [['invite', 'Invite only'], ['open', 'Open to anyone'], ['closed', 'Closed']] }),
     S('auto_approve', 'Auto-approve all requests', 'bool', { help: 'Otherwise only admins and users with auto-approve skip the approval queue' }),
     S('manual_search', 'Manual download picker', 'select', { options: [['everyone', 'Everyone'], ['admins', 'Admins only']], help: 'Who can search the sources and pick an exact download' }),
@@ -62,21 +63,46 @@ const SECTIONS = [
     S('sync_interval_minutes', 'Sync likes & playlists every (minutes)', 'number', { help: '0 disables automatic sync – same as the task\u2019s “every” above' }),
     S('auto_request_followed', 'Automatically download new tracks in followed playlists (more rules under Admin → Auto-download)', 'bool'),
   ] },
-  { id: 'torznab', title: 'Torrents & Usenet (Prowlarr)', desc: 'Searches your torrent and Usenet indexers (through Prowlarr) for whole albums and sends them to qBittorrent or SABnzbd.', test: 'torznab', fields: [
-    S('torznab_enabled', 'Search torrent and Usenet indexers through Prowlarr', 'bool', { help: 'Albums only. Prowlarr searches every indexer you added there; torrents go to qBittorrent, Usenet to SABnzbd.' }),
+  { id: 'torznab', title: 'Torrents & Usenet (Prowlarr)', desc: 'Searches your torrent and Usenet indexers (through Prowlarr) for whole albums and sends them to your torrent client (qBittorrent, Transmission, Deluge or rTorrent) or Usenet client (SABnzbd or NZBGet), or drops them into a watch folder.', test: 'torznab', fields: [
+    S('torznab_enabled', 'Search torrent and Usenet indexers through Prowlarr', 'bool', { help: 'Albums only. Prowlarr searches every indexer you added there; torrents go to the torrent client below, Usenet to the Usenet client.' }),
     S('prowlarr_url', 'Prowlarr URL', 'text', { help: 'Internal address, e.g. http://prowlarr:9696' }),
     S('prowlarr_api_key', 'Prowlarr API key', 'password', { help: 'Prowlarr → Settings → General → API Key' }),
     S('torznab_min_seeders', 'Minimum seeders', 'number'),
     S('torznab_timeout_minutes', 'Try the next release after a stall of (minutes)', 'number'),
-    S('qbit_url', 'qBittorrent URL', 'text', { help: 'e.g. http://qbittorrent:8080 (leave empty to skip torrents)' }),
-    S('qbit_user', 'qBittorrent user'),
-    S('qbit_password', 'qBittorrent password', 'password'),
-    S('qbit_category', 'qBittorrent category'),
-    S('qbit_download_path', 'Torrent download folder (same path in both containers)', 'text', { full: true }),
-    S('sab_url', 'SABnzbd URL', 'text', { help: 'e.g. http://sabnzbd:8080 (leave empty to skip Usenet)' }),
-    S('sab_api_key', 'SABnzbd API key', 'password'),
-    S('sab_category', 'SABnzbd category'),
-    S('sab_download_path', 'Usenet download folder (as mounted in this container)', 'text', { full: true }),
+    S('torrent_client', 'Torrent client', 'select', { options: [['qbittorrent', 'qBittorrent'], ['transmission', 'Transmission'], ['deluge', 'Deluge'], ['rtorrent', 'rTorrent / ruTorrent'], ['blackhole', 'Blackhole folder (any client with a watch folder)']] }),
+    S('qbit_url', 'qBittorrent URL', 'text', { help: 'e.g. http://qbittorrent:8080 (leave empty to skip torrents)', when: ['torrent_client', ['qbittorrent']] }),
+    S('qbit_user', 'qBittorrent user', 'text', { when: ['torrent_client', ['qbittorrent']] }),
+    S('qbit_password', 'qBittorrent password', 'password', { when: ['torrent_client', ['qbittorrent']] }),
+    S('qbit_category', 'qBittorrent category', 'text', { when: ['torrent_client', ['qbittorrent']] }),
+    S('qbit_download_path', 'Torrent download folder (same path in both containers)', 'text', { full: true, when: ['torrent_client', ['qbittorrent']] }),
+    S('transmission_url', 'Transmission URL', 'text', { help: 'e.g. http://transmission:9091 (leave empty to skip torrents)', when: ['torrent_client', ['transmission']] }),
+    S('transmission_user', 'Transmission user', 'text', { help: 'Leave empty when Transmission asks for no login', when: ['torrent_client', ['transmission']] }),
+    S('transmission_password', 'Transmission password', 'password', { when: ['torrent_client', ['transmission']] }),
+    S('transmission_label', 'Transmission label', 'text', { help: 'Transmission 4.0 or newer', when: ['torrent_client', ['transmission']] }),
+    S('transmission_download_path', 'Torrent download folder (same path in both containers)', 'text', { full: true, when: ['torrent_client', ['transmission']] }),
+    S('deluge_url', 'Deluge Web UI URL', 'text', { help: 'e.g. http://deluge:8112 (leave empty to skip torrents)', when: ['torrent_client', ['deluge']] }),
+    S('deluge_password', 'Deluge Web UI password', 'password', { when: ['torrent_client', ['deluge']] }),
+    S('deluge_label', 'Deluge label', 'text', { help: 'Needs the Label plugin; skipped when it is off', when: ['torrent_client', ['deluge']] }),
+    S('deluge_download_path', 'Torrent download folder (same path in both containers)', 'text', { full: true, when: ['torrent_client', ['deluge']] }),
+    S('rtorrent_url', 'rTorrent XML-RPC URL', 'text', { full: true, help: 'e.g. http://rutorrent:8080/RPC2 or http://rutorrent/plugins/httprpc/action.php (leave empty to skip torrents)', when: ['torrent_client', ['rtorrent']] }),
+    S('rtorrent_user', 'rTorrent user', 'text', { help: 'Leave empty when the address asks for no login', when: ['torrent_client', ['rtorrent']] }),
+    S('rtorrent_password', 'rTorrent password', 'password', { when: ['torrent_client', ['rtorrent']] }),
+    S('rtorrent_label', 'rTorrent label (shown in ruTorrent)', 'text', { when: ['torrent_client', ['rtorrent']] }),
+    S('rtorrent_download_path', 'Torrent download folder (same path in both containers)', 'text', { full: true, when: ['torrent_client', ['rtorrent']] }),
+    S('torrent_blackhole_watch', 'Torrent watch folder', 'text', { full: true, help: 'Encore drops .torrent and .magnet files here for your client to pick up', when: ['torrent_client', ['blackhole']] }),
+    S('torrent_blackhole_completed', 'Finished torrents folder', 'text', { full: true, help: 'Where your client puts finished downloads, as mounted in this container', when: ['torrent_client', ['blackhole']] }),
+    S('nzb_client', 'Usenet client', 'select', { options: [['sabnzbd', 'SABnzbd'], ['nzbget', 'NZBGet'], ['blackhole', 'Blackhole folder (any client with a watch folder)']] }),
+    S('sab_url', 'SABnzbd URL', 'text', { help: 'e.g. http://sabnzbd:8080 (leave empty to skip Usenet)', when: ['nzb_client', ['sabnzbd']] }),
+    S('sab_api_key', 'SABnzbd API key', 'password', { when: ['nzb_client', ['sabnzbd']] }),
+    S('sab_category', 'SABnzbd category', 'text', { when: ['nzb_client', ['sabnzbd']] }),
+    S('sab_download_path', 'Usenet download folder (as mounted in this container)', 'text', { full: true, when: ['nzb_client', ['sabnzbd']] }),
+    S('nzbget_url', 'NZBGet URL', 'text', { help: 'e.g. http://nzbget:6789 (leave empty to skip Usenet)', when: ['nzb_client', ['nzbget']] }),
+    S('nzbget_user', 'NZBGet user', 'text', { when: ['nzb_client', ['nzbget']] }),
+    S('nzbget_password', 'NZBGet password', 'password', { when: ['nzb_client', ['nzbget']] }),
+    S('nzbget_category', 'NZBGet category', 'text', { when: ['nzb_client', ['nzbget']] }),
+    S('nzbget_download_path', 'Usenet download folder (as mounted in this container)', 'text', { full: true, when: ['nzb_client', ['nzbget']] }),
+    S('nzb_blackhole_watch', 'Usenet watch folder', 'text', { full: true, help: 'Encore drops .nzb files here for your client to pick up', when: ['nzb_client', ['blackhole']] }),
+    S('nzb_blackhole_completed', 'Finished Usenet downloads folder', 'text', { full: true, help: 'Where your client puts finished downloads, as mounted in this container', when: ['nzb_client', ['blackhole']] }),
   ] },
   { id: 'slskd', title: 'Soulseek', desc: 'Searches the Soulseek file-sharing network – great for FLAC and rare releases. Encore runs Soulseek for you: enter any username and password and an account is created at the first sign-in. Forward the port for the best speeds.', test: 'slskd', fields: [
     S('slskd_enabled', 'Enable Soulseek', 'bool'),
@@ -315,7 +341,7 @@ export async function render(view, ctx) {
         <span class="row" style="gap:8px">${sec.test ? `<button class="btn sm" data-test>${icon.refresh}${esc(sec.testLabel || 'Test connection')}</button>` : ''}<span class="chev">${icon.chevron || '▾'}</span></span></summary>
       <div style="height:14px"></div>
       <div data-out>${flash && flash.sec === sec.id ? `<div class="test-result ${flash.ok ? 'ok' : 'err'}">${flash.ok ? icon.check : icon.x}<span>${esc(flash.message || '')}</span></div>` : ''}</div>
-      ${fieldsHtml(sec.fields, (f) => field(f, values[f.key], lidarrOpts, meta))}
+      ${fieldsHtml(sec.fields, (f) => showWhen(f, field(f, values[f.key], lidarrOpts, meta), values))}
       ${sec.id === 'streamrip' ? tidalBlock() : ''}
       ${sec.id === 'cadenza' ? cadenzaCacheBlock() + engineSettingsBlock() : ''}
       ${sec.id === 'slskd' ? soulseekStatusBlock() : ''}
@@ -343,6 +369,7 @@ export async function render(view, ctx) {
       if (sec.id === 'streamrip') bindTidal(card);
       if (sec.id === 'cadenza') bindCadenzaCache(card, values);
       if (sec.id === 'slskd') { bindVpn(card, () => save(sec, true, card)); bindSoulseek(card); }
+      bindShowWhen(card);
       const paint = (r) => { out.innerHTML = `<div class="test-result ${r.ok ? 'ok' : 'err'}">${r.ok ? icon.check : icon.x}<span>${esc(r.message || (r.ok ? 'Connected' : 'Failed'))}</span></div>`; };
       card.querySelector('[data-save]').onclick = () => save(sec, false, card);
       card.querySelectorAll('[data-clear]').forEach(a => a.addEventListener('click', async (e) => {
@@ -468,6 +495,20 @@ function tidalBlock() {
 
 // The settings grid of a card. The vpn_ fields (Soulseek) get a sub-block of their own, in place,
 // with the tunnel's state and Test VPN under them.
+// A field with `when: [key, [values]]` only shows while the select `key` has one of the values
+// (Torrents & Usenet: only the chosen client's fields). The same markup in web-rs/src/pages/settings.rs.
+function showWhen(f, html, values) {
+  if (!f.when) return html;
+  const [k, vals] = f.when;
+  const on = vals.includes(String(values[k] ?? ''));
+  return html.replace(' class="field ', ` data-when="${k}" data-when-in="${vals.join(' ')}"${on ? '' : ' hidden'} class="field `);
+}
+function bindShowWhen(card) {
+  card.querySelectorAll('select[data-k]').forEach(sel => sel.addEventListener('change', () => {
+    card.querySelectorAll(`[data-when="${sel.dataset.k}"]`).forEach(el => { el.hidden = !el.dataset.whenIn.split(' ').includes(sel.value); });
+  }));
+}
+
 function fieldsHtml(fields, one) {
   const isVpn = (f) => f.key.startsWith('vpn_');
   const at = fields.findIndex(isVpn);
@@ -1090,7 +1131,7 @@ function pipelineHelp() {
     <ol class="muted" style="line-height:1.9;padding-left:18px;margin:10px 0 0">
       <li><b>Library check</b> – if the album/track is already in your library (by MusicBrainz id or name) it's marked available instantly.</li>
       <li><b>streamrip</b> – lossless from Qobuz, Tidal or Deezer with your own accounts, matched by ISRC.</li>
-      <li><b>Torrents & Usenet</b> – Prowlarr searches your indexers; the best album release goes to qBittorrent or SABnzbd and is imported when it finishes. If it stalls past the timeout, the next release or source is tried.</li>
+      <li><b>Torrents & Usenet</b> – Prowlarr searches your indexers; the best album release goes to your torrent or Usenet client and is imported when it finishes. If it stalls past the timeout, the next release or source is tried.</li>
       <li><b>Soulseek</b> – Encore searches the network, results are ranked by track count, format, bitrate, folder name and the uploader's free slots/speed. Stalled or failed users are skipped automatically.</li>
       <li><b>yt-dlp</b> – each track from the MusicBrainz tracklist is matched on YouTube (preferring official "Topic" uploads with matching length).</li>
       <li><b>Import</b> – files are matched to the MusicBrainz release, tagged (incl. MBIDs, ISRCs, cover art), renamed with your template, and your media servers are refreshed.</li>

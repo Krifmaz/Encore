@@ -20,7 +20,7 @@ const SCHEMA: &str = include_str!("schema.sql");
 /// MIGRATIONS change: an older server that finds a higher number refuses to touch the file (it would
 /// otherwise fail half-way through and leave a database neither version can read), and a lower number
 /// means "back up, then migrate".
-pub const SCHEMA_VERSION: i64 = 21;
+pub const SCHEMA_VERSION: i64 = 22;
 
 /// Exit code of the server when the database comes from a newer Encore.
 pub const EXIT_NEWER_DB: i32 = 3;
@@ -66,6 +66,9 @@ const MIGRATIONS: &[(&str, &str, &str)] = &[
     ("sessions", "device_id", "TEXT"),
     ("sessions", "device_name", "TEXT"),
     ("sessions", "last_seen_at", "REAL"),
+    // schema 22: album and artist share links (track_id stays for songs; 0 for the others)
+    ("shares", "kind", "TEXT DEFAULT 'track'"),
+    ("shares", "ref", "TEXT"),
 ];
 
 /// Pragmas, tables, missing columns and indexes, then the version stamp: run on every open.
@@ -342,7 +345,7 @@ mod tests {
 
     #[test]
     fn schema_21_adds_the_playback_spot_to_an_older_database() {
-        assert_eq!(SCHEMA_VERSION, 21);
+        assert!(SCHEMA_VERSION >= 21);
         let d = tmp("spot");
         drop(Db::open(&d).unwrap());
         // what a schema 20 server left: no playback_spot table
@@ -359,6 +362,36 @@ mod tests {
         assert_eq!(crate::backup::validate_file(&backups[0].path).unwrap(), 20);
         db.execute("INSERT INTO playback_spot (user_id, track_id, position, queue, idx, device_id, device_name, playing, updated_at) VALUES (1, 2, 3.5, '[2]', 0, 'd', 'Phone', 1, 10)", p![]).unwrap();
         assert_eq!(db.one("SELECT position FROM playback_spot WHERE user_id=1", p![]).unwrap().unwrap().f("position"), 3.5);
+        assert_eq!(db.one("SELECT value FROM settings WHERE key='kept'", p![]).unwrap().unwrap().s("value"), "1");
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn schema_22_adds_artist_aliases_to_a_schema_21_database() {
+        assert!(SCHEMA_VERSION >= 22);
+        let d = tmp("aliases");
+        drop(Db::open(&d).unwrap());
+        // what a schema 21 server left: no alias tables
+        {
+            let c = Connection::open(d.join("encore.db")).unwrap();
+            c.execute_batch("DROP TABLE artist_alias; DROP TABLE artist_alias_lookups; INSERT INTO settings VALUES ('kept', '1');").unwrap();
+            // song shares as schema 21 had them: no kind / ref
+            c.execute_batch("DROP TABLE shares; CREATE TABLE shares (token TEXT PRIMARY KEY, track_id INTEGER NOT NULL, user_id INTEGER NOT NULL, created_at REAL NOT NULL);
+                             INSERT INTO shares VALUES ('old', 7, 1, 1);").unwrap();
+            c.pragma_update(None, "user_version", 21).unwrap();
+        }
+        let db = Db::open(&d).unwrap();
+        assert_eq!(db.user_version().unwrap(), SCHEMA_VERSION);
+        let backups = crate::backup::list(&d);
+        assert_eq!(backups.len(), 1);
+        assert_eq!(crate::backup::validate_file(&backups[0].path).unwrap(), 21);
+        db.execute("INSERT INTO artist_alias (artist_key, alias, alias_key) VALUES ('ye', 'Kanye West', 'kanye west')", p![]).unwrap();
+        db.execute("INSERT INTO artist_alias_lookups (artist_key, mbid, looked_up_at, ok) VALUES ('ye', 'x', 1, 1)", p![]).unwrap();
+        assert_eq!(db.one("SELECT alias FROM artist_alias WHERE alias_key='kanye west'", p![]).unwrap().unwrap().s("alias"), "Kanye West");
+        let old = db.one("SELECT track_id, kind, ref FROM shares WHERE token='old'", p![]).unwrap().unwrap();
+        assert_eq!((old.i("track_id"), old.s("kind")), (7, "track".to_string()));
+        assert!(old.get("ref").map_or(true, |v| v.is_null()));
+        db.execute("INSERT INTO shares (token, track_id, user_id, created_at, kind, ref) VALUES ('alb', 0, 1, 2, 'album', 'a1')", p![]).unwrap();
         assert_eq!(db.one("SELECT value FROM settings WHERE key='kept'", p![]).unwrap().unwrap().s("value"), "1");
         let _ = std::fs::remove_dir_all(&d);
     }

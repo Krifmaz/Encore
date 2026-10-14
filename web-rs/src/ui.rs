@@ -305,7 +305,21 @@ fn navigator_share() -> Option<js_sys::Function> {
 }
 /// Share a library song: the system share sheet where there is one, otherwise the link goes to the clipboard.
 pub async fn share_track(t: Value) {
-    match crate::api::post_empty(&format!("/library/tracks/{}/share", t.s("id"))).await {
+    let res = crate::api::post_empty(&format!("/library/tracks/{}/share", t.s("id"))).await;
+    share_link(res, &t.s("title"), &format!("{} – {}", t.s("title"), t.s("artist"))).await
+}
+/// Share a library album (same as `share_track`).
+pub async fn share_album(id: String, a: Value) {
+    let res = crate::api::post_empty(&format!("/library/albums/{id}/share")).await;
+    share_link(res, &a.s("album"), &format!("{} – {}", a.s("album"), a.s("albumartist"))).await
+}
+/// Share a library artist by any spelling of its name (same as `share_track`).
+pub async fn share_artist(name: String) {
+    let res = crate::api::post("/library/artists/share", serde_json::json!({ "name": name })).await;
+    share_link(res, &name, &name).await
+}
+async fn share_link(res: crate::api::ApiResult, title: &str, text: &str) {
+    match res {
         Ok(r) => {
             let href = dom::location().href().unwrap_or_default();
             let url = match web_sys::Url::new_with_base(&r.s("path"), &href) {
@@ -314,8 +328,8 @@ pub async fn share_track(t: Value) {
             };
             if let Some(share) = navigator_share() {
                 let data = js_sys::Object::new();
-                let _ = js_sys::Reflect::set(&data, &"title".into(), &t.s("title").into());
-                let _ = js_sys::Reflect::set(&data, &"text".into(), &format!("{} – {}", t.s("title"), t.s("artist")).into());
+                let _ = js_sys::Reflect::set(&data, &"title".into(), &title.into());
+                let _ = js_sys::Reflect::set(&data, &"text".into(), &text.into());
                 let _ = js_sys::Reflect::set(&data, &"url".into(), &url.as_str().into());
                 let nav: wasm_bindgen::JsValue = dom::window().navigator().into();
                 if let Ok(p) = share.call1(&nav, &data) {

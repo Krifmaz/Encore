@@ -171,11 +171,25 @@ export function skeletonGrid(n = 12) {
 }
 
 /** Share a library song: the system share sheet where there is one, otherwise the link goes to the clipboard. */
-export async function shareTrack(t) {
+export function shareTrack(t) {
+  return shareLink(`/library/tracks/${t.id}/share`, undefined, t.title, `${t.title} – ${t.artist}`);
+}
+
+/** Share a library album (same as shareTrack). */
+export function shareAlbum(id, a) {
+  return shareLink(`/library/albums/${id}/share`, undefined, a.album || '', `${a.album || ''} – ${a.albumartist || ''}`);
+}
+
+/** Share a library artist by any spelling of its name (same as shareTrack). */
+export function shareArtist(name) {
+  return shareLink('/library/artists/share', { name }, name, name);
+}
+
+async function shareLink(path, body, title, text) {
   try {
-    const r = await api.post(`/library/tracks/${t.id}/share`);
+    const r = await api.post(path, body);
     const url = new URL(r.path, location.href).href;
-    if (navigator.share) { try { await navigator.share({ title: t.title, text: `${t.title} – ${t.artist}`, url }); return; } catch { /* cancelled → copy */ } }
+    if (navigator.share) { try { await navigator.share({ title, text, url }); return; } catch { /* cancelled → copy */ } }
     await copyText(url);
     toast('Link copied – anyone with it can play this song', 'ok');
   } catch (e) { toast(e.message, 'err'); }

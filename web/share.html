@@ -22,6 +22,13 @@
   .small { font-size: 13px; margin-top: 6px; }
   a { color: var(--accent); }
   .err { padding: 30px 0; }
+  .songs { list-style: none; margin: 14px 0 0; padding: 0; text-align: left; max-height: 360px; overflow-y: auto; }
+  .songs button { width: 100%; display: flex; gap: 10px; align-items: baseline; background: none; border: 0; border-radius: 8px; padding: 7px 8px; color: inherit; font: inherit; text-align: left; cursor: pointer; }
+  .songs button:hover, .songs button.on { background: #22223a; }
+  .songs button.on .t { color: var(--accent); }
+  .songs .n { width: 22px; flex: none; text-align: right; font-size: 13px; }
+  .songs .t { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .songs .d { flex: none; font-size: 13px; }
 </style>
 </head>
 <body>
@@ -35,6 +42,37 @@
     const r = await fetch(`/api/share/${encodeURIComponent(token)}`);
     if (!r.ok) throw new Error((await r.json()).detail || 'Not found');
     const t = await r.json();
+    const tok = encodeURIComponent(token);
+    const mmss = (d) => { const s = Math.round(d); return `${Math.floor(s / 60)}:${String(s % 60).padStart(2, '0')}`; };
+    if (t.kind === 'album' || t.kind === 'artist') {
+      document.title = t.kind === 'album' ? `${t.title} – ${t.artist}` : t.title;
+      const songs = t.tracks || [];
+      const sub = t.kind === 'album' ? [t.artist, t.year].filter(Boolean).join(' · ') : 'Artist';
+      const count = `${songs.length} ${songs.length === 1 ? 'song' : 'songs'}${t.kind === 'album' && t.duration ? ' · ' + mmss(t.duration) : ''}`;
+      card.innerHTML = `<div class="art"><img src="/api/share/${tok}/cover" alt="" onerror="this.remove()"></div>
+        <h1>${esc(t.title)}</h1><div class="muted">${esc(sub)}</div>
+        <div class="muted small">${esc(count)}</div>
+        <audio controls preload="none"></audio>
+        <ol class="songs">${songs.map((x, i) => {
+          const extra = t.kind === 'artist' ? x.album : (x.artist && x.artist !== t.artist ? x.artist : '');
+          return `<li><button type="button" data-i="${i}"><span class="n muted">${i + 1}</span><span class="t">${esc(x.title)}${extra ? `<span class="muted"> · ${esc(extra)}</span>` : ''}</span><span class="d muted">${x.duration ? mmss(x.duration) : ''}</span></button></li>`;
+        }).join('')}</ol>
+        <div class="foot muted">Shared from ${esc(t.app_name || 'Encore')} · <a href="/#/login">Sign in</a> for the whole library</div>`;
+      const a = card.querySelector('audio');
+      const buttons = [...card.querySelectorAll('.songs button')];
+      let cur = -1;
+      const pick = (i, play) => {
+        cur = i;
+        buttons.forEach((b, j) => b.classList.toggle('on', j === i));
+        a.src = `/api/share/${tok}/stream?track=${encodeURIComponent(songs[i].id)}`;
+        if (play) a.play().catch(() => {});
+      };
+      buttons.forEach((b, i) => { b.onclick = () => pick(i, true); });
+      a.onended = () => { if (cur + 1 < songs.length) pick(cur + 1, true); };
+      a.onerror = () => { if (cur >= 0 && a.src && !a.src.includes('transcode')) { a.src += '&transcode=true'; a.play().catch(() => {}); } };
+      if (songs.length) pick(0, false);
+      return;
+    }
     document.title = `${t.title} – ${t.artist}`;
     const khz = (hz) => String(Math.round(hz / 100) / 10);
     const quality = [t.format ? String(t.format).toUpperCase() : '',

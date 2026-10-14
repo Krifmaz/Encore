@@ -1,4 +1,5 @@
 //! Download sources.
+pub mod dl;
 pub mod links;
 pub mod slskd;
 pub mod streamrip;

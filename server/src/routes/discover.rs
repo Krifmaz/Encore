@@ -147,12 +147,18 @@ async fn artist(State(st): State<AppState>, User(_u): User, Path(mbid): Path<Str
     }
     let name = a["name"].as_str().unwrap_or("").to_string();
     a["request_status"] = req_status(&st, std::slice::from_ref(&mbid)).remove(&mbid).map(|s| json!(s)).unwrap_or(Value::Null);
-    a["library_albums"] = json!(st.db.query(
+    // the library artist: every spelling, alias and collaboration (see artists.rs)
+    let (acond, aparams) = crate::artists::album_filter(&st.db, &name);
+    let mut ps = p![mbid];
+    ps.extend(aparams);
+    a["library_albums"] = json!(st.db.query(&format!(
         "SELECT album_id, album, albumartist, year, COUNT(*) tracks, MAX(mb_releasegroupid) rgid FROM tracks
-         WHERE mb_albumartistid=? OR lower(albumartist)=lower(?) GROUP BY album_id ORDER BY year DESC", p![mbid, name])?);
-    a["library_tracks"] = json!(st.db.one(
-        "SELECT COUNT(*) n FROM tracks WHERE mb_albumartistid=? OR mb_artistid=? OR lower(albumartist)=lower(?) OR lower(artist)=lower(?)",
-        p![mbid, mbid, name, name])?.map(|r| r.i("n")).unwrap_or(0));
+         WHERE mb_albumartistid=? OR {acond} GROUP BY album_id ORDER BY year DESC"), ps)?);
+    let (tcond, tparams) = crate::artists::track_filter(&st.db, &name);
+    let mut ps = p![mbid, mbid];
+    ps.extend(tparams);
+    a["library_tracks"] = json!(st.db.one(&format!(
+        "SELECT COUNT(*) n FROM tracks WHERE mb_albumartistid=? OR mb_artistid=? OR {tcond}"), ps)?.map(|r| r.i("n")).unwrap_or(0));
     Ok(Json(a))
 }
 
@@ -164,10 +170,14 @@ struct NameQ {
 }
 
 async fn artist_library_tracks(State(st): State<AppState>, User(_): User, Path(mbid): Path<String>, Query(q): Query<NameQ>) -> ApiResult<Json<Value>> {
-    Ok(Json(json!(st.db.query(
+    // every spelling, alias and collaboration of the library artist too (see artists.rs)
+    let (cond, params) = crate::artists::track_filter(&st.db, &q.name);
+    let mut ps = p![mbid, mbid];
+    ps.extend(params);
+    Ok(Json(json!(st.db.query(&format!(
         "SELECT id, title, artist, album, album_id, format, duration FROM tracks
-         WHERE mb_albumartistid=? OR mb_artistid=? OR lower(albumartist)=lower(?) OR lower(artist)=lower(?)
-         ORDER BY year DESC, lower(album), disc, track LIMIT 5000", p![mbid, mbid, q.name, q.name])?)))
+         WHERE mb_albumartistid=? OR mb_artistid=? OR {cond}
+         ORDER BY year DESC, lower(album), disc, track LIMIT 5000"), ps)?)))
 }
 
 async fn artist_lookup(State(st): State<AppState>, User(_): User, Query(q): Query<NameQ>) -> ApiResult<Json<Value>> {

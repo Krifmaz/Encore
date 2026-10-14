@@ -527,7 +527,7 @@ pub fn render(view: Element, ctx: Ctx) -> PageFuture {
       </div>"##, icon("refresh"), icon("tag"), icon("disc"), icon("shield"), icon("disc"))
         } else { String::new() };
         let artist_html = if !st.artist.is_empty() {
-            format!(r##"<span class="badge accent">{} <a href="#/library" style="margin-left:4px">✕</a></span>"##, esc(&st.artist))
+            format!(r##"<span class="badge accent">{} <a href="#/library" style="margin-left:4px">✕</a></span><button class="btn sm" id="artist-share" title="Share link">{}Share</button>"##, esc(&st.artist), icon("external"))
         } else { String::new() };
         dom::set_html(&view, &format!(r##"
     <div class="row wrap between" style="margin-bottom:18px">
@@ -553,6 +553,7 @@ pub fn render(view: Element, ctx: Ctx) -> PageFuture {
     <div class="row mt" style="justify-content:center"><button class="btn hidden" id="more">Load more</button></div>"##,
             shuffle = icon("shuffle"), search = icon("search"), q = esc(&st.q)));
         dom::on_sel(&view, "#shuffle-lib", "click", |_| dom::spawn(async { if player::shuffle_library().await == 0 { toast("Your library is empty", "err"); } }));
+        { let name = st.artist.clone(); dom::on_sel(&view, "#artist-share", "click", move |_| dom::spawn(ui::share_artist(name.clone()))); }
         let body = need(&view, "#lib-body")?;
         let more = need(&view, "#more")?;
         let saved = dom::ls_get("encore.libSort").and_then(|s| serde_json::from_str::<Value>(&s).ok()).filter(|v| v.is_object()).unwrap_or_else(|| json!({}));
@@ -798,6 +799,7 @@ pub fn render_album(view: Element, ctx: Ctx) -> PageFuture {
         <div class="row wrap mt">
           <button class="btn primary" id="play-all">{play}Play</button>
           <button class="btn" id="shuffle-all">{shuffle}Shuffle</button>
+          <button class="btn" id="album-share" title="Share link">{external}Share</button>
           {edit}
           <button class="btn icon" id="album-menu" aria-label="More options" title="More options">{more}</button>
         </div>
@@ -815,7 +817,7 @@ pub fn render_album(view: Element, ctx: Ctx) -> PageFuture {
             formats = esc(&formats),
             genre = if a.truthy("genre") { format!(r##"<span class="badge">{}</span>"##, esck(&a, "genre")) } else { String::new() },
             tagged = if untagged > 0 { format!(r##"<span class="badge warn">{untagged} track(s) not MusicBrainz-tagged</span>"##) } else { r##"<span class="badge ok">MusicBrainz tagged</span>"##.to_string() },
-            play = icon("play"), shuffle = icon("shuffle"),
+            play = icon("play"), shuffle = icon("shuffle"), external = icon("external"),
             edit = if admin { format!(r##"<button class="btn" id="album-edit" title="Change the album, artist and song names">{}Edit details</button>"##, icon("edit")) } else { String::new() },
             more = icon("more")));
         let queue_tracks = Rc::new(with_album_id(&tracks, &id));
@@ -823,6 +825,7 @@ pub fn render_album(view: Element, ctx: Ctx) -> PageFuture {
         { let qt = queue_tracks.clone(); dom::on_sel(&view, "#shuffle-all", "click", move |_| player::play_queue(shuffled(&qt), 0, "album")); }
         let reload: Rc<dyn Fn()> = Rc::new(hashchange);
         { let (id, a) = (id.clone(), a.clone()); dom::on_sel(&view, "#album-edit", "click", move |_| edit_modal(&id, &a)); }
+        { let (id, a) = (id.clone(), a.clone()); dom::on_sel(&view, "#album-share", "click", move |_| dom::spawn(ui::share_album(id.clone(), a.clone()))); }
         {
             let menu_btn = need(&view, "#album-menu")?;
             let (mb, a, id, qt, reload) = (menu_btn.clone(), a.clone(), id.clone(), queue_tracks.clone(), reload.clone());
@@ -895,6 +898,7 @@ fn album_menu(anchor: &Element, a: &Value, id: &str, qt: &Rc<Vec<Value>>, admin:
     { let qt = qt.clone(); items.push(MenuItem::new("Add to queue", &icon("list"), move || { player::enqueue((*qt).clone()); toast("Added to queue", "ok"); })); }
     { let qt = qt.clone(); items.push(MenuItem::new("Play next", &icon("next"), move || { player::play_next((*qt).clone()); toast("Plays next", "ok"); })); }
     { let ids: Vec<i64> = tracks.iter().map(|t| t.i("id")).collect(); items.push(MenuItem::new("Add to playlist", &icon("plus"), move || playlists::add_to_playlist_modal(ids.clone()))); }
+    { let (id, a) = (id.to_string(), a.clone()); items.push(MenuItem::new("Share link", &icon("external"), move || dom::spawn(ui::share_album(id.clone(), a.clone())))); }
     if player::can_save_offline() {
         let qt = qt.clone();
         items.push(MenuItem::new("Save album for offline", &icon("download"), move || { player::save_offline((*qt).clone()); toast(&format!("Saving {} song(s) to this phone…", qt.len()), "ok"); }));

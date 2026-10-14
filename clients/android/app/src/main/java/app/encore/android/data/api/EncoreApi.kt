@@ -151,6 +151,21 @@ class EncoreApi(private val client: OkHttpClient, private val store: SessionStor
         return if (path.isNotEmpty()) url(path) else o.str("url")
     }
 
+    /** POST /api/library/albums/{album_id}/share → the album's public link (same reply as a song: {token, path, url}). */
+    fun shareAlbumLink(albumId: String): String {
+        val o = post("/api/library/albums/${enc(albumId)}/share", JsonObject(emptyMap())) as? JsonObject ?: throw IOException("Couldn't create the link")
+        val path = o.str("path")
+        return if (path.isNotEmpty()) url(path) else o.str("url")
+    }
+
+    /** POST /api/library/artists/share {name} → the artist's public link (same reply as a song: {token, path, url}). */
+    fun shareArtistLink(name: String): String {
+        val body = JsonObject(mapOf("name" to kotlinx.serialization.json.JsonPrimitive(name)))
+        val o = post("/api/library/artists/share", body) as? JsonObject ?: throw IOException("Couldn't create the link")
+        val path = o.str("path")
+        return if (path.isNotEmpty()) url(path) else o.str("url")
+    }
+
     // ---- library ---------------------------------------------------------------------------------------
 
     fun albums(sort: String = "name", offset: Int = 0, limit: Int = 120, q: String = "", artist: String = ""): List<Album> {
@@ -184,6 +199,10 @@ class EncoreApi(private val client: OkHttpClient, private val store: SessionStor
     }
 
     fun track(id: Long): Track? = Track.from(getObject("/api/library/tracks/$id"))
+
+    /** GET /api/library/artist-tracks?name=: every song of a library artist (merged spellings, aliases, collaborations), max 5000. */
+    fun artistTracks(name: String): List<Track> =
+        get("/api/library/artist-tracks?name=" + enc(name)).objects().mapNotNull { Track.from(it) }
 
     /** GET /api/library/tracks?ids=1,2,3: these songs in this order (unknown ids left out), 300 per call. */
     fun tracksByIds(ids: List<Long>): List<Track> {

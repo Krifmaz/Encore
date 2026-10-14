@@ -1,16 +1,21 @@
-//! Torrent and Usenet releases: search every indexer through Prowlarr, download with qBittorrent (torrents)
-//! or SABnzbd (Usenet), then import the finished folder. Replaces Lidarr.
+//! Torrent and Usenet releases: search every indexer through Prowlarr, download with the chosen torrent
+//! client (qBittorrent, Transmission, Deluge, rTorrent or a blackhole folder) or Usenet client (SABnzbd,
+//! NZBGet or a blackhole folder), then import the finished folder. Replaces Lidarr. The clients are in
+//! sources/dl.
+pub use super::dl::Poll;
+use super::dl::Client;
 use crate::state::AppState;
 use regex::Regex;
 use serde_json::{json, Value};
-use std::path::PathBuf;
 use std::sync::LazyLock;
 
+/// The chosen torrent client is set up (the name is from when qBittorrent was the only one).
 pub fn qbit_ready(st: &AppState) -> bool {
-    !st.cfg.str("qbit_url").is_empty()
+    Client::torrent(st).ready(st)
 }
+/// The chosen Usenet client is set up.
 pub fn sab_ready(st: &AppState) -> bool {
-    !st.cfg.str("sab_url").is_empty() && !st.cfg.str("sab_api_key").is_empty()
+    Client::usenet(st).ready(st)
 }
 pub fn enabled(st: &AppState) -> bool {
     st.cfg.bool("torznab_enabled") && !st.cfg.str("prowlarr_url").is_empty() && !st.cfg.str("prowlarr_api_key").is_empty() && (qbit_ready(st) || sab_ready(st))
@@ -40,12 +45,21 @@ pub async fn status(st: &AppState) -> Value {
         _ => None,
     };
     let Some(n) = indexers else { return json!({ "ok": false, "message": "Prowlarr not reachable or wrong API key" }) };
-    st.cache_put("qbit_sid", Value::Null, 1); // always a fresh login when testing
-    let (mut ok, q) = (n > 0, if qbit_ready(st) { qbit_login(st).await.map(|_| "qBittorrent ok".to_string()) } else { Ok("no qBittorrent".into()) });
-    let s = if sab_ready(st) { sab(st, &[("mode", "version")]).await.map(|_| "SABnzbd ok".to_string()) } else { Ok("no SABnzbd".into()) };
-    ok &= q.is_ok() && s.is_ok();
-    let txt = |r: anyhow::Result<String>| r.unwrap_or_else(|e| e.to_string());
-    json!({ "ok": ok, "message": format!("{n} indexer(s) in Prowlarr · {} · {}", txt(q), txt(s)) })
+    let (mut ok, mut parts) = (n > 0, vec![format!("{n} indexer(s) in Prowlarr")]);
+    for c in [Client::torrent(st), Client::usenet(st)] {
+        if !c.ready(st) {
+            parts.push(format!("no {}", c.name()));
+            continue;
+        }
+        match c.status(st).await {
+            Ok(extra) => parts.push(format!("{} ok{extra}", c.name())),
+            Err(e) => {
+                ok = false;
+                parts.push(e.to_string());
+            }
+        }
+    }
+    json!({ "ok": ok, "message": parts.join(" · ") })
 }
 
 static NON_ALNUM: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"[^a-z0-9]+").unwrap());
@@ -113,143 +127,32 @@ pub fn rank_album(st: &AppState, results: &[Value], artist: &str, album: &str, l
     out
 }
 
-// ---- qBittorrent ---------------------------------------------------------------------------------
+// ---- one download, through the chosen client ----------------------------------------------------
 
-/// Log in to qBittorrent's Web API. Returns the session cookie as "name=value": older versions call
-/// it SID, 5.1+ QBT_SID_<port>. Empty when qBittorrent skips auth for this network.
-async fn qbit_login(st: &AppState) -> anyhow::Result<String> {
-    if let Some(v) = st.cache_get("qbit_sid").filter(|v| v.is_string()) {
-        return Ok(v.as_str().unwrap_or("").to_string());
-    }
-    let url = base(st, "qbit_url");
-    let r = st.http.post(format!("{url}/api/v2/auth/login")).header("Referer", &url).header("Origin", &url)
-        .form(&[("username", st.cfg.str("qbit_user")), ("password", st.cfg.str("qbit_password"))]).send().await
-        .map_err(|e| anyhow::anyhow!("qBittorrent unreachable: {e}"))?;
-    let status = r.status().as_u16();
-    let cookie = r.headers().get_all("set-cookie").iter().filter_map(|h| h.to_str().ok())
-        .filter_map(|c| c.split(';').next().map(|kv| kv.trim().to_string()))
-        .find(|kv| kv.starts_with("SID=") || kv.starts_with("QBT_SID"));
-    let body = r.text().await.unwrap_or_default();
-    let cookie = match cookie {
-        Some(c) => c,
-        None if (200..300).contains(&status) && (body.trim() == "Ok." || body.trim().is_empty()) => String::new(),
-        None if status == 403 => anyhow::bail!("qBittorrent refused the login (HTTP 403) – too many failed attempts ban the IP for a while; also check Web UI → \"Enable Host header validation\" / CSRF settings"),
-        None if body.trim() == "Fails." => anyhow::bail!("qBittorrent login failed: wrong username or password"),
-        None => anyhow::bail!("qBittorrent login failed (HTTP {status}: {})", body.trim().chars().take(120).collect::<String>()),
-    };
-    st.cache_put("qbit_sid", json!(cookie), 1800);
-    Ok(cookie)
+/// The client a release of this protocol goes to.
+pub fn client_for(st: &AppState, proto: &str) -> Client {
+    if proto == "usenet" { Client::usenet(st) } else { Client::torrent(st) }
 }
 
-async fn qbit(st: &AppState, path: &str, form: Option<reqwest::multipart::Form>, query: &[(&str, String)]) -> anyhow::Result<reqwest::Response> {
-    let sid = qbit_login(st).await?;
-    let url = format!("{}/api/v2/{path}", base(st, "qbit_url"));
-    let rb = match form { Some(f) => st.http.post(&url).multipart(f), None => st.http.get(&url).query(query) };
-    let rb = if sid.is_empty() { rb } else { rb.header("Cookie", sid) };
-    let r = rb.header("Referer", base(st, "qbit_url")).send().await?;
-    if r.status().as_u16() == 403 {
-        st.cache_put("qbit_sid", Value::Null, 1);
-        anyhow::bail!("qBittorrent refused the session, retrying next time");
-    }
-    Ok(r.error_for_status()?)
+/// "qBittorrent", "Transmission", "SABnzbd" … for messages.
+pub fn client_name(st: &AppState, proto: &str) -> &'static str {
+    client_for(st, proto).name()
 }
-
-// ---- SABnzbd -------------------------------------------------------------------------------------
-
-async fn sab(st: &AppState, q: &[(&str, &str)]) -> anyhow::Result<Value> {
-    let mut q: Vec<(&str, String)> = q.iter().map(|(k, v)| (*k, v.to_string())).collect();
-    q.push(("apikey", st.cfg.str("sab_api_key")));
-    q.push(("output", "json".into()));
-    let r = st.http.get(format!("{}/api", base(st, "sab_url"))).query(&q).send().await.map_err(|e| anyhow::anyhow!("SABnzbd unreachable: {e}"))?;
-    let v: Value = r.error_for_status()?.json().await?;
-    if v["status"] == false {
-        anyhow::bail!("SABnzbd: {}", v["error"].as_str().unwrap_or("error"));
-    }
-    Ok(v)
-}
-
-// ---- one download, either client -----------------------------------------------------------------
 
 /// Hand a release to the matching download client. → the id used for polling.
 pub async fn add(st: &AppState, cand: &Value, rid: i64) -> anyhow::Result<String> {
     let url = cand["url"].as_str().unwrap_or("");
-    if cand["protocol"] == "usenet" {
-        let name = format!("encore-{rid}");
-        let v = sab(st, &[("mode", "addurl"), ("name", url), ("nzbname", &name), ("cat", &st.cfg.str("sab_category"))]).await?;
-        let id = v["nzo_ids"][0].as_str().ok_or_else(|| anyhow::anyhow!("SABnzbd didn't accept the NZB"))?;
-        return Ok(format!("sab:{id}"));
-    }
-    let tag = format!("encore-{rid}");
-    let form = reqwest::multipart::Form::new().text("urls", url.to_string()).text("category", st.cfg.str("qbit_category"))
-        .text("tags", tag.clone()).text("savepath", st.cfg.str("qbit_download_path"));
-    let body = qbit(st, "torrents/add", Some(form), &[]).await?.text().await.unwrap_or_default();
-    if body.contains("Fails") {
-        anyhow::bail!("qBittorrent didn't accept the torrent");
-    }
-    Ok(format!("qbit:{tag}"))
-}
-
-pub enum Poll {
-    Progress(f64, String),
-    Done(PathBuf),
-    Failed(String),
-}
-
-fn local(st: &AppState, remote: &str, key: &str) -> PathBuf {
-    let p = PathBuf::from(remote);
-    if p.exists() {
-        return p;
-    }
-    // client sees a different mount: same name under the folder Encore sees
-    PathBuf::from(st.cfg.str(key)).join(p.file_name().unwrap_or_default())
+    let c = client_for(st, cand["protocol"].as_str().unwrap_or("torrent"));
+    c.add(st, url, cand["title"].as_str().unwrap_or(""), rid).await
 }
 
 pub async fn poll(st: &AppState, id: &str) -> anyhow::Result<Poll> {
-    if let Some(nzo) = id.strip_prefix("sab:") {
-        let q = sab(st, &[("mode", "queue"), ("nzo_ids", nzo)]).await?;
-        if let Some(s) = q["queue"]["slots"].as_array().and_then(|a| a.first()) {
-            let pct = s["percentage"].as_str().and_then(|p| p.parse().ok()).unwrap_or(0.0);
-            return Ok(Poll::Progress(pct, format!("SABnzbd: {} {}", s["status"].as_str().unwrap_or(""), s["timeleft"].as_str().unwrap_or(""))));
-        }
-        let h = sab(st, &[("mode", "history"), ("nzo_ids", nzo)]).await?;
-        let Some(s) = h["history"]["slots"].as_array().and_then(|a| a.first()).cloned() else { return Ok(Poll::Failed("download disappeared from SABnzbd".into())) };
-        return Ok(match s["status"].as_str().unwrap_or("") {
-            "Completed" => Poll::Done(local(st, s["storage"].as_str().unwrap_or(""), "sab_download_path")),
-            "Failed" => Poll::Failed(format!("SABnzbd: {}", s["fail_message"].as_str().unwrap_or("failed"))),
-            other => Poll::Progress(99.0, format!("SABnzbd: {other}")),
-        });
-    }
-    let tag = id.trim_start_matches("qbit:");
-    let v: Value = qbit(st, "torrents/info", None, &[("tag", tag.into())]).await?.json().await?;
-    let Some(t) = v.as_array().and_then(|a| a.first()).cloned() else { return Ok(Poll::Failed("torrent disappeared from qBittorrent".into())) };
-    let state = t["state"].as_str().unwrap_or("");
-    let progress = t["progress"].as_f64().unwrap_or(0.0);
-    if state == "error" || state == "missingFiles" {
-        return Ok(Poll::Failed(format!("qBittorrent: {state}")));
-    }
-    if progress >= 1.0 && !state.starts_with("checking") {
-        return Ok(Poll::Done(local(st, t["content_path"].as_str().unwrap_or(""), "qbit_download_path")));
-    }
-    let speed = t["dlspeed"].as_f64().unwrap_or(0.0) / 1e6;
-    let msg = if state.contains("stalled") || state.starts_with("meta") { format!("qBittorrent: waiting for peers ({state})") } else { format!("qBittorrent: {speed:.1} MB/s") };
-    Ok(Poll::Progress((progress * 1000.0).round() / 10.0, msg))
+    let (c, own) = Client::for_id(id);
+    c.poll(st, own).await
 }
 
 /// Remove the download (and what's left of its files) from the client.
 pub async fn remove(st: &AppState, id: &str) {
-    if let Some(nzo) = id.strip_prefix("sab:") {
-        let _ = sab(st, &[("mode", "queue"), ("name", "delete"), ("value", nzo), ("del_files", "1")]).await;
-        let _ = sab(st, &[("mode", "history"), ("name", "delete"), ("value", nzo), ("del_files", "1")]).await;
-        return;
-    }
-    let tag = id.trim_start_matches("qbit:");
-    if let Ok(r) = qbit(st, "torrents/info", None, &[("tag", tag.into())]).await {
-        if let Ok(v) = r.json::<Value>().await {
-            let hashes: Vec<&str> = v.as_array().map(|a| a.iter().filter_map(|t| t["hash"].as_str()).collect()).unwrap_or_default();
-            if !hashes.is_empty() {
-                let form = reqwest::multipart::Form::new().text("hashes", hashes.join("|")).text("deleteFiles", "true");
-                let _ = qbit(st, "torrents/delete", Some(form), &[]).await;
-            }
-        }
-    }
+    let (c, own) = Client::for_id(id);
+    c.remove(st, own).await
 }

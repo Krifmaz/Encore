@@ -337,7 +337,7 @@ pub fn render_artist(view: Element, ctx: Ctx) -> PageFuture {
         let disamb = if a.truthy("disambiguation") { format!(r#"<p class="muted" style="margin:0 0 10px">{}</p>"#, esck(&a, "disambiguation")) } else { String::new() };
         let chips: String = a.a("tags").iter().map(|t| { let t = js_string(t); format!(r##"<a class="badge" href="#/tag/{}">{}</a>"##, encode(&t), esc(&t)) }).collect();
         let play_btns = if a.truthy("library_tracks") {
-            format!(r#"<button class="btn primary" id="play-artist">{}Play</button><button class="btn" id="shuffle-artist">Shuffle</button>"#, icon("play"))
+            format!(r#"<button class="btn primary" id="play-artist">{}Play</button><button class="btn" id="shuffle-artist">Shuffle</button><button class="btn" id="share-artist" title="Share link">{}Share</button>"#, icon("play"), icon("external"))
         } else { String::new() };
         let request = if a.truthy("request_status") { status_badge(&a.s("request_status")) } else {
             let mut j = Map::new();
@@ -489,6 +489,7 @@ pub fn render_artist(view: Element, ctx: Ctx) -> PageFuture {
         };
         { let p = play_all.clone(); dom::on_sel(&view, "#play-artist", "click", move |_| p(false)); }
         { let p = play_all.clone(); dom::on_sel(&view, "#shuffle-artist", "click", move |_| p(true)); }
+        { let name = a.s("name"); dom::on_sel(&view, "#share-artist", "click", move |_| dom::spawn(ui::share_artist(name.clone()))); }
 
         // similar artists (Last.fm → ListenBrainz → Deezer)
         {

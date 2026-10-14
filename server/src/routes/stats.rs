@@ -2,6 +2,7 @@
 use crate::auth::{Admin, User};
 use crate::db::{now, Row, RowExt};
 use crate::error::{err, ApiResult};
+use crate::sources::dl::Client;
 use crate::sources::streamrip;
 use crate::state::AppState;
 use crate::{p, scheduler};
@@ -195,11 +196,28 @@ async fn diagnostics(State(st): State<AppState>, Admin(_): Admin) -> ApiResult<J
     if !g("prowlarr_url").is_empty() {
         futs.push(Box::pin(http_check(&st, "Prowlarr", format!("{}/api/v1/system/status", g("prowlarr_url")), vec![("X-Api-Key", st.cfg.str("prowlarr_api_key"))], &[200])));
     }
-    if !g("qbit_url").is_empty() {
-        futs.push(Box::pin(http_check(&st, "qBittorrent", format!("{}/api/v2/app/version", g("qbit_url")), vec![], &[200, 403])));
+    // the chosen download clients (a blackhole folder is checked as a path below)
+    let basic = |u: &str, p: &str| ("Authorization", format!("Basic {}", base64::Engine::encode(&base64::engine::general_purpose::STANDARD, format!("{}:{}", st.cfg.str(u), st.cfg.str(p)))));
+    match Client::torrent(&st) {
+        Client::Qbit if !g("qbit_url").is_empty() => futs.push(Box::pin(http_check(&st, "qBittorrent", format!("{}/api/v2/app/version", g("qbit_url")), vec![], &[200, 403]))),
+        // without a session id Transmission answers 409, which proves the address and the login
+        Client::Transmission if !g("transmission_url").is_empty() => {
+            let u = g("transmission_url");
+            let u = if u.ends_with("/rpc") { u } else { format!("{u}/transmission/rpc") };
+            futs.push(Box::pin(http_check(&st, "Transmission", u, vec![basic("transmission_user", "transmission_password")], &[200, 409])))
+        }
+        Client::Deluge if !g("deluge_url").is_empty() => futs.push(Box::pin(http_check(&st, "Deluge", g("deluge_url"), vec![], &[200]))),
+        Client::Rtorrent if !g("rtorrent_url").is_empty() => futs.push(Box::pin(http_check(&st, "rTorrent", g("rtorrent_url"), vec![basic("rtorrent_user", "rtorrent_password")], &[200, 405]))),
+        _ => {}
     }
-    if !g("sab_url").is_empty() {
-        futs.push(Box::pin(http_check(&st, "SABnzbd", format!("{}/api?mode=version&output=json&apikey={}", g("sab_url"), st.cfg.str("sab_api_key")), vec![], &[200])));
+    match Client::usenet(&st) {
+        Client::Sab if !g("sab_url").is_empty() => futs.push(Box::pin(http_check(&st, "SABnzbd", format!("{}/api?mode=version&output=json&apikey={}", g("sab_url"), st.cfg.str("sab_api_key")), vec![], &[200]))),
+        Client::NzbGet if !g("nzbget_url").is_empty() => {
+            let u = g("nzbget_url");
+            let u = if u.ends_with("/jsonrpc") { format!("{u}/version") } else { format!("{u}/jsonrpc/version") };
+            futs.push(Box::pin(http_check(&st, "NZBGet", u, vec![basic("nzbget_user", "nzbget_password")], &[200])))
+        }
+        _ => {}
     }
     if !g("jellyfin_url").is_empty() {
         futs.push(Box::pin(http_check(&st, "Jellyfin", format!("{}/System/Info/Public", g("jellyfin_url")), vec![], &[200])));
@@ -222,7 +240,18 @@ async fn diagnostics(State(st): State<AppState>, Admin(_): Admin) -> ApiResult<J
         checks.push(path_check("Soulseek downloads", &st.cfg.str("slskd_download_path"), true));
     }
     if torznab_on(&st) {
-        checks.push(path_check("Torrent downloads (as seen by Encore)", &st.cfg.str("qbit_download_path"), true));
+        let c = Client::torrent(&st);
+        if c == Client::TorrentHole {
+            checks.push(path_check("Torrent blackhole watch folder", &st.cfg.str("torrent_blackhole_watch"), true));
+        }
+        checks.push(path_check("Torrent downloads (as seen by Encore)", &st.cfg.str(c.download_path_key()), true));
+    }
+    if st.cfg.bool("torznab_enabled") && Client::usenet(&st).ready(&st) && Client::usenet(&st) != Client::Sab {
+        let c = Client::usenet(&st);
+        if c == Client::NzbHole {
+            checks.push(path_check("Usenet blackhole watch folder", &st.cfg.str("nzb_blackhole_watch"), true));
+        }
+        checks.push(path_check("Usenet downloads (as seen by Encore)", &st.cfg.str(c.download_path_key()), true));
     }
     checks.push(path_check("Config folder", &st.data_dir().to_string_lossy(), true));
     checks.push(tool("ffmpeg", "ffmpeg", &["-version"]).await);
@@ -243,7 +272,7 @@ async fn diagnostics(State(st): State<AppState>, Admin(_): Admin) -> ApiResult<J
 }
 
 fn torznab_on(st: &AppState) -> bool {
-    st.cfg.bool("torznab_enabled") && !st.cfg.str("qbit_url").is_empty()
+    st.cfg.bool("torznab_enabled") && Client::torrent(st).ready(st)
 }
 
 // ---- auto-download (admin) ----------------------------------------------------------------------
