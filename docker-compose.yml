@@ -1,5 +1,5 @@
-# Encore with its built-in Soulseek client. Only Encore is published to the outside world (web UI + Soulseek peer port).
-# The slskd service below is optional: Encore talks to the Soulseek network itself, so you only need it if you prefer slskd.
+# Encore runs Soulseek itself (its Soulseek engine, slskd, is installed from Settings → Download tools).
+# Only Encore is published to the outside world (web UI + Soulseek peer port).
 # Torrents/Usenet: add Prowlarr + qBittorrent/SABnzbd to this network and fill in Settings → Torrents & Usenet.
 #
 # Paths are absolute on purpose: relative paths (./config) resolve to odd places
@@ -16,7 +16,7 @@ services:
     restart: unless-stopped
     ports:
       - "8080:8080"
-      - "2234:2234"   # Soulseek peer port for the built-in client (forward it on your router)
+      - "2234:2234"   # Soulseek peer port (forward it on your router; not used while the VPN is on)
     environment:
       - PUID=${PUID:-1000}
       - PGID=${PGID:-1000}
@@ -27,8 +27,6 @@ services:
       - ENCORE_LIBRARY_PATH=/music
       - ENCORE_STAGING_PATH=/downloads/encore
       - SLSKD_ENABLED=true
-      - SLSKD_URL=http://slskd:5030     # behind gluetun: http://<gluetun container name>:5030
-      - SLSKD_API_KEY=${SLSKD_API_KEY:-}
       - SLSKD_DOWNLOAD_PATH=/downloads/slskd
       - SOULSEEK_USERNAME=${SOULSEEK_USERNAME:-}
       - SOULSEEK_PASSWORD=${SOULSEEK_PASSWORD:-}
@@ -44,54 +42,9 @@ services:
       - ${DOWNLOADS_DIR:-/srv/downloads}:/downloads
     networks: [music]
 
-  # ── Optional: slskd instead of the built-in client ────────────────────────
-  # Uncomment to use slskd instead and set SOULSEEK_CLIENT=slskd in Encore.
-  # slskd:
-  #   image: slskd/slskd:latest
-  #   container_name: slskd
-  #   restart: unless-stopped
-  #   # slskd ignores PUID/PGID – it runs as this user. Make its folders match:
-  #   #   sudo chown -R 1000:1000 /opt/appdata/slskd /srv/downloads/slskd /srv/downloads/slskd-incomplete
-  #   user: "${PUID:-1000}:${PGID:-1000}"
-  #   environment:
-  #     - SLSKD_REMOTE_CONFIGURATION=true
-  #     - SLSKD_SLSK_USERNAME=${SLSK_USERNAME:-}
-  #     - SLSKD_SLSK_PASSWORD=${SLSK_PASSWORD:-}
-  #     - SLSKD_DOWNLOADS_DIR=/downloads/slskd
-  #     - SLSKD_INCOMPLETE_DIR=/downloads/slskd-incomplete
-  #     - SLSKD_SHARED_DIR=/music
-  #     # Add the API key Encore uses to slskd.yml (see README → Using slskd instead)
-  #   volumes:
-  #     - ${APPDATA:-/opt/appdata}/slskd:/app
-  #     - ${MUSIC_DIR:-/srv/media/music}:/music:ro
-  #     - ${DOWNLOADS_DIR:-/srv/downloads}:/downloads
-  #   ports:
-  #     - "50300:50300"   # Soulseek peer port (needed for good speeds); the web UI stays private
-  #   networks: [music]
-
   # ── Soulseek through a VPN? ───────────────────────────────────────────────
-  # Run Encore inside gluetun's network namespace. The VPN's forwarded port becomes the Soulseek
-  # listen port automatically (SOULSEEK_PORT_FILE), the web UI is published through gluetun:
-  #
-  # gluetun:
-  #   image: qmcgaw/gluetun
-  #   cap_add: [NET_ADMIN]
-  #   devices: [/dev/net/tun:/dev/net/tun]
-  #   ports: ["8080:8080"]                       # Encore's web UI, published here instead
-  #   environment:
-  #     - VPN_SERVICE_PROVIDER=protonvpn         # any provider with port forwarding
-  #     - VPN_TYPE=wireguard
-  #     - WIREGUARD_PRIVATE_KEY=${WIREGUARD_PRIVATE_KEY}
-  #     - PORT_FORWARD_ONLY=on
-  #     - VPN_PORT_FORWARDING=on
-  #     - VPN_PORT_FORWARDING_STATUS_FILE=/gluetun/forwarded_port
-  #     - FIREWALL_INPUT_PORTS=8080              # let the web UI in through the VPN container
-  #   volumes: ["${APPDATA:-/opt/appdata}/gluetun:/gluetun"]
-  # encore:
-  #   network_mode: "container:gluetun"          # and remove `ports:` and `networks:` from encore
-  #   environment: [..., SOULSEEK_PORT_FILE=/gluetun/forwarded_port]
-  #   volumes: [..., "${APPDATA:-/opt/appdata}/gluetun:/gluetun:ro"]
-  #   depends_on: { gluetun: { condition: service_healthy, restart: true } }
+  # Encore has WireGuard built in and sends only Soulseek through it: no gluetun, no NET_ADMIN, no tun device.
+  # Turn it on under Settings → Apps & sources → Soulseek → VPN for Soulseek (or VPN_ENABLED / VPN_WIREGUARD_CONFIG).
 
 networks:
   music:

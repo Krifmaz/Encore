@@ -2,12 +2,14 @@
 //! `<data dir>/cadenza-cache/renders/`, and then served like any other file (Range requests, native
 //! seeking, no processing slot). While a render runs, listeners follow the growing `.part` file.
 //!
-//! * Key = sha256 of (track id, file mtime + size, output rate, filter, dither, taps limit).
+//! * Key = sha256 of (track id, file mtime + size, output rate, filter, dither, taps limit, engine:
+//!   built in or downloaded + its version + the admin's engine settings), so an engine update or a
+//!   settings change renders again instead of serving old renders.
 //! * A render is independent of the request that started it: it runs to completion unless the cache
 //!   is turned off, cleared, or the user has more than [`USER_CAP`] renders waiting or running.
 //! * Renders take a processing slot like live streams (`cadenza_max_streams`).
 //! * `cadenza_cache_mb` caps the folder; least recently served songs go first.
-use super::{spawn_chain, Job as LiveJob, Output, Slot, Slots};
+use super::{spawn_chain, EngineRun, Job as LiveJob, Output, Slot, Slots};
 use crate::error::{err, ApiResult};
 use crate::state::AppState;
 use axum::body::{Body, Bytes};
@@ -35,9 +37,11 @@ pub fn renders_dir(data_dir: &Path) -> PathBuf {
 }
 
 /// The cache key for one rendering of one file.
-pub fn cache_key(track_id: i64, mtime_ns: i128, size: u64, rate: u32, filter: &str, dither: &str, max_taps: usize) -> String {
+/// `engine`: [`super::Engine::cache_tag`] (engine, version and settings).
+#[allow(clippy::too_many_arguments)]
+pub fn cache_key(track_id: i64, mtime_ns: i128, size: u64, rate: u32, filter: &str, dither: &str, max_taps: usize, engine: &str) -> String {
     let mut h = Sha256::new();
-    h.update(format!("encore-cadenza-render-1|{track_id}|{mtime_ns}|{size}|{rate}|{filter}|{dither}|{max_taps}"));
+    h.update(format!("encore-cadenza-render-2|{track_id}|{mtime_ns}|{size}|{rate}|{filter}|{dither}|{max_taps}|{engine}"));
     hex::encode(&h.finalize()[..16])
 }
 
@@ -53,6 +57,10 @@ pub struct Spec {
     pub filter: FilterKind,
     pub dither: DitherKind,
     pub max_taps: usize,
+    /// the engine and its settings
+    pub engine: EngineRun,
+    /// [`super::Engine::cache_tag`]
+    pub engine_tag: String,
 }
 
 impl Spec {
@@ -60,7 +68,10 @@ impl Spec {
     pub async fn new(st: &AppState, track_id: i64, path: String, rate: u32, filter: &str, dither: &str) -> Spec {
         let lim = super::Limits::of(st);
         let p2 = path.clone();
-        let (info, meta) = tokio::task::spawn_blocking(move || (crate::routes::library::audio_info(&p2), std::fs::metadata(&p2).ok())).await.unwrap_or((json!({}), None));
+        let st2 = st.clone();
+        let (info, meta, engine) = tokio::task::spawn_blocking(move || (crate::routes::library::audio_info(&p2), std::fs::metadata(&p2).ok(), super::Engine::of(&st2)))
+            .await
+            .unwrap_or_else(|_| (json!({}), None, super::Engine::from_parts(None, Default::default(), lim.max_taps)));
         let input = super::input_format(&info);
         let (mtime_ns, size) = meta
             .map(|m| (m.modified().ok().and_then(|t| t.duration_since(SystemTime::UNIX_EPOCH).ok()).map(|d| d.as_nanos() as i128).unwrap_or(0), m.len()))
@@ -71,20 +82,22 @@ impl Spec {
             mtime_ns,
             size,
             rate: super::target_rate(input.rate, rate, lim.max_rate),
-            filter: super::choose_filter(filter, lim.max_taps),
-            dither: super::choose_dither(dither),
+            filter: super::choose_filter_or(filter, &engine.value("filter").unwrap_or_default(), lim.max_taps),
+            dither: super::choose_dither_or(dither, &engine.value("dither").unwrap_or_default()),
             max_taps: lim.max_taps,
             input,
+            engine: engine.run(),
+            engine_tag: engine.cache_tag(),
         }
     }
 
     pub fn key(&self) -> String {
-        cache_key(self.track_id, self.mtime_ns, self.size, self.rate, &self.filter.id(), self.dither.id(), self.max_taps)
+        cache_key(self.track_id, self.mtime_ns, self.size, self.rate, &self.filter.id(), self.dither.id(), self.max_taps, &self.engine_tag)
     }
 
     /// The same settings as a live stream starting at `seek` seconds.
     pub fn live(&self, seek: f64) -> LiveJob {
-        LiveJob { path: self.path.clone(), input: self.input.clone(), seek, rate: self.rate, filter: self.filter, dither: self.dither }
+        LiveJob { path: self.path.clone(), input: self.input.clone(), seek, rate: self.rate, filter: self.filter, dither: self.dither, engine: self.engine.clone() }
     }
 }
 
@@ -368,8 +381,8 @@ async fn render(ctx: &Ctx, job: &Arc<Render>, spec: &Spec) -> bool {
             return false;
         }
     }
+    // the decoder (and a downloaded engine) end with the chain's task
     let complete = (&mut chain.done).await.unwrap_or(false);
-    let _ = chain.decoder.kill().await;
     if !complete {
         let _ = chain.encoder.kill().await;
         return false;
@@ -386,10 +399,27 @@ async fn render(ctx: &Ctx, job: &Arc<Render>, spec: &Spec) -> bool {
     let p2 = part.clone();
     let _ = tokio::task::spawn_blocking(move || add_seektable(&p2)).await;
     let meta = json!({
-        "track_id": spec.track_id, "rate": spec.rate, "filter": spec.filter.id(), "dither": spec.dither.id(),
+        "track_id": spec.track_id, "rate": spec.rate, "filter": spec.filter.id(), "dither": spec.dither.id(), "engine": spec.engine_tag,
         "label": job.status().label, "secs": (secs * 100.0).round() / 100.0, "factor": (factor * 100.0).round() / 100.0,
         "rendered_at": SystemTime::now().duration_since(SystemTime::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0),
     });
+    // the downloaded engine failed and the built-in one rendered: its output isn't what this key
+    // (the downloaded engine's version and settings) promises, so listeners get it but the cache
+    // doesn't; the next play tries the downloaded engine again
+    if chain.fell_back.load(Ordering::SeqCst) {
+        let mut jobs = JOBS.lock().unwrap();
+        if job.cancel.load(Ordering::SeqCst) {
+            return false;
+        }
+        // followers keep reading their open handle of the unlinked file
+        let _ = std::fs::remove_file(&part);
+        job.update(|s| s.phase = Phase::Done);
+        if jobs.get(&job.key).is_some_and(|j| Arc::ptr_eq(j, job)) {
+            jobs.remove(&job.key);
+        }
+        tracing::info!("cadenza: track {} rendered by the built-in engine (the downloaded one failed) – not cached", spec.track_id);
+        return true;
+    }
     let _ = std::fs::write(ctx.meta(&job.key), meta.to_string());
     {
         // rename and leave the job table together, so a request never sees neither
@@ -966,16 +996,21 @@ mod tests {
 
     #[test]
     fn key_changes_with_settings() {
-        let base = cache_key(7, 1_000, 5_000, 96_000, "sinc-l-64k", "tpdf", 65_536);
-        assert_eq!(base, cache_key(7, 1_000, 5_000, 96_000, "sinc-l-64k", "tpdf", 65_536));
+        const E: &str = "bundled-0.1.0|";
+        let base = cache_key(7, 1_000, 5_000, 96_000, "sinc-l-64k", "tpdf", 65_536, E);
+        assert_eq!(base, cache_key(7, 1_000, 5_000, 96_000, "sinc-l-64k", "tpdf", 65_536, E));
         for other in [
-            cache_key(8, 1_000, 5_000, 96_000, "sinc-l-64k", "tpdf", 65_536),
-            cache_key(7, 1_001, 5_000, 96_000, "sinc-l-64k", "tpdf", 65_536),
-            cache_key(7, 1_000, 5_001, 96_000, "sinc-l-64k", "tpdf", 65_536),
-            cache_key(7, 1_000, 5_000, 192_000, "sinc-l-64k", "tpdf", 65_536),
-            cache_key(7, 1_000, 5_000, 96_000, "sinc-m-64k", "tpdf", 65_536),
-            cache_key(7, 1_000, 5_000, 96_000, "sinc-l-64k", "lipshitz", 65_536),
-            cache_key(7, 1_000, 5_000, 96_000, "sinc-l-64k", "tpdf", 16_384),
+            cache_key(8, 1_000, 5_000, 96_000, "sinc-l-64k", "tpdf", 65_536, E),
+            cache_key(7, 1_001, 5_000, 96_000, "sinc-l-64k", "tpdf", 65_536, E),
+            cache_key(7, 1_000, 5_001, 96_000, "sinc-l-64k", "tpdf", 65_536, E),
+            cache_key(7, 1_000, 5_000, 192_000, "sinc-l-64k", "tpdf", 65_536, E),
+            cache_key(7, 1_000, 5_000, 96_000, "sinc-m-64k", "tpdf", 65_536, E),
+            cache_key(7, 1_000, 5_000, 96_000, "sinc-l-64k", "lipshitz", 65_536, E),
+            cache_key(7, 1_000, 5_000, 96_000, "sinc-l-64k", "tpdf", 16_384, E),
+            // an engine update, or other engine settings, render again
+            cache_key(7, 1_000, 5_000, 96_000, "sinc-l-64k", "tpdf", 65_536, "updated-2.1.0|"),
+            cache_key(7, 1_000, 5_000, 96_000, "sinc-l-64k", "tpdf", 65_536, "updated-2.1.0|gpu=off"),
+            cache_key(7, 1_000, 5_000, 96_000, "sinc-l-64k", "tpdf", 65_536, "bundled-0.1.0|headroom_db=-3"),
         ] {
             assert_ne!(base, other);
         }
@@ -1060,6 +1095,8 @@ mod tests {
             filter: super::super::choose_filter("", 4096),
             dither: DitherKind::Tpdf,
             max_taps: 4096,
+            engine: EngineRun::default(),
+            engine_tag: "bundled-test|".into(),
         }
     }
 

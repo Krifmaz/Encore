@@ -1,11 +1,14 @@
 //! Built-in VPN for Soulseek: a WireGuard tunnel in user space (no tun device, no NET_ADMIN, no
-//! gluetun container) that only the built-in Soulseek client uses. Everything else – Tidal, Qobuz,
-//! the web UI, metadata – keeps the normal connection. With NAT-PMP (ProtonVPN) the VPN forwards a
-//! port, which becomes Soulseek's listen port.
+//! gluetun container) that only Soulseek uses – the Soulseek engine (slskd) reaches it through a
+//! local SOCKS5 proxy (`socks`), and inbound peers arrive through `relay`. Everything else – Tidal,
+//! Qobuz, the web UI, metadata – keeps the normal connection. With NAT-PMP (ProtonVPN) the VPN
+//! forwards a port, which becomes Soulseek's listen port.
 pub mod config;
 pub mod dns;
 pub mod engine;
 pub mod natpmp;
+pub mod relay;
+pub mod socks;
 #[cfg(test)]
 pub(crate) mod tests;
 

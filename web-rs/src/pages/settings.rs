@@ -119,27 +119,23 @@ const SECTIONS: &[Section] = &[
         s("sab_category", "SABnzbd category", "text"),
         s("sab_download_path", "Usenet download folder (as mounted in this container)", "text").full(),
     ] },
-    Section { id: "slskd", title: "Soulseek", desc: "Searches the Soulseek file-sharing network – great for FLAC and rare releases. Built in: no slskd container needed – enter any username and password and an account is created at the first sign-in. Forward the port for the best speeds.", test: Some("slskd"), test_label: None, fields: &[
+    Section { id: "slskd", title: "Soulseek", desc: "Searches the Soulseek file-sharing network – great for FLAC and rare releases. Encore runs Soulseek for you: enter any username and password and an account is created at the first sign-in. Forward the port for the best speeds.", test: Some("slskd"), test_label: None, fields: &[
         s("slskd_enabled", "Enable Soulseek", "bool"),
-        s("soulseek_client", "Client", "select").options(&[("auto", "Built-in when a username is set, else slskd"), ("builtin", "Built-in client"), ("slskd", "slskd (external)")]),
-        s("soulseek_username", "Soulseek username", "text").help("New name + password = new account. Don’t use the same login in slskd or another client at the same time."),
+        s("soulseek_username", "Soulseek username", "text").help("New name + password = new account. Don’t use the same login in another Soulseek client at the same time."),
         s("soulseek_password", "Soulseek password", "password"),
-        s("soulseek_port", "Listen port", "number").help("TCP port the built-in client listens on – forward it on your router (and publish it in Docker) so users behind firewalls can send to you. Ignored while Send Soulseek through a VPN is on – the VPN’s forwarded port is used."),
-        s("soulseek_port_file", "Listen port from a file (VPN port forwarding)", "text").help("Behind gluetun: mount its folder and point this at forwarded_port – the port the VPN assigned is used and followed when it changes. Ignored while Send Soulseek through a VPN is on – the VPN’s forwarded port is used."),
-        s("vpn_enabled", "Send Soulseek through a VPN", "bool").help("Only Soulseek goes through the VPN; Tidal, Qobuz, Deezer and everything else keep your normal connection. Built in – no gluetun container needed."),
-        s("vpn_wireguard_config", "WireGuard config", "textarea").full().secret().help("Paste the whole .conf file from your VPN provider (ProtonVPN: Downloads → WireGuard configuration, with NAT-PMP port forwarding on). The private key is stored on this server only."),
-        s("vpn_port_forwarding", "Port forwarding", "select").options(&[("natpmp", "NAT-PMP (ProtonVPN)"), ("off", "Off")]),
-        s("vpn_kill_switch", "Keep Soulseek off while the VPN is down", "bool"),
+        s("soulseek_port", "Listen port", "number").help("TCP port Soulseek listens on – forward it on your router (and publish it in Docker) so users behind firewalls can send to you. While Send Soulseek through a VPN is on, the VPN’s forwarded port is used instead."),
         s("soulseek_share", "Share your library on Soulseek (recommended)", "bool").help("The network runs on sharing; many users refuse downloads to people who share nothing. Only the library folder is shared, read-only."),
         s("soulseek_upload_slots", "Upload slots", "number"),
-        s("slskd_url", "slskd URL", "text").help("Only for the slskd client, e.g. http://slskd:5030"),
-        s("slskd_api_key", "slskd API key", "password").help("Only for the slskd client: web.authentication.api_keys in slskd.yml"),
         s("slskd_download_path", "Downloads folder (as mounted in this container)", "text").full(),
         s("slskd_preferred_format", "Preferred format", "select").options(&[("flac", "FLAC / lossless"), ("mp3", "MP3"), ("any", "Best available")]),
         s("slskd_min_bitrate", "Minimum MP3 bitrate (kbps)", "number"),
         s("slskd_search_timeout", "Search time (seconds)", "number"),
         s("slskd_stall_minutes", "Give up on a stalled user after (minutes)", "number"),
         s("slskd_max_candidates", "Max users to try per request", "number"),
+        s("vpn_enabled", "Send Soulseek through a VPN", "bool").help("Only Soulseek goes through the VPN; Tidal, Qobuz, Deezer and everything else keep your normal connection. No gluetun container needed."),
+        s("vpn_wireguard_config", "WireGuard config", "textarea").full().secret().help("Paste the whole .conf file from your VPN provider (ProtonVPN: Downloads → WireGuard configuration, with NAT-PMP port forwarding on). The private key is stored on this server only."),
+        s("vpn_port_forwarding", "Port forwarding", "select").options(&[("natpmp", "NAT-PMP (ProtonVPN)"), ("off", "Off")]),
+        s("vpn_kill_switch", "Keep Soulseek off while the VPN is down", "bool"),
     ] },
     Section { id: "ytdlp", title: "YouTube Music & links (yt-dlp)", desc: "Last-resort source: finds the song on YouTube Music. yt-dlp also downloads SoundCloud links you paste in the Downloader, along with YouTube, Bandcamp, Mixcloud and about 1,800 other sites.", test: Some("ytdlp"), test_label: Some("Test cookies"), fields: &[
         s("ytdlp_enabled", "Enable yt-dlp as a source", "bool").help("Searches YouTube Music for requests, and downloads links you paste in the Downloader from YouTube, SoundCloud, Bandcamp, Mixcloud and ~1,800 other sites."),
@@ -489,10 +485,17 @@ impl Hub {
                 else { body.insert(f.key.to_string(), Value::String(if secret { v.trim().to_string() } else { v })); }
             }
         }
+        if sec.id == "cadenza" && meta.o("cadenza_engine_settings").s("source") != "env" {
+            if let Some(engine) = engine_settings_value(root) { body.insert("cadenza_engine_settings".to_string(), Value::String(engine)); }
+        }
+        let engine_saved = body.get("cadenza_engine_settings").and_then(|v| v.as_str()).map(String::from);
         let app_name = body.get("app_name").cloned().unwrap_or(Value::Null);
         match api::put("/admin/settings", Value::Object(body)).await {
             Ok(v) => {
                 *self.values.borrow_mut() = v;
+                if let Some(e) = engine_saved.filter(|e| !e.is_empty()) {
+                    ENGINE.with(|en| if let Some(en) = en.borrow_mut().as_mut() { en.values = serde_json::from_str(&e).unwrap_or_else(|_| json!({})); });
+                }
                 if !quiet { toast("Settings saved", "ok"); }
                 if sec.id == "general" && truthy(&app_name) { dom::set_title(&js_string(&app_name)); }
                 Ok(())
@@ -595,10 +598,12 @@ fn show(hub: &Rc<Hub>, id: String, flash: Option<Value>) -> Pin<Box<dyn Future<O
       <div style="height:14px"></div>
       <div data-out>{flash_html}</div>
       {fields_html}{tidal}{cadenza}
+      {slsk}
       <div class="row mt" style="justify-content:flex-end"><button class="btn primary" data-save>{check}Save</button></div>
     </details>"##,
                 tidal = if sec.id == "streamrip" { tidal_block() } else { String::new() },
-                cadenza = if sec.id == "cadenza" { cadenza_cache_block() } else { String::new() },
+                cadenza = if sec.id == "cadenza" { cadenza_cache_block() + &engine_settings_block() } else { String::new() },
+                slsk = if sec.id == "slskd" { soulseek_status_block() } else { String::new() },
                 sid = sec.id, open = if open { "open" } else { "" }, title = esc(sec.title), check = icon("check"))
         };
         let mut html = if group.id == "tasks" { r##"<div id="tasks-host" style="margin-bottom:16px"></div>"##.to_string() } else { String::new() };
@@ -626,8 +631,8 @@ fn show(hub: &Rc<Hub>, id: String, flash: Option<Value>) -> Pin<Box<dyn Future<O
             let Some(sec) = SECTIONS.iter().find(|x| x.id == sec_id) else { continue };
             let Some(out) = dom::qs_in(&card, "[data-out]") else { continue };
             if sec.id == "streamrip" { bind_tidal(&hub.view, &card); }
-            if sec.id == "cadenza" { bind_cadenza_cache(&card); }
-            if sec.id == "slskd" { bind_vpn(&hub, sec, &card); }
+            if sec.id == "cadenza" { bind_cadenza_cache(&hub, &card); }
+            if sec.id == "slskd" { bind_vpn(&hub, sec, &card); bind_soulseek(&hub, &card); }
             let paint: Rc<dyn Fn(&Value)> = { let out = out.clone(); Rc::new(move |r: &Value| dom::set_html(&out, &test_result(r))) };
             if let Some(b) = dom::qs_in(&card, "[data-save]") {
                 let (hub2, card2) = (hub.clone(), card.clone());
@@ -1383,8 +1388,10 @@ fn fields_html(fields: &[Field], one: impl Fn(&Field) -> String) -> String {
     let rest: Vec<&Field> = fields.iter().filter(|f| !is_vpn(f)).collect();
     let at = at.min(rest.len());
     let vpn: String = fields.iter().filter(|f| is_vpn(f)).map(&one).collect();
-    format!(r##"<div class="form-grid">{}</div>{}<div class="form-grid mt">{}</div>"##,
-        rest[..at].iter().map(|f| one(f)).collect::<String>(), vpn_block(&vpn), rest[at..].iter().map(|f| one(f)).collect::<String>())
+    let after: String = rest[at..].iter().map(|f| one(f)).collect();
+    format!(r##"<div class="form-grid">{}</div>{}{}"##,
+        rest[..at].iter().map(|f| one(f)).collect::<String>(), vpn_block(&vpn),
+        if rest.len() > at { format!(r##"<div class="form-grid mt">{after}</div>"##) } else { String::new() })
 }
 
 // Settings → Soulseek → VPN for Soulseek: the WireGuard fields, the tunnel's state (polled every 5 s while the card is open) and Test VPN.
@@ -1463,6 +1470,7 @@ fn cadenza_cache_block() -> String {
       <div style="min-width:0"><b>Pre-render cache</b><div class="small muted" id="cadenza-cache-state">Checking…</div></div>
       <button class="btn sm" id="cadenza-cache-clear" type="button">{}Clear cache</button>
     </div>
+    <div class="small muted mt" id="cadenza-engine">Engine: …</div>
   </div>"##, icon("trash"))
 }
 
@@ -1477,15 +1485,144 @@ pub fn cadenza_cache_text(c: &Value) -> String {
         if f > 0.0 { format!(" · renders at {}× real time", crate::player::to_fixed1(f)) } else { String::new() })
 }
 
-fn bind_cadenza_cache(card: &Element) {
+/// "Engine: Cadenza 2.1.0 (updated)" / "Engine: Cadenza (built in)" – `engine` of GET /playback/dsp.
+pub fn cadenza_engine_text(e: &Value) -> String {
+    format!("Engine: {}", if e.is_object() && e.s("source") == "updated" && e.truthy("version") { format!("Cadenza {} (updated)", e.s("version")) } else { "Cadenza (built in)".to_string() })
+}
+
+// Server processing → Engine settings: drawn only from the list the active engine gives (engine.settings in
+// GET /playback/dsp: `cadenza render --describe`, or the built-in engine's own), saved to cadenza_engine_settings.
+struct EngineSettings {
+    settings: Vec<Value>,
+    values: Value,
+}
+
+thread_local! {
+    /// { settings, values } of the engine the block was drawn for
+    static ENGINE: RefCell<Option<EngineSettings>> = const { RefCell::new(None) };
+}
+
+fn engine_settings_block() -> String {
+    r##"<div class="card flat mt" id="cadenza-engine-settings" style="padding:12px 14px">
+    <b>Engine settings</b>
+    <div class="small muted" id="cadenza-engine-hint">Checking…</div>
+    <div class="form-grid mt" id="cadenza-engine-fields" hidden></div>
+  </div>"##.to_string()
+}
+
+const ENGINE_TYPES: &[&str] = &["select", "bool", "number"];
+
+/// JavaScript `Number(v)`.
+fn to_num(v: &Value) -> f64 {
+    match v {
+        Value::Null => 0.0,
+        Value::Bool(b) => if *b { 1.0 } else { 0.0 },
+        Value::Number(n) => n.as_f64().unwrap_or(f64::NAN),
+        Value::String(t) => { let t = t.trim(); if t.is_empty() { 0.0 } else { t.parse().unwrap_or(f64::NAN) } }
+        _ => f64::NAN,
+    }
+}
+
+/// `Array.isArray(s.options) ? s.options : []`, each as (value, label).
+fn engine_options(s: &Value) -> Vec<(Value, Value)> {
+    s.a("options").iter().map(|o| (o.get(0).cloned().unwrap_or(Value::Null), o.get(1).cloned().unwrap_or(Value::Null))).collect()
+}
+
+fn engine_default_text(s: &Value) -> String {
+    match s.s("type").as_str() {
+        "bool" => (if s.truthy("default") { "on" } else { "off" }).to_string(),
+        "select" => engine_options(s).into_iter().find(|(v, _)| js_string(v) == s.s("default")).map(|(_, l)| js_string(&l)).unwrap_or_else(|| s.s("default")),
+        _ => s.s("default"),
+    }
+}
+
+/// One engine setting as a form field (data-ek = its key). A saved select value the engine no longer offers shows the default.
+fn engine_field(s: &Value, v: &Value, locked: bool) -> String {
+    let dis = if locked { "disabled" } else { "" };
+    let k = esc(&s.s("key"));
+    let label = esc(&if s.truthy("label") { s.s("label") } else { s.s("key") });
+    let help = format!("<small>{}Default: {}</small>", if s.truthy("help") { format!("{} · ", esc(&s.s("help"))) } else { String::new() }, esc(&engine_default_text(s)));
+    match s.s("type").as_str() {
+        "bool" => format!(r##"<div class="field" style="justify-content:center"><label class="switch"><input type="checkbox" data-ek="{k}" {} {dis}><i></i>{label}</label>{help}</div>"##,
+            if truthy(v) { "checked" } else { "" }),
+        "select" => {
+            let opts = engine_options(s);
+            let pick = if opts.iter().any(|(o, _)| js_string(o) == js_string(v)) { v.clone() } else { s.g("default").clone() };
+            let options: String = opts.iter().map(|(val, lab)| format!(r##"<option value="{}" {}>{}</option>"##,
+                escv(val), if js_string(val) == js_string(&pick) { "selected" } else { "" }, escv(lab))).collect();
+            format!(r##"<label class="field"><span>{label}</span><select class="input" data-ek="{k}" {dis}>{options}</select>{help}</label>"##)
+        }
+        _ => {
+            let attr = |n: &str| -> String { let x = s.g(n); if !x.is_null() && to_num(x).is_finite() { format!(r##" {n}="{}""##, escv(x)) } else { String::new() } };
+            format!(r##"<label class="field"><span>{label}</span><input class="input" type="number" data-ek="{k}"{}{}{} value="{}" autocomplete="off" {dis}>{help}</label>"##,
+                attr("min"), attr("max"), attr("step"), escv(v))
+        }
+    }
+}
+
+fn paint_engine_settings(card: &Element, engine: &Value, locked: bool) {
+    let (Some(hint), Some(bx)) = (dom::qs_in(card, "#cadenza-engine-hint"), dom::qs_in(card, "#cadenza-engine-fields")) else { return };
+    if !dom::data(&bx, "loaded").is_empty() { return; }
+    let settings: Vec<Value> = if engine.is_object() { engine.a("settings") } else { vec![] }
+        .into_iter().filter(|s| s.is_object() && s.truthy("key") && ENGINE_TYPES.contains(&s.s("type").as_str())).collect();
+    let values = if engine.is_object() && engine.g("values").is_object() { engine.g("values").clone() } else { json!({}) };
+    dom::set_data(&bx, "loaded", "1");
+    let html: String = settings.iter().map(|s| engine_field(s, values.get(s.s("key").as_str()).unwrap_or(s.g("default")), locked)).collect();
+    let empty = settings.is_empty();
+    ENGINE.with(|e| *e.borrow_mut() = Some(EngineSettings { settings, values }));
+    if empty { dom::set_text(&hint, "This engine has no settings of its own."); return; }
+    dom::set_text(&hint, &format!("The settings of the engine in use. People’s own filter and dither choices under Settings → Playback still win for their streams.{}", if locked { " Set by an environment variable." } else { "" }));
+    dom::set_html(&bx, &html);
+    dom::hide(&bx, false);
+}
+
+/// The engine settings as the JSON text for cadenza_engine_settings (only values that differ from the default;
+/// keys this engine doesn't have stay as saved), or None when the block isn't drawn.
+fn engine_settings_value(root: &Element) -> Option<String> {
+    let bx = dom::qs_in(root, "#cadenza-engine-fields")?;
+    if dom::data(&bx, "loaded").is_empty() { return None; }
+    ENGINE.with(|e| {
+        let e = e.borrow();
+        let en = e.as_ref()?;
+        let mut out = en.values.as_object().cloned().unwrap_or_default();
+        for el in dom::qsa_in(&bx, "[data-ek]") {
+            let key = dom::data(&el, "ek");
+            let Some(s) = en.settings.iter().find(|x| x.s("key") == key) else { continue };
+            let v = match s.s("type").as_str() {
+                "bool" => Value::Bool(dom::checked(&el)),
+                "number" => {
+                    let raw = dom::value(&el);
+                    let n = if raw.trim().is_empty() { f64::NAN } else { to_num(&Value::String(raw)) };
+                    if !n.is_finite() { out.remove(&key); continue; }
+                    if n == to_num(s.g("default")) { out.remove(&key); continue; }
+                    if n.fract() == 0.0 && n.abs() < 1e15 { Value::from(n as i64) } else { Value::from(n) }
+                }
+                _ => {
+                    let raw = dom::value(&el);
+                    engine_options(s).into_iter().find(|(o, _)| js_string(o) == raw).map(|(o, _)| o).unwrap_or(Value::String(raw))
+                }
+            };
+            if s.s("type") != "number" && &v == s.g("default") { out.remove(&key); } else { out.insert(key, v); }
+        }
+        Some(Value::Object(out).to_string())
+    })
+}
+
+fn bind_cadenza_cache(hub: &Rc<Hub>, card: &Element) {
     let (Some(state), Some(btn)) = (dom::qs_in(card, "#cadenza-cache-state"), dom::qs_in(card, "#cadenza-cache-clear")) else { return };
+    let line = dom::qs_in(card, "#cadenza-engine");
+    let locked = hub.values.borrow().o("_meta").o("cadenza_engine_settings").s("source") == "env";
     let refresh: Rc<dyn Fn()> = {
-        let state = state.clone();
+        let (state, card) = (state.clone(), card.clone());
         Rc::new(move || {
-            let state = state.clone();
+            let (state, card, line) = (state.clone(), card.clone(), line.clone());
             dom::spawn(async move {
                 match api::get("/playback/dsp").await {
-                    Ok(d) => dom::set_text(&state, &cadenza_cache_text(d.g("cache"))),
+                    Ok(d) => {
+                        dom::set_text(&state, &cadenza_cache_text(d.g("cache")));
+                        if let Some(l) = &line { dom::set_text(l, &cadenza_engine_text(d.g("engine"))); }
+                        paint_engine_settings(&card, d.g("engine"), locked);
+                    }
                     Err(_) => dom::set_text(&state, "Status unavailable"),
                 }
             });
@@ -1505,19 +1642,96 @@ fn bind_cadenza_cache(card: &Element) {
     });
 }
 
-// Settings → Apps & sources → Download tools: yt-dlp and streamrip update in place (kept in the config
-// folder, so no new Encore image is needed); Soulseek and slskd are listed with their version only.
+// Settings → Soulseek: how Encore's Soulseek engine is doing (GET /soulseek/status), asked again every 5 s while
+// the card is open. The listen port is hidden while the VPN is on (the VPN's forwarded port is used).
+fn soulseek_status_block() -> String {
+    r##"<div class="card flat mt" id="slsk-engine" style="padding:12px 14px">
+    <b>Status</b>
+    <div class="small muted" id="slsk-engine-state">Checking…</div>
+  </div>"##.to_string()
+}
+
+/// "Running v0.24.1 · signed in as alice" / "Not installed · Install or update it under Download tools" / "Waiting for the VPN" …
+pub fn soulseek_state_html(r: &Value) -> String {
+    if !r.is_object() { return "Status unavailable".into(); }
+    let red = |t: &str| format!(r##"<span style="color:var(--err)">{}</span>"##, esc(t));
+    let v = if r.truthy("version") { let ver = r.s("version"); format!(" v{}", esc(ver.strip_prefix('v').unwrap_or(&ver))) } else { String::new() };
+    let error = r.s("error");
+    let line = match r.s("state").as_str() {
+        "not_installed" => "Not installed".to_string(),
+        "starting" => format!("Starting…{}", if r.truthy("error") { format!(" · {}", red(&error)) } else { String::new() }),
+        "running" => format!("Running{v}{}", if r.truthy("logged_in") { format!(" · signed in as {}", esc(&if r.truthy("username") { r.s("username") } else { "?".to_string() })) }
+            else if r.truthy("error") { format!(" · {}", red(&error)) } else { " · signing in…".to_string() }),
+        "crashed" => red(&format!("Crashed{}", if r.truthy("error") { format!(" – {error}") } else { String::new() })),
+        "waiting_vpn" => "Waiting for the VPN".to_string(),
+        _ => if r.g("enabled") == &Value::Bool(false) { "Off – switch on Enable Soulseek and save".to_string() } else { "Off".to_string() },
+    };
+    if r.truthy("hint") { format!("{line} · {}", esc(&r.s("hint"))) } else { line }
+}
+
+thread_local! {
+    /// Bumped on every paint of the Soulseek card, so the 5 s status poll of an earlier paint stops.
+    static SLSK_POLL: Cell<u32> = const { Cell::new(0) };
+}
+
+fn bind_soulseek(hub: &Rc<Hub>, card: &Element) {
+    let vpn = dom::qs_in(card, r#"[data-k="vpn_enabled"]"#);
+    let field = dom::qs_in(card, r#"[data-k="soulseek_port"]"#).and_then(|p| dom::closest_of(&p, ".field"));
+    if let (Some(vpn), Some(field)) = (vpn, field) {
+        dom::hide(&field, dom::checked(&vpn));
+        let vpn2 = vpn.clone();
+        dom::on(&vpn, "change", move |_| dom::hide(&field, dom::checked(&vpn2)));
+    }
+    let Some(state) = dom::qs_in(card, "#slsk-engine-state") else { return };
+    let refresh = move || {
+        let state = state.clone();
+        dom::spawn(async move {
+            match api::get("/soulseek/status").await {
+                Ok(r) => dom::set_html(&state, &soulseek_state_html(&r)),
+                Err(_) => dom::set_text(&state, "Status unavailable"),
+            }
+        });
+    };
+    refresh();
+    let gen = SLSK_POLL.with(|g| { g.set(g.get().wrapping_add(1)); g.get() });
+    let card = card.clone();
+    dom::interval(&hub.view, 5000, move || {
+        if SLSK_POLL.with(|g| g.get()) != gen || !dom::is_connected(&card) { return; }
+        if card.has_attribute("open") { refresh(); }
+    });
+}
+
+// Settings → Apps & sources → Download tools: yt-dlp, streamrip, Cadenza (server processing) and slskd
+// (Soulseek engine) update in place – kept in the config folder, so no new Encore image is needed.
 const TOOL_SPIN: &str = r##"<span class="spinner" style="width:10px;height:10px;border-width:2px"></span>"##;
 fn tool_list(r: &Value) -> Vec<Value> { if r.is_array() { r.items() } else { r.a("tools") } }
-fn tool_updatable(t: &Value) -> bool { let id = t.s("id"); id == "ytdlp" || id == "streamrip" }
+fn tool_updatable(t: &Value) -> bool { t.truthy("updatable") }
 /// `a || b`: the first truthy of the two, as text.
 fn tool_or(t: &Value, a: &str, b: &str) -> String { if t.truthy(a) { t.s(a) } else if t.truthy(b) { t.s(b) } else { String::new() } }
+
+/// The reset link of a row (link, confirm question, toast): Cadenza goes back to the engine built into Encore,
+/// slskd is removed, the rest go back to the bundled copy.
+fn tool_reset(t: &Value) -> (String, String, String) {
+    match t.s("id").as_str() {
+        "cadenza" => ("Use the built-in engine".into(), "Go back to the engine built into Encore? The downloaded Cadenza is removed.".into(), "Back to the built-in engine".into()),
+        "slskd" => ("Remove slskd".into(), "Remove slskd? Soulseek stays off until you install it again.".into(), "slskd removed".into()),
+        _ => {
+            let name = tool_or(t, "name", "id");
+            ("Use the bundled version".into(), format!("Go back to the {name} version that came with Encore? The updated copy is removed."), format!("Back to the bundled {name}"))
+        }
+    }
+}
+/// slskd is installed by Encore, not bundled: before that its button says Install.
+fn tool_install(t: &Value) -> bool { t.s("id") == "slskd" && !t.truthy("installed") }
 
 fn tool_row(t: &Value, busy: Option<&str>) -> String {
     let id = t.s("id");
     let latest = if t.truthy("latest") { t.s("latest") } else { String::new() };
     let action = if busy == Some(id.as_str()) {
-        format!(r##"<button class="btn sm" type="button" disabled>{TOOL_SPIN} Updating…</button>"##)
+        format!(r##"<button class="btn sm" type="button" disabled>{TOOL_SPIN} {}</button>"##, if tool_install(t) { "Installing…" } else { "Updating…" })
+    } else if tool_install(t) && tool_updatable(t) {
+        format!(r##"<button class="btn sm primary" type="button" data-tool-update="{}" {}>{}Install{}</button>"##,
+            esc(&id), if busy.is_some() { "disabled" } else { "" }, icon("download"), if latest.is_empty() { String::new() } else { format!(" {}", esc(&latest)) })
     } else if t.truthy("update_available") && tool_updatable(t) {
         format!(r##"<button class="btn sm primary" type="button" data-tool-update="{}" {}>{}Update to {}</button>"##,
             esc(&id), if busy.is_some() { "disabled" } else { "" }, icon("download"), esc(&latest))
@@ -1528,7 +1742,7 @@ fn tool_row(t: &Value, busy: Option<&str>) -> String {
     } else if tool_updatable(t) {
         r##"<span class="small faint">Not checked yet</span>"##.to_string()
     } else { String::new() };
-    let updated = t.s("source") == "updated";
+    let updated = t.s("source") == "updated" && id != "slskd";
     format!(r##"<div class="list-item" style="align-items:flex-start;flex-wrap:wrap;gap:12px" data-tool="{eid}">
       <div class="grow" style="min-width:200px"><div style="font-weight:650">{name} <span class="small muted mono">{ver}</span>{upd}</div>
         {note}
@@ -1541,8 +1755,8 @@ fn tool_row(t: &Value, busy: Option<&str>) -> String {
         upd = if updated { r##" <span class="small muted">(updated)</span>"## } else { "" },
         note = if t.truthy("note") { format!(r##"<div class="small muted">{}</div>"##, esc(&t.s("note"))) } else { String::new() },
         err = if t.truthy("error") { format!(r##"<div class="small" style="color:var(--err)">{}</div>"##, esc(&t.s("error"))) } else { String::new() },
-        reset = if updated && tool_updatable(t) {
-            format!(r##"<a href="#" class="small muted" data-tool-reset="{}" {}>Use the bundled version</a>"##, esc(&id), if busy.is_some() { "hidden" } else { "" })
+        reset = if t.truthy("resettable") && tool_updatable(t) {
+            format!(r##"<a href="#" class="small muted" data-tool-reset="{}" {}>{}</a>"##, esc(&id), if busy.is_some() { "hidden" } else { "" }, esc(&tool_reset(t).0))
         } else { String::new() })
 }
 
@@ -1567,6 +1781,9 @@ impl Tools {
     fn name_of(&self, id: &str) -> String {
         self.tools.borrow().iter().find(|t| t.s("id") == id).map(|t| t.s("name")).filter(|n| !n.is_empty()).unwrap_or_else(|| id.to_string())
     }
+    fn tool(&self, id: &str) -> Value {
+        self.tools.borrow().iter().find(|t| t.s("id") == id).cloned().unwrap_or_else(|| json!({ "id": id }))
+    }
 }
 
 async fn render_tools(host: Element, hub: Rc<Hub>) {
@@ -1580,12 +1797,14 @@ async fn render_tools(host: Element, hub: Rc<Hub>) {
             if values.truthy(key) { "checked" } else { "" }, if locked { "disabled" } else { "" }, esc(label))
     };
     let toggles = toggle("tools_auto_ytdlp", "Update yt-dlp automatically (recommended – sites change often)")
-        + &toggle("tools_auto_streamrip", "Update streamrip automatically when a new release is out");
+        + &toggle("tools_auto_streamrip", "Update streamrip automatically when a new release is out")
+        + &toggle("tools_auto_cadenza", "Update Cadenza automatically when a new release is out")
+        + &toggle("tools_auto_slskd", "Update slskd automatically when a new release is out");
     dom::set_html(&host, &format!(r##"<div class="card" id="tools-card" style="margin-bottom:12px">
     <div class="row between" style="margin-bottom:8px;gap:10px"><h2>Download tools</h2><button class="btn sm" type="button" id="tools-check">{refresh}Check for updates</button></div>
-    <p class="muted small" style="margin:0 0 14px">yt-dlp and streamrip update in place – no new Encore image needed. Updates are kept in the config folder.</p>
+    <p class="muted small" style="margin:0 0 14px">yt-dlp, streamrip, Cadenza and slskd update in place – no new Encore image needed. Updates are kept in the config folder.</p>
     <div class="list" id="tools-list"></div>
-    <div class="stack mt" style="gap:8px">{toggles}<div class="small muted">Checked daily – change it under <a href="#/settings?s=tasks">Scheduled tasks</a>.</div></div>
+    <div class="stack mt" style="gap:8px">{toggles}<div class="small muted">Every tool is checked daily; updates install by themselves only where the switch is on. Change the schedule under <a href="#/settings?s=tasks">Scheduled tasks</a>.</div></div>
   </div>"##, refresh = icon("refresh")));
     let (Some(list), Some(check)) = (dom::qs_in(&host, "#tools-list"), dom::qs_in(&host, "#tools-check")) else { return };
     let st = Rc::new(Tools { list: list.clone(), check: check.clone(), tools: RefCell::new(tools), busy: RefCell::new(None), checking: Cell::new(false) });
@@ -1611,12 +1830,12 @@ async fn render_tools(host: Element, hub: Rc<Hub>) {
             if let Some(up) = dom::closest(e, "[data-tool-update]") {
                 if !idle { return; }
                 let id = dom::data(&up, "toolUpdate");
-                let name = st.name_of(&id);
+                let (name, install) = (st.name_of(&id), tool_install(&st.tool(&id)));
                 *st.busy.borrow_mut() = Some(id.clone()); st.paint();
                 let st = st.clone();
                 dom::spawn(async move {
                     match api::post_empty(&format!("/system/tools/{id}/update")).await {
-                        Ok(r) => toast(&format!("{name} updated to {}", tool_or(&r, "installed", "latest")), "ok"),
+                        Ok(r) => toast(&format!("{name} {} {}", if install { "installed" } else { "updated to" }, tool_or(&r, "installed", "latest")), "ok"),
                         Err(err) => toast(&err.message, "err"),
                     }
                     *st.busy.borrow_mut() = None;
@@ -1626,12 +1845,12 @@ async fn render_tools(host: Element, hub: Rc<Hub>) {
                 if !idle { return; }
                 dom::prevent(e);
                 let id = dom::data(&reset, "toolReset");
-                let name = st.name_of(&id);
-                if !dom::confirm(&format!("Go back to the {name} version that came with Encore? The updated copy is removed.")) { return; }
+                let (_, ask, done) = tool_reset(&st.tool(&id));
+                if !dom::confirm(&ask) { return; }
                 let st = st.clone();
                 dom::spawn(async move {
                     match api::post_empty(&format!("/system/tools/{id}/reset")).await {
-                        Ok(_) => toast(&format!("Back to the bundled {name}"), "ok"),
+                        Ok(_) => toast(&done, "ok"),
                         Err(err) => toast(&err.message, "err"),
                     }
                     st.reload().await; st.paint();
@@ -1804,7 +2023,7 @@ fn pipeline_help() -> String {
       <li><b>Library check</b> – if the album/track is already in your library (by MusicBrainz id or name) it's marked available instantly.</li>
       <li><b>streamrip</b> – lossless from Qobuz, Tidal or Deezer with your own accounts, matched by ISRC.</li>
       <li><b>Torrents & Usenet</b> – Prowlarr searches your indexers; the best album release goes to qBittorrent or SABnzbd and is imported when it finishes. If it stalls past the timeout, the next release or source is tried.</li>
-      <li><b>Soulseek</b> – the built-in client (or slskd) searches the network, results are ranked by track count, format, bitrate, folder name and the uploader's free slots/speed. Stalled or failed users are skipped automatically.</li>
+      <li><b>Soulseek</b> – Encore searches the network, results are ranked by track count, format, bitrate, folder name and the uploader's free slots/speed. Stalled or failed users are skipped automatically.</li>
       <li><b>yt-dlp</b> – each track from the MusicBrainz tracklist is matched on YouTube (preferring official "Topic" uploads with matching length).</li>
       <li><b>Import</b> – files are matched to the MusicBrainz release, tagged (incl. MBIDs, ISRCs, cover art), renamed with your template, and your media servers are refreshed.</li>
     </ol></div>"##.to_string()

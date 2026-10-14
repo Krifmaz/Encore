@@ -29,8 +29,8 @@ mod roon;
 mod routes;
 mod scheduler;
 mod scrobble;
+mod slskd_managed;
 mod sources;
-mod soulseek;
 mod sync;
 mod state;
 mod tagger;
@@ -146,7 +146,7 @@ async fn main() -> anyhow::Result<()> {
     }
     tokio::spawn(worker::run(st.clone()));
     tokio::spawn(vpn::supervisor(st.clone()));
-    tokio::spawn(soulseek::supervisor(st.clone()));
+    tokio::spawn(slskd_managed::supervisor(st.clone()));
     tokio::spawn(roon::supervisor(st.clone()));
     let listener = tokio::net::TcpListener::bind(addr).await?;
     axum::serve(listener, app(st).into_make_service_with_connect_info::<SocketAddr>()).await?;

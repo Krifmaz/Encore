@@ -78,27 +78,23 @@ const SECTIONS = [
     S('sab_category', 'SABnzbd category'),
     S('sab_download_path', 'Usenet download folder (as mounted in this container)', 'text', { full: true }),
   ] },
-  { id: 'slskd', title: 'Soulseek', desc: 'Searches the Soulseek file-sharing network – great for FLAC and rare releases. Built in: no slskd container needed – enter any username and password and an account is created at the first sign-in. Forward the port for the best speeds.', test: 'slskd', fields: [
+  { id: 'slskd', title: 'Soulseek', desc: 'Searches the Soulseek file-sharing network – great for FLAC and rare releases. Encore runs Soulseek for you: enter any username and password and an account is created at the first sign-in. Forward the port for the best speeds.', test: 'slskd', fields: [
     S('slskd_enabled', 'Enable Soulseek', 'bool'),
-    S('soulseek_client', 'Client', 'select', { options: [['auto', 'Built-in when a username is set, else slskd'], ['builtin', 'Built-in client'], ['slskd', 'slskd (external)']] }),
-    S('soulseek_username', 'Soulseek username', 'text', { help: 'New name + password = new account. Don’t use the same login in slskd or another client at the same time.' }),
+    S('soulseek_username', 'Soulseek username', 'text', { help: 'New name + password = new account. Don’t use the same login in another Soulseek client at the same time.' }),
     S('soulseek_password', 'Soulseek password', 'password'),
-    S('soulseek_port', 'Listen port', 'number', { help: 'TCP port the built-in client listens on – forward it on your router (and publish it in Docker) so users behind firewalls can send to you. Ignored while Send Soulseek through a VPN is on – the VPN’s forwarded port is used.' }),
-    S('soulseek_port_file', 'Listen port from a file (VPN port forwarding)', 'text', { help: 'Behind gluetun: mount its folder and point this at forwarded_port – the port the VPN assigned is used and followed when it changes. Ignored while Send Soulseek through a VPN is on – the VPN’s forwarded port is used.' }),
-    S('vpn_enabled', 'Send Soulseek through a VPN', 'bool', { help: 'Only Soulseek goes through the VPN; Tidal, Qobuz, Deezer and everything else keep your normal connection. Built in – no gluetun container needed.' }),
-    S('vpn_wireguard_config', 'WireGuard config', 'textarea', { full: true, secret: true, help: 'Paste the whole .conf file from your VPN provider (ProtonVPN: Downloads → WireGuard configuration, with NAT-PMP port forwarding on). The private key is stored on this server only.' }),
-    S('vpn_port_forwarding', 'Port forwarding', 'select', { options: [['natpmp', 'NAT-PMP (ProtonVPN)'], ['off', 'Off']] }),
-    S('vpn_kill_switch', 'Keep Soulseek off while the VPN is down', 'bool'),
+    S('soulseek_port', 'Listen port', 'number', { help: 'TCP port Soulseek listens on – forward it on your router (and publish it in Docker) so users behind firewalls can send to you. While Send Soulseek through a VPN is on, the VPN’s forwarded port is used instead.' }),
     S('soulseek_share', 'Share your library on Soulseek (recommended)', 'bool', { help: 'The network runs on sharing; many users refuse downloads to people who share nothing. Only the library folder is shared, read-only.' }),
     S('soulseek_upload_slots', 'Upload slots', 'number'),
-    S('slskd_url', 'slskd URL', 'text', { help: 'Only for the slskd client, e.g. http://slskd:5030' }),
-    S('slskd_api_key', 'slskd API key', 'password', { help: 'Only for the slskd client: web.authentication.api_keys in slskd.yml' }),
     S('slskd_download_path', 'Downloads folder (as mounted in this container)', 'text', { full: true }),
     S('slskd_preferred_format', 'Preferred format', 'select', { options: [['flac', 'FLAC / lossless'], ['mp3', 'MP3'], ['any', 'Best available']] }),
     S('slskd_min_bitrate', 'Minimum MP3 bitrate (kbps)', 'number'),
     S('slskd_search_timeout', 'Search time (seconds)', 'number'),
     S('slskd_stall_minutes', 'Give up on a stalled user after (minutes)', 'number'),
     S('slskd_max_candidates', 'Max users to try per request', 'number'),
+    S('vpn_enabled', 'Send Soulseek through a VPN', 'bool', { help: 'Only Soulseek goes through the VPN; Tidal, Qobuz, Deezer and everything else keep your normal connection. No gluetun container needed.' }),
+    S('vpn_wireguard_config', 'WireGuard config', 'textarea', { full: true, secret: true, help: 'Paste the whole .conf file from your VPN provider (ProtonVPN: Downloads → WireGuard configuration, with NAT-PMP port forwarding on). The private key is stored on this server only.' }),
+    S('vpn_port_forwarding', 'Port forwarding', 'select', { options: [['natpmp', 'NAT-PMP (ProtonVPN)'], ['off', 'Off']] }),
+    S('vpn_kill_switch', 'Keep Soulseek off while the VPN is down', 'bool'),
   ] },
   { id: 'ytdlp', title: 'YouTube Music & links (yt-dlp)', desc: 'Last-resort source: finds the song on YouTube Music. yt-dlp also downloads SoundCloud links you paste in the Downloader, along with YouTube, Bandcamp, Mixcloud and about 1,800 other sites.', test: 'ytdlp', testLabel: 'Test cookies', fields: [
     S('ytdlp_enabled', 'Enable yt-dlp as a source', 'bool', { help: 'Searches YouTube Music for requests, and downloads links you paste in the Downloader from YouTube, SoundCloud, Bandcamp, Mixcloud and ~1,800 other sites.' }),
@@ -321,7 +317,8 @@ export async function render(view, ctx) {
       <div data-out>${flash && flash.sec === sec.id ? `<div class="test-result ${flash.ok ? 'ok' : 'err'}">${flash.ok ? icon.check : icon.x}<span>${esc(flash.message || '')}</span></div>` : ''}</div>
       ${fieldsHtml(sec.fields, (f) => field(f, values[f.key], lidarrOpts, meta))}
       ${sec.id === 'streamrip' ? tidalBlock() : ''}
-      ${sec.id === 'cadenza' ? cadenzaCacheBlock() : ''}
+      ${sec.id === 'cadenza' ? cadenzaCacheBlock() + engineSettingsBlock() : ''}
+      ${sec.id === 'slskd' ? soulseekStatusBlock() : ''}
       <div class="row mt" style="justify-content:flex-end"><button class="btn primary" data-save>${icon.check}Save</button></div>
     </details>`;
     // the first card starts open (unless a link asked for a specific one); every app is its own drop-down
@@ -344,8 +341,8 @@ export async function render(view, ctx) {
       const sec = SECTIONS.find(x => x.id === card.dataset.sec);
       const out = card.querySelector('[data-out]');
       if (sec.id === 'streamrip') bindTidal(card);
-      if (sec.id === 'cadenza') bindCadenzaCache(card);
-      if (sec.id === 'slskd') bindVpn(card, () => save(sec, true, card));
+      if (sec.id === 'cadenza') bindCadenzaCache(card, values);
+      if (sec.id === 'slskd') { bindVpn(card, () => save(sec, true, card)); bindSoulseek(card); }
       const paint = (r) => { out.innerHTML = `<div class="test-result ${r.ok ? 'ok' : 'err'}">${r.ok ? icon.check : icon.x}<span>${esc(r.message || (r.ok ? 'Connected' : 'Failed'))}</span></div>`; };
       card.querySelector('[data-save]').onclick = () => save(sec, false, card);
       card.querySelectorAll('[data-clear]').forEach(a => a.addEventListener('click', async (e) => {
@@ -408,8 +405,13 @@ export async function render(view, ctx) {
       else if (isMasked(el.value)) { /* never echo a mask back */ }
       else body[f.key] = f.type === 'password' || f.secret ? el.value.trim() : el.value;
     });
+    if (sec.id === 'cadenza') {
+      const engine = engineSettingsValue(root);
+      if (engine !== null && (meta.cadenza_engine_settings || {}).source !== 'env') body.cadenza_engine_settings = engine;
+    }
     try {
       values = await api.put('/admin/settings', body);
+      if (body.cadenza_engine_settings && ENGINE) ENGINE.values = JSON.parse(body.cadenza_engine_settings);
       if (!quiet) toast('Settings saved', 'ok');
       if (sec.id === 'general' && body.app_name) document.title = body.app_name;
     } catch (e) {
@@ -471,7 +473,8 @@ function fieldsHtml(fields, one) {
   const at = fields.findIndex(isVpn);
   if (at < 0) return `<div class="form-grid">${fields.map(one).join('')}</div>`;
   const rest = fields.filter(f => !isVpn(f));
-  return `<div class="form-grid">${rest.slice(0, at).map(one).join('')}</div>${vpnBlock(fields.filter(isVpn).map(one).join(''))}<div class="form-grid mt">${rest.slice(at).map(one).join('')}</div>`;
+  const after = rest.slice(at);
+  return `<div class="form-grid">${rest.slice(0, at).map(one).join('')}</div>${vpnBlock(fields.filter(isVpn).map(one).join(''))}${after.length ? `<div class="form-grid mt">${after.map(one).join('')}</div>` : ''}`;
 }
 
 // Settings → Soulseek → VPN for Soulseek: the WireGuard fields, the tunnel's state (polled every 5 s while the card is open) and Test VPN.
@@ -513,6 +516,7 @@ function cadenzaCacheBlock() {
       <div style="min-width:0"><b>Pre-render cache</b><div class="small muted" id="cadenza-cache-state">Checking…</div></div>
       <button class="btn sm" id="cadenza-cache-clear" type="button">${icon.trash}Clear cache</button>
     </div>
+    <div class="small muted mt" id="cadenza-engine">Engine: …</div>
   </div>`;
 }
 
@@ -525,10 +529,98 @@ export function cadenzaCacheText(c) {
   return `Cache: ${mb(c.used_mb)} MB of ${mb(c.max_mb)} MB · ${n} ${n === 1 ? 'song' : 'songs'}${f > 0 ? ` · renders at ${f.toFixed(1)}× real time` : ''}`;
 }
 
-function bindCadenzaCache(card) {
-  const state = card.querySelector('#cadenza-cache-state'), btn = card.querySelector('#cadenza-cache-clear');
+/** "Engine: Cadenza 2.1.0 (updated)" / "Engine: Cadenza (built in)" – `engine` of GET /playback/dsp. */
+export function cadenzaEngineText(e) {
+  return `Engine: ${e && e.source === 'updated' && e.version ? `Cadenza ${e.version} (updated)` : 'Cadenza (built in)'}`;
+}
+
+// Server processing → Engine settings: drawn only from the list the active engine gives (engine.settings in
+// GET /playback/dsp: `cadenza render --describe`, or the built-in engine's own), saved to cadenza_engine_settings.
+let ENGINE = null;   // { settings, values } of the engine the block was drawn for
+
+function engineSettingsBlock() {
+  return `<div class="card flat mt" id="cadenza-engine-settings" style="padding:12px 14px">
+    <b>Engine settings</b>
+    <div class="small muted" id="cadenza-engine-hint">Checking…</div>
+    <div class="form-grid mt" id="cadenza-engine-fields" hidden></div>
+  </div>`;
+}
+
+const ENGINE_TYPES = ['select', 'bool', 'number'];
+
+function engineDefaultText(s) {
+  if (s.type === 'bool') return s.default ? 'on' : 'off';
+  if (s.type === 'select') {
+    const o = (Array.isArray(s.options) ? s.options : []).find(o => String(o[0]) === String(s.default));
+    return o ? String(o[1]) : String(s.default ?? '');
+  }
+  return String(s.default ?? '');
+}
+
+/** One engine setting as a form field (data-ek = its key). A saved select value the engine no longer offers shows the default. */
+function engineField(s, v, locked) {
+  const dis = locked ? 'disabled' : '';
+  const k = esc(s.key);
+  const label = esc(s.label || s.key);
+  const help = `<small>${s.help ? `${esc(s.help)} · ` : ''}Default: ${esc(engineDefaultText(s))}</small>`;
+  if (s.type === 'bool') {
+    return `<div class="field" style="justify-content:center"><label class="switch"><input type="checkbox" data-ek="${k}" ${v ? 'checked' : ''} ${dis}><i></i>${label}</label>${help}</div>`;
+  }
+  if (s.type === 'select') {
+    const opts = Array.isArray(s.options) ? s.options : [];
+    const pick = opts.some(o => String(o[0]) === String(v)) ? v : s.default;
+    return `<label class="field"><span>${label}</span><select class="input" data-ek="${k}" ${dis}>${opts.map(([val, lab]) => `<option value="${esc(val)}" ${String(val) === String(pick) ? 'selected' : ''}>${esc(lab)}</option>`).join('')}</select>${help}</label>`;
+  }
+  const attr = (n) => (s[n] != null && Number.isFinite(Number(s[n])) ? ` ${n}="${esc(s[n])}"` : '');
+  return `<label class="field"><span>${label}</span><input class="input" type="number" data-ek="${k}"${attr('min')}${attr('max')}${attr('step')} value="${esc(v ?? '')}" autocomplete="off" ${dis}>${help}</label>`;
+}
+
+function paintEngineSettings(card, engine, locked) {
+  const hint = card.querySelector('#cadenza-engine-hint'), box = card.querySelector('#cadenza-engine-fields');
+  if (!hint || !box || box.dataset.loaded) return;
+  const settings = (engine && Array.isArray(engine.settings) ? engine.settings : []).filter(s => s && s.key && ENGINE_TYPES.includes(s.type));
+  const values = engine && engine.values && typeof engine.values === 'object' && !Array.isArray(engine.values) ? engine.values : {};
+  ENGINE = { settings, values };
+  box.dataset.loaded = '1';
+  if (!settings.length) { hint.textContent = 'This engine has no settings of its own.'; return; }
+  hint.textContent = `The settings of the engine in use. People’s own filter and dither choices under Settings → Playback still win for their streams.${locked ? ' Set by an environment variable.' : ''}`;
+  box.innerHTML = settings.map(s => engineField(s, Object.prototype.hasOwnProperty.call(values, s.key) ? values[s.key] : s.default, locked)).join('');
+  box.hidden = false;
+}
+
+/** The engine settings as the JSON text for cadenza_engine_settings (only values that differ from the default;
+ * keys this engine doesn't have stay as saved), or null when the block isn't drawn. */
+function engineSettingsValue(root) {
+  const box = root.querySelector('#cadenza-engine-fields');
+  if (!box || !box.dataset.loaded || !ENGINE) return null;
+  const out = { ...ENGINE.values };
+  box.querySelectorAll('[data-ek]').forEach(el => {
+    const s = ENGINE.settings.find(x => x.key === el.dataset.ek);
+    if (!s) return;
+    let v;
+    if (s.type === 'bool') v = el.checked;
+    else if (s.type === 'number') {
+      v = el.value.trim() === '' ? NaN : Number(el.value);
+      if (!Number.isFinite(v)) { delete out[s.key]; return; }
+    } else {
+      const o = (Array.isArray(s.options) ? s.options : []).find(o => String(o[0]) === el.value);
+      v = o ? o[0] : el.value;
+    }
+    if (s.type === 'number' ? v === Number(s.default) : JSON.stringify(v) === JSON.stringify(s.default)) delete out[s.key];
+    else out[s.key] = v;
+  });
+  return JSON.stringify(out);
+}
+
+function bindCadenzaCache(card, values) {
+  const state = card.querySelector('#cadenza-cache-state'), btn = card.querySelector('#cadenza-cache-clear'), line = card.querySelector('#cadenza-engine');
   if (!state) return;
-  const refresh = () => api.get('/playback/dsp').then(d => { state.textContent = cadenzaCacheText(d?.cache); }).catch(() => { state.textContent = 'Status unavailable'; });
+  const locked = (((values || {})._meta || {}).cadenza_engine_settings || {}).source === 'env';
+  const refresh = () => api.get('/playback/dsp').then(d => {
+    state.textContent = cadenzaCacheText(d?.cache);
+    if (line) line.textContent = cadenzaEngineText(d?.engine);
+    paintEngineSettings(card, d?.engine, locked);
+  }).catch(() => { state.textContent = 'Status unavailable'; });
   refresh();
   btn.onclick = async (e) => {
     e.preventDefault();
@@ -537,6 +629,45 @@ function bindCadenzaCache(card) {
     btn.disabled = false;
     refresh();
   };
+}
+
+// Settings → Soulseek: how Encore's Soulseek engine is doing (GET /soulseek/status), asked again every 5 s while
+// the card is open. The listen port is hidden while the VPN is on (the VPN's forwarded port is used).
+function soulseekStatusBlock() {
+  return `<div class="card flat mt" id="slsk-engine" style="padding:12px 14px">
+    <b>Status</b>
+    <div class="small muted" id="slsk-engine-state">Checking…</div>
+  </div>`;
+}
+
+/** "Running v0.24.1 · signed in as alice" / "Not installed · Install or update it under Download tools" / "Waiting for the VPN" … */
+export function soulseekStateHtml(r) {
+  if (!r || typeof r !== 'object') return 'Status unavailable';
+  const red = (t) => `<span style="color:var(--err)">${esc(t)}</span>`;
+  const v = r.version ? ` v${esc(String(r.version).replace(/^v/, ''))}` : '';
+  let line;
+  if (r.state === 'not_installed') line = 'Not installed';
+  else if (r.state === 'starting') line = `Starting…${r.error ? ` · ${red(r.error)}` : ''}`;
+  else if (r.state === 'running') line = `Running${v}${r.logged_in ? ` · signed in as ${esc(r.username || '?')}` : r.error ? ` · ${red(r.error)}` : ' · signing in…'}`;
+  else if (r.state === 'crashed') line = red(`Crashed${r.error ? ` – ${r.error}` : ''}`);
+  else if (r.state === 'waiting_vpn') line = 'Waiting for the VPN';
+  else line = r.enabled === false ? 'Off – switch on Enable Soulseek and save' : 'Off';
+  return r.hint ? `${line} · ${esc(r.hint)}` : line;
+}
+
+function bindSoulseek(card) {
+  const vpn = card.querySelector('[data-k="vpn_enabled"]'), port = card.querySelector('[data-k="soulseek_port"]');
+  const field = port && port.closest('.field');
+  if (vpn && field) {
+    const sync = () => { field.hidden = vpn.checked; };
+    sync();
+    vpn.addEventListener('change', sync);
+  }
+  const state = card.querySelector('#slsk-engine-state');
+  if (!state) return;
+  const refresh = () => api.get('/soulseek/status').then(r => { state.innerHTML = soulseekStateHtml(r); }).catch(() => { state.textContent = 'Status unavailable'; });
+  refresh();
+  const timer = setInterval(() => { if (!card.isConnected) return clearInterval(timer); if (card.open) refresh(); }, 5000);
 }
 
 function bindTidal(card) {
@@ -596,25 +727,34 @@ function bindTidal(card) {
   };
 }
 
-// Settings → Apps & sources → Download tools: yt-dlp and streamrip update in place (kept in the config
-// folder, so no new Encore image is needed); Soulseek and slskd are listed with their version only.
+// Settings → Apps & sources → Download tools: yt-dlp, streamrip, Cadenza (server processing) and slskd
+// (Soulseek engine) update in place – kept in the config folder, so no new Encore image is needed.
 const TOOL_SPIN = '<span class="spinner" style="width:10px;height:10px;border-width:2px"></span>';
 const toolList = (r) => Array.isArray(r) ? r : (r && Array.isArray(r.tools) ? r.tools : []);
-const toolUpdatable = (t) => t.id === 'ytdlp' || t.id === 'streamrip';
+const toolUpdatable = (t) => !!t.updatable;
+/** The reset link of a row: Cadenza goes back to the engine built into Encore, slskd is removed, the rest go back to the bundled copy. */
+const TOOL_RESET = {
+  cadenza: { link: 'Use the built-in engine', ask: 'Go back to the engine built into Encore? The downloaded Cadenza is removed.', done: 'Back to the built-in engine' },
+  slskd: { link: 'Remove slskd', ask: 'Remove slskd? Soulseek stays off until you install it again.', done: 'slskd removed' },
+};
+const toolReset = (t) => TOOL_RESET[t.id] || { link: 'Use the bundled version', ask: `Go back to the ${t.name || t.id} version that came with Encore? The updated copy is removed.`, done: `Back to the bundled ${t.name || t.id}` };
+/** slskd is installed by Encore, not bundled: before that its button says Install. */
+const toolInstall = (t) => t.id === 'slskd' && !t.installed;
 
 function toolRow(t, busy) {
   let action = '';
-  if (busy === t.id) action = `<button class="btn sm" type="button" disabled>${TOOL_SPIN} Updating…</button>`;
+  if (busy === t.id) action = `<button class="btn sm" type="button" disabled>${TOOL_SPIN} ${toolInstall(t) ? 'Installing…' : 'Updating…'}</button>`;
+  else if (toolInstall(t) && toolUpdatable(t)) action = `<button class="btn sm primary" type="button" data-tool-update="${esc(t.id)}" ${busy ? 'disabled' : ''}>${icon.download}Install${t.latest ? ` ${esc(t.latest)}` : ''}</button>`;
   else if (t.update_available && toolUpdatable(t)) action = `<button class="btn sm primary" type="button" data-tool-update="${esc(t.id)}" ${busy ? 'disabled' : ''}>${icon.download}Update to ${esc(t.latest || '')}</button>`;
   else if (t.update_available) action = `<span class="badge warn">${esc(t.latest || '')} available</span>`;
   else if (t.latest) action = `<span class="badge ok">${icon.check} Up to date</span>`;
   else if (toolUpdatable(t)) action = '<span class="small faint">Not checked yet</span>';
-  const updated = t.source === 'updated';
+  const updated = t.source === 'updated' && t.id !== 'slskd';
   return `<div class="list-item" style="align-items:flex-start;flex-wrap:wrap;gap:12px" data-tool="${esc(t.id)}">
       <div class="grow" style="min-width:200px"><div style="font-weight:650">${esc(t.name || t.id)} <span class="small muted mono">${t.installed ? esc(t.installed) : 'not installed'}</span>${updated ? ' <span class="small muted">(updated)</span>' : ''}</div>
         ${t.note ? `<div class="small muted">${esc(t.note)}</div>` : ''}
         ${t.error ? `<div class="small" style="color:var(--err)">${esc(t.error)}</div>` : ''}
-        ${updated && toolUpdatable(t) ? `<a href="#" class="small muted" data-tool-reset="${esc(t.id)}" ${busy ? 'hidden' : ''}>Use the bundled version</a>` : ''}</div>
+        ${t.resettable && toolUpdatable(t) ? `<a href="#" class="small muted" data-tool-reset="${esc(t.id)}" ${busy ? 'hidden' : ''}>${esc(toolReset(t).link)}</a>` : ''}</div>
       <div class="row" style="gap:8px;align-items:center">${action}</div></div>`;
 }
 
@@ -630,12 +770,14 @@ async function renderTools(host, getValues, setValues) {
     return `<label class="switch"><input type="checkbox" data-tool-auto="${key}" ${values[key] ? 'checked' : ''} ${locked ? 'disabled' : ''}><i></i>${esc(label)}</label>`;
   };
   const toggles = toggle('tools_auto_ytdlp', 'Update yt-dlp automatically (recommended – sites change often)')
-    + toggle('tools_auto_streamrip', 'Update streamrip automatically when a new release is out');
+    + toggle('tools_auto_streamrip', 'Update streamrip automatically when a new release is out')
+    + toggle('tools_auto_cadenza', 'Update Cadenza automatically when a new release is out')
+    + toggle('tools_auto_slskd', 'Update slskd automatically when a new release is out');
   host.innerHTML = `<div class="card" id="tools-card" style="margin-bottom:12px">
     <div class="row between" style="margin-bottom:8px;gap:10px"><h2>Download tools</h2><button class="btn sm" type="button" id="tools-check">${icon.refresh}Check for updates</button></div>
-    <p class="muted small" style="margin:0 0 14px">yt-dlp and streamrip update in place – no new Encore image needed. Updates are kept in the config folder.</p>
+    <p class="muted small" style="margin:0 0 14px">yt-dlp, streamrip, Cadenza and slskd update in place – no new Encore image needed. Updates are kept in the config folder.</p>
     <div class="list" id="tools-list"></div>
-    <div class="stack mt" style="gap:8px">${toggles}<div class="small muted">Checked daily – change it under <a href="#/settings?s=tasks">Scheduled tasks</a>.</div></div>
+    <div class="stack mt" style="gap:8px">${toggles}<div class="small muted">Every tool is checked daily; updates install by themselves only where the switch is on. Change the schedule under <a href="#/settings?s=tasks">Scheduled tasks</a>.</div></div>
   </div>`;
   const list = host.querySelector('#tools-list'), check = host.querySelector('#tools-check');
   const paint = () => {
@@ -654,20 +796,21 @@ async function renderTools(host, getValues, setValues) {
     const up = e.target.closest('[data-tool-update]'), reset = e.target.closest('[data-tool-reset]');
     if (up && !busy) {
       const id = up.dataset.toolUpdate;
-      const name = (tools.find(t => t.id === id) || {}).name || id;
+      const tool = tools.find(t => t.id === id) || {};
+      const name = tool.name || id, install = toolInstall(tool);
       busy = id; paint();
       try {
         const r = await api.post(`/system/tools/${id}/update`);
-        toast(`${name} updated to ${r.installed || r.latest || ''}`, 'ok');
+        toast(`${name} ${install ? 'installed' : 'updated to'} ${r.installed || r.latest || ''}`, 'ok');
       } catch (err) { toast(err.message, 'err'); }
       busy = null;
       await reload(); paint();
     } else if (reset && !busy) {
       e.preventDefault();
       const id = reset.dataset.toolReset;
-      const name = (tools.find(t => t.id === id) || {}).name || id;
-      if (!confirm(`Go back to the ${name} version that came with Encore? The updated copy is removed.`)) return;
-      try { await api.post(`/system/tools/${id}/reset`); toast(`Back to the bundled ${name}`, 'ok'); } catch (err) { toast(err.message, 'err'); }
+      const how = toolReset(tools.find(t => t.id === id) || { id });
+      if (!confirm(how.ask)) return;
+      try { await api.post(`/system/tools/${id}/reset`); toast(how.done, 'ok'); } catch (err) { toast(err.message, 'err'); }
       await reload(); paint();
     }
   };
@@ -946,7 +1089,7 @@ function pipelineHelp() {
       <li><b>Library check</b> – if the album/track is already in your library (by MusicBrainz id or name) it's marked available instantly.</li>
       <li><b>streamrip</b> – lossless from Qobuz, Tidal or Deezer with your own accounts, matched by ISRC.</li>
       <li><b>Torrents & Usenet</b> – Prowlarr searches your indexers; the best album release goes to qBittorrent or SABnzbd and is imported when it finishes. If it stalls past the timeout, the next release or source is tried.</li>
-      <li><b>Soulseek</b> – the built-in client (or slskd) searches the network, results are ranked by track count, format, bitrate, folder name and the uploader's free slots/speed. Stalled or failed users are skipped automatically.</li>
+      <li><b>Soulseek</b> – Encore searches the network, results are ranked by track count, format, bitrate, folder name and the uploader's free slots/speed. Stalled or failed users are skipped automatically.</li>
       <li><b>yt-dlp</b> – each track from the MusicBrainz tracklist is matched on YouTube (preferring official "Topic" uploads with matching length).</li>
       <li><b>Import</b> – files are matched to the MusicBrainz release, tagged (incl. MBIDs, ISRCs, cover art), renamed with your template, and your media servers are refreshed.</li>
     </ol></div>`;

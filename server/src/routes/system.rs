@@ -48,24 +48,30 @@ async fn tools_check(State(st): State<AppState>, Admin(_): Admin) -> ApiResult<J
     Ok(Json(crate::tools::check(&st).await))
 }
 
-/// "Update to X": installs the newest yt-dlp or streamrip into the config dir.
+/// "Update to X" / "Install": the newest yt-dlp or streamrip into the config dir, Cadenza's or slskd's
+/// newest release.
 async fn tools_update(State(st): State<AppState>, Admin(u): Admin, Path(id): Path<String>) -> ApiResult<Json<crate::tools::ToolInfo>> {
-    if id != "ytdlp" && id != "streamrip" {
-        return Err(err(404, "Only yt-dlp and streamrip can be updated from Encore"));
+    if !crate::tools::IDS.contains(&id.as_str()) {
+        return Err(err(404, "Unknown tool"));
     }
-    st.db.log("info", &format!("{} started an update of {}", u.s("username"), if id == "ytdlp" { "yt-dlp" } else { "streamrip" }));
+    st.db.log("info", &format!("{} started an update of {}", u.s("username"), crate::tools::label(&id)));
     crate::tools::update(&st, &id).await.map(Json).map_err(|e| err(400, e.to_string()))
 }
 
-/// "Use the bundled version": removes the updated copy.
+/// "Use the bundled version" / "Use the built-in engine" (Cadenza) / "Remove slskd": removes the updated copy.
 async fn tools_reset(State(st): State<AppState>, Admin(u): Admin, Path(id): Path<String>) -> ApiResult<Json<Vec<crate::tools::ToolInfo>>> {
-    if id != "ytdlp" && id != "streamrip" {
-        return Err(err(404, "Only yt-dlp and streamrip have an updated copy"));
+    if !crate::tools::IDS.contains(&id.as_str()) {
+        return Err(err(404, "Unknown tool"));
     }
     let st2 = st.clone();
     let id2 = id.clone();
     tokio::task::spawn_blocking(move || crate::tools::reset(&st2, &id2)).await.map_err(|e| err(500, e.to_string()))?.map_err(|e| err(400, e.to_string()))?;
-    st.db.log("info", &format!("{} went back to the bundled {}", u.s("username"), if id == "ytdlp" { "yt-dlp" } else { "streamrip" }));
+    let what = match id.as_str() {
+        "cadenza" => "went back to the built-in Cadenza engine".to_string(),
+        "slskd" => "removed slskd".to_string(),
+        _ => format!("went back to the bundled {}", crate::tools::label(&id)),
+    };
+    st.db.log("info", &format!("{} {what}", u.s("username")));
     Ok(Json(tokio::task::spawn_blocking(move || crate::tools::cached(&st)).await.map_err(|e| err(500, e.to_string()))?))
 }
 
@@ -205,11 +211,21 @@ fn disk(path: &str) -> Value {
 async fn status(State(st): State<AppState>, User(me): User) -> ApiResult<Json<Value>> {
     let mbv = tokio::time::timeout(std::time::Duration::from_secs(10), st.mb.get(&st, "artist", &[("query", "test".into()), ("limit", "1".into())])).await;
     let mb = match mbv { Ok(Ok(_)) => json!({ "ok": true }), Ok(Err(e)) => json!({ "ok": false, "error": e.to_string() }), Err(_) => json!({ "ok": false, "error": "timed out" }) };
-    let sl = if slskd::enabled(&st) {
-        match tokio::time::timeout(std::time::Duration::from_secs(10), slskd::status(&st)).await {
-            Ok(Ok(v)) => json!({ "ok": true, "version": v["version"]["full"].as_str().or(v["version"].as_str()) }),
-            Ok(Err(e)) => json!({ "ok": false, "error": e.to_string() }),
-            Err(_) => json!({ "ok": false, "error": "timed out" }),
+    // Soulseek: the engine's state, and once it runs its own sign-in to the Soulseek server
+    let sl = if crate::slskd_managed::configured(&st) {
+        let m = crate::slskd_managed::status();
+        if m["state"] != "running" {
+            json!({ "ok": false, "state": m["state"], "version": m["version"], "error": m["error"] })
+        } else {
+            match tokio::time::timeout(std::time::Duration::from_secs(10), slskd::status(&st)).await {
+                Ok(Ok(v)) => {
+                    let server = v["server"]["state"].as_str().unwrap_or("").to_string();
+                    let ok = v["server"]["isLoggedIn"].as_bool().unwrap_or_else(|| server.contains("LoggedIn"));
+                    json!({ "ok": ok, "state": "running", "version": m["version"], "server": server, "error": if ok { Value::Null } else { json!(format!("Soulseek server: {server}")) } })
+                }
+                Ok(Err(e)) => json!({ "ok": false, "state": "running", "version": m["version"], "error": e.to_string() }),
+                Err(_) => json!({ "ok": false, "state": "running", "version": m["version"], "error": "timed out" }),
+            }
         }
     } else {
         json!({ "ok": false, "enabled": false })
@@ -292,18 +308,28 @@ async fn test(State(st): State<AppState>, Admin(u): Admin, Path(service): Path<S
     let res: anyhow::Result<Value> = async {
         Ok(match service.as_str() {
             "slskd" => {
-                let s = slskd::status(&st).await?;
-                if s["soulseek"].is_object() {
-                    let x = &s["soulseek"];
-                    let ok = x["logged_in"].as_bool().unwrap_or(false);
-                    let err = x["error"].as_str().unwrap_or("");
-                    let text = if ok {
-                        format!("Built-in Soulseek client signed in as {} · sharing {} files in {} folders · port {}{}", x["username"].as_str().unwrap_or(""),
-                            x["shares"]["files"], x["shares"]["dirs"], x["listen_port"], if x["parent"].is_string() { "" } else { " · no distributed parent yet (searches from others arrive once one is found)" })
-                    } else if !err.is_empty() { format!("Not signed in: {err}") } else { "Connecting to the Soulseek server…".to_string() };
-                    msg(ok, text)
+                let m = crate::slskd_managed::status();
+                let vpn = crate::vpn::summary(&crate::vpn::status());
+                let state = m["state"].as_str().unwrap_or("off");
+                let ver = m["version"].as_str().map(|v| format!(" {v}")).unwrap_or_default();
+                if !crate::slskd_managed::configured(&st) {
+                    msg(false, format!("Soulseek is off or has no username and password · {vpn}"))
+                } else if state != "running" {
+                    let what = match state {
+                        "not_installed" => "not installed – install or update it under Download tools (slskd – Soulseek engine)".to_string(),
+                        "starting" => format!("engine{ver} starting"),
+                        "waiting_vpn" => "waiting for the VPN".to_string(),
+                        "crashed" => format!("engine{ver} crashed"),
+                        _ => "off".to_string(),
+                    };
+                    let err = m["error"].as_str().filter(|e| !e.is_empty() && state != "not_installed" && state != "waiting_vpn").map(|e| format!(" – {e}")).unwrap_or_default();
+                    msg(false, format!("Soulseek: {what}{err} · {vpn}"))
                 } else {
-                    msg(true, format!("slskd {} – server {}", s["version"]["full"].as_str().unwrap_or(""), s["server"]["state"].as_str().unwrap_or("unknown")))
+                    let s = slskd::status(&st).await?;
+                    let server = s["server"]["state"].as_str().unwrap_or("unknown");
+                    let ok = s["server"]["isLoggedIn"].as_bool().unwrap_or_else(|| server.contains("LoggedIn"));
+                    let port = m["listen_port"].as_u64().map(|p| format!(" · port {p}")).unwrap_or_default();
+                    msg(ok, format!("Soulseek engine{ver} running · server: {server}{port} · {vpn}"))
                 }
             }
             "musicbrainz" => {
@@ -337,7 +363,7 @@ async fn test(State(st): State<AppState>, Admin(u): Admin, Path(service): Path<S
                 } else {
                     match crate::dsp::self_test(&st).await {
                         Ok(m) => msg(true, m),
-                        Err(e) => msg(false, format!("Cadenza: {e}")),
+                        Err(e) => msg(false, if e.starts_with("Cadenza") { e } else { format!("Cadenza: {e}") }),
                     }
                 }
             }

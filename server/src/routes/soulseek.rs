@@ -1,12 +1,12 @@
 //! /api/soulseek: the Soulseek page – search the network and watch answers arrive, browse a user's
 //! shares, download files or folders as requests (the worker fetches, tags and imports them like a
-//! manual pick), and follow the transfers. Same API over the built-in client and over slskd.
+//! manual pick), and follow the transfers – all through the Soulseek engine Encore runs (slskd).
 use crate::auth::{self, User};
 use crate::db::Row;
 use crate::error::{err, ApiError, ApiResult};
 use crate::routes::picker::create_pick;
 use crate::routes::requests::{quota, NewRequest};
-use crate::soulseek;
+use crate::slskd_managed;
 use crate::sources::slskd;
 use crate::state::AppState;
 use axum::extract::{Path, State};
@@ -75,35 +75,45 @@ fn sweep(st: &AppState) {
 
 // ---- status --------------------------------------------------------------------------------------
 
+/// The Soulseek line for the Soulseek page and Settings: whether it's on, the engine's state
+/// (off | not_installed | starting | running | crashed | waiting_vpn) and, once it runs, the sign-in.
 async fn status(State(st): State<AppState>, User(u): User) -> ApiResult<Json<Value>> {
-    gate(&st, &u)?;
-    let builtin = soulseek::wanted(&st);
-    let mut out = json!({ "enabled": true, "client": if builtin { "builtin" } else { "slskd" }, "logged_in": false, "username": "", "error": "",
-        "shares": { "dirs": 0, "files": 0 }, "port": null, "parent": null, "downloads": 0, "uploads": 0 });
+    if !auth::can(&st, &u, "pick") {
+        return Err(err(403, "Ask an admin for permission to pick downloads"));
+    }
+    let m = slskd_managed::status();
+    let state = m["state"].as_str().unwrap_or("off");
+    let installed = slskd_managed::installed_version(&st);
+    let mut out = json!({ "enabled": slskd::enabled(&st), "configured": slskd_managed::configured(&st), "client": "managed",
+        "state": state, "version": m["version"].clone(), "installed": installed, "vpn": m["vpn"], "hint": "",
+        "logged_in": false, "username": "", "error": m["error"].as_str().unwrap_or(""),
+        "shares": { "dirs": 0, "files": 0 }, "port": m["listen_port"], "parent": null, "downloads": 0, "uploads": 0 });
+    if installed.is_none() {
+        out["hint"] = json!("Install or update it under Download tools");
+    }
+    if !slskd::enabled(&st) || state != "running" {
+        return Ok(Json(out));
+    }
     let s = match tokio::time::timeout(Duration::from_secs(10), slskd::status(&st)).await {
         Ok(Ok(v)) => v,
         Ok(Err(e)) => { out["error"] = json!(e.to_string()); return Ok(Json(out)); }
         Err(_) => { out["error"] = json!("timed out"); return Ok(Json(out)); }
     };
-    if builtin {
-        let x = &s["soulseek"];
-        for (k, v) in [("logged_in", &x["logged_in"]), ("username", &x["username"]), ("error", &x["error"]), ("port", &x["listen_port"]), ("parent", &x["parent"]),
-                       ("downloads", &x["downloads"]), ("uploads", &x["uploads"])] {
-            out[k] = v.clone();
-        }
-        out["shares"] = json!({ "dirs": x["shares"]["dirs"], "files": x["shares"]["files"] });
-    } else {
-        // slskd's /application: server.state reads "Connected, LoggedIn" once it is in; no listen port there
-        let srv = &s["server"];
-        let state = srv["state"].as_str().unwrap_or("");
-        let logged_in = srv["isLoggedIn"].as_bool().unwrap_or_else(|| state.contains("LoggedIn"));
-        out["logged_in"] = json!(logged_in);
-        out["username"] = srv["username"].as_str().or(s["user"]["username"].as_str()).unwrap_or("").into();
-        out["error"] = json!(if logged_in || state.is_empty() { "" } else { state });
-        out["shares"] = json!({ "dirs": s["shares"]["directories"].as_u64().unwrap_or(0), "files": s["shares"]["files"].as_u64().unwrap_or(0) });
-        out["parent"] = s["distributedNetwork"]["parent"].as_str().filter(|p| !p.is_empty()).into();
-        out["downloads"] = json!(slskd::all_downloads(&st).await.map(|d| d.len()).unwrap_or(0));
+    // slskd's /application: server.state reads "Connected, LoggedIn" once it is in
+    let srv = &s["server"];
+    let sstate = srv["state"].as_str().unwrap_or("");
+    let logged_in = srv["isLoggedIn"].as_bool().unwrap_or_else(|| sstate.contains("LoggedIn"));
+    out["logged_in"] = json!(logged_in);
+    out["username"] = srv["username"].as_str().or(s["user"]["username"].as_str()).unwrap_or("").into();
+    out["error"] = json!(if logged_in || sstate.is_empty() { "" } else { sstate });
+    out["shares"] = json!({ "dirs": s["shares"]["directories"].as_u64().unwrap_or(0), "files": s["shares"]["files"].as_u64().unwrap_or(0) });
+    out["parent"] = s["distributedNetwork"]["parent"].as_str().filter(|p| !p.is_empty()).into();
+    if let Some(v) = s["version"]["current"].as_str().or(s["version"]["full"].as_str()) {
+        out["version"] = json!(crate::tools::extract_version(v).unwrap_or_else(|| v.to_string()));
     }
+    let (d, up) = tokio::join!(slskd::all_downloads(&st), slskd::all_uploads(&st));
+    out["downloads"] = json!(d.map(|d| d.len()).unwrap_or(0));
+    out["uploads"] = json!(up.map(|u| u.len()).unwrap_or(0));
     Ok(Json(out))
 }
 
@@ -318,27 +328,18 @@ fn guess(directory: &str, filename: &str) -> (String, String, String) {
 async fn transfers(State(st): State<AppState>, User(u): User) -> ApiResult<Json<Value>> {
     gate(&st, &u)?;
     let dir_of = |n: &str| n.rsplit_once('\\').map(|(d, _)| d.to_string()).unwrap_or_default();
-    if soulseek::wanted(&st) {
-        let Some(c) = soulseek::client() else { return Ok(Json(json!({ "downloads": [], "uploads": [] }))) };
-        let downloads: Vec<Value> = c.downloads().into_iter().map(|d| {
-            let name = d["filename"].as_str().unwrap_or("");
-            json!({ "id": d["id"], "username": d["username"], "filename": name, "directory": dir_of(name), "basename": d["basename"], "state": d["state"],
-                "progress": d["percentComplete"], "bytes": d["bytesTransferred"], "size": d["size"], "speed": d["averageSpeed"], "error": d["error"] })
-        }).collect();
-        let uploads: Vec<Value> = c.uploads().into_iter().map(|x| {
-            let name = x["filename"].as_str().unwrap_or("");
-            json!({ "id": x["id"], "username": x["username"], "filename": name, "basename": name.rsplit('\\').next().unwrap_or(name), "state": x["state"],
-                "bytes": x["bytesTransferred"], "size": x["size"] })
-        }).collect();
-        return Ok(Json(json!({ "downloads": downloads, "uploads": uploads })));
-    }
-    // slskd shares nothing of ours, so there are no uploads to show
     let downloads: Vec<Value> = slskd::all_downloads(&st).await.map_err(upstream)?.into_iter().map(|d| {
         let name = d["path"].as_str().unwrap_or("");
         json!({ "id": d["id"], "username": d["username"], "filename": name, "directory": dir_of(name), "basename": d["filename"], "state": d["state"],
             "progress": d["progress"], "bytes": d["bytes"].as_u64().unwrap_or(0), "size": d["size"], "speed": d["speed"], "error": d["error"].as_str().unwrap_or("") })
     }).collect();
-    Ok(Json(json!({ "downloads": downloads, "uploads": [] })))
+    // uploads are a nicety: a failure there doesn't hide the downloads
+    let uploads: Vec<Value> = slskd::all_uploads(&st).await.unwrap_or_default().into_iter().map(|x| {
+        let name = x["path"].as_str().unwrap_or("");
+        json!({ "id": x["id"], "username": x["username"], "filename": name, "basename": x["filename"], "state": x["state"],
+            "bytes": x["bytes"].as_u64().unwrap_or(0), "size": x["size"] })
+    }).collect();
+    Ok(Json(json!({ "downloads": downloads, "uploads": uploads })))
 }
 
 async fn cancel(State(st): State<AppState>, User(u): User, Path((username, id)): Path<(String, String)>) -> ApiResult<Json<Value>> {

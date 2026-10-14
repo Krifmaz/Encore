@@ -20,7 +20,7 @@ Encore is a single Rust program with the web app built in: fast, small, and no L
 - **YouTube Music**: playlists, albums and your Liked Music import with proper artist and album data. Connect your account for two-way 👍 sync and playlist push. Songs and whole albums are downloaded from official YouTube Music uploads in the original stream quality (256 kbps with Premium cookies).
 - **Admin → Auto-download** controls what downloads on its own (liked songs from any app, new tracks in followed playlists), the album and quality rules, lossless upgrades, and which users have it switched on.
 - **Manual download picker**: *Pick download* on any album or song, or *Pick* on a request. It searches Soulseek, Deezer, YouTube Music and your Prowlarr indexers at once and shows each result's quality, bit depth, size, file count and uploader queue/speed. You choose the exact one, or paste any link. Admins can limit it to admins in Settings.
-- **Soulseek page** (menu → Soulseek, for everyone allowed to pick downloads): search the network directly, browse any user's shared folders, download whole folders or a tick-list of files (they become ordinary requests, tagged and imported like any other), and watch downloads and uploads under *Transfers*. Works with the built-in client and with slskd.
+- **Soulseek page** (menu → Soulseek, for everyone allowed to pick downloads): search the network directly, browse any user's shared folders, download whole folders or a tick-list of files (they become ordinary requests, tagged and imported like any other), and watch downloads and uploads under *Transfers*. Runs on the Soulseek engine Encore manages (Settings → Download tools).
 - **Song or whole album, per request**: in Discover, *Song* or *+ Album*. In the Downloader, *Just the song / Get the whole album / Admin default*, which also applies to playlist imports.
 - **Downloader**: a Spotify, Apple Music, Deezer, Tidal or Qobuz link (playlist, album or track) is matched track by track, and each song is fetched from the best source. YouTube, SoundCloud, Bandcamp, Mixcloud and about 1,800 other sites download directly.
 - **Playlists and Liked Songs**:
@@ -86,26 +86,18 @@ A database written by a newer Encore is never touched by an older one: the serve
 
 Encore and the download clients must see the **same files at the same paths**:
 
-| Host folder | Encore | slskd (optional) | qBittorrent / SABnzbd |
-|---|---|---|---|
-| Music library | `/music` | `/music` (read-only share) | – |
-| Downloads | `/downloads` | `/downloads` | `/downloads` |
+| Host folder | Encore | qBittorrent / SABnzbd |
+|---|---|---|
+| Music library | `/music` | – |
+| Downloads | `/downloads` | `/downloads` |
 
-**Soulseek** is built in: no slskd container needed. In *Settings → Apps & sources → Soulseek*, turn it on and enter a username and password (or set `SOULSEEK_USERNAME` / `SOULSEEK_PASSWORD`). There is no sign-up form on Soulseek: the account is created the first time a new username and password log in. Don't use the same login in slskd or another Soulseek client at the same time, because the network signs the other one out. Forward TCP port 2234 on your router to Encore (the compose file publishes it; change it with `SOULSEEK_PORT`) so users behind firewalls can send to you. Downloads land in `/downloads/slskd` (the downloads folder setting) and are imported from there. Encore shares your library back to the network, read-only and only the library folder, with 2 upload slots by default (`SOULSEEK_SHARE`, `SOULSEEK_UPLOAD_SLOTS`): the network runs on sharing, and many users refuse downloads to people who share nothing. *Test connection* shows whether you are signed in, how many files are shared and the port.
+**Soulseek** is run by Encore, inside the Encore container: no separate container. Encore uses [slskd](https://github.com/slskd/slskd) as its Soulseek engine, downloads it itself and runs it headless (no web UI of its own) on 127.0.0.1. The first time, open *Settings → Download tools* and press **Install** on *slskd – Soulseek engine*; later releases show up there as **Update** (or switch on *Update slskd automatically*). Nothing is downloaded by itself unless that switch is on.
 
-- **Using slskd instead**: set `SOULSEEK_CLIENT=slskd` (or pick *slskd (external)* under *Client*), uncomment the slskd service in the compose file and fill in `SLSKD_URL` / `SLSKD_API_KEY`. slskd saves to `/downloads/slskd`, and Encore imports from there. Add an API key to `slskd.yml` (in slskd's `/app` folder). Limit the key to private networks, which covers every Docker network:
+In *Settings → Apps & sources → Soulseek*, turn it on and enter a username and password (or set `SOULSEEK_USERNAME` / `SOULSEEK_PASSWORD`). There is no sign-up form on Soulseek: the account is created the first time a new username and password log in. Don't use the same login in another Soulseek client at the same time, because the network signs the other one out. Forward TCP port 2234 on your router to Encore (the compose file publishes it; change it with `SOULSEEK_PORT`) so users behind firewalls can send to you. Downloads land in `/downloads/slskd` (the downloads folder setting; unfinished files in its `.incomplete` folder) and are imported from there. Encore shares your library back to the network, read-only and only the library folder, with 2 upload slots by default (`SOULSEEK_SHARE`, `SOULSEEK_UPLOAD_SLOTS`): the network runs on sharing, and many users refuse downloads to people who share nothing. The Soulseek card shows the engine's state (not installed, starting, running, crashed, waiting for the VPN); *Test connection* adds whether it is signed in to the Soulseek server.
 
-  ```yaml
-  web:
-    authentication:
-      api_keys:
-        encore:
-          key: <same value as SLSKD_API_KEY>
-          cidr: 10.0.0.0/8,172.16.0.0/12,192.168.0.0/16
-  ```
+Encore writes the engine's settings (`/config/slskd/slskd.yml`) from its own every time it starts it, restarts it when they change or when it stops, and keeps its output in `/config/slskd/encore-run.log`. The program itself lives in `/config/tools/slskd`; *Remove slskd* under Download tools deletes it (its database under `/config/slskd` stays). Upgrading from an Encore with the built-in client or an external slskd container: the login, port, share and folder settings carry over; the old *Client*, *slskd URL/API key* and *listen port from a file* settings are gone, and an slskd container can be removed.
 
-  - **slskd behind gluetun** (`network_mode: container:gluetun-slsk`): slskd has no hostname of its own, so use the VPN container's name, e.g. `SLSKD_URL=http://gluetun-slsk:5030`.
-- **Built-in client through a VPN**: Encore has WireGuard built in and sends only Soulseek through it. Tidal, Qobuz, Deezer, Spotify, metadata and the web UI keep your normal connection, so streaming services don't refuse the VPN address. In *Settings → Apps & sources → Soulseek → VPN for Soulseek*, turn on *Send Soulseek through a VPN* and paste the whole WireGuard `.conf` file from your VPN provider (ProtonVPN: *Downloads → WireGuard configuration*, with NAT-PMP port forwarding on), or set `VPN_ENABLED=true` and `VPN_WIREGUARD_CONFIG`. With *Port forwarding* on NAT-PMP, the port the VPN forwards becomes the Soulseek listen port and is followed when it changes (the listen port settings are ignored while the VPN is on). *Keep Soulseek off while the VPN is down* (on by default) stops Soulseek from connecting directly when the tunnel is not up. *Test VPN* shows the handshake, forwarded port and public IP; Diagnostics has the same line. It runs in user space: no gluetun, no `NET_ADMIN`, no tun device, and no Soulseek port to publish:
+- **Soulseek through a VPN**: Encore has WireGuard built in and sends only Soulseek through it. Tidal, Qobuz, Deezer, Spotify, metadata and the web UI keep your normal connection, so streaming services don't refuse the VPN address. In *Settings → Apps & sources → Soulseek → VPN for Soulseek*, turn on *Send Soulseek through a VPN* and paste the whole WireGuard `.conf` file from your VPN provider (ProtonVPN: *Downloads → WireGuard configuration*, with NAT-PMP port forwarding on), or set `VPN_ENABLED=true` and `VPN_WIREGUARD_CONFIG`. The engine then reaches the network only through a local SOCKS5 proxy into the tunnel (the Soulseek server, peers, transfers and the distributed network; the server's address is looked up through the VPN's DNS too), and listens on 127.0.0.1 only. With *Port forwarding* on NAT-PMP, the port the VPN forwards becomes the Soulseek listen port, is relayed in from the tunnel and is followed when it changes (the listen port setting is hidden while the VPN is on). *Keep Soulseek off while the VPN is down* (on by default) stops the engine while the tunnel is not up. *Test VPN* shows the handshake, forwarded port and public IP; Diagnostics has the same line. It runs in user space: no gluetun, no `NET_ADMIN`, no tun device, and no Soulseek port to publish:
 
   ```yaml
   encore:
@@ -113,10 +105,6 @@ Encore and the download clients must see the **same files at the same paths**:
     environment: [PUID=1000, PGID=1000, TZ=America/Detroit, ENCORE_LIBRARY_PATH=/music]
     ports: ["8080:8080"]
   ```
-
-  Running Encore inside gluetun still works (`SOULSEEK_PORT_FILE=/gluetun/forwarded_port`, see the commented block in `docker-compose.yml`), but then every service sees the VPN address.
-  - **slskd permissions:** slskd ignores `PUID`/`PGID`. Run it with `user: "1000:1000"` and `chown -R 1000:1000` its config, downloads and incomplete folders, or it can't write to them.
-  - Since slskd 0.26.0 the top-level `permissions:` key in `slskd.yml` moved to `transfers.download.destination.permissions`; an old config stops slskd from starting (see Troubleshooting).
 
 **Torrents & Usenet (optional)**: add your indexers to Prowlarr, then in *Settings → Apps & sources → Torrents & Usenet* enter the Prowlarr URL and API key, plus qBittorrent and/or SABnzbd. Encore searches Prowlarr, sends the best album release to the right client, and imports it when it finishes. This replaces Lidarr.
 
@@ -137,23 +125,22 @@ Set **Settings → General → Public URL** (for example `https://music.example.
 
 ## Troubleshooting
 
-**Admin → Diagnostics** runs every connection, folder-permission and tool check from inside the container and shows the raw responses, with keys hidden. *Copy report* gives you text you can paste into a bug report. `curl` is also included in the image, e.g. with slskd: `docker exec -it encore curl -s http://slskd:5030/health`.
+**Admin → Diagnostics** runs every connection, folder-permission and tool check from inside the container and shows the raw responses, with keys hidden. *Copy report* gives you text you can paste into a bug report. `curl` is also included in the image. The Soulseek engine's own output is in `/config/slskd/encore-run.log`.
 
 | Symptom | Fix |
 |---|---|
 | A setting won't change in the UI | It's set by an environment variable (the field shows 🔒 and the variable name). Environment variables always win, so change it in your compose file. |
 | Upgrading from an older Encore image | Switch the image to `:latest` and keep the same `/config`: the database is shared. Lidarr settings are ignored; set up Prowlarr instead if you want torrents/Usenet. |
 | Soulseek: `Not signed in: login refused: INVALIDPASS` | The username already exists on Soulseek with another password. Pick a new username (the account is created at the first sign-in) or enter the right password. |
-| `401 … API key rejected` (slskd) | The key in Encore doesn't match `web.authentication.api_keys` in `slskd.yml`, or the key's `cidr` doesn't include Encore's IP. Don't put quotes around values in `- KEY=value` lines. |
-| `Can't find host 'slskd'` | Use the service or container name on the same Docker network. Behind gluetun, use the gluetun container's name. |
-| slskd: `/incomplete` (or downloads) not writable | Run slskd with `user: "1000:1000"` and `chown -R 1000:1000` its folders. |
-| slskd won't start after an update: "permissions" error | Since slskd 0.26.0 the top-level `permissions:` key moved to `transfers.download.destination.permissions` (slskd PR #1756), and an old config stops slskd from starting. Move the block. The mode now also applies to folders. |
+| Soulseek: *not installed* | Install it under *Settings → Download tools* (*slskd – Soulseek engine*). |
+| Soulseek: *crashed* | The card shows the engine's last words; the whole output is in `/config/slskd/encore-run.log`. Encore starts it again after 5 s, then waits longer each time (up to 5 minutes). |
+| Soulseek: *waiting for the VPN* | The VPN is on with *Keep Soulseek off while the VPN is down*, and the tunnel isn't up – see *Test VPN*. |
 | Folder not writable by Encore | Diagnostics shows the folder owner and Encore's uid. Match them with `PUID`/`PGID` or `chown`. |
 | Config ends up somewhere odd under Portainer | Use absolute host paths (`/opt/appdata/encore:/config`), not `./encore`. |
 
 ## Keeping it private
 
-- Publish **only Encore**: port 8080 for the web UI and port 2234 for Soulseek peers. If you run slskd, the compose file keeps its web UI off the public internet; slskd only exposes its own Soulseek peer port.
+- Publish **only Encore**: port 8080 for the web UI and port 2234 for Soulseek peers (none with the VPN on). The Soulseek engine's API listens on 127.0.0.1 inside the container only, with a key only Encore knows.
 - Put it behind HTTPS. For example, with Caddy:
 
   ```
@@ -181,17 +168,15 @@ Every option can be changed in the UI. Environment variables only seed the first
 | `ENCORE_SOURCE_ORDER` | `qobuz,tidal,deezer,slskd,torznab,ytdlp` | The one search order: `qobuz`, `tidal`, `deezer` (through streamrip), `slskd`, `torznab`, `ytdlp` |
 | `ENCORE_NAMING_TEMPLATE` | `{albumartist}/{album} ({year})/{discprefix}{track:02d} - {title}` | Rename template |
 | `TORZNAB_ENABLED`, `PROWLARR_URL` / `PROWLARR_API_KEY`, `QBIT_URL` / `QBIT_USER` / `QBIT_PASSWORD`, `SAB_URL` / `SAB_API_KEY` | | Torrents & Usenet through Prowlarr |
-| `SLSKD_ENABLED` | `false` | Master switch for Soulseek, whichever client is used |
-| `SOULSEEK_CLIENT` | `auto` | `auto` (built-in as soon as a username is set, otherwise slskd), `builtin` or `slskd` |
-| `SOULSEEK_USERNAME` / `SOULSEEK_PASSWORD` | | Soulseek login for the built-in client; a new username and password create the account at the first sign-in |
-| `SOULSEEK_PORT` | 2234 | TCP port the built-in client listens on – forward it on your router |
+| `SLSKD_ENABLED` | `false` | Master switch for Soulseek |
+| `SOULSEEK_USERNAME` / `SOULSEEK_PASSWORD` | | Soulseek login; a new username and password create the account at the first sign-in |
+| `SOULSEEK_PORT` | 2234 | TCP port Soulseek listens on – forward it on your router |
 | `SOULSEEK_SHARE` / `SOULSEEK_UPLOAD_SLOTS` | `true` / 2 | Share the library (read-only) back to Soulseek, and how many uploads at once |
 | `VPN_ENABLED` | `false` | Send only Soulseek through the built-in WireGuard VPN |
 | `VPN_WIREGUARD_CONFIG` | | The whole WireGuard `.conf` file from your VPN provider (secret) |
 | `VPN_PORT_FORWARDING` | `natpmp` | `natpmp` (ProtonVPN) uses the forwarded port as the Soulseek listen port, `off` keeps the configured port |
 | `VPN_KILL_SWITCH` | `true` | Keep Soulseek off while the VPN is not connected |
-| `SLSKD_URL` / `SLSKD_API_KEY` | `http://slskd:5030` | Only for the slskd client |
-| `SLSKD_DOWNLOAD_PATH` | `/downloads/slskd` | Soulseek downloads folder, for both clients |
+| `SLSKD_DOWNLOAD_PATH` | `/downloads/slskd` | Soulseek downloads folder |
 | `YTDLP_AUTO_UPDATE` | `true` | Upgrades yt-dlp at every container start |
 | `SPOTIFY_CLIENT_ID` / `SPOTIFY_CLIENT_SECRET`, `TIDAL_CLIENT_ID` / `TIDAL_CLIENT_SECRET`, `LASTFM_API_KEY` / `LASTFM_SHARED_SECRET`, `DISCOGS_TOKEN` | | Account connections, imports, discovery, catalog |
 | `ACOUSTID_API_KEY` | | Audio fingerprint verification |

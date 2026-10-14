@@ -69,9 +69,13 @@ function toastHtml(html, type = 'ok') {
 function statusHtml(s, error) {
   const settings = '<a href="#/settings?s=slskd" style="color:var(--accent)">Settings → Soulseek</a>';
   if (error) return `<span class="dot err"></span> ${esc(error)} · ${settings}`;
+  if (s.configured && s.state === 'not_installed') return `<span class="dot err"></span> <span style="color:var(--warn)">Soulseek is not installed${s.hint ? ` – ${esc(s.hint)}` : ''}</span> · ${settings}`;
   if (!s.enabled) return `<span class="dot"></span> Soulseek is not enabled – turn it on in ${settings}`;
+  if (s.state === 'waiting_vpn') return `<span class="dot"></span> <span style="color:var(--warn)">${esc(s.error || 'Waiting for the VPN')}</span> · ${settings}`;
+  if (s.state === 'crashed') return `<span class="dot err"></span> <span style="color:var(--warn)">Soulseek stopped${s.error ? ` – ${esc(s.error)}` : ''}</span> · ${settings}`;
+  if (s.state === 'starting') return `<span class="dot"></span> Soulseek is starting…${s.error ? ` <span style="color:var(--warn)">${esc(s.error)}</span>` : ''}`;
   if (!s.logged_in) return `<span class="dot err"></span> <span style="color:var(--warn)">Not signed in${s.error ? ` – ${esc(s.error)}` : ''}</span> · ${settings}`;
-  const parts = [`<span class="dot ok"></span> Signed in as <b>${esc(s.username || '?')}</b>${s.client === 'slskd' ? ' <span class="faint">via slskd</span>' : ''}`];
+  const parts = [`<span class="dot ok"></span> Signed in as <b>${esc(s.username || '?')}</b>`];
   parts.push(s.shares?.files ? `sharing ${plural(s.shares.files, 'file')}` : 'sharing nothing');
   if (s.port) parts.push(`port ${esc(s.port)}`);
   if (s.error) parts.push(`<span style="color:var(--warn)">${esc(s.error)}</span>`);
@@ -365,7 +369,7 @@ export async function render(view, ctx) {
         <button class="btn sm" id="slsk-clear" ${dl.some(isFinished) ? '' : 'disabled'}>${icon.trash}Clear finished</button></div>
       <div class="card flat">${dl.length ? downloadsTable(dl) : emptyState(icon.download, 'No downloads', 'Files you download from Soulseek show up here while they transfer.')}</div>
       <div class="section-head"><h2>Uploads <span class="faint small">${ul.length}</span></h2></div>
-      <div class="card flat slsk-ul">${ul.length ? uploadsTable(ul) : emptyState(icon.users, 'No uploads', state.status?.client === 'slskd' ? 'Uploads are only listed for the built-in client.' : 'Other people fetching from your shares show up here.')}</div>`;
+      <div class="card flat slsk-ul">${ul.length ? uploadsTable(ul) : emptyState(icon.users, 'No uploads', 'Other people fetching from your shares show up here.')}</div>`;
   };
   const loadTransfers = async () => {
     try { state.transfers = await api.get('/soulseek/transfers'); }

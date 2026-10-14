@@ -201,9 +201,6 @@ async fn diagnostics(State(st): State<AppState>, Admin(_): Admin) -> ApiResult<J
     if !g("sab_url").is_empty() {
         futs.push(Box::pin(http_check(&st, "SABnzbd", format!("{}/api?mode=version&output=json&apikey={}", g("sab_url"), st.cfg.str("sab_api_key")), vec![], &[200])));
     }
-    if !g("slskd_url").is_empty() {
-        futs.push(Box::pin(http_check(&st, "slskd", format!("{}/api/v0/application", g("slskd_url")), vec![("X-API-Key", st.cfg.str("slskd_api_key"))], &[200])));
-    }
     if !g("jellyfin_url").is_empty() {
         futs.push(Box::pin(http_check(&st, "Jellyfin", format!("{}/System/Info/Public", g("jellyfin_url")), vec![], &[200])));
     }
@@ -221,8 +218,8 @@ async fn diagnostics(State(st): State<AppState>, Admin(_): Admin) -> ApiResult<J
     let mut checks: Vec<Value> = futures_util::future::join_all(futs).await;
     checks.push(path_check("Music library", &st.cfg.str("library_path"), true));
     checks.push(path_check("Staging folder", &st.cfg.str("staging_path"), true));
-    if st.cfg.bool("slskd_enabled") || !g("slskd_url").is_empty() {
-        checks.push(path_check("slskd downloads (as seen by Encore)", &st.cfg.str("slskd_download_path"), true));
+    if st.cfg.bool("slskd_enabled") {
+        checks.push(path_check("Soulseek downloads", &st.cfg.str("slskd_download_path"), true));
     }
     if torznab_on(&st) {
         checks.push(path_check("Torrent downloads (as seen by Encore)", &st.cfg.str("qbit_download_path"), true));

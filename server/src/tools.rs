@@ -1,8 +1,15 @@
-//! Download tools that update without a new Encore image: yt-dlp and streamrip are pip-installed into a
-//! persistent venv under the config dir (`<config>/tools/venv`), made with the image's own Python. Encore
-//! runs whichever copy is newer – that overlay or the one bundled in the image (/opt/tools) – so an image
-//! that ships a newer version wins by itself. Soulseek (built in) and slskd (its own container) are listed
-//! for information only.
+//! Download tools that update without a new Encore image.
+//!
+//! * yt-dlp and streamrip are pip-installed into a persistent venv under the config dir
+//!   (`<config>/tools/venv`), made with the image's own Python. Encore runs whichever copy is newer –
+//!   that overlay or the one bundled in the image (/opt/tools) – so an image that ships a newer version
+//!   wins by itself.
+//! * Cadenza (server processing): the engine compiled into Encore is the built-in one; an update
+//!   downloads the `cadenza` program from Cadenza's GitHub releases into `<config>/tools/cadenza/<ver>/`
+//!   (checked against the release's SHA256SUMS and its `render --describe` protocol) and server-side
+//!   processing runs it instead (see dsp.rs).
+//! * slskd (Encore's Soulseek engine) is installed and run by slskd_managed.rs; this module only lists it,
+//!   checks for and installs its updates.
 use crate::state::AppState;
 use serde::Serialize;
 use serde_json::{json, Value};
@@ -17,6 +24,12 @@ use std::time::{Duration, Instant, SystemTime};
 pub const BUNDLED_DIR: &str = "/opt/tools/bin";
 const STREAMRIP_REPO: &str = "Stensel8/streamrip";
 const PYPI_YTDLP: &str = "https://pypi.org/pypi/yt-dlp/json";
+/// Where Cadenza's releases are published (the `cadenza` program for Linux x86_64 / aarch64).
+pub const CADENZA_REPO: &str = "Krifmaz/Cadenza";
+/// The `cadenza render` interface Encore speaks (`protocol` in `cadenza render --describe`).
+pub const CADENZA_PROTOCOL: u64 = 1;
+/// Every tool the Download tools card lists, in order.
+pub const IDS: [&str; 4] = ["ytdlp", "streamrip", "cadenza", "slskd"];
 /// How long a `--version` answer is trusted.
 const VERSION_TTL: Duration = Duration::from_secs(600);
 /// How long the latest versions found by a check are kept (shown again without asking the network).
@@ -37,6 +50,10 @@ pub struct ToolInfo {
     pub checked_at: Option<f64>,
     pub error: Option<String>,
     pub note: String,
+    /// Encore can install updates of it (Update / Install button)
+    pub updatable: bool,
+    /// the reset button's action is available (an updated copy can be removed)
+    pub resettable: bool,
 }
 
 // ---- versions -----------------------------------------------------------------------------------
@@ -179,12 +196,22 @@ fn overlay_bin(data: &Path) -> PathBuf {
     venv_dir(data).join("bin")
 }
 
-fn label(id: &str) -> &'static str {
+/// Short name, for messages and the task's result line.
+pub fn label(id: &str) -> &'static str {
     match id {
         "ytdlp" => "yt-dlp",
         "streamrip" => "streamrip",
-        "soulseek" => "Soulseek",
+        "cadenza" => "Cadenza",
         _ => "slskd",
+    }
+}
+
+/// The name on the Download tools card.
+fn title(id: &str) -> &'static str {
+    match id {
+        "cadenza" => "Cadenza (server processing)",
+        "slskd" => "slskd – Soulseek engine",
+        _ => label(id),
     }
 }
 
@@ -250,7 +277,11 @@ fn resolve(data: &Path, id: &str) -> Option<(PathBuf, Option<String>, bool)> {
 }
 
 /// The executable to run for a tool; for streamrip, the streamrip_bin setting still wins when set.
+/// For "cadenza": the downloaded program when it works, else None (the built-in engine).
 pub fn path(st: &AppState, id: &str) -> Option<PathBuf> {
+    if id == "cadenza" {
+        return cadenza_external(st.data_dir()).map(|c| c.path);
+    }
     if id == "streamrip" {
         let custom = st.cfg.str("streamrip_bin");
         if !custom.is_empty() {
@@ -316,16 +347,17 @@ async fn github_latest(st: &AppState, repo: &str, tags_fallback: bool) -> anyhow
     anyhow::bail!("GitHub returned {code} for the latest {repo} release: {}", v["message"].as_str().unwrap_or(""))
 }
 
-/// Fetch the newest version of one tool: (version, tag/spec detail).
-async fn fetch_latest(st: &AppState, id: &str) -> anyhow::Result<(String, String)> {
+/// Fetch the newest version of one tool: (version, tag/spec detail, download url when known).
+async fn fetch_latest(st: &AppState, id: &str) -> anyhow::Result<(String, String, Option<String>)> {
     match id {
         "ytdlp" => {
             let (code, v) = get_json(st, PYPI_YTDLP).await?;
             let ver = parse_pypi(&v).ok_or_else(|| anyhow::anyhow!("PyPI returned {code} without a yt-dlp version"))?;
-            Ok((ver.clone(), ver))
+            Ok((ver.clone(), ver, None))
         }
-        "streamrip" => github_latest(st, STREAMRIP_REPO, true).await.map(|(tag, ver)| (ver, tag)),
-        _ => github_latest(st, "slskd/slskd", false).await.map(|(tag, ver)| (ver, tag)),
+        "streamrip" => github_latest(st, STREAMRIP_REPO, true).await.map(|(tag, ver)| (ver, tag, None)),
+        "cadenza" => github_latest(st, CADENZA_REPO, false).await.map(|(tag, ver)| (ver, tag, None)),
+        _ => crate::slskd_managed::latest(st).await.map(|(ver, url)| (ver.clone(), ver, Some(url))),
     }
 }
 
@@ -340,7 +372,7 @@ fn last_check(st: &AppState, id: &str) -> Value {
 
 async fn refresh_latest(st: &AppState, id: &str) -> Value {
     let v = match fetch_latest(st, id).await {
-        Ok((ver, tag)) => json!({ "latest": ver, "tag": tag, "checked_at": crate::db::now() }),
+        Ok((ver, tag, url)) => json!({ "latest": ver, "tag": tag, "url": url, "checked_at": crate::db::now() }),
         Err(e) => {
             // keep what an earlier check found, with the error beside it
             let mut old = last_check(st, id);
@@ -354,6 +386,303 @@ async fn refresh_latest(st: &AppState, id: &str) -> Value {
     };
     st.cache_put(&latest_key(id), v.clone(), LATEST_TTL);
     v
+}
+
+// ---- Cadenza (server processing) ---------------------------------------------------------------
+
+/// `<config>/tools/cadenza`: one folder per downloaded version and `current` (the version in use).
+pub fn cadenza_dir(data: &Path) -> PathBuf {
+    data.join("tools").join("cadenza")
+}
+
+fn cadenza_bin(data: &Path, ver: &str) -> PathBuf {
+    cadenza_dir(data).join(ver).join("cadenza")
+}
+
+/// The version `current` points at (it may not work: see [`cadenza_external`]).
+fn cadenza_current(data: &Path) -> Option<String> {
+    let v = std::fs::read_to_string(cadenza_dir(data).join("current")).ok()?;
+    let v = v.trim();
+    // a version is a folder name: nothing that leaves the cadenza folder
+    (!v.is_empty() && !v.contains('/') && !v.starts_with('.')).then(|| v.to_string())
+}
+
+/// A version number from Cargo.lock: the `version` of the `[[package]]` named `name`.
+pub fn lock_version(lock: &str, name: &str) -> Option<String> {
+    let mut in_pkg = false;
+    for line in lock.lines() {
+        let l = line.trim();
+        if l == "[[package]]" {
+            in_pkg = false;
+        } else if let Some(n) = l.strip_prefix("name = ") {
+            in_pkg = n.trim_matches('"') == name;
+        } else if let Some(v) = l.strip_prefix("version = ") {
+            if in_pkg {
+                return Some(v.trim_matches('"').to_string());
+            }
+        }
+    }
+    None
+}
+
+/// The version of the cadenza-dsp engine compiled into Encore.
+pub fn builtin_cadenza_version() -> String {
+    static V: LazyLock<String> = LazyLock::new(|| lock_version(include_str!("../Cargo.lock"), "cadenza-dsp").unwrap_or_else(|| "built in".into()));
+    V.clone()
+}
+
+/// What `cadenza render --describe` says (protocol already checked).
+#[derive(Clone, Debug, PartialEq)]
+pub struct Describe {
+    pub version: String,
+    pub protocol: u64,
+    pub gpu: bool,
+    /// the engine settings schema: [{key, label, type, options?, default, help, min?, max?, step?}]
+    pub settings: Value,
+}
+
+/// Parse `cadenza render --describe` output: the first line that is a JSON object, which must speak
+/// [`CADENZA_PROTOCOL`].
+pub fn parse_describe(text: &str) -> Result<Describe, String> {
+    let v = text.lines().filter_map(|l| serde_json::from_str::<Value>(l.trim()).ok()).find(|v| v.is_object())
+        .ok_or_else(|| "no description from `cadenza render --describe`".to_string())?;
+    if v["name"].as_str().is_some_and(|n| n != "cadenza") {
+        return Err(format!("not Cadenza ({})", v["name"]));
+    }
+    let protocol = v["protocol"].as_u64().ok_or_else(|| "no protocol in its description".to_string())?;
+    if protocol != CADENZA_PROTOCOL {
+        return Err(format!("it speaks protocol {protocol}, this Encore speaks {CADENZA_PROTOCOL} – update Encore"));
+    }
+    let version = v["version"].as_str().and_then(extract_version).ok_or_else(|| "no version in its description".to_string())?;
+    let settings = if v["settings"].is_array() { v["settings"].clone() } else { json!([]) };
+    Ok(Describe { version, protocol, gpu: v["gpu"].as_bool().unwrap_or(false), settings })
+}
+
+/// Run `<exe> args…` with stdin closed, stopping it after `limit`.
+fn output_within(exe: &Path, args: &[&str], limit: Duration) -> Result<std::process::Output, String> {
+    let mut tries = 0;
+    let child = loop {
+        let r = std::process::Command::new(exe).args(args).stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::piped()).stderr(std::process::Stdio::piped()).spawn();
+        match r {
+            // "Text file busy": just written
+            Err(e) if e.raw_os_error() == Some(26) && tries < 5 => {
+                tries += 1;
+                std::thread::sleep(Duration::from_millis(50 * tries));
+            }
+            r => break r.map_err(|e| format!("could not run it: {e}"))?,
+        }
+    };
+    let mut child = child;
+    let reader = |r: Option<Box<dyn std::io::Read + Send>>| std::thread::spawn(move || {
+        let mut buf = Vec::new();
+        if let Some(mut r) = r {
+            let _ = r.read_to_end(&mut buf);
+        }
+        buf
+    });
+    use std::io::Read;
+    let out = reader(child.stdout.take().map(|r| Box::new(r) as Box<dyn Read + Send>));
+    let err = reader(child.stderr.take().map(|r| Box::new(r) as Box<dyn Read + Send>));
+    let deadline = Instant::now() + limit;
+    let status = loop {
+        match child.try_wait() {
+            Ok(Some(s)) => break s,
+            Ok(None) if Instant::now() < deadline => std::thread::sleep(Duration::from_millis(10)),
+            Ok(None) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err(format!("no answer within {} s", limit.as_secs()));
+            }
+            Err(e) => return Err(e.to_string()),
+        }
+    };
+    Ok(std::process::Output { status, stdout: out.join().unwrap_or_default(), stderr: err.join().unwrap_or_default() })
+}
+
+/// `<exe> render --describe`, without the cache.
+pub fn describe_now(exe: &Path) -> Result<Describe, String> {
+    if !exe.is_file() {
+        return Err("the program is missing".into());
+    }
+    let o = output_within(exe, &["render", "--describe"], Duration::from_secs(30))?;
+    if !o.status.success() {
+        let err = tail(&String::from_utf8_lossy(&o.stderr), 3);
+        return Err(format!("`cadenza render --describe` failed ({}){}", o.status, if err.is_empty() { String::new() } else { format!(": {err}") }));
+    }
+    parse_describe(&String::from_utf8_lossy(&o.stdout))
+}
+
+type DescribeCache = HashMap<PathBuf, (Option<SystemTime>, Result<Describe, String>)>;
+static DESCRIBES: LazyLock<Mutex<DescribeCache>> = LazyLock::new(Default::default);
+
+/// [`describe_now`], once per program file (asked again when the file changes or a check runs).
+pub fn cadenza_describe(exe: &Path) -> Result<Describe, String> {
+    let mtime = mtime_of(exe);
+    if let Some((mt, d)) = DESCRIBES.lock().unwrap().get(exe) {
+        if *mt == mtime {
+            return d.clone();
+        }
+    }
+    let d = describe_now(exe);
+    DESCRIBES.lock().unwrap().insert(exe.to_path_buf(), (mtime, d.clone()));
+    d
+}
+
+fn forget_describes() {
+    DESCRIBES.lock().unwrap().clear();
+}
+
+/// The downloaded Cadenza server processing runs.
+#[derive(Clone, Debug, PartialEq)]
+pub struct CadenzaProgram {
+    pub path: PathBuf,
+    pub version: String,
+    pub settings: Value,
+}
+
+/// The downloaded program `current` points at, when its description works and speaks our protocol;
+/// None → the built-in engine.
+pub fn cadenza_external(data: &Path) -> Option<CadenzaProgram> {
+    let ver = cadenza_current(data)?;
+    let path = cadenza_bin(data, &ver);
+    let d = cadenza_describe(&path).ok()?;
+    Some(CadenzaProgram { path, version: d.version, settings: d.settings })
+}
+
+/// The release asset for this server: `cadenza-<ver>-linux-x86_64.tar.gz` / `…-linux-aarch64.tar.gz`.
+pub fn cadenza_asset(ver: &str, arch: &str) -> Option<String> {
+    matches!(arch, "x86_64" | "aarch64").then(|| format!("cadenza-{ver}-linux-{arch}.tar.gz"))
+}
+
+/// `SHA256SUMS` (sha256sum format: `<hex>  <name>`, or `<hex> *<name>` for binary mode) → name → hex.
+pub fn parse_sha256sums(text: &str) -> HashMap<String, String> {
+    text.lines()
+        .filter_map(|l| {
+            let (hash, name) = l.trim().split_once(char::is_whitespace)?;
+            let name = name.trim_start().trim_start_matches('*').trim();
+            (hash.len() == 64 && hash.chars().all(|c| c.is_ascii_hexdigit()) && !name.is_empty())
+                .then(|| (name.trim_start_matches("./").to_string(), hash.to_ascii_lowercase()))
+        })
+        .collect()
+}
+
+/// The file named `want` (any folder) from a .tar.gz.
+pub fn untar_gz_file(archive: &[u8], want: &str) -> anyhow::Result<Vec<u8>> {
+    use std::io::Read;
+    let mut tar = Vec::new();
+    flate2::read::GzDecoder::new(archive).take(512 * 1024 * 1024).read_to_end(&mut tar)?;
+    let mut at = 0usize;
+    let mut long_name: Option<String> = None;
+    while at + 512 <= tar.len() {
+        let h = &tar[at..at + 512];
+        if h.iter().all(|b| *b == 0) {
+            break;
+        }
+        let field = |a: usize, b: usize| String::from_utf8_lossy(&h[a..b]).trim_end_matches('\0').to_string();
+        let size_field = field(124, 136);
+        let size = u64::from_str_radix(size_field.trim().trim_end_matches(' '), 8).map_err(|_| anyhow::anyhow!("broken archive (size {size_field:?})"))? as usize;
+        let kind = h[156];
+        let mut name = field(0, 100);
+        if &h[257..262] == b"ustar" {
+            let prefix = field(345, 500);
+            if !prefix.is_empty() {
+                name = format!("{prefix}/{name}");
+            }
+        }
+        if let Some(n) = long_name.take() {
+            name = n;
+        }
+        let start = at + 512;
+        let end = start.checked_add(size).filter(|e| *e <= tar.len()).ok_or_else(|| anyhow::anyhow!("archive is cut off"))?;
+        match kind {
+            b'L' => long_name = Some(String::from_utf8_lossy(&tar[start..end]).trim_end_matches('\0').to_string()),
+            b'0' | 0 if name.rsplit('/').next() == Some(want) => return Ok(tar[start..end].to_vec()),
+            _ => {}
+        }
+        at = start + size.div_ceil(512) * 512;
+    }
+    anyhow::bail!("{want} is not in the archive")
+}
+
+fn sha256_hex(data: &[u8]) -> String {
+    use sha2::Digest;
+    hex::encode(sha2::Sha256::digest(data))
+}
+
+/// Install a downloaded release: verify the archive against SHA256SUMS, unpack `cadenza` to
+/// `<dir>/<ver>/cadenza`, require a working `render --describe` with our protocol, point `current` at
+/// it and delete the other versions.
+pub fn install_cadenza(dir: &Path, ver: &str, asset: &str, archive: &[u8], sums: &str) -> anyhow::Result<Describe> {
+    use std::os::unix::fs::PermissionsExt;
+    if ver.is_empty() || ver.contains('/') || ver.starts_with('.') {
+        anyhow::bail!("odd version {ver:?}");
+    }
+    let want = parse_sha256sums(sums).remove(asset).ok_or_else(|| anyhow::anyhow!("{asset} is not listed in the release's SHA256SUMS"))?;
+    let got = sha256_hex(archive);
+    if got != want {
+        anyhow::bail!("{asset} does not match its SHA256SUMS entry (downloaded {got}, expected {want})");
+    }
+    let bin = untar_gz_file(archive, "cadenza")?;
+    let vdir = dir.join(ver);
+    let _ = std::fs::remove_dir_all(&vdir);
+    std::fs::create_dir_all(&vdir)?;
+    let tmp = vdir.join(".cadenza.tmp");
+    std::fs::write(&tmp, &bin)?;
+    std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o755))?;
+    let exe = vdir.join("cadenza");
+    std::fs::rename(&tmp, &exe)?;
+    let d = match describe_now(&exe) {
+        Ok(d) => d,
+        Err(e) => {
+            let _ = std::fs::remove_dir_all(&vdir);
+            anyhow::bail!("Cadenza {ver} was downloaded but does not work here: {e} – Encore keeps using the engine it has");
+        }
+    };
+    let cur = dir.join(".current.tmp");
+    std::fs::write(&cur, format!("{ver}\n"))?;
+    std::fs::rename(&cur, dir.join("current"))?;
+    forget_describes();
+    if let Ok(rd) = std::fs::read_dir(dir) {
+        for e in rd.flatten() {
+            if e.path().is_dir() && e.file_name().to_string_lossy() != ver {
+                let _ = std::fs::remove_dir_all(e.path());
+            }
+        }
+    }
+    Ok(d)
+}
+
+async fn download(st: &AppState, url: &str, max: usize) -> anyhow::Result<Vec<u8>> {
+    let r = st.http.get(url).timeout(Duration::from_secs(600)).send().await.map_err(|e| anyhow::anyhow!("downloading {url}: {e}"))?;
+    if !r.status().is_success() {
+        anyhow::bail!("downloading {url}: HTTP {}", r.status().as_u16());
+    }
+    let b = r.bytes().await.map_err(|e| anyhow::anyhow!("downloading {url}: {e}"))?;
+    if b.len() > max {
+        anyhow::bail!("{url} is larger than expected ({} MB)", b.len() / 1_048_576);
+    }
+    Ok(b.to_vec())
+}
+
+/// Download and install the release `tag` of Cadenza for this server's architecture.
+async fn update_cadenza(st: &AppState, tag: &str) -> anyhow::Result<String> {
+    let ver = tag.trim_start_matches(['v', 'V']).to_string();
+    let arch = std::env::consts::ARCH;
+    let asset = cadenza_asset(&ver, arch).ok_or_else(|| anyhow::anyhow!("Cadenza has no release build for this server ({arch})"))?;
+    let (code, rel) = get_json(st, &format!("https://api.github.com/repos/{CADENZA_REPO}/releases/tags/{tag}")).await?;
+    if code >= 400 {
+        anyhow::bail!("GitHub returned {code} for the Cadenza {tag} release: {}", rel["message"].as_str().unwrap_or(""));
+    }
+    let url_of = |name: &str| rel["assets"].as_array().and_then(|a| a.iter().find(|x| x["name"].as_str() == Some(name)))
+        .and_then(|x| x["browser_download_url"].as_str()).map(String::from);
+    let archive_url = url_of(&asset).ok_or_else(|| anyhow::anyhow!("The Cadenza {ver} release has no {asset}"))?;
+    let sums_url = url_of("SHA256SUMS").ok_or_else(|| anyhow::anyhow!("The Cadenza {ver} release has no SHA256SUMS"))?;
+    let sums = String::from_utf8_lossy(&download(st, &sums_url, 1 << 20).await?).to_string();
+    let archive = download(st, &archive_url, 400 << 20).await?;
+    let dir = cadenza_dir(st.data_dir());
+    let d = tokio::task::spawn_blocking(move || install_cadenza(&dir, &ver, &asset, &archive, &sums)).await??;
+    Ok(d.version)
 }
 
 // ---- the listing --------------------------------------------------------------------------------
@@ -373,6 +702,11 @@ fn custom_copy(st: &AppState, id: &str) -> bool {
 }
 
 fn local_info(st: &AppState, id: &str) -> ToolInfo {
+    match id {
+        "cadenza" => return cadenza_info(st),
+        "slskd" => return slskd_info(st),
+        _ => {}
+    }
     let custom = custom_copy(st, id);
     let found = if !custom {
         resolve(st.data_dir(), id)
@@ -394,71 +728,61 @@ fn local_info(st: &AppState, id: &str) -> ToolInfo {
         (true, _) => "Uses the streamrip set under streamrip → Path – Encore does not update that copy".to_string(),
         _ => String::new(),
     };
-    ToolInfo { id: id.into(), name: label(id).into(), installed, source: source.into(), latest, update_available,
-        checked_at: last["checked_at"].as_f64(), error: last["error"].as_str().map(String::from), note }
+    let resettable = !custom && source == "updated";
+    ToolInfo { id: id.into(), name: title(id).into(), installed, source: source.into(), latest, update_available,
+        checked_at: last["checked_at"].as_f64(), error: last["error"].as_str().map(String::from), note, updatable: !custom, resettable }
 }
 
-fn soulseek_info() -> ToolInfo {
-    ToolInfo { id: "soulseek".into(), name: label("soulseek").into(), installed: Some(crate::VERSION.into()), source: "bundled".into(), latest: None,
-        update_available: false, checked_at: None, error: None, note: "Built into Encore – updates with Encore".into() }
-}
-
-fn slskd_wanted(st: &AppState) -> bool {
-    crate::soulseek::mode(st) == "slskd" && crate::sources::slskd::enabled(st)
-}
-
-fn slskd_info(st: &AppState) -> ToolInfo {
-    let last = last_check(st, "slskd");
-    let installed = st.cache_get("tools:slskd:installed").and_then(|v| v.as_str().map(String::from));
+/// Cadenza: the downloaded program when it works, else the engine built into Encore.
+fn cadenza_info(st: &AppState) -> ToolInfo {
+    let data = st.data_dir();
+    let ext = cadenza_external(data);
+    let (installed, source) = match &ext {
+        Some(e) => (e.version.clone(), "updated"),
+        None => (builtin_cadenza_version(), "bundled"),
+    };
+    let last = last_check(st, "cadenza");
     let latest = last["latest"].as_str().map(String::from);
-    let update_available = matches!((&latest, &installed), (Some(l), Some(i)) if newer(l, i));
-    ToolInfo { id: "slskd".into(), name: label("slskd").into(), source: if installed.is_some() { "system" } else { "missing" }.into(), installed, latest,
-        update_available, checked_at: last["checked_at"].as_f64(), error: last["error"].as_str().map(String::from),
-        note: "Runs in its own container – update it by pulling the slskd image".into() }
+    let update_available = latest.as_deref().is_some_and(|l| newer(l, &installed));
+    let mut error = last["error"].as_str().map(String::from);
+    let note = match (&ext, cadenza_current(data)) {
+        (Some(_), _) => "Downloaded from Cadenza's releases – server processing runs it".to_string(),
+        (None, Some(v)) => {
+            let why = cadenza_describe(&cadenza_bin(data, &v)).err().unwrap_or_default();
+            error.get_or_insert_with(|| format!("The downloaded Cadenza {v} does not work ({why}) – using the built-in engine"));
+            "The engine built into Encore".to_string()
+        }
+        (None, None) => "The engine built into Encore".to_string(),
+    };
+    ToolInfo { id: "cadenza".into(), name: title("cadenza").into(), installed: Some(installed), source: source.into(), latest, update_available,
+        checked_at: last["checked_at"].as_f64(), error, note, updatable: true, resettable: cadenza_dir(data).exists() }
 }
 
-/// slskd's own version, from its API.
-async fn slskd_version(st: &AppState) -> anyhow::Result<String> {
-    let url = format!("{}/api/v0/application", st.cfg.str("slskd_url").trim_end_matches('/'));
-    let r = st.http.get(&url).header("X-API-Key", st.cfg.str("slskd_api_key")).timeout(Duration::from_secs(10)).send().await
-        .map_err(|e| anyhow::anyhow!("slskd unreachable at {url}: {e}"))?;
-    let code = r.status().as_u16();
-    let v: Value = r.json().await.unwrap_or(Value::Null);
-    let ver = v["version"]["current"].as_str().or(v["version"]["full"].as_str()).or(v["version"].as_str()).and_then(extract_version);
-    ver.ok_or_else(|| anyhow::anyhow!("slskd returned {code} without a version"))
+/// slskd, installed and run by Encore (slskd_managed.rs).
+fn slskd_info(st: &AppState) -> ToolInfo {
+    let installed = crate::slskd_managed::installed_version(st);
+    let last = last_check(st, "slskd");
+    let latest = last["latest"].as_str().map(String::from);
+    let update_available = latest.as_deref().is_some_and(|l| installed.as_deref().map(|i| newer(l, i)).unwrap_or(true));
+    let note = if installed.is_some() { "Runs inside Encore for Soulseek" } else { "Not installed – Install downloads it from slskd's releases" };
+    ToolInfo { id: "slskd".into(), name: title("slskd").into(), source: if installed.is_some() { "updated" } else { "missing" }.into(), resettable: installed.is_some(),
+        installed, latest, update_available, checked_at: last["checked_at"].as_f64(), error: last["error"].as_str().map(String::from), note: note.into(), updatable: true }
 }
 
 /// The listing from what is known now (no network).
 pub fn cached(st: &AppState) -> Vec<ToolInfo> {
-    let mut out = vec![local_info(st, "ytdlp"), local_info(st, "streamrip"), soulseek_info()];
-    if slskd_wanted(st) {
-        out.push(slskd_info(st));
-    }
-    out
+    IDS.iter().map(|id| local_info(st, id)).collect()
 }
 
 /// Look up the newest versions (PyPI, GitHub) and the installed ones. An image that ships a newer copy
 /// than the overlay makes the overlay copy redundant: it is removed.
 pub async fn check(st: &AppState) -> Vec<ToolInfo> {
-    tokio::join!(refresh_latest(st, "ytdlp"), refresh_latest(st, "streamrip"));
-    if slskd_wanted(st) {
-        refresh_latest(st, "slskd").await;
-        match slskd_version(st).await {
-            Ok(v) => st.cache_put("tools:slskd:installed", json!(v), LATEST_TTL),
-            Err(e) => {
-                st.cache.lock().unwrap().remove("tools:slskd:installed");
-                let mut last = last_check(st, "slskd");
-                if last.is_object() {
-                    last["error"] = json!(e.to_string());
-                    st.cache_put(&latest_key("slskd"), last, LATEST_TTL);
-                }
-            }
-        }
-    }
+    tokio::join!(refresh_latest(st, "ytdlp"), refresh_latest(st, "streamrip"), refresh_latest(st, "cadenza"), refresh_latest(st, "slskd"));
     for id in ["ytdlp", "streamrip"] {
         let st2 = st.clone();
         let _ = tokio::task::spawn_blocking(move || drop_stale_overlay(&st2, id)).await;
     }
+    forget_describes();
     let st2 = st.clone();
     tokio::task::spawn_blocking(move || cached(&st2)).await.unwrap_or_default()
 }
@@ -561,9 +885,54 @@ pub async fn update(st: &AppState, id: &str) -> anyhow::Result<ToolInfo> {
     tokio::spawn(async move { update_now(&st, &id).await }).await?
 }
 
+/// Tools with a download running (Cadenza, slskd – each its own folder, so they may run together
+/// with a pip install).
+static DOWNLOADING: LazyLock<Mutex<HashSet<String>>> = LazyLock::new(Default::default);
+
+struct Downloading(String);
+impl Downloading {
+    fn start(id: &str) -> anyhow::Result<Downloading> {
+        if !DOWNLOADING.lock().unwrap().insert(id.to_string()) {
+            anyhow::bail!("An update of {} is already running", label(id));
+        }
+        Ok(Downloading(id.to_string()))
+    }
+}
+impl Drop for Downloading {
+    fn drop(&mut self) {
+        DOWNLOADING.lock().unwrap().remove(&self.0);
+    }
+}
+
 async fn update_now(st: &AppState, id: &str) -> anyhow::Result<ToolInfo> {
-    if id != "ytdlp" && id != "streamrip" {
-        anyhow::bail!("{} can't be updated from Encore", label(id));
+    if !IDS.contains(&id) {
+        anyhow::bail!("{id} can't be updated from Encore");
+    }
+    if id == "cadenza" || id == "slskd" {
+        let _busy = Downloading::start(id)?;
+        let mut last = last_check(st, id);
+        if last["tag"].as_str().is_none() || (id == "slskd" && last["url"].as_str().is_none()) {
+            last = refresh_latest(st, id).await;
+        }
+        let Some(tag) = last["tag"].as_str().map(String::from) else {
+            anyhow::bail!("{}", last["error"].as_str().unwrap_or("Could not find the newest version"));
+        };
+        let res = if id == "cadenza" {
+            update_cadenza(st, &tag).await
+        } else {
+            let url = last["url"].as_str().unwrap_or_default().to_string();
+            crate::slskd_managed::install(st, &tag, &url).await.map(|_| tag.clone())
+        };
+        match res {
+            Ok(v) => st.db.log("info", &format!("{} updated to {v}", label(id))),
+            Err(e) => {
+                st.db.log("warning", &format!("Updating {} failed: {e}", label(id)));
+                return Err(e);
+            }
+        }
+        let st2 = st.clone();
+        let id2 = id.to_string();
+        return Ok(tokio::task::spawn_blocking(move || local_info(&st2, &id2)).await?);
     }
     if UPDATING.swap(true, Ordering::SeqCst) {
         anyhow::bail!("An update is already running");
@@ -601,8 +970,22 @@ async fn update_now(st: &AppState, id: &str) -> anyhow::Result<ToolInfo> {
     Ok(tokio::task::spawn_blocking(move || local_info(&st2, &id2)).await?)
 }
 
-/// "Use the bundled version": remove the overlay copy of a tool.
+/// "Use the bundled version": remove the overlay copy of a tool. Cadenza: back to the built-in engine
+/// (removes `<config>/tools/cadenza`); slskd: stop and remove it.
 pub fn reset(st: &AppState, id: &str) -> anyhow::Result<()> {
+    if id == "cadenza" || id == "slskd" {
+        let _busy = Downloading::start(id)?;
+        if id == "slskd" {
+            let _ = crate::slskd_managed::reset(st);
+        } else {
+            let dir = cadenza_dir(st.data_dir());
+            if dir.exists() {
+                std::fs::remove_dir_all(&dir)?;
+            }
+            forget_describes();
+        }
+        return Ok(());
+    }
     let pkg = match id {
         "ytdlp" => "yt-dlp",
         "streamrip" => "streamrip",
@@ -637,40 +1020,79 @@ fn env_allows_ytdlp() -> bool {
     !std::env::var("YTDLP_AUTO_UPDATE").is_ok_and(|v| v.trim().eq_ignore_ascii_case("false"))
 }
 
-/// Scheduled task: check, then update what's switched to update by itself.
+/// The auto-update switch of a tool (Download tools card).
+pub fn auto_key(id: &str) -> &'static str {
+    match id {
+        "ytdlp" => "tools_auto_ytdlp",
+        "streamrip" => "tools_auto_streamrip",
+        "cadenza" => "tools_auto_cadenza",
+        _ => "tools_auto_slskd",
+    }
+}
+
+/// What the scheduled task does with one tool, from what the check found.
+#[derive(Debug, PartialEq)]
+pub enum Plan {
+    /// a result line, nothing to install
+    Say(String),
+    Error(String),
+    /// install `to` (from: installed version, if any)
+    Install { from: Option<String>, to: String },
+}
+
+/// `auto`: the tool's switch is on; `wanted`: the owner set the tool up (an install of a missing
+/// tool is only done for those).
+pub fn plan(t: &ToolInfo, auto: bool, wanted: bool) -> Plan {
+    let name = label(&t.id);
+    let missing = t.source == "missing";
+    if missing && !(auto && wanted && t.id == "slskd" && t.latest.is_some()) {
+        return match (&t.latest, t.id.as_str()) {
+            (Some(l), "slskd") => Plan::Say(format!("{name} {l} available (not installed)")),
+            _ => Plan::Say(format!("{name} not installed")),
+        };
+    }
+    if let Some(e) = &t.error {
+        if t.latest.is_none() || e.starts_with("Could not check") {
+            return Plan::Error(format!("{name}: {e}"));
+        }
+    }
+    if !t.update_available {
+        return Plan::Say(format!("{name} up to date"));
+    }
+    let to = t.latest.clone().unwrap_or_default();
+    if !auto || !t.updatable {
+        return Plan::Say(format!("{name} {to} available"));
+    }
+    Plan::Install { from: t.installed.clone(), to }
+}
+
+/// Whether the scheduled task may install for `id`: its switch is on, yt-dlp isn't pinned by the
+/// environment, and streamrip is switched on (a streamrip the owner turned off is only reported:
+/// "up to date" / "X available", or "not installed" when it isn't there).
+fn task_auto(id: &str, switch: bool, wanted: bool, ytdlp_env: bool) -> bool {
+    switch && (id != "ytdlp" || ytdlp_env) && (id != "streamrip" || wanted)
+}
+
+/// Scheduled task: check every tool, then install updates of those whose switch is on.
 pub async fn scheduled(st: &AppState) -> anyhow::Result<String> {
     let list = check(st).await;
     let mut parts = vec![];
     let mut errors = vec![];
-    for id in ["ytdlp", "streamrip"] {
+    for id in IDS {
         let Some(t) = list.iter().find(|t| t.id == id) else { continue };
-        let auto = match id {
-            "ytdlp" => st.cfg.bool("tools_auto_ytdlp") && env_allows_ytdlp(),
-            _ => st.cfg.bool("tools_auto_streamrip"),
+        let wanted = match id {
+            "streamrip" => st.cfg.bool("streamrip_enabled"),
+            "slskd" => st.cfg.bool("slskd_enabled"),
+            _ => true,
         };
-        let name = label(id);
-        // installing a tool the owner never set up is left to the Update button
-        if t.source == "missing" || (id == "streamrip" && !st.cfg.bool("streamrip_enabled")) {
-            parts.push(format!("{name} not installed"));
-            continue;
-        }
-        if let Some(e) = &t.error {
-            errors.push(format!("{name}: {e}"));
-            continue;
-        }
-        if !t.update_available {
-            parts.push(format!("{name} up to date"));
-            continue;
-        }
-        let from = t.installed.clone().unwrap_or_else(|| "not installed".into());
-        let to = t.latest.clone().unwrap_or_default();
-        if !auto || custom_copy(st, id) {
-            parts.push(format!("{name} {to} available"));
-            continue;
-        }
-        match update(st, id).await {
-            Ok(n) => parts.push(format!("{name} {from} → {}", n.installed.unwrap_or(to))),
-            Err(e) => errors.push(format!("{name}: {}", e.to_string().lines().next().unwrap_or(""))),
+        let auto = task_auto(id, st.cfg.bool(auto_key(id)), wanted, env_allows_ytdlp());
+        match plan(t, auto, wanted) {
+            Plan::Say(s) => parts.push(s),
+            Plan::Error(e) => errors.push(e),
+            Plan::Install { from, to } => match update(st, id).await {
+                Ok(n) => parts.push(format!("{} {} → {}", label(id), from.unwrap_or_else(|| "not installed".into()), n.installed.unwrap_or(to))),
+                Err(e) => errors.push(format!("{}: {}", label(id), e.to_string().lines().next().unwrap_or(""))),
+            },
         }
     }
     if !errors.is_empty() {
@@ -686,6 +1108,21 @@ pub async fn scheduled(st: &AppState) -> anyhow::Result<String> {
 mod tests {
     use super::*;
     use std::cmp::Ordering::*;
+
+    #[test]
+    fn scheduled_task_reports_a_switched_off_streamrip_without_installing() {
+        assert!(!task_auto("streamrip", true, false, true));
+        assert!(task_auto("streamrip", true, true, true));
+        assert!(!task_auto("ytdlp", true, true, false));
+        assert!(task_auto("cadenza", true, true, false));
+        assert!(!task_auto("slskd", false, true, true));
+        let t = info("streamrip", "pip", Some("2.4.9"), Some("2.5.0"));
+        assert_eq!(plan(&t, task_auto("streamrip", true, false, true), false), Plan::Say("streamrip 2.5.0 available".into()));
+        let t = info("streamrip", "pip", Some("2.5.0"), Some("2.5.0"));
+        assert_eq!(plan(&t, false, false), Plan::Say("streamrip up to date".into()));
+        let t = info("streamrip", "missing", None, Some("2.5.0"));
+        assert_eq!(plan(&t, false, false), Plan::Say("streamrip not installed".into()));
+    }
 
     #[test]
     fn versions_compare_by_number() {
@@ -801,6 +1238,189 @@ mod tests {
         assert!(!stamp_matches(&venv, Some("3.14.1")));
         assert!(!stamp_matches(&venv, None));
         let _ = std::fs::remove_dir_all(&venv);
+    }
+
+    const DESCRIBE: &str = r#"{"name":"cadenza","version":"2.1.0","protocol":1,"in_formats":["f32le","f64le"],"out_formats":["s32le"],"gpu":true,"filters":["sinc-l-64k"],"dithers":["tpdf"],"settings":[{"key":"filter","label":"Upsampling filter","type":"select","options":[["sinc-l-64k","Sinc L 64k"]],"default":"sinc-l-64k","help":""},{"key":"gpu","label":"GPU processing","type":"select","options":[["auto","Auto"],["on","On"],["off","Off"]],"default":"auto","help":""}]}"#;
+
+    #[test]
+    fn describe_needs_protocol_1() {
+        let d = parse_describe(&format!("{DESCRIBE}\n")).unwrap();
+        assert_eq!((d.version.as_str(), d.protocol, d.gpu), ("2.1.0", 1, true));
+        assert_eq!(d.settings[1]["key"], "gpu");
+        // stray lines before the JSON are skipped
+        assert_eq!(parse_describe(&format!("warning: something\n{DESCRIBE}")).unwrap().version, "2.1.0");
+        let other = DESCRIBE.replace(r#""protocol":1"#, r#""protocol":2"#);
+        assert!(parse_describe(&other).unwrap_err().contains("protocol 2"));
+        assert!(parse_describe(&DESCRIBE.replace(r#""protocol":1,"#, "")).is_err());
+        assert!(parse_describe(&DESCRIBE.replace(r#""name":"cadenza""#, r#""name":"other""#)).is_err());
+        assert!(parse_describe("not json").is_err());
+        assert!(parse_describe("").is_err());
+        // no settings: an empty schema
+        let bare = parse_describe(r#"{"name":"cadenza","version":"v2.2.0","protocol":1}"#).unwrap();
+        assert_eq!((bare.version.as_str(), bare.settings.clone()), ("2.2.0", json!([])));
+    }
+
+    #[test]
+    fn asset_names_by_arch() {
+        assert_eq!(cadenza_asset("2.1.0", "x86_64").as_deref(), Some("cadenza-2.1.0-linux-x86_64.tar.gz"));
+        assert_eq!(cadenza_asset("2.1.0", "aarch64").as_deref(), Some("cadenza-2.1.0-linux-aarch64.tar.gz"));
+        assert_eq!(cadenza_asset("2.1.0", "arm"), None);
+        assert_eq!(cadenza_asset("2.1.0", "riscv64"), None);
+        assert!(cadenza_asset("2.1.0", std::env::consts::ARCH).is_some() || !matches!(std::env::consts::ARCH, "x86_64" | "aarch64"));
+    }
+
+    #[test]
+    fn sha256sums_lines() {
+        let a = "a".repeat(64);
+        let b = "B".repeat(64);
+        let text = format!("{a}  cadenza-2.1.0-linux-x86_64.tar.gz\n{b} *cadenza-2.1.0-linux-aarch64.tar.gz\n\nnot a line\n{}  short\n{a}  ./dot.tar.gz\n", "c".repeat(10));
+        let m = parse_sha256sums(&text);
+        assert_eq!(m.get("cadenza-2.1.0-linux-x86_64.tar.gz"), Some(&a));
+        assert_eq!(m.get("cadenza-2.1.0-linux-aarch64.tar.gz"), Some(&"b".repeat(64)), "binary mode, lower-cased");
+        assert_eq!(m.get("dot.tar.gz"), Some(&a));
+        assert_eq!(m.len(), 3);
+        assert_eq!(sha256_hex(b"abc"), "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad");
+    }
+
+    #[test]
+    fn cargo_lock_versions() {
+        let lock = "[[package]]\nname = \"cadenza\"\nversion = \"9.9.9\"\n\n[[package]]\nname = \"cadenza-dsp\"\nversion = \"0.1.0\"\nsource = \"git+…\"\n";
+        assert_eq!(lock_version(lock, "cadenza-dsp").as_deref(), Some("0.1.0"));
+        assert_eq!(lock_version(lock, "nope"), None);
+        // Encore's own lock file has the engine it is built with
+        assert!(!parts(&builtin_cadenza_version()).is_empty());
+    }
+
+    /// A ustar .tar.gz of (name, contents, mode).
+    fn tar_gz(files: &[(&str, &[u8])]) -> Vec<u8> {
+        use std::io::Write;
+        let mut tar = Vec::new();
+        for (name, data) in files {
+            let mut h = [0u8; 512];
+            h[..name.len()].copy_from_slice(name.as_bytes());
+            h[100..107].copy_from_slice(b"0000755");
+            h[108..115].copy_from_slice(b"0000000");
+            h[116..123].copy_from_slice(b"0000000");
+            h[124..135].copy_from_slice(format!("{:011o}", data.len()).as_bytes());
+            h[136..147].copy_from_slice(b"00000000000");
+            h[156] = b'0';
+            h[257..263].copy_from_slice(b"ustar\0");
+            h[263..265].copy_from_slice(b"00");
+            h[148..156].copy_from_slice(b"        ");
+            let sum: u32 = h.iter().map(|b| *b as u32).sum();
+            h[148..156].copy_from_slice(format!("{sum:06o}\0 ").as_bytes());
+            tar.extend_from_slice(&h);
+            tar.extend_from_slice(data);
+            tar.resize(tar.len().div_ceil(512) * 512, 0);
+        }
+        tar.extend_from_slice(&[0u8; 1024]);
+        let mut gz = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::fast());
+        gz.write_all(&tar).unwrap();
+        gz.finish().unwrap()
+    }
+
+    #[test]
+    fn untar_finds_the_program() {
+        let a = tar_gz(&[("README", b"hi"), ("cadenza", b"#!/bin/sh\n")]);
+        assert_eq!(untar_gz_file(&a, "cadenza").unwrap(), b"#!/bin/sh\n");
+        assert!(untar_gz_file(&a, "missing").is_err());
+        let nested = tar_gz(&[("cadenza-2.1.0/cadenza", b"x")]);
+        assert_eq!(untar_gz_file(&nested, "cadenza").unwrap(), b"x");
+        assert!(untar_gz_file(b"not gzip", "cadenza").is_err());
+        // an archive made by the system's tar (GNU or bsdtar)
+        let root = std::env::temp_dir().join(format!("encore-tools-tar-{}-{}", std::process::id(), crate::auth::random_hex(4)));
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(root.join("cadenza"), b"real tar").unwrap();
+        let made = std::process::Command::new("tar").arg("-czf").arg(root.join("a.tar.gz")).arg("-C").arg(&root).arg("cadenza").status();
+        if made.is_ok_and(|s| s.success()) {
+            let bytes = std::fs::read(root.join("a.tar.gz")).unwrap();
+            assert_eq!(untar_gz_file(&bytes, "cadenza").unwrap(), b"real tar");
+        }
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn installs_a_release_and_keeps_only_it() {
+        let data = std::env::temp_dir().join(format!("encore-tools-cadenza-{}-{}", std::process::id(), crate::auth::random_hex(4)));
+        let dir = cadenza_dir(&data);
+        let program = |describe: &str| format!("#!/bin/sh\n[ \"$1 $2\" = \"render --describe\" ] || exit 3\necho '{describe}'\n").into_bytes();
+        let asset = "cadenza-2.1.0-linux-x86_64.tar.gz";
+        let archive = tar_gz(&[("cadenza", &program(DESCRIBE))]);
+        let sums = format!("{}  {asset}\n", sha256_hex(&archive));
+        // an older version is there
+        std::fs::create_dir_all(dir.join("2.0.0")).unwrap();
+        std::fs::write(dir.join("2.0.0").join("cadenza"), b"old").unwrap();
+        // a checksum mismatch installs nothing
+        let bad = format!("{}  {asset}\n", "0".repeat(64));
+        let e = install_cadenza(&dir, "2.1.0", asset, &archive, &bad).unwrap_err().to_string();
+        assert!(e.contains("does not match"), "{e}");
+        assert!(install_cadenza(&dir, "2.1.0", asset, &archive, "").unwrap_err().to_string().contains("not listed"));
+        assert!(!dir.join("2.1.0").exists() && cadenza_current(&data).is_none());
+        // a release speaking another protocol is refused and removed
+        let v2 = tar_gz(&[("cadenza", &program(&DESCRIBE.replace(r#""protocol":1"#, r#""protocol":2"#)))]);
+        let e = install_cadenza(&dir, "2.1.0", asset, &v2, &format!("{}  {asset}\n", sha256_hex(&v2))).unwrap_err().to_string();
+        assert!(e.contains("protocol 2"), "{e}");
+        assert!(!dir.join("2.1.0").exists() && cadenza_current(&data).is_none());
+        assert!(cadenza_external(&data).is_none());
+        // the real thing
+        let d = install_cadenza(&dir, "2.1.0", asset, &archive, &sums).unwrap();
+        assert_eq!(d.version, "2.1.0");
+        assert_eq!(cadenza_current(&data).as_deref(), Some("2.1.0"));
+        use std::os::unix::fs::PermissionsExt;
+        assert_eq!(std::fs::metadata(dir.join("2.1.0/cadenza")).unwrap().permissions().mode() & 0o777, 0o755);
+        assert!(!dir.join("2.0.0").exists(), "older versions are deleted");
+        let ext = cadenza_external(&data).unwrap();
+        assert_eq!((ext.path, ext.version.as_str()), (dir.join("2.1.0").join("cadenza"), "2.1.0"));
+        assert_eq!(ext.settings[1]["key"], "gpu");
+        // `current` pointing at a broken program → the built-in engine
+        std::fs::write(dir.join("current"), "9.9.9\n").unwrap();
+        assert!(cadenza_external(&data).is_none());
+        std::fs::write(dir.join("current"), "../../etc\n").unwrap();
+        assert!(cadenza_current(&data).is_none());
+        let _ = std::fs::remove_dir_all(&data);
+    }
+
+    fn info(id: &str, source: &str, installed: Option<&str>, latest: Option<&str>) -> ToolInfo {
+        let update_available = latest.is_some_and(|l| installed.map(|i| newer(l, i)).unwrap_or(true));
+        ToolInfo { id: id.into(), name: title(id).into(), installed: installed.map(String::from), source: source.into(), latest: latest.map(String::from),
+            update_available, checked_at: None, error: None, note: String::new(), updatable: true, resettable: false }
+    }
+
+    #[test]
+    fn scheduled_plan_per_tool() {
+        // Cadenza: built in, a release is out – installed only with its switch on
+        let c = info("cadenza", "bundled", Some("0.1.0"), Some("2.1.0"));
+        assert_eq!(plan(&c, false, true), Plan::Say("Cadenza 2.1.0 available".into()));
+        assert_eq!(plan(&c, true, true), Plan::Install { from: Some("0.1.0".into()), to: "2.1.0".into() });
+        assert_eq!(plan(&info("cadenza", "updated", Some("2.1.0"), Some("2.1.0")), true, true), Plan::Say("Cadenza up to date".into()));
+        // slskd: not installed – nothing downloads by itself unless its switch is on (and Soulseek is)
+        let s = info("slskd", "missing", None, Some("0.24.1"));
+        assert_eq!(plan(&s, false, true), Plan::Say("slskd 0.24.1 available (not installed)".into()));
+        assert_eq!(plan(&s, true, false), Plan::Say("slskd 0.24.1 available (not installed)".into()));
+        assert_eq!(plan(&s, true, true), Plan::Install { from: None, to: "0.24.1".into() });
+        assert_eq!(plan(&info("slskd", "updated", Some("0.24.0"), Some("0.24.1")), false, true), Plan::Say("slskd 0.24.1 available".into()));
+        assert_eq!(plan(&info("slskd", "missing", None, None), true, true), Plan::Say("slskd not installed".into()));
+        // yt-dlp: missing is never installed by the task; a failed check is an error
+        assert_eq!(plan(&info("ytdlp", "missing", None, Some("2026.10.14")), true, true), Plan::Say("yt-dlp not installed".into()));
+        let mut y = info("ytdlp", "bundled", Some("2026.10.09"), Some("2026.10.14"));
+        assert_eq!(plan(&y, true, true), Plan::Install { from: Some("2026.10.09".into()), to: "2026.10.14".into() });
+        y.error = Some("Could not check for a new version: timeout".into());
+        assert!(matches!(plan(&y, true, true), Plan::Error(e) if e.starts_with("yt-dlp: Could not check")));
+        // a copy Encore must not touch
+        let mut st = info("streamrip", "system", Some("2.4.9"), Some("2.5.0"));
+        st.updatable = false;
+        assert_eq!(plan(&st, true, true), Plan::Say("streamrip 2.5.0 available".into()));
+        assert_eq!(IDS.map(auto_key), ["tools_auto_ytdlp", "tools_auto_streamrip", "tools_auto_cadenza", "tools_auto_slskd"]);
+    }
+
+    #[test]
+    fn auto_switch_defaults() {
+        let d: Value = serde_json::from_str(include_str!("defaults.json")).unwrap();
+        assert_eq!(d["tools_auto_ytdlp"]["default"], true);
+        assert_eq!(d["tools_auto_streamrip"]["default"], true);
+        assert_eq!(d["tools_auto_cadenza"]["default"], false);
+        assert_eq!(d["tools_auto_slskd"]["default"], false);
+        assert_eq!(d["cadenza_engine_settings"]["default"], "{}");
     }
 
     #[test]

@@ -92,7 +92,7 @@ export async function render(view) {
   const run = async () => {
     box.innerHTML = '<div class="empty"><span class="spinner"></span><p class="muted">Checking…</p></div>';
     last = await api.get('/system/diagnostics');
-    // the built-in VPN for Soulseek, as one more connection check (older servers have no /system/vpn)
+    // Encore's VPN for Soulseek, as one more connection check (older servers have no /system/vpn)
     try {
       const v = await api.get('/system/vpn');
       last.checks.push({ kind: 'service', name: 'VPN for Soulseek', ok: !v.enabled || v.state === 'up', request: v.endpoint ? `WireGuard ${v.endpoint}` : '', detail: vpnText(v) });

@@ -18,7 +18,7 @@ pub const TASKS: [(&str, &str, &str); 11] = [
     ("retag", "Re-tag albums added to MusicBrainz", "Albums tagged from Deezer/Apple/Discogs get proper MusicBrainz tags once they appear there."),
     ("verify", "Verify audio fingerprints", "Fingerprint unchecked songs with AcoustID and flag wrong audio."),
     ("cleanup", "Clean up", "Remove finished downloads older than the cleanup age from the list and delete leftover staging files."),
-    ("tools", "Update download tools", "Check yt-dlp and streamrip for new versions and install them – no new Encore image needed. yt-dlp changes often as sites change; streamrip only when its maintainers publish a release."),
+    ("tools", "Update download tools", "Check yt-dlp, streamrip, Cadenza (server processing) and slskd (the Soulseek engine) for new versions, and install them for the tools switched to update automatically under Download tools – no new Encore image needed."),
     ("backup", "Back up the database", "Copy the database to config/backups (kept for 7 days, then one a week for 8 weeks, plus the last 3 pre-upgrade copies)."),
 ];
 

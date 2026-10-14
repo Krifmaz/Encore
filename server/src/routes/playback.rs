@@ -17,8 +17,13 @@ pub fn router() -> Router<AppState> {
 }
 
 /// Whether this user can have streams upsampled on the server, and the choices on offer.
+/// `engine`: the engine processing runs on ({version, source: bundled | updated, label}), its settings
+/// schema (`settings`, from `cadenza render --describe` or built from cadenza-dsp's catalog) and the
+/// admin's saved values (`values`, setting `cadenza_engine_settings`).
 async fn dsp_info(State(st): State<AppState>, User(u): User) -> Json<Value> {
     let lim = dsp::Limits::of(&st);
+    let st2 = st.clone();
+    let engine = tokio::task::spawn_blocking(move || dsp::Engine::of(&st2)).await.unwrap_or_else(|_| dsp::Engine::from_parts(None, dsp::saved_values(&st), lim.max_taps));
     let filters: Vec<Value> = dsp::filters(lim.max_taps).iter().map(|f| json!([f.id(), f.label()])).collect();
     let dithers: Vec<Value> = cadenza_dsp::DitherKind::catalog().iter().map(|d| json!([d.id(), d.label()])).collect();
     Json(json!({
@@ -30,9 +35,10 @@ async fn dsp_info(State(st): State<AppState>, User(u): User) -> Json<Value> {
         "max_streams": lim.max_streams,
         "filters": filters,
         "dithers": dithers,
-        "default_filter": dsp::default_filter(lim.max_taps).id(),
-        "default_dither": cadenza_dsp::DitherKind::Tpdf.id(),
+        "default_filter": dsp::choose_filter_or("", &engine.value("filter").unwrap_or_default(), lim.max_taps).id(),
+        "default_dither": dsp::choose_dither_or("", &engine.value("dither").unwrap_or_default()).id(),
         "cache": dsp::render::usage(&st),
+        "engine": engine.json(),
     }))
 }
 

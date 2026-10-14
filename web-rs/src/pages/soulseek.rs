@@ -139,14 +139,30 @@ fn toast_html(html: &str, kind: &str) {
 fn status_html(s: &Value, error: &str) -> String {
     let settings = r##"<a href="#/settings?s=slskd" style="color:var(--accent)">Settings → Soulseek</a>"##;
     if !error.is_empty() { return format!(r#"<span class="dot err"></span> {} · {settings}"#, esc(error)); }
+    let state = s.s("state");
+    if s.truthy("configured") && state == "not_installed" {
+        return format!(r#"<span class="dot err"></span> <span style="color:var(--warn)">Soulseek is not installed{}</span> · {settings}"#,
+            if s.truthy("hint") { format!(" – {}", esc(&s.s("hint"))) } else { String::new() });
+    }
     if !s.truthy("enabled") { return format!(r#"<span class="dot"></span> Soulseek is not enabled – turn it on in {settings}"#); }
+    if state == "waiting_vpn" {
+        return format!(r#"<span class="dot"></span> <span style="color:var(--warn)">{}</span> · {settings}"#,
+            esc(&if s.truthy("error") { s.s("error") } else { "Waiting for the VPN".to_string() }));
+    }
+    if state == "crashed" {
+        return format!(r#"<span class="dot err"></span> <span style="color:var(--warn)">Soulseek stopped{}</span> · {settings}"#,
+            if s.truthy("error") { format!(" – {}", esc(&s.s("error"))) } else { String::new() });
+    }
+    if state == "starting" {
+        return format!(r#"<span class="dot"></span> Soulseek is starting…{}"#,
+            if s.truthy("error") { format!(r#" <span style="color:var(--warn)">{}</span>"#, esc(&s.s("error"))) } else { String::new() });
+    }
     if !s.truthy("logged_in") {
         return format!(r#"<span class="dot err"></span> <span style="color:var(--warn)">Not signed in{}</span> · {settings}"#,
             if s.truthy("error") { format!(" – {}", esc(&s.s("error"))) } else { String::new() });
     }
-    let mut parts = vec![format!(r#"<span class="dot ok"></span> Signed in as <b>{}</b>{}"#,
-        esc(&if s.truthy("username") { s.s("username") } else { "?".to_string() }),
-        if s.g("client").as_str() == Some("slskd") { r#" <span class="faint">via slskd</span>"# } else { "" })];
+    let mut parts = vec![format!(r#"<span class="dot ok"></span> Signed in as <b>{}</b>"#,
+        esc(&if s.truthy("username") { s.s("username") } else { "?".to_string() }))];
     parts.push(if s.g("shares").truthy("files") { format!("sharing {}", plural(s.g("shares").f("files"), "file")) } else { "sharing nothing".to_string() });
     if s.truthy("port") { parts.push(format!("port {}", esc(&s.s("port")))); }
     if s.truthy("error") { parts.push(format!(r#"<span style="color:var(--warn)">{}</span>"#, esc(&s.s("error")))); }
@@ -558,7 +574,6 @@ impl Page {
     fn paint_transfers(&self) {
         let t = self.transfers.borrow();
         let (dl, ul) = (arr(&t, "downloads"), arr(&t, "uploads"));
-        let status = self.status.borrow();
         dom::set_html(&self.tr_el, &format!(r#"
       <div class="section-head"><h2>Downloads <span class="faint small">{}</span></h2>
         <button class="btn sm" id="slsk-clear" {}>{}Clear finished</button></div>
@@ -569,7 +584,7 @@ impl Page {
             if !dl.is_empty() { downloads_table(dl) } else { empty_state(&icon("download"), "No downloads", "Files you download from Soulseek show up here while they transfer.") },
             ul.len(),
             if !ul.is_empty() { uploads_table(ul) } else {
-                empty_state(&icon("users"), "No uploads", if status.g("client").as_str() == Some("slskd") { "Uploads are only listed for the built-in client." } else { "Other people fetching from your shares show up here." })
+                empty_state(&icon("users"), "No uploads", "Other people fetching from your shares show up here.")
             }));
     }
 

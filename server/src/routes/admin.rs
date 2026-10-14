@@ -260,7 +260,7 @@ async fn put_settings(State(st): State<AppState>, Admin(me): Admin, Json(values)
     keys.sort();
     st.db.log("info", &format!("{} updated settings: {}", me.s("username"), keys.iter().map(|s| s.as_str()).collect::<Vec<_>>().join(", ")));
     st.cfg.set_many(&Value::Object(clean));
-    crate::soulseek::ensure(&st); // a changed Soulseek login or port takes effect now, not at the next check
+    crate::slskd_managed::poke(); // a changed Soulseek login or port takes effect now, not at the next check
     Ok(Json(st.cfg.public_dump()))
 }
 

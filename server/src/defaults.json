@@ -194,6 +194,16 @@
   "default": true,
   "secret": false
  },
+ "tools_auto_cadenza": {
+  "env": null,
+  "default": false,
+  "secret": false
+ },
+ "tools_auto_slskd": {
+  "env": null,
+  "default": false,
+  "secret": false
+ },
  "lyrics_on_import": {
   "env": "ENCORE_LYRICS_ON_IMPORT",
   "default": true,
@@ -414,11 +424,6 @@
   "default": false,
   "secret": false
  },
- "soulseek_client": {
-  "env": "SOULSEEK_CLIENT",
-  "default": "auto",
-  "secret": false
- },
  "soulseek_username": {
   "env": "SOULSEEK_USERNAME",
   "default": "",
@@ -432,11 +437,6 @@
  "soulseek_port": {
   "env": "SOULSEEK_PORT",
   "default": 2234,
-  "secret": false
- },
- "soulseek_port_file": {
-  "env": "SOULSEEK_PORT_FILE",
-  "default": "",
   "secret": false
  },
  "soulseek_share": {
@@ -469,16 +469,6 @@
   "default": true,
   "secret": false
  },
- "slskd_url": {
-  "env": "SLSKD_URL",
-  "default": "http://slskd:5030",
-  "secret": false
- },
- "slskd_api_key": {
-  "env": "SLSKD_API_KEY",
-  "default": "",
-  "secret": true
- },
  "slskd_download_path": {
   "env": "SLSKD_DOWNLOAD_PATH",
   "default": "/downloads/slskd",
@@ -508,6 +498,11 @@
   "env": "SLSKD_MAX_CANDIDATES",
   "default": 4,
   "secret": false
+ },
+ "slskd_managed_api_key": {
+  "env": null,
+  "default": "",
+  "secret": true
  },
  "ytdlp_enabled": {
   "env": "YTDLP_ENABLED",
@@ -717,6 +712,11 @@
  "cadenza_cache_mb": {
   "env": "CADENZA_CACHE_MB",
   "default": 4096,
+  "secret": false
+ },
+ "cadenza_engine_settings": {
+  "env": null,
+  "default": "{}",
   "secret": false
  }
 }

@@ -190,7 +190,7 @@ async fn load_backups(bk: &Element) {
 async fn run(view: Element, diag: Element, last: Rc<RefCell<Option<Value>>>) -> Result<(), ApiError> {
     dom::set_html(&diag, r#"<div class="empty"><span class="spinner"></span><p class="muted">Checking…</p></div>"#);
     let mut data = api::get("/system/diagnostics").await?;
-    // the built-in VPN for Soulseek, as one more connection check (older servers have no /system/vpn)
+    // Encore's VPN for Soulseek, as one more connection check (older servers have no /system/vpn)
     if let Ok(v) = api::get("/system/vpn").await {
         let row = json!({ "kind": "service", "name": "VPN for Soulseek", "ok": !v.truthy("enabled") || v.g("state").as_str() == Some("up"),
             "request": if v.truthy("endpoint") { format!("WireGuard {}", v.s("endpoint")) } else { String::new() }, "detail": vpn_text(&v) });
