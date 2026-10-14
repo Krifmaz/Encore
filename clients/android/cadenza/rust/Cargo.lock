@@ -16,8 +16,8 @@ checksum = "fc652a48c352aef3ea3aed32080501cf3ef6ed5da78602a020c991775b0aff04"
 
 [[package]]
 name = "cadenza-dsp"
-version = "0.1.0"
-source = "git+https://github.com/Krifmaz/cadenza?rev=5f17f17#5f17f1731782e1aeae31ba98152b7fc2a68f0260"
+version = "2.2.0"
+source = "git+https://github.com/Krifmaz/cadenza?rev=93c2621#93c262132ffc9f6154ff1d07a77c794375592185"
 dependencies = [
  "dirs",
  "hound",

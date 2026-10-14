@@ -16,7 +16,7 @@ crate-type = ["cdylib", "rlib"]
 
 [dependencies]
 # the same rev as server/Cargo.toml (decision D2: the cadenza repo is public, no deploy key)
-cadenza-dsp = { git = "https://github.com/Krifmaz/cadenza", rev = "5f17f17" }
+cadenza-dsp = { git = "https://github.com/Krifmaz/cadenza", rev = "93c2621" }
 jni = "0.21"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
