@@ -95,9 +95,16 @@ export const fmt = {
     const h = Math.floor(s / 3600), m = Math.floor((s % 3600) / 60), sec = s % 60;
     return h ? `${h}:${String(m).padStart(2, '0')}:${String(sec).padStart(2, '0')}` : `${m}:${String(sec).padStart(2, '0')}`;
   },
+  /** "4 mo 22 days 8 hr 24 min" – years, months (30 days), days, hours, minutes; parts that are 0 are left out. */
   longDur(s) {
-    const h = Math.floor(s / 3600), m = Math.round((s % 3600) / 60);
-    return h ? `${h} hr ${m} min` : `${m} min`;
+    let m = Math.round((s || 0) / 60);
+    const parts = [];
+    for (const [n, one, many] of [[525600, 'yr', 'yr'], [43200, 'mo', 'mo'], [1440, 'day', 'days'], [60, 'hr', 'hr']]) {
+      const v = Math.floor(m / n);
+      if (v) { parts.push(`${v} ${v === 1 ? one : many}`); m -= v * n; }
+    }
+    if (m || !parts.length) parts.push(`${m} min`);
+    return parts.join(' ');
   },
   size(b) {
     if (!b) return '0 B';

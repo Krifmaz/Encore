@@ -108,15 +108,16 @@ pub fn render(view: Element, ctx: Ctx) -> PageFuture {
       <div class="stat"><b>{tracks}</b><span>songs in the library</span></div>
       <div class="stat"><b>{long_dur}</b><span>to listen to{days}</span></div>
       <div class="stat"><b>{plays}</b><span>songs you played{listened}</span></div>
-      <div class="stat"><b>{requests}</b><span>things you requested{rank}</span></div>
+      <div class="stat"><b>{requests}</b><span>{things} you requested{rank}</span></div>
       {top_artist}
       {fun}"##,
                     tracks = ui::fmt::num(lib.f("tracks")),
                     long_dur = ui::fmt::long_dur(duration),
-                    days = if duration > 86400.0 { format!(" · {:.1} days non-stop", duration / 86400.0) } else { String::new() },
+                    days = if duration > 86400.0 { " non-stop" } else { "" },
                     plays = ui::fmt::num(me.f("plays")),
                     listened = if me.truthy("listened") { format!(" · {}", ui::fmt::long_dur(me.f("listened"))) } else { String::new() },
                     requests = ui::fmt::num(me.f("requests")),
+                    things = if me.f("requests") == 1.0 { "thing" } else { "things" },
                     rank = if me.truthy("rank") { format!(r##" · #{} on the <a href="#/leaderboard">leaderboard</a>"##, me.s("rank")) } else { String::new() },
                     top_artist = if me.truthy("top_artist") { format!(r#"<div class="stat"><b class="ellipsis" style="display:block">{}</b><span>your most played artist</span></div>"#, esc(&me.s("top_artist"))) } else { String::new() },
                     fun = if s.truthy("fun") { let fun = s.g("fun"); format!(r#"<div class="stat"><b>{}</b><span>{}</span></div>"#, esc(&fun.s("value")), esc(&fun.s("label"))) } else { String::new() },

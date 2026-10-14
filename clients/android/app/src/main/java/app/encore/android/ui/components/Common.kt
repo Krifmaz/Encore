@@ -659,12 +659,16 @@ fun formatDuration(ms: Long): String {
     return if (h > 0) "%d:%02d:%02d".format(h, m, s) else "%d:%02d".format(m, s)
 }
 
-/** `fmt.longDur`: "2 hr 5 min" / "38 min". */
+/** `fmt.longDur`: "4 mo 22 days 8 hr 24 min" – years, months (30 days), days, hours, minutes; zero parts left out. */
 fun formatLongDuration(seconds: Double): String {
-    val s = seconds.coerceAtLeast(0.0)
-    val h = (s / 3600).toInt()
-    val m = Math.round((s % 3600) / 60).toInt()
-    return if (h > 0) "$h hr $m min" else "$m min"
+    var m = Math.round(maxOf(0.0, seconds) / 60.0)
+    val parts = ArrayList<String>()
+    for ((n, one, many) in listOf(Triple(525600L, "yr", "yr"), Triple(43200L, "mo", "mo"), Triple(1440L, "day", "days"), Triple(60L, "hr", "hr"))) {
+        val v = m / n
+        if (v > 0) { parts.add("$v ${if (v == 1L) one else many}"); m -= v * n }
+    }
+    if (m > 0 || parts.isEmpty()) parts.add("$m min")
+    return parts.joinToString(" ")
 }
 
 /** `fmt.size`: "0 B", "12 KB", "1.5 GB". */
