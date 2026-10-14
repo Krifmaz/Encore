@@ -84,6 +84,7 @@ pub fn render(view: Element, ctx: Ctx) -> PageFuture {
             });
         }
         let d = Rc::new(d);
+        let admin = matches!(ctx.user.s("role").as_str(), "admin" | "owner");
         if let Some(grid) = dom::qs_in(&view, ".grid") {
             let d2 = d.clone();
             dom::on(&grid, "click", move |e| {
@@ -91,7 +92,7 @@ pub fn render(view: Element, ctx: Ctx) -> PageFuture {
                 let Some(card_el) = dom::closest_of(&b, "[data-svc]") else { return };
                 let svc = dom::data(&card_el, "svc");
                 let act = dom::data(&b, "act");
-                if act == "connect" { connect(&svc); return; }
+                if act == "connect" { connect(&svc, &d2, admin); return; }
                 if act == "disconnect" {
                     let d = d2.clone();
                     dom::spawn(async move {
@@ -180,20 +181,33 @@ fn form_entries(form: &Element) -> Value {
     Value::Object(o)
 }
 
-/// `connect(svc)`: start the right sign-in flow for the service.
-fn connect(svc: &str) {
+/// `connect(svc, d, admin)`: start the right sign-in flow for the service (`d` is the `/connections` answer).
+fn connect(svc: &str, d: &Value, admin: bool) {
     let form = info(svc).form;
+    // `d.services[svc]?.label || svc`
+    let label = { let l = d.g("services").g(svc).s("label"); if l.is_empty() { svc.to_string() } else { l } };
     if form == "oauth" {
         let svc = svc.to_string();
+        // `(d.base_url || location.origin).replace(/\/+$/, '')`
+        let base = { let b = d.s("base_url"); if b.is_empty() { dom::location().origin().unwrap_or_default() } else { b } };
+        let base = base.trim_end_matches('/').to_string();
         dom::spawn(async move {
             match api::post(&format!("/connections/{svc}"), json!({})).await {
                 Ok(r) => { let _ = dom::location().set_href(&r.s("url")); }
-                Err(e) => toast(&e.message, "err"),
+                Err(e) => {
+                    // the admin side is not ready (no Public URL / no client id): a modal the user can read, not a passing toast
+                    if !(e.message.contains("Public URL") || e.message.contains("Client ID")) { toast(&e.message, "err"); return; }
+                    let uri_line = if admin {
+                        format!(r#"<div class="small">Redirect URI to register at the service: <span class="mono">{}</span></div>"#, esc(&format!("{base}/api/connections/{svc}/callback")))
+                    } else { String::new() };
+                    modal(ModalOpts::new(&format!("Connect {}", esc(&label)), &format!(r#"<p class="muted" style="margin-top:0">{}</p>
+      {uri_line}"#, esc(&e.message))).footer(r#"<button class="btn" data-close>Close</button>"#));
+                }
             }
         });
         return;
     }
-    if form == "ytmusic" { connect_ytmusic(); return; }
+    if form == "ytmusic" { connect_ytmusic(d.g("available_oauth").truthy("ytmusic")); return; }
     if form == "lastfm" { connect_lastfm(); return; }
     if form == "plex" {
         dom::spawn(async move {
@@ -201,22 +215,29 @@ fn connect(svc: &str) {
                 Ok(r) => r,
                 Err(e) => { toast(&e.message, "err"); return; }
             };
+            // a popup is blocked on phones (window.open returns null) – the modal always shows the link and the progress
             let w = dom::window().open_with_url_and_target_and_features(&r.s("url"), "plexauth", "width=600,height=750").ok().flatten();
-            toast("Sign in to Plex in the popup…", "");
-            for _ in 0..120 {
+            let m = modal(ModalOpts::new("Sign in to Plex", &format!(r#"<a class="btn primary" target="_blank" rel="noopener" href="{}">{}Open Plex sign-in</a>
+      <p class="small muted" style="margin-bottom:0"><span class="spinner"></span> Approve Encore in the Plex page that opens, then come back here. Waiting…</p>"#,
+                esc(&r.s("url")), icon("link"))));
+            let mut i = 0;
+            while i < 120 && m.is_open() {
                 dom::sleep(2000).await;
+                if !m.is_open() { return; }
                 let c = match api::post("/connections/plex/check", json!({ "pin_id": r.g("pin_id") })).await {
                     Ok(c) => c,
-                    Err(e) => { toast(&e.message, "err"); return; }
+                    Err(e) => { m.close(); toast(&e.message, "err"); return; }
                 };
                 if c.truthy("done") {
                     if let Some(w) = &w { let _ = w.close(); }
+                    m.close();
                     toast(&format!("Plex connected ({})", c.s("account")), "ok");
                     hashchange();
                     return;
                 }
+                i += 1;
             }
-            toast("Plex sign-in timed out", "err");
+            if m.is_open() { m.close(); toast("Plex sign-in timed out", "err"); }
         });
         return;
     }
@@ -281,18 +302,42 @@ fn connect_lastfm() {
     }
 }
 
-/// `connectYTMusic()`: device code (polled) or pasted browser headers.
-fn connect_ytmusic() {
-    // the textarea placeholder holds a real newline (`\n` in the JS template literal)
-    let m = modal(ModalOpts::new("Connect YouTube Music", &format!(r#"<div class="tabs" id="ytm-tabs"><button data-m="code" class="active">Sign in with a code</button><button data-m="headers">Paste browser headers</button></div>
+/// `saveHeaders(m, headers)`: POST the pasted music.youtube.com headers and close the modal.
+async fn save_headers(m: crate::ui::Modal, headers: String) {
+    match api::post("/connections/ytmusic", json!({ "headers": headers })).await {
+        Ok(r) => { toast(&format!("YouTube Music connected ({})", r.s("account")), "ok"); m.close(); hashchange(); }
+        Err(e) => toast(&e.message, "err"),
+    }
+}
+
+/// `connectYTMusic(oauth)`: device code (polled) or pasted browser headers. `oauth`: an admin added a Google OAuth
+/// client, so the code sign-in can work; without one the modal opens straight on the pasted-headers path instead of
+/// asking the server for a code and showing its error.
+fn connect_ytmusic(oauth: bool) {
+    let code_part = if oauth {
+        format!(r#"<div class="tabs" id="ytm-tabs"><button data-m="code" class="active">Sign in with a code</button><button data-m="headers">Paste browser headers</button></div>
       <div id="ytm-code" class="mt"><p class="muted" style="margin-top:0">You'll get a short code to enter at google.com/device with the Google account you use for YouTube Music.</p>
-        <button class="btn primary" id="ytm-start">{}Get code</button><div id="ytm-out" class="mt"></div></div>
-      <div id="ytm-headers" class="mt hidden">
+        <button class="btn primary" id="ytm-start">{}Get code</button><div id="ytm-out" class="mt"></div></div>"#, icon("link"))
+    } else { String::new() };
+    let why = if oauth { "" } else { r#"<p class="muted" style="margin-top:0">Signing in with a code needs a Google OAuth client, which no admin has added in Settings → Integrations yet. Paste the headers of a signed-in music.youtube.com request instead – it works the same.</p>"# };
+    // the textarea placeholder holds a real newline (`\n` in the JS template literal)
+    let m = modal(ModalOpts::new("Connect YouTube Music", &format!(r#"{code_part}
+      <div id="ytm-headers" class="{}">
+        {why}
         <ol class="small muted" style="margin-top:0;line-height:1.7"><li>Open music.youtube.com in a desktop browser while signed in, press F12 → Network.</li>
           <li>Click around, find a <span class="mono">browse</span> request (POST), right-click → Copy → <b>Copy request headers</b>.</li><li>Paste below.</li></ol>
         <textarea class="input mono" id="ytm-raw" rows="8" placeholder="accept: */*
 cookie: …"></textarea>
-        <button class="btn primary mt" id="ytm-save">Connect</button></div>"#, icon("link"))).wide(true));
+        <button class="btn primary mt" id="ytm-save">Connect</button></div>"#, if oauth { "mt hidden" } else { "mt" })).wide(true));
+    if let Some(b) = m.qs("#ytm-save") {
+        let m2 = m.clone();
+        dom::on(&b, "click", move |_| {
+            let m = m2.clone();
+            let headers = m.qs("#ytm-raw").map(|t| dom::value(&t)).unwrap_or_default();
+            dom::spawn(save_headers(m, headers));
+        });
+    }
+    if !oauth { return; }
     if let Some(tabs) = m.qs("#ytm-tabs") {
         let m2 = m.clone();
         dom::on(&tabs, "click", move |e| {
@@ -301,19 +346,6 @@ cookie: …"></textarea>
             let mode = dom::data(&b, "m");
             if let Some(el) = m2.qs("#ytm-code") { dom::toggle_class(&el, "hidden", mode != "code"); }
             if let Some(el) = m2.qs("#ytm-headers") { dom::toggle_class(&el, "hidden", mode != "headers"); }
-        });
-    }
-    if let Some(b) = m.qs("#ytm-save") {
-        let m2 = m.clone();
-        dom::on(&b, "click", move |_| {
-            let m = m2.clone();
-            dom::spawn(async move {
-                let headers = m.qs("#ytm-raw").map(|t| dom::value(&t)).unwrap_or_default();
-                match api::post("/connections/ytmusic", json!({ "headers": headers })).await {
-                    Ok(r) => { toast(&format!("YouTube Music connected ({})", r.s("account")), "ok"); m.close(); hashchange(); }
-                    Err(e) => toast(&e.message, "err"),
-                }
-            });
         });
     }
     if let Some(b) = m.qs("#ytm-start") {

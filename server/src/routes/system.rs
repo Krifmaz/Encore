@@ -20,6 +20,7 @@ pub fn router() -> Router<AppState> {
         .route("/api/system/status", get(status))
         .route("/api/system/test/{service}", post(test))
         .route("/api/system/streamrip/tidal-login", post(tidal_login_start).get(tidal_login_status))
+        .route("/api/system/streamrip/tidal-tokens", post(tidal_tokens_save).delete(tidal_tokens_clear))
         .route("/api/system/downloads", get(downloads))
         .route("/api/system/downloads/slskd/clear", post(clear_slskd))
         .route("/api/system/backups", get(backups).post(backup_now))
@@ -198,6 +199,33 @@ async fn tidal_login_status(State(st): State<AppState>, Admin(_): Admin) -> ApiR
     Ok(Json(streamrip::tidal_login_status(&st)))
 }
 
+#[derive(Deserialize)]
+struct TidalTokens {
+    #[serde(default)]
+    toml: String,
+}
+
+/// "Paste tokens instead": the [tidal] section of a streamrip config signed in on another computer.
+async fn tidal_tokens_save(State(st): State<AppState>, Admin(u): Admin, Json(b): Json<TidalTokens>) -> ApiResult<Json<Value>> {
+    if b.toml.trim().is_empty() {
+        return Err(err(400, "Paste the [tidal] section of streamrip's config.toml first"));
+    }
+    if !streamrip::tidal_toml_has_token(&b.toml) {
+        return Err(err(400, streamrip::TIDAL_NO_TOKEN_MSG));
+    }
+    // from here on an error is the server's (config file not writable), not a bad paste
+    let v = streamrip::tidal_tokens_save(&st, &b.toml).await.map_err(|e| err(500, e.to_string()))?;
+    st.db.log("info", &format!("{} pasted Tidal tokens for streamrip", u.s("username")));
+    Ok(Json(v))
+}
+
+/// "Sign out of Tidal": blanks every token in streamrip's config.
+async fn tidal_tokens_clear(State(st): State<AppState>, Admin(u): Admin) -> ApiResult<Json<Value>> {
+    let v = streamrip::tidal_sign_out(&st).await.map_err(|e| err(500, e.to_string()))?;
+    st.db.log("info", &format!("{} signed streamrip out of Tidal", u.s("username")));
+    Ok(Json(v))
+}
+
 fn msg(ok: bool, m: impl Into<String>) -> Value {
     json!({ "ok": ok, "message": m.into() })
 }
@@ -332,7 +360,8 @@ async fn test(State(st): State<AppState>, Admin(u): Admin, Path(service): Path<S
                     let o = tokio::process::Command::new(bin).arg("--version").output().await?;
                     let v: String = String::from_utf8_lossy(&[o.stdout, o.stderr].concat()).trim().chars().take(120).collect();
                     let tidal = if streamrip::tidal_signed_in(&st) { "Tidal: signed in" } else { "Tidal: not signed in yet – use “Sign in to Tidal” below" };
-                    msg(o.status.success(), format!("{v} · credentials written to {} · {tidal}", path.display()))
+                    let reach = streamrip::tidal_probe(&st).await;
+                    msg(o.status.success(), format!("{v} · credentials written to {} · {tidal} · {reach}", path.display()))
                 }
             },
             "acoustid" => {

@@ -40,7 +40,7 @@ export async function render(view, ctx) {
     if (!b) return;
     const svc = b.closest('[data-svc]').dataset.svc;
     const act = b.dataset.act;
-    if (act === 'connect') return connect(svc);
+    if (act === 'connect') return connect(svc, d, ['admin', 'owner'].includes(ctx.user?.role));
     if (act === 'disconnect') {
       if (!await confirmDialog('Disconnect', `Disconnect ${d.services[svc].label}?`, 'Disconnect', true)) return;
       await api.del(`/connections/${svc}`);
@@ -75,26 +75,44 @@ function card(k, s, c, available) {
   </div>`;
 }
 
-async function connect(svc) {
+async function connect(svc, d, admin) {
   const form = (INFO[svc] || {}).form;
+  const label = d.services[svc]?.label || svc;
   if (form === 'oauth') {
-    try { const r = await api.post(`/connections/${svc}`, {}); location.href = r.url; } catch (e) { toast(e.message, 'err'); }
+    try { const r = await api.post(`/connections/${svc}`, {}); location.href = r.url; } catch (e) {
+      // the admin side is not ready (no Public URL / no client id): a modal the user can read, not a passing toast
+      if (!/Public URL|Client ID/.test(e.message)) return toast(e.message, 'err');
+      const base = (d.base_url || location.origin).replace(/\/+$/, '');
+      modal({
+        title: `Connect ${esc(label)}`,
+        body: `<p class="muted" style="margin-top:0">${esc(e.message)}</p>
+      ${admin ? `<div class="small">Redirect URI to register at the service: <span class="mono">${esc(`${base}/api/connections/${svc}/callback`)}</span></div>` : ''}`,
+        footer: '<button class="btn" data-close>Close</button>',
+      });
+    }
     return;
   }
-  if (form === 'ytmusic') return connectYTMusic();
+  if (form === 'ytmusic') return connectYTMusic(!!d.available_oauth?.ytmusic);
   if (form === 'lastfm') return connectLastfm();
   if (form === 'plex') {
+    let r;
+    try { r = await api.post('/connections/plex', {}); } catch (e) { return toast(e.message, 'err'); }
+    // a popup is blocked on phones (window.open returns null) – the modal always shows the link and the progress
+    const w = window.open(r.url, 'plexauth', 'width=600,height=750');
+    const m = modal({
+      title: 'Sign in to Plex',
+      body: `<a class="btn primary" target="_blank" rel="noopener" href="${esc(r.url)}">${icon.link}Open Plex sign-in</a>
+      <p class="small muted" style="margin-bottom:0"><span class="spinner"></span> Approve Encore in the Plex page that opens, then come back here. Waiting…</p>`,
+    });
     try {
-      const r = await api.post('/connections/plex', {});
-      const w = window.open(r.url, 'plexauth', 'width=600,height=750');
-      toast('Sign in to Plex in the popup…');
-      for (let i = 0; i < 120; i++) {
+      for (let i = 0; i < 120 && document.body.contains(m.el); i++) {
         await new Promise(res => setTimeout(res, 2000));
+        if (!document.body.contains(m.el)) return;
         const c = await api.post('/connections/plex/check', { pin_id: r.pin_id });
-        if (c.done) { w?.close(); toast(`Plex connected (${c.account})`, 'ok'); window.dispatchEvent(new HashChangeEvent('hashchange')); return; }
+        if (c.done) { w?.close(); m.close(); toast(`Plex connected (${c.account})`, 'ok'); window.dispatchEvent(new HashChangeEvent('hashchange')); return; }
       }
-      toast('Plex sign-in timed out', 'err');
-    } catch (e) { toast(e.message, 'err'); }
+      if (document.body.contains(m.el)) { m.close(); toast('Plex sign-in timed out', 'err'); }
+    } catch (e) { m.close(); toast(e.message, 'err'); }
     return;
   }
   const fields = {
@@ -137,20 +155,27 @@ function connectLastfm() {
   };
 }
 
-function connectYTMusic() {
+// `oauth`: an admin added a Google OAuth client, so the code sign-in can work. Without one the modal opens straight
+// on the pasted-headers path instead of asking the server for a code and showing its error.
+function connectYTMusic(oauth = true) {
   const m = modal({
     title: 'Connect YouTube Music',
     wide: true,
-    body: `<div class="tabs" id="ytm-tabs"><button data-m="code" class="active">Sign in with a code</button><button data-m="headers">Paste browser headers</button></div>
+    body: `${oauth ? `<div class="tabs" id="ytm-tabs"><button data-m="code" class="active">Sign in with a code</button><button data-m="headers">Paste browser headers</button></div>
       <div id="ytm-code" class="mt"><p class="muted" style="margin-top:0">You'll get a short code to enter at google.com/device with the Google account you use for YouTube Music.</p>
-        <button class="btn primary" id="ytm-start">${icon.link}Get code</button><div id="ytm-out" class="mt"></div></div>
-      <div id="ytm-headers" class="mt hidden">
+        <button class="btn primary" id="ytm-start">${icon.link}Get code</button><div id="ytm-out" class="mt"></div></div>` : ''}
+      <div id="ytm-headers" class="${oauth ? 'mt hidden' : 'mt'}">
+        ${oauth ? '' : '<p class="muted" style="margin-top:0">Signing in with a code needs a Google OAuth client, which no admin has added in Settings → Integrations yet. Paste the headers of a signed-in music.youtube.com request instead – it works the same.</p>'}
         <ol class="small muted" style="margin-top:0;line-height:1.7"><li>Open music.youtube.com in a desktop browser while signed in, press F12 → Network.</li>
           <li>Click around, find a <span class="mono">browse</span> request (POST), right-click → Copy → <b>Copy request headers</b>.</li><li>Paste below.</li></ol>
         <textarea class="input mono" id="ytm-raw" rows="8" placeholder="accept: */*\ncookie: …"></textarea>
         <button class="btn primary mt" id="ytm-save">Connect</button></div>`,
   });
   const el = (s) => m.el.querySelector(s);
+  if (!oauth) {
+    el('#ytm-save').onclick = () => saveHeaders(m, el('#ytm-raw').value);
+    return;
+  }
   el('#ytm-tabs').onclick = (e) => {
     const b = e.target.closest('[data-m]');
     if (!b) return;
@@ -158,12 +183,7 @@ function connectYTMusic() {
     el('#ytm-code').classList.toggle('hidden', b.dataset.m !== 'code');
     el('#ytm-headers').classList.toggle('hidden', b.dataset.m !== 'headers');
   };
-  el('#ytm-save').onclick = async () => {
-    try {
-      const r = await api.post('/connections/ytmusic', { headers: el('#ytm-raw').value });
-      toast(`YouTube Music connected (${r.account})`, 'ok'); m.close(); window.dispatchEvent(new HashChangeEvent('hashchange'));
-    } catch (e) { toast(e.message, 'err'); }
-  };
+  el('#ytm-save').onclick = () => saveHeaders(m, el('#ytm-raw').value);
   el('#ytm-start').onclick = async (ev) => {
     ev.target.disabled = true;
     try {
@@ -177,6 +197,13 @@ function connectYTMusic() {
       }
     } catch (e) { toast(e.message, 'err'); ev.target.disabled = false; }
   };
+}
+
+async function saveHeaders(m, headers) {
+  try {
+    const r = await api.post('/connections/ytmusic', { headers });
+    toast(`YouTube Music connected (${r.account})`, 'ok'); m.close(); window.dispatchEvent(new HashChangeEvent('hashchange'));
+  } catch (e) { toast(e.message, 'err'); }
 }
 
 async function remotePlaylists(svc, label, ctx) {

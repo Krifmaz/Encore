@@ -65,6 +65,32 @@ fn redirect_uri(st: &AppState, service: &str) -> anyhow::Result<String> {
     Ok(format!("{base}/api/connections/{service}/callback"))
 }
 
+/// "Spotify" / "Tidal" for messages.
+fn service_label(service: &str) -> &'static str {
+    if service == "spotify" { "Spotify" } else { "Tidal" }
+}
+
+/// ". Register this redirect URI in the Spotify app: <uri>" when the Public URL is set, else "".
+fn register_hint(st: &AppState, service: &str) -> String {
+    match redirect_uri(st, service) {
+        Ok(uri) => format!(". Register this redirect URI in the {} app: {uri}", service_label(service)),
+        Err(_) => String::new(),
+    }
+}
+
+/// Plain words for a failed authorization-code exchange: the service's error_description when the body is JSON,
+/// else the HTTP status (an HTML page or an empty body says nothing useful).
+pub fn token_exchange_error(service: &str, status: u16, body: &str) -> String {
+    let label = service_label(service);
+    let v: Value = serde_json::from_str(body).unwrap_or(Value::Null);
+    let why = v["error_description"].as_str().or(v["error"].as_str()).or(v["userMessage"].as_str()).map(str::trim).filter(|s| !s.is_empty());
+    match why {
+        Some(w) => format!("{label} did not accept the sign-in (HTTP {status}): {w}"),
+        None if v.is_object() => format!("{label} did not accept the sign-in (HTTP {status}) and sent no reason"),
+        None => format!("{label} did not accept the sign-in (HTTP {status}, no JSON answer). Check the Client ID and that the redirect URI is registered in the {label} app"),
+    }
+}
+
 // ---- OAuth (Spotify / Tidal, PKCE) ----------------------------------------------------------------
 
 pub fn oauth_start(st: &AppState, uid: i64, service: &str) -> anyhow::Result<String> {
@@ -78,7 +104,7 @@ pub fn oauth_start(st: &AppState, uid: i64, service: &str) -> anyhow::Result<Str
         _ => anyhow::bail!("Unsupported sign-in service"),
     };
     if cid.is_empty() {
-        anyhow::bail!("The admin needs to add a {} Client ID in Settings → Integrations", if service == "spotify" { "Spotify" } else { "Tidal" });
+        anyhow::bail!("The admin needs to add a {} Client ID in Settings → Integrations{}", service_label(service), register_hint(st, service));
     }
     let q = [("client_id", cid), ("response_type", "code".into()), ("redirect_uri", redirect_uri(st, service)?), ("code_challenge_method", "S256".into()),
              ("code_challenge", challenge), ("state", state), ("scope", scope.into())];
@@ -91,10 +117,14 @@ pub async fn oauth_finish(st: &AppState, service: &str, code: &str, state: &str,
         .ok_or_else(|| anyhow::anyhow!("Sign-in expired or was started in another session – try again"))?;
     st.cache_put(&key, Value::Null, 0);
     let (url, cid) = if service == "spotify" { ("https://accounts.spotify.com/api/token", st.cfg.str("spotify_client_id")) } else { ("https://auth.tidal.com/v1/oauth2/token", st.cfg.str("tidal_client_id")) };
-    let tok: Value = st.http.post(url).form(&[("grant_type", "authorization_code"), ("code", code), ("redirect_uri", &redirect_uri(st, service)?),
-        ("client_id", &cid), ("code_verifier", pend["verifier"].as_str().unwrap_or(""))]).send().await?.json().await?;
-    let Some(access) = tok["access_token"].as_str() else {
-        anyhow::bail!("{service}: {}", tok["error_description"].as_str().map(String::from).unwrap_or(tok.to_string()));
+    let r = st.http.post(url).form(&[("grant_type", "authorization_code"), ("code", code), ("redirect_uri", &redirect_uri(st, service)?),
+        ("client_id", &cid), ("code_verifier", pend["verifier"].as_str().unwrap_or(""))]).send().await
+        .map_err(|e| anyhow::anyhow!("{} could not be reached from this server: {e}", service_label(service)))?;
+    let status = r.status().as_u16();
+    let body = r.text().await.unwrap_or_default();
+    let tok: Value = serde_json::from_str(&body).unwrap_or(Value::Null);
+    let Some(access) = tok["access_token"].as_str().filter(|_| status == 200) else {
+        anyhow::bail!("{}", token_exchange_error(service, status, &body));
     };
     let expires = now() + tok["expires_in"].as_f64().unwrap_or(3600.0);
     if service == "spotify" {
@@ -378,4 +408,26 @@ pub async fn ytmusic_connect_browser(st: &AppState, uid: i64, raw: &str) -> anyh
         .map_err(|e| anyhow::anyhow!("YouTube Music rejected those headers (copy them again from a fresh request): {e}"))?;
     save(st, uid, "ytmusic", "YouTube Music", &data)?;
     Ok(json!({ "account": "YouTube Music" }))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::token_exchange_error;
+
+    #[test]
+    fn token_error_uses_the_services_description() {
+        let m = token_exchange_error("spotify", 400, r#"{"error":"invalid_grant","error_description":"Invalid redirect URI"}"#);
+        assert_eq!(m, "Spotify did not accept the sign-in (HTTP 400): Invalid redirect URI");
+        let m = token_exchange_error("tidal", 401, r#"{"error":"invalid_client"}"#);
+        assert_eq!(m, "Tidal did not accept the sign-in (HTTP 401): invalid_client");
+    }
+
+    #[test]
+    fn token_error_without_json_is_plain_words() {
+        let m = token_exchange_error("tidal", 403, "<html><title>Access denied</title></html>");
+        assert!(m.starts_with("Tidal did not accept the sign-in (HTTP 403, no JSON answer)"), "{m}");
+        assert!(!m.contains('<'));
+        let m = token_exchange_error("spotify", 500, "{}");
+        assert_eq!(m, "Spotify did not accept the sign-in (HTTP 500) and sent no reason");
+    }
 }

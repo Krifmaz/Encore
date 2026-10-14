@@ -247,9 +247,28 @@ pub async fn download(st: &AppState, url: &str, folder: &Path) -> anyhow::Result
     Ok(files)
 }
 
+
 // ---- Tidal account sign-in (device code) -------------------------------------------------------
 // Tidal has no API key for downloads: streamrip signs in with your own account once, through a link you
-// open in a browser. We run that flow here so it works from Settings instead of a terminal.
+// open in a browser. Encore runs that device flow itself (streamrip's own copy dies when Tidal answers the
+// server with an HTML block page) and writes the tokens into streamrip's config the way streamrip expects:
+// one "lane" per OAuth client – the default client (16/44.1 FLAC) in the plain fields and, when
+// `hires_client` is on, the hi-res client in the `hires_*` fields.
+
+const TIDAL_AUTH: &str = "https://auth.tidal.com/v1/oauth2";
+const TIDAL_SCOPE: &str = "r_usr+w_usr+w_sub";
+const TIDAL_DEFAULT_CLIENT: (&str, &str) = ("4N3n6Q1x95LL5K7p", "oKOXfJW371cX6xaZ0PyhgGNBdNLlBZd4AKKYougMjik=");
+const TIDAL_HIRES_CLIENT: (&str, &str) = ("fX2JxdmntZWK0ixT", "1Nm5AfDAjxrgJFJbKNWLeAyKGVGmINuXPPLHVXAvxAg=");
+const TIDAL_UA: &str = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36";
+/// The [tidal] keys a pasted config may carry, in the order they are written.
+const TIDAL_TOKEN_KEYS: [&str; 10] = ["user_id", "country_code", "access_token", "refresh_token", "token_expiry", "token_client_id",
+    "hires_access_token", "hires_refresh_token", "hires_token_expiry", "hires_token_client_id"];
+const TIDAL_HIRES_KEYS: [&str; 4] = ["hires_access_token", "hires_refresh_token", "hires_token_expiry", "hires_token_client_id"];
+const TIDAL_STEP1_MSG: &str = "Step 1 of 2: open the link, approve in your Tidal account, then come back here.";
+const TIDAL_STEP2_MSG: &str = "Step 2 of 2: open the new link, approve in your Tidal account, then come back here.";
+const TIDAL_ONE_STEP_MSG: &str = "Open the link, approve in your Tidal account, then come back here.";
+const TIDAL_DONE_MSG: &str = "Signed in to Tidal – downloads from Tidal use this account now.";
+const TIDAL_PARTIAL_MSG: &str = "Signed in for 16/44.1 FLAC only – sign in again for hi-res (step 2 was not finished).";
 
 #[derive(Clone, Debug, Default)]
 pub struct TidalLogin {
@@ -257,6 +276,9 @@ pub struct TidalLogin {
     pub status: String,
     pub url: Option<String>,
     pub message: String,
+    /// 1-based lane being approved, and how many lanes there are (1 or 2).
+    pub step: u8,
+    pub steps: u8,
 }
 
 static TIDAL_LOGIN: std::sync::Mutex<Option<TidalLogin>> = std::sync::Mutex::new(None);
@@ -273,97 +295,243 @@ fn tidal_set(f: impl FnOnce(&mut TidalLogin)) {
     }
 }
 
+/// The `[tidal]` section of a TOML text (without the header), or "" when there is none.
+fn tidal_section(text: &str) -> &str {
+    let Some(m) = Regex::new(r"(?m)^\s*\[tidal\]\s*$").unwrap().find(text) else { return "" };
+    let body = &text[m.end()..];
+    let end = Regex::new(r"(?m)^\s*\[").unwrap().find(body).map(|n| n.start()).unwrap_or(body.len());
+    &body[..end]
+}
+
+/// One TOML scalar as text: quotes stripped, inline comments dropped.
+fn toml_scalar(raw: &str) -> String {
+    let v = raw.trim();
+    if let Some(q) = v.strip_prefix('"').or_else(|| v.strip_prefix('\'')) {
+        let close = if v.starts_with('"') { '"' } else { '\'' };
+        return q.split(close).next().unwrap_or("").replace("\\\"", "\"").replace("\\\\", "\\");
+    }
+    v.split('#').next().unwrap_or("").trim().to_string()
+}
+
+/// `key = value` pairs of a `[tidal]` section. Accepts a whole config.toml or just the section, with or
+/// without its `[tidal]` header, quoted or bare values.
+pub fn parse_tidal_toml(text: &str) -> std::collections::BTreeMap<String, String> {
+    // a whole file (any section header present) is narrowed to [tidal]; a bare key list is taken as is
+    let body = if Regex::new(r"(?m)^\s*\[").unwrap().is_match(text) { tidal_section(text).to_string() } else { text.to_string() };
+    let line = Regex::new(r"(?m)^\s*([A-Za-z_][A-Za-z0-9_]*)\s*=\s*(.*)$").unwrap();
+    let mut out = std::collections::BTreeMap::new();
+    for c in line.captures_iter(&body) {
+        let key = c[1].to_string();
+        if TIDAL_TOKEN_KEYS.contains(&key.as_str()) || matches!(key.as_str(), "hires_client" | "client_id" | "client_secret" | "quality") {
+            out.insert(key, toml_scalar(&c[2]));
+        }
+    }
+    out
+}
+
+/// What streamrip's config currently says about Tidal.
+fn tidal_config(st: &AppState) -> std::collections::BTreeMap<String, String> {
+    std::fs::read_to_string(config_path(st)).map(|t| parse_tidal_toml(&t)).unwrap_or_default()
+}
+
+fn tidal_hires_client(cfg: &std::collections::BTreeMap<String, String>) -> bool {
+    cfg.get("hires_client").map(|v| v.trim() != "false").unwrap_or(true)
+}
+
+/// The OAuth clients to sign in: the one in the config if set, else streamrip's default and (with
+/// `hires_client`) hi-res clients. Each lane is (client_id, client_secret, key prefix).
+fn tidal_lanes(cfg: &std::collections::BTreeMap<String, String>) -> Vec<(String, String, &'static str)> {
+    let (cid, sec) = (cfg.get("client_id").cloned().unwrap_or_default(), cfg.get("client_secret").cloned().unwrap_or_default());
+    if !cid.is_empty() && !sec.is_empty() {
+        return vec![(cid, sec, "")];
+    }
+    let mut lanes = vec![(TIDAL_DEFAULT_CLIENT.0.to_string(), TIDAL_DEFAULT_CLIENT.1.to_string(), "")];
+    if tidal_hires_client(cfg) {
+        lanes.push((TIDAL_HIRES_CLIENT.0.to_string(), TIDAL_HIRES_CLIENT.1.to_string(), "hires_"));
+    }
+    lanes
+}
+
+/// A TOML float with one decimal, the way streamrip stores `token_expiry`.
+fn toml_float(v: f64) -> String {
+    format!("{v:.1}")
+}
+
+fn now_secs() -> f64 {
+    std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs_f64()).unwrap_or(0.0)
+}
+
+/// Write `[tidal]` values into streamrip's config (creating the file through apply_credentials first).
+async fn tidal_write(st: &AppState, values: &[(String, String)]) -> anyhow::Result<()> {
+    let path = apply_credentials(st).await?;
+    let mut text = std::fs::read_to_string(&path).unwrap_or_default();
+    for (k, v) in values {
+        text = set_toml(&text, "tidal", k, v);
+    }
+    std::fs::write(&path, text)?;
+    Ok(())
+}
+
+/// The TOML value for a `[tidal]` key: bare for the float/bool keys, quoted for everything else.
+fn tidal_toml_value(key: &str, val: &str) -> String {
+    if key == "hires_client" {
+        return if val == "true" { "true".into() } else { "false".into() };
+    }
+    if key.ends_with("token_expiry") {
+        return match val.trim().parse::<f64>() { Ok(f) => toml_float(f), Err(_) => tstr(val) };
+    }
+    tstr(val)
+}
+
 /// streamrip's config has a Tidal access token (the account is signed in).
 pub fn tidal_signed_in(st: &AppState) -> bool {
-    let Ok(text) = std::fs::read_to_string(config_path(st)) else { return false };
-    let Some(i) = text.find("[tidal]") else { return false };
-    let body = &text[i..];
-    let body = &body[..body[1..].find("\n[").map(|n| n + 1).unwrap_or(body.len())];
-    body.lines().any(|l| {
-        let l = l.trim();
-        l.starts_with("access_token") && l.split_once('=').map(|(_, v)| v.trim().trim_matches('"').len() > 10).unwrap_or(false)
-    })
+    let cfg = tidal_config(st);
+    let has = |k: &str| cfg.get(k).map(|v| v.len() > 10).unwrap_or(false);
+    has("access_token") && (!tidal_hires_client(&cfg) || has("hires_access_token"))
+}
+
+/// Signed in on the default client only: hi-res is wanted but step 2 was never done.
+fn tidal_partial(st: &AppState) -> bool {
+    let cfg = tidal_config(st);
+    let has = |k: &str| cfg.get(k).map(|v| v.len() > 10).unwrap_or(false);
+    has("access_token") && tidal_hires_client(&cfg) && !has("hires_access_token")
 }
 
 /// Current sign-in state for the settings page.
 pub fn tidal_login_status(st: &AppState) -> Value {
     let s = tidal_state();
-    serde_json::json!({ "status": s.status, "url": s.url, "message": s.message, "signed_in": tidal_signed_in(st) })
+    let mut out = serde_json::json!({ "status": s.status, "url": s.url, "message": s.message, "signed_in": tidal_signed_in(st) });
+    if s.steps > 0 {
+        out["step"] = serde_json::json!(s.step);
+        out["steps"] = serde_json::json!(s.steps);
+    }
+    if tidal_partial(st) && s.status != "waiting" && s.status != "starting" {
+        out["partial"] = serde_json::json!(true);
+        if s.status != "failed" {
+            out["message"] = serde_json::json!(TIDAL_PARTIAL_MSG);
+        }
+    }
+    out
 }
 
-/// Start the sign-in: run streamrip on a Tidal link with no token, catch the link.tidal.com URL it prints,
-/// and watch for the token it writes. Returns once the URL is known (or it failed).
-pub async fn tidal_login_start(st: &AppState) -> anyhow::Result<Value> {
-    let Some(bin) = binary(st) else { anyhow::bail!("streamrip is not installed in this container") };
-    let cfg = apply_credentials(st).await?;
-    // a fresh sign-in: blank any old token so streamrip asks again
-    if let Ok(text) = std::fs::read_to_string(&cfg) {
-        let text = set_toml(&text, "tidal", "access_token", "\"\"");
-        let text = set_toml(&text, "tidal", "refresh_token", "\"\"");
-        std::fs::write(&cfg, text)?;
+/// The message for a Tidal answer that is not JSON (an HTML block page) or a 403/429/5xx.
+pub fn tidal_blocked_message(code: u16, body: &str) -> String {
+    let mut m = format!("Tidal refused this server's address (HTTP {code}, an HTML page instead of an answer). Tidal blocks many hosting and VPN addresses. Sign in on your own computer instead and paste the tokens below, or give the container a different route to the internet.");
+    if let Some(c) = Regex::new(r"(?is)<title[^>]*>(.*?)</title>").unwrap().captures(body) {
+        let title: String = c[1].split_whitespace().collect::<Vec<_>>().join(" ");
+        let title = title.replace("&amp;", "&").replace("&lt;", "<").replace("&gt;", ">").replace("&quot;", "\"").replace("&#39;", "'");
+        if !title.is_empty() {
+            m.push_str(" – ");
+            m.extend(title.chars().take(120));
+        }
     }
-    tidal_set(|s| { *s = TidalLogin { status: "starting".into(), url: None, message: "Starting streamrip…".into() }; });
-    let mut child = tokio::process::Command::new(&bin)
-        .args(["--config-path", &cfg.to_string_lossy(), "--no-db", "--no-progress", "url", "https://tidal.com/browse/track/1"])
-        .env("NO_COLOR", "1").env("TERM", "dumb").env("COLUMNS", "400").env("BROWSER", "true")
-        .stdin(std::process::Stdio::null()).stdout(std::process::Stdio::piped()).stderr(std::process::Stdio::piped())
-        .spawn()?;
-    let stdout = child.stdout.take();
-    let stderr = child.stderr.take();
-    let link = Regex::new(r"(https?://)?link\.tidal\.com/[A-Za-z0-9]+").unwrap();
+    m
+}
+
+/// POST a form to auth.tidal.com with browser-like headers; Ok((status, json)) or Err(plain message).
+async fn tidal_auth_post(st: &AppState, path: &str, form: &[(&str, &str)], basic: Option<(&str, &str)>) -> Result<(u16, Value), String> {
+    let mut req = st.http.post(format!("{TIDAL_AUTH}/{path}"))
+        .header("User-Agent", TIDAL_UA).header("Accept", "application/json").header("Accept-Language", "en-US,en;q=0.9").form(form);
+    if let Some((u, p)) = basic {
+        req = req.basic_auth(u, Some(p));
+    }
+    let r = req.send().await.map_err(|e| format!("Could not reach Tidal: {e}"))?;
+    let code = r.status().as_u16();
+    let text = r.text().await.unwrap_or_default();
+    // a JSON object of any status is an answer (pending/invalid-code JSON is handled by the caller);
+    // anything else (an HTML block page, an empty body) means the address is refused
+    match serde_json::from_str::<Value>(&text) {
+        Ok(v) if v.is_object() => Ok((code, v)),
+        _ => Err(tidal_blocked_message(code, &text)),
+    }
+}
+
+/// One lane's device flow: get the link, show it, poll until approved. Returns the token answer.
+async fn tidal_lane_flow(st: &AppState, cid: &str, sec: &str, step: u8, steps: u8) -> Result<Value, String> {
+    let (_, d) = tidal_auth_post(st, "device_authorization", &[("client_id", cid), ("scope", TIDAL_SCOPE)], None).await?;
+    let Some(code) = d["deviceCode"].as_str().map(str::to_string) else {
+        return Err(format!("Tidal did not hand out a sign-in code: {}", d["error_description"].as_str().or(d["error"].as_str()).unwrap_or("no deviceCode in the answer")));
+    };
+    let Some(url) = d["verificationUriComplete"].as_str().map(|u| if u.starts_with("http") { u.to_string() } else { format!("https://{u}") }) else {
+        return Err("Tidal did not hand out a sign-in link".into());
+    };
+    let expires = d["expiresIn"].as_f64().unwrap_or(300.0).max(30.0);
+    let interval = d["interval"].as_f64().unwrap_or(2.0).max(2.0);
+    let message = if steps == 1 { TIDAL_ONE_STEP_MSG } else if step == 1 { TIDAL_STEP1_MSG } else { TIDAL_STEP2_MSG };
+    tidal_set(|s| { s.status = "waiting".into(); s.url = Some(url.clone()); s.message = message.into(); s.step = step; s.steps = steps; });
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs_f64(expires);
+    loop {
+        tokio::time::sleep(std::time::Duration::from_secs_f64(interval)).await;
+        if tokio::time::Instant::now() >= deadline {
+            return Err("Timed out – the link is only valid for 5 minutes. Try again.".into());
+        }
+        let form = [("client_id", cid), ("device_code", code.as_str()), ("grant_type", "urn:ietf:params:oauth:grant-type:device_code"), ("scope", TIDAL_SCOPE)];
+        let (http, t) = tidal_auth_post(st, "token", &form, Some((cid, sec))).await?;
+        if t["access_token"].is_string() {
+            return Ok(t);
+        }
+        let pending = t["sub_status"].as_i64() == Some(1002) || t["error"].as_str() == Some("authorization_pending") || t["error"].as_str() == Some("slow_down");
+        if http == 400 && pending {
+            continue;
+        }
+        let why = t["error_description"].as_str().or(t["error"].as_str()).map(str::to_string).unwrap_or_else(|| format!("HTTP {http}"));
+        return Err(format!("Tidal did not approve the sign-in: {why}"));
+    }
+}
+
+/// Start the sign-in: the device flow runs in the background, lane by lane, and writes the tokens into
+/// streamrip's config. Returns once the first link is known (or it failed).
+pub async fn tidal_login_start(st: &AppState) -> anyhow::Result<Value> {
+    apply_credentials(st).await?;
+    let cfg = tidal_config(st);
+    let lanes = tidal_lanes(&cfg);
+    let steps = lanes.len() as u8;
+    // the old tokens stay until lane 1 is approved: a refused link (Tidal blocks the address) must not
+    // throw away a working, pasted-in sign-in
+    tidal_set(|s| { *s = TidalLogin { status: "starting".into(), url: None, message: "Asking Tidal for a sign-in link…".into(), step: 1, steps }; });
     let st2 = st.clone();
     tokio::spawn(async move {
-        use tokio::io::AsyncBufReadExt;
-        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<String>();
-        if let Some(o) = stdout {
-            let tx = tx.clone();
-            tokio::spawn(async move {
-                let mut lines = tokio::io::BufReader::new(o).lines();
-                while let Ok(Some(l)) = lines.next_line().await { let _ = tx.send(l); }
-            });
-        }
-        if let Some(e) = stderr {
-            let tx = tx.clone();
-            tokio::spawn(async move {
-                let mut lines = tokio::io::BufReader::new(e).lines();
-                while let Ok(Some(l)) = lines.next_line().await { let _ = tx.send(l); }
-            });
-        }
-        drop(tx);
-        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(330);
-        let mut last = String::new();
-        loop {
-            let line = tokio::select! {
-                l = rx.recv() => l,
-                _ = tokio::time::sleep_until(deadline) => {
-                    tidal_set(|s| { s.status = "failed".into(); s.message = "Timed out – the link is only valid for 5 minutes. Try again.".into(); });
-                    let _ = child.kill().await;
+        let mut values: Vec<(String, String)> = vec![];
+        for (i, (cid, sec, prefix)) in lanes.iter().enumerate() {
+            let step = i as u8 + 1;
+            match tidal_lane_flow(&st2, cid, sec, step, steps).await {
+                Ok(t) => {
+                    let expiry = t["expires_in"].as_f64().unwrap_or(604800.0) + now_secs();
+                    if i == 0 {
+                        values.push(("user_id".into(), tstr(&t["user"]["userId"].to_string().trim_matches('"').to_string())));
+                        values.push(("country_code".into(), tstr(t["user"]["countryCode"].as_str().unwrap_or(""))));
+                        // the new default lane replaces the whole old sign-in: blank the hi-res lane with it so a
+                        // stale hi-res token from another account is never mixed in (lane 2 fills it again)
+                        for k in TIDAL_HIRES_KEYS {
+                            values.push((k.to_string(), "\"\"".to_string()));
+                        }
+                    }
+                    values.push((format!("{prefix}access_token"), tstr(t["access_token"].as_str().unwrap_or(""))));
+                    values.push((format!("{prefix}refresh_token"), tstr(t["refresh_token"].as_str().unwrap_or(""))));
+                    values.push((format!("{prefix}token_expiry"), toml_float(expiry)));
+                    values.push((format!("{prefix}token_client_id"), tstr(cid)));
+                    // the first lane is saved at once, so a stopped step 2 still leaves a working 16/44.1 sign-in
+                    if let Err(e) = tidal_write(&st2, &values).await {
+                        tidal_set(|s| { s.status = "failed".into(); s.url = None; s.message = format!("Could not write streamrip's config: {e}"); });
+                        return;
+                    }
+                    values.clear();
+                }
+                Err(e) => {
+                    tidal_set(|s| { s.status = "failed".into(); s.url = None; s.message = e; });
                     return;
                 }
-            };
-            let Some(line) = line else { break };
-            let text = line.trim().to_string();
-            if let Some(m) = link.find(&text) {
-                let u = m.as_str();
-                let u = if u.starts_with("http") { u.to_string() } else { format!("https://{u}") };
-                tidal_set(|s| { s.status = "waiting".into(); s.url = Some(u); s.message = "Open the link, approve in your Tidal account, then come back here.".into(); });
-            } else if !text.is_empty() {
-                last = text.chars().take(200).collect();
-            }
-            if tidal_signed_in(&st2) {
-                tidal_set(|s| { s.status = "done".into(); s.message = "Signed in to Tidal – downloads from Tidal use this account now.".into(); });
-                let _ = child.kill().await;
-                return;
             }
         }
-        let _ = child.wait().await;
-        if tidal_signed_in(&st2) {
-            tidal_set(|s| { s.status = "done".into(); s.message = "Signed in to Tidal – downloads from Tidal use this account now.".into(); });
-        } else {
-            tidal_set(|s| { s.status = "failed".into(); s.message = if last.is_empty() { "streamrip stopped before signing in".into() } else { format!("streamrip: {last}") }; });
+        let hires = lanes.iter().any(|l| l.2 == "hires_");
+        if let Err(e) = tidal_write(&st2, &[("hires_client".into(), if hires { "true".into() } else { "false".into() })]).await {
+            tidal_set(|s| { s.status = "failed".into(); s.url = None; s.message = format!("Could not write streamrip's config: {e}"); });
+            return;
         }
+        st2.db.log("info", &format!("streamrip: signed in to Tidal ({} client{})", lanes.len(), if lanes.len() == 1 { "" } else { "s" }));
+        tidal_set(|s| { s.status = "done".into(); s.url = None; s.message = TIDAL_DONE_MSG.into(); s.step = steps; });
     });
-    // wait for the link (streamrip needs a moment to start)
+    // wait for the link
     for _ in 0..60 {
         tokio::time::sleep(std::time::Duration::from_millis(500)).await;
         let s = tidal_state();
@@ -371,6 +539,205 @@ pub async fn tidal_login_start(st: &AppState) -> anyhow::Result<Value> {
             return Ok(tidal_login_status(st));
         }
     }
-    tidal_set(|s| { if s.status == "starting" { s.status = "failed".into(); s.message = "streamrip did not show a sign-in link (check the Diagnostics page)".into(); } });
+    tidal_set(|s| { if s.status == "starting" { s.status = "failed".into(); s.message = "Tidal did not answer within 30 seconds. Try again.".into(); } });
     Ok(tidal_login_status(st))
+}
+
+pub const TIDAL_NO_TOKEN_MSG: &str = "No access_token found in the pasted text. Paste the [tidal] section of streamrip's config.toml, including its access_token line.";
+
+/// Does a pasted `[tidal]` section (or whole config.toml) carry a default-lane access_token? Anything
+/// else about the paste that goes wrong is a server-side problem, not a bad paste.
+pub fn tidal_toml_has_token(toml: &str) -> bool {
+    parse_tidal_toml(toml).get("access_token").map(|v| v.len() > 10).unwrap_or(false)
+}
+
+/// "Paste tokens instead": a `[tidal]` section (or whole config.toml) from a streamrip run on another
+/// computer. Writes the token fields and reports the sign-in state like the status route.
+pub async fn tidal_tokens_save(st: &AppState, toml: &str) -> anyhow::Result<Value> {
+    let got = parse_tidal_toml(toml);
+    if !tidal_toml_has_token(toml) {
+        anyhow::bail!("{TIDAL_NO_TOKEN_MSG}");
+    }
+    let mut values: Vec<(String, String)> = TIDAL_TOKEN_KEYS.iter().filter_map(|k| got.get(*k).map(|v| (k.to_string(), tidal_toml_value(k, v)))).collect();
+    // a pasted default-lane token with no client id came from streamrip's default client
+    if !got.contains_key("token_client_id") {
+        values.push(("token_client_id".into(), tstr(TIDAL_DEFAULT_CLIENT.0)));
+    }
+    let hires = got.get("hires_access_token").map(|v| v.len() > 10).unwrap_or(false);
+    if hires && !got.contains_key("hires_token_client_id") {
+        values.push(("hires_token_client_id".into(), tstr(TIDAL_HIRES_CLIENT.0)));
+    }
+    if let Some(h) = got.get("hires_client") {
+        values.push(("hires_client".into(), tidal_toml_value("hires_client", h)));
+    } else {
+        values.push(("hires_client".into(), if hires { "true".into() } else { "false".into() }));
+    }
+    tidal_write(st, &values).await?;
+    tidal_set(|s| { *s = TidalLogin { status: "done".into(), url: None, message: "Tokens saved – downloads from Tidal use this account now.".into(), step: 0, steps: 0 }; });
+    st.db.log("info", "streamrip: Tidal tokens pasted in from another computer");
+    Ok(tidal_login_status(st))
+}
+
+/// "Sign out of Tidal": blank every token field.
+pub async fn tidal_sign_out(st: &AppState) -> anyhow::Result<Value> {
+    let values: Vec<(String, String)> = TIDAL_TOKEN_KEYS.iter().map(|k| (k.to_string(), "\"\"".to_string())).collect();
+    tidal_write(st, &values).await?;
+    tidal_set(|s| { *s = TidalLogin::default(); });
+    Ok(tidal_login_status(st))
+}
+
+/// Diagnostics: can this server talk to auth.tidal.com at all? A JSON answer (even an error) means yes.
+pub async fn tidal_probe(st: &AppState) -> String {
+    match tidal_auth_post(st, "device_authorization", &[("client_id", "encore-probe"), ("scope", TIDAL_SCOPE)], None).await {
+        Ok(_) => "Tidal reachable".into(),
+        Err(e) if e.starts_with("Could not reach") => e,
+        Err(_) => "Tidal blocks this server's address – see Sign in to Tidal".into(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const SECTION: &str = r#"
+user_id = "12345678"
+country_code = "US"
+access_token = "eyJhbGciOiJIUzI1NiJ9.default-token-abcdef"
+refresh_token = "refresh-default"
+token_expiry = 1760000000.5
+token_client_id = "4N3n6Q1x95LL5K7p"
+hires_access_token = "eyJhbGciOiJIUzI1NiJ9.hires-token-abcdef"
+hires_refresh_token = "refresh-hires"
+hires_token_expiry = "1760000001.0"
+hires_token_client_id = "fX2JxdmntZWK0ixT"
+"#;
+
+    #[test]
+    fn parses_quoted_and_unquoted_section() {
+        let got = parse_tidal_toml(SECTION);
+        assert_eq!(got["user_id"], "12345678");
+        assert_eq!(got["token_expiry"], "1760000000.5");
+        assert_eq!(got["hires_token_expiry"], "1760000001.0");
+        assert_eq!(got["hires_access_token"], "eyJhbGciOiJIUzI1NiJ9.hires-token-abcdef");
+        assert_eq!(got["hires_token_client_id"], "fX2JxdmntZWK0ixT");
+        let bare = parse_tidal_toml("access_token = abc-def-ghi-jkl # comment\ncountry_code = 'NL'\nuser_id = 42");
+        assert_eq!(bare["access_token"], "abc-def-ghi-jkl");
+        assert_eq!(bare["country_code"], "NL");
+        assert_eq!(bare["user_id"], "42");
+    }
+
+    #[test]
+    fn parses_whole_file_and_only_its_tidal_section() {
+        let file = format!("[downloads]\nfolder = \"/x\"\n\n[qobuz]\nuser_id = \"q\"\nauth_token = \"zzz\"\n\n[tidal]\nquality = 3\nhires_client = true{SECTION}\n[deezer]\narl = \"d\"\nuser_id = \"dz\"\n");
+        let got = parse_tidal_toml(&file);
+        assert_eq!(got["user_id"], "12345678");
+        assert_eq!(got["hires_client"], "true");
+        assert_eq!(got["refresh_token"], "refresh-default");
+        assert!(!got.contains_key("arl"));
+        assert!(!got.contains_key("auth_token"));
+        // a pasted section that still has its header is fine too
+        assert_eq!(parse_tidal_toml(&format!("[tidal]{SECTION}"))["country_code"], "US");
+        assert!(parse_tidal_toml("[qobuz]\nuser_id = \"q\"\n").is_empty());
+    }
+
+    #[test]
+    fn set_toml_round_trips_both_lanes() {
+        let mut text = "[downloads]\nfolder = \"/x\"\n\n[tidal]\nquality = 3\naccess_token = \"\"\ntoken_expiry = \"\"\nhires_client = false\n\n[deezer]\narl = \"d\"\n".to_string();
+        let (e1, e2) = (toml_float(1760000000.0), toml_float(1760000001.75));
+        let lanes: Vec<(&str, &str)> = vec![("user_id", "\"12345678\""), ("country_code", "\"US\""), ("access_token", "\"default-token-abcdef\""), ("refresh_token", "\"r1\""),
+            ("token_expiry", &e1), ("token_client_id", "\"4N3n6Q1x95LL5K7p\""), ("hires_access_token", "\"hires-token-abcdef\""),
+            ("hires_refresh_token", "\"r2\""), ("hires_token_expiry", &e2), ("hires_token_client_id", "\"fX2JxdmntZWK0ixT\""), ("hires_client", "true")];
+        for (k, v) in &lanes {
+            text = set_toml(&text, "tidal", k, v);
+        }
+        let got = parse_tidal_toml(&text);
+        assert_eq!(got["access_token"], "default-token-abcdef");
+        assert_eq!(got["token_expiry"], "1760000000.0");
+        assert_eq!(got["hires_token_expiry"], "1760000001.8");
+        assert_eq!(got["token_client_id"], "4N3n6Q1x95LL5K7p");
+        assert_eq!(got["hires_token_client_id"], "fX2JxdmntZWK0ixT");
+        assert_eq!(got["hires_client"], "true");
+        assert_eq!(got["quality"], "3");
+        // the other sections are untouched and nothing leaked into them
+        assert!(text.contains("[downloads]\nfolder = \"/x\""));
+        assert!(text.trim_end().ends_with("[deezer]\narl = \"d\""));
+        assert_eq!(text.matches("access_token").count(), 2, "one plain, one hires_ – no duplicate lines");
+        assert_eq!(tidal_toml_value("token_expiry", "1760000000"), "1760000000.0");
+        assert_eq!(tidal_toml_value("hires_client", "yes"), "false");
+        assert_eq!(tidal_toml_value("access_token", "a\"b"), "\"a\\\"b\"");
+    }
+
+    #[test]
+    fn lanes_follow_the_config() {
+        let two = tidal_lanes(&parse_tidal_toml("quality = 3"));
+        assert_eq!(two.len(), 2);
+        assert_eq!(two[0].0, TIDAL_DEFAULT_CLIENT.0);
+        assert_eq!(two[1].2, "hires_");
+        assert_eq!(tidal_lanes(&parse_tidal_toml("hires_client = false")).len(), 1);
+        let own = tidal_lanes(&parse_tidal_toml("client_id = \"me\"\nclient_secret = \"s\"\nhires_client = true"));
+        assert_eq!(own.len(), 1);
+        assert_eq!(own[0].0, "me");
+    }
+
+    #[test]
+    fn html_403_message() {
+        let html = "<html><head>\n<title>  Access denied | auth.tidal.com used\n Cloudflare to restrict access</title></head><body>blocked</body></html>";
+        let m = tidal_blocked_message(403, html);
+        assert!(m.starts_with("Tidal refused this server's address (HTTP 403, an HTML page instead of an answer). Tidal blocks many hosting and VPN addresses. Sign in on your own computer instead and paste the tokens below, or give the container a different route to the internet."));
+        assert!(m.ends_with(" – Access denied | auth.tidal.com used Cloudflare to restrict access"), "{m}");
+        assert!(!m.contains('!'));
+        let plain = tidal_blocked_message(502, "bad gateway");
+        assert!(plain.contains("HTTP 502"));
+        assert!(!plain.contains(" – "));
+        let long = format!("<title>{}</title>", "x".repeat(300));
+        assert_eq!(tidal_blocked_message(403, &long).split(" – ").nth(1).unwrap().len(), 120);
+    }
+
+    #[test]
+    fn partial_status_when_hires_token_missing() {
+        let has = |cfg: &std::collections::BTreeMap<String, String>, k: &str| cfg.get(k).map(|v| v.len() > 10).unwrap_or(false);
+        let partial = |text: &str| { let c = parse_tidal_toml(text); has(&c, "access_token") && tidal_hires_client(&c) && !has(&c, "hires_access_token") };
+        let signed = |text: &str| { let c = parse_tidal_toml(text); has(&c, "access_token") && (!tidal_hires_client(&c) || has(&c, "hires_access_token")) };
+        let only_default = "hires_client = true\naccess_token = \"default-token-abcdef\"\nhires_access_token = \"\"";
+        assert!(partial(only_default));
+        assert!(!signed(only_default));
+        assert!(signed(SECTION));
+        assert!(!partial(SECTION));
+        assert!(signed("hires_client = false\naccess_token = \"default-token-abcdef\""));
+        assert!(!partial("access_token = \"\""));
+        assert_eq!(TIDAL_PARTIAL_MSG, "Signed in for 16/44.1 FLAC only – sign in again for hi-res (step 2 was not finished).");
+    }
+
+    #[test]
+    fn pasted_text_needs_an_access_token() {
+        assert!(tidal_toml_has_token(SECTION));
+        assert!(tidal_toml_has_token(&format!("[tidal]{SECTION}")));
+        assert!(!tidal_toml_has_token(""));
+        assert!(!tidal_toml_has_token("user_id = \"12345678\"\naccess_token = \"\""));
+        assert!(!tidal_toml_has_token("[qobuz]\nuser_id = \"q\"\n"));
+        assert!(!tidal_toml_has_token("hires_access_token = \"eyJhbGciOiJIUzI1NiJ9.hires-token-abcdef\""));
+        assert!(TIDAL_NO_TOKEN_MSG.starts_with("No access_token found"));
+    }
+
+    #[test]
+    fn a_new_default_lane_blanks_the_hires_lane() {
+        // the write for lane 1 carries blank hires_ fields, so a stale hi-res token never outlives a new sign-in
+        let mut text = "[tidal]\nquality = 3\nhires_client = true".to_string();
+        for (k, v) in [("access_token", "\"old-default-token-abcdef\""), ("hires_access_token", "\"old-hires-token-abcdef\""), ("hires_token_client_id", "\"fX2JxdmntZWK0ixT\"")] {
+            text = set_toml(&text, "tidal", k, v);
+        }
+        let mut values: Vec<(String, String)> = vec![("access_token".into(), "\"new-default-token-abcdef\"".into())];
+        for k in TIDAL_HIRES_KEYS {
+            values.push((k.to_string(), "\"\"".to_string()));
+        }
+        for (k, v) in &values {
+            text = set_toml(&text, "tidal", k, v);
+        }
+        let got = parse_tidal_toml(&text);
+        assert_eq!(got["access_token"], "new-default-token-abcdef");
+        assert_eq!(got["hires_access_token"], "");
+        assert_eq!(got["hires_token_client_id"], "");
+        assert_eq!(TIDAL_HIRES_KEYS.len(), 4);
+        assert!(TIDAL_HIRES_KEYS.iter().all(|k| TIDAL_TOKEN_KEYS.contains(k) && k.starts_with("hires_")));
+    }
 }

@@ -1,5 +1,5 @@
 //! /api/playlists, /api/connections, /api/sync
-use crate::auth::{Admin, User};
+use crate::auth::{Admin, MaybeUser, User};
 use crate::db::{now, Row, RowExt};
 use crate::error::{err, ApiResult};
 use crate::matcher::LibraryIndex;
@@ -281,10 +281,13 @@ async fn list_connections(State(st): State<AppState>, User(u): User) -> ApiResul
     let has = |k: &str| !st.cfg.str(k).is_empty();
     let avail = json!({ "jellyfin": has("jellyfin_url"), "plex": has("plex_url"), "navidrome": has("navidrome_url"), "spotify": has("spotify_client_id"),
         "tidal": has("tidal_client_id"), "deezer": true, "listenbrainz": true, "ytmusic": true, "lastfm": has("lastfm_api_key") });
+    // which services can sign in with a redirect/device flow (an admin-side OAuth client exists); without one the UI
+    // goes straight to the alternative (pasted headers) instead of calling the start route and showing its error
+    let available_oauth = json!({ "ytmusic": has("ytmusic_client_id") && has("ytmusic_client_secret"), "spotify": has("spotify_client_id"), "tidal": has("tidal_client_id") });
     let services: serde_json::Map<String, Value> = connections::SERVICES.iter().map(|(k, l, kind)| (k.to_string(), json!({ "label": l, "kind": kind }))).collect();
     let sync_state = jobs::get("sync");
-    Ok(Json(json!({ "connections": have, "available": avail, "services": services, "sync": { "running": sync_state["running"], "last": sync_state["last"] },
-        "base_url": st.cfg.str("base_url") })))
+    Ok(Json(json!({ "connections": have, "available": avail, "available_oauth": available_oauth, "services": services,
+        "sync": { "running": sync_state["running"], "last": sync_state["last"] }, "base_url": st.cfg.str("base_url") })))
 }
 
 #[derive(Deserialize, Default)]
@@ -338,9 +341,22 @@ struct CallbackQ {
     error: String,
 }
 
-async fn callback(State(st): State<AppState>, User(u): User, Path(service): Path<String>, Query(q): Query<CallbackQ>) -> Response {
+/// Back to the Connections page with a plain-words error (the callback is a top-level navigation, so a JSON
+/// error body would be shown as a bare page).
+fn callback_error(msg: &str) -> Response {
+    Redirect::to(&format!("/#/connections?error={}", urlencoding::encode(&msg.chars().take(200).collect::<String>()))).into_response()
+}
+
+async fn callback(State(st): State<AppState>, MaybeUser(u): MaybeUser, Path(service): Path<String>, Query(q): Query<CallbackQ>) -> Response {
     if !q.error.is_empty() {
-        return Redirect::to(&format!("/#/connections?error={}", urlencoding::encode(&q.error))).into_response();
+        let why = if q.error == "access_denied" { "You did not allow Encore – try again and approve the access".to_string() } else { q.error.replace('_', " ") };
+        return callback_error(&why);
+    }
+    let Some(u) = u else {
+        return callback_error("Sign in to Encore in this browser first, then connect the account again");
+    };
+    if !matches!(service.as_str(), "lastfm" | "spotify" | "tidal") {
+        return callback_error("Unknown service");
     }
     let done = if service == "lastfm" {
         connections::lastfm_finish(&st, u.i("id"), &q.token).await.map(|_| ())
@@ -349,7 +365,7 @@ async fn callback(State(st): State<AppState>, User(u): User, Path(service): Path
     };
     match done {
         Ok(_) => Redirect::to(&format!("/#/connections?connected={service}")).into_response(),
-        Err(e) => Redirect::to(&format!("/#/connections?error={}", urlencoding::encode(&e.to_string().chars().take(200).collect::<String>()))).into_response(),
+        Err(e) => callback_error(&e.to_string()),
     }
 }
 

@@ -438,15 +438,22 @@ export async function render(view, ctx) {
   show(current);
 }
 
-// Tidal downloads need your Tidal account, not an API key: streamrip signs in once through a link
-// (device code). The server runs that flow; this block shows the link and waits for the approval.
+// Tidal downloads need your Tidal account, not an API key: Encore signs in once through a link
+// (device code, one step per streamrip "lane"). This block shows the link and waits for the approval;
+// when Tidal blocks the server's address the tokens can be pasted from a computer that has access.
 function tidalBlock() {
   return `<div class="card flat mt" id="tidal-login" style="padding:12px 14px">
     <div class="row between wrap" style="gap:8px">
       <div style="min-width:0"><b>Tidal account</b><div class="small muted" id="tidal-state">Checking…</div></div>
-      <button class="btn sm" id="tidal-signin" type="button">${icon.link}Sign in to Tidal</button>
+      <div class="row" style="gap:10px;align-items:center"><a href="#" class="small muted" id="tidal-signout" hidden>Sign out of Tidal</a><button class="btn sm" id="tidal-signin" type="button">${icon.link}Sign in to Tidal</button></div>
     </div>
     <div class="small mt" id="tidal-out" hidden></div>
+    <details class="mt" id="tidal-paste">
+      <summary class="small" style="cursor:pointer">Paste tokens instead</summary>
+      <div class="small muted mt">On a computer with Tidal access: install streamrip (<code>pip install streamrip</code>), run <code>rip url https://tidal.com/browse/track/1</code>, approve the link it prints, then paste the [tidal] section of its config file here (<code>rip config path</code> shows where it is).</div>
+      <textarea id="tidal-toml" class="mt" rows="6" spellcheck="false" style="width:100%;font-family:monospace" placeholder="[tidal]&#10;user_id = &quot;…&quot;&#10;access_token = &quot;…&quot;"></textarea>
+      <div class="row wrap mt" style="gap:8px"><button class="btn sm" id="tidal-save-tokens" type="button">${icon.check}Save tokens</button></div>
+    </details>
   </div>`;
 }
 
@@ -485,30 +492,58 @@ function bindCadenzaCache(card) {
 
 function bindTidal(card) {
   const state = card.querySelector('#tidal-state'), out = card.querySelector('#tidal-out'), btn = card.querySelector('#tidal-signin');
+  const paste = card.querySelector('#tidal-paste'), toml = card.querySelector('#tidal-toml'), save = card.querySelector('#tidal-save-tokens'), signout = card.querySelector('#tidal-signout');
   if (!state) return;
+  const spinner = '<span class="spinner" style="width:10px;height:10px;border-width:2px"></span>';
   const paint = (r) => {
-    state.textContent = r.signed_in ? 'Signed in – Tidal downloads use this account.' : 'Not signed in – Tidal needs a one-time sign-in with your own Tidal account (no API key).';
-    btn.innerHTML = `${icon.link}${r.signed_in ? 'Sign in again' : 'Sign in to Tidal'}`;
+    // partial (default lane only) and signed_in never come together: the server reports one or the other
+    const signed = !!(r.signed_in || r.partial);
+    state.textContent = r.partial ? 'Signed in for 16/44.1 FLAC only – sign in again for hi-res (step 2 was not finished).'
+      : r.signed_in ? 'Signed in – Tidal downloads use this account.'
+      : 'Not signed in – Tidal needs a one-time sign-in with your own Tidal account (no API key).';
+    btn.innerHTML = `${icon.link}${signed ? 'Sign in again' : 'Sign in to Tidal'}`;
+    signout.hidden = !signed;
     if (r.status === 'waiting' && r.url) {
+      const steps = Number(r.steps) || 1, step = Number(r.step) || 1;
       out.hidden = false;
-      out.innerHTML = `Open <a href="${esc(r.url)}" target="_blank" rel="noopener" style="color:var(--accent)">${esc(r.url)}</a> in a browser, approve in your Tidal account, then come back here. <span class="spinner" style="width:10px;height:10px;border-width:2px"></span> Waiting…`;
+      out.innerHTML = `${steps > 1 ? `Step ${step} of ${steps} · ` : ''}Open <a href="${esc(r.url)}" target="_blank" rel="noopener" style="color:var(--accent)">${esc(r.url)}</a> on any device, approve in your Tidal account, then come back here. ${spinner} Waiting…`;
     } else if (r.status === 'done') { out.hidden = false; out.innerHTML = `<span class="badge ok">${icon.check} ${esc(r.message)}</span>`; }
-    else if (r.status === 'failed') { out.hidden = false; out.innerHTML = `<span class="badge err">${esc(r.message || 'Sign-in failed')}</span>`; }
+    else if (r.status === 'failed') {
+      out.hidden = false; out.innerHTML = `<span class="badge err">${esc(r.message || 'Sign-in failed')}</span>`;
+      if ((r.message || '').includes('paste the tokens')) paste.open = true;
+    }
   };
-  let timer = null;
+  let timer = null, opened = '';
+  // Each step has its own link: open the new one when the server moves to step 2.
+  const openLink = (r) => { if (r.status === 'waiting' && r.url && r.url !== opened) { opened = r.url; window.open(r.url, '_blank', 'noopener'); } };
   const poll = async () => {
     if (!card.isConnected) return clearInterval(timer);
-    try { const r = await api.get('/system/streamrip/tidal-login'); paint(r); if (r.status !== 'waiting') { clearInterval(timer); timer = null; btn.disabled = false; } } catch { /* next tick */ }
+    try {
+      const r = await api.get('/system/streamrip/tidal-login'); paint(r); openLink(r);
+      if (r.status !== 'waiting') { clearInterval(timer); timer = null; btn.disabled = false; }
+    } catch { /* next tick */ }
   };
   api.get('/system/streamrip/tidal-login').then(paint).catch(() => { state.textContent = 'Status unavailable'; });
   btn.onclick = async () => {
     btn.disabled = true;
-    out.hidden = false; out.innerHTML = '<span class="spinner" style="width:10px;height:10px;border-width:2px"></span> Starting streamrip…';
+    out.hidden = false; out.innerHTML = `${spinner} Starting sign-in…`;
     try {
       const r = await api.post('/system/streamrip/tidal-login');
       paint(r);
-      if (r.status === 'waiting') { if (r.url) window.open(r.url, '_blank', 'noopener'); timer = setInterval(poll, 3000); } else btn.disabled = false;
+      if (r.status === 'waiting') { openLink(r); if (timer) clearInterval(timer); timer = setInterval(poll, 3000); } else btn.disabled = false;
     } catch (e) { out.innerHTML = `<span class="badge err">${esc(e.message)}</span>`; btn.disabled = false; }
+  };
+  save.onclick = async () => {
+    save.disabled = true;
+    try {
+      const r = await api.post('/system/streamrip/tidal-tokens', { toml: toml.value });
+      paint(r); toml.value = ''; toast('Tidal tokens saved', 'ok');
+    } catch (e) { toast(e.message, 'err'); }
+    save.disabled = false;
+  };
+  signout.onclick = async (e) => {
+    e.preventDefault();
+    try { const r = await api.del('/system/streamrip/tidal-tokens'); paint(r); out.hidden = true; toast('Signed out of Tidal', 'ok'); } catch (err) { toast(err.message, 'err'); }
   };
 }
 

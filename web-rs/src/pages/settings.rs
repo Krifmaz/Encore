@@ -1414,30 +1414,48 @@ fn bind_cadenza_cache(card: &Element) {
     });
 }
 
-// Tidal downloads need your Tidal account, not an API key: streamrip signs in once through a link
-// (device code). The server runs that flow; this block shows the link and waits for the approval.
+// Tidal downloads need your Tidal account, not an API key: Encore signs in once through a link
+// (device code, one step per streamrip "lane"). This block shows the link and waits for the approval;
+// when Tidal blocks the server's address the tokens can be pasted from a computer that has access.
 fn tidal_block() -> String {
     format!(r##"<div class="card flat mt" id="tidal-login" style="padding:12px 14px">
     <div class="row between wrap" style="gap:8px">
       <div style="min-width:0"><b>Tidal account</b><div class="small muted" id="tidal-state">Checking…</div></div>
-      <button class="btn sm" id="tidal-signin" type="button">{}Sign in to Tidal</button>
+      <div class="row" style="gap:10px;align-items:center"><a href="#" class="small muted" id="tidal-signout" hidden>Sign out of Tidal</a><button class="btn sm" id="tidal-signin" type="button">{link}Sign in to Tidal</button></div>
     </div>
     <div class="small mt" id="tidal-out" hidden></div>
-  </div>"##, icon("link"))
+    <details class="mt" id="tidal-paste">
+      <summary class="small" style="cursor:pointer">Paste tokens instead</summary>
+      <div class="small muted mt">On a computer with Tidal access: install streamrip (<code>pip install streamrip</code>), run <code>rip url https://tidal.com/browse/track/1</code>, approve the link it prints, then paste the [tidal] section of its config file here (<code>rip config path</code> shows where it is).</div>
+      <textarea id="tidal-toml" class="mt" rows="6" spellcheck="false" style="width:100%;font-family:monospace" placeholder="[tidal]&#10;user_id = &quot;…&quot;&#10;access_token = &quot;…&quot;"></textarea>
+      <div class="row wrap mt" style="gap:8px"><button class="btn sm" id="tidal-save-tokens" type="button">{check}Save tokens</button></div>
+    </details>
+  </div>"##, link = icon("link"), check = icon("check"))
 }
+
+const TIDAL_SPINNER: &str = r##"<span class="spinner" style="width:10px;height:10px;border-width:2px"></span>"##;
 
 fn bind_tidal(view: &Element, card: &Element) {
     let (Some(state), Some(out), Some(btn)) = (dom::qs_in(card, "#tidal-state"), dom::qs_in(card, "#tidal-out"), dom::qs_in(card, "#tidal-signin")) else { return };
+    let (Some(paste), Some(toml), Some(save), Some(signout)) = (dom::qs_in(card, "#tidal-paste"), dom::qs_in(card, "#tidal-toml"), dom::qs_in(card, "#tidal-save-tokens"), dom::qs_in(card, "#tidal-signout")) else { return };
     let paint: Rc<dyn Fn(&Value)> = {
-        let (state, out, btn) = (state.clone(), out.clone(), btn.clone());
+        let (state, out, btn, paste, signout) = (state.clone(), out.clone(), btn.clone(), paste.clone(), signout.clone());
         Rc::new(move |r: &Value| {
-            let signed = r.truthy("signed_in");
-            dom::set_text(&state, if signed { "Signed in – Tidal downloads use this account." } else { "Not signed in – Tidal needs a one-time sign-in with your own Tidal account (no API key)." });
+            // partial (default lane only) and signed_in never come together: the server reports one or the other
+            let partial = r.truthy("partial");
+            let signed = r.truthy("signed_in") || partial;
+            dom::set_text(&state, if partial { "Signed in for 16/44.1 FLAC only – sign in again for hi-res (step 2 was not finished)." }
+                else if r.truthy("signed_in") { "Signed in – Tidal downloads use this account." }
+                else { "Not signed in – Tidal needs a one-time sign-in with your own Tidal account (no API key)." });
             dom::set_html(&btn, &format!("{}{}", icon("link"), if signed { "Sign in again" } else { "Sign in to Tidal" }));
+            dom::hide(&signout, !signed);
             let status = r.s("status");
             if status == "waiting" && !r.s("url").is_empty() {
+                let steps = r.num("steps").filter(|n| *n >= 1.0).unwrap_or(1.0) as i64;
+                let step = r.num("step").filter(|n| *n >= 1.0).unwrap_or(1.0) as i64;
+                let prefix = if steps > 1 { format!("Step {step} of {steps} · ") } else { String::new() };
                 dom::hide(&out, false);
-                dom::set_html(&out, &format!(r##"Open <a href="{u}" target="_blank" rel="noopener" style="color:var(--accent)">{u}</a> in a browser, approve in your Tidal account, then come back here. <span class="spinner" style="width:10px;height:10px;border-width:2px"></span> Waiting…"##, u = esc(&r.s("url"))));
+                dom::set_html(&out, &format!(r##"{prefix}Open <a href="{u}" target="_blank" rel="noopener" style="color:var(--accent)">{u}</a> on any device, approve in your Tidal account, then come back here. {TIDAL_SPINNER} Waiting…"##, u = esc(&r.s("url"))));
             } else if status == "done" {
                 dom::hide(&out, false);
                 dom::set_html(&out, &format!(r##"<span class="badge ok">{} {}</span>"##, icon("check"), esc(&r.s("message"))));
@@ -1445,6 +1463,7 @@ fn bind_tidal(view: &Element, card: &Element) {
                 dom::hide(&out, false);
                 let m = r.s("message");
                 dom::set_html(&out, &format!(r##"<span class="badge err">{}</span>"##, esc(if m.is_empty() { "Sign-in failed" } else { &m })));
+                if m.contains("paste the tokens") { let _ = paste.set_attribute("open", ""); }
             }
         })
     };
@@ -1457,37 +1476,84 @@ fn bind_tidal(view: &Element, card: &Element) {
             }
         });
     }
-    let (view, card, out2, btn2) = (view.clone(), card.clone(), out.clone(), btn.clone());
-    dom::on(&btn, "click", move |_| {
-        dom::set_disabled(&btn2, true);
-        dom::hide(&out2, false);
-        dom::set_html(&out2, r##"<span class="spinner" style="width:10px;height:10px;border-width:2px"></span> Starting streamrip…"##);
-        let (view, card, out, btn, paint) = (view.clone(), card.clone(), out2.clone(), btn2.clone(), paint.clone());
-        dom::spawn(async move {
-            match api::post_empty("/system/streamrip/tidal-login").await {
-                Ok(r) => {
-                    paint(&r);
-                    if r.s("status") == "waiting" {
-                        if !r.s("url").is_empty() { let _ = dom::window().open_with_url_and_target_and_features(&r.s("url"), "_blank", "noopener"); }
-                        // poll every 3 s until the sign-in finishes or the card is gone
-                        let polling = Rc::new(Cell::new(true));
-                        let (card, btn, paint, polling2) = (card.clone(), btn.clone(), paint.clone(), polling.clone());
-                        dom::interval(&view, 3000, move || {
-                            if !polling2.get() || !dom::is_connected(&card) { polling2.set(false); return; }
-                            let (btn, paint, polling) = (btn.clone(), paint.clone(), polling2.clone());
-                            dom::spawn(async move {
-                                if let Ok(r) = api::get("/system/streamrip/tidal-login").await {
-                                    paint(&r);
-                                    if r.s("status") != "waiting" { polling.set(false); dom::set_disabled(&btn, false); }
-                                }
-                            });
-                        });
-                    } else { dom::set_disabled(&btn, false); }
-                }
-                Err(e) => { dom::set_html(&out, &format!(r##"<span class="badge err">{}</span>"##, esc(&e.message))); dom::set_disabled(&btn, false); }
+    // Each step has its own link: open the new one when the server moves to step 2.
+    let opened: Rc<RefCell<String>> = Rc::new(RefCell::new(String::new()));
+    let open_link: Rc<dyn Fn(&Value)> = {
+        let opened = opened.clone();
+        Rc::new(move |r: &Value| {
+            let url = r.s("url");
+            if r.s("status") == "waiting" && !url.is_empty() && *opened.borrow() != url {
+                *opened.borrow_mut() = url.clone();
+                let _ = dom::window().open_with_url_and_target_and_features(&url, "_blank", "noopener");
             }
+        })
+    };
+    // one poll at a time: a new click stops the previous poller
+    let polling: Rc<Cell<u32>> = Rc::new(Cell::new(0));
+    {
+        let (view, card, out2, btn2, paint, open_link, polling) = (view.clone(), card.clone(), out.clone(), btn.clone(), paint.clone(), open_link.clone(), polling.clone());
+        dom::on(&btn, "click", move |_| {
+            dom::set_disabled(&btn2, true);
+            dom::hide(&out2, false);
+            dom::set_html(&out2, &format!("{TIDAL_SPINNER} Starting sign-in…"));
+            let (view, card, out, btn, paint, open_link, polling) = (view.clone(), card.clone(), out2.clone(), btn2.clone(), paint.clone(), open_link.clone(), polling.clone());
+            dom::spawn(async move {
+                match api::post_empty("/system/streamrip/tidal-login").await {
+                    Ok(r) => {
+                        paint(&r);
+                        if r.s("status") == "waiting" {
+                            open_link(&r);
+                            // poll every 3 s until the sign-in finishes or the card is gone
+                            let gen = polling.get() + 1;
+                            polling.set(gen);
+                            let (card, btn, paint, open_link, polling) = (card.clone(), btn.clone(), paint.clone(), open_link.clone(), polling.clone());
+                            dom::interval(&view, 3000, move || {
+                                if polling.get() != gen || !dom::is_connected(&card) { return; }
+                                let (btn, paint, open_link, polling) = (btn.clone(), paint.clone(), open_link.clone(), polling.clone());
+                                dom::spawn(async move {
+                                    if polling.get() != gen { return; }
+                                    if let Ok(r) = api::get("/system/streamrip/tidal-login").await {
+                                        if polling.get() != gen { return; }
+                                        paint(&r);
+                                        open_link(&r);
+                                        if r.s("status") != "waiting" { polling.set(0); dom::set_disabled(&btn, false); }
+                                    }
+                                });
+                            });
+                        } else { dom::set_disabled(&btn, false); }
+                    }
+                    Err(e) => { dom::set_html(&out, &format!(r##"<span class="badge err">{}</span>"##, esc(&e.message))); dom::set_disabled(&btn, false); }
+                }
+            });
         });
-    });
+    }
+    {
+        let (save2, toml, paint) = (save.clone(), toml.clone(), paint.clone());
+        dom::on(&save, "click", move |_| {
+            dom::set_disabled(&save2, true);
+            let (save, toml, paint) = (save2.clone(), toml.clone(), paint.clone());
+            dom::spawn(async move {
+                match api::post("/system/streamrip/tidal-tokens", json!({ "toml": dom::value(&toml) })).await {
+                    Ok(r) => { paint(&r); dom::set_value(&toml, ""); toast("Tidal tokens saved", "ok"); }
+                    Err(e) => toast(&e.message, "err"),
+                }
+                dom::set_disabled(&save, false);
+            });
+        });
+    }
+    {
+        let (out, paint) = (out.clone(), paint.clone());
+        dom::on(&signout, "click", move |e| {
+            e.prevent_default();
+            let (out, paint) = (out.clone(), paint.clone());
+            dom::spawn(async move {
+                match api::del("/system/streamrip/tidal-tokens").await {
+                    Ok(r) => { paint(&r); dom::hide(&out, true); toast("Signed out of Tidal", "ok"); }
+                    Err(err) => toast(&err.message, "err"),
+                }
+            });
+        });
+    }
 }
 
 fn pipeline_help() -> String {
