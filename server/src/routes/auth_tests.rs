@@ -264,6 +264,89 @@ async fn info_advertises_app_tokens_and_api_level() {
     assert_eq!(r.status, StatusCode::OK);
     assert_eq!(r.body["api"], 2);
     assert!(r.body["features"].as_array().unwrap().iter().any(|f| f == "app_tokens"));
+    assert!(r.body["features"].as_array().unwrap().iter().any(|f| f == "engine_token"));
+}
+
+// ---- POST /api/auth/app-token: a signed-in session mints a bearer token for a device ----------
+
+async fn app_token(app: &Router, headers: &[(&str, &str)], body: Value) -> Resp {
+    call(app, "POST", "/api/auth/app-token", headers, Some(body)).await
+}
+
+#[tokio::test]
+async fn app_token_from_a_cookie_session_works_as_bearer_and_is_listed_as_an_app_session() {
+    let e = setup("apptoken");
+    let cookie = web_login(&e.app).await;
+    let r = app_token(&e.app, &[("cookie", &cookie), ("x-requested-with", "encore")], json!({ "device_id": "cadenza-desktop-abc", "device_name": "Cadenza on studio" })).await;
+    assert_eq!(r.status, StatusCode::OK, "{}", r.body);
+    assert_eq!(r.body["device_id"], "cadenza-desktop-abc");
+    let token = r.body["token"].as_str().unwrap().to_string();
+    assert!(token.len() >= 32);
+    assert!(r.headers.get("set-cookie").is_none(), "no cookie is set for an app token");
+    // only a digest is stored
+    assert!(e.st.db.one("SELECT token FROM sessions WHERE kind='app' AND device_id='cadenza-desktop-abc'", p![]).unwrap().unwrap().s("token").starts_with("sha256:"));
+
+    // the token signs in with Authorization: Bearer
+    let me = call(&e.app, "GET", "/api/auth/me", &[("authorization", &bearer(&token))], None).await;
+    assert_eq!(me.status, StatusCode::OK);
+    assert_eq!(me.body["username"], "listener");
+
+    // listed under Account → sessions as kind app with the device name
+    let r = call(&e.app, "GET", "/api/auth/sessions", &[("cookie", &cookie)], None).await;
+    assert_eq!(r.status, StatusCode::OK);
+    let rows = r.body.as_array().unwrap();
+    assert_eq!(rows.len(), 2);
+    let app_row = rows.iter().find(|s| s["kind"] == "app").expect("app session row");
+    assert_eq!(app_row["device_name"], "Cadenza on studio");
+    assert_eq!(app_row["current"], false);
+    assert!(app_row["last_seen_at"].as_f64().unwrap() > 0.0);
+    let cur = rows.iter().find(|s| s["current"] == true).unwrap();
+    assert_eq!(cur["kind"], "web");
+
+    // logging the browser out does not revoke the app token
+    let r = call(&e.app, "POST", "/api/auth/logout", &[("cookie", &cookie), ("x-requested-with", "encore")], None).await;
+    assert_eq!(r.status, StatusCode::OK);
+    assert_eq!(call(&e.app, "GET", "/api/auth/me", &[("authorization", &bearer(&token))], None).await.status, StatusCode::OK);
+}
+
+#[tokio::test]
+async fn app_token_reissue_replaces_the_previous_one_for_the_same_device() {
+    let e = setup("apptoken-reissue");
+    let cookie = web_login(&e.app).await;
+    let h = [("cookie", cookie.as_str()), ("x-requested-with", "encore")];
+    let t1 = app_token(&e.app, &h, json!({ "device_id": "cadenza-desktop-abc", "device_name": "Cadenza on studio" })).await.body["token"].as_str().unwrap().to_string();
+    let t2 = app_token(&e.app, &h, json!({ "device_id": "cadenza-desktop-abc", "device_name": "Cadenza on studio" })).await.body["token"].as_str().unwrap().to_string();
+    assert_ne!(t1, t2);
+    let n = |dev: &str| e.st.db.one("SELECT COUNT(*) n FROM sessions WHERE kind='app' AND device_id=?", p![dev]).unwrap().unwrap().i("n");
+    assert_eq!(n("cadenza-desktop-abc"), 1);
+    assert_eq!(call(&e.app, "GET", "/api/auth/me", &[("authorization", &bearer(&t1))], None).await.status, StatusCode::UNAUTHORIZED);
+    assert_eq!(call(&e.app, "GET", "/api/auth/me", &[("authorization", &bearer(&t2))], None).await.status, StatusCode::OK);
+    // another device id is another row, and the web session is untouched
+    app_token(&e.app, &h, json!({ "device_id": "cadenza-desktop-xyz" })).await;
+    assert_eq!(n("cadenza-desktop-xyz"), 1);
+    assert_eq!(e.st.db.one("SELECT COUNT(*) n FROM sessions WHERE kind='app'", p![]).unwrap().unwrap().i("n"), 2);
+    assert_eq!(e.st.db.one("SELECT COUNT(*) n FROM sessions WHERE kind='web'", p![]).unwrap().unwrap().i("n"), 1);
+    // a bearer session may ask too (no CSRF header needed)
+    let r = app_token(&e.app, &[("authorization", &bearer(&t2))], json!({ "device_id": "cadenza-desktop-abc", "device_name": "Cadenza on studio" })).await;
+    assert_eq!(r.status, StatusCode::OK);
+    assert_eq!(n("cadenza-desktop-abc"), 1);
+}
+
+#[tokio::test]
+async fn app_token_rejects_bad_ids_and_anonymous_callers() {
+    let e = setup("apptoken-bad");
+    let cookie = web_login(&e.app).await;
+    let h = [("cookie", cookie.as_str()), ("x-requested-with", "encore")];
+    assert_eq!(app_token(&e.app, &h, json!({ "device_id": "" })).await.status, StatusCode::BAD_REQUEST);
+    assert_eq!(app_token(&e.app, &h, json!({ "device_id": "   " })).await.status, StatusCode::BAD_REQUEST);
+    assert_eq!(app_token(&e.app, &h, json!({ "device_id": "x".repeat(65) })).await.status, StatusCode::BAD_REQUEST);
+    assert_eq!(app_token(&e.app, &h, json!({ "device_id": "x".repeat(64) })).await.status, StatusCode::OK);
+    assert_eq!(e.st.db.one("SELECT COUNT(*) n FROM sessions WHERE kind='app'", p![]).unwrap().unwrap().i("n"), 1);
+    // no session at all
+    assert_eq!(app_token(&e.app, &[("x-requested-with", "encore")], json!({ "device_id": "cadenza-desktop-abc" })).await.status, StatusCode::UNAUTHORIZED);
+    // a cookie without the CSRF header is refused like every other POST
+    assert_eq!(app_token(&e.app, &[("cookie", &cookie)], json!({ "device_id": "cadenza-desktop-abc" })).await.status, StatusCode::FORBIDDEN);
+    assert_eq!(e.st.db.one("SELECT COUNT(*) n FROM sessions WHERE kind='app'", p![]).unwrap().unwrap().i("n"), 1);
 }
 
 #[tokio::test]

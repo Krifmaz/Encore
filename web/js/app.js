@@ -106,7 +106,12 @@ function renderShell() {
         <div id="view"></div>
       </main>
     </div>`;
-  qs('#logout-btn').onclick = async () => { await api.post('/auth/logout'); location.reload(); };
+  qs('#logout-btn').onclick = async () => {
+    await api.post('/auth/logout');
+    // the desktop app's Cadenza signed in with its own token: signing out here signs it out too
+    try { window.EncoreNative?.engineLogout?.(); } catch { /* ignore */ }
+    location.reload();
+  };
   const meter = () => storagePage.sidebarMeter(qs('#storage-mini'));
   meter();
   setInterval(meter, 5 * 60 * 1000);

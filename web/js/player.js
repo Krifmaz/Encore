@@ -980,10 +980,17 @@ async function signalPath() {
   if (!link && state.dsp && dspCacheOn() && current() === t) await prepareDsp(t);   // pre-rendered yet?
   const rows = [];
   rows.push(['Source', sourceLine(t, info), info?.lossless === false ? 'A lossy file: what the file lost is gone before Encore touches it' : '']);
+  // a Cadenza device reports every stage of its own pipeline; a browser device just plays
+  const stages = link && Array.isArray(link.state?.signal?.stages) ? link.state.signal.stages : [];
+  const localEngine = !!link && window.encoreRemote?.engine?.()?.id === link.id;
   if (link) {
     const sig = link.state?.signal || {};
+    const eng = link.state?.engine || {};
     rows.push([`Encore → ${esc(link.name)}`, sig.transport === 'original' ? 'The original file, byte for byte' : sig.transport ? (sig.transport === 'flac' ? 'Converted to FLAC by the server (lossless)' : sig.transport.startsWith('cadenza-') ? `Upsampled on the server by Cadenza (${khz(Number(sig.transport.slice(8)) || 0)} kHz)` : /^(aac|opus)-/.test(sig.transport) ? `${sig.transport.split('-')[0].toUpperCase()} ${sig.transport.split('-')[1]} kbps (lossy)` : sig.transport) : 'Not reported by that device', '']);
-    rows.push([esc(link.name), sig.output_rate ? `Plays through its browser audio at ${khz(sig.output_rate)} kHz` : 'Playing there', '']);
+    if (stages.length) {
+      for (const st of stages) rows.push([esc(st?.name || ''), String(st?.detail ?? ''), '']);
+      rows.push(['Output', `${eng.output || ''}${eng.exclusive ? ' · exclusive' : ''}${sig.bitperfect ? ' · bit-perfect' : ''}`, '']);
+    } else rows.push([esc(link.name), sig.output_rate ? `Plays through its browser audio at ${khz(sig.output_rate)} kHz` : 'Playing there', '']);
   } else {
     const tr = transport();
     const net = est.kbps > 0 ? ` · connection ≈ ${mbit(est.kbps)} Mbit/s` : '';
@@ -1003,8 +1010,8 @@ async function signalPath() {
   m.el.querySelector('.modal-body').innerHTML = `
     <div class="stack" style="gap:12px">
       ${rows.map(([k, v, note]) => `<div class="stack" style="gap:2px"><div class="small muted">${k}</div><div style="font-weight:600">${esc(v)}</div>${note ? `<div class="small muted">${esc(note)}</div>` : ''}</div>`).join('')}
-      <div class="card" style="padding:12px"><b>${link ? 'Playing on another device' : cadenza ? 'Processed by Cadenza on the server' : pure ? 'Pure playback from Encore' : 'Not the untouched file'}</b>
-        <div class="small muted" style="margin-top:4px">${link ? 'The rows above are what that device reports. Open Encore there for its own signal path.'
+      <div class="card" style="padding:12px"><b>${link ? (stages.length ? `Played by Cadenza on ${localEngine ? 'this computer' : esc(link.name)}` : 'Playing on another device') : cadenza ? 'Processed by Cadenza on the server' : pure ? 'Pure playback from Encore' : 'Not the untouched file'}</b>
+        <div class="small muted" style="margin-top:4px">${link ? (stages.length ? 'Every stage above is what the engine reports. Bit-perfect means nothing touched the samples.' : 'The rows above are what that device reports. Open Encore there for its own signal path.')
           : cadenza ? 'Encore upsampled the file on the server with Cadenza and sent lossless 24-bit FLAC. Turn it off under Settings → Playback → Server processing to get the untouched file.'
           : pure ? 'Encore sent the file exactly as it is stored. Everything after that – volume, mixing, resampling – is your browser and operating system.'
           : untouched ? 'Encore sent the file untouched; this device adds the effects you chose under Settings → Playback → Sound.'

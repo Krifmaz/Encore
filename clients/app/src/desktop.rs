@@ -55,7 +55,7 @@ pub fn setup<R: Runtime>(app: &AppHandle<R>) -> tauri::Result<()> {
             "next" => control(app, "next"),
             "prev" => control(app, "prev"),
             "show" => show_window(app),
-            "server" => server::show_picker(app, None),
+            "server" => { crate::engine::logout(app); server::show_picker(app, None) }
             "quit" => app.exit(0),
             _ => {}
         })

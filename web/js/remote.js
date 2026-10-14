@@ -30,6 +30,11 @@ function deviceName() {
 
 const ME = deviceId();
 const CHAIN = 'encore.link';
+// The Cadenza engine built into the desktop app: it signs in with its own token and shows up as a device of
+// its own, which this window links to on its own – unless you unlinked it (encore.engine.off = "1").
+const ENGINE_OFF = 'encore.engine.off';
+export const ENGINE_LABEL = 'This computer (Cadenza)';
+let engine = null;         // { id, name } of this computer's engine (desktop app only), known before it is online
 let devices = [];          // the other devices, as the server last told us (pushed, or fetched)
 let onDevices = null;      // the open Devices window repaints through this
 const seen = [];           // commands already run (each one can arrive pushed and again on the next check-in)
@@ -41,18 +46,49 @@ let missed = 0;
 function savedLink() { try { return JSON.parse(localStorage.getItem(CHAIN) || 'null'); } catch { return null; } }
 const sendTo = (id, body) => api.post(`/remote/${encodeURIComponent(id)}/command`, { ...body, from: deviceName() });
 
-export function linkTo(d) {
-  try { localStorage.setItem(CHAIN, JSON.stringify({ id: d.id, name: d.name })); } catch { /* ignore */ }
-  player.setLink({ id: d.id, name: d.name, state: d.state || {}, online: true,
+/** This computer's Cadenza engine as a device `{ id, name }` – only in the desktop app, null elsewhere. */
+export function engineDevice() { return engine; }
+export const isEngine = (id) => !!engine && id === engine.id;
+/** The name a device is shown under: the built-in engine is "This computer (Cadenza)". */
+export const shownName = (d) => isEngine(d.id) ? ENGINE_LABEL : d.name;
+/** You unlinked this computer's engine: it is not linked to again on its own. */
+export const engineOff = () => { try { return localStorage.getItem(ENGINE_OFF) === '1'; } catch { return false; } };
+
+export function linkTo(d, { silent = false } = {}) {
+  const name = shownName(d);
+  if (isEngine(d.id)) { try { localStorage.removeItem(ENGINE_OFF); } catch { /* ignore */ } }
+  try { localStorage.setItem(CHAIN, JSON.stringify({ id: d.id, name })); } catch { /* ignore */ }
+  player.setLink({ id: d.id, name, state: d.state || {}, online: true,
     send: (c) => sendTo(d.id, c).catch(e => toast(e.message, 'err')) });
-  toast(`Linked – this device now controls ${d.name}`, 'ok');
+  if (!silent) toast(`Linked – this device now controls ${name}`, 'ok');
   beat();
 }
 export function unlink() {
+  if (isEngine(player.linked()?.id)) { try { localStorage.setItem(ENGINE_OFF, '1'); } catch { /* ignore */ } }
   try { localStorage.removeItem(CHAIN); } catch { /* ignore */ }
   player.setLink(null);
   toast('Unlinked – music plays on this device again', 'ok');
   beat();
+}
+
+/** Desktop app: sign the built-in engine in. The app knows the engine's id and name before it runs; the
+ *  server hands out a token for them, and the app starts the engine with it. Idempotent – safe on every start. */
+async function engineSignIn() {
+  const n = window.EncoreNative;
+  if (!n?.engine || !n.engineStatus || !n.engineLogin) return;
+  try {
+    let st = await n.engineStatus();
+    if (typeof st === 'string') st = JSON.parse(st);
+    if (!st?.device_id) return;
+    engine = { id: st.device_id, name: st.name || 'Cadenza' };
+    // already running with a token and no error: keep it – a new token would restart the engine's link
+    if (st.running && !st.error) return;
+    const r = await api.post('/auth/app-token', { device_id: st.device_id, device_name: engine.name });
+    let r2 = await n.engineLogin(JSON.stringify({ token: r.token, server: location.origin }));
+    if (typeof r2 === 'string') { try { r2 = JSON.parse(r2); } catch { r2 = null; } }
+    // the app answers with the id it signed in under – that is the device to look for
+    if (r2?.device_id) engine = { id: r2.device_id, name: r2.name || engine.name };
+  } catch { /* Settings → Playback → Cadenza engine says what is wrong */ }
 }
 
 /** Run a command another device sent us – once, however many ways it arrived. */
@@ -70,7 +106,12 @@ function runCommand(c) {
 /** The other devices changed (pushed by the server, or fetched). */
 function gotDevices(list) {
   devices = (list || []).filter(d => d.id !== ME);
-  const link = player.linked();
+  let link = player.linked();
+  // this computer's engine came online: link to it on its own (quietly), unless you unlinked it
+  if (engine && !link && !engineOff()) {
+    const d = devices.find(x => x.id === engine.id);
+    if (d) { linkTo(d, { silent: true }); link = player.linked(); }
+  }
   if (link) {
     const d = devices.find(x => x.id === link.id);
     missed = d ? 0 : missed + 1;
@@ -111,9 +152,10 @@ function connect() {
 export function start(session) {
   if (started || !(session.info?.features || []).includes('remote')) return;
   started = true;
-  window.encoreRemote = { open, unlink };
+  window.encoreRemote = { open, unlink, engine: engineDevice };
   const l = savedLink();
   if (l) player.setLink({ ...l, state: {}, online: true, send: (c) => sendTo(l.id, c).catch(e => toast(e.message, 'err')) });
+  engineSignIn();
   connect();
   player.onChange(beatSoon);
   const loop = () => {
@@ -180,6 +222,7 @@ export function open() {
       const s = d.state || {};
       const isLinked = l?.id === d.id;
       const remoteOfMe = s.remote_of === ME;
+      const name = shownName(d);
       const now = s.remote_of ? `<div class="small muted">🔗 Remote for ${esc(s.remote_of === ME ? 'this device' : (devices.find(x => x.id === s.remote_of)?.name || 'another device'))}</div>`
         : s.title ? `<div class="row" style="gap:12px">
           <div class="thumb" style="width:52px;height:52px">${art(s.cover, s.album || s.title)}</div>
@@ -187,9 +230,9 @@ export function open() {
             <div class="small faint">${s.playing ? 'Playing' : 'Paused'} · ${fmt.dur(s.position || 0)} / ${fmt.dur(s.duration || 0)}${s.signal?.label ? ' · ' + esc(s.signal.label) : ''}</div></div></div>`
         : '<div class="small muted">Nothing playing</div>';
       return `<div class="card stack ${isLinked ? 'linked' : ''}" data-id="${esc(d.id)}" style="gap:10px">
-        <div class="row between"><b>${icon.devices.replace('<svg', '<svg width="16" style="vertical-align:-3px;margin-right:6px"')}${esc(d.name)}</b>
+        <div class="row between"><b>${icon.devices.replace('<svg', '<svg width="16" style="vertical-align:-3px;margin-right:6px"')}${esc(name)}</b>
           ${remoteOfMe || s.remote_of ? '' : isLinked ? `<button class="btn sm primary" data-a="unlink">${icon.link}Linked · Unlink</button>`
-            : `<button class="btn sm" data-a="link" title="Lock this device as a remote for ${esc(d.name)}: everything you play here plays there">${icon.link}Link as remote</button>`}</div>
+            : `<button class="btn sm" data-a="link" title="Lock this device as a remote for ${esc(name)}: everything you play here plays there">${icon.link}Link as remote</button>`}</div>
         ${now}
         ${s.remote_of ? '' : `<div class="row wrap" style="gap:8px">
           ${s.title ? `<button class="btn sm ghost icon" data-a="prev" aria-label="Previous">${icon.prev}</button>
@@ -197,7 +240,7 @@ export function open() {
             <button class="btn sm ghost icon" data-a="next" aria-label="Next">${icon.next}</button>
             <input type="range" min="0" max="1" step="0.05" value="${s.volume ?? 0.9}" data-vol title="Volume" style="width:110px;accent-color:var(--accent)">
             ${isLinked ? '' : '<button class="btn sm" data-a="here" title="Continue this song on this device">Play here</button>'}` : ''}
-          ${player.current() && !l ? `<button class="btn sm primary" data-a="send" title="Move what you're playing to ${esc(d.name)}">Send my music there</button>` : ''}
+          ${player.current() && !l ? `<button class="btn sm primary" data-a="send" title="Move what you're playing to ${esc(name)}">Send my music there</button>` : ''}
         </div>`}</div>`;
     }).join('');
   };

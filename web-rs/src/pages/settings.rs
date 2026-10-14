@@ -796,7 +796,20 @@ fn render_playback(el: Element, _ctx: Ctx) -> PageFuture {
         let p = crate::playback::current();
         // server-side Cadenza: on for this server, and allowed for this account? (fetched once per visit to the tab)
         let dsp = api::get("/playback/dsp").await.unwrap_or_else(|_| json!({ "enabled": false }));
-        let st = Rc::new(Look { el, p: RefCell::new(p), server_prefs, dsp });
+        // the desktop app carries Cadenza: its { running, device_id, name, error } – asked again every couple of seconds
+        let native = app::native_truthy("engine");
+        let engine_st = if native { engine_status().await } else { Value::Null };
+        let st = Rc::new(Look { el, p: RefCell::new(p), server_prefs, dsp, native, engine_st: RefCell::new(engine_st), painted: RefCell::new(String::new()) });
+        // what the Cadenza engine section is painted from – a repaint only when it changes
+        let st2 = st.clone();
+        dom::interval(&st.el, 2000, move || {
+            if !st2.el.is_connected() { return; }
+            let st3 = st2.clone();
+            dom::spawn(async move {
+                if st3.native { *st3.engine_st.borrow_mut() = engine_status().await; }
+                if st3.el.is_connected() && engine_key(&st3) != *st3.painted.borrow() { paint_playback(&st3); }
+            });
+        });
         paint_playback(&st);
         Ok(())
     })
@@ -815,29 +828,116 @@ fn seg_str(p: &Value, key: &str, opts: &[(&str, &str)]) -> String {
         opts.iter().map(|(v, l)| format!(r##"<button type="button" data-v="{v}" class="{}">{l}</button>"##, if cur == *v { "on" } else { "" })).collect::<String>())
 }
 
-/// A linked engine device describes its switches in its state: { name, bitperfect, filter, filters[], dither, dithers[], rate, rates[], output }
-fn engine_html(e: &Value) -> String {
-    let select = |key: &str, label: &str, list: &str, cur: &Value| -> String {
-        if !e.g(list).is_array() { return String::new(); }
-        let opts: String = e.a(list).iter().map(|o| {
-            let (v, l) = (o.items().first().cloned().unwrap_or(Value::Null), o.items().get(1).cloned().unwrap_or(Value::Null));
-            format!(r#"<option value="{}" {}>{}</option>"#, esc(&js_string(&v)), if js_string(&v) == js_string(cur) { "selected" } else { "" }, esc(&js_string(&l)))
-        }).collect();
-        format!(r#"<label class="stack" style="gap:4px"><span class="small muted">{label}</span><select class="input" data-eng="{key}" {}>{opts}</select></label>"#, if e.truthy("bitperfect") { "disabled" } else { "" })
-    };
-    format!(r#"<div class="stack" style="gap:8px">
-      <label class="row" style="gap:8px;align-items:center"><input type="checkbox" data-eng="bitperfect" {}> Bit-perfect – send the file to the DAC untouched (no upsampling, dither or volume)</label>
-      {}
-      {}
-      {}
-      {}
-    </div>"#,
-        if e.truthy("bitperfect") { "checked" } else { "" },
-        select("filter", "Upsampling filter", "filters", e.g("filter")),
-        select("dither", "Dither / noise shaping", "dithers", e.g("dither")),
-        select("rate", "Output rate", "rates", e.g("rate")),
-        if e.truthy("output") { format!(r#"<span class="small muted">Output: {}</span>"#, esc(&e.s("output"))) } else { String::new() })
+/// `await window.EncoreNative.engineStatus()` – null when it fails.
+async fn engine_status() -> Value { app::native_call_async("engineStatus", None).await.unwrap_or(Value::Null) }
+
+/// `JSON.stringify([link?.id, link?.name, link?.state?.engine ?? null, engineSt])`.
+fn engine_key(st: &Look) -> String {
+    let link = crate::player::linked();
+    let eng = link.as_ref().map(|l| l.state.g("engine").clone()).unwrap_or(Value::Null);
+    json!([link.as_ref().map(|l| l.id.clone()), link.as_ref().map(|l| l.name.clone()), eng, *st.engine_st.borrow()]).to_string()
 }
+
+// Settings → Playback → Cadenza engine, when there is no engine to show (the same words in web/js/pages/settings.js)
+const ENGINE_GREYED: &str = r#"<div class="stack" style="gap:8px;opacity:.45;pointer-events:none" aria-disabled="true"><label class="row" style="gap:8px;align-items:center"><input type="checkbox" disabled> Bit-perfect – send the file to the DAC untouched (no upsampling, dither or volume)</label><label class="stack" style="gap:4px"><span class="small muted">Upsampling filter</span><select class="input" disabled><option>–</option></select></label><label class="stack" style="gap:4px"><span class="small muted">Dither / noise shaping</span><select class="input" disabled><option>–</option></select></label><label class="stack" style="gap:4px"><span class="small muted">Output rate</span><select class="input" disabled><option>–</option></select></label></div><span class="small muted">Cadenza is Encore's own playback engine: long upsampling filters, DSD, dither and noise shaping, exclusive output straight into the DAC. It is built into the Encore desktop app – install the app on the computer connected to your DAC and this section comes alive on its own. Cadenza can also run on its own on a small box next to the DAC; link to it under Your devices. To have the server do the upsampling for a browser or phone instead, see Server processing above.</span>"#;
+const ENGINE_OFF_COPY: &str = r#"<span class="small muted">Cadenza is off for this computer – music plays through the browser audio of this window. Link to This computer (Cadenza) under Your devices to turn it back on.</span>"#;
+
+/// `${(Number(v) || 0).toFixed(1)} dB`.
+fn db_text(n: f64) -> String { let n = if n.is_finite() && n != 0.0 { n } else { 0.0 }; format!("{n:.1} dB") }
+/// `Number(v) || 0` printed like JS.
+fn js_num_of(v: &Value) -> String { let n = v.as_f64().unwrap_or(0.0); js_string(&json!(n)) }
+/// A numeric string as a JSON number (whole numbers as integers, like `JSON.stringify(Number(s))`), else None.
+fn eng_num(t: &str) -> Option<Value> {
+    let body = t.strip_prefix('-').unwrap_or(t);
+    let (int, frac) = body.split_once('.').map(|(a, b)| (a, Some(b))).unwrap_or((body, None));
+    let digits = |x: &str| !x.is_empty() && x.bytes().all(|b| b.is_ascii_digit());
+    if !digits(int) || frac.is_some_and(|f| !digits(f)) { return None; }
+    let n: f64 = t.parse().ok()?;
+    Some(if n.fract() == 0.0 { json!(n as i64) } else { json!(n) })
+}
+
+/// A linked Cadenza describes every switch in its state (see Cadenza's encore/state.rs): outputs, exclusive, bit-perfect, PCM and DSD groups, headroom, soft clipper, GPU, matrix.
+fn engine_html(e: &Value) -> String {
+    let pair = |o: &Value| -> (Value, Value) { (o.get(0).cloned().unwrap_or(Value::Null), o.get(1).cloned().unwrap_or(Value::Null)) };
+    let sel = |key: &str, label: &str, list: &Value, cur: &Value, extra: &str| -> String {
+        let Some(items) = list.as_array() else { return String::new() };
+        let cur = js_string(cur);
+        let opts: String = items.iter().map(|o| {
+            let (v, l) = pair(o);
+            format!(r#"<option value="{}" {}>{}</option>"#, esc(&js_string(&v)), if js_string(&v) == cur { "selected" } else { "" }, esc(&js_string(&l)))
+        }).collect();
+        format!(r#"<label class="stack" style="gap:4px"><span class="small muted">{label}</span><select class="input" data-eng="{key}" {extra}>{opts}</select></label>"#)
+    };
+    let seg_e = |key: &str, list: &[Value], cur: &Value| -> String {
+        let cur = js_string(cur);
+        format!(r#"<div class="seg" data-eng-seg="{key}">{}</div>"#, list.iter().map(|o| {
+            let (v, l) = pair(o);
+            format!(r#"<button type="button" data-v="{}" class="{}">{}</button>"#, esc(&js_string(&v)), if js_string(&v) == cur { "on" } else { "" }, esc(&js_string(&l)))
+        }).collect::<String>())
+    };
+    let range = |key: &str, label: &str, id: &str, v: &Value, min: &str| -> String {
+        format!(r#"<label class="stack" style="gap:4px"><span class="small muted">{label}: <span id="{id}">{}</span></span><input type="range" min="{min}" max="0" step="0.5" value="{}" data-eng="{key}" data-v="{id}" style="accent-color:var(--accent)"></label>"#,
+            db_text(v.as_f64().unwrap_or(0.0)), js_num_of(v))
+    };
+    let bp = if e.truthy("bitperfect") { "disabled" } else { "" };
+    let dsd = e.o("dsd");
+    let manual = !e.g("headroom_db").is_null();
+    let gpu_name = if e.truthy("gpu_name") { e.s("gpu_name") } else { "NVIDIA GPU".to_string() };
+    let gpu_line = if e.truthy("gpu_in_use") { format!("In use: {}", esc(&gpu_name)) } else if e.truthy("gpu_available") { format!("{} found, not in use", esc(&gpu_name)) } else { "No NVIDIA GPU found".to_string() };
+    let exclusive_on = if !e.g("exclusive_wanted").is_null() { e.truthy("exclusive_wanted") } else { e.truthy("exclusive") };
+    let exclusive = if e.has("exclusive") { format!(r#"<label class="row" style="gap:8px;align-items:center"><input type="checkbox" data-eng="exclusive" {}> Exclusive – Cadenza alone uses the DAC, nothing else is mixed in</label>"#, if exclusive_on { "checked" } else { "" }) } else { String::new() };
+    let modes = if e.g("output_modes").is_array() { format!(r#"<div class="stack" style="gap:4px"><span class="small muted">Output mode</span>{}</div>"#, seg_e("output_mode", &e.a("output_modes"), e.g("output_mode"))) } else { String::new() };
+    let group = if e.g("output_mode").as_str() == Some("dsd") {
+        format!("{}\n      {}\n      {}\n      {}\n      {}",
+            sel("dsd_rate", "DSD rate", dsd.g("rates"), dsd.g("rate"), bp),
+            sel("dsd_modulator", "DSD modulator", dsd.g("modulators"), dsd.g("modulator"), bp),
+            sel("dsd_packing", "DSD packing", dsd.g("packings"), dsd.g("packing"), bp),
+            if dsd.g("oversamplings").is_array() { format!(r#"<div class="stack" style="gap:4px"><span class="small muted">DSD oversampling</span>{}</div>"#, seg_e("dsd_oversampling", &dsd.a("oversamplings"), dsd.g("oversampling"))) } else { String::new() },
+            if dsd.has("gain_db") { range("dsd_gain_db", "DSD gain", "eng-dsd-gain-v", dsd.g("gain_db"), "-6") } else { String::new() })
+    } else {
+        let bits: Value = if e.g("bits_list").is_array() { Value::Array(e.a("bits_list").iter().map(|b| json!([b, format!("{}-bit", js_string(b))])).collect()) } else { Value::Null };
+        format!("{}\n      {}\n      {}\n      {}",
+            sel("filter", "Upsampling filter", e.g("filters"), e.g("filter"), bp),
+            sel("dither", "Dither / noise shaping", e.g("dithers"), e.g("dither"), bp),
+            sel("rate", "Output rate", e.g("rates"), e.g("rate"), bp),
+            sel("bits", "Bit depth", &bits, e.g("bits"), bp))
+    };
+    let headroom = if e.has("headroom_db") {
+        format!("<label class=\"row\" style=\"gap:8px;align-items:center\"><input type=\"checkbox\" id=\"eng-headroom-auto\" {}> Automatic headroom – room for the filters, so loud peaks do not clip</label>\n      {}",
+            if manual { "" } else { "checked" },
+            if manual { range("headroom_db", "Headroom", "eng-headroom-v", e.g("headroom_db"), "-12") } else { String::new() })
+    } else { String::new() };
+    let soft = if e.has("soft_clip") { format!(r#"<label class="row" style="gap:8px;align-items:center"><input type="checkbox" data-eng="soft_clip" {}> Soft clipper – round off peaks that would clip instead of cutting them</label>"#, if e.truthy("soft_clip") { "checked" } else { "" }) } else { String::new() };
+    let gpu = if e.has("gpu") { format!(r#"<div class="stack" style="gap:4px"><span class="small muted">GPU</span>{}<span class="small muted">{gpu_line}</span></div>"#, seg_e("gpu", &[json!(["auto", "Auto"]), json!(["on", "On"]), json!(["off", "Off"])], e.g("gpu"))) } else { String::new() };
+    let matrix_cur = if e.g("matrix").is_null() { json!("off") } else { e.g("matrix").clone() };
+    format!(r#"<div class="stack" style="gap:8px">
+      {output}
+      {exclusive}
+      <label class="row" style="gap:8px;align-items:center"><input type="checkbox" data-eng="bitperfect" {bp_on}> Bit-perfect – send the file to the DAC untouched (no upsampling, dither or volume)</label>
+      {modes}
+      {group}
+      {headroom}
+      {soft}
+      {gpu}
+      {matrix}
+      <span class="small muted">Output: {out} · {excl}</span>
+      {error}
+    </div>"#,
+        output = sel("output", "Output device", e.g("outputs"), e.g("output_id"), ""),
+        bp_on = if e.truthy("bitperfect") { "checked" } else { "" },
+        matrix = sel("matrix", "Matrix (channel mixing)", e.g("matrix_presets"), &matrix_cur, ""),
+        out = esc(&if e.truthy("output") { e.s("output") } else { "–".to_string() }),
+        excl = if e.truthy("exclusive") { "Exclusive" } else { "Shared" },
+        error = if e.truthy("error") { format!(r#"<span class="small" style="color:var(--err)">{}</span>"#, esc(&e.s("error"))) } else { String::new() })
+}
+
+/// Desktop app: the engine is signing in but its device has not shown up yet (or says why not).
+fn engine_starting_html(st: &Value) -> String {
+    if st.truthy("error") {
+        format!(r#"<span class="small" style="color:var(--err)">{}</span><span class="small muted">Encore keeps trying.</span>"#, esc(&st.s("error")))
+    } else { r#"<span class="small muted">Starting the engine…</span>"#.to_string() }
+}
+
 
 const DSP_RATES: [i64; 8] = [88200, 96000, 176400, 192000, 352800, 384000, 705600, 768000];
 
@@ -1003,10 +1103,17 @@ fn paint_playback(st: &Rc<Look>) {
     let link = crate::player::linked();
     let eng = link.as_ref().map(|l| l.state.g("engine").clone()).filter(|e| crate::json::truthy(e));
     let help = QUALITY_HELP.iter().find(|(k, _)| *k == p.s("quality")).map(|(_, h)| *h).unwrap_or("undefined");
+    // the engine inside this very app, or a Cadenza somewhere else?
+    let local = eng.as_ref().is_some_and(|e| e.truthy("embedded")) && link.as_ref().is_some_and(|l| crate::remote::is_engine(&l.id));
+    *st.painted.borrow_mut() = engine_key(st);
+    let eng_title = match (&eng, &link) {
+        (Some(_), Some(l)) => if local { " · this computer".to_string() } else { format!(" · {}", esc(&l.name)) },
+        _ => if st.native { " · this computer".to_string() } else { String::new() },
+    };
     let engine_block = match (&eng, &link) {
         (Some(e), Some(_)) => engine_html(e),
-        // not linked to a Cadenza device: greyed out
-        _ => r#"<div class="stack" style="gap:8px;opacity:.45;pointer-events:none" aria-disabled="true"><label class="row" style="gap:8px;align-items:center"><input type="checkbox" disabled> Bit-perfect – send the file to the DAC untouched (no upsampling, dither or volume)</label><label class="stack" style="gap:4px"><span class="small muted">Upsampling filter</span><select class="input" disabled><option>–</option></select></label><label class="stack" style="gap:4px"><span class="small muted">Dither / noise shaping</span><select class="input" disabled><option>–</option></select></label><label class="stack" style="gap:4px"><span class="small muted">Output rate</span><select class="input" disabled><option>–</option></select></label></div><span class="small muted">For a Cadenza device on your own hardware – a computer or a small box next to your DAC – which plays straight into the DAC. Link to it under <b>Your devices</b> to use these switches. To upsample streams on this server instead, see Server processing above.</span>"#.to_string(),
+        // the desktop app before its engine shows up (or after you unlinked it); a browser: greyed out
+        _ => if st.native { if crate::remote::engine_off() { ENGINE_OFF_COPY.to_string() } else { engine_starting_html(&st.engine_st.borrow()) } } else { ENGINE_GREYED.to_string() },
     };
     dom::set_html(&st.el, &format!(r##"<div class="card stack">
       <h2>Playback</h2>
@@ -1033,7 +1140,7 @@ fn paint_playback(st: &Rc<Look>) {
         autoplay = if p.truthy("autoplay") { "checked" } else { "" },
         sound = sound_html(&p),
         dsp_block = dsp_html(&p, &st.dsp),
-        eng_name = match (&eng, &link) { (Some(e), Some(l)) => format!(" · {}", esc(&if e.truthy("name") { e.s("name") } else { l.name.clone() })), _ => String::new() }));
+        eng_name = eng_title));
     {
         let st2 = st.clone();
         dom::on_each(&st.el, ".seg[data-key] button", "click", move |b, _| {
@@ -1065,13 +1172,43 @@ fn paint_playback(st: &Rc<Look>) {
         }
     }
     if let Some(l) = link {
+        // every engine switch goes to the linked device as { action: 'engine', set: { key: value } }
         let l = Rc::new(l);
-        dom::on_each(&st.el, "[data-eng]", "change", move |c, _| {
-            let is_check = c.get_attribute("type").as_deref() == Some("checkbox");
-            let v = if is_check { json!(dom::checked(c)) } else { json!(dom::value(c)) };
-            (l.send)(json!({ "action": "engine", "set": { dom::data(c, "eng"): v } }));
-            toast(&format!("Sent to {}", l.name), "ok");
+        let send_eng: Rc<dyn Fn(Value)> = Rc::new(move |set| {
+            (l.send)(json!({ "action": "engine", "set": set }));
+            if !local { toast(&format!("Sent to {}", l.name), "ok"); }
         });
+        for c in dom::qsa_in(&st.el, "[data-eng]") {
+            if c.get_attribute("type").as_deref() != Some("range") { continue; }
+            let (el, c2) = (st.el.clone(), c.clone());
+            dom::on(&c, "input", move |_| {
+                if let Some(v) = dom::qs_in(&el, &format!("#{}", dom::data(&c2, "v"))) { dom::set_text(&v, &db_text(dom::value(&c2).parse().unwrap_or(0.0))); }
+            });
+        }
+        {
+            let send_eng = send_eng.clone();
+            dom::on_each(&st.el, "[data-eng]", "change", move |c, _| {
+                let k = dom::data(c, "eng");
+                let ty = c.get_attribute("type").unwrap_or_default();
+                let raw = dom::value(c);
+                let v = if ty == "checkbox" { json!(dom::checked(c)) }
+                    else if ty == "range" { eng_num(&raw).unwrap_or(json!(0)) }
+                    else if k == "rate" || k == "bits" { eng_num(&raw).unwrap_or_else(|| json!(raw)) }
+                    else { json!(raw) };
+                send_eng(json!({ k: v }));
+            });
+        }
+        {
+            let send_eng = send_eng.clone();
+            dom::on_each(&st.el, "[data-eng-seg] button", "click", move |b, _| {
+                let Some(sg) = dom::closest_of(b, ".seg") else { return };
+                send_eng(json!({ dom::data(&sg, "engSeg"): dom::data(b, "v") }));
+            });
+        }
+        if let Some(ha) = dom::qs_in(&st.el, "#eng-headroom-auto") {
+            let ha2 = ha.clone();
+            dom::on(&ha, "change", move |_| send_eng(json!({ "headroom_db": if dom::checked(&ha2) { Value::Null } else { json!(-3) } })));
+        }
     }
 }
 
@@ -1094,13 +1231,21 @@ fn set_playback(st: &Rc<Look>, patch: Value) {
 }
 
 /// The state of the JS `renderAppearance` closure: the panel, `p` and `serverPrefs`.
-struct Look { el: Element, p: RefCell<Value>, server_prefs: bool, dsp: Value }
+struct Look {
+    el: Element, p: RefCell<Value>, server_prefs: bool, dsp: Value,
+    /// the desktop app carries Cadenza (`window.EncoreNative.engine`)
+    native: bool,
+    /// its `{ running, device_id, name, error }` – asked again every couple of seconds
+    engine_st: RefCell<Value>,
+    /// what the Cadenza engine section was last painted from (`engine_key`)
+    painted: RefCell<String>,
+}
 
 /// Settings → Appearance: theme, accent colour, faded/solid background.
 fn render_appearance(el: Element, _ctx: Ctx) -> PageFuture {
     Box::pin(async move {
         let server_prefs = app::has_feature("theme");
-        let st = Rc::new(Look { el, p: RefCell::new(appearance::current()), server_prefs, dsp: Value::Null });
+        let st = Rc::new(Look { el, p: RefCell::new(appearance::current()), server_prefs, dsp: Value::Null, native: false, engine_st: RefCell::new(Value::Null), painted: RefCell::new(String::new()) });
         paint_appearance(&st);
         Ok(())
     })

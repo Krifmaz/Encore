@@ -1643,8 +1643,12 @@ async fn signal_path() {
     let pure;
     let mut untouched = false;
     let cadenza = linked.is_none() && transport().is_some_and(|(k, _)| k.starts_with("cadenza"));
+    // a Cadenza device reports every stage of its own pipeline; a browser device just plays
+    let stages: Vec<Value> = linked.as_ref().map(|l| l.state.g("signal").a("stages")).unwrap_or_default();
+    let local_engine = linked.as_ref().is_some_and(|l| crate::remote::is_engine(&l.id));
     if let Some(l) = &linked {
         let sig = l.state.o("signal");
+        let eng = l.state.o("engine");
         let tr = sig.s("transport");
         let what = if tr == "original" { "The original file, byte for byte".to_string() }
             else if tr.is_empty() { "Not reported by that device".to_string() }
@@ -1653,7 +1657,12 @@ async fn signal_path() {
             else if tr.starts_with("aac-") || tr.starts_with("opus-") { let (c, k) = tr.split_once('-').unwrap_or((&tr, "")); format!("{} {k} kbps (lossy)", c.to_uppercase()) }
             else { tr.clone() };
         rows.push((format!("Encore → {}", esc(&l.name)), what, String::new()));
-        rows.push((esc(&l.name), if sig.truthy("output_rate") { format!("Plays through its browser audio at {} kHz", khz(sig.f("output_rate"))) } else { "Playing there".into() }, String::new()));
+        if !stages.is_empty() {
+            for stg in &stages { rows.push((esc(&stg.s("name")), stg.s("detail"), String::new())); }
+            rows.push(("Output".into(), format!("{}{}{}", eng.s("output"), if eng.truthy("exclusive") { " · exclusive" } else { "" }, if sig.truthy("bitperfect") { " · bit-perfect" } else { "" }), String::new()));
+        } else {
+            rows.push((esc(&l.name), if sig.truthy("output_rate") { format!("Plays through its browser audio at {} kHz", khz(sig.f("output_rate"))) } else { "Playing there".into() }, String::new()));
+        }
         pure = false;
     } else {
         let tr = transport();
@@ -1676,16 +1685,20 @@ async fn signal_path() {
     let Some(body_el) = m.qs(".modal-body") else { return };
     let rows_html: String = rows.iter().map(|(k, v, note)| format!(r#"<div class="stack" style="gap:2px"><div class="small muted">{k}</div><div style="font-weight:600">{}</div>{}</div>"#,
         esc(v), if note.is_empty() { String::new() } else { format!(r#"<div class="small muted">{}</div>"#, esc(note)) })).collect();
-    let (head, text) = if linked.is_some() {
-        ("Playing on another device", "The rows above are what that device reports. Open Encore there for its own signal path.")
+    let (head, text) = if let Some(l) = &linked {
+        if !stages.is_empty() {
+            (format!("Played by Cadenza on {}", if local_engine { "this computer".to_string() } else { esc(&l.name) }), "Every stage above is what the engine reports. Bit-perfect means nothing touched the samples.")
+        } else {
+            ("Playing on another device".to_string(), "The rows above are what that device reports. Open Encore there for its own signal path.")
+        }
     } else if cadenza {
-        ("Processed by Cadenza on the server", "Encore upsampled the file on the server with Cadenza and sent lossless 24-bit FLAC. Turn it off under Settings → Playback → Server processing to get the untouched file.")
+        ("Processed by Cadenza on the server".to_string(), "Encore upsampled the file on the server with Cadenza and sent lossless 24-bit FLAC. Turn it off under Settings → Playback → Server processing to get the untouched file.")
     } else if pure {
-        ("Pure playback from Encore", "Encore sent the file exactly as it is stored. Everything after that – volume, mixing, resampling – is your browser and operating system.")
+        ("Pure playback from Encore".to_string(), "Encore sent the file exactly as it is stored. Everything after that – volume, mixing, resampling – is your browser and operating system.")
     } else if untouched {
-        ("Not the untouched file", "Encore sent the file untouched; this device adds the effects you chose under Settings → Playback → Sound.")
+        ("Not the untouched file".to_string(), "Encore sent the file untouched; this device adds the effects you chose under Settings → Playback → Sound.")
     } else {
-        ("Not the untouched file", "Encore converted this stream (see above). Settings → Playback → Quality → Original keeps the file untouched even when the connection is slow.")
+        ("Not the untouched file".to_string(), "Encore converted this stream (see above). Settings → Playback → Quality → Original keeps the file untouched even when the connection is slow.")
     };
     set_html(&body_el, &format!(r#"
     <div class="stack" style="gap:12px">

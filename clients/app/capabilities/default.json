@@ -7,6 +7,7 @@
   "permissions": [
     "core:default",
     "allow-now-playing", "allow-page-alive", "allow-servers", "allow-connect", "allow-remove-server", "allow-change-server",
-    "allow-retry-server", "allow-open-offline", "allow-offline-list", "allow-offline-ids", "allow-remove-offline", "allow-save-offline"
+    "allow-retry-server", "allow-open-offline", "allow-offline-list", "allow-offline-ids", "allow-remove-offline", "allow-save-offline",
+    "allow-engine-login", "allow-engine-logout", "allow-engine-status"
   ]
 }

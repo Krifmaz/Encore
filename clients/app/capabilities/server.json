@@ -5,5 +5,8 @@
   "windows": ["main"],
   "local": false,
   "remote": { "urls": ["http://*:*/*", "https://*:*/*"] },
-  "permissions": ["allow-now-playing", "allow-page-alive", "allow-change-server", "allow-open-offline", "allow-save-offline"]
+  "permissions": [
+    "allow-now-playing", "allow-page-alive", "allow-change-server", "allow-open-offline", "allow-save-offline",
+    "allow-engine-login", "allow-engine-logout", "allow-engine-status"
+  ]
 }

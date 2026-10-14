@@ -249,7 +249,8 @@ jobs:
         with:
           workspaces: clients/app
       - if: runner.os == 'Linux'
-        run: sudo apt-get update && sudo apt-get install -y libwebkit2gtk-4.1-dev libgtk-3-dev libayatana-appindicator3-dev librsvg2-dev patchelf
+        # libasound2-dev: Cadenza's ALSA output (the embedded engine); CUDA, WASAPI and CoreAudio need no packages
+        run: sudo apt-get update && sudo apt-get install -y libwebkit2gtk-4.1-dev libgtk-3-dev libayatana-appindicator3-dev librsvg2-dev patchelf libasound2-dev
       - uses: taiki-e/install-action@v2
         with:
           tool: tauri-cli@2.12.2

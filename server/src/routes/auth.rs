@@ -30,6 +30,7 @@ pub fn router() -> Router<AppState> {
         .route("/api/auth/password", post(change_password))
         .route("/api/auth/sessions", get(sessions))
         .route("/api/auth/sessions/{sid}", delete(revoke_session))
+        .route("/api/auth/app-token", post(app_token))
         .route("/api/auth/forgot", post(forgot))
         .route("/api/auth/reset", post(reset))
         .route("/api/auth/email-link", post(email_link))
@@ -59,7 +60,7 @@ fn time_dur(secs: i64) -> cookie::time::Duration {
 }
 
 async fn info(State(st): State<AppState>) -> Json<Value> {
-    let mut features = vec!["owner", "totp", "email_login", "logout_all", "avatar", "theme", "remote", "rename", "reveal", "app_tokens"];
+    let mut features = vec!["owner", "totp", "email_login", "logout_all", "avatar", "theme", "remote", "rename", "reveal", "app_tokens", "engine_token"];
     if crate::sources::slskd::enabled(&st) {
         features.push("soulseek"); // the Soulseek page (search, browse, transfers)
     }
@@ -329,6 +330,26 @@ pub fn device_name(ua: &str) -> String {
         else if ua.contains("Edg/") { "Edge" } else if ua.contains("Firefox/") { "Firefox" } else if ua.contains("Chrome/") { "Chrome" }
         else if ua.contains("Safari/") { "Safari" } else if ua.is_empty() { "Unknown device" } else { "Browser" };
     if os.is_empty() { app.to_string() } else { format!("{app} on {os}") }
+}
+
+#[derive(Deserialize)]
+struct AppTokenBody {
+    device_id: String,
+    #[serde(default)]
+    device_name: Option<String>,
+}
+
+/// A signed-in session (cookie or bearer) asks for an app token for a named device – the desktop app uses
+/// it for the Cadenza engine built into it. The token is an ordinary app session (kind 'app', sliding
+/// expiry) listed under Account → sessions; asking again for the same device replaces the previous one.
+async fn app_token(State(st): State<AppState>, User(u): User, c: ClientInfo, Json(b): Json<AppTokenBody>) -> ApiResult<Json<Value>> {
+    let device_id = b.device_id.trim().to_string();
+    let n = device_id.chars().count();
+    if n == 0 || n > 64 {
+        return Err(err(400, "device_id must be 1 to 64 characters"));
+    }
+    let token = auth::create_app_session(&st, u.i("id"), &c.ua, &c.ip, &device_id, b.device_name.as_deref().unwrap_or(""))?;
+    Ok(Json(json!({ "token": token, "device_id": device_id })))
 }
 
 async fn revoke_session(State(st): State<AppState>, User(u): User, Path(sid): Path<String>) -> ApiResult<Json<Value>> {

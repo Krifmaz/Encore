@@ -204,7 +204,12 @@ fn render_shell() {
         settings = icon("settings"), logout = icon("logout"), menu = icon("menu"),
     ));
     if let Some(b) = qs("#logout-btn") {
-        dom::on_forever(&b, "click", |_| dom::spawn(async { let _ = api::post_empty("/auth/logout").await; dom::reload(); }));
+        dom::on_forever(&b, "click", |_| dom::spawn(async {
+            let _ = api::post_empty("/auth/logout").await;
+            // the desktop app's Cadenza signed in with its own token: signing out here signs it out too
+            native_call("engineLogout");
+            dom::reload();
+        }));
     }
     let meter = || { if let Some(el) = qs("#storage-mini") { pages::storage::sidebar_meter(el); } };
     meter();
@@ -318,6 +323,21 @@ pub fn native_call_with(name: &str, arg: Option<&str>) {
     let Ok(f) = js_sys::Reflect::get(&n, &name.into()) else { return };
     let Ok(f) = f.dyn_into::<js_sys::Function>() else { return };
     let _ = match arg { Some(a) => f.call1(&n, &a.into()), None => f.call0(&n) };
+}
+/// `!!window.EncoreNative?.<name>` for a plain value (e.g. `engine: true`), not only functions.
+pub fn native_truthy(name: &str) -> bool {
+    js_sys::Reflect::get(&dom::window(), &"EncoreNative".into()).ok().filter(|v| !v.is_undefined() && !v.is_null())
+        .and_then(|n| js_sys::Reflect::get(&n, &name.into()).ok()).map(|v| v.is_truthy()).unwrap_or(false)
+}
+/// `await window.EncoreNative.<name>(arg)` as JSON – None when the app has no such function or it failed.
+/// A JSON string answer is parsed like the JS does (`typeof s === 'string' ? JSON.parse(s) : s`).
+pub async fn native_call_async(name: &str, arg: Option<&str>) -> Option<Value> {
+    let n = js_sys::Reflect::get(&dom::window(), &"EncoreNative".into()).ok().filter(|v| !v.is_undefined() && !v.is_null())?;
+    let f = js_sys::Reflect::get(&n, &name.into()).ok()?.dyn_into::<js_sys::Function>().ok()?;
+    let r = match arg { Some(a) => f.call1(&n, &a.into()), None => f.call0(&n) }.ok()?;
+    let v = match r.dyn_into::<js_sys::Promise>() { Ok(p) => wasm_bindgen_futures::JsFuture::from(p).await.ok()?, Err(v) => v };
+    if let Some(s) = v.as_string() { return serde_json::from_str(&s).ok(); }
+    serde_wasm_bindgen::from_value::<Value>(v).ok()
 }
 /// `!!window.EncoreNative?.<name>`.
 pub fn native_has(name: &str) -> bool {

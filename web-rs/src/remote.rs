@@ -13,12 +13,16 @@ use serde_json::{json, Value};
 use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 use wasm_bindgen::closure::Closure;
-use wasm_bindgen::JsCast;
+use wasm_bindgen::{JsCast, JsValue};
 
 const KEY: &str = "encore.device";
 const NAME_KEY: &str = "encore.device.name";
 // Linked: this device is locked as a remote for another one until you unlink.
 const CHAIN: &str = "encore.link";
+// The Cadenza engine built into the desktop app: it signs in with its own token and shows up as a device of
+// its own, which this window links to on its own – unless you unlinked it (encore.engine.off = "1").
+const ENGINE_OFF: &str = "encore.engine.off";
+pub const ENGINE_LABEL: &str = "This computer (Cadenza)";
 
 thread_local! {
     static STARTED: Cell<bool> = const { Cell::new(false) };
@@ -35,6 +39,8 @@ thread_local! {
     static ES: RefCell<Option<web_sys::EventSource>> = const { RefCell::new(None) };
     static BEAT_TIMER: RefCell<Option<dom::Timeout>> = const { RefCell::new(None) };
     static ON_CHANGE: RefCell<Option<player::OnChange>> = const { RefCell::new(None) };
+    /// `{ id, name }` of this computer's engine (desktop app only), known before it is online
+    static ENGINE: RefCell<Option<(String, String)>> = const { RefCell::new(None) };
 }
 
 fn me() -> String { ME.with(|m| m.clone()) }
@@ -104,19 +110,52 @@ fn link_sender(id: String) -> Rc<dyn Fn(Value)> {
     })
 }
 
-pub fn link_to(d: Value) {
-    dom::ls_set(CHAIN, &json!({ "id": d.g("id"), "name": d.g("name") }).to_string());
+/// This computer's Cadenza engine as a device `(id, name)` – only in the desktop app, None elsewhere.
+pub fn engine_device() -> Option<(String, String)> { ENGINE.with(|e| e.borrow().clone()) }
+pub fn is_engine(id: &str) -> bool { ENGINE.with(|e| e.borrow().as_ref().is_some_and(|(eid, _)| eid == id)) }
+/// The name a device is shown under: the built-in engine is "This computer (Cadenza)".
+pub fn shown_name(d: &Value) -> String { if is_engine(&d.s("id")) { ENGINE_LABEL.to_string() } else { d.s("name") } }
+/// You unlinked this computer's engine: it is not linked to again on its own.
+pub fn engine_off() -> bool { dom::ls_get(ENGINE_OFF).as_deref() == Some("1") }
+
+pub fn link_to(d: Value) { link_to_opts(d, false); }
+fn link_to_opts(d: Value, silent: bool) {
+    let name = shown_name(&d);
     let id = d.s("id");
-    player::set_link(Some(player::Link { id: id.clone(), name: d.s("name"), state: d.o("state"), online: true, send: link_sender(id) }));
-    toast(&format!("Linked – this device now controls {}", d.s("name")), "ok");
+    if is_engine(&id) { dom::ls_remove(ENGINE_OFF); }
+    dom::ls_set(CHAIN, &json!({ "id": d.g("id"), "name": name }).to_string());
+    player::set_link(Some(player::Link { id: id.clone(), name: name.clone(), state: d.o("state"), online: true, send: link_sender(id) }));
+    if !silent { toast(&format!("Linked – this device now controls {name}"), "ok"); }
     dom::spawn(beat());
 }
 
 pub fn unlink() {
+    if player::linked().is_some_and(|l| is_engine(&l.id)) { dom::ls_set(ENGINE_OFF, "1"); }
     dom::ls_remove(CHAIN);
     player::set_link(None);
     toast("Unlinked – music plays on this device again", "ok");
     dom::spawn(beat());
+}
+
+/// Desktop app: sign the built-in engine in. The app knows the engine's id and name before it runs; the
+/// server hands out a token for them, and the app starts the engine with it. Idempotent – safe on every start.
+async fn engine_sign_in() {
+    if !app::native_truthy("engine") || !app::native_has("engineStatus") || !app::native_has("engineLogin") { return; }
+    // any failure: Settings → Playback → Cadenza engine says what is wrong
+    let Some(st) = app::native_call_async("engineStatus", None).await else { return };
+    if !st.truthy("device_id") { return; }
+    let name = if st.truthy("name") { st.s("name") } else { "Cadenza".to_string() };
+    ENGINE.with(|e| *e.borrow_mut() = Some((st.s("device_id"), name.clone())));
+    // already running with a token and no error: keep it – a new token would restart the engine's link
+    if st.truthy("running") && !st.truthy("error") { return; }
+    let Ok(r) = api::post("/auth/app-token", json!({ "device_id": st.s("device_id"), "device_name": name })).await else { return };
+    let origin = dom::location().origin().unwrap_or_default();
+    let r2 = app::native_call_async("engineLogin", Some(&json!({ "token": r.g("token"), "server": origin }).to_string())).await;
+    // the app answers with the id it signed in under – that is the device to look for
+    if let Some(r2) = r2.filter(|r2| r2.truthy("device_id")) {
+        let name = if r2.truthy("name") { r2.s("name") } else { name };
+        ENGINE.with(|e| *e.borrow_mut() = Some((r2.s("device_id"), name)));
+    }
 }
 
 /// Run a command another device sent us – once, however many ways it arrived.
@@ -141,6 +180,13 @@ fn run_command(c: Value) {
 fn got_devices(list: Vec<Value>) {
     let my = me();
     DEVICES.with(|d| *d.borrow_mut() = list.into_iter().filter(|d| d.s("id") != my).collect());
+    // this computer's engine came online: link to it on its own (quietly), unless you unlinked it
+    if let Some((eid, _)) = engine_device() {
+        if player::linked().is_none() && !engine_off() {
+            let d = DEVICES.with(|d| d.borrow().iter().find(|x| x.s("id") == eid).cloned());
+            if let Some(d) = d { link_to_opts(d, true); }
+        }
+    }
     if let Some(link) = player::linked() {
         let d = DEVICES.with(|d| d.borrow().iter().find(|x| x.s("id") == link.id).cloned());
         MISSED.with(|m| m.set(if d.is_some() { 0 } else { m.get() + 1 }));
@@ -201,20 +247,27 @@ pub fn start() {
         let id = l.s("id");
         player::set_link(Some(player::Link { id: id.clone(), name: l.s("name"), state: json!({}), online: true, send: link_sender(id) }));
     }
+    dom::spawn(engine_sign_in());
     connect();
     ON_CHANGE.with(|o| *o.borrow_mut() = Some(player::on_change(|_| beat_soon())));
     run_loop();
 }
 
-/// `window.encoreRemote = { open, unlink }` – the player bar and the native apps call these.
+/// `window.encoreRemote = { open, unlink, engine }` – the player bar and the native apps call these.
 fn expose_global() {
     let obj = js_sys::Object::new();
     let open_fn = Closure::<dyn Fn()>::new(open);
     let unlink_fn = Closure::<dyn Fn()>::new(unlink);
+    let engine_fn = Closure::<dyn Fn() -> JsValue>::new(|| match engine_device() {
+        Some((id, name)) => serde_wasm_bindgen::to_value(&json!({ "id": id, "name": name })).unwrap_or(JsValue::NULL),
+        None => JsValue::NULL,
+    });
     let _ = js_sys::Reflect::set(&obj, &"open".into(), open_fn.as_ref());
     let _ = js_sys::Reflect::set(&obj, &"unlink".into(), unlink_fn.as_ref());
+    let _ = js_sys::Reflect::set(&obj, &"engine".into(), engine_fn.as_ref());
     open_fn.forget();
     unlink_fn.forget();
+    engine_fn.forget();
     let _ = js_sys::Reflect::set(&dom::window(), &"encoreRemote".into(), &obj);
 }
 
@@ -232,6 +285,7 @@ fn run_loop() {
 /// One device's card in the Devices window (the body of the JS `devices.map`).
 fn device_card(d: &Value, devices: &[Value], l: Option<&player::Link>, me: &str) -> String {
     let s = d.o("state");
+    let name = shown_name(d);
     let is_linked = l.map(|l| l.id == d.s("id")).unwrap_or(false);
     let remote_of_me = s.s("remote_of").as_str() == me;
     let now = if s.truthy("remote_of") {
@@ -254,7 +308,7 @@ fn device_card(d: &Value, devices: &[Value], l: Option<&player::Link>, me: &str)
     };
     let link_btn = if remote_of_me || s.truthy("remote_of") { String::new() }
         else if is_linked { format!(r#"<button class="btn sm primary" data-a="unlink">{}Linked · Unlink</button>"#, icon("link")) }
-        else { format!(r#"<button class="btn sm" data-a="link" title="Lock this device as a remote for {}: everything you play here plays there">{}Link as remote</button>"#, esc(&d.s("name")), icon("link")) };
+        else { format!(r#"<button class="btn sm" data-a="link" title="Lock this device as a remote for {}: everything you play here plays there">{}Link as remote</button>"#, esc(&name), icon("link")) };
     let controls = if s.truthy("remote_of") { String::new() } else {
         let transport = if s.truthy("title") {
             format!(r#"<button class="btn sm ghost icon" data-a="prev" aria-label="Previous">{}</button>
@@ -269,7 +323,7 @@ fn device_card(d: &Value, devices: &[Value], l: Option<&player::Link>, me: &str)
                 if is_linked { "" } else { r#"<button class="btn sm" data-a="here" title="Continue this song on this device">Play here</button>"# })
         } else { String::new() };
         let send_btn = if player::current().is_some() && l.is_none() {
-            format!(r#"<button class="btn sm primary" data-a="send" title="Move what you're playing to {}">Send my music there</button>"#, esc(&d.s("name")))
+            format!(r#"<button class="btn sm primary" data-a="send" title="Move what you're playing to {}">Send my music there</button>"#, esc(&name))
         } else { String::new() };
         format!(r#"<div class="row wrap" style="gap:8px">
           {transport}
@@ -282,7 +336,7 @@ fn device_card(d: &Value, devices: &[Value], l: Option<&player::Link>, me: &str)
         {now}
         {controls}</div>"#,
         if is_linked { "linked" } else { "" }, esc(&d.s("id")),
-        ui::icon_attr("devices", r#"width="16" style="vertical-align:-3px;margin-right:6px""#), esc(&d.s("name")))
+        ui::icon_attr("devices", r#"width="16" style="vertical-align:-3px;margin-right:6px""#), esc(&name))
 }
 
 /// One Roon zone in the Devices window (the JS `zoneCard`).

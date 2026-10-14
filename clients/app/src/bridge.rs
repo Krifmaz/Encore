@@ -23,6 +23,12 @@ pub fn script() -> String {
   if ({mobile}) {{
     n.saveOffline = (json) => fire('save_offline', {{ json: String(json) }});
     n.openOffline = () => fire('open_offline');
+  }} else {{
+    // Cadenza is built into the desktop app (src/engine.rs); the web app signs it in with an app token
+    n.engine = true;
+    n.engineLogin = (json) => invoke('engine_login', {{ json: String(json) }});
+    n.engineLogout = () => fire('engine_logout');
+    n.engineStatus = () => invoke('engine_status');
   }}
   window.EncoreNative = n;
   const alive = () => fire('page_alive', {{ url: location.href, encore: !!document.querySelector('script[src*="/js/app.js"]') }});
@@ -118,6 +124,9 @@ pub fn remove_server<R: Runtime>(app: AppHandle<R>, url: String) {
 
 #[tauri::command]
 pub fn change_server<R: Runtime>(app: AppHandle<R>) {
+    // another server means another account: the engine's token for this one is no longer wanted
+    #[cfg(desktop)]
+    crate::engine::logout(&app);
     server::show_picker(&app, None);
 }
 

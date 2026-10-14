@@ -6,6 +6,10 @@ import * as adminPage from './admin.js';
 import * as autoPage from './autodownload.js';
 import * as diagPage from './diagnostics.js';
 
+// Settings → Playback → Cadenza engine, when there is no engine to show (the same words in web-rs/src/pages/settings.rs)
+const ENGINE_GREYED = `<div class="stack" style="gap:8px;opacity:.45;pointer-events:none" aria-disabled="true"><label class="row" style="gap:8px;align-items:center"><input type="checkbox" disabled> Bit-perfect – send the file to the DAC untouched (no upsampling, dither or volume)</label><label class="stack" style="gap:4px"><span class="small muted">Upsampling filter</span><select class="input" disabled><option>–</option></select></label><label class="stack" style="gap:4px"><span class="small muted">Dither / noise shaping</span><select class="input" disabled><option>–</option></select></label><label class="stack" style="gap:4px"><span class="small muted">Output rate</span><select class="input" disabled><option>–</option></select></label></div><span class="small muted">Cadenza is Encore's own playback engine: long upsampling filters, DSD, dither and noise shaping, exclusive output straight into the DAC. It is built into the Encore desktop app – install the app on the computer connected to your DAC and this section comes alive on its own. Cadenza can also run on its own on a small box next to the DAC; link to it under Your devices. To have the server do the upsampling for a browser or phone instead, see Server processing above.</span>`;
+const ENGINE_OFF_COPY = '<span class="small muted">Cadenza is off for this computer – music plays through the browser audio of this window. Link to This computer (Cadenza) under Your devices to turn it back on.</span>';
+
 const S = (key, label, type = 'text', extra = {}) => ({ key, label, type, ...extra });
 
 const SECTIONS = [
@@ -526,11 +530,16 @@ async function renderPlayback(el) {
   const playback = await import('../playback.js');
   const player = await import('../player.js');
   const { session } = await import('../app.js');
+  const remote = await import('../remote.js');
   const serverPrefs = (session.info?.features || []).includes('theme');
   let p = playback.current();
   // server-side Cadenza: on for this server, and allowed for this account? (fetched once per visit to the tab)
   let dsp;
   try { dsp = await api.get('/playback/dsp'); } catch { dsp = { enabled: false }; }
+  // the desktop app carries Cadenza: its { running, device_id, name, error } – asked again every couple of seconds
+  const native = !!window.EncoreNative?.engine;
+  const engineStatus = async () => { try { let s = await window.EncoreNative.engineStatus(); if (typeof s === 'string') s = JSON.parse(s); return s || null; } catch { return null; } };
+  let engineSt = native ? await engineStatus() : null;
   const khz = (hz) => String(Math.round(hz / 100) / 10);
   const DSP_RATES = [88200, 96000, 176400, 192000, 352800, 384000, 705600, 768000];
   const opt = (v, l, cur) => `<option value="${esc(v)}" ${String(v) === String(cur) ? 'selected' : ''}>${esc(l)}</option>`;
@@ -618,9 +627,22 @@ async function renderPlayback(el) {
     cf.onchange = () => set({ crossfade: +cf.value });
     el.querySelector('#pb-crossfade-gapless').onchange = (e) => set({ crossfade_album_gapless: e.target.checked });
   };
+  // what the Cadenza engine section is painted from – a repaint only when it changes
+  const engineKey = () => JSON.stringify([player.linked()?.id, player.linked()?.name, player.linked()?.state?.engine ?? null, engineSt]);
+  let painted = '';
+  const tick = setInterval(async () => {
+    if (!el.isConnected) return clearInterval(tick);
+    if (native) engineSt = await engineStatus();
+    if (el.isConnected && engineKey() !== painted) paint();
+  }, 2000);
   const paint = () => {
     const link = player.linked();
     const eng = link?.state?.engine;
+    // the engine inside this very app, or a Cadenza somewhere else?
+    const local = !!eng?.embedded && remote.isEngine(link.id);
+    painted = engineKey();
+    const engTitle = eng ? (local ? ' · this computer' : ` · ${esc(link.name)}`) : native ? ' · this computer' : '';
+    const engBlock = eng ? engineHtml(eng) : native ? (remote.engineOff() ? ENGINE_OFF_COPY : engineStartingHtml()) : ENGINE_GREYED;
     el.innerHTML = `<div class="card stack">
       <h2>Playback</h2>
       <p class="small muted" style="margin:0">${serverPrefs ? 'Saved to your account, so it follows you to every device.' : 'Saved on this device.'}</p>
@@ -637,8 +659,8 @@ async function renderPlayback(el) {
         <span class="small muted">Encore streams the original file untouched – the quality badge on the player opens the <b>Signal path</b>, which shows what the file is, what was sent and what this device does with it. A browser hands the sound to the operating system, which mixes it with other sounds and may resample it; bit-perfect output needs an exclusive-mode engine.</span></div>
       <div class="stack" style="gap:6px"><h3>Server processing (Cadenza)</h3>
         ${dspHtml()}</div>
-      <div class="stack" style="gap:6px"><h3>Cadenza engine${eng ? ` · ${esc(eng.name || link.name)}` : ''}</h3>
-        ${eng ? engineHtml(eng) : `<div class="stack" style="gap:8px;opacity:.45;pointer-events:none" aria-disabled="true"><label class="row" style="gap:8px;align-items:center"><input type="checkbox" disabled> Bit-perfect – send the file to the DAC untouched (no upsampling, dither or volume)</label><label class="stack" style="gap:4px"><span class="small muted">Upsampling filter</span><select class="input" disabled><option>–</option></select></label><label class="stack" style="gap:4px"><span class="small muted">Dither / noise shaping</span><select class="input" disabled><option>–</option></select></label><label class="stack" style="gap:4px"><span class="small muted">Output rate</span><select class="input" disabled><option>–</option></select></label></div><span class="small muted">For a Cadenza device on your own hardware – a computer or a small box next to your DAC – which plays straight into the DAC. Link to it under <b>Your devices</b> to use these switches. To upsample streams on this server instead, see Server processing above.</span>`}</div>
+      <div class="stack" style="gap:6px"><h3>Cadenza engine${engTitle}</h3>
+        ${engBlock}</div>
     </div>`;
     el.querySelectorAll('.seg[data-key] button').forEach(b => b.onclick = () => set({ [b.closest('.seg').dataset.key]: b.dataset.v }));
     el.querySelector('#pb-preload').onchange = (e) => set({ preload: e.target.checked });
@@ -651,20 +673,58 @@ async function renderPlayback(el) {
       el.querySelector('#pb-dsp-dither').onchange = (e) => set({ dsp_dither: e.target.value });
       el.querySelector('#pb-dsp-rate').onchange = (e) => set({ dsp_rate: /^\d+$/.test(e.target.value) ? Number(e.target.value) : e.target.value });
     }
-    el.querySelectorAll('[data-eng]').forEach(c => c.onchange = (e) => {
-      const v = c.type === 'checkbox' ? e.target.checked : e.target.value;
-      link.send({ action: 'engine', set: { [c.dataset.eng]: v } });
-      toast('Sent to ' + link.name, 'ok');
+    // every engine switch goes to the linked device as { action: 'engine', set: { key: value } }
+    const sendEng = (set) => { link.send({ action: 'engine', set }); if (!local) toast('Sent to ' + link.name, 'ok'); };
+    const num = (v) => /^-?\d+(\.\d+)?$/.test(v) ? Number(v) : v;
+    el.querySelectorAll('[data-eng]').forEach(c => {
+      if (c.type === 'range') c.oninput = () => { const v = el.querySelector('#' + c.dataset.v); if (v) v.textContent = dbText(+c.value); };
+      c.onchange = (e) => {
+        const k = c.dataset.eng;
+        const v = c.type === 'checkbox' ? e.target.checked : c.type === 'range' ? Number(c.value) : ['rate', 'bits'].includes(k) ? num(c.value) : c.value;
+        sendEng({ [k]: v });
+      };
     });
+    el.querySelectorAll('[data-eng-seg] button').forEach(b => b.onclick = () => sendEng({ [b.closest('.seg').dataset.engSeg]: b.dataset.v }));
+    const ha = el.querySelector('#eng-headroom-auto');
+    if (ha) ha.onchange = (e) => sendEng({ headroom_db: e.target.checked ? null : -3 });
   };
-  /** A linked engine device describes its switches in its state: { name, bitperfect, filter, filters[], dither, dithers[], rate, rates[], output } */
-  const engineHtml = (e) => `<div class="stack" style="gap:8px">
+  const dbText = (v) => `${(Number(v) || 0).toFixed(1)} dB`;
+  /** A linked Cadenza describes every switch in its state (see Cadenza's encore/state.rs): outputs, exclusive, bit-perfect, PCM and DSD groups, headroom, soft clipper, GPU, matrix. */
+  const engineHtml = (e) => {
+    const sel = (key, label, list, cur, extra = '') => Array.isArray(list) ? `<label class="stack" style="gap:4px"><span class="small muted">${label}</span><select class="input" data-eng="${key}" ${extra}>${list.map(([v, l]) => `<option value="${esc(v)}" ${String(v) === String(cur) ? 'selected' : ''}>${esc(l)}</option>`).join('')}</select></label>` : '';
+    const segE = (key, list, cur) => `<div class="seg" data-eng-seg="${key}">${list.map(([v, l]) => `<button type="button" data-v="${esc(v)}" class="${String(v) === String(cur) ? 'on' : ''}">${esc(l)}</button>`).join('')}</div>`;
+    const range = (key, label, id, v, min) => `<label class="stack" style="gap:4px"><span class="small muted">${label}: <span id="${id}">${dbText(v)}</span></span><input type="range" min="${min}" max="0" step="0.5" value="${Number(v) || 0}" data-eng="${key}" data-v="${id}" style="accent-color:var(--accent)"></label>`;
+    const bp = e.bitperfect ? 'disabled' : '';
+    const dsd = e.dsd || {};
+    const manual = e.headroom_db !== null && e.headroom_db !== undefined;
+    const gpuLine = e.gpu_in_use ? `In use: ${esc(e.gpu_name || 'NVIDIA GPU')}` : e.gpu_available ? `${esc(e.gpu_name || 'NVIDIA GPU')} found, not in use` : 'No NVIDIA GPU found';
+    return `<div class="stack" style="gap:8px">
+      ${sel('output', 'Output device', e.outputs, e.output_id)}
+      ${'exclusive' in e ? `<label class="row" style="gap:8px;align-items:center"><input type="checkbox" data-eng="exclusive" ${(e.exclusive_wanted ?? e.exclusive) ? 'checked' : ''}> Exclusive – Cadenza alone uses the DAC, nothing else is mixed in</label>` : ''}
       <label class="row" style="gap:8px;align-items:center"><input type="checkbox" data-eng="bitperfect" ${e.bitperfect ? 'checked' : ''}> Bit-perfect – send the file to the DAC untouched (no upsampling, dither or volume)</label>
-      ${Array.isArray(e.filters) ? `<label class="stack" style="gap:4px"><span class="small muted">Upsampling filter</span><select class="input" data-eng="filter" ${e.bitperfect ? 'disabled' : ''}>${e.filters.map(([v, l]) => `<option value="${esc(v)}" ${v === e.filter ? 'selected' : ''}>${esc(l)}</option>`).join('')}</select></label>` : ''}
-      ${Array.isArray(e.dithers) ? `<label class="stack" style="gap:4px"><span class="small muted">Dither / noise shaping</span><select class="input" data-eng="dither" ${e.bitperfect ? 'disabled' : ''}>${e.dithers.map(([v, l]) => `<option value="${esc(v)}" ${v === e.dither ? 'selected' : ''}>${esc(l)}</option>`).join('')}</select></label>` : ''}
-      ${Array.isArray(e.rates) ? `<label class="stack" style="gap:4px"><span class="small muted">Output rate</span><select class="input" data-eng="rate" ${e.bitperfect ? 'disabled' : ''}>${e.rates.map(([v, l]) => `<option value="${esc(v)}" ${String(v) === String(e.rate) ? 'selected' : ''}>${esc(l)}</option>`).join('')}</select></label>` : ''}
-      ${e.output ? `<span class="small muted">Output: ${esc(e.output)}</span>` : ''}
+      ${Array.isArray(e.output_modes) ? `<div class="stack" style="gap:4px"><span class="small muted">Output mode</span>${segE('output_mode', e.output_modes, e.output_mode)}</div>` : ''}
+      ${e.output_mode === 'dsd' ? `${sel('dsd_rate', 'DSD rate', dsd.rates, dsd.rate, bp)}
+      ${sel('dsd_modulator', 'DSD modulator', dsd.modulators, dsd.modulator, bp)}
+      ${sel('dsd_packing', 'DSD packing', dsd.packings, dsd.packing, bp)}
+      ${Array.isArray(dsd.oversamplings) ? `<div class="stack" style="gap:4px"><span class="small muted">DSD oversampling</span>${segE('dsd_oversampling', dsd.oversamplings, dsd.oversampling)}</div>` : ''}
+      ${'gain_db' in dsd ? range('dsd_gain_db', 'DSD gain', 'eng-dsd-gain-v', dsd.gain_db, -6) : ''}`
+      : `${sel('filter', 'Upsampling filter', e.filters, e.filter, bp)}
+      ${sel('dither', 'Dither / noise shaping', e.dithers, e.dither, bp)}
+      ${sel('rate', 'Output rate', e.rates, e.rate, bp)}
+      ${sel('bits', 'Bit depth', Array.isArray(e.bits_list) ? e.bits_list.map(b => [b, `${b}-bit`]) : null, e.bits, bp)}`}
+      ${'headroom_db' in e ? `<label class="row" style="gap:8px;align-items:center"><input type="checkbox" id="eng-headroom-auto" ${manual ? '' : 'checked'}> Automatic headroom – room for the filters, so loud peaks do not clip</label>
+      ${manual ? range('headroom_db', 'Headroom', 'eng-headroom-v', e.headroom_db, -12) : ''}` : ''}
+      ${'soft_clip' in e ? `<label class="row" style="gap:8px;align-items:center"><input type="checkbox" data-eng="soft_clip" ${e.soft_clip ? 'checked' : ''}> Soft clipper – round off peaks that would clip instead of cutting them</label>` : ''}
+      ${'gpu' in e ? `<div class="stack" style="gap:4px"><span class="small muted">GPU</span>${segE('gpu', [['auto', 'Auto'], ['on', 'On'], ['off', 'Off']], e.gpu)}<span class="small muted">${gpuLine}</span></div>` : ''}
+      ${sel('matrix', 'Matrix (channel mixing)', e.matrix_presets, e.matrix ?? 'off')}
+      <span class="small muted">Output: ${esc(e.output || '–')} · ${e.exclusive ? 'Exclusive' : 'Shared'}</span>
+      ${e.error ? `<span class="small" style="color:var(--err)">${esc(e.error)}</span>` : ''}
     </div>`;
+  };
+  /** Desktop app: the engine is signing in but its device has not shown up yet (or says why not). */
+  const engineStartingHtml = () => engineSt?.error
+    ? `<span class="small" style="color:var(--err)">${esc(engineSt.error)}</span><span class="small muted">Encore keeps trying.</span>`
+    : '<span class="small muted">Starting the engine…</span>';
   const set = (patch) => { playback.save({ ...p, ...patch }, { serverPrefs }).then(c => { p = c; paint(); }); p = { ...p, ...patch }; paint(); };
   paint();
 }

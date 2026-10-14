@@ -8,6 +8,8 @@ mod server;
 
 #[cfg(desktop)]
 mod desktop;
+#[cfg(desktop)]
+mod engine;
 #[cfg(mobile)]
 mod mobile;
 
@@ -36,6 +38,9 @@ pub struct State {
     pub last: Mutex<bridge::NowPlaying>,
     /// (cover URL being shown or fetched, its downloaded file – empty while the download runs)
     pub art: Mutex<(String, std::path::PathBuf)>,
+    /// the embedded Cadenza engine, started on the first engineLogin (see engine.rs)
+    #[cfg(desktop)]
+    pub engine: engine::Slot,
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -55,18 +60,30 @@ pub fn run() {
     {
         builder = builder.plugin(tauri_plugin_encore_media::init());
     }
+    let builder = builder.plugin(tauri_plugin_opener::init());
+    #[cfg(desktop)]
+    let builder = builder.invoke_handler(tauri::generate_handler![
+        bridge::now_playing, bridge::page_alive, bridge::servers, bridge::connect, bridge::remove_server, bridge::change_server,
+        bridge::retry_server, bridge::open_offline, bridge::offline_list, bridge::offline_ids, bridge::remove_offline, bridge::save_offline,
+        engine::engine_login, engine::engine_logout, engine::engine_status,
+    ]);
+    #[cfg(mobile)]
+    let builder = builder.invoke_handler(tauri::generate_handler![
+        bridge::now_playing, bridge::page_alive, bridge::servers, bridge::connect, bridge::remove_server, bridge::change_server,
+        bridge::retry_server, bridge::open_offline, bridge::offline_list, bridge::offline_ids, bridge::remove_offline, bridge::save_offline,
+    ]);
     let builder = builder
-        .plugin(tauri_plugin_opener::init())
-        .invoke_handler(tauri::generate_handler![
-            bridge::now_playing, bridge::page_alive, bridge::servers, bridge::connect, bridge::remove_server, bridge::change_server,
-            bridge::retry_server, bridge::open_offline, bridge::offline_list, bridge::offline_ids, bridge::remove_offline, bridge::save_offline,
-        ])
         .setup(move |app| {
             let settings = config::load(app.handle());
             let start = if settings.server.is_empty() { None } else { tauri::Url::parse(&format!("{}/", settings.server)).ok() };
             #[cfg(mobile)]
             mobile::remember_server(app.handle(), &settings.server);
-            app.manage(State { settings: Mutex::new(settings), http, armed: AtomicBool::new(false), generation: AtomicU64::new(0), last: Mutex::new(Default::default()), art: Mutex::new(Default::default()) });
+            app.manage(State {
+                settings: Mutex::new(settings), http, armed: AtomicBool::new(false), generation: AtomicU64::new(0),
+                last: Mutex::new(Default::default()), art: Mutex::new(Default::default()),
+                #[cfg(desktop)]
+                engine: engine::slot(),
+            });
 
             let url = match &start { Some(u) => WebviewUrl::External(u.clone()), None => WebviewUrl::App("index.html".into()) };
             let nav = app.handle().clone();
@@ -126,6 +143,11 @@ pub fn run() {
 
     let app = builder.build(tauri::generate_context!()).expect("error while building Encore");
     app.run(|app, event| {
+        // quitting: stop the Cadenza engine so the DAC is released
+        #[cfg(desktop)]
+        if let tauri::RunEvent::Exit = event {
+            engine::shutdown(app);
+        }
         // macOS: closing the window keeps the app (and the music) running; clicking the dock icon brings it back
         #[cfg(target_os = "macos")]
         match event {
