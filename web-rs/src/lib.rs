@@ -12,6 +12,7 @@ pub mod pages;
 pub mod playback;
 pub mod player;
 pub mod remote;
+pub mod scrubber;
 pub mod ui;
 
 use wasm_bindgen::prelude::*;

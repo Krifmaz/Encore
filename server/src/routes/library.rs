@@ -28,6 +28,7 @@ pub fn router() -> Router<AppState> {
         .route("/api/library/artists", get(artists).delete(delete_artist))
         .route("/api/library/tracks", get(tracks))
         .route("/api/library/artist-tracks", get(artist_tracks))
+        .route("/api/library/index", get(library_index::index))
         .route("/api/library/recent", get(recent))
         .route("/api/library/shuffle", get(shuffle_get).post(shuffle_post))
         .route("/api/library/plays", post(plays))
@@ -39,6 +40,7 @@ pub fn router() -> Router<AppState> {
         .route("/api/library/tracks/{id}", get(track))
         .route("/api/library/plays/recent", get(recent_plays))
         .route("/api/library/tracks/{id}/lyrics", get(lyrics))
+        .route("/api/library/tracks/{id}/edges", get(track_edges::edges))
         .route("/api/library/tracks/{id}/share", post(share))
         .route("/api/library/albums/{id}/share", post(share_album))
         .route("/api/library/artists/share", post(share_artist))
@@ -55,6 +57,14 @@ pub fn router() -> Router<AppState> {
         .route("/api/share/{token}/video.mp4", get(shared_video))
         .route("/s/{token}", get(share_page))
 }
+
+/// GET /api/library/index: the side scrubber's sections.
+#[path = "library_index.rs"]
+mod library_index;
+
+/// GET /api/library/tracks/{id}/edges: where a song's sound starts and stops (Smart overlap transitions).
+#[path = "track_edges.rs"]
+mod track_edges;
 
 fn order(table: &[(&str, &str, &str)], key: &str, dir: &str, default: &str) -> String {
     let (_, expr, dflt) = table.iter().find(|(k, _, _)| *k == key).or_else(|| table.iter().find(|(k, _, _)| *k == default)).unwrap();
@@ -256,11 +266,14 @@ fn parse_ids(raw: &str) -> ApiResult<Vec<i64>> {
     Ok(out)
 }
 
+/// Most artists one `/artists` call returns (the web asks without a limit: this is the whole list it shows).
+pub(super) const ARTISTS_MAX: usize = 2000;
+
 /// Artists (merged spellings, collaborations split into their artists, see `artists`). With `q`: ranked
 /// by name / alias, then artists whose albums or songs match; each has "match".
 async fn artists(State(st): State<AppState>, User(_): User, Query(a): Query<SimpleQ>) -> ApiResult<Json<Value>> {
     let idx = crate::artists::index(&st.db);
-    let limit = a.limit.unwrap_or(2000).clamp(1, 2000) as usize;
+    let limit = a.limit.unwrap_or(ARTISTS_MAX as i64).clamp(1, ARTISTS_MAX as i64) as usize;
     if a.q.trim().is_empty() {
         return Ok(Json(json!(idx.list(&a.sort, &a.dir).into_iter().skip(a.offset.max(0) as usize).take(limit).collect::<Vec<_>>())));
     }
@@ -665,21 +678,41 @@ async fn album(State(st): State<AppState>, User(u): User, Path(id): Path<String>
 #[serde(default)]
 struct CoverQ {
     s: u32,
+    /// the cover's version (`cover_v` from the JSON): the answer may then be cached for good
+    v: String,
 }
 
-pub async fn cover_response(st: &AppState, album_id: &str, size: u32, req: Request) -> ApiResult<Response> {
+/// A cover (or a thumbnail of it, WebP when the client takes it). With the current `v` the answer is
+/// immutable; without it, clients keep it a day and revalidate with ETag / Last-Modified.
+pub async fn cover_response(st: &AppState, album_id: &str, size: u32, v: &str, req: Request) -> ApiResult<Response> {
+    let size = crate::covers::snap(size);
+    let webp = size > 0 && req.headers().get(header::ACCEPT).and_then(|a| a.to_str().ok()).is_some_and(|a| a.contains("image/webp"));
     let (st2, aid) = (st.clone(), album_id.to_string());
-    let path = tokio::task::spawn_blocking(move || {
-        let p = st2.library.find_cover(&st2.db, &aid)?;
-        Some(if size > 0 { lib::thumbnail(&st2.db, &p, &aid, size) } else { p })
+    let (path, cur) = tokio::task::spawn_blocking(move || {
+        let (p, cv) = st2.library.covers.get(&st2.db, &aid)?;
+        Some((if size > 0 { crate::covers::thumbnail(&st2.db, &p, &aid, cv, size, webp) } else { p }, cv))
     }).await.ok().flatten().ok_or_else(|| err(404, "No cover"))?;
-    let mut r = serve_file(&path.to_string_lossy(), req, None, None).await?;
-    r.headers_mut().insert(header::CACHE_CONTROL, HeaderValue::from_static("private, no-cache"));
+    let ext = path.extension().map(|e| e.to_string_lossy().to_lowercase()).unwrap_or_default();
+    let etag = format!("\"{cur:x}-{size}-{ext}\"");
+    let cache = if !v.is_empty() && v == cur.to_string() { "private, max-age=31536000, immutable" } else { "private, max-age=86400, stale-while-revalidate=604800" };
+    let fresh = req.headers().get(header::IF_NONE_MATCH).and_then(|h| h.to_str().ok())
+        .is_some_and(|h| h.split(',').any(|t| { let t = t.trim(); t == etag || t == "*" || t.strip_prefix("W/") == Some(etag.as_str()) }));
+    let mut r = if fresh {
+        axum::http::StatusCode::NOT_MODIFIED.into_response()
+    } else {
+        serve_file(&path.to_string_lossy(), req, None, None).await?
+    };
+    let h = r.headers_mut();
+    h.insert(header::CACHE_CONTROL, HeaderValue::from_static(cache));
+    h.insert(header::ETAG, HeaderValue::from_str(&etag).unwrap_or(HeaderValue::from_static("\"0\"")));
+    if size > 0 {
+        h.insert(header::VARY, HeaderValue::from_static("Accept"));
+    }
     Ok(r)
 }
 
 async fn cover(State(st): State<AppState>, User(_): User, Path(id): Path<String>, Query(q): Query<CoverQ>, req: Request) -> ApiResult<Response> {
-    cover_response(&st, &id, q.s, req).await
+    cover_response(&st, &id, q.s, &q.v, req).await
 }
 
 async fn album_zip(State(st): State<AppState>, User(_): User, Path(id): Path<String>, req: Request) -> ApiResult<Response> {
@@ -1030,7 +1063,7 @@ async fn shared_stream(State(st): State<AppState>, Path(token): Path<String>, Qu
 async fn shared_cover(State(st): State<AppState>, Path(token): Path<String>, Query(q): Query<CoverQ>, req: Request) -> ApiResult<Response> {
     let s = share_row(&st, &token)?;
     let tracks = shared_tracks(&st, &s)?;
-    cover_response(&st, &shared_cover_album(&st, &s, &tracks), q.s, req).await
+    cover_response(&st, &shared_cover_album(&st, &s, &tracks), q.s, &q.v, req).await
 }
 
 /// Largest preview video: chat apps (Discord) embed files up to 8 MB.

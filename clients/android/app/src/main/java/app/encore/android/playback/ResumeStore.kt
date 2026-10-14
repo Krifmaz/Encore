@@ -38,6 +38,32 @@ class ResumeStore(context: Context) {
         e.apply()
     }
 
+    /**
+     * Crash recovery: true while this phone plays, false after a pause or a clean stop. Still true at the next
+     * start means the process died while playing (a crash, or the system killed it).
+     */
+    fun markPlaying(playing: Boolean) {
+        val e = prefs.edit().putBoolean(KEY_PLAYING, playing)
+        if (playing) e.putLong(KEY_SAVED_AT, System.currentTimeMillis())
+        e.apply()
+    }
+
+    /**
+     * When the process died while playing: how long ago it last played (ms), else null. Clears the flag, so a
+     * second start doesn't see it again.
+     */
+    fun takeInterrupted(): Long? {
+        if (!prefs.getBoolean(KEY_PLAYING, false)) return null
+        val at = prefs.getLong(KEY_SAVED_AT, 0L)
+        prefs.edit().putBoolean(KEY_PLAYING, false).apply()
+        return if (at > 0L) (System.currentTimeMillis() - at).coerceAtLeast(0L) else Long.MAX_VALUE
+    }
+
+    /** When playback was last resumed by itself after a crash (epoch ms), so a song that crashes the app doesn't loop. */
+    var recoveredAt: Long
+        get() = prefs.getLong(KEY_RECOVERED_AT, 0L)
+        set(v) { prefs.edit().putLong(KEY_RECOVERED_AT, v).apply() }
+
     /** The `updated_at` of another device's spot you closed the "Continue …" bar for ("" = none). */
     var dismissedSpot: String
         get() = prefs.getString(KEY_DISMISSED, null) ?: ""
@@ -78,5 +104,7 @@ class ResumeStore(context: Context) {
         const val KEY_POSITION = "position"
         const val KEY_SAVED_AT = "saved_at"
         const val KEY_DISMISSED = "spot_dismissed"
+        const val KEY_PLAYING = "playing"
+        const val KEY_RECOVERED_AT = "recovered_at"
     }
 }

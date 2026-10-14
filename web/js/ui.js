@@ -130,13 +130,25 @@ export function initials(s) {
   return (s || '?').replace(/^the\s+/i, '').trim().slice(0, 1).toUpperCase() || '?';
 }
 
+// A library album's cover URL; `v` (the album/song's cover_v) makes it cacheable for good.
+export function coverUrl(albumId, v, size) {
+  const q = [size ? `s=${size}` : '', v ? `v=${v}` : ''].filter(Boolean).join('&');
+  return `/api/library/albums/${albumId}/cover${q ? '?' + q : ''}`;
+}
+
 // Image with graceful fallback to a placeholder letter.
-export function art(src, label, cls = '') {
+export function art(src, label, cls = '', size = 0) {
   const ph = `<div class="ph">${esc(initials(label))}</div>`;
   if (!src) return ph;
   // library covers: a small cached version for lists/tiles, a large one for big views
-  if (/\/api\/(library\/albums\/[^/]+|share\/[^/]+)\/cover$/.test(src)) src += `?s=${cls === 'big' ? 1000 : 400}`;
-  return `${ph}<img class="${cls}" src="${esc(src)}" alt="" loading="lazy" onerror="this.remove()">`;
+  let dim = '';
+  const m = /\/api\/(library\/albums\/[^/]+|share\/[^/]+)\/cover(\?v=\d+)?$/.exec(src);
+  if (m) {
+    const s = size || (cls === 'big' ? 1000 : 400);
+    src = src.slice(0, src.length - (m[2] || '').length) + `?s=${s}` + (m[2] ? '&' + m[2].slice(1) : '');
+    dim = ` width="${s}" height="${s}"`;
+  }
+  return `${ph}<img class="${cls}" src="${esc(src)}" alt=""${dim} loading="lazy" decoding="async" onerror="this.remove()">`;
 }
 
 export const STATUS = {

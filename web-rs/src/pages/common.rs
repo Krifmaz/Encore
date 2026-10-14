@@ -66,7 +66,7 @@ pub fn library_tile(a: &Value) -> String {
     <div class="s ellipsis">{artist}{year}</div>
   </div>"#,
         id = esc(&id),
-        art = ui::art(&format!("/api/library/albums/{}/cover", a.s("id")), &a.s("album"), ""),
+        art = ui::art(&format!("/api/library/albums/{}/cover{}", a.s("id"), ui::cover_q(a)), &a.s("album"), ""),
         untagged = if a.truthy("untagged") { r#"<div class="corner"><span class="badge warn" title="Some tracks lack MusicBrainz tags">Untagged</span></div>"# } else { "" },
         play = icon("play"),
         album = esck(a, "album"),

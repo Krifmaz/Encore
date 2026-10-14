@@ -6,14 +6,18 @@ import androidx.media3.common.MediaItem
 import androidx.media3.common.MediaMetadata
 import androidx.media3.session.MediaConstants
 import app.encore.android.data.api.Album
+import app.encore.android.data.api.Artist
 import app.encore.android.data.api.EncoreApi
 import app.encore.android.data.api.Track
 import app.encore.android.data.api.arr
 import app.encore.android.data.api.int
 import app.encore.android.data.api.obj
+import app.encore.android.data.api.objects
 import app.encore.android.data.api.objectsOf
 import app.encore.android.data.api.str
+import app.encore.android.ui.components.libraryIndex
 import kotlinx.serialization.json.JsonPrimitive
+import java.text.Normalizer
 import java.util.concurrent.ConcurrentHashMap
 
 /**
@@ -21,7 +25,12 @@ import java.util.concurrent.ConcurrentHashMap
  * Tauri app's CarService.Tree. Calls are blocking: the service runs them on its executor.
  *
  * Root (at most 4 tabs, PLAN §10): Home (recently added, recently played, made for you, shuffle everything),
- * Playlists (liked songs first), Library (albums, artists). Every node id CarService used still resolves.
+ * Playlists (liked songs first), Library (albums, artists, songs). Every node id CarService used still resolves.
+ *
+ * Android Auto stops scrolling after a few screens (the "speed bump", which an app can't turn off), so the long
+ * lists are split into A–Z letter folders (only letters that have items, from GET /api/library/index, else
+ * grouped here): a letter is one tap and a short list. Big song letters split once more by their first two
+ * letters. Search results come grouped as Songs, Albums, Artists.
  */
 class BrowseTree(private val api: EncoreApi) {
     /** parent id → what we listed under it (playing a listed song plays its siblings). */
@@ -43,8 +52,9 @@ class BrowseTree(private val api: EncoreApi) {
     )
 
     private fun library(): List<MediaItem> = listOf(
-        folder("albums", "Albums", null, MediaMetadata.MEDIA_TYPE_FOLDER_ALBUMS, grid = true),
+        folder("albums", "Albums", null, MediaMetadata.MEDIA_TYPE_FOLDER_ALBUMS, grid = false),
         folder("artists", "Artists", null, MediaMetadata.MEDIA_TYPE_FOLDER_ARTISTS, grid = false),
+        folder("songs", "Songs", null, MediaMetadata.MEDIA_TYPE_FOLDER_MIXED, grid = false),
     )
 
     /** The children of a node, fetched from the server. */
@@ -54,12 +64,25 @@ class BrowseTree(private val api: EncoreApi) {
             parent == "home" -> home()
             parent == "library" -> library()
             parent == "recent" -> albums(api.recentAlbums(60))
-            parent == "albums" -> albums(api.albums(sort = "artist", limit = 500))
-            parent == "artists" -> api.artists().map { a ->
-                folder("artist:${a.name}", a.name, plural(a.albums, "album"), MediaMetadata.MEDIA_TYPE_ARTIST, grid = true,
-                    art = a.coverAlbum.takeIf { it.isNotEmpty() }?.let { MediaItems.coverUri(it) })
+            parent == "albums" -> albumShelf.letters().map { (label, count) ->
+                folder("$ALBUM_LETTER$label", label, count?.let { plural(it, "album") }, MediaMetadata.MEDIA_TYPE_FOLDER_ALBUMS, grid = true)
             }
-            parent.startsWith("artist:") -> albums(api.albums(artist = parent.removePrefix("artist:"), limit = 200))
+            parent.startsWith(ALBUM_LETTER) -> albums(albumShelf.items(parent.removePrefix(ALBUM_LETTER)))
+            parent == "artists" -> artistShelf.letters().map { (label, count) ->
+                folder("$ARTIST_LETTER$label", label, count?.let { plural(it, "artist") }, MediaMetadata.MEDIA_TYPE_FOLDER_ARTISTS, grid = false)
+            }
+            parent.startsWith(ARTIST_LETTER) -> artistShelf.items(parent.removePrefix(ARTIST_LETTER)).map { artist(it, plural(it.albums, "album")) }
+            parent.startsWith("artist:") -> {
+                val name = parent.removePrefix("artist:")
+                listOf(action("$ARTIST_SHUFFLE$name", "Shuffle $name", null)) + albums(api.albums(artist = name, limit = 200))
+            }
+            parent == "songs" -> listOf(action(SONGS_SHUFFLE, "Shuffle all songs", "A random walk through every song")) +
+                songShelf.letters().map { (label, count) ->
+                    folder("$SONG_LETTER$label", label, count?.let { plural(it, "song") }, MediaMetadata.MEDIA_TYPE_FOLDER_MIXED, grid = false)
+                }
+            parent.startsWith(SONG_LETTER) -> songLetter(parent)
+            parent == SONGS_SHUFFLE -> api.shuffle(100, emptyList()).map { track(it, parent) }
+            parent.startsWith(ARTIST_SHUFFLE) -> api.artistTracks(parent.removePrefix(ARTIST_SHUFFLE)).shuffled().take(500).map { track(it, parent) }
             parent.startsWith("album:") -> api.album(parent.removePrefix("album:")).tracks.map { track(it, parent) }
             parent == "playlists" -> {
                 val all = api.playlists()
@@ -115,20 +138,171 @@ class BrowseTree(private val api: EncoreApi) {
         folder("album:${a.id}", a.title, sub, MediaMetadata.MEDIA_TYPE_ALBUM, grid = true, art = MediaItems.coverUri(a.id))
     }
 
+    private fun artist(a: Artist, subtitle: String): MediaItem =
+        folder("artist:${a.name}", a.name, subtitle, MediaMetadata.MEDIA_TYPE_ARTIST, grid = true,
+            art = a.coverAlbum.takeIf { it.isNotEmpty() }?.let { MediaItems.coverUri(it) })
+
     fun track(t: Track, parent: String?): MediaItem = MediaItems.track(api, t, parent)
 
-    /** Library search for voice commands: songs, then albums, then artists whose names match. */
+    /**
+     * Library search (the car's search button and voice): the server's ranked results, grouped as Songs (30),
+     * Albums, Artists. A result song plays with the other result songs as its queue.
+     */
     fun search(q: String): List<MediaItem> {
         val key = "search:$q"
+        val songs = api.tracks(q = q, limit = 30).map { track(it, key) }
+        children[key] = songs
         val out = ArrayList<MediaItem>()
-        out += api.tracks(q = q, limit = 20).map { track(it, key) }
-        out += albums(api.albums(q = q, limit = 10))
-        out += api.artists(q).take(5).map { a ->
-            folder("artist:${a.name}", a.name, "Artist", MediaMetadata.MEDIA_TYPE_ARTIST, grid = true,
-                art = a.coverAlbum.takeIf { it.isNotEmpty() }?.let { MediaItems.coverUri(it) })
-        }
-        children[key] = out.filter { it.mediaId.startsWith("track:") }
+        out += songs.map { grouped(it, "Songs") }
+        out += albums(api.albums(q = q, limit = 12)).map { grouped(it, "Albums") }
+        out += api.artists(q).take(6).map { grouped(artist(it, "Artist"), "Artists") }
         return out
+    }
+
+    /** The item with Android Auto's group title (results with the same title are shown under one heading). */
+    private fun grouped(item: MediaItem, group: String): MediaItem {
+        val md = item.mediaMetadata
+        val extras = Bundle(md.extras ?: Bundle.EMPTY)
+        extras.putString(MediaConstants.EXTRAS_KEY_CONTENT_STYLE_GROUP_TITLE, group)
+        return item.buildUpon().setMediaMetadata(md.buildUpon().setExtras(extras).build()).build()
+    }
+
+    // ---- A–Z letter folders ------------------------------------------------------------------------------
+
+    /**
+     * A library list split by letter: the server's index (sections with the offset of their first row in the
+     * list's own order) and the rows of one letter fetched by offset. Servers without the index: the first
+     * [FALLBACK_ROWS] rows grouped here.
+     */
+    private class Section(val label: String, val offset: Int, val count: Int?)
+
+    private inner class Shelf<T>(
+        private val kind: String,
+        private val sort: String,
+        private val pageSize: Int,
+        private val page: (offset: Int, limit: Int) -> List<T>,
+        private val name: (T) -> String,
+    ) {
+        @Volatile private var sections: List<Section> = emptyList()
+        @Volatile private var loadedAt = 0L
+        /** without the server index: every row we fetched, in list order */
+        @Volatile private var rows: List<T>? = null
+
+        private fun load(): List<Section> {
+            val now = System.currentTimeMillis()
+            if (sections.isNotEmpty() && now - loadedAt < INDEX_TTL_MS) return sections
+            val index = try { api.libraryIndex(kind, sort) } catch (_: Exception) { emptyList() }
+            if (index.isNotEmpty()) {
+                rows = null
+                sections = index.mapIndexed { i, s ->
+                    val next = index.getOrNull(i + 1)?.offset
+                    Section(s.label, s.offset, next?.let { (it - s.offset).coerceAtLeast(0) })
+                }
+            } else {
+                val all = ArrayList<T>()
+                while (all.size < FALLBACK_ROWS) {
+                    val got = page(all.size, pageSize)
+                    all.addAll(got)
+                    if (got.size < pageSize) break
+                }
+                rows = all
+                val out = ArrayList<Section>()
+                var i = 0
+                while (i < all.size) {
+                    val label = letterOf(name(all[i]))
+                    var j = i + 1
+                    while (j < all.size && letterOf(name(all[j])) == label) j++
+                    // a letter that comes back later (names sorted by another rule) joins its first section
+                    if (out.none { it.label == label }) out.add(Section(label, i, j - i))
+                    i = j
+                }
+                sections = out
+            }
+            loadedAt = now
+            return sections
+        }
+
+        /** (label, how many rows when known) for every letter that has rows. */
+        fun letters(): List<Pair<String, Int?>> = load().map { it.label to it.count }
+
+        /** The rows of one letter (at most [LETTER_ROWS]). */
+        fun items(label: String): List<T> {
+            val s = load().firstOrNull { it.label == label } ?: return emptyList()
+            val all = rows
+            if (all != null) return all.drop(s.offset).take(s.count ?: LETTER_ROWS).filter { letterOf(name(it)) == label }
+            val want = minOf(s.count ?: LETTER_ROWS, LETTER_ROWS)
+            val out = ArrayList<T>()
+            var at = s.offset
+            while (out.size < want) {
+                val n = minOf(pageSize, want - out.size)
+                val got = page(at, n)
+                out.addAll(got)
+                at += got.size
+                if (got.size < n) break
+            }
+            return out
+        }
+    }
+
+    private val albumShelf = Shelf<Album>(
+        "albums", "album", 500,
+        { offset, limit -> api.get("/api/library/albums?sort=album&offset=$offset&limit=$limit").objects().mapNotNull { Album.from(it) } },
+        { it.title },
+    )
+
+    private val artistShelf = Shelf<Artist>(
+        "artists", "name", 2000,
+        { offset, limit -> api.get("/api/library/artists?sort=name&offset=$offset&limit=$limit").objects().mapNotNull { Artist.from(it) } },
+        { it.name },
+    )
+
+    private val songShelf = Shelf<Track>(
+        "tracks", "title", 1000,
+        { offset, limit -> api.tracks(offset = offset, limit = limit, sort = "title") },
+        { it.title },
+    )
+
+    /** The songs of one letter folder (`songs:letter:S`, or `songs:letter:S|Sa` for a part of a big letter). */
+    private val letterSongs = ConcurrentHashMap<String, Pair<Long, List<Track>>>()
+
+    private fun songsOfLetter(label: String): List<Track> {
+        val now = System.currentTimeMillis()
+        letterSongs[label]?.let { (at, list) -> if (now - at < INDEX_TTL_MS) return list }
+        val list = songShelf.items(label)
+        letterSongs[label] = now to list
+        return list
+    }
+
+    /**
+     * A letter folder: its songs in title order, or – more than [SPLIT_AT] songs – one folder per first two
+     * letters ("Sa", "Se", …), so no list gets long.
+     */
+    private fun songLetter(id: String): List<MediaItem> {
+        val rest = id.removePrefix(SONG_LETTER)
+        val label = rest.substringBefore("|")
+        val part = if (rest.contains("|")) rest.substringAfter("|") else null
+        val songs = songsOfLetter(label)
+        if (part != null) return songs.filter { prefixOf(it.title, label) == part }.map { track(it, id) }
+        if (songs.size <= SPLIT_AT) return songs.map { track(it, id) }
+        val parts = LinkedHashMap<String, Int>()
+        for (t in songs) { val p = prefixOf(t.title, label); parts[p] = (parts[p] ?: 0) + 1 }
+        return parts.map { (p, n) -> folder("$SONG_LETTER$label|$p", p, plural(n, "song"), MediaMetadata.MEDIA_TYPE_FOLDER_MIXED, grid = false) }
+    }
+
+    /** "Sa" for "Sabotage" under "S"; the letter alone when the second character isn't a letter. */
+    private fun prefixOf(title: String, label: String): String {
+        val second = fold(title.trim()).getOrNull(1)
+        return if (second != null && second.isLetter()) label + second.lowercaseChar() else label
+    }
+
+    /** Every song a playable folder stands for (a whole letter, not its parts). */
+    private fun songsFor(folderId: String): List<MediaItem>? = when {
+        folderId.startsWith(SONG_LETTER) -> {
+            val rest = folderId.removePrefix(SONG_LETTER)
+            if (rest.contains("|")) songLetter(folderId)
+            else songsOfLetter(rest).map { track(it, folderId) }.also { children[folderId] = it }
+        }
+        else -> null
     }
 
     /** The playable list an item stands for: a song (with its listed siblings), or every song under a folder. */
@@ -147,8 +321,19 @@ class BrowseTree(private val api: EncoreApi) {
             val t = api.track(tid) ?: return emptyList<MediaItem>() to 0
             return listOf(track(t, null)) to 0
         }
-        val songs = list(mediaId).filter { it.mediaId.startsWith("track:") }
+        val songs = (songsFor(mediaId) ?: list(mediaId)).filter { it.mediaId.startsWith("track:") }
         return songs to 0
+    }
+
+    /** A playable entry that isn't a folder ("Shuffle all songs", "Shuffle <artist>"): tapping it plays. */
+    private fun action(id: String, title: String, subtitle: String?): MediaItem {
+        val md = MediaMetadata.Builder()
+            .setTitle(title)
+            .setSubtitle(subtitle)
+            .setIsBrowsable(false)
+            .setIsPlayable(true)
+            .setMediaType(MediaMetadata.MEDIA_TYPE_PLAYLIST)
+        return MediaItem.Builder().setMediaId(id).setMediaMetadata(md.build()).build()
     }
 
     private fun folder(id: String, title: String, subtitle: String?, type: Int, grid: Boolean, art: Uri? = null): MediaItem {
@@ -157,7 +342,8 @@ class BrowseTree(private val api: EncoreApi) {
                 if (grid) MediaConstants.EXTRAS_VALUE_CONTENT_STYLE_GRID_ITEM else MediaConstants.EXTRAS_VALUE_CONTENT_STYLE_LIST_ITEM)
             putInt(MediaConstants.EXTRAS_KEY_CONTENT_STYLE_PLAYABLE, MediaConstants.EXTRAS_VALUE_CONTENT_STYLE_LIST_ITEM)
         }
-        val playable = id == "shuffle" || id == "liked" || id.startsWith("playlist:") || id.startsWith("album:") || id.startsWith("mfy:")
+        val playable = id == "shuffle" || id == "liked" || id.startsWith("playlist:") || id.startsWith("album:") || id.startsWith("mfy:") ||
+            id.startsWith(SONG_LETTER)
         val md = MediaMetadata.Builder()
             .setTitle(title)
             .setSubtitle(subtitle)
@@ -173,5 +359,34 @@ class BrowseTree(private val api: EncoreApi) {
 
     companion object {
         const val ROOT = "root"
+
+        /** Root extras: Android Auto shows its on-screen search button (androidx.media's BROWSER_SERVICE_EXTRAS_KEY_SEARCH_SUPPORTED). */
+        const val EXTRAS_SEARCH_SUPPORTED = "android.media.browse.SEARCH_SUPPORTED"
+
+        private const val ALBUM_LETTER = "albums:letter:"
+        private const val ARTIST_LETTER = "artists:letter:"
+        private const val SONG_LETTER = "songs:letter:"
+        private const val SONGS_SHUFFLE = "songs:shuffle"
+        private const val ARTIST_SHUFFLE = "artist-shuffle:"
+
+        private const val INDEX_TTL_MS = 10 * 60_000L
+        /** without the server index: how many rows of a list we group here */
+        private const val FALLBACK_ROWS = 5000
+        /** most rows one letter folder lists */
+        private const val LETTER_ROWS = 3000
+        /** a song letter with more songs than this is split by its first two letters */
+        private const val SPLIT_AT = 150
+
+        private val MARKS = Regex("\\p{Mn}+")
+
+        private fun fold(s: String): String = Normalizer.normalize(s, Normalizer.Form.NFD).replace(MARKS, "")
+
+        /** The server index's letter rule (routes/library_index.rs): A–Z, "#" for digits and symbols, accents folded. */
+        fun letterOf(name: String): String {
+            val c = name.firstOrNull() ?: return "#"
+            if (c.code < 128) return if (c.isLetter()) c.uppercaseChar().toString() else "#"
+            val f = fold(c.toString()).firstOrNull()?.lowercaseChar() ?: return "#"
+            return if (f in 'a'..'z') f.uppercaseChar().toString() else "#"
+        }
     }
 }

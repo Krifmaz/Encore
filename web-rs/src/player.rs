@@ -232,11 +232,11 @@ fn set_media_metadata(t: &Value) {
     js_set(&init, "artist", &t.s("artist").into());
     js_set(&init, "album", &t.s("album").into());
     let artwork = js_sys::Array::new();
-    let cov = cover(t);
+    let cov = cover_at(t, 600);
     if !cov.is_empty() {
         let img = js_sys::Object::new();
         js_set(&img, "src", &cov.into());
-        js_set(&img, "sizes", &"512x512".into());
+        js_set(&img, "sizes", &"600x600".into());
         artwork.push(&img);
     }
     js_set(&init, "artwork", &artwork);
@@ -324,7 +324,7 @@ fn native() {
     let Some(a) = audio() else { return };
     let payload = match cur() {
         Some(t) => {
-            let cov = cover(&t);
+            let cov = cover_at(&t, 600);
             let art_url = if cov.is_empty() { String::new() } else { abs_url(&cov) };
             json!({ "title": t.s("title"), "artist": t.s("artist"), "album": t.s("album"), "playing": !a.paused(), "art": art_url })
         }
@@ -500,11 +500,27 @@ pub fn queue() -> (Vec<Value>, usize) {
 /// `cover(t)` as a JSON value (undefined → Null).
 fn cover_v(t: &Value) -> Value {
     if t.truthy("preview") { t.g("cover").clone() }
-    else if t.truthy("album_id") { Value::String(format!("/api/library/albums/{}/cover", t.s("album_id"))) }
+    else if t.truthy("album_id") { Value::String(format!("/api/library/albums/{}/cover{}", t.s("album_id"), crate::ui::cover_q(t))) }
     else { t.g("cover").clone() }
 }
 /// `cover(t)` as used in strings ("" when falsy).
 fn cover(t: &Value) -> String { let v = cover_v(t); if json::truthy(&v) { js_string(&v) } else { String::new() } }
+/// `coverAt(t, s)`: a library cover at a thumbnail size (other covers as they are).
+fn cover_at(t: &Value, size: u32) -> String {
+    let c = cover(t);
+    if t.truthy("preview") || !t.truthy("album_id") || !c.starts_with("/api/library/albums/") { return c; }
+    crate::ui::cover_url(&t.s("album_id"), &crate::ui::cover_q(t).trim_start_matches("?v=").to_string(), size)
+}
+/// `preloadNextCover()`: the next song's cover, so it shows at once when the song changes.
+fn preload_next_cover() {
+    let (q, i, full) = st(|s| (s.queue.get((s.index + 1).max(0) as usize).map(|t| (**t).clone()), s.index, s.full));
+    let Some(n) = q.filter(|_| i >= 0) else { return };
+    for size in if full { vec![200, 1000] } else { vec![200] } {
+        let c = cover_at(&n, size);
+        if c.is_empty() { continue; }
+        if let Ok(img) = web_sys::HtmlImageElement::new() { img.set_decoding("async"); img.set_src(&c); }
+    }
+}
 
 /// context: 'album' | 'single' | 'list' – decides what happens when the queue ends.
 fn sendable(tracks: &[Value]) -> Vec<Value> { tracks.iter().filter(|t| json::truthy(t) && t.g("id").is_number()).map(slim).collect() }
@@ -665,7 +681,7 @@ pub fn save_offline(tracks: Vec<Value>) {
         let id = t.s("id");
         let ext = if conv { "flac".to_string() } else if t.truthy("format") { t.s("format") } else { "audio".to_string() };
         let url = abs_url(&format!("/api/library/tracks/{id}/stream{}", if conv { "?transcode=true" } else { "" }));
-        let art_url = if t.truthy("album_id") { abs_url(&format!("/api/library/albums/{}/cover?s=600", t.s("album_id"))) } else { String::new() };
+        let art_url = if t.truthy("album_id") { abs_url(&cover_at(t, 600)) } else { String::new() };
         app::native_call_with("saveOffline", Some(&json!({
             "id": id, "title": t.s("title"), "artist": t.s("artist"), "album": t.s("album"), "ext": ext,
             "url": url,
@@ -678,10 +694,11 @@ fn load(transcode: bool, offset: f64, rung: Option<i64>, dsp: Option<bool>) {
     load_opts(LoadOpts { transcode, offset, rung, dsp, ..Default::default() });
 }
 /// rung: kbps of the lossy stream (None = what the song should start on) · dsp: None = whatever the settings say
-/// resume: the same song continues (a quality switch or a seek) – no new play / now-playing · fade: crossfade into it
+/// resume: the same song continues (a quality switch or a seek) – no new play / now-playing · fade: a song transition into it
 /// hold: load it paused (a restored spot) – it starts when you press play
+/// from: where the new song starts in a transition (Smart overlap skips its silent lead-in)
 #[derive(Default)]
-struct LoadOpts { transcode: bool, offset: f64, rung: Option<i64>, dsp: Option<bool>, resume: bool, fade: bool, hold: bool }
+struct LoadOpts { transcode: bool, offset: f64, rung: Option<i64>, dsp: Option<bool>, resume: bool, fade: bool, hold: bool, from: f64 }
 /// Start the current song (or restart it at `offset`).
 fn load_opts(o: LoadOpts) {
     let Some(t) = cur() else { return };
@@ -728,7 +745,10 @@ fn load_opts(o: LoadOpts) {
     let url = stream_url(&t, transcoded && !is_lossy && !is_dsp, rung, is_dsp, server_offset);
     let (Some(mut a), Some(sp)) = (audio(), spare()) else { return };
     let use_plain = t.truthy("preview") && fx_built();
-    if !truthy_num(offset) && !use_plain && dom::data_opt(&sp, "url").as_deref() == Some(url.as_str()) {
+    let swap = !truthy_num(offset) && !use_plain && dom::data_opt(&sp, "url").as_deref() == Some(url.as_str());
+    // a transition needs the pre-buffered element; without it the old song stops and this one starts plainly
+    if o.fade && !swap { end_fade(); }
+    if swap {
         // already buffered in the background: swap players and start right away
         let old = a;
         a = sp;
@@ -738,8 +758,9 @@ fn load_opts(o: LoadOpts) {
         SPARE.with(|x| *x.borrow_mut() = Some(next_spare));
         if !o.fade { let _ = old.pause(); let _ = old.remove_attribute("src"); }
         let _ = old.remove_attribute("data-url");
-        a.set_current_time(0.0);
-        set_fade_gain(&a, if o.fade { 0.0 } else { 1.0 });
+        a.set_current_time(if o.fade && o.from > 0.0 && seekable_to(&a, o.from) { o.from } else { 0.0 });
+        let g = if o.fade { FADE.with(|f| f.borrow().as_ref().map(|f| playback::transition_gains(&f.mode, 0.0, 0.0).1)).unwrap_or(1.0) } else { 1.0 };
+        set_fade_gain(&a, g);
     } else {
         if use_plain != is_plain(&a) {
             // a preview with the effects graph built plays on the never-wrapped element; anything else on a wrapped one
@@ -779,6 +800,7 @@ fn load_opts(o: LoadOpts) {
     }
     if start && is_dsp && dsp_cache_on() { prepare_ahead(&t); }
     if has_media_session() { set_media_metadata(&t); }
+    preload_next_cover();
     dom::add_class(&body(), "has-player");
     render();
     emit();
@@ -885,9 +907,11 @@ fn fully_buffered() -> bool {
     b.length() > 0 && b.end(b.length() - 1).unwrap_or(0.0) >= d - 1.0
 }
 /// Start buffering the song that plays next – once this one is safely ahead, never while it's short of bandwidth.
-fn maybe_preload(force: bool) {
+fn maybe_preload(force: bool) { maybe_preload_need(force, false); }
+/// need: the transition window is open – fetch the next song even with pre-load off.
+fn maybe_preload_need(force: bool, need: bool) {
     let Some(sp) = spare() else { return };
-    if !prefs().truthy("preload") || is_linked() || fading() { return; }
+    if (!prefs().truthy("preload") && !need) || is_linked() || fading() { return; }
     let n = st(|s| if s.index + 1 < 0 { None } else { s.queue.get((s.index + 1) as usize).cloned() });
     let Some(n) = n else { return };
     if n.truthy("preview") && fx_built() { return; }   // a preview plays on the never-wrapped element, not the spare
@@ -1175,45 +1199,109 @@ fn prepare_ahead(t: &Value) {
 }
 fn dsp_note(s: &str) -> &'static str { match s { "cached" => " (pre-rendered)", "rendering" | "queued" => " (rendering ahead)", _ => "" } }
 
-// ---- crossfade ---------------------------------------------------------------------------------
-// The spare element already holds the next song: start it `crossfade` seconds before this one ends and blend
-// the two with an equal-power curve (Web Audio gains when the effects graph runs, element volume otherwise).
-struct Fade { out: HtmlMediaElement, len: f64, timer: Option<Interval> }
-fn maybe_crossfade() {
+// ---- song transitions ----------------------------------------------------------------------------
+// Off | Crossfade (equal-power, both fade) | Overlap (the next song starts at full volume early, only the old one
+// fades out) | Smart overlap (the silent ends of both songs are skipped: the next song starts at its first audible
+// moment, overlapping the old one up to its last audible moment). The next song plays on the spare element; when
+// the window opens and it isn't buffered (pre-load off, a slow server stream), it starts loading then and the
+// transition begins as soon as it can play, over what is left of the window.
+// The gains follow the new song's own clock and are set from its timeupdate events as well as a timer: in a
+// hidden or minimised window (or a phone with the screen off) timers are throttled or stopped, and the fade must
+// not stall there – that is what left the next song silent before ("it just makes the audio quiet").
+struct Fade { out: HtmlMediaElement, mode: String, len: f64, from: f64, out_end: f64, timer: Option<Interval> }
+thread_local! {
+    /// track id → (start_s, end_s) once known (None: asked, unknown)
+    static EDGES: RefCell<HashMap<i64, Option<(f64, f64)>>> = RefCell::new(HashMap::new());
+}
+/// Where a song's sound starts and stops (Smart overlap) – None until the server has answered.
+fn track_edges(t: &Value) -> Option<(f64, f64)> {
+    if !is_lib(t) { return None; }
+    let id = t.i("id");
+    if let Some(e) = EDGES.with(|m| m.borrow().get(&id).cloned()) { return e; }
+    EDGES.with(|m| m.borrow_mut().insert(id, None));
+    dom::spawn(async move {
+        if let Ok(e) = api::get(&format!("/library/tracks/{id}/edges")).await {
+            let (s, end) = (e.f("start_s"), e.f("end_s"));
+            if end > 0.0 { EDGES.with(|m| m.borrow_mut().insert(id, Some((s.max(0.0), end)))); }
+        }
+    });
+    None
+}
+/// The URL load_opts() asks for with these options (offset 0) – the same decisions load_opts() makes.
+fn planned_url(t: &Value, transcode: bool, rung: i64, dsp: bool) -> String {
+    let lossy = rung > 0;
+    let d = dsp && want_dsp(t, lossy);
+    let transcoded = convert(t) || transcode || lossy || d;
+    stream_url(t, transcoded && !lossy && !d, rung, d, 0.0)
+}
+/// The load options (transcode, rung, dsp) that make load_opts() use exactly what the spare element holds for song
+/// `n` (any rung) – None when it holds something else.
+fn spare_for(n: &Value) -> Option<(bool, i64, bool)> {
+    let sp = spare()?;
+    let u = dom::data_opt(&sp, "url")?;
+    if n.truthy("preview") || !n.g("id").is_number() || !u.starts_with(&format!("/api/library/tracks/{}/stream", n.i("id"))) { return None; }
+    let q = web_sys::UrlSearchParams::new_with_str(u.split_once('?').map(|x| x.1).unwrap_or("")).ok()?;
+    if q.has("t") { return None; }
+    let rung = q.get("kbps").and_then(|k| k.parse::<i64>().ok()).unwrap_or(0);
+    let (dsp, transcode) = (q.get("dsp").as_deref() == Some("1"), q.get("transcode").as_deref() == Some("1"));
+    (planned_url(n, transcode, rung, dsp) == u).then_some((transcode, rung, dsp))
+}
+fn seekable_to(el: &HtmlMediaElement, at: f64) -> bool {
+    let s = el.seekable();
+    s.length() > 0 && s.end(s.length() - 1).unwrap_or(0.0) >= at
+}
+fn maybe_transition() {
     let p = prefs();
-    let cf = p.f("crossfade");
-    if !truthy_num(cf) || fading() || is_linked() || st(|s| s.repeat == "one" || s.dragging) || audio().is_none_or(|a| a.paused()) { return; }
+    let mode = p.s("transition");
+    if mode.is_empty() || mode == "off" || fading() || is_linked() || HELD.with(|h| h.get()) || st(|s| s.repeat == "one" || s.dragging) || audio().is_none_or(|a| a.paused()) { return; }
     let (t, n) = st(|s| (
         if s.index < 0 { None } else { s.queue.get(s.index as usize).cloned() },
         if s.index + 1 < 0 { None } else { s.queue.get((s.index + 1) as usize).cloned() },
     ));
     let (Some(t), Some(n)) = (t, n) else { return };
-    let d = duration();
-    if !truthy_num(d) || d < 2.0 * cf { return; }
-    let remaining = d - position();
-    if remaining > cf || remaining < 1.0 { return; }
+    if t.truthy("preview") || (n.truthy("preview") && fx_built()) { return; }
     if p.truthy("crossfade_album_gapless") && !t.is_nullish("album_id") && t.g("album_id") == n.g("album_id") { return; }
+    let cf = p.f("crossfade");
+    let secs = if cf > 0.0 { cf } else { playback::TRANSITION_DEFAULT_S }.max(1.0);
+    let d = duration();
+    if !truthy_num(d) || d < 2.0 * secs { return; }
+    let smart = if mode == "smart" { Some((track_edges(&t), track_edges(&n))) } else { None };
+    // the old song's last audible moment (Smart overlap), else its end
+    let end = match smart { Some((Some((_, e)), _)) if e > 2.0 * secs && e < d => e, _ => d };
+    let remaining = end - position();
+    if remaining > secs || remaining < 1.0 { return; }
     let Some(sp) = spare() else { return };
-    let su = dom::data_opt(&sp, "url");
-    if su.is_none() || su.as_deref() != Some(start_url(&n).as_str()) || sp.ready_state() < 3 { return; }
+    let o = spare_for(&n);
+    if o.is_none() || sp.ready_state() < 3 {
+        // not buffered yet: fetch it now (even with pre-load off) and start as soon as it can play
+        if o.is_none() { maybe_preload_need(true, true); }
+        return;
+    }
+    let Some((transcode, rung, dsp)) = o else { return };
     let Some(out) = audio() else { return };
     log_play();
-    FADE.with(|f| *f.borrow_mut() = Some(Fade { out, len: remaining, timer: None }));
+    let from = match smart { Some((_, Some((s, _)))) if s > 0.05 && s < 30.0 => s, _ => 0.0 };
+    let out_end = out.current_time() + remaining;
+    FADE.with(|f| *f.borrow_mut() = Some(Fade { out, mode, len: remaining, from, out_end, timer: None }));
     st_mut(|s| s.index += 1);
-    load_opts(LoadOpts { fade: true, ..Default::default() });
+    load_opts(LoadOpts { fade: true, transcode, rung: Some(rung), dsp: Some(dsp), from, ..Default::default() });
+    if !fading() { return; }   // load_opts() could not use the spare after all: a plain start
+    let started = audio().map(|a| a.current_time()).unwrap_or(0.0);
     let timer = Interval::new(50, step_fade);
-    FADE.with(|f| if let Some(f) = f.borrow_mut().as_mut() { f.timer = Some(timer); });
+    FADE.with(|f| if let Some(f) = f.borrow_mut().as_mut() { f.from = started; f.timer = Some(timer); });
+    step_fade();
 }
 fn step_fade() {
-    let Some((out, len)) = FADE.with(|f| f.borrow().as_ref().map(|f| (f.out.clone(), f.len))) else { return };
+    let Some((out, mode, len, from, out_end)) = FADE.with(|f| f.borrow().as_ref().map(|f| (f.out.clone(), f.mode.clone(), f.len, f.from, f.out_end))) else { return };
     let Some(a) = audio() else { return };
-    let x = 1f64.min(a.current_time() / len);
+    let x = ((a.current_time() - from).max(0.0) / len).min(1.0);
     let x = if x.is_nan() { 0.0 } else { x };
-    set_fade_gain(&out, (x * std::f64::consts::PI / 2.0).cos());
-    set_fade_gain(&a, (x * std::f64::consts::PI / 2.0).sin());
-    if x >= 1.0 || out.ended() { end_fade(); }
+    let (g_out, g_in) = playback::transition_gains(&mode, x, x * len);
+    set_fade_gain_smooth(&out, g_out, true);
+    set_fade_gain_smooth(&a, g_in, true);
+    if x >= 1.0 || out.ended() || out.current_time() >= out_end { end_fade(); }
 }
-/// Finish (or cut short – next/prev/seek) a crossfade: the old song stops, the new one plays at full volume.
+/// Finish (or cut short – next/prev/seek) a transition: the old song stops, the new one plays at full volume.
 fn end_fade() {
     let Some(f) = FADE.with(|f| f.borrow_mut().take()) else { return };
     // the interval may be the caller: let it go once this turn is over
@@ -1228,12 +1316,30 @@ fn end_fade() {
     route();
     maybe_preload(false);
 }
+/// `p.cancelAndHoldAtTime(t)` where the browser has it (not in web-sys), else `cancelScheduledValues(t)`.
+fn cancel_and_hold(p: &web_sys::AudioParam, t: f64) {
+    let f = js_sys::Reflect::get(p, &JsValue::from_str("cancelAndHoldAtTime")).ok().and_then(|f| f.dyn_into::<js_sys::Function>().ok());
+    match f {
+        Some(f) => { let _ = f.call1(p, &JsValue::from_f64(t)); }
+        None => { let _ = p.cancel_scheduled_values(t); }
+    }
+}
 /// The fade level of one element: a Web Audio gain when it is routed through the effects graph, else its volume (under the slider).
-fn set_fade_gain(el: &HtmlMediaElement, g: f64) {
+fn set_fade_gain(el: &HtmlMediaElement, g: f64) { set_fade_gain_smooth(el, g, false); }
+/// smooth: glide there on the audio clock (the steps come a few times a second, more slowly in a hidden window).
+fn set_fade_gain_smooth(el: &HtmlMediaElement, g: f64, smooth: bool) {
     let gain = FX.with(|fx| fx.borrow().sources.iter().find(|s| same_el(&s.el, el)).and_then(|s| s.gain.clone()));
-    match gain {
-        Some(n) => { n.gain().set_value(g as f32); el.set_volume(user_vol()); }
-        None => el.set_volume(user_vol() * g),
+    match (gain, audio_ctx()) {
+        (Some(n), Some(ctx)) => {
+            let p = n.gain();
+            let now = ctx.current_time();
+            cancel_and_hold(&p, now);
+            let set = if smooth { p.set_target_at_time(g as f32, now, 0.05) } else { p.set_value_at_time(g as f32, now) };
+            if set.is_err() { p.set_value(g as f32); }
+            el.set_volume(user_vol());
+        }
+        (Some(n), None) => { n.gain().set_value(g as f32); el.set_volume(user_vol()); }
+        _ => el.set_volume((user_vol() * g).clamp(0.0, 1.0)),
     }
 }
 
@@ -1877,7 +1983,7 @@ pub fn mount() {
         render(); emit(); save_spot(true);
     }));
     on_both(&a, &sp, "timeupdate", Rc::new(|_| {
-        update_time(); log_play(); sync_lyrics(false); maybe_crossfade();
+        update_time(); log_play(); sync_lyrics(false); maybe_transition();
         if audio().is_some_and(|a| !a.paused()) { save_spot(false); }
         preload_tick();
     }));
@@ -1897,6 +2003,15 @@ pub fn mount() {
         }
     }));
     dom::on_forever(&sp, "error", |_| { if let Some(s) = spare() { let _ = s.remove_attribute("data-url"); } });
+    // a transition moves with either song's clock (timers stall in hidden windows), and ends when the old song does
+    for x in [Some(&a), Some(&sp), Some(&pl)].into_iter().flatten() {
+        dom::on_forever(x, "timeupdate", |_| { if fading() { step_fade(); } });
+        dom::on_forever(x, "ended", |e: &Event| {
+            let out = FADE.with(|f| f.borrow().as_ref().map(|f| f.out.clone()));
+            let target = e.target().and_then(|t| t.dyn_into::<HtmlMediaElement>().ok());
+            if let (Some(out), Some(t)) = (out, target) { if same_el(&out, &t) { end_fade(); } }
+        });
+    }
     if has_media_session() {
         set_action("play", |_| { if let Some(a) = audio() { play(&a); } });
         set_action("pause", |_| { if let Some(a) = audio() { let _ = a.pause(); } });
@@ -2179,7 +2294,7 @@ fn render() {
       <div class="seek"><span id="t-cur">0:00</span><input type="range" id="seek" min="0" max="1000" value="0"><span id="t-dur">0:00</span></div>
     </div>
     {right}"##,
-        thumb = art(&cover(&t), &album_or_title(&t), ""),
+        thumb = crate::ui::art_sized(&cover(&t), &album_or_title(&t), "", 200),
         title = esck(&t, "title"),
         artist = esck(&t, "artist"),
         album = if t.truthy("album") { format!(" · {}", esck(&t, "album")) } else { String::new() },
@@ -2234,7 +2349,7 @@ fn render_full() {
     let playing = now_playing();
     let volume = if link.is_some() { if s.is_nullish("volume") { "0.9".to_string() } else { s.s("volume") } } else { js_num(user_vol()) };
     let autoplay = prefs().truthy("autoplay");
-    dom::set_style(&f, "--np-bg", &format!(r#"url("{}")"#, cover(&t)));
+    dom::set_style(&f, "--np-bg", &format!(r#"url("{}")"#, cover_at(&t, 400)));
     let tab = |p: &str, label: &str| format!(r#"<button data-pane="{p}" class="{}">{label}</button>"#, if pane == p { "active" } else { "" });
     let artist = if t.truthy("preview") { esck(&t, "artist") } else {
         format!(r##"<a href="#/artist-name/{}">{}</a>"##, String::from(js_sys::encode_uri_component(&t.s("artist"))), esck(&t, "artist"))
@@ -2256,7 +2371,7 @@ fn render_full() {
             format!(r#"<div class="np-item" data-i="{i}">
             <div class="thumb">{}</div>
             <div class="grow" style="min-width:0"><div class="ellipsis" style="font-weight:600">{}</div><div class="small muted ellipsis">{}</div></div>
-            {btns}</div>"#, art(&cover(x), &album_or_title(x), ""), esck(x, "title"), esck(x, "artist"))
+            {btns}</div>"#, crate::ui::art_sized(&cover(x), &album_or_title(x), "", 200), esck(x, "title"), esck(x, "artist"))
         }).collect::<String>()
     } else {
         format!(r#"<div class="muted small" style="padding:16px 4px">{}</div>"#,

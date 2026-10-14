@@ -1058,10 +1058,7 @@ fn sound_html(p: &Value) -> String {
         <label class="stack" style="gap:4px"><span class="small muted">Balance <b id="pb-balance-v">{balance_text}</b></span><input type="range" id="pb-balance" min="-100" max="100" step="1" value="{balance}"></label>
         <label class="row" style="gap:8px;align-items:center"><input type="checkbox" id="pb-mono" {mono}> Mono</label>
       </fieldset>
-      <span class="small muted">Runs in this browser or app – it costs your server nothing. Works with every quality setting. Turning it on means the sound is no longer the untouched file (the Signal path says so).</span>
-      <label class="stack" style="gap:4px"><span class="small muted">Crossfade <b id="pb-crossfade-v">{fade_text}</b></span><input type="range" id="pb-crossfade" min="0" max="12" step="1" value="{crossfade}"></label>
-      <label class="row" style="gap:8px;align-items:center"><input type="checkbox" id="pb-crossfade-gapless" {gapless}> Keep albums gapless (no fade between songs from the same album)</label>
-      <span class="small muted">Blends the end of one song into the start of the next.</span>"#,
+      <span class="small muted">Runs in this browser or app – it costs your server nothing. Works with every quality setting. Turning it on means the sound is no longer the untouched file (the Signal path says so).</span>"#,
         fx_checked = if on { "checked" } else { "" },
         fx_style = if on { "" } else { "opacity:.45" },
         fx_disabled = if on { "" } else { "disabled" },
@@ -1069,9 +1066,34 @@ fn sound_html(p: &Value) -> String {
         add_disabled = if list.len() >= 10 { "disabled" } else { "" }, plus = icon("plus"),
         crossfeed = crate::playback::CROSSFEED.iter().map(|(v, l)| dsp_opt(&json!(v), &json!(l), p.g("crossfeed"))).collect::<String>(),
         balance_text = crate::playback::balance_text(p.f("balance")), balance = js_string(p.g("balance")),
-        mono = if p.truthy("mono") { "checked" } else { "" },
-        fade_text = fade_text(p.f("crossfade")), crossfade = js_string(p.g("crossfade")),
-        gapless = if p.truthy("crossfade_album_gapless") { "checked" } else { "" })
+        mono = if p.truthy("mono") { "checked" } else { "" })
+}
+/// Song transitions: how one song becomes the next (every mode uses the seconds and the album rule).
+fn transition_help(mode: &str) -> &'static str {
+    match mode {
+        "off" => "Each song plays to its end, then the next one starts.",
+        "crossfade" => "The end of one song fades out while the next one fades in.",
+        "overlap" => "The next song starts at full volume a few seconds early while the old one fades out under it.",
+        "smart" => "Skips the silence at the end of one song and the start of the next, then overlaps them from the last audible moment, with a short fade.",
+        _ => "",
+    }
+}
+fn transitions_html(p: &Value, cadenza: bool) -> String {
+    let off = p.s("transition") == "off";
+    let cf = p.f("crossfade");
+    let secs = if cf > 0.0 { cf } else { crate::playback::TRANSITION_DEFAULT_S }.max(1.0);
+    format!(r#"{seg}
+      <span class="small muted">{help}</span>
+      <label class="stack" style="gap:4px;{dim}"><span class="small muted">Length <b id="pb-crossfade-v">{text}</b></span><input type="range" id="pb-crossfade" min="1" max="12" step="1" value="{secs}" {disabled}></label>
+      <label class="row" style="gap:8px;align-items:center"><input type="checkbox" id="pb-crossfade-gapless" {gapless}> Keep albums gapless (no transition between songs from the same album)</label>
+      {note}"#,
+        seg = seg_str(p, "transition", &crate::playback::TRANSITIONS),
+        help = transition_help(&p.s("transition")),
+        dim = if off { "opacity:.45" } else { "" },
+        text = fade_text(secs),
+        disabled = if off { "disabled" } else { "" },
+        gapless = if p.truthy("crossfade_album_gapless") { "checked" } else { "" },
+        note = if cadenza { r#"<span class="small muted">Song transitions don't apply while playing through Cadenza</span>"# } else { "" })
 }
 fn bind_sound(st: &Rc<Look>) {
     let el = st.el.clone();
@@ -1171,6 +1193,8 @@ fn paint_playback(st: &Rc<Look>) {
         <label class="row" style="gap:8px;align-items:center"><input type="checkbox" id="pb-resume" {resume}> Resume where I left off when the app opens</label></div>
       <div class="stack" style="gap:6px"><h3>Sound (on this device)</h3>
         {sound}</div>
+      <div class="stack" style="gap:6px"><h3>Song transitions</h3>
+        {transitions}</div>
       <div class="stack" style="gap:6px"><h3>Pure playback</h3>
         <span class="small muted">Encore streams the original file untouched – the quality badge on the player opens the <b>Signal path</b>, which shows what the file is, what was sent and what this device does with it. A browser hands the sound to the operating system, which mixes it with other sounds and may resample it; bit-perfect output needs an exclusive-mode engine.</span></div>
       <div class="stack" style="gap:6px"><h3>Server processing (Cadenza)</h3>
@@ -1184,6 +1208,7 @@ fn paint_playback(st: &Rc<Look>) {
         autoplay = if p.truthy("autoplay") { "checked" } else { "" },
         resume = if p.truthy("resume") { "checked" } else { "" },
         sound = sound_html(&p),
+        transitions = transitions_html(&p, eng.is_some()),
         dsp_block = dsp_html(&p, &st.dsp),
         eng_name = eng_title));
     {

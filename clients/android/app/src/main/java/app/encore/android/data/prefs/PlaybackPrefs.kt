@@ -30,7 +30,11 @@ data class EqPreset(val id: String, val label: String, val preamp: Double, val b
  * eqPreset / eqBands / eqPreamp: parametric EQ (a named preset, or "custom" with your own bands), preamp in dB
  * crossfeed: headphone crossfeed "off" | "light" | "medium" | "strong"
  * balance: -100 (left) … +100 (right) · mono: sum both channels
- * crossfade: seconds the end of one song blends into the next (0 = off) · crossfadeAlbumGapless: no fade within an album
+ * transition: how one song becomes the next – "off" | "crossfade" (equal-power, both fade) | "overlap" (the next song
+ *             starts at full volume `crossfade` seconds early, only the old one fades out) | "smart" (Automix-style: the
+ *             silent ends of both songs are skipped and the next song starts at the old one's last audible moment)
+ * crossfade: the transition's length in seconds (1–12; 0 only with transition "off") · crossfadeAlbumGapless: no
+ *            transition within an album (every mode)
  */
 data class PlaybackPrefs(
     val quality: String = "auto",
@@ -48,6 +52,7 @@ data class PlaybackPrefs(
     val crossfeed: String = "off",
     val balance: Int = 0,
     val mono: Boolean = false,
+    val transition: String = "off",
     val crossfade: Int = 0,
     val crossfadeAlbumGapless: Boolean = true,
 ) {
@@ -70,7 +75,7 @@ data class PlaybackPrefs(
             if (balance != 0) parts.add("Balance: ${balanceText(balance)}")
             if (mono) parts.add("Mono")
         }
-        if (withCrossfade && crossfade > 0) parts.add("Crossfade: $crossfade s")
+        if (withCrossfade && transition != "off" && crossfade > 0) parts.add("${transitionLabel(transition)}: $crossfade s")
         return parts.joinToString(" · ")
     }
 
@@ -94,6 +99,7 @@ data class PlaybackPrefs(
         m["crossfeed"] = JsonPrimitive(crossfeed)
         m["balance"] = JsonPrimitive(balance)
         m["mono"] = JsonPrimitive(mono)
+        m["transition"] = JsonPrimitive(transition)
         m["crossfade"] = JsonPrimitive(crossfade)
         m["crossfade_album_gapless"] = JsonPrimitive(crossfadeAlbumGapless)
         return JsonObject(m)
@@ -137,6 +143,28 @@ data class PlaybackPrefs(
         )
 
         val CROSSFEED: List<Pair<String, String>> = listOf("off" to "Off", "light" to "Light", "medium" to "Medium", "strong" to "Strong")
+
+        /** Settings → Playback → Song transitions. */
+        val TRANSITIONS: List<Pair<String, String>> = listOf("off" to "Off", "crossfade" to "Crossfade", "overlap" to "Overlap", "smart" to "Smart overlap")
+
+        /** Seconds a transition lasts when one is switched on with no length set yet. */
+        const val TRANSITION_DEFAULT_S = 6
+
+        fun transitionLabel(id: String): String = (TRANSITIONS.firstOrNull { it.first == id } ?: TRANSITIONS[0]).second
+
+        /**
+         * The two gains of a song transition at progress x (0…1) of its window, `elapsed` seconds in: (old song, new song).
+         * Crossfade: equal-power (cos/sin). Overlap: the new song at full volume at once (a 0.15 s ramp, so it doesn't
+         * click), the old one fades out under it. Smart overlap: the same with a 0.5 s fade-in.
+         */
+        fun transitionGains(mode: String, x: Double, elapsed: Double): Pair<Float, Float> {
+            val p = if (x.isNaN()) 0.0 else x.coerceIn(0.0, 1.0)
+            val out = Math.cos(p * Math.PI / 2)
+            if (mode == "crossfade") return out.toFloat() to Math.sin(p * Math.PI / 2).toFloat()
+            val rise = if (mode == "smart") 0.5 else 0.15
+            val e = if (elapsed.isNaN()) 0.0 else elapsed
+            return out.toFloat() to (e / rise).coerceIn(0.0, 1.0).toFloat()
+        }
 
         private val QUALITIES = setOf("auto", "original", "saver")
         private val TYPES = EQ_TYPES.map { it.first }.toSet()
@@ -192,6 +220,9 @@ data class PlaybackPrefs(
                 rateRaw.content == "device" || rateRaw.content == "auto" -> rateRaw.content
                 else -> rateRaw.content.toDoubleOrNull()?.let { r -> if (r > 0 && r == Math.floor(r)) r.toLong().toString() else null } ?: d.dspRate
             }
+            val crossfade = num(o["crossfade"], 0.0, 12.0, 0.0).roundToInt()
+            // before Song transitions existed, a crossfade length above 0 meant "crossfade"
+            val transition = text(o["transition"])?.takeIf { t -> TRANSITIONS.any { it.first == t } } ?: if (crossfade > 0) "crossfade" else "off"
             return PlaybackPrefs(
                 quality = text(o["quality"])?.takeIf { it in QUALITIES } ?: d.quality,
                 preload = bool(o["preload"]) != false,
@@ -208,7 +239,8 @@ data class PlaybackPrefs(
                 crossfeed = text(o["crossfeed"])?.takeIf { c -> CROSSFEED.any { it.first == c } } ?: "off",
                 balance = num(o["balance"], -100.0, 100.0, 0.0).roundToInt(),
                 mono = bool(o["mono"]) == true,
-                crossfade = num(o["crossfade"], 0.0, 12.0, 0.0).roundToInt(),
+                transition = transition,
+                crossfade = if (transition != "off" && crossfade < 1) TRANSITION_DEFAULT_S else crossfade,
                 crossfadeAlbumGapless = bool(o["crossfade_album_gapless"]) != false,
             )
         }

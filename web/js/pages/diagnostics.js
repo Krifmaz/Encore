@@ -2,6 +2,8 @@ import { api } from '../api.js';
 import { confirmDialog, copyText, esc, fmt, icon, toast } from '../ui.js';
 
 const KIND = { service: 'Connections', path: 'Folders & permissions', tool: 'Tools in the container' };
+/** App crash report kinds (POST /api/diagnostics/client-crash), the same words in web-rs. */
+const CRASH_KIND = { crash: 'Crash', native: 'Native crash', anr: 'Not responding', low_memory: 'Closed for memory', signaled: 'Killed by the system' };
 
 /** The VPN for Soulseek line (Settings → Soulseek and the Diagnostics row; the same words in web-rs):
  * "Connected · port 51234 · public IP 1.2.3.4 · last handshake 12 s ago" / "Connecting…" / the error / "Off". */
@@ -39,6 +41,11 @@ export async function render(view) {
     <div class="card flat">
       <div class="small muted" style="margin-bottom:10px">Encore keeps copies of its database here (daily, and before every upgrade). Download one now and then to keep it somewhere else.</div>
       <div id="backups"><div class="empty"><span class="spinner"></span></div></div>
+    </div>
+    <div class="section-head"><h2>App crashes</h2><button class="btn sm" id="cr-clear" disabled>Clear</button></div>
+    <div class="card flat">
+      <div class="small muted" style="margin-bottom:10px">The phone app sends a report the next time it opens after it crashed or the system closed it. The newest 50 are kept.</div>
+      <div id="crashes"><div class="empty"><span class="spinner"></span></div></div>
     </div>`;
   const box = view.querySelector('#diag');
   const bk = view.querySelector('#backups');
@@ -88,6 +95,28 @@ export async function render(view) {
     drawBackups(d);
   });
   loadBackups();
+  const cr = view.querySelector('#crashes');
+  const crClear = view.querySelector('#cr-clear');
+  const loadCrashes = async () => {
+    let d;
+    try { d = await api.get('/diagnostics/client-crash'); } catch (e) { cr.innerHTML = `<div class="empty muted small">${esc(e.message)}</div>`; return; }
+    crClear.disabled = !d.crashes.length;
+    cr.innerHTML = d.crashes.length ? `<div class="list">${d.crashes.map(c => `
+      <div class="list-item" style="align-items:flex-start">
+        <span class="dot err" style="margin-top:7px"></span>
+        <div class="grow">
+          <div class="row wrap"><b class="ellipsis">${esc(c.first_line || 'Crash')}</b><span class="badge">${esc(CRASH_KIND[c.kind] || c.kind || 'Crash')}</span></div>
+          <div class="small muted">${esc([c.device, c.app_version, c.os, c.user].filter(Boolean).join(' · '))} · ${fmt.date(c.time)}</div>
+          <details><summary class="small muted" style="cursor:pointer">Full report</summary><div class="code diag-raw">${esc(c.text || '')}</div></details>
+        </div>
+      </div>`).join('')}</div>` : '<div class="empty muted small">No app crashes reported.</div>';
+  };
+  crClear.onclick = async () => {
+    if (!await confirmDialog('Clear app crashes?', 'All crash reports from the phone app are removed.', 'Clear', true)) return;
+    try { await api.del('/diagnostics/client-crash'); } catch (e) { toast(e.message, 'err'); }
+    loadCrashes();
+  };
+  loadCrashes();
   let last = null;
   const run = async () => {
     box.innerHTML = '<div class="empty"><span class="spinner"></span><p class="muted">Checking…</p></div>';

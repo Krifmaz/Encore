@@ -58,9 +58,12 @@ import app.encore.android.data.session.AuthKind
 import app.encore.android.data.session.Session
 import app.encore.android.data.session.ThemeChoice
 import app.encore.android.cadenza.CadenzaEngine
+import app.encore.android.playback.CarPrefs
 import app.encore.android.playback.DeviceOutput
 import app.encore.android.playback.ResumeStore
 import app.encore.android.playback.UsbOutputManager
+import app.encore.android.remote.RemoteDevice
+import app.encore.android.remote.RemoteUi
 import app.encore.android.ui.Nav
 import app.encore.android.ui.components.SectionTitle
 import app.encore.android.ui.theme.palette
@@ -133,6 +136,9 @@ fun SettingsScreen(nav: Nav, session: Session) {
                 Icon(painterResource(R.drawable.ic_expand_more), contentDescription = null, tint = p.muted)
             }
 
+            SectionTitle("This device")
+            DeviceNameRow(nav)
+
             SectionTitle("About")
             Text(
                 "Encore for Android ${BuildConfig.VERSION_NAME} (${BuildConfig.VERSION_CODE})",
@@ -142,6 +148,44 @@ fun SettingsScreen(nav: Nav, session: Session) {
             )
             Spacer(Modifier.height(32.dp))
         }
+    }
+}
+
+/**
+ * The name your other devices see this phone under (web/js/remote.js `encore.device.name`; empty = the default
+ * "Android app (<model>)"), and the Devices sheet.
+ */
+@Composable
+private fun DeviceNameRow(nav: Nav) {
+    val remote = nav.player.remote
+    val custom by remote.customName.collectAsState()
+    val p = MaterialTheme.palette
+    var text by remember { mutableStateOf(custom) }
+    Column(Modifier.padding(horizontal = 16.dp)) {
+        OutlinedTextField(
+            value = text,
+            onValueChange = { v -> text = v.take(60); remote.setName(text) },
+            label = { Text("Device name") },
+            placeholder = { Text(RemoteDevice.defaultName()) },
+            singleLine = true,
+            modifier = Modifier.fillMaxWidth(),
+        )
+        Text(
+            "Shown on your other devices, and in \"was playing on\" when another device offers to continue your music",
+            style = MaterialTheme.typography.bodySmall,
+            color = p.muted,
+            modifier = Modifier.padding(top = 4.dp),
+        )
+    }
+    Row(
+        Modifier.fillMaxWidth().clickable { RemoteUi.openDevices() }.padding(horizontal = 16.dp, vertical = 10.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Column(Modifier.weight(1f)) {
+            Text("Your devices")
+            Text("Play here, send your music to another device, or use this phone as a remote", style = MaterialTheme.typography.bodySmall, color = p.muted)
+        }
+        Icon(painterResource(R.drawable.ic_devices), contentDescription = null, tint = p.muted)
     }
 }
 
@@ -219,8 +263,16 @@ fun PlaybackSettingsScreen(nav: Nav, onBack: () -> Unit) {
             CheckRow("Keep going with a shuffle of the whole library", prefs.autoplay) { on -> set { it.copy(autoplay = on) } }
             CheckRow("Resume where I left off when the app opens", prefs.resume) { on -> set { it.copy(resume = on) } }
 
+            H3("In the car")
+            val carLyrics by remember { CarPrefs.liveLyrics(context) }.collectAsState()
+            CheckRow("Live lyrics in the car", carLyrics) { on -> CarPrefs.setLiveLyrics(context, on) }
+            Help("Android Auto shows the current line of a song's synced lyrics in place of its title (the Lyrics button next to Repeat turns it on and off). Only on this phone.")
+
             H3("Sound (on this device)")
             SoundSection(prefs, bitPerfect, set)
+
+            H3("Song transitions")
+            TransitionsSection(prefs, bitPerfect, set)
 
             H3("Pure playback")
             Help("Encore streams the original file untouched – the quality badge on the player opens the Signal path, which shows what the file is, what was sent and what this device does with it. The app hands the sound to Android, which mixes it with other sounds and may resample it; for bit-perfect output use a USB DAC in bit-perfect mode (Cadenza engine below).")
@@ -291,7 +343,7 @@ private fun PhoneCadenzaSection(phone: PhonePrefs, deviceRate: Int, serverOn: Bo
         if (dac != null) {
             val name = dac.deviceName.ifEmpty { "USB DAC" }
             CheckRow("Send directly to USB DAC (bit-perfect) · $name", phone.bitPerfect) { b -> set { it.copy(bitPerfect = b) } }
-            Help("Android's mixer is bypassed and the DAC gets the exact samples (the song's, or Cadenza's when upsampling is on). Crossfade is off in this mode; volume is the DAC's own.")
+            Help("Android's mixer is bypassed and the DAC gets the exact samples (the song's, or Cadenza's when upsampling is on). Song transitions are off in this mode; volume is the DAC's own.")
         } else {
             Help("Plug in a USB DAC that supports bit-perfect output and the switch appears here.")
         }
@@ -373,15 +425,34 @@ private fun SoundSection(prefs: PlaybackPrefs, bitPerfect: Boolean, set: ((Playb
         CheckRow("Mono", prefs.mono, enabled = on) { m -> set { it.copy(mono = m) } }
     }
     Help("Runs in this app – it costs your server nothing. Works with every quality setting. Turning it on means the sound is no longer the untouched file (the Signal path says so).")
+}
+
+private val TRANSITION_HELP = mapOf(
+    "off" to "Each song plays to its end, then the next one starts.",
+    "crossfade" to "The end of one song fades out while the next one fades in.",
+    "overlap" to "The next song starts at full volume a few seconds early while the old one fades out under it.",
+    "smart" to "Skips the silence at the end of one song and the start of the next, then overlaps them from the last audible moment, with a short fade.",
+)
+
+/** Song transitions: how one song becomes the next (every mode uses the length and the album rule). */
+@Composable
+private fun TransitionsSection(prefs: PlaybackPrefs, bitPerfect: Boolean, set: ((PlaybackPrefs) -> PlaybackPrefs) -> Unit) {
     // bit-perfect USB output plays one song at a time straight to the DAC, so there is nothing to blend
+    val off = prefs.transition == "off"
+    val secs = (if (prefs.crossfade > 0) prefs.crossfade else PlaybackPrefs.TRANSITION_DEFAULT_S).coerceIn(1, 12)
     Column(Modifier.alpha(if (bitPerfect) 0.45f else 1f)) {
-        SliderRow("Crossfade", if (prefs.crossfade > 0) "${prefs.crossfade} s" else "Off", prefs.crossfade.toFloat(), 0f..12f, steps = 11, enabled = !bitPerfect) { v ->
-            set { it.copy(crossfade = Math.round(v)) }
+        Picker(null, PlaybackPrefs.TRANSITIONS, prefs.transition, enabled = !bitPerfect) { v ->
+            set { it.copy(transition = v, crossfade = if (v != "off" && it.crossfade < 1) PlaybackPrefs.TRANSITION_DEFAULT_S else it.crossfade) }
         }
-        CheckRow("Keep albums gapless (no fade between songs from the same album)", prefs.crossfadeAlbumGapless, enabled = !bitPerfect) { on -> set { it.copy(crossfadeAlbumGapless = on) } }
+        Help(TRANSITION_HELP[prefs.transition] ?: "")
+        Column(Modifier.alpha(if (off) 0.45f else 1f)) {
+            SliderRow("Length", "$secs s", secs.toFloat(), 1f..12f, steps = 10, enabled = !bitPerfect && !off) { v ->
+                set { it.copy(crossfade = Math.round(v).coerceIn(1, 12)) }
+            }
+        }
+        CheckRow("Keep albums gapless (no transition between songs from the same album)", prefs.crossfadeAlbumGapless, enabled = !bitPerfect) { on -> set { it.copy(crossfadeAlbumGapless = on) } }
     }
-    if (bitPerfect) Help("Crossfade is off while this phone sends songs bit-perfect to the USB DAC (Cadenza engine below).")
-    Help("Blends the end of one song into the start of the next. Not applied on Android yet – the setting is kept for your other devices.")
+    if (bitPerfect) Help("Song transitions are off while this phone sends songs bit-perfect to the USB DAC (Cadenza engine below).")
 }
 
 private fun signDb(v: Double): String = "${if (v > 0) "+" else ""}${PlaybackPrefs.fmt(v)} dB"
@@ -463,7 +534,7 @@ private fun SliderRow(label: String, valueText: String, value: Float, range: Clo
 private fun previewText(label: String, v: Float): String = when (label) {
     "Preamp" -> signDb(Math.round(v / 0.5f) * 0.5)
     "Balance" -> PlaybackPrefs.balanceText(Math.round(v))
-    "Crossfade" -> if (Math.round(v) > 0) "${Math.round(v)} s" else "Off"
+    "Length" -> "${Math.round(v)} s"
     else -> v.toString()
 }
 

@@ -53,6 +53,8 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import app.encore.android.R
 import app.encore.android.data.api.Track
+import app.encore.android.remote.DevicesButton
+import app.encore.android.remote.LinkedVolume
 import app.encore.android.ui.Nav
 import app.encore.android.ui.Screen
 import app.encore.android.ui.components.Badge
@@ -156,6 +158,7 @@ fun MiniPlayer(nav: Nav, onOpen: () -> Unit) {
                 Text(track.title, style = MaterialTheme.typography.bodyMedium, fontWeight = FontWeight.SemiBold, maxLines = 1, overflow = TextOverflow.Ellipsis)
                 Text(track.artist, style = MaterialTheme.typography.bodySmall, color = p.muted, maxLines = 1, overflow = TextOverflow.Ellipsis)
             }
+            DevicesButton(nav, tint = p.muted)
             IconButton(onClick = { nav.player.togglePlay() }) {
                 Icon(
                     painterResource(if (isPlaying) R.drawable.ic_pause else R.drawable.ic_play),
@@ -185,6 +188,7 @@ fun FullPlayer(nav: Nav, actions: PlayerMenuActions, onClose: () -> Unit) {
     val index by nav.player.queueIndex.collectAsState()
     val badge by nav.player.qualityBadge.collectAsState()
     val liked by nav.graph.likes.liked.collectAsState()
+    val link by nav.player.remote.link.collectAsState()
     val p = MaterialTheme.palette
     var dragging by remember { mutableStateOf<Float?>(null) }
     val coverUrl = if (track.albumId.isNotEmpty()) nav.graph.api.coverUrl(track.albumId, 1000) else null
@@ -217,12 +221,13 @@ fun FullPlayer(nav: Nav, actions: PlayerMenuActions, onClose: () -> Unit) {
             Row(Modifier.fillMaxWidth().padding(horizontal = 6.dp, vertical = 4.dp), verticalAlignment = Alignment.CenterVertically) {
                 IconButton(onClick = onClose) { Icon(painterResource(R.drawable.ic_expand_more), contentDescription = "Close", tint = p.text) }
                 Text(
-                    "Now playing",
+                    link?.let { "Controlling ${it.name}" + if (!it.online) " · offline" else "" } ?: "Now playing",
                     style = MaterialTheme.typography.titleSmall,
                     color = p.muted,
                     textAlign = TextAlign.Center,
                     modifier = Modifier.weight(1f),
                 )
+                DevicesButton(nav, tint = p.text)
                 IconButton(onClick = { actions.upNext() }) {
                     Icon(painterResource(R.drawable.ic_queue_music), contentDescription = "Up next", tint = p.text)
                 }
@@ -320,6 +325,9 @@ fun FullPlayer(nav: Nav, actions: PlayerMenuActions, onClose: () -> Unit) {
                     Icon(painterResource(R.drawable.ic_skip_next), contentDescription = "Next", tint = if (hasNext) p.text else p.faint, modifier = Modifier.size(36.dp))
                 }
             }
+
+            // linked: the other device's volume
+            LinkedVolume(nav, Modifier.fillMaxWidth().padding(horizontal = 48.dp))
 
             // .np-actions: like, share, ⋯
             Row(

@@ -311,7 +311,9 @@ impl Engine {
     /// Process `frames` interleaved frames (`input.len() >= frames * channels`); the result is interleaved at
     /// the output rate and may be empty while the resampler gathers a block.
     pub fn process(&mut self, input: &[f32], frames: usize) -> &[f32] {
-        let n = (frames * self.channels).min(input.len());
+        // whole frames only, never past the input (a short array or a huge `frames` from the JNI side)
+        let whole = input.len() / self.channels * self.channels;
+        let n = frames.saturating_mul(self.channels).min(whole);
         self.scratch.clear();
         self.scratch.extend(input[..n].iter().map(|v| *v as f64));
         self.run_effects();
@@ -628,5 +630,18 @@ mod tests {
         assert_eq!(j["dithers"][2][0], "tpdf");
         assert_eq!(j["default_dither"], "tpdf");
         assert_eq!(j["default_filter"], "sinc-l-64k");
+    }
+
+    #[test]
+    fn frames_never_read_past_the_input() {
+        let mut e = Engine::new(48000, 2, "", "", 0, "").unwrap();
+        e.set_params(r#"{"fx_on":true,"preamp_db":-6}"#);
+        let input = stereo(10, |_| (0.5, 0.5));
+        // more frames than the array holds, a huge count, and an odd sample count: whole frames of the input only
+        assert_eq!(e.process(&input, 64).len(), 20);
+        assert_eq!(e.process(&input, usize::MAX).len(), 20);
+        assert_eq!(e.process(&input[..7], 10).len(), 6);
+        assert_eq!(e.process(&input, 0).len(), 0);
+        assert!(e.process(&[], 5).is_empty());
     }
 }

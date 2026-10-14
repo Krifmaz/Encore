@@ -19,7 +19,7 @@ export async function render(view) {
     <div class="row wrap gap-lg mt" style="align-items:flex-start">
       <div class="card stack" style="flex:1;min-width:280px"><h2>Most played songs</h2>
         ${d.top_songs.length ? d.top_songs.map((s, i) => `<div class="row" style="gap:10px"><span class="faint" style="width:20px">${i + 1}</span>
-          <div class="thumb" style="width:36px;height:36px">${art(s.album_id ? `/api/library/albums/${s.album_id}/cover` : null, s.title)}</div>
+          <div class="thumb" style="width:36px;height:36px">${art(s.album_id ? `/api/library/albums/${s.album_id}/cover${s.cover_v ? '?v=' + s.cover_v : ''}` : null, s.title, '', 200)}</div>
           <div class="grow" style="min-width:0"><div class="ellipsis" style="font-weight:600">${esc(s.title)}</div><div class="small muted ellipsis">${esc(s.artist)}</div></div><b>${fmt.num(s.plays)}</b></div>`).join('') : emptyState(icon.play, 'No plays yet')}</div>
       <div class="card stack" style="flex:1;min-width:280px"><h2>Most played artists</h2>
         ${d.top_artists.length ? d.top_artists.map((a, i) => `<div class="row between"><span>${MEDAL[i] || (i + 1) + '.'} <a href="#/artist-name/${encodeURIComponent(a.artist)}">${esc(a.artist)}</a> <span class="faint small">· ${a.listeners} listener${a.listeners === 1 ? '' : 's'}</span></span><b>${fmt.num(a.plays)}</b></div>`).join('') : '<div class="muted small">No plays yet.</div>'}</div>

@@ -23,11 +23,30 @@ use serde_json::{json, Value};
 /// eq_preset / eq_bands / eq_preamp: parametric EQ (a named preset, or 'custom' with your own bands), preamp in dB
 /// crossfeed: headphone crossfeed 'off' | 'light' | 'medium' | 'strong'
 /// balance: -100 (left) … +100 (right) · mono: sum both channels
-/// crossfade: seconds the end of one song blends into the next (0 = off) · crossfade_album_gapless: no fade within an album
+/// transition: how one song becomes the next – 'off' | 'crossfade' (equal-power, both fade) | 'overlap' (the next song
+///             starts at full volume `crossfade` seconds early, only the old one fades out) | 'smart' (Automix-style: the
+///             silent ends of both songs are skipped and the next song starts at the old one's last audible moment)
+/// crossfade: the transition's length in seconds (1–12; 0 only with transition 'off') · crossfade_album_gapless: no
+///            transition within an album (every mode)
 pub fn defaults() -> Value {
     json!({ "quality": "auto", "preload": true, "autoplay": true, "resume": true, "dsp": false, "dsp_filter": "", "dsp_dither": "tpdf", "dsp_rate": "device",
         "fx_on": false, "eq_preset": "flat", "eq_bands": [], "eq_preamp": 0, "crossfeed": "off", "balance": 0, "mono": false,
-        "crossfade": 0, "crossfade_album_gapless": true })
+        "transition": "off", "crossfade": 0, "crossfade_album_gapless": true })
+}
+pub const TRANSITIONS: [(&str, &str); 4] = [("off", "Off"), ("crossfade", "Crossfade"), ("overlap", "Overlap"), ("smart", "Smart overlap")];
+/// Seconds a transition lasts when one is switched on with no length set yet.
+pub const TRANSITION_DEFAULT_S: f64 = 6.0;
+pub fn transition_label(id: &str) -> &'static str { TRANSITIONS.iter().find(|(v, _)| *v == id).unwrap_or(&TRANSITIONS[0]).1 }
+/// The two gains of a song transition at progress x (0…1) of its window, `elapsed` seconds in: [old song, new song].
+/// Crossfade: equal-power (cos/sin). Overlap: the new song at full volume at once (a 0.15 s ramp, so it doesn't
+/// click), the old one fades out under it. Smart overlap: the same with a 0.5 s fade-in.
+pub fn transition_gains(mode: &str, x: f64, elapsed: f64) -> (f64, f64) {
+    let p = if x.is_finite() { x.clamp(0.0, 1.0) } else { 0.0 };
+    let out = (p * std::f64::consts::PI / 2.0).cos();
+    if mode == "crossfade" { return (out, (p * std::f64::consts::PI / 2.0).sin()); }
+    let rise = if mode == "smart" { 0.5 } else { 0.15 };
+    let e = if elapsed.is_finite() { elapsed } else { 0.0 };
+    (out, (e / rise).clamp(0.0, 1.0))
 }
 const KEY: &str = "encore.playback";
 const QUALITIES: [&str; 3] = ["auto", "original", "saver"];
@@ -111,7 +130,7 @@ pub fn effects_summary(p: &Value, crossfade: bool) -> String {
         if p.f("balance") != 0.0 { parts.push(format!("Balance: {}", balance_text(p.f("balance")))); }
         if p.truthy("mono") { parts.push("Mono".into()); }
     }
-    if crossfade && p.f("crossfade") > 0.0 { parts.push(format!("Crossfade: {} s", n2s(p.f("crossfade")))); }
+    if crossfade && p.s("transition") != "off" && p.f("crossfade") > 0.0 { parts.push(format!("{}: {} s", transition_label(&p.s("transition")), n2s(p.f("crossfade")))); }
     parts.join(" · ")
 }
 
@@ -179,6 +198,11 @@ pub fn clean(p: &Value) -> Value {
     c["balance"] = jnum(js_round(clamp_num(c.g("balance"), -100.0, 100.0, 0.0)));
     c["mono"] = json!(c.g("mono") == &json!(true));
     c["crossfade"] = jnum(js_round(clamp_num(c.g("crossfade"), 0.0, 12.0, 0.0)));
+    // before Song transitions existed, a crossfade length above 0 meant "crossfade"
+    let raw = p.get("transition").and_then(|v| v.as_str()).filter(|x| TRANSITIONS.iter().any(|(v, _)| v == x));
+    let mode = match raw { Some(m) => m, None => if c.f("crossfade") > 0.0 { "crossfade" } else { "off" } };
+    c["transition"] = json!(mode);
+    if mode != "off" && c.f("crossfade") < 1.0 { c["crossfade"] = jnum(TRANSITION_DEFAULT_S); }
     c["crossfade_album_gapless"] = json!(c.g("crossfade_album_gapless") != &json!(false));
     c
 }

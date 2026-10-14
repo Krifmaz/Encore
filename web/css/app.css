@@ -626,3 +626,19 @@ details.slsk-folder > .slsk-files { padding: 0 16px 12px; }
   /* uploads have no trailing action column: undo the phone-table rule that squeezes the last column */
   .slsk-ul .table th:last-child, .slsk-ul .table td:last-child { width: auto; text-align: left; }
 }
+
+/* the library's side scrubber (web/js/scrubber.js): labels on the right edge, a bubble while dragging */
+.scrubber { position: fixed; right: 4px; top: 96px; bottom: calc(var(--player) + 28px); z-index: 45; display: flex; align-items: stretch;
+  opacity: 0; transition: opacity .25s; touch-action: none; user-select: none; -webkit-user-select: none; }
+.scrubber:hover, .scrubber.on, .scrubber.drag { opacity: 1; }
+@media (hover: none) { .scrubber:not(.on):not(.drag) { pointer-events: none; } }
+.scrub-rail { display: flex; flex-direction: column; justify-content: space-between; align-items: flex-end; min-width: 22px; padding: 8px 6px;
+  border-radius: 999px; background: color-mix(in srgb, var(--panel) 82%, transparent); border: 1px solid var(--border); backdrop-filter: blur(6px); cursor: pointer; }
+.scrub-rail span { font-size: 10px; line-height: 1; font-weight: 600; color: var(--muted); white-space: nowrap; font-variant-numeric: tabular-nums; transition: color .12s, transform .12s; }
+.scrub-rail span.skip { visibility: hidden; }
+.scrub-rail span.cur { color: var(--accent); transform: scale(1.25); visibility: visible; }
+.scrub-bubble { position: absolute; right: calc(100% + 14px); top: 0; transform: translateY(-50%); min-width: 64px; height: 64px; padding: 0 16px;
+  display: none; align-items: center; justify-content: center; border-radius: 32px 32px 8px 32px; background: var(--grad); color: var(--on-accent);
+  font-size: 24px; font-weight: 700; white-space: nowrap; box-shadow: var(--shadow); pointer-events: none; }
+.scrubber.drag .scrub-bubble { display: flex; }
+@media (max-width: 760px) { .scrubber { top: 120px; right: 2px; } .scrub-rail { padding: 6px 4px; } }

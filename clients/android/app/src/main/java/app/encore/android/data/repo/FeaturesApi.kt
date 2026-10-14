@@ -303,7 +303,9 @@ class FeaturesApi(private val api: EncoreApi, private val client: OkHttpClient) 
                 throw ApiException(res.code, detail, o)
             }
             if (text.isBlank()) return null
-            return try { json.parseToJsonElement(text) } catch (e: Exception) { throw IOException("Unexpected reply from the server") }
+            val el = try { json.parseToJsonElement(text) } catch (e: Exception) { throw IOException("Unexpected reply from the server") }
+            app.encore.android.data.api.CoverVersions.note(el)
+            return el
         }
     }
 

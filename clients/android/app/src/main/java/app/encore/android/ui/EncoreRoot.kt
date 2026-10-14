@@ -32,6 +32,9 @@ import app.encore.android.R
 import app.encore.android.data.api.Track
 import app.encore.android.data.session.AuthState
 import app.encore.android.data.session.Session
+import app.encore.android.remote.DevicesSheet
+import app.encore.android.remote.LinkedBar
+import app.encore.android.remote.RemoteUi
 import app.encore.android.ui.components.AddToPlaylistSheet
 import app.encore.android.ui.components.MenuEntry
 import app.encore.android.ui.components.PopMenu
@@ -152,8 +155,14 @@ private fun MainScreen(graph: AppGraph, player: PlayerConnection, session: Sessi
     val lyricsOpen by player.lyricsOpen.collectAsState()
     val signalPathOpen by player.signalPathOpen.collectAsState()
     val upNextOpen by player.upNextOpen.collectAsState()
+    // this phone as a remote for another device (remote/RemoteDevice.kt) and the Devices sheet
+    val link by player.remote.link.collectAsState()
+    val devicesOpen by RemoteUi.devicesOpen.collectAsState()
 
     LaunchedEffect(session) { graph.likes.refresh(force = true) }
+    // the next song's cover, fetched ahead so it shows at once when the song changes
+    val queueIndex by player.queueIndex.collectAsState()
+    LaunchedEffect(queueIndex, nowPlaying?.id) { player.queue.value.getOrNull(queueIndex + 1)?.let { graph.coverPreloader.nextSong(it.albumId) } }
 
     val nav = remember(graph, player) {
         Nav(
@@ -188,7 +197,8 @@ private fun MainScreen(graph: AppGraph, player: PlayerConnection, session: Sessi
             bottomBar = {
                 Column {
                     // "Continue <song> from 2:31 · was playing on <device>": pick up where another device left off
-                    SpotBar(nav, session)
+                    // linked: "Controlling <device>" instead (the pick-up bar is hidden while this phone is a remote)
+                    if (link == null) SpotBar(nav, session) else LinkedBar(nav)
                     if (nowPlaying != null) MiniPlayer(nav, onOpen = { showPlayer = true })
                     Box(Modifier.fillMaxWidth().height(1.dp).background(p.border))
                     NavigationBar(containerColor = p.bg2, tonalElevation = 0.dp) {
@@ -252,6 +262,9 @@ private fun MainScreen(graph: AppGraph, player: PlayerConnection, session: Sessi
         }
         if (showUpNext || upNextOpen) {
             UpNextSheet(nav, onDismiss = { showUpNext = false; player.closeUpNext() })
+        }
+        if (devicesOpen) {
+            DevicesSheet(nav, onDismiss = { RemoteUi.devicesOpen.value = false })
         }
         addToPlaylistIds?.let { ids ->
             AddToPlaylistSheet(graph.api, ids, onDismiss = { addToPlaylistIds = null })

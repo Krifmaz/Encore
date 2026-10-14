@@ -3,6 +3,7 @@ import { art, confirmDialog, debounce, emptyState, esc, fmt, icon, modal, popMen
 import { bindTiles, libraryTile } from './common.js';
 import { addToPlaylistModal } from './playlists.js';
 import * as player from '../player.js';
+import { scrubber } from '../scrubber.js';
 
 export async function playAlbum(id, start = 0) {
   const a = await api.get(`/library/albums/${id}`);
@@ -156,16 +157,44 @@ export async function render(view, ctx) {
   paintSort();
   view.querySelector('#lib-filter').value = st.filter;
   bindTiles(body, ctx.navigate);
+  // the side scrubber: sections of the list as it is sorted (none while filtering)
+  const rowsOf = () => body.querySelectorAll(st.tab === 'tracks' ? 'tbody tr' : '.grid > *');
+  const scrub = scrubber(view, {
+    rows: rowsOf,
+    long: () => !more.classList.contains('hidden') || document.documentElement.scrollHeight > 2 * window.innerHeight,
+    jump: async (offset) => {
+      while (rowsOf().length <= offset && !more.classList.contains('hidden')) {
+        const n = rowsOf().length;
+        await load(true, offset + 1 - n);
+        if (rowsOf().length === n) break;
+      }
+      const r = rowsOf()[offset];
+      if (r) window.scrollTo({ top: r.getBoundingClientRect().top + window.scrollY - 16 });
+    },
+    onLeave: ctx.onLeave,
+  });
+  let indexSeq = 0;
+  const loadIndex = async () => {
+    const seq = ++indexSeq;
+    scrub.set([]);
+    if (!['albums', 'singles', 'artists', 'tracks'].includes(st.tab) || st.q) return;
+    const kind = st.tab === 'albums' ? 'albums&album_kind=albums' : st.tab;
+    try {
+      const sections = await api.get(`/library/index?kind=${kind}&sort=${st.sort}&dir=${st.dir}&filter=${st.filter}&artist=${encodeURIComponent(st.artist)}`);
+      if (seq === indexSeq) scrub.set(sections);
+    } catch { /* no scrubber */ }
+  };
 
-  const load = async (append = false) => {
+  const load = async (append = false, want = 0) => {
     if (!append) { st.offset = 0; body.innerHTML = skeletonGrid(12); }
     const filtEl = view.querySelector('#lib-filter');
     filtEl.classList.toggle('hidden', !['albums', 'singles'].includes(st.tab));
     view.querySelector('#lib-q').parentElement.classList.toggle('hidden', ['duplicates', 'issues'].includes(st.tab));
+    if (!append) loadIndex();
     if (st.tab === 'duplicates') return renderDuplicates(body, view, more, load);
     if (st.tab === 'issues') return renderIssues(body, view, more);
     if (st.tab === 'albums' || st.tab === 'singles') {
-      const res = await api.get(`/library/albums?q=${encodeURIComponent(st.q)}&sort=${st.sort}&dir=${st.dir}&kind=${st.tab}&filter=${st.filter}&artist=${encodeURIComponent(st.artist)}&limit=${PAGE}&offset=${st.offset}`);
+      const res = await api.get(`/library/albums?q=${encodeURIComponent(st.q)}&sort=${st.sort}&dir=${st.dir}&kind=${st.tab}&filter=${st.filter}&artist=${encodeURIComponent(st.artist)}&limit=${want ? Math.min(500, Math.max(PAGE, want)) : PAGE}&offset=${st.offset}`);
       const html = res.items.map(libraryTile).join('');
       if (append) body.querySelector('.grid').insertAdjacentHTML('beforeend', html);
       else body.innerHTML = res.items.length ? `<div class="grid">${html}</div>` : emptyState(icon.library, 'No albums found', st.filter === 'untagged' ? 'Everything is tagged 🎉' : '');
@@ -178,16 +207,17 @@ export async function render(view, ctx) {
       view.querySelector('#lib-sub').textContent = `${fmt.num(rows.length)} artists`;
       body.innerHTML = rows.length ? `<div class="grid">${rows.map(a => `
         <div class="tile round" data-href="${a.mbid ? `/artist/${esc(a.mbid)}` : `/artist-name/${encodeURIComponent(a.name)}`}">
-          <div class="art">${art(`/api/library/albums/${a.cover_album}/cover`, a.name)}
+          <div class="art">${art(`/api/library/albums/${a.cover_album}/cover${a.cover_v ? '?v=' + a.cover_v : ''}`, a.name)}
             ${admin ? `<div class="overlay"><button class="fab" data-rm-artist="${esc(a.name)}" title="Remove this artist from the library">${icon.trash}</button></div>` : ''}</div>
           <div class="t ellipsis" style="text-align:center">${esc(a.name)}</div>
           <div class="s" style="text-align:center">${a.albums} album${a.albums === 1 ? '' : 's'} · ${a.tracks} tracks</div>
         </div>`).join('')}</div>` : emptyState(icon.users, 'No artists found');
     } else {
-      const rows = await api.get(`/library/tracks?q=${encodeURIComponent(st.q)}&sort=${st.sort}&dir=${st.dir}&limit=300&offset=${append ? st.offset : 0}`);
+      const lim = want ? Math.min(1000, Math.max(300, want)) : 300;
+      const rows = await api.get(`/library/tracks?q=${encodeURIComponent(st.q)}&sort=${st.sort}&dir=${st.dir}&limit=${lim}&offset=${append ? st.offset : 0}`);
       const base = append ? (body._tracks || []).length : 0;
       const html = rows.map((t, i) => `<tr data-i="${base + i}">
-        <td style="width:52px"><button class="thumb play-thumb" data-play-track="${t.id}" aria-label="Play">${art(`/api/library/albums/${t.album_id}/cover`, t.album || t.title)}<i>${icon.play}</i></button></td>
+        <td style="width:52px"><button class="thumb play-thumb" data-play-track="${t.id}" aria-label="Play">${art(`/api/library/albums/${t.album_id}/cover${t.cover_v ? '?v=' + t.cover_v : ''}`, t.album || t.title, '', 200)}<i>${icon.play}</i></button></td>
         <td><div style="font-weight:600" class="ellipsis">${esc(t.title)}</div><div class="small muted ellipsis">${esc(t.artist)}<span class="show-sm"> · ${esc(t.album || '')}</span></div></td>
         <td class="hide-sm"><a href="#/library/album/${esc(t.album_id)}">${esc(t.album || '')}</a></td>
         <td class="hide-sm"><span class="badge">${esc((t.format || '').toUpperCase())}${t.bitrate ? ' ' + t.bitrate + 'k' : ''}</span> ${verifyBadge(t)}</td>
@@ -201,9 +231,10 @@ export async function render(view, ctx) {
         body._tracks = body._tracks.concat(rows);
       }
       st.offset = (append ? st.offset : 0) + rows.length;
-      more.classList.toggle('hidden', rows.length < 300);
+      more.classList.toggle('hidden', rows.length < lim);
       view.querySelector('#lib-sub').textContent = '';
     }
+    scrub.refresh();
   };
 
   body.addEventListener('click', async (e) => {
@@ -369,7 +400,7 @@ export async function renderAlbum(view, ctx) {
   const history = [requesters ? `Requested by ${esc(requesters)}${isFinite(requestedAt) ? ` on ${fmt.day(requestedAt)}` : ''}` : '', isFinite(addedAt) ? `${requesters ? 'added' : 'Added'} ${fmt.day(addedAt)}` : ''].filter(Boolean).join(' · ');
   view.innerHTML = `
     <div class="detail-head">
-      <div class="cover">${art(`/api/library/albums/${id}/cover`, a.album, "big")}</div>
+      <div class="cover">${art(`/api/library/albums/${id}/cover${a.cover_v ? '?v=' + a.cover_v : ''}`, a.album, "big")}</div>
       <div class="grow">
         <div class="kicker">Album · In your library</div>
         <h1>${esc(a.album || 'Unknown album')}</h1>

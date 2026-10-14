@@ -31,6 +31,7 @@ import androidx.media3.session.MediaSession
 import androidx.media3.session.SessionCommand
 import androidx.media3.session.SessionResult
 import app.encore.android.AppGraph
+import app.encore.android.CrashLog
 import app.encore.android.EncoreApp
 import app.encore.android.R
 import app.encore.android.cadenza.CadenzaEngine
@@ -39,6 +40,8 @@ import app.encore.android.data.api.Track
 import app.encore.android.data.prefs.PhonePrefs
 import app.encore.android.data.prefs.PlaybackPrefs
 import app.encore.android.data.prefs.Quality
+import app.encore.android.remote.RemoteDevice
+import app.encore.android.remote.ServiceHost
 import app.encore.android.ui.MainActivity
 import app.encore.android.ui.components.Toasts
 import com.google.common.collect.ImmutableList
@@ -126,6 +129,15 @@ class EncorePlaybackService : MediaLibraryService() {
     private val played = LinkedHashSet<Long>()
     private var fetchingMore = false
 
+    /** this phone as an Encore remote device: check-ins and commands from other devices (remote/ServiceHost.kt) */
+    private var remoteHost: ServiceHost? = null
+
+    /** like / shuffle / repeat / lyrics buttons and live lyrics for the car, notification and lock screen (CarControls.kt) */
+    private lateinit var car: CarControls
+
+    /** crossfade / overlap / smart overlap between songs (Transitions.kt) */
+    private var transitions: Transitions? = null
+
     override fun onCreate() {
         super.onCreate()
         graph = (application as EncoreApp).graph
@@ -186,6 +198,21 @@ class EncorePlaybackService : MediaLibraryService() {
             .build()
         player.addListener(listener)
         player.addAnalyticsListener(analytics)
+        // song transitions (Settings → Playback): a second player fades the old song's tail out (Transitions.kt)
+        transitions = Transitions(
+            context = this,
+            main = player,
+            // the old song's tail is fetched directly at the URL it is playing from: through the resolver it would
+            // become the song "opened last" (serverRenderAt) and could get another variant after resolver.forget
+            auxSources = DefaultMediaSourceFactory(upstream),
+            auxItem = { item -> auxItem(item) },
+            api = graph.api,
+            io = io,
+            prefs = { prefs },
+            allowed = { !held && !(phone.bitPerfect && usb.target != null) && currentVariant()?.serverStream != true },
+            durationSec = { durationSec() },
+            onHandOver = { item -> handedOver(item) },
+        )
 
         val notifications = DefaultMediaNotificationProvider.Builder(this).build()
         notifications.setSmallIcon(R.drawable.ic_note)
@@ -193,11 +220,13 @@ class EncorePlaybackService : MediaLibraryService() {
 
         val open = Intent(this, MainActivity::class.java).addFlags(Intent.FLAG_ACTIVITY_SINGLE_TOP)
         val sessionActivity = PendingIntent.getActivity(this, 0, open, PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT)
-        session = MediaLibrarySession.Builder(this, player, Callback())
+        car = CarControls(this, graph, player, io) { absPositionMs() }
+        session = MediaLibrarySession.Builder(this, car.player, Callback())
             .setSessionActivity(sessionActivity)
             // covers are content:// URIs from CoverProvider, read with the default data source
             .setBitmapLoader(CacheBitmapLoader(DataSourceBitmapLoader.Builder(this).build()))
             .build()
+        car.attach(session)
 
         // the preferences follow the account; the UI changes them through PrefsRepository in this process
         prefsJob = graph.scope.launch { graph.prefs.playback.collect { p -> if (!released) applyPrefs(p) } }
@@ -208,13 +237,43 @@ class EncorePlaybackService : MediaLibraryService() {
         routeUsb()
         graph.prefs.sync()
         main.post(adaptTick)
+        CrashLog.log("playback service started")
         restoreAtStart()
+        remoteHost = ServiceHost(
+            remote = RemoteDevice.get(this),
+            player = player,
+            positionMs = { absPositionMs() },
+            durationSec = { durationSec() },
+            seekTo = { ms -> seekAbs(ms) },
+            signal = {
+                val i = lastPublished
+                val out = effects.configuredOutputRate
+                Triple(i?.qualityBadge ?: "", i?.transportKind ?: "", if (out > 0) out else deviceRate)
+            },
+            items = { tracks -> tracks.map { MediaItems.track(graph.api, it) }.also { rememberAll(it) } },
+            newQueue = { resolver.forgetAll(); car.queueReplaced() },
+            volume = { transitions?.volume() ?: player.volume },
+            fading = { transitions?.fading == true },
+        ).also { it.start() }
     }
 
     override fun onGetSession(controllerInfo: MediaSession.ControllerInfo): MediaLibrarySession = session
 
+    /**
+     * Sticky: when the process dies while playing (a crash, or the system closing it), Android starts the service
+     * again and restoreAtStart puts the queue back (playing on when it was playing under 2 minutes ago).
+     */
+    override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
+        super.onStartCommand(intent, flags, startId)
+        if (intent == null) CrashLog.log("playback service restarted by the system")
+        return START_STICKY
+    }
+
     override fun onDestroy() {
         released = true
+        remoteHost?.stop()
+        if (this::car.isInitialized) car.release()
+        remoteHost = null
         main.removeCallbacks(tick)
         main.removeCallbacks(adaptTick)
         prefsJob?.cancel()
@@ -223,7 +282,12 @@ class EncorePlaybackService : MediaLibraryService() {
         usb.onChange = null
         usb.stop()
         saveResume()
+        // a clean stop: nothing to recover at the next start
+        resume.markPlaying(false)
+        CrashLog.log("playback service stopped")
         session.release()
+        transitions?.release()
+        transitions = null
         player.removeListener(listener)
         player.removeAnalyticsListener(analytics)
         player.release()
@@ -484,10 +548,17 @@ class EncorePlaybackService : MediaLibraryService() {
             if (isPlaying) main.post(tick) else saveResumePosition()
         }
 
+        override fun onPlayWhenReadyChanged(playWhenReady: Boolean, reason: Int) {
+            // crash recovery: "playing" (or about to, e.g. buffering) survives the process; see restoreAtStart
+            resume.markPlaying(playWhenReady && player.playbackState != Player.STATE_ENDED)
+            CrashLog.log("play ${if (playWhenReady) "on" else "off"} (reason $reason)")
+        }
+
         override fun onPlaybackStateChanged(playbackState: Int) {
             if (playbackState == Player.STATE_BUFFERING) stalled()
             if (playbackState == Player.STATE_READY) main.removeCallbacks(slowStart)
             if (playbackState == Player.STATE_ENDED) {
+                resume.markPlaying(false)
                 val id = lastId
                 if (!logged && id != null && lastDurationSec > 0) logPlay(id, lastDurationSec)
                 logged = true
@@ -496,6 +567,7 @@ class EncorePlaybackService : MediaLibraryService() {
         }
 
         override fun onPlayerError(error: PlaybackException) {
+            CrashLog.log("player error ${error.errorCodeName}: ${error.message}")
             val t = currentTrack() ?: return
             val v = resolver.variantOf(t.id) ?: return
             val at = absPositionMs() / 1000.0
@@ -556,6 +628,26 @@ class EncorePlaybackService : MediaLibraryService() {
         // half the song or 4 minutes, whichever comes first; songs under 30 s at their end
         val hit = if (d > 0) (if (d < 30) p >= d - 1 else p >= minOf(d / 2, 240.0)) else p >= 30
         if (hit) logPlay(id, p)
+    }
+
+    /** The old song as the transitions' second player opens it: the concrete URL of the variant it is playing. */
+    private fun auxItem(item: MediaItem): MediaItem? {
+        val uri = item.localConfiguration?.uri ?: return null
+        // not a library stream (an offline file): the same URI
+        if (StreamResolver.trackIdOf(uri) == null) return item
+        val id = MediaItems.trackId(item.mediaId) ?: return null
+        val v = resolver.variantOf(id) ?: return null
+        return item.buildUpon().setUri(resolver.url(id, v)).build()
+    }
+
+    /**
+     * A song transition moves the player on to the next song with a seek while the old one fades out: the old song
+     * ran to its end, so it counts like a gapless hand-over (REASON_AUTO), with its full length.
+     */
+    private fun handedOver(item: MediaItem) {
+        val id = MediaItems.trackId(item.mediaId) ?: return
+        if (id != lastId) return
+        if (!logged && lastDurationSec > 0) logPlay(id, lastDurationSec)
     }
 
     private fun logPlay(id: Long, seconds: Double) {
@@ -867,15 +959,30 @@ class EncorePlaybackService : MediaLibraryService() {
      * paused at its song and position (nothing plays until you press play). Off: the player starts empty.
      */
     private fun restoreAtStart() {
-        if (!prefs.resume) return
+        // crash recovery: the process died while playing (a crash, or the system closed it). The queue comes back
+        // at its spot even with the setting off, and plays on when it was playing under 2 minutes ago, unless it
+        // already did that in the last 2 minutes (a song that crashes the app must not loop)
+        val interruptedMs = resume.takeInterrupted()
+        val playOn = interruptedMs != null && interruptedMs < RECOVER_WINDOW_MS &&
+            System.currentTimeMillis() - resume.recoveredAt > RECOVER_WINDOW_MS
+        if (interruptedMs != null) CrashLog.log("playback stopped unexpectedly ${interruptedMs / 1000} s ago: ${if (playOn) "playing on" else "restoring paused"}")
+        if (!prefs.resume && interruptedMs == null) return
         io.execute {
             try { runBlocking { graph.store.awaitLoaded() } } catch (_: Exception) {}
             if (graph.store.current == null) return@execute
             val snap = resume.load() ?: return@execute
             val items = snap.tracks.map { MediaItems.track(graph.api, it) }
             main.post {
-                if (released || !prefs.resume || player.mediaItemCount > 0) return@post
+                if (released || (!prefs.resume && interruptedMs == null) || player.mediaItemCount > 0) return@post
                 rememberAll(items)
+                if (playOn) {
+                    resume.recoveredAt = System.currentTimeMillis()
+                    held = false
+                    player.setMediaItems(items, snap.index, snap.positionMs)
+                    player.prepare()
+                    player.play()
+                    return@post
+                }
                 held = true
                 player.setMediaItems(items, snap.index, snap.positionMs)
             }
@@ -889,6 +996,7 @@ class EncorePlaybackService : MediaLibraryService() {
         override fun onConnect(session: MediaSession, controller: MediaSession.ControllerInfo): MediaSession.ConnectionResult {
             val sessionCommands = MediaSession.ConnectionResult.DEFAULT_SESSION_AND_LIBRARY_COMMANDS.buildUpon()
                 .add(SessionCommand(CMD_SEEK, Bundle.EMPTY))
+                .apply { for (c in CarControls.COMMANDS) add(SessionCommand(c, Bundle.EMPTY)) }
                 .build()
             if (controller.isTrusted || controller.packageName in FULL_ACCESS || controller.packageName == packageName) {
                 return MediaSession.ConnectionResult.accept(sessionCommands, MediaSession.ConnectionResult.DEFAULT_PLAYER_COMMANDS)
@@ -897,6 +1005,7 @@ class EncorePlaybackService : MediaLibraryService() {
         }
 
         override fun onCustomCommand(session: MediaSession, controller: MediaSession.ControllerInfo, customCommand: SessionCommand, args: Bundle): ListenableFuture<SessionResult> {
+            if (car.handle(customCommand.customAction)) return Futures.immediateFuture(SessionResult(SessionResult.RESULT_SUCCESS))
             if (customCommand.customAction == CMD_SEEK) {
                 seekAbs(args.getLong(ARG_POSITION_MS, 0L))
                 return Futures.immediateFuture(SessionResult(SessionResult.RESULT_SUCCESS))
@@ -913,7 +1022,15 @@ class EncorePlaybackService : MediaLibraryService() {
             val f = SettableFuture.create<LibraryResult<MediaItem>>()
             io.execute {
                 try { runBlocking { graph.store.awaitLoaded() } } catch (_: Exception) {}
-                f.set(LibraryResult.ofItem(tree.root(), params))
+                // Android Auto shows its search button only when the root says search is supported
+                val extras = Bundle(params?.extras ?: Bundle.EMPTY).apply { putBoolean(BrowseTree.EXTRAS_SEARCH_SUPPORTED, true) }
+                val rootParams = LibraryParams.Builder()
+                    .setExtras(extras)
+                    .setOffline(params?.isOffline == true)
+                    .setRecent(params?.isRecent == true)
+                    .setSuggested(params?.isSuggested == true)
+                    .build()
+                f.set(LibraryResult.ofItem(tree.root(), rootParams))
             }
             return f
         }
@@ -981,6 +1098,7 @@ class EncorePlaybackService : MediaLibraryService() {
 
         /** "Play" on a browsed song plays the whole list it came from, starting there; folders play all their songs. */
         override fun onSetMediaItems(mediaSession: MediaSession, controller: MediaSession.ControllerInfo, mediaItems: MutableList<MediaItem>, startIndex: Int, startPositionMs: Long): ListenableFuture<MediaSession.MediaItemsWithStartPosition> {
+            car.queueReplaced()
             val f = SettableFuture.create<MediaSession.MediaItemsWithStartPosition>()
             io.execute {
                 try {
@@ -1084,6 +1202,9 @@ class EncorePlaybackService : MediaLibraryService() {
         /** Custom session command: seek in song time (server-made streams restart at `t=`). Args: [ARG_POSITION_MS]. */
         const val CMD_SEEK = "app.encore.android.SEEK"
         const val ARG_POSITION_MS = "position_ms"
+
+        /** Crash recovery: playing this recently when the process died → it plays on by itself (restoreAtStart). */
+        private const val RECOVER_WINDOW_MS = 2 * 60 * 1000L
 
         /** Controllers that may play and skip even if Media3 can't verify them as trusted. */
         private val FULL_ACCESS = setOf(

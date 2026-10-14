@@ -1,0 +1,11 @@
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="24dp"
+    android:height="24dp"
+    android:viewportWidth="24"
+    android:viewportHeight="24">
+    <!-- ic_lyrics cut out of a filled rounded square: "live lyrics on" -->
+    <path
+        android:fillColor="#FFFFFFFF"
+        android:fillType="evenOdd"
+        android:pathData="M5,1h14a4,4 0 0,1 4,4v14a4,4 0 0,1 -4,4H5a4,4 0 0,1 -4,-4V5a4,4 0 0,1 4,-4zM12,4.5v8.55c-0.59,-0.34 -1.27,-0.55 -2,-0.55 -1.93,0 -3.5,1.57 -3.5,3.5s1.57,3.5 3.5,3.5 3.5,-1.57 3.5,-3.5V8h3.5V4.5h-5z" />
+</vector>

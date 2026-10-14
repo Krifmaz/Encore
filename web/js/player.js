@@ -77,7 +77,7 @@ function native() {
   const t = current();
   try {
     n.nowPlaying(JSON.stringify(t ? { title: t.title || '', artist: t.artist || '', album: t.album || '', playing: !audio.paused,
-      art: cover(t) ? new URL(cover(t), location.href).href : '' } : { stopped: true }));
+      art: cover(t) ? new URL(coverAt(t, 600), location.href).href : '' } : { stopped: true }));
   } catch { /* ignore */ }
 }
 window.encorePlayer = { toggle: () => toggle(), next: () => next(), prev: () => prev(), open: () => setFull(true) };
@@ -188,7 +188,15 @@ function runCommand(c) {
 }
 export function queue() { return { tracks: state.queue, index: state.index }; }
 
-const cover = (t) => t.preview ? t.cover : t.album_id ? `/api/library/albums/${t.album_id}/cover` : t.cover;
+const cover = (t) => t.preview ? t.cover : t.album_id ? `/api/library/albums/${t.album_id}/cover${t.cover_v ? '?v=' + t.cover_v : ''}` : t.cover;
+// a library cover at a thumbnail size (other covers as they are)
+const coverAt = (t, s) => { const c = cover(t); return c && /\/cover(\?v=\d+)?$/.test(c) ? c.replace(/\/cover(?:\?v=(\d+))?$/, (_, v) => `/cover?s=${s}${v ? '&v=' + v : ''}`) : c; };
+// the next song's cover, so it shows at once when the song changes
+function preloadNextCover() {
+  const n = state.queue[state.index + 1];
+  if (!n) return;
+  for (const s of state.full ? [200, 1000] : [200]) { const c = coverAt(n, s); if (c) { const i = new Image(); i.decoding = 'async'; i.src = c; } }
+}
 
 /** context: 'album' | 'single' | 'list' – decides what happens when the queue ends. */
 const sendable = (tracks) => tracks.filter(t => t && typeof t.id === 'number').map(slim);
@@ -308,7 +316,7 @@ export function saveOffline(tracks) {
     window.EncoreNative.saveOffline(JSON.stringify({
       id: String(t.id), title: t.title || '', artist: t.artist || '', album: t.album || '', ext: conv ? 'flac' : (t.format || 'audio'),
       url: new URL(`/api/library/tracks/${t.id}/stream${conv ? '?transcode=true' : ''}`, location.href).href,
-      art: t.album_id ? new URL(`/api/library/albums/${t.album_id}/cover?s=600`, location.href).href : '',
+      art: t.album_id ? new URL(coverAt(t, 600), location.href).href : '',
     }));
   }
 }
@@ -316,10 +324,11 @@ export function saveOffline(tracks) {
 /**
  * Start the current song (or restart it at `offset`).
  * rung: kbps of the lossy stream (null = what the song should start on) · dsp: null = whatever the settings say
- * resume: the same song continues (a quality switch or a seek) – no new play / now-playing · fade: crossfade into it
+ * resume: the same song continues (a quality switch or a seek) – no new play / now-playing · fade: a song transition into it
+ * from: where the new song starts in a transition (Smart overlap skips its silent lead-in)
  * hold: load it paused (a restored spot) – it starts when you press play
  */
-function load({ transcode = false, offset = 0, rung = null, dsp = null, resume = false, fade: fading = false, hold = false } = {}) {
+function load({ transcode = false, offset = 0, rung = null, dsp = null, resume = false, fade: fading = false, hold = false, from = 0 } = {}) {
   const t = current();
   if (!t) return;
   held = hold;
@@ -350,7 +359,10 @@ function load({ transcode = false, offset = 0, rung = null, dsp = null, resume =
   }
   const url = streamUrl(t, { transcode: state.transcoded && !state.lossy && !state.dsp, rung: state.rung, dsp: state.dsp, offset: serverOffset });
   const usePlain = !!(t.preview && fx.built);
-  if (!offset && !usePlain && spare && spare.dataset.url === url) {
+  const swap = !offset && !usePlain && spare && spare.dataset.url === url;
+  // a transition needs the pre-buffered element; without it the old song stops and this one starts plainly
+  if (fading && !swap) endFade();
+  if (swap) {
     // already buffered in the background: swap players and start right away
     const old = audio;
     audio = spare;
@@ -359,8 +371,8 @@ function load({ transcode = false, offset = 0, rung = null, dsp = null, resume =
     if (old === plain) parked = null;
     if (!fading) { old.pause(); old.removeAttribute('src'); }
     delete old.dataset.url;
-    audio.currentTime = 0;
-    setFadeGain(audio, fading ? 0 : 1);
+    audio.currentTime = fading && from > 0 && seekableTo(audio, from) ? from : 0;
+    setFadeGain(audio, fading && fade ? fadeGains(fade, 0)[1] : 1);
   } else {
     if (usePlain !== (audio === plain)) {
       // a preview with the effects graph built plays on the never-wrapped element; anything else on a wrapped one
@@ -392,9 +404,10 @@ function load({ transcode = false, offset = 0, rung = null, dsp = null, resume =
   if ('mediaSession' in navigator) {
     navigator.mediaSession.metadata = new MediaMetadata({
       title: t.title || '', artist: t.artist || '', album: t.album || '',
-      artwork: cover(t) ? [{ src: cover(t), sizes: '512x512' }] : [],
+      artwork: cover(t) ? [{ src: coverAt(t, 600), sizes: '600x600' }] : [],
     });
   }
+  preloadNextCover();
   document.body.classList.add('has-player');
   render();
   emit();
@@ -474,8 +487,8 @@ function fullyBuffered() {
   return b.length > 0 && b.end(b.length - 1) >= d - 1;
 }
 /** Start buffering the song that plays next – once this one is safely ahead, never while it's short of bandwidth. */
-function maybePreload(force = false) {
-  if (!spare || !prefs.preload || link || fade) return;
+function maybePreload(force = false, need = false) {
+  if (!spare || (!prefs.preload && !need) || link || fade) return;
   const n = state.queue[state.index + 1];
   if (!n || (n.preview && fx.built)) return;   // a preview plays on the never-wrapped element, not the spare
   const url = startUrl(n);
@@ -685,35 +698,85 @@ function prepareAhead(t) {
 }
 const dspNote = (s) => s === 'cached' ? ' (pre-rendered)' : s === 'rendering' || s === 'queued' ? ' (rendering ahead)' : '';
 
-// ---- crossfade ---------------------------------------------------------------------------------
-// The spare element already holds the next song: start it `crossfade` seconds before this one ends and blend
-// the two with an equal-power curve (Web Audio gains when the effects graph runs, element volume otherwise).
-let fade = null;   // { out: the element fading out, len: seconds, timer }
-function maybeCrossfade() {
-  const cf = prefs.crossfade;
-  if (!cf || fade || link || state.repeat === 'one' || audio.paused || state.dragging) return;
+// ---- song transitions ----------------------------------------------------------------------------
+// Off | Crossfade (equal-power, both fade) | Overlap (the next song starts at full volume early, only the old one
+// fades out) | Smart overlap (the silent ends of both songs are skipped: the next song starts at its first audible
+// moment, overlapping the old one up to its last audible moment). The next song plays on the spare element; when
+// the window opens and it isn't buffered (pre-load off, a slow server stream), it starts loading then and the
+// transition begins as soon as it can play, over what is left of the window.
+// The gains follow the new song's own clock and are set from its timeupdate events as well as a timer: in a
+// hidden or minimised window (or a phone with the screen off) timers are throttled or stopped, and the fade must
+// not stall there – that is what left the next song silent before ("it just makes the audio quiet").
+let fade = null;   // { out: the element fading out, mode, len: seconds, from: where the new song started, outEnd: old element time where it stops, timer }
+const edges = new Map();   // track id → { start_s, end_s } once known (null: asked, unknown)
+/** Where a song's sound starts and stops (Smart overlap) – null until the server has answered. */
+function trackEdges(t) {
+  if (!isLib(t)) return null;
+  if (!edges.has(t.id)) {
+    edges.set(t.id, null);
+    api.get(`/library/tracks/${t.id}/edges`).then(e => {
+      if (e && Number(e.end_s) > 0) edges.set(t.id, { start_s: Math.max(0, Number(e.start_s) || 0), end_s: Number(e.end_s) });
+    }).catch(() => {});
+  }
+  return edges.get(t.id);
+}
+/** The URL load() asks for with these options (offset 0) – the same decisions load() makes. */
+function plannedUrl(t, { transcode = false, rung = 0, dsp = false } = {}) {
+  const lossy = rung > 0;
+  const d = !!dsp && wantDsp(t, lossy);
+  const transcoded = convert(t) || transcode || lossy || d;
+  return streamUrl(t, { transcode: transcoded && !lossy && !d, rung, dsp: d });
+}
+/** The load() options that make load() use exactly what the spare element holds for song `n` (any rung) – null when it holds something else. */
+function spareFor(n) {
+  const u = spare?.dataset.url;
+  if (!u || !n || n.preview || typeof n.id !== 'number' || !u.startsWith(`/api/library/tracks/${n.id}/stream`)) return null;
+  const q = new URLSearchParams(u.split('?')[1] || '');
+  if (q.has('t')) return null;
+  const o = { rung: Number(q.get('kbps')) || 0, dsp: q.get('dsp') === '1', transcode: q.get('transcode') === '1' };
+  return plannedUrl(n, o) === u ? o : null;
+}
+const seekableTo = (el, at) => { try { const s = el.seekable; return s.length > 0 && s.end(s.length - 1) >= at; } catch { return false; } };
+const fadeGains = (f, x) => playback.transitionGains(f.mode, x, x * f.len);
+function maybeTransition() {
+  const mode = prefs.transition;
+  if (!mode || mode === 'off' || fade || link || held || state.repeat === 'one' || audio.paused || state.dragging) return;
   const t = current(), n = state.queue[state.index + 1];
-  if (!t || !n) return;
-  const d = duration();
-  if (!d || d < 2 * cf) return;
-  const remaining = d - position();
-  if (remaining > cf || remaining < 1) return;
+  if (!t || !n || t.preview || (n.preview && fx.built)) return;
   if (prefs.crossfade_album_gapless && t.album_id != null && t.album_id === n.album_id) return;
-  if (!spare.dataset.url || spare.dataset.url !== startUrl(n) || spare.readyState < 3) return;
+  const secs = Math.max(1, prefs.crossfade || playback.TRANSITION_DEFAULT_S);
+  const d = duration();
+  if (!d || d < 2 * secs) return;
+  const smart = mode === 'smart' ? [trackEdges(t), trackEdges(n)] : null;
+  // the old song's last audible moment (Smart overlap), else its end
+  const end = smart?.[0] && smart[0].end_s > 2 * secs && smart[0].end_s < d ? smart[0].end_s : d;
+  const remaining = end - position();
+  if (remaining > secs || remaining < 1) return;
+  const o = spareFor(n);
+  if (!o || spare.readyState < 3) {
+    // not buffered yet: fetch it now (even with pre-load off) and start as soon as it can play
+    if (!o) maybePreload(true, true);
+    return;
+  }
   logPlay();
-  fade = { out: audio, len: remaining, timer: null };
+  const from = smart?.[1] && smart[1].start_s > 0.05 && smart[1].start_s < 30 ? smart[1].start_s : 0;
+  fade = { out: audio, mode, len: remaining, from, outEnd: (audio.currentTime || 0) + remaining, timer: null };
   state.index++;
-  load({ fade: true });
+  load({ fade: true, ...o, from });
+  if (!fade) return;   // load() could not use the spare after all: a plain start
+  fade.from = audio.currentTime || 0;
   fade.timer = setInterval(stepFade, 50);
+  stepFade();
 }
 function stepFade() {
   if (!fade) return;
-  const x = Math.min(1, (audio.currentTime || 0) / fade.len);
-  setFadeGain(fade.out, Math.cos(x * Math.PI / 2));
-  setFadeGain(audio, Math.sin(x * Math.PI / 2));
-  if (x >= 1 || fade.out.ended) endFade();
+  const x = Math.min(1, Math.max(0, (audio.currentTime || 0) - fade.from) / fade.len);
+  const [gOut, gIn] = fadeGains(fade, x);
+  setFadeGain(fade.out, gOut, true);
+  setFadeGain(audio, gIn, true);
+  if (x >= 1 || fade.out.ended || (fade.out.currentTime || 0) >= fade.outEnd) endFade();
 }
-/** Finish (or cut short – next/prev/seek) a crossfade: the old song stops, the new one plays at full volume. */
+/** Finish (or cut short – next/prev/seek) a transition: the old song stops, the new one plays at full volume. */
 function endFade() {
   if (!fade) return;
   clearInterval(fade.timer);
@@ -728,11 +791,20 @@ function endFade() {
   route();
   maybePreload();
 }
-/** The fade level of one element: a Web Audio gain when it is routed through the effects graph, else its volume (under the slider). */
-function setFadeGain(el, g) {
+/** The fade level of one element: a Web Audio gain when it is routed through the effects graph, else its volume (under the
+ *  slider). smooth: glide there on the audio clock (the steps come a few times a second, more slowly in a hidden window). */
+function setFadeGain(el, g, smooth = false) {
   if (!el) return;
   const s = fx.sources.get(el);
-  if (s?.gain.gain) { s.gain.gain.value = g; el.volume = userVol; } else el.volume = userVol * g;
+  const p = s?.gain?.gain;
+  if (p) {
+    try {
+      const now = ctx.currentTime;
+      if (p.cancelAndHoldAtTime) p.cancelAndHoldAtTime(now); else p.cancelScheduledValues(now);
+      if (smooth) p.setTargetAtTime(g, now, 0.05); else p.setValueAtTime(g, now);
+    } catch { p.value = g; }
+    el.volume = userVol;
+  } else el.volume = Math.max(0, Math.min(1, userVol * g));
 }
 
 // ---- sound effects on this device (Web Audio) ----------------------------------------------------
@@ -1127,7 +1199,7 @@ export function mount() {
   on('play', () => { held = false; heldAt = 0; playedSince = true; announce(current()); resumeFx(); if (fade) fade.out.play().catch(() => {}); render(); emit(); });
   on('pause', () => { if (fade) fade.out.pause(); render(); emit(); saveSpot(true); });
   on('timeupdate', () => {
-    updateTime(); logPlay(); syncLyrics(); maybeCrossfade();
+    updateTime(); logPlay(); syncLyrics(); maybeTransition();
     if (!audio.paused) saveSpot();
     const now = Date.now();
     if (now - state.lastPreloadCheck > 2000) { state.lastPreloadCheck = now; maybePreload(); }
@@ -1143,6 +1215,11 @@ export function mount() {
     if (!state.transcoded && !current().preview) load({ transcode: true, offset: spotPosition(), hold: held });
   });
   spare.addEventListener('error', () => { delete spare.dataset.url; });
+  // a transition moves with either song's clock (timers stall in hidden windows), and ends when the old song does
+  [audio, spare, plain].forEach(a => {
+    a.addEventListener('timeupdate', () => { if (fade) stepFade(); });
+    a.addEventListener('ended', (e) => { if (fade && e.target === fade.out) endFade(); });
+  });
   if ('mediaSession' in navigator) {
     navigator.mediaSession.setActionHandler('play', () => audio.play());
     navigator.mediaSession.setActionHandler('pause', () => audio.pause());
@@ -1343,7 +1420,7 @@ function render() {
   }
   el.innerHTML = `
     <div class="now" id="p-open" role="button" tabindex="0" aria-label="Open the full-screen player" title="Open player">
-      <div class="thumb">${art(cover(t), t.album || t.title)}</div>
+      <div class="thumb">${art(cover(t), t.album || t.title, '', 200)}</div>
       <div class="grow">
         <div class="ellipsis" style="font-weight:650">${esc(t.title)}</div>
         <div class="ellipsis small muted">${esc(t.artist)}${t.album ? ' · ' + esc(t.album) : ''}</div>
@@ -1391,7 +1468,7 @@ function renderFull() {
   const upNext = q.slice(idx + 1);
   const playing = nowPlaying();
   const volume = link ? (s.volume ?? 0.9) : userVol;
-  f.style.setProperty('--np-bg', `url("${cover(t) || ''}")`);
+  f.style.setProperty('--np-bg', `url("${coverAt(t, 400) || ''}")`);
   f.innerHTML = `
     <div class="np-backdrop"></div>
     <div class="np-top">
@@ -1429,7 +1506,7 @@ function renderFull() {
         <div class="np-list">${upNext.length ? upNext.slice(0, 200).map((x, k) => {
           const i = idx + 1 + k;
           return `<div class="np-item" data-i="${i}">
-            <div class="thumb">${art(cover(x), x.album || x.title)}</div>
+            <div class="thumb">${art(cover(x), x.album || x.title, '', 200)}</div>
             <div class="grow" style="min-width:0"><div class="ellipsis" style="font-weight:600">${esc(x.title)}</div><div class="small muted ellipsis">${esc(x.artist)}</div></div>
             ${link ? '' : `<button class="btn ghost icon sm" data-up="${i}" aria-label="Move up" ${i === idx + 1 ? 'disabled' : ''}>↑</button>
             <button class="btn ghost icon sm" data-rm="${i}" aria-label="Remove">${icon.x}</button>`}</div>`;

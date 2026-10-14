@@ -136,7 +136,6 @@ async fn art_candidates(State(st): State<AppState>, Admin(_): Admin, Path(id): P
 fn embed_album_art(st: &AppState, id: &str, data: &[u8]) -> usize {
     let paths: Vec<PathBuf> = st.db.query("SELECT path FROM tracks WHERE album_id=?", p![id]).unwrap_or_default().iter().map(|r| PathBuf::from(r.s("path"))).collect();
     let n = paths.iter().filter(|pth| tagger::write_tags(pth, &Map::new(), Some(data)).is_ok()).count();
-    tagger::index_paths(st, &paths);
     let covers = st.data_dir().join("covers");
     let _ = std::fs::create_dir_all(&covers);
     let _ = std::fs::write(covers.join(format!("{id}.jpg")), data);
@@ -152,6 +151,8 @@ fn embed_album_art(st: &AppState, id: &str, data: &[u8]) -> usize {
         let _ = std::fs::write(dirs.into_iter().next().unwrap().join("cover.jpg"), data);
     }
     st.library.forget_cover(Some(id));
+    // indexed only now: it starts the cover pass, which must find the new picture, not the old one
+    tagger::index_paths(st, &paths);
     n
 }
 

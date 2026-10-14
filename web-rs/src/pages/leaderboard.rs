@@ -4,7 +4,7 @@ use crate::api;
 use crate::app::{Ctx, PageFuture};
 use crate::dom;
 use crate::json::J;
-use crate::ui::{art, empty_state, esc, fmt, icon};
+use crate::ui::{art_sized, empty_state, esc, fmt, icon};
 use serde_json::Value;
 use web_sys::Element;
 
@@ -59,7 +59,7 @@ pub fn render(view: Element, _ctx: Ctx) -> PageFuture {
           <div class="thumb" style="width:36px;height:36px">{}</div>
           <div class="grow" style="min-width:0"><div class="ellipsis" style="font-weight:600">{}</div><div class="small muted ellipsis">{}</div></div><b>{}</b></div>"#,
                 i + 1,
-                art(&if s.truthy("album_id") { format!("/api/library/albums/{}/cover", s.s("album_id")) } else { String::new() }, &s.s("title"), ""),
+                art_sized(&if s.truthy("album_id") { format!("/api/library/albums/{}/cover{}", s.s("album_id"), crate::ui::cover_q(s)) } else { String::new() }, &s.s("title"), "", 200),
                 esc(&s.s("title")), esc(&s.s("artist")), fmt::num(s.f("plays")))).collect::<String>()
         } else {
             empty_state(&icon("play"), "No plays yet", "")

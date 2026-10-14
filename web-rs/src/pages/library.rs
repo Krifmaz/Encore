@@ -277,6 +277,9 @@ struct Lib {
     tracks: RefCell<Vec<Value>>,
     /// `body.onclick` (set by the duplicates tab; replaced, not stacked)
     body_onclick: RefCell<Option<EventListener>>,
+    /// the side scrubber (web/js/scrubber.js) and `indexSeq`
+    scrub: RefCell<Option<Rc<crate::scrubber::Scrubber>>>,
+    index_seq: Cell<u32>,
 }
 
 impl Lib {
@@ -312,14 +315,55 @@ impl Lib {
     /// `load()` as the handlers call it (not awaited; a failure only reaches the console).
     fn reload(self: &Rc<Self>) {
         let me = self.clone();
-        dom::spawn(async move { let _ = me.load(false).await; });
+        dom::spawn(async move { let _ = me.load(false, 0).await; });
     }
 
-    async fn load(self: Rc<Self>, append: bool) -> Result<(), ApiError> {
+    /// `rowsOf()[i]`: the list's row `i`.
+    fn row(&self, i: usize) -> Option<Element> {
+        let sel = if self.st.borrow().tab == "tracks" { "tbody tr" } else { ".grid > *" };
+        wasm_bindgen::JsCast::dyn_into::<Element>(self.body.query_selector_all(sel).ok()?.item(i as u32)?).ok()
+    }
+    fn row_count(&self) -> usize {
+        let sel = if self.st.borrow().tab == "tracks" { "tbody tr" } else { ".grid > *" };
+        self.body.query_selector_all(sel).map(|l| l.length() as usize).unwrap_or(0)
+    }
+    /// `jump(offset)`: loads up to that row with the list's paging, then scrolls to it.
+    async fn jump(self: Rc<Self>, offset: usize) {
+        while self.row_count() <= offset && !dom::has_class(&self.more, "hidden") {
+            let n = self.row_count();
+            if self.clone().load(true, offset + 1 - n).await.is_err() || self.row_count() == n { break; }
+        }
+        if let Some(r) = self.row(offset) {
+            let w = dom::window();
+            w.scroll_to_with_x_and_y(w.scroll_x().unwrap_or(0.0), r.get_bounding_client_rect().top() + w.scroll_y().unwrap_or(0.0) - 16.0);
+        }
+    }
+    /// `loadIndex()`: the scrubber's sections for the list as it is sorted (none while filtering).
+    fn load_index(self: &Rc<Self>) {
+        let seq = self.index_seq.get() + 1;
+        self.index_seq.set(seq);
+        let Some(scrub) = self.scrub.borrow().clone() else { return };
+        scrub.set(&Value::Null);
+        let (tab, q, sort, dir, filter, artist) = {
+            let s = self.st.borrow();
+            (s.tab.clone(), s.q.clone(), s.sort.clone(), s.dir.clone(), s.filter.clone(), s.artist.clone())
+        };
+        if !matches!(tab.as_str(), "albums" | "singles" | "artists" | "tracks") || !q.is_empty() { return; }
+        let kind = if tab == "albums" { "albums&album_kind=albums".to_string() } else { tab };
+        let me = self.clone();
+        dom::spawn(async move {
+            if let Ok(sections) = api::get(&format!("/library/index?kind={kind}&sort={sort}&dir={dir}&filter={filter}&artist={}", enc(&artist))).await {
+                if me.index_seq.get() == seq { scrub.set(&sections); }
+            }
+        });
+    }
+
+    async fn load(self: Rc<Self>, append: bool, want: usize) -> Result<(), ApiError> {
         if !append { self.st.borrow_mut().offset = 0; dom::set_html(&self.body, &skeleton_grid(12)); }
         let tab = self.st.borrow().tab.clone();
         if let Some(filt) = dom::qs_in(&self.view, "#lib-filter") { dom::toggle_class(&filt, "hidden", !matches!(tab.as_str(), "albums" | "singles")); }
         if let Some(p) = dom::qs_in(&self.view, "#lib-q").and_then(|q| q.parent_element()) { dom::toggle_class(&p, "hidden", matches!(tab.as_str(), "duplicates" | "issues")); }
+        if !append { self.load_index(); }
         if tab == "duplicates" { return self.clone().render_duplicates().await; }
         if tab == "issues" { return render_issues(&self.body, &self.view, &self.more).await; }
         let (q, sort, dir, filter, artist, offset) = {
@@ -327,7 +371,7 @@ impl Lib {
             (s.q.clone(), s.sort.clone(), s.dir.clone(), s.filter.clone(), s.artist.clone(), s.offset)
         };
         if tab == "albums" || tab == "singles" {
-            let res = api::get(&format!("/library/albums?q={}&sort={sort}&dir={dir}&kind={tab}&filter={filter}&artist={}&limit={PAGE}&offset={offset}", enc(&q), enc(&artist))).await?;
+            let res = api::get(&format!("/library/albums?q={}&sort={sort}&dir={dir}&kind={tab}&filter={filter}&artist={}&limit={}&offset={offset}", enc(&q), enc(&artist), if want > 0 { want.clamp(PAGE, 500) } else { PAGE })).await?;
             let items = res.a("items");
             let html: String = items.iter().map(common::library_tile).collect();
             if append {
@@ -346,7 +390,8 @@ impl Lib {
             dom::set_html(&self.body, &if !rows.is_empty() { format!(r##"<div class="grid">{}</div>"##, rows.iter().map(|a| self.artist_tile(a)).collect::<String>()) }
                 else { empty_state(&icon("users"), "No artists found", "") });
         } else {
-            let rows = api::get(&format!("/library/tracks?q={}&sort={sort}&dir={dir}&limit=300&offset={}", enc(&q), if append { offset } else { 0 })).await?.items();
+            let lim = if want > 0 { want.clamp(300, 1000) } else { 300 };
+            let rows = api::get(&format!("/library/tracks?q={}&sort={sort}&dir={dir}&limit={lim}&offset={}", enc(&q), if append { offset } else { 0 })).await?.items();
             let base = if append { self.tracks.borrow().len() } else { 0 };
             let html: String = rows.iter().enumerate().map(|(i, t)| format!(r##"<tr data-i="{idx}">
         <td style="width:52px"><button class="thumb play-thumb" data-play-track="{id}" aria-label="Play">{art}<i>{play}</i></button></td>
@@ -356,7 +401,7 @@ impl Lib {
         <td class="muted hide-sm">{dur}</td>
         <td style="text-align:right"><button class="btn sm ghost icon" data-tmenu="{idx}" aria-label="More">{more}</button></td></tr>"##,
                 idx = base + i, id = t.s("id"),
-                art = ui::art(&format!("/api/library/albums/{}/cover", t.s("album_id")), &if t.truthy("album") { t.s("album") } else { t.s("title") }, ""),
+                art = ui::art_sized(&format!("/api/library/albums/{}/cover{}", t.s("album_id"), ui::cover_q(t)), &if t.truthy("album") { t.s("album") } else { t.s("title") }, "", 200),
                 play = icon("play"), title = esck(t, "title"), artist = esck(t, "artist"), album = esck(t, "album"), album_id = esck(t, "album_id"),
                 fmt = format_text(t), vb = verify_badge(t), dur = ui::fmt::dur(t.f("duration")), more = icon("more"))).collect();
             if !append {
@@ -369,9 +414,10 @@ impl Lib {
                 self.tracks.borrow_mut().extend(rows.iter().cloned());
             }
             { let mut s = self.st.borrow_mut(); s.offset = (if append { s.offset } else { 0 }) + rows.len(); }
-            dom::toggle_class(&self.more, "hidden", rows.len() < 300);
+            dom::toggle_class(&self.more, "hidden", rows.len() < lim);
             set_sub(&self.view, "");
         }
+        if let Some(scrub) = self.scrub.borrow().as_ref() { scrub.refresh(); }
         Ok(())
     }
 
@@ -385,7 +431,7 @@ impl Lib {
           <div class="s" style="text-align:center">{albums} album{s} · {tracks} tracks</div>
         </div>"##,
             href = if a.truthy("mbid") { format!("/artist/{}", esck(a, "mbid")) } else { format!("/artist-name/{}", enc(&a.s("name"))) },
-            art = ui::art(&format!("/api/library/albums/{}/cover", a.s("cover_album")), &a.s("name"), ""),
+            art = ui::art(&format!("/api/library/albums/{}/cover{}", a.s("cover_album"), ui::cover_q(a)), &a.s("name"), ""),
             rm = if self.admin { format!(r##"<div class="overlay"><button class="fab" data-rm-artist="{}" title="Remove this artist from the library">{}</button></div>"##, esck(a, "name"), icon("trash")) } else { String::new() },
             name = esck(a, "name"), albums = a.s("albums"), s = if a.num("albums") == Some(1.0) { "" } else { "s" }, tracks = a.s("tracks"))
     }
@@ -562,10 +608,28 @@ pub fn render(view: Element, ctx: Ctx) -> PageFuture {
         let lib = Rc::new(Lib {
             view: view.clone(), body: body.clone(), more: more.clone(), sort_el: sort_el.clone(), dir_el: dir_el.clone(),
             admin, query_tab: ctx.q("tab"), st: RefCell::new(st), saved: RefCell::new(saved), tracks: RefCell::new(Vec::new()), body_onclick: RefCell::new(None),
+            scrub: RefCell::new(None), index_seq: Cell::new(0),
         });
         lib.paint_sort();
         if let Some(f) = dom::qs_in(&view, "#lib-filter") { let filter = lib.st.borrow().filter.clone(); dom::set_value(&f, &filter); }
         common::bind_tiles(&body);
+        {
+            let (w1, w2, w3) = (Rc::downgrade(&lib), Rc::downgrade(&lib), Rc::downgrade(&lib));
+            let jump: crate::scrubber::JumpFn = Rc::new(move |offset| {
+                let w = w3.clone();
+                Box::pin(async move { if let Some(lib) = w.upgrade() { lib.jump(offset).await; } })
+            });
+            let scrub = crate::scrubber::Scrubber::mount(
+                &view,
+                move |i| w1.upgrade().and_then(|l| l.row(i)),
+                move || w2.upgrade().is_some_and(|l| {
+                    let doc_h = dom::document().document_element().map(|d| d.scroll_height() as f64).unwrap_or(0.0);
+                    !dom::has_class(&l.more, "hidden") || doc_h > 2.0 * dom::window().inner_height().ok().and_then(|v| v.as_f64()).unwrap_or(0.0)
+                }),
+                jump,
+            );
+            *lib.scrub.borrow_mut() = Some(scrub);
+        }
 
         {
             let lib = lib.clone();
@@ -639,7 +703,7 @@ pub fn render(view: Element, ctx: Ctx) -> PageFuture {
         }
         {
             let lib = lib.clone();
-            dom::on(&more, "click", move |_| { let lib = lib.clone(); dom::spawn(async move { let _ = lib.load(true).await; }); });
+            dom::on(&more, "click", move |_| { let lib = lib.clone(); dom::spawn(async move { let _ = lib.load(true, 0).await; }); });
         }
 
         if admin {
@@ -720,7 +784,7 @@ pub fn render(view: Element, ctx: Ctx) -> PageFuture {
                 });
             }
         }
-        lib.clone().load(false).await.map_err(|e| e.message)?;
+        lib.clone().load(false, 0).await.map_err(|e| e.message)?;
         Ok(())
     })
 }
@@ -809,7 +873,7 @@ pub fn render_album(view: Element, ctx: Ctx) -> PageFuture {
       <thead><tr><th class="num">#</th><th>Title</th><th class="hide-sm">Artist</th><th class="hide-sm">Format</th><th>Time</th><th></th></tr></thead>
       <tbody>{rows}</tbody>
     </table></div></div>"##,
-            cover = ui::art(&format!("/api/library/albums/{id}/cover"), &a.s("album"), "big"),
+            cover = ui::art(&format!("/api/library/albums/{id}/cover{}", ui::cover_q(&a)), &a.s("album"), "big"),
             album = esc(&or_str(&a, "album", "Unknown album")), artist_enc = enc(&a.s("albumartist")), artist = esck(&a, "albumartist"),
             year = if a.truthy("year") { format!(" · {}", esck(&a, "year")) } else { String::new() },
             n = tracks.len(), dur = ui::fmt::long_dur(a.f("duration")), size = ui::fmt::size(a.f("size")),

@@ -353,6 +353,7 @@ pub fn index_paths(st: &AppState, paths: &[PathBuf]) {
         }
     }
     st.library.forget_cover(None);
+    st.library.warm_covers(st.db.clone());
 }
 
 /// Files were renamed/moved: keep their library rows (and so likes/playlist entries) by updating the path.

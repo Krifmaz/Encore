@@ -3,6 +3,7 @@ package app.encore.android.ui.screens
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.lazy.grid.rememberLazyGridState
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
@@ -50,6 +51,9 @@ import app.encore.android.data.api.Track
 import app.encore.android.ui.Nav
 import app.encore.android.ui.Screen
 import app.encore.android.ui.components.AlbumCard
+import app.encore.android.ui.components.FastScroller
+import app.encore.android.ui.components.rememberLibraryIndex
+import app.encore.android.ui.components.rememberScrollerTarget
 import app.encore.android.ui.components.Badge
 import app.encore.android.ui.components.Cover
 import app.encore.android.ui.components.EncoreButton
@@ -280,6 +284,8 @@ fun AlbumScreen(nav: Nav, albumId: String) {
 fun ArtistScreen(nav: Nav, name: String) {
     val api = nav.graph.api
     val loader = rememberLoad(name) { api.albums(sort = "released", artist = name, limit = 200) }
+    val grid = rememberLazyGridState()
+    val sections = rememberLibraryIndex(api, "albums", "released", artist = name)
     val p = MaterialTheme.palette
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
@@ -312,40 +318,50 @@ fun ArtistScreen(nav: Nav, name: String) {
     ) { padding ->
         LoadableContent(loader) { albums ->
             val songs = albums.sumOf { it.trackCount }
-            LazyVerticalGrid(
-                columns = GridCells.Adaptive(140.dp),
-                modifier = Modifier.fillMaxSize().padding(padding),
-                contentPadding = PaddingValues(start = Gutter, end = Gutter, bottom = 24.dp),
-                horizontalArrangement = Arrangement.spacedBy(14.dp),
-                verticalArrangement = Arrangement.spacedBy(14.dp),
-            ) {
-                item(span = { GridItemSpan(maxLineSpan) }) {
-                    Column(Modifier.fillMaxWidth().padding(bottom = 8.dp), horizontalAlignment = Alignment.CenterHorizontally) {
-                        RoundCover(
-                            albums.firstOrNull()?.let { api.coverUrl(it.id, 400) },
-                            nav.graph.imageLoader,
-                            size = 140.dp,
-                            label = name,
-                        )
-                        Spacer(Modifier.height(14.dp))
-                        Text("ARTIST · IN YOUR LIBRARY", style = MaterialTheme.typography.labelSmall, color = p.muted, letterSpacing = 1.2.sp)
-                        Text(name, style = MaterialTheme.typography.headlineMedium, textAlign = TextAlign.Center, modifier = Modifier.padding(top = 6.dp))
-                        Text(
-                            "${albums.size} album${if (albums.size == 1) "" else "s"} · $songs tracks",
-                            style = MaterialTheme.typography.bodyMedium,
-                            color = p.muted,
-                            modifier = Modifier.padding(top = 2.dp),
-                        )
-                        // the catalog artist page's Play / Shuffle
-                        Row(Modifier.padding(top = 14.dp, bottom = 10.dp), horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
-                            EncoreButton("Play", iconRes = R.drawable.ic_play, primary = true) { playAll(false) }
-                            EncoreButton("Shuffle", iconRes = R.drawable.ic_shuffle) { playAll(true) }
+            Box(Modifier.fillMaxSize().padding(padding)) {
+                LazyVerticalGrid(
+                    columns = GridCells.Adaptive(140.dp),
+                    state = grid,
+                    modifier = Modifier.fillMaxSize(),
+                    contentPadding = PaddingValues(start = Gutter, end = Gutter, bottom = 24.dp),
+                    horizontalArrangement = Arrangement.spacedBy(14.dp),
+                    verticalArrangement = Arrangement.spacedBy(14.dp),
+                ) {
+                    item(span = { GridItemSpan(maxLineSpan) }) {
+                        Column(Modifier.fillMaxWidth().padding(bottom = 8.dp), horizontalAlignment = Alignment.CenterHorizontally) {
+                            RoundCover(
+                                albums.firstOrNull()?.let { api.coverUrl(it.id, 400) },
+                                nav.graph.imageLoader,
+                                size = 140.dp,
+                                label = name,
+                            )
+                            Spacer(Modifier.height(14.dp))
+                            Text("ARTIST · IN YOUR LIBRARY", style = MaterialTheme.typography.labelSmall, color = p.muted, letterSpacing = 1.2.sp)
+                            Text(name, style = MaterialTheme.typography.headlineMedium, textAlign = TextAlign.Center, modifier = Modifier.padding(top = 6.dp))
+                            Text(
+                                "${albums.size} album${if (albums.size == 1) "" else "s"} · $songs tracks",
+                                style = MaterialTheme.typography.bodyMedium,
+                                color = p.muted,
+                                modifier = Modifier.padding(top = 2.dp),
+                            )
+                            // the catalog artist page's Play / Shuffle
+                            Row(Modifier.padding(top = 14.dp, bottom = 10.dp), horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
+                                EncoreButton("Play", iconRes = R.drawable.ic_play, primary = true) { playAll(false) }
+                                EncoreButton("Shuffle", iconRes = R.drawable.ic_shuffle) { playAll(true) }
+                            }
                         }
                     }
+                    items(albums, key = { it.id }) { a ->
+                        AlbumCard(a, api.coverUrl(a.id, 400), nav.graph.imageLoader) { nav.open(Screen.Album(a.id)) }
+                    }
                 }
-                items(albums, key = { it.id }) { a ->
-                    AlbumCard(a, api.coverUrl(a.id, 400), nav.graph.imageLoader) { nav.open(Screen.Album(a.id)) }
-                }
+                // years, newest first (the header is item 0)
+                FastScroller(
+                    sections.filter { it.offset < albums.size },
+                    rememberScrollerTarget(grid, header = 1),
+                    extent = albums.size,
+                    modifier = Modifier.align(Alignment.CenterEnd),
+                )
             }
         }
     }

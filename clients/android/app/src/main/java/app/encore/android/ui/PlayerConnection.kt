@@ -20,10 +20,13 @@ import app.encore.android.graph
 import app.encore.android.playback.EncorePlaybackService
 import app.encore.android.playback.MediaItems
 import app.encore.android.playback.StreamInfo
+import app.encore.android.remote.Link
+import app.encore.android.remote.RemoteDevice
 import app.encore.android.ui.components.PlayerMenuActions
 import app.encore.android.ui.components.Toasts
 import com.google.common.util.concurrent.ListenableFuture
 import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -31,6 +34,10 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.JsonObjectBuilder
+import kotlinx.serialization.json.buildJsonObject
+import kotlinx.serialization.json.put
 import java.util.concurrent.Executor
 
 /** What the player UI shows; rebuilt from the MediaController whenever the player changes. */
@@ -63,6 +70,15 @@ class PlayerConnection(private val context: Context, private val api: EncoreApi)
     private var future: ListenableFuture<MediaController>? = null
     private var controller: MediaController? = null
     private val prefs: PrefsRepository? by lazy { try { context.graph.prefs } catch (_: Exception) { null } }
+
+    /**
+     * This phone as an Encore remote device (remote/RemoteDevice.kt). While it is linked to another device, the
+     * player flows below show that device and every command here (play, pause, seek, playing a list …) goes there.
+     */
+    val remote: RemoteDevice by lazy { RemoteDevice.get(context) }
+    private var linkJob: Job? = null
+    /** the player flows show the linked device's state (applyLink), not this phone's */
+    private var showingLink = false
 
     private val _state = MutableStateFlow(PlayerUiState())
     val state: StateFlow<PlayerUiState> = _state.asStateFlow()
@@ -121,6 +137,7 @@ class PlayerConnection(private val context: Context, private val api: EncoreApi)
 
     private val positionTick = object : Runnable {
         override fun run() {
+            if (linked() != null) return
             val c = controller ?: return
             _positionMs.value = c.currentPosition.coerceAtLeast(0L) + offsetMs()
             if (c.isPlaying) mainHandler.postDelayed(this, 500L)
@@ -132,6 +149,8 @@ class PlayerConnection(private val context: Context, private val api: EncoreApi)
 
     private val listener = object : Player.Listener {
         override fun onEvents(player: Player, events: Player.Events) {
+            // a song transition steps the volume many times a second: nothing shown here changes with it
+            if (events.size() == 1 && events.contains(Player.EVENT_VOLUME_CHANGED)) return
             refresh()
         }
     }
@@ -144,6 +163,13 @@ class PlayerConnection(private val context: Context, private val api: EncoreApi)
     }
 
     fun connect() {
+        // check in and listen for commands while the app is in front (the service keeps it going while it plays)
+        remote.retain("ui")
+        watchLink()
+        connectController()
+    }
+
+    private fun connectController() {
         // the account's playback settings win over this device's (playback.js adoptAccount), checked on every foreground
         prefs?.sync()
         if (future != null) return
@@ -167,7 +193,11 @@ class PlayerConnection(private val context: Context, private val api: EncoreApi)
     }
 
     fun release() {
+        remote.release("ui")
+        linkJob?.cancel()
+        linkJob = null
         mainHandler.removeCallbacks(positionTick)
+        mainHandler.removeCallbacks(linkTick)
         controller?.removeListener(listener)
         controller = null
         future?.let { MediaController.releaseFuture(it) }
@@ -179,7 +209,7 @@ class PlayerConnection(private val context: Context, private val api: EncoreApi)
         val c = controller
         if (c != null) cmd(c) else {
             pending.add(cmd)
-            connect()
+            connectController()
         }
     }
 
@@ -196,8 +226,121 @@ class PlayerConnection(private val context: Context, private val api: EncoreApi)
         return info.trackId == t.id && info.serverStream
     }
 
-    /** The position right now in song time (the UI polls it while playing). */
-    fun positionMs(): Long = (controller?.currentPosition ?: 0L).coerceAtLeast(0L) + offsetMs()
+    /** The position right now in song time (the UI polls it while playing); the linked device's when linked. */
+    fun positionMs(): Long {
+        linked()?.let { return Math.round(it.positionSec() * 1000) }
+        return (controller?.currentPosition ?: 0L).coerceAtLeast(0L) + offsetMs()
+    }
+
+    // ---- linked: this phone is a remote for another device (web/js/player.js setLink / viaLink) -------------
+
+    /** The device this phone controls, or null. */
+    fun linked(): Link? = remote.link.value
+
+    private fun watchLink() {
+        if (linkJob != null) return
+        linkJob = scope.launch { remote.link.collect { applyLink(it) } }
+    }
+
+    /** Send a command to the linked device; false when this phone isn't linked (play here then). */
+    private fun viaLink(action: String, build: JsonObjectBuilder.() -> Unit = {}): Boolean {
+        if (linked() == null) return false
+        val body: JsonObject = buildJsonObject {
+            put("action", action)
+            build()
+        }
+        return remote.sendToLink(body)
+    }
+
+    /** player.js playQueue() while linked: the library songs of the list go to the linked device. */
+    private fun sendQueue(list: List<Track>, start: Int, positionSec: Double) {
+        val lib = list.filter { it.id > 0L }
+        if (lib.isEmpty()) {
+            Toasts.show("Only songs from your library can be played on another device", "err")
+            return
+        }
+        val idx = list.take(start.coerceAtLeast(0)).count { it.id > 0L }.coerceIn(0, lib.size - 1)
+        val (win, at) = RemoteDevice.window(lib, idx, 1000)
+        viaLink("play_queue") {
+            put("tracks", RemoteDevice.slimList(win))
+            put("index", at)
+            if (positionSec > 1) put("position", positionSec)
+        }
+    }
+
+    /** Between check-ins the linked device's seek bar moves on here. */
+    private val linkTick = object : Runnable {
+        override fun run() {
+            val l = linked() ?: return
+            _positionMs.value = Math.round(l.positionSec() * 1000)
+            if (l.playing) mainHandler.postDelayed(this, 500L)
+        }
+    }
+
+    /** The player flows from the linked device's state (or back to this phone's player when unlinked). */
+    private fun applyLink(l: Link?) {
+        mainHandler.removeCallbacks(linkTick)
+        val wasLinked = showingLink
+        showingLink = l != null
+        if (l == null) {
+            qualityOverride = null
+            if (controller != null) {
+                refresh()
+            } else if (wasLinked) {
+                // only a real unlink empties the player; on a foreground the link's first value (not linked) comes
+                // while the controller is still connecting, and the last values stay until refresh() runs
+                _nowPlaying.value = null
+                _isPlaying.value = false
+                _durationMs.value = 0L
+                _queue.value = emptyList()
+                _queueIndex.value = -1
+                _positionMs.value = 0L
+                _state.value = PlayerUiState(connected = false)
+                updateQuality()
+            }
+            return
+        }
+        mainHandler.removeCallbacks(positionTick)
+        val t = l.track
+        val queue = l.queue
+        var index = if (t == null) -1 else l.index
+        if (t != null && (index !in queue.indices || queue[index].id != t.id)) index = queue.indexOfFirst { it.id == t.id }
+        val dur = Math.round(l.durationSec * 1000)
+        _nowPlaying.value = t
+        _isPlaying.value = l.playing
+        _durationMs.value = dur
+        _queue.value = queue
+        _queueIndex.value = index
+        _positionMs.value = Math.round(l.positionSec() * 1000)
+        val label = l.signalLabel
+        qualityOverride = if (label.isNotEmpty()) label to "Playing on ${l.name}" else ("" to null)
+        updateQuality()
+        if (_qualityBadge.value.isNullOrEmpty()) _qualityBadge.value = null
+        _state.value = PlayerUiState(
+            connected = true,
+            current = t,
+            isPlaying = l.playing,
+            durationMs = dur,
+            index = index,
+            queue = queue,
+            hasNext = index >= 0 && index < queue.lastIndex,
+        )
+        if (t == null) { _lyricsOpen.value = false; _signalPathOpen.value = false }
+        if (l.playing) mainHandler.postDelayed(linkTick, 500L)
+    }
+
+    /** The volume of the player (0..1): this phone's player, or the linked device's. */
+    fun setVolume(v: Float) {
+        val x = v.coerceIn(0f, 1f)
+        if (viaLink("volume") { put("value", x.toDouble()) }) return
+        withController { c -> c.volume = x }
+    }
+
+    private fun notWhileLinked(): Boolean {
+        val l = linked() ?: return false
+        Toasts.show("Change the queue on ${l.name} itself, or unlink first", "info")
+        return true
+    }
 
     // ---- commands --------------------------------------------------------------------------------------
 
@@ -205,6 +348,7 @@ class PlayerConnection(private val context: Context, private val api: EncoreApi)
         if (tracks.isEmpty()) return
         val list = if (shuffle) tracks.shuffled() else tracks
         val start = if (shuffle) 0 else startIndex.coerceIn(0, list.size - 1)
+        if (linked() != null) { sendQueue(list, start, 0.0); return }
         val items = list.map { MediaItems.track(api, it) }
         withController { c ->
             c.setMediaItems(items, start, 0L)
@@ -217,6 +361,7 @@ class PlayerConnection(private val context: Context, private val api: EncoreApi)
     fun playFrom(tracks: List<Track>, index: Int, positionMs: Long) {
         if (tracks.isEmpty()) return
         val start = index.coerceIn(0, tracks.size - 1)
+        if (linked() != null) { sendQueue(tracks, start, positionMs / 1000.0); return }
         val items = tracks.map { MediaItems.track(api, it) }
         withController { c ->
             c.setMediaItems(items, start, positionMs.coerceAtLeast(0L))
@@ -226,6 +371,7 @@ class PlayerConnection(private val context: Context, private val api: EncoreApi)
     }
 
     fun playNext(track: Track) {
+        if (viaLink("play_next") { put("tracks", RemoteDevice.slimList(listOf(track))) }) return
         withController { c ->
             val at = if (c.mediaItemCount == 0) 0 else c.currentMediaItemIndex + 1
             c.addMediaItem(at, MediaItems.track(api, track))
@@ -234,6 +380,7 @@ class PlayerConnection(private val context: Context, private val api: EncoreApi)
     }
 
     fun addToQueue(track: Track) {
+        if (viaLink("enqueue") { put("tracks", RemoteDevice.slimList(listOf(track))) }) return
         withController { c ->
             c.addMediaItem(MediaItems.track(api, track))
             if (c.mediaItemCount == 1) { c.prepare(); c.play() }
@@ -241,6 +388,7 @@ class PlayerConnection(private val context: Context, private val api: EncoreApi)
     }
 
     fun togglePlay() {
+        if (viaLink("toggle")) return
         withController { c ->
             if (c.isPlaying) c.pause() else {
                 if (c.playbackState == Player.STATE_IDLE) c.prepare()
@@ -250,10 +398,14 @@ class PlayerConnection(private val context: Context, private val api: EncoreApi)
         }
     }
 
-    fun next() { withController { c -> if (c.hasNextMediaItem()) c.seekToNextMediaItem() } }
+    fun next() {
+        if (viaLink("next")) return
+        withController { c -> if (c.hasNextMediaItem()) c.seekToNextMediaItem() }
+    }
 
     /** Like the web player: back to the start after 3 s, otherwise the previous song. */
     fun previous() {
+        if (viaLink("prev")) return
         withController { c ->
             if (positionMs() > 3000L || !c.hasPreviousMediaItem()) seekTo(0L) else c.seekToPreviousMediaItem()
         }
@@ -261,6 +413,10 @@ class PlayerConnection(private val context: Context, private val api: EncoreApi)
 
     /** Seek in song time. A server-made stream can't seek in the player: the service re-opens it at the point. */
     fun seekTo(positionMs: Long) {
+        if (viaLink("seek") { put("value", positionMs.coerceAtLeast(0L) / 1000.0) }) {
+            _positionMs.value = positionMs.coerceAtLeast(0L)
+            return
+        }
         withController { c ->
             val pos = positionMs.coerceAtLeast(0L)
             if (serverStream()) {
@@ -274,6 +430,12 @@ class PlayerConnection(private val context: Context, private val api: EncoreApi)
     }
 
     fun skipTo(index: Int) {
+        // linked: a tap in its queue plays that queue from there (player.js queue taps → play_queue)
+        if (linked() != null) {
+            val q = _queue.value
+            if (index in q.indices) sendQueue(q, index, 0.0)
+            return
+        }
         withController { c ->
             if (index in 0 until c.mediaItemCount) {
                 c.seekTo(index, 0L)
@@ -282,10 +444,14 @@ class PlayerConnection(private val context: Context, private val api: EncoreApi)
         }
     }
 
-    fun removeAt(index: Int) { withController { c -> if (index in 0 until c.mediaItemCount) c.removeMediaItem(index) } }
+    fun removeAt(index: Int) {
+        if (notWhileLinked()) return
+        withController { c -> if (index in 0 until c.mediaItemCount) c.removeMediaItem(index) }
+    }
 
     /** Move a queued song (not the one playing) to another place after the current one. */
     fun move(from: Int, to: Int) {
+        if (notWhileLinked()) return
         withController { c ->
             val cur = c.currentMediaItemIndex
             if (from == cur || from !in 0 until c.mediaItemCount || to <= cur || to >= c.mediaItemCount) return@withController
@@ -295,6 +461,7 @@ class PlayerConnection(private val context: Context, private val api: EncoreApi)
 
     /** Shuffle what comes after the current song. */
     fun shuffleUpNext() {
+        if (notWhileLinked()) return
         withController { c ->
             val cur = c.currentMediaItemIndex
             val n = c.mediaItemCount
@@ -358,7 +525,13 @@ class PlayerConnection(private val context: Context, private val api: EncoreApi)
         }
     }
 
-    override fun signalPath() { if (_nowPlaying.value != null) _signalPathOpen.value = true }
+    override fun signalPath() {
+        if (_nowPlaying.value == null) return
+        // the sheet describes this phone's stream; linked, say what the other device reports
+        val l = linked()
+        if (l != null) { Toasts.show(l.signalLabel.ifEmpty { "Playing on ${l.name}" }, "info"); return }
+        _signalPathOpen.value = true
+    }
 
     override fun upNext() { _upNextOpen.value = true }
 
@@ -391,6 +564,7 @@ class PlayerConnection(private val context: Context, private val api: EncoreApi)
     }
 
     private fun refresh() {
+        linked()?.let { applyLink(it); return }
         val c = controller ?: return
         val queue = ArrayList<Track>(c.mediaItemCount)
         for (i in 0 until c.mediaItemCount) {

@@ -11,6 +11,7 @@ mod auth;
 mod backup;
 mod config;
 mod connections;
+mod covers;
 mod db;
 mod dsp;
 mod email;
@@ -93,7 +94,9 @@ pub fn app(st: AppState) -> Router {
         .merge(routes::remote::router())
         .merge(routes::roon::router())
         .merge(routes::playback::router())
-        .with_state(st)
+        .with_state(st.clone())
+        // albums and songs in JSON answers gain `cover_v`, so clients can use cacheable cover URLs
+        .layer(middleware::from_fn_with_state(st, covers::stamp_layer))
         .fallback_service(spa)
         .layer(middleware::from_fn(security_headers))
         // gzip for JSON and pages – never for audio: it only burns CPU and gets in the way of range requests

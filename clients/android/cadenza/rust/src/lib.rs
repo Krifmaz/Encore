@@ -3,8 +3,12 @@
 //!
 //! The engine itself ([`engine::Engine`]) is plain Rust and is what `cargo test` covers on the host; the JNI
 //! functions below only move data across. Every native method is an *instance* method of `CadenzaNative`, so the
-//! second argument is the Kotlin object (unused). A handle is a `Box<Mutex<Engine>>` pointer as a `jlong`; 0 is
-//! "no engine" and every function tolerates it. Nothing here unwinds into the JVM: panics turn into 0 / an empty
+//! second argument is the Kotlin object (unused). A handle is a number naming an engine in a registry (never a
+//! pointer, never reused); 0 is "no engine" and every function tolerates it. A call holds its own reference to
+//! the engine, so freeing it while the audio thread is still inside `process` (the player released from the main
+//! thread, the Signal path read during a configure) only drops the registry's reference: the engine goes when the
+//! last call returns. A stale or freed handle finds nothing (no use-after-free, no double free; GrapheneOS's
+//! hardened malloc turns those into crashes). Nothing here unwinds into the JVM: panics turn into 0 / an empty
 //! array / an empty string.
 
 pub mod engine;
@@ -15,21 +19,46 @@ use jni::objects::{JClass, JFloatArray, JObject, JString};
 use jni::sys::{jfloatArray, jint, jlong, jstring};
 use jni::JNIEnv;
 use std::panic::{catch_unwind, AssertUnwindSafe};
-use std::sync::Mutex;
+use std::collections::HashMap;
+use std::sync::atomic::{AtomicI64, Ordering};
+use std::sync::{Arc, Mutex, MutexGuard, OnceLock};
 
-type Handle = Mutex<Engine>;
+type Shared = Arc<Mutex<Engine>>;
 
-fn with_engine<R>(handle: jlong, f: impl FnOnce(&mut Engine) -> R) -> Option<R> {
+/// Live engines by handle. Handles count up from 1 and are never reused.
+fn registry() -> MutexGuard<'static, HashMap<jlong, Shared>> {
+    static ENGINES: OnceLock<Mutex<HashMap<jlong, Shared>>> = OnceLock::new();
+    let m = ENGINES.get_or_init(|| Mutex::new(HashMap::new()));
+    m.lock().unwrap_or_else(|p| p.into_inner())
+}
+
+static NEXT: AtomicI64 = AtomicI64::new(1);
+
+/// Keeps `engine` and returns its handle (never 0).
+pub fn register(engine: Engine) -> jlong {
+    let h = NEXT.fetch_add(1, Ordering::Relaxed);
+    registry().insert(h, Arc::new(Mutex::new(engine)));
+    h
+}
+
+/// Forgets the handle; `false` when it was not live (already freed, never made). An engine still in use by
+/// another thread is dropped when that call returns.
+pub fn unregister(handle: jlong) -> bool {
+    if handle == 0 {
+        return false;
+    }
+    let removed = registry().remove(&handle);
+    removed.is_some()
+}
+
+/// Runs `f` on the engine behind `handle`; `None` for 0 or a handle that is no longer live.
+pub fn with_engine<R>(handle: jlong, f: impl FnOnce(&mut Engine) -> R) -> Option<R> {
     if handle == 0 {
         return None;
     }
-    // SAFETY: the handle came from nativeCreate (Box::into_raw) and is only freed by nativeDestroy, after which
-    // the Kotlin side sets it to 0 and never uses it again.
-    let m: &Handle = unsafe { &*(handle as *const Handle) };
-    let mut guard = match m.lock() {
-        Ok(g) => g,
-        Err(poisoned) => poisoned.into_inner(),
-    };
+    // the registry lock is only held to take a reference, never while the engine works
+    let e: Shared = registry().get(&handle)?.clone();
+    let mut guard = e.lock().unwrap_or_else(|p| p.into_inner());
     Some(f(&mut guard))
 }
 
@@ -87,7 +116,7 @@ pub extern "system" fn Java_app_encore_android_cadenza_CadenzaNative_nativeCreat
         )
     }));
     match r {
-        Ok(Ok(engine)) => Box::into_raw(Box::new(Mutex::new(engine))) as jlong,
+        Ok(Ok(engine)) => register(engine),
         _ => 0,
     }
 }
@@ -116,7 +145,8 @@ pub extern "system" fn Java_app_encore_android_cadenza_CadenzaNative_nativeSetPa
     }));
 }
 
-/// `nativeProcess(handle, input: FloatArray, frames): FloatArray` – interleaved float PCM in and out.
+/// `nativeProcess(handle, input: FloatArray, frames): FloatArray?` – interleaved float PCM in and out; null when
+/// the handle is not live (or the engine panicked).
 #[no_mangle]
 pub extern "system" fn Java_app_encore_android_cadenza_CadenzaNative_nativeProcess<'a>(
     mut env: JNIEnv<'a>,
@@ -136,13 +166,17 @@ pub extern "system" fn Java_app_encore_android_cadenza_CadenzaNative_nativeProce
     if len > 0 && env.get_float_array_region(&input, 0, &mut buf).is_err() {
         return float_array(&mut env, &[]);
     }
-    let out: Vec<f32> = catch_unwind(AssertUnwindSafe(|| {
+    let out: Option<Vec<f32>> = catch_unwind(AssertUnwindSafe(|| {
         with_engine(handle, |e| e.process(&buf, frames.max(0) as usize).to_vec())
     }))
     .ok()
-    .flatten()
-    .unwrap_or_else(|| buf.clone());
-    float_array(&mut env, &out)
+    .flatten();
+    // no engine (freed by another thread) or a panic: null, and the Kotlin side passes its input through. Not the
+    // whole array: the caller reuses a larger buffer, only `frames` of it are this chunk
+    match out {
+        Some(out) => float_array(&mut env, &out),
+        None => std::ptr::null_mut(),
+    }
 }
 
 /// `nativeFlush(handle): FloatArray` – the tail at the end of a stream; resets the filters.
@@ -190,16 +224,71 @@ pub extern "system" fn Java_app_encore_android_cadenza_CadenzaNative_nativeDestr
     _this: JObject<'a>,
     handle: jlong,
 ) {
-    if handle == 0 {
-        return;
-    }
-    // SAFETY: see with_engine; this is the one place the box is freed.
-    let b: Box<Handle> = unsafe { Box::from_raw(handle as *mut Handle) };
-    drop(b);
+    // a panic in an engine's Drop must not unwind into the JVM
+    let _ = catch_unwind(|| unregister(handle));
 }
 
 #[cfg(test)]
 mod tests {
+    use super::*;
+
+    fn engine() -> Engine {
+        Engine::new(48000, 2, "", "", 0, "").unwrap()
+    }
+
+    #[test]
+    fn handles_are_checked_and_freed_once() {
+        let h = register(engine());
+        assert_ne!(h, 0);
+        assert_eq!(with_engine(h, |e| e.output_rate()), Some(48000));
+        assert!(unregister(h));
+        // a stale handle finds nothing, a second free is a no-op (no double free)
+        assert_eq!(with_engine(h, |e| e.output_rate()), None);
+        assert!(!unregister(h));
+        assert!(!unregister(0));
+        assert_eq!(with_engine(0, |e| e.output_rate()), None);
+        // a pointer-looking number is not dereferenced
+        assert_eq!(with_engine(0x7fff_dead_beef, |e| e.output_rate()), None);
+        // handles are not reused
+        let h2 = register(engine());
+        assert_ne!(h2, h);
+        assert!(unregister(h2));
+    }
+
+    #[test]
+    fn freeing_while_processing_on_another_thread_is_safe() {
+        // the audio thread keeps processing while another thread frees and rebuilds the engine (player release,
+        // configure on a new song, the Signal path read from the UI)
+        let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let current = Arc::new(AtomicI64::new(register(engine())));
+        let audio = {
+            let (stop, current) = (stop.clone(), current.clone());
+            std::thread::spawn(move || {
+                let input = vec![0.25f32; 2 * 512];
+                let mut done = 0u64;
+                while !stop.load(Ordering::Relaxed) {
+                    let h = current.load(Ordering::Relaxed);
+                    if let Some(n) = with_engine(h, |e| {
+                        e.set_params(r#"{"fx_on":true,"preamp_db":-3,"bands":[{"type":"peaking","freq":1000,"gain":3,"q":1}]}"#);
+                        e.process(&input, 512).len()
+                    }) {
+                        assert_eq!(n, input.len());
+                        done += 1;
+                    }
+                }
+                done
+            })
+        };
+        for _ in 0..300 {
+            let old = current.swap(register(engine()), Ordering::Relaxed);
+            assert!(unregister(old));
+            let _ = with_engine(old, |e| e.signal_path_json());
+        }
+        stop.store(true, Ordering::Relaxed);
+        assert!(audio.join().unwrap() > 0);
+        assert!(unregister(current.load(Ordering::Relaxed)));
+    }
+
     #[test]
     fn jni_symbols_match_the_kotlin_class() {
         // The Kotlin class is app.encore.android.cadenza.CadenzaNative; a renamed class or package breaks the

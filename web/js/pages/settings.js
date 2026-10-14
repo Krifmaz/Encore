@@ -937,10 +937,23 @@ async function renderPlayback(el) {
         <label class="stack" style="gap:4px"><span class="small muted">Balance <b id="pb-balance-v">${playback.balanceText(p.balance)}</b></span><input type="range" id="pb-balance" min="-100" max="100" step="1" value="${p.balance}"></label>
         <label class="row" style="gap:8px;align-items:center"><input type="checkbox" id="pb-mono" ${p.mono ? 'checked' : ''}> Mono</label>
       </fieldset>
-      <span class="small muted">Runs in this browser or app – it costs your server nothing. Works with every quality setting. Turning it on means the sound is no longer the untouched file (the Signal path says so).</span>
-      <label class="stack" style="gap:4px"><span class="small muted">Crossfade <b id="pb-crossfade-v">${fadeText(p.crossfade)}</b></span><input type="range" id="pb-crossfade" min="0" max="12" step="1" value="${p.crossfade}"></label>
-      <label class="row" style="gap:8px;align-items:center"><input type="checkbox" id="pb-crossfade-gapless" ${p.crossfade_album_gapless ? 'checked' : ''}> Keep albums gapless (no fade between songs from the same album)</label>
-      <span class="small muted">Blends the end of one song into the start of the next.</span>`;
+      <span class="small muted">Runs in this browser or app – it costs your server nothing. Works with every quality setting. Turning it on means the sound is no longer the untouched file (the Signal path says so).</span>`;
+  };
+  // Song transitions: how one song becomes the next (every mode uses the seconds and the album rule)
+  const TRANSITION_HELP = {
+    off: 'Each song plays to its end, then the next one starts.',
+    crossfade: 'The end of one song fades out while the next one fades in.',
+    overlap: 'The next song starts at full volume a few seconds early while the old one fades out under it.',
+    smart: 'Skips the silence at the end of one song and the start of the next, then overlaps them from the last audible moment, with a short fade.',
+  };
+  const transitionsHtml = (cadenza) => {
+    const off = p.transition === 'off';
+    const secs = Math.max(1, p.crossfade || playback.TRANSITION_DEFAULT_S);
+    return `${seg('transition', playback.TRANSITIONS)}
+      <span class="small muted">${TRANSITION_HELP[p.transition] || ''}</span>
+      <label class="stack" style="gap:4px;${off ? 'opacity:.45' : ''}"><span class="small muted">Length <b id="pb-crossfade-v">${fadeText(secs)}</b></span><input type="range" id="pb-crossfade" min="1" max="12" step="1" value="${secs}" ${off ? 'disabled' : ''}></label>
+      <label class="row" style="gap:8px;align-items:center"><input type="checkbox" id="pb-crossfade-gapless" ${p.crossfade_album_gapless ? 'checked' : ''}> Keep albums gapless (no transition between songs from the same album)</label>
+      ${cadenza ? '<span class="small muted">Song transitions don\'t apply while playing through Cadenza</span>' : ''}`;
   };
   const bindSound = () => {
     el.querySelector('#pb-fx').onchange = (e) => set({ fx_on: e.target.checked });
@@ -971,6 +984,8 @@ async function renderPlayback(el) {
     bal.oninput = () => { el.querySelector('#pb-balance-v').textContent = playback.balanceText(+bal.value); };
     bal.onchange = () => set({ balance: +bal.value });
     el.querySelector('#pb-mono').onchange = (e) => set({ mono: e.target.checked });
+  };
+  const bindTransitions = () => {
     const cf = el.querySelector('#pb-crossfade');
     cf.oninput = () => { el.querySelector('#pb-crossfade-v').textContent = fadeText(+cf.value); };
     cf.onchange = () => set({ crossfade: +cf.value });
@@ -1005,6 +1020,8 @@ async function renderPlayback(el) {
         <label class="row" style="gap:8px;align-items:center"><input type="checkbox" id="pb-resume" ${p.resume ? 'checked' : ''}> Resume where I left off when the app opens</label></div>
       <div class="stack" style="gap:6px"><h3>Sound (on this device)</h3>
         ${soundHtml()}</div>
+      <div class="stack" style="gap:6px"><h3>Song transitions</h3>
+        ${transitionsHtml(!!eng)}</div>
       <div class="stack" style="gap:6px"><h3>Pure playback</h3>
         <span class="small muted">Encore streams the original file untouched – the quality badge on the player opens the <b>Signal path</b>, which shows what the file is, what was sent and what this device does with it. A browser hands the sound to the operating system, which mixes it with other sounds and may resample it; bit-perfect output needs an exclusive-mode engine.</span></div>
       <div class="stack" style="gap:6px"><h3>Server processing (Cadenza)</h3>
@@ -1017,6 +1034,7 @@ async function renderPlayback(el) {
     el.querySelector('#pb-autoplay').onchange = (e) => set({ autoplay: e.target.checked });
     el.querySelector('#pb-resume').onchange = (e) => set({ resume: e.target.checked });
     bindSound();
+    bindTransitions();
     const dspBox = el.querySelector('#pb-dsp');
     if (dspBox) {
       dspBox.onchange = (e) => set({ dsp: e.target.checked });

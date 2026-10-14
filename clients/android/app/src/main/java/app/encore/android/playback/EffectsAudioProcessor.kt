@@ -134,6 +134,7 @@ class EffectsAudioProcessor(private val engine: DspEngine) : BaseAudioProcessor(
         // anything left over (a partial frame) is dropped, as the sink never sends one
         inputBuffer.position(inputBuffer.limit())
         val processed = try { engine.process(floats, frames) } catch (_: Throwable) { floats }
+        if (processed === floats && outRate != inRate) return   // unprocessed input can't go out at another rate: dropped
         val outSamples = if (processed === floats) n else processed.size
         writeFloats(processed, outSamples)
     }

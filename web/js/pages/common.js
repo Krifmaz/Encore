@@ -29,7 +29,7 @@ export function albumTile(a, { href, actions = '', sub } = {}) {
 
 export function libraryTile(a) {
   return `<div class="tile" data-href="/library/album/${esc(a.id)}">
-    <div class="art">${art(`/api/library/albums/${a.id}/cover`, a.album)}
+    <div class="art">${art(`/api/library/albums/${a.id}/cover${a.cover_v ? '?v=' + a.cover_v : ''}`, a.album)}
       ${a.untagged ? '<div class="corner"><span class="badge warn" title="Some tracks lack MusicBrainz tags">Untagged</span></div>' : ''}
       <div class="overlay"><button class="fab" data-play-album="${esc(a.id)}" aria-label="Play">${icon.play}</button></div>
     </div>

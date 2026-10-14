@@ -11,7 +11,14 @@ package app.encore.android.cadenza
  * `app.encore.android.cadenza.CadenzaEngine` in the app module.
  */
 class CadenzaNative {
-    private var handle: Long = 0L
+    /**
+     * The native engine's handle. Read once per call: the playback thread (process, configure) and the main thread
+     * (Signal path, release) use it at the same time. The native side keeps engines in a registry and never
+     * dereferences a handle, so a call with a handle another thread just freed finds nothing instead of freed
+     * memory (lib.rs).
+     */
+    @Volatile private var handle: Long = 0L
+    private val lock = Any()
 
     /** `true` while a native engine exists. */
     val isOpen: Boolean get() = handle != 0L
@@ -25,42 +32,50 @@ class CadenzaNative {
     fun create(sampleRate: Int, channels: Int, filterId: String, ditherId: String, outRate: Int, cacheDir: String): Int {
         destroy()
         if (!available) return 0
-        handle = nativeCreate(sampleRate, channels, filterId, ditherId, outRate, cacheDir)
-        if (handle == 0L) return 0
-        val rate = nativeOutputRate(handle)
+        // built without the lock (designing a long filter takes a while; release() on the main thread must not wait)
+        val h = nativeCreate(sampleRate, channels, filterId, ditherId, outRate, cacheDir)
+        if (h == 0L) return 0
+        val rate = nativeOutputRate(h)
         if (rate <= 0) {
-            destroy()
+            nativeDestroy(h)
             return 0
         }
+        val old = synchronized(lock) { val o = handle; handle = h; o }
+        if (old != 0L) nativeDestroy(old)
         return rate
     }
 
     /** The effects as the JSON document `PlaybackPrefs.engineParams()` makes. */
     fun setParams(json: String) {
-        if (handle != 0L) nativeSetParams(handle, json)
+        val h = handle
+        if (h != 0L) nativeSetParams(h, json)
     }
 
-    /** Interleaved float PCM in, interleaved float PCM (at the output rate) out; `input` itself when closed. */
+    /** Interleaved float PCM in, interleaved float PCM (at the output rate) out; `input` itself when closed, nothing when failing. */
     fun process(input: FloatArray, frames: Int): FloatArray {
-        if (handle == 0L) return input
-        return nativeProcess(handle, input, frames) ?: EMPTY
+        val h = handle
+        if (h == 0L) return input
+        // null: the engine went away under us (or failed) – the chunk is dropped: passed through it would go out at
+        // the input rate where the sink was configured for the engine's (upsampled) output rate
+        return nativeProcess(h, input, frames.coerceIn(0, input.size)) ?: EMPTY
     }
 
     /** The tail at the end of a stream; resets the filters. */
     fun flush(): FloatArray {
-        if (handle == 0L) return EMPTY
-        return nativeFlush(handle) ?: EMPTY
+        val h = handle
+        if (h == 0L) return EMPTY
+        return nativeFlush(h) ?: EMPTY
     }
 
     /** JSON: `{engine, summary, fx_on, input_rate, output_rate, latency_seconds, eq_bands, crossfeed, balance, mono, pipeline}`. */
     fun signalPathJson(): String {
-        if (handle == 0L) return ""
-        return nativeSignalPath(handle) ?: ""
+        val h = handle
+        if (h == 0L) return ""
+        return nativeSignalPath(h) ?: ""
     }
 
     fun destroy() {
-        val h = handle
-        handle = 0L
+        val h = synchronized(lock) { val o = handle; handle = 0L; o }
         if (h != 0L) nativeDestroy(h)
     }
 

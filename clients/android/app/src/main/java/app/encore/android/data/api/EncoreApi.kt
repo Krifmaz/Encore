@@ -38,7 +38,17 @@ class EncoreApi(private val client: OkHttpClient, private val store: SessionStor
 
     fun url(path: String): String = base + path
 
-    fun coverUrl(albumId: String, size: Int = 600): String = url("/api/library/albums/${enc(albumId)}/cover?s=$size")
+    /**
+     * An album cover at a thumbnail size (the server snaps to 96, 200, 400, 600, 1000: list rows 96/200, grids 400,
+     * the full player 1000). With the album's known `cover_v` the URL is versioned and cached for good.
+     */
+    fun coverUrl(albumId: String, size: Int = 600): String {
+        val v = CoverVersions.of(albumId)
+        return url("/api/library/albums/${enc(albumId)}/cover?s=$size" + if (v > 0L) "&v=$v" else "")
+    }
+
+    /** Told about each page of albums a list loads, so their covers can be fetched ahead of the scroll. */
+    @Volatile var onAlbumPage: ((List<String>) -> Unit)? = null
 
     /** The stream of a song (PLAN §6.2): the original file when Android decodes it, FLAC made by the server otherwise. */
     fun streamUrl(trackId: Long, format: String): String =
@@ -172,7 +182,9 @@ class EncoreApi(private val client: OkHttpClient, private val store: SessionStor
         val qs = StringBuilder("/api/library/albums?sort=").append(enc(sort)).append("&limit=").append(limit).append("&offset=").append(offset)
         if (q.isNotEmpty()) qs.append("&q=").append(enc(q))
         if (artist.isNotEmpty()) qs.append("&artist=").append(enc(artist))
-        return get(qs.toString()).objects().mapNotNull { Album.from(it) }
+        val page = get(qs.toString()).objects().mapNotNull { Album.from(it) }
+        if (offset > 0 || page.size > 24) onAlbumPage?.invoke(page.map { it.id })
+        return page
     }
 
     fun album(id: String): AlbumDetail {
@@ -322,7 +334,9 @@ class EncoreApi(private val client: OkHttpClient, private val store: SessionStor
                 throw ApiException(res.code, detail, o)
             }
             if (text.isBlank()) return null
-            return try { json.parseToJsonElement(text) } catch (e: Exception) { throw IOException("Unexpected reply from the server") }
+            val el = try { json.parseToJsonElement(text) } catch (e: Exception) { throw IOException("Unexpected reply from the server") }
+            CoverVersions.note(el)
+            return el
         }
     }
 

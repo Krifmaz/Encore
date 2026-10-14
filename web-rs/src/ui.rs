@@ -231,24 +231,56 @@ pub fn initials(s: &str) -> String {
 }
 
 /// `art(src, label, cls)`: placeholder letter plus the image (lists get the small cached cover).
-pub fn art(src: &str, label: &str, cls: &str) -> String {
+pub fn art(src: &str, label: &str, cls: &str) -> String { art_sized(src, label, cls, 0) }
+
+/// `art(src, label, cls, size)`: as `art`, with the cover size for library covers (0 = by `cls`).
+pub fn art_sized(src: &str, label: &str, cls: &str, size: u32) -> String {
     let ph = format!(r#"<div class="ph">{}</div>"#, esc(&initials(label)));
     if src.is_empty() { return ph; }
     let mut src = src.to_string();
-    if is_cover_url(&src) { src.push_str(if cls == "big" { "?s=1000" } else { "?s=400" }); }
-    format!(r#"{ph}<img class="{cls}" src="{}" alt="" loading="lazy" onerror="this.remove()">"#, esc(&src))
+    let mut dim = String::new();
+    if let Some(base) = cover_base(&src) {
+        let s = if size > 0 { size } else if cls == "big" { 1000 } else { 400 };
+        let v = src[base..].strip_prefix("?v=").map(|v| format!("&v={v}")).unwrap_or_default();
+        src = format!("{}?s={s}{v}", &src[..base]);
+        dim = format!(r#" width="{s}" height="{s}""#);
+    }
+    format!(r#"{ph}<img class="{cls}" src="{}" alt=""{dim} loading="lazy" decoding="async" onerror="this.remove()">"#, esc(&src))
 }
-fn is_cover_url(src: &str) -> bool {
-    // /\/api\/(library\/albums\/[^/]+|share\/[^/]+)\/cover$/
-    if !src.ends_with("/cover") { return false; }
-    let rest = &src[..src.len() - "/cover".len()];
+
+/// A library album's cover URL; `v` (the album/song's cover_v) makes it cacheable for good.
+pub fn cover_url(album_id: &str, v: &str, size: u32) -> String {
+    let q: Vec<String> = [if size > 0 { format!("s={size}") } else { String::new() }, if v.is_empty() { String::new() } else { format!("v={v}") }]
+        .into_iter().filter(|x| !x.is_empty()).collect();
+    format!("/api/library/albums/{album_id}/cover{}", if q.is_empty() { String::new() } else { format!("?{}", q.join("&")) })
+}
+
+/// `?v=…` of a JSON album/song's cover_v ("" when it has none).
+pub fn cover_q(o: &serde_json::Value) -> String {
+    match o.get("cover_v") {
+        Some(serde_json::Value::Number(n)) => format!("?v={n}"),
+        Some(serde_json::Value::String(s)) if !s.is_empty() => format!("?v={s}"),
+        _ => String::new(),
+    }
+}
+
+/// Where `/cover` ends in a library/share cover URL (optionally followed by `?v=<digits>`), like
+/// /\/api\/(library\/albums\/[^/]+|share\/[^/]+)\/cover(\?v=\d+)?$/
+fn cover_base(src: &str) -> Option<usize> {
+    let end = match src.rfind("?v=") {
+        Some(q) if q + 3 < src.len() && src[q + 3..].bytes().all(|b| b.is_ascii_digit()) => q,
+        _ => src.len(),
+    };
+    let head = &src[..end];
+    if !head.ends_with("/cover") { return None; }
+    let rest = &head[..head.len() - "/cover".len()];
     for prefix in ["/api/library/albums/", "/api/share/"] {
         if let Some(i) = rest.find(prefix) {
             let id = &rest[i + prefix.len()..];
-            if !id.is_empty() && !id.contains('/') { return true; }
+            if !id.is_empty() && !id.contains('/') { return Some(end); }
         }
     }
-    false
+    None
 }
 
 pub fn status_info(status: &str) -> (&'static str, String) {

@@ -27,7 +27,8 @@ pub struct ScanState {
 #[derive(Clone, Default)]
 pub struct Library {
     pub scan: Arc<Mutex<ScanState>>,
-    cover_memo: Arc<Mutex<HashMap<String, PathBuf>>>,
+    /// album → cover file + version (see covers.rs)
+    pub covers: crate::covers::CoverIndex,
 }
 
 pub fn album_key(albumartist: &str, album: &str, path: &str) -> String {
@@ -186,6 +187,7 @@ impl Library {
             db.log("info", &msg);
             self.forget_cover(None);
         }
+        self.warm_covers(db.clone());
         let mut s = self.scan.lock().unwrap();
         s.scanning = false;
         s.last_scan = Some(now());
@@ -195,29 +197,21 @@ impl Library {
     // ---- covers --------------------------------------------------------------------------------
 
     pub fn forget_cover(&self, album_id: Option<&str>) {
-        let mut m = self.cover_memo.lock().unwrap();
-        match album_id {
-            None => m.clear(),
-            Some(a) => {
-                m.remove(a);
-            }
-        }
+        self.covers.forget(album_id);
     }
 
     /// Folder picture (cover.jpg, folder.png, …) or the art embedded in the first file (cached).
     pub fn find_cover(&self, db: &Db, album_id: &str) -> Option<PathBuf> {
-        if let Some(p) = self.cover_memo.lock().unwrap().get(album_id).filter(|p| p.is_file()) {
-            return Some(p.clone());
-        }
-        let found = find_cover_uncached(db, album_id);
-        if let Some(f) = &found {
-            self.cover_memo.lock().unwrap().insert(album_id.to_string(), f.clone());
-        }
-        found
+        self.covers.get(db, album_id).map(|c| c.0)
+    }
+
+    /// Make the grid/list cover thumbnails for every album in the background (after scans and imports).
+    pub fn warm_covers(&self, db: Db) {
+        self.covers.warm(db);
     }
 }
 
-fn find_cover_uncached(db: &Db, album_id: &str) -> Option<PathBuf> {
+pub(crate) fn find_cover_uncached(db: &Db, album_id: &str) -> Option<PathBuf> {
     let tracks = db.query("SELECT path FROM tracks WHERE album_id=? ORDER BY disc, track LIMIT 50", p![album_id]).ok()?;
     let mut dirs: Vec<PathBuf> = vec![];
     for t in &tracks {
@@ -272,29 +266,6 @@ fn find_cover_uncached(db: &Db, album_id: &str) -> Option<PathBuf> {
 pub fn embedded_art(path: &str) -> Option<Vec<u8>> {
     let tagged = lofty::read_from_path(path).ok()?;
     tagged.tags().iter().find_map(|t| t.pictures().first().map(|p| p.data().to_vec()))
-}
-
-/// A small cached JPEG of a cover for lists and tiles (originals can be several MB).
-pub fn thumbnail(db: &Db, src: &Path, album_id: &str, size: u32) -> PathBuf {
-    let size = size.clamp(64, 1200);
-    let out = db.data_dir.join("covers").join("thumbs").join(format!("{album_id}_{size}.jpg"));
-    let fresh = |o: &Path| -> bool {
-        let (Ok(a), Ok(b)) = (std::fs::metadata(o).and_then(|m| m.modified()), std::fs::metadata(src).and_then(|m| m.modified())) else { return false };
-        a >= b
-    };
-    if fresh(&out) {
-        return out;
-    }
-    let make = || -> anyhow::Result<()> {
-        let img = image::open(src)?;
-        let img = if img.width().max(img.height()) > size { img.resize(size, size, image::imageops::FilterType::Lanczos3) } else { img };
-        std::fs::create_dir_all(out.parent().unwrap())?;
-        let tmp = out.with_extension("tmp");
-        img.to_rgb8().save_with_format(&tmp, image::ImageFormat::Jpeg)?;
-        std::fs::rename(&tmp, &out)?;
-        Ok(())
-    };
-    if make().is_ok() { out } else { src.to_path_buf() }
 }
 
 pub fn stats(db: &Db) -> Value {

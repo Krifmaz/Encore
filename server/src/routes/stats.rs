@@ -18,6 +18,7 @@ pub fn router() -> Router<AppState> {
         .route("/api/stats/me", get(me))
         .route("/api/stats/leaderboard", get(leaderboard))
         .route("/api/system/diagnostics", get(diagnostics))
+        .route("/api/diagnostics/client-crash", get(client_crash::list).post(client_crash::upload).delete(client_crash::clear))
         .route("/api/admin/autodownload", get(get_auto).put(put_auto))
         .route("/api/admin/autodownload/upgrade-now", post(upgrade_now))
         .route("/api/admin/autodownload/run-now", post(run_sync_now))
@@ -25,6 +26,9 @@ pub fn router() -> Router<AppState> {
         .route("/api/admin/tasks/{key}", patch(patch_task))
         .route("/api/admin/tasks/{key}/run", post(run_task))
 }
+
+#[path = "client_crash.rs"]
+mod client_crash;
 
 // ---- stats --------------------------------------------------------------------------------------
 

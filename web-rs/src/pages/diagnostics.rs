@@ -64,6 +64,11 @@ pub fn render(view: Element, _ctx: Ctx) -> PageFuture {
     <div class="card flat">
       <div class="small muted" style="margin-bottom:10px">Encore keeps copies of its database here (daily, and before every upgrade). Download one now and then to keep it somewhere else.</div>
       <div id="backups"><div class="empty"><span class="spinner"></span></div></div>
+    </div>
+    <div class="section-head"><h2>App crashes</h2><button class="btn sm" id="cr-clear" disabled>Clear</button></div>
+    <div class="card flat">
+      <div class="small muted" style="margin-bottom:10px">The phone app sends a report the next time it opens after it crashed or the system closed it. The newest 50 are kept.</div>
+      <div id="crashes"><div class="empty"><span class="spinner"></span></div></div>
     </div>"#, copy = icon("copy"), refresh = icon("refresh"),
             // `icon.upload || icon.plus`
             up = { let u = icon("upload"); if u.is_empty() { icon("plus") } else { u } }));
@@ -123,6 +128,20 @@ pub fn render(view: Element, _ctx: Ctx) -> PageFuture {
             let bk = bk.clone();
             dom::spawn(async move { load_backups(&bk).await });
         }
+        if let Some(cr) = dom::qs_in(&view, "#crashes") {
+            let v2 = view.clone();
+            let cr2 = cr.clone();
+            dom::on_sel(&view, "#cr-clear", "click", move |_| {
+                let (v, cr) = (v2.clone(), cr2.clone());
+                dom::spawn(async move {
+                    if !confirm_dialog("Clear app crashes?", "All crash reports from the phone app are removed.", "Clear", true).await { return; }
+                    if let Err(e) = api::del("/diagnostics/client-crash").await { toast(&e.message, "err"); }
+                    load_crashes(&v, &cr).await;
+                });
+            });
+            let v = view.clone();
+            dom::spawn(async move { load_crashes(&v, &cr).await });
+        }
         let last: Rc<RefCell<Option<Value>>> = Rc::new(RefCell::new(None));
         {
             let (v, d, l) = (view.clone(), diag.clone(), last.clone());
@@ -176,6 +195,42 @@ fn draw_backups(bk: &Element, d: &Value) {
             dom::timeout(2500, dom::reload);
         });
     });
+}
+
+/// App crash report kinds (POST /api/diagnostics/client-crash), the same words in web/js.
+fn crash_kind(k: &str) -> Option<&'static str> {
+    Some(match k { "crash" => "Crash", "native" => "Native crash", "anr" => "Not responding", "low_memory" => "Closed for memory", "signaled" => "Killed by the system", _ => return None })
+}
+
+/// The JS `loadCrashes`: the "App crashes" list (newest first) and the Clear button.
+async fn load_crashes(view: &Element, cr: &Element) {
+    let d = match api::get("/diagnostics/client-crash").await {
+        Ok(d) => d,
+        Err(e) => { dom::set_html(cr, &format!(r#"<div class="empty muted small">{}</div>"#, esc(&e.message))); return; }
+    };
+    let list = d.a("crashes");
+    if let Some(b) = dom::qs_in(view, "#cr-clear") { dom::set_disabled(&b, list.is_empty()); }
+    if list.is_empty() {
+        dom::set_html(cr, r#"<div class="empty muted small">No app crashes reported.</div>"#);
+        return;
+    }
+    let items: String = list.iter().map(|c| {
+        let kind = c.s("kind");
+        let badge = crash_kind(&kind).map(str::to_string).unwrap_or_else(|| if c.truthy("kind") { kind.clone() } else { "Crash".to_string() });
+        let meta: Vec<String> = ["device", "app_version", "os", "user"].iter().filter(|k| c.truthy(k)).map(|k| c.s(k)).collect();
+        format!(r#"
+      <div class="list-item" style="align-items:flex-start">
+        <span class="dot err" style="margin-top:7px"></span>
+        <div class="grow">
+          <div class="row wrap"><b class="ellipsis">{first}</b><span class="badge">{badge}</span></div>
+          <div class="small muted">{meta} · {time}</div>
+          <details><summary class="small muted" style="cursor:pointer">Full report</summary><div class="code diag-raw">{text}</div></details>
+        </div>
+      </div>"#,
+            first = esc(&if c.truthy("first_line") { c.s("first_line") } else { "Crash".to_string() }),
+            badge = esc(&badge), meta = esc(&meta.join(" · ")), time = fmt::date(c.f("time")), text = esc(&or_empty(c, "text")))
+    }).collect();
+    dom::set_html(cr, &format!(r#"<div class="list">{items}</div>"#));
 }
 
 /// The JS `loadBackups`.

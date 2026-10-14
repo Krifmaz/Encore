@@ -19,11 +19,19 @@ import { api } from './api.js';
  * eq_preset / eq_bands / eq_preamp: parametric EQ (a named preset, or 'custom' with your own bands), preamp in dB
  * crossfeed: headphone crossfeed 'off' | 'light' | 'medium' | 'strong'
  * balance: -100 (left) … +100 (right) · mono: sum both channels
- * crossfade: seconds the end of one song blends into the next (0 = off) · crossfade_album_gapless: no fade within an album
+ * transition: how one song becomes the next – 'off' | 'crossfade' (equal-power, both fade) | 'overlap' (the next song
+ *             starts at full volume `crossfade` seconds early, only the old one fades out) | 'smart' (Automix-style: the
+ *             silent ends of both songs are skipped and the next song starts at the old one's last audible moment)
+ * crossfade: the transition's length in seconds (1–12; 0 only with transition 'off') · crossfade_album_gapless: no
+ *            transition within an album (every mode)
  */
 export const DEFAULTS = { quality: 'auto', preload: true, autoplay: true, resume: true, dsp: false, dsp_filter: '', dsp_dither: 'tpdf', dsp_rate: 'device',
   fx_on: false, eq_preset: 'flat', eq_bands: [], eq_preamp: 0, crossfeed: 'off', balance: 0, mono: false,
-  crossfade: 0, crossfade_album_gapless: true };
+  transition: 'off', crossfade: 0, crossfade_album_gapless: true };
+export const TRANSITIONS = [['off', 'Off'], ['crossfade', 'Crossfade'], ['overlap', 'Overlap'], ['smart', 'Smart overlap']];
+const TRANSITION_IDS = new Set(TRANSITIONS.map(t => t[0]));
+/** Seconds a transition lasts when one is switched on with no length set yet. */
+export const TRANSITION_DEFAULT_S = 6;
 const KEY = 'encore.playback';
 const QUALITIES = new Set(['auto', 'original', 'saver']);
 
@@ -73,6 +81,19 @@ export function fxActive(p) {
 }
 const db = (v) => `${v > 0 ? '+' : ''}${v} dB`;
 export const balanceText = (v) => v === 0 ? 'Centre' : v < 0 ? `L${-v}` : `R${v}`;
+/**
+ * The two gains of a song transition at progress x (0…1) of its window, `elapsed` seconds in: [old song, new song].
+ * Crossfade: equal-power (cos/sin, the sum of powers stays 1). Overlap: the new song at full volume at once (a
+ * 0.15 s ramp, so it doesn't click), the old one fades out under it. Smart overlap: the same with a 0.5 s fade-in.
+ */
+export function transitionGains(mode, x, elapsed) {
+  const p = Math.max(0, Math.min(1, Number(x) || 0));
+  const out = Math.cos(p * Math.PI / 2);
+  if (mode === 'crossfade') return [out, Math.sin(p * Math.PI / 2)];
+  const rise = mode === 'smart' ? 0.5 : 0.15;
+  return [out, Math.max(0, Math.min(1, (Number(elapsed) || 0) / rise))];
+}
+export const transitionLabel = (id) => (TRANSITIONS.find(t => t[0] === id) || TRANSITIONS[0])[1];
 /** "EQ: Bass boost, preamp -6 dB · Crossfeed: medium · Balance: L10 · Mono · Crossfade: 6 s" – '' when nothing applies. */
 export function effectsSummary(p, { crossfade = true } = {}) {
   const parts = [];
@@ -82,7 +103,7 @@ export function effectsSummary(p, { crossfade = true } = {}) {
     if (p.balance !== 0) parts.push(`Balance: ${balanceText(p.balance)}`);
     if (p.mono) parts.push('Mono');
   }
-  if (crossfade && p.crossfade > 0) parts.push(`Crossfade: ${p.crossfade} s`);
+  if (crossfade && p.transition !== 'off' && p.crossfade > 0) parts.push(`${transitionLabel(p.transition)}: ${p.crossfade} s`);
   return parts.join(' · ');
 }
 
@@ -136,6 +157,10 @@ export function clean(p) {
   c.balance = Math.round(num(c.balance, -100, 100, 0));
   c.mono = c.mono === true;
   c.crossfade = Math.round(num(c.crossfade, 0, 12, 0));
+  // before Song transitions existed, a crossfade length above 0 meant "crossfade"
+  const raw = p && typeof p === 'object' ? p.transition : undefined;
+  c.transition = TRANSITION_IDS.has(raw) ? raw : c.crossfade > 0 ? 'crossfade' : 'off';
+  if (c.transition !== 'off' && c.crossfade < 1) c.crossfade = TRANSITION_DEFAULT_S;
   c.crossfade_album_gapless = c.crossfade_album_gapless !== false;
   return c;
 }
