@@ -114,13 +114,13 @@ pub fn target_rate(src: u32, requested: u32, max_rate: u32) -> u32 {
     r
 }
 
-/// `kind` when it fits `max_taps`; otherwise the longest catalogue filter of the same phase and
-/// apodizing kind that does (or the shortest catalogue filter of that kind when none does).
+/// `kind` when it fits `max_taps`; otherwise the longest catalogue filter of the same family,
+/// phase and apodizing kind that does (or the shortest catalogue filter of that kind when none does).
 pub fn cap_filter(kind: FilterKind, max_taps: usize) -> FilterKind {
     if kind.taps <= max_taps {
         return kind;
     }
-    let same: Vec<FilterKind> = FilterKind::catalog().into_iter().filter(|f| f.phase == kind.phase && f.apodizing == kind.apodizing).collect();
+    let same: Vec<FilterKind> = FilterKind::catalog().into_iter().filter(|f| f.family == kind.family && f.phase == kind.phase && f.apodizing == kind.apodizing).collect();
     same.iter()
         .filter(|f| f.taps <= max_taps)
         .max_by_key(|f| f.taps)

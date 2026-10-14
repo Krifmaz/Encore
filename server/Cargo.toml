@@ -41,7 +41,7 @@ unicode-normalization = "0.1.25"
 md5 = "0.8.1"
 flate2 = "1"
 tokio-tungstenite = "0.26"
-cadenza-dsp = { git = "https://github.com/Krifmaz/cadenza", rev = "ba0a02f90d0ba58f81ba9449bee451e8468aedfa" }
+cadenza-dsp = { git = "https://github.com/Krifmaz/cadenza", rev = "5f17f17" }
 
 [profile.release]
 lto = "thin"
