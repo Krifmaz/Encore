@@ -183,7 +183,8 @@ pub struct Job {
 }
 
 fn config(job: &Job) -> PipelineConfig {
-    PipelineConfig { filter: job.filter, output_rate: Some(job.rate), output_bits: 24, dither: job.dither, ..PipelineConfig::default() }
+    // level stays that of the original (no automatic -3 dB headroom); the soft clipper guards intersample overs
+    PipelineConfig { filter: job.filter, output_rate: Some(job.rate), output_bits: 24, dither: job.dither, headroom_db: Some(0.0), ..PipelineConfig::default() }
 }
 
 /// Bytes of interleaved f64 per processing block (about 0.1 s of stereo 44.1 kHz).
@@ -348,7 +349,7 @@ pub async fn self_test(st: &AppState) -> Result<String, String> {
     let rate = lim.max_rate.max(44_100);
     tokio::task::spawn_blocking(move || {
         let input = InputFormat { rate: 44_100, bits: 16, channels: 2, codec: "PCM".into() };
-        let cfg = PipelineConfig { filter, output_rate: Some(rate), output_bits: 24, dither: DitherKind::Tpdf, ..PipelineConfig::default() };
+        let cfg = PipelineConfig { filter, output_rate: Some(rate), output_bits: 24, dither: DitherKind::Tpdf, headroom_db: Some(0.0), ..PipelineConfig::default() };
         let mut p = Pipeline::new(input, cfg, &cache).map_err(|e| e.to_string())?;
         let silence = vec![0.0f64; 44_100 * 2];
         let mut n = p.process(&silence).len();

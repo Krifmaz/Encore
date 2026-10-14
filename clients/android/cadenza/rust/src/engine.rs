@@ -221,6 +221,8 @@ impl Engine {
                 dither,
                 eq: Vec::new(),
                 eq_enabled: false,
+                // the player owns the volume: no automatic -3 dB headroom (the soft clipper still guards overs)
+                headroom_db: Some(0.0),
                 ..Default::default()
             };
             Some(Pipeline::new(input, cfg, &cache).map_err(|e| e.to_string())?)
