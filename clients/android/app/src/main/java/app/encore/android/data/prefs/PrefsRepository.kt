@@ -77,6 +77,10 @@ class PrefsRepository(context: Context, private val api: EncoreApi, private val 
         }
     }
 
+    private val _phone = MutableStateFlow(loadPhone())
+    /** This phone's own Cadenza / USB DAC settings ([PhonePrefs]): kept on this device only, never sent to the account. */
+    val phone: StateFlow<PhonePrefs> = _phone.asStateFlow()
+
     private val _dsp = MutableStateFlow<DspInfo?>(null)
     /** null until GET /api/playback/dsp answered (or while signed out). */
     val dsp: StateFlow<DspInfo?> = _dsp.asStateFlow()
@@ -90,6 +94,18 @@ class PrefsRepository(context: Context, private val api: EncoreApi, private val 
         _playback.value = p
         prefs.edit().putString(KEY, p.toJson().toString()).apply()
         if (store != null && store.settings.value.autoplay != p.autoplay) store.setAutoplay(p.autoplay)
+    }
+
+    private fun loadPhone(): PhonePrefs {
+        val text = prefs.getString(PHONE_KEY, null) ?: return PhonePrefs()
+        return try { PhonePrefs.from(Json.parseToJsonElement(text) as? JsonObject) } catch (_: Exception) { PhonePrefs() }
+    }
+
+    /** Saves this phone's Cadenza / USB settings (device-only: they survive sign-out and never reach the server). */
+    fun setPhone(p: PhonePrefs) {
+        if (p == _phone.value) return
+        _phone.value = p
+        prefs.edit().putString(PHONE_KEY, p.toJson().toString()).apply()
     }
 
     /** Change one or more fields; saved on this device and on the account (kept on this device if the server can't). */
@@ -135,5 +151,6 @@ class PrefsRepository(context: Context, private val api: EncoreApi, private val 
 
     private companion object {
         const val KEY = "playback"
+        const val PHONE_KEY = "phone_cadenza"
     }
 }

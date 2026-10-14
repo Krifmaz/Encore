@@ -126,6 +126,24 @@ class StreamResolver(private val api: EncoreApi, private val estimator: Bandwidt
 
     fun variantOf(id: Long): StreamVariant? = chosen[id]
 
+    /** The song whose data the player opened last (NONE: something that is not a library stream, e.g. an offline file). */
+    @Volatile private var lastOpened: Long = NONE
+
+    /**
+     * The song the sink is about to be configured for at `rate` Hz is the server's Cadenza render, so the phone's
+     * Cadenza leaves it alone (server-side processing wins per song). The sink configures a song right after its data
+     * was opened: at the start of a song, and during a gapless hand-over once the next song is pre-loading (by then
+     * the current song is fully loaded; a seek that reopens it drops and later reopens the next one too). So the
+     * song opened last is the one being configured, and a render still playing does not stop the phone upsampling
+     * the next song at the same rate. When that song is no longer known, any render at `rate` counts.
+     */
+    fun serverRenderAt(rate: Int): Boolean {
+        val id = lastOpened
+        if (id == NONE) return false
+        val v = chosen[id] ?: return chosen.values.any { it.dsp && it.dspRate == rate }
+        return v.dsp && v.dspRate == rate
+    }
+
     /** The next open of this song uses `v` (and keeps it until the song ends). */
     fun force(id: Long, v: StreamVariant) {
         pending[id] = v
@@ -229,13 +247,17 @@ class StreamResolver(private val api: EncoreApi, private val estimator: Bandwidt
     // ---- ResolvingDataSource.Resolver ---------------------------------------------------------------------
 
     override fun resolveDataSpec(dataSpec: DataSpec): DataSpec {
-        val id = trackIdOf(dataSpec.uri) ?: return dataSpec
+        val id = trackIdOf(dataSpec.uri)
+        lastOpened = id ?: NONE
+        if (id == null) return dataSpec
         val t = tracks[id] ?: return dataSpec
         val v = pending.remove(id) ?: chosen[id] ?: startVariant(t).also { chosen[id] = it }
         return dataSpec.buildUpon().setUri(Uri.parse(url(id, v))).build()
     }
 
     companion object {
+        private const val NONE = -1L
+
         /** `/api/library/tracks/{id}/stream` → id */
         fun trackIdOf(uri: Uri): Long? {
             val segs = uri.pathSegments

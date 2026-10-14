@@ -167,6 +167,12 @@ impl Crossfeed {
     }
 }
 
+/// The bit depth Cadenza's quantiser rounds to when the engine upsamples.
+pub const OUTPUT_BITS: u32 = 24;
+
+/// Full scale of the resampler's integers (`2^(OUTPUT_BITS-1)`): its output divided by this is in [-1, 1).
+const OUTPUT_SCALE: f32 = (1u32 << (OUTPUT_BITS - 1)) as f32;
+
 /// One engine for one stream format.
 pub struct Engine {
     rate: u32,
@@ -217,7 +223,9 @@ impl Engine {
             let cfg = PipelineConfig {
                 filter,
                 output_rate: Some(want),
-                output_bits: 32,
+                // Cadenza's dither / noise shaping quantise to 24 bits (what a USB DAC or Android's 32-bit
+                // path takes); the floats handed back are those 24-bit values / 2^23, so the phone only scales
+                output_bits: OUTPUT_BITS,
                 dither,
                 eq: Vec::new(),
                 eq_enabled: false,
@@ -319,7 +327,7 @@ impl Engine {
                 None => Vec::new(),
             };
             self.out.clear();
-            self.out.extend(r.iter().map(|v| *v as f32 / 2147483648.0));
+            self.out.extend(r.iter().map(|v| *v as f32 / OUTPUT_SCALE));
             self.out.len()
         };
         if let Some(eq) = self.eq.as_mut() {
@@ -370,7 +378,7 @@ impl Engine {
         match self.resampler.as_mut() {
             Some(r) => {
                 let ints = r.process(&self.scratch);
-                self.out.extend(ints.iter().map(|v| *v as f32 / 2147483648.0));
+                self.out.extend(ints.iter().map(|v| *v as f32 / OUTPUT_SCALE));
             }
             None => self.out.extend(self.scratch.iter().map(|v| *v as f32)),
         }
@@ -594,6 +602,11 @@ mod tests {
         assert!(j["pipeline"]["stages"].as_array().unwrap().iter().any(|s| s["id"] == "resampler" && s["active"] == true));
         assert!(j["latency_seconds"].as_f64().unwrap() > 0.0);
         assert!(e.summary().contains("→ 88.2 kHz"));
+        // dithered to 24 bits: every sample is an exact multiple of 2^-23 (the phone scales it to an int as it is)
+        assert!(mid.iter().all(|v| {
+            let i = *v * OUTPUT_SCALE;
+            i == i.round() && i.abs() <= OUTPUT_SCALE
+        }));
     }
 
     #[test]

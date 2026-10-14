@@ -33,8 +33,10 @@ import androidx.media3.session.SessionResult
 import app.encore.android.AppGraph
 import app.encore.android.EncoreApp
 import app.encore.android.R
+import app.encore.android.cadenza.CadenzaEngine
 import app.encore.android.data.api.ApiException
 import app.encore.android.data.api.Track
+import app.encore.android.data.prefs.PhonePrefs
 import app.encore.android.data.prefs.PlaybackPrefs
 import app.encore.android.data.prefs.Quality
 import app.encore.android.ui.MainActivity
@@ -46,7 +48,12 @@ import com.google.common.util.concurrent.SettableFuture
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
+import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.JsonArray
+import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.JsonPrimitive
 import okhttp3.Request
+import java.io.File
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.ExecutorService
 import java.util.concurrent.Executors
@@ -81,6 +88,15 @@ class EncorePlaybackService : MediaLibraryService() {
     private var dspJob: Job? = null
     private var prefs: PlaybackPrefs = PlaybackPrefs()
 
+    // Cadenza on this phone + bit-perfect USB (M6): device-only settings (PrefsRepository.phone)
+    private lateinit var usb: UsbOutputManager
+    private var phoneJob: Job? = null
+    private var phone: PhonePrefs = PhonePrefs()
+    /** the rate phone Cadenza upsamples to (0 = off); read on the playback thread at every configure */
+    @Volatile private var phoneOutRate = 0
+    /** this phone's mixer rate, for PhonePrefs.rate "device" */
+    @Volatile private var deviceRate = 0
+
     // scrobbling state (main thread only)
     private var announced: Long? = null
     private var logged = false
@@ -112,8 +128,20 @@ class EncorePlaybackService : MediaLibraryService() {
         resume = ResumeStore(this)
         estimator = BandwidthEstimator(this)
         resolver = StreamResolver(graph.api, estimator)
-        resolver.deviceRate = DeviceOutput.of(this).rateHz
+        deviceRate = DeviceOutput.of(this).rateHz
+        resolver.deviceRate = deviceRate
+        // long Cadenza filters are designed once and kept here
+        CadenzaEngine.cacheDir = File(cacheDir, "cadenza-fir").path
+        usb = UsbOutputManager(this)
+        phone = graph.prefs.phone.value
+        applyPhoneEngine(phone)
         effects = EffectsAudioProcessor(DspEngines.create())
+        // per song, on the playback thread: the server's render wins over the phone's Cadenza
+        effects.beforeConfigure = { inRate ->
+            CadenzaEngine.outputRate = if (resolver.serverRenderAt(inRate)) 0 else phoneOutRate
+            CadenzaEngine.filterId to CadenzaEngine.ditherId
+        }
+        effects.directOutput = { rate, channels, upsampled -> usb.choose(rate, channels, upsampled) }
         prefs = graph.prefs.playback.value
         applyPrefs(prefs)
         resolver.dspInfo = graph.prefs.dsp.value
@@ -134,7 +162,9 @@ class EncorePlaybackService : MediaLibraryService() {
                     // the processor chain only runs on the 16-bit path (float output bypasses it in Media3)
                     .setEnableFloatOutput(false)
                     .setEnableAudioTrackPlaybackParams(enableAudioTrackPlaybackParams)
-                    .setAudioProcessorChain(DefaultAudioSink.DefaultAudioProcessorChain(fx))
+                    // only the effects: Media3's silence skipping / speed processors take 16-bit PCM only, and phone
+                    // Cadenza and bit-perfect USB hand the sink 24 / 32-bit
+                    .setAudioProcessorChain(EffectsChain(fx))
                     .build()
         }
         // pre-load: with it the next song is fetched while this one plays (60 s ahead); without it the buffer
@@ -167,6 +197,10 @@ class EncorePlaybackService : MediaLibraryService() {
         // the preferences follow the account; the UI changes them through PrefsRepository in this process
         prefsJob = graph.scope.launch { graph.prefs.playback.collect { p -> if (!released) applyPrefs(p) } }
         dspJob = graph.scope.launch { graph.prefs.dsp.collect { d -> if (!released) { resolver.dspInfo = d; publish() } } }
+        phoneJob = graph.scope.launch { graph.prefs.phone.collect { p -> if (!released) applyPhone(p) } }
+        usb.onChange = { if (!released) usbChanged() }
+        usb.start()
+        routeUsb()
         graph.prefs.sync()
         main.post(adaptTick)
     }
@@ -179,6 +213,9 @@ class EncorePlaybackService : MediaLibraryService() {
         main.removeCallbacks(adaptTick)
         prefsJob?.cancel()
         dspJob?.cancel()
+        phoneJob?.cancel()
+        usb.onChange = null
+        usb.stop()
         saveResume()
         session.release()
         player.removeListener(listener)
@@ -199,6 +236,100 @@ class EncorePlaybackService : MediaLibraryService() {
             dspAsked.clear()
         }
         publish()
+    }
+
+    // ---- Cadenza on this phone + bit-perfect USB (PhonePrefs) -----------------------------------------------
+
+    /** The engine's static settings (read at the next configure). */
+    private fun applyPhoneEngine(p: PhonePrefs) {
+        CadenzaEngine.filterId = p.filter
+        CadenzaEngine.ditherId = p.dither
+        phoneOutRate = if (CadenzaEngine.available) p.outputRateHz(deviceRate) else 0
+        CadenzaEngine.outputRate = phoneOutRate
+        usb.enabled = p.bitPerfect
+    }
+
+    /**
+     * New phone settings: they apply at the next song, except a new output rate / filter / dither or bit-perfect
+     * switch while a song plays, which restarts it at the same spot so the sink is set up again.
+     */
+    private fun applyPhone(p: PhonePrefs) {
+        val before = phone
+        val rateBefore = phoneOutRate
+        phone = p
+        applyPhoneEngine(p)
+        val engineChanged = phoneOutRate != rateBefore || (phoneOutRate > 0 && (before.filter != p.filter || before.dither != p.dither))
+        val bitPerfectChanged = before.bitPerfect != p.bitPerfect
+        if (bitPerfectChanged) routeUsb()
+        // bit-perfect on or off only changes the path when a DAC is plugged in
+        if (engineChanged || (bitPerfectChanged && UsbOutputManager.state.value != null)) restartForOutput()
+        publish()
+    }
+
+    /** The DAC came or went: this phone's mixer rate may have changed too; re-route and restart if bit-perfect is on. */
+    private fun usbChanged() {
+        deviceRate = DeviceOutput.of(this).rateHz
+        resolver.deviceRate = deviceRate
+        val rateBefore = phoneOutRate
+        applyPhoneEngine(phone)
+        routeUsb()
+        if (phone.bitPerfect || phoneOutRate != rateBefore) restartForOutput()
+        publish()
+    }
+
+    /** ExoPlayer plays to the DAC while bit-perfect output is on (null: Android's choice). */
+    private fun routeUsb() {
+        if (!this::player.isInitialized) return
+        try { player.setPreferredAudioDevice(usb.target) } catch (_: Exception) {}
+        if (usb.target == null) usb.clear()
+    }
+
+    /** The song that plays again from where it is, so the audio sink is configured anew (a new rate or output path). */
+    private fun restartForOutput() {
+        if (!this::player.isInitialized) return
+        if (player.currentMediaItem == null || player.playbackState == Player.STATE_IDLE) return
+        val wasPlaying = player.playWhenReady
+        val t = currentTrack()
+        val v = currentVariant()
+        if (t != null && v != null && v.serverStream) {
+            // a stream the server makes as it goes: ask for it again at the spot
+            val at = absPositionMs() / 1000.0
+            player.stop()
+            reopen(t, rung = null, dsp = null, offsetSec = if (at > 0.5) at else 0.0, prepareFirst = true)
+            player.playWhenReady = wasPlaying
+            return
+        }
+        val index = player.currentMediaItemIndex
+        val pos = player.currentPosition.coerceAtLeast(0L)
+        player.stop()
+        player.prepare()
+        player.seekTo(index, pos)
+        player.playWhenReady = wasPlaying
+    }
+
+    /** The phone engine's filters as id → label (CadenzaEngine.catalog), read once. */
+    private val phoneFilters: Map<String, String> by lazy { phoneCatalog("filters", "default_filter") }
+
+    /** The phone engine's dithers as id → label (CadenzaEngine.catalog), read once. */
+    private val phoneDithers: Map<String, String> by lazy { phoneCatalog("dithers", "default_dither") }
+
+    private fun phoneCatalog(listKey: String, defaultKey: String): Map<String, String> {
+        val json = try { CadenzaEngine.catalog() } catch (_: Throwable) { "" }
+        if (json.isEmpty()) return emptyMap()
+        return try {
+            val o = Json.parseToJsonElement(json) as? JsonObject ?: return emptyMap()
+            val default = (o[defaultKey] as? JsonPrimitive)?.content ?: ""
+            val map = HashMap<String, String>()
+            (o[listKey] as? JsonArray)?.forEach { e ->
+                val a = e as? JsonArray ?: return@forEach
+                val id = (a.getOrNull(0) as? JsonPrimitive)?.content ?: return@forEach
+                map[id] = (a.getOrNull(1) as? JsonPrimitive)?.content ?: id
+            }
+            map[""] = map[default] ?: "Cadenza default"
+            map
+        } catch (_: Exception) {
+            emptyMap()
+        }
     }
 
     // ---- what the UI knows about the stream (session extras) ---------------------------------------------
@@ -247,6 +378,10 @@ class EncorePlaybackService : MediaLibraryService() {
             v.transcode -> "Converted to FLAC for this device (lossless)"
             else -> "Original file, no conversion"
         }
+        // phone Cadenza: the engine's output rate differs from the song's (a server render passes through)
+        val outRate = effects.configuredOutputRate
+        val upsampled = CadenzaEngine.available && !v.dsp && outRate > 0 && effects.configuredInputRate > 0 && outRate != effects.configuredInputRate
+        val bitPerfect = phone.bitPerfect && usb.target != null && usb.active
         val note = when (v.dspState) { "cached" -> " (pre-rendered)"; "rendering", "queued" -> " (rendering ahead)"; else -> "" }
         val text = when {
             v.rung > 0 -> "AAC ${v.rung} kbps, lossy " + (if (prefs.quality == "saver") "(Data saver is on)" else "(adaptive – the connection could not keep up)")
@@ -265,6 +400,13 @@ class EncorePlaybackService : MediaLibraryService() {
             connectionKbps = estimator.kbps ?: 0.0,
             effectsEngine = if (effects.bypass) "" else effects.engineSignalPath(),
             processorRate = effects.configuredOutputRate,
+            phoneCadenza = upsampled,
+            phoneRate = if (upsampled) outRate else 0,
+            phoneFilterLabel = if (upsampled) (phoneFilters[effects.configuredFilterId] ?: effects.configuredFilterId) else "",
+            phoneDitherLabel = if (upsampled) (phoneDithers[effects.configuredDitherId] ?: effects.configuredDitherId) else "",
+            usbBitPerfect = bitPerfect,
+            usbDevice = if (usb.target != null) (UsbOutputManager.state.value?.deviceName ?: "") else "",
+            usbNote = if (phone.bitPerfect && usb.target != null && !bitPerfect) usb.lastNote else "",
         )
     }
 

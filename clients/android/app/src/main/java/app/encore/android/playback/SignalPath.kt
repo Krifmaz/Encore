@@ -75,6 +75,20 @@ data class StreamInfo(
     val effectsEngine: String = "",
     /** the rate the effects processor outputs (0 before the first song) */
     val processorRate: Int = 0,
+    /** Cadenza on this phone upsampled this song */
+    val phoneCadenza: Boolean = false,
+    /** the rate phone Cadenza upsampled to, Hz (0 when it did not) */
+    val phoneRate: Int = 0,
+    /** the phone engine's upsampling filter, e.g. "Sinc L 64k" ("" when it did not upsample) */
+    val phoneFilterLabel: String = "",
+    /** the phone engine's dither, e.g. "TPDF" ("" when it did not upsample) */
+    val phoneDitherLabel: String = "",
+    /** the song goes to the USB DAC through Android's bit-perfect mixer path */
+    val usbBitPerfect: Boolean = false,
+    /** the USB DAC's product name ("" = none) */
+    val usbDevice: String = "",
+    /** why bit-perfect output is on but this song went through the mixer ("" = it did not, or it is off) */
+    val usbNote: String = "",
 ) {
     fun toBundle(): Bundle = Bundle().apply {
         putLong(K_ID, trackId)
@@ -87,6 +101,13 @@ data class StreamInfo(
         putDouble(K_KBPS, connectionKbps)
         putString(K_ENGINE, effectsEngine)
         putInt(K_RATE, processorRate)
+        putBoolean(K_PHONE, phoneCadenza)
+        putInt(K_PHONE_RATE, phoneRate)
+        putString(K_PHONE_FILTER, phoneFilterLabel)
+        putString(K_PHONE_DITHER, phoneDitherLabel)
+        putBoolean(K_USB_BP, usbBitPerfect)
+        putString(K_USB_DEVICE, usbDevice)
+        putString(K_USB_NOTE, usbNote)
     }
 
     companion object {
@@ -100,6 +121,13 @@ data class StreamInfo(
         const val K_KBPS = "encore.connection_kbps"
         const val K_ENGINE = "encore.effects_engine"
         const val K_RATE = "encore.processor_rate"
+        const val K_PHONE = "encore.phone_cadenza"
+        const val K_PHONE_RATE = "encore.phone_rate"
+        const val K_PHONE_FILTER = "encore.phone_filter"
+        const val K_PHONE_DITHER = "encore.phone_dither"
+        const val K_USB_BP = "encore.usb_bit_perfect"
+        const val K_USB_DEVICE = "encore.usb_device"
+        const val K_USB_NOTE = "encore.usb_note"
 
         fun from(b: Bundle?): StreamInfo? {
             if (b == null || !b.containsKey(K_BADGE)) return null
@@ -114,6 +142,13 @@ data class StreamInfo(
                 connectionKbps = b.getDouble(K_KBPS, 0.0),
                 effectsEngine = b.getString(K_ENGINE) ?: "",
                 processorRate = b.getInt(K_RATE, 0),
+                phoneCadenza = b.getBoolean(K_PHONE, false),
+                phoneRate = b.getInt(K_PHONE_RATE, 0),
+                phoneFilterLabel = b.getString(K_PHONE_FILTER) ?: "",
+                phoneDitherLabel = b.getString(K_PHONE_DITHER) ?: "",
+                usbBitPerfect = b.getBoolean(K_USB_BP, false),
+                usbDevice = b.getString(K_USB_DEVICE) ?: "",
+                usbNote = b.getString(K_USB_NOTE) ?: "",
             )
         }
     }

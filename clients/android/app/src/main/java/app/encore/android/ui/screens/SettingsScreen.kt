@@ -30,6 +30,7 @@ import androidx.compose.material3.Slider
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
@@ -46,22 +47,30 @@ import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.unit.dp
+import android.os.Build
 import app.encore.android.BuildConfig
 import app.encore.android.R
 import app.encore.android.data.prefs.EqBand
+import app.encore.android.data.prefs.PhonePrefs
 import app.encore.android.data.prefs.PlaybackPrefs
 import app.encore.android.data.prefs.Quality
 import app.encore.android.data.session.AuthKind
 import app.encore.android.data.session.Session
 import app.encore.android.data.session.ThemeChoice
+import app.encore.android.cadenza.CadenzaEngine
 import app.encore.android.playback.DeviceOutput
 import app.encore.android.playback.ResumeStore
+import app.encore.android.playback.UsbOutputManager
 import app.encore.android.ui.Nav
 import app.encore.android.ui.components.SectionTitle
 import app.encore.android.ui.theme.palette
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.JsonArray
+import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.JsonPrimitive
 
 @Composable
 fun SettingsScreen(nav: Nav, session: Session) {
@@ -175,12 +184,20 @@ fun PlaybackSettingsScreen(nav: Nav, onBack: () -> Unit) {
     val repo = nav.graph.prefs
     val prefs by repo.playback.collectAsState()
     val dsp by repo.dsp.collectAsState()
+    val phone by repo.phone.collectAsState()
     val context = LocalContext.current
     val p = MaterialTheme.palette
     BackHandler(onBack = onBack)
     LaunchedEffect(Unit) { repo.refreshDsp() }
     val set: ((PlaybackPrefs) -> PlaybackPrefs) -> Unit = { change -> repo.update(change) }
     val deviceRate = remember { DeviceOutput.of(context).rateHz }
+    // a USB DAC shows up here while nothing plays too (the playback service only watches while it runs; no-op below Android 14)
+    DisposableEffect(Unit) {
+        val watch = UsbOutputManager.watch(context)
+        onDispose { watch.close() }
+    }
+    val usbDac by UsbOutputManager.state.collectAsState()
+    val bitPerfect = phone.bitPerfect && usbDac != null
 
     Column(Modifier.fillMaxSize()) {
         BackBar("Playback", onBack)
@@ -202,10 +219,10 @@ fun PlaybackSettingsScreen(nav: Nav, onBack: () -> Unit) {
             CheckRow("Keep going with a shuffle of the whole library", prefs.autoplay) { on -> set { it.copy(autoplay = on) } }
 
             H3("Sound (on this device)")
-            SoundSection(prefs, set)
+            SoundSection(prefs, bitPerfect, set)
 
             H3("Pure playback")
-            Help("Encore streams the original file untouched – the quality badge on the player opens the Signal path, which shows what the file is, what was sent and what this device does with it. The app hands the sound to Android, which mixes it with other sounds and may resample it; bit-perfect output needs an exclusive-mode engine.")
+            Help("Encore streams the original file untouched – the quality badge on the player opens the Signal path, which shows what the file is, what was sent and what this device does with it. The app hands the sound to Android, which mixes it with other sounds and may resample it; for bit-perfect output use a USB DAC in bit-perfect mode (Cadenza engine below).")
 
             H3("Server processing (Cadenza)")
             val d = dsp
@@ -230,21 +247,87 @@ fun PlaybackSettingsScreen(nav: Nav, onBack: () -> Unit) {
                 Help("The server's Cadenza upsamples the original file and sends lossless 24-bit FLAC. It uses more data (about 4.6 Mbit/s at 96 kHz, 9.2 Mbit/s at 192 kHz) and the server's processor; Data saver and Auto still step down to a lighter stream when the connection can't keep up.")
             }
 
-            H3("Cadenza engine")
-            Column(Modifier.alpha(0.45f)) {
-                CheckRow("Bit-perfect – send the file to the DAC untouched (no upsampling, dither or volume)", false, enabled = false) {}
-                Picker("Upsampling filter", listOf("" to "–"), "", enabled = false) {}
-                Picker("Dither / noise shaping", listOf("" to "–"), "", enabled = false) {}
-                Picker("Output rate", listOf("" to "–"), "", enabled = false) {}
-            }
-            Help("For a Cadenza device on your own hardware – a computer or a small box next to your DAC – which plays straight into the DAC. Link to it under Your devices to use these switches. To upsample streams on this server instead, see Server processing above.")
+            H3("Cadenza engine · this phone")
+            PhoneCadenzaSection(phone, deviceRate, serverOn = d != null && d.enabled && d.allowed && prefs.dsp) { change -> repo.setPhone(change(repo.phone.value)) }
             Spacer(Modifier.height(32.dp))
         }
     }
 }
 
+/**
+ * Settings → Playback → "Cadenza engine · this phone": the engine inside the app ([CadenzaEngine]) upsampling on the
+ * phone, and bit-perfect output to a USB DAC on Android 14+ ([UsbOutputManager]). Device-only, so [PhonePrefs]
+ * (not the account's playback prefs).
+ */
 @Composable
-private fun SoundSection(prefs: PlaybackPrefs, set: ((PlaybackPrefs) -> PlaybackPrefs) -> Unit) {
+private fun PhoneCadenzaSection(phone: PhonePrefs, deviceRate: Int, serverOn: Boolean, set: ((PhonePrefs) -> PhonePrefs) -> Unit) {
+    if (!CadenzaEngine.available) {
+        Column(Modifier.alpha(0.45f)) {
+            CheckRow("Upsample on this phone with Cadenza", false, enabled = false) {}
+            Picker("Upsampling filter", listOf("" to "–"), "", enabled = false) {}
+            Picker("Dither / noise shaping", listOf("" to "–"), "", enabled = false) {}
+            Picker("Output rate", listOf("" to "–"), "", enabled = false) {}
+        }
+        Help("This build of the app came without the Cadenza library.")
+        return
+    }
+    val catalog = remember { CadenzaCatalog.load() }
+    CheckRow("Upsample on this phone with Cadenza", phone.cadenza) { on -> set { it.copy(cadenza = on) } }
+    val on = phone.cadenza
+    Column(Modifier.alpha(if (on) 1f else 0.45f)) {
+        Picker("Upsampling filter", listOf("" to "Cadenza default") + catalog.filters, phone.filter, enabled = on) { v -> set { it.copy(filter = v) } }
+        Picker("Dither / noise shaping", listOf("" to "Cadenza default") + catalog.dithers, phone.dither, enabled = on) { v -> set { it.copy(dither = v) } }
+        val rates = listOf("device" to (if (deviceRate > 0) "Match this device (${Quality.khz(deviceRate)} kHz)" else "Match this device")) +
+            PhonePrefs.RATES.map { it.toString() to "${Quality.khz(it)} kHz" }
+        Picker("Output rate", rates, phone.rate, enabled = on) { v -> set { it.copy(rate = v) } }
+    }
+    Help("Cadenza runs inside the app: the song is upsampled on the phone before Android gets it. Matching this device's rate stops Android resampling it again; higher rates only make sense with a USB DAC in bit-perfect mode below. Longer filters use more battery.")
+    if (serverOn) Help("Server processing is on, so songs the server upsamples skip the phone engine.")
+
+    if (Build.VERSION.SDK_INT >= 34) {
+        val usb by UsbOutputManager.state.collectAsState()
+        val dac = usb
+        if (dac != null) {
+            val name = dac.deviceName.ifEmpty { "USB DAC" }
+            CheckRow("Send directly to USB DAC (bit-perfect) · $name", phone.bitPerfect) { b -> set { it.copy(bitPerfect = b) } }
+            Help("Android's mixer is bypassed and the DAC gets the exact samples (the song's, or Cadenza's when upsampling is on). Crossfade is off in this mode; volume is the DAC's own.")
+        } else {
+            Help("Plug in a USB DAC that supports bit-perfect output and the switch appears here.")
+        }
+    } else {
+        Help("Bit-perfect USB output needs Android 14 or newer.")
+    }
+}
+
+/** [CadenzaEngine.catalog] parsed: the filters and dithers the phone engine offers, as (id, label) pairs. */
+internal class CadenzaCatalog(val filters: List<Pair<String, String>>, val dithers: List<Pair<String, String>>) {
+    fun filterLabel(id: String): String = filters.firstOrNull { it.first == id }?.second ?: id
+    fun ditherLabel(id: String): String = dithers.firstOrNull { it.first == id }?.second ?: id
+
+    companion object {
+        val EMPTY = CadenzaCatalog(emptyList(), emptyList())
+
+        fun load(): CadenzaCatalog {
+            val json = try { CadenzaEngine.catalog() } catch (_: Throwable) { "" }
+            if (json.isEmpty()) return EMPTY
+            return try {
+                val o = Json.parseToJsonElement(json) as? JsonObject ?: return EMPTY
+                fun pairs(k: String): List<Pair<String, String>> = (o[k] as? JsonArray)?.mapNotNull { e ->
+                    val a = e as? JsonArray ?: return@mapNotNull null
+                    val id = (a.getOrNull(0) as? JsonPrimitive)?.content ?: return@mapNotNull null
+                    val label = (a.getOrNull(1) as? JsonPrimitive)?.content ?: id
+                    id to label
+                } ?: emptyList()
+                CadenzaCatalog(pairs("filters"), pairs("dithers"))
+            } catch (_: Exception) {
+                EMPTY
+            }
+        }
+    }
+}
+
+@Composable
+private fun SoundSection(prefs: PlaybackPrefs, bitPerfect: Boolean, set: ((PlaybackPrefs) -> PlaybackPrefs) -> Unit) {
     val p = MaterialTheme.palette
     CheckRow("Use sound effects", prefs.fxOn) { on -> set { it.copy(fxOn = on) } }
     val on = prefs.fxOn
@@ -289,10 +372,14 @@ private fun SoundSection(prefs: PlaybackPrefs, set: ((PlaybackPrefs) -> Playback
         CheckRow("Mono", prefs.mono, enabled = on) { m -> set { it.copy(mono = m) } }
     }
     Help("Runs in this app – it costs your server nothing. Works with every quality setting. Turning it on means the sound is no longer the untouched file (the Signal path says so).")
-    SliderRow("Crossfade", if (prefs.crossfade > 0) "${prefs.crossfade} s" else "Off", prefs.crossfade.toFloat(), 0f..12f, steps = 11, enabled = true) { v ->
-        set { it.copy(crossfade = Math.round(v)) }
+    // bit-perfect USB output plays one song at a time straight to the DAC, so there is nothing to blend
+    Column(Modifier.alpha(if (bitPerfect) 0.45f else 1f)) {
+        SliderRow("Crossfade", if (prefs.crossfade > 0) "${prefs.crossfade} s" else "Off", prefs.crossfade.toFloat(), 0f..12f, steps = 11, enabled = !bitPerfect) { v ->
+            set { it.copy(crossfade = Math.round(v)) }
+        }
+        CheckRow("Keep albums gapless (no fade between songs from the same album)", prefs.crossfadeAlbumGapless, enabled = !bitPerfect) { on -> set { it.copy(crossfadeAlbumGapless = on) } }
     }
-    CheckRow("Keep albums gapless (no fade between songs from the same album)", prefs.crossfadeAlbumGapless) { on -> set { it.copy(crossfadeAlbumGapless = on) } }
+    if (bitPerfect) Help("Crossfade is off while this phone sends songs bit-perfect to the USB DAC (Cadenza engine below).")
     Help("Blends the end of one song into the start of the next. Not applied on Android yet – the setting is kept for your other devices.")
 }
 

@@ -12,8 +12,9 @@ import kotlinx.serialization.json.JsonPrimitive
  * the player falls back to its Kotlin engine.
  *
  * Effects: preamp → EQ → crossfeed → mono → balance, exactly the web player's graph. The output rate is the
- * input rate unless [outputRate] asks for Cadenza upsampling (M3: "Cadenza engine" settings), in which case
- * [filterId] / [ditherId] pick the design and the filters are cached in [cacheDir].
+ * input rate unless [outputRate] asks for Cadenza upsampling ("Cadenza engine · this phone" in Settings: the playback
+ * service sets these from PhonePrefs), in which case [filterId] / [ditherId] pick the design and the filters are cached
+ * in [cacheDir]. Upsampled output is dithered by Cadenza to 24-bit steps (the processor hands it on as 32-bit PCM).
  */
 class CadenzaEngine : DspEngine {
     private val native = CadenzaNative()
