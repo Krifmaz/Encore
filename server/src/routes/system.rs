@@ -19,6 +19,8 @@ pub fn router() -> Router<AppState> {
     Router::new()
         .route("/api/system/status", get(status))
         .route("/api/system/test/{service}", post(test))
+        .route("/api/system/vpn", get(vpn_status))
+        .route("/api/system/vpn/test", post(vpn_test))
         .route("/api/system/streamrip/tidal-login", post(tidal_login_start).get(tidal_login_status))
         .route("/api/system/streamrip/tidal-tokens", post(tidal_tokens_save).delete(tidal_tokens_clear))
         .route("/api/system/downloads", get(downloads))
@@ -163,7 +165,7 @@ fn disk(path: &str) -> Value {
     if f.len() < 3 { Value::Null } else { json!({ "total": f[0] * 1024, "free": f[2] * 1024 }) }
 }
 
-async fn status(State(st): State<AppState>, User(_): User) -> ApiResult<Json<Value>> {
+async fn status(State(st): State<AppState>, User(me): User) -> ApiResult<Json<Value>> {
     let mbv = tokio::time::timeout(std::time::Duration::from_secs(10), st.mb.get(&st, "artist", &[("query", "test".into()), ("limit", "1".into())])).await;
     let mb = match mbv { Ok(Ok(_)) => json!({ "ok": true }), Ok(Err(e)) => json!({ "ok": false, "error": e.to_string() }), Err(_) => json!({ "ok": false, "error": "timed out" }) };
     let sl = if slskd::enabled(&st) {
@@ -175,6 +177,12 @@ async fn status(State(st): State<AppState>, User(_): User) -> ApiResult<Json<Val
     } else {
         json!({ "ok": false, "enabled": false })
     };
+    let v = crate::vpn::status();
+    // "off" is fine, not a failure; the exit IP and forwarded port are for admins only
+    let mut vpn = json!({ "ok": v["state"] == "up" || v["enabled"] == false, "enabled": v["enabled"], "state": v["state"] });
+    if crate::auth::is_admin(&me) {
+        vpn["text"] = json!(crate::vpn::summary(&v));
+    }
     let services = json!({
         "musicbrainz": mb, "slskd": sl,
         "ytdlp": { "ok": ytdlp::enabled(&st), "version": ytdlp::version().await, "enabled": ytdlp::enabled(&st) },
@@ -183,8 +191,21 @@ async fn status(State(st): State<AppState>, User(_): User) -> ApiResult<Json<Val
         "acoustid": { "ok": acoustid::available(&st), "enabled": acoustid::available(&st) },
         "streamrip": { "ok": streamrip::enabled(&st), "enabled": st.cfg.bool("streamrip_enabled") },
         "ffmpeg": { "ok": which("ffmpeg") },
+        "vpn": vpn,
     });
     Ok(Json(json!({ "version": crate::VERSION, "server": "rust", "services": services, "disk": disk(&st.cfg.str("library_path")), "app_name": st.cfg.str("app_name") })))
+}
+
+/// Settings → Soulseek → VPN for Soulseek: the tunnel's state (polled while the section is open).
+async fn vpn_status(Admin(_): Admin) -> ApiResult<Json<Value>> {
+    let mut v = crate::vpn::status();
+    v["message"] = json!(crate::vpn::summary(&v));
+    Ok(Json(v))
+}
+
+/// "Test VPN": apply the saved settings, wait up to 10 s for a handshake, map the port once.
+async fn vpn_test(State(st): State<AppState>, Admin(_): Admin) -> ApiResult<Json<Value>> {
+    Ok(Json(crate::vpn::test(&st).await))
 }
 
 /// Settings → streamrip → "Sign in to Tidal": starts the one-time account sign-in and returns the link to open.

@@ -20,6 +20,36 @@ fn js_str(v: &Value, key: &str) -> String {
 /// `String(obj[key] || '')`.
 fn or_empty(v: &Value, key: &str) -> String { if v.truthy(key) { v.s(key) } else { String::new() } }
 
+/// The VPN for Soulseek line (Settings → Soulseek and the Diagnostics row; the same words in web/js):
+/// "Connected · port 51234 · public IP 1.2.3.4 · last handshake 12 s ago" / "Connecting…" / the error / "Off".
+pub fn vpn_text(v: &Value) -> String {
+    if !v.is_object() { return "Off".into(); }
+    match v.g("state").as_str() {
+        Some("up") => {
+            let mut parts = vec!["Connected".to_string()];
+            if !v.is_nullish("forwarded_port") { parts.push(format!("port {}", v.s("forwarded_port"))); }
+            else if v.truthy("port_forwarding") {
+                parts.push(if v.truthy("natpmp_error") { format!("no forwarded port ({})", v.s("natpmp_error")) } else { "no forwarded port yet".to_string() });
+            }
+            if v.truthy("public_ip") { parts.push(format!("public IP {}", v.s("public_ip"))); }
+            if !v.is_nullish("last_handshake_secs_ago") {
+                let n = crate::playback::js_round(v.f("last_handshake_secs_ago"));
+                parts.push(format!("last handshake {} s ago", js_string(&json!(n))));
+            }
+            parts.join(" · ")
+        }
+        Some("connecting") => "Connecting…".into(),
+        Some("error") => if v.truthy("error") { v.s("error") } else { "The VPN could not connect".into() },
+        _ => "Off".into(),
+    }
+}
+
+/// `vpn_text` as HTML: errors in red.
+pub fn vpn_state_html(v: &Value) -> String {
+    let t = esc(&vpn_text(v));
+    if v.g("state").as_str() == Some("error") { format!(r#"<span style="color:var(--err)">{t}</span>"#) } else { t }
+}
+
 pub fn render(view: Element, _ctx: Ctx) -> PageFuture {
     Box::pin(async move {
         dom::set_html(&view, &format!(r#"
@@ -159,7 +189,13 @@ async fn load_backups(bk: &Element) {
 /// The JS `run`: fetch the checks and draw them into `#diag` (the result is kept in `last` for the report).
 async fn run(view: Element, diag: Element, last: Rc<RefCell<Option<Value>>>) -> Result<(), ApiError> {
     dom::set_html(&diag, r#"<div class="empty"><span class="spinner"></span><p class="muted">Checking…</p></div>"#);
-    let data = api::get("/system/diagnostics").await?;
+    let mut data = api::get("/system/diagnostics").await?;
+    // the built-in VPN for Soulseek, as one more connection check (older servers have no /system/vpn)
+    if let Ok(v) = api::get("/system/vpn").await {
+        let row = json!({ "kind": "service", "name": "VPN for Soulseek", "ok": !v.truthy("enabled") || v.g("state").as_str() == Some("up"),
+            "request": if v.truthy("endpoint") { format!("WireGuard {}", v.s("endpoint")) } else { String::new() }, "detail": vpn_text(&v) });
+        if let Some(a) = data.get_mut("checks").and_then(|c| c.as_array_mut()) { a.push(row); }
+    }
     *last.borrow_mut() = Some(data.clone());
     if let Some(c) = dom::qs_in(&view, "#copy") { dom::set_disabled(&c, false); }
     let checks = data.a("checks");

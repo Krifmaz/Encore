@@ -23,7 +23,14 @@ fn native(st: &AppState) -> anyhow::Result<soulseek::client::Client> {
         anyhow::bail!("Soulseek: set a username and password in Settings → Apps & sources → Soulseek (an account is created on first login)");
     }
     soulseek::ensure(st);
-    soulseek::client().ok_or_else(|| anyhow::anyhow!("Soulseek client is not running"))
+    if let Some(c) = soulseek::client() {
+        return Ok(c);
+    }
+    // held off by the VPN kill switch: say so, not just that it isn't running
+    if soulseek::status(st)["waiting_for_vpn"] == true {
+        anyhow::bail!(soulseek::WAITING_FOR_VPN);
+    }
+    anyhow::bail!("Soulseek client is not running")
 }
 
 async fn req(st: &AppState, method: reqwest::Method, path: &str, body: Option<Value>, query: &[(&str, &str)]) -> anyhow::Result<Value> {

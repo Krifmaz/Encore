@@ -139,7 +139,7 @@ fn free_ports() -> (u16, u16) {
 }
 
 fn settings(user: &str, server: &str, port: u16, dl: &Path, share: bool) -> Settings {
-    Settings { username: user.into(), password: "pw".into(), server: server.into(), listen_port: port, download_dir: dl.to_path_buf(), upload_slots: 1, share }
+    Settings { username: user.into(), password: "pw".into(), server: server.into(), listen_port: port, download_dir: dl.to_path_buf(), upload_slots: 1, share, vpn: false }
 }
 
 async fn wait_for(what: &str, secs: u64, mut ok: impl FnMut() -> bool) {
@@ -324,4 +324,96 @@ async fn resume_after_partial_file() {
     assert!(!part.exists(), "the .part file is renamed into place");
     env.assert_file();
     env.finish().await;
+}
+
+// ---- VPN routing ---------------------------------------------------------------------------------
+
+#[test]
+fn settings_key_follows_vpn_and_forwarded_port() {
+    use super::{route_for, with_route, Route};
+    let base = settings("bob", "server.slsknet.org:2242", 50300, Path::new("/dl"), true);
+    let direct = with_route(base.clone(), Route::Direct, 50300);
+    assert!(!direct.vpn);
+    assert_eq!(direct.listen_port, 50300);
+    // on the VPN: the vpn flag alone changes the key, and the forwarded port replaces the configured one
+    let vpn_unmapped = with_route(base.clone(), Route::Vpn(None), 50300);
+    assert!(vpn_unmapped.vpn);
+    assert_eq!(vpn_unmapped.listen_port, 50300);
+    assert_ne!(direct.key(), vpn_unmapped.key());
+    let vpn_a = with_route(base.clone(), Route::Vpn(Some(51234)), 50300);
+    let vpn_b = with_route(base.clone(), Route::Vpn(Some(51999)), 50300);
+    assert_eq!(vpn_a.listen_port, 51234);
+    assert_ne!(vpn_a.key(), vpn_unmapped.key());
+    assert_ne!(vpn_a.key(), vpn_b.key(), "a new forwarded port restarts the client");
+    assert_eq!(vpn_a.key(), with_route(base, Route::Vpn(Some(51234)), 50300).key(), "an unchanged port does not");
+    assert_eq!(vpn_a.net(), super::client::Net::Vpn);
+    assert_eq!(direct.net(), super::client::Net::Direct);
+
+    // kill switch: VPN on but not up → no client; off → the normal connection
+    assert_eq!(route_for(false, true, true, true, Some(1)), Route::Direct);
+    assert_eq!(route_for(true, true, true, true, Some(51234)), Route::Vpn(Some(51234)));
+    assert_eq!(route_for(true, true, false, true, None), Route::Wait);
+    assert_eq!(route_for(true, false, false, true, None), Route::Wait, "a config that does not parse never leaks to a direct connection");
+    assert_eq!(route_for(true, true, false, false, None), Route::Direct);
+}
+
+/// A new tunnel (the VPN settings changed) kills the listener on the old one: the client listens
+/// again on the new tunnel and takes inbound connections there.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn vpn_listener_comes_back_on_a_new_tunnel() {
+    use super::client::{serve, Conn, Net};
+    use crate::vpn::engine::Engine;
+    use std::net::SocketAddr;
+    let _lock = crate::vpn::TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let (near_a, far_a) = crate::vpn::tests::tunnel().await;
+    crate::vpn::install(Some(near_a.clone()));
+    let (stop_tx, mut stop) = tokio::sync::watch::channel(false);
+    let (got_tx, mut got) = mpsc::unbounded_channel::<Conn>();
+    let task = tokio::spawn(async move {
+        serve(Net::Vpn, 2234, &mut stop, move |c| { let _ = got_tx.send(c); }, |e| panic!("gave up listening: {e}")).await;
+    });
+    let to = SocketAddr::from(([10, 2, 0, 2], 2234));
+    // dial from the far side until the listener is there, say hi, and see it arrive
+    async fn hello(far: Arc<Engine>, to: SocketAddr, got: &mut mpsc::UnboundedReceiver<Conn>) {
+        let mut c = tokio::time::timeout(Duration::from_secs(15), async {
+            loop {
+                match far.connect(to).await {
+                    Ok(c) => break c,
+                    Err(_) => tokio::time::sleep(Duration::from_millis(100)).await,
+                }
+            }
+        })
+        .await
+        .expect("listening within 15 s");
+        c.write_all(b"hi").await.unwrap();
+        let mut inc = tokio::time::timeout(Duration::from_secs(10), got.recv()).await.expect("accepted within 10 s").unwrap();
+        let mut b = [0u8; 2];
+        inc.read_exact(&mut b).await.unwrap();
+        assert_eq!(&b, b"hi");
+    }
+    hello(far_a.clone(), to, &mut got).await;
+
+    // the settings changed: tunnel B replaces A, as vpn::ensure does
+    let (near_b, far_b) = crate::vpn::tests::tunnel().await;
+    crate::vpn::install(Some(near_b.clone()));
+    near_a.shutdown();
+    hello(far_b.clone(), to, &mut got).await;
+
+    stop_tx.send(true).unwrap();
+    tokio::time::timeout(Duration::from_secs(5), task).await.expect("stops").unwrap();
+    crate::vpn::install(None);
+    for e in [near_a, far_a, near_b, far_b] {
+        e.shutdown();
+    }
+}
+
+#[test]
+fn server_address_split() {
+    use super::client::split_host_port;
+    assert_eq!(split_host_port("server.slsknet.org:2242"), Some(("server.slsknet.org".into(), 2242)));
+    assert_eq!(split_host_port("1.2.3.4:80"), Some(("1.2.3.4".into(), 80)));
+    assert_eq!(split_host_port("[::1]:80"), Some(("::1".into(), 80)));
+    assert_eq!(split_host_port("nohost"), None);
+    assert_eq!(split_host_port(":80"), None);
+    assert_eq!(split_host_port("h:0"), None);
 }

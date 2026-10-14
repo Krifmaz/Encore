@@ -429,6 +429,26 @@
   "default": 2,
   "secret": false
  },
+ "vpn_enabled": {
+  "env": "VPN_ENABLED",
+  "default": false,
+  "secret": false
+ },
+ "vpn_wireguard_config": {
+  "env": "VPN_WIREGUARD_CONFIG",
+  "default": "",
+  "secret": true
+ },
+ "vpn_port_forwarding": {
+  "env": "VPN_PORT_FORWARDING",
+  "default": "natpmp",
+  "secret": false
+ },
+ "vpn_kill_switch": {
+  "env": "VPN_KILL_SWITCH",
+  "default": true,
+  "secret": false
+ },
  "slskd_url": {
   "env": "SLSKD_URL",
   "default": "http://slskd:5030",

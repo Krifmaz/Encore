@@ -83,8 +83,12 @@ const SECTIONS = [
     S('soulseek_client', 'Client', 'select', { options: [['auto', 'Built-in when a username is set, else slskd'], ['builtin', 'Built-in client'], ['slskd', 'slskd (external)']] }),
     S('soulseek_username', 'Soulseek username', 'text', { help: 'New name + password = new account. Don’t use the same login in slskd or another client at the same time.' }),
     S('soulseek_password', 'Soulseek password', 'password'),
-    S('soulseek_port', 'Listen port', 'number', { help: 'TCP port the built-in client listens on – forward it on your router (and publish it in Docker) so users behind firewalls can send to you' }),
-    S('soulseek_port_file', 'Listen port from a file (VPN port forwarding)', 'text', { help: 'Behind gluetun: mount its folder and point this at forwarded_port – the port the VPN assigned is used and followed when it changes' }),
+    S('soulseek_port', 'Listen port', 'number', { help: 'TCP port the built-in client listens on – forward it on your router (and publish it in Docker) so users behind firewalls can send to you. Ignored while Send Soulseek through a VPN is on – the VPN’s forwarded port is used.' }),
+    S('soulseek_port_file', 'Listen port from a file (VPN port forwarding)', 'text', { help: 'Behind gluetun: mount its folder and point this at forwarded_port – the port the VPN assigned is used and followed when it changes. Ignored while Send Soulseek through a VPN is on – the VPN’s forwarded port is used.' }),
+    S('vpn_enabled', 'Send Soulseek through a VPN', 'bool', { help: 'Only Soulseek goes through the VPN; Tidal, Qobuz, Deezer and everything else keep your normal connection. Built in – no gluetun container needed.' }),
+    S('vpn_wireguard_config', 'WireGuard config', 'textarea', { full: true, secret: true, help: 'Paste the whole .conf file from your VPN provider (ProtonVPN: Downloads → WireGuard configuration, with NAT-PMP port forwarding on). The private key is stored on this server only.' }),
+    S('vpn_port_forwarding', 'Port forwarding', 'select', { options: [['natpmp', 'NAT-PMP (ProtonVPN)'], ['off', 'Off']] }),
+    S('vpn_kill_switch', 'Keep Soulseek off while the VPN is down', 'bool'),
     S('soulseek_share', 'Share your library on Soulseek (recommended)', 'bool', { help: 'The network runs on sharing; many users refuse downloads to people who share nothing. Only the library folder is shared, read-only.' }),
     S('soulseek_upload_slots', 'Upload slots', 'number'),
     S('slskd_url', 'slskd URL', 'text', { help: 'Only for the slskd client, e.g. http://slskd:5030' }),
@@ -200,7 +204,8 @@ function field(f, v, opts, meta = {}) {
     return `<label class="field ${cls}"><span>${esc(f.label)}</span><select class="input" data-k="${f.key}" id="${id}" ${dis}>
       ${options.map(([val, lab]) => `<option value="${esc(val)}" ${String(val) === String(v) ? 'selected' : ''}>${esc(lab)}</option>`).join('')}</select>${help}</label>`;
   }
-  const reveal = REVEAL && v;   // also for values set by environment variables (read-only, but viewable)
+  // also for values set by environment variables (read-only, but viewable); never the WireGuard private key
+  const reveal = REVEAL && v && f.key !== 'vpn_wireguard_config';
   if (f.type === 'textarea') {
     const btns = reveal ? `<span class="row" style="gap:8px"><button type="button" class="btn sm" data-reveal="${f.key}">${EYE}Show saved</button><button type="button" class="btn sm" data-copy="${f.key}">${icon.copy}Copy</button></span>` : '';
     return `<label class="field ${cls}"><span>${esc(f.label)}</span><textarea class="input mono" data-k="${f.key}" ${dis} placeholder="${v ? 'Saved – paste to replace' : ''}"></textarea>${btns}${help}</label>`;
@@ -314,7 +319,7 @@ export async function render(view, ctx) {
         <span class="row" style="gap:8px">${sec.test ? `<button class="btn sm" data-test>${icon.refresh}${esc(sec.testLabel || 'Test connection')}</button>` : ''}<span class="chev">${icon.chevron || '▾'}</span></span></summary>
       <div style="height:14px"></div>
       <div data-out>${flash && flash.sec === sec.id ? `<div class="test-result ${flash.ok ? 'ok' : 'err'}">${flash.ok ? icon.check : icon.x}<span>${esc(flash.message || '')}</span></div>` : ''}</div>
-      <div class="form-grid">${sec.fields.map(f => field(f, values[f.key], lidarrOpts, meta)).join('')}</div>
+      ${fieldsHtml(sec.fields, (f) => field(f, values[f.key], lidarrOpts, meta))}
       ${sec.id === 'streamrip' ? tidalBlock() : ''}
       ${sec.id === 'cadenza' ? cadenzaCacheBlock() : ''}
       <div class="row mt" style="justify-content:flex-end"><button class="btn primary" data-save>${icon.check}Save</button></div>
@@ -339,6 +344,7 @@ export async function render(view, ctx) {
       const out = card.querySelector('[data-out]');
       if (sec.id === 'streamrip') bindTidal(card);
       if (sec.id === 'cadenza') bindCadenzaCache(card);
+      if (sec.id === 'slskd') bindVpn(card, () => save(sec, true, card));
       const paint = (r) => { out.innerHTML = `<div class="test-result ${r.ok ? 'ok' : 'err'}">${r.ok ? icon.check : icon.x}<span>${esc(r.message || (r.ok ? 'Connected' : 'Failed'))}</span></div>`; };
       card.querySelector('[data-save]').onclick = () => save(sec, false, card);
       card.querySelectorAll('[data-clear]').forEach(a => a.addEventListener('click', async (e) => {
@@ -455,6 +461,48 @@ function tidalBlock() {
       <div class="row wrap mt" style="gap:8px"><button class="btn sm" id="tidal-save-tokens" type="button">${icon.check}Save tokens</button></div>
     </details>
   </div>`;
+}
+
+// The settings grid of a card. The vpn_ fields (Soulseek) get a sub-block of their own, in place,
+// with the tunnel's state and Test VPN under them.
+function fieldsHtml(fields, one) {
+  const isVpn = (f) => f.key.startsWith('vpn_');
+  const at = fields.findIndex(isVpn);
+  if (at < 0) return `<div class="form-grid">${fields.map(one).join('')}</div>`;
+  const rest = fields.filter(f => !isVpn(f));
+  return `<div class="form-grid">${rest.slice(0, at).map(one).join('')}</div>${vpnBlock(fields.filter(isVpn).map(one).join(''))}<div class="form-grid mt">${rest.slice(at).map(one).join('')}</div>`;
+}
+
+// Settings → Soulseek → VPN for Soulseek: the WireGuard fields, the tunnel's state (polled every 5 s while the card is open) and Test VPN.
+function vpnBlock(inner) {
+  return `<div class="card flat mt" id="vpn-block" style="padding:12px 14px">
+    <b>VPN for Soulseek</b>
+    <div class="form-grid mt">${inner}</div>
+    <div class="row between wrap mt" style="gap:8px">
+      <div class="small muted" id="vpn-state" style="min-width:0">Checking…</div>
+      <button class="btn sm" id="vpn-test" type="button">${icon.refresh}Test VPN</button>
+    </div>
+  </div>`;
+}
+
+function bindVpn(card, saveSection) {
+  const state = card.querySelector('#vpn-state'), btn = card.querySelector('#vpn-test');
+  if (!state || !btn) return;
+  const refresh = () => api.get('/system/vpn').then(r => { if (!btn.disabled) state.innerHTML = diagPage.vpnStateHtml(r); }).catch(() => { state.textContent = 'Status unavailable'; });
+  refresh();
+  const timer = setInterval(() => { if (!card.isConnected) return clearInterval(timer); if (card.open && !btn.disabled) refresh(); }, 5000);
+  btn.onclick = async (e) => {
+    e.preventDefault();
+    btn.disabled = true;
+    state.innerHTML = '<span class="spinner" style="width:10px;height:10px;border-width:2px"></span> Testing…';
+    try {
+      await saveSection();
+      const r = await api.post('/system/vpn/test');
+      const n = r.natpmp;
+      state.innerHTML = diagPage.vpnStateHtml(r) + (n && n.ok === false && n.error ? ` · <span style="color:var(--err)">Port forwarding failed: ${esc(String(n.error))}</span>` : '');
+    } catch (err) { state.innerHTML = `<span style="color:var(--err)">${esc(err.message || 'Test failed')}</span>`; }
+    btn.disabled = false;
+  };
 }
 
 // Server processing: how full the Cadenza pre-render cache is, how fast it renders, and a button to empty it.

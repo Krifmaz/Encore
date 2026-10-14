@@ -274,6 +274,10 @@ async fn reveal_secret(State(st): State<AppState>, Owner(me): Owner, Path(key): 
     if st.cfg.def(&key).is_none() {
         return Err(err(404, "Unknown setting"));
     }
+    // the WireGuard private key never goes back to a browser
+    if key == "vpn_wireguard_config" {
+        return Err(err(403, "The WireGuard config can't be shown – paste it again to replace it"));
+    }
     st.db.log("info", &format!("{} viewed the saved {key}", me.s("username")));
     let v = st.cfg.get(&key);
     Ok(Json(json!({ "key": key, "value": v.as_str().map(String::from).unwrap_or_else(|| v.to_string()) })))

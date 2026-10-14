@@ -124,8 +124,12 @@ const SECTIONS: &[Section] = &[
         s("soulseek_client", "Client", "select").options(&[("auto", "Built-in when a username is set, else slskd"), ("builtin", "Built-in client"), ("slskd", "slskd (external)")]),
         s("soulseek_username", "Soulseek username", "text").help("New name + password = new account. Don’t use the same login in slskd or another client at the same time."),
         s("soulseek_password", "Soulseek password", "password"),
-        s("soulseek_port", "Listen port", "number").help("TCP port the built-in client listens on – forward it on your router (and publish it in Docker) so users behind firewalls can send to you"),
-        s("soulseek_port_file", "Listen port from a file (VPN port forwarding)", "text").help("Behind gluetun: mount its folder and point this at forwarded_port – the port the VPN assigned is used and followed when it changes"),
+        s("soulseek_port", "Listen port", "number").help("TCP port the built-in client listens on – forward it on your router (and publish it in Docker) so users behind firewalls can send to you. Ignored while Send Soulseek through a VPN is on – the VPN’s forwarded port is used."),
+        s("soulseek_port_file", "Listen port from a file (VPN port forwarding)", "text").help("Behind gluetun: mount its folder and point this at forwarded_port – the port the VPN assigned is used and followed when it changes. Ignored while Send Soulseek through a VPN is on – the VPN’s forwarded port is used."),
+        s("vpn_enabled", "Send Soulseek through a VPN", "bool").help("Only Soulseek goes through the VPN; Tidal, Qobuz, Deezer and everything else keep your normal connection. Built in – no gluetun container needed."),
+        s("vpn_wireguard_config", "WireGuard config", "textarea").full().secret().help("Paste the whole .conf file from your VPN provider (ProtonVPN: Downloads → WireGuard configuration, with NAT-PMP port forwarding on). The private key is stored on this server only."),
+        s("vpn_port_forwarding", "Port forwarding", "select").options(&[("natpmp", "NAT-PMP (ProtonVPN)"), ("off", "Off")]),
+        s("vpn_kill_switch", "Keep Soulseek off while the VPN is down", "bool"),
         s("soulseek_share", "Share your library on Soulseek (recommended)", "bool").help("The network runs on sharing; many users refuse downloads to people who share nothing. Only the library folder is shared, read-only."),
         s("soulseek_upload_slots", "Upload slots", "number"),
         s("slskd_url", "slskd URL", "text").help("Only for the slskd client, e.g. http://slskd:5030"),
@@ -265,7 +269,8 @@ fn field(f: &Field, v: &Value, opts: Option<&Value>, meta: &Value) -> String {
         return format!(r##"<label class="field {cls}"><span>{label}</span><select class="input" data-k="{key}" id="{id}" {dis}>
       {opts_html}</select>{help}</label>"##);
     }
-    let reveal = reveal() && truthy(v);   // also for values set by environment variables (read-only, but viewable)
+    // also for values set by environment variables (read-only, but viewable); never the WireGuard private key
+    let reveal = reveal() && truthy(v) && f.key != "vpn_wireguard_config";
     if f.kind == "textarea" {
         let btns = if reveal {
             format!(r##"<span class="row" style="gap:8px"><button type="button" class="btn sm" data-reveal="{key}">{eye}Show saved</button><button type="button" class="btn sm" data-copy="{key}">{copy}Copy</button></span>"##, eye = EYE, copy = icon("copy"))
@@ -583,13 +588,13 @@ fn show(hub: &Rc<Hub>, id: String, flash: Option<Value>) -> Pin<Box<dyn Future<O
                 }
                 _ => String::new(),
             };
-            let fields_html: String = fields.iter().map(|f| field(f, values.g(f.key), lidarr_opts.as_ref(), &meta)).collect();
+            let fields_html = fields_html(fields, |f| field(f, values.g(f.key), lidarr_opts.as_ref(), &meta));
             format!(r##"<details class="card settings-card" data-sec="{sid}" {open}>
       <summary class="row between" style="gap:10px;flex-wrap:nowrap;align-items:flex-start"><div style="min-width:0"><h2>{title}</h2>{desc}</div>
         <span class="row" style="gap:8px">{test}<span class="chev">{chev}</span></span></summary>
       <div style="height:14px"></div>
       <div data-out>{flash_html}</div>
-      <div class="form-grid">{fields_html}</div>{tidal}{cadenza}
+      {fields_html}{tidal}{cadenza}
       <div class="row mt" style="justify-content:flex-end"><button class="btn primary" data-save>{check}Save</button></div>
     </details>"##,
                 tidal = if sec.id == "streamrip" { tidal_block() } else { String::new() },
@@ -620,6 +625,7 @@ fn show(hub: &Rc<Hub>, id: String, flash: Option<Value>) -> Pin<Box<dyn Future<O
             let Some(out) = dom::qs_in(&card, "[data-out]") else { continue };
             if sec.id == "streamrip" { bind_tidal(&hub.view, &card); }
             if sec.id == "cadenza" { bind_cadenza_cache(&card); }
+            if sec.id == "slskd" { bind_vpn(&hub, sec, &card); }
             let paint: Rc<dyn Fn(&Value)> = { let out = out.clone(); Rc::new(move |r: &Value| dom::set_html(&out, &test_result(r))) };
             if let Some(b) = dom::qs_in(&card, "[data-save]") {
                 let (hub2, card2) = (hub.clone(), card.clone());
@@ -1363,6 +1369,89 @@ fn set_appearance(st: &Rc<Look>, patch: Value) {
     let server_prefs = st.server_prefs;
     dom::spawn(async move { appearance::save(&p, server_prefs).await; });
     paint_appearance(st);
+}
+
+// The settings grid of a card. The vpn_ fields (Soulseek) get a sub-block of their own, in place,
+// with the tunnel's state and Test VPN under them.
+fn fields_html(fields: &[Field], one: impl Fn(&Field) -> String) -> String {
+    let is_vpn = |f: &Field| f.key.starts_with("vpn_");
+    let Some(at) = fields.iter().position(|f| is_vpn(f)) else {
+        return format!(r##"<div class="form-grid">{}</div>"##, fields.iter().map(&one).collect::<String>());
+    };
+    let rest: Vec<&Field> = fields.iter().filter(|f| !is_vpn(f)).collect();
+    let at = at.min(rest.len());
+    let vpn: String = fields.iter().filter(|f| is_vpn(f)).map(&one).collect();
+    format!(r##"<div class="form-grid">{}</div>{}<div class="form-grid mt">{}</div>"##,
+        rest[..at].iter().map(|f| one(f)).collect::<String>(), vpn_block(&vpn), rest[at..].iter().map(|f| one(f)).collect::<String>())
+}
+
+// Settings → Soulseek → VPN for Soulseek: the WireGuard fields, the tunnel's state (polled every 5 s while the card is open) and Test VPN.
+fn vpn_block(inner: &str) -> String {
+    format!(r##"<div class="card flat mt" id="vpn-block" style="padding:12px 14px">
+    <b>VPN for Soulseek</b>
+    <div class="form-grid mt">{inner}</div>
+    <div class="row between wrap mt" style="gap:8px">
+      <div class="small muted" id="vpn-state" style="min-width:0">Checking…</div>
+      <button class="btn sm" id="vpn-test" type="button">{refresh}Test VPN</button>
+    </div>
+  </div>"##, refresh = icon("refresh"))
+}
+
+thread_local! {
+    /// Bumped on every paint of the Soulseek card, so the 5 s poll of an earlier paint stops.
+    static VPN_POLL: Cell<u32> = const { Cell::new(0) };
+}
+
+fn bind_vpn(hub: &Rc<Hub>, sec: &'static Section, card: &Element) {
+    let (Some(state), Some(btn)) = (dom::qs_in(card, "#vpn-state"), dom::qs_in(card, "#vpn-test")) else { return };
+    let refresh: Rc<dyn Fn()> = {
+        let (state, btn) = (state.clone(), btn.clone());
+        Rc::new(move || {
+            let (state, btn) = (state.clone(), btn.clone());
+            dom::spawn(async move {
+                match api::get("/system/vpn").await {
+                    Ok(r) => { if !btn.has_attribute("disabled") { dom::set_html(&state, &diagnostics::vpn_state_html(&r)); } }
+                    Err(_) => dom::set_text(&state, "Status unavailable"),
+                }
+            });
+        })
+    };
+    refresh();
+    let gen = VPN_POLL.with(|g| { g.set(g.get().wrapping_add(1)); g.get() });
+    {
+        let (card, btn, refresh) = (card.clone(), btn.clone(), refresh.clone());
+        dom::interval(&hub.view, 5000, move || {
+            if VPN_POLL.with(|g| g.get()) != gen || !dom::is_connected(&card) { return; }
+            if card.has_attribute("open") && !btn.has_attribute("disabled") { refresh(); }
+        });
+    }
+    let (hub2, card2, btn2) = (hub.clone(), card.clone(), btn.clone());
+    dom::on(&btn, "click", move |e| {
+        dom::prevent(e);
+        let (hub, card, btn, state) = (hub2.clone(), card2.clone(), btn2.clone(), state.clone());
+        dom::set_disabled(&btn, true);
+        dom::set_html(&state, r##"<span class="spinner" style="width:10px;height:10px;border-width:2px"></span> Testing…"##);
+        dom::spawn(async move {
+            let r = match hub.save(sec, true, &card).await {
+                Ok(()) => api::post_empty("/system/vpn/test").await,
+                Err(e) => Err(e),
+            };
+            match r {
+                Ok(r) => {
+                    let n = r.g("natpmp");
+                    let failed = if n.is_object() && n.g("ok") == &Value::Bool(false) && n.truthy("error") {
+                        format!(r##" · <span style="color:var(--err)">Port forwarding failed: {}</span>"##, esc(&n.s("error")))
+                    } else { String::new() };
+                    dom::set_html(&state, &format!("{}{failed}", diagnostics::vpn_state_html(&r)));
+                }
+                Err(err) => {
+                    let m = if err.message.is_empty() { "Test failed".to_string() } else { err.message.clone() };
+                    dom::set_html(&state, &format!(r##"<span style="color:var(--err)">{}</span>"##, esc(&m)));
+                }
+            }
+            dom::set_disabled(&btn, false);
+        });
+    });
 }
 
 // Server processing: how full the Cadenza pre-render cache is, how fast it renders, and a button to empty it.

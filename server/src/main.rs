@@ -34,6 +34,7 @@ mod soulseek;
 mod sync;
 mod state;
 mod tagger;
+mod vpn;
 mod worker;
 
 use axum::extract::Request;
@@ -143,6 +144,7 @@ async fn main() -> anyhow::Result<()> {
         tokio::spawn(async move { st.library.scan(st.db.clone(), st.cfg.str("library_path"), false).await });
     }
     tokio::spawn(worker::run(st.clone()));
+    tokio::spawn(vpn::supervisor(st.clone()));
     tokio::spawn(soulseek::supervisor(st.clone()));
     tokio::spawn(roon::supervisor(st.clone()));
     let listener = tokio::net::TcpListener::bind(addr).await?;

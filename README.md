@@ -105,7 +105,16 @@ Encore and the download clients must see the **same files at the same paths**:
   ```
 
   - **slskd behind gluetun** (`network_mode: container:gluetun-slsk`): slskd has no hostname of its own, so use the VPN container's name, e.g. `SLSKD_URL=http://gluetun-slsk:5030`.
-- **Built-in client through a VPN**: run Encore in gluetun's network namespace (`network_mode: container:gluetun`, publish 8080 on gluetun with `FIREWALL_INPUT_PORTS=8080`) and set `SOULSEEK_PORT_FILE=/gluetun/forwarded_port` with gluetun's folder mounted read-only – the port the VPN forwards is used as the Soulseek listen port and followed when it changes. The commented block in `docker-compose.yml` has the full example.
+- **Built-in client through a VPN**: Encore has WireGuard built in and sends only Soulseek through it. Tidal, Qobuz, Deezer, Spotify, metadata and the web UI keep your normal connection, so streaming services don't refuse the VPN address. In *Settings → Apps & sources → Soulseek → VPN for Soulseek*, turn on *Send Soulseek through a VPN* and paste the whole WireGuard `.conf` file from your VPN provider (ProtonVPN: *Downloads → WireGuard configuration*, with NAT-PMP port forwarding on), or set `VPN_ENABLED=true` and `VPN_WIREGUARD_CONFIG`. With *Port forwarding* on NAT-PMP, the port the VPN forwards becomes the Soulseek listen port and is followed when it changes (the listen port settings are ignored while the VPN is on). *Keep Soulseek off while the VPN is down* (on by default) stops Soulseek from connecting directly when the tunnel is not up. *Test VPN* shows the handshake, forwarded port and public IP; Diagnostics has the same line. It runs in user space: no gluetun, no `NET_ADMIN`, no tun device, and no Soulseek port to publish:
+
+  ```yaml
+  encore:
+    image: ghcr.io/krifmaz/encore:latest
+    environment: [PUID=1000, PGID=1000, TZ=America/Detroit, ENCORE_LIBRARY_PATH=/music]
+    ports: ["8080:8080"]
+  ```
+
+  Running Encore inside gluetun still works (`SOULSEEK_PORT_FILE=/gluetun/forwarded_port`, see the commented block in `docker-compose.yml`), but then every service sees the VPN address.
   - **slskd permissions:** slskd ignores `PUID`/`PGID`. Run it with `user: "1000:1000"` and `chown -R 1000:1000` its config, downloads and incomplete folders, or it can't write to them.
   - Since slskd 0.26.0 the top-level `permissions:` key in `slskd.yml` moved to `transfers.download.destination.permissions`; an old config stops slskd from starting (see Troubleshooting).
 
@@ -177,6 +186,10 @@ Every option can be changed in the UI. Environment variables only seed the first
 | `SOULSEEK_USERNAME` / `SOULSEEK_PASSWORD` | | Soulseek login for the built-in client; a new username and password create the account at the first sign-in |
 | `SOULSEEK_PORT` | 2234 | TCP port the built-in client listens on – forward it on your router |
 | `SOULSEEK_SHARE` / `SOULSEEK_UPLOAD_SLOTS` | `true` / 2 | Share the library (read-only) back to Soulseek, and how many uploads at once |
+| `VPN_ENABLED` | `false` | Send only Soulseek through the built-in WireGuard VPN |
+| `VPN_WIREGUARD_CONFIG` | | The whole WireGuard `.conf` file from your VPN provider (secret) |
+| `VPN_PORT_FORWARDING` | `natpmp` | `natpmp` (ProtonVPN) uses the forwarded port as the Soulseek listen port, `off` keeps the configured port |
+| `VPN_KILL_SWITCH` | `true` | Keep Soulseek off while the VPN is not connected |
 | `SLSKD_URL` / `SLSKD_API_KEY` | `http://slskd:5030` | Only for the slskd client |
 | `SLSKD_DOWNLOAD_PATH` | `/downloads/slskd` | Soulseek downloads folder, for both clients |
 | `YTDLP_AUTO_UPDATE` | `true` | Upgrades yt-dlp at every container start |

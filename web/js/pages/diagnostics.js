@@ -3,6 +3,29 @@ import { confirmDialog, copyText, esc, fmt, icon, toast } from '../ui.js';
 
 const KIND = { service: 'Connections', path: 'Folders & permissions', tool: 'Tools in the container' };
 
+/** The VPN for Soulseek line (Settings → Soulseek and the Diagnostics row; the same words in web-rs):
+ * "Connected · port 51234 · public IP 1.2.3.4 · last handshake 12 s ago" / "Connecting…" / the error / "Off". */
+export function vpnText(v) {
+  if (!v || typeof v !== 'object') return 'Off';
+  if (v.state === 'up') {
+    const parts = ['Connected'];
+    if (v.forwarded_port != null) parts.push(`port ${v.forwarded_port}`);
+    else if (v.port_forwarding) parts.push(v.natpmp_error ? `no forwarded port (${v.natpmp_error})` : 'no forwarded port yet');
+    if (v.public_ip) parts.push(`public IP ${v.public_ip}`);
+    if (v.last_handshake_secs_ago != null) parts.push(`last handshake ${Math.round(Number(v.last_handshake_secs_ago))} s ago`);
+    return parts.join(' · ');
+  }
+  if (v.state === 'connecting') return 'Connecting…';
+  if (v.state === 'error') return v.error || 'The VPN could not connect';
+  return 'Off';
+}
+
+/** `vpnText` as HTML: errors in red. */
+export function vpnStateHtml(v) {
+  const t = esc(vpnText(v));
+  return v && v.state === 'error' ? `<span style="color:var(--err)">${t}</span>` : t;
+}
+
 export async function render(view) {
   view.innerHTML = `
     <div class="row wrap between" style="margin-bottom:18px">
@@ -69,6 +92,11 @@ export async function render(view) {
   const run = async () => {
     box.innerHTML = '<div class="empty"><span class="spinner"></span><p class="muted">Checking…</p></div>';
     last = await api.get('/system/diagnostics');
+    // the built-in VPN for Soulseek, as one more connection check (older servers have no /system/vpn)
+    try {
+      const v = await api.get('/system/vpn');
+      last.checks.push({ kind: 'service', name: 'VPN for Soulseek', ok: !v.enabled || v.state === 'up', request: v.endpoint ? `WireGuard ${v.endpoint}` : '', detail: vpnText(v) });
+    } catch { /* no VPN on this server */ }
     view.querySelector('#copy').disabled = false;
     const groups = {};
     last.checks.forEach(c => (groups[c.kind] ||= []).push(c));

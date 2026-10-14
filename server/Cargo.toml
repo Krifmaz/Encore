@@ -41,6 +41,10 @@ unicode-normalization = "0.1.25"
 md5 = "0.8.1"
 flate2 = "1"
 tokio-tungstenite = "0.26"
+# built-in VPN for Soulseek: WireGuard in user space (no tun device) with its own TCP/IP stack
+boringtun = { version = "0.7", default-features = false }
+smoltcp = { version = "0.14", default-features = false, features = ["std", "async", "medium-ip", "proto-ipv4", "socket-tcp", "socket-tcp-cubic", "socket-udp"] }
+socket2 = "0.6"
 cadenza-dsp = { git = "https://github.com/Krifmaz/cadenza", rev = "5f17f17" }
 
 [profile.release]

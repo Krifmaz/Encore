@@ -16,7 +16,7 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
 use std::time::{Duration, Instant};
-use tokio::io::{AsyncReadExt, AsyncSeekExt, AsyncWriteExt};
+use tokio::io::{AsyncRead, AsyncReadExt, AsyncSeekExt, AsyncWrite, AsyncWriteExt, ReadHalf, WriteHalf};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::{mpsc, oneshot, watch, Notify, Semaphore};
 
@@ -39,13 +39,107 @@ pub struct Settings {
     pub download_dir: PathBuf,
     pub upload_slots: usize,
     pub share: bool,
+    /// Every connection (server, peers, transfers, listener) goes through the built-in VPN.
+    pub vpn: bool,
 }
 
 impl Settings {
     /// What a change of these means: a different login, so a restart.
     pub fn key(&self) -> String {
-        format!("{}|{}|{}|{}|{}|{}|{}", self.username, self.password, self.server, self.listen_port, self.download_dir.display(), self.upload_slots, self.share)
+        format!("{}|{}|{}|{}|{}|{}|{}|{}", self.username, self.password, self.server, self.listen_port, self.download_dir.display(), self.upload_slots, self.share, self.vpn)
     }
+
+    pub fn net(&self) -> Net {
+        if self.vpn { Net::Vpn } else { Net::Direct }
+    }
+}
+
+// ---- connections: direct or through the built-in VPN ---------------------------------------------
+
+pub trait AsyncReadWrite: AsyncRead + AsyncWrite {}
+impl<T: AsyncRead + AsyncWrite + ?Sized> AsyncReadWrite for T {}
+
+/// One connection to the server or a peer, whichever way it was made.
+pub type Conn = Box<dyn AsyncReadWrite + Send + Unpin>;
+
+/// How this client reaches the network: the normal connection, or only through the VPN tunnel.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Net {
+    Direct,
+    Vpn,
+}
+
+impl Net {
+    pub async fn connect(self, addr: SocketAddr) -> std::io::Result<Conn> {
+        match self {
+            Net::Direct => {
+                let s = TcpStream::connect(addr).await?;
+                let _ = s.set_nodelay(true);
+                Ok(Box::new(s))
+            }
+            Net::Vpn => Ok(Box::new(crate::vpn::connect_tcp(addr).await?)),
+        }
+    }
+
+    /// `host:port`, where host may be a name; on the VPN the name is looked up through the tunnel too.
+    pub async fn connect_host(self, hostport: &str) -> std::io::Result<Conn> {
+        match self {
+            Net::Direct => {
+                let s = TcpStream::connect(hostport).await?;
+                let _ = s.set_nodelay(true);
+                Ok(Box::new(s))
+            }
+            Net::Vpn => {
+                let (host, port) = split_host_port(hostport)
+                    .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::InvalidInput, format!("bad server address {hostport}")))?;
+                let ips = match host.parse::<IpAddr>() {
+                    Ok(ip) => vec![ip],
+                    Err(_) => crate::vpn::resolve(&host).await?,
+                };
+                let mut last = std::io::Error::new(std::io::ErrorKind::NotFound, format!("no address for {host}"));
+                for ip in ips.into_iter().filter(|ip| ip.is_ipv4()) {
+                    match crate::vpn::connect_tcp(SocketAddr::new(ip, port)).await {
+                        Ok(s) => return Ok(Box::new(s)),
+                        Err(e) => last = e,
+                    }
+                }
+                Err(last)
+            }
+        }
+    }
+
+    pub async fn listen(self, port: u16) -> std::io::Result<Listener> {
+        match self {
+            Net::Direct => Ok(Listener::Direct(TcpListener::bind(SocketAddr::from(([0, 0, 0, 0], port))).await?)),
+            Net::Vpn => Ok(Listener::Vpn(crate::vpn::listen_tcp(port).await?)),
+        }
+    }
+}
+
+pub enum Listener {
+    Direct(TcpListener),
+    Vpn(crate::vpn::VpnListener),
+}
+
+impl Listener {
+    pub async fn accept(&self) -> std::io::Result<Conn> {
+        match self {
+            Listener::Direct(l) => {
+                let (s, _) = l.accept().await?;
+                let _ = s.set_nodelay(true);
+                Ok(Box::new(s))
+            }
+            Listener::Vpn(l) => Ok(Box::new(l.accept().await?.0)),
+        }
+    }
+}
+
+/// "host:port" → (host, port); "[v6]:port" keeps the brackets off.
+pub fn split_host_port(s: &str) -> Option<(String, u16)> {
+    let (h, p) = s.trim().rsplit_once(':')?;
+    let port = p.parse::<u16>().ok().filter(|p| *p > 0)?;
+    let h = h.trim_start_matches('[').trim_end_matches(']');
+    if h.is_empty() { None } else { Some((h.to_string(), port)) }
 }
 
 #[derive(Default, Clone)]
@@ -121,12 +215,12 @@ struct Inner {
     state: Mutex<ConnState>,
     searches: Mutex<HashMap<u32, Search>>,
     addr_waiters: Mutex<HashMap<String, Vec<oneshot::Sender<Option<(Ipv4Addr, u16)>>>>>,
-    indirect: Mutex<HashMap<u32, oneshot::Sender<Result<TcpStream, String>>>>,
+    indirect: Mutex<HashMap<u32, oneshot::Sender<Result<Conn, String>>>>,
     peers: Mutex<HashMap<String, Peer>>,
     downloads: Mutex<Vec<Arc<Download>>>,
     uploads: Mutex<Vec<Upload>>,
     transfer_waits: Mutex<HashMap<u32, oneshot::Sender<Result<(), String>>>>,
-    file_waits: Mutex<HashMap<(String, u32), oneshot::Sender<TcpStream>>>,
+    file_waits: Mutex<HashMap<(String, u32), oneshot::Sender<Conn>>>,
     /// browse() callers waiting for a user's ShareFileList (it carries no token, so keyed by user)
     browse_waits: Mutex<HashMap<String, Vec<oneshot::Sender<Vec<Dir>>>>>,
     answers: Arc<Semaphore>,
@@ -184,7 +278,7 @@ async fn read_frame<R: AsyncReadExt + Unpin>(r: &mut R, code8: bool) -> anyhow::
     Ok(Some((code, buf[head..].to_vec())))
 }
 
-fn writer(mut w: tokio::net::tcp::OwnedWriteHalf) -> mpsc::UnboundedSender<Vec<u8>> {
+fn writer(mut w: WriteHalf<Conn>) -> mpsc::UnboundedSender<Vec<u8>> {
     let (tx, mut rx) = mpsc::unbounded_channel::<Vec<u8>>();
     tokio::spawn(async move {
         while let Some(b) = rx.recv().await {
@@ -460,10 +554,9 @@ impl Client {
 
     async fn server_session(&self) -> anyhow::Result<()> {
         let st = &self.inner.settings;
-        let stream = tokio::time::timeout(Duration::from_secs(15), TcpStream::connect(&st.server)).await
+        let stream = tokio::time::timeout(Duration::from_secs(15), st.net().connect_host(&st.server)).await
             .map_err(|_| anyhow::anyhow!("timed out connecting to {}", st.server))??;
-        let _ = stream.set_nodelay(true);
-        let (mut rd, wr) = stream.into_split();
+        let (mut rd, wr) = tokio::io::split(stream);
         let tx = writer(wr);
         tx.send(p::login(&st.username, &st.password))?;
         {
@@ -543,17 +636,14 @@ impl Client {
 
     /// The server says a peer wants us to connect to them (they couldn't reach us, or we asked).
     async fn pierce(self, user: String, kind: String, ip: Ipv4Addr, port: u16, token: u32) {
-        let stream = match tokio::time::timeout(CONNECT_TIMEOUT, TcpStream::connect(SocketAddr::new(IpAddr::V4(ip), port))).await {
+        let mut stream = match tokio::time::timeout(CONNECT_TIMEOUT, self.inner.settings.net().connect(SocketAddr::new(IpAddr::V4(ip), port))).await {
             Ok(Ok(s)) => s,
             _ => { self.inner.send_server(p::cant_connect_to_peer(token, &user)); return; }
         };
-        let _ = stream.set_nodelay(true);
-        let (rd, mut wr) = stream.into_split();
-        if wr.write_all(&p::pierce_firewall(token)).await.is_err() {
+        if stream.write_all(&p::pierce_firewall(token)).await.is_err() {
             self.inner.send_server(p::cant_connect_to_peer(token, &user));
             return;
         }
-        let stream = rd.reunite(wr).expect("same stream");
         match kind.as_str() {
             "P" => self.run_peer(user, stream).await,
             "F" => self.file_stream(user, stream).await,
@@ -564,44 +654,79 @@ impl Client {
 
 // ---- listener and peer connections ---------------------------------------------------------------
 
+/// Accept on `port` until `stop`, handing each connection to `take`. A restarted client races the
+/// old one's listener going away, so binding is retried for 10 s before `give_up`. A listener on
+/// the VPN dies with its tunnel (the tunnel restarts when its settings change): then this listens
+/// again on the next tunnel, as soon as one is up.
+pub(crate) async fn serve(net: Net, port: u16, stop: &mut watch::Receiver<bool>, mut take: impl FnMut(Conn), give_up: impl FnOnce(String)) {
+    let mut listener = None;
+    for i in 0..40 {
+        match net.listen(port).await {
+            Ok(l) => { listener = Some(l); break; }
+            Err(e) => {
+                if i == 39 || *stop.borrow() {
+                    give_up(e.to_string());
+                    return;
+                }
+                tokio::time::sleep(Duration::from_millis(250)).await;
+            }
+        }
+    }
+    let mut listener = listener.expect("set above");
+    loop {
+        let r = tokio::select! {
+            r = listener.accept() => r,
+            _ = stop.changed() => return,
+        };
+        match r {
+            Ok(c) => take(c),
+            Err(e) if e.kind() == std::io::ErrorKind::NotConnected => {
+                drop(listener);
+                tracing::info!("soulseek: the VPN tunnel restarted – listening on port {port} again once it is up");
+                let mut wait = Duration::from_millis(250);
+                listener = loop {
+                    tokio::select! {
+                        _ = tokio::time::sleep(wait) => {}
+                        _ = stop.changed() => return,
+                    }
+                    match net.listen(port).await {
+                        Ok(l) => break l,
+                        Err(_) => wait = (wait * 2).min(Duration::from_secs(5)),
+                    }
+                };
+                tracing::info!("soulseek: listening on port {port} through the VPN again");
+            }
+            Err(_) => {
+                tokio::select! {
+                    _ = tokio::time::sleep(Duration::from_millis(200)) => {}
+                    _ = stop.changed() => return,
+                }
+            }
+        }
+    }
+}
+
 impl Client {
     async fn listen(self) {
         let port = self.inner.settings.listen_port;
         let mut stop = self.inner.stop.subscribe();
-        // a restarted client races the old one's listener going away: try for a while
-        let mut listener = None;
-        for i in 0..40 {
-            match TcpListener::bind(SocketAddr::from(([0, 0, 0, 0], port))).await {
-                Ok(l) => { listener = Some(l); break; }
-                Err(e) => {
-                    if i == 39 || *stop.borrow() {
-                        tracing::warn!("soulseek: can't listen on port {port}: {e} – only users who accept incoming connections will work");
-                        self.inner.state.lock().unwrap().error = format!("listen port {port} unavailable: {e}");
-                        return;
-                    }
-                    tokio::time::sleep(Duration::from_millis(250)).await;
-                }
-            }
-        }
-        let listener = listener.expect("set above");
-        loop {
-            let (stream, _) = tokio::select! {
-                r = listener.accept() => match r { Ok(x) => x, Err(_) => { tokio::time::sleep(Duration::from_millis(200)).await; continue } },
-                _ = stop.changed() => return,
-            };
-            tokio::spawn(self.clone().incoming(stream));
-        }
+        let me = self.clone();
+        let take = move |c: Conn| {
+            tokio::spawn(me.clone().incoming(c));
+        };
+        let give_up = |e: String| {
+            tracing::warn!("soulseek: can't listen on port {port}: {e} – only users who accept incoming connections will work");
+            self.inner.state.lock().unwrap().error = format!("listen port {port} unavailable: {e}");
+        };
+        serve(self.inner.settings.net(), port, &mut stop, take, give_up).await;
     }
 
-    async fn incoming(self, stream: TcpStream) {
-        let _ = stream.set_nodelay(true);
-        let (mut rd, wr) = stream.into_split();
-        let init = match tokio::time::timeout(Duration::from_secs(10), read_frame(&mut rd, true)).await {
+    async fn incoming(self, mut stream: Conn) {
+        let init = match tokio::time::timeout(Duration::from_secs(10), read_frame(&mut stream, true)).await {
             Ok(Ok(Some((code, payload)))) => p::parse_init(code as u8, &payload).ok(),
             _ => None,
         };
         let Some(init) = init else { return };
-        let stream = rd.reunite(wr).expect("same stream");
         match init {
             InitMsg::PierceFireWall(token) => {
                 if let Some(w) = self.inner.indirect.lock().unwrap().remove(&token) {
@@ -631,13 +756,12 @@ impl Client {
     }
 
     /// A fresh connection of `kind` to a user: direct, else through the server.
-    async fn connect_peer(&self, user: &str, kind: &str) -> anyhow::Result<TcpStream> {
+    async fn connect_peer(&self, user: &str, kind: &str) -> anyhow::Result<Conn> {
         let me = &self.inner.settings.username;
         let direct = async {
             let (ip, port) = self.peer_address(user).await?;
-            let mut s = tokio::time::timeout(CONNECT_TIMEOUT, TcpStream::connect(SocketAddr::new(IpAddr::V4(ip), port))).await
+            let mut s = tokio::time::timeout(CONNECT_TIMEOUT, self.inner.settings.net().connect(SocketAddr::new(IpAddr::V4(ip), port))).await
                 .map_err(|_| anyhow::anyhow!("connect timed out"))??;
-            let _ = s.set_nodelay(true);
             s.write_all(&p::peer_init(me, kind, token())).await?;
             anyhow::Ok(s)
         };
@@ -668,21 +792,21 @@ impl Client {
             }
         }
         let stream = self.connect_peer(user, "P").await?;
-        let (rd, wr) = stream.into_split();
+        let (rd, wr) = tokio::io::split(stream);
         let tx = writer(wr);
         self.inner.peers.lock().unwrap().insert(user.to_string(), Peer { tx: tx.clone() });
         tokio::spawn(self.clone().peer_reader(user.to_string(), rd, tx.clone()));
         Ok(tx)
     }
 
-    async fn run_peer(self, user: String, stream: TcpStream) {
-        let (rd, wr) = stream.into_split();
+    async fn run_peer(self, user: String, stream: Conn) {
+        let (rd, wr) = tokio::io::split(stream);
         let tx = writer(wr);
         self.inner.peers.lock().unwrap().insert(user.clone(), Peer { tx: tx.clone() });
         self.peer_reader(user, rd, tx).await;
     }
 
-    async fn peer_reader(self, user: String, mut rd: tokio::net::tcp::OwnedReadHalf, tx: mpsc::UnboundedSender<Vec<u8>>) {
+    async fn peer_reader(self, user: String, mut rd: ReadHalf<Conn>, tx: mpsc::UnboundedSender<Vec<u8>>) {
         loop {
             let (code, payload) = match tokio::time::timeout(PEER_IDLE, read_frame(&mut rd, false)).await {
                 Ok(Ok(Some(f))) => f,
@@ -834,7 +958,7 @@ impl Client {
 
 impl Client {
     /// Waits for the uploader's "F" connection and runs the transfer.
-    async fn await_file(self, d: Arc<Download>, token: u32, frx: oneshot::Receiver<TcpStream>) {
+    async fn await_file(self, d: Arc<Download>, token: u32, frx: oneshot::Receiver<Conn>) {
         let stream = tokio::select! {
             r = frx => match r { Ok(s) => s, Err(_) => return },
             _ = tokio::time::sleep(Duration::from_secs(120)) => {
@@ -852,7 +976,7 @@ impl Client {
     }
 
     /// An "F" connection from `user`: the first 4 bytes name the transfer.
-    async fn file_stream(self, user: String, mut stream: TcpStream) {
+    async fn file_stream(self, user: String, mut stream: Conn) {
         let mut t = [0u8; 4];
         if tokio::time::timeout(Duration::from_secs(30), stream.read_exact(&mut t)).await.is_err() {
             return;
@@ -871,7 +995,7 @@ impl Client {
         part_file_for(&self.inner.settings.download_dir, &d.user, &d.file, d.size())
     }
 
-    async fn receive(&self, d: Arc<Download>, mut stream: TcpStream) {
+    async fn receive(&self, d: Arc<Download>, mut stream: Conn) {
         let target = self.local_target(&d);
         let part = self.part_path(&d);
         if let Some(dir) = target.parent() {
@@ -1105,13 +1229,12 @@ impl Client {
             if self.inner.state.lock().unwrap().parent.is_some() || gen != self.inner.parent_gen.load(Ordering::Relaxed) {
                 return;
             }
-            let Ok(Ok(mut stream)) = tokio::time::timeout(CONNECT_TIMEOUT, TcpStream::connect(SocketAddr::new(IpAddr::V4(ip), port))).await else { continue };
+            let Ok(Ok(mut stream)) = tokio::time::timeout(CONNECT_TIMEOUT, self.inner.settings.net().connect(SocketAddr::new(IpAddr::V4(ip), port))).await else { continue };
             if stream.write_all(&p::peer_init(&self.inner.settings.username, "D", token())).await.is_err() {
                 continue;
             }
             // the parent speaks first (branch level/root); otherwise it's not one
-            let (mut rd, _wr) = stream.into_split();
-            let Ok(Ok(Some((code, payload)))) = tokio::time::timeout(Duration::from_secs(10), read_frame(&mut rd, true)).await else { continue };
+            let Ok(Ok(Some((code, payload)))) = tokio::time::timeout(Duration::from_secs(10), read_frame(&mut stream, true)).await else { continue };
             let Ok(first) = p::parse_distrib(code as u8, &payload) else { continue };
             {
                 let mut s = self.inner.state.lock().unwrap();
@@ -1122,7 +1245,7 @@ impl Client {
             tracing::info!("soulseek: parent {user} in the distributed network");
             self.on_distrib(&user, first);
             loop {
-                let msg = match tokio::time::timeout(Duration::from_secs(300), read_frame(&mut rd, true)).await {
+                let msg = match tokio::time::timeout(Duration::from_secs(300), read_frame(&mut stream, true)).await {
                     Ok(Ok(Some((code, payload)))) => match p::parse_distrib(code as u8, &payload) { Ok(m) => m, Err(_) => continue },
                     _ => break,
                 };
