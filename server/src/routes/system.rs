@@ -25,11 +25,48 @@ pub fn router() -> Router<AppState> {
         .route("/api/system/streamrip/tidal-tokens", post(tidal_tokens_save).delete(tidal_tokens_clear))
         .route("/api/system/downloads", get(downloads))
         .route("/api/system/downloads/slskd/clear", post(clear_slskd))
+        .route("/api/system/tools", get(tools_list))
+        .route("/api/system/tools/check", post(tools_check))
+        .route("/api/system/tools/{id}/update", post(tools_update))
+        .route("/api/system/tools/{id}/reset", post(tools_reset))
         .route("/api/system/backups", get(backups).post(backup_now))
         .route("/api/system/backups/upload", post(backup_upload).layer(DefaultBodyLimit::max(4 << 30)))
         .route("/api/system/backups/{name}", get(backup_download))
         .route("/api/system/backups/{name}/restore", post(backup_restore))
         .route("/api/discover/probe", get(probe))
+}
+
+// ---- download tools (Settings → Apps & sources → Download tools) --------------------------------
+
+/// What is installed and what the last check found (no network).
+async fn tools_list(State(st): State<AppState>, Admin(_): Admin) -> ApiResult<Json<Vec<crate::tools::ToolInfo>>> {
+    Ok(Json(tokio::task::spawn_blocking(move || crate::tools::cached(&st)).await.map_err(|e| err(500, e.to_string()))?))
+}
+
+/// "Check for updates".
+async fn tools_check(State(st): State<AppState>, Admin(_): Admin) -> ApiResult<Json<Vec<crate::tools::ToolInfo>>> {
+    Ok(Json(crate::tools::check(&st).await))
+}
+
+/// "Update to X": installs the newest yt-dlp or streamrip into the config dir.
+async fn tools_update(State(st): State<AppState>, Admin(u): Admin, Path(id): Path<String>) -> ApiResult<Json<crate::tools::ToolInfo>> {
+    if id != "ytdlp" && id != "streamrip" {
+        return Err(err(404, "Only yt-dlp and streamrip can be updated from Encore"));
+    }
+    st.db.log("info", &format!("{} started an update of {}", u.s("username"), if id == "ytdlp" { "yt-dlp" } else { "streamrip" }));
+    crate::tools::update(&st, &id).await.map(Json).map_err(|e| err(400, e.to_string()))
+}
+
+/// "Use the bundled version": removes the updated copy.
+async fn tools_reset(State(st): State<AppState>, Admin(u): Admin, Path(id): Path<String>) -> ApiResult<Json<Vec<crate::tools::ToolInfo>>> {
+    if id != "ytdlp" && id != "streamrip" {
+        return Err(err(404, "Only yt-dlp and streamrip have an updated copy"));
+    }
+    let st2 = st.clone();
+    let id2 = id.clone();
+    tokio::task::spawn_blocking(move || crate::tools::reset(&st2, &id2)).await.map_err(|e| err(500, e.to_string()))?.map_err(|e| err(400, e.to_string()))?;
+    st.db.log("info", &format!("{} went back to the bundled {}", u.s("username"), if id == "ytdlp" { "yt-dlp" } else { "streamrip" }));
+    Ok(Json(tokio::task::spawn_blocking(move || crate::tools::cached(&st)).await.map_err(|e| err(500, e.to_string()))?))
 }
 
 // ---- database backups (Settings → Diagnostics → Backups) ----------------------------------------

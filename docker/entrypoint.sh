@@ -1,11 +1,9 @@
 #!/bin/sh
 set -e
 
-# Keep yt-dlp fresh – sites change their players constantly.
-if [ "${YTDLP_AUTO_UPDATE:-true}" = "true" ] && [ "$(id -u)" = "0" ]; then
-  echo "[encore] updating yt-dlp…"
-  /opt/tools/bin/pip install -q -U "yt-dlp[default]" 2>/dev/null || echo "[encore] yt-dlp update failed, using bundled version"
-fi
+# yt-dlp and streamrip are kept fresh by Encore's "Update download tools" task: updates go to
+# /config/tools/venv as the Encore user and survive a new image. YTDLP_AUTO_UPDATE=false still turns off
+# yt-dlp's automatic updates (read by Encore).
 
 # Run as PUID/PGID (like linuxserver.io images) unless started as a non-root user.
 if [ "$(id -u)" = "0" ] && [ "${PUID}" != "0" ]; then

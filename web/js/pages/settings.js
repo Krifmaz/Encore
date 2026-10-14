@@ -329,7 +329,7 @@ export async function render(view, ctx) {
     const body = (group.parts || [['', group.sections]]).map(([label, ids]) => {
       const list = secs.filter(sec => ids.includes(sec.id));
       if (!list.length) return '';
-      return (label ? `<div class="nav-label" style="padding:18px 4px 8px">${esc(label)}</div>` : '') + list.map(sec => {
+      return (label ? `<div class="nav-label" style="padding:18px 4px 8px">${esc(label)}</div>` : '') + (label === 'Download sources' ? '<div id="tools-host"></div>' : '') + list.map(sec => {
         const open = (first && !focus) || secs.length === 1 || (flash && flash.sec === sec.id) || focus === sec.id;
         first = false;
         return card(sec, open);
@@ -338,6 +338,7 @@ export async function render(view, ctx) {
     panel.innerHTML = (group.id === 'tasks' ? '<div id="tasks-host" style="margin-bottom:16px"></div>' : '') + body
       + (group.id === 'apps' ? pipelineHelp() : '') + (group.id === 'general' ? await apiCard() + await aboutCard() : '');
     if (group.id === 'tasks') renderTasks(panel.querySelector('#tasks-host'));
+    if (panel.querySelector('#tools-host')) renderTools(panel.querySelector('#tools-host'), () => values, (v) => { values = v; });
     if (focus) { const c = panel.querySelector(`[data-sec="${focus}"]`); focus = null; if (c) c.scrollIntoView({ block: 'start' }); }
     panel.querySelectorAll('[data-sec]').forEach(card => {
       const sec = SECTIONS.find(x => x.id === card.dataset.sec);
@@ -593,6 +594,87 @@ function bindTidal(card) {
     e.preventDefault();
     try { const r = await api.del('/system/streamrip/tidal-tokens'); paint(r); out.hidden = true; toast('Signed out of Tidal', 'ok'); } catch (err) { toast(err.message, 'err'); }
   };
+}
+
+// Settings → Apps & sources → Download tools: yt-dlp and streamrip update in place (kept in the config
+// folder, so no new Encore image is needed); Soulseek and slskd are listed with their version only.
+const TOOL_SPIN = '<span class="spinner" style="width:10px;height:10px;border-width:2px"></span>';
+const toolList = (r) => Array.isArray(r) ? r : (r && Array.isArray(r.tools) ? r.tools : []);
+const toolUpdatable = (t) => t.id === 'ytdlp' || t.id === 'streamrip';
+
+function toolRow(t, busy) {
+  let action = '';
+  if (busy === t.id) action = `<button class="btn sm" type="button" disabled>${TOOL_SPIN} Updating…</button>`;
+  else if (t.update_available && toolUpdatable(t)) action = `<button class="btn sm primary" type="button" data-tool-update="${esc(t.id)}" ${busy ? 'disabled' : ''}>${icon.download}Update to ${esc(t.latest || '')}</button>`;
+  else if (t.update_available) action = `<span class="badge warn">${esc(t.latest || '')} available</span>`;
+  else if (t.latest) action = `<span class="badge ok">${icon.check} Up to date</span>`;
+  else if (toolUpdatable(t)) action = '<span class="small faint">Not checked yet</span>';
+  const updated = t.source === 'updated';
+  return `<div class="list-item" style="align-items:flex-start;flex-wrap:wrap;gap:12px" data-tool="${esc(t.id)}">
+      <div class="grow" style="min-width:200px"><div style="font-weight:650">${esc(t.name || t.id)} <span class="small muted mono">${t.installed ? esc(t.installed) : 'not installed'}</span>${updated ? ' <span class="small muted">(updated)</span>' : ''}</div>
+        ${t.note ? `<div class="small muted">${esc(t.note)}</div>` : ''}
+        ${t.error ? `<div class="small" style="color:var(--err)">${esc(t.error)}</div>` : ''}
+        ${updated && toolUpdatable(t) ? `<a href="#" class="small muted" data-tool-reset="${esc(t.id)}" ${busy ? 'hidden' : ''}>Use the bundled version</a>` : ''}</div>
+      <div class="row" style="gap:8px;align-items:center">${action}</div></div>`;
+}
+
+async function renderTools(host, getValues, setValues) {
+  let tools;
+  try { tools = toolList(await api.get('/system/tools')); } catch { host.innerHTML = ''; return; }
+  let busy = null, checking = false;
+  const values = getValues();
+  const meta = values._meta || {};
+  const toggle = (key, label) => {
+    if (!(key in values)) return '';
+    const locked = (meta[key] || {}).source === 'env';
+    return `<label class="switch"><input type="checkbox" data-tool-auto="${key}" ${values[key] ? 'checked' : ''} ${locked ? 'disabled' : ''}><i></i>${esc(label)}</label>`;
+  };
+  const toggles = toggle('tools_auto_ytdlp', 'Update yt-dlp automatically (recommended – sites change often)')
+    + toggle('tools_auto_streamrip', 'Update streamrip automatically when a new release is out');
+  host.innerHTML = `<div class="card" id="tools-card" style="margin-bottom:12px">
+    <div class="row between" style="margin-bottom:8px;gap:10px"><h2>Download tools</h2><button class="btn sm" type="button" id="tools-check">${icon.refresh}Check for updates</button></div>
+    <p class="muted small" style="margin:0 0 14px">yt-dlp and streamrip update in place – no new Encore image needed. Updates are kept in the config folder.</p>
+    <div class="list" id="tools-list"></div>
+    <div class="stack mt" style="gap:8px">${toggles}<div class="small muted">Checked daily – change it under <a href="#/settings?s=tasks">Scheduled tasks</a>.</div></div>
+  </div>`;
+  const list = host.querySelector('#tools-list'), check = host.querySelector('#tools-check');
+  const paint = () => {
+    list.innerHTML = tools.map(t => toolRow(t, busy)).join('');
+    check.disabled = checking || !!busy;
+    check.innerHTML = checking ? `${TOOL_SPIN} Checking…` : `${icon.refresh}Check for updates`;
+  };
+  const reload = async () => { try { tools = toolList(await api.get('/system/tools')); } catch { /* keep the last list */ } };
+  paint();
+  check.onclick = async () => {
+    checking = true; paint();
+    try { tools = toolList(await api.post('/system/tools/check')); } catch (e) { toast(e.message, 'err'); }
+    checking = false; paint();
+  };
+  list.onclick = async (e) => {
+    const up = e.target.closest('[data-tool-update]'), reset = e.target.closest('[data-tool-reset]');
+    if (up && !busy) {
+      const id = up.dataset.toolUpdate;
+      const name = (tools.find(t => t.id === id) || {}).name || id;
+      busy = id; paint();
+      try {
+        const r = await api.post(`/system/tools/${id}/update`);
+        toast(`${name} updated to ${r.installed || r.latest || ''}`, 'ok');
+      } catch (err) { toast(err.message, 'err'); }
+      busy = null;
+      await reload(); paint();
+    } else if (reset && !busy) {
+      e.preventDefault();
+      const id = reset.dataset.toolReset;
+      const name = (tools.find(t => t.id === id) || {}).name || id;
+      if (!confirm(`Go back to the ${name} version that came with Encore? The updated copy is removed.`)) return;
+      try { await api.post(`/system/tools/${id}/reset`); toast(`Back to the bundled ${name}`, 'ok'); } catch (err) { toast(err.message, 'err'); }
+      await reload(); paint();
+    }
+  };
+  host.querySelectorAll('[data-tool-auto]').forEach(box => box.addEventListener('change', async () => {
+    try { setValues(await api.put('/admin/settings', { [box.dataset.toolAuto]: box.checked })); toast('Saved', 'ok'); }
+    catch (err) { box.checked = !box.checked; toast(err.message, 'err'); }
+  }));
 }
 
 /** Version, build and app downloads – shown at the bottom of General (and of Account for members). */

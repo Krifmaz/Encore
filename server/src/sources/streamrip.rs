@@ -22,8 +22,8 @@ pub fn binary(st: &AppState) -> Option<String> {
     if !custom.is_empty() {
         return which(&custom);
     }
-    // the Docker image puts it in /opt/tools/bin – found there even if PATH was overridden
-    which("streamrip").or_else(|| which("rip")).or_else(|| which("/opt/tools/bin/rip"))
+    // the updated copy in the config dir when it's newer, else the image's /opt/tools/bin, else PATH
+    crate::tools::path(st, "streamrip").map(|p| p.to_string_lossy().into())
 }
 
 pub fn enabled(st: &AppState) -> bool {

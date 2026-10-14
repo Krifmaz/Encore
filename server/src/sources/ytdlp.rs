@@ -13,10 +13,9 @@ pub fn enabled(st: &AppState) -> bool {
 }
 
 pub fn bin() -> String {
+    // the updated copy in the config dir when it's newer, else the image's /opt/tools/bin, else PATH
     std::env::var("ENCORE_YTDLP").unwrap_or_else(|_| {
-        let bundled = "/opt/tools/bin/yt-dlp";
-        let on_path = std::env::var("PATH").map(|p| p.split(':').any(|d| Path::new(d).join("yt-dlp").is_file())).unwrap_or(false);
-        if !on_path && Path::new(bundled).is_file() { bundled.into() } else { "yt-dlp".into() }
+        crate::tools::path_in(&crate::tools::config_dir(), "ytdlp").map(|p| p.to_string_lossy().into()).unwrap_or_else(|| "yt-dlp".into())
     })
 }
 

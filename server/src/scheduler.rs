@@ -8,7 +8,7 @@ use std::path::PathBuf;
 use std::sync::LazyLock;
 
 /// (key, name, description)
-pub const TASKS: [(&str, &str, &str); 10] = [
+pub const TASKS: [(&str, &str, &str); 11] = [
     ("scan", "Scan the library", "Pick up files added, changed or removed outside Encore."),
     ("sync", "Sync likes & playlists", "Two-way liked songs and playlist sync with Jellyfin, Plex, Navidrome, ListenBrainz, Spotify…"),
     ("lossy", "Lossless upgrades", "Re-check albums you only have as MP3/YouTube rips for a lossless copy."),
@@ -18,6 +18,7 @@ pub const TASKS: [(&str, &str, &str); 10] = [
     ("retag", "Re-tag albums added to MusicBrainz", "Albums tagged from Deezer/Apple/Discogs get proper MusicBrainz tags once they appear there."),
     ("verify", "Verify audio fingerprints", "Fingerprint unchecked songs with AcoustID and flag wrong audio."),
     ("cleanup", "Clean up", "Remove finished downloads older than the cleanup age from the list and delete leftover staging files."),
+    ("tools", "Update download tools", "Check yt-dlp and streamrip for new versions and install them – no new Encore image needed. yt-dlp changes often as sites change; streamrip only when its maintainers publish a release."),
     ("backup", "Back up the database", "Copy the database to config/backups (kept for 7 days, then one a week for 8 weeks, plus the last 3 pre-upgrade copies)."),
 ];
 
@@ -34,6 +35,7 @@ fn keys(key: &str) -> (&'static str, &'static str, i64) {
         "artwork" => ("task_artwork_enabled", "task_artwork_minutes", 1),
         "retag" => ("task_retag_enabled", "task_retag_minutes", 1),
         "verify" => ("task_verify_enabled", "task_verify_minutes", 1),
+        "tools" => ("task_tools_enabled", "task_tools_minutes", 1),
         "backup" => ("task_backup_enabled", "task_backup_minutes", 1),
         _ => ("task_cleanup_enabled", "task_cleanup_minutes", 1),
     }
@@ -163,6 +165,7 @@ async fn run(st: &AppState, key: &str) -> anyhow::Result<String> {
             let j = jobs::get("verify");
             format!("{} verified, {} wrong", j["verified"], j["mismatch"])
         }
+        "tools" => crate::tools::scheduled(st).await?,
         "backup" => {
             // VACUUM INTO of a big library takes seconds: not on a runtime worker thread
             let db = st.db.clone();

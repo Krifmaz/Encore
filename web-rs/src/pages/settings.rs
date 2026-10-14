@@ -606,6 +606,7 @@ fn show(hub: &Rc<Hub>, id: String, flash: Option<Value>) -> Pin<Box<dyn Future<O
             let list: Vec<&(&'static Section, Vec<Field>)> = secs.iter().filter(|(sec, _)| ids.contains(&sec.id)).collect();
             if list.is_empty() { continue; }
             if !label.is_empty() { html.push_str(&format!(r##"<div class="nav-label" style="padding:18px 4px 8px">{}</div>"##, esc(label))); }
+            if *label == "Download sources" { html.push_str(r##"<div id="tools-host"></div>"##); }
             for (sec, fields) in list {
                 let flash_here = flash.as_ref().map(|f| f.s("sec") == sec.id).unwrap_or(false);
                 let open = (first && focus.is_none()) || n == 1 || flash_here || focus.as_deref() == Some(sec.id);
@@ -617,6 +618,7 @@ fn show(hub: &Rc<Hub>, id: String, flash: Option<Value>) -> Pin<Box<dyn Future<O
         if group.id == "general" { html.push_str(&hub.api_card().await); html.push_str(&about_card().await); }
         dom::set_html(&hub.panel, &html);
         if group.id == "tasks" { if let Some(host) = dom::qs_in(&hub.panel, "#tasks-host") { dom::spawn(render_tasks(host)); } }
+        if let Some(host) = dom::qs_in(&hub.panel, "#tools-host") { dom::spawn(render_tools(host, hub.clone())); }
         if let Some(f) = focus { if let Some(c) = dom::qs_in(&hub.panel, &format!(r#"[data-sec="{f}"]"#)) { c.scroll_into_view(); } }
 
         for card in dom::qsa_in(&hub.panel, "[data-sec]") {
@@ -1501,6 +1503,157 @@ fn bind_cadenza_cache(card: &Element) {
             refresh();
         });
     });
+}
+
+// Settings → Apps & sources → Download tools: yt-dlp and streamrip update in place (kept in the config
+// folder, so no new Encore image is needed); Soulseek and slskd are listed with their version only.
+const TOOL_SPIN: &str = r##"<span class="spinner" style="width:10px;height:10px;border-width:2px"></span>"##;
+fn tool_list(r: &Value) -> Vec<Value> { if r.is_array() { r.items() } else { r.a("tools") } }
+fn tool_updatable(t: &Value) -> bool { let id = t.s("id"); id == "ytdlp" || id == "streamrip" }
+/// `a || b`: the first truthy of the two, as text.
+fn tool_or(t: &Value, a: &str, b: &str) -> String { if t.truthy(a) { t.s(a) } else if t.truthy(b) { t.s(b) } else { String::new() } }
+
+fn tool_row(t: &Value, busy: Option<&str>) -> String {
+    let id = t.s("id");
+    let latest = if t.truthy("latest") { t.s("latest") } else { String::new() };
+    let action = if busy == Some(id.as_str()) {
+        format!(r##"<button class="btn sm" type="button" disabled>{TOOL_SPIN} Updating…</button>"##)
+    } else if t.truthy("update_available") && tool_updatable(t) {
+        format!(r##"<button class="btn sm primary" type="button" data-tool-update="{}" {}>{}Update to {}</button>"##,
+            esc(&id), if busy.is_some() { "disabled" } else { "" }, icon("download"), esc(&latest))
+    } else if t.truthy("update_available") {
+        format!(r##"<span class="badge warn">{} available</span>"##, esc(&latest))
+    } else if t.truthy("latest") {
+        format!(r##"<span class="badge ok">{} Up to date</span>"##, icon("check"))
+    } else if tool_updatable(t) {
+        r##"<span class="small faint">Not checked yet</span>"##.to_string()
+    } else { String::new() };
+    let updated = t.s("source") == "updated";
+    format!(r##"<div class="list-item" style="align-items:flex-start;flex-wrap:wrap;gap:12px" data-tool="{eid}">
+      <div class="grow" style="min-width:200px"><div style="font-weight:650">{name} <span class="small muted mono">{ver}</span>{upd}</div>
+        {note}
+        {err}
+        {reset}</div>
+      <div class="row" style="gap:8px;align-items:center">{action}</div></div>"##,
+        eid = esc(&id),
+        name = esc(&tool_or(t, "name", "id")),
+        ver = if t.truthy("installed") { esc(&t.s("installed")) } else { "not installed".to_string() },
+        upd = if updated { r##" <span class="small muted">(updated)</span>"## } else { "" },
+        note = if t.truthy("note") { format!(r##"<div class="small muted">{}</div>"##, esc(&t.s("note"))) } else { String::new() },
+        err = if t.truthy("error") { format!(r##"<div class="small" style="color:var(--err)">{}</div>"##, esc(&t.s("error"))) } else { String::new() },
+        reset = if updated && tool_updatable(t) {
+            format!(r##"<a href="#" class="small muted" data-tool-reset="{}" {}>Use the bundled version</a>"##, esc(&id), if busy.is_some() { "hidden" } else { "" })
+        } else { String::new() })
+}
+
+/// What the Download tools card shows: the tool list, the tool being updated, and whether a check runs.
+struct Tools {
+    list: Element,
+    check: Element,
+    tools: RefCell<Vec<Value>>,
+    busy: RefCell<Option<String>>,
+    checking: Cell<bool>,
+}
+
+impl Tools {
+    fn paint(&self) {
+        let busy = self.busy.borrow().clone();
+        let rows: String = self.tools.borrow().iter().map(|t| tool_row(t, busy.as_deref())).collect();
+        dom::set_html(&self.list, &rows);
+        dom::set_disabled(&self.check, self.checking.get() || busy.is_some());
+        dom::set_html(&self.check, &if self.checking.get() { format!("{TOOL_SPIN} Checking…") } else { format!("{}Check for updates", icon("refresh")) });
+    }
+    async fn reload(&self) { if let Ok(r) = api::get("/system/tools").await { *self.tools.borrow_mut() = tool_list(&r); } }
+    fn name_of(&self, id: &str) -> String {
+        self.tools.borrow().iter().find(|t| t.s("id") == id).map(|t| t.s("name")).filter(|n| !n.is_empty()).unwrap_or_else(|| id.to_string())
+    }
+}
+
+async fn render_tools(host: Element, hub: Rc<Hub>) {
+    let tools = match api::get("/system/tools").await { Ok(r) => tool_list(&r), Err(_) => { dom::set_html(&host, ""); return; } };
+    let values = hub.values.borrow().clone();
+    let meta = values.o("_meta");
+    let toggle = |key: &str, label: &str| -> String {
+        if !values.has(key) { return String::new(); }
+        let locked = meta.o(key).s("source") == "env";
+        format!(r##"<label class="switch"><input type="checkbox" data-tool-auto="{key}" {} {}><i></i>{}</label>"##,
+            if values.truthy(key) { "checked" } else { "" }, if locked { "disabled" } else { "" }, esc(label))
+    };
+    let toggles = toggle("tools_auto_ytdlp", "Update yt-dlp automatically (recommended – sites change often)")
+        + &toggle("tools_auto_streamrip", "Update streamrip automatically when a new release is out");
+    dom::set_html(&host, &format!(r##"<div class="card" id="tools-card" style="margin-bottom:12px">
+    <div class="row between" style="margin-bottom:8px;gap:10px"><h2>Download tools</h2><button class="btn sm" type="button" id="tools-check">{refresh}Check for updates</button></div>
+    <p class="muted small" style="margin:0 0 14px">yt-dlp and streamrip update in place – no new Encore image needed. Updates are kept in the config folder.</p>
+    <div class="list" id="tools-list"></div>
+    <div class="stack mt" style="gap:8px">{toggles}<div class="small muted">Checked daily – change it under <a href="#/settings?s=tasks">Scheduled tasks</a>.</div></div>
+  </div>"##, refresh = icon("refresh")));
+    let (Some(list), Some(check)) = (dom::qs_in(&host, "#tools-list"), dom::qs_in(&host, "#tools-check")) else { return };
+    let st = Rc::new(Tools { list: list.clone(), check: check.clone(), tools: RefCell::new(tools), busy: RefCell::new(None), checking: Cell::new(false) });
+    st.paint();
+    {
+        let st = st.clone();
+        dom::on(&check, "click", move |_| {
+            let st = st.clone();
+            st.checking.set(true); st.paint();
+            dom::spawn(async move {
+                match api::post_empty("/system/tools/check").await {
+                    Ok(r) => *st.tools.borrow_mut() = tool_list(&r),
+                    Err(e) => toast(&e.message, "err"),
+                }
+                st.checking.set(false); st.paint();
+            });
+        });
+    }
+    {
+        let st = st.clone();
+        dom::on(&list, "click", move |e| {
+            let idle = st.busy.borrow().is_none();
+            if let Some(up) = dom::closest(e, "[data-tool-update]") {
+                if !idle { return; }
+                let id = dom::data(&up, "toolUpdate");
+                let name = st.name_of(&id);
+                *st.busy.borrow_mut() = Some(id.clone()); st.paint();
+                let st = st.clone();
+                dom::spawn(async move {
+                    match api::post_empty(&format!("/system/tools/{id}/update")).await {
+                        Ok(r) => toast(&format!("{name} updated to {}", tool_or(&r, "installed", "latest")), "ok"),
+                        Err(err) => toast(&err.message, "err"),
+                    }
+                    *st.busy.borrow_mut() = None;
+                    st.reload().await; st.paint();
+                });
+            } else if let Some(reset) = dom::closest(e, "[data-tool-reset]") {
+                if !idle { return; }
+                dom::prevent(e);
+                let id = dom::data(&reset, "toolReset");
+                let name = st.name_of(&id);
+                if !dom::confirm(&format!("Go back to the {name} version that came with Encore? The updated copy is removed.")) { return; }
+                let st = st.clone();
+                dom::spawn(async move {
+                    match api::post_empty(&format!("/system/tools/{id}/reset")).await {
+                        Ok(_) => toast(&format!("Back to the bundled {name}"), "ok"),
+                        Err(err) => toast(&err.message, "err"),
+                    }
+                    st.reload().await; st.paint();
+                });
+            }
+        });
+    }
+    for b in dom::qsa_in(&host, "[data-tool-auto]") {
+        let (b2, hub) = (b.clone(), hub.clone());
+        dom::on(&b, "change", move |_| {
+            let (b, hub) = (b2.clone(), hub.clone());
+            let (key, on) = (dom::data(&b, "toolAuto"), dom::checked(&b));
+            dom::spawn(async move {
+                let mut body = Map::new();
+                body.insert(key, Value::Bool(on));
+                match api::put("/admin/settings", Value::Object(body)).await {
+                    Ok(v) => { *hub.values.borrow_mut() = v; toast("Saved", "ok"); }
+                    Err(err) => { dom::set_checked(&b, !dom::checked(&b)); toast(&err.message, "err"); }
+                }
+            });
+        });
+    }
 }
 
 // Tidal downloads need your Tidal account, not an API key: Encore signs in once through a link

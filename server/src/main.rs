@@ -34,6 +34,7 @@ mod soulseek;
 mod sync;
 mod state;
 mod tagger;
+mod tools;
 mod vpn;
 mod worker;
 
