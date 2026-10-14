@@ -47,7 +47,7 @@ RUN python3 -m venv /opt/uv && /opt/uv/bin/pip install --no-cache-dir uv \
  && /opt/uv/bin/uv pip install --python /opt/tools/bin/python "yt-dlp[default]" \
  && if [ "$INSTALL_STREAMRIP" = "true" ]; then \
       /opt/uv/bin/uv pip install --python /opt/tools/bin/python "https://github.com/Stensel8/streamrip/archive/refs/tags/${STREAMRIP_REF}.zip" \
-      && /opt/tools/bin/rip --version | tee /dev/stderr | grep -q "${STREAMRIP_REF#v}" \
+      && { /opt/tools/bin/streamrip --version 2>/dev/null || /opt/tools/bin/rip --version; } | tee /dev/stderr | grep -q "${STREAMRIP_REF#v}" \
       || { echo "streamrip ${STREAMRIP_REF} failed to install"; exit 1; }; \
     fi \
  && rm -rf /opt/uv
