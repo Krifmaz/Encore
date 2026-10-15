@@ -101,3 +101,21 @@ pub async fn poll(st: &AppState, hash: &str) -> anyhow::Result<Poll> {
 pub async fn remove(st: &AppState, hash: &str) {
     let _ = rpc(st, "torrent-remove", json!({ "ids": [hash], "delete-local-data": true })).await;
 }
+
+/// The torrent's files in Transmission's order. None until a magnet's metadata is there.
+pub async fn files(st: &AppState, hash: &str) -> anyhow::Result<Option<Vec<String>>> {
+    let v = rpc(st, "torrent-get", json!({ "ids": [hash], "fields": ["hashString", "files"] })).await?;
+    let names: Vec<String> = v["torrents"][0]["files"].as_array().cloned().unwrap_or_default().iter().map(|f| f["name"].as_str().unwrap_or("").to_string()).collect();
+    Ok(if names.is_empty() { None } else { Some(names) })
+}
+
+pub async fn select(st: &AppState, hash: &str, keep: &[usize]) -> anyhow::Result<()> {
+    let n = files(st, hash).await?.map(|f| f.len()).unwrap_or(0);
+    let skip: Vec<usize> = (0..n).filter(|i| !keep.contains(i)).collect();
+    let mut args = json!({ "ids": [hash], "files-wanted": keep });
+    if !skip.is_empty() {
+        args["files-unwanted"] = json!(skip);
+    }
+    rpc(st, "torrent-set", args).await?;
+    Ok(())
+}

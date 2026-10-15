@@ -77,6 +77,9 @@ struct SearchBody {
     artist: String,
     title: String,
     query: Option<String>,
+    /// For a song: the album it is on, when the client knows it.
+    album: Option<String>,
+    mbid: Option<String>,
     track_count: Option<usize>,
     length: Option<f64>,
 }
@@ -132,29 +135,149 @@ async fn search_slskd(st: &AppState, b: &SearchBody, q: &str) -> anyhow::Result<
     Ok(out)
 }
 
+/// One indexer result as a picker row. `album` marks a release of the album the song is on: only the
+/// song's file downloads from it.
+fn torznab_row(r: &Value, sc: f64, album: Option<(&str, &str, Option<u32>)>) -> Value {
+    let proto = r["protocol"].as_str().unwrap_or("torrent").to_string();
+    let url = r["magnetUrl"].as_str().filter(|m| !m.is_empty()).or(r["downloadUrl"].as_str()).unwrap_or("").to_string();
+    let title = r["title"].as_str().unwrap_or("").to_string();
+    let lossless = regex::Regex::new(r"(?i)\b(flac|lossless|alac|24[\s-]?bit|hi-?res)\b").unwrap().is_match(&title);
+    let seeds = r["seeders"].as_i64();
+    let age = r["age"].as_i64().map(|d| format!("{d} days old")).unwrap_or_default();
+    let indexer = r["indexer"].as_str().unwrap_or("").to_string();
+    let mut info = vec![proto.clone(), seeds.map(|s| format!("{s} seeders")).unwrap_or_default(), age];
+    let mut payload = json!({ "title": title, "indexer": r["indexer"], "protocol": proto, "size": r["size"], "seeders": r["seeders"], "url": url, "lossless": lossless });
+    let subtitle = match album {
+        Some((name, song, no)) => {
+            info.insert(0, indexer);
+            payload["album"] = json!(name);
+            payload["song_only"] = json!(true);
+            if let Some(n) = no {
+                payload["track_no"] = json!(n);
+            }
+            format!("from the album {name} · only {song} downloads")
+        }
+        None => indexer,
+    };
+    let info = info.into_iter().filter(|x| !x.is_empty()).collect::<Vec<_>>().join(" · ");
+    json!({ "source": "torznab", "key": format!("torznab:{}", r["guid"].as_str().unwrap_or(&title)), "title": title,
+        "subtitle": subtitle, "quality": if lossless { "FLAC" } else { "" }, "lossless": lossless, "tracks": null, "size": r["size"], "info": info,
+        "score": (sc * 10.0).round() / 10.0, "payload": payload })
+}
+
+fn torznab_usable(st: &AppState, r: &Value) -> bool {
+    let proto = r["protocol"].as_str().unwrap_or("torrent");
+    let url = r["magnetUrl"].as_str().filter(|m| !m.is_empty()).or(r["downloadUrl"].as_str()).unwrap_or("");
+    !url.is_empty() && !(proto == "torrent" && !torznab::qbit_ready(st)) && !(proto == "usenet" && !torznab::sab_ready(st))
+}
+
+fn by_score(out: &mut [Value]) {
+    out.sort_by(|a, b| b["score"].as_f64().partial_cmp(&a["score"].as_f64()).unwrap_or(std::cmp::Ordering::Equal));
+}
+
 async fn search_torznab(st: &AppState, b: &SearchBody, q: &str) -> anyhow::Result<Vec<Value>> {
-    if b.kind != "album" {
-        anyhow::bail!("Torrent and Usenet searches find whole albums only");
+    if b.kind == "track" {
+        return search_torznab_song(st, b, q).await;
     }
     let mut out = vec![];
     for r in torznab::search(st, q).await? {
-        let proto = r["protocol"].as_str().unwrap_or("torrent").to_string();
-        let url = r["magnetUrl"].as_str().filter(|m| !m.is_empty()).or(r["downloadUrl"].as_str()).unwrap_or("").to_string();
-        if url.is_empty() || (proto == "torrent" && !torznab::qbit_ready(st)) || (proto == "usenet" && !torznab::sab_ready(st)) {
+        if !torznab_usable(st, &r) {
             continue;
         }
-        let title = r["title"].as_str().unwrap_or("").to_string();
-        let lossless = regex::Regex::new(r"(?i)\b(flac|lossless|alac|24[\s-]?bit|hi-?res)\b").unwrap().is_match(&title);
-        let seeds = r["seeders"].as_i64();
-        let age = r["age"].as_i64().map(|d| format!("{d} days old")).unwrap_or_default();
-        let info = [proto.clone(), seeds.map(|s| format!("{s} seeders")).unwrap_or_default(), age].into_iter().filter(|x| !x.is_empty()).collect::<Vec<_>>().join(" · ");
-        let sc = contains(&title, &b.title) * 40.0 + contains(&title, &b.artist) * 15.0 + if lossless { 30.0 } else { 0.0 } + (seeds.unwrap_or(0) as f64 + 1.0).log2().min(10.0);
-        out.push(json!({ "source": "torznab", "key": format!("torznab:{}", r["guid"].as_str().unwrap_or(&title)), "title": title,
-            "subtitle": r["indexer"], "quality": if lossless { "FLAC" } else { "" }, "lossless": lossless, "tracks": null, "size": r["size"], "info": info,
-            "score": (sc * 10.0).round() / 10.0,
-            "payload": { "title": title, "indexer": r["indexer"], "protocol": proto, "size": r["size"], "seeders": r["seeders"], "url": url, "lossless": lossless } }));
+        let title = r["title"].as_str().unwrap_or("");
+        let lossless = regex::Regex::new(r"(?i)\b(flac|lossless|alac|24[\s-]?bit|hi-?res)\b").unwrap().is_match(title);
+        let sc = contains(title, &b.title) * 40.0 + contains(title, &b.artist) * 15.0 + if lossless { 30.0 } else { 0.0 } + (r["seeders"].as_i64().unwrap_or(0) as f64 + 1.0).log2().min(10.0);
+        out.push(torznab_row(&r, sc, None));
     }
-    out.sort_by(|a, b| b["score"].as_f64().partial_cmp(&a["score"].as_f64()).unwrap_or(std::cmp::Ordering::Equal));
+    by_score(&mut out);
+    Ok(out)
+}
+
+/// The album a song is on, and its track number when known: what the client sent, else MusicBrainz
+/// (the song's first studio album or EP), else Deezer.
+async fn song_album(st: &AppState, b: &SearchBody) -> Option<(String, Option<u32>)> {
+    if let Some(a) = b.album.as_deref().map(str::trim).filter(|a| !a.is_empty() && !a.eq_ignore_ascii_case(&b.title)) {
+        return Some((a.to_string(), None));
+    }
+    let t = std::time::Duration::from_secs(4);
+    if let Some(id) = b.mbid.as_deref().filter(|m| !m.is_empty()) {
+        if let Ok(Ok(Some(g))) = tokio::time::timeout(t, crate::mb::album_for_recording(st, id, true)).await {
+            if let Some(name) = g["title"].as_str().filter(|n| !n.is_empty()) {
+                return Some((name.to_string(), None));
+            }
+        }
+    }
+    if b.artist.is_empty() || b.title.is_empty() {
+        return None;
+    }
+    let q = format!("artist:\"{}\" track:\"{}\"", b.artist.replace('"', ""), b.title.replace('"', ""));
+    let d: Value = st.http.get("https://api.deezer.com/search/track").query(&[("q", q.as_str()), ("limit", "10")]).timeout(t).send().await.ok()?.json().await.ok()?;
+    let hit = d["data"].as_array()?.iter().find(|x| {
+        score(&b.title, &b.artist, x["title"].as_str().unwrap_or(""), x["artist"]["name"].as_str().unwrap_or(""), b.length, x["duration"].as_f64()) > 0.0
+            && x["album"]["title"].as_str().is_some_and(|a| !a.eq_ignore_ascii_case(&b.title))
+    })?.clone();
+    let album = hit["album"]["title"].as_str()?.to_string();
+    let no = match st.http.get(format!("https://api.deezer.com/track/{}", hit["id"])).timeout(t).send().await {
+        Ok(r) => r.json::<Value>().await.ok().and_then(|v| v["track_position"].as_u64()).map(|n| n as u32),
+        Err(_) => None,
+    };
+    Some((album, no))
+}
+
+/// A song: single-track releases of it (searched in the audio, MP3 and lossless categories), plus
+/// releases of the album it is on, from which only the song's file downloads.
+async fn search_torznab_song(st: &AppState, b: &SearchBody, q: &str) -> anyhow::Result<Vec<Value>> {
+    let custom = b.query.as_deref().map(str::trim).is_some_and(|x| !x.is_empty() && x != [b.artist.as_str(), b.title.as_str()].join(" ").trim());
+    let (songs, album) = tokio::join!(torznab::search_in(st, q, &torznab::SONG_CATS), async {
+        let (name, no) = song_album(st, b).await?;
+        let res = torznab::search(st, &[b.artist.as_str(), name.as_str()].join(" ")).await;
+        Some((name, no, res))
+    });
+    let mut out = vec![];
+    let mut seen = std::collections::HashSet::new();
+    let song_err = match songs {
+        Ok(list) => {
+            for r in list {
+                if !torznab_usable(st, &r) {
+                    continue;
+                }
+                let title = r["title"].as_str().unwrap_or("");
+                let scored = torznab::score_song(title, r["size"].as_f64().unwrap_or(0.0), r["seeders"].as_i64(), r["protocol"].as_str().unwrap_or("torrent"), &b.artist, &b.title);
+                // a typed query is shown as found, the song's own search only what matches the song
+                let sc = match scored {
+                    Some((sc, _)) => sc,
+                    None if custom => contains(title, q) * 40.0,
+                    None => continue,
+                };
+                seen.insert(r["guid"].as_str().unwrap_or(title).to_string());
+                out.push(torznab_row(&r, sc, None));
+            }
+            None
+        }
+        Err(e) => Some(e),
+    };
+    if let Some((name, no, Ok(list))) = album {
+        for r in list {
+            let title = r["title"].as_str().unwrap_or("");
+            if !torznab_usable(st, &r) || !seen.insert(r["guid"].as_str().unwrap_or(title).to_string()) {
+                continue;
+            }
+            let (a, ar) = (contains(title, &name), contains(title, &b.artist));
+            if a < 0.8 || ar < 0.5 {
+                continue;
+            }
+            let lossless = regex::Regex::new(r"(?i)\b(flac|lossless|alac|24[\s-]?bit|hi-?res)\b").unwrap().is_match(title);
+            // below the song's own releases of the same quality: the whole album has to arrive first
+            let sc = a * 30.0 + ar * 15.0 + if lossless { 30.0 } else { 0.0 } + (r["seeders"].as_i64().unwrap_or(0) as f64 + 1.0).log2().min(10.0) - 10.0;
+            out.push(torznab_row(&r, sc, Some((&name, &b.title, no))));
+        }
+    }
+    if out.is_empty() {
+        if let Some(e) = song_err {
+            return Err(e);
+        }
+    }
+    by_score(&mut out);
     Ok(out)
 }
 
@@ -289,3 +412,7 @@ pub fn create_pick(st: &AppState, u: &crate::db::Row, req: &NewRequest, source: 
     st.db.log("info", &format!("{} manually picked {source} result for {}: {label}", u.s("username"), req.title.clone().or(req.album.clone()).unwrap_or_default()));
     Ok((id, status))
 }
+
+#[cfg(test)]
+#[path = "picker_tests.rs"]
+mod tests;

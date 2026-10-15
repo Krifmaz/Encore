@@ -316,6 +316,26 @@ fn user_from_parts(st: &AppState, parts: &Parts) -> ApiResult<Option<(Row, Via)>
     Ok(st.db.one("SELECT * FROM users WHERE id=? AND disabled=0", p![s.i("user_id")])?.map(|u| (u, Via::Cookie)))
 }
 
+/// Who these headers still sign in as (read only: no sliding expiry). Long-lived streams call it from time to
+/// time, so a revoked session, a disabled user or a changed role takes effect without a reconnect.
+pub fn current_user(st: &AppState, headers: &HeaderMap) -> Option<Row> {
+    if let Some(key) = headers.get("x-api-key").and_then(|v| v.to_str().ok()) {
+        let want = st.cfg.str("api_key");
+        if !want.is_empty() && ct_eq(key, &want) {
+            return st.db.one("SELECT * FROM users WHERE role IN ('owner','admin') AND disabled=0 ORDER BY role='owner' DESC, id LIMIT 1", p![]).ok().flatten();
+        }
+    }
+    let (kind, token) = match bearer(headers) {
+        Some(t) => ("app", app_token_key(&t)),
+        None => ("web", CookieJar::from_headers(headers).get(COOKIE)?.value().to_string()),
+    };
+    let s = st.db.one("SELECT user_id, expires_at FROM sessions WHERE token=? AND kind=?", p![token, kind]).ok().flatten()?;
+    if s.f("expires_at") < now() {
+        return None;
+    }
+    st.db.one("SELECT * FROM users WHERE id=? AND disabled=0", p![s.i("user_id")]).ok().flatten()
+}
+
 /// The signed-in user. Mutating cookie requests must carry `X-Requested-With: encore` (CSRF); API-key and
 /// bearer requests are exempt.
 pub struct User(pub Row);

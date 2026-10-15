@@ -47,6 +47,8 @@ smoltcp = { version = "0.14", default-features = false, features = ["std", "asyn
 socket2 = "0.6"
 cadenza-dsp = { git = "https://github.com/Krifmaz/cadenza", rev = "93c2621" }
 webp = { version = "0.3", default-features = false }
+# the cover thumbnail pass lowers its threads' priority (setpriority)
+libc = "0.2"
 
 [profile.release]
 lto = "thin"

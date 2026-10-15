@@ -859,7 +859,7 @@ fn render_playback(el: Element, _ctx: Ctx) -> PageFuture {
 }
 
 const QUALITY_HELP: [(&str, &str); 3] = [
-    ("auto", "The original file. Encore measures your connection while it plays and steps the stream down as far as it needs to keep the music playing – down to 32 kbps – then back up as soon as the connection allows."),
+    ("auto", "The original file. Encore measures your connection while it plays and steps the stream down as far as it needs to keep the music playing – down to 96 kbps (64 kbps only on a very poor connection) – then back up as soon as the connection allows."),
     ("original", "Always the original file, even if it stutters on a slow connection. Formats a browser can't play are converted to FLAC (lossless)."),
     ("saver", "Always a small 96 kbps stream (AAC, or Opus in browsers without AAC) – for mobile data and slow links."),
 ];

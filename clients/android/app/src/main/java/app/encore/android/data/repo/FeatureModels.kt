@@ -204,6 +204,10 @@ data class CatalogAlbum(
     val inLibrary: Boolean,
     val libraryAlbumId: String,
     val requestStatus: String,
+    /** Deezer / Apple ids of an album only they know (search results): requested without a MusicBrainz id. */
+    val ext: JsonObject? = null,
+    /** The words the pages show for the request ("Requested", "Not found"…), when the server sent them. */
+    val requestLabel: String = "",
 ) {
     companion object {
         fun from(o: JsonObject): CatalogAlbum? {
@@ -223,6 +227,8 @@ data class CatalogAlbum(
                 inLibrary = o.bool("in_library"),
                 libraryAlbumId = o.text("library_album_id"),
                 requestStatus = o.text("request_status"),
+                ext = o.obj("ext"),
+                requestLabel = o.text("request_label"),
             )
         }
     }
@@ -242,7 +248,12 @@ data class CatalogTrack(
     val inLibrary: Boolean,
     val library: Track?,
     val requestStatus: String,
+    val isrc: String = "",
+    val requestLabel: String = "",
 ) {
+    /** The key request statuses are kept under (songs only Deezer / Apple know have no MusicBrainz id). */
+    val key: String get() = id.ifEmpty { "ext:$artist/$title" }
+
     companion object {
         fun from(o: JsonObject): CatalogTrack? {
             val title = o.text("title")
@@ -260,12 +271,37 @@ data class CatalogTrack(
                 inLibrary = o.bool("in_library"),
                 library = o.obj("library")?.let { Track.from(it) },
                 requestStatus = o.text("request_status"),
+                isrc = o.text("isrc"),
+                requestLabel = o.text("request_label"),
             )
         }
     }
 }
 
-data class SearchResults(val artists: List<CatalogArtist>, val albums: List<CatalogAlbum>, val tracks: List<CatalogTrack>) {
+/** The Top result of a Discover search: one of [track], [album] or [artist], by [kind] (song | album | artist). */
+data class CatalogTop(val kind: String, val track: CatalogTrack?, val album: CatalogAlbum?, val artist: CatalogArtist?) {
+    companion object {
+        fun from(o: JsonObject?): CatalogTop? {
+            if (o == null) return null
+            val kind = o.text("kind")
+            val item = o.obj("item") ?: return null
+            val top = CatalogTop(
+                kind,
+                if (kind == "song") CatalogTrack.from(item) else null,
+                if (kind == "album") CatalogAlbum.from(item) else null,
+                if (kind == "artist") CatalogArtist.from(item) else null,
+            )
+            return if (top.track == null && top.album == null && top.artist == null) null else top
+        }
+    }
+}
+
+data class SearchResults(
+    val artists: List<CatalogArtist>,
+    val albums: List<CatalogAlbum>,
+    val tracks: List<CatalogTrack>,
+    val top: CatalogTop? = null,
+) {
     val isEmpty: Boolean get() = artists.isEmpty() && albums.isEmpty() && tracks.isEmpty()
 
     companion object {
@@ -273,6 +309,7 @@ data class SearchResults(val artists: List<CatalogArtist>, val albums: List<Cata
             artists = o.arr("artists").objectsOf().mapNotNull { CatalogArtist.from(it) },
             albums = o.arr("albums").objectsOf().mapNotNull { CatalogAlbum.from(it) },
             tracks = o.arr("tracks").objectsOf().mapNotNull { CatalogTrack.from(it) },
+            top = CatalogTop.from(o.obj("top")),
         )
     }
 }
@@ -302,6 +339,10 @@ data class ArtistPage(
     val libraryAlbums: List<LibraryAlbumRef>,
     val libraryTracks: Int,
     val requestStatus: String,
+    val requestLabel: String = "",
+    /** What "Request discography" includes: singles too (server setting), Deezer / Apple Music releases too. */
+    val discographySingles: Boolean = false,
+    val catalogMerge: Boolean = false,
 ) {
     companion object {
         /** The links the web shows (discover.js `links`). */
@@ -325,6 +366,9 @@ data class ArtistPage(
                 libraryAlbums = o.arr("library_albums").objectsOf().mapNotNull { LibraryAlbumRef.from(it) },
                 libraryTracks = o.int("library_tracks"),
                 requestStatus = o.text("request_status"),
+                requestLabel = o.text("request_label"),
+                discographySingles = o.bool("discography_singles"),
+                catalogMerge = o.bool("catalog_merge"),
             )
         }
     }
@@ -367,6 +411,7 @@ data class ExtRelease(
     val sources: List<Pair<String, String>>,
     val harmony: String,
     val ext: JsonElement,
+    val requestLabel: String = "",
 ) {
     companion object {
         fun from(o: JsonObject): ExtRelease? {
@@ -386,18 +431,32 @@ data class ExtRelease(
                 sources = sources,
                 harmony = o.text("harmony"),
                 ext = o["ext"] ?: JsonNull,
+                requestLabel = o.text("request_label"),
             )
         }
     }
 }
 
-/** A track of an external release (POST /api/discover/catalog/tracks). */
-data class ExtTrack(val track: Int, val title: String, val artist: String, val lengthSec: Double) {
+/** A track of an external release (POST /api/discover/catalog/tracks), with its library copy (playable) and any request. */
+data class ExtTrack(
+    val track: Int,
+    val title: String,
+    val artist: String,
+    val lengthSec: Double,
+    val isrc: String = "",
+    val inLibrary: Boolean = false,
+    val library: Track? = null,
+    val requestStatus: String = "",
+    val requestLabel: String = "",
+) {
     companion object {
         fun from(o: JsonObject): ExtTrack? {
             val title = o.text("title")
             if (title.isEmpty()) return null
-            return ExtTrack(o.int("track"), title, o.text("artist"), o.dbl("length"))
+            return ExtTrack(
+                o.int("track"), title, o.text("artist"), o.dbl("length"), o.text("isrc"), o.bool("in_library"),
+                o.obj("library")?.let { Track.from(it) }, o.text("request_status"), o.text("request_label"),
+            )
         }
     }
 }
@@ -412,6 +471,9 @@ data class ReleaseTrack(
     val recordingId: String,
     val inLibrary: Boolean,
     val library: Track?,
+    val isrc: String = "",
+    val requestStatus: String = "",
+    val requestLabel: String = "",
 ) {
     companion object {
         fun from(o: JsonObject): ReleaseTrack? {
@@ -426,6 +488,9 @@ data class ReleaseTrack(
                 recordingId = o.text("recording_id"),
                 inLibrary = o.bool("in_library"),
                 library = o.obj("library")?.let { Track.from(it) },
+                isrc = o.text("isrc"),
+                requestStatus = o.text("request_status"),
+                requestLabel = o.text("request_label"),
             )
         }
     }
@@ -452,6 +517,9 @@ data class AlbumPage(
     val libraryAlbumId: String,
     val requestStatus: String,
     val release: Release?,
+    val requestLabel: String = "",
+    /** Songs of the album in the library (Play / Shuffle show when there is any). */
+    val ownedTracks: Int = 0,
 ) {
     companion object {
         fun from(o: JsonObject): AlbumPage = AlbumPage(
@@ -468,6 +536,8 @@ data class AlbumPage(
             libraryAlbumId = o.text("library_album_id"),
             requestStatus = o.text("request_status"),
             release = o.obj("release")?.let { Release.from(it) },
+            requestLabel = o.text("request_label"),
+            ownedTracks = o.int("owned_tracks"),
         )
     }
 }

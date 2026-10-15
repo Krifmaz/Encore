@@ -20,6 +20,35 @@ impl std::error::Error for ApiError {}
 
 pub type ApiResult = Result<Value, ApiError>;
 
+thread_local! {
+    /// `coverColors`: album id → its cover's main colour ("#rrggbb", the server's `cover_color`), painted while the cover loads.
+    static COVER_COLORS: std::cell::RefCell<std::collections::HashMap<String, String>> = Default::default();
+}
+
+/// `coverColors.get(id)`.
+pub fn cover_color(album_id: &str) -> Option<String> { COVER_COLORS.with(|m| m.borrow().get(album_id).cloned()) }
+
+fn is_album_id(s: &str) -> bool { s.len() == 16 && s.bytes().all(|b| b.is_ascii_hexdigit()) }
+
+fn is_hex_color(s: &str) -> bool { s.len() == 7 && s.starts_with('#') && s[1..].bytes().all(|b| b.is_ascii_hexdigit()) }
+
+/// `noteCoverColors(v)`: records every `cover_color` in a JSON answer, under the album whose cover the object shows.
+fn note_cover_colors(v: &Value) {
+    match v {
+        Value::Array(a) => a.iter().for_each(note_cover_colors),
+        Value::Object(o) => {
+            if let Some(c) = o.get("cover_color").and_then(|c| c.as_str()).filter(|c| is_hex_color(c)) {
+                let nonempty = |k: &str| o.get(k).and_then(|x| x.as_str()).filter(|x| !x.is_empty()).map(str::to_string);
+                let id = nonempty("album_id").or_else(|| nonempty("cover_album"))
+                    .or_else(|| nonempty("id").filter(|id| is_album_id(id) && (o.contains_key("album") || o.contains_key("albumartist"))));
+                if let Some(id) = id { COVER_COLORS.with(|m| m.borrow_mut().insert(id, c.to_string())); }
+            }
+            o.values().filter(|x| x.is_object() || x.is_array()).for_each(note_cover_colors);
+        }
+        _ => {}
+    }
+}
+
 async fn request(method: &str, path: &str, body: Option<Value>) -> ApiResult {
     use gloo_net::http::RequestBuilder;
     let url = format!("/api{path}");
@@ -47,6 +76,7 @@ async fn request(method: &str, path: &str, body: Option<Value>) -> ApiResult {
     dom::dispatch(if (502..=504).contains(&status) { "encore:server-down" } else { "encore:server-up" }, None);
     let text = res.text().await.unwrap_or_default();
     let data: Value = if text.is_empty() { Value::Null } else { serde_json::from_str(&text).unwrap_or(Value::String(text.clone())) };
+    if res.ok() && text.contains("\"cover_color\"") { note_cover_colors(&data); }
     if !res.ok() {
         if status == 401 && !path.starts_with("/auth/") {
             dom::dispatch("encore:unauthorized", None);

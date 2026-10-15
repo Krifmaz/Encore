@@ -178,8 +178,10 @@ class EncoreApi(private val client: OkHttpClient, private val store: SessionStor
 
     // ---- library ---------------------------------------------------------------------------------------
 
-    fun albums(sort: String = "name", offset: Int = 0, limit: Int = 120, q: String = "", artist: String = ""): List<Album> {
+    /** [dir] "asc" / "desc", or "" for the sort's own default (as GET /api/library/index takes it). */
+    fun albums(sort: String = "name", offset: Int = 0, limit: Int = 120, q: String = "", artist: String = "", dir: String = ""): List<Album> {
         val qs = StringBuilder("/api/library/albums?sort=").append(enc(sort)).append("&limit=").append(limit).append("&offset=").append(offset)
+        if (dir.isNotEmpty()) qs.append("&dir=").append(enc(dir))
         if (q.isNotEmpty()) qs.append("&q=").append(enc(q))
         if (artist.isNotEmpty()) qs.append("&artist=").append(enc(artist))
         val page = get(qs.toString()).objects().mapNotNull { Album.from(it) }
@@ -201,11 +203,17 @@ class EncoreApi(private val client: OkHttpClient, private val store: SessionStor
         return AlbumDetail(album, tracks, o.dbl("duration"))
     }
 
-    fun artists(q: String = ""): List<Artist> =
-        get("/api/library/artists?sort=name" + if (q.isNotEmpty()) "&q=${enc(q)}" else "").objects().mapNotNull { Artist.from(it) }
+    /** sort: name | added | albums | tracks; [dir] "" for the sort's own default. */
+    fun artists(q: String = "", sort: String = "name", dir: String = ""): List<Artist> =
+        get("/api/library/artists?sort=" + enc(sort) + (if (dir.isNotEmpty()) "&dir=${enc(dir)}" else "") + if (q.isNotEmpty()) "&q=${enc(q)}" else "")
+            .objects().mapNotNull { Artist.from(it) }
 
-    fun tracks(q: String = "", offset: Int = 0, limit: Int = 200, sort: String = "artist"): List<Track> {
+    /** The Search tab: songs, albums and artists for a query, with a Top result (GET /api/library/search). */
+    fun search(q: String, limit: Int = 30): LibrarySearch = LibrarySearch.from(getObject("/api/library/search?q=${enc(q)}&limit=$limit"))
+
+    fun tracks(q: String = "", offset: Int = 0, limit: Int = 200, sort: String = "artist", dir: String = ""): List<Track> {
         val qs = StringBuilder("/api/library/tracks?sort=").append(enc(sort)).append("&limit=").append(limit).append("&offset=").append(offset)
+        if (dir.isNotEmpty()) qs.append("&dir=").append(enc(dir))
         if (q.isNotEmpty()) qs.append("&q=").append(enc(q))
         return get(qs.toString()).objects().mapNotNull { Track.from(it) }
     }

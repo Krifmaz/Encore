@@ -133,6 +133,39 @@ data class Artist(val name: String, val albums: Int, val tracks: Int, val coverA
     }
 }
 
+/**
+ * GET /api/library/search: the library's answer to a query read as artist + title in any order (typos and
+ * accents forgiven), with its Top result (a song, album or artist).
+ */
+data class LibrarySearch(
+    val topKind: String,
+    val topSong: Track?,
+    val topAlbum: Album?,
+    val topArtist: Artist?,
+    val songs: List<Track>,
+    val albums: List<Album>,
+    val artists: List<Artist>,
+) {
+    val isEmpty: Boolean get() = songs.isEmpty() && albums.isEmpty() && artists.isEmpty()
+
+    companion object {
+        fun from(o: JsonObject): LibrarySearch {
+            val top = o.obj("top")
+            val kind = top?.str("kind") ?: ""
+            val item = top?.obj("item")
+            return LibrarySearch(
+                topKind = kind,
+                topSong = if (kind == "song") item?.let { Track.from(it) } else null,
+                topAlbum = if (kind == "album") item?.let { Album.from(it) } else null,
+                topArtist = if (kind == "artist") item?.let { Artist.from(it) } else null,
+                songs = o.arr("songs").objects().mapNotNull { Track.from(it) },
+                albums = o.arr("albums").objects().mapNotNull { Album.from(it) },
+                artists = o.arr("artists").objects().mapNotNull { Artist.from(it) },
+            )
+        }
+    }
+}
+
 data class Playlist(val id: Long, val name: String, val kind: String, val total: Int, val matched: Int, val coverUrl: String) {
     val isLiked: Boolean get() = kind == "liked"
 

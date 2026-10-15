@@ -44,7 +44,7 @@ pub fn similar(a: &str, b: &str) -> f64 {
     crate::matcher::sim(&a, &b)
 }
 
-fn harmony_url(urls: &[String], upc: Option<&str>) -> String {
+pub(crate) fn harmony_url(urls: &[String], upc: Option<&str>) -> String {
     let mut q: Vec<String> = urls.iter().map(|u| format!("url={}", urlencoding::encode(u))).collect();
     if let Some(u) = upc.filter(|u| !u.is_empty()) {
         q.push(format!("gtin={u}"));
@@ -53,7 +53,7 @@ fn harmony_url(urls: &[String], upc: Option<&str>) -> String {
     format!("https://harmony.pulsewidth.org.uk/release?{}", q.join("&"))
 }
 
-fn kind_of(kind: &str, title: &str) -> &'static str {
+pub(crate) fn kind_of(kind: &str, title: &str) -> &'static str {
     let k = kind.to_lowercase();
     if k == "ep" || title.ends_with(" - EP") {
         "EP"
@@ -316,8 +316,88 @@ pub async fn tracklist(st: &AppState, ext: &Value) -> anyhow::Result<Vec<Value>>
     Ok(vec![])
 }
 
+/// The library copy of a song from another catalogue: same ISRC, else same title and artist (and, when
+/// both lengths are known, within 3 seconds). Best quality first.
+pub fn library_track_for(db: &crate::db::Db, isrc: &str, artist: &str, title: &str, length: Option<f64>) -> Option<crate::db::Row> {
+    const COLS: &str = "SELECT id, title, artist, album, album_id, format, duration FROM tracks";
+    const ORDER: &str = " ORDER BY CASE WHEN format IN ('flac','alac','wav','aiff') THEN 0 ELSE 1 END";
+    let isrc = isrc.to_uppercase().replace('-', "");
+    if !isrc.is_empty() {
+        if let Ok(Some(r)) = db.one(&format!("{COLS} WHERE upper(replace(isrc,'-',''))=?{ORDER} LIMIT 1"), p![isrc]) {
+            return Some(r);
+        }
+    }
+    if title.is_empty() {
+        return None;
+    }
+    let rows = db.query(&format!("{COLS} WHERE lower(title)=lower(?) AND (lower(artist)=lower(?) OR lower(albumartist)=lower(?)){ORDER} LIMIT 20"), p![title, artist, artist]).ok()?;
+    match length.filter(|l| *l > 0.0) {
+        Some(l) => rows.into_iter().find(|r| { let d = r.f("duration"); d <= 0.0 || (d - l).abs() <= 3.0 }),
+        None => rows.into_iter().next(),
+    }
+}
+
+/// The newest live request for a song by artist + title: (status, label).
+pub fn track_request(st: &AppState, mbid: &str, artist: &str, title: &str) -> Option<(String, String)> {
+    let row = if mbid.is_empty() { None } else {
+        st.db.one("SELECT status, message FROM requests WHERE kind='track' AND mbid=? AND status NOT IN ('denied','cancelled') ORDER BY id DESC", p![mbid]).ok().flatten()
+    };
+    let row = row.or_else(|| st.db.one("SELECT status, message FROM requests WHERE kind='track' AND lower(artist)=lower(?) AND lower(title)=lower(?)
+        AND status NOT IN ('denied','cancelled') ORDER BY id DESC", p![artist, title]).ok().flatten())?;
+    let status = row.s("status");
+    Some((status.clone(), crate::req_events::label(&status, &row.s("message")).to_string()))
+}
+
+/// Track list of a Deezer / Apple / Bandcamp / Discogs album, each song marked with its library copy
+/// (`in_library`, `library`, playable) and any request for it. The body is the album's `ext`, plus
+/// `artist` for track lists without artists.
 async fn catalog_tracks(State(st): State<AppState>, User(_): User, Json(ext): Json<Value>) -> ApiResult<Json<Value>> {
-    tracklist(&st, &ext).await.map(|t| Json(json!(t))).map_err(|e| err(502, format!("Could not load the track list: {e}")))
+    let mut tracks = tracklist(&st, &ext).await.map_err(|e| err(502, format!("Could not load the track list: {e}")))?;
+    let fallback = s(&ext["artist"]);
+    for t in tracks.iter_mut() {
+        let artist = Some(s(&t["artist"])).filter(|a| !a.is_empty()).unwrap_or(fallback.clone());
+        let title = s(&t["title"]);
+        let lib = library_track_for(&st.db, &s(&t["isrc"]), &artist, &title, t["length"].as_f64());
+        t["in_library"] = json!(lib.is_some());
+        t["library"] = json!(lib);
+        if s(&t["artist"]).is_empty() {
+            t["artist"] = json!(artist);
+        }
+        let rq = track_request(&st, "", &artist, &title);
+        t["request_status"] = rq.as_ref().map(|r| json!(r.0)).unwrap_or(Value::Null);
+        t["request_label"] = rq.map(|r| json!(r.1)).unwrap_or(Value::Null);
+    }
+    Ok(Json(json!(tracks)))
+}
+
+/// What "Request discography" asks for: the MusicBrainz release groups of the wanted types (no live,
+/// compilation … secondary types) and the Deezer / Apple Music albums MusicBrainz is missing, minus what
+/// `skip` says is owned or already requested. An ext album that is a MusicBrainz release under the same
+/// normalized title (released within a year of it) is left out, as is a second copy of the same ext album.
+pub fn discography_plan(groups: &[Value], ext: &[Value], kinds: &[&str], skip: impl Fn(&Value) -> bool) -> Vec<Value> {
+    let year = |v: &Value| s(&v["year"]).chars().take(4).collect::<String>().parse::<i32>().ok()
+        .or_else(|| s(&v["date"]).chars().take(4).collect::<String>().parse::<i32>().ok());
+    // as in `fuzzy`: a title-track single isn't the album of the same name
+    let same = |a: &Value, b: &Value| norm(&s(&a["title"])) == norm(&s(&b["title"])) && !norm(&s(&a["title"])).is_empty()
+        && { let (ta, tb) = (s(&a["type"]), s(&b["type"])); ta == tb || (ta != "Single" && tb != "Single") }
+        && match (year(a), year(b)) { (Some(x), Some(y)) => (x - y).abs() <= 1, _ => true };
+    let mut out: Vec<Value> = vec![];
+    for g in groups {
+        if !kinds.contains(&s(&g["type"]).as_str()) || g["secondary"].as_array().is_some_and(|a| !a.is_empty()) || skip(g) {
+            continue;
+        }
+        out.push(g.clone());
+    }
+    for e in ext {
+        if !e["ext"].is_object() || !kinds.contains(&s(&e["type"]).as_str()) {
+            continue;
+        }
+        if groups.iter().any(|g| same(g, e)) || out.iter().any(|o| o["ext"].is_object() && same(o, e)) || skip(e) {
+            continue;
+        }
+        out.push(e.clone());
+    }
+    out
 }
 
 // ---- merging --------------------------------------------------------------------------------
@@ -458,7 +538,7 @@ pub async fn merged(st: &AppState, artist: &Value) -> Vec<Value> {
     missing
 }
 
-fn annotate(st: &AppState, items: &mut [Value]) {
+pub(crate) fn annotate(st: &AppState, items: &mut [Value]) {
     for m in items.iter_mut() {
         let (title, artist) = (s(&m["title"]), s(&m["artist"]));
         let row = if title.is_empty() { None } else {
@@ -466,8 +546,10 @@ fn annotate(st: &AppState, items: &mut [Value]) {
         };
         m["in_library"] = json!(row.is_some());
         m["library_album_id"] = row.map(|r| json!(r.s("album_id"))).unwrap_or(Value::Null);
-        m["request_status"] = st.db.one("SELECT status FROM requests WHERE kind='album' AND mbid IS NULL AND lower(artist)=lower(?) AND lower(title)=lower(?)
-            AND status NOT IN ('failed','denied','cancelled') ORDER BY id DESC", p![artist, title]).ok().flatten().map(|r| json!(r.s("status"))).unwrap_or(Value::Null);
+        let rq = st.db.one("SELECT status, message FROM requests WHERE kind='album' AND mbid IS NULL AND lower(artist)=lower(?) AND lower(title)=lower(?)
+            AND status NOT IN ('failed','denied','cancelled') ORDER BY id DESC", p![artist, title]).ok().flatten();
+        m["request_status"] = rq.as_ref().map(|r| json!(r.s("status"))).unwrap_or(Value::Null);
+        m["request_label"] = rq.map(|r| json!(crate::req_events::label(&r.s("status"), &r.s("message")))).unwrap_or(Value::Null);
     }
 }
 
@@ -494,5 +576,45 @@ mod tests {
         assert_eq!(bc_date("05 Mar 2021 00:00:00 GMT"), "2021-03-05");
         assert_eq!(dur(&json!("PT3M45S")), json!(225.0));
         assert_eq!(dur(&json!("3:45")), json!(225.0));
+    }
+
+    #[test]
+    fn discography_includes_ext_albums_and_skips_owned() {
+        let groups = vec![
+            json!({ "id": "rg-rodeo", "title": "Rodeo", "type": "Album", "year": "2015", "secondary": [] }),
+            json!({ "id": "rg-owned", "title": "Birds in the Trap", "type": "Album", "year": "2016", "secondary": [] }),
+            json!({ "id": "rg-live", "title": "Live at Rolling Loud", "type": "Album", "year": "2019", "secondary": ["Live"] }),
+            json!({ "id": "rg-single", "title": "90210", "type": "Single", "year": "2015", "secondary": [] }),
+        ];
+        let ext = vec![
+            // the same album on Deezer (a year off): MusicBrainz has it
+            json!({ "id": "ext-d1", "title": "Rodeo (Deluxe)", "type": "Album", "year": "2016", "ext": { "deezer": 1 } }),
+            // only on Deezer and Apple
+            json!({ "id": "ext-d2-a3", "title": "Days Before Rodeo", "type": "Album", "year": "2014", "ext": { "deezer": 2, "apple": 3 } }),
+            json!({ "id": "ext-a4", "title": "Days Before Rodeo", "type": "Album", "year": "2014", "ext": { "apple": 4 } }),
+            // owned already
+            json!({ "id": "ext-d5", "title": "Owned Mixtape", "type": "EP", "year": "2012", "ext": { "deezer": 5 } }),
+            json!({ "id": "ext-d6", "title": "A Compilation", "type": "Compilation", "year": "2012", "ext": { "deezer": 6 } }),
+            json!({ "id": "ext-d7", "title": "Bonus Single", "type": "Single", "year": "2020", "ext": { "deezer": 7 } }),
+        ];
+        let owned = |v: &Value| ["rg-owned", "ext-d5"].contains(&s(&v["id"]).as_str());
+        let ids = |p: Vec<Value>| p.iter().map(|v| s(&v["id"])).collect::<Vec<_>>();
+        let plan = ids(discography_plan(&groups, &ext, &["Album", "EP"], owned));
+        assert_eq!(plan, vec!["rg-rodeo", "ext-d2-a3"]);
+        let plan = ids(discography_plan(&groups, &ext, &["Album", "EP", "Single"], owned));
+        assert_eq!(plan, vec!["rg-rodeo", "rg-single", "ext-d2-a3", "ext-d7"]);
+    }
+
+    #[test]
+    fn a_title_track_single_is_not_the_album() {
+        // MusicBrainz only has the single "Utopia"; Deezer has the album "Utopia" too, and its own single
+        let groups = vec![json!({ "id": "rg-single", "title": "Utopia", "type": "Single", "year": "2020", "secondary": [] })];
+        let ext = vec![
+            json!({ "id": "ext-d1", "title": "Utopia", "type": "Album", "year": "2020", "ext": { "deezer": 1 } }),
+            json!({ "id": "ext-d2", "title": "Utopia", "type": "Single", "year": "2020", "ext": { "deezer": 2 } }),
+        ];
+        let ids = |p: Vec<Value>| p.iter().map(|v| s(&v["id"])).collect::<Vec<_>>();
+        assert_eq!(ids(discography_plan(&groups, &ext, &["Album", "EP"], |_| false)), vec!["ext-d1"]);
+        assert_eq!(ids(discography_plan(&groups, &ext, &["Album", "EP", "Single"], |_| false)), vec!["rg-single", "ext-d1"]);
     }
 }

@@ -23,6 +23,11 @@ import okhttp3.Request
 import okhttp3.RequestBody
 import okhttp3.RequestBody.Companion.toRequestBody
 import java.io.IOException
+import java.util.concurrent.TimeUnit
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.currentCoroutineContext
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.isActive
 
 /**
  * The server calls behind Discover, For you, Requests, the picker, playlist editing, Account and the Leaderboard
@@ -111,7 +116,57 @@ class FeaturesApi(private val api: EncoreApi, private val client: OkHttpClient) 
     fun artistCatalog(mbid: String): List<ExtRelease> =
         getObject("/api/discover/artist/${EncoreApi.enc(mbid)}/catalog").let { o -> (o["releases"] as? kotlinx.serialization.json.JsonArray).objectsOf().mapNotNull { ExtRelease.from(it) } }
 
-    fun catalogTracks(ext: JsonElement): List<ExtTrack> = call("POST", "/api/discover/catalog/tracks", ext).objects().mapNotNull { ExtTrack.from(it) }
+    /** POST /api/discover/catalog/tracks: the release's `ext` plus the artist (for track lists without one). */
+    fun catalogTracks(ext: JsonElement, artist: String = ""): List<ExtTrack> {
+        val body = (ext as? JsonObject)?.let { o -> if (artist.isEmpty()) o else JsonObject(o + ("artist" to JsonPrimitive(artist))) } ?: ext
+        return call("POST", "/api/discover/catalog/tracks", body).objects().mapNotNull { ExtTrack.from(it) }
+    }
+
+    private val sseClient: OkHttpClient by lazy { client.newBuilder().cache(null).readTimeout(0, TimeUnit.MILLISECONDS).build() }
+
+    /**
+     * GET /api/requests/events: [onEvent] gets every change of the user's requests (`{request_id, kind, keys, status,
+     * label, progress}`) until the coroutine is cancelled; reconnects with a backoff. Run it on Dispatchers.IO.
+     * The server sends a keep-alive every 15 s, so a cancelled caller stops within that.
+     */
+    suspend fun requestEvents(onEvent: suspend (JsonObject) -> Unit) {
+        var backoff = 2000L
+        while (currentCoroutineContext().isActive) {
+            try {
+                if (api.base.isEmpty()) throw IOException("Not signed in")
+                val req = Request.Builder().url(api.url("/api/requests/events"))
+                    .header("Accept", "text/event-stream").header("Cache-Control", "no-cache").build()
+                sseClient.newCall(req).execute().use { res ->
+                    if (!res.isSuccessful) throw IOException("HTTP ${res.code}")
+                    backoff = 2000L
+                    val src = res.body.source()
+                    var event = ""
+                    val data = StringBuilder()
+                    while (currentCoroutineContext().isActive) {
+                        val line = src.readUtf8Line() ?: break
+                        when {
+                            line.isEmpty() -> {
+                                if (event == "request" && data.isNotEmpty()) parseObject(data.toString())?.let { onEvent(it) }
+                                event = ""
+                                data.setLength(0)
+                            }
+                            line.startsWith(":") -> {}
+                            line.startsWith("event:") -> event = line.substring(6).trim()
+                            line.startsWith("data:") -> {
+                                if (data.isNotEmpty()) data.append('\n')
+                                data.append(line.substring(5).removePrefix(" "))
+                            }
+                        }
+                    }
+                }
+            } catch (e: CancellationException) {
+                throw e
+            } catch (_: Exception) {
+            }
+            delay(backoff)
+            backoff = (backoff * 2).coerceAtMost(30_000L)
+        }
+    }
 
     /** Every library song by this artist, in album order (the artist page's Play / Shuffle). */
     fun artistLibraryTracks(mbid: String, name: String): List<Track> =
@@ -183,6 +238,7 @@ class FeaturesApi(private val api: EncoreApi, private val client: OkHttpClient) 
             put("artist", opts.artist)
             put("title", opts.title.ifEmpty { opts.album })
             put("query", query)
+            if (opts.kind == "track" && opts.album.isNotEmpty()) put("album", opts.album)
             if (opts.mbid.isNotEmpty()) put("mbid", opts.mbid)
             if (opts.artistMbid.isNotEmpty()) put("artist_mbid", opts.artistMbid)
             if (opts.trackCount > 0) put("track_count", opts.trackCount)

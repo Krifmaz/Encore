@@ -258,6 +258,7 @@ async fn diagnostics(State(st): State<AppState>, Admin(_): Admin) -> ApiResult<J
         checks.push(path_check("Usenet downloads (as seen by Encore)", &st.cfg.str(c.download_path_key()), true));
     }
     checks.push(path_check("Config folder", &st.data_dir().to_string_lossy(), true));
+    checks.push(cover_check(&st));
     checks.push(tool("ffmpeg", "ffmpeg", &["-version"]).await);
     checks.push(tool("fpcalc (audio fingerprints)", "fpcalc", &["-version"]).await);
     checks.push(tool("yt-dlp", &crate::sources::ytdlp::bin(), &["--version"]).await);
@@ -273,6 +274,30 @@ async fn diagnostics(State(st): State<AppState>, Admin(_): Admin) -> ApiResult<J
     }
     let uid = std::process::Command::new("id").arg("-u").output().ok().and_then(|o| String::from_utf8_lossy(&o.stdout).trim().parse::<i64>().ok());
     Ok(Json(json!({ "version": crate::VERSION, "server": "rust", "uid": uid, "checks": checks, "settings": settings, "time": now() })))
+}
+
+/// How far the cover thumbnail pass is: "Cover thumbnails: 12 340 / 18 000".
+fn cover_check(st: &AppState) -> Value {
+    let (done, total, running) = st.library.covers.progress();
+    let group = |n: usize| {
+        let s = n.to_string();
+        let mut out = String::new();
+        for (i, c) in s.chars().enumerate() {
+            if i > 0 && (s.len() - i) % 3 == 0 {
+                out.push(' ');
+            }
+            out.push(c);
+        }
+        out
+    };
+    let detail = if total == 0 && !running {
+        "Not started yet".to_string()
+    } else if running {
+        format!("{} / {} albums looked at, making the rest now", group(done.min(total)), group(total))
+    } else {
+        format!("{} / {} albums looked at", group(done.min(total)), group(total))
+    };
+    json!({ "name": "Cover thumbnails", "kind": "path", "request": "covers/thumbs", "ok": true, "detail": detail, "done": done, "total": total, "running": running })
 }
 
 fn torznab_on(st: &AppState) -> bool {

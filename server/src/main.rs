@@ -27,10 +27,12 @@ mod nlsearch;
 mod notify;
 mod organize;
 mod playlists;
+mod req_events;
 mod roon;
 mod routes;
 mod scheduler;
 mod scrobble;
+mod search;
 mod slskd_managed;
 mod sources;
 mod sync;
@@ -146,6 +148,9 @@ async fn main() -> anyhow::Result<()> {
     let port: u16 = std::env::var("ENCORE_PORT").ok().and_then(|p| p.parse().ok()).unwrap_or(8080);
     let addr = SocketAddr::from(([0, 0, 0, 0], port));
     tracing::info!("Encore {} listening on {addr}", crate::VERSION);
+    // cover thumbnails and colours for albums that have none yet (a new install, a cleared cache, an
+    // update that added sizes): at once, not only after the scan below
+    st.library.warm_covers(st.db.clone());
     // library scan at start; later scans (and every other background job) come from the scheduler
     {
         let st = st.clone();

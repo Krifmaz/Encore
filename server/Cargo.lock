@@ -671,6 +671,7 @@ dependencies = [
  "hex",
  "image",
  "lettre",
+ "libc",
  "lofty",
  "md5",
  "rand 0.9.5",

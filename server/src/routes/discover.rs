@@ -26,23 +26,30 @@ fn mb_err(e: anyhow::Error) -> ApiError {
     err(502, format!("MusicBrainz error: {e}"))
 }
 
-fn req_status(st: &AppState, ids: &[String]) -> HashMap<String, String> {
+pub(crate) fn req_status(st: &AppState, ids: &[String]) -> HashMap<String, String> {
+    req_info(st, ids).into_iter().map(|(k, (s, _))| (k, s)).collect()
+}
+
+/// The newest request per MusicBrainz id: (status, label as the pages show it).
+pub(crate) fn req_info(st: &AppState, ids: &[String]) -> HashMap<String, (String, String)> {
     if ids.is_empty() {
         return HashMap::new();
     }
-    let sql = format!("SELECT mbid, status FROM requests WHERE mbid IN ({}) AND status NOT IN ('denied','cancelled') ORDER BY id", vec!["?"; ids.len()].join(","));
-    st.db.query(&sql, ids.iter().map(|i| json!(i)).collect()).unwrap_or_default().into_iter().map(|r| (r.s("mbid"), r.s("status"))).collect()
+    let sql = format!("SELECT mbid, status, message FROM requests WHERE mbid IN ({}) AND status NOT IN ('denied','cancelled') ORDER BY id", vec!["?"; ids.len()].join(","));
+    st.db.query(&sql, ids.iter().map(|i| json!(i)).collect()).unwrap_or_default().into_iter()
+        .map(|r| (r.s("mbid"), (r.s("status"), crate::req_events::label(&r.s("status"), &r.s("message")).to_string()))).collect()
 }
 
-fn annotate_albums(st: &AppState, items: &mut [Value]) {
+pub(crate) fn annotate_albums(st: &AppState, items: &mut [Value]) {
     let ids: Vec<String> = items.iter().filter_map(|i| i["id"].as_str().map(String::from)).collect();
-    let rs = req_status(st, &ids);
+    let rs = req_info(st, &ids);
     for i in items.iter_mut() {
         let id = i["id"].as_str().unwrap_or("").to_string();
         let lib = crate::library::album_id_for(&st.db, &id, i["artist"].as_str().unwrap_or(""), i["title"].as_str().unwrap_or(""));
         i["in_library"] = json!(lib.is_some());
         i["library_album_id"] = json!(lib);
-        i["request_status"] = rs.get(&id).map(|s| json!(s)).unwrap_or(Value::Null);
+        i["request_status"] = rs.get(&id).map(|s| json!(s.0)).unwrap_or(Value::Null);
+        i["request_label"] = rs.get(&id).map(|s| json!(s.1)).unwrap_or(Value::Null);
     }
 }
 
@@ -73,14 +80,40 @@ async fn lyric_guesses(st: &AppState, words: &str) -> Vec<(String, String)> {
     }).take(5).collect()
 }
 
+/// How a query is searched: Some((query, other reading)) through search::discover (every query but lyrics),
+/// None for the lyrics path below. The other reading is the sentence without its filler and kind words
+/// ("radiohead album ok computer" → "radiohead ok computer"), weighed as extra splits; "play some music by
+/// daft punk" searches the artist.
+fn discover_plan(q: &str, p: &nlsearch::Parsed) -> Option<(String, Option<String>)> {
+    if p.lyrics.is_some() {
+        return None;
+    }
+    let fq = crate::artists::fold(q);
+    let words = |s: &str| s.split(' ').filter(|w| !matches!(*w, "" | "by")).map(String::from).collect::<Vec<_>>();
+    let dq = if p.title.is_empty() && !p.artist.is_empty() { p.artist.clone() } else { q.to_string() };
+    let fp = crate::artists::fold(&p.q);
+    let alt = (words(&fp) != words(&fq) && !fp.is_empty() && dq == q).then(|| p.q.clone());
+    Some((dq, alt))
+}
+
 async fn search(State(st): State<AppState>, User(_): User, Query(sq): Query<SearchQ>) -> ApiResult<Json<Value>> {
     let q = sq.q.trim();
     if q.chars().count() < 2 {
         return Ok(Json(json!({ "artists": [], "albums": [], "tracks": [] })));
     }
     let p = nlsearch::parse(q);
-    let words = if p.sentence { p.q.clone() } else { q.to_string() };
     let t = sq.r#type.as_str();
+    let t = if ["all", "artist", "album", "track"].contains(&t) { t } else { "all" };
+    if let Some((dq, alt)) = discover_plan(q, &p) {
+        // "travis scott 90210", "90210 by travis scott", "the weeknd blinding lights": the split into artist and
+        // title, MusicBrainz + Deezer + Apple (see search.rs)
+        let mut out = crate::search::discover(&st, &dq, alt.as_deref(), t).await.map_err(|e| err(502, e))?;
+        if p.sentence {
+            out["understood"] = json!({ "q": p.q, "title": p.title, "artist": p.artist, "kind": p.kind, "lyrics": p.lyrics });
+        }
+        return Ok(Json(out));
+    }
+    let words = p.q.clone();
     let mut out = json!({ "artists": [], "albums": [], "tracks": [], "understood": if p.sentence {
         json!({ "q": p.q, "title": p.title, "artist": p.artist, "kind": p.kind, "lyrics": p.lyrics }) } else { Value::Null } });
     if t == "all" || t == "artist" {
@@ -137,6 +170,10 @@ async fn search(State(st): State<AppState>, User(_): User, Query(sq): Query<Sear
         }
         out["tracks"] = json!(tracks);
     }
+    // the Top result: the best song, else album, else artist
+    out["top"] = [("tracks", "song"), ("albums", "album"), ("artists", "artist")].iter()
+        .find_map(|(list, kind)| out[*list].as_array().and_then(|a| a.first()).map(|it| json!({ "kind": kind, "item": it })))
+        .unwrap_or(Value::Null);
     Ok(Json(out))
 }
 
@@ -146,7 +183,12 @@ async fn artist(State(st): State<AppState>, User(_u): User, Path(mbid): Path<Str
         annotate_albums(&st, groups);
     }
     let name = a["name"].as_str().unwrap_or("").to_string();
-    a["request_status"] = req_status(&st, std::slice::from_ref(&mbid)).remove(&mbid).map(|s| json!(s)).unwrap_or(Value::Null);
+    let rq = req_info(&st, std::slice::from_ref(&mbid)).remove(&mbid);
+    a["request_status"] = rq.as_ref().map(|s| json!(s.0)).unwrap_or(Value::Null);
+    a["request_label"] = rq.map(|s| json!(if s.0 == "completed" { "Discography requested".to_string() } else { s.1 })).unwrap_or(Value::Null);
+    // what "Request discography" includes, so the page can mark those releases at once
+    a["discography_singles"] = json!(st.cfg.bool("discography_singles"));
+    a["catalog_merge"] = json!(st.cfg.bool("discover_catalog_merge"));
     // the library artist: every spelling, alias and collaboration (see artists.rs)
     let (acond, aparams) = crate::artists::album_filter(&st.db, &name);
     let mut ps = p![mbid];
@@ -193,21 +235,40 @@ async fn artist_lookup(State(st): State<AppState>, User(_): User, Query(q): Quer
 }
 
 async fn album(State(st): State<AppState>, User(_): User, Path(rgid): Path<String>) -> ApiResult<Json<Value>> {
+    if rgid.starts_with("ext-") {
+        return Err(err(404, "This album is only on Deezer / Apple Music, not MusicBrainz – update the app to open it"));
+    }
     let mut g = mb::release_group(&st, &rgid).await.map_err(mb_err)?;
     let rid = mb::best_release_for_group(&st, &rgid, None).await.map_err(mb_err)?;
     let mut rel = match rid { Some(r) => Some(mb::release(&st, &r).await.map_err(mb_err)?), None => None };
     annotate_albums(&st, std::slice::from_mut(&mut g));
+    let mut owned = 0;
     if let Some(r) = rel.as_mut() {
         if let Some(ts) = r["tracks"].as_array_mut() {
-            for t in ts.iter_mut() {
-                let lib = crate::library::find_track(&st.db, t["recording_id"].as_str().unwrap_or(""), t["artist"].as_str().unwrap_or(""), t["title"].as_str().unwrap_or(""));
-                t["in_library"] = json!(lib.is_some());
-                t["library"] = json!(lib);
-            }
+            annotate_album_tracks(&st, ts);
+            owned = ts.iter().filter(|t| t["in_library"] == true).count();
         }
     }
+    // Play / Shuffle show when any song of the album is in the library (the owned ones play in album order)
+    g["owned_tracks"] = json!(owned);
     g["release"] = rel.unwrap_or(Value::Null);
     Ok(Json(g))
+}
+
+/// Each song of an album: its library copy (by recording, ISRC, then title + artist + length) and any request.
+pub(crate) fn annotate_album_tracks(st: &AppState, ts: &mut [Value]) {
+    let ids: Vec<String> = ts.iter().filter_map(|t| t["recording_id"].as_str().filter(|r| !r.is_empty()).map(String::from)).collect();
+    let rs = req_info(st, &ids);
+    for t in ts.iter_mut() {
+        let (rid, artist, title) = (t["recording_id"].as_str().unwrap_or("").to_string(), t["artist"].as_str().unwrap_or("").to_string(), t["title"].as_str().unwrap_or("").to_string());
+        let lib = crate::library::find_track(&st.db, &rid, &artist, &title)
+            .or_else(|| crate::routes::catalog::library_track_for(&st.db, t["isrc"].as_str().unwrap_or(""), &artist, &title, t["length"].as_f64()));
+        t["in_library"] = json!(lib.is_some());
+        t["library"] = json!(lib);
+        let rq = rs.get(&rid).cloned().or_else(|| crate::routes::catalog::track_request(st, "", &artist, &title));
+        t["request_status"] = rq.as_ref().map(|r| json!(r.0)).unwrap_or(Value::Null);
+        t["request_label"] = rq.map(|r| json!(r.1)).unwrap_or(Value::Null);
+    }
 }
 
 fn norm(s: &str) -> String {
@@ -299,5 +360,28 @@ impl AppState {
         }
         self.cache_put(&key, json!(out), 12 * 3600);
         out
+    }
+}
+
+#[cfg(test)]
+mod plan_tests {
+    use super::*;
+
+    fn plan(q: &str) -> Option<(String, Option<String>)> {
+        discover_plan(q, &nlsearch::parse(q))
+    }
+
+    #[test]
+    fn every_query_but_lyrics_goes_through_discover() {
+        for q in ["travis scott 90210", "90210 travis scott", "90210 by travis scott", "travis scott - 90210", "kendrick lamar swimming pools",
+            "the weeknd blinding lights", "linkin park one step closer", "beyonce single ladies"] {
+            let (dq, _) = plan(q).unwrap_or_else(|| panic!("{q} took the old path"));
+            assert_eq!(dq, q);
+        }
+        // the sentence's own reading is weighed too
+        assert_eq!(plan("radiohead album ok computer").unwrap().1.as_deref(), Some("radiohead ok computer"));
+        assert_eq!(plan("travis scott 90210").unwrap().1, None);
+        assert_eq!(plan("play some music by daft punk").unwrap().0, "daft punk");
+        assert!(plan("that song that goes is this the real life").is_none());
     }
 }

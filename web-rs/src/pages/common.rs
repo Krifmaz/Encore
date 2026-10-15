@@ -34,16 +34,26 @@ fn or(v: &Value, a: &str, b: &str) -> String { if v.truthy(a) { v.s(a) } else { 
 
 /// `albumTile(a, { href, actions, sub })`.
 pub fn album_tile(a: &Value, href: &str, actions: &str, sub: Option<&str>) -> String {
-    let corner = if a.truthy("in_library") { r#"<span class="badge ok">In library</span>"#.to_string() }
-        else if a.truthy("request_status") { status_badge(&a.s("request_status")) }
-        else { String::new() };
+    album_tile_with(a, href, actions, sub, None, None)
+}
+
+/// `albumTile(a, { href, actions, sub, key, badge })`: `key` marks the corner badge for live request
+/// labels (see discover.rs), `badge` replaces its contents.
+pub fn album_tile_with(a: &Value, href: &str, actions: &str, sub: Option<&str>, key: Option<&str>, badge: Option<&str>) -> String {
+    let corner = match badge {
+        Some(b) => b.to_string(),
+        None if a.truthy("in_library") => r#"<span class="badge ok">In library</span>"#.to_string(),
+        None if a.truthy("request_status") => status_badge(&a.s("request_status")),
+        None => String::new(),
+    };
+    let key_attr = key.filter(|k| !k.is_empty()).map(|k| format!(r#" data-req-key="{}""#, esc(k))).unwrap_or_default();
     let sub = match sub {
         Some(s) => s.to_string(),
         None => esc(&["artist", "year", "type"].iter().map(|k| a.g(k)).filter(|v| truthy(v)).map(js_string).collect::<Vec<_>>().join(" · ")),
     };
     format!(r#"<div class="tile" data-href="{href}">
     <div class="art">{art}
-      <div class="corner">{corner}</div>
+      <div class="corner"{key_attr}>{corner}</div>
       <div class="overlay">{actions}</div>
     </div>
     <div class="t ellipsis" title="{title}">{title}</div>

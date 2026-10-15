@@ -85,6 +85,9 @@ fn upd(st: &AppState, r: &mut Req, fields: &[(&str, Value)]) {
     params.push(json!(now()));
     params.push(json!(r.id));
     let _ = st.db.execute(&format!("UPDATE requests SET {} WHERE id=?", sets.join(", ")), params);
+    if fields.iter().any(|(k, _)| *k == "status" || *k == "progress") {
+        crate::req_events::emit(&st.db, r.id); // live labels on artist and album pages
+    }
 }
 
 fn check(st: &AppState, id: i64) -> anyhow::Result<()> {
@@ -290,23 +293,41 @@ async fn expand_artist(st: &AppState, r: &mut Req) -> anyhow::Result<()> {
     if st.cfg.bool("discography_singles") {
         kinds.push("Single");
     }
+    // the merged catalog: MusicBrainz plus the Deezer / Apple Music releases MusicBrainz doesn't list
+    let ext = if st.cfg.bool("discover_catalog_merge") { crate::routes::catalog::merged(st, &art).await } else { vec![] };
+    let name = art["name"].as_str().unwrap_or("").to_string();
+    let skip = |x: &Value| {
+        let title = x["title"].as_str().unwrap_or("");
+        match x["id"].as_str().filter(|id| !x["ext"].is_object() && !id.is_empty()) {
+            Some(id) => library::has_release_group(&st.db, id)
+                || st.db.one("SELECT 1 FROM requests WHERE mbid=? AND status NOT IN ('failed','denied','cancelled')", p![id]).ok().flatten().is_some(),
+            None => library::has_album(&st.db, &name, title)
+                || st.db.one("SELECT 1 FROM requests WHERE kind='album' AND mbid IS NULL AND lower(artist)=lower(?) AND lower(title)=lower(?)
+                              AND status NOT IN ('failed','denied','cancelled')", p![name, title]).ok().flatten().is_some(),
+        }
+    };
+    let plan = crate::routes::catalog::discography_plan(art["release_groups"].as_array().map(|a| a.as_slice()).unwrap_or(&[]), &ext, &kinds, skip);
     let t = now();
-    let mut n = 0;
-    for g in art["release_groups"].as_array().cloned().unwrap_or_default() {
-        let id = g["id"].as_str().unwrap_or("");
-        if !kinds.contains(&g["type"].as_str().unwrap_or("")) || g["secondary"].as_array().is_some_and(|a| !a.is_empty()) {
-            continue;
-        }
-        if library::has_release_group(&st.db, id)
-            || st.db.one("SELECT 1 FROM requests WHERE mbid=? AND status NOT IN ('failed','denied','cancelled')", p![id])?.is_some() {
-            continue;
-        }
-        st.db.execute("INSERT INTO requests (user_id, kind, mbid, artist, title, album, year, cover_url, status, detail, parent_id, created_at, updated_at)
+    let (mut n, mut n_ext) = (0, 0);
+    for g in plan {
+        let is_ext = g["ext"].is_object();
+        let detail = if is_ext { json!({ "ext": g["ext"] }) } else { json!({}) };
+        let mbid = if is_ext { Value::Null } else { g["id"].clone() };
+        let year = g["year"].as_str().filter(|y| !y.is_empty()).map(|y| json!(y)).unwrap_or(Value::Null);
+        let id = st.db.execute("INSERT INTO requests (user_id, kind, mbid, artist, title, album, year, cover_url, status, detail, parent_id, created_at, updated_at)
                        VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
-            p![r.row.get("user_id"), "album", id, art["name"], g["title"], g["title"], g["year"], g["cover"], "queued", "{}", r.id, t, t])?;
+            p![r.row.get("user_id"), "album", mbid, name, g["title"], g["title"], year, g["cover"], "queued", detail.to_string(), r.id, t, t])?;
+        crate::req_events::emit(&st.db, id);
         n += 1;
+        if is_ext {
+            n_ext += 1;
+        }
     }
-    let msg = if n > 0 { format!("Queued {n} release(s) from the discography") } else { "Nothing new – you already have (or requested) every release".into() };
+    let msg = match (n, n_ext) {
+        (0, _) => "Nothing new – you already have (or requested) every release".to_string(),
+        (n, 0) => format!("Queued {n} release(s) from the discography"),
+        (n, e) => format!("Queued {n} release(s) from the discography ({e} not in MusicBrainz)"),
+    };
     complete(st, r, &msg, &[], Value::Null).await;
     Ok(())
 }
@@ -704,6 +725,10 @@ async fn torznab_try_next(st: &AppState, r: &mut Req, reason: &str) -> anyhow::R
         torznab::remove(st, &id).await;
         r.d["torznab"]["id"] = Value::Null;
     }
+    // the song's file in the last release says nothing about the next one
+    if r.d["torznab"].is_object() {
+        r.d["torznab"]["selected"] = Value::Null;
+    }
     loop {
         let idx = r.d["torznab"]["idx"].as_i64().unwrap_or(-1) + 1;
         r.d["torznab"]["idx"] = json!(idx);
@@ -733,6 +758,28 @@ async fn poll_torznab(st: &AppState, r: &mut Req) -> anyhow::Result<()> {
         return after_slskd(st, r, o).await;
     };
     let t = now();
+    // a song from a release with several files: download only the song's file
+    if r.s("kind") == "track" && r.d["torznab"]["selected"].is_null() {
+        let cand = r.d["torznab"]["candidates"][r.d["torznab"]["idx"].as_u64().unwrap_or(0) as usize].clone();
+        let track_no = cand["track_no"].as_u64().map(|n| n as u32);
+        match torznab::select_song(st, &id, &r.s("artist"), &r.s("title"), track_no).await {
+            Ok(torznab::SongFile::Pending) => {}
+            Ok(torznab::SongFile::Whole) => r.d["torznab"]["selected"] = json!(false),
+            Ok(torznab::SongFile::Only(name)) => {
+                log_push(r, format!("torznab: downloading only {name}"));
+                r.d["torznab"]["selected"] = json!(name);
+            }
+            Ok(torznab::SongFile::Missing) => {
+                let o = torznab_try_next(st, r, "the song isn't in this release").await?;
+                return after_slskd(st, r, o).await;
+            }
+            Err(e) => {
+                // the whole release downloads; only the song is imported
+                log_push(r, format!("torznab: couldn't select the song's file ({e})"));
+                r.d["torznab"]["selected"] = json!(false);
+            }
+        }
+    }
     match torznab::poll(st, &id).await? {
         torznab::Poll::Progress(pct, msg) => {
             if pct > r.d["torznab"]["last_progress"].as_f64().unwrap_or(0.0) {
@@ -752,13 +799,24 @@ async fn poll_torznab(st: &AppState, r: &mut Req) -> anyhow::Result<()> {
         }
         torznab::Poll::Done(path) => {
             upd(st, r, &[("status", json!("importing")), ("progress", json!(100)), ("message", json!("Verifying, tagging and importing…"))]);
-            let files = if path.is_file() { vec![path.clone()] } else { streamrip::audio_files(&path, &slskd::AUDIO_EXT) };
+            let mut files = if path.is_file() { vec![path.clone()] } else { streamrip::audio_files(&path, &slskd::AUDIO_EXT) };
             if files.is_empty() {
                 let o = torznab_try_next(st, r, "the download had no audio files").await?;
                 return after_slskd(st, r, o).await;
             }
             let root = path.parent().map(|p| p.to_path_buf()).unwrap_or(path.clone());
             let cand = r.d["torznab"]["candidates"][r.d["torznab"]["idx"].as_u64().unwrap_or(0) as usize].clone();
+            if r.s("kind") == "track" && files.len() > 1 {
+                // only the song is imported; the rest goes with the download when it is removed
+                let names: Vec<String> = files.iter().map(|f| f.strip_prefix(&path).unwrap_or(f).to_string_lossy().to_string()).collect();
+                match torznab::pick_file(&names, &r.s("artist"), &r.s("title"), cand["track_no"].as_u64().map(|n| n as u32)) {
+                    Some(i) => files = vec![files[i].clone()],
+                    None => {
+                        let o = torznab_try_next(st, r, "the song isn't in this release").await?;
+                        return after_slskd(st, r, o).await;
+                    }
+                }
+            }
             match import(st, r, &files, &root).await {
                 Ok((new, _)) => {
                     torznab::remove(st, &id).await;
@@ -857,6 +915,7 @@ fn progress_cb(st: &AppState, id: i64) -> impl Fn(f64) + Send + Sync {
     let db = st.db.clone();
     move |pct| {
         let _ = db.execute("UPDATE requests SET progress=?, updated_at=? WHERE id=?", p![pct, now(), id]);
+        crate::req_events::emit(&db, id);
     }
 }
 

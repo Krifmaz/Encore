@@ -10,6 +10,7 @@ use std::sync::LazyLock;
 pub(crate) enum X {
     S(String),
     B64(Vec<u8>),
+    I(i64),
 }
 
 fn esc(s: &str) -> String {
@@ -23,6 +24,7 @@ pub(crate) fn body(method: &str, params: &[X]) -> String {
     let ps: String = params.iter().map(|p| match p {
         X::S(s) => format!("<param><value><string>{}</string></value></param>", esc(s)),
         X::B64(b) => format!("<param><value><base64>{}</base64></value></param>", base64::engine::general_purpose::STANDARD.encode(b)),
+        X::I(n) => format!("<param><value><i8>{n}</i8></value></param>"),
     }).collect();
     format!(r#"<?xml version="1.0"?><methodCall><methodName>{method}</methodName><params>{ps}</params></methodCall>"#)
 }
@@ -130,6 +132,12 @@ pub async fn poll(st: &AppState, hash: &str) -> anyhow::Result<Poll> {
     }
     let msg = call(st, "d.message", &[s(hash)]).await.unwrap_or_default();
     let done = int(st, "d.completed_bytes", hash).await? as f64;
+    // only some files selected: finished once no wanted chunk is left. rTorrent reports 0 wanted chunks for a
+    // closed or stopped download too, so it must be open and started (and not checking its hashes)
+    if size > 0.0 && done > 0.0 && int(st, "d.is_open", hash).await? == 1 && int(st, "d.state", hash).await? == 1
+        && int(st, "d.wanted_chunks", hash).await? == 0 && int(st, "d.is_hash_checking", hash).await? == 0 {
+        return Ok(Poll::Done(local(st, &path(st, hash).await?, "rtorrent_download_path")));
+    }
     let rate = int(st, "d.down.rate", hash).await? as f64 / 1e6;
     let pct = if size > 0.0 { (done / size * 1000.0).round() / 10.0 } else { 0.0 };
     let text = if size == 0.0 { "rTorrent: waiting for the magnet's metadata".to_string() } else if !msg.trim().is_empty() && rate == 0.0 { format!("rTorrent: {}", msg.trim()) } else { format!("rTorrent: {rate:.1} MB/s") };
@@ -143,4 +151,27 @@ pub async fn remove(st: &AppState, hash: &str) {
     if let Some(p) = p.filter(|p| !p.is_empty()) {
         delete_inside(st, &local(st, &p, "rtorrent_download_path"), "rtorrent_download_path");
     }
+}
+
+/// The torrent's files (f.path, in rTorrent's order). None until a magnet's metadata is there.
+pub async fn files(st: &AppState, hash: &str) -> anyhow::Result<Option<Vec<String>>> {
+    if call(st, "d.size_bytes", &[s(hash)]).await?.trim().parse::<f64>().unwrap_or(0.0) <= 0.0 {
+        return Ok(None);
+    }
+    let n = int(st, "d.size_files", hash).await?.max(0);
+    let mut out = vec![];
+    for i in 0..n {
+        out.push(call(st, "f.path", &[s(&format!("{hash}:f{i}"))]).await?);
+    }
+    Ok(if out.is_empty() { None } else { Some(out) })
+}
+
+/// Priority 0 (off) for every file but `keep`, then d.update_priorities so rTorrent applies it.
+pub async fn select(st: &AppState, hash: &str, keep: &[usize]) -> anyhow::Result<()> {
+    let n = int(st, "d.size_files", hash).await?.max(0) as usize;
+    for i in 0..n {
+        call(st, "f.priority.set", &[s(&format!("{hash}:f{i}")), X::I(if keep.contains(&i) { 1 } else { 0 })]).await?;
+    }
+    call(st, "d.update_priorities", &[s(hash)]).await?;
+    Ok(())
 }

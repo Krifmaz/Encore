@@ -38,7 +38,7 @@ pub fn fold(s: &str) -> String {
     out.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
-fn strip_the(f: &str) -> &str {
+pub(crate) fn strip_the(f: &str) -> &str {
     match f.strip_prefix("the ") {
         Some(rest) if !rest.is_empty() => rest,
         _ => f,
@@ -210,27 +210,27 @@ pub struct Artist {
     pub aa_names: Vec<String>,
     /// every track artist value whose songs belong here
     pub artist_names: Vec<String>,
-    folds: Vec<(String, String, bool)>, // (raw, fold, is alias)
+    pub(crate) folds: Vec<(String, String, bool)>, // (raw, fold, is alias)
 }
 
 /// A name as it appears in the tracks table, with the artists it stands for.
-struct Name {
-    raw: String,
+pub(crate) struct Name {
+    pub(crate) raw: String,
     lower: String,
-    fold: String,
-    groups: Vec<usize>,
+    pub(crate) fold: String,
+    pub(crate) groups: Vec<usize>,
 }
 
 pub struct Track {
     pub id: i64,
-    title: String,
-    title_f: String,
+    pub(crate) title: String,
+    pub(crate) title_f: String,
     title_l: String,
-    album_f: String,
+    pub(crate) album_f: String,
     album_l: String,
     album_raw: String,
-    artist_ix: usize,
-    aa_ix: usize,
+    pub(crate) artist_ix: usize,
+    pub(crate) aa_ix: usize,
     disc: i64,
     track: i64,
     year: String,
@@ -242,19 +242,19 @@ pub struct Track {
 
 pub struct Album {
     pub id: String,
-    title: String,
-    title_f: String,
-    aa_ix: usize,
-    artist_ixs: Vec<usize>,
+    pub(crate) title: String,
+    pub(crate) title_f: String,
+    pub(crate) aa_ix: usize,
+    pub(crate) artist_ixs: Vec<usize>,
 }
 
 #[derive(Default)]
 pub struct Index {
     pub artists: Vec<Artist>,
     by_key: HashMap<String, usize>,
-    names: Vec<Name>, // albumartist and artist values (one entry per distinct value)
-    tracks: Vec<Track>,
-    albums: Vec<Album>,
+    pub(crate) names: Vec<Name>, // albumartist and artist values (one entry per distinct value)
+    pub(crate) tracks: Vec<Track>,
+    pub(crate) albums: Vec<Album>,
 }
 
 const LOSSLESS: &[&str] = &["flac", "wav", "alac", "aiff", "aif", "ape", "wv"];
@@ -651,9 +651,9 @@ impl Index {
         out
     }
 
-    /// Song ids for a search, best first, then in the requested order; the same song twice (same title,
-    /// artist and album, length within 2 s) only once, in its best quality.
-    pub fn search_tracks(&self, q: &str, sort: &str, dir: &str) -> Vec<i64> {
+    /// Songs for a search, best first, then in the requested order (the same song twice is still in: see
+    /// `dedupe`).
+    pub(crate) fn search_track_refs(&self, q: &str, sort: &str, dir: &str) -> Vec<&Track> {
         let q = Q::new(q);
         let at = self.artist_tiers(&q);
         let nt = self.name_tiers(&q, &at);
@@ -688,10 +688,15 @@ impl Index {
             }).then(a.id.cmp(&b.id))
         };
         hits.sort_by(|a, b| a.0.cmp(&b.0).then_with(|| ord(a.1, b.1)));
-        // duplicates
+        hits.into_iter().map(|(_, t)| t).collect()
+    }
+
+    /// The same song twice (same title, artist and album, length within 2 s) only once, in its best
+    /// quality, at the place of its first copy.
+    pub(crate) fn dedupe<'a>(&'a self, hits: impl IntoIterator<Item = &'a Track>) -> Vec<&'a Track> {
         let mut out: Vec<&Track> = vec![];
         let mut seen: HashMap<(String, String, String), Vec<usize>> = HashMap::new();
-        for (_, t) in hits {
+        for t in hits {
             let n = &self.names[t.artist_ix];
             let ak = match n.groups.as_slice() {
                 [] => key(&n.raw),
@@ -710,7 +715,7 @@ impl Index {
             slots.push(out.len());
             out.push(t);
         }
-        out.into_iter().map(|t| t.id).collect()
+        out
     }
 }
 

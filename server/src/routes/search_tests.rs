@@ -277,3 +277,71 @@ async fn removing_an_artist_removes_every_merged_spelling() {
     assert_eq!(chk["tracks"], 2);
     assert_eq!(e.artist_names("/api/library/artists?q=!!!").await, vec!["!!!"]);
 }
+
+/// The owner's "travis scott 90210" over the library: any order, typos, accents, a Top result.
+async fn travis_library(name: &str) -> Env {
+    let mut e = setup(name).await;
+    for title in ["Pornography", "Oh My Dis Side", "3500", "Wasted", "90210", "Pray 4 Love", "Antidote"] {
+        e.add(t(title, "Travis Scott", "Rodeo", "Travis Scott"));
+    }
+    e.add(t("travis scott", "user-1776339120", "travis scott", "user-1776339120"));
+    e.add(t("Travis Scott Burger", "Meal Jokes", "Fast Food", "Meal Jokes"));
+    e.add(t("Scott Travis (Drums)", "Judas Priest", "Painkiller", "Judas Priest"));
+    e.add(t("Halo", "Beyoncé", "I Am... Sasha Fierce", "Beyoncé"));
+    e.add(t("Café del Mar", "Energy 52", "Café del Mar", "Energy 52"));
+    e
+}
+
+#[tokio::test]
+async fn library_search_reads_artist_and_title() {
+    let e = travis_library("split").await;
+    for q in ["travis%20scott%2090210", "90210%20travis%20scott", "90210%20by%20travis%20scott", "trvis%20scot%2090210", "TRAVIS%20SCOTT%20-%2090210"] {
+        let r = e.get(&format!("/api/library/search?q={q}")).await;
+        assert_eq!(r["top"]["kind"], "song", "{q}: {r}");
+        assert_eq!(r["top"]["item"]["title"], "90210", "{q}: {r}");
+        assert_eq!(r["songs"][0]["title"], "90210", "{q}: {r}");
+        // the album it is on, and the artist
+        assert_eq!(r["albums"][0]["album"], "Rodeo", "{q}: {r}");
+        assert_eq!(r["artists"][0]["name"], "Travis Scott", "{q}: {r}");
+        // the list endpoints read it the same way
+        let tr = e.get(&format!("/api/library/tracks?q={q}")).await;
+        assert_eq!(tr[0]["title"], "90210", "{q}: {tr}");
+    }
+    // the joke songs are not what "travis scott 90210" finds first
+    let r = e.get("/api/library/tracks?q=travis%20scott%2090210").await;
+    let titles: Vec<&str> = r.as_array().unwrap().iter().map(|x| x["title"].as_str().unwrap()).collect();
+    assert_eq!(titles[0], "90210", "{titles:?}");
+    // an artist's name alone: the artist on top
+    let r = e.get("/api/library/search?q=travis%20scott").await;
+    assert_eq!(r["top"]["kind"], "artist", "{r}");
+    assert_eq!(r["top"]["item"]["name"], "Travis Scott");
+    // an album by artist + title
+    let r = e.get("/api/library/albums?q=rodeo%20travis%20scott").await;
+    assert_eq!(r["items"][0]["album"], "Rodeo", "{r}");
+    let r = e.get("/api/library/search?q=travis%20scott%20rodeo").await;
+    assert_eq!(r["top"]["kind"], "album", "{r}");
+    assert_eq!(r["top"]["item"]["album"], "Rodeo");
+}
+
+#[tokio::test]
+async fn library_search_forgives_typos_and_accents() {
+    let e = travis_library("typos").await;
+    // a typo in the artist alone
+    let names = e.artist_names("/api/library/artists?q=trvis%20scot").await;
+    assert_eq!(names.first().map(String::as_str), Some("Travis Scott"), "{names:?}");
+    // a typo in a title alone
+    let r = e.get("/api/library/search?q=antidoet").await;
+    assert_eq!(r["top"]["item"]["title"], "Antidote", "{r}");
+    // accents either way
+    let r = e.get("/api/library/search?q=beyonce%20halo").await;
+    assert_eq!(r["top"]["kind"], "song", "{r}");
+    assert_eq!(r["top"]["item"]["title"], "Halo");
+    let r = e.get("/api/library/search?q=cafe%20del%20mar").await;
+    assert_eq!(r["albums"][0]["album"], "Café del Mar", "{r}");
+    let r = e.get("/api/library/search?q=Caf%C3%A9").await;
+    assert!(r["songs"].as_array().unwrap().iter().any(|s| s["title"] == "Café del Mar"), "{r}");
+    // nothing typed, nothing found
+    assert_eq!(e.get("/api/library/search?q=").await["top"], Value::Null);
+    let r = e.get("/api/library/search?q=zzzzqqqq").await;
+    assert_eq!(r["songs"], json!([]));
+}

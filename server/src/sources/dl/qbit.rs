@@ -80,3 +80,34 @@ pub async fn remove(st: &AppState, tag: &str) {
         }
     }
 }
+
+async fn hash(st: &AppState, tag: &str) -> anyhow::Result<Option<String>> {
+    let v: Value = qbit(st, "torrents/info", None, &[("tag", tag.into())]).await?.json().await?;
+    Ok(v.as_array().and_then(|a| a.first()).and_then(|t| t["hash"].as_str()).map(String::from))
+}
+
+/// The torrent's files in qBittorrent's order (its file index). None until the metadata is there.
+pub async fn files(st: &AppState, tag: &str) -> anyhow::Result<Option<Vec<String>>> {
+    let Some(h) = hash(st, tag).await? else { return Ok(None) };
+    let v: Value = qbit(st, "torrents/files", None, &[("hash", h)]).await?.json().await?;
+    let mut list: Vec<(i64, String)> = v.as_array().cloned().unwrap_or_default().iter().enumerate()
+        .map(|(i, f)| (f["index"].as_i64().unwrap_or(i as i64), f["name"].as_str().unwrap_or("").to_string())).collect();
+    list.sort_by_key(|x| x.0);
+    Ok(if list.is_empty() { None } else { Some(list.into_iter().map(|x| x.1).collect()) })
+}
+
+/// Priority 0 (don't download) for every file but `keep`.
+pub async fn select(st: &AppState, tag: &str, keep: &[usize]) -> anyhow::Result<()> {
+    let Some(h) = hash(st, tag).await? else { anyhow::bail!("torrent disappeared from qBittorrent") };
+    let n = files(st, tag).await?.map(|f| f.len()).unwrap_or(0);
+    let skip: Vec<String> = (0..n).filter(|i| !keep.contains(i)).map(|i| i.to_string()).collect();
+    let want: Vec<String> = keep.iter().map(|i| i.to_string()).collect();
+    for (ids, prio) in [(skip, "0"), (want, "1")] {
+        if ids.is_empty() {
+            continue;
+        }
+        let form = reqwest::multipart::Form::new().text("hash", h.clone()).text("id", ids.join("|")).text("priority", prio);
+        qbit(st, "torrents/filePrio", Some(form), &[]).await?;
+    }
+    Ok(())
+}

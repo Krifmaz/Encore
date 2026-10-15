@@ -56,8 +56,14 @@ import kotlinx.coroutines.withContext
 import kotlin.math.ceil
 import kotlin.math.max
 
-/** One section of a library list: its label ("A", "2026", "Oct 2026", "<2 min") and its first row's position. */
-data class IndexSection(val label: String, val offset: Int)
+/**
+ * One section of a library list: its label ("A", "2026", "Oct 2026", "14 Oct 2026, 15:42", "<2 min"), its first
+ * row's position, and [short], the rail's text when it is shorter than the label ("15:42"; empty: the label).
+ */
+data class IndexSection(val label: String, val offset: Int, val short: String = "") {
+    /** what the rail shows */
+    val rail: String get() = short.ifEmpty { label }
+}
 
 /**
  * GET /api/library/index?kind=&sort=&dir=&artist=: the sections of a library list in list order, where each
@@ -70,17 +76,20 @@ fun EncoreApi.libraryIndex(kind: String, sort: String, dir: String = "", artist:
     if (artist.isNotEmpty()) qs.append("&artist=").append(EncoreApi.enc(artist))
     return get(qs.toString()).objects().mapNotNull { o ->
         val label = o.str("label")
-        if (label.isEmpty()) null else IndexSection(label, o.int("offset").coerceAtLeast(0))
+        if (label.isEmpty()) null else IndexSection(label, o.int("offset").coerceAtLeast(0), o.str("short"))
     }
 }
 
-/** The sections for a list, loaded again when [kind], [sort] or [artist] change; empty while loading or on errors. */
+/**
+ * The sections for a list, loaded again when [kind], [sort], [dir] or [artist] change; empty while loading or on
+ * errors. [dir] "" is the sort's own default direction (as the list endpoints take it).
+ */
 @Composable
-fun rememberLibraryIndex(api: EncoreApi, kind: String, sort: String, artist: String = ""): List<IndexSection> {
-    var sections by remember(kind, sort, artist) { mutableStateOf<List<IndexSection>>(emptyList()) }
-    LaunchedEffect(kind, sort, artist) {
+fun rememberLibraryIndex(api: EncoreApi, kind: String, sort: String, artist: String = "", dir: String = ""): List<IndexSection> {
+    var sections by remember(kind, sort, artist, dir) { mutableStateOf<List<IndexSection>>(emptyList()) }
+    LaunchedEffect(kind, sort, artist, dir) {
         sections = try {
-            withContext(Dispatchers.IO) { api.libraryIndex(kind, sort, artist = artist) }
+            withContext(Dispatchers.IO) { api.libraryIndex(kind, sort, dir = dir, artist = artist) }
         } catch (e: CancellationException) {
             throw e
         } catch (_: Exception) {
@@ -243,7 +252,8 @@ fun FastScroller(
                 while (start < sections.size) {
                     val end = minOf(sections.size, start + step)
                     val here = current in start until end
-                    val label = if (here) sections[current].label else sections[start].label
+                    // the rail's short text ("15:42"); the bubble shows the whole label
+                    val label = if (here) sections[current].rail else sections[start].rail
                     Box(Modifier.weight((end - start).toFloat()), contentAlignment = Alignment.TopEnd) {
                         Text(
                             label,

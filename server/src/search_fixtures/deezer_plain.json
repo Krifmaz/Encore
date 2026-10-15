@@ -1,0 +1,5 @@
+{"data":[
+ {"id":108404826,"title":"90210","title_short":"90210","duration":339,"rank":812345,"artist":{"id":4495513,"name":"Travis Scott"},"album":{"id":11483466,"title":"Rodeo","cover_medium":"https://e-cdns-images.dzcdn.net/images/cover/rodeo/250x250.jpg","cover_xl":"https://e-cdns-images.dzcdn.net/images/cover/rodeo/1000x1000.jpg"}},
+ {"id":108404999,"title":"90210","title_short":"90210","duration":339,"rank":540000,"artist":{"id":4495513,"name":"Travis Scott"},"album":{"id":11483999,"title":"Rodeo (Expanded Edition)","cover_xl":"https://e-cdns-images.dzcdn.net/images/cover/rodeo-x/1000x1000.jpg"}},
+ {"id":900000001,"title":"Travis Scott Burger","duration":95,"rank":120000,"artist":{"id":1,"name":"Meal Jokes"},"album":{"id":2,"title":"Fast Food"}}
+],"total":3}

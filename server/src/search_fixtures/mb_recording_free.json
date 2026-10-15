@@ -1,0 +1,20 @@
+{"created":"2026-10-15T10:00:02.000Z","count":6,"offset":0,"recordings":[
+ {"id":"rec-user-ts","score":100,"title":"travis scott","length":121000,
+  "artist-credit":[{"name":"user-1776339120","artist":{"id":"art-user","name":"user-1776339120"}}],
+  "releases":[{"id":"rel-user","title":"travis scott","status":"Official","date":"2023","release-group":{"id":"rg-user","primary-type":"Single"}}]},
+ {"id":"rec-2k-ts","score":100,"title":"Travis Scott","length":160000,
+  "artist-credit":[{"name":"2K Marseille","artist":{"id":"art-2k","name":"2K Marseille"}}],
+  "releases":[{"id":"rel-2k","title":"Travis Scott","status":"Official","date":"2021","release-group":{"id":"rg-2k","primary-type":"Single"}}]},
+ {"id":"rec-concert","score":97,"title":"Travis Scott Concert","length":180000,
+  "artist-credit":[{"name":"Lil Kio","artist":{"id":"art-kio","name":"Lil Kio"}}],
+  "releases":[{"id":"rel-kio","title":"Concerts","status":"Official","date":"2022","release-group":{"id":"rg-kio","primary-type":"Album"}}]},
+ {"id":"rec-priest","score":95,"title":"Scott Travis (Drums)","length":60000,
+  "artist-credit":[{"name":"Judas Priest","artist":{"id":"art-priest","name":"Judas Priest"}}],
+  "releases":[{"id":"rel-priest","title":"Painkiller","status":"Official","date":"1990","release-group":{"id":"rg-priest","primary-type":"Album"}}]},
+ {"id":"rec-burger","score":93,"title":"travis scott burger","length":95000,
+  "artist-credit":[{"name":"Meal Jokes","artist":{"id":"art-jokes","name":"Meal Jokes"}}],
+  "releases":[{"id":"rel-burger","title":"Fast Food","status":"Official","date":"2020","release-group":{"id":"rg-burger","primary-type":"Album"}}]},
+ {"id":"rec-karaoke","score":90,"title":"90210 (In the Style of Travis Scott)","length":339000,
+  "artist-credit":[{"name":"Karaoke Hits Band","artist":{"id":"art-karaoke","name":"Karaoke Hits Band"}}],
+  "releases":[{"id":"rel-karaoke","title":"Karaoke Hits 2015","status":"Official","date":"2015","release-group":{"id":"rg-karaoke","primary-type":"Album"}}]}
+]}

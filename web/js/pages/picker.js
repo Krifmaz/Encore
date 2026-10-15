@@ -2,7 +2,7 @@
 import { api } from '../api.js';
 import { art, esc, fmt, icon, modal, toast } from '../ui.js';
 
-const NAMES = { slskd: 'Soulseek', deezer: 'Deezer', ytmusic: 'YouTube Music', lidarr: 'Lidarr' };
+const NAMES = { slskd: 'Soulseek', torznab: 'Torrents & Usenet', deezer: 'Deezer', ytmusic: 'YouTube Music', lidarr: 'Lidarr' };
 
 /**
  * opts: { kind: 'album'|'track', artist, title, album, mbid, artist_mbid, track_count, length, year, cover_url, isrc, request_id }
@@ -81,7 +81,7 @@ export async function pickerModal(opts) {
     for (const s of info.sources) {
       if (s.id === 'lidarr' && kind !== 'album') continue;
       state.loading.add(s.id);
-      api.post('/picker/search', { source: s.id, kind, artist: opts.artist || '', title: opts.title || opts.album || '', query: q, mbid: opts.mbid, artist_mbid: opts.artist_mbid, track_count: opts.track_count, length: opts.length })
+      api.post('/picker/search', { source: s.id, kind, artist: opts.artist || '', title: opts.title || opts.album || '', query: q, album: kind === 'track' ? opts.album : undefined, mbid: opts.mbid, artist_mbid: opts.artist_mbid, track_count: opts.track_count, length: opts.length })
         .then(r => { state.results[s.id] = r; })
         .catch(e => { state.errors[s.id] = e.message; })
         .finally(() => { state.loading.delete(s.id); if (el.isConnected) paint(); });

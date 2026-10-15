@@ -1,6 +1,9 @@
 package app.encore.android.ui.screens
 
+import android.content.Context
 import androidx.compose.foundation.background
+import androidx.compose.foundation.border
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.aspectRatio
 import androidx.compose.foundation.layout.size
@@ -29,6 +32,7 @@ import androidx.compose.foundation.lazy.grid.GridItemSpan
 import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
 import androidx.compose.foundation.lazy.grid.items
 import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.Icon
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Scaffold
@@ -47,7 +51,10 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.input.nestedscroll.nestedScroll
+import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.unit.dp
+import app.encore.android.PreloadCoversAhead
 import app.encore.android.R
 import app.encore.android.data.api.Album
 import app.encore.android.data.api.Track
@@ -59,6 +66,9 @@ import app.encore.android.ui.components.EmptyState
 import app.encore.android.ui.components.EncoreTopBar
 import app.encore.android.ui.components.Gutter
 import app.encore.android.ui.components.LoadableContent
+import app.encore.android.ui.components.MenuEntry
+import app.encore.android.ui.components.MenuSeparator
+import app.encore.android.ui.components.PopMenu
 import app.encore.android.ui.components.Cover
 import app.encore.android.ui.components.SmallButton
 import app.encore.android.ui.components.Tile
@@ -71,14 +81,110 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 
-/** web/js/pages/library.js SORT_OPTS.albums: the server's key and the label. */
-private val ALBUM_SORTS = listOf("added" to "Date added", "released" to "Release date", "album" to "Title A–Z", "artist" to "Artist A–Z", "duration" to "Length", "size" to "Size")
+/**
+ * web/js/pages/library.js SORT_OPTS: per tab, the server's sort key and its label (the first is the default).
+ * The chip beside the tabs shows the label's [CHIP] form.
+ */
+private val SORTS = mapOf(
+    "albums" to listOf("added" to "Date added", "released" to "Release date", "album" to "Title A–Z", "artist" to "Artist A–Z", "duration" to "Length", "size" to "Size"),
+    "artists" to listOf("name" to "Name A–Z", "added" to "Date added", "albums" to "Most albums", "tracks" to "Most songs"),
+    "tracks" to listOf("added" to "Date added", "released" to "Release date", "title" to "Title A–Z", "artist" to "Artist A–Z", "album" to "Album A–Z", "duration" to "Length"),
+)
+
+/** web/js/pages/library.js DESC_FIRST: sorts that start newest / longest / biggest first. */
+private val DESC_FIRST = setOf("added", "released", "duration", "size", "albums", "tracks")
+
+/** The chip's short words for a sort's label (the menu shows the whole label). */
+private val CHIP = mapOf(
+    "Date added" to "Added", "Release date" to "Released", "Title A–Z" to "Title", "Artist A–Z" to "Artist",
+    "Album A–Z" to "Album", "Name A–Z" to "Name", "Most albums" to "Albums", "Most songs" to "Songs",
+)
+
+private val TABS = listOf("albums" to "Albums", "artists" to "Artists", "tracks" to "Songs")
+
+/** A tab's sort: the server's key and "asc" / "desc". */
+private data class LibSort(val key: String, val dir: String)
+
+private fun defaultSort(tab: String): LibSort {
+    val key = SORTS.getValue(tab).first().first
+    return LibSort(key, if (key in DESC_FIRST) "desc" else "asc")
+}
+
+/** The sort each tab had last, kept on this phone (like the web's `encore.libSort`). */
+private class LibrarySorts(context: Context) {
+    private val prefs = context.applicationContext.getSharedPreferences("encore_library", Context.MODE_PRIVATE)
+
+    fun get(tab: String): LibSort {
+        val saved = try { prefs.getString("sort.$tab", null) } catch (_: Exception) { null } ?: return defaultSort(tab)
+        val key = saved.substringBefore(':')
+        val dir = saved.substringAfter(':', "")
+        if (SORTS.getValue(tab).none { it.first == key }) return defaultSort(tab)
+        return LibSort(key, if (dir == "asc" || dir == "desc") dir else if (key in DESC_FIRST) "desc" else "asc")
+    }
+
+    fun set(tab: String, s: LibSort) {
+        try { prefs.edit().putString("sort.$tab", "${s.key}:${s.dir}").apply() } catch (_: Exception) { /* kept for this visit */ }
+    }
+}
+
+/**
+ * The Sort ▾ chip beside the tabs: the current sort and its direction; the menu picks another sort (each starts
+ * in its own direction) or reverses this one.
+ */
+@Composable
+private fun SortChip(tab: String, sort: LibSort, onChange: (LibSort) -> Unit, modifier: Modifier = Modifier) {
+    val p = MaterialTheme.palette
+    val opts = SORTS.getValue(tab)
+    val full = opts.firstOrNull { it.first == sort.key }?.second ?: opts.first().second
+    val label = CHIP[full] ?: full
+    var open by remember { mutableStateOf(false) }
+    val shape = RoundedCornerShape(12.dp)
+    Box(modifier.padding(end = Gutter)) {
+        Row(
+            Modifier
+                .clip(shape)
+                .background(p.panel)
+                .border(1.dp, p.border, shape)
+                .clickable(onClickLabel = "Sort: $full") { open = true }
+                .padding(start = 10.dp, end = 6.dp, top = 9.dp, bottom = 9.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Icon(
+                painterResource(if (sort.dir == "asc") R.drawable.ic_arrow_upward else R.drawable.ic_arrow_downward),
+                contentDescription = if (sort.dir == "asc") "Ascending" else "Descending",
+                tint = p.muted,
+                modifier = Modifier.size(14.dp),
+            )
+            Spacer(Modifier.width(4.dp))
+            Text(label, style = MaterialTheme.typography.labelLarge, color = p.text, maxLines = 1)
+            Icon(painterResource(R.drawable.ic_expand_more), contentDescription = "Sort", tint = p.muted, modifier = Modifier.size(18.dp))
+        }
+        PopMenu(
+            open,
+            { open = false },
+            opts.map { (key, l) ->
+                MenuEntry(l, iconRes = if (key == sort.key) R.drawable.ic_check else null) {
+                    if (key != sort.key) onChange(LibSort(key, if (key in DESC_FIRST) "desc" else "asc"))
+                }
+            } + listOf(
+                MenuSeparator,
+                MenuEntry("Reverse order", iconRes = if (sort.dir == "asc") R.drawable.ic_arrow_downward else R.drawable.ic_arrow_upward) { onChange(sort.copy(dir = if (sort.dir == "asc") "desc" else "asc")) },
+            ),
+        )
+    }
+}
 
 /** Library: Albums / Artists / Songs (the web's #/library tabs). */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun LibraryScreen(nav: Nav) {
     var tab by remember { mutableStateOf(0) }
+    val context = LocalContext.current
+    val store = remember(context) { LibrarySorts(context) }
+    // every tab's sort, remembered per tab
+    var sorts by remember { mutableStateOf(TABS.associate { (k, _) -> k to store.get(k) }) }
+    val tabKey = TABS[tab].first
+    val sort = sorts.getValue(tabKey)
     val scope = rememberCoroutineScope()
     val scrollBehavior = TopAppBarDefaults.enterAlwaysScrollBehavior()
     Scaffold(
@@ -97,11 +203,17 @@ fun LibraryScreen(nav: Nav) {
         },
     ) { padding ->
         Column(Modifier.fillMaxSize().padding(padding)) {
-            ChoiceRow(listOf("Albums", "Artists", "Songs"), tab, { tab = it })
+            Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                ChoiceRow(TABS.map { it.second }, tab, { tab = it }, Modifier.weight(1f), end = 8.dp)
+                SortChip(tabKey, sort, { next ->
+                    sorts = sorts + (tabKey to next)
+                    store.set(tabKey, next)
+                })
+            }
             when (tab) {
-                0 -> AlbumsTab(nav)
-                1 -> ArtistsTab(nav)
-                else -> SongsTab(nav)
+                0 -> AlbumsTab(nav, sort)
+                1 -> ArtistsTab(nav, sort)
+                else -> SongsTab(nav, sort)
             }
         }
     }
@@ -198,7 +310,7 @@ private class Paged<T>(val pageSize: Int) {
 /** The next page at the end of the list (when it comes into view), or the error with a retry. */
 @Composable
 private fun <T> PageLoader(paged: Paged<T>) {
-    LaunchedEffect(paged.generation, paged.rows.size) { paged.want(paged.rows.size) }
+    LaunchedEffect(paged, paged.generation, paged.rows.size) { paged.want(paged.rows.size) }
     Box(Modifier.fillMaxWidth().padding(16.dp), contentAlignment = Alignment.Center) {
         val err = paged.error
         when {
@@ -211,7 +323,7 @@ private fun <T> PageLoader(paged: Paged<T>) {
 /** A row not loaded yet: asks for its page while it is on screen. */
 @Composable
 private fun <T> Placeholder(paged: Paged<T>, index: Int, content: @Composable () -> Unit) {
-    LaunchedEffect(index / paged.pageSize, paged.generation) { paged.want(index) }
+    LaunchedEffect(paged, index / paged.pageSize, paged.generation) { paged.want(index) }
     if (paged.error != null) {
         TextButton(onClick = { paged.retry() }) { Text("Try again", color = MaterialTheme.palette.text) }
     } else {
@@ -248,22 +360,19 @@ private fun TrackPlaceholder() {
 }
 
 @Composable
-private fun AlbumsTab(nav: Nav) {
+private fun AlbumsTab(nav: Nav, sort: LibSort) {
     val api = nav.graph.api
-    var sort by remember { mutableStateOf(0) }
-    val key = ALBUM_SORTS[sort].first
     val scope = rememberCoroutineScope()
-    val paged = remember { Paged<Album>(120) }
+    // a new list per sort; the index is for the same sort and direction, so its offsets are this list's rows
+    val paged = remember(sort) { Paged<Album>(120) }
     paged.scope = scope
-    paged.fetch = { offset, limit -> api.albums(sort = key, offset = offset, limit = limit) }
+    paged.fetch = { offset, limit -> api.albums(sort = sort.key, offset = offset, limit = limit, dir = sort.dir) }
     val grid = rememberLazyGridState()
-    val sections = rememberLibraryIndex(api, "albums", key)
+    LaunchedEffect(sort) { if (grid.firstVisibleItemIndex > 0) grid.scrollToItem(0) }
+    val sections = rememberLibraryIndex(api, "albums", sort.key, dir = sort.dir)
+    // covers 2–3 screens ahead of the scroll, and around the spot after a scrubber jump
+    PreloadCoversAhead(grid, paged.rows.size, 400) { i -> paged.rows.getOrNull(i)?.id }
     Column(Modifier.fillMaxSize()) {
-        ChoiceRow(ALBUM_SORTS.map { it.second }, sort, {
-            sort = it
-            paged.reset()
-            scope.launch { grid.scrollToItem(0) }
-        })
         if (paged.done && paged.rows.isEmpty()) {
             EmptyState(R.drawable.ic_library, "No albums found")
             return@Column
@@ -301,16 +410,18 @@ private fun AlbumsTab(nav: Nav) {
 }
 
 @Composable
-private fun ArtistsTab(nav: Nav) {
+private fun ArtistsTab(nav: Nav, sort: LibSort) {
     val api = nav.graph.api
-    val loader = rememberLoad("artists") { api.artists() }
+    val loader = rememberLoad("artists", sort) { api.artists(sort = sort.key, dir = sort.dir) }
     val grid = rememberLazyGridState()
-    val sections = rememberLibraryIndex(api, "artists", "name")
+    LaunchedEffect(sort) { if (grid.firstVisibleItemIndex > 0) grid.scrollToItem(0) }
+    val sections = rememberLibraryIndex(api, "artists", sort.key, dir = sort.dir)
     LoadableContent(loader) { artists ->
         if (artists.isEmpty()) {
             EmptyState(R.drawable.ic_person, "No artists found")
             return@LoadableContent
         }
+        PreloadCoversAhead(grid, artists.size, 400) { i -> artists.getOrNull(i)?.coverAlbum }
         Box(Modifier.fillMaxSize()) {
             LazyVerticalGrid(
                 columns = GridCells.Adaptive(140.dp),
@@ -350,17 +461,18 @@ private fun ArtistsTab(nav: Nav) {
 }
 
 @Composable
-private fun SongsTab(nav: Nav) {
+private fun SongsTab(nav: Nav, sort: LibSort) {
     val api = nav.graph.api
     val liked by nav.graph.likes.liked.collectAsState()
     val nowPlaying by nav.player.nowPlaying.collectAsState()
     val scope = rememberCoroutineScope()
-    val paged = remember { Paged<Track>(200) }
+    val paged = remember(sort) { Paged<Track>(200) }
     paged.scope = scope
-    paged.fetch = { offset, limit -> api.tracks(offset = offset, limit = limit) }
+    paged.fetch = { offset, limit -> api.tracks(offset = offset, limit = limit, sort = sort.key, dir = sort.dir) }
     val list = rememberLazyListState()
-    // the Songs tab lists by artist (api.tracks' default sort)
-    val sections = rememberLibraryIndex(api, "tracks", "artist")
+    LaunchedEffect(sort) { if (list.firstVisibleItemIndex > 0) list.scrollToItem(0) }
+    val sections = rememberLibraryIndex(api, "tracks", sort.key, dir = sort.dir)
+    PreloadCoversAhead(list, paged.rows.size, 96) { i -> paged.rows.getOrNull(i)?.albumId }
     if (paged.done && paged.rows.isEmpty()) {
         EmptyState(R.drawable.ic_note, "No songs found")
         return

@@ -16,10 +16,11 @@ export async function submitRequest(body, btn) {
   }
 }
 
-export function albumTile(a, { href, actions = '', sub } = {}) {
+/** `key` marks the corner badge for live request labels (see discover.js), `badge` replaces its contents. */
+export function albumTile(a, { href, actions = '', sub, key, badge } = {}) {
   return `<div class="tile" data-href="${esc(href)}">
     <div class="art">${art(a.cover, a.title)}
-      <div class="corner">${a.in_library ? '<span class="badge ok">In library</span>' : a.request_status ? statusBadge(a.request_status) : ''}</div>
+      <div class="corner"${key ? ` data-req-key="${esc(key)}"` : ''}>${badge ?? (a.in_library ? '<span class="badge ok">In library</span>' : a.request_status ? statusBadge(a.request_status) : '')}</div>
       <div class="overlay">${actions}</div>
     </div>
     <div class="t ellipsis" title="${esc(a.title)}">${esc(a.title)}</div>

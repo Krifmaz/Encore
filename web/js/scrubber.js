@@ -9,7 +9,7 @@ const LABEL_PX = 18;
 /**
  * Mounts the scrubber in `view`. `rows()` → the list's row elements in list order; `long()` → whether the
  * list is long enough to need it; `jump(offset)` → loads up to that row and scrolls to it (a promise).
- * Returns { set(sections) } (sections: [{label, offset}]; [] hides it). `onLeave` gets the cleanup.
+ * Returns { set(sections) } (sections: [{label, offset, short?}]; [] hides it). `onLeave` gets the cleanup.
  */
 export function scrubber(view, { rows, long, jump, onLeave }) {
   const el = document.createElement('div');
@@ -97,7 +97,8 @@ export function scrubber(view, { rows, long, jump, onLeave }) {
     set(next) {
       sections = Array.isArray(next) ? next : [];
       cur = -1;
-      rail.innerHTML = sections.map((s, i) => `<span data-s="${i}">${esc(s.label)}</span>`).join('');
+      // the rail shows `short` when the server gives one ("15:42"), the bubble the whole label
+      rail.innerHTML = sections.map((s, i) => `<span data-s="${i}">${esc(s.short || s.label)}</span>`).join('');
       visible();
       track();
     },

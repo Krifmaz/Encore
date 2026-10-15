@@ -1,0 +1,4 @@
+{"created":"2026-10-15T10:00:03.000Z","count":2,"offset":0,"release-groups":[
+ {"id":"rg-tribute","score":100,"title":"90210: A Tribute to Travis Scott","primary-type":"Album","first-release-date":"2016","artist-credit":[{"name":"Tribute Kings","artist":{"id":"art-tk","name":"Tribute Kings"}}]},
+ {"id":"rg-rodeo","score":70,"title":"Rodeo","primary-type":"Album","first-release-date":"2015-09-04","artist-credit":[{"name":"Travis Scott","artist":{"id":"0cb0a4a6-2b1a-4b7c-9e44-6ab7d4d5e7a1","name":"Travis Scott"}}]}
+]}

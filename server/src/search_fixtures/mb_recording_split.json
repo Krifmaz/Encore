@@ -1,0 +1,16 @@
+{"created":"2026-10-15T10:00:01.000Z","count":3,"offset":0,"recordings":[
+ {"id":"rec-90210-rodeo","score":100,"title":"90210","length":339000,"isrcs":["USSM11507451"],
+  "artist-credit":[{"name":"Travis Scott","artist":{"id":"0cb0a4a6-2b1a-4b7c-9e44-6ab7d4d5e7a1","name":"Travis Scott"}}],
+  "first-release-date":"2015-09-04",
+  "releases":[
+   {"id":"rel-hits-2016","title":"Hip Hop Hits 2016","status":"Official","date":"2016-03-01","release-group":{"id":"rg-hits-2016","primary-type":"Album","secondary-types":["Compilation"]}},
+   {"id":"rel-rodeo","title":"Rodeo","status":"Official","date":"2015-09-04","release-group":{"id":"rg-rodeo","primary-type":"Album"}},
+   {"id":"rel-rodeo-promo","title":"Rodeo","status":"Promotion","date":"2015-08-28","release-group":{"id":"rg-rodeo","primary-type":"Album"}}
+  ]},
+ {"id":"rec-90210-live","score":92,"title":"90210","length":352000,
+  "artist-credit":[{"name":"Travis Scott","artist":{"id":"0cb0a4a6-2b1a-4b7c-9e44-6ab7d4d5e7a1","name":"Travis Scott"}}],
+  "releases":[{"id":"rel-live","title":"Live at Rolling Loud","status":"Bootleg","date":"2017-05-06","release-group":{"id":"rg-live","primary-type":"Album","secondary-types":["Live"]}}]},
+ {"id":"rec-90210-hits","score":88,"title":"90210","length":338500,
+  "artist-credit":[{"name":"Travis Scott","artist":{"id":"0cb0a4a6-2b1a-4b7c-9e44-6ab7d4d5e7a1","name":"Travis Scott"}}],
+  "releases":[{"id":"rel-hits-2017","title":"Rap Caviar 2017","status":"Official","date":"2017-01-01","release-group":{"id":"rg-hits-2017","primary-type":"Album","secondary-types":["Compilation"]}}]}
+]}

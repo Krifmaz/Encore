@@ -234,18 +234,38 @@ pub fn initials(s: &str) -> String {
 pub fn art(src: &str, label: &str, cls: &str) -> String { art_sized(src, label, cls, 0) }
 
 /// `art(src, label, cls, size)`: as `art`, with the cover size for library covers (0 = by `cls`).
+/// A library cover whose colour the server sent (`cover_color`) shows that colour at once and fades the picture in over it.
 pub fn art_sized(src: &str, label: &str, cls: &str, size: u32) -> String {
-    let ph = format!(r#"<div class="ph">{}</div>"#, esc(&initials(label)));
+    let mut ph = format!(r#"<div class="ph">{}</div>"#, esc(&initials(label)));
     if src.is_empty() { return ph; }
     let mut src = src.to_string();
     let mut dim = String::new();
+    let mut fade = "";
+    let mut cls = cls.to_string();
     if let Some(base) = cover_base(&src) {
         let s = if size > 0 { size } else if cls == "big" { 1000 } else { 400 };
+        let color = src[..base].strip_suffix("/cover").and_then(|h| h.rfind("/api/library/albums/").map(|i| h[i + "/api/library/albums/".len()..].to_string()))
+            .and_then(|id| crate::api::cover_color(&id));
         let v = src[base..].strip_prefix("?v=").map(|v| format!("&v={v}")).unwrap_or_default();
         src = format!("{}?s={s}{v}", &src[..base]);
         dim = format!(r#" width="{s}" height="{s}""#);
+        if let Some(color) = color {
+            ph = format!(r#"<div class="ph" style="background:{color};color:transparent">{}</div>"#, esc(&initials(label)));
+            fade = r#" onload="this.classList.add('in')""#;
+            cls = if cls.is_empty() { "cover-fade".into() } else { format!("{cls} cover-fade") };
+        }
     }
-    format!(r#"{ph}<img class="{cls}" src="{}" alt=""{dim} loading="lazy" decoding="async" onerror="this.remove()">"#, esc(&src))
+    format!(r#"{ph}<img class="{cls}" src="{}" alt=""{dim} loading="lazy" decoding="async"{fade} onerror="this.remove()">"#, esc(&src))
+}
+
+/// `preloadCovers(urls)`: fetches covers ahead of the scroll (the next page of a list), so they are cached when it shows.
+pub fn preload_covers(urls: &[String]) {
+    for u in urls.iter().take(120).filter(|u| !u.is_empty()) {
+        if let Ok(img) = web_sys::HtmlImageElement::new() {
+            img.set_decoding("async");
+            img.set_src(u);
+        }
+    }
 }
 
 /// A library album's cover URL; `v` (the album/song's cover_v) makes it cacheable for good.

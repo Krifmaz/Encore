@@ -56,6 +56,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import app.encore.android.R
 import app.encore.android.data.api.Album
+import app.encore.android.data.api.CoverVersions
 import app.encore.android.data.api.Track
 import app.encore.android.ui.theme.EncoreColors
 import app.encore.android.ui.theme.palette
@@ -196,8 +197,10 @@ fun Cover(
     label: String? = null,
 ) {
     val base = if (size != null) modifier.size(size) else modifier
-    Box(base.clip(RoundedCornerShape(corner)).background(MaterialTheme.palette.panel2), contentAlignment = Alignment.Center) {
-        ArtPlaceholder(label, Modifier.fillMaxSize(), letterSize = if (size != null && size < 56.dp) 18.dp else 34.dp)
+    // the cover's main colour (the server's cover_color) while it loads; the image crossfades in over it
+    val tint = remember(url) { CoverVersions.colorOfUrl(url) }
+    Box(base.clip(RoundedCornerShape(corner)).background(if (tint != null) Color(tint) else MaterialTheme.palette.panel2), contentAlignment = Alignment.Center) {
+        if (tint == null) ArtPlaceholder(label, Modifier.fillMaxSize(), letterSize = if (size != null && size < 56.dp) 18.dp else 34.dp)
         if (!url.isNullOrEmpty()) {
             AsyncImage(
                 model = url,
@@ -213,8 +216,9 @@ fun Cover(
 /** A round cover (artists: the web's `.tile.round`). */
 @Composable
 fun RoundCover(url: String?, imageLoader: ImageLoader, size: Dp, label: String?, modifier: Modifier = Modifier) {
-    Box(modifier.size(size).clip(CircleShape).background(MaterialTheme.palette.panel2), contentAlignment = Alignment.Center) {
-        ArtPlaceholder(label, Modifier.fillMaxSize(), letterSize = if (size < 56.dp) 18.dp else 34.dp)
+    val tint = remember(url) { CoverVersions.colorOfUrl(url) }
+    Box(modifier.size(size).clip(CircleShape).background(if (tint != null) Color(tint) else MaterialTheme.palette.panel2), contentAlignment = Alignment.Center) {
+        if (tint == null) ArtPlaceholder(label, Modifier.fillMaxSize(), letterSize = if (size < 56.dp) 18.dp else 34.dp)
         if (!url.isNullOrEmpty()) {
             AsyncImage(model = url, contentDescription = null, imageLoader = imageLoader, modifier = Modifier.fillMaxSize(), contentScale = ContentScale.Crop)
         }
@@ -359,12 +363,15 @@ fun EncoreButton(label: String, modifier: Modifier = Modifier, iconRes: Int? = n
     }
 }
 
-/** A row of choices that look like the web's `.tabs` (Albums / Artists / Songs); scrolls when they don't fit. */
+/**
+ * A row of choices that look like the web's `.tabs` (Albums / Artists / Songs); scrolls when they don't fit.
+ * [end]: the space after it (less when something sits beside it, like the library's Sort chip).
+ */
 @Composable
-fun ChoiceRow(options: List<String>, selected: Int, onSelect: (Int) -> Unit, modifier: Modifier = Modifier) {
+fun ChoiceRow(options: List<String>, selected: Int, onSelect: (Int) -> Unit, modifier: Modifier = Modifier, end: Dp = Gutter) {
     val p = MaterialTheme.palette
     val outer = RoundedCornerShape(12.dp)
-    Row(modifier.padding(horizontal = Gutter, vertical = 8.dp).horizontalScroll(rememberScrollState())) {
+    Row(modifier.padding(start = Gutter, end = end, top = 8.dp, bottom = 8.dp).horizontalScroll(rememberScrollState())) {
         Row(
             Modifier.clip(outer).background(p.panel).border(1.dp, p.border, outer).padding(4.dp),
             horizontalArrangement = Arrangement.spacedBy(4.dp),

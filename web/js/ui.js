@@ -1,4 +1,4 @@
-import { api } from './api.js';
+import { api, coverColors } from './api.js';
 export const esc = (s) => String(s ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 export const qs = (sel, el = document) => el.querySelector(sel);
 export const qsa = (sel, el = document) => [...el.querySelectorAll(sel)];
@@ -136,19 +136,37 @@ export function coverUrl(albumId, v, size) {
   return `/api/library/albums/${albumId}/cover${q ? '?' + q : ''}`;
 }
 
-// Image with graceful fallback to a placeholder letter.
+// Image with graceful fallback to a placeholder letter. A library cover whose colour the server sent
+// (`cover_color`) shows that colour at once and fades the picture in over it.
 export function art(src, label, cls = '', size = 0) {
-  const ph = `<div class="ph">${esc(initials(label))}</div>`;
+  let ph = `<div class="ph">${esc(initials(label))}</div>`;
   if (!src) return ph;
   // library covers: a small cached version for lists/tiles, a large one for big views
   let dim = '';
+  let fade = '';
   const m = /\/api\/(library\/albums\/[^/]+|share\/[^/]+)\/cover(\?v=\d+)?$/.exec(src);
   if (m) {
     const s = size || (cls === 'big' ? 1000 : 400);
     src = src.slice(0, src.length - (m[2] || '').length) + `?s=${s}` + (m[2] ? '&' + m[2].slice(1) : '');
     dim = ` width="${s}" height="${s}"`;
+    const color = m[1].startsWith('library/albums/') ? coverColors.get(m[1].slice(15)) : undefined;
+    if (color) {
+      ph = `<div class="ph" style="background:${color};color:transparent">${esc(initials(label))}</div>`;
+      fade = ' onload="this.classList.add(\'in\')"';
+      cls = cls ? `${cls} cover-fade` : 'cover-fade';
+    }
   }
-  return `${ph}<img class="${cls}" src="${esc(src)}" alt=""${dim} loading="lazy" decoding="async" onerror="this.remove()">`;
+  return `${ph}<img class="${cls}" src="${esc(src)}" alt=""${dim} loading="lazy" decoding="async"${fade} onerror="this.remove()">`;
+}
+
+/** Fetches covers ahead of the scroll (the next page of a list), so they are cached when it shows. */
+export function preloadCovers(urls) {
+  for (const u of urls.slice(0, 120)) {
+    if (!u) continue;
+    const img = new Image();
+    img.decoding = 'async';
+    img.src = u;
+  }
 }
 
 export const STATUS = {

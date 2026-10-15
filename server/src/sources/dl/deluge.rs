@@ -119,3 +119,20 @@ pub async fn poll(st: &AppState, hash: &str) -> anyhow::Result<Poll> {
 pub async fn remove(st: &AppState, hash: &str) {
     let _ = rpc(st, "core.remove_torrent", json!([hash, true])).await;
 }
+
+/// The torrent's files by Deluge's file index. None until a magnet's metadata is there.
+pub async fn files(st: &AppState, hash: &str) -> anyhow::Result<Option<Vec<String>>> {
+    let t = rpc(st, "core.get_torrent_status", json!([hash, ["files"]])).await?;
+    let mut list: Vec<(i64, String)> = t["files"].as_array().cloned().unwrap_or_default().iter().enumerate()
+        .map(|(i, f)| (f["index"].as_i64().unwrap_or(i as i64), f["path"].as_str().unwrap_or("").to_string())).collect();
+    list.sort_by_key(|x| x.0);
+    Ok(if list.is_empty() { None } else { Some(list.into_iter().map(|x| x.1).collect()) })
+}
+
+/// Priority 0 (skip) for every file but `keep`, which get the normal priority (4).
+pub async fn select(st: &AppState, hash: &str, keep: &[usize]) -> anyhow::Result<()> {
+    let n = files(st, hash).await?.map(|f| f.len()).unwrap_or(0);
+    let prios: Vec<i64> = (0..n).map(|i| if keep.contains(&i) { 4 } else { 0 }).collect();
+    rpc(st, "core.set_torrent_options", json!([[hash], { "file_priorities": prios }])).await?;
+    Ok(())
+}

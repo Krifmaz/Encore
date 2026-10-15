@@ -1,5 +1,5 @@
 import { api } from '../api.js';
-import { art, confirmDialog, debounce, emptyState, esc, fmt, icon, modal, popMenu, shareAlbum, shareArtist, shareTrack, skeletonGrid, toast } from '../ui.js';
+import { art, confirmDialog, coverUrl, debounce, emptyState, esc, fmt, icon, modal, popMenu, preloadCovers, shareAlbum, shareArtist, shareTrack, skeletonGrid, toast } from '../ui.js';
 import { bindTiles, libraryTile } from './common.js';
 import { addToPlaylistModal } from './playlists.js';
 import * as player from '../player.js';
@@ -185,6 +185,7 @@ export async function render(view, ctx) {
     } catch { /* no scrubber */ }
   };
 
+  let nextPage = null;   // {url, res}: the albums page after the last one shown, fetched ahead
   const load = async (append = false, want = 0) => {
     if (!append) { st.offset = 0; body.innerHTML = skeletonGrid(12); }
     const filtEl = view.querySelector('#lib-filter');
@@ -194,12 +195,22 @@ export async function render(view, ctx) {
     if (st.tab === 'duplicates') return renderDuplicates(body, view, more, load);
     if (st.tab === 'issues') return renderIssues(body, view, more);
     if (st.tab === 'albums' || st.tab === 'singles') {
-      const res = await api.get(`/library/albums?q=${encodeURIComponent(st.q)}&sort=${st.sort}&dir=${st.dir}&kind=${st.tab}&filter=${st.filter}&artist=${encodeURIComponent(st.artist)}&limit=${want ? Math.min(500, Math.max(PAGE, want)) : PAGE}&offset=${st.offset}`);
+      const pageUrl = (offset, limit) => `/library/albums?q=${encodeURIComponent(st.q)}&sort=${st.sort}&dir=${st.dir}&kind=${st.tab}&filter=${st.filter}&artist=${encodeURIComponent(st.artist)}&limit=${limit}&offset=${offset}`;
+      const url = pageUrl(st.offset, want ? Math.min(500, Math.max(PAGE, want)) : PAGE);
+      // the next page was fetched ahead (with its covers) when this one showed
+      const ahead = append && nextPage && nextPage.url === url ? nextPage.res : null;
+      nextPage = null;
+      const res = (ahead && await ahead.catch(() => null)) || await api.get(url);
       const html = res.items.map(libraryTile).join('');
       if (append) body.querySelector('.grid').insertAdjacentHTML('beforeend', html);
       else body.innerHTML = res.items.length ? `<div class="grid">${html}</div>` : emptyState(icon.library, 'No albums found', st.filter === 'untagged' ? 'Everything is tagged 🎉' : '');
       st.offset += res.items.length;
       more.classList.toggle('hidden', st.offset >= res.total);
+      if (st.offset < res.total) {
+        const u = pageUrl(st.offset, PAGE);
+        nextPage = { url: u, res: api.get(u).then(r => { preloadCovers(r.items.map(a => coverUrl(a.id, a.cover_v, 400))); return r; }) };
+        nextPage.res.catch(() => {});
+      }
       view.querySelector('#lib-sub').textContent = `${fmt.num(res.total)} ${st.tab}`;
     } else if (st.tab === 'artists') {
       const rows = await api.get(`/library/artists?q=${encodeURIComponent(st.q)}&sort=${st.sort}&dir=${st.dir}`);

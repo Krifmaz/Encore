@@ -27,9 +27,19 @@ fn base(st: &AppState, key: &str) -> String {
 
 // ---- Prowlarr ------------------------------------------------------------------------------------
 
+/// Audio (3000), MP3 (3010) and lossless (3040): where single-track releases are filed.
+pub const SONG_CATS: [&str; 3] = ["3000", "3010", "3040"];
+
 pub async fn search(st: &AppState, query: &str) -> anyhow::Result<Vec<Value>> {
+    search_in(st, query, &["3000"]).await
+}
+
+/// Search every indexer in these Newznab categories.
+pub async fn search_in(st: &AppState, query: &str, cats: &[&str]) -> anyhow::Result<Vec<Value>> {
+    let mut q: Vec<(&str, &str)> = vec![("query", query), ("type", "search"), ("limit", "100")];
+    q.extend(cats.iter().map(|c| ("categories", *c)));
     let r = st.http.get(format!("{}/api/v1/search", base(st, "prowlarr_url")))
-        .query(&[("query", query), ("type", "search"), ("categories", "3000"), ("limit", "100")])
+        .query(&q)
         .header("X-Api-Key", st.cfg.str("prowlarr_api_key")).timeout(std::time::Duration::from_secs(90)).send().await
         .map_err(|e| anyhow::anyhow!("Prowlarr unreachable: {e}"))?;
     if !r.status().is_success() {
@@ -67,6 +77,30 @@ static LOSSLESS: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"(?i)\b(flac|los
 static MP3_320: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"(?i)\b(320|v0)\b").unwrap());
 static BAD: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"(?i)\b(live|remix(es)?|karaoke|instrumental|8d|nightcore|tribute|cover)\b").unwrap());
 static BIG: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"(?i)\b(discography|collection|anthology|complete works|box ?set)\b").unwrap());
+
+static BRACKET: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"\s*[\(\[][^\)\]]*[\)\]]").unwrap());
+/// Extras of a catalogue title that file and release names often leave out.
+static EXTRA: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"(?i)\b(feat|ft|featuring|with|remaster(ed)?|version|mono|stereo|edit|bonus|deluxe)\b").unwrap());
+static FEAT_TAIL: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"(?i)\s+(feat\.?|ft\.?|featuring)\s.*$").unwrap());
+
+/// A song title without "(feat. X)", "(Remastered 2011)" or " - 2009 Version" (Deezer and Apple add them,
+/// files usually don't). Versions that matter (live, remix …) stay.
+fn core_title(song: &str) -> String {
+    let keep = |x: &str| !EXTRA.is_match(x) || BAD.is_match(x);
+    let out = BRACKET.replace_all(song, |c: &regex::Captures| if keep(&c[0]) { c[0].to_string() } else { String::new() }).into_owned();
+    let out = match out.split_once(" - ") {
+        Some((l, r)) if !keep(r) => l.to_string(),
+        _ => out,
+    };
+    FEAT_TAIL.replace(&out, "").trim().to_string()
+}
+
+/// `contains` of the song title, or of its core when the extras are what's missing.
+fn contains_song(hay: &str, song: &str) -> f64 {
+    let t = contains(hay, song);
+    let core = core_title(song);
+    if core.is_empty() || core == song { t } else { t.max(contains(hay, &core)) }
+}
 
 fn norm(s: &str) -> String {
     NON_ALNUM.replace_all(&s.to_lowercase().replace('&', " and "), " ").split_whitespace().collect::<Vec<_>>().join(" ")
@@ -127,6 +161,76 @@ pub fn rank_album(st: &AppState, results: &[Value], artist: &str, album: &str, l
     out
 }
 
+// ---- single songs --------------------------------------------------------------------------------
+
+/// How well a release matches one song (higher is better), and whether it looks like a single-track
+/// release. None when it isn't that song. `size` in bytes (0 = unknown).
+pub fn score_song(title: &str, size: f64, seeders: Option<i64>, proto: &str, artist: &str, song: &str) -> Option<(f64, bool)> {
+    let (t, a) = (contains_song(title, song), contains(title, artist));
+    if t < 0.8 || a < 0.5 {
+        return None;
+    }
+    let mb = size / 1e6;
+    let single = mb > 0.0 && mb <= 250.0 && !BIG.is_match(title);
+    let lossless = LOSSLESS.is_match(title);
+    let mut score = t * 40.0 + a * 15.0 + if lossless { 30.0 } else if MP3_320.is_match(title) { 12.0 } else { 0.0 };
+    if single {
+        score += 12.0;
+    }
+    if BAD.is_match(title) && !BAD.is_match(song) {
+        score -= 20.0;
+    }
+    if BIG.is_match(title) {
+        score -= 25.0;
+    }
+    // extra words beyond artist and title: a longer name is more likely another release that mentions the song
+    let extra = norm(title).split_whitespace().filter(|w| !norm(song).split_whitespace().any(|x| x == *w) && !norm(artist).split_whitespace().any(|x| x == *w)).count();
+    score -= (extra as f64).min(10.0);
+    score += if proto == "usenet" { 8.0 } else { (seeders.unwrap_or(0) as f64 + 1.0).log2().min(10.0) };
+    Some(((score * 10.0).round() / 10.0, single))
+}
+
+pub fn is_audio(name: &str) -> bool {
+    super::slskd::AUDIO_EXT.contains(&super::slskd::ext(name).as_str())
+}
+
+static LEAD_NO: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"^\s*(?:(?:cd|disc)\s*\d+\s*[-_. ]\s*)?(?:\d-)?(\d{1,3})(?:\D|$)").unwrap());
+
+/// The file of `names` (paths inside a release) that is this song: its name holds every word of the
+/// title (or its track number and most of the title), with as few other words as possible. Versions the
+/// title doesn't ask for (live, remix, instrumental …) lose.
+pub fn pick_file(names: &[String], artist: &str, song: &str, track_no: Option<u32>) -> Option<usize> {
+    let want = norm(song);
+    if want.is_empty() {
+        return None;
+    }
+    let mut best: Option<(f64, usize)> = None;
+    for (i, n) in names.iter().enumerate() {
+        if !is_audio(n) {
+            continue;
+        }
+        let file = n.replace('\\', "/");
+        let file = file.rsplit('/').next().unwrap_or("");
+        let stem = file.rsplit_once('.').map(|x| x.0).unwrap_or(file);
+        let t = contains_song(stem, song);
+        let no = LEAD_NO.captures(stem).and_then(|c| c[1].parse::<u32>().ok());
+        let by_no = track_no.is_some() && no == track_no;
+        if t < 0.999 && !(by_no && t >= 0.5) {
+            continue;
+        }
+        let words = norm(stem);
+        let extra = words.split_whitespace().filter(|w| !want.split_whitespace().any(|x| x == *w) && !norm(artist).split_whitespace().any(|x| x == *w) && w.parse::<u32>().is_err()).count();
+        let mut sc = t * 10.0 - extra as f64 + if by_no { 5.0 } else { 0.0 };
+        if BAD.is_match(stem) && !BAD.is_match(song) {
+            sc -= 8.0;
+        }
+        if best.is_none_or(|(b, _)| sc > b) {
+            best = Some((sc, i));
+        }
+    }
+    best.map(|(_, i)| i)
+}
+
 // ---- one download, through the chosen client ----------------------------------------------------
 
 /// The client a release of this protocol goes to.
@@ -151,8 +255,38 @@ pub async fn poll(st: &AppState, id: &str) -> anyhow::Result<Poll> {
     c.poll(st, own).await
 }
 
+pub enum SongFile {
+    /// The client doesn't know the files yet (a magnet's metadata is loading): ask again later.
+    Pending,
+    /// The client downloads whole releases (Usenet, blackholes) or there is nothing to skip.
+    Whole,
+    /// Only this file downloads now.
+    Only(String),
+    /// No file in the release is this song.
+    Missing,
+}
+
+/// A song from a release with several files: tell the torrent client to download only the song's file.
+pub async fn select_song(st: &AppState, id: &str, artist: &str, song: &str, track_no: Option<u32>) -> anyhow::Result<SongFile> {
+    let (c, own) = Client::for_id(id);
+    if !c.can_select() {
+        return Ok(SongFile::Whole);
+    }
+    let Some(names) = c.files(st, own).await? else { return Ok(SongFile::Pending) };
+    if names.iter().filter(|n| is_audio(n)).count() <= 1 {
+        return Ok(SongFile::Whole);
+    }
+    let Some(i) = pick_file(&names, artist, song, track_no) else { return Ok(SongFile::Missing) };
+    c.select(st, own, &[i]).await?;
+    Ok(SongFile::Only(names[i].clone()))
+}
+
 /// Remove the download (and what's left of its files) from the client.
 pub async fn remove(st: &AppState, id: &str) {
     let (c, own) = Client::for_id(id);
     c.remove(st, own).await
 }
+
+#[cfg(test)]
+#[path = "torznab_tests.rs"]
+mod song_tests;

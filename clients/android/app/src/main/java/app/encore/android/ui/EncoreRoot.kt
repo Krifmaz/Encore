@@ -160,6 +160,8 @@ private fun MainScreen(graph: AppGraph, player: PlayerConnection, session: Sessi
     val devicesOpen by RemoteUi.devicesOpen.collectAsState()
 
     LaunchedEffect(session) { graph.likes.refresh(force = true) }
+    // the first page of each Library tab's covers, so the tabs open with their covers in place
+    LaunchedEffect(session) { graph.coverPreloader.firstPages() }
     // the next song's cover, fetched ahead so it shows at once when the song changes
     val queueIndex by player.queueIndex.collectAsState()
     LaunchedEffect(queueIndex, nowPlaying?.id) { player.queue.value.getOrNull(queueIndex + 1)?.let { graph.coverPreloader.nextSong(it.albumId) } }

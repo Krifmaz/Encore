@@ -156,6 +156,35 @@ impl Client {
         }
     }
 
+    /// Can download only some files of a release (torrent clients with an API; blackholes and Usenet
+    /// can't).
+    pub fn can_select(self) -> bool {
+        matches!(self, Client::Qbit | Client::Transmission | Client::Deluge | Client::Rtorrent)
+    }
+
+    /// The files of a torrent (paths inside it, in the client's order). None while a magnet's metadata
+    /// is still loading, and for clients that can't select files.
+    pub async fn files(self, st: &AppState, id: &str) -> anyhow::Result<Option<Vec<String>>> {
+        match self {
+            Client::Qbit => qbit::files(st, id).await,
+            Client::Transmission => transmission::files(st, id).await,
+            Client::Deluge => deluge::files(st, id).await,
+            Client::Rtorrent => rtorrent::files(st, id).await,
+            _ => Ok(None),
+        }
+    }
+
+    /// Download only the files at `keep` (indexes into `files`); the rest are skipped.
+    pub async fn select(self, st: &AppState, id: &str, keep: &[usize]) -> anyhow::Result<()> {
+        match self {
+            Client::Qbit => qbit::select(st, id, keep).await,
+            Client::Transmission => transmission::select(st, id, keep).await,
+            Client::Deluge => deluge::select(st, id, keep).await,
+            Client::Rtorrent => rtorrent::select(st, id, keep).await,
+            _ => anyhow::bail!("{} downloads whole releases", self.name()),
+        }
+    }
+
     /// Test connection: Ok(extra words, e.g. " 4.0.5") when the client answers and accepts the login.
     pub async fn status(self, st: &AppState) -> anyhow::Result<String> {
         match self {

@@ -224,3 +224,84 @@ async fn warm_pass_makes_grid_thumbnails() {
     };
     assert!(v > 0);
 }
+
+#[test]
+fn dominant_color_picks_the_main_colour() {
+    // mostly red with a blue band and a thin grey frame: red
+    let img = image::RgbImage::from_fn(200, 200, |x, y| {
+        if x < 4 || y < 4 || x > 195 || y > 195 {
+            image::Rgb([128, 128, 128])
+        } else if y > 150 {
+            image::Rgb([20, 40, 220])
+        } else {
+            image::Rgb([220, 30, 30])
+        }
+    });
+    let c = super::dominant_color(&img).unwrap();
+    let rgb = u32::from_str_radix(&c[1..], 16).unwrap();
+    let (r, g, b) = ((rgb >> 16) & 255, (rgb >> 8) & 255, rgb & 255);
+    assert!(c.len() == 7 && c.starts_with('#'), "{c}");
+    assert!(r > 190 && g < 60 && b < 60, "red wins: {c}");
+    // one flat colour comes back as itself (Lab round trip)
+    let flat = image::RgbImage::from_pixel(50, 50, image::Rgb([18, 120, 77]));
+    assert_eq!(super::dominant_color(&flat).as_deref(), Some("#12784d"));
+    // the same answer every time
+    assert_eq!(super::dominant_color(&img), super::dominant_color(&img));
+    assert_eq!(super::dominant_color(&image::RgbImage::new(0, 0)), None);
+}
+
+#[test]
+fn warm_order_puts_recent_albums_first() {
+    let added = vec![
+        ("old".to_string(), 100.0),
+        ("new".to_string(), 900.0),
+        ("played".to_string(), 50.0),
+        ("middle".to_string(), 500.0),
+    ];
+    let played: std::collections::HashMap<String, f64> = [("played".to_string(), 1000.0), ("old".to_string(), 10.0)].into_iter().collect();
+    assert_eq!(super::priority_order(added, &played), vec!["played", "new", "middle", "old"]);
+}
+
+#[tokio::test]
+async fn warm_pass_finds_cover_colours_and_json_carries_them() {
+    let e = setup("color").await;
+    let aid = e.album("Orange");
+    // a flat orange cover
+    image::RgbImage::from_pixel(600, 600, image::Rgb([240, 140, 20])).save(e.dir.join("music").join(&aid).join("cover.jpg")).unwrap();
+    e.st.library.forget_cover(Some(&aid));
+    e.st.library.warm_covers(e.st.db.clone());
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
+    let v = loop {
+        if let Some(Some(v)) = e.st.library.covers.known(&aid) {
+            if e.st.library.covers.color(&e.st.db, &aid, v).is_some() {
+                break v;
+            }
+        }
+        assert!(std::time::Instant::now() < deadline, "warm pass found no colour");
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    };
+    let c = e.st.library.covers.color(&e.st.db, &aid, v).unwrap();
+    let rgb = u32::from_str_radix(&c[1..], 16).unwrap();
+    let (r, g, b) = ((rgb >> 16) & 255, (rgb >> 8) & 255, rgb & 255);
+    assert!(r > 200 && (100..180).contains(&g) && b < 70, "orange: {c}");
+    // stored, for the next start
+    let row = e.st.db.one("SELECT v, color FROM cover_color WHERE album_id=?", p![aid]).unwrap().unwrap();
+    use crate::db::RowExt;
+    assert_eq!((row.i("v") as u64, row.s("color")), (v, c.clone()));
+    // the album, its songs and the albums list carry it next to cover_v
+    let a = e.get(&format!("/api/library/albums/{aid}"), &[]).await.json();
+    assert_eq!(a["cover_color"].as_str(), Some(c.as_str()), "{a}");
+    assert_eq!(a["tracks"][0]["cover_color"].as_str(), Some(c.as_str()));
+    let l = e.get("/api/library/albums?limit=10", &[]).await.json();
+    assert!(l.to_string().contains(&format!("\"cover_color\":\"{c}\"")), "{l}");
+    // the pass is done and says so
+    let (done, total, _) = e.st.library.covers.progress();
+    assert!(total >= 1 && done >= 1, "{done}/{total}");
+    // a new cover: the old colour is not used for it
+    std::thread::sleep(std::time::Duration::from_millis(20));
+    image::RgbImage::from_pixel(600, 600, image::Rgb([20, 40, 200])).save(e.dir.join("music").join(&aid).join("cover.jpg")).unwrap();
+    e.st.library.forget_cover(Some(&aid));
+    let a = e.get(&format!("/api/library/albums/{aid}"), &[]).await.json();
+    assert_ne!(a["cover_v"].as_u64(), Some(v));
+    assert_ne!(a["cover_color"].as_str(), Some(c.as_str()), "{a}");
+}

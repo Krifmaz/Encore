@@ -15,6 +15,7 @@ use web_sys::Element;
 fn names(src: &str) -> Option<&'static str> {
     match src {
         "slskd" => Some("Soulseek"),
+        "torznab" => Some("Torrents & Usenet"),
         "deezer" => Some("Deezer"),
         "ytmusic" => Some("YouTube Music"),
         "lidarr" => Some("Lidarr"),
@@ -274,6 +275,7 @@ impl Picker {
             body.insert("artist".into(), if o.truthy("artist") { o.g("artist").clone() } else { json!("") });
             body.insert("title".into(), if o.truthy("title") { o.g("title").clone() } else if o.truthy("album") { o.g("album").clone() } else { json!("") });
             body.insert("query".into(), json!(q));
+            if self.kind == "track" && o.has("album") { body.insert("album".into(), o.g("album").clone()); }
             // JSON.stringify drops undefined: only keys opts actually has go out
             for k in ["mbid", "artist_mbid", "track_count", "length"] {
                 if o.has(k) { body.insert(k.into(), o.g(k).clone()); }

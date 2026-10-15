@@ -8,9 +8,13 @@
 //! - `sort=` / `dir=`: the list's sort keys
 //!
 //! Labels: name/title/artist sorts → "#" (digits and symbols) and A–Z (accents folded, by the first
-//! character the list sorts on); release date → years ("?" unknown); date added → months ("Oct 2026");
-//! length / size / counts → buckets. A label that already had a section (an accented name sorts after "z")
-//! stays in the section it falls in. A filtered list (`q=`) is ranked, not sorted: no sections.
+//! character the list sorts on); release date → years ("?" unknown); date added → months ("Oct 2026"),
+//! and a month that holds a big part of the list (a library added in one scan) split by day, hour or
+//! minute ("14 Oct 2026, 15:42", with `short: "15:42"` for the rail); length / size / counts → ranges.
+//! A label that already had a section (an accented name sorts after "z") stays in the section it falls in.
+//! A filtered list (`q=`) is ranked, not sorted: no sections.
+//!
+//! Each section: `{label, offset}`, plus `short` when the rail shows a shorter text than the bubble.
 use super::{order, ALBUM_SORTS, TRACK_SORTS};
 use crate::auth::User;
 use crate::error::ApiResult;
@@ -120,10 +124,10 @@ pub async fn index(State(st): State<AppState>, User(_): User, Query(a): Query<In
             st.db.query(&sql, params)?.into_iter().map(|r| (r.get(col).cloned().unwrap_or(Value::Null), by)).collect()
         }
     };
-    let labels: Vec<String> = if values.first().is_some_and(|(_, by)| *by == By::Letter) {
-        letters(values.iter().map(|(v, _)| v.as_str().unwrap_or("")))
-    } else {
-        values.iter().map(|(v, by)| label(v, *by)).collect()
+    let labels: Vec<(String, Option<String>)> = match values.first().map(|(_, by)| *by) {
+        Some(By::Letter) => letters(values.iter().map(|(v, _)| v.as_str().unwrap_or(""))).into_iter().map(|l| (l, None)).collect(),
+        Some(By::Month) => added_labels(&values.iter().map(|(v, _)| num(v)).collect::<Vec<_>>()),
+        _ => values.iter().map(|(v, by)| (label(v, *by), None)).collect(),
     };
     Ok(Json(json!(sections(labels.into_iter()))))
 }
@@ -146,18 +150,121 @@ pub(super) fn letters<'a>(names: impl Iterator<Item = &'a str>) -> Vec<String> {
     }).collect()
 }
 
-/// `[{label, offset}]`: a section where the label changes to one not seen yet.
-fn sections(labels: impl Iterator<Item = String>) -> Vec<Value> {
+/// `[{label, offset, short?}]`: a section where the label changes to one not seen yet.
+fn sections(labels: impl Iterator<Item = (String, Option<String>)>) -> Vec<Value> {
     let mut seen = std::collections::HashSet::new();
     let mut prev: Option<String> = None;
     let mut out = vec![];
-    for (i, l) in labels.enumerate() {
+    for (i, (l, short)) in labels.enumerate() {
         if prev.as_deref() != Some(l.as_str()) && seen.insert(l.clone()) {
-            out.push(json!({ "label": l, "offset": i }));
+            let mut s = json!({ "label": l, "offset": i });
+            if let Some(short) = short {
+                s["short"] = json!(short);
+            }
+            out.push(s);
         }
         prev = Some(l);
     }
     out
+}
+
+/// Finer steps for date added: 0 month, 1 day, 2 hour, 3 minute, 4 second.
+const FINEST: u8 = 4;
+
+fn time_key(t: f64, level: u8) -> i64 {
+    if t <= 0.0 {
+        return i64::MIN;
+    }
+    match level {
+        0 => {
+            let (y, m, _) = civil(t);
+            y * 12 + m
+        }
+        1 => (t / 86_400.0).floor() as i64,
+        2 => (t / 3_600.0).floor() as i64,
+        3 => (t / 60.0).floor() as i64,
+        _ => t.floor() as i64,
+    }
+}
+
+/// Date-added labels (epoch seconds, in list order): months; where one section holds more than about a
+/// twelfth of the list (everything a first scan added shares a time), that section is split by the
+/// coarsest of day / hour / minute that splits it, again until no section is that big or minutes are
+/// reached, so the side bar has places to jump to inside it. The other months stay months.
+fn added_labels(ts: &[f64]) -> Vec<(String, Option<String>)> {
+    let n = ts.len();
+    let limit = (n / 12).max(40);
+    let mut level = vec![0u8; n];
+    loop {
+        let mut changed = false;
+        let mut i = 0;
+        while i < n {
+            let k = time_key(ts[i], level[i]);
+            let mut j = i + 1;
+            while j < n && level[j] == level[i] && time_key(ts[j], level[j]) == k {
+                j += 1;
+            }
+            if j - i > limit && ts[i] > 0.0 {
+                // the coarsest finer step that tells these apart
+                let next = (level[i] + 1..=FINEST).find(|&l| {
+                    let k0 = time_key(ts[i], l);
+                    ts[i..j].iter().any(|&t| time_key(t, l) != k0)
+                });
+                if let Some(l) = next {
+                    level[i..j].iter_mut().for_each(|x| *x = l);
+                    changed = true;
+                }
+            }
+            i = j;
+        }
+        if !changed {
+            break;
+        }
+    }
+    let mut out: Vec<(String, Option<String>)> = ts.iter().zip(&level).map(|(&t, &l)| time_label(t, l)).collect();
+    // still too big (a whole scan in the same second): blocks of `limit` rows, "15:42:07 (2)" …, so the side
+    // bar always has places to jump to and every jump lands exactly
+    let mut i = 0;
+    while i < n {
+        let k = time_key(ts[i], level[i]);
+        let mut j = i + 1;
+        while j < n && level[j] == level[i] && time_key(ts[j], level[j]) == k {
+            j += 1;
+        }
+        if j - i > limit && ts[i] > 0.0 {
+            for (b, x) in (i..j).enumerate().filter(|(b, _)| *b >= limit) {
+                let part = b / limit + 1;
+                let (l, short) = &mut out[x];
+                *l = format!("{l} ({part})");
+                *short = Some(format!("{} ({part})", short.clone().unwrap_or_else(|| l.clone())));
+            }
+        }
+        i = j;
+    }
+    out
+}
+
+/// "Oct 2026"; "14 Oct 2026" (rail: "14 Oct"); "14 Oct 2026, 15:00" (rail: "15:00"); "14 Oct 2026, 15:42" (UTC).
+fn time_label(t: f64, level: u8) -> (String, Option<String>) {
+    if t <= 0.0 {
+        return ("?".into(), None);
+    }
+    if level == 0 {
+        return (month(t), None);
+    }
+    let (y, m, d) = civil(t);
+    let mon = MONTHS[(m - 1) as usize];
+    let secs = t.floor() as i64;
+    let (hh, mm) = (secs.rem_euclid(86_400) / 3600, secs.rem_euclid(3600) / 60);
+    match level {
+        1 => (format!("{d} {mon} {y}"), Some(format!("{d} {mon}"))),
+        2 => (format!("{d} {mon} {y}, {hh:02}:00"), Some(format!("{hh:02}:00"))),
+        3 => (format!("{d} {mon} {y}, {hh:02}:{mm:02}"), Some(format!("{hh:02}:{mm:02}"))),
+        _ => {
+            let ss = secs.rem_euclid(60);
+            (format!("{d} {mon} {y}, {hh:02}:{mm:02}:{ss:02}"), Some(format!("{hh:02}:{mm:02}:{ss:02}")))
+        }
+    }
 }
 
 fn num(v: &Value) -> f64 {
@@ -187,27 +294,17 @@ fn label(v: &Value, by: By) -> String {
             }
             month(t)
         }
-        By::TrackLength => {
-            let m = num(v) / 60.0;
-            (if m < 2.0 { "<2 min" } else if m < 5.0 { "2–5 min" } else if m < 10.0 { "5–10 min" } else if m < 20.0 { "10–20 min" } else { "20+ min" }).into()
-        }
-        By::AlbumLength => {
-            let m = num(v) / 60.0;
-            (if m < 20.0 { "<20 min" } else if m < 40.0 { "20–40 min" } else if m < 60.0 { "40–60 min" } else { "60+ min" }).into()
-        }
-        By::Size => {
-            let mb = num(v) / 1_000_000.0;
-            (if mb < 100.0 { "<100 MB" } else if mb < 250.0 { "100–250 MB" } else if mb < 500.0 { "250–500 MB" } else if mb < 1000.0 { "500 MB–1 GB" } else { "1 GB+" }).into()
-        }
-        By::AlbumCount => {
-            let n = num(v) as i64;
-            (if n <= 1 { "1 album" } else if n < 5 { "2–4 albums" } else if n < 10 { "5–9 albums" } else if n < 20 { "10–19 albums" } else { "20+ albums" }).into()
-        }
-        By::TrackCount => {
-            let n = num(v) as i64;
-            (if n < 10 { "<10 songs" } else if n < 25 { "10–24 songs" } else if n < 50 { "25–49 songs" } else if n < 100 { "50–99 songs" } else { "100+ songs" }).into()
-        }
+        By::TrackLength => range(num(v) / 60.0, &[(2.0, "<2 min"), (3.0, "2–3 min"), (4.0, "3–4 min"), (5.0, "4–5 min"), (7.0, "5–7 min"), (10.0, "7–10 min"), (20.0, "10–20 min")], "20+ min"),
+        By::AlbumLength => range(num(v) / 60.0, &[(20.0, "<20 min"), (30.0, "20–30 min"), (40.0, "30–40 min"), (50.0, "40–50 min"), (60.0, "50–60 min"), (80.0, "60–80 min")], "80+ min"),
+        By::Size => range(num(v) / 1_000_000.0, &[(50.0, "<50 MB"), (100.0, "50–100 MB"), (250.0, "100–250 MB"), (500.0, "250–500 MB"), (1000.0, "500 MB–1 GB"), (2000.0, "1–2 GB")], "2 GB+"),
+        By::AlbumCount => range(num(v), &[(2.0, "1 album"), (3.0, "2 albums"), (5.0, "3–4 albums"), (10.0, "5–9 albums"), (20.0, "10–19 albums")], "20+ albums"),
+        By::TrackCount => range(num(v), &[(5.0, "<5 songs"), (10.0, "5–9 songs"), (25.0, "10–24 songs"), (50.0, "25–49 songs"), (100.0, "50–99 songs"), (200.0, "100–199 songs")], "200+ songs"),
     }
+}
+
+/// The label of the first range `x` is below, or `top`.
+fn range(x: f64, ranges: &[(f64, &str)], top: &str) -> String {
+    ranges.iter().find(|(below, _)| x < *below).map_or(top, |(_, l)| *l).to_string()
 }
 
 /// "#" or "A"–"Z" for a name starting with an ASCII character (what the list sorts on); None otherwise.
@@ -232,6 +329,12 @@ const MONTHS: [&str; 12] = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Au
 
 /// "Oct 2026" for epoch seconds (UTC).
 fn month(t: f64) -> String {
+    let (y, m, _) = civil(t);
+    format!("{} {y}", MONTHS[(m - 1) as usize])
+}
+
+/// (year, month 1–12, day) of epoch seconds (UTC).
+fn civil(t: f64) -> (i64, i64, i64) {
     // days → civil date (Howard Hinnant's algorithm)
     let z = (t / 86400.0).floor() as i64 + 719_468;
     let era = z.div_euclid(146_097);
@@ -241,7 +344,8 @@ fn month(t: f64) -> String {
     let mp = (5 * doy + 2) / 153;
     let m = if mp < 10 { mp + 3 } else { mp - 9 };
     let y = yoe + era * 400 + if m <= 2 { 1 } else { 0 };
-    format!("{} {y}", MONTHS[(m - 1) as usize])
+    let d = doy - (153 * mp + 2) / 5 + 1;
+    (y, m, d)
 }
 
 #[cfg(test)]
@@ -265,14 +369,71 @@ mod unit {
         assert_eq!(label(&json!(""), By::Year), "?");
         assert_eq!(label(&Value::Null, By::Year), "?");
         assert_eq!(label(&json!(119.0), By::TrackLength), "<2 min");
-        assert_eq!(label(&json!(300.0), By::TrackLength), "5–10 min");
-        assert_eq!(label(&json!(3600.0), By::AlbumLength), "60+ min");
+        assert_eq!(label(&json!(300.0), By::TrackLength), "5–7 min");
+        assert_eq!(label(&json!(1200.0), By::TrackLength), "20+ min");
+        assert_eq!(label(&json!(3600.0), By::AlbumLength), "60–80 min");
         assert_eq!(label(&json!(150_000_000), By::Size), "100–250 MB");
+        assert_eq!(label(&json!(3_000_000_000_i64), By::Size), "2 GB+");
+        assert_eq!(label(&json!(1), By::AlbumCount), "1 album");
+        assert_eq!(label(&json!(2), By::AlbumCount), "2 albums");
+        assert_eq!(label(&json!(150), By::TrackCount), "100–199 songs");
+        assert_eq!(civil(951_782_400.0), (2000, 2, 29));
+        assert_eq!(time_label(1_791_995_520.0, 3), ("14 Oct 2026, 16:32".to_string(), Some("16:32".to_string())));
+        assert_eq!(time_label(1_791_995_520.0, 1), ("14 Oct 2026".to_string(), Some("14 Oct".to_string())));
+    }
+
+    #[test]
+    fn added_splits_a_big_month() {
+        // 10 albums added over October, then 500 by one first scan on 14 Jan 2020 over 50 minutes (newest first)
+        let oct = 1_791_936_000.0;
+        let scan = 1_579_000_000.0;
+        let mut ts: Vec<f64> = (0..10).map(|i| oct - i as f64 * 86_400.0).collect();
+        ts.extend((0..500).map(|i| scan + 3000.0 - i as f64 * 6.0));
+        ts.push(0.0);
+        let l = added_labels(&ts);
+        assert_eq!(l.len(), ts.len());
+        // the small month stays a month; the scan becomes minutes (one hour, one day: those don't split it)
+        assert_eq!(l[0].0, "Oct 2026");
+        assert!(l[9].0.starts_with("Oct 2026") || l[9].0.starts_with("Sep 2026"), "{:?}", l[9]);
+        assert_eq!(l[10].0, "14 Jan 2020, 11:56");
+        assert_eq!(l[10].1.as_deref(), Some("11:56"));
+        assert_eq!(l[ts.len() - 1].0, "?");
+        let secs = sections(l.into_iter());
+        assert!(secs.len() > 40, "{}", secs.len());
+        // jumps stay exact: each section starts where its label first appears
+        let again = added_labels(&ts);
+        for s in &secs {
+            let off = s["offset"].as_u64().unwrap() as usize;
+            assert_eq!(again[off].0, s["label"].as_str().unwrap());
+            assert!(off == 0 || again[off - 1].0 != again[off].0);
+        }
+        // a small list keeps months
+        let few: Vec<f64> = (0..30).map(|i| scan + i as f64).collect();
+        assert!(added_labels(&few).iter().all(|(l, s)| l == "Jan 2020" && s.is_none()));
+    }
+
+    #[test]
+    fn added_splits_a_scan_inside_one_minute() {
+        let scan = 1_579_000_020.0;
+        // 500 albums in 40 seconds: seconds
+        let ts: Vec<f64> = (0..500).map(|i| scan + 40.0 - i as f64 * 0.08).collect();
+        let l = added_labels(&ts);
+        assert!(sections(l.clone().into_iter()).len() > 1);
+        assert!(l[0].1.as_deref().is_some_and(|s| s.matches(':').count() == 2), "{:?}", l[0]);
+        // all in the same second: numbered blocks, still exact jumps
+        let ts = vec![scan; 500];
+        let l = added_labels(&ts);
+        let secs = sections(l.clone().into_iter());
+        assert!(secs.len() > 1, "{secs:?}");
+        for s in &secs {
+            let off = s["offset"].as_u64().unwrap() as usize;
+            assert_eq!(l[off].0, s["label"].as_str().unwrap());
+        }
     }
 
     #[test]
     fn sections_skip_repeated_labels() {
-        let v = ["#", "A", "A", "B", "E", "Z", "E"].iter().map(|s| s.to_string());
+        let v = ["#", "A", "A", "B", "E", "Z", "E"].iter().map(|s| (s.to_string(), None));
         assert_eq!(json!(sections(v)), json!([
             { "label": "#", "offset": 0 }, { "label": "A", "offset": 1 }, { "label": "B", "offset": 3 },
             { "label": "E", "offset": 4 }, { "label": "Z", "offset": 5 },

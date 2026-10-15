@@ -19,6 +19,7 @@ pub fn router() -> Router<AppState> {
         .route("/api/requests/from-link", post(from_link))
         .route("/api/requests/link", post(link))
         .route("/api/requests/clear", post(clear))
+        .route("/api/requests/events", get(crate::req_events::events))
         .route("/api/requests/{rid}", delete(remove))
         .route("/api/requests/{rid}/approve", post(approve))
         .route("/api/requests/{rid}/deny", post(deny))
@@ -71,7 +72,44 @@ fn dup(st: &AppState, sql: &str, params: Vec<Value>) -> ApiResult<()> {
     Ok(())
 }
 
+/// The catalogue ids in a Discover "ext-…" album id ("ext-d302127", "ext-d2-a3": Deezer 2, Apple 3).
+pub fn ext_from_id(id: &str) -> Option<Value> {
+    let rest = id.strip_prefix("ext-")?;
+    let mut ext = serde_json::Map::new();
+    for part in rest.split('-') {
+        let (k, n) = part.split_at(part.chars().next().map_or(0, |c| c.len_utf8()));
+        let key = match k { "d" => "deezer", "a" => "apple", _ => continue };
+        if let Ok(n) = n.parse::<i64>() {
+            ext.entry(key).or_insert(json!(n));
+        }
+    }
+    (!ext.is_empty()).then_some(Value::Object(ext))
+}
+
 pub fn create_request(st: &AppState, u: &Row, b: &NewRequest, parent: Option<i64>, extra: Option<Value>) -> ApiResult<i64> {
+    // an "ext-…" id is a Deezer / Apple album from Discover search, not a MusicBrainz id (clients that
+    // don't know ext albums send it as the mbid): request it as the ext album it is
+    let fixed;
+    let b = match nz(&b.mbid).filter(|m| m.starts_with("ext-")) {
+        Some(m) => {
+            let ext = match (b.kind.as_str(), ext_from_id(m)) {
+                ("album", Some(e)) => e,
+                _ => return Err(err(400, "That isn't a MusicBrainz id")),
+            };
+            let mut nb = b.clone();
+            nb.mbid = None;
+            let mut merged = b.ext.clone().filter(|e| e.is_object()).unwrap_or(json!({}));
+            for (k, v) in ext.as_object().into_iter().flatten() {
+                if merged[k].is_null() {
+                    merged[k] = v.clone();
+                }
+            }
+            nb.ext = Some(merged);
+            fixed = nb;
+            &fixed
+        }
+        None => b,
+    };
     let has_extra = extra.is_some();
     let ext_ok = b.ext.as_ref().is_some_and(|e| EXT_SOURCES.iter().any(|k| !e[k].is_null() && e[k] != ""));
     let (artist, title) = (nz(&b.artist), nz(&b.title).or(nz(&b.album)));
@@ -137,6 +175,7 @@ pub fn create_request(st: &AppState, u: &Row, b: &NewRequest, parent: Option<i64
            if approved { "queued" } else { "pending" }, if approved { "" } else { "Waiting for admin approval" }, detail.to_string(), parent, t, t])?;
     let what = title.or(artist).or(nz(&b.url)).unwrap_or("");
     st.db.log("info", &format!("{} requested {}: {what}", u.s("username"), b.kind));
+    crate::req_events::emit(&st.db, id);
     Ok(id)
 }
 
@@ -276,7 +315,9 @@ fn family(st: &AppState, id: i64) -> Vec<i64> {
 }
 
 fn set(st: &AppState, id: i64, status: &str, message: &str) -> Result<i64, ApiError> {
-    Ok(st.db.execute("UPDATE requests SET status=?, message=?, updated_at=? WHERE id=?", p![status, message, now(), id])?)
+    let n = st.db.execute("UPDATE requests SET status=?, message=?, updated_at=? WHERE id=?", p![status, message, now(), id])?;
+    crate::req_events::emit(&st.db, id);
+    Ok(n)
 }
 
 async fn approve(State(st): State<AppState>, Admin(_): Admin, Path(rid): Path<i64>) -> ApiResult<Json<Value>> {
@@ -307,6 +348,7 @@ async fn retry(State(st): State<AppState>, User(u): User, Path(rid): Path<i64>) 
     if r["kind"] == "playlist" {
         for c in st.db.query("SELECT id FROM requests WHERE parent_id=? AND status IN ('failed','cancelled')", p![rid])? {
             st.db.execute(reset, p!["{}", now(), c.i("id")])?;
+            crate::req_events::emit(&st.db, c.i("id"));
         }
         return Ok(Json(json!({ "ok": true })));
     }
@@ -323,6 +365,7 @@ async fn retry(State(st): State<AppState>, User(u): User, Path(rid): Path<i64>) 
     }
     let keep = match r["detail"]["length"].as_f64() { Some(l) => json!({ "length": l }), None => json!({}) };
     st.db.execute(reset, p![keep.to_string(), now(), rid])?;
+    crate::req_events::emit(&st.db, rid);
     Ok(Json(json!({ "ok": true })))
 }
 
@@ -431,4 +474,21 @@ async fn clear(State(st): State<AppState>, User(u): User, body: Option<Json<Clea
         removed += 1;
     }
     Ok(Json(json!({ "ok": true, "removed": removed, "deleted_files": files })))
+}
+
+#[cfg(test)]
+#[path = "labels_tests.rs"]
+mod labels_tests;
+
+#[cfg(test)]
+mod ext_id_tests {
+    use super::*;
+
+    #[test]
+    fn ext_ids_name_their_catalogues() {
+        assert_eq!(ext_from_id("ext-d302127"), Some(json!({ "deezer": 302127 })));
+        assert_eq!(ext_from_id("ext-d2-a3"), Some(json!({ "deezer": 2, "apple": 3 })));
+        assert_eq!(ext_from_id("ext-x"), None);
+        assert_eq!(ext_from_id("9e1f2c84-1111-2222-3333-444455556666"), None);
+    }
 }

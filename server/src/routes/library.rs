@@ -28,6 +28,7 @@ pub fn router() -> Router<AppState> {
         .route("/api/library/artists", get(artists).delete(delete_artist))
         .route("/api/library/tracks", get(tracks))
         .route("/api/library/artist-tracks", get(artist_tracks))
+        .route("/api/library/search", get(crate::search::library_search_route))
         .route("/api/library/index", get(library_index::index))
         .route("/api/library/recent", get(recent))
         .route("/api/library/shuffle", get(shuffle_get).post(shuffle_post))
@@ -73,22 +74,24 @@ fn order(table: &[(&str, &str, &str)], key: &str, dir: &str, default: &str) -> S
 }
 
 const ALBUM_SORTS: &[(&str, &str, &str)] = &[
-    ("name", "lower(albumartist) {d}, year, lower(album)", "asc"),
-    ("artist", "lower(albumartist) {d}, year", "asc"),
-    ("album", "lower(album) {d}", "asc"),
-    ("year", "year {d}, lower(albumartist)", "desc"),
-    ("released", "year {d}, lower(albumartist)", "desc"),
-    ("added", "added {d}", "desc"),
-    ("duration", "duration {d}", "desc"),
-    ("size", "size {d}", "desc"),
+    ("name", "lower(albumartist) {d}, year, lower(album), album_id", "asc"),
+    ("artist", "lower(albumartist) {d}, year, album_id", "asc"),
+    ("album", "lower(album) {d}, album_id", "asc"),
+    ("year", "year {d}, lower(albumartist), album_id", "desc"),
+    ("released", "year {d}, lower(albumartist), album_id", "desc"),
+    // a whole library added in one scan shares one time: the album breaks the tie, so pages and the side
+    // bar's offsets (routes/library_index.rs) see one order
+    ("added", "added {d}, album_id", "desc"),
+    ("duration", "duration {d}, album_id", "desc"),
+    ("size", "size {d}, album_id", "desc"),
 ];
 const TRACK_SORTS: &[(&str, &str, &str)] = &[
-    ("artist", "lower(artist) {d}, lower(album), disc, track", "asc"),
-    ("title", "lower(title) {d}", "asc"),
-    ("album", "lower(album) {d}, disc, track", "asc"),
-    ("added", "added_at {d}", "desc"),
-    ("released", "year {d}, lower(artist)", "desc"),
-    ("duration", "duration {d}", "desc"),
+    ("artist", "lower(artist) {d}, lower(album), disc, track, id", "asc"),
+    ("title", "lower(title) {d}, id", "asc"),
+    ("album", "lower(album) {d}, disc, track, id", "asc"),
+    ("added", "added_at {d}, id", "desc"),
+    ("released", "year {d}, lower(artist), id", "desc"),
+    ("duration", "duration {d}, id", "desc"),
 ];
 
 async fn stats(State(st): State<AppState>, User(_): User) -> Json<Value> {
@@ -170,7 +173,7 @@ async fn albums(State(st): State<AppState>, User(_): User, Query(a): Query<Album
     let mut params: Vec<Value> = vec![];
     // a search is ranked in memory (exact > starts with > a word starts with > contains, accents ignored)
     let ranked = (!a.q.trim().is_empty()).then(|| {
-        let mut r = crate::artists::index(&st.db).search_albums(&a.q);
+        let mut r = crate::search::library_album_ranks(&crate::artists::index(&st.db), &a.q);
         r.truncate(30000);
         r
     });
@@ -249,7 +252,7 @@ struct SimpleQ {
 /// Most songs one `/tracks?ids=` call returns (a restored queue is fetched in pages of this size).
 const MAX_IDS: usize = 300;
 
-const TRACK_COLS: &str = "id, title, artist, album, albumartist, album_id, track, disc, year, duration, format, bitrate, verify_status, verify_detail, request_id, added_at";
+pub(crate) const TRACK_COLS: &str = "id, title, artist, album, albumartist, album_id, track, disc, year, duration, format, bitrate, verify_status, verify_detail, request_id, added_at";
 
 /// Parses `1,2,3` (duplicates dropped, order kept).
 fn parse_ids(raw: &str) -> ApiResult<Vec<i64>> {
@@ -277,7 +280,7 @@ async fn artists(State(st): State<AppState>, User(_): User, Query(a): Query<Simp
     if a.q.trim().is_empty() {
         return Ok(Json(json!(idx.list(&a.sort, &a.dir).into_iter().skip(a.offset.max(0) as usize).take(limit).collect::<Vec<_>>())));
     }
-    Ok(Json(json!(idx.search_artists(&a.q, limit))))
+    Ok(Json(json!(crate::search::library_artists(&idx, &a.q, limit))))
 }
 
 /// Every song of a library artist (all spellings, aliases and collaborations), for Play / Shuffle.
@@ -306,8 +309,8 @@ async fn tracks(State(st): State<AppState>, User(_): User, Query(a): Query<Simpl
         return Ok(Json(json!(ids.iter().filter_map(|i| by_id.remove(i)).collect::<Vec<_>>())));
     }
     if !a.q.trim().is_empty() {
-        // ranked in memory, the same song twice shown once (see artists::Index::search_tracks)
-        let ids: Vec<i64> = crate::artists::index(&st.db).search_tracks(&a.q, &a.sort, &a.dir).into_iter()
+        // ranked in memory, the same song twice shown once (see search::library_track_ids)
+        let ids: Vec<i64> = crate::search::library_track_ids(&crate::artists::index(&st.db), &a.q, &a.sort, &a.dir).into_iter()
             .skip(a.offset.max(0) as usize).take(a.limit.unwrap_or(200).clamp(1, 1000) as usize).collect();
         if ids.is_empty() {
             return Ok(Json(json!([])));

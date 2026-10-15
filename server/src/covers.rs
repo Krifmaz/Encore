@@ -1,6 +1,10 @@
 //! Album covers made fast: an in-memory index (album → cover file + version), versioned cacheable
 //! URLs (`cover_v` in the JSON, `&v=` in the URL), small WebP/JPEG thumbnails in a few fixed sizes,
 //! and a background pass that makes the grid/list sizes ahead of time.
+//!
+//! The pass also finds each cover's main colour (`cover_color` in the JSON, "#rrggbb"), which clients
+//! paint as the placeholder while the image loads. It looks at recently added and recently played
+//! albums first, on up to half the cores at low priority, and its progress shows in Diagnostics.
 use crate::db::{Db, RowExt};
 use crate::p;
 use crate::state::AppState;
@@ -13,7 +17,7 @@ use serde_json::{json, Value};
 use sha1::{Digest, Sha1};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -45,7 +49,20 @@ pub struct CoverIndex {
     warm_again: Arc<AtomicBool>,
     /// goes up with every `forget`: a lookup that saw it change may have read the old file
     generation: Arc<AtomicU64>,
+    /// album → (cover version, "#rrggbb"), read from the cover_color table on first use
+    colors: Arc<Mutex<Option<HashMap<String, (u64, String)>>>>,
+    progress: Arc<WarmProgress>,
 }
+
+/// How far the thumbnail pass is (Diagnostics: "Cover thumbnails: 12 340 / 18 000").
+#[derive(Default)]
+struct WarmProgress {
+    done: AtomicUsize,
+    total: AtomicUsize,
+}
+
+/// Recently played albums count for this long when ordering the thumbnail pass.
+const PLAYED_WINDOW: f64 = 180.0 * 86400.0;
 
 /// A size bucket for `s` (0 = the original file).
 pub fn snap(s: u32) -> u32 {
@@ -175,9 +192,16 @@ impl CoverIndex {
     }
 
     fn warm_once(&self, db: &Db) {
-        let ids: Vec<String> = db.query("SELECT DISTINCT album_id FROM tracks", p![]).unwrap_or_default().iter().map(|r| r.s("album_id")).collect();
+        let added: Vec<(String, f64)> = db.query("SELECT album_id, MAX(COALESCE(added_at, 0)) t FROM tracks WHERE album_id IS NOT NULL AND album_id != '' GROUP BY album_id", p![])
+            .unwrap_or_default().iter().map(|r| (r.s("album_id"), r.f("t"))).collect();
+        let played: HashMap<String, f64> = db.query("SELECT t.album_id, MAX(p.played_at) t FROM plays p JOIN tracks t ON t.id = p.track_id WHERE p.played_at > ? GROUP BY t.album_id",
+            p![crate::db::now() - PLAYED_WINDOW]).unwrap_or_default().iter().map(|r| (r.s("album_id"), r.f("t"))).collect();
+        let ids = priority_order(added, &played);
+        self.progress.total.store(ids.len(), Ordering::SeqCst);
+        self.progress.done.store(0, Ordering::SeqCst);
+        self.load_colors(db);
         let started = Instant::now();
-        let (mut made, mut seen) = (0usize, 0usize);
+        let (made, seen, removed, painted) = (AtomicUsize::new(0), AtomicUsize::new(0), AtomicUsize::new(0), AtomicUsize::new(0));
         // thumbnails on disk by album: those of older versions (and of the old `{album}_{size}.jpg`
         // names, and of albums gone from the library) are removed as we go
         let mut on_disk: HashMap<String, Vec<String>> = HashMap::new();
@@ -189,32 +213,238 @@ impl CoverIndex {
                 }
             }
         }
-        let mut removed = 0usize;
-        for (i, a) in ids.iter().enumerate() {
+        let on_disk = Mutex::new(on_disk);
+        let next = AtomicUsize::new(0);
+        let one = |a: &String| {
             let found = self.get(db, a);
-            if let Some(names) = on_disk.remove(a) {
-                removed += remove_other_versions(db, &names, found.as_ref().map(|f| f.1));
+            let names = on_disk.lock().unwrap().remove(a);
+            if let Some(names) = names {
+                removed.fetch_add(remove_other_versions(db, &names, found.as_ref().map(|f| f.1)), Ordering::Relaxed);
             }
-            let Some((src, v)) = found else { continue };
-            seen += 1;
+            let Some((src, v)) = found else { return };
+            seen.fetch_add(1, Ordering::Relaxed);
             let want: Vec<(u32, bool)> = WARM_SIZES.iter().flat_map(|s| [(*s, true), (*s, false)])
                 .filter(|(s, w)| !thumb_path(db, a, *s, v, *w).is_file()).collect();
+            let mut worked = false;
             if !want.is_empty() {
-                made += make_thumbs(db, &src, a, v, &want);
+                made.fetch_add(make_thumbs(db, &src, a, v, &want), Ordering::Relaxed);
+                worked = true;
+            }
+            if self.color_of(a).is_none_or(|(cv, _)| cv != v) {
+                // the 200 px thumbnail is small and already made: cheap to read again
+                let small = thumb_path(db, a, 200, v, false);
+                if let Some(c) = color_of_file(&small).or_else(|| color_of_file(&src)) {
+                    self.set_color(db, a, v, &c);
+                    painted.fetch_add(1, Ordering::Relaxed);
+                }
+                worked = true;
+            }
+            if worked {
                 // stay out of the way of requests being served
-                std::thread::sleep(Duration::from_millis(15));
+                std::thread::sleep(Duration::from_millis(5));
             }
-            if (i + 1) % 500 == 0 {
-                tracing::info!("cover thumbnails: {}/{} albums looked at, {made} made", i + 1, ids.len());
+        };
+        // each worker takes the next album in priority order until none are left
+        let work = || {
+            lower_priority();
+            loop {
+                let i = next.fetch_add(1, Ordering::SeqCst);
+                let Some(a) = ids.get(i) else { break };
+                one(a);
+                let done = self.progress.done.fetch_add(1, Ordering::SeqCst) + 1;
+                if done % 1000 == 0 {
+                    tracing::info!("cover thumbnails: {done}/{} albums looked at", ids.len());
+                }
             }
+        };
+        let threads = warm_threads();
+        std::thread::scope(|s| {
+            let mut spawned = 0;
+            for n in 0..threads {
+                let work = &work;
+                if std::thread::Builder::new().name(format!("cover-thumbs-{n}")).spawn_scoped(s, work).is_ok() {
+                    spawned += 1;
+                }
+            }
+            if spawned == 0 {
+                // no thread to be had: do it on this one (already a background thread)
+                work();
+            }
+        });
+        for names in on_disk.into_inner().unwrap().values() {
+            removed.fetch_add(remove_other_versions(db, names, None), Ordering::Relaxed);
         }
-        for names in on_disk.values() {
-            removed += remove_other_versions(db, names, None);
-        }
-        if made > 0 || removed > 0 {
-            tracing::info!("cover thumbnails: {made} made for {seen} albums with covers, {removed} old ones removed in {:.1}s", started.elapsed().as_secs_f64());
+        // colours of albums gone from the library
+        let _ = db.execute("DELETE FROM cover_color WHERE album_id NOT IN (SELECT DISTINCT album_id FROM tracks WHERE album_id IS NOT NULL)", p![]);
+        let (made, seen, removed, painted) = (made.into_inner(), seen.into_inner(), removed.into_inner(), painted.into_inner());
+        if made > 0 || removed > 0 || painted > 0 {
+            tracing::info!("cover thumbnails: {made} made and {painted} colours found for {seen} albums with covers, {removed} old ones removed in {:.1}s ({threads} threads)",
+                started.elapsed().as_secs_f64());
         }
     }
+
+    /// The thumbnail pass: (albums looked at, albums in the library, running?).
+    pub fn progress(&self) -> (usize, usize, bool) {
+        (self.progress.done.load(Ordering::SeqCst), self.progress.total.load(Ordering::SeqCst), self.warming.load(Ordering::SeqCst))
+    }
+
+    // ---- placeholder colours --------------------------------------------------------------------
+
+    fn load_colors(&self, db: &Db) {
+        let mut c = self.colors.lock().unwrap();
+        if c.is_some() {
+            return;
+        }
+        let rows = db.query("SELECT album_id, v, color FROM cover_color", p![]).unwrap_or_default();
+        *c = Some(rows.iter().map(|r| (r.s("album_id"), (r.i("v") as u64, r.s("color")))).collect());
+    }
+
+    /// The album's cover colour as last found, with the cover version it was found for.
+    fn color_of(&self, album_id: &str) -> Option<(u64, String)> {
+        self.colors.lock().unwrap().as_ref().and_then(|m| m.get(album_id).cloned())
+    }
+
+    /// The colour of this version of the album's cover, if the pass found it.
+    pub fn color(&self, db: &Db, album_id: &str, v: u64) -> Option<String> {
+        self.load_colors(db);
+        self.color_of(album_id).filter(|c| c.0 == v).map(|c| c.1)
+    }
+
+    fn set_color(&self, db: &Db, album_id: &str, v: u64, color: &str) {
+        let _ = db.execute("INSERT OR REPLACE INTO cover_color (album_id, v, color) VALUES (?, ?, ?)", p![album_id, v as i64, color]);
+        if let Some(m) = self.colors.lock().unwrap().as_mut() {
+            m.insert(album_id.to_string(), (v, color.to_string()));
+        }
+    }
+}
+
+/// The thumbnail pass's threads: half the cores, at least one.
+fn warm_threads() -> usize {
+    std::thread::available_parallelism().map(|n| n.get() / 2).unwrap_or(1).max(1)
+}
+
+/// This thread at nice 10, so requests being served come first.
+fn lower_priority() {
+    #[cfg(target_os = "linux")]
+    unsafe {
+        // on Linux the nice value belongs to the thread: this leaves the server's other threads alone
+        let tid = libc::syscall(libc::SYS_gettid) as libc::id_t;
+        libc::setpriority(libc::PRIO_PROCESS as _, tid, 10);
+    }
+}
+
+/// The order the pass looks at albums in: the most recent of when an album was added and when it was
+/// last played first (what people open now gets its thumbnails and colour first), then the rest.
+fn priority_order(added: Vec<(String, f64)>, played: &HashMap<String, f64>) -> Vec<String> {
+    let mut v: Vec<(String, f64)> = added.into_iter()
+        .map(|(a, t)| {
+            let p = played.get(&a).copied().unwrap_or(0.0);
+            (a, t.max(p))
+        })
+        .collect();
+    v.sort_by(|x, y| y.1.partial_cmp(&x.1).unwrap_or(std::cmp::Ordering::Equal).then_with(|| x.0.cmp(&y.0)));
+    v.into_iter().map(|x| x.0).collect()
+}
+
+/// The main colour of an image file ("#rrggbb").
+fn color_of_file(path: &Path) -> Option<String> {
+    let img = image::ImageReader::open(path).ok()?.with_guessed_format().ok()?.decode().ok()?;
+    let small = if img.width().max(img.height()) > 200 { img.thumbnail(200, 200) } else { img };
+    dominant_color(&small.to_rgb8())
+}
+
+/// The cover's main colour: a small k-means in Lab over a sample of the pixels; the biggest cluster
+/// wins (a more colourful one wins a near tie, so a thin grey border doesn't beat the artwork).
+pub fn dominant_color(img: &image::RgbImage) -> Option<String> {
+    let (w, h) = img.dimensions();
+    if w == 0 || h == 0 {
+        return None;
+    }
+    // about 2 500 pixels whatever the size
+    let step = (((w as f64 * h as f64) / 2500.0).sqrt().floor() as u32).max(1);
+    let mut px: Vec<[f64; 3]> = vec![];
+    for y in (0..h).step_by(step as usize) {
+        for x in (0..w).step_by(step as usize) {
+            px.push(srgb_to_lab(img.get_pixel(x, y).0));
+        }
+    }
+    const K: usize = 5;
+    // start from pixels spread over the lightness range: the same answer every time
+    let mut by_l: Vec<&[f64; 3]> = px.iter().collect();
+    by_l.sort_by(|a, b| a[0].partial_cmp(&b[0]).unwrap_or(std::cmp::Ordering::Equal));
+    let k = K.min(px.len());
+    let mut centres: Vec<[f64; 3]> = (0..k).map(|i| *by_l[(i * 2 + 1) * by_l.len() / (2 * k)]).collect();
+    let mut counts = vec![0usize; k];
+    for _ in 0..10 {
+        let mut sums = vec![[0.0f64; 3]; k];
+        counts.iter_mut().for_each(|c| *c = 0);
+        for p in &px {
+            let j = (0..k).min_by(|a, b| dist2(p, &centres[*a]).partial_cmp(&dist2(p, &centres[*b])).unwrap_or(std::cmp::Ordering::Equal)).unwrap_or(0);
+            counts[j] += 1;
+            for d in 0..3 {
+                sums[j][d] += p[d];
+            }
+        }
+        let mut moved = 0.0;
+        for j in 0..k {
+            if counts[j] > 0 {
+                let c = [sums[j][0] / counts[j] as f64, sums[j][1] / counts[j] as f64, sums[j][2] / counts[j] as f64];
+                moved += dist2(&c, &centres[j]);
+                centres[j] = c;
+            }
+        }
+        if moved < 0.01 {
+            break;
+        }
+    }
+    let score = |j: usize| {
+        let chroma = (centres[j][1].powi(2) + centres[j][2].powi(2)).sqrt();
+        counts[j] as f64 * (1.0 + chroma.min(60.0) / 200.0)
+    };
+    let best = (0..k).max_by(|a, b| score(*a).partial_cmp(&score(*b)).unwrap_or(std::cmp::Ordering::Equal))?;
+    let [r, g, b] = lab_to_srgb(centres[best]);
+    Some(format!("#{r:02x}{g:02x}{b:02x}"))
+}
+
+fn dist2(a: &[f64; 3], b: &[f64; 3]) -> f64 {
+    (a[0] - b[0]).powi(2) + (a[1] - b[1]).powi(2) + (a[2] - b[2]).powi(2)
+}
+
+// sRGB (D65) ↔ CIE Lab
+const WHITE: [f64; 3] = [0.95047, 1.0, 1.08883];
+
+fn srgb_to_lab(c: [u8; 3]) -> [f64; 3] {
+    let lin = |v: u8| {
+        let v = v as f64 / 255.0;
+        if v <= 0.04045 { v / 12.92 } else { ((v + 0.055) / 1.055).powf(2.4) }
+    };
+    let (r, g, b) = (lin(c[0]), lin(c[1]), lin(c[2]));
+    let xyz = [
+        0.4124564 * r + 0.3575761 * g + 0.1804375 * b,
+        0.2126729 * r + 0.7151522 * g + 0.0721750 * b,
+        0.0193339 * r + 0.1191920 * g + 0.9503041 * b,
+    ];
+    let f = |t: f64| if t > 216.0 / 24389.0 { t.cbrt() } else { (24389.0 / 27.0 * t + 16.0) / 116.0 };
+    let (fx, fy, fz) = (f(xyz[0] / WHITE[0]), f(xyz[1] / WHITE[1]), f(xyz[2] / WHITE[2]));
+    [116.0 * fy - 16.0, 500.0 * (fx - fy), 200.0 * (fy - fz)]
+}
+
+fn lab_to_srgb(lab: [f64; 3]) -> [u8; 3] {
+    let fy = (lab[0] + 16.0) / 116.0;
+    let (fx, fz) = (fy + lab[1] / 500.0, fy - lab[2] / 200.0);
+    let inv = |t: f64| if t.powi(3) > 216.0 / 24389.0 { t.powi(3) } else { (116.0 * t - 16.0) / (24389.0 / 27.0) };
+    let (x, y, z) = (inv(fx) * WHITE[0], inv(fy) * WHITE[1], inv(fz) * WHITE[2]);
+    let lin = [
+        3.2404542 * x - 1.5371385 * y - 0.4985314 * z,
+        -0.9692660 * x + 1.8760108 * y + 0.0415560 * z,
+        0.0556434 * x - 0.2040259 * y + 1.0572252 * z,
+    ];
+    let gam = |v: f64| {
+        let v = v.clamp(0.0, 1.0);
+        let s = if v <= 0.0031308 { v * 12.92 } else { 1.055 * v.powf(1.0 / 2.4) - 0.055 };
+        (s * 255.0).round().clamp(0.0, 255.0) as u8
+    };
+    [gam(lin[0]), gam(lin[1]), gam(lin[2])]
 }
 
 /// Removes the thumbnails among `names` (one album's files in the thumbs folder) that are not of
@@ -312,12 +542,15 @@ fn collect(v: &Value, out: &mut Vec<String>) {
     }
 }
 
-fn apply(v: &mut Value, vs: &HashMap<String, u64>) {
+fn apply(v: &mut Value, vs: &HashMap<String, (u64, Option<String>)>) {
     match v {
         Value::Array(a) => a.iter_mut().for_each(|x| apply(x, vs)),
         Value::Object(o) => {
-            if let Some(cv) = album_of(o).and_then(|a| vs.get(&a).copied()) {
+            if let Some((cv, color)) = album_of(o).and_then(|a| vs.get(&a)) {
                 o.insert("cover_v".into(), json!(cv));
+                if let Some(c) = color {
+                    o.insert("cover_color".into(), json!(c));
+                }
             }
             o.values_mut().filter(|x| x.is_array() || x.is_object()).for_each(|x| apply(x, vs));
         }
@@ -325,7 +558,7 @@ fn apply(v: &mut Value, vs: &HashMap<String, u64>) {
     }
 }
 
-/// Add `cover_v` to every album and track in a JSON value. Unknown covers are looked up on the spot
+/// Add `cover_v` (and `cover_color` once the pass found it) to every album and track in a JSON value. Unknown covers are looked up on the spot
 /// when there are only a few (an album page); otherwise the background pass is started for them.
 pub fn stamp(st: &AppState, v: &mut Value) {
     let mut ids = vec![];
@@ -340,7 +573,8 @@ pub fn stamp(st: &AppState, v: &mut Value) {
     for a in ids {
         match st.library.covers.known(&a) {
             Some(Some(cv)) => {
-                vs.insert(a, cv);
+                let color = st.library.covers.color(&st.db, &a, cv);
+                vs.insert(a, (cv, color));
             }
             Some(None) => {}
             None => missing.push(a),
@@ -349,7 +583,8 @@ pub fn stamp(st: &AppState, v: &mut Value) {
     if missing.len() <= INLINE_LOOKUPS {
         for a in missing {
             if let Some((_, cv)) = st.library.covers.get(&st.db, &a) {
-                vs.insert(a, cv);
+                let color = st.library.covers.color(&st.db, &a, cv);
+                vs.insert(a, (cv, color));
             }
         }
     } else {

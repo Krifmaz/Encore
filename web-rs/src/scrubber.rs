@@ -73,10 +73,15 @@ impl Scrubber {
         s
     }
 
-    /// `set(sections)`: `[{label, offset}]`; anything else hides it.
+    /// `set(sections)`: `[{label, offset, short?}]` (the rail shows `short` when given, the bubble the label);
+    /// anything else hides it.
     pub fn set(&self, next: &Value) {
-        let secs: Vec<(String, usize)> = next.as_array().map(|a| a.iter().map(|s| (s.s("label"), s.f("offset").max(0.0) as usize)).collect()).unwrap_or_default();
-        dom::set_html(&self.rail, &secs.iter().enumerate().map(|(i, (l, _))| format!(r##"<span data-s="{i}">{}</span>"##, esc(l))).collect::<String>());
+        let arr = next.as_array().cloned().unwrap_or_default();
+        let secs: Vec<(String, usize)> = arr.iter().map(|s| (s.s("label"), s.f("offset").max(0.0) as usize)).collect();
+        dom::set_html(&self.rail, &arr.iter().enumerate().map(|(i, s)| {
+            let short = s.s("short");
+            format!(r##"<span data-s="{i}">{}</span>"##, esc(if short.is_empty() { s.s("label") } else { short }.as_str()))
+        }).collect::<String>());
         *self.sections.borrow_mut() = secs;
         self.cur.set(-1);
         self.refresh();

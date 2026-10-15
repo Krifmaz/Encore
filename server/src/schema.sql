@@ -212,3 +212,11 @@ CREATE TABLE IF NOT EXISTS artist_alias_lookups (
     looked_up_at REAL NOT NULL,
     ok INTEGER NOT NULL DEFAULT 0
 );
+
+-- each album cover's main colour ("#rrggbb"), painted while the cover loads; v is the cover's version
+-- (covers.rs), so a new cover gets a new colour. Filled by the cover thumbnail pass.
+CREATE TABLE IF NOT EXISTS cover_color (
+    album_id TEXT PRIMARY KEY,
+    v INTEGER NOT NULL,
+    color TEXT NOT NULL
+);

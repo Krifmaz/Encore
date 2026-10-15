@@ -126,8 +126,8 @@ async fn album_sections_match_the_list() {
     assert_eq!(Env::names(&e.labels("kind=albums&sort=album&dir=asc").await), vec!["A", "M", "V", "Z"]);
     assert_eq!(Env::names(&e.labels("kind=albums&sort=released&dir=desc").await), vec!["2026", "2006", "1995", "1976", "?"]);
     assert_eq!(Env::names(&e.labels("kind=albums&sort=added&dir=desc").await), vec!["Oct 2026", "Jan 2020"]);
-    assert_eq!(Env::names(&e.labels("kind=albums&sort=duration&dir=asc").await), vec!["<20 min", "20–40 min", "40–60 min", "60+ min"]);
-    assert_eq!(Env::names(&e.labels("kind=albums&sort=size&dir=desc").await), vec!["1 GB+", "250–500 MB", "<100 MB"]);
+    assert_eq!(Env::names(&e.labels("kind=albums&sort=duration&dir=asc").await), vec!["<20 min", "30–40 min", "40–50 min", "80+ min"]);
+    assert_eq!(Env::names(&e.labels("kind=albums&sort=size&dir=desc").await), vec!["1–2 GB", "250–500 MB", "<50 MB"]);
     // an unknown sort falls back like the list (name)
     assert_eq!(e.labels("kind=albums&sort=nope").await, e.labels("kind=albums&sort=name").await);
     // a search is ranked: no sections
@@ -177,7 +177,7 @@ async fn track_sections_match_the_list() {
     let by_artist = e.labels("kind=tracks").await; // the default sort: artist A–Z
     assert_eq!(Env::names(&by_artist), vec!["#", "A", "T", "Z"]);
     assert_eq!(by_artist.iter().map(|s| s.1).collect::<Vec<_>>(), vec![0, 1, 11, 28]); // É sorts after z: its songs stay under Z
-    assert_eq!(Env::names(&e.labels("kind=tracks&sort=duration&dir=desc").await), vec!["20+ min", "2–5 min", "<2 min"]);
+    assert_eq!(Env::names(&e.labels("kind=tracks&sort=duration&dir=desc").await), vec!["20+ min", "4–5 min", "3–4 min", "2–3 min", "<2 min"]);
 }
 
 #[tokio::test]
@@ -190,7 +190,67 @@ async fn artist_sections() {
         assert_eq!(&letters[*off], label);
     }
     assert_eq!(Env::names(&secs), vec!["#", "A", "T", "Z"]);
-    assert_eq!(Env::names(&e.labels("kind=artists&sort=tracks").await), vec!["10–24 songs", "<10 songs"]);
+    assert_eq!(Env::names(&e.labels("kind=artists&sort=tracks").await), vec!["10–24 songs", "<5 songs"]);
     assert_eq!(Env::names(&e.labels("kind=artists&sort=albums").await), vec!["1 album"]);
     assert_eq!(Env::names(&e.labels("kind=artists&sort=added").await), vec!["Oct 2026", "Jan 2020"]);
+    // every artist sort, both directions, lands on the list's own order
+    for sort in ["name", "added", "albums", "tracks"] {
+        for dir in ["asc", "desc"] {
+            let list = e.get(&format!("/api/library/artists?sort={sort}&dir={dir}")).await.as_array().unwrap().clone();
+            let secs = e.labels(&format!("kind=artists&sort={sort}&dir={dir}")).await;
+            assert_eq!(secs[0].1, 0, "{sort} {dir}");
+            let names: Vec<&str> = list.iter().map(|a| a["name"].as_str().unwrap()).collect();
+            let letters = super::letters(names.into_iter());
+            for (label, off) in &secs {
+                let a = &list[*off];
+                let got = match sort {
+                    "name" => letters[*off].clone(),
+                    "added" => super::label(&a["added"], super::By::Month),
+                    "albums" => super::label(&a["albums"], super::By::AlbumCount),
+                    _ => super::label(&a["tracks"], super::By::TrackCount),
+                };
+                assert_eq!(&got, label, "{sort} {dir} at {off}");
+            }
+        }
+    }
+    assert_eq!(Env::names(&e.labels("kind=artists&sort=name&dir=desc").await), vec!["Z", "T", "A", "#"]);
+}
+
+/// A library a first scan added at once: Date added (the phone's first sort) still gets sections to jump to,
+/// split by minute, with offsets that land on the list's own pages.
+#[tokio::test]
+async fn added_in_one_scan_splits() {
+    let mut e = setup("added_in_one_scan_splits").await;
+    for i in 0..120 {
+        e.album(&format!("Artist {i:03}"), &format!("Album {i}"), "2001", 3, 200.0, 1_000_000, JAN_2020 + (i * 20) as f64);
+    }
+    e.album("Late", "New", "2026", 3, 200.0, 1_000_000, OCT_2026);
+    for (kind, list_uri, field) in [("albums", "/api/library/albums?sort=added&limit=500", "added"), ("tracks", "/api/library/tracks?sort=added&limit=1000", "added_at")] {
+        let secs = e.get(&format!("/api/library/index?kind={kind}&sort=added")).await.as_array().unwrap().clone();
+        let list = e.get(list_uri).await;
+        let list = if kind == "albums" { list["items"].as_array().unwrap().clone() } else { list.as_array().unwrap().clone() };
+        assert!(secs.len() > 10, "{kind}: {secs:?}");
+        assert_eq!(secs[0]["label"], "Oct 2026", "{kind}");
+        assert!(secs[0].get("short").is_none());
+        assert!(secs[1]["label"].as_str().unwrap().starts_with("14 Jan 2020, "), "{kind}: {}", secs[1]);
+        assert_eq!(secs[1]["short"].as_str().unwrap().len(), 5);
+        let mut last = 0.0;
+        for s in &secs {
+            let off = s["offset"].as_u64().unwrap() as usize;
+            let t = list[off][field].as_f64().unwrap();
+            let label = s["label"].as_str().unwrap();
+            if let Some(short) = s["short"].as_str() {
+                assert!(label.ends_with(short), "{label} {short}");
+                // the minute of the item the section starts at
+                let secs_of_day = (t as i64).rem_euclid(86_400);
+                assert_eq!(short, format!("{:02}:{:02}", secs_of_day / 3600, secs_of_day % 3600 / 60), "{kind} {label} at {off}");
+                if off > 0 {
+                    let p = list[off - 1][field].as_f64().unwrap();
+                    assert_ne!((p / 60.0).floor(), (t / 60.0).floor(), "{kind}: the item before {label} is in the same minute");
+                }
+            }
+            assert!(last == 0.0 || t <= last, "newest first");
+            last = t;
+        }
+    }
 }

@@ -1,0 +1,8 @@
+{"created":"2026-10-15T10:00:00.000Z","count":6,"offset":0,"artists":[
+ {"id":"0cb0a4a6-2b1a-4b7c-9e44-6ab7d4d5e7a1","type":"Person","score":100,"name":"Travis Scott","sort-name":"Scott, Travis","country":"US","disambiguation":"US rapper","life-span":{"begin":"1992-04-30"},"aliases":[{"name":"Jacques Webster"},{"name":"Travi$ Scott"}],"tags":[{"count":8,"name":"hip hop"},{"count":5,"name":"trap"}]},
+ {"id":"5a4c3a4e-1111-4c1e-9b5e-90210a000001","type":"Group","score":88,"name":"90210","sort-name":"90210","country":"FR","disambiguation":"French band","life-span":{"begin":"2004"}},
+ {"id":"5a4c3a4e-2222-4c1e-9b5e-90210a000002","type":"Group","score":74,"name":"Travis","sort-name":"Travis","country":"GB","disambiguation":"Scottish band","life-span":{"begin":"1990"}},
+ {"id":"5a4c3a4e-3333-4c1e-9b5e-90210a000003","type":"Person","score":66,"name":"Scott Travis","sort-name":"Travis, Scott","country":"US","disambiguation":"Judas Priest drummer","life-span":{"begin":"1961-09-06"}},
+ {"id":"5a4c3a4e-4444-4c1e-9b5e-90210a000004","type":"Person","score":61,"name":"Scott Travis","sort-name":"Travis, Scott","country":"US","disambiguation":"country singer","life-span":{}},
+ {"id":"5a4c3a4e-5555-4c1e-9b5e-90210a000005","type":"Person","score":40,"name":"Jim Reeves","sort-name":"Reeves, Jim","country":"US","life-span":{"begin":"1923-08-20"}}
+]}

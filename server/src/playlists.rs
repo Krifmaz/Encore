@@ -256,6 +256,7 @@ pub fn request_missing(st: &AppState, u: &Row, pid: i64, auto: bool, album_mode:
         if auto || crate::auth::can(st, u, "auto_approve_playlists") {
             st.db.execute("UPDATE requests SET status='queued', message=? WHERE id=? AND status='pending'",
                 p![if auto { "Auto-download" } else { "Auto-approved (playlist)" }, rid])?;
+            crate::req_events::emit(&st.db, rid);
         }
         st.db.execute("UPDATE playlist_items SET request_id=? WHERE id=?", p![rid, r.i("id")])?;
         n += 1;

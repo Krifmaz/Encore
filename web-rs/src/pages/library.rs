@@ -257,6 +257,15 @@ fn sort_opts(tab: &str) -> Option<&'static [(&'static str, &'static str)]> {
 /// `DESC_FIRST.has(sort)`.
 fn desc_first(sort: &str) -> bool { matches!(sort, "added" | "released" | "duration" | "size" | "albums" | "tracks") }
 
+/// `a.cover_v` as URL text ("" when there is none).
+fn cover_v_text(a: &Value) -> String {
+    match a.get("cover_v") {
+        Some(Value::Number(n)) => n.to_string(),
+        Some(Value::String(s)) => s.clone(),
+        _ => String::new(),
+    }
+}
+
 /// The JS `st` object.
 struct St { tab: String, q: String, sort: String, dir: String, filter: String, artist: String, offset: usize }
 
@@ -280,6 +289,8 @@ struct Lib {
     /// the side scrubber (web/js/scrubber.js) and `indexSeq`
     scrub: RefCell<Option<Rc<crate::scrubber::Scrubber>>>,
     index_seq: Cell<u32>,
+    /// `nextPage`: the albums page after the last one shown, fetched ahead (url, the answer once it came)
+    next_page: Rc<RefCell<Option<(String, Option<Value>)>>>,
 }
 
 impl Lib {
@@ -371,7 +382,11 @@ impl Lib {
             (s.q.clone(), s.sort.clone(), s.dir.clone(), s.filter.clone(), s.artist.clone(), s.offset)
         };
         if tab == "albums" || tab == "singles" {
-            let res = api::get(&format!("/library/albums?q={}&sort={sort}&dir={dir}&kind={tab}&filter={filter}&artist={}&limit={}&offset={offset}", enc(&q), enc(&artist), if want > 0 { want.clamp(PAGE, 500) } else { PAGE })).await?;
+            let page_url = |offset: usize, limit: usize| format!("/library/albums?q={}&sort={sort}&dir={dir}&kind={tab}&filter={filter}&artist={}&limit={limit}&offset={offset}", enc(&q), enc(&artist));
+            let url = page_url(offset, if want > 0 { want.clamp(PAGE, 500) } else { PAGE });
+            // the next page was fetched ahead (with its covers) when this one showed
+            let ahead = self.next_page.borrow_mut().take().filter(|(u, _)| append && *u == url).and_then(|(_, r)| r);
+            let res = match ahead { Some(r) => r, None => api::get(&url).await? };
             let items = res.a("items");
             let html: String = items.iter().map(common::library_tile).collect();
             if append {
@@ -382,6 +397,16 @@ impl Lib {
             }
             let off = { let mut s = self.st.borrow_mut(); s.offset += items.len(); s.offset };
             dom::toggle_class(&self.more, "hidden", off as f64 >= res.f("total"));
+            if (off as f64) < res.f("total") {
+                let u = page_url(off, PAGE);
+                *self.next_page.borrow_mut() = Some((u.clone(), None));
+                let slot = self.next_page.clone();
+                dom::spawn(async move {
+                    let Ok(r) = api::get(&u).await else { return };
+                    ui::preload_covers(&r.a("items").iter().map(|a| ui::cover_url(&a.s("id"), &cover_v_text(a), 400)).collect::<Vec<_>>());
+                    if let Some(p) = slot.borrow_mut().as_mut().filter(|p| p.0 == u) { p.1 = Some(r); }
+                });
+            }
             set_sub(&self.view, &format!("{} {tab}", ui::fmt::num(res.f("total"))));
         } else if tab == "artists" {
             let rows = api::get(&format!("/library/artists?q={}&sort={sort}&dir={dir}", enc(&q))).await?.items();
@@ -608,7 +633,7 @@ pub fn render(view: Element, ctx: Ctx) -> PageFuture {
         let lib = Rc::new(Lib {
             view: view.clone(), body: body.clone(), more: more.clone(), sort_el: sort_el.clone(), dir_el: dir_el.clone(),
             admin, query_tab: ctx.q("tab"), st: RefCell::new(st), saved: RefCell::new(saved), tracks: RefCell::new(Vec::new()), body_onclick: RefCell::new(None),
-            scrub: RefCell::new(None), index_seq: Cell::new(0),
+            scrub: RefCell::new(None), index_seq: Cell::new(0), next_page: Rc::new(RefCell::new(None)),
         });
         lib.paint_sort();
         if let Some(f) = dom::qs_in(&view, "#lib-filter") { let filter = lib.st.borrow().filter.clone(); dom::set_value(&f, &filter); }

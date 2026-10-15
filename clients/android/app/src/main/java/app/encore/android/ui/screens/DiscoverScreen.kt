@@ -8,6 +8,7 @@ import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
@@ -18,6 +19,8 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.LazyListScope
+import androidx.compose.foundation.lazy.LazyRow
+import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.KeyboardActions
@@ -59,8 +62,10 @@ import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import app.encore.android.R
 import app.encore.android.data.api.ApiException
+import app.encore.android.data.api.LibrarySearch
 import app.encore.android.data.repo.CatalogAlbum
 import app.encore.android.data.repo.CatalogArtist
+import app.encore.android.data.repo.CatalogTop
 import app.encore.android.data.repo.CatalogTrack
 import app.encore.android.data.repo.FeaturesApi
 import app.encore.android.data.repo.SearchResults
@@ -69,6 +74,7 @@ import app.encore.android.data.repo.statusKind
 import app.encore.android.data.repo.statusLabel
 import app.encore.android.ui.Nav
 import app.encore.android.ui.Screen
+import app.encore.android.ui.components.AlbumCard
 import app.encore.android.ui.components.ArtPlaceholder
 import app.encore.android.ui.components.Badge
 import app.encore.android.ui.components.ChoiceRow
@@ -82,16 +88,22 @@ import app.encore.android.ui.components.SectionHead
 import app.encore.android.ui.components.SmallButton
 import app.encore.android.ui.components.Tile
 import app.encore.android.ui.components.Toasts
+import app.encore.android.ui.components.TrackRow
 import app.encore.android.ui.components.formatDuration
 import app.encore.android.ui.theme.EncoreColors
 import app.encore.android.ui.theme.palette
 import coil3.compose.AsyncImage
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.async
+import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import kotlinx.serialization.json.JsonArray
+import kotlinx.serialization.json.JsonElement
 import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.put
 
@@ -214,6 +226,102 @@ typealias RequestStatuses = SnapshotStateMap<String, String>
 @Composable
 fun rememberRequestStatuses(): RequestStatuses = remember { mutableStateMapOf() }
 
+// ---- live request labels: requested → searching → downloading → importing → in library -----------------------
+// Each request event (GET /api/requests/events) names the keys a page knows the release or song by (server:
+// req_events.rs): `rg:<release group>`, `rec:<recording>`, `ar:<artist>`, `ext:deezer:<id>`…, `a:` / `t:` + artist|title.
+// They go into the page's [RequestStatuses] under those keys (and the bare MusicBrainz id the pages used before),
+// the label under "label:<key>".
+
+/** Lower case, letters and digits only (the server's `norm`). */
+fun reqNorm(s: String): String = s.lowercase().filter { it.isLetterOrDigit() }
+
+/** The key of a Deezer / Apple Music / Bandcamp / Discogs release in request events. */
+fun extKeyOf(ext: JsonElement?): String {
+    val o = ext as? JsonObject ?: return ""
+    for (k in listOf("deezer", "apple", "bandcamp", "discogs")) {
+        val v = (o[k] as? JsonPrimitive)?.content ?: continue
+        if (v.isNotEmpty() && v != "null") return "ext:$k:$v"
+    }
+    return ""
+}
+
+fun albumNameKey(artist: String, title: String): String = "a:${reqNorm(artist)}|${reqNorm(title)}"
+fun songNameKey(artist: String, title: String): String = "t:${reqNorm(artist)}|${reqNorm(title)}"
+
+/** Every key a catalogue album is known by, the live ones first. */
+fun albumKeys(a: CatalogAlbum): List<String> = listOf(extKeyOf(a.ext), a.id, albumNameKey(a.artist, a.title)).filter { it.isNotEmpty() }
+
+/** Every key a catalogue song is known by. */
+fun trackKeys(t: CatalogTrack): List<String> = listOf(t.id, songNameKey(t.artist, t.title), t.key).filter { it.isNotEmpty() }.distinct()
+
+/** The status of an item known by [keys] (the first key set wins), else what the server said when the page loaded. */
+fun RequestStatuses.statusOf(keys: List<String>, fallback: String): String = keys.firstNotNullOfOrNull { this[it] } ?: fallback
+
+/** The label that came with the status [statusOf] found ("" for the default words). */
+fun RequestStatuses.labelOf(keys: List<String>, fallback: String): String {
+    val k = keys.firstOrNull { this[it] != null } ?: return fallback
+    return this["label:$k"] ?: ""
+}
+
+/** Sets the status (and label) of an item under all its keys. */
+fun RequestStatuses.mark(keys: List<String>, status: String, label: String = "") {
+    for (k in keys) {
+        if (k.isEmpty()) continue
+        this[k] = status
+        if (label.isEmpty()) remove("label:$k") else this["label:$k"] = label
+    }
+}
+
+/** The words of a request status on catalogue pages (the web's `liveBadge`). */
+private val LIVE_STATUS: Map<String, Pair<String, String>> = mapOf(
+    "pending" to ("warn" to "Awaiting approval"),
+    "queued" to ("info" to "Requested"),
+    "searching" to ("info" to "Searching"),
+    "monitoring" to ("accent" to "Downloading"),
+    "downloading" to ("accent" to "Downloading"),
+    "importing" to ("accent" to "Importing"),
+    "completed" to ("ok" to "In library"),
+    "failed" to ("err" to "Failed"),
+    "denied" to ("err" to "Denied"),
+    "cancelled" to ("" to "Cancelled"),
+)
+
+/** A request's badge: the server's label when it sent one (Not found, Discography requested…), else the status in words. */
+@Composable
+fun LiveBadge(status: String, label: String = "", modifier: Modifier = Modifier) {
+    if (status.isEmpty()) return
+    val (kind, words) = LIVE_STATUS[status] ?: ("info" to "Requested")
+    Badge(label.ifEmpty { words }, kind = kind, modifier = modifier)
+}
+
+/** "In library" when owned, else the live request badge, else nothing. */
+@Composable
+fun LiveAvailability(inLibrary: Boolean, status: String, label: String, modifier: Modifier = Modifier) {
+    when {
+        inLibrary -> Badge("In library", kind = "ok", modifier = modifier)
+        status.isNotEmpty() -> LiveBadge(status, label, modifier)
+    }
+}
+
+/** Follows the request events while the page is open, so its badges change as requests move along. */
+@Composable
+fun LiveRequestStatuses(nav: Nav, statuses: RequestStatuses) {
+    LaunchedEffect(Unit) {
+        withContext(Dispatchers.IO) {
+            nav.features.requestEvents { ev ->
+                val keys = ((ev["keys"] as? JsonArray) ?: emptyList<JsonElement>()).mapNotNull { (it as? JsonPrimitive)?.content }.flatMap { k ->
+                    // the pages key MusicBrainz items by their bare id too
+                    val bare = when { k.startsWith("rg:") || k.startsWith("rec:") -> k.substringAfter(':'); else -> "" }
+                    listOf(k, bare)
+                }
+                val status = (ev["status"] as? JsonPrimitive)?.content ?: ""
+                val label = (ev["label"] as? JsonPrimitive)?.content ?: ""
+                if (status.isNotEmpty()) withContext(Dispatchers.Main) { statuses.mark(keys, status, label) }
+            }
+        }
+    }
+}
+
 /**
  * The web's `submitRequest(body)`: POST /api/requests, a toast either way; returns the new status or null when
  * it failed. Runs the call on the IO dispatcher.
@@ -234,10 +342,10 @@ suspend fun submitRequest(features: FeaturesApi, body: JsonObject): String? {
 /** True when the error is the weekly request limit (the loops stop then, like the web's `/limit/i`). */
 fun isLimitError(e: Exception): Boolean = (e.message ?: "").contains("limit", ignoreCase = true) || (e is ApiException && e.code == 429)
 
-/** POST /api/requests for a MusicBrainz album (discover.js `reqBody` / `albumActions`). */
+/** POST /api/requests for a catalogue album (discover.js `albumBody`): by MusicBrainz id, or Deezer / Apple ids. */
 fun albumRequestBody(a: CatalogAlbum): JsonObject = buildJsonObject {
     put("kind", "album")
-    put("mbid", a.id)
+    if (a.ext != null) put("ext", a.ext) else put("mbid", a.id)
     put("artist", a.artist)
     put("title", a.title)
     put("album", a.title)
@@ -248,7 +356,8 @@ fun albumRequestBody(a: CatalogAlbum): JsonObject = buildJsonObject {
 /** POST /api/requests for a MusicBrainz recording; `albumMode` is "song" (just it) or "album" (the whole album). */
 fun trackRequestBody(t: CatalogTrack, albumMode: String): JsonObject = buildJsonObject {
     put("kind", "track")
-    put("mbid", t.id)
+    if (t.id.isNotEmpty()) put("mbid", t.id)
+    if (t.isrc.isNotEmpty()) put("isrc", t.isrc)
     put("artist", t.artist)
     put("title", t.title)
     if (t.album.isNotEmpty()) put("album", t.album)
@@ -339,29 +448,36 @@ fun CatalogAlbumTile(
     statuses: RequestStatuses,
     modifier: Modifier = Modifier,
     subtitle: String? = null,
-    onClick: () -> Unit = { nav.open(Screen.CatalogAlbum(a.id)) },
+    onClick: (() -> Unit)? = null,
 ) {
     val scope = rememberCoroutineScope()
-    val status = statuses[a.id] ?: a.requestStatus
+    val keys = albumKeys(a)
+    val status = statuses.statusOf(keys, a.requestStatus)
+    val label = statuses.labelOf(keys, a.requestLabel)
     Tile(
         title = a.title,
         subtitle = subtitle ?: listOf(a.artist, a.year, a.type).filter { it.isNotEmpty() }.joinToString(" · "),
         modifier = modifier,
-        onClick = onClick,
+        onClick = onClick ?: { openCatalogAlbum(nav, a, scope) },
     ) { m ->
         Box(m) {
             Cover(a.cover.ifEmpty { null }, nav.graph.imageLoader, Modifier.fillMaxSize(), corner = 12.dp, label = a.title)
-            Availability(a.inLibrary, status, Modifier.padding(8.dp))
+            LiveAvailability(a.inLibrary, status, label, Modifier.padding(8.dp))
             when {
                 a.libraryAlbumId.isNotEmpty() -> ArtFab(R.drawable.ic_play, "Play", Modifier.align(Alignment.BottomEnd).padding(8.dp)) {
                     playLibraryAlbum(nav, a.libraryAlbumId, scope)
                 }
                 !a.inLibrary && status.isEmpty() -> ArtFab(R.drawable.ic_add, "Request album", Modifier.align(Alignment.BottomEnd).padding(8.dp)) {
-                    scope.launch { submitRequest(nav.features, albumRequestBody(a))?.let { statuses[a.id] = it } }
+                    scope.launch { submitRequest(nav.features, albumRequestBody(a))?.let { statuses.mark(keys, it) } }
                 }
             }
         }
     }
+}
+
+/** Opens a catalogue album: its page, or (an album only Deezer / Apple know) its artist. */
+fun openCatalogAlbum(nav: Nav, a: CatalogAlbum, scope: kotlinx.coroutines.CoroutineScope) {
+    if (a.ext == null) nav.open(Screen.CatalogAlbum(a.id)) else openCatalogArtist(nav, a.artistId, a.artist, scope)
 }
 
 /** The web's `trackRow` of a MusicBrainz recording: play when owned, else "Song" / "+ Album" request buttons. */
@@ -369,7 +485,9 @@ fun CatalogAlbumTile(
 fun CatalogTrackRow(nav: Nav, t: CatalogTrack, statuses: RequestStatuses) {
     val p = MaterialTheme.palette
     val scope = rememberCoroutineScope()
-    val status = statuses[t.id] ?: t.requestStatus
+    val keys = trackKeys(t)
+    val status = statuses.statusOf(keys, t.requestStatus)
+    val label = statuses.labelOf(keys, t.requestLabel)
     val lib = t.library
     var busy by remember { mutableStateOf(false) }
     Row(
@@ -394,7 +512,7 @@ fun CatalogTrackRow(nav: Nav, t: CatalogTrack, statuses: RequestStatuses) {
                     color = p.text,
                     maxLines = 1,
                     overflow = TextOverflow.Ellipsis,
-                    modifier = Modifier.clickable(enabled = t.artistId.isNotEmpty()) { nav.open(Screen.CatalogArtist(t.artistId)) },
+                    modifier = Modifier.clickable { openCatalogArtist(nav, t.artistId, t.artist, scope) },
                 )
                 val rest = listOf(t.album, t.year).filter { it.isNotEmpty() }.joinToString(" · ")
                 if (rest.isNotEmpty()) {
@@ -405,11 +523,11 @@ fun CatalogTrackRow(nav: Nav, t: CatalogTrack, statuses: RequestStatuses) {
                 Row(Modifier.padding(top = 6.dp), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
                     SmallButton("Song", iconRes = R.drawable.ic_add, primary = true, enabled = !busy) {
                         busy = true
-                        scope.launch { submitRequest(nav.features, trackRequestBody(t, "song"))?.let { statuses[t.id] = it }; busy = false }
+                        scope.launch { submitRequest(nav.features, trackRequestBody(t, "song"))?.let { statuses.mark(keys, it) }; busy = false }
                     }
                     SmallButton("+ Album", iconRes = R.drawable.ic_disc, enabled = !busy) {
                         busy = true
-                        scope.launch { submitRequest(nav.features, trackRequestBody(t, "album"))?.let { statuses[t.id] = it }; busy = false }
+                        scope.launch { submitRequest(nav.features, trackRequestBody(t, "album"))?.let { statuses.mark(keys, it) }; busy = false }
                     }
                 }
             }
@@ -419,7 +537,7 @@ fun CatalogTrackRow(nav: Nav, t: CatalogTrack, statuses: RequestStatuses) {
         }
         if (t.inLibrary || status.isNotEmpty()) {
             Spacer(Modifier.width(8.dp))
-            Availability(t.inLibrary, status)
+            LiveAvailability(t.inLibrary, status, label)
         }
     }
 }
@@ -441,10 +559,14 @@ fun DiscoverScreen(nav: Nav, initialQuery: String = "", initialType: String = "a
     var q by remember { mutableStateOf(initialQuery) }
     var type by remember { mutableStateOf(SEARCH_TYPES.indexOfFirst { it.first == initialType }.coerceAtLeast(0)) }
     var results by remember { mutableStateOf<SearchResults?>(null) }
+    var library by remember { mutableStateOf<LibrarySearch?>(null) }
     var busy by remember { mutableStateOf(false) }
     var error by remember { mutableStateOf<String?>(null) }
     var generation by remember { mutableStateOf(0) }
     val statuses = rememberRequestStatuses()
+    LiveRequestStatuses(nav, statuses)
+    val liked by nav.graph.likes.liked.collectAsState()
+    val nowPlaying by nav.player.nowPlaying.collectAsState()
 
     // typing: after 650 ms, three or more characters (the web's debounce); Search on the keyboard runs at once
     LaunchedEffect(input) {
@@ -457,12 +579,23 @@ fun DiscoverScreen(nav: Nav, initialQuery: String = "", initialType: String = "a
     LaunchedEffect(q, type, generation) {
         if (q.isEmpty()) {
             results = null
+            library = null
             error = null
             return@LaunchedEffect
         }
         busy = true
         try {
-            results = withContext(Dispatchers.IO) { features.search(q, SEARCH_TYPES[type].first) }
+            // the library answers at once; the catalogue (MusicBrainz, Deezer, Apple) takes a moment
+            val (r, lib) = withContext(Dispatchers.IO) {
+                coroutineScope {
+                    val lib = async {
+                        if (type != 0) null else try { nav.graph.api.search(q, 12) } catch (e: CancellationException) { throw e } catch (_: Exception) { null }
+                    }
+                    features.search(q, SEARCH_TYPES[type].first) to lib.await()
+                }
+            }
+            results = r
+            library = lib
             error = null
         } catch (e: CancellationException) {
             throw e
@@ -496,22 +629,146 @@ fun DiscoverScreen(nav: Nav, initialQuery: String = "", initialType: String = "a
             err != null -> ErrorBox(err) { generation += 1 }
             busy && r == null -> Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) { CircularProgressIndicator(color = p.accent, trackColor = p.border) }
             r == null -> Spacer(Modifier.height(1.dp))
-            r.isEmpty -> EmptyState(R.drawable.ic_search, "No results for “$q”")
+            r.isEmpty && (library?.isEmpty ?: true) -> EmptyState(R.drawable.ic_search, "No results for “$q”")
             else -> LazyColumn(Modifier.fillMaxSize()) {
                 if (busy) item { Row(Modifier.padding(horizontal = Gutter, vertical = 4.dp)) { Spinner() } }
-                if (r.artists.isNotEmpty()) {
-                    item { SectionHead("Artists") }
-                    tileRows(r.artists.take(if (type == 0) 6 else 60), 3, key = "artists") { a -> CatalogArtistTile(nav, a) }
+                // what the library already has, first
+                val lib = library
+                if (lib != null && (lib.songs.isNotEmpty() || lib.albums.isNotEmpty())) {
+                    item { SectionHead("In your library") }
+                    if (lib.albums.isNotEmpty()) {
+                        item {
+                            LazyRow(contentPadding = PaddingValues(horizontal = Gutter), horizontalArrangement = Arrangement.spacedBy(14.dp)) {
+                                items(lib.albums.take(6), key = { "lib-album-" + it.id }) { a ->
+                                    AlbumCard(a, nav.graph.api.coverUrl(a.id, 400), nav.graph.imageLoader, Modifier.width(140.dp)) { nav.open(Screen.Album(a.id)) }
+                                }
+                            }
+                        }
+                    }
+                    val songs = lib.songs.take(5)
+                    items(songs.size, key = { i -> "lib-song-" + songs[i].id }) { i ->
+                        val t = songs[i]
+                        TrackRow(
+                            track = t,
+                            imageLoader = nav.graph.imageLoader,
+                            coverUrl = if (t.albumId.isNotEmpty()) nav.graph.api.coverUrl(t.albumId, 96) else null,
+                            liked = t.id in liked,
+                            playing = nowPlaying?.id == t.id,
+                            onClick = { nav.player.play(songs, i) },
+                            onLike = { nav.graph.likes.toggle(t.id) },
+                            subtitle = listOf(t.artist, t.album).filter { it.isNotEmpty() }.joinToString(" · "),
+                            onMore = { nav.trackMenu(t) },
+                        )
+                    }
+                }
+                val top = r.top
+                if (top != null) {
+                    item { SectionHead("Top result") }
+                    item { TopResultCard(nav, top, statuses) }
+                }
+                if (r.tracks.isNotEmpty()) {
+                    item { SectionHead("Songs") }
+                    items(r.tracks.size, key = { i -> "track-" + r.tracks[i].key + "-" + i }) { i -> CatalogTrackRow(nav, r.tracks[i], statuses) }
                 }
                 if (r.albums.isNotEmpty()) {
                     item { SectionHead("Albums") }
                     tileRows(r.albums, 2, key = "albums") { a -> CatalogAlbumTile(nav, a, statuses) }
                 }
-                if (r.tracks.isNotEmpty()) {
-                    item { SectionHead("Songs") }
-                    items(r.tracks.size, key = { i -> "track-" + r.tracks[i].id + "-" + i }) { i -> CatalogTrackRow(nav, r.tracks[i], statuses) }
+                if (r.artists.isNotEmpty()) {
+                    item { SectionHead("Artists") }
+                    tileRows(r.artists.take(if (type == 0) 6 else 60), 3, key = "artists") { a -> CatalogArtistTile(nav, a) }
                 }
                 item { Spacer(Modifier.height(24.dp)) }
+            }
+        }
+    }
+}
+
+/**
+ * The Top result of a Discover search (discover.js `topResult`): a big cover, the kind, the name, "artist · on
+ * album" for songs, and Play when it is in the library, else Request.
+ */
+@Composable
+fun TopResultCard(nav: Nav, top: CatalogTop, statuses: RequestStatuses) {
+    val p = MaterialTheme.palette
+    val scope = rememberCoroutineScope()
+    var busy by remember { mutableStateOf(false) }
+    val t = top.track
+    val a = top.album
+    val ar = top.artist
+    val kicker = when { t != null -> "Song"; a != null -> a.type.ifEmpty { "Album" }; else -> "Artist" }
+    val title = t?.title ?: a?.title ?: ar?.name ?: ""
+    val meta = when {
+        t != null -> listOf(t.artist, if (t.album.isNotEmpty()) "on ${t.album}" else "", t.year).filter { it.isNotEmpty() }.joinToString(" · ")
+        a != null -> listOf(a.artist, a.year).filter { it.isNotEmpty() }.joinToString(" · ")
+        else -> listOfNotNull(ar?.type, ar?.country, ar?.disambiguation).filter { it.isNotEmpty() }.joinToString(" · ")
+    }
+    val open: () -> Unit = {
+        when {
+            t != null -> if (t.releaseGroupId.isNotEmpty()) nav.open(Screen.CatalogAlbum(t.releaseGroupId)) else openCatalogArtist(nav, t.artistId, t.artist, scope)
+            a != null -> openCatalogAlbum(nav, a, scope)
+            ar != null -> openCatalogArtist(nav, ar.id, ar.name, scope)
+        }
+    }
+    CardBox(Modifier.padding(horizontal = Gutter).clickable(onClick = open)) {
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            val art = t?.cover ?: a?.cover ?: ar?.image ?: ""
+            if (ar != null) {
+                Box(Modifier.size(96.dp).clip(CircleShape)) {
+                    ArtPlaceholder(ar.name, Modifier.fillMaxSize())
+                    if (art.isNotEmpty()) {
+                        AsyncImage(model = art, contentDescription = null, imageLoader = nav.graph.imageLoader, modifier = Modifier.fillMaxSize(), contentScale = androidx.compose.ui.layout.ContentScale.Crop)
+                    }
+                }
+            } else {
+                Cover(art.ifEmpty { null }, nav.graph.imageLoader, size = 96.dp, corner = 12.dp, label = title)
+            }
+            Spacer(Modifier.width(14.dp))
+            Column(Modifier.weight(1f)) {
+                Text(kicker.uppercase(), style = MaterialTheme.typography.labelSmall, color = p.muted, fontWeight = FontWeight.SemiBold)
+                Text(title, style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Bold, maxLines = 2, overflow = TextOverflow.Ellipsis)
+                if (meta.isNotEmpty()) {
+                    Text(meta, style = MaterialTheme.typography.bodySmall, color = p.muted, maxLines = 2, overflow = TextOverflow.Ellipsis)
+                }
+                Row(Modifier.padding(top = 10.dp), horizontalArrangement = Arrangement.spacedBy(6.dp), verticalAlignment = Alignment.CenterVertically) {
+                    when {
+                        t != null -> {
+                            val keys = trackKeys(t)
+                            val status = statuses.statusOf(keys, t.requestStatus)
+                            val lib = t.library
+                            when {
+                                lib != null -> SmallButton("Play", iconRes = R.drawable.ic_play, primary = true) { nav.player.play(listOf(lib)) }
+                                t.inLibrary || status.isNotEmpty() -> LiveAvailability(t.inLibrary, status, statuses.labelOf(keys, t.requestLabel))
+                                else -> {
+                                    SmallButton("Song", iconRes = R.drawable.ic_add, primary = true, enabled = !busy) {
+                                        busy = true
+                                        scope.launch { submitRequest(nav.features, trackRequestBody(t, "song"))?.let { statuses.mark(keys, it) }; busy = false }
+                                    }
+                                    SmallButton("+ Album", iconRes = R.drawable.ic_disc, enabled = !busy) {
+                                        busy = true
+                                        scope.launch { submitRequest(nav.features, trackRequestBody(t, "album"))?.let { statuses.mark(keys, it) }; busy = false }
+                                    }
+                                }
+                            }
+                        }
+                        a != null -> {
+                            val keys = albumKeys(a)
+                            val status = statuses.statusOf(keys, a.requestStatus)
+                            when {
+                                a.libraryAlbumId.isNotEmpty() -> SmallButton("Play", iconRes = R.drawable.ic_play, primary = true) { playLibraryAlbum(nav, a.libraryAlbumId, scope) }
+                                a.inLibrary || status.isNotEmpty() -> LiveAvailability(a.inLibrary, status, statuses.labelOf(keys, a.requestLabel))
+                                else -> SmallButton("Request album", iconRes = R.drawable.ic_add, primary = true, enabled = !busy) {
+                                    busy = true
+                                    scope.launch { submitRequest(nav.features, albumRequestBody(a))?.let { statuses.mark(keys, it) }; busy = false }
+                                }
+                            }
+                        }
+                        ar != null -> {
+                            SmallButton("Open artist", iconRes = R.drawable.ic_person, primary = true) { openCatalogArtist(nav, ar.id, ar.name, scope) }
+                            if (ar.inLibrary) Badge("In library", kind = "ok")
+                        }
+                    }
+                }
             }
         }
     }

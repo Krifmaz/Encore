@@ -357,3 +357,140 @@ async fn blackhole_torrent_and_nzb() {
     // a non-NZB answer is refused
     assert!(u.add(st, &format!("{url}/missing"), "x", 3).await.is_err());
 }
+
+// ---- one song out of a multi-file torrent ----------------------------------------------------------
+
+const ALBUM_FILES: [&str; 4] = ["Rodeo/01 Pornography.flac", "Rodeo/02 Oh My Dis Side.flac", "Rodeo/04 90210.flac", "Rodeo/cover.jpg"];
+
+#[tokio::test]
+async fn qbit_selects_one_file() {
+    let env = setup("qbit-select");
+    let log: Log = Default::default();
+    let (l1, l2) = (log.clone(), log.clone());
+    let app = Router::new()
+        .route("/api/v2/auth/login", post(|| async { ([("Set-Cookie", "SID=x; path=/")], "Ok.") }))
+        .route("/api/v2/torrents/info", get(|| async { axum::Json(json!([{ "hash": "h1", "state": "downloading", "progress": 0.1 }])) }))
+        .route("/api/v2/torrents/files", get(move |q: axum::extract::Query<std::collections::HashMap<String, String>>| {
+            let log = l1.clone();
+            async move {
+                log.lock().unwrap().push(json!({ "files": q.get("hash") }));
+                axum::Json(json!(ALBUM_FILES.iter().enumerate().map(|(i, n)| json!({ "index": i, "name": n })).collect::<Vec<_>>()))
+            }
+        }))
+        .route("/api/v2/torrents/filePrio", post(move |mut m: axum::extract::Multipart| {
+            let log = l2.clone();
+            async move {
+                let mut v = json!({});
+                while let Ok(Some(f)) = m.next_field().await {
+                    let k = f.name().unwrap_or("").to_string();
+                    v[k] = json!(f.text().await.unwrap_or_default());
+                }
+                log.lock().unwrap().push(v);
+                "Ok."
+            }
+        }));
+    let url = serve(app).await;
+    let st = &env.st;
+    st.cfg.set_many(&json!({ "torrent_client": "qbittorrent", "qbit_url": url }));
+    let id = "qbit:encore-5";
+    match crate::sources::torznab::select_song(st, id, "Travis Scott", "90210", None).await.unwrap() {
+        crate::sources::torznab::SongFile::Only(n) => assert_eq!(n, "Rodeo/04 90210.flac"),
+        _ => panic!("expected one file"),
+    }
+    let calls = log.lock().unwrap().clone();
+    assert!(calls.iter().any(|c| c["files"] == "h1"));
+    assert!(calls.iter().any(|c| c["hash"] == "h1" && c["id"] == "0|1|3" && c["priority"] == "0"), "{calls:?}");
+    assert!(calls.iter().any(|c| c["hash"] == "h1" && c["id"] == "2" && c["priority"] == "1"), "{calls:?}");
+    // a song that isn't on the album
+    assert!(matches!(crate::sources::torznab::select_song(st, id, "Travis Scott", "Sicko Mode", None).await.unwrap(), crate::sources::torznab::SongFile::Missing));
+}
+
+#[tokio::test]
+async fn transmission_deluge_rtorrent_select_files() {
+    // Transmission: files-unwanted / files-wanted by index
+    let env = setup("select-others");
+    let st = &env.st;
+    let log: Log = Default::default();
+    let l = log.clone();
+    let tr = Router::new().route("/transmission/rpc", post(move |h: HeaderMap, body: String| {
+        let log = l.clone();
+        async move {
+            if h.get("x-transmission-session-id").is_none() {
+                return (StatusCode::CONFLICT, [("X-Transmission-Session-Id", "s")], "").into_response();
+            }
+            let v: Value = serde_json::from_str(&body).unwrap();
+            log.lock().unwrap().push(v.clone());
+            let args = match v["method"].as_str().unwrap() {
+                "torrent-get" => json!({ "torrents": [{ "hashString": "abc", "files": ALBUM_FILES.iter().map(|n| json!({ "name": n, "length": 1 })).collect::<Vec<_>>() }] }),
+                _ => json!({}),
+            };
+            axum::Json(json!({ "result": "success", "arguments": args })).into_response()
+        }
+    }));
+    let url = serve(tr).await;
+    st.cfg.set_many(&json!({ "torrent_client": "transmission", "transmission_url": url }));
+    match crate::sources::torznab::select_song(st, "tr:abc", "Travis Scott", "Oh My Dis Side", Some(2)).await.unwrap() {
+        crate::sources::torznab::SongFile::Only(n) => assert_eq!(n, "Rodeo/02 Oh My Dis Side.flac"),
+        _ => panic!("expected one file"),
+    }
+    let set = log.lock().unwrap().iter().find(|c| c["method"] == "torrent-set").cloned().unwrap();
+    assert_eq!(set["arguments"], json!({ "ids": ["abc"], "files-wanted": [1], "files-unwanted": [0, 2, 3] }));
+
+    // Deluge: file_priorities, 0 = skip
+    let log: Log = Default::default();
+    let l = log.clone();
+    let dl = Router::new().route("/json", post(move |body: String| {
+        let log = l.clone();
+        async move {
+            let v: Value = serde_json::from_str(&body).unwrap();
+            log.lock().unwrap().push(v.clone());
+            let r = match v["method"].as_str().unwrap() {
+                "auth.login" => return ([("Set-Cookie", "_session_id=c; Path=/json")], axum::Json(json!({ "result": true, "error": null, "id": 1 }))).into_response(),
+                "web.connected" => json!(true),
+                "core.get_torrent_status" => json!({ "files": ALBUM_FILES.iter().enumerate().map(|(i, n)| json!({ "index": i, "path": n })).collect::<Vec<_>>() }),
+                _ => json!(null),
+            };
+            axum::Json(json!({ "result": r, "error": null, "id": 1 })).into_response()
+        }
+    }));
+    let url = serve(dl).await;
+    st.cfg.set_many(&json!({ "torrent_client": "deluge", "deluge_url": url, "deluge_password": "pw" }));
+    assert!(matches!(crate::sources::torznab::select_song(st, "deluge:h", "Travis Scott", "90210", None).await.unwrap(), crate::sources::torznab::SongFile::Only(_)));
+    let set = log.lock().unwrap().iter().find(|c| c["method"] == "core.set_torrent_options").cloned().unwrap();
+    assert_eq!(set["params"], json!([["h"], { "file_priorities": [0, 0, 4, 0] }]));
+
+    // rTorrent: f.priority.set per file, then d.update_priorities
+    let log: Log = Default::default();
+    let l = log.clone();
+    let rt = Router::new().route("/RPC2", post(move |body: String| {
+        let log = l.clone();
+        async move {
+            let m = body.split("<methodName>").nth(1).and_then(|s| s.split("</methodName>").next()).unwrap_or("").to_string();
+            log.lock().unwrap().push(json!({ "method": m, "body": body }));
+            let v = match m.as_str() {
+                "d.size_bytes" => "<i8>5000</i8>".to_string(),
+                "d.size_files" => format!("<i8>{}</i8>", ALBUM_FILES.len()),
+                "f.path" => {
+                    let i: usize = body.split(":f").nth(1).and_then(|s| s.split('<').next()).and_then(|s| s.parse().ok()).unwrap_or(0);
+                    format!("<string>{}</string>", ALBUM_FILES[i])
+                }
+                _ => "<i8>0</i8>".to_string(),
+            };
+            ([("Content-Type", "text/xml")], format!("<?xml version=\"1.0\"?><methodResponse><params><param><value>{v}</value></param></params></methodResponse>")).into_response()
+        }
+    }));
+    let url = serve(rt).await;
+    st.cfg.set_many(&json!({ "torrent_client": "rtorrent", "rtorrent_url": format!("{url}/RPC2") }));
+    assert!(matches!(crate::sources::torznab::select_song(st, "rt:HASH", "Travis Scott", "90210", None).await.unwrap(), crate::sources::torznab::SongFile::Only(_)));
+    let calls = log.lock().unwrap().clone();
+    let prios: Vec<String> = calls.iter().filter(|c| c["method"] == "f.priority.set").map(|c| c["body"].as_str().unwrap().to_string()).collect();
+    assert_eq!(prios.len(), 4);
+    assert!(prios[2].contains("HASH:f2") && prios[2].contains("<i8>1</i8>"), "{}", prios[2]);
+    assert!(prios[0].contains("HASH:f0") && prios[0].contains("<i8>0</i8>"));
+    assert!(calls.iter().any(|c| c["method"] == "d.update_priorities"));
+
+    // Usenet and blackholes download whole releases
+    st.cfg.set_many(&json!({ "nzb_client": "sabnzbd" }));
+    assert!(matches!(crate::sources::torznab::select_song(st, "sab:SABnzbd_nzo_1", "Travis Scott", "90210", None).await.unwrap(), crate::sources::torznab::SongFile::Whole));
+    assert!(matches!(crate::sources::torznab::select_song(st, "tbh:Rodeo", "Travis Scott", "90210", None).await.unwrap(), crate::sources::torznab::SongFile::Whole));
+}
