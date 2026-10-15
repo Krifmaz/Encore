@@ -21,6 +21,7 @@ pub fn detect(url: &str) -> Option<&'static str> {
     let rules = [
         ("spotify", r"(?i)open\.spotify\.com|^spotify:|spotify\.link"), ("deezer", r"(?i)deezer\.com|deezer\.page\.link|link\.deezer\.com"),
         ("tidal", r"(?i)tidal\.com"), ("qobuz", r"(?i)qobuz\.com"), ("apple", r"(?i)music\.apple\.com"), ("listenbrainz", r"(?i)listenbrainz\.org/playlist"),
+        ("amazon", r"(?i)music\.amazon\.[a-z.]+/|amazon\.[a-z.]+/music/player/|amzn\.to/"),
         ("ytdlp", r"(?i)youtube\.com|youtu\.be|soundcloud\.com|bandcamp\.com|mixcloud\.com|audiomack\.com|vimeo\.com"),
     ];
     for (name, pat) in rules {
@@ -43,6 +44,7 @@ pub async fn fetch_as(st: &AppState, url: &str, uid: Option<i64>) -> anyhow::Res
         "deezer" => deezer(st, url).await?,
         "tidal" => tidal(st, url).await?,
         "apple" => apple(st, url).await?,
+        "amazon" => super::amazon::fetch(st, url).await?,
         "listenbrainz" => listenbrainz(st, url).await?,
         "ytdlp" => ytdlp_playlist(url).await?,
         _ => web_jsonld(st, url).await?,

@@ -73,6 +73,8 @@ fn record_verification(st: &AppState, results: &[(PathBuf, Option<Value>)]) {
         if let Some(r) = r {
             let _ = st.db.execute("UPDATE tracks SET verify_status=?, verify_detail=?, acoustid_id=?, verified_at=? WHERE path=?",
                 p![r["status"], r["detail"], r["acoustid"], now(), p.to_string_lossy()]);
+            let tid = st.db.one("SELECT id FROM tracks WHERE path=?", p![p.to_string_lossy()]).ok().flatten().map(|t| t.i("id"));
+            crate::contribute::queue_acoustid(st, tid, r);
         }
     }
 }
@@ -624,6 +626,12 @@ pub async fn import_single(st: &AppState, path: &Path, artist: &str, title: &str
             return Err(Rejected(c["detail"].as_str().unwrap_or("").into()).into());
         }
     }
+    // quality checks (quality.rs): fake lossless, upsampled, very quiet or the wrong length is turned away
+    let (qrep, qres) = crate::quality::gate(st, path, length).await;
+    if let (Err(why), true) = (qres, reject) {
+        let _ = std::fs::remove_file(path);
+        return Err(Rejected(why).into());
+    }
     let mut vals = Row::new();
     vals.insert("title".into(), json!(title));
     vals.insert("artist".into(), json!(artist));
@@ -685,6 +693,7 @@ pub async fn import_single(st: &AppState, path: &Path, artist: &str, title: &str
     library::prune_empty(path.parent().unwrap(), source_root);
     index_paths(st, std::slice::from_ref(&new));
     record_verification(st, &[(new.clone(), check)]);
+    crate::quality::store(st, &new, &qrep);
     let mut note = String::new();
     if let Some(ex) = existing {
         let nid = st.db.one("SELECT id FROM tracks WHERE path=?", p![new.to_string_lossy()])?.map(|r| r.i("id"));
@@ -775,6 +784,11 @@ pub async fn import_album_files(st: &AppState, paths: &[PathBuf], artist: &str, 
         pv = None;
         source_meta = None;
     }
+    // quality checks (quality.rs): most of the files fake lossless / upsampled / very quiet → turned away
+    let (qreports, qres) = crate::quality::gate_album(st, &paths).await;
+    if let (Err(why), true) = (qres, reject) {
+        return Err(Rejected(format!("Bad quality: {why}")).into());
+    }
     if let Some(pv) = pv {
         let mut checks = vec![];
         let mut mism = vec![];
@@ -800,6 +814,12 @@ pub async fn import_album_files(st: &AppState, paths: &[PathBuf], artist: &str, 
         }).collect();
         index_paths(st, &new);
         record_verification(st, &results);
+        for (row, np) in rows.iter().zip(new.iter()) {
+            let old = PathBuf::from(row["path"].as_str().unwrap_or(""));
+            if let Some((_, q)) = qreports.iter().find(|(p, _)| *p == old) {
+                crate::quality::store(st, np, q);
+            }
+        }
         drop_superseded(st, &new).await;
         return Ok(new);
     }
@@ -856,6 +876,9 @@ pub async fn import_album_files(st: &AppState, paths: &[PathBuf], artist: &str, 
     save_cover_file(st, &out, cover.as_deref());
     st.db.log("warning", &format!("No confident MusicBrainz match for {artist} - {album}; imported with existing tags"));
     index_paths(st, &out);
+    for (np, (_, q)) in out.iter().zip(qreports.iter()) {
+        crate::quality::store(st, np, q);
+    }
     drop_superseded(st, &out).await;
     Ok(out)
 }

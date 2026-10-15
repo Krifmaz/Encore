@@ -146,7 +146,7 @@ fn torznab_row(r: &Value, sc: f64, album: Option<(&str, &str, Option<u32>)>) -> 
     let age = r["age"].as_i64().map(|d| format!("{d} days old")).unwrap_or_default();
     let indexer = r["indexer"].as_str().unwrap_or("").to_string();
     let mut info = vec![proto.clone(), seeds.map(|s| format!("{s} seeders")).unwrap_or_default(), age];
-    let mut payload = json!({ "title": title, "indexer": r["indexer"], "protocol": proto, "size": r["size"], "seeders": r["seeders"], "url": url, "lossless": lossless });
+    let mut payload = json!({ "title": title, "indexer": r["indexer"], "protocol": proto, "size": r["size"], "seeders": r["seeders"], "url": url, "guid": r["guid"], "lossless": lossless });
     let subtitle = match album {
         Some((name, song, no)) => {
             info.insert(0, indexer);

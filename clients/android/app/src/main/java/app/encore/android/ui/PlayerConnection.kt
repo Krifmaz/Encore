@@ -104,6 +104,12 @@ class PlayerConnection(private val context: Context, private val api: EncoreApi)
     private val _qualityTitle = MutableStateFlow<String?>(null)
     /** web/js/player.js `qualityTitle()`: the long explanation behind the badge. */
     val qualityTitle: StateFlow<String?> = _qualityTitle.asStateFlow()
+    private val _shuffle = MutableStateFlow(false)
+    /** Shuffle mode: the app shuffle the car and the lock screen show too (the linked device's when linked). */
+    val shuffle: StateFlow<Boolean> = _shuffle.asStateFlow()
+    private val _repeat = MutableStateFlow("off")
+    /** Repeat: "off" | "all" | "one" (the linked device's when linked). */
+    val repeat: StateFlow<String> = _repeat.asStateFlow()
     private val _streamInfo = MutableStateFlow<StreamInfo?>(null)
     /** Everything the service reports about the stream that plays (the Signal path sheet reads it). */
     val streamInfo: StateFlow<StreamInfo?> = _streamInfo.asStateFlow()
@@ -295,6 +301,8 @@ class PlayerConnection(private val context: Context, private val api: EncoreApi)
                 _queue.value = emptyList()
                 _queueIndex.value = -1
                 _positionMs.value = 0L
+                _shuffle.value = false
+                _repeat.value = "off"
                 _state.value = PlayerUiState(connected = false)
                 updateQuality()
             }
@@ -312,6 +320,8 @@ class PlayerConnection(private val context: Context, private val api: EncoreApi)
         _queue.value = queue
         _queueIndex.value = index
         _positionMs.value = Math.round(l.positionSec() * 1000)
+        _shuffle.value = l.shuffle
+        _repeat.value = l.repeat
         val label = l.signalLabel
         qualityOverride = if (label.isNotEmpty()) label to "Playing on ${l.name}" else ("" to null)
         updateQuality()
@@ -459,6 +469,31 @@ class PlayerConnection(private val context: Context, private val api: EncoreApi)
         }
     }
 
+    /**
+     * Shuffle mode (player.js setShuffle): on shuffles the rest of the queue, off puts its order back. It is the
+     * session's app shuffle, so the car, the lock screen and the other devices see the same state.
+     */
+    fun setShuffle(on: Boolean) {
+        if (viaLink("shuffle") { put("value", on) }) { _shuffle.value = on; return }
+        withController { c -> c.shuffleModeEnabled = on }
+    }
+
+    /** Repeat (player.js setRepeat): "off" | "all" | "one". */
+    fun setRepeat(mode: String) {
+        if (mode != "off" && mode != "all" && mode != "one") return
+        if (viaLink("repeat") { put("value", mode) }) { _repeat.value = mode; return }
+        withController { c ->
+            c.repeatMode = when (mode) {
+                "all" -> Player.REPEAT_MODE_ALL
+                "one" -> Player.REPEAT_MODE_ONE
+                else -> Player.REPEAT_MODE_OFF
+            }
+        }
+    }
+
+    /** The next repeat setting on a tap: off → all → one → off. */
+    fun cycleRepeat() = setRepeat(when (_repeat.value) { "off" -> "all"; "all" -> "one"; else -> "off" })
+
     /** Shuffle what comes after the current song. */
     fun shuffleUpNext() {
         if (notWhileLinked()) return
@@ -593,6 +628,12 @@ class PlayerConnection(private val context: Context, private val api: EncoreApi)
         _queue.value = queue
         _queueIndex.value = if (current == null) -1 else c.currentMediaItemIndex
         _positionMs.value = c.currentPosition.coerceAtLeast(0L) + offsetMs()
+        _shuffle.value = c.shuffleModeEnabled
+        _repeat.value = when (c.repeatMode) {
+            Player.REPEAT_MODE_ALL -> "all"
+            Player.REPEAT_MODE_ONE -> "one"
+            else -> "off"
+        }
         if (current == null) { _lyricsOpen.value = false; _signalPathOpen.value = false; _upNextOpen.value = false }
         updateQuality()
         mainHandler.removeCallbacks(positionTick)

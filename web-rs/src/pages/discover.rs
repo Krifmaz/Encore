@@ -23,6 +23,14 @@ use web_sys::{Element, HtmlElement, HtmlInputElement};
 /// `encodeURIComponent(s)`.
 fn encode(s: &str) -> String { String::from(js_sys::encode_uri_component(s)) }
 
+/// `mbSeed(m)`: Deezer / Apple albums open the MusicBrainz release editor filled in (contribute.rs).
+fn mb_seed(m: &Value, aid: &str, aname: &str) -> String {
+    let e = m.o("ext");
+    let key = if e.truthy("deezer") { format!("deezer-{}", e.s("deezer")) } else if e.truthy("apple") { format!("apple-{}", e.s("apple")) } else { return String::new() };
+    let apple = if e.truthy("deezer") && e.truthy("apple") { e.s("apple") } else { String::new() };
+    format!("/api/contribute/mb-seed/{}?apple={}&artist={}&artist_name={}", encode(&key), encode(&apple), encode(aid), encode(aname))
+}
+
 /// `history.replaceState(null, '', url)`.
 fn replace_state(url: &str) {
     let _ = dom::window().history().and_then(|h| h.replace_state_with_url(&JsValue::NULL, "", Some(url)));
@@ -231,7 +239,7 @@ fn track_row(t: &Value) -> String {
 /// `librarySongRow(t)`: a library song (the "In your library" row); plays at once.
 fn library_song_row(t: &Value) -> String {
     let label = if t.truthy("album") { t.s("album") } else { t.s("title") };
-    let album = if t.truthy("album") { format!(" · {}", esck(t, "album")) } else { String::new() };
+    let album = if t.truthy("album") { format!(" · {}", crate::ui::album_link(t)) } else { String::new() };
     let len = if t.truthy("duration") { fmt::dur(t.f("duration")) } else { String::new() };
     format!(r#"<div class="list-item">
     <button class="thumb play-thumb" data-play-song='{}' title="Play" aria-label="Play">{}<i>{}</i></button>
@@ -241,7 +249,7 @@ fn library_song_row(t: &Value) -> String {
     </div>
     <span class="small faint hide-sm">{len}</span>
     {}
-  </div>"#, esc_json(t), art(&format!("/api/library/albums/{}/cover", t.s("album_id")), &label, ""), icon("play"), esck(t, "title"), esck(t, "artist"),
+  </div>"#, esc_json(t), art(&format!("/api/library/albums/{}/cover", t.s("album_id")), &label, ""), icon("play"), esck(t, "title"), crate::ui::artist_links(t),
         availability(&json!({ "in_library": true })))
 }
 
@@ -516,6 +524,73 @@ pub fn render_search(view: Element, ctx: Ctx) -> PageFuture {
     })
 }
 
+// ---- Settings → Release types on the artist page and New releases: skipped releases hide behind a chip ----
+
+pub fn hide_skipped_pref() -> bool { dom::ls_get("encore.hideSkipped").as_deref() != Some("0") }
+fn set_hide_skipped(on: bool) { dom::ls_set("encore.hideSkipped", if on { "1" } else { "0" }); }
+
+/// The "Hide skipped types" switch with its "+N hidden" chip (the same markup in web/js/pages/discover.js).
+pub fn skipped_toggle(hide: bool, n: usize) -> String {
+    let chip = if hide && n > 0 { format!(r#"<button class="badge" data-show-skipped title="Releases of the kinds Settings → Release types skips">+{n} hidden</button>"#) } else { String::new() };
+    format!(r#"<span class="row small" style="gap:8px;align-items:center"><label class="row" style="gap:6px;align-items:center"><input type="checkbox" data-hide-skipped {}> Hide skipped types</label>{chip}</span>"#,
+        if hide { "checked" } else { "" })
+}
+
+/// Wire the switch and chip under `root`: `repaint(hide)` draws the list again.
+pub fn bind_skipped_toggle(root: &Element, repaint: Rc<dyn Fn(bool)>) {
+    {
+        let repaint = repaint.clone();
+        dom::on(root, "change", move |e| {
+            if let Some(c) = dom::closest(e, "[data-hide-skipped]") { let on = dom::checked(&c); set_hide_skipped(on); repaint(on); }
+        });
+    }
+    dom::on(root, "click", move |e| {
+        if dom::closest(e, "[data-show-skipped]").is_some() { dom::prevent(e); dom::stop(e); set_hide_skipped(false); repaint(false); }
+    });
+}
+
+/// Request discography: the release-type boxes, ticked from the setting, for this request only. → { kinds, skip } or None.
+async fn release_types_dialog(a: &Value) -> Option<Value> {
+    let rt = a.o("release_types");
+    let boxes = |list: Vec<Value>| -> String {
+        list.iter().map(|o| format!(r#"<label class="row" style="gap:6px;align-items:center"><input type="checkbox" value="{}" {}> {}</label>"#,
+            esck(o, "key"), if o.truthy("on") { "checked" } else { "" }, esck(o, "label"))).collect()
+    };
+    let body = format!(r#"<p class="small muted" style="margin:0 0 12px">Every release of {} you don't have yet, from MusicBrainz{}. The boxes start from Settings → Release types and only change this request.</p>
+        <div class="small muted" style="margin-bottom:6px">Kinds to request</div>
+        <div class="row wrap" style="gap:6px 14px" data-rt="kinds">{}</div>
+        <div class="small muted" style="margin:14px 0 6px">Skip releases that are</div>
+        <div class="row wrap" style="gap:6px 14px" data-rt="skip">{}</div>"#,
+        esck(a, "name"), if a.truthy("catalog_merge") { ", Deezer and Apple Music" } else { "" }, boxes(rt.a("kinds")), boxes(rt.a("skip")));
+    let footer = format!(r#"<button class="btn" data-close>Cancel</button><button class="btn primary" data-ok>{}Request</button>"#, icon("download"));
+    let m = ui::modal(ModalOpts::new("Request discography", &body).footer(&footer));
+    let (tx, rx) = futures::channel::oneshot::channel::<Option<Value>>();
+    let tx = Rc::new(RefCell::new(Some(tx)));
+    if let Some(ok) = m.qs("[data-ok]") {
+        let (m2, tx2) = (m.clone(), tx.clone());
+        dom::on(&ok, "click", move |_| {
+            let picked = |k: &str| -> Vec<Value> { m2.qsa(&format!(r#"[data-rt="{k}"] input:checked"#)).iter().map(|i| Value::String(i.get_attribute("value").unwrap_or_default())).collect() };
+            let kinds = picked("kinds");
+            if kinds.is_empty() { toast("Tick at least one kind of release", "err"); return; }
+            let skip = picked("skip");
+            m2.close();
+            if let Some(t) = tx2.borrow_mut().take() { let _ = t.send(Some(json!({ "kinds": kinds, "skip": skip }))); }
+        });
+    }
+    // dismissed (Escape, backdrop, Cancel): the modal leaves the DOM without Request
+    let el = m.el.clone();
+    let tx3 = tx.clone();
+    let obs = web_sys::MutationObserver::new(wasm_bindgen::closure::Closure::<dyn FnMut(js_sys::Array, web_sys::MutationObserver)>::new(move |_m, o: web_sys::MutationObserver| {
+        if !el.is_connected() { o.disconnect(); if let Some(t) = tx3.borrow_mut().take() { let _ = t.send(None); } }
+    }).into_js_value().unchecked_ref()).ok();
+    if let (Some(o), Some(root)) = (obs, dom::by_id("modal-root")) {
+        let init = web_sys::MutationObserverInit::new();
+        init.set_child_list(true);
+        let _ = o.observe_with_options(&root, &init);
+    }
+    rx.await.ok().flatten()
+}
+
 const ORDER: [&str; 15] = ["Album", "EP", "Single", "Compilation", "Live", "Soundtrack", "Remix", "DJ-mix", "Mixtape/Street", "Demo", "Other", "Broadcast", "Interview", "Spokenword", "Audiobook"];
 const LINK_KEYS: [&str; 9] = ["official homepage", "bandcamp", "soundcloud", "youtube", "streaming", "free streaming", "wikidata", "discogs", "last.fm"];
 
@@ -570,6 +645,7 @@ pub fn render_artist(view: Element, ctx: Ctx) -> PageFuture {
             .filter(|l| !(l.truthy("rgid") && rg_ids.contains(&l.s("rgid"))) && !titles.contains(&l.s("album").to_lowercase()))
             .collect();
         let filter = Rc::new(RefCell::new(dom::ls_get("encore.artistFilter").filter(|s| !s.is_empty()).unwrap_or_else(|| "all".to_string())));
+        let hide_skipped = Rc::new(Cell::new(hide_skipped_pref()));
 
         let kicker = format!("{}{}{}",
             esc(&if a.truthy("type") { a.s("type") } else { "Artist".to_string() }),
@@ -581,8 +657,8 @@ pub fn render_artist(view: Element, ctx: Ctx) -> PageFuture {
             format!(r#"<button class="btn primary" id="play-artist">{}Play</button><button class="btn" id="shuffle-artist">Shuffle</button><button class="btn" id="share-artist" title="Share link">{}Share</button>"#, icon("play"), icon("external"))
         } else { String::new() };
         let request = live(&format!("ar:{}", a.s("id")), &if a.truthy("request_status") { live_badge(&a.s("request_status"), &a.s("request_label")) } else {
-            format!(r#"<button class="btn" id="req-disco" title="Every album and EP{} you don't have, from MusicBrainz{}">{}Request discography</button>"#,
-                if a.truthy("discography_singles") { " and single" } else { "" }, if a.truthy("catalog_merge") { ", Deezer and Apple Music" } else { "" }, icon("download"))
+            format!(r#"<button class="btn" id="req-disco" title="Every release you don't have, from MusicBrainz{}">{}Request discography</button>"#,
+                if a.truthy("catalog_merge") { ", Deezer and Apple Music" } else { "" }, icon("download"))
         });
         let tracks_badge = if a.truthy("library_tracks") { format!(r#"<span class="badge">{} tracks</span>"#, a.s("library_tracks")) } else { String::new() };
         let link_btns: String = links.iter().map(|(k, u)| format!(r#"<a class="btn sm ghost" target="_blank" rel="noopener noreferrer" href="{}">{}</a>"#, esc(u), esc(k))).collect();
@@ -622,7 +698,7 @@ pub fn render_artist(view: Element, ctx: Ctx) -> PageFuture {
     <div id="artist-top"></div>
     {in_library}
     <div class="section-head"><h2>Discography <span class="faint small">{n_rg}</span></h2>
-      <div class="tabs" id="disco-filter">{disco_tabs}</div>
+      <div class="row wrap" style="gap:10px;justify-content:flex-end"><span id="disco-skipped"></span><div class="tabs" id="disco-filter">{disco_tabs}</div></div>
     </div>
     <div id="disco"></div>
     <div id="ext-releases"></div>
@@ -641,17 +717,21 @@ pub fn render_artist(view: Element, ctx: Ctx) -> PageFuture {
         let keys = Rc::new(keys);
         let n_rg = release_groups.len();
         let paint: Rc<dyn Fn()> = {
-            let (view, disco, groups, keys, filter) = (view.clone(), disco.clone(), groups.clone(), keys.clone(), filter.clone());
+            let (view, disco, groups, keys, filter, hide_skipped) = (view.clone(), disco.clone(), groups.clone(), keys.clone(), filter.clone(), hide_skipped.clone());
             Rc::new(move || {
                 let f = filter.borrow().clone();
                 for b in dom::qsa_in(&view, "#disco-filter button") { dom::toggle_class(&b, "active", dom::data(&b, "f") == f); }
-                let keep = |rg: &Value| f == "all" || (if f == "owned" { rg.truthy("in_library") } else { !rg.truthy("in_library") });
+                let hide = hide_skipped.get();
+                let shown = |rg: &Value| !(hide && rg.truthy("skipped"));
+                let keep = |rg: &Value| shown(rg) && (f == "all" || (if f == "owned" { rg.truthy("in_library") } else { !rg.truthy("in_library") }));
                 let g = groups.borrow();
+                let skipped = g.iter().map(|(_, l)| l.iter().filter(|rg| rg.truthy("skipped")).count()).sum::<usize>();
+                if let Some(el) = dom::qs_in(&view, "#disco-skipped") { set_html(&el, &if skipped > 0 { skipped_toggle(hide, skipped) } else { String::new() }); }
                 let html: String = keys.iter().map(|k| {
                     let Some((_, all)) = g.iter().find(|(kk, _)| kk == k) else { return String::new() };
                     let list: Vec<&Value> = all.iter().filter(|rg| keep(rg)).collect();
                     if list.is_empty() { return String::new(); }
-                    let missing = all.iter().filter(|rg| !rg.truthy("in_library") && !rg.truthy("request_status")).count();
+                    let missing = all.iter().filter(|rg| shown(rg) && !rg.truthy("in_library") && !rg.truthy("request_status")).count();
                     let req_missing = if missing > 0 {
                         format!(r#"<button class="btn sm" data-req-missing="{}">{}Request {} missing</button>"#, esc(k), icon("download"), missing)
                     } else { String::new() };
@@ -668,6 +748,13 @@ pub fn render_artist(view: Element, ctx: Ctx) -> PageFuture {
             })
         };
         paint();
+        // set once the Deezer / Apple list has drawn (see paint_ext below)
+        let paint_ext: Rc<RefCell<Rc<dyn Fn()>>> = Rc::new(RefCell::new(Rc::new(|| {})));
+        let repaint_skipped: Rc<dyn Fn(bool)> = {
+            let (hide_skipped, paint, paint_ext) = (hide_skipped.clone(), paint.clone(), paint_ext.clone());
+            Rc::new(move |h: bool| { hide_skipped.set(h); paint(); let pe = paint_ext.borrow().clone(); pe(); })
+        };
+        if let Some(el) = dom::qs_in(&view, "#disco-skipped") { bind_skipped_toggle(&el, repaint_skipped.clone()); }
         {
             let (filter, paint) = (filter.clone(), paint.clone());
             dom::on_sel(&view, "#disco-filter", "click", move |e| {
@@ -678,14 +765,15 @@ pub fn render_artist(view: Element, ctx: Ctx) -> PageFuture {
             });
         }
         {
-            let (groups, paint) = (groups.clone(), paint.clone());
+            let (groups, paint, hide_skipped) = (groups.clone(), paint.clone(), hide_skipped.clone());
             dom::on(&disco, "click", move |e| {
                 let Some(b) = dom::closest(e, "[data-req-missing]") else { return };
                 let key = dom::data(&b, "reqMissing");
+                let hide = hide_skipped.get();
                 let missing: Vec<(usize, Value)> = {
                     let g = groups.borrow();
                     let Some((_, list)) = g.iter().find(|(k, _)| *k == key) else { return };
-                    list.iter().enumerate().filter(|(_, rg)| !rg.truthy("in_library") && !rg.truthy("request_status")).map(|(i, rg)| (i, rg.clone())).collect()
+                    list.iter().enumerate().filter(|(_, rg)| !(hide && rg.truthy("skipped")) && !rg.truthy("in_library") && !rg.truthy("request_status")).map(|(i, rg)| (i, rg.clone())).collect()
                 };
                 let (groups, paint) = (groups.clone(), paint.clone());
                 dom::spawn(async move {
@@ -719,7 +807,6 @@ pub fn render_artist(view: Element, ctx: Ctx) -> PageFuture {
         // from MusicBrainz and the Deezer / Apple Music releases it is missing. The server decides which (title
         // and year dedupe, library check); each release it queues arrives as a request event and marks its tile
         let rel: Rc<RefCell<Vec<Value>>> = Rc::new(RefCell::new(Vec::new()));
-        let paint_ext: Rc<RefCell<Rc<dyn Fn()>>> = Rc::new(RefCell::new(Rc::new(|| {})));
         {
             let (a, view2) = (a.clone(), view.clone());
             let first_cover = first_cover.clone();
@@ -732,6 +819,11 @@ pub fn render_artist(view: Element, ctx: Ctx) -> PageFuture {
                 if let Some(c) = &first_cover { put(&mut body, "cover_url", c.clone()); }
                 let (a, view2) = (a.clone(), view2.clone());
                 dom::spawn(async move {
+                    // the release-type boxes for this request (older servers have none: the plain request)
+                    if a.truthy("release_types") {
+                        let Some(types) = release_types_dialog(&a).await else { return };
+                        put(&mut body, "release_filter", types);
+                    }
                     let Some(r) = common::submit_request(Value::Object(body), Some(b)).await else { return };
                     let pending = r.s("status") == "pending";
                     let key = format!("ar:{}", a.s("id"));
@@ -773,6 +865,7 @@ pub fn render_artist(view: Element, ctx: Ctx) -> PageFuture {
 
         // releases on Deezer / Apple Music that MusicBrainz doesn't list
         let ext = need(&view, "#ext-releases")?;
+        bind_skipped_toggle(&ext, repaint_skipped.clone());
         set_html(&ext, r#"<div class="small muted mt"><span class="spinner"></span> Checking Deezer and Apple Music for releases MusicBrainz is missing…</div>"#);
         {
             let (view, ext, a, rel, paint_ext) = (view.clone(), ext.clone(), a.clone(), rel.clone(), paint_ext.clone());
@@ -798,12 +891,16 @@ pub fn render_artist(view: Element, ctx: Ctx) -> PageFuture {
                 };
                 *rel.borrow_mut() = releases;
                 let paint: Rc<dyn Fn()> = {
-                    let (ext, rel) = (ext.clone(), rel.clone());
+                    let (ext, rel, hide_skipped) = (ext.clone(), rel.clone(), hide_skipped.clone());
+                    let (aid, aname) = (a.s("id"), a.s("name"));
                     Rc::new(move || {
                         let releases = rel.borrow();
+                        let hide = hide_skipped.get();
+                        let ext_skipped = releases.iter().filter(|m| m.truthy("skipped")).count();
                         let mut names: Vec<String> = Vec::new();
                         for m in releases.iter() { for s in m.a("sources") { let n = s.s("name"); if !names.contains(&n) { names.push(n); } } }
                         let tiles: String = releases.iter().enumerate().map(|(i, m)| {
+                            if hide && m.truthy("skipped") { return String::new(); }
                             let corner = if m.truthy("in_library") { r#"<span class="badge ok">In library</span>"#.to_string() }
                                 else if m.truthy("request_status") { live_badge(&m.s("request_status"), &m.s("request_label")) }
                                 else { r#"<span class="badge warn">Not in MusicBrainz</span>"#.to_string() };
@@ -821,14 +918,18 @@ pub fn render_artist(view: Element, ctx: Ctx) -> PageFuture {
         <div class="s ellipsis">{sub}</div>
         <div class="row small" style="gap:8px;flex-wrap:wrap;margin-top:4px">
           {sources}
-          <a target="_blank" rel="noopener" href="{}" title="Import into MusicBrainz with Harmony">Add to MB</a>
+          {seed}
+          <a target="_blank" rel="noopener" href="{}" title="Import into MusicBrainz with Harmony">Harmony</a>
           <a href="#" data-ext-pick="{i}" title="Pick the exact download">Pick</a>
-        </div></div>"##, art(&m.s("cover"), &m.s("title"), ""), esc(&album_key(m)), esck(m, "harmony"), title = esck(m, "title"))
+        </div></div>"##, art(&m.s("cover"), &m.s("title"), ""), esc(&album_key(m)), esck(m, "harmony"), title = esck(m, "title"),
+                                seed = { let u = mb_seed(m, &aid, &aname); if u.is_empty() { String::new() } else {
+                                    format!(r#"<a target="_blank" rel="noopener" href="{}" title="Open the MusicBrainz release editor with this album filled in">Add to MusicBrainz</a>"#, esc(&u)) } })
                         }).collect();
                         set_html(&ext, &format!(r#"<div class="section-head" style="margin-top:28px"><div><h3>Not in MusicBrainz <span class="faint small">{}</span></h3>
         <div class="small muted">Found on {}. Requests download from Soulseek, streamrip, YouTube Music or Bandcamp; files are tagged from the source's data.
-        Add them to MusicBrainz with Harmony and Encore re-tags them automatically.</div></div></div>
-      <div class="grid">{tiles}</div>"#, releases.len(), and_join(&names)));
+        Add them to MusicBrainz with Harmony and Encore re-tags them automatically.</div></div>{}</div>
+      <div class="grid">{tiles}</div>"#, releases.iter().filter(|m| !(hide && m.truthy("skipped"))).count(), and_join(&names),
+                            if ext_skipped > 0 { skipped_toggle(hide, ext_skipped) } else { String::new() }));
                     })
                 };
                 *paint_ext.borrow_mut() = paint.clone();

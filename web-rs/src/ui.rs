@@ -582,3 +582,32 @@ pub fn init() {
     }
     cb.forget();
 }
+
+/// `artistUrl(a)`: where an artist name goes – its MusicBrainz page when the id is known, else the name (library or catalog page).
+pub fn artist_url(a: &Value) -> String {
+    if a.truthy("mbid") { format!("#/artist/{}", String::from(js_sys::encode_uri_component(&a.s("mbid")))) }
+    else { format!("#/artist-name/{}", String::from(js_sys::encode_uri_component(&a.s("name")))) }
+}
+/// `artistLinks(t)`: a song's artist text with each of its artists as its own link ("Travis Scott feat. The Weeknd" →
+/// two links, the words between them kept as they are). Uses `artists` from the server; without it the whole text is one link.
+pub fn artist_links(t: &Value) -> String {
+    let s = t.s("artist");
+    if s.is_empty() { return String::new(); }
+    let given = t.a("artists");
+    let list = if given.is_empty() { vec![serde_json::json!({ "name": s })] } else { given };
+    let (mut out, mut at) = (String::new(), 0usize);
+    for a in &list {
+        let name = a.s("name");
+        if name.is_empty() { continue; }
+        let Some(i) = s[at..].find(&name).map(|i| i + at) else { continue };
+        out.push_str(&format!(r#"{}<a class="artist-link" href="{}">{}</a>"#, esc(&s[at..i]), artist_url(a), esc(&name)));
+        at = i + name.len();
+    }
+    if at == 0 { return format!(r#"<a class="artist-link" href="{}">{}</a>"#, artist_url(&serde_json::json!({ "name": s })), esc(&s)); }
+    out + &esc(&s[at..])
+}
+/// `albumLink(t)`: a song's album name as a link to the album (library album page), or plain text when it has no album id.
+pub fn album_link(t: &Value) -> String {
+    if !t.truthy("album") { return String::new(); }
+    if t.truthy("album_id") { format!(r##"<a class="album-link" href="#/library/album/{}">{}</a>"##, esck(t, "album_id"), esck(t, "album")) } else { esck(t, "album") }
+}

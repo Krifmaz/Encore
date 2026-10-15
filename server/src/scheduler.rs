@@ -8,7 +8,7 @@ use std::path::PathBuf;
 use std::sync::LazyLock;
 
 /// (key, name, description)
-pub const TASKS: [(&str, &str, &str); 11] = [
+pub const TASKS: [(&str, &str, &str); 12] = [
     ("scan", "Scan the library", "Pick up files added, changed or removed outside Encore."),
     ("sync", "Sync likes & playlists", "Two-way liked songs and playlist sync with Jellyfin, Plex, Navidrome, ListenBrainz, Spotify…"),
     ("lossy", "Lossless upgrades", "Re-check albums you only have as MP3/YouTube rips for a lossless copy."),
@@ -17,7 +17,8 @@ pub const TASKS: [(&str, &str, &str); 11] = [
     ("artwork", "Find missing artwork", "Look up and embed cover art for albums without any."),
     ("retag", "Re-tag albums added to MusicBrainz", "Albums tagged from Deezer/Apple/Discogs get proper MusicBrainz tags once they appear there."),
     ("verify", "Verify audio fingerprints", "Fingerprint unchecked songs with AcoustID and flag wrong audio."),
-    ("cleanup", "Clean up", "Remove finished downloads older than the cleanup age from the list and delete leftover staging files."),
+    ("quality", "Quality scan", "Check library songs for fake lossless (a lossy file saved as FLAC), upsampled hi-res, very quiet or clipped audio, a batch per run at low priority. Suspect songs show under Settings → Blocked with a Replace button; nothing is removed."),
+    ("cleanup", "Clean up", "Remove finished downloads older than the cleanup age from the list and delete leftover staging files and reported files kept in the trash for 7 days."),
     ("tools", "Update download tools", "Check yt-dlp, streamrip, Cadenza (server processing) and slskd (the Soulseek engine) for new versions, and install them for the tools switched to update automatically under Download tools – no new Encore image needed."),
     ("backup", "Back up the database", "Copy the database to config/backups (kept for 7 days, then one a week for 8 weeks, plus the last 3 pre-upgrade copies)."),
 ];
@@ -37,6 +38,7 @@ fn keys(key: &str) -> (&'static str, &'static str, i64) {
         "verify" => ("task_verify_enabled", "task_verify_minutes", 1),
         "tools" => ("task_tools_enabled", "task_tools_minutes", 1),
         "backup" => ("task_backup_enabled", "task_backup_minutes", 1),
+        "quality" => ("task_quality_enabled", "task_quality_minutes", 1),
         _ => ("task_cleanup_enabled", "task_cleanup_minutes", 1),
     }
 }
@@ -174,6 +176,7 @@ async fn run(st: &AppState, key: &str) -> anyhow::Result<String> {
             let gone = crate::backup::prune(st.data_dir());
             format!("backups/{}{}", b.name, if gone.is_empty() { String::new() } else { format!(", {} old backup(s) removed", gone.len()) })
         }
+        "quality" => crate::quality::scan(st, 300).await?,
         _ => cleanup(st)?,
     })
 }
@@ -196,7 +199,9 @@ fn cleanup(st: &AppState) -> anyhow::Result<String> {
             }
         }
     }
-    Ok(format!("{removed} leftover download folder(s) removed{}", if n > 0 { format!(", {n} old request(s) cleared") } else { String::new() }))
+    let trashed = crate::routes::report::purge_trash(st);
+    Ok(format!("{removed} leftover download folder(s) removed{}{}", if n > 0 { format!(", {n} old request(s) cleared") } else { String::new() },
+        if trashed > 0 { format!(", {trashed} reported file(s) deleted from the trash") } else { String::new() }))
 }
 
 /// Re-request MusicBrainz-tagged albums that are only lossy (lossless sources only).

@@ -657,6 +657,7 @@ fun DiscoverScreen(nav: Nav, initialQuery: String = "", initialType: String = "a
                             onClick = { nav.player.play(songs, i) },
                             onLike = { nav.graph.likes.toggle(t.id) },
                             subtitle = listOf(t.artist, t.album).filter { it.isNotEmpty() }.joinToString(" · "),
+                            subtitleLinks = rememberSongLinks(nav, t),
                             onMore = { nav.trackMenu(t) },
                         )
                     }

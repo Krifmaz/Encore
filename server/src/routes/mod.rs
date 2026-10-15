@@ -6,6 +6,7 @@ pub mod playback;
 pub mod playlists;
 pub mod remote;
 pub mod roon;
+pub mod report;
 pub mod requests;
 pub mod soulseek;
 pub mod stats;

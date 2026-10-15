@@ -62,6 +62,7 @@ import app.encore.android.ui.components.Gutter
 import app.encore.android.ui.components.Loadable
 import app.encore.android.ui.components.LoadableContent
 import app.encore.android.ui.components.MenuEntry
+import app.encore.android.ui.components.ReportUi
 import app.encore.android.ui.components.MoreButton
 import app.encore.android.ui.components.RoundCover
 import app.encore.android.ui.components.Toasts
@@ -240,6 +241,7 @@ fun AlbumScreen(nav: Nav, albumId: String) {
                                     MenuEntry("Play next", R.drawable.ic_skip_next) { tracks.asReversed().forEach { nav.player.playNext(it) }; Toasts.show("Plays next", "ok") },
                                     MenuEntry("Add to playlist", R.drawable.ic_playlist_add) { nav.addToPlaylist(tracks.map { it.id }) },
                                     MenuEntry("Share link", R.drawable.ic_share) { shareAlbum(album.title, album.artist) },
+                                    MenuEntry("Report a problem", R.drawable.ic_flag) { ReportUi.album(albumId, album.title) { nav.back() } },
                                 ),
                             )
                         }
@@ -266,6 +268,7 @@ fun AlbumScreen(nav: Nav, albumId: String) {
                         onLike = { nav.graph.likes.toggle(t.id) },
                         number = t.trackNo,
                         subtitle = if (t.artist.isNotEmpty() && t.artist != album.artist) "${t.artist} · $fmt" else fmt,
+                        subtitleLinks = if (t.artist.isNotEmpty() && t.artist != album.artist) rememberSongLinks(nav, t, withAlbum = false, suffix = " · $fmt") else null,
                         note = page.notes[t.id],
                         onMore = { nav.trackMenu(t, onAlbumPage = true) },
                     )

@@ -1,6 +1,6 @@
 import { api } from '../api.js';
 import * as player from '../player.js';
-import { art, availability, confirmDialog, debounce, emptyState, esc, fmt, icon, modal, shareArtist, skeletonGrid, toast } from '../ui.js';
+import { albumLink, art, artistLinks, availability, confirmDialog, debounce, emptyState, esc, fmt, icon, modal, shareArtist, skeletonGrid, toast } from '../ui.js';
 import { albumTile, bindTiles, libraryTile, submitRequest } from './common.js';
 import { artistCard, moreLikeThis } from './foryou.js';
 import { pickerModal } from './picker.js';
@@ -87,7 +87,7 @@ function librarySongRow(t) {
     <button class="thumb play-thumb" data-play-song='${esc(JSON.stringify(t))}' title="Play" aria-label="Play">${art(`/api/library/albums/${t.album_id}/cover`, t.album || t.title)}<i>${icon.play}</i></button>
     <div class="grow">
       <div class="ellipsis" style="font-weight:600">${esc(t.title)}</div>
-      <div class="small muted ellipsis">${esc(t.artist)}${t.album ? ' · ' + esc(t.album) : ''}</div>
+      <div class="small muted ellipsis">${artistLinks(t)}${t.album ? ' · ' + albumLink(t) : ''}</div>
     </div>
     <span class="small faint hide-sm">${t.duration ? fmt.dur(t.duration) : ''}</span>
     ${availability({ in_library: true })}
@@ -248,6 +248,47 @@ export async function renderSearch(view, ctx) {
   await run();
 }
 
+// Settings → Release types on the artist page and New releases: skipped releases hide behind a chip
+const hideSkippedPref = () => { try { return localStorage.getItem('encore.hideSkipped') !== '0'; } catch { return true; } };
+const setHideSkipped = (on) => { try { localStorage.setItem('encore.hideSkipped', on ? '1' : '0'); } catch { /* ignore */ } };
+/** The "Hide skipped types" switch with its "+N hidden" chip (the same markup in web-rs/src/pages/discover.rs). */
+export function skippedToggle(hide, n) {
+  return `<span class="row small" style="gap:8px;align-items:center"><label class="row" style="gap:6px;align-items:center"><input type="checkbox" data-hide-skipped ${hide ? 'checked' : ''}> Hide skipped types</label>${hide && n ? `<button class="badge" data-show-skipped title="Releases of the kinds Settings → Release types skips">+${n} hidden</button>` : ''}</span>`;
+}
+/** Wire the switch and chip under `root`: `repaint(hide)` draws the list again. */
+export function bindSkippedToggle(root, repaint) {
+  root.addEventListener('change', (e) => { const c = e.target.closest('[data-hide-skipped]'); if (c) { setHideSkipped(c.checked); repaint(c.checked); } });
+  root.addEventListener('click', (e) => { if (e.target.closest('[data-show-skipped]')) { e.preventDefault(); e.stopPropagation(); setHideSkipped(false); repaint(false); } });
+}
+export { hideSkippedPref };
+
+/** Request discography: the release-type boxes, ticked from the setting, for this request only. → { kinds, skip } or null. */
+export function releaseTypesDialog(a) {
+  return new Promise((resolve) => {
+    let done = false;
+    const box = (o) => `<label class="row" style="gap:6px;align-items:center"><input type="checkbox" value="${esc(o.key)}" ${o.on ? 'checked' : ''}> ${esc(o.label)}</label>`;
+    const m = modal({
+      title: 'Request discography',
+      body: `<p class="small muted" style="margin:0 0 12px">Every release of ${esc(a.name)} you don't have yet, from MusicBrainz${a.catalog_merge ? ', Deezer and Apple Music' : ''}. The boxes start from Settings → Release types and only change this request.</p>
+        <div class="small muted" style="margin-bottom:6px">Kinds to request</div>
+        <div class="row wrap" style="gap:6px 14px" data-rt="kinds">${a.release_types.kinds.map(box).join('')}</div>
+        <div class="small muted" style="margin:14px 0 6px">Skip releases that are</div>
+        <div class="row wrap" style="gap:6px 14px" data-rt="skip">${a.release_types.skip.map(box).join('')}</div>`,
+      footer: `<button class="btn" data-close>Cancel</button><button class="btn primary" data-ok>${icon.download}Request</button>`,
+    });
+    const picked = (k) => [...m.el.querySelectorAll(`[data-rt="${k}"] input:checked`)].map(i => i.value);
+    m.el.querySelector('[data-ok]').onclick = () => {
+      const kinds = picked('kinds');
+      if (!kinds.length) { toast('Tick at least one kind of release', 'err'); return; }
+      done = true;
+      m.close();
+      resolve({ kinds, skip: picked('skip') });
+    };
+    const obs = new MutationObserver(() => { if (!document.body.contains(m.el)) { obs.disconnect(); if (!done) resolve(null); } });
+    obs.observe(document.getElementById('modal-root'), { childList: true });
+  });
+}
+
 const ORDER = ['Album', 'EP', 'Single', 'Compilation', 'Live', 'Soundtrack', 'Remix', 'DJ-mix', 'Mixtape/Street', 'Demo', 'Other', 'Broadcast', 'Interview', 'Spokenword', 'Audiobook'];
 const reqBody = (rg) => ({ kind: 'album', mbid: rg.id, artist: rg.artist, title: rg.title, album: rg.title, year: rg.year, cover_url: rg.cover });
 
@@ -269,6 +310,8 @@ export async function renderArtist(view, ctx) {
   const localOnly = a.library_albums.filter(l => !(l.rgid && rgIds.has(l.rgid)) && !titles.has((l.album || '').toLowerCase()));
   let filter = 'all';
   try { filter = localStorage.getItem('encore.artistFilter') || 'all'; } catch { /* ignore */ }
+  let hideSkipped = hideSkippedPref();
+  const shown = (rg) => !(hideSkipped && rg.skipped);
 
   view.innerHTML = `
     <div class="detail-head artist">
@@ -280,7 +323,7 @@ export async function renderArtist(view, ctx) {
         <div class="chips">${a.tags.map(t => `<a class="badge" href="#/tag/${encodeURIComponent(t)}">${esc(t)}</a>`).join('')}</div>
         <div class="row wrap mt">
           ${a.library_tracks ? `<button class="btn primary" id="play-artist">${icon.play}Play</button><button class="btn" id="shuffle-artist">Shuffle</button><button class="btn" id="share-artist" title="Share link">${icon.external}Share</button>` : ''}
-          ${live(`ar:${a.id}`, a.request_status ? liveBadge(a.request_status, a.request_label) : `<button class="btn" id="req-disco" title="Every album and EP${a.discography_singles ? ' and single' : ''} you don't have, from MusicBrainz${a.catalog_merge ? ', Deezer and Apple Music' : ''}">${icon.download}Request discography</button>`)}
+          ${live(`ar:${a.id}`, a.request_status ? liveBadge(a.request_status, a.request_label) : `<button class="btn" id="req-disco" title="Every release you don't have, from MusicBrainz${a.catalog_merge ? ', Deezer and Apple Music' : ''}">${icon.download}Request discography</button>`)}
         </div>
         <div class="row wrap mt small">
           <span class="badge ${owned ? 'ok' : ''}">${owned} / ${a.release_groups.length} releases in library</span>
@@ -295,7 +338,7 @@ export async function renderArtist(view, ctx) {
     ${a.library_albums.length ? `<div class="section-head"><h2>In your library <span class="faint small">${a.library_albums.length}</span></h2></div>
       <div class="grid">${a.library_albums.map(l => libraryTile({ id: l.album_id, album: l.album, albumartist: l.albumartist, year: l.year })).join('')}</div>` : ''}
     <div class="section-head"><h2>Discography <span class="faint small">${a.release_groups.length}</span></h2>
-      <div class="tabs" id="disco-filter">${[['all', 'All'], ['missing', 'Missing'], ['owned', 'In library']].map(([k, l]) => `<button data-f="${k}">${l}</button>`).join('')}</div>
+      <div class="row wrap" style="gap:10px;justify-content:flex-end"><span id="disco-skipped"></span><div class="tabs" id="disco-filter">${[['all', 'All'], ['missing', 'Missing'], ['owned', 'In library']].map(([k, l]) => `<button data-f="${k}">${l}</button>`).join('')}</div></div>
     </div>
     <div id="disco"></div>
     <div id="ext-releases"></div>
@@ -307,11 +350,13 @@ export async function renderArtist(view, ctx) {
   const disco = view.querySelector('#disco');
   const paint = () => {
     view.querySelectorAll('#disco-filter button').forEach(b => b.classList.toggle('active', b.dataset.f === filter));
-    const keep = rg => filter === 'all' || (filter === 'owned' ? rg.in_library : !rg.in_library);
+    const keep = rg => shown(rg) && (filter === 'all' || (filter === 'owned' ? rg.in_library : !rg.in_library));
+    const skipped = a.release_groups.filter(rg => rg.skipped).length;
+    view.querySelector('#disco-skipped').innerHTML = skipped ? skippedToggle(hideSkipped, skipped) : '';
     const html = keys.map(k => {
       const list = groups[k].filter(keep);
       if (!list.length) return '';
-      const missing = groups[k].filter(rg => !rg.in_library && !rg.request_status);
+      const missing = groups[k].filter(rg => shown(rg) && !rg.in_library && !rg.request_status);
       return `<div class="section-head"><h3>${esc(k)}s <span class="faint small">${list.length}</span></h3>
           ${missing.length ? `<button class="btn sm" data-req-missing="${esc(k)}">${icon.download}Request ${missing.length} missing</button>` : ''}</div>
         <div class="grid">${list.map(rg => albumTile(rg, { href: `/album/${rg.id}`, actions: albumActions(rg), key: albumKey(rg), badge: albumBadge(rg), sub: esc([rg.date || rg.year, rg.secondary.length ? rg.type : ''].filter(Boolean).join(' · ')) })).join('')}</div>`;
@@ -319,6 +364,8 @@ export async function renderArtist(view, ctx) {
     disco.innerHTML = html || emptyState(icon.disc, a.release_groups.length ? (filter === 'owned' ? 'Nothing from this artist in the library yet' : 'You have everything 🎉') : 'No releases on MusicBrainz');
   };
   paint();
+  const repaintSkipped = (h) => { hideSkipped = h; paint(); paintExt(); };
+  bindSkippedToggle(view.querySelector('#disco-skipped'), repaintSkipped);
   view.querySelector('#disco-filter').onclick = (e) => {
     const b = e.target.closest('[data-f]');
     if (!b) return;
@@ -329,7 +376,7 @@ export async function renderArtist(view, ctx) {
   disco.addEventListener('click', async (e) => {
     const b = e.target.closest('[data-req-missing]');
     if (!b) return;
-    const missing = groups[b.dataset.reqMissing].filter(rg => !rg.in_library && !rg.request_status);
+    const missing = groups[b.dataset.reqMissing].filter(rg => shown(rg) && !rg.in_library && !rg.request_status);
     if (!await confirmDialog(`Request ${missing.length} ${b.dataset.reqMissing.toLowerCase()}(s)?`, missing.map(rg => rg.title).join(' · '), 'Request')) return;
     b.disabled = true;
     let ok = 0;
@@ -350,7 +397,10 @@ export async function renderArtist(view, ctx) {
   let paintExt = () => {};
   view.querySelector('#req-disco')?.addEventListener('click', async (e) => {
     const b = e.currentTarget;
-    const r = await submitRequest({ kind: 'artist', mbid: a.id, artist: a.name, cover_url: firstCover }, b);
+    // the release-type boxes for this request (older servers have none: the plain request)
+    const types = a.release_types ? await releaseTypesDialog(a) : {};
+    if (!types) return;
+    const r = await submitRequest({ kind: 'artist', mbid: a.id, artist: a.name, cover_url: firstCover, ...(a.release_types ? { release_filter: types } : {}) }, b);
     if (!r) return;
     const spot = view.querySelector(`[data-req-key="${CSS.escape(`ar:${a.id}`)}"]`);
     if (spot) spot.innerHTML = liveBadge(r.status, r.status === 'pending' ? 'Awaiting approval' : 'Discography requested');
@@ -373,6 +423,7 @@ export async function renderArtist(view, ctx) {
 
   // releases on Deezer / Apple Music that MusicBrainz doesn't list
   const ext = view.querySelector('#ext-releases');
+  bindSkippedToggle(ext, repaintSkipped);
   ext.innerHTML = '<div class="small muted mt"><span class="spinner"></span> Checking Deezer and Apple Music for releases MusicBrainz is missing…</div>';
   api.get(`/discover/artist/${a.id}/catalog`).then(x => {
     if (!view.isConnected) return;
@@ -380,10 +431,13 @@ export async function renderArtist(view, ctx) {
     rel = x.releases;
     const extBody = (m) => ({ kind: 'album', artist: a.name, title: m.title, album: m.title, year: m.year, cover_url: m.cover,
       ext: m.ext });
-    paintExt = () => { ext.innerHTML = `<div class="section-head" style="margin-top:28px"><div><h3>Not in MusicBrainz <span class="faint small">${rel.length}</span></h3>
+    // Deezer / Apple albums open the MusicBrainz release editor filled in (contribute.rs)
+    const mbSeed = (m) => { const e = m.ext || {}; const key = e.deezer ? `deezer-${e.deezer}` : e.apple ? `apple-${e.apple}` : '';
+      return key ? `/api/contribute/mb-seed/${encodeURIComponent(key)}?apple=${encodeURIComponent(e.deezer && e.apple ? e.apple : '')}&artist=${encodeURIComponent(a.id)}&artist_name=${encodeURIComponent(a.name)}` : ''; };
+    paintExt = () => { const extSkipped = rel.filter(m => m.skipped).length; ext.innerHTML = `<div class="section-head" style="margin-top:28px"><div><h3>Not in MusicBrainz <span class="faint small">${rel.filter(shown).length}</span></h3>
         <div class="small muted">Found on ${[...new Set(rel.flatMap(m => m.sources.map(s => s.name)))].join(', ').replace(/, ([^,]*)$/, ' and $1')}. Requests download from Soulseek, streamrip, YouTube Music or Bandcamp; files are tagged from the source's data.
-        Add them to MusicBrainz with Harmony and Encore re-tags them automatically.</div></div></div>
-      <div class="grid">${rel.map((m, i) => `<div class="tile" data-ext-open="${i}">
+        Add them to MusicBrainz with Harmony and Encore re-tags them automatically.</div></div>${extSkipped ? skippedToggle(hideSkipped, extSkipped) : ''}</div>
+      <div class="grid">${rel.map((m, i) => !shown(m) ? '' : `<div class="tile" data-ext-open="${i}">
         <div class="art">${art(m.cover, m.title)}
           <div class="corner" data-req-key="${esc(albumKey(m))}">${m.in_library ? '<span class="badge ok">In library</span>' : m.request_status ? liveBadge(m.request_status, m.request_label) : '<span class="badge warn">Not in MusicBrainz</span>'}</div>
           <div class="overlay">${m.library_album_id ? `<button class="fab" data-play-album="${esc(m.library_album_id)}" title="Play" aria-label="Play">${icon.play}</button>` : m.in_library || m.request_status ? '' : `<button class="fab" data-ext-req="${i}" data-req-hide="${esc(albumKey(m))}" title="Request">${icon.plus}</button>`}</div></div>
@@ -391,7 +445,8 @@ export async function renderArtist(view, ctx) {
         <div class="s ellipsis">${esc([m.date || m.year, m.type, m.tracks ? m.tracks + ' tracks' : ''].filter(Boolean).join(' · '))}</div>
         <div class="row small" style="gap:8px;flex-wrap:wrap;margin-top:4px">
           ${m.sources.map(s => `<a class="muted" target="_blank" rel="noopener" href="${esc(s.url)}">${esc(s.name)}</a>`).join('')}
-          <a target="_blank" rel="noopener" href="${esc(m.harmony)}" title="Import into MusicBrainz with Harmony">Add to MB</a>
+          ${mbSeed(m) ? `<a target="_blank" rel="noopener" href="${esc(mbSeed(m))}" title="Open the MusicBrainz release editor with this album filled in">Add to MusicBrainz</a>` : ''}
+          <a target="_blank" rel="noopener" href="${esc(m.harmony)}" title="Import into MusicBrainz with Harmony">Harmony</a>
           <a href="#" data-ext-pick="${i}" title="Pick the exact download">Pick</a>
         </div></div>`).join('')}</div>`; };
     paintExt();

@@ -41,6 +41,9 @@ struct State {
     dragging: bool,
     context: String,
     repeat: String,
+    /// shuffle mode, and the queue's order from before shuffling (put back when it goes off)
+    shuffle: bool,
+    order: Option<Vec<Rc<Value>>>,
     full: bool,
     pane: String,
     logged: bool,
@@ -65,7 +68,7 @@ struct State {
 }
 impl Default for State {
     fn default() -> Self {
-        Self { queue: vec![], index: -1, transcoded: false, lossy: false, rung: 0, dsp: false, dsp_rate: 0.0, offset: 0.0, dragging: false, context: "list".into(), repeat: "off".into(), full: false, pane: "now".into(), logged: false, announced: None,
+        Self { queue: vec![], index: -1, transcoded: false, lossy: false, rung: 0, dsp: false, dsp_rate: 0.0, offset: 0.0, dragging: false, context: "list".into(), repeat: "off".into(), shuffle: false, order: None, full: false, pane: "now".into(), logged: false, announced: None,
             stalls: vec![], stall_at: 0.0, seek_at: 0.0, step_at: 0.0, switched_at: 0.0, last_preload_check: 0.0, slow_start: None,
             want: false, at: 0.0, src_at: 0.0, floor: playback::AUTO_FLOOR, low_stalls: vec![] }
     }
@@ -415,9 +418,10 @@ pub fn set_link(l: Option<Link>) {
     render();
     if st(|s| s.full) { render_full(); load_lyrics(); }
 }
-/// `[id, playing, online, volume, queue.length, index]` – what a re-render of the bar depends on.
-fn link_key(l: &Link) -> (Value, Value, bool, Value, usize, Value) {
-    (l.state.g("id").clone(), l.state.g("playing").clone(), l.online, l.state.g("volume").clone(), l.state.a("queue").len(), l.state.g("index").clone())
+/// `[id, playing, online, volume, queue.length, index, shuffle, repeat]` – what a re-render of the bar depends on.
+fn link_key(l: &Link) -> (Value, Value, bool, Value, usize, Value, Value, Value) {
+    (l.state.g("id").clone(), l.state.g("playing").clone(), l.online, l.state.g("volume").clone(), l.state.a("queue").len(), l.state.g("index").clone(),
+     l.state.g("shuffle").clone(), l.state.g("repeat").clone())
 }
 /// New state from the linked device (every check-in).
 pub fn link_state(s: Value, online: bool) {
@@ -439,7 +443,7 @@ pub fn link_state(s: Value, online: bool) {
 fn remote_track() -> Option<Value> {
     let s = link_state_value();
     if !s.truthy("title") { return None; }
-    Some(json!({ "id": s.g("id"), "title": s.g("title"), "artist": s.g("artist"), "album": s.g("album"), "album_id": s.g("album_id"), "format": s.g("format"), "duration": s.g("duration"), "cover": s.g("cover"), "remote": true }))
+    Some(json!({ "id": s.g("id"), "title": s.g("title"), "artist": s.g("artist"), "artists": s.g("artists"), "album": s.g("album"), "album_id": s.g("album_id"), "format": s.g("format"), "duration": s.g("duration"), "cover": s.g("cover"), "remote": true }))
 }
 /// The song in front of you: the linked device's when linked, else this device's.
 fn now_track() -> Option<Value> { if is_linked() { remote_track() } else { current() } }
@@ -456,6 +460,8 @@ fn slim(t: &Value) -> Value {
 pub fn snapshot() -> Value {
     let (Some(t), Some(_)) = (cur(), audio()) else { return json!({ "playing": false }) };
     let mut m = match slim(&t) { Value::Object(m) => m, _ => Map::new() };
+    // `...withArtists(t)`: each artist of the song for links, only when it has them
+    if !t.a("artists").is_empty() { m.insert("artists".into(), t.g("artists").clone()); }
     // `cover: cover(t)` – an undefined cover is left out, like JSON.stringify does
     let cov = cover_v(&t);
     if t.truthy("preview") || !t.truthy("album_id") { if t.has("cover") { m.insert("cover".into(), cov); } } else { m.insert("cover".into(), cov); }
@@ -463,6 +469,9 @@ pub fn snapshot() -> Value {
     m.insert("position".into(), json!(spot_position()));
     m.insert("duration".into(), json!(duration()));
     m.insert("volume".into(), json!(user_vol()));
+    let (shuffle, repeat) = st(|s| (s.shuffle, s.repeat.clone()));
+    m.insert("shuffle".into(), json!(shuffle));
+    m.insert("repeat".into(), json!(repeat));
     let rate = CTX.with(|c| c.borrow().as_ref().map(|c| c.sample_rate() as f64));
     m.insert("signal".into(), json!({ "label": quality(&t), "transport": transport().map(|(k, _)| k), "output_rate": rate }));
     let (q, index) = lib_window();
@@ -502,6 +511,8 @@ fn run_command(c: &Value) {
         "prev" => prev(),
         "seek" => seek_to(c.f("value")),
         "volume" => set_volume(c.f("value")),
+        "shuffle" => set_shuffle(c.truthy("value")),
+        "repeat" => set_repeat(&c.s("value")),
         "enqueue" => { if c.g("tracks").is_array() { enqueue(c.a("tracks")); } }
         "play_next" => { if c.g("tracks").is_array() { play_next(c.a("tracks")); } }
         "play_queue" => {
@@ -561,6 +572,8 @@ pub fn play_queue(tracks: Vec<Value>, start: usize, context: &str) {
         s.queue = tracks.into_iter().filter(json::truthy).map(Rc::new).collect();
         s.index = (start as i64).min(s.queue.len() as i64 - 1).max(0);
         s.context = context.to_string();
+        s.order = None;
+        if s.shuffle && context != "preview" { shuffle_rest(s); }
     });
     load(false, 0.0, None, None);
 }
@@ -571,7 +584,11 @@ pub fn enqueue(tracks: Vec<Value>) {
         if !out.is_empty() { via_link(json!({ "action": "enqueue", "tracks": out })); }
         return;
     }
-    st_mut(|s| s.queue.extend(tracks.into_iter().map(Rc::new)));
+    st_mut(|s| {
+        let add: Vec<Rc<Value>> = tracks.into_iter().map(Rc::new).collect();
+        if let Some(o) = s.order.as_mut() { o.extend(add.iter().cloned()); }
+        s.queue.extend(add);
+    });
     if st(|s| s.index < 0) { st_mut(|s| s.index = 0); load(false, 0.0, None, None); } else { render(); emit(); preload_next(); }
 }
 
@@ -583,8 +600,14 @@ pub fn play_next(tracks: Vec<Value>) {
     }
     if st(|s| s.index < 0) { play_queue(tracks, 0, "list"); return; }
     st_mut(|s| {
+        let add: Vec<Rc<Value>> = tracks.into_iter().map(Rc::new).collect();
+        let current = s.queue.get(s.index.max(0) as usize).cloned();
+        if let Some(o) = s.order.as_mut() {
+            let at = current.and_then(|c| o.iter().position(|x| Rc::ptr_eq(x, &c))).map(|i| i + 1).unwrap_or(o.len());
+            o.splice(at..at, add.iter().cloned());
+        }
         let at = ((s.index + 1) as usize).min(s.queue.len());
-        s.queue.splice(at..at, tracks.into_iter().map(Rc::new));
+        s.queue.splice(at..at, add);
     });
     render(); emit(); preload_next();
 }
@@ -864,14 +887,14 @@ fn save_spot(force: bool) {
     if !force && now - SPOT_SAVED_AT.with(|c| c.get()) < 5000.0 { return; }
     SPOT_SAVED_AT.with(|c| c.set(now));
     let (queue, index) = lib_window();
-    let (context, repeat) = st(|s| (s.context.clone(), s.repeat.clone()));
+    let (context, repeat, shuffle) = st(|s| (s.context.clone(), s.repeat.clone(), s.shuffle));
     // saved_at is when music last played here: a pause or a page closed while paused keeps the old one, so a
     // song played on another device since still wins when the app opens again
     let saved_at = if PLAYED_SINCE.with(|p| p.get()) { now / 1000.0 } else {
         saved_spot().map(|s| s.f("saved_at")).filter(|x| x.is_finite() && *x != 0.0).unwrap_or(now / 1000.0)
     };
     if audio().is_some_and(|a| a.paused()) { PLAYED_SINCE.with(|p| p.set(false)); }
-    dom::ls_set(RESUME, &json!({ "queue": queue, "index": index, "position": position(), "shuffle": context == "library",
+    dom::ls_set(RESUME, &json!({ "queue": queue, "index": index, "position": position(), "shuffle": shuffle,
         "repeat": repeat, "context": context, "saved_at": saved_at }).to_string());
 }
 /// The library songs of the queue – at most 300, around the current song – and where the current song is in them.
@@ -914,6 +937,9 @@ pub fn restore(s: Option<Value>) -> bool {
         x.index = (if index.is_finite() { index as i64 } else { 0 }).min(n - 1).max(0);
         x.context = context;
         if ["off", "all", "one"].contains(&repeat.as_str()) { x.repeat = repeat; }
+        // shuffle on: the saved queue is already in its shuffled order (the original order isn't kept)
+        x.shuffle = s.g("shuffle") == &json!(true) && x.context != "library";
+        x.order = None;
     });
     let dur = cur().map(|t| t.f("duration")).unwrap_or(0.0);
     let at = s.f("position");
@@ -1982,20 +2008,66 @@ fn move_to(from: i64, to: i64) {
     });
     render(); emit(); preload_next();
 }
-fn shuffle_up_next() {
+/// `shuffleRest()`: shuffle the songs after the current one, remembering the order they were in (to put back later).
+fn shuffle_rest(s: &mut State) {
+    if s.order.is_none() { s.order = Some(s.queue.clone()); }
+    let start = (s.index + 1).max(0) as usize;
+    if start < s.queue.len() {
+        let rest = &mut s.queue[start..];
+        for i in (1..rest.len()).rev() {
+            let j = (js_sys::Math::random() * (i + 1) as f64).floor() as usize;
+            rest.swap(i, j);
+        }
+    }
+}
+/// `unshuffled()`: the queue in its order from before shuffling: songs removed since stay out, songs added since go at the end.
+fn unshuffled(s: &State) -> Vec<Rc<Value>> {
+    let mut left: Vec<(Rc<Value>, usize)> = vec![];
+    for t in &s.queue {
+        match left.iter_mut().find(|(x, _)| Rc::ptr_eq(x, t)) { Some(e) => e.1 += 1, None => left.push((t.clone(), 1)) }
+    }
+    let mut out = vec![];
+    let mut take = |t: &Rc<Value>, out: &mut Vec<Rc<Value>>| {
+        if let Some(e) = left.iter_mut().find(|(x, n)| *n > 0 && Rc::ptr_eq(x, t)) { e.1 -= 1; out.push(t.clone()); }
+    };
+    for t in s.order.as_deref().unwrap_or(&[]) { take(t, &mut out); }
+    for t in &s.queue { take(t, &mut out); }
+    out
+}
+/// `setShuffle(on)`: shuffle mode – on shuffles the rest of the queue, off puts the original order back (the song playing stays).
+fn set_shuffle(on: bool) {
+    if via_link(json!({ "action": "shuffle", "value": on })) {
+        LINK.with(|l| if let Some(l) = l.borrow_mut().as_mut() { if let Some(o) = l.state.as_object_mut() { o.insert("shuffle".into(), json!(on)); } });
+        if st(|s| s.full) { render_full(); }
+        return;
+    }
+    if st(|s| s.shuffle == on) { return; }
     st_mut(|s| {
-        let start = (s.index + 1).max(0) as usize;
-        if start < s.queue.len() {
-            // `.sort(() => Math.random() - 0.5)` – a random order of what's left (Fisher–Yates with Math.random)
-            let rest = &mut s.queue[start..];
-            for i in (1..rest.len()).rev() {
-                let j = (js_sys::Math::random() * (i + 1) as f64).floor() as usize;
-                rest.swap(i, j);
-            }
+        s.shuffle = on;
+        if on { shuffle_rest(s); }
+        else if s.order.is_some() {
+            let current = s.queue.get(s.index.max(0) as usize).cloned();
+            let q = unshuffled(s);
+            if let Some(i) = current.and_then(|c| q.iter().position(|x| Rc::ptr_eq(x, &c))) { s.queue = q; s.index = i as i64; }
+            s.order = None;
         }
     });
-    render(); emit(); preload_next();
+    render(); emit(); preload_next(); save_spot(true);
 }
+/// `setRepeat(v)`: 'off' | 'all' | 'one'.
+fn set_repeat(v: &str) {
+    if !["off", "all", "one"].contains(&v) { return; }
+    if via_link(json!({ "action": "repeat", "value": v })) {
+        LINK.with(|l| if let Some(l) = l.borrow_mut().as_mut() { if let Some(o) = l.state.as_object_mut() { o.insert("repeat".into(), json!(v)); } });
+        if st(|s| s.full) { render_full(); }
+        return;
+    }
+    st_mut(|s| s.repeat = v.to_string());
+    if st(|s| s.full) { render_full(); }
+    emit(); save_spot(true);
+}
+fn next_repeat(r: &str) -> &'static str { match r { "off" => "all", "all" => "one", "one" => "off", _ => "all" } }
+fn repeat_title(r: &str) -> &'static str { match r { "one" => "Repeat: this song", "all" => "Repeat: the queue", _ => "Repeat: off" } }
 
 fn log_play() {
     let Some(t) = cur() else { return };
@@ -2066,6 +2138,7 @@ fn more_menu(anchor: &Element) {
     if lib { items.push(MenuItem::link("Download this song", &icon("download"), &format!("/api/library/tracks/{}/file", t.s("id")), true)); }
     if lib && !linked && can_save_offline() { let t2 = t.clone(); items.push(MenuItem::new("Save for offline", &icon("download"), move || { save_offline(vec![t2.clone()]); toast("Saving to this phone…", "ok"); })); }
     items.push(MenuItem::new("Signal path", &icon("activity"), || dom::spawn(signal_path())));
+    if lib { let t2 = t.clone(); items.push(MenuItem::new("Report a problem", &icon("shield"), move || crate::pages::report::report_modal("track", t2.g("id").clone(), &t2.s("title"), "", None))); }
     if has_encore_remote() { items.push(MenuItem::new(if linked { "Your devices…" } else { "Play on another device…" }, &icon("devices"), remote_open)); }
     pop_menu(anchor, items);
 }
@@ -2133,7 +2206,10 @@ async fn signal_path() {
     let info = track_info(&t).await;
     if linked().is_none() && st(|s| s.dsp) && dsp_cache_on() && cur().is_some_and(|c| *c == t) { prepare_dsp(&t).await; }   // pre-rendered yet?
     let mut rows: Vec<(String, String, String)> = vec![];
-    rows.push(("Source".into(), source_line(&t, info.as_ref()), if info.as_ref().is_some_and(|i| i.g("lossless") == &json!(false)) { "A lossy file: what the file lost is gone before Encore touches it".into() } else { String::new() }));
+    // quality checks (fake lossless, upsampled, very quiet…): "Fake lossless? cutoff 16 kHz"
+    let suspect = info.as_ref().map(|i| i.o("quality")).filter(|q| q.s("status") == "suspect").map(|q| q.s("summary")).unwrap_or_default();
+    let lossy_note = if info.as_ref().is_some_and(|i| i.g("lossless") == &json!(false)) { "A lossy file: what the file lost is gone before Encore touches it".to_string() } else { String::new() };
+    rows.push(("Source".into(), source_line(&t, info.as_ref()), [lossy_note, suspect].into_iter().filter(|x| !x.is_empty()).collect::<Vec<_>>().join(" · ")));
     let linked = linked();
     let pure;
     let mut untouched = false;
@@ -2689,10 +2765,11 @@ fn render_full() {
         return;
     };
     let s = link.as_ref().map(|l| l.state.clone()).unwrap_or(json!({}));
-    let (idx, pane, repeat, q): (i64, String, String, Vec<Value>) = if link.is_some() {
-        st(|x| (if s.is_nullish("index") { -1 } else { s.i("index") }, x.pane.clone(), x.repeat.clone(), s.a("queue")))
+    let (idx, pane, repeat, shuffle_on, q): (i64, String, String, bool, Vec<Value>) = if link.is_some() {
+        let r = s.s("repeat");
+        st(|x| (if s.is_nullish("index") { -1 } else { s.i("index") }, x.pane.clone(), if ["off", "all", "one"].contains(&r.as_str()) { r } else { "off".into() }, s.truthy("shuffle"), s.a("queue")))
     } else {
-        st(|x| (x.index, x.pane.clone(), x.repeat.clone(), x.queue.iter().map(|t| (**t).clone()).collect()))
+        st(|x| (x.index, x.pane.clone(), x.repeat.clone(), x.shuffle, x.queue.iter().map(|t| (**t).clone()).collect()))
     };
     let up_next: Vec<Value> = q.iter().skip((idx + 1).max(0) as usize).cloned().collect();
     let playing = now_playing();
@@ -2700,9 +2777,7 @@ fn render_full() {
     let autoplay = prefs().truthy("autoplay");
     dom::set_style(&f, "--np-bg", &format!(r#"url("{}")"#, cover_at(&t, 400)));
     let tab = |p: &str, label: &str| format!(r#"<button data-pane="{p}" class="{}">{label}</button>"#, if pane == p { "active" } else { "" });
-    let artist = if t.truthy("preview") { esck(&t, "artist") } else {
-        format!(r##"<a href="#/artist-name/{}">{}</a>"##, String::from(js_sys::encode_uri_component(&t.s("artist"))), esck(&t, "artist"))
-    };
+    let artist = if t.truthy("preview") { esck(&t, "artist") } else { crate::ui::artist_links(&t) };
     let album = if t.truthy("album") {
         format!(" · {}", if t.truthy("album_id") { format!(r##"<a href="#/library/album/{}">{}</a>"##, esck(&t, "album_id"), esck(&t, "album")) } else { esck(&t, "album") })
     } else { String::new() };
@@ -2720,7 +2795,7 @@ fn render_full() {
             format!(r#"<div class="np-item" data-i="{i}">
             <div class="thumb">{}</div>
             <div class="grow" style="min-width:0"><div class="ellipsis" style="font-weight:600">{}</div><div class="small muted ellipsis">{}</div></div>
-            {btns}</div>"#, crate::ui::art_sized(&cover(x), &album_or_title(x), "", 200), esck(x, "title"), esck(x, "artist"))
+            {btns}</div>"#, crate::ui::art_sized(&cover(x), &album_or_title(x), "", 200), esck(x, "title"), if x.truthy("preview") { esck(x, "artist") } else { crate::ui::artist_links(x) })
         }).collect::<String>()
     } else {
         format!(r#"<div class="muted small" style="padding:16px 4px">{}</div>"#,
@@ -2729,10 +2804,12 @@ fn render_full() {
     let actions = format!(r#"<div class="np-actions">
           {}
           {}
+          <button class="btn ghost icon {}" id="f-lyrics" aria-label="Lyrics" title="Lyrics">{}</button>
           <button class="btn ghost icon" id="f-more" aria-label="More" title="More">{}</button>
         </div>"#,
         if can_like(Some(&t)) { like_button("f-like", if is_liked(&t) { "on" } else { "" }) } else { String::new() },
         if can_like(Some(&t)) { format!(r#"<button class="btn ghost icon" id="f-share" aria-label="Share" title="Share link">{}</button>"#, icon("external")) } else { String::new() },
+        if pane == "lyrics" { "on" } else { "" }, icon("music"),
         icon("more"));
     set_html(&f, &format!(r##"
     <div class="np-backdrop"></div>
@@ -2769,11 +2846,11 @@ fn render_full() {
     </div>"##,
         x = icon("x"), tab_now = tab("now", "Now playing"), tab_lyrics = tab("lyrics", "Lyrics"), tab_queue = tab("queue", "Up next"),
         big_art = art(&cover(&t), &album_or_title(&t), "big"), title = esck(&t, "title"), quality = esc(&quality(&t)),
-        shuffle = if link.is_some() { r#"<span class="np-gap"></span>"#.to_string() } else { format!(r#"<button class="btn ghost icon" id="f-shuffle" title="Shuffle up next" aria-label="Shuffle up next">{}</button>"#, icon("shuffle")) },
+        shuffle = format!(r#"<button class="btn ghost icon {}" id="f-shuffle" title="{}" aria-label="Shuffle" aria-pressed="{shuffle_on}">{}</button>"#,
+            if shuffle_on { "on" } else { "" }, if shuffle_on { "Shuffle: on" } else { "Shuffle: off" }, icon("shuffle")),
         prev = icon("prev"), pp = if playing { icon("pause") } else { icon("play") }, next = icon("next"),
-        repeat = if link.is_some() { r#"<span class="np-gap"></span>"#.to_string() } else {
-            format!(r#"<button class="btn ghost icon {}" id="f-repeat" title="Repeat: {repeat}" aria-label="Repeat">{}{}</button>"#, if repeat != "off" { "on" } else { "" }, icon("refresh"), if repeat == "one" { "<sup>1</sup>" } else { "" })
-        },
+        repeat = format!(r#"<button class="btn ghost icon {}" id="f-repeat" title="{}" aria-label="Repeat" aria-pressed="{}">{}{}</button>"#,
+            if repeat != "off" { "on" } else { "" }, repeat_title(&repeat), repeat != "off", icon("refresh"), if repeat == "one" { "<sup>1</sup>" } else { "" }),
         volume_ic = icon_attr("volume", r#"width="18""#), vol = volume, lyrics = lyrics_html(),
         on_name = link.as_ref().map(|l| format!(" on {}", esc(&l.name))).unwrap_or_default(),
         auto = if link.is_some() { String::new() } else { format!(r#"<label class="row small muted" style="gap:6px" title="When the queue ends, keep playing a shuffle of the whole library"><input type="checkbox" id="f-auto" {}> Then shuffle library</label>"#, if autoplay { "checked" } else { "" }) }));
@@ -2792,10 +2869,13 @@ fn render_full() {
     wire(&mut ls, &f, "#f-toggle", "click", |_| toggle());
     wire(&mut ls, &f, "#f-next", "click", |_| next(false));
     wire(&mut ls, &f, "#f-prev", "click", |_| prev());
-    wire(&mut ls, &f, "#f-shuffle", "click", |_| shuffle_up_next());
-    wire(&mut ls, &f, "#f-repeat", "click", |_| {
-        st_mut(|s| s.repeat = match s.repeat.as_str() { "off" => "all", "all" => "one", _ => "off" }.into());
+    wire(&mut ls, &f, "#f-shuffle", "click", move |_| set_shuffle(!shuffle_on));
+    { let r = repeat.clone(); wire(&mut ls, &f, "#f-repeat", "click", move |_| set_repeat(next_repeat(&r))); }
+    wire(&mut ls, &f, "#f-lyrics", "click", |_| {
+        let p = if st(|s| s.pane == "lyrics") { "now" } else { "lyrics" };
+        st_mut(|s| s.pane = p.into());
         render_full();
+        if p == "lyrics" { load_lyrics(); }
     });
     wire(&mut ls, &f, "#f-auto", "change", |e| {
         let on = dom::target_el(e).map(|c| dom::checked(&c)).unwrap_or(false);
@@ -2816,6 +2896,7 @@ fn render_full() {
     let queue_for_link = s.a("queue");
     let is_link = link.is_some();
     wire(&mut ls, &f, ".np-list", "click", move |e| {
+        if dom::closest(e, "a[href]").is_some() { set_full(false); return; }
         if is_link {
             if let Some(it) = dom::closest(e, "[data-i]") {
                 if !queue_for_link.is_empty() { via_link(json!({ "action": "play_queue", "tracks": queue_for_link, "index": num(&dom::data(&it, "i")) as i64 })); }

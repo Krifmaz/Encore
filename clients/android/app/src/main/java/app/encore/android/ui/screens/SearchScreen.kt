@@ -162,6 +162,7 @@ fun SearchScreen(nav: Nav) {
                             onClick = { nav.player.play(r.tracks, i) },
                             onLike = { nav.graph.likes.toggle(t.id) },
                             subtitle = listOf(t.artist, t.album).filter { it.isNotEmpty() }.joinToString(" · "),
+                            subtitleLinks = rememberSongLinks(nav, t),
                             onMore = { nav.trackMenu(t) },
                         )
                     }

@@ -133,8 +133,13 @@ pub fn render(view: Element, ctx: Ctx) -> PageFuture {
                 let releases = d.a("releases");
                 if releases.is_empty() || !v.is_connected() { return; }
                 let Some(el) = dom::qs_in(&v, "#new-releases") else { return };
-                dom::set_html(&el, &format!(r#"<div class="section-head"><h2>New releases</h2><span class="small muted">from artists in your library</span></div>
-      <div class="grid">{}</div>"#, releases.iter().map(|r| format!(r#"<div class="tile" data-href="{href}">
+                // kinds Settings → Release types skips hide behind a "+N hidden" chip
+                let host = el.clone();
+                let paint_new: std::rc::Rc<dyn Fn(bool)> = std::rc::Rc::new(move |hide: bool| {
+                let skipped = releases.iter().filter(|r| r.truthy("skipped")).count();
+                let toggle = if skipped > 0 { crate::pages::discover::skipped_toggle(hide, skipped) } else { String::new() };
+                dom::set_html(&host, &format!(r#"<div class="section-head"><h2>New releases</h2><span class="row wrap" style="gap:10px;justify-content:flex-end"><span class="small muted">from artists in your library</span>{toggle}</span></div>
+      <div class="grid">{}</div>"#, releases.iter().filter(|r| !(hide && r.truthy("skipped"))).map(|r| format!(r#"<div class="tile" data-href="{href}">
         <div class="art">{art}
           <div class="corner">{corner}</div>
 </div>
@@ -148,6 +153,9 @@ pub fn render(view: Element, ctx: Ctx) -> PageFuture {
                     date = esc(&r.s("date")),
                     kind = if r.truthy("type") && r.s("type") != "Album" { format!(" · {}", esc(&r.s("type"))) } else { String::new() },
                 )).collect::<String>()));
+                });
+                paint_new(crate::pages::discover::hide_skipped_pref());
+                crate::pages::discover::bind_skipped_toggle(&el, paint_new);
             });
         }
 

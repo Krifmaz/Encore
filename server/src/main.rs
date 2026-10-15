@@ -11,6 +11,7 @@ mod auth;
 mod backup;
 mod config;
 mod connections;
+mod contribute;
 mod covers;
 mod db;
 mod dsp;
@@ -27,6 +28,8 @@ mod nlsearch;
 mod notify;
 mod organize;
 mod playlists;
+mod quality;
+mod release_types;
 mod req_events;
 mod roon;
 mod routes;
@@ -41,6 +44,7 @@ mod tagger;
 mod tools;
 mod vpn;
 mod worker;
+mod ytauth;
 
 use axum::extract::Request;
 use axum::http::{header, HeaderValue};
@@ -87,6 +91,7 @@ pub fn app(st: AppState) -> Router {
         .merge(routes::foryou::router())
         .merge(routes::catalog::router())
         .merge(routes::requests::router())
+        .merge(routes::report::router())
         .merge(routes::picker::router())
         .merge(routes::soulseek::router())
         .merge(routes::system::router())
@@ -96,6 +101,8 @@ pub fn app(st: AppState) -> Router {
         .merge(routes::remote::router())
         .merge(routes::roon::router())
         .merge(routes::playback::router())
+        .merge(contribute::router())
+        .merge(ytauth::router())
         .with_state(st.clone())
         // albums and songs in JSON answers gain `cover_v`, so clients can use cacheable cover URLs
         .layer(middleware::from_fn_with_state(st, covers::stamp_layer))
@@ -161,6 +168,8 @@ async fn main() -> anyhow::Result<()> {
     tokio::spawn(vpn::supervisor(st.clone()));
     tokio::spawn(slskd_managed::supervisor(st.clone()));
     tokio::spawn(roon::supervisor(st.clone()));
+    tokio::spawn(contribute::worker(st.clone()));
+    tokio::spawn(ytauth::supervisor(st.clone()));
     let listener = tokio::net::TcpListener::bind(addr).await?;
     axum::serve(listener, app(st).into_make_service_with_connect_info::<SocketAddr>()).await?;
     Ok(())

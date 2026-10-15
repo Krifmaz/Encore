@@ -370,11 +370,12 @@ async fn catalog_tracks(State(st): State<AppState>, User(_): User, Json(ext): Js
     Ok(Json(json!(tracks)))
 }
 
-/// What "Request discography" asks for: the MusicBrainz release groups of the wanted types (no live,
-/// compilation … secondary types) and the Deezer / Apple Music albums MusicBrainz is missing, minus what
-/// `skip` says is owned or already requested. An ext album that is a MusicBrainz release under the same
-/// normalized title (released within a year of it) is left out, as is a second copy of the same ext album.
-pub fn discography_plan(groups: &[Value], ext: &[Value], kinds: &[&str], skip: impl Fn(&Value) -> bool) -> Vec<Value> {
+/// What "Request discography" asks for: the MusicBrainz release groups the release-type filter wants
+/// (kinds, minus the ticked extras: live, compilation …) and the Deezer / Apple Music albums MusicBrainz is
+/// missing (their types read from record type and title), minus what `skip` says is owned or already
+/// requested. An ext album that is a MusicBrainz release under the same normalized title (released within
+/// a year of it, skipped type or not) is left out, as is a second copy of the same ext album.
+pub fn discography_plan(groups: &[Value], ext: &[Value], filter: &crate::release_types::ReleaseFilter, skip: impl Fn(&Value) -> bool) -> Vec<Value> {
     let year = |v: &Value| s(&v["year"]).chars().take(4).collect::<String>().parse::<i32>().ok()
         .or_else(|| s(&v["date"]).chars().take(4).collect::<String>().parse::<i32>().ok());
     // as in `fuzzy`: a title-track single isn't the album of the same name
@@ -383,13 +384,13 @@ pub fn discography_plan(groups: &[Value], ext: &[Value], kinds: &[&str], skip: i
         && match (year(a), year(b)) { (Some(x), Some(y)) => (x - y).abs() <= 1, _ => true };
     let mut out: Vec<Value> = vec![];
     for g in groups {
-        if !kinds.contains(&s(&g["type"]).as_str()) || g["secondary"].as_array().is_some_and(|a| !a.is_empty()) || skip(g) {
+        if !filter.wants(g) || skip(g) {
             continue;
         }
         out.push(g.clone());
     }
     for e in ext {
-        if !e["ext"].is_object() || !kinds.contains(&s(&e["type"]).as_str()) {
+        if !e["ext"].is_object() || !filter.wants(e) {
             continue;
         }
         if groups.iter().any(|g| same(g, e)) || out.iter().any(|o| o["ext"].is_object() && same(o, e)) || skip(e) {
@@ -560,6 +561,7 @@ async fn artist_catalog(State(st): State<AppState>, User(_): User, Path(mbid): P
     let a = mb::artist(&st, &mbid).await.map_err(|e| err(502, format!("MusicBrainz error: {e}")))?;
     let mut rel = merged(&st, &a).await;
     annotate(&st, &mut rel);
+    crate::routes::discover::mark_skipped(&crate::release_types::ReleaseFilter::from_cfg(&st.cfg), &mut rel);
     Ok(Json(json!({ "enabled": true, "releases": rel })))
 }
 
@@ -599,10 +601,13 @@ mod tests {
         ];
         let owned = |v: &Value| ["rg-owned", "ext-d5"].contains(&s(&v["id"]).as_str());
         let ids = |p: Vec<Value>| p.iter().map(|v| s(&v["id"])).collect::<Vec<_>>();
-        let plan = ids(discography_plan(&groups, &ext, &["Album", "EP"], owned));
+        let plan = ids(discography_plan(&groups, &ext, &kinds("Album,EP"), owned));
         assert_eq!(plan, vec!["rg-rodeo", "ext-d2-a3"]);
-        let plan = ids(discography_plan(&groups, &ext, &["Album", "EP", "Single"], owned));
+        let plan = ids(discography_plan(&groups, &ext, &kinds("Album,EP,Single"), owned));
         assert_eq!(plan, vec!["rg-rodeo", "rg-single", "ext-d2-a3", "ext-d7"]);
+        // live albums asked for this time: MusicBrainz's live album comes along, compilations still don't
+        let f = crate::release_types::ReleaseFilter::from_value(&json!({ "skip": ["Compilation"] }), &kinds("Album,EP"));
+        assert_eq!(ids(discography_plan(&groups, &ext, &f, owned)), vec!["rg-rodeo", "rg-live", "ext-d2-a3"]);
     }
 
     #[test]
@@ -614,7 +619,27 @@ mod tests {
             json!({ "id": "ext-d2", "title": "Utopia", "type": "Single", "year": "2020", "ext": { "deezer": 2 } }),
         ];
         let ids = |p: Vec<Value>| p.iter().map(|v| s(&v["id"])).collect::<Vec<_>>();
-        assert_eq!(ids(discography_plan(&groups, &ext, &["Album", "EP"], |_| false)), vec!["ext-d1"]);
-        assert_eq!(ids(discography_plan(&groups, &ext, &["Album", "EP", "Single"], |_| false)), vec!["rg-single", "ext-d1"]);
+        assert_eq!(ids(discography_plan(&groups, &ext, &kinds("Album,EP"), |_| false)), vec!["ext-d1"]);
+        assert_eq!(ids(discography_plan(&groups, &ext, &kinds("Album,EP,Single"), |_| false)), vec!["rg-single", "ext-d1"]);
+    }
+
+    fn kinds(k: &str) -> crate::release_types::ReleaseFilter {
+        crate::release_types::ReleaseFilter::from_csv(k, &crate::release_types::default_skip())
+    }
+
+    #[test]
+    fn discography_skips_ext_albums_by_their_title_words() {
+        let groups = vec![json!({ "id": "rg-rodeo", "title": "Rodeo", "type": "Album", "year": "2015", "secondary": [] })];
+        let ext = vec![
+            json!({ "id": "ext-d1", "title": "Rodeo (Live at Coachella)", "type": "Album", "year": "2017", "ext": { "deezer": 1 } }),
+            json!({ "id": "ext-d2", "title": "Astroworld (The Remixes)", "type": "Album", "year": "2019", "ext": { "deezer": 2 } }),
+            json!({ "id": "ext-d3", "title": "Utopia (Instrumentals)", "type": "Album", "year": "2023", "ext": { "deezer": 3 } }),
+            json!({ "id": "ext-d4", "title": "Astroworld (Remastered)", "type": "Album", "year": "2018", "ext": { "deezer": 4 } }),
+            json!({ "id": "ext-d5", "title": "Hits", "type": "Compilation", "year": "2020", "ext": { "deezer": 5 } }),
+        ];
+        let ids = |p: Vec<Value>| p.iter().map(|v| s(&v["id"])).collect::<Vec<_>>();
+        assert_eq!(ids(discography_plan(&groups, &ext, &kinds("Album,EP"), |_| false)), vec!["rg-rodeo", "ext-d4"]);
+        let f = crate::release_types::ReleaseFilter::from_csv("Album", "Compilation");
+        assert_eq!(ids(discography_plan(&groups, &ext, &f, |_| false)), vec!["rg-rodeo", "ext-d1", "ext-d2", "ext-d3", "ext-d4"]);
     }
 }

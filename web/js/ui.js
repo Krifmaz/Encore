@@ -334,3 +334,26 @@ if (typeof document !== 'undefined') {
   };
   if (document.body) start(); else document.addEventListener('DOMContentLoaded', start);
 }
+
+/** Where an artist name goes: its MusicBrainz page when the id is known, else the name (library or catalog page). */
+export const artistUrl = (a) => a.mbid ? `#/artist/${encodeURIComponent(a.mbid)}` : `#/artist-name/${encodeURIComponent(a.name || '')}`;
+/**
+ * A song's artist text with each of its artists as its own link ("Travis Scott feat. The Weeknd" → two links,
+ * the words between them kept as they are). Uses `artists` from the server; without it the whole text is one link.
+ */
+export function artistLinks(t) {
+  const s = t?.artist || '';
+  if (!s) return '';
+  const list = Array.isArray(t.artists) && t.artists.length ? t.artists : [{ name: s }];
+  let out = '', at = 0;
+  for (const a of list) {
+    const i = a?.name ? s.indexOf(a.name, at) : -1;
+    if (i < 0) continue;
+    out += `${esc(s.slice(at, i))}<a class="artist-link" href="${artistUrl(a)}">${esc(a.name)}</a>`;
+    at = i + a.name.length;
+  }
+  if (!at) return `<a class="artist-link" href="${artistUrl({ name: s })}">${esc(s)}</a>`;
+  return out + esc(s.slice(at));
+}
+/** A song's album name as a link to the album (library album page), or plain text when it has no album id. */
+export const albumLink = (t) => t?.album ? (t.album_id ? `<a class="album-link" href="#/library/album/${esc(t.album_id)}">${esc(t.album)}</a>` : esc(t.album)) : '';

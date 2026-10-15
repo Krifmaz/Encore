@@ -74,7 +74,10 @@ pub async fn check_file(st: &AppState, path: &Path, title: &str, artist: &str, l
     }
     if let Some(rid) = recording_id.filter(|r| !r.is_empty()) {
         if recs.iter().any(|r| r["id"] == rid) {
-            return Ok(json!({ "status": "verified", "acoustid": aid, "detail": "MusicBrainz recording confirmed by audio" }));
+            // the fingerprint goes along so contribute.rs can send it to AcoustID (only this sure case: the
+            // audio confirmed the recording the file was asked for / tagged as, no title guess)
+            return Ok(json!({ "status": "verified", "acoustid": aid, "detail": "MusicBrainz recording confirmed by audio",
+                "submit": { "mbid": rid, "fingerprint": fp, "duration": dur } }));
         }
     }
     let want = describe(title, artist, "", length, None, None);

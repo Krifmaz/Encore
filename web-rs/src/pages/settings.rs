@@ -47,6 +47,13 @@ impl Field {
     const fn when(mut self, key: &'static str, values: &'static [&'static str]) -> Self { self.when = Some((key, values)); self }
 }
 
+// Settings → Release types: MusicBrainz primary types, then the extras to skip (server: release_types.rs)
+const RELEASE_KINDS: &[(&str, &str)] = &[("Album", "Album"), ("EP", "EP"), ("Single", "Single"), ("Broadcast", "Broadcast"), ("Other", "Other")];
+const RELEASE_EXTRAS: &[(&str, &str)] = &[("Compilation", "Compilation"), ("Soundtrack", "Soundtrack"), ("Spokenword", "Spoken word"), ("Interview", "Interview"), ("Audiobook", "Audiobook"),
+    ("Audio drama", "Audio drama"), ("Live", "Live"), ("Remix", "Remix"), ("DJ-mix", "DJ-mix"), ("Mixtape/Street", "Mixtape / Street"), ("Demo", "Demo"), ("Field recording", "Field recording"),
+    ("Instrumental", "Instrumental"), ("Acoustic", "Acoustic"), ("Sped up", "Sped up / Slowed"), ("Karaoke", "Karaoke"), ("Covers", "Covers / Tributes")];
+fn type_key(s: &str) -> String { s.to_lowercase().chars().filter(|c| c.is_ascii_lowercase() || c.is_ascii_digit()).collect() }
+
 struct Section {
     id: &'static str,
     title: &'static str,
@@ -84,8 +91,11 @@ const SECTIONS: &[Section] = &[
         s("embed_cover", "Embed cover art in files", "bool"),
     ] },
     Section { id: "pipeline", title: "Download pipeline", desc: "Which sources are searched for a request, and in what order. The first one that has it wins.", test: None, test_label: None, fields: &[
-        s("discography_singles", "Requesting a whole discography includes singles (not just albums and EPs)", "bool"),
         s("source_order", "Source order", "text").full().help("The one place to set what is searched, in order, comma-separated: qobuz, tidal, deezer (all through streamrip), slskd (Soulseek), torznab (torrents/Usenet, albums only), ytdlp (YouTube Music). Leave one out to never use it; sources you haven’t set up are skipped. Recommended (the default): qobuz, tidal, deezer, slskd, torznab, ytdlp – exact hi-res/lossless releases first, then Soulseek, then torrents/Usenet for whole albums, YouTube Music last."),
+    ] },
+    Section { id: "releases", title: "Release types", desc: "Which releases Request discography, the artist pages and New releases count, like the metadata profiles in Lidarr. Song requests skip other versions (live, remix, sped up and so on) unless the song asked for is one.", test: None, test_label: None, fields: &[
+        s("release_types", "Kinds to request", "checks").full().options(RELEASE_KINDS).help("Request discography gets these. Each request can change them in its own panel."),
+        s("release_skip", "Skip releases that are", "checks").full().options(RELEASE_EXTRAS).help("A release with any ticked extra is left out. Instrumental, acoustic, sped up, karaoke and covers are read from the titles."),
     ] },
     Section { id: "verify", title: "Verification & duplicates", desc: "Listens to each download and checks it's really the song you asked for, not a remix, live or wrong track.", test: Some("acoustid"), test_label: None, fields: &[
         s("acoustid_api_key", "AcoustID API key", "password").full().help("Free – register an application at acoustid.org/new-application. Used to fingerprint audio and confirm each file is the right song/version."),
@@ -166,12 +176,15 @@ const SECTIONS: &[Section] = &[
         s("vpn_port_forwarding", "Port forwarding", "select").options(&[("natpmp", "NAT-PMP (ProtonVPN)"), ("off", "Off")]),
         s("vpn_kill_switch", "Keep Soulseek off while the VPN is down", "bool"),
     ] },
-    Section { id: "ytdlp", title: "YouTube Music & links (yt-dlp)", desc: "Last-resort source: finds the song on YouTube Music. yt-dlp also downloads SoundCloud links you paste in the Downloader, along with YouTube, Bandcamp, Mixcloud and about 1,800 other sites.", test: Some("ytdlp"), test_label: Some("Test cookies"), fields: &[
+    Section { id: "ytdlp", title: "YouTube Music & links (yt-dlp)", desc: "Last-resort source: finds the song on YouTube Music. yt-dlp also downloads SoundCloud links you paste in the Downloader, along with YouTube, Bandcamp, Mixcloud and about 1,800 other sites.", test: None, test_label: None, fields: &[
         s("ytdlp_enabled", "Enable yt-dlp as a source", "bool").help("Searches YouTube Music for requests, and downloads links you paste in the Downloader from YouTube, SoundCloud, Bandcamp, Mixcloud and ~1,800 other sites."),
         s("ytdlp_last_resort", "Always try YouTube Music last, so downloads (almost) never fail", "bool"),
         s("ytdlp_format", "Audio format", "select").options(&[("best", "Original stream – best quality, no re-encode (recommended)"), ("m4a", "M4A (AAC, re-encoded)"), ("mp3", "MP3 (re-encoded)"), ("opus", "Opus")]),
         s("ytdlp_quality", "MP3/M4A quality", "text").help("Bitrate like 320, or 0 for best VBR"),
-        s("ytdlp_cookies", "cookies.txt contents (optional)", "textarea").full().secret().help("Netscape cookie file from music.youtube.com. With a YouTube Music Premium account this unlocks 256 kbps audio. Export from a private window so the cookies don’t rotate."),
+    ] },
+    Section { id: "youtube", title: "YouTube sign-in", desc: "Signs yt-dlp in to YouTube: YouTube Music Premium unlocks 256 kbps audio, and signed-in downloads see fewer bot checks. Three ways – Encore’s own browser, the browser extension, or pasted cookies; Encore uses the first that is signed in, in that order.", test: Some("youtube"), test_label: Some("Test cookies"), fields: &[
+        s("youtube_light_refresh", "Refresh pasted cookies every 4 hours", "bool").help("Only for pasted cookies, when neither Encore’s browser nor the extension is signed in: Encore renews them the way an open YouTube tab does and saves the new ones. Never done to the extension’s cookies (that would sign your browser out)."),
+        s("ytdlp_cookies", "Pasted cookies.txt (optional)", "textarea").full().secret().help("Netscape cookie file exported from music.youtube.com. Used when Encore’s browser and the extension are not signed in. Export from a private window and close it right after, so your own browser does not rotate them."),
     ] },
     Section { id: "spotify", title: "Integrations", desc: "API keys that let users connect their Spotify, Tidal, Last.fm, Discogs and YouTube Music accounts, and power recommendations.", test: Some("spotify"), test_label: Some("Test all"), fields: &[
         s("spotify_client_id", "Spotify Client ID", "text").help("developer.spotify.com – add <Public URL>/api/connections/spotify/callback as redirect URI. Development-mode apps allow 5 users and need a Premium owner (2026 rules); without it, public playlists still import via the embed fallback."),
@@ -225,12 +238,14 @@ impl Group {
 const GROUPS: &[Group] = &[
     Group { id: "general", title: "General", aliases: &[], parts: &[("", &["general"])] },
     Group { id: "apps", title: "Apps & sources", aliases: &["downloads", "tagging", "services"], parts: &[
-        ("Download sources", &["pipeline", "streamrip", "torznab", "slskd", "ytdlp"]),
+        ("Download sources", &["pipeline", "releases", "streamrip", "torznab", "slskd", "ytdlp", "youtube"]),
         ("Library & tagging", &["library", "verify"]),
         ("Services", &["spotify", "media", "roon", "cadenza"]),
     ] },
     Group { id: "accounts", title: "Email & notifications", aliases: &[], parts: &[("", &["email", "notify"])] },
     Group { id: "autodownload", title: "Auto-download", aliases: &[], parts: &[] },
+    Group { id: "contribute", title: "Contribute", aliases: &[], parts: &[] },
+    Group { id: "blocked", title: "Blocked", aliases: &[], parts: &[] },
     Group { id: "tasks", title: "Scheduled tasks", aliases: &[], parts: &[("", &["sync"])] },
 ];
 fn group_of(id: &str) -> String {
@@ -275,6 +290,13 @@ fn field(f: &Field, v: &Value, opts: Option<&Value>, meta: &Value) -> String {
     if f.kind == "bool" {
         return format!(r##"<div class="field {cls}" style="justify-content:center"><label class="switch"><input type="checkbox" data-k="{key}" {checked} {dis}><i></i>{label}</label>{help}</div>"##,
             checked = if truthy(v) { "checked" } else { "" });
+    }
+    if f.kind == "checks" {
+        let vs = if v.is_null() { String::new() } else { js_string(v) };
+        let on: Vec<String> = vs.split(',').map(type_key).collect();
+        let boxes: String = f.options.iter().map(|(val, lab)| format!(r##"<label class="row" style="gap:6px;align-items:center"><input type="checkbox" value="{}" {} {dis}> {}</label>"##,
+            esc(val), if on.contains(&type_key(val)) { "checked" } else { "" }, esc(lab))).collect();
+        return format!(r##"<div class="field {cls}" data-k="{key}"><span>{label}</span><div class="row wrap" style="gap:6px 14px">{boxes}</div>{help}</div>"##);
     }
     if f.kind == "select" {
         let mut options: Vec<(String, String)> = f.options.iter().map(|(val, lab)| (val.to_string(), lab.to_string())).collect();
@@ -468,6 +490,8 @@ fn embedded(id: &str) -> Option<app::PageFn> {
         "users" => admin::render_users,
         "invites" => admin::render_invites,
         "autodownload" => autodownload::render,
+        "contribute" => crate::pages::contribute::render,
+        "blocked" => crate::pages::report::render,
         "diagnostics" => diagnostics::render,
         _ => return None,
     })
@@ -506,7 +530,11 @@ impl Hub {
             let Some(f) = sec.fields.iter().find(|x| x.key == k) else { continue };
             if meta.o(f.key).s("source") == "env" { continue; }            // locked by environment
             let secret = f.kind == "password" || f.secret;
-            if el.get_attribute("type").as_deref() == Some("checkbox") { body.insert(f.key.to_string(), Value::Bool(dom::checked(&el))); }
+            if f.kind == "checks" {
+                let on: Vec<String> = dom::qsa_in(&el, "input:checked").iter().map(|i| i.get_attribute("value").unwrap_or_default()).collect();
+                body.insert(f.key.to_string(), Value::String(on.join(",")));
+            }
+            else if el.get_attribute("type").as_deref() == Some("checkbox") { body.insert(f.key.to_string(), Value::Bool(dom::checked(&el))); }
             else {
                 let v = dom::value(&el);
                 if secret && v.trim().is_empty() { /* keep saved secret */ }
@@ -626,10 +654,11 @@ fn show(hub: &Rc<Hub>, id: String, flash: Option<Value>) -> Pin<Box<dyn Future<O
         <span class="row" style="gap:8px">{test}<span class="chev">{chev}</span></span></summary>
       <div style="height:14px"></div>
       <div data-out>{flash_html}</div>
-      {fields_html}{tidal}{cadenza}
+      {yt}{fields_html}{tidal}{cadenza}
       {slsk}
       <div class="row mt" style="justify-content:flex-end"><button class="btn primary" data-save>{check}Save</button></div>
     </details>"##,
+                yt = if sec.id == "youtube" { crate::pages::youtube::youtube_block() } else { String::new() },
                 tidal = if sec.id == "streamrip" { tidal_block() } else { String::new() },
                 cadenza = if sec.id == "cadenza" { cadenza_cache_block() + &engine_settings_block() } else { String::new() },
                 slsk = if sec.id == "slskd" { soulseek_status_block() } else { String::new() },
@@ -662,6 +691,7 @@ fn show(hub: &Rc<Hub>, id: String, flash: Option<Value>) -> Pin<Box<dyn Future<O
             if sec.id == "streamrip" { bind_tidal(&hub.view, &card); }
             if sec.id == "cadenza" { bind_cadenza_cache(&hub, &card); }
             if sec.id == "slskd" { bind_vpn(&hub, sec, &card); bind_soulseek(&hub, &card); }
+            if sec.id == "youtube" { crate::pages::youtube::bind_youtube(&card); }
             bind_show_when(&card);
             let paint: Rc<dyn Fn(&Value)> = { let out = out.clone(); Rc::new(move |r: &Value| dom::set_html(&out, &test_result(r))) };
             if let Some(b) = dom::qs_in(&card, "[data-save]") {
@@ -1793,14 +1823,15 @@ fn tool_reset(t: &Value) -> (String, String, String) {
     match t.s("id").as_str() {
         "cadenza" => ("Use the built-in engine".into(), "Go back to the engine built into Encore? The downloaded Cadenza is removed.".into(), "Back to the built-in engine".into()),
         "slskd" => ("Remove slskd".into(), "Remove slskd? Soulseek stays off until you install it again.".into(), "slskd removed".into()),
+        "browser" => ("Remove the browser".into(), "Remove the browser for YouTube sign-in? Its sign-in is kept for when you install it again; until then the extension or pasted cookies are used.".into(), "Browser removed".into()),
         _ => {
             let name = tool_or(t, "name", "id");
             ("Use the bundled version".into(), format!("Go back to the {name} version that came with Encore? The updated copy is removed."), format!("Back to the bundled {name}"))
         }
     }
 }
-/// slskd is installed by Encore, not bundled: before that its button says Install.
-fn tool_install(t: &Value) -> bool { t.s("id") == "slskd" && !t.truthy("installed") }
+/// slskd and the sign-in browser are installed by Encore, not bundled: before that their button says Install.
+fn tool_install(t: &Value) -> bool { (t.s("id") == "slskd" || t.s("id") == "browser") && !t.truthy("installed") }
 
 fn tool_row(t: &Value, busy: Option<&str>) -> String {
     let id = t.s("id");
@@ -1820,7 +1851,7 @@ fn tool_row(t: &Value, busy: Option<&str>) -> String {
     } else if tool_updatable(t) {
         r##"<span class="small faint">Not checked yet</span>"##.to_string()
     } else { String::new() };
-    let updated = t.s("source") == "updated" && id != "slskd";
+    let updated = t.s("source") == "updated" && id != "slskd" && id != "browser";
     format!(r##"<div class="list-item" style="align-items:flex-start;flex-wrap:wrap;gap:12px" data-tool="{eid}">
       <div class="grow" style="min-width:200px"><div style="font-weight:650">{name} <span class="small muted mono">{ver}</span>{upd}</div>
         {note}
@@ -1877,10 +1908,11 @@ async fn render_tools(host: Element, hub: Rc<Hub>) {
     let toggles = toggle("tools_auto_ytdlp", "Update yt-dlp automatically (recommended – sites change often)")
         + &toggle("tools_auto_streamrip", "Update streamrip automatically when a new release is out")
         + &toggle("tools_auto_cadenza", "Update Cadenza automatically when a new release is out")
-        + &toggle("tools_auto_slskd", "Update slskd automatically when a new release is out");
+        + &toggle("tools_auto_slskd", "Update slskd automatically when a new release is out")
+        + &toggle("tools_auto_browser", "Update the browser for YouTube sign-in automatically");
     dom::set_html(&host, &format!(r##"<div class="card" id="tools-card" style="margin-bottom:12px">
     <div class="row between" style="margin-bottom:8px;gap:10px"><h2>Download tools</h2><button class="btn sm" type="button" id="tools-check">{refresh}Check for updates</button></div>
-    <p class="muted small" style="margin:0 0 14px">yt-dlp, streamrip, Cadenza and slskd update in place – no new Encore image needed. Updates are kept in the config folder.</p>
+    <p class="muted small" style="margin:0 0 14px">yt-dlp, streamrip, Cadenza, slskd and the browser for YouTube sign-in update in place – no new Encore image needed. Updates are kept in the config folder.</p>
     <div class="list" id="tools-list"></div>
     <div class="stack mt" style="gap:8px">{toggles}<div class="small muted">Every tool is checked daily; updates install by themselves only where the switch is on. Change the schedule under <a href="#/settings?s=tasks">Scheduled tasks</a>.</div></div>
   </div>"##, refresh = icon("refresh")));

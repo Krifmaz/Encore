@@ -8,9 +8,9 @@
 // with a shuffle of the whole library: a single song → straight into the shuffle, an album → after its last song.
 import { api } from './api.js';
 import * as playback from './playback.js';
-import { art, esc, fmt, icon, popMenu, shareTrack, toast } from './ui.js';
+import { art, artistLinks, esc, fmt, icon, popMenu, shareTrack, toast } from './ui.js';
 
-const state = { queue: [], index: -1, transcoded: false, lossy: false, rung: 0, dsp: false, dspRate: 0, offset: 0, dragging: false, context: 'list', repeat: 'off', full: false, pane: 'now', logged: false,
+const state = { queue: [], index: -1, transcoded: false, lossy: false, rung: 0, dsp: false, dspRate: 0, offset: 0, dragging: false, context: 'list', repeat: 'off', shuffle: false, order: null, full: false, pane: 'now', logged: false,
   stalls: [], stallAt: 0, seekAt: 0, stepAt: 0, switchedAt: 0, lastPreloadCheck: 0, slowStart: null,
   // want: you want music now (a song started, play pressed) – false only after a real pause (button, headset, lock screen)
   // at: where the song last was for sure · srcAt: when we last gave the element a new source (its 'emptied'/'abort' are ours)
@@ -110,10 +110,10 @@ export function setLink(l) {
 /** New state from the linked device (every check-in). */
 export function linkState(s, online = true) {
   if (!link) return;
-  const before = JSON.stringify([link.state?.id, link.state?.playing, link.online, link.state?.volume, (link.state?.queue || []).length, link.state?.index]);
+  const before = JSON.stringify([link.state?.id, link.state?.playing, link.online, link.state?.volume, (link.state?.queue || []).length, link.state?.index, link.state?.shuffle, link.state?.repeat]);
   link.state = s || {};
   link.online = online;
-  if (JSON.stringify([link.state.id, link.state.playing, link.online, link.state.volume, (link.state.queue || []).length, link.state.index]) !== before) {
+  if (JSON.stringify([link.state.id, link.state.playing, link.online, link.state.volume, (link.state.queue || []).length, link.state.index, link.state.shuffle, link.state.repeat]) !== before) {
     render();
     if (state.full) { renderFull(); loadLyrics(); }
   } else updateLinkedTime();
@@ -122,7 +122,7 @@ export function linkState(s, online = true) {
 function remoteTrack() {
   const s = link?.state || {};
   if (!s.title) return null;
-  return { id: s.id, title: s.title, artist: s.artist, album: s.album, album_id: s.album_id, format: s.format, duration: s.duration, cover: s.cover, remote: true };
+  return { id: s.id, title: s.title, artist: s.artist, artists: s.artists, album: s.album, album_id: s.album_id, format: s.format, duration: s.duration, cover: s.cover, remote: true };
 }
 /** The song in front of you: the linked device's when linked, else this device's. */
 const nowTrack = () => link ? remoteTrack() : current();
@@ -131,11 +131,14 @@ const nowPlaying = () => link ? !!link.state?.playing : !!(audio && showsPlaying
 
 // ---- remote control: what this device is playing, and commands from your other devices ----
 const slim = (t) => ({ id: t.id, title: t.title, artist: t.artist, album: t.album, album_id: t.album_id, format: t.format, duration: t.duration });
+/** Each artist of a song for links (`artists` from the server), only when the song has them. */
+const withArtists = (t) => Array.isArray(t.artists) && t.artists.length ? { artists: t.artists } : {};
 export function snapshot() {
   const t = current();
   if (!t || !audio) return { playing: false };
   const { queue, index } = libWindow();
-  return { ...slim(t), cover: cover(t), playing: showsPlaying(), position: spotPosition(), duration: duration(), volume: userVol,
+  return { ...slim(t), ...withArtists(t), cover: cover(t), playing: showsPlaying(), position: spotPosition(), duration: duration(), volume: userVol,
+           shuffle: state.shuffle, repeat: state.repeat,
            signal: { label: quality(t), transport: transport()?.kind || null, output_rate: ctx?.sampleRate || null },
            index, queue: queue.map(slim) };
 }
@@ -177,6 +180,8 @@ function runCommand(c) {
     case 'prev': return prev();
     case 'seek': return seekTo(Number(c.value) || 0);
     case 'volume': return setVolume(c.value);
+    case 'shuffle': return setShuffle(!!c.value);
+    case 'repeat': return setRepeat(c.value);
     case 'enqueue': return Array.isArray(c.tracks) && enqueue(c.tracks);
     case 'play_next': return Array.isArray(c.tracks) && playNext(c.tracks);
     case 'play_queue':
@@ -216,18 +221,22 @@ export function playQueue(tracks, start = 0, { context = 'list' } = {}) {
   state.queue = tracks.filter(Boolean);
   state.index = Math.max(0, Math.min(start, state.queue.length - 1));
   state.context = context;
+  state.order = null;
+  if (state.shuffle && context !== 'preview') shuffleRest();
   load();
 }
 
 export function enqueue(tracks) {
   if (link && !local) { const out = sendable(tracks); return out.length && viaLink({ action: 'enqueue', tracks: out }); }
   state.queue.push(...tracks);
+  if (state.order) state.order.push(...tracks);
   if (state.index < 0) { state.index = 0; load(); } else { render(); emit(); preloadNext(); }
 }
 
 export function playNext(tracks) {
   if (link && !local) { const out = sendable(tracks); return out.length && viaLink({ action: 'play_next', tracks: out }); }
   if (state.index < 0) return playQueue(tracks);
+  if (state.order) { const at = state.order.indexOf(current()); state.order.splice(at < 0 ? state.order.length : at + 1, 0, ...tracks); }
   state.queue.splice(state.index + 1, 0, ...tracks);
   render(); emit(); preloadNext();
 }
@@ -456,7 +465,7 @@ function saveSpot(force = false) {
   const savedAt = playedSince ? now / 1000 : (Number(savedSpot()?.saved_at) || now / 1000);
   if (audio.paused) playedSince = false;
   try {
-    localStorage.setItem(RESUME, JSON.stringify({ queue: queue.map(slim), index, position: position(), shuffle: state.context === 'library',
+    localStorage.setItem(RESUME, JSON.stringify({ queue: queue.map(slim), index, position: position(), shuffle: state.shuffle,
       repeat: state.repeat, context: state.context, saved_at: savedAt }));
   } catch { /* private mode */ }
 }
@@ -480,6 +489,9 @@ export function restore(s = savedSpot()) {
   state.index = Math.max(0, Math.min(Number(s.index) || 0, q.length - 1));
   state.context = ['album', 'single', 'list', 'library'].includes(s.context) ? s.context : s.shuffle ? 'library' : 'list';
   if (['off', 'all', 'one'].includes(s.repeat)) state.repeat = s.repeat;
+  // shuffle on: the saved queue is already in its shuffled order (the original order isn't kept)
+  state.shuffle = s.shuffle === true && state.context !== 'library';
+  state.order = null;
   const t = current();
   const at = Number(s.position) || 0;
   load({ offset: at > 1 && !(t.duration > 0 && at > t.duration - 2) ? at : 0, hold: true });
@@ -1235,11 +1247,48 @@ function moveTo(from, to) {
   state.queue.splice(to, 0, t);
   render(); emit(); preloadNext();
 }
-function shuffleUpNext() {
-  const rest = state.queue.slice(state.index + 1).sort(() => Math.random() - 0.5);
+/** Shuffle the songs after the current one, remembering the order they were in (to put back later). */
+function shuffleRest() {
+  if (!state.order) state.order = state.queue.slice();
+  const rest = state.queue.slice(state.index + 1);
+  for (let i = rest.length - 1; i > 0; i--) { const j = Math.floor(Math.random() * (i + 1)); [rest[i], rest[j]] = [rest[j], rest[i]]; }
   state.queue.splice(state.index + 1, rest.length, ...rest);
-  render(); emit(); preloadNext();
 }
+/** The queue in its order from before shuffling: songs removed since stay out, songs added since go at the end. */
+function unshuffled() {
+  const left = new Map();
+  for (const t of state.queue) left.set(t, (left.get(t) || 0) + 1);
+  const out = [];
+  for (const t of state.order || []) { const n = left.get(t); if (n) { out.push(t); left.set(t, n - 1); } }
+  for (const t of state.queue) { const n = left.get(t); if (n) { out.push(t); left.set(t, n - 1); } }
+  return out;
+}
+/** Shuffle mode: on shuffles the rest of the queue, off puts the original order back (the song playing stays). */
+function setShuffle(on) {
+  on = !!on;
+  if (viaLink({ action: 'shuffle', value: on })) { if (link.state) link.state.shuffle = on; if (state.full) renderFull(); return; }
+  if (on === state.shuffle) return;
+  state.shuffle = on;
+  if (on) shuffleRest();
+  else if (state.order) {
+    const cur = current();
+    const q = unshuffled();
+    const i = q.indexOf(cur);
+    if (i >= 0) { state.queue = q; state.index = i; }
+    state.order = null;
+  }
+  render(); emit(); preloadNext(); saveSpot(true);
+}
+/** Repeat: 'off' | 'all' | 'one'. */
+function setRepeat(v) {
+  if (!['off', 'all', 'one'].includes(v)) return;
+  if (viaLink({ action: 'repeat', value: v })) { if (link.state) link.state.repeat = v; if (state.full) renderFull(); return; }
+  state.repeat = v;
+  if (state.full) renderFull();
+  emit(); saveSpot(true);
+}
+const nextRepeat = (r) => ({ off: 'all', all: 'one', one: 'off' })[r] || 'all';
+const repeatTitle = (r) => r === 'one' ? 'Repeat: this song' : r === 'all' ? 'Repeat: the queue' : 'Repeat: off';
 
 function logPlay() {
   const t = current();
@@ -1291,6 +1340,7 @@ function moreMenu(anchor) {
     lib ? { label: 'Download this song', icon: icon.download, href: `/api/library/tracks/${t.id}/file`, download: true } : null,
     lib && !link && canSaveOffline() ? { label: 'Save for offline', icon: icon.download, onClick: () => { saveOffline([t]); toast('Saving to this phone…', 'ok'); } } : null,
     { label: 'Signal path', icon: icon.activity, onClick: signalPath },
+    lib ? { label: 'Report a problem', icon: icon.shield, onClick: async () => (await import('./pages/report.js')).reportModal({ kind: 'track', id: t.id, title: t.title }) } : null,
     window.encoreRemote ? { label: link ? 'Your devices…' : 'Play on another device…', icon: icon.devices, onClick: () => window.encoreRemote.open() } : null,
   ]);
 }
@@ -1337,7 +1387,9 @@ async function signalPath() {
   const info = await trackInfo(t);
   if (!link && state.dsp && dspCacheOn() && current() === t) await prepareDsp(t);   // pre-rendered yet?
   const rows = [];
-  rows.push(['Source', sourceLine(t, info), info?.lossless === false ? 'A lossy file: what the file lost is gone before Encore touches it' : '']);
+  // quality checks (fake lossless, upsampled, very quiet…): "Fake lossless? cutoff 16 kHz"
+  const suspect = info?.quality?.status === 'suspect' ? info.quality.summary : '';
+  rows.push(['Source', sourceLine(t, info), [info?.lossless === false ? 'A lossy file: what the file lost is gone before Encore touches it' : '', suspect].filter(Boolean).join(' · ')]);
   // a Cadenza device reports every stage of its own pipeline; a browser device just plays
   const stages = link && Array.isArray(link.state?.signal?.stages) ? link.state.signal.stages : [];
   const localEngine = !!link && window.encoreRemote?.engine?.()?.id === link.id;
@@ -1712,6 +1764,8 @@ function renderFull() {
   const upNext = q.slice(idx + 1);
   const playing = nowPlaying();
   const volume = link ? (s.volume ?? 0.9) : userVol;
+  const shuffleOn = link ? !!s.shuffle : state.shuffle;
+  const repeat = link ? (['off', 'all', 'one'].includes(s.repeat) ? s.repeat : 'off') : state.repeat;
   f.style.setProperty('--np-bg', `url("${coverAt(t, 400) || ''}")`);
   f.innerHTML = `
     <div class="np-backdrop"></div>
@@ -1725,21 +1779,22 @@ function renderFull() {
         <div class="np-art">${art(cover(t), t.album || t.title, "big")}</div>
         <div class="np-meta">
           <h2 class="ellipsis">${esc(t.title)}</h2>
-          <div class="muted ellipsis">${t.preview ? esc(t.artist) : `<a href="#/artist-name/${encodeURIComponent(t.artist || '')}">${esc(t.artist)}</a>`}${t.album ? ` · ${t.album_id ? `<a href="#/library/album/${esc(t.album_id)}">${esc(t.album)}</a>` : esc(t.album)}` : ''}</div>
+          <div class="muted ellipsis">${t.preview ? esc(t.artist) : artistLinks(t)}${t.album ? ` · ${t.album_id ? `<a href="#/library/album/${esc(t.album_id)}">${esc(t.album)}</a>` : esc(t.album)}` : ''}</div>
           <button class="badge mt np-quality" id="f-signal" title="Signal path: what the file is, what Encore sends and what this device does with it">${esc(quality(t))}</button>
         </div>
         <div class="seek np-seek"><span id="f-cur">0:00</span><input type="range" id="fseek" min="0" max="1000" value="0"><span id="f-dur">0:00</span></div>
         <div class="np-ctrls">
-          ${link ? `<span class="np-gap"></span>` : `<button class="btn ghost icon" id="f-shuffle" title="Shuffle up next" aria-label="Shuffle up next">${icon.shuffle}</button>`}
+          <button class="btn ghost icon ${shuffleOn ? 'on' : ''}" id="f-shuffle" title="${shuffleOn ? 'Shuffle: on' : 'Shuffle: off'}" aria-label="Shuffle" aria-pressed="${shuffleOn}">${icon.shuffle}</button>
           <button class="btn ghost icon" id="f-prev" aria-label="Previous">${icon.prev}</button>
           <button class="play-btn lg" id="f-toggle" aria-label="Play/Pause">${playing ? icon.pause : icon.play}</button>
           <button class="btn ghost icon" id="f-next" aria-label="Next">${icon.next}</button>
-          ${link ? `<span class="np-gap"></span>` : `<button class="btn ghost icon ${state.repeat !== 'off' ? 'on' : ''}" id="f-repeat" title="Repeat: ${state.repeat}" aria-label="Repeat">${icon.refresh}${state.repeat === 'one' ? '<sup>1</sup>' : ''}</button>`}
+          <button class="btn ghost icon ${repeat !== 'off' ? 'on' : ''}" id="f-repeat" title="${repeatTitle(repeat)}" aria-label="Repeat" aria-pressed="${repeat !== 'off'}">${icon.refresh}${repeat === 'one' ? '<sup>1</sup>' : ''}</button>
         </div>
         <div class="row np-vol"><span class="faint">${icon.volume.replace('<svg', '<svg width="18"')}</span><input type="range" id="fvol" min="0" max="1" step="0.01" value="${volume}"></div>
         <div class="np-actions">
           ${canLike(t) ? likeButton('f-like', isLiked(t) ? 'on' : '') : ''}
           ${canLike(t) ? `<button class="btn ghost icon" id="f-share" aria-label="Share" title="Share link">${icon.external}</button>` : ''}
+          <button class="btn ghost icon ${state.pane === 'lyrics' ? 'on' : ''}" id="f-lyrics" aria-label="Lyrics" title="Lyrics">${icon.music}</button>
           <button class="btn ghost icon" id="f-more" aria-label="More" title="More">${icon.more}</button>
         </div>
       </section>
@@ -1751,7 +1806,7 @@ function renderFull() {
           const i = idx + 1 + k;
           return `<div class="np-item" data-i="${i}">
             <div class="thumb">${art(cover(x), x.album || x.title, '', 200)}</div>
-            <div class="grow" style="min-width:0"><div class="ellipsis" style="font-weight:600">${esc(x.title)}</div><div class="small muted ellipsis">${esc(x.artist)}</div></div>
+            <div class="grow" style="min-width:0"><div class="ellipsis" style="font-weight:600">${esc(x.title)}</div><div class="small muted ellipsis">${x.preview ? esc(x.artist) : artistLinks(x)}</div></div>
             ${link ? '' : `<button class="btn ghost icon sm" data-up="${i}" aria-label="Move up" ${i === idx + 1 ? 'disabled' : ''}>↑</button>
             <button class="btn ghost icon sm" data-rm="${i}" aria-label="Remove">${icon.x}</button>`}</div>`;
         }).join('') : `<div class="muted small" style="padding:16px 4px">${link ? 'Nothing queued there.' : prefs.autoplay ? 'Nothing queued – a shuffle of your library plays next.' : 'Nothing queued.'}</div>`}</div>
@@ -1764,8 +1819,9 @@ function renderFull() {
   f.querySelector('#f-toggle').onclick = toggle;
   f.querySelector('#f-next').onclick = () => next();
   f.querySelector('#f-prev').onclick = prev;
-  f.querySelector('#f-shuffle')?.addEventListener('click', shuffleUpNext);
-  f.querySelector('#f-repeat')?.addEventListener('click', () => { state.repeat = { off: 'all', all: 'one', one: 'off' }[state.repeat]; renderFull(); });
+  f.querySelector('#f-shuffle').onclick = () => setShuffle(!shuffleOn);
+  f.querySelector('#f-repeat').onclick = () => setRepeat(nextRepeat(repeat));
+  f.querySelector('#f-lyrics').onclick = () => { state.pane = state.pane === 'lyrics' ? 'now' : 'lyrics'; renderFull(); if (state.pane === 'lyrics') loadLyrics(); };
   f.querySelector('#f-auto')?.addEventListener('change', (e) => { playback.save({ ...prefs, autoplay: e.target.checked }, { serverPrefs: (window.encoreSession?.info?.features || []).includes('theme') }); });
   const fvol = f.querySelector('#fvol');
   if (link) fvol.onchange = (e) => setVolume(e.target.value); else fvol.oninput = (e) => localVolume(e.target.value);
@@ -1774,6 +1830,7 @@ function renderFull() {
   f.querySelector('#f-more').onclick = (e) => moreMenu(e.currentTarget);
   bindSeek(f.querySelector('#fseek'), 'f-cur');
   f.querySelector('.np-list').onclick = (e) => {
+    if (e.target.closest('a[href]')) { setFull(false); return; }
     if (link) {
       const it = e.target.closest('[data-i]');
       if (it && s.queue?.length) viaLink({ action: 'play_queue', tracks: s.queue, index: +it.dataset.i });

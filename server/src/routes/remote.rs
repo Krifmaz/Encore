@@ -60,7 +60,9 @@ static HUBS: LazyLock<Mutex<HashMap<i64, Hub>>> = LazyLock::new(Default::default
 /// every command gets a number, so a device that receives one twice (pushed and then on its check-in) runs it once
 static SEQ: AtomicU64 = AtomicU64::new(1);
 const ALIVE: f64 = 15.0;
-const ACTIONS: [&str; 12] = ["toggle", "play", "pause", "next", "prev", "seek", "volume", "play_queue", "enqueue", "play_next", "stop", "engine"];
+/// "shuffle" {value: bool} shuffles the rest of the queue (false puts the order back); "repeat" {value: "off"|"all"|"one"}.
+/// A device's check-in state carries `shuffle` and `repeat` the same way.
+const ACTIONS: [&str; 14] = ["toggle", "play", "pause", "next", "prev", "seek", "volume", "play_queue", "enqueue", "play_next", "stop", "engine", "shuffle", "repeat"];
 
 /// The last spot written per user, so check-ins only touch the database every SPOT_EVERY seconds
 /// (and at once when the song changes or playback stops or starts).

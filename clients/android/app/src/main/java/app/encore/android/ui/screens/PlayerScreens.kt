@@ -189,6 +189,8 @@ fun FullPlayer(nav: Nav, actions: PlayerMenuActions, onClose: () -> Unit) {
     val badge by nav.player.qualityBadge.collectAsState()
     val liked by nav.graph.likes.liked.collectAsState()
     val link by nav.player.remote.link.collectAsState()
+    val shuffle by nav.player.shuffle.collectAsState()
+    val repeat by nav.player.repeat.collectAsState()
     val p = MaterialTheme.palette
     var dragging by remember { mutableStateOf<Float?>(null) }
     val coverUrl = if (track.albumId.isNotEmpty()) nav.graph.api.coverUrl(track.albumId, 1000) else null
@@ -249,14 +251,15 @@ fun FullPlayer(nav: Nav, actions: PlayerMenuActions, onClose: () -> Unit) {
                     maxLines = 1,
                     overflow = TextOverflow.Ellipsis,
                 )
+                // each artist and the album open their pages (closing the player)
                 Text(
-                    listOf(track.artist, track.album).filter { it.isNotEmpty() }.joinToString(" · "),
+                    rememberSongLinks(nav, track, before = onClose),
                     style = MaterialTheme.typography.bodyMedium,
                     color = p.muted,
                     textAlign = TextAlign.Center,
                     maxLines = 1,
                     overflow = TextOverflow.Ellipsis,
-                    modifier = Modifier.padding(top = 4.dp).clickable { if (track.albumId.isNotEmpty()) actions.viewAlbum() else actions.goToArtist() },
+                    modifier = Modifier.padding(top = 4.dp),
                 )
                 val q = badge
                 if (!q.isNullOrEmpty()) {
@@ -294,16 +297,24 @@ fun FullPlayer(nav: Nav, actions: PlayerMenuActions, onClose: () -> Unit) {
                 Text(formatDuration(dur).ifEmpty { "0:00" }, style = MaterialTheme.typography.bodySmall, color = p.faint)
             }
 
-            // .np-ctrls
+            // .np-ctrls: shuffle, prev, play / pause, next, repeat (the same shuffle and repeat as the car and lock screen)
             Row(
                 Modifier.fillMaxWidth().padding(top = 8.dp, bottom = 4.dp),
                 horizontalArrangement = Arrangement.Center,
                 verticalAlignment = Alignment.CenterVertically,
             ) {
+                IconButton(onClick = { nav.player.setShuffle(!shuffle) }, modifier = Modifier.size(48.dp)) {
+                    Icon(
+                        painterResource(R.drawable.ic_shuffle),
+                        contentDescription = if (shuffle) "Shuffle: on" else "Shuffle: off",
+                        tint = if (shuffle) p.accent else p.muted,
+                    )
+                }
+                Spacer(Modifier.width(4.dp))
                 IconButton(onClick = { nav.player.previous() }, modifier = Modifier.size(64.dp)) {
                     Icon(painterResource(R.drawable.ic_skip_previous), contentDescription = "Previous", tint = p.text, modifier = Modifier.size(36.dp))
                 }
-                Spacer(Modifier.width(20.dp))
+                Spacer(Modifier.width(12.dp))
                 Box(
                     Modifier
                         .size(72.dp)
@@ -319,10 +330,18 @@ fun FullPlayer(nav: Nav, actions: PlayerMenuActions, onClose: () -> Unit) {
                         modifier = Modifier.size(36.dp),
                     )
                 }
-                Spacer(Modifier.width(20.dp))
+                Spacer(Modifier.width(12.dp))
                 val hasNext = index < queue.lastIndex
                 IconButton(onClick = { nav.player.next() }, enabled = hasNext, modifier = Modifier.size(64.dp)) {
                     Icon(painterResource(R.drawable.ic_skip_next), contentDescription = "Next", tint = if (hasNext) p.text else p.faint, modifier = Modifier.size(36.dp))
+                }
+                Spacer(Modifier.width(4.dp))
+                IconButton(onClick = { nav.player.cycleRepeat() }, modifier = Modifier.size(48.dp)) {
+                    Icon(
+                        painterResource(if (repeat == "one") R.drawable.ic_repeat_one else R.drawable.ic_repeat),
+                        contentDescription = when (repeat) { "one" -> "Repeat: this song"; "all" -> "Repeat: the queue"; else -> "Repeat: off" },
+                        tint = if (repeat != "off") p.accent else p.muted,
+                    )
                 }
             }
 
@@ -338,6 +357,9 @@ fun FullPlayer(nav: Nav, actions: PlayerMenuActions, onClose: () -> Unit) {
                 LikeButton(track.id in liked, { nav.graph.likes.toggle(track.id) })
                 IconButton(onClick = { actions.shareLink() }) {
                     Icon(painterResource(R.drawable.ic_share), contentDescription = "Share link", tint = p.text)
+                }
+                IconButton(onClick = { actions.lyrics() }) {
+                    Icon(painterResource(R.drawable.ic_lyrics), contentDescription = "Lyrics", tint = p.text)
                 }
                 MoreButton(
                     entries = listOf(
@@ -397,7 +419,7 @@ fun UpNextSheet(nav: Nav, onDismiss: () -> Unit) {
                     Spacer(Modifier.width(10.dp))
                     Column(Modifier.weight(1f)) {
                         Text(q.title, fontWeight = FontWeight.SemiBold, maxLines = 1, overflow = TextOverflow.Ellipsis)
-                        Text(q.artist, style = MaterialTheme.typography.bodySmall, color = p.muted, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                        Text(rememberSongLinks(nav, q, withAlbum = false, before = onDismiss), style = MaterialTheme.typography.bodySmall, color = p.muted, maxLines = 1, overflow = TextOverflow.Ellipsis)
                     }
                     IconButton(onClick = { nav.player.removeAt(i) }) {
                         Icon(painterResource(R.drawable.ic_close), contentDescription = "Remove", tint = p.muted)

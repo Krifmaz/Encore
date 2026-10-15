@@ -197,3 +197,35 @@ async fn two_devices_playing_at_once_stay_throttled() {
     let r = e.row().unwrap();
     assert_eq!((r.s("device_id"), r.i("track_id"), r.f("position")), ("laptop".into(), 2, 4.0));
 }
+
+#[tokio::test]
+async fn shuffle_and_repeat_commands_reach_the_device_and_its_state_shows_them() {
+    let e = setup("shuffle-repeat", 9105).await;
+    let mut s = playing(1, 5.0);
+    s["shuffle"] = json!(true);
+    s["repeat"] = json!("one");
+    e.beat("phone", "Pixel", s).await;
+    let d = call(&e.app, "GET", "/api/remote/devices", &e.cookie, None).await.1;
+    assert_eq!((d[0]["state"]["shuffle"].clone(), d[0]["state"]["repeat"].clone()), (json!(true), json!("one")), "{d}");
+    for c in [json!({ "action": "shuffle", "value": false }), json!({ "action": "repeat", "value": "all" })] {
+        let r = call(&e.app, "POST", "/api/remote/phone/command", &e.cookie, Some(c)).await;
+        assert_eq!(r.0, StatusCode::OK, "{:?}", r.1);
+    }
+    let r = call(&e.app, "POST", "/api/remote/heartbeat", &e.cookie, Some(json!({ "id": "phone", "name": "Pixel", "state": playing(1, 6.0) }))).await;
+    let cmds = r.1["commands"].as_array().unwrap().clone();
+    assert_eq!(cmds.iter().map(|c| (c["action"].clone(), c["value"].clone())).collect::<Vec<_>>(),
+        vec![(json!("shuffle"), json!(false)), (json!("repeat"), json!("all"))]);
+    let r = call(&e.app, "POST", "/api/remote/phone/command", &e.cookie, Some(json!({ "action": "dance" }))).await;
+    assert_eq!(r.0, StatusCode::BAD_REQUEST);
+}
+
+#[tokio::test]
+async fn songs_carry_each_artist_for_links() {
+    let e = setup("credits", 9106).await;
+    e.st.db.execute("INSERT INTO tracks (id, path, title, artist, albumartist, album, album_id, duration) VALUES (?,?,?,?,?,?,?,?)",
+        p![10, "/m/10.flac", "Duet", "Band feat. Guest Singer", "Band", "Record", "alb1", 180.0]).unwrap();
+    crate::artists::invalidate(&e.st.db);
+    let r = call(&e.app, "GET", "/api/library/tracks/10", &e.cookie, None).await;
+    assert_eq!(r.0, StatusCode::OK, "{:?}", r.1);
+    assert_eq!(r.1["artists"], json!([{ "name": "Band", "in_library": true }, { "name": "Guest Singer", "in_library": false }]), "{}", r.1);
+}

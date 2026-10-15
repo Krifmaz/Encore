@@ -49,6 +49,8 @@ cadenza-dsp = { git = "https://github.com/Krifmaz/cadenza", rev = "93c2621" }
 webp = { version = "0.3", default-features = false }
 # the cover thumbnail pass lowers its threads' priority (setpriority)
 libc = "0.2"
+# quality checks on imports: spectrum of the decoded audio (fake lossless, upsampled)
+rustfft = "6.4"
 
 [profile.release]
 lto = "thin"

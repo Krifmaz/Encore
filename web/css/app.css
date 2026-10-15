@@ -645,3 +645,5 @@ details.slsk-folder > .slsk-files { padding: 0 16px 12px; }
   font-size: 24px; font-weight: 700; white-space: nowrap; box-shadow: var(--shadow); pointer-events: none; }
 .scrubber.drag .scrub-bubble { display: flex; }
 @media (max-width: 760px) { .scrubber { top: 120px; right: 2px; } .scrub-rail { padding: 6px 4px; } }
+/* a song's artists and album as links (each artist of a collaboration on its own) */
+.artist-link:hover, .album-link:hover { text-decoration: underline; color: var(--text); }

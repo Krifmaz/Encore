@@ -6,6 +6,7 @@ import app.encore.android.data.api.EncoreApi
 import app.encore.android.data.api.Track
 import app.encore.android.playback.MediaItems
 import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.buildJsonArray
 import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.put
 
@@ -19,6 +20,7 @@ import kotlinx.serialization.json.put
  */
 class ServiceHost(
     private val remote: RemoteDevice,
+    /** the session's player (CarControls' CarPlayer): its shuffle is the app shuffle the car and the phone show */
     private val player: Player,
     /** the position in the song, ms (a server-made stream's offset included) */
     private val positionMs: () -> Long,
@@ -47,9 +49,16 @@ class ServiceHost(
                     Player.EVENT_MEDIA_ITEM_TRANSITION,
                     Player.EVENT_POSITION_DISCONTINUITY,
                     Player.EVENT_TIMELINE_CHANGED,
+                    Player.EVENT_SHUFFLE_MODE_ENABLED_CHANGED,
+                    Player.EVENT_REPEAT_MODE_CHANGED,
                 ) || (events.contains(Player.EVENT_VOLUME_CHANGED) && !fading())
             ) remote.beatSoon()
             if (events.contains(Player.EVENT_IS_PLAYING_CHANGED)) remote.setPlaying(player.isPlaying)
+        }
+
+        // the app shuffle (CarPlayer.setShuffled) calls this directly, with no onEvents after it
+        override fun onShuffleModeEnabledChanged(shuffleModeEnabled: Boolean) {
+            remote.beatSoon()
         }
     }
 
@@ -85,6 +94,13 @@ class ServiceHost(
             put("id", t.id)
             put("title", t.title)
             put("artist", t.artist)
+            if (t.artists.isNotEmpty()) put("artists", buildJsonArray {
+                for (a in t.artists) add(buildJsonObject {
+                    put("name", a.name)
+                    if (a.mbid.isNotEmpty()) put("mbid", a.mbid)
+                    put("in_library", a.inLibrary)
+                })
+            })
             put("album", t.album)
             put("album_id", t.albumId)
             if (t.format.isNotEmpty()) put("format", t.format)
@@ -93,6 +109,8 @@ class ServiceHost(
             put("playing", playingNow())
             put("position", positionMs().coerceAtLeast(0L) / 1000.0)
             put("volume", volume().toDouble())
+            put("shuffle", player.shuffleModeEnabled)
+            put("repeat", repeatName(player.repeatMode))
             put("index", at)
             put("queue", RemoteDevice.slimList(queue))
             put("signal", buildJsonObject {
@@ -126,6 +144,14 @@ class ServiceHost(
             "volume" -> {
                 val v = c.d("value")
                 player.volume = (if (v.isNaN()) 0.9 else v).toFloat().coerceIn(0f, 1f)
+            }
+            // the app shuffle (the player is the session's, so this is the shuffle the car and the phone show)
+            "shuffle" -> player.shuffleModeEnabled = c.b("value")
+            "repeat" -> when (c.s("value")) {
+                "off" -> player.repeatMode = Player.REPEAT_MODE_OFF
+                "all" -> player.repeatMode = Player.REPEAT_MODE_ALL
+                "one" -> player.repeatMode = Player.REPEAT_MODE_ONE
+                else -> {}
             }
             "enqueue" -> {
                 val list = items(RemoteDevice.tracksOf(c["tracks"]))
@@ -161,7 +187,14 @@ class ServiceHost(
         }
     }
 
-    private companion object {
-        val IDLE = buildJsonObject { put("playing", false) }
+    companion object {
+        private val IDLE = buildJsonObject { put("playing", false) }
+
+        /** Media3's repeat mode as the remote says it: "off" | "all" | "one". */
+        fun repeatName(mode: Int): String = when (mode) {
+            Player.REPEAT_MODE_ALL -> "all"
+            Player.REPEAT_MODE_ONE -> "one"
+            else -> "off"
+        }
     }
 }

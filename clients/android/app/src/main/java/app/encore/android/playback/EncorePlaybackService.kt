@@ -241,7 +241,8 @@ class EncorePlaybackService : MediaLibraryService() {
         restoreAtStart()
         remoteHost = ServiceHost(
             remote = RemoteDevice.get(this),
-            player = player,
+            // the session's player: shuffle / repeat from other devices are the same the car and the phone use
+            player = car.player,
             positionMs = { absPositionMs() },
             durationSec = { durationSec() },
             seekTo = { ms -> seekAbs(ms) },

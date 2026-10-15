@@ -1,6 +1,7 @@
 import { api } from '../api.js';
 import { art, emptyState, esc, fmt, icon, modal, toast } from '../ui.js';
 import { bindRequestActions, bindTiles, libraryTile, requestRow } from './common.js';
+import { bindSkippedToggle, hideSkippedPref, skippedToggle } from './discover.js';
 
 export async function render(view, ctx) {
   const hour = new Date().getHours();
@@ -95,13 +96,20 @@ export async function render(view, ctx) {
   // new releases from library artists
   api.get('/discover/new-releases?limit=12').then(d => {
     if (!d.releases.length || !view.isConnected) return;
-    view.querySelector('#new-releases').innerHTML = `<div class="section-head"><h2>New releases</h2><span class="small muted">from artists in your library</span></div>
-      <div class="grid">${d.releases.map(r => `<div class="tile" data-href="${r.mbid ? `/album/${esc(r.mbid)}` : `/artist-name/${encodeURIComponent(r.artist)}`}">
+    const host = view.querySelector('#new-releases');
+    // kinds Settings → Release types skips hide behind a "+N hidden" chip
+    const paintNew = (hide) => {
+      const skipped = d.releases.filter(r => r.skipped).length;
+      host.innerHTML = `<div class="section-head"><h2>New releases</h2><span class="row wrap" style="gap:10px;justify-content:flex-end"><span class="small muted">from artists in your library</span>${skipped ? skippedToggle(hide, skipped) : ''}</span></div>
+      <div class="grid">${d.releases.filter(r => !(hide && r.skipped)).map(r => `<div class="tile" data-href="${r.mbid ? `/album/${esc(r.mbid)}` : `/artist-name/${encodeURIComponent(r.artist)}`}">
         <div class="art">${art(r.cover, r.title)}
           <div class="corner">${r.in_library ? '<span class="badge ok">In library</span>': ''}</div>
 </div>
         <div class="t ellipsis" title="${esc(r.title)}">${esc(r.title)}</div>
         <div class="s ellipsis">${esc(r.artist)} · ${esc(r.date)}${r.type && r.type !== 'Album' ? ' · ' + esc(r.type) : ''}</div></div>`).join('')}</div>`;
+    };
+    paintNew(hideSkippedPref());
+    bindSkippedToggle(host, paintNew);
   }).catch(() => {});
 
   // a taste of For you

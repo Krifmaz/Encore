@@ -3,6 +3,7 @@ package app.encore.android.playback
 import android.net.Uri
 import android.os.Bundle
 import app.encore.android.BuildConfig
+import app.encore.android.data.api.ArtistCredit
 import app.encore.android.data.api.EncoreApi
 import app.encore.android.data.api.Track
 import androidx.media3.common.MediaItem
@@ -22,6 +23,10 @@ object MediaItems {
     const val EXTRA_ALBUM_ARTIST = "albumartist"
     const val EXTRA_BITRATE = "bitrate"
     const val EXTRA_YEAR = "year"
+    /** each artist of the song (names, MusicBrainz ids, in the library), for links in the player */
+    const val EXTRA_ARTIST_NAMES = "artist_names"
+    const val EXTRA_ARTIST_MBIDS = "artist_mbids"
+    const val EXTRA_ARTIST_IN_LIBRARY = "artist_in_library"
 
     fun trackId(mediaId: String): Long? =
         if (mediaId.startsWith("track:")) mediaId.removePrefix("track:").substringBefore("|").toLongOrNull() else null
@@ -42,6 +47,11 @@ object MediaItems {
             putString(EXTRA_ALBUM_ARTIST, t.albumArtist)
             putInt(EXTRA_BITRATE, t.bitrate)
             putString(EXTRA_YEAR, t.year)
+            if (t.artists.isNotEmpty()) {
+                putStringArrayList(EXTRA_ARTIST_NAMES, ArrayList(t.artists.map { it.name }))
+                putStringArrayList(EXTRA_ARTIST_MBIDS, ArrayList(t.artists.map { it.mbid }))
+                putBooleanArray(EXTRA_ARTIST_IN_LIBRARY, t.artists.map { it.inLibrary }.toBooleanArray())
+            }
         }
         val md = MediaMetadata.Builder()
             .setTitle(t.title)
@@ -93,6 +103,14 @@ object MediaItems {
             durationSec = x?.getDouble(EXTRA_DURATION) ?: 0.0,
             format = x?.getString(EXTRA_FORMAT) ?: "",
             bitrate = x?.getInt(EXTRA_BITRATE) ?: 0,
+            artists = artistsOf(x),
         )
+    }
+
+    private fun artistsOf(x: Bundle?): List<ArtistCredit> {
+        val names = x?.getStringArrayList(EXTRA_ARTIST_NAMES) ?: return emptyList()
+        val mbids = x.getStringArrayList(EXTRA_ARTIST_MBIDS)
+        val inLib = x.getBooleanArray(EXTRA_ARTIST_IN_LIBRARY)
+        return names.mapIndexed { i, n -> ArtistCredit(n, mbids?.getOrNull(i) ?: "", inLib?.getOrNull(i) ?: false) }
     }
 }

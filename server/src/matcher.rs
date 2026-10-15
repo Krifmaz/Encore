@@ -8,7 +8,7 @@ use unicode_normalization::UnicodeNormalization;
 
 // version markers → category. Categories in IGNORED don't change the song's identity.
 const VERSION_PATTERNS: [(&str, &str); 15] = [
-    (r"\bslowed\b|\breverb\b|\bsped[\s-]*up\b|\bnightcore\b|\b8d\b|\bdaycore\b|\bchopped\b", "altered"),
+    (r"\bslowed\b|\breverb\b|\bsped[\s-]*up\b|\bnightcore\b|\b8d\b|\bdaycore\b|\bchopped\b|\bbass[\s-]?boost(?:ed)?\b|\blo[\s-]?fi\b|\bpitched\b|\btik[\s-]?tok version\b", "altered"),
     (r"\bkaraoke\b", "karaoke"),
     (r"\ba[\s-]?cappella\b|\bacapella\b|\bvocals? only\b", "acappella"),
     (r"\binstrumental\b|\boff[\s-]?vocal\b", "instrumental"),
@@ -18,7 +18,7 @@ const VERSION_PATTERNS: [(&str, &str); 15] = [
     (r"\bdemo\b", "demo"),
     (r"\bcover\b|\btribute\b", "cover"),
     (r"\bextended\b", "extended"),
-    (r"\bradio edit\b|\bsingle edit\b|\bshort edit\b|\b(?<!re-)edit\b", "edit"),
+    (r"\bradio edit\b|\bsingle edit\b|\bshort edit\b|\b(?<!re-)edit\b|\bradio version\b", "edit"),
     (r"\bre-?recorded\b|\btaylor'?s version\b|\b20\d\d version\b|\bnew version\b", "rerecorded"),
     (r"\borchestral\b|\bsymphonic\b", "orchestral"),
     (r"\bclean\b|\bexplicit\b|\bcensored\b", "explicitness"),
@@ -113,6 +113,47 @@ pub fn parse_title(title: &str) -> (String, BTreeSet<&'static str>, String) {
         }
     }
     (fold(&rest), versions, remixer)
+}
+
+/// A download candidate's name (file name, release or video title) carries a version mark the requested
+/// song doesn't: live, remix, acoustic, instrumental, a cappella, sped up / slowed / reverb / 8D /
+/// nightcore, edit, extended, demo, karaoke, cover … → that mark (the candidate is skipped). Remaster,
+/// deluxe, "official video" and the like don't count. The song's own words and the artist's are taken out
+/// first, so "Live Forever" or the band Live don't read as live.
+pub fn unwanted_version(title: &str, artist: &str, candidate: &str) -> Option<&'static str> {
+    let (base, want, _) = parse_title(title);
+    let mut rest = format!(" {} ", fold(candidate));
+    let whole = format!(" {base} ");
+    if !base.is_empty() && rest.contains(&whole) {
+        rest = rest.replacen(&whole, " ", 1);
+    } else {
+        for w in base.split_whitespace() {
+            rest = rest.replacen(&format!(" {w} "), " ", 1);
+        }
+    }
+    for w in fold(artist).split_whitespace() {
+        while rest.contains(&format!(" {w} ")) {
+            rest = rest.replacen(&format!(" {w} "), " ", 1);
+        }
+    }
+    let rest = rest.trim();
+    PATS.iter().find(|(re, _, cat)| !IGNORED.contains(cat) && !want.contains(cat) && is_match(re, rest)).map(|(_, _, cat)| *cat)
+}
+
+/// A Soulseek file name from the requested title on ("Hole - Live Through This - 03 - Doll Parts" →
+/// "doll parts"): the album and artist parts before it are not version marks. The whole name when the
+/// title isn't in it word for word.
+pub fn from_title_on(title: &str, candidate: &str) -> String {
+    let (base, _, _) = parse_title(title);
+    let c = fold(candidate);
+    if base.is_empty() {
+        return c;
+    }
+    let padded = format!(" {c} ");
+    match padded.rfind(&format!(" {base} ")) {
+        Some(i) => padded[i..].trim().to_string(),
+        None => c,
+    }
 }
 
 pub fn describe(title: &str, artist: &str, album: &str, length: Option<f64>, isrc: Option<&str>, mbid: Option<&str>) -> Desc {
@@ -291,5 +332,48 @@ mod tests {
         assert_eq!(parse_title("Track (Foo Remix)").2, "foo");
         assert!(parse_title("Track Slowed").1.contains("altered"));
         assert!((sim("abcd", "bcde") - 0.75).abs() < 1e-9);
+        assert!(parse_title("Song (Bass Boosted)").1.contains("altered"));
+        assert!(parse_title("Song (Lo-Fi)").1.contains("altered"));
+    }
+
+    #[test]
+    fn candidates_of_another_version_are_skipped() {
+        let u = |title: &str, cand: &str| unwanted_version(title, "Travis Scott", cand);
+        for (cand, mark) in [
+            ("Travis Scott - 90210 (Live at Rolling Loud)", "live"),
+            ("05 - 90210 (Live)", "live"),
+            ("Travis Scott - 90210 (Chopnotslop Remix) [FLAC]", "remix"),
+            ("90210 (Acoustic)", "acoustic"),
+            ("90210 (Instrumental)", "instrumental"),
+            ("90210 (A Cappella)", "acappella"),
+            ("Travis Scott - 90210 (Sped Up)", "altered"),
+            ("90210 slowed + reverb", "altered"),
+            ("90210 (8D Audio)", "altered"),
+            ("90210 nightcore", "altered"),
+            ("90210 (Radio Edit)", "edit"),
+            ("90210 (Extended Mix)", "extended"),
+            ("90210 (Demo)", "demo"),
+            ("Travis Scott - 90210 (Karaoke Version) [FLAC]", "karaoke"),
+            ("90210 (Cover)", "cover"),
+        ] {
+            assert_eq!(u("90210", cand), Some(mark), "{cand}");
+        }
+        for cand in ["Travis Scott - 90210 [FLAC] [WEB]", "04 - 90210", "Travis Scott - 90210 (Official Audio)", "90210 (2015 Remaster)",
+            "Travis Scott - Rodeo (Deluxe) incl 90210 [FLAC]", "90210 (feat. Kacy Hill)", "Travis Scott - 90210 (Explicit)"] {
+            assert_eq!(u("90210", cand), None, "{cand}");
+        }
+        // the requested song's own mark is fine, and its words are not marks
+        assert_eq!(u("90210 (Live)", "Travis Scott - 90210 (Live)"), None);
+        assert_eq!(u("90210 - Acoustic", "90210 (Acoustic Version)"), None);
+        assert_eq!(unwanted_version("Live Forever", "Oasis", "Oasis - Live Forever (Remastered)"), None);
+        assert_eq!(unwanted_version("Live Forever", "Oasis", "Oasis - Live Forever (Live at Knebworth)"), Some("live"));
+        assert_eq!(unwanted_version("Selling the Drama", "Live", "Live - Selling the Drama"), None);
+        assert_eq!(unwanted_version("Remix", "X", "X - Remix"), None);
+        // an album name before the title is not a mark (Soulseek "Artist - Album - NN - Title")
+        let tail = from_title_on("Doll Parts", "Hole - Live Through This - 03 - Doll Parts");
+        assert_eq!(tail, "doll parts");
+        assert_eq!(unwanted_version("Doll Parts", "Hole", &tail), None);
+        let tail = from_title_on("Doll Parts", "Hole - Live Through This - 03 - Doll Parts (Live)");
+        assert_eq!(unwanted_version("Doll Parts", "Hole", &tail), Some("live"));
     }
 }

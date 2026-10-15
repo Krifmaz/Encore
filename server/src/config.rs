@@ -22,6 +22,8 @@ pub struct Config {
 }
 
 pub const MASK: &str = "••••";
+/// settings row that marks the one-time discography_singles → release_types migration as done
+const RELEASE_TYPES_MIGRATED: &str = "release_types_migrated";
 
 fn coerce(default: &Value, raw: &Value) -> Value {
     match default {
@@ -80,6 +82,16 @@ impl Config {
             // the native app's sign-in: counted from the last use (sliding), unlike session_days
             ("app_session_days", Some("ENCORE_APP_SESSION_DAYS"), json!(365), false),
             ("lastfm_shared_secret", Some("LASTFM_SHARED_SECRET"), json!(""), true),
+            // Settings → Contribute (contribute.rs): AcoustID fingerprint submissions and MusicBrainz ISRCs
+            ("acoustid_user_key", Some("ACOUSTID_USER_KEY"), json!(""), true),
+            ("contribute_acoustid", Some("ENCORE_CONTRIBUTE_ACOUSTID"), json!(true), false),
+            ("contribute_isrc", Some("ENCORE_CONTRIBUTE_ISRC"), json!(true), false),
+            ("mb_client_id", Some("MUSICBRAINZ_CLIENT_ID"), json!(""), false),
+            ("mb_client_secret", Some("MUSICBRAINZ_CLIENT_SECRET"), json!(""), true),
+            ("mb_oauth_access_token", None, json!(""), true),
+            ("mb_oauth_refresh_token", None, json!(""), true),
+            ("mb_oauth_expires_at", None, json!(0.0), false),
+            ("mb_oauth_account", None, json!(""), false),
             ("torznab_enabled", Some("TORZNAB_ENABLED"), json!(false), false),
             ("prowlarr_url", Some("PROWLARR_URL"), json!(""), false),
             ("prowlarr_api_key", Some("PROWLARR_API_KEY"), json!(""), true),
@@ -123,6 +135,17 @@ impl Config {
             // daily database backups (Settings → Scheduled tasks; the copies are under config/backups)
             ("task_backup_enabled", Some("TASK_BACKUP_ENABLED"), json!(true), false),
             ("task_backup_minutes", Some("TASK_BACKUP_MINUTES"), json!(1440), false),
+            // YouTube sign-in (ytauth): light refresh of pasted cookies; auto-updates of the sign-in browser
+            ("youtube_light_refresh", Some("YOUTUBE_LIGHT_REFRESH"), json!(true), false),
+            ("tools_auto_browser", None, json!(true), false),
+            // release types (see release_types.rs): kinds to request, extras to skip – CSV
+            ("release_types", Some("RELEASE_TYPES"), json!(crate::release_types::DEFAULT_KINDS), false),
+            ("release_skip", Some("RELEASE_SKIP"), json!(crate::release_types::default_skip()), false),
+            // quality checks (quality.rs): on every download before it enters the library, and the library scan task
+            ("quality_check_on_import", Some("QUALITY_CHECK_ON_IMPORT"), json!(true), false),
+            ("quality_min_lufs", Some("QUALITY_MIN_LUFS"), json!(-28.0), false),
+            ("task_quality_enabled", Some("TASK_QUALITY_ENABLED"), json!(false), false),
+            ("task_quality_minutes", Some("TASK_QUALITY_MINUTES"), json!(360), false),
         ] {
             if !defs.iter().any(|(n, _)| n == k) {
                 defs.push((k.to_string(), Def { env: env.map(String::from), default, secret }));
@@ -134,7 +157,7 @@ impl Config {
     }
 
     pub fn reload(&self) -> anyhow::Result<()> {
-        let stored: HashMap<String, Value> = self
+        let mut stored: HashMap<String, Value> = self
             .db
             .query("SELECT key, value FROM settings", p![])?
             .into_iter()
@@ -144,6 +167,19 @@ impl Config {
                 Some((k, v))
             })
             .collect();
+        // "discography includes singles" (before release types) becomes the Single box, once, on installs
+        // that existed before (a fresh install has nothing stored and keeps the new defaults)
+        if !stored.contains_key(RELEASE_TYPES_MIGRATED) {
+            if !stored.is_empty() {
+                let env_singles = std::env::var("ENCORE_DISCOGRAPHY_SINGLES").ok().map(|r| clean_env(&r)).filter(|c| !c.is_empty()).map(Value::String);
+                let singles = env_singles.as_ref().or(stored.get("discography_singles"));
+                if let Some(kinds) = crate::release_types::migrated_kinds(stored.get("release_types"), singles) {
+                    self.db.execute("INSERT OR REPLACE INTO settings VALUES (?,?)", p!["release_types", json!(kinds).to_string()])?;
+                    stored.insert("release_types".into(), json!(kinds));
+                }
+            }
+            self.db.execute("INSERT OR REPLACE INTO settings VALUES (?,?)", p![RELEASE_TYPES_MIGRATED, "true"])?;
+        }
         let mut cache = self.cache.write().unwrap();
         let mut env = self.env.write().unwrap();
         cache.clear();
@@ -236,5 +272,47 @@ impl Config {
         }
         out.insert("_meta".into(), Value::Object(meta));
         Value::Object(out)
+    }
+}
+
+#[cfg(test)]
+mod release_type_tests {
+    use super::*;
+
+    fn tmp(name: &str) -> std::path::PathBuf {
+        let d = std::env::temp_dir().join(format!("encore-cfg-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        d
+    }
+
+    #[test]
+    fn discography_singles_becomes_the_single_release_type() {
+        let d = tmp("singles");
+        let db = Db::open(&d).unwrap();
+        db.execute("INSERT INTO settings VALUES ('discography_singles', 'true')", p![]).unwrap();
+        let cfg = Config::load(db.clone()).unwrap();
+        assert_eq!(cfg.str("release_types"), "Album,EP,Single");
+        assert_eq!(crate::release_types::ReleaseFilter::from_cfg(&cfg).kinds, vec!["Album", "EP", "Single"]);
+        // stored once: changing the boxes later is not undone by the old switch
+        cfg.set_many(&json!({ "release_types": "Album" }));
+        cfg.reload().unwrap();
+        assert_eq!(cfg.str("release_types"), "Album");
+        // without the old switch: the defaults, nothing stored
+        let d2 = tmp("plain");
+        let cfg = Config::load(Db::open(&d2).unwrap()).unwrap();
+        assert_eq!(cfg.str("release_types"), "Album,EP");
+        assert_eq!(crate::release_types::ReleaseFilter::from_cfg(&cfg), crate::release_types::ReleaseFilter::default());
+        // a fresh install stays on the defaults across restarts (api_key is stored by now)
+        cfg.reload().unwrap();
+        assert_eq!(cfg.str("release_types"), "Album,EP");
+        // an older install that never saved the switch had singles on (its default)
+        let d3 = tmp("older");
+        let db3 = Db::open(&d3).unwrap();
+        db3.execute("INSERT INTO settings VALUES ('api_key', '\"k\"')", p![]).unwrap();
+        let cfg = Config::load(db3).unwrap();
+        assert_eq!(cfg.str("release_types"), "Album,EP,Single");
+        let _ = std::fs::remove_dir_all(d);
+        let _ = std::fs::remove_dir_all(d2);
+        let _ = std::fs::remove_dir_all(d3);
     }
 }

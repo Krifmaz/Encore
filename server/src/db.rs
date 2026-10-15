@@ -20,7 +20,8 @@ const SCHEMA: &str = include_str!("schema.sql");
 /// MIGRATIONS change: an older server that finds a higher number refuses to touch the file (it would
 /// otherwise fail half-way through and leave a database neither version can read), and a lower number
 /// means "back up, then migrate".
-pub const SCHEMA_VERSION: i64 = 23;
+/// 24: round 3 (release types on requests; source blocks, track quality, contributions – see schema.sql).
+pub const SCHEMA_VERSION: i64 = 24;
 
 /// Exit code of the server when the database comes from a newer Encore.
 pub const EXIT_NEWER_DB: i32 = 3;

@@ -15,7 +15,7 @@ use web_sys::Element;
 fn src_name(k: &str) -> Option<&'static str> {
     Some(match k {
         "spotify" => "Spotify", "ytmusic" => "YouTube Music", "deezer" => "Deezer", "tidal" => "Tidal", "qobuz" => "Qobuz",
-        "apple" => "Apple Music", "ytdlp" => "YouTube / SoundCloud", "listenbrainz" => "ListenBrainz", "web" => "Web",
+        "apple" => "Apple Music", "amazon" => "Amazon Music", "ytdlp" => "YouTube / SoundCloud", "listenbrainz" => "ListenBrainz", "web" => "Web",
         "text" => "Pasted list", "merged" => "Merged", "manual" => "Encore", "library" => "Encore",
         "jellyfin" => "Jellyfin", "plex" => "Plex", "navidrome" => "Navidrome",
         _ => return None,
@@ -68,8 +68,8 @@ pub fn import_modal(url: &str, into: Option<i64>) {
     let m = modal(ModalOpts::new(
         if has_into { "Add tracks from a link" } else { "Import playlist" },
         &format!(r#"<div class="tabs" id="imp-tabs"><button data-m="url" class="active">From a link</button><button data-m="text">Paste a list</button></div>
-      <div class="mt" id="imp-url"><input class="input" id="imp-link" value="{url}" placeholder="YouTube Music, Spotify, Deezer, Tidal, Apple Music, Qobuz, YouTube (Music), SoundCloud, Bandcamp, ListenBrainz…">
-        <p class="small faint" style="margin:6px 0 0">Connect Spotify/Tidal on the Connections page to import private playlists and Liked Songs (e.g. <span class="mono">https://music.youtube.com/playlist?list=LM</span> or <span class="mono">https://open.spotify.com/collection/tracks</span>).</p></div>
+      <div class="mt" id="imp-url"><input class="input" id="imp-link" value="{url}" placeholder="YouTube Music, Spotify, Deezer, Tidal, Apple Music, Amazon Music, Qobuz, YouTube (Music), SoundCloud, Bandcamp, ListenBrainz…">
+        <p class="small faint" style="margin:6px 0 0">Connect Spotify/Tidal on the Connections page to import private playlists and Liked Songs (e.g. <span class="mono">https://music.youtube.com/playlist?list=LM</span> or <span class="mono">https://open.spotify.com/collection/tracks</span>). Amazon Music playlists and albums import from their public share links.</p></div>
       <div class="mt hidden" id="imp-text"><textarea class="input" id="imp-lines" rows="8" placeholder="One per line:  Artist - Title"></textarea></div>
       <div class="row wrap mt">
         {name_follow}
@@ -265,7 +265,7 @@ pub fn render_playlist(view: Element, ctx: Ctx) -> PageFuture {
         <td class="hide-sm muted">{album}</td>
         <td>{status}</td>
         <td style="text-align:right"><button class="btn sm ghost" data-rm title="Remove">{x}</button></td></tr>"##,
-            item = it.s("id"), n = i + 1, title = esc(&it.s("title")), artist = esc(&it.s("artist")),
+            item = it.s("id"), n = i + 1, title = esc(&it.s("title")), artist = crate::ui::artist_links(it),
             album = if it.truthy("album_id") { format!(r##"<a href="#/library/album/{}">{}</a>"##, esc(&it.s("album_id")), esc(&it.s("album"))) } else { esc(&it.s("album")) },
             status = if it.truthy("track_id") {
                 format!(r#"<span class="badge ok" title="{}">✓ in library</span>{}"#, esc(&it.s("match_reason")), match it.s("verify_status").as_str() {
@@ -336,7 +336,7 @@ pub fn render_playlist(view: Element, ctx: Ctx) -> PageFuture {
             empty = if items.is_empty() { empty_state(&icon("music"), "Empty playlist", "Add tracks from an album page or from a link.") } else { String::new() },
         ));
         let playable: Vec<Value> = items.iter().filter(|i| i.truthy("track_id")).map(|i| json!({
-            "id": i.g("track_id"), "title": i.g("title"), "artist": i.g("artist"), "album": i.g("album"), "album_id": i.g("album_id"),
+            "id": i.g("track_id"), "title": i.g("title"), "artist": i.g("artist"), "artists": i.g("artists"), "album": i.g("album"), "album_id": i.g("album_id"),
             "format": i.g("format"), "bitrate": i.g("bitrate"), "duration": i.g("duration"),
         })).collect();
         dom::on_sel(&view, "#pl-play", "click", move |_| player::play_queue(playable.clone(), 0, "list"));

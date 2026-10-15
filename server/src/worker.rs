@@ -121,11 +121,16 @@ fn record_origin(st: &AppState, paths: &[PathBuf], origin: &Value, rid: i64, sin
                                WHERE path=? AND (downloaded_at IS NULL OR downloaded_at >= ?) AND added_at >= ?",
             p![origin["source"], origin["detail"], origin["url"], rid, now(), pth.to_string_lossy(), since, since - 1.0]);
     }
+    crate::routes::report::record_origin(st, paths, origin); // the exact source, for Report a problem
 }
 
 async fn complete(st: &AppState, r: &mut Req, message: &str, new: &[PathBuf], origin: Value) {
     if !new.is_empty() {
         record_origin(st, new, &origin, r.id, r.row.f("created_at"));
+    }
+    if r.d["replace"].is_object() {
+        // a reported song's replacement: it takes over the reported track's id
+        crate::routes::report::finish(st, &r.d, new, r.row.f("created_at"));
     }
     upd(st, r, &[("status", json!("completed")), ("progress", json!(100)), ("message", json!(message))]);
     if !new.is_empty() {
@@ -146,6 +151,9 @@ async fn complete(st: &AppState, r: &mut Req, message: &str, new: &[PathBuf], or
 }
 
 async fn fail(st: &AppState, r: &mut Req, message: &str) {
+    if r.d["replace"].is_object() {
+        crate::routes::report::replacement_failed(st, &r.d, message);
+    }
     if r.d["lossless_only"].as_bool().unwrap_or(false) {
         upd(st, r, &[("status", json!("failed")), ("message", json!("No lossless copy available yet – will try again later"))]);
         return;
@@ -263,11 +271,12 @@ async fn start(st: &AppState, r: &mut Req) -> anyhow::Result<()> {
     }
     let lossless_only = r.d["lossless_only"].as_bool().unwrap_or(false);
     // already there? (lossless upgrade requests replace what's there)
-    if kind == "album" && !lossless_only && (library::has_release_group(&st.db, &r.s("mbid")) || library::has_album(&st.db, &r.s("artist"), &r.album_title())) {
+    let replacing = r.d["replace"].is_object(); // a reported copy is being replaced: what's there doesn't count
+    if kind == "album" && !lossless_only && !replacing && (library::has_release_group(&st.db, &r.s("mbid")) || library::has_album(&st.db, &r.s("artist"), &r.album_title())) {
         complete(st, r, "Already in library", &[], Value::Null).await;
         return Ok(());
     }
-    if kind == "track" && track_in_library(st, r) {
+    if kind == "track" && !replacing && track_in_library(st, r) {
         complete(st, r, "Already in library", &[], Value::Null).await;
         return Ok(());
     }
@@ -281,7 +290,9 @@ async fn start(st: &AppState, r: &mut Req) -> anyhow::Result<()> {
     if kind == "album" && r.s("mbid").is_empty() && r.d["ext"].is_object() {
         release_info(st, r).await; // store track list: used for matching downloads and tagging
     }
-    r.d["sources"] = json!(source_order(st, r));
+    let mut order = source_order(st, r);
+    crate::routes::report::avoid_source(&r.d, &mut order); // a replacement tries the reported file's source last
+    r.d["sources"] = json!(order);
     r.d["log"] = json!([]);
     next_source(st, r, "").await
 }
@@ -289,10 +300,8 @@ async fn start(st: &AppState, r: &mut Req) -> anyhow::Result<()> {
 async fn expand_artist(st: &AppState, r: &mut Req) -> anyhow::Result<()> {
     upd(st, r, &[("status", json!("searching")), ("message", json!("Looking up discography…"))]);
     let art = mb::artist(st, &r.s("mbid")).await?;
-    let mut kinds = vec!["Album", "EP"];
-    if st.cfg.bool("discography_singles") {
-        kinds.push("Single");
-    }
+    // the request's own boxes (Request discography panel), else Settings → Release types
+    let filter = crate::release_types::ReleaseFilter::from_value(&r.d["release_filter"], &crate::release_types::ReleaseFilter::from_cfg(&st.cfg));
     // the merged catalog: MusicBrainz plus the Deezer / Apple Music releases MusicBrainz doesn't list
     let ext = if st.cfg.bool("discover_catalog_merge") { crate::routes::catalog::merged(st, &art).await } else { vec![] };
     let name = art["name"].as_str().unwrap_or("").to_string();
@@ -306,7 +315,7 @@ async fn expand_artist(st: &AppState, r: &mut Req) -> anyhow::Result<()> {
                               AND status NOT IN ('failed','denied','cancelled')", p![name, title]).ok().flatten().is_some(),
         }
     };
-    let plan = crate::routes::catalog::discography_plan(art["release_groups"].as_array().map(|a| a.as_slice()).unwrap_or(&[]), &ext, &kinds, skip);
+    let plan = crate::routes::catalog::discography_plan(art["release_groups"].as_array().map(|a| a.as_slice()).unwrap_or(&[]), &ext, &filter, skip);
     let t = now();
     let (mut n, mut n_ext) = (0, 0);
     for g in plan {
@@ -543,6 +552,9 @@ async fn start_slskd(st: &AppState, r: &mut Req, lossless_only: bool) -> anyhow:
     check(st, r.id)?;
     let tried: Vec<String> = r.d["slskd_tried"].as_array().map(|a| a.iter().filter_map(|x| x.as_str().map(String::from)).collect()).unwrap_or_default();
     cands.retain(|c| !tried.contains(&format!("{}|{}", c["username"].as_str().unwrap_or(""), c["directory"].as_str().unwrap_or(""))));
+    // reported files are never picked again; a replacement tries other users first
+    cands.retain(|c| !crate::routes::report::slskd_blocked(st, c));
+    crate::routes::report::avoid_users(&r.d, &mut cands);
     if cands.is_empty() {
         return Ok(Out::Next(if lossless_only { "no lossless results on Soulseek" } else { "no suitable results on Soulseek" }.into()));
     }
@@ -679,7 +691,10 @@ async fn import_slskd(st: &AppState, r: &mut Req, c: &Value) -> anyhow::Result<(
     let user = c["username"].as_str().unwrap_or("");
     match import(st, r, &paths, &root).await {
         Ok((new, note)) => {
-            let origin = json!({ "source": "Soulseek", "detail": format!("user {user} · {}", c["directory"].as_str().unwrap_or("").replace('\\', "/")) });
+            let mut origin = json!({ "source": "Soulseek", "detail": format!("user {user} · {}", c["directory"].as_str().unwrap_or("").replace('\\', "/")) });
+            if let Some((kind, key, label)) = crate::routes::report::block_of_slskd(c, r.s("kind") == "album") {
+                origin["block"] = json!({ "kind": kind, "key": key, "label": label });
+            }
             complete(st, r, &with_note(&format!("Downloaded from Soulseek ({})", c["format"].as_str().unwrap_or("").to_uppercase()), &note), &new, origin).await;
             Ok(())
         }
@@ -712,6 +727,7 @@ async fn start_torznab(st: &AppState, r: &mut Req, lossless_only: bool) -> anyho
         }
     }
     check(st, r.id)?;
+    cands.retain(|c| !crate::routes::report::release_blocked(st, c)); // reported releases are never picked again
     if cands.is_empty() {
         return Ok(Out::Next("no matching release on your indexers".into()));
     }
@@ -821,7 +837,10 @@ async fn poll_torznab(st: &AppState, r: &mut Req) -> anyhow::Result<()> {
                 Ok((new, _)) => {
                     torznab::remove(st, &id).await;
                     let via = if cand["protocol"] == "usenet" { "Usenet" } else { "torrent" };
-                    let origin = json!({ "source": cand["indexer"].as_str().unwrap_or(via), "detail": format!("{via}: {}", cand["title"].as_str().unwrap_or("")) });
+                    let mut origin = json!({ "source": cand["indexer"].as_str().unwrap_or(via), "detail": format!("{via}: {}", cand["title"].as_str().unwrap_or("")) });
+                    if let Some((kind, key, label)) = crate::routes::report::block_of_release(&cand) {
+                        origin["block"] = json!({ "kind": kind, "key": key, "label": label });
+                    }
                     complete(st, r, &format!("Downloaded via {via} ({})", cand["indexer"].as_str().unwrap_or("Prowlarr")), &new, origin).await;
                     Ok(())
                 }
@@ -877,6 +896,7 @@ async fn start_streamrip(st: &AppState, r: &mut Req, urls: Option<Vec<String>>) 
             urls = streamrip::resolve_track(st, &r.s("artist"), &r.s("title"), isrc.as_deref(), r.length()).await;
         }
     }
+    urls.retain(|u| !crate::routes::report::url_blocked(st, u)); // reported items are never picked again
     if urls.is_empty() {
         return Ok(Out::Next("not found on Deezer/Tidal".into()));
     }
@@ -928,11 +948,14 @@ async fn start_ytdlp(st: &AppState, r: &mut Req, pick_url: Option<String>) -> an
         upd(st, r, &[("status", json!("searching")), ("message", json!("Searching YouTube Music…"))]);
         let (url, from_ytm, cover) = match &pick_url {
             Some(u) => (Some(u.clone()), u.contains("music.youtube.com"), None),
-            None => match ytmusic::find_song(st, &r.s("artist"), &r.s("title"), r.length()).await {
+            None => match ytmusic::find_song(st, &r.s("artist"), &r.s("title"), r.length()).await
+                .filter(|hit| !crate::routes::report::blocked(st, "youtube", hit["videoId"].as_str().unwrap_or(""))) {
                 Some(hit) => (Some(format!("https://music.youtube.com/watch?v={}", hit["videoId"].as_str().unwrap_or(""))), true, hit["cover"].as_str().map(String::from)),
                 None => (ytdlp::find_best(&r.s("artist"), &r.s("title"), r.length()).await, false, None),
             },
         };
+        // a reported video is never picked again
+        let url = url.filter(|u| pick_url.is_some() || !crate::routes::report::url_blocked(st, u));
         let Some(url) = url else { return Ok(Out::Next("no match on YouTube".into())) };
         upd(st, r, &[("status", json!("downloading")), ("message", json!(format!("Downloading {url}")))]);
         let res = ytdlp::download(st, &url, &out, false, Some(&cb)).await?;
@@ -973,7 +996,7 @@ async fn start_ytdlp(st: &AppState, r: &mut Req, pick_url: Option<String>) -> an
         } else {
             ytmusic::find_album(st, &r.s("artist"), &album, n_tracks(&rel)).await
         };
-        if let Some(pl) = yt_album.as_ref().and_then(|a| a["playlist_url"].as_str().map(String::from)) {
+        if let Some(pl) = yt_album.as_ref().and_then(|a| a["playlist_url"].as_str().map(String::from)).filter(|u| pick_url.is_some() || !crate::routes::report::url_blocked(st, u)) {
             let title = yt_album.as_ref().unwrap()["title"].as_str().unwrap_or("").to_string();
             upd(st, r, &[("status", json!("downloading")), ("message", json!(format!("YouTube Music album: {title}")))]);
             let res: anyhow::Result<Option<Vec<PathBuf>>> = async {
@@ -1017,6 +1040,7 @@ async fn start_ytdlp(st: &AppState, r: &mut Req, pick_url: Option<String>) -> an
                 Some(h) => Some(format!("https://music.youtube.com/watch?v={}", h["videoId"].as_str().unwrap_or(""))),
                 None => ytdlp::find_best(&artist, &title, len).await,
             };
+            let url = url.filter(|u| !crate::routes::report::url_blocked(st, u));
             let got = match url { Some(u) => ytdlp::download(st, &u, &out.join(format!("{:02}", i + 1)), false, None).await.map(|d| d.files).unwrap_or_default(), None => vec![] };
             if got.is_empty() {
                 missing.push(title);
@@ -1150,11 +1174,20 @@ async fn step(st: AppState, id: i64) {
 
 /// Reset requests that were mid-task when the server stopped.
 fn recover(st: &AppState) {
-    for r in st.db.query("SELECT id, status, source FROM requests WHERE status IN ('searching','importing','downloading')", p![]).unwrap_or_default() {
+    for r in st.db.query("SELECT id, status, source, detail FROM requests WHERE status IN ('searching','importing','downloading')", p![]).unwrap_or_default() {
         if r.s("status") == "downloading" && ["slskd", "slskd_lossless", "torznab"].contains(&r.s("source").as_str()) {
             continue;
         }
-        let _ = st.db.execute("UPDATE requests SET status='queued', message='Restarted after server restart', detail='{}', updated_at=? WHERE id=?", p![now(), r.i("id")]);
+        // what was asked for stays (length, ISRC, Deezer/Apple ids, the ticked release types), and a
+        // reported song's replacement keeps what it replaces and which source to avoid
+        let old: Value = serde_json::from_str(&r.s("detail")).unwrap_or(json!({}));
+        let mut d = json!({});
+        for k in ["replace", "avoid", "album_mode", "release_filter", "length", "isrc", "ext"] {
+            if !old[k].is_null() {
+                d[k] = old[k].clone();
+            }
+        }
+        let _ = st.db.execute("UPDATE requests SET status='queued', message='Restarted after server restart', detail=?, updated_at=? WHERE id=?", p![d.to_string(), now(), r.i("id")]);
     }
 }
 
@@ -1175,6 +1208,7 @@ pub async fn run(st: AppState) {
             }
         }
         crate::scheduler::tick(&st);
+        crate::routes::report::reconcile(&st); // reports whose replacement was cancelled get their song back
         let _ = st.db.execute("DELETE FROM sessions WHERE expires_at < ?", p![now()]);
         tokio::time::sleep(std::time::Duration::from_secs(5)).await;
     }

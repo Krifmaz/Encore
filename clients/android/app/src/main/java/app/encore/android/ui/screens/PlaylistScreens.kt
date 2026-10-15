@@ -212,6 +212,7 @@ fun PlaylistScreen(nav: Nav, id: Long, name: String) {
                             onClick = { nav.player.play(tracks, at) },
                             onLike = { nav.graph.likes.toggle(t.id) },
                             subtitle = listOf(t.artist, t.album).filter { it.isNotEmpty() }.joinToString(" · "),
+                            subtitleLinks = rememberSongLinks(nav, t),
                             onMore = { nav.trackMenu(t) },
                         )
                     } else {

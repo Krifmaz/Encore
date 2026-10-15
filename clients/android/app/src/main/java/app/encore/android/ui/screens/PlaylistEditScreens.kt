@@ -371,9 +371,9 @@ fun PlaylistImportScreen(nav: Nav, into: Long?) {
             item {
                 Column(Modifier.padding(horizontal = Gutter)) {
                     if (mode == 0) {
-                        EncoreField(url, { url = it }, placeholder = "YouTube Music, Spotify, Deezer, Tidal, Apple Music, Qobuz, YouTube (Music), SoundCloud, Bandcamp, ListenBrainz…", leadingIcon = R.drawable.ic_link, keyboardType = KeyboardType.Uri, imeAction = ImeAction.Go, onAction = { doPreview() }, modifier = Modifier.fillMaxWidth())
+                        EncoreField(url, { url = it }, placeholder = "YouTube Music, Spotify, Deezer, Tidal, Apple Music, Amazon Music, Qobuz, YouTube (Music), SoundCloud, Bandcamp, ListenBrainz…", leadingIcon = R.drawable.ic_link, keyboardType = KeyboardType.Uri, imeAction = ImeAction.Go, onAction = { doPreview() }, modifier = Modifier.fillMaxWidth())
                         Text(
-                            "Connect Spotify/Tidal on the Connections page to import private playlists and Liked Songs (e.g. https://music.youtube.com/playlist?list=LM or https://open.spotify.com/collection/tracks).",
+                            "Connect Spotify/Tidal on the Connections page to import private playlists and Liked Songs (e.g. https://music.youtube.com/playlist?list=LM or https://open.spotify.com/collection/tracks). Amazon Music playlists and albums import from their public share links.",
                             style = MaterialTheme.typography.bodySmall, color = p.faint, modifier = Modifier.padding(top = 6.dp),
                         )
                     } else {

@@ -1,9 +1,9 @@
 import { api } from '../api.js';
-import { art, confirmDialog, emptyState, esc, icon, modal, statusBadge, toast } from '../ui.js';
+import { art, artistLinks, confirmDialog, emptyState, esc, icon, modal, statusBadge, toast } from '../ui.js';
 import * as player from '../player.js';
 
 const SRC = {
-  spotify: 'Spotify', ytmusic: 'YouTube Music', deezer: 'Deezer', tidal: 'Tidal', qobuz: 'Qobuz', apple: 'Apple Music', ytdlp: 'YouTube / SoundCloud',
+  spotify: 'Spotify', ytmusic: 'YouTube Music', deezer: 'Deezer', tidal: 'Tidal', qobuz: 'Qobuz', apple: 'Apple Music', amazon: 'Amazon Music', ytdlp: 'YouTube / SoundCloud',
   listenbrainz: 'ListenBrainz', web: 'Web', text: 'Pasted list', merged: 'Merged', manual: 'Encore', library: 'Encore',
   jellyfin: 'Jellyfin', plex: 'Plex', navidrome: 'Navidrome',
 };
@@ -26,8 +26,8 @@ export function importModal(ctx, { url = '', into = null } = {}) {
     title: into ? 'Add tracks from a link' : 'Import playlist',
     wide: true,
     body: `<div class="tabs" id="imp-tabs"><button data-m="url" class="active">From a link</button><button data-m="text">Paste a list</button></div>
-      <div class="mt" id="imp-url"><input class="input" id="imp-link" value="${esc(url)}" placeholder="YouTube Music, Spotify, Deezer, Tidal, Apple Music, Qobuz, YouTube (Music), SoundCloud, Bandcamp, ListenBrainz…">
-        <p class="small faint" style="margin:6px 0 0">Connect Spotify/Tidal on the Connections page to import private playlists and Liked Songs (e.g. <span class="mono">https://music.youtube.com/playlist?list=LM</span> or <span class="mono">https://open.spotify.com/collection/tracks</span>).</p></div>
+      <div class="mt" id="imp-url"><input class="input" id="imp-link" value="${esc(url)}" placeholder="YouTube Music, Spotify, Deezer, Tidal, Apple Music, Amazon Music, Qobuz, YouTube (Music), SoundCloud, Bandcamp, ListenBrainz…">
+        <p class="small faint" style="margin:6px 0 0">Connect Spotify/Tidal on the Connections page to import private playlists and Liked Songs (e.g. <span class="mono">https://music.youtube.com/playlist?list=LM</span> or <span class="mono">https://open.spotify.com/collection/tracks</span>). Amazon Music playlists and albums import from their public share links.</p></div>
       <div class="mt hidden" id="imp-text"><textarea class="input" id="imp-lines" rows="8" placeholder="One per line:  Artist - Title"></textarea></div>
       <div class="row wrap mt">
         ${into ? '' : `<input class="input" id="imp-name" placeholder="Playlist name (optional)" style="max-width:280px">
@@ -181,7 +181,7 @@ export async function renderPlaylist(view, ctx) {
       <thead><tr><th class="num">#</th><th>Title</th><th class="hide-sm">Album</th><th>Status</th><th></th></tr></thead>
       <tbody>${pl.items.map((it, i) => `<tr data-item="${it.id}">
         <td class="num">${i + 1}</td>
-        <td><div style="font-weight:600">${esc(it.title)}</div><div class="small muted">${esc(it.artist)}</div></td>
+        <td><div style="font-weight:600">${esc(it.title)}</div><div class="small muted">${artistLinks(it)}</div></td>
         <td class="hide-sm muted">${it.album_id ? `<a href="#/library/album/${esc(it.album_id)}">${esc(it.album || '')}</a>` : esc(it.album || '')}</td>
         <td>${it.track_id ? `<span class="badge ok" title="${esc(it.match_reason || '')}">✓ in library</span>${it.verify_status === 'verified' ? ' <span class="badge ok" title="Audio fingerprint confirmed">verified</span>' : it.verify_status === 'mismatch' ? ' <span class="badge err">wrong audio</span>' : ''}`
           : it.request_status ? statusBadge(it.request_status) : '<span class="badge">missing</span>'}</td>
@@ -190,7 +190,7 @@ export async function renderPlaylist(view, ctx) {
     ${pl.items.length ? '' : emptyState(icon.music, 'Empty playlist', 'Add tracks from an album page or from a link.')}`;
   const reload = () => window.dispatchEvent(new HashChangeEvent('hashchange'));
   const act = async (fn, msg) => { try { const r = await fn(); toast(msg(r), 'ok'); reload(); } catch (e) { toast(e.message, 'err'); } };
-  const playable = pl.items.filter(i => i.track_id).map(i => ({ id: i.track_id, title: i.title, artist: i.artist, album: i.album, album_id: i.album_id, format: i.format, bitrate: i.bitrate, duration: i.duration }));
+  const playable = pl.items.filter(i => i.track_id).map(i => ({ id: i.track_id, title: i.title, artist: i.artist, artists: i.artists, album: i.album, album_id: i.album_id, format: i.format, bitrate: i.bitrate, duration: i.duration }));
   view.querySelector('#pl-play')?.addEventListener('click', () => player.playQueue(playable, 0));
   view.querySelector('#req')?.addEventListener('click', () => albumChoice('Download missing songs', (mode) =>
     act(() => api.post(`/playlists/${id}/request-missing`, { album_mode: mode }), r => `Requested ${r.requested} track(s)`)));

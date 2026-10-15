@@ -246,6 +246,9 @@ jobs:
           # desktop installers carry the npm version in their names – show the real one
           if [ "$SV" != "$V" ]; then for f in out/*"$SV"*; do [ -e "$f" ] && mv "$f" "${f//$SV/$V}"; done; fi
           cp docker-compose.yml out/
+          # the YouTube sign-in browser extension (chrome/ and firefox/ folders in one zip)
+          rm -f out/Encore-youtube-extension-*.zip
+          bash scripts/build-extension.sh "$V" out
           ls -la out
           if [ -f "docs/releases/$V.md" ]; then cp "docs/releases/$V.md" notes.md; else
             PREV=$(git tag -l 'v[0-9]*' --sort=-creatordate | head -1)
@@ -257,6 +260,7 @@ jobs:
           ### Install
           * **Docker**: \`ghcr.io/krifmaz/encore:latest\` (\`:$V\` pins this build) · compose file attached
           * **Linux without Docker**: \`encore-$V-linux-x86_64.tar.gz\` / \`-aarch64\` – run \`ENCORE_CONFIG_DIR=./config ENCORE_STATIC_DIR=./static ./encore\`
+          * **YouTube sign-in extension**: \`Encore-youtube-extension-$V.zip\` – load the chrome or firefox folder (see extension/encore-youtube-cookies/README.md)
           EOT
           if [ "$ONLY" = android ]; then cat >> notes.md <<EOT
           * **Android**: \`Encore-android-$V.apk\` (this build) · the server, Docker image and desktop apps are from the previous release
@@ -274,7 +278,9 @@ jobs:
         run: |
           # app installers from the previous release when this run didn't build them
           if [ "$APPS" != success ]; then
-            gh release download --dir out --pattern 'Encore-*' 2>/dev/null || true
+            mkdir -p prev && gh release download --dir prev --pattern 'Encore-*' 2>/dev/null || true
+            rm -f prev/Encore-youtube-extension-*.zip   # built fresh above
+            mv prev/* out/ 2>/dev/null || true
           fi
           gh release delete "v$V" --yes --cleanup-tag 2>/dev/null || true
           gh release create "v$V" out/* --title "Encore $V" --notes-file notes.md --target "$GITHUB_SHA" --latest

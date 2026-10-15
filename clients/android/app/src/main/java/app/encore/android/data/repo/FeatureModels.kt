@@ -343,6 +343,9 @@ data class ArtistPage(
     /** What "Request discography" includes: singles too (server setting), Deezer / Apple Music releases too. */
     val discographySingles: Boolean = false,
     val catalogMerge: Boolean = false,
+    /** The Request discography panel's boxes (Settings → Release types, ticked as set): kinds, then extras to skip. */
+    val releaseKinds: List<ReleaseTypeOption> = emptyList(),
+    val releaseSkip: List<ReleaseTypeOption> = emptyList(),
 ) {
     companion object {
         /** The links the web shows (discover.js `links`). */
@@ -369,7 +372,19 @@ data class ArtistPage(
                 requestLabel = o.text("request_label"),
                 discographySingles = o.bool("discography_singles"),
                 catalogMerge = o.bool("catalog_merge"),
+                releaseKinds = o.obj("release_types")?.arr("kinds").objectsOf().mapNotNull { ReleaseTypeOption.from(it) },
+                releaseSkip = o.obj("release_types")?.arr("skip").objectsOf().mapNotNull { ReleaseTypeOption.from(it) },
             )
+        }
+    }
+}
+
+/** One box of the release-type panel (`release_types.kinds[]` / `.skip[]` on the artist page). */
+data class ReleaseTypeOption(val key: String, val label: String, val on: Boolean) {
+    companion object {
+        fun from(o: JsonObject): ReleaseTypeOption? {
+            val key = o.text("key").ifEmpty { return null }
+            return ReleaseTypeOption(key, o.text("label").ifEmpty { key }, o.bool("on"))
         }
     }
 }
@@ -883,7 +898,7 @@ data class ImportResult(val id: Long, val added: Int, val duplicatesSkipped: Int
 
 /** web/js/pages/playlists.js `SRC`: where a playlist came from. */
 val PLAYLIST_SOURCES: Map<String, String> = mapOf(
-    "spotify" to "Spotify", "ytmusic" to "YouTube Music", "deezer" to "Deezer", "tidal" to "Tidal", "qobuz" to "Qobuz", "apple" to "Apple Music",
+    "spotify" to "Spotify", "ytmusic" to "YouTube Music", "deezer" to "Deezer", "tidal" to "Tidal", "qobuz" to "Qobuz", "apple" to "Apple Music", "amazon" to "Amazon Music",
     "ytdlp" to "YouTube / SoundCloud", "listenbrainz" to "ListenBrainz", "web" to "Web", "text" to "Pasted list", "merged" to "Merged",
     "manual" to "Encore", "library" to "Encore", "jellyfin" to "Jellyfin", "plex" to "Plex", "navidrome" to "Navidrome",
 )

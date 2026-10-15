@@ -44,6 +44,8 @@ pub struct NewRequest {
     pub isrc: Option<String>,
     pub album_mode: Option<String>,
     pub ext: Option<Value>,
+    /// "Request discography": this request's release types ({"kinds": [...], "skip": [...]}), else the setting's
+    pub release_filter: Option<Value>,
 }
 
 fn nz(s: &Option<String>) -> Option<&str> {
@@ -152,6 +154,9 @@ pub fn create_request(st: &AppState, u: &Row, b: &NewRequest, parent: Option<i64
     }
     if let Some(m) = b.album_mode.as_deref().filter(|m| *m == "song" || *m == "album") {
         detail["album_mode"] = json!(m);
+    }
+    if let (true, Some(f)) = (b.kind == "artist", b.release_filter.as_ref().filter(|f| f.is_object())) {
+        detail["release_filter"] = crate::release_types::ReleaseFilter::from_value(f, &crate::release_types::ReleaseFilter::from_cfg(&st.cfg)).to_value();
     }
     if let Some(e) = &b.ext {
         let mut keep = serde_json::Map::new();
@@ -279,7 +284,7 @@ async fn from_link(State(st): State<AppState>, User(u): User, Json(b): Json<Link
 }
 
 // links that only describe music (no downloadable audio) → matched song by song
-static METADATA_ONLY: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"(?i)open\.spotify\.com|spotify\.link|^spotify:|music\.apple\.com|listenbrainz\.org|last\.fm/|tidal\.com|qobuz\.com|deezer\.com|deezer\.page\.link|music\.amazon\.|music\.youtube\.com/(playlist|browse)").unwrap());
+static METADATA_ONLY: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"(?i)open\.spotify\.com|spotify\.link|^spotify:|music\.apple\.com|listenbrainz\.org|last\.fm/|tidal\.com|qobuz\.com|deezer\.com|deezer\.page\.link|music\.amazon\.|amazon\.[a-z.]+/music/player/|amzn\.to/|music\.youtube\.com/(playlist|browse)").unwrap());
 static RIP: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"qobuz\.com|tidal\.com|deezer\.com").unwrap());
 
 /// One box for any link: streaming-service links are matched song by song (best quality from any source);

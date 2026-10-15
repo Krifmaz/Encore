@@ -14,8 +14,11 @@ fn song_releases_rank_singles_and_format() {
     let (album, big_single) = s("Travis Scott - Rodeo (Deluxe) incl 90210 [FLAC]", 900.0, 10).unwrap();
     assert!(!big_single);
     assert!(flac > mp3 && mp3 > album - 30.0, "{flac} {mp3} {album}");
-    let (karaoke, _) = s("Travis Scott - 90210 (Karaoke Version) [FLAC]", 50.0, 50).unwrap();
-    assert!(karaoke < flac);
+    // another version is never picked
+    assert!(s("Travis Scott - 90210 (Karaoke Version) [FLAC]", 50.0, 50).is_none());
+    assert!(s("Travis Scott - 90210 (Live) [FLAC]", 50.0, 50).is_none());
+    assert!(s("Travis Scott - 90210 (Sped Up) [MP3 320]", 50.0, 50).is_none());
+    assert!(score_song("Travis Scott - 90210 (Live) [FLAC]", 50e6, Some(5), "torrent", "Travis Scott", "90210 (Live)").is_some());
     // not the song, or another artist
     assert!(s("Travis Scott - Antidote [FLAC]", 50.0, 10).is_none());
     assert!(s("Someone Else - 90210 [FLAC]", 50.0, 10).is_none());

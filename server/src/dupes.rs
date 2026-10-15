@@ -13,6 +13,7 @@ pub async fn verify_track(st: &AppState, t: &Row) -> anyhow::Result<Value> {
     let res = acoustid::check_file(st, Path::new(&t.s("path")), &t.s("title"), &t.s("artist"), dur, Some(&t.s("mb_trackid"))).await?;
     st.db.execute("UPDATE tracks SET verify_status=?, verify_detail=?, acoustid_id=COALESCE(?, acoustid_id), verified_at=? WHERE id=?",
         p![res["status"], res["detail"], res["acoustid"], now(), t.i("id")])?;
+    crate::contribute::queue_acoustid(st, Some(t.i("id")), &res);
     Ok(res)
 }
 

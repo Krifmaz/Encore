@@ -318,6 +318,12 @@ pub fn rank_track(st: &AppState, responses: &[Value], artist: &str, title: &str,
             if t < 0.6 {
                 continue;
             }
+            // another version than the one asked for (live, remix, sped up …): never picked
+            // (from the title on: "Artist - Album - NN - Title" has the album name before it)
+            let tail = crate::matcher::from_title_on(title, base.rsplit_once('.').map(|x| x.0).unwrap_or(base));
+            if crate::matcher::unwanted_version(title, artist, &tail).is_some() {
+                continue;
+            }
             let mut score = fmt + t * 40.0 + contains(&name, artist) * 15.0;
             if TRACK_BAD.is_match(base) && !TRACK_OK.is_match(title) {
                 score -= 20.0;

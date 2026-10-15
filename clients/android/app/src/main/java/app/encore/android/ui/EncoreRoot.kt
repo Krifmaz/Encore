@@ -38,6 +38,8 @@ import app.encore.android.remote.RemoteUi
 import app.encore.android.ui.components.AddToPlaylistSheet
 import app.encore.android.ui.components.MenuEntry
 import app.encore.android.ui.components.PopMenu
+import app.encore.android.ui.components.ReportHost
+import app.encore.android.ui.components.ReportUi
 import app.encore.android.ui.components.ToastHost
 import app.encore.android.ui.components.Toasts
 import app.encore.android.data.repo.PickerOpts
@@ -274,6 +276,8 @@ private fun MainScreen(graph: AppGraph, player: PlayerConnection, session: Sessi
         trackMenuFor?.let { req ->
             TrackMenu(nav, req, onDismiss = { trackMenuFor = null })
         }
+        // ⋯ → Report a problem (songs and albums)
+        ReportHost(nav)
         // toasts sit above the mini player and the tabs
         ToastHost(Modifier.align(Alignment.BottomCenter).padding(bottom = if (nowPlaying != null) 150.dp else 84.dp))
     }
@@ -305,6 +309,7 @@ private fun TrackMenu(nav: Nav, req: TrackMenuRequest, onDismiss: () -> Unit) {
                 },
                 if (t.albumId.isNotEmpty() && !req.onAlbumPage) MenuEntry("Go to album", R.drawable.ic_album) { nav.open(Screen.Album(t.albumId)) } else null,
                 if (t.albumArtist.isNotEmpty() || t.artist.isNotEmpty()) MenuEntry("Go to artist", R.drawable.ic_person) { nav.open(Screen.Artist(t.albumArtist.ifEmpty { t.artist })) } else null,
+                MenuEntry("Report a problem", R.drawable.ic_flag) { ReportUi.track(t.id, t.title) },
             ),
         )
     }

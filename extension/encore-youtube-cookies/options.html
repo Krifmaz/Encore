@@ -1,0 +1,39 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Encore – YouTube sign-in</title>
+<style>
+  :root { color-scheme: light dark; --fg: #1d1b22; --muted: #6b6775; --bg: #f7f6fa; --card: #fff; --line: #e3e0ea; --accent: #8b5cf6; --ok: #15803d; --err: #b91c1c; }
+  @media (prefers-color-scheme: dark) { :root { --fg: #ecebf0; --muted: #a29fac; --bg: #121116; --card: #1c1a22; --line: #2e2b36; --ok: #4ade80; --err: #f87171; } }
+  body { margin: 0; font: 15px/1.5 system-ui, sans-serif; background: var(--bg); color: var(--fg); }
+  main { max-width: 560px; margin: 40px auto; padding: 0 16px; }
+  .card { background: var(--card); border: 1px solid var(--line); border-radius: 12px; padding: 18px 20px; }
+  h1 { font-size: 20px; margin: 0 0 4px; }
+  p { color: var(--muted); margin: 0 0 16px; }
+  label { display: block; font-weight: 600; margin: 12px 0 4px; }
+  input { width: 100%; box-sizing: border-box; padding: 9px 11px; border-radius: 8px; border: 1px solid var(--line); background: var(--bg); color: var(--fg); font: inherit; }
+  .row { display: flex; gap: 8px; margin-top: 16px; flex-wrap: wrap; }
+  button { padding: 8px 14px; border-radius: 8px; border: 1px solid var(--line); background: var(--card); color: var(--fg); font: inherit; cursor: pointer; }
+  button.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
+  #status { margin-top: 14px; font-size: 14px; color: var(--muted); }
+  #status.ok { color: var(--ok); } #status.err { color: var(--err); }
+</style>
+</head>
+<body>
+<main>
+  <div class="card">
+    <h1>Encore – YouTube sign-in</h1>
+    <p>Sends this browser's YouTube cookies to your Encore server so its YouTube Music downloads stay signed in. Stay signed in to YouTube here; nothing is sent anywhere else.</p>
+    <label for="url">Encore address</label>
+    <input id="url" type="url" placeholder="https://music.example.com" autocomplete="off" spellcheck="false">
+    <label for="token">Token</label>
+    <input id="token" type="password" placeholder="From Settings → YouTube sign-in → Connect browser extension" autocomplete="off" spellcheck="false">
+    <div class="row"><button class="primary" id="save" type="button">Save and send now</button><button id="send" type="button">Send now</button></div>
+    <div id="status"></div>
+  </div>
+</main>
+<script src="options.js"></script>
+</body>
+</html>

@@ -179,15 +179,19 @@ async fn search(State(st): State<AppState>, User(_): User, Query(sq): Query<Sear
 
 async fn artist(State(st): State<AppState>, User(_u): User, Path(mbid): Path<String>) -> ApiResult<Json<Value>> {
     let mut a = mb::artist(&st, &mbid).await.map_err(mb_err)?;
+    let filter = crate::release_types::ReleaseFilter::from_cfg(&st.cfg);
     if let Some(groups) = a["release_groups"].as_array_mut() {
         annotate_albums(&st, groups);
+        mark_skipped(&filter, groups);
     }
     let name = a["name"].as_str().unwrap_or("").to_string();
     let rq = req_info(&st, std::slice::from_ref(&mbid)).remove(&mbid);
     a["request_status"] = rq.as_ref().map(|s| json!(s.0)).unwrap_or(Value::Null);
     a["request_label"] = rq.map(|s| json!(if s.0 == "completed" { "Discography requested".to_string() } else { s.1 })).unwrap_or(Value::Null);
     // what "Request discography" includes, so the page can mark those releases at once
-    a["discography_singles"] = json!(st.cfg.bool("discography_singles"));
+    // (older apps read discography_singles; the release-type boxes replace it)
+    a["discography_singles"] = json!(filter.kinds.contains(&"Single"));
+    a["release_types"] = filter.options();
     a["catalog_merge"] = json!(st.cfg.bool("discover_catalog_merge"));
     // the library artist: every spelling, alias and collaboration (see artists.rs)
     let (acond, aparams) = crate::artists::album_filter(&st.db, &name);
@@ -255,6 +259,15 @@ async fn album(State(st): State<AppState>, User(_): User, Path(rgid): Path<Strin
     Ok(Json(g))
 }
 
+/// Settings → Release types on a list of releases: `skipped` is why one is left out ("Live", "Single" …)
+/// or null. The pages hide the skipped ones behind a "+N hidden" chip, and "Request discography" leaves
+/// them out.
+pub(crate) fn mark_skipped(filter: &crate::release_types::ReleaseFilter, items: &mut [Value]) {
+    for i in items.iter_mut() {
+        i["skipped"] = filter.reason(i).map(|r| json!(r)).unwrap_or(Value::Null);
+    }
+}
+
 /// Each song of an album: its library copy (by recording, ISRC, then title + artist + length) and any request.
 pub(crate) fn annotate_album_tracks(st: &AppState, ts: &mut [Value]) {
     let ids: Vec<String> = ts.iter().filter_map(|t| t["recording_id"].as_str().filter(|r| !r.is_empty()).map(String::from)).collect();
@@ -300,14 +313,18 @@ async fn new_releases(State(st): State<AppState>, User(_): User, Query(q): Query
     all.sort_by(|x, y| y.1["date"].as_str().cmp(&x.1["date"].as_str()));
     let mut seen = HashSet::new();
     let mut res = vec![];
+    let filter = crate::release_types::ReleaseFilter::from_cfg(&st.cfg);
     for (artist, a) in all {
         let title = a["title"].as_str().unwrap_or("").to_string();
         if !seen.insert((norm(&artist), norm(&title))) {
             continue;
         }
-        res.push(json!({ "title": title, "artist": artist, "date": a["date"], "type": a["type"], "cover": a["cover"],
-            "followed": false, "in_library": has_album(&st.db, &artist, &title), "mbid": null }));
-        if res.len() >= limit {
+        let mut item = json!({ "title": title, "artist": artist, "date": a["date"], "type": a["type"], "cover": a["cover"],
+            "followed": false, "in_library": has_album(&st.db, &artist, &title), "mbid": null });
+        mark_skipped(&filter, std::slice::from_mut(&mut item));
+        res.push(item);
+        // the limit counts what is shown with "Hide skipped types" on; the skipped ones ride along
+        if res.iter().filter(|x| x["skipped"].is_null()).count() >= limit {
             break;
         }
     }

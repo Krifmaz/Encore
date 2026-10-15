@@ -51,6 +51,25 @@ internal fun JsonElement?.objects(): List<JsonObject> {
     return out
 }
 
+/**
+ * One artist of a song (the server's `artists` on a song: "Travis Scott feat. The Weeknd" → two), with its
+ * MusicBrainz id when known and whether it is an artist of the library.
+ */
+data class ArtistCredit(val name: String, val mbid: String = "", val inLibrary: Boolean = false) {
+    companion object {
+        fun fromJson(e: JsonElement?): List<ArtistCredit> {
+            val arr = e as? JsonArray ?: return emptyList()
+            val out = ArrayList<ArtistCredit>(arr.size)
+            for (x in arr) {
+                val o = x as? JsonObject ?: continue
+                val name = o.str("name")
+                if (name.isNotEmpty()) out.add(ArtistCredit(name, o.str("mbid"), o.bool("in_library")))
+            }
+            return out
+        }
+    }
+}
+
 /** One song as the library lists return it. */
 data class Track(
     val id: Long,
@@ -65,7 +84,12 @@ data class Track(
     val durationSec: Double,
     val format: String,
     val bitrate: Int,
+    /** each artist of the song for links (empty: the whole artist text is one artist) */
+    val artists: List<ArtistCredit> = emptyList(),
 ) {
+    /** The artists to link: the server's split, or the artist text as one. */
+    fun credits(): List<ArtistCredit> = artists.ifEmpty { if (artist.isNotEmpty()) listOf(ArtistCredit(artist)) else emptyList() }
+
     companion object {
         fun from(o: JsonObject): Track? {
             val id = o.long("id")
@@ -93,6 +117,7 @@ data class Track(
             durationSec = o.dbl("duration"),
             format = o.str("format").lowercase(),
             bitrate = o.int("bitrate"),
+            artists = ArtistCredit.fromJson(o["artists"]),
         )
     }
 }

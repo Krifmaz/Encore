@@ -6,6 +6,7 @@ import android.os.Build
 import android.os.Handler
 import android.os.Looper
 import app.encore.android.AppGraph
+import app.encore.android.data.api.ArtistCredit
 import app.encore.android.data.api.EncoreApi
 import app.encore.android.data.api.Track
 import app.encore.android.graph
@@ -78,6 +79,9 @@ data class Link(
     val volume: Double get() = if (state.containsKey("volume")) state.d("volume").coerceIn(0.0, 1.0) else 0.9
     /** player.js `quality()` of what plays there ("FLAC 1411k" …). */
     val signalLabel: String get() = (state["signal"] as? JsonObject)?.s("label") ?: ""
+    /** Its shuffle mode and repeat ("off" | "all" | "one"), as its check-ins say. */
+    val shuffle: Boolean get() = state.b("shuffle")
+    val repeat: String get() = state.s("repeat").takeIf { it == "all" || it == "one" } ?: "off"
 
     /** The linked device's position now, in seconds. */
     fun positionSec(now: Long = System.currentTimeMillis()): Double {
@@ -453,6 +457,8 @@ class RemoteDevice private constructor(context: Context, private val graph: AppG
             "play" -> mapOf("playing" to JsonPrimitive(true), "position" to JsonPrimitive(pos))
             "seek" -> mapOf("position" to JsonPrimitive(body.d("value")))
             "volume" -> mapOf("volume" to JsonPrimitive(body.d("value")))
+            "shuffle" -> mapOf("shuffle" to JsonPrimitive(body.b("value")))
+            "repeat" -> mapOf("repeat" to JsonPrimitive(body.s("value")))
             else -> null
         }
         if (patched != null) {
@@ -530,6 +536,7 @@ class RemoteDevice private constructor(context: Context, private val graph: AppG
                 durationSec = s.d("duration"),
                 format = s.s("format").lowercase(),
                 bitrate = 0,
+                artists = ArtistCredit.fromJson(s["artists"]),
             )
         }
     }

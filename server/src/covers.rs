@@ -636,6 +636,8 @@ pub async fn stamp_layer(State(st): State<AppState>, req: Request, next: Next) -
     let st2 = st.clone();
     let out = tokio::task::spawn_blocking(move || {
         stamp(&st2, &mut v);
+        // songs gain `artists` (each artist of a collaboration on its own, for links)
+        crate::artists::stamp_credits(&st2.db, &mut v);
         serde_json::to_vec(&v).ok()
     }).await.ok().flatten();
     match out {

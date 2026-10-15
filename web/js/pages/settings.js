@@ -5,12 +5,22 @@ import * as connectionsPage from './connections.js';
 import * as adminPage from './admin.js';
 import * as autoPage from './autodownload.js';
 import * as diagPage from './diagnostics.js';
+import * as contributePage from './contribute.js';
+import * as reportPage from './report.js';
+import { bindYoutube, youtubeBlock } from './youtube.js';
 
 // Settings → Playback → Cadenza engine, when there is no engine to show (the same words in web-rs/src/pages/settings.rs)
 const ENGINE_GREYED = `<div class="stack" style="gap:8px;opacity:.45;pointer-events:none" aria-disabled="true"><label class="row" style="gap:8px;align-items:center"><input type="checkbox" disabled> Bit-perfect – send the file to the DAC untouched (no upsampling, dither or volume)</label><label class="stack" style="gap:4px"><span class="small muted">Upsampling filter</span><select class="input" disabled><option>–</option></select></label><label class="stack" style="gap:4px"><span class="small muted">Dither / noise shaping</span><select class="input" disabled><option>–</option></select></label><label class="stack" style="gap:4px"><span class="small muted">Output rate</span><select class="input" disabled><option>–</option></select></label></div><span class="small muted">Cadenza is Encore's own playback engine: long upsampling filters, DSD, dither and noise shaping, exclusive output straight into the DAC. It is built into the Encore desktop app – install the app on the computer connected to your DAC and this section comes alive on its own. Cadenza can also run on its own on a small box next to the DAC; link to it under Your devices. To have the server do the upsampling for a browser or phone instead, see Server processing above.</span>`;
 const ENGINE_OFF_COPY = '<span class="small muted">Cadenza is off for this computer – music plays through the browser audio of this window. Link to This computer (Cadenza) under Your devices to turn it back on.</span>';
 
 const S = (key, label, type = 'text', extra = {}) => ({ key, label, type, ...extra });
+
+// Settings → Release types: MusicBrainz primary types, then the extras to skip (server: release_types.rs)
+const RELEASE_KINDS = [['Album', 'Album'], ['EP', 'EP'], ['Single', 'Single'], ['Broadcast', 'Broadcast'], ['Other', 'Other']];
+const RELEASE_EXTRAS = [['Compilation', 'Compilation'], ['Soundtrack', 'Soundtrack'], ['Spokenword', 'Spoken word'], ['Interview', 'Interview'], ['Audiobook', 'Audiobook'],
+  ['Audio drama', 'Audio drama'], ['Live', 'Live'], ['Remix', 'Remix'], ['DJ-mix', 'DJ-mix'], ['Mixtape/Street', 'Mixtape / Street'], ['Demo', 'Demo'], ['Field recording', 'Field recording'],
+  ['Instrumental', 'Instrumental'], ['Acoustic', 'Acoustic'], ['Sped up', 'Sped up / Slowed'], ['Karaoke', 'Karaoke'], ['Covers', 'Covers / Tributes']];
+const typeKey = (s) => String(s).toLowerCase().replace(/[^a-z0-9]/g, '');
 
 const SECTIONS = [
   { id: 'general', title: 'General', desc: "Your server's name and address, who can sign up, and how requests are approved.", fields: [
@@ -40,8 +50,11 @@ const SECTIONS = [
     S('embed_cover', 'Embed cover art in files', 'bool'),
   ] },
   { id: 'pipeline', title: 'Download pipeline', desc: 'Which sources are searched for a request, and in what order. The first one that has it wins.', fields: [
-    S('discography_singles', 'Requesting a whole discography includes singles (not just albums and EPs)', 'bool'),
     S('source_order', 'Source order', 'text', { full: true, help: 'The one place to set what is searched, in order, comma-separated: qobuz, tidal, deezer (all through streamrip), slskd (Soulseek), torznab (torrents/Usenet, albums only), ytdlp (YouTube Music). Leave one out to never use it; sources you haven’t set up are skipped. Recommended (the default): qobuz, tidal, deezer, slskd, torznab, ytdlp – exact hi-res/lossless releases first, then Soulseek, then torrents/Usenet for whole albums, YouTube Music last.' }),
+  ] },
+  { id: 'releases', title: 'Release types', desc: 'Which releases Request discography, the artist pages and New releases count, like the metadata profiles in Lidarr. Song requests skip other versions (live, remix, sped up and so on) unless the song asked for is one.', fields: [
+    S('release_types', 'Kinds to request', 'checks', { full: true, options: RELEASE_KINDS, help: 'Request discography gets these. Each request can change them in its own panel.' }),
+    S('release_skip', 'Skip releases that are', 'checks', { full: true, options: RELEASE_EXTRAS, help: 'A release with any ticked extra is left out. Instrumental, acoustic, sped up, karaoke and covers are read from the titles.' }),
   ] },
   { id: 'verify', title: 'Verification & duplicates', desc: "Listens to each download and checks it's really the song you asked for, not a remix, live or wrong track.", test: 'acoustid', fields: [
     S('acoustid_api_key', 'AcoustID API key', 'password', { full: true, help: 'Free – register an application at acoustid.org/new-application. Used to fingerprint audio and confirm each file is the right song/version.' }),
@@ -122,12 +135,15 @@ const SECTIONS = [
     S('vpn_port_forwarding', 'Port forwarding', 'select', { options: [['natpmp', 'NAT-PMP (ProtonVPN)'], ['off', 'Off']] }),
     S('vpn_kill_switch', 'Keep Soulseek off while the VPN is down', 'bool'),
   ] },
-  { id: 'ytdlp', title: 'YouTube Music & links (yt-dlp)', desc: 'Last-resort source: finds the song on YouTube Music. yt-dlp also downloads SoundCloud links you paste in the Downloader, along with YouTube, Bandcamp, Mixcloud and about 1,800 other sites.', test: 'ytdlp', testLabel: 'Test cookies', fields: [
+  { id: 'ytdlp', title: 'YouTube Music & links (yt-dlp)', desc: 'Last-resort source: finds the song on YouTube Music. yt-dlp also downloads SoundCloud links you paste in the Downloader, along with YouTube, Bandcamp, Mixcloud and about 1,800 other sites.', fields: [
     S('ytdlp_enabled', 'Enable yt-dlp as a source', 'bool', { help: 'Searches YouTube Music for requests, and downloads links you paste in the Downloader from YouTube, SoundCloud, Bandcamp, Mixcloud and ~1,800 other sites.' }),
     S('ytdlp_last_resort', 'Always try YouTube Music last, so downloads (almost) never fail', 'bool'),
     S('ytdlp_format', 'Audio format', 'select', { options: [['best', 'Original stream – best quality, no re-encode (recommended)'], ['m4a', 'M4A (AAC, re-encoded)'], ['mp3', 'MP3 (re-encoded)'], ['opus', 'Opus']] }),
     S('ytdlp_quality', 'MP3/M4A quality', 'text', { help: 'Bitrate like 320, or 0 for best VBR' }),
-    S('ytdlp_cookies', 'cookies.txt contents (optional)', 'textarea', { full: true, secret: true, help: 'Netscape cookie file from music.youtube.com. With a YouTube Music Premium account this unlocks 256 kbps audio. Export from a private window so the cookies don’t rotate.' }),
+  ] },
+  { id: 'youtube', title: 'YouTube sign-in', desc: 'Signs yt-dlp in to YouTube: YouTube Music Premium unlocks 256 kbps audio, and signed-in downloads see fewer bot checks. Three ways – Encore’s own browser, the browser extension, or pasted cookies; Encore uses the first that is signed in, in that order.', test: 'youtube', testLabel: 'Test cookies', fields: [
+    S('youtube_light_refresh', 'Refresh pasted cookies every 4 hours', 'bool', { help: 'Only for pasted cookies, when neither Encore’s browser nor the extension is signed in: Encore renews them the way an open YouTube tab does and saves the new ones. Never done to the extension’s cookies (that would sign your browser out).' }),
+    S('ytdlp_cookies', 'Pasted cookies.txt (optional)', 'textarea', { full: true, secret: true, help: 'Netscape cookie file exported from music.youtube.com. Used when Encore’s browser and the extension are not signed in. Export from a private window and close it right after, so your own browser does not rotate them.' }),
   ] },
   { id: 'spotify', title: 'Integrations', desc: 'API keys that let users connect their Spotify, Tidal, Last.fm, Discogs and YouTube Music accounts, and power recommendations.', test: 'spotify', testLabel: 'Test all', fields: [
     S('spotify_client_id', 'Spotify Client ID', 'text', { help: 'developer.spotify.com – add <Public URL>/api/connections/spotify/callback as redirect URI. Development-mode apps allow 5 users and need a Premium owner (2026 rules); without it, public playlists still import via the embed fallback.' }),
@@ -178,12 +194,14 @@ const SECTIONS = [
 const GROUPS = [
   { id: 'general', title: 'General', sections: ['general'] },
   { id: 'apps', title: 'Apps & sources', aliases: ['downloads', 'tagging', 'services'], parts: [
-    ['Download sources', ['pipeline', 'streamrip', 'torznab', 'slskd', 'ytdlp']],
+    ['Download sources', ['pipeline', 'releases', 'streamrip', 'torznab', 'slskd', 'ytdlp', 'youtube']],
     ['Library & tagging', ['library', 'verify']],
     ['Services', ['spotify', 'media', 'roon', 'cadenza']],
   ] },
   { id: 'accounts', title: 'Email & notifications', sections: ['email', 'notify'] },
   { id: 'autodownload', title: 'Auto-download', sections: [] },
+  { id: 'contribute', title: 'Contribute', sections: [] },
+  { id: 'blocked', title: 'Blocked', sections: [] },
   { id: 'tasks', title: 'Scheduled tasks', sections: ['sync'] },
 ];
 GROUPS.forEach(g => { g.sections = g.sections || g.parts.flatMap(([, ids]) => ids); });
@@ -214,6 +232,10 @@ function field(f, v, opts, meta = {}) {
   const cls = f.full || f.type === 'textarea' ? 'full' : '';
   if (f.type === 'bool') {
     return `<div class="field ${cls}" style="justify-content:center"><label class="switch"><input type="checkbox" data-k="${f.key}" ${v ? 'checked' : ''} ${dis}><i></i>${esc(f.label)}</label>${help}</div>`;
+  }
+  if (f.type === 'checks') {
+    const on = new Set(String(v ?? '').split(',').map(typeKey));
+    return `<div class="field ${cls}" data-k="${f.key}"><span>${esc(f.label)}</span><div class="row wrap" style="gap:6px 14px">${f.options.map(([val, lab]) => `<label class="row" style="gap:6px;align-items:center"><input type="checkbox" value="${esc(val)}" ${on.has(typeKey(val)) ? 'checked' : ''} ${dis}> ${esc(lab)}</label>`).join('')}</div>${help}</div>`;
   }
   if (f.type === 'select') {
     let options = f.options;
@@ -291,6 +313,8 @@ const EMBEDDED = {
   users: (el, ctx) => adminPage.renderUsers(el, ctx),
   invites: (el, ctx) => adminPage.renderInvites(el, ctx),
   autodownload: (el) => autoPage.render(el),
+  contribute: (el, ctx) => contributePage.render(el, ctx),
+  blocked: (el, ctx) => reportPage.render(el, ctx),
   diagnostics: (el) => diagPage.render(el),
 };
 
@@ -341,7 +365,7 @@ export async function render(view, ctx) {
         <span class="row" style="gap:8px">${sec.test ? `<button class="btn sm" data-test>${icon.refresh}${esc(sec.testLabel || 'Test connection')}</button>` : ''}<span class="chev">${icon.chevron || '▾'}</span></span></summary>
       <div style="height:14px"></div>
       <div data-out>${flash && flash.sec === sec.id ? `<div class="test-result ${flash.ok ? 'ok' : 'err'}">${flash.ok ? icon.check : icon.x}<span>${esc(flash.message || '')}</span></div>` : ''}</div>
-      ${fieldsHtml(sec.fields, (f) => showWhen(f, field(f, values[f.key], lidarrOpts, meta), values))}
+      ${sec.id === 'youtube' ? youtubeBlock() : ''}${fieldsHtml(sec.fields, (f) => showWhen(f, field(f, values[f.key], lidarrOpts, meta), values))}
       ${sec.id === 'streamrip' ? tidalBlock() : ''}
       ${sec.id === 'cadenza' ? cadenzaCacheBlock() + engineSettingsBlock() : ''}
       ${sec.id === 'slskd' ? soulseekStatusBlock() : ''}
@@ -369,6 +393,7 @@ export async function render(view, ctx) {
       if (sec.id === 'streamrip') bindTidal(card);
       if (sec.id === 'cadenza') bindCadenzaCache(card, values);
       if (sec.id === 'slskd') { bindVpn(card, () => save(sec, true, card)); bindSoulseek(card); }
+      if (sec.id === 'youtube') bindYoutube(card);
       bindShowWhen(card);
       const paint = (r) => { out.innerHTML = `<div class="test-result ${r.ok ? 'ok' : 'err'}">${r.ok ? icon.check : icon.x}<span>${esc(r.message || (r.ok ? 'Connected' : 'Failed'))}</span></div>`; };
       card.querySelector('[data-save]').onclick = () => save(sec, false, card);
@@ -427,7 +452,8 @@ export async function render(view, ctx) {
       const f = sec.fields.find(x => x.key === el.dataset.k);
       if (!f) return;
       if ((meta[f.key] || {}).source === 'env') return;            // locked by environment
-      if (el.type === 'checkbox') body[f.key] = el.checked;
+      if (f.type === 'checks') body[f.key] = [...el.querySelectorAll('input:checked')].map(i => i.value).join(',');
+      else if (el.type === 'checkbox') body[f.key] = el.checked;
       else if ((f.type === 'password' || f.secret) && el.value.trim() === '') { /* keep saved secret */ }
       else if (isMasked(el.value)) { /* never echo a mask back */ }
       else body[f.key] = f.type === 'password' || f.secret ? el.value.trim() : el.value;
@@ -777,10 +803,11 @@ const toolUpdatable = (t) => !!t.updatable;
 const TOOL_RESET = {
   cadenza: { link: 'Use the built-in engine', ask: 'Go back to the engine built into Encore? The downloaded Cadenza is removed.', done: 'Back to the built-in engine' },
   slskd: { link: 'Remove slskd', ask: 'Remove slskd? Soulseek stays off until you install it again.', done: 'slskd removed' },
+  browser: { link: 'Remove the browser', ask: 'Remove the browser for YouTube sign-in? Its sign-in is kept for when you install it again; until then the extension or pasted cookies are used.', done: 'Browser removed' },
 };
 const toolReset = (t) => TOOL_RESET[t.id] || { link: 'Use the bundled version', ask: `Go back to the ${t.name || t.id} version that came with Encore? The updated copy is removed.`, done: `Back to the bundled ${t.name || t.id}` };
-/** slskd is installed by Encore, not bundled: before that its button says Install. */
-const toolInstall = (t) => t.id === 'slskd' && !t.installed;
+/** slskd and the sign-in browser are installed by Encore, not bundled: before that their button says Install. */
+const toolInstall = (t) => (t.id === 'slskd' || t.id === 'browser') && !t.installed;
 
 function toolRow(t, busy) {
   let action = '';
@@ -790,7 +817,7 @@ function toolRow(t, busy) {
   else if (t.update_available) action = `<span class="badge warn">${esc(t.latest || '')} available</span>`;
   else if (t.latest) action = `<span class="badge ok">${icon.check} Up to date</span>`;
   else if (toolUpdatable(t)) action = '<span class="small faint">Not checked yet</span>';
-  const updated = t.source === 'updated' && t.id !== 'slskd';
+  const updated = t.source === 'updated' && t.id !== 'slskd' && t.id !== 'browser';
   return `<div class="list-item" style="align-items:flex-start;flex-wrap:wrap;gap:12px" data-tool="${esc(t.id)}">
       <div class="grow" style="min-width:200px"><div style="font-weight:650">${esc(t.name || t.id)} <span class="small muted mono">${t.installed ? esc(t.installed) : 'not installed'}</span>${updated ? ' <span class="small muted">(updated)</span>' : ''}</div>
         ${t.note ? `<div class="small muted">${esc(t.note)}</div>` : ''}
@@ -813,10 +840,11 @@ async function renderTools(host, getValues, setValues) {
   const toggles = toggle('tools_auto_ytdlp', 'Update yt-dlp automatically (recommended – sites change often)')
     + toggle('tools_auto_streamrip', 'Update streamrip automatically when a new release is out')
     + toggle('tools_auto_cadenza', 'Update Cadenza automatically when a new release is out')
-    + toggle('tools_auto_slskd', 'Update slskd automatically when a new release is out');
+    + toggle('tools_auto_slskd', 'Update slskd automatically when a new release is out')
+    + toggle('tools_auto_browser', 'Update the browser for YouTube sign-in automatically');
   host.innerHTML = `<div class="card" id="tools-card" style="margin-bottom:12px">
     <div class="row between" style="margin-bottom:8px;gap:10px"><h2>Download tools</h2><button class="btn sm" type="button" id="tools-check">${icon.refresh}Check for updates</button></div>
-    <p class="muted small" style="margin:0 0 14px">yt-dlp, streamrip, Cadenza and slskd update in place – no new Encore image needed. Updates are kept in the config folder.</p>
+    <p class="muted small" style="margin:0 0 14px">yt-dlp, streamrip, Cadenza, slskd and the browser for YouTube sign-in update in place – no new Encore image needed. Updates are kept in the config folder.</p>
     <div class="list" id="tools-list"></div>
     <div class="stack mt" style="gap:8px">${toggles}<div class="small muted">Every tool is checked daily; updates install by themselves only where the switch is on. Change the schedule under <a href="#/settings?s=tasks">Scheduled tasks</a>.</div></div>
   </div>`;

@@ -24,13 +24,12 @@ pub async fn version() -> Option<String> {
     Some(String::from_utf8_lossy(&o.stdout).trim().to_string()).filter(|s| !s.is_empty())
 }
 
+/// `--cookies <file>` from the YouTube sign-in in use (Encore's browser, the extension or pasted
+/// cookies: see ytauth). yt-dlp writes the jar back when it exits, so it gets a throw-away copy.
 fn cookie_args(st: &AppState, dir: &Path) -> Vec<String> {
-    let c = st.cfg.str("ytdlp_cookies");
-    if c.is_empty() {
-        return vec![];
-    }
+    let Some(c) = crate::ytauth::cookies_for_ytdlp(st).filter(|c| !c.trim().is_empty()) else { return vec![] };
     let p = dir.join(".cookies.txt");
-    if std::fs::write(&p, c).is_ok() {
+    if crate::ytauth::browser::write_private(&p, &c).is_ok() {
         vec!["--cookies".into(), p.to_string_lossy().into()]
     } else {
         vec![]
@@ -44,7 +43,8 @@ pub async fn test_cookies(st: &AppState) -> anyhow::Result<Value> {
         Some(v) => format!("yt-dlp {v}"),
         None => "yt-dlp is not installed in this container".into(),
     };
-    let raw = st.cfg.str("ytdlp_cookies");
+    let source = crate::ytauth::active(st).map(|k| format!(" ({})", k.label().to_lowercase())).unwrap_or_default();
+    let raw = crate::ytauth::cookies_for_ytdlp(st).unwrap_or_default();
     if raw.trim().is_empty() {
         return Ok(json!({ "ok": ver.is_some(), "message": format!("{tool} · no cookies saved – downloads still work, at 128 kbps without Premium") }));
     }
@@ -79,9 +79,9 @@ pub async fn test_cookies(st: &AppState) -> anyhow::Result<Value> {
     let logged_in = html.contains("\"LOGGED_IN\":true");
     let note = if expired > 0 { format!(" ({expired} expired cookies ignored)") } else { String::new() };
     Ok(json!({ "ok": logged_in && ver.is_some(), "message": if logged_in {
-        format!("{tool} · cookies work – signed in to YouTube Music{note}")
+        format!("{tool} · cookies{source} work – signed in to YouTube Music{note}")
     } else {
-        format!("{tool} · YouTube did not accept these cookies (signed out or rotated){note}. Export them again from a private window and close it right after.")
+        format!("{tool} · YouTube did not accept these cookies{source} (signed out or rotated){note}. Sign in again under YouTube sign-in, or export them again from a private window and close it right after.")
     } }))
 }
 
@@ -124,7 +124,10 @@ pub async fn download(st: &AppState, url: &str, outdir: &Path, playlist: bool, p
         alt_host.map(|u| (u, vec!["--extractor-args".into(), "youtube:player_client=default,tv,web_music,mweb".into()], false)),
     ].into_iter().flatten().collect();
     let mut last_err = String::new();
-    for (i, (u, extra, cookies)) in attempts.iter().enumerate() {
+    let mut refreshed = false;
+    let mut i = 0;
+    while i < attempts.len() {
+        let (u, extra, cookies) = &attempts[i];
         let mut a = args.clone();
         a.extend(extra.iter().cloned());
         if *cookies {
@@ -136,6 +139,14 @@ pub async fn download(st: &AppState, url: &str, outdir: &Path, playlist: bool, p
             Ok(d) => return Ok(d),
             Err(e) => {
                 last_err = e.to_string();
+                // asked to sign in / prove it isn't a bot: Encore's browser refreshes the cookies, then the
+                // same attempt runs once more
+                if *cookies && !refreshed && auth_error(&last_err) {
+                    refreshed = true;
+                    if crate::ytauth::after_ytdlp_auth_error(st).await {
+                        continue;
+                    }
+                }
                 let retry = ["Requested format is not available", "Sign in to confirm", "Only images are available", "nsig", "n challenge", "This video is not available"]
                     .iter().any(|k| last_err.contains(k));
                 if !retry || i + 1 == attempts.len() {
@@ -143,8 +154,15 @@ pub async fn download(st: &AppState, url: &str, outdir: &Path, playlist: bool, p
                 }
             }
         }
+        i += 1;
     }
     anyhow::bail!("{last_err}")
+}
+
+/// yt-dlp's errors that mean the cookies are not (or no longer) signed in.
+pub fn auth_error(e: &str) -> bool {
+    ["Sign in to confirm", "confirm you’re not a bot", "confirm you're not a bot", "cookies are no longer valid", "This video is age-restricted", "Use --cookies", "login required"]
+        .iter().any(|k| e.contains(k))
 }
 
 /// yt-dlp needs a JavaScript runtime for YouTube since late 2025. The Docker image ships Node.js.
@@ -234,6 +252,10 @@ pub async fn find_best(artist: &str, title: &str, length: Option<f64>) -> Option
     for r in results {
         let name = r["title"].as_str().unwrap_or("").to_lowercase();
         let ch = r["channel"].as_str().unwrap_or("");
+        // another version than the one asked for (live, remix, sped up …): never picked
+        if crate::matcher::unwanted_version(title, artist, &name).is_some() {
+            continue;
+        }
         let mut s = 0.0;
         if name.contains(&tl) { s += 20.0; }
         if name.contains(&al) || ch.to_lowercase().contains(&al) { s += 10.0; }

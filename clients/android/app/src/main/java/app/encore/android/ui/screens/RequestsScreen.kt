@@ -210,7 +210,7 @@ fun RequestsScreen(nav: Nav) {
                     EncoreField(
                         value = link,
                         onValueChange = { link = it },
-                        placeholder = "Paste a link: Spotify, YouTube, Deezer, Tidal, Qobuz, Bandcamp…",
+                        placeholder = "Paste a link: Spotify, YouTube, Deezer, Tidal, Qobuz, Amazon Music, Bandcamp…",
                         leadingIcon = R.drawable.ic_link,
                         enabled = !linkBusy,
                         keyboardType = KeyboardType.Uri,

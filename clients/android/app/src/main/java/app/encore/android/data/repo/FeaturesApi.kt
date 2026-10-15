@@ -122,6 +122,30 @@ class FeaturesApi(private val api: EncoreApi, private val client: OkHttpClient) 
         return call("POST", "/api/discover/catalog/tracks", body).objects().mapNotNull { ExtTrack.from(it) }
     }
 
+    /**
+     * POST /api/contribute/mb-seed-link: a signed link (good for 15 minutes, no sign-in needed) to the page that opens
+     * the MusicBrainz release editor filled in from Deezer / Apple Music. Null when the album is on neither.
+     */
+    fun mbSeedLink(ext: JsonElement, artistMbid: String, artistName: String): String? {
+        val o = ext as? JsonObject ?: return null
+        fun id(k: String): String = (o[k] as? JsonPrimitive)?.takeIf { it !is JsonNull }?.content.orEmpty()
+        val deezer = id("deezer")
+        val apple = id("apple")
+        val key = when {
+            deezer.isNotEmpty() -> "deezer-$deezer"
+            apple.isNotEmpty() -> "apple-$apple"
+            else -> return null
+        }
+        val body = buildJsonObject {
+            put("key", key)
+            put("apple", if (deezer.isNotEmpty()) apple else "")
+            put("artist", artistMbid)
+            put("artist_name", artistName)
+        }
+        val path = (call("POST", "/api/contribute/mb-seed-link", body) as? JsonObject)?.str("url").orEmpty()
+        return if (path.isEmpty()) null else api.url(path)
+    }
+
     private val sseClient: OkHttpClient by lazy { client.newBuilder().cache(null).readTimeout(0, TimeUnit.MILLISECONDS).build() }
 
     /**
@@ -339,6 +363,14 @@ class FeaturesApi(private val api: EncoreApi, private val client: OkHttpClient) 
 
     fun leaderboard(): Leaderboard = Leaderboard.from(getObject("/api/stats/leaderboard"))
 
+    // ---- Report a problem (web/js/pages/report.js) ----------------------------------------------------------
+
+    /** POST /api/report {kind, track_id | album_id, reason, note}: blocks the source, asks for a replacement. */
+    fun report(body: JsonObject): ReportResult {
+        val o = call("POST", "/api/report", body) as? JsonObject ?: JsonObject(emptyMap())
+        return ReportResult(o.str("status"), o.str("message"))
+    }
+
     // ---- plumbing ------------------------------------------------------------------------------------------
 
     private fun getObject(path: String): JsonObject = call("GET", path, null) as? JsonObject ?: JsonObject(emptyMap())
@@ -374,3 +406,6 @@ private val featuresCache = java.util.WeakHashMap<app.encore.android.AppGraph, F
 /** The one [FeaturesApi] of the app's graph (built lazily; AppGraph itself stays the player/design parts' file). */
 val app.encore.android.AppGraph.features: FeaturesApi
     get() = synchronized(featuresCache) { featuresCache.getOrPut(this) { FeaturesApi(api, http) } }
+
+/** What the server did with a report: status replacing | replaced | no_replacement, and its message. */
+data class ReportResult(val status: String, val message: String)

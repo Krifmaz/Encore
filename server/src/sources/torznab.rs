@@ -154,7 +154,7 @@ pub fn rank_album(st: &AppState, results: &[Value], artist: &str, album: &str, l
             continue;
         }
         out.push(json!({ "title": title, "indexer": r["indexer"], "protocol": proto, "size": r["size"], "seeders": r["seeders"],
-            "url": url, "lossless": lossless, "score": (score * 10.0).round() / 10.0 }));
+            "url": url, "guid": r["guid"], "lossless": lossless, "score": (score * 10.0).round() / 10.0 }));
     }
     out.sort_by(|x, y| y["score"].as_f64().partial_cmp(&x["score"].as_f64()).unwrap_or(std::cmp::Ordering::Equal));
     out.truncate(5);
@@ -168,6 +168,10 @@ pub fn rank_album(st: &AppState, results: &[Value], artist: &str, album: &str, l
 pub fn score_song(title: &str, size: f64, seeders: Option<i64>, proto: &str, artist: &str, song: &str) -> Option<(f64, bool)> {
     let (t, a) = (contains_song(title, song), contains(title, artist));
     if t < 0.8 || a < 0.5 {
+        return None;
+    }
+    // another version than the one asked for (live, remix, karaoke …): never picked
+    if crate::matcher::unwanted_version(song, artist, title).is_some() {
         return None;
     }
     let mb = size / 1e6;
@@ -216,6 +220,9 @@ pub fn pick_file(names: &[String], artist: &str, song: &str, track_no: Option<u3
         let no = LEAD_NO.captures(stem).and_then(|c| c[1].parse::<u32>().ok());
         let by_no = track_no.is_some() && no == track_no;
         if t < 0.999 && !(by_no && t >= 0.5) {
+            continue;
+        }
+        if crate::matcher::unwanted_version(song, artist, stem).is_some() {
             continue;
         }
         let words = norm(stem);

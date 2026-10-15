@@ -48,6 +48,7 @@ import androidx.compose.ui.hapticfeedback.HapticFeedbackType
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalHapticFeedback
 import androidx.compose.ui.res.painterResource
+import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
@@ -472,6 +473,8 @@ fun TrackRow(
     onMore: (() -> Unit)? = null,
     showDuration: Boolean = true,
     note: String? = null,
+    /** the subtitle with tappable artist / album names (ui/screens/ArtistLinks.kt); wins over [subtitle] */
+    subtitleLinks: AnnotatedString? = null,
 ) {
     val p = MaterialTheme.palette
     Row(
@@ -500,13 +503,23 @@ fun TrackRow(
                 maxLines = 1,
                 overflow = TextOverflow.Ellipsis,
             )
-            Text(
-                subtitle ?: track.artist,
-                style = MaterialTheme.typography.bodySmall,
-                color = p.muted,
-                maxLines = 1,
-                overflow = TextOverflow.Ellipsis,
-            )
+            if (subtitleLinks != null) {
+                Text(
+                    subtitleLinks,
+                    style = MaterialTheme.typography.bodySmall,
+                    color = p.muted,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                )
+            } else {
+                Text(
+                    subtitle ?: track.artist,
+                    style = MaterialTheme.typography.bodySmall,
+                    color = p.muted,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                )
+            }
             if (!note.isNullOrEmpty()) {
                 Text(note, style = MaterialTheme.typography.bodySmall, color = p.faint, maxLines = 1, overflow = TextOverflow.Ellipsis)
             }

@@ -221,6 +221,7 @@ fun HomeScreen(nav: Nav, session: Session) {
                         playing = nowPlaying?.id == t.id,
                         onClick = { nav.player.play(data.played, i) },
                         onLike = { nav.graph.likes.toggle(t.id) },
+                        subtitleLinks = rememberSongLinks(nav, t, withAlbum = false),
                         onMore = { nav.trackMenu(t) },
                     )
                 }

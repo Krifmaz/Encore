@@ -111,6 +111,54 @@ pub fn split(s: &str, known: &dyn Fn(&str) -> bool) -> Option<Vec<String>> {
     go(s, &segs, 0, known, &mut out).then_some(out)
 }
 
+/// Separators that always start another artist ("feat."), even one that isn't in the library.
+const FEAT: &[&str] = &[" featuring ", " feat. ", " feat ", " ft. ", " ft "];
+
+/// The artist names in a song's artist text, in order: the whole text when it is one known artist, the
+/// index's split of a collaboration ("A & B" only when both are known), and otherwise the pieces around
+/// "feat." ("Travis Scott feat. The Weeknd" → both, known or not), each split again when it can be.
+pub fn credit_names(s: &str, known: &dyn Fn(&str) -> bool) -> Vec<String> {
+    let s = s.trim();
+    if s.is_empty() {
+        return vec![];
+    }
+    let one = |part: &str| -> Vec<String> {
+        let k = key(part);
+        if !k.is_empty() && known(&k) {
+            return vec![part.to_string()];
+        }
+        split(part, known).unwrap_or_else(|| vec![part.to_string()])
+    };
+    // a library artist whose own name has " ft " / " feat " in it stays whole
+    let whole = key(s);
+    if !whole.is_empty() && known(&whole) {
+        return vec![s.to_string()];
+    }
+    let low = s.to_ascii_lowercase();
+    let b = low.as_bytes();
+    let (mut start, mut i, mut out) = (0, 0, vec![]);
+    while i < b.len() {
+        if let Some(sep) = FEAT.iter().find(|sep| b[i..].starts_with(sep.as_bytes())) {
+            let part = s[start..i].trim();
+            if !part.is_empty() {
+                out.extend(one(part));
+            }
+            i += sep.len();
+            start = i;
+        } else {
+            i += 1;
+        }
+    }
+    if start == 0 {
+        return one(s);
+    }
+    let part = s[start..].trim();
+    if !part.is_empty() {
+        out.extend(one(part));
+    }
+    out
+}
+
 fn is_mbid(s: &str) -> bool {
     s.len() == 36 && s.chars().all(|c| c.is_ascii_hexdigit() || c == '-')
 }
@@ -545,6 +593,17 @@ impl Index {
         self.by_key.get(&key(name)).map(|&i| &self.artists[i])
     }
 
+    /// `artists` for a song: each name in its artist text with the artist's MusicBrainz id when known and
+    /// whether it is a library artist (see `credit_names`).
+    pub fn credits(&self, artist: &str) -> Value {
+        let names = credit_names(artist, &|k: &str| self.by_key.contains_key(k));
+        Value::Array(names.into_iter().map(|n| match self.find(&n) {
+            Some(a) if !a.mbid.is_empty() => json!({ "name": n, "mbid": a.mbid, "in_library": true }),
+            Some(_) => json!({ "name": n, "in_library": true }),
+            None => json!({ "name": n, "in_library": false }),
+        }).collect())
+    }
+
     pub fn to_json(a: &Artist) -> Value {
         let mut v = json!({
             "name": a.name, "albums": a.albums, "tracks": a.tracks, "mbid": if a.mbid.is_empty() { Value::Null } else { json!(a.mbid) },
@@ -813,6 +872,26 @@ pub fn invalidate(db: &Db) {
     }
 }
 
+/// Songs in a JSON answer (objects with a numeric `id`, a `title` and an `artist`) gain `artists`, so
+/// clients can link every artist of a song on its own. The index is only looked at when there is a song.
+pub fn stamp_credits(db: &Db, v: &mut Value) {
+    fn walk(v: &mut Value, db: &Db, idx: &mut Option<Arc<Index>>, seen: &mut HashMap<String, Value>) {
+        match v {
+            Value::Array(a) => a.iter_mut().for_each(|x| walk(x, db, idx, seen)),
+            Value::Object(o) => {
+                let song = o.get("id").is_some_and(|x| x.is_i64()) && o.get("title").is_some_and(|x| x.is_string()) && !o.contains_key("artists");
+                if let Some(artist) = o.get("artist").and_then(|x| x.as_str()).filter(|a| song && !a.trim().is_empty()).map(str::to_string) {
+                    let c = seen.entry(artist.clone()).or_insert_with(|| idx.get_or_insert_with(|| index(db)).credits(&artist)).clone();
+                    o.insert("artists".into(), c);
+                }
+                o.values_mut().filter(|x| x.is_array() || x.is_object()).for_each(|x| walk(x, db, idx, seen));
+            }
+            _ => {}
+        }
+    }
+    walk(v, db, &mut None, &mut HashMap::new());
+}
+
 /// `?,?,?` for n values.
 pub fn marks(n: usize) -> String {
     vec!["?"; n.max(1)].join(",")
@@ -998,6 +1077,22 @@ mod tests {
         assert_eq!(split("Earth, Wind & Fire", &k), None);
         assert_eq!(split("Earth, Wind & Fire feat. Ye", &k), Some(vec!["Earth, Wind & Fire".to_string(), "Ye".to_string()]));
         assert_eq!(split("Ye", &k), None);
+    }
+
+    #[test]
+    fn credit_names_split_feat_always_and_collaborations_when_known() {
+        let known: HashSet<String> = ["ye", "xxxtentacion", "travis scott", "earth wind and fire"].iter().map(|s| s.to_string()).collect();
+        let k = |s: &str| known.contains(s);
+        let v = |x: &[&str]| x.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        assert_eq!(credit_names("Travis Scott feat. The Weeknd", &k), v(&["Travis Scott", "The Weeknd"]));
+        assert_eq!(credit_names("Ye & XXXTENTACION", &k), v(&["Ye", "XXXTENTACION"]));
+        assert_eq!(credit_names("Simon & Garfunkel", &k), v(&["Simon & Garfunkel"]));
+        assert_eq!(credit_names("Earth, Wind & Fire", &k), v(&["Earth, Wind & Fire"]));
+        assert_eq!(credit_names("A & B ft. Ye & XXXTENTACION", &k), v(&["A & B", "Ye", "XXXTENTACION"]));
+        assert_eq!(credit_names("  ", &k), Vec::<String>::new());
+        // a library artist with " ft " in its own name stays one link
+        let known2: HashSet<String> = [key("Left ft Right")].into_iter().collect();
+        assert_eq!(credit_names("Left ft Right", &|s: &str| known2.contains(s)), v(&["Left ft Right"]));
     }
 
     #[test]

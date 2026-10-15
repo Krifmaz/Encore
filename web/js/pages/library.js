@@ -1,5 +1,5 @@
 import { api } from '../api.js';
-import { art, confirmDialog, coverUrl, debounce, emptyState, esc, fmt, icon, modal, popMenu, preloadCovers, shareAlbum, shareArtist, shareTrack, skeletonGrid, toast } from '../ui.js';
+import { albumLink, art, artistLinks, confirmDialog, coverUrl, debounce, emptyState, esc, fmt, icon, modal, popMenu, preloadCovers, shareAlbum, shareArtist, shareTrack, skeletonGrid, toast } from '../ui.js';
 import { bindTiles, libraryTile } from './common.js';
 import { addToPlaylistModal } from './playlists.js';
 import * as player from '../player.js';
@@ -32,6 +32,7 @@ export function trackMenu(anchor, t, { admin = false, onDeleted } = {}) {
     { label: 'Download this song', icon: icon.download, href: `/api/library/tracks/${t.id}/file`, download: true },
     player.canSaveOffline() ? { label: 'Save for offline', icon: icon.download, onClick: () => { player.saveOffline([t]); toast('Saving to this phone…', 'ok'); } } : null,
     t.album_id ? { label: 'Go to album', icon: icon.disc, href: `#/library/album/${t.album_id}` } : null,
+    { label: 'Report a problem', icon: icon.shield, onClick: async () => (await import('./report.js')).reportModal({ kind: 'track', id: t.id, title: t.title, onDone: () => onDeleted?.() }) },
     admin ? { label: 'Edit song details…', icon: icon.edit, onClick: () => fixSongModal(t) } : null,
     (admin || (window.encoreSession?.user?.perms?.fix && t.request_id)) ? (t.verify_status === 'manual'
       ? { label: 'Undo “confirmed”', icon: icon.x, onClick: async () => { await api.post('/library/verify-manual', { track_ids: [t.id], correct: false }); toast('Will be checked again', 'ok'); onDeleted?.(); } }
@@ -229,7 +230,7 @@ export async function render(view, ctx) {
       const base = append ? (body._tracks || []).length : 0;
       const html = rows.map((t, i) => `<tr data-i="${base + i}">
         <td style="width:52px"><button class="thumb play-thumb" data-play-track="${t.id}" aria-label="Play">${art(`/api/library/albums/${t.album_id}/cover${t.cover_v ? '?v=' + t.cover_v : ''}`, t.album || t.title, '', 200)}<i>${icon.play}</i></button></td>
-        <td><div style="font-weight:600" class="ellipsis">${esc(t.title)}</div><div class="small muted ellipsis">${esc(t.artist)}<span class="show-sm"> · ${esc(t.album || '')}</span></div></td>
+        <td><div style="font-weight:600" class="ellipsis">${esc(t.title)}</div><div class="small muted ellipsis">${artistLinks(t)}<span class="show-sm"> · ${albumLink(t)}</span></div></td>
         <td class="hide-sm"><a href="#/library/album/${esc(t.album_id)}">${esc(t.album || '')}</a></td>
         <td class="hide-sm"><span class="badge">${esc((t.format || '').toUpperCase())}${t.bitrate ? ' ' + t.bitrate + 'k' : ''}</span> ${verifyBadge(t)}</td>
         <td class="muted hide-sm">${fmt.dur(t.duration)}</td>
@@ -437,8 +438,8 @@ export async function renderAlbum(view, ctx) {
       <tbody>${a.tracks.map((t, i) => `<tr data-i="${i}">
         <td class="num">${multi ? t.disc + '-' : ''}${t.track || '–'}</td>
         <td><div style="font-weight:600">${esc(t.title)}</div>${admin ? `<div class="small faint ellipsis" style="max-width:520px">${esc(t.relpath)}</div>` : ''}${sourceLine(t)}</td>
-        <td class="hide-sm muted">${esc(t.artist)}</td>
-        <td class="hide-sm"><span class="badge">${esc((t.format || '').toUpperCase())}${t.bitrate ? ' ' + t.bitrate + 'k' : ''}</span>${t.mb_trackid ? '' : ' <span class="badge warn" title="No MusicBrainz id">?</span>'} ${verifyBadge(t)}</td>
+        <td class="hide-sm muted">${artistLinks(t)}</td>
+        <td class="hide-sm"><span class="badge">${esc((t.format || '').toUpperCase())}${t.bitrate ? ' ' + t.bitrate + 'k' : ''}</span>${t.mb_trackid ? '' : ' <span class="badge warn" title="No MusicBrainz id">?</span>'} ${verifyBadge(t)}${t.quality_status === 'suspect' ? ` <button class="badge warn" data-qfix="${i}" title="${esc(t.quality_note || '')} – tap to replace" style="cursor:pointer">Suspect quality</button>` : ''}</td>
         <td class="muted">${fmt.dur(t.duration)}</td>
         <td style="text-align:right;white-space:nowrap"><button class="btn sm ghost" data-like="${t.id}" title="Like (syncs to Finamp/Plexamp)">${icon.heart}</button><button class="btn sm ghost icon" data-tmenu="${i}" aria-label="More">${icon.more}</button></td></tr>`).join('')}</tbody>
     </table></div></div>`;
@@ -458,6 +459,7 @@ export async function renderAlbum(view, ctx) {
     { label: 'Download album (zip)', icon: icon.download, href: `/api/library/albums/${id}/download` },
     { label: 'Lyrics for all songs', icon: icon.music, onClick: async () => (await import('./lyrics.js')).fetchAlbumLyrics(id) },
     a.mb_releasegroupid ? { label: 'Release info', icon: icon.disc, href: `#/album/${a.mb_releasegroupid}` } : null,
+    { label: 'Report a problem', icon: icon.shield, onClick: async () => (await import('./report.js')).reportModal({ kind: 'album', id, title: a.album, onDone: () => ctx.navigate('/library') }) },
     ...(admin ? ['-',
       { label: 'Tag / match metadata', icon: icon.tag, onClick: () => matchModal(id, a, ctx) },
       { label: 'Edit details (album, artist, songs)', icon: icon.edit, onClick: () => editModal(id, a, ctx) },
@@ -492,6 +494,13 @@ export async function renderAlbum(view, ctx) {
     }
     const tm = e.target.closest('[data-tmenu]');
     if (tm) return trackMenu(tm, queueTracks[+tm.dataset.tmenu], { admin, onDeleted: reload });
+    const qf = e.target.closest('[data-qfix]');
+    if (qf) {
+      const t = queueTracks[+qf.dataset.qfix];
+      const { reportModal, reasonFor } = await import('./report.js');
+      const info = await api.get(`/library/tracks/${t.id}/info`).catch(() => null);
+      return reportModal({ kind: 'track', id: t.id, title: t.title, reason: reasonFor((info?.quality?.issues || []).map(x => x.code)), onDone: reload });
+    }
     if (!lb && !e.target.closest('a, button')) {
       const tr = e.target.closest('tr[data-i]');
       if (tr) player.playQueue(queueTracks, +tr.dataset.i, { context: 'album' });

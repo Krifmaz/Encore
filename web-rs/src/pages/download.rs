@@ -11,7 +11,7 @@ use std::rc::Rc;
 use web_sys::Element;
 
 // links that only describe tracks (no downloadable audio) → resolved track-by-track
-const METADATA_ONLY: &str = r"open\.spotify\.com|spotify\.link|^spotify:|music\.apple\.com|listenbrainz\.org";
+const METADATA_ONLY: &str = r"open\.spotify\.com|spotify\.link|^spotify:|music\.apple\.com|music\.amazon\.|amazon\.[a-z.]+/music/player/|amzn\.to/|listenbrainz\.org";
 // YouTube Music playlists are best matched track-by-track too (so albums can be upgraded to lossless)
 const PREFER_IMPORT: &str = r"music\.youtube\.com\/(playlist|browse)";
 const STREAMRIP: &str = r"qobuz\.com|tidal\.com|deezer\.com|deezer\.page\.link";

@@ -4,7 +4,7 @@ import { bindRequestActions, clearMenu, requestRow, submitRequest } from './comm
 import { importModal } from './playlists.js';
 
 // links that only describe tracks (no downloadable audio) → resolved track-by-track
-const METADATA_ONLY = /open\.spotify\.com|spotify\.link|^spotify:|music\.apple\.com|listenbrainz\.org/i;
+const METADATA_ONLY = /open\.spotify\.com|spotify\.link|^spotify:|music\.apple\.com|music\.amazon\.|amazon\.[a-z.]+\/music\/player\/|amzn\.to\/|listenbrainz\.org/i;
 // YouTube Music playlists are best matched track-by-track too (so albums can be upgraded to lossless)
 const PREFER_IMPORT = /music\.youtube\.com\/(playlist|browse)/i;
 const STREAMRIP = /qobuz\.com|tidal\.com|deezer\.com|deezer\.page\.link/i;

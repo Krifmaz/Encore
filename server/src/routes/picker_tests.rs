@@ -49,8 +49,8 @@ async fn song_search_finds_singles_and_the_album() {
     let titles: Vec<&str> = out.iter().map(|x| x["title"].as_str().unwrap()).collect();
     assert_eq!(titles[0], "Travis Scott - 90210 [FLAC] WEB", "{titles:?}");
     assert!(!titles.contains(&"Travis Scott - Antidote [FLAC]") && !titles.contains(&"Other Band - Rodeo [FLAC]"), "{titles:?}");
-    let karaoke = titles.iter().position(|t| t.contains("Karaoke")).unwrap();
-    assert!(karaoke > 0);
+    // another version than the song asked for (release types: song versions) is never offered
+    assert!(!titles.iter().any(|t| t.contains("Karaoke")), "{titles:?}");
     // the album's releases are offered once each, marked, and carry what the worker needs
     let albums: Vec<&Value> = out.iter().filter(|x| x["payload"]["song_only"] == true).collect();
     assert_eq!(albums.len(), 2, "{out:?}");
