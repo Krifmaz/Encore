@@ -9,7 +9,8 @@ use crate::json::J;
 use serde_json::{json, Value};
 
 /// quality: 'auto'     – the original file; Encore measures the connection while it plays and steps the stream down
-///                       (256 → 160 → 96 → 64 → 32 kbps) as far as it needs to keep playing, then back up
+///                       (256 → 160 → 96 kbps; 64 only when 96 keeps stalling, never 32) as far as it needs to keep
+///                       playing, then back up
 ///          'original' – always the original file, whatever the connection does
 ///          'saver'    – always the small 96 kbps stream (mobile data, slow links)
 /// preload: buffer the next song while this one plays (off on very slow connections)
@@ -139,23 +140,27 @@ pub fn effects_summary(p: &Value, crossfade: bool) -> String {
 pub const RUNGS: [i64; 6] = [0, 256, 160, 96, 64, 32];
 pub const SAVER_KBPS: i64 = 96;
 pub const EWMA_ALPHA: f64 = 0.3;
-/// The rungs a song can use: the original, then only the converted streams smaller than it.
-pub fn ladder(orig_kbps: f64) -> Vec<i64> {
-    RUNGS.iter().copied().filter(|&r| r == 0 || !(orig_kbps > 0.0) || (r as f64) < orig_kbps).collect()
+/// Auto never goes below this (32 kbps sounds bad and low) …
+pub const AUTO_FLOOR: i64 = 96;
+/// … except 64 kbps, only after 96 kbps has stalled 3 times within 2 minutes.
+pub const AUTO_LOW: i64 = 64;
+/// The rungs a song can use: the original, then only the converted streams smaller than it and at least `floor`.
+pub fn ladder(orig_kbps: f64, floor: i64) -> Vec<i64> {
+    RUNGS.iter().copied().filter(|&r| r == 0 || ((!(orig_kbps > 0.0) || (r as f64) < orig_kbps) && r >= floor)).collect()
 }
 /// kbit/s a rung needs: the rung itself, the original's bitrate for the original (1411 when unknown).
 pub fn needed(rung: i64, orig_kbps: f64) -> f64 { if rung == 0 { if orig_kbps > 0.0 { orig_kbps } else { 1411.0 } } else { rung as f64 } }
-/// Highest rung that fits in 75 % of the estimate; the original while there is no estimate yet; 32 kbps at worst.
-pub fn choose_rung(estimate: Option<f64>, orig_kbps: f64) -> i64 {
-    let l = ladder(orig_kbps);
+/// Highest rung that fits in 75 % of the estimate; the original while there is no estimate yet; the floor at worst.
+pub fn choose_rung(estimate: Option<f64>, orig_kbps: f64, floor: i64) -> i64 {
+    let l = ladder(orig_kbps, floor);
     let last = *l.last().unwrap_or(&0);
     let Some(e) = estimate else { return 0 };
     if !(e > 0.0) { return last; }
     l.iter().copied().find(|&r| needed(r, orig_kbps) <= 0.75 * e).unwrap_or(last)
 }
-/// One rung down from `rung` (stays at the bottom).
-pub fn step_down(rung: i64, orig_kbps: f64) -> i64 {
-    let l = ladder(orig_kbps);
+/// One rung down from `rung` (stays at the floor).
+pub fn step_down(rung: i64, orig_kbps: f64, floor: i64) -> i64 {
+    let l = ladder(orig_kbps, floor);
     let i = l.iter().position(|&r| r == rung).map(|i| i as i64).unwrap_or(-1);
     let j = ((if i < 0 { 0 } else { i }) + 1).min(l.len() as i64 - 1);
     l[j.max(0) as usize]

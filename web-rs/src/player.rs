@@ -1,7 +1,8 @@
 //! Port of web/js/player.js – see docs/ui-rewrite/CONTRACT.md
 //! Web player: streams the original file (bit-perfect for MP3/FLAC/AAC/Opus); formats a browser
 //! can't decode (ALAC/APE/WavPack/AIFF/WMA) are converted to FLAC on the fly by the server. On Auto quality it
-//! measures the connection and steps the stream down (256 → 32 kbps AAC/Opus) and back up as the bandwidth allows.
+//! measures the connection and steps the stream down (256 → 96 kbps AAC/Opus, 64 at worst) and back up as the bandwidth
+//! allows. A stream that breaks off mid-song (a dropped connection, a locked phone) is picked up again at the same spot.
 //! Optional sound effects (EQ, crossfeed, balance, mono) run in this browser through Web Audio, and crossfade
 //! blends one song into the next with the two <audio> elements.
 //! Tap the bar for the full-screen player (lyrics + Up next). When the queue runs out it keeps going
@@ -52,11 +53,21 @@ struct State {
     switched_at: f64,
     last_preload_check: f64,
     slow_start: Option<Timeout>,
+    /// you want music now (a song started, play pressed) – false only after a real pause (button, headset, lock screen)
+    want: bool,
+    /// where the song last was for sure
+    at: f64,
+    /// when we last gave the element a new source (its 'emptied'/'abort' are ours)
+    src_at: f64,
+    /// Auto's lowest rung (96 kbps; 64 after 96 stalled 3 times within 2 minutes), and those stalls at 96
+    floor: i64,
+    low_stalls: Vec<f64>,
 }
 impl Default for State {
     fn default() -> Self {
         Self { queue: vec![], index: -1, transcoded: false, lossy: false, rung: 0, dsp: false, dsp_rate: 0.0, offset: 0.0, dragging: false, context: "list".into(), repeat: "off".into(), full: false, pane: "now".into(), logged: false, announced: None,
-            stalls: vec![], stall_at: 0.0, seek_at: 0.0, step_at: 0.0, switched_at: 0.0, last_preload_check: 0.0, slow_start: None }
+            stalls: vec![], stall_at: 0.0, seek_at: 0.0, step_at: 0.0, switched_at: 0.0, last_preload_check: 0.0, slow_start: None,
+            want: false, at: 0.0, src_at: 0.0, floor: playback::AUTO_FLOOR, low_stalls: vec![] }
     }
 }
 
@@ -133,6 +144,12 @@ thread_local! {
     static PLAYED_SINCE: Cell<bool> = const { Cell::new(false) };
     /// when saveSpot last wrote (every 5 s while playing)
     static SPOT_SAVED_AT: Cell<f64> = const { Cell::new(0.0) };
+    /// the song whose stream broke off, and its pick-up (see `retry`)
+    static REC: RefCell<Rec> = RefCell::new(Rec::default());
+    /// waiting / a stalled download: checked again after 10 s
+    static STALL_WATCH: RefCell<Option<Timeout>> = const { RefCell::new(None) };
+    /// when the lock screen's position was last set
+    static POS_STATE_AT: Cell<f64> = const { Cell::new(0.0) };
 }
 
 fn fetch_dsp() {
@@ -321,12 +338,12 @@ fn emit() {
 /// Android / desktop apps: tell them what's playing (notification + lock screen + tray), and let them control us.
 fn native() {
     if !app::native_has("nowPlaying") { return; }
-    let Some(a) = audio() else { return };
+    if audio().is_none() { return; }
     let payload = match cur() {
         Some(t) => {
             let cov = cover_at(&t, 600);
             let art_url = if cov.is_empty() { String::new() } else { abs_url(&cov) };
-            json!({ "title": t.s("title"), "artist": t.s("artist"), "album": t.s("album"), "playing": !a.paused(), "art": art_url })
+            json!({ "title": t.s("title"), "artist": t.s("artist"), "album": t.s("album"), "playing": shows_playing(), "art": art_url })
         }
         None => json!({ "stopped": true }),
     };
@@ -367,7 +384,12 @@ pub fn set_link(l: Option<Link>) {
     let old = LINK.with(|x| x.replace(l));
     drop(old);
     if now && !was {
-        if let Some(a) = audio() { if !a.paused() { let _ = a.pause(); } }
+        if let Some(a) = audio() {
+            st_mut(|s| s.want = false);
+            let t = REC.with(|r| r.borrow_mut().timer.take());
+            drop(t);
+            if !a.paused() { let _ = a.pause(); }
+        }
     }
     let old_tick = LINK_TICK.with(|t| t.borrow_mut().take());
     drop(old_tick);
@@ -422,7 +444,7 @@ fn remote_track() -> Option<Value> {
 /// The song in front of you: the linked device's when linked, else this device's.
 fn now_track() -> Option<Value> { if is_linked() { remote_track() } else { current() } }
 fn now_position() -> f64 { if is_linked() { link_state_value().f("position") } else { position() } }
-fn now_playing() -> bool { if is_linked() { link_state_value().truthy("playing") } else { audio().is_some_and(|a| !a.paused()) } }
+fn now_playing() -> bool { if is_linked() { link_state_value().truthy("playing") } else { audio().is_some() && shows_playing() } }
 
 // ---- remote control: what this device is playing, and commands from your other devices ----
 const SLIM_KEYS: [&str; 7] = ["id", "title", "artist", "album", "album_id", "format", "duration"];
@@ -432,12 +454,12 @@ fn slim(t: &Value) -> Value {
     Value::Object(m)
 }
 pub fn snapshot() -> Value {
-    let (Some(t), Some(a)) = (cur(), audio()) else { return json!({ "playing": false }) };
+    let (Some(t), Some(_)) = (cur(), audio()) else { return json!({ "playing": false }) };
     let mut m = match slim(&t) { Value::Object(m) => m, _ => Map::new() };
     // `cover: cover(t)` – an undefined cover is left out, like JSON.stringify does
     let cov = cover_v(&t);
     if t.truthy("preview") || !t.truthy("album_id") { if t.has("cover") { m.insert("cover".into(), cov); } } else { m.insert("cover".into(), cov); }
-    m.insert("playing".into(), json!(!a.paused()));
+    m.insert("playing".into(), json!(shows_playing()));
     m.insert("position".into(), json!(spot_position()));
     m.insert("duration".into(), json!(duration()));
     m.insert("volume".into(), json!(user_vol()));
@@ -474,8 +496,8 @@ pub fn command(c: Value) {
 fn run_command(c: &Value) {
     match c.s("action").as_str() {
         "toggle" => toggle(),
-        "play" => { if cur().is_some() { if let Some(a) = audio() { play(&a); } } }
-        "pause" | "stop" => { if let Some(a) = audio() { let _ = a.pause(); } }
+        "play" => { if cur().is_some() { user_play(); } }
+        "pause" | "stop" => { if audio().is_some() { user_pause(); } }
         "next" => next(false),
         "prev" => prev(),
         "seek" => seek_to(c.f("value")),
@@ -664,7 +686,7 @@ fn rung_for(t: &Value) -> i64 {
     let q = prefs().s("quality");
     if t.truthy("preview") || q == "original" { return 0; }
     if q == "saver" { return playback::SAVER_KBPS; }
-    playback::choose_rung(est_kbps(), orig_kbps(Some(t)))
+    playback::choose_rung(est_kbps(), orig_kbps(Some(t)), st(|s| s.floor))
 }
 /// The URL a song starts with (what the spare element pre-loads, and what load() asks for at a song start).
 fn start_url(t: &Value) -> String {
@@ -708,12 +730,24 @@ fn load_opts(o: LoadOpts) {
     if !o.fade { end_fade(); }
     let offset = o.offset;
     let start = !truthy_num(offset) && !o.resume;
+    // a reload of the same song (a seek, a quality switch, picking a broken-off stream up again) keeps its retry count
+    if start || !rec_is(&t) { reset_rec(Some(t.clone())); }
+    let old_timer = REC.with(|r| { let mut r = r.borrow_mut(); r.need = false; r.timer.take() });
+    drop(old_timer);
+    let old_watch = STALL_WATCH.with(|w| w.borrow_mut().take());
+    drop(old_watch);
+    let now = now_ms();
+    st_mut(|s| { s.want = !o.hold; s.at = offset; s.src_at = now; });
     mark_played(&t);
     let transcode = o.transcode || convert(&t);
     let prev_rung = st(|s| s.rung);
     let rung = if t.truthy("preview") { 0 } else { o.rung.unwrap_or_else(|| rung_for(&t)) };
     st_mut(|s| s.rung = rung);
     if start && !t.truthy("preview") && prefs().s("quality") == "auto" { note_rung_change(prev_rung, rung); }
+    // playing above 96 kbps (or the original) on Auto: the connection has recovered, 64 is off the table again
+    if !t.truthy("preview") && prefs().s("quality") == "auto" && (rung == 0 || rung > playback::AUTO_FLOOR) {
+        st_mut(|s| { s.floor = playback::AUTO_FLOOR; s.low_stalls.clear(); });
+    }
     let is_lossy = rung > 0;
     let is_dsp = o.dsp.unwrap_or(true) && want_dsp(&t, is_lossy);
     let dsp_rate = if is_dsp { dsp_out_rate(&t) } else { 0.0 };
@@ -786,7 +820,7 @@ fn load_opts(o: LoadOpts) {
     if playback::fx_active(&prefs()) { ensure_fx(); }
     route();
     resume_fx();
-    if !o.hold { play(&a); }
+    if !o.hold { play_el(&a); }
     st_mut(|s| s.slow_start = None);
     if start && !o.hold && !t.truthy("preview") && prefs().s("quality") == "auto" {
         // can't even get going: six seconds in and nothing has played yet → one rung down
@@ -794,7 +828,7 @@ fn load_opts(o: LoadOpts) {
         let timer = Timeout::new(6000, move || {
             let same = cur().is_some_and(|c| Rc::ptr_eq(&c, &t2));
             let stuck = audio().is_some_and(|a| !a.paused() && a.current_time() < 0.5 && a.ready_state() < 3);
-            if same && stuck { step_down_now(); }
+            if same && stuck { note_low_stall(now_ms()); step_down_now(); }
         });
         st_mut(|s| s.slow_start = Some(timer));
     }
@@ -804,6 +838,7 @@ fn load_opts(o: LoadOpts) {
     dom::add_class(&body(), "has-player");
     render();
     emit();
+    media_state();
     if !o.hold { save_spot(true); }
     if st(|s| s.full) { load_lyrics(); }
     top_up();
@@ -958,6 +993,7 @@ fn stalled() {
     st_mut(|s| { s.stall_at = now; s.stalls.push(now); });
     if !fully_buffered() { cancel_preload(); }
     if prefs().s("quality") != "auto" || cur().is_some_and(|t| t.truthy("preview")) { return; }
+    note_low_stall(now);
     // stalling again within 90 s of stepping down: the new rung isn't small enough either
     let step_at = st(|s| s.step_at);
     if truthy_num(step_at) && now - step_at < 90000.0 { step_down_now(); return; }
@@ -969,6 +1005,16 @@ fn stalled() {
         if waiting && st(|s| s.stall_at == now) { step_down_now(); }
     }).forget();
 }
+/// Auto, a stall at 96 kbps (mid-song, or a song that can't get going): 96 keeps stalling (3 times within 2 minutes) → only then may Auto go down to 64.
+fn note_low_stall(now: f64) {
+    if prefs().s("quality") != "auto" || cur().is_some_and(|t| t.truthy("preview")) { return; }
+    st_mut(|s| {
+        if s.rung != playback::AUTO_FLOOR || s.floor <= playback::AUTO_LOW { return; }
+        s.low_stalls.retain(|x| now - *x < 120000.0);
+        s.low_stalls.push(now);
+        if s.low_stalls.len() >= 3 { s.floor = playback::AUTO_LOW; s.low_stalls.clear(); }
+    });
+}
 /// Auto: a stall forces one rung down right away, and the estimate drops to 60 % of what the rung needed.
 fn step_down_now() {
     let Some(t) = cur() else { return };
@@ -976,8 +1022,8 @@ fn step_down_now() {
     st_mut(|s| s.slow_start = None);
     let orig = orig_kbps(Some(&t));
     let rung = st(|s| s.rung);
-    let lower = playback::step_down(rung, orig);
-    if lower == rung { return; }   // already at 32 kbps
+    let lower = playback::step_down(rung, orig, st(|s| s.floor));
+    if lower == rung { return; }   // already at the floor
     EST.with(|e| {
         let mut e = e.borrow_mut();
         e.kbps = Some(0.6 * playback::needed(rung, orig));
@@ -1005,6 +1051,218 @@ fn note_rung_change(was: i64, now: i64) {
             toast(&format!("Connection is slow – lowering quality to {now} kbps to keep playing"), "");
         }
     } else if now == 0 { toast("Connection recovered – back to the original file", "ok"); }
+}
+
+// ---- keeping a song going when its stream breaks off ---------------------------------------------
+// A stream the server makes (converted, lighter, Data saver, Cadenza) is sent as it is made, its clock starting where it
+// was asked to. When the connection drops (mobile network, a locked phone, Safari suspending the page) the browser may
+// take the cut-off stream for the whole song and say it ended, report an error, or sit waiting. None of that is the end
+// of the song: it is loaded again at the same spot (1 s, 2 s, 4 s … at most 30 s apart, at once when the network comes
+// back) and keeps playing. Only a song that fails 6 times in a row is skipped.
+const RETRY_MAX: u32 = 6;
+const RETRY_MAX_WAIT: f64 = 30000.0;
+/// t: the song · need: it has to be loaded again · at: where · from: where the last reload started · fails: in a row
+/// ends: when it cut off early (3 within 60 s → one rung down on Auto, once) · empty: reloads that ended at once
+/// deferred: the stream broke off but the element still plays what it has – the reload waits until that runs out
+#[derive(Default)]
+struct Rec { t: Option<Rc<Value>>, need: bool, at: f64, from: f64, fails: u32, ends: Vec<f64>, empty: u32, stepped: bool, deferred: bool, timer: Option<Timeout> }
+fn reset_rec(t: Option<Rc<Value>>) {
+    let old = REC.with(|r| std::mem::replace(&mut *r.borrow_mut(), Rec { t, ..Default::default() }));
+    drop(old);
+}
+/// `rec.t === t`
+fn rec_is(t: &Rc<Value>) -> bool { REC.with(|r| r.borrow().t.as_ref().is_some_and(|x| Rc::ptr_eq(x, t))) }
+fn rec_need() -> bool { REC.with(|r| r.borrow().need) }
+fn rec_deferred() -> bool { REC.with(|r| r.borrow().deferred) }
+/// How close to its end a song may stop and still count as finished: 2 % of it, at least 3 s, at most 10 s.
+fn end_slack(d: f64) -> f64 { 3f64.max(d * 0.02).min(10.0) }
+/// How close to the end reloads that give nothing mean the file is shorter than the library says: 10 %, at least 15 s, at most 30 s.
+fn short_slack(d: f64) -> f64 { 15f64.max(d * 0.1).min(30.0) }
+/// The last reload gave nothing at all (it ended or failed right where it started).
+fn reload_got_nothing(at: f64) -> bool { REC.with(|r| { let r = r.borrow(); r.fails > 0 && at - r.from < 0.5 }) }
+/// A reload of a server-made stream near the end failed at once: it asked past the file's real end (an empty stream is no
+/// audio, which browsers report as an error) – the song is over.
+fn failed_past_end() -> bool {
+    let Some(t) = cur() else { return false };
+    if t.truthy("preview") || is_linked() || !st(|s| s.transcoded) || !rec_is(&t) { return false; }
+    let d = duration();
+    d > 0.0 && reload_got_nothing(known_position()) && d - REC.with(|r| r.borrow().from) < short_slack(d)
+}
+/// Where the song is – the last spot seen for sure when the element has lost it (emptied, no data).
+fn known_position() -> f64 {
+    if audio().is_some_and(|a| a.ready_state() >= 1) { position() } else { st(|s| s.at) }
+}
+/// 'ended' from the playing element: did the song really reach its end, or did its stream break off?
+fn really_ended() -> bool {
+    let Some(t) = cur() else { return true };
+    if t.truthy("preview") || is_linked() { return true; }
+    // the song's own length (from the library for server-made streams – their element's duration may be wrong)
+    let d = duration();
+    if !(d > 0.0) { return true; }
+    let at = known_position();
+    let left = d - at;
+    if left <= end_slack(d) { return true; }
+    if !rec_is(&t) { reset_rec(Some(t.clone())); }
+    // reloaded there and it ended at once again, close to the end: the file is a little shorter than the library says
+    let nothing = reload_got_nothing(at);
+    let empty = REC.with(|r| {
+        let mut r = r.borrow_mut();
+        if nothing { r.empty += 1; } else { r.empty = 0; }
+        r.empty
+    });
+    if empty >= 2 && left < short_slack(d) { return true; }
+    let now = now_ms();
+    let step = REC.with(|r| {
+        let mut r = r.borrow_mut();
+        r.ends.retain(|x| now - *x < 60000.0);
+        r.ends.push(now);
+        let step = r.ends.len() >= 3 && !r.stepped && prefs().s("quality") == "auto";
+        if step { r.stepped = true; }
+        step
+    });
+    if step {
+        // it keeps breaking off: one rung down (once), the reload asks for the lighter stream
+        let (rung, floor) = st(|s| (s.rung, s.floor));
+        let lower = playback::step_down(rung, orig_kbps(Some(&t)), floor);
+        if lower != rung { note_rung_change(rung, lower); st_mut(|s| { s.rung = lower; s.step_at = now_ms(); }); }
+    }
+    retry(Some(at));
+    false
+}
+/// The stream broke off at `at`: load the song again there – later, with backoff; skip it after 6 failures in a row.
+fn retry(at: Option<f64>) -> bool {
+    let Some(t) = cur() else { return false };
+    if t.truthy("preview") || is_linked() { return false; }
+    let at = at.unwrap_or_else(known_position);
+    if !rec_is(&t) { reset_rec(Some(t.clone())); }
+    if rec_need() { return true; }   // one is on its way already
+    let w = STALL_WATCH.with(|w| w.borrow_mut().take());
+    drop(w);
+    let d = duration();
+    let at = (if d > 0.0 { at.min(d - 1.0) } else { at }).max(0.0);
+    let fails = REC.with(|r| {
+        let mut r = r.borrow_mut();
+        r.need = true;
+        r.at = at;
+        r.fails += 1;
+        r.fails
+    });
+    st_mut(|s| s.at = at);
+    if fails >= RETRY_MAX { give_up(&t); return true; }
+    if st(|s| s.want) { later(RETRY_MAX_WAIT.min(1000.0 * 2f64.powi(fails as i32 - 1))); }
+    render(); emit(); media_state();
+    true
+}
+fn later(ms: f64) {
+    let timer = Timeout::new(ms as u32, || {
+        // fired: leave the spent timer be (dropping it here would free the running callback)
+        if let Some(t) = REC.with(|r| r.borrow_mut().timer.take()) { t.forget(); }
+        retry_now();
+    });
+    let old = REC.with(|r| r.borrow_mut().timer.replace(timer));
+    drop(old);
+}
+/// Load the song again where it broke off (the same quality, Cadenza, conversion) – no new play, scrobble or transition.
+fn retry_now() {
+    let old = REC.with(|r| r.borrow_mut().timer.take());
+    drop(old);
+    let Some(t) = cur() else { return };
+    if !rec_need() || !rec_is(&t) || is_linked() { return; }
+    if !st(|s| s.want) { return; }   // paused meanwhile: play picks it up
+    let offline = js_get(dom::window().navigator().as_ref(), "onLine").as_bool() == Some(false);
+    if offline { later(RETRY_MAX_WAIT); return; }   // offline: the 'online' event comes first
+    if let Some(a) = audio().filter(|a| !a.paused() && a.ready_state() >= 2) {
+        // still playing what it has (a network error leaves the buffer playing): pick it up where it is now, and only once
+        // that runs low ('waiting' / 'ended' bring it on at once)
+        let d = duration();
+        let p = position();
+        let at = (if d > 0.0 { p.min(d - 1.0) } else { p }).max(0.0);
+        REC.with(|r| r.borrow_mut().at = at);
+        if a.ready_state() >= 3 && buffered_ahead() > 3.0 {
+            REC.with(|r| r.borrow_mut().deferred = true);
+            later(1000.0);
+            return;
+        }
+    }
+    let at = REC.with(|r| { let mut r = r.borrow_mut(); r.deferred = false; r.from = r.at; r.at });
+    // the reload's own waiting is not a slow link
+    st_mut(|s| s.seek_at = now_ms());
+    let (transcoded, rung, dsp) = st(|s| (s.transcoded, s.rung, s.dsp));
+    load_opts(LoadOpts { offset: at, resume: true, transcode: transcoded, rung: Some(rung), dsp: Some(dsp), ..Default::default() });
+}
+/// Six failures in a row: move on, and say so.
+fn give_up(t: &Rc<Value>) {
+    reset_rec(None);
+    st_mut(|s| s.want = false);
+    let title = if t.truthy("title") { t.s("title") } else { "this song".to_string() };
+    toast(&format!("Couldn't keep {title} playing – skipped"), "err");
+    log_play();
+    next(false);
+}
+/// Where the downloaded part of the playing element ends (seconds of its own clock).
+fn buffered_end() -> f64 {
+    let Some(a) = audio() else { return 0.0 };
+    let b = a.buffered();
+    if b.length() == 0 { return 0.0; }
+    b.end(b.length() - 1).unwrap_or(0.0)
+}
+/// Waiting (or a stalled download) that lasts more than 10 s while playing, with no progress and nothing more arriving: reload at the spot.
+fn watch_stall() {
+    let Some(t) = cur() else { return };
+    if STALL_WATCH.with(|w| w.borrow().is_some()) || t.truthy("preview") || audio().map(|a| a.paused()).unwrap_or(true) { return; }
+    let at = position();
+    let el = audio();
+    let got = buffered_end();
+    let timer = Timeout::new(10000, move || {
+        if let Some(w) = STALL_WATCH.with(|w| w.borrow_mut().take()) { w.forget(); }
+        let same = cur().is_some_and(|c| Rc::ptr_eq(&c, &t)) && audio() == el;
+        let stuck = audio().is_some_and(|a| !a.paused() && a.ready_state() < 3);
+        if !(same && st(|s| s.want) && stuck && (position() - at).abs() < 1.0) { return; }
+        // still downloading, only slowly: starting it over would throw that away – keep waiting
+        if buffered_end() > got + 0.1 { watch_stall(); return; }
+        stall_retry_step(&t, at);
+        retry(Some(at));
+    });
+    STALL_WATCH.with(|w| *w.borrow_mut() = Some(timer));
+}
+/// Auto, a reload because the stream stalled: a stall at 96 counts toward 64, and the reload asks for one rung down when
+/// that has just become allowed or the song never got going at all.
+fn stall_retry_step(t: &Rc<Value>, at: f64) {
+    if t.truthy("preview") || prefs().s("quality") != "auto" { return; }
+    let was = st(|s| s.floor);
+    note_low_stall(now_ms());
+    let (rung, floor) = st(|s| (s.rung, s.floor));
+    if !(at < 1.0 || floor != was) { return; }
+    let lower = playback::step_down(rung, orig_kbps(Some(t)), floor);
+    if lower != rung { note_rung_change(rung, lower); st_mut(|s| { s.rung = lower; s.step_at = now_ms(); }); }
+}
+/// The page is visible again (phone unlocked, app back in front): music you wanted and nobody paused plays on. A pause the
+/// browser made itself (headphones unplugged, another app took the sound) counts as yours: see the 'pause' listener.
+fn wake() {
+    let visible = js_get(document().as_ref(), "visibilityState").as_string().as_deref() == Some("visible");
+    if !visible || is_linked() || HELD.with(|h| h.get()) || cur().is_none() || !st(|s| s.want) { return; }
+    let Some(a) = audio() else { return };
+    if rec_need() { retry_now(); return; }
+    if a.paused() && !a.ended() { resume_fx(); play_el(&a); }
+}
+/// Lock screen / notification: playing or paused (what you want, also while a stream is being picked up) and where.
+fn media_state() {
+    if audio().is_none() { return; }
+    let Some(ms) = media_session() else { return };
+    POS_STATE_AT.with(|c| c.set(now_ms()));
+    let t = cur();
+    let ps = if t.is_none() { "none" } else if shows_playing() { "playing" } else { "paused" };
+    js_set(&ms, "playbackState", &ps.into());
+    if t.is_none() { return; }
+    let Ok(f) = js_get(&ms, "setPositionState").dyn_into::<js_sys::Function>() else { return };
+    let d = duration();
+    if !(d > 0.0) || !d.is_finite() { return; }
+    let at = if rec_need() { REC.with(|r| r.borrow().at) } else { known_position() };
+    let o = js_sys::Object::new();
+    js_set(&o, "duration", &d.into());
+    js_set(&o, "position", &at.min(d).max(0.0).into());
+    js_set(&o, "playbackRate", &1.0.into());
+    let _ = f.call1(&ms, &o);
 }
 
 // ---- the bandwidth estimate (Auto quality) -----------------------------------------------------
@@ -1144,17 +1402,18 @@ fn adapt_tick() {
     if !downloading { probe(); }
     if prefs().s("quality") == "auto" { decide(); }
 }
-/// Auto: follow the estimate – down at once (when the buffer is short), up when it has held 1.5× the higher rung's need for 15 s.
+/// Auto: follow the estimate – down at once (when the buffer is short), up when it has held 1.5× the higher rung's need for 7.5 s.
 fn decide() {
     let t = cur();
     let orig = orig_kbps(t.as_deref());
-    let l = playback::ladder(orig);
+    let floor = st(|s| s.floor);
+    let l = playback::ladder(orig, floor);
     let rung = st(|s| s.rung);
     let ci = l.iter().position(|&r| r == rung);
     let (fresh, est) = EST.with(|e| { let mut e = e.borrow_mut(); let f = e.fresh; e.fresh = false; (f, e.kbps) });
     let (Some(est), Some(ci)) = (est, ci) else { return };
     let now = now_ms();
-    let target = playback::choose_rung(Some(est), orig);
+    let target = playback::choose_rung(Some(est), orig, floor);
     let ti = l.iter().position(|&r| r == target).unwrap_or(0);
     if ti > ci {
         EST.with(|e| e.borrow_mut().up_since = 0.0);
@@ -1167,7 +1426,10 @@ fn decide() {
     if !truthy_num(since) { EST.with(|e| e.borrow_mut().up_since = now); return; }
     // safe to reload: 10 s in hand, or a server-made stream the browser has finished fetching (it shows little of it as buffered)
     let safe = buffered_ahead() > 10.0 || (st(|s| s.transcoded) && audio().is_some_and(|a| a.network_state() != 2));
-    if now - since >= 15000.0 && safe { EST.with(|e| e.borrow_mut().up_since = 0.0); switch_rung(up); }
+    if now - since >= 7500.0 && safe {
+        EST.with(|e| e.borrow_mut().up_since = 0.0);
+        switch_rung(up);
+    }
 }
 
 // ---- server-side Cadenza: render ahead -----------------------------------------------------------
@@ -1583,7 +1845,8 @@ pub fn seek_to(sec: f64) {
     let sec = sec.min(dur - 0.25).max(0.0);
     if HELD.with(|h| h.get()) { HELD_AT.with(|h| h.set(sec)); }
     end_fade();
-    st_mut(|s| s.seek_at = now_ms());
+    st_mut(|s| { s.seek_at = now_ms(); s.at = sec; });
+    REC.with(|r| { let mut r = r.borrow_mut(); if r.need { r.at = sec; } });
     let Some(t) = cur() else { return };
     let id = t.i("id");
     if st(|s| s.dsp) && dsp_cache_on() && dsp_state(id) != "cached" && now_ms() - dsp_asked(id) > 3000.0 {
@@ -1606,12 +1869,14 @@ fn seek_now(sec: f64) {
         local = s.length() > 0 && s.end(s.length() - 1).map(|e| e >= sec - 0.5).unwrap_or(false);
     }
     st_mut(|s| s.seek_at = now_ms());
-    if local { a.set_current_time(sec); }
+    // a stream that broke off can't seek in itself: load it again at the new spot
+    if local && !rec_need() { a.set_current_time(sec); }
     else {
-        let (rung, dsp) = st(|s| (s.rung, s.dsp));
-        load_opts(LoadOpts { transcode: true, rung: Some(rung), dsp: Some(dsp), offset: sec, resume: true, ..Default::default() });
+        let (rung, dsp, transcoded) = st(|s| (s.rung, s.dsp, s.transcoded));
+        load_opts(LoadOpts { transcode: transcoded, rung: Some(rung), dsp: Some(dsp), offset: sec, resume: true, ..Default::default() });
     }
     update_time();
+    media_state();
 }
 
 pub fn toggle() {
@@ -1624,10 +1889,45 @@ pub fn toggle() {
         if st(|s| s.full) { render_full(); }
         return;
     }
-    if cur().is_some() {
-        resume_fx();
-        if let Some(a) = audio() { if a.paused() { play(&a); } else { let _ = a.pause(); } }
-    }
+    if cur().is_some() { if shows_playing() { user_pause(); } else { user_play(); } }
+}
+/// Play pressed (button, headset, lock screen, another device): a stream that broke off is loaded again where it was.
+fn user_play() {
+    let (Some(a), Some(t)) = (audio(), cur()) else { return };
+    st_mut(|s| s.want = true);
+    resume_fx();
+    if rec_need() && rec_is(&t) { retry_now(); } else { play_el(&a); }
+    media_state();
+}
+/// A real pause: it stays paused – nothing picks the song up again until play is pressed.
+fn user_pause() {
+    st_mut(|s| s.want = false);
+    let t = REC.with(|r| r.borrow_mut().timer.take());
+    drop(t);
+    if let Some(a) = audio() { let _ = a.pause(); }
+    media_state();
+    render(); emit();
+}
+/// The play button shows pause while the music plays – and while a broken-off stream is being picked up again.
+fn shows_playing() -> bool {
+    let Some(a) = audio() else { return false };
+    !a.paused() || (st(|s| s.want) && rec_need() && cur().is_some_and(|t| rec_is(&t)))
+}
+/// play() – when the browser refuses (autoplay rules), say so: never sit silently paused with a pause button showing.
+fn play_el(a: &HtmlMediaElement) {
+    let Ok(p) = a.play() else { return };
+    let el = a.clone();
+    dom::spawn(async move {
+        if let Err(e) = wasm_bindgen_futures::JsFuture::from(p).await {
+            let name = js_get(&e, "name").as_string().unwrap_or_default();
+            if name == "NotAllowedError" && audio().is_some_and(|a| same_el(&a, &el)) { blocked(); }
+        }
+    });
+}
+fn blocked() {
+    st_mut(|s| s.want = false);
+    render(); emit(); media_state();
+    toast("Tap play to keep listening", "");
 }
 
 pub fn next(auto: bool) {
@@ -1635,9 +1935,11 @@ pub fn next(auto: bool) {
     if auto && st(|s| s.repeat == "one") { seek_to(0.0); if let Some(a) = audio() { play(&a); } return; }
     if st(|s| s.index < s.queue.len() as i64 - 1) { st_mut(|s| s.index += 1); load(false, 0.0, None, None); return; }
     if st(|s| s.repeat == "all" && !s.queue.is_empty()) { st_mut(|s| s.index = 0); load(false, 0.0, None, None); return; }
-    if st(|s| s.context == "preview") { return; }
+    if st(|s| s.context == "preview") { if auto { st_mut(|s| s.want = false); media_state(); } return; }
     dom::spawn(async move {
         if continue_with_library().await { st_mut(|s| s.index += 1); load(false, 0.0, None, None); }
+        // the end of the music: nothing to pick up again
+        else if auto { st_mut(|s| s.want = false); media_state(); }
     });
 }
 
@@ -1968,39 +2270,78 @@ pub fn mount() {
     // the first bandwidth guess (navigator.connection.downlink) is taken now, at load, as in the JS UI
     EST.with(|_| ());
     // every element gets the listeners; only the one currently playing counts
-    on_both(&a, &sp, "ended", Rc::new(|_| { log_play(); next(true); }));
+    // a stream that broke off mid-song also says 'ended': only a song that really reached its end moves on
+    on_both(&a, &sp, "ended", Rc::new(|_| {
+        if !really_ended() { if rec_deferred() { retry_now(); } return; }
+        log_play(); next(true);
+    }));
     on_both(&a, &sp, "play", Rc::new(|_| {
         HELD.with(|h| h.set(false));
         HELD_AT.with(|h| h.set(0.0));
         PLAYED_SINCE.with(|p| p.set(true));
+        st_mut(|s| s.want = true);
         if let Some(t) = cur() { announce(&t); }
         resume_fx();
         if let Some(out) = FADE.with(|f| f.borrow().as_ref().map(|f| f.out.clone())) { play(&out); }
-        render(); emit();
+        render(); emit(); media_state();
     }));
+    // a pause nobody here made (headphones unplugged, a call or another app took the sound) is a real pause too: it stays
+    // paused – not the end of the song and not a stream being picked up again
     on_both(&a, &sp, "pause", Rc::new(|_| {
+        if !audio().is_some_and(|a| a.ended()) && !rec_need() && !HELD.with(|h| h.get()) { st_mut(|s| s.want = false); }
         if let Some(out) = FADE.with(|f| f.borrow().as_ref().map(|f| f.out.clone())) { let _ = out.pause(); }
-        render(); emit(); save_spot(true);
+        render(); emit(); save_spot(true); media_state();
     }));
+    on_both(&a, &sp, "playing", Rc::new(|_| { let w = STALL_WATCH.with(|w| w.borrow_mut().take()); drop(w); }));
     on_both(&a, &sp, "timeupdate", Rc::new(|_| {
         update_time(); log_play(); sync_lyrics(false); maybe_transition();
+        if audio().is_some_and(|a| a.ready_state() >= 2 && !a.seeking()) && !rec_need() {
+            let p = position();
+            st_mut(|s| s.at = p);
+            // playing on well after a reload: the failures in a row are over
+            REC.with(|r| { let mut r = r.borrow_mut(); if r.fails > 0 && p > r.from + 10.0 { r.fails = 0; r.empty = 0; } });
+        } else if rec_need() && cur().is_some_and(|t| rec_is(&t)) && audio().is_some_and(|a| a.ready_state() >= 2 && !a.seeking() && !a.paused()) {
+            // broke off but still playing what it has: the spot to pick it up at moves along
+            let d = duration();
+            let p = position();
+            let at = (if d > 0.0 { p.min(d - 1.0) } else { p }).max(0.0);
+            REC.with(|r| r.borrow_mut().at = at);
+            st_mut(|s| s.at = at);
+        }
         if audio().is_some_and(|a| !a.paused()) { save_spot(false); }
+        if now_ms() - POS_STATE_AT.with(|c| c.get()) > 5000.0 { media_state(); }
         preload_tick();
     }));
     on_both(&a, &sp, "progress", Rc::new(|_| preload_tick()));
-    on_both(&a, &sp, "waiting", Rc::new(|_| stalled()));
+    on_both(&a, &sp, "waiting", Rc::new(|_| { if rec_deferred() && rec_need() { retry_now(); return; } stalled(); watch_stall(); }));
+    on_both(&a, &sp, "stalled", Rc::new(|_| watch_stall()));
     on_both(&a, &sp, "loadedmetadata", Rc::new(|_| update_time()));
+    // the element dropped its source by itself (not one of our loads): pick the song up again
+    let lost: Rc<dyn Fn(&Event)> = Rc::new(|_| {
+        let has_src = audio().and_then(|a| a.get_attribute("src")).is_some_and(|s| !s.is_empty());
+        if has_src && !HELD.with(|h| h.get()) && now_ms() - st(|s| s.src_at) > 1500.0 { retry(None); }
+    });
+    on_both(&a, &sp, "emptied", lost.clone());
+    on_both(&a, &sp, "abort", lost);
+    // the connection broke off (any stream) → the same spot again, the same stream
+    // a reload near the end asked past the file's real end (nothing to play) → the song is over
     // the server's Cadenza is off, busy or failed → the same spot again without processing, and no more processing this session
     // the browser couldn't decode the original (e.g. ALAC in .m4a) → ask the server for FLAC
+    // a server-made stream that failed some other way → the same spot again
     on_both(&a, &sp, "error", Rc::new(|_| {
         let Some(t) = cur() else { return };
         let has_src = audio().and_then(|a| a.get_attribute("src")).is_some_and(|s| !s.is_empty());
-        if !has_src { return; }
+        if !has_src || t.truthy("preview") { return; }
+        let code = audio().map(|a| js_get(&js_get(a.as_ref(), "error"), "code").as_f64().unwrap_or(0.0)).unwrap_or(0.0);
+        if code == 2.0 { retry(None); return; }   // MEDIA_ERR_NETWORK
+        if failed_past_end() { log_play(); next(true); return; }
         if st(|s| s.dsp) { dsp_fallback(); return; }
         // a restored song stays paused until you press play
-        if !st(|s| s.transcoded) && !t.truthy("preview") {
+        if !st(|s| s.transcoded) {
             load_opts(LoadOpts { transcode: true, offset: spot_position(), hold: HELD.with(|h| h.get()), ..Default::default() });
+            return;
         }
+        retry(None);
     }));
     dom::on_forever(&sp, "error", |_| { if let Some(s) = spare() { let _ = s.remove_attribute("data-url"); } });
     // a transition moves with either song's clock (timers stall in hidden windows), and ends when the old song does
@@ -2013,8 +2354,9 @@ pub fn mount() {
         });
     }
     if has_media_session() {
-        set_action("play", |_| { if let Some(a) = audio() { play(&a); } });
-        set_action("pause", |_| { if let Some(a) = audio() { let _ = a.pause(); } });
+        // the lock screen's / headset's play and pause are yours: a pause there stays paused
+        set_action("play", |_| user_play());
+        set_action("pause", |_| user_pause());
         set_action("nexttrack", |_| next(false));
         set_action("previoustrack", |_| prev());
         // older browsers
@@ -2059,6 +2401,10 @@ pub fn mount() {
     dom::keep_forever(keyup);
     dom::on_window("hashchange", |_| { if st(|s| s.full) { set_full(false); } });
     dom::on_window("pagehide", |_| save_spot(true));
+    dom::on_forever(&document(), "visibilitychange", |_| wake());
+    dom::on_window("pageshow", |_| wake());
+    // the network is back while a broken-off song waits for its next try: try now
+    dom::on_window("online", |_| { if rec_need() && st(|s| s.want) { retry_now(); } });
     dom::on_window("encore:likes", |_| { LIKED.with(|l| *l.borrow_mut() = None); dom::spawn(async { likes().await; paint_likes(); }); });
     dom::on_window("encore:playback-prefs", |_| {
         new_prefs(playback::current());
@@ -2276,7 +2622,7 @@ fn render() {
         if st(|s| s.full) { set_full(false); }
         return;
     };
-    let Some(a) = audio() else { return };
+    if audio().is_none() { return; }
     set_html(&el, &format!(r##"
     <div class="now" id="p-open" role="button" tabindex="0" aria-label="Open the full-screen player" title="Open player">
       <div class="thumb">{thumb}</div>
@@ -2298,7 +2644,7 @@ fn render() {
         title = esck(&t, "title"),
         artist = esck(&t, "artist"),
         album = if t.truthy("album") { format!(" · {}", esck(&t, "album")) } else { String::new() },
-        prev = icon("prev"), pp = if a.paused() { icon("play") } else { icon("pause") }, next = icon("next"),
+        prev = icon("prev"), pp = if shows_playing() { icon("pause") } else { icon("play") }, next = icon("next"),
         right = right_html(Some(&t), true)));
     let mut ls = Vec::new();
     wire(&mut ls, &el, "#p-toggle", "click", |_| toggle());
@@ -2316,11 +2662,14 @@ fn render() {
             let _ = sp.remove_attribute("src");
             let _ = sp.remove_attribute("data-url");
         }
-        st_mut(|s| { s.queue.clear(); s.index = -1; });
+        st_mut(|s| { s.queue.clear(); s.index = -1; s.want = false; });
         HELD.with(|h| h.set(false));
         HELD_AT.with(|h| h.set(0.0));
+        reset_rec(None);
+        let w = STALL_WATCH.with(|w| w.borrow_mut().take());
+        drop(w);
         dom::ls_remove(RESUME);
-        render(); emit();
+        render(); emit(); media_state();
     });
     set_bar(ls);
     update_time();

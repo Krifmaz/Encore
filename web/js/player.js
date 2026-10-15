@@ -1,6 +1,7 @@
 // Web player: streams the original file (bit-perfect for MP3/FLAC/AAC/Opus); formats a browser
 // can't decode (ALAC/APE/WavPack/AIFF/WMA) are converted to FLAC on the fly by the server. On Auto quality it
-// measures the connection and steps the stream down (256 → 32 kbps AAC/Opus) and back up as the bandwidth allows.
+// measures the connection and steps the stream down (256 → 96 kbps AAC/Opus, 64 at worst) and back up as the bandwidth
+// allows. A stream that breaks off mid-song (a dropped connection, a locked phone) is picked up again at the same spot.
 // Optional sound effects (EQ, crossfeed, balance, mono) run in this browser through Web Audio, and crossfade
 // blends one song into the next with the two <audio> elements.
 // Tap the bar for the full-screen player (lyrics + Up next). When the queue runs out it keeps going
@@ -10,7 +11,11 @@ import * as playback from './playback.js';
 import { art, esc, fmt, icon, popMenu, shareTrack, toast } from './ui.js';
 
 const state = { queue: [], index: -1, transcoded: false, lossy: false, rung: 0, dsp: false, dspRate: 0, offset: 0, dragging: false, context: 'list', repeat: 'off', full: false, pane: 'now', logged: false,
-  stalls: [], stallAt: 0, seekAt: 0, stepAt: 0, switchedAt: 0, lastPreloadCheck: 0, slowStart: null };
+  stalls: [], stallAt: 0, seekAt: 0, stepAt: 0, switchedAt: 0, lastPreloadCheck: 0, slowStart: null,
+  // want: you want music now (a song started, play pressed) – false only after a real pause (button, headset, lock screen)
+  // at: where the song last was for sure · srcAt: when we last gave the element a new source (its 'emptied'/'abort' are ours)
+  // floor: Auto's lowest rung (96 kbps; 64 after 96 stalled 3 times within 2 minutes) · lowStalls: those stalls at 96
+  want: false, at: 0, srcAt: 0, floor: playback.AUTO_FLOOR, lowStalls: [] };
 const listeners = new Set();
 let audio = null;
 let spare = null;   // second <audio> that pre-buffers the next song, so skipping is instant
@@ -76,7 +81,7 @@ function native() {
   if (!n?.nowPlaying || !audio) return;
   const t = current();
   try {
-    n.nowPlaying(JSON.stringify(t ? { title: t.title || '', artist: t.artist || '', album: t.album || '', playing: !audio.paused,
+    n.nowPlaying(JSON.stringify(t ? { title: t.title || '', artist: t.artist || '', album: t.album || '', playing: showsPlaying(),
       art: cover(t) ? new URL(coverAt(t, 600), location.href).href : '' } : { stopped: true }));
   } catch { /* ignore */ }
 }
@@ -93,7 +98,7 @@ export function linked() { return link; }
 export function setLink(l) {
   const was = !!link;
   link = l;
-  if (l && !was && audio && !audio.paused) audio.pause();
+  if (l && !was && audio) { state.want = false; clearTimeout(rec.timer); rec.timer = null; if (!audio.paused) audio.pause(); }
   clearInterval(linkTick);
   // between check-ins, move the remote's seek bar along on our own
   if (l) linkTick = setInterval(() => { if (link?.state?.playing) { link.state.position = (link.state.position || 0) + 1; updateLinkedTime(); syncLyrics(); } }, 1000);
@@ -122,7 +127,7 @@ function remoteTrack() {
 /** The song in front of you: the linked device's when linked, else this device's. */
 const nowTrack = () => link ? remoteTrack() : current();
 const nowPosition = () => link ? (link.state?.position || 0) : position();
-const nowPlaying = () => link ? !!link.state?.playing : !!(audio && !audio.paused);
+const nowPlaying = () => link ? !!link.state?.playing : !!(audio && showsPlaying());
 
 // ---- remote control: what this device is playing, and commands from your other devices ----
 const slim = (t) => ({ id: t.id, title: t.title, artist: t.artist, album: t.album, album_id: t.album_id, format: t.format, duration: t.duration });
@@ -130,7 +135,7 @@ export function snapshot() {
   const t = current();
   if (!t || !audio) return { playing: false };
   const { queue, index } = libWindow();
-  return { ...slim(t), cover: cover(t), playing: !audio.paused, position: spotPosition(), duration: duration(), volume: userVol,
+  return { ...slim(t), cover: cover(t), playing: showsPlaying(), position: spotPosition(), duration: duration(), volume: userVol,
            signal: { label: quality(t), transport: transport()?.kind || null, output_rate: ctx?.sampleRate || null },
            index, queue: queue.map(slim) };
 }
@@ -165,9 +170,9 @@ export function command(c) {
 function runCommand(c) {
   switch (c.action) {
     case 'toggle': return toggle();
-    case 'play': return current() && audio.play();
-    case 'pause': return audio?.pause();
-    case 'stop': audio?.pause(); return;
+    case 'play': return current() && userPlay();
+    case 'pause': return audio && userPause();
+    case 'stop': if (audio) userPause(); return;
     case 'next': return next();
     case 'prev': return prev();
     case 'seek': return seekTo(Number(c.value) || 0);
@@ -299,7 +304,7 @@ function fileKbps(t) {
 function rungFor(t) {
   if (!t || t.preview || prefs.quality === 'original') return 0;
   if (prefs.quality === 'saver') return playback.SAVER_KBPS;
-  return playback.chooseRung(est.kbps, origKbps(t));
+  return playback.chooseRung(est.kbps, origKbps(t), state.floor);
 }
 /** The URL a song starts with (what the spare element pre-loads, and what load() asks for at a song start). */
 function startUrl(t) {
@@ -336,11 +341,20 @@ function load({ transcode = false, offset = 0, rung = null, dsp = null, resume =
   if (hold) playedSince = false; else if (!resume) playedSince = true;
   if (!fading) endFade();
   const start = !offset && !resume;
+  // a reload of the same song (a seek, a quality switch, picking a broken-off stream up again) keeps its retry count
+  if (start || rec.t !== t) resetRec(t);
+  clearTimeout(rec.timer); rec.timer = null; rec.need = false;
+  clearTimeout(stallWatch); stallWatch = null;
+  state.want = !hold;
+  state.at = offset;
+  state.srcAt = Date.now();
   markPlayed(t);
   if (convert(t)) transcode = true;
   const prevRung = state.rung;
   state.rung = t.preview ? 0 : (rung === null ? rungFor(t) : rung);
   if (start && !t.preview && prefs.quality === 'auto') noteRungChange(prevRung, state.rung);
+  // playing above 96 kbps (or the original) on Auto: the connection has recovered, 64 is off the table again
+  if (!t.preview && prefs.quality === 'auto' && (state.rung === 0 || state.rung > playback.AUTO_FLOOR)) { state.floor = playback.AUTO_FLOOR; state.lowStalls = []; }
   state.lossy = state.rung > 0;
   state.dsp = (dsp === null ? wantDsp(t, state.lossy) : dsp) && wantDsp(t, state.lossy);
   state.dspRate = state.dsp ? dspOutRate(t) : 0;
@@ -394,11 +408,11 @@ function load({ transcode = false, offset = 0, rung = null, dsp = null, resume =
   if (playback.fxActive(prefs)) ensureFx();
   route();
   resumeFx();
-  if (!hold) audio.play().catch(() => {});
+  if (!hold) playEl(audio);
   clearTimeout(state.slowStart);
   if (start && !hold && !t.preview && prefs.quality === 'auto') {
     // can't even get going: six seconds in and nothing has played yet → one rung down
-    state.slowStart = setTimeout(() => { if (current() === t && !audio.paused && audio.currentTime < 0.5 && audio.readyState < 3) stepDownNow(); }, 6000);
+    state.slowStart = setTimeout(() => { if (current() === t && !audio.paused && audio.currentTime < 0.5 && audio.readyState < 3) { noteLowStall(); stepDownNow(); } }, 6000);
   }
   if (start && state.dsp && dspCacheOn()) prepareAhead(t);
   if ('mediaSession' in navigator) {
@@ -411,6 +425,7 @@ function load({ transcode = false, offset = 0, rung = null, dsp = null, resume =
   document.body.classList.add('has-player');
   render();
   emit();
+  mediaState();
   if (!hold) saveSpot(true);
   if (state.full) loadLyrics();
   topUp();
@@ -528,6 +543,7 @@ function stalled() {
   state.stalls.push(now);
   if (!fullyBuffered()) cancelPreload();
   if (prefs.quality !== 'auto' || current()?.preview) return;
+  noteLowStall(now);
   // stalling again within 90 s of stepping down: the new rung isn't small enough either
   if (state.stepAt && now - state.stepAt < 90000) return stepDownNow();
   const recent = state.stalls.filter(s => now - s < 90000);
@@ -535,14 +551,22 @@ function stalled() {
   // one long stall counts too: still waiting four seconds later
   setTimeout(() => { if (!audio.paused && audio.readyState < 3 && state.stallAt === now) stepDownNow(); }, 4000);
 }
+/** Auto, a stall at 96 kbps (mid-song, or a song that can't get going): 96 keeps stalling (3 times within 2 minutes) → only then may Auto go down to 64. */
+function noteLowStall(now = Date.now()) {
+  if (prefs.quality !== 'auto' || current()?.preview) return;
+  if (state.rung !== playback.AUTO_FLOOR || state.floor <= playback.AUTO_LOW) return;
+  state.lowStalls = state.lowStalls.filter(s => now - s < 120000);
+  state.lowStalls.push(now);
+  if (state.lowStalls.length >= 3) { state.floor = playback.AUTO_LOW; state.lowStalls = []; }
+}
 /** Auto: a stall forces one rung down right away, and the estimate drops to 60 % of what the rung needed. */
 function stepDownNow() {
   const t = current();
   if (!t || t.preview || prefs.quality !== 'auto') return;
   clearTimeout(state.slowStart);
   const orig = origKbps(t);
-  const lower = playback.stepDown(state.rung, orig);
-  if (lower === state.rung) return;   // already at 32 kbps
+  const lower = playback.stepDown(state.rung, orig, state.floor);
+  if (lower === state.rung) return;   // already at the floor
   est.kbps = 0.6 * playback.needed(state.rung, orig);
   est.at = Date.now();
   est.fresh = false;
@@ -566,6 +590,160 @@ function noteRungChange(was, now) {
   if (now > 0 && (was === 0 || now < was)) {
     if (Date.now() - slowToastAt > 60000) { slowToastAt = Date.now(); toast(`Connection is slow – lowering quality to ${now} kbps to keep playing`, ''); }
   } else if (now === 0) toast('Connection recovered – back to the original file', 'ok');
+}
+
+// ---- keeping a song going when its stream breaks off ---------------------------------------------
+// A stream the server makes (converted, lighter, Data saver, Cadenza) is sent as it is made, its clock starting where it
+// was asked to. When the connection drops (mobile network, a locked phone, Safari suspending the page) the browser may
+// take the cut-off stream for the whole song and say it ended, report an error, or sit waiting. None of that is the end
+// of the song: it is loaded again at the same spot (1 s, 2 s, 4 s … at most 30 s apart, at once when the network comes
+// back) and keeps playing. Only a song that fails 6 times in a row is skipped.
+const RETRY_MAX = 6;
+const RETRY_MAX_WAIT = 30000;
+// t: the song · need: it has to be loaded again · at: where · from: where the last reload started · fails: in a row
+// ends: when it cut off early (3 within 60 s → one rung down on Auto, once) · empty: reloads that ended at once
+// deferred: the stream broke off but the element still plays what it has – the reload waits until that runs out
+const rec = { t: null, need: false, at: 0, from: 0, fails: 0, ends: [], empty: 0, stepped: false, deferred: false, timer: null };
+let stallWatch = null;
+function resetRec(t) {
+  clearTimeout(rec.timer);
+  Object.assign(rec, { t, need: false, at: 0, from: 0, fails: 0, ends: [], empty: 0, stepped: false, deferred: false, timer: null });
+}
+/** How close to its end a song may stop and still count as finished: 2 % of it, at least 3 s, at most 10 s. */
+const endSlack = (d) => Math.min(Math.max(3, d * 0.02), 10);
+/** How close to the end reloads that give nothing mean the file is shorter than the library says: 10 %, at least 15 s, at most 30 s. */
+const shortSlack = (d) => Math.min(Math.max(15, d * 0.1), 30);
+/** The last reload gave nothing at all (it ended or failed right where it started). */
+const reloadGotNothing = (at) => rec.fails > 0 && at - rec.from < 0.5;
+/** A reload of a server-made stream near the end failed at once: it asked past the file's real end (an empty stream is no
+ *  audio, which browsers report as an error) – the song is over. */
+function failedPastEnd() {
+  const t = current();
+  if (!t || t.preview || link || !state.transcoded || rec.t !== t) return false;
+  const d = duration();
+  return d > 0 && reloadGotNothing(knownPosition()) && d - rec.from < shortSlack(d);
+}
+/** Where the song is – the last spot seen for sure when the element has lost it (emptied, no data). */
+const knownPosition = () => audio.readyState >= 1 ? position() : state.at;
+/** 'ended' from the playing element: did the song really reach its end, or did its stream break off? */
+function reallyEnded() {
+  const t = current();
+  if (!t || t.preview || link) return true;
+  // the song's own length (from the library for server-made streams – their element's duration may be wrong)
+  const d = duration();
+  if (!(d > 0)) return true;
+  const at = knownPosition();
+  const left = d - at;
+  if (left <= endSlack(d)) return true;
+  if (rec.t !== t) resetRec(t);
+  // reloaded there and it ended at once again, close to the end: the file is a little shorter than the library says
+  if (reloadGotNothing(at)) rec.empty++; else rec.empty = 0;
+  if (rec.empty >= 2 && left < shortSlack(d)) return true;
+  const now = Date.now();
+  rec.ends = rec.ends.filter(x => now - x < 60000);
+  rec.ends.push(now);
+  if (rec.ends.length >= 3 && !rec.stepped && prefs.quality === 'auto') {
+    // it keeps breaking off: one rung down (once), the reload asks for the lighter stream
+    rec.stepped = true;
+    const lower = playback.stepDown(state.rung, origKbps(t), state.floor);
+    if (lower !== state.rung) { noteRungChange(state.rung, lower); state.rung = lower; state.stepAt = Date.now(); }
+  }
+  retry(at);
+  return false;
+}
+/** The stream broke off at `at`: load the song again there – later, with backoff; skip it after 6 failures in a row. */
+function retry(at = knownPosition()) {
+  const t = current();
+  if (!t || t.preview || link) return false;
+  if (rec.t !== t) resetRec(t);
+  if (rec.need) return true;   // one is on its way already
+  clearTimeout(stallWatch); stallWatch = null;
+  const d = duration();
+  rec.need = true;
+  rec.at = Math.max(0, d > 0 ? Math.min(at, d - 1) : at);
+  state.at = rec.at;
+  rec.fails++;
+  if (rec.fails >= RETRY_MAX) { giveUp(t); return true; }
+  if (state.want) later(Math.min(RETRY_MAX_WAIT, 1000 * 2 ** (rec.fails - 1)));
+  render(); emit(); mediaState();
+  return true;
+}
+function later(ms) { clearTimeout(rec.timer); rec.timer = setTimeout(retryNow, ms); }
+/** Load the song again where it broke off (the same quality, Cadenza, conversion) – no new play, scrobble or transition. */
+function retryNow() {
+  clearTimeout(rec.timer); rec.timer = null;
+  const t = current();
+  if (!t || !rec.need || rec.t !== t || link) return;
+  if (!state.want) return;   // paused meanwhile: play picks it up
+  if (navigator.onLine === false) return later(RETRY_MAX_WAIT);   // offline: the 'online' event comes first
+  if (!audio.paused && audio.readyState >= 2) {
+    // still playing what it has (a network error leaves the buffer playing): pick it up where it is now, and only once
+    // that runs low ('waiting' / 'ended' bring it on at once)
+    const d = duration();
+    rec.at = Math.max(0, d > 0 ? Math.min(position(), d - 1) : position());
+    if (audio.readyState >= 3 && bufferedAhead() > 3) { rec.deferred = true; return later(1000); }
+  }
+  rec.deferred = false;
+  rec.from = rec.at;
+  state.seekAt = Date.now();   // the reload's own waiting is not a slow link
+  load({ offset: rec.at, resume: true, transcode: state.transcoded, rung: state.rung, dsp: state.dsp });
+}
+/** Six failures in a row: move on, and say so. */
+function giveUp(t) {
+  resetRec(null);
+  state.want = false;
+  toast(`Couldn't keep ${t.title || 'this song'} playing – skipped`, 'err');
+  logPlay();
+  next();
+}
+/** Where the downloaded part of the playing element ends (seconds of its own clock). */
+function bufferedEnd() {
+  try { const b = audio.buffered; return b.length ? b.end(b.length - 1) : 0; } catch { return 0; }
+}
+/** Waiting (or a stalled download) that lasts more than 10 s while playing, with no progress and nothing more arriving: reload at the spot. */
+function watchStall() {
+  const t = current();
+  if (stallWatch || !t || t.preview || audio.paused) return;
+  const at = position(), el = audio, got = bufferedEnd();
+  stallWatch = setTimeout(() => {
+    stallWatch = null;
+    if (current() !== t || audio !== el || !state.want || audio.paused || audio.readyState >= 3 || Math.abs(position() - at) >= 1) return;
+    // still downloading, only slowly: starting it over would throw that away – keep waiting
+    if (bufferedEnd() > got + 0.1) return watchStall();
+    stallRetryStep(t, at);
+    retry(at);
+  }, 10000);
+}
+/** Auto, a reload because the stream stalled: a stall at 96 counts toward 64, and the reload asks for one rung down when
+ *  that has just become allowed or the song never got going at all. */
+function stallRetryStep(t, at) {
+  if (t.preview || prefs.quality !== 'auto') return;
+  const was = state.floor;
+  noteLowStall();
+  if (!(at < 1 || state.floor !== was)) return;
+  const lower = playback.stepDown(state.rung, origKbps(t), state.floor);
+  if (lower !== state.rung) { noteRungChange(state.rung, lower); state.rung = lower; state.stepAt = Date.now(); }
+}
+/** The page is visible again (phone unlocked, app back in front): music you wanted and nobody paused plays on. A pause the
+ *  browser made itself (headphones unplugged, another app took the sound) counts as yours: see the 'pause' listener. */
+function wake() {
+  if (document.visibilityState !== 'visible' || link || held || !audio || !current() || !state.want) return;
+  if (rec.need) return retryNow();
+  if (audio.paused && !audio.ended) { resumeFx(); playEl(audio); }
+}
+/** Lock screen / notification: playing or paused (what you want, also while a stream is being picked up) and where. */
+let posStateAt = 0;
+function mediaState() {
+  if (!('mediaSession' in navigator) || !audio) return;
+  const ms = navigator.mediaSession;
+  const t = current();
+  posStateAt = Date.now();
+  try { ms.playbackState = !t ? 'none' : showsPlaying() ? 'playing' : 'paused'; } catch { /* ignore */ }
+  if (!t || typeof ms.setPositionState !== 'function') return;
+  const d = duration();
+  if (!(d > 0) || !isFinite(d)) return;
+  const at = rec.need ? rec.at : knownPosition();
+  try { ms.setPositionState({ duration: d, position: Math.max(0, Math.min(d, at)), playbackRate: 1 }); } catch { /* ignore */ }
 }
 
 // ---- the bandwidth estimate (Auto quality) -----------------------------------------------------
@@ -654,17 +832,17 @@ function adaptTick() {
   if (!downloading) probe();
   if (prefs.quality === 'auto') decide();
 }
-/** Auto: follow the estimate – down at once (when the buffer is short), up when it has held 1.5× the higher rung's need for 15 s. */
+/** Auto: follow the estimate – down at once (when the buffer is short), up when it has held 1.5× the higher rung's need for 7.5 s. */
 function decide() {
   const t = current();
   const orig = origKbps(t);
-  const l = playback.ladder(orig);
+  const l = playback.ladder(orig, state.floor);
   const ci = l.indexOf(state.rung);
   const fresh = est.fresh;
   est.fresh = false;
   if (est.kbps === null || ci < 0) return;
   const now = Date.now();
-  const ti = l.indexOf(playback.chooseRung(est.kbps, orig));
+  const ti = l.indexOf(playback.chooseRung(est.kbps, orig, state.floor));
   if (ti > ci) {
     est.upSince = 0;
     if (fresh && now - state.switchedAt > 10000 && !fullyBuffered() && bufferedAhead() < 20) switchRung(l[ti]);
@@ -675,7 +853,10 @@ function decide() {
   if (!est.upSince) { est.upSince = now; return; }
   // safe to reload: 10 s in hand, or a server-made stream the browser has finished fetching (it shows little of it as buffered)
   const safe = bufferedAhead() > 10 || (state.transcoded && audio.networkState !== 2);
-  if (now - est.upSince >= 15000 && safe) { est.upSince = 0; switchRung(up); }
+  if (now - est.upSince >= 7500 && safe) {
+    est.upSince = 0;
+    switchRung(up);
+  }
 }
 
 // ---- server-side Cadenza: render ahead -----------------------------------------------------------
@@ -954,6 +1135,8 @@ export function seekTo(sec) {
   if (held) heldAt = sec;
   endFade();
   state.seekAt = Date.now();
+  state.at = sec;
+  if (rec.need) rec.at = sec;
   const t = current();
   if (state.dsp && dspCacheOn() && dspCache.get(t.id) !== 'cached' && Date.now() - (dspAsked.get(t.id) || 0) > 3000) {
     // maybe the render has finished since: then the browser seeks in the pre-rendered file itself
@@ -971,14 +1154,44 @@ function seekNow(sec) {
     try { const s = audio.seekable; local = s.length > 0 && s.end(s.length - 1) >= sec - 0.5; } catch { local = false; }
   }
   state.seekAt = Date.now();
-  if (local) audio.currentTime = sec;
-  else load({ transcode: true, rung: state.rung, dsp: state.dsp, offset: sec, resume: true });
+  // a stream that broke off can't seek in itself: load it again at the new spot
+  if (local && !rec.need) audio.currentTime = sec;
+  else load({ transcode: state.transcoded, rung: state.rung, dsp: state.dsp, offset: sec, resume: true });
   updateTime();
+  mediaState();
 }
 
 export function toggle() {
   if (viaLink({ action: 'toggle' })) { if (link.state) link.state.playing = !link.state.playing; render(); if (state.full) renderFull(); return; }
-  if (current()) { resumeFx(); (audio.paused ? audio.play() : audio.pause()); }
+  if (current()) { if (showsPlaying()) userPause(); else userPlay(); }
+}
+/** Play pressed (button, headset, lock screen, another device): a stream that broke off is loaded again where it was. */
+function userPlay() {
+  if (!audio || !current()) return;
+  state.want = true;
+  resumeFx();
+  if (rec.need && rec.t === current()) retryNow(); else playEl(audio);
+  mediaState();
+}
+/** A real pause: it stays paused – nothing picks the song up again until play is pressed. */
+function userPause() {
+  state.want = false;
+  clearTimeout(rec.timer); rec.timer = null;
+  audio.pause();
+  mediaState();
+  render(); emit();
+}
+/** The play button shows pause while the music plays – and while a broken-off stream is being picked up again. */
+function showsPlaying() { return !!audio && (!audio.paused || (state.want && rec.need && rec.t === current())); }
+/** play() – when the browser refuses (autoplay rules), say so: never sit silently paused with a pause button showing. */
+function playEl(el) {
+  const p = el.play();
+  if (p && p.catch) p.catch((e) => { if (e?.name === 'NotAllowedError' && el === audio) blocked(); });
+}
+function blocked() {
+  state.want = false;
+  render(); emit(); mediaState();
+  toast('Tap play to keep listening', '');
 }
 
 export async function next(auto = false) {
@@ -986,8 +1199,9 @@ export async function next(auto = false) {
   if (auto && state.repeat === 'one') { seekTo(0); audio.play(); return; }
   if (state.index < state.queue.length - 1) { state.index++; load(); return; }
   if (state.repeat === 'all' && state.queue.length) { state.index = 0; load(); return; }
-  if (state.context === 'preview') return;
+  if (state.context === 'preview') { if (auto) { state.want = false; mediaState(); } return; }
   if (await continueWithLibrary()) { state.index++; load(); }
+  else if (auto) { state.want = false; mediaState(); }   // the end of the music: nothing to pick up again
 }
 
 /** Queue ran out: keep the music going with a shuffle of the whole library. */
@@ -1195,24 +1409,49 @@ export function mount() {
   audio.volume = spare.volume = plain.volume = userVol;
   // every element gets the listeners; only the one currently playing counts
   const on = (type, fn) => [audio, spare, plain].forEach(a => a.addEventListener(type, (e) => { if (e.target === audio) fn(e); }));
-  on('ended', () => { logPlay(); next(true); });
-  on('play', () => { held = false; heldAt = 0; playedSince = true; announce(current()); resumeFx(); if (fade) fade.out.play().catch(() => {}); render(); emit(); });
-  on('pause', () => { if (fade) fade.out.pause(); render(); emit(); saveSpot(true); });
+  // a stream that broke off mid-song also says 'ended': only a song that really reached its end moves on
+  on('ended', () => { if (!reallyEnded()) { if (rec.deferred) retryNow(); return; } logPlay(); next(true); });
+  on('play', () => { held = false; heldAt = 0; playedSince = true; state.want = true; announce(current()); resumeFx(); if (fade) fade.out.play().catch(() => {}); render(); emit(); mediaState(); });
+  // a pause nobody here made (headphones unplugged, a call or another app took the sound) is a real pause too: it stays
+  // paused – not the end of the song and not a stream being picked up again
+  on('pause', () => { if (!audio.ended && !rec.need && !held) state.want = false; if (fade) fade.out.pause(); render(); emit(); saveSpot(true); mediaState(); });
+  on('playing', () => { clearTimeout(stallWatch); stallWatch = null; });
   on('timeupdate', () => {
     updateTime(); logPlay(); syncLyrics(); maybeTransition();
+    if (audio.readyState >= 2 && !audio.seeking && !rec.need) {
+      state.at = position();
+      // playing on well after a reload: the failures in a row are over
+      if (rec.fails && state.at > rec.from + 10) { rec.fails = 0; rec.empty = 0; }
+    } else if (rec.need && rec.t === current() && audio.readyState >= 2 && !audio.seeking && !audio.paused) {
+      // broke off but still playing what it has: the spot to pick it up at moves along
+      const d = duration();
+      rec.at = state.at = Math.max(0, d > 0 ? Math.min(position(), d - 1) : position());
+    }
     if (!audio.paused) saveSpot();
     const now = Date.now();
+    if (now - posStateAt > 5000) mediaState();
     if (now - state.lastPreloadCheck > 2000) { state.lastPreloadCheck = now; maybePreload(); }
   });
   on('progress', () => { const now = Date.now(); if (now - state.lastPreloadCheck > 2000) { state.lastPreloadCheck = now; maybePreload(); } });
-  on('waiting', stalled);
+  on('waiting', () => { if (rec.deferred && rec.need) return retryNow(); stalled(); watchStall(); });
+  on('stalled', watchStall);
   on('loadedmetadata', updateTime);
+  // the element dropped its source by itself (not one of our loads): pick the song up again
+  const lost = () => { if (audio.getAttribute('src') && !held && Date.now() - state.srcAt > 1500) retry(); };
+  on('emptied', lost);
+  on('abort', lost);
+  // the connection broke off (any stream) → the same spot again, the same stream
+  // a reload near the end asked past the file's real end (nothing to play) → the song is over
   // the server's Cadenza is off, busy or failed → the same spot again without processing, and no more processing this session
   // the browser couldn't decode the original (e.g. ALAC in .m4a) → ask the server for FLAC
+  // a server-made stream that failed some other way → the same spot again
   on('error', () => {
-    if (!current() || !audio.getAttribute('src')) return;
+    if (!current() || !audio.getAttribute('src') || current().preview) return;
+    if (audio.error?.code === 2) { retry(); return; }   // MEDIA_ERR_NETWORK
+    if (failedPastEnd()) { logPlay(); next(true); return; }
     if (state.dsp) return dspFallback();
-    if (!state.transcoded && !current().preview) load({ transcode: true, offset: spotPosition(), hold: held });
+    if (!state.transcoded) return load({ transcode: true, offset: spotPosition(), hold: held });
+    retry();
   });
   spare.addEventListener('error', () => { delete spare.dataset.url; });
   // a transition moves with either song's clock (timers stall in hidden windows), and ends when the old song does
@@ -1221,8 +1460,9 @@ export function mount() {
     a.addEventListener('ended', (e) => { if (fade && e.target === fade.out) endFade(); });
   });
   if ('mediaSession' in navigator) {
-    navigator.mediaSession.setActionHandler('play', () => audio.play());
-    navigator.mediaSession.setActionHandler('pause', () => audio.pause());
+    // the lock screen's / headset's play and pause are yours: a pause there stays paused
+    navigator.mediaSession.setActionHandler('play', () => userPlay());
+    navigator.mediaSession.setActionHandler('pause', () => userPause());
     navigator.mediaSession.setActionHandler('nexttrack', () => next());
     navigator.mediaSession.setActionHandler('previoustrack', prev);
     try {
@@ -1254,6 +1494,10 @@ export function mount() {
   });
   window.addEventListener('hashchange', () => { if (state.full) setFull(false); });
   window.addEventListener('pagehide', () => saveSpot(true));
+  document.addEventListener('visibilitychange', wake);
+  window.addEventListener('pageshow', wake);
+  // the network is back while a broken-off song waits for its next try: try now
+  window.addEventListener('online', () => { if (rec.need && state.want) retryNow(); });
   window.addEventListener('encore:likes', () => { liked = null; likes().then(paintLikes); });
   fetchDsp();
   setInterval(adaptTick, 2000);
@@ -1429,7 +1673,7 @@ function render() {
     <div class="ctrls">
       <div class="row">
         <button class="btn ghost icon" id="p-prev" aria-label="Previous">${icon.prev}</button>
-        <button class="play-btn" id="p-toggle" aria-label="Play/Pause">${audio.paused ? icon.play : icon.pause}</button>
+        <button class="play-btn" id="p-toggle" aria-label="Play/Pause">${showsPlaying() ? icon.pause : icon.play}</button>
         <button class="btn ghost icon" id="p-next" aria-label="Next">${icon.next}</button>
       </div>
       <div class="seek"><span id="t-cur">0:00</span><input type="range" id="seek" min="0" max="1000" value="0"><span id="t-dur">0:00</span></div>
@@ -1444,9 +1688,9 @@ function render() {
   bindSeek(el.querySelector('#seek'), 't-cur');
   el.querySelector('#p-close').onclick = () => {
     endFade(); audio.pause(); audio.removeAttribute('src'); spare.removeAttribute('src'); delete spare.dataset.url; state.queue = []; state.index = -1;
-    held = false; heldAt = 0;
+    held = false; heldAt = 0; state.want = false; resetRec(null); clearTimeout(stallWatch); stallWatch = null;
     try { localStorage.removeItem(RESUME); } catch { /* ignore */ }
-    render(); emit();
+    render(); emit(); mediaState();
   };
   updateTime();
   if (state.full) renderFull();

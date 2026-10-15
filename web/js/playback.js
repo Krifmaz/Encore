@@ -5,7 +5,8 @@ import { api } from './api.js';
 
 /**
  * quality: 'auto'     – the original file; Encore measures the connection while it plays and steps the stream down
- *                       (256 → 160 → 96 → 64 → 32 kbps) as far as it needs to keep playing, then back up
+ *                       (256 → 160 → 96 kbps; 64 only when 96 keeps stalling, never 32) as far as it needs to keep
+ *                       playing, then back up
  *          'original' – always the original file, whatever the connection does
  *          'saver'    – always the small 96 kbps stream (mobile data, slow links)
  * preload: buffer the next song while this one plays (off on very slow connections)
@@ -112,21 +113,25 @@ export function effectsSummary(p, { crossfade = true } = {}) {
 export const RUNGS = [0, 256, 160, 96, 64, 32];
 export const SAVER_KBPS = 96;
 export const EWMA_ALPHA = 0.3;
-/** The rungs a song can use: the original, then only the converted streams smaller than it. */
-export function ladder(origKbps) {
-  return RUNGS.filter(r => r === 0 || !(origKbps > 0) || r < origKbps);
+/** Auto never goes below this (32 kbps sounds bad and low) … */
+export const AUTO_FLOOR = 96;
+/** … except 64 kbps, only after 96 kbps has stalled 3 times within 2 minutes. */
+export const AUTO_LOW = 64;
+/** The rungs a song can use: the original, then only the converted streams smaller than it and at least `floor`. */
+export function ladder(origKbps, floor = AUTO_FLOOR) {
+  return RUNGS.filter(r => r === 0 || ((!(origKbps > 0) || r < origKbps) && r >= floor));
 }
 /** kbit/s a rung needs: the rung itself, the original's bitrate for the original (1411 when unknown). */
 export const needed = (rung, origKbps) => rung === 0 ? (origKbps > 0 ? origKbps : 1411) : rung;
-/** Highest rung that fits in 75 % of the estimate; the original while there is no estimate yet; 32 kbps at worst. */
-export function chooseRung(estimate, origKbps) {
-  const l = ladder(origKbps);
+/** Highest rung that fits in 75 % of the estimate; the original while there is no estimate yet; the floor at worst. */
+export function chooseRung(estimate, origKbps, floor = AUTO_FLOOR) {
+  const l = ladder(origKbps, floor);
   if (!(estimate > 0)) return estimate === null || estimate === undefined ? 0 : l[l.length - 1];
   return l.find(r => needed(r, origKbps) <= 0.75 * estimate) ?? l[l.length - 1];
 }
-/** One rung down from `rung` (stays at the bottom). */
-export function stepDown(rung, origKbps) {
-  const l = ladder(origKbps);
+/** One rung down from `rung` (stays at the floor). */
+export function stepDown(rung, origKbps, floor = AUTO_FLOOR) {
+  const l = ladder(origKbps, floor);
   const i = l.indexOf(rung);
   return l[Math.min(l.length - 1, (i < 0 ? 0 : i) + 1)];
 }
