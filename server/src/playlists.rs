@@ -234,7 +234,18 @@ pub fn request_missing(st: &AppState, u: &Row, pid: i64, auto: bool, album_mode:
         let rid = match create_request(st, u, &b, None, None) {
             Ok(id) => id,
             Err(e) if e.status.as_u16() == 409 => continue,
-            Err(e) => anyhow::bail!("{}", e.detail),
+            // the weekly limit stops the run (what was requested so far stays); with nothing requested yet it is an error
+            Err(e) if e.status.as_u16() == 429 => {
+                if n == 0 {
+                    anyhow::bail!("{}", e.detail);
+                }
+                break;
+            }
+            // one row that can't be requested (no artist or title, say) must not stop the others
+            Err(e) => {
+                tracing::info!("playlist {pid}: skipped a missing track ({}): {}", r.s("title"), e.detail);
+                continue;
+            }
         };
         if let Some(x) = extra {
             let d = st.db.one("SELECT detail FROM requests WHERE id=?", p![rid])?.map(|r| r.s("detail")).unwrap_or("{}".into());
