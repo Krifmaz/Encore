@@ -266,7 +266,19 @@ fun PlaybackSettingsScreen(nav: Nav, onBack: () -> Unit) {
             H3("In the car")
             val carLyrics by remember { CarPrefs.liveLyrics(context) }.collectAsState()
             CheckRow("Live lyrics in the car", carLyrics) { on -> CarPrefs.setLiveLyrics(context, on) }
-            Help("Android Auto shows the current line of a song's synced lyrics in place of its title (the Lyrics button next to Repeat turns it on and off). Only on this phone.")
+            val carLyricsMode by remember { CarPrefs.lyricsMode(context) }.collectAsState()
+            Seg(
+                listOf(CarPrefs.MODE_CARD to "Card", CarPrefs.MODE_TITLE to "Title line"),
+                carLyricsMode,
+            ) { v -> CarPrefs.setLyricsMode(context, v) }
+            Help(
+                if (carLyricsMode == CarPrefs.MODE_TITLE) {
+                    "Android Auto shows the current line of a song's synced lyrics in place of its title (the Lyrics button next to Repeat turns it on and off). Only on this phone."
+                } else {
+                    "Android Auto shows a lyrics card in place of the cover: the current line of a song's synced lyrics, large, with the lines around it, over the blurred cover. Title and artist stay as they are. The Lyrics button next to Repeat turns it on and off. Only on this phone."
+                },
+            )
+            Help("For the whole song text on the car screen, open Encore Lyrics in the car's app list.")
 
             H3("Sound (on this device)")
             SoundSection(prefs, bitPerfect, set)

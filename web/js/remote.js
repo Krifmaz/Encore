@@ -22,7 +22,7 @@ function deviceId() {
 function deviceName() {
   try { const own = localStorage.getItem('encore.device.name'); if (own) return own; } catch { /* ignore */ }
   const ua = navigator.userAgent;
-  if (/EncoreAndroid/.test(ua) || window.EncoreNative?.saveOffline) return 'Android app';
+  if (/EncoreAndroid/.test(ua) || window.EncoreNative?.platform === 'android') return 'Android app';
   if (/EncoreDesktop|Electron/.test(ua) || window.EncoreNative?.platform === 'desktop') return `Desktop app (${/Mac/.test(ua) ? 'Mac' : /Windows/.test(ua) ? 'Windows' : 'Linux'})`;
   const os = /iPhone/.test(ua) ? 'iPhone' : /iPad/.test(ua) ? 'iPad' : /Android/.test(ua) ? 'Android' : /Mac/.test(ua) ? 'Mac' : /Windows/.test(ua) ? 'Windows' : /Linux/.test(ua) ? 'Linux' : 'device';
   const br = /Edg\//.test(ua) ? 'Edge' : /Firefox\//.test(ua) ? 'Firefox' : /Chrome\//.test(ua) ? 'Chrome' : /Safari\//.test(ua) ? 'Safari' : 'Browser';

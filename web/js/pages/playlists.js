@@ -1,5 +1,5 @@
 import { api } from '../api.js';
-import { art, artistLinks, confirmDialog, emptyState, esc, icon, modal, statusBadge, toast } from '../ui.js';
+import { art, artistLinks, confirmDialog, emptyState, esc, icon, modal, statusBadge, toast, tr, trSub } from '../ui.js';
 import * as player from '../player.js';
 
 const SRC = {
@@ -156,6 +156,7 @@ export async function renderPlaylist(view, ctx) {
         <div class="progress mt" style="max-width:360px"><i style="width:${pl.total ? pl.matched / pl.total * 100 : 0}%"></i></div>
         <div class="row wrap mt">
           ${pl.matched ? `<button class="btn primary" id="pl-play">${icon.play}Play</button>` : ''}
+          ${pl.matched && player.canSaveOffline() ? `<button class="btn" id="pl-offline">${icon.download}Save for offline</button>` : ''}
           ${missing ? `<button class="btn ${pl.matched ? '' : 'primary'}" id="req">${icon.download}Download ${missing} missing</button>` : ''}
           <button class="btn" id="add">${icon.plus}Add from link</button>
           <button class="btn" id="dedupe">${icon.check}Remove duplicates</button>
@@ -181,7 +182,7 @@ export async function renderPlaylist(view, ctx) {
       <thead><tr><th class="num">#</th><th>Title</th><th class="hide-sm">Album</th><th>Status</th><th></th></tr></thead>
       <tbody>${pl.items.map((it, i) => `<tr data-item="${it.id}">
         <td class="num">${i + 1}</td>
-        <td><div style="font-weight:600">${esc(it.title)}</div><div class="small muted">${artistLinks(it)}</div></td>
+        <td><div style="font-weight:600">${esc(tr(it, 'title'))}</div>${trSub(it, 'title')}<div class="small muted">${artistLinks(it)}</div></td>
         <td class="hide-sm muted">${it.album_id ? `<a href="#/library/album/${esc(it.album_id)}">${esc(it.album || '')}</a>` : esc(it.album || '')}</td>
         <td>${it.track_id ? `<span class="badge ok" title="${esc(it.match_reason || '')}">✓ in library</span>${it.verify_status === 'verified' ? ' <span class="badge ok" title="Audio fingerprint confirmed">verified</span>' : it.verify_status === 'mismatch' ? ' <span class="badge err">wrong audio</span>' : ''}`
           : it.request_status ? statusBadge(it.request_status) : '<span class="badge">missing</span>'}</td>
@@ -192,6 +193,7 @@ export async function renderPlaylist(view, ctx) {
   const act = async (fn, msg) => { try { const r = await fn(); toast(msg(r), 'ok'); reload(); } catch (e) { toast(e.message, 'err'); } };
   const playable = pl.items.filter(i => i.track_id).map(i => ({ id: i.track_id, title: i.title, artist: i.artist, artists: i.artists, album: i.album, album_id: i.album_id, format: i.format, bitrate: i.bitrate, duration: i.duration }));
   view.querySelector('#pl-play')?.addEventListener('click', () => player.playQueue(playable, 0));
+  view.querySelector('#pl-offline')?.addEventListener('click', () => { player.saveOffline(playable); toast(`Saving ${playable.length} song(s) to this device…`, 'ok'); });
   view.querySelector('#req')?.addEventListener('click', () => albumChoice('Download missing songs', (mode) =>
     act(() => api.post(`/playlists/${id}/request-missing`, { album_mode: mode }), r => `Requested ${r.requested} track(s)`)));
   view.querySelector('#dedupe').onclick = () => act(() => api.post(`/playlists/${id}/dedupe`), r => r.removed ? `Removed ${r.removed} duplicate(s)` : 'No duplicates');

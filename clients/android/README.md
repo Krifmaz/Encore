@@ -87,6 +87,7 @@ feature, playback, cadenza…) comes when the code grows. Until then the package
 | `data.session` | `SessionStore` (DataStore Preferences) holds the server, token and auth kind, the device id, and the theme and autoplay settings |
 | `data.library` | `LikesRepository` (optimistic like and unlike) |
 | `playback` | `EncorePlaybackService` (MediaLibraryService plus ExoPlayer), `BrowseTree` (Android Auto), `MediaItems`, `ResumeStore`, `CoverProvider` |
+| `car` | Encore Lyrics car app (`LyricsCarAppService`, `LyricsSurface`), the lyrics card (`LyricsCard`), `CarNowPlaying` and `LyricsCache` shared with `CarControls` |
 | `ui` | `MainActivity`, `ShareActivity`, `PlayerConnection` (MediaController), `EncoreRoot` (tabs and back stack) |
 | `ui.screens` | Server and sign-in, Home, Library, Album, Artist, Playlists, Search, Settings, mini and full player |
 | `ui.theme` | Colours from `web/css/app.css` (Encore, OLED, Light); the cream accent `#f0ead6 → #d6c49a` |
@@ -153,6 +154,34 @@ shuffle library").
   `EXTRAS_KEY_ERROR_RESOLUTION_ACTION_*_COMPAT` extras, so Auto shows "Sign in to Encore on your phone" with a
   button that opens the app.
 
+### Lyrics in the car
+
+- The Lyrics button (next to Repeat) turns live lyrics on and off; Settings → Playback → In the car picks the look:
+  **Card** (default) or **Title line**. Both only change what the session reports (`CarPlayer.showMetadata`), so
+  playback never rebuffers.
+- Card: `LyricsCard` draws an 800×800 picture (blurred, darkened cover; two past lines faded above, the current
+  line large in cream, the next three faded below) on its own thread at each line change. It goes out as
+  `artworkData` and as `content://<applicationId>.covers/lyrics/<version>` (a new URI per card, served by
+  `CoverProvider` from `cacheDir/car-lyrics`, newest six kept). Title and artist stay as they are. No synced
+  lyrics: the normal cover.
+- Title line: the current line as the title, "<title> · <artist>" below it.
+
+### Encore Lyrics (second car app)
+
+- `car.LyricsCarAppService`: an `androidx.car.app` template app, category POI (not navigation), with the
+  `androidx.car.app.MAP_TEMPLATES` and `ACCESS_SURFACE` permissions; `minCarApiLevel` 7 (MapWithContentTemplate,
+  car-app 1.7). `automotive_app_desc.xml` declares `media` and `template`.
+- The map surface (`LyricsSurface`) draws the lyrics: smooth scroll, the current line enlarged in cream, the others
+  fading with distance, over the cover's colour. At most 30 frames a second while something moves, a position
+  check 10 times a second otherwise, nothing while the screen is stopped. A tap on a line seeks to it (surface
+  clicks need car API 5); a drag scrolls by hand for 4 s.
+- The content pane shows title, artist, album and cover; previous / play-pause / next are in the action strip
+  (a pane takes only two actions).
+- The song and position come from the playback service in the same process (`CarNowPlaying`, re-published every
+  second while the screen is shown); commands go through a MediaController on the service's session, which also
+  starts the service when Encore Lyrics opens first. Seeking uses the service's `SEEK` command (absolute position,
+  also for server-made streams).
+
 ## Libraries (all pinned in `gradle/libs.versions.toml`)
 
 | Library | Version |
@@ -164,6 +193,7 @@ shuffle library").
 | androidx.activity:activity-compose | 1.13.0 |
 | androidx.media3: exoplayer, session, datasource-okhttp | 1.11.1 |
 | androidx.datastore:datastore-preferences | 1.2.1 |
+| androidx.car.app:app (Encore Lyrics) | 1.7.0 (car API level 7 for MapWithContentTemplate) |
 | com.squareup.okhttp3:okhttp | 5.5.0 |
 | org.jetbrains.kotlinx:kotlinx-serialization-json | 1.11.0 |
 | org.jetbrains.kotlinx:kotlinx-coroutines-android | 1.11.0 |

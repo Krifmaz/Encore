@@ -8,6 +8,9 @@
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MEDIA_PLAYBACK" />
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+    <!-- Encore Lyrics car app: a point-of-interest app allowed the map templates, drawing the lyrics on the map surface -->
+    <uses-permission android:name="androidx.car.app.MAP_TEMPLATES" />
+    <uses-permission android:name="androidx.car.app.ACCESS_SURFACE" />
 
     <!-- usesCleartextTraffic: self-hosted servers are often plain http on the LAN -->
     <application
@@ -73,6 +76,24 @@
             android:authorities="${applicationId}.covers"
             android:exported="true"
             tools:ignore="ExportedContentProvider" />
+
+        <!-- Encore Lyrics: a second car app (template app, category POI, not navigation) showing the playing song's
+             synced lyrics on the map surface of MapWithContentTemplate (car/LyricsCarAppService.kt) -->
+        <service
+            android:name=".car.LyricsCarAppService"
+            android:exported="true"
+            android:icon="@mipmap/ic_launcher"
+            android:label="@string/car_lyrics_label">
+            <intent-filter>
+                <action android:name="androidx.car.app.CarAppService" />
+                <category android:name="androidx.car.app.category.POI" />
+            </intent-filter>
+        </service>
+
+        <!-- MapWithContentTemplate needs car API level 7 (androidx.car.app 1.7) -->
+        <meta-data
+            android:name="androidx.car.app.minCarApiLevel"
+            android:value="7" />
 
         <meta-data
             android:name="com.google.android.gms.car.application"

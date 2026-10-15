@@ -45,7 +45,7 @@
   </div>
   <audio id="a"></audio>
 <script>
-  // Plays the songs saved with "Save for offline" (files in the app's data folder, served by Rust).
+  // Plays the songs saved with "Save for offline" (files in the app's data folder).
   const invoke = (cmd, args) => window.__TAURI_INTERNALS__.invoke(cmd, args || {});
   const $ = (id) => document.getElementById(id);
   const esc = (s) => String(s ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
@@ -63,27 +63,62 @@
       <button class="x" data-rm="${esc(s.id)}" aria-label="Remove">✕</button></div>`).join('')
       : '<div class="empty muted">Nothing saved yet. When you\'re connected, use ⋯ → “Save for offline” on songs or albums.</div>';
   }
+  // Desktop: the songs play through the embedded Cadenza engine (src/engine.rs offline_*), straight into the DAC.
+  // Android: the page's own <audio> element.
+  const desktop = window.EncoreNative && window.EncoreNative.platform === 'desktop';
+  let eng = { state: 'stopped', position: 0, duration: 0 };
+  const playingNow = () => desktop ? eng.state === 'playing' : !a.paused;
+  function show(s) {
+    $('player').hidden = !s;
+    if (!s) return;
+    $('p-title').textContent = s.title; $('p-artist').textContent = s.artist;
+    $('p-art').style.backgroundImage = s.art ? `url('${s.art}')` : '';
+  }
   function play(list, i) {
     queue = list; idx = i;
     const s = queue[idx]; if (!s) return;
-    a.src = s.file; a.play();
-    $('player').hidden = false;
-    $('p-title').textContent = s.title; $('p-artist').textContent = s.artist;
-    $('p-art').style.backgroundImage = s.art ? `url('${s.art}')` : '';
+    if (desktop) {
+      invoke('offline_play_songs', { ids: queue.map(x => x.id), index: idx }).catch((e) => { $('why').textContent = String(e); });
+      eng = { state: 'playing', position: 0, duration: 0 };
+    } else { a.src = s.file; a.play(); }
+    show(s);
     load(); report();
   }
   function report() {
     const s = queue[idx];
-    invoke('now_playing', { json: JSON.stringify(s ? { title: s.title, artist: s.artist, album: s.album || '', art: '', playing: !a.paused } : { stopped: true }) }).catch(() => {});
+    const pos = desktop ? eng.position : a.currentTime, dur = desktop ? eng.duration : (a.duration || 0);
+    invoke('now_playing', { json: JSON.stringify(s ? { title: s.title, artist: s.artist, album: s.album || '', art: '', playing: playingNow(), position: pos || 0, duration: isFinite(dur) ? dur : 0 } : { stopped: true }) }).catch(() => {});
   }
-  const next = () => { if (idx < queue.length - 1) play(queue, idx + 1); };
-  const prev = () => { if (a.currentTime > 3 || idx === 0) a.currentTime = 0; else play(queue, idx - 1); };
-  const toggle = () => { if (!queue.length) return; a.paused ? a.play() : a.pause(); };
-  window.encorePlayer = { toggle, next, prev, open: () => {} };   // the Rust side calls these for media keys / notification buttons
-  a.onended = next;
-  a.onplay = a.onpause = () => { $('pi').innerHTML = a.paused ? PLAY : PAUSE; report(); };
-  a.ontimeupdate = () => { if (a.duration) $('seek').value = a.currentTime / a.duration * 1000; };
-  $('seek').oninput = (e) => { if (a.duration) a.currentTime = e.target.value / 1000 * a.duration; };
+  const paintPlay = () => { $('pi').innerHTML = playingNow() ? PAUSE : PLAY; };
+  const next = () => { if (desktop) { invoke('offline_engine', { action: 'next' }); return; } if (idx < queue.length - 1) play(queue, idx + 1); };
+  const prev = () => { if (desktop) { invoke('offline_engine', { action: 'prev' }); return; } if (a.currentTime > 3 || idx === 0) a.currentTime = 0; else play(queue, idx - 1); };
+  const toggle = () => { if (!queue.length) return; if (desktop) { invoke('offline_engine', { action: 'toggle' }); return; } a.paused ? a.play() : a.pause(); };
+  const seek = (sec) => { if (desktop) { invoke('offline_engine', { action: 'seek', value: Math.max(0, +sec || 0) }); return; } if (a.duration) a.currentTime = Math.max(0, Math.min(+sec || 0, a.duration)); };
+  const volumeBy = (d) => { if (desktop) { invoke('offline_engine', { action: 'volume', value: +d || 0 }); return; } a.volume = Math.max(0, Math.min(1, a.volume + (+d || 0))); };
+  // the Rust side calls these for media keys, shortcuts, the taskbar buttons, the mini player and notification buttons
+  window.encorePlayer = { toggle, next, prev, seek, volumeBy, open: () => {} };
+  if (desktop) {
+    // follow the engine: its song (it moves on by itself), play state and position
+    let lastKey = '';
+    setInterval(async () => {
+      try { eng = await invoke('offline_engine_status'); } catch { return; }
+      if (eng.id) {
+        const i = queue.findIndex(x => x.id === eng.id);
+        if (i >= 0 && i !== idx) { idx = i; show(queue[idx]); load(); }
+      }
+      if (eng.duration && !$('seek').matches(':active')) $('seek').value = eng.position / eng.duration * 1000;
+      paintPlay();
+      const key = `${eng.id}|${eng.state}|${eng.duration > 0}`;
+      if (key !== lastKey) { lastKey = key; report(); }
+    }, 500);
+    $('seek').onchange = (e) => { if (eng.duration) { seek(e.target.value / 1000 * eng.duration); setTimeout(report, 300); } };
+  } else {
+    a.onended = next;
+    a.onplay = a.onpause = () => { paintPlay(); report(); };
+    a.onseeked = report;
+    a.ontimeupdate = () => { if (a.duration) $('seek').value = a.currentTime / a.duration * 1000; };
+    $('seek').oninput = (e) => { if (a.duration) a.currentTime = e.target.value / 1000 * a.duration; };
+  }
   $('play').onclick = toggle; $('next').onclick = next; $('prev').onclick = prev;
   $('shuf').onclick = () => { const l = [...songs].sort(() => Math.random() - 0.5); play(l, 0); };
   $('list').onclick = (e) => {
@@ -92,7 +127,7 @@
     const r = e.target.closest('[data-i]');
     if (r) play(songs, +r.dataset.i);
   };
-  $('retry').onclick = () => invoke('retry_server');
+  $('retry').onclick = () => { if (desktop) invoke('offline_engine', { action: 'stop' }); invoke('retry_server'); };
   $('server').onclick = () => invoke('change_server');
   load();
 </script>

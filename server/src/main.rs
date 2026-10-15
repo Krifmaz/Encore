@@ -42,6 +42,7 @@ mod sync;
 mod state;
 mod tagger;
 mod tools;
+mod translate;
 mod vpn;
 mod worker;
 mod ytauth;
@@ -102,10 +103,13 @@ pub fn app(st: AppState) -> Router {
         .merge(routes::roon::router())
         .merge(routes::playback::router())
         .merge(contribute::router())
+        .merge(translate::router())
         .merge(ytauth::router())
         .with_state(st.clone())
         // albums and songs in JSON answers gain `cover_v`, so clients can use cacheable cover URLs
-        .layer(middleware::from_fn_with_state(st, covers::stamp_layer))
+        .layer(middleware::from_fn_with_state(st.clone(), covers::stamp_layer))
+        // titles, albums and artists gain `_t` / `_r` (translation, romanization) for listeners who asked
+        .layer(middleware::from_fn_with_state(st, translate::stamp_layer))
         .fallback_service(spa)
         .layer(middleware::from_fn(security_headers))
         // gzip for JSON and pages – never for audio: it only burns CPU and gets in the way of range requests
@@ -170,6 +174,7 @@ async fn main() -> anyhow::Result<()> {
     tokio::spawn(roon::supervisor(st.clone()));
     tokio::spawn(contribute::worker(st.clone()));
     tokio::spawn(ytauth::supervisor(st.clone()));
+    tokio::spawn(translate::worker(st.clone()));
     let listener = tokio::net::TcpListener::bind(addr).await?;
     axum::serve(listener, app(st).into_make_service_with_connect_info::<SocketAddr>()).await?;
     Ok(())

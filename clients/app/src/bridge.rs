@@ -20,15 +20,21 @@ pub fn script() -> String {
     changeServer: () => fire('change_server'),
     _notify: (m) => window.dispatchEvent(new CustomEvent('encore-native', {{ detail: m }})),
   }};
-  if ({mobile}) {{
-    n.saveOffline = (json) => fire('save_offline', {{ json: String(json) }});
-    n.openOffline = () => fire('open_offline');
-  }} else {{
+  // songs kept for listening without the server (src/offline.rs; on the desktop they play through Cadenza)
+  n.saveOffline = (json) => fire('save_offline', {{ json: String(json) }});
+  n.openOffline = () => fire('open_offline');
+  if (!{mobile}) {{
     // Cadenza is built into the desktop app (src/engine.rs); the web app signs it in with an app token
     n.engine = true;
     n.engineLogin = (json) => invoke('engine_login', {{ json: String(json) }});
     n.engineLogout = () => fire('engine_logout');
     n.engineStatus = () => invoke('engine_status');
+    // Settings → This computer (src/extras.rs): start with the computer, shortcuts, mini player, updates
+    n.desktopSettings = () => invoke('desktop_settings');
+    n.setDesktopSettings = (json) => invoke('set_desktop_settings', {{ json: String(json) }});
+    n.miniPlayer = () => fire('mini_player');
+    n.checkUpdate = () => invoke('check_update');
+    n.installUpdate = () => invoke('install_update');
   }}
   window.EncoreNative = n;
   const alive = () => fire('page_alive', {{ url: location.href, encore: !!document.querySelector('script[src*="/js/app.js"]') }});
@@ -39,7 +45,9 @@ pub fn script() -> String {
 "#, platform = if mobile { "android" } else { "desktop" }, version = crate::VERSION, mobile = mobile)
 }
 
-/// What the web app reports with nowPlaying(): {title, artist, album, art, playing} or {stopped: true}.
+/// What the web app reports with nowPlaying(): {title, artist, album, art, playing, position, duration} or
+/// {stopped: true}. position / duration are seconds (0 = unknown) as of the report; the desktop side moves the
+/// position along on its own while playing (taskbar progress, mini player, OS media controls).
 #[derive(Clone, Debug, Default, Deserialize, Serialize)]
 #[serde(default)]
 pub struct NowPlaying {
@@ -49,16 +57,33 @@ pub struct NowPlaying {
     pub art: String,
     pub playing: bool,
     pub stopped: bool,
+    pub position: f64,
+    pub duration: f64,
 }
 
 /// Run a player action in the page: toggle / next / prev / open (see window.encorePlayer in web/js/player.js).
 pub fn control<R: Runtime>(app: &AppHandle<R>, action: &str) {
-    if !matches!(action, "toggle" | "next" | "prev" | "open") {
-        return;
-    }
+    control_with(app, action, 0.0);
+}
+
+/// Like `control`, with a number: seek (to seconds) and volume (change by -1…1, e.g. 0.05). Pages without
+/// those functions (older servers) ignore them.
+pub fn control_with<R: Runtime>(app: &AppHandle<R>, action: &str, value: f64) {
+    let Some(js) = control_js(action, value) else { return };
     if let Some(w) = server::main_window(app) {
-        let _ = w.eval(format!("window.encorePlayer && window.encorePlayer.{action}()"));
+        let _ = w.eval(js);
     }
+}
+
+/// The JavaScript for one player action, or None for an unknown action.
+pub fn control_js(action: &str, value: f64) -> Option<String> {
+    let v = if value.is_finite() { value } else { 0.0 };
+    Some(match action {
+        "toggle" | "next" | "prev" | "open" => format!("window.encorePlayer && window.encorePlayer.{action}()"),
+        "seek" => format!("window.encorePlayer && window.encorePlayer.seek && window.encorePlayer.seek({})", v.max(0.0)),
+        "volume" => format!("window.encorePlayer && window.encorePlayer.volumeBy && window.encorePlayer.volumeBy({})", v.clamp(-1.0, 1.0)),
+        _ => return None,
+    })
 }
 
 /// A toast in the web app (web/js/app.js listens for the encore-native event).
@@ -172,5 +197,37 @@ pub async fn save_offline<R: Runtime>(app: AppHandle<R>, window: WebviewWindow<R
     match offline::save(&app, &http, &cookie, req).await {
         Ok(title) => { notify(&app, &format!("Saved for offline: {title}"), "ok"); Outcome { ok: true, error: None } }
         Err(e) => { notify(&app, &format!("Couldn't save: {e}"), "err"); Outcome { ok: false, error: Some(e) } }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn control_js_knows_the_actions_and_clamps_numbers() {
+        assert_eq!(control_js("toggle", 0.0).unwrap(), "window.encorePlayer && window.encorePlayer.toggle()");
+        assert!(control_js("seek", -5.0).unwrap().ends_with("seek(0)"));
+        assert!(control_js("seek", 61.5).unwrap().ends_with("seek(61.5)"));
+        assert!(control_js("volume", 3.0).unwrap().ends_with("volumeBy(1)"));
+        assert!(control_js("volume", f64::NAN).unwrap().ends_with("volumeBy(0)"));
+        assert!(control_js("alert(1)", 0.0).is_none());
+    }
+
+    #[test]
+    fn now_playing_reads_old_and_new_reports() {
+        let np: NowPlaying = serde_json::from_str(r#"{"title":"a","playing":true}"#).unwrap();
+        assert_eq!((np.position, np.duration), (0.0, 0.0));
+        let np: NowPlaying = serde_json::from_str(r#"{"title":"a","position":12.5,"duration":200}"#).unwrap();
+        assert_eq!((np.position, np.duration), (12.5, 200.0));
+    }
+
+    #[test]
+    fn the_bridge_offers_offline_everywhere_and_desktop_extras_on_the_desktop() {
+        let js = script();
+        assert!(js.contains("n.saveOffline") && js.contains("n.openOffline"));
+        if cfg!(not(any(target_os = "android", target_os = "ios"))) {
+            assert!(js.contains("n.desktopSettings") && js.contains("n.miniPlayer") && js.contains("if (!false)"));
+        }
     }
 }

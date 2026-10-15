@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-mini-state"
+description = "Enables the mini_state command without any pre-configured scope."
+commands.allow = ["mini_state"]
+
+[[permission]]
+identifier = "deny-mini-state"
+description = "Denies the mini_state command without any pre-configured scope."
+commands.deny = ["mini_state"]

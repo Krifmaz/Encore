@@ -1,6 +1,6 @@
 import { api } from '../api.js';
 import * as player from '../player.js';
-import { albumLink, art, artistLinks, availability, confirmDialog, debounce, emptyState, esc, fmt, icon, modal, shareArtist, skeletonGrid, toast } from '../ui.js';
+import { albumLink, art, artistLinks, availability, confirmDialog, debounce, emptyState, esc, fmt, icon, modal, shareArtist, skeletonGrid, toast, tr, trInline, trSub } from '../ui.js';
 import { albumTile, bindTiles, libraryTile, submitRequest } from './common.js';
 import { artistCard, moreLikeThis } from './foryou.js';
 import { pickerModal } from './picker.js';
@@ -73,8 +73,8 @@ function trackRow(t) {
   return `<div class="list-item">
     ${t.library ? `<button class="thumb play-thumb" data-play-song='${esc(JSON.stringify(t.library))}' title="Play" aria-label="Play">${art(t.cover, t.album || t.title)}<i>${icon.play}</i></button>` : `<div class="thumb">${art(t.cover, t.album || t.title)}</div>`}
     <div class="grow">
-      <div class="ellipsis" style="font-weight:600">${esc(t.title)}</div>
-      <div class="small muted ellipsis"><a href="${artistHref(t)}">${esc(t.artist)}</a>${t.album ? ` · ${t.release_group_id ? `<a href="#/album/${esc(t.release_group_id)}">${esc(t.album)}</a>` : esc(t.album)}` : ''}${t.year ? ' · ' + esc(t.year) : ''}</div>
+      <div class="ellipsis" style="font-weight:600">${esc(tr(t, 'title'))}</div>${trSub(t, 'title')}
+      <div class="small muted ellipsis"><a href="${artistHref(t)}">${esc(trInline(t, 'artist'))}</a>${t.album ? ` · ${t.release_group_id ? `<a href="#/album/${esc(t.release_group_id)}">${esc(trInline(t, 'album'))}</a>` : esc(trInline(t, 'album'))}` : ''}${t.year ? ' · ' + esc(t.year) : ''}</div>
     </div>
     <span class="small faint hide-sm">${t.length ? fmt.dur(t.length) : ''}</span>
     ${t.in_library ? availability(t) : live(songKey(t), t.request_status ? liveBadge(t.request_status, t.request_label) : songRequest(t))}
@@ -86,7 +86,7 @@ function librarySongRow(t) {
   return `<div class="list-item">
     <button class="thumb play-thumb" data-play-song='${esc(JSON.stringify(t))}' title="Play" aria-label="Play">${art(`/api/library/albums/${t.album_id}/cover`, t.album || t.title)}<i>${icon.play}</i></button>
     <div class="grow">
-      <div class="ellipsis" style="font-weight:600">${esc(t.title)}</div>
+      <div class="ellipsis" style="font-weight:600">${esc(tr(t, 'title'))}</div>${trSub(t, 'title')}
       <div class="small muted ellipsis">${artistLinks(t)}${t.album ? ' · ' + albumLink(t) : ''}</div>
     </div>
     <span class="small faint hide-sm">${t.duration ? fmt.dur(t.duration) : ''}</span>
@@ -318,7 +318,7 @@ export async function renderArtist(view, ctx) {
       <div class="cover" id="artist-photo">${art(firstCover, a.name)}</div>
       <div class="grow">
         <div class="kicker">${esc(a.type || 'Artist')}${a.country ? ' · ' + esc(a.country) : ''}${a.begin ? ' · since ' + esc(a.begin.slice(0, 4)) : ''}</div>
-        <h1>${esc(a.name)}</h1>
+        <h1>${esc(tr(a, 'name'))}</h1>${trSub(a, 'name')}
         ${a.disambiguation ? `<p class="muted" style="margin:0 0 10px">${esc(a.disambiguation)}</p>` : ''}
         <div class="chips">${a.tags.map(t => `<a class="badge" href="#/tag/${encodeURIComponent(t)}">${esc(t)}</a>`).join('')}</div>
         <div class="row wrap mt">
@@ -562,8 +562,8 @@ export async function renderAlbum(view, ctx) {
       <div class="cover">${art(a.cover.replace('front-250', 'front-500'), a.title)}</div>
       <div class="grow">
         <div class="kicker">${esc(a.type || 'Release')}${a.secondary.length ? ' · ' + esc(a.secondary.join(', ')) : ''}</div>
-        <h1>${esc(a.title)}</h1>
-        <div class="muted"><a href="#/artist/${esc(a.artist_id)}" style="color:var(--text);font-weight:650">${esc(a.artist)}</a>
+        <h1>${esc(tr(a, 'title'))}</h1>${trSub(a, 'title')}
+        <div class="muted"><a href="#/artist/${esc(a.artist_id)}" style="color:var(--text);font-weight:650">${esc(trInline(a, 'artist'))}</a>
           ${a.year ? ' · ' + esc(a.year) : ''}${rel ? ` · ${rel.tracks.length} tracks · ${fmt.longDur(total)}` : ''}${rel?.label ? ' · ' + esc(rel.label) : ''}</div>
         <div class="chips mt">${(a.tags || []).map(t => `<span class="badge">${esc(t)}</span>`).join('')}</div>
         <div class="row wrap mt">

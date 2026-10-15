@@ -1,5 +1,5 @@
 import { api } from '../api.js';
-import { art, emptyState, esc, fmt, icon, modal, toast } from '../ui.js';
+import { art, emptyState, esc, fmt, icon, modal, toast, trInline } from '../ui.js';
 import { bindRequestActions, bindTiles, libraryTile, requestRow } from './common.js';
 import { bindSkippedToggle, hideSkippedPref, skippedToggle } from './discover.js';
 
@@ -120,7 +120,7 @@ export async function render(view, ctx) {
     view.querySelector('#fy-preview').innerHTML = `<div class="section-head"><h2>For you</h2><a class="btn sm" href="#/for-you">See all</a></div>
       <div class="card flat"><div class="list">${tr.map((t, i) => `<div class="list-item">
         ${t.library ? `<button class="thumb play-thumb" data-fy="${i}" aria-label="Play">${art(t.cover, t.title)}<i>${icon.play}</i></button>` : `<div class="thumb">${art(t.cover, t.title)}</div>`}
-        <div class="grow" style="min-width:0"><div class="ellipsis" style="font-weight:600">${esc(t.title)}</div><div class="small muted ellipsis">${esc(t.artist)}</div></div>
+        <div class="grow" style="min-width:0"><div class="ellipsis" style="font-weight:600">${esc(trInline(t, 'title'))}</div><div class="small muted ellipsis">${esc(trInline(t, 'artist'))}</div></div>
         ${t.library ? '<span class="badge ok">In library</span>' : ''}</div>`).join('')}</div></div>`;
     view.querySelector('#fy-preview').addEventListener('click', async (e) => {
       const b = e.target.closest('[data-fy]');

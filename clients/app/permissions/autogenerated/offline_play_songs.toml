@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-offline-play-songs"
+description = "Enables the offline_play_songs command without any pre-configured scope."
+commands.allow = ["offline_play_songs"]
+
+[[permission]]
+identifier = "deny-offline-play-songs"
+description = "Denies the offline_play_songs command without any pre-configured scope."
+commands.deny = ["offline_play_songs"]

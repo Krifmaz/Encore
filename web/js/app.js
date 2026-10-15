@@ -3,7 +3,7 @@ import * as remote from './remote.js';
 import * as playback from './playback.js';
 import { api } from './api.js';
 import * as player from './player.js';
-import { esc, icon, qs, toast } from './ui.js';
+import { esc, icon, qs, setTranslateMode, toast } from './ui.js';
 import * as authPages from './pages/auth.js';
 import * as home from './pages/home.js';
 import * as discover from './pages/discover.js';
@@ -171,7 +171,7 @@ export async function boot() {
   appearance.apply();
   try { session.info = await api.get('/auth/info'); } catch { session.info = {}; }
   try { session.user = await api.get('/auth/me'); } catch { session.user = null; }
-  if (session.user) { appearance.adoptAccount(session.user); playback.adoptAccount(session.user); }
+  if (session.user) { appearance.adoptAccount(session.user); playback.adoptAccount(session.user); setTranslateMode(session.user.prefs?.translate_mode); }
   else appearance.apply(appearance.BRAND);
   if (session.user) {
     renderShell();
@@ -186,6 +186,7 @@ export async function boot() {
 
 export async function refreshUser() {
   session.user = await api.get('/auth/me');
+  setTranslateMode(session.user?.prefs?.translate_mode);
   appearance.apply();
   appearance.adoptAccount(session.user);
   renderShell();

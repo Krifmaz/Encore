@@ -4,6 +4,7 @@ import android.content.Context
 import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
+import android.os.SystemClock
 import androidx.media3.common.ForwardingPlayer
 import androidx.media3.common.MediaItem
 import androidx.media3.common.MediaMetadata
@@ -13,22 +14,54 @@ import androidx.media3.session.MediaSession
 import androidx.media3.session.SessionCommand
 import app.encore.android.AppGraph
 import app.encore.android.R
-import app.encore.android.ui.screens.Lyrics
+import app.encore.android.car.CarLine
+import app.encore.android.car.CarNowPlaying
+import app.encore.android.car.LyricsCache
+import app.encore.android.car.LyricsCard
+import app.encore.android.car.NowPlaying
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
 import java.util.concurrent.ExecutorService
+import java.util.concurrent.Executors
 
 /**
- * "Live lyrics in the car": a device-only setting (SharedPreferences "encore_car"), shared in this process by
- * the playback service and Settings → Playback.
+ * "Live lyrics in the car": device-only settings (SharedPreferences "encore_car"), shared in this process by
+ * the playback service and Settings → Playback. On / off (the Lyrics button), and how: a lyrics card as the
+ * artwork ([MODE_CARD], the default) or the current line as the title ([MODE_TITLE]).
  */
 object CarPrefs {
+    const val MODE_CARD = "card"
+    const val MODE_TITLE = "title"
     private const val FILE = "encore_car"
     private const val LIVE_LYRICS = "live_lyrics"
+    private const val MODE = "lyrics_mode"
     @Volatile private var flow: MutableStateFlow<Boolean>? = null
+    @Volatile private var modeFlow: MutableStateFlow<String>? = null
+
+    /** [MODE_CARD] or [MODE_TITLE]. */
+    fun lyricsMode(context: Context): StateFlow<String> = modeState(context).asStateFlow()
+
+    fun setLyricsMode(context: Context, mode: String) {
+        val m = if (mode == MODE_TITLE) MODE_TITLE else MODE_CARD
+        val f = modeState(context)
+        if (f.value == m) return
+        f.value = m
+        try {
+            context.applicationContext.getSharedPreferences(FILE, Context.MODE_PRIVATE).edit().putString(MODE, m).apply()
+        } catch (_: Exception) {}
+    }
+
+    @Synchronized
+    private fun modeState(context: Context): MutableStateFlow<String> {
+        modeFlow?.let { return it }
+        val m = try {
+            context.applicationContext.getSharedPreferences(FILE, Context.MODE_PRIVATE).getString(MODE, MODE_CARD)
+        } catch (_: Exception) { MODE_CARD }
+        return MutableStateFlow(if (m == MODE_TITLE) MODE_TITLE else MODE_CARD).also { modeFlow = it }
+    }
 
     fun liveLyrics(context: Context): StateFlow<Boolean> = state(context).asStateFlow()
 
@@ -53,7 +86,8 @@ object CarPrefs {
 
 /**
  * The player the session (notification, lock screen, Android Auto) sees: the service's ExoPlayer with two things
- * of its own. The now-playing metadata can carry a lyric line ([showMetadata]) – only what the session reports
+ * of its own. The now-playing metadata can carry a lyric line or the lyrics card as its artwork ([showMetadata]) –
+ * only what the session reports
  * changes; the queue's items keep their real titles, so the phone app's own player, scrobbling, the remote
  * snapshot and resume (which read the items or the ExoPlayer itself) never see it. And shuffle is the app's
  * shuffle (the rest of the queue in a new order, the old order back when it goes off), not ExoPlayer's
@@ -110,8 +144,10 @@ class CarPlayer(private val exo: Player) : ForwardingPlayer(exo) {
 
 /**
  * The buttons next to the transport in the car, the notification and the lock screen (like YouTube Music):
- * Like, Shuffle, Repeat and Lyrics, as media button preferences with custom session commands; and live lyrics,
- * the current synced lyric line as the now-playing title.
+ * Like, Shuffle, Repeat and Lyrics, as media button preferences with custom session commands; and live lyrics:
+ * a card with the lines around the current one as the now-playing artwork (title and artist stay as they are),
+ * or the current synced line as the title ([CarPrefs.lyricsMode]). It also publishes what plays to
+ * [CarNowPlaying] for the Encore Lyrics car app (car/LyricsCarAppService.kt).
  */
 class CarControls(
     private val context: Context,
@@ -133,10 +169,21 @@ class CarControls(
 
     // live lyrics (main thread)
     private var lyricsOn = CarPrefs.liveLyrics(context).value
+    private var mode = CarPrefs.lyricsMode(context).value
+    private var modeJob: Job? = null
+    private var watchJob: Job? = null
     private var lyricsFor: Long? = null
-    private var lines: List<Pair<Double, String>> = emptyList()
+    private var lines: List<CarLine> = emptyList()
     private var lineAt = -2
     private val noLyricsToasted = HashSet<Long>()
+
+    // the lyrics card: drawn on its own low-priority thread, newest request wins
+    private val card = LyricsCard(context)
+    private val cardThread: ExecutorService = Executors.newSingleThreadExecutor { r ->
+        Thread(r, "car-lyrics-card").apply { priority = Thread.NORM_PRIORITY - 2; isDaemon = true }
+    }
+    private var cardSeq = 0
+    @Volatile private var cardWanted = 0
 
     private val listener = object : Player.Listener {
         override fun onMediaItemTransition(mediaItem: MediaItem?, reason: Int) {
@@ -145,6 +192,7 @@ class CarControls(
                 loadLyrics()
             }
             refreshButtons()
+            publish()
         }
 
         override fun onRepeatModeChanged(repeatMode: Int) = refreshButtons()
@@ -152,11 +200,17 @@ class CarControls(
         override fun onIsPlayingChanged(isPlaying: Boolean) {
             main.removeCallbacks(lyricTick)
             if (isPlaying && lyricsOn && lines.isNotEmpty()) main.post(lyricTick)
+            publish()
+            main.removeCallbacks(publishTick)
+            if (isPlaying && CarNowPlaying.watchers.value > 0) main.postDelayed(publishTick, 1000L)
         }
 
         override fun onPositionDiscontinuity(oldPosition: Player.PositionInfo, newPosition: Player.PositionInfo, reason: Int) {
             if (lyricsOn && lines.isNotEmpty()) showLine()
+            publish()
         }
+
+        override fun onPlaybackParametersChanged(playbackParameters: androidx.media3.common.PlaybackParameters) = publish()
     }
 
     init {
@@ -177,19 +231,79 @@ class CarControls(
                 refreshButtons()
             }
         }
+        modeJob = graph.scope.launch {
+            CarPrefs.lyricsMode(context).collect { m ->
+                if (released || m == mode) return@collect
+                mode = m
+                // the other look from the line playing now on
+                cardWanted = ++cardSeq
+                lineAt = -2
+                player.showMetadata(null, null)
+                if (lyricsOn && lines.isNotEmpty()) showLine()
+            }
+        }
+        // the Encore Lyrics car app is on screen: keep its position fresh
+        watchJob = graph.scope.launch {
+            CarNowPlaying.watchers.collect { n ->
+                if (released) return@collect
+                main.removeCallbacks(publishTick)
+                publish()
+                if (n > 0 && exo.isPlaying) main.postDelayed(publishTick, 1000L)
+            }
+        }
         if (graph.store.current != null) graph.likes.refresh()
         if (lyricsOn) loadLyrics()
+        publish()
     }
 
     fun release() {
         released = true
         likesJob?.cancel()
         lyricsJob?.cancel()
+        modeJob?.cancel()
+        watchJob?.cancel()
         main.removeCallbacks(lyricTick)
         main.removeCallbacks(clearNote)
+        main.removeCallbacks(publishTick)
         exo.removeListener(listener)
         player.onShuffle = null
         session = null
+        cardWanted = -1
+        cardThread.execute { card.release() }
+        cardThread.shutdown()
+        CarNowPlaying.publish(null)
+    }
+
+    // ---- what plays, for the Encore Lyrics car app -----------------------------------------------------------
+
+    private val publishTick = object : Runnable {
+        override fun run() {
+            if (released) return
+            publish()
+            if (exo.isPlaying && CarNowPlaying.watchers.value > 0) main.postDelayed(this, 1000L)
+        }
+    }
+
+    /** The song (its own metadata, never the lyric line or card), whether it plays and where. Main thread. */
+    private fun publish() {
+        if (released) return
+        val item = exo.currentMediaItem
+        if (item == null) { CarNowPlaying.publish(null); return }
+        val md = item.mediaMetadata
+        CarNowPlaying.publish(
+            NowPlaying(
+                mediaId = item.mediaId,
+                trackId = MediaItems.trackId(item.mediaId),
+                title = md.title?.toString() ?: "",
+                artist = md.artist?.toString() ?: "",
+                album = md.albumTitle?.toString() ?: "",
+                artworkUri = md.artworkUri,
+                playing = exo.isPlaying,
+                positionMs = positionMs(),
+                atElapsedMs = SystemClock.elapsedRealtime(),
+                speed = exo.playbackParameters.speed,
+            ),
+        )
     }
 
     /** A custom command from a controller; false when it isn't one of ours. Main thread. */
@@ -305,7 +419,7 @@ class CarControls(
 
     private val clearNote = Runnable { if (!released && lines.isEmpty()) player.showMetadata(null, null) }
 
-    /** The current song's synced lyrics, fetched once per song while live lyrics are on. */
+    /** The current song's synced lyrics, fetched once per song while live lyrics are on (LyricsCache). */
     private fun loadLyrics() {
         main.removeCallbacks(lyricTick)
         main.removeCallbacks(clearNote)
@@ -313,13 +427,11 @@ class CarControls(
         lyricsFor = id
         lines = emptyList()
         lineAt = -2
+        cardWanted = ++cardSeq
         player.showMetadata(null, null)
         if (!lyricsOn || id == null) return
         io.execute {
-            val parsed = try {
-                val l = Lyrics.from(graph.api.lyrics(id))
-                if (l.synced) l.lines.map { it.timeSec to it.text } else emptyList()
-            } catch (_: Exception) { emptyList() }
+            val parsed = LyricsCache.synced(graph.api, id)
             main.post {
                 if (released || !lyricsOn || lyricsFor != id || currentId() != id) return@post
                 lines = parsed
@@ -334,8 +446,12 @@ class CarControls(
         }
     }
 
-    /** No synced lyrics: the normal title, and "No synced lyrics for this song" in the subtitle for 3 s, once per song. */
+    /**
+     * No synced lyrics: the normal title and cover. With the title line, "No synced lyrics for this song" in the
+     * subtitle for 3 s, once per song (the card leaves title and artist alone).
+     */
     private fun noSyncedLyrics(id: Long) {
+        if (mode != CarPrefs.MODE_TITLE) return
         if (!noLyricsToasted.add(id)) return
         val item = exo.currentMediaItem ?: return
         val md = exo.mediaMetadata.buildUpon().setArtist("No synced lyrics for this song").build()
@@ -350,28 +466,62 @@ class CarControls(
         lines = emptyList()
         lyricsFor = null
         lineAt = -2
+        cardWanted = ++cardSeq
         player.showMetadata(null, null)
     }
 
-    /** The line at the current position as the title; "<title> · <artist>" below it. Before the first line: the song as it is. */
+    /**
+     * The line at the current position: as the lyrics card (the artwork; title and artist as they are) or as the
+     * title with "<title> · <artist>" below it. Before the first line the title mode shows the song as it is and
+     * the card shows the lines to come.
+     */
     private fun showLine() {
         val item = exo.currentMediaItem ?: return
-        val t = positionMs() / 1000.0 + 0.15
-        var at = -1
-        for (i in lines.indices) { if (lines[i].first <= t) at = i else break }
+        val at = LyricsCache.lineAt(lines, positionMs())
         if (at == lineAt) return
         lineAt = at
+        if (mode == CarPrefs.MODE_CARD) { showCard(item, at); return }
         if (at < 0) { player.showMetadata(null, null); return }
         val base = exo.mediaMetadata
         val title = base.title?.toString() ?: ""
         val artist = base.artist?.toString() ?: ""
-        val text = lines[at].second.ifBlank { "♪" }
+        val text = lines[at].text.ifBlank { "♪" }
         val md = base.buildUpon()
             .setTitle(text)
             .setDisplayTitle(text)
             .setArtist(listOf(title, artist).filter { it.isNotEmpty() }.joinToString(" · "))
             .build()
         player.showMetadata(item.mediaId, md)
+    }
+
+    /**
+     * Draws the card for line [at] on the card thread and shows it as the session's artwork: the bytes as
+     * artworkData and a new content:// URI per card as artworkUri (hosts that load by URI see a new picture each
+     * time). Only the reported metadata changes, so playback never rebuffers. A newer request drops this one.
+     */
+    private fun showCard(item: MediaItem, at: Int) {
+        val seq = ++cardSeq
+        cardWanted = seq
+        val snapshot = lines
+        val itemMd = item.mediaMetadata
+        val coverUri = itemMd.artworkUri
+        val coverKey = itemMd.extras?.getString(MediaItems.EXTRA_ALBUM_ID) ?: coverUri?.toString() ?: ""
+        try {
+            cardThread.execute {
+                if (cardWanted != seq) return@execute
+                val r = try { card.render(coverKey, coverUri, snapshot, at) } catch (_: Throwable) { null }
+                if (r == null) return@execute
+                main.post {
+                    if (released || cardWanted != seq || !lyricsOn || mode != CarPrefs.MODE_CARD) return@post
+                    if (exo.currentMediaItem?.mediaId != item.mediaId) return@post
+                    val md = exo.mediaMetadata.buildUpon()
+                        .setArtworkData(r.bytes, MediaMetadata.PICTURE_TYPE_FRONT_COVER)
+                        .setArtworkUri(r.uri)
+                        .build()
+                    player.showMetadata(item.mediaId, md)
+                }
+            }
+        } catch (_: java.util.concurrent.RejectedExecutionException) {}
     }
 
     companion object {

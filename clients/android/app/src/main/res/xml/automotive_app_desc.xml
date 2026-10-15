@@ -1,5 +1,7 @@
 <?xml version="1.0" encoding="utf-8"?>
-<!-- Android Auto: Encore is a media app (browse + play through EncorePlaybackService) -->
+<!-- Android Auto: Encore is a media app (browse + play through EncorePlaybackService) and a template app
+     (Encore Lyrics, car/LyricsCarAppService.kt) -->
 <automotiveApp>
     <uses name="media" />
+    <uses name="template" />
 </automotiveApp>

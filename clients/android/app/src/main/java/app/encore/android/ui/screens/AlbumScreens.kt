@@ -48,6 +48,7 @@ import app.encore.android.data.api.Album
 import app.encore.android.data.api.AlbumDetail
 import app.encore.android.data.api.EncoreApi
 import app.encore.android.data.api.Track
+import app.encore.android.data.api.Tr
 import app.encore.android.ui.Nav
 import app.encore.android.ui.Screen
 import app.encore.android.ui.components.AlbumCard
@@ -126,6 +127,8 @@ private fun loadAlbumPage(nav: Nav, id: String): AlbumPage {
         year = o.s("year").take(4),
         trackCount = tracks.size,
         formats = tracks.map { it.format }.distinct().joinToString(","),
+        titleTr = Tr.of(o, "album"),
+        artistTr = Tr.of(o, "albumartist"),
     )
     val detail = AlbumDetail(album, tracks, o.d("duration"))
 
@@ -199,13 +202,14 @@ fun AlbumScreen(nav: Nav, albumId: String) {
                         Spacer(Modifier.height(18.dp))
                         Text("ALBUM · IN YOUR LIBRARY", style = MaterialTheme.typography.labelSmall, color = p.muted, letterSpacing = 1.2.sp)
                         Text(
-                            album.title,
+                            album.shownTitle(),
                             style = MaterialTheme.typography.headlineMedium,
                             textAlign = TextAlign.Center,
                             modifier = Modifier.padding(top = 6.dp),
                         )
+                        album.titleUnder()?.let { Text(it, style = MaterialTheme.typography.bodyMedium, color = p.muted, textAlign = TextAlign.Center) }
                         Text(
-                            album.artist,
+                            album.shownArtist(),
                             style = MaterialTheme.typography.bodyLarge,
                             fontWeight = FontWeight.SemiBold,
                             color = p.text,

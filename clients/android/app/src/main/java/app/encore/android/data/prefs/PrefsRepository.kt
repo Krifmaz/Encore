@@ -131,6 +131,8 @@ class PrefsRepository(context: Context, private val api: EncoreApi, private val 
             try {
                 val me = withContext(Dispatchers.IO) { api.meRaw() }
                 adoptAccount((me["prefs"] as? JsonObject)?.get("playback") as? JsonObject)
+                // Settings → Language (translated titles) follows the account too
+                app.encore.android.data.api.Translations.adopt(me["prefs"] as? JsonObject)
             } catch (_: Exception) { /* offline, or signed out */ }
             refreshDsp()
         }
@@ -147,6 +149,7 @@ class PrefsRepository(context: Context, private val api: EncoreApi, private val 
         prefs.edit().remove(KEY).apply()
         _playback.value = PlaybackPrefs()
         _dsp.value = null
+        app.encore.android.data.api.Translations.clear()
     }
 
     private companion object {

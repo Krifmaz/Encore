@@ -485,6 +485,7 @@ fn embedded(id: &str) -> Option<app::PageFn> {
     Some(match id {
         "account" => account::render,
         "appearance" => render_appearance,
+        "language" => crate::pages::translate::render_language,
         "playback" => render_playback,
         "connections" => connections::render,
         "users" => admin::render_users,
@@ -493,6 +494,7 @@ fn embedded(id: &str) -> Option<app::PageFn> {
         "contribute" => crate::pages::contribute::render,
         "blocked" => crate::pages::report::render,
         "diagnostics" => diagnostics::render,
+        "computer" => crate::pages::computer::render,
         _ => return None,
     })
 }
@@ -805,13 +807,15 @@ pub fn render(view: Element, ctx: Ctx) -> PageFuture {
         let s = ctx.q("s");
         let mut current = if s.is_empty() { "account".to_string() } else { group_of(&s) };
         let mut nav: Vec<(&str, Vec<(&str, &str)>)> = vec![
-            ("You", vec![("account", "Account"), ("appearance", "Appearance"), ("playback", "Playback"), ("connections", "Connections")]),
+            ("You", vec![("account", "Account"), ("appearance", "Appearance"), ("language", "Language"), ("playback", "Playback"), ("connections", "Connections")]),
         ];
         if admin {
             nav.push(("People", vec![("users", "Users & permissions"), ("invites", "Invites")]));
             nav.push(("Server", GROUPS.iter().map(|g| (g.id, g.title)).collect()));
             nav.push(("System", vec![("diagnostics", "Diagnostics")]));
         }
+        // the desktop app: its own settings (start with the computer, shortcuts, mini player, offline songs, updates)
+        if app::native_has("desktopSettings") { nav[0].1.push(("computer", "This computer")); }
         let pages: Vec<&str> = nav.iter().flat_map(|(_, items)| items.iter().map(|(id, _)| *id)).collect();
         if !pages.iter().any(|p| *p == current) { current = "account".to_string(); }
         let select_html: String = nav.iter().map(|(label, items)| format!(r##"<optgroup label="{}">{}</optgroup>"##,
@@ -1824,6 +1828,7 @@ fn tool_reset(t: &Value) -> (String, String, String) {
         "cadenza" => ("Use the built-in engine".into(), "Go back to the engine built into Encore? The downloaded Cadenza is removed.".into(), "Back to the built-in engine".into()),
         "slskd" => ("Remove slskd".into(), "Remove slskd? Soulseek stays off until you install it again.".into(), "slskd removed".into()),
         "browser" => ("Remove the browser".into(), "Remove the browser for YouTube sign-in? Its sign-in is kept for when you install it again; until then the extension or pasted cookies are used.".into(), "Browser removed".into()),
+        "translator" => ("Remove the Translator".into(), "Remove the Translator and its model? Translations made so far are kept; new titles only get official translations until you install it again.".into(), "Translator removed".into()),
         _ => {
             let name = tool_or(t, "name", "id");
             ("Use the bundled version".into(), format!("Go back to the {name} version that came with Encore? The updated copy is removed."), format!("Back to the bundled {name}"))
@@ -1831,7 +1836,7 @@ fn tool_reset(t: &Value) -> (String, String, String) {
     }
 }
 /// slskd and the sign-in browser are installed by Encore, not bundled: before that their button says Install.
-fn tool_install(t: &Value) -> bool { (t.s("id") == "slskd" || t.s("id") == "browser") && !t.truthy("installed") }
+fn tool_install(t: &Value) -> bool { (t.s("id") == "slskd" || t.s("id") == "browser" || t.s("id") == "translator") && !t.truthy("installed") }
 
 fn tool_row(t: &Value, busy: Option<&str>) -> String {
     let id = t.s("id");
@@ -1851,7 +1856,7 @@ fn tool_row(t: &Value, busy: Option<&str>) -> String {
     } else if tool_updatable(t) {
         r##"<span class="small faint">Not checked yet</span>"##.to_string()
     } else { String::new() };
-    let updated = t.s("source") == "updated" && id != "slskd" && id != "browser";
+    let updated = t.s("source") == "updated" && id != "slskd" && id != "browser" && id != "translator";
     format!(r##"<div class="list-item" style="align-items:flex-start;flex-wrap:wrap;gap:12px" data-tool="{eid}">
       <div class="grow" style="min-width:200px"><div style="font-weight:650">{name} <span class="small muted mono">{ver}</span>{upd}</div>
         {note}
@@ -1909,12 +1914,23 @@ async fn render_tools(host: Element, hub: Rc<Hub>) {
         + &toggle("tools_auto_streamrip", "Update streamrip automatically when a new release is out")
         + &toggle("tools_auto_cadenza", "Update Cadenza automatically when a new release is out")
         + &toggle("tools_auto_slskd", "Update slskd automatically when a new release is out")
-        + &toggle("tools_auto_browser", "Update the browser for YouTube sign-in automatically");
+        + &toggle("tools_auto_browser", "Update the browser for YouTube sign-in automatically")
+        + &toggle("tools_auto_translator", "Update the Translator (llama.cpp) automatically")
+        + &toggle("translate_background", "Translate the whole library in the background (titles on screen are always translated first)");
+    // the Translator's model: changing it downloads the other one on the next Install / Update
+    let model_pick = if values.has("translator_model") {
+        let opts: String = [("small", "Small – Qwen3 4B Instruct (about 2.5 GB)"), ("best", "Best – Qwen3 8B (about 5 GB)")].iter()
+            .map(|(v, l)| format!(r##"<option value="{v}" {}>{l}</option>"##, if values.s("translator_model") == *v { "selected" } else { "" })).collect();
+        format!(r##"<label class="stack" style="gap:4px;max-width:420px"><span class="small muted">Translator model</span>
+    <select class="input" id="tools-model" {}>{opts}</select>
+    <span class="small muted">Small runs on most servers (about 4 GB of memory while it works); Best translates better and needs about 7 GB. It only runs while there is something to translate.</span></label>"##,
+            if meta.o("translator_model").s("source") == "env" { "disabled" } else { "" })
+    } else { String::new() };
     dom::set_html(&host, &format!(r##"<div class="card" id="tools-card" style="margin-bottom:12px">
     <div class="row between" style="margin-bottom:8px;gap:10px"><h2>Download tools</h2><button class="btn sm" type="button" id="tools-check">{refresh}Check for updates</button></div>
-    <p class="muted small" style="margin:0 0 14px">yt-dlp, streamrip, Cadenza, slskd and the browser for YouTube sign-in update in place – no new Encore image needed. Updates are kept in the config folder.</p>
+    <p class="muted small" style="margin:0 0 14px">yt-dlp, streamrip, Cadenza, slskd, the browser for YouTube sign-in and the Translator update in place – no new Encore image needed. Updates are kept in the config folder.</p>
     <div class="list" id="tools-list"></div>
-    <div class="stack mt" style="gap:8px">{toggles}<div class="small muted">Every tool is checked daily; updates install by themselves only where the switch is on. Change the schedule under <a href="#/settings?s=tasks">Scheduled tasks</a>.</div></div>
+    <div class="stack mt" style="gap:8px">{model_pick}{toggles}<div class="small muted">Every tool is checked daily; updates install by themselves only where the switch is on. Change the schedule under <a href="#/settings?s=tasks">Scheduled tasks</a>.</div></div>
   </div>"##, refresh = icon("refresh")));
     let (Some(list), Some(check)) = (dom::qs_in(&host, "#tools-list"), dom::qs_in(&host, "#tools-check")) else { return };
     let st = Rc::new(Tools { list: list.clone(), check: check.clone(), tools: RefCell::new(tools), busy: RefCell::new(None), checking: Cell::new(false) });
@@ -1966,6 +1982,18 @@ async fn render_tools(host: Element, hub: Rc<Hub>) {
                     st.reload().await; st.paint();
                 });
             }
+        });
+    }
+    if let Some(sel) = dom::qs_in(&host, "#tools-model") {
+        let (sel2, hub, st) = (sel.clone(), hub.clone(), st.clone());
+        dom::on(&sel, "change", move |_| {
+            let (v, hub, st) = (dom::value(&sel2), hub.clone(), st.clone());
+            dom::spawn(async move {
+                match api::put("/admin/settings", json!({ "translator_model": v })).await {
+                    Ok(v) => { *hub.values.borrow_mut() = v; toast("Saved – Install or Update the Translator to download this model", "ok"); st.reload().await; st.paint(); }
+                    Err(err) => toast(&err.message, "err"),
+                }
+            });
         });
     }
     for b in dom::qsa_in(&host, "[data-tool-auto]") {

@@ -80,7 +80,7 @@ fn native_platform() -> Option<String> {
 fn device_name() -> String {
     if let Some(own) = dom::ls_get(NAME_KEY).filter(|s| !s.is_empty()) { return own; }
     let ua = dom::window().navigator().user_agent().unwrap_or_default();
-    if ua.contains("EncoreAndroid") || app::native_has("saveOffline") { return "Android app".into(); }
+    if ua.contains("EncoreAndroid") || native_platform().as_deref() == Some("android") { return "Android app".into(); }
     if ua.contains("EncoreDesktop") || ua.contains("Electron") || native_platform().as_deref() == Some("desktop") {
         return format!("Desktop app ({})", if ua.contains("Mac") { "Mac" } else if ua.contains("Windows") { "Windows" } else { "Linux" });
     }

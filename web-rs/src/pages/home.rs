@@ -250,8 +250,8 @@ pub fn render(view: Element, ctx: Ctx) -> PageFuture {
                     } else {
                         format!(r#"<div class="thumb">{}</div>"#, art(&t.s("cover"), &t.s("title"), ""))
                     },
-                    title = esc(&t.s("title")),
-                    artist = esc(&t.s("artist")),
+                    title = esc(&ui::tr_inline(t, "title")),
+                    artist = esc(&ui::tr_inline(t, "artist")),
                     badge = if t.truthy("library") { r#"<span class="badge ok">In library</span>"# } else { "" },
                 )).collect::<String>()));
                 let tr = Rc::new(tr);

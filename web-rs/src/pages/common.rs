@@ -49,19 +49,23 @@ pub fn album_tile_with(a: &Value, href: &str, actions: &str, sub: Option<&str>, 
     let key_attr = key.filter(|k| !k.is_empty()).map(|k| format!(r#" data-req-key="{}""#, esc(k))).unwrap_or_default();
     let sub = match sub {
         Some(s) => s.to_string(),
-        None => esc(&["artist", "year", "type"].iter().map(|k| a.g(k)).filter(|v| truthy(v)).map(js_string).collect::<Vec<_>>().join(" · ")),
+        None => {
+            let artist = ui::tr_inline(a, "artist");
+            let rest = ["year", "type"].iter().map(|k| a.g(k)).filter(|v| truthy(v)).map(js_string);
+            esc(&std::iter::once(artist).filter(|x| !x.is_empty()).chain(rest).collect::<Vec<_>>().join(" · "))
+        }
     };
     format!(r#"<div class="tile" data-href="{href}">
     <div class="art">{art}
       <div class="corner"{key_attr}>{corner}</div>
       <div class="overlay">{actions}</div>
     </div>
-    <div class="t ellipsis" title="{title}">{title}</div>
+    <div class="t ellipsis" title="{title}">{shown}</div>{under}
     <div class="s ellipsis">{sub}</div>
   </div>"#,
         href = esc(href),
         art = ui::art(&a.s("cover"), &a.s("title"), ""),
-        title = esck(a, "title"))
+        title = esck(a, "title"), shown = esc(&ui::tr(a, "title")), under = ui::tr_sub(a, "title"))
 }
 
 /// `libraryTile(a)`.
@@ -72,7 +76,7 @@ pub fn library_tile(a: &Value) -> String {
       {untagged}
       <div class="overlay"><button class="fab" data-play-album="{id}" aria-label="Play">{play}</button></div>
     </div>
-    <div class="t ellipsis" title="{album}">{album_or}</div>
+    <div class="t ellipsis" title="{album}">{album_or}</div>{under}
     <div class="s ellipsis">{artist}{year}</div>
   </div>"#,
         id = esc(&id),
@@ -80,8 +84,9 @@ pub fn library_tile(a: &Value) -> String {
         untagged = if a.truthy("untagged") { r#"<div class="corner"><span class="badge warn" title="Some tracks lack MusicBrainz tags">Untagged</span></div>"# } else { "" },
         play = icon("play"),
         album = esck(a, "album"),
-        album_or = if a.truthy("album") { esck(a, "album") } else { "Unknown album".to_string() },
-        artist = esck(a, "albumartist"),
+        album_or = if a.truthy("album") { esc(&ui::tr(a, "album")) } else { "Unknown album".to_string() },
+        under = ui::tr_sub(a, "album"),
+        artist = esc(&ui::tr_inline(a, "albumartist")),
         year = if a.truthy("year") { format!(" · {}", esck(a, "year")) } else { String::new() })
 }
 

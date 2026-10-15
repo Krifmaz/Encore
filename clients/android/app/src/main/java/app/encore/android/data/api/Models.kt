@@ -86,9 +86,19 @@ data class Track(
     val bitrate: Int,
     /** each artist of the song for links (empty: the whole artist text is one artist) */
     val artists: List<ArtistCredit> = emptyList(),
+    /** translation / romanization of the title, artist and album (Translations.kt; empty when none) */
+    val titleTr: Tr = Tr.NONE,
+    val artistTr: Tr = Tr.NONE,
+    val albumTr: Tr = Tr.NONE,
 ) {
     /** The artists to link: the server's split, or the artist text as one. */
     fun credits(): List<ArtistCredit> = artists.ifEmpty { if (artist.isNotEmpty()) listOf(ArtistCredit(artist)) else emptyList() }
+
+    /** The title, artist and album as the listener asked to see them (Settings → Language). */
+    fun shownTitle(): String = Translations.shown(title, titleTr)
+    fun titleUnder(): String? = Translations.under(titleTr)
+    fun shownArtist(): String = Translations.inline(artist, artistTr)
+    fun shownAlbum(): String = Translations.inline(album, albumTr)
 
     companion object {
         fun from(o: JsonObject): Track? {
@@ -118,6 +128,9 @@ data class Track(
             format = o.str("format").lowercase(),
             bitrate = o.int("bitrate"),
             artists = ArtistCredit.fromJson(o["artists"]),
+            titleTr = Tr.of(o, "title"),
+            artistTr = Tr.of(o, "artist"),
+            albumTr = Tr.of(o, "album"),
         )
     }
 }
@@ -129,7 +142,13 @@ data class Album(
     val year: String,
     val trackCount: Int,
     val formats: String,
+    val titleTr: Tr = Tr.NONE,
+    val artistTr: Tr = Tr.NONE,
 ) {
+    fun shownTitle(): String = Translations.shown(title, titleTr)
+    fun titleUnder(): String? = Translations.under(titleTr)
+    fun shownArtist(): String = Translations.inline(artist, artistTr)
+
     companion object {
         fun from(o: JsonObject): Album? {
             val id = o.str("id")
@@ -141,6 +160,8 @@ data class Album(
                 year = o.str("year").take(4),
                 trackCount = o.int("tracks"),
                 formats = o.str("formats"),
+                titleTr = Tr.of(o, "album"),
+                artistTr = Tr.of(o, "albumartist"),
             )
         }
     }
@@ -148,12 +169,14 @@ data class Album(
 
 data class AlbumDetail(val album: Album, val tracks: List<Track>, val durationSec: Double)
 
-data class Artist(val name: String, val albums: Int, val tracks: Int, val coverAlbum: String) {
+data class Artist(val name: String, val albums: Int, val tracks: Int, val coverAlbum: String, val nameTr: Tr = Tr.NONE) {
+    fun shownName(): String = Translations.inline(name, nameTr)
+
     companion object {
         fun from(o: JsonObject): Artist? {
             val name = o.str("name")
             if (name.isEmpty()) return null
-            return Artist(name, o.int("albums"), o.int("tracks"), o.str("cover_album"))
+            return Artist(name, o.int("albums"), o.int("tracks"), o.str("cover_album"), Tr.of(o, "name"))
         }
     }
 }

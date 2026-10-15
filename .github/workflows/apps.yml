@@ -254,12 +254,43 @@ jobs:
       - uses: taiki-e/install-action@v2
         with:
           tool: tauri-cli@2.12.2
+      # Auto-update (tauri-plugin-updater, Settings → This computer → Updates): with the TAURI_SIGNING_PRIVATE_KEY
+      # secret (+ TAURI_SIGNING_PRIVATE_KEY_PASSWORD when the key has one) and the matching public key in the
+      # TAURI_UPDATER_PUBKEY variable or secret (both from `cargo tauri signer generate`), the build carries the
+      # public key and makes signed updater files (.sig next to the installer; a .app.tar.gz on macOS). Without
+      # them the app builds as before, just without self-update – the job does not fail.
+      - name: Updater signing
+        id: updater
+        shell: bash
+        env:
+          KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          PUB: ${{ vars.TAURI_UPDATER_PUBKEY || secrets.TAURI_UPDATER_PUBKEY }}
+        run: |
+          if [ -n "$KEY" ] && [ -n "$PUB" ]; then
+            echo "on=true" >> "$GITHUB_OUTPUT"
+            # the public key goes into the app's config (plugins.updater.pubkey) as one JSON string
+            printf '%s' "$PUB" | python3 -c 'import json,sys; print("pubkey=" + json.dumps(sys.stdin.read().strip()))' >> "$GITHUB_OUTPUT"
+            echo "Updater: signed update files"
+          else
+            echo "on=false" >> "$GITHUB_OUTPUT"
+            echo "pubkey=\"\"" >> "$GITHUB_OUTPUT"
+            echo "::notice title=Desktop updates::TAURI_SIGNING_PRIVATE_KEY and/or TAURI_UPDATER_PUBKEY missing – building without self-update (see clients/app/README.md)"
+          fi
       - name: Build
         working-directory: clients/app
         shell: bash
         env:
           ENCORE_VERSION: ${{ inputs.version || format('dev.{0}', github.run_number) }}
-        run: cargo tauri build --ci --bundles ${{ matrix.bundles }} ${{ matrix.args }} --config '{"version":"${{ inputs.semver || '0.0.1' }}"}'
+          TAURI_SIGNING_PRIVATE_KEY: ${{ steps.updater.outputs.on == 'true' && secrets.TAURI_SIGNING_PRIVATE_KEY || '' }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ steps.updater.outputs.on == 'true' && secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD || '' }}
+          UPDATER: ${{ steps.updater.outputs.on }}
+          PUBKEY_JSON: ${{ steps.updater.outputs.pubkey }}
+        run: |
+          CONF='{"version":"${{ inputs.semver || '0.0.1' }}"}'
+          if [ "$UPDATER" = true ]; then
+            CONF='{"version":"${{ inputs.semver || '0.0.1' }}","bundle":{"createUpdaterArtifacts":true},"plugins":{"updater":{"pubkey":'"$PUBKEY_JSON"'}}}'
+          fi
+          cargo tauri build --ci --bundles ${{ matrix.bundles }} ${{ matrix.args }} --config "$CONF"
       # Tauri's bundle_dmg.sh drives Finder with AppleScript to lay out the window, which fails on the hosted Mac
       # runners (no Finder session) – a plain hdiutil image of the .app works everywhere
       - name: Disk image (macOS)
@@ -278,13 +309,20 @@ jobs:
         run: |
           V="${{ inputs.version || format('dev.{0}', github.run_number) }}"
           mkdir -p out
-          find clients/app/target -path '*/release/bundle/*' -type f \( -name '*.AppImage' -o -name '*.deb' -o -name '*.rpm' -o -name '*-setup.exe' -o -name '*.dmg' \) -print | while read -r f; do
+          find clients/app/target -path '*/release/bundle/*' -type f \( -name '*.AppImage' -o -name '*.deb' -o -name '*.rpm' -o -name '*-setup.exe' -o -name '*.dmg' \
+              -o -name '*.AppImage.sig' -o -name '*-setup.exe.sig' -o -name '*.app.tar.gz' -o -name '*.app.tar.gz.sig' \) -print | while read -r f; do
+            # updater files keep their signature next to them under the release name (the signature covers the
+            # content, not the name; release.yml builds latest.json from these .sig files)
             case "$f" in
-              *.AppImage) cp "$f" "out/Encore-$V-linux-x86_64.AppImage" ;;
-              *.deb)      cp "$f" "out/Encore-$V-linux-amd64.deb" ;;
-              *.rpm)      cp "$f" "out/Encore-$V-linux-x86_64.rpm" ;;
-              *.exe)      cp "$f" "out/Encore-Setup-$V.exe" ;;
-              *.dmg)      cp "$f" "out/Encore-$V-mac.dmg" ;;
+              *.AppImage)        cp "$f" "out/Encore-$V-linux-x86_64.AppImage" ;;
+              *.AppImage.sig)    cp "$f" "out/Encore-$V-linux-x86_64.AppImage.sig" ;;
+              *.deb)             cp "$f" "out/Encore-$V-linux-amd64.deb" ;;
+              *.rpm)             cp "$f" "out/Encore-$V-linux-x86_64.rpm" ;;
+              *.exe)             cp "$f" "out/Encore-Setup-$V.exe" ;;
+              *.exe.sig)         cp "$f" "out/Encore-Setup-$V.exe.sig" ;;
+              *.dmg)             cp "$f" "out/Encore-$V-mac.dmg" ;;
+              *.app.tar.gz)      cp "$f" "out/Encore-$V-mac.app.tar.gz" ;;
+              *.app.tar.gz.sig)  cp "$f" "out/Encore-$V-mac.app.tar.gz.sig" ;;
             esac
           done
           ls -la out

@@ -114,10 +114,11 @@ pub fn track_menu(anchor: &Element, t: &Value, admin: bool, on_deleted: Option<R
     items.push(MenuItem::link("Download this song", &icon("download"), &format!("/api/library/tracks/{}/file", t.s("id")), true));
     if player::can_save_offline() {
         let t = t.clone();
-        items.push(MenuItem::new("Save for offline", &icon("download"), move || { player::save_offline(vec![(*t).clone()]); toast("Saving to this phone…", "ok"); }));
+        items.push(MenuItem::new("Save for offline", &icon("download"), move || { player::save_offline(vec![(*t).clone()]); toast("Saving to this device…", "ok"); }));
     }
     if t.truthy("album_id") { items.push(MenuItem::link("Go to album", &icon("disc"), &format!("#/library/album/{}", t.s("album_id")), false)); }
     { let (t, done) = (t.clone(), done.clone()); items.push(MenuItem::new("Report a problem", &icon("shield"), move || { let done = done.clone(); crate::pages::report::report_modal("track", t.g("id").clone(), &t.s("title"), "", Some(Rc::new(move |_| done()))) })); }
+    if ui::translate_mode() != "off" { let (t, done) = (t.clone(), done.clone()); items.push(MenuItem::new("Edit translation", &icon("edit"), move || crate::pages::translate::edit_translation(t.s("title"), "title", Some(done.clone())))); }
     if admin { let t = t.clone(); items.push(MenuItem::new("Edit song details…", &icon("edit"), move || fix_song_modal(&t))); }
     if can_fix {
         if t.s("verify_status") == "manual" {
@@ -421,14 +422,14 @@ impl Lib {
             let base = if append { self.tracks.borrow().len() } else { 0 };
             let html: String = rows.iter().enumerate().map(|(i, t)| format!(r##"<tr data-i="{idx}">
         <td style="width:52px"><button class="thumb play-thumb" data-play-track="{id}" aria-label="Play">{art}<i>{play}</i></button></td>
-        <td><div style="font-weight:600" class="ellipsis">{title}</div><div class="small muted ellipsis">{artist}<span class="show-sm"> · {album_ln}</span></div></td>
+        <td><div style="font-weight:600" class="ellipsis">{title}</div>{title_sub}<div class="small muted ellipsis">{artist}<span class="show-sm"> · {album_ln}</span></div></td>
         <td class="hide-sm"><a href="#/library/album/{album_id}">{album}</a></td>
         <td class="hide-sm"><span class="badge">{fmt}</span> {vb}</td>
         <td class="muted hide-sm">{dur}</td>
         <td style="text-align:right"><button class="btn sm ghost icon" data-tmenu="{idx}" aria-label="More">{more}</button></td></tr>"##,
                 idx = base + i, id = t.s("id"),
                 art = ui::art_sized(&format!("/api/library/albums/{}/cover{}", t.s("album_id"), ui::cover_q(t)), &if t.truthy("album") { t.s("album") } else { t.s("title") }, "", 200),
-                play = icon("play"), title = esck(t, "title"), artist = ui::artist_links(t), album_ln = ui::album_link(t), album = esck(t, "album"), album_id = esck(t, "album_id"),
+                play = icon("play"), title = esc(&ui::tr(t, "title")), title_sub = ui::tr_sub(t, "title"), artist = ui::artist_links(t), album_ln = ui::album_link(t), album = esc(&ui::tr_inline(t, "album")), album_id = esck(t, "album_id"),
                 fmt = format_text(t), vb = verify_badge(t), dur = ui::fmt::dur(t.f("duration")), more = icon("more"))).collect();
             if !append {
                 dom::set_html(&self.body, &if !rows.is_empty() {
@@ -453,13 +454,13 @@ impl Lib {
         <div class="tile round" data-href="{href}">
           <div class="art">{art}
             {rm}</div>
-          <div class="t ellipsis" style="text-align:center">{name}</div>
+          <div class="t ellipsis" style="text-align:center">{name_shown}</div>
           <div class="s" style="text-align:center">{albums} album{s} · {tracks} tracks</div>
         </div>"##,
             href = if a.truthy("mbid") { format!("/artist/{}", esck(a, "mbid")) } else { format!("/artist-name/{}", enc(&a.s("name"))) },
             art = ui::art(&format!("/api/library/albums/{}/cover{}", a.s("cover_album"), ui::cover_q(a)), &a.s("name"), ""),
             rm = if self.admin { format!(r##"<div class="overlay"><button class="fab" data-rm-artist="{}" title="Remove this artist from the library">{}</button></div>"##, esck(a, "name"), icon("trash")) } else { String::new() },
-            name = esck(a, "name"), albums = a.s("albums"), s = if a.num("albums") == Some(1.0) { "" } else { "s" }, tracks = a.s("tracks"))
+            name_shown = esc(&ui::tr_inline(a, "name")), albums = a.s("albums"), s = if a.num("albums") == Some(1.0) { "" } else { "s" }, tracks = a.s("tracks"))
     }
 
     async fn render_duplicates(self: Rc<Self>) -> Result<(), ApiError> {
@@ -861,13 +862,13 @@ pub fn render_album(view: Element, ctx: Ctx) -> PageFuture {
         ].into_iter().filter(|x| !x.is_empty()).collect::<Vec<_>>().join(" · ");
         let rows: String = tracks.iter().enumerate().map(|(i, t)| format!(r##"<tr data-i="{i}">
         <td class="num">{disc}{track}</td>
-        <td><div style="font-weight:600">{title}</div>{relpath}{source}</td>
+        <td><div style="font-weight:600">{title}</div>{title_sub}{relpath}{source}</td>
         <td class="hide-sm muted">{artist}</td>
         <td class="hide-sm"><span class="badge">{fmt}</span>{nomb} {vb}{qb}</td>
         <td class="muted">{dur}</td>
         <td style="text-align:right;white-space:nowrap"><button class="btn sm ghost" data-like="{id}" title="Like (syncs to Finamp/Plexamp)">{heart}</button><button class="btn sm ghost icon" data-tmenu="{i}" aria-label="More">{more}</button></td></tr>"##,
             disc = if multi { format!("{}-", t.s("disc")) } else { String::new() }, track = or_str(t, "track", "–"),
-            title = esck(t, "title"),
+            title = esc(&ui::tr(t, "title")), title_sub = ui::tr_sub(t, "title"),
             relpath = if admin { format!(r##"<div class="small faint ellipsis" style="max-width:520px">{}</div>"##, esck(t, "relpath")) } else { String::new() },
             source = source_line(t), artist = ui::artist_links(t), fmt = format_text(t),
             nomb = if t.truthy("mb_trackid") { "" } else { r##" <span class="badge warn" title="No MusicBrainz id">?</span>"## },
@@ -878,7 +879,7 @@ pub fn render_album(view: Element, ctx: Ctx) -> PageFuture {
       <div class="cover">{cover}</div>
       <div class="grow">
         <div class="kicker">Album · In your library</div>
-        <h1>{album}</h1>
+        <h1>{album}</h1>{album_sub}
         <div class="muted"><a href="#/artist-name/{artist_enc}" style="color:var(--text);font-weight:650">{artist}</a>
           {year} · {n} tracks · {dur} · {size}</div>
         {requested}
@@ -901,7 +902,7 @@ pub fn render_album(view: Element, ctx: Ctx) -> PageFuture {
       <tbody>{rows}</tbody>
     </table></div></div>"##,
             cover = ui::art(&format!("/api/library/albums/{id}/cover{}", ui::cover_q(&a)), &a.s("album"), "big"),
-            album = esc(&or_str(&a, "album", "Unknown album")), artist_enc = enc(&a.s("albumartist")), artist = esck(&a, "albumartist"),
+            album = esc(&if a.truthy("album") { ui::tr(&a, "album") } else { "Unknown album".to_string() }), album_sub = ui::tr_sub(&a, "album"), artist_enc = enc(&a.s("albumartist")), artist = esc(&ui::tr_inline(&a, "albumartist")),
             year = if a.truthy("year") { format!(" · {}", esck(&a, "year")) } else { String::new() },
             n = tracks.len(), dur = ui::fmt::long_dur(a.f("duration")), size = ui::fmt::size(a.f("size")),
             requested = if history.is_empty() { String::new() } else { format!(r##"<div class="small muted" style="margin-top:4px">{history}</div>"##) },
@@ -1003,7 +1004,7 @@ fn album_menu(anchor: &Element, a: &Value, id: &str, qt: &Rc<Vec<Value>>, admin:
     { let (id, a) = (id.to_string(), a.clone()); items.push(MenuItem::new("Share link", &icon("external"), move || dom::spawn(ui::share_album(id.clone(), a.clone())))); }
     if player::can_save_offline() {
         let qt = qt.clone();
-        items.push(MenuItem::new("Save album for offline", &icon("download"), move || { player::save_offline((*qt).clone()); toast(&format!("Saving {} song(s) to this phone…", qt.len()), "ok"); }));
+        items.push(MenuItem::new("Save album for offline", &icon("download"), move || { player::save_offline((*qt).clone()); toast(&format!("Saving {} song(s) to this device…", qt.len()), "ok"); }));
     }
     if admin {
         let (ids, reload) = (ids.clone(), reload.clone());
@@ -1018,6 +1019,7 @@ fn album_menu(anchor: &Element, a: &Value, id: &str, qt: &Rc<Vec<Value>>, admin:
     { let id = id.to_string(); items.push(MenuItem::new("Lyrics for all songs", &icon("music"), move || lyrics::fetch_album_lyrics(&id))); }
     if a.truthy("mb_releasegroupid") { items.push(MenuItem::link("Release info", &icon("disc"), &format!("#/album/{}", a.s("mb_releasegroupid")), false)); }
     { let (id, title) = (id.to_string(), a.s("album")); items.push(MenuItem::new("Report a problem", &icon("shield"), move || crate::pages::report::report_modal("album", json!(id), &title, "", Some(Rc::new(|_| app::navigate("/library")))))); }
+    if ui::translate_mode() != "off" { let (album, reload) = (a.s("album"), reload.clone()); items.push(MenuItem::new("Edit translation", &icon("edit"), move || crate::pages::translate::edit_translation(album.clone(), "album", Some(reload.clone())))); }
     if admin {
         items.push(MenuItem::SEP);
         { let (id, a) = (id.to_string(), a.clone()); items.push(MenuItem::new("Tag / match metadata", &icon("tag"), move || match_modal(&id, &a))); }

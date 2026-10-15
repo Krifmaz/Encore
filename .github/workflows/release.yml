@@ -274,13 +274,43 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           V: ${{ needs.version.outputs.version }}
+          SV: ${{ needs.version.outputs.semver }}
           APPS: ${{ needs.apps.result }}
         run: |
-          # app installers from the previous release when this run didn't build them
+          # app installers (and the desktop update manifest) from the previous release when this run didn't build them
           if [ "$APPS" != success ]; then
-            mkdir -p prev && gh release download --dir prev --pattern 'Encore-*' 2>/dev/null || true
+            mkdir -p prev && gh release download --dir prev --pattern 'Encore-*' --pattern 'latest.json' 2>/dev/null || true
             rm -f prev/Encore-youtube-extension-*.zip   # built fresh above
             mv prev/* out/ 2>/dev/null || true
           fi
+          # desktop auto-update (Settings → This computer → Updates): latest.json from the signed updater files the
+          # desktop job made (apps.yml, only with the TAURI_SIGNING_PRIVATE_KEY secret). No signatures for this
+          # version: the previous latest.json is kept (below), and the apps keep pointing at the last signed release.
+          python3 - "$V" "$SV" <<'PY'
+          import datetime, json, os, sys
+          v, sv = sys.argv[1], sys.argv[2]
+          base = f"https://github.com/Krifmaz/Encore/releases/download/v{v}/"
+          files = {
+              "windows-x86_64": f"Encore-Setup-{v}.exe",
+              "linux-x86_64": f"Encore-{v}-linux-x86_64.AppImage",
+              "darwin-aarch64": f"Encore-{v}-mac.app.tar.gz",
+              "darwin-x86_64": f"Encore-{v}-mac.app.tar.gz",
+          }
+          platforms = {}
+          for plat, f in files.items():
+              sig = os.path.join("out", f + ".sig")
+              if os.path.exists(sig) and os.path.exists(os.path.join("out", f)):
+                  platforms[plat] = {"signature": open(sig).read().strip(), "url": base + f}
+          if platforms:
+              now = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+              with open("out/latest.json", "w") as fh:
+                  json.dump({"version": sv, "notes": f"Encore {v}: https://github.com/Krifmaz/Encore/releases/tag/v{v}", "pub_date": now, "platforms": platforms}, fh, indent=2)
+              print("latest.json for", ", ".join(platforms))
+          else:
+              print("no signed desktop updates in this release")
+          PY
+          # still none (apps rebuilt but unsigned): carry the newest release's manifest over, so the updater
+          # endpoint (releases/latest/download/latest.json) keeps answering with the last signed version
+          if [ ! -f out/latest.json ]; then gh release download --dir out --pattern latest.json 2>/dev/null || true; fi
           gh release delete "v$V" --yes --cleanup-tag 2>/dev/null || true
           gh release create "v$V" out/* --title "Encore $V" --notes-file notes.md --target "$GITHUB_SHA" --latest

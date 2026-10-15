@@ -448,8 +448,9 @@ fun Tile(
 @Composable
 fun AlbumCard(album: Album, coverUrl: String, imageLoader: ImageLoader, modifier: Modifier = Modifier, onClick: () -> Unit) {
     Tile(
-        title = album.title,
-        subtitle = listOf(album.artist, album.year).filter { it.isNotEmpty() }.joinToString(" · "),
+        title = album.shownTitle(),
+        subtitle = listOf(album.shownArtist(), album.year).filter { it.isNotEmpty() }.joinToString(" · "),
+        subtitle2 = album.titleUnder(),
         modifier = modifier,
         onClick = onClick,
     ) { m -> Cover(coverUrl, imageLoader, m, corner = 12.dp, label = album.title) }
@@ -496,13 +497,15 @@ fun TrackRow(
         }
         Column(Modifier.weight(1f)) {
             Text(
-                track.title,
+                track.shownTitle(),
                 style = MaterialTheme.typography.bodyMedium,
                 fontWeight = FontWeight.SemiBold,
                 color = if (playing) p.accent else p.text,
                 maxLines = 1,
                 overflow = TextOverflow.Ellipsis,
             )
+            // Settings → Language: the translation under the original
+            track.titleUnder()?.let { Text(it, style = MaterialTheme.typography.bodySmall, color = p.faint, maxLines = 1, overflow = TextOverflow.Ellipsis) }
             if (subtitleLinks != null) {
                 Text(
                     subtitleLinks,
@@ -513,7 +516,7 @@ fun TrackRow(
                 )
             } else {
                 Text(
-                    subtitle ?: track.artist,
+                    subtitle ?: track.shownArtist(),
                     style = MaterialTheme.typography.bodySmall,
                     color = p.muted,
                     maxLines = 1,

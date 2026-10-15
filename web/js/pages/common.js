@@ -1,5 +1,5 @@
 import { api } from '../api.js';
-import { art, confirmDialog, esc, fmt, icon, popMenu, statusBadge, toast } from '../ui.js';
+import { art, confirmDialog, esc, fmt, icon, popMenu, statusBadge, toast, tr, trInline, trSub } from '../ui.js';
 
 export async function submitRequest(body, btn) {
   if (btn) btn.disabled = true;
@@ -23,8 +23,8 @@ export function albumTile(a, { href, actions = '', sub, key, badge } = {}) {
       <div class="corner"${key ? ` data-req-key="${esc(key)}"` : ''}>${badge ?? (a.in_library ? '<span class="badge ok">In library</span>' : a.request_status ? statusBadge(a.request_status) : '')}</div>
       <div class="overlay">${actions}</div>
     </div>
-    <div class="t ellipsis" title="${esc(a.title)}">${esc(a.title)}</div>
-    <div class="s ellipsis">${sub ?? esc([a.artist, a.year, a.type].filter(Boolean).join(' · '))}</div>
+    <div class="t ellipsis" title="${esc(a.title)}">${esc(tr(a, 'title'))}</div>${trSub(a, 'title')}
+    <div class="s ellipsis">${sub ?? esc([trInline(a, 'artist'), a.year, a.type].filter(Boolean).join(' · '))}</div>
   </div>`;
 }
 
@@ -34,8 +34,8 @@ export function libraryTile(a) {
       ${a.untagged ? '<div class="corner"><span class="badge warn" title="Some tracks lack MusicBrainz tags">Untagged</span></div>' : ''}
       <div class="overlay"><button class="fab" data-play-album="${esc(a.id)}" aria-label="Play">${icon.play}</button></div>
     </div>
-    <div class="t ellipsis" title="${esc(a.album)}">${esc(a.album || 'Unknown album')}</div>
-    <div class="s ellipsis">${esc(a.albumartist)}${a.year ? ' · ' + esc(a.year) : ''}</div>
+    <div class="t ellipsis" title="${esc(a.album)}">${esc(tr(a, 'album') || 'Unknown album')}</div>${trSub(a, 'album')}
+    <div class="s ellipsis">${esc(trInline(a, 'albumartist'))}${a.year ? ' · ' + esc(a.year) : ''}</div>
   </div>`;
 }
 

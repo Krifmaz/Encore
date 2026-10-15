@@ -216,8 +216,8 @@ fn track_row(t: &Value) -> String {
     };
     let album = if t.truthy("album") {
         let inner = if t.truthy("release_group_id") {
-            format!(r##"<a href="#/album/{}">{}</a>"##, esck(t, "release_group_id"), esck(t, "album"))
-        } else { esck(t, "album") };
+            format!(r##"<a href="#/album/{}">{}</a>"##, esck(t, "release_group_id"), esc(&ui::tr_inline(t, "album")))
+        } else { esc(&ui::tr_inline(t, "album")) };
         format!(" · {inner}")
     } else { String::new() };
     let year = if t.truthy("year") { format!(" · {}", esck(t, "year")) } else { String::new() };
@@ -228,12 +228,12 @@ fn track_row(t: &Value) -> String {
     format!(r##"<div class="list-item">
     {thumb}
     <div class="grow">
-      <div class="ellipsis" style="font-weight:600">{}</div>
+      <div class="ellipsis" style="font-weight:600">{}</div>{}
       <div class="small muted ellipsis"><a href="{}">{}</a>{album}{year}</div>
     </div>
     <span class="small faint hide-sm">{len}</span>
     {right}
-  </div>"##, esck(t, "title"), artist_href(t), esck(t, "artist"))
+  </div>"##, esc(&ui::tr(t, "title")), ui::tr_sub(t, "title"), artist_href(t), esc(&ui::tr_inline(t, "artist")))
 }
 
 /// `librarySongRow(t)`: a library song (the "In your library" row); plays at once.
@@ -244,12 +244,12 @@ fn library_song_row(t: &Value) -> String {
     format!(r#"<div class="list-item">
     <button class="thumb play-thumb" data-play-song='{}' title="Play" aria-label="Play">{}<i>{}</i></button>
     <div class="grow">
-      <div class="ellipsis" style="font-weight:600">{}</div>
+      <div class="ellipsis" style="font-weight:600">{}</div>{}
       <div class="small muted ellipsis">{}{album}</div>
     </div>
     <span class="small faint hide-sm">{len}</span>
     {}
-  </div>"#, esc_json(t), art(&format!("/api/library/albums/{}/cover", t.s("album_id")), &label, ""), icon("play"), esck(t, "title"), crate::ui::artist_links(t),
+  </div>"#, esc_json(t), art(&format!("/api/library/albums/{}/cover", t.s("album_id")), &label, ""), icon("play"), esc(&ui::tr(t, "title")), ui::tr_sub(t, "title"), crate::ui::artist_links(t),
         availability(&json!({ "in_library": true })))
 }
 
@@ -679,7 +679,7 @@ pub fn render_artist(view: Element, ctx: Ctx) -> PageFuture {
       <div class="cover" id="artist-photo">{photo}</div>
       <div class="grow">
         <div class="kicker">{kicker}</div>
-        <h1>{name}</h1>
+        <h1>{name}</h1>{name_sub}
         {disamb}
         <div class="chips">{chips}</div>
         <div class="row wrap mt">
@@ -705,7 +705,7 @@ pub fn render_artist(view: Element, ctx: Ctx) -> PageFuture {
     <div id="similar"></div>
     {only_local}"##,
             photo = art(&first_cover_s, &a.s("name"), ""),
-            name = esck(&a, "name"),
+            name = esc(&ui::tr(&a, "name")), name_sub = ui::tr_sub(&a, "name"),
             owned_cls = if owned > 0 { "ok" } else { "" },
             n_rg = release_groups.len(),
             id = esck(&a, "id"),
@@ -1219,7 +1219,7 @@ pub fn render_album(view: Element, ctx: Ctx) -> PageFuture {
       <div class="cover">{cover}</div>
       <div class="grow">
         <div class="kicker">{kicker}</div>
-        <h1>{title}</h1>
+        <h1>{title}</h1>{title_sub}
         <div class="muted"><a href="#/artist/{artist_id}" style="color:var(--text);font-weight:650">{artist}</a>
           {meta}</div>
         <div class="chips mt">{chips}</div>
@@ -1235,9 +1235,9 @@ pub fn render_album(view: Element, ctx: Ctx) -> PageFuture {
     </div>
     {body}"##,
             cover = art(&a.s("cover").replacen("front-250", "front-500", 1), &a.s("title"), ""),
-            title = esck(&a, "title"),
+            title = esc(&ui::tr(&a, "title")), title_sub = ui::tr_sub(&a, "title"),
             artist_id = esck(&a, "artist_id"),
-            artist = esck(&a, "artist"),
+            artist = esc(&ui::tr_inline(&a, "artist")),
             search = icon("search"),
             id = esck(&a, "id"),
             external = icon("external"),

@@ -1,7 +1,7 @@
 // Discovery: "For you" (ListenBrainz recommendations), genre pages, similar artists and "More like this".
 import { api } from '../api.js';
 import * as player from '../player.js';
-import { art, emptyState, esc, fmt, icon, modal, statusBadge, toast } from '../ui.js';
+import { art, emptyState, esc, fmt, icon, modal, statusBadge, toast, tr, trInline, trSub } from '../ui.js';
 import { albumTile, bindTiles, submitRequest } from './common.js';
 
 export const KIND = { 'weekly-exploration': 'New music picked for you every Monday', 'daily-jams': 'Songs you love, refreshed daily', 'weekly-jams': 'Your favourites from the past weeks', lastfm: 'Similar to your most played songs on Last.fm' };
@@ -12,8 +12,8 @@ export function trackRow(t, i) {
     <td class="num">${t.library ? `<button class="btn ghost icon sm" data-play="${i}" aria-label="Play">${icon.play.replace('<svg', '<svg width="14"')}</button>`
       : ''}</td>
     <td><div class="row" style="gap:10px"><div class="thumb">${art(t.cover, t.album || t.title)}</div>
-      <div style="min-width:0"><div class="ellipsis" style="font-weight:600">${esc(t.title)}</div>
-      <div class="small muted ellipsis">${t.artist_mbid ? `<a href="#/artist/${esc(t.artist_mbid)}">${esc(t.artist)}</a>` : `<a href="#/artist-name/${encodeURIComponent(t.artist)}">${esc(t.artist)}</a>`}${t.album ? ' · ' + esc(t.album) : ''}</div></div></div></td>
+      <div style="min-width:0"><div class="ellipsis" style="font-weight:600">${esc(tr(t, 'title'))}</div>${trSub(t, 'title')}
+      <div class="small muted ellipsis">${t.artist_mbid ? `<a href="#/artist/${esc(t.artist_mbid)}">${esc(trInline(t, 'artist'))}</a>` : `<a href="#/artist-name/${encodeURIComponent(t.artist)}">${esc(trInline(t, 'artist'))}</a>`}${t.album ? ' · ' + esc(trInline(t, 'album')) : ''}</div></div></div></td>
     <td class="muted hide-sm">${t.length ? fmt.dur(t.length) : ''}</td>
     <td style="text-align:right;white-space:nowrap">
       <button class="btn sm ghost icon" data-more="${i}" title="More like this" aria-label="More like this">${icon.spark}</button>

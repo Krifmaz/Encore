@@ -261,11 +261,11 @@ pub fn render_playlist(view: Element, ctx: Ctx) -> PageFuture {
         let sync_targets = pl.a("sync_targets");
         let rows: String = items.iter().enumerate().map(|(i, it)| format!(r##"<tr data-item="{item}">
         <td class="num">{n}</td>
-        <td><div style="font-weight:600">{title}</div><div class="small muted">{artist}</div></td>
+        <td><div style="font-weight:600">{title}</div>{title_sub}<div class="small muted">{artist}</div></td>
         <td class="hide-sm muted">{album}</td>
         <td>{status}</td>
         <td style="text-align:right"><button class="btn sm ghost" data-rm title="Remove">{x}</button></td></tr>"##,
-            item = it.s("id"), n = i + 1, title = esc(&it.s("title")), artist = crate::ui::artist_links(it),
+            item = it.s("id"), n = i + 1, title = esc(&crate::ui::tr(it, "title")), title_sub = crate::ui::tr_sub(it, "title"), artist = crate::ui::artist_links(it),
             album = if it.truthy("album_id") { format!(r##"<a href="#/library/album/{}">{}</a>"##, esc(&it.s("album_id")), esc(&it.s("album"))) } else { esc(&it.s("album")) },
             status = if it.truthy("track_id") {
                 format!(r#"<span class="badge ok" title="{}">✓ in library</span>{}"#, esc(&it.s("match_reason")), match it.s("verify_status").as_str() {
@@ -286,6 +286,7 @@ pub fn render_playlist(view: Element, ctx: Ctx) -> PageFuture {
         <div class="progress mt" style="max-width:360px"><i style="width:{pct}%"></i></div>
         <div class="row wrap mt">
           {play}
+          {offline}
           {req}
           <button class="btn" id="add">{plus}Add from link</button>
           <button class="btn" id="dedupe">{check}Remove duplicates</button>
@@ -319,6 +320,7 @@ pub fn render_playlist(view: Element, ctx: Ctx) -> PageFuture {
             total = pl.s("total"), matched = pl.s("matched"), missing_n = js_string(&json!(total - matched)),
             pct = if pl.truthy("total") { js_string(&json!(matched / total * 100.0)) } else { "0".to_string() },
             play = if pl.truthy("matched") { format!(r#"<button class="btn primary" id="pl-play">{}Play</button>"#, icon("play")) } else { String::new() },
+            offline = if pl.truthy("matched") && player::can_save_offline() { format!(r#"<button class="btn" id="pl-offline">{}Save for offline</button>"#, icon("download")) } else { String::new() },
             req = if missing > 0 { format!(r#"<button class="btn {}" id="req">{}Download {missing} missing</button>"#, if pl.truthy("matched") { "" } else { "primary" }, icon("download")) } else { String::new() },
             plus = icon("plus"), check = icon("check"), refresh = icon("refresh"),
             pull = if pl.truthy("source_url") { format!(r#"<button class="btn" id="refresh">{}Pull from {}</button>"#, icon("refresh"), esc(src_name(&source).unwrap_or("source"))) } else { String::new() },
@@ -339,6 +341,10 @@ pub fn render_playlist(view: Element, ctx: Ctx) -> PageFuture {
             "id": i.g("track_id"), "title": i.g("title"), "artist": i.g("artist"), "artists": i.g("artists"), "album": i.g("album"), "album_id": i.g("album_id"),
             "format": i.g("format"), "bitrate": i.g("bitrate"), "duration": i.g("duration"),
         })).collect();
+        {
+            let playable = playable.clone();
+            dom::on_sel(&view, "#pl-offline", "click", move |_| { player::save_offline(playable.clone()); toast(&format!("Saving {} song(s) to this device…", playable.len()), "ok"); });
+        }
         dom::on_sel(&view, "#pl-play", "click", move |_| player::play_queue(playable.clone(), 0, "list"));
         {
             let id2 = id.clone();

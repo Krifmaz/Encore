@@ -21,6 +21,7 @@ class EncoreApp : Application() {
         super.onCreate()
         // first, so a crash while building the graph is written too (CrashLog.kt)
         CrashLog.install(this)
+        app.encore.android.data.api.Translations.init(this)
         graph = AppGraph(this)
         // reports from earlier runs (our own, and native crashes / ANRs the system recorded) go to the server
         CrashLog.uploadPending(this, graph)

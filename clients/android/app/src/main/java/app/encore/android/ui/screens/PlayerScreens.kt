@@ -155,8 +155,8 @@ fun MiniPlayer(nav: Nav, onOpen: () -> Unit) {
             )
             Spacer(Modifier.width(12.dp))
             Column(Modifier.weight(1f)) {
-                Text(track.title, style = MaterialTheme.typography.bodyMedium, fontWeight = FontWeight.SemiBold, maxLines = 1, overflow = TextOverflow.Ellipsis)
-                Text(track.artist, style = MaterialTheme.typography.bodySmall, color = p.muted, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                Text(track.shownTitle(), style = MaterialTheme.typography.bodyMedium, fontWeight = FontWeight.SemiBold, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                Text(track.shownArtist(), style = MaterialTheme.typography.bodySmall, color = p.muted, maxLines = 1, overflow = TextOverflow.Ellipsis)
             }
             DevicesButton(nav, tint = p.muted)
             IconButton(onClick = { nav.player.togglePlay() }) {
@@ -245,12 +245,13 @@ fun FullPlayer(nav: Nav, actions: PlayerMenuActions, onClose: () -> Unit) {
             // .np-meta
             Column(Modifier.fillMaxWidth().padding(horizontal = 28.dp), horizontalAlignment = Alignment.CenterHorizontally) {
                 Text(
-                    track.title,
+                    track.shownTitle(),
                     style = MaterialTheme.typography.headlineSmall,
                     textAlign = TextAlign.Center,
                     maxLines = 1,
                     overflow = TextOverflow.Ellipsis,
                 )
+                track.titleUnder()?.let { Text(it, style = MaterialTheme.typography.bodyMedium, color = p.muted, textAlign = TextAlign.Center, maxLines = 1, overflow = TextOverflow.Ellipsis) }
                 // each artist and the album open their pages (closing the player)
                 Text(
                     rememberSongLinks(nav, track, before = onClose),
@@ -418,7 +419,7 @@ fun UpNextSheet(nav: Nav, onDismiss: () -> Unit) {
                     )
                     Spacer(Modifier.width(10.dp))
                     Column(Modifier.weight(1f)) {
-                        Text(q.title, fontWeight = FontWeight.SemiBold, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                        Text(q.shownTitle(), fontWeight = FontWeight.SemiBold, maxLines = 1, overflow = TextOverflow.Ellipsis)
                         Text(rememberSongLinks(nav, q, withAlbum = false, before = onDismiss), style = MaterialTheme.typography.bodySmall, color = p.muted, maxLines = 1, overflow = TextOverflow.Ellipsis)
                     }
                     IconButton(onClick = { nav.player.removeAt(i) }) {

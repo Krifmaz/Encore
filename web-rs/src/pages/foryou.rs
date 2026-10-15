@@ -48,9 +48,9 @@ pub(crate) fn track_row(t: &Value, i: usize) -> String {
         format!(r#"<button class="btn ghost icon sm" data-play="{i}" aria-label="Play">{}</button>"#, icon_attr("play", r#"width="14""#))
     } else { String::new() };
     let artist_link = if t.truthy("artist_mbid") {
-        format!(r##"<a href="#/artist/{}">{}</a>"##, esc(&t.s("artist_mbid")), esc(&artist))
+        format!(r##"<a href="#/artist/{}">{}</a>"##, esc(&t.s("artist_mbid")), esc(&crate::ui::tr_inline(t, "artist")))
     } else {
-        format!(r##"<a href="#/artist-name/{}">{}</a>"##, String::from(js_sys::encode_uri_component(&artist)), esc(&artist))
+        format!(r##"<a href="#/artist-name/{}">{}</a>"##, String::from(js_sys::encode_uri_component(&artist)), esc(&crate::ui::tr_inline(t, "artist")))
     };
     let status = if t.truthy("library") { r#"<span class="badge ok">In library</span>"#.to_string() }
         else if t.truthy("request_status") { status_badge(&t.s("request_status")) }
@@ -58,7 +58,7 @@ pub(crate) fn track_row(t: &Value, i: usize) -> String {
     format!(r#"<tr data-i="{i}">
     <td class="num">{play}</td>
     <td><div class="row" style="gap:10px"><div class="thumb">{}</div>
-      <div style="min-width:0"><div class="ellipsis" style="font-weight:600">{}</div>
+      <div style="min-width:0"><div class="ellipsis" style="font-weight:600">{}</div>{}
       <div class="small muted ellipsis">{artist_link}{}</div></div></div></td>
     <td class="muted hide-sm">{}</td>
     <td style="text-align:right;white-space:nowrap">
@@ -66,8 +66,8 @@ pub(crate) fn track_row(t: &Value, i: usize) -> String {
       {status}
     </td></tr>"#,
         art(&t.s("cover"), if t.truthy("album") { &album } else { &title }, ""),
-        esc(&title),
-        if t.truthy("album") { format!(" · {}", esc(&album)) } else { String::new() },
+        esc(&crate::ui::tr(t, "title")), crate::ui::tr_sub(t, "title"),
+        if t.truthy("album") { format!(" · {}", esc(&crate::ui::tr_inline(t, "album"))) } else { String::new() },
         if t.truthy("length") { fmt::dur(t.f("length")) } else { String::new() },
         icon("spark"))
 }

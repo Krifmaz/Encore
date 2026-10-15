@@ -17,6 +17,7 @@ import java.io.FileNotFoundException
  * Android Auto and the system media UI load artwork in their own process and can't send our session, so the
  * session's items point here; this provider fetches the cover with the app's authenticated client once and
  * serves it from the cache directory. Only the fixed sizes the server keeps thumbnails for are allowed.
+ * `content://<applicationId>.covers/lyrics/<version>` serves the car's lyrics card (car/LyricsCard.kt).
  */
 class CoverProvider : ContentProvider() {
     override fun onCreate(): Boolean = true
@@ -24,6 +25,12 @@ class CoverProvider : ContentProvider() {
     override fun openFile(uri: Uri, mode: String): ParcelFileDescriptor? {
         if (mode != "r") throw FileNotFoundException("read-only")
         val segments = uri.pathSegments
+        // the car's lyrics card (car/LyricsCard.kt): already rendered, served as it is
+        if (segments.size == 2 && segments[0] == "lyrics") {
+            val ctx = context ?: throw FileNotFoundException("no context")
+            val card = app.encore.android.car.LyricsCard.file(ctx, segments[1]) ?: throw FileNotFoundException(uri.toString())
+            return ParcelFileDescriptor.open(card, ParcelFileDescriptor.MODE_READ_ONLY)
+        }
         if (segments.size != 2 || segments[0] != "album") throw FileNotFoundException(uri.toString())
         val albumId = segments[1]
         val requested = uri.getQueryParameter("s")?.toIntOrNull() ?: 600

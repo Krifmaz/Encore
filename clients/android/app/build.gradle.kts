@@ -83,6 +83,8 @@ dependencies {
     implementation(libs.androidx.media3.exoplayer)
     implementation(libs.androidx.media3.session)
     implementation(libs.androidx.media3.datasource.okhttp)
+    // Encore Lyrics: a template car app (car/LyricsCarAppService.kt) beside the media app
+    implementation(libs.androidx.car.app)
 
     implementation(libs.androidx.datastore.preferences)
     implementation(libs.okhttp)

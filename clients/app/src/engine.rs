@@ -4,7 +4,9 @@
 //! `<app config dir>/cadenza/`. The engine starts lazily on the first login and is shut down when the app exits.
 
 use crate::State;
+use cadenza::decode::Source;
 use cadenza::embed::EmbeddedPlayer;
+use cadenza::engine::{Command, Track};
 use serde::Deserialize;
 use std::path::PathBuf;
 use std::sync::Mutex;
@@ -67,15 +69,86 @@ pub fn login<R: Runtime>(app: &AppHandle<R>, json: &str) -> Result<serde_json::V
     let id = device_id(&server);
     let st = app.state::<State>();
     let mut slot = st.engine.lock().map_err(|_| "engine busy")?;
-    if slot.is_none() {
-        let dir = config_dir(app);
-        let player = EmbeddedPlayer::start(dir.clone(), device_name()).map_err(|e| format!("Cadenza could not start: {e}"))?;
-        eprintln!("Cadenza engine started, config in {}", player.config_path().display());
-        *slot = Some(player);
-    }
+    ensure_started(app, &mut slot)?;
     let player = slot.as_ref().ok_or("engine missing")?;
     let link = player.connect(&server, req.token.trim(), &id);
     Ok(serde_json::json!({ "device_id": link.device_id(), "name": link.device_name() }))
+}
+
+/// Start the engine (no Encore link) if it isn't running yet: the offline player uses it on its own.
+fn ensure_started<R: Runtime>(app: &AppHandle<R>, slot: &mut Option<EmbeddedPlayer>) -> Result<(), String> {
+    if slot.is_none() {
+        let player = EmbeddedPlayer::start(config_dir(app), device_name()).map_err(|e| format!("Cadenza could not start: {e}"))?;
+        *slot = Some(player);
+    }
+    Ok(())
+}
+
+/// Offline player (ui/offline.html on the desktop): play saved songs `ids` through Cadenza from `index`.
+pub fn offline_play<R: Runtime>(app: &AppHandle<R>, ids: &[String], index: usize) -> Result<(), String> {
+    let songs = crate::offline::list(app);
+    let tracks: Vec<Track> = ids.iter().filter_map(|id| {
+        let s = songs.iter().find(|s| &s.id == id)?;
+        let path = crate::offline::audio_path(app, id)?;
+        Some(Track {
+            id: Some(s.id.clone()), source: Source::Path { path }, title: s.title.clone(), artist: s.artist.clone(),
+            album: s.album.clone(), ..Default::default()
+        })
+    }).collect();
+    if tracks.is_empty() {
+        return Err("Those songs aren't on this computer any more".into());
+    }
+    let index = index.min(tracks.len() - 1);
+    let st = app.state::<State>();
+    let mut slot = st.engine.lock().map_err(|_| "engine busy")?;
+    ensure_started(app, &mut slot)?;
+    let player = slot.as_ref().ok_or("engine missing")?;
+    player.engine().play_queue(tracks, index, 0.0);
+    Ok(())
+}
+
+/// Offline player buttons: toggle / next / prev / stop / seek (seconds) / volume (change, -1…1).
+pub fn offline_control<R: Runtime>(app: &AppHandle<R>, action: &str, value: f64) {
+    let st = app.state::<State>();
+    let Ok(slot) = st.engine.lock() else { return };
+    let Some(p) = slot.as_ref() else { return };
+    let e = p.engine();
+    match action {
+        "toggle" => e.send(Command::Toggle),
+        "next" => e.send(Command::Next),
+        "prev" => e.send(Command::Prev),
+        "stop" => e.send(Command::Stop),
+        "seek" if value.is_finite() => e.send(Command::Seek(value.max(0.0))),
+        "volume" if value.is_finite() => e.set_volume_linear((e.status().volume_linear + value).clamp(0.0, 1.0)),
+        _ => {}
+    }
+}
+
+/// `{state: playing|paused|stopped, id, index, position, duration, volume, error}` of the offline player.
+pub fn offline_status<R: Runtime>(app: &AppHandle<R>) -> serde_json::Value {
+    let st = app.state::<State>();
+    let Ok(slot) = st.engine.lock() else { return serde_json::json!({ "state": "stopped" }) };
+    let Some(p) = slot.as_ref() else { return serde_json::json!({ "state": "stopped" }) };
+    let s = p.engine().status();
+    serde_json::json!({
+        "state": s.state, "id": s.track.as_ref().and_then(|t| t.id.clone()), "index": s.index,
+        "position": s.position, "duration": s.duration.unwrap_or(0.0), "volume": s.volume_linear, "error": s.error,
+    })
+}
+
+#[tauri::command(async)]
+pub fn offline_play_songs<R: Runtime>(app: AppHandle<R>, ids: Vec<String>, index: usize) -> Result<(), String> {
+    offline_play(&app, &ids, index)
+}
+
+#[tauri::command(async)]
+pub fn offline_engine<R: Runtime>(app: AppHandle<R>, action: String, value: Option<f64>) {
+    offline_control(&app, &action, value.unwrap_or(0.0));
+}
+
+#[tauri::command(async)]
+pub fn offline_engine_status<R: Runtime>(app: AppHandle<R>) -> serde_json::Value {
+    offline_status(&app)
 }
 
 /// Stop the Encore client; the engine keeps its settings and stops playing. Nothing happens when the engine

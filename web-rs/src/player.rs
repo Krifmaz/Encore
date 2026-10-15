@@ -248,9 +248,9 @@ fn js_set(o: &JsValue, key: &str, v: &JsValue) { let _ = js_sys::Reflect::set(o,
 fn set_media_metadata(t: &Value) {
     let Some(ms) = media_session() else { return };
     let init = js_sys::Object::new();
-    js_set(&init, "title", &t.s("title").into());
-    js_set(&init, "artist", &t.s("artist").into());
-    js_set(&init, "album", &t.s("album").into());
+    js_set(&init, "title", &crate::ui::tr_inline(t, "title").into());
+    js_set(&init, "artist", &crate::ui::tr_inline(t, "artist").into());
+    js_set(&init, "album", &crate::ui::tr_inline(t, "album").into());
     let artwork = js_sys::Array::new();
     let cov = cover_at(t, 600);
     if !cov.is_empty() {
@@ -346,13 +346,19 @@ fn native() {
         Some(t) => {
             let cov = cover_at(&t, 600);
             let art_url = if cov.is_empty() { String::new() } else { abs_url(&cov) };
-            json!({ "title": t.s("title"), "artist": t.s("artist"), "album": t.s("album"), "playing": shows_playing(), "art": art_url })
+            let dur = duration();
+            let pos = position();
+            let pos = if pos.is_finite() { pos.max(0.0) } else { 0.0 };
+            let dur = if dur.is_finite() { dur } else { 0.0 };
+            json!({ "title": t.s("title"), "artist": t.s("artist"), "album": t.s("album"), "playing": shows_playing(), "art": art_url,
+                "position": pos, "duration": dur })
         }
         None => json!({ "stopped": true }),
     };
     app::native_call_with("nowPlaying", Some(&payload.to_string()));
 }
-/// `window.encorePlayer = { toggle, next, prev, open }`.
+/// `window.encorePlayer = { toggle, next, prev, open, seek, volumeBy }` (seek and volumeBy: the desktop app's mini
+/// player, OS media controls and volume shortcuts).
 fn expose_global() {
     if EXPOSED.with(|e| e.replace(true)) { return; }
     let obj = js_sys::Object::new();
@@ -365,6 +371,16 @@ fn expose_global() {
     put("next", Box::new(|| next(false)));
     put("prev", Box::new(prev));
     put("open", Box::new(|| set_full(true)));
+    let put1 = |name: &str, f: Box<dyn Fn(f64)>| {
+        let c = Closure::<dyn Fn(JsValue)>::new(move |v: JsValue| f(js_sys::Number::from(v).value_of()));
+        let _ = js_sys::Reflect::set(&obj, &name.into(), c.as_ref());
+        c.forget();
+    };
+    put1("seek", Box::new(|sec| seek_to(if sec.is_nan() { 0.0 } else { sec.max(0.0) })));
+    put1("volumeBy", Box::new(|d| {
+        let base = LINK.with(|l| l.borrow().as_ref().map(|l| l.state.g("volume").as_f64().unwrap_or(1.0))).unwrap_or_else(|| USER_VOL.with(|u| u.get()));
+        set_volume((base + if d.is_nan() { 0.0 } else { d }).clamp(0.0, 1.0));
+    }));
     let _ = js_sys::Reflect::set(&dom::window(), &"encorePlayer".into(), &obj);
 }
 pub fn current() -> Option<Value> { cur().map(|t| (*t).clone()) }
@@ -2136,9 +2152,11 @@ fn more_menu(anchor: &Element) {
     if lib { items.push(MenuItem::new("Lyrics", &icon("music"), || { st_mut(|s| s.pane = "lyrics".into()); set_full(true); })); }
     if lib { let t2 = t.clone(); items.push(MenuItem::new("Share link", &icon("external"), move || dom::spawn(share_track(t2.clone())))); }
     if lib { items.push(MenuItem::link("Download this song", &icon("download"), &format!("/api/library/tracks/{}/file", t.s("id")), true)); }
-    if lib && !linked && can_save_offline() { let t2 = t.clone(); items.push(MenuItem::new("Save for offline", &icon("download"), move || { save_offline(vec![t2.clone()]); toast("Saving to this phone…", "ok"); })); }
+    if lib && !linked && can_save_offline() { let t2 = t.clone(); items.push(MenuItem::new("Save for offline", &icon("download"), move || { save_offline(vec![t2.clone()]); toast("Saving to this device…", "ok"); })); }
     items.push(MenuItem::new("Signal path", &icon("activity"), || dom::spawn(signal_path())));
+    if app::native_has("miniPlayer") { items.push(MenuItem::new("Mini player", &icon("music"), || app::native_call("miniPlayer"))); }
     if lib { let t2 = t.clone(); items.push(MenuItem::new("Report a problem", &icon("shield"), move || crate::pages::report::report_modal("track", t2.g("id").clone(), &t2.s("title"), "", None))); }
+    if lib && crate::ui::translate_mode() != "off" { let t2 = t.clone(); items.push(MenuItem::new("Edit translation", &icon("edit"), move || crate::pages::translate::edit_translation(t2.s("title"), "title", None))); }
     if has_encore_remote() { items.push(MenuItem::new(if linked { "Your devices…" } else { "Play on another device…" }, &icon("devices"), remote_open)); }
     pop_menu(anchor, items);
 }
@@ -2717,9 +2735,9 @@ fn render() {
     </div>
     {right}"##,
         thumb = crate::ui::art_sized(&cover(&t), &album_or_title(&t), "", 200),
-        title = esck(&t, "title"),
-        artist = esck(&t, "artist"),
-        album = if t.truthy("album") { format!(" · {}", esck(&t, "album")) } else { String::new() },
+        title = esc(&crate::ui::tr(&t, "title")),
+        artist = esc(&crate::ui::tr_inline(&t, "artist")),
+        album = if t.truthy("album") { format!(" · {}", esc(&crate::ui::tr_inline(&t, "album"))) } else { String::new() },
         prev = icon("prev"), pp = if shows_playing() { icon("pause") } else { icon("play") }, next = icon("next"),
         right = right_html(Some(&t), true)));
     let mut ls = Vec::new();
@@ -2777,9 +2795,9 @@ fn render_full() {
     let autoplay = prefs().truthy("autoplay");
     dom::set_style(&f, "--np-bg", &format!(r#"url("{}")"#, cover_at(&t, 400)));
     let tab = |p: &str, label: &str| format!(r#"<button data-pane="{p}" class="{}">{label}</button>"#, if pane == p { "active" } else { "" });
-    let artist = if t.truthy("preview") { esck(&t, "artist") } else { crate::ui::artist_links(&t) };
+    let artist = if t.truthy("preview") { esc(&crate::ui::tr_inline(&t, "artist")) } else { crate::ui::artist_links(&t) };
     let album = if t.truthy("album") {
-        format!(" · {}", if t.truthy("album_id") { format!(r##"<a href="#/library/album/{}">{}</a>"##, esck(&t, "album_id"), esck(&t, "album")) } else { esck(&t, "album") })
+        format!(" · {}", if t.truthy("album_id") { format!(r##"<a href="#/library/album/{}">{}</a>"##, esck(&t, "album_id"), esc(&crate::ui::tr_inline(&t, "album"))) } else { esc(&crate::ui::tr_inline(&t, "album")) })
     } else { String::new() };
     let device_btn = if has_encore_remote() {
         format!(r#"<button class="btn sm ghost np-device" id="f-device" title="Choose where the music plays">{}<span class="hide-sm">{}</span>{}</button>"#,
@@ -2822,7 +2840,7 @@ fn render_full() {
       <section class="np-main">
         <div class="np-art">{big_art}</div>
         <div class="np-meta">
-          <h2 class="ellipsis">{title}</h2>
+          <h2 class="ellipsis">{title}</h2>{title_sub}
           <div class="muted ellipsis">{artist}{album}</div>
           <button class="badge mt np-quality" id="f-signal" title="Signal path: what the file is, what Encore sends and what this device does with it">{quality}</button>
         </div>
@@ -2845,7 +2863,7 @@ fn render_full() {
       </section>
     </div>"##,
         x = icon("x"), tab_now = tab("now", "Now playing"), tab_lyrics = tab("lyrics", "Lyrics"), tab_queue = tab("queue", "Up next"),
-        big_art = art(&cover(&t), &album_or_title(&t), "big"), title = esck(&t, "title"), quality = esc(&quality(&t)),
+        big_art = art(&cover(&t), &album_or_title(&t), "big"), title = esc(&crate::ui::tr(&t, "title")), title_sub = crate::ui::tr_sub(&t, "title"), quality = esc(&quality(&t)),
         shuffle = format!(r#"<button class="btn ghost icon {}" id="f-shuffle" title="{}" aria-label="Shuffle" aria-pressed="{shuffle_on}">{}</button>"#,
             if shuffle_on { "on" } else { "" }, if shuffle_on { "Shuffle: on" } else { "Shuffle: off" }, icon("shuffle")),
         prev = icon("prev"), pp = if playing { icon("pause") } else { icon("play") }, next = icon("next"),

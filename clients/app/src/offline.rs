@@ -76,6 +76,24 @@ pub fn remove<R: Runtime>(app: &AppHandle<R>, id: &str) {
     }
 }
 
+/// The audio file of a saved song (`<id>.<ext>` next to index.json), for the desktop's Cadenza playback.
+#[cfg_attr(mobile, allow(dead_code))]
+pub fn audio_path<R: Runtime>(app: &AppHandle<R>, id: &str) -> Option<PathBuf> {
+    let id = clean(id, |c| c.is_ascii_alphanumeric() || c == '_' || c == '-');
+    if id.is_empty() {
+        return None;
+    }
+    let rd = std::fs::read_dir(dir(app)).ok()?;
+    rd.flatten().map(|e| e.path()).find(|p| is_audio_of(p, &id))
+}
+
+/// `<id>.<ext>` that isn't the cover, the index or an unfinished download.
+fn is_audio_of(p: &Path, id: &str) -> bool {
+    let name = p.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
+    let Some(ext) = name.strip_prefix(&format!("{id}.")) else { return false };
+    !ext.is_empty() && !ext.contains('.') && !matches!(ext, "jpg" | "part" | "json")
+}
+
 fn clean(s: &str, allow: fn(char) -> bool) -> String {
     s.chars().filter(|c| allow(*c)).collect()
 }
@@ -131,4 +149,19 @@ pub async fn save<R: Runtime>(app: &AppHandle<R>, http: &reqwest::Client, cookie
     songs.push(song);
     write(app, &songs);
     Ok(req.title)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_audio_file_is_not_the_cover_or_a_half_download() {
+        assert!(is_audio_of(Path::new("/x/42.flac"), "42"));
+        assert!(is_audio_of(Path::new("/x/42.audio"), "42"));
+        assert!(!is_audio_of(Path::new("/x/42.jpg"), "42"));
+        assert!(!is_audio_of(Path::new("/x/42.part"), "42"));
+        assert!(!is_audio_of(Path::new("/x/420.flac"), "42"));
+        assert!(!is_audio_of(Path::new("/x/index.json"), "42"));
+    }
 }

@@ -10,6 +10,14 @@ mod server;
 mod desktop;
 #[cfg(desktop)]
 mod engine;
+#[cfg(desktop)]
+mod extras;
+#[cfg(any(target_os = "windows", test))]
+mod icons;
+#[cfg(target_os = "windows")]
+mod taskbar;
+#[cfg(target_os = "macos")]
+mod dock;
 #[cfg(mobile)]
 mod mobile;
 
@@ -54,7 +62,10 @@ pub fn run() {
             .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| desktop::show_window(app)))
             .plugin(tauri_plugin_window_state::Builder::new()
                 .with_state_flags(tauri_plugin_window_state::StateFlags::SIZE | tauri_plugin_window_state::StateFlags::POSITION | tauri_plugin_window_state::StateFlags::MAXIMIZED)
-                .build());
+                .build())
+            .plugin(extras::shortcut_plugin())
+            .plugin(extras::autostart_plugin())
+            .plugin(extras::updater_plugin());
     }
     #[cfg(mobile)]
     {
@@ -66,6 +77,9 @@ pub fn run() {
         bridge::now_playing, bridge::page_alive, bridge::servers, bridge::connect, bridge::remove_server, bridge::change_server,
         bridge::retry_server, bridge::open_offline, bridge::offline_list, bridge::offline_ids, bridge::remove_offline, bridge::save_offline,
         engine::engine_login, engine::engine_logout, engine::engine_status,
+        engine::offline_play_songs, engine::offline_engine, engine::offline_engine_status,
+        extras::desktop_settings, extras::set_desktop_settings, extras::mini_player, extras::mini_state, extras::player_control,
+        extras::check_update, extras::install_update,
     ]);
     #[cfg(mobile)]
     let builder = builder.invoke_handler(tauri::generate_handler![
@@ -97,6 +111,10 @@ pub fn run() {
             {
                 let ext = app.handle().clone();
                 let dl = app.handle().clone();
+                // started at log-in (Settings → This computer): only the tray, the window comes with a click
+                if extras::started_minimized() {
+                    w = w.visible(false);
+                }
                 w = w.inner_size(1280.0, 860.0).min_inner_size(380.0, 500.0)
                     .background_color(tauri::window::Color(22, 22, 23, 255))
                     // window.open / target=_blank → the browser
@@ -137,7 +155,15 @@ pub fn run() {
                 });
             }
             #[cfg(desktop)]
-            desktop::setup(app.handle())?;
+            {
+                desktop::setup(app.handle())?;
+                let hotkeys = app.state::<State>().settings.lock().map(|s| s.hotkeys.clone()).unwrap_or_default();
+                let problems = extras::apply_hotkeys(app.handle(), &hotkeys);
+                if !problems.is_empty() {
+                    eprintln!("shortcuts not set: {problems:?}");
+                }
+                extras::watch_updates(app.handle());
+            }
             Ok(())
         });
 
@@ -147,6 +173,15 @@ pub fn run() {
         #[cfg(desktop)]
         if let tauri::RunEvent::Exit = event {
             engine::shutdown(app);
+        }
+        // the main window went away (Windows / Linux close it for good): the mini player has nothing left to drive
+        #[cfg(desktop)]
+        if let tauri::RunEvent::WindowEvent { label, event: tauri::WindowEvent::Destroyed, .. } = &event {
+            if label == "main" {
+                if let Some(m) = app.get_webview_window(extras::MINI) {
+                    let _ = m.close();
+                }
+            }
         }
         // macOS: closing the window keeps the app (and the music) running; clicking the dock icon brings it back
         #[cfg(target_os = "macos")]

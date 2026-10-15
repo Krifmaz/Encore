@@ -593,6 +593,10 @@ pub fn artist_url(a: &Value) -> String {
 pub fn artist_links(t: &Value) -> String {
     let s = t.s("artist");
     if s.is_empty() { return String::new(); }
+    // a translated name is one link to the artist as written
+    if translate_mode() != "off" && (t.truthy("artist_t") || t.truthy("artist_r")) && tr_inline(t, "artist") != s {
+        return format!(r#"<a class="artist-link" href="{}">{}</a>"#, artist_url(&serde_json::json!({ "name": s })), esc(&tr_inline(t, "artist")));
+    }
     let given = t.a("artists");
     let list = if given.is_empty() { vec![serde_json::json!({ "name": s })] } else { given };
     let (mut out, mut at) = (String::new(), 0usize);
@@ -609,5 +613,47 @@ pub fn artist_links(t: &Value) -> String {
 /// `albumLink(t)`: a song's album name as a link to the album (library album page), or plain text when it has no album id.
 pub fn album_link(t: &Value) -> String {
     if !t.truthy("album") { return String::new(); }
-    if t.truthy("album_id") { format!(r##"<a class="album-link" href="#/library/album/{}">{}</a>"##, esck(t, "album_id"), esck(t, "album")) } else { esck(t, "album") }
+    if t.truthy("album_id") { format!(r##"<a class="album-link" href="#/library/album/{}">{}</a>"##, esck(t, "album_id"), esc(&tr_inline(t, "album"))) } else { esc(&tr_inline(t, "album")) }
+}
+
+// ---- translated titles (Settings → Language) ------------------------------------------------------
+// The server adds <field>_t (translation) and <field>_r (romanization) to titles, albums and artists for
+// listeners who turned translations on; these pick what to show for the mode (web/js/ui.js: tr, trSub, trInline).
+thread_local! {
+    static TR_MODE: RefCell<&'static str> = const { RefCell::new("off") };
+}
+/// `setTranslateMode(m)`.
+pub fn set_translate_mode(m: &str) {
+    let m: &'static str = match m { "under" => "under", "instead" => "instead", "romanized" => "romanized", _ => "off" };
+    TR_MODE.with(|x| *x.borrow_mut() = m);
+}
+/// `translateMode()`.
+pub fn translate_mode() -> &'static str { TR_MODE.with(|x| *x.borrow()) }
+fn tr_pick(o: &Value, f: &str, suffixes: &[&str]) -> Option<String> {
+    suffixes.iter().map(|x| o.s(&format!("{f}{x}"))).find(|v| !v.is_empty())
+}
+/// `tr(o, f)`: the original, its translation (instead; the romanization when there is none) or its romanization.
+pub fn tr(o: &Value, f: &str) -> String {
+    let orig = o.s(f);
+    match translate_mode() {
+        "instead" => tr_pick(o, f, &["_t", "_r"]).unwrap_or(orig),
+        "romanized" => tr_pick(o, f, &["_r"]).unwrap_or(orig),
+        _ => orig,
+    }
+}
+/// `trSub(o, f)`: the line under a title when the translation shows under the original (HTML).
+pub fn tr_sub(o: &Value, f: &str) -> String {
+    if translate_mode() != "under" { return String::new(); }
+    match tr_pick(o, f, &["_t", "_r"]) {
+        Some(t) => format!(r#"<div class="tr-sub small faint ellipsis">{}</div>"#, esc(&t)),
+        None => String::new(),
+    }
+}
+/// `trInline(o, f)`: "Original (Translation)" under the original, else as `tr`.
+pub fn tr_inline(o: &Value, f: &str) -> String {
+    if translate_mode() != "under" { return tr(o, f); }
+    match tr_pick(o, f, &["_t", "_r"]) {
+        Some(t) => format!("{} ({t})", o.s(f)),
+        None => o.s(f),
+    }
 }

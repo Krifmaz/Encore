@@ -8,7 +8,7 @@
 // with a shuffle of the whole library: a single song → straight into the shuffle, an album → after its last song.
 import { api } from './api.js';
 import * as playback from './playback.js';
-import { art, artistLinks, esc, fmt, icon, popMenu, shareTrack, toast } from './ui.js';
+import { art, artistLinks, esc, fmt, icon, popMenu, shareTrack, toast, translateMode, tr, trInline, trSub } from './ui.js';
 
 const state = { queue: [], index: -1, transcoded: false, lossy: false, rung: 0, dsp: false, dspRate: 0, offset: 0, dragging: false, context: 'list', repeat: 'off', shuffle: false, order: null, full: false, pane: 'now', logged: false,
   stalls: [], stallAt: 0, seekAt: 0, stepAt: 0, switchedAt: 0, lastPreloadCheck: 0, slowStart: null,
@@ -81,11 +81,18 @@ function native() {
   if (!n?.nowPlaying || !audio) return;
   const t = current();
   try {
+    const dur = duration();
     n.nowPlaying(JSON.stringify(t ? { title: t.title || '', artist: t.artist || '', album: t.album || '', playing: showsPlaying(),
-      art: cover(t) ? new URL(coverAt(t, 600), location.href).href : '' } : { stopped: true }));
+      art: cover(t) ? new URL(coverAt(t, 600), location.href).href : '',
+      position: Math.max(0, position() || 0), duration: Number.isFinite(dur) ? dur : 0 } : { stopped: true }));
   } catch { /* ignore */ }
 }
-window.encorePlayer = { toggle: () => toggle(), next: () => next(), prev: () => prev(), open: () => setFull(true) };
+window.encorePlayer = {
+  toggle: () => toggle(), next: () => next(), prev: () => prev(), open: () => setFull(true),
+  // desktop app: the mini player's seek bar, the OS media controls and the volume shortcuts
+  seek: (sec) => seekTo(Math.max(0, Number(sec) || 0)),
+  volumeBy: (d) => setVolume(Math.max(0, Math.min(1, (link ? Number(link.state?.volume ?? 1) : userVol) + (Number(d) || 0)))),
+};
 export function current() { return state.queue[state.index] || null; }
 
 // ---- linked: this device is locked as a remote for another one ----
@@ -321,7 +328,7 @@ function startUrl(t) {
   return streamUrl(t, { transcode: convert(t) && rung === 0, rung, dsp: wantDsp(t, rung > 0) });
 }
 
-/** Android app: keep songs on the phone so they play with no server. */
+/** Android and desktop apps: keep songs on the device so they play with no server. */
 export const canSaveOffline = () => !!window.EncoreNative?.saveOffline;
 export function saveOffline(tracks) {
   for (const t of tracks) {
@@ -426,7 +433,7 @@ function load({ transcode = false, offset = 0, rung = null, dsp = null, resume =
   if (start && state.dsp && dspCacheOn()) prepareAhead(t);
   if ('mediaSession' in navigator) {
     navigator.mediaSession.metadata = new MediaMetadata({
-      title: t.title || '', artist: t.artist || '', album: t.album || '',
+      title: trInline(t, 'title'), artist: trInline(t, 'artist'), album: trInline(t, 'album'),
       artwork: cover(t) ? [{ src: coverAt(t, 600), sizes: '600x600' }] : [],
     });
   }
@@ -1338,9 +1345,11 @@ function moreMenu(anchor) {
     lib ? { label: 'Lyrics', icon: icon.music, onClick: () => { state.pane = 'lyrics'; setFull(true); } } : null,
     lib ? { label: 'Share link', icon: icon.external, onClick: () => shareTrack(t) } : null,
     lib ? { label: 'Download this song', icon: icon.download, href: `/api/library/tracks/${t.id}/file`, download: true } : null,
-    lib && !link && canSaveOffline() ? { label: 'Save for offline', icon: icon.download, onClick: () => { saveOffline([t]); toast('Saving to this phone…', 'ok'); } } : null,
+    lib && !link && canSaveOffline() ? { label: 'Save for offline', icon: icon.download, onClick: () => { saveOffline([t]); toast('Saving to this device…', 'ok'); } } : null,
     { label: 'Signal path', icon: icon.activity, onClick: signalPath },
+    window.EncoreNative?.miniPlayer ? { label: 'Mini player', icon: icon.music, onClick: () => window.EncoreNative.miniPlayer() } : null,
     lib ? { label: 'Report a problem', icon: icon.shield, onClick: async () => (await import('./pages/report.js')).reportModal({ kind: 'track', id: t.id, title: t.title }) } : null,
+    lib && translateMode() !== 'off' ? { label: 'Edit translation', icon: icon.edit, onClick: async () => (await import('./pages/translate.js')).editTranslation(t.title, 'title') } : null,
     window.encoreRemote ? { label: link ? 'Your devices…' : 'Play on another device…', icon: icon.devices, onClick: () => window.encoreRemote.open() } : null,
   ]);
 }
@@ -1718,8 +1727,8 @@ function render() {
     <div class="now" id="p-open" role="button" tabindex="0" aria-label="Open the full-screen player" title="Open player">
       <div class="thumb">${art(cover(t), t.album || t.title, '', 200)}</div>
       <div class="grow">
-        <div class="ellipsis" style="font-weight:650">${esc(t.title)}</div>
-        <div class="ellipsis small muted">${esc(t.artist)}${t.album ? ' · ' + esc(t.album) : ''}</div>
+        <div class="ellipsis" style="font-weight:650">${esc(tr(t, 'title'))}</div>
+        <div class="ellipsis small muted">${esc(trInline(t, 'artist'))}${t.album ? ' · ' + esc(trInline(t, 'album')) : ''}</div>
       </div>
     </div>
     <div class="ctrls">
@@ -1778,8 +1787,8 @@ function renderFull() {
       <section class="np-main">
         <div class="np-art">${art(cover(t), t.album || t.title, "big")}</div>
         <div class="np-meta">
-          <h2 class="ellipsis">${esc(t.title)}</h2>
-          <div class="muted ellipsis">${t.preview ? esc(t.artist) : artistLinks(t)}${t.album ? ` · ${t.album_id ? `<a href="#/library/album/${esc(t.album_id)}">${esc(t.album)}</a>` : esc(t.album)}` : ''}</div>
+          <h2 class="ellipsis">${esc(tr(t, 'title'))}</h2>${trSub(t, 'title')}
+          <div class="muted ellipsis">${t.preview ? esc(trInline(t, 'artist')) : artistLinks(t)}${t.album ? ` · ${t.album_id ? `<a href="#/library/album/${esc(t.album_id)}">${esc(trInline(t, 'album'))}</a>` : esc(trInline(t, 'album'))}` : ''}</div>
           <button class="badge mt np-quality" id="f-signal" title="Signal path: what the file is, what Encore sends and what this device does with it">${esc(quality(t))}</button>
         </div>
         <div class="seek np-seek"><span id="f-cur">0:00</span><input type="range" id="fseek" min="0" max="1000" value="0"><span id="f-dur">0:00</span></div>

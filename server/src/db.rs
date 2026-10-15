@@ -21,7 +21,8 @@ const SCHEMA: &str = include_str!("schema.sql");
 /// otherwise fail half-way through and leave a database neither version can read), and a lower number
 /// means "back up, then migrate".
 /// 24: round 3 (release types on requests; source blocks, track quality, contributions – see schema.sql).
-pub const SCHEMA_VERSION: i64 = 24;
+/// 25: translated and romanized titles (translations).
+pub const SCHEMA_VERSION: i64 = 25;
 
 /// Exit code of the server when the database comes from a newer Encore.
 pub const EXIT_NEWER_DB: i32 = 3;

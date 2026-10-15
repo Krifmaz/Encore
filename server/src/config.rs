@@ -146,6 +146,11 @@ impl Config {
             ("quality_min_lufs", Some("QUALITY_MIN_LUFS"), json!(-28.0), false),
             ("task_quality_enabled", Some("TASK_QUALITY_ENABLED"), json!(false), false),
             ("task_quality_minutes", Some("TASK_QUALITY_MINUTES"), json!(360), false),
+            // translations (translate/): the Translator tool's model (small | best), its auto-update switch, and
+            // whether the library is translated in the background (titles on screen always are)
+            ("translator_model", Some("TRANSLATOR_MODEL"), json!("small"), false),
+            ("tools_auto_translator", None, json!(false), false),
+            ("translate_background", Some("TRANSLATE_BACKGROUND"), json!(true), false),
         ] {
             if !defs.iter().any(|(n, _)| n == k) {
                 defs.push((k.to_string(), Def { env: env.map(String::from), default, secret }));

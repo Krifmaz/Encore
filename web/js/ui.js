@@ -335,6 +335,33 @@ if (typeof document !== 'undefined') {
   if (document.body) start(); else document.addEventListener('DOMContentLoaded', start);
 }
 
+// ---- translated titles (Settings → Language) ------------------------------------------------------
+// The server adds <field>_t (translation) and <field>_r (romanization) to titles, albums and artists for
+// listeners who turned translations on; these helpers pick what to show for the mode (the same rules
+// in web-rs/src/ui.rs).
+let trMode = 'off';
+export function setTranslateMode(m) { trMode = ['under', 'instead', 'romanized'].includes(m) ? m : 'off'; }
+export const translateMode = () => trMode;
+/** The text of a field: the original, its translation (instead; the romanization when there is none) or its romanization. */
+export function tr(o, f) {
+  const orig = o?.[f] ?? '';
+  if (trMode === 'instead') return o?.[f + '_t'] || o?.[f + '_r'] || orig;
+  if (trMode === 'romanized') return o?.[f + '_r'] || orig;
+  return orig;
+}
+/** "Show translation under the original": the line under a title (HTML; empty in other modes). */
+export function trSub(o, f) {
+  if (trMode !== 'under') return '';
+  const t = o?.[f + '_t'] || o?.[f + '_r'];
+  return t ? `<div class="tr-sub small faint ellipsis">${esc(t)}</div>` : '';
+}
+/** Short secondary text: "Original (Translation)" under the original, else as tr(). */
+export function trInline(o, f) {
+  if (trMode !== 'under') return tr(o, f);
+  const t = o?.[f + '_t'] || o?.[f + '_r'];
+  return t ? `${o?.[f] ?? ''} (${t})` : (o?.[f] ?? '');
+}
+
 /** Where an artist name goes: its MusicBrainz page when the id is known, else the name (library or catalog page). */
 export const artistUrl = (a) => a.mbid ? `#/artist/${encodeURIComponent(a.mbid)}` : `#/artist-name/${encodeURIComponent(a.name || '')}`;
 /**
@@ -344,6 +371,8 @@ export const artistUrl = (a) => a.mbid ? `#/artist/${encodeURIComponent(a.mbid)}
 export function artistLinks(t) {
   const s = t?.artist || '';
   if (!s) return '';
+  // a translated name is one link to the artist as written
+  if (trMode !== 'off' && (t.artist_t || t.artist_r) && trInline(t, 'artist') !== s) return `<a class="artist-link" href="${artistUrl({ name: s })}">${esc(trInline(t, 'artist'))}</a>`;
   const list = Array.isArray(t.artists) && t.artists.length ? t.artists : [{ name: s }];
   let out = '', at = 0;
   for (const a of list) {
@@ -356,4 +385,4 @@ export function artistLinks(t) {
   return out + esc(s.slice(at));
 }
 /** A song's album name as a link to the album (library album page), or plain text when it has no album id. */
-export const albumLink = (t) => t?.album ? (t.album_id ? `<a class="album-link" href="#/library/album/${esc(t.album_id)}">${esc(t.album)}</a>` : esc(t.album)) : '';
+export const albumLink = (t) => t?.album ? (t.album_id ? `<a class="album-link" href="#/library/album/${esc(t.album_id)}">${esc(trInline(t, 'album'))}</a>` : esc(trInline(t, 'album'))) : '';

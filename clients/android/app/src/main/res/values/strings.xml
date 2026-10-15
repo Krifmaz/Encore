@@ -2,4 +2,5 @@
 <resources>
     <string name="app_name">Encore</string>
     <string name="share_label">Request in Encore</string>
+    <string name="car_lyrics_label">Encore Lyrics</string>
 </resources>

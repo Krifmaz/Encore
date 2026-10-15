@@ -308,6 +308,7 @@ async function renderTasks(panel) {
 const EMBEDDED = {
   account: (el, ctx) => accountPage.render(el, ctx),
   appearance: (el, ctx) => renderAppearance(el, ctx),
+  language: async (el) => (await import('./translate.js')).renderLanguage(el),
   playback: (el, ctx) => renderPlayback(el, ctx),
   connections: (el, ctx) => connectionsPage.render(el, ctx),
   users: (el, ctx) => adminPage.renderUsers(el, ctx),
@@ -316,6 +317,7 @@ const EMBEDDED = {
   contribute: (el, ctx) => contributePage.render(el, ctx),
   blocked: (el, ctx) => reportPage.render(el, ctx),
   diagnostics: (el) => diagPage.render(el),
+  computer: async (el) => (await import('./computer.js')).render(el),
 };
 
 export async function render(view, ctx) {
@@ -327,13 +329,15 @@ export async function render(view, ctx) {
   let current = ctx.query.s ? groupOf(ctx.query.s) : 'account';
   let focus = ctx.query.s && current !== ctx.query.s ? ctx.query.s : null;   // #/settings?s=<section> opens that card
   const nav = [
-    ['You', [['account', 'Account'], ['appearance', 'Appearance'], ['playback', 'Playback'], ['connections', 'Connections']]],
+    ['You', [['account', 'Account'], ['appearance', 'Appearance'], ['language', 'Language'], ['playback', 'Playback'], ['connections', 'Connections']]],
     ...(admin ? [
       ['People', [['users', 'Users & permissions'], ['invites', 'Invites']]],
       ['Server', GROUPS.map(g => [g.id, g.title])],
       ['System', [['diagnostics', 'Diagnostics']]],
     ] : []),
   ];
+  // the desktop app: its own settings (start with the computer, shortcuts, mini player, offline songs, updates)
+  if (window.EncoreNative?.desktopSettings) nav[0][1].push(['computer', 'This computer']);
   const pages = nav.flatMap(([, items]) => items);
   if (!pages.some(([id]) => id === current)) current = 'account';
   view.innerHTML = `
@@ -804,10 +808,11 @@ const TOOL_RESET = {
   cadenza: { link: 'Use the built-in engine', ask: 'Go back to the engine built into Encore? The downloaded Cadenza is removed.', done: 'Back to the built-in engine' },
   slskd: { link: 'Remove slskd', ask: 'Remove slskd? Soulseek stays off until you install it again.', done: 'slskd removed' },
   browser: { link: 'Remove the browser', ask: 'Remove the browser for YouTube sign-in? Its sign-in is kept for when you install it again; until then the extension or pasted cookies are used.', done: 'Browser removed' },
+  translator: { link: 'Remove the Translator', ask: 'Remove the Translator and its model? Translations made so far are kept; new titles only get official translations until you install it again.', done: 'Translator removed' },
 };
 const toolReset = (t) => TOOL_RESET[t.id] || { link: 'Use the bundled version', ask: `Go back to the ${t.name || t.id} version that came with Encore? The updated copy is removed.`, done: `Back to the bundled ${t.name || t.id}` };
 /** slskd and the sign-in browser are installed by Encore, not bundled: before that their button says Install. */
-const toolInstall = (t) => (t.id === 'slskd' || t.id === 'browser') && !t.installed;
+const toolInstall = (t) => (t.id === 'slskd' || t.id === 'browser' || t.id === 'translator') && !t.installed;
 
 function toolRow(t, busy) {
   let action = '';
@@ -817,7 +822,7 @@ function toolRow(t, busy) {
   else if (t.update_available) action = `<span class="badge warn">${esc(t.latest || '')} available</span>`;
   else if (t.latest) action = `<span class="badge ok">${icon.check} Up to date</span>`;
   else if (toolUpdatable(t)) action = '<span class="small faint">Not checked yet</span>';
-  const updated = t.source === 'updated' && t.id !== 'slskd' && t.id !== 'browser';
+  const updated = t.source === 'updated' && t.id !== 'slskd' && t.id !== 'browser' && t.id !== 'translator';
   return `<div class="list-item" style="align-items:flex-start;flex-wrap:wrap;gap:12px" data-tool="${esc(t.id)}">
       <div class="grow" style="min-width:200px"><div style="font-weight:650">${esc(t.name || t.id)} <span class="small muted mono">${t.installed ? esc(t.installed) : 'not installed'}</span>${updated ? ' <span class="small muted">(updated)</span>' : ''}</div>
         ${t.note ? `<div class="small muted">${esc(t.note)}</div>` : ''}
@@ -841,12 +846,18 @@ async function renderTools(host, getValues, setValues) {
     + toggle('tools_auto_streamrip', 'Update streamrip automatically when a new release is out')
     + toggle('tools_auto_cadenza', 'Update Cadenza automatically when a new release is out')
     + toggle('tools_auto_slskd', 'Update slskd automatically when a new release is out')
-    + toggle('tools_auto_browser', 'Update the browser for YouTube sign-in automatically');
+    + toggle('tools_auto_browser', 'Update the browser for YouTube sign-in automatically')
+    + toggle('tools_auto_translator', 'Update the Translator (llama.cpp) automatically')
+    + toggle('translate_background', 'Translate the whole library in the background (titles on screen are always translated first)');
+  // the Translator's model: changing it downloads the other one on the next Install / Update
+  const modelPick = 'translator_model' in values ? `<label class="stack" style="gap:4px;max-width:420px"><span class="small muted">Translator model</span>
+    <select class="input" id="tools-model" ${(meta.translator_model || {}).source === 'env' ? 'disabled' : ''}>${[['small', 'Small – Qwen3 4B Instruct (about 2.5 GB)'], ['best', 'Best – Qwen3 8B (about 5 GB)']].map(([v, l]) => `<option value="${v}" ${values.translator_model === v ? 'selected' : ''}>${l}</option>`).join('')}</select>
+    <span class="small muted">Small runs on most servers (about 4 GB of memory while it works); Best translates better and needs about 7 GB. It only runs while there is something to translate.</span></label>` : '';
   host.innerHTML = `<div class="card" id="tools-card" style="margin-bottom:12px">
     <div class="row between" style="margin-bottom:8px;gap:10px"><h2>Download tools</h2><button class="btn sm" type="button" id="tools-check">${icon.refresh}Check for updates</button></div>
-    <p class="muted small" style="margin:0 0 14px">yt-dlp, streamrip, Cadenza, slskd and the browser for YouTube sign-in update in place – no new Encore image needed. Updates are kept in the config folder.</p>
+    <p class="muted small" style="margin:0 0 14px">yt-dlp, streamrip, Cadenza, slskd, the browser for YouTube sign-in and the Translator update in place – no new Encore image needed. Updates are kept in the config folder.</p>
     <div class="list" id="tools-list"></div>
-    <div class="stack mt" style="gap:8px">${toggles}<div class="small muted">Every tool is checked daily; updates install by themselves only where the switch is on. Change the schedule under <a href="#/settings?s=tasks">Scheduled tasks</a>.</div></div>
+    <div class="stack mt" style="gap:8px">${modelPick}${toggles}<div class="small muted">Every tool is checked daily; updates install by themselves only where the switch is on. Change the schedule under <a href="#/settings?s=tasks">Scheduled tasks</a>.</div></div>
   </div>`;
   const list = host.querySelector('#tools-list'), check = host.querySelector('#tools-check');
   const paint = () => {
@@ -883,6 +894,10 @@ async function renderTools(host, getValues, setValues) {
       await reload(); paint();
     }
   };
+  host.querySelector('#tools-model')?.addEventListener('change', async (e) => {
+    try { setValues(await api.put('/admin/settings', { translator_model: e.target.value })); toast('Saved – Install or Update the Translator to download this model', 'ok'); await reload(); paint(); }
+    catch (err) { toast(err.message, 'err'); }
+  });
   host.querySelectorAll('[data-tool-auto]').forEach(box => box.addEventListener('change', async () => {
     try { setValues(await api.put('/admin/settings', { [box.dataset.toolAuto]: box.checked })); toast('Saved', 'ok'); }
     catch (err) { box.checked = !box.checked; toast(err.message, 'err'); }

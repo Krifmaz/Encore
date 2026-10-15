@@ -280,7 +280,7 @@ pub async fn boot() {
     appearance::apply(&appearance::current());
     set_info(api::get("/auth/info").await.unwrap_or_else(|_| serde_json::json!({})));
     set_user(api::get("/auth/me").await.ok());
-    if let Some(u) = user() { appearance::adopt_account(&u); crate::playback::adopt_account(&u); }
+    if let Some(u) = user() { appearance::adopt_account(&u); crate::playback::adopt_account(&u); crate::ui::set_translate_mode(&u.o("prefs").s("translate_mode")); }
     else { appearance::apply(&appearance::brand()); }
     if user().is_some() {
         render_shell();
@@ -296,6 +296,7 @@ pub async fn boot() {
 /// `refreshUser()`.
 pub async fn refresh_user() {
     if let Ok(u) = api::get("/auth/me").await {
+        crate::ui::set_translate_mode(&u.o("prefs").s("translate_mode"));
         appearance::apply(&appearance::current());
         appearance::adopt_account(&u);
         set_user(Some(u));
