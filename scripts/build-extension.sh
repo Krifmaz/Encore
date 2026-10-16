@@ -10,7 +10,8 @@ TMP="$(mktemp -d)"
 trap 'rm -rf "$TMP"' EXIT
 for b in chrome firefox; do
   mkdir -p "$TMP/$b"
-  cp "$SRC/background.js" "$SRC/options.html" "$SRC/options.js" "$SRC/icon.png" "$SRC/README.md" "$TMP/$b/"
+  # every file but the two manifests (the right one is copied below as manifest.json)
+  for f in "$SRC"/*; do case "$(basename "$f")" in manifest*.json) ;; *) cp "$f" "$TMP/$b/" ;; esac; done
   m="$SRC/manifest.json"; [ "$b" = firefox ] && m="$SRC/manifest.firefox.json"
   sed "s/\"version\": \"0.0.0\"/\"version\": \"$V\"/" "$m" > "$TMP/$b/manifest.json"
 done

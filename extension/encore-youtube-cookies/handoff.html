@@ -1,0 +1,25 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Encore – hand over a YouTube sign-in</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<main>
+  <div class="card">
+    <h1>Hand over a YouTube sign-in</h1>
+    <p>Sign in to Google in the other tab of this private window. When YouTube Music shows you signed in, this page sends the sign-in to Encore and closes the private window. It is <b>not</b> signed out: closing a private window just throws its cookies away here, so the session belongs to Encore alone.</p>
+    <div id="state" class="status">Waiting for the sign-in…</div>
+    <div id="count" class="big" hidden></div>
+    <div class="row">
+      <button class="primary" id="send" type="button" hidden>Send to Encore</button>
+      <button id="cancel" type="button" hidden>Wait, don't send yet</button>
+    </div>
+  </div>
+</main>
+<script src="shared.js"></script>
+<script src="handoff.js"></script>
+</body>
+</html>

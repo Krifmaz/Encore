@@ -67,6 +67,53 @@ mod library_index;
 #[path = "track_edges.rs"]
 mod track_edges;
 
+// ---- cached list answers ---------------------------------------------------------------------------
+
+/// How long a cached list answer is kept at most (a safety net: any write to the songs drops it anyway).
+const LIST_TTL: std::time::Duration = std::time::Duration::from_secs(600);
+/// Cached list answers kept at most (each sort / filter / page is one).
+const LIST_MAX: usize = 96;
+
+struct ListEntry {
+    version: u64,
+    at: std::time::Instant,
+    value: Arc<Value>,
+}
+
+static LISTS: std::sync::LazyLock<std::sync::Mutex<HashMap<(std::path::PathBuf, String), ListEntry>>> = std::sync::LazyLock::new(Default::default);
+
+/// A library list's whole answer (albums, songs, artists, the side bar's sections) for as long as the
+/// songs are unchanged: `Db::library_version` moves with every write to them, so a list is never older
+/// than the library. With 57k songs these are GROUP BYs over every row – once per change, not per page.
+pub(super) fn cached_list(st: &AppState, key: &str, make: impl FnOnce() -> ApiResult<Value>) -> ApiResult<Arc<Value>> {
+    let version = st.db.library_version();
+    let k = (st.db.data_dir.clone(), key.to_string());
+    if let Some(e) = LISTS.lock().unwrap_or_else(|e| e.into_inner()).get(&k) {
+        if e.version == version && e.at.elapsed() < LIST_TTL {
+            return Ok(e.value.clone());
+        }
+    }
+    let value = Arc::new(make()?);
+    let mut m = LISTS.lock().unwrap_or_else(|e| e.into_inner());
+    if m.len() >= LIST_MAX {
+        // drop what belongs to an older state of the library first, then the oldest
+        m.retain(|_, e| e.version == version && e.at.elapsed() < LIST_TTL);
+        if m.len() >= LIST_MAX {
+            if let Some(oldest) = m.iter().min_by_key(|(_, e)| e.at).map(|(k, _)| k.clone()) {
+                m.remove(&oldest);
+            }
+        }
+    }
+    // `version` was read before the rows: a write meanwhile makes the next call build it again
+    m.insert(k, ListEntry { version, at: std::time::Instant::now(), value: value.clone() });
+    Ok(value)
+}
+
+/// Items `offset..offset+limit` of a cached JSON array.
+fn page(all: &Value, offset: i64, limit: usize) -> Vec<Value> {
+    all.as_array().map(|a| a.iter().skip(offset.max(0) as usize).take(limit).cloned().collect()).unwrap_or_default()
+}
+
 fn order(table: &[(&str, &str, &str)], key: &str, dir: &str, default: &str) -> String {
     let (_, expr, dflt) = table.iter().find(|(k, _, _)| *k == key).or_else(|| table.iter().find(|(k, _, _)| *k == default)).unwrap();
     let d = if dir == "asc" || dir == "desc" { dir } else { dflt };
@@ -95,7 +142,7 @@ const TRACK_SORTS: &[(&str, &str, &str)] = &[
 ];
 
 async fn stats(State(st): State<AppState>, User(_): User) -> Json<Value> {
-    let mut s = lib::stats(&st.db);
+    let mut s = cached_list(&st, "stats", || Ok(lib::stats(&st.db))).map(|v| (*v).clone()).unwrap_or_else(|_| lib::stats(&st.db));
     let scan = st.library.scan.lock().unwrap().clone();
     s["scan"] = json!(scan);
     s["acoustid"] = json!(!st.cfg.str("acoustid_api_key").is_empty());
@@ -221,20 +268,19 @@ async fn albums(State(st): State<AppState>, User(_): User, Query(a): Query<Album
         let items: Vec<_> = items.into_iter().skip(a.offset.max(0) as usize).take(a.limit.unwrap_or(120).clamp(1, 500) as usize).collect();
         return Ok(Json(json!({ "total": total, "items": items })));
     }
+    // every album in list order, once per state of the library; pages are slices of it
     let sql = format!(
         "SELECT album_id AS id, MAX(album) album, MAX(albumartist) albumartist, MAX(year) year, MAX(genre) genre,
                 COUNT(*) tracks, SUM(duration) duration, SUM(size) size, MAX(added_at) added,
                 GROUP_CONCAT(DISTINCT format) formats, MAX(mb_albumid) mb_albumid, MAX(mb_releasegroupid) mb_releasegroupid,
                 SUM(CASE WHEN mb_albumid IS NULL OR mb_albumid='' THEN 1 ELSE 0 END) untagged
-         FROM tracks WHERE {w} GROUP BY album_id {having} ORDER BY {} LIMIT ? OFFSET ?",
+         FROM tracks WHERE {w} GROUP BY album_id {having} ORDER BY {}",
         order(ALBUM_SORTS, &a.sort, &a.dir, "name")
     );
-    let mut p2 = params.clone();
-    p2.push(json!(a.limit.unwrap_or(120).clamp(1, 500)));
-    p2.push(json!(a.offset.max(0)));
-    let items = st.db.query(&sql, p2)?;
-    let total = st.db.one(&format!("SELECT COUNT(*) n FROM (SELECT album_id FROM tracks WHERE {w} GROUP BY album_id {having})"), params)?.map(|r| r.i("n")).unwrap_or(0);
-    Ok(Json(json!({ "total": total, "items": items })))
+    let key = format!("albums\u{1f}{sql}\u{1f}{}", Value::Array(params.clone()));
+    let all = cached_list(&st, &key, || Ok(json!(st.db.query(&sql, params)?)))?;
+    let total = all.as_array().map_or(0, |a| a.len());
+    Ok(Json(json!({ "total": total, "items": page(&all, a.offset, a.limit.unwrap_or(120).clamp(1, 500) as usize) })))
 }
 
 #[derive(Deserialize, Default)]
@@ -278,7 +324,8 @@ async fn artists(State(st): State<AppState>, User(_): User, Query(a): Query<Simp
     let idx = crate::artists::index(&st.db);
     let limit = a.limit.unwrap_or(ARTISTS_MAX as i64).clamp(1, ARTISTS_MAX as i64) as usize;
     if a.q.trim().is_empty() {
-        return Ok(Json(json!(idx.list(&a.sort, &a.dir).into_iter().skip(a.offset.max(0) as usize).take(limit).collect::<Vec<_>>())));
+        let all = cached_list(&st, &format!("artists\u{1f}{}\u{1f}{}", a.sort, a.dir), || Ok(json!(idx.list(&a.sort, &a.dir))))?;
+        return Ok(Json(json!(page(&all, a.offset, limit))));
     }
     Ok(Json(json!(crate::search::library_artists(&idx, &a.q, limit))))
 }
@@ -319,19 +366,18 @@ async fn tracks(State(st): State<AppState>, User(_): User, Query(a): Query<Simpl
         let mut by_id: std::collections::HashMap<i64, crate::db::Row> = rows.into_iter().map(|r| (r.i("id"), r)).collect();
         return Ok(Json(json!(ids.iter().filter_map(|i| by_id.remove(i)).collect::<Vec<_>>())));
     }
-    let mut params = vec![];
-    let wh = "";
-    params.push(json!(a.limit.unwrap_or(200).clamp(1, 1000)));
-    params.push(json!(a.offset.max(0)));
-    Ok(Json(json!(st.db.query(&format!(
-        "SELECT {TRACK_COLS} FROM tracks {wh} ORDER BY {} LIMIT ? OFFSET ?", order(TRACK_SORTS, &a.sort, &a.dir, "artist")
-    ), params)?)))
+    let (limit, offset) = (a.limit.unwrap_or(200).clamp(1, 1000), a.offset.max(0));
+    let sql = format!("SELECT {TRACK_COLS} FROM tracks ORDER BY {} LIMIT ? OFFSET ?", order(TRACK_SORTS, &a.sort, &a.dir, "artist"));
+    let rows = cached_list(&st, &format!("tracks\u{1f}{sql}\u{1f}{limit}\u{1f}{offset}"), || Ok(json!(st.db.query(&sql, p![limit, offset])?)))?;
+    Ok(Json((*rows).clone()))
 }
 
 async fn recent(State(st): State<AppState>, User(_): User, Query(a): Query<SimpleQ>) -> ApiResult<Json<Value>> {
-    Ok(Json(json!(st.db.query(
+    let limit = a.limit.unwrap_or(18).clamp(1, 200);
+    let rows = cached_list(&st, &format!("recent\u{1f}{limit}"), || Ok(json!(st.db.query(
         "SELECT album_id AS id, MAX(album) album, MAX(albumartist) albumartist, MAX(year) year, MAX(added_at) added, COUNT(*) tracks
-         FROM tracks GROUP BY album_id ORDER BY added DESC LIMIT ?", p![a.limit.unwrap_or(18).clamp(1, 200)])?)))
+         FROM tracks GROUP BY album_id ORDER BY added DESC LIMIT ?", p![limit])?)))?;
+    Ok(Json((*rows).clone()))
 }
 
 const SHUFFLE_COLS: &str = "id, title, artist, album, album_id, format, bitrate, duration";

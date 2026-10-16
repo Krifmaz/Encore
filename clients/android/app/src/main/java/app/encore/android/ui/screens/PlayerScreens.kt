@@ -87,10 +87,9 @@ fun rememberPlayerMenuActions(
 
             override fun goToArtist() {
                 val t = current() ?: return
-                val artist = t.albumArtist.ifEmpty { t.artist }
-                if (artist.isEmpty()) return
+                if (t.albumArtist.isEmpty() && t.artist.isEmpty() && t.artists.isEmpty()) return
                 onClose()
-                nav.open(Screen.Artist(artist))
+                openTrackArtist(nav, t)
             }
 
             override fun viewAlbum() {

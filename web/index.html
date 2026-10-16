@@ -11,6 +11,19 @@
   <meta name="apple-mobile-web-app-capable" content="yes">
   <meta name="mobile-web-app-capable" content="yes">
   <link rel="stylesheet" href="/css/app.css">
+  <!-- the modules the first page needs, fetched at once instead of one import level at a time -->
+  <link rel="modulepreload" href="/js/api.js">
+  <link rel="modulepreload" href="/js/ui.js">
+  <link rel="modulepreload" href="/js/playback.js">
+  <link rel="modulepreload" href="/js/player.js">
+  <link rel="modulepreload" href="/js/remote.js">
+  <link rel="modulepreload" href="/js/appearance.js">
+  <link rel="modulepreload" href="/js/pages/auth.js">
+  <link rel="modulepreload" href="/js/pages/home.js">
+  <link rel="modulepreload" href="/js/pages/common.js">
+  <link rel="modulepreload" href="/js/pages/discover.js">
+  <link rel="modulepreload" href="/js/pages/foryou.js">
+  <link rel="modulepreload" href="/js/pages/picker.js">
 </head>
 <body>
   <div id="app"></div>

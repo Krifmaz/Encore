@@ -1,5 +1,5 @@
 //! A cookie jar in the shapes YouTube cookies arrive and leave in: Netscape cookies.txt (yt-dlp, pasted),
-//! Chrome DevTools `Storage.getCookies` (the managed browser) and `chrome.cookies.getAll` (the extension).
+//! and `chrome.cookies.getAll` (the extension).
 use serde_json::Value;
 
 #[derive(Clone, Debug, PartialEq)]
@@ -73,25 +73,6 @@ impl Jar {
                 if sub { "TRUE" } else { "FALSE" }, c.path, if c.secure { "TRUE" } else { "FALSE" }, c.expires.max(0), c.name, c.value));
         }
         s
-    }
-
-    /// Chrome DevTools `Storage.getCookies` / `Network.getAllCookies` → `{cookies: [{name, value, domain, path,
-    /// expires (-1 = session), httpOnly, secure, session}]}` (or the array itself).
-    pub fn from_cdp(v: &Value) -> Jar {
-        let list = v["cookies"].as_array().or(v.as_array()).cloned().unwrap_or_default();
-        let mut out = Jar::default();
-        for c in list {
-            let domain = c["domain"].as_str().unwrap_or("").to_string();
-            if !wanted_domain(&domain) {
-                continue;
-            }
-            let session = c["session"].as_bool().unwrap_or(false);
-            let exp = c["expires"].as_f64().unwrap_or(-1.0);
-            out.set(Cookie { domain, path: c["path"].as_str().unwrap_or("/").to_string(), secure: c["secure"].as_bool().unwrap_or(false),
-                http_only: c["httpOnly"].as_bool().unwrap_or(false), expires: if session || exp <= 0.0 { 0 } else { exp as i64 },
-                name: c["name"].as_str().unwrap_or("").to_string(), value: c["value"].as_str().unwrap_or("").to_string() });
-        }
-        out
     }
 
     /// `chrome.cookies.getAll()` / Firefox `browser.cookies.getAll()` items: {domain, hostOnly, name, value,

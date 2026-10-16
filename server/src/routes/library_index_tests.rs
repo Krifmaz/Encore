@@ -254,3 +254,30 @@ async fn added_in_one_scan_splits() {
         }
     }
 }
+
+/// The lists are cached (routes/library.rs `cached_list`), but never behind the library: a song added
+/// or changed shows in the next answer, without waiting for the artist index's once-a-second check.
+#[tokio::test]
+async fn cached_lists_follow_every_change_at_once() {
+    let mut e = library("cached_lists_follow_every_change_at_once").await;
+    let albums = |v: &Value| v["total"].as_i64().unwrap();
+    let before = e.get("/api/library/albums?sort=name").await;
+    let sections = e.get("/api/library/index?kind=albums&sort=released&dir=desc").await;
+    let recent = e.get("/api/library/recent?limit=50").await;
+    // asked again: the same (cached) answers
+    assert_eq!(e.get("/api/library/albums?sort=name").await, before);
+    // a song of a new album, written the way the server writes (no invalidate, no waiting)
+    let id = e.next;
+    e.next += 1;
+    e.st.db.execute("INSERT INTO tracks (id, path, title, artist, album, albumartist, album_id, format, duration, size, year, disc, track, added_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+        p![id, "/m/new.flac", "New", "Nina", "Fresh", "Nina", "freshalbum000001", "flac", 100.0, 1000, "1999", 1, 1, OCT_2026 + 10.0]).unwrap();
+    assert_eq!(albums(&e.get("/api/library/albums?sort=name").await), albums(&before) + 1);
+    assert_eq!(e.get("/api/library/recent?limit=50").await.as_array().unwrap().len(), recent.as_array().unwrap().len() + 1);
+    assert_ne!(e.get("/api/library/index?kind=albums&sort=released&dir=desc").await, sections);
+    // a changed year moves the album at once too
+    e.st.db.execute("UPDATE tracks SET year='1888' WHERE id=?", p![id]).unwrap();
+    let list = e.get("/api/library/albums?sort=year&dir=asc&limit=500").await;
+    let first_dated = list["items"].as_array().unwrap().iter().find(|a| !a["year"].as_str().unwrap_or("").is_empty()).unwrap().clone();
+    assert_eq!(first_dated["album"], "Fresh", "{list}");
+    assert!(Env::names(&e.labels("kind=albums&sort=released&dir=asc").await).contains(&"1888"));
+}

@@ -24,12 +24,12 @@ pub async fn version() -> Option<String> {
     Some(String::from_utf8_lossy(&o.stdout).trim().to_string()).filter(|s| !s.is_empty())
 }
 
-/// `--cookies <file>` from the YouTube sign-in in use (Encore's browser, the extension or pasted
+/// `--cookies <file>` from the YouTube sign-in in use (the hand-off session, the extension or pasted
 /// cookies: see ytauth). yt-dlp writes the jar back when it exits, so it gets a throw-away copy.
 fn cookie_args(st: &AppState, dir: &Path) -> Vec<String> {
     let Some(c) = crate::ytauth::cookies_for_ytdlp(st).filter(|c| !c.trim().is_empty()) else { return vec![] };
     let p = dir.join(".cookies.txt");
-    if crate::ytauth::browser::write_private(&p, &c).is_ok() {
+    if crate::ytauth::write_private(&p, &c).is_ok() {
         vec!["--cookies".into(), p.to_string_lossy().into()]
     } else {
         vec![]
@@ -139,7 +139,7 @@ pub async fn download(st: &AppState, url: &str, outdir: &Path, playlist: bool, p
             Ok(d) => return Ok(d),
             Err(e) => {
                 last_err = e.to_string();
-                // asked to sign in / prove it isn't a bot: Encore's browser refreshes the cookies, then the
+                // asked to sign in / prove it isn't a bot: Encore refreshes the server's own cookies, then the
                 // same attempt runs once more
                 if *cookies && !refreshed && auth_error(&last_err) {
                     refreshed = true;

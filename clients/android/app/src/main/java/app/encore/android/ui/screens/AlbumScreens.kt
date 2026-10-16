@@ -214,7 +214,7 @@ fun AlbumScreen(nav: Nav, albumId: String) {
                             fontWeight = FontWeight.SemiBold,
                             color = p.text,
                             textAlign = TextAlign.Center,
-                            modifier = Modifier.padding(top = 6.dp).clickable { if (album.artist.isNotEmpty()) nav.open(Screen.Artist(album.artist)) },
+                            modifier = Modifier.padding(top = 6.dp).clickable { openArtistPage(nav, album.artist) },
                         )
                         Text(
                             listOf(

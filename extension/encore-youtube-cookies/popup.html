@@ -1,0 +1,22 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Encore – YouTube sign-in</title>
+<link rel="stylesheet" href="style.css">
+<style> body { width: 340px; } main { margin: 0; padding: 14px; } .card { margin: 0; } </style>
+</head>
+<body>
+<main>
+  <div class="card">
+    <h1>Encore – YouTube sign-in</h1>
+    <p>Signs your Encore server in to YouTube with a session of its own: a new private window opens, you sign in to Google there, Encore takes that sign-in and the window closes. Encore then keeps it alive by itself.</p>
+    <button class="primary" id="handoff" type="button">Hand over a YouTube sign-in</button>
+    <div class="status" id="status"></div>
+    <div class="row"><button id="options" type="button">Options</button></div>
+  </div>
+</main>
+<script src="shared.js"></script>
+<script src="popup.js"></script>
+</body>
+</html>

@@ -784,6 +784,16 @@ struct Cached {
     checked: Instant,
     print: String,
     index: Arc<Index>,
+    /// `Db::library_version` when it was checked: unchanged means nothing was written since
+    version: u64,
+}
+
+impl Cached {
+    /// Still good without reading the table again: checked within the last second, or nothing written
+    /// to the songs or aliases since.
+    fn current(&self, db: &Db) -> bool {
+        self.checked.elapsed() < Duration::from_secs(1) || self.version == db.library_version()
+    }
 }
 
 /// One database's index, and the lock its rebuild runs under (so only one request rebuilds it).
@@ -805,19 +815,23 @@ fn with_slot<T>(db: &Db, f: impl FnOnce(&mut Slot) -> T) -> T {
 }
 
 fn fingerprint(db: &Db) -> String {
-    let t = db.one("SELECT COUNT(*) n, COALESCE(MAX(id),0) m, TOTAL(mtime) t, TOTAL(length(albumartist)) + TOTAL(length(artist)) * 3 + TOTAL(length(title)) * 7 + TOTAL(length(album)) * 11 + TOTAL(length(mb_albumartistid)) * 13 l FROM tracks", p![]).ok().flatten();
+    // also the columns the library lists sort and filter on (year, length, size, added, format, tags):
+    // their cached answers (routes/library.rs) live as long as this index does
+    let t = db.one("SELECT COUNT(*) n, COALESCE(MAX(id),0) m, TOTAL(mtime) t, TOTAL(length(albumartist)) + TOTAL(length(artist)) * 3 + TOTAL(length(title)) * 7 + TOTAL(length(album)) * 11 + TOTAL(length(mb_albumartistid)) * 13 l,
+                    TOTAL(length(year)) + TOTAL(length(format)) * 3 + TOTAL(length(mb_albumid)) * 7 + TOTAL(length(genre)) * 11 + TOTAL(length(verify_status)) * 13 + TOTAL(length(album_id)) * 17 l2,
+                    TOTAL(duration) d, TOTAL(size) s, TOTAL(added_at) a, TOTAL(disc * 1000 + track) o FROM tracks", p![]).ok().flatten();
     let a = db.one("SELECT COUNT(*) n, TOTAL(length(alias_key)) l FROM artist_alias", p![]).ok().flatten();
     let f = |r: &Option<crate::db::Row>| r.as_ref().map(|r| serde_json::to_string(r).unwrap_or_default()).unwrap_or_default();
     format!("{}|{}", f(&t), f(&a))
 }
 
 /// The artist index for this database: rebuilt when the tracks or aliases changed (checked at most every
-/// second; `invalidate` forces it). The check and the rebuild run outside the shared lock, by one request
+/// second, and only after a write; `invalidate` forces it). The check and the rebuild run outside the shared lock, by one request
 /// at a time; other requests keep the previous index meanwhile (they only wait when there is none yet).
 pub fn index(db: &Db) -> Arc<Index> {
     let (stale, build) = with_slot(db, |s| {
         if let Some(c) = &s.cached {
-            if !s.dirty && c.checked.elapsed() < Duration::from_secs(1) {
+            if !s.dirty && c.current(db) {
                 return (Some(c.index.clone()), None);
             }
         }
@@ -832,19 +846,22 @@ pub fn index(db: &Db) -> Arc<Index> {
     };
     // another request may have finished a rebuild while this one waited
     let (fresh, old_print, generation) = with_slot(db, |s| match &s.cached {
-        Some(c) if !s.dirty && c.checked.elapsed() < Duration::from_secs(1) => (Some(c.index.clone()), None, s.generation),
+        Some(c) if !s.dirty && c.current(db) => (Some(c.index.clone()), None, s.generation),
         Some(c) => (None, if s.dirty { None } else { Some((c.print.clone(), c.index.clone())) }, s.generation),
         None => (None, None, s.generation),
     });
     if let Some(ix) = fresh {
         return ix;
     }
+    // read before the table: a write while we look makes the next request look again
+    let version = db.library_version();
     let print = fingerprint(db);
     if let Some((old, ix)) = old_print {
         if old == print {
             with_slot(db, |s| {
                 if let Some(c) = s.cached.as_mut() {
                     c.checked = Instant::now();
+                    c.version = version;
                 }
             });
             return ix;
@@ -855,7 +872,7 @@ pub fn index(db: &Db) -> Arc<Index> {
         Index::default()
     }));
     with_slot(db, |s| {
-        s.cached = Some(Cached { checked: Instant::now(), print, index: index.clone() });
+        s.cached = Some(Cached { checked: Instant::now(), print, index: index.clone(), version });
         // forgotten again while building: the next request checks once more
         s.dirty = s.generation != generation;
     });

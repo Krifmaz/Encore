@@ -245,9 +245,13 @@ impl CoverIndex {
             }
         };
         // each worker takes the next album in priority order until none are left
-        let work = || {
-            lower_priority();
+        let work = |n: usize| {
+            crate::busy::lower_this_thread();
             loop {
+                // while somebody uses the app, one thread keeps going and the others wait
+                if n > 0 {
+                    crate::busy::wait_while_in_use(Duration::from_secs(600));
+                }
                 let i = next.fetch_add(1, Ordering::SeqCst);
                 let Some(a) = ids.get(i) else { break };
                 one(a);
@@ -262,13 +266,13 @@ impl CoverIndex {
             let mut spawned = 0;
             for n in 0..threads {
                 let work = &work;
-                if std::thread::Builder::new().name(format!("cover-thumbs-{n}")).spawn_scoped(s, work).is_ok() {
+                if std::thread::Builder::new().name(format!("cover-thumbs-{n}")).spawn_scoped(s, move || work(n)).is_ok() {
                     spawned += 1;
                 }
             }
             if spawned == 0 {
                 // no thread to be had: do it on this one (already a background thread)
-                work();
+                work(0);
             }
         });
         for names in on_disk.into_inner().unwrap().values() {
@@ -321,16 +325,6 @@ impl CoverIndex {
 /// The thumbnail pass's threads: half the cores, at least one.
 fn warm_threads() -> usize {
     std::thread::available_parallelism().map(|n| n.get() / 2).unwrap_or(1).max(1)
-}
-
-/// This thread at nice 10, so requests being served come first.
-fn lower_priority() {
-    #[cfg(target_os = "linux")]
-    unsafe {
-        // on Linux the nice value belongs to the thread: this leaves the server's other threads alone
-        let tid = libc::syscall(libc::SYS_gettid) as libc::id_t;
-        libc::setpriority(libc::PRIO_PROCESS as _, tid, 10);
-    }
 }
 
 /// The order the pass looks at albums in: the most recent of when an album was added and when it was

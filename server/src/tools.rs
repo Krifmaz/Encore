@@ -31,7 +31,7 @@ pub const CADENZA_REPO: &str = "Krifmaz/Cadenza";
 /// The `cadenza render` interface Encore speaks (`protocol` in `cadenza render --describe`).
 pub const CADENZA_PROTOCOL: u64 = 1;
 /// Every tool the Download tools card lists, in order.
-pub const IDS: [&str; 6] = ["ytdlp", "streamrip", "cadenza", "slskd", "browser", "translator"];
+pub const IDS: [&str; 5] = ["ytdlp", "streamrip", "cadenza", "slskd", "translator"];
 /// How long a `--version` answer is trusted.
 const VERSION_TTL: Duration = Duration::from_secs(600);
 /// How long the latest versions found by a check are kept (shown again without asking the network).
@@ -204,7 +204,6 @@ pub fn label(id: &str) -> &'static str {
         "ytdlp" => "yt-dlp",
         "streamrip" => "streamrip",
         "cadenza" => "Cadenza",
-        "browser" => "Browser for YouTube sign-in",
         "translator" => "Translator",
         _ => "slskd",
     }
@@ -362,7 +361,6 @@ async fn fetch_latest(st: &AppState, id: &str) -> anyhow::Result<(String, String
         }
         "streamrip" => github_latest(st, STREAMRIP_REPO, true).await.map(|(tag, ver)| (ver, tag, None)),
         "cadenza" => github_latest(st, CADENZA_REPO, false).await.map(|(tag, ver)| (ver, tag, None)),
-        "browser" => crate::ytauth::browser::latest(st).await.map(|(ver, url)| (ver.clone(), ver, Some(url))),
         "translator" => crate::translate::llama::latest(st).await.map(|(tag, url)| (tag.clone(), tag, Some(url))),
         _ => crate::slskd_managed::latest(st).await.map(|(ver, url)| (ver.clone(), ver, Some(url))),
     }
@@ -712,7 +710,6 @@ fn local_info(st: &AppState, id: &str) -> ToolInfo {
     match id {
         "cadenza" => return cadenza_info(st),
         "slskd" => return slskd_info(st),
-        "browser" => return crate::ytauth::browser::info(st, &last_check(st, "browser")),
         "translator" => return crate::translate::llama::info(st, &last_check(st, "translator")),
         _ => {}
     }
@@ -786,7 +783,7 @@ pub fn cached(st: &AppState) -> Vec<ToolInfo> {
 /// Look up the newest versions (PyPI, GitHub) and the installed ones. An image that ships a newer copy
 /// than the overlay makes the overlay copy redundant: it is removed.
 pub async fn check(st: &AppState) -> Vec<ToolInfo> {
-    tokio::join!(refresh_latest(st, "ytdlp"), refresh_latest(st, "streamrip"), refresh_latest(st, "cadenza"), refresh_latest(st, "slskd"), refresh_latest(st, "browser"), refresh_latest(st, "translator"));
+    tokio::join!(refresh_latest(st, "ytdlp"), refresh_latest(st, "streamrip"), refresh_latest(st, "cadenza"), refresh_latest(st, "slskd"), refresh_latest(st, "translator"));
     for id in ["ytdlp", "streamrip"] {
         let st2 = st.clone();
         let _ = tokio::task::spawn_blocking(move || drop_stale_overlay(&st2, id)).await;
@@ -917,7 +914,7 @@ async fn update_now(st: &AppState, id: &str) -> anyhow::Result<ToolInfo> {
     if !IDS.contains(&id) {
         anyhow::bail!("{id} can't be updated from Encore");
     }
-    if id == "cadenza" || id == "slskd" || id == "browser" || id == "translator" {
+    if id == "cadenza" || id == "slskd" || id == "translator" {
         let _busy = Downloading::start(id)?;
         let mut last = last_check(st, id);
         if last["tag"].as_str().is_none() || (id != "cadenza" && last["url"].as_str().is_none()) {
@@ -928,9 +925,6 @@ async fn update_now(st: &AppState, id: &str) -> anyhow::Result<ToolInfo> {
         };
         let res = if id == "cadenza" {
             update_cadenza(st, &tag).await
-        } else if id == "browser" {
-            let url = last["url"].as_str().unwrap_or_default().to_string();
-            crate::ytauth::browser::install(st, &tag, &url).await
         } else if id == "translator" {
             let url = last["url"].as_str().unwrap_or_default().to_string();
             crate::translate::llama::install(st, &tag, &url).await
@@ -988,12 +982,10 @@ async fn update_now(st: &AppState, id: &str) -> anyhow::Result<ToolInfo> {
 /// "Use the bundled version": remove the overlay copy of a tool. Cadenza: back to the built-in engine
 /// (removes `<config>/tools/cadenza`); slskd: stop and remove it.
 pub fn reset(st: &AppState, id: &str) -> anyhow::Result<()> {
-    if id == "cadenza" || id == "slskd" || id == "browser" || id == "translator" {
+    if id == "cadenza" || id == "slskd" || id == "translator" {
         let _busy = Downloading::start(id)?;
         if id == "translator" {
             crate::translate::llama::reset(st.data_dir())?;
-        } else if id == "browser" {
-            crate::ytauth::browser::reset(st.data_dir())?;
         } else if id == "slskd" {
             let _ = crate::slskd_managed::reset(st);
         } else {
@@ -1045,7 +1037,6 @@ pub fn auto_key(id: &str) -> &'static str {
         "ytdlp" => "tools_auto_ytdlp",
         "streamrip" => "tools_auto_streamrip",
         "cadenza" => "tools_auto_cadenza",
-        "browser" => "tools_auto_browser",
         "translator" => "tools_auto_translator",
         _ => "tools_auto_slskd",
     }
@@ -1101,8 +1092,8 @@ pub async fn scheduled(st: &AppState) -> anyhow::Result<String> {
     let mut errors = vec![];
     for id in IDS {
         let Some(t) = list.iter().find(|t| t.id == id) else { continue };
-        // the sign-in browser and the Translator are only installed on request: not a line in every run until then
-        if (id == "browser" || id == "translator") && t.source == "missing" {
+        // the Translator is only installed on request: not a line in every run until then
+        if id == "translator" && t.source == "missing" {
             continue;
         }
         let wanted = match id {
@@ -1435,7 +1426,7 @@ mod tests {
         let mut st = info("streamrip", "system", Some("2.4.9"), Some("2.5.0"));
         st.updatable = false;
         assert_eq!(plan(&st, true, true), Plan::Say("streamrip 2.5.0 available".into()));
-        assert_eq!(IDS.map(auto_key), ["tools_auto_ytdlp", "tools_auto_streamrip", "tools_auto_cadenza", "tools_auto_slskd", "tools_auto_browser", "tools_auto_translator"]);
+        assert_eq!(IDS.map(auto_key), ["tools_auto_ytdlp", "tools_auto_streamrip", "tools_auto_cadenza", "tools_auto_slskd", "tools_auto_translator"]);
     }
 
     #[test]

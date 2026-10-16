@@ -486,6 +486,7 @@ async fn start(st: &AppState) -> anyhow::Result<Running> {
     unsafe {
         cmd.pre_exec(|| {
             libc::setpriority(libc::PRIO_PROCESS, 0, 15);
+            crate::busy::idle_io_for_child();
             Ok(())
         });
     }

@@ -52,6 +52,13 @@ pub async fn index(State(st): State<AppState>, User(_): User, Query(a): Query<In
     if !a.q.trim().is_empty() {
         return Ok(Json(json!([])));
     }
+    // the same sections until the songs change (see super::cached_list)
+    let key = format!("index\u{1f}{}\u{1f}{}\u{1f}{}\u{1f}{}\u{1f}{}\u{1f}{}", a.kind, a.sort, a.dir, a.artist, a.filter, a.album_kind);
+    let v = super::cached_list(&st, &key, || sections_for(&st, &a))?;
+    Ok(Json((*v).clone()))
+}
+
+fn sections_for(st: &AppState, a: &IndexQ) -> ApiResult<Value> {
     let values: Vec<(Value, By)> = match a.kind.as_str() {
         "artists" => {
             let by = match a.sort.as_str() {
@@ -129,7 +136,7 @@ pub async fn index(State(st): State<AppState>, User(_): User, Query(a): Query<In
         Some(By::Month) => added_labels(&values.iter().map(|(v, _)| num(v)).collect::<Vec<_>>()),
         _ => values.iter().map(|(v, by)| (label(v, *by), None)).collect(),
     };
-    Ok(Json(json!(sections(labels.into_iter()))))
+    Ok(json!(sections(labels.into_iter())))
 }
 
 /// The letter of every name, in list order. Lists sort by the lowercased text, so names that start with

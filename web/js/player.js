@@ -8,7 +8,7 @@
 // with a shuffle of the whole library: a single song → straight into the shuffle, an album → after its last song.
 import { api } from './api.js';
 import * as playback from './playback.js';
-import { art, artistLinks, esc, fmt, icon, popMenu, shareTrack, toast, translateMode, tr, trInline, trSub } from './ui.js';
+import { art, artistLinks, artistUrl, esc, fmt, icon, popMenu, shareTrack, toast, translateMode, tr, trInline, trSub } from './ui.js';
 
 const state = { queue: [], index: -1, transcoded: false, lossy: false, rung: 0, dsp: false, dspRate: 0, offset: 0, dragging: false, context: 'list', repeat: 'off', shuffle: false, order: null, full: false, pane: 'now', logged: false,
   stalls: [], stallAt: 0, seekAt: 0, stepAt: 0, switchedAt: 0, lastPreloadCheck: 0, slowStart: null,
@@ -1338,7 +1338,7 @@ function moreMenu(anchor) {
   if (!t) return;
   const lib = typeof t.id === 'number';
   popMenu(anchor, [
-    t.artist && !t.preview ? { label: 'Go to artist', icon: icon.user, href: `#/artist-name/${encodeURIComponent(t.artist)}` } : null,
+    t.artist && !t.preview ? { label: 'Go to artist', icon: icon.user, href: artistUrl((Array.isArray(t.artists) && t.artists.find(a => a?.name)) || { name: t.artist }) } : null,
     t.album_id ? { label: 'View album', icon: icon.disc, href: `#/library/album/${t.album_id}` } : null,
     lib ? { label: isLiked(t) ? 'Remove from Liked Songs' : 'Like', icon: icon.heart, onClick: () => toggleLike(t) } : null,
     lib ? { label: 'Add to playlist', icon: icon.plus, onClick: async () => (await import('./pages/playlists.js')).addToPlaylistModal([t.id]) } : null,

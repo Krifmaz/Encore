@@ -60,16 +60,25 @@ fun songLinks(
 }
 
 /**
- * Where an artist name goes: the library artist page when it is a library artist, else its MusicBrainz page
- * (looked up by name when the id isn't known; the library page when MusicBrainz doesn't know it either).
+ * Where an artist name goes (web `artistUrl` / `#/artist-name/`): the full artist page (MusicBrainz: library
+ * songs, Play/Shuffle, discography) by its id, else looked up by name (aliases too); the library artist list
+ * only when MusicBrainz doesn't know the artist. The Library tab's own artist grid keeps the library view.
  */
 fun openArtistCredit(nav: Nav, a: ArtistCredit, scope: CoroutineScope) {
     if (a.name.isEmpty() && a.mbid.isEmpty()) return
-    if (a.inLibrary && a.name.isNotEmpty()) {
-        nav.open(Screen.Artist(a.name))
-        return
-    }
     openCatalogArtist(nav, a.mbid, a.name, scope)
+}
+
+/** [openArtistCredit] for a plain name (an album's artist, a search hit). */
+fun openArtistPage(nav: Nav, name: String, scope: CoroutineScope = nav.graph.scope) {
+    if (name.isEmpty()) return
+    openCatalogArtist(nav, "", name, scope)
+}
+
+/** "Go to artist" for a song: its first credited artist (the album artist when the song has no split). */
+fun openTrackArtist(nav: Nav, t: Track, scope: CoroutineScope = nav.graph.scope) {
+    val a = t.artists.firstOrNull { it.name.isNotEmpty() || it.mbid.isNotEmpty() }
+    if (a != null) openArtistCredit(nav, a, scope) else openArtistPage(nav, t.albumArtist.ifEmpty { t.artist }, scope)
 }
 
 /** [songLinks] for a song row: artist links (and album) that open their pages; [before] runs first (closing a sheet). */

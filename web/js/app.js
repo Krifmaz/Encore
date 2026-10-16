@@ -7,14 +7,17 @@ import { esc, icon, qs, setTranslateMode, toast } from './ui.js';
 import * as authPages from './pages/auth.js';
 import * as home from './pages/home.js';
 import * as discover from './pages/discover.js';
-import * as libraryPage from './pages/library.js';
-import * as requestsPage from './pages/requests.js';
-import * as downloadPage from './pages/download.js';
-import * as settingsPage from './pages/settings.js';
-import * as playlistsPage from './pages/playlists.js';
 import * as forYouPage from './pages/foryou.js';
-import * as storagePage from './pages/storage.js';
-import * as leaderboardPage from './pages/leaderboard.js';
+
+// pages away from home load when first opened (Settings alone is ~250 KB of modules)
+const lazy = (load, name) => async (v, c) => (await load())[name](v, c);
+const libraryPage = { render: lazy(() => import('./pages/library.js'), 'render'), renderAlbum: lazy(() => import('./pages/library.js'), 'renderAlbum') };
+const requestsPage = { render: lazy(() => import('./pages/requests.js'), 'render') };
+const downloadPage = { render: lazy(() => import('./pages/download.js'), 'render') };
+const settingsPage = { render: lazy(() => import('./pages/settings.js'), 'render') };
+const playlistsPage = { render: lazy(() => import('./pages/playlists.js'), 'render'), renderPlaylist: lazy(() => import('./pages/playlists.js'), 'renderPlaylist') };
+const storagePage = { render: lazy(() => import('./pages/storage.js'), 'render') };
+const leaderboardPage = { render: lazy(() => import('./pages/leaderboard.js'), 'render') };
 
 export const session = { user: null, info: null };
 window.encoreSession = session;
@@ -112,7 +115,7 @@ function renderShell() {
     try { window.EncoreNative?.engineLogout?.(); } catch { /* ignore */ }
     location.reload();
   };
-  const meter = () => storagePage.sidebarMeter(qs('#storage-mini'));
+  const meter = () => import('./pages/storage.js').then(m => m.sidebarMeter(qs('#storage-mini'))).catch(() => {});
   meter();
   setInterval(meter, 5 * 60 * 1000);
   qs('#menu-btn').onclick = (e) => { e.stopPropagation(); qs('#sidebar').classList.toggle('open'); };

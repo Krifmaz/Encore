@@ -181,7 +181,7 @@ fun SearchScreen(nav: Nav) {
                     item { SectionHead("Artists") }
                     items(r.artists, key = { "artist:" + it.name }) { a ->
                         Row(
-                            Modifier.fillMaxWidth().clickable { nav.open(Screen.Artist(a.name)) }.padding(horizontal = Gutter, vertical = 8.dp),
+                            Modifier.fillMaxWidth().clickable { openArtistPage(nav, a.name) }.padding(horizontal = Gutter, vertical = 8.dp),
                             verticalAlignment = Alignment.CenterVertically,
                         ) {
                             RoundCover(if (a.coverAlbum.isNotEmpty()) api.coverUrl(a.coverAlbum, 96) else null, nav.graph.imageLoader, size = 48.dp, label = a.name)
@@ -224,7 +224,7 @@ private fun LibraryTopCard(nav: Nav, f: LibrarySearch) {
         when {
             t != null -> if (t.albumId.isNotEmpty()) nav.open(Screen.Album(t.albumId))
             a != null -> nav.open(Screen.Album(a.id))
-            ar != null -> nav.open(Screen.Artist(ar.name))
+            ar != null -> openArtistPage(nav, ar.name)
         }
     }
     CardBox(Modifier.padding(horizontal = Gutter).clickable(onClick = open)) {
@@ -250,7 +250,7 @@ private fun LibraryTopCard(nav: Nav, f: LibrarySearch) {
                             if (i >= 0) nav.player.play(f.songs, i) else nav.player.play(listOf(t))
                         }
                         a != null -> SmallButton("Play", iconRes = R.drawable.ic_play, primary = true) { playLibraryAlbum(nav, a.id, scope) }
-                        ar != null -> SmallButton("Open artist", iconRes = R.drawable.ic_person, primary = true) { nav.open(Screen.Artist(ar.name)) }
+                        ar != null -> SmallButton("Open artist", iconRes = R.drawable.ic_person, primary = true) { openArtistPage(nav, ar.name) }
                     }
                 }
             }

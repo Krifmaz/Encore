@@ -221,7 +221,11 @@ pub(crate) fn find_cover_uncached(db: &Db, album_id: &str) -> Option<PathBuf> {
         }
         // a folder holding several albums (e.g. "Singles") can't use one cover.jpg for all of them
         let ds = d.to_string_lossy().trim_end_matches('/').to_string();
-        let shared = db.one("SELECT COUNT(DISTINCT album_id) n FROM tracks WHERE path LIKE ? AND path NOT LIKE ?", p![format!("{ds}/%"), format!("{ds}/%/%")])
+        // a range on the path index (`dir/` ≤ path < `dir0`, '0' being the character after '/'), not a
+        // LIKE that reads every song: this runs for every album in the thumbnail pass. Bytes, not
+        // characters, after the folder: no further '/'.
+        let shared = db.one("SELECT COUNT(*) n FROM (SELECT DISTINCT album_id FROM tracks WHERE path >= ? AND path < ? AND instr(substr(CAST(path AS BLOB), ?), CAST('/' AS BLOB)) = 0 LIMIT 2)",
+            p![format!("{ds}/"), format!("{ds}0"), ds.len() as i64 + 2])
             .ok().flatten().map(|r| r.i("n") > 1).unwrap_or(false);
         if !shared {
             dirs.push(d.clone());

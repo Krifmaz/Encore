@@ -2145,7 +2145,7 @@ fn more_menu(anchor: &Element) {
     let lib = t.g("id").is_number();
     let linked = is_linked();
     let mut items: Vec<Option<MenuItem>> = vec![];
-    if t.truthy("artist") && !t.truthy("preview") { items.push(MenuItem::link("Go to artist", &icon("user"), &format!("#/artist-name/{}", String::from(js_sys::encode_uri_component(&t.s("artist")))), false)); }
+    if t.truthy("artist") && !t.truthy("preview") { items.push(MenuItem::link("Go to artist", &icon("user"), &crate::ui::artist_url(&t.a("artists").iter().find(|a| a.truthy("name")).cloned().unwrap_or_else(|| serde_json::json!({ "name": t.s("artist") }))), false)); }
     if t.truthy("album_id") { items.push(MenuItem::link("View album", &icon("disc"), &format!("#/library/album/{}", t.s("album_id")), false)); }
     if lib { let t2 = t.clone(); items.push(MenuItem::new(if is_liked(&t) { "Remove from Liked Songs" } else { "Like" }, &icon("heart"), move || dom::spawn(toggle_like(t2.clone())))); }
     if lib { let id = t.i("id"); items.push(MenuItem::new("Add to playlist", &icon("plus"), move || crate::pages::playlists::add_to_playlist_modal(vec![id]))); }

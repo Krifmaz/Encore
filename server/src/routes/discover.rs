@@ -227,15 +227,67 @@ async fn artist_library_tracks(State(st): State<AppState>, User(_): User, Path(m
 }
 
 async fn artist_lookup(State(st): State<AppState>, User(_): User, Query(q): Query<NameQ>) -> ApiResult<Json<Value>> {
-    if let Some(r) = st.db.one("SELECT MAX(mb_albumartistid) id FROM tracks WHERE lower(albumartist)=lower(?)", p![q.name])? {
-        if !r.s("id").is_empty() {
-            return Ok(Json(json!({ "mbid": r.s("id") })));
+    let name = q.name.trim();
+    if name.is_empty() {
+        return Err(err(400, "No artist name"));
+    }
+    if let Some(id) = library_artist_mbid(&st.db, name) {
+        return Ok(Json(json!({ "mbid": id })));
+    }
+    // MusicBrainz's artist search matches names, sort names and aliases; its raw rows carry the aliases
+    let d = st.mb.get(&st, "artist", &[("query", name.to_string()), ("limit", "10".to_string())]).await.map_err(mb_err)?;
+    let hits = d["artists"].as_array().cloned().unwrap_or_default();
+    let id = pick_artist(&hits, name).ok_or_else(|| err(404, "No MusicBrainz artist with that name"))?;
+    Ok(Json(json!({ "mbid": id })))
+}
+
+fn is_mbid(s: &str) -> bool {
+    s.len() == 36 && s.chars().all(|c| c.is_ascii_hexdigit() || c == '-')
+}
+
+/// The MusicBrainz id the library knows for an artist name: the library artist (any spelling or alias),
+/// else the album artist id of its albums, else the artist id of songs credited to that name alone.
+pub(crate) fn library_artist_mbid(db: &crate::db::Db, name: &str) -> Option<String> {
+    let idx = crate::artists::index(db);
+    let mut names: Vec<String> = vec![name.to_string()];
+    if let Some(a) = idx.find(name) {
+        if is_mbid(&a.mbid) {
+            return Some(a.mbid.clone());
+        }
+        names.extend(a.spellings.iter().cloned());
+    }
+    drop(idx);
+    for n in &names {
+        for sql in ["SELECT mb_albumartistid id, COUNT(*) n FROM tracks WHERE lower(albumartist)=lower(?) AND length(mb_albumartistid)=36 GROUP BY mb_albumartistid ORDER BY n DESC LIMIT 1",
+                    "SELECT mb_artistid id, COUNT(*) n FROM tracks WHERE lower(artist)=lower(?) AND length(mb_artistid)=36 GROUP BY mb_artistid ORDER BY n DESC LIMIT 1"] {
+            if let Ok(Some(r)) = db.one(sql, p![n]) {
+                if is_mbid(&r.s("id")) {
+                    return Some(r.s("id"));
+                }
+            }
         }
     }
-    let hits = mb::search_artists(&st, &q.name, 5).await.map_err(mb_err)?;
-    let best = hits.iter().filter(|h| h["name"].as_str().unwrap_or("").to_lowercase() == q.name.to_lowercase())
-        .max_by_key(|h| h["score"].as_i64().unwrap_or(0)).ok_or_else(|| err(404, "No MusicBrainz artist with that name"))?;
-    Ok(Json(json!({ "mbid": best["id"] })))
+    None
+}
+
+/// The best MusicBrainz artist search row for a name: its name, sort name or one of its aliases is the
+/// name (ignoring case, accents, "the", "&"/"and" and punctuation); the highest score wins.
+pub(crate) fn pick_artist(hits: &[Value], name: &str) -> Option<String> {
+    let want = crate::artists::key(name);
+    let want_n = norm(name);
+    if want.is_empty() && want_n.is_empty() {
+        return None;
+    }
+    let same = |s: &str| !s.trim().is_empty() && (crate::artists::key(s) == want || (!want_n.is_empty() && norm(s) == want_n));
+    let score = |h: &Value| h["score"].as_i64().or_else(|| h["score"].as_str().and_then(|x| x.parse().ok())).unwrap_or(0);
+    let named = |h: &Value| same(h["name"].as_str().unwrap_or(""));
+    let aliased = |h: &Value| same(h["sort-name"].as_str().unwrap_or(""))
+        || h["aliases"].as_array().into_iter().flatten().any(|a| same(a["name"].as_str().unwrap_or("")) || same(a["sort-name"].as_str().unwrap_or("")));
+    // the artist's own name beats an alias another artist also carries
+    let ok = |h: &&Value| is_mbid(h["id"].as_str().unwrap_or(""));
+    hits.iter().filter(ok).filter(|h| named(h)).max_by_key(|h| score(h))
+        .or_else(|| hits.iter().filter(ok).filter(|h| aliased(h)).max_by_key(|h| score(h)))
+        .map(|h| h["id"].as_str().unwrap_or("").to_string())
 }
 
 async fn album(State(st): State<AppState>, User(_): User, Path(rgid): Path<String>) -> ApiResult<Json<Value>> {
@@ -289,8 +341,33 @@ fn norm(s: &str) -> String {
 }
 
 /// Recent releases (Deezer release dates) by artists in your library – nothing from outside it.
+/// New releases are reused for this long; after that the last answer is still shown at once while a
+/// fresh one is made in the background (60 Deezer lookups take seconds on a cold cache).
+const NEW_RELEASES_FRESH: u64 = 15 * 60;
+
 async fn new_releases(State(st): State<AppState>, User(_): User, Query(q): Query<NameQ>) -> ApiResult<Json<Value>> {
     let limit = q.limit.unwrap_or(24).min(60);
+    let (fresh_key, keep_key) = (format!("new-releases:fresh:{limit}"), format!("new-releases:{limit}"));
+    if let Some(v) = st.cache_get(&keep_key) {
+        if st.cache_get(&fresh_key).is_none() {
+            // mark it fresh first, so only one refresh runs
+            st.cache_put(&fresh_key, json!(true), NEW_RELEASES_FRESH);
+            let st = st.clone();
+            tokio::spawn(async move {
+                if let Ok(v) = compute_new_releases(&st, limit).await {
+                    st.cache_put(&format!("new-releases:{limit}"), v, 7 * 86400);
+                }
+            });
+        }
+        return Ok(Json(v));
+    }
+    let v = compute_new_releases(&st, limit).await?;
+    st.cache_put(&fresh_key, json!(true), NEW_RELEASES_FRESH);
+    st.cache_put(&keep_key, v.clone(), 7 * 86400);
+    Ok(Json(v))
+}
+
+async fn compute_new_releases(st: &AppState, limit: usize) -> ApiResult<Value> {
     let names: Vec<String> = st.db.query(
         "SELECT MAX(albumartist) n FROM tracks WHERE albumartist NOT IN ('', 'Unknown Artist', 'Various Artists')
          GROUP BY lower(albumartist) ORDER BY COUNT(*) DESC LIMIT 60", p![])?.into_iter().map(|r| r.s("n")).collect();
@@ -328,7 +405,7 @@ async fn new_releases(State(st): State<AppState>, User(_): User, Query(q): Query
             break;
         }
     }
-    Ok(Json(json!({ "releases": res })))
+    Ok(json!({ "releases": res }))
 }
 
 fn ymd(secs: i64) -> String {
@@ -400,5 +477,49 @@ mod plan_tests {
         assert_eq!(plan("travis scott 90210").unwrap().1, None);
         assert_eq!(plan("play some music by daft punk").unwrap().0, "daft punk");
         assert!(plan("that song that goes is this the real life").is_none());
+    }
+}
+
+#[cfg(test)]
+mod artist_lookup_tests {
+    use super::*;
+    use crate::db::Db;
+
+    const A: &str = "aaaaaaaa-1111-2222-3333-444444444444";
+    const B: &str = "bbbbbbbb-1111-2222-3333-444444444444";
+
+    #[test]
+    fn picks_by_name_then_alias() {
+        let hits = vec![
+            json!({ "id": B, "name": "Somebody Else", "score": 100, "aliases": [{ "name": "Beyonce Knowles" }] }),
+            json!({ "id": A, "name": "Beyoncé", "sort-name": "Knowles, Beyoncé", "score": 90, "aliases": [{ "name": "Beyonce Knowles" }] }),
+        ];
+        assert_eq!(pick_artist(&hits, "beyonce").as_deref(), Some(A), "accents and case don't matter");
+        assert_eq!(pick_artist(&hits, "Beyonce Knowles").as_deref(), Some(B), "an alias, highest score");
+        assert_eq!(pick_artist(&hits, "Knowles, Beyoncé").as_deref(), Some(A), "the sort name");
+        assert_eq!(pick_artist(&hits, "Nobody"), None);
+        let hits = vec![json!({ "id": A, "name": "The Weeknd", "score": "100" })];
+        assert_eq!(pick_artist(&hits, "Weeknd").as_deref(), Some(A), "\"the\" doesn't matter");
+        let hits = vec![json!({ "id": "not-an-id", "name": "X" })];
+        assert_eq!(pick_artist(&hits, "X"), None);
+    }
+
+    #[test]
+    fn library_ids_from_album_artist_or_solo_songs() {
+        let d = std::env::temp_dir().join(format!("encore-artist-lookup-{}-{}", std::process::id(), crate::auth::random_hex(4)));
+        let _ = std::fs::remove_dir_all(&d);
+        let db = Db::open(&d).unwrap();
+        let add = |path: &str, artist: &str, aa: &str, aid: &str, aaid: &str| {
+            db.execute("INSERT INTO tracks (path, album_id, mtime, size, title, artist, album, albumartist, mb_artistid, mb_albumartistid, added_at) VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+                p![path, "al1", 0, 0, path, artist, "Album", aa, aid, aaid, 0]).unwrap();
+        };
+        add("/m/1.flac", "Band", "Band", "", A);
+        add("/m/2.flac", "Guest", "Someone", B, "");
+        add("/m/3.flac", "Guest feat. Band", "Someone", &format!("{B}/{A}"), "");
+        crate::artists::invalidate(&db);
+        assert_eq!(library_artist_mbid(&db, "band").as_deref(), Some(A));
+        assert_eq!(library_artist_mbid(&db, "Guest").as_deref(), Some(B), "a song artist with no albums of its own");
+        assert_eq!(library_artist_mbid(&db, "Nobody"), None);
+        let _ = std::fs::remove_dir_all(d);
     }
 }

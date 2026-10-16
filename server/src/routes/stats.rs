@@ -48,6 +48,18 @@ fn dur(s: f64) -> String {
     if s >= 3600 { format!("{}:{:02}:{:02}", s / 3600, s % 3600 / 60, s % 60) } else { format!("{}:{:02}", s / 60, s % 60) }
 }
 
+/// Seconds the library totals and facts are reused for.
+const STATS_TTL: u64 = 60;
+
+fn cached_facts(st: &AppState) -> Vec<Value> {
+    if let Some(Value::Array(v)) = st.cache_get("stats:facts") {
+        return v;
+    }
+    let v = facts(st);
+    st.cache_put("stats:facts", json!(v), STATS_TTL);
+    v
+}
+
 fn facts(st: &AppState) -> Vec<Value> {
     let one = |sql: &str| st.db.one(sql, p![]).ok().flatten();
     let Some(lib) = one("SELECT COUNT(*) n, COALESCE(SUM(duration),0) d, COALESCE(SUM(size),0) s FROM tracks").filter(|l| l.i("n") > 0) else { return vec![] };
@@ -76,14 +88,22 @@ fn facts(st: &AppState) -> Vec<Value> {
 
 async fn me(State(st): State<AppState>, User(u): User) -> ApiResult<Json<Value>> {
     let uid = u.i("id");
-    let lib = st.db.one("SELECT COUNT(*) tracks, COALESCE(SUM(duration),0) duration, COUNT(DISTINCT albumartist) artists FROM tracks", p![])?.unwrap_or_default();
+    // the library's totals and fun facts read every song: once a minute is plenty for the home page
+    let lib = match st.cache_get("stats:library") {
+        Some(v) => v,
+        None => {
+            let v = json!(st.db.one("SELECT COUNT(*) tracks, COALESCE(SUM(duration),0) duration, COUNT(DISTINCT albumartist) artists FROM tracks", p![])?.unwrap_or_default());
+            st.cache_put("stats:library", v.clone(), STATS_TTL);
+            v
+        }
+    };
     let pl = st.db.one("SELECT COUNT(*) plays, COALESCE(SUM(seconds),0) listened FROM plays WHERE user_id=?", p![uid])?.unwrap_or_default();
     let top = st.db.one("SELECT artist, COUNT(*) n FROM plays WHERE user_id=? GROUP BY lower(artist) ORDER BY n DESC LIMIT 1", p![uid])?;
     let mut rank = ranking(&st);
     rank.sort_by_key(|r| -(r.i("requests") + r.i("plays")));
     let pos = rank.iter().position(|r| r.i("id") == uid).map(|i| i + 1).filter(|_| rank.len() > 1);
     let reqs = st.db.one("SELECT COUNT(*) n FROM requests WHERE user_id=? AND parent_id IS NULL", p![uid])?.map(|r| r.i("n")).unwrap_or(0);
-    let f = facts(&st);
+    let f = cached_facts(&st);
     let fun = if f.is_empty() { Value::Null } else { f[rand::random_range(0..f.len())].clone() };
     let mut mev = Value::Object(pl);
     mev["requests"] = json!(reqs);
@@ -100,17 +120,27 @@ async fn leaderboard(State(st): State<AppState>, User(u): User) -> ApiResult<Jso
         rows.sort_by(|a, b| b.f(key).partial_cmp(&a.f(key)).unwrap_or(std::cmp::Ordering::Equal));
         boards.insert(key.into(), json!({ "label": label, "rows": rows.iter().take(10).map(|r| json!({ "username": r.s("username"), "value": r[key], "me": r.i("id") == u.i("id") })).collect::<Vec<_>>() }));
     }
-    let week = now() - 7.0 * 86400.0;
-    Ok(Json(json!({
-        "boards": boards,
-        "top_songs": st.db.query("SELECT p.title, p.artist, MAX(t.album_id) album_id, COUNT(*) plays FROM plays p LEFT JOIN tracks t ON t.id=p.track_id
-                                  GROUP BY lower(p.artist), lower(p.title) ORDER BY plays DESC LIMIT 10", p![])?,
-        "top_artists": st.db.query("SELECT artist, COUNT(*) plays, COUNT(DISTINCT user_id) listeners FROM plays GROUP BY lower(artist) ORDER BY plays DESC LIMIT 10", p![])?,
-        "this_week": st.db.query("SELECT u.username, COUNT(*) plays FROM plays p JOIN users u ON u.id=p.user_id WHERE p.played_at > ? GROUP BY p.user_id ORDER BY plays DESC LIMIT 5", p![week])?,
-        "library_artists": st.db.query("SELECT MAX(albumartist) artist, COUNT(DISTINCT album_id) albums, COUNT(*) songs FROM tracks
-                                        WHERE albumartist NOT IN ('', 'Unknown Artist', 'Various Artists') GROUP BY lower(albumartist) ORDER BY songs DESC LIMIT 10", p![])?,
-        "facts": facts(&st),
-    })))
+    // the same for everyone: read once a minute (plays and songs grouped over every row)
+    let shared = match st.cache_get("stats:leaderboard") {
+        Some(v) => v,
+        None => {
+            let week = now() - 7.0 * 86400.0;
+            let v = json!({
+                "top_songs": st.db.query("SELECT p.title, p.artist, MAX(t.album_id) album_id, COUNT(*) plays FROM plays p LEFT JOIN tracks t ON t.id=p.track_id
+                                          GROUP BY lower(p.artist), lower(p.title) ORDER BY plays DESC LIMIT 10", p![])?,
+                "top_artists": st.db.query("SELECT artist, COUNT(*) plays, COUNT(DISTINCT user_id) listeners FROM plays GROUP BY lower(artist) ORDER BY plays DESC LIMIT 10", p![])?,
+                "this_week": st.db.query("SELECT u.username, COUNT(*) plays FROM plays p JOIN users u ON u.id=p.user_id WHERE p.played_at > ? GROUP BY p.user_id ORDER BY plays DESC LIMIT 5", p![week])?,
+                "library_artists": st.db.query("SELECT MAX(albumartist) artist, COUNT(DISTINCT album_id) albums, COUNT(*) songs FROM tracks
+                                                WHERE albumartist NOT IN ('', 'Unknown Artist', 'Various Artists') GROUP BY lower(albumartist) ORDER BY songs DESC LIMIT 10", p![])?,
+            });
+            st.cache_put("stats:leaderboard", v.clone(), STATS_TTL);
+            v
+        }
+    };
+    let mut out = shared;
+    out["boards"] = Value::Object(boards);
+    out["facts"] = json!(cached_facts(&st));
+    Ok(Json(out))
 }
 
 // ---- diagnostics --------------------------------------------------------------------------------

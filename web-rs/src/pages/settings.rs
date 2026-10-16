@@ -182,9 +182,9 @@ const SECTIONS: &[Section] = &[
         s("ytdlp_format", "Audio format", "select").options(&[("best", "Original stream – best quality, no re-encode (recommended)"), ("m4a", "M4A (AAC, re-encoded)"), ("mp3", "MP3 (re-encoded)"), ("opus", "Opus")]),
         s("ytdlp_quality", "MP3/M4A quality", "text").help("Bitrate like 320, or 0 for best VBR"),
     ] },
-    Section { id: "youtube", title: "YouTube sign-in", desc: "Signs yt-dlp in to YouTube: YouTube Music Premium unlocks 256 kbps audio, and signed-in downloads see fewer bot checks. Three ways – Encore’s own browser, the browser extension, or pasted cookies; Encore uses the first that is signed in, in that order.", test: Some("youtube"), test_label: Some("Test cookies"), fields: &[
-        s("youtube_light_refresh", "Refresh pasted cookies every 4 hours", "bool").help("Only for pasted cookies, when neither Encore’s browser nor the extension is signed in: Encore renews them the way an open YouTube tab does and saves the new ones. Never done to the extension’s cookies (that would sign your browser out)."),
-        s("ytdlp_cookies", "Pasted cookies.txt (optional)", "textarea").full().secret().help("Netscape cookie file exported from music.youtube.com. Used when Encore’s browser and the extension are not signed in. Export from a private window and close it right after, so your own browser does not rotate them."),
+    Section { id: "youtube", title: "YouTube sign-in", desc: "Signs yt-dlp in to YouTube: YouTube Music Premium unlocks 256 kbps audio, and signed-in downloads see fewer bot checks. Best: connect the Encore browser extension and hand over a sign-in from a private window – Encore then owns that session and keeps it alive by itself. Pasted cookies are the backup.", test: Some("youtube"), test_label: Some("Test cookies"), fields: &[
+        s("ytdlp_cookies", "Pasted cookies.txt (backup)", "textarea").full().secret().help("Netscape cookie file exported from music.youtube.com. Used only when there is no signed-in hand-off or extension sync. Export from a private window and close it right after, so your own browser does not rotate them."),
+        s("youtube_light_refresh", "Refresh pasted cookies every 4 hours", "bool").help("Only for pasted cookies while they are in use: Encore renews them the way an open YouTube tab does and saves the new ones. A handed-over sign-in is always refreshed every 4 hours; an everyday browser’s cookies never are (that would sign that browser out)."),
     ] },
     Section { id: "spotify", title: "Integrations", desc: "API keys that let users connect their Spotify, Tidal, Last.fm, Discogs and YouTube Music accounts, and power recommendations.", test: Some("spotify"), test_label: Some("Test all"), fields: &[
         s("spotify_client_id", "Spotify Client ID", "text").help("developer.spotify.com – add <Public URL>/api/connections/spotify/callback as redirect URI. Development-mode apps allow 5 users and need a Premium owner (2026 rules); without it, public playlists still import via the embed fallback."),
@@ -1827,7 +1827,6 @@ fn tool_reset(t: &Value) -> (String, String, String) {
     match t.s("id").as_str() {
         "cadenza" => ("Use the built-in engine".into(), "Go back to the engine built into Encore? The downloaded Cadenza is removed.".into(), "Back to the built-in engine".into()),
         "slskd" => ("Remove slskd".into(), "Remove slskd? Soulseek stays off until you install it again.".into(), "slskd removed".into()),
-        "browser" => ("Remove the browser".into(), "Remove the browser for YouTube sign-in? Its sign-in is kept for when you install it again; until then the extension or pasted cookies are used.".into(), "Browser removed".into()),
         "translator" => ("Remove the Translator".into(), "Remove the Translator and its model? Translations made so far are kept; new titles only get official translations until you install it again.".into(), "Translator removed".into()),
         _ => {
             let name = tool_or(t, "name", "id");
@@ -1835,8 +1834,8 @@ fn tool_reset(t: &Value) -> (String, String, String) {
         }
     }
 }
-/// slskd and the sign-in browser are installed by Encore, not bundled: before that their button says Install.
-fn tool_install(t: &Value) -> bool { (t.s("id") == "slskd" || t.s("id") == "browser" || t.s("id") == "translator") && !t.truthy("installed") }
+/// slskd and the Translator are installed by Encore, not bundled: before that their button says Install.
+fn tool_install(t: &Value) -> bool { (t.s("id") == "slskd" || t.s("id") == "translator") && !t.truthy("installed") }
 
 fn tool_row(t: &Value, busy: Option<&str>) -> String {
     let id = t.s("id");
@@ -1856,7 +1855,7 @@ fn tool_row(t: &Value, busy: Option<&str>) -> String {
     } else if tool_updatable(t) {
         r##"<span class="small faint">Not checked yet</span>"##.to_string()
     } else { String::new() };
-    let updated = t.s("source") == "updated" && id != "slskd" && id != "browser" && id != "translator";
+    let updated = t.s("source") == "updated" && id != "slskd" && id != "translator";
     format!(r##"<div class="list-item" style="align-items:flex-start;flex-wrap:wrap;gap:12px" data-tool="{eid}">
       <div class="grow" style="min-width:200px"><div style="font-weight:650">{name} <span class="small muted mono">{ver}</span>{upd}</div>
         {note}
@@ -1914,7 +1913,6 @@ async fn render_tools(host: Element, hub: Rc<Hub>) {
         + &toggle("tools_auto_streamrip", "Update streamrip automatically when a new release is out")
         + &toggle("tools_auto_cadenza", "Update Cadenza automatically when a new release is out")
         + &toggle("tools_auto_slskd", "Update slskd automatically when a new release is out")
-        + &toggle("tools_auto_browser", "Update the browser for YouTube sign-in automatically")
         + &toggle("tools_auto_translator", "Update the Translator (llama.cpp) automatically")
         + &toggle("translate_background", "Translate the whole library in the background (titles on screen are always translated first)");
     // the Translator's model: changing it downloads the other one on the next Install / Update
@@ -1928,7 +1926,7 @@ async fn render_tools(host: Element, hub: Rc<Hub>) {
     } else { String::new() };
     dom::set_html(&host, &format!(r##"<div class="card" id="tools-card" style="margin-bottom:12px">
     <div class="row between" style="margin-bottom:8px;gap:10px"><h2>Download tools</h2><button class="btn sm" type="button" id="tools-check">{refresh}Check for updates</button></div>
-    <p class="muted small" style="margin:0 0 14px">yt-dlp, streamrip, Cadenza, slskd, the browser for YouTube sign-in and the Translator update in place – no new Encore image needed. Updates are kept in the config folder.</p>
+    <p class="muted small" style="margin:0 0 14px">yt-dlp, streamrip, Cadenza, slskd and the Translator update in place – no new Encore image needed. Updates are kept in the config folder.</p>
     <div class="list" id="tools-list"></div>
     <div class="stack mt" style="gap:8px">{model_pick}{toggles}<div class="small muted">Every tool is checked daily; updates install by themselves only where the switch is on. Change the schedule under <a href="#/settings?s=tasks">Scheduled tasks</a>.</div></div>
   </div>"##, refresh = icon("refresh")));

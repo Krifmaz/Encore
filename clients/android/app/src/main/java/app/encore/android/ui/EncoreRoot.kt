@@ -308,7 +308,7 @@ private fun TrackMenu(nav: Nav, req: TrackMenuRequest, onDismiss: () -> Unit) {
                     if (d != null && player.nowPlaying.value?.id == t.id) d.shareLink() else Toasts.show("Play the song, then share it from the player", "info")
                 },
                 if (t.albumId.isNotEmpty() && !req.onAlbumPage) MenuEntry("Go to album", R.drawable.ic_album) { nav.open(Screen.Album(t.albumId)) } else null,
-                if (t.albumArtist.isNotEmpty() || t.artist.isNotEmpty()) MenuEntry("Go to artist", R.drawable.ic_person) { nav.open(Screen.Artist(t.albumArtist.ifEmpty { t.artist })) } else null,
+                if (t.albumArtist.isNotEmpty() || t.artist.isNotEmpty()) MenuEntry("Go to artist", R.drawable.ic_person) { app.encore.android.ui.screens.openTrackArtist(nav, t) } else null,
                 MenuEntry("Report a problem", R.drawable.ic_flag) { ReportUi.track(t.id, t.title) },
             ),
         )

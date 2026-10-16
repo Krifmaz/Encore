@@ -9,6 +9,7 @@ mod acoustid;
 mod artists;
 mod auth;
 mod backup;
+mod busy;
 mod config;
 mod connections;
 mod contribute;
@@ -72,9 +73,24 @@ async fn security_headers(req: Request, next: Next) -> Response {
         h.entry("x-frame-options").or_insert(HeaderValue::from_static("DENY"));
     }
     h.entry("referrer-policy").or_insert(HeaderValue::from_static("same-origin"));
-    let cache = if path.starts_with("/api/") { "no-store" } else { "no-cache" };   // app files: cheap 304s, updates show at once
+    let cache = if path.starts_with("/api/") {
+        "no-store"
+    } else if hashed_asset(&path) {
+        "public, max-age=31536000, immutable"   // the web-rs build names files by their content
+    } else {
+        "no-cache"   // app files: cheap 304s, updates show at once
+    };
     h.entry(header::CACHE_CONTROL).or_insert(HeaderValue::from_static(cache));
     resp
+}
+
+/// `/next/encore-web-f92ab5b84b305a59_bg.wasm`: a file whose name carries a hash of its content
+/// (trunk's build), so it never changes under that name.
+fn hashed_asset(path: &str) -> bool {
+    let Some(name) = path.strip_prefix("/next/") else { return false };
+    let stem = name.rsplit_once('.').map(|(s, _)| s).unwrap_or(name);
+    let stem = stem.strip_suffix("_bg").unwrap_or(stem);
+    !name.contains('/') && stem.rsplit_once('-').is_some_and(|(_, h)| h.len() >= 16 && h.bytes().all(|b| b.is_ascii_hexdigit()))
 }
 
 pub fn app(st: AppState) -> Router {
@@ -112,6 +128,8 @@ pub fn app(st: AppState) -> Router {
         .layer(middleware::from_fn_with_state(st, translate::stamp_layer))
         .fallback_service(spa)
         .layer(middleware::from_fn(security_headers))
+        // API calls hold background passes (cover thumbnails …) to one low-priority thread
+        .layer(middleware::from_fn(busy::layer))
         // gzip for JSON and pages – never for audio: it only burns CPU and gets in the way of range requests
         .layer(CompressionLayer::new().compress_when(DefaultPredicate::new().and(NotForContentType::new("audio/"))))
 }
@@ -181,10 +199,22 @@ async fn main() -> anyhow::Result<()> {
 }
 
 #[cfg(test)]
+mod perf_bench;
+
+#[cfg(test)]
 pub static TEST_ENV: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn hashed_assets_are_cached_for_good() {
+        assert!(super::hashed_asset("/next/encore-web-f92ab5b84b305a59.js"));
+        assert!(super::hashed_asset("/next/encore-web-f92ab5b84b305a59_bg.wasm"));
+        assert!(!super::hashed_asset("/next/index.html"));
+        assert!(!super::hashed_asset("/js/app.js"));
+        assert!(!super::hashed_asset("/next/a/encore-web-f92ab5b84b305a59.js"));
+    }
+
     #[test]
     fn routes_do_not_clash() {
         let _env = super::TEST_ENV.lock().unwrap_or_else(|e| e.into_inner());

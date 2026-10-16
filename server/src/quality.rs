@@ -260,6 +260,7 @@ fn command(low_priority: bool) -> tokio::process::Command {
         unsafe {
             c.pre_exec(|| {
                 libc::setpriority(libc::PRIO_PROCESS, 0, 19);
+                crate::busy::idle_io_for_child();
                 Ok(())
             });
         }

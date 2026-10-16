@@ -1,30 +1,27 @@
-//! YouTube sign-in for yt-dlp, three ways, freshest first:
+//! YouTube sign-in for yt-dlp, three ways:
 //!
-//! * **managed**: a headless browser Encore runs (browser.rs). Signed in once through Encore's guided
-//!   form (guided.rs: Encore fills Google's sign-in pages) or the live view, it
-//!   opens YouTube Music every 48 h (and when the cookies near their end, or yt-dlp is asked to sign in)
-//!   so Google rotates the cookies the normal way, and exports them.
-//! * **extension**: the Encore browser extension (extension/encore-youtube-cookies) posts the cookies of
-//!   the owner's own browser. Encore must never rotate these itself: that would sign the browser out.
-//! * **pasted**: a cookies.txt pasted under Settings (`ytdlp_cookies`). With nothing else, Encore does a
-//!   light refresh every 4 h (rotate.rs) and saves the renewed cookies back.
+//! * **handoff** (server-owned): the Encore browser extension opens a new private window, the owner signs
+//!   in to Google there, and the extension sends that window's cookies with `handoff: true`, then closes
+//!   the window without signing out (a private window's cookies are thrown away, so no browser ever uses
+//!   that session again). From then on the session belongs to the server alone: Encore refreshes it itself
+//!   every 4 h (rotate.rs: RotateCookies + a signed-in check on music.youtube.com) and when yt-dlp is
+//!   asked to sign in or to prove it is not a bot.
+//! * **extension**: the extension syncs the cookies of the owner's everyday browser. Encore must never
+//!   rotate these itself: that would sign the browser out.
+//! * **pasted**: a cookies.txt pasted under Settings (`ytdlp_cookies`), light-refreshed every 4 h while
+//!   the switch is on, the renewed cookies saved back.
 //!
-//! Precedence managed > extension > pasted among the sources that are signed in; with none signed in,
-//! the freshest one is still handed to yt-dlp.
-pub mod browser;
-pub mod guided;
+//! Precedence handoff > extension > pasted among the sources that are signed in; with none signed in,
+//! the freshest one is still handed to yt-dlp. Cookie values never go into logs or answers.
 pub mod jar;
 pub mod rotate;
 #[cfg(test)]
 mod tests;
-#[cfg(test)]
-mod guided_tests;
 
 use crate::auth::Admin;
 use crate::db::now;
 use crate::error::{err, ApiResult};
 use crate::state::AppState;
-use axum::extract::ws::{Message as WsMessage, WebSocket, WebSocketUpgrade};
 use axum::extract::State;
 use axum::http::HeaderMap;
 use axum::response::Response;
@@ -37,36 +34,36 @@ use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 use std::time::Duration;
 
-/// Managed browser: open YouTube Music this often.
-pub const MANAGED_EVERY: f64 = 48.0 * 3600.0;
-/// …or sooner, when the sign-in cookies expire within this.
-pub const EXPIRY_MARGIN: f64 = 3.0 * 86400.0;
-/// Light refresh of pasted cookies.
+/// Server-owned (hand-off) and pasted cookies: refresh this often.
 pub const LIGHT_EVERY: f64 = 4.0 * 3600.0;
+/// A refresh that failed (YouTube not reachable – not a sign-out) is tried again after this.
+pub const RETRY_AFTER: f64 = 1800.0;
 /// How often the supervisor looks.
 const TICK: Duration = Duration::from_secs(600);
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Kind {
-    Managed,
+    /// cookies handed over by the extension from a private window: the server's own session
+    #[serde(alias = "managed")]
+    Handoff,
     Extension,
     Pasted,
 }
 
 impl Kind {
-    pub const ALL: [Kind; 3] = [Kind::Managed, Kind::Extension, Kind::Pasted];
+    pub const ALL: [Kind; 3] = [Kind::Handoff, Kind::Extension, Kind::Pasted];
     pub fn key(self) -> &'static str {
         match self {
-            Kind::Managed => "managed",
+            Kind::Handoff => "handoff",
             Kind::Extension => "extension",
             Kind::Pasted => "pasted",
         }
     }
     pub fn label(self) -> &'static str {
         match self {
-            Kind::Managed => "Encore's browser",
-            Kind::Extension => "Browser extension",
+            Kind::Handoff => "Handed-over sign-in",
+            Kind::Extension => "Browser extension (everyday browser)",
             Kind::Pasted => "Pasted cookies",
         }
     }
@@ -87,10 +84,12 @@ pub struct SourceState {
     pub agent: Option<String>,
 }
 
-/// `<config>/youtube-browser/state.json`
+/// `<config>/youtube-browser/state.json` (the folder keeps its old name: installs from before keep their state)
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct AuthState {
-    pub managed: SourceState,
+    /// the server-owned session (`managed` before 0.25.3, when it came from Encore's own browser)
+    #[serde(alias = "managed")]
+    pub handoff: SourceState,
     pub extension: SourceState,
     pub pasted: SourceState,
     /// sha256 of the extension's token
@@ -103,7 +102,7 @@ pub struct AuthState {
 impl AuthState {
     pub fn get(&self, k: Kind) -> &SourceState {
         match k {
-            Kind::Managed => &self.managed,
+            Kind::Handoff => &self.handoff,
             Kind::Extension => &self.extension,
             Kind::Pasted => &self.pasted,
         }
@@ -112,8 +111,47 @@ impl AuthState {
 
 static STATE_LOCK: Mutex<()> = Mutex::new(());
 
+/// `<config>/youtube-browser`: the state and the cookies of the hand-off and the extension.
+pub fn home(data: &Path) -> PathBuf {
+    data.join("youtube-browser")
+}
+
 fn state_path(data: &Path) -> PathBuf {
-    browser::home(data).join("state.json")
+    home(data).join("state.json")
+}
+
+/// Write a file only Encore can read (cookies, the state), atomically.
+pub fn write_private(path: &Path, text: &str) -> anyhow::Result<()> {
+    use std::io::Write;
+    #[cfg(unix)]
+    use std::os::unix::fs::OpenOptionsExt;
+    if let Some(p) = path.parent() {
+        std::fs::create_dir_all(p)?;
+    }
+    let tmp = path.with_extension("tmp");
+    let _ = std::fs::remove_file(&tmp);
+    let mut o = std::fs::OpenOptions::new();
+    o.write(true).create_new(true);
+    #[cfg(unix)]
+    o.mode(0o600);
+    let mut f = o.open(&tmp)?;
+    f.write_all(text.as_bytes())?;
+    f.sync_all()?;
+    std::fs::rename(&tmp, path)?;
+    Ok(())
+}
+
+/// 0.25.3 removed Encore's own sign-in browser (Google refuses sign-ins in it): the program a previous
+/// install downloaded (`<config>/tools/browser`) and its profile (`<config>/youtube-browser/profile`) are
+/// deleted once. Answers what was removed (empty: nothing was there).
+pub fn remove_old_browser(data: &Path) -> Vec<PathBuf> {
+    let mut gone = vec![];
+    for d in [data.join("tools").join("browser"), home(data).join("profile")] {
+        if d.exists() && std::fs::remove_dir_all(&d).is_ok() {
+            gone.push(d);
+        }
+    }
+    gone
 }
 
 pub fn load(data: &Path) -> AuthState {
@@ -126,7 +164,7 @@ pub fn update<R>(data: &Path, f: impl FnOnce(&mut AuthState) -> R) -> R {
     let mut s = load(data);
     let r = f(&mut s);
     if let Ok(t) = serde_json::to_string_pretty(&s) {
-        if let Err(e) = browser::write_private(&state_path(data), &t) {
+        if let Err(e) = write_private(&state_path(data), &t) {
             tracing::warn!("saving the YouTube sign-in state failed: {e}");
         }
     }
@@ -134,17 +172,18 @@ pub fn update<R>(data: &Path, f: impl FnOnce(&mut AuthState) -> R) -> R {
 }
 
 fn ext_path(data: &Path) -> PathBuf {
-    browser::home(data).join("extension-cookies.txt")
+    home(data).join("extension-cookies.txt")
 }
 
-fn managed_path(data: &Path) -> PathBuf {
-    browser::home(data).join("cookies.txt")
+/// The server-owned session (the file the old managed browser exported to: what it held is server-only too).
+fn handoff_path(data: &Path) -> PathBuf {
+    home(data).join("cookies.txt")
 }
 
 /// The cookies of one source (empty when it has none).
 pub fn jar_of(st: &AppState, k: Kind) -> Jar {
     match k {
-        Kind::Managed => std::fs::read_to_string(managed_path(st.data_dir())).map(|t| Jar::parse_netscape(&t)).unwrap_or_default(),
+        Kind::Handoff => std::fs::read_to_string(handoff_path(st.data_dir())).map(|t| Jar::parse_netscape(&t)).unwrap_or_default(),
         Kind::Extension => std::fs::read_to_string(ext_path(st.data_dir())).map(|t| Jar::parse_netscape(&t)).unwrap_or_default(),
         Kind::Pasted => Jar::parse_netscape(&st.cfg.str("ytdlp_cookies")),
     }
@@ -196,27 +235,30 @@ pub fn cookies_for_ytdlp(st: &AppState) -> Option<String> {
 
 // ---- when to refresh ----------------------------------------------------------------------------
 
-fn newest(a: Option<f64>, b: Option<f64>) -> Option<f64> {
-    match (a, b) {
-        (Some(x), Some(y)) => Some(x.max(y)),
-        (x, y) => x.or(y),
-    }
+/// Server-owned (hand-off) cookies: refreshed every 4 h while there are any, and 30 min after a refresh
+/// that could not reach YouTube. `last`: the last check; `failed`: that check could not reach YouTube.
+pub fn handoff_due(now: f64, has_cookies: bool, last: Option<f64>, failed: bool) -> bool {
+    has_cookies && last.is_none_or(|l| now - l >= LIGHT_EVERY || (failed && now - l >= RETRY_AFTER))
 }
 
-/// Managed browser: due after 48 h, or when the sign-in cookies expire within 3 days. `last` is the
-/// last refresh (None: never – then only once there is a profile to refresh).
-pub fn managed_due(now: f64, last: Option<f64>, expiry: Option<i64>) -> bool {
-    let Some(last) = last else { return false };
-    now - last >= MANAGED_EVERY || expiry.is_some_and(|e| (e as f64) - now < EXPIRY_MARGIN)
-}
-
-/// Light refresh: pasted cookies only (no extension, no managed browser in use), every 4 h.
+/// Light refresh of pasted cookies: only while they are the source in use (never the extension's,
+/// never while the hand-off session is in use), every 4 h, with the switch on.
 pub fn light_due(now: f64, last: Option<f64>, active: Option<Kind>, enabled: bool) -> bool {
     enabled && active == Some(Kind::Pasted) && last.is_none_or(|l| now - l >= LIGHT_EVERY)
 }
 
-fn managed_ready(st: &AppState, s: &AuthState) -> bool {
-    browser::installed(st.data_dir()).is_some() && s.managed.updated_at.is_some()
+/// When the source in use is refreshed next (None: never by Encore – the extension's cookies, or the
+/// light refresh switched off).
+pub fn next_refresh(now: f64, act: Option<Kind>, s: &AuthState, pasted_rotates: bool) -> Option<f64> {
+    let after = |src: &SourceState| {
+        let failed = src.message.is_some() && src.ok != Some(false);
+        Some(src.checked_at.map_or(now, |c| c + if failed { RETRY_AFTER } else { LIGHT_EVERY }).max(now))
+    };
+    match act {
+        Some(Kind::Handoff) => after(&s.handoff),
+        Some(Kind::Pasted) if pasted_rotates => after(&s.pasted),
+        _ => None,
+    }
 }
 
 /// The sign-in account behind a jar (YouTube Music's account menu).
@@ -261,49 +303,62 @@ pub async fn verify(st: &AppState, jar: &Jar) -> anyhow::Result<bool> {
 
 // ---- refreshing ---------------------------------------------------------------------------------
 
-/// Refresh the managed browser's cookies now.
-pub async fn refresh_managed(st: &AppState) -> anyhow::Result<bool> {
+/// One rotation at a time (two at once would each supersede the other's cookies), and a hand-off arriving
+/// meanwhile waits for it rather than being overwritten by the older session's renewed cookies.
+static ROTATING: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
+/// Light refresh (rotate.rs) of the server-owned session; the renewed cookies are saved back. Answers
+/// whether it is still signed in.
+pub async fn refresh_handoff(st: &AppState) -> anyhow::Result<bool> {
+    let _g = ROTATING.lock().await;
     let data = st.data_dir().to_path_buf();
-    let r = browser::refresh(&data).await;
+    let mut j = jar_of(st, Kind::Handoff);
     let t = now();
-    match r {
-        Ok(r) => {
-            let account = if r.signed_in { account_of(st, &r.jar).await } else { None };
-            update(&data, |s| {
-                s.managed.checked_at = Some(t);
-                s.managed.ok = Some(r.signed_in);
-                if r.signed_in {
-                    s.managed.updated_at = Some(t);
-                    s.managed.message = None;
-                    if account.is_some() {
-                        s.managed.account = account.clone();
-                    }
-                } else {
-                    s.managed.message = Some("Signed out – sign in to YouTube again".into());
-                }
-            });
-            if r.signed_in {
-                st.db.log("info", "YouTube sign-in refreshed by Encore's browser");
-            } else {
-                signed_out(st, Kind::Managed).await;
-            }
-            Ok(r.signed_in)
-        }
-        Err(e) => {
-            update(&data, |s| {
-                s.managed.checked_at = Some(t);
-                s.managed.message = Some(format!("Refresh failed: {e}"));
-            });
-            st.db.log("warning", &format!("YouTube browser refresh failed: {e}"));
-            Err(e)
-        }
+    if j.is_empty() {
+        anyhow::bail!("No handed-over sign-in – press Hand over a YouTube sign-in in the Encore extension");
     }
+    let outcome = rotate::run(&st.http, &mut j, t as i64).await;
+    if matches!(outcome, rotate::Outcome::Rotated(n) if n > 0) {
+        write_private(&handoff_path(&data), &j.to_netscape())?;
+    }
+    let ok = match &outcome {
+        rotate::Outcome::SignedOut => Some(false),
+        _ => verify(st, &j).await.ok(),
+    };
+    let Some(ok) = ok else {
+        update(&data, |s| {
+            s.handoff.checked_at = Some(t);
+            s.handoff.message = Some("Couldn't reach YouTube to refresh the sign-in – trying again in 30 min".into());
+        });
+        anyhow::bail!("Couldn't reach YouTube to refresh the sign-in");
+    };
+    let account = if ok { account_of(st, &j).await } else { None };
+    update(&data, |s| {
+        s.handoff.checked_at = Some(t);
+        s.handoff.ok = Some(ok);
+        s.handoff.message = (!ok).then(|| "Signed out – do the hand-off again from the Encore extension".to_string());
+        if ok {
+            s.handoff.updated_at = Some(t);
+            if account.is_some() {
+                s.handoff.account = account;
+            }
+        }
+    });
+    if ok {
+        st.db.log("info", "YouTube sign-in refreshed by Encore (handed-over session)");
+        signed_in_again(st);
+    } else {
+        st.db.log("warning", "The handed-over YouTube sign-in was signed out");
+        signed_out(st, Kind::Handoff).await;
+    }
+    Ok(ok)
 }
 
 /// Light refresh of the pasted cookies; the renewed jar is saved back to the setting. With `rotate` false
 /// (cookies set by YTDLP_COOKIES, which Encore can't save back, or the light refresh switched off) they are
 /// only checked: rotating a session that can't be stored would leave the stored one superseded.
 pub async fn refresh_pasted(st: &AppState, rotate: bool) -> anyhow::Result<bool> {
+    let _g = ROTATING.lock().await;
     let raw = st.cfg.str("ytdlp_cookies");
     let mut j = Jar::parse_netscape(&raw);
     if !j.has_auth(now() as i64) {
@@ -330,7 +385,7 @@ pub async fn refresh_pasted(st: &AppState, rotate: bool) -> anyhow::Result<bool>
     };
     let msg = match (&outcome, ok) {
         (_, true) => None,
-        (rotate::Outcome::SignedOut, _) => Some("Google signed these cookies out – paste fresh ones or use another way to sign in".to_string()),
+        (rotate::Outcome::SignedOut, _) => Some("Google signed these cookies out – paste fresh ones or do the hand-off from the Encore extension".to_string()),
         (rotate::Outcome::Failed(e), _) => Some(format!("Stale: {e}")),
         _ => Some("Stale: YouTube no longer accepts these cookies".to_string()),
     };
@@ -346,7 +401,9 @@ pub async fn refresh_pasted(st: &AppState, rotate: bool) -> anyhow::Result<bool>
             }
         }
     });
-    if !ok {
+    if ok {
+        signed_in_again(st);
+    } else {
         signed_out(st, Kind::Pasted).await;
     }
     Ok(ok)
@@ -365,7 +422,20 @@ pub async fn check_extension(st: &AppState) -> anyhow::Result<bool> {
             s.extension.account = account;
         }
     });
+    if ok {
+        signed_in_again(st);
+    }
     Ok(ok)
+}
+
+/// What the admins are told when YouTube signed Encore out.
+pub fn signed_out_message(k: Kind) -> String {
+    let what = match k {
+        Kind::Handoff => "The YouTube sign-in handed over from the Encore extension has ended",
+        Kind::Extension => "The browser the Encore extension syncs is no longer signed in to YouTube",
+        Kind::Pasted => "The pasted YouTube cookies no longer sign in",
+    };
+    format!("{what}. Do the hand-off again from the Encore extension (Hand over a YouTube sign-in). Until then downloads from YouTube Music still work, at lower quality and with more bot checks.")
 }
 
 /// Tell the admins once that YouTube signed out (and nothing else is signed in).
@@ -375,7 +445,7 @@ async fn signed_out(st: &AppState, k: Kind) {
     }
     let first = update(st.data_dir(), |s| !std::mem::replace(&mut s.signed_out_notified, true));
     if first {
-        let msg = format!("{} is no longer signed in to YouTube. Downloads from YouTube Music still work, at lower quality and with more bot checks, until you sign in again under Settings → YouTube sign-in.", k.label());
+        let msg = signed_out_message(k);
         st.db.log("warning", &msg);
         crate::notify::send(st, "YouTube signed out", &msg, None).await;
     }
@@ -385,22 +455,30 @@ fn signed_in_again(st: &AppState) {
     update(st.data_dir(), |s| s.signed_out_notified = false);
 }
 
-/// yt-dlp was asked to sign in / to prove it is not a bot: refresh the managed browser once.
-/// true → cookies were refreshed, try again.
+/// yt-dlp was asked to sign in / to prove it is not a bot: refresh the cookies Encore owns (the hand-off
+/// session, or pasted cookies with the light refresh on) once. true → refreshed and signed in, try again.
 pub async fn after_ytdlp_auth_error(st: &AppState) -> bool {
     let s = load(st.data_dir());
-    if !managed_ready(st, &s) || active(st) != Some(Kind::Managed) {
-        return false;
-    }
+    let act = active(st);
+    let src = match act {
+        Some(Kind::Handoff) => &s.handoff,
+        Some(Kind::Pasted) if st.cfg.bool("youtube_light_refresh") && !st.cfg.env_locked("ytdlp_cookies") => &s.pasted,
+        _ => return false,
+    };
     // at most once per 10 minutes, however many downloads fail together
-    if s.managed.checked_at.is_some_and(|c| now() - c < 600.0) {
+    if src.checked_at.is_some_and(|c| now() - c < 600.0) {
         return false;
     }
-    matches!(refresh_managed(st).await, Ok(true))
+    let r = if act == Some(Kind::Handoff) { refresh_handoff(st).await } else { refresh_pasted(st, true).await };
+    matches!(r, Ok(true))
 }
 
-/// Background loop: managed refresh (48 h / expiry), light refresh of pasted cookies (4 h).
+/// Background loop: refresh of the hand-off session and of pasted cookies (4 h).
 pub async fn supervisor(st: AppState) {
+    let gone = remove_old_browser(st.data_dir());
+    if !gone.is_empty() {
+        st.db.log("info", "Removed Encore's old YouTube sign-in browser and its profile (sign-in now goes through the Encore browser extension's hand-off)");
+    }
     tokio::time::sleep(Duration::from_secs(90)).await;
     loop {
         tick(&st).await;
@@ -411,35 +489,25 @@ pub async fn supervisor(st: AppState) {
 async fn tick(st: &AppState) {
     let t = now();
     let s = load(st.data_dir());
-    if managed_ready(st, &s) {
-        let expiry = jar_of(st, Kind::Managed).auth_expiry(t as i64);
-        // a refresh that failed (not a sign-out: the browser didn't start, no network) is tried again after 2 h
-        let failed = s.managed.message.is_some() && s.managed.ok != Some(false) && s.managed.checked_at.is_some_and(|c| t - c >= 7200.0);
-        if failed || managed_due(t, newest(s.managed.checked_at, s.managed.updated_at), expiry) {
-            if let Ok(true) = refresh_managed(st).await {
-                signed_in_again(st);
-            }
-        }
+    let failed = s.handoff.message.is_some() && s.handoff.ok != Some(false);
+    if handoff_due(t, !jar_of(st, Kind::Handoff).is_empty(), s.handoff.checked_at, failed) {
+        let _ = refresh_handoff(st).await;
     }
     let s = load(st.data_dir());
-    let act = active(st);
-    if light_due(t, s.pasted.checked_at, act, st.cfg.bool("youtube_light_refresh") && !st.cfg.env_locked("ytdlp_cookies")) {
-        if let Ok(true) = refresh_pasted(st, true).await {
-            signed_in_again(st);
-        }
+    if light_due(t, s.pasted.checked_at, active(st), st.cfg.bool("youtube_light_refresh") && !st.cfg.env_locked("ytdlp_cookies")) {
+        let _ = refresh_pasted(st, true).await;
     }
 }
 
 // ---- status -------------------------------------------------------------------------------------
 
-/// Settings → YouTube sign-in.
+/// Settings → YouTube. Never holds a cookie value.
 pub fn status(st: &AppState) -> Value {
     let data = st.data_dir();
     let s = load(data);
     let t = now() as i64;
     let cands = candidates(st, &s);
     let act = choose(&cands, t);
-    let installed = browser::installed(data);
     let sources: serde_json::Map<String, Value> = cands.iter().map(|c| {
         let st8 = &c.state;
         (c.kind.key().to_string(), json!({
@@ -449,23 +517,14 @@ pub fn status(st: &AppState) -> Value {
         }))
     }).collect();
     let light_on = st.cfg.bool("youtube_light_refresh");
-    let next_check = match act {
-        Some(Kind::Managed) => {
-            let last = newest(s.managed.checked_at, s.managed.updated_at).unwrap_or(now());
-            let exp = jar_of(st, Kind::Managed).auth_expiry(t).map(|e| e as f64 - EXPIRY_MARGIN);
-            Some(exp.map_or(last + MANAGED_EVERY, |e| e.min(last + MANAGED_EVERY)).max(now()))
-        }
-        Some(Kind::Pasted) if light_on && !st.cfg.env_locked("ytdlp_cookies") => Some(s.pasted.checked_at.map_or(now(), |c| c + LIGHT_EVERY).max(now())),
-        _ => None,
-    };
+    let next = next_refresh(now(), act, &s, light_on && !st.cfg.env_locked("ytdlp_cookies"));
     let current = act.map(|k| s.get(k).clone()).unwrap_or_default();
-    let diag = diagnostics(st, act, &s, installed.is_some());
     json!({
         "source": act.map(|k| k.key()), "source_label": act.map(|k| k.label()), "account": current.account,
-        "last_refresh": current.updated_at, "next_check": next_check, "sources": sources,
-        "browser": { "installed": installed.as_ref().map(|(_, v)| v.clone()), "signed_in_once": s.managed.updated_at.is_some() },
-        "extension": { "token_at": s.ext_token_at, "connected": s.extension.updated_at.is_some() },
-        "light_refresh": light_on, "diagnostics": diag,
+        "last_refresh": current.updated_at, "last_check": current.checked_at, "next_refresh": next, "next_check": next,
+        "sources": sources,
+        "extension": { "token_at": s.ext_token_at, "connected": s.extension.updated_at.is_some() || s.handoff.updated_at.is_some(), "handoff_at": s.handoff.updated_at },
+        "light_refresh": light_on, "diagnostics": diagnostics(st, act, &s),
     })
 }
 
@@ -475,10 +534,10 @@ fn ago(secs: f64) -> String {
 }
 
 /// One plain line about what is going on.
-fn diagnostics(st: &AppState, act: Option<Kind>, s: &AuthState, has_browser: bool) -> String {
+fn diagnostics(st: &AppState, act: Option<Kind>, s: &AuthState) -> String {
     let mut parts = vec![];
     match act {
-        None => parts.push("No YouTube cookies – yt-dlp downloads signed out (128 kbps, more bot checks)".to_string()),
+        None => parts.push("No YouTube cookies – yt-dlp downloads signed out (128 kbps, more bot checks). Hand over a sign-in from the Encore extension".to_string()),
         Some(k) => {
             let src = s.get(k);
             let jar = jar_of(st, k);
@@ -495,13 +554,12 @@ fn diagnostics(st: &AppState, act: Option<Kind>, s: &AuthState, has_browser: boo
             if let Some(m) = &src.message {
                 parts.push(m.clone());
             }
-            if k == Kind::Extension {
-                parts.push("Encore does not rotate these cookies (that would sign your browser out)".into());
+            match k {
+                Kind::Handoff => parts.push("Encore keeps this sign-in alive by itself (every 4 h)".into()),
+                Kind::Extension => parts.push("Encore does not rotate these cookies (that would sign your browser out) – the hand-off is the better way".into()),
+                Kind::Pasted => {}
             }
         }
-    }
-    if !has_browser && act != Some(Kind::Managed) {
-        parts.push("Install the browser under Download tools to let Encore sign in by itself".into());
     }
     parts.join(" · ")
 }
@@ -515,60 +573,25 @@ pub fn router() -> Router<AppState> {
         .route("/api/youtube/signout", post(sign_out))
         .route("/api/youtube/extension-token", post(new_token))
         .route("/api/youtube/extension-cookies", post(extension_cookies).options(preflight))
-        .route("/api/youtube/browser/live", get(live))
-        .route("/api/youtube/guided/start", post(guided_start))
-        .route("/api/youtube/guided/step", post(guided_step))
-        .route("/api/youtube/guided/cancel", post(guided_cancel))
-}
-
-// ---- guided sign-in (guided.rs) -----------------------------------------------------------------
-
-/// Start the guided sign-in: answers the first step ({kind, title, text, error, choices, code_hint,
-/// screenshot?, account?}).
-async fn guided_start(State(st): State<AppState>, Admin(u): Admin) -> ApiResult<Json<Value>> {
-    use crate::db::RowExt;
-    st.db.log("info", &format!("{} started the YouTube sign-in", u.s("username")));
-    let step = guided::start(&st).await.map_err(|(c, m)| err(c, m))?;
-    Ok(Json(json!(step)))
-}
-
-/// One step: {kind: "email"|"password"|"code"|"choice"|"check", value}. The value is never logged or kept.
-async fn guided_step(State(st): State<AppState>, Admin(_): Admin, Json(body): Json<guided::Submit>) -> ApiResult<Json<Value>> {
-    let step = guided::step(&st, &body.kind, &body.value).await.map_err(|(c, m)| err(c, m))?;
-    drop(body);
-    Ok(Json(json!(step)))
-}
-
-async fn guided_cancel(State(_st): State<AppState>, Admin(_): Admin) -> ApiResult<Json<Value>> {
-    let closed = guided::cancel().await;
-    Ok(Json(json!({ "ok": true, "closed": closed })))
 }
 
 async fn get_status(State(st): State<AppState>, Admin(_): Admin) -> ApiResult<Json<Value>> {
     Ok(Json(tokio::task::spawn_blocking(move || status(&st)).await.map_err(|e| err(500, e.to_string()))?))
 }
 
-/// "Refresh now": the source in use (the managed browser opens YouTube; pasted cookies are rotated;
-/// the extension's are only checked).
+/// "Refresh now": the source in use (the hand-off session and pasted cookies are rotated; the
+/// extension's are only checked).
 async fn refresh_now(State(st): State<AppState>, Admin(u): Admin) -> ApiResult<Json<Value>> {
     use crate::db::RowExt;
-    let s = load(st.data_dir());
     let act = active(&st);
-    let res = if managed_ready(&st, &s) && (act == Some(Kind::Managed) || act.is_none() || s.managed.ok == Some(false)) {
-        refresh_managed(&st).await
-    } else {
-        match act {
-            Some(Kind::Extension) => check_extension(&st).await,
-            // rotated only with the light refresh on (and never cookies from the environment)
-            Some(Kind::Pasted) => refresh_pasted(&st, st.cfg.bool("youtube_light_refresh")).await,
-            Some(Kind::Managed) => refresh_managed(&st).await,
-            None => return Err(err(400, "No YouTube sign-in to refresh – sign in with Encore's browser, connect the extension or paste cookies")),
-        }
+    let res = match act {
+        Some(Kind::Handoff) => refresh_handoff(&st).await,
+        Some(Kind::Extension) => check_extension(&st).await,
+        // rotated only with the light refresh on (and never cookies from the environment)
+        Some(Kind::Pasted) => refresh_pasted(&st, st.cfg.bool("youtube_light_refresh")).await,
+        None => return Err(err(400, "No YouTube sign-in to refresh – hand one over from the Encore extension or paste cookies")),
     };
     let ok = res.map_err(|e| err(400, e.to_string()))?;
-    if ok {
-        signed_in_again(&st);
-    }
     st.db.log("info", &format!("{} refreshed the YouTube sign-in ({})", u.s("username"), if ok { "signed in" } else { "signed out" }));
     let st2 = st.clone();
     let mut v = tokio::task::spawn_blocking(move || status(&st2)).await.map_err(|e| err(500, e.to_string()))?;
@@ -578,20 +601,22 @@ async fn refresh_now(State(st): State<AppState>, Admin(u): Admin) -> ApiResult<J
 
 #[derive(Deserialize, Default)]
 struct SignOutBody {
-    /// "managed" | "extension" | "all" (default: managed and extension; pasted cookies have their own clear)
+    /// "handoff" | "extension" | "all" (default: all but the pasted cookies, which have their own clear)
     source: Option<String>,
 }
 
 async fn sign_out(State(st): State<AppState>, Admin(u): Admin, body: Option<Json<SignOutBody>>) -> ApiResult<Json<Value>> {
     use crate::db::RowExt;
     let which = body.and_then(|b| b.0.source).unwrap_or_else(|| "all".into());
+    let which = if which == "managed" { "handoff".to_string() } else { which };
+    if !["handoff", "extension", "all"].contains(&which.as_str()) {
+        return Err(err(400, "Unknown sign-in"));
+    }
     let data = st.data_dir().to_path_buf();
-    if which == "managed" || which == "all" {
-        guided::cancel().await;
-        let _g = tokio::time::timeout(Duration::from_secs(60), browser::LOCK.lock()).await.map_err(|_| err(409, "The browser is busy – try again in a minute"))?;
-        let _ = std::fs::remove_dir_all(browser::profile_dir(&data));
-        let _ = std::fs::remove_file(managed_path(&data));
-        update(&data, |s| s.managed = SourceState::default());
+    if which == "handoff" || which == "all" {
+        let _g = ROTATING.lock().await;
+        let _ = std::fs::remove_file(handoff_path(&data));
+        update(&data, |s| s.handoff = SourceState::default());
     }
     if which == "extension" || which == "all" {
         let _ = std::fs::remove_file(ext_path(&data));
@@ -647,14 +672,17 @@ fn cors(h: &mut HeaderMap) {
     h.insert("access-control-allow-headers", HeaderValue::from_static("authorization, content-type, x-encore-token"));
 }
 
-/// The browser extension's upload: `{cookies: [chrome.cookies.Cookie…], agent?}` with the token.
+/// The browser extension's upload: `{cookies: [chrome.cookies.Cookie…], agent?, handoff?}` with the token.
+/// `handoff: true`: the cookies of a private window signed in for Encore only – they become the
+/// server-owned session. Otherwise: the everyday browser's cookies (never rotated by Encore).
 async fn extension_cookies(State(st): State<AppState>, headers: HeaderMap, Json(body): Json<Value>) -> Response {
     use axum::response::IntoResponse;
     let s = load(st.data_dir());
     let mut resp = if !token_ok(&headers, s.ext_token.as_deref()) {
-        err(401, "Unknown token – make a new one under Settings → YouTube sign-in → Connect browser extension").into_response()
+        err(401, "Unknown token – make a new one under Settings → YouTube → Connect the browser extension").into_response()
     } else {
-        match accept_extension(&st, &body).await {
+        let r = if body["handoff"].as_bool() == Some(true) { accept_handoff(&st, &body).await } else { accept_extension(&st, &body).await };
+        match r {
             Ok(v) => Json(v).into_response(),
             Err(e) => err(400, e.to_string()).into_response(),
         }
@@ -663,19 +691,50 @@ async fn extension_cookies(State(st): State<AppState>, headers: HeaderMap, Json(
     resp
 }
 
-async fn accept_extension(st: &AppState, body: &Value) -> anyhow::Result<Value> {
+fn cookie_list(body: &Value) -> anyhow::Result<Jar> {
     let list = body["cookies"].as_array().cloned().unwrap_or_default();
     if list.len() > 2000 {
         anyhow::bail!("too many cookies");
     }
-    let j = Jar::from_extension(&list);
+    Ok(Jar::from_extension(&list))
+}
+
+fn agent_of(body: &Value) -> Option<String> {
+    body["agent"].as_str().map(|a| a.chars().filter(|c| !c.is_control()).take(80).collect())
+}
+
+/// A hand-off: the private window's cookies become the server's own session.
+async fn accept_handoff(st: &AppState, body: &Value) -> anyhow::Result<Value> {
+    let j = cookie_list(body)?;
+    let t = now();
+    if !j.has_auth(t as i64) {
+        return Ok(json!({ "ok": false, "message": "That window is not signed in to YouTube yet – finish signing in, then send again" }));
+    }
+    let account = account_of(st, &j).await;
+    {
+        let _g = ROTATING.lock().await;
+        write_private(&handoff_path(st.data_dir()), &j.to_netscape())?;
+        update(st.data_dir(), |s| {
+            s.handoff = SourceState { updated_at: Some(t), checked_at: Some(t), ok: Some(true), account: account.clone(), message: None, agent: agent_of(body) };
+        });
+    }
+    signed_in_again(st);
+    st.db.log("info", &format!("YouTube sign-in handed over from the Encore extension{}{} – Encore keeps it alive by itself now",
+        account.as_deref().map(|a| format!(" ({a})")).unwrap_or_default(),
+        agent_of(body).map(|a| format!(", {a}")).unwrap_or_default()));
+    Ok(json!({ "ok": true, "handoff": true, "cookies": j.0.len(), "account": account,
+        "message": "Encore has its own YouTube sign-in now and keeps it alive by itself. The private window can close." }))
+}
+
+async fn accept_extension(st: &AppState, body: &Value) -> anyhow::Result<Value> {
+    let j = cookie_list(body)?;
     let t = now();
     if !j.has_auth(t as i64) {
         update(st.data_dir(), |s| {
             s.extension.checked_at = Some(t);
             s.extension.ok = Some(false);
             s.extension.message = Some("The browser is not signed in to YouTube".into());
-            s.extension.agent = body["agent"].as_str().map(|a| a.chars().take(80).collect());
+            s.extension.agent = agent_of(body);
         });
         return Ok(json!({ "ok": false, "message": "This browser is not signed in to YouTube – sign in at music.youtube.com" }));
     }
@@ -683,7 +742,7 @@ async fn accept_extension(st: &AppState, body: &Value) -> anyhow::Result<Value> 
     // uploads of one session), so the account name is looked up again
     let session = |jar: &Jar| ["SAPISID", "__Secure-3PSID", "SID"].map(|n| jar.get("www.youtube.com", n).map(|c| c.value.clone()));
     let before = session(&jar_of(st, Kind::Extension));
-    browser::write_private(&ext_path(st.data_dir()), &j.to_netscape())?;
+    write_private(&ext_path(st.data_dir()), &j.to_netscape())?;
     let switched = before != session(&j);
     let changed_account = load(st.data_dir()).extension.account.is_none() || switched;
     let account = if changed_account { account_of(st, &j).await } else { None };
@@ -692,7 +751,7 @@ async fn accept_extension(st: &AppState, body: &Value) -> anyhow::Result<Value> 
         s.extension.checked_at = Some(t);
         s.extension.ok = Some(true);
         s.extension.message = None;
-        s.extension.agent = body["agent"].as_str().map(|a| a.chars().take(80).collect());
+        s.extension.agent = agent_of(body);
         // a switched account never keeps the old name, even when the new one couldn't be read
         if account.is_some() || switched {
             s.extension.account = account;
@@ -700,183 +759,4 @@ async fn accept_extension(st: &AppState, body: &Value) -> anyhow::Result<Value> 
     });
     signed_in_again(st);
     Ok(json!({ "ok": true, "cookies": j.0.len(), "message": format!("{} cookies received", j.0.len()) }))
-}
-
-// ---- live view ----------------------------------------------------------------------------------
-
-/// Admin-only WebSocket: the managed browser's screen as JPEG frames, mouse and keys back. With a
-/// guided sign-in open (guided.rs) it shows that browser as it is, and closing it hands it back to the form.
-/// Server → client: {type:"frame", data, width, height} · {type:"url", url} · {type:"status", message}
-/// · {type:"done", account} · {type:"error", message}. Client → server: {type:"mouse"|"key"|"text"|"nav", …}
-/// (see browser::input_commands) and {type:"check"} (look for a finished sign-in now).
-async fn live(ws: WebSocketUpgrade, State(st): State<AppState>, headers: HeaderMap, Admin(u): Admin) -> Response {
-    use crate::db::RowExt;
-    use axum::response::IntoResponse;
-    // a GET skips the CSRF header check and the session cookie is SameSite=Lax: only Encore's own pages
-    // may open the browser (not another site on a sibling subdomain)
-    if !same_origin(&headers, &st.cfg.str("base_url")) {
-        return err(403, "The sign-in browser can only be opened from Encore itself").into_response();
-    }
-    st.db.log("info", &format!("{} opened the YouTube sign-in browser", u.s("username")));
-    ws.max_message_size(1 << 20).on_upgrade(move |sock| live_session(st, sock))
-}
-
-/// The request's Origin is this server (its Host, the proxy's X-Forwarded-Host or the Base URL). No Origin
-/// at all is not a browser page, so no session cookie rides along unasked.
-pub fn same_origin(headers: &HeaderMap, base_url: &str) -> bool {
-    let h = |k: &str| headers.get(k).and_then(|v| v.to_str().ok()).map(|v| v.trim().to_lowercase());
-    let Some(origin) = h("origin") else { return true };
-    let Some(o) = reqwest::Url::parse(&origin).ok().and_then(|u| u.host_str().map(|host| match u.port() {
-        Some(p) => format!("{host}:{p}"),
-        None => host.to_string(),
-    })) else { return false };
-    let base = reqwest::Url::parse(base_url.trim()).ok().and_then(|u| u.host_str().map(|host| match u.port() {
-        Some(p) => format!("{host}:{p}"),
-        None => host.to_string(),
-    }));
-    let mut ok: Vec<String> = [h("host"), h("x-forwarded-host"), base].into_iter().flatten()
-        .flat_map(|v| v.split(',').map(|x| x.trim().to_string()).collect::<Vec<_>>()).filter(|v| !v.is_empty()).collect();
-    // a Host with the scheme's default port written out
-    for v in ok.clone() {
-        if let Some(bare) = v.strip_suffix(":443").or(v.strip_suffix(":80")) {
-            ok.push(bare.to_string());
-        }
-    }
-    ok.contains(&o)
-}
-
-async fn send(sock: &mut WebSocket, v: Value) -> bool {
-    sock.send(WsMessage::Text(v.to_string().into())).await.is_ok()
-}
-
-async fn live_session(st: AppState, mut sock: WebSocket) {
-    let data = st.data_dir().to_path_buf();
-    // the guided sign-in's browser, as it is (its page stays where the form left it)
-    if let Some((id, b)) = guided::attach().await {
-        // the page tells Close to go back to the guided form
-        send(&mut sock, json!({ "type": "guided" })).await;
-        let res = drive(&st, &b, &mut sock, false).await;
-        let signed_in = matches!(res, Ok(Some(_)));
-        guided::detach(id, signed_in).await;
-        match res {
-            Ok(Some(account)) => {
-                signed_in_again(&st);
-                st.db.log("info", &format!("Encore's browser is signed in to YouTube{}", account.as_deref().map(|a| format!(" as {a}")).unwrap_or_default()));
-                send(&mut sock, json!({ "type": "done", "account": account })).await;
-            }
-            Ok(None) => {}
-            Err(e) => {
-                send(&mut sock, json!({ "type": "error", "message": e.to_string() })).await;
-            }
-        }
-        let _ = sock.send(WsMessage::Close(None)).await;
-        return;
-    }
-    let Ok(_g) = browser::LOCK.try_lock() else {
-        send(&mut sock, json!({ "type": "error", "message": "The browser is busy refreshing – try again in a minute" })).await;
-        return;
-    };
-    send(&mut sock, json!({ "type": "status", "message": "Starting the browser…" })).await;
-    let b = match browser::Browser::launch(&data).await {
-        Ok(b) => b,
-        Err(e) => {
-            send(&mut sock, json!({ "type": "error", "message": e.to_string() })).await;
-            return;
-        }
-    };
-    let res = drive(&st, &b, &mut sock, true).await;
-    b.close().await;
-    match res {
-        Ok(Some(account)) => {
-            signed_in_again(&st);
-            st.db.log("info", &format!("Encore's browser is signed in to YouTube{}", account.as_deref().map(|a| format!(" as {a}")).unwrap_or_default()));
-            send(&mut sock, json!({ "type": "done", "account": account })).await;
-        }
-        Ok(None) => {}
-        Err(e) => {
-            send(&mut sock, json!({ "type": "error", "message": e.to_string() })).await;
-        }
-    }
-    let _ = sock.send(WsMessage::Close(None)).await;
-}
-
-/// Run the live view until the sign-in is done (Some(account)), the viewer leaves (None) or 15 minutes pass.
-/// `fresh`: a browser of its own (open YouTube Music / Google's sign-in first); else the guided
-/// sign-in's browser, left on its page.
-async fn drive(st: &AppState, b: &browser::Browser, sock: &mut WebSocket, fresh: bool) -> anyhow::Result<Option<Option<String>>> {
-    let mut ev = b.cdp.subscribe();
-    b.page("Page.startScreencast", json!({ "format": "jpeg", "quality": 70, "maxWidth": 1280, "maxHeight": 860, "everyNthFrame": 1 })).await?;
-    if fresh {
-        // already signed in (a profile from before)? Then YouTube Music; else Google's sign-in page
-        b.navigate("https://music.youtube.com/").await?;
-        b.wait_load(Duration::from_secs(20)).await;
-        tokio::time::sleep(Duration::from_secs(2)).await;
-        if !b.logged_in().await {
-            b.navigate(browser::SIGN_IN_URL).await?;
-        }
-    } else {
-        send(sock, json!({ "type": "url", "url": b.url().await })).await;
-        // a first frame now (the screencast sends frames only when the page paints)
-        if let Ok(r) = b.page("Page.captureScreenshot", json!({ "format": "jpeg", "quality": 70 })).await {
-            send(sock, json!({ "type": "frame", "data": r["data"], "width": 1280, "height": 860 })).await;
-        }
-    }
-    let deadline = tokio::time::Instant::now() + Duration::from_secs(900);
-    let mut check_at: Option<tokio::time::Instant> = Some(tokio::time::Instant::now() + Duration::from_secs(1));
-    loop {
-        let wake = check_at.unwrap_or(deadline).min(deadline);
-        tokio::select! {
-            e = ev.recv() => {
-                let Ok(e) = e else { continue };
-                match e["method"].as_str().unwrap_or("") {
-                    "Page.screencastFrame" => {
-                        let p = &e["params"];
-                        let _ = b.page("Page.screencastFrameAck", json!({ "sessionId": p["sessionId"] })).await;
-                        let (w, h) = (p["metadata"]["deviceWidth"].as_f64().unwrap_or(1280.0), p["metadata"]["deviceHeight"].as_f64().unwrap_or(860.0));
-                        if !send(sock, json!({ "type": "frame", "data": p["data"], "width": w, "height": h })).await {
-                            return Ok(None);
-                        }
-                    }
-                    "Page.frameNavigated" => {
-                        let f = &e["params"]["frame"];
-                        if f["parentId"].is_null() {
-                            let url = f["url"].as_str().unwrap_or("").to_string();
-                            send(sock, json!({ "type": "url", "url": url })).await;
-                            if url.starts_with("https://music.youtube.com") || url.starts_with("https://www.youtube.com") {
-                                check_at = Some(tokio::time::Instant::now() + Duration::from_secs(3));
-                            }
-                        }
-                    }
-                    _ => {}
-                }
-            }
-            m = sock.recv() => {
-                let Some(Ok(m)) = m else { return Ok(None) };
-                let WsMessage::Text(t) = m else {
-                    if matches!(m, WsMessage::Close(_)) { return Ok(None) }
-                    continue;
-                };
-                let Ok(v) = serde_json::from_str::<Value>(t.as_str()) else { continue };
-                if v["type"] == "check" {
-                    check_at = Some(tokio::time::Instant::now());
-                    continue;
-                }
-                for (method, params) in browser::input_commands(&v) {
-                    let _ = b.page(method, params).await;
-                }
-            }
-            _ = tokio::time::sleep_until(wake) => {
-                if tokio::time::Instant::now() >= deadline {
-                    anyhow::bail!("The sign-in window closed after 15 minutes – open it again to finish");
-                }
-                check_at = None;
-                if b.url().await.starts_with("https://music.youtube.com") && b.logged_in().await {
-                    send(sock, json!({ "type": "status", "message": "Signed in – saving the cookies…" })).await;
-                    if let Some(account) = guided::save_signin(st, b).await? {
-                        return Ok(Some(account));
-                    }
-                }
-            }
-        }
-    }
 }

@@ -135,9 +135,8 @@ impl Config {
             // daily database backups (Settings → Scheduled tasks; the copies are under config/backups)
             ("task_backup_enabled", Some("TASK_BACKUP_ENABLED"), json!(true), false),
             ("task_backup_minutes", Some("TASK_BACKUP_MINUTES"), json!(1440), false),
-            // YouTube sign-in (ytauth): light refresh of pasted cookies; auto-updates of the sign-in browser
+            // YouTube sign-in (ytauth): light refresh of pasted cookies
             ("youtube_light_refresh", Some("YOUTUBE_LIGHT_REFRESH"), json!(true), false),
-            ("tools_auto_browser", None, json!(true), false),
             // release types (see release_types.rs): kinds to request, extras to skip – CSV
             ("release_types", Some("RELEASE_TYPES"), json!(crate::release_types::DEFAULT_KINDS), false),
             ("release_skip", Some("RELEASE_SKIP"), json!(crate::release_types::default_skip()), false),

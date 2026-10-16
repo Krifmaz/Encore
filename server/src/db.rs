@@ -4,14 +4,64 @@ use rusqlite::types::{Value as SqlValue, ValueRef};
 use rusqlite::{params_from_iter, Connection, OpenFlags};
 use serde_json::{Map, Value};
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex};
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex, MutexGuard};
 
 pub type Row = Map<String, Value>;
 
+/// One connection for writes (they are serialized here, as SQLite would anyway) and a few for reads:
+/// in WAL mode reads never wait for a write or for each other, so a long scan or a background job no
+/// longer holds up every page that loads meanwhile.
 #[derive(Clone)]
 pub struct Db {
     conn: Arc<Mutex<Connection>>,
+    readers: Arc<Vec<Mutex<Connection>>>,
+    next_reader: Arc<AtomicUsize>,
+    /// goes up with every write to the songs or the artist aliases (see `library_version`)
+    library_writes: Arc<AtomicU64>,
     pub data_dir: PathBuf,
+}
+
+/// Read connections next to the write one (ENCORE_DB_READERS; 0 = every statement on one connection,
+/// as servers before 0.25.3 did).
+fn readers_wanted() -> usize {
+    std::env::var("ENCORE_DB_READERS").ok().and_then(|v| v.trim().parse().ok()).unwrap_or(4).min(16)
+}
+
+/// Per-connection settings: WAL is safe with synchronous=NORMAL (a power cut can lose the last
+/// commits, never corrupt the file); a bigger page cache and memory-mapped reads make the library
+/// queries (60k songs) run from memory.
+fn tune(conn: &Connection) -> rusqlite::Result<()> {
+    conn.busy_timeout(std::time::Duration::from_secs(10))?;
+    conn.pragma_update(None, "foreign_keys", "ON")?;
+    conn.pragma_update(None, "synchronous", "NORMAL")?;
+    conn.pragma_update(None, "cache_size", -16000)?;   // KiB: 16 MB per connection
+    conn.pragma_update(None, "temp_store", "MEMORY")?;
+    // mmap_size answers with the value it set: a pragma_update would see an unexpected row
+    let _ = conn.query_row("PRAGMA mmap_size=268435456", [], |_| Ok(()));
+    Ok(())
+}
+
+fn open_readers(path: &Path) -> rusqlite::Result<Vec<Connection>> {
+    (0..readers_wanted()).map(|_| {
+        let c = Connection::open(path)?;
+        tune(&c)?;
+        Ok(c)
+    }).collect()
+}
+
+/// Each opened database counts its writes from its own starting point, so two handles on one file
+/// (tests) never look alike.
+fn next_instance() -> u64 {
+    static N: AtomicU64 = AtomicU64::new(1);
+    N.fetch_add(1, Ordering::SeqCst)
+}
+
+/// Statements that only read go to a read connection; anything else to the write one.
+fn is_read(sql: &str) -> bool {
+    let head = sql.trim_start();
+    let word: String = head.chars().take_while(|c| c.is_ascii_alphabetic()).collect::<String>().to_ascii_uppercase();
+    word == "SELECT" || (word == "WITH" && !["INSERT", "UPDATE", "DELETE", "REPLACE"].iter().any(|w| head.to_ascii_uppercase().contains(w)))
 }
 
 const SCHEMA: &str = include_str!("schema.sql");
@@ -76,8 +126,7 @@ const MIGRATIONS: &[(&str, &str, &str)] = &[
 /// Pragmas, tables, missing columns and indexes, then the version stamp: run on every open.
 fn prepare(conn: &Connection) -> anyhow::Result<()> {
     conn.pragma_update(None, "journal_mode", "WAL")?;
-    conn.pragma_update(None, "foreign_keys", "ON")?;
-    conn.busy_timeout(std::time::Duration::from_secs(10))?;
+    tune(conn)?;
     conn.execute_batch(SCHEMA)?;
     for (table, col, typ) in MIGRATIONS {
         let mut stmt = conn.prepare(&format!("PRAGMA table_info({table})"))?;
@@ -90,6 +139,16 @@ fn prepare(conn: &Connection) -> anyhow::Result<()> {
         "CREATE INDEX IF NOT EXISTS idx_tracks_isrc ON tracks(isrc);
          CREATE INDEX IF NOT EXISTS idx_tracks_acoustid ON tracks(acoustid_id);
          CREATE INDEX IF NOT EXISTS sessions_user_device ON sessions(user_id, device_id);
+         -- 0.25.3: lookups by name (is this album / song / artist in the library? artist pages, new
+         -- releases) used to read every song; older servers ignore these indexes, so no schema bump
+         CREATE INDEX IF NOT EXISTS idx_tracks_lalbum ON tracks(lower(album));
+         CREATE INDEX IF NOT EXISTS idx_tracks_ltitle ON tracks(lower(title));
+         CREATE INDEX IF NOT EXISTS idx_tracks_lalbumartist ON tracks(lower(albumartist));
+         CREATE INDEX IF NOT EXISTS idx_tracks_albumartist ON tracks(albumartist);
+         CREATE INDEX IF NOT EXISTS idx_tracks_artist ON tracks(artist);
+         CREATE INDEX IF NOT EXISTS idx_tracks_mb_albumartist ON tracks(mb_albumartistid);
+         CREATE INDEX IF NOT EXISTS idx_tracks_mb_artist ON tracks(mb_artistid);
+         CREATE INDEX IF NOT EXISTS idx_requests_mbid ON requests(mbid);
          CREATE TABLE IF NOT EXISTS login_links (digest TEXT PRIMARY KEY, user_id INTEGER NOT NULL, expires_at REAL NOT NULL);",
     )?;
     conn.pragma_update(None, "user_version", SCHEMA_VERSION)?;
@@ -152,7 +211,39 @@ impl Db {
             crate::backup::create(&conn, data_dir, crate::backup::Kind::BeforeUpgrade)?;
         }
         prepare(&conn)?;
-        Ok(Db { conn: Arc::new(Mutex::new(conn)), data_dir: data_dir.to_path_buf() })
+        let readers = open_readers(&path)?.into_iter().map(Mutex::new).collect();
+        Ok(Db { conn: Arc::new(Mutex::new(conn)), readers: Arc::new(readers), next_reader: Arc::new(AtomicUsize::new(0)), library_writes: Arc::new(AtomicU64::new(next_instance() << 40)), data_dir: data_dir.to_path_buf() })
+    }
+
+    /// Changes whenever a statement that may write the songs or the artist aliases ran through this
+    /// handle (every write in the server does): caches of library answers compare it instead of reading
+    /// the whole table again. Writes made by another program (a test's own connection) don't count.
+    pub fn library_version(&self) -> u64 {
+        self.library_writes.load(Ordering::SeqCst)
+    }
+
+    fn note_write(&self, sql: &str) {
+        let l = sql.to_ascii_lowercase();
+        if l.contains("tracks") || l.contains("artist_alias") {
+            self.library_writes.fetch_add(1, Ordering::SeqCst);
+        }
+    }
+
+    /// A free read connection (or, when all are busy, the next one in turn).
+    fn reader(&self) -> MutexGuard<'_, Connection> {
+        let n = self.readers.len();
+        if n == 0 {
+            return self.conn.lock().unwrap();
+        }
+        let start = self.next_reader.fetch_add(1, Ordering::Relaxed);
+        for i in 0..n {
+            match self.readers[(start + i) % n].try_lock() {
+                Ok(g) => return g,
+                Err(std::sync::TryLockError::Poisoned(e)) => return e.into_inner(),
+                Err(std::sync::TryLockError::WouldBlock) => {}
+            }
+        }
+        self.readers[start % n].lock().unwrap_or_else(|e| e.into_inner())
     }
 
     /// `PRAGMA user_version` of the open database.
@@ -181,6 +272,8 @@ impl Db {
             return Err(e.into());
         }
         let mut guard = self.conn.lock().unwrap();
+        // the read connections are closed too (in order; nothing else ever holds two of these locks)
+        let mut readers: Vec<MutexGuard<'_, Connection>> = self.readers.iter().map(|m| m.lock().unwrap_or_else(|e| e.into_inner())).collect();
         let safety = match crate::backup::create(&guard, &self.data_dir, crate::backup::Kind::BeforeRestore) {
             Ok(s) => s,
             Err(e) => {
@@ -198,6 +291,11 @@ impl Db {
             }
         };
         drop(std::mem::replace(&mut *guard, placeholder));
+        for r in readers.iter_mut() {
+            if let Ok(p) = Connection::open_in_memory() {
+                drop(std::mem::replace(&mut **r, p));
+            }
+        }
         for suffix in ["-wal", "-shm"] {
             let _ = std::fs::remove_file(format!("{}{suffix}", path.display()));
         }
@@ -206,6 +304,8 @@ impl Db {
         match (swap, reopen) {
             (Ok(()), Ok(conn)) => {
                 *guard = conn;
+                self.library_writes.fetch_add(1, Ordering::SeqCst);
+                Self::reopen_readers(&path, &mut readers);
                 tracing::info!("database restored from {} (safety copy: {})", from.display(), safety.name);
                 Ok(safety)
             }
@@ -236,17 +336,35 @@ impl Db {
                     }
                     Err(e) => tracing::error!("database could not be reopened after a failed restore: {e}"),
                 }
+                Self::reopen_readers(&path, &mut readers);
                 anyhow::bail!("restore failed ({reason}); the data from before is in backups/{}", safety.name)
             }
         }
     }
 
+    fn reopen_readers(path: &Path, readers: &mut [MutexGuard<'_, Connection>]) {
+        match open_readers(path) {
+            Ok(fresh) => {
+                for (r, c) in readers.iter_mut().zip(fresh) {
+                    **r = c;
+                }
+            }
+            Err(e) => tracing::error!("database read connections could not be reopened: {e}"),
+        }
+    }
+
     pub fn execute_batch(&self, sql: &str) -> rusqlite::Result<()> {
-        self.conn.lock().unwrap().execute_batch(sql)
+        let r = self.conn.lock().unwrap().execute_batch(sql);
+        self.note_write(sql);
+        r
     }
 
     pub fn query(&self, sql: &str, params: Vec<Value>) -> rusqlite::Result<Vec<Row>> {
-        let conn = self.conn.lock().unwrap();
+        let read = is_read(sql);
+        if !read {
+            self.note_write(sql);
+        }
+        let conn = if read { self.reader() } else { self.conn.lock().unwrap() };
         let mut stmt = conn.prepare_cached(sql)?;
         let cols: Vec<String> = stmt.column_names().iter().map(|c| c.to_string()).collect();
         let rows = stmt.query_map(params_from_iter(params.iter().map(to_sql)), |r| {
@@ -266,7 +384,10 @@ impl Db {
     /// Runs a statement; returns the last inserted row id.
     pub fn execute(&self, sql: &str, params: Vec<Value>) -> rusqlite::Result<i64> {
         let conn = self.conn.lock().unwrap();
-        conn.execute(sql, params_from_iter(params.iter().map(to_sql)))?;
+        let r = conn.execute(sql, params_from_iter(params.iter().map(to_sql)));
+        // counted after the write too: a reader that looked between the two sees the change next time
+        self.note_write(sql);
+        r?;
         Ok(conn.last_insert_rowid())
     }
 
@@ -421,6 +542,48 @@ mod tests {
         assert_eq!(std::fs::read(d.join("encore.db")).unwrap(), before);
         assert_eq!(std::fs::read(&wal).unwrap(), b"not a real wal, must be left alone");
         assert!(crate::backup::list(&d).is_empty());
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn reads_and_writes_go_to_their_connections() {
+        assert!(is_read("SELECT 1"));
+        assert!(is_read("  select * from tracks"));
+        assert!(is_read("WITH x AS (SELECT 1) SELECT * FROM x"));
+        assert!(!is_read("WITH x AS (SELECT 1) INSERT INTO t SELECT * FROM x"));
+        assert!(!is_read("INSERT INTO settings VALUES ('a','b')"));
+        assert!(!is_read("UPDATE tracks SET year='1'"));
+        assert!(!is_read("PRAGMA user_version = 3"));
+        let d = tmp("pool");
+        let db = Db::open(&d).unwrap();
+        // a read while the write connection is held elsewhere (a long write, a backup) doesn't wait
+        db.execute("INSERT INTO settings VALUES ('k', '1')", p![]).unwrap();
+        let held = db.conn.lock().unwrap();
+        let (tx, rx) = std::sync::mpsc::channel();
+        let db2 = db.clone();
+        std::thread::spawn(move || {
+            let v = db2.one("SELECT value FROM settings WHERE key='k'", p![]).unwrap().unwrap().s("value");
+            tx.send(v).unwrap();
+        });
+        let got = rx.recv_timeout(std::time::Duration::from_secs(5));
+        drop(held);
+        if !db.readers.is_empty() {
+            assert_eq!(got.unwrap(), "1");
+        }
+        // what was written is read back at once (WAL: a read starts from the last commit)
+        for i in 0..50 {
+            db.execute("UPDATE settings SET value=? WHERE key='k'", p![i.to_string()]).unwrap();
+            assert_eq!(db.one("SELECT value FROM settings WHERE key='k'", p![]).unwrap().unwrap().s("value"), i.to_string());
+        }
+        // writes to the songs move the library version; others don't
+        let v = db.library_version();
+        db.execute("INSERT INTO settings VALUES ('x', '1')", p![]).unwrap();
+        assert_eq!(db.library_version(), v);
+        db.execute("UPDATE tracks SET year='1' WHERE id=-1", p![]).unwrap();
+        assert!(db.library_version() > v);
+        // a second handle on the same file never looks like this one
+        let other = Db::open(&d).unwrap();
+        assert_ne!(other.library_version(), db.library_version());
         let _ = std::fs::remove_dir_all(&d);
     }
 

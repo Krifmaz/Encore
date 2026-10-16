@@ -69,7 +69,6 @@ async fn tools_reset(State(st): State<AppState>, Admin(u): Admin, Path(id): Path
     let what = match id.as_str() {
         "cadenza" => "went back to the built-in Cadenza engine".to_string(),
         "slskd" => "removed slskd".to_string(),
-        "browser" => "removed the browser for YouTube sign-in".to_string(),
         "translator" => "removed the Translator and its model".to_string(),
         _ => format!("went back to the bundled {}", crate::tools::label(&id)),
     };
