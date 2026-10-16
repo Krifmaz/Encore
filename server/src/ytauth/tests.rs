@@ -259,8 +259,20 @@ fn browser_command_line() {
     assert!(!a.iter().any(|x| x.starts_with("--remote-debugging-port") || x.starts_with("--remote-debugging-address")));
     assert!(a.contains(&"--user-data-dir=/config/youtube-browser/profile".to_string()));
     assert!(a.iter().any(|x| x.starts_with("--user-agent=") && x.contains("Chrome/141.0.0.0") && !x.contains("Headless")));
-    assert!(!a.iter().any(|x| x.contains("enable-automation") || x == "--no-sandbox"));
+    assert!(!a.iter().any(|x| x.contains("enable-automation")));
+    // a PUID container has no usable Chrome sandbox: always off, root or not
+    assert!(a.contains(&"--no-sandbox".to_string()));
     assert!(browser::args(Path::new("/p"), "ua", true).contains(&"--no-sandbox".to_string()));
+}
+
+#[test]
+fn start_failure_names_the_reason_not_the_stack_trace() {
+    let lines: Vec<String> = ["[1016/081200.1:FATAL:zygote_host_impl_linux.cc(127)] No usable sandbox! ...", "#0 0x55 base::debug::CollectStackTrace()", "[end of stack trace]"]
+        .iter().map(|s| s.to_string()).collect();
+    assert!(browser::start_failure(&lines).unwrap().contains("No usable sandbox"));
+    let lines: Vec<String> = ["chrome: error while loading shared libraries: libnss3.so: cannot open shared object file"].iter().map(|s| s.to_string()).collect();
+    assert!(browser::start_failure(&lines).unwrap().contains("libnss3"));
+    assert_eq!(browser::start_failure(&["[end of stack trace]".to_string()]), None);
 }
 
 #[test]

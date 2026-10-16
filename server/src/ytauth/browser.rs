@@ -291,22 +291,34 @@ pub fn user_agent(version: &str) -> String {
 }
 
 /// The command line: new headless mode, the persistent profile, a normal user agent. Never
-/// --enable-automation; --no-sandbox only when running as root (Chrome refuses to start otherwise).
-pub fn args(profile: &Path, ua: &str, root: bool) -> Vec<String> {
+/// --enable-automation. Always --no-sandbox: Chrome's sandbox needs user namespaces or a setuid
+/// helper, which an unprivileged Docker container doesn't give it (as root Chrome refuses to start
+/// without the flag; as PUID it aborts with "No usable sandbox"). The browser only ever opens Google's
+/// sign-in and YouTube Music pages.
+pub fn args(profile: &Path, ua: &str, _root: bool) -> Vec<String> {
     let mut a: Vec<String> = [
         // DevTools over fds 3/4 only: no TCP port another local process could connect to and read the
         // Google session from
         "--headless=new", "--remote-debugging-pipe", "--no-first-run", "--no-default-browser-check",
         "--disable-dev-shm-usage", "--password-store=basic", "--use-mock-keychain", "--window-size=1280,860", "--lang=en-US",
-        "--disable-features=Translate,MediaRouter", "--mute-audio",
+        "--disable-features=Translate,MediaRouter", "--mute-audio", "--no-sandbox", "--disable-gpu",
     ].iter().map(|s| s.to_string()).collect();
     a.push(format!("--user-data-dir={}", profile.display()));
     a.push(format!("--user-agent={ua}"));
-    if root {
-        a.push("--no-sandbox".into());
-    }
     a.push("about:blank".into());
     a
+}
+
+/// The line of a failed start's output that says why: a fatal error, a missing library, the sandbox –
+/// not the crash report's "[end of stack trace]" that comes last.
+pub fn start_failure(lines: &[String]) -> Option<String> {
+    let why = |l: &&String| {
+        let x = l.to_lowercase();
+        x.contains("error while loading shared libraries") || x.contains("no usable sandbox") || x.contains(":fatal:") || x.contains("fatal")
+            || (x.contains("error") && !x.contains("stack trace"))
+    };
+    lines.iter().find(why).or_else(|| lines.iter().rev().find(|l| !l.contains("stack trace") && !l.trim().is_empty()))
+        .map(|l| l.chars().take(300).collect())
 }
 
 /// A running browser with one page attached.
@@ -379,7 +391,7 @@ impl Browser {
                 while let Ok(Some(l)) = lines.next_line().await {
                     let mut t = tail.lock().unwrap();
                     t.push(l);
-                    if t.len() > 5 {
+                    if t.len() > 40 {
                         t.remove(0);
                     }
                 }
@@ -390,8 +402,11 @@ impl Browser {
             Ok(Ok(t)) => t,
             _ => {
                 let _ = child.kill().await;
-                let last = tail.lock().unwrap().last().cloned();
-                anyhow::bail!("the browser did not start{}", last.map(|l| format!(": {l}")).unwrap_or_default());
+                let lines = tail.lock().unwrap().clone();
+                for l in &lines {
+                    tracing::warn!("youtube browser: {l}");
+                }
+                anyhow::bail!("the browser did not start{}", start_failure(&lines).map(|l| format!(": {l}")).unwrap_or_default());
             }
         };
         let target = match targets["targetInfos"].as_array().and_then(|t| t.iter().find(|t| t["type"] == "page")).and_then(|t| t["targetId"].as_str()) {
