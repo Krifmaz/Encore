@@ -323,7 +323,7 @@ pub fn start_failure(lines: &[String]) -> Option<String> {
 
 /// A running browser with one page attached.
 pub struct Browser {
-    child: tokio::process::Child,
+    child: tokio::sync::Mutex<tokio::process::Child>,
     pub cdp: Cdp,
     pub session: String,
 }
@@ -346,7 +346,6 @@ fn is_root() -> bool {
 
 impl Browser {
     pub async fn launch(data: &Path) -> anyhow::Result<Browser> {
-        use tokio::io::AsyncBufReadExt;
         let (exe, ver) = installed(data).ok_or_else(|| anyhow::anyhow!("The browser for YouTube sign-in is not installed – install it under Download tools"))?;
         let profile = profile_dir(data);
         std::fs::create_dir_all(&profile)?;
@@ -355,17 +354,24 @@ impl Browser {
             use std::os::unix::fs::PermissionsExt;
             let _ = std::fs::set_permissions(&d, std::fs::Permissions::from_mode(0o700));
         }
+        Browser::launch_exe(&exe, &ver, &profile).await
+    }
+
+    /// Start a given chrome program on a profile directory (tests use their own Chromium and a
+    /// throwaway profile).
+    pub async fn launch_exe(exe: &Path, ver: &str, profile: &Path) -> anyhow::Result<Browser> {
+        use tokio::io::AsyncBufReadExt;
         // a browser that crashed leaves its lock behind
         for f in ["SingletonLock", "SingletonSocket", "SingletonCookie"] {
             let _ = std::fs::remove_file(profile.join(f));
         }
-        let ua = user_agent(&ver);
+        let ua = user_agent(ver);
         // fd 3: commands to the browser, fd 4: its answers (--remote-debugging-pipe)
         let (cmd_r, cmd_w) = pipe()?;
         let (ev_r, ev_w) = pipe()?;
         let (cr, ew) = (std::os::fd::AsRawFd::as_raw_fd(&cmd_r), std::os::fd::AsRawFd::as_raw_fd(&ev_w));
-        let mut cmd = tokio::process::Command::new(&exe);
-        cmd.args(args(&profile, &ua, is_root())).stdin(std::process::Stdio::null())
+        let mut cmd = tokio::process::Command::new(exe);
+        cmd.args(args(profile, &ua, is_root())).stdin(std::process::Stdio::null())
             .stdout(std::process::Stdio::null()).stderr(std::process::Stdio::piped()).kill_on_drop(true);
         // SAFETY: only async-signal-safe calls (fcntl, dup2) between fork and exec
         unsafe {
@@ -414,10 +420,14 @@ impl Browser {
             None => cdp.call("Target.createTarget", json!({ "url": "about:blank" }), None).await?["targetId"].as_str().unwrap_or("").to_string(),
         };
         let session = cdp.call("Target.attachToTarget", json!({ "targetId": target, "flatten": true }), None).await?["sessionId"].as_str().unwrap_or("").to_string();
-        let b = Browser { child, cdp, session };
+        let b = Browser { child: tokio::sync::Mutex::new(child), cdp, session };
         b.page("Network.setUserAgentOverride", json!({ "userAgent": ua, "acceptLanguage": "en-US,en", "platform": "Linux" })).await?;
         b.page("Page.enable", json!({})).await?;
         b.page("Emulation.setDeviceMetricsOverride", json!({ "width": 1280, "height": 860, "deviceScaleFactor": 1, "mobile": false })).await?;
+        // a headless page never has the window's focus, so typed text has nowhere to go (focus() on an
+        // input is ignored and Input.insertText lands nowhere): pretend the page is focused
+        let _ = b.page("Emulation.setFocusEmulationEnabled", json!({ "enabled": true })).await;
+        let _ = b.page("Page.bringToFront", json!({})).await;
         Ok(b)
     }
 
@@ -462,10 +472,31 @@ impl Browser {
         Ok(Jar::from_cdp(&v))
     }
 
-    pub async fn close(mut self) {
+    /// Evaluate a script in the page and return its value (promises awaited).
+    pub async fn eval(&self, expr: &str) -> anyhow::Result<Value> {
+        let r = self.page("Runtime.evaluate", json!({ "expression": expr, "returnByValue": true, "awaitPromise": true })).await?;
+        if let Some(x) = r.get("exceptionDetails") {
+            anyhow::bail!("page script failed: {}", x["exception"]["description"].as_str().or(x["text"].as_str()).unwrap_or("error").lines().next().unwrap_or(""));
+        }
+        Ok(r["result"]["value"].clone())
+    }
+
+    /// A real mouse click (move, press, release) at a point of the page.
+    pub async fn click_at(&self, x: f64, y: f64) -> anyhow::Result<()> {
+        for ev in ["move", "down", "up"] {
+            for (method, params) in input_commands(&json!({ "type": "mouse", "event": ev, "x": x, "y": y, "button": "left", "clickCount": 1 })) {
+                self.page(method, params).await?;
+            }
+        }
+        Ok(())
+    }
+
+    /// Close the browser (it may be shared, so this takes &self; a second close does nothing).
+    pub async fn close(&self) {
         let _ = tokio::time::timeout(Duration::from_secs(5), self.cdp.call("Browser.close", json!({}), None)).await;
-        if tokio::time::timeout(Duration::from_secs(5), self.child.wait()).await.is_err() {
-            let _ = self.child.kill().await;
+        let mut child = self.child.lock().await;
+        if tokio::time::timeout(Duration::from_secs(5), child.wait()).await.is_err() {
+            let _ = child.kill().await;
         }
     }
 }

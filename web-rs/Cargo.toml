@@ -27,7 +27,7 @@ web-sys = { version = "0.3", features = [
   "HtmlAnchorElement", "HtmlImageElement", "HtmlAudioElement", "HtmlMediaElement", "HtmlFormElement", "HtmlCollection",
   "Storage", "Location", "History", "Headers", "Request", "RequestInit", "RequestCredentials", "Response", "MediaSession",
   "MediaMetadata", "MediaMetadataInit", "MediaImage", "MediaSessionAction", "MediaSessionActionDetails", "MediaSessionPlaybackState",
-  "Navigator", "Event", "EventTarget", "KeyboardEvent", "MouseEvent", "PointerEvent", "TouchEvent", "CustomEvent", "CustomEventInit",
+  "Navigator", "Event", "EventTarget", "KeyboardEvent", "MouseEvent", "PointerEvent", "TouchEvent", "Touch", "TouchList", "CustomEvent", "CustomEventInit",
   "HashChangeEvent", "Node", "NodeList", "DomRect", "CssStyleDeclaration", "DomStringMap", "DomTokenList", "File", "FileList",
   "FormData", "Blob", "Url", "UrlSearchParams", "ScrollToOptions", "ScrollBehavior", "MediaQueryList", "Clipboard",
   "Notification", "NotificationOptions", "NotificationPermission", "ServiceWorkerContainer", "AbortController", "AbortSignal",

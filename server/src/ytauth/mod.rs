@@ -1,6 +1,7 @@
 //! YouTube sign-in for yt-dlp, three ways, freshest first:
 //!
-//! * **managed**: a headless browser Encore runs (browser.rs). Signed in once through a live view, it
+//! * **managed**: a headless browser Encore runs (browser.rs). Signed in once through Encore's guided
+//!   form (guided.rs: Encore fills Google's sign-in pages) or the live view, it
 //!   opens YouTube Music every 48 h (and when the cookies near their end, or yt-dlp is asked to sign in)
 //!   so Google rotates the cookies the normal way, and exports them.
 //! * **extension**: the Encore browser extension (extension/encore-youtube-cookies) posts the cookies of
@@ -11,10 +12,13 @@
 //! Precedence managed > extension > pasted among the sources that are signed in; with none signed in,
 //! the freshest one is still handed to yt-dlp.
 pub mod browser;
+pub mod guided;
 pub mod jar;
 pub mod rotate;
 #[cfg(test)]
 mod tests;
+#[cfg(test)]
+mod guided_tests;
 
 use crate::auth::Admin;
 use crate::db::now;
@@ -512,6 +516,32 @@ pub fn router() -> Router<AppState> {
         .route("/api/youtube/extension-token", post(new_token))
         .route("/api/youtube/extension-cookies", post(extension_cookies).options(preflight))
         .route("/api/youtube/browser/live", get(live))
+        .route("/api/youtube/guided/start", post(guided_start))
+        .route("/api/youtube/guided/step", post(guided_step))
+        .route("/api/youtube/guided/cancel", post(guided_cancel))
+}
+
+// ---- guided sign-in (guided.rs) -----------------------------------------------------------------
+
+/// Start the guided sign-in: answers the first step ({kind, title, text, error, choices, code_hint,
+/// screenshot?, account?}).
+async fn guided_start(State(st): State<AppState>, Admin(u): Admin) -> ApiResult<Json<Value>> {
+    use crate::db::RowExt;
+    st.db.log("info", &format!("{} started the YouTube sign-in", u.s("username")));
+    let step = guided::start(&st).await.map_err(|(c, m)| err(c, m))?;
+    Ok(Json(json!(step)))
+}
+
+/// One step: {kind: "email"|"password"|"code"|"choice"|"check", value}. The value is never logged or kept.
+async fn guided_step(State(st): State<AppState>, Admin(_): Admin, Json(body): Json<guided::Submit>) -> ApiResult<Json<Value>> {
+    let step = guided::step(&st, &body.kind, &body.value).await.map_err(|(c, m)| err(c, m))?;
+    drop(body);
+    Ok(Json(json!(step)))
+}
+
+async fn guided_cancel(State(_st): State<AppState>, Admin(_): Admin) -> ApiResult<Json<Value>> {
+    let closed = guided::cancel().await;
+    Ok(Json(json!({ "ok": true, "closed": closed })))
 }
 
 async fn get_status(State(st): State<AppState>, Admin(_): Admin) -> ApiResult<Json<Value>> {
@@ -557,6 +587,7 @@ async fn sign_out(State(st): State<AppState>, Admin(u): Admin, body: Option<Json
     let which = body.and_then(|b| b.0.source).unwrap_or_else(|| "all".into());
     let data = st.data_dir().to_path_buf();
     if which == "managed" || which == "all" {
+        guided::cancel().await;
         let _g = tokio::time::timeout(Duration::from_secs(60), browser::LOCK.lock()).await.map_err(|_| err(409, "The browser is busy – try again in a minute"))?;
         let _ = std::fs::remove_dir_all(browser::profile_dir(&data));
         let _ = std::fs::remove_file(managed_path(&data));
@@ -673,7 +704,8 @@ async fn accept_extension(st: &AppState, body: &Value) -> anyhow::Result<Value> 
 
 // ---- live view ----------------------------------------------------------------------------------
 
-/// Admin-only WebSocket: the managed browser's screen as JPEG frames, mouse and keys back.
+/// Admin-only WebSocket: the managed browser's screen as JPEG frames, mouse and keys back. With a
+/// guided sign-in open (guided.rs) it shows that browser as it is, and closing it hands it back to the form.
 /// Server → client: {type:"frame", data, width, height} · {type:"url", url} · {type:"status", message}
 /// · {type:"done", account} · {type:"error", message}. Client → server: {type:"mouse"|"key"|"text"|"nav", …}
 /// (see browser::input_commands) and {type:"check"} (look for a finished sign-in now).
@@ -719,6 +751,27 @@ async fn send(sock: &mut WebSocket, v: Value) -> bool {
 
 async fn live_session(st: AppState, mut sock: WebSocket) {
     let data = st.data_dir().to_path_buf();
+    // the guided sign-in's browser, as it is (its page stays where the form left it)
+    if let Some((id, b)) = guided::attach().await {
+        // the page tells Close to go back to the guided form
+        send(&mut sock, json!({ "type": "guided" })).await;
+        let res = drive(&st, &b, &mut sock, false).await;
+        let signed_in = matches!(res, Ok(Some(_)));
+        guided::detach(id, signed_in).await;
+        match res {
+            Ok(Some(account)) => {
+                signed_in_again(&st);
+                st.db.log("info", &format!("Encore's browser is signed in to YouTube{}", account.as_deref().map(|a| format!(" as {a}")).unwrap_or_default()));
+                send(&mut sock, json!({ "type": "done", "account": account })).await;
+            }
+            Ok(None) => {}
+            Err(e) => {
+                send(&mut sock, json!({ "type": "error", "message": e.to_string() })).await;
+            }
+        }
+        let _ = sock.send(WsMessage::Close(None)).await;
+        return;
+    }
     let Ok(_g) = browser::LOCK.try_lock() else {
         send(&mut sock, json!({ "type": "error", "message": "The browser is busy refreshing – try again in a minute" })).await;
         return;
@@ -731,7 +784,7 @@ async fn live_session(st: AppState, mut sock: WebSocket) {
             return;
         }
     };
-    let res = drive(&st, &b, &mut sock).await;
+    let res = drive(&st, &b, &mut sock, true).await;
     b.close().await;
     match res {
         Ok(Some(account)) => {
@@ -748,15 +801,25 @@ async fn live_session(st: AppState, mut sock: WebSocket) {
 }
 
 /// Run the live view until the sign-in is done (Some(account)), the viewer leaves (None) or 15 minutes pass.
-async fn drive(st: &AppState, b: &browser::Browser, sock: &mut WebSocket) -> anyhow::Result<Option<Option<String>>> {
+/// `fresh`: a browser of its own (open YouTube Music / Google's sign-in first); else the guided
+/// sign-in's browser, left on its page.
+async fn drive(st: &AppState, b: &browser::Browser, sock: &mut WebSocket, fresh: bool) -> anyhow::Result<Option<Option<String>>> {
     let mut ev = b.cdp.subscribe();
     b.page("Page.startScreencast", json!({ "format": "jpeg", "quality": 70, "maxWidth": 1280, "maxHeight": 860, "everyNthFrame": 1 })).await?;
-    // already signed in (a profile from before)? Then YouTube Music; else Google's sign-in page
-    b.navigate("https://music.youtube.com/").await?;
-    b.wait_load(Duration::from_secs(20)).await;
-    tokio::time::sleep(Duration::from_secs(2)).await;
-    if !b.logged_in().await {
-        b.navigate(browser::SIGN_IN_URL).await?;
+    if fresh {
+        // already signed in (a profile from before)? Then YouTube Music; else Google's sign-in page
+        b.navigate("https://music.youtube.com/").await?;
+        b.wait_load(Duration::from_secs(20)).await;
+        tokio::time::sleep(Duration::from_secs(2)).await;
+        if !b.logged_in().await {
+            b.navigate(browser::SIGN_IN_URL).await?;
+        }
+    } else {
+        send(sock, json!({ "type": "url", "url": b.url().await })).await;
+        // a first frame now (the screencast sends frames only when the page paints)
+        if let Ok(r) = b.page("Page.captureScreenshot", json!({ "format": "jpeg", "quality": 70 })).await {
+            send(sock, json!({ "type": "frame", "data": r["data"], "width": 1280, "height": 860 })).await;
+        }
     }
     let deadline = tokio::time::Instant::now() + Duration::from_secs(900);
     let mut check_at: Option<tokio::time::Instant> = Some(tokio::time::Instant::now() + Duration::from_secs(1));
@@ -809,18 +872,7 @@ async fn drive(st: &AppState, b: &browser::Browser, sock: &mut WebSocket) -> any
                 check_at = None;
                 if b.url().await.starts_with("https://music.youtube.com") && b.logged_in().await {
                     send(sock, json!({ "type": "status", "message": "Signed in – saving the cookies…" })).await;
-                    let jar = b.cookies().await?;
-                    if jar.has_auth(now() as i64) {
-                        browser::write_cookies(st.data_dir(), &jar)?;
-                        let account = account_of(st, &jar).await;
-                        let t = now();
-                        update(st.data_dir(), |s| {
-                            s.managed.updated_at = Some(t);
-                            s.managed.checked_at = Some(t);
-                            s.managed.ok = Some(true);
-                            s.managed.message = None;
-                            s.managed.account = account.clone();
-                        });
+                    if let Some(account) = guided::save_signin(st, b).await? {
                         return Ok(Some(account));
                     }
                 }
