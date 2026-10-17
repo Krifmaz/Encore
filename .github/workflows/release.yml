@@ -5,13 +5,11 @@ name: release
 # by hand (e.g. 1.0.0). The tag is created through the release (the API may create tags; a git push
 # from the Actions token may not).
 #   Start one: Actions → release → Run workflow.
-#   Tick "apps" to also build the desktop app, its Omnistall installers and the Android APK (the macOS runner
-#   costs 10× minutes, so they are off by default and a release without them is just the server + Docker image;
-#   the previous release's app files and installers are attached again). They can be built on your own machine
-#   instead and attached to the release: scripts/release-apps.sh.
+#   Tick "apps" to also build the desktop installers and the Android APK (the macOS runner costs 10× minutes,
+#   so they are off by default and a release without them is just the server + Docker image). They can be
+#   built on your own machine instead and attached to the release: scripts/release-apps.sh.
 #   Docker: :<version> and :latest.
-#   Notes: docs/releases/<version>.md if it exists, otherwise the commit list since the previous release; the
-#   Install section is added from what is attached (scripts/release-notes-apps.sh). SHA256SUMS covers every file.
+#   Notes: docs/releases/<version>.md if it exists, otherwise the commit list since the previous release.
 on:
   workflow_dispatch:
     inputs:
@@ -256,9 +254,9 @@ jobs:
         run: |
           V=${{ needs.version.outputs.version }}; SV=${{ needs.version.outputs.semver }}
           if [ "$ONLY" = android ]; then
-            # Android only: keep every other file of the newest release, swap in the new APK (SHA256SUMS is rewritten below)
+            # Android only: keep every other file of the newest release, swap in the new APK
             mkdir -p keep && gh release download --dir keep 2>/dev/null || true   # the newest release
-            rm -f keep/Encore-android-*.apk keep/docker-compose.yml keep/SHA256SUMS
+            rm -f keep/Encore-android-*.apk keep/docker-compose.yml
             mv keep/* out/ 2>/dev/null || true
           fi
           # desktop installers carry the npm version in their names – show the real one
@@ -267,44 +265,40 @@ jobs:
           # the YouTube sign-in browser extension (chrome/ and firefox/ folders in one zip)
           rm -f out/Encore-youtube-extension-*.zip
           bash scripts/build-extension.sh "$V" out
-          # the apps were not built this run: carry the previous release's app files, Omnistall installers and desktop
-          # update manifest forward (the installers keep their own version in the name and install that version's
-          # files, which come along; the notes below say so)
-          if [ "$APPS" != success ]; then
-            mkdir -p prev && gh release download --dir prev --pattern 'Encore-*' --pattern 'encore-installer_*' --pattern 'latest.json' 2>/dev/null || true
-            rm -f prev/Encore-youtube-extension-*.zip   # built fresh above
-            mv prev/* out/ 2>/dev/null || true
-          fi
           ls -la out
           if [ -f "docs/releases/$V.md" ]; then cp "docs/releases/$V.md" notes.md; else
             PREV=$(git tag -l 'v[0-9]*' --sort=-creatordate | head -1)
             { echo "## Changes"; git log --no-merges --pretty='- %s' ${PREV:+$PREV..}HEAD | head -60; } > notes.md
           fi
-          # Install: the Omnistall installers first, then the phone, the server, the extension, and last the plain app
-          # files the installers download. The app lines come from what is in out/ (scripts/release-notes-apps.sh), so
-          # carried-over files are named with their real version.
-          apps_line() { bash scripts/release-notes-apps.sh "$V" "$1" out/*; }
-          {
-            printf '\n---\n### Install\n'
-            apps_line desktop
-            apps_line android
-            if [ "$ONLY" = android ]; then
-              echo "* **Docker**: \`ghcr.io/krifmaz/encore:latest\` is the previous release's image (this run built only the Android app; there is no \`:$V\` tag) · compose file attached"
-            else
-              echo "* **Docker**: \`ghcr.io/krifmaz/encore:latest\` (\`:$V\` pins this build) · compose file attached"
-            fi
-            SRV=$(cd out && ls encore-*-linux-x86_64.tar.gz 2>/dev/null | head -1)   # the previous release's on an Android-only run
-            echo "* **Linux server without Docker**: \`${SRV:-encore-$V-linux-x86_64.tar.gz}\` / \`-aarch64\` – run \`ENCORE_CONFIG_DIR=./config ENCORE_STATIC_DIR=./static ./encore\`"
-            echo "* **YouTube sign-in extension**: \`Encore-youtube-extension-$V.zip\` – load the chrome or firefox folder (see extension/encore-youtube-cookies/README.md)"
-            apps_line files
-          } >> notes.md
-          cat notes.md
+          cat >> notes.md <<EOT
+
+          ---
+          ### Install
+          * **Docker**: \`ghcr.io/krifmaz/encore:latest\` (\`:$V\` pins this build) · compose file attached
+          * **Linux without Docker**: \`encore-$V-linux-x86_64.tar.gz\` / \`-aarch64\` – run \`ENCORE_CONFIG_DIR=./config ENCORE_STATIC_DIR=./static ./encore\`
+          * **YouTube sign-in extension**: \`Encore-youtube-extension-$V.zip\` – load the chrome or firefox folder (see extension/encore-youtube-cookies/README.md)
+          EOT
+          if [ "$ONLY" = android ]; then cat >> notes.md <<EOT
+          * **Android**: \`Encore-android-$V.apk\` (this build) · the server, Docker image and desktop apps are from the previous release
+          EOT
+          elif [ "$APPS" = success ]; then cat >> notes.md <<EOT
+          * **Android**: \`Encore-android-$V.apk\` · **Windows**: \`Encore-Setup-$V.exe\` · **macOS**: the .dmg (unsigned: right-click → Open the first time) · **Linux desktop**: .AppImage or .deb
+          EOT
+          else echo "* **Apps**: the desktop and Android apps were not rebuilt for this release – the ones attached are from the last build that made them." >> notes.md; fi
+          sed -i 's/^          //' notes.md
       - name: Publish
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           V: ${{ needs.version.outputs.version }}
           SV: ${{ needs.version.outputs.semver }}
+          APPS: ${{ needs.apps.result }}
         run: |
+          # app installers (and the desktop update manifest) from the previous release when this run didn't build them
+          if [ "$APPS" != success ]; then
+            mkdir -p prev && gh release download --dir prev --pattern 'Encore-*' --pattern 'latest.json' 2>/dev/null || true
+            rm -f prev/Encore-youtube-extension-*.zip   # built fresh above
+            mv prev/* out/ 2>/dev/null || true
+          fi
           # desktop auto-update (Settings → This computer → Updates): latest.json from the signed updater files the
           # desktop job made (apps.yml, only with the TAURI_SIGNING_PRIVATE_KEY secret). No signatures for this
           # version: the previous latest.json is kept (below), and the apps keep pointing at the last signed release.
@@ -334,9 +328,5 @@ jobs:
           # still none (apps rebuilt but unsigned): carry the newest release's manifest over, so the updater
           # endpoint (releases/latest/download/latest.json) keeps answering with the last signed version
           if [ ! -f out/latest.json ]; then gh release download --dir out --pattern latest.json 2>/dev/null || true; fi
-          # SHA256SUMS over every file, written last so it covers them all: the Omnistall installers' manifests name it
-          # (checksum_asset) and check each download against it; scripts/release-apps.sh keeps it current when it
-          # attaches files afterwards
-          (cd out && rm -f SHA256SUMS && sha256sum -- * > SHA256SUMS && cat SHA256SUMS)
           gh release delete "v$V" --yes --cleanup-tag 2>/dev/null || true
           gh release create "v$V" out/* --title "Encore $V" --notes-file notes.md --target "$GITHUB_SHA" --latest

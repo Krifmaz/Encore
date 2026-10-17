@@ -1,8 +1,0 @@
-# The Omnistall commit (github.com/Krifmaz/Omnistall) Encore's installers are built from. Read by the installer
-# job in .github/workflows/apps.yml and by scripts/release-apps.sh --installer; Omnistall has no releases yet, so
-# both build it from source at this commit (`cargo build --release -p installer-gui`, then `cargo xtask`).
-# Bump it: `git -C <omnistall clone> rev-parse HEAD`, put the full sha on the last line, check the manifest still
-# validates (`scripts/installer-manifest.sh 0.0.0 /tmp/encore.toml` and, in the clone,
-# `cargo xtask validate /tmp/encore.toml`), then run Actions → apps → Run workflow with only = installer.
-# Once Omnistall publishes releases, download its binaries there instead of building them and retire this file.
-e07b0e219bec5d27322369f9984108cf801339da

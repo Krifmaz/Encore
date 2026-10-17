@@ -146,12 +146,9 @@ Nothing here is started until the owner says "go".
     one admin banner "The downloads folder /downloads is read-only – check the disk (dmesg, fsck) or the
     mount" and the worker pauses requests (status "Waiting for the downloads folder") instead of failing each
     one; resumes when the probe passes. Diagnostics shows the probe result.
-18. **Desktop app installed through Omnistall** (owner's universal installer, github.com/Krifmaz/Omnistall):
-    one branded installer per OS (`Encore-Installer-<v>-windows-x86_64.exe`, `-macos-universal.dmg`,
-    `-linux-x86_64.AppImage`/.deb) built in Encore's CI from a pinned Omnistall commit and a generated manifest;
-    SHA256SUMS over every asset; the raw app files stay attached as the installer's payload; release notes lead
-    with the installers. Switch to Omnistall's own releases once it publishes them. The Iced app (0.27) ships
-    this way from the start; its Update/Repair/Uninstall come from the installer's registry.
+18. ~~Desktop app installed through Omnistall~~ – **dropped Oct 17 (owner's call).** The installer job, manifest and
+    scripts were removed again; the desktop app ships as before (NSIS .exe, .dmg, .AppImage/.deb/.rpm). The Iced app
+    (0.27) ships the same way.
 19. **Bug reports in the app** (sidebar entry under the Storage box, web and phone): any user writes a report
     (text + screenshots/images, up to a few MB each; the page, app version and device are attached
     automatically), kinds: Bug · Not a bug · How do I…; the admin sees them in a Bug reports page (list, filters,

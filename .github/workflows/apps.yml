@@ -1,17 +1,16 @@
 name: apps
 
-# Android APK + desktop apps (Windows, macOS, Linux) + the desktop installers (Omnistall). Never runs on push – the
-# macOS runner alone costs 10× Actions minutes. Start it by hand (Actions → apps → Run workflow; "only" picks a
-# single job; "desktop" also builds the installers, "installer" only those) or through the release workflow with
-# "apps" ticked, which attaches everything to the release. The release's Android APK is the native app
-# (android-native); the legacy Tauri android job only runs by hand.
+# Android APK + desktop apps (Windows, macOS, Linux). Never runs on push – the macOS runner alone costs
+# 10× Actions minutes. Start it by hand (Actions → apps → Run workflow; "only" picks a single job) or through
+# the release workflow with "apps" ticked, which attaches the installers to the release. The release's Android
+# APK is the native app (android-native); the legacy Tauri android job only runs by hand.
 on:
   workflow_dispatch:
     inputs:
       only:
-        description: "Build only this job (all = every job below; desktop = the desktop app and its installer)"
+        description: "Build only this job (all = every job below)"
         type: choice
-        options: [all, android-native, android, desktop, installer]
+        options: [all, android-native, android, desktop]
         default: all
   workflow_call:
     inputs:
@@ -225,9 +224,7 @@ jobs:
           path: Encore-android-legacy-*.apk
 
   desktop:
-    # Tauri (Rust) app: clients/app. Unsigned – macOS: right-click → Open the first time. These are the files the
-    # Omnistall installer (the `installer` job below) downloads from the release; their names in the Collect step are
-    # mirrored in clients/installer/encore.toml.in, so a renamed file here needs the same change there.
+    # Tauri (Rust) app: clients/app. Unsigned installers – macOS: right-click → Open the first time.
     if: inputs.only == '' || inputs.only == 'all' || inputs.only == 'desktop'
     strategy:
       fail-fast: false
@@ -332,186 +329,5 @@ jobs:
       - uses: actions/upload-artifact@v4
         with:
           name: Encore-desktop-${{ runner.os }}
-          path: out/*
-          if-no-files-found: error
-
-  installer:
-    # The Encore installer: Omnistall (github.com/Krifmaz/Omnistall, the owner's universal installer) built from the
-    # commit pinned in clients/installer/OMNISTALL_REV and branded with the manifest made from
-    # clients/installer/encore.toml.in. One file per OS – Encore-Installer-<version>-windows-x86_64.exe,
-    # -macos-universal.dmg, -linux-x86_64.AppImage and encore-installer_<version>_amd64.deb – that downloads the
-    # matching desktop file (the ones the desktop job above makes) from the release and installs it per user.
-    # Runs beside `desktop`, not after it: the manifest names the release's SHA256SUMS file (checksum_asset) instead of
-    # carrying the payload hashes, so neither job waits for the other, the three OS installers need no download of the
-    # desktop artifacts, and a payload rebuilt later with scripts/release-apps.sh stays installable (the script
-    # updates SHA256SUMS). release.yml writes SHA256SUMS over every asset right before it publishes. No aarch64 Linux
-    # installer: the desktop job builds no aarch64 payload, so there would be nothing for it to install.
-    # Packaging follows Omnistall's own release.yml step by step (xtask appdir + appimagetool, xtask deb, lipo +
-    # xtask app-bundle + codesign + hdiutil, brand then sign on Windows) with the same optional signing secrets:
-    #   Windows: WINDOWS_CERT_PFX_BASE64, WINDOWS_CERT_PASSWORD
-    #   macOS:   MACOS_CERT_P12_BASE64, MACOS_CERT_PASSWORD, MACOS_SIGN_IDENTITY, APPLE_ID, APPLE_TEAM_ID, APPLE_APP_PASSWORD
-    # Without them the .exe is unsigned and the .app ad-hoc signed (right-click → Open the first time).
-    if: inputs.only == '' || inputs.only == 'all' || inputs.only == 'desktop' || inputs.only == 'installer'
-    strategy:
-      fail-fast: false
-      matrix:
-        os: [windows-latest, macos-latest, ubuntu-22.04]
-    runs-on: ${{ matrix.os }}
-    env:
-      # V names the files (dev.<run number> on a manual run); SV is the version inside the packages (.deb Version,
-      # CFBundleVersion), which must start with a digit – a release passes the same number for both
-      V: ${{ inputs.version || format('dev.{0}', github.run_number) }}
-      SV: ${{ inputs.semver || format('0.0.0+dev.{0}', github.run_number) }}
-      # whether the optional signing secrets exist (a step's `if` cannot read `secrets` directly)
-      HAS_WINDOWS_CERT: ${{ secrets.WINDOWS_CERT_PFX_BASE64 != '' }}
-      HAS_MACOS_CERT: ${{ secrets.MACOS_CERT_P12_BASE64 != '' }}
-      HAS_APPLE_ID: ${{ secrets.APPLE_ID != '' }}
-    steps:
-      - uses: actions/checkout@v4
-      - name: Omnistall revision
-        id: pin
-        shell: bash
-        run: |
-          REV=$(sed -n 's/^\([0-9a-f]\{40\}\)[[:space:]]*$/\1/p' clients/installer/OMNISTALL_REV | head -1)
-          [ -n "$REV" ] || { echo "::error::clients/installer/OMNISTALL_REV holds no 40-character commit sha"; exit 1; }
-          echo "rev=$REV" >> "$GITHUB_OUTPUT"
-          echo "Omnistall $REV"
-      - uses: actions/checkout@v4
-        with:
-          repository: Krifmaz/Omnistall
-          ref: ${{ steps.pin.outputs.rev }}
-          path: omnistall
-      - uses: dtolnay/rust-toolchain@stable
-        with:
-          targets: ${{ runner.os == 'macOS' && 'aarch64-apple-darwin,x86_64-apple-darwin' || '' }}
-      - uses: Swatinem/rust-cache@v2
-        with:
-          workspaces: omnistall
-          key: installer-${{ steps.pin.outputs.rev }}
-      - name: Manifest
-        # encore.toml at the repo root, next to omnistall/; the xtask alias (cargo run -p xtask) only resolves
-        # inside the Omnistall checkout, so every xtask call below runs from there with ../ paths
-        shell: bash
-        run: |
-          bash scripts/installer-manifest.sh "$V" encore.toml
-          cat encore.toml
-          cd omnistall && cargo xtask validate ../encore.toml
-      - name: Build Omnistall
-        # Omnistall's release profile is fat LTO with codegen-units = 1 (its own settings, not overridden here), and macOS
-        # builds installer-gui twice (the two lipo inputs); rust-cache does not shorten the LTO link, so the first uncached
-        # macOS run may pass the ~12 min target. If it does, set CARGO_PROFILE_RELEASE_LTO: thin in this job's env (an
-        # override here, Omnistall stays as it is) or build only the host arch on macOS.
-        working-directory: omnistall
-        shell: bash
-        run: |
-          if [ "$RUNNER_OS" = macOS ]; then
-            cargo build --release --locked -p installer-gui --target aarch64-apple-darwin
-            cargo build --release --locked -p installer-gui --target x86_64-apple-darwin
-          else
-            cargo build --release --locked -p installer-gui
-          fi
-      # ---- Linux: AppImage (sidecar manifest in the AppDir) + .deb (manifest at /usr/share/omnistall/manifest.toml)
-      - name: System packages (Linux)
-        if: runner.os == 'Linux'
-        run: sudo apt-get update && sudo apt-get install -y libfuse2 file
-      - name: Package AppImage and .deb (Linux)
-        if: runner.os == 'Linux'
-        working-directory: omnistall
-        shell: bash
-        run: |
-          set -euxo pipefail
-          mkdir -p ../out
-          BIN=target/release/omnistall
-          cargo xtask appdir --binary "$BIN" --out ../out/Encore-Installer.AppDir --manifest ../encore.toml --name "Encore Installer"
-          curl -fsSL -o appimagetool "https://github.com/AppImage/appimagetool/releases/download/continuous/appimagetool-x86_64.AppImage"
-          chmod +x appimagetool
-          ARCH=x86_64 ./appimagetool --appimage-extract-and-run ../out/Encore-Installer.AppDir "../out/Encore-Installer-$V-linux-x86_64.AppImage"
-          rm -rf ../out/Encore-Installer.AppDir
-          cargo xtask deb --binary "$BIN" --out "../out/encore-installer_${V}_amd64.deb" --version "$SV" --arch amd64 --manifest ../encore.toml
-          ls -la ../out
-      # ---- macOS: universal binary → Encore Installer.app (manifest in Contents/Resources) → signed → .dmg
-      - name: Universal app bundle (macOS)
-        if: runner.os == 'macOS'
-        working-directory: omnistall
-        shell: bash
-        run: |
-          set -euxo pipefail
-          mkdir -p ../out
-          lipo -create -output ../out/omnistall-universal \
-            target/aarch64-apple-darwin/release/omnistall target/x86_64-apple-darwin/release/omnistall
-          cargo xtask app-bundle --binary ../out/omnistall-universal --out "../out/Encore Installer.app" --version "$SV" --manifest ../encore.toml --name "Encore Installer"
-          rm ../out/omnistall-universal
-      - name: Import signing certificate (macOS)
-        if: runner.os == 'macOS' && env.HAS_MACOS_CERT == 'true'
-        env:
-          MACOS_CERT: ${{ secrets.MACOS_CERT_P12_BASE64 }}
-          MACOS_CERT_PASSWORD: ${{ secrets.MACOS_CERT_PASSWORD }}
-        run: |
-          set -euo pipefail
-          echo "$MACOS_CERT" | base64 --decode > cert.p12
-          security create-keychain -p ci build.keychain
-          security default-keychain -s build.keychain
-          security unlock-keychain -p ci build.keychain
-          security import cert.p12 -k build.keychain -P "$MACOS_CERT_PASSWORD" -T /usr/bin/codesign
-          security set-key-partition-list -S apple-tool:,apple: -s -k ci build.keychain
-          rm cert.p12
-      - name: Code sign (macOS)
-        if: runner.os == 'macOS'
-        env:
-          IDENTITY: ${{ secrets.MACOS_SIGN_IDENTITY }}
-        run: |
-          set -euo pipefail
-          if [ -n "${IDENTITY:-}" ]; then
-            codesign --force --deep --options runtime --timestamp --sign "$IDENTITY" "out/Encore Installer.app"
-          else
-            echo "No Developer ID: ad-hoc signing (users right-click > Open once)."
-            codesign --force --deep --sign - "out/Encore Installer.app"
-          fi
-          codesign --verify --verbose "out/Encore Installer.app"
-      - name: Disk image (macOS)
-        if: runner.os == 'macOS'
-        run: |
-          set -euxo pipefail
-          rm -rf dmg-root && mkdir dmg-root
-          cp -R "out/Encore Installer.app" dmg-root/
-          ln -s /Applications dmg-root/Applications
-          hdiutil create -volname "Encore Installer" -srcfolder dmg-root -ov -format UDZO "out/Encore-Installer-$V-macos-universal.dmg"
-          rm -rf "out/Encore Installer.app" dmg-root
-          ls -la out
-      - name: Notarize and staple (macOS)
-        if: runner.os == 'macOS' && env.HAS_APPLE_ID == 'true'
-        env:
-          APPLE_ID: ${{ secrets.APPLE_ID }}
-          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
-          APPLE_APP_PASSWORD: ${{ secrets.APPLE_APP_PASSWORD }}
-        run: |
-          set -euo pipefail
-          xcrun notarytool submit "out/Encore-Installer-$V-macos-universal.dmg" \
-            --apple-id "$APPLE_ID" --team-id "$APPLE_TEAM_ID" --password "$APPLE_APP_PASSWORD" --wait
-          xcrun stapler staple "out/Encore-Installer-$V-macos-universal.dmg"
-      # ---- Windows: brand (append the manifest) BEFORE signing – Authenticode hashes the whole file
-      - name: Brand (Windows)
-        if: runner.os == 'Windows'
-        working-directory: omnistall
-        shell: bash
-        run: |
-          set -euxo pipefail
-          mkdir -p ../out
-          cargo xtask brand --installer target/release/omnistall.exe --manifest ../encore.toml --out "../out/Encore-Installer-$V-windows-x86_64.exe"
-          ls -la ../out
-      - name: Sign (Windows)
-        if: runner.os == 'Windows' && env.HAS_WINDOWS_CERT == 'true'
-        shell: pwsh
-        env:
-          PFX: ${{ secrets.WINDOWS_CERT_PFX_BASE64 }}
-          PFX_PASSWORD: ${{ secrets.WINDOWS_CERT_PASSWORD }}
-        run: |
-          [IO.File]::WriteAllBytes("cert.pfx", [Convert]::FromBase64String($env:PFX))
-          $signtool = Get-ChildItem "C:\Program Files (x86)\Windows Kits\10\bin\*\x64\signtool.exe" | Sort-Object FullName -Descending | Select-Object -First 1
-          & $signtool.FullName sign /f cert.pfx /p $env:PFX_PASSWORD /fd SHA256 /tr http://timestamp.digicert.com /td SHA256 "out/Encore-Installer-$env:V-windows-x86_64.exe"
-          Remove-Item cert.pfx
-      - uses: actions/upload-artifact@v4
-        with:
-          name: Encore-installer-${{ runner.os }}
           path: out/*
           if-no-files-found: error
