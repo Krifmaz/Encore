@@ -95,3 +95,12 @@ Nothing here is started until the owner says "go".
       of disappearing.
     - Seen while Soulseek was signed out ("409 … must be connected and logged in … (currently: Disconnecting)").
       Show that state as a short "Soulseek isn't connected yet" line with a link to its settings.
+13. **streamrip asks for the Deezer ARL interactively** after a fresh config ("produced no files: … the ARL cookie
+    automatically / 2. Copy the ARL cookie from your browser by hand"). The ARL had lived only in the old
+    config.toml, not in Encore's `streamrip_deezer_arl` setting.
+    - Fix: apply the credentials before every run, not only when the file is missing.
+    - When rebuilding the config, carry over the credentials and tokens from the old file.
+    - Run streamrip non-interactively (stdin closed); detect its prompts and show "Deezer needs an ARL cookie –
+      Settings → streamrip" instead.
+    - The Requests list piles up duplicate failed rows for the same song (4× "Reach Out To The Truth").
+      Group retries of one song into one row.
