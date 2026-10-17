@@ -397,6 +397,10 @@ jobs:
           cat encore.toml
           cd omnistall && cargo xtask validate ../encore.toml
       - name: Build Omnistall
+        # Omnistall's release profile is fat LTO with codegen-units = 1 (its own settings, not overridden here), and macOS
+        # builds installer-gui twice (the two lipo inputs); rust-cache does not shorten the LTO link, so the first uncached
+        # macOS run may pass the ~12 min target. If it does, set CARGO_PROFILE_RELEASE_LTO: thin in this job's env (an
+        # override here, Omnistall stays as it is) or build only the host arch on macOS.
         working-directory: omnistall
         shell: bash
         run: |
@@ -419,7 +423,7 @@ jobs:
           mkdir -p ../out
           BIN=target/release/omnistall
           cargo xtask appdir --binary "$BIN" --out ../out/Encore-Installer.AppDir --manifest ../encore.toml --name "Encore Installer"
-          curl -sSL -o appimagetool "https://github.com/AppImage/appimagetool/releases/download/continuous/appimagetool-x86_64.AppImage"
+          curl -fsSL -o appimagetool "https://github.com/AppImage/appimagetool/releases/download/continuous/appimagetool-x86_64.AppImage"
           chmod +x appimagetool
           ARCH=x86_64 ./appimagetool --appimage-extract-and-run ../out/Encore-Installer.AppDir "../out/Encore-Installer-$V-linux-x86_64.AppImage"
           rm -rf ../out/Encore-Installer.AppDir

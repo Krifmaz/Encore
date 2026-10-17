@@ -105,7 +105,8 @@ if [ "$INSTALLER" = 1 ]; then
   if [ "$OS" = linux ] && [ "$(uname -m)" != x86_64 ]; then
     echo "note: the manifest has no Linux $(uname -m) app file (the desktop app is built for x86_64 only), so an installer for this machine would have nothing to install – skipped"
   else
-    OMNI="${OMNISTALL_DIR:-$(mktemp -d)}"
+    # absolute: the manifest, binary and AppDir paths below are derived from it and every xtask call runs from inside it
+    OMNI="${OMNISTALL_DIR:-$(mktemp -d)}"; mkdir -p "$OMNI"; OMNI=$(cd "$OMNI" && pwd)
     if [ -f "$OMNI/Cargo.toml" ]; then
       [ "$(git -C "$OMNI" rev-parse HEAD)" = "$REV" ] || { echo "$OMNI is not at Omnistall $REV (clients/installer/OMNISTALL_REV) – check it out there or unset OMNISTALL_DIR"; exit 1; }
     else
@@ -123,13 +124,15 @@ if [ "$INSTALLER" = 1 ]; then
         (cd "$OMNI" && run cargo build --release --locked -p installer-gui)
         BIN="$OMNI/target/release/omnistall"
         (cd "$OMNI" && run cargo xtask appdir --binary "$BIN" --out "$OMNI/Encore-Installer.AppDir" --manifest "$MANIFEST" --name "Encore Installer")
-        TOOL=$(command -v appimagetool || true)
+        TOOL=$(command -v appimagetool || true); EXTRACT=()
         if [ -z "$TOOL" ]; then
           TOOL="$OMNI/appimagetool"
-          run curl -sSL -o "$TOOL" "https://github.com/AppImage/appimagetool/releases/download/continuous/appimagetool-x86_64.AppImage"
+          run curl -fsSL -o "$TOOL" "https://github.com/AppImage/appimagetool/releases/download/continuous/appimagetool-x86_64.AppImage"
           run chmod +x "$TOOL"
+          # an option of the AppImage runtime (runs it without FUSE), not of appimagetool itself – a natively installed tool rejects it
+          EXTRACT=(--appimage-extract-and-run)
         fi
-        run env ARCH=x86_64 "$TOOL" --appimage-extract-and-run "$OMNI/Encore-Installer.AppDir" "$ROOT/out/Encore-Installer-$V-linux-x86_64.AppImage"
+        run env ARCH=x86_64 "$TOOL" "${EXTRACT[@]+"${EXTRACT[@]}"}" "$OMNI/Encore-Installer.AppDir" "$ROOT/out/Encore-Installer-$V-linux-x86_64.AppImage"
         if command -v dpkg-deb >/dev/null; then
           (cd "$OMNI" && run cargo xtask deb --binary "$BIN" --out "$ROOT/out/encore-installer_${V}_amd64.deb" --version "$V" --arch amd64 --manifest "$MANIFEST")
         else

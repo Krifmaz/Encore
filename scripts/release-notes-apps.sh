@@ -34,7 +34,7 @@ desktop() {
     lx="**Linux**:"
     [ -n "$L" ] && lx="$lx \`$L\`"
     [ -n "$L" ] && [ -n "$D" ] && lx="$lx or"
-    [ -n "$D" ] && lx="$lx \`$D\`"
+    [ -n "$D" ] && lx="$lx \`$D\` (installs the package \`omnistall\`; \`sudo apt remove omnistall\` removes it)"
     parts+=("$lx")
   fi
   local line
