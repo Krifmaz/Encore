@@ -1,6 +1,6 @@
 // Shared by the background script, the popup, the options page and the hand-off page.
 // Nothing here logs or shows a cookie value.
-/* exported api, SIGN_IN_URL, DOMAINS, settings, agent, remember, collect, post, signedIn, incognitoAllowed, isFirefox */
+/* exported api, SIGN_IN_URL, DOMAINS, settings, agent, remember, collect, post, signedIn, incognitoAllowed, isFirefox, handoffBlocker, openHandoffWindow */
 const api = globalThis.browser ?? globalThis.chrome;
 // Google's sign-in page, continuing to YouTube Music
 const SIGN_IN_URL = 'https://accounts.google.com/ServiceLogin?continue=https://music.youtube.com/';
@@ -49,7 +49,9 @@ function signedIn(cookies) {
   return cookies.some(c => /(^|\.)youtube\.com$/.test(c.domain.replace(/^\./, '')) && (c.name === 'SAPISID' || c.name === '__Secure-3PAPISID'));
 }
 
-// POST the cookies to Encore. handoff: the private window's sign-in becomes Encore's own.
+// POST the cookies to Encore. handoff: the private window's sign-in becomes Encore's own. The browser's
+// name ("Firefox 143") and its full User-Agent go along: Google ties a sign-in to the browser it was made
+// in, so Encore refreshes a handed-over session as this browser.
 async function post(cookies, extra) {
   const { url, token } = await settings();
   if (!url || !token) return { ok: false, message: 'Enter the Encore address and token in the options first' };
@@ -57,7 +59,7 @@ async function post(cookies, extra) {
     const r = await fetch(`${url}/api/youtube/extension-cookies`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
-      body: JSON.stringify({ cookies, agent: agent(), ...extra }),
+      body: JSON.stringify({ cookies, agent: agent(), user_agent: navigator.userAgent, ...extra }),
     });
     const body = await r.json().catch(() => ({}));
     if (!r.ok) return { ok: false, message: body.detail || body.error || `Encore answered HTTP ${r.status}` };

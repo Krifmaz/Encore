@@ -46,7 +46,12 @@ pub struct NewRequest {
     pub ext: Option<Value>,
     /// "Request discography": this request's release types ({"kinds": [...], "skip": [...]}), else the setting's
     pub release_filter: Option<Value>,
+    /// "Request discography": exactly these releases – the boxes ticked in the dialog, as MusicBrainz release
+    /// group ids and Discover "ext-…" ids – instead of what the release types pick (owned and requested ones
+    /// are still left out)
+    pub release_ids: Option<Vec<String>>,
 }
+
 
 fn nz(s: &Option<String>) -> Option<&str> {
     s.as_deref().filter(|x| !x.is_empty())
@@ -208,6 +213,19 @@ pub fn create_or_reuse(st: &AppState, u: &Row, b: &NewRequest, parent: Option<i6
     if let (true, Some(f)) = (b.kind == "artist", b.release_filter.as_ref().filter(|f| f.is_object())) {
         detail["release_filter"] = crate::release_types::ReleaseFilter::from_value(f, &crate::release_types::ReleaseFilter::from_cfg(&st.cfg)).to_value();
     }
+    if let (true, Some(ids)) = (b.kind == "artist", b.release_ids.as_ref()) {
+        let mut seen: Vec<&str> = vec![];
+        for id in ids.iter().map(|i| i.trim()).filter(|i| !i.is_empty()) {
+            if !seen.contains(&id) {
+                seen.push(id);
+            }
+        }
+        if seen.is_empty() {
+            return Err(err(400, "Tick at least one release"));
+        }
+        detail["release_ids"] = json!(seen);
+    }
+
     if let Some(e) = &b.ext {
         let mut keep = serde_json::Map::new();
         for k in EXT_SOURCES.iter().chain(["upc"].iter()) {

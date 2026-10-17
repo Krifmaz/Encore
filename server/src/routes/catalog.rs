@@ -375,31 +375,64 @@ async fn catalog_tracks(State(st): State<AppState>, User(_): User, Json(ext): Js
 /// missing (their types read from record type and title), minus what `skip` says is owned or already
 /// requested. An ext album that is a MusicBrainz release under the same normalized title (released within
 /// a year of it, skipped type or not) is left out, as is a second copy of the same ext album.
-pub fn discography_plan(groups: &[Value], ext: &[Value], filter: &crate::release_types::ReleaseFilter, skip: impl Fn(&Value) -> bool) -> Vec<Value> {
+///
+/// With `only` – the releases ticked in the dialog, by id – the type filter is not consulted: exactly those,
+/// minus the owned and requested ones, and minus an ext copy of a MusicBrainz release that is planned too.
+pub fn discography_plan(groups: &[Value], ext: &[Value], filter: &crate::release_types::ReleaseFilter, only: Option<&[String]>, skip: impl Fn(&Value) -> bool) -> Vec<Value> {
     let year = |v: &Value| s(&v["year"]).chars().take(4).collect::<String>().parse::<i32>().ok()
         .or_else(|| s(&v["date"]).chars().take(4).collect::<String>().parse::<i32>().ok());
     // as in `fuzzy`: a title-track single isn't the album of the same name
     let same = |a: &Value, b: &Value| norm(&s(&a["title"])) == norm(&s(&b["title"])) && !norm(&s(&a["title"])).is_empty()
         && { let (ta, tb) = (s(&a["type"]), s(&b["type"])); ta == tb || (ta != "Single" && tb != "Single") }
         && match (year(a), year(b)) { (Some(x), Some(y)) => (x - y).abs() <= 1, _ => true };
+    let wanted = |v: &Value| match only {
+        Some(ids) => ids.iter().any(|i| *i == s(&v["id"])),
+        None => filter.wants(v),
+    };
     let mut out: Vec<Value> = vec![];
     for g in groups {
-        if !filter.wants(g) || skip(g) {
+        if !wanted(g) || skip(g) {
             continue;
         }
         out.push(g.clone());
     }
     for e in ext {
-        if !e["ext"].is_object() || !filter.wants(e) {
+        if !e["ext"].is_object() || !wanted(e) {
             continue;
         }
-        if groups.iter().any(|g| same(g, e)) || out.iter().any(|o| o["ext"].is_object() && same(o, e)) || skip(e) {
+        // MusicBrainz has it: with the settings' filter any group counts (owned or skipped too); with ticked
+        // ids only a group that is being requested, so a tick on the ext copy alone is honoured
+        let in_mb = match only {
+            Some(_) => out.iter().any(|o| !o["ext"].is_object() && same(o, e)),
+            None => groups.iter().any(|g| same(g, e)),
+        };
+        if in_mb || out.iter().any(|o| o["ext"].is_object() && same(o, e)) || skip(e) {
             continue;
         }
         out.push(e.clone());
     }
     out
 }
+
+/// The clients' Request discography dialog: `items` (MusicBrainz release groups, or the Deezer / Apple
+/// albums MusicBrainz is missing) grouped by canonical kind in the clients' order, each release carrying
+/// `kind` and `allowed` (whether the Release types settings want it). → `[{kind, label, releases}]`.
+pub fn grouped(filter: &crate::release_types::ReleaseFilter, items: &[Value]) -> Vec<Value> {
+    let mut groups: Vec<(&'static str, Vec<Value>)> = vec![];
+    for it in items {
+        let kind = crate::release_types::group_kind(it);
+        let mut r = it.clone();
+        r["kind"] = json!(kind);
+        r["allowed"] = json!(filter.wants(it));
+        match groups.iter_mut().find(|(k, _)| *k == kind) {
+            Some(g) => g.1.push(r),
+            None => groups.push((kind, vec![r])),
+        }
+    }
+    groups.sort_by_key(|(k, _)| crate::release_types::group_rank(k));
+    groups.into_iter().map(|(k, releases)| json!({ "kind": k, "label": crate::release_types::label(k), "releases": releases })).collect()
+}
+
 
 // ---- merging --------------------------------------------------------------------------------
 
@@ -561,9 +594,13 @@ async fn artist_catalog(State(st): State<AppState>, User(_): User, Path(mbid): P
     let a = mb::artist(&st, &mbid).await.map_err(|e| err(502, format!("MusicBrainz error: {e}")))?;
     let mut rel = merged(&st, &a).await;
     annotate(&st, &mut rel);
-    crate::routes::discover::mark_skipped(&crate::release_types::ReleaseFilter::from_cfg(&st.cfg), &mut rel);
-    Ok(Json(json!({ "enabled": true, "releases": rel })))
+    let filter = crate::release_types::ReleaseFilter::from_cfg(&st.cfg);
+    crate::routes::discover::mark_skipped(&filter, &mut rel);
+    // `releases` flat for the tiles, `groups` by canonical kind (with `allowed` per release) for the dialog
+    let groups = grouped(&filter, &rel);
+    Ok(Json(json!({ "enabled": true, "releases": rel, "groups": groups })))
 }
+
 
 #[cfg(test)]
 mod tests {
@@ -601,14 +638,71 @@ mod tests {
         ];
         let owned = |v: &Value| ["rg-owned", "ext-d5"].contains(&s(&v["id"]).as_str());
         let ids = |p: Vec<Value>| p.iter().map(|v| s(&v["id"])).collect::<Vec<_>>();
-        let plan = ids(discography_plan(&groups, &ext, &kinds("Album,EP"), owned));
+        let plan = ids(discography_plan(&groups, &ext, &kinds("Album,EP"), None, owned));
         assert_eq!(plan, vec!["rg-rodeo", "ext-d2-a3"]);
-        let plan = ids(discography_plan(&groups, &ext, &kinds("Album,EP,Single"), owned));
+        let plan = ids(discography_plan(&groups, &ext, &kinds("Album,EP,Single"), None, owned));
         assert_eq!(plan, vec!["rg-rodeo", "rg-single", "ext-d2-a3", "ext-d7"]);
         // live albums asked for this time: MusicBrainz's live album comes along, compilations still don't
         let f = crate::release_types::ReleaseFilter::from_value(&json!({ "skip": ["Compilation"] }), &kinds("Album,EP"));
-        assert_eq!(ids(discography_plan(&groups, &ext, &f, owned)), vec!["rg-rodeo", "rg-live", "ext-d2-a3"]);
+        assert_eq!(ids(discography_plan(&groups, &ext, &f, None, owned)), vec!["rg-rodeo", "rg-live", "ext-d2-a3"]);
     }
+
+    #[test]
+    fn ticked_release_ids_are_requested_as_they_are() {
+        let groups = vec![
+            json!({ "id": "rg-rodeo", "title": "Rodeo", "type": "Album", "year": "2015", "secondary": [] }),
+            json!({ "id": "rg-owned", "title": "Birds in the Trap", "type": "Album", "year": "2016", "secondary": [] }),
+            json!({ "id": "rg-live", "title": "Live at Rolling Loud", "type": "Album", "year": "2019", "secondary": ["Live"] }),
+            json!({ "id": "rg-single", "title": "90210", "type": "Single", "year": "2015", "secondary": [] }),
+        ];
+        let ext = vec![
+            json!({ "id": "ext-d1", "title": "Rodeo (Deluxe)", "type": "Album", "year": "2016", "ext": { "deezer": 1 } }),
+            json!({ "id": "ext-d2-a3", "title": "Days Before Rodeo", "type": "Album", "year": "2014", "ext": { "deezer": 2, "apple": 3 } }),
+            json!({ "id": "ext-a4", "title": "Days Before Rodeo", "type": "Album", "year": "2014", "ext": { "apple": 4 } }),
+        ];
+        let owned = |v: &Value| s(&v["id"]) == "rg-owned";
+        let ids = |p: Vec<Value>| p.iter().map(|v| s(&v["id"])).collect::<Vec<_>>();
+        let only = |l: &[&str]| l.iter().map(|x| x.to_string()).collect::<Vec<String>>();
+        // the ticked live album and single come along although the settings leave them out; the owned one
+        // doesn't, and the second copy of the same Deezer / Apple album is one request
+        let t = only(&["rg-live", "rg-single", "rg-owned", "ext-d2-a3", "ext-a4"]);
+        assert_eq!(ids(discography_plan(&groups, &ext, &kinds("Album,EP"), Some(&t), owned)), vec!["rg-live", "rg-single", "ext-d2-a3"]);
+        // the Deezer copy of a MusicBrainz album: one request when both are ticked, itself when only it is
+        let t = only(&["rg-rodeo", "ext-d1"]);
+        assert_eq!(ids(discography_plan(&groups, &ext, &kinds("Album,EP"), Some(&t), owned)), vec!["rg-rodeo"]);
+        let t = only(&["ext-d1"]);
+        assert_eq!(ids(discography_plan(&groups, &ext, &kinds("Album,EP"), Some(&t), owned)), vec!["ext-d1"]);
+        // nothing ticked that is new (or an id the page never had): nothing
+        assert!(discography_plan(&groups, &ext, &kinds("Album,EP"), Some(&only(&["rg-owned", "nope"])), owned).is_empty());
+    }
+
+    #[test]
+    fn the_dialog_groups_releases_by_kind_with_their_allowed_flag() {
+        let items = vec![
+            json!({ "id": "rg-single", "title": "90210", "type": "Single", "year": "2015", "secondary": [] }),
+            json!({ "id": "rg-rodeo", "title": "Rodeo", "type": "Album", "year": "2015", "secondary": [] }),
+            json!({ "id": "rg-live", "title": "Live at Rolling Loud", "type": "Album", "year": "2019", "secondary": ["Live"] }),
+            json!({ "id": "rg-ep", "title": "Owl Pharaoh", "type": "EP", "year": "2013", "secondary": [] }),
+            json!({ "id": "ext-d1", "title": "Hits", "type": "Compilation", "year": "2020", "ext": { "deezer": 1 } }),
+            json!({ "id": "ext-d2", "title": "Days Before Rodeo", "type": "Album", "year": "2014", "ext": { "deezer": 2 } }),
+        ];
+        let g = grouped(&kinds("Album,EP"), &items);
+        assert_eq!(g.iter().map(|x| s(&x["kind"])).collect::<Vec<_>>(), vec!["Album", "EP", "Single", "Compilation", "Live"]);
+        let of = |k: &str| g.iter().find(|x| x["kind"] == k).unwrap()["releases"].as_array().unwrap().iter()
+            .map(|r| (s(&r["id"]), r["allowed"].as_bool().unwrap(), s(&r["kind"]))).collect::<Vec<_>>();
+        assert_eq!(of("Album"), vec![("rg-rodeo".into(), true, "Album".into()), ("ext-d2".into(), true, "Album".into())]);
+        assert_eq!(of("EP"), vec![("rg-ep".into(), true, "EP".into())]);
+        assert_eq!(of("Single"), vec![("rg-single".into(), false, "Single".into())]);
+        assert_eq!(of("Compilation"), vec![("ext-d1".into(), false, "Compilation".into())]);
+        assert_eq!(of("Live"), vec![("rg-live".into(), false, "Live".into())]);
+        assert_eq!(g[3]["label"], "Compilation");
+        // singles on and live albums not skipped: the flags follow the settings
+        let f = crate::release_types::ReleaseFilter::from_csv("Album,EP,Single", "Compilation");
+        let g = grouped(&f, &items);
+        let allowed = |k: &str| g.iter().find(|x| x["kind"] == k).unwrap()["releases"][0]["allowed"].as_bool().unwrap();
+        assert!(allowed("Single") && allowed("Live") && !allowed("Compilation"));
+    }
+
 
     #[test]
     fn a_title_track_single_is_not_the_album() {
@@ -619,8 +713,9 @@ mod tests {
             json!({ "id": "ext-d2", "title": "Utopia", "type": "Single", "year": "2020", "ext": { "deezer": 2 } }),
         ];
         let ids = |p: Vec<Value>| p.iter().map(|v| s(&v["id"])).collect::<Vec<_>>();
-        assert_eq!(ids(discography_plan(&groups, &ext, &kinds("Album,EP"), |_| false)), vec!["ext-d1"]);
-        assert_eq!(ids(discography_plan(&groups, &ext, &kinds("Album,EP,Single"), |_| false)), vec!["rg-single", "ext-d1"]);
+        assert_eq!(ids(discography_plan(&groups, &ext, &kinds("Album,EP"), None, |_| false)), vec!["ext-d1"]);
+        assert_eq!(ids(discography_plan(&groups, &ext, &kinds("Album,EP,Single"), None, |_| false)), vec!["rg-single", "ext-d1"]);
+
     }
 
     fn kinds(k: &str) -> crate::release_types::ReleaseFilter {
@@ -638,8 +733,9 @@ mod tests {
             json!({ "id": "ext-d5", "title": "Hits", "type": "Compilation", "year": "2020", "ext": { "deezer": 5 } }),
         ];
         let ids = |p: Vec<Value>| p.iter().map(|v| s(&v["id"])).collect::<Vec<_>>();
-        assert_eq!(ids(discography_plan(&groups, &ext, &kinds("Album,EP"), |_| false)), vec!["rg-rodeo", "ext-d4"]);
+        assert_eq!(ids(discography_plan(&groups, &ext, &kinds("Album,EP"), None, |_| false)), vec!["rg-rodeo", "ext-d4"]);
         let f = crate::release_types::ReleaseFilter::from_csv("Album", "Compilation");
-        assert_eq!(ids(discography_plan(&groups, &ext, &f, |_| false)), vec!["rg-rodeo", "ext-d1", "ext-d2", "ext-d3", "ext-d4"]);
+        assert_eq!(ids(discography_plan(&groups, &ext, &f, None, |_| false)), vec!["rg-rodeo", "ext-d1", "ext-d2", "ext-d3", "ext-d4"]);
+
     }
 }

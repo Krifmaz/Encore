@@ -253,6 +253,7 @@ async fn run(view: Element, diag: Element, last: Rc<RefCell<Option<Value>>>) -> 
     }
     *last.borrow_mut() = Some(data.clone());
     if let Some(c) = dom::qs_in(&view, "#copy") { dom::set_disabled(&c, false); }
+    let server = server_block(data.g("machine"));
     let checks = data.a("checks");
     let bad = checks.iter().filter(|c| !c.truthy("ok")).count();
     let groups: String = KIND.iter().map(|(k, title)| {
@@ -275,6 +276,7 @@ async fn run(view: Element, diag: Element, last: Rc<RefCell<Option<Value>>>) -> 
         <span class="badge {badc}">{badl}</span>
         <span class="muted small">Encore {version} · running as uid {uid} · {time}</span>
       </div>
+      {server}
       {groups}
       <div class="section-head"><h2>Where settings come from</h2><span class="small muted">Environment variables always win over values saved in Encore</span></div>
       <div class="card flat"><div class="table-wrap"><table class="table"><thead><tr><th>Setting</th><th>Source</th><th>Value</th></tr></thead><tbody>
@@ -287,6 +289,46 @@ async fn run(view: Element, diag: Element, last: Rc<RefCell<Option<Value>>>) -> 
         time = fmt::date(data.f("time")),
     ));
     Ok(())
+}
+
+/// The "Server" block (0.26, `machine` in the diagnostics answer): what the owner's box looks like from inside
+/// the container, as (label, value) rows in plain words – for the page and the copied report.
+fn server_rows(s: &Value) -> Vec<(&'static str, String)> {
+    let folder = |v: &Value| -> String {
+        if !v.is_object() { return "not set".into(); }
+        let mut t = if v.truthy("fs") { v.s("fs") } else { "unknown file system".to_string() };
+        if v.has("network") { t.push_str(if v.truthy("network") { " (network)" } else { " (local)" }); }
+        if v.truthy("path") { format!("{} · {t}", v.s("path")) } else { t }
+    };
+    let memory = if s.is_nullish("memory") { "unknown".to_string() } else {
+        format!("{}{}", fmt::size(s.f("memory")), if s.g("memory_source").as_str() == Some("cgroup") { " (container limit)" } else { " (whole machine)" })
+    };
+    let readers = {
+        let n = s.i("db_readers");
+        match s.g("db_readers_source").as_str() {
+            Some("env") => format!("{n} (ENCORE_DB_READERS)"),
+            Some("network") => format!("{n} – off because the config folder is on a network file system (set ENCORE_DB_READERS to turn them on)"),
+            _ => format!("{n} (default)"),
+        }
+    };
+    vec![
+        ("CPUs", if s.is_nullish("cpus") { "unknown".into() } else { js_str(s, "cpus") }),
+        ("Memory", memory),
+        ("Config folder", folder(s.g("config"))),
+        ("Music folder", folder(s.g("music"))),
+        ("Database", if s.is_nullish("database_bytes") { "unknown".into() } else { fmt::size(s.f("database_bytes")) }),
+        ("Translations", if s.truthy("translations_on") { "on for at least one account".into() } else { "off for every account".into() }),
+        ("Database read connections", readers),
+    ]
+}
+
+/// The Server section of the page (nothing on a server that doesn't send the block).
+fn server_block(s: &Value) -> String {
+    if !s.is_object() { return String::new(); }
+    let rows: String = server_rows(s).iter().map(|(k, v)| format!(r#"<tr><td class="small muted" style="white-space:nowrap">{k}</td><td class="small">{}</td></tr>"#, esc(v))).collect();
+    format!(r#"
+        <div class="section-head"><h2>Server</h2><span class="small muted">What Encore sees of the machine it runs on</span></div>
+        <div class="card flat"><div class="table-wrap"><table class="table"><tbody>{rows}</tbody></table></div></div>"#)
 }
 
 /// One `.list-item` of a check group.
@@ -325,6 +367,13 @@ fn copy_report(last: &Value) {
         // `c.body.slice(0, 300)` – JS slices by UTF-16 units
         let body = if c.truthy("body") && !ok { format!("\n     body: {}", String::from(js_sys::JsString::from(c.s("body")).slice(0, 300))) } else { String::new() };
         lines.push(format!("{} {} – {}{status}{ms}\n     {}{body}", if ok { "OK  " } else { "FAIL" }, js_str(&c, "name"), or_empty(&c, "request"), or_empty(&c, "detail")));
+    }
+    if last.g("machine").is_object() {
+        lines.push(String::new());
+        lines.push("Server:".into());
+        for (k, v) in server_rows(last.g("machine")) {
+            lines.push(format!("  {k}: {v}"));
+        }
     }
     lines.push(String::new());
     lines.push("Settings:".into());

@@ -312,13 +312,18 @@ async fn album(State(st): State<AppState>, User(_): User, Path(rgid): Path<Strin
 }
 
 /// Settings → Release types on a list of releases: `skipped` is why one is left out ("Live", "Single" …)
-/// or null. The pages hide the skipped ones behind a "+N hidden" chip, and "Request discography" leaves
-/// them out.
+/// or null, `allowed` the same as a flag, and `kind` the canonical kind the clients group it under. The
+/// pages hide the skipped ones behind a "+N hidden" chip, and the Request discography dialog starts with
+/// the allowed ones ticked.
 pub(crate) fn mark_skipped(filter: &crate::release_types::ReleaseFilter, items: &mut [Value]) {
     for i in items.iter_mut() {
-        i["skipped"] = filter.reason(i).map(|r| json!(r)).unwrap_or(Value::Null);
+        let reason = filter.reason(i);
+        i["skipped"] = reason.map(|r| json!(r)).unwrap_or(Value::Null);
+        i["allowed"] = json!(reason.is_none());
+        i["kind"] = json!(crate::release_types::group_kind(i));
     }
 }
+
 
 /// Each song of an album: its library copy (by recording, ISRC, then title + artist + length) and any request.
 pub(crate) fn annotate_album_tracks(st: &AppState, ts: &mut [Value]) {

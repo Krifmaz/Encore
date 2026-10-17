@@ -1,5 +1,8 @@
 package app.encore.android.ui.screens
 
+import android.content.Context
+import android.net.ConnectivityManager
+import android.net.NetworkCapabilities
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.graphics.Color
@@ -13,8 +16,14 @@ import app.encore.android.data.api.ArtistCredit
 import app.encore.android.data.api.Track
 import app.encore.android.ui.Nav
 import app.encore.android.ui.Screen
+import app.encore.android.ui.components.Toasts
 import app.encore.android.ui.theme.palette
 import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
+import kotlinx.coroutines.withTimeoutOrNull
 
 /**
  * Tappable names on a song (web/js/ui.js `artistLinks` / `albumLink`): each artist of the song is its own link
@@ -67,6 +76,56 @@ fun songLinks(
 fun openArtistCredit(nav: Nav, a: ArtistCredit, scope: CoroutineScope) {
     if (a.name.isEmpty() && a.mbid.isEmpty()) return
     openCatalogArtist(nav, a.mbid, a.name, scope)
+}
+
+/** The lookup shows a hint once it takes this long (a library artist answers at once: no flash). */
+private const val HINT_AFTER_MS = 300L
+/** A lookup that takes longer than this (a dead Wi-Fi, a slow MusicBrainz) gives way to the library page. */
+private const val LOOKUP_TIMEOUT_MS = 8_000L
+
+/**
+ * Opens the catalogue page of an artist; without an id the name is looked up on the server (the web's
+ * `/artist-name/`: the library's MusicBrainz id, else a MusicBrainz search with aliases). While the lookup
+ * runs a "Looking up …" hint shows; with no network at all the library artist page opens at once instead of
+ * waiting for the request to fail, and a lookup that fails or takes too long ends there as well.
+ */
+fun openCatalogArtist(nav: Nav, mbid: String, name: String, scope: CoroutineScope) {
+    if (mbid.isNotEmpty()) {
+        nav.open(Screen.CatalogArtist(mbid))
+        return
+    }
+    if (name.isEmpty()) return
+    if (!online(nav)) {
+        // offline: the library knows this artist's songs; MusicBrainz can wait for the network
+        nav.open(Screen.Artist(name))
+        return
+    }
+    scope.launch {
+        val hint = launch {
+            delay(HINT_AFTER_MS)
+            Toasts.show("Looking up $name…")
+        }
+        val id = try {
+            withTimeoutOrNull(LOOKUP_TIMEOUT_MS) { withContext(Dispatchers.IO) { nav.features.artistLookup(name) } } ?: ""
+        } catch (_: Exception) {
+            ""
+        }
+        hint.cancel()
+        if (id.isNotEmpty()) nav.open(Screen.CatalogArtist(id)) else nav.open(Screen.Artist(name))
+    }
+}
+
+/** Is there a network with internet access right now? (ACCESS_NETWORK_STATE; true when the system can't say.) */
+private fun online(nav: Nav): Boolean = try {
+    val cm = nav.graph.app.getSystemService(Context.CONNECTIVITY_SERVICE) as? ConnectivityManager
+    if (cm == null) {
+        true
+    } else {
+        val net = cm.activeNetwork
+        net != null && cm.getNetworkCapabilities(net)?.hasCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET) == true
+    }
+} catch (_: Exception) {
+    true
 }
 
 /** [openArtistCredit] for a plain name (an album's artist, a search hit). */

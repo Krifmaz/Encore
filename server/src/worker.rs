@@ -300,8 +300,11 @@ async fn start(st: &AppState, r: &mut Req) -> anyhow::Result<()> {
 async fn expand_artist(st: &AppState, r: &mut Req) -> anyhow::Result<()> {
     upd(st, r, &[("status", json!("searching")), ("message", json!("Looking up discography…"))]);
     let art = mb::artist(st, &r.s("mbid")).await?;
-    // the request's own boxes (Request discography panel), else Settings → Release types
+    // the request's own boxes (Request discography panel), else Settings → Release types; the releases ticked
+    // in the dialog (`release_ids`) take the place of the filter altogether
     let filter = crate::release_types::ReleaseFilter::from_value(&r.d["release_filter"], &crate::release_types::ReleaseFilter::from_cfg(&st.cfg));
+    let only: Option<Vec<String>> = r.d["release_ids"].as_array().map(|a| a.iter().filter_map(|v| v.as_str().map(String::from)).collect());
+
     // the merged catalog: MusicBrainz plus the Deezer / Apple Music releases MusicBrainz doesn't list
     let ext = if st.cfg.bool("discover_catalog_merge") { crate::routes::catalog::merged(st, &art).await } else { vec![] };
     let name = art["name"].as_str().unwrap_or("").to_string();
@@ -315,7 +318,8 @@ async fn expand_artist(st: &AppState, r: &mut Req) -> anyhow::Result<()> {
                               AND status NOT IN ('failed','denied','cancelled')", p![name, title]).ok().flatten().is_some(),
         }
     };
-    let plan = crate::routes::catalog::discography_plan(art["release_groups"].as_array().map(|a| a.as_slice()).unwrap_or(&[]), &ext, &filter, skip);
+    let plan = crate::routes::catalog::discography_plan(art["release_groups"].as_array().map(|a| a.as_slice()).unwrap_or(&[]), &ext, &filter, only.as_deref(), skip);
+
     let t = now();
     let (mut n, mut n_ext) = (0, 0);
     for g in plan {
@@ -333,7 +337,9 @@ async fn expand_artist(st: &AppState, r: &mut Req) -> anyhow::Result<()> {
         }
     }
     let msg = match (n, n_ext) {
+        (0, _) if only.is_some() => "Nothing new – you already have (or requested) every ticked release".to_string(),
         (0, _) => "Nothing new – you already have (or requested) every release".to_string(),
+
         (n, 0) => format!("Queued {n} release(s) from the discography"),
         (n, e) => format!("Queued {n} release(s) from the discography ({e} not in MusicBrainz)"),
     };
@@ -510,7 +516,7 @@ async fn start_pick(st: &AppState, r: &mut Req) -> anyhow::Result<()> {
             upd(st, r, &[("source", json!("torznab"))]);
             torznab_try_next(st, r, "").await?
         }
-        "deezer" | "link" if src == "deezer" || RIP_LINK.is_match(&url) => {
+        "deezer" | "tidal" | "qobuz" | "link" if src != "link" || RIP_LINK.is_match(&url) => {
             if !streamrip::enabled(st) {
                 fail(st, r, "Qobuz/Tidal/Deezer links need streamrip enabled in Settings → Downloaders").await;
                 return Ok(());
@@ -1196,7 +1202,8 @@ fn recover(st: &AppState) {
         // reported song's replacement keeps what it replaces and which source to avoid
         let old: Value = serde_json::from_str(&r.s("detail")).unwrap_or(json!({}));
         let mut d = json!({});
-        for k in ["replace", "avoid", "album_mode", "release_filter", "length", "isrc", "ext", "attempts", "log"] {
+        for k in ["replace", "avoid", "album_mode", "release_filter", "release_ids", "length", "isrc", "ext", "attempts", "log"] {
+
             if !old[k].is_null() {
                 d[k] = old[k].clone();
             }

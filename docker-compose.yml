@@ -36,6 +36,9 @@ services:
       - YTMUSIC_CLIENT_SECRET=${YTMUSIC_CLIENT_SECRET:-}
       - STREAMRIP_ENABLED=${STREAMRIP_ENABLED:-false}
       - STREAMRIP_DEEZER_ARL=${STREAMRIP_DEEZER_ARL:-}
+      # Database read connections (default 4). Encore turns them off by itself when /config is on a network
+      # file system (NFS, SMB/CIFS, FUSE); set this to turn them on there anyway, or to 0 for one connection.
+      # - ENCORE_DB_READERS=4
     volumes:
       - ${APPDATA:-/opt/appdata}/encore:/config
       - ${MUSIC_DIR:-/srv/media/music}:/music

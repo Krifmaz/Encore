@@ -30,6 +30,8 @@ class EncoreApp : Application() {
 
 /** The app's singletons, built by hand (no DI framework in M1). */
 class AppGraph(app: Application) {
+    /** The application, for system services (connectivity) from plain functions outside composables. */
+    val app: Application = app
     val scope: CoroutineScope = CoroutineScope(SupervisorJob() + Dispatchers.Main)
     val store: SessionStore = SessionStore(app, scope)
     val http: OkHttpClient = buildHttpClient(app, store)

@@ -45,6 +45,7 @@ const TICK: Duration = Duration::from_secs(600);
 #[serde(rename_all = "lowercase")]
 pub enum Kind {
     /// cookies handed over by the extension from a private window: the server's own session
+    // 0.26 compatibility shim (state files and clients from before 0.25.3 say `managed`): remove in 0.27
     #[serde(alias = "managed")]
     Handoff,
     Extension,
@@ -63,7 +64,7 @@ impl Kind {
     pub fn label(self) -> &'static str {
         match self {
             Kind::Handoff => "Handed-over sign-in",
-            Kind::Extension => "Browser extension (everyday browser)",
+            Kind::Extension => "Everyday browser (extension)",
             Kind::Pasted => "Pasted cookies",
         }
     }
@@ -82,12 +83,21 @@ pub struct SourceState {
     pub message: Option<String>,
     /// the extension's browser ("Chrome 141", "Firefox 143")
     pub agent: Option<String>,
+    /// that browser's full User-Agent (extensions from 0.26 on report it): what Encore presents when it
+    /// refreshes a handed-over session
+    pub user_agent: Option<String>,
+    /// cookies the last refresh by Encore renewed (Some(0): Google answered but sent none back, so the
+    /// sign-in was only checked; None: never refreshed, never rotated on purpose, or the rotation call
+    /// itself failed – `message` says)
+    pub rotated: Option<usize>,
 }
 
 /// `<config>/youtube-browser/state.json` (the folder keeps its old name: installs from before keep their state)
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct AuthState {
     /// the server-owned session (`managed` before 0.25.3, when it came from Encore's own browser)
+    // 0.26 compatibility shim (state files written before 0.25.3): remove in 0.27, with the test
+    // `old_state_file_keeps_its_session_as_the_handoff`
     #[serde(alias = "managed")]
     pub handoff: SourceState,
     pub extension: SourceState,
@@ -105,6 +115,13 @@ impl AuthState {
             Kind::Handoff => &self.handoff,
             Kind::Extension => &self.extension,
             Kind::Pasted => &self.pasted,
+        }
+    }
+    pub fn get_mut(&mut self, k: Kind) -> &mut SourceState {
+        match k {
+            Kind::Handoff => &mut self.handoff,
+            Kind::Extension => &mut self.extension,
+            Kind::Pasted => &mut self.pasted,
         }
     }
 }
@@ -144,6 +161,9 @@ pub fn write_private(path: &Path, text: &str) -> anyhow::Result<()> {
 /// 0.25.3 removed Encore's own sign-in browser (Google refuses sign-ins in it): the program a previous
 /// install downloaded (`<config>/tools/browser`) and its profile (`<config>/youtube-browser/profile`) are
 /// deleted once. Answers what was removed (empty: nothing was there).
+///
+/// 0.26 compatibility shim for installs from before 0.25.3: remove in 0.27, with its call in `supervisor`
+/// and the test `old_sign_in_browser_is_removed_once`.
 pub fn remove_old_browser(data: &Path) -> Vec<PathBuf> {
     let mut gone = vec![];
     for d in [data.join("tools").join("browser"), home(data).join("profile")] {
@@ -272,6 +292,25 @@ pub async fn account_of(st: &AppState, jar: &Jar) -> Option<String> {
     account_name(&v)
 }
 
+/// The values that identify one Google session in a jar (they stay the same between uploads of one
+/// session and differ for another account or a new sign-in).
+fn session_of(jar: &Jar) -> [Option<String>; 3] {
+    ["SAPISID", "__Secure-3PSID", "SID"].map(|n| jar.get("www.youtube.com", n).map(|c| c.value.clone()))
+}
+
+/// The account name behind a source's cookies, looked up in the background: a hand-off or an upload is
+/// answered at once, without waiting for YouTube. The name is written only while the source still holds the
+/// session that was looked up (a newer hand-off meanwhile keeps its own, still unknown, account).
+fn spawn_account_lookup(st: &AppState, k: Kind, jar: Jar) {
+    let st = st.clone();
+    tokio::spawn(async move {
+        let Some(account) = account_of(&st, &jar).await else { return };
+        if session_of(&jar_of(&st, k)) == session_of(&jar) {
+            update(st.data_dir(), |s| s.get_mut(k).account = Some(account));
+        }
+    });
+}
+
 /// "Name (handle or e-mail)" from an account_menu answer.
 pub fn account_name(v: &Value) -> Option<String> {
     fn find<'a>(v: &'a Value, key: &str) -> Option<&'a Value> {
@@ -290,13 +329,14 @@ pub fn account_name(v: &Value) -> Option<String> {
     })
 }
 
-/// Is a jar signed in to YouTube Music? (the page's ytcfg says LOGGED_IN)
-pub async fn verify(st: &AppState, jar: &Jar) -> anyhow::Result<bool> {
+/// Is a jar signed in to YouTube Music? (the page's ytcfg says LOGGED_IN). `ua`: the browser the session
+/// came from (rotate::user_agent).
+pub async fn verify(st: &AppState, jar: &Jar, ua: &str) -> anyhow::Result<bool> {
     let cookie = jar.header_for("music.youtube.com", now() as i64);
     if cookie.is_empty() {
         return Ok(false);
     }
-    let html = st.http.get("https://music.youtube.com/").header("Cookie", cookie).header("Accept-Language", "en").header("User-Agent", rotate::UA)
+    let html = st.http.get("https://music.youtube.com/").header("Cookie", cookie).header("Accept-Language", "en").header("User-Agent", ua)
         .timeout(Duration::from_secs(30)).send().await?.text().await?;
     Ok(html.contains("\"LOGGED_IN\":true"))
 }
@@ -307,9 +347,50 @@ pub async fn verify(st: &AppState, jar: &Jar) -> anyhow::Result<bool> {
 /// meanwhile waits for it rather than being overwritten by the older session's renewed cookies.
 static ROTATING: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
-/// Light refresh (rotate.rs) of the server-owned session; the renewed cookies are saved back. Answers
-/// whether it is still signed in.
-pub async fn refresh_handoff(st: &AppState) -> anyhow::Result<bool> {
+/// What a refresh found.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Refresh {
+    pub signed_in: bool,
+    /// cookies Google renewed (None: nothing was rotated on purpose – the extension's cookies, or pasted
+    /// cookies that are only checked – or the rotation call itself failed; the status's message says)
+    pub rotated: Option<usize>,
+}
+
+/// Record what a refresh of a source found. `rotated` Some(0) is a refresh that renewed nothing: the
+/// sign-in was checked, but "last refresh" (`updated_at`) stays where it was, so the status never calls a
+/// bare check a refresh. `message`: what to tell the admin (None when all is well); with a message and
+/// `rotated` None (the rotation call failed, the sign-in holds) "last refresh" stays as well.
+fn note_refresh(src: &mut SourceState, t: f64, ok: bool, rotated: Option<usize>, message: Option<String>, account: Option<String>) {
+    src.checked_at = Some(t);
+    src.ok = Some(ok);
+    src.rotated = rotated;
+    src.message = message;
+    if ok {
+        if src.message.is_none() && rotated.is_none_or(|n| n > 0) {
+            src.updated_at = Some(t);
+        }
+        if account.is_some() {
+            src.account = account;
+        }
+    }
+}
+
+/// The plain note for a source whose last refresh renewed nothing (None otherwise, and None when the
+/// source has a message of its own: that one says what happened).
+fn refresh_note(src: &SourceState) -> Option<String> {
+    (src.rotated == Some(0) && src.ok == Some(true) && src.message.is_none()).then(|| "the last refresh renewed no cookies (Google sent none back) – only the sign-in was checked".to_string())
+}
+
+/// What a rotation renewed, for `note_refresh` and the answer: Some(n) when Google answered (0: without
+/// cookies); None when nothing was rotated on purpose (`rotated` false) or the call itself failed – then
+/// nothing is known about the cookies and the message says why.
+fn renewed(outcome: &rotate::Outcome, rotated: bool) -> Option<usize> {
+    match outcome { rotate::Outcome::Rotated(n) if rotated => Some(*n), _ => None }
+}
+
+/// Light refresh (rotate.rs) of the server-owned session, presented as the browser it was handed over
+/// from; the renewed cookies are saved back. Answers whether it is still signed in and what was renewed.
+pub async fn refresh_handoff(st: &AppState) -> anyhow::Result<Refresh> {
     let _g = ROTATING.lock().await;
     let data = st.data_dir().to_path_buf();
     let mut j = jar_of(st, Kind::Handoff);
@@ -317,13 +398,15 @@ pub async fn refresh_handoff(st: &AppState) -> anyhow::Result<bool> {
     if j.is_empty() {
         anyhow::bail!("No handed-over sign-in – press Hand over a YouTube sign-in in the Encore extension");
     }
-    let outcome = rotate::run(&st.http, &mut j, t as i64).await;
+    let src = load(&data).handoff;
+    let ua = rotate::user_agent(src.user_agent.as_deref(), src.agent.as_deref());
+    let outcome = rotate::run(&st.http, &mut j, t as i64, &ua).await;
     if matches!(outcome, rotate::Outcome::Rotated(n) if n > 0) {
         write_private(&handoff_path(&data), &j.to_netscape())?;
     }
     let ok = match &outcome {
         rotate::Outcome::SignedOut => Some(false),
-        _ => verify(st, &j).await.ok(),
+        _ => verify(st, &j, &ua).await.ok(),
     };
     let Some(ok) = ok else {
         update(&data, |s| {
@@ -332,32 +415,33 @@ pub async fn refresh_handoff(st: &AppState) -> anyhow::Result<bool> {
         });
         anyhow::bail!("Couldn't reach YouTube to refresh the sign-in");
     };
+    let rotated = renewed(&outcome, true);
+    let message = match (&outcome, ok) {
+        (_, false) => Some("Signed out – do the hand-off again from the Encore extension".to_string()),
+        // the rotation call itself failed (Google unreachable or an error answer): tried again in 30 min
+        (rotate::Outcome::Failed(e), true) => Some(format!("Couldn't renew the cookies ({e}) – still signed in, trying again in 30 min")),
+        _ => None,
+    };
     let account = if ok { account_of(st, &j).await } else { None };
-    update(&data, |s| {
-        s.handoff.checked_at = Some(t);
-        s.handoff.ok = Some(ok);
-        s.handoff.message = (!ok).then(|| "Signed out – do the hand-off again from the Encore extension".to_string());
-        if ok {
-            s.handoff.updated_at = Some(t);
-            if account.is_some() {
-                s.handoff.account = account;
-            }
-        }
-    });
+    update(&data, |s| note_refresh(&mut s.handoff, t, ok, rotated, message, account));
     if ok {
-        st.db.log("info", "YouTube sign-in refreshed by Encore (handed-over session)");
+        st.db.log("info", &match &outcome {
+            rotate::Outcome::Rotated(n) if *n > 0 => format!("YouTube sign-in refreshed by Encore (handed-over session, {n} cookies renewed)"),
+            rotate::Outcome::Failed(e) => format!("YouTube sign-in checked by Encore (handed-over session): still signed in, but the cookies could not be renewed: {e}"),
+            _ => "YouTube sign-in checked by Encore (handed-over session): still signed in, but Google renewed no cookies".to_string(),
+        });
         signed_in_again(st);
     } else {
         st.db.log("warning", "The handed-over YouTube sign-in was signed out");
         signed_out(st, Kind::Handoff).await;
     }
-    Ok(ok)
+    Ok(Refresh { signed_in: ok, rotated })
 }
 
 /// Light refresh of the pasted cookies; the renewed jar is saved back to the setting. With `rotate` false
 /// (cookies set by YTDLP_COOKIES, which Encore can't save back, or the light refresh switched off) they are
 /// only checked: rotating a session that can't be stored would leave the stored one superseded.
-pub async fn refresh_pasted(st: &AppState, rotate: bool) -> anyhow::Result<bool> {
+pub async fn refresh_pasted(st: &AppState, rotate: bool) -> anyhow::Result<Refresh> {
     let _g = ROTATING.lock().await;
     let raw = st.cfg.str("ytdlp_cookies");
     let mut j = Jar::parse_netscape(&raw);
@@ -366,7 +450,9 @@ pub async fn refresh_pasted(st: &AppState, rotate: bool) -> anyhow::Result<bool>
     }
     let t = now();
     let rotate = rotate && !st.cfg.env_locked("ytdlp_cookies");
-    let outcome = if rotate { rotate::run(&st.http, &mut j, t as i64).await } else { rotate::Outcome::Rotated(0) };
+    // pasted cookies come with no browser: the default one
+    let ua = rotate::user_agent(None, None);
+    let outcome = if rotate { rotate::run(&st.http, &mut j, t as i64, &ua).await } else { rotate::Outcome::Rotated(0) };
     // Google renewed them: saved whatever the check below says (the old values are superseded now)
     if matches!(outcome, rotate::Outcome::Rotated(n) if n > 0) {
         st.cfg.set_many(&json!({ "ytdlp_cookies": j.to_netscape() }));
@@ -374,7 +460,7 @@ pub async fn refresh_pasted(st: &AppState, rotate: bool) -> anyhow::Result<bool>
     // None: YouTube couldn't be reached – nothing is known, nothing changes and nobody is told
     let ok = match &outcome {
         rotate::Outcome::SignedOut => Some(false),
-        _ => verify(st, &j).await.ok(),
+        _ => verify(st, &j, &ua).await.ok(),
     };
     let Some(ok) = ok else {
         update(st.data_dir(), |s| {
@@ -384,35 +470,29 @@ pub async fn refresh_pasted(st: &AppState, rotate: bool) -> anyhow::Result<bool>
         anyhow::bail!("Couldn't reach YouTube to check the cookies");
     };
     let msg = match (&outcome, ok) {
+        (rotate::Outcome::Failed(e), true) if rotate => Some(format!("Couldn't renew the cookies ({e}) – still signed in, trying again later")),
         (_, true) => None,
         (rotate::Outcome::SignedOut, _) => Some("Google signed these cookies out – paste fresh ones or do the hand-off from the Encore extension".to_string()),
         (rotate::Outcome::Failed(e), _) => Some(format!("Stale: {e}")),
         _ => Some("Stale: YouTube no longer accepts these cookies".to_string()),
     };
+    // only checked (rotation off): nothing was meant to be renewed; a failed call renewed nothing either
+    let rotated = renewed(&outcome, rotate);
     let account = if ok { account_of(st, &j).await } else { None };
-    update(st.data_dir(), |s| {
-        s.pasted.checked_at = Some(t);
-        s.pasted.ok = Some(ok);
-        s.pasted.message = msg;
-        if ok {
-            s.pasted.updated_at = Some(t);
-            if account.is_some() {
-                s.pasted.account = account;
-            }
-        }
-    });
+    update(st.data_dir(), |s| note_refresh(&mut s.pasted, t, ok, rotated, msg, account));
     if ok {
         signed_in_again(st);
     } else {
         signed_out(st, Kind::Pasted).await;
     }
-    Ok(ok)
+    Ok(Refresh { signed_in: ok, rotated })
 }
 
 /// Check the extension's cookies still sign in (never rotated by Encore).
 pub async fn check_extension(st: &AppState) -> anyhow::Result<bool> {
     let j = jar_of(st, Kind::Extension);
-    let ok = verify(st, &j).await?;
+    let src = load(st.data_dir()).extension;
+    let ok = verify(st, &j, &rotate::user_agent(src.user_agent.as_deref(), src.agent.as_deref())).await?;
     let account = if ok { account_of(st, &j).await } else { None };
     update(st.data_dir(), |s| {
         s.extension.checked_at = Some(now());
@@ -470,7 +550,7 @@ pub async fn after_ytdlp_auth_error(st: &AppState) -> bool {
         return false;
     }
     let r = if act == Some(Kind::Handoff) { refresh_handoff(st).await } else { refresh_pasted(st, true).await };
-    matches!(r, Ok(true))
+    matches!(r, Ok(Refresh { signed_in: true, .. }))
 }
 
 /// Background loop: refresh of the hand-off session and of pasted cookies (4 h).
@@ -513,7 +593,7 @@ pub fn status(st: &AppState) -> Value {
         (c.kind.key().to_string(), json!({
             "label": c.kind.label(), "has_cookies": !c.jar.is_empty(), "signed_in": c.jar.has_auth(t) && st8.ok != Some(false),
             "expires": c.jar.auth_expiry(t), "updated_at": st8.updated_at, "checked_at": st8.checked_at, "ok": st8.ok,
-            "account": st8.account, "message": st8.message, "agent": st8.agent,
+            "account": st8.account, "message": st8.message, "agent": st8.agent, "rotated": st8.rotated,
         }))
     }).collect();
     let light_on = st.cfg.bool("youtube_light_refresh");
@@ -521,7 +601,9 @@ pub fn status(st: &AppState) -> Value {
     let current = act.map(|k| s.get(k).clone()).unwrap_or_default();
     json!({
         "source": act.map(|k| k.key()), "source_label": act.map(|k| k.label()), "account": current.account,
-        "last_refresh": current.updated_at, "last_check": current.checked_at, "next_refresh": next, "next_check": next,
+        "last_refresh": current.updated_at, "last_check": current.checked_at, "next_refresh": next,
+        // 0.26 compatibility shim: `next_check` is `next_refresh` for clients from before 0.25.3 – remove in 0.27
+        "next_check": next,
         "sources": sources,
         "extension": { "token_at": s.ext_token_at, "connected": s.extension.updated_at.is_some() || s.handoff.updated_at.is_some(), "handoff_at": s.handoff.updated_at },
         "light_refresh": light_on, "diagnostics": diagnostics(st, act, &s),
@@ -550,6 +632,9 @@ fn diagnostics(st: &AppState, act: Option<Kind>, s: &AuthState) -> String {
             }
             if let Some(c) = src.checked_at {
                 parts.push(format!("checked {}{}", ago(c), match src.ok { Some(true) => ": signed in", Some(false) => ": signed out", None => "" }));
+            }
+            if let Some(n) = refresh_note(src) {
+                parts.push(n);
             }
             if let Some(m) = &src.message {
                 parts.push(m.clone());
@@ -586,16 +671,24 @@ async fn refresh_now(State(st): State<AppState>, Admin(u): Admin) -> ApiResult<J
     let act = active(&st);
     let res = match act {
         Some(Kind::Handoff) => refresh_handoff(&st).await,
-        Some(Kind::Extension) => check_extension(&st).await,
+        Some(Kind::Extension) => check_extension(&st).await.map(|ok| Refresh { signed_in: ok, rotated: None }),
         // rotated only with the light refresh on (and never cookies from the environment)
         Some(Kind::Pasted) => refresh_pasted(&st, st.cfg.bool("youtube_light_refresh")).await,
         None => return Err(err(400, "No YouTube sign-in to refresh – hand one over from the Encore extension or paste cookies")),
     };
-    let ok = res.map_err(|e| err(400, e.to_string()))?;
-    st.db.log("info", &format!("{} refreshed the YouTube sign-in ({})", u.s("username"), if ok { "signed in" } else { "signed out" }));
+    let r = res.map_err(|e| err(400, e.to_string()))?;
+    let what = match (r.signed_in, r.rotated) {
+        (false, _) => "signed out",
+        (true, Some(0)) => "signed in, nothing renewed",
+        (true, Some(_)) => "signed in, cookies renewed",
+        (true, None) => "signed in",
+    };
+    st.db.log("info", &format!("{} refreshed the YouTube sign-in ({what})", u.s("username")));
     let st2 = st.clone();
     let mut v = tokio::task::spawn_blocking(move || status(&st2)).await.map_err(|e| err(500, e.to_string()))?;
-    v["refreshed"] = json!(ok);
+    v["refreshed"] = json!(r.signed_in);
+    // what the refresh renewed (0: Google sent no cookies back, the sign-in was only checked; null: nothing was rotated on purpose)
+    v["rotated"] = json!(r.rotated);
     Ok(Json(v))
 }
 
@@ -608,6 +701,7 @@ struct SignOutBody {
 async fn sign_out(State(st): State<AppState>, Admin(u): Admin, body: Option<Json<SignOutBody>>) -> ApiResult<Json<Value>> {
     use crate::db::RowExt;
     let which = body.and_then(|b| b.0.source).unwrap_or_else(|| "all".into());
+    // 0.26 compatibility shim (clients from before 0.25.3 say `managed`): remove in 0.27
     let which = if which == "managed" { "handoff".to_string() } else { which };
     if !["handoff", "extension", "all"].contains(&which.as_str()) {
         return Err(err(400, "Unknown sign-in"));
@@ -703,6 +797,11 @@ fn agent_of(body: &Value) -> Option<String> {
     body["agent"].as_str().map(|a| a.chars().filter(|c| !c.is_control()).take(80).collect())
 }
 
+/// The browser's full `navigator.userAgent` (extensions from 0.26 on send it as `user_agent`).
+fn user_agent_of(body: &Value) -> Option<String> {
+    body["user_agent"].as_str().map(|a| a.chars().filter(|c| !c.is_control()).take(400).collect::<String>()).filter(|a| !a.is_empty())
+}
+
 /// A hand-off: the private window's cookies become the server's own session.
 async fn accept_handoff(st: &AppState, body: &Value) -> anyhow::Result<Value> {
     let j = cookie_list(body)?;
@@ -710,19 +809,20 @@ async fn accept_handoff(st: &AppState, body: &Value) -> anyhow::Result<Value> {
     if !j.has_auth(t as i64) {
         return Ok(json!({ "ok": false, "message": "That window is not signed in to YouTube yet – finish signing in, then send again" }));
     }
-    let account = account_of(st, &j).await;
     {
         let _g = ROTATING.lock().await;
         write_private(&handoff_path(st.data_dir()), &j.to_netscape())?;
         update(st.data_dir(), |s| {
-            s.handoff = SourceState { updated_at: Some(t), checked_at: Some(t), ok: Some(true), account: account.clone(), message: None, agent: agent_of(body) };
+            s.handoff = SourceState { updated_at: Some(t), checked_at: Some(t), ok: Some(true), account: None, message: None, agent: agent_of(body),
+                user_agent: user_agent_of(body), rotated: None };
         });
     }
     signed_in_again(st);
-    st.db.log("info", &format!("YouTube sign-in handed over from the Encore extension{}{} – Encore keeps it alive by itself now",
-        account.as_deref().map(|a| format!(" ({a})")).unwrap_or_default(),
-        agent_of(body).map(|a| format!(", {a}")).unwrap_or_default()));
-    Ok(json!({ "ok": true, "handoff": true, "cookies": j.0.len(), "account": account,
+    // the account name needs YouTube: looked up after the answer, so the extension's window closes at once
+    spawn_account_lookup(st, Kind::Handoff, j.clone());
+    st.db.log("info", &format!("YouTube sign-in handed over from the Encore extension{} – Encore keeps it alive by itself now",
+        agent_of(body).map(|a| format!(" ({a})")).unwrap_or_default()));
+    Ok(json!({ "ok": true, "handoff": true, "cookies": j.0.len(),
         "message": "Encore has its own YouTube sign-in now and keeps it alive by itself. The private window can close." }))
 }
 
@@ -735,28 +835,31 @@ async fn accept_extension(st: &AppState, body: &Value) -> anyhow::Result<Value> 
             s.extension.ok = Some(false);
             s.extension.message = Some("The browser is not signed in to YouTube".into());
             s.extension.agent = agent_of(body);
+            s.extension.user_agent = user_agent_of(body);
         });
         return Ok(json!({ "ok": false, "message": "This browser is not signed in to YouTube – sign in at music.youtube.com" }));
     }
     // another Google account in that browser: its session cookies differ (they stay the same between
     // uploads of one session), so the account name is looked up again
-    let session = |jar: &Jar| ["SAPISID", "__Secure-3PSID", "SID"].map(|n| jar.get("www.youtube.com", n).map(|c| c.value.clone()));
-    let before = session(&jar_of(st, Kind::Extension));
+    let before = session_of(&jar_of(st, Kind::Extension));
     write_private(&ext_path(st.data_dir()), &j.to_netscape())?;
-    let switched = before != session(&j);
+    let switched = before != session_of(&j);
     let changed_account = load(st.data_dir()).extension.account.is_none() || switched;
-    let account = if changed_account { account_of(st, &j).await } else { None };
     update(st.data_dir(), |s| {
         s.extension.updated_at = Some(t);
         s.extension.checked_at = Some(t);
         s.extension.ok = Some(true);
         s.extension.message = None;
         s.extension.agent = agent_of(body);
-        // a switched account never keeps the old name, even when the new one couldn't be read
-        if account.is_some() || switched {
-            s.extension.account = account;
+        s.extension.user_agent = user_agent_of(body);
+        // a switched account never keeps the old name (the new one arrives from the lookup below)
+        if switched {
+            s.extension.account = None;
         }
     });
     signed_in_again(st);
+    if changed_account {
+        spawn_account_lookup(st, Kind::Extension, j.clone());
+    }
     Ok(json!({ "ok": true, "cookies": j.0.len(), "message": format!("{} cookies received", j.0.len()) }))
 }

@@ -10,6 +10,8 @@ pub const AUDIO_EXT: [&str; 12] = ["flac", "mp3", "m4a", "aac", "ogg", "opus", "
 pub const LOSSLESS: [&str; 6] = ["flac", "wav", "alac", "aiff", "ape", "wv"];
 pub const DONE_OK: &str = "Succeeded";
 pub const DONE_BAD: [&str; 6] = ["Errored", "Rejected", "TimedOut", "Cancelled", "Aborted", "Failed"];
+/// slskd runs but has no Soulseek server session yet (its API answers 409 to searches and transfers).
+pub const NOT_CONNECTED: &str = "Soulseek isn't connected yet";
 
 /// Soulseek is on, has a login and its engine is installed – a source the worker can use.
 pub fn enabled(st: &AppState) -> bool {
@@ -17,7 +19,7 @@ pub fn enabled(st: &AppState) -> bool {
 }
 
 /// Why slskd can't answer right now, in words for the user (None while it runs or is starting).
-fn not_ready(st: &AppState) -> Option<String> {
+pub fn not_ready(st: &AppState) -> Option<String> {
     if !slskd_managed::configured(st) {
         return Some("Soulseek: switch it on and set a username and password in Settings → Apps & sources → Soulseek (an account is created on first login)".into());
     }
@@ -56,9 +58,19 @@ async fn req_within(st: &AppState, method: reqwest::Method, path: &str, body: Op
     let status = r.status();
     let text = r.text().await.unwrap_or_default();
     if status.as_u16() >= 400 {
-        anyhow::bail!("Soulseek engine returned {status}: {}", text.chars().take(200).collect::<String>());
+        return Err(http_error(status.as_u16(), &text));
     }
     Ok(serde_json::from_str(&text).unwrap_or(Value::Null))
+}
+
+/// An error answer from slskd's API as a message for the user: 409 means the engine has no server session
+/// (not signed in to the Soulseek network yet), anything else is reported with its status and text.
+pub fn http_error(status: u16, text: &str) -> anyhow::Error {
+    if status == 409 {
+        return anyhow::anyhow!("{NOT_CONNECTED}");
+    }
+    let reason = axum::http::StatusCode::from_u16(status).map(|s| s.to_string()).unwrap_or_else(|_| status.to_string());
+    anyhow::anyhow!("Soulseek engine returned {reason}: {}", text.chars().take(200).collect::<String>())
 }
 
 /// slskd's /application: version, server.state ("Connected, LoggedIn"), shares, …

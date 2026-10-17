@@ -344,32 +344,44 @@ async fn artist_tracks(State(st): State<AppState>, User(_): User, Query(q): Quer
 #[path = "search_tests.rs"]
 mod search_tests;
 
+/// `cols` of these songs, in this order: one indexed lookup by id (at most `MAX_IDS`, or a page of a list).
+fn rows_by_id(db: &crate::db::Db, cols: &str, ids: &[i64]) -> rusqlite::Result<Vec<crate::db::Row>> {
+    if ids.is_empty() {
+        return Ok(vec![]);
+    }
+    let rows = db.query(&format!("SELECT {cols} FROM tracks WHERE id IN ({})", crate::artists::marks(ids.len())), ids.iter().map(|i| json!(i)).collect())?;
+    let mut by_id: HashMap<i64, crate::db::Row> = rows.into_iter().map(|r| (r.i("id"), r)).collect();
+    Ok(ids.iter().filter_map(|i| by_id.remove(i)).collect())
+}
+
+/// Every song's id in list order, kept until the songs change (see `cached_list`): one sorted pass over
+/// the table per sort, and every page of the list is a slice of it. `order_by` is empty for "any order".
+fn track_ids(st: &AppState, order_by: &str) -> ApiResult<Arc<Value>> {
+    let sql = if order_by.is_empty() { "SELECT id FROM tracks".to_string() } else { format!("SELECT id FROM tracks ORDER BY {order_by}") };
+    cached_list(st, &format!("track-ids\u{1f}{order_by}"), || Ok(json!(st.db.query(&sql, p![])?.iter().map(|r| r.i("id")).collect::<Vec<i64>>())))
+}
+
+/// Items `offset..offset+limit` of a cached id list.
+fn page_ids(all: &Value, offset: i64, limit: usize) -> Vec<i64> {
+    all.as_array().map(|a| a.iter().skip(offset.max(0) as usize).take(limit).filter_map(|v| v.as_i64()).collect()).unwrap_or_default()
+}
+
 async fn tracks(State(st): State<AppState>, User(_): User, Query(a): Query<SimpleQ>) -> ApiResult<Json<Value>> {
     if let Some(raw) = a.ids.as_deref() {
         let ids = parse_ids(raw)?;
-        if ids.is_empty() {
-            return Ok(Json(json!([])));
-        }
-        let marks = vec!["?"; ids.len()].join(",");
-        let rows = st.db.query(&format!("SELECT {TRACK_COLS} FROM tracks WHERE id IN ({marks})"), ids.iter().map(|i| json!(i)).collect())?;
-        let mut by_id: std::collections::HashMap<i64, crate::db::Row> = rows.into_iter().map(|r| (r.i("id"), r)).collect();
-        return Ok(Json(json!(ids.iter().filter_map(|i| by_id.remove(i)).collect::<Vec<_>>())));
+        return Ok(Json(json!(rows_by_id(&st.db, TRACK_COLS, &ids)?)));
     }
     if !a.q.trim().is_empty() {
         // ranked in memory, the same song twice shown once (see search::library_track_ids)
         let ids: Vec<i64> = crate::search::library_track_ids(&crate::artists::index(&st.db), &a.q, &a.sort, &a.dir).into_iter()
             .skip(a.offset.max(0) as usize).take(a.limit.unwrap_or(200).clamp(1, 1000) as usize).collect();
-        if ids.is_empty() {
-            return Ok(Json(json!([])));
-        }
-        let rows = st.db.query(&format!("SELECT {TRACK_COLS} FROM tracks WHERE id IN ({})", crate::artists::marks(ids.len())), ids.iter().map(|i| json!(i)).collect())?;
-        let mut by_id: std::collections::HashMap<i64, crate::db::Row> = rows.into_iter().map(|r| (r.i("id"), r)).collect();
-        return Ok(Json(json!(ids.iter().filter_map(|i| by_id.remove(i)).collect::<Vec<_>>())));
+        return Ok(Json(json!(rows_by_id(&st.db, TRACK_COLS, &ids)?)));
     }
-    let (limit, offset) = (a.limit.unwrap_or(200).clamp(1, 1000), a.offset.max(0));
-    let sql = format!("SELECT {TRACK_COLS} FROM tracks ORDER BY {} LIMIT ? OFFSET ?", order(TRACK_SORTS, &a.sort, &a.dir, "artist"));
-    let rows = cached_list(&st, &format!("tracks\u{1f}{sql}\u{1f}{limit}\u{1f}{offset}"), || Ok(json!(st.db.query(&sql, p![limit, offset])?)))?;
-    Ok(Json((*rows).clone()))
+    let (limit, offset) = (a.limit.unwrap_or(200).clamp(1, 1000) as usize, a.offset.max(0));
+    // the id list is sorted once per sort and kept; a page fetches its rows by id (the 0.25.3 WIP cached
+    // each page on its own, so every new page was another sort of every song)
+    let ids = track_ids(&st, &order(TRACK_SORTS, &a.sort, &a.dir, "artist"))?;
+    Ok(Json(json!(rows_by_id(&st.db, TRACK_COLS, &page_ids(&ids, offset, limit))?)))
 }
 
 async fn recent(State(st): State<AppState>, User(_): User, Query(a): Query<SimpleQ>) -> ApiResult<Json<Value>> {
@@ -408,8 +420,34 @@ async fn shuffle_post(State(st): State<AppState>, User(_): User, Json(b): Json<S
 
 fn shuffle_inner(st: &AppState, limit: i64, exclude: &[i64]) -> ApiResult<Json<Value>> {
     let ex: std::collections::HashSet<i64> = exclude.iter().copied().collect();
-    let rows = st.db.query(&format!("SELECT {SHUFFLE_COLS} FROM tracks ORDER BY RANDOM()"), p![])?;
-    Ok(Json(json!(rows.into_iter().filter(|r| !ex.contains(&r.i("id"))).take(limit.clamp(1, 200) as usize).collect::<Vec<_>>())))
+    // random picks from the cached id list (`ORDER BY RANDOM()` read and sorted every song for 50 of them)
+    let all = track_ids(st, "")?;
+    let ids = draw(all.as_array().map(|a| a.as_slice()).unwrap_or(&[]), limit.clamp(1, 200) as usize, &ex);
+    Ok(Json(json!(rows_by_id(&st.db, SHUFFLE_COLS, &ids)?)))
+}
+
+/// `n` distinct random ids out of `pool` that are not in `exclude` (fewer when the pool runs out):
+/// random picks while most of the pool is still unheard, then the remainder listed and shuffled.
+fn draw(pool: &[Value], n: usize, exclude: &std::collections::HashSet<i64>) -> Vec<i64> {
+    use rand::seq::SliceRandom;
+    let mut out: Vec<i64> = Vec::with_capacity(n);
+    let mut taken: std::collections::HashSet<i64> = std::collections::HashSet::with_capacity(n);
+    if pool.is_empty() {
+        return out;
+    }
+    let mut misses = 0;
+    while out.len() < n && misses < n * 8 + 64 {
+        match pool[rand::random_range(0..pool.len())].as_i64() {
+            Some(id) if !exclude.contains(&id) && taken.insert(id) => out.push(id),
+            _ => misses += 1,
+        }
+    }
+    if out.len() < n {
+        let mut rest: Vec<i64> = pool.iter().filter_map(|v| v.as_i64()).filter(|i| !exclude.contains(i) && !taken.contains(i)).collect();
+        rest.shuffle(&mut rand::rng());
+        out.extend(rest.into_iter().take(n - out.len()));
+    }
+    out
 }
 
 #[derive(Deserialize)]

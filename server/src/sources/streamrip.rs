@@ -865,6 +865,148 @@ pub async fn tidal_probe(st: &AppState) -> String {
     }
 }
 
+// ---- the picker's catalogue searches: the accounts streamrip signs in with --------------------------
+
+/// The Deezer ARL is set, in Encore's settings or by hand in streamrip's config.toml.
+pub fn deezer_arl_set(st: &AppState) -> bool {
+    !st.cfg.str("streamrip_deezer_arl").is_empty() || !toml_value(&std::fs::read_to_string(config_path(st)).unwrap_or_default(), "deezer", "arl").is_empty()
+}
+
+/// The Qobuz login streamrip has, as (user id or email, token or md5 password, is a token): Encore's settings
+/// first, else config.toml under either naming (`user_id`/`auth_token`, or `email_or_userid`/`password_or_token`
+/// with `use_auth_token`). None when there is no login.
+pub fn qobuz_login(st: &AppState) -> Option<(String, String, bool)> {
+    let (u, t) = (st.cfg.str("streamrip_qobuz_user"), st.cfg.str("streamrip_qobuz_token"));
+    if !u.is_empty() && !t.is_empty() {
+        return Some((u, t, true));
+    }
+    let text = std::fs::read_to_string(config_path(st)).unwrap_or_default();
+    let v = |k: &str| toml_value(&text, "qobuz", k);
+    let (user, token) = (v("user_id"), v("auth_token"));
+    if !user.is_empty() && !token.is_empty() {
+        return Some((user, token, true));
+    }
+    let (user, secret) = (v("email_or_userid"), v("password_or_token"));
+    if user.is_empty() || secret.is_empty() {
+        return None;
+    }
+    Some((user, secret, v("use_auth_token").trim() != "false"))
+}
+
+/// Qobuz's API, the one streamrip's client talks to. `ENCORE_QOBUZ_API` points it at a stand-in (the tests'
+/// local mock); never set it in use.
+pub fn qobuz_api() -> String {
+    std::env::var("ENCORE_QOBUZ_API").ok().filter(|u| !u.trim().is_empty()).unwrap_or_else(|| "https://www.qobuz.com/api.json/0.2".into())
+}
+
+/// Qobuz's web player, where the app id comes from. `ENCORE_QOBUZ_PLAYER` is the tests' stand-in.
+fn qobuz_player() -> String {
+    std::env::var("ENCORE_QOBUZ_PLAYER").ok().filter(|u| !u.trim().is_empty()).unwrap_or_else(|| "https://play.qobuz.com".into())
+}
+
+pub const QOBUZ_APP_ID_MSG: &str = "Qobuz's web player has changed and its app id can't be read – run one Qobuz download so streamrip stores the id in config.toml";
+
+/// The app id Qobuz's API wants in `X-App-Id`: the one streamrip stored in config.toml after its first run,
+/// else read from the web player's bundle the way streamrip's own client does (kept for a day).
+pub async fn qobuz_app_id(st: &AppState) -> anyhow::Result<String> {
+    let stored = toml_value(&std::fs::read_to_string(config_path(st)).unwrap_or_default(), "qobuz", "app_id");
+    if !stored.is_empty() {
+        return Ok(stored);
+    }
+    if let Some(v) = st.cache_get("qobuz_app_id") {
+        return Ok(v.as_str().unwrap_or("").to_string());
+    }
+    let player = qobuz_player();
+    let login = st.http.get(format!("{player}/login")).send().await?.text().await?;
+    let bundle = Regex::new(r#"<script src="(/resources/\d+\.\d+\.\d+-[a-z]\d{3}/bundle\.js)"></script>"#).unwrap().captures(&login)
+        .ok_or_else(|| anyhow::anyhow!("{QOBUZ_APP_ID_MSG}"))?[1].to_string();
+    let js = st.http.get(format!("{player}{bundle}")).send().await?.text().await?;
+    let id = Regex::new(r#"production:\{api:\{appId:"(\d{9})",appSecret:"\w{32}"#).unwrap().captures(&js).ok_or_else(|| anyhow::anyhow!("{QOBUZ_APP_ID_MSG}"))?[1].to_string();
+    st.cache_put("qobuz_app_id", Value::String(id.clone()), 24 * 3600);
+    Ok(id)
+}
+
+/// The `X-User-Auth-Token` for Qobuz's API: the stored token, or the token Qobuz hands out for an
+/// email + md5 password login (kept for twelve hours). None without a login.
+pub async fn qobuz_user_token(st: &AppState, app_id: &str) -> anyhow::Result<Option<String>> {
+    let Some((user, secret, is_token)) = qobuz_login(st) else { return Ok(None) };
+    if is_token {
+        return Ok(Some(secret));
+    }
+    if let Some(v) = st.cache_get("qobuz_user_token") {
+        return Ok(v.as_str().map(String::from));
+    }
+    // the login goes in the query string (streamrip's way): a failed call must not echo it (reqwest's
+    // message would carry the whole URL, e-mail and password hash included)
+    let r = st.http.get(format!("{}/user/login", qobuz_api())).query(&[("email", user.as_str()), ("password", secret.as_str()), ("app_id", app_id)]).header("X-App-Id", app_id).send().await
+        .map_err(|e| anyhow::anyhow!("Qobuz login: {}", http_error_without_url(e)))?;
+    let code = r.status().as_u16();
+    let d: Value = r.json().await.unwrap_or(Value::Null);
+    let tok = d["user_auth_token"].as_str().filter(|t| !t.is_empty()).map(String::from);
+    match (code, tok) {
+        (200, Some(t)) => {
+            st.cache_put("qobuz_user_token", Value::String(t.clone()), 12 * 3600);
+            Ok(Some(t))
+        }
+        (401, _) => anyhow::bail!("Qobuz refused the login – check the email and password in streamrip's config.toml"),
+        _ => anyhow::bail!("Qobuz login failed (HTTP {code}): {}", d["message"].as_str().unwrap_or("no message")),
+    }
+}
+
+/// A request error as words, without the URL reqwest appends to its message, but with its cause
+/// ("connection refused", "dns error …").
+fn http_error_without_url(e: reqwest::Error) -> String {
+    let e = e.without_url();
+    let mut s = e.to_string();
+    let mut cause = std::error::Error::source(&e);
+    while let Some(c) = cause {
+        s.push_str(": ");
+        s.push_str(&c.to_string());
+        cause = std::error::Error::source(c);
+    }
+    s
+}
+
+pub const TIDAL_LAPSED_MSG: &str = "Tidal sign-in has lapsed – sign in again in Settings → streamrip";
+
+/// The signed-in Tidal account's token for Encore's own API calls (the picker's Tidal search), as
+/// (access_token, country_code). A lapsed token is refreshed through the OAuth client it came from and
+/// written back, so streamrip's next run finds it fresh. None when not signed in.
+pub async fn tidal_user_token(st: &AppState) -> anyhow::Result<Option<(String, String)>> {
+    let cfg = tidal_config(st);
+    let get = |k: &str| cfg.get(k).cloned().unwrap_or_default();
+    let token = get("access_token");
+    if token.len() <= 10 {
+        return Ok(None);
+    }
+    let cc = get("country_code");
+    let cc = if cc.is_empty() { "US".to_string() } else { cc };
+    let expiry = get("token_expiry").trim().parse::<f64>().unwrap_or(0.0);
+    if expiry <= 0.0 || expiry > now_secs() + 60.0 {
+        return Ok(Some((token, cc)));
+    }
+    let refresh = get("refresh_token");
+    if refresh.is_empty() {
+        anyhow::bail!("{TIDAL_LAPSED_MSG}");
+    }
+    let cid = { let c = get("token_client_id"); if c.is_empty() { TIDAL_DEFAULT_CLIENT.0.to_string() } else { c } };
+    let secret = if cid == TIDAL_DEFAULT_CLIENT.0 { TIDAL_DEFAULT_CLIENT.1.to_string() }
+        else if cid == TIDAL_HIRES_CLIENT.0 { TIDAL_HIRES_CLIENT.1.to_string() }
+        else if cid == get("client_id") { get("client_secret") } else { String::new() };
+    let form = [("client_id", cid.as_str()), ("refresh_token", refresh.as_str()), ("grant_type", "refresh_token"), ("scope", TIDAL_SCOPE)];
+    let (code, d) = tidal_auth_post(st, "token", &form, Some((cid.as_str(), secret.as_str()))).await.map_err(|e| anyhow::anyhow!("{e}"))?;
+    let fresh = d["access_token"].as_str().unwrap_or("").to_string();
+    if code != 200 || fresh.len() <= 10 {
+        anyhow::bail!("{TIDAL_LAPSED_MSG}");
+    }
+    let mut values = vec![("access_token".to_string(), tstr(&fresh)), ("token_expiry".to_string(), toml_float(now_secs() + d["expires_in"].as_f64().unwrap_or(3600.0)))];
+    if let Some(r) = d["refresh_token"].as_str().filter(|r| !r.is_empty()) {
+        values.push(("refresh_token".to_string(), tstr(r)));
+    }
+    tidal_write(st, &values).await?;
+    Ok(Some((fresh, cc)))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

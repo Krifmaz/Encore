@@ -4,6 +4,39 @@ use axum::http::HeaderValue;
 
 const NOW: i64 = 1_800_000_000;
 
+/// A stand-in for music.youtube.com's web API, the only network `account_of` needs: every call is answered
+/// with one account after `delay` ms. Points `ENCORE_YTMUSIC_API` at itself (the caller holds TEST_ENV and
+/// clears it with `unmock_ytmusic`). Nothing in these tests reaches the network.
+async fn mock_ytmusic(account: &'static str, delay: u64) -> String {
+    let app = Router::new().route("/account/account_menu", post(move || async move {
+        tokio::time::sleep(Duration::from_millis(delay)).await;
+        Json(json!({ "actions": [{ "openPopupAction": { "popup": { "multiPageMenuRenderer": { "header": { "activeAccountHeaderRenderer": {
+            "accountName": { "runs": [{ "text": account }] } } } } } } }] }))
+    }));
+    let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let url = format!("http://{}", l.local_addr().unwrap());
+    tokio::spawn(async move {
+        let _ = axum::serve(l, app).await;
+    });
+    std::env::set_var("ENCORE_YTMUSIC_API", &url);
+    url
+}
+
+fn unmock_ytmusic() {
+    std::env::remove_var("ENCORE_YTMUSIC_API");
+}
+
+/// Wait (up to 5 s) until the state file says what `f` wants.
+async fn eventually(data: &Path, f: impl Fn(&AuthState) -> bool) -> bool {
+    for _ in 0..100 {
+        if f(&load(data)) {
+            return true;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    false
+}
+
 fn ck(domain: &str, name: &str, value: &str, expires: i64) -> Cookie {
     Cookie { domain: domain.into(), path: "/".into(), secure: true, http_only: false, expires, name: name.into(), value: value.into() }
 }
@@ -90,7 +123,8 @@ fn http_dates() {
 #[test]
 fn rotation_request_building() {
     let j = signed_in_jar(NOW + 86400);
-    let calls = rotate::build(&j, NOW);
+    let ff = "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:143.0) Gecko/20100101 Firefox/143.0";
+    let calls = rotate::build(&j, NOW, ff);
     assert_eq!(calls.len(), 2);
     let y = &calls[0];
     assert_eq!(y.url, "https://accounts.youtube.com/RotateCookies");
@@ -98,6 +132,7 @@ fn rotation_request_building() {
     let h = |k: &str| y.headers.iter().find(|(n, _)| n == k).map(|(_, v)| v.as_str());
     assert_eq!(h("Content-Type"), Some("application/json"));
     assert_eq!(h("Origin"), Some("https://accounts.youtube.com"));
+    assert_eq!(h("User-Agent"), Some(ff), "the rotation presents the browser the session came from");
     // youtube.com cookies to accounts.youtube.com, google.com ones to accounts.google.com
     assert!(h("Cookie").unwrap().contains("__Secure-1PSID=s1") && !h("Cookie").unwrap().contains("g1"));
     assert_eq!(calls[1].url, "https://accounts.google.com/RotateCookies");
@@ -105,10 +140,71 @@ fn rotation_request_building() {
     assert!(gc.contains("__Secure-1PSID=g1") && !gc.contains("SAPISID"));
     // only youtube cookies: one call; no session cookies: none
     let only_yt = Jar(j.0.iter().filter(|c| c.domain.contains("youtube")).cloned().collect());
-    assert_eq!(rotate::build(&only_yt, NOW).len(), 1);
-    assert!(rotate::build(&Jar(vec![ck(".youtube.com", "PREF", "x", 0)]), NOW).is_empty());
+    assert_eq!(rotate::build(&only_yt, NOW, rotate::UA).len(), 1);
+    assert!(rotate::build(&Jar(vec![ck(".youtube.com", "PREF", "x", 0)]), NOW, rotate::UA).is_empty());
     // expired cookies are not sent
-    assert!(rotate::build(&j, NOW + 86400 * 2).is_empty());
+    assert!(rotate::build(&j, NOW + 86400 * 2, rotate::UA).is_empty());
+}
+
+#[test]
+fn user_agent_follows_the_browser_of_the_handoff() {
+    let brave = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/141.0.0.0 Safari/537.36";
+    // the full string the extension reported wins
+    assert_eq!(rotate::user_agent(Some(brave), Some("Chrome 141")), brave);
+    assert_eq!(rotate::user_agent(Some(&format!("  {brave}\n")), None), brave, "trimmed");
+    // an older extension sent only the short name: a matching browser is built from it
+    assert!(rotate::user_agent(None, Some("Firefox 143")).contains("Firefox/143.0"));
+    assert!(rotate::user_agent(None, Some("Chrome 141")).contains("Chrome/141.0.0.0"));
+    let edge = rotate::user_agent(None, Some("Edge 141"));
+    assert!(edge.contains("Edg/141.0.0.0") && edge.contains("Chrome/141.0.0.0"));
+    // nothing usable: the default
+    assert_eq!(rotate::user_agent(None, None), rotate::UA);
+    assert_eq!(rotate::user_agent(Some("curl/8.0"), Some("Browser")), rotate::UA, "not a browser's string");
+    assert_eq!(rotate::user_agent(Some("Mozilla/5.0 \u{7}evil"), Some("Chrome x")), rotate::UA, "control characters and no version");
+}
+
+#[test]
+fn a_refresh_that_renewed_nothing_is_not_called_a_refresh() {
+    let mut s = SourceState { updated_at: Some(100.0), ..Default::default() };
+    // Google answered 200 but sent no cookies: checked, not refreshed – "last refresh" stays
+    note_refresh(&mut s, 200.0, true, Some(0), None, None);
+    assert_eq!((s.updated_at, s.checked_at, s.ok, s.rotated), (Some(100.0), Some(200.0), Some(true), Some(0)));
+    assert!(s.message.is_none(), "not a failure: the next refresh is due in 4 h as usual");
+    assert!(refresh_note(&s).unwrap().contains("renewed no cookies"));
+    // cookies came back: a real refresh
+    note_refresh(&mut s, 300.0, true, Some(2), None, Some("Kris".into()));
+    assert_eq!((s.updated_at, s.rotated), (Some(300.0), Some(2)));
+    assert_eq!(s.account.as_deref(), Some("Kris"));
+    assert!(refresh_note(&s).is_none());
+    // only checked on purpose (pasted cookies with the light refresh off): as before
+    note_refresh(&mut s, 400.0, true, None, None, None);
+    assert_eq!((s.updated_at, s.rotated), (Some(400.0), None));
+    // signed out: nothing bumped, the message stands
+    note_refresh(&mut s, 500.0, false, Some(0), Some("Signed out".into()), None);
+    assert_eq!((s.updated_at, s.ok, s.message.as_deref()), (Some(400.0), Some(false), Some("Signed out")));
+    assert!(refresh_note(&s).is_none(), "a signed-out source has its own message");
+    // the rotation call itself failed but the sign-in holds: nothing is known about the cookies (not
+    // "Google sent none back"), "last refresh" stays, and the message alone says what happened
+    let failed = rotate::Outcome::Failed("HTTP 503".into());
+    assert_eq!(renewed(&failed, true), None);
+    assert_eq!((renewed(&rotate::Outcome::Rotated(0), true), renewed(&rotate::Outcome::Rotated(3), true), renewed(&rotate::Outcome::Rotated(0), false)), (Some(0), Some(3), None));
+    note_refresh(&mut s, 600.0, true, renewed(&failed, true), Some("Couldn't renew the cookies (HTTP 503) – still signed in, trying again in 30 min".into()), None);
+    assert_eq!((s.updated_at, s.checked_at, s.ok, s.rotated), (Some(400.0), Some(600.0), Some(true), None));
+    assert!(refresh_note(&s).is_none(), "the message explains; no second note about Google sending no cookies");
+    assert!(s.message.as_deref().unwrap().contains("Couldn't renew"));
+}
+
+#[test]
+fn one_wording_for_the_extension_source() {
+    // the server's label is the words both the web card (web-rs/src/pages/youtube.rs) and the frozen JS UI show
+    assert_eq!(Kind::Extension.label(), "Everyday browser (extension)");
+    assert_eq!(Kind::Handoff.label(), "Handed-over sign-in");
+    assert_eq!(Kind::Pasted.label(), "Pasted cookies");
+    if let Some(root) = repo_root() {
+        let card = std::fs::read_to_string(root.join("web-rs/src/pages/youtube.rs")).unwrap();
+        assert!(card.contains("\"Everyday browser (extension)\""), "the web card uses the same words");
+        assert!(!card.contains("Browser extension (everyday browser)"));
+    }
 }
 
 fn cand(kind: Kind, jar: Jar, updated: Option<f64>, ok: Option<bool>) -> Candidate {
@@ -205,24 +301,70 @@ fn signed_out_notice_asks_for_a_new_handoff() {
     }
 }
 
+/// The repository root: the folder holding `extension/encore-youtube-cookies`, found by walking up from the
+/// server crate (so a workspace layout or a moved checkout works too). None: the server crate is tested on
+/// its own, without the rest of the repository.
+fn repo_root() -> Option<PathBuf> {
+    let mut d = Path::new(env!("CARGO_MANIFEST_DIR")).to_path_buf();
+    for _ in 0..4 {
+        if d.join("extension/encore-youtube-cookies/manifest.json").is_file() {
+            return Some(d);
+        }
+        d = d.parent()?.to_path_buf();
+    }
+    None
+}
+
 #[test]
 fn extension_manifests_are_valid() {
-    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../extension/encore-youtube-cookies");
-    let m: Value = serde_json::from_str(&std::fs::read_to_string(root.join("manifest.json")).unwrap()).unwrap();
+    let Some(repo) = repo_root() else {
+        eprintln!("skipped: no extension/encore-youtube-cookies above {} (server crate tested on its own)", env!("CARGO_MANIFEST_DIR"));
+        return;
+    };
+    let root = repo.join("extension/encore-youtube-cookies");
+    let read = |f: &str| std::fs::read_to_string(root.join(f)).unwrap_or_else(|e| panic!("{f}: {e}"));
+    let m: Value = serde_json::from_str(&read("manifest.json")).unwrap();
     assert_eq!(m["manifest_version"], 3);
     assert_eq!(m["incognito"], "split", "the hand-off opens its own incognito window");
+    assert_eq!(m["version"], "0.0.0", "scripts/build-extension.sh stamps the release version over this placeholder");
     let perms: Vec<&str> = m["permissions"].as_array().unwrap().iter().filter_map(|p| p.as_str()).collect();
-    for p in ["cookies", "tabs", "storage"] {
+    for p in ["cookies", "tabs", "storage", "alarms"] {
         assert!(perms.contains(&p), "permission {p}");
     }
-    for f in ["popup.html", "popup.js", "background.js"] {
-        assert!(root.join(f).exists(), "{f}");
+    assert_eq!(m["background"]["service_worker"], "background.js");
+    for f in ["popup.html", "popup.js", "options.html", "options.js", "handoff.html", "handoff.js", "background.js", "shared.js", "style.css", "icon.png", "README.md"] {
+        assert!(root.join(f).is_file(), "{f}");
     }
-    let ff = root.join("manifest.firefox.json");
-    if ff.exists() {
-        let m: Value = serde_json::from_str(&std::fs::read_to_string(ff).unwrap()).unwrap();
-        assert_eq!(m["manifest_version"], 3);
+    // every script and stylesheet a page loads is there
+    for page in ["popup.html", "options.html", "handoff.html"] {
+        let html = read(page);
+        for cap in html.split("src=\"").skip(1).chain(html.split("href=\"").skip(1)) {
+            let f = cap.split('"').next().unwrap();
+            assert!(root.join(f).is_file(), "{page} loads {f}");
+        }
     }
+    let ff: Value = serde_json::from_str(&read("manifest.firefox.json")).unwrap();
+    assert_eq!(ff["manifest_version"], 3);
+    assert_eq!(ff["version"], "0.0.0");
+    assert_eq!(ff["background"]["scripts"], json!(["shared.js", "background.js"]), "Firefox has no importScripts: shared.js first");
+    assert!(ff["incognito"].is_null(), "Firefox: spanning, so the hand-off page can watch the private window");
+    assert_eq!(ff["name"], m["name"]);
+    // the extension posts the browser it runs in: the server presents it when it refreshes the hand-off
+    let shared = read("shared.js");
+    assert!(shared.contains("user_agent: navigator.userAgent"), "shared.js reports navigator.userAgent");
+    assert!(shared.contains("/api/youtube/extension-cookies"), "the fixed upload route");
+    // one zip name everywhere the owner reads about it: the build script, the release notes template, the READMEs and the web card
+    let zip = "Encore-youtube-extension-";
+    for f in ["scripts/build-extension.sh", ".github/workflows/release.yml", "README.md", "extension/encore-youtube-cookies/README.md", "web-rs/src/pages/youtube.rs"] {
+        let text = std::fs::read_to_string(repo.join(f)).unwrap_or_else(|e| panic!("{f}: {e}"));
+        assert!(text.contains(zip), "{f} names the zip {zip}<version>.zip");
+    }
+    // and one path to the card in Settings
+    let ext_readme = read("README.md");
+    for f in ["README.md", "extension/encore-youtube-cookies/README.md"] {
+        assert!(std::fs::read_to_string(repo.join(f)).unwrap().contains("Apps & sources"), "{f} points at Settings → Apps & sources → YouTube sign-in");
+    }
+    assert!(ext_readme.contains("Connect the browser extension") && ext_readme.contains("Hand over a YouTube sign-in"));
 }
 
 #[test]
@@ -255,9 +397,11 @@ async fn extension_upload_route_needs_its_token() {
     std::env::set_var("ENCORE_CONFIG_DIR", &dir);
     let st = crate::build_state().unwrap();
     let app = crate::app(st.clone());
+    mock_ytmusic("Kris", 0).await;
+    let ua = "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/141.0.0.0 Safari/537.36 Brave";
     let body = json!({ "cookies": [
         { "domain": ".youtube.com", "hostOnly": false, "name": "SAPISID", "value": "a", "path": "/", "secure": true, "httpOnly": false, "session": false, "expirationDate": 4_000_000_000u64 },
-    ], "agent": "Chrome 141" });
+    ], "agent": "Chrome 141", "user_agent": ua });
     let post = |tok: Option<&str>| {
         let mut b = Request::builder().method("POST").uri("/api/youtube/extension-cookies").header("content-type", "application/json");
         if let Some(t) = tok {
@@ -280,13 +424,19 @@ async fn extension_upload_route_needs_its_token() {
         use std::os::unix::fs::PermissionsExt;
         assert_eq!(std::fs::metadata(super::ext_path(st.data_dir())).unwrap().permissions().mode() & 0o777, 0o600);
     }
-    assert_eq!(load(st.data_dir()).extension.agent.as_deref(), Some("Chrome 141"));
+    let s = load(st.data_dir());
+    assert_eq!(s.extension.agent.as_deref(), Some("Chrome 141"));
+    assert_eq!(s.extension.user_agent.as_deref(), Some(ua), "the browser's User-Agent is kept for the sign-in check");
+    assert_eq!(rotate::user_agent(s.extension.user_agent.as_deref(), s.extension.agent.as_deref()), ua);
     // the extension's cookies are now what yt-dlp gets
     assert_eq!(active(&st), Some(Kind::Extension));
     assert!(cookies_for_ytdlp(&st).unwrap().contains("SAPISID\ta"));
+    // the account name arrives from the lookup after the answer
+    assert!(eventually(st.data_dir(), |s| s.extension.account.as_deref() == Some("Kris")).await, "account looked up in the background");
     // the status route is for admins only
     let r = app.clone().oneshot(Request::builder().uri("/api/youtube/auth").body(Body::empty()).unwrap()).await.unwrap();
     assert_eq!(r.status(), 401);
+    unmock_ytmusic();
     let _ = std::fs::remove_dir_all(&dir);
 }
 
@@ -311,10 +461,14 @@ async fn handoff_becomes_the_server_owned_session_and_stays_out_of_logs() {
     std::env::set_var("ENCORE_CONFIG_DIR", &dir);
     let st = crate::build_state().unwrap();
     let app = crate::app(st.clone());
+    // YouTube Music stands in locally and takes its time: the hand-off answer must not wait for it
+    const SLOW_MS: u64 = 1500;
+    mock_ytmusic("Kris (@kris)", SLOW_MS).await;
+    let ff = "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:143.0) Gecko/20100101 Firefox/143.0";
     let token = "eyt_handofftoken";
     update(st.data_dir(), |s| s.ext_token = Some(token_hash(token)));
     let post = |handoff: bool, value: &str| {
-        let body = json!({ "handoff": handoff, "agent": "Firefox 143", "cookies": [
+        let body = json!({ "handoff": handoff, "agent": "Firefox 143", "user_agent": ff, "cookies": [
             { "domain": ".youtube.com", "hostOnly": false, "name": "SAPISID", "value": value, "path": "/", "secure": true, "httpOnly": false, "session": false, "expirationDate": 4_000_000_000u64 },
             { "domain": ".youtube.com", "hostOnly": false, "name": "__Secure-3PSID", "value": format!("{value}-3p"), "path": "/", "secure": true, "httpOnly": true, "session": false, "expirationDate": 4_000_000_000u64 },
         ] });
@@ -325,24 +479,40 @@ async fn handoff_becomes_the_server_owned_session_and_stays_out_of_logs() {
     let r = app.clone().oneshot(post(false, "everydaySECRET")).await.unwrap();
     assert_eq!(r.status(), 200);
     assert_eq!(active(&st), Some(Kind::Extension));
+    let started = std::time::Instant::now();
     let r = app.clone().oneshot(post(true, "handoffSECRET")).await.unwrap();
     assert_eq!(r.status(), 200);
+    assert!(started.elapsed() < Duration::from_millis(SLOW_MS), "the hand-off is answered without waiting for YouTube ({:?})", started.elapsed());
     let bytes = axum::body::to_bytes(r.into_body(), 1 << 20).await.unwrap();
     let text = String::from_utf8_lossy(&bytes);
     assert!(!text.contains("SECRET"), "no cookie values in the answer: {text}");
     let v: Value = serde_json::from_slice(&bytes).unwrap();
     assert_eq!(v["handoff"], true);
+    assert_eq!(v["ok"], true);
     assert_eq!(active(&st), Some(Kind::Handoff));
     assert!(cookies_for_ytdlp(&st).unwrap().contains("handoffSECRET"));
     let s = load(st.data_dir());
     assert_eq!(s.handoff.ok, Some(true));
     assert_eq!(s.handoff.agent.as_deref(), Some("Firefox 143"));
+    assert_eq!(s.handoff.user_agent.as_deref(), Some(ff), "the refresh will present the browser the hand-off came from");
+    assert_eq!(rotate::user_agent(s.handoff.user_agent.as_deref(), s.handoff.agent.as_deref()), ff);
     assert!(s.extension.updated_at.is_some(), "the everyday browser's cookies stay as the next choice");
     // the server refreshes the hand-off itself; the extension's never
     assert!(next_refresh(now(), active(&st), &s, false).is_some());
-    let status = status(&st).to_string();
-    assert_eq!(status_source(&status), "handoff");
-    assert!(!status.contains("SECRET"), "no cookie values in the status");
+    let shown = status(&st).to_string();
+    assert_eq!(status_source(&shown), "handoff");
+    assert!(!shown.contains("SECRET"), "no cookie values in the status");
+    assert!(shown.contains("Handed-over sign-in") && shown.contains("Everyday browser (extension)"), "{shown}");
+    // the account name follows once YouTube answered
+    assert!(eventually(st.data_dir(), |s| s.handoff.account.as_deref() == Some("Kris (@kris)")).await, "account looked up in the background");
+    assert_eq!(status(&st)["account"], "Kris (@kris)");
+    // a refresh that renewed nothing is reported as a check, and "last refresh" stays
+    let handed_at = load(st.data_dir()).handoff.updated_at;
+    update(st.data_dir(), |s| note_refresh(&mut s.handoff, now() + 1.0, true, Some(0), None, None));
+    let v = status(&st);
+    assert_eq!(v["last_refresh"], json!(handed_at));
+    assert_eq!(v["sources"]["handoff"]["rotated"], 0);
+    assert!(v["diagnostics"].as_str().unwrap().contains("renewed no cookies"), "{}", v["diagnostics"]);
     let logs = st.db.query("SELECT message FROM activity", vec![]).unwrap();
     assert!(logs.iter().any(|r| r["message"].as_str().unwrap_or("").contains("handed over")));
     assert!(!logs.iter().any(|r| r["message"].as_str().unwrap_or("").contains("SECRET")), "no cookie values in the log");
@@ -358,6 +528,8 @@ async fn handoff_becomes_the_server_owned_session_and_stays_out_of_logs() {
     let v: Value = serde_json::from_slice(&axum::body::to_bytes(r.into_body(), 1 << 20).await.unwrap()).unwrap();
     assert_eq!(v["ok"], false);
     assert!(cookies_for_ytdlp(&st).unwrap().contains("handoffSECRET"));
+    assert_eq!(load(st.data_dir()).handoff.account.as_deref(), Some("Kris (@kris)"), "a failed hand-off changes nothing");
+    unmock_ytmusic();
     let _ = std::fs::remove_dir_all(&dir);
 }
 

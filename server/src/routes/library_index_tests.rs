@@ -281,3 +281,112 @@ async fn cached_lists_follow_every_change_at_once() {
     assert_eq!(first_dated["album"], "Fresh", "{list}");
     assert!(Env::names(&e.labels("kind=albums&sort=released&dir=asc").await).contains(&"1888"));
 }
+
+/// Cached id lists of the songs list (`track-ids…` keys of the list cache) for this test's database.
+fn id_lists(e: &Env) -> usize {
+    super::super::LISTS.lock().unwrap().keys().filter(|(d, k)| *d == e.st.db.data_dir && k.starts_with("track-ids\u{1f}")).count()
+}
+
+fn ids_of(v: &Value) -> Vec<i64> {
+    v.as_array().unwrap().iter().map(|t| t["id"].as_i64().unwrap()).collect()
+}
+
+/// The songs list sorts the ids once per sort and keeps them; every page is a slice of that list, in
+/// the list's order, with the same columns as before – and a new song shows up on the next load.
+#[tokio::test]
+async fn song_pages_are_slices_of_one_cached_id_list() {
+    let mut e = library("song_pages").await;
+    for (sort, dir) in [("artist", "asc"), ("title", "desc"), ("album", "asc"), ("added", "desc"), ("released", "desc"), ("duration", "asc")] {
+        let all = e.get(&format!("/api/library/tracks?sort={sort}&dir={dir}&limit=1000")).await;
+        let ids = ids_of(&all);
+        assert_eq!(ids.len(), 35, "{sort}");
+        let mut uniq = ids.clone();
+        uniq.sort();
+        uniq.dedup();
+        assert_eq!(uniq.len(), ids.len(), "{sort}: no song twice");
+        for (offset, limit) in [(0, 10), (10, 5), (30, 10), (35, 5)] {
+            let page = e.get(&format!("/api/library/tracks?sort={sort}&dir={dir}&limit={limit}&offset={offset}")).await;
+            let want: Vec<i64> = ids.iter().copied().skip(offset).take(limit).collect();
+            assert_eq!(ids_of(&page), want, "{sort} {dir} offset {offset} limit {limit}");
+        }
+        let first = &all.as_array().unwrap()[0];
+        for col in ["id", "title", "artist", "album", "albumartist", "album_id", "track", "disc", "year", "duration", "format", "bitrate", "added_at"] {
+            assert!(first.get(col).is_some(), "{sort}: {col} missing from {first}");
+        }
+    }
+    // the order is the sort's own (the same ORDER BY the page query used to run)
+    let by_artist = e.get("/api/library/tracks?sort=artist&limit=1000").await;
+    let direct: Vec<i64> = {
+        use crate::db::RowExt;
+        e.st.db.query("SELECT id FROM tracks ORDER BY lower(artist) ASC, lower(album), disc, track, id", p![]).unwrap().iter().map(|r| r.i("id")).collect()
+    };
+    assert_eq!(ids_of(&by_artist), direct);
+    assert_eq!(by_artist[0]["artist"], "2Pac");
+    let by_len = e.get("/api/library/tracks?sort=duration&dir=asc&limit=3").await;
+    assert_eq!(by_len[0]["duration"], 100.0);
+    // one cached id list per sort and direction, not one entry per page
+    assert_eq!(id_lists(&e), 6);
+    // a new song is on the next page load (the write moves the library version)
+    e.album("Zz Top", "Zz", "2001", 1, 100.0, 1, OCT_2026);
+    let all = e.get("/api/library/tracks?sort=artist&limit=1000").await;
+    assert_eq!(all.as_array().unwrap().len(), 36);
+    assert!(all.as_array().unwrap().iter().any(|t| t["artist"] == "Zz Top"));
+    // the explicit-ids path keeps the asked order
+    let picked = e.get(&format!("/api/library/tracks?ids={},{}", ids_of(&all)[5], ids_of(&all)[2])).await;
+    assert_eq!(ids_of(&picked), vec![ids_of(&all)[5], ids_of(&all)[2]]);
+}
+
+/// Shuffle draws from the cached id list instead of sorting every song by RANDOM(): the asked number of
+/// distinct songs, none of the excluded ones, and all that are left when fewer remain than asked for.
+#[tokio::test]
+async fn shuffle_draws_without_sorting_every_song() {
+    let e = library("shuffle").await;
+    let got = e.get("/api/library/shuffle?limit=10").await;
+    let ids = ids_of(&got);
+    assert_eq!(ids.len(), 10);
+    let mut uniq = ids.clone();
+    uniq.sort();
+    uniq.dedup();
+    assert_eq!(uniq.len(), 10, "no song twice");
+    for col in ["id", "title", "artist", "album", "album_id", "format", "bitrate", "duration"] {
+        assert!(got[0].get(col).is_some(), "{col} missing from {}", got[0]);
+    }
+    let all: Vec<i64> = {
+        use crate::db::RowExt;
+        e.st.db.query("SELECT id FROM tracks ORDER BY id", p![]).unwrap().iter().map(|r| r.i("id")).collect()
+    };
+    let exclude: Vec<String> = all[..30].iter().map(|i| i.to_string()).collect();
+    let got = e.get(&format!("/api/library/shuffle?limit=10&exclude={}", exclude.join(","))).await;
+    let mut ids = ids_of(&got);
+    ids.sort();
+    assert_eq!(ids, all[30..].to_vec(), "the five songs left, each once");
+    // two draws of 20 out of 35 in the same order would be a very unlucky day
+    let a = ids_of(&e.get("/api/library/shuffle?limit=20").await);
+    let b = ids_of(&e.get("/api/library/shuffle?limit=20").await);
+    assert!(a != b || a.is_empty());
+    assert_eq!(id_lists(&e), 1, "one cached id list (any order) for shuffle");
+}
+
+/// The translate layer: nothing happens while no account has translations on; once one has, the list
+/// answers to that listener carry the `_t` fields, and the layer gets the user from the handler's own
+/// extractor (no user lookup of its own – the stamping still works with that path).
+#[tokio::test]
+async fn translations_are_stamped_through_the_handlers_user() {
+    let e = library("translated").await;
+    assert!(!crate::translate::anyone_on(&e.st.db));
+    crate::translate::store::put(&e.st.db, "Végétal", "en", "album", Some("Vegetal"), None, crate::translate::store::Source::Official).unwrap();
+    let v = e.get("/api/library/tracks?sort=album&limit=1000").await;
+    let veg = v.as_array().unwrap().iter().find(|t| t["album"] == "Végétal").unwrap().clone();
+    assert!(veg.get("album_t").is_none(), "nobody has translations on: {veg}");
+    // the listener turns them on (a write to users: the layer notices without a restart)
+    e.st.db.execute("UPDATE users SET prefs=? WHERE username='indexer'", p![r#"{"translate_mode":"under","translate_lang":"en"}"#]).unwrap();
+    assert!(crate::translate::anyone_on(&e.st.db));
+    let v = e.get("/api/library/tracks?sort=album&limit=1000").await;
+    let veg = v.as_array().unwrap().iter().find(|t| t["album"] == "Végétal").unwrap().clone();
+    assert_eq!(veg["album_t"], "Vegetal", "{veg}");
+    assert_eq!(veg["artist"], "Émilie Simon");
+    // off again: the fields go
+    e.st.db.execute("UPDATE users SET prefs='{}' WHERE username='indexer'", p![]).unwrap();
+    let v = e.get("/api/library/tracks?sort=album&limit=1000").await;
+    assert!(v.as_array().unwrap().iter().all(|t| t.get("album_t").is_none()));
+}

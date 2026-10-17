@@ -201,6 +201,84 @@ fn which(name: &str) -> bool {
     std::env::var("PATH").map(|p| p.split(':').any(|d| std::path::Path::new(d).join(name).is_file())).unwrap_or(false)
 }
 
+// ---- Diagnostics → Server ------------------------------------------------------------------------
+
+/// What the machine looks like from inside the container: CPUs, memory (the container's limit when there
+/// is one), the file systems of /config and /music (local or network), the database's size, whether any
+/// account has translations on, and the database read connections in effect. Plain facts the owner can
+/// quote when a page feels slow (`/api/system/diagnostics`, key `machine`).
+pub(crate) fn server_block(st: &AppState) -> Value {
+    let fs = |path: &str| -> Value {
+        if path.is_empty() {
+            return Value::Null;
+        }
+        match crate::fsinfo::of(std::path::Path::new(path)) {
+            Some(f) => json!({ "path": path, "fs": f.name, "network": f.network }),
+            None => json!({ "path": path }),
+        }
+    };
+    let (memory, memory_source) = memory_limit();
+    let (readers, source) = st.db.readers_in_effect();
+    json!({
+        "cpus": std::thread::available_parallelism().map(|n| n.get()).ok(),
+        "memory": memory,
+        "memory_source": memory_source,
+        "config": fs(&st.data_dir().to_string_lossy()),
+        "music": fs(&st.cfg.str("library_path")),
+        "database_bytes": st.db.file_size(),
+        "translations_on": crate::translate::anyone_on(&st.db),
+        "db_readers": readers,
+        "db_readers_source": source.as_str(),
+    })
+}
+
+/// (bytes, "cgroup" | "total"): the container's memory limit when one is set (cgroup v2, then v1), else
+/// the machine's memory; None when neither can be read (not Linux).
+fn memory_limit() -> (Option<u64>, &'static str) {
+    let read = |p: &str| std::fs::read_to_string(p).ok().map(|s| s.trim().to_string());
+    // "max" (v2) or a number near 2^63 (v1) means no limit
+    let limit = read("/sys/fs/cgroup/memory.max").or_else(|| read("/sys/fs/cgroup/memory/memory.limit_in_bytes"))
+        .and_then(|s| s.parse::<u64>().ok()).filter(|n| *n < 1 << 60);
+    if let Some(n) = limit {
+        return (Some(n), "cgroup");
+    }
+    let total = read("/proc/meminfo").and_then(|m| {
+        m.lines().find(|l| l.starts_with("MemTotal:")).and_then(|l| l.split_whitespace().nth(1)).and_then(|k| k.parse::<u64>().ok()).map(|k| k * 1024)
+    });
+    (total, "total")
+}
+
+#[cfg(test)]
+mod server_block_tests {
+    #[test]
+    fn the_server_block_names_every_fact() {
+        let _env = crate::TEST_ENV.lock().unwrap_or_else(|e| e.into_inner());
+        let dir = std::env::temp_dir().join(format!("encore-srvblock-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("music")).unwrap();
+        std::env::set_var("ENCORE_CONFIG_DIR", &dir);
+        let st = crate::build_state().unwrap();
+        st.cfg.set_many(&serde_json::json!({ "library_path": dir.join("music").to_string_lossy() }));
+        let b = super::server_block(&st);
+        assert!(b["cpus"].as_u64().unwrap_or(0) >= 1);
+        assert_eq!(b["config"]["path"], serde_json::json!(dir.to_string_lossy()));
+        assert_eq!(b["music"]["path"], serde_json::json!(dir.join("music").to_string_lossy()));
+        if cfg!(target_os = "linux") {
+            assert!(b["memory"].as_u64().unwrap_or(0) > 0, "{b}");
+            assert!(["cgroup", "total"].contains(&b["memory_source"].as_str().unwrap()));
+            assert!(b["config"]["fs"].is_string() && b["config"]["network"].is_boolean(), "{b}");
+        }
+        assert!(b["database_bytes"].as_u64().unwrap_or(0) > 0);
+        assert_eq!(b["translations_on"], serde_json::json!(false));
+        assert_eq!(b["db_readers"].as_u64().unwrap(), st.db.readers_in_effect().0 as u64);
+        assert!(["env", "default", "network"].contains(&b["db_readers_source"].as_str().unwrap()));
+        // the owner turns translations on: the block says so at once (no restart, no cache lag)
+        st.db.execute("UPDATE users SET prefs=? WHERE role='owner'", crate::p![r#"{"translate_mode":"under","translate_lang":"en"}"#]).unwrap();
+        assert_eq!(super::server_block(&st)["translations_on"], serde_json::json!(true));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+}
+
 fn disk(path: &str) -> Value {
     let o = std::process::Command::new("df").args(["-Pk", path]).output();
     let Ok(o) = o else { return Value::Null };

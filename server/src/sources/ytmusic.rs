@@ -4,12 +4,17 @@ use crate::state::AppState;
 use serde_json::{json, Value};
 
 const API: &str = "https://music.youtube.com/youtubei/v1";
+
+/// The web API's base. `ENCORE_YTMUSIC_API` points it at a stand-in (the tests' local mock); never set it in use.
+fn api() -> String {
+    std::env::var("ENCORE_YTMUSIC_API").ok().filter(|u| !u.trim().is_empty()).unwrap_or_else(|| API.into())
+}
 const SONGS: &str = "EgWKAQIIAWoMEA4QChADEAQQCRAF";
 const ALBUMS: &str = "EgWKAQIYAWoMEA4QChADEAQQCRAF";
 
 async fn call(st: &AppState, endpoint: &str, mut body: Value) -> anyhow::Result<Value> {
     body["context"] = json!({ "client": { "clientName": "WEB_REMIX", "clientVersion": "1.20250101.01.00", "hl": "en", "gl": "US" } });
-    let r = st.http.post(format!("{API}/{endpoint}?prettyPrint=false")).header("Origin", "https://music.youtube.com")
+    let r = st.http.post(format!("{}/{endpoint}?prettyPrint=false", api())).header("Origin", "https://music.youtube.com")
         .header("Referer", "https://music.youtube.com/").json(&body).send().await?;
     Ok(r.error_for_status()?.json().await?)
 }
@@ -139,7 +144,7 @@ pub async fn find_album(st: &AppState, artist: &str, album_title: &str, track_co
 /// Call YouTube Music as the user: pasted browser cookies (SAPISIDHASH) or a Google sign-in token.
 pub async fn authed(st: &AppState, data: &Value, endpoint: &str, mut body: Value) -> anyhow::Result<Value> {
     body["context"] = json!({ "client": { "clientName": "WEB_REMIX", "clientVersion": "1.20250101.01.00", "hl": "en", "gl": "US" } });
-    let mut rb = st.http.post(format!("{API}/{endpoint}?prettyPrint=false")).header("Origin", "https://music.youtube.com")
+    let mut rb = st.http.post(format!("{}/{endpoint}?prettyPrint=false", api())).header("Origin", "https://music.youtube.com")
         .header("X-Origin", "https://music.youtube.com").header("Referer", "https://music.youtube.com/").json(&body);
     if data["mode"] == "browser" {
         let h = &data["headers"];

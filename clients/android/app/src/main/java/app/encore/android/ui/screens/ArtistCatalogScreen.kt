@@ -33,7 +33,9 @@ import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.draw.shadow
+
 import androidx.compose.ui.input.nestedscroll.nestedScroll
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
@@ -85,52 +87,110 @@ import kotlinx.serialization.json.put
 // ---- artist (web/js/pages/discover.js renderArtist) --------------------------------------------------------------
 
 /**
- * Request discography: every release the server's release-type filter (or this request's own `filter`,
- * {kinds, skip}) wants that isn't owned or requested yet. The server decides which (title and year dedupe,
- * library check); each one arrives as a request event and marks its tile. → the request's status, or null.
+ * Request discography. With [releaseIds] (the boxes ticked in the sheet) the server requests exactly those,
+ * minus the owned and requested ones; without, every release the server's release-type filter (or this
+ * request's own [filter], {kinds, skip}) wants that isn't owned or requested yet. The server decides (title
+ * and year dedupe, library check); each release arrives as a request event and marks its tile. → the request's
+ * status, or null.
  */
-private suspend fun requestDiscography(features: app.encore.android.data.repo.FeaturesApi, a: ArtistPage, cover: String, filter: JsonObject?): String? {
+private suspend fun requestDiscography(features: app.encore.android.data.repo.FeaturesApi, a: ArtistPage, cover: String, releaseIds: List<String>?, filter: JsonObject?): String? {
     val body = buildJsonObject {
         put("kind", "artist")
         put("mbid", a.id)
         put("artist", a.name)
         if (cover.isNotEmpty()) put("cover_url", cover)
+        if (releaseIds != null) put("release_ids", JsonArray(releaseIds.map { JsonPrimitive(it) }))
         if (filter != null) put("release_filter", filter)
     }
     return submitRequest(features, body)
 }
 
-/** The Request discography panel (the web's modal): the release-type boxes from Settings, for this request only. */
+/** One box of the Request discography sheet: a MusicBrainz release group, or a release only Deezer / Apple Music know. */
+private data class DiscoEntry(
+    val id: String,
+    val title: String,
+    val year: String,
+    /** The group it is shown under ("Album", "Live" …). */
+    val kind: String,
+    /** The MusicBrainz primary type ("Album", "EP", "Single" …), for the release-type fallback sent to older servers. */
+    val primary: String,
+    val allowed: Boolean,
+    val skipped: String,
+    val owned: Boolean,
+    /** The live request status, "" when not requested. */
+    val requested: String,
+    val requestedLabel: String,
+) {
+    /** Owned or requested releases can't be ticked: there is nothing to request. */
+    val fixed: Boolean get() = owned || requested.isNotEmpty()
+}
+
+private fun primaryOf(type: String): String = when (type) {
+    "" -> "Other"
+    "Compilation" -> "Album"
+    else -> type
+}
+
+/**
+ * The Request discography sheet (the web's dialog): every release on the page – MusicBrainz, and the Deezer /
+ * Apple Music ones that have loaded – grouped by kind, a box per release, ticked to start when Settings →
+ * Release types allows it and it isn't owned or requested; Select all / Deselect all per group and overall;
+ * the button counts the ticks. Only the ticked releases are requested.
+ */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-private fun ReleaseTypesSheet(a: ArtistPage, onDismiss: () -> Unit, onRequest: (List<String>, List<String>) -> Unit) {
+private fun DiscographySheet(a: ArtistPage, ext: List<ExtRelease>, statuses: RequestStatuses, onDismiss: () -> Unit, onRequest: (List<DiscoEntry>) -> Unit) {
     val p = MaterialTheme.palette
     val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
-    var kinds by remember { mutableStateOf(a.releaseKinds.filter { it.on }.map { it.key }.toSet()) }
-    var skip by remember { mutableStateOf(a.releaseSkip.filter { it.on }.map { it.key }.toSet()) }
+    val entries = a.releaseGroups.map { rg ->
+        val rgKeys = albumKeys(rg)
+        val status = statuses.statusOf(rgKeys, rg.requestStatus)
+        DiscoEntry(rg.id, rg.title, rg.year, rg.kind.ifEmpty { groupKey(rg) }, primaryOf(rg.type), rg.allowed, rg.skipped, rg.inLibrary, status, statuses.labelOf(rgKeys, rg.requestLabel))
+    } + ext.filter { it.id.isNotEmpty() }.map { m ->
+        val mKeys = extReleaseKeys(a.name, m)
+        val status = statuses.statusOf(mKeys, m.requestStatus)
+        DiscoEntry(m.id, m.title, m.year, m.kind.ifEmpty { m.type.ifEmpty { "Other" } }, primaryOf(m.type), m.allowed, m.skipped, m.inLibrary, status, statuses.labelOf(mKeys, m.requestLabel))
+    }
+
+    val groups = entries.groupBy { it.kind }
+    val keys = groups.keys.sortedBy { groupRank(it) }
+    var ticked by remember { mutableStateOf(entries.filter { it.allowed && !it.fixed }.map { it.id }.toSet()) }
+    fun selectable(list: List<DiscoEntry>): Set<String> = list.filter { !it.fixed }.map { it.id }.toSet()
     ModalBottomSheet(onDismissRequest = onDismiss, sheetState = sheetState, containerColor = p.panel, contentColor = p.text) {
         Column(Modifier.fillMaxWidth().verticalScroll(rememberScrollState()).padding(horizontal = 22.dp).padding(bottom = 24.dp)) {
             Text("Request discography", style = MaterialTheme.typography.titleLarge, modifier = Modifier.padding(vertical = 8.dp))
             Text(
-                "Every release of ${a.name} you don't have yet, from MusicBrainz${if (a.catalogMerge) ", Deezer and Apple Music" else ""}. The boxes start from Settings → Release types and only change this request.",
+                "Every release of ${a.name} on this page, from MusicBrainz${if (a.catalogMerge) ", Deezer and Apple Music" else ""}. Ticked to start: what Settings → Release types allows and you don't have or haven't requested yet.",
                 style = MaterialTheme.typography.bodySmall, color = p.muted,
             )
-            Text("Kinds to request", style = MaterialTheme.typography.labelLarge, color = p.muted, modifier = Modifier.padding(top = 14.dp, bottom = 2.dp))
-            for (o in a.releaseKinds) {
-                ReleaseTypeBox(o.label, o.key in kinds) { on -> kinds = if (on) kinds + o.key else kinds - o.key }
+            Row(Modifier.fillMaxWidth().padding(top = 10.dp), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
+                Text("${entries.size} releases", style = MaterialTheme.typography.bodySmall, color = p.muted)
+                Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                    SmallButton("Select all") { ticked = selectable(entries) }
+                    SmallButton("Deselect all") { ticked = emptySet() }
+                }
             }
-            Text("Skip releases that are", style = MaterialTheme.typography.labelLarge, color = p.muted, modifier = Modifier.padding(top = 14.dp, bottom = 2.dp))
-            for (o in a.releaseSkip) {
-                ReleaseTypeBox(o.label, o.key in skip) { on -> skip = if (on) skip + o.key else skip - o.key }
+            for (k in keys) {
+                val list = groups[k] ?: continue
+                Row(Modifier.fillMaxWidth().padding(top = 14.dp, bottom = 2.dp), verticalAlignment = Alignment.CenterVertically) {
+                    Text("${k}s", style = MaterialTheme.typography.titleMedium, modifier = Modifier.weight(1f))
+                    Text("${list.size}", style = MaterialTheme.typography.bodySmall, color = p.muted, modifier = Modifier.padding(end = 8.dp))
+                    SmallButton("Select all") { ticked = ticked + selectable(list) }
+                    Spacer(Modifier.width(6.dp))
+                    SmallButton("Deselect all") { ticked = ticked - list.map { it.id }.toSet() }
+                }
+                for (e in list) {
+                    ReleaseBox(e, e.id in ticked) { on -> ticked = if (on) ticked + e.id else ticked - e.id }
+                }
             }
             Row(Modifier.fillMaxWidth().padding(top = 16.dp), horizontalArrangement = Arrangement.spacedBy(8.dp, Alignment.End)) {
                 EncoreButton("Cancel") { onDismiss() }
-                EncoreButton("Request", iconRes = R.drawable.ic_download, primary = true) {
-                    if (kinds.isEmpty()) {
-                        Toasts.show("Tick at least one kind of release", "err")
+                val n = ticked.size
+                EncoreButton("Request $n release${if (n == 1) "" else "s"}", iconRes = R.drawable.ic_download, primary = true) {
+                    if (ticked.isEmpty()) {
+                        Toasts.show("Tick at least one release", "err")
                     } else {
-                        // in the server's order, like the web sends them
-                        onRequest(a.releaseKinds.map { it.key }.filter { it in kinds }, a.releaseSkip.map { it.key }.filter { it in skip })
+                        onRequest(entries.filter { it.id in ticked }) // in the page's order
                     }
                 }
             }
@@ -138,13 +198,29 @@ private fun ReleaseTypesSheet(a: ArtistPage, onDismiss: () -> Unit, onRequest: (
     }
 }
 
+/** A release's box: title, year and why it starts unticked (owned, requested, or off in Release types). */
 @Composable
-private fun ReleaseTypeBox(label: String, checked: Boolean, onChange: (Boolean) -> Unit) {
-    Row(Modifier.fillMaxWidth().clickable { onChange(!checked) }, verticalAlignment = Alignment.CenterVertically) {
-        Checkbox(checked = checked, onCheckedChange = { onChange(it) })
-        Text(label, style = MaterialTheme.typography.bodyMedium)
+private fun ReleaseBox(e: DiscoEntry, checked: Boolean, onChange: (Boolean) -> Unit) {
+    val p = MaterialTheme.palette
+    val note = when {
+        e.owned -> "In library"
+        e.requested.isNotEmpty() -> e.requestedLabel.ifEmpty { "Requested" }
+        e.skipped.isNotEmpty() -> "${e.skipped} – off in Release types"
+        else -> ""
+    }
+    Row(
+        Modifier.fillMaxWidth().clickable(enabled = !e.fixed) { onChange(!checked) }.alpha(if (e.fixed) 0.6f else 1f),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Checkbox(checked = checked, onCheckedChange = { onChange(it) }, enabled = !e.fixed)
+        Column(Modifier.weight(1f)) {
+            Text(e.title, style = MaterialTheme.typography.bodyMedium, maxLines = 1, overflow = TextOverflow.Ellipsis)
+            val sub = listOf(e.year, note).filter { it.isNotEmpty() }.joinToString(" · ")
+            if (sub.isNotEmpty()) Text(sub, style = MaterialTheme.typography.bodySmall, color = p.muted, maxLines = 1, overflow = TextOverflow.Ellipsis)
+        }
     }
 }
+
 
 /** The order the discography's groups come in. */
 private val GROUP_ORDER = listOf(
@@ -238,12 +314,13 @@ fun CatalogArtistScreen(nav: Nav, mbid: String) {
                                 LiveBadge(status, statusText)
                             } else {
                                 EncoreButton("Request discography", iconRes = R.drawable.ic_download) {
-                                    // the release-type boxes for this request (older servers have none: the plain request)
+                                    // the releases to tick, for this request (older servers have no release types: the plain request)
                                     if (a.releaseKinds.isNotEmpty()) {
                                         discoSheet = true
                                     } else {
                                         scope.launch {
-                                            val st = requestDiscography(features, a, firstCover, null) ?: return@launch
+                                            val st = requestDiscography(features, a, firstCover, null, null) ?: return@launch
+
                                             statuses.mark(artistKeys, st, if (st == "pending") "Awaiting approval" else "Discography requested")
                                         }
                                     }
@@ -377,18 +454,23 @@ fun CatalogArtistScreen(nav: Nav, mbid: String) {
             }
 
             if (discoSheet) {
-                ReleaseTypesSheet(a, onDismiss = { discoSheet = false }) { kinds, skip ->
+                DiscographySheet(a, extReleases ?: emptyList(), statuses, onDismiss = { discoSheet = false }) { picked ->
                     discoSheet = false
                     scope.launch {
+                        // a server from before 0.26 doesn't know release_ids: it gets the kinds of the ticked releases as
+                        // this request's release types instead, and skips only the extras none of them belong to
+                        val kinds = a.releaseKinds.map { it.key }.filter { k -> picked.any { it.primary == k } }
+                        val skip = a.releaseSkip.map { it.key }.filter { k -> picked.none { it.kind == k } }
                         val filter = buildJsonObject {
                             put("kinds", JsonArray(kinds.map { JsonPrimitive(it) }))
                             put("skip", JsonArray(skip.map { JsonPrimitive(it) }))
                         }
-                        val st = requestDiscography(features, a, firstCover, filter) ?: return@launch
+                        val st = requestDiscography(features, a, firstCover, picked.map { it.id }, filter) ?: return@launch
                         statuses.mark(artistKeys, st, if (st == "pending") "Awaiting approval" else "Discography requested")
                     }
                 }
             }
+
 
             confirmMissing?.let { (k, missing) ->
                 ConfirmDialog(

@@ -13,7 +13,7 @@ use axum_extra::extract::CookieJar;
 use rand::Rng;
 use serde_json::{json, Map, Value};
 use std::collections::{HashMap, VecDeque};
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 use subtle::ConstantTimeEq;
 
 pub const COOKIE: &str = "encore_session";
@@ -346,6 +346,28 @@ pub struct Owner(pub Row);
 /// Signed in or not.
 pub struct MaybeUser(pub Option<Row>);
 
+/// A middleware's parking place for the signed-in user: it puts an empty slot into the request's
+/// extensions before the handler runs, the `User` / `MaybeUser` extractors fill it, and the middleware
+/// reads it once the handler has answered, so it needs no session and user queries of its own
+/// (`translate::stamp_layer`).
+#[derive(Clone, Default)]
+pub struct UserSlot(Arc<Mutex<Option<Row>>>);
+
+impl UserSlot {
+    fn fill(parts: &Parts, u: &Row) {
+        if let Some(slot) = parts.extensions.get::<UserSlot>() {
+            let mut copy = u.clone();
+            copy.remove("password_hash");
+            *slot.0.lock().unwrap_or_else(|e| e.into_inner()) = Some(copy);
+        }
+    }
+
+    /// The user the handler's extractor found (None when the handler had none, or nobody was signed in).
+    pub fn take(&self) -> Option<Row> {
+        self.0.lock().unwrap_or_else(|e| e.into_inner()).take()
+    }
+}
+
 impl FromRequestParts<AppState> for User {
     type Rejection = ApiError;
     async fn from_request_parts(parts: &mut Parts, st: &AppState) -> Result<Self, Self::Rejection> {
@@ -357,6 +379,7 @@ impl FromRequestParts<AppState> for User {
             }
         }
         u.remove("password_hash");
+        UserSlot::fill(parts, &u);
         Ok(User(u))
     }
 }
@@ -386,7 +409,11 @@ impl FromRequestParts<AppState> for Owner {
 impl FromRequestParts<AppState> for MaybeUser {
     type Rejection = ApiError;
     async fn from_request_parts(parts: &mut Parts, st: &AppState) -> Result<Self, Self::Rejection> {
-        Ok(MaybeUser(user_from_parts(st, parts)?.map(|(u, _)| u)))
+        let u = user_from_parts(st, parts)?.map(|(u, _)| u);
+        if let Some(u) = &u {
+            UserSlot::fill(parts, u);
+        }
+        Ok(MaybeUser(u))
     }
 }
 

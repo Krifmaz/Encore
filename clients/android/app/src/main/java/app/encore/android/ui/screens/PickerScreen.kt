@@ -2,6 +2,7 @@ package app.encore.android.ui.screens
 
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -35,15 +36,19 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.input.nestedscroll.nestedScroll
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import app.encore.android.R
+import app.encore.android.data.api.ApiException
+import app.encore.android.data.api.str
 import app.encore.android.data.repo.PickResult
 import app.encore.android.data.repo.PickerInfo
 import app.encore.android.data.repo.PickerOpts
+import app.encore.android.data.repo.PickerSource
 import app.encore.android.ui.Nav
 import app.encore.android.ui.components.Badge
 import app.encore.android.ui.components.ChoiceRow
@@ -68,10 +73,45 @@ import kotlinx.serialization.json.JsonElement
 import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.put
 
-/** picker.js `NAMES`: the sources' display names. */
-private val SOURCE_NAMES = mapOf("slskd" to "Soulseek", "deezer" to "Deezer", "ytmusic" to "YouTube Music", "lidarr" to "Lidarr", "torznab" to "Torrents & Usenet")
-
 private fun isUrl(v: String): Boolean = Regex("^https?://\\S+$", RegexOption.IGNORE_CASE).matches(v.trim())
+
+/** A failed search on one source: the message and, for a 409 (signed out, stopped, off), the settings link. */
+private class PickErr(val message: String, val settings: String = "", val label: String = "")
+
+private fun pickErr(e: Exception): PickErr {
+    val body = (e as? ApiException)?.body
+    return PickErr(e.message ?: "Search failed", body?.str("settings") ?: "", body?.str("settings_label") ?: "")
+}
+
+/** The word after a tab's name for a source that can't search right now. */
+private fun stateWord(state: String): String = when (state) {
+    "sign_in" -> "sign in"
+    "not_connected" -> "not connected"
+    "not_installed" -> "not installed"
+    "off" -> "off"
+    else -> ""
+}
+
+/** The web UI's settings page for a `#/settings?s=…` link, on this server (the phone has no admin settings of its own). */
+private fun settingsUrl(nav: Nav, link: String): String = nav.graph.api.base.trimEnd('/') + "/" + link.trimStart('/')
+
+/** "Sign in to Tidal – Settings → streamrip": a hint with its settings link, which opens the web UI. */
+@OptIn(ExperimentalLayoutApi::class)
+@Composable
+private fun HintLine(nav: Nav, hint: String, settings: String, label: String, error: Boolean = false) {
+    val p = MaterialTheme.palette
+    val context = LocalContext.current
+    FlowRow(Modifier.padding(horizontal = Gutter, vertical = 6.dp), horizontalArrangement = Arrangement.spacedBy(6.dp), verticalArrangement = Arrangement.spacedBy(2.dp)) {
+        if (hint.isNotEmpty()) Text(hint, style = MaterialTheme.typography.bodySmall, color = if (error) EncoreColors.Err else p.muted)
+        if (settings.isNotEmpty()) {
+            Text(
+                (if (hint.isNotEmpty()) "– " else "") + label.ifEmpty { "Settings" },
+                style = MaterialTheme.typography.bodySmall, color = p.accent,
+                modifier = Modifier.clickable { openUrl(context, settingsUrl(nav, settings)) },
+            )
+        }
+    }
+}
 
 /**
  * The manual download picker (web/js/pages/picker.js): search every source, see quality / size / uploader and
@@ -84,13 +124,12 @@ fun PickerScreen(nav: Nav, opts: PickerOpts) {
     val p = MaterialTheme.palette
     val scope = rememberCoroutineScope()
     val info = rememberLoad("picker-sources") { features.pickerSources() }
-    val kind = if (opts.kind == "track") "track" else "album"
     var query by remember { mutableStateOf(listOf(opts.artist, opts.title.ifEmpty { opts.album }).filter { it.isNotEmpty() }.joinToString(" ")) }
     var linkUrl by remember { mutableStateOf("") }
     var tab by remember { mutableStateOf(0) }
     var lossless by remember { mutableStateOf(false) }
     val results = remember { mutableStateMapOf<String, List<PickResult>>() }
-    val errors = remember { mutableStateMapOf<String, String>() }
+    val errors = remember { mutableStateMapOf<String, PickErr>() }
     val loading = remember { mutableStateMapOf<String, Boolean>() }
     var searchGen by remember { mutableStateOf(0) }
     var busy by remember { mutableStateOf(false) }
@@ -122,13 +161,14 @@ fun PickerScreen(nav: Nav, opts: PickerOpts) {
                 LaunchedEffect(Unit) { Toasts.show("Manual search is limited to admins", "err"); nav.back() }
                 return@LoadableContent
             }
-            val sources = inf.sources.filter { !(it.id == "lidarr" && kind != "album") }
-            // one search per source, all at once; results land as they come
+            // every source the server knows has a tab; only the ready ones search, the others show why not
+            val sources = inf.sources
             LaunchedEffect(searchGen) {
                 if (sources.isEmpty()) return@LaunchedEffect
                 results.clear(); errors.clear()
                 val q = query.trim()
                 for (s in sources) {
+                    if (!s.ready) continue
                     loading[s.id] = true
                     launch {
                         try {
@@ -136,7 +176,8 @@ fun PickerScreen(nav: Nav, opts: PickerOpts) {
                         } catch (e: CancellationException) {
                             throw e
                         } catch (e: Exception) {
-                            errors[s.id] = e.message ?: "Search failed"
+                            // a 409 carries the source's state and settings link ("Soulseek isn't connected yet")
+                            errors[s.id] = pickErr(e)
                         }
                         loading[s.id] = false
                     }
@@ -145,6 +186,11 @@ fun PickerScreen(nav: Nav, opts: PickerOpts) {
             val tabs = listOf("all" to "All") + sources.map { it.id to it.name }
             val current = tabs.getOrNull(tab)?.first ?: "all"
             val showing = if (current == "all") sources.map { it.id } else listOf(current)
+            fun tabLabel(id: String, name: String): String {
+                if (id == "all") return "All"
+                val s = sources.firstOrNull { it.id == id }
+                return if (s == null || s.ready) name + " " + (results[id]?.size ?: 0) else name + " · " + stateWord(s.state)
+            }
 
             LazyColumn(Modifier.fillMaxSize().padding(padding)) {
                 item {
@@ -180,7 +226,7 @@ fun PickerScreen(nav: Nav, opts: PickerOpts) {
                 }
                 item {
                     Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
-                        ChoiceRow(tabs.map { (id, name) -> if (id == "all") "All" else name + " " + (results[id]?.size ?: 0) }, tab, onSelect = { tab = it }, modifier = Modifier.weight(1f))
+                        ChoiceRow(tabs.map { (id, name) -> tabLabel(id, name) }, tab, onSelect = { tab = it }, modifier = Modifier.weight(1f))
                     }
                 }
                 item {
@@ -193,14 +239,17 @@ fun PickerScreen(nav: Nav, opts: PickerOpts) {
                     item { Text("No download sources are enabled – set them up in Settings.", color = p.muted, modifier = Modifier.padding(Gutter)) }
                 }
                 for (src in showing) {
-                    val name = SOURCE_NAMES[src] ?: sources.firstOrNull { it.id == src }?.name ?: src
+                    val source: PickerSource? = sources.firstOrNull { it.id == src }
+                    val name = source?.name?.ifEmpty { null } ?: src
                     var list = results[src] ?: emptyList()
                     if (lossless) list = list.filter { it.lossless }
-                    if (current == "all") item(key = "head-$src") { SectionHead(name, subtitle = "${list.size}") }
+                    // the count only for a source that was searched (the web's section head does the same)
+                    if (current == "all") item(key = "head-$src") { SectionHead(name, subtitle = if (source?.ready != false) "${list.size}" else null) }
+                    val err = errors[src]
                     when {
-                        errors[src] != null -> item(key = "err-$src") {
-                            Text(errors[src] ?: "", style = MaterialTheme.typography.bodySmall, color = EncoreColors.Err, modifier = Modifier.padding(horizontal = Gutter, vertical = 6.dp))
-                        }
+                        // signed out, not connected or off: "Sign in to Tidal – Settings → streamrip"
+                        source != null && !source.ready -> item(key = "state-$src") { HintLine(nav, source.hint, source.settings, source.settingsLabel) }
+                        err != null -> item(key = "err-$src") { HintLine(nav, err.message, err.settings, err.label, error = true) }
                         loading[src] == true -> item(key = "load-$src") {
                             Row(Modifier.padding(horizontal = Gutter, vertical = 6.dp), verticalAlignment = Alignment.CenterVertically) {
                                 Spinner(); Spacer(Modifier.width(8.dp))

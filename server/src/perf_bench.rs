@@ -3,7 +3,8 @@
 //!
 //!     cargo test --release perf_bench -- --ignored --nocapture
 //!
-//! Prints a Markdown table (docs/perf/2026-10.md has the numbers). MusicBrainz is a local mock.
+//! Prints a Markdown table (docs/perf/ has the numbers per release: 0.26-baseline.md before the 0.26 speed
+//! pass, 0.26.md after it). MusicBrainz is a local mock.
 use crate::state::AppState;
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
@@ -349,6 +350,18 @@ async fn perf_bench() {
     stop.store(true, std::sync::atomic::Ordering::Relaxed);
     bg.join().unwrap();
     rows.push(format!("| **home page while a background job reads the whole library** | | {:.1} | {:.1} | |", pct(&mut v.clone(), 0.5), pct(&mut v, 0.95)));
+    // paging through the songs list: ten pages nobody opened yet, one after the other (since 0.26 a page is a
+    // slice of one cached id list; the 0.25.3 WIP ran the sorted page query below for every new page)
+    let t = Instant::now();
+    for i in 0..10 {
+        s.get(&format!("/api/library/tracks?sort=title&limit=200&offset={}", 2000 + i * 200)).await;
+    }
+    rows.push(format!("| **songs list: 10 pages nobody opened yet, one after the other (total)** | | {:.1} | | |", t.elapsed().as_secs_f64() * 1000.0));
+    let t = Instant::now();
+    for i in 0..10 {
+        let _ = s.st.db.query(&format!("SELECT {} FROM tracks ORDER BY lower(title) ASC, id LIMIT 200 OFFSET {}", crate::routes::library::TRACK_COLS, 4000 + i * 200), crate::p![]);
+    }
+    rows.push(format!("| **the same 10 pages as sorted page queries (what each new page cost before 0.26, database only)** | | {:.1} | | |", t.elapsed().as_secs_f64() * 1000.0));
     println!("\n| endpoint | cold ms | warm p50 ms | warm p95 ms | KiB |\n|---|---|---|---|---|");
     for r in rows {
         println!("{r}");

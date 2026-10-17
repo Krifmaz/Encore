@@ -10,11 +10,13 @@ fn repo() -> PathBuf {
 }
 
 /// Strings only the JavaScript UI has, on purpose – listed here as (part of the reference text, why) so the
-/// test skips them knowingly. The reference holds none right now: the About card's interface switch
-/// (web/js/pages/settings.js, gone from web-rs with the switch of 0.26) was never extracted into it, so the
-/// list stays empty until a legacy-only string appears. An entry that matches no reference line fails the
-/// test, so a stale one is noticed.
-const LEGACY_ONLY: &[(&str, &str)] = &[];
+/// test skips them knowingly. The About card's interface switch (web/js/pages/settings.js, gone from web-rs
+/// with the switch of 0.26) was never extracted into the reference, so it needs no entry. An entry that
+/// matches no reference line fails the test, so a stale one is noticed.
+const LEGACY_ONLY: &[(&str, &str)] = &[
+    ("Tick at least one kind of release", "the Request discography dialog of 0.26 ticks releases, not kinds (\"Tick at least one release\")"),
+];
+
 
 /// A line of the reference: `<file>:<line>  [<category>]  <text>` (the line number is missing for a few entries).
 struct Entry {

@@ -80,6 +80,29 @@ fn active_targets(db: &Db) -> Vec<&'static str> {
     out
 }
 
+/// `active_targets` per database, looked up again only after a write to the accounts (`Db::users_version`).
+static ACTIVE: LazyLock<Mutex<HashMap<std::path::PathBuf, (u64, Vec<&'static str>)>>> = LazyLock::new(Default::default);
+
+/// The target languages of everyone who has translations on, from the cache (see `ACTIVE`).
+pub fn active_targets_cached(db: &Db) -> Vec<&'static str> {
+    // the version is read before the rows: a prefs change meanwhile makes the next call look again
+    let version = db.users_version();
+    if let Some((v, t)) = ACTIVE.lock().unwrap_or_else(|e| e.into_inner()).get(&db.data_dir) {
+        if *v == version {
+            return t.clone();
+        }
+    }
+    let targets = active_targets(db);
+    ACTIVE.lock().unwrap_or_else(|e| e.into_inner()).insert(db.data_dir.clone(), (version, targets.clone()));
+    targets
+}
+
+/// Does any account have translations on? (The stamp layer does nothing at all when not; Diagnostics
+/// shows it.)
+pub fn anyone_on(db: &Db) -> bool {
+    !active_targets_cached(db).is_empty()
+}
+
 // ---- stamping JSON answers ----------------------------------------------------------------------
 
 /// The fields that get `<field>_t` / `<field>_r`.
@@ -152,21 +175,31 @@ pub fn stamp(db: &Db, target: &str, v: &mut Value) -> Vec<(String, Kind, Option<
     wanted.into_iter().filter(|(t, _, _)| !known.contains(&script::normalize(t))).collect()
 }
 
-/// Middleware: JSON answers to a signed-in listener's GETs gain the translations they asked for.
-pub async fn stamp_layer(State(st): State<AppState>, req: Request, next: Next) -> Response {
+/// Middleware: JSON answers to a signed-in listener's GETs gain the translations they asked for. While no
+/// account has translations on it does nothing (most servers): no user lookup, no look at the body.
+pub async fn stamp_layer(State(st): State<AppState>, mut req: Request, next: Next) -> Response {
     let path = req.uri().path().to_string();
     let wanted = req.method() == Method::GET && path.starts_with("/api/") && !path.starts_with("/api/remote/events") && !path.starts_with("/api/translate/");
-    if !wanted {
+    if !wanted || !anyone_on(&st.db) {
         return next.run(req).await;
     }
+    // the handler's User extractor leaves the signed-in user here: no session and user queries of our own
+    let slot = auth::UserSlot::default();
+    req.extensions_mut().insert(slot.clone());
     let headers = req.headers().clone();
     let resp = next.run(req).await;
     let json = resp.headers().get(header::CONTENT_TYPE).and_then(|v| v.to_str().ok()).is_some_and(|c| c.starts_with("application/json"));
     if !json || resp.status() != StatusCode::OK {
         return resp;
     }
-    let st2 = st.clone();
-    let user = tokio::task::spawn_blocking(move || auth::current_user(&st2, &headers)).await.ok().flatten();
+    let user = match slot.take() {
+        Some(u) => Some(u),
+        // a handler without the extractor: looked up as before
+        None => {
+            let st2 = st.clone();
+            tokio::task::spawn_blocking(move || auth::current_user(&st2, &headers)).await.ok().flatten()
+        }
+    };
     let Some((_, target)) = user.as_ref().map(prefs_of).filter(|(m, _)| *m != Mode::Off) else { return resp };
     let (mut parts, body) = resp.into_parts();
     let Ok(bytes) = axum::body::to_bytes(body, 32 << 20).await else {
@@ -387,7 +420,7 @@ fn library_backlog(db: &Db, target: &'static str, limit: usize) -> Vec<Pending> 
 /// One pass: queued titles first, then the library in batches, then rows that wait for the model.
 async fn run_pass(st: &AppState) {
     let db = st.db.clone();
-    let targets = tokio::task::spawn_blocking(move || active_targets(&db)).await.unwrap_or_default();
+    let targets = tokio::task::spawn_blocking(move || active_targets_cached(&db)).await.unwrap_or_default();
     let mut model_ok = true;
     loop {
         let queued = take_queued(BATCH);

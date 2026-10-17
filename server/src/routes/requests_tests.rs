@@ -158,3 +158,26 @@ fn retry_detail_counts_attempts_and_keeps_a_bounded_log() {
     assert_eq!(d["log"][KEPT_LOG_LINES - 1], "attempt 50 failed: again");
     assert_eq!(d["log"][0], "line 61");
 }
+
+#[test]
+fn a_discography_request_keeps_the_ticked_releases() {
+    let st = state("ticked");
+    let u = user(&st, "owner3", "admin");
+    let artist = |mbid: &str, ids: Option<Vec<&str>>| NewRequest {
+        kind: "artist".into(), mbid: Some(mbid.into()), artist: Some("Band".into()),
+        release_filter: Some(json!({ "kinds": ["Album", "Single"], "skip": ["Live"] })),
+        release_ids: ids.map(|l| l.into_iter().map(String::from).collect()),
+        ..Default::default()
+    };
+    // the dialog's ticks: trimmed, blanks and doubles dropped, kept next to the request's own release types
+    let id = create_request(&st, &u, &artist("aaaaaaaa-2222-3333-4444-555555555555", Some(vec![" rg-1 ", "ext-d2-a3", "rg-1", "", "rg-2"])), None, None).unwrap();
+    let d = &row(&st, id)["detail"];
+    assert_eq!(d["release_ids"], json!(["rg-1", "ext-d2-a3", "rg-2"]));
+    assert_eq!(d["release_filter"], json!({ "kinds": ["Album", "Single"], "skip": ["Live"] }));
+    // nothing ticked is a mistake, not "everything"
+    let e = create_request(&st, &u, &artist("bbbbbbbb-2222-3333-4444-555555555555", Some(vec!["", "  "])), None, None).err().expect("refused");
+    assert_eq!(e.status.as_u16(), 400);
+    // the plain request (no dialog, or an older client): the release types alone decide
+    let id = create_request(&st, &u, &artist("cccccccc-2222-3333-4444-555555555555", None), None, None).unwrap();
+    assert!(row(&st, id)["detail"]["release_ids"].is_null());
+}

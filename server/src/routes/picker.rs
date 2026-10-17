@@ -1,10 +1,10 @@
 //! /api/picker: search one source by hand, then download exactly the chosen result.
 use crate::auth::{self, User};
 use crate::db::RowExt;
-use crate::error::{err, ApiResult};
+use crate::error::{err, ApiError, ApiResult};
 use crate::matcher::{compare, describe};
 use crate::routes::requests::{get_owned, quota, NewRequest};
-use crate::sources::{slskd, streamrip, torznab, ytmusic};
+use crate::sources::{slskd, streamrip, torznab, ytdlp, ytmusic};
 use crate::state::AppState;
 use crate::{p, worker};
 use axum::extract::State;
@@ -12,6 +12,8 @@ use axum::routing::{get, post};
 use axum::{Json, Router};
 use serde::Deserialize;
 use serde_json::{json, Value};
+use std::collections::HashMap;
+use std::sync::LazyLock;
 
 pub fn router() -> Router<AppState> {
     Router::new()
@@ -22,21 +24,118 @@ pub fn router() -> Router<AppState> {
 
 const LOSSLESS: [&str; 7] = ["flac", "alac", "wav", "aiff", "aif", "ape", "wv"];
 
-fn available(st: &AppState) -> Vec<Value> {
-    let mut out = vec![];
-    if slskd::enabled(st) {
-        out.push(json!({ "id": "slskd", "name": "Soulseek" }));
+/// The picker's sources in tab order: (id, name, the settings section that sets it up).
+const SOURCES: [(&str, &str, &str); 6] = [
+    ("slskd", "Soulseek", "slskd"),
+    ("torznab", "Torrents & Usenet", "torznab"),
+    ("qobuz", "Qobuz", "streamrip"),
+    ("tidal", "Tidal", "streamrip"),
+    ("deezer", "Deezer", "streamrip"),
+    ("ytmusic", "YouTube Music", "ytdlp"),
+];
+
+fn source_name(id: &str) -> &'static str {
+    SOURCES.iter().find(|s| s.0 == id).map(|s| s.1).unwrap_or("")
+}
+
+/// What a source can do right now. `state`: ready | sign_in (a login is missing) | not_connected (set up, but
+/// not reachable right now) | not_installed | off. `hint` says why in a few words when not ready; `section`
+/// is the settings section where it is fixed.
+pub struct SourceState {
+    pub state: &'static str,
+    pub hint: String,
+    pub section: &'static str,
+}
+
+fn state(state: &'static str, hint: impl Into<String>, section: &'static str) -> SourceState {
+    SourceState { state, hint: hint.into(), section }
+}
+
+/// The settings link for a section, as the web UI addresses it, and its label.
+fn settings_link(section: &str) -> (String, &'static str) {
+    let label = match section {
+        "slskd" => "Settings → Soulseek",
+        "torznab" => "Settings → Torrents & Usenet",
+        "streamrip" => "Settings → streamrip",
+        "ytdlp" => "Settings → yt-dlp",
+        "pipeline" => "Settings → Download pipeline",
+        _ => "Settings",
+    };
+    (format!("#/settings?s={section}"), label)
+}
+
+/// One streamrip service (Qobuz, Tidal, Deezer): streamrip on and installed, the service in the pipeline,
+/// its account signed in.
+fn streamrip_state(st: &AppState, id: &str) -> SourceState {
+    let name = source_name(id);
+    if !st.cfg.bool("streamrip_enabled") {
+        return state("off", format!("{name} downloads need streamrip switched on"), "streamrip");
     }
-    if torznab::enabled(st) {
-        out.push(json!({ "id": "torznab", "name": "Torrents & Usenet" }));
+    if streamrip::binary(st).is_none() {
+        return state("not_installed", streamrip::NOT_INSTALLED_MSG, "streamrip");
     }
-    if streamrip::enabled(st) && streamrip::services(st).iter().any(|s| s == "deezer") {
-        out.push(json!({ "id": "deezer", "name": "Deezer" }));
+    if !streamrip::services(st).iter().any(|s| s == id) {
+        return state("off", format!("{name} is not in the download pipeline"), "pipeline");
     }
-    if st.cfg.bool("ytdlp_enabled") {
-        out.push(json!({ "id": "ytmusic", "name": "YouTube Music" }));
+    match id {
+        "deezer" if !streamrip::deezer_arl_set(st) => state("sign_in", "Deezer needs an ARL cookie", "streamrip"),
+        "tidal" if !streamrip::tidal_signed_in(st) => state("sign_in", "Sign in to Tidal", "streamrip"),
+        "qobuz" if streamrip::qobuz_login(st).is_none() => state("sign_in", "Sign in to Qobuz (user id and token)", "streamrip"),
+        _ => state("ready", "", "streamrip"),
     }
-    out
+}
+
+/// A source's state right now (see `SourceState`).
+pub fn source_state(st: &AppState, id: &str) -> SourceState {
+    match id {
+        "slskd" => {
+            if !st.cfg.bool("slskd_enabled") {
+                return state("off", "Soulseek is off", "slskd");
+            }
+            if !crate::slskd_managed::configured(st) {
+                return state("sign_in", "Soulseek needs a username and password", "slskd");
+            }
+            if crate::slskd_managed::installed_version(st).is_none() {
+                return state("not_installed", "Soulseek is not installed – install it under Download tools", "slskd");
+            }
+            if crate::slskd_managed::status()["state"].as_str() == Some("running") {
+                return state("ready", "", "slskd");
+            }
+            state("not_connected", slskd::not_ready(st).unwrap_or_else(|| "Soulseek is starting – try again in a moment".into()), "slskd")
+        }
+        "torznab" => {
+            if !st.cfg.bool("torznab_enabled") {
+                return state("off", "Torrents & Usenet are off", "torznab");
+            }
+            if st.cfg.str("prowlarr_url").is_empty() || st.cfg.str("prowlarr_api_key").is_empty() {
+                return state("sign_in", "Prowlarr needs its address and API key", "torznab");
+            }
+            if !(torznab::qbit_ready(st) || torznab::sab_ready(st)) {
+                return state("not_connected", "No torrent or Usenet client is set up", "torznab");
+            }
+            state("ready", "", "torznab")
+        }
+        "qobuz" | "tidal" | "deezer" => streamrip_state(st, id),
+        "ytmusic" => if ytdlp::enabled(st) { state("ready", "", "ytdlp") } else { state("off", "YouTube Music is off (yt-dlp)", "ytdlp") },
+        _ => state("off", "Unknown source", "pipeline"),
+    }
+}
+
+/// Every source the picker knows, with its state: nothing is hidden, so a signed-out or stopped source shows
+/// why and where to fix it. `{id, name, state, hint, settings, settings_label}`.
+pub fn available(st: &AppState) -> Vec<Value> {
+    SOURCES.iter().map(|(id, name, _)| {
+        let s = source_state(st, id);
+        let (settings, label) = settings_link(s.section);
+        json!({ "id": id, "name": name, "state": s.state, "hint": s.hint, "settings": settings, "settings_label": label })
+    }).collect()
+}
+
+/// A search on a source that is not ready: 409 with the state and the settings link, so the client shows the
+/// hint for that one tab instead of a failed search.
+fn state_error(id: &str, s: &SourceState) -> ApiError {
+    let (settings, label) = settings_link(s.section);
+    err(409, s.hint.clone()).with(json!({ "source": id, "state": s.state, "settings": settings, "settings_label": label }))
 }
 
 async fn sources(State(st): State<AppState>, User(u): User) -> ApiResult<Json<Value>> {
@@ -71,17 +170,17 @@ fn contains(hay: &str, needle: &str) -> f64 {
 
 #[derive(Deserialize, Default)]
 #[serde(default)]
-struct SearchBody {
-    source: String,
-    kind: String,
-    artist: String,
-    title: String,
-    query: Option<String>,
+pub struct SearchBody {
+    pub source: String,
+    pub kind: String,
+    pub artist: String,
+    pub title: String,
+    pub query: Option<String>,
     /// For a song: the album it is on, when the client knows it.
-    album: Option<String>,
-    mbid: Option<String>,
-    track_count: Option<usize>,
-    length: Option<f64>,
+    pub album: Option<String>,
+    pub mbid: Option<String>,
+    pub track_count: Option<usize>,
+    pub length: Option<f64>,
 }
 
 async fn search_slskd(st: &AppState, b: &SearchBody, q: &str) -> anyhow::Result<Vec<Value>> {
@@ -327,23 +426,251 @@ async fn search_ytmusic(st: &AppState, b: &SearchBody, q: &str) -> anyhow::Resul
     }).collect())
 }
 
-async fn search(State(st): State<AppState>, User(u): User, Json(b): Json<SearchBody>) -> ApiResult<Json<Value>> {
-    if !auth::can(&st, &u, "pick") {
-        return Err(err(403, "Ask an admin for permission to pick downloads"));
+// ---- Tidal (openapi v2) --------------------------------------------------------------------------
+
+/// Tidal's v2 API. `ENCORE_TIDAL_API` points it at a stand-in (the tests' local mock); never set it in use.
+fn tidal_api() -> String {
+    std::env::var("ENCORE_TIDAL_API").ok().filter(|u| !u.trim().is_empty()).unwrap_or_else(|| "https://openapi.tidal.com/v2".into())
+}
+
+/// The token the search runs with, and the country: the developer app's client-credentials token when a
+/// Tidal Client ID is set (Settings → Integrations), else the account streamrip signed in with.
+async fn tidal_credentials(st: &AppState) -> anyhow::Result<(String, String)> {
+    let client = !st.cfg.str("tidal_client_id").is_empty() && !st.cfg.str("tidal_client_secret").is_empty();
+    // the account's token (refreshed when lapsed); with a Client ID a lapsed account only costs its country
+    let user = match streamrip::tidal_user_token(st).await {
+        Ok(u) => u,
+        Err(e) if client => {
+            st.db.log("warning", &format!("picker: Tidal account token: {e}"));
+            None
+        }
+        Err(e) => return Err(e),
+    };
+    let cc = user.as_ref().map(|u| u.1.clone()).filter(|c| !c.is_empty()).unwrap_or_else(|| "US".into());
+    if client {
+        return Ok((streamrip::tidal_token(st).await?, cc));
     }
+    match user {
+        Some((tok, _)) => Ok((tok, cc)),
+        None => anyhow::bail!("Sign in to Tidal"),
+    }
+}
+
+async fn tidal_get(st: &AppState, tok: &str, url: &str, query: &[(&str, &str)]) -> anyhow::Result<Value> {
+    let r = st.http.get(url).query(query).bearer_auth(tok).header("Accept", "application/vnd.api+json").send().await?;
+    let code = r.status().as_u16();
+    if code == 401 || code == 403 {
+        anyhow::bail!("Tidal rejected the sign-in token – sign in again in Settings → streamrip");
+    }
+    if code >= 400 {
+        anyhow::bail!("Tidal API {code}: {}", r.text().await.unwrap_or_default().chars().take(200).collect::<String>());
+    }
+    Ok(r.json().await?)
+}
+
+static ISO: LazyLock<regex::Regex> = LazyLock::new(|| regex::Regex::new(r"^P(?:T)?(?:(\d+)H)?(?:(\d+)M)?(?:([\d.]+)S)?").unwrap());
+
+/// "PT3M12S" → seconds.
+fn iso_secs(v: &str) -> Option<f64> {
+    let c = ISO.captures(v)?;
+    let g = |i| c.get(i).and_then(|m: regex::Match| m.as_str().parse::<f64>().ok()).unwrap_or(0.0);
+    Some(g(1) * 3600.0 + g(2) * 60.0 + g(3))
+}
+
+/// Tidal's `mediaTags` as a quality label: (label, lossless). Tidal's search gives the tier, not the exact
+/// rate: hi-res is 24-bit at up to 192 kHz.
+fn tidal_quality(tags: Option<&Vec<Value>>) -> (&'static str, bool) {
+    let Some(tags) = tags else { return ("FLAC", true) };
+    let has = |t: &str| tags.iter().any(|x| x.as_str() == Some(t));
+    if has("HIRES_LOSSLESS") {
+        ("FLAC 24-bit", true)
+    } else if has("MQA") {
+        ("MQA", true)
+    } else if has("LOSSLESS") {
+        ("FLAC 16/44.1", true)
+    } else {
+        ("AAC", false)
+    }
+}
+
+/// Picker rows from a `/albums` or `/tracks` listing (`included` carries the artists and albums), in the
+/// order the search gave the ids.
+fn tidal_rows(b: &SearchBody, d: &Value, order: &[String]) -> Vec<Value> {
+    let album = b.kind == "album";
+    let inc: HashMap<(String, String), Value> = d["included"].as_array().cloned().unwrap_or_default().into_iter()
+        .map(|x| ((x["type"].as_str().unwrap_or("").to_string(), x["id"].as_str().unwrap_or("").to_string()), x["attributes"].clone())).collect();
+    let items = d["data"].as_array().cloned().unwrap_or_default();
+    let mut out = vec![];
+    for id in order {
+        let Some(x) = items.iter().find(|x| x["id"].as_str() == Some(id)) else { continue };
+        let a = &x["attributes"];
+        let rel = |name: &str, typ: &str| -> Vec<Value> {
+            x["relationships"][name]["data"].as_array().cloned().unwrap_or_default().iter()
+                .filter_map(|r| inc.get(&(typ.to_string(), r["id"].as_str().unwrap_or("").to_string())).cloned()).collect()
+        };
+        let artists = rel("artists", "artists").iter().filter_map(|v| v["name"].as_str().map(String::from)).collect::<Vec<_>>().join(", ");
+        let mut title = a["title"].as_str().unwrap_or("").to_string();
+        if let Some(v) = a["version"].as_str().filter(|v| !v.is_empty() && !title.to_lowercase().contains(&v.to_lowercase())) {
+            title = format!("{title} ({v})");
+        }
+        let (quality, lossless) = tidal_quality(a["mediaTags"].as_array());
+        let dur = a["duration"].as_str().and_then(iso_secs);
+        let explicit = if a["explicit"].as_bool().unwrap_or(false) { "explicit" } else { "" };
+        let cover = |links: &Value| -> Value {
+            let l = links.as_array().cloned().unwrap_or_default();
+            l.iter().find(|i| i["meta"]["width"].as_u64() == Some(320)).or(l.first()).and_then(|i| i["href"].as_str()).map(|h| json!(h)).unwrap_or(Value::Null)
+        };
+        if album {
+            let year = a["releaseDate"].as_str().map(|d| d.chars().take(4).collect::<String>()).unwrap_or_default();
+            let kind = a["type"].as_str().map(|t| { let t = t.to_lowercase(); t.chars().next().map(|c| c.to_uppercase().collect::<String>() + &t[1..]).unwrap_or_default() }).unwrap_or_default();
+            let info = [kind, year, explicit.to_string()].into_iter().filter(|s| !s.is_empty()).collect::<Vec<_>>().join(" · ");
+            out.push(json!({ "source": "tidal", "key": format!("tidal:album:{id}"), "title": title, "subtitle": artists, "quality": quality, "lossless": lossless,
+                "tracks": a["numberOfItems"], "size": null, "duration": dur, "info": info, "cover": cover(&a["imageLinks"]),
+                "score": score(&b.title, &b.artist, &title, &artists, None, None), "payload": { "url": format!("https://tidal.com/browse/album/{id}") } }));
+        } else {
+            let alb = rel("albums", "albums");
+            let album_title = alb.first().and_then(|v| v["title"].as_str()).unwrap_or("");
+            let sub = format!("{artists} · {album_title}").trim_end_matches(" · ").to_string();
+            out.push(json!({ "source": "tidal", "key": format!("tidal:track:{id}"), "title": title, "subtitle": sub, "quality": quality, "lossless": lossless,
+                "tracks": 1, "size": null, "duration": dur, "info": explicit, "cover": alb.first().map(|v| cover(&v["imageLinks"])).unwrap_or(Value::Null), "isrc": a["isrc"],
+                "score": score(&b.title, &b.artist, &title, &artists, b.length, dur), "payload": { "url": format!("https://tidal.com/browse/track/{id}") } }));
+        }
+    }
+    out
+}
+
+/// Tidal's catalogue through openapi v2: the search gives ids, the listing their details with artists (and
+/// albums). Picks hand the worker a tidal.com link, which streamrip downloads with the signed-in account.
+async fn search_tidal(st: &AppState, b: &SearchBody, q: &str) -> anyhow::Result<Vec<Value>> {
+    let (tok, cc) = tidal_credentials(st).await?;
+    let base = tidal_api();
+    let typ = if b.kind == "album" { "albums" } else { "tracks" };
+    let found = tidal_get(st, &tok, &format!("{base}/searchResults/{}", urlencoding::encode(q)), &[("countryCode", cc.as_str()), ("include", typ)]).await?;
+    let ids: Vec<String> = found["data"]["relationships"][typ]["data"].as_array().cloned().unwrap_or_default().iter()
+        .filter(|x| x["type"].as_str() == Some(typ)).filter_map(|x| x["id"].as_str().map(String::from)).take(25).collect();
+    if ids.is_empty() {
+        return Ok(vec![]);
+    }
+    let include = if typ == "albums" { "artists" } else { "artists,albums" };
+    let listing = tidal_get(st, &tok, &format!("{base}/{typ}"), &[("countryCode", cc.as_str()), ("filter[id]", ids.join(",").as_str()), ("include", include)]).await?;
+    let mut out = tidal_rows(b, &listing, &ids);
+    by_score(&mut out);
+    Ok(out)
+}
+
+// ---- Qobuz ----------------------------------------------------------------------------------------
+
+/// "FLAC 24/192", "FLAC 16/44.1": Qobuz says the exact bit depth and sample rate (kHz) per release.
+fn qobuz_quality(depth: i64, rate: f64) -> String {
+    if depth <= 0 || rate <= 0.0 {
+        return "FLAC".into();
+    }
+    let rate = if rate.fract() == 0.0 { format!("{}", rate as i64) } else { format!("{rate:.1}") };
+    format!("FLAC {depth}/{rate}")
+}
+
+/// A Qobuz id as text (albums have string ids, tracks numbers).
+fn idstr(v: &Value) -> String {
+    match v { Value::String(s) => s.clone(), other => other.to_string().trim_matches('"').to_string() }
+}
+
+/// Picker rows from an `album/search` or `track/search` answer.
+fn qobuz_rows(b: &SearchBody, d: &Value) -> Vec<Value> {
+    let album = b.kind == "album";
+    let items = d[if album { "albums" } else { "tracks" }]["items"].as_array().cloned().unwrap_or_default();
+    items.iter().filter(|x| !x["id"].is_null()).map(|x| {
+        let id = idstr(&x["id"]);
+        let mut title = x["title"].as_str().unwrap_or("").to_string();
+        if let Some(v) = x["version"].as_str().filter(|v| !v.is_empty() && !title.to_lowercase().contains(&v.to_lowercase())) {
+            title = format!("{title} ({v})");
+        }
+        let quality = qobuz_quality(x["maximum_bit_depth"].as_i64().unwrap_or(0), x["maximum_sampling_rate"].as_f64().unwrap_or(0.0));
+        let explicit = if x["parental_warning"].as_bool().unwrap_or(false) { "explicit" } else { "" };
+        let warning = if x["streamable"].as_bool() == Some(false) { "Not streamable on Qobuz with this account" } else { "" };
+        let dur = x["duration"].as_f64();
+        if album {
+            let artist = x["artist"]["name"].as_str().unwrap_or("");
+            let year = x["release_date_original"].as_str().or(x["released_at"].as_str()).map(|d| d.chars().take(4).collect::<String>()).unwrap_or_default();
+            let info = [year, explicit.to_string()].into_iter().filter(|s| !s.is_empty()).collect::<Vec<_>>().join(" · ");
+            json!({ "source": "qobuz", "key": format!("qobuz:album:{id}"), "title": title, "subtitle": artist, "quality": quality, "lossless": true,
+                "tracks": x["tracks_count"], "size": null, "duration": dur, "info": info, "warning": warning, "cover": x["image"]["small"],
+                "score": score(&b.title, &b.artist, &title, artist, None, None), "payload": { "url": format!("https://open.qobuz.com/album/{id}") } })
+        } else {
+            let artist = x["performer"]["name"].as_str().or(x["album"]["artist"]["name"].as_str()).unwrap_or("");
+            let sub = format!("{artist} · {}", x["album"]["title"].as_str().unwrap_or("")).trim_end_matches(" · ").to_string();
+            json!({ "source": "qobuz", "key": format!("qobuz:track:{id}"), "title": title, "subtitle": sub, "quality": quality, "lossless": true,
+                "tracks": 1, "size": null, "duration": dur, "info": explicit, "warning": warning, "cover": x["album"]["image"]["small"], "isrc": x["isrc"],
+                "score": score(&b.title, &b.artist, &title, artist, b.length, dur), "payload": { "url": format!("https://open.qobuz.com/track/{id}") } })
+        }
+    }).collect()
+}
+
+/// Qobuz's catalogue with the app id and login streamrip uses. Picks hand the worker an open.qobuz.com link.
+async fn search_qobuz(st: &AppState, b: &SearchBody, q: &str) -> anyhow::Result<Vec<Value>> {
+    let app_id = streamrip::qobuz_app_id(st).await?;
+    let token = streamrip::qobuz_user_token(st, &app_id).await?;
+    let kind = if b.kind == "album" { "album" } else { "track" };
+    let mut req = st.http.get(format!("{}/{kind}/search", streamrip::qobuz_api())).query(&[("query", q), ("limit", "25"), ("offset", "0")]).header("X-App-Id", &app_id);
+    if let Some(t) = &token {
+        req = req.header("X-User-Auth-Token", t);
+    }
+    let r = req.send().await?;
+    let code = r.status().as_u16();
+    if code >= 400 {
+        let d: Value = r.json().await.unwrap_or(Value::Null);
+        let msg = d["message"].as_str().unwrap_or("no message");
+        anyhow::bail!(match code {
+            401 => "Qobuz rejected the login – check the user id and token in Settings → streamrip".to_string(),
+            400 => format!("Qobuz rejected the app id ({msg}) – run one Qobuz download so streamrip stores a fresh one"),
+            _ => format!("Qobuz API {code}: {msg}"),
+        });
+    }
+    let d: Value = r.json().await?;
+    let mut out = qobuz_rows(b, &d);
+    by_score(&mut out);
+    Ok(out)
+}
+
+// ---- the search route -----------------------------------------------------------------------------
+
+/// One source's search. A source that is not ready answers 409 with its state and settings link (see
+/// `state_error`), as does Soulseek when its engine runs without a server session, so the client shows the
+/// hint under that tab alone.
+pub async fn run_search(st: &AppState, b: &SearchBody) -> ApiResult<Vec<Value>> {
     if b.kind != "album" && b.kind != "track" {
         return Err(err(400, "Manual search works for albums and songs"));
+    }
+    if !SOURCES.iter().any(|s| s.0 == b.source) {
+        return Err(err(400, format!("Unknown source {}", b.source)));
+    }
+    let s = source_state(st, &b.source);
+    if s.state != "ready" {
+        return Err(state_error(&b.source, &s));
     }
     let q = b.query.clone().map(|q| q.trim().to_string()).filter(|q| !q.is_empty())
         .unwrap_or_else(|| [b.artist.as_str(), b.title.as_str()].iter().filter(|s| !s.is_empty()).cloned().collect::<Vec<_>>().join(" "));
     let res = match b.source.as_str() {
-        "slskd" => search_slskd(&st, &b, &q).await,
-        "torznab" => search_torznab(&st, &b, &q).await,
-        "deezer" => search_deezer(&st, &b, &q).await,
-        "ytmusic" => search_ytmusic(&st, &b, &q).await,
-        other => return Err(err(400, format!("Unknown source {other}"))),
+        "slskd" => search_slskd(st, b, &q).await,
+        "torznab" => search_torznab(st, b, &q).await,
+        "qobuz" => search_qobuz(st, b, &q).await,
+        "tidal" => search_tidal(st, b, &q).await,
+        "deezer" => search_deezer(st, b, &q).await,
+        _ => search_ytmusic(st, b, &q).await,
     };
-    res.map(|v| Json(json!(v))).map_err(|e| err(502, format!("{} search failed: {}", b.source, e.to_string().chars().take(160).collect::<String>())))
+    res.map_err(|e| {
+        let msg = e.to_string();
+        if b.source == "slskd" && (msg == slskd::NOT_CONNECTED || slskd::not_ready(st).is_some()) {
+            return state_error("slskd", &state("not_connected", msg, "slskd"));
+        }
+        err(502, format!("{} search failed: {}", source_name(&b.source), msg.chars().take(160).collect::<String>()))
+    })
+}
+
+async fn search(State(st): State<AppState>, User(u): User, Json(b): Json<SearchBody>) -> ApiResult<Json<Value>> {
+    if !auth::can(&st, &u, "pick") {
+        return Err(err(403, "Ask an admin for permission to pick downloads"));
+    }
+    run_search(&st, &b).await.map(|v| Json(json!(v)))
 }
 
 #[derive(Deserialize)]

@@ -425,17 +425,8 @@ fun CatalogArtistTile(nav: Nav, a: CatalogArtist, modifier: Modifier = Modifier,
     }
 }
 
-/** Opens the catalogue page of an artist; without an id the name is looked up (the web's `/artist-name/`). */
-fun openCatalogArtist(nav: Nav, mbid: String, name: String, scope: kotlinx.coroutines.CoroutineScope) {
-    if (mbid.isNotEmpty()) {
-        nav.open(Screen.CatalogArtist(mbid))
-        return
-    }
-    scope.launch {
-        val id = try { withContext(Dispatchers.IO) { nav.features.artistLookup(name) } } catch (_: Exception) { "" }
-        if (id.isNotEmpty()) nav.open(Screen.CatalogArtist(id)) else nav.open(Screen.Artist(name))
-    }
-}
+// `openCatalogArtist` (the catalogue page of an artist, looked up by name when there is no id) lives in
+// ArtistLinks.kt with the other artist navigation.
 
 /**
  * The web's `albumTile` for a release group: cover, the "In library" / status corner badge, the play or request

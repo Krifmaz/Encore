@@ -306,7 +306,7 @@ async fn diagnostics(State(st): State<AppState>, Admin(_): Admin) -> ApiResult<J
         settings.push(json!({ "key": k, "source": src, "env": if src == "env" { json!(d.env) } else { Value::Null }, "value": dump[k] }));
     }
     let uid = std::process::Command::new("id").arg("-u").output().ok().and_then(|o| String::from_utf8_lossy(&o.stdout).trim().parse::<i64>().ok());
-    Ok(Json(json!({ "version": crate::VERSION, "server": "rust", "uid": uid, "checks": checks, "settings": settings, "time": now() })))
+    Ok(Json(json!({ "version": crate::VERSION, "server": "rust", "uid": uid, "checks": checks, "settings": settings, "machine": super::system::server_block(&st), "time": now() })))
 }
 
 /// How far the cover thumbnail pass is: "Cover thumbnails: 12 340 / 18 000".

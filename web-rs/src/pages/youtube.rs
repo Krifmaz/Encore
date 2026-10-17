@@ -58,6 +58,7 @@ pub fn youtube_status_html(r: &Value) -> String {
     let sources = r.o("sources");
     let ok = has_source && sources.o(&source).truthy("signed_in");
     let badge = if !has_source { r##"<span class="badge">No cookies</span>"##.to_string() } else if ok { format!(r##"<span class="badge ok">{} Signed in</span>"##, icon("check")) } else { r##"<span class="badge warn">Signed out</span>"##.to_string() };
+    // `next_check` is the 0.26 compatibility name of `next_refresh` (servers from before 0.25.3): drop in 0.27
     let next = if r.truthy("next_refresh") { r.f("next_refresh") } else if r.truthy("next_check") { r.f("next_check") } else { 0.0 };
     let when = if has_source {
         format!("Last refresh {}{}", ago(r.f("last_refresh")), if next != 0.0 { format!(" · next refresh {}", until(next)) } else { String::new() })
@@ -129,7 +130,12 @@ pub fn bind_youtube(root: &Element) {
                         Ok(r) => {
                             card.paint(&r);
                             let ok = r.truthy("refreshed");
-                            toast(if ok { "Refreshed – still signed in" } else { "YouTube signed out" }, if ok { "ok" } else { "err" });
+                            // `rotated` 0: Google answered without new cookies – the sign-in was checked, not renewed
+                            let nothing_renewed = r.g("rotated").as_u64() == Some(0);
+                            // still signed in, but the renewal itself failed: the server's own words
+                            let trouble = r.o("sources").o(&r.s("source")).s("message");
+                            toast(if !ok { "YouTube signed out" } else if !trouble.is_empty() { trouble.as_str() } else if nothing_renewed { "Still signed in – Google sent no renewed cookies, so nothing was refreshed" } else { "Refreshed – still signed in" },
+                                if !ok { "err" } else if nothing_renewed || !trouble.is_empty() { "warn" } else { "ok" });
                         }
                         Err(err) => toast(&err.message, "err"),
                     }

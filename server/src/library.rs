@@ -181,13 +181,20 @@ impl Library {
         }
         let me = self.clone();
         let db2 = db.clone();
-        let (changed, removed) = tokio::task::spawn_blocking(move || me.scan_sync(&db2, &root, full)).await.unwrap_or((0, 0));
+        let (changed, removed) = tokio::task::spawn_blocking(move || {
+            let n = me.scan_sync(&db2, &root, full);
+            // the planner's statistics follow what the scan's queries wanted (cheap when there is nothing to do)
+            db2.optimize();
+            n
+        }).await.unwrap_or((0, 0));
         let msg = format!("Scan complete: {changed} updated, {removed} removed");
         if changed + removed > 0 {
             db.log("info", &msg);
             self.forget_cover(None);
+            // thumbnails and colours for what changed; a scan that found nothing new leaves the disk alone
+            // (the hourly scan used to walk every album's folder each time)
+            self.warm_covers(db.clone());
         }
-        self.warm_covers(db.clone());
         let mut s = self.scan.lock().unwrap();
         s.scanning = false;
         s.last_scan = Some(now());

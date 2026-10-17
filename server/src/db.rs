@@ -19,31 +19,72 @@ pub struct Db {
     next_reader: Arc<AtomicUsize>,
     /// goes up with every write to the songs or the artist aliases (see `library_version`)
     library_writes: Arc<AtomicU64>,
+    /// goes up with every write to the accounts (see `users_version`)
+    user_writes: Arc<AtomicU64>,
+    /// why there are as many read connections as there are (Diagnostics)
+    readers_source: ReadersSource,
     pub data_dir: PathBuf,
 }
 
-/// Read connections next to the write one (ENCORE_DB_READERS; 0 = every statement on one connection,
-/// as servers before 0.25.3 did).
-fn readers_wanted() -> usize {
-    std::env::var("ENCORE_DB_READERS").ok().and_then(|v| v.trim().parse().ok()).unwrap_or(4).min(16)
+/// Where the number of read connections came from.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ReadersSource {
+    /// `ENCORE_DB_READERS` is set
+    Env,
+    /// the default (4) on a local disk
+    Default,
+    /// off: the config folder is on this network file system
+    NetworkFs(&'static str),
+}
+
+impl ReadersSource {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            ReadersSource::Env => "env",
+            ReadersSource::Default => "default",
+            ReadersSource::NetworkFs(_) => "network",
+        }
+    }
+}
+
+/// Read connections next to the write one: `ENCORE_DB_READERS` when set (0 = every statement on one
+/// connection, as servers before 0.25.3 did), else 4 on a local disk and 0 when the config folder is on
+/// a network file system (NFS, SMB/CIFS, FUSE …: several connections to one file are slow or unsafe
+/// with their locking).
+fn readers_wanted(data_dir: &Path) -> (usize, ReadersSource) {
+    readers_for(std::env::var("ENCORE_DB_READERS").ok().as_deref(), crate::fsinfo::of(data_dir))
+}
+
+fn readers_for(env: Option<&str>, fs: Option<crate::fsinfo::FsInfo>) -> (usize, ReadersSource) {
+    if let Some(n) = env.and_then(|v| v.trim().parse::<usize>().ok()) {
+        return (n.min(16), ReadersSource::Env);
+    }
+    match fs {
+        Some(f) if f.network => (0, ReadersSource::NetworkFs(f.name)),
+        _ => (4, ReadersSource::Default),
+    }
 }
 
 /// Per-connection settings: WAL is safe with synchronous=NORMAL (a power cut can lose the last
 /// commits, never corrupt the file); a bigger page cache and memory-mapped reads make the library
-/// queries (60k songs) run from memory.
+/// queries (60k songs) run from memory; the prepared-statement cache holds the server's hot statements
+/// (rusqlite's default of 16 thrashed against a few hundred distinct ones); the WAL file is trimmed
+/// back to 64 MB after a checkpoint instead of keeping the size a full scan grew it to.
 fn tune(conn: &Connection) -> rusqlite::Result<()> {
     conn.busy_timeout(std::time::Duration::from_secs(10))?;
+    conn.set_prepared_statement_cache_capacity(128);
     conn.pragma_update(None, "foreign_keys", "ON")?;
     conn.pragma_update(None, "synchronous", "NORMAL")?;
     conn.pragma_update(None, "cache_size", -16000)?;   // KiB: 16 MB per connection
     conn.pragma_update(None, "temp_store", "MEMORY")?;
-    // mmap_size answers with the value it set: a pragma_update would see an unexpected row
+    // these two answer with the value they set: a pragma_update would see an unexpected row
     let _ = conn.query_row("PRAGMA mmap_size=268435456", [], |_| Ok(()));
+    let _ = conn.query_row("PRAGMA journal_size_limit=67108864", [], |_| Ok(()));
     Ok(())
 }
 
-fn open_readers(path: &Path) -> rusqlite::Result<Vec<Connection>> {
-    (0..readers_wanted()).map(|_| {
+fn open_readers(path: &Path, n: usize) -> rusqlite::Result<Vec<Connection>> {
+    (0..n).map(|_| {
         let c = Connection::open(path)?;
         tune(&c)?;
         Ok(c)
@@ -72,7 +113,9 @@ const SCHEMA: &str = include_str!("schema.sql");
 /// means "back up, then migrate".
 /// 24: round 3 (release types on requests; source blocks, track quality, contributions – see schema.sql).
 /// 25: translated and romanized titles (translations).
-pub const SCHEMA_VERSION: i64 = 25;
+/// 26: the lookup indexes of the 0.25.3 speed work (which added them without a bump, so no backup was
+///     taken first) plus six more (artist, request and play lookups), and ANALYZE after the migration.
+pub const SCHEMA_VERSION: i64 = 26;
 
 /// Exit code of the server when the database comes from a newer Encore.
 pub const EXIT_NEWER_DB: i32 = 3;
@@ -149,11 +192,91 @@ fn prepare(conn: &Connection) -> anyhow::Result<()> {
          CREATE INDEX IF NOT EXISTS idx_tracks_mb_albumartist ON tracks(mb_albumartistid);
          CREATE INDEX IF NOT EXISTS idx_tracks_mb_artist ON tracks(mb_artistid);
          CREATE INDEX IF NOT EXISTS idx_requests_mbid ON requests(mbid);
-         CREATE TABLE IF NOT EXISTS login_links (digest TEXT PRIMARY KEY, user_id INTEGER NOT NULL, expires_at REAL NOT NULL);",
+         CREATE TABLE IF NOT EXISTS login_links (digest TEXT PRIMARY KEY, user_id INTEGER NOT NULL, expires_at REAL NOT NULL);
+         -- schema 26: songs by artist (artist pages, car links, for-you), requests by song and by user
+         -- (catalog and discover pages look a request up per row; the leaderboard counts per user),
+         -- playlist rows and plays by song (deletes and the cover pass), plays by time (recent plays)
+         CREATE INDEX IF NOT EXISTS idx_tracks_lartist ON tracks(lower(artist));
+         CREATE INDEX IF NOT EXISTS idx_requests_kind_song ON requests(kind, lower(artist), lower(title));
+         CREATE INDEX IF NOT EXISTS idx_requests_user ON requests(user_id);
+         CREATE INDEX IF NOT EXISTS idx_pli_track ON playlist_items(track_id);
+         CREATE INDEX IF NOT EXISTS idx_plays_track ON plays(track_id);
+         CREATE INDEX IF NOT EXISTS idx_plays_time ON plays(played_at);",
     )?;
     conn.pragma_update(None, "user_version", SCHEMA_VERSION)?;
     Ok(())
 }
+
+/// After a migration the planner has no statistics for the new indexes (and a database that never had
+/// ANALYZE run has none at all): a 57k-row table with 20 indexes then gets guessed plans.
+fn analyze(conn: &Connection) {
+    if let Err(e) = conn.execute_batch("ANALYZE") {
+        tracing::warn!("ANALYZE after the schema migration failed: {e}");
+    }
+}
+
+/// The tables a statement writes: the name after INSERT INTO / REPLACE INTO / UPDATE / DELETE FROM /
+/// ALTER TABLE / DROP TABLE / CREATE TABLE, for every statement in the text (lower-cased, quotes and a
+/// schema prefix stripped). Tables a statement only reads (a subquery) are not in it. `--` comments are
+/// skipped, except inside a string literal or a quoted name.
+fn tables_written(sql: &str) -> Vec<String> {
+    let mut no_comments = String::with_capacity(sql.len());
+    let (mut quote, mut comment) = (None::<char>, false);
+    let mut chars = sql.chars().peekable();
+    while let Some(c) = chars.next() {
+        if comment {
+            if c == '\n' {
+                comment = false;
+                no_comments.push(' ');
+            }
+            continue;
+        }
+        match quote {
+            Some(q) => {
+                if c == q {
+                    quote = None;
+                }
+                no_comments.push(c);
+            }
+            None if c == '\'' || c == '"' => {
+                quote = Some(c);
+                no_comments.push(c);
+            }
+            None if c == '-' && chars.peek() == Some(&'-') => comment = true,
+            None => no_comments.push(c),
+        }
+    }
+    let tokens: Vec<String> = no_comments.split(|c: char| c.is_whitespace() || matches!(c, ';' | '(' | ')' | ','))
+        .filter(|t| !t.is_empty()).map(|t| t.to_ascii_lowercase()).collect();
+    let at = |i: usize| tokens.get(i).map(|s| s.as_str());
+    let mut out = vec![];
+    let mut i = 0;
+    while i < tokens.len() {
+        let name_at = match tokens[i].as_str() {
+            // UPDATE [OR ROLLBACK | ABORT | REPLACE | FAIL | IGNORE] table
+            "update" => if at(i + 1) == Some("or") { i + 3 } else { i + 1 },
+            // INSERT [OR …] INTO table, REPLACE INTO table
+            "into" if i >= 1 && (matches!(at(i - 1), Some("insert" | "replace")) || (i >= 3 && at(i - 3) == Some("insert") && at(i - 2) == Some("or"))) => i + 1,
+            "from" if i >= 1 && at(i - 1) == Some("delete") => i + 1,
+            "table" if i >= 1 && matches!(at(i - 1), Some("alter" | "drop")) => if at(i + 1) == Some("if") { i + 3 } else { i + 1 },
+            // CREATE [TEMP | TEMPORARY] TABLE [IF NOT EXISTS] table
+            "table" if i >= 1 && (at(i - 1) == Some("create") || (i >= 2 && at(i - 2) == Some("create"))) => if at(i + 1) == Some("if") { i + 4 } else { i + 1 },
+            _ => { i += 1; continue; }
+        };
+        if let Some(n) = at(name_at) {
+            let n = n.rsplit('.').next().unwrap_or(n);
+            out.push(n.trim_matches(|c| matches!(c, '"' | '`' | '[' | ']' | '\'')).to_string());
+        }
+        i = name_at + 1;
+    }
+    out
+}
+
+/// The tables the library answers (lists, the side bar, the artist index) are built from: a write to
+/// one of them moves `library_version`.
+const LIBRARY_TABLES: &[&str] = &["tracks", "artist_alias"];
+/// A write to one of these moves `users_version` (who has translations on, roles, prefs).
+const USER_TABLES: &[&str] = &["users"];
 
 pub fn now() -> f64 {
     std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs_f64()).unwrap_or(0.0)
@@ -211,21 +334,63 @@ impl Db {
             crate::backup::create(&conn, data_dir, crate::backup::Kind::BeforeUpgrade)?;
         }
         prepare(&conn)?;
-        let readers = open_readers(&path)?.into_iter().map(Mutex::new).collect();
-        Ok(Db { conn: Arc::new(Mutex::new(conn)), readers: Arc::new(readers), next_reader: Arc::new(AtomicUsize::new(0)), library_writes: Arc::new(AtomicU64::new(next_instance() << 40)), data_dir: data_dir.to_path_buf() })
+        if upgrade_from.is_some() {
+            analyze(&conn);
+        }
+        let (wanted, readers_source) = readers_wanted(data_dir);
+        if let ReadersSource::NetworkFs(fs) = readers_source {
+            tracing::info!("{} is on {fs}, a network file system: the database read connections are off (set ENCORE_DB_READERS=4 to turn them on anyway)", data_dir.display());
+        }
+        let readers = open_readers(&path, wanted)?.into_iter().map(Mutex::new).collect();
+        let instance = next_instance() << 40;
+        Ok(Db { conn: Arc::new(Mutex::new(conn)), readers: Arc::new(readers), next_reader: Arc::new(AtomicUsize::new(0)), library_writes: Arc::new(AtomicU64::new(instance)),
+            user_writes: Arc::new(AtomicU64::new(instance)), readers_source, data_dir: data_dir.to_path_buf() })
     }
 
-    /// Changes whenever a statement that may write the songs or the artist aliases ran through this
+    /// Changes whenever a statement that writes the songs or the artist aliases ran through this
     /// handle (every write in the server does): caches of library answers compare it instead of reading
     /// the whole table again. Writes made by another program (a test's own connection) don't count.
     pub fn library_version(&self) -> u64 {
         self.library_writes.load(Ordering::SeqCst)
     }
 
+    /// Changes whenever a statement that writes the accounts ran through this handle (prefs, roles, new
+    /// or disabled users): "does anyone have translations on" is looked up again only after that.
+    pub fn users_version(&self) -> u64 {
+        self.user_writes.load(Ordering::SeqCst)
+    }
+
     fn note_write(&self, sql: &str) {
-        let l = sql.to_ascii_lowercase();
-        if l.contains("tracks") || l.contains("artist_alias") {
+        let tables = tables_written(sql);
+        if tables.iter().any(|t| LIBRARY_TABLES.contains(&t.as_str())) {
             self.library_writes.fetch_add(1, Ordering::SeqCst);
+        }
+        if tables.iter().any(|t| USER_TABLES.contains(&t.as_str())) {
+            self.user_writes.fetch_add(1, Ordering::SeqCst);
+        }
+    }
+
+    /// How many read connections there are and why (Diagnostics).
+    pub fn readers_in_effect(&self) -> (usize, ReadersSource) {
+        (self.readers.len(), self.readers_source)
+    }
+
+    /// Bytes of the database file and its WAL.
+    pub fn file_size(&self) -> u64 {
+        ["encore.db", "encore.db-wal"].iter().filter_map(|f| std::fs::metadata(self.data_dir.join(f)).ok()).map(|m| m.len()).sum()
+    }
+
+    /// `PRAGMA optimize` on every connection: SQLite re-analyzes the tables whose statistics its recent
+    /// queries would have wanted (cheap when there is nothing to do). After scans and imports.
+    pub fn optimize(&self) {
+        let run = |c: &Connection| {
+            if let Err(e) = c.execute_batch("PRAGMA optimize") {
+                tracing::debug!("PRAGMA optimize: {e}");
+            }
+        };
+        run(&self.conn.lock().unwrap_or_else(|e| e.into_inner()));
+        for r in self.readers.iter() {
+            run(&r.lock().unwrap_or_else(|e| e.into_inner()));
         }
     }
 
@@ -303,8 +468,12 @@ impl Db {
         let reopen = Connection::open(&path).map_err(anyhow::Error::from).and_then(|c| prepare(&c).map(|_| c));
         match (swap, reopen) {
             (Ok(()), Ok(conn)) => {
+                if version < SCHEMA_VERSION {
+                    analyze(&conn);
+                }
                 *guard = conn;
                 self.library_writes.fetch_add(1, Ordering::SeqCst);
+                self.user_writes.fetch_add(1, Ordering::SeqCst);
                 Self::reopen_readers(&path, &mut readers);
                 tracing::info!("database restored from {} (safety copy: {})", from.display(), safety.name);
                 Ok(safety)
@@ -343,7 +512,7 @@ impl Db {
     }
 
     fn reopen_readers(path: &Path, readers: &mut [MutexGuard<'_, Connection>]) {
-        match open_readers(path) {
+        match open_readers(path, readers.len()) {
             Ok(fresh) => {
                 for (r, c) in readers.iter_mut().zip(fresh) {
                     **r = c;
@@ -584,6 +753,95 @@ mod tests {
         // a second handle on the same file never looks like this one
         let other = Db::open(&d).unwrap();
         assert_ne!(other.library_version(), db.library_version());
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn the_library_version_moves_only_for_writes_to_its_tables() {
+        let t = |sql: &str| tables_written(sql);
+        assert_eq!(t("INSERT INTO plays (user_id, track_id) SELECT 1, id FROM tracks WHERE id=?"), vec!["plays"]);
+        assert_eq!(t("INSERT OR IGNORE INTO track_quality (track_id, status) VALUES (?, 'ok')"), vec!["track_quality"]);
+        assert_eq!(t("REPLACE INTO settings VALUES ('a', 'b')"), vec!["settings"]);
+        assert_eq!(t("UPDATE OR REPLACE tracks SET year='1' WHERE id=?"), vec!["tracks"]);
+        assert_eq!(t("UPDATE playlist_items SET track_id=NULL WHERE track_id=(SELECT id FROM tracks WHERE path=?)"), vec!["playlist_items"]);
+        assert_eq!(t("DELETE FROM tracks WHERE path=?"), vec!["tracks"]);
+        assert_eq!(t("DELETE FROM activity WHERE id < (SELECT MAX(id) - 2000 FROM activity)"), vec!["activity"]);
+        assert_eq!(t("WITH x AS (SELECT 1) UPDATE main.\"artist_alias\" SET alias='a'"), vec!["artist_alias"]);
+        assert_eq!(t("CREATE TABLE IF NOT EXISTS login_links (digest TEXT); CREATE INDEX IF NOT EXISTS i ON tracks(lower(artist)); ALTER TABLE tracks ADD COLUMN x TEXT"), vec!["login_links", "tracks"]);
+        // a comment that mentions the songs is not a write to them
+        assert_eq!(t("-- bump tracks later\nINSERT INTO settings VALUES ('a','b')"), vec!["settings"]);
+        // `--` inside a literal or a quoted name is not a comment: the write after it still counts
+        assert_eq!(t("WITH x AS (SELECT 'a--b' AS v) UPDATE tracks SET year='1' -- tracks\n WHERE id=?"), vec!["tracks"]);
+        assert_eq!(t("UPDATE settings SET value='--' WHERE key=?; DELETE FROM \"act--ivity\""), vec!["settings", "act--ivity"]);
+        assert!(t("SELECT * FROM tracks").is_empty());
+
+        let d = tmp("whitelist");
+        let db = Db::open(&d).unwrap();
+        let (lv, uv) = (db.library_version(), db.users_version());
+        // the substring "tracks" used to move the version: a write to another table that only reads the songs doesn't
+        db.execute("DELETE FROM track_quality WHERE track_id=-1", p![]).unwrap();
+        db.execute("UPDATE playlist_items SET track_id=NULL WHERE track_id=(SELECT id FROM tracks WHERE path='nothing')", p![]).unwrap();
+        db.execute("INSERT INTO plays (user_id, track_id, seconds, played_at) SELECT 1, id, 1, 1 FROM tracks WHERE id=-1", p![]).unwrap();
+        assert_eq!((db.library_version(), db.users_version()), (lv, uv));
+        db.execute("DELETE FROM tracks WHERE id=-1", p![]).unwrap();
+        assert_eq!(db.library_version(), lv + 1);
+        db.execute("DELETE FROM artist_alias WHERE alias_key='nothing'", p![]).unwrap();
+        assert_eq!((db.library_version(), db.users_version()), (lv + 2, uv));
+        // the accounts have their own counter (who has translations on)
+        db.execute("UPDATE users SET prefs='{}' WHERE id=-1", p![]).unwrap();
+        assert_eq!((db.library_version(), db.users_version()), (lv + 2, uv + 1));
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn read_connections_stay_off_on_a_network_file_system() {
+        use crate::fsinfo::{classify, FsInfo};
+        assert_eq!(readers_for(None, Some(classify(0xEF53))), (4, ReadersSource::Default));
+        assert_eq!(readers_for(None, None), (4, ReadersSource::Default));
+        assert_eq!(readers_for(None, Some(classify(0x6969))), (0, ReadersSource::NetworkFs("NFS")));
+        assert_eq!(readers_for(None, Some(classify(0xFF53_4D42))), (0, ReadersSource::NetworkFs("CIFS")));
+        assert_eq!(readers_for(None, Some(classify(0x6573_5546))), (0, ReadersSource::NetworkFs("FUSE")));
+        // the variable wins either way; nonsense in it is ignored
+        assert_eq!(readers_for(Some("2"), Some(classify(0x6969))), (2, ReadersSource::Env));
+        assert_eq!(readers_for(Some(" 0 "), None), (0, ReadersSource::Env));
+        assert_eq!(readers_for(Some("99"), None), (16, ReadersSource::Env));
+        assert_eq!(readers_for(Some("many"), Some(FsInfo { name: "SMB", network: true })), (0, ReadersSource::NetworkFs("SMB")));
+        assert_eq!(ReadersSource::NetworkFs("SMB").as_str(), "network");
+    }
+
+    #[test]
+    fn schema_26_backs_up_before_adding_the_lookup_indexes() {
+        assert!(SCHEMA_VERSION >= 26);
+        let d = tmp("idx26");
+        drop(Db::open(&d).unwrap());
+        // what a schema 25 server left: the 0.25.3 WIP's indexes may be there (they came without a bump),
+        // the new ones are not; a song so that ANALYZE has something to count
+        {
+            let c = Connection::open(d.join("encore.db")).unwrap();
+            c.execute_batch("DROP INDEX idx_tracks_lartist; DROP INDEX idx_requests_kind_song; DROP INDEX idx_requests_user; DROP INDEX idx_pli_track;
+                             DROP INDEX idx_plays_track; DROP INDEX idx_plays_time; DROP INDEX idx_tracks_lalbumartist;
+                             INSERT INTO settings VALUES ('kept', '1');
+                             INSERT INTO tracks (path, title, artist, album, albumartist, album_id) VALUES ('/m/a.flac', 'A', 'Ann', 'Alb', 'Ann', 'x1');").unwrap();
+            c.pragma_update(None, "user_version", 25).unwrap();
+        }
+        let db = Db::open(&d).unwrap();
+        assert_eq!(db.user_version().unwrap(), SCHEMA_VERSION);
+        let backups = crate::backup::list(&d);
+        assert_eq!(backups.len(), 1);
+        assert_eq!(backups[0].kind, crate::backup::Kind::BeforeUpgrade);
+        assert_eq!(crate::backup::validate_file(&backups[0].path).unwrap(), 25);
+        let names: Vec<String> = db.query("SELECT name FROM sqlite_master WHERE type='index'", p![]).unwrap().iter().map(|r| r.s("name")).collect();
+        for want in ["idx_tracks_lartist", "idx_requests_kind_song", "idx_requests_user", "idx_pli_track", "idx_plays_track", "idx_plays_time", "idx_tracks_lalbumartist"] {
+            assert!(names.iter().any(|n| n == want), "{want} missing from {names:?}");
+        }
+        // ANALYZE ran after the migration: the planner has statistics, and takes the new index
+        assert!(db.one("SELECT COUNT(*) n FROM sqlite_stat1", p![]).unwrap().unwrap().i("n") > 0);
+        let plan = db.query("EXPLAIN QUERY PLAN SELECT id FROM tracks WHERE lower(artist)=lower(?)", p!["ann"]).unwrap();
+        assert!(plan.iter().any(|r| r.s("detail").contains("idx_tracks_lartist")), "{plan:?}");
+        assert_eq!(db.one("SELECT value FROM settings WHERE key='kept'", p![]).unwrap().unwrap().s("value"), "1");
+        assert_eq!(db.one("SELECT title FROM tracks WHERE lower(artist)=lower('ANN')", p![]).unwrap().unwrap().s("title"), "A");
+        // the statement cache and the WAL limit are on every connection
+        assert_eq!(db.conn.lock().unwrap().query_row("PRAGMA journal_size_limit", [], |r| r.get::<_, i64>(0)).unwrap(), 67108864);
         let _ = std::fs::remove_dir_all(&d);
     }
 

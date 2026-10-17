@@ -11,15 +11,40 @@ use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
 use web_sys::Element;
 
-/// `NAMES[src]` (None where the JS object had no entry → `undefined`).
-fn names(src: &str) -> Option<&'static str> {
-    match src {
-        "slskd" => Some("Soulseek"),
-        "torznab" => Some("Torrents & Usenet"),
-        "deezer" => Some("Deezer"),
-        "ytmusic" => Some("YouTube Music"),
-        "lidarr" => Some("Lidarr"),
-        _ => None,
+/// A failed search on one source: the message and, when the server pointed at a setting (a 409: the
+/// source is signed out, stopped or off), the settings link and its label.
+struct PickErr {
+    message: String,
+    settings: String,
+    label: String,
+}
+
+impl PickErr {
+    fn from_api(e: &api::ApiError) -> PickErr {
+        PickErr { message: e.message.clone(), settings: e.data.s("settings"), label: e.data.s("settings_label") }
+    }
+}
+
+/// `hint – Settings → X`: a hint with its settings link (the link alone when the hint is empty).
+fn hint_html(hint: &str, settings: &str, label: &str) -> String {
+    let link = if settings.is_empty() { String::new() } else {
+        format!(r#"<a href="{}" style="color:var(--accent)">{}</a>"#, esc(settings), esc(if label.is_empty() { "Settings" } else { label }))
+    };
+    match (hint.is_empty(), link.is_empty()) {
+        (false, false) => format!("{} – {link}", esc(hint)),
+        (false, true) => esc(hint),
+        _ => link,
+    }
+}
+
+/// The word after a tab's name for a source that can't search right now.
+fn state_word(state: &str) -> &'static str {
+    match state {
+        "sign_in" => "sign in",
+        "not_connected" => "not connected",
+        "not_installed" => "not installed",
+        "off" => "off",
+        _ => "",
     }
 }
 
@@ -28,7 +53,7 @@ struct State {
     tab: String,
     lossless: bool,
     results: HashMap<String, Vec<Value>>,
-    errors: HashMap<String, String>,
+    errors: HashMap<String, PickErr>,
     loading: HashSet<String>,
 }
 
@@ -200,21 +225,32 @@ fn row(x: &Value, i: usize) -> String {
 }
 
 impl Picker {
-    /// The JS `tabs()`.
+    /// The source as `/picker/sources` listed it: `{id, name, state, hint, settings, settings_label}`.
+    fn source(&self, id: &str) -> Option<&Value> { self.sources.iter().find(|s| s.g("id").as_str() == Some(id)) }
+
+    /// The source's display name (the server's; the id when it is not listed).
+    fn name(&self, id: &str) -> String { self.source(id).map(|s| s.s("name")).filter(|n| !n.is_empty()).unwrap_or_else(|| id.to_string()) }
+
+    /// A source searches only when the server says it is ready; anything else (signed out, not connected,
+    /// not installed, off) shows its hint and settings link under its tab instead.
+    fn ready(&self, id: &str) -> bool { self.source(id).map(|s| { let st = s.s("state"); st.is_empty() || st == "ready" }).unwrap_or(false) }
+
+    /// The JS `tabs()`: every source has a tab; one that can't search shows why in a word instead of a count.
     fn tabs(&self) {
         let st = self.state.borrow();
         let all: usize = st.results.values().map(|r| r.len()).sum();
-        let mut entries: Vec<(String, String, usize)> = vec![("all".to_string(), "All".to_string(), all)];
+        let mut entries: Vec<(String, String, String)> = vec![("all".to_string(), "All".to_string(), all.to_string())];
         for s in &self.sources {
             let id = s.s("id");
             let n = st.results.get(&id).map(|r| r.len()).unwrap_or(0);
-            entries.push((id, s.s("name"), n));
+            let word = if self.ready(&id) { "" } else { state_word(&s.s("state")) };
+            entries.push((id, s.s("name"), if word.is_empty() { n.to_string() } else { word.to_string() }));
         }
         let html: String = entries.iter().map(|(k, l, n)| {
             let spin = st.loading.contains(k) || (k == "all" && !st.loading.is_empty());
             format!(r#"<button data-t="{k}" class="{}">{} {}</button>"#,
                 if st.tab == *k { "active" } else { "" }, esc(l),
-                if spin { r#"<span class="spinner" style="width:12px;height:12px"></span>"#.to_string() } else { format!(r#"<span class="faint">{n}</span>"#) })
+                if spin { r#"<span class="spinner" style="width:12px;height:12px"></span>"#.to_string() } else { format!(r#"<span class="faint">{}</span>"#, esc(n)) })
         }).collect();
         if let Some(t) = dom::qs_in(&self.el, "#pk-tabs") { dom::set_html(&t, &html); }
     }
@@ -225,22 +261,27 @@ impl Picker {
         let full: &[Value] = st.results.get(src).map(|v| v.as_slice()).unwrap_or(&[]);
         // (index in the unfiltered list = the JS `state.results[src].indexOf(x)`, x)
         let list: Vec<(usize, &Value)> = full.iter().enumerate().filter(|(_, x)| !st.lossless || x.truthy("lossless")).collect();
-        let name = names(src);
+        let name = self.name(src);
         let head = if st.tab == "all" {
-            format!(r#"<div class="section-head" style="margin:14px 0 8px"><h3>{} <span class="faint small">{}</span></h3></div>"#, esc(name.unwrap_or(src)), list.len())
+            let count = if self.ready(src) { format!(r#" <span class="faint small">{}</span>"#, list.len()) } else { String::new() };
+            format!(r#"<div class="section-head" style="margin:14px 0 8px"><h3>{}{count}</h3></div>"#, esc(&name))
         } else { String::new() };
-        if let Some(err) = st.errors.get(src).filter(|e| !e.is_empty()) {
-            return head + &format!(r#"<div class="error-box small">{}</div>"#, esc(err));
+        // a signed-out, stopped or switched-off source: "Sign in to Tidal – Settings → streamrip"
+        if let Some(s) = self.source(src).filter(|_| !self.ready(src)) {
+            return head + &format!(r#"<div class="muted small">{}</div>"#, hint_html(&s.s("hint"), &s.s("settings"), &s.s("settings_label")));
+        }
+        if let Some(err) = st.errors.get(src).filter(|e| !e.message.is_empty()) {
+            return head + &format!(r#"<div class="error-box small">{}</div>"#, hint_html(&err.message, &err.settings, &err.label));
         }
         if st.loading.contains(src) {
             return head + &format!(r#"<div class="muted small"><span class="spinner"></span> Searching {}…{}</div>"#,
-                esc(name.unwrap_or("")), if src == "slskd" { " (Soulseek takes a few seconds)" } else { "" });
+                esc(&name), if src == "slskd" { " (Soulseek takes a few seconds)" } else { "" });
         }
         if list.is_empty() { return head + r#"<div class="muted small">No results.</div>"#; }
         let shown = &list[..list.len().min(if st.tab == "all" { 8 } else { 150 })];
         let rows: String = shown.iter().map(|(i, x)| row(x, *i)).collect();
         let more = if st.tab == "all" && list.len() > shown.len() {
-            format!(r#"<button class="btn sm ghost mt" data-t="{src}">Show all {} from {}</button>"#, list.len(), esc(name.unwrap_or("")))
+            format!(r#"<button class="btn sm ghost mt" data-t="{src}">Show all {} from {}</button>"#, list.len(), esc(&name))
         } else { String::new() };
         format!("{head}<div>{rows}</div>\n      {more}")
     }
@@ -267,7 +308,8 @@ impl Picker {
         let o = &self.opts;
         for s in &self.sources {
             let id = s.s("id");
-            if s.g("id").as_str() == Some("lidarr") && self.kind != "album" { continue; }
+            // a source that is signed out, not connected or off shows its hint instead of searching
+            if !self.ready(&id) { continue; }
             self.state.borrow_mut().loading.insert(id.clone());
             let mut body = Map::new();
             if s.has("id") { body.insert("source".into(), s.g("id").clone()); }
@@ -284,7 +326,8 @@ impl Picker {
             dom::spawn(async move {
                 match api::post("/picker/search", Value::Object(body)).await {
                     Ok(r) => { p.state.borrow_mut().results.insert(id.clone(), r.items()); }
-                    Err(e) => { p.state.borrow_mut().errors.insert(id.clone(), e.message); }
+                    // a 409 carries the source's state and settings link ("Soulseek isn't connected yet – Settings → Soulseek")
+                    Err(e) => { p.state.borrow_mut().errors.insert(id.clone(), PickErr::from_api(&e)); }
                 }
                 p.state.borrow_mut().loading.remove(&id);
                 if p.el.is_connected() { p.paint(); }

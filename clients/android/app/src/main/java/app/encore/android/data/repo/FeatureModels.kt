@@ -208,6 +208,12 @@ data class CatalogAlbum(
     val ext: JsonObject? = null,
     /** The words the pages show for the request ("Requested", "Not found"…), when the server sent them. */
     val requestLabel: String = "",
+    /** The group the server files it under ("Album", "Live", "Compilation" …; 0.26), "" from older servers. */
+    val kind: String = "",
+    /** Whether Settings → Release types wants it (0.26: `allowed`; older servers: no `skipped` reason). */
+    val allowed: Boolean = true,
+    /** Why the release types leave it out ("Live", "Single" …), or "". */
+    val skipped: String = "",
 ) {
     companion object {
         fun from(o: JsonObject): CatalogAlbum? {
@@ -229,10 +235,14 @@ data class CatalogAlbum(
                 requestStatus = o.text("request_status"),
                 ext = o.obj("ext"),
                 requestLabel = o.text("request_label"),
+                kind = o.text("kind"),
+                allowed = if (o.containsKey("allowed")) o.bool("allowed") else o.text("skipped").isEmpty(),
+                skipped = o.text("skipped"),
             )
         }
     }
 }
+
 
 /** A recording from search (mb::search_recordings) with the library match. */
 data class CatalogTrack(
@@ -427,6 +437,14 @@ data class ExtRelease(
     val harmony: String,
     val ext: JsonElement,
     val requestLabel: String = "",
+    /** The server's "ext-…" id (Deezer / Apple ids), the one a discography request names it by; "" from older servers. */
+    val id: String = "",
+    /** The group the server files it under ("Album", "Compilation", "Live" …; 0.26), "" from older servers. */
+    val kind: String = "",
+    /** Whether Settings → Release types wants it (0.26: `allowed`; older servers: no `skipped` reason). */
+    val allowed: Boolean = true,
+    /** Why the release types leave it out ("Live", "Single" …), or "". */
+    val skipped: String = "",
 ) {
     companion object {
         fun from(o: JsonObject): ExtRelease? {
@@ -434,7 +452,12 @@ data class ExtRelease(
             if (title.isEmpty()) return null
             val sources = o.arr("sources").objectsOf().map { it.text("name") to it.text("url") }.filter { it.first.isNotEmpty() }
             return ExtRelease(
+                id = o.text("id"),
+                kind = o.text("kind"),
+                allowed = if (o.containsKey("allowed")) o.bool("allowed") else o.text("skipped").isEmpty(),
+                skipped = o.text("skipped"),
                 title = title,
+
                 year = o.text("year").take(4),
                 date = o.text("date"),
                 type = o.text("type"),
@@ -735,13 +758,22 @@ data class RequestRow(
 
 // ---- Picker ----------------------------------------------------------------------------------------------------
 
-data class PickerSource(val id: String, val name: String)
+/**
+ * One source of GET /api/picker/sources. `state`: ready | sign_in | not_connected | not_installed | off; `hint`
+ * says why when not ready, `settings` is the web UI's settings link (`#/settings?s=…`) with its label.
+ */
+data class PickerSource(val id: String, val name: String, val state: String = "ready", val hint: String = "", val settings: String = "", val settingsLabel: String = "") {
+    /** Only a ready source is searched; the others show their hint under their tab. */
+    val ready: Boolean get() = state.isEmpty() || state == "ready"
+}
 
 data class PickerInfo(val allowed: Boolean, val sources: List<PickerSource>) {
     companion object {
         fun from(o: JsonObject): PickerInfo = PickerInfo(
             allowed = o.bool("allowed"),
-            sources = o.arr("sources").objectsOf().map { PickerSource(it.text("id"), it.text("name")) }.filter { it.id.isNotEmpty() },
+            sources = o.arr("sources").objectsOf().map {
+                PickerSource(it.text("id"), it.text("name"), it.text("state").ifEmpty { "ready" }, it.text("hint"), it.text("settings"), it.text("settings_label"))
+            }.filter { it.id.isNotEmpty() },
         )
     }
 }

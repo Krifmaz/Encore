@@ -178,9 +178,42 @@ pub fn primary(rg: &Value) -> &'static str {
     }
 }
 
+/// The order the clients show release groups in (the artist page's sections and the Request discography
+/// dialog); kinds not listed come after, in `EXTRAS` order.
+pub const GROUP_ORDER: [&str; 15] = ["Album", "EP", "Single", "Compilation", "Live", "Soundtrack", "Remix", "DJ-mix", "Mixtape/Street", "Demo", "Other", "Broadcast", "Interview", "Spokenword", "Audiobook"];
+
+/// Where a group goes in the clients' order (`GROUP_ORDER`, then the other extras).
+pub fn group_rank(kind: &str) -> usize {
+    GROUP_ORDER.iter().position(|k| *k == kind)
+        .or_else(|| EXTRAS.iter().position(|e| e.0 == kind).map(|i| GROUP_ORDER.len() + i))
+        .unwrap_or(GROUP_ORDER.len() + EXTRAS.len())
+}
+
+/// The label of a kind or extra ("Mixtape / Street" for "Mixtape/Street"); an unknown key is its own label.
+pub fn label(kind: &str) -> &str {
+    KINDS.iter().chain(EXTRAS.iter()).find(|(k, _)| *k == kind).map(|(_, l)| *l).unwrap_or(kind)
+}
+
+/// The group a release is shown under – its canonical kind: the first MusicBrainz secondary type (Live,
+/// Compilation, Soundtrack …), else, for a Deezer / Apple album, the first extra its record type and title
+/// say (Compilation, Live, Remix …), else the primary type (Album, EP, Single, Broadcast, Other). The same
+/// key the Release types settings use, so a client can tell which group a setting is about.
+pub fn group_kind(rg: &Value) -> &'static str {
+    if let Some(k) = rg["secondary"].as_array().and_then(|a| a.iter().find_map(|x| canon(s(x)).filter(|k| !is_kind(k)))) {
+        return k;
+    }
+    if is_ext(rg) {
+        if let Some(m) = marks(rg).into_iter().next() {
+            return m;
+        }
+    }
+    primary(rg)
+}
+
 fn re(p: &str) -> Regex {
     Regex::new(&format!("(?i){p}")).unwrap()
 }
+
 
 /// Encore's own extras, from the title and disambiguation of any release.
 static OWN: LazyLock<Vec<(Regex, &'static str)>> = LazyLock::new(|| vec![
@@ -375,7 +408,37 @@ mod tests {
     }
 
     #[test]
+    fn releases_are_grouped_by_their_canonical_kind() {
+        // MusicBrainz: the first secondary type, else the primary type (the artist page's sections)
+        assert_eq!(group_kind(&mb("Rodeo", "Album", &[])), "Album");
+        assert_eq!(group_kind(&mb("90210", "Single", &[])), "Single");
+        assert_eq!(group_kind(&mb("Live at Rolling Loud", "Album", &["Live"])), "Live");
+        assert_eq!(group_kind(&mb("Box", "Album", &["Compilation", "Live"])), "Compilation");
+        assert_eq!(group_kind(&mb("Tape", "Album", &["Mixtape/Street"])), "Mixtape/Street");
+        assert_eq!(group_kind(&mb("Thing", "", &[])), "Other");
+        // a MusicBrainz title's words don't move it: "Rodeo (Instrumentals)" stays an album, only unticked
+        assert_eq!(group_kind(&mb("Rodeo (Instrumentals)", "Album", &[])), "Album");
+        // Deezer / Apple: the record type and the title words
+        assert_eq!(group_kind(&ext("Hits", "Compilation")), "Compilation");
+        assert_eq!(group_kind(&ext("Rodeo (Live at Coachella)", "Album")), "Live");
+        assert_eq!(group_kind(&ext("Astroworld (The Remixes)", "Album")), "Remix");
+        assert_eq!(group_kind(&ext("Days Before Rodeo", "Album")), "Album");
+        assert_eq!(group_kind(&ext("Utopia", "Single")), "Single");
+        assert_eq!(group_kind(&ext("Hello - EP", "EP")), "EP");
+        // the clients' order, then the other extras, then anything unknown
+        assert!(group_rank("Album") < group_rank("EP") && group_rank("EP") < group_rank("Single"));
+        assert!(group_rank("Single") < group_rank("Compilation") && group_rank("Compilation") < group_rank("Live"));
+        assert!(group_rank("Audiobook") < group_rank("Instrumental") && group_rank("Instrumental") < group_rank("Covers"));
+        assert!(group_rank("Covers") < group_rank("Whatever"));
+        assert_eq!(label("Mixtape/Street"), "Mixtape / Street");
+        assert_eq!(label("Spokenword"), "Spoken word");
+        assert_eq!(label("EP"), "EP");
+        assert_eq!(label("Whatever"), "Whatever");
+    }
+
+    #[test]
     fn discography_singles_migrates_to_the_single_box() {
+
         assert_eq!(migrated_kinds(None, Some(&json!(true))).as_deref(), Some("Album,EP,Single"));
         assert_eq!(migrated_kinds(None, Some(&json!("true"))).as_deref(), Some("Album,EP,Single"));
         assert_eq!(migrated_kinds(None, Some(&json!(false))), None);

@@ -64,7 +64,7 @@ async function send() {
   $('cancel').hidden = true;
   say('Sending to Encore…');
   const res = await post(await collect(storeId), { handoff: true });
-  await remember(res.ok, res.ok ? `Handed over${res.account ? ` (${res.account})` : ''}` : res.message, 'handoff');
+  await remember(res.ok, res.ok ? 'Handed over' : res.message, 'handoff');
   if (!res.ok) {
     phase = 'failed';
     $('send').disabled = false;
@@ -74,7 +74,8 @@ async function send() {
   }
   phase = 'done';
   $('send').hidden = true;
-  say(`Done – Encore has its own YouTube sign-in now${res.account ? ` (${res.account})` : ''} and keeps it alive by itself. Closing the private window…`, 'ok');
+  // the account name is looked up after the answer: the YouTube card in Settings shows it in a moment
+  say('Done – Encore has its own YouTube sign-in now and keeps it alive by itself. Closing the private window…', 'ok');
   // closing (not signing out): the private window's cookies are thrown away, Encore's session stays valid
   setTimeout(() => { api.windows.remove(winId).catch(() => {}); }, 1500);
 }

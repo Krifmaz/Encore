@@ -549,34 +549,88 @@ pub fn bind_skipped_toggle(root: &Element, repaint: Rc<dyn Fn(bool)>) {
     });
 }
 
-/// Request discography: the release-type boxes, ticked from the setting, for this request only. → { kinds, skip } or None.
-async fn release_types_dialog(a: &Value) -> Option<Value> {
-    let rt = a.o("release_types");
-    let boxes = |list: Vec<Value>| -> String {
-        list.iter().map(|o| format!(r#"<label class="row" style="gap:6px;align-items:center"><input type="checkbox" value="{}" {}> {}</label>"#,
-            esck(o, "key"), if o.truthy("on") { "checked" } else { "" }, esck(o, "label"))).collect()
+/// A release's group in the Request discography dialog: the server's canonical `kind` (0.26), else the page's
+/// own rule (the first secondary type, else the primary type, else Other).
+fn kind_of(rg: &Value) -> String {
+    if rg.truthy("kind") { return rg.s("kind"); }
+    let sec = rg.a("secondary");
+    if !sec.is_empty() { js_string(&sec[0]) } else if rg.truthy("type") { rg.s("type") } else { "Other".to_string() }
+}
+
+/// Whether Settings → Release types wants a release: the server's `allowed` (0.26), else "not skipped".
+fn allowed(rg: &Value) -> bool {
+    if rg.has("allowed") { rg.truthy("allowed") } else { !rg.truthy("skipped") }
+}
+
+/// Request discography: every release on the page (MusicBrainz, and the Deezer / Apple Music ones that have
+/// loaded) grouped by kind, a box per release – ticked to start when Settings → Release types allows it and it
+/// isn't owned or requested – Select all / Deselect all per group and overall, the button counting the ticks.
+/// Owned and requested releases can't be ticked. → { release_ids } or None when dismissed.
+async fn discography_dialog(a: &Value, releases: &[Value]) -> Option<Value> {
+    let rank = |k: &str| ORDER.iter().position(|o| *o == k).unwrap_or(ORDER.len());
+    let mut groups: Vec<(String, Vec<&Value>)> = Vec::new();
+    for r in releases {
+        let k = kind_of(r);
+        match groups.iter_mut().find(|(kk, _)| *kk == k) { Some(g) => g.1.push(r), None => groups.push((k, vec![r])) }
+    }
+    groups.sort_by_key(|(k, _)| rank(k));
+    let row = |r: &Value, k: &str| -> String {
+        let (owned, requested) = (r.truthy("in_library"), r.truthy("request_status"));
+        let fixed = owned || requested;
+        let note = if owned { "In library".to_string() }
+            else if requested { let l = r.s("request_label"); if l.is_empty() { "Requested".to_string() } else { l } }
+            else if r.truthy("skipped") { format!("{} – off in Release types", r.s("skipped")) }
+            else { String::new() };
+        let year = if r.truthy("year") { r.s("year") } else { r.s("date").chars().take(4).collect() };
+        format!(r#"<label class="row" style="gap:8px;align-items:center{}"><input type="checkbox" value="{}" data-kind="{}"{}{}> <span class="ellipsis" style="flex:1;min-width:0">{}</span><span class="small muted" style="white-space:nowrap">{}</span></label>"#,
+            if fixed { ";opacity:.6" } else { "" }, esck(r, "id"), esc(k), if !fixed && allowed(r) { " checked" } else { "" }, if fixed { " disabled" } else { "" },
+            esck(r, "title"), esc(&join_truthy(&[year, note], " · ")))
     };
-    let body = format!(r#"<p class="small muted" style="margin:0 0 12px">Every release of {} you don't have yet, from MusicBrainz{}. The boxes start from Settings → Release types and only change this request.</p>
-        <div class="small muted" style="margin-bottom:6px">Kinds to request</div>
-        <div class="row wrap" style="gap:6px 14px" data-rt="kinds">{}</div>
-        <div class="small muted" style="margin:14px 0 6px">Skip releases that are</div>
-        <div class="row wrap" style="gap:6px 14px" data-rt="skip">{}</div>"#,
-        esck(a, "name"), if a.truthy("catalog_merge") { ", Deezer and Apple Music" } else { "" }, boxes(rt.a("kinds")), boxes(rt.a("skip")));
-    let footer = format!(r#"<button class="btn" data-close>Cancel</button><button class="btn primary" data-ok>{}Request</button>"#, icon("download"));
+    let list: String = groups.iter().map(|(k, rs)| format!(r#"<div class="section-head" style="margin:12px 0 4px"><h3 style="margin:0">{k}s <span class="faint small">{n}</span></h3>
+          <span class="row" style="gap:6px"><button class="btn sm ghost" data-sel-group="{k}" data-on="1">Select all</button><button class="btn sm ghost" data-sel-group="{k}" data-on="0">Deselect all</button></span></div>
+        <div style="display:flex;flex-direction:column;gap:4px">{rows}</div>"#, k = esc(k), n = rs.len(), rows = rs.iter().map(|r| row(r, k)).collect::<String>())).collect();
+
+    let body = format!(r#"<p class="small muted" style="margin:0 0 10px">Every release of {} on this page, from MusicBrainz{}. Ticked to start: what Settings → Release types allows and you don't have or haven't requested yet.</p>
+        <div class="row" style="justify-content:space-between;align-items:center;gap:8px"><span class="small muted">{} releases</span>
+          <span class="row" style="gap:6px"><button class="btn sm ghost" data-sel-all="1">Select all</button><button class="btn sm ghost" data-sel-all="0">Deselect all</button></span></div>
+        <div data-disco-list>{}</div>"#,
+        esck(a, "name"), if a.truthy("catalog_merge") { ", Deezer and Apple Music" } else { "" }, releases.len(), list);
+    let footer = format!(r#"<button class="btn" data-close>Cancel</button><button class="btn primary" data-ok>{}<span data-ok-label>Request</span></button>"#, icon("download"));
     let m = ui::modal(ModalOpts::new("Request discography", &body).footer(&footer));
+    // the button counts the ticks, live
+    let count: Rc<dyn Fn()> = {
+        let m = m.clone();
+        Rc::new(move || {
+            let n = m.qsa("[data-disco-list] input:checked").len();
+            if let Some(l) = m.qs("[data-ok-label]") { dom::set_text(&l, &format!("Request {n} release{}", if n == 1 { "" } else { "s" })); }
+        })
+    };
+    count();
+    { let c = count.clone(); dom::on(&m.el, "change", move |_| c()); }
+    {
+        let (m2, c) = (m.clone(), count.clone());
+        dom::on(&m.el, "click", move |e| {
+            let (sel, on) = if let Some(b) = dom::closest(e, "[data-sel-all]") {
+                ("[data-disco-list] input:not(:disabled)".to_string(), dom::data(&b, "selAll") == "1")
+            } else if let Some(b) = dom::closest(e, "[data-sel-group]") {
+                (format!(r#"[data-disco-list] input[data-kind="{}"]:not(:disabled)"#, dom::data(&b, "selGroup").replace('"', "")), dom::data(&b, "on") == "1")
+            } else { return };
+            for i in m2.qsa(&sel) { dom::set_checked(&i, on); }
+            c();
+        });
+    }
     let (tx, rx) = futures::channel::oneshot::channel::<Option<Value>>();
     let tx = Rc::new(RefCell::new(Some(tx)));
     if let Some(ok) = m.qs("[data-ok]") {
         let (m2, tx2) = (m.clone(), tx.clone());
         dom::on(&ok, "click", move |_| {
-            let picked = |k: &str| -> Vec<Value> { m2.qsa(&format!(r#"[data-rt="{k}"] input:checked"#)).iter().map(|i| Value::String(i.get_attribute("value").unwrap_or_default())).collect() };
-            let kinds = picked("kinds");
-            if kinds.is_empty() { toast("Tick at least one kind of release", "err"); return; }
-            let skip = picked("skip");
+            let ids: Vec<Value> = m2.qsa("[data-disco-list] input:checked").iter().map(|i| Value::String(i.get_attribute("value").unwrap_or_default())).collect();
+            if ids.is_empty() { toast("Tick at least one release", "err"); return; }
             m2.close();
-            if let Some(t) = tx2.borrow_mut().take() { let _ = t.send(Some(json!({ "kinds": kinds, "skip": skip }))); }
+            if let Some(t) = tx2.borrow_mut().take() { let _ = t.send(Some(json!({ "release_ids": ids }))); }
         });
     }
+
     // dismissed (Escape, backdrop, Cancel): the modal leaves the DOM without Request
     let el = m.el.clone();
     let tx3 = tx.clone();
@@ -803,12 +857,13 @@ pub fn render_artist(view: Element, ctx: Ctx) -> PageFuture {
         common::bind_tiles(&view);
         bind_request_buttons(&view);
         watch_requests(&view, Some(Rc::new(app::route)));
-        // Request discography: every album and EP (and single, per the server setting) not owned or requested,
-        // from MusicBrainz and the Deezer / Apple Music releases it is missing. The server decides which (title
-        // and year dedupe, library check); each release it queues arrives as a request event and marks its tile
+        // Request discography: the dialog lists every release on the page (MusicBrainz, and the Deezer / Apple
+        // Music releases it is missing once they have loaded), ticked per Settings → Release types; the server
+        // requests the ticked ones that aren't owned or requested (title and year dedupe, library check), and
+        // each release it queues arrives as a request event and marks its tile
         let rel: Rc<RefCell<Vec<Value>>> = Rc::new(RefCell::new(Vec::new()));
         {
-            let (a, view2) = (a.clone(), view.clone());
+            let (a, view2, groups, rel) = (a.clone(), view.clone(), groups.clone(), rel.clone());
             let first_cover = first_cover.clone();
             dom::on_sel(&view, "#req-disco", "click", move |_| {
                 let Some(b) = dom::qs_in(&view2, "#req-disco") else { return };
@@ -817,13 +872,16 @@ pub fn render_artist(view: Element, ctx: Ctx) -> PageFuture {
                 copy(&mut body, "mbid", &a, "id");
                 copy(&mut body, "artist", &a, "name");
                 if let Some(c) = &first_cover { put(&mut body, "cover_url", c.clone()); }
-                let (a, view2) = (a.clone(), view2.clone());
+                let (a, view2, groups, rel) = (a.clone(), view2.clone(), groups.clone(), rel.clone());
                 dom::spawn(async move {
-                    // the release-type boxes for this request (older servers have none: the plain request)
+                    // the releases to tick, for this request (older servers have no release types: the plain request)
                     if a.truthy("release_types") {
-                        let Some(types) = release_types_dialog(&a).await else { return };
-                        put(&mut body, "release_filter", types);
+                        let mut on_page: Vec<Value> = groups.borrow().iter().flat_map(|(_, l)| l.iter().cloned()).collect();
+                        on_page.extend(rel.borrow().iter().cloned());
+                        let Some(picked) = discography_dialog(&a, &on_page).await else { return };
+                        if let Some(o) = picked.as_object() { for (k, v) in o { put(&mut body, k, v.clone()); } }
                     }
+
                     let Some(r) = common::submit_request(Value::Object(body), Some(b)).await else { return };
                     let pending = r.s("status") == "pending";
                     let key = format!("ar:{}", a.s("id"));

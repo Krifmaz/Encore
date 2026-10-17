@@ -19,6 +19,7 @@ mod dsp;
 mod email;
 mod dupes;
 mod error;
+mod fsinfo;
 mod jobs;
 mod library;
 mod lyrics;
