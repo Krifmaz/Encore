@@ -133,3 +133,11 @@ Nothing here is started until the owner says "go".
       installed plugins for search/download.
     - Migration: existing tools/settings map onto their plugin 1:1 without re-setup.
     - Not shipped: anything that strips DRM (the owner asked for gamdl/zotify; declined).
+16. **In-app updates and restart on every device:**
+    - Server: an update check against GitHub releases (banner in Settings and on the phone with the release
+      notes), a "Restart server" button, and self-update when the Docker socket is mounted (pull the new image
+      and recreate the container, Watchtower-style; off and hidden when the socket isn't there).
+    - Android: in-app update: download the new APK from the release, verify its signature, open the installer
+      (REQUEST_INSTALL_PACKAGES). The car follows the phone.
+    - Web: the service worker's "a new version is ready – reload" message (planned with offline).
+    - Desktop: the existing updater (needs the TAURI signing secret in CI).
