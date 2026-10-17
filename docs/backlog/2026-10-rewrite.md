@@ -104,3 +104,17 @@ Nothing here is started until the owner says "go".
       Settings → streamrip" instead.
     - The Requests list piles up duplicate failed rows for the same song (4× "Reach Out To The Truth").
       Group retries of one song into one row.
+14. **Offline website (PWA):** the site must open and play downloaded songs when the server is unreachable.
+    - The service worker caches the whole app shell (the web-rs WASM, JS glue, CSS, fonts, icons) and serves
+      it when the server is down.
+    - "Download for offline" on the web: songs, albums, playlists and Liked Songs are saved in the browser's
+      storage (OPFS/Cache API) together with their covers, lyrics and metadata. Call
+      navigator.storage.persist(); show used/available space and let the user manage downloads.
+    - An offline mode: when the server can't be reached, show the Downloaded library (search, play,
+      queue, shuffle) and grey out everything else. Queue plays, likes and scrobbles and send them when back
+      online.
+    - Respect the user's session: downloads stay usable offline for a limited time (e.g. 30 days) without
+      re-checking the login.
+    - iOS Safari limits: storage is evicted for sites not added to the Home Screen. Tell iPhone users to "Add
+      to Home Screen" for reliable offline use.
+    - The phone and desktop apps already have offline songs; reuse the same model so they behave the same.
