@@ -152,3 +152,9 @@ Nothing here is started until the owner says "go".
     SHA256SUMS over every asset; the raw app files stay attached as the installer's payload; release notes lead
     with the installers. Switch to Omnistall's own releases once it publishes them. The Iced app (0.27) ships
     this way from the start; its Update/Repair/Uninstall come from the installer's registry.
+19. **Bug reports in the app** (sidebar entry under the Storage box, web and phone): any user writes a report
+    (text + screenshots/images, up to a few MB each; the page, app version and device are attached
+    automatically), kinds: Bug · Not a bug · How do I…; the admin sees them in a Bug reports page (list, filters,
+    status: new / looking / fixed / won't fix / answered), replies in a thread the user sees in the app (and by
+    email when set up), and exports them (one Markdown or JSON file with the images zipped) to hand to the
+    developer. Stored in <config>/reports/. Ships as the next small release.
