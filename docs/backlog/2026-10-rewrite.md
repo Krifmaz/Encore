@@ -141,3 +141,8 @@ Nothing here is started until the owner says "go".
       (REQUEST_INSTALL_PACKAGES). The car follows the phone.
     - Web: the service worker's "a new version is ready – reload" message (planned with offline).
     - Desktop: the existing updater (needs the TAURI signing secret in CI).
+17. **Read-only or missing downloads disk** (seen Oct 17: yt-dlp "Read-only file system (os error 30)" on
+    every request; 20 failed rows). Extend item 9's write probe to the staging folder and every download root:
+    one admin banner "The downloads folder /downloads is read-only – check the disk (dmesg, fsck) or the
+    mount" and the worker pauses requests (status "Waiting for the downloads folder") instead of failing each
+    one; resumes when the probe passes. Diagnostics shows the probe result.
