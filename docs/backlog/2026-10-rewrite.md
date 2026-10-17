@@ -86,3 +86,12 @@ Nothing here is started until the owner says "go".
       (`config reset` / `--update`) when it's invalid or outdated, then re-apply the credentials.
     - Surface the full streamrip error (the text after "config.toml:" was empty).
     - Add a "Reset streamrip config" button.
+12. **The download picker ("Pick a download") only offers Soulseek, Torrents & Usenet, Deezer and YouTube Music.**
+    - Tidal and Qobuz are never listed, even when streamrip is signed in to them. `sources()` in
+      server/src/routes/picker.rs only adds Deezer from streamrip's services.
+    - Fix: add Tidal and Qobuz tabs: search their catalogs and show quality (e.g. FLAC 24/192 MQA/Hi-Res) per
+      result.
+    - Show every configured download source; a source that isn't signed in shows "Sign in to Tidal" instead
+      of disappearing.
+    - Seen while Soulseek was signed out ("409 … must be connected and logged in … (currently: Disconnecting)").
+      Show that state as a short "Soulseek isn't connected yet" line with a link to its settings.
