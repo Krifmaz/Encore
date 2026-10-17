@@ -3,7 +3,7 @@ use crate::api;
 use crate::app::{Ctx, PageFuture};
 use crate::dom;
 use crate::json::J;
-use crate::pages::common::{bind_request_actions, clear_menu, request_row};
+use crate::pages::common::{self, bind_request_actions, clear_menu, request_row};
 use crate::ui::{empty_state, icon};
 use serde_json::Value;
 use std::cell::{Cell, RefCell};
@@ -25,8 +25,9 @@ pub fn render(view: Element, ctx: Ctx) -> PageFuture {
         };
         let controls = if admin {
             format!(r#"<label class="switch"><input type="checkbox" id="mine"><i></i>Only mine</label>
-          <button class="btn sm" id="clear">{}Clear finished</button>"#, icon("trash"))
-        } else { String::new() };
+          <button class="btn sm" id="retry-failed" title="Queue every failed request again">{}Retry failed</button>
+          <button class="btn sm" id="clear">{}Clear finished</button>"#, icon("refresh"), icon("trash"))
+        } else { format!(r#"<button class="btn sm" id="retry-failed" title="Queue every failed request again">{}Retry failed</button>"#, icon("refresh")) };
         dom::set_html(&view, &format!(r#"
     <div class="row wrap between" style="margin-bottom:18px">
       <div><h1>Requests</h1><div class="small muted" id="quota"></div></div>
@@ -68,6 +69,10 @@ pub fn render(view: Element, ctx: Ctx) -> PageFuture {
             if let Some(btn) = dom::qs_in(&view, "#clear") {
                 let (b, mine, reload) = (btn.clone(), mine.clone(), reload.clone());
                 dom::on(&btn, "click", move |_| clear_menu(&b, reload.clone(), mine.get()));
+            }
+            if let Some(btn) = dom::qs_in(&view, "#retry-failed") {
+                let (mine, reload) = (mine.clone(), reload.clone());
+                dom::on(&btn, "click", move |_| { let r = reload.clone(); common::retry_failed(mine.get(), r); });
             }
         }
         let me = api::get("/auth/me").await.map_err(|e| e.message)?;

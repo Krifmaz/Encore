@@ -60,9 +60,9 @@ pub fn render(view: Element, ctx: Ctx) -> PageFuture {
       </div>
       <div id="probe-out"></div>
     </form>
-    <div class="section-head"><h2>Recent downloads</h2><button class="btn sm" id="dl-clear">{trash}Clear…</button></div>
+    <div class="section-head"><h2>Recent downloads</h2><div class="row" style="gap:8px"><button class="btn sm" id="dl-retry-failed" title="Queue every failed download again">{refresh}Retry failed</button><button class="btn sm" id="dl-clear">{trash}Clear…</button></div></div>
     <div class="card flat" id="dl-list"></div>"##,
-            link = icon("link"), download = icon("download"), list = icon("list"), trash = icon("trash")));
+            link = icon("link"), download = icon("download"), list = icon("list"), trash = icon("trash"), refresh = icon("refresh")));
         let form = need(&view, "#dl-form")?;
         let out = need(&view, "#probe-out")?;
         let url_in = need(&form, "input[name=url]")?;
@@ -214,6 +214,11 @@ pub fn render(view: Element, ctx: Ctx) -> PageFuture {
             let clear = need(&view, "#dl-clear")?;
             let (c, l) = (clear.clone(), load.clone());
             dom::on(&clear, "click", move |_| common::clear_menu(&c, l.clone(), true));
+        }
+        {
+            let retry = need(&view, "#dl-retry-failed")?;
+            let l = load.clone();
+            dom::on(&retry, "click", move |_| { let l = l.clone(); common::retry_failed(true, l); });
         }
         load_rows(&list).await.map_err(|e| e.message)?;
         {

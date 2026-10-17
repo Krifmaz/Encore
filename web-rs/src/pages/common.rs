@@ -266,3 +266,22 @@ pub fn clear_menu(anchor: &Element, reload: Rc<dyn Fn()>, mine: bool) {
     }
     ui::pop_menu(anchor, items);
 }
+
+/// Retry failed: queue every failed request again (admins: everyone's, unless `mine`), say how many, reload.
+pub fn retry_failed(mine: bool, reload: Rc<dyn Fn()>) {
+    dom::spawn(async move {
+        match api::post("/requests/retry-failed", serde_json::json!({ "mine": mine })).await {
+            Ok(r) => {
+                let (n, skipped) = (r.g("retried").as_i64().unwrap_or(0), r.g("skipped").as_i64().unwrap_or(0));
+                let msg = match (n, skipped) {
+                    (0, 0) => "No failed requests to retry".to_string(),
+                    (n, 0) => format!("Retrying {n} request{}", if n == 1 { "" } else { "s" }),
+                    (n, s) => format!("Retrying {n} · {s} couldn't be retried{}", r.g("why").as_str().map(|w| format!(" ({w})")).unwrap_or_default()),
+                };
+                toast(&msg, if skipped > 0 { "warn" } else { "ok" });
+                reload();
+            }
+            Err(e) => toast(&e.message, "err"),
+        }
+    });
+}

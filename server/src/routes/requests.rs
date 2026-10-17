@@ -19,6 +19,7 @@ pub fn router() -> Router<AppState> {
         .route("/api/requests/from-link", post(from_link))
         .route("/api/requests/link", post(link))
         .route("/api/requests/clear", post(clear))
+        .route("/api/requests/retry-failed", post(retry_failed))
         .route("/api/requests/events", get(crate::req_events::events))
         .route("/api/requests/{rid}", delete(remove))
         .route("/api/requests/{rid}/approve", post(approve))
@@ -431,20 +432,54 @@ async fn deny(State(st): State<AppState>, Admin(a): Admin, Path(rid): Path<i64>)
 
 async fn retry(State(st): State<AppState>, User(u): User, Path(rid): Path<i64>) -> ApiResult<Json<Value>> {
     let r = get_owned(&st, rid, &u)?;
+    retry_request(&st, &u, rid, &r)?;
+    Ok(Json(json!({ "ok": true })))
+}
+
+/// Retry failed (the button beside Clear): every failed top-level request the caller may retry is queued
+/// again in one go. Admins retry everyone's unless `mine` is set.
+#[derive(serde::Deserialize, Default)]
+struct RetryFailedBody {
+    #[serde(default)]
+    mine: bool,
+}
+async fn retry_failed(State(st): State<AppState>, User(u): User, body: Option<Json<RetryFailedBody>>) -> ApiResult<Json<Value>> {
+    let b = body.map(|j| j.0).unwrap_or_default();
+    let mut sql = "SELECT id FROM requests WHERE parent_id IS NULL AND status='failed'".to_string();
+    let mut params: Vec<Value> = vec![];
+    if !auth::is_admin(&u) || b.mine {
+        sql += " AND user_id=?";
+        params.push(json!(u.i("id")));
+    }
+    let (mut retried, mut skipped) = (0, 0);
+    let mut why: Option<String> = None;
+    for row in st.db.query(&sql, params)? {
+        let id = row.i("id");
+        let Ok(r) = get_request(&st, id) else { continue };
+        match retry_request(&st, &u, id, &r) {
+            Ok(()) => retried += 1,
+            Err(e) => { skipped += 1; why.get_or_insert(e.detail.clone()); }
+        }
+    }
+    Ok(Json(json!({ "retried": retried, "skipped": skipped, "why": why })))
+}
+
+/// Queue one finished request again (the per-row Retry and Retry failed share this).
+fn retry_request(st: &AppState, u: &Row, rid: i64, r: &Value) -> ApiResult<()> {
     let reset = "UPDATE requests SET status='queued', progress=0, message='Retrying', source=NULL, detail=?, updated_at=? WHERE id=?";
     if r["kind"] == "playlist" {
         for c in st.db.query("SELECT id FROM requests WHERE parent_id=? AND status IN ('failed','cancelled')", p![rid])? {
             st.db.execute(reset, p!["{}", now(), c.i("id")])?;
             crate::req_events::emit(&st.db, c.i("id"));
         }
-        return Ok(Json(json!({ "ok": true })));
+        return Ok(());
     }
     let status = r["status"].as_str().unwrap_or("");
     if !["failed", "cancelled", "completed"].contains(&status) {
         return Err(err(400, "Only finished requests can be retried"));
     }
-    let admin = auth::is_admin(&u);
-    if !admin && !auth::can(&st, &u, "fix") {
+    let admin = auth::is_admin(u);
+    if !admin && !auth::can(st, u, "fix") {
         return Err(err(403, "Ask an admin to retry"));
     }
     if status == "cancelled" && !admin && !(u.b("auto_approve") || st.cfg.bool("auto_approve")) {
@@ -459,7 +494,7 @@ async fn retry(State(st): State<AppState>, User(u): User, Path(rid): Path<i64>) 
     let keep = detail_for_retry(&r["detail"], status, r["message"].as_str().unwrap_or(""), keep);
     st.db.execute(reset, p![keep.to_string(), now(), rid])?;
     crate::req_events::emit(&st.db, rid);
-    Ok(Json(json!({ "ok": true })))
+    Ok(())
 }
 
 async fn cancel(State(st): State<AppState>, User(u): User, Path(rid): Path<i64>) -> ApiResult<Json<Value>> {
