@@ -94,7 +94,14 @@ fn device_name() -> String {
 /// `JSON.parse(localStorage.getItem(CHAIN) || 'null')` – `Some` only when that is truthy.
 fn saved_link() -> Option<Value> {
     let raw = dom::ls_get(CHAIN).filter(|s| !s.is_empty()).unwrap_or_else(|| "null".into());
-    serde_json::from_str::<Value>(&raw).ok().filter(crate::json::truthy)
+    let l = serde_json::from_str::<Value>(&raw).ok().filter(crate::json::truthy)?;
+    // a link to the desktop app's built-in engine from before it stopped being a device: forget it, so music
+    // plays on this device again
+    if l.s("id").starts_with("cadenza-desktop-") {
+        dom::ls_remove(CHAIN);
+        return None;
+    }
+    Some(l)
 }
 
 /// `api.post(`/remote/${id}/command`, { ...body, from: deviceName() })`.
@@ -183,13 +190,8 @@ fn run_command(c: Value) {
 fn got_devices(list: Vec<Value>) {
     let my = me();
     DEVICES.with(|d| *d.borrow_mut() = list.into_iter().filter(|d| d.s("id") != my).collect());
-    // this computer's engine came online: link to it on its own (quietly), unless you unlinked it
-    if let Some((eid, _)) = engine_device() {
-        if player::linked().is_none() && !engine_off() {
-            let d = DEVICES.with(|d| d.borrow().iter().find(|x| x.s("id") == eid).cloned());
-            if let Some(d) = d { link_to_opts(d, true); }
-        }
-    }
+    // the built-in engine is no longer a device to link to (the server keeps it out of the list; 0.27 makes
+    // it a Playback switch), so nothing links to it on its own any more
     if let Some(link) = player::linked() {
         let d = DEVICES.with(|d| d.borrow().iter().find(|x| x.s("id") == link.id).cloned());
         MISSED.with(|m| m.set(if d.is_some() { 0 } else { m.get() + 1 }));

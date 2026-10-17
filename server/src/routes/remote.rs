@@ -145,8 +145,15 @@ struct Beat {
     state: Value,
 }
 
+/// The Cadenza engine built into the desktop app checks in like a device, but it is not one: it is that
+/// computer's own output path (0.27 makes it a Playback switch). Until then it is kept out of every device
+/// list, so nobody can send music to it or link it. A standalone Cadenza on the network stays listed.
+fn is_embedded_engine(id: &str, d: &Device) -> bool {
+    id.starts_with("cadenza-desktop-") || d.state["engine"]["embedded"].as_bool() == Some(true)
+}
+
 fn online(hub: &Hub, t: f64) -> Vec<Value> {
-    let mut list: Vec<Value> = hub.devices.iter().filter(|(_, d)| t - d.seen < ALIVE && !d.name.is_empty())
+    let mut list: Vec<Value> = hub.devices.iter().filter(|(id, d)| t - d.seen < ALIVE && !d.name.is_empty() && !is_embedded_engine(id, d))
         .map(|(id, d)| json!({ "id": id, "name": d.name, "state": d.state, "seen": d.seen })).collect();
     // a stable order, so the list doesn't jump around between refreshes
     list.sort_by(|a, b| (a["name"].as_str(), a["id"].as_str()).cmp(&(b["name"].as_str(), b["id"].as_str())));
@@ -340,5 +347,17 @@ mod tests {
         hub.devices.insert("old".into(), Device { name: "Old".into(), state: json!({}), seen: t - 100.0, commands: vec![], push: None });
         let names: Vec<_> = online(&hub, t).iter().map(|d| d["name"].as_str().unwrap().to_string()).collect();
         assert_eq!(names, vec!["Desktop", "Phone"]);
+    }
+
+    #[test]
+    fn the_desktop_apps_built_in_engine_is_not_a_device() {
+        let mut hub = Hub::default();
+        let t = now();
+        hub.devices.insert("cadenza-desktop-0123456789abcdef".into(), Device { name: "Cadenza on PC".into(), state: json!({}), seen: t, commands: vec![], push: None });
+        hub.devices.insert("x".into(), Device { name: "Cadenza embedded".into(), state: json!({ "engine": { "embedded": true } }), seen: t, commands: vec![], push: None });
+        hub.devices.insert("lan".into(), Device { name: "Cadenza on the NAS".into(), state: json!({ "engine": { "embedded": false } }), seen: t, commands: vec![], push: None });
+        hub.devices.insert("p".into(), Device { name: "Phone".into(), state: json!({}), seen: t, commands: vec![], push: None });
+        let names: Vec<_> = online(&hub, t).iter().map(|d| d["name"].as_str().unwrap().to_string()).collect();
+        assert_eq!(names, vec!["Cadenza on the NAS", "Phone"]);
     }
 }
