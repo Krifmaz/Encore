@@ -162,7 +162,7 @@ Nothing here is started until the owner says "go".
     there, and a WebAssembly panic stops the whole page (grids stay skeletons, spinners spin, the clicks that
     would have been wired after the panic never are). The web UI now also shows a banner on a panic and files
     the report under Settings → Diagnostics → App crashes (kind "web").
-21. **Player bar buttons (web + desktop):** Lyrics on the bar (done 0.26.2); then View album, Add to playlist and
-    Share link as bar buttons, with a "Customize the bar" option (in the ⋮ menu and Settings → Appearance) to
-    pick which actions sit on the bar and which stay in the ⋮ menu. Stored per browser like the other
-    appearance choices; the phone keeps its own bar.
+21. **Player bar buttons (web + desktop)** – done 0.26.2/0.26.3: Lyrics, View album, Add to playlist and Share link
+    can sit on the bar; "Customize the bar…" (⋮ menu and Settings → Appearance) picks which of Like, View album,
+    Add to playlist, Lyrics, Share, Up next, Other devices and the quality badge are shown (⋮ and the volume stay).
+    Saved per browser (`encore.barButtons`); phones keep the short bar.

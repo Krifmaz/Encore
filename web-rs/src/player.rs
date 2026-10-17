@@ -2158,6 +2158,7 @@ fn more_menu(anchor: &Element) {
     if lib { let t2 = t.clone(); items.push(MenuItem::new("Report a problem", &icon("shield"), move || crate::pages::report::report_modal("track", t2.g("id").clone(), &t2.s("title"), "", None))); }
     if lib && crate::ui::translate_mode() != "off" { let t2 = t.clone(); items.push(MenuItem::new("Edit translation", &icon("edit"), move || crate::pages::translate::edit_translation(t2.s("title"), "title", None))); }
     if has_encore_remote() { items.push(MenuItem::new(if linked { "Your devices…" } else { "Play on another device…" }, &icon("devices"), remote_open)); }
+    items.push(MenuItem::new("Customize the bar…", &icon("settings"), customize_bar_modal));
     pop_menu(anchor, items);
 }
 
@@ -2604,30 +2605,99 @@ fn update_linked_time() {
     }
 }
 
-/// The extra buttons on the right of the bar: like, ⋯, lyrics, up next, devices, volume (and close when playing here).
+/// The actions that can sit on the bar as buttons (`id`, label, icon), in the order they are drawn. ⋯ and the
+/// volume are always there; everything here is also in the ⋯ menu, so a hidden button loses nothing.
+pub const BAR_ACTIONS: &[(&str, &str, &str)] = &[
+    ("quality", "Quality badge", ""),
+    ("like", "Like", "heart"),
+    ("album", "View album", "disc"),
+    ("playlist", "Add to playlist", "plus"),
+    ("lyrics", "Lyrics", "music"),
+    ("share", "Share link", "external"),
+    ("queue", "Up next", "list"),
+    ("devices", "Other devices", "devices"),
+];
+const BAR_KEY: &str = "encore.barButtons";
+const BAR_DEFAULT: &[&str] = &["quality", "like", "lyrics", "queue", "devices"];
+
+/// The buttons the user chose for the bar (localStorage `encore.barButtons`, a JSON list of BAR_ACTIONS ids).
+pub fn bar_buttons() -> Vec<String> {
+    dom::ls_get(BAR_KEY).and_then(|s| serde_json::from_str::<Vec<String>>(&s).ok())
+        .map(|v| v.into_iter().filter(|x| BAR_ACTIONS.iter().any(|(id, _, _)| id == x)).collect())
+        .unwrap_or_else(|| BAR_DEFAULT.iter().map(|s| s.to_string()).collect())
+}
+pub fn set_bar_buttons(v: &[String]) {
+    let same_as_default = v.len() == BAR_DEFAULT.len() && BAR_DEFAULT.iter().all(|d| v.iter().any(|x| x == d));
+    if same_as_default { dom::ls_remove(BAR_KEY); } else { dom::ls_set(BAR_KEY, &serde_json::to_string(v).unwrap_or_default()); }
+    render();
+}
+fn bar_has(id: &str) -> bool { bar_buttons().iter().any(|x| x == id) }
+
+/// "Customize the bar…": tick the buttons the bar shows (⋯ menu and Settings → Appearance).
+pub fn customize_bar_modal() {
+    let on = bar_buttons();
+    let rows: String = BAR_ACTIONS.iter().map(|(id, label, ic)| format!(
+        r#"<label class="row" style="gap:10px;padding:6px 0"><input type="checkbox" data-bar="{id}" {}>{}<span>{label}</span></label>"#,
+        if on.iter().any(|x| x == id) { "checked" } else { "" },
+        if ic.is_empty() { String::new() } else { icon(ic) })).collect();
+    let m = crate::ui::modal(ModalOpts::new("Customize the bar",
+        &format!(r#"<p class="small muted" style="margin:0 0 8px">Buttons on the player bar. ⋯ and the volume always stay; everything is still in the ⋯ menu.</p><div class="stack" style="gap:0">{rows}</div>"#))
+        .footer(r#"<button class="btn" data-bar-reset>Reset</button><button class="btn primary" data-close>Done</button>"#));
+    let read = {
+        let m = m.clone();
+        move || -> Vec<String> { m.qsa("[data-bar]").iter().filter(|b| dom::checked(b)).map(|b| dom::data(b, "bar")).collect() }
+    };
+    {
+        let read = read.clone();
+        dom::on_each(&m.el, "[data-bar]", "change", move |_, _| set_bar_buttons(&read()));
+    }
+    if let Some(r) = m.qs("[data-bar-reset]") {
+        let m2 = m.clone();
+        dom::on(&r, "click", move |_| {
+            for b in m2.qsa("[data-bar]") { dom::set_checked(&b, BAR_DEFAULT.contains(&dom::data(&b, "bar").as_str())); }
+            set_bar_buttons(&BAR_DEFAULT.iter().map(|s| s.to_string()).collect::<Vec<_>>());
+        });
+    }
+}
+
+/// The extra buttons on the right of the bar – the ones chosen in "Customize the bar" (`bar_buttons`), then ⋯,
+/// the volume, and close when playing here.
 fn right_html(t: Option<&Value>, closable: bool) -> String {
-    let badge = match t { Some(t) if !t.truthy("preview") => format!(r#"<button class="badge hide-sm" id="p-signal" type="button" title="{} – click for the signal path">{}</button>"#, esc(&quality_title(t)), esc(&quality(t))), _ => String::new() };
-    let like = if can_like(t) { like_button("p-like", if t.is_some_and(is_liked) { "on" } else { "" }) } else { String::new() };
-    let devices = if has_encore_remote() { format!(r#"<button class="btn ghost icon" id="p-devices" aria-label="Other devices" title="Play on or control your other devices">{}</button>"#, icon("devices")) } else { String::new() };
+    let lib = t.is_some_and(|t| t.g("id").is_number());
+    let btn = |id: &str, label: &str, ic: &str| format!(r#"<button class="btn ghost icon" id="p-{id}" aria-label="{label}" title="{label}">{}</button>"#, icon(ic));
+    let badge = match t { Some(t) if bar_has("quality") && !t.truthy("preview") => format!(r#"<button class="badge hide-sm" id="p-signal" type="button" title="{} – click for the signal path">{}</button>"#, esc(&quality_title(t)), esc(&quality(t))), _ => String::new() };
+    let like = if bar_has("like") && can_like(t) { like_button("p-like", if t.is_some_and(is_liked) { "on" } else { "" }) } else { String::new() };
+    let album = if bar_has("album") && t.is_some_and(|t| t.truthy("album_id")) { btn("album", "View album", "disc") } else { String::new() };
+    let playlist = if bar_has("playlist") && lib { btn("playlist", "Add to playlist", "plus") } else { String::new() };
+    let lyrics = if bar_has("lyrics") { btn("lyrics", "Lyrics", "music") } else { String::new() };
+    let share = if bar_has("share") && lib { btn("share", "Share link", "external") } else { String::new() };
+    let queue = if bar_has("queue") { btn("queue", "Up next", "list") } else { String::new() };
+    let devices = if bar_has("devices") && has_encore_remote() { format!(r#"<button class="btn ghost icon" id="p-devices" aria-label="Other devices" title="Play on or control your other devices">{}</button>"#, icon("devices")) } else { String::new() };
     let vol = if is_linked() { let s = link_state_value(); if s.is_nullish("volume") { "0.9".to_string() } else { s.s("volume") } } else { js_num(user_vol()) };
     format!(r#"<div class="right">
       {badge}
       {like}
+      {album}
+      {playlist}
       <button class="btn ghost icon" id="p-more" aria-label="More" title="More">{more}</button>
-      <button class="btn ghost icon" id="p-lyrics" aria-label="Lyrics" title="Lyrics">{lyrics}</button>
-      <button class="btn ghost icon" id="p-queue" aria-label="Up next" title="Up next">{list}</button>
+      {lyrics}
+      {share}
+      {queue}
       {devices}
       <span class="faint vol-ic">{volume}</span>
       <input type="range" id="vol" min="0" max="1" step="0.01" value="{vol}">
       {close}
     </div>"#,
-        more = icon("more"), lyrics = icon("music"), list = icon("list"), volume = icon_attr("volume", r#"width="18""#),
+        more = icon("more"), volume = icon_attr("volume", r#"width="18""#),
         close = if closable { format!(r#"<button class="btn ghost icon" id="p-close" aria-label="Close player">{}</button>"#, icon("x")) } else { String::new() })
 }
 fn bind_right(ls: &mut Vec<EventListener>, el: &Element) {
     wire(ls, el, "#p-like", "click", |_| { if let Some(t) = now_track() { dom::spawn(toggle_like(t)); } });
     wire(ls, el, "#p-more", "click", |e| { if let Some(b) = dom::closest(e, "#p-more") { more_menu(&b); } });
+    wire(ls, el, "#p-album", "click", |_| { if let Some(t) = now_track() { if t.truthy("album_id") { app::navigate(&format!("/library/album/{}", t.s("album_id"))); } } });
+    wire(ls, el, "#p-playlist", "click", |_| { if let Some(t) = now_track() { if t.g("id").is_number() { crate::pages::playlists::add_to_playlist_modal(vec![t.i("id")]); } } });
     wire(ls, el, "#p-lyrics", "click", |_| { st_mut(|s| s.pane = "lyrics".into()); set_full(true); });
+    wire(ls, el, "#p-share", "click", |_| { if let Some(t) = now_track() { if t.g("id").is_number() { dom::spawn(share_track(t)); } } });
     wire(ls, el, "#p-queue", "click", |_| { st_mut(|s| s.pane = "queue".into()); set_full(true); });
     wire(ls, el, "#p-devices", "click", |_| remote_open());
     wire(ls, el, "#p-signal", "click", |_| dom::spawn(signal_path()));

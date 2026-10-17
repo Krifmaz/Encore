@@ -1399,12 +1399,16 @@ fn paint_appearance(st: &Rc<Look>) {
           {in_use}</div></div>
       <div class="stack" style="gap:6px"><h3>Background</h3>{background}</div>
       <div class="row"><button class="btn primary" type="button">{check}Example button</button><span class="badge accent">Example badge</span></div>
+      <div class="stack" style="gap:6px"><h3>Player bar</h3>
+        <p class="small muted" style="margin:0">Pick which buttons sit on the bar at the bottom (Like, View album, Add to playlist, Lyrics, Share, Up next, Other devices, the quality badge). Saved on this device.</p>
+        <div class="row"><button class="btn" type="button" id="bar-customize">{settings}Customize the bar…</button></div></div>
     </div>"##,
         saved = if st.server_prefs { "Saved to your account, so it follows you to every device." } else { "Saved on this device." },
         theme = seg(&p, "theme", &[("encore", "Encore"), ("dark", "Dark"), ("oled", "OLED black"), ("light", "Light"), ("system", "Match device")]),
         in_use = if p.s("accent") == "custom" { r##"<span class="badge accent">in use</span>"## } else { "" },
         background = seg(&p, "background", &[("fade", "Faded colour"), ("solid", "Solid")]),
-        check = icon("check")));
+        check = icon("check"), settings = icon("settings")));
+    if let Some(b) = dom::qs_in(&st.el, "#bar-customize") { dom::on(&b, "click", |_| crate::player::customize_bar_modal()); }
     {
         let st2 = st.clone();
         dom::on_each(&st.el, ".seg button", "click", move |b, _| {
