@@ -118,3 +118,18 @@ Nothing here is started until the owner says "go".
     - iOS Safari limits: storage is evicted for sites not added to the Home Screen. Tell iPhone users to "Add
       to Home Screen" for reliable offline use.
     - The phone and desktop apps already have offline songs; reuse the same model so they behave the same.
+15. **Plugins tab (own Settings tab, replaces the Download tools list in Apps & sources):**
+    - Every download source/tool is a plugin: yt-dlp, streamrip, slskd, Cadenza (server processing), the
+      translator, the Torznab/Newznab + qBittorrent/SABnzbd bridges, the Jellyfin/Plex/Navidrome/Lidarr
+      connections. They ship as "available, not installed"; the admin installs the ones they want with one
+      click (download/verify/update, as the tools do today).
+    - A plugin manifest (name, version, description, kind: source|tool|connection|playback, settings schema,
+      binary downloads per arch, commands, permissions) plus a small runtime contract (search, download,
+      status, test).
+    - Upload your own plugin (zip with manifest + script/binary) or install from a URL/Git repo. Plugins run
+      sandboxed (own folder, no shell access to the rest of /config, resource limits), show their logs, and
+      can be disabled/removed.
+    - Each plugin's settings card is generated from its manifest; the picker and the request worker ask the
+      installed plugins for search/download.
+    - Migration: existing tools/settings map onto their plugin 1:1 without re-setup.
+    - Not shipped: anything that strips DRM (the owner asked for gamdl/zotify; declined).
