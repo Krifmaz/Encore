@@ -158,3 +158,7 @@ Nothing here is started until the owner says "go".
     status: new / looking / fixed / won't fix / answered), replies in a thread the user sees in the app (and by
     email when set up), and exports them (one Markdown or JSON file with the images zipped) to hand to the
     developer. Stored in <config>/reports/. Ships as the next small release.
+20. **For you → artist page: songs/albums that are in the library can't be played or opened** (0.26.0/0.26.1,
+    desktop app). Reported together with "nothing loads" on Library and Requests; check whether it is the same
+    cause (the page's requests never finish) or the catalog artist page's library section lost its click
+    handlers in web-rs.
