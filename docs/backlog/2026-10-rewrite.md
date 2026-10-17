@@ -159,6 +159,13 @@ Nothing here is started until the owner says "go".
     email when set up), and exports them (one Markdown or JSON file with the images zipped) to hand to the
     developer. Stored in <config>/reports/. Ships as the next small release.
 20. **For you → artist page: songs/albums that are in the library can't be played or opened** (0.26.0/0.26.1,
-    desktop app). Reported together with "nothing loads" on Library and Requests; check whether it is the same
-    cause (the page's requests never finish) or the catalog artist page's library section lost its click
-    handlers in web-rs.
+    desktop app). Reported together with "nothing loads" on Library and Requests. **Fixed in 0.26.2:** one
+    cause for all of it – `initials()` in web-rs/src/ui.rs sliced the first 4 bytes of a title to drop a
+    leading "the "; a title starting with multi-byte characters (Japanese, Korean, curly quotes, "…") panicked
+    there, and a WebAssembly panic stops the whole page (grids stay skeletons, spinners spin, the clicks that
+    would have been wired after the panic never are). The web UI now also shows a banner on a panic and files
+    the report under Settings → Diagnostics → App crashes (kind "web").
+21. **Player bar buttons (web + desktop):** Lyrics on the bar (done 0.26.2); then View album, Add to playlist and
+    Share link as bar buttons, with a "Customize the bar" option (in the ⋮ menu and Settings → Appearance) to
+    pick which actions sit on the bar and which stay in the ⋮ menu. Stored per browser like the other
+    appearance choices; the phone keeps its own bar.

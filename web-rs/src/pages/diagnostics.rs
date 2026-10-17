@@ -199,7 +199,7 @@ fn draw_backups(bk: &Element, d: &Value) {
 
 /// App crash report kinds (POST /api/diagnostics/client-crash), the same words in web/js.
 fn crash_kind(k: &str) -> Option<&'static str> {
-    Some(match k { "crash" => "Crash", "native" => "Native crash", "anr" => "Not responding", "low_memory" => "Closed for memory", "signaled" => "Killed by the system", _ => return None })
+    Some(match k { "crash" => "Crash", "native" => "Native crash", "anr" => "Not responding", "low_memory" => "Closed for memory", "signaled" => "Killed by the system", "web" => "Web page", _ => return None })
 }
 
 /// The JS `loadCrashes`: the "App crashes" list (newest first) and the Clear button.

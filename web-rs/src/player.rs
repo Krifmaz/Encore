@@ -2604,7 +2604,7 @@ fn update_linked_time() {
     }
 }
 
-/// The extra buttons on the right of the bar: like, ⋯, up next, devices, volume (and close when playing here).
+/// The extra buttons on the right of the bar: like, ⋯, lyrics, up next, devices, volume (and close when playing here).
 fn right_html(t: Option<&Value>, closable: bool) -> String {
     let badge = match t { Some(t) if !t.truthy("preview") => format!(r#"<button class="badge hide-sm" id="p-signal" type="button" title="{} – click for the signal path">{}</button>"#, esc(&quality_title(t)), esc(&quality(t))), _ => String::new() };
     let like = if can_like(t) { like_button("p-like", if t.is_some_and(is_liked) { "on" } else { "" }) } else { String::new() };
@@ -2614,18 +2614,20 @@ fn right_html(t: Option<&Value>, closable: bool) -> String {
       {badge}
       {like}
       <button class="btn ghost icon" id="p-more" aria-label="More" title="More">{more}</button>
+      <button class="btn ghost icon" id="p-lyrics" aria-label="Lyrics" title="Lyrics">{lyrics}</button>
       <button class="btn ghost icon" id="p-queue" aria-label="Up next" title="Up next">{list}</button>
       {devices}
       <span class="faint vol-ic">{volume}</span>
       <input type="range" id="vol" min="0" max="1" step="0.01" value="{vol}">
       {close}
     </div>"#,
-        more = icon("more"), list = icon("list"), volume = icon_attr("volume", r#"width="18""#),
+        more = icon("more"), lyrics = icon("music"), list = icon("list"), volume = icon_attr("volume", r#"width="18""#),
         close = if closable { format!(r#"<button class="btn ghost icon" id="p-close" aria-label="Close player">{}</button>"#, icon("x")) } else { String::new() })
 }
 fn bind_right(ls: &mut Vec<EventListener>, el: &Element) {
     wire(ls, el, "#p-like", "click", |_| { if let Some(t) = now_track() { dom::spawn(toggle_like(t)); } });
     wire(ls, el, "#p-more", "click", |e| { if let Some(b) = dom::closest(e, "#p-more") { more_menu(&b); } });
+    wire(ls, el, "#p-lyrics", "click", |_| { st_mut(|s| s.pane = "lyrics".into()); set_full(true); });
     wire(ls, el, "#p-queue", "click", |_| { st_mut(|s| s.pane = "queue".into()); set_full(true); });
     wire(ls, el, "#p-devices", "click", |_| remote_open());
     wire(ls, el, "#p-signal", "click", |_| dom::spawn(signal_path()));

@@ -225,7 +225,9 @@ pub mod fmt {
 /// `initials(s)`.
 pub fn initials(s: &str) -> String {
     let t = s.trim();
-    let t = if t.len() >= 4 && t[..4].eq_ignore_ascii_case("the ") { t[4..].trim_start() } else { t };
+    // `t.get(..4)` is None when byte 4 is inside a multi-byte character (Japanese, curly quotes…): slicing
+    // there would panic and take the whole page with it (0.26.0/0.26.1 showed empty grids for that reason).
+    let t = match t.get(..4) { Some(h) if h.eq_ignore_ascii_case("the ") => t[4..].trim_start(), _ => t };
     let t = if t.is_empty() { "?" } else { t };
     t.chars().next().map(|c| c.to_uppercase().to_string()).unwrap_or_else(|| "?".into())
 }
@@ -655,5 +657,23 @@ pub fn tr_inline(o: &Value, f: &str) -> String {
     match tr_pick(o, f, &["_t", "_r"]) {
         Some(t) => format!("{} ({t})", o.s(f)),
         None => o.s(f),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::initials;
+
+    #[test]
+    fn initials_never_panic_on_multibyte_names() {
+        // byte 4 falls inside a character for every one of these
+        for s in ["ペルソナ4 サウンドトラック", "平田志穂子", "“Quoted” Album", "한국어 앨범", "…and more", "é…x", "🎉🎉"] {
+            let _ = initials(s);
+        }
+        assert_eq!(initials("ペルソナ4"), "ペ");
+        assert_eq!(initials("the Beatles"), "B");
+        assert_eq!(initials("The"), "T");
+        assert_eq!(initials("  "), "?");
+        assert_eq!(initials("éclair"), "É");
     }
 }
