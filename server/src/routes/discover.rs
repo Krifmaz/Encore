@@ -18,6 +18,7 @@ pub fn router() -> Router<AppState> {
         .route("/api/discover/artist/{mbid}", get(artist))
         .route("/api/discover/artist/{mbid}/library-tracks", get(artist_library_tracks))
         .route("/api/discover/artist-lookup", get(artist_lookup))
+        .route("/api/discover/album-lookup", get(album_lookup))
         .route("/api/discover/album/{rgid}", get(album))
         .route("/api/discover/new-releases", get(new_releases))
 }
@@ -239,6 +240,30 @@ async fn artist_lookup(State(st): State<AppState>, User(_): User, Query(q): Quer
     let hits = d["artists"].as_array().cloned().unwrap_or_default();
     let id = pick_artist(&hits, name).ok_or_else(|| err(404, "No MusicBrainz artist with that name"))?;
     Ok(Json(json!({ "mbid": id })))
+}
+
+#[derive(serde::Deserialize)]
+struct AlbumQ {
+    artist: String,
+    album: String,
+}
+
+/// "Get the rest of the album" from a library album with no MusicBrainz tag: the release group that matches
+/// the artist and title best, so the catalog page can show the missing songs with Request.
+async fn album_lookup(State(st): State<AppState>, User(_): User, Query(q): Query<AlbumQ>) -> ApiResult<Json<Value>> {
+    let (artist, album) = (q.artist.trim(), q.album.trim());
+    if album.is_empty() {
+        return Err(err(400, "No album title"));
+    }
+    let query = if artist.is_empty() { format!("releasegroup:\"{}\"", crate::mb::esc(album)) } else { format!("releasegroup:\"{}\" AND artist:\"{}\"", crate::mb::esc(album), crate::mb::esc(artist)) };
+    let hits = crate::mb::search_albums(&st, &query, 10).await.map_err(mb_err)?;
+    let norm = |s: &str| crate::routes::catalog::norm(s);
+    let (want_t, want_a) = (norm(album), norm(artist));
+    // an exact title (and artist when given) first, else MusicBrainz's best score
+    let hit = hits.iter().find(|h| norm(&h["title"].as_str().unwrap_or("")) == want_t && (want_a.is_empty() || norm(&h["artist"].as_str().unwrap_or("")) == want_a))
+        .or_else(|| hits.first())
+        .ok_or_else(|| err(404, "MusicBrainz doesn't know this album – look it up in the Downloader instead"))?;
+    Ok(Json(json!({ "rgid": hit["id"], "title": hit["title"], "artist": hit["artist"] })))
 }
 
 fn is_mbid(s: &str) -> bool {

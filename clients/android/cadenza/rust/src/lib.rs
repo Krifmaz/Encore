@@ -261,11 +261,13 @@ mod tests {
         // configure on a new song, the Signal path read from the UI)
         let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
         let current = Arc::new(AtomicI64::new(register(engine())));
+        // buffers the audio thread got through; the swaps below only start once it is running, so the test
+        // can't finish before the thread was ever scheduled (it did on a fast CI runner)
+        let done = Arc::new(std::sync::atomic::AtomicU64::new(0));
         let audio = {
-            let (stop, current) = (stop.clone(), current.clone());
+            let (stop, current, done) = (stop.clone(), current.clone(), done.clone());
             std::thread::spawn(move || {
                 let input = vec![0.25f32; 2 * 512];
-                let mut done = 0u64;
                 while !stop.load(Ordering::Relaxed) {
                     let h = current.load(Ordering::Relaxed);
                     if let Some(n) = with_engine(h, |e| {
@@ -273,19 +275,22 @@ mod tests {
                         e.process(&input, 512).len()
                     }) {
                         assert_eq!(n, input.len());
-                        done += 1;
+                        done.fetch_add(1, Ordering::Relaxed);
                     }
                 }
-                done
             })
         };
+        while done.load(Ordering::Relaxed) == 0 {
+            std::thread::yield_now();
+        }
         for _ in 0..300 {
             let old = current.swap(register(engine()), Ordering::Relaxed);
             assert!(unregister(old));
             let _ = with_engine(old, |e| e.signal_path_json());
         }
         stop.store(true, Ordering::Relaxed);
-        assert!(audio.join().unwrap() > 0);
+        audio.join().unwrap();
+        assert!(done.load(Ordering::Relaxed) > 0);
         assert!(unregister(current.load(Ordering::Relaxed)));
     }
 
