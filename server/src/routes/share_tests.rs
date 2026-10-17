@@ -38,7 +38,7 @@ async fn setup(name: &str) -> Env {
         crate::build_state().unwrap()
     };
     // the real share page template
-    st.static_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("..").join("web");
+    st.static_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("..").join("web-rs").join("static");
     crate::auth::create_user(&st, "sharer", PW, "user", None, None).unwrap();
     let app = crate::app(st.clone());
     let req = Request::builder().method("POST").uri("/api/auth/login").header("x-requested-with", "encore").header("content-type", "application/json")

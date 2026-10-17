@@ -363,7 +363,7 @@ fn expose_global() {
     if EXPOSED.with(|e| e.replace(true)) { return; }
     let obj = js_sys::Object::new();
     let put = |name: &str, f: Box<dyn Fn()>| {
-        let c = Closure::<dyn Fn()>::new(move || f());
+        let c = Closure::<dyn Fn()>::new(f);
         let _ = js_sys::Reflect::set(&obj, &name.into(), c.as_ref());
         c.forget();
     };
@@ -558,7 +558,7 @@ fn cover(t: &Value) -> String { let v = cover_v(t); if json::truthy(&v) { js_str
 fn cover_at(t: &Value, size: u32) -> String {
     let c = cover(t);
     if t.truthy("preview") || !t.truthy("album_id") || !c.starts_with("/api/library/albums/") { return c; }
-    crate::ui::cover_url(&t.s("album_id"), &crate::ui::cover_q(t).trim_start_matches("?v=").to_string(), size)
+    crate::ui::cover_url(&t.s("album_id"), crate::ui::cover_q(t).trim_start_matches("?v="), size)
 }
 /// `preloadNextCover()`: the next song's cover, so it shows at once when the song changes.
 fn preload_next_cover() {
@@ -2829,6 +2829,12 @@ fn render_full() {
         if can_like(Some(&t)) { format!(r#"<button class="btn ghost icon" id="f-share" aria-label="Share" title="Share link">{}</button>"#, icon("external")) } else { String::new() },
         if pane == "lyrics" { "on" } else { "" }, icon("music"),
         icon("more"));
+    let on_name = link.as_ref().map(|l| format!(" on {}", esc(&l.name))).unwrap_or_default();
+    let shuffle = format!(r#"<button class="btn ghost icon {}" id="f-shuffle" title="{}" aria-label="Shuffle" aria-pressed="{shuffle_on}">{}</button>"#,
+        if shuffle_on { "on" } else { "" }, if shuffle_on { "Shuffle: on" } else { "Shuffle: off" }, icon("shuffle"));
+    let repeat_btn = format!(r#"<button class="btn ghost icon {}" id="f-repeat" title="{}" aria-label="Repeat" aria-pressed="{}">{}{}</button>"#,
+        if repeat != "off" { "on" } else { "" }, repeat_title(&repeat), repeat != "off", icon("refresh"), if repeat == "one" { "<sup>1</sup>" } else { "" });
+    let auto = if link.is_some() { String::new() } else { format!(r#"<label class="row small muted" style="gap:6px" title="When the queue ends, keep playing a shuffle of the whole library"><input type="checkbox" id="f-auto" {}> Then shuffle library</label>"#, if autoplay { "checked" } else { "" }) };
     set_html(&f, &format!(r##"
     <div class="np-backdrop"></div>
     <div class="np-top">
@@ -2864,14 +2870,9 @@ fn render_full() {
     </div>"##,
         x = icon("x"), tab_now = tab("now", "Now playing"), tab_lyrics = tab("lyrics", "Lyrics"), tab_queue = tab("queue", "Up next"),
         big_art = art(&cover(&t), &album_or_title(&t), "big"), title = esc(&crate::ui::tr(&t, "title")), title_sub = crate::ui::tr_sub(&t, "title"), quality = esc(&quality(&t)),
-        shuffle = format!(r#"<button class="btn ghost icon {}" id="f-shuffle" title="{}" aria-label="Shuffle" aria-pressed="{shuffle_on}">{}</button>"#,
-            if shuffle_on { "on" } else { "" }, if shuffle_on { "Shuffle: on" } else { "Shuffle: off" }, icon("shuffle")),
-        prev = icon("prev"), pp = if playing { icon("pause") } else { icon("play") }, next = icon("next"),
-        repeat = format!(r#"<button class="btn ghost icon {}" id="f-repeat" title="{}" aria-label="Repeat" aria-pressed="{}">{}{}</button>"#,
-            if repeat != "off" { "on" } else { "" }, repeat_title(&repeat), repeat != "off", icon("refresh"), if repeat == "one" { "<sup>1</sup>" } else { "" }),
+        shuffle = shuffle, prev = icon("prev"), pp = if playing { icon("pause") } else { icon("play") }, next = icon("next"), repeat = repeat_btn,
         volume_ic = icon_attr("volume", r#"width="18""#), vol = volume, lyrics = lyrics_html(),
-        on_name = link.as_ref().map(|l| format!(" on {}", esc(&l.name))).unwrap_or_default(),
-        auto = if link.is_some() { String::new() } else { format!(r#"<label class="row small muted" style="gap:6px" title="When the queue ends, keep playing a shuffle of the whole library"><input type="checkbox" id="f-auto" {}> Then shuffle library</label>"#, if autoplay { "checked" } else { "" }) }));
+        on_name = on_name, auto = auto));
     let mut ls = Vec::new();
     wire(&mut ls, &f, "#f-close", "click", |_| set_full(false));
     wire(&mut ls, &f, ".np-tabs", "click", |e| {

@@ -28,8 +28,6 @@ pub fn on_server(base: &str, u: &Url) -> bool {
 fn base_of(u: &Url) -> String {
     let mut path = u.path().to_string();
     if let Some(i) = path.find("/api/") { path.truncate(i); }
-    // the Rust web interface lives at /next/ on the same server
-    if let Some(i) = path.find("/next/").or_else(|| path.ends_with("/next").then(|| path.len() - 5)) { path.truncate(i); }
     let path = path.trim_end_matches('/');
     format!("{}{}", u.origin().ascii_serialization(), path)
 }
@@ -230,4 +228,28 @@ pub fn user_agent() -> String {
         else { "X11; Linux x86_64" };
     let tag = if cfg!(target_os = "android") { "EncoreAndroid" } else { "EncoreDesktop" };
     format!("Mozilla/5.0 ({os}) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36 {tag}/{VERSION}")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn base_of_keeps_the_sub_path_and_drops_only_the_api_part() {
+        let b = |u: &str| base_of(&Url::parse(u).unwrap());
+        assert_eq!(b("https://music.example.org/api/health"), "https://music.example.org");
+        assert_eq!(b("https://music.example.org/encore/api/health"), "https://music.example.org/encore");
+        assert_eq!(b("http://192.168.1.5:8080/"), "http://192.168.1.5:8080");
+        // the Rust UI is at / since 0.26; /next/ is just a redirect on the server, not a sub-path to strip
+        assert_eq!(b("https://music.example.org/next/"), "https://music.example.org/next");
+    }
+
+    #[test]
+    fn on_server_knows_the_same_host_and_the_https_upgrade() {
+        let u = |s: &str| Url::parse(s).unwrap();
+        assert!(on_server("http://music.example.org", &u("https://music.example.org/#/library")));
+        assert!(on_server("http://192.168.1.5:8080", &u("http://192.168.1.5:8080/api/health")));
+        assert!(!on_server("http://192.168.1.5:8080", &u("http://192.168.1.5:9090/")));
+        assert!(!on_server("https://music.example.org", &u("https://other.example.org/")));
+    }
 }

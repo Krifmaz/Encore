@@ -293,6 +293,9 @@ async fn diagnostics(State(st): State<AppState>, Admin(_): Admin) -> ApiResult<J
     checks.push(tool("fpcalc (audio fingerprints)", "fpcalc", &["-version"]).await);
     checks.push(tool("yt-dlp", &crate::sources::ytdlp::bin(), &["--version"]).await);
     checks.push(tool("streamrip", &streamrip::binary(&st).unwrap_or("streamrip".into()), &["--version"]).await);
+    if streamrip::binary(&st).is_some() {
+        checks.push(streamrip::config_loads_check(&st).await);
+    }
     let dump = st.cfg.public_dump();
     let mut settings = vec![];
     for (k, d) in st.cfg.defs.iter() {

@@ -23,6 +23,7 @@ pub fn router() -> Router<AppState> {
         .route("/api/system/vpn/test", post(vpn_test))
         .route("/api/system/streamrip/tidal-login", post(tidal_login_start).get(tidal_login_status))
         .route("/api/system/streamrip/tidal-tokens", post(tidal_tokens_save).delete(tidal_tokens_clear))
+        .route("/api/system/streamrip/reset-config", post(streamrip_reset_config))
         .route("/api/system/downloads", get(downloads))
         .route("/api/system/downloads/slskd/clear", post(clear_slskd))
         .route("/api/system/tools", get(tools_list))
@@ -301,6 +302,17 @@ async fn tidal_tokens_clear(State(st): State<AppState>, Admin(u): Admin) -> ApiR
     Ok(Json(v))
 }
 
+/// Settings → streamrip → "Reset streamrip config": a fresh config.toml from streamrip's defaults; the old
+/// file is kept as a backup and its Tidal sign-in, Deezer ARL and Qobuz login are carried over.
+async fn streamrip_reset_config(State(st): State<AppState>, Admin(u): Admin) -> ApiResult<Json<Value>> {
+    if streamrip::binary(&st).is_none() {
+        return Err(err(400, streamrip::NOT_INSTALLED_MSG));
+    }
+    let c = streamrip::reset_config(&st).await.map_err(|e| err(500, e.to_string()))?;
+    st.db.log("info", &format!("{} reset streamrip's config ({})", u.s("username"), c.message()));
+    Ok(Json(c.json()))
+}
+
 fn msg(ok: bool, m: impl Into<String>) -> Value {
     json!({ "ok": ok, "message": m.into() })
 }
@@ -321,6 +333,7 @@ async fn test(State(st): State<AppState>, Admin(u): Admin, Path(service): Path<S
                         "starting" => format!("engine{ver} starting"),
                         "waiting_vpn" => "waiting for the VPN".to_string(),
                         "crashed" => format!("engine{ver} crashed"),
+                        "blocked" => format!("engine{ver} can't start"),
                         _ => "off".to_string(),
                     };
                     let err = m["error"].as_str().filter(|e| !e.is_empty() && state != "not_installed" && state != "waiting_vpn").map(|e| format!(" – {e}")).unwrap_or_default();
@@ -440,14 +453,15 @@ async fn test(State(st): State<AppState>, Admin(u): Admin, Path(service): Path<S
                 msg(true, "Tidal credentials valid")
             }
             "streamrip" => match streamrip::binary(&st) {
-                None => msg(false, "streamrip is not installed in this container (use the default Docker image or set its path)"),
+                None => msg(false, streamrip::NOT_INSTALLED_MSG),
                 Some(bin) => {
-                    let path = streamrip::apply_credentials(&st).await?;
-                    let o = tokio::process::Command::new(bin).arg("--version").output().await?;
+                    let c = streamrip::check_config(&st, false).await?;
+                    let o = tokio::process::Command::new(bin).arg("--version").stdin(std::process::Stdio::null()).output().await?;
                     let v: String = String::from_utf8_lossy(&[o.stdout, o.stderr].concat()).trim().chars().take(120).collect();
                     let tidal = if streamrip::tidal_signed_in(&st) { "Tidal: signed in" } else { "Tidal: not signed in yet – use “Sign in to Tidal” below" };
                     let reach = streamrip::tidal_probe(&st).await;
-                    msg(o.status.success(), format!("{v} · credentials written to {} · {tidal} · {reach}", path.display()))
+                    let config = if c.problem.is_some() { c.message() } else if c.regenerated { format!("config written fresh and credentials written to {}", c.path.display()) } else { format!("config loads, credentials written to {}", c.path.display()) };
+                    msg(o.status.success() && c.problem.is_none(), format!("{v} · {config} · {tidal} · {reach}"))
                 }
             },
             "acoustid" => {

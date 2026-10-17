@@ -33,6 +33,42 @@ fn src_label(p: &Value) -> String {
     let source = p.s("source");
     src_name(&source).map(|s| s.to_string()).unwrap_or(source)
 }
+/// A row "Download missing" would ask for: not in the library, and never requested or its request is gone,
+/// failed, cancelled or denied. Rows whose request is waiting, running or done are on their way already.
+fn requestable(it: &Value) -> bool {
+    !it.truthy("track_id") && matches!(it.st("request_status"), None | Some("failed") | Some("cancelled") | Some("denied"))
+}
+
+/// The "Download missing" toast from the route's `{requested, in_progress, failed: [{title, reason}]}`:
+/// "Requested 120 · 600 already in progress · 64 couldn't be requested (why)".
+pub fn missing_report_text(r: &Value) -> String {
+    let mut s = format!("Requested {}", r.i("requested"));
+    if r.i("in_progress") > 0 {
+        s += &format!(" · {} already in progress", r.i("in_progress"));
+    }
+    let failed = r.a("failed");
+    if !failed.is_empty() {
+        let mut why: Vec<String> = vec![];
+        for f in &failed {
+            let reason = f.s("reason");
+            if !reason.is_empty() && !why.contains(&reason) {
+                why.push(reason);
+            }
+        }
+        let more = why.len().saturating_sub(3);
+        why.truncate(3);
+        let mut why = why.join("; ");
+        if more > 0 {
+            why += &format!("; {more} more");
+        }
+        s += &format!(" · {} couldn't be requested", failed.len());
+        if !why.is_empty() {
+            s += &format!(" ({why})");
+        }
+    }
+    s
+}
+
 /// `window.dispatchEvent(new HashChangeEvent('hashchange'))`: re-render the current page.
 fn reload() {
     if let Ok(ev) = web_sys::HashChangeEvent::new("hashchange") { let _ = dom::window().dispatch_event(&ev); }
@@ -254,7 +290,7 @@ pub fn render_playlist(view: Element, ctx: Ctx) -> PageFuture {
         let (pl, conns) = futures::try_join!(api::get(&pl_path), api::get("/connections")).map_err(|e| e.message)?;
         let connected: Vec<String> = conns.o("connections").as_object().map(|o| o.keys().filter(|k| target_name(k).is_some()).cloned().collect()).unwrap_or_default();
         let items = pl.a("items");
-        let missing = items.iter().filter(|i| !i.truthy("track_id") && !i.truthy("request_id")).count();
+        let missing = items.iter().filter(|i| requestable(i)).count();
         let liked = pl.s("kind") == "liked";
         let source = pl.s("source");
         let (total, matched) = (pl.f("total"), pl.f("matched"));
@@ -273,7 +309,12 @@ pub fn render_playlist(view: Element, ctx: Ctx) -> PageFuture {
                     "mismatch" => r#" <span class="badge err">wrong audio</span>"#,
                     _ => "",
                 })
-            } else if it.truthy("request_status") { status_badge(&it.s("request_status")) } else { r#"<span class="badge">missing</span>"#.to_string() },
+            } else if let Some(s) = it.st("request_status") {
+                match it.st("request_message") {
+                    Some(m) => format!(r#"<span title="{}">{}</span>"#, esc(m), status_badge(s)),
+                    None => status_badge(s),
+                }
+            } else { r#"<span class="badge">missing</span>"#.to_string() },
             x = icon("x"),
         )).collect();
         dom::set_html(&view, &format!(r##"
@@ -353,7 +394,7 @@ pub fn render_playlist(view: Element, ctx: Ctx) -> PageFuture {
                 album_choice("Download missing songs", Rc::new(move |mode| {
                     let id4 = id3.clone();
                     dom::spawn(act(async move { api::post(&format!("/playlists/{id4}/request-missing"), json!({ "album_mode": mode })).await },
-                        |r| format!("Requested {} track(s)", r.s("requested"))));
+                        missing_report_text));
                 }));
             });
         }
@@ -507,4 +548,36 @@ pub fn add_to_playlist_modal(track_ids: Vec<i64>) {
             });
         }
     });
+}
+
+#[cfg(test)]
+mod missing_report_tests {
+    use super::*;
+
+    #[test]
+    fn the_toast_counts_and_explains() {
+        assert_eq!(missing_report_text(&json!({ "requested": 120, "in_progress": 0, "failed": [] })), "Requested 120");
+        assert_eq!(missing_report_text(&json!({ "requested": 120, "in_progress": 600, "failed": [] })), "Requested 120 · 600 already in progress");
+        let failed: Vec<Value> = (0..64).map(|i| json!({ "title": format!("Song {i}"), "reason": if i % 2 == 0 { "Track needs a MusicBrainz id or artist + title" } else { "Weekly request limit reached (50). Ask an admin to raise it." } })).collect();
+        assert_eq!(missing_report_text(&json!({ "requested": 120, "in_progress": 600, "failed": failed })),
+            "Requested 120 · 600 already in progress · 64 couldn't be requested (Track needs a MusicBrainz id or artist + title; Weekly request limit reached (50). Ask an admin to raise it.)");
+        // more than three different reasons are counted, not listed
+        let failed: Vec<Value> = (0..5).map(|i| json!({ "title": "x", "reason": format!("reason {i}") })).collect();
+        assert_eq!(missing_report_text(&json!({ "requested": 0, "failed": failed })), "Requested 0 · 5 couldn't be requested (reason 0; reason 1; reason 2; 2 more)");
+        // an old server that only sends the count
+        assert_eq!(missing_report_text(&json!({ "requested": 3 })), "Requested 3");
+    }
+
+    #[test]
+    fn only_rows_whose_request_is_over_or_gone_are_asked_for() {
+        assert!(requestable(&json!({ "title": "a" })));
+        assert!(requestable(&json!({ "request_id": 5 })), "the request row is gone");
+        for s in ["failed", "cancelled", "denied"] {
+            assert!(requestable(&json!({ "request_id": 5, "request_status": s })), "{s}");
+        }
+        for s in ["pending", "queued", "searching", "downloading", "completed"] {
+            assert!(!requestable(&json!({ "request_id": 5, "request_status": s })), "{s}");
+        }
+        assert!(!requestable(&json!({ "track_id": 9 })));
+    }
 }

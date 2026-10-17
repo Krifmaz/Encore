@@ -37,7 +37,7 @@ pub const NOT_INSTALLED: &str = "Soulseek is not installed – install it under 
 
 #[derive(Clone, Debug, Default)]
 struct Status {
-    /// off | not_installed | starting | running | crashed | waiting_vpn
+    /// off | not_installed | starting | running | crashed | waiting_vpn | blocked
     state: &'static str,
     version: Option<String>,
     pid: Option<u32>,
@@ -46,16 +46,24 @@ struct Status {
     vpn: bool,
     /// the share scan's progress (percent) while slskd builds its share list
     scan: Option<u8>,
+    /// something to fix although slskd runs (downloads go to the fallback folder)
+    warning: Option<String>,
+    /// the folder slskd downloads into (the fallback when the configured one can't be written)
+    downloads: Option<String>,
 }
 
 static STATUS: LazyLock<Mutex<Status>> = LazyLock::new(|| Mutex::new(Status { state: "off", ..Default::default() }));
 static WAKE: LazyLock<tokio::sync::Notify> = LazyLock::new(tokio::sync::Notify::new);
 static INSTALLING: AtomicBool = AtomicBool::new(false);
+/// Set by Start now: the next check starts slskd at once instead of waiting out the backoff.
+static START_NOW: AtomicBool = AtomicBool::new(false);
 
-/// {state: off|not_installed|starting|running|crashed|waiting_vpn, version, pid, error, listen_port, vpn}
+/// {state: off|not_installed|starting|running|crashed|waiting_vpn|blocked, version, pid, error, listen_port, vpn,
+/// scanning, warning, download_dir}
 pub fn status() -> Value {
     let s = STATUS.lock().unwrap().clone();
-    json!({ "state": s.state, "version": s.version, "pid": s.pid, "error": s.error, "listen_port": s.listen_port, "vpn": s.vpn, "scanning": s.scan })
+    json!({ "state": s.state, "version": s.version, "pid": s.pid, "error": s.error, "listen_port": s.listen_port, "vpn": s.vpn, "scanning": s.scan,
+        "warning": s.warning, "download_dir": s.downloads })
 }
 
 fn set_status(f: impl FnOnce(&mut Status)) {
@@ -64,7 +72,14 @@ fn set_status(f: impl FnOnce(&mut Status)) {
 
 /// Look at the settings now instead of at the next check (after saving settings, installing, removing).
 pub fn poke() {
+    *PROBED.lock().unwrap() = None; // the settings may have changed: the downloads folder is probed again
     WAKE.notify_one();
+}
+
+/// Start now (after a crash or a blocked start): forget the backoff and try at once.
+pub fn start_now() {
+    START_NOW.store(true, Ordering::SeqCst);
+    poke();
 }
 
 // ---- paths ----------------------------------------------------------------------------------------
@@ -99,6 +114,94 @@ pub fn configured(st: &AppState) -> bool {
 
 pub fn base_url() -> String {
     format!("http://127.0.0.1:{WEB_PORT}")
+}
+
+// ---- the downloads folder --------------------------------------------------------------------------
+
+/// Where downloads go when the configured folder can't be used: <config>/downloads/slskd (the config
+/// folder is Encore's own, so it is always writable).
+pub fn fallback_dir(data: &Path) -> PathBuf {
+    data.join("downloads").join("slskd")
+}
+
+/// Encore's own uid and gid (what slskd runs as too), for the chown line.
+fn ids() -> (u32, u32) {
+    // SAFETY: both calls only read the process's credentials and cannot fail.
+    unsafe { (libc::geteuid(), libc::getegid()) }
+}
+
+/// Can Encore write in `dir`? The folder is made when `create` is set (download folders; the library
+/// folder has to be mounted already), then a probe file is written and removed. The Err is the reason.
+pub fn probe_writable(dir: &Path, create: bool) -> Result<(), String> {
+    if create {
+        std::fs::create_dir_all(dir).map_err(|e| e.to_string())?;
+    } else if !dir.is_dir() {
+        return Err("the folder doesn't exist inside the container – check the volume mapping in your compose file".into());
+    }
+    let probe = dir.join(format!(".encore-write-test-{}", std::process::id()));
+    std::fs::write(&probe, b"x").map_err(|e| e.to_string())?;
+    let _ = std::fs::remove_file(&probe);
+    Ok(())
+}
+
+/// "/downloads/slskd isn't writable by Encore (uid 1000, gid 1000): Permission denied (os error 13). Fix:
+/// chown 1000:1000 /downloads/slskd (on the host: the folder mounted there), or set PUID/PGID to its owner"
+pub fn unwritable(dir: &Path, why: &str) -> String {
+    let (uid, gid) = ids();
+    format!("{d} isn't writable by Encore (uid {uid}, gid {gid}): {why}. Fix: chown {uid}:{gid} {d} (on the host: the folder mounted there), or set PUID/PGID to its owner", d = dir.display())
+}
+
+/// The folder slskd downloads into, probed before slskd starts (slskd itself would exit on it and be
+/// started again for ever). The configured folder when Encore can write there. When it can't: a folder
+/// the user chose (saved in Settings or set by SLSKD_DOWNLOAD_PATH) blocks the start with the exact fix
+/// (Err); the default folder is replaced by the fallback, with a warning that says so (Ok with Some).
+pub fn downloads_dir_for(configured: &Path, chosen: bool, fallback: &Path) -> Result<(PathBuf, Option<String>), String> {
+    let Err(why) = probe_writable(configured, true) else { return Ok((configured.to_path_buf(), None)) };
+    let problem = format!("Soulseek's downloads folder {}", unwritable(configured, &why));
+    if chosen {
+        return Err(problem);
+    }
+    match probe_writable(fallback, true) {
+        Ok(()) => Ok((fallback.to_path_buf(), Some(format!("Downloads go to {} for now – {}", fallback.display(), unwritable(configured, &why))))),
+        Err(e2) => Err(format!("{problem}. The fallback {} isn't writable either: {e2}", fallback.display())),
+    }
+}
+
+/// The user chose the Soulseek downloads folder (saved in Settings or set by the environment) rather
+/// than leaving the default.
+fn downloads_chosen(st: &AppState) -> bool {
+    const KEY: &str = "slskd_download_path";
+    st.cfg.env_locked(KEY) || st.cfg.def(KEY).map(|d| d.default != st.cfg.get(KEY)).unwrap_or(true)
+}
+
+/// Where slskd's downloads land right now: the running plan's folder (the fallback when the configured
+/// one can't be written), else the configured one.
+pub fn download_dir(st: &AppState) -> PathBuf {
+    match STATUS.lock().unwrap().downloads.clone() {
+        Some(d) => PathBuf::from(d),
+        None => PathBuf::from(st.cfg.str("slskd_download_path")),
+    }
+}
+
+/// The last downloads-folder probe, by what was probed: (configured folder, chosen, fallback folder).
+static PROBED: Mutex<Option<((PathBuf, bool, PathBuf), Result<(PathBuf, Option<String>), String>)>> = Mutex::new(None);
+
+/// `downloads_dir_for` for the settings, probed only when it matters. While slskd runs (or starts, or
+/// waits for the VPN) with the same folder settings the last answer is reused: the supervisor checks
+/// every few seconds, and writing a probe file each time would keep the downloads disk awake, poke
+/// slskd's own folder watcher and cost a round trip on a network mount. The folder is probed again when
+/// the setting changes, before a start (blocked, crashed) and after poke() or start_now().
+fn probed_downloads_dir(st: &AppState, configured: &Path) -> Result<(PathBuf, Option<String>), String> {
+    let inputs = (configured.to_path_buf(), downloads_chosen(st), fallback_dir(st.data_dir()));
+    let reuse = matches!(STATUS.lock().unwrap().state, "starting" | "running" | "waiting_vpn");
+    if reuse {
+        if let Some((_, r)) = PROBED.lock().unwrap().as_ref().filter(|(k, _)| *k == inputs) {
+            return r.clone();
+        }
+    }
+    let r = downloads_dir_for(&inputs.0, inputs.1, &inputs.2);
+    *PROBED.lock().unwrap() = Some((inputs, r.clone()));
+    r
 }
 
 /// The key slskd.yml gives Encore (48 random characters, generated once and kept in the settings).
@@ -455,6 +558,10 @@ pub struct Plan {
     pub dirs: Vec<PathBuf>,
     pub listen_port: u16,
     pub vpn: bool,
+    /// where downloads land (the fallback when the configured folder can't be written)
+    pub downloads: PathBuf,
+    /// shown beside the state while slskd runs: the configured folder can't be written, so the fallback is used
+    pub warning: Option<String>,
 }
 
 impl Plan {
@@ -554,6 +661,9 @@ fn signal(pid: u32, sig: &str) {
 pub struct Runner {
     child: Option<Child>,
     key: u64,
+    /// the key of the plan last started (or that failed to start): a different one is new settings,
+    /// tried at once instead of after the old plan's backoff
+    tried: u64,
     started: Instant,
     backoff: Duration,
     next_start: Option<Instant>,
@@ -565,7 +675,7 @@ const BACKOFF_MAX: Duration = Duration::from_secs(300);
 
 impl Default for Runner {
     fn default() -> Self {
-        Runner { child: None, key: 0, started: Instant::now(), backoff: BACKOFF_MIN, next_start: None, log: None }
+        Runner { child: None, key: 0, tried: 0, started: Instant::now(), backoff: BACKOFF_MIN, next_start: None, log: None }
     }
 }
 
@@ -585,6 +695,7 @@ impl Runner {
 
     /// Bring the process in line with `want` and update the status.
     pub async fn apply(&mut self, want: Want) {
+        let start_now = START_NOW.swap(false, Ordering::SeqCst);
         let plan = match want {
             Want::Off | Want::NotInstalled | Want::WaitingVpn | Want::Blocked(_) => {
                 self.stop().await;
@@ -595,7 +706,7 @@ impl Runner {
                     match want {
                         Want::NotInstalled => { s.state = "not_installed"; s.error = Some(NOT_INSTALLED.into()); }
                         Want::WaitingVpn => { s.state = "waiting_vpn"; s.error = Some(WAITING_FOR_VPN.into()); s.vpn = true; }
-                        Want::Blocked(e) => { s.state = "starting"; s.error = Some(e); }
+                        Want::Blocked(e) => { s.state = "blocked"; s.error = Some(e); }
                         _ => {}
                     }
                 });
@@ -636,10 +747,19 @@ impl Runner {
                         s.pid = None;
                         s.error = Some(msg);
                     });
-                    return;
+                    if key == self.tried && !start_now {
+                        return;
+                    }
+                    // the settings changed while it ran (or Start now was pressed): no waiting
                 }
             }
         }
+        if key != self.tried || start_now {
+            // new settings (or Start now) are a fresh attempt: the old plan's backoff doesn't apply
+            self.next_start = None;
+            self.backoff = BACKOFF_MIN;
+        }
+        self.tried = key;
         if self.next_start.is_some_and(|t| Instant::now() < t) {
             return; // crashed: wait out the backoff
         }
@@ -660,7 +780,8 @@ impl Runner {
         self.next_start = None;
         let pid = self.child.as_ref().and_then(|c| c.id());
         set_status(|s| {
-            *s = Status { state: "starting", version: Some(plan.version.clone()), pid, error: None, listen_port: Some(plan.listen_port), vpn: plan.vpn, scan: None };
+            *s = Status { state: "starting", version: Some(plan.version.clone()), pid, error: None, listen_port: Some(plan.listen_port), vpn: plan.vpn, scan: None,
+                warning: plan.warning.clone(), downloads: Some(plan.downloads.to_string_lossy().to_string()) };
         });
     }
 
@@ -721,6 +842,20 @@ async fn want(st: &AppState) -> Want {
         return Want::NotInstalled;
     };
     let mut y = yml_from_settings(st);
+    // the downloads folder first: a folder Encore can't write is a configuration problem to show, not a
+    // crash loop to run
+    let configured = PathBuf::from(&y.downloads);
+    let (downloads, warning) = match probed_downloads_dir(st, &configured) {
+        Ok(x) => x,
+        Err(e) => {
+            crate::vpn::relay::ensure(None);
+            return Want::Blocked(e);
+        }
+    };
+    if downloads != configured {
+        y.downloads = downloads.to_string_lossy().to_string();
+        y.incomplete = downloads.join(".incomplete").to_string_lossy().to_string();
+    }
     let r = route(st);
     match r {
         Route::Wait => {
@@ -766,6 +901,8 @@ async fn want(st: &AppState) -> Want {
         bin,
         app_dir: app,
         version,
+        downloads,
+        warning,
     })
 }
 
@@ -945,7 +1082,7 @@ mod tests {
     }
 
     fn plan(dir: &Path, bin: PathBuf, yml: &str) -> Plan {
-        Plan { bin, app_dir: dir.join("app"), version: "0.26.1".into(), yml: yml.into(), dirs: vec![dir.join("dl")], listen_port: 2234, vpn: false }
+        Plan { bin, app_dir: dir.join("app"), version: "0.26.1".into(), yml: yml.into(), dirs: vec![dir.join("dl")], listen_port: 2234, vpn: false, downloads: dir.join("dl"), warning: None }
     }
 
     fn state() -> (String, Option<u32>, Option<String>) {
@@ -1011,9 +1148,145 @@ mod tests {
         r.apply(plan(&dir, bin.clone(), "x\n").into()).await;
         assert_eq!(state().0, "starting", "started again");
         tokio::time::sleep(Duration::from_millis(400)).await;
-        r.apply(plan(&dir, bin, "x\n").into()).await;
+        r.apply(plan(&dir, bin.clone(), "x\n").into()).await;
         assert!(state().2.unwrap().contains("again in 10 s"), "the backoff doubles");
+        assert!(r.next_start.is_some(), "waiting 10 s");
+
+        // a changed plan starts at once: new settings are a fresh attempt, not the old crash loop
+        r.apply(plan(&dir, bin.clone(), "y\n").into()).await;
+        assert_eq!(state().0, "starting", "changed settings: started at once, no backoff");
+        assert_eq!(std::fs::read_to_string(dir.join("app").join("slskd.yml")).unwrap(), "y\n");
+        tokio::time::sleep(Duration::from_millis(400)).await;
+        r.apply(plan(&dir, bin.clone(), "y\n").into()).await;
+        let (s, _, err) = state();
+        assert_eq!(s, "crashed");
+        assert!(err.unwrap().contains("again in 5 s"), "the backoff starts over for the new plan");
+        r.apply(plan(&dir, bin.clone(), "y\n").into()).await;
+        assert_eq!(state().0, "crashed", "the same plan waits out its backoff");
+
+        // Start now: the button on the Soulseek card forgets the backoff
+        start_now();
+        r.apply(plan(&dir, bin, "y\n").into()).await;
+        assert_eq!(state().0, "starting", "Start now: started at once");
         r.apply(Want::Off).await;
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A folder Encore can't write: a path the user chose blocks the start with the exact chown line,
+    /// the default path falls back to <config>/downloads/slskd with a warning; a blocked start is tried
+    /// again at once when the folder is fixed.
+    #[tokio::test]
+    async fn unwritable_downloads_folder_blocks_with_the_chown_line() {
+        let _l = LOCK.lock().await;
+        let dir = tmp("unwritable");
+        let (uid, gid) = ids();
+        // root may write anywhere: for it, a file stands where the folder should be
+        let bad = if uid == 0 {
+            std::fs::write(dir.join("file"), "x").unwrap();
+            dir.join("file").join("slskd")
+        } else {
+            let d = dir.join("ro");
+            std::fs::create_dir_all(&d).unwrap();
+            std::fs::set_permissions(&d, std::fs::Permissions::from_mode(0o500)).unwrap();
+            d.join("slskd")
+        };
+        let fallback = dir.join("config").join("downloads").join("slskd");
+        let chown = format!("chown {uid}:{gid} {}", bad.display());
+
+        let good = dir.join("dl");
+        assert_eq!(downloads_dir_for(&good, true, &fallback).unwrap(), (good.clone(), None));
+        assert!(good.is_dir(), "a writable folder is made and used");
+        assert!(!fallback.exists(), "no fallback while the configured folder works");
+
+        let e = downloads_dir_for(&bad, true, &fallback).unwrap_err();
+        assert!(e.contains(&chown), "the exact chown line\n{e}");
+        assert!(e.contains("or set PUID/PGID"), "{e}");
+        assert!(e.contains(&format!("isn't writable by Encore (uid {uid}, gid {gid})")), "{e}");
+        assert!(e.starts_with("Soulseek's downloads folder"), "{e}");
+        assert!(!fallback.exists(), "a chosen folder is never replaced");
+
+        let (d, warn) = downloads_dir_for(&bad, false, &fallback).unwrap();
+        assert_eq!(d, fallback, "the default folder falls back to <config>/downloads/slskd");
+        assert!(fallback.is_dir());
+        let warn = warn.unwrap();
+        assert!(warn.starts_with(&format!("Downloads go to {} for now", fallback.display())), "{warn}");
+        assert!(warn.contains(&chown) && warn.contains("or set PUID/PGID"), "{warn}");
+
+        // not even the fallback: blocked, and both folders are named
+        let bad_fallback = bad.join("fallback");
+        let e = downloads_dir_for(&bad, false, &bad_fallback).unwrap_err();
+        assert!(e.contains(&chown) && e.contains("isn't writable either"), "{e}");
+
+        // the Runner shows Blocked as its own state, with the message, and starts at once when the plan arrives
+        let mut r = Runner::default();
+        r.backoff = Duration::from_secs(80); // left over from an earlier crash loop
+        r.next_start = Some(Instant::now() + Duration::from_secs(80));
+        r.apply(Want::Blocked(e.clone())).await;
+        let (s, pid, err) = state();
+        assert_eq!((s.as_str(), pid), ("blocked", None));
+        assert_eq!(err.as_deref(), Some(e.as_str()));
+        assert!(r.next_start.is_none() && r.backoff == BACKOFF_MIN, "a blocked start is retried every check, without backoff");
+        let bin = script(&dir, "exec sleep 30");
+        let mut p = plan(&dir, bin, "a: 1\n");
+        p.warning = Some(warn.clone());
+        p.downloads = fallback.clone();
+        r.apply(p.into()).await;
+        assert_eq!(state().0, "starting", "the folder was fixed: started at once");
+        let st = status();
+        assert_eq!(st["warning"].as_str(), Some(warn.as_str()), "the fallback warning rides along with the status");
+        assert_eq!(st["download_dir"].as_str(), Some(fallback.to_string_lossy().as_ref()));
+        r.apply(Want::Off).await;
+        assert!(status()["warning"].is_null());
+        if uid != 0 {
+            let _ = std::fs::set_permissions(dir.join("ro"), std::fs::Permissions::from_mode(0o700));
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The files of a finished download are looked for where slskd put them – the fallback folder while
+    /// that is in use, not the setting – and the folder is probed only when it matters: the last answer is
+    /// reused while slskd runs with the same folder settings, probed again after poke() and before a start.
+    #[tokio::test]
+    async fn finished_files_are_found_in_the_fallback_folder_and_the_probe_is_reused_while_running() {
+        let _l = LOCK.lock().await;
+        let dir = tmp("fallback-files");
+        let st = {
+            let _env = crate::TEST_ENV.lock().unwrap_or_else(|e| e.into_inner());
+            std::env::set_var("ENCORE_CONFIG_DIR", dir.join("config"));
+            crate::build_state().unwrap()
+        };
+        let configured = dir.join("configured");
+        std::fs::create_dir_all(&configured).unwrap();
+        st.cfg.set_many(&json!({ "slskd_download_path": configured.to_string_lossy() }));
+        let fallback = fallback_dir(st.data_dir());
+        std::fs::create_dir_all(fallback.join("Album")).unwrap();
+        let file = fallback.join("Album").join("01 - Song.flac");
+        std::fs::write(&file, b"flac").unwrap();
+        let remote = "@@abcd\\Music\\Album\\01 - Song.flac";
+        set_status(|s| *s = Status { state: "off", ..Default::default() });
+        assert_eq!(download_dir(&st), configured, "no plan: the setting");
+        assert_eq!(crate::sources::slskd::local_path(&st, remote), None, "nothing under the configured folder");
+        set_status(|s| s.downloads = Some(fallback.to_string_lossy().to_string()));
+        assert_eq!(download_dir(&st), fallback);
+        assert_eq!(crate::sources::slskd::local_path(&st, remote), Some(file.clone()), "found where slskd put it");
+        set_status(|s| s.downloads = None);
+
+        // the probe: reused while slskd runs, again after poke() and before a start
+        *PROBED.lock().unwrap() = None;
+        set_status(|s| s.state = "running");
+        assert_eq!(probed_downloads_dir(&st, &configured), Ok((configured.clone(), None)));
+        std::fs::remove_dir_all(&configured).unwrap();
+        std::fs::write(&configured, "x").unwrap(); // a file where the folder was: nobody can write there now
+        assert_eq!(probed_downloads_dir(&st, &configured), Ok((configured.clone(), None)), "the last answer while slskd runs");
+        poke();
+        assert!(probed_downloads_dir(&st, &configured).is_err(), "poke: probed again");
+        std::fs::remove_file(&configured).unwrap();
+        assert!(probed_downloads_dir(&st, &configured).is_err(), "the last answer while slskd runs, whatever it was");
+        set_status(|s| s.state = "crashed");
+        assert_eq!(probed_downloads_dir(&st, &configured), Ok((configured.clone(), None)), "before a start: probed again");
+        assert!(configured.is_dir(), "the probe makes the folder");
+        *PROBED.lock().unwrap() = None;
+        set_status(|s| *s = Status { state: "off", ..Default::default() });
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -1039,7 +1312,7 @@ mod tests {
         y.shares = vec![dir.join("share").to_string_lossy().to_string()];
         std::fs::create_dir_all(dir.join("share")).unwrap();
         y.username = format!("encoretest{}", random_alnum(6));
-        let p = Plan { bin, app_dir: dir.join("app"), version: "0.0.0".into(), yml: render_yml(&y), dirs: vec![dir.join("dl"), dir.join("dl").join(".incomplete")], listen_port: 2234, vpn: false };
+        let p = Plan { bin, app_dir: dir.join("app"), version: "0.0.0".into(), yml: render_yml(&y), dirs: vec![dir.join("dl"), dir.join("dl").join(".incomplete")], listen_port: 2234, vpn: false, downloads: dir.join("dl"), warning: None };
         let mut r = Runner::default();
         r.apply(p.clone().into()).await;
         let http = reqwest::Client::new();

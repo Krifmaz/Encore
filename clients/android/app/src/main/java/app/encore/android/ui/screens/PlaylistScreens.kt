@@ -216,7 +216,7 @@ fun PlaylistScreen(nav: Nav, id: Long, name: String) {
                             onMore = { nav.trackMenu(t) },
                         )
                     } else {
-                        // not in the library: greyed, with the web's "missing" badge
+                        // not in the library: greyed, with its request's status or the web's "missing" badge
                         Row(
                             Modifier.fillMaxWidth().padding(start = Gutter, end = Gutter, top = 10.dp, bottom = 10.dp),
                             verticalAlignment = Alignment.CenterVertically,
@@ -233,7 +233,7 @@ fun PlaylistScreen(nav: Nav, id: Long, name: String) {
                                 Text(row.title, fontWeight = FontWeight.SemiBold, color = p.faint, maxLines = 1, overflow = TextOverflow.Ellipsis)
                                 Text(row.artist, style = MaterialTheme.typography.bodySmall, color = p.faint, maxLines = 1, overflow = TextOverflow.Ellipsis)
                             }
-                            Badge("missing")
+                            if (row.requestStatus.isNotEmpty()) StatusBadge(row.requestStatus) else Badge("missing")
                         }
                     }
                 }

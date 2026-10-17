@@ -37,7 +37,8 @@ pub fn script() -> String {
     n.installUpdate = () => invoke('install_update');
   }}
   window.EncoreNative = n;
-  const alive = () => fire('page_alive', {{ url: location.href, encore: !!document.querySelector('script[src*="/js/app.js"]') }});
+  // an Encore page carries <meta name="application-name" content="Encore"> (web-rs/index.html and the legacy web/index.html)
+  const alive = () => fire('page_alive', {{ url: location.href, encore: !!document.querySelector('meta[name="application-name"][content="Encore"]') }});
   if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', alive); else alive();
   // keyboard: reload like a browser (the window has no menu bar on Windows/Linux)
   window.addEventListener('keydown', (e) => {{ if ((e.ctrlKey || e.metaKey) && !e.shiftKey && e.key.toLowerCase() === 'r') {{ e.preventDefault(); location.reload(); }} }});
@@ -61,7 +62,7 @@ pub struct NowPlaying {
     pub duration: f64,
 }
 
-/// Run a player action in the page: toggle / next / prev / open (see window.encorePlayer in web/js/player.js).
+/// Run a player action in the page: toggle / next / prev / open (see window.encorePlayer in web-rs/src/player.rs).
 pub fn control<R: Runtime>(app: &AppHandle<R>, action: &str) {
     control_with(app, action, 0.0);
 }
@@ -86,7 +87,7 @@ pub fn control_js(action: &str, value: f64) -> Option<String> {
     })
 }
 
-/// A toast in the web app (web/js/app.js listens for the encore-native event).
+/// A toast in the web app (web-rs/src/app.rs listens for the encore-native event).
 pub fn notify<R: Runtime>(app: &AppHandle<R>, text: &str, kind: &str) {
     if let Some(w) = server::main_window(app) {
         let msg = serde_json::json!({ "text": text, "kind": kind });
@@ -220,6 +221,13 @@ mod tests {
         assert_eq!((np.position, np.duration), (0.0, 0.0));
         let np: NowPlaying = serde_json::from_str(r#"{"title":"a","position":12.5,"duration":200}"#).unwrap();
         assert_eq!((np.position, np.duration), (12.5, 200.0));
+    }
+
+    #[test]
+    fn an_encore_page_is_known_by_its_application_name_meta_not_by_the_old_script_tag() {
+        let js = script();
+        assert!(js.contains(r#"document.querySelector('meta[name="application-name"][content="Encore"]')"#));
+        assert!(!js.contains("/js/app.js"), "the Rust UI has no app.js; the marker is in both index.html files");
     }
 
     #[test]

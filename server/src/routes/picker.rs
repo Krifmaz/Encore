@@ -1,9 +1,9 @@
 //! /api/picker: search one source by hand, then download exactly the chosen result.
 use crate::auth::{self, User};
-use crate::db::{now, RowExt};
+use crate::db::RowExt;
 use crate::error::{err, ApiResult};
 use crate::matcher::{compare, describe};
-use crate::routes::requests::{create_request, get_owned, quota, NewRequest};
+use crate::routes::requests::{get_owned, quota, NewRequest};
 use crate::sources::{slskd, streamrip, torznab, ytmusic};
 use crate::state::AppState;
 use crate::{p, worker};
@@ -355,7 +355,8 @@ struct PickBody {
     request: Option<NewRequest>,
 }
 
-/// Create a request locked to the chosen result. An existing request is cancelled and replaced.
+/// Create a request locked to the chosen result. An existing request's row is reused (stopped first when
+/// it is running), so the song keeps one row with its attempt count.
 async fn pick(State(st): State<AppState>, User(u): User, Json(mut b): Json<PickBody>) -> ApiResult<Json<Value>> {
     if !auth::can(&st, &u, "pick") {
         return Err(err(403, "Ask an admin for permission to pick downloads"));
@@ -381,9 +382,8 @@ async fn pick(State(st): State<AppState>, User(u): User, Json(mut b): Json<PickB
         let req = NewRequest { kind: s("kind").unwrap_or_default(), mbid: s("mbid"), artist: s("artist"), title: s("title"), album: s("album"), year: s("year"),
             cover_url: s("cover_url"), length: old["detail"]["length"].as_f64(), isrc: old["detail"]["isrc"].as_str().map(String::from), ..Default::default() };
         let status = old["status"].as_str().unwrap_or("");
-        if status == "pending" || worker::ACTIVE.contains(&status) {
+        if worker::ACTIVE.contains(&status) {
             worker::cancel(&st, rid).await;
-            st.db.execute("UPDATE requests SET status='cancelled', message='Replaced by a manual pick', updated_at=? WHERE id=?", p![now(), rid])?;
         }
         req
     } else if let Some(r) = b.request.clone() {
@@ -393,17 +393,22 @@ async fn pick(State(st): State<AppState>, User(u): User, Json(mut b): Json<PickB
         return Err(err(400, "Nothing to download"));
     };
     let label = b.title.clone().or(b.payload["title"].as_str().map(String::from)).unwrap_or_default();
-    let (id, status) = create_pick(&st, &u, &req, &b.source, b.payload, &label)?;
+    let (id, status) = create_pick_for(&st, &u, &req, &b.source, b.payload, &label, b.request_id)?;
     Ok(Json(json!({ "id": id, "status": status })))
 }
 
 /// The request behind a manual pick: the worker downloads exactly `payload` from `source`, then tags
 /// and imports it like any other request. Returns (id, status).
 pub fn create_pick(st: &AppState, u: &crate::db::Row, req: &NewRequest, source: &str, payload: Value, label: &str) -> ApiResult<(i64, String)> {
+    create_pick_for(st, u, req, source, payload, label, None)
+}
+
+/// `create_pick` for an existing request (`reuse`): its row is reset and locked to the pick.
+pub fn create_pick_for(st: &AppState, u: &crate::db::Row, req: &NewRequest, source: &str, payload: Value, label: &str, reuse: Option<i64>) -> ApiResult<(i64, String)> {
     if req.kind != "album" && req.kind != "track" {
         return Err(err(400, "Manual picks work for albums and songs"));
     }
-    let id = create_request(st, u, req, None, Some(json!({ "pick": { "source": source, "payload": payload, "title": label } })))?;
+    let id = crate::routes::requests::create_or_reuse(st, u, req, None, Some(json!({ "pick": { "source": source, "payload": payload, "title": label } })), reuse)?;
     let status = st.db.one("SELECT status FROM requests WHERE id=?", p![id])?.map(|r| r.s("status")).unwrap_or_default();
     if status == "queued" {
         let msg: String = if label.is_empty() { "Manual pick".into() } else { format!("Manual pick: {label}").chars().take(200).collect() };

@@ -17,18 +17,34 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+          components: clippy
       - uses: Swatinem/rust-cache@v2
         with:
-          workspaces: server
+          workspaces: |
+            server
+            web-rs
       - run: cargo test --locked
         working-directory: server
-      - name: Check the web app's JavaScript parses
-        run: for f in $(find web/js -name '*.js'); do node --input-type=module --check < "$f" || { echo "syntax error in $f"; exit 1; }; done
+      - name: Check the web app (web-rs) for WebAssembly, clippy and its tests (the strings reference among them)
+        working-directory: web-rs
+        run: |
+          cargo check --locked --target wasm32-unknown-unknown
+          cargo clippy --locked --target wasm32-unknown-unknown -- -D warnings
+          cargo test --locked
+      - name: Build the web app (trunk)
+        working-directory: web-rs
+        run: |
+          curl -fsSL https://github.com/trunk-rs/trunk/releases/download/v0.21.14/trunk-x86_64-unknown-linux-gnu.tar.gz | tar -xz -C /usr/local/bin trunk
+          trunk build --release
+          for f in index.html sw.js share.html css/app.css manifest.webmanifest; do test -f "dist/$f" || { echo "dist/$f missing"; exit 1; }; done
+          ls dist/encore-web-*_bg.wasm
       - run: cargo build --release --locked
         working-directory: server
       - name: Package (Linux x86_64)
         run: |
-          mkdir -p out/encore && cp server/target/release/encore out/encore/ && cp -r web out/encore/static
+          mkdir -p out/encore && cp server/target/release/encore out/encore/ && cp -r web-rs/dist out/encore/static && cp -r web out/encore/static-legacy
           tar -C out -czf encore-linux-x86_64.tar.gz encore
       - uses: actions/upload-artifact@v4
         with:

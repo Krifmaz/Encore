@@ -67,9 +67,11 @@ pub fn quota(st: &AppState, u: &Row, n: i64) -> ApiResult<()> {
     Ok(())
 }
 
+/// 409 when the song is already requested; the body carries the existing request's `id` and `status`, so a
+/// caller (Download missing, say) can link to it instead of skipping the song.
 fn dup(st: &AppState, sql: &str, params: Vec<Value>) -> ApiResult<()> {
     if let Some(d) = st.db.one(sql, params)? {
-        return Err(err(409, format!("Already requested (#{}, {})", d.i("id"), d.s("status"))));
+        return Err(err(409, format!("Already requested (#{}, {})", d.i("id"), d.s("status"))).with(json!({ "id": d.i("id"), "status": d.s("status") })));
     }
     Ok(())
 }
@@ -88,7 +90,50 @@ pub fn ext_from_id(id: &str) -> Option<Value> {
     (!ext.is_empty()).then_some(Value::Object(ext))
 }
 
+/// How many of the previous attempt's log lines a reused row keeps, and how long each may be.
+const KEPT_LOG_LINES: usize = 40;
+const KEPT_LOG_CHARS: usize = 500;
+
+/// A new request row – or, when the same song was asked for before and that request failed or was
+/// cancelled, that row again (reset like Retry, `detail.attempts` one higher, the old message in its log),
+/// so the Requests list has one row per song. Returns the row's id.
 pub fn create_request(st: &AppState, u: &Row, b: &NewRequest, parent: Option<i64>, extra: Option<Value>) -> ApiResult<i64> {
+    create_or_reuse(st, u, b, parent, extra, None)
+}
+
+/// The failed or cancelled top-level request for the same song (same kind and MusicBrainz id, or the same
+/// artist and title when there is none), newest first.
+fn failed_twin(st: &AppState, b: &NewRequest, artist: Option<&str>, title: Option<&str>) -> ApiResult<Option<Row>> {
+    let ended = "status IN ('failed','cancelled') AND parent_id IS NULL ORDER BY id DESC LIMIT 1";
+    if let Some(m) = nz(&b.mbid) {
+        return Ok(st.db.one(&format!("SELECT * FROM requests WHERE kind=? AND mbid=? AND {ended}"), p![b.kind, m])?);
+    }
+    if !matches!(b.kind.as_str(), "album" | "track") {
+        return Ok(None);
+    }
+    let (Some(a), Some(t)) = (artist, title) else { return Ok(None) };
+    Ok(st.db.one(&format!("SELECT * FROM requests WHERE kind=? AND mbid IS NULL AND lower(artist)=lower(?) AND lower(title)=lower(?) AND {ended}"), p![b.kind, a, t])?)
+}
+
+/// The `detail` of a request that is asked for again: the new request's detail plus the attempt count and
+/// the previous attempt's log, ending with how it ended.
+pub fn detail_for_retry(old_detail: &Value, old_status: &str, old_message: &str, mut detail: Value) -> Value {
+    let attempts = old_detail["attempts"].as_u64().unwrap_or(1);
+    let mut log: Vec<Value> = old_detail["log"].as_array().cloned().unwrap_or_default().into_iter()
+        .map(|l| match l.as_str() { Some(s) if s.chars().count() > KEPT_LOG_CHARS => json!(s.chars().take(KEPT_LOG_CHARS).collect::<String>() + "…"), _ => l }).collect();
+    let ended = format!("attempt {attempts} {old_status}: {}", old_message.chars().take(KEPT_LOG_CHARS).collect::<String>()).trim_end_matches([':', ' ']).to_string();
+    log.push(json!(ended));
+    if log.len() > KEPT_LOG_LINES {
+        log.drain(..log.len() - KEPT_LOG_LINES);
+    }
+    detail["attempts"] = json!(attempts + 1);
+    detail["log"] = json!(log);
+    detail
+}
+
+/// `create_request` with the row to reuse known (a manual pick for an existing request), or found among
+/// the failed and cancelled requests.
+pub fn create_or_reuse(st: &AppState, u: &Row, b: &NewRequest, parent: Option<i64>, extra: Option<Value>, reuse: Option<i64>) -> ApiResult<i64> {
     // an "ext-…" id is a Deezer / Apple album from Discover search, not a MusicBrainz id (clients that
     // don't know ext albums send it as the mbid): request it as the ext album it is
     let fixed;
@@ -144,6 +189,11 @@ pub fn create_request(st: &AppState, u: &Row, b: &NewRequest, parent: Option<i64
     if let (Some(m), false) = (nz(&b.mbid), has_extra) {
         dup(st, "SELECT id, status FROM requests WHERE mbid=? AND kind=? AND status NOT IN ('failed','denied','cancelled')", p![m, b.kind])?;
     }
+    let twin = match reuse {
+        Some(id) => st.db.one("SELECT * FROM requests WHERE id=?", p![id])?,
+        None if parent.is_none() => failed_twin(st, b, artist, title)?,
+        None => None,
+    };
     let approved = auth::is_admin(u) || u.b("auto_approve") || st.cfg.bool("auto_approve");
     let mut detail = json!({});
     if let Some(l) = b.length.filter(|l| *l > 0.0) {
@@ -173,12 +223,25 @@ pub fn create_request(st: &AppState, u: &Row, b: &NewRequest, parent: Option<i64
         }
     }
     let t = now();
+    let what = title.or(artist).or(nz(&b.url)).unwrap_or("");
+    if let Some(old) = twin {
+        let id = old.i("id");
+        let old_detail: Value = serde_json::from_str(&old.s("detail")).unwrap_or(json!({}));
+        let detail = detail_for_retry(&old_detail, &old.s("status"), &old.s("message"), detail);
+        st.db.execute(
+            "UPDATE requests SET user_id=?, status=?, message=?, progress=0, source=NULL, detail=?, artist=COALESCE(?, artist), title=COALESCE(?, title),
+             album=COALESCE(?, album), year=COALESCE(?, year), cover_url=COALESCE(?, cover_url), url=COALESCE(?, url), updated_at=? WHERE id=?",
+            p![u.i("id"), if approved { "queued" } else { "pending" }, if approved { "Requested again" } else { "Waiting for admin approval" }, detail.to_string(),
+               artist, title, nz(&b.album), nz(&b.year), nz(&b.cover_url), nz(&b.url), t, id])?;
+        st.db.log("info", &format!("{} requested {} again (#{id}, attempt {}): {what}", u.s("username"), b.kind, detail["attempts"]));
+        crate::req_events::emit(&st.db, id);
+        return Ok(id);
+    }
     let id = st.db.execute(
         "INSERT INTO requests (user_id, kind, mbid, artist, title, album, year, cover_url, url, status, message, detail, parent_id, created_at, updated_at)
          VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
         p![u.i("id"), b.kind, nz(&b.mbid), artist, title, nz(&b.album), nz(&b.year), nz(&b.cover_url), nz(&b.url),
            if approved { "queued" } else { "pending" }, if approved { "" } else { "Waiting for admin approval" }, detail.to_string(), parent, t, t])?;
-    let what = title.or(artist).or(nz(&b.url)).unwrap_or("");
     st.db.log("info", &format!("{} requested {}: {what}", u.s("username"), b.kind));
     crate::req_events::emit(&st.db, id);
     Ok(id)
@@ -222,6 +285,7 @@ async fn list(State(st): State<AppState>, User(u): User, Query(q): Query<ListQ>)
         r.remove("detail");
         r.insert("log".into(), d.get("log").cloned().unwrap_or(json!([])));
         r.insert("length".into(), d["length"].clone());
+        r.insert("attempts".into(), json!(d["attempts"].as_u64().unwrap_or(1)));
         r.insert("picked".into(), json!(d["pick"].is_object()));
         let mut cand = Value::Null;
         let idx = d["slskd"]["idx"].as_i64().unwrap_or(-1);
@@ -368,7 +432,13 @@ async fn retry(State(st): State<AppState>, User(u): User, Path(rid): Path<i64>) 
     if status == "cancelled" && !admin && !(u.b("auto_approve") || st.cfg.bool("auto_approve")) {
         return Err(err(403, "Ask an admin to retry"));
     }
-    let keep = match r["detail"]["length"].as_f64() { Some(l) => json!({ "length": l }), None => json!({}) };
+    let mut keep = json!({});
+    for k in ["length", "isrc"] {
+        if !r["detail"][k].is_null() {
+            keep[k] = r["detail"][k].clone();
+        }
+    }
+    let keep = detail_for_retry(&r["detail"], status, r["message"].as_str().unwrap_or(""), keep);
     st.db.execute(reset, p![keep.to_string(), now(), rid])?;
     crate::req_events::emit(&st.db, rid);
     Ok(Json(json!({ "ok": true })))
@@ -403,7 +473,7 @@ fn delete_files(st: &AppState, r: &Value) -> usize {
     }
     let idx = r["detail"]["slskd"]["idx"].as_i64().unwrap_or(-1);
     if let (Some(c), true) = (r["detail"]["slskd"]["candidates"].get(idx.max(0) as usize), idx >= 0 && r["status"] != "completed") {
-        let root = std::path::PathBuf::from(st.cfg.str("slskd_download_path"));
+        let root = crate::slskd_managed::download_dir(st); // where the files landed (the fallback folder when that is in use)
         for f in c["files"].as_array().cloned().unwrap_or_default() {
             if let Some(pth) = crate::sources::slskd::local_path(st, f["filename"].as_str().unwrap_or("")) {
                 let _ = std::fs::remove_file(&pth);
@@ -484,6 +554,10 @@ async fn clear(State(st): State<AppState>, User(u): User, body: Option<Json<Clea
 #[cfg(test)]
 #[path = "labels_tests.rs"]
 mod labels_tests;
+
+#[cfg(test)]
+#[path = "requests_tests.rs"]
+mod requests_tests;
 
 #[cfg(test)]
 mod ext_id_tests {

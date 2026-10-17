@@ -347,10 +347,10 @@ class FeaturesApi(private val api: EncoreApi, private val client: OkHttpClient) 
         if (!text.isNullOrBlank()) put("text", text) else put("url", (url ?: "").trim())
     }
 
-    /** POST /api/playlists/{id}/request-missing {album_mode} → how many songs were requested. */
-    fun requestMissing(id: Long, albumMode: String?): Int {
+    /** POST /api/playlists/{id}/request-missing {album_mode} → what was requested, what is already on its way, what couldn't be. */
+    fun requestMissing(id: Long, albumMode: String?): MissingReport {
         val body = buildJsonObject { if (!albumMode.isNullOrEmpty()) put("album_mode", albumMode) }
-        return (call("POST", "/api/playlists/$id/request-missing", body) as? JsonObject)?.int("requested") ?: 0
+        return MissingReport.from(call("POST", "/api/playlists/$id/request-missing", body) as? JsonObject ?: JsonObject(emptyMap()))
     }
 
     fun dedupePlaylist(id: Long): Int = (call("POST", "/api/playlists/$id/dedupe", JsonObject(emptyMap())) as? JsonObject)?.int("removed") ?: 0

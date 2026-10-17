@@ -294,8 +294,15 @@ async fn warm_pass_finds_cover_colours_and_json_carries_them() {
     assert_eq!(a["tracks"][0]["cover_color"].as_str(), Some(c.as_str()));
     let l = e.get("/api/library/albums?limit=10", &[]).await.json();
     assert!(l.to_string().contains(&format!("\"cover_color\":\"{c}\"")), "{l}");
-    // the pass is done and says so
-    let (done, total, _) = e.st.library.covers.progress();
+    // the pass is done and says so (the album is counted after its colour is stored: give it a moment)
+    let (done, total) = loop {
+        let (done, total, _) = e.st.library.covers.progress();
+        if done >= 1 {
+            break (done, total);
+        }
+        assert!(std::time::Instant::now() < deadline, "the pass stored the colour but never counted the album: {done}/{total}");
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    };
     assert!(total >= 1 && done >= 1, "{done}/{total}");
     // a new cover: the old colour is not used for it
     std::thread::sleep(std::time::Duration::from_millis(20));

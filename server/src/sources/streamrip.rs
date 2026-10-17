@@ -54,30 +54,302 @@ fn tstr(s: &str) -> String {
     format!("\"{}\"", s.replace('\\', "\\\\").replace('"', "\\\""))
 }
 
-/// Write the credentials entered in Encore's settings into streamrip's config file.
-pub async fn apply_credentials(st: &AppState) -> anyhow::Result<PathBuf> {
+// ---- the config file ----------------------------------------------------------------------------
+// streamrip reads one TOML file. Encore lets streamrip write the defaults (it does so for a path that
+// has no file yet), checks that the file loads with `rip --config-path X config path`, and when it does
+// not – a half-written file, the format of an older streamrip, a key it does not know – moves the file
+// aside and writes a fresh one, carrying the sign-ins over. The credentials from Encore's settings go
+// in before every run, not only when the file is new.
+
+pub const NOT_INSTALLED_MSG: &str = "streamrip is not installed in this container (use the default Docker image or set its path)";
+/// Deezer runs need the ARL cookie; streamrip would ask for it on a terminal, which a server has none of.
+pub const ARL_MSG: &str = "Deezer needs an ARL cookie – Settings → streamrip";
+pub const CONFIG_BROKEN_MSG: &str = "streamrip can't load its config – press Reset streamrip config in Settings → streamrip";
+/// The line streamrip prints when its config does not load (the text after the colon says why).
+const CONFIG_ERROR: &str = "Error loading config";
+/// How much of a run's output the request's log keeps.
+const LOG_CAP: usize = 20_000;
+/// How much of it the request's message shows.
+const MESSAGE_CAP: usize = 300;
+/// Time limit for a config check or regeneration (a Python start-up, normally a second).
+const CHECK_SECS: u64 = 90;
+
+/// The body of a `[section]` (without the header), or "" when there is none.
+fn section_body<'a>(text: &'a str, name: &str) -> &'a str {
+    let Some(m) = Regex::new(&format!(r"(?m)^\s*\[{}\]\s*$", regex::escape(name))).unwrap().find(text) else { return "" };
+    let body = &text[m.end()..];
+    let end = Regex::new(r"(?m)^\s*\[").unwrap().find(body).map(|n| n.start()).unwrap_or(body.len());
+    &body[..end]
+}
+
+/// One `key = value` of a section as plain text ("" when missing).
+pub fn toml_value(text: &str, section: &str, key: &str) -> String {
+    let line = Regex::new(&format!(r"(?m)^\s*{}\s*=\s*(.*)$", regex::escape(key))).unwrap();
+    line.captures(section_body(text, section)).map(|c| toml_scalar(&c[1])).unwrap_or_default()
+}
+
+/// streamrip 2.x names the Qobuz login `email_or_userid` / `password_or_token` (with `use_auth_token`);
+/// 1.x had `user_id` / `auth_token`. The file streamrip wrote says which it is.
+fn qobuz_v2(text: &str) -> bool {
+    let q = section_body(text, "qobuz");
+    q.contains("email_or_userid") || !q.contains("auth_token")
+}
+
+/// Write the credentials entered in Encore's settings into streamrip's config file. Keys the settings
+/// leave empty stay as they are in the file, so a login typed into config.toml by hand is kept.
+pub fn apply_credentials(st: &AppState) -> anyhow::Result<PathBuf> {
     let path = config_path(st);
     std::fs::create_dir_all(path.parent().unwrap())?;
     let mut text = std::fs::read_to_string(&path).unwrap_or_default();
-    if text.is_empty() {
-        // let streamrip write its default config, then edit it
-        if let Some(bin) = binary(st) {
-            let _ = tokio::process::Command::new(bin).args(["--config-path", &path.to_string_lossy(), "config", "path"]).output().await;
-            text = std::fs::read_to_string(&path).unwrap_or_default();
-        }
-    }
     let arl = st.cfg.str("streamrip_deezer_arl");
     if !arl.is_empty() {
         text = set_toml(&text, "deezer", "arl", &tstr(&arl));
     }
     let (qu, qt) = (st.cfg.str("streamrip_qobuz_user"), st.cfg.str("streamrip_qobuz_token"));
     if !qu.is_empty() && !qt.is_empty() {
-        text = set_toml(&text, "qobuz", "user_id", &tstr(&qu));
-        text = set_toml(&text, "qobuz", "auth_token", &tstr(&qt));
+        if qobuz_v2(&text) {
+            text = set_toml(&text, "qobuz", "use_auth_token", "true");
+            text = set_toml(&text, "qobuz", "email_or_userid", &tstr(&qu));
+            text = set_toml(&text, "qobuz", "password_or_token", &tstr(&qt));
+        } else {
+            text = set_toml(&text, "qobuz", "user_id", &tstr(&qu));
+            text = set_toml(&text, "qobuz", "auth_token", &tstr(&qt));
+        }
     }
     text = set_toml(&text, "database", "downloads_enabled", "false");
     std::fs::write(&path, text)?;
     Ok(path)
+}
+
+/// Run streamrip for a check: stdin closed (it can never wait for a key), no colours, a time limit.
+/// Ok((exited 0, combined output)).
+async fn run_rip(bin: &str, args: &[&str], secs: u64) -> anyhow::Result<(bool, String)> {
+    let fut = tokio::process::Command::new(bin).args(args).stdin(std::process::Stdio::null())
+        .env("NO_COLOR", "1").env("TERM", "dumb").env("PYTHONUNBUFFERED", "1").kill_on_drop(true).output();
+    let out = tokio::time::timeout(std::time::Duration::from_secs(secs), fut).await.map_err(|_| anyhow::anyhow!("streamrip did not answer within {secs} s"))??;
+    Ok((out.status.success(), String::from_utf8_lossy(&[out.stdout, out.stderr].concat()).to_string()))
+}
+
+/// Does the config at `path` load? `rip --config-path X config path` says so: a non-zero exit or the
+/// fork's "Error loading config" line means no. Err carries the complaint, one line.
+pub async fn validate_config(bin: &str, path: &Path) -> Result<(), String> {
+    let p = path.to_string_lossy().to_string();
+    match run_rip(bin, &["--config-path", &p, "config", "path"], CHECK_SECS).await {
+        Err(e) => Err(e.to_string()),
+        Ok((true, text)) if !text.contains(CONFIG_ERROR) => Ok(()),
+        Ok((_, text)) => Err(summary(&text, MESSAGE_CAP)),
+    }
+}
+
+/// Move the config aside (config.toml.bak-<date>) and let streamrip write its defaults. Returns the backup.
+async fn regenerate(bin: &str, path: &Path) -> anyhow::Result<Option<PathBuf>> {
+    let backup = if path.exists() {
+        let b = path.with_file_name(format!("config.toml.bak-{}", crate::backup::stamp(crate::db::now())));
+        std::fs::rename(path, &b)?;
+        Some(b)
+    } else {
+        None
+    };
+    let p = path.to_string_lossy().to_string();
+    // streamrip writes its default config for a path that has no file yet; `config reset` is the fallback
+    let _ = run_rip(bin, &["--config-path", &p, "config", "path"], CHECK_SECS).await;
+    if !path.is_file() {
+        let _ = run_rip(bin, &["--config-path", &p, "config", "reset", "-y"], CHECK_SECS).await;
+    }
+    if !path.is_file() {
+        anyhow::bail!("streamrip did not write a default config at {}", path.display());
+    }
+    Ok(backup)
+}
+
+/// The sign-ins an old config held, written into a fresh one: the [tidal] tokens (and the user's own
+/// client and hires_client), the Deezer ARL, the Qobuz pair under whichever key names the fresh file uses.
+fn carry_over(old: &str, fresh: &str) -> String {
+    let mut text = fresh.to_string();
+    let t = parse_tidal_toml(old);
+    for k in TIDAL_TOKEN_KEYS.iter().chain(["hires_client", "client_id", "client_secret"].iter()) {
+        if let Some(v) = t.get(*k).filter(|v| !v.is_empty()) {
+            text = set_toml(&text, "tidal", k, &tidal_toml_value(k, v));
+        }
+    }
+    let arl = toml_value(old, "deezer", "arl");
+    if !arl.is_empty() {
+        text = set_toml(&text, "deezer", "arl", &tstr(&arl));
+    }
+    let user = [toml_value(old, "qobuz", "email_or_userid"), toml_value(old, "qobuz", "user_id")].into_iter().find(|v| !v.is_empty());
+    let token = [toml_value(old, "qobuz", "password_or_token"), toml_value(old, "qobuz", "auth_token")].into_iter().find(|v| !v.is_empty());
+    if let (Some(u), Some(k)) = (user, token) {
+        if qobuz_v2(&text) {
+            text = set_toml(&text, "qobuz", "use_auth_token", "true");
+            text = set_toml(&text, "qobuz", "email_or_userid", &tstr(&u));
+            text = set_toml(&text, "qobuz", "password_or_token", &tstr(&k));
+        } else {
+            text = set_toml(&text, "qobuz", "user_id", &tstr(&u));
+            text = set_toml(&text, "qobuz", "auth_token", &tstr(&k));
+        }
+    }
+    text
+}
+
+/// What `check_config` found and did.
+#[derive(Debug, Default)]
+pub struct ConfigCheck {
+    pub path: PathBuf,
+    /// A fresh file was written (the old one, if any, is `backup`).
+    pub regenerated: bool,
+    pub backup: Option<PathBuf>,
+    /// Why the config still does not load (or why it could not be checked), when it does not.
+    pub problem: Option<String>,
+}
+
+impl ConfigCheck {
+    pub fn json(&self) -> Value {
+        serde_json::json!({ "ok": self.problem.is_none(), "path": self.path.to_string_lossy(), "regenerated": self.regenerated,
+            "backup": self.backup.as_ref().map(|b| b.to_string_lossy().to_string()), "message": self.message() })
+    }
+
+    pub fn message(&self) -> String {
+        let where_ = self.path.display();
+        match (&self.problem, self.regenerated) {
+            (Some(p), true) => format!("streamrip wrote a fresh config at {where_}, but it still doesn't load: {p}"),
+            (Some(p), false) => format!("streamrip can't load its config at {where_}: {p}"),
+            (None, true) => match &self.backup {
+                Some(b) => format!("streamrip config written fresh at {where_} – the old file is kept as {} and its Tidal sign-in, Deezer ARL and Qobuz login were carried over", b.display()),
+                None => format!("streamrip config written fresh at {where_}"),
+            },
+            (None, false) => format!("streamrip config loads ({where_})"),
+        }
+    }
+}
+
+/// Make sure streamrip's config loads: a missing file is written from streamrip's defaults; one that
+/// fails the check (or `force`) is backed up, regenerated and gets its sign-ins carried over. The
+/// credentials from Encore's settings are written in every time.
+pub async fn check_config(st: &AppState, force: bool) -> anyhow::Result<ConfigCheck> {
+    let path = config_path(st);
+    std::fs::create_dir_all(path.parent().unwrap())?;
+    let mut out = ConfigCheck { path: path.clone(), ..Default::default() };
+    let Some(bin) = binary(st) else {
+        // nothing can run without the program; the credentials still land in the file for when it is there
+        apply_credentials(st)?;
+        out.problem = Some(NOT_INSTALLED_MSG.into());
+        return Ok(out);
+    };
+    let why = if !path.is_file() {
+        Some("no config file yet".to_string())
+    } else if force {
+        Some("reset asked for".to_string())
+    } else {
+        validate_config(&bin, &path).await.err()
+    };
+    if let Some(why) = why {
+        let old = std::fs::read_to_string(&path).unwrap_or_default();
+        out.backup = regenerate(&bin, &path).await?;
+        out.regenerated = true;
+        if !old.is_empty() {
+            let fresh = std::fs::read_to_string(&path)?;
+            std::fs::write(&path, carry_over(&old, &fresh))?;
+        }
+        match &out.backup {
+            Some(b) => st.db.log("warning", &format!("streamrip: config regenerated ({why}); the old file is kept as {}", b.display())),
+            None => st.db.log("info", &format!("streamrip: config written at {} ({why})", path.display())),
+        }
+        out.problem = validate_config(&bin, &path).await.err();
+    }
+    apply_credentials(st)?;
+    Ok(out)
+}
+
+/// The config file, made to load when it can be (see `check_config`); its path.
+pub async fn ensure_config(st: &AppState) -> anyhow::Result<PathBuf> {
+    check_config(st, false).await.map(|c| c.path)
+}
+
+/// "Reset streamrip config": a fresh file whatever the state of the old one, sign-ins carried over.
+pub async fn reset_config(st: &AppState) -> anyhow::Result<ConfigCheck> {
+    check_config(st, true).await
+}
+
+/// Diagnostics: does streamrip load its config? Read-only – nothing is written or regenerated here.
+pub async fn config_loads_check(st: &AppState) -> Value {
+    let path = config_path(st);
+    let bin = binary(st).unwrap_or("streamrip".into());
+    let (ok, detail) = match binary(st) {
+        None => (false, NOT_INSTALLED_MSG.to_string()),
+        Some(_) if !path.is_file() => (false, format!("No config file at {} yet – it is written on the first download, or press Reset streamrip config in Settings → streamrip", path.display())),
+        Some(bin) => match validate_config(&bin, &path).await {
+            Ok(()) => (true, format!("OK – {}", path.display())),
+            Err(e) => (false, format!("{e} – press Reset streamrip config in Settings → streamrip")),
+        },
+    };
+    serde_json::json!({ "name": "streamrip config loads", "kind": "tool", "request": format!("{bin} --config-path {} config path", path.display()), "ok": ok, "detail": detail })
+}
+
+/// The useful part of streamrip's output, one line: box drawing stripped, numbered progress lines
+/// dropped, the last three lines that name an error (each with the line that continues it), capped.
+fn summary(text: &str, max: usize) -> String {
+    let boxes = Regex::new(r"[│╭╰╮╯─━┃]+").unwrap();
+    let num = Regex::new(r"^\d+\s").unwrap();
+    let errs = Regex::new(r"(?i)error|invalid|fail|not (found|available)|login|arl|token|subscription|traceback|exception").unwrap();
+    let lines: Vec<String> = text.lines().map(|l| boxes.replace_all(l, " ").split_whitespace().collect::<Vec<_>>().join(" ")).filter(|l| !l.is_empty() && !num.is_match(l)).collect();
+    let mut groups: Vec<String> = vec![];
+    let mut i = 0;
+    while i < lines.len() {
+        if errs.is_match(&lines[i]) {
+            let mut g = lines[i].clone();
+            if i + 1 < lines.len() && !errs.is_match(&lines[i + 1]) {
+                g.push(' ');
+                g.push_str(&lines[i + 1]);
+                i += 1;
+            }
+            groups.push(g);
+        }
+        i += 1;
+    }
+    let pick: Vec<String> = if groups.is_empty() { lines.iter().rev().take(3).rev().cloned().collect() } else { groups.into_iter().rev().take(3).rev().collect() };
+    cap(&pick.join(" / "), max)
+}
+
+fn cap(s: &str, max: usize) -> String {
+    if s.chars().count() <= max { s.to_string() } else { s.chars().take(max.saturating_sub(1)).collect::<String>() + "…" }
+}
+
+/// streamrip stopped to ask for the Deezer ARL (a prompt that reads EOF on a server).
+fn asks_for_arl(text: &str) -> bool {
+    let arl = Regex::new(r"(?i)\barl\b|Finding-Your-Deezer-ARL").unwrap();
+    let prompt = Regex::new(r"(?i)enter your|paste|copy the arl|finding-your-deezer-arl|prompt|cookie|eoferror|eof when reading").unwrap();
+    arl.is_match(text) && prompt.is_match(text)
+}
+
+/// The one-line reason a run produced nothing: the Deezer prompt and a config that does not load get
+/// plain words; anything else the error lines of the output, first 300 characters.
+pub fn failure_message(text: &str) -> String {
+    if asks_for_arl(text) {
+        return ARL_MSG.to_string();
+    }
+    if text.contains(CONFIG_ERROR) {
+        return format!("{CONFIG_BROKEN_MSG} – {}", summary(text, MESSAGE_CAP));
+    }
+    format!("streamrip produced no files: {}", summary(text, MESSAGE_CAP))
+}
+
+/// A run that produced no files: the message for the request, the whole output for its log.
+#[derive(Debug)]
+pub struct RipError {
+    pub message: String,
+    pub log: String,
+}
+
+impl std::fmt::Display for RipError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.message)
+    }
+}
+impl std::error::Error for RipError {}
+
+/// The output of a failed run, when the error came from one (for the request's log).
+pub fn run_log(e: &anyhow::Error) -> Option<&str> {
+    e.downcast_ref::<RipError>().map(|r| r.log.as_str()).filter(|l| !l.is_empty())
 }
 
 // ---- resolving a request to a service link ------------------------------------------------------
@@ -222,27 +494,28 @@ pub fn audio_files(dir: &Path, exts: &[&str]) -> Vec<PathBuf> {
 
 pub async fn download(st: &AppState, url: &str, folder: &Path) -> anyhow::Result<Vec<PathBuf>> {
     std::fs::create_dir_all(folder)?;
-    if !config_path(st).exists() {
-        apply_credentials(st).await?;
+    let Some(bin) = binary(st) else { anyhow::bail!("{NOT_INSTALLED_MSG}") };
+    // the config is checked (and mended) and the credentials written before every run, not only the first
+    let check = check_config(st, false).await?;
+    if let Some(p) = check.problem {
+        anyhow::bail!("{CONFIG_BROKEN_MSG} – {p}");
+    }
+    if url.contains("deezer.com") && toml_value(&std::fs::read_to_string(&check.path).unwrap_or_default(), "deezer", "arl").is_empty() {
+        anyhow::bail!("{ARL_MSG}");
     }
     let tpl = st.cfg.str("streamrip_command");
     let tpl = if tpl.is_empty() { DEFAULT_CMD.to_string() } else { tpl };
-    let cmd = tpl.replace("{bin}", &shq(&binary(st).unwrap_or("streamrip".into())))
-        .replace("{config}", &shq(&config_path(st).to_string_lossy())).replace("{folder}", &shq(&folder.to_string_lossy()))
+    let cmd = tpl.replace("{bin}", &shq(&bin))
+        .replace("{config}", &shq(&check.path.to_string_lossy())).replace("{folder}", &shq(&folder.to_string_lossy()))
         .replace("{quality}", &st.cfg.int("streamrip_quality").to_string()).replace("{url}", &shq(url));
-    let fut = tokio::process::Command::new("sh").args(["-c", &cmd]).env("NO_COLOR", "1").env("TERM", "dumb").kill_on_drop(true).output();
+    // stdin closed: a prompt (the Deezer ARL, say) reads EOF at once instead of waiting forever
+    let fut = tokio::process::Command::new("sh").args(["-c", &cmd]).stdin(std::process::Stdio::null())
+        .env("NO_COLOR", "1").env("TERM", "dumb").env("PYTHONUNBUFFERED", "1").kill_on_drop(true).output();
     let out = tokio::time::timeout(std::time::Duration::from_secs(3600), fut).await.map_err(|_| anyhow::anyhow!("streamrip timed out"))??;
     let files = audio_files(folder, &AUDIO);
     if files.is_empty() {
         let text = String::from_utf8_lossy(&[out.stdout, out.stderr].concat()).to_string();
-        let boxes = Regex::new(r"[│╭╰╮╯─━┃]+").unwrap();
-        let num = Regex::new(r"^\d+\s").unwrap();
-        let errs = Regex::new(r"(?i)error|invalid|fail|not (found|available)|login|arl|token|subscription").unwrap();
-        let lines: Vec<String> = text.lines().map(|l| boxes.replace_all(l, " ").trim().to_string()).filter(|l| !l.is_empty() && !num.is_match(l)).collect();
-        let e: Vec<&String> = lines.iter().filter(|l| errs.is_match(l)).collect();
-        let pick: Vec<&String> = if e.is_empty() { lines.iter().collect() } else { e };
-        let tail: Vec<&str> = pick.iter().rev().take(3).rev().map(|s| s.as_str()).collect();
-        anyhow::bail!("streamrip produced no files: {}", tail.join(" / ").chars().take(300).collect::<String>());
+        return Err(RipError { message: failure_message(&text), log: cap(text.trim(), LOG_CAP) }.into());
     }
     Ok(files)
 }
@@ -297,10 +570,7 @@ fn tidal_set(f: impl FnOnce(&mut TidalLogin)) {
 
 /// The `[tidal]` section of a TOML text (without the header), or "" when there is none.
 fn tidal_section(text: &str) -> &str {
-    let Some(m) = Regex::new(r"(?m)^\s*\[tidal\]\s*$").unwrap().find(text) else { return "" };
-    let body = &text[m.end()..];
-    let end = Regex::new(r"(?m)^\s*\[").unwrap().find(body).map(|n| n.start()).unwrap_or(body.len());
-    &body[..end]
+    section_body(text, "tidal")
 }
 
 /// One TOML scalar as text: quotes stripped, inline comments dropped.
@@ -361,9 +631,9 @@ fn now_secs() -> f64 {
     std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs_f64()).unwrap_or(0.0)
 }
 
-/// Write `[tidal]` values into streamrip's config (creating the file through apply_credentials first).
+/// Write `[tidal]` values into streamrip's config (made sound through ensure_config first).
 async fn tidal_write(st: &AppState, values: &[(String, String)]) -> anyhow::Result<()> {
-    let path = apply_credentials(st).await?;
+    let path = ensure_config(st).await?;
     let mut text = std::fs::read_to_string(&path).unwrap_or_default();
     for (k, v) in values {
         text = set_toml(&text, "tidal", k, v);
@@ -482,7 +752,7 @@ async fn tidal_lane_flow(st: &AppState, cid: &str, sec: &str, step: u8, steps: u
 /// Start the sign-in: the device flow runs in the background, lane by lane, and writes the tokens into
 /// streamrip's config. Returns once the first link is known (or it failed).
 pub async fn tidal_login_start(st: &AppState) -> anyhow::Result<Value> {
-    apply_credentials(st).await?;
+    ensure_config(st).await?;
     let cfg = tidal_config(st);
     let lanes = tidal_lanes(&cfg);
     let steps = lanes.len() as u8;
@@ -739,5 +1009,236 @@ hires_token_client_id = "fX2JxdmntZWK0ixT"
         assert_eq!(got["hires_token_client_id"], "");
         assert_eq!(TIDAL_HIRES_KEYS.len(), 4);
         assert!(TIDAL_HIRES_KEYS.iter().all(|k| TIDAL_TOKEN_KEYS.contains(k) && k.starts_with("hires_")));
+    }
+
+    fn state(name: &str) -> (AppState, PathBuf) {
+        let dir = std::env::temp_dir().join(format!("encore-rip-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let st = {
+            let _env = crate::TEST_ENV.lock().unwrap_or_else(|e| e.into_inner());
+            std::env::set_var("ENCORE_CONFIG_DIR", &dir);
+            crate::build_state().unwrap()
+        };
+        (st, dir)
+    }
+
+    /// A stand-in for streamrip's `rip`, in `dir`: `config path` writes the 2.x default file when there is
+    /// none and complains the way the fork does about a file marked `broken = true`; `url` does what the
+    /// `mode` file beside it says (prompt for the ARL, fail to load the config, or download one song).
+    /// Every call, with what its stdin is, lands in `calls.log`.
+    fn fake_rip(dir: &Path) -> PathBuf {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::create_dir_all(dir).unwrap();
+        let body = r#"here=$(dirname "$0")
+echo "call: $* stdin=$(readlink /proc/$$/fd/0 2>/dev/null || echo unknown)" >> "$here/calls.log"
+cfg=""; folder=""; sub=""; url=""
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --config-path) cfg=$2; shift;;
+    --folder) folder=$2; shift;;
+    --quality) shift;;
+    config) sub=config;;
+    path) [ "$sub" = config ] && sub=path;;
+    reset) [ "$sub" = config ] && sub=reset;;
+    url) sub=url; url=$2; shift;;
+  esac
+  shift
+done
+if [ ! -f "$cfg" ]; then
+  echo "No file found at $cfg, creating default config."
+  cat > "$cfg" <<'EOF'
+[downloads]
+folder = "/x"
+
+[qobuz]
+quality = 3
+use_auth_token = false
+email_or_userid = ""
+password_or_token = ""
+
+[tidal]
+quality = 3
+user_id = ""
+country_code = ""
+access_token = ""
+refresh_token = ""
+token_expiry = ""
+
+[deezer]
+quality = 2
+arl = ""
+
+[database]
+downloads_enabled = true
+
+[misc]
+version = "2.0.6"
+EOF
+fi
+if grep -q '^broken = true' "$cfg"; then
+  echo "Error loading config from $cfg: "
+  echo "QobuzConfig.__init__() got an unexpected keyword argument 'user_id'"
+  echo "Try running rip config reset"
+  exit 0
+fi
+case "$sub" in
+  path) echo "$cfg";;
+  url)
+    mode=$(cat "$here/mode" 2>/dev/null)
+    case "$mode" in
+      prompt)
+        echo "If you're not sure how to find the ARL cookie, see the instructions at https://github.com/nathom/streamrip/wiki/Finding-Your-Deezer-ARL-Cookie"
+        echo "Enter your ARL: Traceback (most recent call last):"
+        echo "  File \"rip/prompter.py\", line 80, in prompt_creds"
+        echo "EOFError: EOF when reading a line"
+        exit 1;;
+      config_error)
+        echo "Error loading config from $cfg: "
+        echo "Need to update config from 2.0.5 to 2.0.6"
+        echo "Try running rip config reset"
+        exit 0;;
+      *) mkdir -p "$folder/Album"; printf 'fLaC' > "$folder/Album/01 Song.flac";;
+    esac;;
+esac
+"#;
+        let p = dir.join("rip");
+        let tmp = dir.join(".rip.tmp");
+        std::fs::write(&tmp, format!("#!/bin/sh\n{body}\n")).unwrap();
+        std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o755)).unwrap();
+        std::fs::rename(&tmp, &p).unwrap();
+        p
+    }
+
+    #[tokio::test]
+    async fn a_missing_or_broken_config_is_written_fresh_with_the_sign_ins_carried_over() {
+        let (st, dir) = state("config");
+        let rip = fake_rip(&dir.join("fake"));
+        st.cfg.set_many(&serde_json::json!({ "streamrip_enabled": true, "streamrip_bin": rip.to_string_lossy(), "streamrip_qobuz_user": "qu", "streamrip_qobuz_token": "qt" }));
+        assert_eq!(binary(&st).as_deref(), Some(rip.to_string_lossy().as_ref()));
+        // no file yet: streamrip writes its defaults, Encore its credentials (2.x key names, downloads db off)
+        let c = check_config(&st, false).await.unwrap();
+        assert!(c.regenerated && c.backup.is_none() && c.problem.is_none(), "{c:?}");
+        let text = std::fs::read_to_string(&c.path).unwrap();
+        assert_eq!(toml_value(&text, "qobuz", "email_or_userid"), "qu");
+        assert_eq!(toml_value(&text, "qobuz", "password_or_token"), "qt");
+        assert_eq!(toml_value(&text, "qobuz", "use_auth_token"), "true");
+        assert!(!section_body(&text, "qobuz").contains("user_id ="), "{text}");
+        assert_eq!(toml_value(&text, "database", "downloads_enabled"), "false");
+        assert_eq!(toml_value(&text, "misc", "version"), "2.0.6");
+        // a sound file is left alone, and Diagnostics says so
+        let c = check_config(&st, false).await.unwrap();
+        assert!(!c.regenerated && c.problem.is_none(), "{c:?}");
+        let check = config_loads_check(&st).await;
+        assert_eq!(check["ok"], true, "{check}");
+        assert_eq!(check["name"], "streamrip config loads");
+        // the file breaks (keys from another streamrip, say) while holding a Tidal sign-in, a hand-typed ARL
+        // and the 1.x Qobuz login
+        let mut broken = text.clone();
+        for (k, v) in [("access_token", "\"tok-default-abcdef\""), ("hires_access_token", "\"tok-hires-abcdef\""), ("hires_client", "true")] {
+            broken = set_toml(&broken, "tidal", k, v);
+        }
+        broken = set_toml(&broken, "deezer", "arl", "\"old-arl-cookie\"");
+        broken = set_toml(&broken, "qobuz", "email_or_userid", "\"\"");
+        broken = set_toml(&broken, "qobuz", "password_or_token", "\"\"");
+        broken = set_toml(&broken, "qobuz", "user_id", "\"polluted\"");
+        broken = set_toml(&broken, "qobuz", "auth_token", "\"polluted-token\"");
+        broken = set_toml(&broken, "misc", "broken", "true");
+        std::fs::write(&c.path, &broken).unwrap();
+        st.cfg.set_many(&serde_json::json!({ "streamrip_qobuz_user": "", "streamrip_qobuz_token": "" }));
+        let check = config_loads_check(&st).await;
+        assert_eq!(check["ok"], false, "{check}");
+        let detail = check["detail"].as_str().unwrap();
+        assert!(detail.contains("unexpected keyword argument 'user_id'") && detail.contains("Reset streamrip config"), "{detail}");
+        let c = check_config(&st, false).await.unwrap();
+        assert!(c.regenerated && c.problem.is_none(), "{c:?}");
+        let backup = c.backup.clone().expect("the old file is kept");
+        assert!(backup.file_name().unwrap().to_string_lossy().starts_with("config.toml.bak-"), "{backup:?}");
+        assert!(std::fs::read_to_string(&backup).unwrap().contains("broken = true"));
+        let fresh = std::fs::read_to_string(&c.path).unwrap();
+        assert!(!fresh.contains("broken"), "{fresh}");
+        let t = parse_tidal_toml(&fresh);
+        assert_eq!(t["access_token"], "tok-default-abcdef");
+        assert_eq!(t["hires_access_token"], "tok-hires-abcdef");
+        assert_eq!(t["hires_client"], "true");
+        assert_eq!(toml_value(&fresh, "deezer", "arl"), "old-arl-cookie");
+        assert_eq!(toml_value(&fresh, "qobuz", "email_or_userid"), "polluted", "the 1.x login moves under the 2.x key names");
+        assert_eq!(toml_value(&fresh, "qobuz", "password_or_token"), "polluted-token");
+        assert_eq!(toml_value(&fresh, "qobuz", "use_auth_token"), "true");
+        assert!(!fresh.lines().any(|l| l.starts_with("user_id = \"polluted") || l.starts_with("auth_token =")), "{fresh}");
+        assert!(c.message().contains("carried over"), "{}", c.message());
+        // "Reset streamrip config" on a sound file: a fresh one all the same, sign-ins kept
+        let c = reset_config(&st).await.unwrap();
+        assert!(c.regenerated && c.backup.is_some() && c.problem.is_none(), "{c:?}");
+        assert_eq!(parse_tidal_toml(&std::fs::read_to_string(&c.path).unwrap())["access_token"], "tok-default-abcdef");
+        assert_eq!(c.json()["ok"], true);
+        // a run whose output is the fork's config complaint: plain words, the whole output for the log
+        std::fs::write(dir.join("fake/mode"), "config_error").unwrap();
+        let e = download(&st, "https://tidal.com/browse/track/1", &dir.join("out")).await.err().expect("no files");
+        let m = e.to_string();
+        assert!(m.starts_with(CONFIG_BROKEN_MSG), "{m}");
+        assert!(m.contains("Need to update config from 2.0.5 to 2.0.6"), "{m}");
+        assert!(run_log(&e).unwrap().contains("Try running rip config reset"));
+        let calls = std::fs::read_to_string(dir.join("fake/calls.log")).unwrap();
+        assert!(calls.lines().last().unwrap().contains("url https://tidal.com/browse/track/1"), "{calls}");
+        assert!(calls.lines().all(|l| l.contains("stdin=/dev/null")), "stdin is closed on every run:\n{calls}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn the_deezer_arl_prompt_becomes_a_plain_message() {
+        let (st, dir) = state("arl");
+        let rip = fake_rip(&dir.join("fake"));
+        st.cfg.set_many(&serde_json::json!({ "streamrip_enabled": true, "streamrip_bin": rip.to_string_lossy() }));
+        let out = dir.join("out");
+        // no ARL anywhere: a Deezer link is refused before streamrip runs
+        let e = download(&st, "https://www.deezer.com/track/1", &out).await.err().expect("no ARL");
+        assert_eq!(e.to_string(), ARL_MSG);
+        assert!(run_log(&e).is_none());
+        let calls = std::fs::read_to_string(dir.join("fake/calls.log")).unwrap();
+        assert!(!calls.contains(" url "), "{calls}");
+        // an ARL streamrip still asks about (its prompt reads EOF): the same plain message, the output kept
+        st.cfg.set_many(&serde_json::json!({ "streamrip_deezer_arl": "a-cookie" }));
+        std::fs::write(dir.join("fake/mode"), "prompt").unwrap();
+        let e = download(&st, "https://www.deezer.com/track/1", &out).await.err().expect("prompted");
+        assert_eq!(e.to_string(), ARL_MSG);
+        assert!(run_log(&e).unwrap().contains("EOFError: EOF when reading a line"));
+        let calls = std::fs::read_to_string(dir.join("fake/calls.log")).unwrap();
+        assert!(calls.contains("url https://www.deezer.com/track/1"), "{calls}");
+        assert_eq!(toml_value(&std::fs::read_to_string(config_path(&st)).unwrap(), "deezer", "arl"), "a-cookie", "the ARL from Settings is in the file before the run");
+        // and a run that works
+        std::fs::write(dir.join("fake/mode"), "ok").unwrap();
+        let files = download(&st, "https://www.deezer.com/track/1", &out).await.unwrap();
+        assert_eq!(files.len(), 1);
+        assert!(files[0].ends_with("Album/01 Song.flac"), "{files:?}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn failure_messages_read_plainly() {
+        // the owner's case: the complaint continues on the next line, which the old picker lost
+        let owner = "Error loading config from /config/streamrip/config.toml: \nQobuzConfig.__init__() got an unexpected keyword argument 'user_id'\nTry running rip config reset\n";
+        let m = failure_message(owner);
+        assert!(m.starts_with("streamrip can't load its config – press Reset streamrip config in Settings → streamrip – "), "{m}");
+        assert!(m.contains("unexpected keyword argument 'user_id'"), "{m}");
+        assert_eq!(ARL_MSG, "Deezer needs an ARL cookie – Settings → streamrip");
+        assert_eq!(failure_message("Copy the ARL cookie from your browser and paste it here\nEnter your ARL:"), ARL_MSG);
+        assert_eq!(failure_message("Finding-Your-Deezer-ARL-Cookie\nEOFError: EOF when reading a line"), ARL_MSG);
+        // an unrelated failure keeps streamrip's own words, boxes and progress lines stripped
+        let other = "╭──────╮\n│ Searching │\n╰──────╯\n12 downloading\nNo results found for the query\n";
+        assert_eq!(failure_message(other), "streamrip produced no files: Searching / No results found for the query");
+        // 300 characters at most
+        let long = format!("Error: {}", "x".repeat(400));
+        let m = failure_message(&long);
+        assert_eq!(m.chars().count(), "streamrip produced no files: ".len() + 300, "{m}");
+        assert!(m.ends_with('…'));
+        // "early" is not the ARL
+        assert!(failure_message("Login failed early: token expired").starts_with("streamrip produced no files: Login failed early"));
+        assert!(!asks_for_arl("an early prompt"));
+        assert_eq!(toml_value("[deezer]\nquality = 2\narl = \"abc\" # mine\n[tidal]\narl = \"no\"", "deezer", "arl"), "abc");
+        assert_eq!(toml_value("[tidal]\nx = 1", "deezer", "arl"), "");
+        assert!(qobuz_v2("[qobuz]\nemail_or_userid = \"\"\nauth_token = \"x\""));
+        assert!(!qobuz_v2("[qobuz]\nuser_id = \"\"\nauth_token = \"\""));
+        assert!(qobuz_v2(""));
     }
 }

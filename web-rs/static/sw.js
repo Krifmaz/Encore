@@ -1,8 +1,12 @@
 // Encore service worker: makes the web app installable and opens instantly.
 // The app shell is served network-first (always fresh when the server is reachable) with a cached
 // fallback; API calls, streams and the built-in services are never cached.
-const CACHE = 'encore-shell-v4';
-const SHELL = ['/', '/index.html', '/css/app.css', '/js/app.js', '/favicon.svg', '/manifest.webmanifest', '/icons/icon-192.png'];
+//
+// This file is a template: hooks/sw.sh (a Trunk post_build hook) fills in the cache name (made from the
+// build's content hash, so every build retires the shell of the one before) and the shell list (the fixed
+// files plus the hashed .js and .wasm of this build), and writes the result to dist/sw.js.
+const CACHE = '__CACHE__';
+const SHELL = [__SHELL__];
 
 self.addEventListener('install', (e) => {
   e.waitUntil(caches.open(CACHE).then(c => c.addAll(SHELL)).then(() => self.skipWaiting()));
@@ -21,5 +25,5 @@ self.addEventListener('fetch', (e) => {
       caches.open(CACHE).then(c => c.put(e.request, copy));
     }
     return res;
-  }).catch(() => caches.match(e.request).then(hit => hit || caches.match(url.pathname.startsWith('/next/') ? '/next/index.html' : '/index.html'))));
+  }).catch(() => caches.match(e.request).then(hit => hit || caches.match('/index.html'))));
 });

@@ -231,7 +231,8 @@ data class PlaylistDetail(val playlist: Playlist, val rows: List<PlaylistRow>) {
     val tracks: List<Track> get() = rows.mapNotNull { it.track }
 }
 
-data class PlaylistRow(val title: String, val artist: String, val track: Track?)
+/** `requestStatus` is the linked request's status ("" when never requested or the request is gone). */
+data class PlaylistRow(val title: String, val artist: String, val track: Track?, val requestStatus: String = "")
 
 /** GET /api/auth/info – what this server can do. */
 data class AuthInfo(val appName: String, val version: String, val signupMode: String, val features: List<String>) {

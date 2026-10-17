@@ -581,10 +581,10 @@ pub async fn sync_user(st: &AppState, uid: i64, log: &mut Vec<String>) -> Value 
     // 1b. auto-download liked songs that aren't in the library yet
     if st.cfg.bool("auto_request_likes") {
         if let Ok(Some(owner)) = st.db.one("SELECT * FROM users WHERE id=? AND disabled=0 AND auto_download=1", p![uid]) {
-            if let Ok(n) = playlists::request_missing(st, &owner, lid, true, None) {
-                if n > 0 {
-                    st.db.log("info", &format!("Auto-download: {n} liked song(s) for {}", owner.s("username")));
-                    requested = n;
+            if let Ok(rep) = playlists::request_missing(st, &owner, lid, true, None) {
+                if rep.requested > 0 {
+                    st.db.log("info", &format!("Auto-download: {} liked song(s) for {}", rep.requested, owner.s("username")));
+                    requested = rep.requested;
                 }
             }
         }
@@ -707,9 +707,9 @@ pub async fn sync_all(st: AppState) {
                 }
                 if st.cfg.bool("auto_request_followed") {
                     if let Ok(Some(owner)) = st.db.one("SELECT * FROM users WHERE id=? AND disabled=0 AND auto_download=1", p![pl.i("user_id")]) {
-                        if let Ok(n) = playlists::request_missing(&st, &owner, pl.i("id"), true, None) {
-                            if n > 0 {
-                                st.db.log("info", &format!("Auto-download: {n} new track(s) from followed playlist '{}'", pl.s("name")));
+                        if let Ok(rep) = playlists::request_missing(&st, &owner, pl.i("id"), true, None) {
+                            if rep.requested > 0 {
+                                st.db.log("info", &format!("Auto-download: {} new track(s) from followed playlist '{}'", rep.requested, pl.s("name")));
                             }
                         }
                     }

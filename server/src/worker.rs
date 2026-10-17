@@ -683,7 +683,7 @@ async fn import_slskd(st: &AppState, r: &mut Req, c: &Value) -> anyhow::Result<(
         }
         tokio::time::sleep(std::time::Duration::from_secs(5)).await;
     }
-    let root = PathBuf::from(st.cfg.str("slskd_download_path"));
+    let root = crate::slskd_managed::download_dir(st);
     if paths.is_empty() {
         fail(st, r, &format!("Downloaded files not found under {} – check the shared volume mapping", root.display())).await;
         return Ok(());
@@ -921,12 +921,16 @@ async fn start_streamrip(st: &AppState, r: &mut Req, urls: Option<Vec<String>>) 
             Err(e) if e.is::<Cancelled>() => return Err(e),
             Err(e) => {
                 st.db.log("warning", &format!("streamrip failed for {} ({url}): {e}", r.label()));
+                // the whole output stays in the request's log (the message shows its first lines)
+                if let Some(log) = streamrip::run_log(&e) {
+                    log_push(r, format!("streamrip output for {url}:\n{log}"));
+                }
                 last = e.to_string();
             }
         }
     }
     rm(&staging(st, r));
-    Ok(Out::Next(format!("streamrip: {}", last.chars().take(150).collect::<String>())))
+    Ok(Out::Next(last.chars().take(300).collect::<String>()))
 }
 
 // ---- YouTube (yt-dlp) ---------------------------------------------------------------------------
@@ -1118,7 +1122,17 @@ async fn run_streamrip_url(st: &AppState, r: &mut Req) -> anyhow::Result<()> {
     let _slot = STREAMRIP.acquire().await?;
     let out = staging(st, r);
     let url = r.s("url");
-    let files = streamrip::download(st, &url, &out).await?;
+    let files = match streamrip::download(st, &url, &out).await {
+        Ok(f) => f,
+        Err(e) => {
+            // the whole output stays in the request's log before the failure is recorded
+            if let Some(log) = streamrip::run_log(&e) {
+                log_push(r, format!("streamrip output for {url}:\n{log}"));
+                upd(st, r, &[]);
+            }
+            return Err(e);
+        }
+    };
     upd(st, r, &[("status", json!("importing")), ("message", json!("Tagging and importing…"))]);
     let mut groups: std::collections::BTreeMap<PathBuf, Vec<PathBuf>> = Default::default();
     for f in files {
@@ -1182,7 +1196,7 @@ fn recover(st: &AppState) {
         // reported song's replacement keeps what it replaces and which source to avoid
         let old: Value = serde_json::from_str(&r.s("detail")).unwrap_or(json!({}));
         let mut d = json!({});
-        for k in ["replace", "avoid", "album_mode", "release_filter", "length", "isrc", "ext"] {
+        for k in ["replace", "avoid", "album_mode", "release_filter", "length", "isrc", "ext", "attempts", "log"] {
             if !old[k].is_null() {
                 d[k] = old[k].clone();
             }

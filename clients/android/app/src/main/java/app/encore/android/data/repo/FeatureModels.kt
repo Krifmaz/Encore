@@ -683,6 +683,8 @@ data class RequestRow(
     val username: String,
     val parentId: Long,
     val lengthSec: Double,
+    /** How many times the song was requested or retried on this row (1 for a first request). */
+    val attempts: Int = 1,
 ) {
     val isActive: Boolean get() = status in ACTIVE_STATUSES
 
@@ -725,6 +727,7 @@ data class RequestRow(
                 username = o.text("username"),
                 parentId = o.long("parent_id"),
                 lengthSec = o.dbl("length"),
+                attempts = o.int("attempts").coerceAtLeast(1),
             )
         }
     }
@@ -893,6 +896,33 @@ data class ImportTrack(val artist: String, val title: String, val album: String,
 data class ImportResult(val id: Long, val added: Int, val duplicatesSkipped: Int, val requested: Int) {
     companion object {
         fun from(o: JsonObject): ImportResult = ImportResult(o.long("id"), o.int("added"), o.int("duplicates_skipped"), o.int("requested"))
+    }
+}
+
+/** A song "Download missing" couldn't request, and why. */
+data class MissingFailure(val title: String, val reason: String)
+
+/** POST /api/playlists/{id}/request-missing: what "Download missing" did, song by song. */
+data class MissingReport(val requested: Int, val inProgress: Int, val failed: List<MissingFailure>) {
+    /** The toast, the web's words: "Requested 120 · 600 already in progress · 64 couldn't be requested (why)". */
+    fun toastText(): String {
+        val sb = StringBuilder("Requested $requested")
+        if (inProgress > 0) sb.append(" · $inProgress already in progress")
+        if (failed.isNotEmpty()) {
+            val reasons = failed.map { it.reason }.filter { it.isNotEmpty() }.distinct()
+            val why = reasons.take(3).joinToString("; ") + (if (reasons.size > 3) "; ${reasons.size - 3} more" else "")
+            sb.append(" · ${failed.size} couldn't be requested")
+            if (why.isNotEmpty()) sb.append(" ($why)")
+        }
+        return sb.toString()
+    }
+
+    companion object {
+        fun from(o: JsonObject): MissingReport = MissingReport(
+            requested = o.int("requested"),
+            inProgress = o.int("in_progress"),
+            failed = o.arr("failed").objectsOf().map { MissingFailure(it.text("title"), it.text("reason")) },
+        )
     }
 }
 

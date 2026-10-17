@@ -1,9 +1,17 @@
 [build]
 target = "index.html"
 dist = "dist"
-public_url = "/next/"
+# the Rust UI is the website: served at the root of the server (server/src/main.rs serves dist/ as the SPA)
+public_url = "/"
 release = true
 filehash = true
 
 [tools]
 wasm_opt = "version_119"
+
+# sw.js is written after the build, with the hashed .js/.wasm names in its shell list and a cache name made
+# from that hash (static/sw.js is the template)
+[[hooks]]
+stage = "post_build"
+command = "sh"
+command_arguments = ["hooks/sw.sh"]

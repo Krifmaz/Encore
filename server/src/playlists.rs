@@ -220,12 +220,46 @@ pub fn merge(st: &AppState, uid: i64, ids: &[i64], name: &str) -> anyhow::Result
     Ok(res)
 }
 
+/// What "Download missing" did, song by song: requested now, already on its way, or not requestable (and why).
+#[derive(Debug, Default, Clone, PartialEq, serde::Serialize)]
+pub struct MissingReport {
+    pub requested: usize,
+    pub in_progress: usize,
+    pub failed: Vec<MissingFailure>,
+}
+
+#[derive(Debug, Clone, PartialEq, serde::Serialize)]
+pub struct MissingFailure {
+    pub title: String,
+    pub reason: String,
+}
+
+/// A request in one of these states ended without the song: the item is requested again.
+pub const REREQUEST: [&str; 3] = ["failed", "cancelled", "denied"];
+
 /// Request every item that's not in the library yet. auto=true (auto-download rules) skips approval.
-pub fn request_missing(st: &AppState, u: &Row, pid: i64, auto: bool, album_mode: Option<String>) -> anyhow::Result<usize> {
+/// An item whose request is gone, failed, cancelled or denied is requested again; one whose request is
+/// pending, running or done counts as in progress; when someone already asked for the song (409) the item
+/// is linked to that request instead of being skipped.
+pub fn request_missing(st: &AppState, u: &Row, pid: i64, auto: bool, album_mode: Option<String>) -> anyhow::Result<MissingReport> {
     use crate::routes::requests::{create_request, NewRequest};
-    let mut n = 0;
-    for r in items(st, pid) {
-        if r.i("track_id") > 0 || r.i("request_id") > 0 {
+    let mut rep = MissingReport::default();
+    let rows = st.db.query("SELECT i.*, r.status AS request_status FROM playlist_items i LEFT JOIN requests r ON r.id=i.request_id
+                            WHERE i.playlist_id=? ORDER BY i.position, i.id", p![pid])?;
+    // once the weekly limit is hit the rest of the rows are reported, not requested
+    let mut limit: Option<String> = None;
+    for r in rows {
+        if r.i("track_id") > 0 {
+            continue;
+        }
+        let status = r.s("request_status");
+        if r.i("request_id") > 0 && !status.is_empty() && !REREQUEST.contains(&status.as_str()) {
+            rep.in_progress += 1;
+            continue;
+        }
+        let what = || match r.s("title") { t if !t.is_empty() => t, _ => r.s("artist") };
+        if let Some(why) = &limit {
+            rep.failed.push(MissingFailure { title: what(), reason: why.clone() });
             continue;
         }
         let b = NewRequest { kind: "track".into(), mbid: opt(&r, "mbid"), artist: opt(&r, "artist"), title: opt(&r, "title"), album: opt(&r, "album"),
@@ -233,17 +267,30 @@ pub fn request_missing(st: &AppState, u: &Row, pid: i64, auto: bool, album_mode:
         let extra = if auto { Some(json!({ "auto": true })) } else { None };
         let rid = match create_request(st, u, &b, None, None) {
             Ok(id) => id,
-            Err(e) if e.status.as_u16() == 409 => continue,
-            // the weekly limit stops the run (what was requested so far stays); with nothing requested yet it is an error
+            // someone already asked for this song: the item follows that request
+            Err(e) if e.status.as_u16() == 409 => {
+                match e.extra.as_ref().and_then(|x| x["id"].as_i64()) {
+                    Some(id) => {
+                        st.db.execute("UPDATE playlist_items SET request_id=? WHERE id=?", p![id, r.i("id")])?;
+                        rep.in_progress += 1;
+                    }
+                    None => rep.failed.push(MissingFailure { title: what(), reason: e.detail }),
+                }
+                continue;
+            }
+            // the weekly limit stops the requests (what was requested so far stays); with nothing requested yet it is an error
             Err(e) if e.status.as_u16() == 429 => {
-                if n == 0 {
+                if rep.requested == 0 && rep.in_progress == 0 {
                     anyhow::bail!("{}", e.detail);
                 }
-                break;
+                rep.failed.push(MissingFailure { title: what(), reason: e.detail.clone() });
+                limit = Some(e.detail);
+                continue;
             }
             // one row that can't be requested (no artist or title, say) must not stop the others
             Err(e) => {
-                tracing::info!("playlist {pid}: skipped a missing track ({}): {}", r.s("title"), e.detail);
+                tracing::info!("playlist {pid}: couldn't request a missing track ({}): {}", what(), e.detail);
+                rep.failed.push(MissingFailure { title: what(), reason: e.detail });
                 continue;
             }
         };
@@ -259,9 +306,9 @@ pub fn request_missing(st: &AppState, u: &Row, pid: i64, auto: bool, album_mode:
             crate::req_events::emit(&st.db, rid);
         }
         st.db.execute("UPDATE playlist_items SET request_id=? WHERE id=?", p![rid, r.i("id")])?;
-        n += 1;
+        rep.requested += 1;
     }
-    Ok(n)
+    Ok(rep)
 }
 
 pub fn summary(st: &AppState, pl: &Row) -> Value {

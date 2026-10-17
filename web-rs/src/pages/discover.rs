@@ -113,7 +113,7 @@ const EXT_ORDER: [&str; 4] = ["deezer", "apple", "bandcamp", "discogs"];
 
 /// `extKey(ext)`.
 fn ext_key(ext: &Value) -> String {
-    EXT_ORDER.iter().find(|k| { let v = ext.g(k); !v.is_null() && js_string(v) != "" })
+    EXT_ORDER.iter().find(|k| { let v = ext.g(k); !v.is_null() && !js_string(v).is_empty() })
         .map(|k| format!("ext:{k}:{}", js_string(ext.g(k)))).unwrap_or_default()
 }
 

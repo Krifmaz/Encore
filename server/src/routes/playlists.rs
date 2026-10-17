@@ -100,7 +100,10 @@ async fn import_inner(st: &AppState, u: &Row, b: ImportBody) -> ApiResult<Value>
         }
     };
     if b.request_missing {
-        res["requested"] = json!(playlists::request_missing(st, u, res["id"].as_i64().unwrap_or(0), false, b.album_mode).map_err(bad)?);
+        let rep = playlists::request_missing(st, u, res["id"].as_i64().unwrap_or(0), false, b.album_mode).map_err(bad)?;
+        res["requested"] = json!(rep.requested);
+        res["in_progress"] = json!(rep.in_progress);
+        res["failed"] = json!(rep.failed);
     }
     st.db.log("info", &format!("{} imported '{}' from {source} ({} tracks, {} duplicates skipped)", u.s("username"), data["name"].as_str().unwrap_or(""), tracks.len(), res["duplicates_skipped"]));
     Ok(res)
@@ -127,7 +130,7 @@ async fn create(State(st): State<AppState>, User(u): User, Json(b): Json<Patch>)
 async fn detail(State(st): State<AppState>, User(u): User, Path(pid): Path<i64>) -> ApiResult<Json<Value>> {
     let pl = own(&st, pid, &u)?;
     let mut v = playlists::summary(&st, &pl);
-    v["items"] = json!(st.db.query("SELECT i.*, t.album_id, t.format, t.bitrate, t.verify_status, r.status AS request_status
+    v["items"] = json!(st.db.query("SELECT i.*, t.album_id, t.format, t.bitrate, t.verify_status, r.status AS request_status, r.message AS request_message
         FROM playlist_items i LEFT JOIN tracks t ON t.id=i.track_id LEFT JOIN requests r ON r.id=i.request_id
         WHERE i.playlist_id=? ORDER BY i.position, i.id", p![pid])?);
     v["remote_ids"] = serde_json::from_str(&pl.s("remote_ids")).unwrap_or(json!({}));
@@ -185,7 +188,8 @@ async fn request_missing(State(st): State<AppState>, User(u): User, Path(pid): P
     own(&st, pid, &u)?;
     crate::routes::requests::quota(&st, &u, 1)?;
     let mode = body.and_then(|b| b["album_mode"].as_str().map(String::from));
-    Ok(Json(json!({ "requested": playlists::request_missing(&st, &u, pid, false, mode).map_err(bad)? })))
+    // {requested, in_progress, failed: [{title, reason}]}
+    Ok(Json(json!(playlists::request_missing(&st, &u, pid, false, mode).map_err(bad)?)))
 }
 
 async fn refresh(State(st): State<AppState>, User(u): User, Path(pid): Path<i64>) -> ApiResult<Json<Value>> {
@@ -418,3 +422,7 @@ async fn import_remote(State(st): State<AppState>, User(u): User, Path((service,
     let (added, dupes) = playlists::refresh_followed(&st, &pl).await.map_err(|e| err(502, e.to_string()))?;
     Ok(Json(json!({ "id": pl.i("id"), "added": added, "duplicates_skipped": dupes })))
 }
+
+#[cfg(test)]
+#[path = "playlists_tests.rs"]
+mod playlists_tests;

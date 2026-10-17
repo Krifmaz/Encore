@@ -1,0 +1,121 @@
+//! Download missing: which rows are requested again, which count as in progress, what the report says,
+//! and the 409 that links a row to the request someone else already made (no network).
+use super::*;
+use crate::auth;
+use crate::playlists::MissingFailure;
+use crate::routes::requests::{create_request, NewRequest};
+
+fn state(name: &str) -> AppState {
+    let dir = std::env::temp_dir().join(format!("encore-missing-{name}-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let _env = crate::TEST_ENV.lock().unwrap_or_else(|e| e.into_inner());
+    std::env::set_var("ENCORE_CONFIG_DIR", &dir);
+    crate::build_state().unwrap()
+}
+
+fn user(st: &AppState, name: &str, role: &str) -> Row {
+    let id = auth::create_user(st, name, "a-long-password-1", role, None, None).unwrap();
+    st.db.one("SELECT * FROM users WHERE id=?", p![id]).unwrap().unwrap()
+}
+
+fn playlist(st: &AppState, u: &Row) -> i64 {
+    st.db.execute("INSERT INTO playlists (user_id, name, kind, source, sync_targets, created_at, updated_at) VALUES (?,?,?,?,?,?,?)",
+        p![u.i("id"), "Mix", "playlist", "manual", "[]", now(), now()]).unwrap()
+}
+
+/// A song that is not in the library, linked to `request_id` when given (the id may be of a request that no longer exists).
+fn item(st: &AppState, pid: i64, pos: i64, title: &str, artist: &str, request_id: Option<i64>) -> i64 {
+    st.db.execute("INSERT INTO playlist_items (playlist_id, position, title, artist, request_id, added_at) VALUES (?,?,?,?,?,?)",
+        p![pid, pos, title, artist, request_id, now()]).unwrap()
+}
+
+/// A request row in a given state.
+fn request(st: &AppState, u: &Row, artist: &str, title: &str, status: &str) -> i64 {
+    st.db.execute("INSERT INTO requests (user_id, kind, artist, title, status, message, detail, created_at, updated_at) VALUES (?,?,?,?,?,?,?,?,?)",
+        p![u.i("id"), "track", artist, title, status, "", "{}", now(), now()]).unwrap()
+}
+
+/// The request a playlist row follows: (request id, its status; "" when the request is gone).
+fn linked(st: &AppState, iid: i64) -> (i64, String) {
+    let it = st.db.one("SELECT request_id FROM playlist_items WHERE id=?", p![iid]).unwrap().unwrap();
+    let rid = it.i("request_id");
+    let status = st.db.one("SELECT status FROM requests WHERE id=?", p![rid]).unwrap().map(|r| r.s("status")).unwrap_or_default();
+    (rid, status)
+}
+
+#[tokio::test]
+async fn gone_failed_cancelled_and_denied_requests_are_asked_again() {
+    let st = state("rules");
+    let u = user(&st, "owner1", "admin");
+    let pid = playlist(&st, &u);
+    // never requested
+    let fresh = item(&st, pid, 0, "Fresh", "Band", None);
+    // its request row was deleted
+    let gone = item(&st, pid, 1, "Gone", "Band", Some(999_999));
+    // ended without the song
+    let mut again = vec![];
+    for (i, s) in ["failed", "cancelled", "denied"].iter().enumerate() {
+        let rid = request(&st, &u, "Band", &format!("Over {s}"), s);
+        again.push((item(&st, pid, 2 + i as i64, &format!("Over {s}"), "Band", Some(rid)), rid));
+    }
+    // waiting, running or done: left alone
+    let mut waiting = vec![];
+    for (i, s) in ["pending", "queued", "completed"].iter().enumerate() {
+        let rid = request(&st, &u, "Band", &format!("Still {s}"), s);
+        waiting.push((item(&st, pid, 5 + i as i64, &format!("Still {s}"), "Band", Some(rid)), rid));
+    }
+    // in the library already
+    st.db.execute("INSERT INTO playlist_items (playlist_id, position, title, artist, track_id, added_at) VALUES (?,?,?,?,?,?)", p![pid, 8, "Owned", "Band", 1, now()]).unwrap();
+    // nothing to search for: no title
+    let nameless = item(&st, pid, 9, "", "Band", None);
+
+    let rep = playlists::request_missing(&st, &u, pid, false, None).unwrap();
+    assert_eq!((rep.requested, rep.in_progress), (5, 3), "{rep:?}");
+    assert_eq!(rep.failed, vec![MissingFailure { title: "Band".into(), reason: "Track needs a MusicBrainz id or artist + title".into() }]);
+
+    assert_eq!(linked(&st, fresh).1, "queued");
+    let (rid, status) = linked(&st, gone);
+    assert!(rid != 999_999 && status == "queued", "the gone request is replaced: #{rid} {status}");
+    for (iid, old) in &again {
+        let (rid, status) = linked(&st, *iid);
+        assert!(rid > 0 && status == "queued", "item {iid} should follow a live request, not #{old}: #{rid} {status}");
+    }
+    for (iid, old) in &waiting {
+        assert_eq!(linked(&st, *iid).0, *old, "item {iid} keeps its request");
+    }
+    assert_eq!(linked(&st, nameless).0, 0);
+
+    // a second click asks for nothing twice: everything is on its way now
+    let rep = playlists::request_missing(&st, &u, pid, false, None).unwrap();
+    assert_eq!((rep.requested, rep.in_progress, rep.failed.len()), (0, 8, 1), "{rep:?}");
+}
+
+#[tokio::test]
+async fn an_already_requested_song_links_to_that_request() {
+    let st = state("dup");
+    let u = user(&st, "owner2", "admin");
+    let other = user(&st, "friend", "user");
+    let song = NewRequest { kind: "track".into(), artist: Some("Band".into()), title: Some("Shared".into()), ..Default::default() };
+    // the friend asked first
+    let theirs = create_request(&st, &other, &song, None, None).unwrap();
+    // asking again is a 409 that names the request
+    let e = create_request(&st, &u, &song, None, None).err().expect("a duplicate is refused");
+    assert_eq!(e.status.as_u16(), 409);
+    assert!(e.detail.starts_with("Already requested (#"), "{}", e.detail);
+    assert_eq!(e.extra.as_ref().and_then(|x| x["id"].as_i64()), Some(theirs));
+
+    let pid = playlist(&st, &u);
+    let iid = item(&st, pid, 0, "Shared", "Band", None);
+    let rep = playlists::request_missing(&st, &u, pid, false, None).unwrap();
+    assert_eq!((rep.requested, rep.in_progress, rep.failed.len()), (0, 1, 0), "{rep:?}");
+    assert_eq!(linked(&st, iid).0, theirs, "the row follows the friend's request");
+
+    // the route reports the same numbers, and the rows carry the request's status
+    let Json(v) = request_missing(State(st.clone()), User(u.clone()), Path(pid), None).await.unwrap();
+    assert_eq!(v, json!({ "requested": 0, "in_progress": 1, "failed": [] }));
+    let theirs_status = st.db.one("SELECT status FROM requests WHERE id=?", p![theirs]).unwrap().unwrap().s("status");
+    let Json(d) = detail(State(st.clone()), User(u), Path(pid)).await.unwrap();
+    assert_eq!(d["items"][0]["request_id"], json!(theirs));
+    assert_eq!(d["items"][0]["request_status"], json!(theirs_status));
+}

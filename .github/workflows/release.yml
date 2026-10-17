@@ -92,14 +92,24 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+          components: clippy
       - uses: Swatinem/rust-cache@v2
         with:
-          workspaces: server
+          workspaces: |
+            server
+            web-rs
       - run: cargo test --locked
         working-directory: server
-      - run: for f in $(find web/js -name '*.js'); do node --input-type=module --check < "$f" || { echo "syntax error in $f"; exit 1; }; done
+      - name: Check the web app (web-rs) for WebAssembly, clippy and its tests (the strings reference among them)
+        working-directory: web-rs
+        run: |
+          cargo check --locked --target wasm32-unknown-unknown
+          cargo clippy --locked --target wasm32-unknown-unknown -- -D warnings
+          cargo test --locked
 
-  # the web app in Rust/WebAssembly (web-rs) → static/next, packed into the Linux tarballs (the image builds it itself)
+  # the web app in Rust/WebAssembly (web-rs) → static/, packed into the Linux tarballs (the image builds it itself)
   ui:
     runs-on: ubuntu-latest
     steps:
@@ -113,9 +123,14 @@ jobs:
       - run: curl -fsSL https://github.com/trunk-rs/trunk/releases/download/v0.21.14/trunk-x86_64-unknown-linux-gnu.tar.gz | tar -xz -C /usr/local/bin trunk
       - run: trunk build --release
         working-directory: web-rs
+      - name: The dist has everything the server serves by name
+        working-directory: web-rs
+        run: |
+          for f in index.html sw.js share.html css/app.css manifest.webmanifest favicon.svg icons/icon-192.png; do test -f "dist/$f" || { echo "dist/$f missing"; exit 1; }; done
+          ls dist/encore-web-*_bg.wasm
       - uses: actions/upload-artifact@v4
         with:
-          name: ui-next
+          name: ui-dist
           path: web-rs/dist
 
   server:
@@ -149,12 +164,13 @@ jobs:
         run: cargo build --release --locked --target ${{ matrix.target }}
       - uses: actions/download-artifact@v4
         with:
-          name: ui-next
-          path: web/next
+          name: ui-dist
+          path: web-rs/dist
       - name: Package
         run: |
           V=${{ needs.version.outputs.version }}
-          mkdir -p out/encore && cp server/target/${{ matrix.target }}/release/encore out/encore/ && cp -r web out/encore/static
+          # static/ is the Rust UI (trunk's dist); static-legacy/ the frozen JavaScript UI for ENCORE_LEGACY_UI=1
+          mkdir -p out/encore && cp server/target/${{ matrix.target }}/release/encore out/encore/ && cp -r web-rs/dist out/encore/static && cp -r web out/encore/static-legacy
           tar -C out -czf encore-$V-linux-${{ matrix.arch }}.tar.gz encore
       - uses: actions/upload-artifact@v4
         with:

@@ -307,6 +307,7 @@ private fun RequestItem(
             Row(Modifier.padding(top = 2.dp), verticalAlignment = Alignment.CenterVertically) {
                 Badge(r.kind)
                 val bits = ArrayList<String>()
+                if (r.attempts > 1) bits.add("${r.attempts} attempts")
                 if (r.source.isNotEmpty()) bits.add("via ${r.source}")
                 if (r.message.isNotEmpty()) bits.add(r.message)
                 if (admin && r.username.isNotEmpty()) bits.add("by ${r.username}")

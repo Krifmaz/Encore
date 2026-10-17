@@ -54,7 +54,7 @@ fn js_trim(s: &str) -> String { String::from(js_sys::JsString::from(s).trim()) }
 fn need(root: &Element, sel: &str) -> Result<Element, String> { dom::qs_in(root, sel).ok_or_else(|| format!("{sel} not found")) }
 
 /// Last component of a Soulseek path (backslashes from Windows clients, slashes from others).
-fn base_name(p: &str) -> String { p.split(['\\', '/']).filter(|s| !s.is_empty()).next_back().unwrap_or("").to_string() }
+fn base_name(p: &str) -> String { p.split(['\\', '/']).rfind(|s| !s.is_empty()).unwrap_or("").to_string() }
 /// `String(f.extension || (f.name || baseName(f.filename)).split('.').pop() || '').replace(/^\./, '').toLowerCase()`.
 fn ext_of(f: &Value) -> String {
     let e = if f.truthy("extension") { f.s("extension") } else {
@@ -153,6 +153,10 @@ fn status_html(s: &Value, error: &str) -> String {
         return format!(r#"<span class="dot err"></span> <span style="color:var(--warn)">Soulseek stopped{}</span> · {settings}"#,
             if s.truthy("error") { format!(" – {}", esc(&s.s("error"))) } else { String::new() });
     }
+    if state == "blocked" {
+        return format!(r#"<span class="dot err"></span> <span style="color:var(--warn)">Soulseek can't start{}</span> · {settings}"#,
+            if s.truthy("error") { format!(" – {}", esc(&s.s("error"))) } else { String::new() });
+    }
     if state == "starting" {
         return format!(r#"<span class="dot"></span> Soulseek is starting…{}"#,
             if s.truthy("error") { format!(r#" <span style="color:var(--warn)">{}</span>"#, esc(&s.s("error"))) } else { String::new() });
@@ -167,6 +171,7 @@ fn status_html(s: &Value, error: &str) -> String {
     if !s["scanning"].is_null() { parts.push(format!("scanning shares {}%", esc(&s.s("scanning")))); }
     if s.truthy("port") { parts.push(format!("port {}", esc(&s.s("port")))); }
     if s.truthy("error") { parts.push(format!(r#"<span style="color:var(--warn)">{}</span>"#, esc(&s.s("error")))); }
+    if s.truthy("warning") { parts.push(format!(r#"<span style="color:var(--warn)">{}</span>"#, esc(&s.s("warning")))); }
     parts.join(" · ")
 }
 
@@ -715,8 +720,8 @@ pub fn render(view: Element, ctx: Ctx) -> PageFuture {
             dom::interval(&view, 2000, move || {
                 if !p.view.is_connected() { return; }
                 n += 1;
-                if n % 15 == 0 { let p = p.clone(); dom::spawn(async move { p.load_status().await }); }                                                    // every 30 s
-                if p.enabled.get() && (*p.tab.borrow() == "transfers" || n % 5 == 0) { let p = p.clone(); dom::spawn(async move { p.load_transfers().await }); }   // 2 s on the tab, 10 s for the badge
+                if n.is_multiple_of(15) { let p = p.clone(); dom::spawn(async move { p.load_status().await }); }                                                    // every 30 s
+                if p.enabled.get() && (*p.tab.borrow() == "transfers" || n.is_multiple_of(5)) { let p = p.clone(); dom::spawn(async move { p.load_transfers().await }); }   // 2 s on the tab, 10 s for the badge
             });
         }
         Ok(())

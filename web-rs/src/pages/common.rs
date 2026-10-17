@@ -145,6 +145,7 @@ pub fn request_row(r: &Value, admin: bool) -> String {
       <div class="ellipsis" style="font-weight:600">{what}</div>
       <div class="small muted ellipsis">
         <span class="badge" style="padding:0 7px">{kind}</span>
+        {attempts}
         {source}
         {message}
         {by}
@@ -164,6 +165,7 @@ pub fn request_row(r: &Value, admin: bool) -> String {
         id = r.s("id"),
         thumb = ui::art(&r.s("cover_url"), &or(r, "title", "artist"), ""),
         kind = esc(&kind),
+        attempts = { let n = r.f("attempts") as i64; if n > 1 { format!(r#"<span class="faint" title="Requested or retried {n} times">{n} attempts</span> ·"#) } else { String::new() } },
         source = if r.truthy("source") { format!(r#"<span class="faint">via {}</span> ·"#, esck(r, "source")) } else { String::new() },
         message = if r.truthy("message") { esck(r, "message") } else { String::new() },
         by = if admin && r.truthy("username") { format!(r#" · <span class="faint">by {}</span>"#, esck(r, "username")) } else { String::new() },

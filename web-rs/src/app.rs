@@ -258,7 +258,7 @@ async fn route_async() {
     // every navigation renders into a fresh container, so a slow page that finishes after the user
     // has moved on writes into a detached element instead of clobbering the current page
     let view = dom::create("div");
-    if let Some(v) = qs("#view") { let _ = v.replace_children_with_node_1(&view); }
+    if let Some(v) = qs("#view") { v.replace_children_with_node_1(&view); }
     let Some((name, params)) = match_route(&path) else {
         set_html(&view, r##"<div class="empty"><h2>Page not found</h2><p class="muted"><a href="#/">Go home</a></p></div>"##);
         return;

@@ -259,9 +259,39 @@ async fn put_settings(State(st): State<AppState>, Admin(me): Admin, Json(values)
     let mut keys: Vec<&String> = clean.keys().collect();
     keys.sort();
     st.db.log("info", &format!("{} updated settings: {}", me.s("username"), keys.iter().map(|s| s.as_str()).collect::<Vec<_>>().join(", ")));
+    let warnings = folder_warnings(&clean, |k| st.cfg.get(k));
     st.cfg.set_many(&Value::Object(clean));
     crate::slskd_managed::poke(); // a changed Soulseek login or port takes effect now, not at the next check
-    Ok(Json(st.cfg.public_dump()))
+    let mut out = st.cfg.public_dump();
+    if !warnings.is_empty() {
+        out["_warnings"] = json!(warnings);
+    }
+    Ok(Json(out))
+}
+
+/// Folders Encore has to write to, probed when one changes so a wrong PUID/PGID shows on the card at
+/// once (with the chown line) instead of at the first download: the Soulseek and staging folders, every
+/// download client's folder and the blackhole folders. Only the two folders Encore owns (Soulseek
+/// downloads, staging) are created by the probe; a download client's or blackhole folder has to be
+/// mounted already, like the library – an empty one made inside the container would hide a missing
+/// volume mapping. `current` gives a key's saved value: a folder saved unchanged (the rest of its
+/// section was edited) is not probed again.
+fn folder_warnings(saved: &Map<String, Value>, current: impl Fn(&str) -> Value) -> Vec<Value> {
+    let mut out = vec![];
+    for (k, v) in saved {
+        let folder = k == "slskd_download_path" || k == "staging_path" || k == "library_path"
+            || k.ends_with("_download_path") || k.ends_with("_blackhole_watch") || k.ends_with("_blackhole_completed");
+        let Some(path) = v.as_str().map(str::trim).filter(|p| folder && !p.is_empty()) else { continue };
+        if current(k).as_str().map(str::trim) == Some(path) {
+            continue;
+        }
+        let dir = std::path::Path::new(path);
+        let owned = k == "slskd_download_path" || k == "staging_path";
+        if let Err(why) = crate::slskd_managed::probe_writable(dir, owned) {
+            out.push(json!({ "key": k, "message": crate::slskd_managed::unwritable(dir, &why) }));
+        }
+    }
+    out
 }
 
 /// The API key acts as the owner – only the owner may see or change it.
@@ -296,4 +326,46 @@ struct Limit {
 
 async fn activity(State(st): State<AppState>, Admin(_): Admin, Query(q): Query<Limit>) -> ApiResult<Json<Value>> {
     Ok(Json(json!(st.db.query("SELECT * FROM activity ORDER BY id DESC LIMIT ?", p![q.limit.unwrap_or(300).clamp(1, 1000)])?)))
+}
+
+#[cfg(test)]
+mod folder_tests {
+    use super::*;
+
+    /// Saving a folder Encore can't write to answers with the chown line; the library and a download client's
+    /// folder have to exist (never created); a folder saved unchanged is not probed.
+    #[test]
+    fn saved_folders_are_probed() {
+        let dir = std::env::temp_dir().join(format!("encore-admin-folders-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        // root may write anywhere: a file where the folder should be stops it too
+        std::fs::write(dir.join("file"), "x").unwrap();
+        let bad = dir.join("file").join("slskd");
+        let mut saved = Map::new();
+        saved.insert("slskd_download_path".into(), json!(bad.to_string_lossy()));
+        saved.insert("staging_path".into(), json!(dir.join("staging").to_string_lossy()));
+        saved.insert("library_path".into(), json!(dir.join("missing").to_string_lossy()));
+        saved.insert("soulseek_username".into(), json!("/not/a/folder"));
+        // saved unchanged with the rest of its section: not probed (it would fail – a file is in the way)
+        let same = dir.join("file").join("watch");
+        saved.insert("torrent_blackhole_watch".into(), json!(same.to_string_lossy()));
+        // a download client's folder that is not mounted: reported, never created
+        let qbit = dir.join("qbit");
+        saved.insert("qbit_download_path".into(), json!(qbit.to_string_lossy()));
+        let w = folder_warnings(&saved, |k| if k == "torrent_blackhole_watch" { json!(same.to_string_lossy()) } else { Value::Null });
+        assert_eq!(w.len(), 3, "{w:?}");
+        assert!(w.iter().all(|x| x["key"] != "torrent_blackhole_watch"), "an unchanged folder is not probed: {w:?}");
+        let q = w.iter().find(|x| x["key"] == "qbit_download_path").unwrap()["message"].as_str().unwrap().to_string();
+        assert!(q.contains("doesn't exist inside the container"), "{q}");
+        assert!(!qbit.exists(), "a download client's folder is never created by a save");
+        let slskd = w.iter().find(|x| x["key"] == "slskd_download_path").unwrap()["message"].as_str().unwrap().to_string();
+        assert!(slskd.contains(&format!("chown {}:{} {}", unsafe { libc::geteuid() }, unsafe { libc::getegid() }, bad.display())), "{slskd}");
+        assert!(slskd.contains("or set PUID/PGID"), "{slskd}");
+        let lib = w.iter().find(|x| x["key"] == "library_path").unwrap()["message"].as_str().unwrap().to_string();
+        assert!(lib.contains("doesn't exist inside the container"), "{lib}");
+        assert!(!dir.join("missing").exists(), "the library folder is never created by a save");
+        assert!(dir.join("staging").is_dir(), "a writable download folder is made");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }

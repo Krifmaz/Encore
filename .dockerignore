@@ -2,6 +2,10 @@
 .github
 **/__pycache__
 server/target
+web-rs/target
+web-rs/target-shared
+web-rs/dist
+web/next
 clients
 docs
 app

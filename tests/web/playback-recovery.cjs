@@ -1,6 +1,7 @@
 // Playwright check for the web player keeping a song going when its stream breaks off (0.24.1 hotfix).
 //   NODE_PATH=/opt/node-tools/node_modules node tests/web/playback-recovery.cjs
-// The Rust/WASM UI too: build it (cd web-rs && trunk build --dist /some/dir) and run with ENCORE_RS_DIST=/some/dir.
+// The Rust/WASM UI too: build it (cd web-rs && trunk build --dist /some/dir) and run with ENCORE_RS_DIST=/some/dir; it is
+// served at / (its hashed .js/.wasm sit at the root, as on the server) and the JS test page's files come from web/.
 // A tiny local server serves web/ and a fake /api: songs are generated tones, sent as server-made streams (Data saver:
 // a lossy stream sent chunked, paced, its clock starting at ?t=). The first stream of song 1 is cut mid-song –
 // cleanly ('end': the browser takes it for the whole song) or abruptly ('drop': a network error). The player must not
@@ -17,7 +18,7 @@ const { execFileSync } = require('child_process');
 const { chromium } = require('playwright');
 
 const WEB = path.resolve(process.env.ENCORE_WEB || path.join(__dirname, '../../web'));
-const RS = process.env.ENCORE_RS_DIST ? path.resolve(process.env.ENCORE_RS_DIST) : null;   // the Rust/WASM UI's build, served at /next/
+const RS = process.env.ENCORE_RS_DIST ? path.resolve(process.env.ENCORE_RS_DIST) : null;   // the Rust/WASM UI's build, served at / (and the old /next/)
 const TMP = fs.mkdtempSync(path.join(os.tmpdir(), 'encore-pb-'));
 const TRACKS = [
   { id: 1, title: 'Tone A', artist: 'Test', album: 'Tones', album_id: null, duration: 16, format: 'flac' },
@@ -98,11 +99,13 @@ const server = http.createServer((req, res) => {
     });
     return;
   }
-  const root = RS && u.pathname.startsWith('/next/') ? RS : WEB;
-  const rel = RS && root === RS ? u.pathname.slice('/next'.length) : u.pathname;
-  let file = path.join(root, path.normalize(rel).replace(/^(\.\.[/\\])+/, ''));
-  if (root === RS && (rel === '/' || rel === '')) file = path.join(RS, 'index.html');
-  if (!file.startsWith(root) || !fs.existsSync(file) || fs.statSync(file).isDirectory()) { res.writeHead(404); return res.end(); }
+  const rel = RS && (u.pathname === '/next' || u.pathname.startsWith('/next/')) ? (u.pathname.slice('/next'.length) || '/') : u.pathname;
+  let file = null;
+  for (const root of RS ? [RS, WEB] : [WEB]) {
+    const f = rel === '/' || rel === '' ? path.join(root, 'index.html') : path.join(root, path.normalize(rel).replace(/^(\.\.[/\\])+/, ''));
+    if (f.startsWith(root) && fs.existsSync(f) && !fs.statSync(f).isDirectory()) { file = f; break; }
+  }
+  if (!file) { res.writeHead(404); return res.end(); }
   res.writeHead(200, { 'Content-Type': MIME[path.extname(file)] || 'application/octet-stream' });
   fs.createReadStream(file).pipe(res);
 });
@@ -133,7 +136,7 @@ async function run(browser, base, mode, rs) {
     if (rs) localStorage.setItem('encore.resume', JSON.stringify({ queue: tracks, index: 0, position: 0, context: 'album', repeat: 'off', saved_at: Date.now() / 1000 }));
   }, { tracks: listed(mode), rs });
   if (rs) {
-    await page.goto(`${base}/next/`);
+    await page.goto(`${base}/`);
     await page.waitForFunction(() => document.querySelector('#p-toggle:not([disabled])') && window.encorePlayer, null, { timeout: 30000 });
     await page.evaluate(() => window.encorePlayer.toggle());
   } else {

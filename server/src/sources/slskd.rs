@@ -27,6 +27,7 @@ fn not_ready(st: &AppState) -> Option<String> {
         "not_installed" => Some(slskd_managed::NOT_INSTALLED.into()),
         "waiting_vpn" => Some(slskd_managed::WAITING_FOR_VPN.into()),
         "crashed" => Some(format!("Soulseek engine stopped: {}", s["error"].as_str().unwrap_or("unknown problem"))),
+        "blocked" => Some(format!("Soulseek can't start – {}", s["error"].as_str().unwrap_or("see Settings → Soulseek"))),
         _ if slskd_managed::installed_version(st).is_none() => Some(slskd_managed::NOT_INSTALLED.into()),
         _ => Some("Soulseek is starting – try again in a moment".into()),
     }
@@ -345,9 +346,10 @@ pub fn rank_track(st: &AppState, responses: &[Value], artist: &str, title: &str,
     cands
 }
 
-/// Locate a finished download on the shared volume.
+/// Locate a finished download on the shared volume: under the folder slskd downloads into right now (the
+/// fallback under <config>/downloads/slskd when the configured one can't be written), not the setting.
 pub fn local_path(st: &AppState, remote: &str) -> Option<std::path::PathBuf> {
-    let root = std::path::PathBuf::from(st.cfg.str("slskd_download_path"));
+    let root = crate::slskd_managed::download_dir(st);
     let n = remote.replace('\\', "/");
     let parts: Vec<&str> = n.split('/').collect();
     let base = *parts.last()?;

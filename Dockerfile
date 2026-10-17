@@ -17,7 +17,7 @@ RUN case "$TARGETARCH" in arm64) T=aarch64-unknown-linux-gnu ;; *) T=x86_64-unkn
  && { [ -n "$ENCORE_VERSION" ] || unset ENCORE_VERSION; } \
  && cargo build --release --locked --target "$T" && cp "target/$T/release/encore" /encore
 
-# The web app in Rust/WebAssembly (web-rs): built once on the build machine, served at /next/ beside the JS app.
+# The web app in Rust/WebAssembly (web-rs): built once on the build machine with trunk, served at / by the server.
 FROM --platform=$BUILDPLATFORM rust:1-slim-trixie AS ui
 RUN apt-get update && apt-get install -y --no-install-recommends curl ca-certificates && rm -rf /var/lib/apt/lists/* \
  && rustup target add wasm32-unknown-unknown \
@@ -55,8 +55,10 @@ ENV PATH=/opt/tools/bin:$PATH \
     ENCORE_CONFIG_DIR=/config ENCORE_STATIC_DIR=/app/static ENCORE_PORT=8080 \
     PUID=1000 PGID=1000 TZ=UTC
 COPY --from=build /encore /usr/local/bin/encore
-COPY web /app/static
-COPY --from=ui /ui/dist /app/static/next
+# the Rust UI (trunk's dist: index.html, the hashed .js/.wasm, css, icons, manifest, share.html, sw.js) is the website;
+# the frozen JavaScript UI of 0.25 sits next to it for ENCORE_LEGACY_UI=1, this one release
+COPY --from=ui /ui/dist /app/static
+COPY web /app/static-legacy
 COPY docker/entrypoint.sh /entrypoint.sh
 RUN chmod +x /entrypoint.sh && mkdir -p /config /music /downloads
 ARG ENCORE_BUILD=dev

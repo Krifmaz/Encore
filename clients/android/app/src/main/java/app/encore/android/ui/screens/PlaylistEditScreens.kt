@@ -182,7 +182,7 @@ fun PlaylistMenu(nav: Nav, id: Long, name: String, isLiked: Boolean, onChanged: 
     }
     if (missingChoice) {
         AlbumChoiceDialog("Download missing songs", onDismiss = { missingChoice = false }) { mode ->
-            act(scope, { "Requested ${features.requestMissing(id, mode)} track(s)" }, onChanged)
+            act(scope, { features.requestMissing(id, mode).toastText() }, onChanged)
         }
     }
 }

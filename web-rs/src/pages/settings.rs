@@ -550,12 +550,20 @@ impl Hub {
         let engine_saved = body.get("cadenza_engine_settings").and_then(|v| v.as_str()).map(String::from);
         let app_name = body.get("app_name").cloned().unwrap_or(Value::Null);
         match api::put("/admin/settings", Value::Object(body)).await {
-            Ok(v) => {
+            Ok(mut v) => {
+                // a saved folder Encore can't write to: the server says so at once, with the chown line
+                let warnings: Vec<String> = v.g("_warnings").as_array().map(|a| a.iter().map(|w| w.s("message")).filter(|m| !m.is_empty()).collect()).unwrap_or_default();
+                if let Some(o) = v.as_object_mut() { o.remove("_warnings"); }
                 *self.values.borrow_mut() = v;
                 if let Some(e) = engine_saved.filter(|e| !e.is_empty()) {
                     ENGINE.with(|en| if let Some(en) = en.borrow_mut().as_mut() { en.values = serde_json::from_str(&e).unwrap_or_else(|_| json!({})); });
                 }
                 if !quiet { toast("Settings saved", "ok"); }
+                if !warnings.is_empty() {
+                    if let Some(out) = dom::qs_in(root, "[data-out]") {
+                        dom::set_html(&out, &warnings.iter().map(|m| test_result(&json!({ "ok": false, "message": m }))).collect::<String>());
+                    }
+                }
                 if sec.id == "general" && truthy(&app_name) { dom::set_title(&js_string(&app_name)); }
                 Ok(())
             }
@@ -661,7 +669,7 @@ fn show(hub: &Rc<Hub>, id: String, flash: Option<Value>) -> Pin<Box<dyn Future<O
       <div class="row mt" style="justify-content:flex-end"><button class="btn primary" data-save>{check}Save</button></div>
     </details>"##,
                 yt = if sec.id == "youtube" { crate::pages::youtube::youtube_block() } else { String::new() },
-                tidal = if sec.id == "streamrip" { tidal_block() } else { String::new() },
+                tidal = if sec.id == "streamrip" { tidal_block() + &streamrip_config_block() } else { String::new() },
                 cadenza = if sec.id == "cadenza" { cadenza_cache_block() + &engine_settings_block() } else { String::new() },
                 slsk = if sec.id == "slskd" { soulseek_status_block() } else { String::new() },
                 sid = sec.id, open = if open { "open" } else { "" }, title = esc(sec.title), check = icon("check"))
@@ -690,7 +698,7 @@ fn show(hub: &Rc<Hub>, id: String, flash: Option<Value>) -> Pin<Box<dyn Future<O
             let sec_id = dom::data(&card, "sec");
             let Some(sec) = SECTIONS.iter().find(|x| x.id == sec_id) else { continue };
             let Some(out) = dom::qs_in(&card, "[data-out]") else { continue };
-            if sec.id == "streamrip" { bind_tidal(&hub.view, &card); }
+            if sec.id == "streamrip" { bind_tidal(&hub.view, &card); bind_streamrip_config(&card); }
             if sec.id == "cadenza" { bind_cadenza_cache(&hub, &card); }
             if sec.id == "slskd" { bind_vpn(&hub, sec, &card); bind_soulseek(&hub, &card); }
             if sec.id == "youtube" { crate::pages::youtube::bind_youtube(&card); }
@@ -860,9 +868,8 @@ pub async fn about_card() -> String {
     <div class="row wrap" style="gap:24px"><div><div class="small muted">Version</div><div style="font-weight:700;font-size:20px">v{}</div></div>
       <div><div class="small muted">Server</div><div>{}</div></div>
       <div><div class="small muted">Build</div><div class="mono">{}</div></div></div>
-    <div class="small muted">Apps for Android, Windows, macOS and Linux: <a href="https://github.com/Krifmaz/Encore/releases" target="_blank" rel="noopener">github.com/Krifmaz/Encore/releases</a></div>
-    <div class="small muted">Interface: Rust (WebAssembly, preview) · <a href="/{}">Back to the standard interface</a></div></div>"##,
-        esc(&version), esc(server), esc(&build), esc(&{ let h = dom::hash(); if h.is_empty() { "#/".to_string() } else { h } }))
+    <div class="small muted">Apps for Android, Windows, macOS and Linux: <a href="https://github.com/Krifmaz/Encore/releases" target="_blank" rel="noopener">github.com/Krifmaz/Encore/releases</a></div></div>"##,
+        esc(&version), esc(server), esc(&build))
 }
 
 /// Settings → Playback: stream quality, buffering, what happens when the queue ends, server-side Cadenza processing of streams
@@ -1200,7 +1207,7 @@ fn bind_sound(st: &Rc<Look>) {
 fn paint_playback(st: &Rc<Look>) {
     let p = st.p.borrow().clone();
     let link = crate::player::linked();
-    let eng = link.as_ref().map(|l| l.state.g("engine").clone()).filter(|e| crate::json::truthy(e));
+    let eng = link.as_ref().map(|l| l.state.g("engine").clone()).filter(crate::json::truthy);
     let help = QUALITY_HELP.iter().find(|(k, _)| *k == p.s("quality")).map(|(_, h)| *h).unwrap_or("undefined");
     // the engine inside this very app, or a Cadenza somewhere else?
     let local = eng.as_ref().is_some_and(|e| e.truthy("embedded")) && link.as_ref().is_some_and(|l| crate::remote::is_engine(&l.id));
@@ -1494,7 +1501,7 @@ fn bind_show_when(card: &Element) {
 // with the tunnel's state and Test VPN under them.
 fn fields_html(fields: &[Field], one: impl Fn(&Field) -> String) -> String {
     let is_vpn = |f: &Field| f.key.starts_with("vpn_");
-    let Some(at) = fields.iter().position(|f| is_vpn(f)) else {
+    let Some(at) = fields.iter().position(is_vpn) else {
         return format!(r##"<div class="form-grid">{}</div>"##, fields.iter().map(&one).collect::<String>());
     };
     let rest: Vec<&Field> = fields.iter().filter(|f| !is_vpn(f)).collect();
@@ -1758,7 +1765,7 @@ fn bind_cadenza_cache(hub: &Rc<Hub>, card: &Element) {
 // the card is open. The listen port is hidden while the VPN is on (the VPN's forwarded port is used).
 fn soulseek_status_block() -> String {
     r##"<div class="card flat mt" id="slsk-engine" style="padding:12px 14px">
-    <b>Status</b>
+    <div class="row between" style="gap:10px"><b>Status</b><button class="btn sm" id="slsk-start" hidden>Start now</button></div>
     <div class="small muted" id="slsk-engine-state">Checking…</div>
   </div>"##.to_string()
 }
@@ -1775,10 +1782,18 @@ pub fn soulseek_state_html(r: &Value) -> String {
         "running" => format!("Running{v}{}", if r.truthy("logged_in") { format!(" · signed in as {}", esc(&if r.truthy("username") { r.s("username") } else { "?".to_string() })) }
             else if r.truthy("error") { format!(" · {}", red(&error)) } else { " · signing in…".to_string() }),
         "crashed" => red(&format!("Crashed{}", if r.truthy("error") { format!(" – {error}") } else { String::new() })),
+        "blocked" => red(&format!("Can't start{}", if r.truthy("error") { format!(" – {error}") } else { String::new() })),
         "waiting_vpn" => "Waiting for the VPN".to_string(),
         _ => if r.g("enabled") == &Value::Bool(false) { "Off – switch on Enable Soulseek and save".to_string() } else { "Off".to_string() },
     };
-    if r.truthy("hint") { format!("{line} · {}", esc(&r.s("hint"))) } else { line }
+    let line = if r.truthy("hint") { format!("{line} · {}", esc(&r.s("hint"))) } else { line };
+    // slskd runs, but downloads go to the fallback folder: say so, with the fix
+    if r.truthy("warning") { format!(r##"{line}<div style="color:var(--warn);margin-top:4px">{}</div>"##, esc(&r.s("warning"))) } else { line }
+}
+
+/// The Start now button belongs to a crash or a blocked start: the states a person can act on.
+pub fn can_start_now(state: &str) -> bool {
+    matches!(state, "crashed" | "blocked")
 }
 
 thread_local! {
@@ -1795,16 +1810,39 @@ fn bind_soulseek(hub: &Rc<Hub>, card: &Element) {
         dom::on(&vpn, "change", move |_| dom::hide(&field, dom::checked(&vpn2)));
     }
     let Some(state) = dom::qs_in(card, "#slsk-engine-state") else { return };
-    let refresh = move || {
-        let state = state.clone();
-        dom::spawn(async move {
-            match api::get("/soulseek/status").await {
-                Ok(r) => dom::set_html(&state, &soulseek_state_html(&r)),
-                Err(_) => dom::set_text(&state, "Status unavailable"),
-            }
-        });
+    let start = dom::qs_in(card, "#slsk-start");
+    let refresh: Rc<dyn Fn()> = {
+        let start = start.clone();
+        Rc::new(move || {
+            let (state, start) = (state.clone(), start.clone());
+            dom::spawn(async move {
+                match api::get("/soulseek/status").await {
+                    Ok(r) => {
+                        dom::set_html(&state, &soulseek_state_html(&r));
+                        if let Some(b) = &start { dom::hide(b, !can_start_now(&r.s("state"))); }
+                    }
+                    Err(_) => dom::set_text(&state, "Status unavailable"),
+                }
+            });
+        })
     };
     refresh();
+    if let Some(b) = &start {
+        let (refresh2, b2) = (refresh.clone(), b.clone());
+        dom::on(b, "click", move |_| {
+            let (refresh, b) = (refresh2.clone(), b2.clone());
+            dom::set_disabled(&b, true);
+            dom::spawn(async move {
+                match api::post_empty("/soulseek/start").await {
+                    Ok(_) => toast("Starting Soulseek", "ok"),
+                    Err(err) => toast(&err.message, "err"),
+                }
+                dom::set_disabled(&b, false);
+                // the supervisor starts it on its next check: look again once it has had a moment
+                dom::timeout(1500, move || refresh());
+            });
+        });
+    }
     let gen = SLSK_POLL.with(|g| { g.set(g.get().wrapping_add(1)); g.get() });
     let card = card.clone();
     dom::interval(&hub.view, 5000, move || {
@@ -2151,6 +2189,40 @@ fn bind_tidal(view: &Element, card: &Element) {
             });
         });
     }
+}
+
+// streamrip's config file: when it does not load (a half-written file, the format of an older streamrip),
+// a fresh one from streamrip's defaults mends it; the server keeps the old file and carries the sign-ins over.
+fn streamrip_config_block() -> String {
+    format!(r##"<div class="card flat mt" id="rip-config" style="padding:12px 14px">
+    <div class="row between wrap" style="gap:8px">
+      <div style="min-width:0"><b>streamrip config file</b><div class="small muted">When requests fail with "Error loading config", write a fresh config.toml from streamrip's defaults. The old file is kept as a backup; the Tidal sign-in, Deezer ARL and Qobuz login are carried over.</div></div>
+      <button class="btn sm" id="rip-reset" type="button">{refresh}Reset streamrip config</button>
+    </div>
+    <div class="small mt" id="rip-out" hidden></div>
+  </div>"##, refresh = icon("refresh"))
+}
+
+fn bind_streamrip_config(card: &Element) {
+    let (Some(btn), Some(out)) = (dom::qs_in(card, "#rip-reset"), dom::qs_in(card, "#rip-out")) else { return };
+    let btn2 = btn.clone();
+    dom::on(&btn, "click", move |_| {
+        let (btn, out) = (btn2.clone(), out.clone());
+        dom::spawn(async move {
+            if !crate::ui::confirm_dialog("Reset streamrip config", "Replace streamrip's config.toml with a fresh one from its defaults? The current file is kept as a backup, and the Tidal sign-in, Deezer ARL and Qobuz login are carried over.", "Reset", false).await { return; }
+            dom::set_disabled(&btn, true);
+            dom::hide(&out, false);
+            match api::post_empty("/system/streamrip/reset-config").await {
+                Ok(r) => {
+                    dom::set_html(&out, &test_result(&r));
+                    let ok = r.truthy("ok");
+                    toast(if ok { "streamrip config reset" } else { "streamrip config still doesn't load" }, if ok { "ok" } else { "err" });
+                }
+                Err(e) => dom::set_html(&out, &format!(r##"<span class="badge err">{}</span>"##, esc(&e.message))),
+            }
+            dom::set_disabled(&btn, false);
+        });
+    });
 }
 
 fn pipeline_help() -> String {

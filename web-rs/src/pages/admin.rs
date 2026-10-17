@@ -241,9 +241,8 @@ pub fn render_users(view: Element, ctx: Ctx) -> PageFuture {
                         }
                         "toggle" => patch(&id, json!({ "disabled": is_disable }), &ld).await,
                         "del" => {
-                            if confirm_dialog("Delete user", &format!("Delete {name}? Their requests stay in history."), "Delete", true).await {
-                                if api::del(&format!("/admin/users/{id}")).await.is_ok() { ld(); }
-                            }
+                            if confirm_dialog("Delete user", &format!("Delete {name}? Their requests stay in history."), "Delete", true).await
+                                && api::del(&format!("/admin/users/{id}")).await.is_ok() { ld(); }
                         }
                         "pw" => {
                             let m = modal(ModalOpts::new(&format!("Reset password for {}", esc(&name)),

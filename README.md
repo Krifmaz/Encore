@@ -81,7 +81,7 @@ A database written by a newer Encore is never touched by an older one: the serve
 - **Android Auto**: the app includes a car media service (browse and voice search of your library, native playback straight from the server). Because the APK is not installed from Google Play, Android Auto hides it until you allow it once: open the **Android Auto** app on the phone → scroll to *Version*, tap it about ten times until *Developer settings* unlocks → ⋮ → *Developer settings* → turn on **Unknown sources**. Then *Customize launcher* and tick Encore. Open Encore on the phone once first so it knows your server and sign-in; the car then starts it on its own.
 - **Desktop** (Windows, macOS, Linux): same Releases page – a small Rust app (Tauri) that opens your server in its own window. Media keys and the system's media controls work (lock screen, Now Playing, MPRIS), there's a tray with what's playing and play/pause/next, and it remembers your servers. The macOS build is unsigned: right-click → Open the first time.
 - **Any phone**: open Encore in the browser and choose *Add to Home screen*. On HTTPS it installs as an app.
-- **Rust web interface (preview)**: the web app rewritten in Rust/WebAssembly is served at `/next/` beside the standard one – Settings → General → About has the link there and back. Same sign-in, same features; it becomes the default once it matches.
+- **Web interface in Rust**: since 0.26 the web app is the Rust/WebAssembly one, served at `/` (the old `/next/` address redirects there). Same sign-in, same pages, same look. Set `ENCORE_LEGACY_UI=1` to get the previous JavaScript interface back for this one release (it has none of 0.26's interface fixes); it goes away in 0.27. A browser that blocks WebAssembly for the site (Brave Shields, Vanadium with JIT off, iOS Lockdown Mode, Edge's enhanced security) gets a message saying how to allow it.
 
 ## Wiring up the services
 
@@ -136,7 +136,9 @@ Set **Settings → General → Public URL** (for example `https://music.example.
 | Soulseek: *not installed* | Install it under *Settings → Download tools* (*slskd – Soulseek engine*). |
 | Soulseek: *crashed* | The card shows the engine's last words; the whole output is in `/config/slskd/encore-run.log`. Encore starts it again after 5 s, then waits longer each time (up to 5 minutes). |
 | Soulseek: *waiting for the VPN* | The VPN is on with *Keep Soulseek off while the VPN is down*, and the tunnel isn't up – see *Test VPN*. |
-| Folder not writable by Encore | Diagnostics shows the folder owner and Encore's uid. Match them with `PUID`/`PGID` or `chown`. |
+| Folder not writable by Encore | Diagnostics shows the folder owner and Encore's uid. Match them with `PUID`/`PGID` or `chown`. The Soulseek card (and Save on a folder setting) shows the exact `chown` line; folders set in the environment are created and chowned when the container starts. |
+| streamrip: *Error loading config* / *produced no files* | Encore checks streamrip's config before every run and writes a fresh one when it doesn't load (the old file is kept as `config.toml.bak-<date>`, the Tidal sign-in, ARL and Qobuz login are carried over); *Reset streamrip config* in *Settings → streamrip* forces it, and Diagnostics has a *streamrip config loads* check. streamrip's whole output is kept with the request (the `log` in `GET /api/requests`). |
+| streamrip: *Deezer needs an ARL cookie* | Enter the ARL in *Settings → streamrip*; it is written into streamrip's config before every run (streamrip never gets to ask for it on the server). A song asked for again after a failure keeps its one row, with the attempt count. |
 | Config ends up somewhere odd under Portainer | Use absolute host paths (`/opt/appdata/encore:/config`), not `./encore`. |
 
 ## Keeping it private
@@ -218,12 +220,15 @@ Every option can be changed in the UI. Environment variables only seed the first
 ## Development
 
 ```bash
+# the web app first (Rust → WebAssembly): rustup target add wasm32-unknown-unknown; cargo install trunk
+cd web-rs && trunk build --release && cd ..
 cd server
 cargo test
-ENCORE_CONFIG_DIR=../data ENCORE_STATIC_DIR=../web ENCORE_LIBRARY_PATH=~/Music ENCORE_PORT=8080 cargo run
+ENCORE_CONFIG_DIR=../data ENCORE_STATIC_DIR=../web-rs/dist ENCORE_LIBRARY_PATH=~/Music ENCORE_PORT=8080 cargo run
 ```
 
 - `server/`: the server (Rust: axum, SQLite, lofty for tags, Chromaprint via `fpcalc`). yt-dlp and streamrip are run as programs; the Docker image includes them.
-- `web/`: the web app, plain ES modules with no build step. Edit and reload.
+- `web-rs/`: the web app (Rust compiled to WebAssembly, built by trunk into `web-rs/dist`; the server serves that folder at `/`). Rebuild after a change and reload.
+- `web/`: the frozen legacy UI (JavaScript, no build step), served at `/` only with `ENCORE_LEGACY_UI=1` – from source add `ENCORE_LEGACY_STATIC_DIR=../web` too. It gets no new features.
 - `clients/app/`: the desktop and Android app (Rust, Tauri) – `cargo tauri dev` or `cargo tauri android dev` in that folder; `plugins/media/` is the Kotlin half (media notification, share intent, downloads).
 - **Building the apps for a release on your own machine** (no Actions minutes): `scripts/release-apps.sh` builds this OS's installer plus the Android APK and attaches them to the newest GitHub release (`scripts/release-apps.sh 0.20.3` for a specific one; `--android` / `--desktop` for one of the two, `--no-upload` to only build into `out/`). Windows builds the `.exe` from Git Bash, Linux the `.AppImage`/`.deb`/`.rpm`, a Mac the `.dmg`; the APK builds anywhere the Android SDK + NDK and a JDK are installed. Needs the `gh` CLI signed in.

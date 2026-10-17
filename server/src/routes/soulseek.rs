@@ -1,8 +1,8 @@
 //! /api/soulseek: the Soulseek page – search the network and watch answers arrive, browse a user's
 //! shares, download files or folders as requests (the worker fetches, tags and imports them like a
 //! manual pick), and follow the transfers – all through the Soulseek engine Encore runs (slskd).
-use crate::auth::{self, User};
-use crate::db::Row;
+use crate::auth::{self, Admin, User};
+use crate::db::{Row, RowExt};
 use crate::error::{err, ApiError, ApiResult};
 use crate::routes::picker::create_pick;
 use crate::routes::requests::{quota, NewRequest};
@@ -22,6 +22,7 @@ use std::time::{Duration, Instant};
 pub fn router() -> Router<AppState> {
     Router::new()
         .route("/api/soulseek/status", get(status))
+        .route("/api/soulseek/start", post(start))
         .route("/api/soulseek/search", post(search_start))
         .route("/api/soulseek/search/{id}", get(search_poll))
         .route("/api/soulseek/browse/{username}", get(browse))
@@ -86,7 +87,7 @@ async fn status(State(st): State<AppState>, User(u): User) -> ApiResult<Json<Val
     let installed = slskd_managed::installed_version(&st);
     let mut out = json!({ "enabled": slskd::enabled(&st), "configured": slskd_managed::configured(&st), "client": "managed",
         "state": state, "version": m["version"].clone(), "installed": installed, "vpn": m["vpn"], "hint": "",
-        "logged_in": false, "username": "", "error": m["error"].as_str().unwrap_or(""),
+        "logged_in": false, "username": "", "error": m["error"].as_str().unwrap_or(""), "warning": m["warning"], "download_dir": m["download_dir"],
         "shares": { "dirs": 0, "files": 0 }, "port": m["listen_port"], "scanning": m["scanning"], "parent": null, "downloads": 0, "uploads": 0 });
     if installed.is_none() {
         out["hint"] = json!("Install or update it under Download tools");
@@ -116,6 +117,20 @@ async fn status(State(st): State<AppState>, User(u): User) -> ApiResult<Json<Val
     out["downloads"] = json!(d.map(|d| d.len()).unwrap_or(0));
     out["uploads"] = json!(up.map(|u| u.len()).unwrap_or(0));
     Ok(Json(out))
+}
+
+/// Start now (the button on the Soulseek card after a crash or a blocked start): try at once instead of
+/// after the backoff. The supervisor does the starting; the card's status poll shows how it went.
+async fn start(State(st): State<AppState>, Admin(me): Admin) -> ApiResult<Json<Value>> {
+    if !slskd_managed::configured(&st) {
+        return Err(err(400, "Soulseek is off or has no username and password – fill them in and save first"));
+    }
+    if slskd_managed::installed_version(&st).is_none() {
+        return Err(err(400, slskd_managed::NOT_INSTALLED));
+    }
+    st.db.log("info", &format!("{} started Soulseek", me.s("username")));
+    slskd_managed::start_now();
+    Ok(Json(json!({ "ok": true, "state": slskd_managed::status()["state"] })))
 }
 
 // ---- search --------------------------------------------------------------------------------------

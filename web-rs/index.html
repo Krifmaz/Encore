@@ -4,6 +4,8 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
   <meta name="theme-color" content="#161617">
+  <!-- the Encore apps (desktop, phone) recognise an Encore page by this marker -->
+  <meta name="application-name" content="Encore">
   <title>Encore</title>
   <link rel="icon" href="/favicon.svg" type="image/svg+xml">
   <link rel="manifest" href="/manifest.webmanifest">
@@ -11,10 +13,92 @@
   <meta name="apple-mobile-web-app-capable" content="yes">
   <meta name="mobile-web-app-capable" content="yes">
   <link rel="stylesheet" href="/css/app.css">
+  <!-- files served next to the app, by name: the stylesheet, icons, the PWA manifest, the public share page
+       and the service worker template (hooks/sw.sh writes the real sw.js after the build) -->
+  <link data-trunk rel="copy-dir" href="static/css">
+  <link data-trunk rel="copy-dir" href="static/icons">
+  <link data-trunk rel="copy-file" href="static/favicon.svg">
+  <link data-trunk rel="copy-file" href="static/manifest.webmanifest">
+  <link data-trunk rel="copy-file" href="static/share.html">
+  <style>
+    #wasm-blocked { display: none; max-width: 560px; margin: 12vh auto 0; padding: 0 20px; font: 15px/1.5 system-ui, -apple-system, "Segoe UI", sans-serif; color: #f3f3f8; }
+    #wasm-blocked[data-shown] { display: block; }
+    #wasm-blocked h1 { font-size: 22px; margin: 0 0 10px; }
+    #wasm-blocked p, #wasm-blocked li { color: #c7c7d4; }
+    #wasm-blocked ul { padding-left: 20px; }
+    #wasm-blocked li[data-this] { color: #f3f3f8; }
+    #wasm-blocked li[data-this]::after { content: " – this browser"; color: #9a9ab0; }
+    #wasm-blocked a { color: #8b5cf6; }
+    #wasm-blocked .detail { font-size: 13px; color: #9a9ab0; word-break: break-word; }
+  </style>
+  <script>
+    // WebAssembly guard: the app is a WebAssembly program, so when a browser refuses to compile it the page
+    // would otherwise stay blank. Shows the fallback markup in #app when WebAssembly is missing, when the
+    // module fails with a WebAssembly/CompileError rejection, or when the app has not started after 15 s.
+    (function () {
+      var shown = false, started = false;
+      var ua = navigator.userAgent || '';
+      function browser() {
+        if (navigator.brave && typeof navigator.brave.isBrave === 'function') return 'brave';
+        if (/\bEdg\//.test(ua)) return 'edge';
+        if (/iPhone|iPad|iPod/.test(ua) || (/Macintosh/.test(ua) && 'ontouchend' in document)) return 'ios';
+        // Vanadium reports itself as Chrome, so it cannot be told apart; its entry stays in the list unmarked
+        return '';
+      }
+      function show(detail) {
+        if (shown || started) return;
+        shown = true;
+        var box = document.getElementById('wasm-blocked');
+        if (!box) return;
+        var li = box.querySelector('li[data-browser="' + browser() + '"]');
+        if (li) { li.setAttribute('data-this', ''); li.parentNode.insertBefore(li, li.parentNode.firstChild); }
+        var d = box.querySelector('.detail');
+        if (d && detail) d.textContent = detail;
+        box.setAttribute('data-shown', '');
+      }
+      window.addEventListener('TrunkApplicationStarted', function () {
+        started = true;
+        var box = document.getElementById('wasm-blocked');
+        if (box) box.removeAttribute('data-shown');
+      });
+      window.addEventListener('unhandledrejection', function (e) {
+        var r = e && e.reason;
+        var text = r && (r.message || r.name) ? (r.name ? r.name + ': ' : '') + (r.message || '') : String(r);
+        if (/WebAssembly|CompileError|wasm/i.test(text)) show(text);
+      });
+      // trunk's loader is a module script with a top-level await: a browser that follows the spec reports its
+      // rejection as an error event, not as an unhandled rejection, so the same check listens on both
+      window.addEventListener('error', function (e) {
+        var text = (e && (e.message || (e.error && (e.error.name + ': ' + e.error.message)))) || '';
+        if (/WebAssembly|CompileError|wasm/i.test(text)) show(text);
+      });
+      if (typeof WebAssembly === 'undefined') show('WebAssembly is not available in this browser.');
+      setTimeout(function () { if (!started) show('The app did not start within 15 seconds.'); }, 15000);
+    })();
+  </script>
   <link data-trunk rel="rust" data-wasm-opt="z" />
 </head>
 <body>
-  <div id="app"></div>
+  <div id="app">
+    <!-- with scripts blocked altogether (Brave's Shields can) the guard below never runs: say so without it -->
+    <noscript><div style="max-width:560px;margin:12vh auto 0;padding:0 20px;font:15px/1.5 system-ui,-apple-system,'Segoe UI',sans-serif;color:#f3f3f8">
+      <h1 style="font-size:22px;margin:0 0 10px">Encore needs JavaScript and WebAssembly</h1>
+      <p style="color:#c7c7d4">This browser blocks scripts for this site, so the app cannot start. Allow them for this site and reload the page (Brave: open Shields, the lion icon, and allow Scripts).</p>
+    </div></noscript>
+    <!-- shown by the guard above when WebAssembly is blocked; the app replaces this once it starts -->
+    <div id="wasm-blocked">
+      <h1>Encore needs WebAssembly</h1>
+      <p>This browser blocks WebAssembly for this site, so the app cannot start. Allow it for this site and reload the page:</p>
+      <ul>
+        <li data-browser="brave"><b>Brave</b>: open Shields (the lion icon) for this site and allow Scripts, or set Shields down for this site.</li>
+        <li data-browser="vanadium"><b>Vanadium</b> (GrapheneOS): Site settings → JavaScript JIT → allow for this site.</li>
+        <li data-browser="ios"><b>Safari with Lockdown Mode</b> (iPhone, iPad): tap aA in the address bar → Website Settings → turn Lockdown Mode off for this site.</li>
+        <li data-browser="edge"><b>Microsoft Edge</b> with enhanced security: open the site information (the lock icon) → turn off the enhanced security for this site, so JIT is allowed again.</li>
+      </ul>
+      <p>Other browsers: a content blocker or a security policy that disables WebAssembly has the same effect; allow it for this site.</p>
+      <p class="detail"></p>
+    </div>
+  </div>
   <div id="toasts"></div>
   <div id="modal-root"></div>
 </body>
