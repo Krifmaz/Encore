@@ -422,7 +422,13 @@ async fn test(State(st): State<AppState>, Admin(u): Admin, Path(service): Path<S
                     let ok = s["server"]["isLoggedIn"].as_bool().unwrap_or_else(|| server.contains("LoggedIn"));
                     let port = m["listen_port"].as_u64().map(|p| format!(" · port {p}")).unwrap_or_default();
                     let scan = m["scanning"].as_u64().map(|p| format!(" · scanning shares {p}%")).unwrap_or_default();
-                    msg(ok, format!("Soulseek engine{ver} running{scan} · server: {server}{port} · {vpn}"))
+                    let why = if ok { String::new() } else {
+                        match m["server_error"].as_str().filter(|w| !w.is_empty()) {
+                            Some(w) => format!(" – {w}"),
+                            None => " – not signed in yet; if this stays after the share scan, read the engine log on the Soulseek card".to_string(),
+                        }
+                    };
+                    msg(ok, format!("Soulseek engine{ver} running{scan} · server: {server}{why}{port} · {vpn}"))
                 }
             }
             "musicbrainz" => {

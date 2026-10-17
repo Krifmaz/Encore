@@ -107,7 +107,18 @@ async fn status(State(st): State<AppState>, User(u): User) -> ApiResult<Json<Val
     let logged_in = srv["isLoggedIn"].as_bool().unwrap_or_else(|| sstate.contains("LoggedIn"));
     out["logged_in"] = json!(logged_in);
     out["username"] = srv["username"].as_str().or(s["user"]["username"].as_str()).unwrap_or("").into();
-    out["error"] = json!(if logged_in || sstate.is_empty() { "" } else { sstate });
+    // not signed in: say why in words (from slskd's own log), never just "Disconnected"
+    out["error"] = json!(if logged_in {
+        String::new()
+    } else if let Some(why) = m["server_error"].as_str().filter(|w| !w.is_empty()) {
+        format!("not signed in to the Soulseek network – {why}")
+    } else {
+        let st_word = if sstate.is_empty() { "unknown".to_string() } else { sstate.to_string() };
+        format!("not signed in to the Soulseek network yet ({st_word}) – it signs in once the share scan is done; if this stays, the engine log below says why")
+    });
+    if auth::is_admin(&u) {
+        out["log"] = json!(slskd_managed::log_tail());
+    }
     out["shares"] = json!({ "dirs": s["shares"]["directories"].as_u64().unwrap_or(0), "files": s["shares"]["files"].as_u64().unwrap_or(0) });
     out["parent"] = s["distributedNetwork"]["parent"].as_str().filter(|p| !p.is_empty()).into();
     if let Some(v) = s["version"]["current"].as_str().or(s["version"]["full"].as_str()) {

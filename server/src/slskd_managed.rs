@@ -50,6 +50,54 @@ struct Status {
     warning: Option<String>,
     /// the folder slskd downloads into (the fallback when the configured one can't be written)
     downloads: Option<String>,
+    /// why the engine isn't signed in to the Soulseek network, in plain words (from slskd's own log)
+    server_error: Option<String>,
+}
+
+/// The last lines slskd printed (also written to encore-run.log): shown on the Soulseek card to admins, so a
+/// sign-in problem can be read without opening the container.
+static LOG_TAIL: Mutex<VecDeque<String>> = Mutex::new(VecDeque::new());
+
+/// slskd's last 20 lines, oldest first.
+pub fn log_tail() -> Vec<String> {
+    LOG_TAIL.lock().unwrap().iter().cloned().collect()
+}
+
+/// What a line of slskd's log means for the sign-in, in words a person can act on. `None` for lines
+/// that say nothing about it; `Some(None)` for a successful sign-in (clears the problem).
+pub fn server_hint(line: &str) -> Option<Option<String>> {
+    let l = line.to_lowercase();
+    let tail = || {
+        let t = line.split("] ").last().unwrap_or(line).trim();
+        t.chars().take(160).collect::<String>()
+    };
+    if l.contains("logged in to the soulseek server") || l.contains("login succeeded") || (l.contains("logged in") && l.contains(" as ")) {
+        return Some(None);
+    }
+    if l.contains("invalidpass") {
+        return Some(Some("wrong password for this username – enter the right one, or choose an unused username to create a new account".into()));
+    }
+    if l.contains("invalidusername") {
+        return Some(Some("Soulseek doesn't allow this username – choose another".into()));
+    }
+    if l.contains("invalidversion") {
+        return Some(Some("Soulseek refused this engine version – update it under Download tools".into()));
+    }
+    if l.contains("kicked") || l.contains("same username") || l.contains("another client") || l.contains("elsewhere") {
+        return Some(Some("signed out because the same username signed in from another Soulseek client – close it, or use a different username here".into()));
+    }
+    if (l.contains("login") || l.contains("log in")) && (l.contains("reject") || l.contains("fail")) {
+        return Some(Some(format!("Soulseek refused the sign-in: {}", tail())));
+    }
+    if (l.contains("soulseek server") || l.contains("server connection") || l.contains("slsknet.org"))
+        && (l.contains("timed out") || l.contains("refused") || l.contains("unreachable") || l.contains("failed to connect") || l.contains("unable to connect") || l.contains("no such host") || l.contains("could not resolve"))
+    {
+        return Some(Some(format!("can't reach the Soulseek server (server.slsknet.org:2242) – check the VPN or firewall: {}", tail())));
+    }
+    if l.contains("disconnected from the soulseek server") || l.contains("soulseek client disconnected") {
+        return Some(Some(format!("disconnected from the Soulseek server: {}", tail())));
+    }
+    None
 }
 
 static STATUS: LazyLock<Mutex<Status>> = LazyLock::new(|| Mutex::new(Status { state: "off", ..Default::default() }));
@@ -63,7 +111,7 @@ static START_NOW: AtomicBool = AtomicBool::new(false);
 pub fn status() -> Value {
     let s = STATUS.lock().unwrap().clone();
     json!({ "state": s.state, "version": s.version, "pid": s.pid, "error": s.error, "listen_port": s.listen_port, "vpn": s.vpn, "scanning": s.scan,
-        "warning": s.warning, "download_dir": s.downloads })
+        "warning": s.warning, "download_dir": s.downloads, "server_error": s.server_error })
 }
 
 fn set_status(f: impl FnOnce(&mut Status)) {
@@ -626,6 +674,13 @@ fn pipe<R: AsyncRead + Unpin + Send + 'static>(r: R, log: Arc<RunLog>) {
 /// What slskd's own output tells us: it is up once the application has started (its API can be slow
 /// to answer while a big share scan runs), and how far the share scan is.
 fn on_line(l: &str) {
+    {
+        let mut t = LOG_TAIL.lock().unwrap();
+        if t.len() >= 20 {
+            t.pop_front();
+        }
+        t.push_back(l.chars().take(300).collect());
+    }
     if l.contains("Application started") {
         set_status(|s| {
             if s.state == "starting" {
@@ -633,6 +688,9 @@ fn on_line(l: &str) {
                 s.error = None;
             }
         });
+    }
+    if let Some(hint) = server_hint(l) {
+        set_status(|s| s.server_error = hint);
     }
     if let Some(p) = scan_percent(l) {
         set_status(|s| s.scan = (p < 100).then_some(p));
@@ -781,8 +839,9 @@ impl Runner {
         let pid = self.child.as_ref().and_then(|c| c.id());
         set_status(|s| {
             *s = Status { state: "starting", version: Some(plan.version.clone()), pid, error: None, listen_port: Some(plan.listen_port), vpn: plan.vpn, scan: None,
-                warning: plan.warning.clone(), downloads: Some(plan.downloads.to_string_lossy().to_string()) };
+                warning: plan.warning.clone(), downloads: Some(plan.downloads.to_string_lossy().to_string()), server_error: None };
         });
+        LOG_TAIL.lock().unwrap().clear();
     }
 
     fn start(&mut self, plan: &Plan) -> anyhow::Result<()> {
@@ -949,6 +1008,29 @@ pub async fn supervisor(st: AppState) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// slskd's own lines become words a person can act on; a sign-in clears them.
+    #[test]
+    fn sign_in_problems_are_said_in_plain_words() {
+        let hint = |l: &str| server_hint(l).flatten();
+        assert!(hint("[17:02:11 ERR] Login failed: The server rejected login attempt: INVALIDPASS").unwrap().contains("wrong password"));
+        assert!(hint("[17:02:11 ERR] The server rejected login attempt: INVALIDUSERNAME").unwrap().contains("username"));
+        assert!(hint("[17:02:11 WRN] Disconnected from the Soulseek server: Kicked from server by another client").unwrap().contains("another Soulseek client"));
+        assert!(hint("[17:02:11 WRN] Soulseek client disconnected: Connection to the Soulseek server timed out").unwrap().contains("can't reach the Soulseek server"));
+        assert!(hint("[17:02:11 WRN] Disconnected from the Soulseek server: the network went away").unwrap().starts_with("disconnected from the Soulseek server"));
+        assert_eq!(server_hint("[17:02:12 INF] Logged in to the Soulseek server as krifmaz"), Some(None));
+        assert_eq!(server_hint("[17:02:12 INF] Scanned 11% of shared directories. Found 7115 files so far."), None);
+        // the status follows the lines, and the last 20 lines are kept for the card (the status is one per process)
+        let _turn = LOCK.blocking_lock();
+        set_status(|s| *s = Status { state: "running", ..Default::default() });
+        on_line("[17:02:11 ERR] Login failed: The server rejected login attempt: INVALIDPASS");
+        assert!(status()["server_error"].as_str().unwrap().contains("wrong password"));
+        on_line("[17:02:12 INF] Logged in to the Soulseek server as krifmaz");
+        assert!(status()["server_error"].is_null());
+        assert!(log_tail().iter().any(|l| l.contains("INVALIDPASS")));
+        set_status(|s| *s = Status { state: "off", ..Default::default() });
+    }
+
     use std::os::unix::fs::PermissionsExt;
 
     /// The status is one per process: tests that drive a Runner take turns.

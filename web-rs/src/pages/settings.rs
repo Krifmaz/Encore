@@ -1788,7 +1788,16 @@ pub fn soulseek_state_html(r: &Value) -> String {
     };
     let line = if r.truthy("hint") { format!("{line} · {}", esc(&r.s("hint"))) } else { line };
     // slskd runs, but downloads go to the fallback folder: say so, with the fix
-    if r.truthy("warning") { format!(r##"{line}<div style="color:var(--warn);margin-top:4px">{}</div>"##, esc(&r.s("warning"))) } else { line }
+    let line = if r.truthy("warning") { format!(r##"{line}<div style="color:var(--warn);margin-top:4px">{}</div>"##, esc(&r.s("warning"))) } else { line };
+    // admins get the engine's last lines whenever something is wrong, so the cause can be read right here
+    let unhealthy = matches!(r.s("state").as_str(), "crashed" | "blocked") || (r.s("state") == "running" && !r.truthy("logged_in"));
+    let log: Vec<String> = r.g("log").as_array().map(|a| a.iter().filter_map(|l| l.as_str().map(String::from)).collect()).unwrap_or_default();
+    if unhealthy && !log.is_empty() {
+        format!(r##"{line}<details class="small" style="margin-top:6px"><summary class="muted">Engine log (last {} lines)</summary><pre class="mono" style="white-space:pre-wrap;max-height:240px;overflow:auto;margin:6px 0 0">{}</pre></details>"##,
+            log.len(), esc(&log.join("\n")))
+    } else {
+        line
+    }
 }
 
 /// The Start now button belongs to a crash or a blocked start: the states a person can act on.
