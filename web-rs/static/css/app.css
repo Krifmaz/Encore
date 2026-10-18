@@ -353,6 +353,12 @@ button.badge { font: inherit; font-size: 11px; cursor: pointer; }
 .play-btn svg { width: 18px; height: 18px; }
 .tracklist tr.playing td { color: var(--accent); }
 .tracklist tbody tr { cursor: pointer; }
+/* the number column turns into a play button while the row is hovered (and marks the row that is playing) */
+.tracklist td.num .rowplay { display: none; color: var(--text); }
+.tracklist td.num .rowplay svg { width: 16px; height: 16px; fill: currentColor; }
+.tracklist tbody tr:hover td.num .n, .tracklist tbody tr.playing td.num .n { display: none; }
+.tracklist tbody tr:hover td.num .rowplay, .tracklist tbody tr.playing td.num .rowplay { display: inline-flex; vertical-align: middle; }
+.tracklist tbody tr.playing td.num .rowplay { color: var(--accent); }
 .tile .art .overlay .fab { box-shadow: 0 6px 18px rgba(var(--accent-rgb), .5); }
 
 /* ---------- misc ---------- */

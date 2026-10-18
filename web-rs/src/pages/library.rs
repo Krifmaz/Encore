@@ -861,13 +861,14 @@ pub fn render_album(view: Element, ctx: Ctx) -> PageFuture {
             if added_at.is_finite() { format!("{} {}", if requesters.is_empty() { "Added" } else { "added" }, ui::fmt::day(added_at)) } else { String::new() },
         ].into_iter().filter(|x| !x.is_empty()).collect::<Vec<_>>().join(" · ");
         let rows: String = tracks.iter().enumerate().map(|(i, t)| format!(r##"<tr data-i="{i}">
-        <td class="num">{disc}{track}</td>
+        <td class="num"><span class="n">{disc}{track}</span><span class="rowplay" aria-hidden="true">{rowplay}</span></td>
         <td><div style="font-weight:600">{title}</div>{title_sub}{relpath}{source}</td>
         <td class="hide-sm muted">{artist}</td>
         <td class="hide-sm"><span class="badge">{fmt}</span>{nomb} {vb}{qb}</td>
         <td class="muted">{dur}</td>
         <td style="text-align:right;white-space:nowrap"><button class="btn sm ghost" data-like="{id}" title="Like (syncs to Finamp/Plexamp)">{heart}</button><button class="btn sm ghost icon" data-tmenu="{i}" aria-label="More">{more}</button></td></tr>"##,
-            disc = if multi { format!("{}-", t.s("disc")) } else { String::new() }, track = or_str(t, "track", "–"),
+            // no track number in the tags (a YouTube download): the row's place in the album instead of a dash
+            disc = if multi { format!("{}-", t.s("disc")) } else { String::new() }, track = if t.truthy("track") { t.s("track") } else { (i + 1).to_string() }, rowplay = icon("play"),
             title = esc(&ui::tr(t, "title")), title_sub = ui::tr_sub(t, "title"),
             relpath = if admin { format!(r##"<div class="small faint ellipsis" style="max-width:520px">{}</div>"##, esck(t, "relpath")) } else { String::new() },
             source = source_line(t), artist = ui::artist_links(t), fmt = format_text(t),
