@@ -345,6 +345,8 @@ body.has-player { --player: var(--player-h); }
 .player .ctrls.idle button:disabled, .player .ctrls.idle input:disabled { opacity: .35; cursor: default; }   /* stays on the far right even when the middle (controls) is empty, e.g. nothing playing */
 .player .right input { max-width: 100px; }
 .btn.like.on { color: var(--accent); }
+.player .right .btn.mode.on { color: var(--accent); }
+.player .right .btn.mode sup { font-size: 9px; margin-left: -3px; }
 .btn.like.on svg { fill: currentColor; }
 button.badge { font: inherit; font-size: 11px; cursor: pointer; }
 .play-btn { width: 40px; height: 40px; border-radius: 50%; background: var(--text); color: var(--bg); border: 0; display: grid; place-items: center; cursor: pointer; flex: none; }
@@ -395,7 +397,7 @@ button.badge { font: inherit; font-size: 11px; cursor: pointer; }
   .player .right { grid-column: 3; grid-row: 2; }
   /* phones: the bar keeps play, next, up next and ⋯ – like, share, devices and volume live in the full-screen player */
   .player .right input, .player .right .faint, .player .right .badge, .player .right #p-close, .player .right #p-devices, .player .right .like, .player .right #p-unlink,
-  .player .right #p-album, .player .right #p-playlist, .player .right #p-lyrics, .player .right #p-share { display: none; }
+  .player .right #p-album, .player .right #p-playlist, .player .right #p-lyrics, .player .right #p-share, .player .right #p-shuffle, .player .right #p-repeat { display: none; }
   .player .ctrls .row .btn.icon#p-prev { display: none; }
 }
 @media (max-width: 900px) {

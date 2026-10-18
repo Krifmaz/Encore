@@ -2054,6 +2054,7 @@ fn unshuffled(s: &State) -> Vec<Rc<Value>> {
 fn set_shuffle(on: bool) {
     if via_link(json!({ "action": "shuffle", "value": on })) {
         LINK.with(|l| if let Some(l) = l.borrow_mut().as_mut() { if let Some(o) = l.state.as_object_mut() { o.insert("shuffle".into(), json!(on)); } });
+        render();
         if st(|s| s.full) { render_full(); }
         return;
     }
@@ -2075,10 +2076,12 @@ fn set_repeat(v: &str) {
     if !["off", "all", "one"].contains(&v) { return; }
     if via_link(json!({ "action": "repeat", "value": v })) {
         LINK.with(|l| if let Some(l) = l.borrow_mut().as_mut() { if let Some(o) = l.state.as_object_mut() { o.insert("repeat".into(), json!(v)); } });
+        render();
         if st(|s| s.full) { render_full(); }
         return;
     }
     st_mut(|s| s.repeat = v.to_string());
+    render();
     if st(|s| s.full) { render_full(); }
     emit(); save_spot(true);
 }
@@ -2609,6 +2612,8 @@ fn update_linked_time() {
 /// volume are always there; everything here is also in the ⋯ menu, so a hidden button loses nothing.
 pub const BAR_ACTIONS: &[(&str, &str, &str)] = &[
     ("quality", "Quality badge", ""),
+    ("shuffle", "Shuffle", "shuffle"),
+    ("repeat", "Repeat", "refresh"),
     ("like", "Like", "heart"),
     ("album", "View album", "disc"),
     ("playlist", "Add to playlist", "plus"),
@@ -2618,18 +2623,41 @@ pub const BAR_ACTIONS: &[(&str, &str, &str)] = &[
     ("devices", "Other devices", "devices"),
 ];
 const BAR_KEY: &str = "encore.barButtons";
-const BAR_DEFAULT: &[&str] = &["quality", "like", "lyrics", "queue", "devices"];
+const BAR_DEFAULT: &[&str] = &["quality", "shuffle", "repeat", "like", "lyrics", "queue", "devices"];
+/// Buttons added after the first version shipped: a saved choice from before gets them once (0.26.6), so they
+/// show up without a visit to "Customize the bar".
+const BAR_ADDED: &[(&str, &[&str])] = &[("encore.barButtons.v2", &["shuffle", "repeat"])];
 
 /// The buttons the user chose for the bar (localStorage `encore.barButtons`, a JSON list of BAR_ACTIONS ids).
 pub fn bar_buttons() -> Vec<String> {
-    dom::ls_get(BAR_KEY).and_then(|s| serde_json::from_str::<Vec<String>>(&s).ok())
-        .map(|v| v.into_iter().filter(|x| BAR_ACTIONS.iter().any(|(id, _, _)| id == x)).collect())
-        .unwrap_or_else(|| BAR_DEFAULT.iter().map(|s| s.to_string()).collect())
+    let Some(saved) = dom::ls_get(BAR_KEY).and_then(|s| serde_json::from_str::<Vec<String>>(&s).ok()) else {
+        return BAR_DEFAULT.iter().map(|s| s.to_string()).collect();
+    };
+    let mut v: Vec<String> = saved.into_iter().filter(|x| BAR_ACTIONS.iter().any(|(id, _, _)| id == x)).collect();
+    for (flag, ids) in BAR_ADDED {
+        if dom::ls_get(flag).is_none() {
+            for id in *ids { if !v.iter().any(|x| x == id) { v.push(id.to_string()); } }
+            dom::ls_set(flag, "1");
+            dom::ls_set(BAR_KEY, &serde_json::to_string(&v).unwrap_or_default());
+        }
+    }
+    v
 }
 pub fn set_bar_buttons(v: &[String]) {
     let same_as_default = v.len() == BAR_DEFAULT.len() && BAR_DEFAULT.iter().all(|d| v.iter().any(|x| x == d));
     if same_as_default { dom::ls_remove(BAR_KEY); } else { dom::ls_set(BAR_KEY, &serde_json::to_string(v).unwrap_or_default()); }
+    for (flag, _) in BAR_ADDED { dom::ls_set(flag, "1"); }
     render();
+}
+/// Shuffle and repeat as the bar shows them: the linked device's when linked, else this player's.
+fn mode_state() -> (bool, String) {
+    if is_linked() {
+        let s = link_state_value();
+        let r = s.s("repeat");
+        (s.truthy("shuffle"), if ["off", "all", "one"].contains(&r.as_str()) { r } else { "off".into() })
+    } else {
+        st(|x| (x.shuffle, x.repeat.clone()))
+    }
 }
 fn bar_has(id: &str) -> bool { bar_buttons().iter().any(|x| x == id) }
 
@@ -2667,6 +2695,15 @@ fn right_html(t: Option<&Value>, closable: bool) -> String {
     let lib = t.is_some_and(|t| t.g("id").is_number());
     let btn = |id: &str, label: &str, ic: &str| format!(r#"<button class="btn ghost icon" id="p-{id}" aria-label="{label}" title="{label}">{}</button>"#, icon(ic));
     let badge = match t { Some(t) if bar_has("quality") && !t.truthy("preview") => format!(r#"<button class="badge hide-sm" id="p-signal" type="button" title="{} – click for the signal path">{}</button>"#, esc(&quality_title(t)), esc(&quality(t))), _ => String::new() };
+    let (shuffle_on, repeat) = mode_state();
+    let shuffle = if bar_has("shuffle") && t.is_some() {
+        format!(r#"<button class="btn ghost icon mode {}" id="p-shuffle" title="{}" aria-label="Shuffle" aria-pressed="{shuffle_on}">{}</button>"#,
+            if shuffle_on { "on" } else { "" }, if shuffle_on { "Shuffle: on" } else { "Shuffle: off" }, icon("shuffle"))
+    } else { String::new() };
+    let repeat_btn = if bar_has("repeat") && t.is_some() {
+        format!(r#"<button class="btn ghost icon mode {}" id="p-repeat" title="{}" aria-label="Repeat" aria-pressed="{}">{}{}</button>"#,
+            if repeat != "off" { "on" } else { "" }, repeat_title(&repeat), repeat != "off", icon("refresh"), if repeat == "one" { "<sup>1</sup>" } else { "" })
+    } else { String::new() };
     let like = if bar_has("like") && can_like(t) { like_button("p-like", if t.is_some_and(is_liked) { "on" } else { "" }) } else { String::new() };
     let album = if bar_has("album") && t.is_some_and(|t| t.truthy("album_id")) { btn("album", "View album", "disc") } else { String::new() };
     let playlist = if bar_has("playlist") && lib { btn("playlist", "Add to playlist", "plus") } else { String::new() };
@@ -2677,6 +2714,8 @@ fn right_html(t: Option<&Value>, closable: bool) -> String {
     let vol = if is_linked() { let s = link_state_value(); if s.is_nullish("volume") { "0.9".to_string() } else { s.s("volume") } } else { js_num(user_vol()) };
     format!(r#"<div class="right">
       {badge}
+      {shuffle}
+      {repeat_btn}
       {like}
       {album}
       {playlist}
@@ -2695,6 +2734,8 @@ fn right_html(t: Option<&Value>, closable: bool) -> String {
 fn bind_right(ls: &mut Vec<EventListener>, el: &Element) {
     wire(ls, el, "#p-like", "click", |_| { if let Some(t) = now_track() { dom::spawn(toggle_like(t)); } });
     wire(ls, el, "#p-more", "click", |e| { if let Some(b) = dom::closest(e, "#p-more") { more_menu(&b); } });
+    wire(ls, el, "#p-shuffle", "click", |_| { let (on, _) = mode_state(); set_shuffle(!on); });
+    wire(ls, el, "#p-repeat", "click", |_| { let (_, r) = mode_state(); set_repeat(next_repeat(&r)); });
     wire(ls, el, "#p-album", "click", |_| { if let Some(t) = now_track() { if t.truthy("album_id") { app::navigate(&format!("/library/album/{}", t.s("album_id"))); } } });
     wire(ls, el, "#p-playlist", "click", |_| { if let Some(t) = now_track() { if t.g("id").is_number() { crate::pages::playlists::add_to_playlist_modal(vec![t.i("id")]); } } });
     wire(ls, el, "#p-lyrics", "click", |_| { st_mut(|s| s.pane = "lyrics".into()); set_full(true); });
