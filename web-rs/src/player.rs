@@ -2636,10 +2636,11 @@ fn bar_has(id: &str) -> bool { bar_buttons().iter().any(|x| x == id) }
 /// "Customize the bar…": tick the buttons the bar shows (⋯ menu and Settings → Appearance).
 pub fn customize_bar_modal() {
     let on = bar_buttons();
+    // the icons get an explicit size: outside a .btn an SVG would stretch to the row
     let rows: String = BAR_ACTIONS.iter().map(|(id, label, ic)| format!(
-        r#"<label class="row" style="gap:10px;padding:6px 0"><input type="checkbox" data-bar="{id}" {}>{}<span>{label}</span></label>"#,
+        r#"<label class="row" style="gap:10px;padding:6px 0;align-items:center;cursor:pointer"><input type="checkbox" data-bar="{id}" {}><span class="faint" style="display:inline-flex;width:18px;height:18px;flex:none">{}</span><span>{label}</span></label>"#,
         if on.iter().any(|x| x == id) { "checked" } else { "" },
-        if ic.is_empty() { String::new() } else { icon(ic) })).collect();
+        if ic.is_empty() { String::new() } else { icon_attr(ic, r#"width="18" height="18""#) })).collect();
     let m = crate::ui::modal(ModalOpts::new("Customize the bar",
         &format!(r#"<p class="small muted" style="margin:0 0 8px">Buttons on the player bar. ⋯ and the volume always stay; everything is still in the ⋯ menu.</p><div class="stack" style="gap:0">{rows}</div>"#))
         .footer(r#"<button class="btn" data-bar-reset>Reset</button><button class="btn primary" data-close>Done</button>"#));
