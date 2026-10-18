@@ -510,8 +510,9 @@ async fn follow_again(mut file: tokio::fs::File, rx: watch::Receiver<Status>, gu
     }
 }
 
-fn no_cache(r: &mut Response) {
-    r.headers_mut().insert(header::CACHE_CONTROL, HeaderValue::from_static("private, no-cache"));
+/// A render is never kept by a cache on the way, nor saved as an offline copy (see `NO_STORE`).
+fn no_store(r: &mut Response) {
+    r.headers_mut().insert(header::CACHE_CONTROL, HeaderValue::from_static(crate::routes::library::NO_STORE));
 }
 
 /// Serve a finished render as a plain file (Range / 206 / Content-Length), and mark it used.
@@ -524,7 +525,7 @@ async fn serve_cached(path: PathBuf, key: &str, ctx: &Ctx, spec: &Spec, req: Req
         .unwrap_or_default();
     let mut r = crate::routes::library::serve_file(&path.to_string_lossy(), req, Some("audio/flac"), None).await?;
     super::stream_headers(r.headers_mut(), spec.rate, &label, "cached", 0.0);
-    no_cache(&mut r);
+    no_store(&mut r);
     Ok(r)
 }
 
@@ -558,7 +559,7 @@ async fn serve_following(ctx: &Ctx, job: Arc<Render>, spec: &Spec, t: f64) -> Ap
         ([(header::CONTENT_TYPE, "audio/flac")], Body::from_stream(stream)).into_response()
     };
     super::stream_headers(r.headers_mut(), spec.rate, &status.label, "rendering", t);
-    no_cache(&mut r);
+    no_store(&mut r);
     Ok(r)
 }
 
@@ -1117,6 +1118,7 @@ mod tests {
         // two requests for the same key while it renders: one job, one slot
         let a = serve(&ctx, &spec, 1, 0.0, req()).await.unwrap().expect("served");
         assert_eq!(a.headers()["x-encore-dsp"], "rendering");
+        assert_eq!(a.headers()["cache-control"], "private, no-store", "a render is never kept or saved offline");
         let b = serve(&ctx, &spec, 2, 0.0, req()).await.unwrap().expect("served");
         assert_eq!(b.headers()["x-encore-dsp"], "rendering");
         assert_eq!(TEST_SLOTS.active(), 1);
@@ -1136,6 +1138,7 @@ mod tests {
         let c = serve(&ctx, &spec, 1, 30.0, r).await.unwrap().expect("served");
         assert_eq!(c.status(), 206);
         assert_eq!(c.headers()["x-encore-dsp"], "cached");
+        assert_eq!(c.headers()["cache-control"], "private, no-store");
         assert_eq!(c.headers()["content-length"], "131072");
         assert!(c.headers()["content-range"].to_str().unwrap().starts_with("bytes 0-131071/"));
         // same audio (the header differs: final STREAMINFO and the seek table)

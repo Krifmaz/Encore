@@ -241,6 +241,8 @@ fn library_song_row(t: &Value) -> String {
     let label = if t.truthy("album") { t.s("album") } else { t.s("title") };
     let album = if t.truthy("album") { format!(" · {}", crate::ui::album_link(t)) } else { String::new() };
     let len = if t.truthy("duration") { fmt::dur(t.f("duration")) } else { String::new() };
+    // the song's ⋯ (common::bind_tiles opens it): Play next, Add to queue, Download for offline …
+    let menu = format!(r#"<button class="btn sm ghost icon" data-song-menu='{}' aria-label="More" title="More">{}</button>"#, esc_json(t), icon("more"));
     format!(r#"<div class="list-item">
     <button class="thumb play-thumb" data-play-song='{}' title="Play" aria-label="Play">{}<i>{}</i></button>
     <div class="grow">
@@ -248,7 +250,7 @@ fn library_song_row(t: &Value) -> String {
       <div class="small muted ellipsis">{}{album}</div>
     </div>
     <span class="small faint hide-sm">{len}</span>
-    {}
+    {}{menu}
   </div>"#, esc_json(t), art(&format!("/api/library/albums/{}/cover", t.s("album_id")), &label, ""), icon("play"), esc(&ui::tr(t, "title")), ui::tr_sub(t, "title"), crate::ui::artist_links(t),
         availability(&json!({ "in_library": true })))
 }

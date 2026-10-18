@@ -8,7 +8,7 @@ use std::path::PathBuf;
 use std::sync::LazyLock;
 
 /// (key, name, description)
-pub const TASKS: [(&str, &str, &str); 12] = [
+pub const TASKS: [(&str, &str, &str); 13] = [
     ("scan", "Scan the library", "Pick up files added, changed or removed outside Encore."),
     ("sync", "Sync likes & playlists", "Two-way liked songs and playlist sync with Jellyfin, Plex, Navidrome, ListenBrainz, Spotify…"),
     ("lossy", "Lossless upgrades", "Re-check albums you only have as MP3/YouTube rips for a lossless copy."),
@@ -21,6 +21,7 @@ pub const TASKS: [(&str, &str, &str); 12] = [
     ("cleanup", "Clean up", "Remove finished downloads older than the cleanup age from the list and delete leftover staging files and reported files kept in the trash for 7 days."),
     ("tools", "Update download tools", "Check yt-dlp, streamrip, Cadenza (server processing) and slskd (the Soulseek engine) for new versions, and install them for the tools switched to update automatically under Download tools – no new Encore image needed."),
     ("backup", "Back up the database", "Copy the database to config/backups (kept for 7 days, then one a week for 8 weeks, plus the last 3 pre-upgrade copies)."),
+    ("update", "Check for Encore updates", "Look for a new Encore release on GitHub. Settings → Diagnostics shows what changed, with Restart server and, when the Docker socket is mounted, Update now."),
 ];
 
 static BOOT: LazyLock<f64> = LazyLock::new(now);
@@ -39,6 +40,7 @@ fn keys(key: &str) -> (&'static str, &'static str, i64) {
         "tools" => ("task_tools_enabled", "task_tools_minutes", 1),
         "backup" => ("task_backup_enabled", "task_backup_minutes", 1),
         "quality" => ("task_quality_enabled", "task_quality_minutes", 1),
+        "update" => ("check_updates", "task_update_minutes", 1),
         _ => ("task_cleanup_enabled", "task_cleanup_minutes", 1),
     }
 }
@@ -177,6 +179,7 @@ async fn run(st: &AppState, key: &str) -> anyhow::Result<String> {
             format!("backups/{}{}", b.name, if gone.is_empty() { String::new() } else { format!(", {} old backup(s) removed", gone.len()) })
         }
         "quality" => crate::quality::scan(st, 300).await?,
+        "update" => crate::update::scheduled(st).await?,
         _ => cleanup(st)?,
     })
 }

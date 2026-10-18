@@ -17,6 +17,7 @@ pub(super) fn stalled() {
     let now = now_ms();
     let paused = audio().map(|a| a.paused()).unwrap_or(true);
     if now - st(|s| s.seek_at) < 3000.0 || position() < 1.0 || paused { return; }   // a seek, a switch or the start, not a slow link
+    if st(|s| s.local_copy) { return; }   // a downloaded copy: the network has nothing to do with it
     st_mut(|s| { s.stall_at = now; s.stalls.push(now); });
     if !fully_buffered() { cancel_preload(); }
     if prefs().s("quality") != "auto" || cur().is_some_and(|t| t.truthy("preview")) { return; }
@@ -45,7 +46,7 @@ pub(super) fn note_low_stall(now: f64) {
 /// Auto: a stall forces one rung down right away, and the estimate drops to 60 % of what the rung needed.
 pub(super) fn step_down_now() {
     let Some(t) = cur() else { return };
-    if t.truthy("preview") || prefs().s("quality") != "auto" { return; }
+    if t.truthy("preview") || st(|s| s.local_copy) || prefs().s("quality") != "auto" { return; }
     st_mut(|s| s.slow_start = None);
     let orig = orig_kbps(Some(&t));
     let rung = st(|s| s.rung);
@@ -204,7 +205,7 @@ async fn probe_once(id: &str, size: f64) -> Option<(f64, f64)> {
 pub(super) fn adapt_tick() {
     if is_linked() || audio().is_none() { return; }
     let Some(t) = cur() else { return };
-    if t.truthy("preview") { return; }
+    if t.truthy("preview") || st(|s| s.local_copy) { return; }   // a downloaded copy uses no bandwidth
     let downloading = sample_progress();
     if audio().is_some_and(|a| a.paused()) { EST.with(|e| e.borrow_mut().up_since = 0.0); return; }
     if !downloading { probe(); }

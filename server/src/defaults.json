@@ -189,6 +189,21 @@
   "default": 1440,
   "secret": false
  },
+ "check_updates": {
+  "env": "ENCORE_CHECK_UPDATES",
+  "default": true,
+  "secret": false
+ },
+ "task_update_minutes": {
+  "env": null,
+  "default": 1440,
+  "secret": false
+ },
+ "self_update": {
+  "env": "ENCORE_SELF_UPDATE",
+  "default": "",
+  "secret": false
+ },
  "tools_auto_ytdlp": {
   "env": null,
   "default": true,

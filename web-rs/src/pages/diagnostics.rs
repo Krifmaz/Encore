@@ -58,6 +58,7 @@ pub fn render(view: Element, _ctx: Ctx) -> PageFuture {
       <div class="row"><button class="btn" id="copy" disabled>{copy}Copy report</button><button class="btn primary" id="run">{refresh}Run checks</button></div>
     </div>
     <div id="diag"><div class="empty"><span class="spinner"></span></div></div>
+    <div id="updates"></div>
     <div class="section-head"><h2>Backups</h2>
       <div class="row"><label class="btn sm">{up}Upload a backup…<input type="file" id="bk-upload" accept=".db,.sqlite,.sqlite3,application/vnd.sqlite3,application/x-sqlite3" hidden></label><button class="btn sm primary" id="bk-now">Back up now</button></div>
     </div>
@@ -127,6 +128,10 @@ pub fn render(view: Element, _ctx: Ctx) -> PageFuture {
         {
             let bk = bk.clone();
             dom::spawn(async move { load_backups(&bk).await });
+        }
+        // Updates (admins only; the server answers 403 to anyone else and an older server 404: then nothing shows)
+        if let Some(up) = dom::qs_in(&view, "#updates") {
+            if crate::app::is_admin() { dom::spawn(async move { load_updates(&up, false).await }); }
         }
         if let Some(cr) = dom::qs_in(&view, "#crashes") {
             let v2 = view.clone();
@@ -252,6 +257,8 @@ async fn run(view: Element, diag: Element, last: Rc<RefCell<Option<Value>>>) -> 
         if let Some(a) = data.get_mut("checks").and_then(|c| c.as_array_mut()) { a.push(row); }
     }
     *last.borrow_mut() = Some(data.clone());
+    remember_machine(data.g("machine"));
+    if let Some(sv) = settings_view() { show_banner(&sv, data.g("machine").truthy("encore_update_available"), &data.g("machine").s("encore_latest")); }
     if let Some(c) = dom::qs_in(&view, "#copy") { dom::set_disabled(&c, false); }
     let server = server_block(data.g("machine"));
     let checks = data.a("checks");
@@ -381,4 +388,420 @@ fn copy_report(last: &Value) {
         lines.push(format!("  {} = {}  [{}]", js_str(&s, "key"), js_str(&s, "value"), if s.g("source").as_str() == Some("env") { format!("env {}", js_str(&s, "env")) } else { "saved".to_string() }));
     }
     copy_text(&lines.join("\n"));
+}
+
+// ---- Updates (0.28): the version this server runs, the newest release, Check now, Restart server, Update now ----
+
+/// The README section on "Update now" (the Docker socket mount) and "Restart server".
+const README_UPDATES: &str = "https://github.com/Krifmaz/Encore#updates-and-restart";
+/// After Restart server / Update now: /api/health every 2 s; after 90 s the page says the server is late (and
+/// keeps looking for 10 minutes in all).
+const POLL_MS: u32 = 2000;
+const BACK_BUDGET_MS: f64 = 90_000.0;
+const GIVE_UP_MS: f64 = 600_000.0;
+/// A restart so quick that no poll saw the server down: this long of answers in a row counts as back.
+const QUIET_BACK_MS: f64 = 30_000.0;
+/// The Settings banner reads the diagnostics answer at most this often per page load.
+const MACHINE_FRESH_MS: f64 = 30.0 * 60.0 * 1000.0;
+
+thread_local! {
+    /// The last `machine` block of /api/system/diagnostics and when it came (ms), for the Settings banner.
+    static MACHINE: RefCell<Option<(f64, Value)>> = const { RefCell::new(None) };
+}
+
+fn remember_machine(m: &Value) {
+    if m.is_object() { MACHINE.with(|x| *x.borrow_mut() = Some((dom::now_ms(), m.clone()))); }
+}
+
+/// Release notes (GitHub markdown) as plain lines for "What changed": headings lose their #, list items get a
+/// bullet, * and ` go, [text](link) and ![text](image) keep their text, <https://…> its address; HTML
+/// comments, code fences, rules and runs of blank lines go.
+pub fn notes_text(md: &str) -> String {
+    let mut text = md.replace("\r\n", "\n");
+    while let Some(a) = text.find("<!--") {
+        let end = text[a..].find("-->").map(|e| a + e + 3).unwrap_or(text.len());
+        text.replace_range(a..end, "");
+    }
+    let mut out: Vec<String> = vec![];
+    for raw in text.lines() {
+        let body = raw.trim_start();
+        let indent = (raw.len() - body.len()).min(8);
+        let mut t = body.trim_end();
+        if t.starts_with("```") || t.starts_with("~~~") { continue; }
+        if t.len() >= 3 && t.chars().all(|c| matches!(c, '-' | '*' | '_' | ' ')) && t.chars().filter(|c| *c != ' ').count() >= 3 {
+            t = "";
+        }
+        if t.starts_with('#') { t = t.trim_start_matches('#').trim_start(); }
+        while let Some(r) = t.strip_prefix('>') { t = r.trim_start(); }
+        let mut bullet = false;
+        for m in ["* ", "- ", "+ "] {
+            if let Some(r) = t.strip_prefix(m) { t = r.trim_start(); bullet = true; break; }
+        }
+        let line = inline_text(t);
+        if line.trim().is_empty() {
+            if out.last().is_some_and(|l| !l.is_empty()) { out.push(String::new()); }
+            continue;
+        }
+        out.push(format!("{}{}{}", " ".repeat(indent), if bullet { "• " } else { "" }, line.trim_end()));
+    }
+    while out.last().is_some_and(|l| l.is_empty()) { out.pop(); }
+    out.join("\n")
+}
+
+/// `[text](url)` at `i` (the `[`): its text and the index after the `)`.
+fn md_link(c: &[char], i: usize) -> Option<(String, usize)> {
+    let close = (i + 1..c.len()).find(|&j| c[j] == ']')?;
+    if c.get(close + 1) != Some(&'(') { return None; }
+    let end = (close + 2..c.len()).find(|&j| c[j] == ')')?;
+    Some((c[i + 1..close].iter().collect(), end + 1))
+}
+
+fn inline_text(s: &str) -> String {
+    let c: Vec<char> = s.chars().collect();
+    let mut out = String::new();
+    let mut i = 0;
+    while i < c.len() {
+        let at = if c[i] == '!' && c.get(i + 1) == Some(&'[') { i + 1 } else { i };
+        if c[at] == '[' {
+            if let Some((text, next)) = md_link(&c, at) {
+                out.push_str(&inline_text(&text));
+                i = next;
+                continue;
+            }
+        }
+        if c[i] == '<' {
+            if let Some(end) = (i + 1..c.len()).find(|&j| c[j] == '>') {
+                let inner: String = c[i + 1..end].iter().collect();
+                if inner.starts_with("http://") || inner.starts_with("https://") {
+                    out.push_str(&inner);
+                    i = end + 1;
+                    continue;
+                }
+            }
+        }
+        if c[i] != '*' && c[i] != '`' { out.push(c[i]); }
+        i += 1;
+    }
+    out
+}
+
+/// GitHub's `published_at` (an ISO date) as "Oct 12, 2026" in the reader's language ("" when missing).
+fn published_day(v: &Value) -> String {
+    let Some(s) = v.as_str().filter(|s| !s.is_empty()) else { return String::new() };
+    let ms = js_sys::Date::parse(s);
+    if ms.is_nan() { return String::new(); }
+    fmt::day(ms / 1000.0)
+}
+
+/// The Updates card: GET /system/update (`?force=1` for Check now) and draw it into `up`.
+async fn load_updates(up: &Element, force: bool) {
+    let path = if force { "/system/update?force=1" } else { "/system/update" };
+    match api::get(path).await {
+        Ok(d) => {
+            note_update(&d);
+            draw_updates(up, &d);
+        }
+        // not an admin, or a server without the endpoint: nothing to show
+        Err(e) if e.status == 403 || e.status == 404 => dom::set_html(up, ""),
+        Err(e) => {
+            dom::set_html(up, &format!(r#"<div class="section-head"><h2>Updates</h2></div>
+    <div class="card"><div class="small" style="color:var(--err)">{}</div></div>"#, esc(&e.message)));
+        }
+    }
+}
+
+fn updates_html(d: &Value) -> String {
+    let current = d.s("current");
+    let latest = d.s("latest");
+    let newer = d.truthy("is_newer") && !latest.is_empty();
+    // a build without a release number (cargo build, or the image built from the sources)
+    let dev = d.truthy("dev");
+    let dev_note = if dev { r#"<div class="small muted">A build without a release number: any release counts as newer.</div>"# } else { "" };
+    let error = if d.truthy("error") { format!(r#"<div class="small" style="color:var(--err)">Couldn't check for updates: {}</div>"#, esck(d, "error")) } else { String::new() };
+    let checked = if d.f("checked_at") > 0.0 { format!(r#"<span class="small faint">checked {}</span>"#, esc(&fmt::ago(d.f("checked_at")))) } else { String::new() };
+    let state = if latest.is_empty() {
+        if error.is_empty() { r#"<span class="small muted">Not checked yet – press Check now</span>"#.to_string() } else { String::new() }
+    } else if newer {
+        let day = published_day(d.g("published_at"));
+        format!(r#"<span class="badge info">Encore {} is available</span>{}"#, esc(&latest),
+            if day.is_empty() { String::new() } else { format!(r#"<span class="small muted">released {}</span>"#, esc(&day)) })
+    } else {
+        r#"<span class="small muted">You have the newest version</span>"#.to_string()
+    };
+    let github = if d.truthy("url") {
+        format!(r#"<a class="btn sm" href="{}" target="_blank" rel="noopener">{}View on GitHub</a>"#, esck(d, "url"), icon("external"))
+    } else { String::new() };
+    let ready = d.g("self_update").as_str() == Some("ready");
+    let update_btn = if ready && newer { r#"<button class="btn sm primary" id="up-now">Update now</button>"#.to_string() } else { String::new() };
+    let notes = notes_text(&d.s("notes"));
+    let notes = if notes.is_empty() { String::new() } else {
+        format!(r#"<details><summary class="small muted" style="cursor:pointer">What changed in {}</summary><div class="small" style="white-space:pre-wrap;margin-top:8px">{}{}</div></details>"#,
+            esc(&latest), esc(&notes), if d.truthy("notes_cut") { "\n…" } else { "" })
+    };
+    let help = if ready { String::new() } else {
+        let reason = if d.truthy("self_update_reason") { d.s("self_update_reason") } else { "The Docker socket is not mounted".to_string() };
+        format!(r#"<div class="small muted">Update now is not available here: {}. <a href="{README_UPDATES}" target="_blank" rel="noopener" style="color:var(--accent)">How to turn it on</a></div>"#,
+            esc(reason.trim_end_matches('.')))
+    };
+    let shell = crate::sw::shell_cache().map(|c| format!(r#"<div class="small faint">This browser keeps the web app for offline use ({})</div>"#, esc(&c))).unwrap_or_default();
+    format!(r#"
+    <div class="section-head"><h2>Updates</h2>
+      <div class="row"><button class="btn sm" id="up-check">{refresh}Check now</button><button class="btn sm" id="up-restart">Restart server</button></div>
+    </div>
+    <div class="card stack">
+      <div class="row wrap between">
+        <div class="stack" style="gap:6px">
+          <div style="font-weight:700;font-size:20px">Encore {current}{dev}</div>
+          <div class="row wrap" style="gap:8px">{state}{checked}</div>
+        </div>
+        <div class="row wrap">{github}{update_btn}</div>
+      </div>
+      {dev_note}{error}{notes}{help}{shell}
+      <div id="up-status" hidden></div>
+    </div>"#, refresh = icon("refresh"), current = esc(&current), dev = if dev { " · development build" } else { "" })
+}
+
+fn draw_updates(up: &Element, d: &Value) {
+    dom::set_html(up, &updates_html(d));
+    {
+        let up2 = up.clone();
+        dom::on_sel(up, "#up-check", "click", move |e| {
+            let Some(btn) = dom::target_el(e).and_then(|t| dom::closest_of(&t, "button")) else { return };
+            let up = up2.clone();
+            dom::set_disabled(&btn, true);
+            dom::set_html(&btn, r#"<span class="spinner" style="width:14px;height:14px"></span>Checking…"#);
+            dom::spawn(async move { load_updates(&up, true).await });
+        });
+    }
+    {
+        let up2 = up.clone();
+        let current = d.s("current");
+        dom::on_sel(up, "#up-restart", "click", move |_| {
+            let (up, current) = (up2.clone(), current.clone());
+            dom::spawn(async move {
+                if !confirm_dialog("Restart the server?", "Playback stops for about ten seconds.", "Restart", true).await { return; }
+                busy(&up, true);
+                status(&up, &format!(r#"<span class="spinner"></span><span>{}</span>"#, "Restarting – waiting for the server…"));
+                if let Err(e) = api::post_empty("/system/restart").await {
+                    toast(&e.message, "err");
+                    status_off(&up);
+                    busy(&up, false);
+                    return;
+                }
+                wait_back(&up, Wait::Restart, &current).await;
+            });
+        });
+    }
+    {
+        let up2 = up.clone();
+        let (current, latest) = (d.s("current"), d.s("latest"));
+        dom::on_sel(up, "#up-now", "click", move |_| {
+            let (up, current, latest) = (up2.clone(), current.clone(), latest.clone());
+            dom::spawn(async move {
+                let ok = confirm_dialog(&format!("Update to {latest}?"), "The container is replaced by a new one with the same settings; this takes a minute.", "Update now", false).await;
+                if !ok { return; }
+                busy(&up, true);
+                status(&up, &format!(r#"<span class="spinner"></span><span>Downloading Encore {} – this can take a few minutes…</span>"#, esc(&latest)));
+                match api::post("/system/update", json!({ "tag": latest })).await {
+                    Ok(r) => {
+                        let msg = if r.truthy("message") { r.s("message") } else { format!("Updating to {latest}; the server restarts in a moment") };
+                        status(&up, &format!(r#"<span class="spinner"></span><span>{}</span>"#, esc(&msg)));
+                        wait_back(&up, Wait::Update, &current).await;
+                    }
+                    Err(e) => {
+                        status(&up, &format!(r#"<span class="dot err"></span><span style="color:var(--err)">{}</span>"#, esc(&e.message)));
+                        busy(&up, false);
+                    }
+                }
+            });
+        });
+    }
+}
+
+/// The buttons of the card while the server restarts.
+fn busy(up: &Element, on: bool) {
+    for sel in ["#up-check", "#up-restart", "#up-now"] {
+        if let Some(b) = dom::qs_in(up, sel) { dom::set_disabled(&b, on); }
+    }
+}
+
+fn status(up: &Element, html: &str) {
+    if let Some(s) = dom::qs_in(up, "#up-status") {
+        dom::set_html(&s, &format!(r#"<div class="row wrap small">{html}</div>"#));
+        dom::hide(&s, false);
+    }
+}
+
+fn status_off(up: &Element) {
+    if let Some(s) = dom::qs_in(up, "#up-status") { dom::set_html(&s, ""); dom::hide(&s, true); }
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Wait { Restart, Update }
+
+/// What the page makes of the polls so far.
+#[derive(Debug, PartialEq, Eq)]
+enum Back { Waiting, Running(String), SameVersion, Late }
+
+/// The decision of `wait_back`, apart from the network: `down` once a poll failed, `answering_for` how long the
+/// server has answered without a failure, `version` what /api/health said (None: no answer).
+fn judge(w: Wait, from: &str, version: Option<&str>, down: bool, answering_for: f64, elapsed: f64) -> Back {
+    match (w, version) {
+        (Wait::Restart, Some(v)) if down || answering_for >= QUIET_BACK_MS => Back::Running(v.to_string()),
+        (Wait::Update, Some(v)) if v != from => Back::Running(v.to_string()),
+        (Wait::Update, Some(_)) if down => Back::SameVersion,
+        _ if elapsed >= BACK_BUDGET_MS => Back::Late,
+        _ => Back::Waiting,
+    }
+}
+
+/// `GET /api/health` without the app's connection events (the banner would flash); None when it does not
+/// answer within 3 s or not with ok.
+async fn health() -> Option<Value> {
+    let ctl = web_sys::AbortController::new().ok()?;
+    let signal = ctl.signal();
+    let _abort = dom::Timeout::new(3000, move || ctl.abort());
+    let req = gloo_net::http::Request::get("/api/health")
+        .cache(web_sys::RequestCache::NoStore)
+        .abort_signal(Some(&signal))
+        .build().ok()?;
+    let r = req.send().await.ok()?;
+    if !r.ok() { return None; }
+    let v: Value = serde_json::from_str(&r.text().await.ok()?).ok()?;
+    v.truthy("ok").then_some(v)
+}
+
+/// Poll /api/health every 2 s until the server is back (a restart: it went away and answers again; an update:
+/// it answers with another version), then show "Back" with Reload. After 90 s the card says the server is late
+/// and keeps looking for 10 minutes in all.
+async fn wait_back(up: &Element, w: Wait, from: &str) {
+    let start = dom::now_ms();
+    let mut down = false;
+    let mut answering_since: Option<f64> = None;
+    let mut late = false;
+    loop {
+        dom::sleep(POLL_MS).await;
+        if !up.is_connected() { return; }
+        let h = health().await;
+        let now = dom::now_ms();
+        let version = h.as_ref().map(|v| v.s("version"));
+        match &version {
+            None => { down = true; answering_since = None; }
+            Some(_) => { answering_since.get_or_insert(now); }
+        }
+        let answering_for = answering_since.map(|t| now - t).unwrap_or(0.0);
+        match judge(w, from, version.as_deref(), down, answering_for, now - start) {
+            Back::Running(v) => {
+                status(up, &format!(r#"<span class="dot ok"></span><b>Back</b><span class="muted">Encore {} is running</span><button class="btn sm primary" id="up-reload">Reload</button>"#, esc(&v)));
+                if let Some(b) = dom::qs_in(up, "#up-reload") { dom::on(&b, "click", |_| dom::reload()); }
+                return;
+            }
+            Back::SameVersion => {
+                status(up, &format!(r#"<span class="dot err"></span><span>The server is back, still on Encore {}: the update did not go through. Try Update now again, or update by hand (<code>docker compose pull && docker compose up -d</code>).</span><button class="btn sm" id="up-reload">Reload</button>"#, esc(from)));
+                if let Some(b) = dom::qs_in(up, "#up-reload") { dom::on(&b, "click", |_| dom::reload()); }
+                return;
+            }
+            Back::Late if !late => {
+                late = true;
+                status(up, r#"<span class="spinner"></span><span>The server did not come back yet – check <code>docker ps</code></span>"#);
+            }
+            _ => {}
+        }
+        if now - start >= GIVE_UP_MS {
+            status(up, r#"<span class="dot err"></span><span>The server did not come back yet – check <code>docker ps</code></span><button class="btn sm" id="up-reload">Reload</button>"#);
+            if let Some(b) = dom::qs_in(up, "#up-reload") { dom::on(&b, "click", |_| dom::reload()); }
+            return;
+        }
+    }
+}
+
+/// A fresh answer of /system/update also tells the Settings banner (same screen) whether to show.
+fn note_update(d: &Value) {
+    let available = d.truthy("is_newer") && d.truthy("latest");
+    MACHINE.with(|m| {
+        if let Some((_, v)) = m.borrow_mut().as_mut() {
+            if let Some(o) = v.as_object_mut() {
+                o.insert("encore_update_available".into(), json!(available));
+                o.insert("encore_latest".into(), d.g("latest").clone());
+            }
+        }
+    });
+    if let Some(view) = settings_view() { show_banner(&view, available, &d.s("latest")); }
+}
+
+/// The Settings page around the Diagnostics panel (its title takes the banner).
+fn settings_view() -> Option<Element> { dom::qs(".settings-grid").and_then(|g| g.parent_element()) }
+
+/// Settings: the line under the title for admins when the server's last check found a newer Encore ("Encore
+/// 0.29.0 is available – Diagnostics"). It reads the `machine` block of /api/system/diagnostics, where the
+/// server keeps its last check (nothing goes to GitHub), at most once per half hour per page load; the
+/// Diagnostics page refreshes it whenever it runs.
+pub fn update_banner(view: &Element) {
+    if !crate::app::is_admin() { return; }
+    // opened on Diagnostics: its own run of the checks fills the banner
+    if dom::hash().contains("s=diagnostics") { return; }
+    let view = view.clone();
+    dom::spawn(async move {
+        let cached = MACHINE.with(|m| m.borrow().as_ref().filter(|(t, _)| dom::now_ms() - t < MACHINE_FRESH_MS).map(|(_, v)| v.clone()));
+        let m = match cached {
+            Some(m) => m,
+            None => match api::get("/system/diagnostics").await {
+                Ok(d) => { remember_machine(d.g("machine")); d.g("machine").clone() }
+                Err(_) => return,
+            },
+        };
+        if !view.is_connected() { return; }
+        show_banner(&view, m.truthy("encore_update_available"), &m.s("encore_latest"));
+    });
+}
+
+fn show_banner(view: &Element, available: bool, latest: &str) {
+    if let Some(b) = dom::by_id("update-banner") { b.remove(); }
+    if !available || latest.is_empty() { return; }
+    let Some(h1) = dom::qs_in(view, "h1") else { return };
+    let _ = h1.insert_adjacent_html("afterend", &format!(r##"<div id="update-banner" class="card row" style="margin:-6px 0 16px;padding:10px 14px"><span class="badge info">Update</span><span class="small">Encore {} is available – <a href="#/settings?s=diagnostics" style="color:var(--accent)">Diagnostics</a></span></div>"##, esc(latest)));
+    if let Some(a) = dom::qs("#update-banner a") {
+        dom::on(&a, "click", |e| {
+            // switch the panel like the side menu does (the page stays); without the menu the link reloads it
+            if let Some(b) = dom::qs(r#".settings-nav [data-s="diagnostics"]"#) { dom::prevent(e); dom::click(&b); }
+        });
+    }
+}
+
+#[cfg(test)]
+mod update_tests {
+    use super::*;
+
+    #[test]
+    fn notes_become_plain_lines() {
+        let md = "## What's new\r\n\r\n* **Offline**: songs play without the server ([docs](https://x.y/docs))\n- Update from `Settings`\n\n\n\n### Fixes\n  * a nested ~~one~~ item\n> quoted *line*\n![shot](https://x.y/a.png)\n<!-- hidden\nnote -->\n---\n```sh\ndocker compose pull\n```\nSee <https://github.com/Krifmaz/Encore>.";
+        assert_eq!(notes_text(md), "What's new\n\n• Offline: songs play without the server (docs)\n• Update from Settings\n\nFixes\n  • a nested ~~one~~ item\nquoted line\nshot\n\ndocker compose pull\nSee https://github.com/Krifmaz/Encore.");
+    }
+
+    #[test]
+    fn notes_keep_plain_text_and_odd_brackets() {
+        assert_eq!(notes_text(""), "");
+        assert_eq!(notes_text("\n\n# Title\n\n"), "Title");
+        assert_eq!(notes_text("a [b] c (d) e!"), "a [b] c (d) e!");
+        assert_eq!(notes_text("x < y and [unclosed](link"), "x < y and [unclosed](link");
+        assert_eq!(notes_text("[a](u1) and [b](u2)"), "a and b");
+        assert_eq!(notes_text("Ünïcode – “quotes” [ok](u)"), "Ünïcode – “quotes” ok");
+    }
+
+    #[test]
+    fn the_wait_after_a_restart_or_an_update() {
+        // a restart: back once the server went away and answers again
+        assert_eq!(judge(Wait::Restart, "0.28.0", Some("0.28.0"), false, 0.0, 2000.0), Back::Waiting);
+        assert_eq!(judge(Wait::Restart, "0.28.0", None, true, 0.0, 4000.0), Back::Waiting);
+        assert_eq!(judge(Wait::Restart, "0.28.0", Some("0.28.0"), true, 0.0, 6000.0), Back::Running("0.28.0".into()));
+        // so quick that no poll saw it down: 30 s of answers count as back
+        assert_eq!(judge(Wait::Restart, "0.28.0", Some("0.28.0"), false, QUIET_BACK_MS, 32_000.0), Back::Running("0.28.0".into()));
+        // an update: back when another version answers; the old one after a gap means it did not go through
+        assert_eq!(judge(Wait::Update, "0.28.0", Some("0.28.0"), false, 40_000.0, 40_000.0), Back::Waiting);
+        assert_eq!(judge(Wait::Update, "0.28.0", Some("0.29.0"), false, 0.0, 8000.0), Back::Running("0.29.0".into()));
+        assert_eq!(judge(Wait::Update, "0.28.0", Some("0.28.0"), true, 0.0, 30_000.0), Back::SameVersion);
+        // late after 90 s
+        assert_eq!(judge(Wait::Update, "0.28.0", None, true, 0.0, BACK_BUDGET_MS), Back::Late);
+        assert_eq!(judge(Wait::Restart, "0.28.0", None, true, 0.0, BACK_BUDGET_MS + 2000.0), Back::Late);
+    }
 }

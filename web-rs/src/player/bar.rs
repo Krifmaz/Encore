@@ -18,7 +18,12 @@ fn set_p(seek: &Element) { dom::set_style(seek, "--p", &format!("{}%", js_num(nu
 // ---- likes, sharing and the ⋯ menu for the song in front of you -------------------------------------
 pub(super) async fn likes() -> HashSet<i64> {
     if LIKED.with(|l| l.borrow().is_none()) {
-        let set: HashSet<i64> = match api::get("/likes").await { Ok(v) => v.items().iter().filter_map(|x| x.as_i64()).collect(), Err(_) => HashSet::new() };
+        let set: HashSet<i64> = match api::get("/likes").await {
+            Ok(v) => { let s = v.items().iter().filter_map(|x| x.as_i64()).collect(); keep_likes(&s); s }
+            // no server: the hearts as this device last knew them
+            Err(e) if unreachable(e.status) => kept_likes(),
+            Err(_) => HashSet::new(),
+        };
         LIKED.with(|l| *l.borrow_mut() = Some(set));
     }
     LIKED.with(|l| l.borrow().clone().unwrap_or_default())
@@ -29,12 +34,28 @@ pub(super) async fn toggle_like(t: Value) {
     if !t.g("id").is_number() { return; }
     let id = t.i("id");
     let s = likes().await;
+    let liked = !s.contains(&id);
+    // no server: the change waits in the outbox and the heart answers now. A change of this song still waiting
+    // there (the server was away a moment ago): this one goes after it through the outbox, so the server sees
+    // them in order instead of the older one last.
+    let waiting = crate::offline::outbox::has_like(id);
+    if no_server() || waiting {
+        like_later(id, liked);
+        if waiting { sync_outbox(); }
+        toast(if liked { "Added to Liked Songs" } else { "Removed from Liked Songs" }, "ok");
+        paint_likes();
+        return;
+    }
     let r = if s.contains(&id) {
         api::del(&format!("/likes/{id}")).await.map(|_| { LIKED.with(|l| if let Some(s) = l.borrow_mut().as_mut() { s.remove(&id); }); toast("Removed from Liked Songs", "ok"); })
     } else {
         api::post_empty(&format!("/likes/{id}")).await.map(|_| { LIKED.with(|l| if let Some(s) = l.borrow_mut().as_mut() { s.insert(id); }); toast("Added to Liked Songs", "ok"); })
     };
-    if let Err(e) = r { toast(&e.message, "err"); }
+    match r {
+        Ok(_) => { if let Some(s) = LIKED.with(|l| l.borrow().clone()) { keep_likes(&s); } sync_outbox(); }
+        Err(e) if unreachable(e.status) => { like_later(id, liked); toast(if liked { "Added to Liked Songs" } else { "Removed from Liked Songs" }, "ok"); paint_likes(); return; }
+        Err(e) => toast(&e.message, "err"),
+    }
     dom::dispatch("encore:likes", None);
     paint_likes();
 }
@@ -69,6 +90,7 @@ pub(super) fn more_menu(anchor: &Element) {
     if lib { let t2 = t.clone(); items.push(MenuItem::new("Share link", &icon("external"), move || dom::spawn(share_track(t2.clone())))); }
     if lib { items.push(MenuItem::link("Download this song", &icon("download"), &format!("/api/library/tracks/{}/file", t.s("id")), true)); }
     if lib && !linked && can_save_offline() { let t2 = t.clone(); items.push(MenuItem::new("Save for offline", &icon("download"), move || { save_offline(vec![t2.clone()]); toast("Saving to this device…", "ok"); })); }
+    if lib && !linked { items.extend(crate::pages::downloads::menu_items(std::slice::from_ref(&t))); }
     items.push(MenuItem::new("Signal path", &icon("activity"), || dom::spawn(signal_path())));
     if native::has_mini_player() { items.push(MenuItem::new("Mini player", &icon("music"), native::mini_player)); }
     if lib { let t2 = t.clone(); items.push(MenuItem::new("Report a problem", &icon("shield"), move || crate::pages::report::report_modal("track", t2.g("id").clone(), &t2.s("title"), "", None))); }
@@ -99,6 +121,7 @@ pub(super) fn quality(t: &Value) -> String {
         return if label.is_empty() { t.s("format").to_uppercase() } else { label };
     }
     if t.truthy("preview") { return "30 s preview".into(); }
+    if st(|s| s.local_copy) { return copy_quality(t); }
     let f = t.s("format").to_uppercase();
     let rung = st(|s| s.rung);
     if rung > 0 { return format!("{f} → {} {rung}k", lossy_codec().to_uppercase()); }
@@ -109,6 +132,7 @@ pub(super) fn quality(t: &Value) -> String {
 fn quality_title(t: &Value) -> String {
     if t.truthy("remote") { return format!("What {} is playing", { let n = link_name(); if n.is_empty() { "that device".to_string() } else { n } }); }
     if t.truthy("preview") { return "A 30-second preview – not in your library".into(); }
+    if st(|s| s.local_copy) { return "Playing the copy downloaded to this device".into(); }
     let rung = st(|s| s.rung);
     if rung > 0 { return if prefs().s("quality") == "saver" { "Data saver: a small 96 kbps stream".into() } else { format!("Adaptive quality: {rung} kbps while the connection can't keep up with the original") }; }
     if st(|s| s.dsp) { return "Upsampled on the server by Cadenza (lossless 24-bit FLAC)".into(); }
@@ -341,10 +365,11 @@ fn render_linked(el: &Element) {
 
 pub(super) fn render() {
     let Some(el) = by_id("player") else { return };
-    if is_linked() { render_linked(&el); return; }
+    if is_linked() { super::full::forget(super::full::View::Bar); render_linked(&el); return; }
     let t = cur();
     dom::add_class(&body(), "has-player");
     let Some(t) = t else {
+        super::full::forget(super::full::View::Bar);
         let devices = if has_encore_remote() {
             format!(r#"<button class="btn ghost icon" id="p-devices" aria-label="Other devices" title="Play on or control your other devices">{}</button>"#, icon("devices"))
         } else { String::new() };
@@ -373,7 +398,7 @@ pub(super) fn render() {
         return;
     };
     if audio().is_none() { return; }
-    set_html(&el, &format!(r##"
+    let html = format!(r##"
     <div class="now" id="p-open" role="button" tabindex="0" aria-label="Open the full-screen player" title="Open player">
       <div class="thumb">{thumb}</div>
       <div class="grow">
@@ -394,8 +419,13 @@ pub(super) fn render() {
         title = esc(&crate::ui::tr(&t, "title")),
         artist = esc(&crate::ui::tr_inline(&t, "artist")),
         album = if t.truthy("album") { format!(" · {}", esc(&crate::ui::tr_inline(&t, "album"))) } else { String::new() },
-        prev = icon("prev"), pp = if shows_playing() { icon("pause") } else { icon("play") }, next = icon("next"),
-        right = right_html(Some(&t), true)));
+        prev = icon("prev"), pp = super::full::PP, next = icon("next"),
+        right = right_html(Some(&t), true));
+    if !super::full::draw(super::full::View::Bar, &el, "#p-toggle", &html, &if shows_playing() { icon("pause") } else { icon("play") }) {
+        update_time();
+        if st(|s| s.full) { render_full(); }
+        return;
+    }
     let mut ls = Vec::new();
     wire(&mut ls, &el, "#p-toggle", "click", |_| toggle());
     wire(&mut ls, &el, "#p-next", "click", |_| next(false));

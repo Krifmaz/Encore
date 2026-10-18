@@ -14,6 +14,7 @@ pub mod contribute;
 pub mod diagnostics;
 pub mod discover;
 pub mod download;
+pub mod downloads;
 pub mod foryou;
 pub mod home;
 pub mod leaderboard;

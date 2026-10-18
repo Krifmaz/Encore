@@ -98,8 +98,13 @@ pub(super) fn load_lyrics() {
     LYR.with(|l| *l.borrow_mut() = Lyr { id: id.clone(), lines: vec![], plain: String::new(), loading: true, instrumental: false });
     if let Some(b) = by_id("np-lyrics") { set_html(&b, &lyrics_html()); }
     dom::spawn(async move {
-        match api::get(&format!("/library/tracks/{}/lyrics", js_string(&id))).await {
-            Ok(r) => {
+        // without the server: the lyrics saved with the download
+        let r = match api::get(&format!("/library/tracks/{}/lyrics", js_string(&id))).await {
+            Ok(r) => Some(r),
+            Err(_) => saved_lyrics(&id).await,
+        };
+        match r {
+            Some(r) => {
                 if LYR.with(|l| l.borrow().id != id) { return; }
                 let synced = r.truthy("synced");
                 LYR.with(|l| *l.borrow_mut() = Lyr {
@@ -110,7 +115,7 @@ pub(super) fn load_lyrics() {
                     instrumental: r.truthy("instrumental"),
                 });
             }
-            Err(_) => { LYR.with(|l| *l.borrow_mut() = Lyr { id: id.clone(), lines: vec![], plain: String::new(), loading: false, instrumental: false }); }
+            None => { LYR.with(|l| *l.borrow_mut() = Lyr { id: id.clone(), lines: vec![], plain: String::new(), loading: false, instrumental: false }); }
         }
         if let Some(b) = by_id("np-lyrics") { set_html(&b, &lyrics_html()); sync_lyrics(true); }
     });

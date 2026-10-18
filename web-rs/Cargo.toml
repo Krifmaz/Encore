@@ -26,6 +26,7 @@ web-sys = { version = "0.3", features = [
   "HtmlImageElement", "HtmlMediaElement", "HtmlFormElement",
   "Storage", "Location", "Headers", "Request", "RequestInit", "RequestCredentials", "Response", "RequestCache",
   "Navigator", "Clipboard", "ServiceWorkerContainer", "Screen", "Performance", "MediaQueryList",
+  "ServiceWorker", "ServiceWorkerRegistration", "ServiceWorkerState",
   "MediaMetadata", "MediaSessionActionDetails",
   "Event", "EventTarget", "KeyboardEvent", "MouseEvent", "PointerEvent", "CustomEvent", "CustomEventInit",
   "HashChangeEvent", "StorageEvent", "MessageEvent", "EventSource",
@@ -35,6 +36,9 @@ web-sys = { version = "0.3", features = [
   "AudioContext", "AudioContextState", "AudioNode", "AudioParam", "AudioDestinationNode", "MediaElementAudioSourceNode",
   "BiquadFilterNode", "BiquadFilterType", "GainNode", "DelayNode", "StereoPannerNode", "ChannelSplitterNode", "ChannelMergerNode",
   "ChannelCountMode", "ChannelInterpretation",
+  # the offline store (src/offline): the Cache API, storage estimate/persist, downloads read in pieces
+  "CacheStorage", "Cache", "StorageManager", "StorageEstimate", "Blob", "BlobPropertyBag", "ReadableStream",
+  "ReadableStreamDefaultReader", "ResponseInit", "AbortController", "AbortSignal",
 ] }
 
 [profile.release]

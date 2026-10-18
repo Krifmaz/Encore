@@ -94,6 +94,7 @@ fn match_route(path: &str) -> Option<(&'static str, Vec<String>)> {
         "/connections" => ("redirect:connections", vec![]),
         "/following" => ("nav:/for-you", vec![]),
         "/download" => ("download", vec![]),
+        "/downloads" => ("downloads", vec![]),
         "/soulseek" => ("soulseek", vec![]),
         "/activity" => ("nav:/download", vec![]),
         "/admin/users" => ("redirect:users", vec![]),
@@ -133,6 +134,7 @@ fn page_for(name: &str) -> Option<PageFn> {
         "playlists" => pages::playlists::render,
         "playlist" => pages::playlists::render_playlist,
         "download" => pages::download::render,
+        "downloads" => pages::downloads::render,
         "soulseek" => pages::soulseek::render,
         "settings" => pages::settings::render,
         "storage" => pages::storage::render,
@@ -176,6 +178,7 @@ fn render_shell() {
           {search}
           {foryou}
           {library}
+          {downloads_nav}
           {requests}
           {playlists}
           {download}
@@ -205,6 +208,7 @@ fn render_shell() {
         search = nav_link("/search", &icon("search"), "Discover", ""),
         foryou = nav_link("/for-you", &icon("spark"), "For you", ""),
         library = nav_link("/library", &icon("library"), "Library", ""),
+        downloads_nav = if pages::downloads::enabled() { nav_link("/downloads", &icon("saved"), "Downloads", "") } else { String::new() },
         requests = nav_link("/requests", &icon("inbox"), "Requests", r#"<span class="badge warn hidden" id="pending-badge"></span>"#),
         playlists = nav_link("/playlists", &icon("list"), "Playlists", ""),
         download = nav_link("/download", &icon("download"), "Downloader", ""),
@@ -218,7 +222,8 @@ fn render_shell() {
     ));
     if let Some(b) = qs("#logout-btn") {
         dom::on_forever(&b, "click", |_| dom::spawn(async {
-            let _ = api::post_empty("/auth/logout").await;
+            // a sign-out the server does not confirm is finished at the next start that reaches it (offline/mode.rs)
+            crate::offline::mode::sign_out().await;
             // the desktop app's Cadenza signed in with its own token: signing out here signs it out too
             native::engine_logout();
             dom::reload();
@@ -297,6 +302,7 @@ async fn route_async() {
     dom::clear_page();
     if let Some(m) = by_id("modal-root") { set_html(&m, ""); }
     let (path, query) = parse_hash();
+    let path = crate::offline::mode::route_path(path);
     let Some(u) = user() else {
         if let Some(app) = by_id("app") { pages::auth::render(app, path, query).await; }
         return;
@@ -306,7 +312,7 @@ async fn route_async() {
     if let Some(sb) = qs("#sidebar") { dom::remove_class(&sb, "open"); }
     for a in qsa("[data-nav]") {
         let href = dom::data(&a, "nav");
-        dom::toggle_class(&a, "active", if href == "/" { path == "/" } else { path.starts_with(&href) });
+        dom::toggle_class(&a, "active", if href == "/" { path == "/" } else { path == href || path.starts_with(&format!("{href}/")) });
     }
     // every navigation renders into a fresh container, so a slow page that finishes after the user
     // has moved on writes into a detached element instead of clobbering the current page
@@ -331,11 +337,25 @@ async fn route_async() {
 /// `boot()`.
 pub async fn boot() {
     appearance::apply(&appearance::current());
-    set_info(api::get("/auth/info").await.unwrap_or_else(|_| serde_json::json!({})));
-    set_user(api::get("/auth/me").await.ok());
+    // where offline mode could open (or a sign-out waits for the server), a server that doesn't answer gets a
+    // few seconds, not the connect timeout
+    let quick = crate::offline::signout_pending() || crate::offline::mode::could_open().await;
+    let wait = quick.then_some(crate::offline::mode::WAIT_MS);
+    let ask = |path: &'static str| async move { match wait { Some(ms) => api::get_within(path, ms).await, None => api::get(path).await } };
+    let (info, me) = futures::join!(ask("/auth/info"), ask("/auth/me"));
+    set_info(info.unwrap_or_else(|_| serde_json::json!({})));
+    let me = crate::offline::mode::settle_sign_out(me).await;
+    // the server can't be reached but songs are downloaded here: offline mode (offline/mode.rs)
+    let offline = match &me { Err(e) => crate::offline::mode::try_enter(e.status).await, Ok(_) => false };
+    if !offline { set_user(me.ok()); }
     if let Some(u) = user() { appearance::adopt_account(&u); crate::playback::adopt_account(&u); crate::ui::set_translate_mode(&u.o("prefs").s("translate_mode")); }
     else { appearance::apply(&appearance::brand()); }
-    if user().is_some() {
+    if offline {
+        render_shell();
+        player::mount();
+        crate::offline::mode::shell_ready();
+    } else if let Some(u) = user() {
+        crate::offline::mode::signed_in(&u);
         render_shell();
         remote::start();
         player::mount();
@@ -350,6 +370,7 @@ pub async fn boot() {
 /// `refreshUser()`.
 pub async fn refresh_user() {
     if let Ok(u) = api::get("/auth/me").await {
+        crate::offline::remember_me(&u);
         crate::ui::set_translate_mode(&u.o("prefs").s("translate_mode"));
         appearance::apply(&appearance::current());
         appearance::adopt_account(&u);
@@ -360,6 +381,8 @@ pub async fn refresh_user() {
 }
 
 fn conn_banner(on: bool, text: &str) {
+    // offline mode has its own banner
+    if on && crate::offline::mode::active() { return; }
     let b = by_id("conn-banner");
     if !on { if let Some(b) = b { b.remove(); } return; }
     let b = match b { Some(b) => b, None => { let b = dom::create("div"); b.set_id("conn-banner"); let _ = dom::body().append_child(&b); b } };
@@ -376,11 +399,9 @@ pub use crate::native::{native_call, native_call_async, native_call_with, native
 /// Module-load work of app.js: listeners, service worker, boot.
 pub fn init() {
     dom::on_window("hashchange", |_| route());
-    let loc = dom::location();
-    let proto = loc.protocol().unwrap_or_default();
-    let host = loc.hostname().unwrap_or_default();
-    if proto == "https:" || host == "localhost" {
-        let _ = dom::window().navigator().service_worker().register("/sw.js");
+    // wherever the browser allows it (https, localhost, 127.0.0.1, *.localhost): the same test as downloads
+    if dom::window().is_secure_context() {
+        crate::sw::register();
     }
     dom::on_window("encore:unauthorized", |_| {
         if user().is_some() {

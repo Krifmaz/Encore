@@ -57,7 +57,7 @@ fn mime_of(format: &str) -> Option<&'static str> {
         _ => return None,
     })
 }
-fn can_play(format: &str) -> bool {
+pub(crate) fn can_play(format: &str) -> bool {
     let f = format.to_lowercase();
     let Some(mime) = mime_of(&f) else { return false };
     PLAYABLE.with(|p| {
@@ -138,6 +138,7 @@ fn rung_for(t: &Value) -> i64 {
 }
 /// The URL a song starts with (what the spare element pre-loads, and what load() asks for at a song start).
 fn start_url(t: &Value) -> String {
+    if use_local(t) { if let Some(u) = url_for(t.i("id")) { return u; } }
     let rung = rung_for(t);
     stream_url(t, convert(t) && rung == 0, rung, want_dsp(t, rung > 0), 0.0)
 }
@@ -154,6 +155,13 @@ pub(super) struct LoadOpts { pub(super) transcode: bool, pub(super) offset: f64,
 /// Start the current song (or restart it at `offset`).
 pub(super) fn load_opts(o: LoadOpts) {
     let Some(t) = cur() else { return };
+    // a song downloaded to this device plays from its copy (local.rs): its object URL first, then the load
+    let local = use_local(&t);
+    if local && url_for(t.i("id")).is_none() {
+        let t2 = t.clone();
+        prepare(t.i("id"), move || if cur().is_some_and(|c| Rc::ptr_eq(&c, &t2)) { load_opts(o); } else { sweep(); });
+        return;
+    }
     HELD.with(|h| h.set(o.hold));
     HELD_AT.with(|h| h.set(if o.hold { o.offset } else { 0.0 }));
     if o.hold { PLAYED_SINCE.with(|p| p.set(false)); } else if !o.resume { PLAYED_SINCE.with(|p| p.set(true)); }
@@ -169,17 +177,18 @@ pub(super) fn load_opts(o: LoadOpts) {
     let now = now_ms();
     st_mut(|s| { s.want = !o.hold; s.at = offset; s.src_at = now; });
     mark_played(&t);
-    let transcode = o.transcode || convert(&t);
+    // the saved copy is a whole file: no conversion, no lighter rung, no Cadenza
+    let transcode = !local && (o.transcode || convert(&t));
     let prev_rung = st(|s| s.rung);
-    let rung = if t.truthy("preview") { 0 } else { o.rung.unwrap_or_else(|| rung_for(&t)) };
-    st_mut(|s| s.rung = rung);
-    if start && !t.truthy("preview") && prefs().s("quality") == "auto" { note_rung_change(prev_rung, rung); }
+    let rung = if t.truthy("preview") || local { 0 } else { o.rung.unwrap_or_else(|| rung_for(&t)) };
+    st_mut(|s| { s.rung = rung; s.local_copy = local; });
+    if start && !local && !t.truthy("preview") && prefs().s("quality") == "auto" { note_rung_change(prev_rung, rung); }
     // playing above 96 kbps (or the original) on Auto: the connection has recovered, 64 is off the table again
-    if !t.truthy("preview") && prefs().s("quality") == "auto" && (rung == 0 || rung > playback::AUTO_FLOOR) {
+    if !local && !t.truthy("preview") && prefs().s("quality") == "auto" && (rung == 0 || rung > playback::AUTO_FLOOR) {
         st_mut(|s| { s.floor = playback::AUTO_FLOOR; s.low_stalls.clear(); });
     }
     let is_lossy = rung > 0;
-    let is_dsp = o.dsp.unwrap_or(true) && want_dsp(&t, is_lossy);
+    let is_dsp = !local && o.dsp.unwrap_or(true) && want_dsp(&t, is_lossy);
     let dsp_rate = if is_dsp { dsp_out_rate(&t) } else { 0.0 };
     st_mut(|s| { s.lossy = is_lossy; s.dsp = is_dsp; s.dsp_rate = dsp_rate; });
     if is_dsp && !INFO.with(|m| m.borrow().contains_key(&t.i("id"))) {
@@ -206,7 +215,7 @@ pub(super) fn load_opts(o: LoadOpts) {
         st_mut(|s| { s.logged = false; s.stalls.clear(); s.step_at = 0.0; });
         if !o.hold { announce(&t); }
     }
-    let url = stream_url(&t, transcoded && !is_lossy && !is_dsp, rung, is_dsp, server_offset);
+    let url = if local { url_for(t.i("id")).unwrap_or_default() } else { stream_url(&t, transcoded && !is_lossy && !is_dsp, rung, is_dsp, server_offset) };
     let (Some(mut a), Some(sp)) = (audio(), spare()) else { return };
     let use_plain = t.truthy("preview") && fx_built();
     let swap = !truthy_num(offset) && !use_plain && dom::data_opt(&sp, "url").as_deref() == Some(url.as_str());
@@ -242,6 +251,7 @@ pub(super) fn load_opts(o: LoadOpts) {
         a.set_src(&url);
     }
     dom::set_data(&a, "url", &url);
+    sweep();
     if truthy_num(offset) && !truthy_num(server_offset) {
         let el = a.clone();
         if el.ready_state() >= 1 { el.set_current_time(offset); }
@@ -252,7 +262,7 @@ pub(super) fn load_opts(o: LoadOpts) {
     resume_fx();
     if !o.hold { play_el(&a); }
     st_mut(|s| s.slow_start = None);
-    if start && !o.hold && !t.truthy("preview") && prefs().s("quality") == "auto" {
+    if start && !o.hold && !local && !t.truthy("preview") && prefs().s("quality") == "auto" {
         // can't even get going: six seconds in and nothing has played yet → one rung down
         let t2 = t.clone();
         let timer = Timeout::new(6000, move || {
@@ -275,6 +285,7 @@ pub(super) fn load_opts(o: LoadOpts) {
 }
 /// "now playing" on Last.fm / ListenBrainz – once per song start.
 pub(super) fn announce(t: &Rc<Value>) {
+    if no_server() { return; }
     if t.g("id").is_number() && !st(|s| s.announced.as_ref().is_some_and(|a| Rc::ptr_eq(a, t))) {
         st_mut(|s| s.announced = Some(t.clone()));
         let id = t.g("id").clone();
@@ -300,6 +311,7 @@ pub(super) fn maybe_preload_need(force: bool, need: bool) {
     let n = st(|s| if s.index + 1 < 0 { None } else { s.queue.get((s.index + 1) as usize).cloned() });
     let Some(n) = n else { return };
     if n.truthy("preview") && fx_built() { return; }   // a preview plays on the never-wrapped element, not the spare
+    if use_local(&n) && url_for(n.i("id")).is_none() { prepare(n.i("id"), move || maybe_preload_need(force, need)); return; }
     let url = start_url(&n);
     if dom::data_opt(&sp, "url").as_deref() == Some(url.as_str()) { return; }
     let t = cur();
@@ -487,8 +499,16 @@ pub(super) fn log_play() {
     let hit = if truthy_num(d) { if d < 30.0 { p >= d - 1.0 } else { p >= (d / 2.0).min(240.0) } } else { p >= 30.0 };
     if hit {
         st_mut(|s| s.logged = true);
-        let id = t.g("id").clone();
-        dom::spawn(async move { let _ = api::post("/library/plays", json!({ "track_id": id, "seconds": p })).await; });
+        // without the server the play waits in the outbox, with the time it was played
+        if no_server() { play_later(t.i("id"), p); return; }
+        let (id, tid) = (t.g("id").clone(), t.i("id"));
+        dom::spawn(async move {
+            match api::post("/library/plays", json!({ "track_id": id, "seconds": p })).await {
+                Ok(_) => sync_outbox(),
+                Err(e) if unreachable(e.status) => play_later(tid, p),
+                Err(_) => {}
+            }
+        });
     }
 }
 

@@ -21,6 +21,7 @@ mod full;
 mod fx;
 mod link;
 mod load;
+mod local;
 mod lyrics;
 mod media_session;
 mod queue;
@@ -33,6 +34,8 @@ pub use full::set_full;
 pub use fx::device_rate;
 pub use link::{command, link_state, linked, set_link, snapshot, Link};
 pub use load::{seek_to, set_volume, toggle};
+pub(crate) use load::can_play;
+pub use local::{offline_setting, prefer_local, set_prefer_local};
 pub use media_session::{can_save_offline, save_offline};
 pub use queue::{enqueue, next, play_next, play_queue, prev, preview, queue, restore, saved_spot, shuffle_library};
 pub(crate) use crate::num::{khz, to_fixed1};
@@ -43,6 +46,7 @@ use full::*;
 use fx::*;
 use link::*;
 use load::*;
+use local::*;
 use lyrics::*;
 use media_session::*;
 use queue::*;
@@ -104,12 +108,14 @@ struct State {
     /// Auto's lowest rung (96 kbps; 64 after 96 stalled 3 times within 2 minutes), and those stalls at 96
     floor: i64,
     low_stalls: Vec<f64>,
+    /// the song plays from its copy downloaded to this device (local.rs), not from the server
+    local_copy: bool,
 }
 impl Default for State {
     fn default() -> Self {
         Self { queue: vec![], index: -1, transcoded: false, lossy: false, rung: 0, dsp: false, dsp_rate: 0.0, offset: 0.0, dragging: false, context: "list".into(), repeat: "off".into(), shuffle: false, order: None, full: false, pane: "now".into(), logged: false, announced: None,
             stalls: vec![], stall_at: 0.0, seek_at: 0.0, step_at: 0.0, switched_at: 0.0, last_preload_check: 0.0, slow_start: None,
-            want: false, at: 0.0, src_at: 0.0, floor: playback::AUTO_FLOOR, low_stalls: vec![] }
+            want: false, at: 0.0, src_at: 0.0, floor: playback::AUTO_FLOOR, low_stalls: vec![], local_copy: false }
     }
 }
 
@@ -352,6 +358,8 @@ pub fn mount() {
         let Some(t) = cur() else { return };
         let has_src = audio().and_then(|a| a.get_attribute("src")).is_some_and(|s| !s.is_empty());
         if !has_src || t.truthy("preview") { return; }
+        // a downloaded copy that won't play: the server's stream instead
+        if st(|s| s.local_copy) { copy_failed(&t); return; }
         let code = audio().map(|a| js_get(&js_get(a.as_ref(), "error"), "code").as_f64().unwrap_or(0.0)).unwrap_or(0.0);
         if code == 2.0 { retry(None); return; }   // MEDIA_ERR_NETWORK
         if failed_past_end() { log_play(); next(true); return; }
@@ -437,6 +445,7 @@ pub fn mount() {
         if key.as_deref() == Some("encore.playback") { new_prefs(playback::current()); }
     });
     fetch_dsp();
+    local::start();
     dom::interval_forever(2000, adapt_tick);
     render();
 }

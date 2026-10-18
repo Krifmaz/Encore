@@ -13,11 +13,13 @@ pub mod dom;
 pub mod json;
 pub mod native;
 pub mod num;
+pub mod offline;
 pub mod pages;
 pub mod playback;
 pub mod player;
 pub mod remote;
 pub mod scrubber;
+pub mod sw;
 pub mod ui;
 
 #[cfg(test)]

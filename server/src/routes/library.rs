@@ -450,24 +450,107 @@ fn draw(pool: &[Value], n: usize, exclude: &std::collections::HashSet<i64>) -> V
     out
 }
 
+/// One play as a client reports it. `played_at` (unix seconds) is when the play was logged: an offline client
+/// stamps it when the song is heard and sends it when the server is back; missing means now.
 #[derive(Deserialize)]
-struct PlayBody {
+struct Play {
     track_id: i64,
     #[serde(default)]
     seconds: f64,
+    #[serde(default)]
+    played_at: Option<f64>,
 }
 
-async fn plays(State(st): State<AppState>, User(u): User, Json(b): Json<PlayBody>) -> ApiResult<Json<Value>> {
-    let t = st.db.one("SELECT artist, title, album FROM tracks WHERE id=?", p![b.track_id])?.ok_or_else(|| err(404, "Track not found"))?;
-    let secs = b.seconds.clamp(0.0, 7200.0);
-    st.db.execute("INSERT INTO plays (user_id, track_id, artist, title, album, seconds, played_at) VALUES (?,?,?,?,?,?,?)",
-        p![u.i("id"), b.track_id, t.s("artist"), t.s("title"), t.s("album"), secs, now()])?;
-    crate::scrobble::scrobble(&st, u.i("id"), b.track_id, (now() - secs) as i64);
-    Ok(Json(json!({ "ok": true })))
+/// At most this many plays in one call (413 above): an offline client sends a long outbox in parts.
+const MAX_PLAYS: usize = 500;
+/// The oldest a reported play may be (400 days); an older `played_at` counts as this old.
+const MAX_PLAY_AGE: f64 = 400.0 * 86400.0;
+/// The time between two scrobbles of a list, so Last.fm and ListenBrainz don't get hundreds at once.
+const SCROBBLE_GAP: std::time::Duration = std::time::Duration::from_millis(250);
+
+/// POST /api/library/plays: one play `{track_id, seconds}` (404 for an unknown song, `{ok: true}`, as always),
+/// or the list an offline client sends when the server is back – `{plays: [{track_id, seconds, played_at}]}`
+/// or the bare array – answered `{ok: true, saved, skipped}`. In a list, unknown songs are skipped, and so is
+/// a play that is already saved (the same song at the same `played_at`: a list sent twice after a lost answer).
+/// Each play is saved and scrobbled with its own time, clamped to the last 400 days.
+async fn plays(State(st): State<AppState>, User(u): User, Json(b): Json<Value>) -> ApiResult<Json<Value>> {
+    let uid = u.i("id");
+    let (single, raw) = match b {
+        Value::Array(a) => (false, a),
+        Value::Object(mut o) if o.contains_key("plays") => match o.remove("plays") {
+            Some(Value::Array(a)) => (false, a),
+            _ => return Err(err(422, "plays must be a list")),
+        },
+        one => (true, vec![one]),
+    };
+    if raw.len() > MAX_PLAYS {
+        return Err(err(413, format!("At most {MAX_PLAYS} plays in one call")));
+    }
+    let list = raw.into_iter().map(serde_json::from_value::<Play>).collect::<Result<Vec<_>, _>>().map_err(|e| err(422, format!("Bad play: {e}")))?;
+    let ids: Vec<i64> = list.iter().map(|p| p.track_id).collect();
+    let known: HashMap<i64, crate::db::Row> = st.db.query("SELECT id, artist, title, album FROM tracks WHERE id IN (SELECT value FROM json_each(?))", p![json!(ids).to_string()])?
+        .into_iter().map(|r| (r.i("id"), r)).collect();
+    if single && known.is_empty() {
+        return Err(err(404, "Track not found"));
+    }
+    let now = now();
+    let mut rows: Vec<(i64, f64, f64)> = Vec::with_capacity(list.len()); // (track, seconds, played_at)
+    let mut seen = std::collections::HashSet::new();
+    let mut skipped = 0;
+    for p in list {
+        if !known.contains_key(&p.track_id) {
+            skipped += 1;
+            continue;
+        }
+        let secs = p.seconds.clamp(0.0, 7200.0);
+        let at = p.played_at.filter(|t| t.is_finite()).map_or(now, |t| t.clamp(now - MAX_PLAY_AGE, now));
+        if p.played_at.is_some() && !seen.insert((p.track_id, at.to_bits())) {
+            skipped += 1;
+            continue;
+        }
+        rows.push((p.track_id, secs, at));
+    }
+    let mut saved: Vec<(i64, f64, f64)> = vec![];
+    if !rows.is_empty() {
+        // one statement on the writer: the whole list is saved or none of it, and a play already saved (the same
+        // song at the same time) is left out inside it, so two calls with the same list at the same moment (two
+        // tabs back online together) can't both get past the check; RETURNING names what went in
+        let sql = format!(
+            "INSERT INTO plays (user_id, track_id, artist, title, album, seconds, played_at) \
+             SELECT v.column1, v.column2, v.column3, v.column4, v.column5, v.column6, v.column7 FROM (VALUES {}) AS v \
+             WHERE NOT EXISTS (SELECT 1 FROM plays p WHERE p.user_id = v.column1 AND p.played_at = v.column7 AND p.track_id = v.column2) \
+             RETURNING track_id, seconds, played_at",
+            vec!["(?,?,?,?,?,?,?)"; rows.len()].join(",")
+        );
+        let mut params = Vec::with_capacity(rows.len() * 7);
+        for (tid, secs, at) in &rows {
+            let t = &known[tid];
+            params.extend(p![uid, tid, t.s("artist"), t.s("title"), t.s("album"), secs, at]);
+        }
+        saved = st.db.query(&sql, params)?.iter().map(|r| (r.i("track_id"), r.f("seconds"), r.f("played_at"))).collect();
+        skipped += rows.len() - saved.len();
+    }
+    let starts: Vec<(i64, i64)> = saved.iter().map(|(tid, secs, at)| (*tid, (at - secs) as i64)).collect();
+    if single {
+        for (tid, start) in starts {
+            crate::scrobble::scrobble(&st, uid, tid, start);
+        }
+        return Ok(Json(json!({ "ok": true })));
+    }
+    if !starts.is_empty() {
+        let st = st.clone();
+        tokio::spawn(async move {
+            for (tid, start) in starts {
+                crate::scrobble::scrobble(&st, uid, tid, start);
+                tokio::time::sleep(SCROBBLE_GAP).await;
+            }
+        });
+    }
+    Ok(Json(json!({ "ok": true, "saved": saved.len(), "skipped": skipped })))
 }
 
 /// A song started: shows as "now playing" on Last.fm / ListenBrainz.
-async fn now_playing(State(st): State<AppState>, User(u): User, Json(b): Json<PlayBody>) -> Json<Value> {
+async fn now_playing(State(st): State<AppState>, User(u): User, Json(b): Json<Play>) -> Json<Value> {
     crate::scrobble::now_playing(&st, u.i("id"), b.track_id);
     Json(json!({ "ok": true }))
 }
@@ -625,6 +708,7 @@ pub async fn stream_track(st: &AppState, id: i64, q: &StreamQ, req: Request, use
     // the child is killed when the response (and with it the stream) is dropped
     let stream = futures_util::StreamExt::map(tokio_util::io::ReaderStream::new(out), move |c| { let _keep = &child; c });
     let mut r = ([(header::CONTENT_TYPE, ct)], Body::from_stream(stream)).into_response();
+    r.headers_mut().insert(header::CACHE_CONTROL, HeaderValue::from_static(NO_STORE));
     r.headers_mut().insert(header::HeaderName::from_static("x-transcoded"), HeaderValue::from_str(&tag).unwrap_or(HeaderValue::from_static("flac")));
     r.headers_mut().insert(header::HeaderName::from_static("x-encore-stream"), HeaderValue::from_str(&tag).unwrap_or(HeaderValue::from_static("flac")));
     Ok(r)
@@ -633,6 +717,11 @@ pub async fn stream_track(st: &AppState, id: i64, q: &StreamQ, req: Request, use
 async fn stream(State(st): State<AppState>, User(u): User, Path(id): Path<i64>, Query(q): Query<StreamQ>, req: Request) -> ApiResult<Response> {
     stream_track(&st, id, &q, req, Some(&u)).await
 }
+
+/// `Cache-Control` of every stream made on the fly (FLAC, the fallback, the lossy rungs, Cadenza): no cache on
+/// the way keeps it (the browser's, a proxy's, the service worker's). Only the original is worth keeping; a
+/// client that saves a conversion for offline play does so on purpose and marks the copy "(converted)".
+pub(crate) const NO_STORE: &str = "private, no-store";
 
 /// The file itself (Range requests work), labelled `original`.
 async fn original(path: &str, req: Request, ct: &str) -> ApiResult<Response> {
@@ -762,7 +851,7 @@ async fn dsp_stream(st: &AppState, id: i64, path: String, q: &StreamQ, u: &crate
         crate::dsp::render::start_background(ctx, &spec, u.i("id"));
     }
     let mut r = crate::dsp::stream(crate::dsp::cache(st), spec.live(t), slot).await?;
-    r.headers_mut().insert(header::CACHE_CONTROL, HeaderValue::from_static("private, no-cache"));
+    r.headers_mut().insert(header::CACHE_CONTROL, HeaderValue::from_static(NO_STORE));
     Ok(r)
 }
 
@@ -842,12 +931,15 @@ struct InfoQ {
 /// What's in the file and, under `stream`, how its plain stream is served for this client (`kind` is the
 /// `x-encore-stream` label the stream would carry, `codec` the file's codec, `reason` why it is not the
 /// original) – given the same `X-Encore-Decoders` header or `?codecs=` list as the stream request.
+/// `offline_ok` is true when that stream is the original, so a copy saved for offline play is the file itself.
 async fn track_info(State(st): State<AppState>, User(_): User, Path(id): Path<i64>, Query(q): Query<InfoQ>, headers: axum::http::HeaderMap) -> ApiResult<Json<Value>> {
     let t = st.db.one("SELECT id, path, format, size, bitrate, duration FROM tracks WHERE id=?", p![id])?.ok_or_else(|| err(404, "Track not found"))?;
     let path = t.s("path");
     let mut info = tokio::task::spawn_blocking(move || audio_info(&path)).await.unwrap_or(json!({}));
     let plan = plan(&t.s("format"), &info, decoders(&headers, &q.codecs).as_deref());
     info["stream"] = json!({ "kind": plan.kind, "codec": plan.codec, "reason": plan.reason });
+    // otherwise a client saves a conversion (`?q=aac` or `?q=opus`, its quality marked "(converted)")
+    info["offline_ok"] = json!(plan.kind == "original");
     info["id"] = json!(t.i("id"));
     info["format"] = json!(t.s("format"));
     info["size"] = json!(t.i("size"));
@@ -1601,3 +1693,7 @@ mod share_tests;
 #[cfg(test)]
 #[path = "stream_tests.rs"]
 mod stream_tests;
+
+#[cfg(test)]
+#[path = "library_plays_tests.rs"]
+mod library_plays_tests;

@@ -8,6 +8,34 @@ thread_local! {
 
 fn set_full_listeners(ls: Vec<EventListener>) { let old = FULL.with(|b| std::mem::replace(&mut *b.borrow_mut(), ls)); drop(old); }
 
+thread_local! {
+    /// The HTML the bar and the full player were last drawn with, the play/pause icon left out (`PP`). A play or a
+    /// pause then only swaps that icon: drawing a view again re-creates every cover in it, and each one fades in
+    /// over its colour again – the flash on every pause.
+    static DRAWN: RefCell<[Option<String>; 2]> = const { RefCell::new([None, None]) };
+}
+
+/// Where the play/pause icon goes in a view's HTML, for `draw`.
+pub(super) const PP: &str = "\u{1}pp\u{1}";
+
+#[derive(Clone, Copy)]
+pub(super) enum View { Bar = 0, Full = 1 }
+
+/// Draws `html` (with `PP` where the play/pause icon goes) into `el`, unless the view already shows exactly that:
+/// then only the button `toggle` gets the icon `pp`. True when the view was drawn, so its listeners need wiring again.
+pub(super) fn draw(view: View, el: &Element, toggle: &str, html: &str, pp: &str) -> bool {
+    if DRAWN.with(|d| d.borrow()[view as usize].as_deref() == Some(html)) {
+        if let Some(b) = qs_in(el, toggle) { set_html(&b, pp); }
+        return false;
+    }
+    set_html(el, &html.replace(PP, pp));
+    DRAWN.with(|d| d.borrow_mut()[view as usize] = Some(html.to_string()));
+    true
+}
+
+/// The view was drawn some other way (the empty or the linked state): the next `draw` draws it in full.
+pub(super) fn forget(view: View) { DRAWN.with(|d| d.borrow_mut()[view as usize] = None); }
+
 pub fn set_full(on: bool) {
     st_mut(|s| s.full = on);
     let Some(f) = by_id("np-full") else { return };
@@ -20,6 +48,7 @@ pub(super) fn render_full() {
     let Some(f) = by_id("np-full") else { return };
     let link = linked();
     let Some(t) = now_track() else {
+        forget(View::Full);
         set_html(&f, &format!(r#"<div class="np-top"><button class="btn ghost icon" id="f-close" aria-label="Close">{}</button><span></span><span></span></div>
       <div class="empty">{}<h2>Nothing playing on {}</h2><p class="muted">Play anything – it starts there.</p></div>"#,
             icon("x"), icon("devices"), esc(&link.as_ref().map(|l| l.name.clone()).unwrap_or_else(|| "this device".into()))));
@@ -81,7 +110,7 @@ pub(super) fn render_full() {
     let repeat_btn = format!(r#"<button class="btn ghost icon {}" id="f-repeat" title="{}" aria-label="Repeat" aria-pressed="{}">{}{}</button>"#,
         if repeat != "off" { "on" } else { "" }, repeat_title(&repeat), repeat != "off", icon("refresh"), if repeat == "one" { "<sup>1</sup>" } else { "" });
     let auto = if link.is_some() { String::new() } else { format!(r#"<label class="row small muted" style="gap:6px" title="When the queue ends, keep playing a shuffle of the whole library"><input type="checkbox" id="f-auto" {}> Then shuffle library</label>"#, if autoplay { "checked" } else { "" }) };
-    set_html(&f, &format!(r##"
+    let html = format!(r##"
     <div class="np-backdrop"></div>
     <div class="np-top">
       <button class="btn ghost icon" id="f-close" aria-label="Close">{x}</button>
@@ -107,7 +136,7 @@ pub(super) fn render_full() {
         <div class="row np-vol"><span class="faint">{volume_ic}</span><input type="range" id="fvol" min="0" max="1" step="0.01" value="{vol}"></div>
         {actions}
       </section>
-      <section class="np-lyrics" id="np-lyrics">{lyrics}</section>
+      <section class="np-lyrics" id="np-lyrics"></section>
       <section class="np-queue">
         <div class="row between"><h3>Up next{on_name}</h3>
           {auto}</div>
@@ -116,9 +145,15 @@ pub(super) fn render_full() {
     </div>"##,
         x = icon("x"), tab_now = tab("now", "Now playing"), tab_lyrics = tab("lyrics", "Lyrics"), tab_queue = tab("queue", "Up next"),
         big_art = art(&cover(&t), &album_or_title(&t), "big"), title = esc(&crate::ui::tr(&t, "title")), title_sub = crate::ui::tr_sub(&t, "title"), quality = esc(&quality(&t)),
-        shuffle = shuffle, prev = icon("prev"), pp = if playing { icon("pause") } else { icon("play") }, next = icon("next"), repeat = repeat_btn,
-        volume_ic = icon_attr("volume", r#"width="18""#), vol = volume, lyrics = lyrics_html(),
-        on_name = on_name, auto = auto));
+        shuffle = shuffle, prev = icon("prev"), pp = PP, next = icon("next"), repeat = repeat_btn,
+        volume_ic = icon_attr("volume", r#"width="18""#), vol = volume,
+        on_name = on_name, auto = auto);
+    if !draw(View::Full, &f, "#f-toggle", &html, &if playing { icon("pause") } else { icon("play") }) {
+        update_time();
+        return;
+    }
+    // the lyrics fill in by themselves as they load (lyrics.rs), so they stay out of the HTML `draw` compares
+    if let Some(l) = qs_in(&f, "#np-lyrics") { set_html(&l, &lyrics_html()); }
     let mut ls = Vec::new();
     wire(&mut ls, &f, "#f-close", "click", |_| set_full(false));
     wire(&mut ls, &f, ".np-tabs", "click", |e| {

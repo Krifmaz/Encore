@@ -68,6 +68,10 @@ pub fn icon(name: &str) -> String {
         "shuffle" => p(r#"<path d="M16 3h5v5M4 20 21 3M21 16v5h-5M15 15l6 6M4 4l5 5"/>"#),
         "list" => p(r#"<path d="M8 6h13M8 12h13M8 18h13M3 6h.01M3 12h.01M3 18h.01"/>"#),
         "devices" => p(r#"<rect x="2" y="4" width="13" height="10" rx="2"/><path d="M6 18h5M8.5 14v4"/><rect x="17" y="8" width="5" height="12" rx="1.5"/><path d="M19.5 17h.01"/>"#),
+        // songs kept on this device (the Downloads page): an arrow into a drive
+        "saved" => p(r#"<path d="M12 2v8M16 6l-4 4-4-4"/><rect x="2" y="14" width="20" height="8" rx="2"/><path d="M6 18h.01M10 18h.01"/>"#),
+        // no connection to the server (the offline banner): a crossed-out signal
+        "offline" => p(r#"<path d="m2 2 20 20M8.5 16.4a5 5 0 0 1 7 0M5 12.9a10 10 0 0 1 5.2-2.7M19 12.9a10 10 0 0 0-2-1.5M2 8.8a15 15 0 0 1 4.2-2.6M22 8.8a15 15 0 0 0-11.3-3.8M12 20h.01"/>"#),
         "bug" => p(r#"<path d="M9 7V6a3 3 0 0 1 6 0v1"/><path d="M12 20c-3.3 0-6-2.7-6-6v-3a4 4 0 0 1 4-4h4a4 4 0 0 1 4 4v3c0 3.3-2.7 6-6 6z"/><path d="M12 20v-9M6 13H2M22 13h-4M3 21c0-2.1 1.7-3.9 3.8-4M20.2 17c2.1.1 3.8 1.9 3.8 4M3 5c0 2.1 1.6 3.8 3.5 4M21 5c0 2.1-1.6 3.8-3.5 4M8 2l1.9 1.9M16 2l-1.9 1.9"/>"#),
         _ => String::new(),
     }
@@ -254,12 +258,29 @@ pub fn art_sized(src: &str, label: &str, cls: &str, size: u32) -> String {
         dim = format!(r#" width="{s}" height="{s}""#);
         if let Some(color) = color {
             ph = format!(r#"<div class="ph" style="background:{color};color:transparent">{}</div>"#, esc(&initials(label)));
-            fade = r#" onload="this.classList.add('in')""#;
+            if cover_seen(&src) {
+                // shown on this page before: the browser has it, so it goes up at once, with no second fade
+                return format!(r#"{ph}<img class="{cls}" src="{}" alt=""{dim} onerror="this.remove()">"#, esc(&src));
+            }
+            fade = r#" onload="this.classList.add('in');(window.__encoreCovers||(window.__encoreCovers=new Set)).add(this.getAttribute('src'))""#;
             cls = if cls.is_empty() { "cover-fade".into() } else { format!("{cls} cover-fade") };
         }
     }
     format!(r#"{ph}<img class="{cls}" src="{}" alt=""{dim} loading="lazy" decoding="async"{fade} onerror="this.remove()">"#, esc(&src))
 }
+
+/// Whether this cover address has faded in on this page before (the fading cover's `onload` adds it to
+/// `window.__encoreCovers`). A view drawn again – the player after a change of song, a list after a reload –
+/// then shows those covers at once instead of flashing their colour first.
+#[cfg(target_arch = "wasm32")]
+fn cover_seen(src: &str) -> bool {
+    let Some(w) = web_sys::window() else { return false };
+    js_sys::Reflect::get(&w, &"__encoreCovers".into()).ok()
+        .and_then(|s| s.dyn_into::<js_sys::Set>().ok())
+        .is_some_and(|s| s.has(&src.into()))
+}
+#[cfg(not(target_arch = "wasm32"))]
+fn cover_seen(_src: &str) -> bool { false }
 
 /// `preloadCovers(urls)`: fetches covers ahead of the scroll (the next page of a list), so they are cached when it shows.
 pub fn preload_covers(urls: &[String]) {

@@ -90,12 +90,19 @@ pub fn library_tile(a: &Value) -> String {
         year = if a.truthy("year") { format!(" · {}", esck(a, "year")) } else { String::new() })
 }
 
-/// `bindTiles(root, navigate)`: the play buttons on tiles and the tile itself (navigates with `app::navigate`).
+/// `bindTiles(root, navigate)`: the play buttons on tiles and the tile itself (navigates with `app::navigate`), and
+/// the ⋯ of library song rows (`data-song-menu`, the song as JSON).
 pub fn bind_tiles(root: &Element) {
     dom::on(root, "click", |e| {
         if let Some(play) = dom::closest(e, "[data-play-album]") {
             dom::stop(e);
             pages::library::play_album(&dom::data(&play, "playAlbum"), 0);
+            return;
+        }
+        if let Some(b) = dom::closest(e, "[data-song-menu]") {
+            dom::stop(e);
+            let Ok(t) = serde_json::from_str::<Value>(&dom::data(&b, "songMenu")) else { return };
+            pages::library::track_menu(&b, &t, app::is_admin(), None);
             return;
         }
         if let Some(song) = dom::closest(e, "[data-play-song]") {

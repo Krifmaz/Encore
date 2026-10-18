@@ -9,10 +9,10 @@ Gives your Encore server a YouTube sign-in for its YouTube Music downloads. Two 
   cookies away in the browser, so from then on the session belongs to Encore alone: Encore refreshes it by
   itself every 4 hours (and when YouTube asks it to sign in), also while your computer is off. If Google
   ever ends it, Encore tells the admins: do the hand-off again.
-* **Sync this browser's own sign-in** (optional, in the options). Sends this browser's YouTube cookies when
-  the browser starts, 30 seconds after a sign-in cookie changes, and every 6 hours. Encore never refreshes
-  these itself (that would sign this browser out), so they only stay fresh while the browser is used.
-  A handed-over sign-in always wins over these.
+* **Sync this browser's own sign-in** (optional, a switch in the popup). Sends this browser's YouTube
+  cookies when the browser starts, 30 seconds after a sign-in cookie changes, and every 6 hours. Encore never
+  refreshes these itself (that would sign this browser out), so they only stay fresh while the browser is
+  used. A handed-over sign-in always wins over these.
 
 Cookies go to your Encore server and nowhere else. The browser's name and version (its User-Agent) go with
 them: Encore refreshes a handed-over sign-in as that browser, since Google ties a sign-in to the browser it
@@ -31,12 +31,16 @@ was made in.
      use Firefox Developer Edition / Nightly with `xpinstall.signatures.required` off, or sign it on
      addons.mozilla.org as an unlisted add-on). In `about:addons` → Encore – YouTube sign-in, set
      **Run in Private Windows** to **Allow**.
-3. The options page opens (or click the extension's button → Options): enter your Encore address (for
-   example `https://music.example.com`) and the token, then **Save**. Allow the permissions it asks for.
+3. Click the extension's button in the toolbar (pin it first if the browser hides it under the puzzle-piece
+   menu): everything is in that popup, in Encore's colours. Under **Encore connection** enter your Encore
+   address (for example `https://music.example.com`) and the token (**Show** shows what you pasted), then
+   **Save**, and allow the permissions it asks for. Firefox closes the popup when it asks: open it again and it
+   says whether the permission was given and to click the button once more. The extension's
+   **Options** in the browser's extension settings open the same page in a tab.
 4. Click the extension's button → **Hand over a YouTube sign-in**, sign in to Google in the private window,
    and let it count down. Settings → Apps & sources → YouTube sign-in in Encore then shows "Handed-over
    sign-in" as the source, with the browser it came from; "Everyday browser (extension)" is the optional
    sync below. Encore refreshes the handed-over sign-in every 4 hours and says so on the card; when Google
    answers a refresh without new cookies, the card says the sign-in was only checked.
 
-Making a new token in Encore stops the old one; enter the new one in the options.
+Making a new token in Encore stops the old one; enter the new one under Encore connection in the popup.

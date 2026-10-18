@@ -1,19 +1,169 @@
-:root { color-scheme: light dark; --fg: #1d1b22; --muted: #6b6775; --bg: #f7f6fa; --card: #fff; --line: #e3e0ea; --accent: #8b5cf6; --ok: #15803d; --err: #b91c1c; }
-@media (prefers-color-scheme: dark) { :root { --fg: #ecebf0; --muted: #a29fac; --bg: #121116; --card: #1c1a22; --line: #2e2b36; --ok: #4ade80; --err: #f87171; } }
-body { margin: 0; font: 15px/1.5 system-ui, sans-serif; background: var(--bg); color: var(--fg); }
-main { max-width: 560px; margin: 40px auto; padding: 0 16px; }
-.card { background: var(--card); border: 1px solid var(--line); border-radius: 12px; padding: 18px 20px; margin-bottom: 16px; }
-h1 { font-size: 20px; margin: 0 0 4px; } h2 { font-size: 16px; margin: 0 0 4px; }
-p { color: var(--muted); margin: 0 0 12px; }
-ol { color: var(--muted); margin: 0 0 12px; padding-left: 20px; }
-label { display: block; font-weight: 600; margin: 12px 0 4px; }
-label.check { display: flex; gap: 8px; align-items: flex-start; font-weight: 400; }
-input[type=url], input[type=password] { width: 100%; box-sizing: border-box; padding: 9px 11px; border-radius: 8px; border: 1px solid var(--line); background: var(--bg); color: var(--fg); font: inherit; }
-.row { display: flex; gap: 8px; margin-top: 12px; flex-wrap: wrap; }
-button { padding: 8px 14px; border-radius: 8px; border: 1px solid var(--line); background: var(--card); color: var(--fg); font: inherit; cursor: pointer; }
-button.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
-button:disabled { opacity: .6; cursor: default; }
-.status { margin-top: 12px; font-size: 14px; color: var(--muted); }
-.ok { color: var(--ok); } .err { color: var(--err); }
-.big { font-size: 40px; font-weight: 700; margin: 8px 0; }
-.tag { font-size: 12px; background: var(--accent); color: #fff; border-radius: 6px; padding: 1px 6px; vertical-align: middle; }
+/* Encore's look, taken from the web app (web-rs/static/css/app.css): its default appearance – the "Encore"
+   theme (charcoal and cream, data-theme="encore") with the "Logo" accent – and its light theme
+   (data-theme="light") when the system is set to light. */
+:root {
+  --bg: #161617;
+  --bg-2: #1c1c1e;
+  --panel: #222224;
+  --panel-2: #2a2a2d;
+  --border: #353538;
+  --text: #f0ead6;
+  --muted: #aaa493;
+  --faint: #918b77; /* the web's #77725f is 3.3:1 on a card; the hints here are 12px text */
+  --accent: #f0ead6;
+  --accent-2: #d6c49a;
+  --accent-rgb: 240, 234, 214;
+  --on-accent: #16161f;
+  --grad: linear-gradient(135deg, var(--accent), var(--accent-2));
+  --ok: #22c55e;
+  --warn: #f59e0b;
+  --err: #ef4444;
+  --ok-text: var(--ok);
+  --warn-text: var(--warn);
+  --err-text: #f87171; /* #ef4444 is 3.8:1 on its badge */
+  --accent-text: color-mix(in srgb, var(--accent-2) 55%, var(--text));
+  --switch-off: var(--border);
+  --radius: 14px;
+  --ring: var(--accent); /* hover and focus edges */
+  color-scheme: dark;
+}
+@media (prefers-color-scheme: light) {
+  :root {
+    --bg: #f6f6fb;
+    --bg-2: #ffffff;
+    --panel: #ffffff;
+    --panel-2: #f0f0f7;
+    --border: #e2e2ee;
+    --text: #16161f;
+    --muted: #5d5d75;
+    --faint: #6f6f87; /* the web's #8d8da5 is 3.2:1 on white */
+    /* cream on white needs the darker end of the accent for edges, and darker status text */
+    --ring: var(--accent-2);
+    --ok-text: #15803d;
+    --warn-text: #b45309;
+    --err-text: #b91c1c;
+    --accent-text: color-mix(in srgb, var(--accent-2) 45%, var(--text));
+    --switch-off: #cfcfdd; /* the web's border grey all but vanishes on white */
+    color-scheme: light;
+  }
+}
+
+* { box-sizing: border-box; }
+[hidden] { display: none !important; }
+html, body { margin: 0; }
+body {
+  background: var(--bg);
+  color: var(--text);
+  font: 14px/1.5 Inter, ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  -webkit-font-smoothing: antialiased;
+}
+button, input { font: inherit; color: inherit; }
+h1, h2 { margin: 0; line-height: 1.2; letter-spacing: -.01em; }
+h1 { font-size: 22px; font-weight: 750; }
+h2 { font-size: 15px; font-weight: 650; }
+p, ol { margin: 0; color: var(--muted); }
+ol { padding-left: 20px; }
+b { color: var(--text); }
+.small { font-size: 12.5px; }
+
+/* ---------- page (the hand-off page, and the popup's page opened from the extension settings) ---------- */
+main { max-width: 540px; margin: 32px auto; padding: 0 16px; display: flex; flex-direction: column; gap: 12px; }
+
+/* the logo and the name, as in the web app's sidebar */
+.brand { display: flex; align-items: center; gap: 10px; padding: 2px 4px 4px; font-weight: 800; font-size: 18px; order: -2; }
+.brand img { width: 28px; height: 28px; flex: none; }
+.brand .sub { margin-left: auto; font-size: 12px; font-weight: 600; color: var(--muted); }
+@media (prefers-color-scheme: light) {
+  /* the cream mark on its charcoal tile, as on the app icon */
+  .brand img { background: #1c1c1e; border-radius: 8px; padding: 4px; }
+}
+
+.card { background: var(--panel); border: 1px solid var(--border); border-radius: var(--radius); padding: 16px; min-width: 0; }
+.card-body { display: flex; flex-direction: column; gap: 10px; min-width: 0; }
+.card-head { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.row { display: flex; align-items: center; gap: 8px 10px; flex-wrap: wrap; }
+.row > .status { flex: 1 1 150px; }
+
+/* a card that folds: <details class="card"> */
+details.card > summary { display: flex; align-items: center; gap: 8px; cursor: pointer; list-style: none; user-select: none; min-width: 0; }
+details.card > summary::-webkit-details-marker { display: none; }
+details.card > summary h2 { flex: none; }
+details.card > summary .faint { flex: 1; min-width: 0; text-align: right; font-size: 12.5px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+details.card > summary::after {
+  content: ""; flex: none; width: 7px; height: 7px; margin: 0 3px 3px 2px;
+  border-right: 2px solid var(--muted); border-bottom: 2px solid var(--muted); transform: rotate(45deg); transition: transform .15s;
+}
+details.card:not([open]) > summary::after { transform: rotate(-45deg); margin-bottom: 0; }
+details.card[open] > summary { margin-bottom: 12px; }
+.faint { color: var(--faint); }
+
+/* ---------- controls ---------- */
+button {
+  display: inline-flex; align-items: center; justify-content: center; gap: 8px;
+  padding: 9px 16px; border-radius: 10px; border: 1px solid var(--border);
+  background: var(--panel-2); color: var(--text); cursor: pointer; font-weight: 600; white-space: nowrap;
+  transition: transform .08s, background .15s, border-color .15s, opacity .15s;
+}
+button:hover { border-color: var(--ring); }
+button:active { transform: scale(.97); }
+button:disabled { opacity: .5; cursor: not-allowed; transform: none; }
+button.primary { background: var(--grad); border-color: transparent; color: var(--on-accent); }
+button.primary:hover { filter: brightness(1.08); }
+@media (prefers-color-scheme: light) { button.primary { border-color: var(--accent-2); } }
+button.ghost { background: transparent; border-color: transparent; }
+button.ghost:hover { background: var(--panel-2); }
+button.sm { padding: 6px 11px; font-size: 13px; border-radius: 8px; }
+button.block { width: 100%; }
+button:focus-visible, summary:focus-visible { outline: 2px solid var(--ring); outline-offset: 2px; }
+
+.input {
+  width: 100%; min-width: 0; padding: 9px 12px; border-radius: 10px; border: 1px solid var(--border);
+  background: var(--bg-2); outline: none; transition: border-color .15s, box-shadow .15s;
+}
+.input::placeholder { color: var(--faint); }
+.input:focus { border-color: var(--ring); box-shadow: 0 0 0 3px rgba(var(--accent-rgb), .2); }
+.field { display: flex; flex-direction: column; gap: 6px; min-width: 0; }
+.field > span, .field > label { font-size: 13px; font-weight: 600; color: var(--muted); }
+.field small { color: var(--faint); font-size: 12px; }
+.with-button { display: flex; gap: 6px; }
+.with-button .input { flex: 1; }
+
+/* the web app's switch (the checkbox stays focusable) */
+.switch { display: inline-flex; align-items: center; gap: 10px; cursor: pointer; user-select: none; font-weight: 550; }
+.switch input { position: absolute; opacity: 0; width: 1px; height: 1px; margin: 0; }
+.switch i { width: 38px; height: 22px; border-radius: 99px; background: var(--switch-off); position: relative; transition: background .15s; flex: none; }
+.switch i::after { content: ""; position: absolute; top: 3px; left: 3px; width: 16px; height: 16px; border-radius: 50%; background: #fff; box-shadow: 0 1px 2px rgba(0, 0, 0, .25); transition: transform .15s; }
+.switch input:checked + i { background: var(--grad); }
+.switch input:checked + i::after { transform: translateX(16px); background: var(--on-accent); }
+.switch input:focus-visible + i { outline: 2px solid var(--ring); outline-offset: 2px; }
+
+.badge {
+  display: inline-flex; align-items: center; gap: 5px; padding: 2px 9px; border-radius: 99px; font-size: 11.5px; font-weight: 650;
+  background: var(--panel-2); color: var(--muted); border: 1px solid var(--border); white-space: nowrap; line-height: 1.5;
+}
+.badge.ok { color: var(--ok-text); border-color: rgba(34, 197, 94, .35); background: rgba(34, 197, 94, .1); }
+.badge.warn { color: var(--warn-text); border-color: rgba(245, 158, 11, .35); background: rgba(245, 158, 11, .1); }
+.badge.err { color: var(--err-text); border-color: rgba(239, 68, 68, .35); background: rgba(239, 68, 68, .1); }
+.badge.accent { color: var(--accent-text); border-color: rgba(var(--accent-rgb), .4); background: rgba(var(--accent-rgb), .14); }
+
+/* a status line: an optional badge, then the text wrapping under it */
+.status { font-size: 12.5px; line-height: 1.55; color: var(--muted); overflow-wrap: anywhere; min-width: 0; }
+.status > .badge { margin-right: 6px; vertical-align: 1px; padding: 0 8px; }
+.status.ok { color: var(--ok-text); }
+.status.err { color: var(--err-text); }
+.big { font-size: 40px; font-weight: 750; line-height: 1.1; }
+
+/* ---------- the toolbar popup (popup.html; opened in a tab it gets html.tab and the page layout) ---------- */
+html:not(.tab) body.popup { width: 360px; }
+/* the browser caps a popup at 600 px: anything longer scrolls inside main, so the width never changes */
+html:not(.tab) body.popup main { margin: 0; max-width: none; max-height: 600px; overflow: hidden auto; padding: 10px 12px 12px; gap: 10px; scrollbar-width: thin; }
+html:not(.tab) body.popup .brand { font-size: 17px; padding: 0 2px; }
+html:not(.tab) body.popup .brand img { width: 26px; height: 26px; }
+html:not(.tab) body.popup .card { padding: 13px 14px; }
+html:not(.tab) body.popup .card-body { gap: 9px; }
+html:not(.tab) body.popup h2 { font-size: 14.5px; }
+/* while the connection is open the explanations step aside, so the popup stays within its 600 px */
+html:not(.tab) body.popup:has(#conn[open]) .card p.small { display: none; }
+html.tab button.block { width: auto; align-self: flex-start; }
+/* not set up yet: the connection comes first */
+body.popup.setup #conn { order: -1; }

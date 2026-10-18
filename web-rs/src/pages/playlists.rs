@@ -300,7 +300,7 @@ pub fn render_playlist(view: Element, ctx: Ctx) -> PageFuture {
         <td><div style="font-weight:600">{title}</div>{title_sub}<div class="small muted">{artist}</div></td>
         <td class="hide-sm muted">{album}</td>
         <td>{status}</td>
-        <td style="text-align:right"><button class="btn sm ghost" data-rm title="Remove">{x}</button></td></tr>"##,
+        <td style="text-align:right;white-space:nowrap">{tmenu}<button class="btn sm ghost" data-rm title="Remove">{x}</button></td></tr>"##,
             item = it.s("id"), n = i + 1, title = esc(&crate::ui::tr(it, "title")), title_sub = crate::ui::tr_sub(it, "title"), artist = crate::ui::artist_links(it),
             album = if it.truthy("album_id") { format!(r##"<a href="#/library/album/{}">{}</a>"##, esc(&it.s("album_id")), esc(&it.s("album"))) } else { esc(&it.s("album")) },
             status = if it.truthy("track_id") {
@@ -316,6 +316,8 @@ pub fn render_playlist(view: Element, ctx: Ctx) -> PageFuture {
                 }
             } else { r#"<span class="badge">missing</span>"#.to_string() },
             x = icon("x"),
+            // the song's ⋯ (Play next, Add to queue, Download for offline …) for rows in the library
+            tmenu = if it.truthy("track_id") { format!(r#"<button class="btn sm ghost icon" data-ptmenu="{i}" aria-label="More" title="More">{}</button>"#, icon("more")) } else { String::new() },
         )).collect();
         dom::set_html(&view, &format!(r##"
     <div class="detail-head">
@@ -328,6 +330,7 @@ pub fn render_playlist(view: Element, ctx: Ctx) -> PageFuture {
         <div class="row wrap mt">
           {play}
           {offline}
+          {pl_menu}
           {req}
           <button class="btn" id="add">{plus}Add from link</button>
           <button class="btn" id="dedupe">{check}Remove duplicates</button>
@@ -361,6 +364,7 @@ pub fn render_playlist(view: Element, ctx: Ctx) -> PageFuture {
             total = pl.s("total"), matched = pl.s("matched"), missing_n = js_string(&json!(total - matched)),
             pct = if pl.truthy("total") { js_string(&json!(matched / total * 100.0)) } else { "0".to_string() },
             play = if pl.truthy("matched") { format!(r#"<button class="btn primary" id="pl-play">{}Play</button>"#, icon("play")) } else { String::new() },
+            pl_menu = if pl.truthy("matched") && crate::pages::downloads::enabled() { format!(r#"<button class="btn icon" id="pl-menu" aria-label="More options" title="More options">{}</button>"#, icon("more")) } else { String::new() },
             offline = if pl.truthy("matched") && player::can_save_offline() { format!(r#"<button class="btn" id="pl-offline">{}Save for offline</button>"#, icon("download")) } else { String::new() },
             req = if missing > 0 { format!(r#"<button class="btn {}" id="req">{}Download {missing} missing</button>"#, if pl.truthy("matched") { "" } else { "primary" }, icon("download")) } else { String::new() },
             plus = icon("plus"), check = icon("check"), refresh = icon("refresh"),
@@ -378,10 +382,26 @@ pub fn render_playlist(view: Element, ctx: Ctx) -> PageFuture {
             rows = rows,
             empty = if items.is_empty() { empty_state(&icon("music"), "Empty playlist", "Add tracks from an album page or from a link.") } else { String::new() },
         ));
-        let playable: Vec<Value> = items.iter().filter(|i| i.truthy("track_id")).map(|i| json!({
-            "id": i.g("track_id"), "title": i.g("title"), "artist": i.g("artist"), "artists": i.g("artists"), "album": i.g("album"), "album_id": i.g("album_id"),
-            "format": i.g("format"), "bitrate": i.g("bitrate"), "duration": i.g("duration"),
-        })).collect();
+        let playable: Vec<Value> = items.iter().filter(|i| i.truthy("track_id")).map(as_track).collect();
+        {
+            let playable = playable.clone();
+            dom::on_sel(&view, "#pl-menu", "click", move |e| {
+                let Some(anchor) = dom::closest(e, "#pl-menu") else { return };
+                let mut menu: Vec<Option<crate::ui::MenuItem>> = vec![];
+                { let p = playable.clone(); menu.push(crate::ui::MenuItem::new("Play next", &icon("next"), move || { player::play_next(p.clone()); toast("Plays next", "ok"); })); }
+                { let p = playable.clone(); menu.push(crate::ui::MenuItem::new("Add to queue", &icon("list"), move || { player::enqueue(p.clone()); toast("Added to queue", "ok"); })); }
+                menu.extend(crate::pages::downloads::menu_items(&playable));
+                crate::ui::pop_menu(&anchor, menu);
+            });
+        }
+        {
+            let rows = items.clone();
+            dom::on_sel(&view, "tbody", "click", move |e| {
+                let Some(b) = dom::closest(e, "[data-ptmenu]") else { return };
+                let Some(it) = dom::data(&b, "ptmenu").parse::<usize>().ok().and_then(|i| rows.get(i)) else { return };
+                crate::pages::library::track_menu(&b, &as_track(it), app::is_admin(), Some(Rc::new(reload)));
+            });
+        }
         {
             let playable = playable.clone();
             dom::on_sel(&view, "#pl-offline", "click", move |_| { player::save_offline(playable.clone()); toast(&format!("Saving {} song(s) to this device…", playable.len()), "ok"); });
@@ -491,6 +511,14 @@ pub fn render_playlist(view: Element, ctx: Ctx) -> PageFuture {
             });
         }
         Ok(())
+    })
+}
+
+/// A playlist row that is in the library, as the player and the song menu want it.
+fn as_track(i: &Value) -> Value {
+    json!({
+        "id": i.g("track_id"), "title": i.g("title"), "artist": i.g("artist"), "artists": i.g("artists"), "album": i.g("album"), "album_id": i.g("album_id"),
+        "format": i.g("format"), "bitrate": i.g("bitrate"), "duration": i.g("duration"),
     })
 }
 

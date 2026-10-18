@@ -116,6 +116,8 @@ pub fn track_menu(anchor: &Element, t: &Value, admin: bool, on_deleted: Option<R
         let t = t.clone();
         items.push(MenuItem::new("Save for offline", &icon("download"), move || { player::save_offline(vec![(*t).clone()]); toast("Saving to this device…", "ok"); }));
     }
+    // this browser's own downloads (0.28): "Download for offline" / "Remove download"
+    items.extend(crate::pages::downloads::menu_items(&[(*t).clone()]));
     if t.truthy("album_id") { items.push(MenuItem::link("Go to album", &icon("disc"), &format!("#/library/album/{}", t.s("album_id")), false)); }
     { let (t, done) = (t.clone(), done.clone()); items.push(MenuItem::new("Report a problem", &icon("shield"), move || { let done = done.clone(); crate::pages::report::report_modal("track", t.g("id").clone(), &t.s("title"), "", Some(Rc::new(move |_| done()))) })); }
     if ui::translate_mode() != "off" { let (t, done) = (t.clone(), done.clone()); items.push(MenuItem::new("Edit translation", &icon("edit"), move || crate::pages::translate::edit_translation(t.s("title"), "title", Some(done.clone())))); }
@@ -1007,6 +1009,7 @@ fn album_menu(anchor: &Element, a: &Value, id: &str, qt: &Rc<Vec<Value>>, admin:
         let qt = qt.clone();
         items.push(MenuItem::new("Save album for offline", &icon("download"), move || { player::save_offline((*qt).clone()); toast(&format!("Saving {} song(s) to this device…", qt.len()), "ok"); }));
     }
+    items.extend(crate::pages::downloads::menu_items(qt));
     if admin {
         let (ids, reload) = (ids.clone(), reload.clone());
         items.push(MenuItem::new("All songs are right (confirm)", &icon("check"), move || {

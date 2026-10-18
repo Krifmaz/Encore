@@ -7,37 +7,7 @@
 <link rel="stylesheet" href="style.css">
 </head>
 <body>
-<main>
-  <div class="card">
-    <h1>Encore – YouTube sign-in</h1>
-    <p>Connects this browser to your Encore server. Nothing is sent anywhere else.</p>
-    <label for="url">Encore address</label>
-    <input id="url" type="url" placeholder="https://music.example.com" autocomplete="off" spellcheck="false">
-    <label for="token">Token</label>
-    <input id="token" type="password" placeholder="From Settings → YouTube → Connect the browser extension" autocomplete="off" spellcheck="false">
-    <div class="row"><button id="save" type="button">Save</button></div>
-    <div class="status" id="saved"></div>
-  </div>
-  <div class="card">
-    <h2>Hand over a YouTube sign-in <span class="tag">Recommended</span></h2>
-    <p>Encore gets a YouTube session of its own and keeps it alive by itself, also while this computer is off.</p>
-    <ol>
-      <li>A new private window opens at Google's sign-in.</li>
-      <li>Sign in there (any account; a separate one for Encore is fine).</li>
-      <li>When YouTube Music shows you signed in, the sign-in is sent to Encore after a 3-second countdown and the private window closes – without signing out, so no browser uses that session again.</li>
-    </ol>
-    <div class="row"><button class="primary" id="handoff" type="button">Hand over a YouTube sign-in</button></div>
-    <div class="status" id="handoffStatus"></div>
-  </div>
-  <div class="card">
-    <h2>Sync this browser's own sign-in</h2>
-    <p>The older way: sends this browser's YouTube cookies when the browser starts, when the sign-in changes and every 6 hours. Encore never refreshes them (that would sign this browser out), so it only works while this browser is used. Encore prefers a handed-over sign-in when it has one.</p>
-    <label class="check"><input id="everyday" type="checkbox"> Keep syncing this browser's YouTube sign-in</label>
-    <div class="row"><button id="send" type="button">Send this browser's cookies now</button></div>
-    <div class="status" id="status"></div>
-  </div>
-</main>
-<script src="shared.js"></script>
+<!-- The options page is the toolbar popup's page in a tab: options.js opens popup.html?tab here. -->
 <script src="options.js"></script>
 </body>
 </html>

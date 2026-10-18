@@ -43,6 +43,9 @@ services:
       - ${APPDATA:-/opt/appdata}/encore:/config
       - ${MUSIC_DIR:-/srv/media/music}:/music
       - ${DOWNLOADS_DIR:-/srv/downloads}:/downloads
+      # Optional, only for "Update now" (Settings → Diagnostics). Warning: the socket gives the container control
+      # of Docker on this host; mount it only if you want Update now.
+      # - /var/run/docker.sock:/var/run/docker.sock
     networks: [music]
 
   # ── Soulseek through a VPN? ───────────────────────────────────────────────

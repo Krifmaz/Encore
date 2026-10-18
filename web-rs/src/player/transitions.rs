@@ -48,6 +48,8 @@ fn planned_url(t: &Value, transcode: bool, rung: i64, dsp: bool) -> String {
 fn spare_for(n: &Value) -> Option<(bool, i64, bool)> {
     let sp = spare()?;
     let u = dom::data_opt(&sp, "url")?;
+    // the next song's downloaded copy: load_opts() takes it whatever the options say
+    if is_local_url(n, &u) { return Some((false, 0, false)); }
     if n.truthy("preview") || !n.g("id").is_number() || !u.starts_with(&format!("/api/library/tracks/{}/stream", n.i("id"))) { return None; }
     let q = web_sys::UrlSearchParams::new_with_str(u.split_once('?').map(|x| x.1).unwrap_or("")).ok()?;
     if q.has("t") { return None; }
@@ -120,6 +122,7 @@ pub(super) fn end_fade() {
     let _ = out.remove_attribute("src");
     let _ = out.remove_attribute("data-url");
     out.load();
+    sweep();
     set_fade_gain(&out, 1.0);
     if let Some(a) = audio() { set_fade_gain(&a, 1.0); }
     route();

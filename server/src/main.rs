@@ -15,6 +15,7 @@ mod connections;
 mod contribute;
 mod covers;
 mod db;
+mod docker;
 mod dsp;
 mod email;
 mod dupes;
@@ -38,6 +39,7 @@ mod routes;
 mod scheduler;
 mod scrobble;
 mod search;
+mod selfupdate;
 mod slskd_managed;
 mod sources;
 mod sync;
@@ -45,6 +47,7 @@ mod state;
 mod tagger;
 mod tools;
 mod translate;
+mod update;
 mod vpn;
 mod worker;
 mod ytauth;
@@ -75,6 +78,9 @@ async fn security_headers(req: Request, next: Next) -> Response {
         h.entry("x-frame-options").or_insert(HeaderValue::from_static("DENY"));
     }
     h.entry("referrer-policy").or_insert(HeaderValue::from_static("same-origin"));
+    // every answer says it is Encore's: the web app's service worker and offline mode tell a proxy's error page
+    // (Caddy's 502, Traefik's 404, Cloudflare's 530 while Encore is down) from Encore's own answers by it
+    h.insert("x-encore", HeaderValue::from_static("1"));
     let cache = if path.starts_with("/api/") {
         "no-store"
     } else if hashed_asset(&path) {
@@ -87,12 +93,13 @@ async fn security_headers(req: Request, next: Next) -> Response {
 }
 
 /// `/encore-web-f92ab5b84b305a59_bg.wasm`: a file whose name carries a hash of its content (trunk's build,
-/// next to index.html at the root), so it never changes under that name.
+/// next to index.html at the root), so it never changes under that name. Trunk writes the hash without its
+/// leading zeros (one build in 16 has 15 digits), so 12 digits are enough; web-rs/static/sw.js has the same rule.
 fn hashed_asset(path: &str) -> bool {
     let Some(name) = path.strip_prefix('/') else { return false };
     let stem = name.rsplit_once('.').map(|(s, _)| s).unwrap_or(name);
     let stem = stem.strip_suffix("_bg").unwrap_or(stem);
-    !name.contains('/') && stem.rsplit_once('-').is_some_and(|(_, h)| h.len() >= 16 && h.bytes().all(|b| b.is_ascii_hexdigit()))
+    !name.contains('/') && stem.rsplit_once('-').is_some_and(|(_, h)| h.len() >= 12 && h.bytes().all(|b| b.is_ascii_hexdigit()))
 }
 
 /// `/next/` was the Rust UI's address while the JavaScript UI lived at `/`; an alias for one release (0.26).
@@ -108,8 +115,12 @@ async fn next_alias(uri: axum::http::Uri) -> Redirect {
 
 pub fn app(st: AppState) -> Router {
     let static_dir = st.static_dir.clone();
-    // the web app (web-rs, built by trunk into static/): one folder, index.html for every path that is not a file
-    let spa = ServeDir::new(&static_dir).fallback(ServeFile::new(static_dir.join("index.html")));
+    // the web app (web-rs, built by trunk into static/): one folder, index.html for every path that is not a file.
+    // The image keeps each text file brotli- and gzip-compressed next to it (`app.css.br`, `app.css.gz`): a
+    // browser that takes one gets it, anything else the plain file; caches keep the variants apart (Vary).
+    let index = ServeFile::new(static_dir.join("index.html")).precompressed_br().precompressed_gzip();
+    let spa = ServeDir::new(&static_dir).precompressed_br().precompressed_gzip().fallback(index);
+    let spa = tower_http::set_header::SetResponseHeader::if_not_present(spa, header::VARY, HeaderValue::from_static("accept-encoding"));
     let router = Router::new()
         .route("/next", get(next_alias))
         .route("/next/", get(next_alias))
@@ -171,6 +182,10 @@ pub fn build_state() -> anyhow::Result<AppState> {
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     tracing_subscriber::fmt().with_env_filter(tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into())).init();
+    // `encore self-update-helper …`: the container swap of "Update now" (no database, no web server)
+    if let Some(code) = selfupdate::main_if_helper().await {
+        std::process::exit(code);
+    }
     let st = match build_state() {
         Ok(st) => st,
         Err(e) => {
@@ -210,7 +225,8 @@ async fn main() -> anyhow::Result<()> {
     tokio::spawn(ytauth::supervisor(st.clone()));
     tokio::spawn(translate::worker(st.clone()));
     let listener = tokio::net::TcpListener::bind(addr).await?;
-    axum::serve(listener, app(st).into_make_service_with_connect_info::<SocketAddr>()).await?;
+    // until "Restart server": then a graceful stop and exit code 75 (update.rs)
+    update::serve(listener, app(st.clone()), st).await?;
     Ok(())
 }
 
@@ -226,6 +242,8 @@ mod tests {
     fn hashed_assets_are_cached_for_good() {
         assert!(super::hashed_asset("/encore-web-f92ab5b84b305a59.js"));
         assert!(super::hashed_asset("/encore-web-f92ab5b84b305a59_bg.wasm"));
+        // a hash that started with a zero
+        assert!(super::hashed_asset("/encore-web-59d563296e62da3_bg.wasm"));
         for plain in ["/", "/index.html", "/sw.js", "/share.html", "/manifest.webmanifest", "/favicon.svg", "/css/app.css", "/icons/apple-touch-icon.png", "/js/app.js"] {
             assert!(!super::hashed_asset(plain), "{plain}");
         }
@@ -287,6 +305,91 @@ mod tests {
         assert_eq!((s, b.as_str()), (StatusCode::OK, "body{}"));
         let (s, _, b) = get(&rust, "/sw.js").await;
         assert_eq!((s, b.as_str()), (StatusCode::OK, "// sw"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The image keeps `<file>.br` and `<file>.gz` next to each text file of the web app: a client that takes
+    /// brotli gets the .br as it is (gzip: the .gz), a client that says nothing gets the plain file; index.html
+    /// the same, also for a deep link; a file without siblings is plain; the cache rules stay.
+    #[tokio::test]
+    async fn the_web_app_is_served_precompressed() {
+        use axum::body::Body;
+        use axum::http::{Request, StatusCode};
+        use tower::ServiceExt;
+        let dir = std::env::temp_dir().join(format!("encore-precompressed-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let dist = dir.join("static");
+        std::fs::create_dir_all(dist.join("css")).unwrap();
+        // the siblings' bytes are made up: the server sends them as they are and never decodes them
+        for (name, text) in [("index.html", "<!doctype html>encore"), ("encore-web-f92ab5b84b305a59.js", "// glue"), ("css/app.css", "body{}")] {
+            std::fs::write(dist.join(name), text).unwrap();
+            std::fs::write(dist.join(format!("{name}.br")), format!("br:{text}")).unwrap();
+            std::fs::write(dist.join(format!("{name}.gz")), format!("gz:{text}")).unwrap();
+        }
+        std::fs::write(dist.join("favicon.svg"), "<svg/>").unwrap();
+        let app = {
+            let _env = super::TEST_ENV.lock().unwrap_or_else(|e| e.into_inner());
+            std::env::set_var("ENCORE_CONFIG_DIR", dir.join("config"));
+            let mut st = super::build_state().unwrap();
+            st.static_dir = dist;
+            super::app(st)
+        };
+        let get = |path: &str, accept: Option<&str>| {
+            let app = app.clone();
+            let mut req = Request::builder().uri(path);
+            if let Some(a) = accept {
+                req = req.header("accept-encoding", a);
+            }
+            let req = req.body(Body::empty()).unwrap();
+            async move {
+                let resp = app.oneshot(req).await.unwrap();
+                let status = resp.status();
+                let h = resp.headers().clone();
+                let body = axum::body::to_bytes(resp.into_body(), 1 << 20).await.unwrap();
+                let header = move |name: &str| h.get(name).map(|v| v.to_str().unwrap().to_string());
+                (status, header, String::from_utf8_lossy(&body).to_string())
+            }
+        };
+        // brotli when the client takes it, before gzip
+        let (s, h, b) = get("/css/app.css", Some("gzip, deflate, br")).await;
+        assert_eq!((s, b.as_str()), (StatusCode::OK, "br:body{}"));
+        assert_eq!(h("content-encoding").as_deref(), Some("br"));
+        assert!(h("content-type").unwrap().starts_with("text/css"), "the type of the file, not of the sibling");
+        assert_eq!(h("cache-control").as_deref(), Some("no-cache"));
+        assert_eq!(h("vary").as_deref(), Some("accept-encoding"), "caches keep the variants apart");
+        let (_, h, b) = get("/css/app.css", Some("gzip")).await;
+        assert_eq!((h("content-encoding").as_deref(), b.as_str()), (Some("gzip"), "gz:body{}"));
+        // no Accept-Encoding (or only identity): the plain file
+        for accept in [None, Some("identity")] {
+            let (s, h, b) = get("/css/app.css", accept).await;
+            assert_eq!((s, b.as_str()), (StatusCode::OK, "body{}"), "{accept:?}");
+            assert_eq!(h("content-encoding"), None, "{accept:?}");
+            assert_eq!(h("vary").as_deref(), Some("accept-encoding"), "{accept:?}");
+        }
+        // the hashed glue: still cached for good
+        let (_, h, b) = get("/encore-web-f92ab5b84b305a59.js", Some("br")).await;
+        assert_eq!((h("content-encoding").as_deref(), b.as_str()), (Some("br"), "br:// glue"));
+        assert_eq!(h("cache-control").as_deref(), Some("public, max-age=31536000, immutable"));
+        // index.html for the root and, through the fallback, for a deep link
+        for path in ["/", "/some/deep/link"] {
+            let (s, h, b) = get(path, Some("br, gzip")).await;
+            assert_eq!((s, b.as_str()), (StatusCode::OK, "br:<!doctype html>encore"), "{path}");
+            assert_eq!(h("content-encoding").as_deref(), Some("br"), "{path}");
+            assert!(h("content-type").unwrap().starts_with("text/html"), "{path}");
+            assert_eq!(h("cache-control").as_deref(), Some("no-cache"), "{path}");
+            let (_, h, b) = get(path, None).await;
+            assert_eq!((h("content-encoding"), b.as_str()), (None, "<!doctype html>encore"), "{path}");
+        }
+        // no siblings: the plain file, whatever the client takes
+        let (s, h, b) = get("/favicon.svg", Some("br, gzip")).await;
+        assert_eq!((s, h("content-encoding"), b.as_str()), (StatusCode::OK, None, "<svg/>"));
+        // the API is not touched by any of it
+        let (_, h, _) = get("/api/health", Some("br, gzip")).await;
+        assert_eq!(h("cache-control").as_deref(), Some("no-store"));
+        // every answer, the app's files and the API alike, says it is Encore's (sw.js tells proxy pages by it)
+        assert_eq!(h("x-encore").as_deref(), Some("1"));
+        let (_, h, _) = get("/some/deep/link", None).await;
+        assert_eq!(h("x-encore").as_deref(), Some("1"));
         let _ = std::fs::remove_dir_all(&dir);
     }
 

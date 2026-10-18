@@ -51,6 +51,10 @@ webp = { version = "0.3", default-features = false }
 libc = "0.2"
 # quality checks on imports: spectrum of the decoded audio (fake lossless, upsampled)
 rustfft = "6.4"
+# "Update now": the Docker Engine API over the unix socket (HTTP/1.1 client; already in the tree via axum/reqwest)
+hyper = { version = "1", features = ["client", "http1"] }
+hyper-util = { version = "0.1", features = ["tokio"] }
+http-body-util = "0.1"
 
 [profile.release]
 lto = "thin"

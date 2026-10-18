@@ -122,7 +122,8 @@ fn magic_page(root: &Element, query: &HashMap<String, String>, app: &str) {
                 body.insert("token".into(), Value::String(token));
                 if let Some(c) = &code { body.insert("code".into(), Value::String(c.clone())); }
                 match api::post("/auth/magic", Value::Object(body)).await {
-                    Ok(_) => { dom::set_hash("#/"); dom::reload(); }
+                    // the new session's cookie replaces the old one, so no sign-out is pending any more (offline/mod.rs)
+                    Ok(_) => { crate::offline::set_signout_pending(false); dom::set_hash("#/"); dom::reload(); }
                     Err(ex) => {
                         if ex.data.truthy("two_factor") {
                             dom::remove_class(&form, "hidden");
@@ -229,7 +230,8 @@ pub async fn render(root: Element, path: String, query: HashMap<String, String>)
                 }
             }.await;
             match res {
-                Ok(_) => { dom::set_hash("#/"); dom::reload(); }
+                // the new session's cookie replaces the old one, so no sign-out is pending any more (offline/mod.rs)
+                Ok(_) => { crate::offline::set_signout_pending(false); dom::set_hash("#/"); dom::reload(); }
                 Err(ex) => {
                     dom::set_disabled(&btn, false);
                     if ex.data.truthy("two_factor") && dom::qs_in(&form, "[name=code]").is_none() {

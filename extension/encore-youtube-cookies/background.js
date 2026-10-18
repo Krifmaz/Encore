@@ -2,7 +2,7 @@
 // * Hand-off (recommended, handoff.html): a new private window signs in for Encore only; its cookies are sent
 //   with handoff:true and the window closes without signing out, so Encore owns that session alone and keeps
 //   it alive by itself.
-// * Everyday browser sync (optional, switched on in the options): this browser's own youtube.com / google.com
+// * Everyday browser sync (optional, switched on in the popup): this browser's own youtube.com / google.com
 //   cookies, on browser start, 30 s after a sign-in cookie changes and every 6 hours. Encore never rotates
 //   these, so the browser stays signed in.
 if (typeof importScripts === 'function') importScripts('shared.js'); // Chrome service worker (Firefox lists it in the manifest)
@@ -21,7 +21,7 @@ async function sync(reason, force) {
   if (incognitoContext) return { ok: false };
   const s = await settings();
   if (!force && !s.everyday) return { ok: false };
-  if (!s.url || !s.token) { await remember(false, 'Enter the Encore address and token in the options'); return { ok: false }; }
+  if (!s.url || !s.token) { await remember(false, 'Enter the Encore address and token under Encore connection'); return { ok: false }; }
   const res = await post(await collect(), { reason });
   await remember(res.ok, res.message);
   return res;

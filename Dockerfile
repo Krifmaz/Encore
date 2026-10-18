@@ -19,12 +19,17 @@ RUN case "$TARGETARCH" in arm64) T=aarch64-unknown-linux-gnu ;; *) T=x86_64-unkn
 
 # The web app in Rust/WebAssembly (web-rs): built once on the build machine with trunk, served at / by the server.
 FROM --platform=$BUILDPLATFORM rust:1-slim-trixie AS ui
-RUN apt-get update && apt-get install -y --no-install-recommends curl ca-certificates && rm -rf /var/lib/apt/lists/* \
+RUN apt-get update && apt-get install -y --no-install-recommends curl ca-certificates brotli && rm -rf /var/lib/apt/lists/* \
  && rustup target add wasm32-unknown-unknown \
  && curl -fsSL https://github.com/trunk-rs/trunk/releases/download/v0.21.14/trunk-x86_64-unknown-linux-gnu.tar.gz | tar -xz -C /usr/local/bin trunk
 WORKDIR /ui
 COPY web-rs ./
-RUN trunk build --release
+# every text file of the build also as <file>.br (brotli, best) and <file>.gz (gzip, best) next to it: the server
+# sends the one the browser takes as it is, so nothing is compressed per request and the .wasm comes much smaller
+RUN trunk build --release \
+ && find dist -type f \( -name '*.js' -o -name '*.wasm' -o -name '*.css' -o -name '*.html' -o -name '*.svg' \
+      -o -name '*.webmanifest' -o -name '*.json' \) -exec brotli -f -k -q 11 {} + -exec gzip -f -k -n -9 {} + \
+ && find dist -name '*.br' | grep -q . && find dist -name '*.gz' | grep -q .
 
 FROM debian:trixie-slim
 LABEL org.opencontainers.image.title="Encore" \

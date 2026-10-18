@@ -77,7 +77,7 @@ const SECTIONS: &[Section] = &[
         s("contact_email", "Contact email for MusicBrainz", "text").help("MusicBrainz asks API clients to identify themselves"),
         s("musicbrainz_url", "MusicBrainz server", "text").help("Use your own mirror for faster lookups"),
         s("musicbrainz_rate", "MusicBrainz requests / second", "number").step("0.1").help("Keep at 1 for the public server"),
-        s("github_token", "GitHub token (optional)", "password").full().help("Only for the Download tools update checks: GitHub allows 60 checks an hour per address without a token and 5,000 with one. A fine-grained token with no permissions is enough (github.com → Settings → Developer settings)."),
+        s("github_token", "GitHub token (optional)", "password").full().help("For the update checks of the download tools and of Encore itself: GitHub allows 60 checks an hour per address without a token and 5,000 with one. A fine-grained token with no permissions is enough (github.com → Settings → Developer settings); if the Encore repository is private, give the token read access to it."),
     ] },
     Section { id: "library", title: "Library & tagging", desc: "Where your music lives, and how downloaded files are tagged, named and organised.", test: None, test_label: None, fields: &[
         s("library_path", "Music library path", "text").help("Inside the container (mount your music folder here)"),
@@ -840,6 +840,7 @@ pub fn render(view: Element, ctx: Ctx) -> PageFuture {
       <nav class="settings-nav">{nav_html}</nav>
       <div id="panel"></div>
     </div>"##));
+        if admin { diagnostics::update_banner(&view); }
         let panel = dom::qs_in(&view, "#panel").ok_or_else(|| "Settings: no panel".to_string())?;
         let focus = if !s.is_empty() && current != s { Some(s.clone()) } else { None };
         let hub = Rc::new(Hub { view: view.clone(), panel, ctx: ctx.clone(), values: RefCell::new(values), lidarr_opts: RefCell::new(None), focus: RefCell::new(focus) });
@@ -1273,6 +1274,7 @@ fn paint_playback(st: &Rc<Look>) {
         dom::on(&c, "change", move |_| set_playback(&st2, json!({ "resume": dom::checked(&c2) })));
     }
     bind_sound(st);
+    crate::player::offline_setting(&st.el);
     if let Some(c) = dom::qs_in(&st.el, "#pb-dsp") {
         let (st2, c2) = (st.clone(), c.clone());
         dom::on(&c, "change", move |_| set_playback(&st2, json!({ "dsp": dom::checked(&c2) })));

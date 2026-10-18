@@ -21,6 +21,7 @@ pub(super) async fn track_info(t: &Value) -> Option<Value> {
 pub(super) fn transport() -> Option<(String, String)> {
     let t = cur()?;
     if t.truthy("preview") { return Some(("preview".into(), "A 30-second preview from the catalogue (lossy) – not your file".into())); }
+    if st(|s| s.local_copy) { return Some(("local".into(), format!("Downloaded copy on this device · {}", copy_quality(&t)))); }
     let rung = st(|s| s.rung);
     if rung > 0 {
         let codec = lossy_codec();
@@ -63,8 +64,16 @@ pub(super) async fn signal_path() {
     // quality checks (fake lossless, upsampled, very quiet…): "Fake lossless? cutoff 16 kHz"
     let suspect = info.as_ref().map(|i| i.o("quality")).filter(|q| q.s("status") == "suspect").map(|q| q.s("summary")).unwrap_or_default();
     let lossy_note = if info.as_ref().is_some_and(|i| i.g("lossless") == &json!(false)) { "A lossy file: what the file lost is gone before Encore touches it".to_string() } else { String::new() };
-    rows.push(("Source".into(), source_line(&t, info.as_ref()), [lossy_note, suspect].into_iter().filter(|x| !x.is_empty()).collect::<Vec<_>>().join(" · ")));
     let linked = linked();
+    let copy = linked.is_none() && st(|s| s.local_copy) && cur().is_some_and(|c| *c == t);
+    let converted = copy && copy_converted(&t);
+    if copy {
+        // the saved copy: where the music comes from now; the server's file only as a note
+        let note = if converted { format!("Converted from the server's file: {}", source_line(&t, info.as_ref())) } else { [lossy_note, suspect].into_iter().filter(|x| !x.is_empty()).collect::<Vec<_>>().join(" · ") };
+        rows.push(("Source".into(), format!("Downloaded copy on this device · {}", copy_quality(&t)), note));
+    } else {
+        rows.push(("Source".into(), source_line(&t, info.as_ref()), [lossy_note, suspect].into_iter().filter(|x| !x.is_empty()).collect::<Vec<_>>().join(" · ")));
+    }
     let pure;
     let mut untouched = false;
     let cadenza = linked.is_none() && transport().is_some_and(|(k, _)| k.starts_with("cadenza"));
@@ -78,6 +87,7 @@ pub(super) async fn signal_path() {
         let what = if tr == "original" { "The original file, byte for byte".to_string() }
             else if tr.is_empty() { "Not reported by that device".to_string() }
             else if tr == "flac" { "Converted to FLAC by the server (lossless)".to_string() }
+            else if tr == "local" { "Nothing: it plays a copy downloaded to that device".to_string() }
             else if let Some(rate) = tr.strip_prefix("cadenza-") { let n = num(rate); format!("Upsampled on the server by Cadenza ({} kHz)", khz(if truthy_num(n) { n } else { 0.0 })) }
             else if tr.starts_with("aac-") || tr.starts_with("opus-") { let (c, k) = tr.split_once('-').unwrap_or((&tr, "")); format!("{} {k} kbps (lossy)", c.to_uppercase()) }
             else { tr.clone() };
@@ -92,7 +102,7 @@ pub(super) async fn signal_path() {
     } else {
         let tr = transport();
         let net = match est_kbps() { Some(k) if k > 0.0 => format!(" · connection ≈ {} Mbit/s", mbit(k)), _ => String::new() };
-        rows.push(("Encore → this device".into(), format!("{}{net}", tr.as_ref().map(|(_, x)| x.clone()).unwrap_or_default()), String::new()));
+        if !copy { rows.push(("Encore → this device".into(), format!("{}{net}", tr.as_ref().map(|(_, x)| x.clone()).unwrap_or_default()), String::new())); }
         let out = output_rate();
         let src = info.as_ref().map(|i| i.f("sample_rate")).unwrap_or(0.0);
         let resampled = truthy_num(out) && truthy_num(src) && out != src;
@@ -118,6 +128,12 @@ pub(super) async fn signal_path() {
         }
     } else if cadenza {
         ("Processed by Cadenza on the server".to_string(), "Encore upsampled the file on the server with Cadenza and sent lossless 24-bit FLAC. Turn it off under Settings → Playback → Server processing to get the untouched file.")
+    } else if copy && converted {
+        ("Not the untouched file".to_string(), "This download is a converted copy: the original file doesn't play in this browser, or the server converted it. Where the original plays, Downloads → ⋯ → Download again in original quality replaces it.")
+    } else if copy && playback::fx_active(&prefs()) {
+        ("Not the untouched file".to_string(), "The original file, downloaded byte for byte; this device adds the effects you chose under Settings → Playback → Sound.")
+    } else if copy {
+        ("Pure playback from this device".to_string(), "The original file, downloaded byte for byte. Everything after that – volume, mixing, resampling – is your browser and operating system.")
     } else if pure {
         ("Pure playback from Encore".to_string(), "Encore sent the file exactly as it is stored. Everything after that – volume, mixing, resampling – is your browser and operating system.")
     } else if untouched {

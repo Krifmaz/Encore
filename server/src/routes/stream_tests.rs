@@ -1,7 +1,8 @@
 //! Codec negotiation through the real router: a client that lists its decoders (`X-Encore-Decoders` or
 //! `?codecs=`) gets the original when the file's codec is listed and a lossless FLAC fallback otherwise, the
 //! `x-encore-stream` label says which, `/tracks/{id}/info` makes the same call, DSF passes through when
-//! listed, and `audio_info` is read once per file and mtime.
+//! listed, and `audio_info` is read once per file and mtime. `offline_ok` in `/info` follows the plan, and only
+//! the original may be kept by a cache: every stream made on the fly says `private, no-store`.
 use crate::p;
 use crate::state::AppState;
 use axum::body::Body;
@@ -324,4 +325,52 @@ fn the_plan_by_codec_and_list() {
     assert_eq!(super::decoders(&h, "mp3"), Some(list("opus")));
     h.insert("x-encore-decoders", "".parse().unwrap());
     assert_eq!(super::decoders(&h, "mp3"), Some(list("mp3")));
+}
+
+#[tokio::test]
+async fn offline_ok_only_for_the_original_and_made_streams_are_never_stored() {
+    let mut e = setup("offline").await;
+    std::fs::write(e.music.join("d.wav"), wav_bytes(44_100)).unwrap();
+    std::fs::write(e.music.join("e.dsf"), dsf_bytes()).unwrap();
+    let wav = e.add("d.wav");
+    let dsf = e.add("e.dsf");
+    let info = |id: i64, query: &'static str, decoders: Option<&'static str>| {
+        let e = &e;
+        async move { e.get(&format!("/api/library/tracks/{id}/info{query}"), decoders).await.json() }
+    };
+    // `offline_ok` next to `stream`: true exactly when the stream is the original for this client
+    for (id, query, decoders, kind) in [
+        (wav, "", None, "original"),                     // a browser plays WAV
+        (wav, "", Some("flac,wav"), "original"),
+        (wav, "", Some("flac,mp3,aac"), "flac-fallback"), // no WAV decoder: a conversion
+        (wav, "?codecs=wav", None, "original"),
+        (dsf, "", None, "flac"),                         // browsers can't play DSD
+        (dsf, "", Some("dsd"), "original"),
+        (dsf, "?codecs=flac", None, "flac-fallback"),
+    ] {
+        let v = info(id, query, decoders).await;
+        assert_eq!(v["stream"]["kind"], kind, "{id}{query} {decoders:?}: {v}");
+        assert_eq!(v["offline_ok"], kind == "original", "{id}{query} {decoders:?}: {v}");
+    }
+
+    // the original keeps its header; DSF passed through too
+    let r = e.stream(wav, "", None).await;
+    assert_eq!((r.h("x-encore-stream").as_str(), r.h("cache-control").as_str()), ("original", "private, max-age=3600"));
+    let r = e.stream(dsf, "", Some("dsd")).await;
+    assert_eq!((r.h("x-encore-stream").as_str(), r.h("cache-control").as_str()), ("original", "private, max-age=3600"));
+    if !have_ffmpeg() {
+        eprintln!("ffmpeg not found: skipping the no-store check of made streams");
+        return;
+    }
+    // made on the fly: the asked-for conversion, the fallback, the lossy rungs, DSD for a browser
+    for (id, query, decoders, label) in [
+        (wav, "?transcode=1", None, "flac"),
+        (wav, "", Some("flac,mp3"), "flac-fallback"),
+        (wav, "?q=aac&kbps=128", None, "aac-128"),
+        (dsf, "", None, "flac"),
+    ] {
+        let r = e.stream(id, query, decoders).await;
+        assert_eq!(r.h("x-encore-stream"), label, "{id}{query} {decoders:?}");
+        assert_eq!(r.h("cache-control"), "private, no-store", "{id}{query} {decoders:?}");
+    }
 }

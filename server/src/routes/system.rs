@@ -35,6 +35,9 @@ pub fn router() -> Router<AppState> {
         .route("/api/system/backups/{name}", get(backup_download))
         .route("/api/system/backups/{name}/restore", post(backup_restore))
         .route("/api/discover/probe", get(probe))
+        // Encore's own updates and "Restart server" (update.rs)
+        .route("/api/system/update", get(crate::update::get_update).post(crate::update::post_update))
+        .route("/api/system/restart", post(crate::update::post_restart))
 }
 
 // ---- download tools (Settings → Apps & sources → Download tools) --------------------------------
@@ -219,6 +222,8 @@ pub(crate) fn server_block(st: &AppState) -> Value {
     };
     let (memory, memory_source) = memory_limit();
     let (readers, source) = st.db.readers_in_effect();
+    // the last update check (kept in the database, no network): the Settings banner reads it from here
+    let (update_available, latest) = crate::update::machine_fields(st);
     json!({
         "cpus": std::thread::available_parallelism().map(|n| n.get()).ok(),
         "memory": memory,
@@ -229,6 +234,9 @@ pub(crate) fn server_block(st: &AppState) -> Value {
         "translations_on": crate::translate::anyone_on(&st.db),
         "db_readers": readers,
         "db_readers_source": source.as_str(),
+        "encore_version": crate::VERSION,
+        "encore_update_available": update_available,
+        "encore_latest": latest,
     })
 }
 

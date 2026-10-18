@@ -1,4 +1,4 @@
-// Shared by the background script, the popup, the options page and the hand-off page.
+// Shared by the background script, the popup (also the options page) and the hand-off page.
 // Nothing here logs or shows a cookie value.
 /* exported api, SIGN_IN_URL, DOMAINS, settings, agent, remember, collect, post, signedIn, incognitoAllowed, isFirefox, handoffBlocker, openHandoffWindow */
 const api = globalThis.browser ?? globalThis.chrome;
@@ -54,7 +54,7 @@ function signedIn(cookies) {
 // in, so Encore refreshes a handed-over session as this browser.
 async function post(cookies, extra) {
   const { url, token } = await settings();
-  if (!url || !token) return { ok: false, message: 'Enter the Encore address and token in the options first' };
+  if (!url || !token) return { ok: false, message: 'Enter the Encore address and token under Encore connection first' };
   try {
     const r = await fetch(`${url}/api/youtube/extension-cookies`, {
       method: 'POST',
@@ -77,7 +77,7 @@ async function incognitoAllowed() {
 // Why the hand-off can't start yet (null: it can).
 async function handoffBlocker() {
   const s = await settings();
-  if (!s.url || !s.token) return 'Enter the Encore address and token in the options first.';
+  if (!s.url || !s.token) return 'Enter the Encore address and token under Encore connection first.';
   if (!(await incognitoAllowed())) {
     return isFirefox
       ? 'Allow the extension in private windows first: open about:addons → Encore – YouTube sign-in → "Run in Private Windows" → Allow. Then press the button again.'

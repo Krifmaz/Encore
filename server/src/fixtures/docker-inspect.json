@@ -1,0 +1,360 @@
+{
+  "Id": "784f60a526476812415c46b2613ebae100e5df0b6fc23a4b255d19ccf653c7a5",
+  "Created": "2026-10-11T08:14:22.512837215Z",
+  "Path": "/usr/bin/tini",
+  "Args": [
+    "--",
+    "/entrypoint.sh",
+    "encore"
+  ],
+  "State": {
+    "Status": "running",
+    "Running": true,
+    "Paused": false,
+    "Restarting": false,
+    "OOMKilled": false,
+    "Dead": false,
+    "Pid": 2311,
+    "ExitCode": 0,
+    "Error": "",
+    "StartedAt": "2026-10-11T08:14:23.019334902Z",
+    "FinishedAt": "0001-01-01T00:00:00Z",
+    "Health": {
+      "Status": "healthy",
+      "FailingStreak": 0,
+      "Log": [
+        {
+          "Start": "2026-10-18T09:00:01.10Z",
+          "End": "2026-10-18T09:00:01.16Z",
+          "ExitCode": 0,
+          "Output": "{\"ok\":true,\"version\":\"0.27.0\",\"server\":\"rust\"}"
+        }
+      ]
+    }
+  },
+  "Image": "sha256:d4a92e09a51355b13a6055a235cf06c2ec9e0d079cd1ade6135629bdb98fc349",
+  "ResolvConfPath": "/var/lib/docker/containers/784f60a526476812415c46b2613ebae100e5df0b6fc23a4b255d19ccf653c7a5/resolv.conf",
+  "HostnamePath": "/var/lib/docker/containers/784f60a526476812415c46b2613ebae100e5df0b6fc23a4b255d19ccf653c7a5/hostname",
+  "HostsPath": "/var/lib/docker/containers/784f60a526476812415c46b2613ebae100e5df0b6fc23a4b255d19ccf653c7a5/hosts",
+  "LogPath": "/var/lib/docker/containers/784f60a526476812415c46b2613ebae100e5df0b6fc23a4b255d19ccf653c7a5/784f60a526476812415c46b2613ebae100e5df0b6fc23a4b255d19ccf653c7a5-json.log",
+  "Name": "/encore",
+  "RestartCount": 0,
+  "Driver": "overlay2",
+  "Platform": "linux",
+  "MountLabel": "",
+  "ProcessLabel": "",
+  "AppArmorProfile": "docker-default",
+  "ExecIDs": null,
+  "HostConfig": {
+    "Binds": [
+      "/srv/music:/music:rw",
+      "/var/run/docker.sock:/var/run/docker.sock:rw",
+      "encore_config:/config:rw"
+    ],
+    "ContainerIDFile": "",
+    "LogConfig": {
+      "Type": "json-file",
+      "Config": {
+        "max-file": "3",
+        "max-size": "10m"
+      }
+    },
+    "NetworkMode": "encore_default",
+    "PortBindings": {
+      "8080/tcp": [
+        {
+          "HostIp": "",
+          "HostPort": "8080"
+        }
+      ]
+    },
+    "RestartPolicy": {
+      "Name": "unless-stopped",
+      "MaximumRetryCount": 0
+    },
+    "AutoRemove": false,
+    "VolumeDriver": "",
+    "VolumesFrom": null,
+    "ConsoleSize": [
+      0,
+      0
+    ],
+    "CapAdd": [
+      "SYS_NICE"
+    ],
+    "CapDrop": null,
+    "CgroupnsMode": "private",
+    "Dns": [],
+    "DnsOptions": [],
+    "DnsSearch": [],
+    "ExtraHosts": [
+      "host.docker.internal:host-gateway"
+    ],
+    "GroupAdd": null,
+    "IpcMode": "private",
+    "Cgroup": "",
+    "Links": null,
+    "OomScoreAdj": 0,
+    "PidMode": "",
+    "Privileged": false,
+    "PublishAllPorts": false,
+    "ReadonlyRootfs": false,
+    "SecurityOpt": null,
+    "UTSMode": "",
+    "UsernsMode": "",
+    "ShmSize": 67108864,
+    "Runtime": "runc",
+    "Isolation": "",
+    "CpuShares": 0,
+    "Memory": 2147483648,
+    "NanoCpus": 2000000000,
+    "CgroupParent": "",
+    "BlkioWeight": 0,
+    "BlkioWeightDevice": null,
+    "BlkioDeviceReadBps": null,
+    "BlkioDeviceWriteBps": null,
+    "BlkioDeviceReadIOps": null,
+    "BlkioDeviceWriteIOps": null,
+    "CpuPeriod": 0,
+    "CpuQuota": 0,
+    "CpuRealtimePeriod": 0,
+    "CpuRealtimeRuntime": 0,
+    "CpusetCpus": "",
+    "CpusetMems": "",
+    "Devices": [
+      {
+        "PathOnHost": "/dev/dri",
+        "PathInContainer": "/dev/dri",
+        "CgroupPermissions": "rwm"
+      }
+    ],
+    "DeviceCgroupRules": null,
+    "DeviceRequests": null,
+    "MemoryReservation": 0,
+    "MemorySwap": 4294967296,
+    "MemorySwappiness": null,
+    "OomKillDisable": null,
+    "PidsLimit": null,
+    "Ulimits": null,
+    "CpuCount": 0,
+    "CpuPercent": 0,
+    "IOMaximumIOps": 0,
+    "IOMaximumBandwidth": 0,
+    "Mounts": [
+      {
+        "Type": "bind",
+        "Source": "/srv/downloads",
+        "Target": "/downloads"
+      }
+    ],
+    "MaskedPaths": [
+      "/proc/asound",
+      "/proc/acpi",
+      "/proc/kcore",
+      "/proc/keys",
+      "/proc/latency_stats",
+      "/proc/timer_list",
+      "/proc/timer_stats",
+      "/proc/sched_debug",
+      "/proc/scsi",
+      "/sys/firmware",
+      "/sys/devices/virtual/powercap"
+    ],
+    "ReadonlyPaths": [
+      "/proc/bus",
+      "/proc/fs",
+      "/proc/irq",
+      "/proc/sys",
+      "/proc/sysrq-trigger"
+    ]
+  },
+  "GraphDriver": {
+    "Data": {
+      "LowerDir": "/var/lib/docker/overlay2/f56865fef7726a425116631e69a89fd76357b5ba56e4fcd4e1fe70e8242b666e-init/diff",
+      "MergedDir": "/var/lib/docker/overlay2/f56865fef7726a425116631e69a89fd76357b5ba56e4fcd4e1fe70e8242b666e/merged",
+      "UpperDir": "/var/lib/docker/overlay2/f56865fef7726a425116631e69a89fd76357b5ba56e4fcd4e1fe70e8242b666e/diff",
+      "WorkDir": "/var/lib/docker/overlay2/f56865fef7726a425116631e69a89fd76357b5ba56e4fcd4e1fe70e8242b666e/work"
+    },
+    "Name": "overlay2"
+  },
+  "Mounts": [
+    {
+      "Type": "bind",
+      "Source": "/srv/music",
+      "Destination": "/music",
+      "Mode": "rw",
+      "RW": true,
+      "Propagation": "rprivate"
+    },
+    {
+      "Type": "bind",
+      "Source": "/var/run/docker.sock",
+      "Destination": "/var/run/docker.sock",
+      "Mode": "rw",
+      "RW": true,
+      "Propagation": "rprivate"
+    },
+    {
+      "Type": "volume",
+      "Name": "encore_config",
+      "Source": "/var/lib/docker/volumes/encore_config/_data",
+      "Destination": "/config",
+      "Driver": "local",
+      "Mode": "rw",
+      "RW": true,
+      "Propagation": ""
+    },
+    {
+      "Type": "bind",
+      "Source": "/srv/downloads",
+      "Destination": "/downloads",
+      "Mode": "",
+      "RW": true,
+      "Propagation": "rprivate"
+    }
+  ],
+  "Config": {
+    "Hostname": "784f60a52647",
+    "Domainname": "",
+    "User": "",
+    "AttachStdin": false,
+    "AttachStdout": true,
+    "AttachStderr": true,
+    "ExposedPorts": {
+      "8080/tcp": {}
+    },
+    "Tty": false,
+    "OpenStdin": false,
+    "StdinOnce": false,
+    "Env": [
+      "TZ=Europe/Berlin",
+      "PUID=1000",
+      "PGID=988",
+      "ENCORE_BASE_URL=https://music.example.org",
+      "PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
+      "ENCORE_CONFIG_DIR=/config",
+      "ENCORE_STATIC_DIR=/app/static",
+      "ENCORE_PORT=8080",
+      "ENCORE_BUILD=4f1d2c3b5a69788f9e0d1c2b3a4f5e6d7c8b9a01"
+    ],
+    "Cmd": [
+      "encore"
+    ],
+    "Healthcheck": {
+      "Test": [
+        "CMD-SHELL",
+        "curl -fsS http://127.0.0.1:8080/api/health || exit 1"
+      ],
+      "Interval": 30000000000,
+      "Timeout": 5000000000,
+      "StartPeriod": 20000000000,
+      "Retries": 3
+    },
+    "Image": "ghcr.io/krifmaz/encore:latest",
+    "Volumes": {
+      "/config": {}
+    },
+    "WorkingDir": "/",
+    "Entrypoint": [
+      "/usr/bin/tini",
+      "--",
+      "/entrypoint.sh"
+    ],
+    "OnBuild": null,
+    "Labels": {
+      "com.docker.compose.config-hash": "8e2f0f6f1c0e3a3d5b9c7a1e2d4f6b8a0c2e4f6a8b0d2f4a6c8e0b2d4f6a8c0e",
+      "com.docker.compose.container-number": "1",
+      "com.docker.compose.depends_on": "",
+      "com.docker.compose.image": "sha256:d4a92e09a51355b13a6055a235cf06c2ec9e0d079cd1ade6135629bdb98fc349",
+      "com.docker.compose.oneoff": "False",
+      "com.docker.compose.project": "encore",
+      "com.docker.compose.project.config_files": "/srv/encore/compose.yaml",
+      "com.docker.compose.project.working_dir": "/srv/encore",
+      "com.docker.compose.service": "encore",
+      "com.docker.compose.version": "2.29.7",
+      "org.opencontainers.image.created": "2026-10-11T07:55:10.412Z",
+      "org.opencontainers.image.source": "https://github.com/Krifmaz/Encore",
+      "org.opencontainers.image.version": "0.27.0"
+    },
+    "StopSignal": "SIGTERM"
+  },
+  "NetworkSettings": {
+    "Bridge": "",
+    "SandboxID": "b7ad567477c83756aab9a542b2be04f77dbae25115d85f22070d74d8cc4779dc",
+    "SandboxKey": "/var/run/docker/netns/b7ad567477c8",
+    "Ports": {
+      "8080/tcp": [
+        {
+          "HostIp": "0.0.0.0",
+          "HostPort": "8080"
+        },
+        {
+          "HostIp": "::",
+          "HostPort": "8080"
+        }
+      ]
+    },
+    "HairpinMode": false,
+    "LinkLocalIPv6Address": "",
+    "LinkLocalIPv6PrefixLen": 0,
+    "SecondaryIPAddresses": null,
+    "SecondaryIPv6Addresses": null,
+    "EndpointID": "",
+    "Gateway": "",
+    "GlobalIPv6Address": "",
+    "GlobalIPv6PrefixLen": 0,
+    "IPAddress": "",
+    "IPPrefixLen": 0,
+    "IPv6Gateway": "",
+    "MacAddress": "",
+    "Networks": {
+      "encore_default": {
+        "IPAMConfig": null,
+        "Links": null,
+        "Aliases": [
+          "encore",
+          "encore"
+        ],
+        "MacAddress": "02:42:ac:13:00:02",
+        "DriverOpts": null,
+        "NetworkID": "faf05341e082cae4a32d578538d22a5fe7553f8f795f94925bdbae23528a4aa5",
+        "EndpointID": "f56865fef7726a425116631e69a89fd76357b5ba56e4fcd4e1fe70e8242b666e",
+        "Gateway": "172.19.0.1",
+        "IPAddress": "172.19.0.2",
+        "IPPrefixLen": 16,
+        "IPv6Gateway": "",
+        "GlobalIPv6Address": "",
+        "GlobalIPv6PrefixLen": 0,
+        "DNSNames": [
+          "encore",
+          "784f60a52647"
+        ]
+      },
+      "proxy": {
+        "IPAMConfig": {
+          "IPv4Address": "172.30.0.20"
+        },
+        "Links": null,
+        "Aliases": [
+          "music",
+          "784f60a52647"
+        ],
+        "MacAddress": "02:42:ac:1e:00:14",
+        "DriverOpts": null,
+        "NetworkID": "8ffedfdfcd934c34ce7112cca7769102b06ade406d6e4ffc815e87d590f08a63",
+        "EndpointID": "c4d1e7d4193f302822548ddd0490cf478665b89a690c7370bddddf319cf474fe",
+        "Gateway": "172.30.0.1",
+        "IPAddress": "172.30.0.20",
+        "IPPrefixLen": 24,
+        "IPv6Gateway": "",
+        "GlobalIPv6Address": "",
+        "GlobalIPv6PrefixLen": 0,
+        "DNSNames": [
+          "encore",
+          "music",
+          "784f60a52647"
+        ]
+      }
+    }
+  }
+}

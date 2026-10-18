@@ -140,6 +140,15 @@ Nothing here is started until the owner says "go".
     - The Requests list piles up duplicate failed rows for the same song (4× "Reach Out To The Truth").
       Group retries of one song into one row.
 14. **Offline website (PWA):** the site must open and play downloaded songs when the server is unreachable.
+    – **Done 0.28.0 for the website**: the service worker keeps the app shell (and says "A new version of Encore is
+    ready" with Reload); Download for offline on songs, albums, playlists and Liked Songs into the Cache API
+    (`encore-offline-v1`, chosen over OPFS because Safari lacks `createWritable` on the main thread) with covers and
+    lyrics; Downloads (side bar, below Library) with the storage line, Make persistent and removal; offline mode with the banner,
+    greyed entries and the 30-day grace; plays and likes queued and sent with their real times (`POST
+    /api/library/plays` list form); the iOS Home Screen hint. One record for every client:
+    docs/contracts/offline-manifest.md. **Waits for the phone (0.30)**: the native app's offline store
+    (`Music/Encore/` on shared storage), its offline mode and outbox, and Downloaded in Android Auto. The desktop
+    app (Iced) has had offline songs since 0.27.0 and reads the same record.
     - The service worker caches the whole app shell (the web-rs WASM, JS glue, CSS, fonts, icons) and serves
       it when the server is down.
     - "Download for offline" on the web: songs, albums, playlists and Liked Songs are saved in the browser's
@@ -169,6 +178,12 @@ Nothing here is started until the owner says "go".
     - Migration: existing tools/settings map onto their plugin 1:1 without re-setup.
     - Not shipped: anything that strips DRM (the owner asked for gamdl/zotify; declined).
 16. **In-app updates and restart on every device:**
+    – **Done 0.28.0 for the server and the web**: Settings → Diagnostics → Updates (version check against the GitHub
+    releases once a day, the notes, Check now), the Settings header banner, Restart server (exit code 75, restarted
+    by the image's entrypoint loop), Update now when the Docker socket is mounted (`ENCORE_SELF_UPDATE=off` hides
+    it), and the service worker's "new version" message. The desktop app (Iced) updates itself from the release
+    since 0.27.0. **Waits for the phone (0.30)**: the Android in-app update (download the APK, verify, open the
+    installer) and the update banner on the phone.
     - Server: an update check against GitHub releases (banner in Settings and on the phone with the release
       notes), a "Restart server" button, and self-update when the Docker socket is mounted (pull the new image
       and recreate the container, Watchtower-style; off and hidden when the socket isn't there).
