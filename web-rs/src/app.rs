@@ -19,7 +19,12 @@ pub struct Session { pub user: Option<Value>, pub info: Value }
 thread_local! {
     static SESSION: RefCell<Session> = RefCell::new(Session::default());
     static ROUTE_N: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+    /// The last hash that was not a Bug reports page: a new report says which page the user came from.
+    static PREV_HASH: RefCell<String> = const { RefCell::new(String::new()) };
 }
+
+/// The hash the user was on before opening Bug reports ("#/library?s=…"), "" right after boot.
+pub fn previous_hash() -> String { PREV_HASH.with(|h| h.borrow().clone()) }
 
 pub fn session() -> Session { SESSION.with(|s| s.borrow().clone()) }
 pub fn user() -> Option<Value> { SESSION.with(|s| s.borrow().user.clone()) }
@@ -99,7 +104,9 @@ fn match_route(path: &str) -> Option<(&'static str, Vec<String>)> {
         "/account" => ("redirect:account", vec![]),
         "/storage" => ("storage", vec![]),
         "/leaderboard" => ("leaderboard", vec![]),
+        "/bug-reports" => ("bug-reports", vec![]),
         _ => {
+            if let Some(r) = p("/bug-reports/") { return if r.chars().all(|c| c.is_ascii_digit()) { Some(("bug-report", vec![r])) } else { None }; }
             if let Some(r) = p("/tag/") { return Some(("tag", vec![r])); }
             if let Some(r) = p("/artist/") { return seg(&r).map(|s| ("artist", vec![s])); }
             if let Some(r) = p("/artist-name/") { return Some(("artist-name", vec![r])); }
@@ -130,6 +137,8 @@ fn page_for(name: &str) -> Option<PageFn> {
         "settings" => pages::settings::render,
         "storage" => pages::storage::render,
         "leaderboard" => pages::leaderboard::render,
+        "bug-reports" => pages::bugreports::render,
+        "bug-report" => pages::bugreports::render_one,
         _ => return None,
     })
 }
@@ -174,6 +183,9 @@ fn render_shell() {
           {leaderboard}
         </nav>
         <div id="storage-mini" style="flex:none"></div>
+        <nav class="nav nav-under">
+          {bugs}
+        </nav>
         <div class="sidebar-foot" style="margin-top:0">
           <a href="#/settings?s=account" class="row grow" style="min-width:0">
             {avatar}
@@ -198,6 +210,7 @@ fn render_shell() {
         download = nav_link("/download", &icon("download"), "Downloader", ""),
         soulseek = if has_feature("soulseek") { nav_link("/soulseek", &icon("users"), "Soulseek", "") } else { String::new() },
         leaderboard = nav_link("/leaderboard", &icon("activity"), "Leaderboard", ""),
+        bugs = nav_link("/bug-reports", &icon("bug"), "Bug reports", r#"<span class="badge warn hidden" id="bugs-badge"></span>"#),
         avatar = avatar_html(&u, 32),
         username = esc(&u.s("username")),
         role = if u.s("role") == "owner" { "Owner" } else if admin { "Admin" } else { "Member" },
@@ -214,6 +227,7 @@ fn render_shell() {
     let meter = || { if let Some(el) = qs("#storage-mini") { pages::storage::sidebar_meter(el); } };
     meter();
     dom::interval_forever(5 * 60 * 1000, meter);
+    dom::spawn(refresh_bugs_badge());
     if let Some(b) = qs("#menu-btn") {
         dom::on_forever(&b, "click", |e| { e.stop_propagation(); if let Some(sb) = qs("#sidebar") { let _ = sb.class_list().toggle("open"); } });
     }
@@ -238,6 +252,18 @@ async fn refresh_pending_badge() {
     }
 }
 
+/// The sidebar's Bug reports badge: reports with something new for this user (GET /api/bug-reports/unread).
+async fn refresh_bugs_badge() {
+    if user().is_none() { return; }
+    if let Ok(d) = api::get("/bug-reports/unread").await {
+        let n = d.i("count");
+        if let Some(b) = qs("#bugs-badge") {
+            b.set_text_content(Some(&n.to_string()));
+            dom::toggle_class(&b, "hidden", n <= 0);
+        }
+    }
+}
+
 /// `route()`: render the page for the current hash.
 pub fn route() { dom::spawn(route_async()); }
 
@@ -250,6 +276,7 @@ async fn route_async() {
         return;
     };
     if qs("#view").is_none() { render_shell(); }
+    if !path.starts_with("/bug-reports") { PREV_HASH.with(|h| *h.borrow_mut() = dom::hash()); }
     if let Some(sb) = qs("#sidebar") { dom::remove_class(&sb, "open"); }
     for a in qsa("[data-nav]") {
         let href = dom::data(&a, "nav");
@@ -289,6 +316,7 @@ pub async fn boot() {
         remote::resume();
         dom::spawn(refresh_pending_badge());
         dom::interval_forever(30000, || dom::spawn(refresh_pending_badge()));
+        dom::interval_forever(60000, || dom::spawn(refresh_bugs_badge()));
     }
     route();
 }
@@ -365,6 +393,7 @@ pub fn init() {
         }
     });
     dom::on_window("encore:requests-changed", |_| dom::spawn(refresh_pending_badge()));
+    dom::on_window("encore:bugs-changed", |_| dom::spawn(refresh_bugs_badge()));
     dom::on_window("offline", |_| conn_banner(true, "Not connected – check your internet or server"));
     dom::on_window("encore-native", |e| {
         if let Some(ce) = e.dyn_ref::<web_sys::CustomEvent>() {

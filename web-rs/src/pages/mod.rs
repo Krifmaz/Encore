@@ -6,6 +6,7 @@ pub mod admin;
 pub mod artwork;
 pub mod auth;
 pub mod autodownload;
+pub mod bugreports;
 pub mod common;
 pub mod computer;
 pub mod connections;

@@ -146,6 +146,7 @@ pub fn app(st: AppState) -> Router {
         .merge(routes::tagging::router())
         .merge(routes::playlists::router())
         .merge(routes::stats::router())
+        .merge(routes::bugreports::router())
         .merge(routes::remote::router())
         .merge(routes::roon::router())
         .merge(routes::playback::router())

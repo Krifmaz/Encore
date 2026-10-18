@@ -648,3 +648,23 @@ details.slsk-folder > .slsk-files { padding: 0 16px 12px; }
 @media (max-width: 760px) { .scrubber { top: 120px; right: 2px; } .scrub-rail { padding: 6px 4px; } }
 /* a song's artists and album as links (each artist of a collaboration on its own) */
 .artist-link:hover, .album-link:hover { text-decoration: underline; color: var(--text); }
+
+/* ---------- bug reports (sidebar entry under the storage box, #/bug-reports) ---------- */
+.nav.nav-under { flex: none; margin: 0 0 6px; overflow: visible; }
+.bug-row .bug-title { color: var(--text); }
+.bug-row .bug-title:hover { text-decoration: underline; }
+.bug-row .bug-unread { box-shadow: 0 0 8px var(--warn); }
+.bug-chip.on { cursor: pointer; }
+.bug-thumbs { display: flex; flex-wrap: wrap; gap: 8px; min-height: 0; }
+.bug-thumbs:empty { display: none; }
+.bug-thumb { position: relative; width: 72px; height: 72px; border-radius: 8px; overflow: hidden; border: 1px solid var(--border); background: var(--panel-2); display: grid; place-items: center; padding: 4px; }
+.bug-thumb img { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: cover; }
+.bug-thumb .ellipsis { max-width: 100%; }
+.bug-thumb-x { position: absolute; top: 2px; right: 2px; width: 20px; height: 20px; border-radius: 50%; border: 0; background: rgba(0,0,0,.6); color: #fff; cursor: pointer; line-height: 1; font-size: 14px; display: grid; place-items: center; }
+.bug-files { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 10px; }
+.bug-file.img { display: block; width: 140px; height: 100px; border-radius: 8px; overflow: hidden; border: 1px solid var(--border); background: var(--panel-2); }
+.bug-file.img img { width: 100%; height: 100%; object-fit: cover; display: block; }
+.bug-file.img:hover { outline: 2px solid var(--accent); }
+.bug-file.text { display: inline-flex; align-items: center; gap: 6px; padding: 6px 10px; border: 1px solid var(--border); border-radius: 8px; font-size: 13px; color: var(--text); background: var(--panel-2); }
+.bug-file.text svg { width: 14px; height: 14px; }
+.bug-file.text:hover { border-color: var(--accent); }

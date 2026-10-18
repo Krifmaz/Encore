@@ -22,7 +22,7 @@ subtle = "2"
 totp-rs = { version = "5", features = ["gen_secret", "otpauth", "qr"] }
 lettre = { version = "0.11", default-features = false, features = ["builder", "smtp-transport", "tokio1", "tokio1-rustls-tls", "hostname"] }
 reqwest = { version = "0.12", default-features = false, features = ["multipart", "json", "rustls-tls", "rustls-tls-native-roots", "stream"] }
-image = { version = "0.25", default-features = false, features = ["jpeg", "png", "webp"] }
+image = { version = "0.25", default-features = false, features = ["jpeg", "png", "webp", "gif"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 anyhow = "1"

@@ -149,12 +149,12 @@ Nothing here is started until the owner says "go".
 18. ~~Desktop app installed through Omnistall~~ – **dropped Oct 17 (owner's call).** The installer job, manifest and
     scripts were removed again; the desktop app ships as before (NSIS .exe, .dmg, .AppImage/.deb/.rpm). The Iced app
     (0.27) ships the same way.
-19. **Bug reports in the app** (sidebar entry under the Storage box, web and phone): any user writes a report
-    (text + screenshots/images, up to a few MB each; the page, app version and device are attached
-    automatically), kinds: Bug · Not a bug · How do I…; the admin sees them in a Bug reports page (list, filters,
-    status: new / looking / fixed / won't fix / answered), replies in a thread the user sees in the app (and by
-    email when set up), and exports them (one Markdown or JSON file with the images zipped) to hand to the
-    developer. Stored in <config>/reports/. Ships as the next small release.
+19. **Bug reports in the app** – done 0.26.4 (web + desktop); the phone app's screen follows. Sidebar entry under
+    the Storage box: any user writes a report (text + screenshots/images, up to 8 MB each; the page, app version
+    and device are attached automatically), kinds: Bug · Not a bug · How do I…; the admin sees them in a Bug
+    reports page (list, filters, status: new / looking / fixed / won't fix / answered), replies in a thread the
+    user sees in the app (and by email when set up), and exports them (reports.md + reports.json with the images
+    zipped) to hand to the developer. Stored in <config>/reports/.
 20. **For you → artist page: songs/albums that are in the library can't be played or opened** (0.26.0/0.26.1,
     desktop app). Reported together with "nothing loads" on Library and Requests. **Fixed in 0.26.2:** one
     cause for all of it – `initials()` in web-rs/src/ui.rs sliced the first 4 bytes of a title to drop a
