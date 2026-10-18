@@ -1,0 +1,12 @@
+[Desktop Entry]
+Type=Application
+Name=Encore
+GenericName=Music player
+Comment=Your Encore music server, with Cadenza playing on this computer
+Exec=encore-desktop
+Icon=encore-desktop
+Terminal=false
+Categories=AudioVideo;Audio;Player;
+Keywords=music;player;encore;cadenza;
+StartupNotify=true
+StartupWMClass=encore-desktop

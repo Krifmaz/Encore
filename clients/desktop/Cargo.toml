@@ -1,0 +1,71 @@
+[package]
+name = "encore-desktop"
+version = "0.27.0"
+description = "Encore desktop app: your Encore music server in a native window, with Cadenza playing on this device"
+authors = ["Encore"]
+license = "MIT"
+edition = "2021"
+rust-version = "1.90"
+default-run = "encore-desktop"
+
+[[bin]]
+name = "encore-desktop"
+path = "src/main.rs"
+
+[features]
+default = []
+# CUDA offload in Cadenza's DSP (the CI Windows and Linux release builds turn it on; it needs
+# an NVIDIA driver at run time and does not build on every machine).
+cuda = ["cadenza/cuda"]
+
+[dependencies]
+iced = { version = "0.14", features = ["tokio", "image", "svg", "advanced"] }
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "rustls-tls-native-roots", "json", "cookies", "stream", "multipart"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time", "fs", "io-util"] }
+futures-util = "0.3"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+log = "0.4"
+env_logger = "0.11"
+url = "2"
+percent-encoding = "2"
+image = { version = "0.25", default-features = false, features = ["png", "jpeg", "webp"] }
+directories = "6"
+gethostname = "1"
+open = "5"
+rfd = "0.16"
+semver = "1"
+sha2 = "0.10"
+hound = "3.5"
+tempfile = "3"
+# The tray: ksni (StatusNotifierItem over D-Bus, pure Rust) on Linux instead of the default
+# GTK + libappindicator + libxdo backend, which needs a GTK main loop the app does not run.
+# Its menus are tray_icon::menu (muda without GTK and libxdo).
+tray-icon = { version = "0.25", default-features = false, features = ["ksni"] }
+souvlaki = { version = "0.8", default-features = false, features = ["use_zbus"] }
+global-hotkey = "0.8"
+auto-launch = "0.6"
+# Cadenza: the engine itself with shared-mode output everywhere; the per-OS tables add the
+# exclusive backends. Cargo unifies the features of one dependency across target tables, so
+# the git+rev is the same in every table.
+cadenza = { git = "https://github.com/Krifmaz/cadenza", rev = "17673b3a0905157edb611940e2c5e2b0eded0c37", default-features = false, features = ["cpal"] }
+cadenza-dsp = { git = "https://github.com/Krifmaz/cadenza", rev = "17673b3a0905157edb611940e2c5e2b0eded0c37" }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+cadenza = { git = "https://github.com/Krifmaz/cadenza", rev = "17673b3a0905157edb611940e2c5e2b0eded0c37", default-features = false, features = ["alsa"] }
+
+[target.'cfg(target_os = "windows")'.dependencies]
+cadenza = { git = "https://github.com/Krifmaz/cadenza", rev = "17673b3a0905157edb611940e2c5e2b0eded0c37", default-features = false, features = ["wasapi"] }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+cadenza = { git = "https://github.com/Krifmaz/cadenza", rev = "17673b3a0905157edb611940e2c5e2b0eded0c37", default-features = false, features = ["coreaudio"] }
+
+[profile.release]
+opt-level = "s"
+lto = "thin"
+codegen-units = 4
+strip = true
+
+# Long filters and the FFTs are far nicer with optimisations on, even in debug builds.
+[profile.dev.package."*"]
+opt-level = 2

@@ -1,5 +1,7 @@
 # Encore app (desktop and Android)
 
+**The classic app: 0.27 is its last release.** The desktop app is now [clients/desktop](../desktop/README.md) (native, Iced); this folder is removed in a later release.
+
 Your Encore server in its own window: a small Rust app built with [Tauri 2](https://v2.tauri.app) that loads the
 web app from the server you choose. No JavaScript framework, no bundled browser – the system webview is used, so
 the download is a few MB instead of a hundred.

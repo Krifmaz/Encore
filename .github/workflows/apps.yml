@@ -3,14 +3,16 @@ name: apps
 # Android APK + desktop apps (Windows, macOS, Linux). Never runs on push – the macOS runner alone costs
 # 10× Actions minutes. Start it by hand (Actions → apps → Run workflow; "only" picks a single job) or through
 # the release workflow with "apps" ticked, which attaches the installers to the release. The release's Android
-# APK is the native app (android-native); the legacy Tauri android job only runs by hand.
+# APK is the native app (android-native); the legacy Tauri android job only runs by hand. The desktop app is
+# the native one (desktop: clients/desktop, Iced); the Tauri app it replaces (desktop-classic: clients/app) is
+# built beside it for one more release under its old file names.
 on:
   workflow_dispatch:
     inputs:
       only:
         description: "Build only this job (all = every job below)"
         type: choice
-        options: [all, android-native, android, desktop]
+        options: [all, android-native, android, desktop, desktop-classic]
         default: all
   workflow_call:
     inputs:
@@ -224,8 +226,141 @@ jobs:
           path: Encore-android-legacy-*.apk
 
   desktop:
-    # Tauri (Rust) app: clients/app. Unsigned installers – macOS: right-click → Open the first time.
+    # The desktop app: clients/desktop (Iced, pure Rust, Cadenza playing on this computer), built and packaged by
+    # scripts/desktop-package.sh – Encore-<version>-windows-x86_64.exe (NSIS, per user under %LOCALAPPDATA%\Encore),
+    # Encore-<version>-macos-universal.dmg (lipo of both Mac targets), Encore-<version>-linux-x86_64.AppImage and
+    # encore_<version>_amd64.deb. The app's updater looks for exactly these names in the newest release and checks
+    # them against its SHA256SUMS (release.yml writes it), so a renamed file here needs the same change in
+    # clients/desktop/src/desktop/updater.rs. Windows and Linux carry Cadenza's CUDA offload (the crate's `cuda`
+    # feature: loaded at run time, the NVIDIA driver is enough); macOS has none.
+    # Signing is optional, from these secrets (without them the .exe is unsigned and the .app is signed ad hoc –
+    # macOS then asks for System Settings → Privacy & Security → Open Anyway the first time):
+    #   Windows: WINDOWS_CERT_PFX_BASE64, WINDOWS_CERT_PASSWORD
+    #   macOS:   MACOS_CERT_P12_BASE64, MACOS_CERT_PASSWORD, MACOS_SIGN_IDENTITY; APPLE_ID, APPLE_TEAM_ID and
+    #            APPLE_APP_PASSWORD to notarize the .dmg
     if: inputs.only == '' || inputs.only == 'all' || inputs.only == 'desktop'
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-22.04
+            features: cuda
+            args: ""
+          - os: windows-latest
+            features: cuda
+            args: ""
+          - os: macos-latest
+            features: ""
+            args: --universal
+    runs-on: ${{ matrix.os }}
+    env:
+      # V names the files (dev.<run number> on a manual run). A release also builds the app as that version
+      # (--stamp), so the in-app updater compares the right number; a manual run keeps Cargo.toml's.
+      V: ${{ inputs.version || format('dev.{0}', github.run_number) }}
+      IS_RELEASE: ${{ inputs.version != '' }}
+      # the test build without debug info: several GB smaller, so the rust-cache entries of the three systems do not
+      # push the server's and web-rs's caches out of the repository's 10 GB (panics still name file and line)
+      CARGO_PROFILE_DEV_DEBUG: 0
+      # whether the optional signing secrets exist (a step's `if` cannot read `secrets` directly)
+      HAS_WINDOWS_CERT: ${{ secrets.WINDOWS_CERT_PFX_BASE64 != '' }}
+      HAS_MACOS_CERT: ${{ secrets.MACOS_CERT_P12_BASE64 != '' }}
+    steps:
+      - name: LF line ends (Windows)
+        # Git for Windows would check the scripts out with CRLF line ends, which bash cannot run
+        if: runner.os == 'Windows'
+        run: git config --global core.autocrlf false
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ runner.os == 'macOS' && 'aarch64-apple-darwin,x86_64-apple-darwin' || '' }}
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: clients/desktop
+          key: desktop
+      - name: System packages (Linux)
+        if: runner.os == 'Linux'
+        # ALSA (Cadenza's output), xkbcommon and Wayland (the window), udev; no GTK or libxdo: the tray is
+        # ksni over D-Bus and file dialogs use the desktop portal. `file` for appimagetool
+        run: sudo apt-get update && sudo apt-get install -y libasound2-dev libxkbcommon-dev libwayland-dev libudev-dev pkg-config file
+      - name: Packaging checks (Linux)
+        # the file names agree with the in-app updater, the installer folder, --stamp (seconds, no build)
+        if: runner.os == 'Linux'
+        run: bash clients/desktop/packaging/check.sh
+      - name: NSIS (Windows)
+        if: runner.os == 'Windows'
+        shell: bash
+        run: command -v makensis >/dev/null || [ -f "/c/Program Files (x86)/NSIS/makensis.exe" ] || choco install nsis -y --no-progress
+      - name: Tests
+        # on Linux and Windows; the Mac skips them to save its 10× minutes (the release build below still compiles
+        # all of its code)
+        if: runner.os != 'macOS'
+        working-directory: clients/desktop
+        run: cargo test --locked
+      - name: Signing certificate (Windows)
+        if: runner.os == 'Windows' && env.HAS_WINDOWS_CERT == 'true'
+        shell: bash
+        env:
+          PFX: ${{ secrets.WINDOWS_CERT_PFX_BASE64 }}
+        run: |
+          F="$(cygpath -u "$RUNNER_TEMP")/encore-sign.pfx"
+          printf '%s' "$PFX" | base64 -d > "$F" || { echo "::error::WINDOWS_CERT_PFX_BASE64 is not valid base64"; exit 1; }
+          echo "WINDOWS_CERT_PFX=$F" >> "$GITHUB_ENV"
+      - name: Signing certificate (macOS)
+        if: runner.os == 'macOS' && env.HAS_MACOS_CERT == 'true'
+        env:
+          MACOS_CERT: ${{ secrets.MACOS_CERT_P12_BASE64 }}
+          MACOS_CERT_PASSWORD: ${{ secrets.MACOS_CERT_PASSWORD }}
+        run: |
+          set -euo pipefail
+          P12="$RUNNER_TEMP/encore-sign.p12"
+          printf '%s' "$MACOS_CERT" | base64 --decode > "$P12"
+          security create-keychain -p ci encore-build.keychain
+          security default-keychain -s encore-build.keychain
+          security unlock-keychain -p ci encore-build.keychain
+          # a new keychain locks itself after 5 idle minutes, long before the two release builds reach codesign
+          security set-keychain-settings -lut 21600 encore-build.keychain
+          security import "$P12" -k encore-build.keychain -P "$MACOS_CERT_PASSWORD" -T /usr/bin/codesign
+          security set-key-partition-list -S apple-tool:,apple: -s -k ci encore-build.keychain
+          rm -f "$P12"
+      - name: Build and package
+        shell: bash
+        env:
+          FEATURES: ${{ matrix.features }}
+          WINDOWS_CERT_PASSWORD: ${{ env.HAS_WINDOWS_CERT == 'true' && secrets.WINDOWS_CERT_PASSWORD || '' }}
+          MACOS_SIGN_IDENTITY: ${{ env.HAS_MACOS_CERT == 'true' && secrets.MACOS_SIGN_IDENTITY || '' }}
+          APPLE_ID: ${{ env.HAS_MACOS_CERT == 'true' && secrets.APPLE_ID || '' }}
+          APPLE_TEAM_ID: ${{ env.HAS_MACOS_CERT == 'true' && secrets.APPLE_TEAM_ID || '' }}
+          APPLE_APP_PASSWORD: ${{ env.HAS_MACOS_CERT == 'true' && secrets.APPLE_APP_PASSWORD || '' }}
+        run: |
+          STAMP=""; [ "$IS_RELEASE" = true ] && STAMP=--stamp
+          # shellcheck disable=SC2086
+          bash scripts/desktop-package.sh --version "$V" $STAMP --features "$FEATURES" ${{ matrix.args }} --out out
+          # the names the in-app updater looks for
+          case "$RUNNER_OS" in
+            Linux)   WANT="Encore-$V-linux-x86_64.AppImage encore_${V}_amd64.deb" ;;
+            macOS)   WANT="Encore-$V-macos-universal.dmg" ;;
+            Windows) WANT="Encore-$V-windows-x86_64.exe" ;;
+          esac
+          for f in $WANT; do
+            [ -s "out/$f" ] || { echo "::error::out/$f was not made"; ls -la out; exit 1; }
+          done
+      - name: Remove signing keys
+        if: always()
+        shell: bash
+        run: |
+          rm -f "${WINDOWS_CERT_PFX:-/nonexistent}"
+          if [ "$RUNNER_OS" = macOS ]; then security delete-keychain encore-build.keychain 2>/dev/null || true; fi
+      - uses: actions/upload-artifact@v4
+        with:
+          name: Encore-desktop-${{ runner.os }}
+          path: out/*
+          if-no-files-found: error
+
+  desktop-classic:
+    # The classic desktop app (Tauri: clients/app), replaced by `desktop` above and kept for this release only
+    # (0.27); its files keep their old names, except the AppImage, which is Encore-classic-<version>-linux-x86_64.AppImage
+    # because the new app's AppImage now has the old name. Unsigned installers – macOS: right-click → Open the first time.
+    if: inputs.only == '' || inputs.only == 'all' || inputs.only == 'desktop-classic'
     strategy:
       fail-fast: false
       matrix:
@@ -314,8 +449,8 @@ jobs:
             # updater files keep their signature next to them under the release name (the signature covers the
             # content, not the name; release.yml builds latest.json from these .sig files)
             case "$f" in
-              *.AppImage)        cp "$f" "out/Encore-$V-linux-x86_64.AppImage" ;;
-              *.AppImage.sig)    cp "$f" "out/Encore-$V-linux-x86_64.AppImage.sig" ;;
+              *.AppImage)        cp "$f" "out/Encore-classic-$V-linux-x86_64.AppImage" ;;
+              *.AppImage.sig)    cp "$f" "out/Encore-classic-$V-linux-x86_64.AppImage.sig" ;;
               *.deb)             cp "$f" "out/Encore-$V-linux-amd64.deb" ;;
               *.rpm)             cp "$f" "out/Encore-$V-linux-x86_64.rpm" ;;
               *.exe)             cp "$f" "out/Encore-Setup-$V.exe" ;;
@@ -328,6 +463,6 @@ jobs:
           ls -la out
       - uses: actions/upload-artifact@v4
         with:
-          name: Encore-desktop-${{ runner.os }}
+          name: Encore-desktop-classic-${{ runner.os }}
           path: out/*
           if-no-files-found: error

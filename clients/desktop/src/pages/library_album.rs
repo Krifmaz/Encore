@@ -1,0 +1,1497 @@
+//! Album: a library album and its songs. Behaviour reference: web-rs/src/pages/library.rs
+//! `render_album` (the header with Play / Shuffle / Share / Edit details and the ⋯ menu, the song
+//! rows with likes and the song menu), `album_menu`, `match_modal` (Tag this album), `edit_modal`
+//! (Edit details) and web-rs/src/pages/artwork.rs (Change artwork).
+
+use super::library::{self, format_text, long_dur, size_text, tr, verify_badge, Act, Shared};
+use crate::api::ApiError;
+use crate::fmt;
+use crate::pages::{urlencode, Ctx, El, Page};
+use crate::theme::{self, Badge, Btn};
+use crate::widgets::{
+    self, badge, btn, btn_icon, confirm, empty, grid, h1, h3, icon, icon_btn, modal, pop_menu, skeleton_rows,
+    small_muted, t, tabs, Icon, MenuItem, Tile, TileKind, TrackRow,
+};
+use iced::widget::{button, column, container, image, row, space, text_input, toggler, tooltip};
+use iced::{Alignment, ContentFit, Length, Point, Subscription, Task};
+use serde_json::{json, Value};
+use std::collections::HashSet;
+
+/// Edit details.
+#[derive(Debug)]
+pub struct EditState {
+    /// albumartist, album, date, genre.
+    pub fields: [String; 4],
+    /// disc, track, title, artist per song.
+    pub tracks: Vec<[String; 4]>,
+    pub rename: bool,
+    pub busy: bool,
+}
+
+/// Tag this album.
+#[derive(Debug)]
+pub struct MatchState {
+    pub provider: String,
+    pub artist: String,
+    pub album: String,
+    pub link: String,
+    pub searching: bool,
+    pub candidates: Option<Vec<Value>>,
+    pub track_count: String,
+    pub error: String,
+    pub preview: Option<Value>,
+    pub previewing: bool,
+    pub rename: bool,
+    pub applying: bool,
+}
+
+/// Change artwork.
+#[derive(Debug)]
+pub struct ArtState {
+    pub q: String,
+    pub searching: bool,
+    pub candidates: Option<Vec<Value>>,
+    pub error: String,
+    pub busy: bool,
+}
+
+#[derive(Debug)]
+pub enum Dialog {
+    Edit(Box<EditState>),
+    Match(Box<MatchState>),
+    Artwork(Box<ArtState>),
+    Confirm {
+        title: String,
+        text: String,
+        ok: String,
+        danger: bool,
+        on_ok: Box<Message>,
+    },
+}
+
+#[derive(Debug, Default)]
+pub struct State {
+    pub id: String,
+    /// The album with its `tracks` (None while loading).
+    pub album: Option<Value>,
+    pub error: String,
+    pub liked: HashSet<i64>,
+    /// The album's ⋯ menu is open at this point.
+    pub menu: Option<Point>,
+    pub dialog: Option<Dialog>,
+    pub shared: Shared,
+    /// A Report a problem dialog for the whole album is open (the web goes to the library after).
+    reporting_album: bool,
+    seq: u64,
+}
+
+const PROVIDERS: [(&str, &str); 5] = [
+    ("musicbrainz", "MusicBrainz"),
+    ("deezer", "Deezer"),
+    ("apple", "Apple Music"),
+    ("discogs", "Discogs"),
+    ("fingerprint", "By audio (AcoustID)"),
+];
+
+fn match_help(provider: &str) -> &'static str {
+    match provider {
+        "musicbrainz" => "Full MusicBrainz tags (ids that Picard, Navidrome and Jellyfin use).",
+        "deezer" => "Titles, track numbers, ISRCs, label, barcode and cover from Deezer – for releases MusicBrainz lacks or gets wrong.",
+        "apple" => "Titles, track numbers, genre and a large cover from Apple Music.",
+        "discogs" => "Vinyl, cassettes, bootlegs and old releases (needs a Discogs token in Settings).",
+        "fingerprint" => "Ignores names: identifies each song by its audio, then finds the release most of them are on (needs an AcoustID key).",
+        _ => "",
+    }
+}
+
+#[derive(Clone, Debug)]
+pub enum Message {
+    Loaded(u64, Result<Value, ApiError>),
+    Likes(Result<Value, ApiError>),
+    Play(usize),
+    PlayAll,
+    ShuffleAll,
+    Like(i64),
+    Liked(i64, bool, Result<Value, ApiError>),
+    OpenArtist(String),
+    Share,
+    /// Save the album's songs on this computer.
+    SaveOffline,
+    ShareGot(Result<Value, ApiError>),
+    Menu,
+    CloseMenu,
+    AddToQueue,
+    PlayNext,
+    AddToPlaylist,
+    ConfirmAll,
+    ConfirmedAll(Result<Value, ApiError>),
+    DownloadZip,
+    Zipped(Result<String, String>),
+    AlbumLyrics,
+    AlbumLyricsDone(Result<Value, ApiError>),
+    GetRest,
+    RestLookup(Result<Value, ApiError>),
+    ReleaseInfo,
+    ReportAlbum,
+    EditOpen,
+    EditField(usize, String),
+    EditTrack(usize, usize, String),
+    EditRename(bool),
+    EditSave,
+    EditSaved(Result<Value, ApiError>),
+    MatchOpen,
+    MatchProvider(String),
+    MatchArtist(String),
+    MatchAlbum(String),
+    MatchLink(String),
+    MatchSearch,
+    MatchResults(Result<Value, ApiError>),
+    MatchPick(String),
+    MatchPreview(Result<Value, ApiError>),
+    MatchBack,
+    MatchRename(bool),
+    MatchApply,
+    MatchApplied(String, Result<Value, ApiError>),
+    ArtOpen,
+    ArtQuery(String),
+    ArtSearch,
+    ArtResults(Result<Value, ApiError>),
+    ArtPick(usize),
+    ArtUpload,
+    /// The picked file as a data URL ("" = cancelled), or why it was refused.
+    ArtFile(Result<String, String>),
+    ArtSet(Result<Value, ApiError>),
+    FindArt,
+    FoundArt(Result<Value, ApiError>),
+    DeleteAsk,
+    Delete,
+    Deleted(Result<Value, ApiError>),
+    TrackMenu(usize),
+    Suspect(usize),
+    CloseDialog,
+    Shared(Act),
+}
+
+/// Called when the app navigates here (with the route's parameters).
+pub fn open(state: &mut State, id: String, ctx: &mut Ctx) -> Task<Message> {
+    state.id = id;
+    state.menu = None;
+    state.dialog = None;
+    state.shared.reset();
+    state.reporting_album = false;
+    state.liked.clear();
+    let likes = {
+        let api = ctx.api.clone();
+        Task::perform(async move { api.get("/likes").await }, Message::Likes)
+    };
+    Task::batch([load(state, ctx), likes])
+}
+
+fn load(state: &mut State, ctx: &Ctx) -> Task<Message> {
+    state.seq += 1;
+    let seq = state.seq;
+    state.album = None;
+    state.error.clear();
+    let api = ctx.api.clone();
+    let path = format!("/library/albums/{}", state.id);
+    Task::perform(async move { api.get(&path).await }, move |r| Message::Loaded(seq, r))
+}
+
+/// The album's songs with `album_id` set (what the player queues).
+fn queue_tracks(state: &State) -> Vec<Value> {
+    match &state.album {
+        Some(a) => library::with_album_id(&fmt::items(&a["tracks"]), &state.id),
+        None => Vec::new(),
+    }
+}
+
+fn confirm_dialog(state: &mut State, title: &str, text: String, ok: &str, danger: bool, on_ok: Message) {
+    state.menu = None;
+    state.dialog = Some(Dialog::Confirm {
+        title: title.into(),
+        text,
+        ok: ok.into(),
+        danger,
+        on_ok: Box::new(on_ok),
+    });
+}
+
+/// `str.match(uuid | deezer | apple | discogs)` of the Tag this album link box.
+pub fn parse_release_link(link: &str) -> Option<String> {
+    let l = link.trim();
+    if l.is_empty() {
+        return None;
+    }
+    if let Some(u) = find_uuid(l) {
+        return Some(u);
+    }
+    let digits_after = |hay: &str, marker: &str| -> Option<String> {
+        let i = hay.find(marker)? + marker.len();
+        let d: String = hay[i..].chars().take_while(|c| c.is_ascii_digit()).collect();
+        (!d.is_empty()).then_some(d)
+    };
+    if l.contains("deezer.com/") {
+        if let Some(d) = digits_after(l, "/album/") {
+            return Some(format!("deezer:{d}"));
+        }
+    }
+    if l.contains("apple.com/") {
+        if let Some(i) = l.find("/album/") {
+            let rest = &l[i + 7..];
+            // `/album/<slug>/<id>` or `/album/<id>` or `/album/id<id>`
+            let last = rest.trim_end_matches('/').rsplit('/').next().unwrap_or("");
+            let last = last.split('?').next().unwrap_or("");
+            let last = last.strip_prefix("id").unwrap_or(last);
+            let d: String = last.chars().take_while(|c| c.is_ascii_digit()).collect();
+            if !d.is_empty() {
+                return Some(format!("apple:{d}"));
+            }
+        }
+    }
+    if l.contains("discogs.com/") {
+        for (kind, letter) in [("/release/", "r"), ("/master/", "m")] {
+            if let Some(d) = digits_after(l, kind) {
+                return Some(format!("discogs:{letter}{d}"));
+            }
+        }
+    }
+    None
+}
+
+/// A MusicBrainz id anywhere in the text.
+fn find_uuid(s: &str) -> Option<String> {
+    let groups = [8usize, 4, 4, 4, 12];
+    let b = s.as_bytes();
+    let mut i = 0;
+    while i + 36 <= b.len() {
+        let cand = &s[i..i + 36];
+        let mut ok = cand.is_ascii();
+        if ok {
+            let mut at = 0;
+            for (gi, g) in groups.iter().enumerate() {
+                if !cand[at..at + g].bytes().all(|c| c.is_ascii_hexdigit()) {
+                    ok = false;
+                    break;
+                }
+                at += g;
+                if gi < 4 {
+                    if cand.as_bytes()[at] != b'-' {
+                        ok = false;
+                        break;
+                    }
+                    at += 1;
+                }
+            }
+        }
+        if ok {
+            return Some(cand.to_ascii_lowercase());
+        }
+        i += 1;
+    }
+    None
+}
+
+/// Standard base64 (for the uploaded picture's data URL).
+pub fn base64(bytes: &[u8]) -> String {
+    const T: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut out = String::with_capacity(bytes.len().div_ceil(3) * 4);
+    for chunk in bytes.chunks(3) {
+        let n = chunk.len();
+        let v = (u32::from(chunk[0]) << 16)
+            | (u32::from(*chunk.get(1).unwrap_or(&0)) << 8)
+            | u32::from(*chunk.get(2).unwrap_or(&0));
+        out.push(T[(v >> 18) as usize & 63] as char);
+        out.push(T[(v >> 12) as usize & 63] as char);
+        out.push(if n > 1 { T[(v >> 6) as usize & 63] as char } else { '=' });
+        out.push(if n > 2 { T[v as usize & 63] as char } else { '=' });
+    }
+    out
+}
+
+/// Pick a picture and read it as a data URL ("" when cancelled).
+async fn pick_picture() -> Result<String, String> {
+    let Some(f) = rfd::AsyncFileDialog::new()
+        .add_filter("Pictures", &["jpg", "jpeg", "png"])
+        .pick_file()
+        .await
+    else {
+        return Ok(String::new());
+    };
+    let bytes = f.read().await;
+    if bytes.len() > 15 * 1024 * 1024 {
+        return Err("Picture is larger than 15 MB".into());
+    }
+    let mime = if f.file_name().to_ascii_lowercase().ends_with(".png") {
+        "image/png"
+    } else {
+        "image/jpeg"
+    };
+    Ok(format!("data:{mime};base64,{}", base64(&bytes)))
+}
+
+fn match_search(state: &mut State, ctx: &Ctx) -> Task<Message> {
+    let Some(Dialog::Match(m)) = &mut state.dialog else {
+        return Task::none();
+    };
+    m.searching = true;
+    m.preview = None;
+    m.error.clear();
+    let url = format!(
+        "/library/albums/{}/match?provider={}&artist={}&album={}",
+        state.id,
+        m.provider,
+        urlencode(&m.artist),
+        urlencode(&m.album)
+    );
+    let api = ctx.api.clone();
+    Task::perform(async move { api.get(&url).await }, Message::MatchResults)
+}
+
+fn match_preview(state: &mut State, rid: String, ctx: &Ctx) -> Task<Message> {
+    let Some(Dialog::Match(m)) = &mut state.dialog else {
+        return Task::none();
+    };
+    m.previewing = true;
+    m.error.clear();
+    let url = format!("/library/albums/{}/preview?release_id={}", state.id, urlencode(&rid));
+    let api = ctx.api.clone();
+    Task::perform(async move { api.get(&url).await }, Message::MatchPreview)
+}
+
+fn art_search(state: &mut State, ctx: &Ctx) -> Task<Message> {
+    let Some(Dialog::Artwork(a)) = &mut state.dialog else {
+        return Task::none();
+    };
+    a.searching = true;
+    a.error.clear();
+    let url = format!("/library/albums/{}/art-candidates?q={}", state.id, urlencode(&a.q));
+    let api = ctx.api.clone();
+    Task::perform(async move { api.get(&url).await }, Message::ArtResults)
+}
+
+fn set_art(state: &mut State, body: Value, ctx: &Ctx) -> Task<Message> {
+    if let Some(Dialog::Artwork(a)) = &mut state.dialog {
+        a.busy = true;
+    }
+    let api = ctx.api.clone();
+    let path = format!("/library/albums/{}/art", state.id);
+    Task::perform(async move { api.post(&path, body).await }, Message::ArtSet)
+}
+
+/// `t.key || fallback`.
+fn or_str(t: &Value, key: &str, fallback: &str) -> String {
+    if fmt::truthy(t, key) {
+        fmt::s(t, key)
+    } else {
+        fallback.to_string()
+    }
+}
+
+pub fn update(state: &mut State, msg: Message, ctx: &mut Ctx) -> Task<Message> {
+    match msg {
+        Message::Loaded(seq, res) => {
+            if seq != state.seq {
+                return Task::none();
+            }
+            match res {
+                Ok(a) => state.album = Some(a),
+                Err(e) => {
+                    state.album = Some(Value::Null);
+                    state.error = e.message;
+                }
+            }
+        }
+        Message::Likes(Ok(v)) => {
+            state.liked = fmt::items(&v).iter().filter_map(Value::as_i64).collect();
+        }
+        Message::Likes(Err(_)) => {}
+        Message::Play(i) => {
+            let q = queue_tracks(state);
+            if !q.is_empty() {
+                ctx.play(q, i);
+            }
+        }
+        Message::PlayAll => {
+            let q = queue_tracks(state);
+            if !q.is_empty() {
+                ctx.play(q, 0);
+            }
+        }
+        Message::ShuffleAll => {
+            let q = library::shuffled(&queue_tracks(state));
+            if !q.is_empty() {
+                ctx.play(q, 0);
+            }
+        }
+        Message::Like(id) => {
+            let has = state.liked.contains(&id);
+            let api = ctx.api.clone();
+            return Task::perform(
+                async move {
+                    if has {
+                        api.del(&format!("/likes/{id}")).await
+                    } else {
+                        api.post_empty(&format!("/likes/{id}")).await
+                    }
+                },
+                move |r| Message::Liked(id, !has, r),
+            );
+        }
+        Message::Liked(id, now, Ok(_)) => {
+            if now {
+                state.liked.insert(id);
+            } else {
+                state.liked.remove(&id);
+            }
+            // the player's heart follows
+            ctx.player_msg(crate::player::Message::RefreshLikes);
+        }
+        Message::Liked(_, _, Err(e)) => ctx.toast_err(e.message),
+        Message::OpenArtist(name) => ctx.navigate(Page::ArtistName(name)),
+        Message::Share => {
+            state.menu = None;
+            let api = ctx.api.clone();
+            let path = format!("/library/albums/{}/share", state.id);
+            return Task::perform(async move { api.post_empty(&path).await }, Message::ShareGot);
+        }
+        Message::SaveOffline => {
+            state.menu = None;
+            crate::desktop::offline::save(ctx, queue_tracks(state));
+        }
+        Message::ShareGot(Ok(r)) => {
+            ctx.copy(format!("{}{}", ctx.base(), fmt::s(&r, "path")));
+            ctx.toast_ok("Link copied – anyone with it can play this song");
+        }
+        Message::ShareGot(Err(e)) => ctx.toast_err(e.message),
+        Message::Menu => state.menu = Some(ctx.cursor),
+        Message::CloseMenu => state.menu = None,
+        Message::AddToQueue => {
+            state.menu = None;
+            ctx.enqueue(queue_tracks(state));
+        }
+        Message::PlayNext => {
+            state.menu = None;
+            ctx.play_next(queue_tracks(state));
+        }
+        Message::AddToPlaylist => {
+            state.menu = None;
+            let ids: Vec<i64> = queue_tracks(state).iter().map(|t| fmt::i(t, "id")).collect();
+            return library::open_add_to_playlist(&mut state.shared, ids, ctx).map(Message::Shared);
+        }
+        Message::ConfirmAll => {
+            state.menu = None;
+            let ids: Vec<Value> = queue_tracks(state).iter().map(|t| t["id"].clone()).collect();
+            let api = ctx.api.clone();
+            return Task::perform(
+                async move { api.post("/library/verify-manual", json!({ "track_ids": ids })).await },
+                Message::ConfirmedAll,
+            );
+        }
+        Message::ConfirmedAll(Ok(_)) => {
+            ctx.toast_ok("Album confirmed");
+            return load(state, ctx);
+        }
+        Message::ConfirmedAll(Err(e)) => ctx.toast_err(e.message),
+        Message::DownloadZip => {
+            state.menu = None;
+            let a = state.album.clone().unwrap_or(Value::Null);
+            let name = library::safe_file_name(&format!("{} - {}.zip", fmt::s(&a, "albumartist"), fmt::s(&a, "album")));
+            let api = ctx.api.clone();
+            return Task::perform(
+                library::save_as(api, format!("/library/albums/{}/download", state.id), name),
+                Message::Zipped,
+            );
+        }
+        Message::Zipped(Ok(path)) => {
+            if !path.is_empty() {
+                ctx.toast_ok(format!("Saved to {path}"));
+            }
+        }
+        Message::Zipped(Err(e)) => ctx.toast_err(e),
+        Message::AlbumLyrics => {
+            state.menu = None;
+            ctx.toast("Looking for lyrics…");
+            let api = ctx.api.clone();
+            let path = format!("/library/albums/{}/lyrics", state.id);
+            return Task::perform(async move { api.post_empty(&path).await }, Message::AlbumLyricsDone);
+        }
+        Message::AlbumLyricsDone(Ok(r)) => ctx.toast_ok(if fmt::truthy(&r, "checked") {
+            format!("Lyrics found for {} of {} song(s)", fmt::s(&r, "found"), fmt::s(&r, "checked"))
+        } else {
+            "Every song already has lyrics".to_string()
+        }),
+        Message::AlbumLyricsDone(Err(e)) => ctx.toast_err(e.message),
+        Message::GetRest => {
+            state.menu = None;
+            let a = state.album.clone().unwrap_or(Value::Null);
+            let rgid = fmt::s(&a, "mb_releasegroupid");
+            if !rgid.is_empty() {
+                ctx.navigate(Page::Album(rgid));
+                return Task::none();
+            }
+            let artist = if fmt::truthy(&a, "albumartist") { fmt::s(&a, "albumartist") } else { fmt::s(&a, "artist") };
+            let url = format!(
+                "/discover/album-lookup?artist={}&album={}",
+                urlencode(&artist),
+                urlencode(&fmt::s(&a, "album"))
+            );
+            let api = ctx.api.clone();
+            return Task::perform(async move { api.get(&url).await }, Message::RestLookup);
+        }
+        Message::RestLookup(Ok(r)) => {
+            if fmt::truthy(&r, "rgid") {
+                ctx.navigate(Page::Album(fmt::s(&r, "rgid")));
+            } else {
+                ctx.toast("MusicBrainz doesn't know this album – look it up in the Downloader instead");
+            }
+        }
+        Message::RestLookup(Err(e)) => ctx.toast(e.message),
+        Message::ReleaseInfo => {
+            state.menu = None;
+            if let Some(a) = &state.album {
+                let rgid = fmt::s(a, "mb_releasegroupid");
+                if !rgid.is_empty() {
+                    ctx.navigate(Page::Album(rgid));
+                }
+            }
+        }
+        Message::ReportAlbum => {
+            state.menu = None;
+            let title = state.album.as_ref().map(|a| fmt::s(a, "album")).unwrap_or_default();
+            state.reporting_album = true;
+            library::open_report(&mut state.shared, "album", json!(state.id), &title, "");
+        }
+        Message::EditOpen => {
+            state.menu = None;
+            let Some(a) = &state.album else {
+                return Task::none();
+            };
+            let tracks = fmt::items(&a["tracks"])
+                .iter()
+                .map(|t| [or_str(t, "disc", "1"), or_str(t, "track", ""), fmt::s(t, "title"), fmt::s(t, "artist")])
+                .collect();
+            state.dialog = Some(Dialog::Edit(Box::new(EditState {
+                fields: [fmt::s(a, "albumartist"), fmt::s(a, "album"), fmt::s(a, "year"), fmt::s(a, "genre")],
+                tracks,
+                rename: true,
+                busy: false,
+            })));
+        }
+        Message::EditField(i, v) => {
+            if let Some(Dialog::Edit(e)) = &mut state.dialog {
+                if let Some(f) = e.fields.get_mut(i) {
+                    *f = v;
+                }
+            }
+        }
+        Message::EditTrack(ti, fi, v) => {
+            if let Some(Dialog::Edit(e)) = &mut state.dialog {
+                if let Some(f) = e.tracks.get_mut(ti).and_then(|r| r.get_mut(fi)) {
+                    *f = v;
+                }
+            }
+        }
+        Message::EditRename(on) => {
+            if let Some(Dialog::Edit(e)) = &mut state.dialog {
+                e.rename = on;
+            }
+        }
+        Message::EditSave => {
+            let (Some(Dialog::Edit(e)), Some(a)) = (&mut state.dialog, &state.album) else {
+                return Task::none();
+            };
+            if e.busy {
+                return Task::none();
+            }
+            e.busy = true;
+            let tracks = fmt::items(&a["tracks"]);
+            let ids: Vec<Value> = tracks.iter().map(|t| t["id"].clone()).collect();
+            let album_values = json!({
+                "albumartist": e.fields[0].trim(), "album": e.fields[1].trim(),
+                "date": e.fields[2].trim(), "genre": e.fields[3].trim()
+            });
+            let mut per_track: Vec<(Value, Value)> = Vec::new();
+            for (t, row) in tracks.iter().zip(e.tracks.iter()) {
+                let changed = row[2] != fmt::s(t, "title")
+                    || row[3] != fmt::s(t, "artist")
+                    || row[1] != or_str(t, "track", "")
+                    || row[0] != or_str(t, "disc", "1");
+                if changed {
+                    per_track.push((
+                        t["id"].clone(),
+                        json!({ "discnumber": row[0].trim(), "tracknumber": row[1].trim(), "title": row[2].trim(), "artist": row[3].trim() }),
+                    ));
+                }
+            }
+            let rename = e.rename;
+            let api = ctx.api.clone();
+            return Task::perform(
+                async move {
+                    let mut out = api
+                        .post("/library/tags", json!({ "track_ids": ids, "values": album_values }))
+                        .await?;
+                    for (id, values) in per_track {
+                        out = api
+                            .post("/library/tags", json!({ "track_ids": [id], "values": values }))
+                            .await?;
+                    }
+                    if rename {
+                        out = api
+                            .post("/library/tags", json!({ "track_ids": ids, "values": {}, "rename": true }))
+                            .await?;
+                    }
+                    Ok(out)
+                },
+                Message::EditSaved,
+            );
+        }
+        Message::EditSaved(Ok(out)) => {
+            state.dialog = None;
+            ctx.toast_ok("Saved");
+            let new_id = fmt::s(&out, "album_id");
+            if fmt::truthy(&out, "album_id") && new_id != state.id {
+                ctx.navigate(Page::LibraryAlbum(new_id));
+            } else {
+                return load(state, ctx);
+            }
+        }
+        Message::EditSaved(Err(e)) => {
+            if let Some(Dialog::Edit(ed)) = &mut state.dialog {
+                ed.busy = false;
+            }
+            ctx.toast_err(e.message);
+        }
+        Message::MatchOpen => {
+            state.menu = None;
+            let Some(a) = &state.album else {
+                return Task::none();
+            };
+            let artist0 = if a["albumartist_orig"].is_null() {
+                fmt::s(a, "albumartist")
+            } else {
+                fmt::s(a, "albumartist_orig")
+            };
+            state.dialog = Some(Dialog::Match(Box::new(MatchState {
+                provider: "musicbrainz".into(),
+                artist: if artist0 == "Unknown Artist" { String::new() } else { artist0 },
+                album: fmt::s(a, "album"),
+                link: String::new(),
+                searching: false,
+                candidates: None,
+                track_count: String::new(),
+                error: String::new(),
+                preview: None,
+                previewing: false,
+                rename: true,
+                applying: false,
+            })));
+            return match_search(state, ctx);
+        }
+        Message::MatchProvider(p) => {
+            if let Some(Dialog::Match(m)) = &mut state.dialog {
+                m.provider = p;
+                return match_search(state, ctx);
+            }
+        }
+        Message::MatchArtist(v) => {
+            if let Some(Dialog::Match(m)) = &mut state.dialog {
+                m.artist = v;
+            }
+        }
+        Message::MatchAlbum(v) => {
+            if let Some(Dialog::Match(m)) = &mut state.dialog {
+                m.album = v;
+            }
+        }
+        Message::MatchLink(v) => {
+            if let Some(Dialog::Match(m)) = &mut state.dialog {
+                m.link = v;
+            }
+        }
+        Message::MatchSearch => {
+            if let Some(Dialog::Match(m)) = &state.dialog {
+                if let Some(rid) = parse_release_link(&m.link) {
+                    return match_preview(state, rid, ctx);
+                }
+                return match_search(state, ctx);
+            }
+        }
+        Message::MatchResults(r) => {
+            if let Some(Dialog::Match(m)) = &mut state.dialog {
+                m.searching = false;
+                match r {
+                    Ok(d) => {
+                        m.track_count = fmt::s(&d, "track_count");
+                        m.candidates = Some(fmt::items(&d["candidates"]));
+                    }
+                    Err(e) => m.error = e.message,
+                }
+            }
+        }
+        Message::MatchPick(rid) => return match_preview(state, rid, ctx),
+        Message::MatchPreview(r) => {
+            if let Some(Dialog::Match(m)) = &mut state.dialog {
+                m.previewing = false;
+                match r {
+                    Ok(pv) => m.preview = Some(pv),
+                    Err(e) => m.error = e.message,
+                }
+            }
+        }
+        Message::MatchBack => {
+            if let Some(Dialog::Match(m)) = &mut state.dialog {
+                m.preview = None;
+                return match_search(state, ctx);
+            }
+        }
+        Message::MatchRename(on) => {
+            if let Some(Dialog::Match(m)) = &mut state.dialog {
+                m.rename = on;
+            }
+        }
+        Message::MatchApply => {
+            if let Some(Dialog::Match(m)) = &mut state.dialog {
+                let Some(pv) = &m.preview else {
+                    return Task::none();
+                };
+                if m.applying {
+                    return Task::none();
+                }
+                m.applying = true;
+                let rid = fmt::s(&pv["release"], "id");
+                let rid = if rid.is_empty() { fmt::s(pv, "release_id") } else { rid };
+                let provider = or_str(&pv["release"], "provider", "MusicBrainz");
+                let body = json!({ "release_id": rid, "rename": m.rename });
+                let api = ctx.api.clone();
+                let path = format!("/library/albums/{}/retag", state.id);
+                return Task::perform(async move { api.post(&path, body).await }, move |r| {
+                    Message::MatchApplied(provider.clone(), r)
+                });
+            }
+        }
+        Message::MatchApplied(provider, Ok(out)) => {
+            state.dialog = None;
+            ctx.toast_ok(format!("Album tagged from {provider}"));
+            let new_id = fmt::s(&out, "album_id");
+            if fmt::truthy(&out, "album_id") && new_id != state.id {
+                ctx.navigate(Page::LibraryAlbum(new_id));
+            } else {
+                return load(state, ctx);
+            }
+        }
+        Message::MatchApplied(_, Err(e)) => {
+            if let Some(Dialog::Match(m)) = &mut state.dialog {
+                m.applying = false;
+            }
+            ctx.toast_err(e.message);
+        }
+        Message::ArtOpen => {
+            state.menu = None;
+            let q = state.album.as_ref().map(|a| fmt::s(a, "album")).unwrap_or_default();
+            state.dialog = Some(Dialog::Artwork(Box::new(ArtState {
+                q,
+                searching: false,
+                candidates: None,
+                error: String::new(),
+                busy: false,
+            })));
+            return art_search(state, ctx);
+        }
+        Message::ArtQuery(q) => {
+            if let Some(Dialog::Artwork(a)) = &mut state.dialog {
+                a.q = q;
+            }
+        }
+        Message::ArtSearch => return art_search(state, ctx),
+        Message::ArtResults(r) => {
+            if let Some(Dialog::Artwork(a)) = &mut state.dialog {
+                a.searching = false;
+                match r {
+                    Ok(c) => a.candidates = Some(fmt::items(&c)),
+                    Err(e) => a.error = e.message,
+                }
+            }
+        }
+        Message::ArtPick(i) => {
+            let url = match &state.dialog {
+                Some(Dialog::Artwork(a)) if !a.busy => a
+                    .candidates
+                    .as_ref()
+                    .and_then(|c| c.get(i))
+                    .map(|x| x["url"].clone()),
+                _ => None,
+            };
+            if let Some(url) = url {
+                return set_art(state, json!({ "url": url }), ctx);
+            }
+        }
+        Message::ArtUpload => return Task::perform(pick_picture(), Message::ArtFile),
+        Message::ArtFile(Ok(data)) => {
+            if !data.is_empty() {
+                return set_art(state, json!({ "data": data }), ctx);
+            }
+        }
+        Message::ArtFile(Err(e)) => ctx.toast_err(e),
+        Message::ArtSet(Ok(r)) => {
+            state.dialog = None;
+            ctx.toast_ok(format!("Artwork embedded in {} file(s)", fmt::s(&r, "embedded")));
+            return load(state, ctx);
+        }
+        Message::ArtSet(Err(e)) => {
+            if let Some(Dialog::Artwork(a)) = &mut state.dialog {
+                a.busy = false;
+            }
+            ctx.toast_err(e.message);
+        }
+        Message::FindArt => {
+            state.menu = None;
+            let api = ctx.api.clone();
+            let path = format!("/library/albums/{}/artwork", state.id);
+            return Task::perform(async move { api.post_empty(&path).await }, Message::FoundArt);
+        }
+        Message::FoundArt(Ok(r)) => {
+            ctx.toast_ok(format!("Artwork embedded in {} file(s)", fmt::s(&r, "embedded")));
+            return load(state, ctx);
+        }
+        Message::FoundArt(Err(e)) => ctx.toast_err(e.message),
+        Message::DeleteAsk => {
+            let a = state.album.clone().unwrap_or(Value::Null);
+            let text = format!(
+                "Permanently delete \"{}\" ({} files) from disk?",
+                fmt::s(&a, "album"),
+                fmt::items(&a["tracks"]).len()
+            );
+            confirm_dialog(state, "Delete album", text, "Delete", true, Message::Delete);
+        }
+        Message::Delete => {
+            state.dialog = None;
+            let api = ctx.api.clone();
+            let path = format!("/library/albums/{}", state.id);
+            return Task::perform(async move { api.del(&path).await }, Message::Deleted);
+        }
+        Message::Deleted(Ok(_)) => {
+            ctx.toast_ok("Album deleted");
+            ctx.navigate(Page::library(""));
+        }
+        Message::Deleted(Err(e)) => ctx.toast_err(e.message),
+        Message::TrackMenu(i) => {
+            if let Some(t) = queue_tracks(state).get(i) {
+                library::track_menu(&mut state.shared, t, ctx);
+            }
+        }
+        Message::Suspect(i) => {
+            if let Some(t) = queue_tracks(state).get(i).cloned() {
+                return library::shared_update(&mut state.shared, Act::SuspectQuality(Box::new(t)), ctx)
+                    .map(Message::Shared);
+            }
+        }
+        Message::CloseDialog => state.dialog = None,
+        Message::Shared(a) => {
+            if matches!(a, Act::CloseDialog) {
+                state.reporting_album = false;
+            }
+            let task = library::shared_update(&mut state.shared, a, ctx).map(Message::Shared);
+            if state.shared.take_changed() {
+                if state.reporting_album {
+                    state.reporting_album = false;
+                    ctx.navigate(Page::library(""));
+                    return task;
+                }
+                if let Some(new) = state.shared.moved_to.take() {
+                    if new != state.id {
+                        ctx.navigate(Page::LibraryAlbum(new));
+                        return task;
+                    }
+                }
+                return Task::batch([task, load(state, ctx)]);
+            }
+            return task;
+        }
+    }
+    Task::none()
+}
+
+/// `sourceLine(t)`: where a song came from.
+fn source_line(t: &Value) -> String {
+    if !fmt::truthy(t, "source") {
+        return String::new();
+    }
+    let mut s = format!("⬇ {}", fmt::s(t, "source"));
+    if fmt::truthy(t, "source_detail") {
+        s.push_str(&format!(" · {}", fmt::s(t, "source_detail")));
+    }
+    if fmt::truthy(t, "downloaded_at") {
+        s.push_str(&format!(" · {}", fmt::ago(fmt::f(t, "downloaded_at"))));
+    }
+    if fmt::truthy(t, "requested_by") {
+        s.push_str(&format!(" · requested by {}", fmt::s(t, "requested_by")));
+        if fmt::truthy(t, "requested_at") {
+            s.push_str(&format!(" on {}", fmt::date(fmt::f(t, "requested_at"))));
+        }
+    }
+    s
+}
+
+pub fn view<'a>(state: &'a State, ctx: &Ctx<'a>) -> El<'a, Message> {
+    let p = ctx.look;
+    let admin = ctx.is_admin();
+    let a = match &state.album {
+        None => return column![skeleton_rows(8)].into(),
+        Some(Value::Null) => return widgets::error_box(&state.error),
+        Some(a) => a,
+    };
+    let tracks = fmt::items(&a["tracks"]);
+    let multi = tracks
+        .iter()
+        .map(|t| fmt::s(t, "disc"))
+        .collect::<HashSet<_>>()
+        .len()
+        > 1;
+    let mut formats: Vec<String> = Vec::new();
+    for t in &tracks {
+        let f = fmt::s(t, "format").to_uppercase();
+        if !formats.contains(&f) {
+            formats.push(f);
+        }
+    }
+    let untagged = tracks.iter().filter(|t| !fmt::truthy(t, "mb_albumid")).count();
+    let mut requesters: Vec<String> = Vec::new();
+    for t in &tracks {
+        let w = fmt::s(t, "requested_by");
+        if !w.is_empty() && !requesters.contains(&w) {
+            requesters.push(w);
+        }
+    }
+    let earliest = |key: &str| {
+        tracks
+            .iter()
+            .filter(|t| fmt::truthy(t, key))
+            .map(|t| fmt::f(t, key))
+            .fold(f64::INFINITY, f64::min)
+    };
+    let (requested_at, added_at) = (earliest("requested_at"), earliest("added_at"));
+    let mut history: Vec<String> = Vec::new();
+    if !requesters.is_empty() {
+        let mut s = format!("Requested by {}", requesters.join(", "));
+        if requested_at.is_finite() {
+            s.push_str(&format!(" on {}", fmt::date(requested_at)));
+        }
+        history.push(s);
+    }
+    if added_at.is_finite() {
+        history.push(format!(
+            "{} {}",
+            if requesters.is_empty() { "Added" } else { "added" },
+            fmt::date(added_at)
+        ));
+    }
+
+    // the header
+    let cover: El<'a, Message> = match ctx.cover(&state.id, &a["cover_v"], 600) {
+        Some(h) => image(h)
+            .width(220)
+            .height(220)
+            .content_fit(ContentFit::Cover)
+            .border_radius(14.0)
+            .into(),
+        None => container(icon(Icon::Disc, 48.0, p.faint))
+            .width(220)
+            .height(220)
+            .center(220)
+            .style(theme::art)
+            .into(),
+    };
+    let album_name = if fmt::truthy(a, "album") { tr(ctx, a, "album") } else { "Unknown album".to_string() };
+    let artist_name = fmt::s(a, "albumartist");
+    let mut meta = String::new();
+    if fmt::truthy(a, "year") {
+        meta.push_str(&format!(" · {}", fmt::s(a, "year")));
+    }
+    meta.push_str(&format!(
+        " · {} tracks · {} · {}",
+        tracks.len(),
+        long_dur(fmt::f(a, "duration")),
+        size_text(fmt::f(a, "size"))
+    ));
+    let artist_line = row![
+        button(t(tr(ctx, a, "albumartist")).size(14).font(theme::semibold()))
+            .padding(0)
+            .style(theme::btn(Btn::Row))
+            .on_press(Message::OpenArtist(artist_name.clone())),
+        widgets::muted(meta).size(14),
+    ]
+    .spacing(0)
+    .align_y(Alignment::Center);
+    let mut chips = row![badge(formats.join(" / "), Badge::Plain)].spacing(6);
+    if fmt::truthy(a, "genre") {
+        chips = chips.push(badge(fmt::s(a, "genre"), Badge::Plain));
+    }
+    chips = chips.push(if untagged > 0 {
+        badge(format!("{untagged} track(s) not MusicBrainz-tagged"), Badge::Warn)
+    } else {
+        badge("MusicBrainz tagged", Badge::Ok)
+    });
+    let mut actions = row![
+        btn_icon(Icon::Play, "Play", Btn::Primary, Some(Message::PlayAll)),
+        btn_icon(Icon::Shuffle, "Shuffle", Btn::Default, Some(Message::ShuffleAll)),
+        tooltip(
+            btn_icon(Icon::External, "Share", Btn::Default, Some(Message::Share)),
+            widgets::tip_box("Share link"),
+            tooltip::Position::Bottom
+        )
+        .gap(4),
+    ]
+    .spacing(8)
+    .align_y(Alignment::Center);
+    if admin {
+        actions = actions.push(
+            tooltip(
+                btn_icon(Icon::Edit, "Edit details", Btn::Default, Some(Message::EditOpen)),
+                widgets::tip_box("Change the album, artist and song names"),
+                tooltip::Position::Bottom,
+            )
+            .gap(4),
+        );
+    }
+    actions = actions.push(icon_btn(Icon::More, "More options", Some(Message::Menu)));
+    let mut info = column![
+        small_muted("Album · In your library").font(theme::semibold()),
+        h1(album_name),
+        artist_line,
+    ]
+    .spacing(6)
+    .width(Length::Fill);
+    if !history.is_empty() {
+        info = info.push(small_muted(history.join(" · ")));
+    }
+    info = info.push(container(chips.wrap()).padding([6, 0]));
+    info = info.push(actions.wrap());
+    // a right-click on the header opens "More options" at the pointer (the web's album header)
+    let head = iced::widget::mouse_area(row![cover, info].spacing(24).align_y(Alignment::End)).on_right_press(Message::Menu);
+
+    // the songs
+    let cur = ctx.player.current_id();
+    let mut list = column![];
+    for (i, tr_) in tracks.iter().enumerate() {
+        let id = fmt::i(tr_, "id");
+        let number = format!(
+            "{}{}",
+            if multi { format!("{}-", fmt::s(tr_, "disc")) } else { String::new() },
+            if fmt::truthy(tr_, "track") { fmt::s(tr_, "track") } else { (i + 1).to_string() }
+        );
+        let mut r = TrackRow::new(tr(ctx, tr_, "title"))
+            .label(number)
+            .sub(tr(ctx, tr_, "artist"))
+            .quality(format_text(tr_))
+            .duration(Some(fmt::f(tr_, "duration")))
+            .playing(cur == Some(id))
+            .liked(state.liked.contains(&id), Message::Like(id))
+            .on_play(Message::Play(i))
+            .on_menu(Message::TrackMenu(i));
+        if admin {
+            r = r.note(fmt::s(tr_, "relpath"));
+        }
+        r = r.note(source_line(tr_));
+        if !fmt::truthy(tr_, "mb_trackid") {
+            r = r.badge(
+                tooltip(badge("?", Badge::Warn), widgets::tip_box("No MusicBrainz id"), tooltip::Position::Top)
+                    .gap(4)
+                    .into(),
+            );
+        }
+        r = r.badge_maybe(verify_badge(tr_));
+        if fmt::s(tr_, "quality_status") == "suspect" {
+            r = r.extra(
+                button(badge("Suspect quality", Badge::Warn))
+                    .padding(0)
+                    .style(theme::btn(Btn::Row))
+                    .on_press(Message::Suspect(i))
+                    .into(),
+            );
+        }
+        list = list.push(r.view());
+    }
+    let songs: El<'a, Message> = if tracks.is_empty() {
+        empty(Icon::Music, "No songs found", "")
+    } else {
+        widgets::card_flat(list).width(Length::Fill).into()
+    };
+    column![head, songs].spacing(22).width(Length::Fill).into()
+}
+
+/// The album's ⋯ menu (web `album_menu`).
+fn album_menu<'a>(state: &State, ctx: &Ctx<'a>, at: Point) -> El<'a, Message> {
+    let admin = ctx.is_admin();
+    let a = state.album.clone().unwrap_or(Value::Null);
+    let mut items = vec![
+        MenuItem::new("Add to queue", Message::AddToQueue).icon(Icon::List),
+        MenuItem::new("Play next", Message::PlayNext).icon(Icon::Next),
+        MenuItem::new("Add to playlist", Message::AddToPlaylist).icon(Icon::Plus),
+        MenuItem::new("Share link", Message::Share).icon(Icon::External),
+        MenuItem::new("Save album for offline", Message::SaveOffline).icon(Icon::Download),
+    ];
+    if admin {
+        items.push(MenuItem::new("All songs are right (confirm)", Message::ConfirmAll).icon(Icon::Check));
+    }
+    items.push(MenuItem::new("Download album (zip)", Message::DownloadZip).icon(Icon::Download));
+    items.push(MenuItem::new("Lyrics for all songs", Message::AlbumLyrics).icon(Icon::Music));
+    items.push(MenuItem::new("Get the rest of the album", Message::GetRest).icon(Icon::Download));
+    if fmt::truthy(&a, "mb_releasegroupid") {
+        items.push(MenuItem::new("Release info", Message::ReleaseInfo).icon(Icon::Disc));
+    }
+    items.push(MenuItem::new("Report a problem", Message::ReportAlbum).icon(Icon::Shield));
+    if admin {
+        items.push(MenuItem::new("Tag / match metadata", Message::MatchOpen).icon(Icon::Tag));
+        items.push(MenuItem::new("Edit details (album, artist, songs)", Message::EditOpen).icon(Icon::Edit));
+        items.push(MenuItem::new("Change artwork…", Message::ArtOpen).icon(Icon::Disc));
+        items.push(MenuItem::new("Find artwork automatically", Message::FindArt).icon(Icon::Refresh));
+        items.push(
+            MenuItem::new("Delete album from disk", Message::DeleteAsk)
+                .icon(Icon::Trash)
+                .danger(),
+        );
+    }
+    pop_menu(at, items, Message::CloseMenu, ctx.size)
+}
+
+fn input<'a>(placeholder: &str, value: &str, on: impl Fn(String) -> Message + 'a) -> text_input::TextInput<'a, Message> {
+    text_input(placeholder, value)
+        .on_input(on)
+        .padding([8, 11])
+        .size(14)
+        .style(theme::input)
+}
+
+fn edit_dialog<'a>(e: &'a EditState) -> El<'a, Message> {
+    let field = |i: usize, label: &'static str| -> El<'a, Message> {
+        widgets::field(label, input("", &e.fields[i], move |v| Message::EditField(i, v)))
+    };
+    let mut rows = column![
+        row![
+            small_muted("Disc").width(70),
+            small_muted("#").width(70),
+            small_muted("Title").width(Length::FillPortion(3)),
+            small_muted("Artist").width(Length::FillPortion(2)),
+        ]
+        .spacing(8),
+        widgets::divider(),
+    ]
+    .spacing(6);
+    for (ti, tr_) in e.tracks.iter().enumerate() {
+        rows = rows.push(
+            row![
+                container(input("", &tr_[0], move |v| Message::EditTrack(ti, 0, v))).width(70),
+                container(input("", &tr_[1], move |v| Message::EditTrack(ti, 1, v))).width(70),
+                container(input("", &tr_[2], move |v| Message::EditTrack(ti, 2, v))).width(Length::FillPortion(3)),
+                container(input("", &tr_[3], move |v| Message::EditTrack(ti, 3, v))).width(Length::FillPortion(2)),
+            ]
+            .spacing(8),
+        );
+    }
+    let body = column![
+        widgets::muted("Type what this album really is. The names are written into the files, and automatic tagging won't change them back.").size(13),
+        row![field(0, "Album artist"), field(1, "Album")].spacing(12),
+        row![field(2, "Year / date"), field(3, "Genre")].spacing(12),
+        widgets::card(rows).width(Length::Fill),
+        toggler(e.rename)
+            .label("Move and rename the files to match (naming template)")
+            .text_size(13.5)
+            .spacing(10)
+            .on_toggle(Message::EditRename)
+            .style(theme::switch),
+    ]
+    .spacing(14);
+    let footer = row![
+        btn("Cancel", Btn::Default, Some(Message::CloseDialog)),
+        btn("Save", Btn::Primary, (!e.busy).then_some(Message::EditSave)),
+    ]
+    .spacing(10);
+    modal("Edit details", body, Some(footer.into()), true, Message::CloseDialog)
+}
+
+fn match_dialog<'a>(m: &'a MatchState, ctx: &Ctx<'a>) -> El<'a, Message> {
+    let p = ctx.look;
+    let thumb = |cover: &str, size: f32| -> El<'a, Message> {
+        match ctx.picture(cover) {
+            Some(h) => image(h)
+                .width(size)
+                .height(size)
+                .content_fit(ContentFit::Cover)
+                .border_radius(8.0)
+                .into(),
+            None => container(icon(Icon::Disc, size * 0.4, p.faint))
+                .width(size)
+                .height(size)
+                .center(size)
+                .style(theme::art)
+                .into(),
+        }
+    };
+    let join = |v: &Value, keys: &[&str]| -> String {
+        keys.iter()
+            .filter(|k| fmt::truthy(v, k))
+            .map(|k| fmt::s(v, k))
+            .collect::<Vec<_>>()
+            .join(" · ")
+    };
+    let pct_badge = |x: f64, text: String| -> El<'a, Message> {
+        badge(text, if x > 0.85 { Badge::Ok } else if x > 0.6 { Badge::Warn } else { Badge::Err })
+    };
+    let results: El<'a, Message> = if let Some(pv) = &m.preview {
+        let r = &pv["release"];
+        let conf = fmt::f(pv, "confidence");
+        let provider = or_str(r, "provider", "MusicBrainz");
+        let mut rows = column![
+            row![
+                small_muted("Current").width(Length::FillPortion(2)),
+                small_muted(format!("→ {provider}")).width(Length::FillPortion(2)),
+                small_muted("New path").width(Length::FillPortion(3)),
+            ]
+            .spacing(10),
+            widgets::divider(),
+        ]
+        .spacing(6);
+        for row_ in fmt::items(&pv["rows"]) {
+            let old_track = if row_["old_track"].is_null() { "–".to_string() } else { fmt::s(&row_, "old_track") };
+            let old = column![
+                t(format!("{old_track}. {}", fmt::s(&row_, "old_title"))).size(13),
+                widgets::faint(fmt::s(&row_, "old_artist")).size(11.5),
+            ]
+            .spacing(2)
+            .width(Length::FillPortion(2));
+            let new: El<'a, Message> = if fmt::truthy(&row_, "new_title") {
+                let diff = row_["new_title"] != row_["old_title"];
+                column![
+                    t(format!(
+                        "{}{}. {}",
+                        if fmt::f(&row_, "new_disc") > 1.0 { format!("{}-", fmt::s(&row_, "new_disc")) } else { String::new() },
+                        fmt::s(&row_, "new_track"),
+                        fmt::s(&row_, "new_title")
+                    ))
+                    .size(13)
+                    .color(if diff { p.accent } else { p.text }),
+                    widgets::faint(fmt::s(&row_, "new_artist")).size(11.5),
+                ]
+                .spacing(2)
+                .width(Length::FillPortion(2))
+                .into()
+            } else {
+                container(badge("no match – left untouched", Badge::Err))
+                    .width(Length::FillPortion(2))
+                    .into()
+            };
+            rows = rows.push(
+                row![
+                    old,
+                    new,
+                    widgets::faint(fmt::s(&row_, "new_path"))
+                        .size(11.5)
+                        .font(theme::mono())
+                        .width(Length::FillPortion(3)),
+                ]
+                .spacing(10)
+                .align_y(Alignment::Center),
+            );
+        }
+        column![
+            row![
+                thumb(&fmt::s(r, "cover"), 64.0),
+                column![h3(fmt::s(r, "title")), small_muted(join(r, &["artist", "date", "country", "label"]))]
+                    .spacing(3)
+                    .width(Length::Fill),
+                pct_badge(conf, format!("Confidence {}%", (conf * 100.0).round() as i64)),
+            ]
+            .spacing(12)
+            .align_y(Alignment::Center),
+            widgets::card(rows).width(Length::Fill),
+            row![
+                toggler(m.rename)
+                    .label("Rename & move files using naming template")
+                    .text_size(13.5)
+                    .spacing(10)
+                    .on_toggle(Message::MatchRename)
+                    .style(theme::switch),
+                space().width(Length::Fill),
+                btn("Back", Btn::Default, Some(Message::MatchBack)),
+                btn_icon(Icon::Check, if m.applying { "Writing tags…" } else { "Apply tags" }, Btn::Primary, (!m.applying).then_some(Message::MatchApply)),
+            ]
+            .spacing(10)
+            .align_y(Alignment::Center),
+        ]
+        .spacing(14)
+        .into()
+    } else if m.searching || m.previewing {
+        widgets::muted(if m.provider == "fingerprint" && m.searching {
+            "Listening to every song… this takes a few seconds per song"
+        } else {
+            "Searching…"
+        })
+        .size(14)
+        .into()
+    } else if !m.error.is_empty() {
+        widgets::error_box(&m.error)
+    } else {
+        match &m.candidates {
+            None => column![].into(),
+            Some(c) if c.is_empty() => empty(
+                Icon::Search,
+                "No releases found",
+                "Try editing the artist/album, or paste a release ID.",
+            ),
+            Some(cands) => {
+                let mut list = column![];
+                for c in cands {
+                    let mt = fmt::f(c, "match");
+                    let mut right: Vec<El<'a, Message>> = Vec::new();
+                    if fmt::truthy(c, "track_count") {
+                        right.push(badge(
+                            format!("{} tracks", fmt::s(c, "track_count")),
+                            if fmt::s(c, "track_count") == m.track_count { Badge::Ok } else { Badge::Warn },
+                        ));
+                    }
+                    right.push(pct_badge(mt, format!("{}%", (mt * 100.0).round() as i64)));
+                    list = list.push(widgets::list_row(
+                        Some(thumb(&fmt::s(c, "cover"), 44.0)),
+                        format!("{} · {}", fmt::s(c, "title"), fmt::s(c, "artist")),
+                        join(c, &["provider", "date", "country", "formats", "label", "status", "type"]),
+                        right,
+                        Some(Message::MatchPick(fmt::s(c, "id"))),
+                    ));
+                }
+                column![
+                    small_muted(format!("Your files: {} tracks. Pick the matching release:", m.track_count)),
+                    widgets::card_flat(list).width(Length::Fill),
+                ]
+                .spacing(8)
+                .into()
+            }
+        }
+    };
+    let body = column![
+        tabs(&PROVIDERS, &m.provider, Message::MatchProvider),
+        small_muted(match_help(&m.provider)),
+        row![
+            container(input("Artist", &m.artist, Message::MatchArtist).on_submit(Message::MatchSearch)).width(Length::FillPortion(2)),
+            container(input("Album", &m.album, Message::MatchAlbum).on_submit(Message::MatchSearch)).width(Length::FillPortion(3)),
+            btn_icon(Icon::Search, "Search", Btn::Default, Some(Message::MatchSearch)),
+        ]
+        .spacing(8)
+        .align_y(Alignment::Center),
+        input("…or paste a MusicBrainz / Deezer / Apple / Discogs link", &m.link, Message::MatchLink)
+            .on_submit(Message::MatchSearch),
+        results,
+    ]
+    .spacing(12);
+    modal("Tag this album", body, None, true, Message::CloseDialog)
+}
+
+fn art_dialog<'a>(a: &'a ArtState, ctx: &Ctx<'a>) -> El<'a, Message> {
+    let out: El<'a, Message> = if a.searching {
+        widgets::muted("Searching every catalogue…").size(14).into()
+    } else if !a.error.is_empty() {
+        widgets::error_box(&a.error)
+    } else {
+        match &a.candidates {
+            None => column![].into(),
+            Some(c) if c.is_empty() => widgets::muted("No artwork found – try another title, or upload a picture.")
+                .size(14)
+                .into(),
+            Some(c) => grid(
+                c.iter()
+                    .enumerate()
+                    .map(|(i, x)| {
+                        let mut title = fmt::s(x, "source");
+                        if fmt::truthy(x, "size") {
+                            title.push_str(&format!(" · {}", fmt::s(x, "size")));
+                        }
+                        Tile::new(title, TileKind::Album, Message::ArtPick(i))
+                            .sub(fmt::s(x, "label"))
+                            .cover(ctx.picture(&fmt::s(x, "thumb")))
+                            .width(140.0)
+                            .view()
+                    })
+                    .collect(),
+            ),
+        }
+    };
+    let body = column![
+        row![
+            container(input("Album title to search for", &a.q, Message::ArtQuery).on_submit(Message::ArtSearch)).width(Length::Fill),
+            btn("Search", Btn::Primary, (!a.busy).then_some(Message::ArtSearch)),
+            btn("Upload…", Btn::Default, (!a.busy).then_some(Message::ArtUpload)),
+        ]
+        .spacing(8)
+        .align_y(Alignment::Center),
+        small_muted("Cover Art Archive, Deezer, Apple Music, YouTube Music and Discogs. The picture is embedded in every song and saved as cover.jpg."),
+        out,
+    ]
+    .spacing(12);
+    modal("Change artwork", body, None, true, Message::CloseDialog)
+}
+
+/// A modal or ⋯ menu to lay over the whole window, when one is open.
+pub fn overlay<'a>(state: &'a State, ctx: &Ctx<'a>) -> Option<El<'a, Message>> {
+    if let Some(o) = library::shared_overlay(&state.shared, ctx) {
+        return Some(o.map(Message::Shared));
+    }
+    match &state.dialog {
+        Some(Dialog::Edit(e)) => return Some(edit_dialog(e)),
+        Some(Dialog::Match(m)) => return Some(match_dialog(m, ctx)),
+        Some(Dialog::Artwork(a)) => return Some(art_dialog(a, ctx)),
+        Some(Dialog::Confirm {
+            title,
+            text,
+            ok,
+            danger,
+            on_ok,
+        }) => return Some(confirm(title, text, ok, *danger, (**on_ok).clone(), Message::CloseDialog)),
+        None => {}
+    }
+    state.menu.map(|at| album_menu(state, ctx, at))
+}
+
+pub fn subscription(_state: &State) -> Subscription<Message> {
+    Subscription::none()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn release_links_are_understood() {
+        assert_eq!(
+            parse_release_link("https://musicbrainz.org/release/4F8A9C0D-1234-5678-9abc-def012345678"),
+            Some("4f8a9c0d-1234-5678-9abc-def012345678".into())
+        );
+        assert_eq!(parse_release_link("https://www.deezer.com/en/album/302127"), Some("deezer:302127".into()));
+        assert_eq!(
+            parse_release_link("https://music.apple.com/us/album/thriller/269572838"),
+            Some("apple:269572838".into())
+        );
+        assert_eq!(
+            parse_release_link("https://music.apple.com/album/id269572838?i=1"),
+            Some("apple:269572838".into())
+        );
+        assert_eq!(parse_release_link("https://www.discogs.com/release/249504-x"), Some("discogs:r249504".into()));
+        assert_eq!(parse_release_link("https://www.discogs.com/Artist/master/1234"), Some("discogs:m1234".into()));
+        assert_eq!(parse_release_link("just words"), None);
+        assert_eq!(parse_release_link(""), None);
+    }
+
+    #[test]
+    fn base64_is_standard() {
+        assert_eq!(base64(b""), "");
+        assert_eq!(base64(b"f"), "Zg==");
+        assert_eq!(base64(b"fo"), "Zm8=");
+        assert_eq!(base64(b"foo"), "Zm9v");
+        assert_eq!(base64(b"foobar"), "Zm9vYmFy");
+    }
+
+    #[test]
+    fn the_source_line_reads_like_the_web() {
+        assert_eq!(source_line(&json!({})), "");
+        let s = source_line(&json!({ "source": "soulseek", "source_detail": "user1", "requested_by": "ann" }));
+        assert_eq!(s, "⬇ soulseek · user1 · requested by ann");
+    }
+}

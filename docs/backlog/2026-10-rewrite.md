@@ -76,6 +76,30 @@ Nothing here is started until the owner says "go".
    Settings → Playback card, the exclusive-mode error, the clamped rate lists, DSD greyed in shared mode, the link
    limit, Test sound and the signal path are built in the new app against the JSON the prompt defines, and the
    hardware list (h) is section 6 of the prompt.
+   **Done in 0.27 (second part), in the desktop app (clients/desktop, Iced) – Settings → Playback → "Play through
+   Cadenza on this device":**
+   - b: exclusive mode is a switch on the card; the status line reads "Output: <device> · <format> · Exclusive |
+     Shared" from what the engine opened, or "not opened yet" before it opened anything, never Shared on a guess.
+     When exclusive was asked for and the engine opened shared or failed, the card says "Exclusive mode failed:
+     <reason>" with the engine's reason (it names the program holding the device when the driver reports one).
+   - c: the PCM and DSD rate lists come from the chosen device's reported rates and DSD capabilities and follow a
+     device change.
+   - d: the DSD output mode is greyed out with the reason while exclusive is off.
+   - e: a link select (USB, I2S, S/PDIF coax 192 kHz, optical 96 kHz) caps the rate until the engine has its own
+     `output.link`.
+   - f: Test sound plays a 2-second tone through the chosen output; the player's Signal path dialog shows the
+     server's stream decision (`/tracks/{id}/info`, e.g. the FLAC fallback for Opus, since the app's
+     `X-Encore-Decoders` list has no opus yet), the engine's input, every active stage and the output.
+   - g: position, duration and state come from the engine's status events; the player bar shows the engine's
+     error as a red "Engine error" badge.
+   - Not tested on real audio hardware: here the app is built, unit-tested and screenshot-toured under Xvfb with
+     the engine's null output; CI builds and packages it for the three systems. **Needs the owner's hardware**
+     (Windows PC with the RTX 3070, Singxer SU-2, Fosi ZD3), with the new app (`Encore-0.27.0-windows-x86_64.exe`):
+     sound at all in shared mode; exclusive on the ZD3 direct and through the SU-2 (Exclusive in the status line,
+     or the failure with its reason and the program's name); the DSD list stopping at DSD256 on the ZD3 and DSD
+     greyed in shared mode; the link limit on the SU-2 path; Test sound on the chosen output; track 58742 (Opus)
+     playing through the FLAC fallback, seeking included; position and duration moving; the DAC free for another
+     program right after Quit; the CUDA stage on the RTX 3070 without dropouts.
 9. **Soulseek crash on 0.26.1:** "can't create /downloads/slskd: Permission denied".
    - Cause: docker/entrypoint.sh only creates and chowns the staging folder.
    - Fix: create and chown every configured working folder before dropping to PUID.
