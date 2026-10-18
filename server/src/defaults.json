@@ -359,6 +359,11 @@
   "default": "{bin} --config-path {config} --folder {folder} --quality {quality} --no-db --no-progress url {url}",
   "secret": false
  },
+ "github_token": {
+  "env": "GITHUB_TOKEN",
+  "default": "",
+  "secret": true
+ },
  "streamrip_deezer_arl": {
   "env": "STREAMRIP_DEEZER_ARL",
   "default": "",

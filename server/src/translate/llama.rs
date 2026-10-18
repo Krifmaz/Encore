@@ -131,10 +131,7 @@ pub fn newer_build(latest: &str, installed: &str) -> bool {
 
 /// The newest llama.cpp build for this server: (tag, download url).
 pub async fn latest(st: &AppState) -> anyhow::Result<(String, String)> {
-    let r = st.http.get(format!("https://api.github.com/repos/{LLAMA_REPO}/releases?per_page=20"))
-        .header("Accept", "application/vnd.github+json").timeout(Duration::from_secs(20)).send().await?;
-    let code = r.status().as_u16();
-    let v: Value = r.json().await.unwrap_or(Value::Null);
+    let (code, v) = crate::tools::github_get(st, &format!("https://api.github.com/repos/{LLAMA_REPO}/releases?per_page=20")).await?;
     if code >= 400 {
         anyhow::bail!("GitHub returned {code} for llama.cpp releases: {}", v["message"].as_str().unwrap_or(""));
     }

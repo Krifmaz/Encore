@@ -300,10 +300,7 @@ pub fn pick_asset(release: &Value, arch: &str) -> Option<(String, String)> {
 
 /// The newest slskd release for this machine: (version, asset URL).
 pub async fn latest(st: &AppState) -> anyhow::Result<(String, String)> {
-    let r = st.http.get(RELEASES).header("Accept", "application/vnd.github+json").timeout(Duration::from_secs(20)).send().await
-        .map_err(|e| anyhow::anyhow!("GitHub unreachable: {e}"))?;
-    let code = r.status().as_u16();
-    let v: Value = r.json().await.unwrap_or(Value::Null);
+    let (code, v) = crate::tools::github_get(st, RELEASES).await?;
     if code >= 400 {
         anyhow::bail!("GitHub returned {code} for the latest slskd release: {}", v["message"].as_str().unwrap_or(""));
     }

@@ -332,15 +332,75 @@ async fn get_json(st: &AppState, url: &str) -> anyhow::Result<(u16, Value)> {
     Ok((code, v))
 }
 
+/// GitHub's API with a conditional request. The ETag and body of the last answer for a URL are kept (a week,
+/// in the small cache) and sent back as `If-None-Match`: a 304 answer gives the kept body as a 200, and GitHub
+/// does not count 304s against the rate limit (60 requests an hour per address without a token, 5,000 with
+/// the `github_token` setting). A rate-limited answer (403 or 429 with X-RateLimit-Remaining: 0) becomes a
+/// sentence with the reset time instead of GitHub's text.
+pub async fn github_get(st: &AppState, url: &str) -> anyhow::Result<(u16, Value)> {
+    let key = format!("gh:etag:{url}");
+    let kept = st.cache_get(&key);
+    let token = st.cfg.str("github_token");
+    let token = token.trim();
+    let mut req = st.http.get(url)
+        .header("Accept", "application/vnd.github+json")
+        .header("X-GitHub-Api-Version", "2022-11-28")
+        .timeout(Duration::from_secs(20));
+    if !token.is_empty() {
+        req = req.bearer_auth(token);
+    }
+    if let Some(etag) = kept.as_ref().and_then(|k| k["etag"].as_str()) {
+        req = req.header("If-None-Match", etag);
+    }
+    let r = req.send().await.map_err(|e| anyhow::anyhow!("GitHub unreachable: {e}"))?;
+    let code = r.status().as_u16();
+    if code == 304 {
+        if let Some(k) = kept {
+            return Ok((200, k["body"].clone()));
+        }
+    }
+    let header = |name: &str| r.headers().get(name).and_then(|v| v.to_str().ok()).map(|v| v.trim().to_string());
+    let remaining = header("x-ratelimit-remaining").and_then(|v| v.parse::<i64>().ok());
+    let reset = header("x-ratelimit-reset").and_then(|v| v.parse::<i64>().ok());
+    let etag = header("etag");
+    let v = r.json::<Value>().await.unwrap_or(Value::Null);
+    if (code == 403 || code == 429) && remaining == Some(0) {
+        anyhow::bail!("{}", rate_limit_message(reset, !token.is_empty(), crate::db::now() as i64));
+    }
+    if code < 400 {
+        if let Some(etag) = etag {
+            st.cache_put(&key, json!({ "etag": etag, "body": v }), 7 * 86400);
+        }
+    }
+    Ok((code, v))
+}
+
+/// What a rate-limited check says: when it clears (from X-RateLimit-Reset, epoch seconds) and the way out.
+pub fn rate_limit_message(reset_epoch: Option<i64>, has_token: bool, now: i64) -> String {
+    let when = match reset_epoch {
+        Some(t) if t > now => {
+            let mins = ((t - now) + 59) / 60;
+            let s = t.rem_euclid(86400);
+            format!(" until about {:02}:{:02} UTC (in {} min)", s / 3600, (s % 3600) / 60, mins.max(1))
+        }
+        _ => String::new(),
+    };
+    if has_token {
+        format!("GitHub is rate-limiting update checks for the GitHub token{when} – try again then")
+    } else {
+        format!("GitHub is rate-limiting update checks from this server's address (60 an hour without a token){when} – try again then, or add a GitHub token under Settings → Apps & sources → General, which allows 5,000 an hour")
+    }
+}
+
 async fn github_latest(st: &AppState, repo: &str, tags_fallback: bool) -> anyhow::Result<(String, String)> {
-    let (code, v) = get_json(st, &format!("https://api.github.com/repos/{repo}/releases/latest")).await?;
+    let (code, v) = github_get(st, &format!("https://api.github.com/repos/{repo}/releases/latest")).await?;
     if code < 400 {
         if let Some(t) = parse_github(&v) {
             return Ok(t);
         }
     }
     if tags_fallback && (code == 404 || code < 400) {
-        let (code, v) = get_json(st, &format!("https://api.github.com/repos/{repo}/tags")).await?;
+        let (code, v) = github_get(st, &format!("https://api.github.com/repos/{repo}/tags")).await?;
         if code < 400 {
             if let Some(t) = parse_github(&v) {
                 return Ok(t);
@@ -675,7 +735,7 @@ async fn update_cadenza(st: &AppState, tag: &str) -> anyhow::Result<String> {
     let ver = tag.trim_start_matches(['v', 'V']).to_string();
     let arch = std::env::consts::ARCH;
     let asset = cadenza_asset(&ver, arch).ok_or_else(|| anyhow::anyhow!("Cadenza has no release build for this server ({arch})"))?;
-    let (code, rel) = get_json(st, &format!("https://api.github.com/repos/{CADENZA_REPO}/releases/tags/{tag}")).await?;
+    let (code, rel) = github_get(st, &format!("https://api.github.com/repos/{CADENZA_REPO}/releases/tags/{tag}")).await?;
     if code >= 400 {
         anyhow::bail!("GitHub returned {code} for the Cadenza {tag} release: {}", rel["message"].as_str().unwrap_or(""));
     }
@@ -1124,6 +1184,67 @@ pub async fn scheduled(st: &AppState) -> anyhow::Result<String> {
 mod tests {
     use super::*;
     use std::cmp::Ordering::*;
+
+    #[test]
+    fn a_rate_limited_check_says_when_it_clears_and_what_helps() {
+        // 10:00:00 UTC now, reset at 10:42:30
+        let now = 10 * 3600;
+        let m = rate_limit_message(Some(now + 42 * 60 + 30), false, now);
+        assert!(m.starts_with("GitHub is rate-limiting update checks from this server's address (60 an hour without a token) until about 10:42 UTC (in 43 min)"), "{m}");
+        assert!(m.contains("add a GitHub token under Settings"), "{m}");
+        let m = rate_limit_message(None, true, now);
+        assert_eq!(m, "GitHub is rate-limiting update checks for the GitHub token – try again then");
+        // a reset in the past says nothing about a time
+        assert!(!rate_limit_message(Some(now - 5), false, now).contains("until"));
+    }
+
+    /// A second check of the same URL sends If-None-Match and takes the 304 as the kept body; a rate-limited
+    /// answer is one sentence, not GitHub's.
+    #[tokio::test]
+    async fn github_checks_reuse_the_last_answer_through_etags() {
+        use axum::{extract::State as S, http::HeaderMap, response::IntoResponse, routing::get, Router};
+        use std::sync::atomic::{AtomicUsize, Ordering as O};
+        use std::sync::Arc;
+        #[derive(Clone)]
+        struct Hits { full: Arc<AtomicUsize>, conditional: Arc<AtomicUsize> }
+        async fn latest(S(h): S<Hits>, headers: HeaderMap) -> axum::response::Response {
+            if headers.get("if-none-match").and_then(|v| v.to_str().ok()) == Some("\"abc\"") {
+                h.conditional.fetch_add(1, O::SeqCst);
+                return (axum::http::StatusCode::NOT_MODIFIED, [("etag", "\"abc\"")]).into_response();
+            }
+            h.full.fetch_add(1, O::SeqCst);
+            (axum::http::StatusCode::OK, [("etag", "\"abc\""), ("content-type", "application/json")], r#"{"tag_name":"v1.2.3"}"#).into_response()
+        }
+        async fn limited() -> axum::response::Response {
+            (axum::http::StatusCode::FORBIDDEN, [("x-ratelimit-remaining", "0"), ("x-ratelimit-reset", "4102444800"), ("content-type", "application/json")],
+                r#"{"message":"API rate limit exceeded for 1.2.3.4. (But here's the good news: ...)"}"#).into_response()
+        }
+        let hits = Hits { full: Arc::new(AtomicUsize::new(0)), conditional: Arc::new(AtomicUsize::new(0)) };
+        let app = Router::new().route("/repos/x/y/releases/latest", get(latest)).route("/repos/x/z/releases/latest", get(limited)).with_state(hits.clone());
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let base = format!("http://{}", listener.local_addr().unwrap());
+        tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+
+        let dir = std::env::temp_dir().join(format!("encore-ghcache-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let st = {
+            let _env = crate::TEST_ENV.lock().unwrap_or_else(|e| e.into_inner());
+            std::env::set_var("ENCORE_CONFIG_DIR", &dir);
+            crate::build_state().unwrap()
+        };
+        let url = format!("{base}/repos/x/y/releases/latest");
+        let (code, v) = github_get(&st, &url).await.unwrap();
+        assert_eq!((code, v["tag_name"].as_str()), (200, Some("v1.2.3")));
+        let (code, v) = github_get(&st, &url).await.unwrap();
+        assert_eq!((code, v["tag_name"].as_str()), (200, Some("v1.2.3")), "the 304 answer is served from the kept body");
+        assert_eq!((hits.full.load(O::SeqCst), hits.conditional.load(O::SeqCst)), (1, 1));
+        let e = github_get(&st, &format!("{base}/repos/x/z/releases/latest")).await.unwrap_err().to_string();
+        // (the token wording depends on whether GITHUB_TOKEN is set where the tests run)
+        assert!(e.starts_with("GitHub is rate-limiting update checks"), "{e}");
+        assert!(!e.contains("good news"), "{e}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 
     #[test]
     fn scheduled_task_reports_a_switched_off_streamrip_without_installing() {
