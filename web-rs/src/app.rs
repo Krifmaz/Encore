@@ -231,6 +231,32 @@ fn render_shell() {
     if let Some(b) = qs("#menu-btn") {
         dom::on_forever(&b, "click", |e| { e.stop_propagation(); if let Some(sb) = qs("#sidebar") { let _ = sb.class_list().toggle("open"); } });
     }
+    // Right-click (or a long press on a phone) opens the same menu as the row's ⋯ button, at the pointer:
+    // climb from what was clicked to the first element that holds exactly one ⋯ button (a track row, a
+    // request, the album header, the player bar), and press it. Text fields and the open menu keep the
+    // browser's own menu; where there is no ⋯ nothing changes.
+    dom::on_forever(&document(), "contextmenu", |e| {
+        const MORE: &str = r#"button[aria-label="More"], button[aria-label="More options"], [data-act="menu"], [data-tmenu], #p-more, #f-more"#;
+        let Some(target) = e.target().and_then(|t| t.dyn_into::<Element>().ok()) else { return };
+        if target.closest("input, textarea, select, [contenteditable], .menu-pop, .modal").ok().flatten().is_some() { return; }
+        let mut node = Some(target);
+        let mut hops = 0;
+        while let Some(el) = node {
+            if hops > 12 || el.tag_name() == "BODY" { break; }
+            let found = el.query_selector_all(MORE).map(|l| l.length()).unwrap_or(0);
+            if found == 1 {
+                if let Some(b) = el.query_selector(MORE).ok().flatten() {
+                    if let Some(m) = e.dyn_ref::<web_sys::MouseEvent>() { ui::next_menu_at(m.client_x() as f64, m.client_y() as f64); }
+                    e.prevent_default();
+                    if let Some(h) = b.dyn_ref::<web_sys::HtmlElement>() { h.click(); }
+                }
+                return;
+            }
+            if found > 1 { return; }
+            node = el.parent_element();
+            hops += 1;
+        }
+    });
     dom::on_forever(&document(), "click", |e| {
         if let Some(sb) = qs("#sidebar") {
             if dom::has_class(&sb, "open") {

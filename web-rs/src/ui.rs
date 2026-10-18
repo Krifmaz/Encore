@@ -442,9 +442,18 @@ impl MenuItem {
     pub const SEP: Option<MenuItem> = None;
 }
 
+thread_local! {
+    /// Where the next menu opens instead of under its button: set by the right-click handler (app.rs) just
+    /// before it clicks the row's ⋯ button, read once by `pop_menu`.
+    static MENU_AT: std::cell::Cell<Option<(f64, f64)>> = const { std::cell::Cell::new(None) };
+}
+/// The next `pop_menu` opens at this viewport point (a right-click), then the override is used up.
+pub fn next_menu_at(x: f64, y: f64) { MENU_AT.with(|m| m.set(Some((x, y)))); }
+
 /// `popMenu(anchor, items)`: pops up next to the button on desktop, slides up as a sheet on phones.
 /// Items are `Option<MenuItem>`; `None` is a separator (the JS `'-'`). Entries you want to skip: filter them out before.
 pub fn pop_menu(anchor: &Element, items: Vec<Option<MenuItem>>) {
+    let at = MENU_AT.with(|m| m.take());
     for n in dom::qsa(".menu-pop, .menu-bg") { n.remove(); }
     let bg = create("div");
     bg.set_class_name("menu-bg");
@@ -481,14 +490,25 @@ pub fn pop_menu(anchor: &Element, items: Vec<Option<MenuItem>>) {
     let _ = body().append_child(&bg);
     let _ = body().append_child(&el);
     if !dom::is_phone() {
-        let r = anchor.get_bounding_client_rect();
         let h = el.dyn_ref::<web_sys::HtmlElement>().map(|h| (h.offset_width() as f64, h.offset_height() as f64)).unwrap_or((0.0, 0.0));
         let (w, hh) = h;
         let win = dom::window();
         let iw = win.inner_width().ok().and_then(|v| v.as_f64()).unwrap_or(0.0);
         let ih = win.inner_height().ok().and_then(|v| v.as_f64()).unwrap_or(0.0);
-        let left = (r.right() - w).min(iw - w - 8.0).max(8.0);
-        let top = if r.bottom() + hh + 8.0 > ih { (r.top() - hh - 6.0).max(8.0) } else { r.bottom() + 6.0 };
+        let (left, top) = match at {
+            // a right-click: the menu's corner sits at the pointer, flipped when it would leave the window
+            Some((x, y)) => {
+                let left = if x + w + 8.0 > iw { (x - w).max(8.0) } else { x };
+                let top = if y + hh + 8.0 > ih { (y - hh).max(8.0) } else { y };
+                (left, top)
+            }
+            None => {
+                let r = anchor.get_bounding_client_rect();
+                let left = (r.right() - w).min(iw - w - 8.0).max(8.0);
+                let top = if r.bottom() + hh + 8.0 > ih { (r.top() - hh - 6.0).max(8.0) } else { r.bottom() + 6.0 };
+                (left, top)
+            }
+        };
         dom::set_style(&el, "left", &format!("{left}px"));
         dom::set_style(&el, "top", &format!("{top}px"));
     }
