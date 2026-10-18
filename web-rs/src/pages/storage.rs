@@ -1,4 +1,4 @@
-//! Port of web/js/pages/storage.js – see docs/ui-rewrite/CONTRACT.md
+//! Port of web/js/pages/storage.js – see docs/archive/ui-rewrite/CONTRACT.md
 //! Storage at a glance: disk, library breakdown, biggest artists/albums, download folders.
 use crate::api;
 use crate::app::{Ctx, PageFuture};

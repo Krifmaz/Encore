@@ -95,23 +95,6 @@ fn hashed_asset(path: &str) -> bool {
     !name.contains('/') && stem.rsplit_once('-').is_some_and(|(_, h)| h.len() >= 16 && h.bytes().all(|b| b.is_ascii_hexdigit()))
 }
 
-/// `ENCORE_LEGACY_UI=1`: serve the frozen JavaScript UI (web/ of 0.25, without this release's interface fixes)
-/// at `/` instead of the Rust UI, for this one release.
-fn legacy_ui() -> bool {
-    matches!(std::env::var("ENCORE_LEGACY_UI").as_deref(), Ok("1") | Ok("true") | Ok("yes"))
-}
-
-/// Where the JavaScript UI lives when `ENCORE_LEGACY_UI=1`: `ENCORE_LEGACY_STATIC_DIR`, or the Rust UI's folder
-/// with `-legacy` on its name (`/app/static` → `/app/static-legacy`, as the image lays them out).
-pub fn legacy_dir(static_dir: &std::path::Path) -> PathBuf {
-    if let Ok(d) = std::env::var("ENCORE_LEGACY_STATIC_DIR") {
-        return PathBuf::from(d);
-    }
-    let mut name = static_dir.file_name().map(|n| n.to_os_string()).unwrap_or_else(|| "static".into());
-    name.push("-legacy");
-    static_dir.with_file_name(name)
-}
-
 /// `/next/` was the Rust UI's address while the JavaScript UI lived at `/`; an alias for one release (0.26).
 /// `/next` and `/next/` go to `/`; `/next/<path>` goes to `/<path>` with its query string, so an old tab
 /// reloading its hashed script, a bookmarked `/next/share.html` and a desktop app whose saved address ends in
@@ -158,16 +141,8 @@ pub fn app(st: AppState) -> Router {
         .layer(middleware::from_fn_with_state(st.clone(), covers::stamp_layer))
         // titles, albums and artists gain `_t` / `_r` (translation, romanization) for listeners who asked
         .layer(middleware::from_fn_with_state(st, translate::stamp_layer));
-    let router = if legacy_ui() {
-        let legacy = legacy_dir(&static_dir);
-        tracing::warn!("ENCORE_LEGACY_UI=1: serving the JavaScript UI from {} – it has none of this release's interface fixes", legacy.display());
-        // the files both UIs share (css, icons, manifest, share.html, sw.js) live in the Rust UI's folder only
-        let shared = ServeDir::new(&static_dir).fallback(ServeFile::new(legacy.join("index.html")));
-        router.fallback_service(ServeDir::new(&legacy).fallback(shared))
-    } else {
-        router.fallback_service(spa)
-    };
     router
+        .fallback_service(spa)
         .layer(middleware::from_fn(security_headers))
         // API calls hold background passes (cover thumbnails …) to one low-priority thread
         .layer(middleware::from_fn(busy::layer))
@@ -259,48 +234,27 @@ mod tests {
         assert!(!super::hashed_asset("/a/encore-web-f92ab5b84b305a59.js"));
     }
 
-    #[test]
-    fn the_legacy_folder_sits_next_to_the_static_one() {
-        let _env = super::TEST_ENV.lock().unwrap_or_else(|e| e.into_inner());
-        std::env::remove_var("ENCORE_LEGACY_STATIC_DIR");
-        assert_eq!(super::legacy_dir(std::path::Path::new("/app/static")), std::path::PathBuf::from("/app/static-legacy"));
-        assert_eq!(super::legacy_dir(std::path::Path::new("./static")), std::path::PathBuf::from("./static-legacy"));
-        std::env::set_var("ENCORE_LEGACY_STATIC_DIR", "/srv/old-ui");
-        assert_eq!(super::legacy_dir(std::path::Path::new("/app/static")), std::path::PathBuf::from("/srv/old-ui"));
-        std::env::remove_var("ENCORE_LEGACY_STATIC_DIR");
-    }
-
-    /// The Rust UI's trunk output served at `/`: index.html for the root and for unknown paths, the hashed files
-    /// cached for good, `/next/…` redirected to `/…`, and with ENCORE_LEGACY_UI=1 the JavaScript UI's folder at `/`
-    /// with the shared files still taken from the Rust UI's folder.
+    /// The Rust UI's trunk output served at `/`: index.html for the root and for unknown paths, its own files
+    /// (css, sw.js) from the same folder, the hashed files cached for good, `/next/…` redirected to `/…`.
     #[tokio::test]
-    async fn the_rust_ui_is_the_website_and_the_legacy_switch_brings_the_old_one_back() {
+    async fn the_rust_ui_is_the_website() {
         use axum::body::Body;
         use axum::http::{Request, StatusCode};
         use tower::ServiceExt;
         let dir = std::env::temp_dir().join(format!("encore-ui-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         let dist = dir.join("static");
-        let legacy = dir.join("static-legacy");
         std::fs::create_dir_all(dist.join("css")).unwrap();
-        std::fs::create_dir_all(legacy.join("js")).unwrap();
         std::fs::write(dist.join("index.html"), "<meta name=\"application-name\" content=\"Encore\">rust ui").unwrap();
         std::fs::write(dist.join("encore-web-f92ab5b84b305a59.js"), "// glue").unwrap();
         std::fs::write(dist.join("css/app.css"), "body{}").unwrap();
         std::fs::write(dist.join("sw.js"), "// sw").unwrap();
-        std::fs::write(legacy.join("index.html"), "legacy ui").unwrap();
-        std::fs::write(legacy.join("js/app.js"), "// app").unwrap();
-        let (rust, old) = {
+        let rust = {
             let _env = super::TEST_ENV.lock().unwrap_or_else(|e| e.into_inner());
             std::env::set_var("ENCORE_CONFIG_DIR", dir.join("config"));
-            std::env::remove_var("ENCORE_LEGACY_UI");
             let mut st = super::build_state().unwrap();
-            st.static_dir = dist.clone();
-            let rust = super::app(st.clone());
-            std::env::set_var("ENCORE_LEGACY_UI", "1");
-            let old = super::app(st);
-            std::env::remove_var("ENCORE_LEGACY_UI");
-            (rust, old)
+            st.static_dir = dist;
+            super::app(st)
         };
         let get = |app: &super::Router, path: &str| {
             let app = app.clone();
@@ -328,19 +282,11 @@ mod tests {
             assert_eq!(s, StatusCode::TEMPORARY_REDIRECT, "{alias}");
             assert_eq!(h.get("location").unwrap(), to, "{alias}");
         }
-        // the switch: the JavaScript UI at /, its own files from its folder, the shared ones from the Rust UI's
-        let (s, _, b) = get(&old, "/").await;
-        assert_eq!((s, b.as_str()), (StatusCode::OK, "legacy ui"));
-        let (s, _, b) = get(&old, "/js/app.js").await;
-        assert_eq!((s, b.as_str()), (StatusCode::OK, "// app"));
-        let (s, _, b) = get(&old, "/css/app.css").await;
+        // the Rust UI's own files come from the same folder
+        let (s, _, b) = get(&rust, "/css/app.css").await;
         assert_eq!((s, b.as_str()), (StatusCode::OK, "body{}"));
-        let (s, _, b) = get(&old, "/sw.js").await;
+        let (s, _, b) = get(&rust, "/sw.js").await;
         assert_eq!((s, b.as_str()), (StatusCode::OK, "// sw"));
-        let (s, _, b) = get(&old, "/#/library".split('#').next().unwrap()).await;
-        assert_eq!((s, b.as_str()), (StatusCode::OK, "legacy ui"));
-        let (s, _, b) = get(&old, "/not/a/file").await;
-        assert_eq!((s, b.as_str()), (StatusCode::OK, "legacy ui"));
         let _ = std::fs::remove_dir_all(&dir);
     }
 

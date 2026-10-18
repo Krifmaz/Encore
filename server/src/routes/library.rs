@@ -553,6 +553,9 @@ pub struct StreamQ {
     filter: String,
     /// Cadenza dither id (default TPDF)
     dither: String,
+    /// the codecs this client decodes, comma separated (`X-Encore-Decoders` as a query, for an `<audio>` element
+    /// that can't send headers): the original when the file's codec is listed, else lossless FLAC
+    codecs: String,
 }
 
 /// A query switch: `1`, `true`, `yes` or `on` (an empty or missing value is off).
@@ -575,12 +578,21 @@ pub async fn stream_track(st: &AppState, id: i64, q: &StreamQ, req: Request, use
     if let (true, false, Some(u)) = (q.dsp, lossy, user) {
         return dsp_stream(st, id, path, q, u, req).await;
     }
-    let alac = if fmt == "m4a" || fmt == "mp4" { let p2 = path.clone(); tokio::task::spawn_blocking(move || is_alac(&p2)).await.unwrap_or(false) } else { false };
-    if let (false, false, false, Some(ct)) = (q.transcode, lossy, alac, browser_type(&fmt)) {
-        let mut r = serve_file(&path, req, Some(ct), None).await?;
-        r.headers_mut().insert(header::CACHE_CONTROL, HeaderValue::from_static("private, max-age=3600"));
-        r.headers_mut().insert(header::HeaderName::from_static("x-encore-stream"), HeaderValue::from_static("original"));
-        return Ok(r);
+    // codec negotiation: a client that says what it decodes gets the original when the file's codec is listed
+    // (DSF and DFF included) and lossless FLAC otherwise – unless it asked for a conversion or a lossy stream itself
+    let mut fallback = false;
+    if let (false, false, Some(list)) = (q.transcode, lossy, decoders(req.headers(), &q.codecs)) {
+        let p2 = path.clone();
+        let info = tokio::task::spawn_blocking(move || audio_info(&p2)).await.unwrap_or(json!({}));
+        if let Some(ct) = plan(&fmt, &info, Some(&list)).content_type {
+            return original(&path, req, ct).await;
+        }
+        fallback = true;
+    } else {
+        let alac = if fmt == "m4a" || fmt == "mp4" { let p2 = path.clone(); tokio::task::spawn_blocking(move || is_alac(&p2)).await.unwrap_or(false) } else { false };
+        if let (false, false, false, Some(ct)) = (q.transcode, lossy, alac, browser_type(&fmt)) {
+            return original(&path, req, ct).await;
+        }
     }
     let mut cmd = tokio::process::Command::new("ffmpeg");
     cmd.args(["-v", "error", "-nostdin"]);
@@ -605,7 +617,7 @@ pub async fn stream_track(st: &AppState, id: i64, q: &StreamQ, req: Request, use
         }
     } else {
         cmd.args(["-c:a", "flac", "-compression_level", "0", "-f", "flac", "-flush_packets", "1", "pipe:1"]);
-        ("audio/flac", "flac".to_string())
+        ("audio/flac", if fallback { "flac-fallback" } else { "flac" }.to_string())
     };
     cmd.stdout(std::process::Stdio::piped()).stderr(std::process::Stdio::null()).kill_on_drop(true);
     let mut child = cmd.spawn().map_err(|e| err(500, format!("ffmpeg: {e}")))?;
@@ -620,6 +632,98 @@ pub async fn stream_track(st: &AppState, id: i64, q: &StreamQ, req: Request, use
 
 async fn stream(State(st): State<AppState>, User(u): User, Path(id): Path<i64>, Query(q): Query<StreamQ>, req: Request) -> ApiResult<Response> {
     stream_track(&st, id, &q, req, Some(&u)).await
+}
+
+/// The file itself (Range requests work), labelled `original`.
+async fn original(path: &str, req: Request, ct: &str) -> ApiResult<Response> {
+    let mut r = serve_file(path, req, Some(ct), None).await?;
+    r.headers_mut().insert(header::CACHE_CONTROL, HeaderValue::from_static("private, max-age=3600"));
+    // the body depends on the client's decoder list (an Opus file is the original for one client and a FLAC pipe
+    // for another), so a cache in front of the client keeps the answers apart
+    r.headers_mut().insert(header::VARY, HeaderValue::from_static("X-Encore-Decoders"));
+    r.headers_mut().insert(header::HeaderName::from_static("x-encore-stream"), HeaderValue::from_static("original"));
+    Ok(r)
+}
+
+// ---- codec negotiation ----------------------------------------------------------------------------
+//
+// `x-encore-stream` on every stream answer says what the body is: `original` (the file, byte for byte),
+// `flac` (FLAC made on the fly because a browser can't play the file, or `transcode` was asked for),
+// `flac-fallback` (FLAC made on the fly because the client's decoders don't cover the file's codec),
+// `aac-<kbps>` / `opus-<kbps>` (the lossy streams) and `cadenza-<rate>` (upsampled by the server).
+
+/// The request header that lists the codecs a client decodes: `X-Encore-Decoders: flac,mp3,aac,alac,opus,
+/// vorbis,wav,aiff,dsf,dff` (also `wavpack`, `ape`; `dsd` stands for dsf and dff, `ogg` for vorbis). The same
+/// list goes as `?codecs=` on the URL for a client that can't send headers; the header wins when both are given.
+pub const DECODERS_HEADER: &str = "x-encore-decoders";
+
+/// The codecs the client decodes, from the header or the query; None when neither says anything (an empty
+/// list counts as nothing said): the client then decodes what a browser does.
+fn decoders(headers: &axum::http::HeaderMap, query: &str) -> Option<Vec<String>> {
+    let raw = headers.get(DECODERS_HEADER).and_then(|v| v.to_str().ok()).filter(|s| !s.trim().is_empty()).unwrap_or(query);
+    let mut out = Vec::new();
+    for t in raw.split(',').map(|t| t.trim().to_ascii_lowercase()).filter(|t| !t.is_empty()) {
+        match t.as_str() {
+            "dsd" => out.extend(["dsf".to_string(), "dff".to_string()]),
+            "ogg" => out.push("vorbis".to_string()),
+            _ => out.push(t),
+        }
+    }
+    (!out.is_empty()).then_some(out)
+}
+
+/// What the file holds, in the words of the decoders list: from `audio_info` (which tells ALAC from AAC in
+/// .m4a and Opus from Vorbis in .ogg), or from the extension for what lofty doesn't read (DSF, DFF).
+fn file_codec(fmt: &str, info: &Value) -> String {
+    match info["codec"].as_str().unwrap_or("") {
+        "" => match fmt { "m4a" | "mp4" => "aac", "ogg" | "oga" => "vorbis", "aif" => "aiff", "wv" => "wavpack", other => other }.to_string(),
+        "ogg vorbis" => "vorbis".to_string(),
+        c => c.to_string(),
+    }
+}
+
+/// The codec as the signal path spells it.
+fn codec_name(codec: &str) -> String {
+    match codec { "opus" => "Opus".to_string(), "vorbis" => "Vorbis".to_string(), "wavpack" => "WavPack".to_string(), "speex" => "Speex".to_string(), c => c.to_uppercase() }
+}
+
+/// The content type of an original a client asked for by codec (browsers never get the ones past `browser_type`).
+fn original_type(fmt: &str) -> &'static str {
+    browser_type(fmt).unwrap_or(match fmt {
+        "dsf" => "audio/x-dsf", "dff" => "audio/x-dff", "aiff" | "aif" => "audio/aiff", "wv" => "audio/x-wavpack", "ape" => "audio/x-ape",
+        _ => "application/octet-stream",
+    })
+}
+
+/// How a plain stream of a file (no lossy, Cadenza or `transcode` switch) is served, decided the same way for
+/// the stream and for `/tracks/{id}/info`.
+pub struct Plan {
+    /// the `x-encore-stream` label: `original`, `flac` or `flac-fallback`
+    pub kind: &'static str,
+    /// the file's codec: `opus`, `flac`, `alac`, `dsf` …
+    pub codec: String,
+    /// why the body is not the file, in plain words (None for the original)
+    pub reason: Option<String>,
+    /// the original's content type; None when FLAC is made on the fly
+    pub content_type: Option<&'static str>,
+}
+
+/// With a decoders list: the original when the file's codec is listed (a FLAC file always: the fallback
+/// would be FLAC too), else `flac-fallback`. Without one: the original when a browser plays the format, else `flac`.
+pub fn plan(fmt: &str, info: &Value, decoders: Option<&[String]>) -> Plan {
+    let codec = file_codec(fmt, info);
+    let original = |ct| Plan { kind: "original", codec: codec.clone(), reason: None, content_type: Some(ct) };
+    match decoders {
+        Some(list) if codec == "flac" || list.contains(&codec) => original(original_type(fmt)),
+        Some(_) => {
+            let reason = if codec.is_empty() { "the file's codec is unknown".to_string() } else { format!("the client has no {} decoder", codec_name(&codec)) };
+            Plan { kind: "flac-fallback", codec, reason: Some(reason), content_type: None }
+        }
+        None => match browser_type(fmt) {
+            Some(ct) if codec != "alac" => original(ct),
+            _ => Plan { kind: "flac", reason: Some(format!("browsers can't play {}", codec_name(&codec))), codec, content_type: None },
+        },
+    }
 }
 
 /// Cadenza on the server: lossless 24-bit FLAC at the chosen rate. With the render cache on
@@ -662,8 +766,31 @@ async fn dsp_stream(st: &AppState, id: i64, path: String, q: &StreamQ, u: &crate
     Ok(r)
 }
 
+/// `audio_info` answers kept per file and mtime: the stream, the signal path, the quality check and Cadenza
+/// ask about the same file again and again. Cleared when full (one in a long scan over distinct files).
+static AUDIO_INFO: std::sync::LazyLock<std::sync::Mutex<HashMap<std::path::PathBuf, (std::time::SystemTime, Value)>>> = std::sync::LazyLock::new(Default::default);
+const AUDIO_INFO_MAX: usize = 4096;
+
 /// What's in the file, for the player's signal path: codec, sample rate, bit depth, channels, bitrate.
+/// Read once per file and mtime (`{}` for a file that isn't there, which is never kept).
 pub fn audio_info(path: &str) -> Value {
+    let Ok(mtime) = std::fs::metadata(path).and_then(|m| m.modified()) else { return json!({}) };
+    let key = std::path::PathBuf::from(path);
+    if let Some((at, v)) = AUDIO_INFO.lock().unwrap_or_else(|e| e.into_inner()).get(&key) {
+        if *at == mtime {
+            return v.clone();
+        }
+    }
+    let v = read_audio_info(path);
+    let mut m = AUDIO_INFO.lock().unwrap_or_else(|e| e.into_inner());
+    if m.len() >= AUDIO_INFO_MAX && !m.contains_key(&key) {
+        m.clear();
+    }
+    m.insert(key, (mtime, v.clone()));
+    v
+}
+
+fn read_audio_info(path: &str) -> Value {
     use lofty::file::AudioFile;
     use lofty::prelude::*;
     let Ok(f) = lofty::read_from_path(path) else { return json!({}) };
@@ -705,10 +832,22 @@ async fn recent_plays(State(st): State<AppState>, User(u): User, Query(q): Query
     Ok(Json(json!(rows)))
 }
 
-async fn track_info(State(st): State<AppState>, User(_): User, Path(id): Path<i64>) -> ApiResult<Json<Value>> {
+#[derive(Deserialize, Default)]
+#[serde(default)]
+struct InfoQ {
+    /// the codecs the client decodes, as `?codecs=` on the stream URL (or send `X-Encore-Decoders`)
+    codecs: String,
+}
+
+/// What's in the file and, under `stream`, how its plain stream is served for this client (`kind` is the
+/// `x-encore-stream` label the stream would carry, `codec` the file's codec, `reason` why it is not the
+/// original) – given the same `X-Encore-Decoders` header or `?codecs=` list as the stream request.
+async fn track_info(State(st): State<AppState>, User(_): User, Path(id): Path<i64>, Query(q): Query<InfoQ>, headers: axum::http::HeaderMap) -> ApiResult<Json<Value>> {
     let t = st.db.one("SELECT id, path, format, size, bitrate, duration FROM tracks WHERE id=?", p![id])?.ok_or_else(|| err(404, "Track not found"))?;
     let path = t.s("path");
     let mut info = tokio::task::spawn_blocking(move || audio_info(&path)).await.unwrap_or(json!({}));
+    let plan = plan(&t.s("format"), &info, decoders(&headers, &q.codecs).as_deref());
+    info["stream"] = json!({ "kind": plan.kind, "codec": plan.codec, "reason": plan.reason });
     info["id"] = json!(t.i("id"));
     info["format"] = json!(t.s("format"));
     info["size"] = json!(t.i("size"));
@@ -1458,3 +1597,7 @@ pub(crate) fn share_page_html(html: &str, meta: &Value, base: &str, token: &str,
 #[cfg(test)]
 #[path = "share_tests.rs"]
 mod share_tests;
+
+#[cfg(test)]
+#[path = "stream_tests.rs"]
+mod stream_tests;

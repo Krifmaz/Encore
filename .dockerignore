@@ -5,7 +5,6 @@ server/target
 web-rs/target
 web-rs/target-shared
 web-rs/dist
-web/next
 clients
 docs
 app

@@ -1,4 +1,4 @@
-//! Port of web/js/pages/autodownload.js – see docs/ui-rewrite/CONTRACT.md
+//! Port of web/js/pages/autodownload.js – see docs/archive/ui-rewrite/CONTRACT.md
 use crate::api;
 use crate::app::{Ctx, PageFuture};
 use crate::dom;

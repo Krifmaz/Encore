@@ -1,4 +1,4 @@
-//! Port of web/js/pages/settings.js – see docs/ui-rewrite/CONTRACT.md
+//! Port of web/js/pages/settings.js – see docs/archive/ui-rewrite/CONTRACT.md
 //! The settings hub: the nav groups, the admin settings form (every `S(...)` field with its help text),
 //! secrets with the eye/copy buttons, Save and Test, scheduled tasks, appearance, the API-key and About
 //! cards, and the embedded sub-pages (account, connections, users, invites, auto-download, diagnostics).
@@ -824,7 +824,7 @@ pub fn render(view: Element, ctx: Ctx) -> PageFuture {
             nav.push(("System", vec![("diagnostics", "Diagnostics")]));
         }
         // the desktop app: its own settings (start with the computer, shortcuts, mini player, offline songs, updates)
-        if app::native_has("desktopSettings") { nav[0].1.push(("computer", "This computer")); }
+        if crate::native::has_desktop_settings() { nav[0].1.push(("computer", "This computer")); }
         let pages: Vec<&str> = nav.iter().flat_map(|(_, items)| items.iter().map(|(id, _)| *id)).collect();
         if !pages.iter().any(|p| *p == current) { current = "account".to_string(); }
         let select_html: String = nav.iter().map(|(label, items)| format!(r##"<optgroup label="{}">{}</optgroup>"##,
@@ -882,7 +882,7 @@ fn render_playback(el: Element, _ctx: Ctx) -> PageFuture {
         // server-side Cadenza: on for this server, and allowed for this account? (fetched once per visit to the tab)
         let dsp = api::get("/playback/dsp").await.unwrap_or_else(|_| json!({ "enabled": false }));
         // the desktop app carries Cadenza: its { running, device_id, name, error } – asked again every couple of seconds
-        let native = app::native_truthy("engine");
+        let native = crate::native::has_engine();
         let engine_st = if native { engine_status().await } else { Value::Null };
         let st = Rc::new(Look { el, p: RefCell::new(p), server_prefs, dsp, native, engine_st: RefCell::new(engine_st), painted: RefCell::new(String::new()) });
         // what the Cadenza engine section is painted from – a repaint only when it changes
@@ -914,7 +914,7 @@ fn seg_str(p: &Value, key: &str, opts: &[(&str, &str)]) -> String {
 }
 
 /// `await window.EncoreNative.engineStatus()` – null when it fails.
-async fn engine_status() -> Value { app::native_call_async("engineStatus", None).await.unwrap_or(Value::Null) }
+async fn engine_status() -> Value { crate::native::engine_status().await.unwrap_or(Value::Null) }
 
 /// `JSON.stringify([link?.id, link?.name, link?.state?.engine ?? null, engineSt])`.
 fn engine_key(st: &Look) -> String {

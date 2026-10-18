@@ -1,4 +1,4 @@
-//! Port of web/js/playback.js – see docs/ui-rewrite/CONTRACT.md
+//! Port of web/js/playback.js – see docs/archive/ui-rewrite/CONTRACT.md
 //!
 //! Playback preferences (Settings → Playback): stream quality, pre-loading the next song, what happens
 //! when the queue ends, sound effects on this device and crossfade. Kept on this device, and – on servers
@@ -6,6 +6,8 @@
 
 use crate::dom::{self, ls_get, ls_set};
 use crate::json::J;
+use crate::num::{js_num, js_number};
+pub use crate::num::{jnum, js_round};
 use serde_json::{json, Value};
 
 /// quality: 'auto'     – the original file; Encore measures the connection while it plays and steps the stream down
@@ -72,12 +74,6 @@ pub const EQ_PRESETS: [Preset; 8] = [
 ];
 pub const CROSSFEED: [(&str, &str); 4] = [("off", "Off"), ("light", "Light"), ("medium", "Medium"), ("strong", "Strong")];
 
-/// A JSON number the way JS would print it (whole numbers without ".0").
-pub fn jnum(x: f64) -> Value {
-    if x.is_finite() && x.fract() == 0.0 && x.abs() < 1e15 { json!(x as i64) } else { json!(x) }
-}
-/// `Math.round(x)` (halves round up, also for negatives).
-pub fn js_round(x: f64) -> f64 { (x + 0.5).floor() }
 /// `Number(x.toFixed(digits))`.
 fn round_to(x: f64, digits: i32) -> f64 { let m = 10f64.powi(digits); (x * m).round() / m }
 /// `num(v, lo, hi, dflt)`: Number(v) clamped, the default when it isn't a finite number.
@@ -113,11 +109,9 @@ pub fn fx_active(p: &Value) -> bool {
     if p.g("fx_on") != &json!(true) { return false; }
     !eq_bands(p).is_empty() || p.f("eq_preamp") != 0.0 || p.s("crossfeed") != "off" || p.f("balance") != 0.0 || p.truthy("mono")
 }
-/// `${n}` of a JS number.
-fn n2s(x: f64) -> String { x.to_string() }
-fn db(v: f64) -> String { format!("{}{} dB", if v > 0.0 { "+" } else { "" }, n2s(v)) }
+fn db(v: f64) -> String { format!("{}{} dB", if v > 0.0 { "+" } else { "" }, js_num(v)) }
 pub fn balance_text(v: f64) -> String {
-    if v == 0.0 { "Centre".into() } else if v < 0.0 { format!("L{}", n2s(-v)) } else { format!("R{}", n2s(v)) }
+    if v == 0.0 { "Centre".into() } else if v < 0.0 { format!("L{}", js_num(-v)) } else { format!("R{}", js_num(v)) }
 }
 /// "EQ: Bass boost, preamp -6 dB · Crossfeed: medium · Balance: L10 · Mono · Crossfade: 6 s" – '' when nothing applies.
 pub fn effects_summary(p: &Value, crossfade: bool) -> String {
@@ -131,7 +125,7 @@ pub fn effects_summary(p: &Value, crossfade: bool) -> String {
         if p.f("balance") != 0.0 { parts.push(format!("Balance: {}", balance_text(p.f("balance")))); }
         if p.truthy("mono") { parts.push("Mono".into()); }
     }
-    if crossfade && p.s("transition") != "off" && p.f("crossfade") > 0.0 { parts.push(format!("{}: {} s", transition_label(&p.s("transition")), n2s(p.f("crossfade")))); }
+    if crossfade && p.s("transition") != "off" && p.f("crossfade") > 0.0 { parts.push(format!("{}: {} s", transition_label(&p.s("transition")), js_num(p.f("crossfade")))); }
     parts.join(" · ")
 }
 
@@ -210,18 +204,6 @@ pub fn clean(p: &Value) -> Value {
     if mode != "off" && c.f("crossfade") < 1.0 { c["crossfade"] = jnum(TRANSITION_DEFAULT_S); }
     c["crossfade_album_gapless"] = json!(c.g("crossfade_album_gapless") != &json!(false));
     c
-}
-
-/// JavaScript's `Number(x)` for a JSON value (NaN where JS gives NaN).
-fn js_number(v: &Value) -> f64 {
-    match v {
-        Value::Null => 0.0,
-        Value::Bool(b) => if *b { 1.0 } else { 0.0 },
-        Value::Number(n) => n.as_f64().unwrap_or(f64::NAN),
-        Value::String(s) => { let t = s.trim(); if t.is_empty() { 0.0 } else { t.parse::<f64>().unwrap_or(f64::NAN) } }
-        Value::Array(a) => match a.as_slice() { [] => 0.0, [x] if !x.is_array() && !x.is_object() => js_number(x), _ => f64::NAN },
-        Value::Object(_) => f64::NAN,
-    }
 }
 
 pub fn current() -> Value {

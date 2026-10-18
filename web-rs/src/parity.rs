@@ -1,6 +1,6 @@
 //! The acceptance list of the port: docs/ui/strings-reference.txt holds every user-visible string of the
 //! JavaScript UI (web/js, frozen since 0.26). Every string web/js still ships has to appear in web-rs, so the
-//! two interfaces read the same – the rule of docs/ui-rewrite/PORTING.md. Run with `cargo test` in web-rs.
+//! two interfaces read the same – the rule of docs/archive/ui-rewrite/PORTING.md. Run with `cargo test` in web-rs.
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};

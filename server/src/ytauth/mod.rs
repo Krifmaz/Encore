@@ -45,8 +45,6 @@ const TICK: Duration = Duration::from_secs(600);
 #[serde(rename_all = "lowercase")]
 pub enum Kind {
     /// cookies handed over by the extension from a private window: the server's own session
-    // 0.26 compatibility shim (state files and clients from before 0.25.3 say `managed`): remove in 0.27
-    #[serde(alias = "managed")]
     Handoff,
     Extension,
     Pasted,
@@ -96,9 +94,6 @@ pub struct SourceState {
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct AuthState {
     /// the server-owned session (`managed` before 0.25.3, when it came from Encore's own browser)
-    // 0.26 compatibility shim (state files written before 0.25.3): remove in 0.27, with the test
-    // `old_state_file_keeps_its_session_as_the_handoff`
-    #[serde(alias = "managed")]
     pub handoff: SourceState,
     pub extension: SourceState,
     pub pasted: SourceState,
@@ -156,22 +151,6 @@ pub fn write_private(path: &Path, text: &str) -> anyhow::Result<()> {
     f.sync_all()?;
     std::fs::rename(&tmp, path)?;
     Ok(())
-}
-
-/// 0.25.3 removed Encore's own sign-in browser (Google refuses sign-ins in it): the program a previous
-/// install downloaded (`<config>/tools/browser`) and its profile (`<config>/youtube-browser/profile`) are
-/// deleted once. Answers what was removed (empty: nothing was there).
-///
-/// 0.26 compatibility shim for installs from before 0.25.3: remove in 0.27, with its call in `supervisor`
-/// and the test `old_sign_in_browser_is_removed_once`.
-pub fn remove_old_browser(data: &Path) -> Vec<PathBuf> {
-    let mut gone = vec![];
-    for d in [data.join("tools").join("browser"), home(data).join("profile")] {
-        if d.exists() && std::fs::remove_dir_all(&d).is_ok() {
-            gone.push(d);
-        }
-    }
-    gone
 }
 
 pub fn load(data: &Path) -> AuthState {
@@ -555,10 +534,6 @@ pub async fn after_ytdlp_auth_error(st: &AppState) -> bool {
 
 /// Background loop: refresh of the hand-off session and of pasted cookies (4 h).
 pub async fn supervisor(st: AppState) {
-    let gone = remove_old_browser(st.data_dir());
-    if !gone.is_empty() {
-        st.db.log("info", "Removed Encore's old YouTube sign-in browser and its profile (sign-in now goes through the Encore browser extension's hand-off)");
-    }
     tokio::time::sleep(Duration::from_secs(90)).await;
     loop {
         tick(&st).await;
@@ -602,8 +577,6 @@ pub fn status(st: &AppState) -> Value {
     json!({
         "source": act.map(|k| k.key()), "source_label": act.map(|k| k.label()), "account": current.account,
         "last_refresh": current.updated_at, "last_check": current.checked_at, "next_refresh": next,
-        // 0.26 compatibility shim: `next_check` is `next_refresh` for clients from before 0.25.3 – remove in 0.27
-        "next_check": next,
         "sources": sources,
         "extension": { "token_at": s.ext_token_at, "connected": s.extension.updated_at.is_some() || s.handoff.updated_at.is_some(), "handoff_at": s.handoff.updated_at },
         "light_refresh": light_on, "diagnostics": diagnostics(st, act, &s),
@@ -701,8 +674,6 @@ struct SignOutBody {
 async fn sign_out(State(st): State<AppState>, Admin(u): Admin, body: Option<Json<SignOutBody>>) -> ApiResult<Json<Value>> {
     use crate::db::RowExt;
     let which = body.and_then(|b| b.0.source).unwrap_or_else(|| "all".into());
-    // 0.26 compatibility shim (clients from before 0.25.3 say `managed`): remove in 0.27
-    let which = if which == "managed" { "handoff".to_string() } else { which };
     if !["handoff", "extension", "all"].contains(&which.as_str()) {
         return Err(err(400, "Unknown sign-in"));
     }

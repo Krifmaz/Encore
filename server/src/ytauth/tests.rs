@@ -267,34 +267,6 @@ fn next_refresh_follows_the_source_in_use() {
 }
 
 #[test]
-fn old_state_file_keeps_its_session_as_the_handoff() {
-    let old = r#"{"managed":{"updated_at":5.0,"ok":true,"account":"Kris"},"extension":{},"pasted":{},"ext_token":"h","signed_out_notified":false}"#;
-    let s: AuthState = serde_json::from_str(old).unwrap();
-    assert_eq!(s.handoff.account.as_deref(), Some("Kris"));
-    assert_eq!(serde_json::from_str::<Kind>("\"managed\"").unwrap(), Kind::Handoff);
-    assert!(serde_json::to_string(&s).unwrap().contains("\"handoff\""));
-}
-
-#[test]
-fn old_sign_in_browser_is_removed_once() {
-    let dir = std::env::temp_dir().join(format!("encore-ytauth-rm-{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&dir);
-    std::fs::create_dir_all(dir.join("tools/browser/141/chrome-linux64")).unwrap();
-    std::fs::write(dir.join("tools/browser/current"), "141").unwrap();
-    std::fs::create_dir_all(dir.join("youtube-browser/profile/Default")).unwrap();
-    std::fs::create_dir_all(dir.join("tools/cadenza")).unwrap();
-    write_private(&dir.join("youtube-browser/state.json"), "{}").unwrap();
-    write_private(&dir.join("youtube-browser/extension-cookies.txt"), "x").unwrap();
-    let gone = remove_old_browser(&dir);
-    assert_eq!(gone.len(), 2);
-    assert!(!dir.join("tools/browser").exists() && !dir.join("youtube-browser/profile").exists());
-    // everything else stays: other tools, the sign-in state, the extension's cookies
-    assert!(dir.join("tools/cadenza").exists() && dir.join("youtube-browser/state.json").exists() && dir.join("youtube-browser/extension-cookies.txt").exists());
-    assert!(remove_old_browser(&dir).is_empty(), "second start: nothing to do (and nothing logged)");
-    let _ = std::fs::remove_dir_all(&dir);
-}
-
-#[test]
 fn signed_out_notice_asks_for_a_new_handoff() {
     for k in Kind::ALL {
         assert!(signed_out_message(k).contains("Do the hand-off again from the Encore extension"));

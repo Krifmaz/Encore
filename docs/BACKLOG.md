@@ -91,6 +91,5 @@ scripts always stay).
 2. ~~**Android app → Tauri 2 mobile**~~ – done 2026-10-11 (same `clients/app`; a small Kotlin plugin for the
    media notification, share intents, downloads and the offline cookie). CI signs with a generated debug key
    until a release keystore is configured.
-3. **Web interface → Rust/WebAssembly** – written 2026-10-11 (`web-rs`, plain web-sys, no framework): every
-   page, the player and remote ported 1:1 and served at `/next/` beside the JS UI (link in Settings → About).
-   Left: use it for a while, fix what differs from the JS UI, then make it the default and drop `web/js`.
+3. ~~**Web interface → Rust/WebAssembly**~~ – written 2026-10-11 (`web-rs`, plain web-sys, no framework): every
+   page, the player and remote ported 1:1; the website at `/` since 0.26, and 0.27 removed the JavaScript UI.

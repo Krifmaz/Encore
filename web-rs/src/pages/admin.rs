@@ -1,4 +1,4 @@
-//! Port of web/js/pages/admin.js – see docs/ui-rewrite/CONTRACT.md
+//! Port of web/js/pages/admin.js – see docs/archive/ui-rewrite/CONTRACT.md
 //! The admin sub-pages of Settings: Users & permissions (render_users) and Invites (render_invites).
 use crate::api;
 use crate::app::{self, Ctx, PageFuture};

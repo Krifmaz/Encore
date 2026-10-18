@@ -169,8 +169,8 @@ jobs:
       - name: Package
         run: |
           V=${{ needs.version.outputs.version }}
-          # static/ is the Rust UI (trunk's dist); static-legacy/ the frozen JavaScript UI for ENCORE_LEGACY_UI=1
-          mkdir -p out/encore && cp server/target/${{ matrix.target }}/release/encore out/encore/ && cp -r web-rs/dist out/encore/static && cp -r web out/encore/static-legacy
+          # static/ is the Rust UI (trunk's dist)
+          mkdir -p out/encore && cp server/target/${{ matrix.target }}/release/encore out/encore/ && cp -r web-rs/dist out/encore/static
           tar -C out -czf encore-$V-linux-${{ matrix.arch }}.tar.gz encore
       - uses: actions/upload-artifact@v4
         with:

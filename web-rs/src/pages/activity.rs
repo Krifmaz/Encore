@@ -1,4 +1,4 @@
-//! Port of web/js/pages/activity.js – see docs/ui-rewrite/CONTRACT.md
+//! Port of web/js/pages/activity.js – see docs/archive/ui-rewrite/CONTRACT.md
 //!
 //! The download activity list: Soulseek transfers, torrent/Usenet downloads and the activity log,
 //! reloaded every 5 seconds while the page is on screen.

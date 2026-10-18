@@ -1,4 +1,4 @@
-//! Port of web/js/pages/computer.js – see docs/ui-rewrite/CONTRACT.md
+//! Port of web/js/pages/computer.js – see docs/archive/ui-rewrite/CONTRACT.md
 //! Settings → This computer: only in the Encore desktop app (window.EncoreNative.desktopSettings,
 //! clients/app/src/extras.rs). Start with the computer, the mini player, global keyboard shortcuts, offline
 //! songs and updates.

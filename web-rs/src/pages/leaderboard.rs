@@ -1,4 +1,4 @@
-//! Port of web/js/pages/leaderboard.js – see docs/ui-rewrite/CONTRACT.md
+//! Port of web/js/pages/leaderboard.js – see docs/archive/ui-rewrite/CONTRACT.md
 //! Leaderboard: who requests, plays and likes the most, plus fun library facts.
 use crate::api;
 use crate::app::{Ctx, PageFuture};

@@ -1,4 +1,4 @@
-//! Port of web/js/pages/translate.js – see docs/ui-rewrite/CONTRACT.md
+//! Port of web/js/pages/translate.js – see docs/archive/ui-rewrite/CONTRACT.md
 //! Translated titles: Settings → Language and ⋯ → Edit translation.
 
 use crate::api;

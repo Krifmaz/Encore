@@ -1,4 +1,4 @@
-//! Port of web/js/pages/picker.js – see docs/ui-rewrite/CONTRACT.md
+//! Port of web/js/pages/picker.js – see docs/archive/ui-rewrite/CONTRACT.md
 //! Manual download picker: search every source, see quality/size/uploader, download the exact result you choose.
 
 use crate::api;

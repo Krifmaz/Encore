@@ -1,4 +1,4 @@
-//! Port of web/js/pages/soulseek.js – see docs/ui-rewrite/CONTRACT.md
+//! Port of web/js/pages/soulseek.js – see docs/archive/ui-rewrite/CONTRACT.md
 //! Soulseek: search the network, browse what a user shares, download files or whole folders, watch transfers.
 //! Everything goes through /api/soulseek; a download becomes an ordinary request the worker tags and imports.
 

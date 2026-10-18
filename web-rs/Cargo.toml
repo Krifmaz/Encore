@@ -19,25 +19,22 @@ serde-wasm-bindgen = "0.6"
 console_error_panic_hook = "0.1"
 gloo-events = "0.3"
 gloo-timers = { version = "0.4", features = ["futures"] }
-gloo-utils = "0.2"
 gloo-net = { version = "0.6", features = ["http"] }
 futures = "0.3"
 web-sys = { version = "0.3", features = [
-  "Window", "Document", "Element", "HtmlElement", "HtmlInputElement", "HtmlSelectElement", "HtmlTextAreaElement", "HtmlButtonElement",
-  "HtmlAnchorElement", "HtmlImageElement", "HtmlAudioElement", "HtmlMediaElement", "HtmlFormElement", "HtmlCollection",
-  "Storage", "Location", "History", "Headers", "Request", "RequestInit", "RequestCredentials", "Response", "MediaSession",
-  "MediaMetadata", "MediaMetadataInit", "MediaImage", "MediaSessionAction", "MediaSessionActionDetails", "MediaSessionPlaybackState",
-  "Navigator", "Event", "EventTarget", "KeyboardEvent", "MouseEvent", "PointerEvent", "TouchEvent", "Touch", "TouchList", "CustomEvent", "CustomEventInit",
-  "HashChangeEvent", "Node", "NodeList", "DomRect", "CssStyleDeclaration", "DomStringMap", "DomTokenList", "File", "FileList",
-  "FormData", "Blob", "Url", "UrlSearchParams", "ScrollToOptions", "ScrollBehavior", "MediaQueryList", "Clipboard",
-  "Notification", "NotificationOptions", "NotificationPermission", "ServiceWorkerContainer", "AbortController", "AbortSignal",
-  "MutationObserver", "MutationObserverInit", "MutationRecord", "Screen", "ScreenOrientation", "DocumentFragment", "Text",
-  "TimeRanges", "HtmlLabelElement", "HtmlDivElement", "InputEvent", "DragEvent", "DataTransfer", "ProgressEvent",
-  "WheelEvent", "FocusEvent", "console", "FileReader", "AnimationEvent", "TransitionEvent", "VisibilityState", "Crypto", "Performance",
-  "EventSource", "MessageEvent", "AudioContext", "BaseAudioContext", "StorageEvent",
-  "AudioNode", "AudioParam", "BiquadFilterNode", "BiquadFilterType", "GainNode", "DelayNode", "StereoPannerNode", "ChannelSplitterNode",
-  "ChannelMergerNode", "MediaElementAudioSourceNode", "AudioDestinationNode", "ChannelCountMode", "ChannelInterpretation", "AudioContextState",
-  "RequestCache", "WebSocket",
+  "Window", "Document", "Element", "HtmlElement", "HtmlInputElement", "HtmlSelectElement", "HtmlTextAreaElement",
+  "HtmlImageElement", "HtmlMediaElement", "HtmlFormElement",
+  "Storage", "Location", "Headers", "Request", "RequestInit", "RequestCredentials", "Response", "RequestCache",
+  "Navigator", "Clipboard", "ServiceWorkerContainer", "Screen", "Performance", "MediaQueryList",
+  "MediaMetadata", "MediaSessionActionDetails",
+  "Event", "EventTarget", "KeyboardEvent", "MouseEvent", "PointerEvent", "CustomEvent", "CustomEventInit",
+  "HashChangeEvent", "StorageEvent", "MessageEvent", "EventSource",
+  "Node", "NodeList", "Text", "DomRect", "CssStyleDeclaration", "DomTokenList", "TimeRanges",
+  "File", "FileList", "FileReader", "FormData", "Url", "UrlSearchParams", "ScrollToOptions", "ScrollBehavior",
+  "MutationObserver", "MutationObserverInit", "MutationRecord", "console",
+  "AudioContext", "AudioContextState", "AudioNode", "AudioParam", "AudioDestinationNode", "MediaElementAudioSourceNode",
+  "BiquadFilterNode", "BiquadFilterType", "GainNode", "DelayNode", "StereoPannerNode", "ChannelSplitterNode", "ChannelMergerNode",
+  "ChannelCountMode", "ChannelInterpretation",
 ] }
 
 [profile.release]

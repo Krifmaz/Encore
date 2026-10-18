@@ -1,4 +1,4 @@
-//! Port of web/js/pages/discover.js – see docs/ui-rewrite/CONTRACT.md
+//! Port of web/js/pages/discover.js – see docs/archive/ui-rewrite/CONTRACT.md
 //! The search page, the artist page (discography, similar artists, releases outside MusicBrainz, photo/bio and
 //! popular tracks), the artist-by-name redirect, the album page and the shared request buttons.
 

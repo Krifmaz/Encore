@@ -55,6 +55,12 @@ Nothing here is started until the owner says "go".
    a. Check the codecs the engine can decode. When it can't decode a file, the server sends a lossless FLAC
       transcode, shown in the signal path. Write a Cadenza-agent prompt to add Opus and check AAC, ALAC,
       WavPack, APE, DSF and DFF.
+      **Done in 0.27 (first phase):** the server negotiates codecs on `/api/library/tracks/{id}/stream`
+      (`X-Encore-Decoders` header or `?codecs=`; the original when the file's codec is listed, DSF/DFF
+      included, else lossless FLAC labelled `flac-fallback` in `x-encore-stream`) and `/tracks/{id}/info`
+      reports the same decision with the reason; the Cadenza-agent prompt is docs/cadenza/2026-10-engine.md
+      (Opus, the codec checks, the WASAPI words, capabilities, clamping, the link limit, per-track gain, the
+      embed API for the desktop app). The engine side itself is done in the Cadenza repo from that prompt.
    b. Find why exclusive mode fails: the device held by another app, the Windows "allow exclusive" setting,
       or format negotiation/IsFormatSupported. Never fall back to shared silently; show
       "Exclusive mode failed: <reason>".
@@ -65,6 +71,11 @@ Nothing here is started until the owner says "go".
    g. Check that the engine starts the stream and reports position (it sat at 0:00).
    h. List what needs the owner's hardware to confirm. Never edit the Cadenza repo; write a prompt for the
       Cadenza agent instead.
+
+   b to h move to the Iced desktop app phase (0.27, second part; docs/backlog/2026-10-plan.md section 8): the
+   Settings → Playback card, the exclusive-mode error, the clamped rate lists, DSD greyed in shared mode, the link
+   limit, Test sound and the signal path are built in the new app against the JSON the prompt defines, and the
+   hardware list (h) is section 6 of the prompt.
 9. **Soulseek crash on 0.26.1:** "can't create /downloads/slskd: Permission denied".
    - Cause: docker/entrypoint.sh only creates and chowns the staging folder.
    - Fix: create and chown every configured working folder before dropping to PUID.

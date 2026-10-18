@@ -1,4 +1,4 @@
-//! Port of web/js/pages/account.js – see docs/ui-rewrite/CONTRACT.md
+//! Port of web/js/pages/account.js – see docs/archive/ui-rewrite/CONTRACT.md
 //! Account: profile + picture, password, username, email, apps, two-step sign-in, active sessions and
 //! (for members) the About card.
 

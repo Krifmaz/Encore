@@ -1,4 +1,4 @@
-//! Port of web/js/pages/auth.js – see docs/ui-rewrite/CONTRACT.md
+//! Port of web/js/pages/auth.js – see docs/archive/ui-rewrite/CONTRACT.md
 //! Sign-in, sign-up (with invite), forgot password, the reset page, the magic-link page and "Change server".
 
 use crate::api::{self, ApiError};

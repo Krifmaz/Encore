@@ -1,4 +1,4 @@
-//! Port of web/js/pages/artwork.js – see docs/ui-rewrite/CONTRACT.md
+//! Port of web/js/pages/artwork.js – see docs/archive/ui-rewrite/CONTRACT.md
 //! Pick an album's artwork by hand: search every catalogue or upload a picture; it's embedded in the files.
 
 use crate::api;

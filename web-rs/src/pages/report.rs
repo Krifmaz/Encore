@@ -1,4 +1,4 @@
-//! Port of web/js/pages/report.js – see docs/ui-rewrite/CONTRACT.md
+//! Port of web/js/pages/report.js – see docs/archive/ui-rewrite/CONTRACT.md
 //! ⋯ → Report a problem (songs and albums), and Settings → Blocked: reports, blocked sources with Undo,
 //! and the songs the quality checks flagged.
 use crate::api;

@@ -1,4 +1,4 @@
-//! Port of web/js/pages/lyrics.js – see docs/ui-rewrite/CONTRACT.md
+//! Port of web/js/pages/lyrics.js – see docs/archive/ui-rewrite/CONTRACT.md
 //! Lyrics for one song (shown, fetched and saved as .lrc/.txt next to the file) or a whole album.
 
 use crate::api;

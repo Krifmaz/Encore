@@ -1,15 +1,16 @@
-// Playwright check for the web player keeping a song going when its stream breaks off (0.24.1 hotfix).
+// Playwright check for the web player keeping a song going when its stream breaks off (0.24.1 hotfix), run against
+// the Rust/WASM UI (web-rs):
+//   cd web-rs && trunk build --release
 //   NODE_PATH=/opt/node-tools/node_modules node tests/web/playback-recovery.cjs
-// The Rust/WASM UI too: build it (cd web-rs && trunk build --dist /some/dir) and run with ENCORE_RS_DIST=/some/dir; it is
-// served at / (its hashed .js/.wasm sit at the root, as on the server) and the JS test page's files come from web/.
-// A tiny local server serves web/ and a fake /api: songs are generated tones, sent as server-made streams (Data saver:
-// a lossy stream sent chunked, paced, its clock starting at ?t=). The first stream of song 1 is cut mid-song –
-// cleanly ('end': the browser takes it for the whole song) or abruptly ('drop': a network error). The player must not
-// skip: it loads song 1 again near the cut and plays on; when song 1 really ends, song 2 plays. 'error': the connection
-// drops and the browser's own attempt to fetch the stream again is refused (a network error on the element).
-// 'short': nothing is cut, but the library says song 1 is longer than its file (30 s for 16): it really ends at 16 s,
-// the player takes that for a break-off and asks past the file's end, which gives an empty stream (an error on the
-// element, as AAC does) – song 2 must follow, with no "Couldn't keep … playing" and no long silence.
+// The UI's build is read from web-rs/dist (or ENCORE_RS_DIST) and served at /, its hashed .js/.wasm at the root as on
+// the server. A tiny local server serves it and a fake /api: songs are generated tones, sent as server-made streams
+// (Data saver: a lossy stream sent chunked, paced, its clock starting at ?t=). The first stream of song 1 is cut
+// mid-song – cleanly ('end': the browser takes it for the whole song) or abruptly ('drop': a network error). The
+// player must not skip: it loads song 1 again near the cut and plays on; when song 1 really ends, song 2 plays.
+// 'error': the connection drops and the browser's own attempt to fetch the stream again is refused (a network error on
+// the element). 'short': nothing is cut, but the library says song 1 is longer than its file (30 s for 16): it really
+// ends at 16 s, the player takes that for a break-off and asks past the file's end, which gives an empty stream (an
+// error on the element, as AAC does) – song 2 must follow, with no "Couldn't keep … playing" and no long silence.
 const http = require('http');
 const fs = require('fs');
 const path = require('path');
@@ -17,8 +18,11 @@ const os = require('os');
 const { execFileSync } = require('child_process');
 const { chromium } = require('playwright');
 
-const WEB = path.resolve(process.env.ENCORE_WEB || path.join(__dirname, '../../web'));
-const RS = process.env.ENCORE_RS_DIST ? path.resolve(process.env.ENCORE_RS_DIST) : null;   // the Rust/WASM UI's build, served at / (and the old /next/)
+const RS = path.resolve(process.env.ENCORE_RS_DIST || path.join(__dirname, '../../web-rs/dist'));   // the Rust/WASM UI's build, served at /
+if (!fs.existsSync(path.join(RS, 'index.html'))) {
+  console.error(`no web-rs build at ${RS}: run "cd web-rs && trunk build --release" or set ENCORE_RS_DIST`);
+  process.exit(2);
+}
 const TMP = fs.mkdtempSync(path.join(os.tmpdir(), 'encore-pb-'));
 const TRACKS = [
   { id: 1, title: 'Tone A', artist: 'Test', album: 'Tones', album_id: null, duration: 16, format: 'flac' },
@@ -28,23 +32,13 @@ for (const t of TRACKS) {
   execFileSync('ffmpeg', ['-v', 'error', '-y', '-f', 'lavfi', '-i', `sine=frequency=${330 + t.id * 110}:duration=${t.duration}:sample_rate=48000`,
     '-ac', '2', path.join(TMP, `${t.id}.wav`)]);
 }
-const MIME = { '.js': 'text/javascript', '.css': 'text/css', '.html': 'text/html', '.svg': 'image/svg+xml', '.json': 'application/json' };
+const MIME = { '.js': 'text/javascript', '.css': 'text/css', '.html': 'text/html', '.svg': 'image/svg+xml', '.json': 'application/json', '.wasm': 'application/wasm', '.webmanifest': 'application/manifest+json' };
 // what the library says about the songs: in 'short', song 1 claims 30 s (its file has 16)
 const listed = (mode) => TRACKS.map(t => mode === 'short' && t.id === 1 ? { ...t, duration: 30 } : t);
 const sleep = (ms) => new Promise(r => setTimeout(r, ms));
 
 let scenario = 'none';
 let log = [];
-const TEST_PAGE = `<!doctype html><html><head><meta charset="utf-8"></head><body><div id="toasts"></div>
-<script type="module">
-  import * as player from '/js/player.js';
-  window.__player = player;
-  window.__toasts = [];
-  new MutationObserver(() => document.querySelectorAll('#toasts .toast').forEach(t => { if (!t.dataset.seen) { t.dataset.seen = 1; window.__toasts.push(t.textContent); } }))
-    .observe(document.getElementById('toasts'), { childList: true });
-  player.mount();
-  window.__ready = true;
-</script></body></html>`;
 
 function stream(req, res, id, q) {
   const t = Number(q.get('t')) || 0;
@@ -83,7 +77,6 @@ function stream(req, res, id, q) {
 const server = http.createServer((req, res) => {
   const u = new URL(req.url, 'http://x');
   const json = (v) => { res.writeHead(200, { 'Content-Type': 'application/json' }); res.end(JSON.stringify(v)); };
-  if (u.pathname === '/__test.html') { res.writeHead(200, { 'Content-Type': 'text/html' }); return res.end(TEST_PAGE); }
   const m = u.pathname.match(/^\/api\/library\/tracks\/(\d+)\/stream$/);
   if (m) return stream(req, res, Number(m[1]), u.searchParams);
   if (u.pathname.startsWith('/api/')) {
@@ -99,12 +92,10 @@ const server = http.createServer((req, res) => {
     });
     return;
   }
-  const rel = RS && (u.pathname === '/next' || u.pathname.startsWith('/next/')) ? (u.pathname.slice('/next'.length) || '/') : u.pathname;
-  let file = null;
-  for (const root of RS ? [RS, WEB] : [WEB]) {
-    const f = rel === '/' || rel === '' ? path.join(root, 'index.html') : path.join(root, path.normalize(rel).replace(/^(\.\.[/\\])+/, ''));
-    if (f.startsWith(root) && fs.existsSync(f) && !fs.statSync(f).isDirectory()) { file = f; break; }
-  }
+  // the UI's files, index.html for the app's own routes (the server does the same)
+  const rel = u.pathname;
+  const f = rel === '/' || rel === '' ? path.join(RS, 'index.html') : path.join(RS, path.normalize(rel).replace(/^(\.\.[/\\])+/, ''));
+  const file = f.startsWith(RS) && fs.existsSync(f) && !fs.statSync(f).isDirectory() ? f : (path.extname(rel) ? null : path.join(RS, 'index.html'));
   if (!file) { res.writeHead(404); return res.end(); }
   res.writeHead(200, { 'Content-Type': MIME[path.extname(file)] || 'application/octet-stream' });
   fs.createReadStream(file).pipe(res);
@@ -113,43 +104,35 @@ const server = http.createServer((req, res) => {
 const failures = [];
 const check = (ok, msg) => { console.log(`${ok ? 'ok  ' : 'FAIL'} ${msg}`); if (!ok) failures.push(msg); };
 
-// what the page is playing: { id, pos } (the Rust UI: read from the player bar)
-const sample = (rs) => rs
-  ? (() => {
-    const title = document.querySelector('#player .now .grow .ellipsis')?.textContent || '';
-    const [m, sec] = (document.getElementById('t-cur')?.textContent || '0:00').split(':').map(Number);
-    return { id: title === 'Tone A' ? 1 : title === 'Tone B' ? 2 : null, pos: m * 60 + sec };
-  })()
-  : (() => { const c = window.__player.current(); return { id: c?.id, pos: window.__player.snapshot().position }; })();
+// what the page is playing: { id, pos }, read from the player bar
+const sample = () => {
+  const title = document.querySelector('#player .now .grow .ellipsis')?.textContent || '';
+  const [m, sec] = (document.getElementById('t-cur')?.textContent || '0:00').split(':').map(Number);
+  return { id: title === 'Tone A' ? 1 : title === 'Tone B' ? 2 : null, pos: m * 60 + sec };
+};
 
-async function run(browser, base, mode, rs) {
+async function run(browser, base, mode) {
   scenario = mode; log = [];
   const page = await browser.newPage();
   page.on('pageerror', e => console.log('page error:', e.message));
-  const tag = `${rs ? 'rust' : 'js'} ${mode}`;
-  await page.addInitScript(({ tracks, rs }) => {
+  const tag = `rust ${mode}`;
+  await page.addInitScript((tracks) => {
     // what the playing element said (media events don't bubble: caught on the way down)
     window.__ev = [];
     for (const k of ['ended', 'error']) window.addEventListener(k, (e) => { if (e.target.id === 'audio' || e.target.id === 'audio-next') window.__ev.push(`${k}${e.target.error ? ' ' + e.target.error.code : ''}`); }, true);
-    localStorage.setItem('encore.playback', JSON.stringify({ quality: 'saver', preload: false, autoplay: false, resume: rs }));
-    // the Rust UI is started through its own pick-up: the queue put back paused, then play
-    if (rs) localStorage.setItem('encore.resume', JSON.stringify({ queue: tracks, index: 0, position: 0, context: 'album', repeat: 'off', saved_at: Date.now() / 1000 }));
-  }, { tracks: listed(mode), rs });
-  if (rs) {
-    await page.goto(`${base}/`);
-    await page.waitForFunction(() => document.querySelector('#p-toggle:not([disabled])') && window.encorePlayer, null, { timeout: 30000 });
-    await page.evaluate(() => window.encorePlayer.toggle());
-  } else {
-    await page.goto(`${base}/__test.html`);
-    await page.waitForFunction(() => window.__ready);
-    await page.evaluate((tracks) => window.__player.playQueue(tracks, 0, { context: 'album' }), listed(mode));
-  }
+    localStorage.setItem('encore.playback', JSON.stringify({ quality: 'saver', preload: false, autoplay: false, resume: true }));
+    // the UI is started through its own pick-up: the queue put back paused, then play
+    localStorage.setItem('encore.resume', JSON.stringify({ queue: tracks, index: 0, position: 0, context: 'album', repeat: 'off', saved_at: Date.now() / 1000 }));
+  }, listed(mode));
+  await page.goto(`${base}/`);
+  await page.waitForFunction(() => document.querySelector('#p-toggle:not([disabled])') && window.encorePlayer, null, { timeout: 30000 });
+  await page.evaluate(() => window.encorePlayer.toggle());
   const t0 = Date.now();
   const samples = [];
   let resumedAt = null;
   // watch for up to 40 s: song 1 (16 s) with its cut and pick-up, then song 2 (6 s)
   while (Date.now() - t0 < 40000) {
-    const s = await page.evaluate(sample, rs);
+    const s = await page.evaluate(sample);
     samples.push({ ...s, at: Date.now() - t0 });
     const streams1 = log.filter(l => l.kind === 'stream' && l.id === 1);
     // (the browser may first ask for the same stream again by itself; ours asks for it at the spot it reached)
@@ -159,7 +142,7 @@ async function run(browser, base, mode, rs) {
   }
   await sleep(1500);   // song 2's own end, and its play count
   const events = await page.evaluate(() => window.__ev);
-  const toasts = await page.evaluate(() => window.__toasts || [...document.querySelectorAll('#toasts .toast')].map(t => t.textContent));
+  const toasts = await page.evaluate(() => [...document.querySelectorAll('#toasts .toast')].map(t => t.textContent));
   const cut = log.find(l => l.kind === 'cut');
   const firstSong2 = samples.find(x => x.id === 2);
   const lastSong1 = [...samples].reverse().find(x => x.id === 1);
@@ -174,7 +157,7 @@ async function run(browser, base, mode, rs) {
     check(resumedAt !== null && resumedAt >= 2 && resumedAt <= 10, `[${tag}] song 1 was loaded again near the cut (t=${resumedAt})`);
   }
   if (mode === 'error') check(events.some(e => e.startsWith('error')), `[${tag}] the element reported an error`);
-  check(maxPos1 >= (rs ? 13 : 14), `[${tag}] song 1 played on to its real end (reached ${maxPos1.toFixed(1)} s of 16)`);
+  check(maxPos1 >= 13, `[${tag}] song 1 played on to its real end (reached ${maxPos1.toFixed(1)} s of 16)`);
   check(!!firstSong2 && lastSong1 && lastSong1.pos >= 13, `[${tag}] song 2 started only after song 1 really ended (song 1 last seen at ${lastSong1?.pos?.toFixed(1)} s)`);
   check(samples.some(x => x.id === 2 && x.pos > 4), `[${tag}] song 2 played`);
   check(!toasts.some(t => /Couldn't keep/.test(t)), `[${tag}] nothing was skipped`);
@@ -188,8 +171,7 @@ async function run(browser, base, mode, rs) {
   const base = `http://127.0.0.1:${server.address().port}`;
   const browser = await chromium.launch({ args: ['--autoplay-policy=no-user-gesture-required'] });
   try {
-    for (const mode of (process.env.MODES || 'end,drop,error,short').split(',')) await run(browser, base, mode, false);
-    if (RS) for (const mode of (process.env.MODES || 'end,drop,error,short').split(',')) await run(browser, base, mode, true);
+    for (const mode of (process.env.MODES || 'end,drop,error,short').split(',')) await run(browser, base, mode);
   } finally {
     await browser.close();
     server.close();

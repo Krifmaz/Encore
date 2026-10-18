@@ -1,4 +1,4 @@
-//! Port of web/js/pages/library.js – see docs/ui-rewrite/CONTRACT.md
+//! Port of web/js/pages/library.js – see docs/archive/ui-rewrite/CONTRACT.md
 //! The library page (Albums / Singles / Artists / Songs / Duplicates / Wrong audio tabs with sorting, filters and
 //! shuffle), the album page (play, shuffle, likes, Edit details, Tag / match metadata, artwork, delete) and the
 //! per-song ⋯ menu with the Edit song details modal.

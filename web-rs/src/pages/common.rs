@@ -1,4 +1,4 @@
-//! Port of web/js/pages/common.js – see docs/ui-rewrite/CONTRACT.md
+//! Port of web/js/pages/common.js – see docs/archive/ui-rewrite/CONTRACT.md
 //! What many pages share: sending a request, album and library tiles, request rows with their
 //! action buttons, and the "Clear" menu of the download lists. Same HTML, same API calls.
 

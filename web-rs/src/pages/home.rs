@@ -1,4 +1,4 @@
-//! Port of web/js/pages/home.js – see docs/ui-rewrite/CONTRACT.md
+//! Port of web/js/pages/home.js – see docs/archive/ui-rewrite/CONTRACT.md
 use crate::api::{self, ApiError};
 use crate::app::{self, Ctx, PageFuture};
 use crate::dom::{self, EventListener};

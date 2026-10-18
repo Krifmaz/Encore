@@ -58,8 +58,7 @@ pub fn youtube_status_html(r: &Value) -> String {
     let sources = r.o("sources");
     let ok = has_source && sources.o(&source).truthy("signed_in");
     let badge = if !has_source { r##"<span class="badge">No cookies</span>"##.to_string() } else if ok { format!(r##"<span class="badge ok">{} Signed in</span>"##, icon("check")) } else { r##"<span class="badge warn">Signed out</span>"##.to_string() };
-    // `next_check` is the 0.26 compatibility name of `next_refresh` (servers from before 0.25.3): drop in 0.27
-    let next = if r.truthy("next_refresh") { r.f("next_refresh") } else if r.truthy("next_check") { r.f("next_check") } else { 0.0 };
+    let next = if r.truthy("next_refresh") { r.f("next_refresh") } else { 0.0 };
     let when = if has_source {
         format!("Last refresh {}{}", ago(r.f("last_refresh")), if next != 0.0 { format!(" · next refresh {}", until(next)) } else { String::new() })
     } else { String::new() };

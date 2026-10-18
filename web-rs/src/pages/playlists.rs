@@ -1,4 +1,4 @@
-//! Port of web/js/pages/playlists.js – see docs/ui-rewrite/CONTRACT.md
+//! Port of web/js/pages/playlists.js – see docs/archive/ui-rewrite/CONTRACT.md
 use crate::api::{self, ApiResult};
 use crate::app::{self, Ctx, PageFuture};
 use crate::dom;

@@ -11,6 +11,8 @@ pub mod app;
 pub mod appearance;
 pub mod dom;
 pub mod json;
+pub mod native;
+pub mod num;
 pub mod pages;
 pub mod playback;
 pub mod player;

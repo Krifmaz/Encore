@@ -1,4 +1,4 @@
-//! Port of web/js/pages/foryou.js – see docs/ui-rewrite/CONTRACT.md
+//! Port of web/js/pages/foryou.js – see docs/archive/ui-rewrite/CONTRACT.md
 //! Discovery: "For you" (ListenBrainz recommendations), genre pages, similar artists and "More like this".
 use crate::api;
 use crate::app::{Ctx, PageFuture};

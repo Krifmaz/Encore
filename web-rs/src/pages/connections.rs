@@ -1,4 +1,4 @@
-//! Port of web/js/pages/connections.js – see docs/ui-rewrite/CONTRACT.md
+//! Port of web/js/pages/connections.js – see docs/archive/ui-rewrite/CONTRACT.md
 //! The Connections settings page: one card per service, the connect forms (user/password, token, Deezer profile,
 //! Plex PIN, YouTube Music device code / headers, Last.fm), remote playlist import and "Sync now".
 

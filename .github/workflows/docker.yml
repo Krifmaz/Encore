@@ -44,7 +44,7 @@ jobs:
         working-directory: server
       - name: Package (Linux x86_64)
         run: |
-          mkdir -p out/encore && cp server/target/release/encore out/encore/ && cp -r web-rs/dist out/encore/static && cp -r web out/encore/static-legacy
+          mkdir -p out/encore && cp server/target/release/encore out/encore/ && cp -r web-rs/dist out/encore/static
           tar -C out -czf encore-linux-x86_64.tar.gz encore
       - uses: actions/upload-artifact@v4
         with:

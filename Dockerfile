@@ -55,10 +55,8 @@ ENV PATH=/opt/tools/bin:$PATH \
     ENCORE_CONFIG_DIR=/config ENCORE_STATIC_DIR=/app/static ENCORE_PORT=8080 \
     PUID=1000 PGID=1000 TZ=UTC
 COPY --from=build /encore /usr/local/bin/encore
-# the Rust UI (trunk's dist: index.html, the hashed .js/.wasm, css, icons, manifest, share.html, sw.js) is the website;
-# the frozen JavaScript UI of 0.25 sits next to it for ENCORE_LEGACY_UI=1, this one release
+# the Rust UI (trunk's dist: index.html, the hashed .js/.wasm, css, icons, manifest, share.html, sw.js) is the website
 COPY --from=ui /ui/dist /app/static
-COPY web /app/static-legacy
 COPY docker/entrypoint.sh /entrypoint.sh
 RUN chmod +x /entrypoint.sh && mkdir -p /config /music /downloads
 ARG ENCORE_BUILD=dev

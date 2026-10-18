@@ -1,4 +1,4 @@
-//! Port of web/js/pages/contribute.js – see docs/ui-rewrite/CONTRACT.md
+//! Port of web/js/pages/contribute.js – see docs/archive/ui-rewrite/CONTRACT.md
 //! Settings → Contribute: send AcoustID fingerprints and MusicBrainz ISRCs for songs the audio confirmed,
 //! and how albums missing from MusicBrainz get added.
 use crate::api;

@@ -1,4 +1,4 @@
-//! Port of web/js/pages/diagnostics.js – see docs/ui-rewrite/CONTRACT.md
+//! Port of web/js/pages/diagnostics.js – see docs/archive/ui-rewrite/CONTRACT.md
 use crate::api::{self, ApiError};
 use crate::app::{Ctx, PageFuture};
 use crate::dom;
