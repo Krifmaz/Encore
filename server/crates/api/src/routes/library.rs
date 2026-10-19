@@ -868,10 +868,17 @@ struct NameQ {
 /// with other artists stay, since they belong to those artists too. The artist index, the deletes and the
 /// file work run on the blocking pool.
 async fn delete_artist(State(st): State<AppState>, Admin(u): Admin, Query(q): Query<NameQ>) -> ApiResult<Json<Value>> {
-    st.blocking(move |st| delete_artist_now(st, &u, &q)).await
+    let (v, cancelled) = st.blocking(move |st| delete_artist_now(st, &u, &q)).await?;
+    // its requests that were not done stop (a waiting one would import the artist again later); only
+    // Encore's own staging folders of them go
+    for id in cancelled {
+        encore_requests::worker::cancel(&st, id).await;
+        encore_requests::events::emit(&st, id);
+    }
+    Ok(v)
 }
 
-fn delete_artist_now(st: &AppState, u: &encore_db::Row, q: &NameQ) -> ApiResult<Json<Value>> {
+fn delete_artist_now(st: &AppState, u: &encore_db::Row, q: &NameQ) -> ApiResult<(Json<Value>, Vec<i64>)> {
     let idx = st.library.artists.index(&st.db);
     // (an alias that is also another artist's name, kept apart by MusicBrainz, stays with that artist)
     let mut names: Vec<String> = idx.find(&q.name).map(|a| a.spellings.iter().chain(a.aliases.iter().filter(|x| idx.find(x).is_some_and(|b| b.key == a.key))).cloned().collect()).unwrap_or_default();
@@ -896,10 +903,14 @@ fn delete_artist_now(st: &AppState, u: &encore_db::Row, q: &NameQ) -> ApiResult<
         }
     }
     st.db.execute(&format!("DELETE FROM follows WHERE lower(name) IN ({m})"), lower.clone())?;
-    st.db.execute(&format!("UPDATE requests SET status='cancelled', message='Artist removed' WHERE lower(artist) IN ({m}) AND status IN ('pending','queued')"), lower)?;
+    let open: Vec<i64> = st.db.query(&format!("SELECT id FROM requests WHERE lower(artist) IN ({m}) AND status IN ('pending','queued','waiting')"), lower)?
+        .iter().map(|r| r.i("id")).collect();
+    for id in &open {
+        st.db.execute("UPDATE requests SET status='cancelled', message='Artist removed', updated_at=? WHERE id=?", p![now(), id])?;
+    }
     st.library.artists.invalidate();
     st.db.log("info", &format!("{} removed artist {} ({} songs)", u.s("username"), q.name, rows.len()));
-    Ok(Json(json!({ "ok": true, "removed": rows.len() })))
+    Ok((Json(json!({ "ok": true, "removed": rows.len() })), open))
 }
 
 #[derive(Deserialize)]

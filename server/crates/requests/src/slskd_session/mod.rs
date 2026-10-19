@@ -382,7 +382,7 @@ pub fn text_elsewhere(text: &str) -> String {
 
 /// Requests parked until Soulseek is back.
 pub fn parked(st: &impl Ctx) -> i64 {
-    st.db().one("SELECT COUNT(*) AS n FROM requests WHERE status='queued' AND json_extract(detail, '$.soulseek_wait') IS NOT NULL", encore_db::p![])
+    st.db().one("SELECT COUNT(*) AS n FROM requests WHERE status IN ('waiting','queued') AND json_extract(detail, '$.soulseek_wait') IS NOT NULL", encore_db::p![])
         .ok().flatten().map(|r| encore_db::RowExt::i(&r, "n")).unwrap_or(0)
 }
 

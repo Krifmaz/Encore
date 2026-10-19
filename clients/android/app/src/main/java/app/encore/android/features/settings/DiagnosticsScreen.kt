@@ -6,6 +6,7 @@ import android.net.Uri
 import android.provider.OpenableColumns
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.ExperimentalLayoutApi
@@ -44,6 +45,8 @@ import app.encore.android.data.api.settingsApi
 import app.encore.android.data.repo.formatAgo
 import app.encore.android.ui.Nav
 import app.encore.android.ui.components.Badge
+import app.encore.android.ui.components.CopyIconButton
+import app.encore.android.ui.components.DetailsDialog
 import app.encore.android.ui.components.EncoreButton
 import app.encore.android.ui.components.ErrorBox
 import app.encore.android.ui.components.RowDivider
@@ -552,6 +555,8 @@ private fun Crashes(api: SettingsApi) {
     var list by remember { mutableStateOf<List<JsonObject>?>(null) }
     var error by remember { mutableStateOf("") }
     var asking by remember { mutableStateOf(false) }
+    // the crash opened whole: (kind, text)
+    var whole by remember { mutableStateOf<Pair<String, String>?>(null) }
     LaunchedEffect(version) {
         try {
             list = withContext(Dispatchers.IO) { api.crashes() }.arr("crashes").objectsOf()
@@ -573,15 +578,23 @@ private fun Crashes(api: SettingsApi) {
             else -> l.forEachIndexed { i, c ->
                 if (i > 0) RowDivider(startIndent = 0.dp)
                 var open by remember(c) { mutableStateOf(false) }
+                val first = c.str("first_line").ifEmpty { "Crash" }
+                val kind = SettingsRules.crashKind(c.str("kind"))
+                val meta = listOf("device", "app_version", "os", "user").map { c.str(it) }.filter { it.isNotEmpty() }
+                // the whole report to read and copy: the cut-off first line opens it, Copy takes all of it
+                val full = SettingsRules.crashText(first, kind, meta.joinToString(" · "), dateTime(c.dbl("time")), c.str("text"))
                 Row(Modifier.fillMaxWidth().padding(vertical = 6.dp), verticalAlignment = Alignment.Top) {
                     Dot(false, Modifier.padding(top = 6.dp))
                     Spacer(Modifier.width(10.dp))
                     Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(2.dp)) {
                         Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-                            Text(c.str("first_line").ifEmpty { "Crash" }, style = MaterialTheme.typography.bodyMedium, fontWeight = FontWeight.Bold, maxLines = 2, modifier = Modifier.weight(1f, fill = false))
-                            Badge(SettingsRules.crashKind(c.str("kind")))
+                            Text(
+                                first, style = MaterialTheme.typography.bodyMedium, fontWeight = FontWeight.Bold, maxLines = 2,
+                                modifier = Modifier.weight(1f, fill = false).clickable(onClickLabel = "Details") { whole = kind to full },
+                            )
+                            Badge(kind)
+                            CopyIconButton(full, size = 28.dp)
                         }
-                        val meta = listOf("device", "app_version", "os", "user").map { c.str(it) }.filter { it.isNotEmpty() }
                         Muted("${meta.joinToString(" · ")} · ${dateTime(c.dbl("time"))}")
                         TextLink("Full report", color = p.muted) { open = !open }
                         if (open) Mono(c.str("text").take(20000), color = p.muted)
@@ -590,6 +603,7 @@ private fun Crashes(api: SettingsApi) {
             }
         }
     }
+    whole?.let { (kind, text) -> DetailsDialog(kind, text, onDismiss = { whole = null }) }
     if (asking) {
         ConfirmDialog("Clear app crashes?", "All crash reports from the phone app are removed.", "Clear", danger = true, onDismiss = { asking = false }) {
             scope.serverCall(after = { _: Unit -> version += 1 }, onError = { msg -> Toasts.show(msg, "err"); version += 1 }) { api.clearCrashes() }

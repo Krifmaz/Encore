@@ -10,6 +10,7 @@ use encore_http::mb;
 use encore_db::p;
 use regex::Regex;
 use serde_json::{json, Value};
+use encore_core::fsx::{self, Step, StepError};
 use std::path::{Path, PathBuf};
 use std::sync::LazyLock;
 
@@ -76,11 +77,34 @@ fn record_verification(st: &impl Ctx, results: &[(PathBuf, Option<Value>)]) {
 
 use encore_media::tags::write_tags;
 
-fn tag_file(st: &impl Ctx, path: &Path, vals: &Row, cover: Option<&[u8]>) {
+/// Write the tags (and the cover) into a file. A tag the file can't take is only logged; a storage error
+/// (the disk under the download or the library failing) stops the import as a [`fsx::StepError`], so the
+/// request waits for the storage with its files kept.
+fn tag_file(st: &impl Ctx, path: &Path, vals: &Row, cover: Option<&[u8]>) -> Result<(), StepError> {
     let cover = if st.cfg().bool("embed_cover") { cover } else { None };
+    fsx::fault_point(Step::Import, "write", path)?;
     if let Err(e) = write_tags(path, vals, cover) {
-        st.db().log("warning", &format!("Could not tag {}: {e}", path.file_name().unwrap_or_default().to_string_lossy()));
+        if let Some(io) = io_error_of(&e) {
+            let se = StepError::new(Step::Import, "write", path, None, io);
+            if se.is_storage() {
+                return Err(se);
+            }
+            st.db().log("warning", &format!("Could not tag {}: {se}", path.file_name().unwrap_or_default().to_string_lossy()));
+            return Ok(());
+        }
+        st.db().log("warning", &format!("Could not tag {}: {e:#}", path.file_name().unwrap_or_default().to_string_lossy()));
     }
+    Ok(())
+}
+
+/// The io error under a tag write's error (lofty's errors give it as their source), as a fresh io::Error.
+fn io_error_of(e: &anyhow::Error) -> Option<std::io::Error> {
+    for c in e.chain() {
+        if let Some(io) = c.downcast_ref::<std::io::Error>() {
+            return Some(io.raw_os_error().map(std::io::Error::from_raw_os_error).unwrap_or_else(|| std::io::Error::new(io.kind(), io.to_string())));
+        }
+    }
+    None
 }
 
 // ---- cover art ----------------------------------------------------------------------------------
@@ -243,41 +267,163 @@ async fn may_replace(st: &impl Ctx, src: &Path, dest: &Path) -> bool {
     same != Some(false)
 }
 
-fn mv(src: &Path, dest: &Path) -> std::io::Result<()> {
-    if std::fs::rename(src, dest).is_ok() {
-        return Ok(());
+/// Move a file (a rename, or across file systems a copy that is flushed to the disk before the source goes).
+/// A copy that fails leaves no half file at `dest`. Every step's error names its operation and paths.
+fn mv(src: &Path, dest: &Path) -> Result<(), StepError> {
+    match fsx::rename(src, dest, Step::Import) {
+        Ok(()) => return Ok(()),
+        // the library is on another file system: copy it over
+        Err(e) if e.errno == Some(libc::EXDEV) => {}
+        // the source can't be renamed (a read-only download folder, say): copy it over
+        Err(e) if !fsx::roots::covers(dest) || !e.errno.is_some_and(fsx::is_storage) => {}
+        Err(e) => return Err(e),
     }
-    std::fs::copy(src, dest)?; // across file systems
-    std::fs::remove_file(src)
+    if let Err(e) = fsx::copy(src, dest, Step::Import).and_then(|_| fsx::fsync(dest, Step::Import)) {
+        let _ = std::fs::remove_file(dest);
+        return Err(e);
+    }
+    if let Err(e) = fsx::remove_file(src, Step::Import) {
+        // the file is in its new place; the old copy stays behind
+        tracing::warn!("{e}");
+    }
+    Ok(())
 }
 
-/// Move src to dest. With replace_same a file already at dest is the same song (same path), so only the
-/// better of the two is kept instead of adding "(2)" copies.
-pub async fn move_file(st: &impl Ctx, src: &Path, dest: &Path, replace_same: bool) -> anyhow::Result<PathBuf> {
-    if src == dest {
-        return Ok(src.to_path_buf());
-    }
-    std::fs::create_dir_all(dest.parent().unwrap())?;
-    if replace_same && dest.exists() && may_replace(st, src, dest).await {
-        if file_rank(src) > file_rank(dest) {
-            let tmp = PathBuf::from(format!("{}.encore-new", dest.to_string_lossy()));
-            mv(src, &tmp)?;
-            std::fs::rename(&tmp, dest)?;
-        } else {
-            std::fs::remove_file(src)?;
-        }
-        return Ok(dest.to_path_buf());
-    }
+/// The next free name for `dest`: "Song.flac", "Song (2).flac", … (`taken` are names already chosen).
+fn free_name(dest: &Path, taken: &std::collections::HashSet<PathBuf>) -> PathBuf {
     let mut d = dest.to_path_buf();
     let stem = dest.file_stem().unwrap_or_default().to_string_lossy().to_string();
     let ext = dest.extension().map(|e| format!(".{}", e.to_string_lossy())).unwrap_or_default();
     let mut i = 2;
-    while d.exists() {
+    while d.exists() || taken.contains(&d) {
         d = dest.with_file_name(format!("{stem} ({i}){ext}"));
         i += 1;
     }
+    d
+}
+
+/// Move src to dest. With replace_same a file already at dest is the same song (same path), so only the
+/// better of the two is kept instead of adding "(2)" copies. For moves inside the library (a rename to new
+/// tags); a download goes into the library with [`place_all`].
+pub async fn move_file(st: &impl Ctx, src: &Path, dest: &Path, replace_same: bool) -> anyhow::Result<PathBuf> {
+    if src == dest {
+        return Ok(src.to_path_buf());
+    }
+    fsx::mkdir_all(dest.parent().unwrap(), Step::Import)?;
+    if replace_same && dest.exists() && may_replace(st, src, dest).await {
+        if file_rank(src) > file_rank(dest) {
+            let tmp = PathBuf::from(format!("{}.encore-new", dest.to_string_lossy()));
+            mv(src, &tmp)?;
+            fsx::rename(&tmp, dest, Step::Import)?;
+        } else {
+            fsx::remove_file(src, Step::Import)?;
+        }
+        return Ok(dest.to_path_buf());
+    }
+    let d = free_name(dest, &Default::default());
     mv(src, &d)?;
     Ok(d)
+}
+
+/// What [`place_all`] does with one file.
+enum Place {
+    /// already where it belongs
+    Same,
+    /// a new file at this path
+    New(PathBuf),
+    /// the better copy of the same song: replaces the file at this path
+    Replace(PathBuf),
+    /// the file at this path is as good: the download's copy is dropped
+    Keep(PathBuf),
+}
+
+/// The temporary name a file has next to its destination until every file of the import is there.
+fn part_name(dest: &Path) -> PathBuf {
+    PathBuf::from(format!("{}.encore-part", dest.to_string_lossy()))
+}
+
+/// Move downloaded files into the library all together, so a storage error part way never leaves an
+/// import half done. Every file is first put next to its destination under a temporary name (a hard link
+/// on the same file system, else a copy flushed to the disk), and only when all of them are there are they
+/// renamed into place and the downloaded copies removed. A failure on the way removes the temporary files
+/// and the files already renamed, and leaves every download where it was: the request keeps its files and
+/// the import can run again. `moves` are (download, destination) pairs; with `replace_same` a file already
+/// at the destination is the same song and only the better copy stays (as [`move_file`]). → the final paths,
+/// in the order of `moves`.
+pub async fn place_all(st: &impl Ctx, moves: &[(PathBuf, PathBuf)], replace_same: bool) -> anyhow::Result<Vec<PathBuf>> {
+    let mut taken = std::collections::HashSet::new();
+    let mut plan = vec![];
+    for (src, dest) in moves {
+        if src == dest {
+            plan.push(Place::Same);
+            continue;
+        }
+        if replace_same && dest.exists() && !taken.contains(dest) && may_replace(st, src, dest).await {
+            taken.insert(dest.clone());
+            plan.push(if file_rank(src) > file_rank(dest) { Place::Replace(dest.clone()) } else { Place::Keep(dest.clone()) });
+            continue;
+        }
+        let d = free_name(dest, &taken);
+        taken.insert(d.clone());
+        plan.push(Place::New(d));
+    }
+    // 1. every new file next to its destination, under its temporary name
+    let mut parts: Vec<PathBuf> = vec![];
+    let placed: Result<(), StepError> = (|| {
+        for ((src, _), p) in moves.iter().zip(&plan) {
+            let (Place::New(d) | Place::Replace(d)) = p else { continue };
+            fsx::mkdir_all(d.parent().unwrap(), Step::Import)?;
+            let part = part_name(d);
+            let _ = std::fs::remove_file(&part); // left by an import that stopped part way
+            parts.push(part.clone());
+            if fsx::hard_link(src, &part, Step::Import).is_err() {
+                // another file system (or one without hard links): a copy, on the disk before the source goes
+                fsx::copy(src, &part, Step::Import)?;
+                fsx::fsync(&part, Step::Import)?;
+            }
+        }
+        Ok(())
+    })();
+    if let Err(e) = placed {
+        for p in &parts {
+            let _ = std::fs::remove_file(p);
+        }
+        return Err(e.into());
+    }
+    // 2. into place
+    let mut done: Vec<PathBuf> = vec![];
+    for p in &plan {
+        let (Place::New(d) | Place::Replace(d)) = p else { continue };
+        if let Err(e) = fsx::rename(part_name(d), d, Step::Import) {
+            for q in &parts {
+                let _ = std::fs::remove_file(q);
+            }
+            // the new files that made it go again (their downloads are still there); a replaced file stays
+            // replaced by its better copy
+            for (q, was) in done.iter().zip(plan.iter().filter(|x| matches!(x, Place::New(_) | Place::Replace(_)))) {
+                if matches!(was, Place::New(_)) {
+                    let _ = std::fs::remove_file(q);
+                }
+            }
+            return Err(e.into());
+        }
+        done.push(d.clone());
+    }
+    // 3. the downloaded copies go: the files are in the library now, so a copy that can't be removed only
+    // stays behind (the download folder's clean-up takes it later)
+    let mut out = vec![];
+    for ((src, _), p) in moves.iter().zip(&plan) {
+        match p {
+            Place::Same => out.push(src.clone()),
+            Place::New(d) | Place::Replace(d) | Place::Keep(d) => {
+                if let Err(e) = fsx::remove_file(src, Step::Import) {
+                    tracing::warn!("{e}");
+                }
+                out.push(d.clone());
+            }
+        }
+    }
+    Ok(out)
 }
 
 /// Imported files into the library ([`library::index_files`]: one transaction per 200 files), then the
@@ -478,19 +624,32 @@ pub async fn apply_preview(st: &impl Ctx, pv: &Value, rename: bool, source_root:
     }
     let mut new_paths = vec![];
     let mut old_dirs = std::collections::HashSet::new();
+    // a download goes into the library all together ([`place_all`]): (row, download, destination)
+    let mut moves: Vec<(usize, PathBuf, PathBuf)> = vec![];
     for row in pv["rows"].as_array().cloned().unwrap_or_default() {
         let path = PathBuf::from(row["path"].as_str().unwrap_or(""));
         let Some(vals) = row["values"].as_object() else {
             new_paths.push(path);
             continue;
         };
-        tag_file(st, &path, vals, cover.as_deref());
+        tag_file(st, &path, vals, cover.as_deref())?;
         if rename {
             old_dirs.insert(path.parent().map(|p| p.to_path_buf()).unwrap_or_default());
             let np = PathBuf::from(row["new_path"].as_str().unwrap_or(""));
-            new_paths.push(move_file(st, &path, &np, source_root.is_some()).await?);
+            if source_root.is_some() {
+                moves.push((new_paths.len(), path.clone(), np));
+                new_paths.push(path);
+            } else {
+                new_paths.push(move_file(st, &path, &np, false).await?);
+            }
         } else {
             new_paths.push(path);
+        }
+    }
+    if !moves.is_empty() {
+        let pairs: Vec<(PathBuf, PathBuf)> = moves.iter().map(|(_, a, b)| (a.clone(), b.clone())).collect();
+        for ((i, _, _), placed) in moves.iter().zip(place_all(st, &pairs, true).await?) {
+            new_paths[*i] = placed;
         }
     }
     save_cover_file(st, &new_paths, cover.as_deref());
@@ -508,7 +667,11 @@ fn save_cover_file(st: &impl Ctx, paths: &[PathBuf], cover: Option<&[u8]>) {
     }
     let d = first.parent().unwrap();
     if paths.iter().all(|p| p.parent() == Some(d)) && !["cover.jpg", "cover.png", "folder.jpg"].iter().any(|n| d.join(n).exists()) {
-        let _ = std::fs::write(d.join("cover.jpg"), c);
+        // the songs are in; a cover that can't be saved is only logged
+        if let Err(e) = fsx::write(d.join("cover.jpg"), c, Step::Import) {
+            st.db().log("warning", &format!("Could not save the cover: {e}"));
+            tracing::warn!("{e}");
+        }
     }
 }
 
@@ -620,9 +783,9 @@ pub async fn import_single(st: &impl Ctx, path: &Path, artist: &str, title: &str
             return Ok((PathBuf::from(ex.s("path")), "already in library – kept existing copy".into()));
         }
     }
-    tag_file(st, path, &vals, cover.as_deref());
+    tag_file(st, path, &vals, cover.as_deref())?;
     let dest = render_path(st, &vals, &ext, true);
-    let new = move_file(st, path, &dest, true).await?;
+    let new = place_all(st, &[(path.to_path_buf(), dest)], true).await?.remove(0);
     library::prune_empty(path.parent().unwrap(), source_root);
     index_paths(st, std::slice::from_ref(&new));
     record_verification(st, &[(new.clone(), check)]);
@@ -779,6 +942,7 @@ pub async fn import_album_files(st: &impl Ctx, paths: &[PathBuf], what: AlbumImp
     let src_tracks: Vec<Value> = source_meta.and_then(|m| m["tracks"].as_array().cloned()).unwrap_or_default();
     let unique_numbers = src_tracks.iter().map(|x| x["track"].as_i64()).collect::<std::collections::HashSet<_>>().len() == src_tracks.len();
     let mut out = vec![];
+    let mut moves = vec![];
     for (i, p) in paths.iter().enumerate() {
         let t = read_tags(&p.to_string_lossy());
         let mut vals = t.clone();
@@ -811,13 +975,16 @@ pub async fn import_album_files(st: &impl Ctx, paths: &[PathBuf], what: AlbumImp
                            ("date", json!(year)), ("isrc", stt.as_ref().map(|s| s["isrc"].clone()).unwrap_or_default()), ("barcode", meta["upc"].clone())] {
                 w.insert(k.into(), v);
             }
-            tag_file(st, p, &w, cover.as_deref());
+            tag_file(st, p, &w, cover.as_deref())?;
         } else if cover.is_some() {
-            tag_file(st, p, &Row::new(), cover.as_deref());
+            tag_file(st, p, &Row::new(), cover.as_deref())?;
         }
         let ext = p.extension().map(|e| format!(".{}", e.to_string_lossy())).unwrap_or_default();
-        let dest = render_path(st, &vals, &ext, false);
-        out.push(move_file(st, p, &dest, true).await?);
+        moves.push((p.clone(), render_path(st, &vals, &ext, false)));
+    }
+    // all of the album or none of it ([`place_all`])
+    out.extend(place_all(st, &moves, true).await?);
+    for p in &paths {
         library::prune_empty(p.parent().unwrap(), source_root);
     }
     save_cover_file(st, &out, cover.as_deref());

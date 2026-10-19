@@ -24,6 +24,8 @@ const LEGACY_ONLY: &[(&str, &str)] = &[
     ("Save for offline", "songs kept on the phone by the Tauri Android app (EncoreNative.saveOffline), gone in 0.29; browsers use Download for offline"),
     ("Saving to this device…", "the Tauri Android app's Save for offline, gone in 0.29"),
     ("Saving song(s) to this device…", "the Tauri Android app's Save for offline, gone in 0.29"),
+    // R1 (the owner, Oct 19): streamrip and links are staged in that folder too
+    ("Staging path for yt-dlp downloads", "renamed \"Staging folder for downloads\" in the server's settings table (0.29, R1): streamrip and links use the folder too"),
 ];
 
 /// Whole files of the JavaScript UI whose page web-rs no longer has, as (file, why). Like [`LEGACY_ONLY`], an

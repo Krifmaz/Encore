@@ -273,7 +273,9 @@ impl Picker {
             return head + &format!(r#"<div class="muted small">{}</div>"#, hint_html(&s.s("hint"), &s.s("settings"), &s.s("settings_label")));
         }
         if let Some(err) = st.errors.get(src).filter(|e| !e.message.is_empty()) {
-            return head + &format!(r#"<div class="error-box small">{}</div>"#, hint_html(&err.message, &err.settings, &err.label));
+            // the source's whole error, with Copy (R1)
+            return head + &format!(r#"<div class="error-box small row" style="align-items:flex-start"><span class="grow" style="min-width:0;overflow-wrap:anywhere">{}</span>{}</div>"#,
+                hint_html(&err.message, &err.settings, &err.label), crate::details::copy_button(&format!("{name}: {}", err.message)));
         }
         if st.loading.contains(src) && src == "slskd" && st.slsk_waiting {
             return head + r#"<div class="muted small"><span class="spinner"></span> Waiting for another Soulseek search, then searching…</div>"#;

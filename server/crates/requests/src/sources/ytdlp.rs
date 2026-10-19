@@ -91,9 +91,12 @@ pub struct Download {
 }
 
 /// Download a link (one video or a whole playlist) into `outdir`. `progress` gets 0–100.
+/// The staging folder's steps say which folder failed ([`encore_core::fsx`]): a read-only or failing disk
+/// is a storage problem the request waits out, not a failure of YouTube.
 pub async fn download(st: &impl Ctx, url: &str, outdir: &Path, playlist: bool, progress: Option<&(dyn Fn(f64) + Send + Sync)>) -> anyhow::Result<Download> {
-    std::fs::create_dir_all(outdir)?;
-    let before: std::collections::HashSet<_> = std::fs::read_dir(outdir)?.flatten().map(|e| e.path()).collect();
+    use encore_core::fsx::{self, Step};
+    fsx::mkdir_all(outdir, Step::Stage)?;
+    let before: std::collections::HashSet<_> = fsx::read_dir(outdir, Step::Stage)?.flatten().map(|e| e.path()).collect();
     let fmt = st.cfg().str("ytdlp_format");
     let fmt = if fmt.is_empty() { "best".to_string() } else { fmt };
     let tmpl = outdir.join("%(playlist_index|)s%(playlist_index& - |)s%(artist,uploader|Unknown)s - %(track,title)s.%(ext)s");
@@ -174,8 +177,14 @@ async fn js_runtime_args(st: &impl Ctx) -> Vec<String> {
 }
 
 async fn run(st: &impl Ctx, args: &[String], outdir: &Path, before: &std::collections::HashSet<PathBuf>, progress: Option<&(dyn Fn(f64) + Send + Sync)>) -> anyhow::Result<Download> {
-    let mut child = Command::new(bin(st)).args(args).stdout(Stdio::piped()).stderr(Stdio::piped()).kill_on_drop(true).spawn()
-        .map_err(|e| anyhow::anyhow!("yt-dlp is not installed ({e})"))?;
+    use encore_core::fsx::{self, Step};
+    let program = bin(st);
+    // a program that isn't there says so; any other start failure names the program and the errno
+    let mut child = match fsx::spawn(Step::Download, &program, || Command::new(&program).args(args).stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped()).kill_on_drop(true).spawn()) {
+        Ok(c) => c,
+        Err(e) if e.source.kind() == std::io::ErrorKind::NotFound => anyhow::bail!("yt-dlp is not installed ({})", e.source),
+        Err(e) => return Err(e.into()),
+    };
     let mut lines = BufReader::new(child.stdout.take().unwrap()).lines();
     let stderr = child.stderr.take().unwrap();
     let err_task = tokio::spawn(async move {
@@ -207,7 +216,7 @@ async fn run(st: &impl Ctx, args: &[String], outdir: &Path, before: &std::collec
     let err = err_task.await.unwrap_or_default();
     let _ = std::fs::remove_file(outdir.join(".cookies.txt"));
     let mut files = vec![];
-    for e in std::fs::read_dir(outdir)?.flatten() {
+    for e in fsx::read_dir(outdir, Step::Download)?.flatten() {
         let p = e.path();
         if before.contains(&p) {
             continue;

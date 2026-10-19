@@ -230,10 +230,27 @@ class FeaturesApi(private val api: EncoreApi, private val client: OkHttpClient) 
     /** POST /api/requests: the new row; its `status` is `pending` (needs approval) or `queued`. */
     fun createRequest(body: JsonObject): String = (call("POST", "/api/requests", body) as? JsonObject)?.str("status") ?: ""
 
-    /** POST /api/requests/{id}/approve|deny|retry|cancel. */
+    /**
+     * POST /api/requests/{id}/approve|deny|retry|cancel|import-again. Import again (the request's owner or an admin)
+     * imports the kept files of a failed or waiting import; nothing is downloaded again.
+     */
     fun requestAction(id: Long, action: String) {
         call("POST", "/api/requests/$id/$action", JsonObject(emptyMap()))
     }
+
+    /**
+     * GET /api/requests/storage: whether imports go on (the Requests page's banner). Null from a server without it
+     * (an older one answers 404): no banner then.
+     */
+    fun requestStorage(): StorageHealth? =
+        try {
+            getObject("/api/requests/storage").page(StorageHealth.serializer())
+        } catch (e: ApiException) {
+            if (e.code == 404) null else throw e
+        }
+
+    /** POST /api/requests/storage/check (admins, Check again): every folder probed now; the answer is the new state. */
+    fun checkStorage(): StorageHealth = postObject("/api/requests/storage/check").page(StorageHealth.serializer())
 
     /** DELETE /api/requests/{id}[?files=true]; returns the number of files deleted. */
     fun deleteRequest(id: Long, files: Boolean): Int =
@@ -526,6 +543,8 @@ class FeaturesApi(private val api: EncoreApi, private val client: OkHttpClient) 
     // ---- plumbing ------------------------------------------------------------------------------------------
 
     private fun getObject(path: String): JsonObject = call("GET", path, null) as? JsonObject ?: JsonObject(emptyMap())
+
+    private fun postObject(path: String): JsonObject = call("POST", path, JsonObject(emptyMap())) as? JsonObject ?: JsonObject(emptyMap())
 
     private fun call(method: String, path: String, body: JsonElement?): JsonElement? {
         if (api.base.isEmpty()) throw IOException("Not signed in")

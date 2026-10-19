@@ -455,7 +455,11 @@ fn downloads_table(rows: &[Value]) -> String {
             esc(&x.s("username")),
             esc(&x.s("filename")), esc(&if x.truthy("basename") { x.s("basename") } else { base_name(&x.s("filename")) }),
             esc(&x.s("directory")),
-            if x.truthy("error") { format!(r#"<div class="small" style="color:var(--err)">{}</div>"#, esc(&x.s("error"))) } else { String::new() },
+            // the transfer's whole error on a click, with Copy (R1)
+            if x.truthy("error") {
+                format!(r#"<div class="small" style="color:var(--err);overflow-wrap:anywhere"{}>{}</div>"#,
+                    crate::details::attrs("Transfer error", &format!("{}\n{}\n{}", x.s("username"), x.s("filename"), x.s("error"))), esc(&x.s("error")))
+            } else { String::new() },
             state_badge(&x.s("state"), false),
             if is_active(x) && x.truthy("speed") { format!("{}<br>", esc(&speed_text(x.f("speed")))) } else { String::new() },
             ui::fmt::size(x.f("bytes")), ui::fmt::size(x.f("size")),

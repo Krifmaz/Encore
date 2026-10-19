@@ -1005,8 +1005,9 @@ help = "Inside the container (mount your music folder here)"
 env = "ENCORE_STAGING_PATH"
 default = "/downloads/encore"
 group = "library"
-label = "Staging path for yt-dlp downloads"
+label = "Staging folder for downloads"
 type = "path"
+help = "Where downloads (streamrip, yt-dlp, links) are saved before they are tagged and moved into the library"
 
 [keys.scan_interval_minutes]
 env = "ENCORE_SCAN_INTERVAL"

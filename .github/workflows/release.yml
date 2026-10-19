@@ -219,7 +219,9 @@ jobs:
           # the same as the build above, so the crates it compiled are reused
           ENCORE_VERSION: ${{ needs.version.outputs.version }}
         run: |
-          cargo bench --locked --target ${{ matrix.target }} --bench perf > perf.md
+          # -p encore: a bench across the workspace would turn on encore-core's test-only fault-io feature
+          # (through encore-api's and encore-requests' dev-dependencies), which refuses a release build
+          cargo bench -p encore --locked --target ${{ matrix.target }} --bench perf > perf.md
           { echo "## Speed table, Encore ${{ needs.version.outputs.version }} (release build, GitHub runner)"; cat perf.md; } >> "$GITHUB_STEP_SUMMARY"
 
   docker:

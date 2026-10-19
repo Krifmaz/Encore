@@ -418,9 +418,9 @@ const AUTO_KEYS: [&str; 11] = ["auto_request_followed", "auto_request_likes", "a
 
 async fn get_auto(State(st): State<AppState>, Admin(_): Admin) -> ApiResult<Json<Value>> {
     let mut stats = st.db.one("SELECT
-        SUM(CASE WHEN detail LIKE '%\"auto\": true%' AND status IN ('queued','searching','downloading','monitoring','importing') THEN 1 ELSE 0 END) auto_active,
+        SUM(CASE WHEN detail LIKE '%\"auto\": true%' AND status IN ('queued','searching','downloading','monitoring','importing','waiting') THEN 1 ELSE 0 END) auto_active,
         SUM(CASE WHEN source='album' AND status='monitoring' THEN 1 ELSE 0 END) album_waiting,
-        SUM(CASE WHEN kind='album' AND detail LIKE '%lossless_only%' AND status IN ('queued','searching','downloading','importing') THEN 1 ELSE 0 END) upgrades_active,
+        SUM(CASE WHEN kind='album' AND detail LIKE '%lossless_only%' AND status IN ('queued','searching','downloading','importing','waiting') THEN 1 ELSE 0 END) upgrades_active,
         SUM(CASE WHEN kind='album' AND detail LIKE '%lossless_only%' AND status='completed' THEN 1 ELSE 0 END) upgrades_done
         FROM requests", p![])?.unwrap_or_default();
     let lossy = st.db.one("SELECT COUNT(*) n FROM (SELECT album_id FROM tracks GROUP BY album_id HAVING SUM(CASE WHEN format IN ('flac','wav','alac','aiff','ape','wv') THEN 1 ELSE 0 END) = 0)", p![])?

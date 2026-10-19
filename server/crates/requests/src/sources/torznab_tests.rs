@@ -60,3 +60,33 @@ fn catalogue_extras_dont_hide_the_file() {
     assert_eq!(core_title("Song (Live Version)"), "Song (Live Version)");
     assert_eq!(core_title("Song feat. X"), "Song");
 }
+
+#[test]
+fn symbols_that_stand_for_letters_match_the_spelled_out_names() {
+    // the owner's case: Ke$ha – Cannibal, which indexers and scene names spell "Kesha"
+    assert_eq!(match_words("Ke$ha"), "kesha");
+    assert_eq!(match_words("A$AP Rocky"), "asap rocky");
+    assert_eq!(match_words("Joey Bada$$"), "joey badass");
+    assert_eq!(match_words("$uicideboy$"), "suicideboys");
+    assert_eq!(match_words("Ty Dolla $ign"), "ty dolla sign");
+    assert_eq!(match_words("P!nk"), "pink");
+    assert_eq!(match_words("Panic! at the Disco"), "panic at the disco");
+    assert_eq!(match_words("Wham!"), "wham");
+    assert_eq!(match_words("$100 Bill"), "100 bill");
+    assert_eq!(match_words("Beyoncé"), "beyonce");
+    assert_eq!(match_words("Don't Stop"), "dont stop");
+    // the query the worker sends to Prowlarr: letters, not "Ke ha"
+    assert_eq!(fold_symbols("Ke$ha Cannibal"), "Kesha Cannibal");
+    assert_eq!(fold_symbols("$100 Bill – Wham!"), "$100 Bill – Wham!");
+    // compared with and without the symbols, in both directions
+    assert_eq!(contains("Kesha - Cannibal (2010) [FLAC]", "Ke$ha"), 1.0);
+    assert_eq!(contains("Ke$ha - Cannibal [FLAC]", "Kesha"), 1.0);
+    assert_eq!(contains("Ke$ha - Cannibal [FLAC]", "Ke$ha"), 1.0);
+    assert_eq!(contains("Ke ha - Cannibal [FLAC]", "Ke$ha"), 1.0, "the plain reading still counts");
+    assert_eq!(contains("Pink - Funhouse (2008) [FLAC]", "P!nk"), 1.0);
+    assert_eq!(contains("Beyonce - Lemonade [FLAC]", "Beyoncé"), 1.0);
+    assert_eq!(contains("Someone Else - Cannibal [FLAC]", "Ke$ha"), 0.0);
+    // the album gate and the song gate let Kesha's releases through
+    assert!(score_song("Kesha - Blow (2011) [FLAC]", 40e6, Some(9), "torrent", "Ke$ha", "Blow").is_some());
+    assert!(score_song("Kesha - Blow (2011) [FLAC]", 40e6, Some(9), "torrent", "Someone", "Blow").is_none());
+}

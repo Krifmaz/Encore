@@ -40,6 +40,7 @@ pub fn render(view: Element, ctx: Ctx) -> PageFuture {
     <h1>Downloader</h1>
     <p class="muted" style="margin:6px 0 20px">Paste a link from anywhere. <b>Spotify, Apple Music, YouTube Music, Deezer, Tidal, Qobuz, Amazon Music</b> songs, albums and playlists are matched song by song (exact ISRC when available) and fetched from the best source you have – lossless first.
       <b>YouTube, SoundCloud, Bandcamp, Mixcloud</b> and ~1,800 other sites download directly. Every file is fingerprint-verified and de-duplicated before it hits the library.</p>
+    <div id="storage-banner"></div>
     <form class="card stack" id="dl-form">
       <div class="row wrap">
         <div class="search grow">{link}<input class="input" name="url" placeholder="https://…" required autocomplete="off"></div>
@@ -210,6 +211,10 @@ pub fn render(view: Element, ctx: Ctx) -> PageFuture {
         }
 
         common::bind_request_actions(&list, load.clone());
+        // imports paused because a folder can't be written (R1): the same banner as on Requests
+        if let Some(slot) = dom::qs_in(&view, "#storage-banner") {
+            common::storage_banner(&view, &slot, matches!(ctx.user.s("role").as_str(), "admin" | "owner"));
+        }
         {
             let clear = need(&view, "#dl-clear")?;
             let (c, l) = (clear.clone(), load.clone());

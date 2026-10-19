@@ -285,6 +285,12 @@ pub enum Effect {
     Enqueue(Vec<Value>),
     /// Copy to the clipboard.
     Clipboard(String),
+    /// Copy to the clipboard and say whether it worked ("Copied to clipboard" or "Copy failed –
+    /// select and copy manually", the web's `ui::copy_text`).
+    CopyText(String),
+    /// Show a text in full in a dialog: wrapped, selectable, with a Copy button (an error or a
+    /// status that a row cuts short, a request's details).
+    Details { title: String, text: String },
     /// Open in the browser.
     OpenUrl(String),
     /// Change and save the config (the look is re-applied after).
@@ -312,6 +318,8 @@ impl std::fmt::Debug for Effect {
             Effect::PlayNext(t) => write!(f, "PlayNext({})", t.len()),
             Effect::Enqueue(t) => write!(f, "Enqueue({})", t.len()),
             Effect::Clipboard(s) => write!(f, "Clipboard({s:?})"),
+            Effect::CopyText(s) => write!(f, "CopyText({s:?})"),
+            Effect::Details { title, .. } => write!(f, "Details({title:?})"),
             Effect::OpenUrl(u) => write!(f, "OpenUrl({u:?})"),
             Effect::Config(_) => f.write_str("Config(..)"),
             Effect::SignedIn(_) => f.write_str("SignedIn"),
@@ -471,6 +479,20 @@ impl<'a> Ctx<'a> {
     /// Copy to the clipboard (pair it with a toast).
     pub fn copy(&mut self, text: impl Into<String>) {
         self.push(Effect::Clipboard(text.into()));
+    }
+
+    /// The web's `copy_text`: copy, then toast "Copied to clipboard", or "Copy failed – select and
+    /// copy manually" when the clipboard did not take it.
+    pub fn copy_text(&mut self, text: impl Into<String>) {
+        self.push(Effect::CopyText(text.into()));
+    }
+
+    /// Open `text` in full in the details dialog (wrapped, selectable, with Copy).
+    pub fn details(&mut self, title: impl Into<String>, text: impl Into<String>) {
+        self.push(Effect::Details {
+            title: title.into(),
+            text: text.into(),
+        });
     }
 
     /// Open a link in the browser.

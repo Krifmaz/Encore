@@ -1,8 +1,13 @@
 //! streamrip (encore_requests::sources::streamrip) on a server's settings, with a stand-in for its `rip`
-//! program: its config written, checked and reset, and its failures in plain words.
+//! program: its config written, checked and reset, and its failures in plain words; and a Deezer album
+//! picked in the picker, downloaded by the stand-in and imported by the request worker, end to end
+//! (Deezer itself is out of reach here: `deezer_album_live` runs the real streamrip when asked to).
 use crate::state::AppState;
+use encore_core::fsx;
+use encore_db::{p, RowExt};
 use encore_http::Ctx as _;
 use encore_requests::sources::streamrip::*;
+use serde_json::{json, Value};
 use std::path::{Path, PathBuf};
 
 fn state(name: &str) -> (AppState, PathBuf) {
@@ -15,8 +20,10 @@ fn state(name: &str) -> (AppState, PathBuf) {
 
 /// A stand-in for streamrip's `rip`, in `dir`: `config path` writes the 2.x default file when there is
 /// none and complains the way the fork does about a file marked `broken = true`; `url` does what the
-/// `mode` file beside it says (prompt for the ARL, fail to load the config, or download one song).
-/// Every call, with what its stdin is, lands in `calls.log`.
+/// `mode` file beside it says (prompt for the ARL, fail to load the config, download one song, download the
+/// FLACs in `fixture/` as an album, or fail with output and exit 1). Every call, with what its stdin is,
+/// lands in `calls.log`; a `url` run first writes to and reads from /dev/tty (which must neither hang nor
+/// fail the run), and leaves its /proc stat and environment in `stat` and `env`.
 fn fake_rip(dir: &Path) -> PathBuf {
     use std::os::unix::fs::PermissionsExt;
     std::fs::create_dir_all(dir).unwrap();
@@ -62,6 +69,11 @@ arl = ""
 [database]
 downloads_enabled = true
 
+[cli]
+progress_bars = true
+max_search_results = 100
+# no_update_check = true
+
 [misc]
 version = "2.0.6"
 EOF
@@ -75,6 +87,10 @@ fi
 case "$sub" in
   path) echo "$cfg";;
   url)
+cat /proc/$$/stat > "$here/stat"
+echo "TERM=$TERM NO_COLOR=$NO_COLOR COLUMNS=$COLUMNS PYTHONUNBUFFERED=$PYTHONUNBUFFERED HOME=$HOME" > "$here/env"
+echo "Logging in to Deezer" > /dev/tty
+read answer < /dev/tty
 mode=$(cat "$here/mode" 2>/dev/null)
 case "$mode" in
   prompt)
@@ -88,6 +104,24 @@ case "$mode" in
     echo "Need to update config from 2.0.5 to 2.0.6"
     echo "Try running rip config reset"
     exit 0;;
+  album)
+    echo "Downloading Illuminate EP by Duumu"
+    mkdir -p "$folder/Duumu - Illuminate EP"
+    cp "$here"/fixture/*.flac "$folder/Duumu - Illuminate EP/"
+    echo "WARNING: a warning on stderr" >&2
+    echo "Downloaded 4 tracks";;
+  errno)
+    mkdir -p "$folder/Duumu - Illuminate EP"
+    echo "Downloading Illuminate EP by Duumu"
+    echo "OSError: [Errno 5] Input/output error: '$folder/Duumu - Illuminate EP/01. Light 1.flac'" >&2
+    exit 1;;
+  fail)
+    echo "Resolving https://www.deezer.com/album/302127"
+    echo "first line of the run, kept in the log"
+    echo "Traceback (most recent call last):" >&2
+    echo "  File \"rip/main.py\", line 120, in rip" >&2
+    echo "NonStreamableError: This album is not available in your country" >&2
+    exit 1;;
   *) mkdir -p "$folder/Album"; printf 'fLaC' > "$folder/Album/01 Song.flac";;
 esac;;
 esac
@@ -201,5 +235,311 @@ async fn the_deezer_arl_prompt_becomes_a_plain_message() {
     let files = download(&st, "https://www.deezer.com/track/1", &out).await.unwrap();
     assert_eq!(files.len(), 1);
     assert!(files[0].ends_with("Album/01 Song.flac"), "{files:?}");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+// ---- a Deezer album, end to end ---------------------------------------------------------------------
+
+const DEEZER_ALBUM: &str = "https://www.deezer.com/album/302127";
+
+/// Four small FLACs of "Illuminate EP" by Duumu, tagged the way streamrip tags them, in `dir`. False when
+/// there is no ffmpeg here to make them.
+fn album_fixture(dir: &Path) -> bool {
+    std::fs::create_dir_all(dir).unwrap();
+    for n in 1..=4 {
+        let out = dir.join(format!("{n:02}. Duumu - Light {n}.flac"));
+        let ok = std::process::Command::new("ffmpeg").args(["-v", "error", "-y", "-f", "lavfi", "-i", &format!("sine=frequency={}:duration=1", 220 * n)])
+            .args(["-ar", "44100", "-sample_fmt", "s16", "-c:a", "flac"])
+            .args(["-metadata", &format!("title=Light {n}"), "-metadata", "artist=Duumu", "-metadata", "album_artist=Duumu", "-metadata", "album=Illuminate EP"])
+            .args(["-metadata", &format!("track={n}/4"), "-metadata", "date=2024"]).arg(&out).stdin(std::process::Stdio::null()).status();
+        if !ok.map(|s| s.success()).unwrap_or(false) {
+            return false;
+        }
+    }
+    true
+}
+
+/// A cover for the request (served from here, so the import asks no catalogue for one).
+async fn cover_server(dir: &Path) -> Option<String> {
+    let jpg = dir.join("cover.jpg");
+    let ok = std::process::Command::new("ffmpeg").args(["-v", "error", "-y", "-f", "lavfi", "-i", "testsrc=size=320x320", "-frames:v", "1"]).arg(&jpg)
+        .stdin(std::process::Stdio::null()).status().map(|s| s.success()).unwrap_or(false);
+    let bytes = std::fs::read(&jpg).ok().filter(|_| ok)?;
+    let app = axum::Router::new().route("/cover.jpg", axum::routing::get(move || {
+        let b = bytes.clone();
+        async move { ([(axum::http::header::CONTENT_TYPE, "image/jpeg")], b) }
+    }));
+    let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let url = format!("http://{}/cover.jpg", l.local_addr().unwrap());
+    tokio::spawn(async move {
+        let _ = axum::serve(l, app).await;
+    });
+    Some(url)
+}
+
+/// A server whose streamrip is the stand-in (Deezer signed in with an ARL), with its staging folder and
+/// library in its own folder, nothing asked of MusicBrainz, no lyrics, no quality gate; and its folders.
+struct Rip {
+    ts: crate::test_support::TestServer,
+    fake: PathBuf,
+    staging: PathBuf,
+    lib: PathBuf,
+    cover: String,
+}
+
+async fn rip_server(name: &str) -> Option<Rip> {
+    let ts = crate::test_support::TestServer::new(&format!("rip-e2e-{name}"));
+    let (fake, staging, lib) = (ts.dir.join("fake"), ts.dir.join("staging"), ts.dir.join("lib"));
+    let rip = fake_rip(&fake);
+    if !album_fixture(&fake.join("fixture")) {
+        ts.remove();
+        return None; // no ffmpeg here
+    }
+    let cover = cover_server(&ts.dir).await?;
+    std::fs::create_dir_all(&lib).unwrap();
+    ts.st.cfg.set_many(&json!({ "streamrip_enabled": true, "streamrip_bin": rip.to_string_lossy(), "streamrip_deezer_arl": "arl-cookie",
+        "staging_path": staging.to_string_lossy(), "library_path": lib.to_string_lossy(), "musicbrainz_url": "http://127.0.0.1:9",
+        "autotag_on_import": false, "quality_check_on_import": false, "lyrics_on_import": false, "auto_approve": true,
+        "source_order": "deezer", "ytdlp_enabled": false, "ytdlp_last_resort": false, "slskd_enabled": false }));
+    crate::test_support::user(&ts.st, "boss", "admin"); // user 1, the requests' owner
+    std::fs::write(fake.join("mode"), "album").unwrap();
+    Some(Rip { ts, fake, staging, lib, cover })
+}
+
+/// The album picked in the picker: its Deezer release.
+fn picked_album(st: &AppState, cover: &str) -> i64 {
+    let t = encore_db::now();
+    let detail = json!({ "pick": { "source": "deezer", "payload": { "url": DEEZER_ALBUM }, "title": "Illuminate EP", "subtitle": "Duumu" } });
+    st.db.execute("INSERT INTO requests (user_id, kind, artist, title, album, cover_url, status, message, detail, created_at, updated_at) VALUES (1,'album','Duumu','Illuminate EP','Illuminate EP',?,'queued','',?,?,?)",
+        p![cover, detail.to_string(), t, t]).unwrap()
+}
+
+fn request_row(st: &AppState, id: i64) -> (String, String, Value) {
+    let r = st.db.one("SELECT status, message, detail FROM requests WHERE id=?", p![id]).unwrap().unwrap();
+    (r.s("status"), r.s("message"), serde_json::from_str(&r.s("detail")).unwrap_or(json!({})))
+}
+
+fn log_text(d: &Value) -> String {
+    d["log"].as_array().map(|a| a.iter().filter_map(|l| l.as_str()).collect::<Vec<_>>().join("\n")).unwrap_or_default()
+}
+
+/// Field `n` (1-based, after the command's parentheses) of a /proc/<pid>/stat line.
+fn stat_field(stat: &str, n: usize) -> i64 {
+    stat.rsplit_once(')').unwrap().1.split_whitespace().nth(n - 3).unwrap().parse().unwrap()
+}
+
+#[tokio::test]
+async fn a_picked_deezer_album_downloads_and_imports_through_the_worker() {
+    let Some(r) = rip_server("ok").await else { return };
+    let st = r.ts.st.clone();
+    let id = picked_album(&st, &r.cover);
+    let started = std::time::Instant::now();
+    encore_requests::worker::step(st.clone(), id).await;
+    let (status, message, d) = request_row(&st, id);
+    assert_eq!(status, "completed", "{message}\n{}", log_text(&d));
+    assert!(message.starts_with("Downloaded from Deezer via streamrip"), "{message}");
+    // four tracks in the library, indexed, from the request
+    let n = st.db.one("SELECT COUNT(*) n FROM tracks WHERE request_id=?", p![id]).unwrap().unwrap().i("n");
+    assert_eq!(n, 4);
+    let files: Vec<PathBuf> = walkdir::WalkDir::new(&r.lib).into_iter().flatten().filter(|e| e.path().extension().is_some_and(|x| x == "flac")).map(|e| e.into_path()).collect();
+    assert_eq!(files.len(), 4, "{files:?}");
+    assert!(files.iter().all(|f| f.starts_with(r.lib.join("Duumu"))), "{files:?}");
+    assert!(!r.staging.join(format!("request-{id}")).exists(), "the staging folder goes after the import");
+    // streamrip's output stays with the request when it worked too (both pipes)
+    let output = d["output"]["text"].as_str().unwrap_or("");
+    assert!(output.contains("Downloaded 4 tracks") && output.contains("WARNING: a warning on stderr"), "{d}");
+    assert_eq!((d["output"]["ok"].as_bool(), d["output"]["url"].as_str()), (Some(true), Some(DEEZER_ALBUM)), "{d}");
+    // the run: the default command line, no terminal (the /dev/tty write and read failed at once instead of
+    // hanging), its own session, plain output, HOME the data folder
+    assert!(started.elapsed() < std::time::Duration::from_secs(60));
+    let calls = std::fs::read_to_string(r.fake.join("calls.log")).unwrap();
+    let run = calls.lines().find(|l| l.contains(" url ")).unwrap();
+    let folder = r.staging.join(format!("request-{id}/streamrip"));
+    assert!(run.contains(&format!("--folder {} --quality 2 --no-db --no-progress url {DEEZER_ALBUM}", folder.display())), "{run}");
+    assert!(calls.lines().all(|l| l.contains("stdin=/dev/null")), "{calls}");
+    let stat = std::fs::read_to_string(r.fake.join("stat")).unwrap();
+    let mine = std::fs::read_to_string("/proc/self/stat").unwrap();
+    assert_eq!(stat_field(&stat, 7), 0, "no controlling terminal: {stat}");
+    assert_ne!(stat_field(&stat, 6), stat_field(&mine, 6), "a session of its own: {stat}");
+    let env = std::fs::read_to_string(r.fake.join("env")).unwrap();
+    assert_eq!(env.trim(), format!("TERM=dumb NO_COLOR=1 COLUMNS=200 PYTHONUNBUFFERED=1 HOME={}", st.data_dir().display()));
+    // the config the run read: Deezer signed in, no downloads database, no progress bars, no update check
+    let text = std::fs::read_to_string(config_path(&st)).unwrap();
+    assert_eq!(toml_value(&text, "deezer", "arl"), "arl-cookie");
+    assert_eq!(toml_value(&text, "database", "downloads_enabled"), "false");
+    assert_eq!(toml_value(&text, "cli", "progress_bars"), "false");
+    assert_eq!(toml_value(&text, "cli", "no_update_check"), "true", "{text}");
+    r.ts.remove();
+}
+
+#[tokio::test]
+async fn a_run_hands_back_its_output_when_it_works_too() {
+    let Some(r) = rip_server("output").await else { return };
+    let st = r.ts.st.clone();
+    let out = r.ts.dir.join("out");
+    let got = download_run(&st, DEEZER_ALBUM, &out).await.unwrap();
+    assert_eq!(got.files.len(), 4);
+    for line in ["Downloading Illuminate EP by Duumu", "WARNING: a warning on stderr", "Downloaded 4 tracks"] {
+        assert!(got.log.contains(line), "{line} in {}", got.log);
+    }
+    r.ts.remove();
+}
+
+#[tokio::test]
+async fn a_staging_folder_that_cannot_be_made_names_mkdir_and_its_path() {
+    let Some(r) = rip_server("mkdir").await else { return };
+    let st = r.ts.st.clone();
+    let id = picked_album(&st, &r.cover);
+    let folder = r.staging.join(format!("request-{id}/streamrip"));
+    // what a read-only parent gives (as root, which may write anywhere, through the fault seam)
+    fsx::fault::fail(&r.staging, "mkdir", 13);
+    encore_requests::worker::step(st.clone(), id).await;
+    fsx::fault::clear(&r.staging);
+    let (status, message, d) = request_row(&st, id);
+    assert_eq!(status, "failed", "{message}");
+    assert!(message.contains(&format!("mkdir {}: Permission denied (os error 13)", folder.display())), "{message}");
+    let calls = std::fs::read_to_string(r.fake.join("calls.log")).unwrap_or_default();
+    assert!(!calls.contains(" url "), "streamrip never ran: {calls}");
+    assert!(log_text(&d).contains(&format!("mkdir {}", folder.display())), "{d}");
+    r.ts.remove();
+}
+
+#[tokio::test]
+async fn a_config_that_cannot_be_written_names_write_and_the_config() {
+    let Some(r) = rip_server("config").await else { return };
+    let st = r.ts.st.clone();
+    let id = picked_album(&st, &r.cover);
+    let config = config_path(&st);
+    fsx::fault::fail(config.parent().unwrap(), "write", 5);
+    encore_requests::worker::step(st.clone(), id).await;
+    fsx::fault::clear(config.parent().unwrap());
+    let (status, message, _) = request_row(&st, id);
+    assert_eq!(status, "failed", "{message}");
+    assert!(message.contains(&format!("config failed: write {}: Input/output error (os error 5)", config.display())), "{message}");
+    let calls = std::fs::read_to_string(r.fake.join("calls.log")).unwrap_or_default();
+    assert!(!calls.contains(" url "), "streamrip never ran: {calls}");
+    r.ts.remove();
+}
+
+#[tokio::test]
+async fn a_failed_run_keeps_streamrips_words_and_its_whole_output() {
+    let Some(r) = rip_server("fail").await else { return };
+    let st = r.ts.st.clone();
+    std::fs::write(r.fake.join("mode"), "fail").unwrap();
+    let id = picked_album(&st, &r.cover);
+    encore_requests::worker::step(st.clone(), id).await;
+    let (status, message, d) = request_row(&st, id);
+    assert_eq!(status, "failed", "{message}");
+    assert!(message.contains("NonStreamableError: This album is not available in your country"), "{message}");
+    // the whole output, both pipes, in the request's details (once: the log says where it is)
+    let output = d["output"]["text"].as_str().unwrap_or("").to_string();
+    // (the stand-in's write to /dev/tty is not in it: there is no terminal, and the shell said so)
+    assert!(!output.contains("Logging in to Deezer") && output.contains("/dev/tty: No such device or address"), "{output}");
+    for line in ["first line of the run, kept in the log", "Traceback (most recent call last):", "File \"rip/main.py\", line 120, in rip",
+                 "NonStreamableError: This album is not available in your country"] {
+        assert!(output.contains(line), "{line} in {output}");
+    }
+    assert_eq!((d["output"]["ok"].as_bool(), d["output"]["url"].as_str()), (Some(false), Some(DEEZER_ALBUM)), "{d}");
+    let log = log_text(&d);
+    assert!(log.contains(&format!("streamrip: {DEEZER_ALBUM} failed – its output is in the details")), "{log}");
+    assert!(!log.contains("first line of the run"), "the output is not in the log a second time: {log}");
+    assert_eq!(walkdir::WalkDir::new(&r.lib).into_iter().flatten().filter(|e| e.file_type().is_file()).count(), 0);
+    r.ts.remove();
+}
+
+/// EIO on the move into the library: the request waits for the storage with its files kept, no other source
+/// is tried and no attempt is counted; once the disk is back (Check again) the import alone runs and
+/// completes it.
+#[tokio::test]
+async fn eio_on_the_move_into_the_library_waits_with_the_files_kept_then_imports() {
+    let Some(r) = rip_server("eio").await else { return };
+    let st = r.ts.st.clone();
+    let id = picked_album(&st, &r.cover);
+    fsx::fault::fail(&r.lib, "*", 5);
+    encore_requests::worker::step(st.clone(), id).await;
+    let (status, message, d) = request_row(&st, id);
+    assert_eq!(status, "waiting", "{message}");
+    assert!(message.starts_with("Waiting: library storage error – import failed: "), "{message}");
+    assert!(message.contains("Input/output error (os error 5)"), "{message}");
+    assert_eq!(d["attempts"].as_i64().unwrap_or(0), 0, "{d}");
+    let kept = walkdir::WalkDir::new(r.staging.join(format!("request-{id}"))).into_iter().flatten().filter(|e| e.path().extension().is_some_and(|x| x == "flac")).count();
+    assert_eq!(kept, 4, "the downloaded files stay in staging");
+    let runs = || std::fs::read_to_string(r.fake.join("calls.log")).unwrap_or_default().lines().filter(|l| l.contains(" url ")).count();
+    assert_eq!(runs(), 1);
+    // still failing: the queue's look leaves it waiting, nothing downloaded again
+    encore_requests::worker::step(st.clone(), id).await;
+    assert_eq!(request_row(&st, id).0, "waiting");
+    assert_eq!(runs(), 1);
+    // the disk is back and an admin presses Check again: the import runs again from the kept files
+    fsx::fault::clear(&r.lib);
+    let health = encore_requests::worker::storage::check_now(&st, true).await;
+    assert_eq!(health["ok"], true, "{health}");
+    encore_requests::worker::step(st.clone(), id).await;
+    let (status, message, _) = request_row(&st, id);
+    assert_eq!(status, "completed", "{message}");
+    assert_eq!(runs(), 1, "never downloaded again");
+    assert_eq!(st.db.one("SELECT COUNT(*) n FROM tracks WHERE request_id=?", p![id]).unwrap().unwrap().i("n"), 4);
+    r.ts.remove();
+}
+
+/// streamrip's own disk error while it writes into the staging folder ("[Errno 5] Input/output error:
+/// '…/request-1/streamrip/…'") is the storage's problem, not Deezer's: the download step waits (no attempt
+/// counted, nothing else tried) and runs again once its turn comes and the disk is fine.
+#[tokio::test]
+async fn streamrips_own_disk_error_in_staging_waits_for_the_storage() {
+    let Some(r) = rip_server("errno").await else { return };
+    let st = r.ts.st.clone();
+    std::fs::write(r.fake.join("mode"), "errno").unwrap();
+    let id = picked_album(&st, &r.cover);
+    encore_requests::worker::step(st.clone(), id).await;
+    let (status, message, d) = request_row(&st, id);
+    assert_eq!((status.as_str(), d["wait"]["reason"].as_str()), ("waiting", Some("storage_download")), "{message}");
+    let file = r.staging.join(format!("request-{id}/streamrip/Duumu - Illuminate EP/01. Light 1.flac"));
+    assert!(message.starts_with(&format!("Waiting: storage error – download failed: write {}: Input/output error (os error 5). Next try at ", file.display())), "{message}");
+    assert_eq!(d["attempts"].as_i64().unwrap_or(0), 0, "{d}");
+    assert!(d["output"]["text"].as_str().unwrap_or("").contains("[Errno 5] Input/output error"), "{d}");
+    let runs = || std::fs::read_to_string(r.fake.join("calls.log")).unwrap_or_default().lines().filter(|l| l.contains(" url ")).count();
+    assert_eq!(runs(), 1);
+    // its turn, the disk fine again: the download runs again and the album is imported
+    std::fs::write(r.fake.join("mode"), "album").unwrap();
+    st.db.execute("UPDATE requests SET detail=json_set(detail, '$.wait.next_try_at', ?) WHERE id=?", p![encore_db::now() - 1.0, id]).unwrap();
+    encore_requests::worker::step(st.clone(), id).await;
+    let (status, message, d) = request_row(&st, id);
+    assert_eq!(status, "completed", "{message}");
+    assert_eq!(runs(), 2);
+    assert_eq!(d["attempts"].as_i64().unwrap_or(0), 0, "{d}");
+    r.ts.remove();
+}
+
+/// The real streamrip against Deezer, when asked to: `ENCORE_LIVE_DEEZER_URL` (an album or track link) and
+/// `ENCORE_LIVE_DEEZER_ARL` set, and the streamrip on PATH (or `ENCORE_LIVE_STREAMRIP_BIN`).
+/// `cargo test -p encore-api deezer_album_live -- --ignored --nocapture`
+#[tokio::test]
+#[ignore = "runs the real streamrip against Deezer: set ENCORE_LIVE_DEEZER_URL and ENCORE_LIVE_DEEZER_ARL"]
+async fn deezer_album_live() {
+    let (Ok(url), Ok(arl)) = (std::env::var("ENCORE_LIVE_DEEZER_URL"), std::env::var("ENCORE_LIVE_DEEZER_ARL")) else {
+        eprintln!("ENCORE_LIVE_DEEZER_URL and ENCORE_LIVE_DEEZER_ARL are not set: nothing to do");
+        return;
+    };
+    let (st, dir) = state("live");
+    let mut settings = json!({ "streamrip_enabled": true, "streamrip_deezer_arl": arl, "streamrip_quality": 2 });
+    if let Ok(bin) = std::env::var("ENCORE_LIVE_STREAMRIP_BIN") {
+        settings["streamrip_bin"] = json!(bin);
+    }
+    st.cfg().set_many(&settings);
+    let bin = binary(&st).expect("streamrip installed (PATH, /opt/tools/bin or ENCORE_LIVE_STREAMRIP_BIN)");
+    let c = check_config(&st, false).await.unwrap();
+    assert!(c.problem.is_none(), "{}", c.message());
+    let out = dir.join("out");
+    let started = std::time::Instant::now();
+    let res = download_run(&st, &url, &out).await;
+    match &res {
+        Ok(r) => eprintln!("{bin}: {} file(s) in {:?}\n{}", r.files.len(), started.elapsed(), r.log),
+        Err(e) => eprintln!("{bin}: {e:#}\n{}", run_log(e).unwrap_or("")),
+    }
+    let got = res.unwrap();
+    assert!(!got.files.is_empty());
+    let text = std::fs::read_to_string(config_path(&st)).unwrap();
+    assert_eq!(toml_value(&text, "cli", "progress_bars"), "false");
     let _ = std::fs::remove_dir_all(&dir);
 }

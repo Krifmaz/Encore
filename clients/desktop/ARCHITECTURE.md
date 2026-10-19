@@ -118,6 +118,11 @@ Asks (collected during `update`, applied by the app right after):
 - `ctx.play(tracks, index)` – Encore track rows (JSON as the server sends them) through the engine;
   `ctx.play_next(tracks)`, `ctx.enqueue(tracks)`.
 - `ctx.copy(text)` (pair it with a toast), `ctx.open_url(url)` (the browser).
+- `ctx.copy_text(text)` – the web's `copy_text`: copies, reads the clipboard back and toasts "Copied to
+  clipboard" or "Copy failed – select and copy manually". `ctx.details(title, text)` opens the details
+  dialog over everything: the text whole, wrapped and selectable (a read-only editor), with Close and
+  Copy. `widgets::details::copy_btn(msg)` is the small Copy button an error line carries. Use them for
+  any error or status a line cuts short or that someone may paste into a bug report.
 - `ctx.edit_config(|c| c.appearance.theme = "oled".into())` – saved, look re-applied.
 - `ctx.player_msg(player::Message::…)` – e.g. open the queue or Customize the bar.
 - `ctx.signed_in(user)` (login only), `ctx.sign_out()`, `ctx.refresh_session()` (after a profile change),
@@ -147,7 +152,8 @@ Pages never need it; player, link, desktop and tour have their own variants alre
   `(ctx.cursor, target)`; in `overlay` return `widgets::pop_menu(at, vec![MenuItem::new("Play next",
   Message::PlayNext(id)).icon(Icon::Plus), MenuItem::new("Delete", ..).danger()], Message::CloseMenu,
   ctx.size)`.
-- Toasts come from `ctx.toast*`; the app draws the stack bottom right for 4 s.
+- Toasts come from `ctx.toast*`; the app draws the stack bottom right for 4 s. An error toast stays
+  until it is clicked away and carries Copy (at most three stay; the same error is not shown twice).
 
 ## Navigating
 

@@ -46,6 +46,7 @@ import app.encore.android.data.repo.RequestRow
 import app.encore.android.features.requests.RequestItem
 import app.encore.android.features.requests.RequestRules
 import app.encore.android.features.requests.RequestSheets
+import app.encore.android.features.requests.StorageBanner
 import app.encore.android.features.requests.rememberRequestActions
 import app.encore.android.ui.Nav
 import app.encore.android.ui.Screen
@@ -92,7 +93,7 @@ private object AlbumModePref {
  * Requests (web-rs/src/pages/requests.rs, with the web Downloader's link box and bulk actions, download.rs): the list
  * with status filters, every row's buttons (common.rs), a tap for the whole message and log, a link box with the
  * album choice, Preview, Import as playlist and Exactly this link, Retry failed and Clear… beside Only mine (as the
- * web shows them), and for admins Activity in ⋯.
+ * web shows them), the storage banner while imports are paused, and for admins Activity in ⋯.
  */
 @OptIn(ExperimentalMaterial3Api::class, ExperimentalLayoutApi::class)
 @Composable
@@ -306,6 +307,8 @@ fun RequestsScreen(nav: Nav) {
                     }
                 }
             }
+            // imports paused because a folder can't be written: the banner over the list (admins: Check again)
+            item(key = "storage-banner") { StorageBanner(nav, admin) { reload() } }
             // a new request: paste a link (the web's Downloader) or search Discover
             item {
                 Row(Modifier.fillMaxWidth().padding(horizontal = Gutter, vertical = 6.dp), verticalAlignment = Alignment.CenterVertically) {

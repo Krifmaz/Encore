@@ -360,14 +360,14 @@ async fn tidal_tokens_save(State(st): State<AppState>, Admin(u): Admin, Json(b):
         return Err(err(400, streamrip::TIDAL_NO_TOKEN_MSG));
     }
     // from here on an error is the server's (config file not writable), not a bad paste
-    let v = streamrip::tidal_tokens_save(&st, &b.toml).await.map_err(|e| err(500, e.to_string()))?;
+    let v = streamrip::tidal_tokens_save(&st, &b.toml).await.map_err(|e| err(500, format!("{e:#}")))?;
     st.db.log("info", &format!("{} pasted Tidal tokens for streamrip", u.s("username")));
     Ok(Json(v))
 }
 
 /// "Sign out of Tidal": blanks every token in streamrip's config.
 async fn tidal_tokens_clear(State(st): State<AppState>, Admin(u): Admin) -> ApiResult<Json<Value>> {
-    let v = streamrip::tidal_sign_out(&st).await.map_err(|e| err(500, e.to_string()))?;
+    let v = streamrip::tidal_sign_out(&st).await.map_err(|e| err(500, format!("{e:#}")))?;
     st.db.log("info", &format!("{} signed streamrip out of Tidal", u.s("username")));
     Ok(Json(v))
 }
@@ -378,7 +378,7 @@ async fn streamrip_reset_config(State(st): State<AppState>, Admin(u): Admin) -> 
     if streamrip::binary(&st).is_none() {
         return Err(err(400, streamrip::NOT_INSTALLED_MSG));
     }
-    let c = streamrip::reset_config(&st).await.map_err(|e| err(500, e.to_string()))?;
+    let c = streamrip::reset_config(&st).await.map_err(|e| err(500, format!("{e:#}")))?;
     st.db.log("info", &format!("{} reset streamrip's config ({})", u.s("username"), c.message()));
     Ok(Json(c.json()))
 }
@@ -555,7 +555,8 @@ async fn test(State(st): State<AppState>, Admin(u): Admin, Path(service): Path<S
     match res {
         Ok(v) => Ok(Json(v)),
         Err(e) if e.to_string() == "__unknown" => Err(err(404, "Unknown service")),
-        Err(e) => Ok(Json(msg(false, e.to_string().chars().take(400).collect::<String>()))),
+        // the whole chain, never cut: "streamrip config path: config failed: start /config/tools/venv/bin/rip: …"
+        Err(e) => Ok(Json(msg(false, format!("{e:#}")))),
     }
 }
 
@@ -568,7 +569,7 @@ async fn downloads(State(st): State<AppState>, Admin(viewer): Admin) -> ApiResul
         }
     }
     // torrent / Usenet downloads Encore is waiting on
-    out["torrents"] = json!(st.db.query("SELECT id, artist, title, progress, message FROM requests WHERE source='torznab' AND status IN ('downloading','importing') ORDER BY id", p![])?);
+    out["torrents"] = json!(st.db.query("SELECT id, artist, title, progress, message FROM requests WHERE source='torznab' AND status IN ('downloading','importing','waiting') ORDER BY id", p![])?);
     enrich(&st, Some(&viewer), &mut out).await;
     Ok(Json(out))
 }

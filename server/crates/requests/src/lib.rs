@@ -52,6 +52,8 @@ pub struct Requests {
     pub youtube: ytauth::Locks,
     /// a Tidal sign-in for streamrip in progress
     pub tidal: sources::streamrip::TidalLogins,
+    /// whether the library and the staging folder can be written (imports pause while they can't)
+    pub storage: worker::Health,
 }
 
 impl Default for Requests {
@@ -64,6 +66,7 @@ impl Default for Requests {
             slskd: Default::default(),
             youtube: Default::default(),
             tidal: Default::default(),
+            storage: Default::default(),
         }
     }
 }

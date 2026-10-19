@@ -1,4 +1,5 @@
-//! /api/requests: ask for artists, albums, songs or any link; approve, retry, cancel, clear.
+//! /api/requests: ask for artists, albums, songs or any link; approve, retry, cancel, clear; import again a
+//! download whose import waited or failed; the storage health that pauses imports.
 use crate::enrich::enrich_now;
 use crate::auth::{self, Admin, User};
 use encore_db::{now, Row, RowExt};
@@ -19,18 +20,24 @@ use std::sync::LazyLock;
 use encore_requests::create::*;
 
 pub fn router() -> Router<AppState> {
-    Router::new()
+    let r = Router::new()
         .route("/api/requests", get(list).post(create))
         .route("/api/requests/from-link", post(from_link))
         .route("/api/requests/link", post(link))
         .route("/api/requests/clear", post(clear))
         .route("/api/requests/retry-failed", post(retry_failed))
         .route("/api/requests/events", get(crate::routes::request_events::events))
+        .route("/api/requests/storage", get(storage))
+        .route("/api/requests/storage/check", post(storage_check))
         .route("/api/requests/{rid}", delete(remove))
+        .route("/api/requests/{rid}/import-again", post(import_again))
         .route("/api/requests/{rid}/approve", post(approve))
         .route("/api/requests/{rid}/deny", post(deny))
         .route("/api/requests/{rid}/retry", post(retry))
-        .route("/api/requests/{rid}/cancel", post(cancel))
+        .route("/api/requests/{rid}/cancel", post(cancel));
+    #[cfg(feature = "fault-io")]
+    let r = r.route("/api/requests/storage/fault", post(fault_set).delete(fault_clear));
+    r
 }
 
 fn get_request(st: &AppState, id: i64) -> ApiResult<Value> {
@@ -56,7 +63,7 @@ async fn list(State(st): State<AppState>, User(u): User, Query(q): Query<ListQ>)
         params.push(json!(u.i("id")));
     }
     match q.status.as_deref() {
-        Some("active") => sql += " AND r.status IN ('pending','queued','searching','downloading','monitoring','importing')",
+        Some("active") => sql += " AND r.status IN ('pending','queued','searching','downloading','monitoring','importing','waiting')",
         Some(s) if !s.is_empty() => {
             sql += " AND r.status=?";
             params.push(json!(s));
@@ -69,19 +76,32 @@ async fn list(State(st): State<AppState>, User(u): User, Query(q): Query<ListQ>)
     // candidate lists) and the enrichment
     st.blocking(move |st| {
         let rows = st.db.read_now(|c| c.query(&sql, params))?;
-        let mut v = json!(list_rows(rows));
+        let mut v = json!(list_rows(rows, encore_config::perms::is_admin(&u)));
         enrich_now(st, Some(&u), &mut v);
         Ok(Json(v))
     }).await
 }
 
 /// The requests list's rows as the page shows them: the `detail` JSON read for the log, the length, the
-/// attempts, whether it was picked by hand and the candidate being downloaded.
-fn list_rows(rows: Vec<Row>) -> Vec<Value> {
+/// attempts, whether it was picked by hand, the candidate being downloaded, and what a waiting or failed
+/// import keeps ([`worker::storage::row_fields`]: `wait_reason`, `next_try_at`, `has_files`, `kept_path`,
+/// `error`, `output`). Other users than admins see no server folders: a wait for the storage in plain words.
+fn list_rows(rows: Vec<Row>, admin: bool) -> Vec<Value> {
     rows.into_iter().map(|mut r| {
         let d: Value = serde_json::from_str(&r.s("detail")).unwrap_or(json!({}));
         r.remove("detail");
-        r.insert("log".into(), d.get("log").cloned().unwrap_or(json!([])));
+        r.extend(worker::storage::row_fields(&r.s("status"), &d, admin));
+        let log = d.get("log").cloned().unwrap_or(json!([]));
+        if admin {
+            r.insert("log".into(), log);
+        } else {
+            if let Some(msg) = r.get("message").and_then(|v| v.as_str()).map(String::from) {
+                let m = worker::storage::plain_message(&r.s("status"), &msg, &d).unwrap_or_else(|| worker::storage::hide_folders(&msg));
+                r.insert("message".into(), json!(m));
+            }
+            let log: Vec<Value> = log.as_array().into_iter().flatten().map(|l| l.as_str().map(|s| json!(worker::storage::hide_folders(s))).unwrap_or(l.clone())).collect();
+            r.insert("log".into(), json!(log));
+        }
         r.insert("length".into(), d["length"].clone());
         r.insert("attempts".into(), json!(d["attempts"].as_u64().unwrap_or(1)));
         r.insert("picked".into(), json!(d["pick"].is_object()));
@@ -243,13 +263,16 @@ async fn retry_failed(State(st): State<AppState>, User(u): User, body: Option<Js
     Ok(Json(json!({ "retried": retried, "skipped": skipped, "why": why })))
 }
 
-/// Queue one finished request again (the per-row Retry and Retry failed share this).
+/// Queue one finished request again (the per-row Retry and Retry failed share this). A request whose
+/// downloaded files are kept (its import waited or failed) imports them again instead of downloading; a
+/// playlist's songs each the same way.
 fn retry_request(st: &AppState, u: &Row, rid: i64, r: &Value) -> ApiResult<()> {
-    let reset = "UPDATE requests SET status='queued', progress=0, message='Retrying', source=NULL, detail=?, updated_at=? WHERE id=?";
     if r["kind"] == "playlist" {
         for c in st.db.query("SELECT id FROM requests WHERE parent_id=? AND status IN ('failed','cancelled')", p![rid])? {
-            st.db.execute(reset, p!["{}", now(), c.i("id")])?;
-            encore_requests::events::emit(st, c.i("id"));
+            // a song that can't be queued again (it changed meanwhile) doesn't hold up the others
+            if let Ok(child) = get_request(st, c.i("id")) {
+                let _ = requeue(st, c.i("id"), &child);
+            }
         }
         return Ok(());
     }
@@ -264,6 +287,17 @@ fn retry_request(st: &AppState, u: &Row, rid: i64, r: &Value) -> ApiResult<()> {
     if status == "cancelled" && !admin && !(u.b("auto_approve") || st.cfg.bool("auto_approve")) {
         return Err(err(403, "Ask an admin to retry"));
     }
+    requeue(st, rid, r)
+}
+
+/// A finished request queued again: a failed one whose downloaded files are kept imports them (nothing is
+/// downloaded again), anything else starts over with what it asked for, its attempts and its log.
+fn requeue(st: &AppState, rid: i64, r: &Value) -> ApiResult<()> {
+    let status = r["status"].as_str().unwrap_or("");
+    if status == "failed" && worker::storage::has_files(&r["detail"]) {
+        return worker::storage::import_again(st, rid).map_err(|e| err(400, e));
+    }
+    let reset = "UPDATE requests SET status='queued', progress=0, message='Retrying', source=NULL, detail=?, updated_at=? WHERE id=?";
     let mut keep = json!({});
     for k in ["length", "isrc"] {
         if !r["detail"][k].is_null() {
@@ -274,6 +308,53 @@ fn retry_request(st: &AppState, u: &Row, rid: i64, r: &Value) -> ApiResult<()> {
     st.db.execute(reset, p![keep.to_string(), now(), rid])?;
     encore_requests::events::emit(st, rid);
     Ok(())
+}
+
+/// Import again (`POST /api/requests/{id}/import-again`, the request's admin or owner): a failed or waiting
+/// request whose downloaded files are still there imports them at the queue's next look, without
+/// downloading anything again or counting an attempt. → `{ok, status: "waiting"}`
+async fn import_again(State(st): State<AppState>, User(u): User, Path(rid): Path<i64>) -> ApiResult<Json<Value>> {
+    get_owned(&st, rid, &u)?;
+    worker::storage::import_again(&st, rid).map_err(|e| err(400, e))?;
+    st.db.log("info", &format!("{} asked to import request #{rid} again", u.s("username")));
+    Ok(Json(json!({ "ok": true, "status": "waiting" })))
+}
+
+/// `GET /api/requests/storage`: whether imports go on, for the banner on the Requests page. Admins get the
+/// folder, the operation and the error; everyone else whether imports are paused and the plain words.
+async fn storage(State(st): State<AppState>, User(u): User) -> ApiResult<Json<Value>> {
+    let admin = encore_config::perms::is_admin(&u);
+    st.blocking(move |st| Ok(Json(worker::storage::status(st, admin)))).await
+}
+
+/// `POST /api/requests/storage/check` (admins): Check again – every folder probed now; the answer is the new
+/// state, and waiting imports resume at once when it passes.
+async fn storage_check(State(st): State<AppState>, Admin(_): Admin) -> ApiResult<Json<Value>> {
+    Ok(Json(worker::storage::check_now(&st, true).await))
+}
+
+/// The fault seam for a live test run (`--features fault-io`, never a release build): `{prefix, op, errno}`
+/// makes `op` ("mkdir", "copy", "*" …) on a path under `prefix` fail with `errno`.
+#[cfg(feature = "fault-io")]
+async fn fault_set(Admin(_): Admin, Json(b): Json<Value>) -> ApiResult<Json<Value>> {
+    let prefix = b["prefix"].as_str().filter(|p| !p.is_empty()).ok_or_else(|| err(400, "prefix is required"))?;
+    encore_core::fsx::fault::fail(prefix, b["op"].as_str().unwrap_or("*"), b["errno"].as_i64().unwrap_or(5) as i32);
+    Ok(Json(fault_list()))
+}
+
+/// Clear the faults (`?prefix=` one prefix, else all).
+#[cfg(feature = "fault-io")]
+async fn fault_clear(Admin(_): Admin, Query(q): Query<std::collections::HashMap<String, String>>) -> ApiResult<Json<Value>> {
+    match q.get("prefix") {
+        Some(p) => encore_core::fsx::fault::clear(p),
+        None => encore_core::fsx::fault::clear_all(),
+    }
+    Ok(Json(fault_list()))
+}
+
+#[cfg(feature = "fault-io")]
+fn fault_list() -> Value {
+    json!({ "faults": encore_core::fsx::fault::list().into_iter().map(|(p, op, errno)| json!({ "prefix": p, "op": op, "errno": errno })).collect::<Vec<_>>() })
 }
 
 async fn cancel(State(st): State<AppState>, User(u): User, Path(rid): Path<i64>) -> ApiResult<Json<Value>> {
@@ -323,7 +404,8 @@ struct FilesQ {
     files: bool,
 }
 
-/// Remove a request from the list; files=true also deletes what it downloaded (admins only).
+/// Remove a request from the list; files=true also deletes what it downloaded (admins only). Encore's own
+/// staging folder of the request goes either way; files in a download client's folder only with files=true.
 async fn remove(State(st): State<AppState>, User(u): User, Path(rid): Path<i64>, Query(q): Query<FilesQ>) -> ApiResult<Json<Value>> {
     let r = get_owned(&st, rid, &u)?;
     if q.files && !encore_config::perms::is_admin(&u) {
@@ -333,6 +415,9 @@ async fn remove(State(st): State<AppState>, User(u): User, Path(rid): Path<i64>,
         worker::cancel(&st, rid).await;
     }
     let n = if q.files { delete_files(&st, &r) } else { 0 };
+    for i in family(&st, rid) {
+        worker::storage::remove_staging(&st, i);
+    }
     st.db.execute("DELETE FROM requests WHERE id=? OR parent_id=?", p![rid, rid])?;
     if n > 0 {
         st.db.log("info", &format!("{} deleted request #{rid} and {n} file(s)", u.s("username")));

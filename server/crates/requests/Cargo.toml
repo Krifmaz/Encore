@@ -41,8 +41,12 @@ tower = { workspace = true, optional = true }
 [features]
 # a stand-in slskd (an axum app called in-process) for other crates' tests: `Managed::set_target`
 test-support = ["dep:axum", "dep:tower"]
+# the fault seam of encore_core::fsx for a live test run (never a release build)
+fault-io = ["encore-core/fault-io"]
 
 [dev-dependencies]
+# the fault seam (a file operation on a path fails with a chosen errno): storage errors in the tests
+encore-core = { workspace = true, features = ["fault-io"] }
 # stand-ins for the download clients and services in the tests
 axum = { workspace = true }
 tower = { workspace = true }

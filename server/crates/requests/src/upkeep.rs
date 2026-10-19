@@ -9,7 +9,11 @@ pub fn cleanup(st: &impl Ctx) -> anyhow::Result<String> {
     let cutoff = now() - days as f64 * 86400.0;
     let n = st.db().one("SELECT COUNT(*) n FROM requests WHERE status IN ('completed','denied','cancelled') AND updated_at < ?", p![cutoff])?.map(|r| r.i("n")).unwrap_or(0);
     st.db().execute("DELETE FROM requests WHERE status IN ('completed','denied','cancelled') AND updated_at < ?", p![cutoff])?;
-    let active: std::collections::HashSet<String> = st.db().query("SELECT id FROM requests WHERE status IN ('queued','searching','downloading','monitoring','importing')", p![])?
+    // a request's staging folder stays while it runs or waits, and while it keeps downloaded files for Import
+    // again (a storage problem, a failed import, a link's files that could not be imported): those are never
+    // cleared here
+    let active: std::collections::HashSet<String> = st.db().query("SELECT id FROM requests WHERE status IN ('queued','searching','downloading','monitoring','importing','waiting')
+        OR (status IN ('failed','completed') AND json_extract(detail, '$.kept') IS NOT NULL)", p![])?
         .iter().map(|r| format!("request-{}", r.i("id"))).collect();
     let mut removed = 0;
     if let Ok(rd) = std::fs::read_dir(st.cfg().str("staging_path")) {
@@ -46,7 +50,7 @@ pub fn queue_lossy_upgrades(st: &impl Ctx, limit: usize) -> anyhow::Result<usize
                 continue;
             }
         }
-        if st.db().one("SELECT 1 FROM requests WHERE mbid=? AND status IN ('queued','searching','downloading','monitoring','importing','pending')", p![rg])?.is_some() {
+        if st.db().one("SELECT 1 FROM requests WHERE mbid=? AND status IN ('queued','searching','downloading','monitoring','importing','waiting','pending')", p![rg])?.is_some() {
             continue;
         }
         st.db().execute("INSERT OR REPLACE INTO sync_state VALUES (0,?,?)", p![scope, t.to_string()])?;

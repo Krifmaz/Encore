@@ -1005,7 +1005,7 @@ async fn a_request_waits_for_soulseek_and_searches_once_it_is_back() {
     let id = request(&st, "Song", "queued", json!({ "attempts": 2 }));
     encore_requests::worker::step(st.clone(), id).await;
     let (status, message, source, d, at) = row(&st, id);
-    assert_eq!((status.as_str(), source.as_str()), ("queued", "slskd"));
+    assert_eq!((status.as_str(), source.as_str()), ("waiting", "slskd"));
     assert!(message.starts_with("Waiting for Soulseek – next attempt at "), "{message}");
     assert_eq!(d["attempts"], 2);
     assert_eq!(d["sources"], json!(["slskd"]));
@@ -1014,7 +1014,7 @@ async fn a_request_waits_for_soulseek_and_searches_once_it_is_back() {
     tokio::time::sleep(Duration::from_millis(1)).await; // (the clock time in the message follows the wall clock, not paused time)
     encore_requests::worker::step(st.clone(), id).await;
     let again = row(&st, id);
-    assert_eq!((again.0.as_str(), again.1.as_str(), again.3["attempts"].as_u64()), ("queued", message.as_str(), Some(2)));
+    assert_eq!((again.0.as_str(), again.1.as_str(), again.3["attempts"].as_u64()), ("waiting", message.as_str(), Some(2)));
     assert_eq!(again.4, at, "nothing written while nothing changed");
     assert_eq!(session::status(&st)["searches_waiting"], 1);
     assert!(f.lock().unwrap().posts.is_empty());
@@ -1050,7 +1050,7 @@ async fn a_session_that_drops_during_the_search_parks_the_request() {
     server_closes(&f, "Remote connection closed");
     tokio::time::timeout(Duration::from_secs(30), step).await.unwrap().unwrap();
     let (status, message, source, d, _) = row(&st, id);
-    assert_eq!((status.as_str(), source.as_str()), ("queued", "slskd"), "{message}");
+    assert_eq!((status.as_str(), source.as_str()), ("waiting", "slskd"), "{message}");
     assert!(message.starts_with("Waiting for Soulseek – "), "{message}");
     assert_eq!(d["sources"], json!(["slskd", "ytdlp"]), "yt-dlp not tried");
     assert_eq!(d["attempts"], 1);
@@ -1074,7 +1074,7 @@ async fn requests_wait_while_slskd_does_not_answer() {
     let id = request(&st, "Song", "queued", json!({}));
     encore_requests::worker::step(st.clone(), id).await;
     let (status, message, _, d, _) = row(&st, id);
-    assert_eq!(status, "queued", "{message}");
+    assert_eq!(status, "waiting", "{message}");
     assert!(message.starts_with("Waiting for Soulseek – "), "{message}");
     assert_eq!(d["sources"], json!(["slskd", "ytdlp"]));
     assert!(slskd::search_now(&st, "x").await.unwrap_err().is::<slskd::NotConnected>());
@@ -1097,11 +1097,11 @@ async fn requests_wait_for_the_vpn_and_skip_a_blocked_engine() {
     let id = request(&st, "Song", "queued", json!({}));
     encore_requests::worker::step(st.clone(), id).await;
     let (status, message, ..) = row(&st, id);
-    assert_eq!((status.as_str(), message.as_str()), ("queued", "Waiting for Soulseek – waiting for the VPN"));
+    assert_eq!((status.as_str(), message.as_str()), ("waiting", "Waiting for Soulseek – waiting for the VPN"));
     st.requests.slskd.set_state_for_tests("crashed");
     encore_requests::worker::step(st.clone(), id).await;
     let (status, message, ..) = row(&st, id);
-    assert_eq!((status.as_str(), message.as_str()), ("queued", "Waiting for Soulseek – the Soulseek engine stopped and is started again shortly"));
+    assert_eq!((status.as_str(), message.as_str()), ("waiting", "Waiting for Soulseek – the Soulseek engine stopped and is started again shortly"));
     st.requests.slskd.set_state_for_tests("blocked");
     let task = tokio::spawn(encore_requests::worker::step(st.clone(), id));
     until("yt-dlp tried", Duration::from_secs(5), || row(&st, id).2 == "ytdlp").await;
@@ -1221,7 +1221,7 @@ async fn a_transfer_that_fails_while_disconnected_waits_for_soulseek() {
     let id = downloading(&st, &f, &["u1", "u2"], "Completed, Errored", json!(["ytdlp"]));
     encore_requests::worker::step(st.clone(), id).await;
     let (status, message, source, d, _) = row(&st, id);
-    assert_eq!((status.as_str(), source.as_str()), ("queued", "slskd"), "{message}");
+    assert_eq!((status.as_str(), source.as_str()), ("waiting", "slskd"), "{message}");
     assert!(message.starts_with("Waiting for Soulseek – next attempt at "), "{message}");
     assert_eq!(d["sources"], json!(["slskd", "ytdlp"]), "yt-dlp not tried");
     assert!(tried(&d).is_empty(), "u1 not counted as failed: {d}");
@@ -1240,7 +1240,7 @@ async fn a_transfer_that_fails_while_disconnected_waits_for_soulseek() {
     let id = downloading(&st, &f, &["u1", "u2"], "Completed, Errored", json!(["ytdlp"]));
     encore_requests::worker::step(st.clone(), id).await;
     let (status, message, source, d, _) = row(&st, id);
-    assert_eq!((status.as_str(), source.as_str()), ("queued", "slskd"), "{message}");
+    assert_eq!((status.as_str(), source.as_str()), ("waiting", "slskd"), "{message}");
     assert!(message.starts_with("Waiting for Soulseek – "), "{message}");
     assert!(tried(&d).is_empty(), "u1 not counted as failed: {d}");
     assert_eq!(d["sources"], json!(["slskd", "ytdlp"]));
@@ -1259,7 +1259,7 @@ async fn a_picked_soulseek_file_waits_for_the_session() {
     let id = request(&st, "Song", "queued", json!({ "pick": { "source": "slskd", "payload": cand("u1"), "title": "01 u1.flac" } }));
     encore_requests::worker::step(st.clone(), id).await;
     let (status, message, source, d, _) = row(&st, id);
-    assert_eq!((status.as_str(), source.as_str()), ("queued", "slskd"), "{message}");
+    assert_eq!((status.as_str(), source.as_str()), ("waiting", "slskd"), "{message}");
     assert!(message.starts_with("Waiting for Soulseek – next attempt at "), "{message}");
     assert!(d["pick"].is_object() && d["soulseek_wait"]["since"].is_number(), "{d}");
     f.lock().unwrap().login = Login::Works;
@@ -1352,7 +1352,7 @@ async fn retry_failed_of_200_requests_searches_one_at_a_time() {
     assert_eq!((code, body["retried"].as_u64()), (StatusCode::OK, Some(200)), "{body}");
     assert!(f.lock().unwrap().posts.is_empty(), "retrying only queues them");
     let worker = tokio::spawn(encore_requests::worker::run(st.clone()));
-    let active = || st.db.one("SELECT COUNT(*) n FROM requests WHERE status IN ('queued','searching','downloading','monitoring','importing')", p![]).unwrap().unwrap().i("n");
+    let active = || st.db.one("SELECT COUNT(*) n FROM requests WHERE status IN ('queued','searching','downloading','monitoring','importing','waiting')", p![]).unwrap().unwrap().i("n");
     until("all 200 searched", Duration::from_secs(8 * 3600), || active() == 0).await;
     worker.abort();
     let f = f.lock().unwrap();

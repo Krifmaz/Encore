@@ -96,6 +96,7 @@ pub fn live_badge(status: &str, label: &str) -> String {
         "searching" => ("info", "Searching"),
         "monitoring" | "downloading" => ("accent", "Downloading"),
         "importing" => ("accent", "Importing"),
+        "waiting" => ("warn", "Waiting"),
         "completed" => ("ok", "In library"),
         "failed" => ("err", "Failed"),
         "denied" => ("err", "Denied"),

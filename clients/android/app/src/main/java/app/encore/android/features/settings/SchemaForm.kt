@@ -22,6 +22,7 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.KeyboardOptions
+import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.material3.Checkbox
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.DropdownMenu
@@ -59,6 +60,7 @@ import androidx.compose.ui.text.input.VisualTransformation
 import androidx.compose.ui.text.withStyle
 import androidx.compose.ui.unit.dp
 import app.encore.android.R
+import app.encore.android.ui.components.CopyIconButton
 import app.encore.android.ui.components.EncoreButton
 import app.encore.android.ui.components.SmallButton
 import app.encore.android.ui.components.Toasts
@@ -535,7 +537,13 @@ private fun ResultLines(testing: Boolean, lines: List<ResultLine>) {
         ) {
             Icon(painterResource(if (l.ok) R.drawable.ic_check else R.drawable.ic_close), contentDescription = null, tint = tone, modifier = Modifier.size(16.dp))
             Spacer(Modifier.width(8.dp))
-            Text(l.message, style = MaterialTheme.typography.bodySmall)
+            // a failed test's whole text is selectable and has Copy (settings::test_result)
+            if (l.ok) {
+                Text(l.message, style = MaterialTheme.typography.bodySmall)
+            } else {
+                SelectionContainer(Modifier.weight(1f)) { Text(l.message, style = MaterialTheme.typography.bodySmall) }
+                CopyIconButton(l.message, size = 24.dp)
+            }
         }
     }
 }

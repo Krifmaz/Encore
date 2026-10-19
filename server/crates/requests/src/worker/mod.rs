@@ -1,14 +1,16 @@
 //! The request worker, stage by stage: `queue` gives every active request a task, `pick` decides where
 //! it comes from, `fetch` runs the sources (streamrip, Soulseek, Prowlarr → the download clients,
 //! YouTube), `verify` holds what a download is checked against, and `import` tags and imports the files
-//! and finishes the request.
+//! and finishes the request. [`storage`] keeps a download whose import hits a storage error and runs its
+//! import again later (the `waiting` status), with the health check that pauses imports.
 mod fetch;
 mod import;
 mod pick;
 mod queue;
+pub mod storage;
 mod verify;
 
-pub use queue::{cancel, run, step};
+pub use queue::{cancel, recover, run, step};
 
 use crate::sources::{slskd, streamrip, torznab, ytdlp};
 use crate::{notify, Ctx};
@@ -25,8 +27,13 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, LazyLock, Mutex};
 use verify::*;
 
-/// The states of a request the worker is busy with.
-pub const ACTIVE: [&str; 5] = ["queued", "searching", "downloading", "monitoring", "importing"];
+/// The states of a request the worker is busy with. `waiting`: the request waits for something outside it
+/// (`detail.wait.reason`: "soulseek" for the Soulseek session, "storage_import" for its import after a
+/// storage error, its files kept, "storage_download" for the staging folder); the worker looks at it again
+/// when its turn comes (`detail.wait.next_try_at`) and never starts it as a new download.
+pub const ACTIVE: [&str; 6] = ["queued", "searching", "downloading", "monitoring", "importing", "waiting"];
+
+pub use storage::Health;
 
 static RIP_LINK: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"qobuz\.com|tidal\.com|deezer\.com").unwrap());
 

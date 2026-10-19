@@ -11,6 +11,7 @@ use crate::link;
 use crate::pages::{self, Ctx, Effect, El, Page};
 use crate::player;
 use crate::theme::{self, Palette};
+use crate::widgets::details::{self, Details};
 use crate::widgets::{self, Covers, Toast, ToastKind};
 use iced::widget::{column, container, operation, row, scrollable, stack};
 use iced::{window, Length, Point, Size, Subscription, Task};
@@ -62,6 +63,12 @@ pub enum Message {
     Shell(ShellKind, Result<Value, ApiError>),
     Cover(String, Option<Vec<u8>>),
     DismissToast(u64),
+    /// Copy an error toast's text.
+    CopyToast(u64),
+    /// The details dialog (an error or a request in full, with Copy).
+    Details(details::Msg),
+    /// A copy was checked against the clipboard: whether it took.
+    Copied(bool),
     WindowOpened(window::Id),
     CloseRequested(window::Id),
     WindowClosed(window::Id),
@@ -106,6 +113,8 @@ pub struct App {
     pub history: Vec<Page>,
     pub toasts: Vec<Toast>,
     next_toast: u64,
+    /// The details dialog when one is open (over the page and its own dialogs).
+    pub details: Option<Details>,
     pub covers: Covers,
     pub player: player::State,
     pub link: link::State,
@@ -193,6 +202,7 @@ impl App {
             history: Vec::new(),
             toasts: Vec::new(),
             next_toast: 1,
+            details: None,
             covers: Covers::new(),
             player: player::State::default(),
             link: link::State::default(),
@@ -272,17 +282,35 @@ impl App {
     }
 
     pub fn toast(&mut self, text: impl Into<String>, kind: ToastKind) {
+        let text = text.into();
+        // an error stays until it is dismissed: the same error again (a page that polls) does not
+        // pile up a second copy
+        if kind == ToastKind::Err && self.toasts.iter().any(|t| t.stays() && t.text == text) {
+            return;
+        }
         let id = self.next_toast;
         self.next_toast += 1;
         self.toasts.push(Toast {
             id,
-            text: text.into(),
+            text,
             kind,
             at: std::time::Instant::now(),
         });
+        // at most three errors stay: a new one pushes out the oldest
+        while self.toasts.iter().filter(|t| t.stays()).count() > Toast::STAYING {
+            if let Some(i) = self.toasts.iter().position(Toast::stays) {
+                self.toasts.remove(i);
+            }
+        }
         if self.toasts.len() > 5 {
             self.toasts.remove(0);
         }
+    }
+
+    /// The web's `copy_text`: write to the clipboard, read it back, and say whether it took.
+    fn copy_checked(text: String) -> Task<Message> {
+        iced::clipboard::write::<Message>(text.clone())
+            .chain(iced::clipboard::read().map(move |got| Message::Copied(details::copied(&text, got.as_deref()))))
     }
 
     /// Play Encore track rows through the engine.
@@ -368,6 +396,7 @@ impl App {
             }
         }
         self.page = page.clone();
+        self.details = None;
         let mut ctx = ctx!(self);
         let task = match page {
             Page::Login => pages::login::open(&mut self.login, &mut ctx).map(Message::Login),
@@ -481,6 +510,8 @@ impl App {
                 Effect::PlayNext(t) => tasks.push(self.queue(t, true)),
                 Effect::Enqueue(t) => tasks.push(self.queue(t, false)),
                 Effect::Clipboard(s) => tasks.push(iced::clipboard::write(s)),
+                Effect::CopyText(s) => tasks.push(Self::copy_checked(s)),
+                Effect::Details { title, text } => self.details = Some(Details::new(title, text)),
                 Effect::OpenUrl(u) => {
                     if let Err(e) = open::that_detached(&u) {
                         self.toast(format!("Could not open the browser: {e}"), ToastKind::Err);
@@ -599,6 +630,28 @@ impl App {
             }
             Message::DismissToast(id) => {
                 self.toasts.retain(|t| t.id != id);
+                Task::none()
+            }
+            Message::CopyToast(id) => match self.toasts.iter().find(|t| t.id == id) {
+                Some(t) => Self::copy_checked(t.text.clone()),
+                None => Task::none(),
+            },
+            Message::Details(m) => {
+                if matches!(m, details::Msg::Close) {
+                    self.details = None;
+                    return Task::none();
+                }
+                match self.details.as_mut().and_then(|d| d.update(m)) {
+                    Some(text) => Self::copy_checked(text),
+                    None => Task::none(),
+                }
+            }
+            Message::Copied(ok) => {
+                if ok {
+                    self.toast(details::COPIED, ToastKind::Ok);
+                } else {
+                    self.toast(details::COPY_FAILED, ToastKind::Err);
+                }
                 Task::none()
             }
             Message::WindowOpened(id) => {
@@ -784,8 +837,11 @@ impl App {
         if let Some(o) = self.overlay_view(&ctx) {
             layers = layers.push(o);
         }
+        if let Some(d) = &self.details {
+            layers = layers.push(details::view(d).map(Message::Details));
+        }
         if !self.toasts.is_empty() {
-            layers = layers.push(widgets::toast::view(&self.toasts, Message::DismissToast));
+            layers = layers.push(widgets::toast::view(&self.toasts, Message::DismissToast, Message::CopyToast));
         }
         layers.into()
     }
@@ -834,6 +890,16 @@ impl App {
         });
         if self.tour.is_some() {
             subs.push(crate::tour::subscription().map(Message::Tour));
+        }
+        if self.details.is_some() {
+            // Escape closes the details dialog
+            subs.push(iced::event::listen_with(|e, _, _| match e {
+                iced::Event::Keyboard(iced::keyboard::Event::KeyPressed {
+                    key: iced::keyboard::Key::Named(iced::keyboard::key::Named::Escape),
+                    ..
+                }) => Some(Message::Details(details::Msg::Close)),
+                _ => None,
+            }));
         }
         Subscription::batch(subs)
     }

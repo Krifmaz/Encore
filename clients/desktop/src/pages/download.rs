@@ -166,6 +166,8 @@ pub enum Message {
     Level(Level),
     ClearSlskd,
     ClearedSlskd(Result<Value, ApiError>),
+    /// A line in full in the details dialog, with Copy: `(title, text)`.
+    ShowText(String, String),
 }
 
 /// The 30 most recent url / track / album requests of this user.
@@ -468,6 +470,7 @@ pub fn update(state: &mut State, msg: Message, ctx: &mut Ctx) -> Task<Message> {
             }
         }
         Message::Level(l) => state.activity.level = l.0.to_string(),
+        Message::ShowText(title, text) => ctx.details(title, text),
         Message::ClearSlskd => {
             if state.activity.clearing {
                 return Task::none();
@@ -611,6 +614,7 @@ pub fn view<'a>(state: &'a State, ctx: &Ctx<'a>) -> El<'a, Message> {
             .center_x(Length::Fill)
             .into(),
     };
+    let banner = request_list::storage_banner(ctx, &state.list).map(|b| b.map(Message::List));
     let mut page = column![
         column![
             h1("Downloader"),
@@ -621,14 +625,15 @@ pub fn view<'a>(state: &'a State, ctx: &Ctx<'a>) -> El<'a, Message> {
         ]
         .spacing(6),
         card(form).width(Length::Fill),
-        column![
-            section_head("Recent downloads", Some(recent_actions)),
-            card_flat(list).width(Length::Fill),
-        ]
-        .spacing(10),
     ]
     .spacing(22)
     .width(Length::Fill);
+    // imports paused: said above the downloads it holds back
+    let mut recent = column![section_head("Recent downloads", Some(recent_actions))].spacing(10);
+    if let Some(b) = banner {
+        recent = recent.push(b);
+    }
+    page = page.push(recent.push(card_flat(list).width(Length::Fill)));
     if state.admin {
         page = page.push(activity_view(state, ctx));
     }
@@ -673,7 +678,15 @@ fn activity_view<'a>(state: &'a State, ctx: &Ctx<'a>) -> El<'a, Message> {
                         .font(theme::semibold())]
                     .spacing(4);
                     if fmt::truthy(q, "message") {
-                        lines = lines.push(small_muted(fmt::s(q, "message")));
+                        // a click opens the whole message with Copy
+                        lines = lines.push(
+                            iced::widget::mouse_area(small_muted(fmt::s(q, "message")))
+                                .on_press(Message::ShowText(
+                                    format!("{} – {}", fmt::s(q, "artist"), fmt::s(q, "title")),
+                                    fmt::s(q, "message"),
+                                ))
+                                .interaction(iced::mouse::Interaction::Pointer),
+                        );
                     }
                     lines = lines.push(
                         container(
@@ -720,8 +733,10 @@ fn activity_view<'a>(state: &'a State, ctx: &Ctx<'a>) -> El<'a, Message> {
                         _ => Badge::Plain,
                     };
                     let ts = fmt::f(l, "ts");
+                    // a click opens the line in full with Copy
+                    let full = format!("{} · {}\n{}", level, fmt::stamp(ts), fmt::s(l, "message"));
                     col = col.push(column![
-                        container(
+                        iced::widget::mouse_area(container(
                             row![
                                 container(badge(level, kind)).width(78),
                                 widgets::t(fmt::s(l, "message")).size(12.5).width(Length::Fill),
@@ -737,7 +752,9 @@ fn activity_view<'a>(state: &'a State, ctx: &Ctx<'a>) -> El<'a, Message> {
                             .spacing(12)
                             .align_y(Alignment::Center)
                         )
-                        .padding([8, 16]),
+                        .padding([8, 16]))
+                        .on_press(Message::ShowText("Log entry".into(), full))
+                        .interaction(iced::mouse::Interaction::Pointer),
                         widgets::divider(),
                     ]);
                 }

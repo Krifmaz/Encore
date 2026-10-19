@@ -6,7 +6,7 @@
 
 use super::fields::{self, Card, Field};
 use super::{autodownload, blocked, contribute, tasks, tools, Section};
-use super::{env_locked, help, input, input_locked, is_masked, link_muted, result_line, select_table, switch_maybe, vs};
+use super::{env_locked, help, input, input_locked, is_masked, link_muted, result_line_copy, select_table, switch_maybe, vs};
 use crate::api::ApiError;
 use crate::fmt;
 use crate::pages::{Ctx, El};
@@ -78,6 +78,8 @@ pub enum Message {
     ApiKey(Result<Value, ApiError>),
     ShowKey(bool),
     CopyKey,
+    /// Copy a failed test's words.
+    CopyText(String),
     AskRegen,
     Regen,
     Regenerated(Result<Value, ApiError>),
@@ -438,6 +440,7 @@ pub fn update(state: &mut State, msg: Message, ctx: &mut Ctx) -> Task<Message> {
         Message::ApiKey(Ok(r)) => state.api_key = Some(fmt::s(&r, "api_key")),
         Message::ApiKey(Err(_)) => state.api_key = None,
         Message::ShowKey(on) => state.key_shown = on,
+        Message::CopyText(text) => ctx.copy_text(text),
         Message::CopyKey => {
             if let Some(k) = &state.api_key {
                 ctx.copy(k.clone());
@@ -645,7 +648,7 @@ fn card_view<'a>(state: &'a State, values: &'a Value, card: &'static Card, ctx: 
     if open {
         if let Some(lines) = state.flash.get(card.id) {
             for (ok, m) in lines {
-                body = body.push(result_line(*ok, m.as_str()));
+                body = body.push(result_line_copy(*ok, m, Message::CopyText));
             }
         }
         if card.id == "youtube" {
@@ -659,6 +662,7 @@ fn card_view<'a>(state: &'a State, values: &'a Value, card: &'static Card, ctx: 
                     &state.tools,
                     grid(state, values, &vpn, reveal),
                     (!state.tools.vpn_testing()).then_some(Message::Tools(tools::Message::VpnTest)),
+                    Message::CopyText,
                 ));
             }
             body = body.push(tools::soulseek_block(&state.tools).map(Message::Tools));

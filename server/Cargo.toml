@@ -95,6 +95,11 @@ tokio = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
 
+[features]
+# a server whose file operations can be made to fail (encore_core::fsx::fault): `cargo run --features
+# fault-io` with ENCORE_FAULT_IO="/music:mkdir:5" or POST /api/requests/storage/fault. Never a release build.
+fault-io = ["encore-api/fault-io"]
+
 [dev-dependencies]
 # tests/ and benches/: the server through its router, on the TestServer helper
 encore-api = { workspace = true, features = ["test-support"] }

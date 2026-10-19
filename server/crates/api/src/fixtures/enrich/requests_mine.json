@@ -12,12 +12,17 @@
     "candidate": null,
     "cover_url": null,
     "created_at": 1792281081.6542645,
+    "error": null,
+    "has_files": false,
     "id": 4,
+    "kept_path": null,
     "kind": "track",
     "length": null,
     "log": [],
     "mbid": null,
     "message": "Already in library",
+    "next_try_at": null,
+    "output": null,
     "parent_id": null,
     "picked": false,
     "progress": 100.0,
@@ -28,6 +33,7 @@
     "url": null,
     "user_id": 1,
     "username": "admin",
+    "wait_reason": null,
     "year": null
   },
   {
@@ -43,7 +49,10 @@
     "candidate": null,
     "cover_url": null,
     "created_at": 1792280084.939732,
+    "error": null,
+    "has_files": false,
     "id": 3,
+    "kept_path": null,
     "kind": "track",
     "length": null,
     "log": [
@@ -51,6 +60,8 @@
     ],
     "mbid": null,
     "message": "All sources exhausted (ytdlp: no match on YouTube)",
+    "next_try_at": null,
+    "output": null,
     "parent_id": null,
     "picked": false,
     "progress": 0.0,
@@ -61,6 +72,7 @@
     "url": null,
     "user_id": 1,
     "username": "admin",
+    "wait_reason": null,
     "year": null
   },
   {
@@ -76,7 +88,10 @@
     "candidate": null,
     "cover_url": null,
     "created_at": 1792280084.932336,
+    "error": null,
+    "has_files": false,
     "id": 2,
+    "kept_path": null,
     "kind": "track",
     "length": null,
     "log": [
@@ -84,6 +99,8 @@
     ],
     "mbid": null,
     "message": "All sources exhausted (ytdlp: no match on YouTube)",
+    "next_try_at": null,
+    "output": null,
     "parent_id": null,
     "picked": false,
     "progress": 0.0,
@@ -94,6 +111,7 @@
     "url": null,
     "user_id": 1,
     "username": "admin",
+    "wait_reason": null,
     "year": null
   },
   {
@@ -109,7 +127,10 @@
     "candidate": null,
     "cover_url": null,
     "created_at": 1792280084.9249752,
+    "error": null,
+    "has_files": false,
     "id": 1,
+    "kept_path": null,
     "kind": "track",
     "length": null,
     "log": [
@@ -117,6 +138,8 @@
     ],
     "mbid": null,
     "message": "All sources exhausted (ytdlp: no match on YouTube)",
+    "next_try_at": null,
+    "output": null,
     "parent_id": null,
     "picked": false,
     "progress": 0.0,
@@ -127,6 +150,7 @@
     "url": null,
     "user_id": 1,
     "username": "admin",
+    "wait_reason": null,
     "year": null
   }
 ]

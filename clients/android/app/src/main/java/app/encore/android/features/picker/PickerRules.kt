@@ -38,6 +38,9 @@ object PickerRules {
     /** While "Search again" runs, the kept rows stay and this line shows. */
     fun searchingAgainText(name: String): String = "Searching $name again…"
 
+    /** What Copy takes from a source's error (picker.rs): "Torrents & Usenet: <the whole error>". */
+    fun errorCopy(name: String, message: String): String = "$name: $message"
+
     /**
      * "Found at 14:02" for a kept answer: the server's own words when it sent them (the same clock as its "next attempt
      * at 14:20"), else made here from `cached_at`: today, yesterday, or the day.

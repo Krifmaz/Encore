@@ -2,6 +2,11 @@
 //! `request_row`, `bind_request_actions`, `clear_menu`, `retry_failed`): the rows with their
 //! action buttons, the ⋯ menu, the Clear menu, the picker, and the requests they send. A page
 //! holds a [`List`], routes `Msg` here and draws [`view`] and [`overlay`]. Package C owns this file.
+//!
+//! Also what a request keeps when the library can't be written (servers since 0.29): the
+//! `waiting` status, Import again for a request whose downloaded files are kept, the storage
+//! banner ([`storage_banner`], `GET /api/requests/storage`) with Check again for admins, and a
+//! request's details in full with Copy ([`request_text`]).
 
 use super::catalog::status_badge;
 use super::{
@@ -21,12 +26,197 @@ pub fn is_active(status: &str) -> bool {
     matches!(status, "searching" | "downloading" | "importing" | "monitoring")
 }
 
-/// Statuses the Cancel button applies to.
+/// Statuses the Cancel button applies to (the server's ACTIVE list and pending).
 pub fn can_cancel(status: &str) -> bool {
     matches!(
         status,
-        "pending" | "queued" | "searching" | "downloading" | "monitoring" | "importing"
+        "pending" | "queued" | "searching" | "downloading" | "monitoring" | "importing" | "waiting"
     )
+}
+
+/// Import again (`POST /api/requests/{id}/import-again`): a failed or waiting request whose
+/// downloaded files are kept (or a link's request that kept the files it could not import)
+/// imports them without downloading anything again. It takes Retry's place on a failed row.
+pub fn can_import_again(r: &Value) -> bool {
+    fmt::truthy(r, "has_files") && matches!(r["status"].as_str(), Some("failed" | "waiting" | "completed"))
+}
+
+/// What Cancel and Remove from list say first when a request keeps downloaded files (the web's
+/// words): they go with it, and Import again is gone.
+pub const KEPT_FILES_LOST: &str = "Its downloaded files have not been imported yet and can't be imported after this.";
+
+/// The candidate being fetched, as the web's details say it: "from alice: Illuminate EP (FLAC,
+/// 4 files)".
+pub fn candidate_line(c: &Value) -> String {
+    if !c.is_object() || (!fmt::truthy(c, "username") && !fmt::truthy(c, "directory")) {
+        return String::new();
+    }
+    let mut extra = vec![];
+    if fmt::truthy(c, "format") {
+        extra.push(fmt::s(c, "format").to_uppercase());
+    }
+    let n = fmt::i(c, "files");
+    if n > 0 {
+        extra.push(format!("{n} file{}", if n == 1 { "" } else { "s" }));
+    }
+    let mut what = fmt::s(c, "directory");
+    if !extra.is_empty() {
+        what = format!("{what} ({})", extra.join(", ")).trim().to_string();
+    }
+    if fmt::truthy(c, "username") {
+        format!("from {}: {what}", fmt::s(c, "username"))
+    } else {
+        what
+    }
+}
+
+/// What a request asked for in one line, the details dialog's title (the web's `request_what`):
+/// "Illuminate EP – Duumu", "Duumu – full discography", the link.
+pub fn request_what(r: &Value) -> String {
+    let kind = fmt::s(r, "kind");
+    let title = match kind.as_str() {
+        "album" => or(r, "title", "album"),
+        "url" => or(r, "title", "url"),
+        "artist" => String::new(),
+        _ => fmt::s(r, "title"),
+    };
+    let artist = fmt::s(r, "artist");
+    match (title.is_empty(), artist.is_empty()) {
+        (false, false) => format!("{title} – {artist}"),
+        (false, true) => title,
+        (true, false) if kind == "artist" => format!("{artist} – full discography"),
+        (true, false) => artist,
+        _ => String::new(),
+    }
+}
+
+/// The words for what a waiting request waits for (`wait_reason`), as the web says them.
+pub fn wait_words(reason: &str) -> &'static str {
+    match reason {
+        "soulseek" => "Soulseek isn't connected yet",
+        "storage_import" => "the downloaded files are kept and the import waits for the storage",
+        "storage_download" => "the download waits for the staging folder",
+        _ => "",
+    }
+}
+
+/// A request in plain text for the details dialog and its Copy, laid out as the web's
+/// `request_text` – what a bug report needs: title, artist, status and message, every attempt in
+/// the log with its source and whole error, the failed step with its operation, path and errno,
+/// streamrip's output, the request id and the server's version (and this app's). Times are UTC.
+pub fn request_text(r: &Value, server_version: &str) -> String {
+    let mut out: Vec<String> = vec![format!("Encore request #{}", fmt::s(r, "id"))];
+    let mut add = |k: &str, v: String| {
+        if !v.trim().is_empty() {
+            out.push(format!("{k}: {v}"));
+        }
+    };
+    let kind = fmt::s(r, "kind");
+    add("Title", if kind == "album" { or(r, "title", "album") } else { fmt::s(r, "title") });
+    add("Artist", fmt::s(r, "artist"));
+    if kind == "track" && fmt::s(r, "album") != fmt::s(r, "title") {
+        add("Album", fmt::s(r, "album"));
+    }
+    add("Link", fmt::s(r, "url"));
+    add("Kind", kind.clone());
+    let status = fmt::s(r, "status");
+    let (_, label) = super::catalog::status_words(&status);
+    let why = if status == "waiting" { wait_words(&fmt::s(r, "wait_reason")) } else { "" };
+    add("Status", if why.is_empty() { label } else { format!("{label} – {why}") });
+    add("Message", fmt::s(r, "message"));
+    if status == "waiting" && fmt::f(r, "next_try_at") > 0.0 {
+        add("Next try", fmt::stamp(fmt::f(r, "next_try_at")));
+    }
+    add("Attempts", fmt::s(r, "attempts"));
+    add("Source", fmt::s(r, "source"));
+    if fmt::truthy(r, "picked") {
+        add("Picked by hand", "yes".into());
+    }
+    add("Downloading", candidate_line(&r["candidate"]));
+    let e = &r["error"];
+    if e.is_object() {
+        add("Error", if fmt::truthy(e, "text") { fmt::s(e, "text") } else { fmt::s(e, "error") });
+        add("Step", fmt::s(e, "step"));
+        add("Operation", fmt::s(e, "op"));
+        add("Path", fmt::s(e, "path"));
+        add("Other path", fmt::s(e, "to"));
+        add("Errno", fmt::s(e, "errno"));
+        if fmt::truthy(e, "text") {
+            add("System error", fmt::s(e, "error"));
+        }
+        if fmt::truthy(e, "storage") {
+            add("Storage problem", "yes – not the source".into());
+        }
+    }
+    if fmt::truthy(r, "has_files") {
+        add(
+            "Downloaded files kept in",
+            // (other users than admins get no server folder)
+            if fmt::truthy(r, "kept_path") { fmt::s(r, "kept_path") } else { "the server".into() },
+        );
+    }
+    let log: Vec<String> = r["log"]
+        .as_array()
+        .map(|a| a.iter().map(|l| l.as_str().map(str::to_string).unwrap_or_else(|| l.to_string())).collect())
+        .unwrap_or_default();
+    let log: Vec<String> = log.into_iter().filter(|l| !l.trim().is_empty()).collect();
+    if !log.is_empty() {
+        out.push(String::new());
+        out.push("Log (every attempt, oldest first):".into());
+        out.extend(log);
+    }
+    let o = &r["output"];
+    if o.is_object() && fmt::truthy(o, "text") {
+        let head: Vec<String> = [
+            fmt::s(o, "url"),
+            (if fmt::truthy(o, "ok") { "produced files" } else { "failed" }).to_string(),
+            if fmt::f(o, "at") > 0.0 { fmt::stamp(fmt::f(o, "at")) } else { String::new() },
+        ]
+        .into_iter()
+        .filter(|x| !x.is_empty())
+        .collect();
+        out.push(String::new());
+        let source = if fmt::truthy(o, "source") { fmt::s(o, "source") } else { "streamrip".to_string() };
+        out.push(format!("{source} output ({}):", head.join(" · ")));
+        out.push(fmt::s(o, "text").trim_end().to_string());
+    }
+    out.push(String::new());
+    let mut add = |k: &str, v: String| {
+        if !v.trim().is_empty() {
+            out.push(format!("{k}: {v}"));
+        }
+    };
+    add("Requested by", fmt::s(r, "username"));
+    if fmt::f(r, "created_at") > 0.0 {
+        add("Requested", fmt::stamp(fmt::f(r, "created_at")));
+    }
+    if fmt::f(r, "updated_at") > 0.0 {
+        add("Updated", fmt::stamp(fmt::f(r, "updated_at")));
+    }
+    add("Request id", fmt::s(r, "id"));
+    add("Server version", if server_version.is_empty() { "unknown".into() } else { server_version.to_string() });
+    out.join("\n")
+}
+
+/// The storage banner's sentence (`GET /api/requests/storage`), or None when imports go on. The
+/// server sends it finished on its own clock; the words here are for a server that sends none.
+pub fn storage_text(s: &Value, admin: bool) -> Option<String> {
+    if !s.is_object() || s["ok"].as_bool() != Some(false) {
+        return None;
+    }
+    if fmt::truthy(s, "text") {
+        return Some(fmt::s(s, "text"));
+    }
+    Some(if admin && fmt::truthy(s, "path") {
+        format!(
+            "Imports are paused: {} is not writable – {}: {}.",
+            fmt::s(s, "path"),
+            fmt::s(s, "op"),
+            fmt::s(s, "error")
+        )
+    } else {
+        "Imports are paused because of a storage problem on the server. Your downloads are kept and will be added when it is fixed.".to_string()
+    })
 }
 
 /// `a.x || a.y`, as a string.
@@ -72,10 +262,13 @@ pub fn tree(rows: &[Value]) -> Vec<(&Value, Vec<&Value>)> {
         .collect()
 }
 
-/// The question before deleting a request's files.
-pub fn delete_files_text(status: &str) -> &'static str {
+/// The question before deleting a request's files (`kept`: its downloaded files are kept for
+/// Import again).
+pub fn delete_files_text(status: &str, kept: bool) -> &'static str {
     if status == "completed" {
         "Permanently delete the songs this request downloaded from the library?"
+    } else if kept {
+        "Delete the downloaded files kept for this request? They can't be imported afterwards."
     } else {
         "Delete the leftover/partial files of this download?"
     }
@@ -138,13 +331,24 @@ pub fn clear_menu<M: Clone>(admin: bool, on: impl Fn(Clear) -> M) -> Vec<MenuIte
     items
 }
 
-/// The ⋯ menu of a finished row.
-pub fn row_menu<M: Clone>(admin: bool, status: &str, on_remove: impl Fn(bool) -> M) -> Vec<MenuItem<M>> {
-    let mut items = vec![MenuItem::new("Remove from list", on_remove(false)).icon(Icon::X)];
+/// The ⋯ menu of a row: Details, and for a row that stopped moving Remove from list and the
+/// admin's files entry.
+pub fn row_menu<M: Clone>(
+    admin: bool,
+    status: &str,
+    kept: bool,
+    on_details: M,
+    on_remove: impl Fn(bool) -> M,
+) -> Vec<MenuItem<M>> {
+    let mut items = vec![MenuItem::new("Details", on_details).icon(Icon::List)];
+    if is_active(status) {
+        return items;
+    }
+    items.push(MenuItem::new("Remove from list", on_remove(false)).icon(Icon::X));
     if admin {
         items.push(
             MenuItem::new(
-                if status == "completed" { "Delete downloaded files" } else { "Delete leftover files" },
+                if status == "completed" || kept { "Delete downloaded files" } else { "Delete leftover files" },
                 on_remove(true),
             )
             .icon(Icon::Trash)
@@ -181,19 +385,26 @@ pub fn retry_failed_toast(r: &Value) -> (String, bool) {
 
 #[derive(Debug)]
 enum Menu {
-    Row { id: i64, status: String },
+    Row { id: i64, status: String, kept: bool },
     Clear,
 }
 
 #[derive(Clone, Debug)]
 enum Then {
+    /// Remove from list with the files (Delete downloaded files)
     Remove(i64),
+    /// Remove from list, the kept files going with it
+    RemoveKept(i64),
+    /// Cancel, the kept files going with it
+    Cancel(i64),
     Clear(Clear),
 }
 
 #[derive(Debug)]
 struct Confirm {
+    title: &'static str,
     text: String,
+    ok: &'static str,
     then: Then,
 }
 
@@ -220,6 +431,13 @@ pub struct List {
     picker: Option<picker::State>,
     gen: u64,
     retrying: bool,
+    /// `GET /api/requests/storage`: whether imports are paused (null until it answered, and from a
+    /// server without it).
+    storage: Value,
+    /// Check again is running.
+    checking: bool,
+    /// Loads since the page opened (the storage state goes with every eighth).
+    storage_loads: u64,
 }
 
 #[derive(Clone, Debug)]
@@ -244,6 +462,12 @@ pub enum Msg {
     Cleared(bool, Result<Value, ApiError>),
     RetryFailed,
     RetriedFailed(Result<Value, ApiError>),
+    /// Open a request's details (the whole message, the log, the failed step) with Copy.
+    Details(i64),
+    Storage(Result<Value, ApiError>),
+    /// Check again (admins): probe the folders now.
+    CheckStorage,
+    Checked(Result<Value, ApiError>),
 }
 
 impl List {
@@ -256,6 +480,9 @@ impl List {
         self.confirm = None;
         self.picker = None;
         self.retrying = false;
+        self.storage = Value::Null;
+        self.checking = false;
+        self.storage_loads = 0;
     }
 
     pub fn rows(&self) -> &[Value] {
@@ -265,13 +492,22 @@ impl List {
         }
     }
 
-    /// Fetch the rows again (the first time, and every few seconds while the page is open).
+    /// Fetch the rows again (the first time, and every few seconds while the page is open), and
+    /// beside them whether imports are paused: the first time, then every eighth time (about
+    /// every 30 s, as the web) – and every time while they are paused, so the banner goes as soon
+    /// as the rows show the import done.
     pub fn load(&mut self, ctx: &Ctx) -> Task<Msg> {
         self.gen += 1;
         let gen = self.gen;
         let api = ctx.api.clone();
         let url = format!("/requests?{}", self.query);
-        Task::perform(async move { api.get(&url).await }, move |r| Msg::Loaded(gen, r))
+        let rows = Task::perform(async move { api.get(&url).await }, move |r| Msg::Loaded(gen, r));
+        self.storage_loads += 1;
+        if self.storage_loads % 8 != 1 && self.storage["ok"].as_bool() != Some(false) {
+            return rows;
+        }
+        let api = ctx.api.clone();
+        Task::batch([rows, Task::perform(async move { api.get("/requests/storage").await }, Msg::Storage)])
     }
 
     fn status_of(&self, id: i64) -> String {
@@ -280,6 +516,10 @@ impl List {
             .find(|r| fmt::i(r, "id") == id)
             .map(|r| fmt::s(r, "status"))
             .unwrap_or_default()
+    }
+
+    fn kept(&self, id: i64) -> bool {
+        self.rows().iter().any(|r| fmt::i(r, "id") == id && fmt::truthy(r, "has_files"))
     }
 }
 
@@ -315,6 +555,11 @@ pub fn update(l: &mut List, msg: Msg, ctx: &mut Ctx) -> Task<Msg> {
             }
         }
         Msg::Act(id, act) => {
+            // the kept files go with a cancelled request: it asks first
+            if act == "cancel" && l.kept(id) && !l.busy.contains(&id) {
+                l.confirm = Some(Confirm { title: "Cancel this request?", text: KEPT_FILES_LOST.into(), ok: "Cancel request", then: Then::Cancel(id) });
+                return Task::none();
+            }
             if !l.busy.insert(id) {
                 return Task::none();
             }
@@ -348,16 +593,25 @@ pub fn update(l: &mut List, msg: Msg, ctx: &mut Ctx) -> Task<Msg> {
             }
             return Task::batch(tasks);
         }
-        Msg::Menu(id, status) => l.menu = Some((ctx.cursor, Menu::Row { id, status })),
+        Msg::Menu(id, status) => {
+            let kept = l.kept(id);
+            l.menu = Some((ctx.cursor, Menu::Row { id, status, kept }));
+        }
         Msg::ClearMenu => l.menu = Some((ctx.cursor, Menu::Clear)),
         Msg::CloseMenu => l.menu = None,
         Msg::Remove(id, files) => {
             l.menu = None;
             if files {
                 l.confirm = Some(Confirm {
-                    text: delete_files_text(&l.status_of(id)).to_string(),
+                    title: "Delete files",
+                    text: delete_files_text(&l.status_of(id), l.kept(id)).to_string(),
+                    ok: "Delete",
                     then: Then::Remove(id),
                 });
+                return Task::none();
+            }
+            if l.kept(id) {
+                l.confirm = Some(Confirm { title: "Remove this request?", text: KEPT_FILES_LOST.into(), ok: "Remove", then: Then::RemoveKept(id) });
                 return Task::none();
             }
             let api = ctx.api.clone();
@@ -368,7 +622,9 @@ pub fn update(l: &mut List, msg: Msg, ctx: &mut Ctx) -> Task<Msg> {
             l.menu = None;
             if c.files() {
                 l.confirm = Some(Confirm {
+                    title: "Delete files",
                     text: format!("{}: this permanently deletes the files from disk.", c.label()),
+                    ok: "Delete",
                     then: Then::Clear(c),
                 });
                 return Task::none();
@@ -389,6 +645,17 @@ pub fn update(l: &mut List, msg: Msg, ctx: &mut Ctx) -> Task<Msg> {
                 Then::Remove(id) => {
                     let url = format!("/requests/{id}?files=true");
                     Task::perform(async move { api.del(&url).await }, |r| Msg::Removed(true, r))
+                }
+                Then::RemoveKept(id) => {
+                    let url = format!("/requests/{id}");
+                    Task::perform(async move { api.del(&url).await }, |r| Msg::Removed(false, r))
+                }
+                Then::Cancel(id) => {
+                    if !l.busy.insert(id) {
+                        return Task::none();
+                    }
+                    let url = format!("/requests/{id}/cancel");
+                    Task::perform(async move { api.post_empty(&url).await }, move |r| Msg::Acted(id, r))
                 }
                 Then::Clear(k) => {
                     let body = k.body(l.mine);
@@ -438,6 +705,41 @@ pub fn update(l: &mut List, msg: Msg, ctx: &mut Ctx) -> Task<Msg> {
                     } else {
                         ctx.toast_ok(msg);
                     }
+                    return l.load(ctx);
+                }
+                Err(e) => ctx.toast_err(e.message),
+            }
+        }
+        Msg::Details(id) => {
+            l.menu = None;
+            if let Some(r) = l.rows().iter().find(|r| fmt::i(r, "id") == id) {
+                let title = request_what(r);
+                let text = request_text(r, &fmt::s(&ctx.session.info, "version"));
+                ctx.details(if title.is_empty() { "Details".to_string() } else { title }, text);
+            }
+        }
+        Msg::Storage(Ok(v)) => l.storage = v,
+        // an older server has no storage state (no banner); a failed look keeps the last one
+        Msg::Storage(Err(_)) => {}
+        Msg::CheckStorage => {
+            if l.checking {
+                return Task::none();
+            }
+            l.checking = true;
+            let api = ctx.api.clone();
+            return Task::perform(async move { api.post_empty("/requests/storage/check").await }, Msg::Checked);
+        }
+        Msg::Checked(r) => {
+            l.checking = false;
+            match r {
+                // when the folders can be written again the waiting imports resume: show them move
+                Ok(v) => {
+                    if v["ok"].as_bool() == Some(false) {
+                        ctx.toast_warn("Imports are still paused");
+                    } else {
+                        ctx.toast_ok("Imports resumed");
+                    }
+                    l.storage = v;
                     return l.load(ctx);
                 }
                 Err(e) => ctx.toast_err(e.message),
@@ -494,6 +796,15 @@ pub fn request_row<'a>(ctx: &Ctx<'a>, l: &List, r: &Value) -> El<'a, Msg> {
     }
     line = line.push(super::faint(format!("· {}", fmt::ago(fmt::f(r, "created_at")))).size(12));
     let mut lines = column![t(what(r)).size(14).font(theme::semibold()), line.wrap()].spacing(3);
+    // a request with kept files says where they are (the files wait for Import again or the next
+    // try) – to admins: the server's folders are theirs (the server sends members none)
+    if l.admin && fmt::truthy(r, "has_files") && fmt::truthy(r, "kept_path") {
+        lines = lines.push(
+            super::faint(format!("Downloaded files kept in {}", fmt::s(r, "kept_path")))
+                .size(12)
+                .wrapping(iced::widget::text::Wrapping::WordOrGlyph),
+        );
+    }
     if active && fmt::truthy(r, "progress") {
         lines = lines.push(
             container(
@@ -535,28 +846,61 @@ pub fn request_row<'a>(ctx: &Ctx<'a>, l: &List, r: &Value) -> El<'a, Msg> {
             .gap(4),
         );
     }
-    if matches!(status.as_str(), "failed" | "cancelled") || kind == "playlist" {
+    if can_import_again(r) {
+        // the downloaded files are kept: import them, nothing is downloaded again
+        right = right.push(
+            tooltip(
+                button(
+                    row![icon(Icon::Refresh, 14.0, p.text), t("Import again").size(13).font(theme::semibold())]
+                        .spacing(6)
+                        .align_y(Alignment::Center),
+                )
+                .padding([6, 11])
+                .style(theme::btn(Btn::Default))
+                .on_press_maybe((!busy).then_some(Msg::Act(id, "import-again"))),
+                tip_box("Import the downloaded files again – nothing is downloaded again"),
+                tooltip::Position::Bottom,
+            )
+            .gap(4),
+        );
+    } else if matches!(status.as_str(), "failed" | "cancelled") || kind == "playlist" {
         right = right.push(icon_btn(Icon::Refresh, "Retry", (!busy).then_some(Msg::Act(id, "retry"))));
     }
     if can_cancel(&status) {
         right = right.push(icon_btn(Icon::X, "Cancel", (!busy).then_some(Msg::Act(id, "cancel"))));
     }
-    if !active {
-        right = right.push(icon_btn(Icon::More, "More", Some(Msg::Menu(id, status.clone()))));
-    }
-    let body = container(
-        row![thumb, lines.width(Length::Fill), right]
-            .spacing(14)
-            .align_y(Alignment::Center),
-    )
-    .padding([11, 16]);
-    // a right-click opens the row's ⋯ menu at the pointer, where it has one
-    let body: El<'a, Msg> = if active {
-        body.into()
-    } else {
-        iced::widget::mouse_area(body).on_right_press(Msg::Menu(id, status.clone())).into()
-    };
+    right = right.push(icon_btn(Icon::More, "More", Some(Msg::Menu(id, status.clone()))));
+    // a click on the words opens the details (the whole message, the log, Copy)
+    let words = iced::widget::mouse_area(lines.width(Length::Fill))
+        .on_press(Msg::Details(id))
+        .interaction(iced::mouse::Interaction::Pointer);
+    let body = container(row![thumb, words, right].spacing(14).align_y(Alignment::Center)).padding([11, 16]);
+    // a right-click opens the row's ⋯ menu at the pointer
+    let body = iced::widget::mouse_area(body).on_right_press(Msg::Menu(id, status.clone()));
     column![body, super::divider()].into()
+}
+
+/// The banner over a request list while imports are paused (`GET /api/requests/storage`): for
+/// admins the folder, the operation and the error with Check again; for everyone else that the
+/// downloads are kept. None while imports go on.
+pub fn storage_banner<'a>(ctx: &Ctx<'a>, l: &List) -> Option<El<'a, Msg>> {
+    let admin = ctx.is_admin();
+    let text = storage_text(&l.storage, admin)?;
+    let p = ctx.look;
+    let mut r = row![
+        icon(Icon::Download, 18.0, p.warn),
+        t(text).size(13.5).width(Length::Fill).wrapping(iced::widget::text::Wrapping::WordOrGlyph),
+    ]
+    .spacing(10)
+    .align_y(Alignment::Center);
+    if admin {
+        r = r.push(btn_sm(
+            if l.checking { "Checking…" } else { "Check again" },
+            Btn::Default,
+            (!l.checking).then_some(Msg::CheckStorage),
+        ));
+    }
+    Some(container(r).padding([12, 16]).width(Length::Fill).style(theme::warn_box).into())
 }
 
 /// A tooltip box with an owned text.
@@ -643,14 +987,14 @@ pub fn overlay<'a>(l: &'a List, ctx: &Ctx<'a>) -> Option<El<'a, Msg>> {
         return Some(picker::view(p, ctx).map(Msg::Picker));
     }
     if let Some(c) = &l.confirm {
-        return Some(confirm("Delete files", &c.text, "Delete", true, Msg::ConfirmOk, Msg::CloseDialog));
+        return Some(confirm(c.title, &c.text, c.ok, true, Msg::ConfirmOk, Msg::CloseDialog));
     }
     let (at, menu) = l.menu.as_ref()?;
     let admin = ctx.is_admin();
     let items = match menu {
-        Menu::Row { id, status } => {
+        Menu::Row { id, status, kept } => {
             let id = *id;
-            row_menu(admin, status, move |files| Msg::Remove(id, files))
+            row_menu(admin, status, *kept, Msg::Details(id), move |files| Msg::Remove(id, files))
         }
         Menu::Clear => clear_menu(admin, Msg::Clear),
     };
@@ -671,7 +1015,9 @@ mod tests {
         assert_eq!(what(&json!({ "kind": "track", "title": "One", "artist": "A" })), "One · A");
         assert!(is_active("downloading") && !is_active("queued"));
         assert!(can_cancel("pending") && !can_cancel("completed"));
-        assert_eq!(delete_files_text("completed"), "Permanently delete the songs this request downloaded from the library?");
+        assert_eq!(delete_files_text("completed", false), "Permanently delete the songs this request downloaded from the library?");
+        assert_eq!(delete_files_text("failed", true), "Delete the downloaded files kept for this request? They can't be imported afterwards.");
+        assert_eq!(delete_files_text("failed", false), "Delete the leftover/partial files of this download?");
     }
 
     #[test]
@@ -692,8 +1038,13 @@ mod tests {
         assert_eq!(Clear::FailedFiles.body(true), json!({ "statuses": ["failed", "cancelled", "denied"], "files": true, "mine": true }));
         assert_eq!(clear_menu::<()>(true, |_| ()).len(), 4);
         assert_eq!(clear_menu::<()>(false, |_| ()).len(), 2);
-        assert_eq!(row_menu::<()>(false, "failed", |_| ()).len(), 1);
-        assert_eq!(row_menu::<()>(true, "completed", |_| ())[1].label, "Delete downloaded files");
+        assert_eq!(row_menu::<()>(false, "failed", false, (), |_| ()).len(), 2);
+        assert_eq!(row_menu::<()>(true, "completed", false, (), |_| ())[0].label, "Details");
+        assert_eq!(row_menu::<()>(true, "completed", false, (), |_| ())[2].label, "Delete downloaded files");
+        assert_eq!(row_menu::<()>(true, "failed", false, (), |_| ())[2].label, "Delete leftover files");
+        assert_eq!(row_menu::<()>(true, "failed", true, (), |_| ())[2].label, "Delete downloaded files");
+        // a request the worker is on: only its details
+        assert_eq!(row_menu::<()>(true, "downloading", false, (), |_| ()).len(), 1);
         assert_eq!(cleared_toast(&json!({ "removed": 3, "deleted_files": 5 }), true), "3 cleared · 5 file(s) deleted");
         assert_eq!(cleared_toast(&json!({ "removed": 3 }), false), "3 cleared");
         assert_eq!(retry_failed_toast(&json!({ "retried": 0, "skipped": 0 })), ("No failed requests to retry".to_string(), false));
@@ -702,6 +1053,91 @@ mod tests {
             retry_failed_toast(&json!({ "retried": 2, "skipped": 1, "why": "quota" })),
             ("Retrying 2 · 1 couldn't be retried (quota)".to_string(), true)
         );
+    }
+
+    #[test]
+    fn a_waiting_request_and_its_kept_files() {
+        assert!(can_cancel("waiting") && !is_active("waiting"));
+        assert_eq!(super::super::catalog::status_words("waiting").1, "Waiting");
+        let failed = json!({ "status": "failed", "has_files": true });
+        assert!(can_import_again(&failed));
+        assert!(can_import_again(&json!({ "status": "waiting", "has_files": true })));
+        assert!(!can_import_again(&json!({ "status": "failed", "has_files": false })));
+        assert!(can_import_again(&json!({ "status": "completed", "has_files": true })), "a link's files that could not be imported");
+        assert!(!can_import_again(&json!({ "status": "cancelled", "has_files": true })));
+        assert!(!can_import_again(&json!({ "status": "failed" })), "an older server sends no has_files");
+    }
+
+    #[test]
+    fn the_copied_request_holds_everything_for_a_report() {
+        let r = json!({
+            "id": 12, "kind": "album", "title": "Illuminate EP", "artist": "Duumu", "status": "waiting",
+            "message": "Waiting: library storage error – import failed: mkdir /music/Duumu/Illuminate EP: Input/output error (os error 5). Next try at 14:20",
+            "wait_reason": "storage_import", "next_try_at": 1_792_427_497.2, "has_files": true,
+            "kept_path": "/downloads/encore/request-12/streamrip", "attempts": 3, "source": "streamrip", "username": "caz",
+            "created_at": 1_792_420_000.0, "picked": true,
+            "error": { "step": "import", "op": "mkdir", "path": "/music/Duumu/Illuminate EP", "to": null, "errno": 5,
+                       "error": "Input/output error (os error 5)", "storage": true,
+                       "text": "import failed: mkdir /music/Duumu/Illuminate EP: Input/output error (os error 5) – storage problem, not the source" },
+            "output": { "source": "streamrip", "url": "https://www.deezer.com/album/1", "text": "Downloading Illuminate EP\n4 tracks done\n", "ok": true, "at": 1_792_427_000.1 },
+            "log": ["slskd: error: Soulseek isn't connected yet", "attempt 2 failed: streamrip: Input/output error (os error 5)"],
+            "candidate": null,
+        });
+        let text = request_text(&r, "0.29.0");
+        assert!(text.starts_with("Encore request #12\nTitle: Illuminate EP\nArtist: Duumu\nKind: album\n"), "{text}");
+        for want in [
+            "Status: Waiting – the downloaded files are kept and the import waits for the storage",
+            "Message: Waiting: library storage error – import failed: mkdir /music/Duumu/Illuminate EP: Input/output error (os error 5). Next try at 14:20",
+            "Next try: 2026-10-19 16:31 UTC",
+            "Attempts: 3",
+            "Source: streamrip",
+            "Picked by hand: yes",
+            "Error: import failed: mkdir /music/Duumu/Illuminate EP: Input/output error (os error 5) – storage problem, not the source",
+            "Step: import",
+            "Operation: mkdir",
+            "Path: /music/Duumu/Illuminate EP",
+            "Errno: 5",
+            "System error: Input/output error (os error 5)",
+            "Storage problem: yes – not the source",
+            "Downloaded files kept in: /downloads/encore/request-12/streamrip",
+            "\nLog (every attempt, oldest first):\nslskd: error: Soulseek isn't connected yet\nattempt 2 failed: streamrip: Input/output error (os error 5)\n",
+            "\nstreamrip output (https://www.deezer.com/album/1 · produced files · 2026-10-19 16:23 UTC):\nDownloading Illuminate EP\n4 tracks done\n",
+            "Requested by: caz",
+            "Request id: 12",
+            "Server version: 0.29.0",
+        ] {
+            assert!(text.contains(want), "missing {want:?} in\n{text}");
+        }
+        assert!(!text.contains("Other path"), "an empty field is left out");
+        assert_eq!(request_what(&r), "Illuminate EP – Duumu");
+        assert_eq!(request_what(&json!({ "kind": "artist", "artist": "Duumu" })), "Duumu – full discography");
+        // an older server's row still reads
+        let old = request_text(&json!({ "id": 3, "kind": "track", "title": "One", "artist": "A", "status": "failed", "message": "All sources exhausted (x)", "attempts": 1 }), "");
+        assert!(old.contains("Status: Failed") && old.contains("Attempts: 1") && old.contains("Server version: unknown"), "{old}");
+        assert!(!old.contains("Error:") && !old.contains("Log ("), "{old}");
+        assert!(text.ends_with("Server version: 0.29.0"), "the same last line as the web's and the phone's: {text}");
+        assert_eq!(wait_words("soulseek"), "Soulseek isn't connected yet");
+    }
+
+    #[test]
+    fn the_storage_banner_words() {
+        assert_eq!(storage_text(&Value::Null, true), None, "an older server: no banner");
+        assert_eq!(storage_text(&json!({ "ok": true, "text": null }), true), None);
+        let admin = json!({ "ok": false, "path": "/music", "op": "mkdir", "error": "Input/output error (os error 5)",
+            "text": "Imports are paused: /music is not writable – mkdir /music/.encore-probe-12-3: Input/output error (os error 5). Checked 14:10, next check 14:20" });
+        assert_eq!(storage_text(&admin, true).unwrap(), fmt::s(&admin, "text"));
+        let mut bare = admin.clone();
+        bare["text"] = Value::Null;
+        assert_eq!(storage_text(&bare, true).unwrap(), "Imports are paused: /music is not writable – mkdir: Input/output error (os error 5).");
+        assert_eq!(
+            storage_text(&json!({ "ok": false, "since": 1.0 }), false).unwrap(),
+            "Imports are paused because of a storage problem on the server. Your downloads are kept and will be added when it is fixed."
+        );
+        assert_eq!(
+            candidate_line(&json!({ "username": "alice", "format": "flac", "directory": "Illuminate EP", "files": 4 })),
+            "from alice: Illuminate EP (FLAC, 4 files)"
+        );
+        assert_eq!(candidate_line(&Value::Null), "");
     }
 
     #[test]

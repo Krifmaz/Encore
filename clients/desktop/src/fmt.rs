@@ -78,6 +78,15 @@ pub fn date(ts: f64) -> String {
     format!("{d} {} {y}", MONTHS[(m - 1) as usize])
 }
 
+/// `2026-10-19 14:20 UTC` for a unix timestamp in seconds: a time with no doubt about its day or
+/// zone, for text that is copied into a bug report.
+pub fn stamp(ts: f64) -> String {
+    let secs = ts.floor() as i64;
+    let (y, m, d) = civil_from_days(secs.div_euclid(86_400));
+    let t = secs.rem_euclid(86_400);
+    format!("{y}-{m:02}-{d:02} {:02}:{:02} UTC", t / 3600, t % 3600 / 60)
+}
+
 /// Days since 1970-01-01 to (year, month, day); Howard Hinnant's algorithm.
 fn civil_from_days(z: i64) -> (i64, u32, u32) {
     let z = z + 719_468;
@@ -170,6 +179,8 @@ mod tests {
         assert_eq!(mmss(3735.0), "1:02:15");
         assert_eq!(duration_long(7500.0), "2 h 5 min");
         assert_eq!(date(1_792_311_210.0), "18 Oct 2026");
+        // 1792427497 = 2026-10-19 16:31:37 UTC
+        assert_eq!(stamp(1_792_427_497.2), "2026-10-19 16:31 UTC");
     }
 
     #[test]

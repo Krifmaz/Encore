@@ -22,6 +22,13 @@ pub(super) async fn start(st: &impl Ctx, r: &mut Req) -> anyhow::Result<()> {
         upd(st, r, &[("source", json!("ytdlp")), ("status", json!("downloading")), ("message", json!("Starting download…"))]);
         return run_url(st, r).await;
     }
+    if r.d["kept"].is_object() && !r.d["pick"].is_object() && storage::has_files(&r.d) {
+        // asked for again while its downloaded files are kept: they are imported, not downloaded again
+        return storage::import_kept(st, r).await;
+    }
+    if let Some(d) = r.d.as_object_mut() {
+        d.remove("kept"); // kept files that are gone: a new download
+    }
     if r.d["pick"].is_object() {
         return start_pick(st, r).await;
     }
@@ -59,6 +66,7 @@ pub(super) async fn next_source(st: &impl Ctx, r: &mut Req, reason: &str) -> any
     loop {
         if !reason.is_empty() {
             let src = r.opt("source").unwrap_or("start".into());
+            storage::log_failure(st, r, &src, &reason);
             log_push(r, format!("{src}: {reason}"));
         }
         let mut srcs: Vec<String> = r.d["sources"].as_array().map(|a| a.iter().filter_map(|x| x.as_str().map(String::from)).collect()).unwrap_or_default();
@@ -95,15 +103,28 @@ pub(super) async fn next_source(st: &impl Ctx, r: &mut Req, reason: &str) -> any
             Ok(Out::Done) | Ok(Out::Wait) => return Ok(()),
             Ok(Out::Next(why)) => reason = why,
             Err(e) if e.is::<Cancelled>() => return Err(e),
+            // the staging folder (or a download's own folder) failed: the disk's problem, not the source's –
+            // the step waits for the storage instead of going on to the next source
+            Err(e) if storage_error(st, &e).is_some() => {
+                let se = storage_error(st, &e).unwrap();
+                let reason = if r.d["kept"].is_object() { storage::STORAGE_IMPORT } else { storage::STORAGE_DOWNLOAD };
+                return storage::wait_for_storage(st, r, se, reason);
+            }
             // the session went down between the check and the search: wait for it like above
             Err(e) if soulseek && e.is::<slskd::NotConnected>() => match soulseek_turn(st, r).await {
                 Turn::Wait(when) => return park_for_soulseek(st, r, &src, &when),
                 Turn::Skip(why) => reason = why,
                 Turn::Go => reason = format!("error: {e}"),
             },
-            Err(e) => reason = format!("error: {e}"),
+            Err(e) => reason = format!("error: {}", encore_core::fsx::explain(&e)),
         }
     }
+}
+
+/// The storage error in `e`'s chain (with the server's folders registered first).
+pub(super) fn storage_error<'a>(st: &impl Ctx, e: &'a anyhow::Error) -> Option<&'a encore_core::fsx::StepError> {
+    storage::register_roots(st);
+    encore_core::fsx::storage(e)
 }
 
 /// Whether a Soulseek step can search now.
@@ -129,10 +150,11 @@ pub(super) async fn soulseek_turn(st: &impl Ctx, r: &Req) -> Turn {
     }
 }
 
-/// Park the request until Soulseek is back: queued, "Waiting for Soulseek – next attempt at 14:20", the
-/// Soulseek step first in its sources again, and its attempts untouched. The queue looks at it again
-/// every few seconds and goes on where it stopped ([`super::queue`]): a Soulseek step searches again, a
-/// picked file is asked for again. Writes only what changed.
+/// Park the request until Soulseek is back: `waiting` (reason "soulseek", `next_try_at` the session's next
+/// attempt when it has one), "Waiting for Soulseek – next attempt at 14:20", the Soulseek step first in its
+/// sources again, and its attempts untouched. The queue looks at it again every few seconds and goes on
+/// where it stopped ([`super::queue`]): a Soulseek step searches again, a picked file is asked for again.
+/// Writes only what changed.
 pub(super) fn park_for_soulseek(st: &impl Ctx, r: &mut Req, src: &str, when: &str) -> anyhow::Result<()> {
     check(st, r.id)?;
     let mut srcs: Vec<Value> = r.d["sources"].as_array().cloned().unwrap_or_default();
@@ -144,9 +166,15 @@ pub(super) fn park_for_soulseek(st: &impl Ctx, r: &mut Req, src: &str, when: &st
         log_push(r, format!("{src}: waiting for Soulseek ({when})"));
         changed = true;
     }
+    let next = st.requests().slskd.session().snapshot().next_at.map(crate::slskd_session::unix_at).map(|t| (t * 10.0).round() / 10.0);
+    let wait = json!({ "reason": storage::SOULSEEK, "since": r.d["soulseek_wait"]["since"], "next_try_at": next });
+    if r.d["wait"] != wait {
+        r.d["wait"] = wait;
+        changed = true;
+    }
     let msg = format!("Waiting for Soulseek – {when}");
-    if changed || r.s("status") != "queued" || r.s("message") != msg || r.s("source") != src {
-        upd(st, r, &[("status", json!("queued")), ("source", json!(src)), ("progress", json!(0)), ("message", json!(msg))]);
+    if changed || r.s("status") != "waiting" || r.s("message") != msg || r.s("source") != src {
+        upd(st, r, &[("status", json!("waiting")), ("source", json!(src)), ("progress", json!(0)), ("message", json!(msg))]);
     }
     Ok(())
 }

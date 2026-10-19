@@ -46,7 +46,8 @@ fn a_failed_or_cancelled_twin_is_reused() {
     assert_eq!(r["detail"]["isrc"], "USX11234567");
     assert_eq!(r["detail"]["length"], 200.0);
     assert_eq!(rows_for(&st, "Song"), 1);
-    // cancelled, then asked for by someone else: the row moves to them, waits for approval, counts attempt 3
+    // cancelled, then asked for by someone else: the row moves to them and waits for approval; the cancelled
+    // run got no answer from a source, so it isn't counted (the attempts rule)
     let other = user(&st, "friend", "user");
     st.db.execute("UPDATE requests SET status='cancelled', message='Cancelled by owner1' WHERE id=?", p![first]).unwrap();
     assert_eq!(create_request(&*st, &other, &song("band", "song"), None, None).unwrap(), first, "the match ignores case");
@@ -54,12 +55,12 @@ fn a_failed_or_cancelled_twin_is_reused() {
     assert_eq!(r["user_id"], other.i("id"));
     assert_eq!(r["status"], "pending");
     assert_eq!(r["message"], "Waiting for admin approval");
-    assert_eq!(r["detail"]["attempts"], 3);
+    assert_eq!(r["detail"]["attempts"], 2);
     assert_eq!(r["detail"]["log"][1], "attempt 2 cancelled: Cancelled by owner1");
     assert_eq!(rows_for(&st, "Song"), 1);
     // the list carries the count
     let d: Value = serde_json::from_str(&st.db.one("SELECT detail FROM requests WHERE id=?", p![first]).unwrap().unwrap().s("detail")).unwrap();
-    assert_eq!(d["attempts"].as_u64().unwrap_or(1), 3);
+    assert_eq!(d["attempts"].as_u64().unwrap_or(1), 2);
     // denied is not reused: that is a new ask for approval, as before
     st.db.execute("UPDATE requests SET status='denied' WHERE id=?", p![first]).unwrap();
     let fresh = create_request(&*st, &other, &song("Band", "Song"), None, None).unwrap();
@@ -118,13 +119,14 @@ fn a_pick_for_an_existing_request_reuses_its_row() {
     assert_eq!(r["detail"]["attempts"], 3);
     assert_eq!(r["detail"]["log"], json!(["attempt 1 failed: All sources exhausted", "attempt 2 failed: Soulseek: gone"]));
     assert_eq!(rows_for(&st, "Pickme"), 1);
-    // a pick for a running request takes the row over too (the pick replaces the search)
+    // a pick for a running request takes the row over too (the pick replaces the search; the run it
+    // replaces got no answer yet and isn't counted)
     st.db.execute("UPDATE requests SET status='searching', message='Trying slskd…', source='slskd' WHERE id=?", p![id]).unwrap();
     let (pid3, _) = crate::routes::picker::create_pick_for(&st, &u, &song("Band", "Pickme"), "slskd", json!({ "username": "y", "files": [] }), "Band – Pickme", Some(id)).unwrap();
     assert_eq!(pid3, id);
     let r = row(&st, id);
     assert_eq!(r["status"], "queued");
-    assert_eq!(r["detail"]["attempts"], 4);
+    assert_eq!(r["detail"]["attempts"], 3);
     assert_eq!(r["detail"]["log"][2], "attempt 3 searching: Trying slskd…");
 }
 
@@ -138,9 +140,20 @@ fn retry_detail_counts_attempts_and_keeps_a_bounded_log() {
     assert!(d["log"][1].as_str().unwrap().ends_with('…'));
     assert_eq!(d["log"][2], "attempt 2 failed: boom");
     // a first request has no counter yet: its retry is attempt 2; an empty message leaves no trailing colon
-    let d = detail_for_retry(&json!({}), "cancelled", "", json!({}));
+    let d = detail_for_retry(&json!({}), "failed", "", json!({}));
     assert_eq!(d["attempts"], 2);
+    assert_eq!(d["log"], json!(["attempt 1 failed"]));
+    // the attempts rule: a cancelled run, or one that only waited, counts nothing
+    let d = detail_for_retry(&json!({}), "cancelled", "", json!({}));
+    assert_eq!(d["attempts"], 1);
     assert_eq!(d["log"], json!(["attempt 1 cancelled"]));
+    assert_eq!(detail_for_retry(&json!({ "attempts": 3 }), "waiting", "Waiting for Soulseek – next attempt at 14:20", json!({}))["attempts"], 3);
+    // an import that failed with its files kept: the source did its part; the files go along
+    let kept = json!({ "files": ["/downloads/encore/request-1/a.flac"], "root": "/downloads/encore/request-1", "reason": "error" });
+    let d = detail_for_retry(&json!({ "attempts": 2, "kept": kept }), "failed", "import failed: …", json!({}));
+    assert_eq!(d["attempts"], 2);
+    assert_eq!(d["kept"], kept);
+    assert!(detail_for_retry(&json!({ "kept": kept }), "failed", "", json!({ "pick": { "source": "slskd" } }))["kept"].is_null(), "a pick of something else downloads it");
     // the kept log never grows past the limit
     let many: Vec<String> = (0..100).map(|i| format!("line {i}")).collect();
     let d = detail_for_retry(&json!({ "attempts": 50, "log": many }), "failed", "again", json!({}));

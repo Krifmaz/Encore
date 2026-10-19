@@ -6,6 +6,7 @@ pub mod badge;
 pub mod catalog;
 pub mod choice;
 pub mod cover;
+pub mod details;
 pub mod empty;
 pub mod icons;
 pub mod list_row;

@@ -536,7 +536,7 @@ fn request_row<'a>(r: &'a Value, ctx: &Ctx<'a>) -> El<'a, Message> {
     let mut right = row![status_badge(&status)].spacing(6).align_y(Alignment::Center);
     if matches!(
         status.as_str(),
-        "pending" | "queued" | "searching" | "downloading" | "monitoring" | "importing"
+        "pending" | "queued" | "searching" | "downloading" | "monitoring" | "importing" | "waiting"
     ) {
         right = right.push(icon_btn(Icon::X, "Cancel", Some(Message::CancelReq(fmt::i(r, "id")))));
     }

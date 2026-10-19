@@ -50,6 +50,8 @@ cadenza-dsp = { workspace = true }
 libc = { workspace = true }
 
 [dev-dependencies]
+# the fault seam (a file operation on a path fails with a chosen errno): EIO on the move into the library
+encore-core = { workspace = true, features = ["fault-io"] }
 encore-vpn = { workspace = true, features = ["test-support"] }
 # the tests set artist aliases directly
 encore-library = { workspace = true, features = ["test-support"] }
@@ -60,3 +62,6 @@ tokio = { workspace = true, features = ["test-util"] }
 [features]
 # the TestServer helper (a server on a temporary config folder) for other crates' tests
 test-support = []
+# the fault seam of encore_core::fsx and its admin route (POST/DELETE /api/requests/storage/fault) for the
+# integrator's live run: `cargo run --features fault-io`. Never a release build.
+fault-io = ["encore-core/fault-io", "encore-requests/fault-io"]

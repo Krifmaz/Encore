@@ -2,10 +2,14 @@
 //! and Usenet through the download clients, streamrip, yt-dlp).
 use super::*;
 
+/// A search query from a request's names: bracketed parts and symbols out, the symbols that stand for
+/// letters spelled out first (Ke$ha → Kesha, P!nk → Pink; see `torznab::fold_symbols`), so indexers and
+/// Soulseek get "Kesha Cannibal" and not "Ke ha Cannibal".
 pub(super) fn q(parts: &[&str]) -> String {
     static BR: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"[\(\[].*?[\)\]]").unwrap());
     static NW: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"[^\w\s']").unwrap());
     let s = parts.iter().filter(|p| !p.is_empty()).cloned().collect::<Vec<_>>().join(" ");
+    let s = crate::sources::torznab::fold_symbols(&s);
     let s = BR.replace_all(&s, " ");
     NW.replace_all(&s, " ").split_whitespace().collect::<Vec<_>>().join(" ")
 }
@@ -48,6 +52,7 @@ pub(super) async fn start_slskd(st: &impl Ctx, r: &mut Req, lossless_only: bool)
     // it searched: a later wait for Soulseek starts its own hour
     if let Some(d) = r.d.as_object_mut() {
         d.remove("soulseek_wait");
+        d.remove("wait");
     }
     let tried: Vec<String> = r.d["slskd_tried"].as_array().map(|a| a.iter().filter_map(|x| x.as_str().map(String::from)).collect()).unwrap_or_default();
     cands.retain(|c| !tried.contains(&format!("{}|{}", c["username"].as_str().unwrap_or(""), c["directory"].as_str().unwrap_or(""))));
@@ -148,6 +153,7 @@ pub(super) async fn slskd_try_next(st: &impl Ctx, r: &mut Req, reason: &str) -> 
         }
         if let Some(d) = r.d.as_object_mut() {
             d.remove("soulseek_wait"); // a later wait for Soulseek starts its own hour
+            d.remove("wait");
         }
         let t = now();
         r.d["slskd"]["started"] = json!(t);
@@ -285,15 +291,15 @@ pub(super) async fn import_slskd(st: &impl Ctx, r: &mut Req, c: &Value) -> anyho
         return Ok(());
     }
     let user = c["username"].as_str().unwrap_or("");
-    match import(st, r, &paths, &root).await {
-        Ok((new, note)) => {
-            let mut origin = json!({ "source": "Soulseek", "detail": format!("user {user} · {}", c["directory"].as_str().unwrap_or("").replace('\\', "/")) });
-            if let Some((kind, key, label)) = crate::report::block_of_slskd(c, r.s("kind") == "album") {
-                origin["block"] = json!({ "kind": kind, "key": key, "label": label });
-            }
-            complete(st, r, &with_note(&format!("Downloaded from Soulseek ({})", c["format"].as_str().unwrap_or("").to_uppercase()), &note), &new, origin).await;
-            Ok(())
-        }
+    let mut origin = json!({ "source": "Soulseek", "detail": format!("user {user} · {}", c["directory"].as_str().unwrap_or("").replace('\\', "/")) });
+    if let Some((kind, key, label)) = crate::report::block_of_slskd(c, r.s("kind") == "album") {
+        origin["block"] = json!({ "kind": kind, "key": key, "label": label });
+    }
+    let src = if r.s("source") == "slskd_lossless" { "slskd_lossless" } else { "slskd" };
+    let done = format!("Downloaded from Soulseek ({})", c["format"].as_str().unwrap_or("").to_uppercase());
+    // the files stay in Soulseek's folder when the import has to wait: Encore never clears that folder
+    match storage::import_checked(st, r, &paths, &root, storage::Spec::new(src, false, origin, done)).await {
+        Ok(_) => Ok(()),
         Err(e) if e.is::<Rejected>() => {
             for p in &paths {
                 let _ = std::fs::remove_file(p);
@@ -427,17 +433,17 @@ pub(super) async fn poll_torznab(st: &impl Ctx, r: &mut Req) -> anyhow::Result<(
                     }
                 }
             }
-            match import(st, r, &files, &root).await {
-                Ok((new, _)) => {
-                    torznab::remove(st, &id).await;
-                    let via = if cand["protocol"] == "usenet" { "Usenet" } else { "torrent" };
-                    let mut origin = json!({ "source": cand["indexer"].as_str().unwrap_or(via), "detail": format!("{via}: {}", cand["title"].as_str().unwrap_or("")) });
-                    if let Some((kind, key, label)) = crate::report::block_of_release(&cand) {
-                        origin["block"] = json!({ "kind": kind, "key": key, "label": label });
-                    }
-                    complete(st, r, &format!("Downloaded via {via} ({})", cand["indexer"].as_str().unwrap_or("Prowlarr")), &new, origin).await;
-                    Ok(())
-                }
+            let via = if cand["protocol"] == "usenet" { "Usenet" } else { "torrent" };
+            let mut origin = json!({ "source": cand["indexer"].as_str().unwrap_or(via), "detail": format!("{via}: {}", cand["title"].as_str().unwrap_or("")) });
+            if let Some((kind, key, label)) = crate::report::block_of_release(&cand) {
+                origin["block"] = json!({ "kind": kind, "key": key, "label": label });
+            }
+            // the download leaves its client once its files are in the library – not before: while the import
+            // waits for the storage the files stay in the client's folder
+            let mut spec = storage::Spec::new("torznab", false, origin, format!("Downloaded via {via} ({})", cand["indexer"].as_str().unwrap_or("Prowlarr")));
+            spec.torznab_id = Some(id.clone());
+            match storage::import_checked(st, r, &files, &root, spec).await {
+                Ok(_) => Ok(()),
                 Err(e) if e.is::<Rejected>() => {
                     st.db().log("warning", &format!("Rejected {} for {}: {e}", cand["title"].as_str().unwrap_or(""), r.label()));
                     let o = torznab_try_next(st, r, &format!("wrong audio ({e})")).await?;
@@ -498,31 +504,45 @@ pub(super) async fn start_streamrip(st: &impl Ctx, r: &mut Req, urls: Option<Vec
         let out = staging(st, r).join("streamrip");
         rm(&out);
         upd(st, r, &[("status", json!("downloading")), ("message", json!(format!("streamrip: {url}")))]);
-        let res: anyhow::Result<(Vec<PathBuf>, String)> = async {
-            let files = streamrip::download(st, &url, &out).await?;
-            upd(st, r, &[("status", json!("importing")), ("progress", json!(100)), ("message", json!("Verifying, tagging and importing…"))]);
-            import(st, r, &files, &out).await
-        }.await;
-        match res {
-            Ok((new, note)) => {
-                rm(&staging(st, r));
-                let svc = if url.contains("deezer") { "Deezer" } else if url.contains("tidal") { "Tidal" } else { "Qobuz" };
-                complete(st, r, &with_note(&format!("Downloaded from {svc} via streamrip"), &note), &new, json!({ "source": svc, "detail": "via streamrip", "url": url })).await;
-                return Ok(Out::Done);
+        let files = match streamrip::download_run(st, &url, &out).await {
+            Ok(run) => {
+                // streamrip's own words stay with the request on every outcome (its details show them)
+                storage::keep_output(r, "streamrip", &url, &run.log, true);
+                run.files
             }
             Err(e) if e.is::<Cancelled>() => return Err(e),
             Err(e) => {
-                st.db().log("warning", &format!("streamrip failed for {} ({url}): {e}", r.label()));
-                // the whole output stays in the request's log (the message shows its first lines)
+                // the whole output stays with the request, in its details (the message shows streamrip's words)
                 if let Some(log) = streamrip::run_log(&e) {
-                    log_push(r, format!("streamrip output for {url}:\n{log}"));
+                    log_push(r, format!("streamrip: {url} failed – its output is in the details"));
+                    storage::keep_output(r, "streamrip", &url, log, false);
                 }
-                last = e.to_string();
+                // the staging folder failed, not streamrip: the step waits for the storage
+                if let Some(se) = storage_error(st, &e) {
+                    storage::wait_for_storage(st, r, se, storage::STORAGE_DOWNLOAD)?;
+                    return Ok(Out::Wait);
+                }
+                last = encore_core::fsx::explain(&e);
+                storage::log_failure(st, r, "streamrip", &format!("{url}: {last}"));
+                continue;
+            }
+        };
+        upd(st, r, &[("status", json!("importing")), ("progress", json!(100)), ("message", json!("Verifying, tagging and importing…"))]);
+        let svc = if url.contains("deezer") { "Deezer" } else if url.contains("tidal") { "Tidal" } else { "Qobuz" };
+        let spec = storage::Spec::new("streamrip", true, json!({ "source": svc, "detail": "via streamrip", "url": url }), format!("Downloaded from {svc} via streamrip"));
+        match storage::import_checked(st, r, &files, &out, spec).await {
+            // done, or waiting for the storage with the files kept, or stopped with them kept: no other link
+            // or source is tried for a storage problem
+            Ok(_) => return Ok(Out::Done),
+            Err(e) if e.is::<Cancelled>() => return Err(e),
+            Err(e) => {
+                last = encore_core::fsx::explain(&e);
+                storage::log_failure(st, r, "streamrip", &format!("{url}: {last}"));
             }
         }
     }
     rm(&staging(st, r));
-    Ok(Out::Next(last.chars().take(300).collect::<String>()))
+    Ok(Out::Next(last))
 }
 
 pub(super) fn progress_cb(st: &impl Ctx, id: i64) -> impl Fn(f64) + Send + Sync {
@@ -554,15 +574,11 @@ pub(super) async fn start_ytdlp(st: &impl Ctx, r: &mut Req, pick_url: Option<Str
         upd(st, r, &[("status", json!("downloading")), ("message", json!(format!("Downloading {url}")))]);
         let res = ytdlp::download(st, &url, &out, false, Some(&cb)).await?;
         let Some(f) = res.files.first() else { return Ok(Out::Next("yt-dlp produced no audio".into())) };
-        let hint = r.hint().or(cover);
-        let mbid = r.opt("mbid");
-        match tagger::import_single(st, f, &r.s("artist"), &r.s("title"), mbid.as_deref(), &out, r.length(), true, hint.as_deref()).await {
-            Ok((new, note)) => {
-                rm(&out);
-                let src = if from_ytm { "YouTube Music" } else { "YouTube" };
-                complete(st, r, &with_note(&format!("Downloaded from {src}"), &note), &[new], json!({ "source": src, "url": url })).await;
-                Ok(Out::Done)
-            }
+        let src = if from_ytm { "YouTube Music" } else { "YouTube" };
+        let mut spec = storage::Spec::new("ytdlp", true, json!({ "source": src, "url": url }), format!("Downloaded from {src}"));
+        spec.hint = cover;
+        match storage::import_checked(st, r, std::slice::from_ref(f), &out, spec).await {
+            Ok(_) => Ok(Out::Done),
             Err(e) if e.is::<Rejected>() => {
                 rm(&out);
                 Ok(Out::Next(format!("YouTube match was the wrong audio ({e})")))
@@ -601,18 +617,23 @@ pub(super) async fn start_ytdlp(st: &impl Ctx, r: &mut Req, pick_url: Option<Str
                     return Ok(None);
                 }
                 upd(st, r, &[("status", json!("importing")), ("progress", json!(100)), ("message", json!("Verifying, tagging and importing…"))]);
-                Ok(Some(import(st, r, &dl.files, &out).await?.0))
+                Ok(Some(dl.files))
             }.await;
             match res {
-                Ok(Some(new)) => {
-                    rm(&out);
+                Ok(Some(files)) => {
                     let via = if pl.contains("bandcamp.com") { "Bandcamp" } else { "YouTube Music" };
-                    complete(st, r, &format!("Downloaded from {via}"), &new, json!({ "source": via, "detail": format!("album {title}"), "url": pl })).await;
-                    return Ok(Out::Done);
+                    let spec = storage::Spec::new("ytdlp", true, json!({ "source": via, "detail": format!("album {title}"), "url": pl }), format!("Downloaded from {via}"));
+                    match storage::import_checked(st, r, &files, &out, spec).await {
+                        Ok(_) => return Ok(Out::Done),
+                        Err(e) if e.is::<Cancelled>() => return Err(e),
+                        Err(e) => st.db().log("warning", &format!("YouTube Music album for {} failed: {}", r.label(), encore_core::fsx::explain(&e))),
+                    }
                 }
                 Ok(None) => {}
                 Err(e) if e.is::<Cancelled>() => return Err(e),
-                Err(e) => st.db().log("warning", &format!("YouTube Music album for {} failed: {e}", r.label())),
+                // the staging folder failed: the step waits for the storage
+                Err(e) if storage_error(st, &e).is_some() => return Err(e),
+                Err(e) => st.db().log("warning", &format!("YouTube Music album for {} failed: {}", r.label(), encore_core::fsx::explain(&e))),
             }
             rm(&out);
             if pick_url.is_some() {
@@ -635,7 +656,15 @@ pub(super) async fn start_ytdlp(st: &impl Ctx, r: &mut Req, pick_url: Option<Str
                 None => ytdlp::find_best(st, &artist, &title, len).await,
             };
             let url = url.filter(|u| !crate::report::url_blocked(st, u));
-            let got = match url { Some(u) => ytdlp::download(st, &u, &out.join(format!("{:02}", i + 1)), false, None).await.map(|d| d.files).unwrap_or_default(), None => vec![] };
+            let got = match url {
+                Some(u) => match ytdlp::download(st, &u, &out.join(format!("{:02}", i + 1)), false, None).await {
+                    Ok(d) => d.files,
+                    // the staging folder failed: the step waits for the storage (the tracks got so far stay)
+                    Err(e) if storage_error(st, &e).is_some() => return Err(e),
+                    Err(_) => vec![],
+                },
+                None => vec![],
+            };
             if got.is_empty() {
                 missing.push(title);
             }
@@ -646,13 +675,10 @@ pub(super) async fn start_ytdlp(st: &impl Ctx, r: &mut Req, pick_url: Option<Str
             return Ok(Out::Next(format!("YouTube missing {}/{n} tracks", missing.len())));
         }
         upd(st, r, &[("status", json!("importing")), ("progress", json!(100)), ("message", json!("Verifying, tagging and importing…"))]);
-        match import(st, r, &files, &out).await {
-            Ok((new, _)) => {
-                rm(&out);
-                let m = if missing.is_empty() { "Downloaded from YouTube".to_string() } else { format!("Downloaded from YouTube ({} track(s) missing)", missing.len()) };
-                complete(st, r, &m, &new, json!({ "source": "YouTube Music", "detail": "matched track by track" })).await;
-                Ok(Out::Done)
-            }
+        let m = if missing.is_empty() { "Downloaded from YouTube".to_string() } else { format!("Downloaded from YouTube ({} track(s) missing)", missing.len()) };
+        let spec = storage::Spec::new("ytdlp", true, json!({ "source": "YouTube Music", "detail": "matched track by track" }), m);
+        match storage::import_checked(st, r, &files, &out, spec).await {
+            Ok(_) => Ok(Out::Done),
             Err(e) if e.is::<Rejected>() => {
                 rm(&out);
                 Ok(Out::Next(format!("YouTube matches were wrong ({e})")))
@@ -662,7 +688,9 @@ pub(super) async fn start_ytdlp(st: &impl Ctx, r: &mut Req, pick_url: Option<Str
     }
 }
 
-/// Any link: downloaded as-is with yt-dlp, then tagged from what the files say.
+/// Any link: downloaded as-is with yt-dlp, then tagged from what the files say. A link whose files could
+/// not be imported is a failure with its reason, never "Downloaded 0 file(s)"; one whose songs were all in
+/// the library already says so.
 pub(super) async fn run_url(st: &impl Ctx, r: &mut Req) -> anyhow::Result<()> {
     let _slot = st.requests().ytdlp.acquire().await?;
     let out = staging(st, r);
@@ -673,76 +701,69 @@ pub(super) async fn run_url(st: &impl Ctx, r: &mut Req) -> anyhow::Result<()> {
         fail(st, r, "yt-dlp produced no audio files").await;
         return Ok(());
     }
+    // one video: the row shows its title and artist instead of the link
+    if res.entries.len() == 1 && r.opt("title").is_none() {
+        let e = &res.entries[0];
+        let mut set = vec![];
+        if let Some(t) = e["title"].as_str().filter(|t| !t.is_empty()) {
+            set.push(("title", json!(t)));
+        }
+        if let (Some(a), None) = (e["artist"].as_str().filter(|a| !a.is_empty()), r.opt("artist")) {
+            set.push(("artist", json!(a)));
+        }
+        upd(st, r, &set);
+    }
     upd(st, r, &[("status", json!("importing")), ("message", json!("Tagging and importing…"))]);
     let hint = r.hint().or_else(|| (res.entries.len() == 1).then(|| res.entries[0]["thumbnail"].as_str().map(String::from)).flatten());
-    let albums: std::collections::HashSet<String> = res.entries.iter().filter_map(|e| e["album"].as_str().filter(|a| !a.is_empty()).map(String::from)).collect();
-    let mut new = vec![];
-    if res.files.len() > 1 && albums.len() == 1 {
-        let artist = res.entries[0]["artist"].as_str().map(String::from).or(r.opt("artist")).unwrap_or("Unknown Artist".into());
-        new = tagger::import_album_files(st, &res.files, tagger::AlbumImport {
-            artist: &artist, album: albums.iter().next().unwrap(), rgid: None, source_root: &out, reject: false, source_meta: None, hint: hint.as_deref(),
-        }).await?;
-    } else {
-        for f in &res.files {
-            let t = encore_media::tags::read_tags(&f.to_string_lossy());
-            let (mut artist, mut title) = (t.s("artist"), t.s("title"));
-            let base = f.file_stem().unwrap_or_default().to_string_lossy().to_string();
-            if (artist.is_empty() || artist == "Unknown Artist") && base.contains(" - ") {
-                let (a, b) = base.split_once(" - ").unwrap();
-                (artist, title) = (a.to_string(), b.to_string());
-            }
-            let prefix = format!("{} - ", artist.to_lowercase());
-            if !artist.is_empty() && title.to_lowercase().starts_with(&prefix) {
-                title = title[prefix.len()..].to_string();
-            }
-            let artist = if artist.is_empty() { "Unknown Artist".to_string() } else { artist };
-            match tagger::import_single(st, f, &artist, &title, None, &out, None, false, hint.as_deref()).await {
-                Ok((p, _)) => new.push(p),
-                Err(e) => st.db().log("warning", &format!("Skipped {base}: {e}")),
-            }
-        }
-    }
-    rm(&out);
     let url = r.s("url");
     let host = reqwest::Url::parse(&url).ok().and_then(|u| u.host_str().map(String::from)).unwrap_or("link".into());
     let src = if host.contains("music.youtube") { "YouTube Music".to_string() } else { host.trim_start_matches("www.").to_string() };
-    complete(st, r, &format!("Downloaded {} file(s)", new.len()), &new, json!({ "source": src, "detail": "direct link", "url": url })).await;
-    Ok(())
+    let mut spec = storage::Spec::new("ytdlp", true, json!({ "source": src, "detail": "direct link", "url": url }), "");
+    spec.how = "url";
+    spec.hint = hint;
+    spec.entries = res.entries.iter().map(|e| json!({ "album": e["album"], "artist": e["artist"], "title": e["title"] })).collect();
+    storage::import_checked(st, r, &res.files, &out, spec).await.map(|_| ())
 }
 
+/// A Qobuz, Tidal or Deezer link: downloaded with streamrip, each folder it made imported by its tags.
 pub(super) async fn run_streamrip_url(st: &impl Ctx, r: &mut Req) -> anyhow::Result<()> {
     let _slot = st.requests().streamrip.acquire().await?;
     let out = staging(st, r);
     let url = r.s("url");
-    let files = match streamrip::download(st, &url, &out).await {
-        Ok(f) => f,
+    let files = match streamrip::download_run(st, &url, &out).await {
+        Ok(run) => {
+            storage::keep_output(r, "streamrip", &url, &run.log, true);
+            run.files
+        }
         Err(e) => {
-            // the whole output stays in the request's log before the failure is recorded
+            // the whole output stays with the request, in its details, before the failure (or the wait) is
+            // recorded
             if let Some(log) = streamrip::run_log(&e) {
-                log_push(r, format!("streamrip output for {url}:\n{log}"));
+                log_push(r, format!("streamrip: {url} failed – its output is in the details"));
+                storage::keep_output(r, "streamrip", &url, log, false);
                 upd(st, r, &[]);
             }
             return Err(e);
         }
     };
     upd(st, r, &[("status", json!("importing")), ("message", json!("Tagging and importing…"))]);
-    let mut groups: std::collections::BTreeMap<PathBuf, Vec<PathBuf>> = Default::default();
-    for f in files {
-        groups.entry(f.parent().unwrap().to_path_buf()).or_default().push(f);
-    }
-    let mut new = vec![];
-    for fs in groups.values() {
-        let t = encore_media::tags::read_tags(&fs[0].to_string_lossy());
-        if fs.len() > 1 {
-            new.extend(tagger::import_album_files(st, fs, tagger::AlbumImport {
-                artist: &t.s("albumartist"), album: &t.s("album"), rgid: None, source_root: &out, reject: false, source_meta: None, hint: None,
-            }).await?);
-        } else {
-            new.push(tagger::import_single(st, &fs[0], &t.s("artist"), &t.s("title"), None, &out, None, false, None).await?.0);
-        }
-    }
-    rm(&out);
     let svc = if url.contains("deezer") { "Deezer" } else if url.contains("tidal") { "Tidal" } else { "Qobuz" };
-    complete(st, r, &format!("Downloaded {} file(s) via streamrip", new.len()), &new, json!({ "source": svc, "detail": "via streamrip", "url": url })).await;
-    Ok(())
+    let mut spec = storage::Spec::new("streamrip", true, json!({ "source": svc, "detail": "via streamrip", "url": url }), "");
+    spec.how = "rip_url";
+    storage::import_checked(st, r, &files, &out, spec).await.map(|_| ())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::q;
+
+    #[test]
+    fn queries_spell_out_the_symbols_that_stand_for_letters() {
+        assert_eq!(q(&["Ke$ha", "Cannibal"]), "Kesha Cannibal");
+        assert_eq!(q(&["P!nk", "Funhouse"]), "Pink Funhouse");
+        assert_eq!(q(&["A$AP Rocky", "Testing (Deluxe)"]), "AsAP Rocky Testing");
+        // other symbols still go, and empty parts are left out
+        assert_eq!(q(&["AC/DC", "", "Back in Black [Remastered]"]), "AC DC Back in Black");
+        assert_eq!(q(&["Panic! at the Disco", "Pray for the Wicked"]), "Panic at the Disco Pray for the Wicked");
+    }
 }

@@ -257,6 +257,12 @@ class SettingsRulesTest {
         assertTrue(text.contains("  app_name = null  [saved]"))
         assertEquals("Killed by the system", SettingsRules.crashKind("signaled"))
         assertEquals("Crash", SettingsRules.crashKind(""))
+        // an app crash as its dialog and Copy have it: what, where, when, then the whole report
+        assertEquals(
+            "java.lang.IllegalStateException: boom\nCrash\nPixel 8 · 0.30.0 · Android 16 · caz\n<time>\n\nat a.b.C.d(C.kt:1)\nat e.f.G.h(G.kt:2)",
+            SettingsRules.crashText("java.lang.IllegalStateException: boom", "Crash", "Pixel 8 · 0.30.0 · Android 16 · caz", "<time>", "at a.b.C.d(C.kt:1)\nat e.f.G.h(G.kt:2)\n"),
+        )
+        assertEquals("Crash\nNot responding\n<time>", SettingsRules.crashText("Crash", "Not responding", "", "<time>", "  "))
     }
 
     @Test

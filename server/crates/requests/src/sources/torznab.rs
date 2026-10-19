@@ -37,7 +37,9 @@ pub async fn search(st: &impl Ctx, query: &str) -> anyhow::Result<Vec<Value>> {
 
 /// Search every indexer in these Newznab categories.
 pub async fn search_in(st: &impl Ctx, query: &str, cats: &[&str]) -> anyhow::Result<Vec<Value>> {
-    let mut q: Vec<(&str, &str)> = vec![("query", query), ("type", "search"), ("limit", "100")];
+    // indexers spell Ke$ha "Kesha": the query too ([`fold_symbols`])
+    let query = fold_symbols(query);
+    let mut q: Vec<(&str, &str)> = vec![("query", query.as_str()), ("type", "search"), ("limit", "100")];
     q.extend(cats.iter().map(|c| ("categories", *c)));
     let r = st.http().get(format!("{}/api/v1/search", base(st, "prowlarr_url")))
         .query(&q)
@@ -106,13 +108,53 @@ fn contains_song(hay: &str, song: &str) -> f64 {
 fn title_words(s: &str) -> String {
     ascii_words(&s.replace('&', " and "))
 }
+
+/// A name with the symbols that stand for letters spelled out, everything else as it is: "$" next to a
+/// letter (or next to a run of "$" that is) reads as "s" (Ke$ha → Kesha, A$AP → AsAP, Bada$$ → Badass,
+/// $uicideboy$ → suicideboys, Ty Dolla $ign → Ty Dolla sign), "!" between two letters as "i" (P!nk →
+/// Pink; "Panic! at" and "Wham!" keep it). Indexers and scene names spell those artists with letters.
+/// For search queries too: "Ke$ha Cannibal" → "Kesha Cannibal", where stripping the symbol gave "Ke ha".
+pub fn fold_symbols(s: &str) -> String {
+    let c: Vec<char> = s.chars().collect();
+    let letter = |i: usize| c.get(i).is_some_and(|x| x.is_alphabetic());
+    // past a run of "$" from i in direction `step`: is the first other character a letter?
+    let letter_past_dollars = |i: usize, step: isize| {
+        let mut j = i as isize;
+        while j >= 0 && (j as usize) < c.len() && c[j as usize] == '$' {
+            j += step;
+        }
+        j >= 0 && letter(j as usize)
+    };
+    c.iter().enumerate().map(|(i, &x)| match x {
+        '$' if letter_past_dollars(i, -1) || letter_past_dollars(i, 1) => 's',
+        '!' if i > 0 && letter(i - 1) && letter(i + 1) => 'i',
+        x => x,
+    }).collect()
+}
+
+/// [`title_words`] for comparing a name with release and file names whatever their spelling:
+/// [`fold_symbols`], apostrophes dropped (Don't → dont, the way scene names write it) and accents folded
+/// (Beyoncé → beyonce).
+pub fn match_words(s: &str) -> String {
+    // a "$" left over is a symbol, not a letter ("$100 Bill"): a break, before matcher::fold reads it as "s"
+    let t: String = fold_symbols(s).chars().filter(|c| *c != '\'' && *c != '’').map(|c| if c == '$' { ' ' } else { c }).collect();
+    title_words(&encore_library::matcher::fold(&t))
+}
+
+/// The share of `needle`'s words found in `hay`, the better of two readings of both: the plain words
+/// ("Ke$ha" → "ke ha") and [`match_words`] ("Ke$ha" → "kesha"). So "Ke$ha" matches a release named
+/// "Kesha" and one named "Ke$ha", and no match of the plain reading is lost.
 fn contains(hay: &str, needle: &str) -> f64 {
-    let n = title_words(needle);
+    contains_with(hay, needle, title_words).max(contains_with(hay, needle, match_words))
+}
+
+fn contains_with(hay: &str, needle: &str, words: fn(&str) -> String) -> f64 {
+    let n = words(needle);
     let w: Vec<&str> = n.split_whitespace().collect();
     if w.is_empty() {
         return 1.0;
     }
-    let h = format!(" {} ", title_words(hay));
+    let h = format!(" {} ", words(hay));
     w.iter().filter(|x| h.contains(&format!(" {x} "))).count() as f64 / w.len() as f64
 }
 

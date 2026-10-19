@@ -100,7 +100,12 @@ fn slskd_row(f: &Value) -> String {
         else if ["Errored", "Rejected", "TimedOut", "Cancelled"].iter().any(|k| state.contains(k)) { "err" }
         else { "info" };
     let speed = if f.truthy("speed") { format!(" · {}/s", fmt::size(f.f("speed"))) } else { String::new() };
-    format!(r#"<tr><td><div class="ellipsis" style="max-width:420px;font-weight:600">{}</div><div class="small faint ellipsis" style="max-width:420px">{} · {}</div></td>
+    // slskd's reason for a failed transfer, whole on a click, with Copy (R1)
+    let error = if f.truthy("error") {
+        format!(r#"<div class="small" style="color:var(--err);max-width:420px;overflow-wrap:anywhere"{}>{}</div>"#,
+            crate::details::attrs("Transfer error", &format!("{}\n{}\n{}", f.s("username"), f.s("filename"), f.s("error"))), esc(&f.s("error")))
+    } else { String::new() };
+    format!(r#"<tr><td><div class="ellipsis" style="max-width:420px;font-weight:600">{}</div><div class="small faint ellipsis" style="max-width:420px">{} · {}</div>{error}</td>
           <td class="hide-sm muted">{}</td>
           <td><span class="badge {}">{}</span></td>
           <td><div class="progress"><i style="width:{}%"></i></div><div class="small faint">{}%{}</div></td></tr>"#,
@@ -109,7 +114,10 @@ fn slskd_row(f: &Value) -> String {
 
 /// One `.list-item` of the torrents/Usenet list (the `tor.map(q => …)` row).
 fn torrent_row(q: &Value) -> String {
-    let message = if q.truthy("message") { format!(r#"<div class="small muted">{}</div>"#, esc(&q.s("message"))) } else { String::new() };
+    // the whole message on a click, with Copy (R1)
+    let message = if q.truthy("message") {
+        format!(r#"<div class="small muted"{}>{}</div>"#, crate::details::attrs(&format!("{} – {}", q.s("artist"), q.s("title")), &q.s("message")), esc(&q.s("message")))
+    } else { String::new() };
     format!(r#"<div class="list-item"><div class="grow"><b>{} – {}</b>
           {}
           <div class="progress" style="margin-top:6px;max-width:420px"><i style="width:{}%"></i></div></div></div>"#,
@@ -120,8 +128,15 @@ fn torrent_row(q: &Value) -> String {
 fn log_row(l: &Value) -> String {
     let level = l.s("level");
     let cls = if level == "error" { "err" } else if level == "warning" { "warn" } else { "" };
+    let when = fmt::date(l.f("ts"));
+    // a click opens the line with its level and time, to read and copy (R1)
     format!(r#"<div class="list-item" style="padding:8px 16px">
       <span class="badge {}" style="width:68px;justify-content:center">{}</span>
-      <span class="grow small">{}</span><span class="small faint" title="{}">{}</span></div>"#,
-        cls, esc(&level), esc(&l.s("message")), fmt::date(l.f("ts")), fmt::ago(l.f("ts")))
+      <span class="grow small log-text"{}>{}</span><span class="small faint" title="{}">{}</span></div>"#,
+        cls, esc(&level), crate::details::attrs("Log entry", &log_text(l, &when)), esc(&l.s("message")), when, fmt::ago(l.f("ts")))
+}
+
+/// One log line as text: "warning · 19/10/2026, 14:10:00" and the message under it.
+pub fn log_text(l: &Value, when: &str) -> String {
+    format!("{} · {when}\n{}", l.s("level"), l.s("message"))
 }

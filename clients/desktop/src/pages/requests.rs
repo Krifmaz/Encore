@@ -1,7 +1,9 @@
 //! Requests: Your requests and, for admins, everyone's. Behaviour reference: web-rs/src/pages/requests.rs.
 //! The tabs filter by status, admins see everyone's requests with an "Only mine" switch, Retry
 //! failed and Clear finished; the list reloads every 4 s. The rows, their buttons and menus
-//! live in `widgets::request_list` (the Downloader shares them).
+//! live in `widgets::request_list` (the Downloader shares them), and so does the banner that says
+//! imports are paused while the library can't be written. "Active" includes waiting requests
+//! (the server's `status=active`).
 
 use crate::api::ApiError;
 use crate::fmt;
@@ -42,6 +44,18 @@ pub enum Message {
     Me(Result<Value, ApiError>),
     Tick,
     GoDiscover,
+}
+
+impl State {
+    /// The request whose details the screenshot tour opens: the first that did not complete,
+    /// else the first.
+    pub fn first_request(&self) -> Option<i64> {
+        let rows = self.list.rows();
+        rows.iter()
+            .find(|r| r["status"].as_str() != Some("completed"))
+            .or(rows.first())
+            .map(|r| fmt::i(r, "id"))
+    }
 }
 
 /// The query of the current tab and switch, as the web builds it.
@@ -152,14 +166,13 @@ pub fn view<'a>(state: &'a State, ctx: &Ctx<'a>) -> El<'a, Message> {
         Some(rows) => rows.map(Message::List),
         None => widgets::empty::empty_with(Icon::Inbox, "Nothing here", "", Some(note.into())),
     };
-    column![
-        head,
-        tabs(&TABS, &state.filter, Message::Filter),
-        card_flat(list).width(Length::Fill),
-    ]
-    .spacing(16)
-    .width(Length::Fill)
-    .into()
+    let mut page = column![head].spacing(16).width(Length::Fill);
+    if let Some(b) = request_list::storage_banner(ctx, &state.list) {
+        page = page.push(b.map(Message::List));
+    }
+    page.push(tabs(&TABS, &state.filter, Message::Filter))
+        .push(card_flat(list).width(Length::Fill))
+        .into()
 }
 
 /// A modal or ⋯ menu to lay over the whole window, when one is open.

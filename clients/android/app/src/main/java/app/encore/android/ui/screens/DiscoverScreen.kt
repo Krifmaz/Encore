@@ -279,6 +279,7 @@ private val LIVE_STATUS: Map<String, Pair<String, String>> = mapOf(
     "monitoring" to ("accent" to "Downloading"),
     "downloading" to ("accent" to "Downloading"),
     "importing" to ("accent" to "Importing"),
+    "waiting" to ("warn" to "Waiting"),
     "completed" to ("ok" to "In library"),
     "failed" to ("err" to "Failed"),
     "denied" to ("err" to "Denied"),

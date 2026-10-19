@@ -10,10 +10,17 @@ pub async fn step<C: Ctx>(st: C, id: i64) {
         return;
     }
     let source = r.s("source");
+    let reason = r.d["wait"]["reason"].as_str().unwrap_or("").to_string();
     let res = match (status.as_str(), source.as_str()) {
+        // waiting for the storage: the import (or the staging folder's source step) again once it's due
+        ("waiting", _) if reason == storage::STORAGE_IMPORT || reason == storage::STORAGE_DOWNLOAD => storage::retry(&st, &mut r).await,
         // waiting for Soulseek: go on where it stopped (the Soulseek step is first in its sources; a picked
-        // file starts over from its pick)
-        ("queued", "slskd" | "slskd_lossless") if r.d["soulseek_wait"].is_object() && r.d["sources"].is_array() && !r.d["pick"].is_object() => next_source(&st, &mut r, "").await,
+        // file starts over from its pick). A request parked by an older version is still `queued`.
+        ("waiting", _) | ("queued", "slskd" | "slskd_lossless") if r.d["soulseek_wait"].is_object() && r.d["sources"].is_array() && !r.d["pick"].is_object() => next_source(&st, &mut r, "").await,
+        // a picked Soulseek file asked for again
+        ("waiting", _) if r.d["soulseek_wait"].is_object() && r.d["pick"].is_object() => start(&st, &mut r).await,
+        // never a new download for a waiting request
+        ("waiting", _) => Ok(()),
         ("queued", _) => start(&st, &mut r).await,
         ("downloading", "slskd" | "slskd_lossless") => poll_slskd(&st, &mut r).await,
         ("downloading" | "monitoring", "torznab") => poll_torznab(&st, &mut r).await,
@@ -27,27 +34,43 @@ pub async fn step<C: Ctx>(st: C, id: i64) {
         tracing::warn!("request {id}: {e:#}");
         if let Some(mut r) = get(&st, id) {
             if ACTIVE.contains(&r.s("status").as_str()) {
-                if !r.s("source").is_empty() && r.d["sources"].is_array() {
-                    let _ = next_source(&st, &mut r, &format!("error: {e}")).await;
+                storage::register_roots(&st);
+                if let Some(se) = encore_core::fsx::storage(&e) {
+                    // a storage error that came this far (a download's folder): the step waits, it didn't fail
+                    let reason = if r.d["kept"].is_object() { storage::STORAGE_IMPORT } else { storage::STORAGE_DOWNLOAD };
+                    let _ = storage::wait_for_storage(&st, &mut r, se, reason);
+                } else if !r.s("source").is_empty() && r.d["sources"].is_array() {
+                    let _ = next_source(&st, &mut r, &format!("error: {}", encore_core::fsx::explain(&e))).await;
                 } else {
-                    fail(&st, &mut r, &e.to_string()).await;
+                    fail(&st, &mut r, &encore_core::fsx::explain(&e)).await;
                 }
             }
         }
     }
 }
 
-/// Reset requests that were mid-task when the server stopped.
-pub(super) fn recover(st: &impl Ctx) {
+/// Reset requests that were mid-task when the server stopped. Downloaded files are never thrown away for
+/// it: an import that was running goes back to waiting for its import ([`storage::recover`], which also
+/// rescues failed requests whose files are still there), and a Soulseek or torrent download that was being
+/// imported is looked at again where it is (its files are in the client's folder).
+pub fn recover(st: &impl Ctx) {
+    storage::register_roots(st);
+    storage::recover(st);
     for r in st.db().query("SELECT id, status, source, detail FROM requests WHERE status IN ('searching','importing','downloading')", p![]).unwrap_or_default() {
-        if r.s("status") == "downloading" && ["slskd", "slskd_lossless", "torznab"].contains(&r.s("source").as_str()) {
+        let client = ["slskd", "slskd_lossless", "torznab"].contains(&r.s("source").as_str());
+        if r.s("status") == "downloading" && client {
+            continue;
+        }
+        if r.s("status") == "importing" && client {
+            let _ = st.db().execute("UPDATE requests SET status='downloading', message='Importing again after a server restart', updated_at=? WHERE id=?", p![now(), r.i("id")]);
             continue;
         }
         // what was asked for stays (length, ISRC, Deezer/Apple ids, the ticked release types), and a
         // reported song's replacement keeps what it replaces and which source to avoid
         let old: Value = serde_json::from_str(&r.s("detail")).unwrap_or(json!({}));
         let mut d = json!({});
-        for k in ["replace", "avoid", "album_mode", "release_filter", "release_ids", "length", "isrc", "ext", "attempts", "log"] {
+        // (downloaded files kept for their import stay too: the import runs again, nothing is downloaded)
+        for k in ["replace", "avoid", "album_mode", "release_filter", "release_ids", "length", "isrc", "ext", "attempts", "log", "pick", "kept"] {
 
             if !old[k].is_null() {
                 d[k] = old[k].clone();
@@ -60,6 +83,7 @@ pub(super) fn recover(st: &impl Ctx) {
 pub async fn run<C: Ctx>(st: C) {
     recover(&st);
     loop {
+        let _ = storage::tick(&st); // a paused import's health check every 10 minutes, started and not waited for
         let ids: Vec<i64> = st.db().query(&format!("SELECT id FROM requests WHERE status IN ({}) ORDER BY id", vec!["?"; ACTIVE.len()].join(",")),
             ACTIVE.iter().map(|s| json!(s)).collect()).unwrap_or_default().into_iter().map(|r| r.i("id")).collect();
         {
@@ -79,20 +103,24 @@ pub async fn run<C: Ctx>(st: C) {
     }
 }
 
-/// Stop work on a request (its downloads are cancelled in slskd / the download client).
+/// Stop work on a request: a download in progress is cancelled in slskd / the download client, and
+/// Encore's own staging folder of the request goes. Finished files that wait in a download client's folder
+/// for their import are never deleted (the client's folder is the client's).
 pub async fn cancel(st: &impl Ctx, id: i64) {
     let Some(r) = get(st, id) else { return };
+    if let Some(h) = st.requests().tasks.0.lock().unwrap().remove(&id) {
+        h.abort();
+    }
+    let kept = r.d["kept"].is_object();
     let src = r.s("source");
-    if src.starts_with("slskd") {
+    if src.starts_with("slskd") && !kept {
         let idx = r.d["slskd"]["idx"].as_i64().unwrap_or(-1);
         if let Some(c) = r.d["slskd"]["candidates"].get(idx.max(0) as usize).filter(|_| idx >= 0) {
             slskd_cancel_current(st, c).await;
         }
     }
-    if let Some(tid) = r.d["torznab"]["id"].as_str() {
+    if let (Some(tid), false) = (r.d["torznab"]["id"].as_str(), kept) {
         torznab::remove(st, tid).await;
     }
-    if let Some(h) = st.requests().tasks.0.lock().unwrap().remove(&id) {
-        h.abort();
-    }
+    storage::remove_staging(st, id);
 }

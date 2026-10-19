@@ -2,7 +2,7 @@
 //! fingerprints and MusicBrainz ISRCs for songs the audio confirmed, and how albums missing from
 //! MusicBrainz get added.
 
-use super::{env_locked, help, input, link, result_line, switch_maybe};
+use super::{env_locked, help, input, link, result_line_copy, switch_maybe};
 use crate::api::ApiError;
 use crate::fmt;
 use crate::pages::{Ctx, El};
@@ -40,6 +40,8 @@ pub enum Message {
     MbDisconnect,
     MbDisconnected(Result<Value, ApiError>),
     OpenUrl(String),
+    /// Copy a failed result's words.
+    CopyText(String),
 }
 
 fn reload(ctx: &Ctx) -> Task<Message> {
@@ -170,6 +172,7 @@ pub fn update(state: &mut State, msg: Message, ctx: &mut Ctx) -> Task<Message> {
             return reload(ctx);
         }
         Message::OpenUrl(u) => ctx.open_url(u),
+        Message::CopyText(text) => ctx.copy_text(text),
     }
     Task::none()
 }
@@ -236,7 +239,7 @@ pub fn view<'a>(state: &'a State, _ctx: &Ctx<'a>) -> El<'a, Message> {
     let (a, m) = (&d["acoustid"], &d["isrc"]);
     let mut intro = vec![help("Encore leans on AcoustID and MusicBrainz to know what a file is. Here it can give back: fingerprints of songs whose recording the audio confirmed, ISRCs MusicBrainz is missing, and albums that are only on Deezer or Apple Music. Only songs Encore is sure about are sent; nothing is sent until you add your own keys.").into()];
     if let Some((ok, msg)) = &state.flash {
-        intro.push(result_line(*ok, msg.as_str()));
+        intro.push(result_line_copy(*ok, msg, Message::CopyText));
     }
     let intro_card = super::card("Contribute", intro);
 

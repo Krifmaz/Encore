@@ -94,6 +94,8 @@ pub enum Message {
     Picked(Result<Value, ApiError>),
     /// A settings link in a hint (`#/settings?s=slskd`).
     OpenSettings(String),
+    /// Copy a source's error in full.
+    CopyError(String),
     Close,
 }
 
@@ -418,6 +420,7 @@ pub fn update(state: &mut State, msg: Message, ctx: &mut Ctx) -> Task<Message> {
             ctx.navigate(settings_page(&hash));
             state.closed = true;
         }
+        Message::CopyError(text) => ctx.copy_text(text),
         Message::Close => state.closed = true,
     }
     Task::none()
@@ -553,12 +556,21 @@ fn section<'a>(ctx: &Ctx<'a>, state: &State, src: &str) -> El<'a, Message> {
             .into();
     }
     if let Some(err) = state.errors.get(src).filter(|e| !e.message.is_empty()) {
+        // the whole error, wrapped, and Copy for a bug report
+        let copy = super::details::copy_btn(Message::CopyError(format!("{name}: {}", err.message)));
         return col
             .push(
-                container(hint_line(&err.message, &err.settings, &err.label, true))
-                    .padding([8, 12])
-                    .width(Length::Fill)
-                    .style(theme::error_box),
+                container(
+                    row![
+                        container(hint_line(&err.message, &err.settings, &err.label, true)).width(Length::Fill),
+                        copy
+                    ]
+                    .spacing(8)
+                    .align_y(Alignment::Center),
+                )
+                .padding([8, 12])
+                .width(Length::Fill)
+                .style(theme::error_box),
             )
             .into();
     }

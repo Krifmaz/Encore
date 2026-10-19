@@ -306,6 +306,8 @@ pub enum Message {
     ClearFinished,
     Cleared(Result<Value, ApiError>),
     GoSettings,
+    /// Copy an error in full (the status line, a search, a transfer).
+    CopyText(String),
 }
 
 fn load_status(ctx: &Ctx) -> Task<Message> {
@@ -720,6 +722,7 @@ pub fn update(state: &mut State, msg: Message, ctx: &mut Ctx) -> Task<Message> {
             }
         }
         Message::GoSettings => ctx.navigate(settings_page("#/settings?s=slskd")),
+        Message::CopyText(text) => ctx.copy_text(text),
     }
     Task::none()
 }
@@ -849,19 +852,38 @@ fn status_line<'a>(state: &'a State, ctx: &Ctx<'a>) -> El<'a, Message> {
         _ => p.faint,
     };
     let mut r = row![dot(color)].spacing(6).align_y(Alignment::Center);
+    let (r_words, linked) = status_words_linked(&parts);
     let n = parts.len();
     for (i, (words, warn)) in parts.into_iter().enumerate() {
+        // a sentence that ends "… – fix them in Settings → Soulseek" (the server's words) links its own
+        // last words to the card instead of repeating them
+        let words = if linked && i + 1 == n { words[..words.len() - SETTINGS_LINK.len()].trim_end().to_string() } else { words };
         let mut txt = t(words).size(12.5);
         txt = if warn { txt.color(p.warn) } else { txt.color(p.muted) };
         r = r.push(txt);
-        if i + 1 < n || with_settings {
+        if (i + 1 < n || with_settings) && !(linked && i + 1 == n) {
             r = r.push(small_muted("·"));
         }
     }
-    if with_settings {
-        r = r.push(link("Settings → Soulseek", Message::GoSettings));
+    if with_settings || linked {
+        r = r.push(link(SETTINGS_LINK, Message::GoSettings));
+    }
+    // why it is not working, in full, for a report
+    if matches!(kind, "err" | "warn") {
+        r = r.push(widgets::details::copy_btn(Message::CopyText(r_words)));
     }
     r.wrap().into()
+}
+
+/// The settings link's words, which the server's sentences end with away from the card.
+const SETTINGS_LINK: &str = "Settings → Soulseek";
+
+/// The status line's words as one text (for Copy), and whether its last sentence ends with the
+/// settings link's words.
+fn status_words_linked(parts: &[(String, bool)]) -> (String, bool) {
+    let all = parts.iter().map(|(w, _)| w.as_str()).collect::<Vec<_>>().join(" · ");
+    let linked = parts.last().is_some_and(|(w, _)| w.ends_with(SETTINGS_LINK) && w.len() > SETTINGS_LINK.len());
+    (all, linked)
 }
 
 fn user_badges<'a>(u: &Value) -> Vec<El<'a, Message>> {
@@ -1089,7 +1111,16 @@ fn search_view<'a>(state: &'a State, ctx: &Ctx<'a>) -> El<'a, Message> {
             Some(small_muted(format!("{} · {} for “{q}”", plural(*n, "user"), plural(*files, "file"))).into())
         }
         SearchStatus::Done { .. } => None,
-        SearchStatus::Err(e) => Some(t(e.as_str()).size(12).color(p.err).into()),
+        SearchStatus::Err(e) => Some(
+            row![
+                t(e.as_str()).size(12).color(p.err),
+                widgets::details::copy_btn(Message::CopyText(e.clone())),
+            ]
+            .spacing(6)
+            .align_y(Alignment::Center)
+            .wrap()
+            .into(),
+        ),
     };
     let mut col = column![form].spacing(10).width(Length::Fill);
     if let Some(s) = status {
@@ -1169,7 +1200,15 @@ fn transfers_view<'a>(state: &'a State, ctx: &Ctx<'a>) -> El<'a, Message> {
                     .wrapping(iced::widget::text::Wrapping::WordOrGlyph),
             );
             if fmt::truthy(x, "error") {
-                file = file.push(t(fmt::s(x, "error")).size(12).color(p.err));
+                let full = format!("{}\n{}\n{}", fmt::s(x, "username"), fmt::s(x, "filename"), fmt::s(x, "error"));
+                file = file.push(
+                    row![
+                        t(fmt::s(x, "error")).size(12).color(p.err).width(Length::Fill),
+                        widgets::details::copy_btn(Message::CopyText(full)),
+                    ]
+                    .spacing(6)
+                    .align_y(Alignment::Center),
+                );
             }
             let mut speed = column![].spacing(2);
             if active && fmt::truthy(x, "speed") {
@@ -1484,7 +1523,10 @@ mod tests {
         assert!(parts[0].1 && parts[0].0.starts_with("Disconnected – the login timed out"));
         let rejected = json!({ "enabled": true, "state": "running", "session": { "state": "stopped", "reason": "rejected", "text": "Rejected: invalid username or password – fix them below" } });
         let (dot, parts, _) = status_parts(&rejected, "");
-        assert_eq!((dot, parts[0].0.as_str()), ("err", "Rejected: invalid username or password"));
+        assert_eq!((dot, parts[0].0.as_str()), ("err", "Rejected: invalid username or password – fix them in Settings → Soulseek"));
+        // the line links the sentence's last words to the card instead of saying them twice
+        assert_eq!(status_words_linked(&parts), ("Rejected: invalid username or password – fix them in Settings → Soulseek".to_string(), true));
+        assert!(!status_words_linked(&[("Signed in as me".to_string(), false)]).1);
         let limited = json!({ "enabled": true, "state": "running", "logged_in": true, "username": "me", "shares": { "files": 0 },
             "session": { "state": "logged_in", "reason": "rate_limited", "text": "Logged in as me since 14:02. Rate limited by the Soulseek server – next search at 14:05" } });
         let (dot, parts, _) = status_parts(&limited, "");

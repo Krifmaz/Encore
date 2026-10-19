@@ -103,8 +103,15 @@ fn failed_twin(st: &impl Ctx, b: &NewRequest, artist: Option<&str>, title: Optio
 
 /// The `detail` of a request that is asked for again: the new request's detail plus the attempt count and
 /// the previous attempt's log, ending with how it ended.
+///
+/// The attempts rule: `attempts` counts the runs at the sources that got a real answer from them – the run
+/// before ended `failed` or `completed`. A run that was cancelled or taken over while it ran, a wait for
+/// Soulseek or for the storage, and an import that failed with its downloaded files kept (the source did
+/// its part) never count. Downloaded files that are kept go along, so asking again imports them instead of
+/// downloading them again (unless the new ask is a pick of something else).
 pub fn detail_for_retry(old_detail: &Value, old_status: &str, old_message: &str, mut detail: Value) -> Value {
     let attempts = old_detail["attempts"].as_u64().unwrap_or(1);
+    let counted = matches!(old_status, "failed" | "completed") && !old_detail["kept"].is_object();
     let mut log: Vec<Value> = old_detail["log"].as_array().cloned().unwrap_or_default().into_iter()
         .map(|l| match l.as_str() { Some(s) if s.chars().count() > KEPT_LOG_CHARS => json!(s.chars().take(KEPT_LOG_CHARS).collect::<String>() + "…"), _ => l }).collect();
     let ended = format!("attempt {attempts} {old_status}: {}", old_message.chars().take(KEPT_LOG_CHARS).collect::<String>()).trim_end_matches([':', ' ']).to_string();
@@ -112,8 +119,11 @@ pub fn detail_for_retry(old_detail: &Value, old_status: &str, old_message: &str,
     if log.len() > KEPT_LOG_LINES {
         log.drain(..log.len() - KEPT_LOG_LINES);
     }
-    detail["attempts"] = json!(attempts + 1);
+    detail["attempts"] = json!(if counted { attempts + 1 } else { attempts });
     detail["log"] = json!(log);
+    if old_detail["kept"].is_object() && detail["pick"].is_null() {
+        detail["kept"] = old_detail["kept"].clone();
+    }
     detail
 }
 

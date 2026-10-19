@@ -100,11 +100,19 @@ struct ToolsInner {
 }
 
 /// Run `<exe> <arg>` (None: it did not start). A file that is still being written ("Text file busy") is
-/// tried again a few times.
+/// tried again a few times. Nothing interactive: stdin is /dev/null, no controlling terminal (a session of
+/// its own: streamrip 2.4.9 draws a spinner for its update check even for `--version`), plain output.
 fn probe(exe: &Path, arg: &str) -> Option<Answer> {
+    use std::os::unix::process::CommandExt;
     let mut tries = 0;
     let o = loop {
-        match std::process::Command::new(exe).arg(arg).stdin(std::process::Stdio::null()).output() {
+        let mut cmd = std::process::Command::new(exe);
+        cmd.arg(arg).stdin(std::process::Stdio::null()).env("TERM", "dumb").env("NO_COLOR", "1");
+        // SAFETY: setsid is async-signal-safe; nothing else runs between fork and exec
+        unsafe {
+            cmd.pre_exec(|| if libc::setsid() == -1 { Err(std::io::Error::last_os_error()) } else { Ok(()) });
+        }
+        match cmd.output() {
             Err(e) if e.raw_os_error() == Some(26) && tries < 5 => {
                 tries += 1;
                 std::thread::sleep(Duration::from_millis(50 * tries));

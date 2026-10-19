@@ -46,7 +46,7 @@ RUN apt-get update \
 # download tools Encore runs as programs: yt-dlp (YouTube, SoundCloud, Bandcamp …) and, optionally,
 # streamrip (Qobuz/Tidal/Deezer with your own subscription). Build with --build-arg INSTALL_STREAMRIP=false to skip it.
 ARG INSTALL_STREAMRIP=true
-ARG STREAMRIP_REF=v2.4.9
+ARG STREAMRIP_REF=v2.4.10
 # The streamrip fork needs Python 3.14+, newer than Debian's python3, so uv fetches a standalone 3.14 for the
 # tools' venv. No silent fallback to PyPI's streamrip 2.1.0: its Tidal client was revoked, so a failed install
 # must fail the build instead of shipping a streamrip that cannot sign in to Tidal.

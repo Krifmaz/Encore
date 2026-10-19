@@ -46,6 +46,8 @@ pub fn label(status: &str, message: &str) -> &'static str {
         "searching" => "Searching",
         "downloading" | "monitoring" => "Downloading",
         "importing" => "Importing",
+        // waiting for Soulseek, or for the storage with the download kept
+        "waiting" => "Waiting",
         "completed" => "In library",
         "failed" => {
             // no source had it ("All sources exhausted (…)") – unless what went wrong was the import; a
@@ -124,6 +126,7 @@ mod tests {
         assert_eq!(label("queued", ""), "Requested");
         assert_eq!(label("monitoring", ""), "Downloading");
         assert_eq!(label("completed", ""), "In library");
+        assert_eq!(label("waiting", "Waiting: library storage error – import failed: mkdir /music/A: Input/output error (os error 5)"), "Waiting");
         assert_eq!(label("failed", "All sources exhausted (slskd: no results)"), "Not found");
         assert_eq!(label("failed", "Import failed: disk full"), "Failed");
         assert_eq!(label("failed", "Downloaded files not found under /downloads – check the shared volume mapping"), "Failed");

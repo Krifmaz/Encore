@@ -1,7 +1,8 @@
 //! The picker against mock services (no network): song picks from torrent and Usenet indexers (a mock
 //! Prowlarr), the source state table, and the Tidal and Qobuz catalogue searches with their quality labels.
 use super::*;
-use axum::extract::{Path, RawQuery};
+use axum::extract::{Path, Query, RawQuery};
+use axum::http::StatusCode;
 use axum::http::HeaderMap;
 use std::sync::{Arc, Mutex};
 
@@ -73,6 +74,13 @@ async fn song_search_finds_singles_and_the_album() {
     let ab = SearchBody { source: "torznab".into(), kind: "album".into(), artist: "Travis Scott".into(), title: "Rodeo".into(), ..Default::default() };
     let out = search_torznab(&st, &ab, "Travis Scott Rodeo").await.unwrap();
     assert!(out.iter().all(|x| x["payload"]["song_only"].is_null()) && !out.is_empty());
+    // Ke$ha reaches the indexers as "Kesha", the way they spell her
+    let kb = SearchBody { source: "torznab".into(), kind: "album".into(), artist: "Ke$ha".into(), title: "Cannibal".into(), ..Default::default() };
+    search_torznab(&st, &kb, "Ke$ha Cannibal").await.unwrap();
+    let last = queries.lock().unwrap().last().cloned().unwrap();
+    assert!(last.contains("query=Kesha+Cannibal"), "{last}");
+    assert_eq!(contains("Kesha - Cannibal (2010) [FLAC]", "Ke$ha"), 1.0);
+    assert_eq!(contains("Ke$ha - Cannibal [FLAC]", "Kesha"), 1.0);
     let _ = std::fs::remove_dir_all(&dir);
 }
 
@@ -179,14 +187,22 @@ fn mock_tidal(seen: Arc<Mutex<Vec<(String, String)>>>) -> Router {
         "relationships": { "artists": { "data": [{ "id": "ar1", "type": "artists" }] }, "albums": { "data": [{ "id": "a1", "type": "albums" }] } } }],
         "included": [{ "id": "ar1", "type": "artists", "attributes": { "name": "Travis Scott" } }, { "id": "a1", "type": "albums", "attributes": { "title": "Rodeo", "imageLinks": img } }] });
     Router::new()
-        .route("/searchResults/{q}", get(move |Path(q): Path<String>, RawQuery(rq): RawQuery, h: HeaderMap| {
+        // the search as Tidal answers it since mid-2026: the query in filter[query], `data` an array
+        .route("/searchResults", get(move |Query(q): Query<HashMap<String, String>>, RawQuery(rq): RawQuery, h: HeaderMap| {
             let n1 = n1.clone();
             async move {
-                n1(format!("/searchResults/{q}"), rq, &h);
-                Json(json!({ "data": { "id": q, "type": "searchResults", "relationships": {
+                n1("/searchResults".into(), rq, &h);
+                let Some(query) = q.get("filter[query]").filter(|v| !v.is_empty()) else {
+                    return (StatusCode::BAD_REQUEST, Json(json!({ "errors": [{ "code": "VALUE_REQUIRED", "detail": "filter[query] is required" }] })));
+                };
+                (StatusCode::OK, Json(json!({ "data": [{ "id": query, "type": "searchResults", "relationships": {
                     "albums": { "data": [{ "id": "a1", "type": "albums" }, { "id": "a2", "type": "albums" }, { "id": "a3", "type": "albums" }] },
-                    "tracks": { "data": [{ "id": "t1", "type": "tracks" }] } } } }))
+                    "tracks": { "data": [{ "id": "t1", "type": "tracks" }] } } }] })))
             }
+        }))
+        // the retired path form answers every query the way the owner's screenshot shows
+        .route("/searchResults/{q}", get(|Path(_q): Path<String>| async move {
+            (StatusCode::BAD_REQUEST, Json(json!({ "errors": [{ "code": "INVALID_RESOURCE_ID", "detail": "Invalid resource ID", "source": { "pointer": "data/id" } }] })))
         }))
         .route("/albums", get(move |RawQuery(rq): RawQuery, h: HeaderMap| { let (n2, albums) = (n2.clone(), albums.clone()); async move { n2("/albums".into(), rq, &h); Json(albums) } }))
         .route("/tracks", get(move |RawQuery(rq): RawQuery, h: HeaderMap| { let (n3, tracks) = (n3.clone(), tracks.clone()); async move { n3("/tracks".into(), rq, &h); Json(tracks) } }))
@@ -220,8 +236,8 @@ async fn tidal_search_reads_the_quality_tier_and_hands_streamrip_links() {
         let calls = seen.lock().unwrap().clone();
         assert_eq!(calls.len(), 2, "{calls:?}");
         assert!(calls.iter().all(|(_, auth)| auth == "Bearer app-token"), "{calls:?}");
-        // (the path extractor hands the query decoded)
-        assert!(calls[0].0.starts_with("/searchResults/Travis Scott Rodeo?") && calls[0].0.contains("countryCode=US") && calls[0].0.contains("include=albums"), "{calls:?}");
+        // the query in filter[query] (form-encoded), not in the path
+        assert!(calls[0].0.starts_with("/searchResults?") && calls[0].0.contains("filter%5Bquery%5D=Travis+Scott+Rodeo") && calls[0].0.contains("countryCode=US") && calls[0].0.contains("include=albums"), "{calls:?}");
         assert!(calls[1].0.starts_with("/albums?") && calls[1].0.contains("filter%5Bid%5D=a1%2Ca2%2Ca3") && calls[1].0.contains("include=artists"), "{calls:?}");
     }
     // a song: its album and artist from the included resources, the ISO duration in seconds
@@ -240,6 +256,23 @@ async fn tidal_search_reads_the_quality_tier_and_hands_streamrip_links() {
     assert_eq!(out.len(), 3);
     let calls = seen.lock().unwrap().clone();
     assert!(calls.iter().all(|(_, auth)| auth == "Bearer user-token-abcdef") && calls[0].0.contains("countryCode=NL"), "{calls:?}");
+    // characters that need escaping reach Tidal unchanged, and an empty query asks nothing
+    seen.lock().unwrap().clear();
+    let odd = "AC/DC #1 Ke$ha 100% Sigur Rós? a&b";
+    assert_eq!(search_tidal(&st, &b, odd).await.unwrap().len(), 3);
+    {
+        let calls = seen.lock().unwrap().clone();
+        let u = reqwest::Url::parse(&format!("http://tidal{}", calls[0].0)).unwrap();
+        let q: HashMap<String, String> = u.query_pairs().into_owned().collect();
+        assert_eq!(q["filter[query]"], odd, "{calls:?}");
+        assert_eq!(q["include"], "albums");
+    }
+    seen.lock().unwrap().clear();
+    assert!(search_tidal(&st, &b, "   ").await.unwrap().is_empty());
+    assert!(seen.lock().unwrap().is_empty(), "no call for an empty query");
+    // the old path form is the owner's 400 INVALID_RESOURCE_ID: Encore no longer asks it
+    let old = encore_http::tidal::get(&st, "user-token-abcdef", "/searchResults/Duumu%20Illuminate%20EP").send().await.unwrap();
+    assert_eq!(old.status().as_u16(), 400);
     // signed out of both: the search says so
     write_config(&st, "[tidal]\naccess_token = \"\"\n");
     assert_eq!(search_tidal(&st, &b, "Travis Scott Rodeo").await.err().unwrap().to_string(), "Sign in to Tidal");

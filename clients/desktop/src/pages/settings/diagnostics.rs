@@ -61,6 +61,8 @@ pub enum Message {
     ClearCrashes,
     Cleared(Result<Value, ApiError>),
     CloseDialog,
+    /// Copy one failed check or one crash report in full.
+    CopyText(String),
 }
 
 /// The VPN for Soulseek line: "Connected · port 51234 · public IP 1.2.3.4 · last handshake 12 s ago",
@@ -219,6 +221,37 @@ pub fn report(last: &Value) -> String {
     lines.join("\n")
 }
 
+/// One check in full for Copy, as the web's dialog has it: the name, the request, what it said
+/// and the whole raw answer (the report keeps 300 characters of it).
+pub fn check_text(c: &Value) -> String {
+    let detail = match &c["soulseek"] {
+        s if s.is_object() => super::tools::session_text_elsewhere(&if fmt::truthy(c, "detail") { fmt::s(c, "detail") } else { super::tools::session_text(s) }),
+        _ => fmt::s(c, "detail"),
+    };
+    [fmt::s(c, "name"), fmt::s(c, "request"), detail, fmt::s(c, "body")]
+        .into_iter()
+        .filter(|x| !x.is_empty())
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+/// One app crash report in full for Copy (the web's `crash_text`): what, where and when, then the
+/// report.
+pub fn crash_text(cr: &Value) -> String {
+    let kind = fmt::s(cr, "kind");
+    let label = crash_kind(&kind).map(str::to_string).unwrap_or_else(|| if kind.is_empty() { "Crash".to_string() } else { kind.clone() });
+    let meta: Vec<String> = ["device", "app_version", "os", "user"].iter().filter(|k| fmt::truthy(cr, k)).map(|k| fmt::s(cr, k)).collect();
+    let first = if fmt::truthy(cr, "first_line") { fmt::s(cr, "first_line") } else { "Crash".to_string() };
+    let time = if fmt::f(cr, "time") > 0.0 { fmt::stamp(fmt::f(cr, "time")) } else { String::new() };
+    let head = [first, label, meta.join(" · "), time].into_iter().filter(|x| !x.is_empty()).collect::<Vec<_>>().join("\n");
+    let text = fmt::s(cr, "text");
+    if text.trim().is_empty() {
+        head
+    } else {
+        format!("{head}\n\n{}", text.trim_end())
+    }
+}
+
 /// App crash report kinds.
 fn crash_kind(k: &str) -> Option<&'static str> {
     Some(match k {
@@ -370,6 +403,7 @@ pub fn update(state: &mut State, msg: Message, ctx: &mut Ctx) -> Task<Message> {
             return load_crashes(ctx);
         }
         Message::CloseDialog => state.dialog = None,
+        Message::CopyText(text) => ctx.copy_text(text),
     }
     Task::none()
 }
@@ -413,6 +447,9 @@ fn check_item<'a>(state: &'a State, c: &'a Value, i: usize) -> El<'a, Message> {
     }
     if c.get("ms").is_some_and(|m| !m.is_null()) {
         head = head.push(widgets::faint(format!("{} ms", fmt::s(c, "ms"))).size(12));
+    }
+    if !ok {
+        head = head.push(widgets::details::copy_btn(Message::CopyText(check_text(c))));
     }
     let mut body = column![head].spacing(3).width(Length::Fill);
     if fmt::truthy(c, "request") {
@@ -603,7 +640,13 @@ pub fn view<'a>(state: &'a State, ctx: &Ctx<'a>) -> El<'a, Message> {
                 let first = if fmt::truthy(cr, "first_line") { fmt::s(cr, "first_line") } else { "Crash".to_string() };
                 let text = cr["text"].as_str().unwrap_or("");
                 let mut body = column![
-                    row![t(first).size(14).font(theme::bold()), badge(label, Badge::Plain)].spacing(8).align_y(Alignment::Center),
+                    row![
+                        t(first).size(14).font(theme::bold()),
+                        badge(label, Badge::Plain),
+                        widgets::details::copy_btn(Message::CopyText(crash_text(cr))),
+                    ]
+                    .spacing(8)
+                    .align_y(Alignment::Center),
                     small_muted(format!("{} · {}", meta.join(" · "), fmt::date(fmt::f(cr, "time")))),
                 ]
                 .spacing(3)
@@ -696,5 +739,11 @@ mod tests {
         assert_eq!(rows[0].1, "unknown");
         assert_eq!(rows[2].1, "not set");
         assert_eq!(crash_kind("anr"), Some("Not responding"));
+        // Copy takes one check whole, the raw answer included
+        let long = "x".repeat(900);
+        let c = json!({ "name": "MusicBrainz", "ok": false, "request": "GET x", "detail": "timeout", "body": long });
+        assert_eq!(check_text(&c), format!("MusicBrainz\nGET x\ntimeout\n{long}"));
+        let cr = json!({ "kind": "anr", "first_line": "ANR in app", "device": "Pixel", "app_version": "0.30", "time": 1_792_427_497.0, "text": "trace\n" });
+        assert_eq!(crash_text(&cr), "ANR in app\nNot responding\nPixel · 0.30\n2026-10-19 16:31 UTC\n\ntrace");
     }
 }

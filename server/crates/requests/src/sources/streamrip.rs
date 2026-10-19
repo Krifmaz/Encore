@@ -3,6 +3,7 @@
 //! which signs in with your own subscription.
 use crate::Ctx;
 use encore_core::audio::STREAMRIP_EXTS as AUDIO;
+use encore_core::fsx::{self, Step, StepError};
 use encore_library::matcher::{compare, describe};
 use regex::Regex;
 use serde_json::Value;
@@ -66,6 +67,8 @@ const LOG_CAP: usize = 20_000;
 const MESSAGE_CAP: usize = 300;
 /// Time limit for a config check or regeneration (a Python start-up, normally a second).
 const CHECK_SECS: u64 = 90;
+/// Time limit for a download run.
+const RUN_SECS: u64 = 3600;
 
 /// The body of a `[section]` (without the header), or "" when there is none.
 pub fn section_body<'a>(text: &'a str, name: &str) -> &'a str {
@@ -91,9 +94,16 @@ fn qobuz_v2(text: &str) -> bool {
 /// Write the credentials entered in Encore's settings into streamrip's config file. Keys the settings
 /// leave empty stay as they are in the file, so a login typed into config.toml by hand is kept.
 pub fn apply_credentials(st: &impl Ctx) -> anyhow::Result<PathBuf> {
+    apply_credentials_for(st, None)
+}
+
+/// [`apply_credentials`] for the streamrip of `version` (its `--version`, when known): the update check is
+/// switched off the way that streamrip reads it ([`quiet_config`]).
+pub fn apply_credentials_for(st: &impl Ctx, version: Option<&str>) -> anyhow::Result<PathBuf> {
     let path = config_path(st);
-    std::fs::create_dir_all(path.parent().unwrap())?;
-    let mut text = std::fs::read_to_string(&path).unwrap_or_default();
+    fsx::mkdir_all(path.parent().unwrap(), Step::Config)?;
+    // a file that is there but can't be read is never written over with the credentials alone
+    let mut text = read_config(&path)?;
     let arl = st.cfg().str("streamrip_deezer_arl");
     if !arl.is_empty() {
         text = set_toml(&text, "deezer", "arl", &tstr(&arl));
@@ -110,44 +120,274 @@ pub fn apply_credentials(st: &impl Ctx) -> anyhow::Result<PathBuf> {
         }
     }
     text = set_toml(&text, "database", "downloads_enabled", "false");
-    std::fs::write(&path, text)?;
+    text = quiet_config(&text, version);
+    write_config(&path, &text)?;
     Ok(path)
 }
 
-/// Run streamrip for a check: stdin closed (it can never wait for a key), no colours, a time limit.
+/// streamrip's config text, "" when there is no file yet. Err (naming "read <path>") when the file is there
+/// but can't be read: an EIO must not read as an empty config that is then written back.
+pub fn read_config(path: &Path) -> Result<String, StepError> {
+    fsx::fault_point(Step::Config, "read", path)?;
+    match std::fs::read_to_string(path) {
+        Ok(t) => Ok(t),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(String::new()),
+        Err(e) => Err(StepError::new(Step::Config, "read", path, None, e)),
+    }
+}
+
+/// Write streamrip's config whole or not at all: into a new file beside it, then renamed over it, so a crash
+/// or a full disk halfway never leaves a cut-off file (the Tidal sign-in lives only there). The new file
+/// keeps the old one's permissions (it holds the sign-ins), and a symlinked config stays a symlink. The
+/// error names "write <config>" (or the rename).
+pub fn write_config(path: &Path, text: &str) -> Result<(), StepError> {
+    let target = match std::fs::symlink_metadata(path) {
+        Ok(m) if m.file_type().is_symlink() => std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf()),
+        _ => path.to_path_buf(),
+    };
+    fsx::fault_point(Step::Config, "write", &target)?;
+    let name = target.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_else(|| "config.toml".into());
+    let tmp = target.with_file_name(format!(".{name}.encore-new"));
+    let written = std::fs::write(&tmp, text).and_then(|_| match std::fs::metadata(&target) {
+        Ok(m) => std::fs::set_permissions(&tmp, m.permissions()),
+        Err(_) => Ok(()),
+    });
+    if let Err(e) = written {
+        let _ = std::fs::remove_file(&tmp);
+        return Err(StepError::new(Step::Config, "write", &target, None, e));
+    }
+    fsx::rename(&tmp, &target, Step::Config).inspect_err(|_| {
+        let _ = std::fs::remove_file(&tmp);
+    })
+}
+
+/// The config's switches for a run without a terminal, written before every run:
+/// - `[cli] progress_bars = false`, what `--no-progress` does (for a command line of the owner's without it);
+/// - the update check off, the way the streamrip in use reads it. The fork (Stensel8/streamrip) from
+///   2.4.10 reads `[cli] no_update_check = true` (its template carries the line commented out); nathom's 2.x
+///   reads `[misc] check_for_updates = false`. The fork's 2.4.9 (the image's before 0.29) has no switch at all: it asks
+///   GitHub before every command (10 s at most, never fatal, its notice lands in the output), and its
+///   `[cli]` refuses a key it does not know ("CliConfig.__init__() got an unexpected keyword argument"),
+///   so nothing is written for it.
+///
+/// Only keys whose section the file already has are set: a section of only Encore's keys would not load.
+pub fn quiet_config(text: &str, version: Option<&str>) -> String {
+    let mut text = text.to_string();
+    let cli = section_body(&text, "cli").to_string();
+    let has_key = |body: &str, key: &str| Regex::new(&format!(r"(?m)^\s*{key}\s*=")).unwrap().is_match(body);
+    if has_key(&cli, "progress_bars") {
+        text = set_toml(&text, "cli", "progress_bars", "false");
+        let reads_it = match version.and_then(encore_core::version::extract_version) {
+            Some(v) => encore_core::version::compare(&v, "2.4.10") != std::cmp::Ordering::Less,
+            // unknown (a streamrip of the owner's): the template of a streamrip that reads it names the key
+            None => cli.contains("no_update_check"),
+        };
+        if reads_it {
+            text = set_toml(&text, "cli", "no_update_check", "true");
+        }
+    }
+    if has_key(section_body(&text, "misc"), "check_for_updates") {
+        text = set_toml(&text, "misc", "check_for_updates", "false");
+    }
+    text
+}
+
+// ---- running streamrip without a terminal ---------------------------------------------------------
+
+/// How a streamrip run ended.
+#[derive(Debug)]
+pub struct RunOutput {
+    /// Its exit; None when it was stopped at the time limit.
+    pub status: Option<std::process::ExitStatus>,
+    /// stdout and stderr together, in the order they came, read to the end (the middle of a huge output
+    /// is left out, see [`OUTPUT_KEEP`]).
+    pub output: String,
+}
+
+impl RunOutput {
+    pub fn success(&self) -> bool {
+        self.status.is_some_and(|s| s.success())
+    }
+}
+
+/// How much of a run's output is held while it runs: the first and the last this many bytes.
+pub const OUTPUT_KEEP: usize = 1 << 20;
+
+/// A run's output as it comes, from both pipes: whole lines, in the order they came.
+#[derive(Default)]
+struct Collected {
+    head: Vec<u8>,
+    tail: std::collections::VecDeque<u8>,
+    left_out: usize,
+}
+
+impl Collected {
+    fn push(&mut self, bytes: &[u8]) {
+        let room = OUTPUT_KEEP.saturating_sub(self.head.len());
+        let (h, rest) = bytes.split_at(room.min(bytes.len()));
+        self.head.extend_from_slice(h);
+        self.tail.extend(rest);
+        while self.tail.len() > OUTPUT_KEEP {
+            self.tail.pop_front();
+            self.left_out += 1;
+        }
+    }
+
+    fn text(&self) -> String {
+        let mut out = String::from_utf8_lossy(&self.head).into_owned();
+        if self.left_out > 0 {
+            out.push_str(&format!("\n… ({} bytes of output left out) …\n", self.left_out));
+        }
+        let tail: Vec<u8> = self.tail.iter().copied().collect();
+        out.push_str(&String::from_utf8_lossy(&tail));
+        out
+    }
+}
+
+/// Read one pipe to its end into `sink`, a whole line at a time (so stdout and stderr don't cut into each
+/// other's lines; a line that never ends is passed on every 64 KiB).
+async fn pump(mut r: impl tokio::io::AsyncRead + Unpin, sink: std::sync::Arc<std::sync::Mutex<Collected>>) {
+    use tokio::io::AsyncReadExt;
+    let mut buf = vec![0u8; 8192];
+    let mut pending: Vec<u8> = vec![];
+    loop {
+        match r.read(&mut buf).await {
+            Ok(0) | Err(_) => break,
+            Ok(n) => {
+                pending.extend_from_slice(&buf[..n]);
+                if let Some(i) = pending.iter().rposition(|b| *b == b'\n') {
+                    let rest = pending.split_off(i + 1);
+                    sink.lock().unwrap().push(&pending);
+                    pending = rest;
+                } else if pending.len() >= 64 * 1024 {
+                    sink.lock().unwrap().push(&pending);
+                    pending.clear();
+                }
+            }
+        }
+    }
+    if !pending.is_empty() {
+        pending.push(b'\n');
+        sink.lock().unwrap().push(&pending);
+    }
+}
+
+/// The session a run started (its process group has the run's pid): stopped as a whole, the run's own
+/// children (ffmpeg, a shell's program) with it, when the run is given up – the time limit, or the request's
+/// task cancelled while it runs.
+struct Session(Option<i32>);
+
+impl Session {
+    fn stop(&mut self) {
+        if let Some(pid) = self.0.take() {
+            // the run's pid is still ours (not waited for yet), or its group still has members: never another's
+            unsafe {
+                libc::kill(-pid, libc::SIGKILL);
+            }
+        }
+    }
+}
+
+impl Drop for Session {
+    fn drop(&mut self) {
+        self.stop();
+    }
+}
+
+/// Run streamrip with nothing interactive about it, the same for a download and for a config check:
+/// - stdin is /dev/null: a prompt (the Deezer ARL, a login) reads EOF at once instead of waiting;
+/// - a session of its own (`setsid`): no controlling terminal even when the container runs with `tty: true`,
+///   so a write to or a read from /dev/tty fails at once (ENXIO) instead of drawing on or waiting for a
+///   terminal nobody sees;
+/// - stdout and stderr piped and read to the end, together, for the request's log;
+/// - plain output: TERM=dumb, NO_COLOR=1, COLUMNS=200 (the fork's rich console ignores COLUMNS and takes 80
+///   without a terminal), PYTHONUNBUFFERED=1 (lines as they happen), PYTHONIOENCODING=utf-8, no forced colour;
+/// - HOME is Encore's data folder (`home`): streamrip's app folder and caches go there, not into a home
+///   folder Encore may not write.
+///
+/// At the time limit the whole session is stopped. Err only when the program could not be started; the
+/// error names it ("download failed: start /config/tools/venv/bin/rip: Input/output error (os error 5)").
+pub async fn run_quiet(program: &str, args: &[String], home: &Path, secs: u64, step: Step) -> Result<RunOutput, StepError> {
+    use std::process::Stdio;
+    let mut cmd = tokio::process::Command::new(program);
+    cmd.args(args).stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped())
+        .env("TERM", "dumb").env("NO_COLOR", "1").env("COLUMNS", "200").env("PYTHONUNBUFFERED", "1").env("PYTHONIOENCODING", "utf-8")
+        .env("HOME", home).env_remove("FORCE_COLOR").env_remove("CLICOLOR_FORCE").kill_on_drop(true);
+    // SAFETY: setsid is async-signal-safe; nothing else runs between fork and exec
+    unsafe {
+        cmd.pre_exec(|| if libc::setsid() == -1 { Err(std::io::Error::last_os_error()) } else { Ok(()) });
+    }
+    let mut child = fsx::spawn(step, program, || cmd.spawn())?;
+    let mut session = Session(child.id().map(|p| p as i32));
+    let sink = std::sync::Arc::new(std::sync::Mutex::new(Collected::default()));
+    let readers: Vec<tokio::task::JoinHandle<()>> = [
+        child.stdout.take().map(|o| tokio::spawn(pump(o, sink.clone()))),
+        child.stderr.take().map(|e| tokio::spawn(pump(e, sink.clone()))),
+    ].into_iter().flatten().collect();
+    let status = match tokio::time::timeout(std::time::Duration::from_secs(secs), child.wait()).await {
+        Ok(Ok(s)) => Some(s),
+        Ok(Err(e)) => {
+            sink.lock().unwrap().push(format!("(Encore lost track of streamrip: {e})\n").as_bytes());
+            session.stop();
+            None
+        }
+        Err(_) => {
+            session.stop();
+            let _ = child.kill().await;
+            sink.lock().unwrap().push(format!("(Encore stopped streamrip after {} s)\n", secs).as_bytes());
+            None
+        }
+    };
+    // the pipes close once every process of the run has ended; one that keeps them open (a child left
+    // behind) is not waited for long, and is stopped with its session
+    let aborts: Vec<_> = readers.iter().map(|h| h.abort_handle()).collect();
+    if tokio::time::timeout(std::time::Duration::from_secs(5), futures_util::future::join_all(readers)).await.is_err() {
+        session.stop();
+        aborts.iter().for_each(|a| a.abort());
+    }
+    // done: the run's pid is waited for and may be handed out again – never signal it from here on
+    session.0 = None;
+    let output = sink.lock().unwrap().text();
+    Ok(RunOutput { status, output })
+}
+
+/// Run streamrip for a config check (`config path`, `config reset`): [`run_quiet`] with a short limit.
 /// Ok((exited 0, combined output)).
-async fn run_rip(bin: &str, args: &[&str], secs: u64) -> anyhow::Result<(bool, String)> {
-    let fut = tokio::process::Command::new(bin).args(args).stdin(std::process::Stdio::null())
-        .env("NO_COLOR", "1").env("TERM", "dumb").env("PYTHONUNBUFFERED", "1").kill_on_drop(true).output();
-    let out = tokio::time::timeout(std::time::Duration::from_secs(secs), fut).await.map_err(|_| anyhow::anyhow!("streamrip did not answer within {secs} s"))??;
-    Ok((out.status.success(), String::from_utf8_lossy(&[out.stdout, out.stderr].concat()).to_string()))
+async fn run_rip(bin: &str, args: &[&str], home: &Path, secs: u64) -> anyhow::Result<(bool, String)> {
+    let args: Vec<String> = args.iter().map(|a| a.to_string()).collect();
+    let run = run_quiet(bin, &args, home, secs, Step::Config).await?;
+    if run.status.is_none() {
+        anyhow::bail!("streamrip did not answer within {secs} s");
+    }
+    Ok((run.success(), run.output))
 }
 
 /// Does the config at `path` load? `rip --config-path X config path` says so: a non-zero exit or the
-/// fork's "Error loading config" line means no. Err carries the complaint, one line.
-pub async fn validate_config(bin: &str, path: &Path) -> Result<(), String> {
+/// fork's "Error loading config" line means no. Err carries the complaint, one line. `home`: Encore's data
+/// folder (see [`run_quiet`]).
+pub async fn validate_config(bin: &str, path: &Path, home: &Path) -> Result<(), String> {
     let p = path.to_string_lossy().to_string();
-    match run_rip(bin, &["--config-path", &p, "config", "path"], CHECK_SECS).await {
-        Err(e) => Err(e.to_string()),
+    match run_rip(bin, &["--config-path", &p, "config", "path"], home, CHECK_SECS).await {
+        Err(e) => Err(format!("{e:#}")),
         Ok((true, text)) if !text.contains(CONFIG_ERROR) => Ok(()),
         Ok((_, text)) => Err(summary(&text, MESSAGE_CAP)),
     }
 }
 
 /// Move the config aside (config.toml.bak-<date>) and let streamrip write its defaults. Returns the backup.
-async fn regenerate(bin: &str, path: &Path) -> anyhow::Result<Option<PathBuf>> {
+async fn regenerate(bin: &str, path: &Path, home: &Path) -> anyhow::Result<Option<PathBuf>> {
     let backup = if path.exists() {
         let b = path.with_file_name(format!("config.toml.bak-{}", encore_db::backup::stamp(encore_db::now())));
-        std::fs::rename(path, &b)?;
+        fsx::rename(path, &b, Step::Config)?;
         Some(b)
     } else {
         None
     };
     let p = path.to_string_lossy().to_string();
     // streamrip writes its default config for a path that has no file yet; `config reset` is the fallback
-    let _ = run_rip(bin, &["--config-path", &p, "config", "path"], CHECK_SECS).await;
+    run_rip(bin, &["--config-path", &p, "config", "path"], home, CHECK_SECS).await.map_err(|e| e.context("streamrip config path"))?;
     if !path.is_file() {
-        let _ = run_rip(bin, &["--config-path", &p, "config", "reset", "-y"], CHECK_SECS).await;
+        let _ = run_rip(bin, &["--config-path", &p, "config", "reset", "-y"], home, CHECK_SECS).await;
     }
     if !path.is_file() {
         anyhow::bail!("streamrip did not write a default config at {}", path.display());
@@ -220,7 +460,8 @@ impl ConfigCheck {
 /// credentials from Encore's settings are written in every time.
 pub async fn check_config(st: &impl Ctx, force: bool) -> anyhow::Result<ConfigCheck> {
     let path = config_path(st);
-    std::fs::create_dir_all(path.parent().unwrap())?;
+    fsx::mkdir_all(path.parent().unwrap(), Step::Config)?;
+    let home = st.data_dir().to_path_buf();
     let mut out = ConfigCheck { path: path.clone(), ..Default::default() };
     let Some(bin) = binary(st) else {
         // nothing can run without the program; the credentials still land in the file for when it is there
@@ -233,24 +474,33 @@ pub async fn check_config(st: &impl Ctx, force: bool) -> anyhow::Result<ConfigCh
     } else if force {
         Some("reset asked for".to_string())
     } else {
-        validate_config(&bin, &path).await.err()
+        validate_config(&bin, &path, &home).await.err()
     };
     if let Some(why) = why {
-        let old = std::fs::read_to_string(&path).unwrap_or_default();
-        out.backup = regenerate(&bin, &path).await?;
+        // the sign-ins to carry over: a file that can't be read stops here rather than lose them
+        let old = read_config(&path)?;
+        out.backup = regenerate(&bin, &path, &home).await?;
         out.regenerated = true;
         if !old.is_empty() {
-            let fresh = std::fs::read_to_string(&path)?;
-            std::fs::write(&path, carry_over(&old, &fresh))?;
+            let fresh = fsx::read_to_string(&path, Step::Config)?;
+            write_config(&path, &carry_over(&old, &fresh))?;
         }
         match &out.backup {
             Some(b) => st.db().log("warning", &format!("streamrip: config regenerated ({why}); the old file is kept as {}", b.display())),
             None => st.db().log("info", &format!("streamrip: config written at {} ({why})", path.display())),
         }
-        out.problem = validate_config(&bin, &path).await.err();
+        out.problem = validate_config(&bin, &path, &home).await.err();
     }
-    apply_credentials(st)?;
+    let version = version_of(st, &bin).await;
+    apply_credentials_for(st, version.as_deref())?;
     Ok(out)
+}
+
+/// The version of the streamrip at `bin` (its `--version`, kept by the tools' cache for 10 minutes; the
+/// first look runs it, off the async threads).
+async fn version_of(st: &impl Ctx, bin: &str) -> Option<String> {
+    let (st, bin) = (st.clone(), PathBuf::from(bin));
+    tokio::task::spawn_blocking(move || st.system().tools.version_of(&bin)).await.ok().flatten()
 }
 
 /// The config file, made to load when it can be (see `check_config`); its path.
@@ -270,7 +520,7 @@ pub async fn config_loads_check(st: &impl Ctx) -> Value {
     let (ok, detail) = match binary(st) {
         None => (false, NOT_INSTALLED_MSG.to_string()),
         Some(_) if !path.is_file() => (false, format!("No config file at {} yet – it is written on the first download, or press Reset streamrip config in Settings → streamrip", path.display())),
-        Some(bin) => match validate_config(&bin, &path).await {
+        Some(bin) => match validate_config(&bin, &path, st.data_dir()).await {
             Ok(()) => (true, format!("OK – {}", path.display())),
             Err(e) => (false, format!("{e} – press Reset streamrip config in Settings → streamrip")),
         },
@@ -307,6 +557,19 @@ fn cap(s: &str, max: usize) -> String {
     if s.chars().count() <= max { s.to_string() } else { s.chars().take(max.saturating_sub(1)).collect::<String>() + "…" }
 }
 
+/// A run's output for the request's log: whole when it fits in `max` characters, else its first quarter
+/// and its last three quarters (where the error is), with the length of the part left out between.
+pub fn cap_log(text: &str, max: usize) -> String {
+    let n = text.chars().count();
+    if n <= max {
+        return text.to_string();
+    }
+    let (head, tail) = (max / 4, max - max / 4);
+    let first: String = text.chars().take(head).collect();
+    let last: String = text.chars().skip(n - tail).collect();
+    format!("{first}\n… ({} characters left out) …\n{last}", n - head - tail)
+}
+
 /// streamrip stopped to ask for the Deezer ARL (a prompt that reads EOF on a server).
 fn asks_for_arl(text: &str) -> bool {
     let arl = Regex::new(r"(?i)\barl\b|Finding-Your-Deezer-ARL").unwrap();
@@ -326,7 +589,23 @@ pub fn failure_message(text: &str) -> String {
     format!("streamrip produced no files: {}", summary(text, MESSAGE_CAP))
 }
 
-/// A run that produced no files: the message for the request, the whole output for its log.
+/// The reason a run produced nothing, from its output and how it ended: [`failure_message`], or what is
+/// known when it printed nothing, or that it was stopped at the time limit.
+fn run_failure(run: &RunOutput, secs: u64) -> String {
+    let words = if run.output.trim().is_empty() { None } else { Some(failure_message(&run.output)) };
+    match (run.status, words) {
+        (None, Some(w)) => format!("streamrip did not finish within {} minutes and was stopped – {w}", secs / 60),
+        (None, None) => format!("streamrip did not finish within {} minutes and was stopped", secs / 60),
+        (Some(_), Some(w)) => w,
+        (Some(s), None) => match s.code() {
+            Some(c) => format!("streamrip produced no files and printed nothing (exit code {c})"),
+            None => "streamrip produced no files and printed nothing (it was stopped by a signal)".to_string(),
+        },
+    }
+}
+
+/// A run that produced no files: the message for the request (streamrip's own words), its whole output for
+/// the request's log.
 #[derive(Debug)]
 pub struct RipError {
     pub message: String,
@@ -342,7 +621,8 @@ impl std::error::Error for RipError {}
 
 /// The output of a failed run, when the error came from one (for the request's log).
 pub fn run_log(e: &anyhow::Error) -> Option<&str> {
-    e.downcast_ref::<RipError>().map(|r| r.log.as_str()).filter(|l| !l.is_empty())
+    // the error itself, or the context of a file error after the run ("its folder can't be read")
+    e.downcast_ref::<RipError>().or_else(|| e.chain().find_map(|c| c.downcast_ref::<RipError>())).map(|r| r.log.as_str()).filter(|l| !l.is_empty())
 }
 
 // ---- resolving a request to a service link ------------------------------------------------------
@@ -382,7 +662,8 @@ async fn tidal_by_isrc(st: &impl Ctx, isrc: &str, albums: bool) -> anyhow::Resul
     if albums {
         q.push(("include", "albums"));
     }
-    let d: Value = encore_http::tidal::get(st, &tok, "/tracks").query(&q).send().await?.json().await?;
+    // an error answer is Tidal's words in the log, not "not on Tidal"
+    let d: Value = encore_http::tidal::read(encore_http::tidal::get(st, &tok, "/tracks").query(&q).send().await?).await?;
     Ok(if albums {
         d["included"].as_array().and_then(|i| i.iter().find(|x| x["type"] == "albums")).and_then(|x| x["id"].as_str()).map(|id| format!("https://tidal.com/browse/album/{id}"))
     } else {
@@ -478,6 +759,31 @@ pub async fn resolve_track(st: &impl Ctx, artist: &str, title: &str, isrc: Optio
 
 // ---- running streamrip --------------------------------------------------------------------------
 
+/// [`audio_files`] that says when the folder can't be read: an EIO there is the disk's ("staging failed: read
+/// /downloads/encore/request-12/streamrip/…: Input/output error (os error 5)"), never "streamrip produced no
+/// files".
+pub fn audio_files_checked(dir: &Path, exts: &[&str]) -> Result<Vec<PathBuf>, StepError> {
+    fsx::fault_point(Step::Stage, "read", dir)?;
+    let mut f = vec![];
+    for e in walkdir::WalkDir::new(dir) {
+        let e = match e {
+            Ok(e) => e,
+            Err(err) => {
+                let at = err.path().unwrap_or(dir).to_path_buf();
+                match err.into_io_error() {
+                    Some(io) if io.kind() != std::io::ErrorKind::NotFound => return Err(StepError::new(Step::Stage, "read", &at, None, io)),
+                    _ => continue, // gone while walking, or a symlink loop
+                }
+            }
+        };
+        if e.file_type().is_file() && e.path().extension().is_some_and(|x| exts.contains(&x.to_string_lossy().to_lowercase().as_str())) {
+            f.push(e.into_path());
+        }
+    }
+    f.sort();
+    Ok(f)
+}
+
 pub fn audio_files(dir: &Path, exts: &[&str]) -> Vec<PathBuf> {
     let mut f: Vec<PathBuf> = walkdir::WalkDir::new(dir).into_iter().flatten().filter(|e| e.file_type().is_file())
         .map(|e| e.into_path()).filter(|p| p.extension().is_some_and(|x| exts.contains(&x.to_string_lossy().to_lowercase().as_str()))).collect();
@@ -485,32 +791,86 @@ pub fn audio_files(dir: &Path, exts: &[&str]) -> Vec<PathBuf> {
     f
 }
 
+/// What a streamrip download left: the audio files, and streamrip's output for the request's log.
+#[derive(Debug, Default)]
+pub struct Ripped {
+    pub files: Vec<PathBuf>,
+    /// stdout and stderr together, in the order they came ([`cap_log`] at 20 000 characters)
+    pub log: String,
+}
+
+/// The command line of a run: the program and its arguments. The default runs the program itself (no
+/// shell), so a start that fails names it ("start /config/tools/venv/bin/rip"); a command of the owner's
+/// (`streamrip_command`) runs through `sh -c` as before.
+fn command(st: &impl Ctx, bin: &str, config: &Path, folder: &Path, url: &str) -> (String, Vec<String>) {
+    let quality = st.cfg().int("streamrip_quality").to_string();
+    let tpl = st.cfg().str("streamrip_command");
+    if tpl.trim().is_empty() || tpl.trim() == DEFAULT_CMD {
+        let args = ["--config-path", &config.to_string_lossy(), "--folder", &folder.to_string_lossy(), "--quality", &quality, "--no-db", "--no-progress", "url", url];
+        return (bin.to_string(), args.iter().map(|a| a.to_string()).collect());
+    }
+    let cmd = tpl.replace("{bin}", &shq(bin))
+        .replace("{config}", &shq(&config.to_string_lossy())).replace("{folder}", &shq(&folder.to_string_lossy()))
+        .replace("{quality}", &quality).replace("{url}", &shq(url));
+    ("sh".to_string(), vec!["-c".to_string(), cmd])
+}
+
 pub async fn download(st: &impl Ctx, url: &str, folder: &Path) -> anyhow::Result<Vec<PathBuf>> {
-    std::fs::create_dir_all(folder)?;
+    Ok(download_run(st, url, folder).await?.files)
+}
+
+/// Download `url` into `folder` with streamrip, without a terminal ([`run_quiet`]). Every file step and the
+/// start name their operation and path ("staging failed: mkdir /downloads/encore/request-12/streamrip: …",
+/// "config failed: write /config/streamrip/config.toml: …", "download failed: start /config/tools/venv/bin/rip:
+/// …", errors of [`encore_core::fsx`]). streamrip's output comes back on every outcome of a run: in
+/// [`Ripped::log`], or in the [`RipError`] of a run that produced no files ([`run_log`]).
+pub async fn download_run(st: &impl Ctx, url: &str, folder: &Path) -> anyhow::Result<Ripped> {
+    fsx::mkdir_all(folder, Step::Stage)?;
     let Some(bin) = binary(st) else { anyhow::bail!("{NOT_INSTALLED_MSG}") };
     // the config is checked (and mended) and the credentials written before every run, not only the first
     let check = check_config(st, false).await?;
     if let Some(p) = check.problem {
         anyhow::bail!("{CONFIG_BROKEN_MSG} – {p}");
     }
-    if url.contains("deezer.com") && toml_value(&std::fs::read_to_string(&check.path).unwrap_or_default(), "deezer", "arl").is_empty() {
+    if url.contains("deezer.com") && toml_value(&read_config(&check.path)?, "deezer", "arl").is_empty() {
         anyhow::bail!("{ARL_MSG}");
     }
-    let tpl = st.cfg().str("streamrip_command");
-    let tpl = if tpl.is_empty() { DEFAULT_CMD.to_string() } else { tpl };
-    let cmd = tpl.replace("{bin}", &shq(&bin))
-        .replace("{config}", &shq(&check.path.to_string_lossy())).replace("{folder}", &shq(&folder.to_string_lossy()))
-        .replace("{quality}", &st.cfg().int("streamrip_quality").to_string()).replace("{url}", &shq(url));
-    // stdin closed: a prompt (the Deezer ARL, say) reads EOF at once instead of waiting forever
-    let fut = tokio::process::Command::new("sh").args(["-c", &cmd]).stdin(std::process::Stdio::null())
-        .env("NO_COLOR", "1").env("TERM", "dumb").env("PYTHONUNBUFFERED", "1").kill_on_drop(true).output();
-    let out = tokio::time::timeout(std::time::Duration::from_secs(3600), fut).await.map_err(|_| anyhow::anyhow!("streamrip timed out"))??;
-    let files = audio_files(folder, &AUDIO);
-    if files.is_empty() {
-        let text = String::from_utf8_lossy(&[out.stdout, out.stderr].concat()).to_string();
-        return Err(RipError { message: failure_message(&text), log: cap(text.trim(), LOG_CAP) }.into());
+    let (program, args) = command(st, &bin, &check.path, folder, url);
+    let run = run_quiet(&program, &args, st.data_dir(), RUN_SECS, Step::Download).await?;
+    let log = cap_log(run.output.trim(), LOG_CAP);
+    let files = match audio_files_checked(folder, &AUDIO) {
+        Ok(f) => f,
+        // the run's output still goes with the error, for the log
+        Err(e) => return Err(anyhow::Error::from(e).context(RipError { message: "streamrip ran, but its folder can't be read".into(), log })),
+    };
+    // streamrip's own words for a disk that failed under it (its files can't be trusted to be whole): the
+    // storage's problem, not the source's – the step waits for the storage
+    crate::worker::storage::register_roots(st);
+    if let Some(se) = storage_error_in(&log) {
+        let message = if files.is_empty() || run.status.is_none() { run_failure(&run, RUN_SECS) } else { format!("streamrip hit a storage error: {se}") };
+        return Err(anyhow::Error::from(se).context(RipError { message, log }));
     }
-    Ok(files)
+    if files.is_empty() || run.status.is_none() {
+        return Err(RipError { message: run_failure(&run, RUN_SECS), log }.into());
+    }
+    Ok(Ripped { files, log })
+}
+
+/// A storage error streamrip itself met while writing into one of Encore's folders ("[Errno 5] Input/output
+/// error: '/downloads/encore/request-12/streamrip/…'"): the step error it stands for, when the errno is a
+/// storage one ([`fsx::is_storage`]) and the path lies in a folder Encore uses (the staging folder). A
+/// storage errno elsewhere (streamrip's own config or cache) is streamrip's failure as before.
+pub fn storage_error_in(output: &str) -> Option<StepError> {
+    static ERRNO: std::sync::LazyLock<Regex> = std::sync::LazyLock::new(|| Regex::new(r"\[Errno (\d+)\][^'\n]*'([^'\n]+)'").unwrap());
+    ERRNO.captures_iter(output).find_map(|c| {
+        let n: i32 = c[1].parse().ok()?;
+        let path = Path::new(&c[2]);
+        if !fsx::is_storage(n) || !path.is_absolute() {
+            return None;
+        }
+        let e = StepError::new(Step::Download, "write", path, None, std::io::Error::from_raw_os_error(n));
+        e.is_storage().then_some(e)
+    })
 }
 
 
@@ -626,11 +986,11 @@ fn toml_float(v: f64) -> String {
 /// Write `[tidal]` values into streamrip's config (made sound through ensure_config first).
 async fn tidal_write(st: &impl Ctx, values: &[(String, String)]) -> anyhow::Result<()> {
     let path = ensure_config(st).await?;
-    let mut text = std::fs::read_to_string(&path).unwrap_or_default();
+    let mut text = read_config(&path)?;
     for (k, v) in values {
         text = set_toml(&text, "tidal", k, v);
     }
-    std::fs::write(&path, text)?;
+    write_config(&path, &text)?;
     Ok(())
 }
 
@@ -1015,6 +1375,23 @@ pub async fn tidal_user_token(st: &impl Ctx) -> anyhow::Result<Option<(String, S
 mod tests {
     use super::*;
 
+    #[test]
+    fn streamrips_own_storage_errors_are_the_storage_s() {
+        let staging = std::env::temp_dir().join(format!("encore-rip-errno-{}", std::process::id()));
+        fsx::roots::add([&staging]);
+        let file = staging.join("request-12/streamrip/Duumu - Illuminate EP/01. Light.flac");
+        let out = format!("Downloading Illuminate EP\nTraceback (most recent call last):\nOSError: [Errno 5] Input/output error: '{}'\n", file.display());
+        let e = storage_error_in(&out).unwrap();
+        assert_eq!((e.step, e.op, e.errno), (Step::Download, "write", Some(5)));
+        assert_eq!(e.path, file);
+        assert!(e.to_string().ends_with("Input/output error (os error 5) – storage problem, not the source"), "{e}");
+        assert!(storage_error_in(&format!("[Errno 28] No space left on device: '{}' -> '/tmp/x'", file.display())).is_some());
+        // not a storage errno, outside Encore's folders, or no path: streamrip's own failure
+        assert!(storage_error_in(&format!("[Errno 2] No such file or directory: '{}'", file.display())).is_none());
+        assert!(storage_error_in("[Errno 5] Input/output error: '/root/.cache/streamrip/x'").is_none());
+        assert!(storage_error_in("OSError: [Errno 28] No space left on device").is_none());
+    }
+
     const SECTION: &str = r#"
 user_id = "12345678"
 country_code = "US"
@@ -1183,5 +1560,205 @@ hires_token_client_id = "fX2JxdmntZWK0ixT"
         assert!(qobuz_v2("[qobuz]\nemail_or_userid = \"\"\nauth_token = \"x\""));
         assert!(!qobuz_v2("[qobuz]\nuser_id = \"\"\nauth_token = \"\""));
         assert!(qobuz_v2(""));
+    }
+
+    /// The fork's 2.4.9 template ([cli] without the key), 2.4.10's (the key commented out), nathom's 2.x ([misc]).
+    const CLI_249: &str = "[database]\ndownloads_enabled = true\n\n[cli]\n# Show resolve, download progress bars\nprogress_bars = true\nmax_search_results = 100\n";
+    const CLI_2410: &str = "[cli]\nprogress_bars = true\nmax_search_results = 100\n# streamrip asks GitHub for a newer release before every command. Uncomment this\n# no_update_check = true\n";
+    const MISC_20: &str = "[cli]\ntext_output = true\nprogress_bars = true\n\n[misc]\nversion = \"2.0.6\"\ncheck_for_updates = true\n";
+
+    #[test]
+    fn the_update_check_is_switched_off_the_way_each_streamrip_reads_it() {
+        // 2.4.9 (the image's before 0.29): progress bars off, no update-check key (its [cli] would refuse one)
+        for v in [Some("streamrip, version 2.4.9"), Some("2.4.9"), None] {
+            let t = quiet_config(CLI_249, v);
+            assert_eq!(toml_value(&t, "cli", "progress_bars"), "false", "{v:?}");
+            assert!(!t.lines().any(|l| l.trim_start().starts_with("no_update_check")), "{v:?}: {t}");
+            assert_eq!(toml_value(&t, "cli", "max_search_results"), "100");
+        }
+        // 2.4.10 and later read [cli] no_update_check; known by the version or by the template's line
+        for v in [Some("streamrip, version 2.4.10"), Some("2.5.0"), None] {
+            let t = quiet_config(CLI_2410, v);
+            assert_eq!(toml_value(&t, "cli", "no_update_check"), "true", "{v:?}: {t}");
+            assert_eq!(toml_value(&t, "cli", "progress_bars"), "false");
+        }
+        assert_eq!(toml_value(&quiet_config(CLI_249, Some("2.4.10")), "cli", "no_update_check"), "true", "a config from 2.4.9 run by 2.4.10");
+        assert_eq!(toml_value(&quiet_config(CLI_2410, Some("2.4.9")), "cli", "no_update_check"), "", "a downgraded streamrip never gets the key");
+        // nathom's 2.x: [misc] check_for_updates
+        let t = quiet_config(MISC_20, Some("2.0.6"));
+        assert_eq!(toml_value(&t, "misc", "check_for_updates"), "false");
+        assert_eq!(toml_value(&t, "misc", "version"), "2.0.6");
+        assert_eq!(toml_value(&t, "cli", "no_update_check"), "");
+        // a file without those sections gets none of Encore's (a section of only its keys would not load)
+        let bare = "[deezer]\narl = \"x\"\n";
+        assert_eq!(quiet_config(bare, Some("2.4.10")), bare);
+        // written twice, the same file
+        let once = quiet_config(CLI_2410, None);
+        assert_eq!(quiet_config(&once, None), once);
+    }
+
+    #[test]
+    fn a_long_run_log_keeps_its_end() {
+        let text: String = (0..3000).map(|i| format!("line {i}\n")).collect::<String>() + "Traceback: the real error";
+        let log = cap_log(&text, 2000);
+        assert!(log.starts_with("line 0\n"), "{log}");
+        assert!(log.ends_with("Traceback: the real error"), "{log}");
+        assert!(log.contains("characters left out"), "{log}");
+        assert!(log.chars().count() < 2100);
+        assert_eq!(cap_log("short", 2000), "short");
+    }
+
+    #[test]
+    fn a_run_that_printed_nothing_says_how_it_ended() {
+        use std::os::unix::process::ExitStatusExt;
+        let ended = |code: i32, out: &str| RunOutput { status: Some(std::process::ExitStatus::from_raw(code << 8)), output: out.into() };
+        assert_eq!(run_failure(&ended(1, ""), RUN_SECS), "streamrip produced no files and printed nothing (exit code 1)");
+        assert_eq!(run_failure(&ended(1, "Error: album not available in your country\n"), RUN_SECS), "streamrip produced no files: Error: album not available in your country");
+        let stopped = RunOutput { status: None, output: "Downloading…\n".into() };
+        assert_eq!(run_failure(&stopped, 3600), "streamrip did not finish within 60 minutes and was stopped – streamrip produced no files: Downloading…");
+    }
+
+    #[test]
+    fn the_config_is_written_whole_with_its_permissions() {
+        use std::os::unix::fs::PermissionsExt;
+        let d = std::env::temp_dir().join(format!("encore-rip-write-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(&d).unwrap();
+        let p = d.join("config.toml");
+        assert_eq!(read_config(&p).unwrap(), "", "no file yet");
+        write_config(&p, "[deezer]\narl = \"a\"\n").unwrap();
+        std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o600)).unwrap();
+        write_config(&p, "[deezer]\narl = \"b\"\n").unwrap();
+        assert_eq!(read_config(&p).unwrap(), "[deezer]\narl = \"b\"\n");
+        assert_eq!(std::fs::metadata(&p).unwrap().permissions().mode() & 0o777, 0o600, "the sign-ins stay private");
+        assert_eq!(std::fs::read_dir(&d).unwrap().count(), 1, "no new file left beside it");
+        // a symlinked config stays a symlink
+        let real = d.join("real.toml");
+        std::fs::rename(&p, &real).unwrap();
+        std::os::unix::fs::symlink(&real, &p).unwrap();
+        write_config(&p, "x = 1\n").unwrap();
+        assert!(std::fs::symlink_metadata(&p).unwrap().file_type().is_symlink());
+        assert_eq!(std::fs::read_to_string(&real).unwrap(), "x = 1\n");
+        // a config folder that is a file: the error names the write of the config
+        let blocked = d.join("real.toml").join("config.toml");
+        let e = write_config(&blocked, "x").unwrap_err();
+        assert_eq!((e.step, e.op), (Step::Config, "write"));
+        assert!(e.to_string().starts_with(&format!("config failed: write {}: ", blocked.display())), "{e}");
+        // so does an unreadable one, for the read
+        let e = read_config(&blocked).unwrap_err();
+        assert!(e.to_string().starts_with(&format!("config failed: read {}: Not a directory (os error 20)", blocked.display())), "{e}");
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    /// A script in a fresh folder, for the runs below.
+    fn script(name: &str, body: &str) -> (PathBuf, PathBuf) {
+        use std::os::unix::fs::PermissionsExt;
+        let d = std::env::temp_dir().join(format!("encore-rip-run-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(&d).unwrap();
+        let p = d.join("run.sh");
+        let tmp = d.join(".run.tmp");
+        std::fs::write(&tmp, format!("#!/bin/sh\n{body}\n")).unwrap();
+        std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o755)).unwrap();
+        std::fs::rename(&tmp, &p).unwrap();
+        (d, p)
+    }
+
+    /// Field `n` (1-based, after the command's parentheses) of /proc/<pid>/stat.
+    fn stat_field(stat: &str, n: usize) -> i64 {
+        stat.rsplit_once(')').unwrap().1.split_whitespace().nth(n - 3).unwrap().parse().unwrap()
+    }
+
+    #[tokio::test]
+    async fn a_run_has_no_terminal_and_hands_back_all_its_output() {
+        let (d, sh) = script("quiet", r#"here=$(dirname "$0")
+cat /proc/$$/stat > "$here/stat"
+echo "env TERM=$TERM NO_COLOR=$NO_COLOR COLUMNS=$COLUMNS PYTHONUNBUFFERED=$PYTHONUNBUFFERED HOME=$HOME" > "$here/env"
+echo "to the terminal" > /dev/tty
+read answer < /dev/tty
+echo "out 1"
+echo "err 1" >&2
+echo "out 2"
+printf 'no newline at the end' >&2
+exit 3"#);
+        let started = std::time::Instant::now();
+        let run = run_quiet(&sh.to_string_lossy(), &[], &d, 30, Step::Download).await.unwrap();
+        assert!(started.elapsed() < std::time::Duration::from_secs(20), "a read from /dev/tty must not wait");
+        assert_eq!(run.status.and_then(|s| s.code()), Some(3));
+        assert!(!run.success());
+        for line in ["out 1", "err 1", "out 2", "no newline at the end"] {
+            assert!(run.output.contains(line), "{line} in {}", run.output);
+        }
+        assert!(run.output.find("out 1").unwrap() < run.output.find("out 2").unwrap());
+        // its own session (setsid), so no controlling terminal: tty_nr 0, a session id that is not ours
+        let stat = std::fs::read_to_string(d.join("stat")).unwrap();
+        let mine = std::fs::read_to_string("/proc/self/stat").unwrap();
+        assert_eq!(stat_field(&stat, 7), 0, "tty_nr: {stat}");
+        assert_ne!(stat_field(&stat, 6), stat_field(&mine, 6), "session: {stat}");
+        assert_eq!(stat_field(&stat, 6), stat_field(&stat, 5), "the run leads its session's process group");
+        let env = std::fs::read_to_string(d.join("env")).unwrap();
+        assert_eq!(env.trim(), format!("env TERM=dumb NO_COLOR=1 COLUMNS=200 PYTHONUNBUFFERED=1 HOME={}", d.display()));
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[tokio::test]
+    async fn a_run_past_its_limit_is_stopped_with_everything_it_started() {
+        let (d, sh) = script("limit", r#"here=$(dirname "$0")
+sleep 300 &
+echo $! > "$here/child"
+echo "started"
+sleep 300"#);
+        let started = std::time::Instant::now();
+        let run = run_quiet(&sh.to_string_lossy(), &[], &d, 2, Step::Download).await.unwrap();
+        assert!(started.elapsed() < std::time::Duration::from_secs(15));
+        assert!(run.status.is_none());
+        assert!(run.output.contains("started") && run.output.contains("Encore stopped streamrip after 2 s"), "{}", run.output);
+        // the program's own child went with it
+        let child: i32 = std::fs::read_to_string(d.join("child")).unwrap().trim().parse().unwrap();
+        let mut gone = false;
+        for _ in 0..50 {
+            let stat = std::fs::read_to_string(format!("/proc/{child}/stat")).unwrap_or_default();
+            if stat.is_empty() || stat.rsplit_once(')').is_some_and(|(_, r)| r.trim_start().starts_with('Z')) {
+                gone = true;
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        }
+        assert!(gone, "sleep {child} still runs");
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn an_unreadable_folder_after_a_run_is_the_disks_and_keeps_the_output() {
+        let d = std::env::temp_dir().join(format!("encore-rip-walk-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(d.join("Album")).unwrap();
+        std::fs::write(d.join("Album/01.flac"), b"x").unwrap();
+        assert_eq!(audio_files_checked(&d, &AUDIO).unwrap(), vec![d.join("Album/01.flac")]);
+        let e = audio_files_checked(&d.join("missing"), &AUDIO).unwrap();
+        assert!(e.is_empty(), "a folder that is not there has no files");
+        // a folder whose reading fails
+        let file = d.join("Album/01.flac");
+        let e = audio_files_checked(&file.join("x"), &AUDIO).unwrap_err();
+        assert_eq!((e.step, e.op, e.errno), (Step::Stage, "read", Some(20)));
+        let wrapped = anyhow::Error::from(e).context(RipError { message: "streamrip ran, but its folder can't be read".into(), log: "the output".into() });
+        assert_eq!(run_log(&wrapped), Some("the output"));
+        assert!(fsx::find(&wrapped).is_some());
+        assert!(format!("{wrapped:#}").starts_with(&format!("streamrip ran, but its folder can't be read: staging failed: read {}", file.join("x").display())), "{wrapped:#}");
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[tokio::test]
+    async fn a_program_that_cannot_start_is_named() {
+        let d = std::env::temp_dir().join(format!("encore-rip-nostart-{}", std::process::id()));
+        let missing = d.join("venv/bin/rip");
+        let e = run_quiet(&missing.to_string_lossy(), &[], &d, 5, Step::Download).await.unwrap_err();
+        assert_eq!(e.to_string(), format!("download failed: start {}: No such file or directory (os error 2) – the program is missing", missing.display()));
+        // something that can't be run (a folder): the error of the start, with its path and errno
+        let (d2, _) = script("noexec", "echo hi");
+        let e = run_quiet(&d2.to_string_lossy(), &[], &d2, 5, Step::Config).await.unwrap_err();
+        assert!(e.to_string().starts_with(&format!("config failed: start {}: Permission denied (os error 13)", d2.display())), "{e}");
+        assert_eq!(e.errno, Some(13));
+        let _ = std::fs::remove_dir_all(&d2);
     }
 }

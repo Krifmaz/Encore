@@ -126,7 +126,7 @@ fn card(k: &str, s: &Value, c: &Value, available: bool) -> String {
     let info = info(k);
     let connected = crate::json::truthy(c);
     let badge = if connected {
-        if c.truthy("last_error") { format!(r#"<span class="badge err" title="{}">error</span>"#, esc(&c.s("last_error"))) }
+        if c.truthy("last_error") { format!(r#"<span class="badge err" title="{}"{}>error</span>"#, esc(&c.s("last_error")), crate::details::attrs(&s.s("label"), &c.s("last_error"))) }
         else { r#"<span class="badge ok">connected</span>"#.to_string() }
     } else { String::new() };
     let body = if connected {

@@ -27,6 +27,8 @@ pub fn live_status(status: &str, label: &str) -> (Badge, String) {
         "searching" => (Badge::Info, "Searching"),
         "monitoring" | "downloading" => (Badge::Accent, "Downloading"),
         "importing" => (Badge::Accent, "Importing"),
+        // the worker waits (for Soulseek, or for the library to be writable again)
+        "waiting" => (Badge::Warn, "Waiting"),
         "completed" => (Badge::Ok, "In library"),
         "failed" => (Badge::Err, "Failed"),
         "denied" => (Badge::Err, "Denied"),
@@ -50,6 +52,7 @@ pub fn status_words(status: &str) -> (Badge, String) {
         "monitoring" => (Badge::Accent, "Monitoring".into()),
         "downloading" => (Badge::Accent, "Downloading".into()),
         "importing" => (Badge::Accent, "Importing".into()),
+        "waiting" => (Badge::Warn, "Waiting".into()),
         "completed" => (Badge::Ok, "Available".into()),
         "failed" => (Badge::Err, "Failed".into()),
         "denied" => (Badge::Err, "Denied".into()),

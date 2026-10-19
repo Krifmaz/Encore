@@ -196,6 +196,7 @@ pub fn status_badge<'a, M: 'a>(status: &str) -> El<'a, M> {
         "monitoring" => (Badge::Accent, "Monitoring"),
         "downloading" => (Badge::Accent, "Downloading"),
         "importing" => (Badge::Accent, "Importing"),
+        "waiting" => (Badge::Warn, "Waiting"),
         "completed" => (Badge::Ok, "Available"),
         "failed" => (Badge::Err, "Failed"),
         "denied" => (Badge::Err, "Denied"),

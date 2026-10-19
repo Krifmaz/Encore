@@ -37,6 +37,10 @@ enum Step {
     RowMenu,
     /// Close the menu again.
     CloseRowMenu,
+    /// Open the first request's details (skipped when the list is empty).
+    RequestDetails,
+    /// Close the details dialog.
+    CloseDetails,
     Exit,
 }
 
@@ -76,6 +80,9 @@ impl State {
             CloseRowMenu,
             Nav(Page::Requests),
             Shot("requests"),
+            RequestDetails,
+            Shot("request-details"),
+            CloseDetails,
             Nav(Page::Playlists),
             Shot("playlists"),
             Nav(Page::Download),
@@ -250,6 +257,19 @@ fn step(app: &mut App) -> Task<AppMsg> {
             app.cursor = iced::Point::new(760.0, 430.0);
             app.update(AppMsg::LibraryAlbum(crate::pages::library_album::Message::TrackMenu(0)))
         }
+        Step::RequestDetails => match app.requests.first_request() {
+            Some(id) => {
+                t.wait = 4;
+                app.update(AppMsg::Requests(crate::pages::requests::Message::List(
+                    crate::widgets::request_list::Msg::Details(id),
+                )))
+            }
+            None => {
+                t.next += 1;
+                Task::none()
+            }
+        },
+        Step::CloseDetails => app.update(AppMsg::Details(crate::widgets::details::Msg::Close)),
         Step::CloseRowMenu => {
             app.update(AppMsg::LibraryAlbum(crate::pages::library_album::Message::Shared(
                 crate::pages::library::Act::CloseMenu,

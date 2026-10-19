@@ -9,6 +9,7 @@
 pub mod api;
 pub mod app;
 pub mod appearance;
+pub mod details;
 pub mod dom;
 pub mod json;
 pub mod num;
@@ -31,6 +32,7 @@ use wasm_bindgen::prelude::*;
 pub fn start() {
     std::panic::set_hook(Box::new(on_panic));
     ui::init();
+    details::init();
     appearance::init();
     app::init();
 }

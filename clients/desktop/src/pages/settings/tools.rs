@@ -3,7 +3,7 @@
 //! config file, the Soulseek engine's status, the VPN for Soulseek, the server's Cadenza cache
 //! and engine settings, and the YouTube sign-in card.
 
-use super::{help, link_muted, result_line, select, switch_maybe, vs, Opt};
+use super::{help, link_muted, result_line, result_line_copy, select, switch_maybe, vs, Opt};
 use crate::api::ApiError;
 use crate::fmt;
 use crate::pages::{Ctx, El};
@@ -77,6 +77,8 @@ pub enum Message {
     TidalTokensSaved(Result<Value, ApiError>),
     TidalSignOut,
     TidalSignedOut(Result<Value, ApiError>),
+    /// Copy a failed result's words.
+    CopyText(String),
     AskRipReset,
     RipReset,
     RipResetDone(Result<Value, ApiError>),
@@ -239,10 +241,10 @@ pub fn session_text(s: &Value) -> String {
     }
 }
 
-/// The sentence away from the card (the Soulseek page): "fix them below" points at the card's fields, which
-/// aren't there – the line links to the card instead.
+/// The sentence away from the card (the Soulseek page, Diagnostics): "fix them below" points at the card's
+/// fields, which aren't there – it names the card instead, in the server's words (`text_elsewhere`).
 pub fn session_text_elsewhere(text: &str) -> String {
-    text.replace(" – fix them below", "")
+    text.replace(" – fix them below", " – fix them in Settings → Soulseek")
 }
 
 /// What goes under the sentence, on this computer's clock: "Next attempt in 3 m 12 s · 12 searches waiting
@@ -260,8 +262,12 @@ pub fn session_details(s: &Value, now: f64) -> String {
     }
     let n = fmt::i(s, "searches_waiting");
     if n > 0 {
-        let what = if n == 1 { "1 search".to_string() } else { format!("{n} searches") };
-        parts.push(if state == "logged_in" { format!("{what} waiting their turn") } else { format!("{what} waiting for the connection") });
+        parts.push(match (n, state == "logged_in") {
+            (1, true) => "1 search waiting for its turn".to_string(),
+            (n, true) => format!("{n} searches waiting for their turn"),
+            (1, false) => "1 search waiting for the connection".to_string(),
+            (n, false) => format!("{n} searches waiting for the connection"),
+        });
     }
     if fmt::truthy(s, "search_running") {
         parts.push("a search is running".into());
@@ -601,6 +607,7 @@ pub fn update(state: &mut State, msg: Message, ctx: &mut Ctx) -> Task<Message> {
             ctx.toast_ok("Signed out of Tidal");
         }
         Message::TidalSignedOut(Err(e)) => ctx.toast_err(e.message),
+        Message::CopyText(text) => ctx.copy_text(text),
         Message::AskRipReset => state.dialog = Some(Dialog::RipReset),
         Message::RipReset => {
             state.dialog = None;
@@ -967,7 +974,7 @@ pub fn tidal_block<'a>(state: &'a State) -> El<'a, Message> {
         c = c.push(result_line(true, fmt::s(r, "message")));
     } else if status == "failed" {
         let m = fmt::s(r, "message");
-        c = c.push(result_line(false, if m.is_empty() { "Sign-in failed".to_string() } else { m }));
+        c = c.push(result_line_copy(false, if m.is_empty() { "Sign-in failed" } else { m.as_str() }, Message::CopyText));
     }
     c = c.push(link_muted(if state.tidal_paste { "▾ Paste tokens instead" } else { "▸ Paste tokens instead" }, Message::TidalPaste(!state.tidal_paste)));
     if state.tidal_paste {
@@ -991,7 +998,7 @@ pub fn streamrip_block<'a>(state: &'a State) -> El<'a, Message> {
     )]
     .spacing(10);
     if let Some((ok, msg)) = &state.rip_out {
-        c = c.push(result_line(*ok, msg.as_str()));
+        c = c.push(result_line_copy(*ok, msg, Message::CopyText));
     }
     flat(c)
 }
@@ -1045,15 +1052,25 @@ pub fn soulseek_block<'a>(state: &'a State) -> El<'a, Message> {
 }
 
 /// The VPN for Soulseek block: the WireGuard fields (given), the tunnel's state and Test VPN
-/// (`on_test` is the page's message; None while a test runs).
-pub fn vpn_block<'a, M: Clone + 'a>(state: &'a State, fields: El<'a, M>, on_test: Option<M>) -> El<'a, M> {
+/// (`on_test` is the page's message; None while a test runs). A failed test carries Copy
+/// (`on_copy` gets its words).
+pub fn vpn_block<'a, M: Clone + 'a>(
+    state: &'a State,
+    fields: El<'a, M>,
+    on_test: Option<M>,
+    on_copy: impl Fn(String) -> M,
+) -> El<'a, M> {
     let v = &state.vpn;
     let p = theme::look();
     let text = if state.vpn_testing { "Testing…".to_string() } else if v.is_null() { "Status unavailable".to_string() } else { super::diagnostics::vpn_text(v) };
-    let is_err = v["state"].as_str() == Some("error");
-    let mut status = row![crate::widgets::t(text).size(12.5).color(if is_err { p.err } else { p.muted })].spacing(6).align_y(Alignment::Center);
+    let is_err = v["state"].as_str() == Some("error") && !state.vpn_testing;
+    let mut status = row![crate::widgets::t(text.clone()).size(12.5).color(if is_err { p.err } else { p.muted })].spacing(6).align_y(Alignment::Center);
     if fmt::truthy(v, "_failed") {
         status = status.push(super::err_text(fmt::s(v, "_failed")));
+    }
+    if is_err || fmt::truthy(v, "_failed") {
+        let all = [text, fmt::s(v, "_failed")].into_iter().filter(|w| !w.is_empty()).collect::<Vec<_>>().join(" · ");
+        status = status.push(crate::widgets::details::copy_btn(on_copy(all)));
     }
     flat(
         column![
@@ -1295,11 +1312,17 @@ mod tests {
             "text": "Logged in as alice since 14:02. Rate limited by the Soulseek server – next search at 14:05" });
         assert_eq!(session_tone(&s), "warn");
         assert_eq!(session_details(&s, now), "Searches go on in 45 s · a search is running");
+        // searches held back while logged in: one waits for its turn, more wait for theirs
+        let one = json!({ "state": "logged_in", "searches_waiting": 1 });
+        assert_eq!(session_details(&one, now), "1 search waiting for its turn");
+        let three = json!({ "state": "logged_in", "searches_waiting": 3 });
+        assert_eq!(session_details(&three, now), "3 searches waiting for their turn");
+        assert_eq!(session_details(&json!({ "state": "connecting", "searches_waiting": 1 }), now), "1 search waiting for the connection");
         assert_eq!(reconnect_wait(&json!({ "state": "running", "session": s })), None);
-        // rejected: red; away from the card the line links to it instead of saying "below"
+        // rejected: red; away from the card the line names it (the server's words) instead of saying "below"
         let s = json!({ "state": "stopped", "reason": "rejected", "text": "Rejected: invalid username or password – fix them below" });
         assert_eq!(session_tone(&s), "err");
-        assert_eq!(session_text_elsewhere(&session_text(&s)), "Rejected: invalid username or password");
+        assert_eq!(session_text_elsewhere(&session_text(&s)), "Rejected: invalid username or password – fix them in Settings → Soulseek");
         // not installed: the engine line only
         let r = json!({ "state": "not_installed", "hint": "Install or update it under Download tools", "session": { "state": "stopped", "text": "Soulseek is not installed" } });
         assert!(!has_session(&r));

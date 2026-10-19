@@ -166,14 +166,19 @@ fn score(want_t: &str, want_a: &str, t: &str, a: &str, len: Option<f64>, got: Op
     if v.matched { (v.score * 100.0).round() / 100.0 } else { 0.0 }
 }
 
+/// The share of `needle`'s words in `hay`, the better of two readings of both: the plain words and the
+/// symbols spelled out (Ke$ha → kesha, P!nk → pink, accents folded: [`torznab::match_words`]).
 fn contains(hay: &str, needle: &str) -> f64 {
-    let n = encore_core::text::ascii_words(needle);
-    let w: Vec<&str> = n.split_whitespace().collect();
-    if w.is_empty() {
-        return 0.0;
-    }
-    let h = format!(" {} ", encore_core::text::ascii_words(hay));
-    w.iter().filter(|x| h.contains(&format!(" {x} "))).count() as f64 / w.len() as f64
+    let share = |words: fn(&str) -> String| {
+        let n = words(needle);
+        let w: Vec<&str> = n.split_whitespace().collect();
+        if w.is_empty() {
+            return 0.0;
+        }
+        let h = format!(" {} ", words(hay));
+        w.iter().filter(|x| h.contains(&format!(" {x} "))).count() as f64 / w.len() as f64
+    };
+    share(encore_core::text::ascii_words).max(share(torznab::match_words))
 }
 
 #[derive(Deserialize, Default)]
@@ -192,7 +197,8 @@ pub struct SearchBody {
 }
 
 async fn search_slskd(st: &AppState, b: &SearchBody, q: &str) -> anyhow::Result<Vec<Value>> {
-    let q: String = q.chars().map(|c| if c.is_alphanumeric() || c.is_whitespace() || c == '\'' { c } else { ' ' }).collect();
+    // symbols that stand for letters spelled out first (Ke$ha → Kesha, not "Ke ha")
+    let q: String = torznab::fold_symbols(q).chars().map(|c| if c.is_alphanumeric() || c.is_whitespace() || c == '\'' { c } else { ' ' }).collect();
     let mut out = vec![];
     for resp in slskd::search_now(st, &q).await? {
         let user = resp["username"].as_str().unwrap_or("").to_string();
@@ -468,7 +474,12 @@ async fn tidal_credentials(st: &AppState) -> anyhow::Result<(String, String)> {
 
 /// A path of Tidal's API with the search's token; a rejected token means signing in again.
 async fn tidal_get(st: &AppState, tok: &str, path: &str, query: &[(&str, &str)]) -> anyhow::Result<Value> {
-    let r = tidal::get(st, tok, path).query(query).send().await?;
+    tidal_read(tidal::get(st, tok, path).query(query)).await
+}
+
+/// Send a request to Tidal's API: its answer, or Tidal's words; a rejected token means signing in again.
+async fn tidal_read(req: reqwest::RequestBuilder) -> anyhow::Result<Value> {
+    let r = req.send().await?;
     let code = r.status().as_u16();
     if code == 401 || code == 403 {
         anyhow::bail!("Tidal rejected the sign-in token – sign in again in Settings → streamrip");
@@ -541,11 +552,13 @@ fn tidal_rows(b: &SearchBody, d: &Value, order: &[String]) -> Vec<Value> {
 /// Tidal's catalogue through openapi v2: the search gives ids, the listing their details with artists (and
 /// albums). Picks hand the worker a tidal.com link, which streamrip downloads with the signed-in account.
 async fn search_tidal(st: &AppState, b: &SearchBody, q: &str) -> anyhow::Result<Vec<Value>> {
+    // Tidal refuses an empty query (400): nothing to search for, nothing asked
+    let Some(q) = tidal::search_query(q) else { return Ok(vec![]) };
     let (tok, cc) = tidal_credentials(st).await?;
     let typ = if b.kind == "album" { "albums" } else { "tracks" };
-    let found = tidal_get(st, &tok, &format!("/searchResults/{}", urlencoding::encode(q)), &[("countryCode", cc.as_str()), ("include", typ)]).await?;
-    let ids: Vec<String> = found["data"]["relationships"][typ]["data"].as_array().cloned().unwrap_or_default().iter()
-        .filter(|x| x["type"].as_str() == Some(typ)).filter_map(|x| x["id"].as_str().map(String::from)).take(25).collect();
+    // the query in `filter[query]`: the older path form (/searchResults/{q}) answers 400 INVALID_RESOURCE_ID
+    let found = tidal_read(tidal::search(st, &tok, &q, &cc, typ)).await?;
+    let ids: Vec<String> = tidal::search_ids(&found, typ).into_iter().take(25).collect();
     if ids.is_empty() {
         return Ok(vec![]);
     }
@@ -694,6 +707,11 @@ async fn pick(State(st): State<AppState>, User(u): User, Json(mut b): Json<PickB
         let req = NewRequest { kind: s("kind").unwrap_or_default(), mbid: s("mbid"), artist: s("artist"), title: s("title"), album: s("album"), year: s("year"),
             cover_url: s("cover_url"), length: old["detail"]["length"].as_f64(), isrc: old["detail"]["isrc"].as_str().map(String::from), ..Default::default() };
         let status = old["status"].as_str().unwrap_or("");
+        // a pick starts the request over, and its downloaded files would go with it: they are imported (or
+        // the request cancelled) first
+        if matches!(status, "failed" | "waiting" | "importing" | "completed") && worker::storage::has_files(&old["detail"]) {
+            return Err(err(409, "This request has downloaded files waiting to be imported – Import again or cancel it first"));
+        }
         if worker::ACTIVE.contains(&status) {
             worker::cancel(&st, rid).await;
         }

@@ -101,7 +101,7 @@ pub const SECTIONS: &[Card] = &[
     ] },
     Card { id: "library", title: "Library & tagging", desc: "Where your music lives, and how downloaded files are tagged, named and organised.", test: None, test_label: None, fields: &[
         s("library_path", "Music library path", "text").help("Inside the container (mount your music folder here)"),
-        s("staging_path", "Staging path for yt-dlp downloads", "text"),
+        s("staging_path", "Staging folder for downloads", "text").help("Where downloads (streamrip, yt-dlp, links) are saved before they are tagged and moved into the library"),
         s("scan_interval_minutes", "Rescan library every (minutes)", "number").help("0 disables periodic scans"),
         s("autotag_on_import", "Tag downloads from MusicBrainz on import", "bool"),
         s("autotag_threshold", "Auto-tag confidence threshold", "number").step("0.05").help("0–1. Matches below this are imported with their existing tags"),

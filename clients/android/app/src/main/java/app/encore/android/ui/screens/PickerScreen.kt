@@ -18,6 +18,7 @@ import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.ExperimentalLayoutApi
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.material3.Checkbox
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.MaterialTheme
@@ -57,6 +58,7 @@ import app.encore.android.ui.Nav
 import app.encore.android.ui.Screen
 import app.encore.android.ui.components.Badge
 import app.encore.android.ui.components.ChoiceRow
+import app.encore.android.ui.components.CopyIconButton
 import app.encore.android.ui.components.Cover
 import app.encore.android.ui.components.EncoreButton
 import app.encore.android.ui.components.EncoreTopBar
@@ -98,15 +100,18 @@ private fun settingsSection(link: String): String = Regex("[?&]s=([^&]+)").find(
 
 /**
  * "Sign in to Tidal – Settings → streamrip": a hint with its settings link. Admins go to that page of the phone's own
- * Settings; everyone else gets the web UI's page.
+ * Settings; everyone else gets the web UI's page. A source's error ([copy] set) is selectable, whole, with Copy.
  */
 @OptIn(ExperimentalLayoutApi::class)
 @Composable
-private fun HintLine(nav: Nav, admin: Boolean, hint: String, settings: String, label: String, error: Boolean = false) {
+private fun HintLine(nav: Nav, admin: Boolean, hint: String, settings: String, label: String, error: Boolean = false, copy: String? = null) {
     val p = MaterialTheme.palette
     val context = LocalContext.current
     FlowRow(Modifier.padding(horizontal = Gutter, vertical = 6.dp), horizontalArrangement = Arrangement.spacedBy(6.dp), verticalArrangement = Arrangement.spacedBy(2.dp)) {
-        if (hint.isNotEmpty()) Text(hint, style = MaterialTheme.typography.bodySmall, color = if (error) EncoreColors.Err else p.muted)
+        if (hint.isNotEmpty()) {
+            if (copy != null) SelectionContainer { Text(hint, style = MaterialTheme.typography.bodySmall, color = if (error) EncoreColors.Err else p.muted) }
+            else Text(hint, style = MaterialTheme.typography.bodySmall, color = if (error) EncoreColors.Err else p.muted)
+        }
         if (settings.isNotEmpty()) {
             Text(
                 (if (hint.isNotEmpty()) "– " else "") + label.ifEmpty { "Settings" },
@@ -121,6 +126,7 @@ private fun HintLine(nav: Nav, admin: Boolean, hint: String, settings: String, l
                 },
             )
         }
+        if (copy != null) CopyIconButton(copy, Modifier.align(Alignment.CenterVertically), size = 28.dp)
     }
 }
 
@@ -130,7 +136,7 @@ private fun HintLine(nav: Nav, admin: Boolean, hint: String, settings: String, l
  */
 @OptIn(ExperimentalLayoutApi::class)
 @Composable
-private fun FoundRow(text: String, again: Boolean, running: String?, error: String?, onAgain: () -> Unit) {
+private fun FoundRow(name: String, text: String, again: Boolean, running: String?, error: String?, onAgain: () -> Unit) {
     val p = MaterialTheme.palette
     if (running != null) {
         Row(Modifier.padding(horizontal = Gutter, vertical = 6.dp), verticalAlignment = Alignment.CenterVertically) {
@@ -150,7 +156,11 @@ private fun FoundRow(text: String, again: Boolean, running: String?, error: Stri
         }
     }
     if (error != null && running == null) {
-        Text(error, style = MaterialTheme.typography.bodySmall, color = EncoreColors.Err, modifier = Modifier.padding(horizontal = Gutter, vertical = 2.dp))
+        // the whole error, selectable, with Copy
+        Row(Modifier.padding(horizontal = Gutter, vertical = 2.dp), verticalAlignment = Alignment.CenterVertically) {
+            SelectionContainer(Modifier.weight(1f, fill = false)) { Text(error, style = MaterialTheme.typography.bodySmall, color = EncoreColors.Err) }
+            CopyIconButton(PickerRules.errorCopy(name, error), size = 28.dp)
+        }
     }
 }
 
@@ -355,7 +365,7 @@ fun PickerScreen(nav: Nav, opts: PickerOpts) {
                         // signed out, not connected or off: "Sign in to Tidal – Settings → streamrip" (unless a kept
                         // search answered for it)
                         source != null && !source.ready && keptAnswer == null -> item(key = "state-$src") { HintLine(nav, admin, source.hint, source.settings, source.settingsLabel) }
-                        err != null -> item(key = "err-$src") { HintLine(nav, admin, err.message, err.settings, err.label, error = true) }
+                        err != null -> item(key = "err-$src") { HintLine(nav, admin, err.message, err.settings, err.label, error = true, copy = PickerRules.errorCopy(name, err.message)) }
                         loading[src] == true -> item(key = "load-$src") {
                             Row(Modifier.padding(horizontal = Gutter, vertical = 6.dp), verticalAlignment = Alignment.CenterVertically) {
                                 Spinner(); Spacer(Modifier.width(8.dp))
@@ -371,7 +381,7 @@ fun PickerScreen(nav: Nav, opts: PickerOpts) {
                             val running = if (again[src] == true) (if (src == "slskd" && slskWaiting) PickerRules.WAITING else PickerRules.searchingAgainText(name)) else null
                             if (line != null || running != null || againErrors[src] != null) {
                                 item(key = "found-$src") {
-                                    FoundRow(line?.text.orEmpty(), line?.again == true, running, againErrors[src]) { source?.let { searchAgain(it) } }
+                                    FoundRow(name, line?.text.orEmpty(), line?.again == true, running, againErrors[src]) { source?.let { searchAgain(it) } }
                                 }
                             }
                             if (list.isEmpty() && line == null) item(key = "none-$src") { Text("No results.", style = MaterialTheme.typography.bodySmall, color = p.muted, modifier = Modifier.padding(horizontal = Gutter, vertical = 6.dp)) }

@@ -472,6 +472,22 @@ pub fn result_line<'a, M: 'a>(ok: bool, message: impl IntoFragment<'a>) -> El<'a
         .into()
 }
 
+/// A test result like [`result_line`]; a failure carries Copy (`on_copy` gets the whole text).
+pub fn result_line_copy<'a, M: Clone + 'a>(ok: bool, message: &str, on_copy: impl Fn(String) -> M) -> El<'a, M> {
+    if ok {
+        return result_line(ok, message.to_string());
+    }
+    let color = theme::look().err;
+    row![
+        icon(Icon::X, 15.0, color),
+        container(t(message.to_string()).size(13).color(color)).width(Length::Fill),
+        crate::widgets::details::copy_btn(on_copy(message.to_string())),
+    ]
+    .spacing(6)
+    .align_y(Alignment::Center)
+    .into()
+}
+
 /// A link-looking button in the accent colour (`<a href>` on the web).
 pub fn link<'a, M: Clone + 'a>(label: impl IntoFragment<'a>, on: M) -> El<'a, M> {
     button(t(label).size(13).color(theme::look().accent))

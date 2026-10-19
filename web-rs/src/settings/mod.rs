@@ -75,11 +75,13 @@ fn replace_state(url: &str) {
     if let Ok(h) = dom::window().history() { let _ = h.replace_state_with_url(&JsValue::NULL, "", Some(url)); }
 }
 
-/// `<div class="test-result …">` for a /system/test result (the `paint` of the JS).
+/// `<div class="test-result …">` for a /system/test result (the `paint` of the JS). A failure has a Copy button
+/// for its whole text (R1).
 pub fn test_result(r: &Value) -> String {
     let ok = r.truthy("ok");
     let msg = { let m = r.g("message"); if truthy(m) { js_string(m) } else if ok { "Connected".to_string() } else { "Failed".to_string() } };
-    format!(r##"<div class="test-result {}">{}<span>{}</span></div>"##, if ok { "ok" } else { "err" }, if ok { icon("check") } else { icon("x") }, esc(&msg))
+    let copy = if ok { String::new() } else { crate::details::copy_button(&msg) };
+    format!(r##"<div class="test-result {}">{}<span>{}</span>{copy}</div>"##, if ok { "ok" } else { "err" }, if ok { icon("check") } else { icon("x") }, esc(&msg))
 }
 
 /// The JS `show(id)`: paints one settings page into the panel.

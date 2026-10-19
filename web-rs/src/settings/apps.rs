@@ -366,7 +366,8 @@ pub fn session_details(s: &Value, now: f64) -> String {
     let n = s.i("searches_waiting");
     if n > 0 {
         let what = if n == 1 { "1 search".to_string() } else { format!("{n} searches") };
-        parts.push(if state == "logged_in" { format!("{what} waiting their turn") } else { format!("{what} waiting for the connection") });
+        let turn = if n == 1 { "its" } else { "their" };
+        parts.push(if state == "logged_in" { format!("{what} waiting for {turn} turn") } else { format!("{what} waiting for the connection") });
     }
     if s.truthy("search_running") { parts.push("a search is running".into()); }
     if s.f("last_search_at") > 0.0 { parts.push(format!("last search {}", ago_at(s.f("last_search_at"), now))); }
@@ -785,7 +786,7 @@ pub fn bind_tidal(view: &Element, card: &Element) {
             } else if status == "failed" {
                 dom::hide(&out, false);
                 let m = r.s("message");
-                dom::set_html(&out, &format!(r##"<span class="badge err">{}</span>"##, esc(if m.is_empty() { "Sign-in failed" } else { &m })));
+                dom::set_html(&out, &super::test_result(&json!({ "ok": false, "message": if m.is_empty() { "Sign-in failed".to_string() } else { m.clone() } })));
                 if m.contains("paste the tokens") { let _ = paste.set_attribute("open", ""); }
             }
         })
@@ -845,7 +846,7 @@ pub fn bind_tidal(view: &Element, card: &Element) {
                             });
                         } else { dom::set_disabled(&btn, false); }
                     }
-                    Err(e) => { dom::set_html(&out, &format!(r##"<span class="badge err">{}</span>"##, esc(&e.message))); dom::set_disabled(&btn, false); }
+                    Err(e) => { dom::set_html(&out, &super::test_result(&json!({ "ok": false, "message": e.message }))); dom::set_disabled(&btn, false); }
                 }
             });
         });
@@ -906,7 +907,7 @@ pub fn bind_streamrip_config(card: &Element) {
                     let ok = r.truthy("ok");
                     toast(if ok { "streamrip config reset" } else { "streamrip config still doesn't load" }, if ok { "ok" } else { "err" });
                 }
-                Err(e) => dom::set_html(&out, &format!(r##"<span class="badge err">{}</span>"##, esc(&e.message))),
+                Err(e) => dom::set_html(&out, &super::test_result(&json!({ "ok": false, "message": e.message }))),
             }
             dom::set_disabled(&btn, false);
         });
@@ -1012,5 +1013,21 @@ mod soulseek_tests {
         // a session without `text` still says something
         assert_eq!(session_text(&json!({ "state": "connecting" })), "Connecting to the Soulseek server…");
         assert_eq!(session_text(&json!({ "state": "waiting" })), "Not connected – connecting shortly");
+    }
+}
+
+#[cfg(test)]
+mod session_words_tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn searches_waiting_for_their_turn_read_right_for_one_and_many() {
+        let now = 1_760_000_000.0;
+        let s = |n: i64| json!({ "state": "logged_in", "searches_waiting": n });
+        assert_eq!(session_details(&s(1), now), "1 search waiting for its turn");
+        assert_eq!(session_details(&s(3), now), "3 searches waiting for their turn");
+        let down = json!({ "state": "waiting", "searches_waiting": 1 });
+        assert_eq!(session_details(&down, now), "1 search waiting for the connection");
     }
 }

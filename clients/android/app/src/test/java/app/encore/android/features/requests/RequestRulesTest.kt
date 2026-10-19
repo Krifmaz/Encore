@@ -7,6 +7,10 @@ import app.encore.android.data.repo.LinkResult
 import app.encore.android.data.repo.Me
 import app.encore.android.data.repo.RequestRow
 import app.encore.android.data.repo.RetryFailedResult
+import app.encore.android.data.repo.SlskTransfer
+import app.encore.android.data.repo.StorageHealth
+import app.encore.android.data.repo.statusKind
+import app.encore.android.data.repo.statusLabel
 import kotlinx.serialization.json.JsonObject
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
@@ -181,5 +185,218 @@ class RequestRulesTest {
         assertEquals(long, d.message)
         assertEquals(40, d.log.size)
         assertNotNull(d.log.firstOrNull { it.text == "error number 40" })
+    }
+    // ---- R1: waiting requests, kept files, the storage banner, Copy ------------------------------------------------
+
+    /** A row whose import waits for the storage, as S1's server sends it (the same row as the web's test). */
+    private val waiting = """{"id": 12, "kind": "album", "status": "waiting", "title": "Illuminate EP", "artist": "Duumu", "album": "Illuminate EP",
+        "source": "streamrip", "username": "caz", "created_at": 0, "attempts": 3, "picked": true,
+        "message": "Waiting: library storage error – import failed: mkdir /music/Duumu/Illuminate EP: Input/output error (os error 5). Next try at 14:20",
+        "wait_reason": "storage_import", "next_try_at": 1792427497.2, "has_files": true, "kept_path": "/downloads/encore/request-12/streamrip",
+        "error": {"step": "import", "op": "mkdir", "path": "/music/Duumu/Illuminate EP", "to": null, "errno": 5,
+            "error": "Input/output error (os error 5)", "storage": true,
+            "text": "import failed: mkdir /music/Duumu/Illuminate EP: Input/output error (os error 5) – storage problem, not the source"},
+        "output": {"source": "streamrip", "url": "https://www.deezer.com/album/1", "text": "Downloading Illuminate EP\n4 tracks done\n", "ok": true, "at": 1792427000.1},
+        "log": ["slskd: error: Soulseek isn't connected yet", "attempt 2 failed: streamrip: Input/output error (os error 5)"],
+        "candidate": null}"""
+
+    private val date: (Double) -> String = { t -> "<${t.toLong()}>" }
+
+    @Test
+    fun theWaitingFieldsAreRead() {
+        val r = row(waiting)
+        assertEquals("storage_import", r.waitReason)
+        assertEquals(1792427497.2, r.nextTryAt, 0.001)
+        assertTrue(r.hasFiles)
+        assertEquals("/downloads/encore/request-12/streamrip", r.keptPath)
+        val e = r.error!!
+        assertEquals("import", e.step)
+        assertEquals("mkdir", e.op)
+        assertEquals("/music/Duumu/Illuminate EP", e.path)
+        assertEquals("", e.to)
+        assertEquals("5", e.errno)
+        assertTrue(e.storage)
+        assertEquals("streamrip", r.output?.source)
+        assertTrue(r.output?.ok == true)
+        // an older server: none of them, and odd values never cost the row
+        val old = row("""{"id": 8, "status": "queued"}""")
+        assertEquals("", old.waitReason)
+        assertFalse(old.hasFiles)
+        assertNull(old.error)
+        assertNull(old.output)
+        val odd = row("""{"id": 9, "status": "failed", "error": "boom", "output": [1], "has_files": null, "next_try_at": null}""")
+        assertNull(odd.error)
+        assertNull(odd.output)
+        assertFalse(odd.hasFiles)
+        assertEquals(0.0, odd.nextTryAt, 0.0)
+    }
+
+    @Test
+    fun waitingReadsWaitingAndCanBeCancelled() {
+        assertEquals("Waiting", statusLabel("waiting"))
+        assertEquals("warn", statusKind("waiting"))
+        val r = row(waiting)
+        // nothing runs while it waits: no progress, but Cancel, and ⋯ has Remove from list (the web's row)
+        assertFalse(r.isActive)
+        assertTrue(RequestRules.canCancel(r))
+        assertTrue(RequestRules.canRemove(r))
+        assertEquals("the downloaded files are kept and the import waits for the storage", RequestRules.waitWords("storage_import"))
+        assertEquals("Soulseek isn't connected yet", RequestRules.waitWords("soulseek"))
+        assertEquals("the download waits for the staging folder", RequestRules.waitWords("storage_download"))
+        assertEquals("", RequestRules.waitWords(""))
+        assertEquals("Waiting – the downloaded files are kept and the import waits for the storage", RequestRules.statusText(r))
+        assertEquals("Failed", RequestRules.statusText(row("""{"id": 2, "status": "failed", "wait_reason": "soulseek"}""")))
+    }
+
+    @Test
+    fun importAgainTakesRetrysPlace() {
+        val admin = Me(role = "admin")
+        val r = row(waiting)
+        assertTrue(RequestRules.canImportAgain(r))
+        assertFalse(RequestRules.canRetry(r, admin))
+        // a failed import whose files are kept: Import again too
+        val failedKept = row("""{"id": 3, "kind": "album", "status": "failed", "has_files": true}""")
+        assertTrue(RequestRules.canImportAgain(failedKept))
+        assertFalse(RequestRules.canRetry(failedKept, admin))
+        // a link's request that kept the files it could not import: Import again for them
+        assertTrue(RequestRules.canImportAgain(row("""{"id": 6, "kind": "url", "status": "completed", "has_files": true}""")))
+        assertFalse(RequestRules.canImportAgain(row("""{"id": 7, "kind": "url", "status": "cancelled", "has_files": true}""")))
+        // a plain failure keeps Retry
+        val failed = row("""{"id": 4, "kind": "album", "status": "failed", "has_files": false}""")
+        assertFalse(RequestRules.canImportAgain(failed))
+        assertTrue(RequestRules.canRetry(failed, admin))
+        // a Soulseek wait has no files: no Import again, no Retry, but Cancel
+        val soulseek = row("""{"id": 5, "kind": "track", "status": "waiting", "wait_reason": "soulseek", "has_files": false, "message": "Waiting for Soulseek – next attempt at 14:20"}""")
+        assertFalse(RequestRules.canImportAgain(soulseek))
+        assertFalse(RequestRules.canRetry(soulseek, admin))
+        assertTrue(RequestRules.canCancel(soulseek))
+        // the admin's files entry and its confirm say the files are kept
+        assertEquals("Delete downloaded files", RequestRules.filesLabel("failed", kept = true))
+        assertEquals("Delete leftover files", RequestRules.filesLabel("failed", kept = false))
+        assertEquals("Delete the downloaded files kept for this request? They can't be imported afterwards.", RequestRules.filesConfirm("waiting", kept = true))
+        assertEquals("Delete the leftover/partial files of this download?", RequestRules.filesConfirm("failed"))
+        assertEquals("Permanently delete the songs this request downloaded from the library?", RequestRules.filesConfirm("completed", kept = true))
+    }
+
+    @Test
+    fun theStorageBannerForAdminsAndMembers() {
+        val admin = StorageHealth(ok = false, since = 1792426891.6, path = "/music", op = "mkdir", error = "Input/output error (os error 5)", errno = "5", waiting = 3,
+            text = "Imports are paused: /music is not writable – mkdir /music/.encore-probe-12-3: Input/output error (os error 5). Checked 14:10, next check 14:20")
+        assertEquals("Imports are paused: /music is not writable – mkdir /music/.encore-probe-12-3: Input/output error (os error 5). Checked 14:10, next check 14:20", RequestRules.storageBanner(admin, admin = true))
+        val member = StorageHealth(ok = false, since = 1792426891.6, text = "Imports are paused because of a storage problem on the server. Your downloads are kept and will be added when it is fixed.")
+        assertEquals(RequestRules.PLAIN_BANNER, RequestRules.storageBanner(member, admin = false))
+        // no problem, an older server (no answer) or a missing `ok`: no banner
+        assertNull(RequestRules.storageBanner(StorageHealth(ok = true), admin = true))
+        assertNull(RequestRules.storageBanner(null, admin = false))
+        assertNull(RequestRules.storageBanner(StorageHealth(), admin = true))
+        // no text: the client says it in the same words
+        val bare = StorageHealth(ok = false, path = "/music", op = "mkdir", error = "Read-only file system (os error 30)")
+        assertEquals("Imports are paused: /music is not writable – mkdir: Read-only file system (os error 30).", RequestRules.storageBanner(bare, admin = true))
+        assertEquals(RequestRules.PLAIN_BANNER, RequestRules.storageBanner(bare, admin = false))
+        assertEquals("Imports are still paused" to "warn", RequestRules.checkToast(bare))
+        assertEquals("Imports resumed" to "ok", RequestRules.checkToast(StorageHealth(ok = true)))
+        // the server's JSON as it comes
+        val decoded = (EncoreJson.parseToJsonElement("""{"ok": false, "since": 1792426891.6, "checked_at": 1792426891.6, "next_check_at": 1792427491.6, "path": "/music", "op": "mkdir",
+            "error": "Input/output error (os error 5)", "errno": 5, "step": "import", "waiting": 3, "text": null}""") as JsonObject).decodeModel(StorageHealth.serializer())!!
+        assertTrue(decoded.paused)
+        assertEquals("5", decoded.errno)
+        assertEquals(3, decoded.waiting)
+        assertEquals("Imports are paused: /music is not writable – mkdir: Input/output error (os error 5).", RequestRules.storageBanner(decoded, admin = true))
+        val ok = (EncoreJson.parseToJsonElement("""{"ok": true, "since": null, "text": null}""") as JsonObject).decodeModel(StorageHealth.serializer())!!
+        assertFalse(ok.paused)
+    }
+
+    @Test
+    fun theCopiedTextIsTheWebs() {
+        // the same lines as web-rs/src/pages/common.rs `request_text` (its test `the_details_hold_what_a_bug_report_needs`)
+        val want = "Encore request #12\n" +
+            "Title: Illuminate EP\n" +
+            "Artist: Duumu\n" +
+            "Kind: album\n" +
+            "Status: Waiting – the downloaded files are kept and the import waits for the storage\n" +
+            "Message: Waiting: library storage error – import failed: mkdir /music/Duumu/Illuminate EP: Input/output error (os error 5). Next try at 14:20\n" +
+            "Next try: <1792427497>\n" +
+            "Attempts: 3\n" +
+            "Source: streamrip\n" +
+            "Picked by hand: yes\n" +
+            "Error: import failed: mkdir /music/Duumu/Illuminate EP: Input/output error (os error 5) – storage problem, not the source\n" +
+            "Step: import\n" +
+            "Operation: mkdir\n" +
+            "Path: /music/Duumu/Illuminate EP\n" +
+            "Errno: 5\n" +
+            "System error: Input/output error (os error 5)\n" +
+            "Storage problem: yes – not the source\n" +
+            "Downloaded files kept in: /downloads/encore/request-12/streamrip\n" +
+            "\n" +
+            "Log (every attempt, oldest first):\n" +
+            "slskd: error: Soulseek isn't connected yet\n" +
+            "attempt 2 failed: streamrip: Input/output error (os error 5)\n" +
+            "\n" +
+            "streamrip output (https://www.deezer.com/album/1 · produced files · <1792427000>):\n" +
+            "Downloading Illuminate EP\n" +
+            "4 tracks done\n" +
+            "\n" +
+            "Requested by: caz\n" +
+            "Request id: 12\n" +
+            "Server version: 0.29.0"
+        assertEquals(want, RequestRules.requestText(row(waiting), "0.29.0", date))
+        // a link that failed with nothing kept: no empty lines for what it doesn't have
+        val link = row("""{"id": 7, "kind": "url", "status": "failed", "url": "https://www.youtube.com/watch?v=x", "title": "", "created_at": 1700000000,
+            "message": "Downloaded, but nothing could be imported: …", "attempts": 1, "error": null, "output": null, "log": [], "has_files": false}""")
+        assertEquals(
+            "Encore request #7\nLink: https://www.youtube.com/watch?v=x\nKind: url\nStatus: Failed\nMessage: Downloaded, but nothing could be imported: …\nAttempts: 1\n\nRequested: <1700000000>\nRequest id: 7\nServer version: unknown",
+            RequestRules.requestText(link, "", date),
+        )
+        // every attempt's whole error stays, however long (the row cuts it, the copy never does)
+        val long = "streamrip: " + "x".repeat(5000)
+        assertTrue(RequestRules.requestText(row("""{"id": 9, "status": "failed", "log": ["$long"], "updated_at": 1700000100}"""), "1.0", date).contains("\n$long\n"))
+        assertTrue(RequestRules.requestText(row("""{"id": 9, "status": "failed", "updated_at": 1700000100}"""), "1.0", date).contains("\nUpdated: <1700000100>\n"))
+        // the candidate being fetched, and a failed output without a link
+        val c = row("""{"id": 10, "kind": "track", "title": "Blow", "album": "Cannibal", "status": "downloading", "candidate": {"username": "alice", "format": "flac", "directory": "Cannibal", "files": 4},
+            "output": {"source": "streamrip", "text": "Traceback\nOSError: [Errno 5]", "ok": false, "at": 0}}""")
+        val t = RequestRules.requestText(c, "1.0", date)
+        assertTrue(t, t.contains("\nAlbum: Cannibal\n"))
+        assertTrue(t, t.contains("\nDownloading: from alice: Cannibal (FLAC, 4 files)\n"))
+        assertTrue(t, t.contains("\nstreamrip output (failed):\nTraceback\nOSError: [Errno 5]\n"))
+        assertEquals("Illuminate EP – Duumu", RequestRules.requestWhat(row(waiting)))
+        assertEquals("https://www.youtube.com/watch?v=x", RequestRules.requestWhat(link))
+        assertEquals("Duumu – full discography", RequestRules.requestWhat(row("""{"id": 1, "kind": "artist", "artist": "Duumu"}""")))
+    }
+
+    @Test
+    fun theDetailsSheetShowsTheWaitTheErrorAndTheOutput() {
+        val d = RequestRules.details(row(waiting), admin = true, ago = "8m ago", date = date)
+        assertEquals("Waiting – the downloaded files are kept and the import waits for the storage", d.status)
+        assertEquals(
+            listOf("Requested or retried 3 times", "via streamrip", "Picked by hand", "Next try: <1792427497>", "Downloaded files kept in: /downloads/encore/request-12/streamrip", "by caz", "8m ago"),
+            d.facts,
+        )
+        assertEquals("import failed: mkdir /music/Duumu/Illuminate EP: Input/output error (os error 5) – storage problem, not the source", d.error)
+        assertEquals(
+            listOf("Step: import", "Operation: mkdir", "Path: /music/Duumu/Illuminate EP", "Errno: 5", "System error: Input/output error (os error 5)", "Storage problem: yes – not the source"),
+            d.errorFacts,
+        )
+        assertEquals("streamrip output", d.outputTitle)
+        assertEquals("https://www.deezer.com/album/1 · produced files · <1792427000>", d.outputHead)
+        assertEquals("Downloading Illuminate EP\n4 tracks done", d.output)
+        // a plain failure has none of it; a rename names its other path; an error without a sentence uses the system's words
+        val plain = RequestRules.details(row(illuminate), admin = false, ago = "8m ago", date = date)
+        assertEquals("", plain.status)
+        assertEquals("", plain.error)
+        assertEquals("", plain.output)
+        val mv = row("""{"id": 3, "status": "failed", "has_files": true, "error": {"step": "import", "op": "rename", "path": "/a", "to": "/b", "errno": 13, "error": "Permission denied (os error 13)", "storage": false}}""")
+        val e = RequestRules.details(mv, admin = false, ago = "1m ago", date = date)
+        assertEquals("Permission denied (os error 13)", e.error)
+        assertEquals(listOf("Step: import", "Operation: rename", "Path: /a", "Other path: /b", "Errno: 13"), e.errorFacts)
+        assertTrue(e.facts.contains("Downloaded files kept in: the server"))
+    }
+
+    @Test
+    fun activityLinesAndTransferErrorsAsText() {
+        assertEquals("warning · <date>\nstorage: /music not writable – mkdir /music/.encore-probe-1-1: Input/output error (os error 5); imports paused",
+            RequestRules.logText("warning", "storage: /music not writable – mkdir /music/.encore-probe-1-1: Input/output error (os error 5); imports paused", "<date>"))
+        assertEquals("alice\n01 - Intro.flac\nTransfer rejected: File not shared.",
+            RequestRules.transferErrorText(SlskTransfer(username = "alice", filename = "01 - Intro.flac", error = "Transfer rejected: File not shared.")))
+        assertEquals(RequestRules.IMPORT_AGAIN_HELP, "Import the downloaded files again – nothing is downloaded again")
     }
 }

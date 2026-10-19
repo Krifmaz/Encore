@@ -724,6 +724,22 @@ pub fn error_box(_: &Theme) -> container::Style {
     }
 }
 
+/// `.banner.warn`: an amber box for something that needs attention but is not an error (imports
+/// paused while the library cannot be written).
+pub fn warn_box(_: &Theme) -> container::Style {
+    let p = look();
+    container::Style {
+        text_color: Some(p.text),
+        background: Some(Background::Color(p.warn.scale_alpha(0.12))),
+        border: Border {
+            color: p.warn.scale_alpha(0.4),
+            width: 1.0,
+            radius: 10.0.into(),
+        },
+        ..container::Style::default()
+    }
+}
+
 /// `.tabs` and `.seg`: the frame around tab buttons.
 pub fn tabs_frame(_: &Theme) -> container::Style {
     let p = look();

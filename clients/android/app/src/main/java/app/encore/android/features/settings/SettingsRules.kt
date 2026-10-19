@@ -409,6 +409,15 @@ object SettingsRules {
         else -> k
     }
 
+    /**
+     * An app crash as text, for its dialog and Copy (diagnostics.rs `crash_text`): the first line, the kind, device /
+     * app / os / user and the time, then the whole report.
+     */
+    fun crashText(first: String, kind: String, meta: String, time: String, text: String): String {
+        val head = listOf(first, kind, meta, time).filter { it.isNotEmpty() }.joinToString("\n")
+        return if (text.isBlank()) head else head + "\n\n" + text.trimEnd()
+    }
+
     /** The Server block (`machine` of the diagnostics answer) as (label, value) rows; [size] formats bytes. */
     fun serverRows(s: JsonObject, size: (Double) -> String): List<Pair<String, String>> {
         fun folder(v: JsonObject?): String {

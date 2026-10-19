@@ -108,5 +108,7 @@ class PickerRulesTest {
         assertEquals("Searching Deezer…", PickerRules.searchingText("deezer", "Deezer"))
         assertEquals("Searching Soulseek again…", PickerRules.searchingAgainText("Soulseek"))
         assertEquals("Waiting for another Soulseek search, then searching…", PickerRules.WAITING)
+        // Copy takes the source's name and its whole error (picker.rs)
+        assertEquals("Tidal: Tidal API 400 INVALID_RESOURCE_ID, pointer data/id", PickerRules.errorCopy("Tidal", "Tidal API 400 INVALID_RESOURCE_ID, pointer data/id"))
     }
 }

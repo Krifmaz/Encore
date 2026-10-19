@@ -72,6 +72,8 @@ pub fn icon(name: &str) -> String {
         "saved" => p(r#"<path d="M12 2v8M16 6l-4 4-4-4"/><rect x="2" y="14" width="20" height="8" rx="2"/><path d="M6 18h.01M10 18h.01"/>"#),
         // no connection to the server (the offline banner): a crossed-out signal
         "offline" => p(r#"<path d="m2 2 20 20M8.5 16.4a5 5 0 0 1 7 0M5 12.9a10 10 0 0 1 5.2-2.7M19 12.9a10 10 0 0 0-2-1.5M2 8.8a15 15 0 0 1 4.2-2.6M22 8.8a15 15 0 0 0-11.3-3.8M12 20h.01"/>"#),
+        // a warning (the storage banner): a triangle with a mark
+        "alert" => p(r#"<path d="M10.29 3.86 1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"/><path d="M12 9v4M12 17h.01"/>"#),
         "bug" => p(r#"<path d="M9 7V6a3 3 0 0 1 6 0v1"/><path d="M12 20c-3.3 0-6-2.7-6-6v-3a4 4 0 0 1 4-4h4a4 4 0 0 1 4 4v3c0 3.3-2.7 6-6 6z"/><path d="M12 20v-9M6 13H2M22 13h-4M3 21c0-2.1 1.7-3.9 3.8-4M20.2 17c2.1.1 3.8 1.9 3.8 4M3 5c0 2.1 1.6 3.8 3.5 4M21 5c0 2.1-1.6 3.8-3.5 4M8 2l1.9 1.9M16 2l-1.9 1.9"/>"#),
         _ => String::new(),
     }
@@ -79,8 +81,15 @@ pub fn icon(name: &str) -> String {
 /// `icon.x.replace('<svg', '<svg width="12" height="12"')` and friends.
 pub fn icon_attr(name: &str, attrs: &str) -> String { icon(name).replacen("<svg", &format!("<svg {attrs}"), 1) }
 
-/// `toast(msg, type)`.
+/// The words when the clipboard refuses: the toast says what to do instead, so it has no Copy of its own.
+pub const COPY_FAILED: &str = "Copy failed – select and copy manually";
+/// At most this many error toasts stay on screen; a new one pushes out the oldest.
+const ERROR_TOASTS: usize = 3;
+
+/// `toast(msg, type)`. An error toast (`err`) stays until it is closed and has a Copy button, so a long error can
+/// be read in full and pasted into a bug report (R1); the same error twice in a row is shown once.
 pub fn toast(msg: &str, kind: &str) {
+    if kind == "err" && msg != COPY_FAILED { return error_toast(msg); }
     let el = create("div");
     el.set_class_name(&format!("toast {kind}"));
     el.set_text_content(Some(msg));
@@ -91,6 +100,27 @@ pub fn toast(msg: &str, kind: &str) {
     keep_app(gloo_timers::callback::Timeout::new(4200, move || e2.remove()));
 }
 fn keep_app(x: impl std::any::Any + 'static) { dom::keep_forever(x) }
+
+/// The error toast's HTML: the whole message, Copy and Close.
+pub fn error_toast_html(msg: &str) -> String {
+    format!(r#"<div class="toast-text">{m}</div><div class="toast-acts"><button type="button" class="btn sm ghost" data-copy-text="{m}">{copy}Copy</button><button type="button" class="btn sm ghost icon" data-toast-close title="Close" aria-label="Close">{x}</button></div>"#,
+        m = esc(msg), copy = icon("copy"), x = icon("x"))
+}
+
+fn error_toast(msg: &str) {
+    let Some(t) = by_id("toasts") else { return };
+    let open = qsa_in(&t, ".toast.err.stays");
+    // the same error again (a retry that failed the same way): the one on screen stays, nothing piles up
+    if open.iter().any(|e| dom::data(e, "msg") == msg) { return; }
+    for old in open.iter().take((open.len() + 1).saturating_sub(ERROR_TOASTS)) { old.remove(); }
+    let el = create("div");
+    el.set_class_name("toast err stays");
+    let _ = el.set_attribute("role", "alert");
+    dom::set_data(&el, "msg", msg);
+    // Copy and Close are handled by the page's one click listener (details.rs `init`)
+    set_html(&el, &error_toast_html(msg));
+    let _ = t.append_child(&el);
+}
 
 /// A modal on screen: `el` is the `.modal`, `close()` removes it.
 #[derive(Clone)]
@@ -335,6 +365,8 @@ pub fn status_info(status: &str) -> (&'static str, String) {
         "monitoring" => ("accent", "Monitoring".into()),
         "downloading" => ("accent", "Downloading".into()),
         "importing" => ("accent", "Importing".into()),
+        // waiting for Soulseek or for the storage (`wait_reason`): nothing runs until then
+        "waiting" => ("warn", "Waiting".into()),
         "completed" => ("ok", "Available".into()),
         "failed" => ("err", "Failed".into()),
         "denied" => ("err", "Denied".into()),
@@ -428,15 +460,48 @@ async fn share_link(res: crate::api::ApiResult, title: &str, text: &str) {
     }
 }
 
+/// `copyText(t)`: the clipboard API where the page may use it (https or localhost), otherwise – a server reached
+/// over plain http on the home network has no `navigator.clipboard` – the text is selected in a hidden box and
+/// copied the old way. The toast says which way it went.
 pub fn copy_text(t: &str) {
+    let has_api = js_sys::Reflect::get(&dom::window().navigator(), &"clipboard".into()).map(|c| !c.is_undefined() && !c.is_null()).unwrap_or(false);
+    if !has_api {
+        // no await before this: the browser still counts the click that asked for it
+        copy_done(copy_by_selection(t));
+        return;
+    }
     let t = t.to_string();
     dom::spawn(async move {
         let clip = dom::window().navigator().clipboard();
-        match wasm_bindgen_futures::JsFuture::from(clip.write_text(&t)).await {
-            Ok(_) => toast("Copied to clipboard", "ok"),
-            Err(_) => toast("Copy failed – select and copy manually", "err"),
-        }
+        let ok = wasm_bindgen_futures::JsFuture::from(clip.write_text(&t)).await.is_ok() || copy_by_selection(&t);
+        copy_done(ok);
     });
+}
+
+fn copy_done(ok: bool) {
+    if ok { toast("Copied to clipboard", "ok") } else { toast(COPY_FAILED, "err") }
+}
+
+/// The old way: the text in an off-screen box, selected, `document.execCommand('copy')`.
+fn copy_by_selection(t: &str) -> bool {
+    let Ok(area) = create("textarea").dyn_into::<web_sys::HtmlTextAreaElement>() else { return false };
+    area.set_value(t);
+    let _ = area.set_attribute("readonly", "");
+    let _ = area.set_attribute("style", "position:fixed;top:-1000px;left:0;width:1px;height:1px;opacity:0");
+    // inside an open dialog, so focus stays where the user is
+    let host: Element = dom::qs("#modal-root .modal-bg:last-child .modal").unwrap_or_else(|| body().into());
+    let _ = host.append_child(&area);
+    area.select();
+    // iOS selects a read-only box only with a range
+    let _ = area.set_selection_range(0, t.encode_utf16().count() as u32);
+    let doc = document();
+    let ok = js_sys::Reflect::get(&doc, &"execCommand".into()).ok()
+        .and_then(|f| f.dyn_into::<js_sys::Function>().ok())
+        .and_then(|f| f.call1(&doc, &"copy".into()).ok())
+        .and_then(|r| r.as_bool())
+        .unwrap_or(false);
+    area.remove();
+    ok
 }
 
 /// One entry of the ⋯ menu (`None` in the list = separator).
@@ -717,5 +782,19 @@ mod tests {
         assert_eq!(initials("The"), "T");
         assert_eq!(initials("  "), "?");
         assert_eq!(initials("éclair"), "É");
+    }
+}
+
+#[cfg(test)]
+mod error_toast_tests {
+    use super::*;
+
+    #[test]
+    fn an_error_toast_keeps_its_whole_text_with_copy_and_close() {
+        let h = error_toast_html("download failed: start /config/tools/venv/bin/rip: Input/output error (os error 5) <x>");
+        assert!(h.starts_with(r#"<div class="toast-text">download failed: start /config/tools/venv/bin/rip: Input/output error (os error 5) &lt;x&gt;</div>"#), "{h}");
+        assert!(h.contains(r#"data-copy-text="download failed: start /config/tools/venv/bin/rip: Input/output error (os error 5) &lt;x&gt;">"#) && h.contains("Copy</button>"), "{h}");
+        assert!(h.contains(r#"data-toast-close title="Close""#), "{h}");
+        assert_eq!(status_info("waiting"), ("warn", "Waiting".to_string()));
     }
 }

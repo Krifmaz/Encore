@@ -52,6 +52,8 @@ val REQUEST_STATUS: Map<String, Pair<String, String>> = mapOf(
     "monitoring" to ("accent" to "Monitoring"),
     "downloading" to ("accent" to "Downloading"),
     "importing" to ("accent" to "Importing"),
+    // waiting for Soulseek or for the storage (`wait_reason`): nothing runs until then
+    "waiting" to ("warn" to "Waiting"),
     "completed" to ("ok" to "Available"),
     "failed" to ("err" to "Failed"),
     "denied" to ("err" to "Denied"),
@@ -61,8 +63,8 @@ val REQUEST_STATUS: Map<String, Pair<String, String>> = mapOf(
 /** The statuses that are still moving (web/js/pages/common.js `active`). */
 val ACTIVE_STATUSES: Set<String> = setOf("searching", "downloading", "importing", "monitoring")
 
-/** Statuses a request can be cancelled in (common.js `requestRow`). */
-val CANCELLABLE_STATUSES: Set<String> = setOf("pending", "queued", "searching", "downloading", "monitoring", "importing")
+/** Statuses a request can be cancelled in (common.rs `request_row`; a waiting one too, the server counts it active). */
+val CANCELLABLE_STATUSES: Set<String> = setOf("pending", "queued", "searching", "downloading", "monitoring", "importing", "waiting")
 
 fun statusLabel(status: String): String = REQUEST_STATUS[status]?.second ?: status
 
@@ -594,6 +596,23 @@ data class RequestRow(
     val picked: LBool = false,
     /** The Soulseek or torrent release being fetched now, when there is one. */
     @Serializable(with = RequestCandidate.OrNull::class) val candidate: RequestCandidate? = null,
+    @SerialName("updated_at") val updatedAt: LDouble = 0.0,
+    /**
+     * What a `waiting` request waits for: `soulseek` (the session is down), `storage_import` (the files are
+     * downloaded, the import waits for the storage) or `storage_download` (the staging folder failed before any file
+     * existed); "" for every other status.
+     */
+    @SerialName("wait_reason") val waitReason: LString = "",
+    /** When the worker tries again (unix seconds; 0 when unknown). */
+    @SerialName("next_try_at") val nextTryAt: LDouble = 0.0,
+    /** The downloaded files are kept: the row offers Import again instead of Retry. */
+    @SerialName("has_files") val hasFiles: LBool = false,
+    /** Where the kept files are (Encore's staging folder or a download client's folder). */
+    @SerialName("kept_path") val keptPath: LString = "",
+    /** The last file or program step that failed, with its operation, path and errno. */
+    @Serializable(with = RequestError.OrNull::class) val error: RequestError? = null,
+    /** A source's own output (streamrip's stdout and stderr), on every outcome. */
+    @Serializable(with = RequestOutput.OrNull::class) val output: RequestOutput? = null,
 ) : Checked<RequestRow> {
     val isActive: Boolean get() = status in ACTIVE_STATUSES
 
@@ -627,6 +646,58 @@ data class RequestCandidate(
     val files: LInt = 0,
 ) {
     internal object OrNull : Nested<RequestCandidate>(serializer())
+}
+
+/**
+ * `error` of a request row: the step (download | stage | import | config | start), the operation (mkdir, write,
+ * rename, copy…), the path and the other path of a rename or copy, the errno, the system's words, whether it is a
+ * storage problem (not the source's), and the whole sentence the server shows.
+ */
+@Serializable
+data class RequestError(
+    val step: LString = "",
+    val op: LString = "",
+    val path: LString = "",
+    val to: LString = "",
+    val errno: LString = "",
+    val error: LString = "",
+    val storage: LBool = false,
+    val text: LString = "",
+) {
+    internal object OrNull : Nested<RequestError>(serializer())
+}
+
+/** `output` of a request row: a source's own output (`ok`: the run produced files), its link and when it ran. */
+@Serializable
+data class RequestOutput(
+    val source: LString = "",
+    val url: LString = "",
+    val text: LString = "",
+    val ok: LBool = false,
+    val at: LDouble = 0.0,
+) {
+    internal object OrNull : Nested<RequestOutput>(serializer())
+}
+
+/**
+ * GET /api/requests/storage: whether imports go on. `ok` false means paused; admins also get the folder, the
+ * operation, the error and the times; `text` is the banner's sentence with the server's clock.
+ */
+@Serializable
+data class StorageHealth(
+    val ok: LBoolOrNull = null,
+    val since: LDouble = 0.0,
+    @SerialName("checked_at") val checkedAt: LDouble = 0.0,
+    @SerialName("next_check_at") val nextCheckAt: LDouble = 0.0,
+    val path: LString = "",
+    val op: LString = "",
+    val error: LString = "",
+    val errno: LString = "",
+    val step: LString = "",
+    val waiting: LInt = 0,
+    val text: LString = "",
+) {
+    val paused: Boolean get() = ok == false
 }
 
 /** POST /api/requests/link: `mode` direct (one download) or matched (songs requested one by one). */
@@ -666,6 +737,8 @@ data class SlskTransfer(
     val progress: LDouble = 0.0,
     val size: LDouble = 0.0,
     val speed: LDouble = 0.0,
+    /** slskd's reason for a failed transfer (its `exception`). */
+    val error: LString = "",
 )
 
 /** One torrent / Usenet download of GET /api/system/downloads `torrents[]` (a request Encore waits on). */

@@ -223,19 +223,29 @@ async fn load_crashes(view: &Element, cr: &Element) {
         let kind = c.s("kind");
         let badge = crash_kind(&kind).map(str::to_string).unwrap_or_else(|| if c.truthy("kind") { kind.clone() } else { "Crash".to_string() });
         let meta: Vec<String> = ["device", "app_version", "os", "user"].iter().filter(|k| c.truthy(k)).map(|k| c.s(k)).collect();
+        let first = if c.truthy("first_line") { c.s("first_line") } else { "Crash".to_string() };
+        let time = fmt::date(c.f("time"));
+        // the whole report to read and copy (R1): the cut-off first line opens it, Copy takes all of it
+        let full = crash_text(&first, &badge, &meta.join(" · "), &time, &or_empty(c, "text"));
         format!(r#"
       <div class="list-item" style="align-items:flex-start">
         <span class="dot err" style="margin-top:7px"></span>
-        <div class="grow">
-          <div class="row wrap"><b class="ellipsis">{first}</b><span class="badge">{badge}</span></div>
+        <div class="grow" style="min-width:0">
+          <div class="row wrap"><b class="ellipsis"{open}>{first}</b><span class="badge">{badge}</span>{copy}</div>
           <div class="small muted">{meta} · {time}</div>
           <details><summary class="small muted" style="cursor:pointer">Full report</summary><div class="code diag-raw">{text}</div></details>
         </div>
       </div>"#,
-            first = esc(&if c.truthy("first_line") { c.s("first_line") } else { "Crash".to_string() }),
-            badge = esc(&badge), meta = esc(&meta.join(" · ")), time = fmt::date(c.f("time")), text = esc(&or_empty(c, "text")))
+            open = crate::details::attrs(&badge, &full), first = esc(&first), copy = crate::details::copy_button(&full),
+            badge = esc(&badge), meta = esc(&meta.join(" · ")), time = time, text = esc(&or_empty(c, "text")))
     }).collect();
     dom::set_html(cr, &format!(r#"<div class="list">{items}</div>"#));
+}
+
+/// An app crash as text, for its dialog and Copy: what, where and when, then the report.
+fn crash_text(first: &str, kind: &str, meta: &str, time: &str, text: &str) -> String {
+    let head = [first, kind, meta, time].iter().filter(|x| !x.is_empty()).copied().collect::<Vec<_>>().join("\n");
+    if text.trim().is_empty() { head } else { format!("{head}\n\n{}", text.trim_end()) }
 }
 
 /// The JS `loadBackups`.
@@ -362,13 +372,15 @@ fn check_item(c: &Value, now: f64) -> String {
             <span class="dot {okc}" style="margin-top:7px"></span>
             <div class="grow">
               <div class="row wrap"><b>{name}</b>{status}{ms}</div>
-              <div class="small mono faint ellipsis">{request}</div>
+              <div class="small mono faint ellipsis"{whole}>{request}</div>
               <div class="small" style="color:{color}">{detail}</div>
               {extra}
               {body}
             </div>
           </div>"#,
         name = esck(c, "name"),
+        // the cut-off request line opens the whole check, to read and copy (R1)
+        whole = if c.truthy("request") { crate::details::attrs(&c.s("name"), &[c.s("name"), or_empty(c, "request"), detail.clone(), or_empty(c, "body")].iter().filter(|x| !x.is_empty()).cloned().collect::<Vec<_>>().join("\n")) } else { String::new() },
         request = esc(&or_empty(c, "request")),
         color = if ok { "var(--muted)" } else { "var(--err)" },
         detail = esc(&detail),

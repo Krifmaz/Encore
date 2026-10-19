@@ -2,9 +2,10 @@
 //! file is rejected), the request is marked done or failed, and the admin's channels are told.
 use super::*;
 
-/// Import downloaded files for this request; a wrong-audio rejection becomes Err(Rejected).
-pub(super) async fn import(st: &impl Ctx, r: &Req, files: &[PathBuf], root: &Path) -> anyhow::Result<(Vec<PathBuf>, String)> {
-    let hint = r.hint();
+/// Import downloaded files for this request; a wrong-audio rejection becomes Err(Rejected). `hint`: a cover
+/// to look at besides the request's own.
+pub(super) async fn import(st: &impl Ctx, r: &Req, files: &[PathBuf], root: &Path, hint: Option<&str>) -> anyhow::Result<(Vec<PathBuf>, String)> {
+    let hint = r.hint().or(hint.map(String::from));
     if r.s("kind") == "album" {
         let mbid = r.opt("mbid");
         let new = tagger::import_album_files(st, files, tagger::AlbumImport {
@@ -65,6 +66,7 @@ pub(super) async fn fail(st: &impl Ctx, r: &mut Req, message: &str) {
         return;
     }
     upd(st, r, &[("status", json!("failed")), ("message", json!(message))]);
+    tracing::warn!("request {} failed: {} – {message}", r.id, r.label());
     st.db().log("error", &format!("Request failed: {} – {message}", r.label()));
     notify::send(st, "❌ Request failed", &format!("{}\n{message}", r.label()), r.hint().as_deref()).await;
 }

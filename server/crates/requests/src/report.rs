@@ -562,7 +562,7 @@ pub async fn dismiss_report(st: &impl Ctx, id: i64) -> ApiResult<()> {
     if r.s("status") == "replacing" || r.s("status") == "filing" {
         if let Some(req) = r.get("request_id").and_then(|v| v.as_i64()) {
             crate::worker::cancel(st, req).await;
-            let _ = st.db().execute("UPDATE requests SET status='cancelled', message='Report dismissed', updated_at=? WHERE id=? AND status IN ('pending','queued','searching','downloading','monitoring','importing')", p![now(), req]);
+            let _ = st.db().execute("UPDATE requests SET status='cancelled', message='Report dismissed', updated_at=? WHERE id=? AND status IN ('pending','queued','searching','downloading','monitoring','importing','waiting')", p![now(), req]);
         }
         for t in parked_ids(st, id) {
             restore(st, t);

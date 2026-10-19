@@ -311,7 +311,8 @@ pub fn render_playlist(view: Element, ctx: Ctx) -> PageFuture {
                 })
             } else if let Some(s) = it.st("request_status") {
                 match it.st("request_message") {
-                    Some(m) => format!(r#"<span title="{}">{}</span>"#, esc(m), status_badge(s)),
+                    // the request's whole message on a click, with Copy (R1)
+                    Some(m) => format!(r#"<span title="{}"{}>{}</span>"#, esc(m), crate::details::attrs(&it.s("title"), m), status_badge(s)),
                     None => status_badge(s),
                 }
             } else { r#"<span class="badge">missing</span>"#.to_string() },

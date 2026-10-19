@@ -35,11 +35,14 @@ pub fn render(view: Element, ctx: Ctx) -> PageFuture {
         {controls}
       </div>
     </div>
+    <div id="storage-banner"></div>
     <div class="tabs" id="r-tabs">
       {tabs}
     </div>
     <div class="card flat mt" id="r-list"><div class="empty"><span class="spinner"></span></div></div>"#));
         let list = dom::qs_in(&view, "#r-list").ok_or("#r-list")?;
+        // imports paused because a folder can't be written: the banner over the list (R1)
+        if let Some(slot) = dom::qs_in(&view, "#storage-banner") { common::storage_banner(&view, &slot, admin); }
         // the JS `load` closure: callers that never awaited it get a spawning `Rc<dyn Fn()>`
         let reload: Rc<dyn Fn()> = {
             let (list, filter, mine) = (list.clone(), filter.clone(), mine.clone());
@@ -70,10 +73,11 @@ pub fn render(view: Element, ctx: Ctx) -> PageFuture {
                 let (b, mine, reload) = (btn.clone(), mine.clone(), reload.clone());
                 dom::on(&btn, "click", move |_| clear_menu(&b, reload.clone(), mine.get()));
             }
-            if let Some(btn) = dom::qs_in(&view, "#retry-failed") {
-                let (mine, reload) = (mine.clone(), reload.clone());
-                dom::on(&btn, "click", move |_| { let r = reload.clone(); common::retry_failed(mine.get(), r); });
-            }
+        }
+        // members have the button too (their own failed requests): it was only wired for admins
+        if let Some(btn) = dom::qs_in(&view, "#retry-failed") {
+            let (mine, reload) = (mine.clone(), reload.clone());
+            dom::on(&btn, "click", move |_| { let r = reload.clone(); common::retry_failed(mine.get(), r); });
         }
         let me = api::get("/auth/me").await.map_err(|e| e.message)?;
         if me.truthy("request_limit") && !matches!(me.s("role").as_str(), "admin" | "owner") {
