@@ -253,6 +253,14 @@ label.field small { color: var(--faint); font-size: 12px; }
 .list-item { display: flex; align-items: center; gap: 14px; padding: 11px 16px; border-bottom: 1px solid var(--border); min-width: 0; }
 .list-item:last-child { border-bottom: 0; }
 .list-item:hover { background: var(--panel-2); }
+/* a request row on a phone: the buttons go under the words, so the status message ("Waiting for Soulseek – next
+   attempt at 14:20") can be read */
+@media (max-width: 760px) {
+  .list-item.req-row { flex-wrap: wrap; row-gap: 8px; }
+  .list-item.req-row > .grow { flex: 1 1 calc(100% - 62px); }
+  .list-item.req-row > .row:last-child { flex: 1 1 100%; justify-content: flex-end; }
+  .list-item.req-row > .grow > .small.ellipsis { white-space: normal; }
+}
 .thumb { width: 48px; height: 48px; border-radius: 8px; object-fit: cover; background: var(--panel-2); flex: none; position: relative; overflow: hidden; }
 .thumb.lg { width: 64px; height: 64px; }
 .table-wrap { overflow-x: auto; }

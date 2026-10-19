@@ -52,9 +52,12 @@ fn gate(st: &AppState, u: &Row) -> ApiResult<()> {
     Ok(())
 }
 
-/// Soulseek (not Encore) failed: 424, because the web app treats 502–504 as "the server is down".
+/// Soulseek (not Encore) failed: 424, because the web app treats 502–504 as "the server is down". The
+/// session being down is 409 ("Soulseek isn't connected – next attempt at 14:20"), a search that can't run
+/// now 429 ("Soulseek is busy with another search", "Rate limited … next search at 14:05").
 fn upstream(e: anyhow::Error) -> ApiError {
-    err(424, e.to_string().chars().take(200).collect::<String>())
+    let code = if e.is::<slskd::NotConnected>() { 409 } else if e.is::<slskd::Busy>() { 429 } else { 424 };
+    err(code, e.to_string().chars().take(200).collect::<String>())
 }
 
 /// Forget searches older than five minutes; slskd is told to drop its copy too.
@@ -85,6 +88,7 @@ async fn status(State(st): State<AppState>, User(u): User) -> ApiResult<Json<Val
     let state = m["state"].as_str().unwrap_or("off");
     let installed = slskd_managed::installed_version(&st);
     let mut out = json!({ "enabled": slskd::enabled(&st), "configured": slskd_managed::configured(&st), "client": "managed",
+        "session": encore_requests::slskd_session::status(&st),
         "state": state, "version": m["version"].clone(), "installed": installed, "vpn": m["vpn"], "hint": "",
         "logged_in": false, "username": "", "error": m["error"].as_str().unwrap_or(""), "warning": m["warning"], "download_dir": m["download_dir"],
         "shares": { "dirs": 0, "files": 0 }, "port": m["listen_port"], "scanning": m["scanning"], "parent": null, "downloads": 0, "uploads": 0 });
@@ -125,9 +129,14 @@ async fn status(State(st): State<AppState>, User(u): User) -> ApiResult<Json<Val
     let logged_in = srv["isLoggedIn"].as_bool().unwrap_or_else(|| sstate.contains("LoggedIn"));
     out["logged_in"] = json!(logged_in);
     out["username"] = srv["username"].as_str().or(s["user"]["username"].as_str()).unwrap_or("").into();
-    // not signed in: say why in words (from slskd's own log), never just "Disconnected"
+    // not signed in: say why in words, never just "Disconnected" – Encore's own view of the session first
+    // (the reason and the next attempt: what the phone and older apps show in this field), else slskd's log
+    let session = &out["session"];
+    let session_down = session["state"].as_str().is_some_and(|s| s != "logged_in");
     out["error"] = json!(if logged_in {
         String::new()
+    } else if session_down {
+        encore_requests::slskd_session::text_elsewhere(session["text"].as_str().unwrap_or(""))
     } else if let Some(why) = m["server_error"].as_str().filter(|w| !w.is_empty()) {
         format!("not signed in to the Soulseek network – {why}")
     } else {

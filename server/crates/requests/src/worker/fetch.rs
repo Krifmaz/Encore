@@ -10,24 +10,45 @@ pub(super) fn q(parts: &[&str]) -> String {
     NW.replace_all(&s, " ").split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
+/// A request's message while its step runs, without touching the rest of the row (the worker's search
+/// says "Searching Soulseek…" once its turn comes).
+fn note_message(st: &impl Ctx, id: i64, msg: &str) {
+    let _ = st.db().execute("UPDATE requests SET message=?, updated_at=? WHERE id=? AND status='searching'", p![msg, now(), id]);
+    crate::events::emit(st, id);
+}
+
+/// One Soulseek search for a request: it waits its turn behind the other searches (one at a time) and
+/// says so while it waits, and while it sits out a pause of the server's.
+async fn slskd_search(st: &impl Ctx, id: i64, query: &str, searching: &'static str) -> anyhow::Result<Vec<Value>> {
+    if st.requests().slskd.session().searching() {
+        note_message(st, id, "Waiting for another Soulseek search…");
+    }
+    slskd::search_as(st, query, slskd::Who::Worker, |pause| note_message(st, id, pause.unwrap_or(searching))).await
+}
+
 pub(super) async fn start_slskd(st: &impl Ctx, r: &mut Req, lossless_only: bool) -> anyhow::Result<Out> {
-    upd(st, r, &[("status", json!("searching")), ("message", json!(if lossless_only { "Searching Soulseek for lossless…" } else { "Searching Soulseek…" }))]);
+    let searching = if lossless_only { "Searching Soulseek for lossless…" } else { "Searching Soulseek…" };
+    upd(st, r, &[("status", json!("searching")), ("message", json!(searching))]);
     let mut cands = vec![];
     if r.s("kind") == "album" {
         let rel = release_info(st, r).await;
         let album = r.album_title();
         for query in [q(&[&r.s("artist"), &album]), q(&[&album])] {
-            let res = slskd::search(st, &query).await?;
+            let res = slskd_search(st, r.id, &query, searching).await?;
             cands = slskd::rank_album(st, &res, &r.s("artist"), &album, n_tracks(&rel), lossless_only);
             if !cands.is_empty() {
                 break;
             }
         }
     } else {
-        let res = slskd::search(st, &q(&[&r.s("artist"), &r.s("title")])).await?;
+        let res = slskd_search(st, r.id, &q(&[&r.s("artist"), &r.s("title")]), searching).await?;
         cands = slskd::rank_track(st, &res, &r.s("artist"), &r.s("title"), r.length(), lossless_only);
     }
     check(st, r.id)?;
+    // it searched: a later wait for Soulseek starts its own hour
+    if let Some(d) = r.d.as_object_mut() {
+        d.remove("soulseek_wait");
+    }
     let tried: Vec<String> = r.d["slskd_tried"].as_array().map(|a| a.iter().filter_map(|x| x.as_str().map(String::from)).collect()).unwrap_or_default();
     cands.retain(|c| !tried.contains(&format!("{}|{}", c["username"].as_str().unwrap_or(""), c["directory"].as_str().unwrap_or(""))));
     // reported files are never picked again; a replacement tries other users first
@@ -50,30 +71,83 @@ pub(super) async fn slskd_cancel_current(st: &impl Ctx, c: &Value) {
     }
 }
 
+/// How long a download slskd is too busy to take is asked for again before the user counts as failed.
+const ENQUEUE_BUSY_MAX: f64 = 600.0;
+
+/// The candidate's key in `slskd_tried`: "user|folder".
+fn slskd_key(c: &Value) -> String {
+    format!("{}|{}", c["username"].as_str().unwrap_or(""), c["directory"].as_str().unwrap_or(""))
+}
+
+/// Hand the next candidate's files to slskd (the current one failed for `reason`, or there is none yet).
+/// A download slskd didn't take for reasons of its own is not the user's failure: while slskd is busy
+/// taking other downloads the same candidate is asked for again at the next look (`pending`), and when the
+/// session is down the request waits for Soulseek (Err([`slskd::NotConnected`])) – also the candidate
+/// whose transfer just failed is not counted as tried then, since the session ending is what ends the
+/// transfers.
 pub(super) async fn slskd_try_next(st: &impl Ctx, r: &mut Req, reason: &str) -> anyhow::Result<Out> {
     let mut reason = reason.to_string();
+    // the current candidate's download was never taken: ask for it again, it didn't fail
+    let mut again = r.d["slskd"]["pending"].is_object();
+    // the candidate marked tried by this call because its transfer failed
+    let mut marked: Option<String> = None;
+    let mut first = true;
     loop {
         let idx = r.d["slskd"]["idx"].as_i64().unwrap_or(-1);
         let cands = r.d["slskd"]["candidates"].as_array().cloned().unwrap_or_default();
-        if idx >= 0 {
-            if let Some(c) = cands.get(idx as usize) {
-                let key = format!("{}|{}", c["username"].as_str().unwrap_or(""), c["directory"].as_str().unwrap_or(""));
+        let idx = if again {
+            idx.max(0)
+        } else {
+            if let Some(c) = cands.get(idx.max(0) as usize).filter(|_| idx >= 0) {
+                let key = slskd_key(c);
                 if !r.d["slskd_tried"].is_array() {
                     r.d["slskd_tried"] = json!([]);
                 }
                 r.d["slskd_tried"].as_array_mut().unwrap().push(json!(key));
+                if first {
+                    marked = Some(key);
+                }
                 slskd_cancel_current(st, c).await;
             }
-        }
-        let idx = idx + 1;
+            idx + 1
+        };
+        let pending_since = if again { r.d["slskd"]["pending"]["since"].as_f64() } else { None };
+        again = false;
+        first = false;
         r.d["slskd"]["idx"] = json!(idx);
+        if let Some(o) = r.d["slskd"].as_object_mut() {
+            o.remove("pending");
+        }
         let Some(c) = cands.get(idx as usize).cloned() else {
             return Ok(Out::Next(if reason.is_empty() { "all Soulseek candidates failed".into() } else { reason }));
         };
         let user = c["username"].as_str().unwrap_or("").to_string();
         if let Err(e) = slskd::enqueue(st, &user, c["files"].as_array().map(|a| a.as_slice()).unwrap_or(&[])).await {
+            if e.is::<slskd::NotConnected>() || e.is::<crate::slskd_managed::Unreachable>() {
+                // the session (or slskd itself, restarting) is gone, not this user: the supervisor looks at
+                // once, and the request waits for Soulseek like a search that finds it down
+                let down = st.requests().slskd.session().search_found_it_down();
+                r.d["slskd"]["pending"] = json!({ "since": pending_since.unwrap_or(now()) });
+                if let (Some(k), Some(tried)) = (marked.take(), r.d["slskd_tried"].as_array_mut()) {
+                    if let Some(i) = tried.iter().rposition(|t| t.as_str() == Some(k.as_str())) {
+                        tried.remove(i);
+                    }
+                }
+                return Err(if e.is::<slskd::NotConnected>() { e } else { down.into() });
+            }
+            let since = pending_since.unwrap_or(now());
+            if e.is::<slskd::EnqueueBusy>() && now() - since < ENQUEUE_BUSY_MAX {
+                // slskd is taking other downloads: this one is asked for again at the next look
+                r.d["slskd"]["pending"] = json!({ "since": since });
+                upd(st, r, &[("status", json!("downloading")), ("progress", json!(0)),
+                             ("message", json!(format!("Waiting for Soulseek to take the download from {user} (it is busy with other downloads)")))]);
+                return Ok(Out::Wait);
+            }
             reason = e.to_string();
             continue;
+        }
+        if let Some(d) = r.d.as_object_mut() {
+            d.remove("soulseek_wait"); // a later wait for Soulseek starts its own hour
         }
         let t = now();
         r.d["slskd"]["started"] = json!(t);
@@ -94,7 +168,42 @@ pub(super) async fn after_slskd(st: &impl Ctx, r: &mut Req, out: Out) -> anyhow:
     Ok(())
 }
 
+/// Look at a Soulseek download in progress. When the session is down – the transfers end with it – the
+/// request waits for Soulseek instead of going on to the next user or source ([`slskd_down`]).
 pub(super) async fn poll_slskd(st: &impl Ctx, r: &mut Req) -> anyhow::Result<()> {
+    match poll_slskd_once(st, r).await {
+        Err(e) if e.is::<slskd::NotConnected>() => slskd_down(st, r).await,
+        other => other,
+    }
+}
+
+/// A Soulseek step found the session down (a download slskd couldn't take, a transfer that ended with
+/// the session): the request waits for Soulseek where it is, as a search that finds it down does (the
+/// 60-minute rule applies), or goes on when Soulseek won't be back by itself (off, a rejected login).
+pub(super) async fn slskd_down(st: &impl Ctx, r: &mut Req) -> anyhow::Result<()> {
+    match soulseek_turn(st, r).await {
+        Turn::Skip(why) => next_source(st, r, &why).await,
+        Turn::Wait(when) => park_download(st, r, &when),
+        // the answer said down, the session doesn't know yet (the supervisor looks at once)
+        Turn::Go => park_download(st, r, "connecting shortly"),
+    }
+}
+
+/// The transfer can't go on: is that because the session is down? Then the request waits for Soulseek
+/// (true) and the user isn't counted as failed.
+async fn parked_for_the_session(st: &impl Ctx, r: &mut Req) -> anyhow::Result<bool> {
+    match soulseek_turn(st, r).await {
+        Turn::Wait(when) => park_download(st, r, &when).map(|_| true),
+        Turn::Go | Turn::Skip(_) => Ok(false),
+    }
+}
+
+async fn poll_slskd_once(st: &impl Ctx, r: &mut Req) -> anyhow::Result<()> {
+    if r.d["slskd"]["pending"].is_object() {
+        // slskd didn't take the download yet (it was busy): ask again
+        let o = slskd_try_next(st, r, "").await?;
+        return after_slskd(st, r, o).await;
+    }
     let idx = r.d["slskd"]["idx"].as_i64().unwrap_or(-1);
     let Some(c) = r.d["slskd"]["candidates"].get(idx.max(0) as usize).cloned() else {
         return next_source(st, r, "lost track of the Soulseek download").await;
@@ -117,6 +226,9 @@ pub(super) async fn poll_slskd(st: &impl Ctx, r: &mut Req) -> anyhow::Result<()>
             return import_slskd(st, r, &c).await;
         }
         if t - r.d["slskd"]["started"].as_f64().unwrap_or(t) > 120.0 {
+            if parked_for_the_session(st, r).await? {
+                return Ok(());
+            }
             let o = slskd_try_next(st, r, "transfers disappeared").await?;
             return after_slskd(st, r, o).await;
         }
@@ -124,6 +236,9 @@ pub(super) async fn poll_slskd(st: &impl Ctx, r: &mut Req) -> anyhow::Result<()>
     }
     let states: Vec<String> = latest.values().map(|f| f["state"].as_str().unwrap_or("").to_string()).collect();
     if states.iter().any(|s| slskd::DONE_BAD.iter().any(|b| s.contains(b))) {
+        if parked_for_the_session(st, r).await? {
+            return Ok(());
+        }
         st.db().log("warning", &format!("Soulseek transfer from {user} failed for {}; trying next source", r.label()));
         let o = slskd_try_next(st, r, "transfer failed").await?;
         return after_slskd(st, r, o).await;
@@ -140,6 +255,9 @@ pub(super) async fn poll_slskd(st: &impl Ctx, r: &mut Req) -> anyhow::Result<()>
         return import_slskd(st, r, &c).await;
     }
     if t - r.d["slskd"]["last_change"].as_f64().unwrap_or(t) > st.cfg().int("slskd_stall_minutes") as f64 * 60.0 {
+        if parked_for_the_session(st, r).await? {
+            return Ok(());
+        }
         let o = slskd_try_next(st, r, "transfer stalled").await?;
         return after_slskd(st, r, o).await;
     }

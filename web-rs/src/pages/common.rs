@@ -146,7 +146,7 @@ pub fn request_row(r: &Value, admin: bool) -> String {
         _ => format!(r#"{} <span class="muted">· {}</span>"#, esck(r, "title"), esck(r, "artist")),
     };
     let active = matches!(status.as_str(), "searching" | "downloading" | "importing" | "monitoring");
-    format!(r#"<div class="list-item" data-id="{id}">
+    format!(r#"<div class="list-item req-row" data-id="{id}">
     <div class="thumb">{thumb}</div>
     <div class="grow">
       <div class="ellipsis" style="font-weight:600">{what}</div>

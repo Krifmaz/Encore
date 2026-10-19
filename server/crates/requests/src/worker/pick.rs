@@ -70,6 +70,18 @@ pub(super) async fn next_source(st: &impl Ctx, r: &mut Req, reason: &str) -> any
         }
         let src = srcs.remove(0);
         r.d["sources"] = json!(srcs);
+        let soulseek = src == "slskd" || src == "slskd_lossless";
+        if soulseek {
+            match soulseek_turn(st, r).await {
+                Turn::Go => {}
+                Turn::Wait(when) => return park_for_soulseek(st, r, &src, &when),
+                Turn::Skip(why) => {
+                    log_push(r, format!("{src}: {why}"));
+                    reason.clear();
+                    continue;
+                }
+            }
+        }
         upd(st, r, &[("source", json!(src)), ("progress", json!(0)), ("status", json!("searching")), ("message", json!(format!("Trying {src}…")))]);
         let res = match src.as_str() {
             "slskd" => start_slskd(st, r, false).await,
@@ -83,9 +95,67 @@ pub(super) async fn next_source(st: &impl Ctx, r: &mut Req, reason: &str) -> any
             Ok(Out::Done) | Ok(Out::Wait) => return Ok(()),
             Ok(Out::Next(why)) => reason = why,
             Err(e) if e.is::<Cancelled>() => return Err(e),
+            // the session went down between the check and the search: wait for it like above
+            Err(e) if soulseek && e.is::<slskd::NotConnected>() => match soulseek_turn(st, r).await {
+                Turn::Wait(when) => return park_for_soulseek(st, r, &src, &when),
+                Turn::Skip(why) => reason = why,
+                Turn::Go => reason = format!("error: {e}"),
+            },
             Err(e) => reason = format!("error: {e}"),
         }
     }
+}
+
+/// Whether a Soulseek step can search now.
+pub(super) enum Turn {
+    Go,
+    /// wait for the session ("next attempt at 14:20")
+    Wait(String),
+    /// go on to the next source, for this reason
+    Skip(String),
+}
+
+/// The session's answer for the worker, with the hour-long limit: a request that has waited 60 minutes
+/// for Soulseek goes on down its sources.
+pub(super) async fn soulseek_turn(st: &impl Ctx, r: &Req) -> Turn {
+    use crate::slskd_session::{ForWorker, WORKER_WAIT_MAX};
+    match st.requests().slskd.session().for_worker(st).await {
+        ForWorker::Go => Turn::Go,
+        ForWorker::Skip(why) => Turn::Skip(why),
+        ForWorker::Wait(_) if r.d["soulseek_wait"]["since"].as_f64().is_some_and(|t| now() - t >= WORKER_WAIT_MAX) => {
+            Turn::Skip("Soulseek was not connected for 60 minutes – trying the next source".into())
+        }
+        ForWorker::Wait(when) => Turn::Wait(when),
+    }
+}
+
+/// Park the request until Soulseek is back: queued, "Waiting for Soulseek – next attempt at 14:20", the
+/// Soulseek step first in its sources again, and its attempts untouched. The queue looks at it again
+/// every few seconds and goes on where it stopped ([`super::queue`]): a Soulseek step searches again, a
+/// picked file is asked for again. Writes only what changed.
+pub(super) fn park_for_soulseek(st: &impl Ctx, r: &mut Req, src: &str, when: &str) -> anyhow::Result<()> {
+    check(st, r.id)?;
+    let mut srcs: Vec<Value> = r.d["sources"].as_array().cloned().unwrap_or_default();
+    srcs.insert(0, json!(src));
+    r.d["sources"] = json!(srcs);
+    let mut changed = false;
+    if !r.d["soulseek_wait"].is_object() {
+        r.d["soulseek_wait"] = json!({ "since": now() });
+        log_push(r, format!("{src}: waiting for Soulseek ({when})"));
+        changed = true;
+    }
+    let msg = format!("Waiting for Soulseek – {when}");
+    if changed || r.s("status") != "queued" || r.s("message") != msg || r.s("source") != src {
+        upd(st, r, &[("status", json!("queued")), ("source", json!(src)), ("progress", json!(0)), ("message", json!(msg))]);
+    }
+    Ok(())
+}
+
+/// A Soulseek download (a picked file, or a request's Soulseek step) that can't go on while the session is
+/// down waits for Soulseek ([`park_for_soulseek`]).
+pub(super) fn park_download(st: &impl Ctx, r: &mut Req, when: &str) -> anyhow::Result<()> {
+    let src = Some(r.s("source")).filter(|s| s == "slskd_lossless").unwrap_or_else(|| "slskd".into());
+    park_for_soulseek(st, r, &src, when)
 }
 
 pub(super) fn source_order(st: &impl Ctx, r: &Req) -> Vec<String> {
@@ -129,18 +199,30 @@ pub(super) fn source_order(st: &impl Ctx, r: &Req) -> Vec<String> {
     order.into_iter().filter(|s| avail(s) && seen.insert(s.clone())).collect()
 }
 
-/// Download exactly the chosen result – no fallback to other sources.
+/// Download exactly the chosen result – no fallback to other sources. A picked Soulseek file waits for
+/// the session like any Soulseek step (the hour-long limit included), then is asked for again.
 pub(super) async fn start_pick(st: &impl Ctx, r: &mut Req) -> anyhow::Result<()> {
     let pick = r.d["pick"].clone();
     r.d["sources"] = json!([]);
-    r.d["log"] = json!([]);
+    if !r.d["soulseek_wait"].is_object() {
+        r.d["log"] = json!([]); // a pick that waited for Soulseek keeps the line that says so
+    }
     let src = pick["source"].as_str().unwrap_or("");
     let url = pick["payload"]["url"].as_str().unwrap_or("").to_string();
     let out = match src {
         "slskd" => {
-            r.d["slskd"] = json!({ "candidates": [pick["payload"]], "idx": -1 });
             upd(st, r, &[("source", json!("slskd"))]);
-            slskd_try_next(st, r, "").await?
+            match soulseek_turn(st, r).await {
+                Turn::Wait(when) => return park_for_soulseek(st, r, "slskd", &when),
+                Turn::Skip(why) => Out::Next(why),
+                Turn::Go => {
+                    r.d["slskd"] = json!({ "candidates": [pick["payload"]], "idx": -1 });
+                    match slskd_try_next(st, r, "").await {
+                        Err(e) if e.is::<slskd::NotConnected>() => return slskd_down(st, r).await,
+                        o => o?,
+                    }
+                }
+            }
         }
         "torznab" => {
             r.d["torznab"] = json!({ "candidates": [pick["payload"]], "idx": -1 });

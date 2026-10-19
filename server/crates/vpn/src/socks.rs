@@ -2,13 +2,52 @@
 //! server and to peers goes out through the VPN tunnel. A random username and password (RFC 1929)
 //! keep other local programs off it; CONNECT only (BIND and UDP are refused), to IPv4 addresses or
 //! domain names (looked up through the VPN's DNS server, so no lookup leaks either).
+//!
+//! One address can have a door ([`Vpn::set_door`]): Encore lets slskd reach the Soulseek server only
+//! while one of its own connection attempts is under way, so slskd's own reconnect loop is refused here
+//! ("connection refused", on loopback, in a moment) and never knocks on the server.
 use super::{Vpn, VpnStream};
 use std::future::Future;
 use std::io;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr, SocketAddrV4};
+use std::pin::Pin;
+use std::sync::Arc;
+use std::task::{Context, Poll};
 use subtle::ConstantTimeEq;
-use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
+use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, ReadBuf};
 use tokio::net::TcpListener;
+
+/// A door on the connections to one address: asked once per connection, `Some(pass)` lets it through
+/// (the pass is kept as long as the connection lasts), `None` turns it away.
+pub type Door = Arc<dyn Fn() -> Option<Pass> + Send + Sync>;
+/// What a door hands out for one connection; dropping it says the connection is over.
+pub type Pass = Box<dyn Send + Sync>;
+
+/// A stream that keeps its door's pass until it is dropped.
+pub struct Guarded<T> {
+    inner: T,
+    _pass: Option<Pass>,
+}
+
+impl<T: AsyncRead + Unpin> AsyncRead for Guarded<T> {
+    fn poll_read(self: Pin<&mut Self>, cx: &mut Context<'_>, buf: &mut ReadBuf<'_>) -> Poll<io::Result<()>> {
+        Pin::new(&mut self.get_mut().inner).poll_read(cx, buf)
+    }
+}
+
+impl<T: AsyncWrite + Unpin> AsyncWrite for Guarded<T> {
+    fn poll_write(self: Pin<&mut Self>, cx: &mut Context<'_>, buf: &[u8]) -> Poll<io::Result<usize>> {
+        Pin::new(&mut self.get_mut().inner).poll_write(cx, buf)
+    }
+
+    fn poll_flush(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+        Pin::new(&mut self.get_mut().inner).poll_flush(cx)
+    }
+
+    fn poll_shutdown(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+        Pin::new(&mut self.get_mut().inner).poll_shutdown(cx)
+    }
+}
 
 /// Where a client wants to go.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -28,6 +67,21 @@ const REP_COMMAND: u8 = 7;
 const REP_ADDRESS_TYPE: u8 = 8;
 
 impl Vpn {
+    /// Put a door on the connections to `addr` (None takes it away).
+    pub fn set_door(&self, door: Option<(SocketAddrV4, Door)>) {
+        *self.0.door.lock().unwrap() = door;
+    }
+
+    /// Whether a connection to `addr` may go out now: Ok(None) with no door there, Ok(Some(pass)) when
+    /// the door lets it through, Err (connection refused) when the door is shut.
+    pub fn through_door(&self, addr: SocketAddr) -> io::Result<Option<Pass>> {
+        let door = self.0.door.lock().unwrap().as_ref().filter(|(a, _)| SocketAddr::V4(*a) == addr).map(|(_, d)| d.clone());
+        match door {
+            None => Ok(None),
+            Some(d) => d().map(Some).ok_or_else(|| io::Error::new(io::ErrorKind::ConnectionRefused, "Encore is not connecting to this server now")),
+        }
+    }
+
     /// The proxy for slskd.yml, once [`Vpn::socks`] has run: (port, username, password).
     pub fn socks_endpoint(&self) -> Option<(u16, String, String)> {
         self.0.socks.lock().unwrap().clone()
@@ -73,8 +127,9 @@ async fn accept_loop(vpn: Vpn, l: TcpListener, user: String, pass: String) {
     }
 }
 
-/// The real connector: the tunnel, names resolved by the VPN's DNS server.
-async fn through_vpn(vpn: Vpn, t: Target) -> io::Result<VpnStream> {
+/// The real connector: the tunnel, names resolved by the VPN's DNS server, through the door when the
+/// address has one.
+async fn through_vpn(vpn: Vpn, t: Target) -> io::Result<Guarded<VpnStream>> {
     let addr = match t {
         Target::V4(a) => SocketAddr::V4(a),
         Target::Domain(host, port) => {
@@ -84,7 +139,8 @@ async fn through_vpn(vpn: Vpn, t: Target) -> io::Result<VpnStream> {
             SocketAddr::from((ip, port))
         }
     };
-    vpn.connect_tcp(addr).await
+    let pass = vpn.through_door(addr)?;
+    Ok(Guarded { inner: vpn.connect_tcp(addr).await?, _pass: pass })
 }
 
 fn bad(m: &str) -> io::Error {
@@ -311,6 +367,55 @@ mod tests {
         client.read_exact(&mut r).await.unwrap();
         assert_eq!(r[1], REP_NET_UNREACHABLE, "a down tunnel is unreachable, never a direct connection");
         assert!(task.await.unwrap().is_err());
+    }
+
+    /// A door on the Soulseek server's address: shut, a CONNECT there is refused before the tunnel is
+    /// even asked; open, it goes on (unreachable here: no tunnel) and the door counts it; other
+    /// addresses pass by it.
+    #[tokio::test]
+    async fn the_door_on_one_address() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let vpn = Vpn::default();
+        vpn.install(None);
+        let asked = Arc::new(AtomicUsize::new(0));
+        let open = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let (a, o) = (asked.clone(), open.clone());
+        vpn.set_door(Some(("208.76.170.59:2271".parse().unwrap(), Arc::new(move || {
+            a.fetch_add(1, Ordering::SeqCst);
+            o.load(Ordering::SeqCst).then(|| Box::new(()) as Pass)
+        }))));
+        assert!(vpn.through_door("1.2.3.4:2271".parse().unwrap()).unwrap().is_none(), "no door there");
+        assert_eq!(asked.load(Ordering::SeqCst), 0);
+        let e = vpn.through_door("208.76.170.59:2271".parse().unwrap()).err().unwrap();
+        assert_eq!(e.kind(), io::ErrorKind::ConnectionRefused);
+        let (port, user, pass) = vpn.socks().await.unwrap();
+        let connect = |target: [u8; 6]| {
+            let (user, pass) = (user.clone(), pass.clone());
+            async move {
+                let mut c = tokio::net::TcpStream::connect(("127.0.0.1", port)).await.unwrap();
+                c.write_all(&[5, 1, 2]).await.unwrap();
+                let mut b = [0u8; 2];
+                c.read_exact(&mut b).await.unwrap();
+                let mut m = vec![1, user.len() as u8];
+                m.extend_from_slice(user.as_bytes());
+                m.push(pass.len() as u8);
+                m.extend_from_slice(pass.as_bytes());
+                c.write_all(&m).await.unwrap();
+                c.read_exact(&mut b).await.unwrap();
+                c.write_all(&[&[5u8, 1, 0, 1][..], &target].concat()).await.unwrap();
+                let mut r = [0u8; 10];
+                c.read_exact(&mut r).await.unwrap();
+                r[1]
+            }
+        };
+        let server = [208, 76, 170, 59, 0x08, 0xDF];
+        assert_eq!(connect(server).await, REP_REFUSED, "a shut door: refused");
+        open.store(true, Ordering::SeqCst);
+        assert_eq!(connect(server).await, REP_NET_UNREACHABLE, "an open door: on to the tunnel (down here)");
+        assert_eq!(connect([1, 2, 3, 4, 0x08, 0xDF]).await, REP_NET_UNREACHABLE, "a peer: no door");
+        assert_eq!(asked.load(Ordering::SeqCst), 3);
+        vpn.set_door(None);
+        assert!(vpn.through_door("208.76.170.59:2271".parse().unwrap()).unwrap().is_none());
     }
 
     /// The real server: started once, a random login, refuses CONNECT while no VPN is up.

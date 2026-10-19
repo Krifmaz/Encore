@@ -13,7 +13,7 @@ use std::hash::{Hash, Hasher};
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use encore_config::Config;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -27,6 +27,8 @@ pub const API_KEY_SETTING: &str = "slskd_managed_api_key";
 /// slskd's default Soulseek server.
 const SERVER: (&str, u16) = ("vps.slsknet.org", 2271);
 const LOG_MAX: u64 = 5 * 1024 * 1024;
+/// slskd's `soulseek.connection.timeout.connect`: how long it waits to reach the Soulseek server.
+pub const CONNECT_TIMEOUT_MS: u64 = 30_000;
 /// The empty folder slskd.yml names as the web UI's content (beside the binary; wwwroot is deleted).
 const NO_WEB_UI: &str = "no-web-ui";
 const RELEASES: &str = "https://api.github.com/repos/slskd/slskd/releases/latest";
@@ -74,6 +76,18 @@ struct Inner {
     probed: Mutex<Option<(ProbeKey, ProbeAnswer)>>,
     /// the Soulseek server's address the last time its name was looked up through the VPN
     server_ip: Mutex<Option<(String, std::net::IpAddr)>>,
+    /// the session with the Soulseek server: its state, Encore's reconnect schedule and the search gate
+    session: crate::slskd_session::Session,
+    /// where slskd's API answers when not on its port on loopback (tests: a stand-in)
+    target: Mutex<Option<Target>>,
+    /// counts the slskd processes started (the session supervisor tells a restart by it)
+    generation: AtomicU64,
+    /// the process (its generation) that has finished starting: its API takes a connect request
+    started: AtomicU64,
+    /// when the engine last became "running"
+    running_at: Mutex<Option<Instant>>,
+    /// the direct route's relay to the Soulseek server, once started
+    relay: Mutex<Option<Arc<Relay>>>,
 }
 
 impl Default for Managed {
@@ -86,6 +100,12 @@ impl Default for Managed {
             start_now: Default::default(),
             probed: Default::default(),
             server_ip: Default::default(),
+            session: Default::default(),
+            target: Default::default(),
+            generation: Default::default(),
+            started: Default::default(),
+            running_at: Default::default(),
+            relay: Default::default(),
         }))
     }
 }
@@ -104,8 +124,101 @@ impl Managed {
             "warning": s.warning, "download_dir": s.downloads, "server_error": s.server_error })
     }
 
-    fn state(&self) -> &'static str {
+    /// The engine's state: off | not_installed | starting | running | crashed | waiting_vpn | blocked.
+    pub fn state(&self) -> &'static str {
         self.0.status.lock().unwrap().state
+    }
+
+    /// The session with the Soulseek server (its state, Encore's reconnect schedule, the search gate).
+    pub fn session(&self) -> &crate::slskd_session::Session {
+        &self.0.session
+    }
+
+    /// Tests: slskd's API answers there instead of on its port on loopback.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn set_target(&self, t: Target) {
+        *self.0.target.lock().unwrap() = Some(t);
+    }
+
+    /// Tests: the engine is in this state (as if the supervisor had brought it there).
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn set_state_for_tests(&self, state: &'static str) {
+        self.set_status(|s| s.state = state);
+        if state == "running" {
+            self.0.started.store(self.generation(), Ordering::SeqCst);
+        }
+        self.0.session.wake();
+    }
+
+    /// Tests: a new slskd process runs, started (as if the supervisor had restarted it).
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn restarted_for_tests(&self) {
+        let gen = self.0.generation.fetch_add(1, Ordering::SeqCst) + 1;
+        self.0.started.store(gen, Ordering::SeqCst); // and has finished starting
+        self.0.session.wake();
+    }
+
+    /// The slskd process that runs (or ran last): a new number for each start.
+    pub fn generation(&self) -> u64 {
+        self.0.generation.load(Ordering::SeqCst)
+    }
+
+    /// slskd runs and has finished starting, so a connect request (PUT /server) is acted on: its last
+    /// startup line ("Not connecting to the Soulseek server; 'no-connect' option is enabled") has come, or
+    /// it has been running for 20 s. (A PUT right after "Application started" was seen to do nothing.)
+    pub fn ready(&self) -> bool {
+        self.state() == "running"
+            && (self.0.started.load(Ordering::SeqCst) == self.generation()
+                || self.0.running_at.lock().unwrap().is_some_and(|t| t.elapsed() >= Duration::from_secs(20)))
+    }
+
+    fn now_running(&self) {
+        *self.0.running_at.lock().unwrap() = Some(Instant::now());
+        self.0.session.wake();
+    }
+
+    /// Encore's connection attempt: let one connection through to the Soulseek server. On the direct route
+    /// the relay connects to the server first (30 s at most), so slskd's login wait (5 s, fixed in slskd)
+    /// doesn't have to cover the connect as well; Err when the server can't be reached.
+    pub async fn open_door(&self) -> anyhow::Result<()> {
+        let direct = !self.0.status.lock().unwrap().vpn;
+        let relay = self.0.relay.lock().unwrap().clone();
+        if let Some(r) = relay.filter(|_| direct) {
+            let up = r.upstream.lock().unwrap().clone();
+            let s = dial(&up).await.map_err(|e| anyhow::anyhow!("can't reach {}:{}: {e}", up.0, up.1))?;
+            let n = r.dialled.fetch_add(1, Ordering::SeqCst) + 1;
+            *r.ready.lock().unwrap() = Some((n, s));
+            // not taken while the door is open: closed again, the server mustn't wait on an idle connection
+            tokio::spawn(async move {
+                tokio::time::sleep(crate::slskd_session::DOOR_WINDOW).await;
+                let mut ready = r.ready.lock().unwrap();
+                if ready.as_ref().is_some_and(|(m, _)| *m == n) {
+                    *ready = None;
+                }
+            });
+        }
+        self.0.session.open_door();
+        Ok(())
+    }
+
+    /// The direct route's relay (started once): its port on loopback, and where it reaches the server.
+    async fn relay_port(&self, upstream: (String, u16)) -> std::io::Result<u16> {
+        if let Some(r) = self.0.relay.lock().unwrap().as_ref() {
+            *r.upstream.lock().unwrap() = upstream;
+            return Ok(r.port);
+        }
+        let l = tokio::net::TcpListener::bind(("127.0.0.1", 0)).await?;
+        let port = l.local_addr()?.port();
+        let r = Arc::new(Relay { port, upstream: Mutex::new(upstream), ready: Mutex::new(None), dialled: AtomicU64::new(0) });
+        {
+            let mut cur = self.0.relay.lock().unwrap();
+            if let Some(won) = cur.as_ref() {
+                return Ok(won.port); // another caller started it meanwhile; this listener just closes
+            }
+            *cur = Some(r.clone());
+        }
+        tokio::spawn(relay_loop(l, r, self.0.session.clone()));
+        Ok(port)
     }
 
     fn set_status(&self, f: impl FnOnce(&mut Status)) {
@@ -116,6 +229,7 @@ impl Managed {
     pub fn poke(&self) {
         *self.0.probed.lock().unwrap() = None; // the settings may have changed: the downloads folder is probed again
         self.0.wake.notify_one();
+        self.0.session.wake(); // and the login with them: the session's schedule starts over
     }
 
     /// Start now (after a crash or a blocked start): forget the backoff and try at once.
@@ -162,16 +276,26 @@ impl Managed {
             t.push_back(l.chars().take(300).collect());
         }
         if l.contains("Application started") {
+            let mut up = false;
             self.set_status(|s| {
                 if s.state == "starting" {
                     s.state = "running";
                     s.error = None;
+                    up = true;
                 }
             });
+            if up {
+                self.now_running();
+            }
+        }
+        if l.contains("Not connecting to the Soulseek server") || l.contains("Attempting to connect to the Soulseek server") {
+            self.0.started.store(self.generation(), Ordering::SeqCst);
+            self.0.session.wake();
         }
         if let Some(hint) = server_hint(l) {
             self.set_status(|s| s.server_error = hint);
         }
+        self.0.session.on_line(l);
         if let Some(p) = scan_percent(l) {
             self.set_status(|s| s.scan = (p < 100).then_some(p));
         } else if l.contains("Share scan started") {
@@ -220,6 +344,69 @@ pub fn server_hint(line: &str) -> Option<Option<String>> {
 }
 
 
+// ---- the relay to the Soulseek server (direct route) ----------------------------------------------
+
+/// On the direct route slskd.yml names this relay on loopback as the Soulseek server. It passes a
+/// connection on to the real server only through the session's door (`slskd_session::door`): while one
+/// of Encore's attempts is under way. slskd's own reconnect attempts are reset at once and never reach
+/// the server. (On the VPN route Encore's SOCKS proxy keeps the same door.)
+struct Relay {
+    port: u16,
+    /// the Soulseek server (host, port)
+    upstream: Mutex<(String, u16)>,
+    /// the connection to the server made for the attempt under way: (its number, the stream)
+    ready: Mutex<Option<(u64, tokio::net::TcpStream)>>,
+    dialled: AtomicU64,
+}
+
+/// A connection to the Soulseek server: 30 s to connect, keepalive on (the relay would not notice a
+/// dead server connection otherwise, and neither would slskd behind it).
+async fn dial(up: &(String, u16)) -> std::io::Result<tokio::net::TcpStream> {
+    let s = tokio::time::timeout(Duration::from_millis(CONNECT_TIMEOUT_MS), tokio::net::TcpStream::connect((up.0.as_str(), up.1))).await
+        .map_err(|_| std::io::Error::new(std::io::ErrorKind::TimedOut, format!("no answer within {} s (timed out)", CONNECT_TIMEOUT_MS / 1000)))??;
+    let _ = s.set_nodelay(true);
+    let ka = socket2::TcpKeepalive::new().with_time(Duration::from_secs(60)).with_interval(Duration::from_secs(15));
+    let _ = socket2::SockRef::from(&s).set_tcp_keepalive(&ka);
+    Ok(s)
+}
+
+async fn relay_loop(l: tokio::net::TcpListener, r: Arc<Relay>, session: crate::slskd_session::Session) {
+    loop {
+        let s = match l.accept().await {
+            Ok((s, _)) => s,
+            Err(e) => {
+                tracing::warn!("soulseek: the relay to the server couldn't accept: {e}");
+                tokio::time::sleep(Duration::from_millis(500)).await;
+                continue;
+            }
+        };
+        let Some(pass) = session.door() else {
+            // slskd's own attempt: reset at once, so it fails in a moment without reaching the server
+            let _ = socket2::SockRef::from(&s).set_linger(Some(Duration::ZERO));
+            drop(s);
+            continue;
+        };
+        let ready = r.ready.lock().unwrap().take().map(|(_, u)| u);
+        let up = r.upstream.lock().unwrap().clone();
+        tokio::spawn(async move {
+            let _pass = pass; // the connection counts as open until this task ends
+            let mut s = s;
+            let _ = s.set_nodelay(true);
+            let mut u = match ready {
+                Some(u) => u,
+                None => match dial(&up).await {
+                    Ok(u) => u,
+                    Err(e) => {
+                        tracing::debug!("soulseek: the relay couldn't reach {}:{}: {e}", up.0, up.1);
+                        return;
+                    }
+                },
+            };
+            let _ = tokio::io::copy_bidirectional(&mut s, &mut u).await;
+        });
+    }
+}
+
 // ---- paths ----------------------------------------------------------------------------------------
 
 fn tools_dir(data: &Path) -> PathBuf {
@@ -252,6 +439,92 @@ pub fn configured(st: &impl Ctx) -> bool {
 
 pub fn base_url() -> String {
     format!("http://127.0.0.1:{WEB_PORT}")
+}
+
+// ---- slskd's API ----------------------------------------------------------------------------------
+
+/// Where slskd's API answers.
+#[derive(Clone)]
+pub enum Target {
+    /// an address ("http://127.0.0.1:5031")
+    Url(String),
+    /// tests: a stand-in slskd answering in this process (no sockets, so tokio's paused time can run
+    /// through the reconnect schedule and the search spacing without HTTP timeouts firing)
+    #[cfg(any(test, feature = "test-support"))]
+    App(axum::Router),
+}
+
+/// slskd's API didn't answer at all: it isn't listening (starting, restarting or stopped). Its words are
+/// the ones people saw before ("Soulseek is starting – try again in a moment").
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Unreachable;
+
+impl std::fmt::Display for Unreachable {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("Soulseek is starting – try again in a moment")
+    }
+}
+
+impl std::error::Error for Unreachable {}
+
+/// Tests: a stand-in slskd answers this status to play one that isn't listening ([`Unreachable`]).
+#[cfg(any(test, feature = "test-support"))]
+pub const STAND_IN_DOWN: u16 = 599;
+
+/// One call to slskd's API with Encore's key: (status, body). `timeout` overrides the client's 30 s.
+/// A connection refused is [`Unreachable`] (slskd isn't listening: starting, restarting or stopped).
+pub async fn api(st: &impl Ctx, method: reqwest::Method, path: &str, body: Option<&Value>, query: &[(&str, &str)], timeout: Option<Duration>) -> anyhow::Result<(u16, String)> {
+    let path = format!("/api/v0/{}", path.trim_start_matches('/'));
+    let target = st.requests().slskd.0.target.lock().unwrap().clone();
+    let base = match target {
+        Some(Target::Url(u)) => u,
+        #[cfg(any(test, feature = "test-support"))]
+        Some(Target::App(app)) => return call_app(app, st, method, &path, body, query).await,
+        None => base_url(),
+    };
+    let mut rb = st.http().request(method, format!("{base}{path}")).header("X-API-Key", api_key(st)).query(query);
+    if let Some(b) = body {
+        rb = rb.json(b);
+    }
+    if let Some(t) = timeout {
+        rb = rb.timeout(t);
+    }
+    let r = rb.send().await.map_err(|e| {
+        if e.is_connect() { anyhow::Error::new(Unreachable) } else { anyhow::anyhow!("Soulseek engine didn't answer: {e}") }
+    })?;
+    let status = r.status().as_u16();
+    Ok((status, r.text().await.unwrap_or_default()))
+}
+
+#[cfg(any(test, feature = "test-support"))]
+async fn call_app(app: axum::Router, st: &impl Ctx, method: reqwest::Method, path: &str, body: Option<&Value>, query: &[(&str, &str)]) -> anyhow::Result<(u16, String)> {
+    use tower::ServiceExt;
+    let q: Vec<String> = query.iter().map(|(k, v)| format!("{}={}", urlencoding::encode(k), urlencoding::encode(v))).collect();
+    let uri = if q.is_empty() { path.to_string() } else { format!("{path}?{}", q.join("&")) };
+    let mut req = axum::http::Request::builder().method(method).uri(uri).header("x-api-key", api_key(st));
+    let bytes = match body {
+        Some(b) => {
+            req = req.header("content-type", "application/json");
+            serde_json::to_vec(b)?
+        }
+        None => vec![],
+    };
+    let resp = app.oneshot(req.body(axum::body::Body::from(bytes))?).await?;
+    let status = resp.status().as_u16();
+    if status == STAND_IN_DOWN {
+        return Err(Unreachable.into());
+    }
+    let text = axum::body::to_bytes(resp.into_body(), usize::MAX).await.map(|b| String::from_utf8_lossy(&b).to_string()).unwrap_or_default();
+    Ok((status, text))
+}
+
+/// [`api`] as JSON (null for an empty answer); an error answer is an Err with its status and text.
+pub async fn api_json(st: &impl Ctx, method: reqwest::Method, path: &str, body: Option<&Value>) -> anyhow::Result<Value> {
+    let (status, text) = api(st, method, path, body, &[], Some(Duration::from_secs(10))).await?;
+    if status >= 400 {
+        anyhow::bail!("slskd answered {status}: {}", text.chars().take(200).collect::<String>());
+    }
+    Ok(serde_json::from_str(&text).unwrap_or(Value::Null))
 }
 
 // ---- the downloads folder --------------------------------------------------------------------------
@@ -557,7 +830,8 @@ fn q(s: &str) -> String {
 pub fn render_yml(y: &Yml) -> String {
     let mut o = String::from("# Written by Encore from its settings – edits here are overwritten.\n");
     o += "headless: true\nremote_configuration: false\nremote_file_management: false\ninstance_name: encore\n";
-    o += "flags:\n  no_logo: true\n  no_version_check: true\n";
+    // Encore connects to the Soulseek server itself, on its own schedule (crate::slskd_session)
+    o += "flags:\n  no_logo: true\n  no_version_check: true\n  no_connect: true\n";
     o += "logger:\n  no_disk: true\n  no_color: true\n";
     o += &format!("directories:\n  downloads: {}\n  incomplete: {}\n", q(&y.downloads), q(&y.incomplete));
     o += "shares:\n";
@@ -576,8 +850,11 @@ pub fn render_yml(y: &Yml) -> String {
     o += &format!("  username: {}\n  password: {}\n", q(&y.username), q(&y.password));
     o += &format!("  listen_ip_address: {}\n  listen_port: {}\n", q(&y.listen_ip), y.listen_port);
     o += "  description: \"Encore\"\n";
+    // 30 s to reach the server (slskd's default is 10 s; through a VPN that can be too short). The login's
+    // own wait (Soulseek.NET's message timeout, 5 s) is not a setting of slskd: docs/backlog/slskd-upstream.md
+    o += &format!("  connection:\n    timeout:\n      connect: {CONNECT_TIMEOUT_MS}\n");
     if let Some((port, user, pass)) = &y.proxy {
-        o += &format!("  connection:\n    proxy:\n      enabled: true\n      address: \"127.0.0.1\"\n      port: {port}\n      username: {}\n      password: {}\n", q(user), q(pass));
+        o += &format!("    proxy:\n      enabled: true\n      address: \"127.0.0.1\"\n      port: {port}\n      username: {}\n      password: {}\n", q(user), q(pass));
     }
     o += &format!("web:\n  port: {WEB_PORT}\n  ip_address: \"127.0.0.1\"\n  url_base: \"/\"\n  content_path: {}\n  logging: false\n", q(&y.content_path));
     o += "  https:\n    disabled: true\n";
@@ -780,6 +1057,7 @@ impl Runner {
             if tokio::time::timeout(Duration::from_secs(10), c.wait()).await.is_err() {
                 let _ = c.kill().await;
             }
+            self.managed.0.session.wake();
         }
         self.key = 0;
     }
@@ -903,6 +1181,8 @@ impl Runner {
             let _ = std::fs::write(plan.app_dir.join("encore.pid"), pid.to_string());
         }
         tracing::info!("soulseek: started slskd {} (pid {:?}, port {}{})", plan.version, child.id(), plan.listen_port, if plan.vpn { ", through the VPN" } else { "" });
+        self.managed.0.generation.fetch_add(1, Ordering::SeqCst);
+        self.managed.0.session.wake();
         self.child = Some(child);
         self.started = Instant::now();
         self.log = Some(log);
@@ -954,7 +1234,15 @@ async fn want(st: &impl Ctx) -> Want {
             st.vpn().relay(None);
             return Want::WaitingVpn;
         }
-        Route::Direct => st.vpn().relay(None),
+        Route::Direct => {
+            st.vpn().relay(None);
+            st.vpn().set_door(None);
+            // slskd reaches the server through Encore's relay, which keeps the door (see Relay)
+            match st.requests().slskd.relay_port(y.server.clone()).await {
+                Ok(port) => y.server = ("127.0.0.1".into(), port),
+                Err(e) => return Want::Blocked(format!("Couldn't start Encore's relay to the Soulseek server: {e}")),
+            }
+        }
         Route::Vpn(fwd) => {
             let proxy = match st.vpn().socks().await {
                 Ok(p) => p,
@@ -975,6 +1263,12 @@ async fn want(st: &impl Ctx) -> Want {
                 (Err(e), None) => return Want::Blocked(format!("Couldn't look up the Soulseek server {host} through the VPN: {e}")),
             };
             y.server = (ip.to_string(), port);
+            // the proxy lets slskd reach the server only through the session's door (see Relay)
+            if let std::net::IpAddr::V4(v4) = ip {
+                let session = st.requests().slskd.session().clone();
+                let door: encore_vpn::socks::Door = Arc::new(move || session.door().map(|p| Box::new(p) as encore_vpn::socks::Pass));
+                st.vpn().set_door(Some((std::net::SocketAddrV4::new(v4, port), door)));
+            }
             y.proxy = Some(proxy);
             // peers reach slskd only through the tunnel: the forwarded port is relayed to loopback
             y.listen_ip = "127.0.0.1".into();
@@ -1000,8 +1294,7 @@ async fn want(st: &impl Ctx) -> Want {
 
 /// slskd's API answers (any answer: it is up).
 async fn answers(st: &impl Ctx) -> bool {
-    st.http().get(format!("{}/api/v0/application", base_url())).header("X-API-Key", api_key(st)).timeout(Duration::from_secs(10)).send().await
-        .is_ok()
+    matches!(api(st, reqwest::Method::GET, "application", None, &[], Some(Duration::from_secs(10))).await, Ok((s, _)) if s > 0)
 }
 
 /// Stops slskd gently before the server restarts (SIGTERM, then SIGKILL after 10 s).
@@ -1036,6 +1329,7 @@ pub async fn supervisor(st: impl Ctx) {
                 s.state = "running";
                 s.error = None;
             });
+            managed.now_running();
         }
         let wait = if st.cfg().bool("vpn_enabled") || managed.state() == "starting" { 3 } else { 10 };
         tokio::select! {
@@ -1117,6 +1411,11 @@ mod tests {
         }
         assert!(y.contains(&format!("key: \"{}\"", "k".repeat(48))));
         assert!(!y.contains("proxy"), "no proxy without the VPN");
+        // Encore connects on its own schedule (slskd_session), with 30 s to reach the server; the other
+        // timeouts stay slskd's
+        assert!(y.contains("flags:\n  no_logo: true\n  no_version_check: true\n  no_connect: true\n"), "{y}");
+        assert!(y.contains("  description: \"Encore\"\n  connection:\n    timeout:\n      connect: 30000\n"), "{y}");
+        assert!(!y.contains("inactivity") && !y.contains("transfer:"), "{y}");
         let y = render_yml(&yml(false, false));
         assert!(y.contains("shares:\n  directories: []"), "{y}");
         let mut v = yml(true, true);
@@ -1124,7 +1423,8 @@ mod tests {
         v.listen_port = 51234;
         v.server = ("208.76.170.59".into(), 2271);
         let y = render_yml(&v);
-        assert!(y.contains("  connection:\n    proxy:\n      enabled: true\n      address: \"127.0.0.1\"\n      port: 40000\n      username: \"u\"\n      password: \"p\""), "{y}");
+        assert!(y.contains("  connection:\n    timeout:\n      connect: 30000\n    proxy:\n      enabled: true\n      address: \"127.0.0.1\"\n      port: 40000\n      username: \"u\"\n      password: \"p\""), "{y}");
+        assert_eq!(y.matches("connection:").count(), 1, "one connection block: {y}");
         assert!(y.contains("  listen_ip_address: \"127.0.0.1\"\n  listen_port: 51234"), "{y}");
         assert!(y.contains("  address: \"208.76.170.59\""), "the server by address, so slskd does no DNS lookup of its own");
     }
@@ -1478,6 +1778,62 @@ mod tests {
         r.apply(Want::Off).await;
         println!("{}", log().lines().take(40).collect::<Vec<_>>().join("\n"));
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The relay of the direct route (real sockets): slskd's own attempts are reset at once and never reach
+    /// the server; Encore's attempt connects to the server first, then lets exactly one connection
+    /// through, which carries bytes both ways and counts as open until it closes.
+    #[tokio::test]
+    async fn the_relay_lets_only_encores_attempt_through() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let server = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let up = ("127.0.0.1".to_string(), server.local_addr().unwrap().port());
+        let m = Managed::default();
+        let port = m.relay_port(up.clone()).await.unwrap();
+        assert_eq!(m.relay_port(up.clone()).await.unwrap(), port, "one relay");
+        let session = m.session().clone();
+        // the door is shut: reset at once, nothing reaches the server
+        let mut c = tokio::net::TcpStream::connect(("127.0.0.1", port)).await.unwrap();
+        let mut b = [0u8; 8];
+        let r = tokio::time::timeout(Duration::from_secs(5), c.read(&mut b)).await.expect("turned away at once");
+        assert!(matches!(r, Ok(0) | Err(_)), "{r:?}");
+        assert_eq!(session.door_seen().refused, 1);
+        assert!(tokio::time::timeout(Duration::from_millis(200), server.accept()).await.is_err(), "the server saw nothing");
+        // Encore's attempt: the server is reached first, then slskd's connection is joined to it
+        m.open_door().await.unwrap();
+        let (mut srv, _) = tokio::time::timeout(Duration::from_secs(5), server.accept()).await.unwrap().unwrap();
+        let mut c = tokio::net::TcpStream::connect(("127.0.0.1", port)).await.unwrap();
+        c.write_all(b"login").await.unwrap();
+        let mut got = [0u8; 5];
+        srv.read_exact(&mut got).await.unwrap();
+        assert_eq!(&got, b"login");
+        srv.write_all(b"ok").await.unwrap();
+        let mut got = [0u8; 2];
+        c.read_exact(&mut got).await.unwrap();
+        assert_eq!(&got, b"ok");
+        assert_eq!((session.door_seen().passed, session.door_seen().live), (1, 1));
+        // a second connection (slskd's loop after this attempt): reset
+        let mut c2 = tokio::net::TcpStream::connect(("127.0.0.1", port)).await.unwrap();
+        let r = tokio::time::timeout(Duration::from_secs(5), c2.read(&mut b)).await.expect("turned away at once");
+        assert!(matches!(r, Ok(0) | Err(_)), "{r:?}");
+        // the server ends the session: the connection through the door closes
+        drop(srv);
+        let r = tokio::time::timeout(Duration::from_secs(5), c.read(&mut b)).await.unwrap();
+        assert!(matches!(r, Ok(0) | Err(_)));
+        drop(c);
+        for _ in 0..50 {
+            if session.door_seen().live == 0 {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        assert_eq!(session.door_seen().live, 0, "closed");
+        // a server that can't be reached: the attempt fails before slskd is asked
+        drop(server);
+        m.relay_port(("127.0.0.1".into(), 1)).await.unwrap();
+        let e = m.open_door().await.unwrap_err().to_string();
+        assert!(e.starts_with("can't reach 127.0.0.1:1: "), "{e}");
+        assert!(session.door().is_none(), "the door stays shut");
     }
 
     impl From<Plan> for Want {

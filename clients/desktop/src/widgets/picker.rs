@@ -62,6 +62,8 @@ pub struct State {
     results: HashMap<String, Vec<Value>>,
     errors: HashMap<String, PickErr>,
     loading: HashSet<String>,
+    /// Another Soulseek search held the turn when this one was sent (one runs at a time): say it waits.
+    slsk_waiting: bool,
     /// The search generation: answers of an older search are dropped.
     gen: u64,
     /// A pick is being sent.
@@ -85,6 +87,8 @@ pub enum Message {
     Lossless(bool),
     /// `(generation, source, answer)`.
     Searched(u64, String, Result<Value, ApiError>),
+    /// GET /system/soulseek as a search starts: whether the Soulseek one waits for another search.
+    SlskTurn(u64, Result<Value, ApiError>),
     /// Get the `i`th result of `source`.
     Get(String, usize),
     Picked(Result<Value, ApiError>),
@@ -165,6 +169,7 @@ pub fn open(opts: Value, ctx: &Ctx) -> (State, Task<Message>) {
         results: HashMap::new(),
         errors: HashMap::new(),
         loading: HashSet::new(),
+        slsk_waiting: false,
         gen: 0,
         sending: false,
         closed: false,
@@ -212,8 +217,10 @@ fn run(state: &mut State, q: &str, ctx: &Ctx) -> Task<Message> {
     state.results.clear();
     state.errors.clear();
     state.loading.clear();
+    state.slsk_waiting = false;
     let o = &state.opts;
     let mut tasks = Vec::new();
+
     for s in state.sources().to_vec() {
         let id = fmt::s(&s, "id");
         if !state.ready(&id) {
@@ -251,10 +258,18 @@ fn run(state: &mut State, q: &str, ctx: &Ctx) -> Task<Message> {
         }
         let api = ctx.api.clone();
         let gen = state.gen;
-        tasks.push(Task::perform(
+        let search = Task::perform(
             async move { api.post("/picker/search", Value::Object(body)).await },
             move |r| Message::Searched(gen, id.clone(), r),
-        ));
+        );
+        if fmt::s(&s, "id") == "slskd" {
+            // Soulseek searches one at a time: when another one runs, this one waits for it (30 s at most) –
+            // asked before this search is sent, so it can't be this one
+            let api = ctx.api.clone();
+            tasks.push(Task::perform(async move { api.get("/system/soulseek").await }, move |r| Message::SlskTurn(gen, r)).chain(search));
+        } else {
+            tasks.push(search);
+        }
     }
     Task::batch(tasks)
 }
@@ -359,6 +374,11 @@ pub fn update(state: &mut State, msg: Message, ctx: &mut Ctx) -> Task<Message> {
         }
         Message::Tab(t) => state.tab = t,
         Message::Lossless(on) => state.lossless = on,
+        Message::SlskTurn(gen, r) => {
+            if gen == state.gen && state.loading.contains("slskd") && r.is_ok_and(|v| fmt::truthy(&v, "search_running")) {
+                state.slsk_waiting = true;
+            }
+        }
         Message::Searched(gen, src, r) => {
             if gen != state.gen {
                 return Task::none();
@@ -541,6 +561,9 @@ fn section<'a>(ctx: &Ctx<'a>, state: &State, src: &str) -> El<'a, Message> {
                     .style(theme::error_box),
             )
             .into();
+    }
+    if state.loading.contains(src) && src == "slskd" && state.slsk_waiting {
+        return col.push(small_muted("Waiting for another Soulseek search, then searching…")).into();
     }
     if state.loading.contains(src) {
         return col

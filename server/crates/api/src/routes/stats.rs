@@ -329,6 +329,14 @@ async fn diagnostics(State(st): State<AppState>, Admin(_): Admin) -> ApiResult<J
     futs.push(Box::pin(http_check(&st, "Cover Art Archive", format!("{}/", encore_http::coverartarchive::BASE), vec![], &[200, 301, 302, 307, 308])));
     futs.push(Box::pin(http_check(&st, "YouTube Music", "https://music.youtube.com/".into(), vec![], &[200, 301, 302, 303])));
     let mut checks: Vec<Value> = futures_util::future::join_all(futs).await;
+    // the Soulseek session as Encore keeps it (no call: the session's supervisor reads slskd all the time);
+    // the card's sentence, pointing at the card ("fix them in Settings → Soulseek", not "below")
+    if encore_requests::slskd_managed::configured(&st) {
+        let s = encore_requests::slskd_session::status(&st);
+        let detail = encore_requests::slskd_session::text_elsewhere(s["text"].as_str().unwrap_or(""));
+        checks.push(json!({ "name": "Soulseek", "kind": "service", "request": "GET /api/system/soulseek", "ok": s["state"] == "logged_in",
+            "detail": detail, "soulseek": s }));
+    }
     // the folders: a write test in each (on the blocking pool; these are checks of the folders as they are now)
     let mut paths: Vec<(&str, String)> = vec![("Music library", st.cfg.str("library_path")), ("Staging folder", st.cfg.str("staging_path"))];
     if st.cfg.bool("slskd_enabled") {

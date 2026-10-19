@@ -23,6 +23,8 @@ pub fn router() -> Router<AppState> {
     Router::new()
         .route("/api/system/test/{service}", post(test))
         .route("/api/system/vpn", get(vpn_status))
+        .route("/api/system/soulseek", get(soulseek_status))
+        .route("/api/system/soulseek/reconnect", post(soulseek_reconnect))
         .route("/api/system/vpn/test", post(vpn_test))
         .route("/api/system/streamrip/tidal-login", post(tidal_login_start).get(tidal_login_status))
         .route("/api/system/streamrip/tidal-tokens", post(tidal_tokens_save).delete(tidal_tokens_clear))
@@ -285,6 +287,40 @@ mod server_block_tests {
     }
 }
 
+/// The Soulseek session for the Soulseek card, the Soulseek page and Diagnostics (see
+/// `encore_requests::slskd_session::status`): its state and reason, the next attempt, the waiting searches.
+async fn soulseek_status(State(st): State<AppState>, User(u): User) -> ApiResult<Json<Value>> {
+    if !crate::auth::can(&st, &u, "pick") {
+        return Err(err(403, "Ask an admin for permission to pick downloads"));
+    }
+    let mut v = encore_requests::slskd_session::status(&st);
+    v["engine"] = json!(st.requests.slskd.state());
+    Ok(Json(v))
+}
+
+/// Reconnect now (the Soulseek card's button): refused with "Wait N s" within 30 s of the last attempt,
+/// else the reconnect schedule starts over and the supervisor connects at once.
+async fn soulseek_reconnect(State(st): State<AppState>, Admin(me): Admin) -> ApiResult<Json<Value>> {
+    if let Some(why) = slskd::not_ready(&st) {
+        return Err(err(400, why));
+    }
+    if st.requests.slskd.state() != "running" {
+        return Err(err(400, "The Soulseek engine is starting – it connects as soon as it is up"));
+    }
+    use encore_requests::slskd_session::Refused;
+    match st.requests.slskd.session().reconnect_now() {
+        Ok(()) => {}
+        Err(Refused::LoggedIn) => return Err(err(400, "Soulseek is logged in")),
+        Err(Refused::Connecting) => return Err(err(400, "Soulseek is connecting now")),
+        Err(Refused::Wait(wait)) => {
+            let n = wait.as_secs_f64().ceil().max(1.0) as u64;
+            return Err(err(429, format!("Wait {n} s")).with(json!({ "wait": n })));
+        }
+    }
+    st.db.log("info", &format!("{} pressed Reconnect now for Soulseek", me.s("username")));
+    Ok(Json(encore_requests::slskd_session::status(&st)))
+}
+
 /// Settings → Soulseek → VPN for Soulseek: the tunnel's state (polled while the section is open).
 async fn vpn_status(State(st): State<AppState>, Admin(_): Admin) -> ApiResult<Json<Value>> {
     let mut v = st.vpn.status();
@@ -378,12 +414,9 @@ async fn test(State(st): State<AppState>, Admin(u): Admin, Path(service): Path<S
                     let ok = s["server"]["isLoggedIn"].as_bool().unwrap_or_else(|| server.contains("LoggedIn"));
                     let port = m["listen_port"].as_u64().map(|p| format!(" · port {p}")).unwrap_or_default();
                     let scan = m["scanning"].as_u64().map(|p| format!(" · scanning shares {p}%")).unwrap_or_default();
-                    let why = if ok { String::new() } else {
-                        match m["server_error"].as_str().filter(|w| !w.is_empty()) {
-                            Some(w) => format!(" – {w}"),
-                            None => " – not signed in yet; if this stays after the share scan, read the engine log on the Soulseek card".to_string(),
-                        }
-                    };
+                    // Encore's own view of the session: the reason and the next attempt
+                    let session = encore_requests::slskd_session::why_not(&st.requests.slskd.session().snapshot());
+                    let why = if ok { String::new() } else { format!(" – {session}") };
                     msg(ok, format!("Soulseek engine{ver} running{scan} · server: {server}{why}{port} · {vpn}"))
                 }
             }

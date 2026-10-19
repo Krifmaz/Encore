@@ -291,23 +291,134 @@ pub fn bind_cadenza_cache(hub: &Rc<Hub>, card: &Element) {
 }
 
 // Settings → Soulseek: how Encore's Soulseek engine is doing (GET /soulseek/status), asked again every 5 s while
-// the card is open. The listen port is hidden while the VPN is on (the VPN's forwarded port is used).
+// the card is open. The listen port is hidden while the VPN is on (the VPN's forwarded port is used). Once the
+// engine runs, the session's own line (`session`: the same object as GET /system/soulseek) says whether it is
+// logged in, why not and when the next attempt is, with Reconnect now.
 pub fn soulseek_status_block() -> String {
-    r##"<div class="card flat mt" id="slsk-engine" style="padding:12px 14px">
-    <div class="row between" style="gap:10px"><b>Status</b><button class="btn sm" id="slsk-start" hidden>Start now</button></div>
+    format!(r##"<div class="card flat mt" id="slsk-engine" style="padding:12px 14px">
+    <div class="row between" style="gap:10px"><b>Status</b><div class="row" style="gap:6px"><button class="btn sm" id="slsk-reconnect" type="button" hidden>{}<span id="slsk-reconnect-label">Reconnect now</span></button><button class="btn sm" id="slsk-start" hidden>Start now</button></div></div>
     <div class="small muted" id="slsk-engine-state">Checking…</div>
-  </div>"##.to_string()
+  </div>"##, icon("refresh"))
+}
+
+/// A wait in the server's words: "45 s", "3 m 12 s", "15 m", "2 h 5 m".
+pub fn span(secs: f64) -> String {
+    let s = secs.max(0.0).round() as i64;
+    match (s / 3600, (s % 3600) / 60, s % 60) {
+        (0, 0, s) => format!("{s} s"),
+        (0, m, 0) => format!("{m} m"),
+        (0, m, s) => format!("{m} m {s} s"),
+        (h, 0, _) => format!("{h} h"),
+        (h, m, _) => format!("{h} h {m} m"),
+    }
+}
+
+/// How long ago, in the desktop app's words (its settings/tools.rs `ago_at`): "just now", "5 min ago", "2 h ago",
+/// "3 days ago".
+fn ago_at(ts: f64, now: f64) -> String {
+    let d = (now - ts).max(0.0);
+    if d < 60.0 { "just now".into() }
+    else if d < 3600.0 { format!("{} min ago", (d / 60.0).floor() as i64) }
+    else if d < 86400.0 { format!("{} h ago", (d / 3600.0).floor() as i64) }
+    else { format!("{} days ago", (d / 86400.0).floor() as i64) }
+}
+
+/// The Soulseek session's colour: ok (logged in), warn (rate limited, waiting for the next attempt), err (stopped
+/// for a reason of the server's: rejected, banned, kicked again), "" (connecting, or off).
+pub fn session_tone(s: &Value) -> &'static str {
+    match s.s("state").as_str() {
+        "logged_in" => if s.s("reason") == "rate_limited" { "warn" } else { "ok" },
+        "waiting" | "disconnected" => "warn",
+        "stopped" if s.truthy("reason") => "err",
+        _ => "",
+    }
+}
+
+/// The session's sentence: the server's `text`, so every app says the same ("Logged in as alice since 14:02",
+/// "Disconnected – the login timed out (…). Next attempt at 14:20 (attempt 3).", "Rejected: invalid username or
+/// password – fix them below").
+pub fn session_text(s: &Value) -> String {
+    if s.truthy("text") { return s.s("text"); }
+    match s.s("state").as_str() {
+        "logged_in" => format!("Logged in as {}", if s.truthy("username") { s.s("username") } else { "?".into() }),
+        "connecting" => "Connecting to the Soulseek server…".into(),
+        "stopped" => if s.truthy("message") { s.s("message") } else { "Soulseek is off".into() },
+        _ => if s.truthy("message") { format!("Not connected – {}", s.s("message")) } else { "Not connected – connecting shortly".into() },
+    }
+}
+
+/// The sentence away from the card (the Soulseek page, Diagnostics): "fix them below" points at the card's
+/// fields, which aren't there – the line links to the card instead. (The server's Diagnostics line already
+/// says "fix them in Settings → Soulseek", for the apps without a link; the link says it here.)
+pub fn session_text_elsewhere(text: &str) -> String {
+    text.replace(" – fix them below", "").replace(" – fix them in Settings → Soulseek", "")
+}
+
+/// What goes under the sentence, in the browser's own clock: "Next attempt in 3 m 12 s · 12 searches waiting for
+/// the connection · last search 5 min ago".
+pub fn session_details(s: &Value, now: f64) -> String {
+    let mut parts: Vec<String> = vec![];
+    let state = s.s("state");
+    let next = s.f("next_attempt_at");
+    if matches!(state.as_str(), "waiting" | "disconnected") && next > now { parts.push(format!("next attempt in {}", span(next - now))); }
+    let resume = s.f("next_search_at");
+    if resume > now { parts.push(format!("searches go on in {}", span(resume - now))); }
+    let n = s.i("searches_waiting");
+    if n > 0 {
+        let what = if n == 1 { "1 search".to_string() } else { format!("{n} searches") };
+        parts.push(if state == "logged_in" { format!("{what} waiting their turn") } else { format!("{what} waiting for the connection") });
+    }
+    if s.truthy("search_running") { parts.push("a search is running".into()); }
+    if s.f("last_search_at") > 0.0 { parts.push(format!("last search {}", ago_at(s.f("last_search_at"), now))); }
+    capitalized(&parts.join(" · "))
+}
+
+/// The line with its first letter in upper case ("Next attempt in 28 s · …").
+fn capitalized(s: &str) -> String {
+    let mut c = s.chars();
+    match c.next() { Some(f) => f.to_uppercase().collect::<String>() + c.as_str(), None => String::new() }
+}
+
+/// The session as HTML: a dot and the sentence, the details under it in faint type.
+pub fn session_html(s: &Value, now: f64) -> String {
+    let tone = session_tone(s);
+    let color = match tone { "ok" => "var(--text)", "warn" => "var(--warn)", "err" => "var(--err)", _ => "var(--muted)" };
+    // connecting: a spinner where the dot goes
+    let mark = if s.s("state") == "connecting" { r##"<span class="spinner" style="width:10px;height:10px;border-width:2px;vertical-align:middle;margin-right:6px"></span>"##.to_string() }
+        else { format!(r##"<span class="dot {tone}" style="vertical-align:middle;margin-right:6px"></span>"##) };
+    let details = session_details(s, now);
+    format!(r##"<div class="slsk-session" style="margin-top:6px;color:{color}">{mark}{}</div>{}"##,
+        esc(&session_text(s)),
+        if details.is_empty() { String::new() } else { format!(r##"<div class="faint" style="margin-top:2px">{}</div>"##, esc(&details)) })
+}
+
+/// The Reconnect now button's words, as in the desktop app: "Reconnect now (in 12 s)" while it has to wait.
+pub fn reconnect_label(wait: Option<i64>) -> String {
+    match wait { Some(n) => format!("Reconnect now (in {n} s)"), None => "Reconnect now".into() }
+}
+
+/// Reconnect now: shown while the session is down and the engine runs; `Some(n)` when it has to wait n seconds
+/// (attempts are at least 30 s apart), None when it can go now.
+pub fn reconnect_wait(r: &Value) -> Option<Option<i64>> {
+    let s = r.g("session");
+    if r.s("state") != "running" || !s.truthy("can_reconnect") { return None; }
+    let n = s.i("reconnect_in");
+    Some(if n > 0 { Some(n) } else { None })
 }
 
 /// "Running v0.24.1 · signed in as alice" / "Not installed · Install or update it under Download tools" / "Waiting for the VPN" …
-pub fn soulseek_state_html(r: &Value) -> String {
+/// With a session (servers since 0.29): "Running v0.26.1" and the session's line under it.
+pub fn soulseek_state_html(r: &Value, now: f64) -> String {
     if !r.is_object() { return "Status unavailable".into(); }
     let red = |t: &str| format!(r##"<span style="color:var(--err)">{}</span>"##, esc(t));
     let v = if r.truthy("version") { let ver = r.s("version"); format!(" v{}", esc(ver.strip_prefix('v').unwrap_or(&ver))) } else { String::new() };
     let error = r.s("error");
+    let session = r.g("session");
+    let with_session = r.s("state") == "running" && session.is_object() && session.truthy("state");
     let line = match r.s("state").as_str() {
         "not_installed" => "Not installed".to_string(),
         "starting" => format!("Starting…{}", if r.truthy("error") { format!(" · {}", red(&error)) } else { String::new() }),
+        "running" if with_session => format!("Running{v}"),
         "running" => format!("Running{v}{}", if r.truthy("logged_in") { format!(" · signed in as {}", esc(&if r.truthy("username") { r.s("username") } else { "?".to_string() })) }
             else if r.truthy("error") { format!(" · {}", red(&error)) } else { " · signing in…".to_string() }),
         "crashed" => red(&format!("Crashed{}", if r.truthy("error") { format!(" – {error}") } else { String::new() })),
@@ -316,10 +427,12 @@ pub fn soulseek_state_html(r: &Value) -> String {
         _ => if r.g("enabled") == &Value::Bool(false) { "Off – switch on Enable Soulseek and save".to_string() } else { "Off".to_string() },
     };
     let line = if r.truthy("hint") { format!("{line} · {}", esc(&r.s("hint"))) } else { line };
+    let line = if with_session { line + &session_html(session, now) } else { line };
     // slskd runs, but downloads go to the fallback folder: say so, with the fix
     let line = if r.truthy("warning") { format!(r##"{line}<div style="color:var(--warn);margin-top:4px">{}</div>"##, esc(&r.s("warning"))) } else { line };
     // admins get the engine's last lines whenever something is wrong, so the cause can be read right here
-    let unhealthy = matches!(r.s("state").as_str(), "crashed" | "blocked") || (r.s("state") == "running" && !r.truthy("logged_in"));
+    let logged_in = if with_session { session.s("state") == "logged_in" } else { r.truthy("logged_in") };
+    let unhealthy = matches!(r.s("state").as_str(), "crashed" | "blocked") || (r.s("state") == "running" && !logged_in);
     let log: Vec<String> = r.g("log").as_array().map(|a| a.iter().filter_map(|l| l.as_str().map(String::from)).collect()).unwrap_or_default();
     if unhealthy && !log.is_empty() {
         format!(r##"{line}<details class="small" style="margin-top:6px"><summary class="muted">Engine log (last {} lines)</summary><pre class="mono" style="white-space:pre-wrap;max-height:240px;overflow:auto;margin:6px 0 0">{}</pre></details>"##,
@@ -349,16 +462,32 @@ pub fn bind_soulseek(hub: &Rc<Hub>, card: &Element) {
     }
     let Some(state) = dom::qs_in(card, "#slsk-engine-state") else { return };
     let start = dom::qs_in(card, "#slsk-start");
+    let reconnect = dom::qs_in(card, "#slsk-reconnect");
+    // the status as it came, and drawn: the engine line, the session, and the two buttons
+    let paint: Rc<dyn Fn(&Value)> = {
+        let (state, start, reconnect) = (state.clone(), start.clone(), reconnect.clone());
+        Rc::new(move |r: &Value| {
+            dom::set_html(&state, &soulseek_state_html(r, dom::now_s()));
+            if let Some(b) = &start { dom::hide(b, !can_start_now(&r.s("state"))); }
+            if let Some(b) = &reconnect {
+                let wait = reconnect_wait(r);
+                dom::hide(b, wait.is_none());
+                if !b.has_attribute("data-busy") {
+                    let n = wait.flatten();
+                    if let Some(l) = dom::qs_in(b, "#slsk-reconnect-label") { dom::set_text(&l, &reconnect_label(n)); }
+                    dom::set_disabled(b, n.is_some());
+                    let _ = b.set_attribute("title", &match n { Some(n) => format!("Wait {n} s – attempts are at least 30 s apart"), None => "Connect to the Soulseek server now".into() });
+                }
+            }
+        })
+    };
     let refresh: Rc<dyn Fn()> = {
-        let start = start.clone();
+        let (state, paint) = (state.clone(), paint.clone());
         Rc::new(move || {
-            let (state, start) = (state.clone(), start.clone());
+            let (state, paint) = (state.clone(), paint.clone());
             dom::spawn(async move {
                 match api::get("/soulseek/status").await {
-                    Ok(r) => {
-                        dom::set_html(&state, &soulseek_state_html(&r));
-                        if let Some(b) = &start { dom::hide(b, !can_start_now(&r.s("state"))); }
-                    }
+                    Ok(r) => paint(&r),
                     Err(_) => dom::set_text(&state, "Status unavailable"),
                 }
             });
@@ -378,6 +507,27 @@ pub fn bind_soulseek(hub: &Rc<Hub>, card: &Element) {
                 dom::set_disabled(&b, false);
                 // the supervisor starts it on its next check: look again once it has had a moment
                 dom::timeout(1500, move || refresh());
+            });
+        });
+    }
+    if let Some(b) = &reconnect {
+        let (refresh2, b2) = (refresh.clone(), b.clone());
+        dom::on(b, "click", move |e| {
+            dom::prevent(e);
+            let (refresh, b) = (refresh2.clone(), b2.clone());
+            dom::set_disabled(&b, true);
+            let _ = b.set_attribute("data-busy", "1");
+            dom::spawn(async move {
+                match api::post_empty("/system/soulseek/reconnect").await {
+                    Ok(_) => toast("Connecting to Soulseek", "ok"),
+                    // 429 "Wait 12 s": the last attempt was less than 30 s ago
+                    Err(err) => toast(&err.message, "err"),
+                }
+                let _ = b.remove_attribute("data-busy");
+                dom::set_disabled(&b, false);
+                refresh();
+                // the attempt takes a few seconds: look again once it has had them
+                dom::timeout(3000, move || refresh());
             });
         });
     }
@@ -773,4 +923,94 @@ pub fn pipeline_help() -> String {
       <li><b>yt-dlp</b> – each track from the MusicBrainz tracklist is matched on YouTube (preferring official "Topic" uploads with matching length).</li>
       <li><b>Import</b> – files are matched to the MusicBrainz release, tagged (incl. MBIDs, ISRCs, cover art), renamed with your template, and your media servers are refreshed.</li>
     </ol></div>"##.to_string()
+}
+
+#[cfg(test)]
+mod soulseek_tests {
+    use super::*;
+    use serde_json::json;
+
+    /// GET /soulseek/status of a 0.29 server: the engine runs, the session is down and waits for its next attempt.
+    fn waiting(now: f64) -> Value {
+        json!({ "enabled": true, "state": "running", "version": "0.26.1", "logged_in": false, "error": "", "log": ["Failed to reconnect: The wait timed out after 5000 milliseconds"],
+            "session": { "state": "waiting", "reason": "timeout", "message": "The wait timed out after 5000 milliseconds", "since": now - 20.0,
+                "next_attempt_at": now + 192.0, "attempts": 2, "last_search_at": now - 300.0, "searches_waiting": 12, "search_running": false,
+                "username": null, "next_search_at": null, "reconnect_in": 0, "can_reconnect": true,
+                "text": "Disconnected – the login timed out (the Soulseek server did not answer in 5 s). Next attempt at 14:20 (attempt 3)." } })
+    }
+
+    #[test]
+    fn waits_read_like_the_server_log() {
+        assert_eq!(span(45.0), "45 s");
+        assert_eq!(span(120.0), "2 m");
+        assert_eq!(span(192.4), "3 m 12 s");
+        assert_eq!(span(3600.0 + 300.0), "1 h 5 m");
+        assert_eq!(span(-3.0), "0 s");
+    }
+
+    #[test]
+    fn the_card_shows_the_session_under_the_engine() {
+        let now = 1_760_000_000.0;
+        let r = waiting(now);
+        let html = soulseek_state_html(&r, now);
+        assert!(html.starts_with("Running v0.26.1<div class=\"slsk-session\""), "{html}");
+        assert!(html.contains("Disconnected – the login timed out (the Soulseek server did not answer in 5 s). Next attempt at 14:20 (attempt 3)."), "{html}");
+        assert!(html.contains("dot warn"), "{html}");
+        // the same words as the desktop app's card
+        assert!(html.contains("Next attempt in 3 m 12 s · 12 searches waiting for the connection · last search 5 min ago"), "{html}");
+        // down: the engine log is there to read
+        assert!(html.contains("Engine log (last 1 lines)"), "{html}");
+        assert_eq!(reconnect_wait(&r), Some(None));
+        let mut r2 = r.clone();
+        r2["session"]["reconnect_in"] = json!(12);
+        assert_eq!(reconnect_wait(&r2), Some(Some(12)));
+        assert_eq!(reconnect_label(Some(12)), "Reconnect now (in 12 s)");
+        assert_eq!(reconnect_label(None), "Reconnect now");
+        assert_eq!((ago_at(now - 7300.0, now), ago_at(now - 3.0 * 86400.0, now)), ("2 h ago".to_string(), "3 days ago".to_string()));
+    }
+
+    #[test]
+    fn logged_in_rejected_and_rate_limited() {
+        let now = 1_760_000_000.0;
+        let mut r = waiting(now);
+        r["session"] = json!({ "state": "logged_in", "reason": null, "username": "alice", "since": now - 600.0, "searches_waiting": 0, "search_running": true,
+            "can_reconnect": false, "reconnect_in": 0, "last_search_at": now - 2.0, "text": "Logged in as alice since 14:02" });
+        let html = soulseek_state_html(&r, now);
+        assert!(html.contains("dot ok") && html.contains("Logged in as alice since 14:02"), "{html}");
+        assert!(html.contains("A search is running · last search just now"), "{html}");
+        assert!(!html.contains("Engine log"), "logged in: no log – {html}");
+        assert_eq!(reconnect_wait(&r), None);
+        // searches turned away for a minute
+        r["session"]["reason"] = json!("rate_limited");
+        r["session"]["next_search_at"] = json!(now + 45.0);
+        assert_eq!(session_tone(&r["session"]), "warn");
+        assert!(session_details(&r["session"], now).starts_with("Searches go on in 45 s"));
+        // the server refused the login: red, and Reconnect now stays (after fixing the password)
+        r["session"] = json!({ "state": "stopped", "reason": "rejected", "can_reconnect": true, "reconnect_in": 0,
+            "text": "Rejected: invalid username or password – fix them below" });
+        assert_eq!(session_tone(&r["session"]), "err");
+        assert!(soulseek_state_html(&r, now).contains("Rejected: invalid username or password – fix them below"));
+        assert_eq!(session_text_elsewhere(&session_text(&r["session"])), "Rejected: invalid username or password");
+        // the server's Diagnostics line names the card itself (for the apps without a link); here the link does
+        assert_eq!(session_text_elsewhere("Rejected: invalid username or password – fix them in Settings → Soulseek"), "Rejected: invalid username or password");
+    }
+
+    #[test]
+    fn without_a_running_engine_or_a_session_the_card_reads_as_before() {
+        let now = 1_760_000_000.0;
+        // not installed: the engine line only (the session would only repeat it)
+        let r = json!({ "enabled": true, "configured": true, "state": "not_installed", "hint": "Install or update it under Download tools",
+            "session": { "state": "stopped", "message": "Soulseek is not installed – install it under Settings → Download tools (slskd – Soulseek engine)", "can_reconnect": false,
+                "text": "Soulseek is not installed – install it under Settings → Download tools (slskd – Soulseek engine)" } });
+        assert_eq!(soulseek_state_html(&r, now), "Not installed · Install or update it under Download tools");
+        assert_eq!(reconnect_wait(&r), None);
+        // a server before 0.29: no session
+        let old = json!({ "state": "running", "version": "v0.24.1", "logged_in": true, "username": "alice" });
+        assert_eq!(soulseek_state_html(&old, now), "Running v0.24.1 · signed in as alice");
+        let old = json!({ "state": "running", "version": "v0.24.1", "logged_in": false, "error": "" });
+        assert_eq!(soulseek_state_html(&old, now), "Running v0.24.1 · signing in…");
+        // a session without `text` still says something
+        assert_eq!(session_text(&json!({ "state": "connecting" })), "Connecting to the Soulseek server…");
+        assert_eq!(session_text(&json!({ "state": "waiting" })), "Not connected – connecting shortly");
+    }
 }

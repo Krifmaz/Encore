@@ -8,7 +8,7 @@ mod pick;
 mod queue;
 mod verify;
 
-pub use queue::{cancel, run};
+pub use queue::{cancel, run, step};
 
 use crate::sources::{slskd, streamrip, torznab, ytdlp};
 use crate::{notify, Ctx};

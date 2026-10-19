@@ -55,6 +55,8 @@ struct State {
     results: HashMap<String, Vec<Value>>,
     errors: HashMap<String, PickErr>,
     loading: HashSet<String>,
+    /// another Soulseek search held the turn when this one was sent (one runs at a time): say it waits
+    slsk_waiting: bool,
 }
 
 /// What the JS closures captured: `opts`, `kind`, `info.sources`, the modal, `el`, `out` and `state`.
@@ -113,7 +115,7 @@ pub fn picker_modal_with(opts: Value, on_done: Option<Rc<dyn Fn(Value)>>) {
             m,
             el: el.clone(),
             out,
-            state: RefCell::new(State { tab: "all".into(), lossless: false, results: HashMap::new(), errors: HashMap::new(), loading: HashSet::new() }),
+            state: RefCell::new(State { tab: "all".into(), lossless: false, results: HashMap::new(), errors: HashMap::new(), loading: HashSet::new(), slsk_waiting: false }),
             on_done,
         });
 
@@ -273,6 +275,9 @@ impl Picker {
         if let Some(err) = st.errors.get(src).filter(|e| !e.message.is_empty()) {
             return head + &format!(r#"<div class="error-box small">{}</div>"#, hint_html(&err.message, &err.settings, &err.label));
         }
+        if st.loading.contains(src) && src == "slskd" && st.slsk_waiting {
+            return head + r#"<div class="muted small"><span class="spinner"></span> Waiting for another Soulseek search, then searching…</div>"#;
+        }
         if st.loading.contains(src) {
             return head + &format!(r#"<div class="muted small"><span class="spinner"></span> Searching {}…{}</div>"#,
                 esc(&name), if src == "slskd" { " (Soulseek takes a few seconds)" } else { "" });
@@ -304,6 +309,7 @@ impl Picker {
             let mut st = self.state.borrow_mut();
             st.results.clear();
             st.errors.clear();
+            st.slsk_waiting = false;
         }
         let o = &self.opts;
         for s in &self.sources {
@@ -324,6 +330,16 @@ impl Picker {
             }
             let p = self.clone();
             dom::spawn(async move {
+                // Soulseek searches one at a time: when another one runs, this one waits for it (30 s at most) –
+                // asked before this search is sent, so it can't be this one
+                if id == "slskd" {
+                    if let Ok(r) = api::get("/system/soulseek").await {
+                        if r.truthy("search_running") {
+                            p.state.borrow_mut().slsk_waiting = true;
+                            if p.el.is_connected() { p.paint(); }
+                        }
+                    }
+                }
                 match api::post("/picker/search", Value::Object(body)).await {
                     Ok(r) => { p.state.borrow_mut().results.insert(id.clone(), r.items()); }
                     // a 409 carries the source's state and settings link ("Soulseek isn't connected yet – Settings → Soulseek")

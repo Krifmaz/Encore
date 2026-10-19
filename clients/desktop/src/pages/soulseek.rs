@@ -217,6 +217,8 @@ enum SearchStatus {
     #[default]
     Idle,
     Starting,
+    /// One Soulseek search runs at a time: this one waits for another (30 s at most).
+    Waiting,
     Running {
         n: usize,
     },
@@ -282,6 +284,8 @@ pub enum Message {
     Query(String),
     Search,
     Started(u64, Result<Value, ApiError>),
+    /// A second into a start that hasn't answered: GET /system/soulseek, to say whether it waits for another search.
+    TurnCheck(u64, Result<Value, ApiError>),
     Polled(u64, Result<Value, ApiError>),
     ToggleUser(String),
     ToggleFile(String, bool),
@@ -426,8 +430,10 @@ pub fn update(state: &mut State, msg: Message, ctx: &mut Ctx) -> Task<Message> {
         Message::Tick => {
             state.ticks += 1;
             let mut tasks = Vec::new();
-            if state.ticks.is_multiple_of(15) {
-                tasks.push(load_status(ctx)); // every 30 s
+            // every 30 s, every 10 s while Soulseek isn't logged in (the line follows the reconnects)
+            let down = super::settings::tools::has_session(&state.status) && fmt::s(&state.status["session"], "state") != "logged_in";
+            if state.ticks.is_multiple_of(15) || (down && state.ticks.is_multiple_of(5)) {
+                tasks.push(load_status(ctx));
             }
             // 2 s on the tab, 10 s for the badge
             if state.enabled && (state.tab == "transfers" || state.ticks.is_multiple_of(5)) {
@@ -450,11 +456,24 @@ pub fn update(state: &mut State, msg: Message, ctx: &mut Ctx) -> Task<Message> {
             state.open_users.clear();
             state.s_status = SearchStatus::Starting;
             let api = ctx.api.clone();
+            let api2 = ctx.api.clone();
             let gen = state.gen;
-            return Task::perform(
-                async move { api.post("/soulseek/search", json!({ "q": q })).await },
-                move |r| Message::Started(gen, r),
-            );
+            return Task::batch([
+                Task::perform(async move { api.post("/soulseek/search", json!({ "q": q })).await }, move |r| Message::Started(gen, r)),
+                // a start that takes over a second waits for another search (one runs at a time)
+                Task::perform(
+                    async move {
+                        tokio::time::sleep(Duration::from_secs(1)).await;
+                        api2.get("/system/soulseek").await
+                    },
+                    move |r| Message::TurnCheck(gen, r),
+                ),
+            ]);
+        }
+        Message::TurnCheck(gen, r) => {
+            if gen == state.gen && matches!(state.s_status, SearchStatus::Starting) && r.is_ok_and(|v| fmt::truthy(&v, "search_running")) {
+                state.s_status = SearchStatus::Waiting;
+            }
         }
         Message::Started(gen, r) => {
             if gen != state.gen {
@@ -470,7 +489,14 @@ pub fn update(state: &mut State, msg: Message, ctx: &mut Ctx) -> Task<Message> {
                     state.s_status = SearchStatus::Running { n: 0 };
                     return poll(state, ctx);
                 }
-                Err(e) => state.s_status = SearchStatus::Err(e.message),
+                Err(e) => {
+                    let down = e.status == 409;
+                    state.s_status = SearchStatus::Err(e.message);
+                    // 409: the session is down – the line at the top says why and when the next attempt is
+                    if down {
+                        return load_status(ctx);
+                    }
+                }
             }
         }
         Message::Polled(gen, r) => {
@@ -756,10 +782,30 @@ pub fn status_parts(s: &Value, error: &str) -> (&'static str, Vec<(String, bool)
         }
         return ("", parts, false);
     }
-    if !fmt::truthy(s, "logged_in") {
+    // the session (servers since 0.29): Encore's own view of the login – why it is down and when the next attempt is
+    use super::settings::tools::{has_session, session_text, session_text_elsewhere};
+    let session = &s["session"];
+    let with_session = has_session(s);
+    let logged_in = if with_session { fmt::s(session, "state") == "logged_in" } else { fmt::truthy(s, "logged_in") };
+    if with_session && !logged_in {
+        let (dot, warn) = match fmt::s(session, "state").as_str() {
+            "connecting" => ("", false),
+            "stopped" if fmt::truthy(session, "reason") => ("err", true),
+            "stopped" => ("", true),
+            _ => ("warn", true),
+        };
+        return (dot, vec![(session_text_elsewhere(&session_text(session)), warn)], true);
+    }
+    if !logged_in {
         return ("err", vec![(format!("Not signed in{}", dash("error")), true)], true);
     }
-    let name = if fmt::truthy(s, "username") { fmt::s(s, "username") } else { "?".into() };
+    let name = if fmt::truthy(s, "username") {
+        fmt::s(s, "username")
+    } else if with_session && fmt::truthy(session, "username") {
+        fmt::s(session, "username")
+    } else {
+        "?".into()
+    };
     let mut parts = vec![(format!("Signed in as {name}"), false)];
     parts.push((
         if fmt::truthy(&s["shares"], "files") {
@@ -778,6 +824,11 @@ pub fn status_parts(s: &Value, error: &str) -> (&'static str, Vec<(String, bool)
     if fmt::truthy(s, "error") {
         parts.push((fmt::s(s, "error"), true));
     }
+    // searches turned away for a while: "Rate limited by the Soulseek server – next search at 14:05"
+    if with_session && fmt::s(session, "reason") == "rate_limited" {
+        let text = session_text(session);
+        parts.push((text.find("Rate limited").map(|i| text[i..].to_string()).unwrap_or_else(|| "Rate limited by the Soulseek server".into()), true));
+    }
     if fmt::truthy(s, "warning") {
         parts.push((fmt::s(s, "warning"), true));
     }
@@ -793,6 +844,7 @@ fn status_line<'a>(state: &'a State, ctx: &Ctx<'a>) -> El<'a, Message> {
     let (kind, parts, with_settings) = status_parts(&state.status, &state.status_err);
     let color = match kind {
         "ok" => p.ok,
+        "warn" => p.warn,
         "err" => p.err,
         _ => p.faint,
     };
@@ -1024,6 +1076,7 @@ fn search_view<'a>(state: &'a State, ctx: &Ctx<'a>) -> El<'a, Message> {
     let status: Option<El<'a, Message>> = match &state.s_status {
         SearchStatus::Idle => None,
         SearchStatus::Starting => Some(small_muted("Starting the search…").into()),
+        SearchStatus::Waiting => Some(small_muted("Waiting for another Soulseek search…").into()),
         SearchStatus::Running { n } => Some(
             small_muted(format!(
                 "Searching for up to {} s… {} so far",
@@ -1423,5 +1476,19 @@ mod tests {
         assert_eq!(parts[0], ("Soulseek stopped – x".to_string(), true));
         let (_, parts, link) = status_parts(&json!({ "enabled": false }), "");
         assert!(link && parts[0].0.starts_with("Soulseek is not enabled"));
+        // the session (0.29): why it isn't logged in and when the next attempt is, linking to the settings
+        let waiting = json!({ "enabled": true, "state": "running", "logged_in": false,
+            "session": { "state": "waiting", "reason": "timeout", "text": "Disconnected – the login timed out (the Soulseek server did not answer in 5 s). Next attempt at 14:20 (attempt 3)." } });
+        let (dot, parts, link) = status_parts(&waiting, "");
+        assert_eq!((dot, link), ("warn", true));
+        assert!(parts[0].1 && parts[0].0.starts_with("Disconnected – the login timed out"));
+        let rejected = json!({ "enabled": true, "state": "running", "session": { "state": "stopped", "reason": "rejected", "text": "Rejected: invalid username or password – fix them below" } });
+        let (dot, parts, _) = status_parts(&rejected, "");
+        assert_eq!((dot, parts[0].0.as_str()), ("err", "Rejected: invalid username or password"));
+        let limited = json!({ "enabled": true, "state": "running", "logged_in": true, "username": "me", "shares": { "files": 0 },
+            "session": { "state": "logged_in", "reason": "rate_limited", "text": "Logged in as me since 14:02. Rate limited by the Soulseek server – next search at 14:05" } });
+        let (dot, parts, _) = status_parts(&limited, "");
+        assert_eq!(dot, "ok");
+        assert_eq!(parts.last().unwrap(), &("Rate limited by the Soulseek server – next search at 14:05".to_string(), true));
     }
 }

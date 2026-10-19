@@ -418,7 +418,17 @@ fn check_item<'a>(state: &'a State, c: &'a Value, i: usize) -> El<'a, Message> {
     if fmt::truthy(c, "request") {
         body = body.push(widgets::faint(fmt::s(c, "request")).size(12).font(theme::mono()));
     }
-    if fmt::truthy(c, "detail") {
+    // the Soulseek session (servers since 0.29): the card's sentence and what is waiting
+    let soulseek = &c["soulseek"];
+    if soulseek.is_object() {
+        use super::tools::{now, session_details, session_text, session_text_elsewhere};
+        let detail = if fmt::truthy(c, "detail") { fmt::s(c, "detail") } else { session_text(soulseek) };
+        body = body.push(t(session_text_elsewhere(&detail)).size(12.5).color(if ok { p.muted } else { p.err }));
+        let more = session_details(soulseek, now());
+        if !more.is_empty() {
+            body = body.push(widgets::faint(more).size(12));
+        }
+    } else if fmt::truthy(c, "detail") {
         body = body.push(t(fmt::s(c, "detail")).size(12.5).color(if ok { p.muted } else { p.err }));
     }
     if let Some(raw) = c["body"].as_str().filter(|b| !b.is_empty()) {

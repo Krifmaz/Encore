@@ -1,8 +1,8 @@
 //! Requests: what people ask for and how it gets into the library. A request is created ([`create`]),
 //! approved, then worked on by the [`worker`] stage by stage (queue, pick a source, fetch, verify,
-//! import) through the download [`sources`] (Soulseek through the managed engine in [`slskd_managed`],
-//! torrents and Usenet through the download clients, streamrip, yt-dlp with the YouTube sign-in of
-//! [`ytauth`]). Pages follow the requests live through [`events`]; [`report`] handles a song reported as
+//! import) through the download [`sources`] (Soulseek through the managed engine in [`slskd_managed`]
+//! and its server session in [`slskd_session`], torrents and Usenet through the download clients,
+//! streamrip, yt-dlp with the YouTube sign-in of [`ytauth`]). Pages follow the requests live through [`events`]; [`report`] handles a song reported as
 //! wrong (its source blocked, a replacement requested); [`missing`] requests what a playlist lacks;
 //! [`upkeep`] queues lossless upgrades and clears old requests; [`notify`] tells the admin's channels.
 //!
@@ -16,6 +16,7 @@ pub mod missing;
 pub mod notify;
 pub mod report;
 pub mod slskd_managed;
+pub mod slskd_session;
 pub mod sources;
 pub mod upkeep;
 pub mod worker;

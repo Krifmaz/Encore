@@ -52,6 +52,8 @@ struct Inner {
     relay: Mutex<Option<(u16, JoinHandle<()>)>>,
     /// the SOCKS5 proxy once started: (port, username, password)
     socks: Mutex<Option<(u16, String, String)>>,
+    /// the door on connections to one address (the Soulseek server), see [`socks::Door`]
+    door: Mutex<Option<(SocketAddrV4, socks::Door)>>,
 }
 
 /// The settings the tunnel runs on. Not vpn_kill_switch: only Soulseek reads that (every 5 s), and

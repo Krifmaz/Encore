@@ -6,6 +6,7 @@ use crate::api;
 use crate::app::{Ctx, PageFuture};
 use crate::dom::{self, EventListener};
 use crate::json::{js_string, json, J};
+use crate::settings::apps::{session_text, session_text_elsewhere};
 use crate::ui::{self, empty_state, esc, icon, toast, ModalOpts};
 use gloo_events::EventListenerOptions;
 use gloo_timers::callback::Timeout;
@@ -161,16 +162,35 @@ fn status_html(s: &Value, error: &str) -> String {
         return format!(r#"<span class="dot"></span> Soulseek is starting…{}"#,
             if s.truthy("error") { format!(r#" <span style="color:var(--warn)">{}</span>"#, esc(&s.s("error"))) } else { String::new() });
     }
-    if !s.truthy("logged_in") {
+    // the session (servers since 0.29): Encore's own view of the login – why it is down and when the next attempt is
+    let session = s.g("session");
+    let with_session = state == "running" && session.is_object() && session.truthy("state");
+    let logged_in = if with_session { session.s("state") == "logged_in" } else { s.truthy("logged_in") };
+    if with_session && !logged_in {
+        let (dot, color) = match session.s("state").as_str() {
+            "connecting" => ("", "inherit"),
+            "stopped" if session.truthy("reason") => ("err", "var(--warn)"),
+            "stopped" => ("", "var(--warn)"),
+            _ => ("warn", "var(--warn)"),
+        };
+        return format!(r#"<span class="dot {dot}"></span> <span style="color:{color}">{}</span> · {settings}"#, esc(&session_text_elsewhere(&session_text(session))));
+    }
+    if !logged_in {
         return format!(r#"<span class="dot err"></span> <span style="color:var(--warn)">Not signed in{}</span> · {settings}"#,
             if s.truthy("error") { format!(" – {}", esc(&s.s("error"))) } else { String::new() });
     }
-    let mut parts = vec![format!(r#"<span class="dot ok"></span> Signed in as <b>{}</b>"#,
-        esc(&if s.truthy("username") { s.s("username") } else { "?".to_string() }))];
+    let name = if s.truthy("username") { s.s("username") } else if with_session && session.truthy("username") { session.s("username") } else { "?".to_string() };
+    let mut parts = vec![format!(r#"<span class="dot ok"></span> Signed in as <b>{}</b>"#, esc(&name))];
     parts.push(if s.g("shares").truthy("files") { format!("sharing {}", plural(s.g("shares").f("files"), "file")) } else { "sharing nothing".to_string() });
     if !s["scanning"].is_null() { parts.push(format!("scanning shares {}%", esc(&s.s("scanning")))); }
     if s.truthy("port") { parts.push(format!("port {}", esc(&s.s("port")))); }
     if s.truthy("error") { parts.push(format!(r#"<span style="color:var(--warn)">{}</span>"#, esc(&s.s("error")))); }
+    // searches turned away for a while: "Rate limited by the Soulseek server – next search at 14:05"
+    if with_session && session.s("reason") == "rate_limited" {
+        let text = session_text(session);
+        let rl = text.find("Rate limited").map(|i| text[i..].to_string()).unwrap_or_else(|| "Rate limited by the Soulseek server".to_string());
+        parts.push(format!(r#"<span style="color:var(--warn)">{}</span>"#, esc(&rl)));
+    }
     if s.truthy("warning") { parts.push(format!(r#"<span style="color:var(--warn)">{}</span>"#, esc(&s.s("warning")))); }
     parts.join(" · ")
 }
@@ -477,6 +497,8 @@ struct Page {
     transfers: RefCell<Value>,
     checked: Checked,   // "user\nfilename" of every ticked file in the search results
     gen: Cell<u64>,
+    /// the search (its `gen`) whose start is still on its way; 0 for none
+    starting: Cell<u64>,
     poll_t: RefCell<Option<Timeout>>,
 }
 
@@ -532,11 +554,32 @@ impl Page {
         self.checked.borrow_mut().clear();
         dom::set_html(&self.results_el, "");
         dom::set_html(&self.s_status, r#"<span class="spinner" style="width:12px;height:12px"></span> Starting the search…"#);
+        self.starting.set(my);
+        // one Soulseek search runs at a time: a start that takes over a second waits for another one (30 s at most)
+        {
+            let p = self.clone();
+            dom::timeout(1000, move || {
+                if p.starting.get() != my { return; }
+                dom::spawn(async move {
+                    let Ok(r) = api::get("/system/soulseek").await else { return };
+                    if p.starting.get() == my && my == p.gen.get() && r.truthy("search_running") {
+                        dom::set_html(&p.s_status, r#"<span class="spinner" style="width:12px;height:12px"></span> Waiting for another Soulseek search…"#);
+                    }
+                });
+            });
+        }
         let p = self.clone();
         dom::spawn(async move {
-            let s = match api::post("/soulseek/search", json!({ "q": q })).await {
+            let res = api::post("/soulseek/search", json!({ "q": q })).await;
+            if p.starting.get() == my { p.starting.set(0); }
+            let s = match res {
                 Ok(s) => s,
-                Err(e) => { if my == p.gen.get() { dom::set_html(&p.s_status, &format!(r#"<span style="color:var(--err)">{}</span>"#, esc(&e.message))); } return; }
+                Err(e) => {
+                    if my == p.gen.get() { dom::set_html(&p.s_status, &format!(r#"<span style="color:var(--err)">{}</span>"#, esc(&e.message))); }
+                    // 409: the session is down – the line at the top says why and when the next attempt is
+                    if e.status == 409 { p.load_status().await; }
+                    return;
+                }
             };
             p.poll(my, Rc::new(s), Rc::new(q));
         });
@@ -663,6 +706,7 @@ pub fn render(view: Element, ctx: Ctx) -> PageFuture {
             transfers: RefCell::new(json!({ "downloads": [], "uploads": [] })),
             checked: Rc::new(RefCell::new(HashSet::new())),
             gen: Cell::new(0),
+            starting: Cell::new(0),
             poll_t: RefCell::new(None),
         });
         bind_tree(&page.results_el, page.results.clone(), page.checked.clone());
@@ -720,10 +764,35 @@ pub fn render(view: Element, ctx: Ctx) -> PageFuture {
             dom::interval(&view, 2000, move || {
                 if !p.view.is_connected() { return; }
                 n += 1;
-                if n.is_multiple_of(15) { let p = p.clone(); dom::spawn(async move { p.load_status().await }); }                                                    // every 30 s
+                // every 30 s, every 10 s while Soulseek isn't logged in (the line follows the reconnects)
+                let down = { let s = p.status.borrow(); s.s("state") == "running" && s.g("session").truthy("state") && s.g("session").s("state") != "logged_in" };
+                if n.is_multiple_of(15) || (down && n.is_multiple_of(5)) { let p = p.clone(); dom::spawn(async move { p.load_status().await }); }
                 if p.enabled.get() && (*p.tab.borrow() == "transfers" || n.is_multiple_of(5)) { let p = p.clone(); dom::spawn(async move { p.load_transfers().await }); }   // 2 s on the tab, 10 s for the badge
             });
         }
         Ok(())
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_header_says_why_soulseek_is_not_signed_in() {
+        let waiting = json!({ "enabled": true, "state": "running", "logged_in": false, "error": "not signed in to the Soulseek network yet",
+            "session": { "state": "waiting", "reason": "timeout", "text": "Disconnected – the login timed out (the Soulseek server did not answer in 5 s). Next attempt at 14:20 (attempt 3)." } });
+        let h = status_html(&waiting, "");
+        assert!(h.starts_with(r#"<span class="dot warn"></span> <span style="color:var(--warn)">Disconnected – the login timed out"#), "{h}");
+        assert!(h.ends_with("Settings → Soulseek</a>"), "{h}");
+        let rejected = json!({ "enabled": true, "state": "running", "logged_in": false,
+            "session": { "state": "stopped", "reason": "rejected", "text": "Rejected: invalid username or password – fix them below" } });
+        let h = status_html(&rejected, "");
+        assert!(h.contains(r#"dot err"#) && h.contains(">Rejected: invalid username or password</span> · "), "{h}");
+        let connecting = json!({ "enabled": true, "state": "running", "session": { "state": "connecting", "text": "Connecting to the Soulseek server (attempt 1)…" } });
+        assert!(status_html(&connecting, "").starts_with(r#"<span class="dot "></span> <span style="color:inherit">Connecting to the Soulseek server (attempt 1)…</span>"#));
+        // a server before 0.29 (no session): as before
+        let old = json!({ "enabled": true, "state": "running", "logged_in": false, "error": "boom" });
+        assert!(status_html(&old, "").contains("Not signed in – boom"));
+    }
 }

@@ -38,6 +38,8 @@ pub struct State {
     tidal_toml: text_editor::Content,
     rip_out: Option<(bool, String)>,
     slsk: Value,
+    /// Reconnect now was pressed and has not answered yet.
+    slsk_reconnecting: bool,
     vpn: Value,
     vpn_testing: bool,
     dsp: Value,
@@ -81,6 +83,9 @@ pub enum Message {
     Slsk(Result<Value, ApiError>),
     SlskStart,
     SlskStarted(Result<Value, ApiError>),
+    /// Reconnect now (POST /system/soulseek/reconnect): the session's schedule starts over.
+    SlskReconnect,
+    SlskReconnected(Result<Value, ApiError>),
     Vpn(Result<Value, ApiError>),
     /// Handled by the server page (the Soulseek card is saved first).
     VpnTest,
@@ -166,7 +171,126 @@ fn tool_install(t: &Value) -> bool {
     matches!(fmt::s(t, "id").as_str(), "slskd" | "translator") && !fmt::truthy(t, "installed")
 }
 
+/// A wait in the server's words: "45 s", "3 m 12 s", "15 m", "2 h 5 m".
+pub fn span(secs: f64) -> String {
+    let s = secs.max(0.0).round() as i64;
+    match (s / 3600, (s % 3600) / 60, s % 60) {
+        (0, 0, s) => format!("{s} s"),
+        (0, m, 0) => format!("{m} m"),
+        (0, m, s) => format!("{m} m {s} s"),
+        (h, 0, _) => format!("{h} h"),
+        (h, m, _) => format!("{h} h {m} m"),
+    }
+}
+
+/// `fmt::ago` against a given clock: "just now", "5 min ago", "2 h ago", "3 days ago".
+fn ago_at(ts: f64, now: f64) -> String {
+    let d = (now - ts).max(0.0);
+    if d < 60.0 {
+        "just now".into()
+    } else if d < 3600.0 {
+        format!("{} min ago", (d / 60.0) as u64)
+    } else if d < 86_400.0 {
+        format!("{} h ago", (d / 3600.0) as u64)
+    } else {
+        format!("{} days ago", (d / 86_400.0) as u64)
+    }
+}
+
+/// Unix seconds now.
+pub fn now() -> f64 {
+    std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs_f64()).unwrap_or(0.0)
+}
+
+/// `/soulseek/status` of a server since 0.29 with the engine running: it carries the session (`session`, the
+/// same object as GET /system/soulseek), whose line says whether Soulseek is logged in, why not and when next.
+pub fn has_session(r: &Value) -> bool {
+    fmt::s(r, "state") == "running" && r["session"].is_object() && fmt::truthy(&r["session"], "state")
+}
+
+/// The session's colour (web-rs settings/apps.rs): ok (logged in), warn (rate limited, waiting for the next
+/// attempt), err (stopped for a reason of the server's: rejected, banned, kicked again), "" (connecting, off).
+pub fn session_tone(s: &Value) -> &'static str {
+    match fmt::s(s, "state").as_str() {
+        "logged_in" => if fmt::s(s, "reason") == "rate_limited" { "warn" } else { "ok" },
+        "waiting" | "disconnected" => "warn",
+        "stopped" if fmt::truthy(s, "reason") => "err",
+        _ => "",
+    }
+}
+
+/// The session's sentence: the server's `text`, so every app says the same ("Logged in as alice since 14:02",
+/// "Disconnected – the login timed out (…). Next attempt at 14:20 (attempt 3).").
+pub fn session_text(s: &Value) -> String {
+    if fmt::truthy(s, "text") {
+        return fmt::s(s, "text");
+    }
+    match fmt::s(s, "state").as_str() {
+        "logged_in" => format!("Logged in as {}", if fmt::truthy(s, "username") { fmt::s(s, "username") } else { "?".into() }),
+        "connecting" => "Connecting to the Soulseek server…".into(),
+        "stopped" => if fmt::truthy(s, "message") { fmt::s(s, "message") } else { "Soulseek is off".into() },
+        _ => {
+            if fmt::truthy(s, "message") {
+                format!("Not connected – {}", fmt::s(s, "message"))
+            } else {
+                "Not connected – connecting shortly".into()
+            }
+        }
+    }
+}
+
+/// The sentence away from the card (the Soulseek page): "fix them below" points at the card's fields, which
+/// aren't there – the line links to the card instead.
+pub fn session_text_elsewhere(text: &str) -> String {
+    text.replace(" – fix them below", "")
+}
+
+/// What goes under the sentence, on this computer's clock: "Next attempt in 3 m 12 s · 12 searches waiting
+/// for the connection · last search 5 min ago".
+pub fn session_details(s: &Value, now: f64) -> String {
+    let mut parts: Vec<String> = vec![];
+    let state = fmt::s(s, "state");
+    let next = fmt::f(s, "next_attempt_at");
+    if matches!(state.as_str(), "waiting" | "disconnected") && next > now {
+        parts.push(format!("next attempt in {}", span(next - now)));
+    }
+    let resume = fmt::f(s, "next_search_at");
+    if resume > now {
+        parts.push(format!("searches go on in {}", span(resume - now)));
+    }
+    let n = fmt::i(s, "searches_waiting");
+    if n > 0 {
+        let what = if n == 1 { "1 search".to_string() } else { format!("{n} searches") };
+        parts.push(if state == "logged_in" { format!("{what} waiting their turn") } else { format!("{what} waiting for the connection") });
+    }
+    if fmt::truthy(s, "search_running") {
+        parts.push("a search is running".into());
+    }
+    if fmt::f(s, "last_search_at") > 0.0 {
+        parts.push(format!("last search {}", ago_at(fmt::f(s, "last_search_at"), now)));
+    }
+    let line = parts.join(" · ");
+    // "Next attempt in 28 s · …"
+    let mut c = line.chars();
+    match c.next() {
+        Some(f) => f.to_uppercase().collect::<String>() + c.as_str(),
+        None => String::new(),
+    }
+}
+
+/// Reconnect now: shown while the session is down and the engine runs; `Some(n)` when it has to wait n seconds
+/// (attempts are at least 30 s apart), None when it can go now.
+pub fn reconnect_wait(r: &Value) -> Option<Option<i64>> {
+    let s = &r["session"];
+    if fmt::s(r, "state") != "running" || !fmt::truthy(s, "can_reconnect") {
+        return None;
+    }
+    let n = fmt::i(s, "reconnect_in");
+    Some(if n > 0 { Some(n) } else { None })
+}
+
 /// "Running v0.24.1 · signed in as alice" / "Not installed" / "Waiting for the VPN" …
+/// With a session (servers since 0.29): "Running v0.26.1"; the session's line goes under it.
 pub fn soulseek_state_text(r: &Value) -> String {
     if !r.is_object() {
         return "Status unavailable".into();
@@ -181,6 +305,7 @@ pub fn soulseek_state_text(r: &Value) -> String {
     let line = match fmt::s(r, "state").as_str() {
         "not_installed" => "Not installed".to_string(),
         "starting" => format!("Starting…{}", if fmt::truthy(r, "error") { format!(" · {error}") } else { String::new() }),
+        "running" if has_session(r) => format!("Running{v}"),
         "running" => format!(
             "Running{v}{}",
             if fmt::truthy(r, "logged_in") {
@@ -513,6 +638,31 @@ pub fn update(state: &mut State, msg: Message, ctx: &mut Ctx) -> Task<Message> {
                 },
                 Message::Slsk,
             );
+        }
+        Message::SlskReconnect => {
+            state.slsk_reconnecting = true;
+            let api = ctx.api.clone();
+            return Task::perform(async move { api.post_empty("/system/soulseek/reconnect").await }, Message::SlskReconnected);
+        }
+        Message::SlskReconnected(r) => {
+            state.slsk_reconnecting = false;
+            match r {
+                Ok(_) => ctx.toast_ok("Connecting to Soulseek"),
+                // 429 "Wait 12 s": the last attempt was less than 30 s ago
+                Err(e) => ctx.toast_err(e.message),
+            }
+            // the attempt takes a few seconds: look again once it has had them
+            let api = ctx.api.clone();
+            return Task::batch([
+                get(ctx, "/soulseek/status", Message::Slsk),
+                Task::perform(
+                    async move {
+                        tokio::time::sleep(std::time::Duration::from_millis(3000)).await;
+                        api.get("/soulseek/status").await
+                    },
+                    Message::Slsk,
+                ),
+            ]);
         }
         Message::Vpn(Ok(r)) => {
             if !state.vpn_testing {
@@ -852,17 +1002,40 @@ pub fn soulseek_block<'a>(state: &'a State) -> El<'a, Message> {
     let st = fmt::s(r, "state");
     let p = theme::look();
     let red = matches!(st.as_str(), "crashed" | "blocked");
-    let start: El<'a, Message> = if can_start_now(&st) {
-        btn_sm("Start now", Btn::Default, Some(Message::SlskStart)).into()
-    } else {
-        container(iced::widget::space()).into()
-    };
-    let mut c = column![super::between(crate::widgets::t("Status").size(14).font(theme::bold()).into(), start)].spacing(6);
+    let mut buttons = row![].spacing(6);
+    if let Some(wait) = reconnect_wait(r) {
+        // attempts are at least 30 s apart: the button waits that out
+        let on = (wait.is_none() && !state.slsk_reconnecting).then_some(Message::SlskReconnect);
+        let label = match wait {
+            Some(n) => format!("Reconnect now (in {n} s)"),
+            None => "Reconnect now".to_string(),
+        };
+        buttons = buttons.push(btn_sm(label, Btn::Default, on));
+    }
+    if can_start_now(&st) {
+        buttons = buttons.push(btn_sm("Start now", Btn::Default, Some(Message::SlskStart)));
+    }
+    let mut c = column![super::between(crate::widgets::t("Status").size(14).font(theme::bold()).into(), buttons.into())].spacing(6);
     c = c.push(crate::widgets::t(soulseek_state_text(r)).size(12.5).color(if red { p.err } else { p.muted }));
+    let session = &r["session"];
+    if has_session(r) {
+        let color = match session_tone(session) {
+            "ok" => p.ok,
+            "warn" => p.warn,
+            "err" => p.err,
+            _ => p.muted,
+        };
+        c = c.push(crate::widgets::t(session_text(session)).size(12.5).color(color));
+        let details = session_details(session, now());
+        if !details.is_empty() {
+            c = c.push(crate::widgets::t(details).size(12).color(p.faint));
+        }
+    }
     if fmt::truthy(r, "warning") {
         c = c.push(super::warn_text(fmt::s(r, "warning")));
     }
-    let unhealthy = red || (st == "running" && !fmt::truthy(r, "logged_in"));
+    let logged_in = if has_session(r) { fmt::s(session, "state") == "logged_in" } else { fmt::truthy(r, "logged_in") };
+    let unhealthy = red || (st == "running" && !logged_in);
     let log: Vec<String> = fmt::items(&r["log"]).iter().filter_map(|l| l.as_str().map(String::from)).collect();
     if unhealthy && !log.is_empty() {
         c = c.push(help(format!("Engine log (last {} lines)", log.len())));
@@ -1100,6 +1273,39 @@ mod tests {
         assert_eq!(soulseek_state_text(&json!({ "state": "running", "version": "v0.24.1", "logged_in": true, "username": "alice" })), "Running v0.24.1 · signed in as alice");
         assert_eq!(soulseek_state_text(&json!({ "state": "crashed", "error": "boom" })), "Crashed – boom");
         assert_eq!(soulseek_state_text(&json!({ "state": "off", "enabled": false })), "Off – switch on Enable Soulseek and save");
+    }
+
+    #[test]
+    fn the_soulseek_session_under_the_engine() {
+        let now = 1_760_000_000.0;
+        let r = json!({ "state": "running", "version": "0.26.1", "logged_in": false,
+            "session": { "state": "waiting", "reason": "timeout", "next_attempt_at": now + 192.0, "attempts": 2, "last_search_at": now - 300.0,
+                "searches_waiting": 12, "search_running": false, "reconnect_in": 0, "can_reconnect": true,
+                "text": "Disconnected – the login timed out (the Soulseek server did not answer in 5 s). Next attempt at 14:20 (attempt 3)." } });
+        assert_eq!(soulseek_state_text(&r), "Running v0.26.1");
+        assert_eq!(session_tone(&r["session"]), "warn");
+        assert!(session_text(&r["session"]).starts_with("Disconnected – the login timed out"));
+        assert_eq!(session_details(&r["session"], now), "Next attempt in 3 m 12 s · 12 searches waiting for the connection · last search 5 min ago");
+        assert_eq!(reconnect_wait(&r), Some(None));
+        let mut r2 = r.clone();
+        r2["session"]["reconnect_in"] = json!(12);
+        assert_eq!(reconnect_wait(&r2), Some(Some(12)));
+        // logged in, with searches turned away for a minute
+        let s = json!({ "state": "logged_in", "reason": "rate_limited", "next_search_at": now + 45.0, "search_running": true, "can_reconnect": false,
+            "text": "Logged in as alice since 14:02. Rate limited by the Soulseek server – next search at 14:05" });
+        assert_eq!(session_tone(&s), "warn");
+        assert_eq!(session_details(&s, now), "Searches go on in 45 s · a search is running");
+        assert_eq!(reconnect_wait(&json!({ "state": "running", "session": s })), None);
+        // rejected: red; away from the card the line links to it instead of saying "below"
+        let s = json!({ "state": "stopped", "reason": "rejected", "text": "Rejected: invalid username or password – fix them below" });
+        assert_eq!(session_tone(&s), "err");
+        assert_eq!(session_text_elsewhere(&session_text(&s)), "Rejected: invalid username or password");
+        // not installed: the engine line only
+        let r = json!({ "state": "not_installed", "hint": "Install or update it under Download tools", "session": { "state": "stopped", "text": "Soulseek is not installed" } });
+        assert!(!has_session(&r));
+        assert_eq!(soulseek_state_text(&r), "Not installed · Install or update it under Download tools");
+        assert_eq!(reconnect_wait(&r), None);
+        assert_eq!(span(3900.0), "1 h 5 m");
         assert!(can_start_now("blocked") && !can_start_now("running"));
         assert_eq!(cadenza_cache_text(&Value::Null), "Cache: not available on this server");
         assert_eq!(cadenza_cache_text(&json!({ "used_mb": 812.4, "max_mb": 4096, "files": 23, "last_factor": 6.2 })), "Cache: 812 MB of 4096 MB · 23 songs · renders at 6.2× real time");

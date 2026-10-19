@@ -27,15 +27,26 @@ reqwest = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 sha1 = { workspace = true }
+socket2 = { workspace = true }
 subtle = { workspace = true }
 tokio = { workspace = true }
 tracing = { workspace = true }
 urlencoding = { workspace = true }
 walkdir = { workspace = true }
 zip = { workspace = true }
+# test-support: a stand-in slskd answering in this process
+axum = { workspace = true, optional = true }
+tower = { workspace = true, optional = true }
+
+[features]
+# a stand-in slskd (an axum app called in-process) for other crates' tests: `Managed::set_target`
+test-support = ["dep:axum", "dep:tower"]
 
 [dev-dependencies]
 # stand-ins for the download clients and services in the tests
 axum = { workspace = true }
+tower = { workspace = true }
 # the slskd test runs it behind the VPN's proxy with no tunnel up
 encore-vpn = { workspace = true, features = ["test-support"] }
+# paused time for the Soulseek reconnect schedule and the search spacing
+tokio = { workspace = true, features = ["test-util"] }

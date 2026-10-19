@@ -100,6 +100,12 @@ pub fn source_state(st: &AppState, id: &str) -> SourceState {
                 return state("not_installed", "Soulseek is not installed – install it under Download tools", "slskd");
             }
             if st.requests.slskd.status()["state"].as_str() == Some("running") {
+                // the engine runs; the session may not (Encore's reconnect schedule says when it is back)
+                let c = st.requests.slskd.session().snapshot();
+                use encore_requests::slskd_session::State;
+                if c.checked.is_some() && matches!(c.state, State::Waiting | State::Stopped | State::Connecting) {
+                    return state("not_connected", format!("Soulseek isn't connected – {}", encore_requests::slskd_session::when_text(&c)), "slskd");
+                }
                 return state("ready", "", "slskd");
             }
             state("not_connected", slskd::not_ready(st).unwrap_or_else(|| "Soulseek is starting – try again in a moment".into()), "slskd")
@@ -188,7 +194,7 @@ pub struct SearchBody {
 async fn search_slskd(st: &AppState, b: &SearchBody, q: &str) -> anyhow::Result<Vec<Value>> {
     let q: String = q.chars().map(|c| if c.is_alphanumeric() || c.is_whitespace() || c == '\'' { c } else { ' ' }).collect();
     let mut out = vec![];
-    for resp in slskd::search(st, &q).await? {
+    for resp in slskd::search_now(st, &q).await? {
         let user = resp["username"].as_str().unwrap_or("").to_string();
         let (free, queue, speed) = (resp["hasFreeUploadSlot"].as_bool().unwrap_or(false), resp["queueLength"].as_f64().unwrap_or(0.0), resp["uploadSpeed"].as_f64().unwrap_or(0.0));
         let audio: Vec<Value> = resp["files"].as_array().cloned().unwrap_or_default().into_iter().filter(|f| encore_core::audio::DOWNLOAD_EXTS.contains(&slskd::ext(f["filename"].as_str().unwrap_or("")).as_str())).collect();
@@ -635,8 +641,11 @@ pub async fn run_search(st: &AppState, b: &SearchBody) -> ApiResult<Vec<Value>> 
     };
     res.map_err(|e| {
         let msg = e.to_string();
-        if b.source == "slskd" && (msg == slskd::NOT_CONNECTED || slskd::not_ready(st).is_some()) {
+        if b.source == "slskd" && (e.is::<slskd::NotConnected>() || slskd::not_ready(st).is_some()) {
             return state_error("slskd", &state("not_connected", msg, "slskd"));
+        }
+        if b.source == "slskd" && e.is::<slskd::Busy>() {
+            return err(429, msg); // another search held the turn for 30 s, or searches are rate limited
         }
         err(502, format!("{} search failed: {}", source_name(&b.source), msg.chars().take(160).collect::<String>()))
     })

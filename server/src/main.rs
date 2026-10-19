@@ -74,6 +74,8 @@ fn background(st: &AppState) -> Vec<Arc<dyn Supervisor>> {
             let st = s.clone();
             move || { let st = st.clone(); async move { encore_requests::slskd_managed::stop(&st).await } }
         }),
+        // the Soulseek server session: Encore's reconnect schedule (slskd's own loop is kept off)
+        looping("soulseek session", { let st = s.clone(); move || encore_requests::slskd_session::supervisor(st.clone()) }),
         looping("roon", { let st = s.clone(); move || encore_playback::roon::supervisor(st.clone()) }),
         looping("contributions", { let st = s.clone(); move || encore_library::contribute::worker(st.clone()) }),
         looping("youtube sign-in", { let st = s.clone(); move || encore_requests::ytauth::supervisor(st.clone()) }),

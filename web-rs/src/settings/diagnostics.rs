@@ -266,7 +266,8 @@ async fn run(view: Element, diag: Element, last: Rc<RefCell<Option<Value>>>) -> 
     let groups: String = KIND.iter().map(|(k, title)| {
         let g: Vec<&Value> = checks.iter().filter(|c| c.s("kind") == *k).collect();
         if g.is_empty() { return String::new(); }
-        let items: String = g.iter().map(|c| check_item(c)).collect();
+        let now = dom::now_s();
+        let items: String = g.iter().map(|c| check_item(c, now)).collect();
         format!(r#"
         <div class="section-head"><h2>{title}</h2></div>
         <div class="card flat"><div class="list">{items}</div></div>"#)
@@ -339,8 +340,17 @@ fn server_block(s: &Value) -> String {
 }
 
 /// One `.list-item` of a check group.
-fn check_item(c: &Value) -> String {
+fn check_item(c: &Value, now: f64) -> String {
     let ok = c.truthy("ok");
+    // the Soulseek session (servers since 0.29): the card's sentence, what is waiting, and the way to the card
+    let soulseek = c.g("soulseek");
+    let extra = if soulseek.is_object() {
+        let details = super::apps::session_details(soulseek, now);
+        let link = if ok { String::new() } else { r##"<a href="#/settings?s=slskd" style="color:var(--accent)">Settings → Soulseek</a>"##.to_string() };
+        let parts: Vec<String> = [esc(&details), link].into_iter().filter(|p| !p.is_empty()).collect();
+        if parts.is_empty() { String::new() } else { format!(r#"<div class="small faint">{}</div>"#, parts.join(" · ")) }
+    } else { String::new() };
+    let detail = if soulseek.is_object() { super::apps::session_text_elsewhere(&if c.truthy("detail") { c.s("detail") } else { super::apps::session_text(soulseek) }) } else { or_empty(c, "detail") };
     let okc = if ok { "ok" } else { "err" };
     let status = if c.truthy("status") { format!(r#"<span class="badge {okc}">HTTP {}</span>"#, js_str(c, "status")) } else { String::new() };
     let ms = if !c.is_nullish("ms") { format!(r#"<span class="small faint">{} ms</span>"#, js_str(c, "ms")) } else { String::new() };
@@ -354,13 +364,14 @@ fn check_item(c: &Value) -> String {
               <div class="row wrap"><b>{name}</b>{status}{ms}</div>
               <div class="small mono faint ellipsis">{request}</div>
               <div class="small" style="color:{color}">{detail}</div>
+              {extra}
               {body}
             </div>
           </div>"#,
         name = esck(c, "name"),
         request = esc(&or_empty(c, "request")),
         color = if ok { "var(--muted)" } else { "var(--err)" },
-        detail = esc(&or_empty(c, "detail")),
+        detail = esc(&detail),
     )
 }
 

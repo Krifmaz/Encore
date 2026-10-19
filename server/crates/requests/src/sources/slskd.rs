@@ -6,12 +6,16 @@ use encore_core::text::ascii_words;
 use regex::Regex;
 use serde_json::{json, Value};
 use std::sync::LazyLock;
+use std::time::Duration;
+use tokio::time::Instant;
 
 use encore_core::audio::{DOWNLOAD_EXTS, DOWNLOAD_LOSSLESS};
 pub const DONE_OK: &str = "Succeeded";
 pub const DONE_BAD: [&str; 6] = ["Errored", "Rejected", "TimedOut", "Cancelled", "Aborted", "Failed"];
 /// slskd runs but has no Soulseek server session yet (its API answers 409 to searches and transfers).
 pub const NOT_CONNECTED: &str = "Soulseek isn't connected yet";
+
+pub use crate::slskd_session::{Busy, NotConnected, Who};
 
 /// Soulseek is on, has a login and its engine is installed – a source the worker can use.
 pub fn enabled(st: &impl Ctx) -> bool {
@@ -44,30 +48,31 @@ async fn req_within(st: &impl Ctx, method: reqwest::Method, path: &str, body: Op
     if let Some(why) = not_ready(st) {
         anyhow::bail!(why);
     }
-    let url = format!("{}/api/v0/{}", slskd_managed::base_url(), path.trim_start_matches('/'));
-    let mut rb = st.http().request(method, &url).header("X-API-Key", slskd_managed::api_key(st)).query(query);
-    if let Some(b) = body {
-        rb = rb.json(&b);
-    }
-    if let Some(t) = timeout {
-        rb = rb.timeout(t);
-    }
-    let r = rb.send().await.map_err(|e| {
-        if e.is_connect() { anyhow::anyhow!("Soulseek is starting – try again in a moment") } else { anyhow::anyhow!("Soulseek engine didn't answer: {e}") }
-    })?;
-    let status = r.status();
-    let text = r.text().await.unwrap_or_default();
-    if status.as_u16() >= 400 {
-        return Err(http_error(status.as_u16(), &text));
+    let (status, text) = slskd_managed::api(st, method, path, body.as_ref(), query, timeout).await?;
+    if status >= 400 {
+        return Err(http_error(status, &text));
     }
     Ok(serde_json::from_str(&text).unwrap_or(Value::Null))
 }
 
+/// slskd's answer says the server session is down: 409, or the error Soulseek.NET throws when the session
+/// ends between slskd's check and the call ("The server connection must be connected and logged in …").
+pub fn says_not_connected(status: u16, text: &str) -> bool {
+    status == 409 || (status >= 500 && text.contains("must be connected and logged in"))
+}
+
+/// slskd's answer turns a search away for being one too many: 429 ("Only one concurrent operation is
+/// permitted"), or the words of another version ("Only one concurrent search").
+pub fn says_too_many(status: u16, text: &str) -> bool {
+    status == 429 || text.to_lowercase().contains("concurrent search")
+}
+
 /// An error answer from slskd's API as a message for the user: 409 means the engine has no server session
-/// (not signed in to the Soulseek network yet), anything else is reported with its status and text.
+/// (not signed in to the Soulseek network yet: a [`NotConnected`]), anything else is reported with its
+/// status and text.
 pub fn http_error(status: u16, text: &str) -> anyhow::Error {
-    if status == 409 {
-        return anyhow::anyhow!("{NOT_CONNECTED}");
+    if says_not_connected(status, text) {
+        return NotConnected(NOT_CONNECTED.into()).into();
     }
     let reason = reqwest::StatusCode::from_u16(status).map(|s| s.to_string()).unwrap_or_else(|_| status.to_string());
     anyhow::anyhow!("Soulseek engine returned {reason}: {}", text.chars().take(200).collect::<String>())
@@ -87,22 +92,153 @@ fn search_body(sid: &str, text: &str, timeout: i64) -> Value {
         "filterResponses": true, "minimumResponseFileCount": 1 })
 }
 
-/// Run a search and wait for it to finish. Returns the responses.
+/// The request worker's search: waits its turn (one search at a time, 3 s apart), never runs while the
+/// session is down ([`NotConnected`]), and sits out "too many searches" answers. Returns the responses
+/// once the search is over.
 pub async fn search(st: &impl Ctx, text: &str) -> anyhow::Result<Vec<Value>> {
+    search_as(st, text, Who::Worker, |_| {}).await
+}
+
+/// A person's search (the picker): goes before the worker's, and is refused at once when the session is
+/// down ([`NotConnected`]) or can't start within 30 s ([`Busy`]).
+pub async fn search_now(st: &impl Ctx, text: &str) -> anyhow::Result<Vec<Value>> {
+    search_as(st, text, Who::Person, |_| {}).await
+}
+
+/// [`search`] for `who`. `note` says what the search is doing, for the worker's request: `None` when it
+/// searches (its turn has come, or the server's pause is over: "Searching Soulseek…"), `Some(words)` while
+/// it sits out a pause of the server's ("Rate limited by the Soulseek server – searching again at 14:05").
+pub async fn search_as(st: &impl Ctx, text: &str, who: Who, note: impl Fn(Option<&str>) + Send + Sync) -> anyhow::Result<Vec<Value>> {
+    if let Some(why) = not_ready(st) {
+        anyhow::bail!(why);
+    }
+    let session = st.requests().slskd.session();
+    let turn = session.turn(st, who).await?;
+    note(None);
+    let deadline = turn.deadline();
     let timeout = search_timeout(st);
     let sid = uuid();
-    req(st, reqwest::Method::POST, "searches", Some(search_body(&sid, text, timeout)), &[]).await?;
+    let mut run = Running { st: st.clone(), sid: sid.clone(), turn: Some(turn), armed: true };
+    if let Err(e) = post_search(st, &sid, text, timeout, deadline, &note).await {
+        run.armed = false; // slskd didn't take it
+        return Err(e);
+    }
+    let mut last = Value::Null;
+    let mut gone = false;
     for _ in 0..timeout + 20 {
         tokio::time::sleep(std::time::Duration::from_secs(1)).await;
-        if let Ok(s) = req(st, reqwest::Method::GET, &format!("searches/{sid}"), None, &[]).await {
-            if s["isComplete"].as_bool().unwrap_or(false) {
+        match req(st, reqwest::Method::GET, &format!("searches/{sid}"), None, &[]).await {
+            Ok(s) => {
+                let done = s["isComplete"].as_bool().unwrap_or(false);
+                last = s;
+                if done {
+                    break;
+                }
+            }
+            Err(e) if engine_lost(&e) => {
+                gone = true;
                 break;
             }
+            Err(_) => {}
         }
     }
-    let res = req(st, reqwest::Method::GET, &format!("searches/{sid}/responses"), None, &[]).await;
+    let res = if gone { None } else { Some(req(st, reqwest::Method::GET, &format!("searches/{sid}/responses"), None, &[]).await) };
     let _ = req(st, reqwest::Method::DELETE, &format!("searches/{sid}"), None, &[]).await;
-    Ok(res?.as_array().cloned().unwrap_or_default())
+    run.armed = false;
+    drop(run);
+    // the session ended under the search (slskd cancels the searches that run when it does, or slskd
+    // itself went away): the caller waits for Soulseek instead of taking a cut-short answer for "nothing
+    // found"
+    let cut_short = last["state"].as_str().is_some_and(|s| s.contains("Cancelled") || s.contains("Errored"));
+    match res {
+        None => Err(session.search_found_it_down().into()),
+        Some(Err(e)) if engine_lost(&e) => Err(session.search_found_it_down().into()),
+        Some(_) if cut_short || not_ready(st).is_some() => Err(session.search_found_it_down().into()),
+        Some(r) => Ok(r?.as_array().cloned().unwrap_or_default()),
+    }
+}
+
+/// slskd went away under a search: it doesn't answer, or no longer knows the search.
+fn engine_lost(e: &anyhow::Error) -> bool {
+    e.is::<slskd_managed::Unreachable>() || e.to_string().contains("returned 404")
+}
+
+/// A search slskd may be running for Encore, with the turn it holds. When the caller goes away before
+/// the search is over (a cancelled request, a closed picker), dropping this stops the search in slskd
+/// before the turn passes on, so the next search never runs beside it.
+struct Running<C: Ctx> {
+    st: C,
+    sid: String,
+    turn: Option<crate::slskd_session::Turn>,
+    /// the search may be running in slskd (posted, or on its way)
+    armed: bool,
+}
+
+impl<C: Ctx> Drop for Running<C> {
+    fn drop(&mut self) {
+        let Some(turn) = self.turn.take() else { return };
+        if !self.armed {
+            return;
+        }
+        let (st, sid) = (self.st.clone(), self.sid.clone());
+        if let Ok(rt) = tokio::runtime::Handle::try_current() {
+            rt.spawn(async move {
+                stop_search(&st, &sid).await;
+                drop(turn);
+            });
+        }
+    }
+}
+
+/// Stop a search in slskd and forget it (slskd's DELETE alone forgets a search that goes on running).
+async fn stop_search(st: &impl Ctx, sid: &str) {
+    let _ = req(st, reqwest::Method::PUT, &format!("searches/{sid}"), None, &[]).await;
+    let _ = req(st, reqwest::Method::DELETE, &format!("searches/{sid}"), None, &[]).await;
+}
+
+/// POST /searches, holding the turn: after the 3 s spacing and any rate-limit pause, only while logged in.
+/// "Too many searches" pauses searches for 60 s: the worker tries again (5 times at most, saying so with
+/// `note`), a person (with a `deadline`) is told when the next search can go ([`Busy`]). "Not connected",
+/// or slskd not answering, marks the session down and wakes its supervisor ([`NotConnected`]).
+async fn post_search(st: &impl Ctx, sid: &str, text: &str, timeout: i64, deadline: Option<Instant>, note: &(impl Fn(Option<&str>) + Sync)) -> anyhow::Result<()> {
+    let session = st.requests().slskd.session();
+    let body = search_body(sid, text, timeout);
+    let who = if deadline.is_some() { Who::Person } else { Who::Worker };
+    let mut limited = 0;
+    loop {
+        // the worker's request says it sits out the server's pause, and searches again after it
+        let paused = session.rate_limited_until().filter(|_| who == Who::Worker);
+        if let Some(until) = paused {
+            note(Some(&format!("Rate limited by the Soulseek server – searching again at {}", crate::slskd_session::clock(crate::slskd_session::unix_at(until)))));
+        }
+        session.before_search(st, deadline).await?;
+        if paused.is_some() {
+            note(None);
+        }
+        let (status, answer) = match slskd_managed::api(st, reqwest::Method::POST, "searches", Some(&body), &[], None).await {
+            Ok(a) => a,
+            Err(e) if e.is::<slskd_managed::Unreachable>() => return Err(session.search_found_it_down().into()),
+            Err(e) => return Err(e),
+        };
+        if status < 400 {
+            return Ok(());
+        }
+        if says_too_many(status, &answer) {
+            let busy = session.rate_limited();
+            limited += 1;
+            if who == Who::Person {
+                return Err(busy.into());
+            }
+            if limited > crate::slskd_session::RATE_LIMIT_TRIES {
+                anyhow::bail!("the Soulseek server kept turning searches away (rate limited) – try again later");
+            }
+            continue;
+        }
+        if says_not_connected(status, &answer) {
+            return Err(session.search_found_it_down().into());
+        }
+        return Err(http_error(status, &answer));
+    }
 }
 
 fn uuid() -> String {
@@ -111,10 +247,42 @@ fn uuid() -> String {
     format!("{}-{}-4{}-a{}-{}", &h[0..8], &h[8..12], &h[13..16], &h[17..20], &h[20..32])
 }
 
-/// Start a search for a page to poll with `search_poll`; it runs for `slskd_search_timeout` seconds.
+/// Start a person's search for a page to poll with `search_poll`; it runs for `slskd_search_timeout`
+/// seconds and holds the turn until slskd says it is over (or it is ended), so the next search waits.
+/// Refused at once when the session is down ([`NotConnected`]) or the turn doesn't come within 30 s
+/// ([`Busy`]).
 pub async fn search_start(st: &impl Ctx, text: &str) -> anyhow::Result<String> {
+    if let Some(why) = not_ready(st) {
+        anyhow::bail!(why);
+    }
+    let turn = st.requests().slskd.session().turn(st, Who::Person).await?;
+    let deadline = turn.deadline();
     let sid = uuid();
-    req(st, reqwest::Method::POST, "searches", Some(search_body(&sid, text, search_timeout(st))), &[]).await?;
+    let timeout = search_timeout(st);
+    let mut run = Running { st: st.clone(), sid: sid.clone(), turn: Some(turn), armed: true };
+    if let Err(e) = post_search(st, &sid, text, timeout, deadline, &|_| {}).await {
+        run.armed = false;
+        return Err(e);
+    }
+    let st2 = st.clone();
+    tokio::spawn(async move {
+        for _ in 0..timeout + 20 {
+            tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+            match req(&st2, reqwest::Method::GET, &format!("searches/{}", run.sid), None, &[]).await {
+                Ok(s) if s["isComplete"].as_bool().unwrap_or(false) => {
+                    run.armed = false;
+                    break;
+                }
+                // ended (search_end stopped it first) or forgotten
+                Err(e) if e.to_string().contains("returned 404") => {
+                    run.armed = false;
+                    break;
+                }
+                _ => {}
+            }
+        }
+        drop(run); // still running after all that time: stopped before the turn passes on
+    });
     Ok(sid)
 }
 
@@ -126,9 +294,9 @@ pub async fn search_poll(st: &impl Ctx, id: &str) -> anyhow::Result<(Vec<Value>,
     Ok((res.as_array().cloned().unwrap_or_default(), s["isComplete"].as_bool().unwrap_or(false)))
 }
 
-/// Forget a polled search (slskd keeps them until told).
+/// End a polled search: stopped if it still runs, then forgotten (slskd keeps them until told).
 pub async fn search_end(st: &impl Ctx, id: &str) {
-    let _ = req(st, reqwest::Method::DELETE, &format!("searches/{id}"), None, &[]).await;
+    stop_search(st, id).await;
 }
 
 /// A user's share list: [{ name, files: [{ filename (full path), size, bitRate, … }] }].
@@ -151,10 +319,52 @@ pub async fn browse(st: &impl Ctx, user: &str) -> anyhow::Result<Vec<Value>> {
     Ok(dirs)
 }
 
+/// How long slskd may take to take a download: it asks the Soulseek server for the user's address, then
+/// the user's client (30 s to connect). Longer than the client's 30 s, so Encore's turn to enqueue covers
+/// all of slskd's work.
+const ENQUEUE_WAIT: Duration = Duration::from_secs(90);
+/// slskd is taking other downloads (429): ask again this long after, this many times.
+pub const ENQUEUE_PAUSE: Duration = Duration::from_secs(2);
+pub const ENQUEUE_TRIES: u32 = 5;
+
+/// slskd kept answering that it is taking other downloads (429 "Only one concurrent operation is
+/// permitted"): the download was not refused by the user, and is asked for again later.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EnqueueBusy(pub String);
+
+impl std::fmt::Display for EnqueueBusy {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+impl std::error::Error for EnqueueBusy {}
+
+/// Ask slskd to download `files` from `username`. One at a time (slskd 0.26 takes two at once and answers
+/// 429 to a third, for as long as it waits on the server and the user's client); a 429 all the same is
+/// asked again 2 s later, five times, then [`EnqueueBusy`]. A session that is down is [`NotConnected`].
 pub async fn enqueue(st: &impl Ctx, username: &str, files: &[Value]) -> anyhow::Result<()> {
-    let body: Vec<Value> = files.iter().map(|f| json!({ "filename": f["filename"], "size": f["size"] })).collect();
-    req(st, reqwest::Method::POST, &format!("transfers/downloads/{}", urlencoding::encode(username)), Some(json!(body)), &[]).await?;
-    Ok(())
+    if let Some(why) = not_ready(st) {
+        anyhow::bail!(why);
+    }
+    let body = json!(files.iter().map(|f| json!({ "filename": f["filename"], "size": f["size"] })).collect::<Vec<_>>());
+    let path = format!("transfers/downloads/{}", urlencoding::encode(username));
+    let _one = st.requests().slskd.session().enqueue_turn().await;
+    let mut busy = 0;
+    loop {
+        let (status, text) = slskd_managed::api(st, reqwest::Method::POST, &path, Some(&body), &[], Some(ENQUEUE_WAIT)).await?;
+        if status < 400 {
+            return Ok(());
+        }
+        if !says_too_many(status, &text) {
+            return Err(http_error(status, &text));
+        }
+        busy += 1;
+        if busy > ENQUEUE_TRIES {
+            return Err(EnqueueBusy(format!("the Soulseek engine is busy taking other downloads ({})", text.chars().take(120).collect::<String>())).into());
+        }
+        tokio::time::sleep(ENQUEUE_PAUSE).await;
+    }
 }
 
 pub async fn user_downloads(st: &impl Ctx, username: &str) -> Vec<Value> {

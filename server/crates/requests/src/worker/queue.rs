@@ -2,7 +2,8 @@
 //! a download in progress), and requests that were mid-step when the server stopped start again.
 use super::*;
 
-pub(super) async fn step<C: Ctx>(st: C, id: i64) {
+/// Run the request's next step (start it, go on after a wait, or look at a download in progress).
+pub async fn step<C: Ctx>(st: C, id: i64) {
     let Some(mut r) = get(&st, id) else { return };
     let status = r.s("status");
     if !ACTIVE.contains(&status.as_str()) {
@@ -10,6 +11,9 @@ pub(super) async fn step<C: Ctx>(st: C, id: i64) {
     }
     let source = r.s("source");
     let res = match (status.as_str(), source.as_str()) {
+        // waiting for Soulseek: go on where it stopped (the Soulseek step is first in its sources; a picked
+        // file starts over from its pick)
+        ("queued", "slskd" | "slskd_lossless") if r.d["soulseek_wait"].is_object() && r.d["sources"].is_array() && !r.d["pick"].is_object() => next_source(&st, &mut r, "").await,
         ("queued", _) => start(&st, &mut r).await,
         ("downloading", "slskd" | "slskd_lossless") => poll_slskd(&st, &mut r).await,
         ("downloading" | "monitoring", "torznab") => poll_torznab(&st, &mut r).await,
