@@ -1,0 +1,152 @@
+//! Translated and romanized titles in the API: the routes of Settings → Language and the edit dialog, and
+//! the Translator's row on the Download tools card. Answers gain a listener's translations through the
+//! enrichment pass (crate::enrich); the translations themselves (sources, cache, the model, the background
+//! worker) live in encore_library::translate.
+use encore_library::translate::*;
+
+use crate::auth::{self, User};
+use encore_db::{Row, RowExt};
+use encore_core::error::{err, ApiResult};
+use crate::state::AppState;
+use encore_system::tools::ToolInfo;
+use axum::extract::{Query, State};
+use axum::routing::{get, post};
+use axum::{Json, Router};
+use prompt::Kind;
+use serde::Deserialize;
+use serde_json::{json, Value};
+
+/// The Translator's row on the Download tools card.
+pub fn tool_info(st: &AppState, last: &Value) -> ToolInfo {
+    let data = st.data_dir();
+    let inst = llama::installed(data).map(|(_, t)| t);
+    let m = llama::model(st);
+    let has_model = llama::model_path(data, &m).is_file();
+    let latest = last["latest"].as_str().map(String::from);
+    let newer = inst.as_deref().zip(latest.as_deref()).is_some_and(|(i, l)| llama::newer_build(l, i));
+    let note = match (&inst, has_model) {
+        (Some(_), true) => format!("Translates titles on this server with the {} model – starts when needed, stops after 2 minutes idle", m.id),
+        (Some(_), false) => format!("The {} model is not downloaded yet – Update downloads it (about {:.1} GB)", m.id, m.gb),
+        (None, _) => format!("Not installed – Install downloads llama.cpp and the {} model (about {:.1} GB) to translate titles on this server", m.id, m.gb),
+    };
+    ToolInfo {
+        id: "translator".into(), name: encore_system::tools::label("translator").into(),
+        source: if inst.is_some() { "updated" } else { "missing" }.into(), resettable: inst.is_some() || llama::dir(data).exists(),
+        update_available: inst.is_some() && (newer || !has_model),
+        // a missing model counts as an update: the button downloads it
+        latest: if inst.is_some() && !has_model && !newer { inst.clone() } else { latest },
+        installed: inst, checked_at: last["checked_at"].as_f64(), error: last["error"].as_str().map(String::from), note, updatable: true,
+    }
+}
+
+
+// ---- routes -------------------------------------------------------------------------------------
+
+pub fn router() -> Router<AppState> {
+    Router::new()
+        .route("/api/translate/languages", get(languages))
+        .route("/api/translate/status", get(status))
+        .route("/api/translate/entry", get(get_entry).put(put_entry).delete(delete_entry))
+        .route("/api/translate/run", post(run_now))
+}
+
+/// The choices Settings → Language offers.
+async fn languages(User(_): User) -> Json<Value> {
+    Json(json!({
+        "languages": script::LANGUAGES.iter().map(|(c, n, _)| json!({ "code": c, "name": n })).collect::<Vec<_>>(),
+        "modes": MODES.iter().map(|(id, label)| json!({ "id": id, "label": label })).collect::<Vec<_>>(),
+        "default": script::DEFAULT_TARGET,
+    }))
+}
+
+/// Whether the Translator can run, and (for admins) how far the cache is.
+async fn status(State(st): State<AppState>, User(u): User) -> ApiResult<Json<Value>> {
+    let admin = encore_config::perms::is_admin(&u);
+    let st2 = st.clone();
+    let (ready, counts) = tokio::task::spawn_blocking(move || (llama::ready(&st2), store::counts(&st2.db))).await.map_err(|e| err(500, e.to_string()))?;
+    let m = llama::model(&st);
+    let mut out = json!({
+        "translator": ready, "model": m.id, "running": llama::running(&st),
+        "can_edit": auth::can(&st, &u, "translate"), "background": st.cfg.bool("translate_background"),
+    });
+    if admin {
+        out["rows"] = json!(counts.0);
+        out["shown"] = json!(counts.1);
+        out["waiting"] = json!(counts.2);
+        out["queued"] = json!(st.library.translator.queued());
+    }
+    Ok(Json(out))
+}
+
+#[derive(Deserialize)]
+struct EntryQ {
+    text: String,
+    #[serde(default)]
+    target: String,
+}
+
+fn target_for(u: &Row, asked: &str) -> &'static str {
+    if asked.trim().is_empty() { prefs_of(u).1 } else { script::target(asked) }
+}
+
+/// One text's translation for the edit dialog.
+async fn get_entry(State(st): State<AppState>, User(u): User, Query(q): Query<EntryQ>) -> ApiResult<Json<Value>> {
+    if q.text.trim().is_empty() {
+        return Err(err(400, "Nothing to look up"));
+    }
+    let target = target_for(&u, &q.target);
+    Ok(Json(tokio::task::spawn_blocking(move || store::entry(&st.db, &q.text, target)).await.map_err(|e| err(500, e.to_string()))?))
+}
+
+#[derive(Deserialize)]
+struct EntryBody {
+    text: String,
+    #[serde(default)]
+    kind: String,
+    #[serde(default)]
+    target: String,
+    translation: Option<String>,
+    romanization: Option<String>,
+}
+
+/// A manual correction: it wins over every source and stays (empty text = show nothing).
+async fn put_entry(State(st): State<AppState>, User(u): User, Json(b): Json<EntryBody>) -> ApiResult<Json<Value>> {
+    if !auth::can(&st, &u, "translate") {
+        return Err(err(403, "You can't edit translations"));
+    }
+    if b.text.trim().is_empty() || b.text.len() > 1000 {
+        return Err(err(400, "Nothing to translate"));
+    }
+    let long = |s: &Option<String>| s.as_ref().is_some_and(|x| x.len() > 500);
+    if long(&b.translation) || long(&b.romanization) {
+        return Err(err(400, "That is too long for a title"));
+    }
+    let target = target_for(&u, &b.target);
+    let kind = Kind::parse(&b.kind).as_str();
+    let who = u.s("username");
+    let out = tokio::task::spawn_blocking(move || -> rusqlite::Result<Value> {
+        store::set_manual(&st.db, &b.text, target, kind, Some(b.translation.as_deref().unwrap_or("")), Some(b.romanization.as_deref().unwrap_or("")))?;
+        st.db.log("info", &format!("{who} corrected the {} translation of “{}”", script::language_name(target), script::normalize(&b.text)));
+        Ok(store::entry(&st.db, &b.text, target))
+    }).await.map_err(|e| err(500, e.to_string()))??;
+    Ok(Json(out))
+}
+
+/// Remove a manual correction: what the sources found shows again.
+async fn delete_entry(State(st): State<AppState>, User(u): User, Query(q): Query<EntryQ>) -> ApiResult<Json<Value>> {
+    if !auth::can(&st, &u, "translate") {
+        return Err(err(403, "You can't edit translations"));
+    }
+    let target = target_for(&u, &q.target);
+    let out = tokio::task::spawn_blocking(move || -> rusqlite::Result<Value> {
+        store::set_manual(&st.db, &q.text, target, "title", None, None)?;
+        Ok(store::entry(&st.db, &q.text, target))
+    }).await.map_err(|e| err(500, e.to_string()))??;
+    Ok(Json(out))
+}
+
+/// Start a pass now (Settings → Language after a change; Download tools after an install).
+async fn run_now(State(st): State<AppState>, User(_): User) -> Json<Value> {
+    st.library.translator.wake();
+    Json(json!({ "ok": true }))
+}

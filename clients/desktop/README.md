@@ -3,8 +3,8 @@
 Your Encore server in a native window on Windows, macOS and Linux, with every song playing through
 [Cadenza](https://github.com/Krifmaz/cadenza), Encore's own playback engine, built into the app. Pure Rust:
 [Iced](https://iced.rs) 0.14 for the window (wgpu, with a software fallback), no web view and no browser
-engine. It replaces the classic Tauri app in `clients/app`, which ships one last time with 0.27 and is then
-removed.
+engine. It replaced the classic Tauri app, which shipped for the last time with 0.27 and was removed in
+0.29.
 
 The app is the web app, native: the same pages in the same order (Home, Discover, For you, Library, Requests,
 Playlists, the Downloader, Soulseek, the leaderboard, Storage, Bug reports, Settings), the same words and the

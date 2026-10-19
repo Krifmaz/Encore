@@ -1,0 +1,140 @@
+//! The request worker, stage by stage: `queue` gives every active request a task, `pick` decides where
+//! it comes from, `fetch` runs the sources (streamrip, Soulseek, Prowlarr → the download clients,
+//! YouTube), `verify` holds what a download is checked against, and `import` tags and imports the files
+//! and finishes the request.
+mod fetch;
+mod import;
+mod pick;
+mod queue;
+mod verify;
+
+pub use queue::{cancel, run};
+
+use crate::sources::{slskd, streamrip, torznab, ytdlp};
+use crate::{notify, Ctx};
+use encore_db::{now, p, Row, RowExt};
+use encore_http::mb;
+use encore_library::tagger::{self, Rejected};
+use fetch::*;
+use import::*;
+use pick::*;
+use regex::Regex;
+use serde_json::{json, Value};
+use std::collections::HashMap;
+use std::path::{Path, PathBuf};
+use std::sync::{Arc, LazyLock, Mutex};
+use verify::*;
+
+/// The states of a request the worker is busy with.
+pub const ACTIVE: [&str; 5] = ["queued", "searching", "downloading", "monitoring", "importing"];
+
+static RIP_LINK: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"qobuz\.com|tidal\.com|deezer\.com").unwrap());
+
+/// Running request tasks, so a cancel can stop them.
+#[derive(Clone, Default)]
+pub struct Tasks(Arc<Mutex<HashMap<i64, tokio::task::AbortHandle>>>);
+
+/// The request was cancelled/removed while we worked on it.
+#[derive(Debug)]
+pub struct Cancelled;
+
+impl std::fmt::Display for Cancelled {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("cancelled")
+    }
+}
+
+impl std::error::Error for Cancelled {}
+
+/// A request as the worker sees it: its row and its parsed `detail`.
+pub struct Req {
+    pub id: i64,
+    pub row: Row,
+    pub d: Value,
+}
+
+impl Req {
+    fn s(&self, k: &str) -> String {
+        self.row.s(k)
+    }
+    fn opt(&self, k: &str) -> Option<String> {
+        Some(self.row.s(k)).filter(|x| !x.is_empty())
+    }
+    fn album_title(&self) -> String {
+        self.opt("album").unwrap_or_else(|| self.s("title"))
+    }
+    fn length(&self) -> Option<f64> {
+        self.d["length"].as_f64().filter(|l| *l > 0.0)
+    }
+    fn label(&self) -> String {
+        match self.s("kind").as_str() {
+            "album" => format!("{} – {}", self.s("artist"), self.album_title()),
+            "artist" => self.s("artist"),
+            "url" => self.opt("title").unwrap_or_else(|| self.s("url")),
+            _ => format!("{} – {}", self.s("artist"), self.s("title")),
+        }
+    }
+    fn hint(&self) -> Option<String> {
+        self.opt("cover_url")
+    }
+}
+
+pub fn get(st: &impl Ctx, id: i64) -> Option<Req> {
+    let row = st.db().one("SELECT * FROM requests WHERE id=?", p![id]).ok()??;
+    let d = serde_json::from_str(&row.s("detail")).unwrap_or(json!({}));
+    let d = if d.is_object() { d } else { json!({}) };
+    Some(Req { id, row, d })
+}
+
+/// Update columns (detail is always written along).
+fn upd(st: &impl Ctx, r: &mut Req, fields: &[(&str, Value)]) {
+    let mut sets = vec![];
+    let mut params = vec![];
+    for (k, v) in fields {
+        sets.push(format!("{k}=?"));
+        params.push(v.clone());
+        r.row.insert(k.to_string(), v.clone());
+    }
+    sets.push("detail=?".into());
+    params.push(json!(r.d.to_string()));
+    sets.push("updated_at=?".into());
+    params.push(json!(now()));
+    params.push(json!(r.id));
+    let _ = st.db().execute(&format!("UPDATE requests SET {} WHERE id=?", sets.join(", ")), params);
+    if fields.iter().any(|(k, _)| *k == "status" || *k == "progress") {
+        crate::events::emit(st, r.id); // live labels on artist and album pages
+    }
+}
+
+fn check(st: &impl Ctx, id: i64) -> anyhow::Result<()> {
+    match get(st, id) {
+        Some(r) if ACTIVE.contains(&r.s("status").as_str()) => Ok(()),
+        _ => Err(Cancelled.into()),
+    }
+}
+
+fn staging(st: &impl Ctx, r: &Req) -> PathBuf {
+    PathBuf::from(st.cfg().str("staging_path")).join(format!("request-{}", r.id))
+}
+
+fn rm(p: &Path) {
+    let _ = std::fs::remove_dir_all(p);
+}
+
+/// What happened when trying a source.
+enum Out {
+    Done,
+    Wait,
+    Next(String),
+}
+
+fn log_push(r: &mut Req, line: String) {
+    if !r.d["log"].is_array() {
+        r.d["log"] = json!([]);
+    }
+    r.d["log"].as_array_mut().unwrap().push(json!(line));
+}
+
+fn with_note(msg: &str, note: &str) -> String {
+    if note.is_empty() { msg.into() } else { format!("{msg} – {note}") }
+}

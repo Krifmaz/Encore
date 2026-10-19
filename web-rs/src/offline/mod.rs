@@ -5,8 +5,7 @@
 //! the server.
 //!
 //! mode.rs is offline mode (the banner, the switched-off shell, the retries); the Downloads page and the
-//! "Download for offline" menu entries are in pages/downloads.rs. The native apps keep their own offline
-//! screens.
+//! "Download for offline" menu entries are in pages/downloads.rs.
 
 pub mod download;
 pub mod mode;

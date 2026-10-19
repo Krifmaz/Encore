@@ -18,7 +18,7 @@ What Roon is known for, what Encore already does in that area, and where each is
 | **Scrobbling** | Last.fm | Last.fm and ListenBrainz, from every player including the car | Encore |
 | **Multi-user** | One profile set per Core, no per-user permissions | Users, roles, invites, request approvals, per-user connections, play stats, leaderboard | Encore |
 | **Self-hosting** | Core on your machine, but account, licensing and metadata depend on Roon's cloud; subscription | One container, SQLite, no account with anyone, no subscription | Encore |
-| **Interface** | Polished native apps (Windows, macOS, Linux, iOS, Android) | Web UI (JavaScript and a Rust/WebAssembly build), Tauri desktop, Android app | Roon for polish; Encore for running anywhere |
+| **Interface** | Polished native apps (Windows, macOS, Linux, iOS, Android) | Web UI (Rust/WebAssembly), native desktop app (Iced), Android app | Roon for polish; Encore for running anywhere |
 
 ## What Roon does that Encore doesn't (yet)
 

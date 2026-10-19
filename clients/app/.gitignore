@@ -1,8 +1,0 @@
-/target
-/gen/schemas
-/gen/android/.gradle
-/gen/android/app/build
-/gen/android/build
-/gen/android/local.properties
-/gen/android/.idea
-/gen/android/*.iml

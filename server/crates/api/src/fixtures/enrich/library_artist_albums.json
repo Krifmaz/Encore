@@ -1,0 +1,39 @@
+{
+  "items": [
+    {
+      "added": 1792360592.3883302,
+      "album": "First Album",
+      "albumartist": "Beta Band",
+      "cover_color": "#e151fb",
+      "cover_v": 18169343590900,
+      "duration": 24.0,
+      "formats": "flac",
+      "genre": null,
+      "id": "eef3dd552229b6eb",
+      "mb_albumid": null,
+      "mb_releasegroupid": null,
+      "size": 335034,
+      "tracks": 6,
+      "untagged": 6,
+      "year": "2021"
+    },
+    {
+      "added": 1792360592.386806,
+      "album": "Second Album",
+      "albumartist": "Beta Band",
+      "cover_color": "#a5a52f",
+      "cover_v": 226018955654648,
+      "duration": 24.0,
+      "formats": "flac",
+      "genre": null,
+      "id": "1ef99653a54aa327",
+      "mb_albumid": null,
+      "mb_releasegroupid": null,
+      "size": 335046,
+      "tracks": 6,
+      "untagged": 6,
+      "year": "2021"
+    }
+  ],
+  "total": 2
+}

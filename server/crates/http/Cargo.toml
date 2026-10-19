@@ -1,0 +1,19 @@
+[package]
+name = "encore-http"
+description = "Encore: the HTTP client and one module per external service (MusicBrainz, Deezer, Apple, Last.fm …)"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+encore-core = { workspace = true }
+encore-db = { workspace = true }
+encore-config = { workspace = true }
+anyhow = { workspace = true }
+hex = { workspace = true }
+md5 = { workspace = true }
+regex = { workspace = true }
+reqwest = { workspace = true }
+serde_json = { workspace = true }
+sha1 = { workspace = true }
+tokio = { workspace = true }

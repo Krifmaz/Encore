@@ -1,6 +1,6 @@
 //! Offline music: the songs saved on this computer (desktop/offline.rs), playing through Cadenza
-//! without the server. Behaviour reference: the classic app's offline page
-//! (clients/app/ui/offline.html) and its words. Reachable from the sign-in page when the server
+//! without the server. Behaviour reference: the offline page of the classic app (removed in 0.29)
+//! and its words. Reachable from the sign-in page when the server
 //! can't be reached (then it has its own Retry, Change server and player, since the app shows no
 //! sidebar or player bar there) and from Settings → This computer.
 

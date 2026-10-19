@@ -5,7 +5,7 @@
 //! open, commands and the other devices' state arrive the moment they change instead of at the next check-in,
 //! and this device checks in right away whenever its own playback changes – so a remote feels instant.
 //!
-//! Split by concern: link.rs (this device locked as a remote, and this computer's built-in engine), spot.rs
+//! Split by concern: link.rs (this device locked as a remote), spot.rs
 //! (pick up where you left off) and devices.rs (the Devices window). This file holds the device's identity,
 //! the heartbeat and the event stream.
 
@@ -14,7 +14,7 @@ mod link;
 mod spot;
 
 pub use devices::open;
-pub use link::{engine_device, engine_off, is_engine, link_to, shown_name, unlink, ENGINE_LABEL};
+pub use link::{link_to, unlink};
 pub use spot::resume;
 
 use link::*;
@@ -24,12 +24,12 @@ use crate::dom;
 use crate::json::J;
 use crate::num::{num, rand36, to36};
 use crate::ui::{self, art, esc, fmt, icon, toast, ModalOpts};
-use crate::{api, app, native, player};
+use crate::{api, app, player};
 use serde_json::{json, Value};
 use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 use wasm_bindgen::closure::Closure;
-use wasm_bindgen::{JsCast, JsValue};
+use wasm_bindgen::JsCast;
 
 const KEY: &str = "encore.device";
 const NAME_KEY: &str = "encore.device.name";
@@ -67,14 +67,10 @@ fn device_id() -> String {
     }
 }
 
-/// A readable name: "Android app", "Chrome on Windows", "Safari on iPhone" … (or the one you gave it)
+/// A readable name: "Chrome on Windows", "Safari on iPhone" … (or the one you gave it)
 fn device_name() -> String {
     if let Some(own) = dom::ls_get(NAME_KEY).filter(|s| !s.is_empty()) { return own; }
     let ua = dom::window().navigator().user_agent().unwrap_or_default();
-    if ua.contains("EncoreAndroid") || native::platform().as_deref() == Some("android") { return "Android app".into(); }
-    if ua.contains("EncoreDesktop") || ua.contains("Electron") || native::platform().as_deref() == Some("desktop") {
-        return format!("Desktop app ({})", if ua.contains("Mac") { "Mac" } else if ua.contains("Windows") { "Windows" } else { "Linux" });
-    }
     let os = if ua.contains("iPhone") { "iPhone" } else if ua.contains("iPad") { "iPad" } else if ua.contains("Android") { "Android" }
         else if ua.contains("Mac") { "Mac" } else if ua.contains("Windows") { "Windows" } else if ua.contains("Linux") { "Linux" } else { "device" };
     let br = if ua.contains("Edg/") { "Edge" } else if ua.contains("Firefox/") { "Firefox" } else if ua.contains("Chrome/") { "Chrome" }
@@ -173,27 +169,20 @@ pub fn start() {
         let id = l.s("id");
         player::set_link(Some(player::Link { id: id.clone(), name: l.s("name"), state: json!({}), online: true, send: link_sender(id) }));
     }
-    dom::spawn(engine_sign_in());
     connect();
     ON_CHANGE.with(|o| *o.borrow_mut() = Some(player::on_change(|_| beat_soon())));
     run_loop();
 }
 
-/// `window.encoreRemote = { open, unlink, engine }` – the player bar and the native apps call these.
+/// `window.encoreRemote = { open, unlink }` – the player bar calls these.
 fn expose_global() {
     let obj = js_sys::Object::new();
     let open_fn = Closure::<dyn Fn()>::new(open);
     let unlink_fn = Closure::<dyn Fn()>::new(unlink);
-    let engine_fn = Closure::<dyn Fn() -> JsValue>::new(|| match engine_device() {
-        Some((id, name)) => serde_wasm_bindgen::to_value(&json!({ "id": id, "name": name })).unwrap_or(JsValue::NULL),
-        None => JsValue::NULL,
-    });
     let _ = js_sys::Reflect::set(&obj, &"open".into(), open_fn.as_ref());
     let _ = js_sys::Reflect::set(&obj, &"unlink".into(), unlink_fn.as_ref());
-    let _ = js_sys::Reflect::set(&obj, &"engine".into(), engine_fn.as_ref());
     open_fn.forget();
     unlink_fn.forget();
-    engine_fn.forget();
     let _ = js_sys::Reflect::set(&dom::window(), &"encoreRemote".into(), &obj);
 }
 

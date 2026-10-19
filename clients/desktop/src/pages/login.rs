@@ -1,7 +1,7 @@
 //! The first page: pick a server (remembered ones, or type an address), sign in, and the
 //! "Can't reach" state with Retry. Behaviour reference: web-rs/src/pages/auth.rs (the sign-in,
-//! sign-up, forgot password and email sign-in link forms and their words) and the classic app's
-//! server picker (clients/app/ui/index.html). Only the pages an email links to (`#/reset`,
+//! sign-up, forgot password and email sign-in link forms and their words) and the server picker of
+//! the classic app (removed in 0.29). Only the pages an email links to (`#/reset`,
 //! `#/magic`) stay in the browser.
 
 use crate::api::ApiError;

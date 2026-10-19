@@ -1,0 +1,59 @@
+[package]
+name = "encore-api"
+description = "Encore: the web API (routers by URL prefix, the signed-in user extractors, middleware), the server state, and the web app served at /"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+encore-core = { workspace = true }
+encore-db = { workspace = true }
+encore-config = { workspace = true }
+encore-http = { workspace = true }
+encore-jobs = { workspace = true }
+encore-media = { workspace = true }
+encore-library = { workspace = true }
+encore-sync = { workspace = true }
+encore-playback = { workspace = true }
+encore-vpn = { workspace = true }
+encore-system = { workspace = true }
+encore-requests = { workspace = true }
+axum = { workspace = true }
+axum-extra = { workspace = true }
+tokio = { workspace = true }
+tower-http = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+rusqlite = { workspace = true }
+bcrypt = { workspace = true }
+rand = { workspace = true }
+base64 = { workspace = true }
+sha2 = { workspace = true }
+hex = { workspace = true }
+subtle = { workspace = true }
+totp-rs = { workspace = true }
+lettre = { workspace = true }
+reqwest = { workspace = true }
+image = { workspace = true }
+tracing = { workspace = true }
+anyhow = { workspace = true }
+urlencoding = { workspace = true }
+cookie = { workspace = true }
+walkdir = { workspace = true }
+zip = { workspace = true }
+tokio-util = { workspace = true }
+futures-util = { workspace = true }
+tower = { workspace = true }
+regex = { workspace = true }
+flate2 = { workspace = true }
+cadenza-dsp = { workspace = true }
+libc = { workspace = true }
+
+[dev-dependencies]
+encore-vpn = { workspace = true, features = ["test-support"] }
+# the tests set artist aliases directly
+encore-library = { workspace = true, features = ["test-support"] }
+
+[features]
+# the TestServer helper (a server on a temporary config folder) for other crates' tests
+test-support = []

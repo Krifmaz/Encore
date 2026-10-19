@@ -1,0 +1,27 @@
+[package]
+name = "encore-system"
+description = "Encore: its own updates and restart, the self-update over the Docker socket, and the download tools that update without a new image"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+encore-core = { workspace = true }
+encore-db = { workspace = true }
+encore-config = { workspace = true }
+encore-http = { workspace = true }
+encore-jobs = { workspace = true }
+encore-playback = { workspace = true }
+anyhow = { workspace = true }
+axum = { workspace = true }
+flate2 = { workspace = true }
+hex = { workspace = true }
+http-body-util = { workspace = true }
+hyper = { workspace = true }
+hyper-util = { workspace = true }
+libc = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+tokio = { workspace = true }
+tracing = { workspace = true }
+urlencoding = { workspace = true }

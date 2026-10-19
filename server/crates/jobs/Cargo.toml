@@ -1,0 +1,16 @@
+[package]
+name = "encore-jobs"
+description = "Encore: background work: the gate that keeps it out of the way of people using the app, the progress of long jobs, the scheduled tasks and the supervisors of the background loops"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+encore-db = { workspace = true }
+encore-config = { workspace = true }
+anyhow = { workspace = true }
+axum = { workspace = true }
+libc = { workspace = true }
+serde_json = { workspace = true }
+tokio = { workspace = true }
+tracing = { workspace = true }

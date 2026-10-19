@@ -1,9 +1,9 @@
 //! Port of web/js/app.js: the session, the hash router, the shell (sidebar + main), banners and boot.
 
-use crate::dom::{self, by_id, document, qs, qs_in, qsa, set_html};
+use crate::dom::{self, by_id, document, qs, qsa, set_html};
 use crate::json::J;
 use crate::ui::{self, esc, icon, toast};
-use crate::{api, appearance, native, pages, player, remote};
+use crate::{api, appearance, pages, player, remote};
 use serde_json::Value;
 use std::cell::RefCell;
 use std::collections::HashMap;
@@ -136,7 +136,7 @@ fn page_for(name: &str) -> Option<PageFn> {
         "download" => pages::download::render,
         "downloads" => pages::downloads::render,
         "soulseek" => pages::soulseek::render,
-        "settings" => pages::settings::render,
+        "settings" => crate::settings::render,
         "storage" => pages::storage::render,
         "leaderboard" => pages::leaderboard::render,
         "bug-reports" => pages::bugreports::render,
@@ -224,8 +224,6 @@ fn render_shell() {
         dom::on_forever(&b, "click", |_| dom::spawn(async {
             // a sign-out the server does not confirm is finished at the next start that reaches it (offline/mode.rs)
             crate::offline::mode::sign_out().await;
-            // the desktop app's Cadenza signed in with its own token: signing out here signs it out too
-            native::engine_logout();
             dom::reload();
         }));
     }
@@ -386,15 +384,8 @@ fn conn_banner(on: bool, text: &str) {
     let b = by_id("conn-banner");
     if !on { if let Some(b) = b { b.remove(); } return; }
     let b = match b { Some(b) => b, None => { let b = dom::create("div"); b.set_id("conn-banner"); let _ = dom::body().append_child(&b); b } };
-    let offline_screen = native::has_open_offline();
-    set_html(&b, &format!(r#"{}<span>{}</span>{}"#, icon("x"), esc(text), if offline_screen { r#"<button class="btn sm" id="go-offline">Offline music</button>"# } else { "" }));
-    if let Some(btn) = qs_in(&b, "#go-offline") {
-        dom::on_forever(&btn, "click", |_| { native::open_offline(); });
-    }
+    set_html(&b, &format!(r#"{}<span>{}</span>"#, icon("x"), esc(text)));
 }
-
-/// The `window.EncoreNative` bridge lives in native.rs; the pages still reach the untyped helpers through `app::`.
-pub use crate::native::{native_call, native_call_async, native_call_with, native_has, native_truthy};
 
 /// Module-load work of app.js: listeners, service worker, boot.
 pub fn init() {
@@ -414,16 +405,6 @@ pub fn init() {
     dom::on_window("encore:requests-changed", |_| dom::spawn(refresh_pending_badge()));
     dom::on_window("encore:bugs-changed", |_| dom::spawn(refresh_bugs_badge()));
     dom::on_window("offline", |_| conn_banner(true, "Not connected – check your internet or server"));
-    dom::on_window("encore-native", |e| {
-        if let Some(ce) = e.dyn_ref::<web_sys::CustomEvent>() {
-            let d = ce.detail();
-            let text = js_sys::Reflect::get(&d, &"text".into()).ok().and_then(|v| v.as_string()).unwrap_or_default();
-            if !text.is_empty() {
-                let kind = js_sys::Reflect::get(&d, &"kind".into()).ok().and_then(|v| v.as_string()).unwrap_or_else(|| "ok".into());
-                toast(&text, &kind);
-            }
-        }
-    });
     dom::on_window("online", |_| conn_banner(false, ""));
     dom::on_window("encore:server-down", |_| conn_banner(true, "The Encore server isn't answering"));
     dom::on_window("encore:server-up", |_| conn_banner(false, ""));

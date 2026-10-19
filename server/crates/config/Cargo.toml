@@ -1,0 +1,17 @@
+[package]
+name = "encore-config"
+description = "Encore: settings (defaults, values saved in the UI, environment variables) and release types"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+encore-core = { workspace = true }
+encore-db = { workspace = true }
+anyhow = { workspace = true }
+regex = { workspace = true }
+serde_json = { workspace = true }
+
+[build-dependencies]
+# build.rs reads settings.toml; preserve_order keeps the file's order (cards and their fields)
+toml = { version = "0.8.23", default-features = false, features = ["parse", "preserve_order"] }

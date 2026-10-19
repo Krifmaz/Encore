@@ -1,6 +1,8 @@
 //! The acceptance list of the port: docs/ui/strings-reference.txt holds every user-visible string of the
 //! JavaScript UI (web/js, frozen since 0.26). Every string web/js still ships has to appear in web-rs, so the
-//! two interfaces read the same – the rule of docs/archive/ui-rewrite/PORTING.md. Run with `cargo test` in web-rs.
+//! two interfaces read the same – the rule of docs/archive/ui-rewrite/PORTING.md. The Settings → Server cards'
+//! words are counted where they live since 0.29, the server's settings table (server/crates/config/settings.toml),
+//! which the web app draws them from. Run with `cargo test` in web-rs.
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -15,6 +17,19 @@ fn repo() -> PathBuf {
 /// matches no reference line fails the test, so a stale one is noticed.
 const LEGACY_ONLY: &[(&str, &str)] = &[
     ("Tick at least one kind of release", "the Request discography dialog of 0.26 ticks releases, not kinds (\"Tick at least one release\")"),
+    // 0.29: the web app runs only in browsers; what the apps hung on window.EncoreNative went with the bridge
+    ("Offline music", "the apps' offline screen (EncoreNative.openOffline), gone with the bridge in 0.29"),
+    ("Change server…", "the apps' server picker (EncoreNative.changeServer), gone with the bridge in 0.29"),
+    ("This computer", "Settings → This computer of the classic desktop app (EncoreNative.desktopSettings), gone in 0.29"),
+    ("Save for offline", "songs kept on the phone by the Tauri Android app (EncoreNative.saveOffline), gone in 0.29; browsers use Download for offline"),
+    ("Saving to this device…", "the Tauri Android app's Save for offline, gone in 0.29"),
+    ("Saving song(s) to this device…", "the Tauri Android app's Save for offline, gone in 0.29"),
+];
+
+/// Whole files of the JavaScript UI whose page web-rs no longer has, as (file, why). Like [`LEGACY_ONLY`], an
+/// entry that matches no reference line fails the test.
+const LEGACY_FILES: &[(&str, &str)] = &[
+    ("web/js/pages/computer.js", "Settings → This computer, a page of the classic desktop app only, gone with the EncoreNative bridge in 0.29"),
 ];
 
 
@@ -139,7 +154,10 @@ fn read_all(dir: &Path, ext: &str) -> String {
 fn every_string_the_javascript_ui_ships_is_in_web_rs() {
     let repo = repo();
     let reference = std::fs::read_to_string(repo.join("docs/ui/strings-reference.txt")).expect("docs/ui/strings-reference.txt");
-    let rs_raw = read_all(&repo.join("web-rs/src"), "rs");
+    // since 0.29 the words of the Settings → Server cards (titles, labels, help, options) are in the server's
+    // settings table: the web app draws those cards from GET /api/admin/settings/schema, which answers with them
+    let table = std::fs::read_to_string(repo.join("server/crates/config/settings.toml")).expect("server/crates/config/settings.toml");
+    let rs_raw = read_all(&repo.join("web-rs/src"), "rs") + &table;
     assert!(rs_raw.len() > 100_000, "web-rs sources read");
     let rs_norm = without_placeholders(&rs_raw);
     let rs_decoded = collapse(&decode_entities(&rs_norm));
@@ -155,11 +173,17 @@ fn every_string_the_javascript_ui_ships_is_in_web_rs() {
     let mut skipped_gone = Vec::new();
     let mut skipped_legacy = Vec::new();
     let mut legacy_used = vec![false; LEGACY_ONLY.len()];
+    let mut legacy_files_used = vec![false; LEGACY_FILES.len()];
     let mut missing = Vec::new();
     for line in reference.lines() {
         if line.is_empty() || line.starts_with('#') { continue; }
         let Some(e) = parse(line) else { panic!("unreadable reference line: {line}") };
         if residue(&e.text) { skipped_residue.push(e.text.clone()); continue; }
+        if let Some((i, (_, why))) = LEGACY_FILES.iter().enumerate().find(|(_, (f, _))| e.file == *f) {
+            legacy_files_used[i] = true;
+            skipped_legacy.push(format!("{} – {why}", e.text));
+            continue;
+        }
         if let Some((i, (_, why))) = LEGACY_ONLY.iter().enumerate().find(|(_, (s, _))| e.text.contains(s)) {
             legacy_used[i] = true;
             skipped_legacy.push(format!("{} – {why}", e.text));
@@ -191,6 +215,8 @@ fn every_string_the_javascript_ui_ships_is_in_web_rs() {
     for s in &skipped_legacy { eprintln!("  legacy-only: {s}"); }
     let stale: Vec<&str> = LEGACY_ONLY.iter().zip(&legacy_used).filter(|(_, used)| !**used).map(|((s, _), _)| *s).collect();
     assert!(stale.is_empty(), "LEGACY_ONLY entries that match no line of the reference: {stale:?}");
+    let stale_files: Vec<&str> = LEGACY_FILES.iter().zip(&legacy_files_used).filter(|(_, used)| !**used).map(|((f, _), _)| *f).collect();
+    assert!(stale_files.is_empty(), "LEGACY_FILES entries that match no line of the reference: {stale_files:?}");
     assert!(checked > 850, "the reference lists about 935 strings that web/js still ships; only {checked} were checked");
     assert!(skipped_residue.len() < 20, "too many lines read as template residue: {skipped_residue:?}");
     assert!(missing.is_empty(), "{} string(s) of the JavaScript UI are not in web-rs:\n  {}", missing.len(), missing.join("\n  "));

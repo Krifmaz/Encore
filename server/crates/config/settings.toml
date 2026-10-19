@@ -1,0 +1,1768 @@
+# The settings table: every server setting with its environment variable and default, and for the ones on the
+# Settings pages, the words and the layout of their field. The web app's static table was the source for the words
+# (labels, help, options, visibility rules). build.rs turns this file into settings_gen.rs: the `Keys` names, a typed
+# accessor per key on `Config` (`cfg.app_name()`), the `TABLE` of definitions the loader reads, and `SCHEMA`, which
+# GET /api/admin/settings/schema answers with. docs/contracts/settings-schema.md describes the answer.
+#
+# [sections.<id>]  a page under Settings → Server, in nav order: title, aliases (old ?s= links that open it).
+#                  A page with no groups is drawn by its own code in the web app (Auto-download, Contribute, Blocked).
+# [groups.<id>]    a card on a page, in page order: section, part (the heading over a run of cards; none when left out),
+#                  title, desc, test (the card's Test button calls POST /api/system/test/<test>), test_label (its words).
+# [keys.<name>]    one setting:
+#   env            the environment variable that sets it (and then locks it in the UI); none for internal keys
+#   default        its value when nothing is saved; its TOML type is the setting's type (bool, integer, float, string)
+#   secret         true: never sent to a browser, only "set" or "not set"
+#   group          the card that shows it (none: not on the generic form; `help` says where it is edited)
+#   label, help    the field's words
+#   type           text | password | number | bool | select | checks | textarea | path | url (path and url are text
+#                  fields whose value is a folder or an address); without `type`: bool, number or text from the default
+#   options        [value, label] pairs for select and checks
+#   when           shown only while another select has a value: "key=value" or "key!=value"
+#   unit, min, max, step   for number fields
+#   full           the field takes the card's whole width
+#   advanced       for people who know what they are doing (the field says so in its label)
+# A card's fields are the keys that name it, in the order they appear in this file.
+#
+# The order of TABLE (the diagnostics page lists changed settings in this order): every key A to Z, except the keys in
+# `listed_last`, which follow in the order given there (they were added after the first table and kept their place).
+
+listed_last = [
+    "email_login", "app_session_days", "lastfm_shared_secret", "acoustid_user_key", "contribute_acoustid",
+    "contribute_isrc", "mb_client_id", "mb_client_secret", "mb_oauth_access_token", "mb_oauth_refresh_token",
+    "mb_oauth_expires_at", "mb_oauth_account", "torznab_enabled", "prowlarr_url", "prowlarr_api_key",
+    "torznab_min_seeders", "torznab_timeout_minutes", "qbit_url", "qbit_user", "qbit_password", "qbit_category",
+    "qbit_download_path", "sab_url", "sab_api_key", "sab_category", "sab_download_path", "torrent_client",
+    "transmission_url", "transmission_user", "transmission_password", "transmission_label",
+    "transmission_download_path", "deluge_url", "deluge_password", "deluge_label", "deluge_download_path",
+    "rtorrent_url", "rtorrent_user", "rtorrent_password", "rtorrent_label", "rtorrent_download_path",
+    "torrent_blackhole_watch", "torrent_blackhole_completed", "nzb_client", "nzbget_url", "nzbget_user",
+    "nzbget_password", "nzbget_category", "nzbget_download_path", "nzb_blackhole_watch", "nzb_blackhole_completed",
+    "task_backup_enabled", "task_backup_minutes", "youtube_light_refresh", "release_types", "release_skip",
+    "quality_check_on_import", "quality_min_lufs", "task_quality_enabled", "task_quality_minutes", "translator_model",
+    "tools_auto_translator", "translate_background",
+]
+
+[sections.general]
+title = "General"
+
+[sections.apps]
+title = "Apps & sources"
+aliases = ["downloads", "tagging", "services"]
+
+[sections.accounts]
+title = "Email & notifications"
+
+[sections.autodownload]
+title = "Auto-download"
+
+[sections.contribute]
+title = "Contribute"
+
+[sections.blocked]
+title = "Blocked"
+
+[sections.tasks]
+title = "Scheduled tasks"
+
+[groups.general]
+section = "general"
+title = "General"
+desc = "Your server's name and address, who can sign up, and how requests are approved."
+
+[groups.pipeline]
+section = "apps"
+part = "Download sources"
+title = "Download pipeline"
+desc = "Which sources are searched for a request, and in what order. The first one that has it wins."
+
+[groups.releases]
+section = "apps"
+part = "Download sources"
+title = "Release types"
+desc = "Which releases Request discography, the artist pages and New releases count, like the metadata profiles in Lidarr. Song requests skip other versions (live, remix, sped up and so on) unless the song asked for is one."
+
+[groups.streamrip]
+section = "apps"
+part = "Download sources"
+title = "Qobuz / Tidal / Deezer (streamrip)"
+desc = "Searches Qobuz, Tidal and Deezer with your own accounts and downloads lossless (FLAC). Usually the best quality. streamrip is only used for these three: its SoundCloud support would give the same quality as yt-dlp, so SoundCloud links go through yt-dlp."
+test = "streamrip"
+test_label = "Test & write config"
+
+[groups.torznab]
+section = "apps"
+part = "Download sources"
+title = "Torrents & Usenet (Prowlarr)"
+desc = "Searches your torrent and Usenet indexers (through Prowlarr) for whole albums and sends them to your torrent client (qBittorrent, Transmission, Deluge or rTorrent) or Usenet client (SABnzbd or NZBGet), or drops them into a watch folder."
+test = "torznab"
+test_label = "Test connection"
+
+[groups.slskd]
+section = "apps"
+part = "Download sources"
+title = "Soulseek"
+desc = "Searches the Soulseek file-sharing network – great for FLAC and rare releases. Encore runs Soulseek for you: enter any username and password and an account is created at the first sign-in. Forward the port for the best speeds."
+test = "slskd"
+test_label = "Test connection"
+
+[groups.ytdlp]
+section = "apps"
+part = "Download sources"
+title = "YouTube Music & links (yt-dlp)"
+desc = "Last-resort source: finds the song on YouTube Music. yt-dlp also downloads SoundCloud links you paste in the Downloader, along with YouTube, Bandcamp, Mixcloud and about 1,800 other sites."
+
+[groups.youtube]
+section = "apps"
+part = "Download sources"
+title = "YouTube sign-in"
+desc = "Signs yt-dlp in to YouTube: YouTube Music Premium unlocks 256 kbps audio, and signed-in downloads see fewer bot checks. Best: connect the Encore browser extension and hand over a sign-in from a private window – Encore then owns that session and keeps it alive by itself. Pasted cookies are the backup."
+test = "youtube"
+test_label = "Test cookies"
+
+[groups.library]
+section = "apps"
+part = "Library & tagging"
+title = "Library & tagging"
+desc = "Where your music lives, and how downloaded files are tagged, named and organised."
+
+[groups.verify]
+section = "apps"
+part = "Library & tagging"
+title = "Verification & duplicates"
+desc = "Listens to each download and checks it's really the song you asked for, not a remix, live or wrong track."
+test = "acoustid"
+test_label = "Test connection"
+
+[groups.spotify]
+section = "apps"
+part = "Services"
+title = "Integrations"
+desc = "API keys that let users connect their Spotify, Tidal, Last.fm, Discogs and YouTube Music accounts, and power recommendations."
+test = "spotify"
+test_label = "Test all"
+
+[groups.media]
+section = "apps"
+part = "Services"
+title = "Media servers"
+desc = "Tells Navidrome, Jellyfin or Plex to rescan after new music arrives, so it shows up there right away."
+test = "mediaservers"
+test_label = "Trigger refresh"
+
+[groups.roon]
+section = "apps"
+part = "Services"
+title = "Roon"
+desc = "Encore as a Roon extension: your Roon zones show up under Your devices with what they play, transport and volume, and “Play in Roon” starts a search result in a zone. Enable it here, then approve Encore once in Roon → Settings → Extensions."
+test = "roon"
+test_label = "Test connection"
+
+[groups.cadenza]
+section = "apps"
+part = "Services"
+title = "Server processing (Cadenza)"
+desc = "Lets permitted users have their streams upsampled on this server by Cadenza (long-filter upsampling, dither and noise shaping, lossless 24-bit FLAC out). Off by default: it costs real processor time per stream. Allow users under People → Users & permissions."
+test = "cadenza"
+test_label = "Test"
+
+[groups.email]
+section = "accounts"
+title = "Email"
+desc = "Lets Encore send password-reset and sign-in emails."
+test = "email"
+test_label = "Send test email"
+
+[groups.notify]
+section = "accounts"
+title = "Notifications"
+desc = "Get a message on Discord, ntfy or any webhook when downloads finish or fail."
+test = "notify"
+test_label = "Send test"
+
+[groups.sync]
+section = "tasks"
+title = "Playlists & sync"
+desc = "Keeps liked songs and playlists in step with Spotify, YouTube Music, Jellyfin, Plex and the rest. Runs as the “Sync likes & playlists” task above."
+
+# ---- General → General
+
+[keys.app_name]
+env = "ENCORE_APP_NAME"
+default = "Encore"
+group = "general"
+label = "App name"
+type = "text"
+
+[keys.base_url]
+env = "ENCORE_BASE_URL"
+default = ""
+group = "general"
+label = "Public URL"
+type = "url"
+help = "e.g. https://music.example.com – used in links & notifications"
+
+[keys.share_preview]
+env = "SHARE_PREVIEW"
+default = "small"
+group = "general"
+label = "Shared link preview"
+type = "select"
+options = [
+    ["small", "Small card (small cover)"],
+    ["large", "Big picture"],
+    ["playable", "Playable card (play button and seek bar)"],
+]
+help = "How shared links look in Discord, X and other chat apps"
+
+[keys.signup_mode]
+env = "ENCORE_SIGNUP_MODE"
+default = "invite"
+group = "general"
+label = "Sign-up mode"
+type = "select"
+options = [
+    ["invite", "Invite only"],
+    ["open", "Open to anyone"],
+    ["closed", "Closed"],
+]
+
+[keys.auto_approve]
+env = "ENCORE_AUTO_APPROVE"
+default = false
+group = "general"
+label = "Auto-approve all requests"
+type = "bool"
+help = "Otherwise only admins and users with auto-approve skip the approval queue"
+
+[keys.manual_search]
+env = "ENCORE_MANUAL_SEARCH"
+default = "everyone"
+group = "general"
+label = "Manual download picker"
+type = "select"
+options = [
+    ["everyone", "Everyone"],
+    ["admins", "Admins only"],
+]
+help = "Who can search the sources and pick an exact download"
+
+[keys.default_request_limit]
+env = "ENCORE_REQUEST_LIMIT"
+default = 0
+group = "general"
+label = "Default weekly request limit for new users"
+type = "number"
+min = 0
+help = "0 = unlimited"
+
+[keys.session_days]
+env = "ENCORE_SESSION_DAYS"
+default = 30
+group = "general"
+label = "Stay signed in for (days)"
+type = "number"
+unit = "days"
+min = 1
+
+[keys.app_session_days]
+env = "ENCORE_APP_SESSION_DAYS"
+default = 365
+group = "general"
+label = "Keep the Encore app signed in for (days)"
+type = "number"
+unit = "days"
+min = 1
+help = "Counted from the last time the app was used"
+
+[keys.contact_email]
+env = "ENCORE_CONTACT_EMAIL"
+default = ""
+group = "general"
+label = "Contact email for MusicBrainz"
+type = "text"
+help = "MusicBrainz asks API clients to identify themselves"
+
+[keys.musicbrainz_url]
+env = "MUSICBRAINZ_URL"
+default = "https://musicbrainz.org"
+group = "general"
+label = "MusicBrainz server"
+type = "url"
+help = "Use your own mirror for faster lookups"
+
+[keys.musicbrainz_rate]
+env = "MUSICBRAINZ_RATE"
+default = 1.0
+group = "general"
+label = "MusicBrainz requests / second"
+type = "number"
+unit = "requests per second"
+min = 0
+step = 0.1
+help = "Keep at 1 for the public server"
+
+[keys.github_token]
+env = "GITHUB_TOKEN"
+default = ""
+secret = true
+group = "general"
+label = "GitHub token (optional)"
+type = "password"
+full = true
+help = "For the update checks of the download tools and of Encore itself: GitHub allows 60 checks an hour per address without a token and 5,000 with one. A fine-grained token with no permissions is enough (github.com → Settings → Developer settings); if the Encore repository is private, give the token read access to it."
+
+# ---- Apps & sources → Download pipeline
+
+[keys.source_order]
+env = "ENCORE_SOURCE_ORDER"
+default = "tidal,deezer,slskd,torznab,ytdlp"
+group = "pipeline"
+label = "Source order"
+type = "text"
+full = true
+help = "The one place to set what is searched, in order, comma-separated: qobuz, tidal, deezer (all through streamrip), slskd (Soulseek), torznab (torrents/Usenet, albums only), ytdlp (YouTube Music). Leave one out to never use it; sources you haven’t set up are skipped. Recommended (the default): qobuz, tidal, deezer, slskd, torznab, ytdlp – exact hi-res/lossless releases first, then Soulseek, then torrents/Usenet for whole albums, YouTube Music last."
+
+# ---- Apps & sources → Release types
+
+[keys.release_types]
+env = "RELEASE_TYPES"
+default = "Album,EP"
+group = "releases"
+label = "Kinds to request"
+type = "checks"
+options = [
+    ["Album", "Album"],
+    ["EP", "EP"],
+    ["Single", "Single"],
+    ["Broadcast", "Broadcast"],
+    ["Other", "Other"],
+]
+full = true
+help = "Request discography gets these. Each request can change them in its own panel."
+
+[keys.release_skip]
+env = "RELEASE_SKIP"
+default = "Compilation,Soundtrack,Spokenword,Interview,Audiobook,Audio drama,Live,Remix,DJ-mix,Mixtape/Street,Demo,Field recording,Instrumental,Acoustic,Sped up,Karaoke,Covers"
+group = "releases"
+label = "Skip releases that are"
+type = "checks"
+options = [
+    ["Compilation", "Compilation"],
+    ["Soundtrack", "Soundtrack"],
+    ["Spokenword", "Spoken word"],
+    ["Interview", "Interview"],
+    ["Audiobook", "Audiobook"],
+    ["Audio drama", "Audio drama"],
+    ["Live", "Live"],
+    ["Remix", "Remix"],
+    ["DJ-mix", "DJ-mix"],
+    ["Mixtape/Street", "Mixtape / Street"],
+    ["Demo", "Demo"],
+    ["Field recording", "Field recording"],
+    ["Instrumental", "Instrumental"],
+    ["Acoustic", "Acoustic"],
+    ["Sped up", "Sped up / Slowed"],
+    ["Karaoke", "Karaoke"],
+    ["Covers", "Covers / Tributes"],
+]
+full = true
+help = "A release with any ticked extra is left out. Instrumental, acoustic, sped up, karaoke and covers are read from the titles."
+
+# ---- Apps & sources → Qobuz / Tidal / Deezer (streamrip)
+
+[keys.streamrip_enabled]
+env = "STREAMRIP_ENABLED"
+default = false
+group = "streamrip"
+label = "Enable streamrip source"
+type = "bool"
+help = "Downloads lossless from your own paid accounts. Respect each service’s terms – use at your own risk."
+
+[keys.streamrip_quality]
+env = "STREAMRIP_QUALITY"
+default = 2
+group = "streamrip"
+label = "Max quality"
+type = "select"
+options = [
+    ["1", "MP3 320 / AAC"],
+    ["2", "CD – 16-bit FLAC"],
+    ["3", "Hi-res ≤ 24/96"],
+    ["4", "Hi-res max"],
+]
+
+[keys.streamrip_deezer_arl]
+env = "STREAMRIP_DEEZER_ARL"
+default = ""
+secret = true
+group = "streamrip"
+label = "Deezer ARL cookie"
+type = "password"
+full = true
+help = "From deezer.com → browser dev tools → Cookies → arl"
+
+[keys.streamrip_qobuz_user]
+env = "STREAMRIP_QOBUZ_USER"
+default = ""
+group = "streamrip"
+label = "Qobuz user id"
+type = "text"
+
+[keys.streamrip_qobuz_token]
+env = "STREAMRIP_QOBUZ_TOKEN"
+default = ""
+secret = true
+group = "streamrip"
+label = "Qobuz auth token"
+type = "password"
+help = "play.qobuz.com → dev tools → Network → user/login response"
+
+[keys.streamrip_bin]
+env = "STREAMRIP_BIN"
+default = ""
+group = "streamrip"
+label = "streamrip executable (optional)"
+type = "path"
+help = "Leave empty to auto-detect"
+
+[keys.streamrip_command]
+env = "STREAMRIP_COMMAND"
+default = "{bin} --config-path {config} --folder {folder} --quality {quality} --no-db --no-progress url {url}"
+group = "streamrip"
+label = "Command template (advanced)"
+type = "text"
+full = true
+advanced = true
+
+# ---- Apps & sources → Torrents & Usenet (Prowlarr)
+
+[keys.torznab_enabled]
+env = "TORZNAB_ENABLED"
+default = false
+group = "torznab"
+label = "Search torrent and Usenet indexers through Prowlarr"
+type = "bool"
+help = "Albums only. Prowlarr searches every indexer you added there; torrents go to the torrent client below, Usenet to the Usenet client."
+
+[keys.prowlarr_url]
+env = "PROWLARR_URL"
+default = ""
+group = "torznab"
+label = "Prowlarr URL"
+type = "url"
+help = "Internal address, e.g. http://prowlarr:9696"
+
+[keys.prowlarr_api_key]
+env = "PROWLARR_API_KEY"
+default = ""
+secret = true
+group = "torznab"
+label = "Prowlarr API key"
+type = "password"
+help = "Prowlarr → Settings → General → API Key"
+
+[keys.torznab_min_seeders]
+env = "TORZNAB_MIN_SEEDERS"
+default = 2
+group = "torznab"
+label = "Minimum seeders"
+type = "number"
+min = 0
+
+[keys.torznab_timeout_minutes]
+env = "TORZNAB_TIMEOUT_MINUTES"
+default = 120
+group = "torznab"
+label = "Try the next release after a stall of (minutes)"
+type = "number"
+unit = "minutes"
+min = 1
+
+[keys.torrent_client]
+env = "TORRENT_CLIENT"
+default = "qbittorrent"
+group = "torznab"
+label = "Torrent client"
+type = "select"
+options = [
+    ["qbittorrent", "qBittorrent"],
+    ["transmission", "Transmission"],
+    ["deluge", "Deluge"],
+    ["rtorrent", "rTorrent / ruTorrent"],
+    ["blackhole", "Blackhole folder (any client with a watch folder)"],
+]
+
+[keys.qbit_url]
+env = "QBIT_URL"
+default = ""
+group = "torznab"
+label = "qBittorrent URL"
+type = "url"
+when = "torrent_client=qbittorrent"
+help = "e.g. http://qbittorrent:8080 (leave empty to skip torrents)"
+
+[keys.qbit_user]
+env = "QBIT_USER"
+default = "admin"
+group = "torznab"
+label = "qBittorrent user"
+type = "text"
+when = "torrent_client=qbittorrent"
+
+[keys.qbit_password]
+env = "QBIT_PASSWORD"
+default = ""
+secret = true
+group = "torznab"
+label = "qBittorrent password"
+type = "password"
+when = "torrent_client=qbittorrent"
+
+[keys.qbit_category]
+env = "QBIT_CATEGORY"
+default = "encore"
+group = "torznab"
+label = "qBittorrent category"
+type = "text"
+when = "torrent_client=qbittorrent"
+
+[keys.qbit_download_path]
+env = "QBIT_DOWNLOAD_PATH"
+default = "/downloads/torrents"
+group = "torznab"
+label = "Torrent download folder (same path in both containers)"
+type = "path"
+when = "torrent_client=qbittorrent"
+full = true
+
+[keys.transmission_url]
+env = "TRANSMISSION_URL"
+default = ""
+group = "torznab"
+label = "Transmission URL"
+type = "url"
+when = "torrent_client=transmission"
+help = "e.g. http://transmission:9091 (leave empty to skip torrents)"
+
+[keys.transmission_user]
+env = "TRANSMISSION_USER"
+default = ""
+group = "torznab"
+label = "Transmission user"
+type = "text"
+when = "torrent_client=transmission"
+help = "Leave empty when Transmission asks for no login"
+
+[keys.transmission_password]
+env = "TRANSMISSION_PASSWORD"
+default = ""
+secret = true
+group = "torznab"
+label = "Transmission password"
+type = "password"
+when = "torrent_client=transmission"
+
+[keys.transmission_label]
+env = "TRANSMISSION_LABEL"
+default = "encore"
+group = "torznab"
+label = "Transmission label"
+type = "text"
+when = "torrent_client=transmission"
+help = "Transmission 4.0 or newer"
+
+[keys.transmission_download_path]
+env = "TRANSMISSION_DOWNLOAD_PATH"
+default = "/downloads/torrents"
+group = "torznab"
+label = "Torrent download folder (same path in both containers)"
+type = "path"
+when = "torrent_client=transmission"
+full = true
+
+[keys.deluge_url]
+env = "DELUGE_URL"
+default = ""
+group = "torznab"
+label = "Deluge Web UI URL"
+type = "url"
+when = "torrent_client=deluge"
+help = "e.g. http://deluge:8112 (leave empty to skip torrents)"
+
+[keys.deluge_password]
+env = "DELUGE_PASSWORD"
+default = ""
+secret = true
+group = "torznab"
+label = "Deluge Web UI password"
+type = "password"
+when = "torrent_client=deluge"
+
+[keys.deluge_label]
+env = "DELUGE_LABEL"
+default = "encore"
+group = "torznab"
+label = "Deluge label"
+type = "text"
+when = "torrent_client=deluge"
+help = "Needs the Label plugin; skipped when it is off"
+
+[keys.deluge_download_path]
+env = "DELUGE_DOWNLOAD_PATH"
+default = "/downloads/torrents"
+group = "torznab"
+label = "Torrent download folder (same path in both containers)"
+type = "path"
+when = "torrent_client=deluge"
+full = true
+
+[keys.rtorrent_url]
+env = "RTORRENT_URL"
+default = ""
+group = "torznab"
+label = "rTorrent XML-RPC URL"
+type = "url"
+when = "torrent_client=rtorrent"
+full = true
+help = "e.g. http://rutorrent:8080/RPC2 or http://rutorrent/plugins/httprpc/action.php (leave empty to skip torrents)"
+
+[keys.rtorrent_user]
+env = "RTORRENT_USER"
+default = ""
+group = "torznab"
+label = "rTorrent user"
+type = "text"
+when = "torrent_client=rtorrent"
+help = "Leave empty when the address asks for no login"
+
+[keys.rtorrent_password]
+env = "RTORRENT_PASSWORD"
+default = ""
+secret = true
+group = "torznab"
+label = "rTorrent password"
+type = "password"
+when = "torrent_client=rtorrent"
+
+[keys.rtorrent_label]
+env = "RTORRENT_LABEL"
+default = "encore"
+group = "torznab"
+label = "rTorrent label (shown in ruTorrent)"
+type = "text"
+when = "torrent_client=rtorrent"
+
+[keys.rtorrent_download_path]
+env = "RTORRENT_DOWNLOAD_PATH"
+default = "/downloads/torrents"
+group = "torznab"
+label = "Torrent download folder (same path in both containers)"
+type = "path"
+when = "torrent_client=rtorrent"
+full = true
+
+[keys.torrent_blackhole_watch]
+env = "TORRENT_BLACKHOLE_WATCH"
+default = "/downloads/watch"
+group = "torznab"
+label = "Torrent watch folder"
+type = "path"
+when = "torrent_client=blackhole"
+full = true
+help = "Encore drops .torrent and .magnet files here for your client to pick up"
+
+[keys.torrent_blackhole_completed]
+env = "TORRENT_BLACKHOLE_COMPLETED"
+default = "/downloads/torrents"
+group = "torznab"
+label = "Finished torrents folder"
+type = "path"
+when = "torrent_client=blackhole"
+full = true
+help = "Where your client puts finished downloads, as mounted in this container"
+
+[keys.nzb_client]
+env = "NZB_CLIENT"
+default = "sabnzbd"
+group = "torznab"
+label = "Usenet client"
+type = "select"
+options = [
+    ["sabnzbd", "SABnzbd"],
+    ["nzbget", "NZBGet"],
+    ["blackhole", "Blackhole folder (any client with a watch folder)"],
+]
+
+[keys.sab_url]
+env = "SAB_URL"
+default = ""
+group = "torznab"
+label = "SABnzbd URL"
+type = "url"
+when = "nzb_client=sabnzbd"
+help = "e.g. http://sabnzbd:8080 (leave empty to skip Usenet)"
+
+[keys.sab_api_key]
+env = "SAB_API_KEY"
+default = ""
+secret = true
+group = "torznab"
+label = "SABnzbd API key"
+type = "password"
+when = "nzb_client=sabnzbd"
+
+[keys.sab_category]
+env = "SAB_CATEGORY"
+default = "encore"
+group = "torznab"
+label = "SABnzbd category"
+type = "text"
+when = "nzb_client=sabnzbd"
+
+[keys.sab_download_path]
+env = "SAB_DOWNLOAD_PATH"
+default = "/downloads/usenet"
+group = "torznab"
+label = "Usenet download folder (as mounted in this container)"
+type = "path"
+when = "nzb_client=sabnzbd"
+full = true
+
+[keys.nzbget_url]
+env = "NZBGET_URL"
+default = ""
+group = "torznab"
+label = "NZBGet URL"
+type = "url"
+when = "nzb_client=nzbget"
+help = "e.g. http://nzbget:6789 (leave empty to skip Usenet)"
+
+[keys.nzbget_user]
+env = "NZBGET_USER"
+default = "nzbget"
+group = "torznab"
+label = "NZBGet user"
+type = "text"
+when = "nzb_client=nzbget"
+
+[keys.nzbget_password]
+env = "NZBGET_PASSWORD"
+default = ""
+secret = true
+group = "torznab"
+label = "NZBGet password"
+type = "password"
+when = "nzb_client=nzbget"
+
+[keys.nzbget_category]
+env = "NZBGET_CATEGORY"
+default = "encore"
+group = "torznab"
+label = "NZBGet category"
+type = "text"
+when = "nzb_client=nzbget"
+
+[keys.nzbget_download_path]
+env = "NZBGET_DOWNLOAD_PATH"
+default = "/downloads/usenet"
+group = "torznab"
+label = "Usenet download folder (as mounted in this container)"
+type = "path"
+when = "nzb_client=nzbget"
+full = true
+
+[keys.nzb_blackhole_watch]
+env = "NZB_BLACKHOLE_WATCH"
+default = "/downloads/watch"
+group = "torznab"
+label = "Usenet watch folder"
+type = "path"
+when = "nzb_client=blackhole"
+full = true
+help = "Encore drops .nzb files here for your client to pick up"
+
+[keys.nzb_blackhole_completed]
+env = "NZB_BLACKHOLE_COMPLETED"
+default = "/downloads/usenet"
+group = "torznab"
+label = "Finished Usenet downloads folder"
+type = "path"
+when = "nzb_client=blackhole"
+full = true
+help = "Where your client puts finished downloads, as mounted in this container"
+
+# ---- Apps & sources → Soulseek
+
+[keys.slskd_enabled]
+env = "SLSKD_ENABLED"
+default = false
+group = "slskd"
+label = "Enable Soulseek"
+type = "bool"
+
+[keys.soulseek_username]
+env = "SOULSEEK_USERNAME"
+default = ""
+group = "slskd"
+label = "Soulseek username"
+type = "text"
+help = "New name + password = new account. Don’t use the same login in another Soulseek client at the same time."
+
+[keys.soulseek_password]
+env = "SOULSEEK_PASSWORD"
+default = ""
+secret = true
+group = "slskd"
+label = "Soulseek password"
+type = "password"
+
+[keys.soulseek_port]
+env = "SOULSEEK_PORT"
+default = 2234
+group = "slskd"
+label = "Listen port"
+type = "number"
+min = 1
+max = 65535
+help = "TCP port Soulseek listens on – forward it on your router (and publish it in Docker) so users behind firewalls can send to you. While Send Soulseek through a VPN is on, the VPN’s forwarded port is used instead."
+
+[keys.soulseek_share]
+env = "SOULSEEK_SHARE"
+default = true
+group = "slskd"
+label = "Share your library on Soulseek (recommended)"
+type = "bool"
+help = "The network runs on sharing; many users refuse downloads to people who share nothing. Only the library folder is shared, read-only."
+
+[keys.soulseek_upload_slots]
+env = "SOULSEEK_UPLOAD_SLOTS"
+default = 2
+group = "slskd"
+label = "Upload slots"
+type = "number"
+min = 0
+
+[keys.slskd_download_path]
+env = "SLSKD_DOWNLOAD_PATH"
+default = "/downloads/slskd"
+group = "slskd"
+label = "Downloads folder (as mounted in this container)"
+type = "path"
+full = true
+
+[keys.slskd_preferred_format]
+env = "SLSKD_PREFERRED_FORMAT"
+default = "flac"
+group = "slskd"
+label = "Preferred format"
+type = "select"
+options = [
+    ["flac", "FLAC / lossless"],
+    ["mp3", "MP3"],
+    ["any", "Best available"],
+]
+
+[keys.slskd_min_bitrate]
+env = "SLSKD_MIN_BITRATE"
+default = 192
+group = "slskd"
+label = "Minimum MP3 bitrate (kbps)"
+type = "number"
+unit = "kbps"
+min = 0
+
+[keys.slskd_search_timeout]
+env = "SLSKD_SEARCH_TIMEOUT"
+default = 15
+group = "slskd"
+label = "Search time (seconds)"
+type = "number"
+unit = "seconds"
+min = 1
+
+[keys.slskd_stall_minutes]
+env = "SLSKD_STALL_MINUTES"
+default = 20
+group = "slskd"
+label = "Give up on a stalled user after (minutes)"
+type = "number"
+unit = "minutes"
+min = 1
+
+[keys.slskd_max_candidates]
+env = "SLSKD_MAX_CANDIDATES"
+default = 4
+group = "slskd"
+label = "Max users to try per request"
+type = "number"
+min = 1
+
+[keys.vpn_enabled]
+env = "VPN_ENABLED"
+default = false
+group = "slskd"
+label = "Send Soulseek through a VPN"
+type = "bool"
+help = "Only Soulseek goes through the VPN; Tidal, Qobuz, Deezer and everything else keep your normal connection. No gluetun container needed."
+
+[keys.vpn_wireguard_config]
+env = "VPN_WIREGUARD_CONFIG"
+default = ""
+secret = true
+group = "slskd"
+label = "WireGuard config"
+type = "textarea"
+full = true
+help = "Paste the whole .conf file from your VPN provider (ProtonVPN: Downloads → WireGuard configuration, with NAT-PMP port forwarding on). The private key is stored on this server only."
+
+[keys.vpn_port_forwarding]
+env = "VPN_PORT_FORWARDING"
+default = "natpmp"
+group = "slskd"
+label = "Port forwarding"
+type = "select"
+options = [
+    ["natpmp", "NAT-PMP (ProtonVPN)"],
+    ["off", "Off"],
+]
+
+[keys.vpn_kill_switch]
+env = "VPN_KILL_SWITCH"
+default = true
+group = "slskd"
+label = "Keep Soulseek off while the VPN is down"
+type = "bool"
+
+# ---- Apps & sources → YouTube Music & links (yt-dlp)
+
+[keys.ytdlp_enabled]
+env = "YTDLP_ENABLED"
+default = true
+group = "ytdlp"
+label = "Enable yt-dlp as a source"
+type = "bool"
+help = "Searches YouTube Music for requests, and downloads links you paste in the Downloader from YouTube, SoundCloud, Bandcamp, Mixcloud and ~1,800 other sites."
+
+[keys.ytdlp_last_resort]
+env = "ENCORE_YTDLP_LAST_RESORT"
+default = true
+group = "ytdlp"
+label = "Always try YouTube Music last, so downloads (almost) never fail"
+type = "bool"
+
+[keys.ytdlp_format]
+env = "YTDLP_FORMAT"
+default = "best"
+group = "ytdlp"
+label = "Audio format"
+type = "select"
+options = [
+    ["best", "Original stream – best quality, no re-encode (recommended)"],
+    ["m4a", "M4A (AAC, re-encoded)"],
+    ["mp3", "MP3 (re-encoded)"],
+    ["opus", "Opus"],
+]
+
+[keys.ytdlp_quality]
+env = "YTDLP_QUALITY"
+default = "320"
+group = "ytdlp"
+label = "MP3/M4A quality"
+type = "text"
+help = "Bitrate like 320, or 0 for best VBR"
+
+# ---- Apps & sources → YouTube sign-in
+
+[keys.ytdlp_cookies]
+env = "YTDLP_COOKIES"
+default = ""
+secret = true
+group = "youtube"
+label = "Pasted cookies.txt (backup)"
+type = "textarea"
+full = true
+help = "Netscape cookie file exported from music.youtube.com. Used only when there is no signed-in hand-off or extension sync. Export from a private window and close it right after, so your own browser does not rotate them."
+
+[keys.youtube_light_refresh]
+env = "YOUTUBE_LIGHT_REFRESH"
+default = true
+group = "youtube"
+label = "Refresh pasted cookies every 4 hours"
+type = "bool"
+help = "Only for pasted cookies while they are in use: Encore renews them the way an open YouTube tab does and saves the new ones. A handed-over sign-in is always refreshed every 4 hours; an everyday browser’s cookies never are (that would sign that browser out)."
+
+# ---- Apps & sources → Library & tagging
+
+[keys.library_path]
+env = "ENCORE_LIBRARY_PATH"
+default = "/music"
+group = "library"
+label = "Music library path"
+type = "path"
+help = "Inside the container (mount your music folder here)"
+
+[keys.staging_path]
+env = "ENCORE_STAGING_PATH"
+default = "/downloads/encore"
+group = "library"
+label = "Staging path for yt-dlp downloads"
+type = "path"
+
+[keys.scan_interval_minutes]
+env = "ENCORE_SCAN_INTERVAL"
+default = 60
+group = "library"
+label = "Rescan library every (minutes)"
+type = "number"
+unit = "minutes"
+min = 0
+help = "0 disables periodic scans"
+
+[keys.autotag_on_import]
+env = "ENCORE_AUTOTAG"
+default = true
+group = "library"
+label = "Tag downloads from MusicBrainz on import"
+type = "bool"
+
+[keys.autotag_threshold]
+env = "ENCORE_AUTOTAG_THRESHOLD"
+default = 0.8
+group = "library"
+label = "Auto-tag confidence threshold"
+type = "number"
+min = 0
+max = 1
+step = 0.05
+help = "0–1. Matches below this are imported with their existing tags"
+
+[keys.rename_on_import]
+env = "ENCORE_RENAME_ON_IMPORT"
+default = true
+group = "library"
+label = "Rename & organise files"
+type = "bool"
+
+[keys.naming_template]
+env = "ENCORE_NAMING_TEMPLATE"
+default = "{albumartist}/{album} ({year})/{discprefix}{track:02d} - {title}"
+group = "library"
+label = "Album naming template"
+type = "text"
+full = true
+help = "Fields: {albumartist} {artist} {album} {year} {disc} {discprefix} {track:02d} {title} {genre} {label} {type} {format}"
+
+[keys.single_template]
+env = "ENCORE_SINGLE_TEMPLATE"
+default = "{artist}/Singles/{artist} - {title}"
+group = "library"
+label = "Single-track naming template"
+type = "text"
+full = true
+
+[keys.save_cover]
+env = "ENCORE_SAVE_COVER"
+default = true
+group = "library"
+label = "Save cover.jpg in album folders"
+type = "bool"
+
+[keys.embed_cover]
+env = "ENCORE_EMBED_COVER"
+default = true
+group = "library"
+label = "Embed cover art in files"
+type = "bool"
+
+# ---- Apps & sources → Verification & duplicates
+
+[keys.acoustid_api_key]
+env = "ACOUSTID_API_KEY"
+default = ""
+secret = true
+group = "verify"
+label = "AcoustID API key"
+type = "password"
+full = true
+help = "Free – register an application at acoustid.org/new-application. Used to fingerprint audio and confirm each file is the right song/version."
+
+[keys.verify_on_import]
+env = "ENCORE_VERIFY_ON_IMPORT"
+default = true
+group = "verify"
+label = "Fingerprint every download before import"
+type = "bool"
+
+[keys.reject_mismatch]
+env = "ENCORE_REJECT_MISMATCH"
+default = true
+group = "verify"
+label = "Reject downloads whose audio is a different song/version (and try the next source)"
+type = "bool"
+
+[keys.dedupe_on_import]
+env = "ENCORE_DEDUPE_ON_IMPORT"
+default = true
+group = "verify"
+label = "Never import a second copy of a song (keep the better-quality file)"
+type = "bool"
+
+[keys.upgrade_check_audio]
+env = "ENCORE_UPGRADE_CHECK_AUDIO"
+default = true
+group = "verify"
+label = "Before replacing a song with a better copy, compare the audio – a different recording is kept as its own song"
+type = "bool"
+
+# ---- Apps & sources → Integrations
+
+[keys.spotify_client_id]
+env = "SPOTIFY_CLIENT_ID"
+default = ""
+group = "spotify"
+label = "Spotify Client ID"
+type = "text"
+help = "developer.spotify.com – add <Public URL>/api/connections/spotify/callback as redirect URI. Development-mode apps allow 5 users and need a Premium owner (2026 rules); without it, public playlists still import via the embed fallback."
+
+[keys.spotify_client_secret]
+env = "SPOTIFY_CLIENT_SECRET"
+default = ""
+secret = true
+group = "spotify"
+label = "Spotify Client secret"
+type = "password"
+
+[keys.tidal_client_id]
+env = "TIDAL_CLIENT_ID"
+default = ""
+group = "spotify"
+label = "Tidal Client ID"
+type = "text"
+help = "Only for looking up Tidal albums/songs by ISRC and for the Tidal connection. Get one at developer.tidal.com → Dashboard → Create new app (any name), redirect URI <Public URL>/api/connections/tidal/callback, then copy the Client ID and Client secret here. Downloads from Tidal use your own account instead: Apps & sources → Qobuz / Tidal / Deezer (streamrip) → Sign in to Tidal."
+
+[keys.tidal_client_secret]
+env = "TIDAL_CLIENT_SECRET"
+default = ""
+secret = true
+group = "spotify"
+label = "Tidal Client secret"
+type = "password"
+
+[keys.lastfm_api_key]
+env = "LASTFM_API_KEY"
+default = ""
+secret = true
+group = "spotify"
+label = "Last.fm API key"
+type = "password"
+help = "last.fm/api/account/create (free) – loved tracks, similar artists/songs, genre pages, For you"
+
+[keys.lastfm_shared_secret]
+env = "LASTFM_SHARED_SECRET"
+default = ""
+secret = true
+group = "spotify"
+label = "Last.fm shared secret"
+type = "password"
+help = "Shown next to the API key. Needed for scrobbling: users sign in with Last.fm on the Connections page."
+
+[keys.discogs_token]
+env = "DISCOGS_TOKEN"
+default = ""
+secret = true
+group = "spotify"
+label = "Discogs personal access token"
+type = "password"
+help = "discogs.com/settings/developers → “Generate new token” and paste that personal access token here (not an application’s Consumer Key/Secret – no app is needed). Finds vinyl, bootlegs and old releases MusicBrainz is missing."
+
+[keys.ytmusic_client_id]
+env = "YTMUSIC_CLIENT_ID"
+default = ""
+group = "spotify"
+label = "YouTube Music OAuth Client ID"
+type = "text"
+help = "Google Cloud → YouTube Data API v3 → OAuth client of type “TVs and Limited Input devices”. Lets users sign in to YouTube Music with a code (they can also paste browser headers instead)."
+
+[keys.ytmusic_client_secret]
+env = "YTMUSIC_CLIENT_SECRET"
+default = ""
+secret = true
+group = "spotify"
+label = "YouTube Music OAuth Client secret"
+type = "password"
+
+# ---- Apps & sources → Media servers
+
+[keys.navidrome_url]
+env = "NAVIDROME_URL"
+default = ""
+group = "media"
+label = "Navidrome URL"
+type = "url"
+help = "URLs here let users link their own accounts on the Connections page; the admin credentials below are only used to trigger library rescans"
+
+[keys.navidrome_user]
+env = "NAVIDROME_USER"
+default = ""
+group = "media"
+label = "Navidrome user"
+type = "text"
+
+[keys.navidrome_password]
+env = "NAVIDROME_PASSWORD"
+default = ""
+secret = true
+group = "media"
+label = "Navidrome password"
+type = "password"
+
+[keys.jellyfin_url]
+env = "JELLYFIN_URL"
+default = ""
+group = "media"
+label = "Jellyfin URL"
+type = "url"
+
+[keys.jellyfin_api_key]
+env = "JELLYFIN_API_KEY"
+default = ""
+secret = true
+group = "media"
+label = "Jellyfin API key"
+type = "password"
+
+[keys.plex_url]
+env = "PLEX_URL"
+default = ""
+group = "media"
+label = "Plex URL"
+type = "url"
+
+[keys.plex_token]
+env = "PLEX_TOKEN"
+default = ""
+secret = true
+group = "media"
+label = "Plex token"
+type = "password"
+
+# ---- Apps & sources → Roon
+
+[keys.roon_enabled]
+env = "ROON_ENABLED"
+default = false
+group = "roon"
+label = "Enable Roon"
+type = "bool"
+help = "Roon Core (or Nucleus / ROCK) on the same network. Roon 1.8 or newer."
+
+[keys.roon_host]
+env = "ROON_HOST"
+default = ""
+group = "roon"
+label = "Roon Core address"
+type = "text"
+help = "Leave empty to find the Core on the network. Running Encore in Docker? Multicast does not cross the bridge network – enter the Core’s IP here (add :port if it is not 9330)."
+
+# ---- Apps & sources → Server processing (Cadenza)
+
+[keys.cadenza_server_enabled]
+env = "CADENZA_SERVER_ENABLED"
+default = false
+group = "cadenza"
+label = "Enable server processing"
+type = "bool"
+
+[keys.cadenza_max_streams]
+env = "CADENZA_MAX_STREAMS"
+default = 2
+group = "cadenza"
+label = "Streams at once"
+type = "number"
+min = 0
+help = "Processed streams the whole server runs at the same time; more are played as the original."
+
+[keys.cadenza_max_rate]
+env = "CADENZA_MAX_RATE"
+default = 192000
+group = "cadenza"
+label = "Highest output rate"
+type = "select"
+options = [
+    ["96000", "96 kHz"],
+    ["192000", "192 kHz"],
+    ["384000", "384 kHz"],
+    ["768000", "768 kHz"],
+]
+
+[keys.cadenza_max_taps]
+env = "CADENZA_MAX_TAPS"
+default = 65536
+group = "cadenza"
+label = "Longest filter"
+type = "select"
+options = [
+    ["16384", "16k taps (light)"],
+    ["65536", "64k taps"],
+    ["262144", "256k taps"],
+    ["1048576", "1M taps (heavy)"],
+]
+
+[keys.cadenza_cache_mb]
+env = "CADENZA_CACHE_MB"
+default = 4096
+group = "cadenza"
+label = "Cache size (MB)"
+type = "number"
+unit = "MB"
+min = 0
+help = "Each song is rendered once and kept on disk, so seeking and skipping need no new processing and the next song is ready before it plays. The least recently played renders make room. 0 = no cache (every stream is processed live)."
+
+# ---- Email & notifications → Email
+
+[keys.smtp_host]
+env = "SMTP_HOST"
+default = ""
+group = "email"
+label = "SMTP server"
+type = "text"
+help = "e.g. smtp.fastmail.com – used for password-reset emails"
+
+[keys.smtp_port]
+env = "SMTP_PORT"
+default = 587
+group = "email"
+label = "Port"
+type = "number"
+min = 1
+max = 65535
+help = "587 (STARTTLS) or 465 (SSL)"
+
+[keys.smtp_user]
+env = "SMTP_USER"
+default = ""
+group = "email"
+label = "Username"
+type = "text"
+
+[keys.smtp_password]
+env = "SMTP_PASSWORD"
+default = ""
+secret = true
+group = "email"
+label = "Password"
+type = "password"
+
+[keys.smtp_from]
+env = "SMTP_FROM"
+default = ""
+group = "email"
+label = "From address"
+type = "text"
+help = "e.g. Encore <music@example.com>"
+
+[keys.smtp_security]
+env = "SMTP_SECURITY"
+default = "starttls"
+group = "email"
+label = "Security"
+type = "select"
+options = [
+    ["starttls", "STARTTLS"],
+    ["ssl", "SSL/TLS"],
+    ["none", "None"],
+]
+
+# ---- Email & notifications → Notifications
+
+[keys.discord_webhook]
+env = "DISCORD_WEBHOOK"
+default = ""
+secret = true
+group = "notify"
+label = "Discord webhook URL"
+type = "password"
+full = true
+
+[keys.ntfy_url]
+env = "NTFY_URL"
+default = ""
+group = "notify"
+label = "ntfy topic URL"
+type = "url"
+help = "e.g. https://ntfy.sh/my-music"
+
+[keys.ntfy_token]
+env = "NTFY_TOKEN"
+default = ""
+secret = true
+group = "notify"
+label = "ntfy access token"
+type = "password"
+
+[keys.webhook_url]
+env = "WEBHOOK_URL"
+default = ""
+secret = true
+group = "notify"
+label = "Generic webhook (JSON POST)"
+type = "password"
+full = true
+
+# ---- Scheduled tasks → Playlists & sync
+
+[keys.sync_interval_minutes]
+env = "ENCORE_SYNC_INTERVAL"
+default = 15
+group = "sync"
+label = "Sync likes & playlists every (minutes)"
+type = "number"
+unit = "minutes"
+min = 0
+help = "0 disables automatic sync – same as the task’s “every” above"
+
+[keys.auto_request_followed]
+env = "ENCORE_AUTO_REQUEST_FOLLOWED"
+default = false
+group = "sync"
+label = "Automatically download new tracks in followed playlists (more rules under Admin → Auto-download)"
+type = "bool"
+
+# ---- Settings → Scheduled tasks (drawn by the tasks page: one on/off switch and one interval per task)
+
+[keys.task_lossy_minutes]
+default = 360
+help = "How often the Lossless upgrades task runs, in minutes (on/off: upgrade_lossy)."
+
+[keys.task_discover_minutes]
+default = 360
+help = "How often the Auto-discover task runs, in minutes (on/off: discover_auto_count above 0)."
+
+[keys.task_lyrics_enabled]
+default = true
+help = "Fetch missing lyrics task on/off."
+
+[keys.task_lyrics_minutes]
+default = 720
+help = "How often the Fetch missing lyrics task runs, in minutes."
+
+[keys.task_artwork_enabled]
+default = true
+help = "Find missing artwork task on/off."
+
+[keys.task_artwork_minutes]
+default = 1440
+help = "How often the Find missing artwork task runs, in minutes."
+
+[keys.task_retag_enabled]
+default = true
+help = "Re-tag albums added to MusicBrainz task on/off."
+
+[keys.task_retag_minutes]
+default = 1440
+help = "How often the Re-tag albums added to MusicBrainz task runs, in minutes."
+
+[keys.task_verify_enabled]
+default = false
+help = "Verify audio fingerprints task on/off."
+
+[keys.task_verify_minutes]
+default = 1440
+help = "How often the Verify audio fingerprints task runs, in minutes."
+
+[keys.task_quality_enabled]
+env = "TASK_QUALITY_ENABLED"
+default = false
+help = "Quality scan task on/off."
+
+[keys.task_quality_minutes]
+env = "TASK_QUALITY_MINUTES"
+default = 360
+help = "How often the Quality scan task runs, in minutes."
+
+[keys.task_cleanup_enabled]
+default = true
+help = "Clean up task on/off."
+
+[keys.task_cleanup_minutes]
+default = 1440
+help = "How often the Clean up task runs, in minutes."
+
+[keys.task_cleanup_days]
+default = 14
+help = "The cleanup age: finished downloads older than this many days leave the list."
+
+[keys.task_tools_enabled]
+default = true
+help = "Update download tools task on/off."
+
+[keys.task_tools_minutes]
+default = 1440
+help = "How often the Update download tools task runs, in minutes."
+
+[keys.task_backup_enabled]
+env = "TASK_BACKUP_ENABLED"
+default = true
+help = "Back up the database task on/off (the copies are under config/backups)."
+
+[keys.task_backup_minutes]
+env = "TASK_BACKUP_MINUTES"
+default = 1440
+help = "How often the Back up the database task runs, in minutes."
+
+[keys.check_updates]
+env = "ENCORE_CHECK_UPDATES"
+default = true
+help = "Check for Encore updates task on/off."
+
+[keys.task_update_minutes]
+default = 1440
+help = "How often the Check for Encore updates task runs, in minutes."
+
+# ---- Settings → Download tools (switches on the tools card)
+
+[keys.tools_auto_ytdlp]
+default = true
+label = "Update yt-dlp automatically (recommended – sites change often)"
+
+[keys.tools_auto_streamrip]
+default = true
+label = "Update streamrip automatically when a new release is out"
+
+[keys.tools_auto_cadenza]
+default = false
+label = "Update Cadenza automatically when a new release is out"
+
+[keys.tools_auto_slskd]
+default = false
+label = "Update slskd automatically when a new release is out"
+
+[keys.tools_auto_translator]
+default = false
+label = "Update the Translator (llama.cpp) automatically"
+
+[keys.translator_model]
+env = "TRANSLATOR_MODEL"
+default = "small"
+help = "The Translator tool's model: small or best."
+
+[keys.translate_background]
+env = "TRANSLATE_BACKGROUND"
+default = true
+help = "Translate the library in the background (titles on screen always are)."
+
+# ---- Settings → Server processing (Cadenza): the engine's own settings, drawn from its description
+
+[keys.cadenza_engine_settings]
+default = "{}"
+help = "The Cadenza engine's settings as JSON text, only the values that differ from the engine's defaults."
+
+# ---- Settings → Auto-download (drawn by the Auto-download page)
+
+[keys.auto_request_likes]
+env = "ENCORE_AUTO_REQUEST_LIKES"
+default = false
+label = "Liked songs"
+help = "A song liked in Finamp, Plexamp, YouTube Music, Spotify, Tidal, Deezer… that isn’t in the library yet gets downloaded."
+
+[keys.discover_auto_count]
+env = "ENCORE_DISCOVER_AUTO_COUNT"
+default = 0
+help = "Auto-discover: from each user’s ListenBrainz Weekly Exploration, download the top this many new songs every week (0 = off)."
+
+[keys.discover_catalog_merge]
+env = "ENCORE_CATALOG_MERGE"
+default = true
+label = "Show releases MusicBrainz is missing"
+help = "Artist pages also list albums/EPs/singles found on Deezer and Apple Music that aren’t in MusicBrainz, so they can be requested."
+
+[keys.album_upgrade]
+env = "ENCORE_ALBUM_UPGRADE"
+default = "album_ep"
+label = "When a song is part of an album"
+help = "album_ep: download the whole album or EP it’s from (recommended); album: the whole album (studio albums only); off: only the song."
+
+[keys.quality_first]
+env = "ENCORE_QUALITY_FIRST"
+default = true
+label = "Highest quality first"
+help = "Try every lossless source (Qobuz/Tidal/Deezer, then FLAC on Soulseek – 24-bit preferred) before torrents/Usenet, MP3s and YouTube Music."
+
+[keys.upgrade_lossy]
+env = "ENCORE_UPGRADE_LOSSY"
+default = false
+label = "Keep upgrading lossy albums"
+help = "Periodically look for lossless copies of albums you only have as MP3/YouTube rips. Better files replace the old ones; playlists follow automatically."
+
+[keys.upgrade_lossy_days]
+env = "ENCORE_UPGRADE_LOSSY_DAYS"
+default = 7
+label = "Retry each lossy album every"
+help = "Days between two checks of the same album."
+
+# ---- People → Users & permissions: what a new member gets
+
+[keys.new_user_auto_approve]
+env = "ENCORE_NEW_USER_AUTO_APPROVE"
+default = false
+label = "Requests skip the approval queue"
+
+[keys.new_user_auto_approve_playlists]
+env = "ENCORE_NEW_USER_AUTO_APPROVE_PLAYLISTS"
+default = false
+label = "Playlist downloads skip the approval queue"
+
+[keys.new_user_pick]
+env = "ENCORE_NEW_USER_PICK"
+default = true
+label = "Pick the exact version to download"
+
+[keys.new_user_fix]
+env = "ENCORE_NEW_USER_FIX"
+default = true
+label = "Fix their own downloads"
+
+[keys.new_user_storage]
+env = "ENCORE_NEW_USER_STORAGE"
+default = true
+label = "See server storage"
+
+[keys.new_user_auto_download]
+env = "ENCORE_NEW_USER_AUTO_DOWNLOAD"
+default = true
+label = "Auto-download (likes and followed playlists)"
+
+# ---- Settings → Contribute (drawn by the Contribute page)
+
+[keys.contribute_acoustid]
+env = "ENCORE_CONTRIBUTE_ACOUSTID"
+default = true
+label = "Send fingerprints of confirmed songs to AcoustID"
+
+[keys.acoustid_user_key]
+env = "ACOUSTID_USER_KEY"
+default = ""
+secret = true
+label = "AcoustID user key"
+
+[keys.contribute_isrc]
+env = "ENCORE_CONTRIBUTE_ISRC"
+default = true
+label = "Add missing ISRCs to MusicBrainz"
+
+[keys.mb_client_id]
+env = "MUSICBRAINZ_CLIENT_ID"
+default = ""
+label = "MusicBrainz application client ID"
+
+[keys.mb_client_secret]
+env = "MUSICBRAINZ_CLIENT_SECRET"
+default = ""
+secret = true
+label = "MusicBrainz application client secret"
+
+[keys.mb_oauth_access_token]
+default = ""
+secret = true
+help = "Saved by the MusicBrainz sign-in on the Contribute page."
+
+[keys.mb_oauth_refresh_token]
+default = ""
+secret = true
+help = "Saved by the MusicBrainz sign-in on the Contribute page."
+
+[keys.mb_oauth_expires_at]
+default = 0.0
+help = "When the MusicBrainz access token runs out (Unix seconds); saved by the sign-in."
+
+[keys.mb_oauth_account]
+default = ""
+help = "The MusicBrainz account that signed in on the Contribute page."
+
+# ---- Other pages
+
+[keys.email_login]
+env = "ENCORE_EMAIL_LOGIN"
+default = true
+help = "Offer “Email me a sign-in link” on the sign-in page (when email is set up)."
+
+[keys.quality_check_on_import]
+env = "QUALITY_CHECK_ON_IMPORT"
+default = true
+help = "Check every download for fake lossless and similar problems before it enters the library (switch on Settings → Blocked)."
+
+[keys.quality_min_lufs]
+env = "QUALITY_MIN_LUFS"
+default = -28.0
+help = "Songs quieter than this loudness (LUFS) are reported as very quiet by the quality checks."
+
+[keys.self_update]
+env = "ENCORE_SELF_UPDATE"
+default = ""
+help = "Whether Diagnostics may offer Update now through the Docker socket: off, false, no or 0 switch it off."
+
+# ---- Lyrics (no field in the UI; set them through the environment)
+
+[keys.lyrics_on_import]
+env = "ENCORE_LYRICS_ON_IMPORT"
+default = true
+help = "Fetch lyrics from LRCLIB when a download is imported."
+
+[keys.lyrics_save_files]
+env = "ENCORE_LYRICS_SAVE_FILES"
+default = true
+help = "Save lyrics next to the songs: a .lrc file when they are synced, a .txt file when they are not."
+
+[keys.lyrics_embed]
+env = "ENCORE_LYRICS_EMBED"
+default = false
+help = "Embed the plain lyrics in the song's tags, except when only plain lyrics were found and they are saved as a .txt file."
+
+# ---- Kept by the server itself (never shown as a field)
+
+[keys.api_key]
+default = ""
+secret = true
+help = "The server's API key: made at the first start, shown to the owner on the API key card (POST /api/admin/settings/api-key makes a new one)."
+
+[keys.plex_client_id]
+default = ""
+help = "This server's Plex client identifier, made at the first Plex sign-in."
+
+[keys.roon_core_id]
+default = ""
+help = "The Roon Core this server was approved by."
+
+[keys.roon_token]
+default = ""
+secret = true
+help = "The Roon Core's token for this extension."
+
+[keys.slskd_managed_api_key]
+default = ""
+secret = true
+help = "The API key of the slskd that Encore runs, made at its first start."
+
+[keys.discography_singles]
+env = "ENCORE_DISCOGRAPHY_SINGLES"
+default = true
+help = "Before release types: whether a discography request included singles. Read once to set release_types."
+
+[keys.streamrip_sources]
+env = "STREAMRIP_SOURCES"
+default = "deezer,tidal"
+help = "Before the source order: which streamrip services to use. Still read when source_order names none of them."
+
+# ---- Not read by the server any more (kept so the settings answer does not change)
+
+[keys.auto_request_follows]
+env = "ENCORE_AUTO_REQUEST_FOLLOWS"
+default = true
+
+[keys.autoplay_library]
+env = "ENCORE_AUTOPLAY_LIBRARY"
+default = true
+
+[keys.follow_check_hours]
+env = "ENCORE_FOLLOW_CHECK_HOURS"
+default = 12

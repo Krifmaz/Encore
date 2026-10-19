@@ -112,10 +112,6 @@ pub fn track_menu(anchor: &Element, t: &Value, admin: bool, on_deleted: Option<R
     { let t = t.clone(); items.push(MenuItem::new("Lyrics", &icon("music"), move || lyrics::lyrics_modal(&t))); }
     { let t = t.clone(); items.push(MenuItem::new("Share link", &icon("external"), move || dom::spawn(ui::share_track((*t).clone())))); }
     items.push(MenuItem::link("Download this song", &icon("download"), &format!("/api/library/tracks/{}/file", t.s("id")), true));
-    if player::can_save_offline() {
-        let t = t.clone();
-        items.push(MenuItem::new("Save for offline", &icon("download"), move || { player::save_offline(vec![(*t).clone()]); toast("Saving to this device…", "ok"); }));
-    }
     // this browser's own downloads (0.28): "Download for offline" / "Remove download"
     items.extend(crate::pages::downloads::menu_items(&[(*t).clone()]));
     if t.truthy("album_id") { items.push(MenuItem::link("Go to album", &icon("disc"), &format!("#/library/album/{}", t.s("album_id")), false)); }
@@ -1005,10 +1001,6 @@ fn album_menu(anchor: &Element, a: &Value, id: &str, qt: &Rc<Vec<Value>>, admin:
     { let qt = qt.clone(); items.push(MenuItem::new("Play next", &icon("next"), move || { player::play_next((*qt).clone()); toast("Plays next", "ok"); })); }
     { let ids: Vec<i64> = tracks.iter().map(|t| t.i("id")).collect(); items.push(MenuItem::new("Add to playlist", &icon("plus"), move || playlists::add_to_playlist_modal(ids.clone()))); }
     { let (id, a) = (id.to_string(), a.clone()); items.push(MenuItem::new("Share link", &icon("external"), move || dom::spawn(ui::share_album(id.clone(), a.clone())))); }
-    if player::can_save_offline() {
-        let qt = qt.clone();
-        items.push(MenuItem::new("Save album for offline", &icon("download"), move || { player::save_offline((*qt).clone()); toast(&format!("Saving {} song(s) to this device…", qt.len()), "ok"); }));
-    }
     items.extend(crate::pages::downloads::menu_items(qt));
     if admin {
         let (ids, reload) = (ids.clone(), reload.clone());

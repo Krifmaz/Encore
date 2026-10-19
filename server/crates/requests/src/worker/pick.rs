@@ -1,0 +1,297 @@
+//! Picking where a request comes from: already in the library, the whole album instead of one song, an
+//! artist's discography as one request per release, the sources in the admin's order, or exactly what
+//! someone picked by hand.
+use super::*;
+
+pub(super) async fn start(st: &impl Ctx, r: &mut Req) -> anyhow::Result<()> {
+    let kind = r.s("kind");
+    if kind == "playlist" {
+        upd(st, r, &[("status", json!("completed"))]);
+        return Ok(());
+    }
+    if kind == "url" {
+        let url = r.s("url");
+        if RIP_LINK.is_match(&url) {
+            if !streamrip::enabled(st) {
+                fail(st, r, "Qobuz/Tidal/Deezer links need streamrip enabled in Settings → Downloaders").await;
+                return Ok(());
+            }
+            upd(st, r, &[("source", json!("streamrip")), ("status", json!("downloading")), ("message", json!("Downloading with streamrip…"))]);
+            return run_streamrip_url(st, r).await;
+        }
+        upd(st, r, &[("source", json!("ytdlp")), ("status", json!("downloading")), ("message", json!("Starting download…"))]);
+        return run_url(st, r).await;
+    }
+    if r.d["pick"].is_object() {
+        return start_pick(st, r).await;
+    }
+    let lossless_only = r.d["lossless_only"].as_bool().unwrap_or(false);
+    // already there? (lossless upgrade requests replace what's there)
+    let replacing = r.d["replace"].is_object(); // a reported copy is being replaced: what's there doesn't count
+    if kind == "album" && !lossless_only && !replacing && (encore_library::has_release_group(st.db(), &r.s("mbid")) || encore_library::has_album(st.db(), &r.s("artist"), &r.album_title())) {
+        complete(st, r, "Already in library", &[], Value::Null).await;
+        return Ok(());
+    }
+    if kind == "track" && !replacing && track_in_library(st, r).await {
+        complete(st, r, "Already in library", &[], Value::Null).await;
+        return Ok(());
+    }
+    if kind == "track" && try_album_upgrade(st, r).await? {
+        return Ok(());
+    }
+    if kind == "artist" {
+        // always one request per release, so each one goes through every source
+        return expand_artist(st, r).await;
+    }
+    if kind == "album" && r.s("mbid").is_empty() && r.d["ext"].is_object() {
+        release_info(st, r).await; // store track list: used for matching downloads and tagging
+    }
+    let mut order = source_order(st, r);
+    crate::report::avoid_source(&r.d, &mut order); // a replacement tries the reported file's source last
+    r.d["sources"] = json!(order);
+    r.d["log"] = json!([]);
+    next_source(st, r, "").await
+}
+
+/// Try the remaining sources in order until one downloads or waits.
+pub(super) async fn next_source(st: &impl Ctx, r: &mut Req, reason: &str) -> anyhow::Result<()> {
+    let mut reason = reason.to_string();
+    loop {
+        if !reason.is_empty() {
+            let src = r.opt("source").unwrap_or("start".into());
+            log_push(r, format!("{src}: {reason}"));
+        }
+        let mut srcs: Vec<String> = r.d["sources"].as_array().map(|a| a.iter().filter_map(|x| x.as_str().map(String::from)).collect()).unwrap_or_default();
+        if srcs.is_empty() {
+            let log: Vec<String> = r.d["log"].as_array().map(|a| a.iter().filter_map(|x| x.as_str().map(String::from)).collect()).unwrap_or_default();
+            let tried = if log.is_empty() { "no download sources enabled".to_string() } else { log[log.len().saturating_sub(3)..].join("; ") };
+            fail(st, r, &format!("All sources exhausted ({tried})")).await;
+            return Ok(());
+        }
+        let src = srcs.remove(0);
+        r.d["sources"] = json!(srcs);
+        upd(st, r, &[("source", json!(src)), ("progress", json!(0)), ("status", json!("searching")), ("message", json!(format!("Trying {src}…")))]);
+        let res = match src.as_str() {
+            "slskd" => start_slskd(st, r, false).await,
+            "slskd_lossless" => start_slskd(st, r, true).await,
+            "torznab" => start_torznab(st, r, false).await,
+            "ytdlp" => start_ytdlp(st, r, None).await,
+            "streamrip" => start_streamrip(st, r, None).await,
+            other => Ok(Out::Next(format!("unknown source {other}"))),
+        };
+        match res {
+            Ok(Out::Done) | Ok(Out::Wait) => return Ok(()),
+            Ok(Out::Next(why)) => reason = why,
+            Err(e) if e.is::<Cancelled>() => return Err(e),
+            Err(e) => reason = format!("error: {e}"),
+        }
+    }
+}
+
+pub(super) fn source_order(st: &impl Ctx, r: &Req) -> Vec<String> {
+    let mut order: Vec<String> = st.cfg().str("source_order").split(',').map(|s| s.trim().to_lowercase())
+        // qobuz / tidal / deezer are streamrip services: the first one marks where streamrip runs
+        .map(|s| if streamrip::SERVICES.contains(&s.as_str()) { "streamrip".to_string() } else { s })
+        .filter(|s| !s.is_empty()).collect();
+    for (src, before) in [("torznab", "ytdlp")] {
+        if !order.iter().any(|s| s == src) {
+            // saved orders that predate this source
+            let at = order.iter().position(|s| s == before).unwrap_or(order.len());
+            order.insert(at, src.into());
+        }
+    }
+    let lossless_only = r.d["lossless_only"].as_bool().unwrap_or(false);
+    if st.cfg().bool("quality_first") || lossless_only {
+        // every lossless option first (in the admin's order), then lossy fallbacks
+        let mut lossless: Vec<String> = order.iter().filter(|s| *s == "streamrip").cloned().collect();
+        if order.iter().any(|s| s == "slskd") {
+            lossless.push("slskd_lossless".into());
+        }
+        lossless.extend(order.iter().filter(|s| *s != "streamrip").cloned());
+        order = lossless;
+    }
+    if lossless_only {
+        order.retain(|s| ["streamrip", "slskd_lossless"].contains(&s.as_str()));
+    } else if st.cfg().bool("ytdlp_last_resort") {
+        // downloads should basically never fail: YouTube Music is always the final fallback
+        order.retain(|s| s != "ytdlp");
+        order.push("ytdlp".into());
+    }
+    let album = r.s("kind") == "album";
+    let avail = |s: &str| match s {
+        "torznab" => torznab::enabled(st) && album,
+        "slskd" | "slskd_lossless" => slskd::enabled(st),
+        "ytdlp" => ytdlp::enabled(st) || st.cfg().bool("ytdlp_last_resort"),
+        "streamrip" => streamrip::enabled(st),
+        _ => false,
+    };
+    let mut seen = std::collections::HashSet::new();
+    order.into_iter().filter(|s| avail(s) && seen.insert(s.clone())).collect()
+}
+
+/// Download exactly the chosen result – no fallback to other sources.
+pub(super) async fn start_pick(st: &impl Ctx, r: &mut Req) -> anyhow::Result<()> {
+    let pick = r.d["pick"].clone();
+    r.d["sources"] = json!([]);
+    r.d["log"] = json!([]);
+    let src = pick["source"].as_str().unwrap_or("");
+    let url = pick["payload"]["url"].as_str().unwrap_or("").to_string();
+    let out = match src {
+        "slskd" => {
+            r.d["slskd"] = json!({ "candidates": [pick["payload"]], "idx": -1 });
+            upd(st, r, &[("source", json!("slskd"))]);
+            slskd_try_next(st, r, "").await?
+        }
+        "torznab" => {
+            r.d["torznab"] = json!({ "candidates": [pick["payload"]], "idx": -1 });
+            upd(st, r, &[("source", json!("torznab"))]);
+            torznab_try_next(st, r, "").await?
+        }
+        "deezer" | "tidal" | "qobuz" | "link" if src != "link" || RIP_LINK.is_match(&url) => {
+            if !streamrip::enabled(st) {
+                fail(st, r, "Qobuz/Tidal/Deezer links need streamrip enabled in Settings → Downloaders").await;
+                return Ok(());
+            }
+            upd(st, r, &[("source", json!("streamrip"))]);
+            start_streamrip(st, r, Some(vec![url])).await?
+        }
+        "ytmusic" | "link" => {
+            upd(st, r, &[("source", json!("ytdlp"))]);
+            start_ytdlp(st, r, Some(url)).await?
+        }
+        other => Out::Next(format!("unknown source {other}")),
+    };
+    if let Out::Next(why) = out {
+        next_source(st, r, &why).await?;
+    }
+    Ok(())
+}
+
+pub(super) async fn expand_artist(st: &impl Ctx, r: &mut Req) -> anyhow::Result<()> {
+    upd(st, r, &[("status", json!("searching")), ("message", json!("Looking up discography…"))]);
+    let art = mb::artist(st, &r.s("mbid")).await?;
+    // the request's own boxes (Request discography panel), else Settings → Release types; the releases ticked
+    // in the dialog (`release_ids`) take the place of the filter altogether
+    let filter = encore_config::release_types::ReleaseFilter::from_value(&r.d["release_filter"], &encore_config::release_types::ReleaseFilter::from_cfg(st.cfg()));
+    let only: Option<Vec<String>> = r.d["release_ids"].as_array().map(|a| a.iter().filter_map(|v| v.as_str().map(String::from)).collect());
+
+    // the merged catalog: MusicBrainz plus the Deezer / Apple Music releases MusicBrainz doesn't list
+    let ext = if st.cfg().bool("discover_catalog_merge") { encore_library::catalog::merged(st, &art).await } else { vec![] };
+    let name = art["name"].as_str().unwrap_or("").to_string();
+    let skip = |x: &Value| {
+        let title = x["title"].as_str().unwrap_or("");
+        match x["id"].as_str().filter(|id| !x["ext"].is_object() && !id.is_empty()) {
+            Some(id) => encore_library::has_release_group(st.db(), id)
+                || st.db().one("SELECT 1 FROM requests WHERE mbid=? AND status NOT IN ('failed','denied','cancelled')", p![id]).ok().flatten().is_some(),
+            None => encore_library::has_album(st.db(), &name, title)
+                || st.db().one("SELECT 1 FROM requests WHERE kind='album' AND mbid IS NULL AND lower(artist)=lower(?) AND lower(title)=lower(?)
+                              AND status NOT IN ('failed','denied','cancelled')", p![name, title]).ok().flatten().is_some(),
+        }
+    };
+    let plan = encore_library::catalog::discography_plan(art["release_groups"].as_array().map(|a| a.as_slice()).unwrap_or(&[]), &ext, &filter, only.as_deref(), skip);
+
+    let t = now();
+    let (mut n, mut n_ext) = (0, 0);
+    for g in plan {
+        let is_ext = g["ext"].is_object();
+        let detail = if is_ext { json!({ "ext": g["ext"] }) } else { json!({}) };
+        let mbid = if is_ext { Value::Null } else { g["id"].clone() };
+        let year = g["year"].as_str().filter(|y| !y.is_empty()).map(|y| json!(y)).unwrap_or(Value::Null);
+        let id = st.db().execute("INSERT INTO requests (user_id, kind, mbid, artist, title, album, year, cover_url, status, detail, parent_id, created_at, updated_at)
+                       VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            p![r.row.get("user_id"), "album", mbid, name, g["title"], g["title"], year, g["cover"], "queued", detail.to_string(), r.id, t, t])?;
+        crate::events::emit(st, id);
+        n += 1;
+        if is_ext {
+            n_ext += 1;
+        }
+    }
+    let msg = match (n, n_ext) {
+        (0, _) if only.is_some() => "Nothing new – you already have (or requested) every ticked release".to_string(),
+        (0, _) => "Nothing new – you already have (or requested) every release".to_string(),
+
+        (n, 0) => format!("Queued {n} release(s) from the discography"),
+        (n, e) => format!("Queued {n} release(s) from the discography ({e} not in MusicBrainz)"),
+    };
+    complete(st, r, &msg, &[], Value::Null).await;
+    Ok(())
+}
+
+/// Is the requested song (this version of it) in the library? The library's index of every song is kept
+/// while the songs are unchanged and built on the blocking pool when they changed (encore_library's `Songs`).
+pub(super) async fn track_in_library(st: &impl Ctx, r: &Req) -> bool {
+    let mbid = r.opt("mbid").or(r.d["recording"].as_str().map(String::from));
+    let want = encore_library::matcher::describe(&r.s("title"), &r.s("artist"), r.length(), r.d["isrc"].as_str(), mbid.as_deref());
+    st.library().songs.load(st.db()).await.find(&want).is_some()
+}
+
+/// If the song is on an official album, fetch the whole album instead (best quality available).
+pub(super) async fn try_album_upgrade(st: &impl Ctx, r: &mut Req) -> anyhow::Result<bool> {
+    let mode = match r.d["album_mode"].as_str() { Some("song") => "off".to_string(), Some("album") => "album_ep".to_string(), _ => st.cfg().str("album_upgrade") };
+    if mode == "off" || r.d["no_album"].as_bool().unwrap_or(false) {
+        return Ok(false);
+    }
+    upd(st, r, &[("status", json!("searching")), ("message", json!("Looking up which album this song is on…"))]);
+    let (mut rid, mut alb) = (None, None);
+    let found: anyhow::Result<()> = async {
+        rid = match r.opt("mbid") { Some(m) => Some(m), None => encore_library::matcher::resolve_recording(st, &r.s("artist"), &r.s("title"), r.length(), r.d["isrc"].as_str()).await? };
+        if let Some(id) = &rid {
+            alb = mb::album_for_recording(st, id, mode == "album_ep").await?;
+        }
+        Ok(())
+    }.await;
+    if let Err(e) = found {
+        st.db().log("warning", &format!("Album lookup failed for {}: {e}", r.label()));
+    }
+    r.d["recording"] = json!(rid);
+    let Some(alb) = alb.filter(|a| !encore_library::has_release_group(st.db(), a["id"].as_str().unwrap_or(""))) else {
+        r.d["no_album"] = json!(true);
+        upd(st, r, &[]);
+        return Ok(false);
+    };
+    let typ = alb["type"].as_str().unwrap_or("album").to_lowercase();
+    let aid = match st.db().one("SELECT id FROM requests WHERE kind='album' AND mbid=? AND status NOT IN ('failed','denied','cancelled')", p![alb["id"]])? {
+        Some(e) => e.i("id"),
+        None => {
+            let t = now();
+            let artist = if alb["artist"].as_str().unwrap_or("").is_empty() { json!(r.s("artist")) } else { alb["artist"].clone() };
+            let id = st.db().execute("INSERT INTO requests (user_id, kind, mbid, artist, title, album, year, cover_url, status, message, detail, created_at, updated_at)
+                                    VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                p![r.row.get("user_id"), "album", alb["id"], artist, alb["title"], alb["title"], alb["year"], alb["cover"], "queued",
+                   format!("Full album for “{}”", r.s("title")), "{}", t, t])?;
+            st.db().log("info", &format!("“{}” is on {typ} “{}” – downloading the whole {typ}", r.s("title"), alb["title"].as_str().unwrap_or("")));
+            id
+        }
+    };
+    r.d["album_request"] = json!(aid);
+    let cover = r.opt("cover_url").map(|c| json!(c)).unwrap_or(alb["cover"].clone());
+    upd(st, r, &[("status", json!("monitoring")), ("source", json!("album")), ("cover_url", cover),
+                 ("message", json!(format!("Getting the whole {typ} “{}”", alb["title"].as_str().unwrap_or(""))))]);
+    Ok(true)
+}
+
+pub(super) async fn poll_album(st: &impl Ctx, r: &mut Req) -> anyhow::Result<()> {
+    let a = get(st, r.d["album_request"].as_i64().unwrap_or(0));
+    let reason = match &a {
+        Some(a) if a.s("status") == "completed" => {
+            if track_in_library(st, r).await {
+                complete(st, r, &format!("Downloaded with the album “{}”", a.s("title")), &[], Value::Null).await;
+                return Ok(());
+            }
+            "the album didn't contain this exact version"
+        }
+        None => "the album couldn't be downloaded",
+        Some(a) if ["failed", "denied", "cancelled"].contains(&a.s("status").as_str()) => "the album couldn't be downloaded",
+        Some(a) => {
+            let msg = a.opt("message").unwrap_or(a.s("status"));
+            if a.row.f("progress") != r.row.f("progress") || r.d["last_msg"].as_str() != Some(&msg) {
+                r.d["last_msg"] = json!(msg);
+                upd(st, r, &[("progress", json!(a.row.f("progress"))), ("message", json!(format!("Album “{}”: {msg}", a.s("title"))))]);
+            }
+            return Ok(());
+        }
+    };
+    r.d["no_album"] = json!(true);
+    upd(st, r, &[("status", json!("queued")), ("source", Value::Null), ("message", json!(format!("Getting the song on its own ({reason})")))]);
+    Ok(())
+}

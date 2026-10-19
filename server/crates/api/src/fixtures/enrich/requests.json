@@ -1,0 +1,132 @@
+[
+  {
+    "album": "ペルソナ4",
+    "artist": "平田志穂子",
+    "artists": [
+      {
+        "in_library": true,
+        "name": "平田志穂子"
+      }
+    ],
+    "attempts": 1,
+    "candidate": null,
+    "cover_url": null,
+    "created_at": 1792281081.6542645,
+    "id": 4,
+    "kind": "track",
+    "length": null,
+    "log": [],
+    "mbid": null,
+    "message": "Already in library",
+    "parent_id": null,
+    "picked": false,
+    "progress": 100.0,
+    "source": null,
+    "status": "completed",
+    "title": "Reach Out To The Truth",
+    "updated_at": 1792281085.6806307,
+    "url": null,
+    "user_id": 1,
+    "username": "admin",
+    "year": null
+  },
+  {
+    "album": null,
+    "artist": "Nobody 3",
+    "artists": [
+      {
+        "in_library": false,
+        "name": "Nobody 3"
+      }
+    ],
+    "attempts": 1,
+    "candidate": null,
+    "cover_url": null,
+    "created_at": 1792280084.939732,
+    "id": 3,
+    "kind": "track",
+    "length": null,
+    "log": [
+      "ytdlp: no match on YouTube"
+    ],
+    "mbid": null,
+    "message": "All sources exhausted (ytdlp: no match on YouTube)",
+    "parent_id": null,
+    "picked": false,
+    "progress": 0.0,
+    "source": "ytdlp",
+    "status": "failed",
+    "title": "Missing Song 3",
+    "updated_at": 1792280093.3149488,
+    "url": null,
+    "user_id": 1,
+    "username": "admin",
+    "year": null
+  },
+  {
+    "album": null,
+    "artist": "Nobody 2",
+    "artists": [
+      {
+        "in_library": false,
+        "name": "Nobody 2"
+      }
+    ],
+    "attempts": 1,
+    "candidate": null,
+    "cover_url": null,
+    "created_at": 1792280084.932336,
+    "id": 2,
+    "kind": "track",
+    "length": null,
+    "log": [
+      "ytdlp: no match on YouTube"
+    ],
+    "mbid": null,
+    "message": "All sources exhausted (ytdlp: no match on YouTube)",
+    "parent_id": null,
+    "picked": false,
+    "progress": 0.0,
+    "source": "ytdlp",
+    "status": "failed",
+    "title": "Missing Song 2",
+    "updated_at": 1792280091.5273502,
+    "url": null,
+    "user_id": 1,
+    "username": "admin",
+    "year": null
+  },
+  {
+    "album": null,
+    "artist": "Nobody 1",
+    "artists": [
+      {
+        "in_library": false,
+        "name": "Nobody 1"
+      }
+    ],
+    "attempts": 1,
+    "candidate": null,
+    "cover_url": null,
+    "created_at": 1792280084.9249752,
+    "id": 1,
+    "kind": "track",
+    "length": null,
+    "log": [
+      "ytdlp: no match on YouTube"
+    ],
+    "mbid": null,
+    "message": "All sources exhausted (ytdlp: no match on YouTube)",
+    "parent_id": null,
+    "picked": false,
+    "progress": 0.0,
+    "source": "ytdlp",
+    "status": "failed",
+    "title": "Missing Song 1",
+    "updated_at": 1792280090.78591,
+    "url": null,
+    "user_id": 1,
+    "username": "admin",
+    "year": null
+  }
+]

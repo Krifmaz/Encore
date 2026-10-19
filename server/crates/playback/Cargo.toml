@@ -1,0 +1,26 @@
+[package]
+name = "encore-playback"
+description = "Encore: playing music: the stream decision and codec negotiation, server processing with Cadenza and its render cache, the devices hub and resume spot, Roon"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+encore-core = { workspace = true }
+encore-db = { workspace = true }
+encore-media = { workspace = true }
+anyhow = { workspace = true }
+axum = { workspace = true }
+cadenza-dsp = { workspace = true }
+futures-util = { workspace = true }
+hex = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+sha2 = { workspace = true }
+tokio = { workspace = true }
+tokio-tungstenite = { workspace = true }
+tokio-util = { workspace = true }
+tower = { workspace = true }
+tower-http = { workspace = true }
+tracing = { workspace = true }
+urlencoding = { workspace = true }

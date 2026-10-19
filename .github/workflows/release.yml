@@ -8,10 +8,12 @@ name: release
 #   Tick "apps" to also build the desktop installers and the Android APK (the macOS runner costs 10× minutes,
 #   so they are off by default and a release without them is just the server + Docker image). They can be
 #   built on your own machine instead and attached to the release: scripts/release-apps.sh.
-#   Desktop: the native app (apps.yml `desktop`, clients/desktop) and, for this release line only, the classic
-#   Tauri app (`desktop-classic`, clients/app) under its old file names.
+#   Desktop: the native app (apps.yml `desktop`, clients/desktop).
 #   Docker: :<version> and :latest.
 #   Notes: docs/releases/<version>.md if it exists, otherwise the commit list since the previous release.
+#   Checks first (the `test` job, which pull requests run too through docker.yml): the server's tests and clippy
+#   for every crate of the workspace, the web app's checks, and whether Cadenza is pinned to one rev everywhere.
+#   The x86_64 server build also runs the speed table (server/benches/perf.rs) into its job summary.
 #   SHA256SUMS covers every file of the release; the desktop app checks its updates against it.
 on:
   workflow_dispatch:
@@ -34,17 +36,26 @@ on:
         type: choice
         options: [all, android]
         default: all
+  # docker.yml (pull requests, by hand) runs only the test job below: it calls this file with only = test
+  workflow_call:
+    inputs:
+      only:
+        type: string
+        required: false
+        default: test
 
 permissions:
   contents: write
   packages: write
 
+# releases queue one after the other; a test-only call (docker.yml) gets a group of its own
 concurrency:
-  group: release
+  group: ${{ inputs.only == 'test' && format('release-test-{0}', github.run_id) || 'release' }}
   cancel-in-progress: false
 
 jobs:
   version:
+    if: inputs.only != 'test'
     runs-on: ubuntu-latest
     outputs:
       version: ${{ steps.v.outputs.version }}
@@ -83,15 +94,20 @@ jobs:
           semver "$V" || { echo "bad version $V (want MAJOR.MINOR.PATCH)"; exit 1; }
           IFS=. read -r A B C <<< "$V"
           echo "version=$V" >> "$GITHUB_OUTPUT"
-          # desktop installers (Tauri) take the same semver
+          # the apps take the same semver
           echo "semver=$V" >> "$GITHUB_OUTPUT"
           # Android versionCode, always increasing and above the old date-based codes (26101302 …):
           # 260000000 + major*1000000 + minor*10000 + patch*10
           echo "code=$(( 260000000 + A * 1000000 + B * 10000 + C * 10 ))" >> "$GITHUB_OUTPUT"
           echo "Version $V"
 
+  # The checks every release and every pull request runs (docker.yml calls this job with only = test).
   test:
     runs-on: ubuntu-latest
+    env:
+      # line numbers in backtraces are all a test run needs; full debug info for every crate's test binary would
+      # fill the runner's disk (and the cache)
+      CARGO_PROFILE_DEV_DEBUG: line-tables-only
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
@@ -103,8 +119,20 @@ jobs:
           workspaces: |
             server
             web-rs
-      - run: cargo test --locked
+      # The server, the desktop app and the phone build the same Cadenza engine and move their pins to a new rev
+      # together (scripts/check-cadenza-pins.sh lists them). Not blocking yet: the desktop app is ahead of the
+      # server and the phone, and moving the server's pin changes what its Cadenza processing renders, which a
+      # structure-only release (0.29) leaves alone. The step shows the differing pins; once they match, remove
+      # continue-on-error so a split can't come back.
+      - name: Cadenza is pinned to the same rev everywhere
+        continue-on-error: true
+        run: bash scripts/check-cadenza-pins.sh
+      - name: Server tests (every crate of the workspace)
         working-directory: server
+        run: cargo test --workspace --locked
+      - name: Server clippy (every crate, tests and the bench included)
+        working-directory: server
+        run: cargo clippy --workspace --all-targets --locked -- -D warnings
       - name: Check the web app (web-rs) for WebAssembly, clippy and its tests (the strings reference among them)
         working-directory: web-rs
         run: |
@@ -114,6 +142,7 @@ jobs:
 
   # the web app in Rust/WebAssembly (web-rs) → static/, packed into the Linux tarballs (the image builds it itself)
   ui:
+    if: inputs.only != 'test'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -138,7 +167,7 @@ jobs:
 
   server:
     needs: [version, test, ui]
-    if: inputs.only != 'android'
+    if: inputs.only != 'android' && inputs.only != 'test'
     runs-on: ubuntu-latest
     strategy:
       matrix:
@@ -179,10 +208,23 @@ jobs:
         with:
           name: server-${{ matrix.arch }}
           path: "*.tar.gz"
+      # The speed table (server/benches/perf.rs, the same as docs/perf/) on this release build, in the job summary.
+      # A GitHub runner is another machine with other neighbours, so compare its numbers only with other runs here.
+      # Only the x86_64 build can run on the runner; a failed bench does not hold the release back.
+      - name: Speed table (cargo bench --bench perf)
+        if: matrix.arch == 'x86_64'
+        continue-on-error: true
+        working-directory: server
+        env:
+          # the same as the build above, so the crates it compiled are reused
+          ENCORE_VERSION: ${{ needs.version.outputs.version }}
+        run: |
+          cargo bench --locked --target ${{ matrix.target }} --bench perf > perf.md
+          { echo "## Speed table, Encore ${{ needs.version.outputs.version }} (release build, GitHub runner)"; cat perf.md; } >> "$GITHUB_STEP_SUMMARY"
 
   docker:
     needs: [version, test]
-    if: inputs.only != 'android'
+    if: inputs.only != 'android' && inputs.only != 'test'
     runs-on: ubuntu-latest
     env:
       DOCKER_BUILD_RECORD_UPLOAD: false
@@ -261,6 +303,8 @@ jobs:
             # written again when publishing)
             mkdir -p keep && gh release download --dir keep 2>/dev/null || true   # the newest release
             rm -f keep/Encore-android-*.apk keep/docker-compose.yml keep/SHA256SUMS
+            # the classic Tauri desktop app (removed in 0.29) and its update manifest are not carried over
+            (cd keep && rm -f Encore-Setup-* Encore-classic-* Encore-*-mac.dmg Encore-*-mac.app.tar.gz* Encore-*-linux-amd64.deb Encore-*-linux-x86_64.rpm latest.json)
             mv keep/* out/ 2>/dev/null || true
           fi
           # desktop installers carry the npm version in their names – show the real one
@@ -288,7 +332,6 @@ jobs:
           elif [ "$APPS" = success ]; then cat >> notes.md <<EOT
           * **Android**: \`Encore-android-$V.apk\`
           * **Desktop app** (new: native, with Cadenza playing on this computer; it updates itself from here on): **Windows** \`Encore-$V-windows-x86_64.exe\` · **macOS** \`Encore-$V-macos-universal.dmg\` (if macOS will not open it the first time: System Settings → Privacy & Security → Open Anyway) · **Linux** \`Encore-$V-linux-x86_64.AppImage\` or \`encore_${V}_amd64.deb\` · checksums in \`SHA256SUMS\`
-          * **Classic desktop app** (the Tauri app, kept for this release only): **Windows** \`Encore-Setup-$V.exe\` · **macOS** \`Encore-$V-mac.dmg\` (unsigned: right-click → Open the first time) · **Linux** \`Encore-classic-$V-linux-x86_64.AppImage\`, \`Encore-$V-linux-amd64.deb\` or \`.rpm\`
           EOT
           else echo "* **Apps**: the desktop and Android apps were not rebuilt for this release – the ones attached are from the last build that made them." >> notes.md; fi
           sed -i 's/^          //' notes.md
@@ -296,47 +339,17 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           V: ${{ needs.version.outputs.version }}
-          SV: ${{ needs.version.outputs.semver }}
           APPS: ${{ needs.apps.result }}
         run: |
-          # app installers (and the desktop update manifest) from the previous release when this run didn't build them
+          # app installers from the previous release when this run didn't build them
           # (encore_*.deb is the desktop app's Debian package)
           if [ "$APPS" != success ]; then
-            mkdir -p prev && gh release download --dir prev --pattern 'Encore-*' --pattern 'encore_*.deb' --pattern 'latest.json' 2>/dev/null || true
+            mkdir -p prev && gh release download --dir prev --pattern 'Encore-*' --pattern 'encore_*.deb' 2>/dev/null || true
             rm -f prev/Encore-youtube-extension-*.zip   # built fresh above
+            # the classic Tauri desktop app (removed in 0.29) is not carried over
+            (cd prev && rm -f Encore-Setup-* Encore-classic-* Encore-*-mac.dmg Encore-*-mac.app.tar.gz* Encore-*-linux-amd64.deb Encore-*-linux-x86_64.rpm)
             mv prev/* out/ 2>/dev/null || true
           fi
-          # the classic (Tauri) app's auto-update (Settings → This computer → Updates): latest.json from the signed
-          # updater files the desktop-classic job made (apps.yml, only with the TAURI_SIGNING_PRIVATE_KEY secret). No
-          # signatures for this version: the previous latest.json is kept (below), and the apps keep pointing at the
-          # last signed release. The native app (apps.yml `desktop`) does not use it: it reads the release itself and
-          # checks the files against SHA256SUMS (below).
-          python3 - "$V" "$SV" <<'PY'
-          import datetime, json, os, sys
-          v, sv = sys.argv[1], sys.argv[2]
-          base = f"https://github.com/Krifmaz/Encore/releases/download/v{v}/"
-          files = {
-              "windows-x86_64": f"Encore-Setup-{v}.exe",
-              "linux-x86_64": f"Encore-classic-{v}-linux-x86_64.AppImage",
-              "darwin-aarch64": f"Encore-{v}-mac.app.tar.gz",
-              "darwin-x86_64": f"Encore-{v}-mac.app.tar.gz",
-          }
-          platforms = {}
-          for plat, f in files.items():
-              sig = os.path.join("out", f + ".sig")
-              if os.path.exists(sig) and os.path.exists(os.path.join("out", f)):
-                  platforms[plat] = {"signature": open(sig).read().strip(), "url": base + f}
-          if platforms:
-              now = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
-              with open("out/latest.json", "w") as fh:
-                  json.dump({"version": sv, "notes": f"Encore {v}: https://github.com/Krifmaz/Encore/releases/tag/v{v}", "pub_date": now, "platforms": platforms}, fh, indent=2)
-              print("latest.json for", ", ".join(platforms))
-          else:
-              print("no signed desktop updates in this release")
-          PY
-          # still none (apps rebuilt but unsigned): carry the newest release's manifest over, so the updater
-          # endpoint (releases/latest/download/latest.json) keeps answering with the last signed version
-          if [ ! -f out/latest.json ]; then gh release download --dir out --pattern latest.json 2>/dev/null || true; fi
           # SHA256SUMS over every file, written last so it covers them all: the native desktop app installs an update
           # only when its file is listed here with the same hash (clients/desktop/src/desktop/updater.rs)
           (cd out && rm -f SHA256SUMS && sha256sum -- * > SHA256SUMS && cat SHA256SUMS)

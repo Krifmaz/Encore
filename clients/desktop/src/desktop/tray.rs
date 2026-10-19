@@ -1,7 +1,7 @@
 //! The tray (the menu bar on macOS): the Encore icon, a tooltip with the song, and a menu with
 //! what is playing, Play / Pause, Next, Previous, Show Encore, Mini player, the update line
-//! when a new version is found, and Quit Encore (the classic app's words,
-//! clients/app/src/desktop.rs). A left click on the icon shows the window.
+//! when a new version is found, and Quit Encore (the words of the classic app, removed in 0.29).
+//! A left click on the icon shows the window.
 //!
 //! Windows and macOS keep the icon on the main thread, whose event loop serves it; Linux keeps it
 //! on a thread of its own and talks to the tray host over the D-Bus session bus. Without a

@@ -1,0 +1,206 @@
+[
+  {
+    "album": "First Album",
+    "album_id": "eef3dd552229b6eb",
+    "artist": "Beta Band",
+    "artists": [
+      {
+        "in_library": true,
+        "name": "Beta Band"
+      }
+    ],
+    "cover_color": "#e151fb",
+    "cover_v": 18169343590900,
+    "duration": 4.0,
+    "format": "flac",
+    "id": 4,
+    "title": "Song 1 of First Album"
+  },
+  {
+    "album": "First Album",
+    "album_id": "eef3dd552229b6eb",
+    "artist": "Beta Band",
+    "artists": [
+      {
+        "in_library": true,
+        "name": "Beta Band"
+      }
+    ],
+    "cover_color": "#e151fb",
+    "cover_v": 18169343590900,
+    "duration": 4.0,
+    "format": "flac",
+    "id": 22,
+    "title": "Song 1 of First Album"
+  },
+  {
+    "album": "First Album",
+    "album_id": "eef3dd552229b6eb",
+    "artist": "Beta Band",
+    "artists": [
+      {
+        "in_library": true,
+        "name": "Beta Band"
+      }
+    ],
+    "cover_color": "#e151fb",
+    "cover_v": 18169343590900,
+    "duration": 4.0,
+    "format": "flac",
+    "id": 5,
+    "title": "Song 2 of First Album"
+  },
+  {
+    "album": "First Album",
+    "album_id": "eef3dd552229b6eb",
+    "artist": "Beta Band",
+    "artists": [
+      {
+        "in_library": true,
+        "name": "Beta Band"
+      }
+    ],
+    "cover_color": "#e151fb",
+    "cover_v": 18169343590900,
+    "duration": 4.0,
+    "format": "flac",
+    "id": 23,
+    "title": "Song 2 of First Album"
+  },
+  {
+    "album": "First Album",
+    "album_id": "eef3dd552229b6eb",
+    "artist": "Beta Band",
+    "artists": [
+      {
+        "in_library": true,
+        "name": "Beta Band"
+      }
+    ],
+    "cover_color": "#e151fb",
+    "cover_v": 18169343590900,
+    "duration": 4.0,
+    "format": "flac",
+    "id": 6,
+    "title": "Song 3 of First Album"
+  },
+  {
+    "album": "First Album",
+    "album_id": "eef3dd552229b6eb",
+    "artist": "Beta Band",
+    "artists": [
+      {
+        "in_library": true,
+        "name": "Beta Band"
+      }
+    ],
+    "cover_color": "#e151fb",
+    "cover_v": 18169343590900,
+    "duration": 4.0,
+    "format": "flac",
+    "id": 24,
+    "title": "Song 3 of First Album"
+  },
+  {
+    "album": "Second Album",
+    "album_id": "1ef99653a54aa327",
+    "artist": "Beta Band",
+    "artists": [
+      {
+        "in_library": true,
+        "name": "Beta Band"
+      }
+    ],
+    "cover_color": "#a5a52f",
+    "cover_v": 226018955654648,
+    "duration": 4.0,
+    "format": "flac",
+    "id": 1,
+    "title": "Song 1 of Second Album"
+  },
+  {
+    "album": "Second Album",
+    "album_id": "1ef99653a54aa327",
+    "artist": "Beta Band",
+    "artists": [
+      {
+        "in_library": true,
+        "name": "Beta Band"
+      }
+    ],
+    "cover_color": "#a5a52f",
+    "cover_v": 226018955654648,
+    "duration": 4.0,
+    "format": "flac",
+    "id": 19,
+    "title": "Song 1 of Second Album"
+  },
+  {
+    "album": "Second Album",
+    "album_id": "1ef99653a54aa327",
+    "artist": "Beta Band",
+    "artists": [
+      {
+        "in_library": true,
+        "name": "Beta Band"
+      }
+    ],
+    "cover_color": "#a5a52f",
+    "cover_v": 226018955654648,
+    "duration": 4.0,
+    "format": "flac",
+    "id": 2,
+    "title": "Song 2 of Second Album"
+  },
+  {
+    "album": "Second Album",
+    "album_id": "1ef99653a54aa327",
+    "artist": "Beta Band",
+    "artists": [
+      {
+        "in_library": true,
+        "name": "Beta Band"
+      }
+    ],
+    "cover_color": "#a5a52f",
+    "cover_v": 226018955654648,
+    "duration": 4.0,
+    "format": "flac",
+    "id": 20,
+    "title": "Song 2 of Second Album"
+  },
+  {
+    "album": "Second Album",
+    "album_id": "1ef99653a54aa327",
+    "artist": "Beta Band",
+    "artists": [
+      {
+        "in_library": true,
+        "name": "Beta Band"
+      }
+    ],
+    "cover_color": "#a5a52f",
+    "cover_v": 226018955654648,
+    "duration": 4.0,
+    "format": "flac",
+    "id": 3,
+    "title": "Song 3 of Second Album"
+  },
+  {
+    "album": "Second Album",
+    "album_id": "1ef99653a54aa327",
+    "artist": "Beta Band",
+    "artists": [
+      {
+        "in_library": true,
+        "name": "Beta Band"
+      }
+    ],
+    "cover_color": "#a5a52f",
+    "cover_v": 226018955654648,
+    "duration": 4.0,
+    "format": "flac",
+    "id": 21,
+    "title": "Song 3 of Second Album"
+  }
+]

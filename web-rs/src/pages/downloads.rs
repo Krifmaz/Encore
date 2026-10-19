@@ -3,15 +3,14 @@
 //! "Remove download" entries the other menus add (song, album, playlist, the player) and the download itself,
 //! which runs in the background with a progress toast.
 //!
-//! All of it only where this browser can keep downloads (`offline::available()`: https or localhost) and not
-//! in the apps, which keep songs on their own offline screens (`native::can_save_offline()`).
+//! All of it only where this browser can keep downloads (`offline::available()`: https or localhost).
 
 use crate::app::{Ctx, PageFuture};
 use crate::dom::{self, set_html};
 use crate::json::J;
 use crate::offline::{self, mode, outbox, Progress, Record, Summary};
 use crate::ui::{self, confirm_dialog, empty_state, esc, fmt, icon, pop_menu, toast, MenuItem};
-use crate::{native, player};
+use crate::player;
 use serde_json::{json, Value};
 use std::cell::RefCell;
 use std::collections::HashMap;
@@ -30,8 +29,8 @@ pub const SIGN_IN_AGAIN: &str = "Sign in again when the server is back to keep p
 pub const STILL_CONVERTED: &str = "This browser can't play the original file, so the converted copy stays";
 pub const STILL_CONVERTED_ALL: &str = "This browser can't play the original files, so the converted copies stay";
 
-/// Web downloads apply here: a browser that can keep them, and not one of the apps.
-pub fn enabled() -> bool { offline::available() && !native::can_save_offline() }
+/// Web downloads apply here: a browser that can keep them.
+pub fn enabled() -> bool { offline::available() }
 
 // ---- the menu entries and the download ------------------------------------------------------------
 
@@ -464,8 +463,7 @@ fn shuffled(mut v: Vec<Record>) -> Vec<Record> {
 pub fn render(view: Element, ctx: Ctx) -> PageFuture {
     Box::pin(async move {
         if !enabled() {
-            let why = if native::can_save_offline() { "This app keeps downloaded songs on its own offline screen." } else { offline::store::NO_STORE };
-            set_html(&view, &format!("<h1>Downloads</h1>{}", empty_state(&icon("saved"), "Downloads aren't available here", &esc(why))));
+            set_html(&view, &format!("<h1>Downloads</h1>{}", empty_state(&icon("saved"), "Downloads aren't available here", &esc(offline::store::NO_STORE))));
             return Ok(());
         }
         set_html(&view, &format!(r#"

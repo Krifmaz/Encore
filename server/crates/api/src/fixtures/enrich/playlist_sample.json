@@ -1,0 +1,179 @@
+{
+  "cover_url": null,
+  "created_at": 1792365179.1262372,
+  "description": "",
+  "follow": 0,
+  "id": 2,
+  "items": [
+    {
+      "added_at": 1792365179.1741376,
+      "album": "Second Album",
+      "album_id": "1ef99653a54aa327",
+      "artist": "Beta Band",
+      "artists": [
+        {
+          "in_library": true,
+          "name": "Beta Band"
+        }
+      ],
+      "bitrate": 111,
+      "cover_color": "#a5a52f",
+      "cover_url": null,
+      "cover_v": 226018955654648,
+      "duration": 4.0,
+      "format": "flac",
+      "id": 5,
+      "isrc": null,
+      "match_reason": null,
+      "mbid": null,
+      "playlist_id": 2,
+      "position": 0,
+      "request_id": null,
+      "request_message": null,
+      "request_status": null,
+      "source": "library",
+      "source_id": null,
+      "title": "Song 1 of Second Album",
+      "track_id": 19,
+      "verify_status": null
+    },
+    {
+      "added_at": 1792365179.1741376,
+      "album": "Second Album",
+      "album_id": "761bb0aaa0c97236",
+      "artist": "Alpha Artist",
+      "artists": [
+        {
+          "in_library": true,
+          "name": "Alpha Artist"
+        }
+      ],
+      "bitrate": 111,
+      "cover_color": "#d471e7",
+      "cover_url": null,
+      "cover_v": 117237759666321,
+      "duration": 4.0,
+      "format": "flac",
+      "id": 6,
+      "isrc": null,
+      "match_reason": null,
+      "mbid": null,
+      "playlist_id": 2,
+      "position": 1,
+      "request_id": null,
+      "request_message": null,
+      "request_status": null,
+      "source": "library",
+      "source_id": null,
+      "title": "Song 1 of Second Album",
+      "track_id": 25,
+      "verify_status": null
+    },
+    {
+      "added_at": 1792365179.1741376,
+      "album": "First Album",
+      "album_id": "150c2e63e67a8f86",
+      "artist": "Alpha Artist",
+      "artists": [
+        {
+          "in_library": true,
+          "name": "Alpha Artist"
+        }
+      ],
+      "bitrate": 111,
+      "cover_color": "#b7cb00",
+      "cover_url": null,
+      "cover_v": 2907780667060,
+      "duration": 4.0,
+      "format": "flac",
+      "id": 7,
+      "isrc": null,
+      "match_reason": null,
+      "mbid": null,
+      "playlist_id": 2,
+      "position": 2,
+      "request_id": null,
+      "request_message": null,
+      "request_status": null,
+      "source": "library",
+      "source_id": null,
+      "title": "Song 1 of First Album",
+      "track_id": 28,
+      "verify_status": null
+    },
+    {
+      "added_at": 1792365179.1741376,
+      "album": "ペルソナ4 サウンドトラック",
+      "album_id": "52b52b2323b5df9d",
+      "artist": "平田志穂子",
+      "artists": [
+        {
+          "in_library": true,
+          "name": "平田志穂子"
+        }
+      ],
+      "bitrate": 118,
+      "cover_color": "#b3f50c",
+      "cover_url": null,
+      "cover_v": 80461843779493,
+      "duration": 3.0,
+      "format": "flac",
+      "id": 8,
+      "isrc": null,
+      "match_reason": null,
+      "mbid": null,
+      "playlist_id": 2,
+      "position": 3,
+      "request_id": null,
+      "request_message": null,
+      "request_status": null,
+      "source": "library",
+      "source_id": null,
+      "title": "Reach Out To The Truth",
+      "track_id": 32,
+      "verify_status": null
+    },
+    {
+      "added_at": 1792365179.1741376,
+      "album": "“Quoted” Album",
+      "album_id": "ea9795066f904928",
+      "artist": "Artist",
+      "artists": [
+        {
+          "in_library": true,
+          "name": "Artist"
+        }
+      ],
+      "bitrate": 119,
+      "cover_color": "#af9f23",
+      "cover_url": null,
+      "cover_v": 235299191346193,
+      "duration": 3.0,
+      "format": "flac",
+      "id": 9,
+      "isrc": null,
+      "match_reason": null,
+      "mbid": null,
+      "playlist_id": 2,
+      "position": 4,
+      "request_id": null,
+      "request_message": null,
+      "request_status": null,
+      "source": "library",
+      "source_id": null,
+      "title": "“Hey” Song",
+      "track_id": 36,
+      "verify_status": null
+    }
+  ],
+  "kind": "playlist",
+  "matched": 5,
+  "name": "P4 sample",
+  "remote_ids": {},
+  "source": "manual",
+  "source_url": null,
+  "sync_targets": [],
+  "total": 5,
+  "updated_at": 1792365179.1741376,
+  "user_id": 1
+}

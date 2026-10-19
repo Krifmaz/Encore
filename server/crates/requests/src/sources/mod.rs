@@ -1,0 +1,8 @@
+//! Download sources.
+pub mod amazon;
+pub mod dl;
+pub mod links;
+pub mod slskd;
+pub mod streamrip;
+pub mod torznab;
+pub mod ytdlp;

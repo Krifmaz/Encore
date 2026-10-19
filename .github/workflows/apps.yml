@@ -2,22 +2,20 @@ name: apps
 
 # Android APK + desktop apps (Windows, macOS, Linux). Never runs on push – the macOS runner alone costs
 # 10× Actions minutes. Start it by hand (Actions → apps → Run workflow; "only" picks a single job) or through
-# the release workflow with "apps" ticked, which attaches the installers to the release. The release's Android
-# APK is the native app (android-native); the legacy Tauri android job only runs by hand. The desktop app is
-# the native one (desktop: clients/desktop, Iced); the Tauri app it replaces (desktop-classic: clients/app) is
-# built beside it for one more release under its old file names.
+# the release workflow with "apps" ticked, which attaches the installers to the release. The Android APK is the
+# native app (android-native: clients/android); the desktop app is the native one (desktop: clients/desktop, Iced).
 on:
   workflow_dispatch:
     inputs:
       only:
         description: "Build only this job (all = every job below)"
         type: choice
-        options: [all, android-native, android, desktop, desktop-classic]
+        options: [all, android-native, desktop]
         default: all
   workflow_call:
     inputs:
       only:
-        # release.yml doesn't pass it: a release builds every release job (the Tauri android job never runs here)
+        # release.yml doesn't pass it: a release builds every job
         type: string
         required: false
         default: all
@@ -179,83 +177,6 @@ jobs:
           path: Encore-android-*.apk
           if-no-files-found: error
 
-  android:
-    # LEGACY Tauri (Rust) app: clients/app built for Android (arm64 + arm32), kept until the native app has shipped
-    # (deleted in M7, PLAN §11). Manual runs only: a release (workflow_call) attaches the native APK instead, so
-    # this job is skipped there. Its artifact is Encore-android-legacy. Signed like android-native when the
-    # ANDROID_KEYSTORE_* secrets are set, otherwise with the runner's debug key.
-    if: inputs.version == '' && (inputs.only == 'all' || inputs.only == 'android')
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-java@v4
-        with:
-          distribution: temurin
-          java-version: "21"
-      - uses: android-actions/setup-android@v3
-        with:
-          packages: "platform-tools platforms;android-36 build-tools;36.0.0 ndk;29.0.13846066"
-      - uses: dtolnay/rust-toolchain@stable
-        with:
-          targets: aarch64-linux-android,armv7-linux-androideabi
-      - uses: Swatinem/rust-cache@v2
-        with:
-          workspaces: clients/app
-          key: android
-      - uses: taiki-e/install-action@v2
-        with:
-          tool: tauri-cli@2.12.2
-      - name: Signing key
-        # clients/app/gen/android reads ANDROID_KEYSTORE_FILE as a path to the keystore, so decode the base64
-        # secret to a file and pass that path (the old setup passed the secret itself, which never worked).
-        # Without the secrets the Gradle release config falls back to the debug key, which a fresh runner doesn't
-        # have yet. Gradle looks for it under $XDG_CONFIG_HOME/.android on the runner, so pin the folder explicitly.
-        env:
-          KS_B64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
-          KS_PASS: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
-          KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
-          KEY_PASS: ${{ secrets.ANDROID_KEY_PASSWORD }}
-        run: |
-          if [ -n "$KS_B64" ] && [ -n "$KS_PASS" ] && [ -n "$KEY_ALIAS" ] && [ -n "$KEY_PASS" ]; then
-            KS="$RUNNER_TEMP/release.jks"
-            printf '%s' "$KS_B64" | base64 -d > "$KS"
-            {
-              echo "ANDROID_KEYSTORE_FILE=$KS"
-              echo "ANDROID_KEYSTORE_PASSWORD=$KS_PASS"
-              echo "ANDROID_KEY_ALIAS=$KEY_ALIAS"
-              echo "ANDROID_KEY_PASSWORD=$KEY_PASS"
-            } >> "$GITHUB_ENV"
-            echo "Release key: $KS"
-          else
-            echo "::warning title=Android signing (legacy)::ANDROID_KEYSTORE_* secrets incomplete – signing with the runner's debug key"
-          fi
-          D="$HOME/.android"
-          echo "ANDROID_USER_HOME=$D" >> "$GITHUB_ENV"
-          mkdir -p "$D"
-          [ -f "$D/debug.keystore" ] || keytool -genkeypair -v -keystore "$D/debug.keystore" -storepass android \
-            -alias androiddebugkey -keypass android -dname "CN=Android Debug,O=Android,C=US" -keyalg RSA -keysize 2048 -validity 10000
-      - name: Build APK
-        working-directory: clients/app
-        env:
-          ENCORE_VERSION: ${{ inputs.version || format('dev.{0}', github.run_number) }}
-        run: |
-          export NDK_HOME="$ANDROID_HOME/ndk/29.0.13846066"
-          cargo tauri android build --ci --apk --target aarch64 --target armv7 \
-            --config '{"version":"${{ inputs.semver || '0.0.1' }}","bundle":{"android":{"versionCode":${{ inputs.code || github.run_number }}}}}'
-      - name: Collect
-        run: |
-          V="${{ inputs.version || format('dev.{0}', github.run_number) }}"
-          APK=$(find clients/app/gen/android/app/build/outputs/apk -name '*release*.apk' | head -1)
-          [ -n "$APK" ] || { echo "no APK built"; find clients/app/gen/android/app/build/outputs -type f; exit 1; }
-          cp "$APK" "Encore-android-legacy-$V.apk" && ls -la Encore-android-legacy-*.apk
-      - name: Remove signing key
-        if: always()
-        run: rm -f "$RUNNER_TEMP/release.jks"
-      - uses: actions/upload-artifact@v4
-        with:
-          name: Encore-android-legacy
-          path: Encore-android-legacy-*.apk
-
   desktop:
     # The desktop app: clients/desktop (Iced, pure Rust, Cadenza playing on this computer), built and packaged by
     # scripts/desktop-package.sh – Encore-<version>-windows-x86_64.exe (NSIS, per user under %LOCALAPPDATA%\Encore),
@@ -384,116 +305,5 @@ jobs:
       - uses: actions/upload-artifact@v4
         with:
           name: Encore-desktop-${{ runner.os }}
-          path: out/*
-          if-no-files-found: error
-
-  desktop-classic:
-    # The classic desktop app (Tauri: clients/app), replaced by `desktop` above and kept for this release only
-    # (0.27); its files keep their old names, except the AppImage, which is Encore-classic-<version>-linux-x86_64.AppImage
-    # because the new app's AppImage now has the old name. Unsigned installers – macOS: right-click → Open the first time.
-    if: inputs.only == '' || inputs.only == 'all' || inputs.only == 'desktop-classic'
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - os: ubuntu-22.04
-            bundles: deb,appimage,rpm
-            args: ""
-          - os: windows-latest
-            bundles: nsis
-            args: ""
-          - os: macos-latest
-            bundles: app
-            args: --target universal-apple-darwin
-    runs-on: ${{ matrix.os }}
-    steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
-        with:
-          targets: ${{ matrix.os == 'macos-latest' && 'aarch64-apple-darwin,x86_64-apple-darwin' || '' }}
-      - uses: Swatinem/rust-cache@v2
-        with:
-          workspaces: clients/app
-      - if: runner.os == 'Linux'
-        # libasound2-dev: Cadenza's ALSA output (the embedded engine); CUDA, WASAPI and CoreAudio need no packages
-        run: sudo apt-get update && sudo apt-get install -y libwebkit2gtk-4.1-dev libgtk-3-dev libayatana-appindicator3-dev librsvg2-dev patchelf libasound2-dev
-      - uses: taiki-e/install-action@v2
-        with:
-          tool: tauri-cli@2.12.2
-      # Auto-update (tauri-plugin-updater, Settings → This computer → Updates): with the TAURI_SIGNING_PRIVATE_KEY
-      # secret (+ TAURI_SIGNING_PRIVATE_KEY_PASSWORD when the key has one) and the matching public key in the
-      # TAURI_UPDATER_PUBKEY variable or secret (both from `cargo tauri signer generate`), the build carries the
-      # public key and makes signed updater files (.sig next to the installer; a .app.tar.gz on macOS). Without
-      # them the app builds as before, just without self-update – the job does not fail.
-      - name: Updater signing
-        id: updater
-        shell: bash
-        env:
-          KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
-          PUB: ${{ vars.TAURI_UPDATER_PUBKEY || secrets.TAURI_UPDATER_PUBKEY }}
-        run: |
-          if [ -n "$KEY" ] && [ -n "$PUB" ]; then
-            echo "on=true" >> "$GITHUB_OUTPUT"
-            # the public key goes into the app's config (plugins.updater.pubkey) as one JSON string
-            printf '%s' "$PUB" | python3 -c 'import json,sys; print("pubkey=" + json.dumps(sys.stdin.read().strip()))' >> "$GITHUB_OUTPUT"
-            echo "Updater: signed update files"
-          else
-            echo "on=false" >> "$GITHUB_OUTPUT"
-            echo "pubkey=\"\"" >> "$GITHUB_OUTPUT"
-            echo "::notice title=Desktop updates::TAURI_SIGNING_PRIVATE_KEY and/or TAURI_UPDATER_PUBKEY missing – building without self-update (see clients/app/README.md)"
-          fi
-      - name: Build
-        working-directory: clients/app
-        shell: bash
-        env:
-          ENCORE_VERSION: ${{ inputs.version || format('dev.{0}', github.run_number) }}
-          TAURI_SIGNING_PRIVATE_KEY: ${{ steps.updater.outputs.on == 'true' && secrets.TAURI_SIGNING_PRIVATE_KEY || '' }}
-          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ steps.updater.outputs.on == 'true' && secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD || '' }}
-          UPDATER: ${{ steps.updater.outputs.on }}
-          PUBKEY_JSON: ${{ steps.updater.outputs.pubkey }}
-        run: |
-          CONF='{"version":"${{ inputs.semver || '0.0.1' }}"}'
-          if [ "$UPDATER" = true ]; then
-            CONF='{"version":"${{ inputs.semver || '0.0.1' }}","bundle":{"createUpdaterArtifacts":true},"plugins":{"updater":{"pubkey":'"$PUBKEY_JSON"'}}}'
-          fi
-          cargo tauri build --ci --bundles ${{ matrix.bundles }} ${{ matrix.args }} --config "$CONF"
-      # Tauri's bundle_dmg.sh drives Finder with AppleScript to lay out the window, which fails on the hosted Mac
-      # runners (no Finder session) – a plain hdiutil image of the .app works everywhere
-      - name: Disk image (macOS)
-        if: runner.os == 'macOS'
-        shell: bash
-        run: |
-          APP=$(find clients/app/target -path '*/release/bundle/macos/*.app' -maxdepth 6 -type d | head -1)
-          [ -n "$APP" ] || { echo "no .app bundle"; exit 1; }
-          STAGE=$(mktemp -d)
-          cp -R "$APP" "$STAGE/"
-          ln -s /Applications "$STAGE/Applications"
-          mkdir -p "$(dirname "$APP")/../dmg"
-          hdiutil create -volname "Encore" -srcfolder "$STAGE" -ov -format UDZO "$(dirname "$APP")/../dmg/Encore_${{ inputs.semver || '0.0.1' }}_universal.dmg"
-      - name: Collect
-        shell: bash
-        run: |
-          V="${{ inputs.version || format('dev.{0}', github.run_number) }}"
-          mkdir -p out
-          find clients/app/target -path '*/release/bundle/*' -type f \( -name '*.AppImage' -o -name '*.deb' -o -name '*.rpm' -o -name '*-setup.exe' -o -name '*.dmg' \
-              -o -name '*.AppImage.sig' -o -name '*-setup.exe.sig' -o -name '*.app.tar.gz' -o -name '*.app.tar.gz.sig' \) -print | while read -r f; do
-            # updater files keep their signature next to them under the release name (the signature covers the
-            # content, not the name; release.yml builds latest.json from these .sig files)
-            case "$f" in
-              *.AppImage)        cp "$f" "out/Encore-classic-$V-linux-x86_64.AppImage" ;;
-              *.AppImage.sig)    cp "$f" "out/Encore-classic-$V-linux-x86_64.AppImage.sig" ;;
-              *.deb)             cp "$f" "out/Encore-$V-linux-amd64.deb" ;;
-              *.rpm)             cp "$f" "out/Encore-$V-linux-x86_64.rpm" ;;
-              *.exe)             cp "$f" "out/Encore-Setup-$V.exe" ;;
-              *.exe.sig)         cp "$f" "out/Encore-Setup-$V.exe.sig" ;;
-              *.dmg)             cp "$f" "out/Encore-$V-mac.dmg" ;;
-              *.app.tar.gz)      cp "$f" "out/Encore-$V-mac.app.tar.gz" ;;
-              *.app.tar.gz.sig)  cp "$f" "out/Encore-$V-mac.app.tar.gz.sig" ;;
-            esac
-          done
-          ls -la out
-      - uses: actions/upload-artifact@v4
-        with:
-          name: Encore-desktop-classic-${{ runner.os }}
           path: out/*
           if-no-files-found: error

@@ -1,11 +1,30 @@
-[package]
-name = "encore"
+[workspace]
+members = [".", "crates/*"]
+# a plain `cargo test` / `cargo clippy` / `cargo build` in server/ covers every crate, not only the binary
+default-members = [".", "crates/*"]
+resolver = "2"
+
+[workspace.package]
 version = "2.0.0"
 edition = "2021"
-description = "Encore music server"
 license = "MIT"
 
-[dependencies]
+# Every crate takes its dependencies from here (`x = { workspace = true }`), so all of them build with
+# one feature set and share one copy in target/.
+[workspace.dependencies]
+encore-core = { path = "crates/core" }
+encore-db = { path = "crates/db" }
+encore-config = { path = "crates/config" }
+encore-http = { path = "crates/http" }
+encore-jobs = { path = "crates/jobs" }
+encore-media = { path = "crates/media" }
+encore-library = { path = "crates/library" }
+encore-sync = { path = "crates/sync" }
+encore-playback = { path = "crates/playback" }
+encore-vpn = { path = "crates/vpn" }
+encore-system = { path = "crates/system" }
+encore-requests = { path = "crates/requests" }
+encore-api = { path = "crates/api" }
 axum = { version = "0.8", features = ["multipart", "ws", "macros"] }
 axum-extra = { version = "0.10", features = ["cookie"] }
 tokio = { version = "1", features = ["full"] }
@@ -56,9 +75,49 @@ hyper = { version = "1", features = ["client", "http1"] }
 hyper-util = { version = "0.1", features = ["tokio"] }
 http-body-util = "0.1"
 
+[package]
+name = "encore"
+version.workspace = true
+edition.workspace = true
+description = "Encore music server"
+license.workspace = true
+
+[dependencies]
+encore-api = { workspace = true }
+encore-db = { workspace = true }
+encore-jobs = { workspace = true }
+encore-library = { workspace = true }
+encore-playback = { workspace = true }
+encore-requests = { workspace = true }
+encore-system = { workspace = true }
+anyhow = { workspace = true }
+tokio = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+
+[dev-dependencies]
+# tests/ and benches/: the server through its router, on the TestServer helper
+encore-api = { workspace = true, features = ["test-support"] }
+axum = { workspace = true }
+futures-util = { workspace = true }
+image = { workspace = true }
+rusqlite = { workspace = true }
+serde_json = { workspace = true }
+tower = { workspace = true }
+urlencoding = { workspace = true }
+
+# the speed table of docs/perf: `cargo bench --bench perf` (a plain program, no bench harness)
+[[bench]]
+name = "perf"
+harness = false
+
+# The release binary: the whole program optimised as one unit (fat LTO, one codegen unit) – slower to build,
+# faster to run. Panics keep unwinding (no `panic = "abort"`): the database lends its connections under
+# catch_unwind so a panic in one request can't poison the write lock, and a panicking handler or blocking
+# task fails that request only, not the whole server.
 [profile.release]
-lto = "thin"
-codegen-units = 4
+lto = "fat"
+codegen-units = 1
 strip = true
 
 # Cadenza's filter design and FFT resampling run in real time while streaming: keep them optimised

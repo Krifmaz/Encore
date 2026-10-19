@@ -122,7 +122,7 @@ impl Default for Appearance {
 }
 
 /// Global shortcuts: accelerator strings like "CmdOrCtrl+Alt+P" ("" = not set). Same defaults as
-/// the classic app (clients/app/src/config.rs).
+/// the classic app had (removed in 0.29).
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Hotkeys {

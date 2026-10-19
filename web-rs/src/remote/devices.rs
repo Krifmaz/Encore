@@ -6,7 +6,7 @@ use super::*;
 /// One device's card in the Devices window (the body of the JS `devices.map`).
 fn device_card(d: &Value, devices: &[Value], l: Option<&player::Link>, me: &str) -> String {
     let s = d.o("state");
-    let name = shown_name(d);
+    let name = d.s("name");
     let is_linked = l.map(|l| l.id == d.s("id")).unwrap_or(false);
     let remote_of_me = s.s("remote_of").as_str() == me;
     let now = if s.truthy("remote_of") {

@@ -15,7 +15,7 @@
 use super::{outbox, AtBoot};
 use crate::api::{ApiError, ApiResult};
 use crate::ui::{esc, icon, toast};
-use crate::{api, app, dom, native};
+use crate::{api, app, dom};
 use serde_json::Value;
 use std::cell::Cell;
 use std::future::Future;
@@ -72,14 +72,13 @@ pub fn decide(status: u16, cached: Option<Value>, last: Option<Value>, saved: us
 /// boot(), before asking the server: offline mode could open if it can't be reached (downloads here and a
 /// remembered user). Then the first calls get [`WAIT_MS`] instead of the connect timeout.
 pub async fn could_open() -> bool {
-    super::available() && !native::can_save_offline() && super::last_user().is_some() && !super::index().await.is_empty()
+    super::available() && super::last_user().is_some() && !super::index().await.is_empty()
 }
 
 /// boot(): `/auth/me` failed with `status`. Enters offline mode when it applies – the user is set from the
 /// remembered one and true comes back; app.rs then draws the shell and calls [`shell_ready`].
 pub async fn try_enter(status: u16) -> bool {
-    // the apps keep their own offline screens
-    if !unreachable(status) || !super::available() || native::can_save_offline() { return false; }
+    if !unreachable(status) || !super::available() { return false; }
     let saved = super::index().await.len();
     let Some((user, ended)) = decide(status, super::cached_me(), super::last_user(), saved) else { return false };
     ACTIVE.with(|a| a.set(true));
@@ -108,7 +107,7 @@ pub fn signed_in(me: &Value) {
             }
         });
     }
-    if !super::available() || native::can_save_offline() { return; }
+    if !super::available() { return; }
     dom::spawn(async {
         super::index().await;
         if let Err(e) = outbox::flush().await { dom::console_error(&format!("offline outbox: {e}")); }
@@ -121,7 +120,7 @@ pub fn signed_in(me: &Value) {
 /// (outbox.rs sends only its owner's). The status of `POST /auth/logout` (0: no answer, or none within
 /// [`WAIT_MS`]: Sign out does not wait for the connect timeout, the sign-out just stays pending).
 async fn end_session(send_outbox: bool) -> u16 {
-    if send_outbox && super::available() && !native::can_save_offline() {
+    if send_outbox && super::available() {
         if let Err(e) = outbox::flush().await { dom::console_error(&format!("offline outbox: {e}")); }
     }
     match api::post_empty_within("/auth/logout", WAIT_MS).await { Ok(_) => 200, Err(e) => e.status }

@@ -89,10 +89,8 @@ pub(super) fn more_menu(anchor: &Element) {
     if lib { items.push(MenuItem::new("Lyrics", &icon("music"), || { st_mut(|s| s.pane = "lyrics".into()); set_full(true); })); }
     if lib { let t2 = t.clone(); items.push(MenuItem::new("Share link", &icon("external"), move || dom::spawn(share_track(t2.clone())))); }
     if lib { items.push(MenuItem::link("Download this song", &icon("download"), &format!("/api/library/tracks/{}/file", t.s("id")), true)); }
-    if lib && !linked && can_save_offline() { let t2 = t.clone(); items.push(MenuItem::new("Save for offline", &icon("download"), move || { save_offline(vec![t2.clone()]); toast("Saving to this device…", "ok"); })); }
     if lib && !linked { items.extend(crate::pages::downloads::menu_items(std::slice::from_ref(&t))); }
     items.push(MenuItem::new("Signal path", &icon("activity"), || dom::spawn(signal_path())));
-    if native::has_mini_player() { items.push(MenuItem::new("Mini player", &icon("music"), native::mini_player)); }
     if lib { let t2 = t.clone(); items.push(MenuItem::new("Report a problem", &icon("shield"), move || crate::pages::report::report_modal("track", t2.g("id").clone(), &t2.s("title"), "", None))); }
     if lib && crate::ui::translate_mode() != "off" { let t2 = t.clone(); items.push(MenuItem::new("Edit translation", &icon("edit"), move || crate::pages::translate::edit_translation(t2.s("title"), "title", None))); }
     if has_encore_remote() { items.push(MenuItem::new(if linked { "Your devices…" } else { "Play on another device…" }, &icon("devices"), remote_open)); }

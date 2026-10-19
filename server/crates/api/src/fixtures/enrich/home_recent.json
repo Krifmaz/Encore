@@ -1,0 +1,62 @@
+[
+  {
+    "added": 1792360592.3987255,
+    "album": "“Quoted” Album",
+    "albumartist": "Artist",
+    "cover_color": "#af9f23",
+    "cover_v": 235299191346193,
+    "id": "ea9795066f904928",
+    "tracks": 6,
+    "year": "2020"
+  },
+  {
+    "added": 1792360592.397678,
+    "album": "ペルソナ4 サウンドトラック",
+    "albumartist": "平田志穂子",
+    "cover_color": "#b3f50c",
+    "cover_v": 80461843779493,
+    "id": "52b52b2323b5df9d",
+    "tracks": 6,
+    "year": "2008"
+  },
+  {
+    "added": 1792360592.391323,
+    "album": "First Album",
+    "albumartist": "Alpha Artist",
+    "cover_color": "#b7cb00",
+    "cover_v": 2907780667060,
+    "id": "150c2e63e67a8f86",
+    "tracks": 6,
+    "year": "2021"
+  },
+  {
+    "added": 1792360592.3898032,
+    "album": "Second Album",
+    "albumartist": "Alpha Artist",
+    "cover_color": "#d471e7",
+    "cover_v": 117237759666321,
+    "id": "761bb0aaa0c97236",
+    "tracks": 6,
+    "year": "2021"
+  },
+  {
+    "added": 1792360592.3883302,
+    "album": "First Album",
+    "albumartist": "Beta Band",
+    "cover_color": "#e151fb",
+    "cover_v": 18169343590900,
+    "id": "eef3dd552229b6eb",
+    "tracks": 6,
+    "year": "2021"
+  },
+  {
+    "added": 1792360592.386806,
+    "album": "Second Album",
+    "albumartist": "Beta Band",
+    "cover_color": "#a5a52f",
+    "cover_v": 226018955654648,
+    "id": "1ef99653a54aa327",
+    "tracks": 6,
+    "year": "2021"
+  }
+]

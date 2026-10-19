@@ -1,0 +1,938 @@
+[
+  {
+    "added_at": 1792280084.9141605,
+    "album": "First Album",
+    "album_id": "150c2e63e67a8f86",
+    "albumartist": "Alpha Artist",
+    "artist": "Alpha Artist",
+    "artists": [
+      {
+        "in_library": true,
+        "name": "Alpha Artist"
+      }
+    ],
+    "bitrate": 111,
+    "cover_color": "#b7cb00",
+    "cover_v": 2907780667060,
+    "disc": 1,
+    "duration": 4.0,
+    "format": "flac",
+    "id": 10,
+    "request_id": null,
+    "title": "Song 1 of First Album",
+    "track": 1,
+    "verify_detail": null,
+    "verify_status": null,
+    "year": "2021"
+  },
+  {
+    "added_at": 1792360592.3903716,
+    "album": "First Album",
+    "album_id": "150c2e63e67a8f86",
+    "albumartist": "Alpha Artist",
+    "artist": "Alpha Artist",
+    "artists": [
+      {
+        "in_library": true,
+        "name": "Alpha Artist"
+      }
+    ],
+    "bitrate": 111,
+    "cover_color": "#b7cb00",
+    "cover_v": 2907780667060,
+    "disc": 1,
+    "duration": 4.0,
+    "format": "flac",
+    "id": 28,
+    "request_id": null,
+    "title": "Song 1 of First Album",
+    "track": 1,
+    "verify_detail": null,
+    "verify_status": null,
+    "year": "2021"
+  },
+  {
+    "added_at": 1792280084.9142768,
+    "album": "First Album",
+    "album_id": "150c2e63e67a8f86",
+    "albumartist": "Alpha Artist",
+    "artist": "Alpha Artist",
+    "artists": [
+      {
+        "in_library": true,
+        "name": "Alpha Artist"
+      }
+    ],
+    "bitrate": 113,
+    "cover_color": "#b7cb00",
+    "cover_v": 2907780667060,
+    "disc": 1,
+    "duration": 4.0,
+    "format": "flac",
+    "id": 11,
+    "request_id": null,
+    "title": "Song 2 of First Album",
+    "track": 2,
+    "verify_detail": null,
+    "verify_status": null,
+    "year": "2021"
+  },
+  {
+    "added_at": 1792360592.3907473,
+    "album": "First Album",
+    "album_id": "150c2e63e67a8f86",
+    "albumartist": "Alpha Artist",
+    "artist": "Alpha Artist",
+    "artists": [
+      {
+        "in_library": true,
+        "name": "Alpha Artist"
+      }
+    ],
+    "bitrate": 113,
+    "cover_color": "#b7cb00",
+    "cover_v": 2907780667060,
+    "disc": 1,
+    "duration": 4.0,
+    "format": "flac",
+    "id": 29,
+    "request_id": null,
+    "title": "Song 2 of First Album",
+    "track": 2,
+    "verify_detail": null,
+    "verify_status": null,
+    "year": "2021"
+  },
+  {
+    "added_at": 1792280084.9143884,
+    "album": "First Album",
+    "album_id": "150c2e63e67a8f86",
+    "albumartist": "Alpha Artist",
+    "artist": "Alpha Artist",
+    "artists": [
+      {
+        "in_library": true,
+        "name": "Alpha Artist"
+      }
+    ],
+    "bitrate": 110,
+    "cover_color": "#b7cb00",
+    "cover_v": 2907780667060,
+    "disc": 1,
+    "duration": 4.0,
+    "format": "flac",
+    "id": 12,
+    "request_id": null,
+    "title": "Song 3 of First Album",
+    "track": 3,
+    "verify_detail": null,
+    "verify_status": null,
+    "year": "2021"
+  },
+  {
+    "added_at": 1792360592.391323,
+    "album": "First Album",
+    "album_id": "150c2e63e67a8f86",
+    "albumartist": "Alpha Artist",
+    "artist": "Alpha Artist",
+    "artists": [
+      {
+        "in_library": true,
+        "name": "Alpha Artist"
+      }
+    ],
+    "bitrate": 110,
+    "cover_color": "#b7cb00",
+    "cover_v": 2907780667060,
+    "disc": 1,
+    "duration": 4.0,
+    "format": "flac",
+    "id": 30,
+    "request_id": null,
+    "title": "Song 3 of First Album",
+    "track": 3,
+    "verify_detail": null,
+    "verify_status": null,
+    "year": "2021"
+  },
+  {
+    "added_at": 1792280084.9137535,
+    "album": "Second Album",
+    "album_id": "761bb0aaa0c97236",
+    "albumartist": "Alpha Artist",
+    "artist": "Alpha Artist",
+    "artists": [
+      {
+        "in_library": true,
+        "name": "Alpha Artist"
+      }
+    ],
+    "bitrate": 111,
+    "cover_color": "#d471e7",
+    "cover_v": 117237759666321,
+    "disc": 1,
+    "duration": 4.0,
+    "format": "flac",
+    "id": 7,
+    "request_id": null,
+    "title": "Song 1 of Second Album",
+    "track": 1,
+    "verify_detail": null,
+    "verify_status": null,
+    "year": "2021"
+  },
+  {
+    "added_at": 1792360592.388997,
+    "album": "Second Album",
+    "album_id": "761bb0aaa0c97236",
+    "albumartist": "Alpha Artist",
+    "artist": "Alpha Artist",
+    "artists": [
+      {
+        "in_library": true,
+        "name": "Alpha Artist"
+      }
+    ],
+    "bitrate": 111,
+    "cover_color": "#d471e7",
+    "cover_v": 117237759666321,
+    "disc": 1,
+    "duration": 4.0,
+    "format": "flac",
+    "id": 25,
+    "request_id": null,
+    "title": "Song 1 of Second Album",
+    "track": 1,
+    "verify_detail": null,
+    "verify_status": null,
+    "year": "2021"
+  },
+  {
+    "added_at": 1792280084.9138737,
+    "album": "Second Album",
+    "album_id": "761bb0aaa0c97236",
+    "albumartist": "Alpha Artist",
+    "artist": "Alpha Artist",
+    "artists": [
+      {
+        "in_library": true,
+        "name": "Alpha Artist"
+      }
+    ],
+    "bitrate": 113,
+    "cover_color": "#d471e7",
+    "cover_v": 117237759666321,
+    "disc": 1,
+    "duration": 4.0,
+    "format": "flac",
+    "id": 8,
+    "request_id": null,
+    "title": "Song 2 of Second Album",
+    "track": 2,
+    "verify_detail": null,
+    "verify_status": null,
+    "year": "2021"
+  },
+  {
+    "added_at": 1792360592.3894346,
+    "album": "Second Album",
+    "album_id": "761bb0aaa0c97236",
+    "albumartist": "Alpha Artist",
+    "artist": "Alpha Artist",
+    "artists": [
+      {
+        "in_library": true,
+        "name": "Alpha Artist"
+      }
+    ],
+    "bitrate": 113,
+    "cover_color": "#d471e7",
+    "cover_v": 117237759666321,
+    "disc": 1,
+    "duration": 4.0,
+    "format": "flac",
+    "id": 26,
+    "request_id": null,
+    "title": "Song 2 of Second Album",
+    "track": 2,
+    "verify_detail": null,
+    "verify_status": null,
+    "year": "2021"
+  },
+  {
+    "added_at": 1792280084.9140048,
+    "album": "Second Album",
+    "album_id": "761bb0aaa0c97236",
+    "albumartist": "Alpha Artist",
+    "artist": "Alpha Artist",
+    "artists": [
+      {
+        "in_library": true,
+        "name": "Alpha Artist"
+      }
+    ],
+    "bitrate": 110,
+    "cover_color": "#d471e7",
+    "cover_v": 117237759666321,
+    "disc": 1,
+    "duration": 4.0,
+    "format": "flac",
+    "id": 9,
+    "request_id": null,
+    "title": "Song 3 of Second Album",
+    "track": 3,
+    "verify_detail": null,
+    "verify_status": null,
+    "year": "2021"
+  },
+  {
+    "added_at": 1792360592.3898032,
+    "album": "Second Album",
+    "album_id": "761bb0aaa0c97236",
+    "albumartist": "Alpha Artist",
+    "artist": "Alpha Artist",
+    "artists": [
+      {
+        "in_library": true,
+        "name": "Alpha Artist"
+      }
+    ],
+    "bitrate": 110,
+    "cover_color": "#d471e7",
+    "cover_v": 117237759666321,
+    "disc": 1,
+    "duration": 4.0,
+    "format": "flac",
+    "id": 27,
+    "request_id": null,
+    "title": "Song 3 of Second Album",
+    "track": 3,
+    "verify_detail": null,
+    "verify_status": null,
+    "year": "2021"
+  },
+  {
+    "added_at": 1792280755.570913,
+    "album": "“Quoted” Album",
+    "album_id": "ea9795066f904928",
+    "albumartist": "Artist",
+    "artist": "Artist",
+    "artists": [
+      {
+        "in_library": true,
+        "name": "Artist"
+      }
+    ],
+    "bitrate": 119,
+    "cover_color": "#af9f23",
+    "cover_v": 235299191346193,
+    "disc": 1,
+    "duration": 3.0,
+    "format": "flac",
+    "id": 14,
+    "request_id": null,
+    "title": "“Hey” Song",
+    "track": 1,
+    "verify_detail": null,
+    "verify_status": null,
+    "year": "2020"
+  },
+  {
+    "added_at": 1792360592.3987255,
+    "album": "“Quoted” Album",
+    "album_id": "ea9795066f904928",
+    "albumartist": "Artist",
+    "artist": "Artist",
+    "artists": [
+      {
+        "in_library": true,
+        "name": "Artist"
+      }
+    ],
+    "bitrate": 119,
+    "cover_color": "#af9f23",
+    "cover_v": 235299191346193,
+    "disc": 1,
+    "duration": 3.0,
+    "format": "flac",
+    "id": 36,
+    "request_id": null,
+    "title": "“Hey” Song",
+    "track": 1,
+    "verify_detail": null,
+    "verify_status": null,
+    "year": "2020"
+  },
+  {
+    "added_at": 1792280825.869122,
+    "album": "“Quoted” Album",
+    "album_id": "ea9795066f904928",
+    "albumartist": "Artist",
+    "artist": "Artist",
+    "artists": [
+      {
+        "in_library": true,
+        "name": "Artist"
+      }
+    ],
+    "bitrate": 119,
+    "cover_color": "#af9f23",
+    "cover_v": 235299191346193,
+    "disc": 1,
+    "duration": 3.0,
+    "format": "flac",
+    "id": 17,
+    "request_id": null,
+    "title": "Song 2",
+    "track": 2,
+    "verify_detail": null,
+    "verify_status": null,
+    "year": "2020"
+  },
+  {
+    "added_at": 1792360592.398023,
+    "album": "“Quoted” Album",
+    "album_id": "ea9795066f904928",
+    "albumartist": "Artist",
+    "artist": "Artist",
+    "artists": [
+      {
+        "in_library": true,
+        "name": "Artist"
+      }
+    ],
+    "bitrate": 119,
+    "cover_color": "#af9f23",
+    "cover_v": 235299191346193,
+    "disc": 1,
+    "duration": 3.0,
+    "format": "flac",
+    "id": 34,
+    "request_id": null,
+    "title": "Song 2",
+    "track": 2,
+    "verify_detail": null,
+    "verify_status": null,
+    "year": "2020"
+  },
+  {
+    "added_at": 1792280825.8693297,
+    "album": "“Quoted” Album",
+    "album_id": "ea9795066f904928",
+    "albumartist": "Artist",
+    "artist": "Artist",
+    "artists": [
+      {
+        "in_library": true,
+        "name": "Artist"
+      }
+    ],
+    "bitrate": 119,
+    "cover_color": "#af9f23",
+    "cover_v": 235299191346193,
+    "disc": 1,
+    "duration": 3.0,
+    "format": "flac",
+    "id": 18,
+    "request_id": null,
+    "title": "Song 3",
+    "track": 3,
+    "verify_detail": null,
+    "verify_status": null,
+    "year": "2020"
+  },
+  {
+    "added_at": 1792360592.3983853,
+    "album": "“Quoted” Album",
+    "album_id": "ea9795066f904928",
+    "albumartist": "Artist",
+    "artist": "Artist",
+    "artists": [
+      {
+        "in_library": true,
+        "name": "Artist"
+      }
+    ],
+    "bitrate": 119,
+    "cover_color": "#af9f23",
+    "cover_v": 235299191346193,
+    "disc": 1,
+    "duration": 3.0,
+    "format": "flac",
+    "id": 35,
+    "request_id": null,
+    "title": "Song 3",
+    "track": 3,
+    "verify_detail": null,
+    "verify_status": null,
+    "year": "2020"
+  },
+  {
+    "added_at": 1792280084.913297,
+    "album": "First Album",
+    "album_id": "eef3dd552229b6eb",
+    "albumartist": "Beta Band",
+    "artist": "Beta Band",
+    "artists": [
+      {
+        "in_library": true,
+        "name": "Beta Band"
+      }
+    ],
+    "bitrate": 111,
+    "cover_color": "#e151fb",
+    "cover_v": 18169343590900,
+    "disc": 1,
+    "duration": 4.0,
+    "format": "flac",
+    "id": 4,
+    "request_id": null,
+    "title": "Song 1 of First Album",
+    "track": 1,
+    "verify_detail": null,
+    "verify_status": null,
+    "year": "2021"
+  },
+  {
+    "added_at": 1792360592.387313,
+    "album": "First Album",
+    "album_id": "eef3dd552229b6eb",
+    "albumartist": "Beta Band",
+    "artist": "Beta Band",
+    "artists": [
+      {
+        "in_library": true,
+        "name": "Beta Band"
+      }
+    ],
+    "bitrate": 111,
+    "cover_color": "#e151fb",
+    "cover_v": 18169343590900,
+    "disc": 1,
+    "duration": 4.0,
+    "format": "flac",
+    "id": 22,
+    "request_id": null,
+    "title": "Song 1 of First Album",
+    "track": 1,
+    "verify_detail": null,
+    "verify_status": null,
+    "year": "2021"
+  },
+  {
+    "added_at": 1792280084.9134462,
+    "album": "First Album",
+    "album_id": "eef3dd552229b6eb",
+    "albumartist": "Beta Band",
+    "artist": "Beta Band",
+    "artists": [
+      {
+        "in_library": true,
+        "name": "Beta Band"
+      }
+    ],
+    "bitrate": 113,
+    "cover_color": "#e151fb",
+    "cover_v": 18169343590900,
+    "disc": 1,
+    "duration": 4.0,
+    "format": "flac",
+    "id": 5,
+    "request_id": null,
+    "title": "Song 2 of First Album",
+    "track": 2,
+    "verify_detail": null,
+    "verify_status": null,
+    "year": "2021"
+  },
+  {
+    "added_at": 1792360592.3878143,
+    "album": "First Album",
+    "album_id": "eef3dd552229b6eb",
+    "albumartist": "Beta Band",
+    "artist": "Beta Band",
+    "artists": [
+      {
+        "in_library": true,
+        "name": "Beta Band"
+      }
+    ],
+    "bitrate": 113,
+    "cover_color": "#e151fb",
+    "cover_v": 18169343590900,
+    "disc": 1,
+    "duration": 4.0,
+    "format": "flac",
+    "id": 23,
+    "request_id": null,
+    "title": "Song 2 of First Album",
+    "track": 2,
+    "verify_detail": null,
+    "verify_status": null,
+    "year": "2021"
+  },
+  {
+    "added_at": 1792280084.913555,
+    "album": "First Album",
+    "album_id": "eef3dd552229b6eb",
+    "albumartist": "Beta Band",
+    "artist": "Beta Band",
+    "artists": [
+      {
+        "in_library": true,
+        "name": "Beta Band"
+      }
+    ],
+    "bitrate": 110,
+    "cover_color": "#e151fb",
+    "cover_v": 18169343590900,
+    "disc": 1,
+    "duration": 4.0,
+    "format": "flac",
+    "id": 6,
+    "request_id": null,
+    "title": "Song 3 of First Album",
+    "track": 3,
+    "verify_detail": null,
+    "verify_status": null,
+    "year": "2021"
+  },
+  {
+    "added_at": 1792360592.3883302,
+    "album": "First Album",
+    "album_id": "eef3dd552229b6eb",
+    "albumartist": "Beta Band",
+    "artist": "Beta Band",
+    "artists": [
+      {
+        "in_library": true,
+        "name": "Beta Band"
+      }
+    ],
+    "bitrate": 110,
+    "cover_color": "#e151fb",
+    "cover_v": 18169343590900,
+    "disc": 1,
+    "duration": 4.0,
+    "format": "flac",
+    "id": 24,
+    "request_id": null,
+    "title": "Song 3 of First Album",
+    "track": 3,
+    "verify_detail": null,
+    "verify_status": null,
+    "year": "2021"
+  },
+  {
+    "added_at": 1792280084.9125984,
+    "album": "Second Album",
+    "album_id": "1ef99653a54aa327",
+    "albumartist": "Beta Band",
+    "artist": "Beta Band",
+    "artists": [
+      {
+        "in_library": true,
+        "name": "Beta Band"
+      }
+    ],
+    "bitrate": 111,
+    "cover_color": "#a5a52f",
+    "cover_v": 226018955654648,
+    "disc": 1,
+    "duration": 4.0,
+    "format": "flac",
+    "id": 1,
+    "request_id": null,
+    "title": "Song 1 of Second Album",
+    "track": 1,
+    "verify_detail": null,
+    "verify_status": null,
+    "year": "2021"
+  },
+  {
+    "added_at": 1792360592.38555,
+    "album": "Second Album",
+    "album_id": "1ef99653a54aa327",
+    "albumartist": "Beta Band",
+    "artist": "Beta Band",
+    "artists": [
+      {
+        "in_library": true,
+        "name": "Beta Band"
+      }
+    ],
+    "bitrate": 111,
+    "cover_color": "#a5a52f",
+    "cover_v": 226018955654648,
+    "disc": 1,
+    "duration": 4.0,
+    "format": "flac",
+    "id": 19,
+    "request_id": null,
+    "title": "Song 1 of Second Album",
+    "track": 1,
+    "verify_detail": null,
+    "verify_status": null,
+    "year": "2021"
+  },
+  {
+    "added_at": 1792280084.9129596,
+    "album": "Second Album",
+    "album_id": "1ef99653a54aa327",
+    "albumartist": "Beta Band",
+    "artist": "Beta Band",
+    "artists": [
+      {
+        "in_library": true,
+        "name": "Beta Band"
+      }
+    ],
+    "bitrate": 113,
+    "cover_color": "#a5a52f",
+    "cover_v": 226018955654648,
+    "disc": 1,
+    "duration": 4.0,
+    "format": "flac",
+    "id": 2,
+    "request_id": null,
+    "title": "Song 2 of Second Album",
+    "track": 2,
+    "verify_detail": null,
+    "verify_status": null,
+    "year": "2021"
+  },
+  {
+    "added_at": 1792360592.386342,
+    "album": "Second Album",
+    "album_id": "1ef99653a54aa327",
+    "albumartist": "Beta Band",
+    "artist": "Beta Band",
+    "artists": [
+      {
+        "in_library": true,
+        "name": "Beta Band"
+      }
+    ],
+    "bitrate": 113,
+    "cover_color": "#a5a52f",
+    "cover_v": 226018955654648,
+    "disc": 1,
+    "duration": 4.0,
+    "format": "flac",
+    "id": 20,
+    "request_id": null,
+    "title": "Song 2 of Second Album",
+    "track": 2,
+    "verify_detail": null,
+    "verify_status": null,
+    "year": "2021"
+  },
+  {
+    "added_at": 1792280084.9131408,
+    "album": "Second Album",
+    "album_id": "1ef99653a54aa327",
+    "albumartist": "Beta Band",
+    "artist": "Beta Band",
+    "artists": [
+      {
+        "in_library": true,
+        "name": "Beta Band"
+      }
+    ],
+    "bitrate": 110,
+    "cover_color": "#a5a52f",
+    "cover_v": 226018955654648,
+    "disc": 1,
+    "duration": 4.0,
+    "format": "flac",
+    "id": 3,
+    "request_id": null,
+    "title": "Song 3 of Second Album",
+    "track": 3,
+    "verify_detail": null,
+    "verify_status": null,
+    "year": "2021"
+  },
+  {
+    "added_at": 1792360592.386806,
+    "album": "Second Album",
+    "album_id": "1ef99653a54aa327",
+    "albumartist": "Beta Band",
+    "artist": "Beta Band",
+    "artists": [
+      {
+        "in_library": true,
+        "name": "Beta Band"
+      }
+    ],
+    "bitrate": 110,
+    "cover_color": "#a5a52f",
+    "cover_v": 226018955654648,
+    "disc": 1,
+    "duration": 4.0,
+    "format": "flac",
+    "id": 21,
+    "request_id": null,
+    "title": "Song 3 of Second Album",
+    "track": 3,
+    "verify_detail": null,
+    "verify_status": null,
+    "year": "2021"
+  },
+  {
+    "added_at": 1792280755.5703678,
+    "album": "ペルソナ4 サウンドトラック",
+    "album_id": "52b52b2323b5df9d",
+    "albumartist": "平田志穂子",
+    "artist": "平田志穂子",
+    "artists": [
+      {
+        "in_library": true,
+        "name": "平田志穂子"
+      }
+    ],
+    "bitrate": 118,
+    "cover_color": "#b3f50c",
+    "cover_v": 80461843779493,
+    "disc": 1,
+    "duration": 3.0,
+    "format": "flac",
+    "id": 13,
+    "request_id": null,
+    "title": "Reach Out To The Truth",
+    "track": 1,
+    "verify_detail": null,
+    "verify_status": null,
+    "year": "2008"
+  },
+  {
+    "added_at": 1792360592.3973174,
+    "album": "ペルソナ4 サウンドトラック",
+    "album_id": "52b52b2323b5df9d",
+    "albumartist": "平田志穂子",
+    "artist": "平田志穂子",
+    "artists": [
+      {
+        "in_library": true,
+        "name": "平田志穂子"
+      }
+    ],
+    "bitrate": 118,
+    "cover_color": "#b3f50c",
+    "cover_v": 80461843779493,
+    "disc": 1,
+    "duration": 3.0,
+    "format": "flac",
+    "id": 32,
+    "request_id": null,
+    "title": "Reach Out To The Truth",
+    "track": 1,
+    "verify_detail": null,
+    "verify_status": null,
+    "year": "2008"
+  },
+  {
+    "added_at": 1792280825.868864,
+    "album": "ペルソナ4 サウンドトラック",
+    "album_id": "52b52b2323b5df9d",
+    "albumartist": "平田志穂子",
+    "artist": "平田志穂子",
+    "artists": [
+      {
+        "in_library": true,
+        "name": "平田志穂子"
+      }
+    ],
+    "bitrate": 117,
+    "cover_color": "#b3f50c",
+    "cover_v": 80461843779493,
+    "disc": 1,
+    "duration": 3.0,
+    "format": "flac",
+    "id": 16,
+    "request_id": null,
+    "title": "Track 2",
+    "track": 2,
+    "verify_detail": null,
+    "verify_status": null,
+    "year": "2008"
+  },
+  {
+    "added_at": 1792360592.397678,
+    "album": "ペルソナ4 サウンドトラック",
+    "album_id": "52b52b2323b5df9d",
+    "albumartist": "平田志穂子",
+    "artist": "平田志穂子",
+    "artists": [
+      {
+        "in_library": true,
+        "name": "平田志穂子"
+      }
+    ],
+    "bitrate": 117,
+    "cover_color": "#b3f50c",
+    "cover_v": 80461843779493,
+    "disc": 1,
+    "duration": 3.0,
+    "format": "flac",
+    "id": 33,
+    "request_id": null,
+    "title": "Track 2",
+    "track": 2,
+    "verify_detail": null,
+    "verify_status": null,
+    "year": "2008"
+  },
+  {
+    "added_at": 1792280825.8685322,
+    "album": "ペルソナ4 サウンドトラック",
+    "album_id": "52b52b2323b5df9d",
+    "albumartist": "平田志穂子",
+    "artist": "平田志穂子",
+    "artists": [
+      {
+        "in_library": true,
+        "name": "平田志穂子"
+      }
+    ],
+    "bitrate": 118,
+    "cover_color": "#b3f50c",
+    "cover_v": 80461843779493,
+    "disc": 1,
+    "duration": 3.0,
+    "format": "flac",
+    "id": 15,
+    "request_id": null,
+    "title": "Track 3",
+    "track": 3,
+    "verify_detail": null,
+    "verify_status": null,
+    "year": "2008"
+  },
+  {
+    "added_at": 1792360592.396241,
+    "album": "ペルソナ4 サウンドトラック",
+    "album_id": "52b52b2323b5df9d",
+    "albumartist": "平田志穂子",
+    "artist": "平田志穂子",
+    "artists": [
+      {
+        "in_library": true,
+        "name": "平田志穂子"
+      }
+    ],
+    "bitrate": 118,
+    "cover_color": "#b3f50c",
+    "cover_v": 80461843779493,
+    "disc": 1,
+    "duration": 3.0,
+    "format": "flac",
+    "id": 31,
+    "request_id": null,
+    "title": "Track 3",
+    "track": 3,
+    "verify_detail": null,
+    "verify_status": null,
+    "year": "2008"
+  }
+]

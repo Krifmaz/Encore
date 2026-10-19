@@ -1,17 +1,11 @@
 //! One module per web/js/pages/*.js file.
 
-pub mod account;
 pub mod activity;
-pub mod admin;
 pub mod artwork;
 pub mod auth;
-pub mod autodownload;
 pub mod bugreports;
 pub mod common;
-pub mod computer;
-pub mod connections;
 pub mod contribute;
-pub mod diagnostics;
 pub mod discover;
 pub mod download;
 pub mod downloads;
@@ -24,7 +18,6 @@ pub mod picker;
 pub mod playlists;
 pub mod report;
 pub mod requests;
-pub mod settings;
 pub mod soulseek;
 pub mod storage;
 pub mod translate;

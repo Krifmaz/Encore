@@ -1,0 +1,314 @@
+[
+  {
+    "added_at": 1792280084.913297,
+    "album": "First Album",
+    "album_id": "eef3dd552229b6eb",
+    "albumartist": "Beta Band",
+    "artist": "Beta Band",
+    "artists": [
+      {
+        "in_library": true,
+        "name": "Beta Band"
+      }
+    ],
+    "bitrate": 111,
+    "cover_color": "#e151fb",
+    "cover_v": 18169343590900,
+    "disc": 1,
+    "duration": 4.0,
+    "format": "flac",
+    "id": 4,
+    "request_id": null,
+    "title": "Song 1 of First Album",
+    "track": 1,
+    "verify_detail": null,
+    "verify_status": null,
+    "year": "2021"
+  },
+  {
+    "added_at": 1792360592.387313,
+    "album": "First Album",
+    "album_id": "eef3dd552229b6eb",
+    "albumartist": "Beta Band",
+    "artist": "Beta Band",
+    "artists": [
+      {
+        "in_library": true,
+        "name": "Beta Band"
+      }
+    ],
+    "bitrate": 111,
+    "cover_color": "#e151fb",
+    "cover_v": 18169343590900,
+    "disc": 1,
+    "duration": 4.0,
+    "format": "flac",
+    "id": 22,
+    "request_id": null,
+    "title": "Song 1 of First Album",
+    "track": 1,
+    "verify_detail": null,
+    "verify_status": null,
+    "year": "2021"
+  },
+  {
+    "added_at": 1792280084.9134462,
+    "album": "First Album",
+    "album_id": "eef3dd552229b6eb",
+    "albumartist": "Beta Band",
+    "artist": "Beta Band",
+    "artists": [
+      {
+        "in_library": true,
+        "name": "Beta Band"
+      }
+    ],
+    "bitrate": 113,
+    "cover_color": "#e151fb",
+    "cover_v": 18169343590900,
+    "disc": 1,
+    "duration": 4.0,
+    "format": "flac",
+    "id": 5,
+    "request_id": null,
+    "title": "Song 2 of First Album",
+    "track": 2,
+    "verify_detail": null,
+    "verify_status": null,
+    "year": "2021"
+  },
+  {
+    "added_at": 1792360592.3878143,
+    "album": "First Album",
+    "album_id": "eef3dd552229b6eb",
+    "albumartist": "Beta Band",
+    "artist": "Beta Band",
+    "artists": [
+      {
+        "in_library": true,
+        "name": "Beta Band"
+      }
+    ],
+    "bitrate": 113,
+    "cover_color": "#e151fb",
+    "cover_v": 18169343590900,
+    "disc": 1,
+    "duration": 4.0,
+    "format": "flac",
+    "id": 23,
+    "request_id": null,
+    "title": "Song 2 of First Album",
+    "track": 2,
+    "verify_detail": null,
+    "verify_status": null,
+    "year": "2021"
+  },
+  {
+    "added_at": 1792280084.913555,
+    "album": "First Album",
+    "album_id": "eef3dd552229b6eb",
+    "albumartist": "Beta Band",
+    "artist": "Beta Band",
+    "artists": [
+      {
+        "in_library": true,
+        "name": "Beta Band"
+      }
+    ],
+    "bitrate": 110,
+    "cover_color": "#e151fb",
+    "cover_v": 18169343590900,
+    "disc": 1,
+    "duration": 4.0,
+    "format": "flac",
+    "id": 6,
+    "request_id": null,
+    "title": "Song 3 of First Album",
+    "track": 3,
+    "verify_detail": null,
+    "verify_status": null,
+    "year": "2021"
+  },
+  {
+    "added_at": 1792360592.3883302,
+    "album": "First Album",
+    "album_id": "eef3dd552229b6eb",
+    "albumartist": "Beta Band",
+    "artist": "Beta Band",
+    "artists": [
+      {
+        "in_library": true,
+        "name": "Beta Band"
+      }
+    ],
+    "bitrate": 110,
+    "cover_color": "#e151fb",
+    "cover_v": 18169343590900,
+    "disc": 1,
+    "duration": 4.0,
+    "format": "flac",
+    "id": 24,
+    "request_id": null,
+    "title": "Song 3 of First Album",
+    "track": 3,
+    "verify_detail": null,
+    "verify_status": null,
+    "year": "2021"
+  },
+  {
+    "added_at": 1792280084.9125984,
+    "album": "Second Album",
+    "album_id": "1ef99653a54aa327",
+    "albumartist": "Beta Band",
+    "artist": "Beta Band",
+    "artists": [
+      {
+        "in_library": true,
+        "name": "Beta Band"
+      }
+    ],
+    "bitrate": 111,
+    "cover_color": "#a5a52f",
+    "cover_v": 226018955654648,
+    "disc": 1,
+    "duration": 4.0,
+    "format": "flac",
+    "id": 1,
+    "request_id": null,
+    "title": "Song 1 of Second Album",
+    "track": 1,
+    "verify_detail": null,
+    "verify_status": null,
+    "year": "2021"
+  },
+  {
+    "added_at": 1792360592.38555,
+    "album": "Second Album",
+    "album_id": "1ef99653a54aa327",
+    "albumartist": "Beta Band",
+    "artist": "Beta Band",
+    "artists": [
+      {
+        "in_library": true,
+        "name": "Beta Band"
+      }
+    ],
+    "bitrate": 111,
+    "cover_color": "#a5a52f",
+    "cover_v": 226018955654648,
+    "disc": 1,
+    "duration": 4.0,
+    "format": "flac",
+    "id": 19,
+    "request_id": null,
+    "title": "Song 1 of Second Album",
+    "track": 1,
+    "verify_detail": null,
+    "verify_status": null,
+    "year": "2021"
+  },
+  {
+    "added_at": 1792280084.9129596,
+    "album": "Second Album",
+    "album_id": "1ef99653a54aa327",
+    "albumartist": "Beta Band",
+    "artist": "Beta Band",
+    "artists": [
+      {
+        "in_library": true,
+        "name": "Beta Band"
+      }
+    ],
+    "bitrate": 113,
+    "cover_color": "#a5a52f",
+    "cover_v": 226018955654648,
+    "disc": 1,
+    "duration": 4.0,
+    "format": "flac",
+    "id": 2,
+    "request_id": null,
+    "title": "Song 2 of Second Album",
+    "track": 2,
+    "verify_detail": null,
+    "verify_status": null,
+    "year": "2021"
+  },
+  {
+    "added_at": 1792360592.386342,
+    "album": "Second Album",
+    "album_id": "1ef99653a54aa327",
+    "albumartist": "Beta Band",
+    "artist": "Beta Band",
+    "artists": [
+      {
+        "in_library": true,
+        "name": "Beta Band"
+      }
+    ],
+    "bitrate": 113,
+    "cover_color": "#a5a52f",
+    "cover_v": 226018955654648,
+    "disc": 1,
+    "duration": 4.0,
+    "format": "flac",
+    "id": 20,
+    "request_id": null,
+    "title": "Song 2 of Second Album",
+    "track": 2,
+    "verify_detail": null,
+    "verify_status": null,
+    "year": "2021"
+  },
+  {
+    "added_at": 1792280084.9131408,
+    "album": "Second Album",
+    "album_id": "1ef99653a54aa327",
+    "albumartist": "Beta Band",
+    "artist": "Beta Band",
+    "artists": [
+      {
+        "in_library": true,
+        "name": "Beta Band"
+      }
+    ],
+    "bitrate": 110,
+    "cover_color": "#a5a52f",
+    "cover_v": 226018955654648,
+    "disc": 1,
+    "duration": 4.0,
+    "format": "flac",
+    "id": 3,
+    "request_id": null,
+    "title": "Song 3 of Second Album",
+    "track": 3,
+    "verify_detail": null,
+    "verify_status": null,
+    "year": "2021"
+  },
+  {
+    "added_at": 1792360592.386806,
+    "album": "Second Album",
+    "album_id": "1ef99653a54aa327",
+    "albumartist": "Beta Band",
+    "artist": "Beta Band",
+    "artists": [
+      {
+        "in_library": true,
+        "name": "Beta Band"
+      }
+    ],
+    "bitrate": 110,
+    "cover_color": "#a5a52f",
+    "cover_v": 226018955654648,
+    "disc": 1,
+    "duration": 4.0,
+    "format": "flac",
+    "id": 21,
+    "request_id": null,
+    "title": "Song 3 of Second Album",
+    "track": 3,
+    "verify_detail": null,
+    "verify_status": null,
+    "year": "2021"
+  }
+]

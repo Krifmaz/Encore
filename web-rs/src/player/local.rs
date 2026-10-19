@@ -225,9 +225,9 @@ pub(super) fn start() {
 }
 
 /// Settings → Playback: "Play downloaded songs from this device", after Buffering – only where this browser
-/// keeps downloads (the apps have their own offline screens).
+/// keeps downloads.
 pub fn offline_setting(root: &Element) {
-    if !offline::available() || can_save_offline() || qs_in(root, "#pb-local").is_some() { return; }
+    if !offline::available() || qs_in(root, "#pb-local").is_some() { return; }
     let Some(anchor) = qs_in(root, "#pb-preload").and_then(|c| dom::closest_of(&c, ".stack")) else { return };
     let html = format!(r#"<div class="stack" style="gap:6px"><h3>Downloads</h3>
         <label class="row" style="gap:8px;align-items:center"><input type="checkbox" id="pb-local" {}> Play downloaded songs from this device</label>

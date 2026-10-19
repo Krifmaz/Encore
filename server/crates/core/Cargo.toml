@@ -1,0 +1,20 @@
+[package]
+name = "encore-core"
+description = "Encore: state-free helpers shared by every crate (errors, ids, text, audio formats, versions)"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+anyhow = { workspace = true }
+axum = { workspace = true }
+base64 = { workspace = true }
+hex = { workspace = true }
+libc = { workspace = true }
+rand = { workspace = true }
+regex = { workspace = true }
+rusqlite = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+sha2 = { workspace = true }
+tracing = { workspace = true }

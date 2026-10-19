@@ -665,49 +665,320 @@ version = "2.0.0"
 dependencies = [
  "anyhow",
  "axum",
+ "encore-api",
+ "encore-db",
+ "encore-jobs",
+ "encore-library",
+ "encore-playback",
+ "encore-requests",
+ "encore-system",
+ "futures-util",
+ "image",
+ "rusqlite",
+ "serde_json",
+ "tokio",
+ "tower",
+ "tracing",
+ "tracing-subscriber",
+ "urlencoding",
+]
+
+[[package]]
+name = "encore-api"
+version = "2.0.0"
+dependencies = [
+ "anyhow",
+ "axum",
  "axum-extra",
  "base64 0.22.1",
  "bcrypt",
- "boringtun",
  "cadenza-dsp",
  "cookie",
- "fancy-regex",
+ "encore-config",
+ "encore-core",
+ "encore-db",
+ "encore-http",
+ "encore-jobs",
+ "encore-library",
+ "encore-media",
+ "encore-playback",
+ "encore-requests",
+ "encore-sync",
+ "encore-system",
+ "encore-vpn",
  "flate2",
  "futures-util",
  "hex",
- "http-body-util",
- "hyper",
- "hyper-util",
  "image",
  "lettre",
  "libc",
- "lofty",
- "md5",
  "rand 0.9.5",
  "regex",
  "reqwest",
  "rusqlite",
- "rustfft",
  "serde",
  "serde_json",
- "sha1",
  "sha2",
- "smoltcp",
- "socket2",
  "subtle",
  "tokio",
- "tokio-tungstenite 0.26.2",
  "tokio-util",
  "totp-rs",
  "tower",
  "tower-http",
  "tracing",
- "tracing-subscriber",
+ "urlencoding",
+ "walkdir",
+ "zip",
+]
+
+[[package]]
+name = "encore-config"
+version = "2.0.0"
+dependencies = [
+ "anyhow",
+ "encore-core",
+ "encore-db",
+ "regex",
+ "serde_json",
+ "toml",
+]
+
+[[package]]
+name = "encore-core"
+version = "2.0.0"
+dependencies = [
+ "anyhow",
+ "axum",
+ "base64 0.22.1",
+ "hex",
+ "libc",
+ "rand 0.9.5",
+ "regex",
+ "rusqlite",
+ "serde",
+ "serde_json",
+ "sha2",
+ "tracing",
+]
+
+[[package]]
+name = "encore-db"
+version = "2.0.0"
+dependencies = [
+ "anyhow",
+ "encore-core",
+ "rusqlite",
+ "serde_json",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
+name = "encore-http"
+version = "2.0.0"
+dependencies = [
+ "anyhow",
+ "encore-config",
+ "encore-core",
+ "encore-db",
+ "hex",
+ "md5",
+ "regex",
+ "reqwest",
+ "serde_json",
+ "sha1",
+ "tokio",
+]
+
+[[package]]
+name = "encore-jobs"
+version = "2.0.0"
+dependencies = [
+ "anyhow",
+ "axum",
+ "encore-config",
+ "encore-db",
+ "libc",
+ "serde_json",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
+name = "encore-library"
+version = "2.0.0"
+dependencies = [
+ "anyhow",
+ "encore-config",
+ "encore-core",
+ "encore-db",
+ "encore-http",
+ "encore-jobs",
+ "encore-media",
+ "fancy-regex",
+ "flate2",
+ "futures-util",
+ "hex",
+ "image",
+ "libc",
+ "lofty",
+ "regex",
+ "reqwest",
+ "rusqlite",
+ "serde",
+ "serde_json",
+ "sha1",
+ "sha2",
+ "tokio",
+ "tracing",
  "unicode-normalization",
  "urlencoding",
  "walkdir",
- "webp",
  "zip",
+]
+
+[[package]]
+name = "encore-media"
+version = "2.0.0"
+dependencies = [
+ "anyhow",
+ "encore-core",
+ "encore-db",
+ "encore-http",
+ "encore-jobs",
+ "image",
+ "libc",
+ "lofty",
+ "rustfft",
+ "serde_json",
+ "sha1",
+ "tokio",
+ "tracing",
+ "webp",
+]
+
+[[package]]
+name = "encore-playback"
+version = "2.0.0"
+dependencies = [
+ "anyhow",
+ "axum",
+ "cadenza-dsp",
+ "encore-core",
+ "encore-db",
+ "encore-media",
+ "futures-util",
+ "hex",
+ "serde",
+ "serde_json",
+ "sha2",
+ "tokio",
+ "tokio-tungstenite 0.26.2",
+ "tokio-util",
+ "tower",
+ "tower-http",
+ "tracing",
+ "urlencoding",
+]
+
+[[package]]
+name = "encore-requests"
+version = "2.0.0"
+dependencies = [
+ "anyhow",
+ "axum",
+ "base64 0.22.1",
+ "encore-config",
+ "encore-core",
+ "encore-db",
+ "encore-http",
+ "encore-library",
+ "encore-media",
+ "encore-sync",
+ "encore-system",
+ "encore-vpn",
+ "futures-util",
+ "hex",
+ "libc",
+ "md5",
+ "rand 0.9.5",
+ "regex",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "sha1",
+ "subtle",
+ "tokio",
+ "tracing",
+ "urlencoding",
+ "walkdir",
+ "zip",
+]
+
+[[package]]
+name = "encore-sync"
+version = "2.0.0"
+dependencies = [
+ "anyhow",
+ "base64 0.22.1",
+ "encore-core",
+ "encore-db",
+ "encore-http",
+ "encore-library",
+ "hex",
+ "md5",
+ "rand 0.9.5",
+ "regex",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "sha2",
+ "tokio",
+ "tracing",
+ "urlencoding",
+]
+
+[[package]]
+name = "encore-system"
+version = "2.0.0"
+dependencies = [
+ "anyhow",
+ "axum",
+ "encore-config",
+ "encore-core",
+ "encore-db",
+ "encore-http",
+ "encore-jobs",
+ "encore-playback",
+ "flate2",
+ "hex",
+ "http-body-util",
+ "hyper",
+ "hyper-util",
+ "libc",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tracing",
+ "urlencoding",
+]
+
+[[package]]
+name = "encore-vpn"
+version = "2.0.0"
+dependencies = [
+ "base64 0.22.1",
+ "boringtun",
+ "encore-config",
+ "encore-core",
+ "encore-jobs",
+ "rand 0.9.5",
+ "serde_json",
+ "smoltcp",
+ "socket2",
+ "subtle",
+ "tokio",
+ "tracing",
 ]
 
 [[package]]
@@ -2292,6 +2563,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "serde_spanned"
+version = "0.6.9"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "bf41e0cfaf7226dca15e8197172c295a782857fcb97fad1808a166870dee75a3"
+dependencies = [
+ "serde",
+]
+
+[[package]]
 name = "serde_urlencoded"
 version = "0.7.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2612,6 +2892,41 @@ dependencies = [
  "futures-sink",
  "pin-project-lite",
  "tokio",
+]
+
+[[package]]
+name = "toml"
+version = "0.8.23"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "dc1beb996b9d83529a9e75c17a1686767d148d70663143c7854d8b4a09ced362"
+dependencies = [
+ "indexmap",
+ "serde",
+ "serde_spanned",
+ "toml_datetime",
+ "toml_edit",
+]
+
+[[package]]
+name = "toml_datetime"
+version = "0.6.11"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "22cddaf88f4fbc13c51aebbf5f8eceb5c7c5a9da2ac40a13519eb5b0a0e8f11c"
+dependencies = [
+ "serde",
+]
+
+[[package]]
+name = "toml_edit"
+version = "0.22.27"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "41fe8c660ae4257887cf66394862d21dbca4a6ddd26f04a3560410406a2f819a"
+dependencies = [
+ "indexmap",
+ "serde",
+ "serde_spanned",
+ "toml_datetime",
+ "winnow",
 ]
 
 [[package]]
@@ -3138,6 +3453,15 @@ name = "windows_x86_64_msvc"
 version = "0.52.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "589f6da84c646204747d1270a2a5661ea66ed1cced2631d546fdfb155959f9ec"
+
+[[package]]
+name = "winnow"
+version = "0.7.15"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "df79d97927682d2fd8adb29682d1140b343be4ac0f08fd68b7765d9c059d3945"
+dependencies = [
+ "memchr",
+]
 
 [[package]]
 name = "wit-bindgen"

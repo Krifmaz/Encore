@@ -1,0 +1,25 @@
+[package]
+name = "encore-sync"
+description = "Encore: connections to other services (media servers, streaming accounts, scrobbling), playlists and liked songs, and the sync between them"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+encore-core = { workspace = true }
+encore-db = { workspace = true }
+encore-http = { workspace = true }
+encore-library = { workspace = true }
+anyhow = { workspace = true }
+base64 = { workspace = true }
+hex = { workspace = true }
+md5 = { workspace = true }
+rand = { workspace = true }
+regex = { workspace = true }
+reqwest = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+sha2 = { workspace = true }
+tokio = { workspace = true }
+tracing = { workspace = true }
+urlencoding = { workspace = true }

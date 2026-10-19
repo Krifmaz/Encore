@@ -1,0 +1,46 @@
+[
+  {
+    "added": 1792360592.391323,
+    "albums": 2,
+    "cover_album": "150c2e63e67a8f86",
+    "cover_color": "#b7cb00",
+    "cover_v": 2907780667060,
+    "mbid": null,
+    "name": "Alpha Artist",
+    "size": 670152,
+    "tracks": 12
+  },
+  {
+    "added": 1792360592.3987255,
+    "albums": 1,
+    "cover_album": "ea9795066f904928",
+    "cover_color": "#af9f23",
+    "cover_v": 235299191346193,
+    "mbid": null,
+    "name": "Artist",
+    "size": 268362,
+    "tracks": 6
+  },
+  {
+    "added": 1792360592.3883302,
+    "albums": 2,
+    "cover_album": "1ef99653a54aa327",
+    "cover_color": "#a5a52f",
+    "cover_v": 226018955654648,
+    "mbid": null,
+    "name": "Beta Band",
+    "size": 670080,
+    "tracks": 12
+  },
+  {
+    "added": 1792360592.397678,
+    "albums": 1,
+    "cover_album": "52b52b2323b5df9d",
+    "cover_color": "#b3f50c",
+    "cover_v": 80461843779493,
+    "mbid": null,
+    "name": "平田志穂子",
+    "size": 265496,
+    "tracks": 6
+  }
+]

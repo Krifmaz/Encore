@@ -1,5 +1,5 @@
 //! Port of web/js/pages/auth.js – see docs/archive/ui-rewrite/CONTRACT.md
-//! Sign-in, sign-up (with invite), forgot password, the reset page, the magic-link page and "Change server".
+//! Sign-in, sign-up (with invite), forgot password, the reset page and the magic-link page.
 
 use crate::api::{self, ApiError};
 use crate::app;
@@ -195,19 +195,16 @@ pub async fn render(root: Element, path: String, query: HashMap<String, String>)
         <p class="small muted" style="text-align:center;margin:18px 0 0">
           {foot}
         </p>
-        {change_server}
       </div>
     </div>"##,
         logo = logo(30),
         title = if is_signup { "Create your account" } else { "Sign in to request music and manage the library" },
         form = if is_signup { signup_form(&mode, &invite) } else { login_form(info.truthy("email_login")) },
-        change_server = if app::native_has("changeServer") { r##"<p class="small muted" style="text-align:center;margin:10px 0 0"><a href="#" id="change-server" style="color:var(--accent)">Change server</a></p>"## } else { "" },
     ));
     let r = root.clone();
     dom::on_sel(&root, "#forgot-link", "click", move |e| { dom::prevent(e); forgot_form(&r); });
     let r = root.clone();
     dom::on_sel(&root, "#email-link-btn", "click", move |e| { dom::prevent(e); email_link_form(&r); });
-    dom::on_sel(&root, "#change-server", "click", |e| { dom::prevent(e); app::native_call("changeServer"); });
     let Some(form) = dom::qs_in(&root, "form") else { return };
     let err = dom::qs_in(&root, "#auth-err").expect("#auth-err");
     let f = form.clone();

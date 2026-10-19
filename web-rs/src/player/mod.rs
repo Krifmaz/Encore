@@ -36,7 +36,6 @@ pub use link::{command, link_state, linked, set_link, snapshot, Link};
 pub use load::{seek_to, set_volume, toggle};
 pub(crate) use load::can_play;
 pub use local::{offline_setting, prefer_local, set_prefer_local};
-pub use media_session::{can_save_offline, save_offline};
 pub use queue::{enqueue, next, play_next, play_queue, prev, preview, queue, restore, saved_spot, shuffle_library};
 pub(crate) use crate::num::{khz, to_fixed1};
 
@@ -59,7 +58,7 @@ use crate::dom::{self, body, by_id, document, now_ms, qs_in, qsa_in, set_html, E
 use crate::json::{self, js_string, J};
 use crate::num::{js_num, num, truthy_num};
 use crate::ui::{art, esc, esck, fmt, icon, icon_attr, pop_menu, share_track, toast, MenuItem, ModalOpts};
-use crate::{app, native, playback};
+use crate::{app, playback};
 use gloo_events::EventListenerOptions;
 use serde_json::{json, Map, Value};
 use std::cell::{Cell, RefCell};
@@ -164,11 +163,6 @@ fn prefs() -> Value { PREFS.with(|p| p.borrow().clone()) }
 fn play(a: &HtmlMediaElement) {
     if let Ok(p) = a.play() { dom::spawn(async move { let _ = wasm_bindgen_futures::JsFuture::from(p).await; }); }
 }
-/// `new URL(u, location.href).href`.
-fn abs_url(u: &str) -> String {
-    let base = dom::location().href().unwrap_or_default();
-    web_sys::Url::new_with_base(u, &base).map(|x| x.href()).unwrap_or_default()
-}
 
 /// `root.querySelector(sel).on<ev> = f`.
 fn wire(out: &mut Vec<EventListener>, root: &Element, sel: &str, ev: &str, f: impl FnMut(&Event) + 'static) {
@@ -200,7 +194,7 @@ fn js_call0(o: &JsValue, name: &str) -> Option<JsValue> {
     js_get(o, name).dyn_into::<js_sys::Function>().ok()?.call0(o).ok()
 }
 
-// ---- listeners: the pages and the remote are told whenever the song changes (the native apps too, see media_session.rs) ----
+// ---- listeners: the pages and the remote are told whenever the song changes ----
 /// `onChange(fn)` – dropping the handle unsubscribes.
 pub struct OnChange(u64);
 impl Drop for OnChange {
@@ -215,7 +209,6 @@ fn emit() {
     let fns: Vec<Listener> = LISTENERS.with(|l| l.borrow().iter().map(|(_, f)| f.clone()).collect());
     let c = current();
     for f in fns { f(c.clone()); }
-    native();
 }
 
 pub fn current() -> Option<Value> { cur().map(|t| (*t).clone()) }

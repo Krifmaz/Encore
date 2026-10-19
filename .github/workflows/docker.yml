@@ -2,7 +2,9 @@ name: test-and-build
 
 # Encore: the server + web app. Runs the tests and checks that the Docker image builds – on pull
 # requests and by hand only, to keep Actions minutes down. Images are only published by the release
-# workflow: :latest and :<version>.
+# workflow: :latest and :<version>. The tests are release.yml's test job (the server's tests and clippy
+# for every crate, the web app's checks, the Cadenza pins); a run started by hand also puts the speed table
+# in the package job's summary.
 on:
   pull_request:
   workflow_dispatch:
@@ -12,27 +14,26 @@ permissions:
   packages: write
 
 jobs:
+  # the same tests as a release (release.yml's test job, called with only = test)
   test:
+    uses: ./.github/workflows/release.yml
+    with:
+      only: test
+
+  # the web app and the Linux build a pull request can be tried with (encore-linux artifact)
+  package:
+    needs: test
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: wasm32-unknown-unknown
-          components: clippy
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: |
             server
             web-rs
-      - run: cargo test --locked
-        working-directory: server
-      - name: Check the web app (web-rs) for WebAssembly, clippy and its tests (the strings reference among them)
-        working-directory: web-rs
-        run: |
-          cargo check --locked --target wasm32-unknown-unknown
-          cargo clippy --locked --target wasm32-unknown-unknown -- -D warnings
-          cargo test --locked
       - name: Build the web app (trunk)
         working-directory: web-rs
         run: |
@@ -50,6 +51,17 @@ jobs:
         with:
           name: encore-linux
           path: encore-linux-x86_64.tar.gz
+      # The speed table (server/benches/perf.rs, the same as docs/perf/) in the job summary, only when the
+      # workflow is started by hand (Actions → test-and-build → Run workflow on the branch): the bench builds the
+      # API crate a second time with its test helper and links the whole program again with fat LTO, which costs
+      # a quarter of an hour of runner time; release.yml runs it on every release. A GitHub runner is another
+      # machine with other neighbours: compare its numbers only with other runs here, not with docs/perf/.
+      - name: Speed table (cargo bench --bench perf)
+        if: github.event_name == 'workflow_dispatch'
+        working-directory: server
+        run: |
+          cargo bench --locked --bench perf > perf.md
+          { echo "## Speed table (release build, GitHub runner)"; cat perf.md; } >> "$GITHUB_STEP_SUMMARY"
 
   docker:
     needs: test

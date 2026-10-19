@@ -1,8 +1,0 @@
-<resources xmlns:tools="http://schemas.android.com/tools">
-    <!-- Base application theme. -->
-    <style name="Theme.encore_app" parent="Theme.Material3.DayNight.NoActionBar">
-        <item name="android:windowBackground">#0b0b12</item>
-        <item name="android:statusBarColor">#0b0b12</item>
-        <item name="android:navigationBarColor">#0b0b12</item>
-    </style>
-</resources>

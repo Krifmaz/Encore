@@ -11,7 +11,11 @@ ENV CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER=aarch64-linux-gnu-gcc \
     AR_aarch64_unknown_linux_gnu=aarch64-linux-gnu-ar
 ARG ENCORE_VERSION=
 WORKDIR /src
+# the server is a Cargo workspace: cargo reads every member before it builds one, so all of them come in – the
+# crates (crates/*), the speed bench Cargo.toml names (benches/) and the encore binary itself (src/)
 COPY server/Cargo.toml server/Cargo.lock ./
+COPY server/crates ./crates
+COPY server/benches ./benches
 COPY server/src ./src
 RUN case "$TARGETARCH" in arm64) T=aarch64-unknown-linux-gnu ;; *) T=x86_64-unknown-linux-gnu ;; esac \
  && { [ -n "$ENCORE_VERSION" ] || unset ENCORE_VERSION; } \

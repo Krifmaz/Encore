@@ -1,0 +1,147 @@
+{
+  "cover_url": null,
+  "created_at": 1792279903.5730236,
+  "description": null,
+  "follow": 0,
+  "id": 1,
+  "items": [
+    {
+      "added_at": 1792365179.1138685,
+      "album": "First Album",
+      "album_id": "150c2e63e67a8f86",
+      "artist": "Alpha Artist",
+      "artists": [
+        {
+          "in_library": true,
+          "name": "Alpha Artist"
+        }
+      ],
+      "bitrate": 111,
+      "cover_color": "#b7cb00",
+      "cover_url": null,
+      "cover_v": 2907780667060,
+      "duration": 4.0,
+      "format": "flac",
+      "id": 1,
+      "isrc": null,
+      "match_reason": "added from library",
+      "mbid": null,
+      "playlist_id": 1,
+      "position": 0,
+      "request_id": null,
+      "request_message": null,
+      "request_status": null,
+      "source": "library",
+      "source_id": null,
+      "title": "Song 1 of First Album",
+      "track_id": 28,
+      "verify_status": null
+    },
+    {
+      "added_at": 1792365179.1170793,
+      "album": "ペルソナ4 サウンドトラック",
+      "album_id": "52b52b2323b5df9d",
+      "artist": "平田志穂子",
+      "artists": [
+        {
+          "in_library": true,
+          "name": "平田志穂子"
+        }
+      ],
+      "bitrate": 118,
+      "cover_color": "#b3f50c",
+      "cover_url": null,
+      "cover_v": 80461843779493,
+      "duration": 3.0,
+      "format": "flac",
+      "id": 2,
+      "isrc": null,
+      "match_reason": "added from library",
+      "mbid": null,
+      "playlist_id": 1,
+      "position": 1,
+      "request_id": null,
+      "request_message": null,
+      "request_status": null,
+      "source": "library",
+      "source_id": null,
+      "title": "Reach Out To The Truth",
+      "track_id": 13,
+      "verify_status": null
+    },
+    {
+      "added_at": 1792365179.120573,
+      "album": "First Album",
+      "album_id": "eef3dd552229b6eb",
+      "artist": "Beta Band",
+      "artists": [
+        {
+          "in_library": true,
+          "name": "Beta Band"
+        }
+      ],
+      "bitrate": 111,
+      "cover_color": "#e151fb",
+      "cover_url": null,
+      "cover_v": 18169343590900,
+      "duration": 4.0,
+      "format": "flac",
+      "id": 3,
+      "isrc": null,
+      "match_reason": "added from library",
+      "mbid": null,
+      "playlist_id": 1,
+      "position": 2,
+      "request_id": null,
+      "request_message": null,
+      "request_status": null,
+      "source": "library",
+      "source_id": null,
+      "title": "Song 1 of First Album",
+      "track_id": 22,
+      "verify_status": null
+    },
+    {
+      "added_at": 1792365179.1223457,
+      "album": "ペルソナ4 サウンドトラック",
+      "album_id": "52b52b2323b5df9d",
+      "artist": "平田志穂子",
+      "artists": [
+        {
+          "in_library": true,
+          "name": "平田志穂子"
+        }
+      ],
+      "bitrate": 118,
+      "cover_color": "#b3f50c",
+      "cover_url": null,
+      "cover_v": 80461843779493,
+      "duration": 3.0,
+      "format": "flac",
+      "id": 4,
+      "isrc": null,
+      "match_reason": "added from library",
+      "mbid": null,
+      "playlist_id": 1,
+      "position": 3,
+      "request_id": null,
+      "request_message": null,
+      "request_status": null,
+      "source": "library",
+      "source_id": null,
+      "title": "Track 3",
+      "track_id": 31,
+      "verify_status": null
+    }
+  ],
+  "kind": "liked",
+  "matched": 4,
+  "name": "Liked Songs",
+  "remote_ids": {},
+  "source": "manual",
+  "source_url": null,
+  "sync_targets": [],
+  "total": 4,
+  "updated_at": 1792365179.1224637,
+  "user_id": 1
+}

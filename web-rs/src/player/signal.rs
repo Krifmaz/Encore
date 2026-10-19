@@ -79,7 +79,6 @@ pub(super) async fn signal_path() {
     let cadenza = linked.is_none() && transport().is_some_and(|(k, _)| k.starts_with("cadenza"));
     // a Cadenza device reports every stage of its own pipeline; a browser device just plays
     let stages: Vec<Value> = linked.as_ref().map(|l| l.state.g("signal").a("stages")).unwrap_or_default();
-    let local_engine = linked.as_ref().is_some_and(|l| crate::remote::is_engine(&l.id));
     if let Some(l) = &linked {
         let sig = l.state.o("signal");
         let eng = l.state.o("engine");
@@ -122,7 +121,7 @@ pub(super) async fn signal_path() {
         esc(v), if note.is_empty() { String::new() } else { format!(r#"<div class="small muted">{}</div>"#, esc(note)) })).collect();
     let (head, text) = if let Some(l) = &linked {
         if !stages.is_empty() {
-            (format!("Played by Cadenza on {}", if local_engine { "this computer".to_string() } else { esc(&l.name) }), "Every stage above is what the engine reports. Bit-perfect means nothing touched the samples.")
+            (format!("Played by Cadenza on {}", esc(&l.name)), "Every stage above is what the engine reports. Bit-perfect means nothing touched the samples.")
         } else {
             ("Playing on another device".to_string(), "The rows above are what that device reports. Open Encore there for its own signal path.")
         }

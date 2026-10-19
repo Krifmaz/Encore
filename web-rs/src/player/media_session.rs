@@ -1,5 +1,5 @@
-//! The lock screen and the OS media controls (Media Session API), and the native apps (`window.EncoreNative`,
-//! `window.encorePlayer`): what's playing, their controls, songs kept offline on the phone.
+//! The lock screen and the OS media controls (Media Session API), and `window.encorePlayer` (the player's
+//! controls for scripts and tests).
 
 use super::*;
 
@@ -69,27 +69,7 @@ pub(super) fn set_action(action: &str, f: impl Fn(JsValue) + 'static) {
 /// `d.seekTime` / `d.seekOffset` of a MediaSessionActionDetails.
 pub(super) fn detail_num(d: &JsValue, key: &str) -> Option<f64> { js_sys::Reflect::get(d, &key.into()).ok().and_then(|v| v.as_f64()) }
 
-/// Android / desktop apps: tell them what's playing (notification + lock screen + tray), and let them control us.
-pub(super) fn native() {
-    if !native::has_now_playing() { return; }
-    if audio().is_none() { return; }
-    let payload = match cur() {
-        Some(t) => {
-            let cov = cover_at(&t, 600);
-            let art_url = if cov.is_empty() { String::new() } else { abs_url(&cov) };
-            let dur = duration();
-            let pos = position();
-            let pos = if pos.is_finite() { pos.max(0.0) } else { 0.0 };
-            let dur = if dur.is_finite() { dur } else { 0.0 };
-            json!({ "title": t.s("title"), "artist": t.s("artist"), "album": t.s("album"), "playing": shows_playing(), "art": art_url,
-                "position": pos, "duration": dur })
-        }
-        None => json!({ "stopped": true }),
-    };
-    native::now_playing(&payload);
-}
-/// `window.encorePlayer = { toggle, next, prev, open, seek, volumeBy }` (seek and volumeBy: the desktop app's mini
-/// player, OS media controls and volume shortcuts).
+/// `window.encorePlayer = { toggle, next, prev, open, seek, volumeBy }`.
 pub(super) fn expose_global() {
     if EXPOSED.with(|e| e.replace(true)) { return; }
     let obj = js_sys::Object::new();
@@ -113,22 +93,4 @@ pub(super) fn expose_global() {
         set_volume((base + if d.is_nan() { 0.0 } else { d }).clamp(0.0, 1.0));
     }));
     let _ = js_sys::Reflect::set(&dom::window(), &"encorePlayer".into(), &obj);
-}
-
-/// Android app: keep songs on the phone so they play with no server.
-pub fn can_save_offline() -> bool { native::can_save_offline() }
-pub fn save_offline(tracks: Vec<Value>) {
-    for t in &tracks {
-        if !t.g("id").is_number() { continue; }
-        let conv = convert(t);
-        let id = t.s("id");
-        let ext = if conv { "flac".to_string() } else if t.truthy("format") { t.s("format") } else { "audio".to_string() };
-        let url = abs_url(&format!("/api/library/tracks/{id}/stream{}", if conv { "?transcode=true" } else { "" }));
-        let art_url = if t.truthy("album_id") { abs_url(&cover_at(t, 600)) } else { String::new() };
-        native::save_offline(&json!({
-            "id": id, "title": t.s("title"), "artist": t.s("artist"), "album": t.s("album"), "ext": ext,
-            "url": url,
-            "art": art_url,
-        }));
-    }
 }

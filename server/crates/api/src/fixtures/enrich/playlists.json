@@ -1,0 +1,36 @@
+[
+  {
+    "cover_url": null,
+    "created_at": 1792279903.5730236,
+    "description": null,
+    "follow": 0,
+    "id": 1,
+    "kind": "liked",
+    "matched": 4,
+    "name": "Liked Songs",
+    "remote_ids": "{}",
+    "source": "manual",
+    "source_url": null,
+    "sync_targets": [],
+    "total": 4,
+    "updated_at": 1792365179.1224637,
+    "user_id": 1
+  },
+  {
+    "cover_url": null,
+    "created_at": 1792365179.1262372,
+    "description": "",
+    "follow": 0,
+    "id": 2,
+    "kind": "playlist",
+    "matched": 5,
+    "name": "P4 sample",
+    "remote_ids": "{}",
+    "source": "manual",
+    "source_url": null,
+    "sync_targets": [],
+    "total": 5,
+    "updated_at": 1792365179.1741376,
+    "user_id": 1
+  }
+]

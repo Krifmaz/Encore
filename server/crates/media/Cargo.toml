@@ -1,0 +1,22 @@
+[package]
+name = "encore-media"
+description = "Encore: audio files and pictures: the ffmpeg command builder, tags, audio info, covers and thumbnails, quality and loudness checks"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+encore-core = { workspace = true }
+encore-db = { workspace = true }
+encore-http = { workspace = true }
+encore-jobs = { workspace = true }
+anyhow = { workspace = true }
+image = { workspace = true }
+libc = { workspace = true }
+lofty = { workspace = true }
+rustfft = { workspace = true }
+serde_json = { workspace = true }
+sha1 = { workspace = true }
+tokio = { workspace = true }
+tracing = { workspace = true }
+webp = { workspace = true }

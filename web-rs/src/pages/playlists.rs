@@ -329,7 +329,6 @@ pub fn render_playlist(view: Element, ctx: Ctx) -> PageFuture {
         <div class="progress mt" style="max-width:360px"><i style="width:{pct}%"></i></div>
         <div class="row wrap mt">
           {play}
-          {offline}
           {pl_menu}
           {req}
           <button class="btn" id="add">{plus}Add from link</button>
@@ -365,7 +364,6 @@ pub fn render_playlist(view: Element, ctx: Ctx) -> PageFuture {
             pct = if pl.truthy("total") { js_string(&json!(matched / total * 100.0)) } else { "0".to_string() },
             play = if pl.truthy("matched") { format!(r#"<button class="btn primary" id="pl-play">{}Play</button>"#, icon("play")) } else { String::new() },
             pl_menu = if pl.truthy("matched") && crate::pages::downloads::enabled() { format!(r#"<button class="btn icon" id="pl-menu" aria-label="More options" title="More options">{}</button>"#, icon("more")) } else { String::new() },
-            offline = if pl.truthy("matched") && player::can_save_offline() { format!(r#"<button class="btn" id="pl-offline">{}Save for offline</button>"#, icon("download")) } else { String::new() },
             req = if missing > 0 { format!(r#"<button class="btn {}" id="req">{}Download {missing} missing</button>"#, if pl.truthy("matched") { "" } else { "primary" }, icon("download")) } else { String::new() },
             plus = icon("plus"), check = icon("check"), refresh = icon("refresh"),
             pull = if pl.truthy("source_url") { format!(r#"<button class="btn" id="refresh">{}Pull from {}</button>"#, icon("refresh"), esc(src_name(&source).unwrap_or("source"))) } else { String::new() },
@@ -401,10 +399,6 @@ pub fn render_playlist(view: Element, ctx: Ctx) -> PageFuture {
                 let Some(it) = dom::data(&b, "ptmenu").parse::<usize>().ok().and_then(|i| rows.get(i)) else { return };
                 crate::pages::library::track_menu(&b, &as_track(it), app::is_admin(), Some(Rc::new(reload)));
             });
-        }
-        {
-            let playable = playable.clone();
-            dom::on_sel(&view, "#pl-offline", "click", move |_| { player::save_offline(playable.clone()); toast(&format!("Saving {} song(s) to this device…", playable.len()), "ok"); });
         }
         dom::on_sel(&view, "#pl-play", "click", move |_| player::play_queue(playable.clone(), 0, "list"));
         {
