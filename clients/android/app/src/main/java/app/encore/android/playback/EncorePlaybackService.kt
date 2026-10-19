@@ -6,13 +6,16 @@ import android.content.Intent
 import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
+import android.os.SystemClock
 import androidx.media3.common.AudioAttributes
 import androidx.media3.common.C
 import androidx.media3.common.MediaItem
 import androidx.media3.common.PlaybackException
 import androidx.media3.common.Player
+import androidx.media3.common.util.StuckPlayerException
 import androidx.media3.datasource.DataSourceBitmapLoader
 import androidx.media3.datasource.DefaultDataSource
+import androidx.media3.datasource.HttpDataSource
 import androidx.media3.datasource.ResolvingDataSource
 import androidx.media3.datasource.okhttp.OkHttpDataSource
 import androidx.media3.exoplayer.DefaultLoadControl
@@ -52,11 +55,13 @@ import app.encore.android.ui.MainActivity
 import com.google.common.collect.ImmutableList
 import com.google.common.util.concurrent.Futures
 import com.google.common.util.concurrent.ListenableFuture
+import com.google.common.util.concurrent.MoreExecutors
 import com.google.common.util.concurrent.SettableFuture
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
 import java.io.File
+import java.io.IOException
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.ExecutorService
 import java.util.concurrent.Executors
@@ -110,6 +115,20 @@ class EncorePlaybackService : MediaLibraryService() {
 
     /** the song the phone couldn't decode and the server was asked to convert (once per song) */
     private var transcodeRetried: Long? = null
+
+    /** the song that last stopped on an error, and how often it was opened again since (PlayerErrors.MAX_REOPENS) */
+    private var brokenSong: Long? = null
+    private var brokenTries = 0
+    /**
+     * songs skipped in a row because they would not play, until one plays to its end: once round the queue at most
+     * (a song that starts and then stalls does not count as playing, or a stuck output would skip forever)
+     */
+    private var skipped = 0
+
+    /** crash recovery: the notification goes up in the foreground while the restored queue is still paused */
+    private var recovering = false
+    /** when crash recovery pressed play (elapsedRealtime), for one more try if Android refuses audio focus */
+    private var recoveryPlayedAt = 0L
 
     /** this phone as an Encore remote device: check-ins and commands from other devices (remote/ServiceHost.kt) */
     private var remoteHost: ServiceHost? = null
@@ -179,7 +198,8 @@ class EncorePlaybackService : MediaLibraryService() {
             .setBufferDurationsMs(if (prefs.preload) 30_000 else 15_000, if (prefs.preload) 60_000 else 15_000, 2_500, 5_000)
             .build()
         player = ExoPlayer.Builder(this, renderers)
-            .setMediaSourceFactory(DefaultMediaSourceFactory(dataSourceFactory))
+            // a lost connection is waited out while buffering instead of stopping the music after 3 tries (PatientLoads)
+            .setMediaSourceFactory(DefaultMediaSourceFactory(dataSourceFactory).setLoadErrorHandlingPolicy(PatientLoads()))
             .setLoadControl(loadControl)
             .setAudioAttributes(audioAttributes, true)
             .setHandleAudioBecomingNoisy(true)
@@ -194,7 +214,7 @@ class EncorePlaybackService : MediaLibraryService() {
         adaptive = AdaptiveQuality(player, current, resolver, estimator, graph.api, graph.http, io, main, prefsNow, gone) { publish() }
         serverCadenza = ServerCadenza(player, current, resolver, graph.api, io, main, prefsNow, gone) { publish() }
         autoplay = Autoplay(player, current, resolver, graph.api, io, main, prefsNow, gone)
-        resume = Resume(this, player, current, graph.api, graph.store, io, main, prefsNow, gone) { items -> rememberAll(items) }
+        resume = Resume(this, player, current, graph.api, graph.store, io, main, prefsNow, gone, startPlaying = { playFromBackground() }) { items -> rememberAll(items) }
         // a reopen (another rung, a seek in a server-made stream) is a seek as far as stalls go, and a new variant
         current.onReplaced = { adaptive.noteSeek(); publish() }
 
@@ -214,7 +234,8 @@ class EncorePlaybackService : MediaLibraryService() {
             // crossfade is off in a group listen (gapless stays)
             allowed = { !resume.held && !output.bitPerfectRoute && current.variant()?.serverStream != true && group?.active != true },
             durationSec = { current.durationSec() },
-            onHandOver = { item -> scrobbler.handedOver(item) },
+            // (a song that played to its end also ends a run of skips, see skip)
+            onHandOver = { item -> skipped = 0; scrobbler.handedOver(item) },
             // the old song's tail keeps its own normalization gain
             gainFor = { item -> Normalization.decide(norm, MediaItems.toTrack(item)?.gain).linear },
         )
@@ -296,6 +317,55 @@ class EncorePlaybackService : MediaLibraryService() {
         super.onStartCommand(intent, flags, startId)
         if (intent == null) CrashLog.log("playback service restarted by the system")
         return START_STICKY
+    }
+
+    /**
+     * Encore swiped out of the recent apps: the music goes on while it plays or is about to (buffering, or held by a
+     * short interruption such as a call). Media3's own rule keeps it only while isPlaying, so a swipe during a second
+     * of buffering stopped the music. Paused, ended, failed or never in the foreground: the service stops, as before.
+     */
+    override fun onTaskRemoved(rootIntent: Intent?) {
+        val wanted = player.playWhenReady &&
+            (player.playbackState == Player.STATE_READY || player.playbackState == Player.STATE_BUFFERING)
+        val keep = wanted && isPlaybackOngoing()
+        CrashLog.log("task removed: ${if (keep) "playing on" else "stopping"}")
+        if (!keep) pauseAllPlayersAndStopSelf()
+    }
+
+    /** Crash recovery ([playFromBackground]) asks for the notification in the foreground while still paused. */
+    override fun onUpdateNotificationAsync(session: MediaSession, startInForegroundRequired: Boolean): ListenableFuture<Void?> {
+        val f = super.onUpdateNotificationAsync(session, startInForegroundRequired || recovering)
+        // the service is in the foreground now: the restored queue plays at once, before a later notification
+        // update (a cover that finished loading) can take the paused service out of the foreground again
+        if (recovering) f.addListener({ if (recovering && isPlaybackOngoing()) recoveryPlay() }, MoreExecutors.directExecutor())
+        return f
+    }
+
+    /**
+     * Crash recovery plays on by itself, with no screen and nothing bound to the service (a sticky restart). Android
+     * 16 refuses audio focus to an app that is neither on screen nor a foreground service, so a plain play() here
+     * was turned straight back off, and Media3 shows the notification only for a session something has connected
+     * to. So the session is added here, the notification goes up in the foreground while the queue is still paused,
+     * and the music starts the moment it is up (after 5 s at most, when the system does not allow it).
+     */
+    private fun playFromBackground() {
+        recovering = true
+        addSession(session)
+        // already added (the app is open): the notification is asked for again now
+        triggerNotificationUpdate()
+        main.postDelayed({
+            if (recovering && !released) {
+                CrashLog.log("recovery: not in the foreground after 5 s")
+                recoveryPlay()
+            }
+        }, 5000L)
+    }
+
+    private fun recoveryPlay() {
+        if (!recovering || released) return
+        recovering = false
+        recoveryPlayedAt = SystemClock.elapsedRealtime()
+        player.play()
     }
 
     override fun onDestroy() {
@@ -461,6 +531,9 @@ class EncorePlaybackService : MediaLibraryService() {
                 return
             }
             scrobbler.songChanged(reason)
+            // the next song gets its own tries (onPlayerError); a song that played to its end ends a run of skips
+            brokenSong = null
+            if (reason == Player.MEDIA_ITEM_TRANSITION_REASON_AUTO || reason == Player.MEDIA_ITEM_TRANSITION_REASON_REPEAT) skipped = 0
             val previous = current.id
             if (previous != null && previous != id) resolver.forget(previous)
             adaptive.songChanged()
@@ -495,6 +568,14 @@ class EncorePlaybackService : MediaLibraryService() {
             // crash recovery: "playing" (or about to, e.g. buffering) survives the process; see Resume.restoreAtStart
             resume.markPlaying(playWhenReady && player.playbackState != Player.STATE_ENDED)
             CrashLog.log("play ${if (playWhenReady) "on" else "off"} (reason $reason)")
+            // crash recovery's play was refused audio focus at once (the system did not count the service as in
+            // the foreground yet): once more, half a second later
+            if (!playWhenReady && reason == Player.PLAY_WHEN_READY_CHANGE_REASON_AUDIO_FOCUS_LOSS &&
+                recoveryPlayedAt > 0L && SystemClock.elapsedRealtime() - recoveryPlayedAt < 2000L) {
+                recoveryPlayedAt = 0L
+                CrashLog.log("recovery: no audio focus, trying once more")
+                main.postDelayed({ if (!released) player.play() }, 500L)
+            }
         }
 
         override fun onPlaybackStateChanged(playbackState: Int) {
@@ -512,32 +593,62 @@ class EncorePlaybackService : MediaLibraryService() {
             val t = current.track() ?: return
             val v = resolver.variantOf(t.id) ?: return
             val at = current.absPositionMs() / 1000.0
-            if (v.local.isNotEmpty()) {
-                // the downloaded copy would not play: this session the song streams from the server, from the same spot
-                resolver.copyFailed(t.id)
-                app.encore.android.ui.components.Toasts.show("This download would not play – playing the song from the server", "info")
-                current.reopen(t, rung = null, dsp = null, offsetSec = if (at > 0.5) at else 0.0, prepareFirst = true)
-                return
-            }
-            if (v.dsp) {
-                // the server's Cadenza is off, busy or failed → the same spot again without processing, and no
-                // more processing this session
-                serverCadenza.failed()
-                current.reopen(t, rung = v.rung, dsp = false, offsetSec = if (at > 0.5) at else 0.0, prepareFirst = true)
-                return
-            }
-            if (!v.transcode && !v.lossy && transcodeRetried != t.id) {
-                // the phone couldn't decode the original (e.g. an odd M4A) → ask the server for FLAC
-                transcodeRetried = t.id
-                resolver.force(t.id, v.copy(transcode = true, offsetSec = at))
-                current.switchingTo = t.id
-                current.replace(prepare = true)
+            if (brokenSong != t.id) { brokenSong = t.id; brokenTries = 0 }
+            // a lost connection used to be taken for "the phone can't decode it" (a FLAC conversion that failed the
+            // same way) and anything else stopped the music for good: in the background nobody pressed play again
+            val status = (error.cause as? HttpDataSource.InvalidResponseCodeException)?.responseCode ?: 0
+            val bufferedNothing = (error.cause as? StuckPlayerException)?.stuckType == StuckPlayerException.STUCK_BUFFERING_NO_PROGRESS
+            val action = PlayerErrors.decide(error.errorCode, status, bufferedNothing, v, transcodeRetried == t.id, brokenTries)
+            CrashLog.log("song ${t.id}: ${action.name.lowercase()}" + (if (status > 0) " (HTTP $status)" else ""))
+            when (action) {
+                PlayerErrors.Action.STREAM -> {
+                    // the downloaded copy would not play: this session the song streams from the server, from the same spot
+                    resolver.copyFailed(t.id)
+                    app.encore.android.ui.components.Toasts.show("This download would not play – playing the song from the server", "info")
+                    current.reopen(t, rung = null, dsp = null, offsetSec = if (at > 0.5) at else 0.0, prepareFirst = true)
+                }
+                PlayerErrors.Action.NO_DSP -> {
+                    // the server's Cadenza is off, busy or failed → the same spot again without processing, and no
+                    // more processing this session
+                    serverCadenza.failed()
+                    current.reopen(t, rung = v.rung, dsp = false, offsetSec = if (at > 0.5) at else 0.0, prepareFirst = true)
+                }
+                PlayerErrors.Action.REOPEN -> {
+                    // the same spot again at once: the player buffers (holding its wake and Wi-Fi locks) and
+                    // ExoPlayer's own waits pace the tries, so no timer has to run while the phone sleeps
+                    brokenTries++
+                    resolver.force(t.id, v.copy(offsetSec = if (at > 0.5) at else 0.0))
+                    current.switchingTo = t.id
+                    current.replace(prepare = true)
+                }
+                PlayerErrors.Action.TRANSCODE -> {
+                    // the phone couldn't decode the original (e.g. an odd M4A) → ask the server for FLAC
+                    transcodeRetried = t.id
+                    resolver.force(t.id, v.copy(transcode = true, offsetSec = at))
+                    current.switchingTo = t.id
+                    current.replace(prepare = true)
+                }
+                PlayerErrors.Action.SKIP -> skip(t.id)
+                PlayerErrors.Action.STOP -> {}
             }
         }
 
         override fun onPositionDiscontinuity(oldPosition: Player.PositionInfo, newPosition: Player.PositionInfo, reason: Int) {
             if (reason == Player.DISCONTINUITY_REASON_SEEK) adaptive.noteSeek()
         }
+    }
+
+    /** The song won't play: on to the next one (once round the queue at most, then it stays stopped). */
+    private fun skip(id: Long) {
+        brokenSong = null
+        // in a group listen the queue is the group's: this phone does not move on alone
+        if (group?.active == true || !player.hasNextMediaItem() || ++skipped > player.mediaItemCount) {
+            CrashLog.log("song $id would not play: stopped")
+            return
+        }
+        CrashLog.log("song $id would not play: on to the next one")
+        player.seekTo(player.nextMediaItemIndex, 0L)
+        player.prepare()
     }
 
     /** Runs once a second while playing (and only then: no requests while paused). */
@@ -725,12 +836,10 @@ class EncorePlaybackService : MediaLibraryService() {
          */
         override fun onSetMediaItems(mediaSession: MediaSession, controller: MediaSession.ControllerInfo, mediaItems: MutableList<MediaItem>, startIndex: Int, startPositionMs: Long): ListenableFuture<MediaSession.MediaItemsWithStartPosition> {
             val inGroup = GroupListen.inGroup
-            if (!inGroup) car.queueReplaced()
             val f = SettableFuture.create<MediaSession.MediaItemsWithStartPosition>()
             io.execute {
                 try {
                     runBlocking { graph.store.awaitLoaded() }
-                    if (!inGroup) resolver.forgetAll()
                     val single = mediaItems.size == 1 && mediaItems[0].localConfiguration == null
                     val (list, at, pos) = if (single && (MediaItems.parentOf(mediaItems[0].mediaId) != null || MediaItems.trackId(mediaItems[0].mediaId) == null)) {
                         val (list, at) = resolveIncoming(mediaItems[0])
@@ -747,11 +856,20 @@ class EncorePlaybackService : MediaLibraryService() {
                         f.setException(toGroup(list, at, pos))
                         return@execute
                     }
+                    // nothing to play (an empty playlist, a voice request that matched nothing): the request fails
+                    // and the queue that is playing stays (an empty queue stopped the music and took the
+                    // notification down)
+                    if (list.isEmpty()) throw IOException("Nothing to play")
+                    resolver.forgetAll()
+                    // before the new queue is set: Media3 sets it in a later post on the same main thread
+                    main.post { if (!released) car.queueReplaced() }
                     rememberAll(list)
                     f.set(MediaSession.MediaItemsWithStartPosition(list, at, pos))
-                } catch (_: Exception) {
-                    if (inGroup) f.setException(UnsupportedOperationException(GROUP_QUEUE))
-                    else f.set(MediaSession.MediaItemsWithStartPosition(mediaItems, startIndex, startPositionMs))
+                } catch (e: Exception) {
+                    CrashLog.log("play request from ${controller.packageName} failed: $e")
+                    // never the controller's own items: they have no stream address, and for a car's, a Bluetooth
+                    // browse list's or the Assistant's request ExoPlayer threw on the main thread and closed the app
+                    f.setException(if (inGroup) UnsupportedOperationException(GROUP_QUEUE) else e)
                 }
             }
             return f

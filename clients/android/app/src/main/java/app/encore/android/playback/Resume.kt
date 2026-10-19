@@ -29,6 +29,11 @@ class Resume(
     private val main: Handler,
     private val prefs: () -> PlaybackPrefs,
     private val released: () -> Boolean,
+    /**
+     * crash recovery presses play: the service first goes into the foreground, because Android 16 refuses audio
+     * focus to a background service and a plain play() was turned straight back off
+     */
+    private val startPlaying: () -> Unit,
     /** the songs as the service's media items, remembered for the stream resolver */
     private val remember: (List<MediaItem>) -> Unit,
 ) {
@@ -113,7 +118,7 @@ class Resume(
                     held = false
                     player.setMediaItems(items, snap.index, snap.positionMs)
                     player.prepare()
-                    player.play()
+                    startPlaying()
                     return@post
                 }
                 held = true
