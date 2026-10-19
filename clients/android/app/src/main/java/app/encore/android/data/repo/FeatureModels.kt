@@ -585,6 +585,15 @@ data class RequestRow(
     @SerialName("length") val lengthSec: LDouble = 0.0,
     /** How many times the song was requested or retried on this row (1 for a first request). */
     val attempts: LInt = 1,
+    /**
+     * What the worker noted while trying the sources, oldest first: "slskd: no results", "torznab: no matching release
+     * on your indexers", "attempt 2 failed: …" (the server's `detail.log`; empty on older servers).
+     */
+    val log: LTexts = emptyList(),
+    /** Picked by hand in the picker: only that release is tried. */
+    val picked: LBool = false,
+    /** The Soulseek or torrent release being fetched now, when there is one. */
+    @Serializable(with = RequestCandidate.OrNull::class) val candidate: RequestCandidate? = null,
 ) : Checked<RequestRow> {
     val isActive: Boolean get() = status in ACTIVE_STATUSES
 
@@ -608,6 +617,78 @@ data class RequestRow(
 
     override fun checked(): RequestRow? = if (id <= 0L) null else if (attempts < 1) copy(attempts = 1) else this
 }
+
+/** `candidate` of a request row: the Soulseek user (or the indexer), the format, the folder (or release) and its files. */
+@Serializable
+data class RequestCandidate(
+    val username: LString = "",
+    val format: LString = "",
+    val directory: LString = "",
+    val files: LInt = 0,
+) {
+    internal object OrNull : Nested<RequestCandidate>(serializer())
+}
+
+/** POST /api/requests/link: `mode` direct (one download) or matched (songs requested one by one). */
+@Serializable
+data class LinkResult(
+    val mode: LString = "",
+    val requested: LInt = 0,
+    @SerialName("already_requested") val alreadyRequested: LInt = 0,
+    val name: LString = "",
+    val status: LString = "",
+)
+
+/** GET /api/discover/probe?url=: what yt-dlp sees at a link (the Downloader's Preview). */
+@Serializable
+data class LinkProbe(
+    val title: LString = "",
+    val extractor: LString = "",
+    val uploader: LString = "",
+    @SerialName("is_playlist") val isPlaylist: LBool = false,
+    val count: LInt = 0,
+    val duration: LDouble = 0.0,
+    val thumbnail: LString = "",
+)
+
+/** POST /api/requests/retry-failed: how many were queued again, how many the server refused and why. */
+data class RetryFailedResult(val retried: Int, val skipped: Int, val why: String)
+
+// ---- Activity (admins: web-rs/src/pages/activity.rs) -------------------------------------------------------------
+
+/** One Soulseek transfer of GET /api/system/downloads `slskd[]`. */
+@Serializable
+data class SlskTransfer(
+    val username: LString = "",
+    val filename: LString = "",
+    val directory: LString = "",
+    val state: LString = "",
+    val progress: LDouble = 0.0,
+    val size: LDouble = 0.0,
+    val speed: LDouble = 0.0,
+)
+
+/** One torrent / Usenet download of GET /api/system/downloads `torrents[]` (a request Encore waits on). */
+@Serializable
+data class TorrentDownload(
+    val id: LLong = 0L,
+    val artist: LString = "",
+    val title: LString = "",
+    val progress: LDouble = 0.0,
+    val message: LString = "",
+)
+
+/** GET /api/system/downloads. `slskdError`: why the Soulseek list could not be read. */
+data class SystemDownloads(val slskd: List<SlskTransfer>, val torrents: List<TorrentDownload>, val slskdError: String)
+
+/** One line of GET /api/system/activity: `level` info | warning | error. */
+@Serializable
+data class ActivityLine(
+    val id: LLong = 0L,
+    val ts: LDouble = 0.0,
+    val level: LString = "",
+    val message: LString = "",
+)
 
 // ---- Picker ----------------------------------------------------------------------------------------------------
 
@@ -654,6 +735,128 @@ data class PickResult(
     val payload: JsonElement = JsonObject(emptyMap()),
 ) : Checked<PickResult> {
     override fun checked(): PickResult? = if (title.isEmpty()) null else this
+}
+
+/**
+ * One source's answer of POST /api/picker/search. Today's server sends a bare array of results; a server that keeps
+ * Soulseek and indexer answers sends `{items, from, cached_at, found, query, can_search, notice}`
+ * (docs: req-slsk-cache §4). Every extra field is optional, so a bare array reads as a live answer.
+ *
+ * - `from`: "cache" when the rows come from a kept search, else "live" (or empty).
+ * - `cached_at`: unix seconds when the kept search finished; `found`: the server's "Found at 14:02".
+ * - `query`: the text the kept search was made with (may differ from the search box).
+ * - `can_search`: false when "Search again" would be refused at once (Soulseek not connected); `notice` says why.
+ */
+@Serializable
+data class PickSearch(
+    @Serializable(with = Items::class) val items: List<PickResult> = emptyList(),
+    val from: LString = "",
+    @SerialName("cached_at") val cachedAt: LDouble = 0.0,
+    val found: LString = "",
+    val query: LString = "",
+    @SerialName("can_search") val canSearchFlag: LBoolOrNull = null,
+    val notice: LString = "",
+) {
+    /** The rows came from a search the server kept. */
+    val kept: Boolean get() = from == "cache"
+
+    /** "Search again" can run now (true unless the server says it can't). */
+    val canSearch: Boolean get() = canSearchFlag ?: true
+}
+
+/** [PickSearch] from the answer: a bare array (today's servers) is a live answer with those rows. */
+fun pickSearchOf(answer: JsonElement?): PickSearch = when (answer) {
+    is JsonObject -> answer.decodeModel(PickSearch.serializer()) ?: PickSearch()
+    is JsonArray -> PickSearch(items = answer.objectsOf().rows(PickResult.serializer()), from = "live")
+    else -> PickSearch()
+}
+
+/** One picture of GET /api/library/albums/{id}/art-candidates. */
+@Serializable
+data class ArtCandidate(
+    val url: LString = "",
+    val thumb: LString = "",
+    val source: LString = "",
+    val size: LString = "",
+    val label: LString = "",
+) : Checked<ArtCandidate> {
+    override fun checked(): ArtCandidate? = if (url.isEmpty()) null else this
+}
+
+/** One release of GET /api/library/albums/{id}/match `candidates`; `match` 0..1. */
+@Serializable
+data class MatchCandidate(
+    val id: LString = "",
+    val cover: LString = "",
+    val title: LString = "",
+    val artist: LString = "",
+    val provider: LString = "",
+    val date: LString = "",
+    val country: LString = "",
+    val formats: LString = "",
+    val label: LString = "",
+    val status: LString = "",
+    val type: LString = "",
+    @SerialName("track_count") val trackCount: LInt = 0,
+    val match: LDouble = 0.0,
+) : Checked<MatchCandidate> {
+    override fun checked(): MatchCandidate? = if (id.isEmpty()) null else this
+
+    /** library.rs: provider · date · country · formats · label · status · type. */
+    val info: String get() = listOf(provider, date, country, formats, label, status, type).filter { it.isNotEmpty() }.joinToString(" · ")
+}
+
+/** GET /api/library/albums/{id}/match: how many songs the album has here, and the releases that may be it. */
+@Serializable
+data class AlbumMatch(
+    @SerialName("track_count") val trackCount: LInt = 0,
+    @Serializable(with = Items::class) val candidates: List<MatchCandidate> = emptyList(),
+)
+
+/** The release of a match preview. */
+@Serializable
+data class MatchRelease(
+    val cover: LString = "",
+    val title: LString = "",
+    val artist: LString = "",
+    val date: LString = "",
+    val country: LString = "",
+    val label: LString = "",
+    val provider: LString = "",
+) {
+    internal object OrNull : Nested<MatchRelease>(serializer())
+}
+
+/** One song of a match preview: what it is now, and what it becomes (no `new_title`: left untouched). */
+@Serializable
+data class MatchRow(
+    @SerialName("old_track") val oldTrack: LString = "",
+    @SerialName("old_title") val oldTitle: LString = "",
+    @SerialName("old_artist") val oldArtist: LString = "",
+    @SerialName("new_title") val newTitle: LString = "",
+    @SerialName("new_artist") val newArtist: LString = "",
+    @SerialName("new_track") val newTrack: LString = "",
+    @SerialName("new_disc") val newDisc: LInt = 0,
+    @SerialName("new_path") val newPath: LString = "",
+)
+
+/** GET /api/library/albums/{id}/preview?release_id=. */
+@Serializable
+data class MatchPreview(
+    @Serializable(with = MatchRelease.OrNull::class) val release: MatchRelease? = null,
+    val confidence: LDouble = 0.0,
+    @Serializable(with = Items::class) val rows: List<MatchRow> = emptyList(),
+)
+
+/** One answer of GET /api/library/tracks/{id}/identify: what the audio says the song is, and how sure. */
+@Serializable
+data class SongMatch(
+    val title: LString = "",
+    val artist: LString = "",
+    val album: LString = "",
+    val score: LString = "",
+) : Checked<SongMatch> {
+    override fun checked(): SongMatch? = if (title.isEmpty()) null else this
 }
 
 /** What the picker is looking for (picker.js `opts`). */

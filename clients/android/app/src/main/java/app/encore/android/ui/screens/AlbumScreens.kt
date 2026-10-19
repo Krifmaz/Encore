@@ -23,9 +23,13 @@ import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Text
 import androidx.compose.material3.TopAppBarDefaults
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.shadow
@@ -65,6 +69,20 @@ import app.encore.android.ui.components.formatSize
 import app.encore.android.ui.components.rememberLoad
 import app.encore.android.ui.components.shareLinkOf
 import app.encore.android.ui.theme.palette
+import app.encore.android.data.repo.Me
+import app.encore.android.features.library.AlbumArtworkSheet
+import app.encore.android.features.library.AlbumEditSheet
+import app.encore.android.features.library.AlbumMatchSheet
+import app.encore.android.features.library.LibraryFixRules
+import app.encore.android.features.library.OnSongFixed
+import app.encore.android.features.library.SongFixUi
+import app.encore.android.features.library.VerifyBadge
+import app.encore.android.ui.Screen
+import app.encore.android.ui.components.MenuSeparator
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonObject
 
@@ -89,8 +107,11 @@ fun PlayButtons(nav: Nav, tracks: List<Track>, modifier: Modifier = Modifier, tr
 
 // ---- album -----------------------------------------------------------------------------------------------------
 
-/** What the album page shows beyond [AlbumDetail]: size, the history line and per-track "requested by" notes. */
-private class AlbumPage(val detail: AlbumDetail, val size: Long, val history: String, val notes: Map<Long, String>)
+/**
+ * What the album page shows beyond [AlbumDetail]: size, the history line, per-track "requested by" notes, and the
+ * MusicBrainz release group ("" when the album has none) for "Get the rest of the album" and "Release info".
+ */
+private class AlbumPage(val detail: AlbumDetail, val size: Long, val history: String, val notes: Map<Long, String>, val rgid: String = "")
 
 /**
  * GET /api/library/albums/{id} (server/src/routes/library.rs `album`): the rows carry `requested_by`,
@@ -128,7 +149,7 @@ private fun loadAlbumPage(nav: Nav, id: String): AlbumPage {
         val id2 = r.dbl("id").toLong()
         notes[id2] = "requested by $who" + if (at > 0) " on ${formatDay(at)}" else ""
     }
-    return AlbumPage(detail, o.dbl("size").toLong(), history, notes)
+    return AlbumPage(detail, o.dbl("size").toLong(), history, notes, o.str("mb_releasegroupid"))
 }
 
 @OptIn(ExperimentalMaterial3Api::class)
@@ -138,12 +159,46 @@ fun AlbumScreen(nav: Nav, albumId: String) {
     val liked by nav.graph.likes.liked.collectAsState()
     val nowPlaying by nav.player.nowPlaying.collectAsState()
     val loader = rememberLoad(albumId) { loadAlbumPage(nav, albumId) }
+    // a song corrected or deleted from its menu, or the album changed from this page's menu: the page loads again
+    // (in place, keeping the scroll position)
+    OnSongFixed { loader.refresh() }
     // "Download for offline" / "Remove download" (features/offline)
     val offlineMenu = rememberOfflineMenu(nav)
     val p = MaterialTheme.palette
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
     val scrollBehavior = TopAppBarDefaults.enterAlwaysScrollBehavior()
+    var me by remember { mutableStateOf<Me?>(null) }
+    LaunchedEffect(Unit) { me = try { withContext(Dispatchers.IO) { nav.features.me() } } catch (e: CancellationException) { throw e } catch (_: Exception) { null } }
+    var confirmDelete by remember { mutableStateOf<Pair<String, Int>?>(null) }
+    // the admin's sheets: "match" (Tag / match metadata), "edit" (Edit details), "artwork" (Change artwork…)
+    var albumSheet by remember { mutableStateOf("") }
+    // "Get the rest of the album": the album on Discover, where the songs that aren't here yet can be requested
+    fun restOfAlbum(rgid: String, artist: String, title: String) {
+        if (rgid.isNotEmpty()) { nav.open(Screen.CatalogAlbum(rgid)); return }
+        scope.launch {
+            try {
+                val found = withContext(Dispatchers.IO) { nav.features.albumLookup(artist, title) }
+                if (found.isNotEmpty()) nav.open(Screen.CatalogAlbum(found))
+                else Toasts.show("MusicBrainz doesn't know this album – look it up in the Downloader instead", "warn")
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                Toasts.show(e.message ?: "That didn't work", "warn")
+            }
+        }
+    }
+    fun albumAction(block: suspend () -> Unit) {
+        scope.launch {
+            try {
+                block()
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                Toasts.show(e.message ?: "That didn't work", "err")
+            }
+        }
+    }
     // the album's public link, like the player's "Share link" for a song
     fun shareAlbum(title: String, artist: String) {
         shareLinkOf(
@@ -228,7 +283,38 @@ fun AlbumScreen(nav: Nav, albumId: String) {
                                     MenuEntry("Add to playlist", R.drawable.ic_playlist_add) { nav.addToPlaylist(tracks.map { it.id }) },
                                     *offlineMenu.entries(tracks).toTypedArray(),
                                     MenuEntry("Share link", R.drawable.ic_share) { shareAlbum(album.title, album.artist) },
+                                    if (me?.isAdmin == true) MenuEntry("All songs are right (confirm)", R.drawable.ic_check) {
+                                        albumAction {
+                                            withContext(Dispatchers.IO) { nav.features.verifyManual(tracks.map { it.id }) }
+                                            Toasts.show("Album confirmed", "ok")
+                                            SongFixUi.changed()
+                                        }
+                                    } else null,
+                                    MenuEntry("Lyrics for all songs", R.drawable.ic_lyrics) {
+                                        Toasts.show("Looking for lyrics…", "info")
+                                        albumAction {
+                                            val (found, checked) = withContext(Dispatchers.IO) { nav.features.albumLyrics(albumId) }
+                                            Toasts.show(if (checked > 0) "Lyrics found for $found of $checked song(s)" else "Every song already has lyrics", "ok")
+                                        }
+                                    },
+                                    MenuEntry("Get the rest of the album", R.drawable.ic_download) { restOfAlbum(page.rgid, album.artist, album.title) },
+                                    if (page.rgid.isNotEmpty()) MenuEntry("Release info", R.drawable.ic_disc) { nav.open(Screen.CatalogAlbum(page.rgid)) } else null,
                                     MenuEntry("Report a problem", R.drawable.ic_flag) { ReportUi.album(albumId, album.title) { nav.back() } },
+                                    if (me?.isAdmin == true) MenuSeparator else null,
+                                    if (me?.isAdmin == true) MenuEntry("Tag / match metadata", R.drawable.ic_note) { albumSheet = "match" } else null,
+                                    if (me?.isAdmin == true) MenuEntry("Edit details (album, artist, songs)", R.drawable.ic_edit) { albumSheet = "edit" } else null,
+                                    if (me?.isAdmin == true) MenuEntry("Change artwork…", R.drawable.ic_disc) { albumSheet = "artwork" } else null,
+                                    if (me?.isAdmin == true) MenuEntry("Find artwork automatically", R.drawable.ic_refresh) {
+                                        albumAction {
+                                            val n = withContext(Dispatchers.IO) { nav.features.findAlbumArtwork(albumId) }
+                                            Toasts.show("Artwork embedded in $n file(s)", "ok")
+                                            SongFixUi.changed()
+                                        }
+                                    } else null,
+                                    if (me?.isAdmin == true) MenuSeparator else null,
+                                    if (me?.isAdmin == true) MenuEntry("Delete album from disk", R.drawable.ic_delete, danger = true) {
+                                        confirmDelete = album.title to tracks.size
+                                    } else null,
                                 ),
                             )
                         }
@@ -257,10 +343,34 @@ fun AlbumScreen(nav: Nav, albumId: String) {
                         subtitle = if (t.artist.isNotEmpty() && t.artist != album.artist) "${t.artist} · $fmt" else fmt,
                         subtitleLinks = if (t.artist.isNotEmpty() && t.artist != album.artist) rememberSongLinks(nav, t, withAlbum = false, suffix = " · $fmt") else null,
                         note = page.notes[t.id],
+                        // the audio check's verdict: "wrong audio" marks the songs to correct (library.rs `verify_badge`)
+                        badge = if (LibraryFixRules.verifyBadge(t.verifyStatus) != null) ({ VerifyBadge(t) }) else null,
                         onMore = { nav.trackMenu(t, onAlbumPage = true) },
                     )
                 }
                 item { Spacer(Modifier.height(24.dp)) }
+            }
+        }
+    }
+    val shown = (loader.state.value as? Loadable.Ready)?.value?.detail?.album
+    when (albumSheet) {
+        "match" -> AlbumMatchSheet(nav, albumId, shown?.artist.orEmpty(), shown?.title.orEmpty(), onDismiss = { albumSheet = "" })
+        "edit" -> AlbumEditSheet(nav, albumId, onDismiss = { albumSheet = "" })
+        "artwork" -> AlbumArtworkSheet(nav, albumId, shown?.title.orEmpty(), onDismiss = { albumSheet = "" })
+    }
+    // ⋯ → Delete album from disk (admins)
+    confirmDelete?.let { (title, files) ->
+        ConfirmDialog(
+            title = "Delete album",
+            text = "Permanently delete \"$title\" ($files files) from disk?",
+            okLabel = "Delete",
+            danger = true,
+            onDismiss = { confirmDelete = null },
+        ) {
+            albumAction {
+                withContext(Dispatchers.IO) { nav.features.deleteAlbum(albumId) }
+                Toasts.show("Album deleted", "ok")
+                nav.back()
             }
         }
     }

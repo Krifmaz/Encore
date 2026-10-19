@@ -57,6 +57,16 @@ import app.encore.android.ui.screens.AccountScreen
 import app.encore.android.ui.screens.AlbumScreen
 import app.encore.android.ui.screens.ArtistScreen
 import app.encore.android.ui.screens.AuthFlow
+import app.encore.android.features.library.SongFixHost
+import app.encore.android.features.library.SongFixUi
+import app.encore.android.features.requests.ActivityScreen
+import app.encore.android.data.repo.Me
+import app.encore.android.data.repo.features
+import androidx.compose.runtime.rememberCoroutineScope
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
 import app.encore.android.ui.screens.CatalogAlbumScreen
 import app.encore.android.ui.screens.CatalogArtistScreen
 import app.encore.android.ui.screens.DiscoverScreen
@@ -110,8 +120,18 @@ sealed interface Screen {
     data class Picker(val opts: PickerOpts) : Screen
     /** Reorder / remove songs of a playlist. */
     data class PlaylistEdit(val id: Long) : Screen
-    /** Import a playlist (`into == null`) or add songs from a link to one; [url] fills the link in. */
-    data class PlaylistImport(val into: Long?, val url: String = "") : Screen
+    /**
+     * Import a playlist (`into == null`) or add songs from a link to one; [url] fills the link in. From the Requests
+     * link box ("Import as playlist", the web Downloader's): [requestMissing] ticked, [albumMode] chosen, and the
+     * link previewed at once.
+     */
+    data class PlaylistImport(val into: Long?, val url: String = "", val requestMissing: Boolean = false, val albumMode: String? = null) : Screen
+
+    /** Admins: Soulseek transfers, torrent / Usenet downloads and the server log (the web's Activity, under the Downloader). */
+    data object Activity : Screen
+
+    /** Settings opened at one page or card (a `#/settings?s=…` link, e.g. the picker's "Settings → Soulseek"). */
+    data class SettingsAt(val id: String) : Screen
 
     // bug reports (features/bugs): the list (opened from the Home menu or Settings → This device; [from] is sent along
     // with a new report as the page it came from) and one report with its thread
@@ -191,6 +211,13 @@ private fun MainScreen(graph: AppGraph, player: PlayerConnection, session: Sessi
     }
 
     LaunchedEffect(session) { OfflineMode.start(graph.app) }
+    // who is signed in (role and permissions), for the song menu's correcting entries and the Library's admin tab
+    val me by SongFixUi.me.collectAsState()
+    LaunchedEffect(session) {
+        SongFixUi.setMe(null)
+        SongFixUi.setMe(try { withContext(Dispatchers.IO) { graph.features.me() } } catch (e: CancellationException) { throw e } catch (_: Exception) { null })
+    }
+    val fixScope = rememberCoroutineScope()
     LaunchedEffect(offline) {
         if (offline) {
             stack.clear()
@@ -290,7 +317,9 @@ private fun MainScreen(graph: AppGraph, player: PlayerConnection, session: Sessi
                     is Screen.Tag -> TagScreen(nav, top.name)
                     is Screen.Picker -> PickerScreen(nav, top.opts)
                     is Screen.PlaylistEdit -> PlaylistEditScreen(nav, top.id)
-                    is Screen.PlaylistImport -> PlaylistImportScreen(nav, top.into, top.url)
+                    is Screen.PlaylistImport -> PlaylistImportScreen(nav, top.into, top.url, top.requestMissing, top.albumMode)
+                    is Screen.Activity -> ActivityScreen(nav)
+                    is Screen.SettingsAt -> SettingsScreen(nav, session, startAt = top.id)
                     is Screen.BugReports -> BugReportsScreen(nav, top.from)
                     is Screen.BugReport -> BugReportScreen(nav, top.id)
                     is Screen.Files -> FilesScreen(nav)
@@ -324,10 +353,12 @@ private fun MainScreen(graph: AppGraph, player: PlayerConnection, session: Sessi
             AddToPlaylistSheet(graph.api, ids, onDismiss = { addToPlaylistIds = null })
         }
         trackMenuFor?.let { req ->
-            TrackMenu(nav, req, offlineMenu, onDismiss = { trackMenuFor = null })
+            TrackMenu(nav, req, offlineMenu, me, fixScope, onDismiss = { trackMenuFor = null })
         }
         // ⋯ → Report a problem (songs and albums)
         ReportHost(nav)
+        // ⋯ → Edit song details… / Delete song from disk (correcting a library song)
+        SongFixHost(nav)
         // toasts sit above the mini player and the tabs
         ToastHost(Modifier.align(Alignment.BottomCenter).padding(bottom = if (nowPlaying != null) 150.dp else 84.dp))
     }
@@ -335,10 +366,11 @@ private fun MainScreen(graph: AppGraph, player: PlayerConnection, session: Sessi
 
 /**
  * The "⋯" of one song in a list (web/js/pages/library.js `trackMenu`): Play next, Add to queue, Add to playlist,
- * Lyrics, Share link, Go to album. Shown as a bottom-anchored popup at the root so every list shares one.
+ * Lyrics, Share link, Go to album, Report a problem, and for those who may correct the song: Edit song details…,
+ * This is the right song, Delete song from disk. Shown as a bottom-anchored popup at the root so every list shares one.
  */
 @Composable
-private fun TrackMenu(nav: Nav, req: TrackMenuRequest, offlineMenu: OfflineMenu, onDismiss: () -> Unit) {
+private fun TrackMenu(nav: Nav, req: TrackMenuRequest, offlineMenu: OfflineMenu, me: Me?, fixScope: CoroutineScope, onDismiss: () -> Unit) {
     val t = req.track
     val player = nav.player
     Box(Modifier.fillMaxSize(), contentAlignment = Alignment.BottomCenter) {
@@ -361,6 +393,8 @@ private fun TrackMenu(nav: Nav, req: TrackMenuRequest, offlineMenu: OfflineMenu,
                 if (t.albumId.isNotEmpty() && !req.onAlbumPage) MenuEntry("Go to album", R.drawable.ic_album) { nav.open(Screen.Album(t.albumId)) } else null,
                 if (t.albumArtist.isNotEmpty() || t.artist.isNotEmpty()) MenuEntry("Go to artist", R.drawable.ic_person) { app.encore.android.ui.screens.openTrackArtist(nav, t) } else null,
                 MenuEntry("Report a problem", R.drawable.ic_flag) { ReportUi.track(t.id, t.title) },
+                // admins, and members with "fix" on a song their request brought in (library.rs `track_menu`)
+                *SongFixUi.entries(nav, t, me, fixScope, req.onAlbumPage).toTypedArray(),
             ),
         )
     }

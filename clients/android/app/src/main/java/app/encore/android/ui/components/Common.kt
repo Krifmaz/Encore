@@ -99,16 +99,30 @@ sealed interface Loadable<out T> {
 }
 
 /** A blocking API call run on the IO dispatcher when the screen opens (and again on retry). */
-class Loader<T>(val state: MutableState<Loadable<T>>, private val retryKey: MutableState<Int>) {
-    fun retry() { retryKey.value = retryKey.value + 1 }
+class Loader<T>(val state: MutableState<Loadable<T>>, private val retryKey: MutableState<Int>, private val quiet: MutableState<Boolean>) {
+    fun retry() {
+        quiet.value = false
+        retryKey.value = retryKey.value + 1
+    }
+
+    /**
+     * Loads again without the spinner (a song was corrected or deleted from its ⋯ menu): what is shown stays, and the
+     * list keeps its scroll position, until the new answer replaces it.
+     */
+    fun refresh() {
+        quiet.value = true
+        retryKey.value = retryKey.value + 1
+    }
 }
 
 @Composable
 fun <T> rememberLoad(vararg keys: Any?, block: () -> T): Loader<T> {
     val state = remember(*keys) { mutableStateOf<Loadable<T>>(Loadable.Loading) }
     val retry = remember(*keys) { mutableStateOf(0) }
+    val quiet = remember(*keys) { mutableStateOf(false) }
     LaunchedEffect(retry.value, *keys) {
-        state.value = Loadable.Loading
+        if (!quiet.value || state.value !is Loadable.Ready) state.value = Loadable.Loading
+        quiet.value = false
         state.value = try {
             Loadable.Ready(withContext(Dispatchers.IO) { block() })
         } catch (e: CancellationException) {
@@ -117,7 +131,7 @@ fun <T> rememberLoad(vararg keys: Any?, block: () -> T): Loader<T> {
             Loadable.Failed(e.message ?: "Something went wrong")
         }
     }
-    return Loader(state, retry)
+    return Loader(state, retry, quiet)
 }
 
 @Composable
@@ -337,12 +351,16 @@ fun Badge(text: String, kind: String = "", modifier: Modifier = Modifier, onClic
     }
 }
 
-/** The web's `.btn.sm`: a small bordered button on the panel colour. */
+/** The web's `.btn.sm`: a small bordered button on the panel colour (`danger`: the web's `.btn.sm.danger`, in red). */
 @Composable
-fun SmallButton(label: String, modifier: Modifier = Modifier, iconRes: Int? = null, primary: Boolean = false, enabled: Boolean = true, onClick: () -> Unit) {
+fun SmallButton(label: String, modifier: Modifier = Modifier, iconRes: Int? = null, primary: Boolean = false, enabled: Boolean = true, danger: Boolean = false, onClick: () -> Unit) {
     val p = MaterialTheme.palette
     val shape = RoundedCornerShape(8.dp)
-    val bg = if (primary) Modifier.background(p.gradient) else Modifier.background(p.panel2).border(1.dp, p.border, shape)
+    val bg = when {
+        primary -> Modifier.background(p.gradient)
+        danger -> Modifier.background(EncoreColors.Err.copy(alpha = 0.10f)).border(1.dp, EncoreColors.Err.copy(alpha = 0.45f), shape)
+        else -> Modifier.background(p.panel2).border(1.dp, p.border, shape)
+    }
     Row(
         modifier
             .clip(shape)
@@ -352,7 +370,7 @@ fun SmallButton(label: String, modifier: Modifier = Modifier, iconRes: Int? = nu
         verticalAlignment = Alignment.CenterVertically,
         horizontalArrangement = Arrangement.spacedBy(6.dp),
     ) {
-        val fg = if (primary) p.onAccent else p.text
+        val fg = if (primary) p.onAccent else if (danger) EncoreColors.Err else p.text
         if (iconRes != null) Icon(painterResource(iconRes), contentDescription = null, tint = fg, modifier = Modifier.size(16.dp))
         Text(label, style = MaterialTheme.typography.labelMedium, color = fg)
     }
@@ -382,10 +400,11 @@ fun EncoreButton(label: String, modifier: Modifier = Modifier, iconRes: Int? = n
 
 /**
  * A row of choices that look like the web's `.tabs` (Albums / Artists / Songs); scrolls when they don't fit.
- * [end]: the space after it (less when something sits beside it, like the library's Sort chip).
+ * [end]: the space after it (less when something sits beside it, like the library's Sort chip). [busy]: the choices
+ * that show a small spinner after their label (the picker's tabs while their source searches).
  */
 @Composable
-fun ChoiceRow(options: List<String>, selected: Int, onSelect: (Int) -> Unit, modifier: Modifier = Modifier, end: Dp = Gutter) {
+fun ChoiceRow(options: List<String>, selected: Int, onSelect: (Int) -> Unit, modifier: Modifier = Modifier, end: Dp = Gutter, busy: Set<Int> = emptySet()) {
     val p = MaterialTheme.palette
     val outer = RoundedCornerShape(12.dp)
     Row(modifier.padding(start = Gutter, end = end, top = 8.dp, bottom = 8.dp).horizontalScroll(rememberScrollState())) {
@@ -402,7 +421,10 @@ fun ChoiceRow(options: List<String>, selected: Int, onSelect: (Int) -> Unit, mod
                         .clickable { onSelect(i) }
                         .padding(horizontal = 14.dp, vertical = 7.dp),
                 ) {
-                    Text(label, style = MaterialTheme.typography.labelLarge, color = if (on) p.text else p.muted, maxLines = 1)
+                    Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                        Text(label, style = MaterialTheme.typography.labelLarge, color = if (on) p.text else p.muted, maxLines = 1)
+                        if (i in busy) CircularProgressIndicator(color = p.accent, trackColor = p.border, strokeWidth = 1.5.dp, modifier = Modifier.size(12.dp))
+                    }
                 }
             }
         }
@@ -492,6 +514,8 @@ fun TrackRow(
     note: String? = null,
     /** the subtitle with tappable artist / album names (ui/screens/ArtistLinks.kt); wins over [subtitle] */
     subtitleLinks: AnnotatedString? = null,
+    /** a small badge on the line under the subtitle, before [note] (the album page's audio check verdict) */
+    badge: (@Composable () -> Unit)? = null,
 ) {
     val p = MaterialTheme.palette
     Row(
@@ -539,7 +563,14 @@ fun TrackRow(
                     overflow = TextOverflow.Ellipsis,
                 )
             }
-            if (!note.isNullOrEmpty()) {
+            if (badge != null) {
+                Row(Modifier.padding(top = 3.dp), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                    badge()
+                    if (!note.isNullOrEmpty()) {
+                        Text(note, style = MaterialTheme.typography.bodySmall, color = p.faint, maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.weight(1f, fill = false))
+                    }
+                }
+            } else if (!note.isNullOrEmpty()) {
                 Text(note, style = MaterialTheme.typography.bodySmall, color = p.faint, maxLines = 1, overflow = TextOverflow.Ellipsis)
             }
         }
@@ -585,8 +616,8 @@ fun RowDivider(modifier: Modifier = Modifier, startIndent: Dp = Gutter) {
 
 // ---- menus -----------------------------------------------------------------------------------------------------
 
-/** One line of a "⋯" menu (the web's `popMenu`). A null `onClick` draws a separator. */
-class MenuEntry(val label: String, val iconRes: Int? = null, val danger: Boolean = false, val onClick: (() -> Unit)?)
+/** One line of a "⋯" menu (the web's `popMenu`). A null `onClick` draws a separator; `badge` is a count after the label. */
+class MenuEntry(val label: String, val iconRes: Int? = null, val danger: Boolean = false, val badge: String? = null, val onClick: (() -> Unit)?)
 
 /** A separator for [PopMenu]. */
 val MenuSeparator: MenuEntry = MenuEntry("-", onClick = null)
@@ -609,7 +640,12 @@ fun PopMenu(expanded: Boolean, onDismiss: () -> Unit, entries: List<MenuEntry?>)
             }
             val fg = if (e.danger) EncoreColors.Err else p.text
             DropdownMenuItem(
-                text = { Text(e.label, color = fg, style = MaterialTheme.typography.bodyLarge) },
+                text = {
+                    Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        Text(e.label, color = fg, style = MaterialTheme.typography.bodyLarge)
+                        if (!e.badge.isNullOrEmpty()) Badge(e.badge, kind = "warn")
+                    }
+                },
                 onClick = { onDismiss(); e.onClick.invoke() },
                 leadingIcon = if (e.iconRes != null) {
                     { Icon(painterResource(e.iconRes), contentDescription = null, tint = fg.copy(alpha = 0.85f), modifier = Modifier.size(18.dp)) }

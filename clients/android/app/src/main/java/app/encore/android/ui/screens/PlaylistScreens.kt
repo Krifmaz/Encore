@@ -41,6 +41,7 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import app.encore.android.features.library.OnSongFixed
 import app.encore.android.R
 import app.encore.android.data.api.Playlist
 import app.encore.android.ui.Nav
@@ -142,6 +143,8 @@ fun PlaylistScreen(nav: Nav, id: Long, name: String) {
     val nowPlaying by nav.player.nowPlaying.collectAsState()
     // Liked Songs changes as you like things: reload when the set changes
     val loader = rememberLoad(id, if (name == "Liked Songs") liked.size else 0) { api.playlist(id) }
+    // a song corrected or deleted from its ⋯: the playlist loads again in place
+    OnSongFixed { loader.refresh() }
     // "Download for offline" / "Remove download" for the playlist's songs (features/offline)
     val offlineMenu = rememberOfflineMenu(nav)
     val p = MaterialTheme.palette

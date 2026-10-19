@@ -1,23 +1,21 @@
 package app.encore.android.ui.screens
 
-import androidx.compose.foundation.background
+import android.content.Context
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.ExperimentalLayoutApi
+import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.WindowInsets
-import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.width
-import androidx.compose.foundation.layout.FlowRow
-import androidx.compose.foundation.layout.ExperimentalLayoutApi
 import androidx.compose.foundation.lazy.LazyColumn
-import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Scaffold
@@ -27,29 +25,31 @@ import androidx.compose.material3.TopAppBarDefaults
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.key
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.draw.clip
 import androidx.compose.ui.input.nestedscroll.nestedScroll
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import app.encore.android.R
-import app.encore.android.data.repo.CANCELLABLE_STATUSES
+import app.encore.android.data.repo.LinkProbe
 import app.encore.android.data.repo.Me
-import app.encore.android.data.repo.PickerOpts
 import app.encore.android.data.repo.RequestRow
-import app.encore.android.data.repo.formatAgo
+import app.encore.android.features.requests.RequestItem
+import app.encore.android.features.requests.RequestRules
+import app.encore.android.features.requests.RequestSheets
+import app.encore.android.features.requests.rememberRequestActions
 import app.encore.android.ui.Nav
 import app.encore.android.ui.Screen
 import app.encore.android.ui.Tab
-import app.encore.android.ui.components.Badge
 import app.encore.android.ui.components.ChoiceRow
 import app.encore.android.ui.components.Cover
 import app.encore.android.ui.components.EmptyState
@@ -59,23 +59,47 @@ import app.encore.android.ui.components.Gutter
 import app.encore.android.ui.components.MenuEntry
 import app.encore.android.ui.components.MenuSeparator
 import app.encore.android.ui.components.MoreButton
+import app.encore.android.ui.components.PopMenu
 import app.encore.android.ui.components.SmallButton
 import app.encore.android.ui.components.Toasts
+import app.encore.android.ui.theme.EncoreColors
 import app.encore.android.ui.theme.palette
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import kotlinx.serialization.json.JsonNull
+import kotlinx.serialization.json.buildJsonObject
+import kotlinx.serialization.json.put
 
 private val FILTERS = listOf("all" to "All", "active" to "Active", "pending" to "Awaiting approval", "completed" to "Available", "failed" to "Failed")
 
-/** Requests (web/js/pages/requests.js): the list with status badges, Pick / Retry / Cancel, a new request from a link. */
-@OptIn(ExperimentalMaterial3Api::class)
+/** "If a song is on an album:" is remembered on this phone, like the web's `encore.albumMode` (default: just the song). */
+private object AlbumModePref {
+    private const val FILE = "encore_requests"
+    private const val KEY = "album_mode"
+
+    fun read(context: Context): String =
+        try { context.applicationContext.getSharedPreferences(FILE, Context.MODE_PRIVATE).getString(KEY, "song") ?: "song" } catch (_: Exception) { "song" }
+
+    fun write(context: Context, mode: String) {
+        try { context.applicationContext.getSharedPreferences(FILE, Context.MODE_PRIVATE).edit().putString(KEY, mode).apply() } catch (_: Exception) {}
+    }
+}
+
+/**
+ * Requests (web-rs/src/pages/requests.rs, with the web Downloader's link box and bulk actions, download.rs): the list
+ * with status filters, every row's buttons (common.rs), a tap for the whole message and log, a link box with the
+ * album choice, Preview, Import as playlist and Exactly this link, Retry failed and Clear… beside Only mine (as the
+ * web shows them), and for admins Activity in ⋯.
+ */
+@OptIn(ExperimentalMaterial3Api::class, ExperimentalLayoutApi::class)
 @Composable
 fun RequestsScreen(nav: Nav) {
     val features = nav.features
     val p = MaterialTheme.palette
+    val context = LocalContext.current
     val scope = rememberCoroutineScope()
     var me by remember { mutableStateOf<Me?>(null) }
     var filter by remember { mutableStateOf(0) }
@@ -85,13 +109,21 @@ fun RequestsScreen(nav: Nav) {
     var generation by remember { mutableStateOf(0) }
     var link by remember { mutableStateOf("") }
     var linkBusy by remember { mutableStateOf(false) }
-    var confirmFiles by remember { mutableStateOf<Pair<RequestRow, String>?>(null) }
+    var albumMode by remember { mutableStateOf(AlbumModePref.read(context)) }
+    var probe by remember { mutableStateOf<LinkProbe?>(null) }
+    var probeError by remember { mutableStateOf<String?>(null) }
+    var probing by remember { mutableStateOf(false) }
     var confirmClear by remember { mutableStateOf<Pair<List<String>, String>?>(null) }
+    var clearMenu by remember { mutableStateOf(false) }
+    // Retry failed on its way (its button waits)
+    var retrying by remember { mutableStateOf(false) }
     val scrollBehavior = TopAppBarDefaults.enterAlwaysScrollBehavior()
+    fun reload() { generation += 1 }
+    val actions = rememberRequestActions(nav) { reload() }
 
     suspend fun load() {
         try {
-            val m = me ?: withContext(Dispatchers.IO) { features.me() }.also { me = it; if (!it.isAdmin && !mine) mine = true }
+            val m = me ?: withContext(Dispatchers.IO) { features.me() }.also { me = it; actions.me = it; if (!it.isAdmin && !mine) mine = true }
             rows = withContext(Dispatchers.IO) { features.requests(FILTERS[filter].first, mine && m.isAdmin) }
             error = null
         } catch (e: CancellationException) {
@@ -100,7 +132,6 @@ fun RequestsScreen(nav: Nav) {
             if (rows == null) error = e.message ?: "Couldn't load the requests"
         }
     }
-    fun reload() { generation += 1 }
 
     LaunchedEffect(filter, mine, generation) { load() }
     // the web refreshes every 4 s while the page is open
@@ -111,50 +142,104 @@ fun RequestsScreen(nav: Nav) {
         }
     }
 
-    fun act(r: RequestRow, action: String) {
-        scope.launch {
-            try {
-                withContext(Dispatchers.IO) { features.requestAction(r.id, action) }
-                reload()
-            } catch (e: Exception) {
-                Toasts.show(e.message ?: "That didn't work", "err")
-            }
-        }
-    }
-    fun remove(r: RequestRow, files: Boolean) {
-        scope.launch {
-            try {
-                val n = withContext(Dispatchers.IO) { features.deleteRequest(r.id, files) }
-                if (files) Toasts.show("$n file(s) deleted", "ok")
-                reload()
-            } catch (e: Exception) {
-                Toasts.show(e.message ?: "That didn't work", "err")
-            }
-        }
-    }
     fun clear(statuses: List<String>, files: Boolean) {
         scope.launch {
             try {
                 val (removed, deleted) = withContext(Dispatchers.IO) { features.clearRequests(statuses, files, mine) }
-                Toasts.show("$removed cleared" + if (files) " · $deleted file(s) deleted" else "", "ok")
+                Toasts.show(RequestRules.clearToast(removed, deleted, files), "ok")
                 reload()
+            } catch (e: CancellationException) {
+                throw e
             } catch (e: Exception) {
                 Toasts.show(e.message ?: "That didn't work", "err")
             }
         }
     }
+    fun retryFailed() {
+        if (retrying) return
+        retrying = true
+        scope.launch {
+            try {
+                val r = withContext(Dispatchers.IO) { features.retryFailed(mine) }
+                val (msg, kind) = RequestRules.retryFailedToast(r)
+                Toasts.show(msg, kind)
+                reload()
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                Toasts.show(e.message ?: "That didn't work", "err")
+            }
+            retrying = false
+        }
+    }
+    fun importAsPlaylist() {
+        val url = link.trim()
+        if (url.isEmpty()) return
+        nav.open(Screen.PlaylistImport(null, url, requestMissing = true, albumMode = albumMode))
+    }
+    // Download (the web Downloader's): matched song by song, or downloaded directly
     fun requestLink() {
         val url = link.trim()
         if (url.isEmpty()) return
         linkBusy = true
         scope.launch {
             try {
-                val msg = withContext(Dispatchers.IO) { features.requestLink(url) }
-                Toasts.show(msg, "ok")
+                val r = withContext(Dispatchers.IO) { features.requestLinkWithMode(url, albumMode) }
+                Toasts.show(RequestRules.linkToast(r, albumMode), "ok")
                 link = ""
+                probe = null
+                probeError = null
                 reload()
+            } catch (e: CancellationException) {
+                throw e
             } catch (e: Exception) {
                 Toasts.show(e.message ?: "Couldn't request that link", "err")
+            }
+            linkBusy = false
+        }
+    }
+    fun preview() {
+        val url = link.trim()
+        if (url.isEmpty()) return
+        if (RequestRules.previewImports(url)) { importAsPlaylist(); return }
+        probing = true
+        probe = null
+        probeError = null
+        scope.launch {
+            try {
+                probe = withContext(Dispatchers.IO) { features.probeLink(url) }
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                probeError = e.message ?: "That didn't work"
+            }
+            probing = false
+        }
+    }
+    // Exactly this link: skip matching, download what the link points at
+    fun exactly() {
+        val url = link.trim()
+        if (url.isEmpty()) return
+        if (RequestRules.metadataOnly(url)) { importAsPlaylist(); return }
+        linkBusy = true
+        val title = probe?.title?.ifEmpty { null }
+        scope.launch {
+            try {
+                val body = buildJsonObject {
+                    put("kind", "url")
+                    put("url", url)
+                    if (title != null) put("title", title) else put("title", JsonNull)
+                }
+                val status = withContext(Dispatchers.IO) { features.createRequest(body) }
+                Toasts.show(if (status == "pending") "Request sent – waiting for approval" else "Request queued", "ok")
+                link = ""
+                probe = null
+                probeError = null
+                reload()
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                Toasts.show(e.message ?: "That didn't work", "err")
             }
             linkBusy = false
         }
@@ -169,19 +254,8 @@ fun RequestsScreen(nav: Nav) {
         topBar = {
             EncoreTopBar("Requests", scrollBehavior = scrollBehavior, onBack = nav.back, actions = {
                 if (admin) {
-                    MoreButton(
-                        entries = listOf(
-                            MenuEntry("Clear completed", R.drawable.ic_check) { clear(listOf("completed"), false) },
-                            MenuEntry("Clear failed & cancelled", R.drawable.ic_close) { clear(listOf("failed", "cancelled", "denied"), false) },
-                            MenuSeparator,
-                            MenuEntry("Clear failed & cancelled + delete their files", R.drawable.ic_delete, danger = true) {
-                                confirmClear = listOf("failed", "cancelled", "denied") to "Failed & cancelled"
-                            },
-                            MenuEntry("Clear completed + delete the songs", R.drawable.ic_delete, danger = true) {
-                                confirmClear = listOf("completed") to "Completed downloads"
-                            },
-                        ),
-                    )
+                    // the web's Activity (Soulseek transfers, torrents, the log), under its Downloader
+                    MoreButton(entries = listOf(MenuEntry("Activity", R.drawable.ic_signal) { nav.open(Screen.Activity) }))
                 }
             })
         },
@@ -189,27 +263,55 @@ fun RequestsScreen(nav: Nav) {
         val list = rows
         val err = error
         LazyColumn(Modifier.fillMaxSize().padding(padding)) {
-            // quota and the admin's "Only mine"
+            // quota, the admin's "Only mine", and the web's Retry failed and Clear buttons (members' Clear entries
+            // only clear the list; the admin's also delete files, after a confirm)
             item {
                 Column(Modifier.padding(horizontal = Gutter)) {
                     if (m != null && m.requestLimit > 0 && !m.isAdmin) {
                         Text("${m.requestsThisWeek} of ${m.requestLimit} requests used this week", style = MaterialTheme.typography.bodySmall, color = p.muted)
                     }
-                    if (admin) {
-                        Row(verticalAlignment = Alignment.CenterVertically) {
-                            Switch(checked = mine, onCheckedChange = { mine = it })
-                            Spacer(Modifier.width(8.dp))
-                            Text("Only mine", style = MaterialTheme.typography.bodyMedium)
+                    if (m != null) {
+                        FlowRow(
+                            Modifier.fillMaxWidth().padding(vertical = 4.dp),
+                            horizontalArrangement = Arrangement.spacedBy(8.dp),
+                            verticalArrangement = Arrangement.spacedBy(4.dp),
+                        ) {
+                            if (admin) {
+                                Row(verticalAlignment = Alignment.CenterVertically) {
+                                    Switch(checked = mine, onCheckedChange = { mine = it })
+                                    Spacer(Modifier.width(8.dp))
+                                    Text("Only mine", style = MaterialTheme.typography.bodyMedium)
+                                    Spacer(Modifier.width(8.dp))
+                                }
+                            }
+                            SmallButton("Retry failed", iconRes = R.drawable.ic_refresh, enabled = !retrying, modifier = Modifier.align(Alignment.CenterVertically)) { retryFailed() }
+                            Box(Modifier.align(Alignment.CenterVertically)) {
+                                SmallButton("Clear…", iconRes = R.drawable.ic_delete) { clearMenu = true }
+                                PopMenu(
+                                    clearMenu, { clearMenu = false },
+                                    listOf(
+                                        MenuEntry("Clear completed", R.drawable.ic_check) { clear(listOf("completed"), false) },
+                                        MenuEntry("Clear failed & cancelled", R.drawable.ic_close) { clear(listOf("failed", "cancelled", "denied"), false) },
+                                        if (admin) MenuSeparator else null,
+                                        if (admin) MenuEntry("Clear failed & cancelled + delete their files", R.drawable.ic_delete, danger = true) {
+                                            confirmClear = listOf("failed", "cancelled", "denied") to "Failed & cancelled"
+                                        } else null,
+                                        if (admin) MenuEntry("Clear completed + delete the songs", R.drawable.ic_delete, danger = true) {
+                                            confirmClear = listOf("completed") to "Completed downloads"
+                                        } else null,
+                                    ),
+                                )
+                            }
                         }
                     }
                 }
             }
-            // a new request: paste a link (the "Share to Encore" endpoint) or search Discover
+            // a new request: paste a link (the web's Downloader) or search Discover
             item {
                 Row(Modifier.fillMaxWidth().padding(horizontal = Gutter, vertical = 6.dp), verticalAlignment = Alignment.CenterVertically) {
                     EncoreField(
                         value = link,
-                        onValueChange = { link = it },
+                        onValueChange = { link = it; probe = null; probeError = null },
                         placeholder = "Paste a link: Spotify, YouTube, Deezer, Tidal, Qobuz, Amazon Music, Bandcamp…",
                         leadingIcon = R.drawable.ic_link,
                         enabled = !linkBusy,
@@ -222,9 +324,48 @@ fun RequestsScreen(nav: Nav) {
                     SmallButton("Request", iconRes = R.drawable.ic_download, primary = true, enabled = !linkBusy && link.isNotBlank()) { requestLink() }
                 }
             }
-            item {
-                Row(Modifier.padding(horizontal = Gutter, vertical = 2.dp)) {
-                    SmallButton("Search Discover to request music", iconRes = R.drawable.ic_search) { nav.showTab(Tab.DISCOVER) }
+            if (link.isNotBlank()) {
+                // the Downloader's choices for this link
+                item {
+                    Text("If a song is on an album:", style = MaterialTheme.typography.bodySmall, color = p.muted, modifier = Modifier.padding(horizontal = Gutter))
+                    val modeIndex = RequestRules.ALBUM_MODES.indexOfFirst { it.first == albumMode }.coerceAtLeast(0)
+                    ChoiceRow(RequestRules.ALBUM_MODES.map { it.second }, modeIndex, onSelect = { i ->
+                        albumMode = RequestRules.ALBUM_MODES[i].first
+                        AlbumModePref.write(context, albumMode)
+                    })
+                    val metadataOnly = RequestRules.metadataOnly(link)
+                    FlowRow(Modifier.padding(horizontal = Gutter), horizontalArrangement = Arrangement.spacedBy(6.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                        SmallButton("Preview", enabled = !probing && !linkBusy) { preview() }
+                        SmallButton("Import as playlist", iconRes = R.drawable.ic_queue_music, enabled = !linkBusy) { importAsPlaylist() }
+                        SmallButton("Exactly this link", iconRes = R.drawable.ic_link, enabled = !linkBusy && !metadataOnly) { exactly() }
+                    }
+                    if (metadataOnly) {
+                        Text(
+                            "This service has no downloadable audio – use “Import as playlist”",
+                            style = MaterialTheme.typography.bodySmall, color = p.faint, modifier = Modifier.padding(horizontal = Gutter, vertical = 4.dp),
+                        )
+                    }
+                    val pv = probe
+                    val pe = probeError
+                    when {
+                        probing -> Row(Modifier.padding(horizontal = Gutter, vertical = 8.dp)) { Spinner() }
+                        pe != null -> Text(pe, style = MaterialTheme.typography.bodySmall, color = EncoreColors.Err, modifier = Modifier.padding(horizontal = Gutter, vertical = 8.dp))
+                        pv != null -> Row(Modifier.fillMaxWidth().padding(horizontal = Gutter, vertical = 8.dp), verticalAlignment = Alignment.CenterVertically) {
+                            Cover(pv.thumbnail.ifEmpty { null }, nav.graph.imageLoader, size = 56.dp, corner = 8.dp, label = pv.title)
+                            Spacer(Modifier.width(12.dp))
+                            Column(Modifier.weight(1f)) {
+                                Text(pv.title.ifEmpty { "Untitled" }, fontWeight = FontWeight.Bold, maxLines = 2, overflow = TextOverflow.Ellipsis)
+                                val sub = RequestRules.probeLine(pv)
+                                if (sub.isNotEmpty()) Text(sub, style = MaterialTheme.typography.bodySmall, color = p.muted)
+                            }
+                        }
+                    }
+                }
+            } else {
+                item {
+                    Row(Modifier.padding(horizontal = Gutter, vertical = 2.dp)) {
+                        SmallButton("Search Discover to request music", iconRes = R.drawable.ic_search) { nav.showTab(Tab.DISCOVER) }
+                    }
                 }
             }
             item { ChoiceRow(FILTERS.map { it.second }, filter, onSelect = { filter = it }) }
@@ -239,7 +380,7 @@ fun RequestsScreen(nav: Nav) {
                     for (r in top) {
                         val kids = list.filter { it.parentId == r.id }
                         item(key = "req-${r.id}") {
-                            RequestItem(nav, r, m, admin, onAct = { act(r, it) }, onRemove = { remove(r, false) }, onDeleteFiles = { confirmFiles = r to it })
+                            RequestItem(actions, r)
                             if (kids.isNotEmpty()) {
                                 var open by remember { mutableStateOf(false) }
                                 Text(
@@ -249,9 +390,8 @@ fun RequestsScreen(nav: Nav) {
                                     modifier = Modifier.padding(start = 78.dp, end = Gutter, bottom = 10.dp).clickable { open = !open },
                                 )
                                 if (open) {
-                                    for (k in kids) {
-                                        RequestItem(nav, k, m, admin, onAct = { act(k, it) }, onRemove = { remove(k, false) }, onDeleteFiles = { confirmFiles = k to it }, indent = 24.dp)
-                                    }
+                                    // keyed, so an open ⋯ stays on its row when the 4 s reload moves the children
+                                    for (k in kids) key(k.id) { RequestItem(actions, k, indent = 24.dp) }
                                 }
                             }
                         }
@@ -262,15 +402,7 @@ fun RequestsScreen(nav: Nav) {
         }
     }
 
-    confirmFiles?.let { (r, st) ->
-        ConfirmDialog(
-            title = "Delete files",
-            text = if (st == "completed") "Permanently delete the songs this request downloaded from the library?" else "Delete the leftover/partial files of this download?",
-            okLabel = "Delete",
-            danger = true,
-            onDismiss = { confirmFiles = null },
-        ) { remove(r, true) }
-    }
+    RequestSheets(actions, rows ?: emptyList())
     confirmClear?.let { (statuses, label) ->
         ConfirmDialog(
             title = "Delete files",
@@ -279,73 +411,5 @@ fun RequestsScreen(nav: Nav) {
             danger = true,
             onDismiss = { confirmClear = null },
         ) { clear(statuses, true) }
-    }
-}
-
-/** common.js `requestRow`: cover, what, kind badge · via source · message · by user · ago, progress, the actions. */
-@OptIn(ExperimentalLayoutApi::class)
-@Composable
-private fun RequestItem(
-    nav: Nav,
-    r: RequestRow,
-    me: Me?,
-    admin: Boolean,
-    onAct: (String) -> Unit,
-    onRemove: () -> Unit,
-    onDeleteFiles: (status: String) -> Unit,
-    indent: androidx.compose.ui.unit.Dp = 0.dp,
-) {
-    val p = MaterialTheme.palette
-    Row(Modifier.fillMaxWidth().padding(start = Gutter + indent, end = Gutter, top = 8.dp, bottom = 8.dp), verticalAlignment = Alignment.Top) {
-        Cover(r.coverUrl.ifEmpty { null }, nav.graph.imageLoader, size = 48.dp, corner = 8.dp, label = r.title.ifEmpty { r.artist })
-        Spacer(Modifier.width(14.dp))
-        Column(Modifier.weight(1f)) {
-            Row(verticalAlignment = Alignment.CenterVertically) {
-                Text(r.what, style = MaterialTheme.typography.bodyMedium, fontWeight = FontWeight.SemiBold, maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.weight(1f, fill = false))
-                if (r.whatNote.isNotEmpty()) Text(" · " + r.whatNote, style = MaterialTheme.typography.bodyMedium, color = p.muted, maxLines = 1, overflow = TextOverflow.Ellipsis)
-            }
-            Row(Modifier.padding(top = 2.dp), verticalAlignment = Alignment.CenterVertically) {
-                Badge(r.kind)
-                val bits = ArrayList<String>()
-                if (r.attempts > 1) bits.add("${r.attempts} attempts")
-                if (r.source.isNotEmpty()) bits.add("via ${r.source}")
-                if (r.message.isNotEmpty()) bits.add(r.message)
-                if (admin && r.username.isNotEmpty()) bits.add("by ${r.username}")
-                bits.add(formatAgo(r.createdAt))
-                Text(" " + bits.joinToString(" · "), style = MaterialTheme.typography.bodySmall, color = p.muted, maxLines = 2, overflow = TextOverflow.Ellipsis)
-            }
-            if (r.isActive && r.progress > 0) {
-                Box(Modifier.padding(top = 6.dp).fillMaxWidth(0.8f).height(5.dp).clip(RoundedCornerShape(99.dp)).background(p.panel2)) {
-                    Box(Modifier.fillMaxWidth(r.progress.coerceIn(0, 100) / 100f).fillMaxHeight().background(p.gradient))
-                }
-            }
-            FlowRow(Modifier.padding(top = 6.dp), horizontalArrangement = Arrangement.spacedBy(6.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
-                StatusBadge(r.status, Modifier.align(Alignment.CenterVertically))
-                if (admin && r.status == "pending") {
-                    SmallButton("Approve", iconRes = R.drawable.ic_check, primary = true) { onAct("approve") }
-                    SmallButton("Deny") { onAct("deny") }
-                }
-                if ((r.kind == "album" || r.kind == "track") && r.status != "completed" && me?.can("pick") == true) {
-                    SmallButton("Pick", iconRes = R.drawable.ic_search) {
-                        nav.open(Screen.Picker(PickerOpts(kind = r.kind, mbid = r.mbid, artist = r.artist, title = r.title, album = r.album, lengthSec = r.lengthSec, requestId = r.id)))
-                    }
-                }
-                if (r.status == "failed" || r.status == "cancelled" || r.kind == "playlist") {
-                    SmallButton("Retry", iconRes = R.drawable.ic_refresh) { onAct("retry") }
-                }
-                if (r.status in CANCELLABLE_STATUSES) {
-                    SmallButton("Cancel", iconRes = R.drawable.ic_close) { onAct("cancel") }
-                }
-                if (!r.isActive) {
-                    MoreButton(
-                        entries = listOf(
-                            MenuEntry("Remove from list", R.drawable.ic_close) { onRemove() },
-                            if (admin) MenuEntry(if (r.status == "completed") "Delete downloaded files" else "Delete leftover files", R.drawable.ic_delete, danger = true) { onDeleteFiles(r.status) } else null,
-                        ),
-                        iconSize = 18.dp,
-                    )
-                }
-            }
-        }
     }
 }

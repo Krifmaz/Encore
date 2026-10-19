@@ -25,6 +25,7 @@ import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBarDefaults
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -304,7 +305,7 @@ fun PlaylistEditScreen(nav: Nav, id: Long) {
  */
 @OptIn(ExperimentalMaterial3Api::class, ExperimentalLayoutApi::class)
 @Composable
-fun PlaylistImportScreen(nav: Nav, into: Long?, startUrl: String = "") {
+fun PlaylistImportScreen(nav: Nav, into: Long?, startUrl: String = "", startRequestMissing: Boolean = false, startAlbumMode: String? = null) {
     val features = nav.features
     val p = MaterialTheme.palette
     val scope = rememberCoroutineScope()
@@ -314,14 +315,15 @@ fun PlaylistImportScreen(nav: Nav, into: Long?, startUrl: String = "") {
     var text by remember { mutableStateOf("") }
     var name by remember { mutableStateOf("") }
     var follow by remember { mutableStateOf(false) }
-    var requestMissing by remember { mutableStateOf(false) }
-    var albumMode by remember { mutableStateOf(0) }
+    val albumModes = listOf("" to "Albums: admin default", "song" to "Just the songs", "album" to "Whole albums")
+    // the Requests link box's "Import as playlist" (the web Downloader's): missing songs requested, its album choice
+    var requestMissing by remember { mutableStateOf(startRequestMissing) }
+    var albumMode by remember { mutableStateOf(albumModes.indexOfFirst { it.first == startAlbumMode }.coerceAtLeast(0)) }
     var preview by remember { mutableStateOf<ImportPreview?>(null) }
     var previewError by remember { mutableStateOf<String?>(null) }
     var previewing by remember { mutableStateOf(false) }
     var importing by remember { mutableStateOf(false) }
     val scrollBehavior = TopAppBarDefaults.enterAlwaysScrollBehavior()
-    val albumModes = listOf("" to "Albums: admin default", "song" to "Just the songs", "album" to "Whole albums")
 
     fun bodyUrl(): String? = if (mode == 0) url.trim() else null
     fun bodyText(): String? = if (mode == 1) text else null
@@ -341,6 +343,8 @@ fun PlaylistImportScreen(nav: Nav, into: Long?, startUrl: String = "") {
             previewing = false
         }
     }
+    // from the Requests link box the link is previewed at once, as the web Downloader does
+    LaunchedEffect(Unit) { if (startRequestMissing && startUrl.isNotBlank()) doPreview() }
     fun doImport() {
         importing = true
         scope.launch {

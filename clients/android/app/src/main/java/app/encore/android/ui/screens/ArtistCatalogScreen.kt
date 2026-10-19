@@ -29,6 +29,7 @@ import androidx.compose.material3.Text
 import androidx.compose.material3.TopAppBarDefaults
 import androidx.compose.material3.rememberModalBottomSheetState
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -49,6 +50,7 @@ import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import app.encore.android.features.library.OnSongFixed
 import app.encore.android.R
 import app.encore.android.data.api.Album
 import app.encore.android.data.api.ArtistSongs
@@ -64,7 +66,11 @@ import app.encore.android.data.repo.SimilarArtists
 import app.encore.android.data.repo.TopTrack
 import app.encore.android.ui.Nav
 import app.encore.android.ui.Screen
+import app.encore.android.data.repo.Me
 import app.encore.android.ui.components.AlbumCard
+import app.encore.android.ui.components.MenuEntry
+import app.encore.android.ui.components.MoreButton
+import kotlinx.coroutines.CancellationException
 import app.encore.android.ui.components.Badge
 import app.encore.android.ui.components.ChoiceRow
 import app.encore.android.ui.components.Cover
@@ -294,6 +300,12 @@ private fun ArtistPageScreen(nav: Nav, mbid: String, name: String) {
     var moreLike by remember { mutableStateOf<Pair<String, String>?>(null) }
     var discoSheet by remember { mutableStateOf(false) }
     val scrollBehavior = TopAppBarDefaults.enterAlwaysScrollBehavior()
+    // admins, on a library artist: "Remove artist" (library.rs, for artists a wrong download added)
+    var me by remember { mutableStateOf<Me?>(null) }
+    var confirmRemove by remember { mutableStateOf(false) }
+    LaunchedEffect(byName) {
+        if (byName) me = try { withContext(Dispatchers.IO) { features.me() } } catch (e: CancellationException) { throw e } catch (_: Exception) { null }
+    }
 
     Scaffold(
         modifier = Modifier.fillMaxSize().nestedScroll(scrollBehavior.nestedScrollConnection),
@@ -311,6 +323,9 @@ private fun ArtistPageScreen(nav: Nav, mbid: String, name: String) {
                         ) { api.shareArtistLink(name) }
                     }) {
                         Icon(painterResource(R.drawable.ic_share), contentDescription = "Share link")
+                    }
+                    if (me?.isAdmin == true) {
+                        MoreButton(entries = listOf(MenuEntry("Remove artist", R.drawable.ic_delete, danger = true) { confirmRemove = true }))
                     }
                 }
             } else {
@@ -354,8 +369,9 @@ private fun ArtistPageScreen(nav: Nav, mbid: String, name: String) {
             val nowPlaying by nav.player.nowPlaying.collectAsState()
             val libAlbumCount = if (byName) d.libraryAlbums.size else a.libraryAlbums.size
 
-            fun showAllSongs() {
-                if (loadingAll || allSongs != null) return
+            // again: the whole list once more (a song in it was corrected or deleted); it stays until the new one is in
+            fun showAllSongs(again: Boolean = false) {
+                if (loadingAll || (allSongs != null && !again)) return
                 loadingAll = true
                 scope.launch {
                     val out = ArrayList<Track>()
@@ -376,6 +392,12 @@ private fun ArtistPageScreen(nav: Nav, mbid: String, name: String) {
                         loadingAll = false
                     }
                 }
+            }
+            // a song corrected or deleted from its ⋯: the liked and library songs load again in place
+            OnSongFixed {
+                likedLoad.refresh()
+                songsLoad.refresh()
+                if (allSongs != null) showAllSongs(again = true)
             }
 
             fun playAll(shuffle: Boolean) {
@@ -695,6 +717,27 @@ private fun ArtistPageScreen(nav: Nav, mbid: String, name: String) {
             }
             extTracks?.let { m -> ExtTracksSheet(nav, a.name, m, statuses, artistMbid = a.id, onDismiss = { extTracks = null }) }
             moreLike?.let { (artist, title) -> MoreLikeThisSheet(nav, artist, title, "", onDismiss = { moreLike = null }) }
+        }
+    }
+    if (confirmRemove) {
+        ConfirmDialog(
+            title = "Remove artist",
+            text = "Delete every album by “$name” from disk and cancel their pending downloads? Use this for artists that were added by a wrong download.",
+            okLabel = "Remove",
+            danger = true,
+            onDismiss = { confirmRemove = false },
+        ) {
+            scope.launch {
+                try {
+                    val n = withContext(Dispatchers.IO) { features.removeArtist(name) }
+                    Toasts.show("Removed $n song(s)", "ok")
+                    nav.back()
+                } catch (e: CancellationException) {
+                    throw e
+                } catch (e: Exception) {
+                    Toasts.show(e.message ?: "That didn't work", "err")
+                }
+            }
         }
     }
 }

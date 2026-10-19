@@ -107,7 +107,7 @@ import kotlinx.serialization.json.JsonPrimitive
  * and not saved yet is still there after going to another page and back.
  */
 @Composable
-fun SettingsScreen(nav: Nav, session: Session) {
+fun SettingsScreen(nav: Nav, session: Session, startAt: String? = null) {
     val graph = nav.graph
     val api = graph.settingsApi
     val p = MaterialTheme.palette
@@ -172,7 +172,27 @@ fun SettingsScreen(nav: Nav, session: Session) {
         focus = if (page != id) id else null
         pages.add(page)
     }
-    val back: () -> Unit = { if (pages.isNotEmpty()) pages.removeAt(pages.lastIndex); focus = null }
+    // opened at one page (a `#/settings?s=…` link): it opens once the schema has said which page holds that card, and
+    // going back from it leaves Settings
+    var started by remember { mutableStateOf(startAt == null) }
+    LaunchedEffect(startAt, me, schemaState, schemaError) {
+        if (started || startAt == null || me == null) return@LaunchedEffect
+        if (admin && schemaState == null && schemaError == null) return@LaunchedEffect
+        started = true
+        open(startAt)
+    }
+    val back: () -> Unit = {
+        if (startAt != null && pages.size <= 1) nav.back()
+        else if (pages.isNotEmpty()) pages.removeAt(pages.lastIndex)
+        focus = null
+    }
+    if (!started) {
+        Column(Modifier.fillMaxSize()) {
+            BackBar("Settings", nav.back)
+            LoadingBox()
+        }
+        return
+    }
 
     val page = pages.lastOrNull()
     if (page != null) {

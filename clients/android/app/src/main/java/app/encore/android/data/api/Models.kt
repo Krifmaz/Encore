@@ -62,6 +62,16 @@ data class Track(
     /** the file's sample rate in Hz and bit depth (0 when unknown: lossy files, servers before 0.31) */
     val sampleRate: Int = 0,
     val bitDepth: Int = 0,
+    /** the request that brought the file in (0: none); members with `fix` may correct such songs */
+    val requestId: Long = 0L,
+    /**
+     * the audio check's verdict: "verified", "mismatch" (wrong audio), "manual" (someone confirmed it is the right
+     * song); "" when unchecked. [verifyDetail] says why ("Confirmed by Caz", what the fingerprint found).
+     */
+    val verifyStatus: String = "",
+    val verifyDetail: String = "",
+    /** who requested the song (only the album page's rows say; "" elsewhere) */
+    val requestedBy: String = "",
 ) {
     /** The artists to link: the server's split, or the artist text as one. */
     fun credits(): List<ArtistCredit> = artists.ifEmpty { if (artist.isNotEmpty()) listOf(ArtistCredit(artist)) else emptyList() }
@@ -106,6 +116,10 @@ data class Track(
             gain = TrackGain.from(o["gain"]),
             sampleRate = o.int("sample_rate"),
             bitDepth = o.int("bit_depth"),
+            requestId = o.long("request_id"),
+            verifyStatus = o.str("verify_status"),
+            verifyDetail = o.str("verify_detail"),
+            requestedBy = o.str("requested_by"),
         )
     }
 }

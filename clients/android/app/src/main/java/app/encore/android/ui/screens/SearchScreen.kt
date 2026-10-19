@@ -40,6 +40,7 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import app.encore.android.features.library.OnSongFixed
 import app.encore.android.R
 import app.encore.android.data.api.Album
 import app.encore.android.data.api.Artist
@@ -87,6 +88,8 @@ fun SearchScreen(nav: Nav) {
     var busy by remember { mutableStateOf(false) }
     var error by remember { mutableStateOf<String?>(null) }
     var generation by remember { mutableStateOf(0) }
+    // a song corrected or deleted from its ⋯: the search runs again (the results stay until it answers)
+    OnSongFixed { generation += 1 }
 
     LaunchedEffect(query, generation) {
         val q = query.trim()

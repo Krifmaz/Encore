@@ -3,6 +3,7 @@ package app.encore.android.data.repo
 import app.encore.android.core.arr
 import app.encore.android.core.int
 import app.encore.android.core.long
+import app.encore.android.core.obj
 import app.encore.android.core.objects
 import app.encore.android.core.objectsOf
 import app.encore.android.core.str
@@ -252,11 +253,152 @@ class FeaturesApi(private val api: EncoreApi, private val client: OkHttpClient) 
     /** POST /api/requests/link {url}: request whatever a link points at (same as "Share to Encore"). */
     fun requestLink(url: String): String = api.requestLink(url)
 
+    /**
+     * POST /api/requests/link {url, album_mode} (the Downloader's Download): `albumMode` "song", "album", or "" for
+     * the admin's default (sent as null, as the web does).
+     */
+    fun requestLinkWithMode(url: String, albumMode: String): LinkResult {
+        val body = buildJsonObject {
+            put("url", url)
+            if (albumMode.isEmpty()) put("album_mode", JsonNull) else put("album_mode", albumMode)
+        }
+        return (call("POST", "/api/requests/link", body) as? JsonObject ?: JsonObject(emptyMap())).page(LinkResult.serializer())
+    }
+
+    /** GET /api/discover/probe?url=: title, site, uploader, length or item count, thumbnail (the Downloader's Preview). */
+    fun probeLink(url: String): LinkProbe = getObject("/api/discover/probe?url=${EncoreApi.enc(url)}").page(LinkProbe.serializer())
+
+    /** POST /api/requests/retry-failed {mine}: queue every failed request again (members: their own). */
+    fun retryFailed(mine: Boolean): RetryFailedResult {
+        val o = call("POST", "/api/requests/retry-failed", buildJsonObject { put("mine", mine) }) as? JsonObject
+        return RetryFailedResult(o?.int("retried") ?: 0, o?.int("skipped") ?: 0, o?.str("why") ?: "")
+    }
+
+    /** How many requests wait for an admin's approval (the web's sidebar count: GET /api/requests?status=pending). */
+    fun pendingCount(): Int = call("GET", "/api/requests?status=pending&limit=500", null).objects().size
+
+    // ---- Activity (admins) -----------------------------------------------------------------------------------
+
+    /** GET /api/system/downloads: Soulseek transfers, torrent / Usenet downloads, and why Soulseek's list is missing. */
+    fun systemDownloads(): SystemDownloads {
+        val o = getObject("/api/system/downloads")
+        return SystemDownloads(
+            slskd = o.arr("slskd").objectsOf().rows(SlskTransfer.serializer()),
+            torrents = o.arr("torrents").objectsOf().rows(TorrentDownload.serializer()),
+            slskdError = o.obj("errors")?.str("slskd") ?: "",
+        )
+    }
+
+    /** GET /api/system/activity: the server log, newest first. */
+    fun activity(): List<ActivityLine> = call("GET", "/api/system/activity", null).objects().rows(ActivityLine.serializer())
+
+    /** POST /api/system/downloads/slskd/clear: remove finished Soulseek transfers from the list. */
+    fun clearSoulseekTransfers() {
+        call("POST", "/api/system/downloads/slskd/clear", JsonObject(emptyMap()))
+    }
+
+    // ---- correcting library songs and albums (web-rs/src/pages/library.rs) ------------------------------------
+
+    /** POST /api/library/verify-manual {track_ids[, correct:false]}: "This is the right song" / Undo "confirmed". */
+    fun verifyManual(trackIds: List<Long>, correct: Boolean = true) {
+        val body = buildJsonObject {
+            put("track_ids", buildJsonArray { for (id in trackIds) add(JsonPrimitive(id)) })
+            if (!correct) put("correct", false)
+        }
+        call("POST", "/api/library/verify-manual", body)
+    }
+
+    /** DELETE /api/library/tracks/{id}: the file goes from disk (admins; members with `fix` for their own request). */
+    fun deleteTrack(id: Long) {
+        call("DELETE", "/api/library/tracks/$id", null)
+    }
+
+    /** GET /api/library/mismatches (admins): the songs whose audio doesn't match their tags (the web's Wrong audio tab). */
+    fun mismatches(): List<Track> = call("GET", "/api/library/mismatches", null).objects().mapNotNull { Track.from(it) }
+
+    /** GET /api/library/tracks/{id}/identify: what the audio fingerprint says the song is. */
+    fun identifyTrack(id: Long): List<SongMatch> = call("GET", "/api/library/tracks/$id/identify", null).objects().rows(SongMatch.serializer())
+
+    /** POST /api/library/tracks/{id}/fix {values, move}: the song's new details; returns its album id. */
+    fun fixTrack(id: Long, values: Map<String, String>, move: Boolean): String {
+        val body = buildJsonObject {
+            put("values", buildJsonObject { for ((k, v) in values) put(k, v) })
+            put("move", move)
+        }
+        return (call("POST", "/api/library/tracks/$id/fix", body) as? JsonObject)?.str("album_id") ?: ""
+    }
+
+    /** POST /api/library/albums/{id}/artwork: find and embed artwork; returns how many files got it. */
+    fun findAlbumArtwork(id: String): Int =
+        (call("POST", "/api/library/albums/${EncoreApi.enc(id)}/artwork", JsonObject(emptyMap())) as? JsonObject)?.int("embedded") ?: 0
+
+    /** DELETE /api/library/albums/{id}: every file of the album goes from disk. */
+    fun deleteAlbum(id: String) {
+        call("DELETE", "/api/library/albums/${EncoreApi.enc(id)}", null)
+    }
+
+    /** GET /api/library/albums/{id}/art-candidates?q=: pictures from every catalogue for "Change artwork". */
+    fun artCandidates(albumId: String, q: String): List<ArtCandidate> =
+        call("GET", "/api/library/albums/${EncoreApi.enc(albumId)}/art-candidates?q=${EncoreApi.enc(q)}", null).objects().rows(ArtCandidate.serializer())
+
+    /** POST /api/library/albums/{id}/art {url} or {data: a data: URL}: embed the picture; returns how many files got it. */
+    fun setAlbumArt(albumId: String, url: String? = null, data: String? = null): Int {
+        val body = buildJsonObject {
+            if (url != null) put("url", url)
+            if (data != null) put("data", data)
+        }
+        return (call("POST", "/api/library/albums/${EncoreApi.enc(albumId)}/art", body) as? JsonObject)?.int("embedded") ?: 0
+    }
+
+    /** GET /api/library/albums/{id}/match?provider=&artist=&album=: releases that may be this album ("Tag / match metadata"). */
+    fun albumMatch(albumId: String, provider: String, artist: String, album: String): AlbumMatch =
+        getObject("/api/library/albums/${EncoreApi.enc(albumId)}/match?provider=${EncoreApi.enc(provider)}&artist=${EncoreApi.enc(artist)}&album=${EncoreApi.enc(album)}")
+            .page(AlbumMatch.serializer())
+
+    /** GET /api/library/albums/{id}/preview?release_id=: what the files would be called after tagging from that release. */
+    fun albumMatchPreview(albumId: String, releaseId: String): MatchPreview =
+        getObject("/api/library/albums/${EncoreApi.enc(albumId)}/preview?release_id=${EncoreApi.enc(releaseId)}").page(MatchPreview.serializer())
+
+    /** POST /api/library/albums/{id}/retag {release_id, rename}: write the release's tags; returns the album's (new) id. */
+    fun retagAlbum(albumId: String, releaseId: String, rename: Boolean): String =
+        (call("POST", "/api/library/albums/${EncoreApi.enc(albumId)}/retag", buildJsonObject { put("release_id", releaseId); put("rename", rename) }) as? JsonObject)?.str("album_id") ?: ""
+
+    /** GET /api/library/albums/{id}, as it comes (Edit details needs its genre, discs and track numbers). */
+    fun albumRaw(albumId: String): JsonObject = getObject("/api/library/albums/${EncoreApi.enc(albumId)}")
+
+    /** POST /api/library/tags {track_ids, values[, rename]}: write tags into the files; returns the album's (new) id. */
+    fun writeTags(trackIds: List<Long>, values: Map<String, String>, rename: Boolean = false): String {
+        val body = buildJsonObject {
+            put("track_ids", buildJsonArray { for (id in trackIds) add(JsonPrimitive(id)) })
+            put("values", buildJsonObject { for ((k, v) in values) put(k, v) })
+            if (rename) put("rename", true)
+        }
+        return (call("POST", "/api/library/tags", body) as? JsonObject)?.str("album_id") ?: ""
+    }
+
+    /** POST /api/library/albums/{id}/lyrics: look for every song's lyrics → (found, checked; 0 checked: all had some). */
+    fun albumLyrics(albumId: String): Pair<Int, Int> {
+        val o = call("POST", "/api/library/albums/${EncoreApi.enc(albumId)}/lyrics", JsonObject(emptyMap())) as? JsonObject
+        return (o?.int("found") ?: 0) to (o?.int("checked") ?: 0)
+    }
+
+    /** DELETE /api/library/artists?name=: every album by the artist goes from disk, their downloads are cancelled. */
+    fun removeArtist(name: String): Int =
+        (call("DELETE", "/api/library/artists?name=${EncoreApi.enc(name)}", null) as? JsonObject)?.int("removed") ?: 0
+
+    /** GET /api/discover/album-lookup?artist=&album=: the MusicBrainz release group of a library album ("" when unknown). */
+    fun albumLookup(artist: String, album: String): String =
+        getObject("/api/discover/album-lookup?artist=${EncoreApi.enc(artist)}&album=${EncoreApi.enc(album)}").str("rgid")
+
     // ---- Picker --------------------------------------------------------------------------------------------
 
     fun pickerSources(): PickerInfo = getObject("/api/picker/sources").page(PickerInfo.serializer())
 
-    fun pickerSearch(source: String, opts: PickerOpts, query: String): List<PickResult> {
+    /**
+     * POST /api/picker/search for one source. `request_id` goes along when the picker was opened for a request, and
+     * `fresh` asks for a new search instead of a kept one ("Search again"); servers that keep no searches ignore both.
+     */
+    fun pickerSearch(source: String, opts: PickerOpts, query: String, fresh: Boolean = false): PickSearch {
         val body = buildJsonObject {
             put("source", source)
             put("kind", opts.kind)
@@ -268,9 +410,18 @@ class FeaturesApi(private val api: EncoreApi, private val client: OkHttpClient) 
             if (opts.artistMbid.isNotEmpty()) put("artist_mbid", opts.artistMbid)
             if (opts.trackCount > 0) put("track_count", opts.trackCount)
             if (opts.lengthSec > 0) put("length", opts.lengthSec)
+            if (opts.requestId > 0L) put("request_id", opts.requestId)
+            if (fresh) put("fresh", true)
         }
-        return call("POST", "/api/picker/search", body).objects().rows(PickResult.serializer())
+        return pickSearchOf(call("POST", "/api/picker/search", body))
     }
+
+    /**
+     * GET /api/system/soulseek `search_running`: another Soulseek search holds the turn (one runs at a time), so a
+     * new one waits for it. Null when the server can't say (an older server, or no permission).
+     */
+    fun soulseekSearchRunning(): Boolean? =
+        try { (call("GET", "/api/system/soulseek", null) as? JsonObject)?.get("search_running")?.let { it.toString() == "true" } } catch (e: CancellationException) { throw e } catch (_: Exception) { null }
 
     /** POST /api/picker/pick: a request locked to this result; returns its status (`pending` or `queued`). */
     fun pick(source: String, payload: JsonElement, title: String, opts: PickerOpts): String {

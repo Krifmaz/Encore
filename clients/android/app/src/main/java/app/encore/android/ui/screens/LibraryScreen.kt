@@ -68,6 +68,9 @@ import app.encore.android.R
 import app.encore.android.data.api.Album
 import app.encore.android.data.api.LibrarySearch
 import app.encore.android.data.api.Track
+import app.encore.android.features.library.OnSongFixed
+import app.encore.android.features.library.SongFixUi
+import app.encore.android.features.library.WrongAudioList
 import app.encore.android.features.offline.DownloadedList
 import app.encore.android.features.offline.OfflineLibraryScreen
 import app.encore.android.features.offline.OfflineMode
@@ -208,8 +211,9 @@ private fun SortChip(tab: String, sort: LibSort, onChange: (LibSort) -> Unit, mo
 }
 
 /**
- * Library: Albums / Artists / Songs (the web's #/library tabs), and Downloaded once songs are saved on this phone
- * (features/offline). In offline mode the saved songs are the whole library.
+ * Library: Albums / Artists / Songs (the web's #/library tabs), Downloaded once songs are saved on this phone
+ * (features/offline), and for admins Wrong audio (the songs the audio check flagged). In offline mode the saved songs
+ * are the whole library.
  *
  * The search box (0.31) searches the whole library whatever tab is selected: while it has a query the page shows
  * one results view (Artists, Albums, Songs, each with "Show all N" that opens its tab filtered by the query); a
@@ -228,7 +232,11 @@ fun LibraryScreen(nav: Nav) {
     val store = remember(context) { LibrarySorts(context) }
     val saved = remember(context) { OfflineStore.of(context) }
     val savedAll by saved.all.collectAsState()
-    val labels = TABS.map { it.second } + if (saved.songs(savedAll).isNotEmpty()) listOf("Downloaded") else emptyList()
+    // admins: the web's Wrong audio tab (after Downloaded, so that one keeps its place)
+    val me by SongFixUi.me.collectAsState()
+    val tabs = TABS + (if (saved.songs(savedAll).isNotEmpty()) listOf("downloaded" to "Downloaded") else emptyList()) +
+        (if (me?.isAdmin == true) listOf("issues" to "Wrong audio") else emptyList())
+    val labels = tabs.map { it.second }
     val shown = if (tab < labels.size) tab else 0
     // every tab's sort, remembered per tab
     var sorts by remember { mutableStateOf(TABS.associate { (k, _) -> k to store.get(k) }) }
@@ -282,10 +290,11 @@ fun LibraryScreen(nav: Nav) {
                     tab = section
                     LibraryState.results = false
                 }
-            } else when (shown) {
-                0 -> AlbumsTab(nav, sort, q)
-                1 -> ArtistsTab(nav, sort, q)
-                2 -> SongsTab(nav, sort, q)
+            } else when (tabs[shown].first) {
+                "albums" -> AlbumsTab(nav, sort, q)
+                "artists" -> ArtistsTab(nav, sort, q)
+                "tracks" -> SongsTab(nav, sort, q)
+                "issues" -> WrongAudioList(nav, q)
                 else -> DownloadedList(nav)
             }
         }
@@ -325,6 +334,21 @@ private class Paged<T>(val pageSize: Int) {
         loading = false
         error = null
         generation += 1
+    }
+
+    /**
+     * Loads the pages already loaded again, in place (a song was corrected or deleted from its ⋯): the rows stay on
+     * screen, and the scroll position with them, until each page's new answer replaces them.
+     */
+    fun refresh() {
+        val pages = loaded.sorted()
+        loaded.clear()
+        inFlight.clear()
+        done = false
+        loading = false
+        error = null
+        generation += 1
+        for (page in pages) want(page * pageSize)
     }
 
     /** Loads the page that holds row [index] (once). */
@@ -545,6 +569,8 @@ private fun SongsTab(nav: Nav, sort: LibSort, q: String = "") {
     val paged = remember(sort, q) { Paged<Track>(200) }
     paged.scope = scope
     paged.fetch = { offset, limit -> api.tracks(q = q, offset = offset, limit = limit, sort = sort.key, dir = sort.dir) }
+    // a song corrected or deleted from its ⋯: the loaded pages load again
+    OnSongFixed { paged.refresh() }
     val list = rememberLazyListState()
     LaunchedEffect(sort, q) { if (list.firstVisibleItemIndex > 0) list.scrollToItem(0) }
     val index = rememberLibraryIndex(api, "tracks", sort.key, dir = sort.dir)
@@ -640,6 +666,8 @@ private fun LibraryResults(nav: Nav, q: String, onShowAll: (Int) -> Unit) {
     var found by remember { mutableStateOf<Pair<String, LibrarySearch>?>(null) }
     var error by remember { mutableStateOf<String?>(null) }
     var generation by remember { mutableStateOf(0) }
+    // a song corrected or deleted from its ⋯: the search runs again (the results stay until it answers)
+    OnSongFixed { generation += 1 }
     // the newest query wins: a new one cancels the request of the one before
     LaunchedEffect(q, generation) {
         error = null

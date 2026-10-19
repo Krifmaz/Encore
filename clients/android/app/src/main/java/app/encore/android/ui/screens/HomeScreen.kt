@@ -20,7 +20,9 @@ import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
+import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
@@ -32,13 +34,18 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import app.encore.android.features.library.OnSongFixed
 import app.encore.android.R
 import app.encore.android.core.int
 import app.encore.android.core.str
 import app.encore.android.data.api.Album
 import app.encore.android.data.api.Track
 import app.encore.android.data.api.User
+import app.encore.android.data.repo.RequestRow
 import app.encore.android.data.session.Session
+import app.encore.android.features.requests.RequestItem
+import app.encore.android.features.requests.RequestSheets
+import app.encore.android.features.requests.rememberRequestActions
 import app.encore.android.features.files.FilesAccess
 import app.encore.android.features.group.ListeningTogetherRow
 import app.encore.android.ui.Nav
@@ -61,7 +68,10 @@ import app.encore.android.ui.components.Toasts
 import app.encore.android.ui.components.TrackRow
 import app.encore.android.ui.components.rememberLoad
 import app.encore.android.ui.theme.palette
+import androidx.compose.foundation.layout.offset
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import kotlinx.serialization.json.JsonArray
@@ -110,6 +120,35 @@ fun HomeScreen(nav: Nav, session: Session) {
             me = try { api.me() } catch (_: Exception) { null },
         )
     }
+    // a song corrected or deleted from its ⋯ (Recently played): Home loads again in place
+    OnSongFixed { loader.refresh() }
+
+    // "Your downloads in progress" (home.rs `load_reqs`): this user's active requests, with their buttons; and for
+    // admins the count of requests awaiting approval (the web's sidebar badge, every 30 s)
+    var reqGen by remember { mutableIntStateOf(0) }
+    var active by remember { mutableStateOf<List<RequestRow>>(emptyList()) }
+    var pending by remember { mutableIntStateOf(0) }
+    val reqActions = rememberRequestActions(nav) { reqGen += 1 }
+    LaunchedEffect(session, reqGen) {
+        try {
+            val features = nav.features
+            if (reqActions.me == null) reqActions.me = withContext(Dispatchers.IO) { features.me() }
+            active = withContext(Dispatchers.IO) { features.requests("active", mine = true, limit = 8) }
+            if (reqActions.admin) pending = withContext(Dispatchers.IO) { features.pendingCount() }
+        } catch (e: CancellationException) {
+            throw e
+        } catch (_: Exception) {
+        }
+    }
+    LaunchedEffect(session) {
+        var ticks = 0
+        while (true) {
+            delay(10_000)
+            ticks += 1
+            // the progress of downloads on their way; the approval count every 30 s
+            if (active.isNotEmpty() || (reqActions.admin && ticks % 3 == 0)) reqGen += 1
+        }
+    }
 
     LoadableContent(loader) { data ->
         // admins: the file manager in the menu, once the server says it has one (0.33)
@@ -142,12 +181,14 @@ fun HomeScreen(nav: Nav, session: Session) {
                             size = 40.dp,
                             modifier = Modifier.clip(CircleShape).clickable { menu = true },
                         )
+                        // admins: requests awaiting approval
+                        if (pending > 0) Badge("$pending", kind = "warn", modifier = Modifier.align(Alignment.TopEnd).offset(x = 10.dp, y = (-6).dp))
                         PopMenu(
                             expanded = menu,
                             onDismiss = { menu = false },
                             entries = listOf(
                                 MenuEntry("For you", R.drawable.ic_spark) { nav.open(Screen.ForYou) },
-                                MenuEntry("Requests", R.drawable.ic_inbox) { nav.open(Screen.Requests) },
+                                MenuEntry("Requests", R.drawable.ic_inbox, badge = if (pending > 0) "$pending" else null) { nav.open(Screen.Requests) },
                                 MenuEntry("Leaderboard", R.drawable.ic_leaderboard) { nav.open(Screen.Leaderboard) },
                                 MenuSeparator,
                                 MenuEntry("Account", R.drawable.ic_person) { nav.open(Screen.Account) },
@@ -200,6 +241,11 @@ fun HomeScreen(nav: Nav, session: Session) {
                 }
             }
 
+            if (active.isNotEmpty()) {
+                item { SectionHead("Your downloads in progress", action = "All requests") { nav.open(Screen.Requests) } }
+                for (r in active) item(key = "req-${r.id}") { RequestItem(reqActions, r) }
+            }
+
             item { SectionHead("Recently added", action = "Library") { nav.showTab(Tab.LIBRARY) } }
             if (data.recent.isEmpty()) {
                 item { EmptyState(R.drawable.ic_library, "Your library is empty", "Search above or paste a link to get started.") }
@@ -234,4 +280,5 @@ fun HomeScreen(nav: Nav, session: Session) {
             item { Spacer(Modifier.height(24.dp)) }
         }
     }
+    RequestSheets(reqActions, active)
 }

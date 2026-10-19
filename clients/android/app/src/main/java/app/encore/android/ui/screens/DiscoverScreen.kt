@@ -60,6 +60,7 @@ import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
+import app.encore.android.features.library.OnSongFixed
 import app.encore.android.R
 import app.encore.android.data.api.ApiException
 import app.encore.android.data.api.LibrarySearch
@@ -572,8 +573,11 @@ fun DiscoverScreen(nav: Nav, initialQuery: String = "", initialType: String = "a
             q = v
         }
     }
+    // a song corrected or deleted from its ⋯: the library part asks again (the catalogue part stays)
+    var libraryGen by remember { mutableStateOf(0) }
+    OnSongFixed { libraryGen += 1 }
     // the library answers at once and shows first; the catalogue (MusicBrainz, Deezer, Apple) takes a moment
-    LaunchedEffect(q, generation) {
+    LaunchedEffect(q, generation, libraryGen) {
         if (q.isEmpty()) {
             library = null
             libraryFor = ""
