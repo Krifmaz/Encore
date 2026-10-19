@@ -1,6 +1,7 @@
 package app.encore.android.ui
 
 import android.Manifest
+import android.content.Intent
 import android.content.pm.PackageManager
 import android.graphics.Color
 import android.os.Build
@@ -15,6 +16,7 @@ import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import app.encore.android.AppGraph
 import app.encore.android.data.session.ThemeChoice
+import app.encore.android.features.group.GroupListen
 import app.encore.android.features.update.Updater
 import app.encore.android.graph
 import app.encore.android.ui.theme.EncoreTheme
@@ -34,6 +36,8 @@ class MainActivity : ComponentActivity() {
         askForNotifications()
         // the app's own update: at most once a day, when "Look for a new version when Encore starts" is on
         Updater.checkAtStart(this)
+        // a group listen link shared to the app (not again when the activity is only recreated)
+        if (savedInstanceState == null) handleIntent(intent)
         setContent {
             val settings by appGraph.store.settings.collectAsState()
             LaunchedEffect(settings.theme) { applySystemBars(settings.theme) }
@@ -41,6 +45,20 @@ class MainActivity : ComponentActivity() {
                 EncoreRoot(appGraph, player)
             }
         }
+    }
+
+    override fun onNewIntent(intent: Intent) {
+        super.onNewIntent(intent)
+        setIntent(intent)
+        handleIntent(intent)
+    }
+
+    /** `https://<server>/#/group/<code>` (from ShareActivity): the root asks "Join <host>'s group listen?" once signed in. */
+    private fun handleIntent(i: Intent?) {
+        if (i == null) return
+        val link = i.getStringExtra(EXTRA_GROUP_LINK) ?: i.dataString?.takeIf { it.contains("#/group/") } ?: return
+        i.removeExtra(EXTRA_GROUP_LINK)
+        GroupListen.pendingLink.value = link
     }
 
     override fun onStart() {
@@ -62,6 +80,11 @@ class MainActivity : ComponentActivity() {
             SystemBarStyle.dark(Color.TRANSPARENT)
         }
         enableEdgeToEdge(statusBarStyle = style, navigationBarStyle = style)
+    }
+
+    companion object {
+        /** A group listen link or code for the root to open (ShareActivity). */
+        const val EXTRA_GROUP_LINK = "app.encore.android.GROUP_LINK"
     }
 
     private fun askForNotifications() {

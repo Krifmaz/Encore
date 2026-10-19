@@ -16,6 +16,7 @@ import androidx.media3.session.SessionToken
 import app.encore.android.data.api.EncoreApi
 import app.encore.android.data.api.Track
 import app.encore.android.data.prefs.PrefsRepository
+import app.encore.android.features.group.GroupListen
 import app.encore.android.graph
 import app.encore.android.playback.EncorePlaybackService
 import app.encore.android.playback.MediaItems
@@ -354,10 +355,24 @@ class PlayerConnection(private val context: Context, private val api: EncoreApi)
 
     // ---- commands --------------------------------------------------------------------------------------
 
+    /**
+     * In a group listen the queue and the transport are the group's (features/group): what may not be done here says
+     * why ("Only Alex controls playback") and does nothing; the rest goes through the player, whose service tells the
+     * group (GroupSync), or straight to the group for the queue.
+     */
+    private fun groupDenied(): Boolean = GroupListen.inGroup && GroupListen.deniedHere()
+
+    private fun notInGroup(): Boolean {
+        if (!GroupListen.inGroup) return false
+        Toasts.show("Shuffle and repeat are off during a group listen", "info")
+        return true
+    }
+
     fun play(tracks: List<Track>, startIndex: Int = 0, shuffle: Boolean = false) {
         if (tracks.isEmpty()) return
         val list = if (shuffle) tracks.shuffled() else tracks
         val start = if (shuffle) 0 else startIndex.coerceIn(0, list.size - 1)
+        if (GroupListen.playList(list, start)) return
         if (linked() != null) { sendQueue(list, start, 0.0); return }
         val items = list.map { MediaItems.track(api, it) }
         withController { c ->
@@ -371,6 +386,7 @@ class PlayerConnection(private val context: Context, private val api: EncoreApi)
     fun playFrom(tracks: List<Track>, index: Int, positionMs: Long) {
         if (tracks.isEmpty()) return
         val start = index.coerceIn(0, tracks.size - 1)
+        if (GroupListen.playList(tracks, start, positionMs.coerceAtLeast(0L) / 1000.0)) return
         if (linked() != null) { sendQueue(tracks, start, positionMs / 1000.0); return }
         val items = tracks.map { MediaItems.track(api, it) }
         withController { c ->
@@ -381,6 +397,7 @@ class PlayerConnection(private val context: Context, private val api: EncoreApi)
     }
 
     fun playNext(track: Track) {
+        if (GroupListen.playNext(listOf(track))) return
         if (viaLink("play_next") { put("tracks", RemoteDevice.slimList(listOf(track))) }) return
         withController { c ->
             val at = if (c.mediaItemCount == 0) 0 else c.currentMediaItemIndex + 1
@@ -390,6 +407,7 @@ class PlayerConnection(private val context: Context, private val api: EncoreApi)
     }
 
     fun addToQueue(track: Track) {
+        if (GroupListen.enqueue(listOf(track))) return
         if (viaLink("enqueue") { put("tracks", RemoteDevice.slimList(listOf(track))) }) return
         withController { c ->
             c.addMediaItem(MediaItems.track(api, track))
@@ -409,12 +427,14 @@ class PlayerConnection(private val context: Context, private val api: EncoreApi)
     }
 
     fun next() {
+        if (groupDenied()) return
         if (viaLink("next")) return
         withController { c -> if (c.hasNextMediaItem()) c.seekToNextMediaItem() }
     }
 
     /** Like the web player: back to the start after 3 s, otherwise the previous song. */
     fun previous() {
+        if (groupDenied()) return
         if (viaLink("prev")) return
         withController { c ->
             if (positionMs() > 3000L || !c.hasPreviousMediaItem()) seekTo(0L) else c.seekToPreviousMediaItem()
@@ -423,6 +443,7 @@ class PlayerConnection(private val context: Context, private val api: EncoreApi)
 
     /** Seek in song time. A server-made stream can't seek in the player: the service re-opens it at the point. */
     fun seekTo(positionMs: Long) {
+        if (groupDenied()) return
         if (viaLink("seek") { put("value", positionMs.coerceAtLeast(0L) / 1000.0) }) {
             _positionMs.value = positionMs.coerceAtLeast(0L)
             return
@@ -440,6 +461,7 @@ class PlayerConnection(private val context: Context, private val api: EncoreApi)
     }
 
     fun skipTo(index: Int) {
+        if (groupDenied()) return
         // linked: a tap in its queue plays that queue from there (player.js queue taps → play_queue)
         if (linked() != null) {
             val q = _queue.value
@@ -455,12 +477,14 @@ class PlayerConnection(private val context: Context, private val api: EncoreApi)
     }
 
     fun removeAt(index: Int) {
+        GroupListen.state.value?.let { s -> s.queue.getOrNull(index)?.let { GroupListen.remove(it, index) }; return }
         if (notWhileLinked()) return
         withController { c -> if (index in 0 until c.mediaItemCount) c.removeMediaItem(index) }
     }
 
     /** Move a queued song (not the one playing) to another place after the current one. */
     fun move(from: Int, to: Int) {
+        GroupListen.state.value?.let { s -> s.queue.getOrNull(from)?.let { GroupListen.move(it, from, to) }; return }
         if (notWhileLinked()) return
         withController { c ->
             val cur = c.currentMediaItemIndex
@@ -474,6 +498,7 @@ class PlayerConnection(private val context: Context, private val api: EncoreApi)
      * session's app shuffle, so the car, the lock screen and the other devices see the same state.
      */
     fun setShuffle(on: Boolean) {
+        if (notInGroup()) return
         if (viaLink("shuffle") { put("value", on) }) { _shuffle.value = on; return }
         withController { c -> c.shuffleModeEnabled = on }
     }
@@ -481,6 +506,7 @@ class PlayerConnection(private val context: Context, private val api: EncoreApi)
     /** Repeat (player.js setRepeat): "off" | "all" | "one". */
     fun setRepeat(mode: String) {
         if (mode != "off" && mode != "all" && mode != "one") return
+        if (notInGroup()) return
         if (viaLink("repeat") { put("value", mode) }) { _repeat.value = mode; return }
         withController { c ->
             c.repeatMode = when (mode) {
@@ -496,6 +522,7 @@ class PlayerConnection(private val context: Context, private val api: EncoreApi)
 
     /** Shuffle what comes after the current song. */
     fun shuffleUpNext() {
+        if (notInGroup()) return
         if (notWhileLinked()) return
         withController { c ->
             val cur = c.currentMediaItemIndex
@@ -511,6 +538,7 @@ class PlayerConnection(private val context: Context, private val api: EncoreApi)
 
     /** Signing out: stop and forget the queue. */
     fun stopAndClear() {
+        GroupListen.leave(quiet = true)
         withController { c ->
             c.stop()
             c.clearMediaItems()

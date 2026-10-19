@@ -77,6 +77,13 @@ class PrefsRepository(context: Context, private val api: EncoreApi, private val 
     /** This phone's own Cadenza / USB DAC settings ([PhonePrefs]): kept on this device only, never sent to the account. */
     val phone: StateFlow<PhonePrefs> = _phone.asStateFlow()
 
+    private val _norm = MutableStateFlow(loadNorm())
+    /**
+     * Volume normalization (Settings → Playback → Sound): this device only, as on the web (its localStorage keys
+     * `encore.norm.*` are the keys here); it survives sign-out and never reaches the account.
+     */
+    val norm: StateFlow<NormPrefs> = _norm.asStateFlow()
+
     private val _dsp = MutableStateFlow<DspInfo?>(null)
     /** null until GET /api/playback/dsp answered (or while signed out). */
     val dsp: StateFlow<DspInfo?> = _dsp.asStateFlow()
@@ -95,6 +102,24 @@ class PrefsRepository(context: Context, private val api: EncoreApi, private val 
     private fun loadPhone(): PhonePrefs {
         val text = prefs.getString(PHONE_KEY, null) ?: return PhonePrefs()
         return try { PhonePrefs.from(parseJsonObject(text)) } catch (_: Exception) { PhonePrefs() }
+    }
+
+    private fun loadNorm(): NormPrefs = try {
+        NormPrefs(
+            mode = prefs.getString(NormPrefs.KEY_MODE, null) ?: "off",
+            target = prefs.getInt(NormPrefs.KEY_TARGET, NormPrefs.DEFAULT_TARGET),
+            clip = prefs.getBoolean(NormPrefs.KEY_CLIP, true),
+        ).clean()
+    } catch (_: Exception) {
+        NormPrefs()
+    }
+
+    /** Saves the volume normalization settings on this device. */
+    fun setNorm(n: NormPrefs) {
+        val c = n.clean()
+        if (c == _norm.value) return
+        _norm.value = c
+        prefs.edit().putString(NormPrefs.KEY_MODE, c.mode).putInt(NormPrefs.KEY_TARGET, c.target).putBoolean(NormPrefs.KEY_CLIP, c.clip).apply()
     }
 
     /** Saves this phone's Cadenza / USB settings (device-only: they survive sign-out and never reach the server). */

@@ -41,12 +41,19 @@ import kotlinx.coroutines.withContext
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
 
-/** `GET /api/library/tracks/{id}/info`: what's in the file. */
-class TrackInfo(val codec: String, val sampleRate: Int, val bitDepth: Int, val channels: Int, val bitrate: Int, val lossless: Boolean?) {
+/**
+ * `GET /api/library/tracks/{id}/info`: what's in the file. [gainSource] is where the song's loudness comes from
+ * (`gain.source`, 0.31: "tags" | "measured"; "" when unknown or from an older server).
+ */
+class TrackInfo(val codec: String, val sampleRate: Int, val bitDepth: Int, val channels: Int, val bitrate: Int, val lossless: Boolean?, val gainSource: String = "") {
     companion object {
         fun from(o: JsonObject): TrackInfo {
             val l = (o["lossless"] as? JsonPrimitive)?.content
-            return TrackInfo(o.stringOnly("codec"), o.int("sample_rate"), o.int("bit_depth"), o.int("channels"), o.int("bitrate"), when (l) { "true" -> true; "false" -> false; else -> null })
+            return TrackInfo(
+                o.stringOnly("codec"), o.int("sample_rate"), o.int("bit_depth"), o.int("channels"), o.int("bitrate"),
+                when (l) { "true" -> true; "false" -> false; else -> null },
+                (o["gain"] as? JsonObject)?.stringOnly("source") ?: "",
+            )
         }
     }
 }
@@ -145,10 +152,21 @@ fun SignalPathSheet(nav: Nav, onDismiss: () -> Unit) {
                     else -> ""
                 },
             )
+            // volume normalization (the first stage of this phone's processing, before the effects)
+            val normText = s?.normText ?: ""
+            if (normText.isNotEmpty()) {
+                val from = when (info?.gainSource) {
+                    "tags" -> "From the file's ReplayGain tags."
+                    "measured" -> "Measured by Encore."
+                    else -> ""
+                }
+                PathRow("Normalization", normText, listOf(s?.normNote ?: "", if ((s?.normDb ?: 0.0) != 0.0) from else "").filter { it.isNotEmpty() }.joinToString(" "))
+            }
             val effects = prefs.effectsSummary()
             if (effects.isNotEmpty()) PathRow("Effects on this device", effects, s?.effectsEngine?.takeIf { it.isNotEmpty() } ?: "")
 
-            val effected = prefs.fxActive()
+            val normed = (s?.normDb ?: 0.0) != 0.0
+            val effected = prefs.fxActive() || normed
             val untouched = kind == "original" && info?.lossless != false
             val pure = untouched && !effected
             Spacer(Modifier.height(8.dp))
@@ -167,6 +185,7 @@ fun SignalPathSheet(nav: Nav, onDismiss: () -> Unit) {
                         phoneCadenza -> "Cadenza upsampled the song in this app before Android got it. Turn it off under Settings → Playback → Cadenza engine to get the untouched file."
                         cadenza -> "Encore upsampled the file on the server with Cadenza and sent lossless 24-bit FLAC. Turn it off under Settings → Playback → Server processing to get the untouched file."
                         pure -> "Encore sent the file exactly as it is stored. Everything after that – volume, mixing, resampling – is this device and Android."
+                        untouched && !prefs.fxActive() -> "Encore sent the file untouched; this device changes its volume for normalization (Settings → Playback → Sound)."
                         untouched -> "Encore sent the file untouched; this device adds the effects you chose under Settings → Playback → Sound."
                         else -> "Encore converted this stream (see above). Settings → Playback → Quality → Original keeps the file untouched even when the connection is slow."
                     },

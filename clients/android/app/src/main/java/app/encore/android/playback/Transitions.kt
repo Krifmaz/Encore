@@ -36,8 +36,9 @@ import java.util.concurrent.ExecutorService
  *
  * Not done (falls back to the normal gapless change): bit-perfect USB output, a server-made stream as the old song
  * (it can't be reopened at a spot without a new request), repeat one, a held (restored, not yet played) queue, and
- * songs shorter than twice the transition. The aux player has its own Cadenza engine with the same effects but no
- * phone upsampling (it plays at the song's rate): only the fading-out tail is affected.
+ * songs shorter than twice the transition. The aux player has its own Cadenza engine with the same effects and the
+ * old song's volume normalization gain, but no phone upsampling (it plays at the song's rate): only the fading-out
+ * tail is affected.
  */
 class Transitions(
     private val context: Context,
@@ -56,6 +57,8 @@ class Transitions(
     private val durationSec: () -> Double,
     /** the main player is about to move on to the next song while the old one fades out (it counts as played to its end) */
     private val onHandOver: (MediaItem) -> Unit = {},
+    /** a song's volume normalization gain (linear, 1 = none): the old song's tail keeps the level it played at */
+    private val gainFor: (MediaItem) -> Float = { 1f },
 ) : Player.Listener {
     private val handler = Handler(Looper.getMainLooper())
     private var aux: ExoPlayer? = null
@@ -209,6 +212,7 @@ class Transitions(
         val src = auxItem(item) ?: return null
         val a = aux ?: build().also { aux = it }
         auxFx?.params = prefs().engineParams()
+        auxFx?.gain = try { gainFor(item) } catch (_: Exception) { 1f }
         a.volume = 0f
         a.setMediaSource(auxSources.createMediaSource(src), windowStart.coerceAtLeast(0L))
         a.playWhenReady = false

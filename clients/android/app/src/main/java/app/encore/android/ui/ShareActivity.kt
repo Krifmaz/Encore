@@ -22,6 +22,15 @@ class ShareActivity : ComponentActivity() {
         val link = LINK.find(text)?.value ?: text.trim().takeIf { it.startsWith("spotify:") }
         val app = applicationContext
         val graph = app.graph
+        // a group listen invite (https://<server>/#/group/<code>): the app opens and asks to join
+        if (text.contains("#/group/")) {
+            val open = Intent(this, MainActivity::class.java)
+                .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_SINGLE_TOP)
+                .putExtra(MainActivity.EXTRA_GROUP_LINK, text.trim())
+            try { startActivity(open) } catch (_: Exception) {}
+            finish()
+            return
+        }
         finish()
         if (link == null) {
             Toast.makeText(app, "No link to request", Toast.LENGTH_SHORT).show()

@@ -20,7 +20,9 @@ import app.encore.android.features.offline.OfflineStore
 import app.encore.android.ui.components.libraryIndex
 import kotlinx.serialization.json.JsonPrimitive
 import java.text.Normalizer
+import java.util.concurrent.CompletableFuture
 import java.util.concurrent.ConcurrentHashMap
+import java.util.concurrent.TimeUnit
 
 /**
  * The library as a browse tree for Android Auto (and anything else that browses media apps), ported from the
@@ -35,10 +37,20 @@ import java.util.concurrent.ConcurrentHashMap
  * lists are split into A–Z letter folders (only letters that have items, from GET /api/library/index, else
  * grouped here): a letter is one tap and a short list. Big song letters split once more by their first two
  * letters. Search results come grouped as Songs, Albums, Artists.
+ *
+ * An artist (`artist:<mbid>` or `artist:<name>`, 0.31) is a rich page: Shuffle, Popular songs (the ones in the
+ * library), Liked from this artist, then the albums. The car's Artist button pins the playing song's artist at the
+ * top of Home ([pinArtist]), since Android Auto's now-playing screen can't open a browse node by itself.
  */
 class BrowseTree(private val api: EncoreApi, private val offline: OfflineStore? = null) {
     /** parent id → what we listed under it (playing a listed song plays its siblings). */
     private val children = ConcurrentHashMap<String, List<MediaItem>>()
+
+    /**
+     * Set by the service: a node listed a moment ago has more children now (an artist page's Popular songs that came
+     * late), with about this many; the browser is told to ask again. Any thread.
+     */
+    var onLate: ((parentId: String, count: Int) -> Unit)? = null
 
     fun root(): MediaItem = folder(ROOT, "Encore", null, MediaMetadata.MEDIA_TYPE_FOLDER_MIXED, grid = false)
 
@@ -69,7 +81,16 @@ class BrowseTree(private val api: EncoreApi, private val offline: OfflineStore? 
         }
     }
 
-    private fun home(): List<MediaItem> = listOf(
+    /** The artist the car's Artist button asked for last, shown first on Home (null: none yet). */
+    @Volatile private var pinned: Pair<ArtistNode, Uri?>? = null
+
+    /** The Artist button: [node] goes to the top of Home (with the playing song's cover as its picture). */
+    fun pinArtist(node: ArtistNode, art: Uri?) {
+        pinned = node to art
+    }
+
+    private fun home(): List<MediaItem> = listOfNotNull(
+        pinned?.let { (a, art) -> folder(a.id, a.name, "Artist", MediaMetadata.MEDIA_TYPE_ARTIST, grid = true, art = art) },
         folder("recent", "Recently added", "New in your library", MediaMetadata.MEDIA_TYPE_FOLDER_ALBUMS, grid = true),
         folder("played", "Recently played", "Pick up where you left off", MediaMetadata.MEDIA_TYPE_FOLDER_MIXED, grid = false),
         folder("mfy", "Made for you", "Your ListenBrainz playlists", MediaMetadata.MEDIA_TYPE_FOLDER_PLAYLISTS, grid = true),
@@ -104,9 +125,11 @@ class BrowseTree(private val api: EncoreApi, private val offline: OfflineStore? 
                 folder("$ARTIST_LETTER$label", label, count?.let { plural(it, "artist") }, MediaMetadata.MEDIA_TYPE_FOLDER_ARTISTS, grid = false)
             }
             parent.startsWith(ARTIST_LETTER) -> artistShelf.items(parent.removePrefix(ARTIST_LETTER)).map { artist(it, plural(it.albums, "album")) }
-            parent.startsWith("artist:") -> {
-                val name = parent.removePrefix("artist:")
-                listOf(action("$ARTIST_SHUFFLE$name", "Shuffle $name", null)) + albums(api.albums(artist = name, limit = 200))
+            parent.startsWith("artist:") -> artistPage(parent.removePrefix("artist:"))
+            parent.startsWith(ARTIST_POPULAR) -> popularOf(parent.removePrefix(ARTIST_POPULAR)).map { track(it, parent) }
+            parent.startsWith(ARTIST_LIKED) -> {
+                val (name, mbid) = artistOf(parent.removePrefix(ARTIST_LIKED))
+                if (name.isEmpty()) emptyList() else likedOf(name, mbid).map { track(it, parent) }
             }
             parent == "songs" -> listOf(action(SONGS_SHUFFLE, "Shuffle all songs", "A random walk through every song")) +
                 songShelf.letters().map { (label, count) ->
@@ -165,13 +188,90 @@ class BrowseTree(private val api: EncoreApi, private val offline: OfflineStore? 
         else -> null
     }
 
+    // ---- the artist page ------------------------------------------------------------------------------------
+
+    /** (name, mbid) of an artist node's key: an mbid (the name as ArtistNode learned it, or the server's) or a name. */
+    private fun artistOf(key: String): Pair<String, String> {
+        if (!ArtistNode.isMbid(key)) return key to ArtistNode.mbidOf(key)
+        val name = ArtistNode.nameOf(key) ?: try {
+            api.getObject("/api/discover/artist/${EncoreApi.enc(key)}").str("name").also { if (it.isNotEmpty()) ArtistNode.learn(it, key) }
+        } catch (_: Exception) { "" }
+        return name to key
+    }
+
+    /**
+     * Shuffle, Popular songs (Deezer's, the ones in the library; needs the mbid), Liked from this artist (hidden when
+     * none, and on servers before 0.31), then the albums under an "Albums" heading.
+     */
+    private fun artistPage(key: String): List<MediaItem> {
+        val (name, mbid) = artistOf(key)
+        if (name.isEmpty()) return emptyList()
+        // the popular songs come from Deezer through the server and can take a moment: asked alongside, waited for
+        // 1.5 s at most; a late answer (kept 10 minutes) has the car ask for the page again, and the row appears then
+        val popularLater = if (mbid.isNotEmpty()) CompletableFuture.supplyAsync { popularOf(mbid) } else null
+        val liked = likedOf(name, mbid)
+        val owned = api.albums(artist = name, limit = 200)
+        var late = false
+        val popular = try {
+            popularLater?.get(POPULAR_WAIT_MS, TimeUnit.MILLISECONDS)
+        } catch (_: java.util.concurrent.TimeoutException) {
+            late = true
+            null
+        } catch (_: Exception) {
+            null
+        } ?: emptyList()
+        if (late) {
+            val count = 2 + (if (liked.isNotEmpty()) 1 else 0) + owned.size
+            popularLater?.thenAccept { list -> if (list.isNotEmpty()) onLate?.invoke("artist:$key", count) }
+        }
+        val out = ArrayList<MediaItem>()
+        out += action("$ARTIST_SHUFFLE$name", "Shuffle $name", null)
+        if (popular.isNotEmpty()) {
+            out += listRow(folder("$ARTIST_POPULAR$mbid", "Popular songs", plural(popular.size, "song"), MediaMetadata.MEDIA_TYPE_PLAYLIST, grid = false))
+        }
+        if (liked.isNotEmpty()) {
+            out += listRow(folder("$ARTIST_LIKED$key", "Liked from this artist", plural(liked.size, "song"), MediaMetadata.MEDIA_TYPE_PLAYLIST, grid = false))
+        }
+        out += albums(owned).map { grouped(it, "Albums") }
+        return out
+    }
+
+    /** The artist's popular songs that are in the library (GET /api/discover/artist/{mbid}/extras `top[].library`), kept 10 minutes. */
+    private val popular = ConcurrentHashMap<String, Pair<Long, List<Track>>>()
+
+    private fun popularOf(mbid: String): List<Track> {
+        val now = System.currentTimeMillis()
+        popular[mbid]?.let { (at, list) -> if (now - at < INDEX_TTL_MS) return list }
+        val list = try {
+            api.getObject("/api/discover/artist/${EncoreApi.enc(mbid)}/extras").arr("top").objectsOf()
+                .mapNotNull { row -> row.obj("library")?.let { Track.from(it) } }
+                .distinctBy { it.id }
+        } catch (_: Exception) {
+            return emptyList()
+        }
+        popular[mbid] = now to list
+        return list
+    }
+
+    /** Liked from this artist (GET /api/library/artists/{name}/liked, 0.31); empty on older servers. */
+    private fun likedOf(name: String, mbid: String): List<Track> =
+        try { api.artistLiked(name, mbid).tracks } catch (_: Exception) { emptyList() }
+
+    /** A folder shown as a list row inside a grid page (Android Auto's per-item style). */
+    private fun listRow(item: MediaItem): MediaItem {
+        val md = item.mediaMetadata
+        val extras = Bundle(md.extras ?: Bundle.EMPTY)
+        extras.putInt(MediaConstants.EXTRAS_KEY_CONTENT_STYLE_SINGLE_ITEM, MediaConstants.EXTRAS_VALUE_CONTENT_STYLE_LIST_ITEM)
+        return item.buildUpon().setMediaMetadata(md.buildUpon().setExtras(extras).build()).build()
+    }
+
     private fun albums(list: List<Album>): List<MediaItem> = list.map { a ->
         val sub = listOf(a.artist, a.year).filter { it.isNotEmpty() }.joinToString(" · ")
         folder("album:${a.id}", a.title, sub, MediaMetadata.MEDIA_TYPE_ALBUM, grid = true, art = MediaItems.coverUri(a.id))
     }
 
     private fun artist(a: Artist, subtitle: String): MediaItem =
-        folder("artist:${a.name}", a.name, subtitle, MediaMetadata.MEDIA_TYPE_ARTIST, grid = true,
+        folder(ArtistNode(a.name, "").id, a.name, subtitle, MediaMetadata.MEDIA_TYPE_ARTIST, grid = true,
             art = a.coverAlbum.takeIf { it.isNotEmpty() }?.let { MediaItems.coverUri(it) })
 
     fun track(t: Track, parent: String?): MediaItem = MediaItems.track(api, t, parent)
@@ -392,7 +492,7 @@ class BrowseTree(private val api: EncoreApi, private val offline: OfflineStore? 
             putInt(MediaConstants.EXTRAS_KEY_CONTENT_STYLE_PLAYABLE, MediaConstants.EXTRAS_VALUE_CONTENT_STYLE_LIST_ITEM)
         }
         val playable = id == "shuffle" || id == "liked" || id.startsWith("playlist:") || id.startsWith("album:") || id.startsWith("mfy:") ||
-            id.startsWith(SONG_LETTER) || id == DL_SONGS || id.startsWith(DL_ALBUM)
+            id.startsWith(SONG_LETTER) || id == DL_SONGS || id.startsWith(DL_ALBUM) || id.startsWith(ARTIST_POPULAR) || id.startsWith(ARTIST_LIKED)
         val md = MediaMetadata.Builder()
             .setTitle(title)
             .setSubtitle(subtitle)
@@ -417,6 +517,9 @@ class BrowseTree(private val api: EncoreApi, private val offline: OfflineStore? 
         private const val SONG_LETTER = "songs:letter:"
         private const val SONGS_SHUFFLE = "songs:shuffle"
         private const val ARTIST_SHUFFLE = "artist-shuffle:"
+        /** an artist's popular songs in the library (`artist-popular:<mbid>`) and liked songs (`artist-liked:<mbid or name>`) */
+        private const val ARTIST_POPULAR = "artist-popular:"
+        private const val ARTIST_LIKED = "artist-liked:"
         /** the songs saved on this phone (features/offline) */
         private const val DOWNLOADED = "downloaded"
         private const val DL_SONGS = "downloaded:songs"
@@ -424,6 +527,8 @@ class BrowseTree(private val api: EncoreApi, private val offline: OfflineStore? 
         private const val DL_ALBUM = "downloaded:album:"
 
         private const val INDEX_TTL_MS = 10 * 60_000L
+        /** how long an artist page waits for its popular songs (later ones come with [onLate]) */
+        private const val POPULAR_WAIT_MS = 1500L
         /** without the server index: how many rows of a list we group here */
         private const val FALLBACK_ROWS = 5000
         /** most rows one letter folder lists */
@@ -441,6 +546,60 @@ class BrowseTree(private val api: EncoreApi, private val offline: OfflineStore? 
             if (c.code < 128) return if (c.isLetter()) c.uppercaseChar().toString() else "#"
             val f = fold(c.toString()).firstOrNull()?.lowercaseChar() ?: return "#"
             return if (f in 'a'..'z') f.uppercaseChar().toString() else "#"
+        }
+    }
+}
+
+/**
+ * An artist's browse node (0.31): `artist:<mbid>` when MusicBrainz knows the artist (the car's Artist button, the
+ * Encore Lyrics car app), else `artist:<name>` (Library → Artists, older songs). Both list the same page
+ * ([BrowseTree] artistPage). The names of the mbids seen here are kept for the life of the process, so the tree
+ * can ask the library by name.
+ */
+data class ArtistNode(val name: String, val mbid: String) {
+    val id: String get() = "artist:" + mbid.ifEmpty { name }
+
+    companion object {
+        private val UUID = Regex("[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}")
+        private val names = ConcurrentHashMap<String, String>()
+        private val mbids = ConcurrentHashMap<String, String>()
+
+        fun isMbid(s: String): Boolean = UUID.matches(s)
+
+        fun nameOf(mbid: String): String? = names[mbid.lowercase()]
+
+        fun mbidOf(name: String): String = mbids[name] ?: ""
+
+        fun learn(name: String, mbid: String) {
+            if (name.isEmpty() || !isMbid(mbid)) return
+            names[mbid.lowercase()] = name
+            mbids[name] = mbid.lowercase()
+        }
+
+        /**
+         * The artist of a song item: its first credited artist that is in the library, else the first one (the
+         * server's split, with mbids), else the album artist or artist text (as "Go to artist" on the phone).
+         */
+        fun of(item: MediaItem): ArtistNode? {
+            val x = item.mediaMetadata.extras
+            val names = x?.getStringArrayList(MediaItems.EXTRA_ARTIST_NAMES)
+            if (x != null && !names.isNullOrEmpty()) {
+                val ids = x.getStringArrayList(MediaItems.EXTRA_ARTIST_MBIDS)
+                val inLib = x.getBooleanArray(MediaItems.EXTRA_ARTIST_IN_LIBRARY)
+                val i = names.indices.firstOrNull { inLib?.getOrNull(it) == true && names[it].isNotEmpty() }
+                    ?: names.indices.firstOrNull { names[it].isNotEmpty() }
+                if (i != null) {
+                    val mbid = ids?.getOrNull(i)?.takeIf { isMbid(it) }?.lowercase() ?: ""
+                    learn(names[i], mbid)
+                    return ArtistNode(names[i], mbid)
+                }
+            }
+            val name = listOfNotNull(
+                x?.getString(MediaItems.EXTRA_ALBUM_ARTIST),
+                x?.getString(MediaItems.EXTRA_ARTIST),
+                item.mediaMetadata.artist?.toString(),
+            ).firstOrNull { it.isNotBlank() } ?: return null
+            return ArtistNode(name, mbidOf(name))
         }
     }
 }

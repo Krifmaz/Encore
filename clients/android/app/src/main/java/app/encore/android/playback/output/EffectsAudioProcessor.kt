@@ -19,7 +19,13 @@ import java.nio.FloatBuffer
  * dither. Without the Cadenza library in the APK the sound passes through untouched.
  *
  * The processor stays in the chain once configured (like the web player's Web Audio graph) and is a byte-for-byte
- * pass-through while the effects are off, so switching them on takes effect right away.
+ * pass-through while the effects and volume normalization are off, so switching them on takes effect right away.
+ *
+ * Volume normalization (Settings → Playback → Sound) is the first stage, as the web's GainNode before its effects:
+ * each song's gain ([gainAtConfigure], asked when the sink is configured for the song) multiplies the samples as they
+ * go into Cadenza's input buffer, so it works with the effects off and in a build without the Cadenza library. A new
+ * level in the middle of a song (a setting changed) is reached with a ramp over one buffer, so it doesn't click.
+ * Songs that go bit-perfect to a USB DAC ([directOutput]) are never normalized.
  *
  * When Cadenza upsamples on the phone (the engine's output rate differs from the song's) its output is already
  * dithered to 24 bits by Cadenza, so it leaves as 32-bit integer PCM (Android 12+; float before that, which carries
@@ -79,6 +85,25 @@ class EffectsAudioProcessor(private val engine: CadenzaEngine) : BaseAudioProces
     @Volatile var configuredDitherId: String = ""
         private set
 
+    /**
+     * Volume normalization: the level the samples are played at (linear, 1 = untouched). Set from any thread; a
+     * change mid-song is ramped over the next buffer. Ignored while the song goes bit-perfect to a USB DAC.
+     */
+    @Volatile var gain: Float = 1f
+
+    /**
+     * Asked at every configure (playback thread) for the gain of the song the sink is being configured for (linear;
+     * the playback service's volume normalization). null (the transitions' second player): [gain] is set directly.
+     */
+    @Volatile var gainAtConfigure: (() -> Float)? = null
+
+    /** The current stream goes bit-perfect to a USB DAC: no normalization (set at every configure). */
+    @Volatile var configuredBitPerfect: Boolean = false
+        private set
+
+    /** the gain the last buffer ended at (playback thread) */
+    private var appliedGain = 1f
+
     /** The effects as JSON (PlaybackPrefs.engineParams). `bypass` says whether anything is applied. */
     var params: String
         get() = pendingParams
@@ -110,6 +135,12 @@ class EffectsAudioProcessor(private val engine: CadenzaEngine) : BaseAudioProces
         configuredInputRate = inRate
         configuredOutputRate = outRate
         configuredEncoding = outEncoding
+        // a new song: its own level from its first sample (no ramp); none at all on the bit-perfect path
+        val bitPerfect = direct != C.ENCODING_INVALID
+        configuredBitPerfect = bitPerfect
+        val g = (try { gainAtConfigure?.invoke() } catch (_: Throwable) { null }) ?: gain
+        gain = if (g.isNaN() || g <= 0f) 1f else g
+        appliedGain = if (bitPerfect) 1f else gain
         appliedParams = ""
         return AudioProcessor.AudioFormat(outRate, channels, outEncoding)
     }
@@ -122,8 +153,12 @@ class EffectsAudioProcessor(private val engine: CadenzaEngine) : BaseAudioProces
         }
         val bytes = inputBuffer.remaining()
         if (bytes == 0) return
-        // effects off, or no engine (a build without the Cadenza library): the song as it is
-        if ((bypass || !engineReady) && outRate == inRate) {
+        val target = if (configuredBitPerfect) 1f else gain
+        val from = appliedGain
+        // nothing for the engine to do: effects off and no upsampling, or no engine (a build without the library)
+        val plain = (bypass || !engineReady) && outRate == inRate
+        // ... and no normalization either: the song as it is
+        if (plain && from == 1f && target == 1f) {
             if (outEncoding == C.ENCODING_PCM_16BIT) {
                 // untouched: the same bytes go out
                 val out = replaceOutputBuffer(bytes)
@@ -136,12 +171,33 @@ class EffectsAudioProcessor(private val engine: CadenzaEngine) : BaseAudioProces
         }
         val frames = bytes / (2 * channels)
         val n = frames * channels
-        // the samples go straight into the engine's direct buffer (absolute puts, nothing copied across JNI)
+        // the samples go straight into the engine's direct buffer (absolute puts, nothing copied across JNI), with the
+        // normalization gain on the way in (the first stage, before the preamp and EQ)
         val floats = engine.input(n)
         val src = inputBuffer.order(ByteOrder.LITTLE_ENDIAN)
-        for (i in 0 until n) floats.put(i, src.getShort().toInt() / 32768f)
+        if (from == target) {
+            val k = target / 32768f
+            for (i in 0 until n) floats.put(i, src.getShort() * k)
+        } else {
+            // a new level mid-song: a straight ramp over this buffer, frame by frame
+            val step = (target - from) / frames.coerceAtLeast(1)
+            var i = 0
+            for (f in 0 until frames) {
+                val k = (from + step * (f + 1)) / 32768f
+                for (c in 0 until channels) {
+                    floats.put(i, src.getShort() * k)
+                    i++
+                }
+            }
+        }
+        appliedGain = target
         // anything left over (a partial frame) is dropped, as the sink never sends one
         inputBuffer.position(inputBuffer.limit())
+        // only the gain: the engine has nothing to add, the samples go out as they are now
+        if (plain) {
+            writeFloats(floats, n)
+            return
+        }
         // null: the engine failed or went away mid-stream, the chunk is lost; the input buffer itself: no engine
         val processed = try { engine.process(frames) } catch (_: Throwable) { floats } ?: return
         if (processed === floats && outRate != inRate) return   // unprocessed input can't go out at another rate: dropped
@@ -243,7 +299,10 @@ class EffectsAudioProcessor(private val engine: CadenzaEngine) : BaseAudioProces
 /**
  * The sink's processor chain: only [EffectsAudioProcessor]. Media3's default chain adds silence skipping and Sonic
  * (speed), which take 16-bit PCM only and would refuse the 24 / 32-bit output of phone Cadenza or bit-perfect USB;
- * the app never changes speed or skips silence, so they are left out (speed stays 1).
+ * the app never skips silence, so they are left out and the chain's own speed stays 1. A speed other than 1 is
+ * applied by the audio track instead (the sink's `setEnableAudioOutputPlaybackParameters(true)`), and only a group
+ * listen's catch-up nudge sets one (0.97 / 1.03, never with bit-perfect USB or Cadenza on the phone: GroupSync);
+ * no controller may change the speed (the session's onConnect leaves COMMAND_SET_SPEED_AND_PITCH out).
  */
 class EffectsChain(private val effects: EffectsAudioProcessor) : AudioProcessorChain {
     private val processors: Array<AudioProcessor> = arrayOf<AudioProcessor>(effects)

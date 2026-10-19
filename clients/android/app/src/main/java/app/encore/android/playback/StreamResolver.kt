@@ -7,6 +7,7 @@ import androidx.media3.datasource.DataSpec
 import androidx.media3.datasource.ResolvingDataSource
 import app.encore.android.data.api.EncoreApi
 import app.encore.android.data.api.Track
+import app.encore.android.data.api.TrackGain
 import app.encore.android.data.prefs.DspInfo
 import app.encore.android.data.prefs.PlaybackPrefs
 import app.encore.android.data.prefs.Quality
@@ -45,9 +46,9 @@ data class StreamVariant(
 }
 
 /** What the resolver needs to know about a song. */
-data class StreamTrack(val id: Long, val format: String, val bitrate: Int, val durationSec: Double) {
+data class StreamTrack(val id: Long, val format: String, val bitrate: Int, val durationSec: Double, val gain: TrackGain? = null) {
     companion object {
-        fun of(t: Track): StreamTrack = StreamTrack(t.id, t.format, t.bitrate, t.durationSec)
+        fun of(t: Track): StreamTrack = StreamTrack(t.id, t.format, t.bitrate, t.durationSec, t.gain)
     }
 }
 
@@ -149,6 +150,15 @@ class StreamResolver(private val api: EncoreApi, private val estimator: Bandwidt
 
     /** The song whose data the player opened last (NONE: something that is not a library stream, e.g. an offline file). */
     @Volatile private var lastOpened: Long = NONE
+
+    /**
+     * The song the sink is about to be configured for (the one opened last, see [serverRenderAt]), for its volume
+     * normalization gain; null when that is not a library song.
+     */
+    fun lastOpenedTrack(): StreamTrack? {
+        val id = lastOpened
+        return if (id == NONE) null else tracks[id]
+    }
 
     /**
      * The song the sink is about to be configured for at `rate` Hz is the server's Cadenza render, so the phone's

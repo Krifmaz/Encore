@@ -13,9 +13,10 @@ import androidx.car.app.Session
 import androidx.car.app.model.Action
 import androidx.car.app.model.ActionStrip
 import androidx.car.app.model.CarIcon
+import androidx.car.app.model.Header
+import androidx.car.app.model.ItemList
+import androidx.car.app.model.ListTemplate
 import androidx.car.app.model.MessageTemplate
-import androidx.car.app.model.Pane
-import androidx.car.app.model.PaneTemplate
 import androidx.car.app.model.Row
 import androidx.car.app.model.Template
 import androidx.car.app.navigation.model.MapController
@@ -25,6 +26,9 @@ import androidx.core.content.ContextCompat
 import androidx.core.graphics.drawable.IconCompat
 import androidx.lifecycle.DefaultLifecycleObserver
 import androidx.lifecycle.LifecycleOwner
+import androidx.media3.common.MediaItem
+import androidx.media3.session.LibraryResult
+import androidx.media3.session.MediaBrowser
 import androidx.media3.session.MediaController
 import androidx.media3.session.SessionCommand
 import androidx.media3.session.SessionToken
@@ -42,11 +46,12 @@ import java.util.concurrent.Executors
  * Encore Lyrics: a second car app (besides the media app Android Auto builds from EncorePlaybackService) that
  * shows the playing song's synced lyrics on the car screen. A point-of-interest template app (it is not a
  * navigation app) with the map templates permission: MapWithContentTemplate's map surface draws the lyrics
- * ([LyricsSurface]), its content pane shows the song with previous / play-pause / next.
+ * ([LyricsSurface]), its content list shows the song with previous / play-pause / next, and the song's artist as
+ * a row that opens the artist's page ([BrowseScreen], 0.31).
  *
  * It reads the song and position from the playback service in this process ([CarNowPlaying]) and controls it
- * through a MediaController on the service's session, which also starts the service when the car app opens
- * first.
+ * through a MediaBrowser on the service's session (which also starts the service when the car app opens first);
+ * the artist's page is the media app's browse node `artist:<mbid or name>`, read through the same browser.
  */
 class LyricsCarAppService : CarAppService() {
     override fun createHostValidator(): HostValidator {
@@ -64,17 +69,22 @@ class LyricsCarAppService : CarAppService() {
 }
 
 class LyricsCarSession : Session() {
-    private var controllerFuture: ListenableFuture<MediaController>? = null
-    private var controller: MediaController? = null
+    private var controllerFuture: ListenableFuture<MediaBrowser>? = null
+    private var controller: MediaBrowser? = null
     private var surface: LyricsSurface? = null
+    /** browse requests made before the browser connected */
+    private val waiting = ArrayList<(MediaBrowser?) -> Unit>()
 
     override fun onCreateScreen(intent: Intent): Screen {
         val ctx = carContext
         val token = SessionToken(ctx, ComponentName(ctx, EncorePlaybackService::class.java))
-        val future = MediaController.Builder(ctx, token).buildAsync()
+        val future = MediaBrowser.Builder(ctx, token).buildAsync()
         controllerFuture = future
         future.addListener({
             controller = try { future.get() } catch (_: Exception) { null }
+            val pending = ArrayList(waiting)
+            waiting.clear()
+            for (w in pending) w(controller)
         }, ContextCompat.getMainExecutor(ctx))
 
         val s = LyricsSurface(ctx) { ms -> seek(ms) }
@@ -90,6 +100,7 @@ class LyricsCarSession : Session() {
                 controllerFuture?.let { MediaController.releaseFuture(it) }
                 controllerFuture = null
                 controller = null
+                waiting.clear()
             }
         })
         return LyricsScreen(ctx, s, this)
@@ -104,6 +115,35 @@ class LyricsCarSession : Session() {
 
     fun previous() { controller?.seekToPrevious() }
 
+    /**
+     * The children of a browse node of the media app ([onDone] gets null when the phone's Encore can't answer).
+     * Main thread; [onDone] runs on the main thread.
+     */
+    fun children(nodeId: String, onDone: (List<MediaItem>?) -> Unit) {
+        val c = controller
+        if (c == null) {
+            if (controllerFuture == null) { onDone(null); return }
+            waiting.add { b -> if (b == null) onDone(null) else children(nodeId, onDone) }
+            return
+        }
+        val f = try { c.getChildren(nodeId, 0, BROWSE_PAGE, null) } catch (_: Exception) { onDone(null); return }
+        f.addListener({
+            val r = try { f.get() } catch (_: Exception) { null }
+            onDone(if (r != null && r.resultCode == LibraryResult.RESULT_SUCCESS) r.value?.toList() ?: emptyList() else null)
+        }, ContextCompat.getMainExecutor(carContext))
+    }
+
+    /**
+     * Plays a browse item: a song with the list it came from, or everything a folder or Shuffle stands for (the
+     * service resolves the id as it does for Android Auto).
+     */
+    fun play(mediaId: String) {
+        val c = controller ?: return
+        c.setMediaItem(MediaItem.Builder().setMediaId(mediaId).build())
+        c.prepare()
+        c.play()
+    }
+
     /** From the start of the song, also for server-made streams (the service's own seek command). */
     fun seek(ms: Long) {
         val c = controller ?: return
@@ -114,6 +154,9 @@ class LyricsCarSession : Session() {
     companion object {
         /** MapWithContentTemplate needs car API level 7 (car-app library 1.7); the manifest asks for it too. */
         const val MIN_API = 7
+
+        /** most items one browse request asks for (the host shows fewer: its list limit) */
+        const val BROWSE_PAGE = 200
     }
 }
 
@@ -144,7 +187,7 @@ class LyricsScreen(
         scope.launch {
             CarNowPlaying.state.collect { now ->
                 np = now
-                val key = listOf(now?.mediaId, now?.title, now?.artist, now?.album, now?.playing, coverFor == now?.artworkUri?.toString() && cover != null)
+                val key = listOf(now?.mediaId, now?.title, now?.artist, now?.album, now?.artistNode, now?.playing, coverFor == now?.artworkUri?.toString() && cover != null)
                 if (now?.artworkUri?.toString() != coverFor) loadCover(now)
                 if (key != shownKey) {
                     shownKey = key
@@ -182,20 +225,35 @@ class LyricsScreen(
         }
         val now = np
         val row = Row.Builder()
+        val list = ItemList.Builder()
         if (now == null) {
             row.setTitle("Nothing playing")
             row.addText("Start a song in Encore")
+            list.addItem(row.build())
         } else {
             row.setTitle(now.title.ifEmpty { "Unknown title" })
+            val artistNode = now.artistNode
             if (now.artist.isNotEmpty()) row.addText(now.artist)
             if (now.album.isNotEmpty()) row.addText(now.album)
             cover?.let { row.setImage(CarIcon.Builder(IconCompat.createWithBitmap(it)).build(), Row.IMAGE_TYPE_LARGE) }
+            list.addItem(row.build())
+            if (artistNode != null) {
+                // the artist row opens the artist's page (Shuffle, Popular songs, Liked from this artist, albums);
+                // with several artists on the song it is the first one in the library
+                list.addItem(
+                    Row.Builder()
+                        .setTitle(artistNode.name)
+                        .addText("Artist")
+                        .setImage(CarIcon.Builder(IconCompat.createWithResource(carContext, R.drawable.ic_person)).build())
+                        .setBrowsable(true)
+                        .setOnClickListener { screenManager.push(BrowseScreen(carContext, session, artistNode.id, artistNode.name)) }
+                        .build(),
+                )
+            }
         }
-        val pane = Pane.Builder().addRow(row.build()).build()
-        @Suppress("DEPRECATION")
-        val content = PaneTemplate.Builder(pane)
-            .setTitle("Encore Lyrics")
-            .setHeaderAction(Action.APP_ICON)
+        val content = ListTemplate.Builder()
+            .setHeader(Header.Builder().setTitle("Encore Lyrics").setStartHeaderAction(Action.APP_ICON).build())
+            .setSingleList(list.build())
             .build()
         val playing = now?.playing == true
         val strip = ActionStrip.Builder()

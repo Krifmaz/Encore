@@ -12,6 +12,7 @@ import androidx.media3.common.Player
 import androidx.media3.session.CommandButton
 import androidx.media3.session.MediaSession
 import androidx.media3.session.SessionCommand
+import androidx.media3.session.SessionResult
 import app.encore.android.AppGraph
 import app.encore.android.R
 import app.encore.android.car.CarLine
@@ -99,6 +100,8 @@ class CarPlayer(private val exo: Player) : ForwardingPlayer(exo) {
     private var shown: MediaMetadata? = null
     /** set by [CarControls]: turn the app shuffle on / off */
     var onShuffle: ((Boolean) -> Unit)? = null
+    /** set by [CarControls]: a controller's repeat change (Media3's own repeat command); false refuses it */
+    var onRepeat: ((Int) -> Boolean)? = null
     /** the app shuffle's state */
     var shuffled = false
         private set
@@ -123,6 +126,11 @@ class CarPlayer(private val exo: Player) : ForwardingPlayer(exo) {
 
     override fun setShuffleModeEnabled(shuffleModeEnabled: Boolean) {
         onShuffle?.invoke(shuffleModeEnabled)
+    }
+
+    override fun setRepeatMode(repeatMode: Int) {
+        if (onRepeat?.invoke(repeatMode) == false) return
+        super.setRepeatMode(repeatMode)
     }
 
     /** What the session shows for the song [mediaId] (null: its own metadata again). Main thread. */
@@ -185,12 +193,24 @@ class CarControls(
     private var cardSeq = 0
     @Volatile private var cardWanted = 0
 
+    // Android Auto (main thread): while a car is connected the quality badge and the Artist button join the
+    // buttons and the quality detail goes on the subtitle line (the phone's notification stays as it was)
+    private var cars = 0
+    private var stream: StreamInfo? = null
+    /** in a group listen: the car's subtitle line starts with "Group listen" */
+    private var group = false
+    private var quality: CarQuality? = null
+
+    /** Set by the service: the Artist button was pressed for this artist (the browse tree pins it on Home, with this cover). */
+    var onArtist: ((ArtistNode, android.net.Uri?) -> Unit)? = null
+
     private val listener = object : Player.Listener {
         override fun onMediaItemTransition(mediaItem: MediaItem?, reason: Int) {
             if (reason != Player.MEDIA_ITEM_TRANSITION_REASON_PLAYLIST_CHANGED || currentId() != lyricsFor) {
                 graph.likes.refresh()
                 loadLyrics()
             }
+            updateQuality()
             refreshButtons()
             publish()
         }
@@ -215,6 +235,7 @@ class CarControls(
 
     init {
         player.onShuffle = { on -> setShuffle(on) }
+        player.onRepeat = { mode -> mode == Player.REPEAT_MODE_OFF || !groupRefused() }
         exo.addListener(listener)
     }
 
@@ -238,7 +259,7 @@ class CarControls(
                 // the other look from the line playing now on
                 cardWanted = ++cardSeq
                 lineAt = -2
-                player.showMetadata(null, null)
+                plain()
                 if (lyricsOn && lines.isNotEmpty()) showLine()
             }
         }
@@ -267,6 +288,7 @@ class CarControls(
         main.removeCallbacks(publishTick)
         exo.removeListener(listener)
         player.onShuffle = null
+        player.onRepeat = null
         session = null
         cardWanted = -1
         cardThread.execute { card.release() }
@@ -302,6 +324,7 @@ class CarControls(
                 positionMs = positionMs(),
                 atElapsedMs = SystemClock.elapsedRealtime(),
                 speed = exo.playbackParameters.speed,
+                artistNode = ArtistNode.of(item),
             ),
         )
     }
@@ -311,15 +334,149 @@ class CarControls(
         when (action) {
             CMD_LIKE -> currentId()?.let { graph.likes.toggle(it) }
             CMD_SHUFFLE -> setShuffle(!player.shuffled)
-            CMD_REPEAT -> exo.repeatMode = when (exo.repeatMode) {
+            CMD_REPEAT -> if (!groupRefused()) exo.repeatMode = when (exo.repeatMode) {
                 Player.REPEAT_MODE_OFF -> Player.REPEAT_MODE_ALL
                 Player.REPEAT_MODE_ALL -> Player.REPEAT_MODE_ONE
                 else -> Player.REPEAT_MODE_OFF
             }
             CMD_LYRICS -> CarPrefs.setLiveLyrics(context, !lyricsOn)
+            // the badge only shows the quality; pressing it does nothing
+            CMD_QUALITY -> {}
+            CMD_ARTIST -> currentArtist()?.let { a ->
+                onArtist?.invoke(a, exo.currentMediaItem?.mediaMetadata?.artworkUri)
+                // Android Auto's now-playing screen can't be sent to a browse node: say where the page is
+                note("${a.name} is at the top of Home")
+            }
             else -> return false
         }
         return true
+    }
+
+    /**
+     * [handle] with the result a controller gets back: for Artist the node to open
+     * (`androidx.media.utils.extras.KEY_CUSTOM_BROWSER_ACTION_RESULT_BROWSE_NODE`; a host that runs it as a custom
+     * browse action opens the node, the now-playing screen's custom actions get no result). Null when it isn't one
+     * of ours. Main thread.
+     */
+    fun result(action: String): SessionResult? {
+        if (!handle(action)) return null
+        val node = if (action == CMD_ARTIST) currentArtist() else null
+        if (node == null) return SessionResult(SessionResult.RESULT_SUCCESS)
+        return SessionResult(SessionResult.RESULT_SUCCESS, Bundle().apply { putString(RESULT_BROWSE_NODE, node.id) })
+    }
+
+    /** The playing song's artist for the Artist button: the first credit in the library, else the first one. */
+    fun currentArtist(): ArtistNode? {
+        val item = exo.currentMediaItem ?: return null
+        return ArtistNode.of(item)
+    }
+
+    /** A controller connected or went away; [car]: it is Android Auto (or the desktop head unit). Main thread. */
+    fun controller(car: Boolean, connected: Boolean) {
+        if (!car) return
+        val before = cars > 0
+        cars = (cars + if (connected) 1 else -1).coerceAtLeast(0)
+        if (before != cars > 0) {
+            refreshButtons()
+            refreshText()
+        }
+    }
+
+    /** How the song reaches this phone (the service's StreamInfo, when it changes): the badge follows it. Main thread. */
+    fun streamChanged(info: StreamInfo) {
+        stream = info
+        updateQuality()
+    }
+
+    /** The quality of the song playing now; the buttons and the subtitle when it changed. */
+    private fun updateQuality() {
+        if (released) return
+        val item = exo.currentMediaItem
+        val q = if (item == null) null else {
+            val x = item.mediaMetadata.extras
+            val id = MediaItems.trackId(item.mediaId)
+            // the stream info of another song (just before the service published this one): the file alone
+            val s = stream?.takeIf { it.trackId == id }
+            val local = if (s?.transportKind == "local") app.encore.android.features.offline.OfflineStore.instance?.record(id ?: 0L)?.quality ?: "" else ""
+            CarQuality.of(
+                format = x?.getString(MediaItems.EXTRA_FORMAT) ?: "",
+                bitrate = x?.getInt(MediaItems.EXTRA_BITRATE) ?: 0,
+                sampleRate = x?.getInt(MediaItems.EXTRA_SAMPLE_RATE) ?: 0,
+                bitDepth = x?.getInt(MediaItems.EXTRA_BIT_DEPTH) ?: 0,
+                transportKind = s?.transportKind ?: "",
+                phoneRate = s?.phoneRate ?: 0,
+                localQuality = local,
+            )
+        }
+        if (q == quality) return
+        quality = q
+        refreshButtons()
+        refreshText()
+    }
+
+    /** The quality detail for the subtitle line ("FLAC 24/96"), only while a car is connected. */
+    private fun detail(): String? = if (cars > 0) quality?.detail?.takeIf { it.isNotEmpty() } else null
+
+    /** "<artist> · FLAC 24/96": the subtitle line with the quality detail after it (when there is one); "Group listen · " before it in a group. */
+    private fun subtitleOf(artist: String): String {
+        val d = detail()
+        val line = if (d == null) artist else if (artist.isEmpty()) d else "$artist · $d"
+        return if (group && cars > 0) (if (line.isEmpty()) "Group listen" else "Group listen · $line") else line
+    }
+
+    /**
+     * In a group listen or not (the service's GroupSync, before it takes the group's queue): the car's subtitle says
+     * so, and repeat and the app shuffle go off (a group has neither: client-shapes §2.2). Main thread.
+     */
+    fun setGroup(on: Boolean) {
+        if (group == on) return
+        group = on
+        if (on) {
+            // the group's queue replaces this one right after: no reorder back, the shuffle just ends
+            unshuffled = emptyList()
+            if (player.shuffled) player.setShuffled(false)
+            if (exo.repeatMode != Player.REPEAT_MODE_OFF) exo.repeatMode = Player.REPEAT_MODE_OFF
+            refreshButtons()
+        }
+        refreshText()
+    }
+
+    /** In a group listen (the car's, notification's or lock screen's Shuffle / Repeat): refused, and said why. */
+    private fun groupRefused(): Boolean {
+        if (!group && !app.encore.android.features.group.GroupListen.inGroup) return false
+        note("Shuffle and repeat are off during a group listen")
+        return true
+    }
+
+    /** The song as it is, with the quality detail on the subtitle line in the car. Main thread. */
+    private fun plain() {
+        val item = exo.currentMediaItem
+        if (item == null || (detail() == null && !(group && cars > 0))) { player.showMetadata(null, null); return }
+        val base = exo.mediaMetadata
+        player.showMetadata(item.mediaId, base.buildUpon().setArtist(subtitleOf(base.artist?.toString() ?: "")).build())
+    }
+
+    /** The subtitle again after the car or the quality changed: the lyric line or card drawn anew, else [plain]. */
+    private fun refreshText() {
+        if (released) return
+        main.removeCallbacks(clearNote)
+        if (lyricsOn && lines.isNotEmpty()) {
+            lineAt = -2
+            showLine()
+        } else {
+            plain()
+        }
+    }
+
+    /** [note] for the service: why the car's request was not done (in a group listen, "Only Alex controls playback"). */
+    fun say(text: String) = note(text)
+
+    /** A short note on the subtitle line for 3 s (title and cover stay). Main thread. */
+    private fun note(text: String) {
+        val item = exo.currentMediaItem ?: return
+        player.showMetadata(item.mediaId, exo.mediaMetadata.buildUpon().setArtist(text).build())
+        main.removeCallbacks(clearNote)
+        main.postDelayed(clearNote, 3000L)
     }
 
     /** A new queue replaced the old one (any controller, a remote device): shuffle starts off. Main thread. */
@@ -337,6 +494,7 @@ class CarControls(
 
     private fun setShuffle(on: Boolean) {
         if (on == player.shuffled) return
+        if (on && groupRefused()) return
         val cur = exo.currentMediaItemIndex
         val n = exo.mediaItemCount
         val rest = ArrayList<MediaItem>()
@@ -373,7 +531,11 @@ class CarControls(
         try { s.setMediaButtonPreferences(buttons()) } catch (_: Exception) {}
     }
 
-    /** Like, Shuffle, Repeat, Lyrics (YouTube Music's order, with lyrics after repeat). */
+    /**
+     * Like, Shuffle, Repeat, Lyrics (YouTube Music's order, with lyrics after repeat); with a car connected the
+     * quality badge and Artist come after Like. All of them go to the overflow slot (Media3's default for custom
+     * buttons), which has no limit; Android Auto shows what fits and the rest behind its own overflow button.
+     */
     private fun buttons(): List<CommandButton> {
         val liked = currentId()?.let { graph.likes.isLiked(it) } == true
         val like = CommandButton.Builder(if (liked) CommandButton.ICON_HEART_FILLED else CommandButton.ICON_HEART_UNFILLED)
@@ -404,7 +566,21 @@ class CarControls(
             .setCustomIconResId(if (lyricsOn) R.drawable.ic_lyrics_on else R.drawable.ic_lyrics)
             .setSessionCommand(SessionCommand(CMD_LYRICS, Bundle.EMPTY))
             .build()
-        return listOf(like, shuffle, repeat, lyrics)
+        if (cars == 0) return listOf(like, shuffle, repeat, lyrics)
+        // in the car: the quality badge after Like, then Artist (the now-playing text can't be tapped there)
+        val q = quality
+        // (no predefined icon: controllers would draw Media3's own "quality" icon instead of the four badges)
+        val badge = if (q == null) null else CommandButton.Builder(CommandButton.ICON_UNDEFINED)
+            .setDisplayName(q.name)
+            .setCustomIconResId(q.kind.icon)
+            .setSessionCommand(SessionCommand(CMD_QUALITY, Bundle.EMPTY))
+            .build()
+        val artist = if (currentArtist() == null) null else CommandButton.Builder(CommandButton.ICON_ARTIST)
+            .setDisplayName("Artist")
+            .setCustomIconResId(R.drawable.ic_person)
+            .setSessionCommand(SessionCommand(CMD_ARTIST, Bundle.EMPTY))
+            .build()
+        return listOfNotNull(like, badge, artist, shuffle, repeat, lyrics)
     }
 
     // ---- live lyrics -----------------------------------------------------------------------------------------
@@ -417,7 +593,8 @@ class CarControls(
         }
     }
 
-    private val clearNote = Runnable { if (!released && lines.isEmpty()) player.showMetadata(null, null) }
+    /** After a note: the lyric line or card when they own the screen, else the song with its quality detail. */
+    private val clearNote = Runnable { if (!released) refreshText() }
 
     /** The current song's synced lyrics, fetched once per song while live lyrics are on (LyricsCache). */
     private fun loadLyrics() {
@@ -428,7 +605,7 @@ class CarControls(
         lines = emptyList()
         lineAt = -2
         cardWanted = ++cardSeq
-        player.showMetadata(null, null)
+        plain()
         if (!lyricsOn || id == null) return
         io.execute {
             val parsed = LyricsCache.synced(graph.api, id)
@@ -453,11 +630,7 @@ class CarControls(
     private fun noSyncedLyrics(id: Long) {
         if (mode != CarPrefs.MODE_TITLE) return
         if (!noLyricsToasted.add(id)) return
-        val item = exo.currentMediaItem ?: return
-        val md = exo.mediaMetadata.buildUpon().setArtist("No synced lyrics for this song").build()
-        player.showMetadata(item.mediaId, md)
-        main.removeCallbacks(clearNote)
-        main.postDelayed(clearNote, 3000L)
+        note("No synced lyrics for this song")
     }
 
     private fun stopLyrics() {
@@ -467,13 +640,14 @@ class CarControls(
         lyricsFor = null
         lineAt = -2
         cardWanted = ++cardSeq
-        player.showMetadata(null, null)
+        plain()
     }
 
     /**
      * The line at the current position: as the lyrics card (the artwork; title and artist as they are) or as the
      * title with "<title> · <artist>" below it. Before the first line the title mode shows the song as it is and
-     * the card shows the lines to come.
+     * the card shows the lines to come. In the car the quality detail stays on the subtitle line after the artist
+     * ("<title> · <artist> · FLAC 24/96" while the lyric line owns the title).
      */
     private fun showLine() {
         val item = exo.currentMediaItem ?: return
@@ -481,7 +655,7 @@ class CarControls(
         if (at == lineAt) return
         lineAt = at
         if (mode == CarPrefs.MODE_CARD) { showCard(item, at); return }
-        if (at < 0) { player.showMetadata(null, null); return }
+        if (at < 0) { plain(); return }
         val base = exo.mediaMetadata
         val title = base.title?.toString() ?: ""
         val artist = base.artist?.toString() ?: ""
@@ -489,7 +663,7 @@ class CarControls(
         val md = base.buildUpon()
             .setTitle(text)
             .setDisplayTitle(text)
-            .setArtist(listOf(title, artist).filter { it.isNotEmpty() }.joinToString(" · "))
+            .setArtist(subtitleOf(listOf(title, artist).filter { it.isNotEmpty() }.joinToString(" · ")))
             .build()
         player.showMetadata(item.mediaId, md)
     }
@@ -514,9 +688,11 @@ class CarControls(
                 main.post {
                     if (released || cardWanted != seq || !lyricsOn || mode != CarPrefs.MODE_CARD) return@post
                     if (exo.currentMediaItem?.mediaId != item.mediaId) return@post
-                    val md = exo.mediaMetadata.buildUpon()
+                    val base = exo.mediaMetadata
+                    val md = base.buildUpon()
                         .setArtworkData(r.bytes, MediaMetadata.PICTURE_TYPE_FRONT_COVER)
                         .setArtworkUri(r.uri)
+                        .setArtist(subtitleOf(base.artist?.toString() ?: ""))
                         .build()
                     player.showMetadata(item.mediaId, md)
                 }
@@ -529,8 +705,17 @@ class CarControls(
         const val CMD_SHUFFLE = "app.encore.android.CAR_SHUFFLE"
         const val CMD_REPEAT = "app.encore.android.CAR_REPEAT"
         const val CMD_LYRICS = "app.encore.android.CAR_LYRICS"
+        /** the quality badge (shows, does nothing) and Artist (opens the artist's browse node), car only */
+        const val CMD_QUALITY = "app.encore.android.CAR_QUALITY"
+        const val CMD_ARTIST = "app.encore.android.CAR_ARTIST"
+
+        /** Artist's result: the browse node to open (androidx.media's custom browse action result key). */
+        const val RESULT_BROWSE_NODE = "androidx.media.utils.extras.KEY_CUSTOM_BROWSER_ACTION_RESULT_BROWSE_NODE"
 
         /** The session commands controllers need to see the buttons (MediaSession hides buttons whose command they lack). */
-        val COMMANDS = listOf(CMD_LIKE, CMD_SHUFFLE, CMD_REPEAT, CMD_LYRICS)
+        val COMMANDS = listOf(CMD_LIKE, CMD_SHUFFLE, CMD_REPEAT, CMD_LYRICS, CMD_QUALITY, CMD_ARTIST)
+
+        /** Android Auto and the desktop head unit: the controllers the badge, Artist and the subtitle detail are for. */
+        val CAR_PACKAGES = setOf("com.google.android.projection.gearhead", "com.google.android.autosimulator")
     }
 }

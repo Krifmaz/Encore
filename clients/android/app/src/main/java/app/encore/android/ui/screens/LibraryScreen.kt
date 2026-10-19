@@ -27,6 +27,13 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.LazyRow
+import androidx.compose.foundation.lazy.items as rowItems
+import androidx.compose.foundation.text.KeyboardActions
+import androidx.compose.foundation.text.KeyboardOptions
+import androidx.compose.material3.IconButton
+import androidx.compose.material3.OutlinedTextField
+import androidx.compose.material3.OutlinedTextFieldDefaults
 import androidx.compose.foundation.lazy.grid.GridCells
 import androidx.compose.foundation.lazy.grid.GridItemSpan
 import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
@@ -52,11 +59,14 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.input.nestedscroll.nestedScroll
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalFocusManager
+import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.unit.dp
 import app.encore.android.PreloadCoversAhead
 import app.encore.android.R
 import app.encore.android.data.api.Album
+import app.encore.android.data.api.LibrarySearch
 import app.encore.android.data.api.Track
 import app.encore.android.features.offline.DownloadedList
 import app.encore.android.features.offline.OfflineLibraryScreen
@@ -67,7 +77,10 @@ import app.encore.android.ui.Screen
 import app.encore.android.ui.components.AlbumCard
 import app.encore.android.ui.components.ChoiceRow
 import app.encore.android.ui.components.EmptyState
+import app.encore.android.ui.components.EncoreButton
 import app.encore.android.ui.components.EncoreTopBar
+import app.encore.android.ui.components.ErrorBox
+import app.encore.android.ui.components.SectionHead
 import app.encore.android.ui.components.Gutter
 import app.encore.android.ui.components.LoadableContent
 import app.encore.android.ui.components.MenuEntry
@@ -82,6 +95,7 @@ import app.encore.android.ui.components.rememberLoad
 import app.encore.android.ui.theme.palette
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 
@@ -105,6 +119,21 @@ private val CHIP = mapOf(
 )
 
 private val TABS = listOf("albums" to "Albums", "artists" to "Artists", "tracks" to "Songs")
+
+/**
+ * The Library page's search and tab, kept while the app runs so going to an album and back (or to another tab)
+ * finds them as they were (the web keeps the query in the address, `#/library?q=`).
+ */
+private object LibraryState {
+    /** what is typed in the search box */
+    var text by mutableStateOf("")
+    /** with a query: the one results view (true), or the selected tab filtered by the query (false) */
+    var results by mutableStateOf(true)
+    var tab by mutableStateOf(0)
+}
+
+/** The first matches each section of the results view shows. */
+private const val RESULTS_LIMIT = 12
 
 /** A tab's sort: the server's key and "asc" / "desc". */
 private data class LibSort(val key: String, val dir: String)
@@ -181,6 +210,10 @@ private fun SortChip(tab: String, sort: LibSort, onChange: (LibSort) -> Unit, mo
 /**
  * Library: Albums / Artists / Songs (the web's #/library tabs), and Downloaded once songs are saved on this phone
  * (features/offline). In offline mode the saved songs are the whole library.
+ *
+ * The search box (0.31) searches the whole library whatever tab is selected: while it has a query the page shows
+ * one results view (Artists, Albums, Songs, each with "Show all N" that opens its tab filtered by the query); a
+ * tab tapped while a query is typed shows that tab filtered. Nothing anywhere: "Search everywhere" opens Discover.
  */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -190,7 +223,7 @@ fun LibraryScreen(nav: Nav) {
         OfflineLibraryScreen(nav)
         return
     }
-    var tab by remember { mutableStateOf(0) }
+    var tab by LibraryState::tab
     val context = LocalContext.current
     val store = remember(context) { LibrarySorts(context) }
     val saved = remember(context) { OfflineStore.of(context) }
@@ -203,6 +236,15 @@ fun LibraryScreen(nav: Nav) {
     val tabKey = TABS.getOrNull(shown)?.first ?: TABS[0].first
     val sort = sorts.getValue(tabKey)
     val scope = rememberCoroutineScope()
+    // the query the lists use: what is typed, a moment after the typing stops (at once when cleared)
+    var q by remember { mutableStateOf(LibraryState.text.trim()) }
+    LaunchedEffect(LibraryState.text) {
+        val v = LibraryState.text.trim()
+        if (v == q) return@LaunchedEffect
+        if (v.isNotEmpty()) delay(300)
+        q = v
+    }
+    val resultsView = q.isNotEmpty() && LibraryState.results
     val scrollBehavior = TopAppBarDefaults.enterAlwaysScrollBehavior()
     Scaffold(
         modifier = Modifier.fillMaxSize().nestedScroll(scrollBehavior.nestedScrollConnection),
@@ -220,19 +262,30 @@ fun LibraryScreen(nav: Nav) {
         },
     ) { padding ->
         Column(Modifier.fillMaxSize().padding(padding)) {
+            LibrarySearchField(LibraryState.text) { v ->
+                LibraryState.text = v
+                // typing shows the results view again
+                LibraryState.results = true
+            }
             Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
-                ChoiceRow(labels, shown, { tab = it }, Modifier.weight(1f), end = 8.dp)
-                if (shown < TABS.size) {
+                // with a query, a tab shows that tab filtered by it
+                ChoiceRow(labels, if (resultsView) -1 else shown, { tab = it; LibraryState.results = false }, Modifier.weight(1f), end = 8.dp)
+                if (shown < TABS.size && !resultsView) {
                     SortChip(tabKey, sort, { next ->
                         sorts = sorts + (tabKey to next)
                         store.set(tabKey, next)
                     })
                 }
             }
-            when (shown) {
-                0 -> AlbumsTab(nav, sort)
-                1 -> ArtistsTab(nav, sort)
-                2 -> SongsTab(nav, sort)
+            if (resultsView) {
+                LibraryResults(nav, q) { section ->
+                    tab = section
+                    LibraryState.results = false
+                }
+            } else when (shown) {
+                0 -> AlbumsTab(nav, sort, q)
+                1 -> ArtistsTab(nav, sort, q)
+                2 -> SongsTab(nav, sort, q)
                 else -> DownloadedList(nav)
             }
         }
@@ -380,21 +433,23 @@ private fun TrackPlaceholder() {
 }
 
 @Composable
-private fun AlbumsTab(nav: Nav, sort: LibSort) {
+private fun AlbumsTab(nav: Nav, sort: LibSort, q: String = "") {
     val api = nav.graph.api
     val scope = rememberCoroutineScope()
-    // a new list per sort; the index is for the same sort and direction, so its offsets are this list's rows
-    val paged = remember(sort) { Paged<Album>(120) }
+    // a new list per sort (and query); the index is for the same sort and direction, so its offsets are this list's
+    // rows (a filtered list has no index)
+    val paged = remember(sort, q) { Paged<Album>(120) }
     paged.scope = scope
-    paged.fetch = { offset, limit -> api.albums(sort = sort.key, offset = offset, limit = limit, dir = sort.dir) }
+    paged.fetch = { offset, limit -> api.albums(sort = sort.key, offset = offset, limit = limit, q = q, dir = sort.dir) }
     val grid = rememberLazyGridState()
-    LaunchedEffect(sort) { if (grid.firstVisibleItemIndex > 0) grid.scrollToItem(0) }
-    val sections = rememberLibraryIndex(api, "albums", sort.key, dir = sort.dir)
+    LaunchedEffect(sort, q) { if (grid.firstVisibleItemIndex > 0) grid.scrollToItem(0) }
+    val index = rememberLibraryIndex(api, "albums", sort.key, dir = sort.dir)
+    val sections = if (q.isEmpty()) index else emptyList()
     // covers 2–3 screens ahead of the scroll, and around the spot after a scrubber jump
     PreloadCoversAhead(grid, paged.rows.size, 400) { i -> paged.rows.getOrNull(i)?.id }
     Column(Modifier.fillMaxSize()) {
         if (paged.done && paged.rows.isEmpty()) {
-            EmptyState(R.drawable.ic_library, "No albums found")
+            EmptyState(R.drawable.ic_library, if (q.isEmpty()) "No albums found" else "No albums match “$q”")
             return@Column
         }
         Box(Modifier.fillMaxSize()) {
@@ -430,15 +485,16 @@ private fun AlbumsTab(nav: Nav, sort: LibSort) {
 }
 
 @Composable
-private fun ArtistsTab(nav: Nav, sort: LibSort) {
+private fun ArtistsTab(nav: Nav, sort: LibSort, q: String = "") {
     val api = nav.graph.api
-    val loader = rememberLoad("artists", sort) { api.artists(sort = sort.key, dir = sort.dir) }
+    val loader = rememberLoad("artists", sort, q) { api.artists(q = q, sort = sort.key, dir = sort.dir) }
     val grid = rememberLazyGridState()
-    LaunchedEffect(sort) { if (grid.firstVisibleItemIndex > 0) grid.scrollToItem(0) }
-    val sections = rememberLibraryIndex(api, "artists", sort.key, dir = sort.dir)
+    LaunchedEffect(sort, q) { if (grid.firstVisibleItemIndex > 0) grid.scrollToItem(0) }
+    val index = rememberLibraryIndex(api, "artists", sort.key, dir = sort.dir)
+    val sections = if (q.isEmpty()) index else emptyList()
     LoadableContent(loader) { artists ->
         if (artists.isEmpty()) {
-            EmptyState(R.drawable.ic_person, "No artists found")
+            EmptyState(R.drawable.ic_person, if (q.isEmpty()) "No artists found" else "No artists match “$q”")
             return@LoadableContent
         }
         PreloadCoversAhead(grid, artists.size, 400) { i -> artists.getOrNull(i)?.coverAlbum }
@@ -481,20 +537,21 @@ private fun ArtistsTab(nav: Nav, sort: LibSort) {
 }
 
 @Composable
-private fun SongsTab(nav: Nav, sort: LibSort) {
+private fun SongsTab(nav: Nav, sort: LibSort, q: String = "") {
     val api = nav.graph.api
     val liked by nav.graph.likes.liked.collectAsState()
     val nowPlaying by nav.player.nowPlaying.collectAsState()
     val scope = rememberCoroutineScope()
-    val paged = remember(sort) { Paged<Track>(200) }
+    val paged = remember(sort, q) { Paged<Track>(200) }
     paged.scope = scope
-    paged.fetch = { offset, limit -> api.tracks(offset = offset, limit = limit, sort = sort.key, dir = sort.dir) }
+    paged.fetch = { offset, limit -> api.tracks(q = q, offset = offset, limit = limit, sort = sort.key, dir = sort.dir) }
     val list = rememberLazyListState()
-    LaunchedEffect(sort) { if (list.firstVisibleItemIndex > 0) list.scrollToItem(0) }
-    val sections = rememberLibraryIndex(api, "tracks", sort.key, dir = sort.dir)
+    LaunchedEffect(sort, q) { if (list.firstVisibleItemIndex > 0) list.scrollToItem(0) }
+    val index = rememberLibraryIndex(api, "tracks", sort.key, dir = sort.dir)
+    val sections = if (q.isEmpty()) index else emptyList()
     PreloadCoversAhead(list, paged.rows.size, 96) { i -> paged.rows.getOrNull(i)?.albumId }
     if (paged.done && paged.rows.isEmpty()) {
-        EmptyState(R.drawable.ic_note, "No songs found")
+        EmptyState(R.drawable.ic_note, if (q.isEmpty()) "No songs found" else "No songs match “$q”")
         return
     }
     Box(Modifier.fillMaxSize()) {
@@ -534,5 +591,135 @@ private fun SongsTab(nav: Nav, sort: LibSort) {
             modifier = Modifier.align(Alignment.CenterEnd),
             onJump = { paged.jumpTo(it) },
         )
+    }
+}
+
+// ---- the search box and the one results view (0.31) ----------------------------------------------------------
+
+/** The Library's search box (the web's `.search .input`). */
+@Composable
+private fun LibrarySearchField(value: String, onChange: (String) -> Unit) {
+    val p = MaterialTheme.palette
+    val focus = LocalFocusManager.current
+    OutlinedTextField(
+        value = value,
+        onValueChange = onChange,
+        placeholder = { Text("Search artists, albums, songs in your library…", color = p.faint, maxLines = 1) },
+        singleLine = true,
+        shape = RoundedCornerShape(12.dp),
+        leadingIcon = { Icon(painterResource(R.drawable.ic_search), contentDescription = null, tint = p.faint) },
+        trailingIcon = {
+            if (value.isNotEmpty()) {
+                IconButton(onClick = { onChange("") }) { Icon(painterResource(R.drawable.ic_close), contentDescription = "Clear", tint = p.muted) }
+            }
+        },
+        keyboardOptions = KeyboardOptions(imeAction = ImeAction.Search),
+        keyboardActions = KeyboardActions(onSearch = { focus.clearFocus() }),
+        colors = OutlinedTextFieldDefaults.colors(
+            focusedBorderColor = p.accent,
+            unfocusedBorderColor = p.border,
+            focusedContainerColor = p.bg2,
+            unfocusedContainerColor = p.bg2,
+            cursorColor = p.accent,
+        ),
+        modifier = Modifier.fillMaxWidth().padding(start = Gutter, end = Gutter, top = 4.dp),
+    )
+}
+
+/**
+ * The results view of a library search (GET /api/library/search): Artists (round tiles), Albums (singles too) and
+ * Songs (rows that play), each with its first matches and "Show all N" ([onShowAll] with the tab: 0 albums,
+ * 1 artists, 2 songs). Servers before 0.31 send no counts: "Show all" then appears when a section is full.
+ */
+@Composable
+private fun LibraryResults(nav: Nav, q: String, onShowAll: (Int) -> Unit) {
+    val api = nav.graph.api
+    val p = MaterialTheme.palette
+    val liked by nav.graph.likes.liked.collectAsState()
+    val nowPlaying by nav.player.nowPlaying.collectAsState()
+    var found by remember { mutableStateOf<Pair<String, LibrarySearch>?>(null) }
+    var error by remember { mutableStateOf<String?>(null) }
+    var generation by remember { mutableStateOf(0) }
+    // the newest query wins: a new one cancels the request of the one before
+    LaunchedEffect(q, generation) {
+        error = null
+        try {
+            val r = withContext(Dispatchers.IO) { api.search(q, RESULTS_LIMIT) }
+            found = q to r
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            error = e.message ?: "Search failed"
+        }
+    }
+    val f = found?.takeIf { it.first == q }?.second
+    val err = error
+    when {
+        f == null && err != null -> ErrorBox(err) { generation += 1 }
+        f == null -> Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+            CircularProgressIndicator(color = p.accent, trackColor = p.border)
+        }
+        f.isEmpty -> Column(Modifier.fillMaxWidth(), horizontalAlignment = Alignment.CenterHorizontally) {
+            EmptyState(R.drawable.ic_search, "Nothing in your library matches “$q”")
+            EncoreButton("Search everywhere", iconRes = R.drawable.ic_explore, primary = true) { nav.open(Screen.DiscoverSearch(q)) }
+        }
+        else -> LazyColumn(Modifier.fillMaxSize()) {
+            val c = f.counts
+            fun showAll(total: Int?, shown: Int): String? = when {
+                total != null -> if (total > shown) "Show all $total" else null
+                shown >= RESULTS_LIMIT -> "Show all"
+                else -> null
+            }
+            if (f.artists.isNotEmpty()) {
+                val action = showAll(c?.artists, f.artists.size)
+                item(key = "artists-head") { SectionHead("Artists", action = action, onAction = if (action != null) ({ onShowAll(1) }) else null) }
+                item(key = "artists") {
+                    LazyRow(contentPadding = PaddingValues(horizontal = Gutter), horizontalArrangement = Arrangement.spacedBy(14.dp)) {
+                        rowItems(f.artists, key = { "artist:" + it.name }) { a ->
+                            Tile(
+                                title = a.shownName(),
+                                subtitle = "${a.albums} album${if (a.albums == 1) "" else "s"}",
+                                centered = true,
+                                modifier = Modifier.width(120.dp),
+                                onClick = { nav.open(Screen.Artist(a.name)) },
+                            ) { m ->
+                                Cover(if (a.coverAlbum.isNotEmpty()) api.coverUrl(a.coverAlbum, 400) else null, nav.graph.imageLoader, m, corner = 999.dp, label = a.name)
+                            }
+                        }
+                    }
+                }
+            }
+            if (f.albums.isNotEmpty()) {
+                val action = showAll(c?.albums, f.albums.size)
+                item(key = "albums-head") { SectionHead("Albums", action = action, onAction = if (action != null) ({ onShowAll(0) }) else null) }
+                item(key = "albums") {
+                    LazyRow(contentPadding = PaddingValues(horizontal = Gutter), horizontalArrangement = Arrangement.spacedBy(14.dp)) {
+                        rowItems(f.albums, key = { "album:" + it.id }) { a ->
+                            AlbumCard(a, api.coverUrl(a.id, 400), nav.graph.imageLoader, Modifier.width(140.dp)) { nav.open(Screen.Album(a.id)) }
+                        }
+                    }
+                }
+            }
+            if (f.songs.isNotEmpty()) {
+                val action = showAll(c?.songs, f.songs.size)
+                item(key = "songs-head") { SectionHead("Songs", action = action, onAction = if (action != null) ({ onShowAll(2) }) else null) }
+                items(f.songs.size, key = { i -> "song:" + f.songs[i].id + ":" + i }) { i ->
+                    val t = f.songs[i]
+                    TrackRow(
+                        track = t,
+                        imageLoader = nav.graph.imageLoader,
+                        coverUrl = if (t.albumId.isNotEmpty()) api.coverUrl(t.albumId, 96) else null,
+                        liked = t.id in liked,
+                        playing = nowPlaying?.id == t.id,
+                        onClick = { nav.player.play(f.songs, i) },
+                        onLike = { nav.graph.likes.toggle(t.id) },
+                        subtitle = listOf(t.artist, t.album).filter { it.isNotEmpty() }.joinToString(" · "),
+                        subtitleLinks = rememberSongLinks(nav, t),
+                        onMore = { nav.trackMenu(t) },
+                    )
+                }
+            }
+            item { Spacer(Modifier.height(24.dp)) }
+        }
     }
 }

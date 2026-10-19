@@ -94,6 +94,12 @@ class ResumeStore(context: Context) {
         m["disc"] = JsonPrimitive(t.disc)
         m["duration"] = JsonPrimitive(t.durationSec)
         m["format"] = JsonPrimitive(t.format)
+        // the loudness, so volume normalization knows a restored queue too (the row's own shape)
+        t.gain?.let { m["gain"] = it.toJson() }
+        // the car's quality badge and detail ("FLAC 24/96", "MP3 320k") for a restored queue
+        if (t.bitrate > 0) m["bitrate"] = JsonPrimitive(t.bitrate)
+        if (t.sampleRate > 0) m["sample_rate"] = JsonPrimitive(t.sampleRate)
+        if (t.bitDepth > 0) m["bit_depth"] = JsonPrimitive(t.bitDepth)
         return JsonObject(m)
     }
 

@@ -4,6 +4,7 @@ import android.net.Uri
 import android.os.SystemClock
 import app.encore.android.data.api.EncoreApi
 import app.encore.android.features.offline.OfflineStore
+import app.encore.android.playback.ArtistNode
 import app.encore.android.ui.screens.Lyrics
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -28,6 +29,8 @@ data class NowPlaying(
     val positionMs: Long,
     val atElapsedMs: Long,
     val speed: Float,
+    /** the song's artist as a browse node (the car app's artist row opens it); null when the song names none */
+    val artistNode: ArtistNode? = null,
 ) {
     fun positionNow(): Long =
         if (!playing) positionMs else positionMs + ((SystemClock.elapsedRealtime() - atElapsedMs) * speed).toLong()

@@ -1,5 +1,21 @@
 package app.encore.android.ui.screens
 
+import androidx.activity.compose.BackHandler
+import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.core.FastOutSlowInEasing
+import androidx.compose.animation.core.animateFloatAsState
+import androidx.compose.animation.core.tween
+import androidx.compose.animation.expandVertically
+import androidx.compose.animation.fadeIn
+import androidx.compose.animation.fadeOut
+import androidx.compose.animation.shrinkVertically
+import androidx.compose.foundation.gestures.detectHorizontalDragGestures
+import androidx.compose.foundation.gestures.detectTapGestures
+import androidx.compose.foundation.layout.BoxWithConstraints
+import androidx.compose.foundation.layout.offset
+import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.unit.lerp
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.interaction.MutableInteractionSource
@@ -54,6 +70,9 @@ import androidx.compose.ui.unit.dp
 import app.encore.android.R
 import app.encore.android.data.api.Track
 import app.encore.android.remote.DevicesButton
+import app.encore.android.features.group.GroupListen
+import app.encore.android.features.group.GroupPill
+import app.encore.android.features.group.GroupUpNextSheet
 import app.encore.android.remote.LinkedVolume
 import app.encore.android.ui.Nav
 import app.encore.android.ui.Screen
@@ -173,9 +192,16 @@ fun MiniPlayer(nav: Nav, onOpen: () -> Unit) {
     }
 }
 
+/** The thumbnail the cover becomes in lyrics mode. */
+private val THUMB = 56.dp
+
 /**
  * The full-screen player (the web's `.np-full`): the cover blurred as a backdrop under a dark wash, the big art,
  * title / artist · album, the quality badge, the seek bar, prev / play / next, and like, share and "⋯".
+ *
+ * Lyrics mode (the Lyrics button, ⋯ → Lyrics; remembered as [LyricsMode]): the cover glides into a 56 dp thumbnail
+ * beside the title, artist, play / pause and a thin seek line, and the lyrics take the rest of the screen ([LyricsPane]).
+ * "Back to the cover", a tap on the thumbnail or Back return to the big art.
  */
 @Composable
 fun FullPlayer(nav: Nav, actions: PlayerMenuActions, onClose: () -> Unit) {
@@ -191,7 +217,18 @@ fun FullPlayer(nav: Nav, actions: PlayerMenuActions, onClose: () -> Unit) {
     val link by nav.player.remote.link.collectAsState()
     val shuffle by nav.player.shuffle.collectAsState()
     val repeat by nav.player.repeat.collectAsState()
+    // a group listen: the pill in the top bar, and the ⋯ menu's "Start a group listen" / "Group listen"
+    val group by GroupListen.state.collectAsState()
+    val groupsHere by GroupListen.available.collectAsState()
     val p = MaterialTheme.palette
+    val context = LocalContext.current
+    val lyricsMode by remember { LyricsMode.state(context) }.collectAsState()
+    val toLyrics = { LyricsMode.set(context, true) }
+    val toCover = { LyricsMode.set(context, false) }
+    // Back in lyrics mode goes back to the cover first
+    BackHandler(enabled = lyricsMode) { toCover() }
+    val prog by animateFloatAsState(if (lyricsMode) 1f else 0f, tween(420, easing = FastOutSlowInEasing), label = "lyricsMode")
+    val lyrics = rememberLyrics(nav, track.id, active = lyricsMode)
     // "Download for offline" / "Remove download" for the song (features/offline); not while this phone is a remote
     val offlineMenu = rememberOfflineMenu(nav)
     var dragging by remember { mutableStateOf<Float?>(null) }
@@ -231,152 +268,253 @@ fun FullPlayer(nav: Nav, actions: PlayerMenuActions, onClose: () -> Unit) {
                     textAlign = TextAlign.Center,
                     modifier = Modifier.weight(1f),
                 )
+                GroupPill(Modifier.padding(end = 4.dp))
                 DevicesButton(nav, tint = p.text)
                 IconButton(onClick = { actions.upNext() }) {
                     Icon(painterResource(R.drawable.ic_queue_music), contentDescription = "Up next", tint = p.text)
                 }
             }
 
-            // .np-art
-            Box(Modifier.weight(1f).fillMaxWidth().padding(horizontal = 32.dp, vertical = 8.dp), contentAlignment = Alignment.Center) {
-                Box(Modifier.fillMaxWidth().aspectRatio(1f).shadow(30.dp, RoundedCornerShape(20.dp), clip = false)) {
-                    Cover(coverUrl, nav.graph.imageLoader, Modifier.fillMaxSize(), corner = 20.dp, label = track.album.ifEmpty { track.title })
+            // .np-art, and in lyrics mode the compact bar and the lyrics: the cover moves between the two places
+            BoxWithConstraints(Modifier.weight(1f).fillMaxWidth()) {
+                val big = maxOf(minOf(maxWidth - 64.dp, maxHeight - 16.dp), THUMB)
+                val size = lerp(big, THUMB, prog)
+                val x = lerp((maxWidth - big) / 2, 20.dp, prog)
+                val y = lerp((maxHeight - big) / 2, 4.dp, prog)
+                val corner = lerp(20.dp, 8.dp, prog)
+                if (prog > 0f) {
+                    Column(Modifier.fillMaxSize().alpha(prog)) {
+                        // the compact bar: the thumbnail's place, title / artist, play / pause
+                        Row(
+                            Modifier.fillMaxWidth().padding(start = 20.dp + THUMB + 12.dp, end = 8.dp, top = 4.dp).height(THUMB),
+                            verticalAlignment = Alignment.CenterVertically,
+                        ) {
+                            Column(Modifier.weight(1f)) {
+                                Text(track.shownTitle(), style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                                Text(track.shownArtist(), style = MaterialTheme.typography.bodySmall, color = p.muted, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                            }
+                            IconButton(onClick = { nav.player.togglePlay() }) {
+                                Icon(
+                                    painterResource(if (isPlaying) R.drawable.ic_pause else R.drawable.ic_play),
+                                    contentDescription = if (isPlaying) "Pause" else "Play",
+                                    tint = p.text,
+                                )
+                            }
+                        }
+                        ThinSeek(position, duration, onSeek = { ms -> nav.player.seekTo(ms) }, Modifier.padding(start = 20.dp, end = 20.dp, top = 6.dp))
+                        LyricsPane(nav, lyrics, position, Modifier.weight(1f).fillMaxWidth())
+                    }
                 }
-            }
-
-            // .np-meta
-            Column(Modifier.fillMaxWidth().padding(horizontal = 28.dp), horizontalAlignment = Alignment.CenterHorizontally) {
-                Text(
-                    track.shownTitle(),
-                    style = MaterialTheme.typography.headlineSmall,
-                    textAlign = TextAlign.Center,
-                    maxLines = 1,
-                    overflow = TextOverflow.Ellipsis,
-                )
-                track.titleUnder()?.let { Text(it, style = MaterialTheme.typography.bodyMedium, color = p.muted, textAlign = TextAlign.Center, maxLines = 1, overflow = TextOverflow.Ellipsis) }
-                // each artist and the album open their pages (closing the player)
-                Text(
-                    rememberSongLinks(nav, track, before = onClose),
-                    style = MaterialTheme.typography.bodyMedium,
-                    color = p.muted,
-                    textAlign = TextAlign.Center,
-                    maxLines = 1,
-                    overflow = TextOverflow.Ellipsis,
-                    modifier = Modifier.padding(top = 4.dp),
-                )
-                val q = badge
-                if (!q.isNullOrEmpty()) {
-                    Spacer(Modifier.height(10.dp))
-                    Badge(q, onClick = { actions.signalPath() })
-                }
-            }
-
-            // .np-seek
-            val dur = duration.coerceAtLeast(0L)
-            val shown = dragging ?: if (dur > 0) (position.toFloat() / dur).coerceIn(0f, 1f) else 0f
-            Slider(
-                value = shown,
-                onValueChange = { dragging = it },
-                onValueChangeFinished = {
-                    val d = dragging
-                    if (d != null && dur > 0) nav.player.seekTo((d * dur).toLong())
-                    dragging = null
-                },
-                enabled = dur > 0,
-                colors = SliderDefaults.colors(
-                    thumbColor = p.text,
-                    activeTrackColor = p.accent,
-                    inactiveTrackColor = p.border,
-                    disabledThumbColor = p.faint,
-                    disabledActiveTrackColor = p.border,
-                    disabledInactiveTrackColor = p.border,
-                ),
-                modifier = Modifier.fillMaxWidth().padding(start = 20.dp, end = 20.dp, top = 12.dp),
-            )
-            Row(Modifier.fillMaxWidth().padding(horizontal = 28.dp)) {
-                val cur = dragging?.let { (it * dur).toLong() } ?: position
-                Text(formatDuration(cur).ifEmpty { "0:00" }, style = MaterialTheme.typography.bodySmall, color = p.faint)
-                Spacer(Modifier.weight(1f))
-                Text(formatDuration(dur).ifEmpty { "0:00" }, style = MaterialTheme.typography.bodySmall, color = p.faint)
-            }
-
-            // .np-ctrls: shuffle, prev, play / pause, next, repeat (the same shuffle and repeat as the car and lock screen)
-            Row(
-                Modifier.fillMaxWidth().padding(top = 8.dp, bottom = 4.dp),
-                horizontalArrangement = Arrangement.Center,
-                verticalAlignment = Alignment.CenterVertically,
-            ) {
-                IconButton(onClick = { nav.player.setShuffle(!shuffle) }, modifier = Modifier.size(48.dp)) {
-                    Icon(
-                        painterResource(R.drawable.ic_shuffle),
-                        contentDescription = if (shuffle) "Shuffle: on" else "Shuffle: off",
-                        tint = if (shuffle) p.accent else p.muted,
-                    )
-                }
-                Spacer(Modifier.width(4.dp))
-                IconButton(onClick = { nav.player.previous() }, modifier = Modifier.size(64.dp)) {
-                    Icon(painterResource(R.drawable.ic_skip_previous), contentDescription = "Previous", tint = p.text, modifier = Modifier.size(36.dp))
-                }
-                Spacer(Modifier.width(12.dp))
                 Box(
                     Modifier
-                        .size(72.dp)
-                        .clip(CircleShape)
-                        .background(p.gradient)
-                        .clickable { nav.player.togglePlay() },
-                    contentAlignment = Alignment.Center,
+                        .offset(x, y)
+                        .size(size)
+                        .shadow(lerp(30.dp, 6.dp, prog), RoundedCornerShape(corner), clip = false)
+                        .clickable(enabled = lyricsMode, onClickLabel = "Back to the cover") { toCover() },
                 ) {
-                    Icon(
-                        painterResource(if (isPlaying) R.drawable.ic_pause else R.drawable.ic_play),
-                        contentDescription = if (isPlaying) "Pause" else "Play",
-                        tint = p.onAccent,
-                        modifier = Modifier.size(36.dp),
-                    )
+                    Cover(coverUrl, nav.graph.imageLoader, Modifier.fillMaxSize(), corner = corner, label = track.album.ifEmpty { track.title })
                 }
-                Spacer(Modifier.width(12.dp))
-                val hasNext = index < queue.lastIndex
-                IconButton(onClick = { nav.player.next() }, enabled = hasNext, modifier = Modifier.size(64.dp)) {
-                    Icon(painterResource(R.drawable.ic_skip_next), contentDescription = "Next", tint = if (hasNext) p.text else p.faint, modifier = Modifier.size(36.dp))
-                }
-                Spacer(Modifier.width(4.dp))
-                IconButton(onClick = { nav.player.cycleRepeat() }, modifier = Modifier.size(48.dp)) {
-                    Icon(
-                        painterResource(if (repeat == "one") R.drawable.ic_repeat_one else R.drawable.ic_repeat),
-                        contentDescription = when (repeat) { "one" -> "Repeat: this song"; "all" -> "Repeat: the queue"; else -> "Repeat: off" },
-                        tint = if (repeat != "off") p.accent else p.muted,
+            }
+
+            // lyrics mode: the way back to the big art
+            AnimatedVisibility(visible = lyricsMode, enter = fadeIn(tween(300)), exit = fadeOut(tween(150))) {
+                Box(Modifier.fillMaxWidth().padding(top = 6.dp, bottom = 14.dp), contentAlignment = Alignment.Center) {
+                    Text(
+                        "Back to the cover",
+                        style = MaterialTheme.typography.labelLarge,
+                        color = p.text,
+                        modifier = Modifier
+                            .clip(RoundedCornerShape(50))
+                            .background(p.panel2.copy(alpha = 0.85f))
+                            .clickable { toCover() }
+                            .padding(horizontal = 18.dp, vertical = 10.dp),
                     )
                 }
             }
 
-            // linked: the other device's volume
-            LinkedVolume(nav, Modifier.fillMaxWidth().padding(horizontal = 48.dp))
-
-            // .np-actions: like, share, ⋯
-            Row(
-                Modifier.fillMaxWidth().padding(bottom = 12.dp),
-                horizontalArrangement = Arrangement.spacedBy(18.dp, Alignment.CenterHorizontally),
-                verticalAlignment = Alignment.CenterVertically,
+            AnimatedVisibility(
+                visible = !lyricsMode,
+                enter = expandVertically(tween(420, easing = FastOutSlowInEasing)) + fadeIn(tween(420)),
+                exit = shrinkVertically(tween(420, easing = FastOutSlowInEasing)) + fadeOut(tween(200)),
             ) {
-                LikeButton(track.id in liked, { nav.graph.likes.toggle(track.id) })
-                IconButton(onClick = { actions.shareLink() }) {
-                    Icon(painterResource(R.drawable.ic_share), contentDescription = "Share link", tint = p.text)
+                Column(Modifier.fillMaxWidth()) {
+                    // .np-meta
+                    Column(Modifier.fillMaxWidth().padding(horizontal = 28.dp), horizontalAlignment = Alignment.CenterHorizontally) {
+                        Text(
+                            track.shownTitle(),
+                            style = MaterialTheme.typography.headlineSmall,
+                            textAlign = TextAlign.Center,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis,
+                        )
+                        track.titleUnder()?.let { Text(it, style = MaterialTheme.typography.bodyMedium, color = p.muted, textAlign = TextAlign.Center, maxLines = 1, overflow = TextOverflow.Ellipsis) }
+                        // each artist and the album open their pages (closing the player)
+                        Text(
+                            rememberSongLinks(nav, track, before = onClose),
+                            style = MaterialTheme.typography.bodyMedium,
+                            color = p.muted,
+                            textAlign = TextAlign.Center,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis,
+                            modifier = Modifier.padding(top = 4.dp),
+                        )
+                        val q = badge
+                        if (!q.isNullOrEmpty()) {
+                            Spacer(Modifier.height(10.dp))
+                            Badge(q, onClick = { actions.signalPath() })
+                        }
+                    }
+
+                    // .np-seek
+                    val dur = duration.coerceAtLeast(0L)
+                    val shown = dragging ?: if (dur > 0) (position.toFloat() / dur).coerceIn(0f, 1f) else 0f
+                    Slider(
+                        value = shown,
+                        onValueChange = { dragging = it },
+                        onValueChangeFinished = {
+                            val d = dragging
+                            if (d != null && dur > 0) nav.player.seekTo((d * dur).toLong())
+                            dragging = null
+                        },
+                        enabled = dur > 0,
+                        colors = SliderDefaults.colors(
+                            thumbColor = p.text,
+                            activeTrackColor = p.accent,
+                            inactiveTrackColor = p.border,
+                            disabledThumbColor = p.faint,
+                            disabledActiveTrackColor = p.border,
+                            disabledInactiveTrackColor = p.border,
+                        ),
+                        modifier = Modifier.fillMaxWidth().padding(start = 20.dp, end = 20.dp, top = 12.dp),
+                    )
+                    Row(Modifier.fillMaxWidth().padding(horizontal = 28.dp)) {
+                        val cur = dragging?.let { (it * dur).toLong() } ?: position
+                        Text(formatDuration(cur).ifEmpty { "0:00" }, style = MaterialTheme.typography.bodySmall, color = p.faint)
+                        Spacer(Modifier.weight(1f))
+                        Text(formatDuration(dur).ifEmpty { "0:00" }, style = MaterialTheme.typography.bodySmall, color = p.faint)
+                    }
+
+                    // .np-ctrls: shuffle, prev, play / pause, next, repeat (the same shuffle and repeat as the car and lock screen)
+                    Row(
+                        Modifier.fillMaxWidth().padding(top = 8.dp, bottom = 4.dp),
+                        horizontalArrangement = Arrangement.Center,
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        IconButton(onClick = { nav.player.setShuffle(!shuffle) }, modifier = Modifier.size(48.dp)) {
+                            Icon(
+                                painterResource(R.drawable.ic_shuffle),
+                                contentDescription = if (shuffle) "Shuffle: on" else "Shuffle: off",
+                                tint = if (shuffle) p.accent else p.muted,
+                            )
+                        }
+                        Spacer(Modifier.width(4.dp))
+                        IconButton(onClick = { nav.player.previous() }, modifier = Modifier.size(64.dp)) {
+                            Icon(painterResource(R.drawable.ic_skip_previous), contentDescription = "Previous", tint = p.text, modifier = Modifier.size(36.dp))
+                        }
+                        Spacer(Modifier.width(12.dp))
+                        Box(
+                            Modifier
+                                .size(72.dp)
+                                .clip(CircleShape)
+                                .background(p.gradient)
+                                .clickable { nav.player.togglePlay() },
+                            contentAlignment = Alignment.Center,
+                        ) {
+                            Icon(
+                                painterResource(if (isPlaying) R.drawable.ic_pause else R.drawable.ic_play),
+                                contentDescription = if (isPlaying) "Pause" else "Play",
+                                tint = p.onAccent,
+                                modifier = Modifier.size(36.dp),
+                            )
+                        }
+                        Spacer(Modifier.width(12.dp))
+                        val hasNext = index < queue.lastIndex
+                        IconButton(onClick = { nav.player.next() }, enabled = hasNext, modifier = Modifier.size(64.dp)) {
+                            Icon(painterResource(R.drawable.ic_skip_next), contentDescription = "Next", tint = if (hasNext) p.text else p.faint, modifier = Modifier.size(36.dp))
+                        }
+                        Spacer(Modifier.width(4.dp))
+                        IconButton(onClick = { nav.player.cycleRepeat() }, modifier = Modifier.size(48.dp)) {
+                            Icon(
+                                painterResource(if (repeat == "one") R.drawable.ic_repeat_one else R.drawable.ic_repeat),
+                                contentDescription = when (repeat) { "one" -> "Repeat: this song"; "all" -> "Repeat: the queue"; else -> "Repeat: off" },
+                                tint = if (repeat != "off") p.accent else p.muted,
+                            )
+                        }
+                    }
+
+                    // linked: the other device's volume
+                    LinkedVolume(nav, Modifier.fillMaxWidth().padding(horizontal = 48.dp))
+
+                    // .np-actions: like, share, lyrics, ⋯
+                    Row(
+                        Modifier.fillMaxWidth().padding(bottom = 12.dp),
+                        horizontalArrangement = Arrangement.spacedBy(18.dp, Alignment.CenterHorizontally),
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        LikeButton(track.id in liked, { nav.graph.likes.toggle(track.id) })
+                        IconButton(onClick = { actions.shareLink() }) {
+                            Icon(painterResource(R.drawable.ic_share), contentDescription = "Share link", tint = p.text)
+                        }
+                        IconButton(onClick = toLyrics) {
+                            Icon(painterResource(R.drawable.ic_lyrics), contentDescription = "Lyrics", tint = p.text)
+                        }
+                        MoreButton(
+                            entries = listOf(
+                                if (track.artist.isNotEmpty() || track.albumArtist.isNotEmpty()) MenuEntry("Go to artist", R.drawable.ic_person) { actions.goToArtist() } else null,
+                                if (track.albumId.isNotEmpty()) MenuEntry("View album", R.drawable.ic_album) { actions.viewAlbum() } else null,
+                                MenuEntry("Add to playlist", R.drawable.ic_playlist_add) { actions.addToPlaylist() },
+                                MenuEntry("Lyrics", R.drawable.ic_lyrics) { toLyrics() },
+                                MenuEntry("Share link", R.drawable.ic_share) { actions.shareLink() },
+                                MenuEntry("Signal path", R.drawable.ic_signal) { actions.signalPath() },
+                                when {
+                                    group != null -> MenuEntry("Group listen", R.drawable.ic_group) { GroupListen.sheetOpen.value = true }
+                                    groupsHere == true && link == null -> MenuEntry("Start a group listen", R.drawable.ic_group) { GroupListen.startOpen.value = true }
+                                    else -> null
+                                },
+                                *(if (link == null) offlineMenu.entries(listOf(track)) else emptyList()).toTypedArray(),
+                            ),
+                            tint = p.text,
+                        )
+                    }
                 }
-                IconButton(onClick = { actions.lyrics() }) {
-                    Icon(painterResource(R.drawable.ic_lyrics), contentDescription = "Lyrics", tint = p.text)
-                }
-                MoreButton(
-                    entries = listOf(
-                        if (track.artist.isNotEmpty() || track.albumArtist.isNotEmpty()) MenuEntry("Go to artist", R.drawable.ic_person) { actions.goToArtist() } else null,
-                        if (track.albumId.isNotEmpty()) MenuEntry("View album", R.drawable.ic_album) { actions.viewAlbum() } else null,
-                        MenuEntry("Add to playlist", R.drawable.ic_playlist_add) { actions.addToPlaylist() },
-                        MenuEntry("Lyrics", R.drawable.ic_lyrics) { actions.lyrics() },
-                        MenuEntry("Share link", R.drawable.ic_share) { actions.shareLink() },
-                        MenuEntry("Signal path", R.drawable.ic_signal) { actions.signalPath() },
-                        *(if (link == null) offlineMenu.entries(listOf(track)) else emptyList()).toTypedArray(),
-                    ),
-                    tint = p.text,
-                )
             }
+        }
+    }
+}
+
+/**
+ * The thin seek line of lyrics mode: the played part in the accent colour; a tap or a drag along it seeks (the
+ * position follows the finger while dragging and is sent when you let go).
+ */
+@Composable
+private fun ThinSeek(positionMs: Long, durationMs: Long, onSeek: (Long) -> Unit, modifier: Modifier = Modifier) {
+    val p = MaterialTheme.palette
+    val dur = durationMs.coerceAtLeast(0L)
+    var drag by remember { mutableStateOf<Float?>(null) }
+    val frac = drag ?: if (dur > 0) (positionMs.toFloat() / dur).coerceIn(0f, 1f) else 0f
+    Box(
+        modifier
+            .fillMaxWidth()
+            .height(20.dp)
+            .pointerInput(dur) {
+                detectTapGestures { o -> if (dur > 0 && size.width > 0) onSeek(((o.x / size.width).coerceIn(0f, 1f) * dur).toLong()) }
+            }
+            .pointerInput(dur) {
+                detectHorizontalDragGestures(
+                    onDragStart = { o -> if (dur > 0 && size.width > 0) drag = (o.x / size.width).coerceIn(0f, 1f) },
+                    onDragEnd = {
+                        drag?.let { f -> onSeek((f * dur).toLong()) }
+                        drag = null
+                    },
+                    onDragCancel = { drag = null },
+                ) { change, _ ->
+                    if (dur > 0 && size.width > 0) drag = (change.position.x / size.width).coerceIn(0f, 1f)
+                }
+            },
+        contentAlignment = Alignment.CenterStart,
+    ) {
+        Box(Modifier.fillMaxWidth().height(if (drag != null) 5.dp else 3.dp).clip(RoundedCornerShape(3.dp)).background(p.border)) {
+            Box(Modifier.fillMaxWidth(frac).fillMaxHeight().background(p.accent))
         }
     }
 }
@@ -385,6 +523,9 @@ fun FullPlayer(nav: Nav, actions: PlayerMenuActions, onClose: () -> Unit) {
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun UpNextSheet(nav: Nav, onDismiss: () -> Unit) {
+    // in a group listen: the group's queue, with who added each song
+    val group by GroupListen.state.collectAsState()
+    group?.let { GroupUpNextSheet(nav, it, onDismiss); return }
     val queue by nav.player.queue.collectAsState()
     val index by nav.player.queueIndex.collectAsState()
     val settings by nav.graph.store.settings.collectAsState()

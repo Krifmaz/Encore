@@ -7,6 +7,7 @@ import app.encore.android.core.int
 import app.encore.android.core.long
 import app.encore.android.core.obj
 import app.encore.android.core.objects
+import app.encore.android.core.objectsOf
 import app.encore.android.core.str
 import kotlinx.serialization.SerialName
 import kotlinx.serialization.Serializable
@@ -56,6 +57,11 @@ data class Track(
     val titleTr: Tr = Tr.NONE,
     val artistTr: Tr = Tr.NONE,
     val albumTr: Tr = Tr.NONE,
+    /** the song's loudness for volume normalization (the row's `gain`; null when the server doesn't know it) */
+    val gain: TrackGain? = null,
+    /** the file's sample rate in Hz and bit depth (0 when unknown: lossy files, servers before 0.31) */
+    val sampleRate: Int = 0,
+    val bitDepth: Int = 0,
 ) {
     /** The artists to link: the server's split, or the artist text as one. */
     fun credits(): List<ArtistCredit> = artists.ifEmpty { if (artist.isNotEmpty()) listOf(ArtistCredit(artist)) else emptyList() }
@@ -97,6 +103,9 @@ data class Track(
             titleTr = Tr.of(o, "title"),
             artistTr = Tr.of(o, "artist"),
             albumTr = Tr.of(o, "album"),
+            gain = TrackGain.from(o["gain"]),
+            sampleRate = o.int("sample_rate"),
+            bitDepth = o.int("bit_depth"),
         )
     }
 }
@@ -159,6 +168,8 @@ data class LibrarySearch(
     val songs: List<Track>,
     val albums: List<Album>,
     val artists: List<Artist>,
+    /** `counts`: every match per section before the limit (0.31); null from older servers */
+    val counts: SearchCounts? = null,
 ) {
     val isEmpty: Boolean get() = songs.isEmpty() && albums.isEmpty() && artists.isEmpty()
 
@@ -167,7 +178,9 @@ data class LibrarySearch(
             val top = o.obj("top")
             val kind = top?.str("kind") ?: ""
             val item = top?.obj("item")
+            val counts = o.obj("counts")?.let { c -> SearchCounts(c.int("artists"), c.int("albums"), c.int("songs")) }
             return LibrarySearch(
+                counts = counts,
                 topKind = kind,
                 topSong = if (kind == "song") item?.let { Track.from(it) } else null,
                 topAlbum = if (kind == "album") item?.let { Album.from(it) } else null,
@@ -176,6 +189,30 @@ data class LibrarySearch(
                 albums = o.arr("albums").objects().mapNotNull { Album.from(it) },
                 artists = o.arr("artists").objects().mapNotNull { Artist.from(it) },
             )
+        }
+    }
+}
+
+/** GET /api/library/search `counts`: how many artists, albums and songs match in all ("Show all N"). */
+data class SearchCounts(val artists: Int, val albums: Int, val songs: Int)
+
+/**
+ * GET /api/library/artists/{name}/tracks and /liked (0.31): one page of an artist's songs in the library and how
+ * many there are in all.
+ */
+data class ArtistSongs(val total: Int, val tracks: List<Track>) {
+    companion object {
+        val EMPTY = ArtistSongs(0, emptyList())
+
+        /** `{total, tracks}`; a bare array is read as the whole list. */
+        fun from(e: JsonElement?): ArtistSongs {
+            if (e is JsonArray) {
+                val list = e.objectsOf().mapNotNull { Track.from(it) }
+                return ArtistSongs(list.size, list)
+            }
+            val o = e as? JsonObject ?: return EMPTY
+            val list = (o.arr("tracks") ?: o.arr("items")).objectsOf().mapNotNull { Track.from(it) }
+            return ArtistSongs(if (o.containsKey("total")) o.int("total").coerceAtLeast(list.size) else list.size, list)
         }
     }
 }

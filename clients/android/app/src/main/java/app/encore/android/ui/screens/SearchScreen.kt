@@ -49,6 +49,7 @@ import app.encore.android.ui.Nav
 import app.encore.android.ui.Screen
 import app.encore.android.ui.components.AlbumCard
 import app.encore.android.ui.components.EmptyState
+import app.encore.android.ui.components.EncoreButton
 import app.encore.android.ui.components.ErrorBox
 import app.encore.android.ui.components.Gutter
 import app.encore.android.ui.components.PageTitle
@@ -143,7 +144,11 @@ fun SearchScreen(nav: Nav) {
             }
             err != null -> ErrorBox(err) { generation += 1 }
             r == null -> EmptyState(R.drawable.ic_search, "Search your library", "Artists, albums and songs you already have. Discover searches the whole catalogue.")
-            r.empty -> EmptyState(R.drawable.ic_search, "No results for “${r.query}”")
+            // nothing in the library: the same way out as the Library page's search (0.31)
+            r.empty -> Column(Modifier.fillMaxWidth(), horizontalAlignment = Alignment.CenterHorizontally) {
+                EmptyState(R.drawable.ic_search, "Nothing in your library matches “${r.query}”")
+                EncoreButton("Search everywhere", iconRes = R.drawable.ic_explore, primary = true) { nav.open(Screen.DiscoverSearch(r.query)) }
+            }
             else -> LazyColumn(Modifier.fillMaxSize()) {
                 val f = r.found
                 if (f.topSong != null || f.topAlbum != null || f.topArtist != null) {

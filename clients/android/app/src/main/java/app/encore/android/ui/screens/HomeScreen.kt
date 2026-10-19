@@ -39,6 +39,8 @@ import app.encore.android.data.api.Album
 import app.encore.android.data.api.Track
 import app.encore.android.data.api.User
 import app.encore.android.data.session.Session
+import app.encore.android.features.files.FilesAccess
+import app.encore.android.features.group.ListeningTogetherRow
 import app.encore.android.ui.Nav
 import app.encore.android.ui.Screen
 import app.encore.android.ui.Tab
@@ -110,6 +112,9 @@ fun HomeScreen(nav: Nav, session: Session) {
     }
 
     LoadableContent(loader) { data ->
+        // admins: the file manager in the menu, once the server says it has one (0.33)
+        val filesHere by FilesAccess.available.collectAsState()
+        androidx.compose.runtime.LaunchedEffect(data.me?.isAdmin) { if (data.me?.isAdmin == true) FilesAccess.probe(nav.graph) }
         LazyColumn(Modifier.fillMaxSize()) {
             // .hero: avatar, "Good evening, <name>" and the line under it
             item {
@@ -147,6 +152,7 @@ fun HomeScreen(nav: Nav, session: Session) {
                                 MenuSeparator,
                                 MenuEntry("Account", R.drawable.ic_person) { nav.open(Screen.Account) },
                                 MenuEntry("Settings", R.drawable.ic_settings) { nav.open(Screen.Settings) },
+                                if (data.me?.isAdmin == true && filesHere == true) MenuEntry("Files", R.drawable.ic_folder) { nav.open(Screen.Files) } else null,
                                 MenuEntry("Bug reports", R.drawable.ic_bug) { nav.open(Screen.BugReports("Home")) },
                             ),
                         )
@@ -166,6 +172,9 @@ fun HomeScreen(nav: Nav, session: Session) {
                     }
                 }
             }
+
+            // group listens on this server (0.31): nothing when there are none, or on an older server
+            item { ListeningTogetherRow(nav) }
 
             if (data.madeForYou.isNotEmpty()) {
                 item { SectionHead("Made for you", subtitle = "ListenBrainz builds these from what you listen to") }

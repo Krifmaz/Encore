@@ -29,6 +29,7 @@ import androidx.compose.material3.Text
 import androidx.compose.material3.TopAppBarDefaults
 import androidx.compose.material3.rememberModalBottomSheetState
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
@@ -50,6 +51,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import app.encore.android.R
 import app.encore.android.data.api.Album
+import app.encore.android.data.api.ArtistSongs
 import app.encore.android.data.api.Track
 import app.encore.android.data.repo.AlbumPage
 import app.encore.android.data.repo.ArtistExtras
@@ -79,6 +81,7 @@ import app.encore.android.ui.components.SectionHead
 import app.encore.android.ui.components.SmallButton
 import app.encore.android.ui.components.Tile
 import app.encore.android.ui.components.Toasts
+import app.encore.android.ui.components.TrackRow
 import app.encore.android.ui.components.formatDuration
 import app.encore.android.ui.components.formatLongDuration
 import app.encore.android.ui.components.rememberLibraryIndex
@@ -332,6 +335,48 @@ private fun ArtistPageScreen(nav: Nav, mbid: String, name: String) {
             val artistKeys = listOf("ar:${a.id}")
             val status = statuses.statusOf(artistKeys, a.requestStatus)
             val statusText = statuses.labelOf(artistKeys, a.requestLabel)
+            // 0.31: the songs liked from this artist and the artist's songs in the library (hidden on older servers)
+            // (a catalogue artist with nothing in the library asks for neither)
+            val libName = if (byName) name else if (a.libraryTracks > 0) a.name else ""
+            val likedLoad = rememberLoad("artist-liked", libName, mbid) {
+                if (libName.isEmpty()) ArtistSongs.EMPTY else try { api.artistLiked(libName, mbid) } catch (_: Exception) { ArtistSongs.EMPTY }
+            }
+            val songsLoad = rememberLoad("artist-songs", libName, mbid) {
+                if (libName.isEmpty()) ArtistSongs.EMPTY else try { api.artistSongs(libName, mbid, 0, ARTIST_SONGS_FIRST) } catch (_: Exception) { ArtistSongs.EMPTY }
+            }
+            val liked = (likedLoad.state.value as? Loadable.Ready)?.value ?: ArtistSongs.EMPTY
+            val firstSongs = (songsLoad.state.value as? Loadable.Ready)?.value ?: ArtistSongs.EMPTY
+            // "Show all N": every song, loaded page by page into this list
+            var allSongs by remember(libName, mbid) { mutableStateOf<List<Track>?>(null) }
+            var loadingAll by remember(libName, mbid) { mutableStateOf(false) }
+            val songs = allSongs ?: firstSongs.tracks
+            val likedIds by nav.graph.likes.liked.collectAsState()
+            val nowPlaying by nav.player.nowPlaying.collectAsState()
+            val libAlbumCount = if (byName) d.libraryAlbums.size else a.libraryAlbums.size
+
+            fun showAllSongs() {
+                if (loadingAll || allSongs != null) return
+                loadingAll = true
+                scope.launch {
+                    val out = ArrayList<Track>()
+                    try {
+                        withContext(Dispatchers.IO) {
+                            while (out.size < ARTIST_SONGS_MAX) {
+                                val page = api.artistSongs(libName, mbid, out.size, ARTIST_SONGS_PAGE)
+                                out.addAll(page.tracks)
+                                if (page.tracks.size < ARTIST_SONGS_PAGE || out.size >= page.total) break
+                            }
+                        }
+                        allSongs = out
+                    } catch (e: kotlinx.coroutines.CancellationException) {
+                        throw e
+                    } catch (e: Exception) {
+                        Toasts.show(e.message ?: "Couldn't load the songs", "err")
+                    } finally {
+                        loadingAll = false
+                    }
+                }
+            }
 
             fun playAll(shuffle: Boolean) {
                 scope.launch {
@@ -441,15 +486,71 @@ private fun ArtistPageScreen(nav: Nav, mbid: String, name: String) {
                             TopTrackRow(nav, a.name, t, statuses, onPlay = { lib -> nav.player.play(playable, playable.indexOf(lib).coerceAtLeast(0)) }, onMore = { moreLike = a.name to t.title })
                         }
                     }
+                    // liked from this artist (0.31): song rows that play, Play all; hidden when none
+                    if (liked.tracks.isNotEmpty()) {
+                        item(key = "liked-head") {
+                            SectionHead(
+                                "Liked from this artist",
+                                subtitle = plural(liked.total, "song"),
+                                action = "Play all",
+                                onAction = { nav.player.play(liked.tracks, 0) },
+                            )
+                        }
+                        items(liked.tracks.size, key = { i -> "liked-$i-${liked.tracks[i].id}" }) { i ->
+                            val t = liked.tracks[i]
+                            TrackRow(
+                                track = t,
+                                imageLoader = nav.graph.imageLoader,
+                                coverUrl = if (t.albumId.isNotEmpty()) api.coverUrl(t.albumId, 96) else null,
+                                liked = t.id in likedIds,
+                                playing = nowPlaying?.id == t.id,
+                                onClick = { nav.player.play(liked.tracks, i) },
+                                onLike = { nav.graph.likes.toggle(t.id) },
+                                subtitle = t.shownAlbum().ifEmpty { t.shownArtist() },
+                                onMore = { nav.trackMenu(t) },
+                            )
+                        }
+                    }
+                    // in your library: the artist's songs (the first ten, Show all N) and albums
+                    if (songs.isNotEmpty() || libAlbumCount > 0) {
+                        item(key = "lib-head") {
+                            SectionHead(
+                                "In your library",
+                                subtitle = listOfNotNull(
+                                    if (firstSongs.total > 0) plural(firstSongs.total, "song") else null,
+                                    if (libAlbumCount > 0) plural(libAlbumCount, "album") else null,
+                                ).joinToString(" · "),
+                            )
+                        }
+                    }
+                    if (songs.isNotEmpty()) {
+                        val more = allSongs == null && firstSongs.total > songs.size
+                        item(key = "lib-songs-head") {
+                            SubHead("Songs", action = if (more) (if (loadingAll) "Loading…" else "Show all ${firstSongs.total}") else null, onAction = { showAllSongs() })
+                        }
+                        items(songs.size, key = { i -> "lib-song-$i-${songs[i].id}" }) { i ->
+                            val t = songs[i]
+                            TrackRow(
+                                track = t,
+                                imageLoader = nav.graph.imageLoader,
+                                coverUrl = if (t.albumId.isNotEmpty()) api.coverUrl(t.albumId, 96) else null,
+                                liked = t.id in likedIds,
+                                playing = nowPlaying?.id == t.id,
+                                onClick = { nav.player.play(songs, i) },
+                                onLike = { nav.graph.likes.toggle(t.id) },
+                                subtitle = listOf(t.shownAlbum(), t.year.take(4)).filter { it.isNotEmpty() }.joinToString(" · "),
+                                onMore = { nav.trackMenu(t) },
+                            )
+                        }
+                        if (libAlbumCount > 0) item(key = "lib-albums-head") { SubHead("Albums") }
+                    }
                     // albums in the library: by name, the library's own albums of the artist (the Library tab's grid)
                     if (byName && d.libraryAlbums.isNotEmpty()) {
-                        item { SectionHead("In your library", subtitle = "${d.libraryAlbums.size}") }
                         tileRows(d.libraryAlbums, libColumns, key = "lib") { al ->
                             AlbumCard(al, api.coverUrl(al.id, 400), nav.graph.imageLoader) { nav.open(Screen.Album(al.id)) }
                         }
                     }
                     if (a.libraryAlbums.isNotEmpty()) {
-                        item { SectionHead("In your library", subtitle = "${a.libraryAlbums.size}") }
                         tileRows(a.libraryAlbums, 2, key = "lib") { l ->
                             Tile(
                                 title = l.album,
@@ -532,8 +633,12 @@ private fun ArtistPageScreen(nav: Nav, mbid: String, name: String) {
                     item { Spacer(Modifier.height(24.dp)) }
                 }
                 if (byName && d.libraryAlbums.isNotEmpty()) {
-                    // the library's albums start after the header and their title (by name there is no bio or Popular)
-                    val libStart = 1 + (if (x != null && x.bio.isNotEmpty()) 1 else 0) + (if (x != null && x.top.isNotEmpty()) 1 + x.top.size else 0) + 1
+                    // the library's albums start after the header, Liked from this artist, the section's title and its
+                    // songs (by name there is no bio or Popular)
+                    val likedRows = if (liked.tracks.isNotEmpty()) 1 + liked.tracks.size else 0
+                    val songRows = if (songs.isNotEmpty()) 1 + songs.size + 1 else 0
+                    val libStart = 1 + (if (x != null && x.bio.isNotEmpty()) 1 else 0) + (if (x != null && x.top.isNotEmpty()) 1 + x.top.size else 0) +
+                        likedRows + 1 + songRows
                     val target = remember(listState, libStart, libColumns) {
                         ScrollerTarget(
                             firstVisible = { (listState.firstVisibleItemIndex - libStart).coerceAtLeast(0) * libColumns },
@@ -591,6 +696,25 @@ private fun ArtistPageScreen(nav: Nav, mbid: String, name: String) {
             extTracks?.let { m -> ExtTracksSheet(nav, a.name, m, statuses, artistMbid = a.id, onDismiss = { extTracks = null }) }
             moreLike?.let { (artist, title) -> MoreLikeThisSheet(nav, artist, title, "", onDismiss = { moreLike = null }) }
         }
+    }
+}
+
+/** "In your library": the first songs shown, the page size of "Show all N", and the most it loads. */
+private const val ARTIST_SONGS_FIRST = 10
+private const val ARTIST_SONGS_PAGE = 200
+private const val ARTIST_SONGS_MAX = 5000
+
+private fun plural(n: Int, what: String) = "$n $what${if (n == 1) "" else "s"}"
+
+/** A heading inside a section ("Songs", "Albums" under "In your library") with an optional small button. */
+@Composable
+private fun SubHead(title: String, action: String? = null, onAction: (() -> Unit)? = null) {
+    Row(
+        Modifier.fillMaxWidth().padding(start = Gutter, end = Gutter, top = 6.dp, bottom = 4.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Text(title, style = MaterialTheme.typography.titleMedium, modifier = Modifier.weight(1f))
+        if (action != null && onAction != null) SmallButton(action, onClick = onAction)
     }
 }
 

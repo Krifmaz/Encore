@@ -7,6 +7,8 @@
     <uses-permission android:name="android.permission.WAKE_LOCK" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MEDIA_PLAYBACK" />
+    <!-- Files (features/files): an upload to the server keeps the app running until it ends (UploadService) -->
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_DATA_SYNC" />
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
     <!-- Offline songs (features/offline): Android 8–9 write Music/Encore as plain files; Android 10+ use MediaStore,
          which needs no permission for the app's own files -->
@@ -68,6 +70,13 @@
                 <action android:name="android.media.browse.MediaBrowserService" />
             </intent-filter>
         </service>
+
+        <!-- Files: uploads to the server go on while the app is in the background, with their progress as the
+             notification; stops itself when the batch ends -->
+        <service
+            android:name=".features.files.UploadService"
+            android:exported="false"
+            android:foregroundServiceType="dataSync" />
 
         <!-- Media buttons (Bluetooth / headset play) after the process died or a reboot: starts the service, which
              resumes the last queue through onPlaybackResumption -->

@@ -234,6 +234,28 @@ class EncoreApi(private val client: OkHttpClient, private val store: SessionStor
     fun artistTracks(name: String): List<Track> =
         get("/api/library/artist-tracks?name=" + enc(name)).objects().mapNotNull { Track.from(it) }
 
+    /**
+     * GET /api/library/artists/{name}/liked (0.31): the songs of the artist the listener liked, newest like first.
+     * [mbid] (optional) lets the server also count songs credited to that MusicBrainz id. Older servers answer 404.
+     */
+    fun artistLiked(name: String, mbid: String = "", limit: Int = 200): ArtistSongs =
+        ArtistSongs.from(get(artistRoute(name, "liked") + "&limit=$limit" + if (mbid.isNotEmpty()) "&mbid=${enc(mbid)}" else ""))
+
+    /**
+     * GET /api/library/artists/{name}/tracks (0.31): a page of the artist's songs in the library (album year, then
+     * disc and track) with the total. Older servers answer 404.
+     */
+    fun artistSongs(name: String, mbid: String = "", offset: Int = 0, limit: Int = 50): ArtistSongs =
+        ArtistSongs.from(get(artistRoute(name, "tracks") + "&offset=$offset&limit=$limit" + if (mbid.isNotEmpty()) "&mbid=${enc(mbid)}" else ""))
+
+    /**
+     * `/api/library/artists/{name}/<tail>?name=<name>` (client-shapes §3.2): the name always goes in `name=` too, which
+     * the server prefers; a name with "/" puts `_` in the path, because proxies such as Apache (AllowEncodedSlashes
+     * Off) answer 404 for `%2F` in a path ("AC/DC").
+     */
+    private fun artistRoute(name: String, tail: String): String =
+        "/api/library/artists/" + (if (name.contains('/')) "_" else enc(name)) + "/$tail?name=" + enc(name)
+
     /** GET /api/library/tracks?ids=1,2,3: these songs in this order (unknown ids left out), 300 per call. */
     fun tracksByIds(ids: List<Long>): List<Track> {
         val out = ArrayList<Track>(ids.size)

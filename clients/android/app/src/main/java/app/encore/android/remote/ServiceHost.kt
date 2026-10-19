@@ -7,6 +7,7 @@ import app.encore.android.core.dbl
 import app.encore.android.core.str
 import app.encore.android.data.api.EncoreApi
 import app.encore.android.data.api.Track
+import app.encore.android.features.group.GroupListen
 import app.encore.android.playback.MediaItems
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.buildJsonArray
@@ -136,6 +137,15 @@ class ServiceHost(
     }
 
     override fun run(c: JsonObject) {
+        // in a group listen the queue is the group's: songs sent from another device go to the group (or are refused)
+        if (GroupListen.inGroup) {
+            when (c.str("action")) {
+                "play_queue" -> { GroupListen.playList(RemoteDevice.tracksOf(c["tracks"]), c.dbl("index").toInt(), c.dbl("position").coerceAtLeast(0.0)); return }
+                "enqueue" -> { GroupListen.enqueue(RemoteDevice.tracksOf(c["tracks"])); return }
+                "play_next" -> { GroupListen.playNext(RemoteDevice.tracksOf(c["tracks"])); return }
+                "shuffle", "repeat" -> return
+            }
+        }
         when (c.str("action")) {
             "toggle" -> if (player.isPlaying || player.playWhenReady && player.playbackState == Player.STATE_BUFFERING) player.pause() else play()
             "play" -> play()

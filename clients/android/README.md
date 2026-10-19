@@ -8,17 +8,23 @@ What it does:
 
 - server picker, sign-in with an authenticator code (2FA), app tokens, sign out
 - tabs Home, Search, Library, Playlists and Discover; For you, Requests, the download picker, Leaderboard, Account
-  and Settings; one artist page (MusicBrainz, or the library's albums for an artist known by name only)
+  and Settings; one artist page (MusicBrainz, or the library's albums for an artist known by name only) with "Liked
+  from this artist" and "In your library"; one search box on the Library page for artists, albums and songs, and
+  Discover's search asks the library too
 - playback in one `MediaLibraryService` (ExoPlayer): queue, mini and full player, gapless, notification and lock
   screen, resume and crash recovery, "Keep going with a shuffle of the whole library", plays and now playing
 - the web player's playback settings: quality Auto / Original / Data saver with the bandwidth estimate, the server's
-  Cadenza (render ahead), sound effects (EQ, crossfeed, balance, mono), song transitions, the Signal path
+  Cadenza (render ahead), volume normalization (Off / Track / Album, this device only), sound effects (EQ,
+  crossfeed, balance, mono), song transitions, the Signal path
+- the full player's lyrics mode: the cover becomes a thumbnail and the lyrics take the screen (tap a line to seek)
+- group listen: several people on the server hear the same queue at the same time, each on their own device
 - Cadenza on this phone (upsampling) and bit-perfect output to a USB DAC (Android 14+)
 - this phone as an Encore remote device (play here, send there, control another device)
-- Android Auto (browse, search, voice, live lyrics) and the Encore Lyrics car app
+- Android Auto (browse, search, voice, live lyrics, the quality badge, the artist's page) and the Encore Lyrics car app
 - "Share → Request in Encore", crash reports to the server (Diagnostics → App crashes)
 - songs saved for offline in `Music/Encore`, offline mode, Downloaded in the Library tab and in Android Auto
 - updates itself from the GitHub releases (Settings → This device → Updates)
+- for admins, the file manager (Settings → Server → Files): browse, upload, move, rename, trash and import
 - bug reports: the list, a report with its replies, a new report with pictures (Home menu and Settings → This
   device)
 
@@ -114,6 +120,45 @@ foreground service, no WorkManager), then the album cover (600 px) and the lyric
 - The rules (index, upgrade of older shapes, names, the quality label, the outbox) are plain Kotlin with JUnit tests
   in `app/src/test/java/app/encore/android/features/offline/`.
 
+### Group listen
+
+`features/group/` (0.31; the routes under `/api/group`, the same the web and the desktop use). Accounts only (guests join through the web page). Start a group listen (the player's ⋯ menu, the
+devices sheet: what plays here becomes the group's queue), join with a code or an invite link
+(`https://<server>/#/group/<code>` shared to the app opens "Join <host>'s group listen?"), or from the server's list
+(Home's "Listening together now", the devices sheet's "Group listens"; `GET /api/group` every 20 s while shown).
+`GroupListen` is the process's group: its state from the answers and the event stream
+(`GET /api/group/{id}/events`), the clock offset (three `GET /api/time` round trips), the actions and the toasts
+("Sam joined"). `GroupSync` (in the playback service) makes the player follow it: the group's queue, song and play
+state, drift above 0.5 s → seek, 0.15–0.5 s → playback speed 0.97 / 1.03 through the audio track until within 0.05 s
+(seek only with bit-perfect USB or Cadenza on the phone); what is done on the phone, the lock screen, headphones or the
+car goes to the group when this device may control it ("Only Alex controls playback" otherwise), and a pause on
+headphones or by a member who may not control pauses only here ("Paused here · Catch up"). Crossfade and the library
+shuffle are off in a group, linking to another device too; the car's subtitle starts with "Group listen", and what
+the car, a voice request or the Encore Lyrics app asks to play goes to the group's queue (the queue here is never
+replaced). A seek made to catch up aims ahead by what this phone's seeks have been taking to start playing
+(`SeekLag`, learnt per kind of stream), so a slow server-made stream does not seek again every few seconds. The clock
+offset is kept against the time since boot, not the wall clock. After an app restart the phone is back in its group
+but "Paused here": it never starts the music by itself. A server without group listens (404 / 403) hides every entry
+and is asked again only every 10 minutes. The rules (codes, the expected position, the sync rule, the clock, the
+toasts, the seek lag) are plain Kotlin with JUnit tests in `app/src/test/java/app/encore/android/features/group/`.
+
+To check on a device (no test covers it): the audio track applies the playback speed since 0.31
+(`setEnableAudioOutputPlaybackParameters(true)`, for the group listen's 0.97 / 1.03 nudge), so with a USB DAC in
+bit-perfect mode, and with Cadenza on the phone, the Signal path must still say bit-perfect and songs must play at 1.0
+(in and out of a group listen).
+
+### Files (admins)
+
+`features/files/` (0.33): Settings → Server → Files or the Home menu, for admins on a server that has the file manager
+(`GET /api/files/roots`; hidden otherwise). The roots, a folder with breadcrumbs, sorting and paging (500 at a time),
+multi-select by a long press, New folder, Rename, Move (a folder picker over the roots), Move to trash, the Trash
+(Restore, Delete forever, Empty trash), Edit tags for audio files, Import… with the match review or "Keep the files
+where they are", and Upload: files (`OpenMultipleDocuments`) or a whole folder (`OpenDocumentTree`, walked with
+`DocumentsContract`, names kept as `<folder>/<sub>/<file>`), one request per file, each streamed from its document
+through OkHttp multipart (never held in memory), in the app's scope so it goes on when the page is left, with a
+short foreground service (`UploadService`, type dataSync, the progress as its notification) so Android does not
+freeze or close the app halfway. A document whose size is not what the picker said is sent again without a length.
+
 ## Code layout
 
 Two Gradle modules: `:app` (packages under `app.encore.android`) and `:cadenza` (the JNI binding `CadenzaNative` and
@@ -134,6 +179,8 @@ navigation is a typed back stack in `ui/EncoreRoot.kt`. Comments that cite "PLAN
 | `remote` | `RemoteDevice` (check-ins, SSE commands, linking), `ServiceHost` (the service's side), `DevicesSheet` |
 | `features.offline` | songs saved on the phone: `OfflineStore` (files, MediaStore, the index), `OfflineWorker` (downloads), `OfflineMode` (offline mode, the outbox), `OfflineIndex` / `OfflineOutbox` (the plain rules), `OfflineUi` (menus, the Downloaded list, Settings → Downloads, the banner) |
 | `features.update` | the phone updates itself: `UpdateRules` (the plain rules), `Updater` (GitHub, the download, the checks), `ApkInstaller` (signer check, `PackageInstaller` session, `UpdateInstallReceiver`), `UpdatesSection` (Settings) |
+| `features.group` | group listen: `GroupModels` (state, list, `GroupRules`), `GroupApi`, `GroupListen` (the process's group, event stream, clock), `GroupSync` (the service's player follows the group), `GroupUi` (sheet, dialogs, the bar above the mini player, Home's row, the devices sheet's section, Up next) |
+| `features.files` | the admin file manager: `FilesApi` (routes, models, streamed uploads, `FilesAccess`), `FilesScreen` (roots, folders, Trash, dialogs, import, uploads) |
 | `features.bugs` | bug reports: `BugRules` (the plain rules), `BugReportsApi`, `BugAttachments` (photo picker, the JPEG fallback), `BugReportsScreen`, `BugReportScreen`, `NewBugReportSheet`; the export is shared through `androidx.core.content.FileProvider` (`<applicationId>.files`, `cacheDir/shared/` only) |
 | `car` | Encore Lyrics car app (`LyricsCarAppService`, `LyricsSurface`), the lyrics card (`LyricsCard`), `CarNowPlaying` and `LyricsCache` shared with `CarControls` |
 | `ui`, `ui.screens`, `ui.components`, `ui.theme` | `MainActivity`, `ShareActivity`, `PlayerConnection` (MediaController), `EncoreRoot`; the screens; shared widgets; the palettes from the web's CSS |
@@ -157,11 +204,14 @@ JSON extra) and the player events, handed to the parts that act on them:
 | `ServerCadenza.kt` | the server's Cadenza: render ahead, seeks into a finished render, falling back to the original |
 | `Autoplay.kt` | a shuffle of the library when the queue ends |
 | `Resume.kt` (+ `ResumeStore`) | the queue and spot on this phone, restored paused at start, and crash recovery |
-| `Transitions.kt` | crossfade / overlap / smart overlap with a second ExoPlayer for the old song's tail (its own Cadenza engine, effects only) |
+| `Transitions.kt` | crossfade / overlap / smart overlap with a second ExoPlayer for the old song's tail (its own Cadenza engine, effects only, the old song's normalization gain) |
+| `Normalization.kt` | volume normalization (0.31): the gain of a song from its row's `gain` and the settings (`NormPrefs`, keys `encore.norm.*`, this device only), the clipping limit, the Signal path line; JUnit tests in `app/src/test/.../playback/` |
 | `CarControls.kt`, `BrowseTree.kt`, `MediaItems.kt`, `CoverProvider.kt` | Android Auto and the session's buttons, the browse tree, media ids, `content://` covers and lyrics cards |
 
 The sound path: ExoPlayer decodes to 16-bit PCM; `EffectsAudioProcessor` (the only processor in the sink) converts it
-to floats straight into a direct buffer of `CadenzaEngine`; `CadenzaNative.nativeProcess` runs the effects (and,
+to floats straight into a direct buffer of `CadenzaEngine`, multiplied by the song's volume normalization gain on the
+way (set when the sink is configured for the song, ramped over one buffer when the setting changes mid-song, never for
+a song that goes bit-perfect to a USB DAC; it works with the effects off and without the Cadenza library); `CadenzaNative.nativeProcess` runs the effects (and,
 when "Upsample on this phone with Cadenza" is on, the resampler) in place over that memory, or into a second
 direct buffer when upsampling makes the output longer; the processor writes 16-bit with TPDF dither, or 24 / 32-bit
 for Cadenza's output and bit-perfect USB. Effects off at the song's rate pass the bytes through untouched.
@@ -217,6 +267,13 @@ shuffle of the library. It never repeats songs heard in this session. It can be 
   …) still resolves.
 - Picking a song plays the list it was shown in.
 - Voice requests ("play <album or artist>") search the library.
+- The artist's page `artist:<mbid or name>` (0.31): "Shuffle <name>", "Popular songs" (the ones in the library),
+  "Liked from this artist", then the albums under "Albums". Old `artist:<name>` ids still resolve.
+- While Android Auto (or the desktop head unit) is connected, the quality badge (lossless, hi-res, lossy, Cadenza;
+  `CarQuality.kt`, it does nothing when pressed) and an Artist button come after Like, and the quality detail ("FLAC
+  24/96") goes on the subtitle line after the artist, also while live lyrics own the title line. The now-playing
+  screen can't open a browse node, so Artist pins the artist at the top of Home and says so for 3 s. In a group
+  listen the subtitle starts with "Group listen · ".
 - Resume uses the last queue, which is stored on the phone.
 - Artwork is `content://<applicationId>.covers/album/<id>?s=600`. Android Auto and System UI can't send our session,
   so `CoverProvider` fetches each cover once with the app's client and serves it from the cache.
@@ -249,8 +306,9 @@ shuffle of the library. It never repeats songs heard in this session. It can be 
   fading with distance, over the cover's colour. At most 30 frames a second while something moves, a position
   check 10 times a second otherwise, nothing while the screen is stopped. A tap on a line seeks to it (surface
   clicks need car API 5); a drag scrolls by hand for 4 s.
-- The content pane shows title, artist, album and cover; previous / play-pause / next are in the action strip
-  (a pane takes only two actions).
+- The content list shows title, artist, album and cover; previous / play-pause / next are in the action strip. The
+  artist row opens the artist's page (`car.BrowseScreen`, the media app's `artist:` node read through a
+  MediaBrowser on the service's session); a song or Shuffle plays and goes back to the lyrics.
 - The song and position come from the playback service in the same process (`CarNowPlaying`, re-published every
   second while the screen is shown); commands go through a MediaController on the service's session, which also
   starts the service when Encore Lyrics opens first. Seeking uses the service's `SEEK` command (absolute position,

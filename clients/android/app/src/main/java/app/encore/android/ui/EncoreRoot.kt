@@ -38,6 +38,10 @@ import app.encore.android.features.offline.OfflineBanner
 import app.encore.android.features.offline.OfflineMenu
 import app.encore.android.features.offline.OfflineMode
 import app.encore.android.features.offline.rememberOfflineMenu
+import app.encore.android.features.files.FilesScreen
+import app.encore.android.features.group.GroupBar
+import app.encore.android.features.group.GroupDialogs
+import app.encore.android.features.group.GroupListen
 import app.encore.android.remote.DevicesSheet
 import app.encore.android.remote.LinkedBar
 import app.encore.android.remote.RemoteUi
@@ -61,7 +65,7 @@ import app.encore.android.ui.screens.FullPlayer
 import app.encore.android.ui.screens.HomeScreen
 import app.encore.android.ui.screens.LeaderboardScreen
 import app.encore.android.ui.screens.LibraryScreen
-import app.encore.android.ui.screens.LyricsScreen
+import app.encore.android.ui.screens.LyricsRequests
 import app.encore.android.ui.screens.PickerScreen
 import app.encore.android.ui.screens.PlaylistEditScreen
 import app.encore.android.ui.screens.PlaylistImportScreen
@@ -113,6 +117,9 @@ sealed interface Screen {
     // with a new report as the page it came from) and one report with its thread
     data class BugReports(val from: String = "") : Screen
     data class BugReport(val id: Long) : Screen
+
+    /** The admin file manager (features/files, 0.33): Settings → Server → Files, or the Home menu. */
+    data object Files : Screen
 }
 
 /** The bottom tabs (the web's main nav on phones): Home, Search, Library, Playlists, Discover. */
@@ -173,6 +180,15 @@ private fun MainScreen(graph: AppGraph, player: PlayerConnection, session: Sessi
     val devicesOpen by RemoteUi.devicesOpen.collectAsState()
     // offline mode (features/offline): the banner, the Library tab with the songs saved here, the other tabs greyed
     val offline by OfflineMode.active.collectAsState()
+    // a group listen (features/group): its bar above the mini player; a group link shared to the app asks to join
+    val group by GroupListen.state.collectAsState()
+    val groupLink by GroupListen.pendingLink.collectAsState()
+    LaunchedEffect(groupLink, session) {
+        val text = groupLink ?: return@LaunchedEffect
+        GroupListen.pendingLink.value = null
+        GroupListen.init(graph.app)
+        GroupListen.openInvite(text)
+    }
 
     LaunchedEffect(session) { OfflineMode.start(graph.app) }
     LaunchedEffect(offline) {
@@ -226,7 +242,12 @@ private fun MainScreen(graph: AppGraph, player: PlayerConnection, session: Sessi
                 Column {
                     // "Continue <song> from 2:31 · was playing on <device>": pick up where another device left off
                     // linked: "Controlling <device>" instead (the pick-up bar is hidden while this phone is a remote)
-                    if (link == null) SpotBar(nav, session) else LinkedBar(nav)
+                    // in a group listen: "Group · 3" (and "Paused here · Catch up") instead
+                    when {
+                        group != null -> GroupBar(nav)
+                        link == null -> SpotBar(nav, session)
+                        else -> LinkedBar(nav)
+                    }
                     if (nowPlaying != null) MiniPlayer(nav, onOpen = { showPlayer = true })
                     Box(Modifier.fillMaxWidth().height(1.dp).background(p.border))
                     NavigationBar(containerColor = p.bg2, tonalElevation = 0.dp) {
@@ -272,6 +293,7 @@ private fun MainScreen(graph: AppGraph, player: PlayerConnection, session: Sessi
                     is Screen.PlaylistImport -> PlaylistImportScreen(nav, top.into)
                     is Screen.BugReports -> BugReportsScreen(nav, top.from)
                     is Screen.BugReport -> BugReportScreen(nav, top.id)
+                    is Screen.Files -> FilesScreen(nav)
                     null -> when (tab) {
                         Tab.HOME -> HomeScreen(nav, session)
                         Tab.SEARCH -> SearchScreen(nav)
@@ -285,9 +307,8 @@ private fun MainScreen(graph: AppGraph, player: PlayerConnection, session: Sessi
         if (showPlayer && nowPlaying != null) {
             FullPlayer(nav, menuActions, onClose = { showPlayer = false })
         }
-        if (lyricsOpen && nowPlaying != null) {
-            LyricsScreen(nav, onClose = { player.closeLyrics() })
-        }
+        // ⋯ → Lyrics (a song's menu, the player's): the full player opens in lyrics mode
+        LyricsRequests(nav, onOpenPlayer = { showPlayer = true })
         if (signalPathOpen && nowPlaying != null) {
             SignalPathSheet(nav, onDismiss = { player.closeSignalPath() })
         }
@@ -297,6 +318,8 @@ private fun MainScreen(graph: AppGraph, player: PlayerConnection, session: Sessi
         if (devicesOpen) {
             DevicesSheet(nav, onDismiss = { RemoteUi.devicesOpen.value = false })
         }
+        // group listen: its sheet, Start, Join with a code, "Join <host>'s group listen?"
+        GroupDialogs(nav)
         addToPlaylistIds?.let { ids ->
             AddToPlaylistSheet(graph.api, ids, onDismiss = { addToPlaylistIds = null })
         }

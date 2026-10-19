@@ -50,6 +50,9 @@ import androidx.compose.ui.unit.dp
 import app.encore.android.R
 import app.encore.android.core.dbl
 import app.encore.android.core.str
+import app.encore.android.features.group.GroupDevicesSection
+import app.encore.android.features.group.GroupLinkNote
+import app.encore.android.features.group.GroupListen
 import app.encore.android.ui.Nav
 import app.encore.android.ui.components.Cover
 import app.encore.android.ui.components.SmallButton
@@ -156,6 +159,8 @@ fun DevicesSheet(nav: Nav, onDismiss: () -> Unit) {
     val link by remote.link.collectAsState()
     val custom by remote.customName.collectAsState()
     val nowPlaying by nav.player.nowPlaying.collectAsState()
+    // in a group listen this phone plays the group's music itself: no linking, no sending
+    val group by GroupListen.state.collectAsState()
     val p = MaterialTheme.palette
     val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
     var renaming by remember { mutableStateOf(false) }
@@ -192,6 +197,7 @@ fun DevicesSheet(nav: Nav, onDismiss: () -> Unit) {
                 Spacer(Modifier.height(6.dp))
                 SmallButton("Unlink from ${l.name}", iconRes = R.drawable.ic_link) { remote.unlink() }
             }
+            GroupLinkNote(Modifier.padding(top = 4.dp))
             Spacer(Modifier.height(12.dp))
         }
         LazyColumn(Modifier.fillMaxWidth().fillMaxHeight(0.75f)) {
@@ -211,10 +217,13 @@ fun DevicesSheet(nav: Nav, onDismiss: () -> Unit) {
                     dev = dev,
                     others = devices,
                     linked = link?.id == dev.id,
-                    canSend = link == null && nowPlaying != null,
+                    canSend = link == null && nowPlaying != null && group == null,
+                    grouped = group != null,
                     onDone = onDismiss,
                 )
             }
+            // group listens on this server (0.31): the one this phone is in, the others, Start / Join with a code
+            item { GroupDevicesSection(nav, onDone = onDismiss) }
             item { Spacer(Modifier.height(24.dp)) }
         }
     }
@@ -244,7 +253,7 @@ fun DevicesSheet(nav: Nav, onDismiss: () -> Unit) {
 
 @OptIn(ExperimentalLayoutApi::class)
 @Composable
-private fun DeviceCard(nav: Nav, dev: DeviceInfo, others: List<DeviceInfo>, linked: Boolean, canSend: Boolean, onDone: () -> Unit) {
+private fun DeviceCard(nav: Nav, dev: DeviceInfo, others: List<DeviceInfo>, linked: Boolean, canSend: Boolean, grouped: Boolean, onDone: () -> Unit) {
     val remote = nav.player.remote
     val p = MaterialTheme.palette
     val s = dev.state
@@ -269,7 +278,7 @@ private fun DeviceCard(nav: Nav, dev: DeviceInfo, others: List<DeviceInfo>, link
             Text(dev.name, fontWeight = FontWeight.SemiBold, maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.weight(1f))
             if (dev.remoteOf.isEmpty()) {
                 if (linked) SmallButton("Linked · Unlink", iconRes = R.drawable.ic_link, primary = true) { remote.unlink() }
-                else SmallButton("Link as remote", iconRes = R.drawable.ic_link) { remote.linkTo(dev) }
+                else if (!grouped) SmallButton("Link as remote", iconRes = R.drawable.ic_link) { remote.linkTo(dev) }
             }
         }
         val title = dev.title
@@ -332,7 +341,7 @@ private fun DeviceCard(nav: Nav, dev: DeviceInfo, others: List<DeviceInfo>, link
                 }
             }
             FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                if (title.isNotEmpty() && !linked) {
+                if (title.isNotEmpty() && !linked && !grouped) {
                     SmallButton("Play here") { playHere(nav, dev); onDone() }
                 }
                 if (canSend) {

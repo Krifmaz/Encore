@@ -52,7 +52,9 @@ import app.encore.android.BuildConfig
 import app.encore.android.R
 import app.encore.android.data.prefs.EqBand
 import app.encore.android.data.prefs.PhonePrefs
+import app.encore.android.data.prefs.NormPrefs
 import app.encore.android.data.prefs.PlaybackPrefs
+import app.encore.android.playback.Normalization
 import app.encore.android.data.prefs.Quality
 import app.encore.android.data.session.AuthKind
 import app.encore.android.data.session.Session
@@ -135,6 +137,9 @@ fun SettingsScreen(nav: Nav, session: Session) {
                 }
                 Icon(painterResource(R.drawable.ic_expand_more), contentDescription = null, tint = p.muted)
             }
+
+            // admins: Settings → Server → Files (the file manager, 0.33; hidden on older servers)
+            app.encore.android.features.files.FilesEntry(nav) { nav.open(app.encore.android.ui.Screen.Files) }
 
             SectionTitle("This device")
             DeviceNameRow(nav)
@@ -286,6 +291,8 @@ fun PlaybackSettingsScreen(nav: Nav, onBack: () -> Unit) {
             Help("For the whole song text on the car screen, open Encore Lyrics in the car's app list.")
 
             H3("Sound (on this device)")
+            val norm by repo.norm.collectAsState()
+            NormalizationSection(norm, bitPerfect) { n -> repo.setNorm(n) }
             SoundSection(prefs, bitPerfect, set)
 
             H3("Song transitions")
@@ -420,6 +427,38 @@ private fun SoundSection(prefs: PlaybackPrefs, bitPerfect: Boolean, set: ((Playb
     else Help("Runs in this app – it costs your server nothing. Works with every quality setting. Turning it on means the sound is no longer the untouched file (the Signal path says so).")
 }
 
+private val NORM_HELP = mapOf(
+    "off" to "Every song plays at its own level.",
+    "track" to "Every song plays at about the same loudness.",
+    "album" to "Every album plays at about the same loudness; the songs of an album keep their differences.",
+)
+
+/**
+ * Volume normalization (the web's Settings → Playback → Sound, keys `encore.norm.*`): Off / Track / Album, the target
+ * loudness and "Prevent clipping". This device only (PrefsRepository.norm); it works with the effects off.
+ */
+@Composable
+private fun NormalizationSection(norm: NormPrefs, bitPerfect: Boolean, set: (NormPrefs) -> Unit) {
+    Column(Modifier.alpha(if (bitPerfect) 0.45f else 1f)) {
+        Text("Volume normalization", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.palette.muted, modifier = Modifier.padding(bottom = 4.dp))
+        Seg(NormPrefs.MODES, norm.mode) { v -> set(norm.copy(mode = v)) }
+        Help(NORM_HELP[norm.mode] ?: "")
+        Column(Modifier.alpha(if (norm.on) 1f else 0.45f)) {
+            SliderRow(
+                "Target level",
+                Normalization.lufsText(norm.target),
+                norm.target.toFloat(),
+                NormPrefs.MIN_TARGET.toFloat()..NormPrefs.MAX_TARGET.toFloat(),
+                steps = NormPrefs.MAX_TARGET - NormPrefs.MIN_TARGET - 1,
+                enabled = norm.on,
+            ) { v -> set(norm.copy(target = Math.round(v))) }
+            CheckRow("Prevent clipping", norm.clip, enabled = norm.on) { on -> set(norm.copy(clip = on)) }
+        }
+        Help("Uses the ReplayGain tags in your files, or Encore's own measurement when a file has none. Higher targets are louder; −14 LUFS is about what streaming services play at. Prevent clipping never turns a song up further than its loudest peak allows. Only on this device.")
+    }
+    if (bitPerfect) Help("Normalization is off while this phone sends songs bit-perfect to the USB DAC (Cadenza engine below).")
+}
+
 private val TRANSITION_HELP = mapOf(
     "off" to "Each song plays to its end, then the next one starts.",
     "crossfade" to "The end of one song fades out while the next one fades in.",
@@ -528,6 +567,7 @@ private fun previewText(label: String, v: Float): String = when (label) {
     "Preamp" -> signDb(Math.round(v / 0.5f) * 0.5)
     "Balance" -> PlaybackPrefs.balanceText(Math.round(v))
     "Length" -> "${Math.round(v)} s"
+    "Target level" -> Normalization.lufsText(Math.round(v))
     else -> v.toString()
 }
 

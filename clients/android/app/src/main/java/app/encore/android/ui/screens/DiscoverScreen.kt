@@ -95,8 +95,6 @@ import app.encore.android.ui.theme.palette
 import coil3.compose.AsyncImage
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.async
-import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
@@ -540,6 +538,11 @@ private val SEARCH_TYPES = listOf("all" to "Top results", "artist" to "Artists",
 /**
  * The Discover tab: search MusicBrainz for artists, albums and songs; everything can be requested. Stacked with
  * [initialQuery] it opens as a page with a back arrow (the For you album tiles and library links use that).
+ *
+ * Every search also asks the library (GET /api/library/search, in parallel; the newest query wins, 0.31): Top
+ * results start with "In your library" (artists, albums, songs), the Artists, Albums and Songs tabs with a short
+ * strip of their kind, and when the catalogue has nothing the library's matches show instead of "No results".
+ * Library items play or open the library's pages; catalogue items keep their Request buttons.
  */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -551,6 +554,8 @@ fun DiscoverScreen(nav: Nav, initialQuery: String = "", initialType: String = "a
     var type by remember { mutableStateOf(SEARCH_TYPES.indexOfFirst { it.first == initialType }.coerceAtLeast(0)) }
     var results by remember { mutableStateOf<SearchResults?>(null) }
     var library by remember { mutableStateOf<LibrarySearch?>(null) }
+    /** the query [library] answers (a newer one may be typed already) */
+    var libraryFor by remember { mutableStateOf("") }
     var busy by remember { mutableStateOf(false) }
     var error by remember { mutableStateOf<String?>(null) }
     var generation by remember { mutableStateOf(0) }
@@ -567,30 +572,38 @@ fun DiscoverScreen(nav: Nav, initialQuery: String = "", initialType: String = "a
             q = v
         }
     }
+    // the library answers at once and shows first; the catalogue (MusicBrainz, Deezer, Apple) takes a moment
+    LaunchedEffect(q, generation) {
+        if (q.isEmpty()) {
+            library = null
+            libraryFor = ""
+            return@LaunchedEffect
+        }
+        val lib = try {
+            withContext(Dispatchers.IO) { nav.graph.api.search(q, 12) }
+        } catch (e: CancellationException) {
+            throw e
+        } catch (_: Exception) {
+            null
+        }
+        library = lib
+        libraryFor = q
+    }
     LaunchedEffect(q, type, generation) {
         if (q.isEmpty()) {
             results = null
-            library = null
             error = null
             return@LaunchedEffect
         }
         busy = true
         try {
-            // the library answers at once; the catalogue (MusicBrainz, Deezer, Apple) takes a moment
-            val (r, lib) = withContext(Dispatchers.IO) {
-                coroutineScope {
-                    val lib = async {
-                        if (type != 0) null else try { nav.graph.api.search(q, 12) } catch (e: CancellationException) { throw e } catch (_: Exception) { null }
-                    }
-                    features.search(q, SEARCH_TYPES[type].first) to lib.await()
-                }
-            }
-            results = r
-            library = lib
+            results = withContext(Dispatchers.IO) { features.search(q, SEARCH_TYPES[type].first) }
             error = null
         } catch (e: CancellationException) {
             throw e
         } catch (e: Exception) {
+            // (not the results of the query before)
+            results = null
             error = e.message ?: "Search failed"
         } finally {
             busy = false
@@ -615,28 +628,50 @@ fun DiscoverScreen(nav: Nav, initialQuery: String = "", initialType: String = "a
         ChoiceRow(SEARCH_TYPES.map { it.second }, type, onSelect = { type = it; q = input.trim() })
         val r = results
         val err = error
+        // the library's matches of this tab's kind (all three on Top results)
+        val lib = library?.takeIf { libraryFor == q }
+        val libArtists = if (type == 0 || type == 1) lib?.artists.orEmpty().take(6) else emptyList()
+        val libAlbums = if (type == 0 || type == 2) lib?.albums.orEmpty().take(6) else emptyList()
+        val libSongs = when (type) { 0 -> lib?.songs.orEmpty().take(5); 3 -> lib?.songs.orEmpty().take(3); else -> emptyList() }
+        val libHas = libArtists.isNotEmpty() || libAlbums.isNotEmpty() || libSongs.isNotEmpty()
         when {
             q.isEmpty() -> EmptyState(R.drawable.ic_search, "Search the entire MusicBrainz catalogue", "Everything you find can be requested with one click.")
-            err != null -> ErrorBox(err) { generation += 1 }
-            busy && r == null -> Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) { CircularProgressIndicator(color = p.accent, trackColor = p.border) }
-            r == null -> Spacer(Modifier.height(1.dp))
-            r.isEmpty && (library?.isEmpty ?: true) -> EmptyState(R.drawable.ic_search, "No results for “$q”")
+            err != null && !libHas -> ErrorBox(err) { generation += 1 }
+            busy && r == null && !libHas -> Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) { CircularProgressIndicator(color = p.accent, trackColor = p.border) }
+            r == null && !libHas -> Spacer(Modifier.height(1.dp))
+            r != null && r.isEmpty && !libHas -> EmptyState(R.drawable.ic_search, "No results for “$q”")
             else -> LazyColumn(Modifier.fillMaxSize()) {
                 if (busy) item { Row(Modifier.padding(horizontal = Gutter, vertical = 4.dp)) { Spinner() } }
                 // what the library already has, first
-                val lib = library
-                if (lib != null && (lib.songs.isNotEmpty() || lib.albums.isNotEmpty())) {
+                if (libHas) {
                     item { SectionHead("In your library") }
-                    if (lib.albums.isNotEmpty()) {
+                    if (libArtists.isNotEmpty()) {
                         item {
                             LazyRow(contentPadding = PaddingValues(horizontal = Gutter), horizontalArrangement = Arrangement.spacedBy(14.dp)) {
-                                items(lib.albums.take(6), key = { "lib-album-" + it.id }) { a ->
+                                items(libArtists, key = { "lib-artist-" + it.name }) { a ->
+                                    Tile(
+                                        title = a.shownName(),
+                                        subtitle = "${a.albums} album${if (a.albums == 1) "" else "s"}",
+                                        centered = true,
+                                        modifier = Modifier.width(120.dp),
+                                        onClick = { nav.open(Screen.Artist(a.name)) },
+                                    ) { m ->
+                                        Cover(if (a.coverAlbum.isNotEmpty()) nav.graph.api.coverUrl(a.coverAlbum, 400) else null, nav.graph.imageLoader, m, corner = 999.dp, label = a.name)
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    if (libAlbums.isNotEmpty()) {
+                        item {
+                            LazyRow(contentPadding = PaddingValues(horizontal = Gutter), horizontalArrangement = Arrangement.spacedBy(14.dp)) {
+                                items(libAlbums, key = { "lib-album-" + it.id }) { a ->
                                     AlbumCard(a, nav.graph.api.coverUrl(a.id, 400), nav.graph.imageLoader, Modifier.width(140.dp)) { nav.open(Screen.Album(a.id)) }
                                 }
                             }
                         }
                     }
-                    val songs = lib.songs.take(5)
+                    val songs = libSongs
                     items(songs.size, key = { i -> "lib-song-" + songs[i].id }) { i ->
                         val t = songs[i]
                         TrackRow(
@@ -652,6 +687,15 @@ fun DiscoverScreen(nav: Nav, initialQuery: String = "", initialType: String = "a
                             onMore = { nav.trackMenu(t) },
                         )
                     }
+                }
+                if (r == null) {
+                    // the catalogue is still searching, or failed
+                    if (err != null) item { NoteText("Couldn't search the catalogue: $err", Modifier.padding(vertical = 8.dp)) }
+                    item { Spacer(Modifier.height(24.dp)) }
+                    return@LazyColumn
+                }
+                if (r.isEmpty && !busy) {
+                    item { NoteText("Nothing in the catalogue matches “$q”", Modifier.padding(vertical = 12.dp)) }
                 }
                 val top = r.top
                 if (top != null) {

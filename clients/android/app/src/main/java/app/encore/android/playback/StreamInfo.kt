@@ -43,6 +43,15 @@ data class StreamInfo(
     val usbDevice: String = "",
     /** why bit-perfect output is on but this song went through the mixer ("" = it did not, or it is off) */
     val usbNote: String = "",
+    /**
+     * Volume normalization for this song, the Signal path's "Normalization" row: "−3.2 dB (album gain, target −14
+     * LUFS)", "No loudness data for this song" or "Off for bit-perfect output"; "" while normalization is off
+     */
+    val normText: String = "",
+    /** the row's note ("Lowered to keep the peaks from clipping", …) */
+    val normNote: String = "",
+    /** the gain normalization applies to this song in dB (0 = none: off, no data, bit-perfect) */
+    val normDb: Double = 0.0,
 ) {
     fun toBundle(): Bundle = Bundle().apply { putString(KEY, EncoreJson.encodeToString(serializer(), this@StreamInfo)) }
 

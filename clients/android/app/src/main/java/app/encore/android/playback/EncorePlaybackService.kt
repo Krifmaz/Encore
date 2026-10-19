@@ -35,8 +35,12 @@ import app.encore.android.EncoreApp
 import app.encore.android.R
 import app.encore.android.cadenza.CadenzaEngine
 import app.encore.android.data.api.ApiException
+import app.encore.android.data.prefs.NormPrefs
 import app.encore.android.data.prefs.PlaybackPrefs
 import app.encore.android.data.prefs.Quality
+import app.encore.android.features.group.GroupListen
+import app.encore.android.features.group.GroupRules
+import app.encore.android.features.group.GroupSync
 import app.encore.android.features.offline.OfflineMode
 import app.encore.android.features.offline.OfflineStore
 import app.encore.android.playback.output.EffectsAudioProcessor
@@ -97,6 +101,11 @@ class EncorePlaybackService : MediaLibraryService() {
     private var prefsJob: Job? = null
     private var dspJob: Job? = null
     private var phoneJob: Job? = null
+    private var normJob: Job? = null
+    /** volume normalization (Settings → Playback → Sound, this device only: PrefsRepository.norm) */
+    @Volatile private var norm: NormPrefs = NormPrefs()
+    /** the song the effects processor's gain is for (set at its configure, on the playback thread) */
+    @Volatile private var gainTrackId: Long = -1L
     private var prefs: PlaybackPrefs = PlaybackPrefs()
 
     /** the song the phone couldn't decode and the server was asked to convert (once per song) */
@@ -110,6 +119,9 @@ class EncorePlaybackService : MediaLibraryService() {
 
     /** crossfade / overlap / smart overlap between songs (Transitions.kt) */
     private var transitions: Transitions? = null
+
+    /** a group listen: the player follows the group (features/group/GroupSync.kt) */
+    private var group: GroupSync? = null
 
     override fun onCreate() {
         super.onCreate()
@@ -131,6 +143,9 @@ class EncorePlaybackService : MediaLibraryService() {
         // per song, on the playback thread: the server's render wins over the phone's Cadenza
         effects.beforeConfigure = { inRate -> output.setupFor(inRate) }
         effects.directOutput = { rate, channels, upsampled -> output.directOutput(rate, channels, upsampled) }
+        // volume normalization: the gain of the song the sink is configured for (the one the resolver opened last)
+        norm = graph.prefs.norm.value
+        effects.gainAtConfigure = { configuredGain() }
         prefs = graph.prefs.playback.value
         applyPrefs(prefs)
         resolver.dspInfo = graph.prefs.dsp.value
@@ -150,7 +165,9 @@ class EncorePlaybackService : MediaLibraryService() {
                 DefaultAudioSink.Builder(context)
                     // the processor chain only runs on the 16-bit path (float output bypasses it in Media3)
                     .setEnableFloatOutput(false)
-                    .setEnableAudioTrackPlaybackParams(enableAudioTrackPlaybackParams)
+                    // the audio track changes the speed (a group listen nudges it to 0.97 / 1.03 to catch up, the pitch
+                    // stays): the processor chain itself keeps 1.0
+                    .setEnableAudioOutputPlaybackParameters(true)
                     // only the effects: Media3's silence skipping / speed processors take 16-bit PCM only, and phone
                     // Cadenza and bit-perfect USB hand the sink 24 / 32-bit
                     .setAudioProcessorChain(EffectsChain(fx))
@@ -169,7 +186,8 @@ class EncorePlaybackService : MediaLibraryService() {
             .setWakeMode(C.WAKE_MODE_NETWORK)
             .build()
 
-        val prefsNow: () -> PlaybackPrefs = { prefs }
+        // in a group listen the group's queue is the queue: no library shuffle after it
+        val prefsNow: () -> PlaybackPrefs = { if (group?.active == true) prefs.copy(autoplay = false) else prefs }
         val gone: () -> Boolean = { released }
         current = CurrentStream(player, resolver)
         scrobbler = Scrobbler(player, current, graph.api, io)
@@ -193,9 +211,12 @@ class EncorePlaybackService : MediaLibraryService() {
             api = graph.api,
             io = io,
             prefs = prefsNow,
-            allowed = { !resume.held && !output.bitPerfectRoute && current.variant()?.serverStream != true },
+            // crossfade is off in a group listen (gapless stays)
+            allowed = { !resume.held && !output.bitPerfectRoute && current.variant()?.serverStream != true && group?.active != true },
             durationSec = { current.durationSec() },
             onHandOver = { item -> scrobbler.handedOver(item) },
+            // the old song's tail keeps its own normalization gain
+            gainFor = { item -> Normalization.decide(norm, MediaItems.toTrack(item)?.gain).linear },
         )
 
         val notifications = DefaultMediaNotificationProvider.Builder(this).build()
@@ -211,11 +232,21 @@ class EncorePlaybackService : MediaLibraryService() {
             .setBitmapLoader(CacheBitmapLoader(DataSourceBitmapLoader.Builder(this).build()))
             .build()
         car.attach(session)
+        // the car's Artist button: the artist goes to the top of Home (Android Auto can't be sent to a browse node)
+        car.onArtist = { a, art ->
+            tree.pinArtist(a, art)
+            try { session.notifyChildrenChanged("home", 5, null) } catch (_: Exception) {}
+        }
+        // an artist page's Popular songs that came after the page was shown: the car asks for it again
+        tree.onLate = { id, count ->
+            main.post { if (!released) try { session.notifyChildrenChanged(id, count, null) } catch (_: Exception) {} }
+        }
 
         // the preferences follow the account; the UI changes them through PrefsRepository in this process
         prefsJob = graph.scope.launch { graph.prefs.playback.collect { p -> if (!released) applyPrefs(p) } }
         dspJob = graph.scope.launch { graph.prefs.dsp.collect { d -> if (!released) { resolver.dspInfo = d; publish() } } }
         phoneJob = graph.scope.launch { graph.prefs.phone.collect { p -> if (!released) output.phoneChanged(p) } }
+        normJob = graph.scope.launch { graph.prefs.norm.collect { n -> if (!released) applyNorm(n) } }
         output.start(player, current)
         graph.prefs.sync()
         adaptive.start()
@@ -238,6 +269,21 @@ class EncorePlaybackService : MediaLibraryService() {
             volume = { transitions?.volume() ?: player.volume },
             fading = { transitions?.fading == true },
         ).also { it.start() }
+        // a group listen: the player follows the group's queue and clock, and this phone's controls go to the group
+        GroupListen.init(this)
+        group = GroupSync(
+            player = player,
+            positionMs = { current.absPositionMs() },
+            seekTo = { ms -> seekAbs(ms) },
+            items = { tracks -> tracks.map { MediaItems.track(graph.api, it) }.also { rememberAll(it) } },
+            newQueue = { resolver.forgetAll(); car.queueReplaced() },
+            // the speed stays 1.0 for bit-perfect USB and Cadenza on this phone (seek only)
+            speedOk = { !output.bitPerfectRoute && lastPublished?.phoneCadenza != true },
+            // the variant the song plays (or will start) with: a server-made stream reopens at t= to seek
+            serverMade = { t -> (resolver.variantOf(t.id) ?: resolver.startVariant(resolver.track(t.id) ?: StreamTrack.of(t))).serverStream },
+            onActive = { on -> car.setGroup(on) },
+        ).also { it.start() }
+        GroupListen.restore()
     }
 
     override fun onGetSession(controllerInfo: MediaSession.ControllerInfo): MediaLibrarySession = session
@@ -254,6 +300,8 @@ class EncorePlaybackService : MediaLibraryService() {
 
     override fun onDestroy() {
         released = true
+        group?.stop()
+        group = null
         remoteHost?.stop()
         if (this::car.isInitialized) car.release()
         remoteHost = null
@@ -262,6 +310,7 @@ class EncorePlaybackService : MediaLibraryService() {
         prefsJob?.cancel()
         dspJob?.cancel()
         phoneJob?.cancel()
+        normJob?.cancel()
         output.stop()
         // a clean stop: the spot is saved and nothing is left to recover at the next start
         resume.stopped()
@@ -285,6 +334,49 @@ class EncorePlaybackService : MediaLibraryService() {
         // (the first call, from onCreate, comes before anything was rendered: nothing to forget yet)
         if (this::serverCadenza.isInitialized) serverCadenza.prefsChanged(before, p)
         publish()
+    }
+
+    // ---- volume normalization ------------------------------------------------------------------------------
+
+    /** At the effects processor's configure (playback thread): the gain of the song it is configured for. */
+    private fun configuredGain(): Float {
+        val t = resolver.lastOpenedTrack()
+        gainTrackId = t?.id ?: -1L
+        return Normalization.decide(norm, t?.gain).linear
+    }
+
+    /**
+     * The song in front of you is not the one the processor's gain was chosen for (a very short song let the next one
+     * be opened first): its own level, reached with a short ramp.
+     */
+    private fun gainFollows(id: Long) {
+        if (id == gainTrackId) return
+        val t = resolver.track(id) ?: return
+        gainTrackId = id
+        effects.gain = Normalization.decide(norm, t.gain).linear
+    }
+
+    /** New normalization settings: the song that plays changes level at once (ramped), the next ones at their start. */
+    private fun applyNorm(n: NormPrefs) {
+        if (n == norm) return
+        norm = n
+        val id = current.id
+        effects.gain = Normalization.decide(n, id?.let { resolver.track(it) }?.gain).linear
+        publish()
+    }
+
+    /** The Signal path's "Normalization" row for this song (text, note, dB). */
+    private fun normRow(t: StreamTrack): Triple<String, String, Double> {
+        if (!norm.on) return Triple("", "", 0.0)
+        if (output.bitPerfectNow) return Triple("Off for bit-perfect output", "The DAC gets the samples untouched.", 0.0)
+        val d = Normalization.decide(norm, t.gain)
+        // every note that applies, joined by a space (client-shapes §5.7); the Signal path adds the gain's source after them
+        val notes = if (d.noData) listOf("It plays at its own level until Encore has measured it.") else listOfNotNull(
+            if (d.limited) "Lowered to keep the peaks from clipping (the song asked for ${Normalization.dbText(d.requestedDb)})." else null,
+            if (d.basis == "track" && norm.mode == "album") "No album gain for this song, so its track gain is used." else null,
+            if (d.basis == "album" && norm.mode == "track") "No track gain for this song, so its album gain is used." else null,
+        )
+        return Triple(d.line(), notes.joinToString(" "), if (d.noData) 0.0 else d.db)
     }
 
     // ---- what the UI knows about the stream (session extras) ---------------------------------------------
@@ -320,6 +412,7 @@ class EncorePlaybackService : MediaLibraryService() {
             v.transcode -> "Converted to FLAC by the server (lossless) – this device can't play $f"
             else -> "The original file, byte for byte – nothing was converted or resampled on the way"
         }
+        val nr = normRow(t)
         return StreamInfo(
             trackId = t.id,
             qualityBadge = badge,
@@ -338,6 +431,9 @@ class EncorePlaybackService : MediaLibraryService() {
             usbBitPerfect = output.bitPerfectNow,
             usbDevice = output.usbDeviceName,
             usbNote = output.usbNote,
+            normText = nr.first,
+            normNote = nr.second,
+            normDb = nr.third,
         )
     }
 
@@ -350,6 +446,8 @@ class EncorePlaybackService : MediaLibraryService() {
         if (info == lastPublished) return
         lastPublished = info
         try { session.setSessionExtras(info.toBundle()) } catch (_: Exception) {}
+        // the car's quality badge follows how the song reaches this phone
+        car.streamChanged(info)
     }
 
     // ---- player events -------------------------------------------------------------------------------------
@@ -369,6 +467,7 @@ class EncorePlaybackService : MediaLibraryService() {
             current.id = id
             if (mediaItem != null && id != null) {
                 MediaItems.toTrack(mediaItem)?.let { resolver.remember(StreamTrack.of(it)) }
+                gainFollows(id)
                 if (!resume.held) scrobbler.announce(id)
                 autoplay.played(id)
                 val v = resolver.variantOf(id) ?: resolver.startVariant(resolver.track(id) ?: StreamTrack.of(MediaItems.toTrack(mediaItem)!!)).also { resolver.force(id, it) }
@@ -480,22 +579,50 @@ class EncorePlaybackService : MediaLibraryService() {
     // ---- the session -----------------------------------------------------------------------------------------
 
     private inner class Callback : MediaLibrarySession.Callback {
-        /** Android Auto, the system UI and our own app get full control; other apps get what Media3 allows them. */
+        /**
+         * Android Auto, the system UI and our own app get full control; other apps get what Media3 allows them. No
+         * controller may change the playback speed: the audio track applies it for real (a group listen's catch-up
+         * nudge, GroupSync, is the only one that sets it), and the app has no speed setting.
+         */
         override fun onConnect(session: MediaSession, controller: MediaSession.ControllerInfo): MediaSession.ConnectionResult {
             val sessionCommands = MediaSession.ConnectionResult.DEFAULT_SESSION_AND_LIBRARY_COMMANDS.buildUpon()
                 .add(SessionCommand(CMD_SEEK, Bundle.EMPTY))
                 .apply { for (c in CarControls.COMMANDS) add(SessionCommand(c, Bundle.EMPTY)) }
                 .build()
+            val playerCommands = MediaSession.ConnectionResult.DEFAULT_PLAYER_COMMANDS.buildUpon()
+                .remove(Player.COMMAND_SET_SPEED_AND_PITCH)
+                .build()
             if (controller.isTrusted || controller.packageName in FULL_ACCESS || controller.packageName == packageName) {
-                return MediaSession.ConnectionResult.accept(sessionCommands, MediaSession.ConnectionResult.DEFAULT_PLAYER_COMMANDS)
+                return MediaSession.ConnectionResult.accept(sessionCommands, playerCommands)
             }
-            return MediaSession.ConnectionResult.AcceptedResultBuilder(session).setAvailableSessionCommands(sessionCommands).build()
+            return MediaSession.ConnectionResult.AcceptedResultBuilder(session, controller)
+                .setAvailableSessionCommands(sessionCommands)
+                .setAvailablePlayerCommands(playerCommands)
+                .build()
+        }
+
+        /** Android Auto came or went: the car's quality badge, Artist button and subtitle detail follow (CarControls). */
+        override fun onPostConnect(session: MediaSession, controller: MediaSession.ControllerInfo) {
+            car.controller(controller.packageName in CarControls.CAR_PACKAGES, connected = true)
+        }
+
+        override fun onDisconnected(session: MediaSession, controller: MediaSession.ControllerInfo) {
+            car.controller(controller.packageName in CarControls.CAR_PACKAGES, connected = false)
         }
 
         override fun onCustomCommand(session: MediaSession, controller: MediaSession.ControllerInfo, customCommand: SessionCommand, args: Bundle): ListenableFuture<SessionResult> {
-            if (car.handle(customCommand.customAction)) return Futures.immediateFuture(SessionResult(SessionResult.RESULT_SUCCESS))
+            car.result(customCommand.customAction)?.let { return Futures.immediateFuture(it) }
             if (customCommand.customAction == CMD_SEEK) {
-                seekAbs(args.getLong(ARG_POSITION_MS, 0L))
+                val ms = args.getLong(ARG_POSITION_MS, 0L)
+                val g = group
+                if (g != null && g.active) {
+                    // in a group listen the seek is the group's (or refused when only the host controls playback)
+                    if (GroupListen.deniedHere()) return Futures.immediateFuture(SessionResult(SessionResult.RESULT_SUCCESS))
+                    g.userSeek(ms)
+                    g.applying { seekAbs(ms) }
+                } else {
+                    seekAbs(ms)
+                }
                 return Futures.immediateFuture(SessionResult(SessionResult.RESULT_SUCCESS))
             }
             return Futures.immediateFuture(SessionResult(SessionResult.RESULT_ERROR_NOT_SUPPORTED))
@@ -569,7 +696,10 @@ class EncorePlaybackService : MediaLibraryService() {
             return Futures.immediateFuture(LibraryResult.ofItemList(ImmutableList.copyOf(pageOf(found, page, pageSize)), params))
         }
 
-        /** Items a controller adds ("play this", "add to queue"): give them their stream URIs. */
+        /**
+         * Items a controller adds ("play this", "add to queue"): give them their stream URIs. In a group listen they
+         * are added to the group's Up next instead ([toGroup]).
+         */
         override fun onAddMediaItems(mediaSession: MediaSession, controller: MediaSession.ControllerInfo, mediaItems: MutableList<MediaItem>): ListenableFuture<MutableList<MediaItem>> {
             val f = SettableFuture.create<MutableList<MediaItem>>()
             io.execute {
@@ -579,37 +709,49 @@ class EncorePlaybackService : MediaLibraryService() {
                     if (ready != null) { out.add(ready); continue }
                     try { out.addAll(resolveIncoming(item).first) } catch (_: Exception) {}
                 }
+                if (GroupListen.inGroup) {
+                    f.setException(toGroup(out, null))
+                    return@execute
+                }
                 rememberAll(out)
                 f.set(out)
             }
             return f
         }
 
-        /** "Play" on a browsed song plays the whole list it came from, starting there; folders play all their songs. */
+        /**
+         * "Play" on a browsed song plays the whole list it came from, starting there; folders play all their songs.
+         * In a group listen the list becomes the group's queue instead ([toGroup]); the queue here stays.
+         */
         override fun onSetMediaItems(mediaSession: MediaSession, controller: MediaSession.ControllerInfo, mediaItems: MutableList<MediaItem>, startIndex: Int, startPositionMs: Long): ListenableFuture<MediaSession.MediaItemsWithStartPosition> {
-            car.queueReplaced()
+            val inGroup = GroupListen.inGroup
+            if (!inGroup) car.queueReplaced()
             val f = SettableFuture.create<MediaSession.MediaItemsWithStartPosition>()
             io.execute {
                 try {
                     runBlocking { graph.store.awaitLoaded() }
-                    resolver.forgetAll()
+                    if (!inGroup) resolver.forgetAll()
                     val single = mediaItems.size == 1 && mediaItems[0].localConfiguration == null
-                    if (single && (MediaItems.parentOf(mediaItems[0].mediaId) != null || MediaItems.trackId(mediaItems[0].mediaId) == null)) {
+                    val (list, at, pos) = if (single && (MediaItems.parentOf(mediaItems[0].mediaId) != null || MediaItems.trackId(mediaItems[0].mediaId) == null)) {
                         val (list, at) = resolveIncoming(mediaItems[0])
-                        rememberAll(list)
-                        f.set(MediaSession.MediaItemsWithStartPosition(list, at, startPositionMs.coerceAtLeast(0L)))
+                        Triple(list, at, startPositionMs.coerceAtLeast(0L))
                     } else {
                         val out = ArrayList<MediaItem>()
                         for (item in mediaItems) {
                             val ready = MediaItems.withUri(graph.api, item)
                             if (ready != null) out.add(ready) else try { out.addAll(resolveIncoming(item).first) } catch (_: Exception) {}
                         }
-                        rememberAll(out)
-                        val index = if (out.isEmpty()) 0 else startIndex.coerceIn(0, out.size - 1)
-                        f.set(MediaSession.MediaItemsWithStartPosition(out, index, startPositionMs))
+                        Triple(out, if (out.isEmpty()) 0 else startIndex.coerceIn(0, out.size - 1), startPositionMs)
                     }
+                    if (inGroup) {
+                        f.setException(toGroup(list, at, pos))
+                        return@execute
+                    }
+                    rememberAll(list)
+                    f.set(MediaSession.MediaItemsWithStartPosition(list, at, pos))
                 } catch (_: Exception) {
-                    f.set(MediaSession.MediaItemsWithStartPosition(mediaItems, startIndex, startPositionMs))
+                    if (inGroup) f.setException(UnsupportedOperationException(GROUP_QUEUE))
+                    else f.set(MediaSession.MediaItemsWithStartPosition(mediaItems, startIndex, startPositionMs))
                 }
             }
             return f
@@ -618,6 +760,8 @@ class EncorePlaybackService : MediaLibraryService() {
         /** "Resume" from the lock screen, Bluetooth or the car: the last queue (stored on the phone), or recently played. */
         override fun onPlaybackResumption(mediaSession: MediaSession, controller: MediaSession.ControllerInfo, isForPlayback: Boolean): ListenableFuture<MediaSession.MediaItemsWithStartPosition> {
             val f = SettableFuture.create<MediaSession.MediaItemsWithStartPosition>()
+            // in a group listen the group's queue comes from the group (GroupSync), never the one saved here
+            if (GroupListen.inGroup) return Futures.immediateFailedFuture(UnsupportedOperationException(GROUP_QUEUE))
             io.execute {
                 try {
                     runBlocking { graph.store.awaitLoaded() }
@@ -660,6 +804,30 @@ class EncorePlaybackService : MediaLibraryService() {
     }
 
     /**
+     * In a group listen the queue is the group's: what a controller asks to play or add (Android Auto's browse tree, a
+     * voice request, the Encore Lyrics car app) goes to the group, which plays it on every device,
+     * or is refused with the reason ("Only Alex controls playback", also on the car's subtitle line). The queue here is
+     * never replaced: the returned exception fails the controller's request. [index] null: added to Up next (every
+     * member may).
+     */
+    private fun toGroup(items: List<MediaItem>, index: Int?, positionMs: Long = 0L): Exception {
+        val all = items.map { MediaItems.toTrack(it) }
+        val tracks = all.filterNotNull()
+        val at = if (index == null) 0 else all.take(index).count { it != null }
+        main.post {
+            if (released) return@post
+            val s = GroupListen.state.value ?: return@post
+            if (index == null) {
+                GroupListen.enqueue(tracks)
+            } else {
+                if (!s.youCanControl) car.say(GroupRules.onlyHost(s))
+                GroupListen.playList(tracks, at, if (positionMs > 0L) positionMs / 1000.0 else 0.0)
+            }
+        }
+        return UnsupportedOperationException(GROUP_QUEUE)
+    }
+
+    /**
      * What a controller's item stands for: a browse id or song id (via the tree), or – with an empty id – a voice
      * request ("play <album>", "play <artist>", or just "play music"), answered from the library.
      */
@@ -699,6 +867,9 @@ class EncorePlaybackService : MediaLibraryService() {
         /** Custom session command: seek in song time (server-made streams restart at `t=`). Args: [ARG_POSITION_MS]. */
         const val CMD_SEEK = "app.encore.android.SEEK"
         const val ARG_POSITION_MS = "position_ms"
+
+        /** why a controller's play or add fails in a group listen (only logged by Media3) */
+        private const val GROUP_QUEUE = "In a group listen the queue is the group's"
 
         /** Controllers that may play and skip even if Media3 can't verify them as trusted. */
         private val FULL_ACCESS = setOf(

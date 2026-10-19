@@ -6,6 +6,7 @@ import app.encore.android.BuildConfig
 import app.encore.android.data.api.ArtistCredit
 import app.encore.android.data.api.EncoreApi
 import app.encore.android.data.api.Track
+import app.encore.android.data.api.TrackGain
 import app.encore.android.data.api.Tr
 import app.encore.android.data.api.Translations
 import androidx.media3.common.MediaItem
@@ -25,6 +26,9 @@ object MediaItems {
     const val EXTRA_ALBUM_ARTIST = "albumartist"
     const val EXTRA_BITRATE = "bitrate"
     const val EXTRA_YEAR = "year"
+    /** the file's sample rate (Hz) and bit depth, for the car's quality badge (0.31; absent when unknown) */
+    const val EXTRA_SAMPLE_RATE = "sample_rate"
+    const val EXTRA_BIT_DEPTH = "bit_depth"
     /** each artist of the song (names, MusicBrainz ids, in the library), for links in the player */
     const val EXTRA_ARTIST_NAMES = "artist_names"
     const val EXTRA_ARTIST_MBIDS = "artist_mbids"
@@ -34,6 +38,8 @@ object MediaItems {
     const val EXTRA_ARTIST = "orig_artist"
     const val EXTRA_ALBUM = "orig_album"
     const val EXTRA_TR = "tr"
+    /** the song's loudness for volume normalization: [track, album, track_peak, album_peak] in dB / linear, NaN = unknown */
+    const val EXTRA_GAIN = "gain"
 
     fun trackId(mediaId: String): Long? =
         if (mediaId.startsWith("track:")) mediaId.removePrefix("track:").substringBefore("|").toLongOrNull() else null
@@ -54,6 +60,9 @@ object MediaItems {
             putString(EXTRA_ALBUM_ARTIST, t.albumArtist)
             putInt(EXTRA_BITRATE, t.bitrate)
             putString(EXTRA_YEAR, t.year)
+            if (t.sampleRate > 0) putInt(EXTRA_SAMPLE_RATE, t.sampleRate)
+            if (t.bitDepth > 0) putInt(EXTRA_BIT_DEPTH, t.bitDepth)
+            t.gain?.let { putDoubleArray(EXTRA_GAIN, it.toArray()) }
             putString(EXTRA_TITLE, t.title)
             putString(EXTRA_ARTIST, t.artist)
             putString(EXTRA_ALBUM, t.album)
@@ -122,6 +131,9 @@ object MediaItems {
             titleTr = if (tr != null) Tr(tr[0], tr[1]) else Tr.NONE,
             artistTr = if (tr != null) Tr(tr[2], tr[3]) else Tr.NONE,
             albumTr = if (tr != null) Tr(tr[4], tr[5]) else Tr.NONE,
+            gain = TrackGain.fromArray(x?.getDoubleArray(EXTRA_GAIN)),
+            sampleRate = x?.getInt(EXTRA_SAMPLE_RATE) ?: 0,
+            bitDepth = x?.getInt(EXTRA_BIT_DEPTH) ?: 0,
         )
     }
 

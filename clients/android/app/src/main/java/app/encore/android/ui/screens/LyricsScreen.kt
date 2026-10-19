@@ -1,43 +1,43 @@
 package app.encore.android.ui.screens
 
-import androidx.activity.compose.BackHandler
-import androidx.compose.foundation.background
+import android.content.Context
+import androidx.compose.animation.animateColorAsState
+import androidx.compose.animation.core.tween
 import androidx.compose.foundation.clickable
-import androidx.compose.foundation.interaction.MutableInteractionSource
+import androidx.compose.foundation.gestures.animateScrollBy
+import androidx.compose.foundation.gestures.scrollBy
+import androidx.compose.foundation.interaction.collectIsDraggedAsState
+import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
-import androidx.compose.foundation.layout.safeDrawingPadding
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.CircularProgressIndicator
-import androidx.compose.material3.Icon
-import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.Stable
 import androidx.compose.runtime.collectAsState
+import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
-import androidx.compose.runtime.getValue
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
-import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
-import app.encore.android.R
 import app.encore.android.features.offline.OfflineStore
 import app.encore.android.core.bool
 import app.encore.android.core.str
@@ -45,6 +45,9 @@ import app.encore.android.ui.Nav
 import app.encore.android.ui.theme.palette
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.withContext
 import kotlinx.serialization.json.JsonObject
 
@@ -86,71 +89,108 @@ class Lyrics(val lines: List<LyricLine>, val plain: String, val instrumental: Bo
 }
 
 /**
- * Full-screen lyrics for the song that plays (web/js/player.js lyrics pane + pages/lyrics.js): time-synced lines
- * follow the position and a tap on one seeks there; plain lyrics scroll. Opened from the player's ⋯ menu.
+ * Lyrics mode of the full player (the web's `encore.lyricsMode`): on, the cover shrinks to a thumbnail beside the
+ * title and the lyrics take the screen. Remembered on this device, so the player opens the way you left it.
+ */
+object LyricsMode {
+    private const val FILE = "encore_ui"
+    private const val KEY = "encore.lyricsMode"
+    @Volatile private var flow: MutableStateFlow<Boolean>? = null
+
+    fun state(context: Context): StateFlow<Boolean> = flowOf(context).asStateFlow()
+
+    fun set(context: Context, on: Boolean) {
+        val f = flowOf(context)
+        if (f.value == on) return
+        f.value = on
+        try {
+            context.applicationContext.getSharedPreferences(FILE, Context.MODE_PRIVATE).edit().putBoolean(KEY, on).apply()
+        } catch (_: Exception) {}
+    }
+
+    @Synchronized
+    private fun flowOf(context: Context): MutableStateFlow<Boolean> {
+        flow?.let { return it }
+        val on = try {
+            context.applicationContext.getSharedPreferences(FILE, Context.MODE_PRIVATE).getBoolean(KEY, false)
+        } catch (_: Exception) { false }
+        return MutableStateFlow(on).also { flow = it }
+    }
+}
+
+/**
+ * "Lyrics" from a song's ⋯ menu or the player's menu (PlayerConnection.lyrics): the full player opens in lyrics mode.
+ * Drawn once at the root; [onOpenPlayer] shows the full player.
  */
 @Composable
-fun LyricsScreen(nav: Nav, onClose: () -> Unit) {
-    val p = MaterialTheme.palette
-    val track by nav.player.nowPlaying.collectAsState()
-    val position by nav.player.positionMs.collectAsState()
-    val t = track
-    BackHandler(onBack = onClose)
+fun LyricsRequests(nav: Nav, onOpenPlayer: () -> Unit) {
+    val asked by nav.player.lyricsOpen.collectAsState()
+    LaunchedEffect(asked) {
+        if (!asked) return@LaunchedEffect
+        LyricsMode.set(nav.graph.app, true)
+        onOpenPlayer()
+        nav.player.closeLyrics()
+    }
+}
 
-    var lyrics by remember { mutableStateOf<Lyrics?>(null) }
-    var loading by remember { mutableStateOf(true) }
-    var error by remember { mutableStateOf<String?>(null) }
-    LaunchedEffect(t?.id) {
-        val id = t?.id ?: return@LaunchedEffect
-        loading = true
-        error = null
-        lyrics = null
+/** The lyrics of one song as they load (kept by the full player while it is open, so the mode can flip freely). */
+@Stable
+class LyricsLoad {
+    var lyrics by mutableStateOf<Lyrics?>(null)
+    var loading by mutableStateOf(false)
+    var error by mutableStateOf<String?>(null)
+    /** the song these are for (-1: none yet) */
+    var forId: Long = -1L
+}
+
+/** Loads the lyrics of [trackId] once [active] (lyrics mode is on): from the server, or saved with a download. */
+@Composable
+fun rememberLyrics(nav: Nav, trackId: Long?, active: Boolean): LyricsLoad {
+    val load = remember { LyricsLoad() }
+    LaunchedEffect(trackId, active) {
+        val id = trackId ?: return@LaunchedEffect
+        if (!active || load.forId == id) return@LaunchedEffect
+        load.forId = id
+        load.loading = true
+        load.error = null
+        load.lyrics = null
         try {
-            lyrics = withContext(Dispatchers.IO) {
+            load.lyrics = withContext(Dispatchers.IO) {
                 // offline: the lyrics saved with a downloaded song
                 val o = try { nav.graph.api.lyrics(id) } catch (e: Exception) { OfflineStore.of(nav.graph.app).savedLyrics(id) ?: throw e }
                 Lyrics.from(o)
             }
         } catch (e: CancellationException) {
+            // another song (or the player closed) before they came: asked again next time
+            load.forId = -1L
             throw e
         } catch (e: Exception) {
-            error = e.message ?: "Lyrics lookup failed"
+            load.error = e.message ?: "Lyrics lookup failed"
         }
-        loading = false
+        load.loading = false
     }
+    return load
+}
 
-    Column(
-        Modifier
-            .fillMaxSize()
-            .background(p.bg)
-            .clickable(interactionSource = remember { MutableInteractionSource() }, indication = null, onClick = {})
-            .safeDrawingPadding(),
-    ) {
-        Row(Modifier.fillMaxWidth().padding(horizontal = 4.dp), verticalAlignment = Alignment.CenterVertically) {
-            IconButton(onClick = onClose) { Icon(painterResource(R.drawable.ic_expand_more), contentDescription = "Close", tint = p.text) }
-            Column(Modifier.weight(1f), horizontalAlignment = Alignment.CenterHorizontally) {
-                Text("Lyrics", style = MaterialTheme.typography.titleSmall, color = p.text)
-                if (t != null) Text(
-                    "${t.title} · ${t.artist}",
-                    style = MaterialTheme.typography.bodySmall,
-                    color = p.muted,
-                    maxLines = 1,
-                    overflow = TextOverflow.Ellipsis,
-                )
-            }
-            IconButton(onClick = onClose, enabled = false) { }
-        }
-        val l = lyrics
+/**
+ * The lyrics pane of the full player (the web's lyrics mode): time-synced lines follow the position, the current one
+ * large (28 sp, the others 22 sp) and kept in the middle with a smooth scroll, the lines already sung dimmed; a tap on
+ * a line seeks there. Plain lyrics scroll.
+ */
+@Composable
+fun LyricsPane(nav: Nav, load: LyricsLoad, positionMs: Long, modifier: Modifier = Modifier) {
+    val p = MaterialTheme.palette
+    val l = load.lyrics
+    Box(modifier) {
         when {
-            t == null -> Empty("Nothing playing.", p.muted)
-            loading -> Row(Modifier.fillMaxWidth().padding(24.dp), horizontalArrangement = androidx.compose.foundation.layout.Arrangement.Center, verticalAlignment = Alignment.CenterVertically) {
+            load.loading -> Row(Modifier.fillMaxWidth().padding(24.dp), horizontalArrangement = Arrangement.Center, verticalAlignment = Alignment.CenterVertically) {
                 CircularProgressIndicator(Modifier.padding(end = 12.dp), color = p.accent, strokeWidth = 2.dp)
                 Text("Looking for lyrics…", color = p.muted)
             }
-            error != null -> Empty(error ?: "", p.muted)
+            load.error != null -> Empty(load.error ?: "", p.muted)
             l == null -> Empty("No lyrics found for this song.", p.muted)
             l.instrumental -> Empty("Instrumental", p.muted)
-            l.lines.isNotEmpty() -> SyncedLines(l, position / 1000.0, onSeek = { sec -> nav.player.seekTo((sec * 1000).toLong()) })
+            l.lines.isNotEmpty() -> SyncedLines(l, positionMs / 1000.0, onSeek = { sec -> nav.player.seekTo((sec * 1000).toLong()) })
             l.plain.isNotBlank() -> Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(horizontal = 24.dp, vertical = 16.dp)) {
                 Text(
                     "Plain lyrics · " + if (l.source == "file") "saved next to the song" else "from LRCLIB, saved next to the song",
@@ -158,7 +198,7 @@ fun LyricsScreen(nav: Nav, onClose: () -> Unit) {
                     color = p.faint,
                     modifier = Modifier.padding(bottom = 10.dp),
                 )
-                Text(l.plain, color = p.text, lineHeight = 26.sp, style = MaterialTheme.typography.bodyLarge)
+                Text(l.plain, color = p.text, fontSize = 22.sp, lineHeight = 30.sp, fontWeight = FontWeight.Medium)
             }
             else -> Empty("No lyrics found for this song.", p.muted)
         }
@@ -172,35 +212,61 @@ private fun Empty(text: String, color: androidx.compose.ui.graphics.Color) {
     }
 }
 
-/** Time-synced lines: the current one (0.3 s ahead, like the web) is bright and kept in the middle; a tap seeks. */
+/**
+ * Time-synced lines: the current one (0.3 s ahead, like the web) bright, large and scrolled to the middle; the ones
+ * already sung dimmed. While you drag the list it stays where you put it; the next line brings it back.
+ */
 @Composable
 private fun SyncedLines(l: Lyrics, positionSec: Double, onSeek: (Double) -> Unit) {
     val p = MaterialTheme.palette
     val listState = rememberLazyListState()
+    val dragged by listState.interactionSource.collectIsDraggedAsState()
     val at = positionSec + 0.3
     var current = -1
     for (i in l.lines.indices) if (l.lines[i].timeSec <= at) current = i else break
     LaunchedEffect(current) {
-        if (current >= 0) {
-            val viewport = listState.layoutInfo.viewportEndOffset - listState.layoutInfo.viewportStartOffset
-            listState.animateScrollToItem(current, -(viewport / 2 - 40))
+        if (current < 0 || dragged) return@LaunchedEffect
+        val info = listState.layoutInfo
+        val middle = (info.viewportStartOffset + info.viewportEndOffset) / 2
+        val item = info.visibleItemsInfo.firstOrNull { it.index == current }
+        if (item != null) {
+            listState.animateScrollBy((item.offset + item.size / 2 - middle).toFloat(), tween(450))
+        } else {
+            // far away (a seek, or the first line): jump there, then centre it
+            listState.scrollToItem(current)
+            val again = listState.layoutInfo
+            val it2 = again.visibleItemsInfo.firstOrNull { it.index == current } ?: return@LaunchedEffect
+            listState.scrollBy((it2.offset + it2.size / 2 - (again.viewportStartOffset + again.viewportEndOffset) / 2).toFloat())
         }
     }
-    LazyColumn(
-        Modifier.fillMaxSize(),
-        state = listState,
-        contentPadding = PaddingValues(horizontal = 24.dp, vertical = 120.dp),
-    ) {
-        itemsIndexed(l.lines) { i, line ->
-            val on = i == current
-            Text(
-                line.text.ifEmpty { "♪" },
-                color = if (on) p.text else p.faint,
-                fontWeight = if (on) FontWeight.Bold else FontWeight.Medium,
-                fontSize = if (on) 24.sp else 20.sp,
-                lineHeight = 30.sp,
-                modifier = Modifier.fillMaxWidth().clickable { onSeek(line.timeSec) }.padding(vertical = 8.dp),
-            )
+    BoxWithConstraints(Modifier.fillMaxSize()) {
+        // room above the first and below the last line, so both can sit in the middle
+        val pad = (maxHeight / 2 - 24.dp).coerceAtLeast(0.dp)
+        LazyColumn(
+            Modifier.fillMaxSize(),
+            state = listState,
+            contentPadding = PaddingValues(start = 24.dp, end = 24.dp, top = pad, bottom = pad),
+        ) {
+            itemsIndexed(l.lines) { i, line ->
+                val on = i == current
+                val color by animateColorAsState(
+                    when {
+                        on -> p.text
+                        i < current -> p.faint
+                        else -> p.muted
+                    },
+                    tween(300),
+                    label = "lyric",
+                )
+                Text(
+                    line.text.ifEmpty { "♪" },
+                    color = color,
+                    fontWeight = if (on) FontWeight.Bold else FontWeight.SemiBold,
+                    fontSize = if (on) 28.sp else 22.sp,
+                    lineHeight = if (on) 34.sp else 28.sp,
+                    modifier = Modifier.fillMaxWidth().clickable { onSeek(line.timeSec) }.padding(vertical = 8.dp),
+                )
+            }
         }
     }
 }
