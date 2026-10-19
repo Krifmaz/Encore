@@ -1,0 +1,96 @@
+package app.encore.android.playback
+
+import androidx.media3.common.MediaItem
+import androidx.media3.common.Player
+import androidx.media3.exoplayer.ExoPlayer
+import app.encore.android.data.api.EncoreApi
+import app.encore.android.features.offline.OfflineMode
+import java.util.concurrent.ExecutorService
+
+/**
+ * Plays and now-playing, with the same rules and endpoints as the web player: "now playing" when a song starts
+ * (`POST /api/library/now-playing`), a play (`POST /api/library/plays`) at half the song or 4 minutes, whichever
+ * comes first, songs under 30 s at their end; a song that runs to its end (gapless, or faded out by a song
+ * transition) counts with its full length. The server passes them on (ListenBrainz, Last.fm). A play the server
+ * can't take (offline) waits in the outbox (features/offline) and goes when it answers again. Main thread only.
+ */
+class Scrobbler(
+    private val player: ExoPlayer,
+    private val current: CurrentStream,
+    private val api: EncoreApi,
+    private val io: ExecutorService,
+) {
+    private var announced: Long? = null
+    private var logged = false
+    private var lastId: Long? = null
+    private var lastDurationSec = 0.0
+
+    /** "Now playing" for the song, once per song. */
+    fun announce(id: Long) {
+        if (announced == id) return
+        announced = id
+        // offline: nobody to tell (and no request held up on a server that doesn't answer)
+        if (OfflineMode.active.value) return
+        io.execute { try { api.nowPlaying(id) } catch (_: Exception) {} }
+    }
+
+    /**
+     * Another song (not the same one reopened): a song that ran to its end ([Player.MEDIA_ITEM_TRANSITION_REASON_AUTO],
+     * a repeat) counts with its full length; the new one starts unplayed.
+     */
+    fun songChanged(reason: Int) {
+        if (reason == Player.MEDIA_ITEM_TRANSITION_REASON_AUTO || reason == Player.MEDIA_ITEM_TRANSITION_REASON_REPEAT) {
+            val prev = lastId
+            if (!logged && prev != null && lastDurationSec > 0) logPlay(prev, lastDurationSec)
+        }
+        logged = false
+        lastId = null
+        lastDurationSec = 0.0
+    }
+
+    /** The queue ended: the last song ran to its end. */
+    fun ended() {
+        val id = lastId
+        if (!logged && id != null && lastDurationSec > 0) logPlay(id, lastDurationSec)
+        logged = true
+    }
+
+    /**
+     * A song transition moves the player on to the next song with a seek while the old one fades out: the old song
+     * ran to its end, so it counts like a gapless hand-over, with its full length.
+     */
+    fun handedOver(item: MediaItem) {
+        val id = MediaItems.trackId(item.mediaId) ?: return
+        if (id != lastId) return
+        if (!logged && lastDurationSec > 0) logPlay(id, lastDurationSec)
+    }
+
+    /** Once a second while playing: has the song played long enough to count? */
+    fun check() {
+        val item = player.currentMediaItem ?: return
+        val id = MediaItems.trackId(item.mediaId) ?: return
+        val p = current.absPositionMs() / 1000.0
+        val d = current.durationSec()
+        lastId = id
+        lastDurationSec = d
+        if (logged) return
+        // half the song or 4 minutes, whichever comes first; songs under 30 s at their end
+        val hit = if (d > 0) (if (d < 30) p >= d - 1 else p >= minOf(d / 2, 240.0)) else p >= 30
+        if (hit) logPlay(id, p)
+    }
+
+    private fun logPlay(id: Long, seconds: Double) {
+        logged = true
+        // the outbox is a file: written on `io`, never on the thread that drives the player
+        if (OfflineMode.active.value) { io.execute { OfflineMode.queuePlay(id, seconds) }; return }
+        io.execute {
+            try {
+                api.logPlay(id, seconds)
+                // the server answers again: plays and likes from a short gap go now
+                OfflineMode.syncSoon()
+            } catch (e: Exception) {
+                if (OfflineMode.unreachable(e)) OfflineMode.queuePlay(id, seconds)
+            }
+        }
+    }
+}

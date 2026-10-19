@@ -105,7 +105,7 @@ data class PlaybackPrefs(
         return JsonObject(m)
     }
 
-    /** What the DSP engine gets (DspEngine.setParams): the effects as one JSON string. */
+    /** What the Cadenza engine gets (CadenzaEngine.setParams): the effects as one JSON string. */
     fun engineParams(): String {
         val m = LinkedHashMap<String, JsonElement>()
         m["fx_on"] = JsonPrimitive(fxActive())

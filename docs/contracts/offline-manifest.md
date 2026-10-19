@@ -71,8 +71,8 @@ The desktop app and the phone keep the songs as files and add two fields the web
 
 | Field | Type | Meaning |
 |---|---|---|
-| `file` | string | The audio file's name in the offline folder (desktop), or its path relative to the index (phone). |
-| `art` | string | The cover file's name or relative path, `""` when there is none. `cover` is true exactly when this names a file that exists. |
+| `file` | string | The audio file's name in the offline folder (desktop), or its path relative to `Music/Encore/` (phone; on Android 10 and later the index lives in app storage, so this is not relative to the index there). |
+| `art` | string | The cover file's name (desktop) or its path relative to the folder that holds the index (phone), `""` when there is none. `cover` is true exactly when this names a file that exists. |
 
 These are paths inside the client's own folder, never URLs and never absolute paths, so the folder can
 move without the index breaking.
@@ -172,8 +172,18 @@ The signed-in user is remembered for offline mode in `localStorage` `encore.offl
 
 ### Phone (0.30)
 
-`Music/Encore/index.json` on shared storage, next to the files, with `file` and `art` relative to
-`Music/Encore/`. The file layout under that folder is decided in 0.30.
+- audio: `Music/Encore/<Album artist>/<Album>/NN - Title.ext` on shared storage, so the songs are plain files
+  any file manager or player sees: through MediaStore Audio (with `IS_PENDING` while writing) on Android 10
+  and later, as plain files on Android 8 and 9;
+- on Android 10 and later the index, covers and lyrics stay in the app's own storage, because Android lets an
+  app put only audio in `Music/`: `files/offline/.encore-index.json`, `covers/<server tag>-<album_id>.jpg`,
+  `lyrics/<server tag>-<id>.json`;
+- on Android 8 and 9 the index is `Music/Encore/.encore-index.json` (with a copy in the app's storage) and the
+  cover is `cover.jpg` in the album folder;
+- `file` is relative to `Music/Encore/`; `art` is relative to the folder that holds the index;
+- a converted copy is FLAC with the quality `FLAC (converted)`;
+- the queued plays and likes are `files/offline/outbox.json`, `{owner, plays, likes}`, sent only for the user
+  who queued them.
 
 ## Upgrading an older index
 

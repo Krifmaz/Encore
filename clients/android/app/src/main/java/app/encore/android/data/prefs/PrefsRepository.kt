@@ -1,6 +1,11 @@
 package app.encore.android.data.prefs
 
 import android.content.Context
+import app.encore.android.cadenza.CadenzaCatalog
+import app.encore.android.core.bool
+import app.encore.android.core.dbl
+import app.encore.android.core.obj
+import app.encore.android.core.parseJsonObject
 import app.encore.android.data.api.EncoreApi
 import app.encore.android.data.session.SessionStore
 import kotlinx.coroutines.CoroutineScope
@@ -13,10 +18,7 @@ import kotlinx.coroutines.flow.drop
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
-import kotlinx.serialization.json.Json
-import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonObject
-import kotlinx.serialization.json.JsonPrimitive
 
 /** GET /api/playback/dsp: is server-side Cadenza processing on, may this account use it, and the choices on offer. */
 data class DspInfo(
@@ -32,23 +34,17 @@ data class DspInfo(
 ) {
     companion object {
         fun from(o: JsonObject): DspInfo {
-            fun pairs(key: String): List<Pair<String, String>> = (o[key] as? JsonArray)?.mapNotNull { e ->
-                val a = e as? JsonArray ?: return@mapNotNull null
-                val id = (a.getOrNull(0) as? JsonPrimitive)?.content ?: return@mapNotNull null
-                id to ((a.getOrNull(1) as? JsonPrimitive)?.content ?: id)
-            } ?: emptyList()
-            fun bool(key: String) = (o[key] as? JsonPrimitive)?.content == "true"
-            fun num(key: String) = (o[key] as? JsonPrimitive)?.content?.toDoubleOrNull() ?: 0.0
-            val cacheMb = ((o["cache"] as? JsonObject)?.get("max_mb") as? JsonPrimitive)?.content?.toDoubleOrNull() ?: 0.0
+            // the server's catalog has the phone engine's shape
+            val catalog = CadenzaCatalog.parse(o)
             return DspInfo(
-                enabled = bool("enabled"),
-                allowed = bool("allowed"),
-                maxRate = num("max_rate").toInt(),
-                filters = pairs("filters"),
-                dithers = pairs("dithers"),
-                defaultFilter = (o["default_filter"] as? JsonPrimitive)?.content ?: "",
-                defaultDither = (o["default_dither"] as? JsonPrimitive)?.content ?: "tpdf",
-                cacheOn = cacheMb > 0,
+                enabled = o.bool("enabled"),
+                allowed = o.bool("allowed"),
+                maxRate = o.dbl("max_rate").toInt(),
+                filters = catalog.filters,
+                dithers = catalog.dithers,
+                defaultFilter = catalog.defaultFilter ?: "",
+                defaultDither = catalog.defaultDither ?: "tpdf",
+                cacheOn = (o.obj("cache")?.dbl("max_mb") ?: 0.0) > 0,
             )
         }
     }
@@ -87,7 +83,7 @@ class PrefsRepository(context: Context, private val api: EncoreApi, private val 
 
     private fun load(): PlaybackPrefs {
         val text = prefs.getString(KEY, null) ?: return PlaybackPrefs()
-        return try { PlaybackPrefs.clean(Json.parseToJsonElement(text) as? JsonObject) } catch (_: Exception) { PlaybackPrefs() }
+        return try { PlaybackPrefs.clean(parseJsonObject(text)) } catch (_: Exception) { PlaybackPrefs() }
     }
 
     private fun store(p: PlaybackPrefs) {
@@ -98,7 +94,7 @@ class PrefsRepository(context: Context, private val api: EncoreApi, private val 
 
     private fun loadPhone(): PhonePrefs {
         val text = prefs.getString(PHONE_KEY, null) ?: return PhonePrefs()
-        return try { PhonePrefs.from(Json.parseToJsonElement(text) as? JsonObject) } catch (_: Exception) { PhonePrefs() }
+        return try { PhonePrefs.from(parseJsonObject(text)) } catch (_: Exception) { PhonePrefs() }
     }
 
     /** Saves this phone's Cadenza / USB settings (device-only: they survive sign-out and never reach the server). */

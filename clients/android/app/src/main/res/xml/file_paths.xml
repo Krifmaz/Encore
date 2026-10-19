@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- The files Encore hands to other apps through androidx.core.content.FileProvider (authority ${applicationId}.files):
+     only what is put under cacheDir/shared/ (bug report exports: shared/bug-reports/). -->
+<paths>
+    <cache-path name="shared" path="shared/" />
+</paths>

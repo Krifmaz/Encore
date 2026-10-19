@@ -1,5 +1,10 @@
 # Encore for Android: native app plan
 
+> **Retired in 0.30 (Oct 2026).** This is the plan the native app was built from (Oct 13). Its milestones are done,
+> and its module split (Hilt, Room, Retrofit, Paging, WorkManager, an `offline/` module) was never adopted. What is
+> current is described in [clients/android/README.md](../../../clients/android/README.md); later work is planned in
+> docs/backlog/2026-10-plan.md. Kept for the reasoning behind decisions (auth, stream policy, Cadenza on the phone).
+
 Status: proposal, 2026-10-13. Scope: Android phone + Android Auto only. Desktop (Tauri, `clients/app`) and iOS are untouched.
 
 Sources this plan is built on: the existing Android code (`clients/app/plugins/media/android/.../{CarService,PlaybackService,MediaPlugin,EncoreApi}.kt`, `clients/app/src/*.rs`), the server router (`server/src/main.rs`, `server/src/routes/*.rs`, `server/src/auth.rs`, `server/src/schema.sql`), the web player (`web/js/player.js`, `web/js/playback.js`, `web/js/remote.js`, `web/js/app.js` routes) and the Cadenza engine (`/home/user/cadenza/crates/cadenza-dsp`).

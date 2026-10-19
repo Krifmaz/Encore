@@ -37,7 +37,7 @@ permissions:
 # A release calls this file with inputs.version set; a manual run leaves it empty (version dev.<run number>).
 jobs:
   android-native:
-    # Native Kotlin app: clients/android (docs/android-native/PLAN.md §11). This is the APK a release attaches as
+    # Native Kotlin app: clients/android (clients/android/README.md). This is the APK a release attaches as
     # Encore-android-<version>.apk. Signed with the permanent release key from the ANDROID_KEYSTORE_BASE64,
     # ANDROID_KEYSTORE_PASSWORD, ANDROID_KEY_ALIAS, ANDROID_KEY_PASSWORD secrets. Without them a release fails;
     # a manual run warns and signs with the runner's debug key (installs, but won't update a release build).
@@ -56,9 +56,9 @@ jobs:
       - uses: android-actions/setup-android@v3
         with:
           packages: "platform-tools platforms;android-36 build-tools;36.0.0 ndk;29.0.13846066"
-      # Cadenza on the phone (M2, PLAN §11 steps 3–5): Rust + Android targets + cargo-ndk, so the Gradle task
-      # :cadenza:cargoNdkBuild builds libencore_cadenza.so (arm64-v8a, armeabi-v7a) into the APK. Without these
-      # steps the task is skipped with a warning and the APK still builds (the player uses its Kotlin DSP).
+      # Cadenza on the phone: Rust + Android targets + cargo-ndk, so the Gradle task :cadenza:cargoNdkBuild builds
+      # libencore_cadenza.so (arm64-v8a, armeabi-v7a) into the APK. Without these steps the task is skipped with a
+      # warning and the APK still builds (with no sound effects or phone upsampling: there is no other engine).
       # github.com/Krifmaz/cadenza is public, so no deploy key (decision D2).
       - uses: dtolnay/rust-toolchain@stable
         with:
@@ -129,6 +129,10 @@ jobs:
         run: |
           gradle -p clients/android --no-daemon --stacktrace :app:assembleRelease \
             "-PencoreVersionName=$ENCORE_VERSION" "-PencoreVersionCode=$ENCORE_CODE"
+      - name: Unit tests
+        # app/src/test (JUnit 4, plain Kotlin rules of offline songs, updates and bug reports); debug is the build
+        # type AGP always gives unit tests
+        run: gradle -p clients/android --no-daemon --stacktrace :app:testDebugUnitTest
       - name: Collect
         run: |
           APK=$(find clients/android/app/build/outputs/apk/release -name '*.apk' ! -name '*unsigned*' | head -1)
@@ -139,6 +143,33 @@ jobs:
             unzip -l "$APK" | grep -q "lib/$abi/libencore_cadenza.so" || { echo "::error::lib/$abi/libencore_cadenza.so is missing from the APK (did :cadenza:cargoNdkBuild run?)"; unzip -l "$APK" | grep ' lib/' || true; exit 1; }
           done
           cp "$APK" "Encore-android-$ENCORE_VERSION.apk" && ls -la Encore-android-*.apk
+      - name: 16 KB pages
+        # Phones with 16 KB memory pages (Android 15+) load a native library only when every LOAD segment is aligned
+        # to 16 KB (cadenza/rust/build.rs links with -z max-page-size=16384) and the APK keeps the uncompressed .so
+        # files 16 KB aligned (zipalign -P 16)
+        run: |
+          APK="Encore-android-$ENCORE_VERSION.apk"
+          READELF=$(ls "$ANDROID_NDK_HOME"/toolchains/llvm/prebuilt/*/bin/llvm-readelf 2>/dev/null | head -1)
+          [ -n "$READELF" ] || { echo "::error::llvm-readelf not found under $ANDROID_NDK_HOME"; exit 1; }
+          D=$(mktemp -d)
+          unzip -q -o "$APK" 'lib/*' -d "$D"
+          BAD=0
+          for so in $(find "$D/lib" -name '*.so' | sort); do
+            ALIGNS=$("$READELF" -lW "$so" | awk '$1 == "LOAD" { print $NF }')
+            [ -n "$ALIGNS" ] || { echo "::error::${so#"$D"/}: no LOAD segments read"; BAD=1; continue; }
+            echo "${so#"$D"/}: LOAD alignment $(echo $ALIGNS)"
+            for a in $ALIGNS; do
+              if [ $((a)) -lt $((0x4000)) ]; then
+                echo "::error::${so#"$D"/} has a LOAD segment aligned to $a, below 16 KB (0x4000)"
+                BAD=1
+              fi
+            done
+          done
+          rm -rf "$D"
+          [ "$BAD" = 0 ] || exit 1
+          "$ANDROID_HOME/build-tools/36.0.0/zipalign" -c -P 16 -v 4 "$APK" > zipalign.log 2>&1 \
+            || { tail -20 zipalign.log; echo "::error::the APK is not aligned for 16 KB pages (zipalign -c -P 16 -v 4)"; exit 1; }
+          tail -1 zipalign.log
       - name: Remove signing key
         if: always()
         run: rm -f "$RUNNER_TEMP/release.jks"

@@ -1,14 +1,15 @@
 package app.encore.android.data.repo
 
+import app.encore.android.core.arr
+import app.encore.android.core.int
+import app.encore.android.core.long
+import app.encore.android.core.objects
+import app.encore.android.core.objectsOf
+import app.encore.android.core.str
 import app.encore.android.data.api.ApiException
 import app.encore.android.data.api.AuthInfo
 import app.encore.android.data.api.EncoreApi
 import app.encore.android.data.api.Track
-import app.encore.android.data.api.int
-import app.encore.android.data.api.long
-import app.encore.android.data.api.objects
-import app.encore.android.data.api.objectsOf
-import app.encore.android.data.api.str
 import kotlinx.serialization.json.JsonElement
 import kotlinx.serialization.json.JsonNull
 import kotlinx.serialization.json.JsonObject
@@ -40,7 +41,7 @@ class FeaturesApi(private val api: EncoreApi, private val client: OkHttpClient) 
 
     // ---- account -------------------------------------------------------------------------------------------
 
-    fun me(): Me = Me.from(api.meRaw())
+    fun me(): Me = api.meRaw().page(Me.serializer())
 
     /** GET /api/auth/info of the signed-in server: which account features exist (rename, avatar, totp, logout_all). */
     fun info(): AuthInfo = api.info(api.base)
@@ -58,7 +59,7 @@ class FeaturesApi(private val api: EncoreApi, private val client: OkHttpClient) 
         call("POST", "/api/auth/password", buildJsonObject { put("current", current); put("new", new) })
     }
 
-    fun sessions(): List<SessionRow> = call("GET", "/api/auth/sessions", null).objects().map { SessionRow.from(it) }
+    fun sessions(): List<SessionRow> = call("GET", "/api/auth/sessions", null).objects().rows(SessionRow.serializer())
 
     fun revokeSession(id: String) {
         call("DELETE", "/api/auth/sessions/${EncoreApi.enc(id)}", null)
@@ -68,7 +69,7 @@ class FeaturesApi(private val api: EncoreApi, private val client: OkHttpClient) 
         call("POST", "/api/auth/logout-all", JsonObject(emptyMap()))
     }
 
-    fun totpSetup(): TotpSetup = TotpSetup.from(call("POST", "/api/auth/2fa/setup", JsonObject(emptyMap())) as? JsonObject ?: JsonObject(emptyMap()))
+    fun totpSetup(): TotpSetup = (call("POST", "/api/auth/2fa/setup", JsonObject(emptyMap())) as? JsonObject ?: JsonObject(emptyMap())).page(TotpSetup.serializer())
 
     fun totpEnable(code: String) {
         call("POST", "/api/auth/2fa/enable", buildJsonObject { put("code", code) })
@@ -104,22 +105,22 @@ class FeaturesApi(private val api: EncoreApi, private val client: OkHttpClient) 
 
     /** GET /api/discover/search?q=&type=all|artist|album|track. */
     fun search(q: String, type: String): SearchResults =
-        SearchResults.from(getObject("/api/discover/search?q=${EncoreApi.enc(q)}&type=${EncoreApi.enc(type)}"))
+        getObject("/api/discover/search?q=${EncoreApi.enc(q)}&type=${EncoreApi.enc(type)}").page(SearchResults.serializer())
 
-    fun artist(mbid: String): ArtistPage = ArtistPage.from(getObject("/api/discover/artist/${EncoreApi.enc(mbid)}"))
+    fun artist(mbid: String): ArtistPage = getObject("/api/discover/artist/${EncoreApi.enc(mbid)}").page(ArtistPage.serializer())
 
-    fun artistExtras(mbid: String): ArtistExtras = ArtistExtras.from(getObject("/api/discover/artist/${EncoreApi.enc(mbid)}/extras"))
+    fun artistExtras(mbid: String): ArtistExtras = getObject("/api/discover/artist/${EncoreApi.enc(mbid)}/extras").page(ArtistExtras.serializer())
 
-    fun artistSimilar(mbid: String): SimilarArtists = SimilarArtists.from(getObject("/api/discover/artist/${EncoreApi.enc(mbid)}/similar"))
+    fun artistSimilar(mbid: String): SimilarArtists = getObject("/api/discover/artist/${EncoreApi.enc(mbid)}/similar").page(SimilarArtists.serializer())
 
     /** Releases on Deezer / Apple Music / Bandcamp / Discogs that MusicBrainz doesn't list (empty when the admin turned the merge off). */
     fun artistCatalog(mbid: String): List<ExtRelease> =
-        getObject("/api/discover/artist/${EncoreApi.enc(mbid)}/catalog").let { o -> (o["releases"] as? kotlinx.serialization.json.JsonArray).objectsOf().mapNotNull { ExtRelease.from(it) } }
+        getObject("/api/discover/artist/${EncoreApi.enc(mbid)}/catalog").arr("releases").objectsOf().rows(ExtRelease.serializer())
 
     /** POST /api/discover/catalog/tracks: the release's `ext` plus the artist (for track lists without one). */
     fun catalogTracks(ext: JsonElement, artist: String = ""): List<ExtTrack> {
         val body = (ext as? JsonObject)?.let { o -> if (artist.isEmpty()) o else JsonObject(o + ("artist" to JsonPrimitive(artist))) } ?: ext
-        return call("POST", "/api/discover/catalog/tracks", body).objects().mapNotNull { ExtTrack.from(it) }
+        return call("POST", "/api/discover/catalog/tracks", body).objects().rows(ExtTrack.serializer())
     }
 
     /**
@@ -199,20 +200,20 @@ class FeaturesApi(private val api: EncoreApi, private val client: OkHttpClient) 
     /** A library artist's MusicBrainz id (404 when MusicBrainz doesn't know the name). */
     fun artistLookup(name: String): String = getObject("/api/discover/artist-lookup?name=${EncoreApi.enc(name)}").str("mbid")
 
-    fun album(rgid: String): AlbumPage = AlbumPage.from(getObject("/api/discover/album/${EncoreApi.enc(rgid)}"))
+    fun album(rgid: String): AlbumPage = getObject("/api/discover/album/${EncoreApi.enc(rgid)}").page(AlbumPage.serializer())
 
     // ---- For you -------------------------------------------------------------------------------------------
 
-    fun forYou(): ForYou = ForYou.from(getObject("/api/discover/for-you"))
+    fun forYou(): ForYou = getObject("/api/discover/for-you").page(ForYou.serializer())
 
-    fun tags(): Tags = Tags.from(getObject("/api/discover/tags"))
+    fun tags(): Tags = getObject("/api/discover/tags").page(Tags.serializer())
 
-    fun tag(name: String, page: Int): TagPage = TagPage.from(getObject("/api/discover/tag/${EncoreApi.enc(name)}?page=$page"))
+    fun tag(name: String, page: Int): TagPage = getObject("/api/discover/tag/${EncoreApi.enc(name)}?page=$page").page(TagPage.serializer())
 
     fun similarTracks(artist: String, title: String, mbid: String): SimilarTracks {
         val qs = StringBuilder("/api/discover/similar-tracks?artist=").append(EncoreApi.enc(artist)).append("&title=").append(EncoreApi.enc(title))
         if (mbid.isNotEmpty()) qs.append("&mbid=").append(EncoreApi.enc(mbid))
-        return SimilarTracks.from(getObject(qs.toString()))
+        return getObject(qs.toString()).page(SimilarTracks.serializer())
     }
 
     // ---- Requests ------------------------------------------------------------------------------------------
@@ -222,7 +223,7 @@ class FeaturesApi(private val api: EncoreApi, private val client: OkHttpClient) 
         val qs = StringBuilder("/api/requests?limit=").append(limit)
         if (status.isNotEmpty() && status != "all") qs.append("&status=").append(EncoreApi.enc(status))
         if (mine) qs.append("&mine=true")
-        return call("GET", qs.toString(), null).objects().mapNotNull { RequestRow.from(it) }
+        return call("GET", qs.toString(), null).objects().rows(RequestRow.serializer())
     }
 
     /** POST /api/requests: the new row; its `status` is `pending` (needs approval) or `queued`. */
@@ -253,7 +254,7 @@ class FeaturesApi(private val api: EncoreApi, private val client: OkHttpClient) 
 
     // ---- Picker --------------------------------------------------------------------------------------------
 
-    fun pickerSources(): PickerInfo = PickerInfo.from(getObject("/api/picker/sources"))
+    fun pickerSources(): PickerInfo = getObject("/api/picker/sources").page(PickerInfo.serializer())
 
     fun pickerSearch(source: String, opts: PickerOpts, query: String): List<PickResult> {
         val body = buildJsonObject {
@@ -268,7 +269,7 @@ class FeaturesApi(private val api: EncoreApi, private val client: OkHttpClient) 
             if (opts.trackCount > 0) put("track_count", opts.trackCount)
             if (opts.lengthSec > 0) put("length", opts.lengthSec)
         }
-        return call("POST", "/api/picker/search", body).objects().mapNotNull { PickResult.from(it) }
+        return call("POST", "/api/picker/search", body).objects().rows(PickResult.serializer())
     }
 
     /** POST /api/picker/pick: a request locked to this result; returns its status (`pending` or `queued`). */
@@ -302,7 +303,7 @@ class FeaturesApi(private val api: EncoreApi, private val client: OkHttpClient) 
 
     // ---- Playlists -----------------------------------------------------------------------------------------
 
-    fun playlistPage(id: Long): PlaylistPage = PlaylistPage.from(getObject("/api/playlists/$id"))
+    fun playlistPage(id: Long): PlaylistPage = getObject("/api/playlists/$id").page(PlaylistPage.serializer())
 
     /** POST /api/playlists {name} → the new playlist's id. */
     fun createPlaylist(name: String): Long = (call("POST", "/api/playlists", buildJsonObject { put("name", name) }) as? JsonObject)?.long("id") ?: 0L
@@ -329,7 +330,7 @@ class FeaturesApi(private val api: EncoreApi, private val client: OkHttpClient) 
     }
 
     fun importPreview(url: String?, text: String?): ImportPreview =
-        ImportPreview.from(call("POST", "/api/playlists/preview", importBody(url, text)) as? JsonObject ?: JsonObject(emptyMap()))
+        (call("POST", "/api/playlists/preview", importBody(url, text)) as? JsonObject ?: JsonObject(emptyMap())).page(ImportPreview.serializer())
 
     fun importPlaylist(url: String?, text: String?, name: String?, follow: Boolean, into: Long?, requestMissing: Boolean, albumMode: String?): ImportResult {
         val body = buildJsonObject {
@@ -340,7 +341,7 @@ class FeaturesApi(private val api: EncoreApi, private val client: OkHttpClient) 
             put("request_missing", requestMissing)
             if (!albumMode.isNullOrEmpty()) put("album_mode", albumMode)
         }
-        return ImportResult.from(call("POST", "/api/playlists/import", body) as? JsonObject ?: JsonObject(emptyMap()))
+        return (call("POST", "/api/playlists/import", body) as? JsonObject ?: JsonObject(emptyMap())).page(ImportResult.serializer())
     }
 
     private fun importBody(url: String?, text: String?): JsonObject = buildJsonObject {
@@ -350,7 +351,7 @@ class FeaturesApi(private val api: EncoreApi, private val client: OkHttpClient) 
     /** POST /api/playlists/{id}/request-missing {album_mode} → what was requested, what is already on its way, what couldn't be. */
     fun requestMissing(id: Long, albumMode: String?): MissingReport {
         val body = buildJsonObject { if (!albumMode.isNullOrEmpty()) put("album_mode", albumMode) }
-        return MissingReport.from(call("POST", "/api/playlists/$id/request-missing", body) as? JsonObject ?: JsonObject(emptyMap()))
+        return (call("POST", "/api/playlists/$id/request-missing", body) as? JsonObject ?: JsonObject(emptyMap())).page(MissingReport.serializer())
     }
 
     fun dedupePlaylist(id: Long): Int = (call("POST", "/api/playlists/$id/dedupe", JsonObject(emptyMap())) as? JsonObject)?.int("removed") ?: 0
@@ -361,7 +362,7 @@ class FeaturesApi(private val api: EncoreApi, private val client: OkHttpClient) 
 
     // ---- Leaderboard ---------------------------------------------------------------------------------------
 
-    fun leaderboard(): Leaderboard = Leaderboard.from(getObject("/api/stats/leaderboard"))
+    fun leaderboard(): Leaderboard = getObject("/api/stats/leaderboard").page(Leaderboard.serializer())
 
     // ---- Report a problem (web/js/pages/report.js) ----------------------------------------------------------
 

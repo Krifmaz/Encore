@@ -1,5 +1,6 @@
 package app.encore.android.data.api
 
+import app.encore.android.core.stringOnly
 import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonElement
 import kotlinx.serialization.json.JsonObject
@@ -43,7 +44,7 @@ object CoverVersions {
             is JsonObject -> {
                 val v = (e["cover_v"] as? JsonPrimitive)?.content?.toLongOrNull() ?: 0L
                 if (v > 0L) albumOf(e)?.let { versions[it] = v }
-                val c = e.text("cover_color")
+                val c = e.stringOnly("cover_color")
                 if (c.length == 7 && c[0] == '#') {
                     c.substring(1).toIntOrNull(16)?.let { rgb -> albumOf(e)?.let { colors[it] = (0xFF000000.toInt() or rgb) } }
                 }
@@ -53,13 +54,11 @@ object CoverVersions {
         }
     }
 
-    private fun JsonObject.text(key: String): String = (this[key] as? JsonPrimitive)?.takeIf { it.isString }?.content ?: ""
-
     /** The album whose cover the object shows: `album_id`, an artist's `cover_album`, or an album's own `id`. */
     private fun albumOf(o: JsonObject): String? {
-        o.text("album_id").takeIf { it.isNotEmpty() }?.let { return it }
-        o.text("cover_album").takeIf { it.isNotEmpty() }?.let { return it }
-        val id = o.text("id")
+        o.stringOnly("album_id").takeIf { it.isNotEmpty() }?.let { return it }
+        o.stringOnly("cover_album").takeIf { it.isNotEmpty() }?.let { return it }
+        val id = o.stringOnly("id")
         return id.takeIf { it.length == 16 && it.all { c -> c.isDigit() || c in 'a'..'f' || c in 'A'..'F' } && ("album" in o || "albumartist" in o) }
     }
 }

@@ -33,10 +33,10 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
-import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.getValue
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -57,11 +57,15 @@ import app.encore.android.data.prefs.Quality
 import app.encore.android.data.session.AuthKind
 import app.encore.android.data.session.Session
 import app.encore.android.data.session.ThemeChoice
+import app.encore.android.cadenza.CadenzaCatalog
 import app.encore.android.cadenza.CadenzaEngine
+import app.encore.android.features.bugs.BugReportsEntry
+import app.encore.android.features.offline.OfflineStorageSection
+import app.encore.android.features.update.UpdatesSection
 import app.encore.android.playback.CarPrefs
-import app.encore.android.playback.DeviceOutput
 import app.encore.android.playback.ResumeStore
-import app.encore.android.playback.UsbOutputManager
+import app.encore.android.playback.output.DeviceOutput
+import app.encore.android.playback.output.UsbOutputManager
 import app.encore.android.remote.RemoteDevice
 import app.encore.android.remote.RemoteUi
 import app.encore.android.ui.Nav
@@ -70,10 +74,6 @@ import app.encore.android.ui.theme.palette
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
-import kotlinx.serialization.json.Json
-import kotlinx.serialization.json.JsonArray
-import kotlinx.serialization.json.JsonObject
-import kotlinx.serialization.json.JsonPrimitive
 
 @Composable
 fun SettingsScreen(nav: Nav, session: Session) {
@@ -138,6 +138,11 @@ fun SettingsScreen(nav: Nav, session: Session) {
 
             SectionTitle("This device")
             DeviceNameRow(nav)
+            // songs saved on this phone: the room they take, per-album remove, Remove all (features/offline)
+            OfflineStorageSection(nav)
+            UpdatesSection()
+            // the reports to the admin, with the count of those that have something new (features/bugs)
+            BugReportsEntry(nav)
 
             SectionTitle("About")
             Text(
@@ -336,7 +341,7 @@ private fun PhoneCadenzaSection(phone: PhonePrefs, deviceRate: Int, serverOn: Bo
         Help("This build of the app came without the Cadenza library.")
         return
     }
-    val catalog = remember { CadenzaCatalog.load() }
+    val catalog = CadenzaCatalog.phone
     CheckRow("Upsample on this phone with Cadenza", phone.cadenza) { on -> set { it.copy(cadenza = on) } }
     val on = phone.cadenza
     Column(Modifier.alpha(if (on) 1f else 0.45f)) {
@@ -364,38 +369,13 @@ private fun PhoneCadenzaSection(phone: PhonePrefs, deviceRate: Int, serverOn: Bo
     }
 }
 
-/** [CadenzaEngine.catalog] parsed: the filters and dithers the phone engine offers, as (id, label) pairs. */
-internal class CadenzaCatalog(val filters: List<Pair<String, String>>, val dithers: List<Pair<String, String>>) {
-    fun filterLabel(id: String): String = filters.firstOrNull { it.first == id }?.second ?: id
-    fun ditherLabel(id: String): String = dithers.firstOrNull { it.first == id }?.second ?: id
-
-    companion object {
-        val EMPTY = CadenzaCatalog(emptyList(), emptyList())
-
-        fun load(): CadenzaCatalog {
-            val json = try { CadenzaEngine.catalog() } catch (_: Throwable) { "" }
-            if (json.isEmpty()) return EMPTY
-            return try {
-                val o = Json.parseToJsonElement(json) as? JsonObject ?: return EMPTY
-                fun pairs(k: String): List<Pair<String, String>> = (o[k] as? JsonArray)?.mapNotNull { e ->
-                    val a = e as? JsonArray ?: return@mapNotNull null
-                    val id = (a.getOrNull(0) as? JsonPrimitive)?.content ?: return@mapNotNull null
-                    val label = (a.getOrNull(1) as? JsonPrimitive)?.content ?: id
-                    id to label
-                } ?: emptyList()
-                CadenzaCatalog(pairs("filters"), pairs("dithers"))
-            } catch (_: Exception) {
-                EMPTY
-            }
-        }
-    }
-}
-
 @Composable
 private fun SoundSection(prefs: PlaybackPrefs, bitPerfect: Boolean, set: ((PlaybackPrefs) -> PlaybackPrefs) -> Unit) {
     val p = MaterialTheme.palette
-    CheckRow("Use sound effects", prefs.fxOn) { on -> set { it.copy(fxOn = on) } }
-    val on = prefs.fxOn
+    // the effects run in Cadenza: a build without its library plays without them
+    val lib = CadenzaEngine.available
+    CheckRow("Use sound effects", prefs.fxOn && lib, enabled = lib) { on -> set { it.copy(fxOn = on) } }
+    val on = prefs.fxOn && lib
     Column(Modifier.alpha(if (on) 1f else 0.45f)) {
         val presets = PlaybackPrefs.EQ_PRESETS.map { it.id to it.label } + (if (prefs.eqPreset == "custom") listOf("custom" to "Custom") else emptyList())
         Picker("Equalizer preset", presets, prefs.eqPreset, enabled = on) { id ->
@@ -436,7 +416,8 @@ private fun SoundSection(prefs: PlaybackPrefs, bitPerfect: Boolean, set: ((Playb
         }
         CheckRow("Mono", prefs.mono, enabled = on) { m -> set { it.copy(mono = m) } }
     }
-    Help("Runs in this app – it costs your server nothing. Works with every quality setting. Turning it on means the sound is no longer the untouched file (the Signal path says so).")
+    if (!lib) Help("This build of the app came without the Cadenza library: the sound effects are off.")
+    else Help("Runs in this app – it costs your server nothing. Works with every quality setting. Turning it on means the sound is no longer the untouched file (the Signal path says so).")
 }
 
 private val TRANSITION_HELP = mapOf(

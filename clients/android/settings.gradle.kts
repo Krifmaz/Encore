@@ -1,5 +1,5 @@
-// Encore for Android – the native app (Kotlin, Compose, Media3). See docs/android-native/PLAN.md.
-// A separate Gradle build from the Tauri client in clients/app.
+// Encore for Android – the native app (Kotlin, Compose, Media3). See README.md.
+// A Gradle build of its own (the rest of the repo is Rust).
 pluginManagement {
     repositories {
         google()

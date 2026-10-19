@@ -58,6 +58,10 @@ import app.encore.android.PreloadCoversAhead
 import app.encore.android.R
 import app.encore.android.data.api.Album
 import app.encore.android.data.api.Track
+import app.encore.android.features.offline.DownloadedList
+import app.encore.android.features.offline.OfflineLibraryScreen
+import app.encore.android.features.offline.OfflineMode
+import app.encore.android.features.offline.OfflineStore
 import app.encore.android.ui.Nav
 import app.encore.android.ui.Screen
 import app.encore.android.ui.components.AlbumCard
@@ -174,16 +178,29 @@ private fun SortChip(tab: String, sort: LibSort, onChange: (LibSort) -> Unit, mo
     }
 }
 
-/** Library: Albums / Artists / Songs (the web's #/library tabs). */
+/**
+ * Library: Albums / Artists / Songs (the web's #/library tabs), and Downloaded once songs are saved on this phone
+ * (features/offline). In offline mode the saved songs are the whole library.
+ */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun LibraryScreen(nav: Nav) {
+    val offline by OfflineMode.active.collectAsState()
+    if (offline) {
+        OfflineLibraryScreen(nav)
+        return
+    }
     var tab by remember { mutableStateOf(0) }
     val context = LocalContext.current
     val store = remember(context) { LibrarySorts(context) }
+    val saved = remember(context) { OfflineStore.of(context) }
+    val savedAll by saved.all.collectAsState()
+    val labels = TABS.map { it.second } + if (saved.songs(savedAll).isNotEmpty()) listOf("Downloaded") else emptyList()
+    val shown = if (tab < labels.size) tab else 0
     // every tab's sort, remembered per tab
     var sorts by remember { mutableStateOf(TABS.associate { (k, _) -> k to store.get(k) }) }
-    val tabKey = TABS[tab].first
+    // (Downloaded has no sort: it keeps the albums as they were saved)
+    val tabKey = TABS.getOrNull(shown)?.first ?: TABS[0].first
     val sort = sorts.getValue(tabKey)
     val scope = rememberCoroutineScope()
     val scrollBehavior = TopAppBarDefaults.enterAlwaysScrollBehavior()
@@ -204,16 +221,19 @@ fun LibraryScreen(nav: Nav) {
     ) { padding ->
         Column(Modifier.fillMaxSize().padding(padding)) {
             Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
-                ChoiceRow(TABS.map { it.second }, tab, { tab = it }, Modifier.weight(1f), end = 8.dp)
-                SortChip(tabKey, sort, { next ->
-                    sorts = sorts + (tabKey to next)
-                    store.set(tabKey, next)
-                })
+                ChoiceRow(labels, shown, { tab = it }, Modifier.weight(1f), end = 8.dp)
+                if (shown < TABS.size) {
+                    SortChip(tabKey, sort, { next ->
+                        sorts = sorts + (tabKey to next)
+                        store.set(tabKey, next)
+                    })
+                }
             }
-            when (tab) {
+            when (shown) {
                 0 -> AlbumsTab(nav, sort)
                 1 -> ArtistsTab(nav, sort)
-                else -> SongsTab(nav, sort)
+                2 -> SongsTab(nav, sort)
+                else -> DownloadedList(nav)
             }
         }
     }

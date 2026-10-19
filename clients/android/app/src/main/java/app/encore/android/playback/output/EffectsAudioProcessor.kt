@@ -1,4 +1,4 @@
-package app.encore.android.playback
+package app.encore.android.playback.output
 
 import android.os.Build
 import androidx.media3.common.C
@@ -6,13 +6,17 @@ import androidx.media3.common.PlaybackParameters
 import androidx.media3.common.audio.AudioProcessor
 import androidx.media3.common.audio.AudioProcessorChain
 import androidx.media3.common.audio.BaseAudioProcessor
+import app.encore.android.cadenza.CadenzaEngine
+import app.encore.android.cadenza.EngineSetup
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
+import java.nio.FloatBuffer
 
 /**
  * The sound effects (EQ, crossfeed, balance, mono) as a Media3 audio processor in ExoPlayer's audio sink, where
- * every decoded song passes through. It converts the sink's 16-bit PCM to float, hands it to a [DspEngine]
- * (Cadenza when available, Kotlin otherwise) and writes the result back as 16-bit PCM with TPDF dither.
+ * every decoded song passes through. It converts the sink's 16-bit PCM to float in the engine's direct buffer,
+ * has [CadenzaEngine] process it there (no copy across JNI) and writes the result back as 16-bit PCM with TPDF
+ * dither. Without the Cadenza library in the APK the sound passes through untouched.
  *
  * The processor stays in the chain once configured (like the web player's Web Audio graph) and is a byte-for-byte
  * pass-through while the effects are off, so switching them on takes effect right away.
@@ -24,7 +28,7 @@ import java.nio.ByteOrder
  *
  * Runs on ExoPlayer's playback thread; the UI only sets [params].
  */
-class EffectsAudioProcessor(private val engine: DspEngine) : BaseAudioProcessor() {
+class EffectsAudioProcessor(private val engine: CadenzaEngine) : BaseAudioProcessor() {
     @Volatile private var pendingParams: String = ""
     private var appliedParams: String = ""
     @Volatile var bypass: Boolean = true
@@ -33,7 +37,8 @@ class EffectsAudioProcessor(private val engine: DspEngine) : BaseAudioProcessor(
     private var channels = 2
     private var inRate = 48000
     private var outRate = 48000
-    private var floats = FloatArray(0)
+    /** the engine was built for this stream (false without the library: the sound passes through) */
+    private var engineReady = false
     private var seed = 0x2545F491L
 
     private var outEncoding = C.ENCODING_PCM_16BIT
@@ -59,11 +64,12 @@ class EffectsAudioProcessor(private val engine: DspEngine) : BaseAudioProcessor(
     @Volatile var directOutput: ((rate: Int, channels: Int, upsampled: Boolean) -> Int)? = null
 
     /**
-     * Called with the song's rate just before the engine is configured for it (the service sets the phone's Cadenza
-     * rate). It returns the filter and dither ids the engine will use, kept as [configuredFilterId] /
-     * [configuredDitherId] so the Signal path names what this song really went through.
+     * Called with the song's rate just before the engine is configured for it: what the engine does besides the
+     * effects (the phone's Cadenza upsampling, OutputRouter.setupFor). Its filter and dither ids are kept as
+     * [configuredFilterId] / [configuredDitherId] so the Signal path names what this song really went through.
+     * null (the transitions' second player): effects only.
      */
-    @Volatile var beforeConfigure: ((inRate: Int) -> Pair<String, String>)? = null
+    @Volatile var beforeConfigure: ((inRate: Int) -> EngineSetup)? = null
 
     /** The phone Cadenza filter id the current stream was configured with ("" = Cadenza's default). */
     @Volatile var configuredFilterId: String = ""
@@ -85,10 +91,11 @@ class EffectsAudioProcessor(private val engine: DspEngine) : BaseAudioProcessor(
         if (inputAudioFormat.encoding != C.ENCODING_PCM_16BIT) throw AudioProcessor.UnhandledAudioFormatException(inputAudioFormat)
         channels = inputAudioFormat.channelCount
         inRate = inputAudioFormat.sampleRate
-        val ids = try { beforeConfigure?.invoke(inRate) } catch (_: Throwable) { null }
-        configuredFilterId = ids?.first ?: ""
-        configuredDitherId = ids?.second ?: ""
-        outRate = try { engine.configure(inRate, channels) } catch (_: Throwable) { inRate }
+        val setup = (try { beforeConfigure?.invoke(inRate) } catch (_: Throwable) { null }) ?: EngineSetup()
+        configuredFilterId = setup.filterId
+        configuredDitherId = setup.ditherId
+        engineReady = false
+        outRate = try { engine.configure(inRate, channels, setup).also { engineReady = true } } catch (_: Throwable) { inRate }
         if (outRate <= 0) outRate = inRate
         val upsampled = outRate != inRate
         val direct = directOutput?.let { pick -> try { pick(outRate, channels, upsampled) } catch (_: Throwable) { C.ENCODING_INVALID } }
@@ -115,7 +122,8 @@ class EffectsAudioProcessor(private val engine: DspEngine) : BaseAudioProcessor(
         }
         val bytes = inputBuffer.remaining()
         if (bytes == 0) return
-        if (bypass && outRate == inRate) {
+        // effects off, or no engine (a build without the Cadenza library): the song as it is
+        if ((bypass || !engineReady) && outRate == inRate) {
             if (outEncoding == C.ENCODING_PCM_16BIT) {
                 // untouched: the same bytes go out
                 val out = replaceOutputBuffer(bytes)
@@ -128,20 +136,22 @@ class EffectsAudioProcessor(private val engine: DspEngine) : BaseAudioProcessor(
         }
         val frames = bytes / (2 * channels)
         val n = frames * channels
-        if (floats.size < n) floats = FloatArray(n)
+        // the samples go straight into the engine's direct buffer (absolute puts, nothing copied across JNI)
+        val floats = engine.input(n)
         val src = inputBuffer.order(ByteOrder.LITTLE_ENDIAN)
-        for (i in 0 until n) floats[i] = src.getShort().toInt() / 32768f
+        for (i in 0 until n) floats.put(i, src.getShort().toInt() / 32768f)
         // anything left over (a partial frame) is dropped, as the sink never sends one
         inputBuffer.position(inputBuffer.limit())
-        val processed = try { engine.process(floats, frames) } catch (_: Throwable) { floats }
+        // null: the engine failed or went away mid-stream, the chunk is lost; the input buffer itself: no engine
+        val processed = try { engine.process(frames) } catch (_: Throwable) { floats } ?: return
         if (processed === floats && outRate != inRate) return   // unprocessed input can't go out at another rate: dropped
-        val outSamples = if (processed === floats) n else processed.size
+        val outSamples = if (processed === floats) n else processed.limit()
         writeFloats(processed, outSamples)
     }
 
     override fun onQueueEndOfStream() {
         val tail = try { engine.flush() } catch (_: Throwable) { FloatArray(0) }
-        if (tail.isNotEmpty()) writeFloats(tail, tail.size)
+        if (tail.isNotEmpty()) writeFloats(FloatBuffer.wrap(tail), tail.size)
     }
 
     /** The song's 16-bit samples, unchanged, in a wider container (bit-perfect output, effects off). */
@@ -173,7 +183,7 @@ class EffectsAudioProcessor(private val engine: DspEngine) : BaseAudioProcessor(
         out.put(((v shr 16) and 0xFF).toByte())
     }
 
-    private fun writeFloats(data: FloatArray, samples: Int) {
+    private fun writeFloats(data: FloatBuffer, samples: Int) {
         if (outEncoding != C.ENCODING_PCM_16BIT) {
             writeWide(data, samples)
             return
@@ -182,7 +192,7 @@ class EffectsAudioProcessor(private val engine: DspEngine) : BaseAudioProcessor(
         for (i in 0 until samples) {
             // TPDF dither (±1 LSB triangular), then clip
             val d = (nextRand() + nextRand()) / 32768f
-            val v = data[i] * 32768f + d
+            val v = data.get(i) * 32768f + d
             val s = if (v > 32767f) 32767 else if (v < -32768f) -32768 else Math.round(v)
             out.putShort(s.toShort())
         }
@@ -193,10 +203,10 @@ class EffectsAudioProcessor(private val engine: DspEngine) : BaseAudioProcessor(
      * 24-bit precision out: Cadenza's upsampled output is already dithered to 24-bit steps, so it is only scaled
      * (exactly); the effects alone at the song's rate are rounded to 24 bits.
      */
-    private fun writeWide(data: FloatArray, samples: Int) {
+    private fun writeWide(data: FloatBuffer, samples: Int) {
         val out = replaceOutputBuffer(samples * bytesPerSample()).order(ByteOrder.LITTLE_ENDIAN)
         for (i in 0 until samples) {
-            val f = data[i]
+            val f = data.get(i)
             if (outEncoding == C.ENCODING_PCM_FLOAT) {
                 out.putFloat(if (f > 1f) 1f else if (f < -1f) -1f else f)
                 continue
@@ -220,7 +230,6 @@ class EffectsAudioProcessor(private val engine: DspEngine) : BaseAudioProcessor(
 
     override fun onReset() {
         try { engine.flush() } catch (_: Throwable) {}
-        floats = FloatArray(0)
     }
 
     fun release() {

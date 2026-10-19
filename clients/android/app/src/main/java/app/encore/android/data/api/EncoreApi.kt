@@ -1,5 +1,15 @@
 package app.encore.android.data.api
 
+import app.encore.android.core.EncoreJson
+import app.encore.android.core.arr
+import app.encore.android.core.bool
+import app.encore.android.core.dbl
+import app.encore.android.core.int
+import app.encore.android.core.long
+import app.encore.android.core.obj
+import app.encore.android.core.objects
+import app.encore.android.core.objectsOf
+import app.encore.android.core.str
 import app.encore.android.data.session.AuthKind
 import app.encore.android.data.session.Session
 import app.encore.android.data.session.SessionStore
@@ -30,7 +40,7 @@ sealed interface LoginResult {
  * playback service's executor. Responses are parsed leniently (see Models.kt).
  */
 class EncoreApi(private val client: OkHttpClient, private val store: SessionStore) {
-    val json: Json = Json { ignoreUnknownKeys = true }
+    val json: Json = EncoreJson
     private val jsonType = "application/json; charset=utf-8".toMediaType()
 
     /** The signed-in server ("" when signed out). */
@@ -366,14 +376,6 @@ class EncoreApi(private val client: OkHttpClient, private val store: SessionStor
 
         fun enc(s: String): String = URLEncoder.encode(s, "UTF-8").replace("+", "%20")
     }
-}
-
-/** A JSON array (possibly null) as its objects. */
-internal fun kotlinx.serialization.json.JsonArray?.objectsOf(): List<JsonObject> {
-    if (this == null) return emptyList()
-    val out = ArrayList<JsonObject>(size)
-    for (e in this) if (e is JsonObject) out.add(e)
-    return out
 }
 
 /**

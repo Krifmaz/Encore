@@ -32,9 +32,9 @@ import androidx.compose.material3.rememberModalBottomSheetState
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
-import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.getValue
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -48,6 +48,8 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.text.withStyle
 import androidx.compose.ui.unit.dp
 import app.encore.android.R
+import app.encore.android.core.dbl
+import app.encore.android.core.str
 import app.encore.android.ui.Nav
 import app.encore.android.ui.components.Cover
 import app.encore.android.ui.components.SmallButton
@@ -277,27 +279,27 @@ private fun DeviceCard(nav: Nav, dev: DeviceInfo, others: List<DeviceInfo>, link
                 Text("Remote for $of", style = MaterialTheme.typography.bodySmall, color = p.muted)
             }
             title.isNotEmpty() -> Row(verticalAlignment = Alignment.CenterVertically) {
-                val albumId = s.s("album_id")
+                val albumId = s.str("album_id")
                 Cover(
                     if (albumId.isNotEmpty()) nav.graph.api.coverUrl(albumId, 96) else null,
                     nav.graph.imageLoader,
                     size = 52.dp,
                     corner = 8.dp,
-                    label = s.s("album").ifEmpty { title },
+                    label = s.str("album").ifEmpty { title },
                 )
                 Spacer(Modifier.width(12.dp))
                 Column(Modifier.weight(1f)) {
                     Text(title, fontWeight = FontWeight.SemiBold, maxLines = 1, overflow = TextOverflow.Ellipsis)
                     Text(
-                        listOf(s.s("artist"), s.s("album")).filter { it.isNotEmpty() }.joinToString(" · "),
+                        listOf(s.str("artist"), s.str("album")).filter { it.isNotEmpty() }.joinToString(" · "),
                         style = MaterialTheme.typography.bodySmall,
                         color = p.muted,
                         maxLines = 1,
                         overflow = TextOverflow.Ellipsis,
                     )
-                    val pos = formatDuration(Math.round(s.d("position") * 1000)).ifEmpty { "0:00" }
-                    val dur = formatDuration(Math.round(s.d("duration") * 1000)).ifEmpty { "0:00" }
-                    val label = (s["signal"] as? JsonObject)?.s("label") ?: ""
+                    val pos = formatDuration(Math.round(s.dbl("position") * 1000)).ifEmpty { "0:00" }
+                    val dur = formatDuration(Math.round(s.dbl("duration") * 1000)).ifEmpty { "0:00" }
+                    val label = (s["signal"] as? JsonObject)?.str("label") ?: ""
                     Text(
                         (if (dev.playing) "Playing" else "Paused") + " · $pos / $dur" + (if (label.isNotEmpty()) " · $label" else ""),
                         style = MaterialTheme.typography.bodySmall,
@@ -325,7 +327,7 @@ private fun DeviceCard(nav: Nav, dev: DeviceInfo, others: List<DeviceInfo>, link
                     IconButton(onClick = { send("next") }) {
                         Icon(painterResource(R.drawable.ic_skip_next), contentDescription = "Next", tint = p.text)
                     }
-                    val vol = if (s.containsKey("volume")) s.d("volume").toFloat().coerceIn(0f, 1f) else 0.9f
+                    val vol = if (s.containsKey("volume")) s.dbl("volume").toFloat().coerceIn(0f, 1f) else 0.9f
                     VolumeSlider(vol, p.accent, p.border, Modifier.weight(1f).padding(start = 6.dp)) { v -> send("volume") { put("value", v.toDouble()) } }
                 }
             }
@@ -352,12 +354,12 @@ private fun playHere(nav: Nav, dev: DeviceInfo) {
         Toasts.show("That song is no longer in your library", "err")
         return
     }
-    var index = s.d("index").toInt()
+    var index = s.dbl("index").toInt()
     if (current != null && (index !in list.indices || list[index].id != current.id)) index = list.indexOfFirst { it.id == current.id }
     if (index < 0) index = 0
     // this phone plays itself again
     if (remote.link.value != null) remote.unlink()
-    var at = s.d("position")
+    var at = s.dbl("position")
     val dur = list[index].durationSec
     if (dur > 0 && at > dur - 2) at = 0.0
     nav.player.playFrom(list, index, Math.round(at * 1000))

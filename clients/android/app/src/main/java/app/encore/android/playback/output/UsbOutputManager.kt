@@ -1,4 +1,4 @@
-package app.encore.android.playback
+package app.encore.android.playback.output
 
 import android.content.Context
 import android.media.AudioAttributes

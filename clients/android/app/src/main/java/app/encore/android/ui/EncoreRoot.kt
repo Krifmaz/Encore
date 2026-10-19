@@ -32,6 +32,12 @@ import app.encore.android.R
 import app.encore.android.data.api.Track
 import app.encore.android.data.session.AuthState
 import app.encore.android.data.session.Session
+import app.encore.android.features.bugs.BugReportScreen
+import app.encore.android.features.bugs.BugReportsScreen
+import app.encore.android.features.offline.OfflineBanner
+import app.encore.android.features.offline.OfflineMenu
+import app.encore.android.features.offline.OfflineMode
+import app.encore.android.features.offline.rememberOfflineMenu
 import app.encore.android.remote.DevicesSheet
 import app.encore.android.remote.LinkedBar
 import app.encore.android.remote.RemoteUi
@@ -102,6 +108,11 @@ sealed interface Screen {
     data class PlaylistEdit(val id: Long) : Screen
     /** Import a playlist (`into == null`) or add songs from a link to one. */
     data class PlaylistImport(val into: Long?) : Screen
+
+    // bug reports (features/bugs): the list (opened from the Home menu or Settings → This device; [from] is sent along
+    // with a new report as the page it came from) and one report with its thread
+    data class BugReports(val from: String = "") : Screen
+    data class BugReport(val id: Long) : Screen
 }
 
 /** The bottom tabs (the web's main nav on phones): Home, Search, Library, Playlists, Discover. */
@@ -160,7 +171,16 @@ private fun MainScreen(graph: AppGraph, player: PlayerConnection, session: Sessi
     // this phone as a remote for another device (remote/RemoteDevice.kt) and the Devices sheet
     val link by player.remote.link.collectAsState()
     val devicesOpen by RemoteUi.devicesOpen.collectAsState()
+    // offline mode (features/offline): the banner, the Library tab with the songs saved here, the other tabs greyed
+    val offline by OfflineMode.active.collectAsState()
 
+    LaunchedEffect(session) { OfflineMode.start(graph.app) }
+    LaunchedEffect(offline) {
+        if (offline) {
+            stack.clear()
+            tab = Tab.LIBRARY
+        }
+    }
     LaunchedEffect(session) { graph.likes.refresh(force = true) }
     // the first page of each Library tab's covers, so the tabs open with their covers in place
     LaunchedEffect(session) { graph.coverPreloader.firstPages() }
@@ -179,6 +199,9 @@ private fun MainScreen(graph: AppGraph, player: PlayerConnection, session: Sessi
             showTrackMenu = { t, onAlbum -> trackMenuFor = TrackMenuRequest(t, onAlbum) },
         )
     }
+    // the song menu's "Download for offline": made here, so the storage permission's answer (Android 8–9) still
+    // finds it after the menu closed
+    val offlineMenu = rememberOfflineMenu(nav)
     val menuActions = rememberPlayerMenuActions(
         nav = nav,
         onClose = { showPlayer = false },
@@ -186,7 +209,7 @@ private fun MainScreen(graph: AppGraph, player: PlayerConnection, session: Sessi
         onAddToPlaylist = { ids -> addToPlaylistIds = ids },
     )
 
-    BackHandler(enabled = lyricsOpen || showPlayer || stack.isNotEmpty() || tab != Tab.HOME) {
+    BackHandler(enabled = lyricsOpen || showPlayer || stack.isNotEmpty() || (tab != Tab.HOME && !offline)) {
         when {
             lyricsOpen -> player.closeLyrics()
             showPlayer -> showPlayer = false
@@ -198,6 +221,7 @@ private fun MainScreen(graph: AppGraph, player: PlayerConnection, session: Sessi
     Box(Modifier.fillMaxSize()) {
         Scaffold(
             containerColor = p.bg,
+            topBar = { OfflineBanner() },
             bottomBar = {
                 Column {
                     // "Continue <song> from 2:31 · was playing on <device>": pick up where another device left off
@@ -209,6 +233,7 @@ private fun MainScreen(graph: AppGraph, player: PlayerConnection, session: Sessi
                         for (t in Tab.entries) {
                             NavigationBarItem(
                                 selected = t == tab && stack.isEmpty(),
+                                enabled = !offline || t == Tab.LIBRARY,
                                 onClick = {
                                     stack.clear()
                                     tab = t
@@ -245,6 +270,8 @@ private fun MainScreen(graph: AppGraph, player: PlayerConnection, session: Sessi
                     is Screen.Picker -> PickerScreen(nav, top.opts)
                     is Screen.PlaylistEdit -> PlaylistEditScreen(nav, top.id)
                     is Screen.PlaylistImport -> PlaylistImportScreen(nav, top.into)
+                    is Screen.BugReports -> BugReportsScreen(nav, top.from)
+                    is Screen.BugReport -> BugReportScreen(nav, top.id)
                     null -> when (tab) {
                         Tab.HOME -> HomeScreen(nav, session)
                         Tab.SEARCH -> SearchScreen(nav)
@@ -274,7 +301,7 @@ private fun MainScreen(graph: AppGraph, player: PlayerConnection, session: Sessi
             AddToPlaylistSheet(graph.api, ids, onDismiss = { addToPlaylistIds = null })
         }
         trackMenuFor?.let { req ->
-            TrackMenu(nav, req, onDismiss = { trackMenuFor = null })
+            TrackMenu(nav, req, offlineMenu, onDismiss = { trackMenuFor = null })
         }
         // ⋯ → Report a problem (songs and albums)
         ReportHost(nav)
@@ -288,7 +315,7 @@ private fun MainScreen(graph: AppGraph, player: PlayerConnection, session: Sessi
  * Lyrics, Share link, Go to album. Shown as a bottom-anchored popup at the root so every list shares one.
  */
 @Composable
-private fun TrackMenu(nav: Nav, req: TrackMenuRequest, onDismiss: () -> Unit) {
+private fun TrackMenu(nav: Nav, req: TrackMenuRequest, offlineMenu: OfflineMenu, onDismiss: () -> Unit) {
     val t = req.track
     val player = nav.player
     Box(Modifier.fillMaxSize(), contentAlignment = Alignment.BottomCenter) {
@@ -299,6 +326,7 @@ private fun TrackMenu(nav: Nav, req: TrackMenuRequest, onDismiss: () -> Unit) {
                 MenuEntry("Play next", R.drawable.ic_skip_next) { player.playNext(t); Toasts.show("Plays next", "ok") },
                 MenuEntry("Add to queue", R.drawable.ic_queue_music) { player.addToQueue(t); Toasts.show("Added to queue", "ok") },
                 MenuEntry("Add to playlist", R.drawable.ic_playlist_add) { nav.addToPlaylist(listOf(t.id)) },
+                *offlineMenu.entries(listOf(t)).toTypedArray(),
                 MenuEntry("Lyrics", R.drawable.ic_lyrics) {
                     val d = player.menuActions
                     if (d != null && player.nowPlaying.value?.id == t.id) d.lyrics() else Toasts.show("Play the song, then open Lyrics from the player", "info")

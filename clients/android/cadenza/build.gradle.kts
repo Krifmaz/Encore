@@ -1,8 +1,8 @@
-// Cadenza on the phone (docs/android-native/PLAN.md §6.3): the Kotlin JNI binding (CadenzaNative) and the Rust
-// library libencore_cadenza.so built from cadenza/rust by cargo-ndk. `cargoNdkBuild` runs before preBuild; when
-// cargo-ndk is not on the PATH it is SKIPPED with a warning and the APK simply has no Cadenza library (the player
-// then uses its Kotlin DSP). CI installs Rust, the Android targets, cargo-ndk 4.1.2 and the NDK, so release APKs
-// include the libs for arm64-v8a and armeabi-v7a.
+// Cadenza on the phone (cadenza/README.md): the Kotlin JNI binding (CadenzaNative) and the Rust library
+// libencore_cadenza.so built from cadenza/rust by cargo-ndk. `cargoNdkBuild` runs before preBuild; when cargo-ndk is
+// not on the PATH it is SKIPPED with a warning and the APK simply has no Cadenza library (the player then plays
+// without sound effects or phone upsampling). CI installs Rust, the Android targets, cargo-ndk 4.1.2 and the NDK, so
+// release APKs include the libs for arm64-v8a and armeabi-v7a, with 16 KB aligned segments (rust/build.rs).
 import java.io.File
 
 plugins {
@@ -51,13 +51,13 @@ android {
 val cargoNdkBuild = tasks.register<Exec>("cargoNdkBuild") {
     group = "build"
     description = "Builds libencore_cadenza.so for ${abis.joinToString()} with cargo-ndk (skipped without cargo-ndk)"
-    inputs.files(fileTree(rustDir) { include("Cargo.toml", "Cargo.lock", "src/**") })
+    inputs.files(fileTree(rustDir) { include("Cargo.toml", "Cargo.lock", "build.rs", "src/**") })
     outputs.dir(jniLibsDir)
     onlyIf {
         if (cargoNdk == null || cargo == null) {
             logger.warn(
                 "cargoNdkBuild SKIPPED: cargo-ndk is not on the PATH (or cargo is missing), so this APK has no Cadenza " +
-                    "library (libencore_cadenza.so) and uses the Kotlin DSP. Install with: rustup target add " +
+                    "library (libencore_cadenza.so): no sound effects or phone upsampling. Install with: rustup target add " +
                     "aarch64-linux-android armv7-linux-androideabi && cargo install cargo-ndk --version 4.1.2 --locked"
             )
             false

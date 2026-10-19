@@ -1,4 +1,4 @@
-# Every version is pinned (docs/android-native/PLAN.md §3). Bump deliberately, one line at a time.
+# Every version is pinned (README.md, Libraries). Bump deliberately, one line at a time.
 [versions]
 agp = "9.4.0"
 kotlin = "2.4.21"                 # also in the root build.gradle.kts buildscript classpath
@@ -9,8 +9,9 @@ okhttp = "5.3.2"                  # 5.4+ needs compileSdk 37 (not on GitHub runn
 kotlinxSerialization = "1.11.0"
 kotlinxCoroutines = "1.11.0"
 coil = "3.5.0"                     # 3.6 needs compileSdk 37 and pulls Compose 1.12
-datastore = "1.2.1"               # plain DataStore for M1; Tink-encrypted store follows (PLAN §4.2)
+datastore = "1.2.1"               # plain DataStore (the session token is app-private, allowBackup=false)
 carApp = "1.7.0"                  # androidx.car.app (Encore Lyrics car app): MapWithContentTemplate needs 1.7 / car API level 7
+junit = "4.13.2"                  # unit tests only (app/src/test: the pure rules of offline, updates, bug reports)
 
 [libraries]
 androidx-compose-bom = { group = "androidx.compose", name = "compose-bom", version.ref = "composeBom" }
@@ -29,6 +30,7 @@ kotlinx-coroutines-android = { group = "org.jetbrains.kotlinx", name = "kotlinx-
 coil-compose = { group = "io.coil-kt.coil3", name = "coil-compose", version.ref = "coil" }
 coil-network-okhttp = { group = "io.coil-kt.coil3", name = "coil-network-okhttp", version.ref = "coil" }
 coil-network-cache-control = { group = "io.coil-kt.coil3", name = "coil-network-cache-control", version.ref = "coil" }
+junit = { group = "junit", name = "junit", version.ref = "junit" }
 
 [plugins]
 android-application = { id = "com.android.application", version.ref = "agp" }

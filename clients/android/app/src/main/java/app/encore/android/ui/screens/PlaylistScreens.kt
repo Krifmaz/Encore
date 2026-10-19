@@ -53,6 +53,8 @@ import app.encore.android.ui.components.EncoreTopBar
 import app.encore.android.ui.components.Gutter
 import app.encore.android.ui.components.Loadable
 import app.encore.android.ui.components.LoadableContent
+import app.encore.android.ui.components.MoreButton
+import app.encore.android.features.offline.rememberOfflineMenu
 import app.encore.android.ui.components.Tile
 import app.encore.android.ui.components.TrackRow
 import app.encore.android.ui.components.rememberLoad
@@ -140,6 +142,8 @@ fun PlaylistScreen(nav: Nav, id: Long, name: String) {
     val nowPlaying by nav.player.nowPlaying.collectAsState()
     // Liked Songs changes as you like things: reload when the set changes
     val loader = rememberLoad(id, if (name == "Liked Songs") liked.size else 0) { api.playlist(id) }
+    // "Download for offline" / "Remove download" for the playlist's songs (features/offline)
+    val offlineMenu = rememberOfflineMenu(nav)
     val p = MaterialTheme.palette
     val scrollBehavior = TopAppBarDefaults.enterAlwaysScrollBehavior()
     Scaffold(
@@ -191,8 +195,12 @@ fun PlaylistScreen(nav: Nav, id: Long, name: String) {
                 }
                 item {
                     Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.Center) {
-                        if (tracks.isNotEmpty()) PlayButtons(nav, tracks)
-                        else Spacer(Modifier.height(16.dp))
+                        if (tracks.isNotEmpty()) {
+                            PlayButtons(nav, tracks) {
+                                val entries = offlineMenu.entries(tracks)
+                                if (entries.isNotEmpty()) MoreButton(entries = entries)
+                            }
+                        } else Spacer(Modifier.height(16.dp))
                     }
                 }
                 if (rows.isEmpty()) {

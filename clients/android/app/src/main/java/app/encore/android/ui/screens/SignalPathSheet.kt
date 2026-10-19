@@ -17,19 +17,22 @@ import androidx.compose.material3.rememberModalBottomSheetState
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
-import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.getValue
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
+import app.encore.android.cadenza.CadenzaCatalog
+import app.encore.android.core.int
+import app.encore.android.core.stringOnly
 import app.encore.android.data.api.Track
 import app.encore.android.data.prefs.Quality
-import app.encore.android.playback.DeviceOutput
 import app.encore.android.playback.StreamInfo
+import app.encore.android.playback.output.DeviceOutput
 import app.encore.android.ui.Nav
 import app.encore.android.ui.theme.palette
 import kotlinx.coroutines.CancellationException
@@ -42,10 +45,8 @@ import kotlinx.serialization.json.JsonPrimitive
 class TrackInfo(val codec: String, val sampleRate: Int, val bitDepth: Int, val channels: Int, val bitrate: Int, val lossless: Boolean?) {
     companion object {
         fun from(o: JsonObject): TrackInfo {
-            fun s(k: String) = (o[k] as? JsonPrimitive)?.takeIf { it.isString }?.content ?: ""
-            fun n(k: String) = (o[k] as? JsonPrimitive)?.content?.toDoubleOrNull()?.toInt() ?: 0
             val l = (o["lossless"] as? JsonPrimitive)?.content
-            return TrackInfo(s("codec"), n("sample_rate"), n("bit_depth"), n("channels"), n("bitrate"), when (l) { "true" -> true; "false" -> false; else -> null })
+            return TrackInfo(o.stringOnly("codec"), o.int("sample_rate"), o.int("bit_depth"), o.int("channels"), o.int("bitrate"), when (l) { "true" -> true; "false" -> false; else -> null })
         }
     }
 }
@@ -87,7 +88,7 @@ fun SignalPathSheet(nav: Nav, onDismiss: () -> Unit) {
         loading = false
     }
     val out = remember { DeviceOutput.of(context) }
-    val catalog = remember { CadenzaCatalog.load() }
+    val catalog = CadenzaCatalog.phone
 
     ModalBottomSheet(onDismissRequest = onDismiss, sheetState = sheetState, containerColor = p.panel, contentColor = p.text) {
         Column(Modifier.fillMaxWidth().verticalScroll(rememberScrollState()).padding(start = 22.dp, end = 22.dp, bottom = 28.dp)) {

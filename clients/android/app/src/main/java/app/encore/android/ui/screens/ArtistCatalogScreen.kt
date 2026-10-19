@@ -14,11 +14,14 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.Checkbox
 import androidx.compose.material3.ExperimentalMaterial3Api
+import androidx.compose.material3.Icon
+import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.Scaffold
@@ -26,10 +29,10 @@ import androidx.compose.material3.Text
 import androidx.compose.material3.TopAppBarDefaults
 import androidx.compose.material3.rememberModalBottomSheetState
 import androidx.compose.runtime.Composable
-import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.getValue
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -37,13 +40,16 @@ import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.draw.shadow
 
 import androidx.compose.ui.input.nestedscroll.nestedScroll
+import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import app.encore.android.R
+import app.encore.android.data.api.Album
 import app.encore.android.data.api.Track
 import app.encore.android.data.repo.AlbumPage
 import app.encore.android.data.repo.ArtistExtras
@@ -56,23 +62,28 @@ import app.encore.android.data.repo.SimilarArtists
 import app.encore.android.data.repo.TopTrack
 import app.encore.android.ui.Nav
 import app.encore.android.ui.Screen
+import app.encore.android.ui.components.AlbumCard
 import app.encore.android.ui.components.Badge
 import app.encore.android.ui.components.ChoiceRow
 import app.encore.android.ui.components.Cover
 import app.encore.android.ui.components.EmptyState
 import app.encore.android.ui.components.EncoreButton
 import app.encore.android.ui.components.EncoreTopBar
+import app.encore.android.ui.components.FastScroller
 import app.encore.android.ui.components.Gutter
 import app.encore.android.ui.components.Loadable
 import app.encore.android.ui.components.LoadableContent
 import app.encore.android.ui.components.RoundCover
+import app.encore.android.ui.components.ScrollerTarget
 import app.encore.android.ui.components.SectionHead
 import app.encore.android.ui.components.SmallButton
 import app.encore.android.ui.components.Tile
 import app.encore.android.ui.components.Toasts
 import app.encore.android.ui.components.formatDuration
 import app.encore.android.ui.components.formatLongDuration
+import app.encore.android.ui.components.rememberLibraryIndex
 import app.encore.android.ui.components.rememberLoad
+import app.encore.android.ui.components.shareLinkOf
 import app.encore.android.ui.theme.palette
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
@@ -231,19 +242,47 @@ private fun groupKey(rg: CatalogAlbum): String = rg.secondary.firstOrNull() ?: r
 
 private fun groupRank(k: String): Int = GROUP_ORDER.indexOf(k).let { if (it < 0) 99 else it }
 
-/** The MusicBrainz page of an artist: header, popular songs, library albums, discography with filters, similar artists. */
+/** The page of an artist MusicBrainz knows, by its id (artist links, Discover, For you). */
+@Composable
+fun CatalogArtistScreen(nav: Nav, mbid: String) = ArtistPageScreen(nav, mbid = mbid, name = "")
+
+/**
+ * The page of an artist known by name only: the Library tab's artist grid, no network, or a name MusicBrainz doesn't
+ * know. The same page with what the library has: the header with Play / Shuffle and the library's albums by that name
+ * as its "In your library" section.
+ */
+@Composable
+fun ArtistScreen(nav: Nav, name: String) = ArtistPageScreen(nav, mbid = "", name = name)
+
+/** What the artist page shows: the MusicBrainz page (only the name for a library-only artist) and the library's albums by name. */
+private class ArtistPageData(val page: ArtistPage, val libraryAlbums: List<Album>)
+
+/**
+ * The one artist page: header, popular songs, library albums, discography with filters, similar artists. By
+ * MusicBrainz id it has everything; by name only, the header and the library's albums (the rest needs the id).
+ */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-fun CatalogArtistScreen(nav: Nav, mbid: String) {
+private fun ArtistPageScreen(nav: Nav, mbid: String, name: String) {
+    val byName = mbid.isEmpty()
     val features = nav.features
+    val api = nav.graph.api
     val p = MaterialTheme.palette
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
-    val loader = rememberLoad("catalog-artist", mbid) { features.artist(mbid) }
+    val loader = rememberLoad("artist-page", mbid, name) {
+        if (byName) ArtistPageData(ArtistPage(name = name), api.albums(sort = "released", artist = name, limit = 200))
+        else ArtistPageData(features.artist(mbid), emptyList())
+    }
     // photo, bio and popular songs; similar artists; releases MusicBrainz is missing – all optional, loaded after the page
-    val extras = rememberLoad("catalog-extras", mbid) { try { features.artistExtras(mbid) } catch (_: Exception) { ArtistExtras("", "", "", emptyList()) } }
-    val similar = rememberLoad("catalog-similar", mbid) { try { features.artistSimilar(mbid) } catch (_: Exception) { SimilarArtists("", emptyList()) } }
-    val ext = rememberLoad("catalog-ext", mbid) { try { features.artistCatalog(mbid) } catch (_: Exception) { emptyList() } }
+    val extras = rememberLoad("catalog-extras", mbid) { if (byName) ArtistExtras() else try { features.artistExtras(mbid) } catch (_: Exception) { ArtistExtras() } }
+    val similar = rememberLoad("catalog-similar", mbid) { if (byName) SimilarArtists() else try { features.artistSimilar(mbid) } catch (_: Exception) { SimilarArtists() } }
+    val ext = rememberLoad("catalog-ext", mbid) { if (byName) emptyList() else try { features.artistCatalog(mbid) } catch (_: Exception) { emptyList() } }
+    // by name: the years of the library's albums for the side scrubber, and as many albums to a row as fit (the
+    // Library tab's grid: 140 dp tiles, at least two)
+    val sections = if (byName) rememberLibraryIndex(api, "albums", "released", artist = name) else emptyList()
+    val listState = rememberLazyListState()
+    val libColumns = ((LocalConfiguration.current.screenWidthDp - 2 * Gutter.value + 14f) / (140f + 14f)).toInt().coerceAtLeast(2)
     val statuses = rememberRequestStatuses()
     LiveRequestStatuses(nav, statuses)
     var filter by remember { mutableStateOf(0) }
@@ -257,9 +296,27 @@ fun CatalogArtistScreen(nav: Nav, mbid: String) {
         modifier = Modifier.fillMaxSize().nestedScroll(scrollBehavior.nestedScrollConnection),
         containerColor = p.bg,
         contentWindowInsets = WindowInsets(0, 0, 0, 0),
-        topBar = { EncoreTopBar("", scrollBehavior = scrollBehavior, onBack = nav.back) },
+        topBar = {
+            if (byName) {
+                EncoreTopBar(name, scrollBehavior = scrollBehavior, onBack = nav.back) {
+                    IconButton(onClick = {
+                        shareLinkOf(
+                            context, scope,
+                            subject = name,
+                            text = name,
+                            toast = "Link copied – anyone with it can play this artist",
+                        ) { api.shareArtistLink(name) }
+                    }) {
+                        Icon(painterResource(R.drawable.ic_share), contentDescription = "Share link")
+                    }
+                }
+            } else {
+                EncoreTopBar("", scrollBehavior = scrollBehavior, onBack = nav.back)
+            }
+        },
     ) { padding ->
-        LoadableContent(loader) { a ->
+        LoadableContent(loader) { d ->
+            val a = d.page
             val x = (extras.state.value as? Loadable.Ready)?.value
             val sim = (similar.state.value as? Loadable.Ready)?.value
             val extReleases = (ext.state.value as? Loadable.Ready)?.value
@@ -267,7 +324,8 @@ fun CatalogArtistScreen(nav: Nav, mbid: String) {
             val groups = a.releaseGroups.groupBy { groupKey(it) }
             val keys = groups.keys.sortedBy { groupRank(it) }
             val owned = a.releaseGroups.count { it.inLibrary }
-            val firstCover = a.releaseGroups.firstOrNull { it.type == "Album" && it.secondary.isEmpty() }?.cover ?: ""
+            val firstCover = if (byName) d.libraryAlbums.firstOrNull()?.let { api.coverUrl(it.id, 400) } ?: ""
+                else a.releaseGroups.firstOrNull { it.type == "Album" && it.secondary.isEmpty() }?.cover ?: ""
             val rgIds = a.releaseGroups.map { it.id }.toSet()
             val titles = a.releaseGroups.map { it.title.lowercase() }.toSet()
             val localOnly = a.libraryAlbums.filter { l -> !(l.rgid.isNotEmpty() && l.rgid in rgIds) && l.album.lowercase() !in titles }
@@ -277,180 +335,215 @@ fun CatalogArtistScreen(nav: Nav, mbid: String) {
 
             fun playAll(shuffle: Boolean) {
                 scope.launch {
-                    val songs = try { withContext(Dispatchers.IO) { features.artistLibraryTracks(a.id, a.name) } } catch (e: Exception) { Toasts.show(e.message ?: "Couldn't load the songs", "err"); return@launch }
+                    // by name: every spelling, alias and collaboration of the artist in the library (GET /api/library/artist-tracks)
+                    val songs = try {
+                        withContext(Dispatchers.IO) { if (byName) api.artistTracks(name) else features.artistLibraryTracks(a.id, a.name) }
+                    } catch (e: Exception) { Toasts.show(e.message ?: "Couldn't load the songs", "err"); return@launch }
                     if (songs.isEmpty()) Toasts.show("Nothing by this artist in your library", "err") else nav.player.play(songs, shuffle = shuffle)
                 }
             }
 
-            LazyColumn(Modifier.fillMaxSize().padding(padding)) {
-                // .detail-head.artist
-                item {
-                    Column(Modifier.fillMaxWidth().padding(horizontal = Gutter), horizontalAlignment = Alignment.CenterHorizontally) {
-                        RoundCover((x?.image?.ifEmpty { null }) ?: firstCover.ifEmpty { null }, nav.graph.imageLoader, size = 150.dp, label = a.name)
-                        Spacer(Modifier.height(14.dp))
-                        Text(
-                            listOf(a.type.ifEmpty { "Artist" }, a.country, if (a.begin.isNotEmpty()) "since ${a.begin.take(4)}" else "").filter { it.isNotEmpty() }.joinToString(" · ").uppercase(),
-                            style = MaterialTheme.typography.labelSmall,
-                            color = p.muted,
-                            letterSpacing = 1.2.sp,
-                        )
-                        Text(a.name, style = MaterialTheme.typography.headlineMedium, textAlign = TextAlign.Center, modifier = Modifier.padding(top = 6.dp))
-                        if (a.disambiguation.isNotEmpty()) {
-                            Text(a.disambiguation, style = MaterialTheme.typography.bodyMedium, color = p.muted, textAlign = TextAlign.Center, modifier = Modifier.padding(top = 4.dp))
-                        }
-                        if (a.tags.isNotEmpty()) {
-                            Row(Modifier.padding(top = 10.dp), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-                                for (t in a.tags.take(5)) Badge(t, onClick = { nav.open(Screen.Tag(t)) })
+            Box(Modifier.fillMaxSize().padding(padding)) {
+                LazyColumn(Modifier.fillMaxSize(), state = listState) {
+                    // .detail-head.artist
+                    item {
+                        Column(Modifier.fillMaxWidth().padding(horizontal = Gutter), horizontalAlignment = Alignment.CenterHorizontally) {
+                            RoundCover((x?.image?.ifEmpty { null }) ?: firstCover.ifEmpty { null }, nav.graph.imageLoader, size = 150.dp, label = a.name)
+                            Spacer(Modifier.height(14.dp))
+                            Text(
+                                if (byName) "ARTIST · IN YOUR LIBRARY"
+                                else listOf(a.type.ifEmpty { "Artist" }, a.country, if (a.begin.isNotEmpty()) "since ${a.begin.take(4)}" else "").filter { it.isNotEmpty() }.joinToString(" · ").uppercase(),
+                                style = MaterialTheme.typography.labelSmall,
+                                color = p.muted,
+                                letterSpacing = 1.2.sp,
+                            )
+                            Text(a.name, style = MaterialTheme.typography.headlineMedium, textAlign = TextAlign.Center, modifier = Modifier.padding(top = 6.dp))
+                            if (byName) {
+                                val albums = d.libraryAlbums
+                                Text(
+                                    "${albums.size} album${if (albums.size == 1) "" else "s"} · ${albums.sumOf { it.trackCount }} tracks",
+                                    style = MaterialTheme.typography.bodyMedium,
+                                    color = p.muted,
+                                    modifier = Modifier.padding(top = 2.dp),
+                                )
                             }
-                        }
-                        Row(Modifier.padding(top = 14.dp), horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
-                            if (a.libraryTracks > 0) {
-                                EncoreButton("Play", iconRes = R.drawable.ic_play, primary = true) { playAll(false) }
-                                EncoreButton("Shuffle", iconRes = R.drawable.ic_shuffle) { playAll(true) }
+                            if (a.disambiguation.isNotEmpty()) {
+                                Text(a.disambiguation, style = MaterialTheme.typography.bodyMedium, color = p.muted, textAlign = TextAlign.Center, modifier = Modifier.padding(top = 4.dp))
                             }
-                        }
-                        Row(Modifier.padding(top = 8.dp), verticalAlignment = Alignment.CenterVertically) {
-                            if (status.isNotEmpty()) {
-                                LiveBadge(status, statusText)
-                            } else {
-                                EncoreButton("Request discography", iconRes = R.drawable.ic_download) {
-                                    // the releases to tick, for this request (older servers have no release types: the plain request)
-                                    if (a.releaseKinds.isNotEmpty()) {
-                                        discoSheet = true
-                                    } else {
-                                        scope.launch {
-                                            val st = requestDiscography(features, a, firstCover, null, null) ?: return@launch
+                            if (a.tags.isNotEmpty()) {
+                                Row(Modifier.padding(top = 10.dp), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                                    for (t in a.tags.take(5)) Badge(t, onClick = { nav.open(Screen.Tag(t)) })
+                                }
+                            }
+                            Row(Modifier.padding(top = 14.dp), horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
+                                if (byName || a.libraryTracks > 0) {
+                                    EncoreButton("Play", iconRes = R.drawable.ic_play, primary = true) { playAll(false) }
+                                    EncoreButton("Shuffle", iconRes = R.drawable.ic_shuffle) { playAll(true) }
+                                }
+                            }
+                            // requests, the counts and the links need MusicBrainz
+                            if (!byName) Row(Modifier.padding(top = 8.dp), verticalAlignment = Alignment.CenterVertically) {
+                                if (status.isNotEmpty()) {
+                                    LiveBadge(status, statusText)
+                                } else {
+                                    EncoreButton("Request discography", iconRes = R.drawable.ic_download) {
+                                        // the releases to tick, for this request (older servers have no release types: the plain request)
+                                        if (a.releaseKinds.isNotEmpty()) {
+                                            discoSheet = true
+                                        } else {
+                                            scope.launch {
+                                                val st = requestDiscography(features, a, firstCover, null, null) ?: return@launch
 
-                                            statuses.mark(artistKeys, st, if (st == "pending") "Awaiting approval" else "Discography requested")
+                                                statuses.mark(artistKeys, st, if (st == "pending") "Awaiting approval" else "Discography requested")
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                            if (!byName) Row(Modifier.padding(top = 12.dp), horizontalArrangement = Arrangement.spacedBy(6.dp), verticalAlignment = Alignment.CenterVertically) {
+                                Badge("$owned / ${a.releaseGroups.size} releases in library", kind = if (owned > 0) "ok" else "")
+                                if (a.libraryTracks > 0) Badge("${a.libraryTracks} tracks")
+                            }
+                            if (!byName) Row(
+                                Modifier.padding(top = 8.dp).fillMaxWidth(),
+                                horizontalArrangement = Arrangement.spacedBy(6.dp, Alignment.CenterHorizontally),
+                            ) {
+                                SmallButton("MusicBrainz", iconRes = R.drawable.ic_open_in_new) { openUrl(context, "https://musicbrainz.org/artist/${a.id}") }
+                                for ((k, u) in a.links.take(2)) SmallButton(k) { openUrl(context, u) }
+                            }
+                        }
+                    }
+                    // bio (Wikipedia / Deezer)
+                    if (x != null && x.bio.isNotEmpty()) {
+                        item {
+                            var open by remember { mutableStateOf(false) }
+                            Box(Modifier.padding(start = Gutter, end = Gutter, top = 18.dp)) {
+                                CardBox {
+                                    Column {
+                                        Text(x.bio, style = MaterialTheme.typography.bodyMedium, color = p.text, maxLines = if (open) Int.MAX_VALUE else 4, overflow = TextOverflow.Ellipsis)
+                                        Row(Modifier.padding(top = 8.dp), horizontalArrangement = Arrangement.spacedBy(10.dp), verticalAlignment = Alignment.CenterVertically) {
+                                            SmallButton(if (open) "Show less" else "Show more") { open = !open }
+                                            if (x.bioUrl.isNotEmpty()) {
+                                                Text("Wikipedia", style = MaterialTheme.typography.bodySmall, color = p.muted, modifier = Modifier.clickable { openUrl(context, x.bioUrl) })
+                                            }
                                         }
                                     }
                                 }
                             }
                         }
-                        Row(Modifier.padding(top = 12.dp), horizontalArrangement = Arrangement.spacedBy(6.dp), verticalAlignment = Alignment.CenterVertically) {
-                            Badge("$owned / ${a.releaseGroups.size} releases in library", kind = if (owned > 0) "ok" else "")
-                            if (a.libraryTracks > 0) Badge("${a.libraryTracks} tracks")
-                        }
-                        Row(
-                            Modifier.padding(top = 8.dp).fillMaxWidth(),
-                            horizontalArrangement = Arrangement.spacedBy(6.dp, Alignment.CenterHorizontally),
-                        ) {
-                            SmallButton("MusicBrainz", iconRes = R.drawable.ic_open_in_new) { openUrl(context, "https://musicbrainz.org/artist/${a.id}") }
-                            for ((k, u) in a.links.take(2)) SmallButton(k) { openUrl(context, u) }
+                    }
+                    // popular songs (Deezer)
+                    if (x != null && x.top.isNotEmpty()) {
+                        item { SectionHead("Popular") }
+                        val playable = x.top.mapNotNull { it.library }
+                        items(x.top.size, key = { i -> "top-$i" }) { i ->
+                            val t = x.top[i]
+                            TopTrackRow(nav, a.name, t, statuses, onPlay = { lib -> nav.player.play(playable, playable.indexOf(lib).coerceAtLeast(0)) }, onMore = { moreLike = a.name to t.title })
                         }
                     }
-                }
-                // bio (Wikipedia / Deezer)
-                if (x != null && x.bio.isNotEmpty()) {
-                    item {
-                        var open by remember { mutableStateOf(false) }
-                        Box(Modifier.padding(start = Gutter, end = Gutter, top = 18.dp)) {
-                            CardBox {
-                                Column {
-                                    Text(x.bio, style = MaterialTheme.typography.bodyMedium, color = p.text, maxLines = if (open) Int.MAX_VALUE else 4, overflow = TextOverflow.Ellipsis)
-                                    Row(Modifier.padding(top = 8.dp), horizontalArrangement = Arrangement.spacedBy(10.dp), verticalAlignment = Alignment.CenterVertically) {
-                                        SmallButton(if (open) "Show less" else "Show more") { open = !open }
-                                        if (x.bioUrl.isNotEmpty()) {
-                                            Text("Wikipedia", style = MaterialTheme.typography.bodySmall, color = p.muted, modifier = Modifier.clickable { openUrl(context, x.bioUrl) })
-                                        }
-                                    }
-                                }
+                    // albums in the library: by name, the library's own albums of the artist (the Library tab's grid)
+                    if (byName && d.libraryAlbums.isNotEmpty()) {
+                        item { SectionHead("In your library", subtitle = "${d.libraryAlbums.size}") }
+                        tileRows(d.libraryAlbums, libColumns, key = "lib") { al ->
+                            AlbumCard(al, api.coverUrl(al.id, 400), nav.graph.imageLoader) { nav.open(Screen.Album(al.id)) }
+                        }
+                    }
+                    if (a.libraryAlbums.isNotEmpty()) {
+                        item { SectionHead("In your library", subtitle = "${a.libraryAlbums.size}") }
+                        tileRows(a.libraryAlbums, 2, key = "lib") { l ->
+                            Tile(
+                                title = l.album,
+                                subtitle = listOf(l.albumArtist, l.year).filter { it.isNotEmpty() }.joinToString(" · "),
+                                onClick = { nav.open(Screen.Album(l.albumId)) },
+                            ) { m -> Cover(nav.graph.api.coverUrl(l.albumId, 400), nav.graph.imageLoader, m, corner = 12.dp, label = l.album) }
+                        }
+                    }
+                    // discography with the All / Missing / In library filter (MusicBrainz's)
+                    if (!byName) item { SectionHead("Discography", subtitle = "${a.releaseGroups.size}") }
+                    if (!byName) item { ChoiceRow(listOf("All", "Missing", "In library"), filter, onSelect = { filter = it }) }
+                    var any = false
+                    for (k in keys) {
+                        val all = groups[k] ?: continue
+                        val list = all.filter { rg -> filter == 0 || (if (filter == 2) rg.inLibrary else !rg.inLibrary) }
+                        if (list.isEmpty()) continue
+                        any = true
+                        val missing = all.filter { rg -> !rg.inLibrary && statuses.statusOf(albumKeys(rg), rg.requestStatus).isEmpty() }
+                        item(key = "group-$k") {
+                            SectionHead(
+                                "${k}s",
+                                subtitle = "${list.size}",
+                                action = if (missing.isNotEmpty()) "Request ${missing.size} missing" else null,
+                                onAction = if (missing.isNotEmpty()) ({ confirmMissing = k to missing }) else null,
+                            )
+                        }
+                        tileRows(list, 2, key = "rg-$k") { rg ->
+                            CatalogAlbumTile(
+                                nav, rg, statuses,
+                                subtitle = listOf(rg.date.ifEmpty { rg.year }, if (rg.secondary.isNotEmpty()) rg.type else "").filter { it.isNotEmpty() }.joinToString(" · "),
+                            )
+                        }
+                    }
+                    if (!any && !byName) {
+                        item {
+                            EmptyState(
+                                R.drawable.ic_disc,
+                                if (a.releaseGroups.isNotEmpty()) (if (filter == 2) "Nothing from this artist in the library yet" else "You have everything 🎉") else "No releases on MusicBrainz",
+                            )
+                        }
+                    }
+                    // releases Deezer / Apple Music / Bandcamp / Discogs know and MusicBrainz doesn't
+                    if (extLoading) {
+                        item {
+                            Row(Modifier.padding(horizontal = Gutter, vertical = 12.dp), verticalAlignment = Alignment.CenterVertically) {
+                                Spinner()
+                                Spacer(Modifier.width(8.dp))
+                                Text("Checking Deezer and Apple Music for releases MusicBrainz is missing…", style = MaterialTheme.typography.bodySmall, color = p.muted)
                             }
                         }
+                    } else if (!extReleases.isNullOrEmpty()) {
+                        val found = extReleases.flatMap { r -> r.sources.map { it.first } }.distinct()
+                        val foundText = if (found.size > 1) found.dropLast(1).joinToString(", ") + " and " + found.last() else found.joinToString()
+                        item { SectionHead("Not in MusicBrainz", subtitle = "${extReleases.size}") }
+                        item {
+                            NoteText(
+                                "Found on $foundText. Requests download from Soulseek, streamrip, YouTube Music or Bandcamp; files are tagged from the source's data. " +
+                                    "Add them to MusicBrainz with Harmony and Encore re-tags them automatically.",
+                                Modifier.padding(bottom = 6.dp),
+                            )
+                        }
+                        tileRows(extReleases, 2, key = "ext") { m -> ExtReleaseTile(nav, a.name, m, statuses, onOpen = { extTracks = m }) }
                     }
-                }
-                // popular songs (Deezer)
-                if (x != null && x.top.isNotEmpty()) {
-                    item { SectionHead("Popular") }
-                    val playable = x.top.mapNotNull { it.library }
-                    items(x.top.size, key = { i -> "top-$i" }) { i ->
-                        val t = x.top[i]
-                        TopTrackRow(nav, a.name, t, statuses, onPlay = { lib -> nav.player.play(playable, playable.indexOf(lib).coerceAtLeast(0)) }, onMore = { moreLike = a.name to t.title })
+                    // similar artists
+                    if (sim != null && sim.artists.isNotEmpty()) {
+                        item { SectionHead("Similar artists", subtitle = sim.source) }
+                        tileRows(sim.artists, 3, key = "similar") { s -> CatalogArtistTile(nav, s, subtitle = " ") }
                     }
-                }
-                // albums in the library
-                if (a.libraryAlbums.isNotEmpty()) {
-                    item { SectionHead("In your library", subtitle = "${a.libraryAlbums.size}") }
-                    tileRows(a.libraryAlbums, 2, key = "lib") { l ->
-                        Tile(
-                            title = l.album,
-                            subtitle = listOf(l.albumArtist, l.year).filter { it.isNotEmpty() }.joinToString(" · "),
-                            onClick = { nav.open(Screen.Album(l.albumId)) },
-                        ) { m -> Cover(nav.graph.api.coverUrl(l.albumId, 400), nav.graph.imageLoader, m, corner = 12.dp, label = l.album) }
-                    }
-                }
-                // discography with the All / Missing / In library filter
-                item { SectionHead("Discography", subtitle = "${a.releaseGroups.size}") }
-                item { ChoiceRow(listOf("All", "Missing", "In library"), filter, onSelect = { filter = it }) }
-                var any = false
-                for (k in keys) {
-                    val all = groups[k] ?: continue
-                    val list = all.filter { rg -> filter == 0 || (if (filter == 2) rg.inLibrary else !rg.inLibrary) }
-                    if (list.isEmpty()) continue
-                    any = true
-                    val missing = all.filter { rg -> !rg.inLibrary && statuses.statusOf(albumKeys(rg), rg.requestStatus).isEmpty() }
-                    item(key = "group-$k") {
-                        SectionHead(
-                            "${k}s",
-                            subtitle = "${list.size}",
-                            action = if (missing.isNotEmpty()) "Request ${missing.size} missing" else null,
-                            onAction = if (missing.isNotEmpty()) ({ confirmMissing = k to missing }) else null,
-                        )
-                    }
-                    tileRows(list, 2, key = "rg-$k") { rg ->
-                        CatalogAlbumTile(
-                            nav, rg, statuses,
-                            subtitle = listOf(rg.date.ifEmpty { rg.year }, if (rg.secondary.isNotEmpty()) rg.type else "").filter { it.isNotEmpty() }.joinToString(" · "),
-                        )
-                    }
-                }
-                if (!any) {
-                    item {
-                        EmptyState(
-                            R.drawable.ic_disc,
-                            if (a.releaseGroups.isNotEmpty()) (if (filter == 2) "Nothing from this artist in the library yet" else "You have everything 🎉") else "No releases on MusicBrainz",
-                        )
-                    }
-                }
-                // releases Deezer / Apple Music / Bandcamp / Discogs know and MusicBrainz doesn't
-                if (extLoading) {
-                    item {
-                        Row(Modifier.padding(horizontal = Gutter, vertical = 12.dp), verticalAlignment = Alignment.CenterVertically) {
-                            Spinner()
-                            Spacer(Modifier.width(8.dp))
-                            Text("Checking Deezer and Apple Music for releases MusicBrainz is missing…", style = MaterialTheme.typography.bodySmall, color = p.muted)
+                    if (localOnly.isNotEmpty()) {
+                        item { SectionHead("Only in your library", subtitle = "${localOnly.size}") }
+                        item { NoteText("Albums MusicBrainz doesn't list for this artist (or not matched yet).", Modifier.padding(bottom = 6.dp)) }
+                        tileRows(localOnly, 2, key = "local") { l ->
+                            Tile(
+                                title = l.album,
+                                subtitle = listOf(l.albumArtist, l.year).filter { it.isNotEmpty() }.joinToString(" · "),
+                                onClick = { nav.open(Screen.Album(l.albumId)) },
+                            ) { m -> Cover(nav.graph.api.coverUrl(l.albumId, 400), nav.graph.imageLoader, m, corner = 12.dp, label = l.album) }
                         }
                     }
-                } else if (!extReleases.isNullOrEmpty()) {
-                    val found = extReleases.flatMap { r -> r.sources.map { it.first } }.distinct()
-                    val foundText = if (found.size > 1) found.dropLast(1).joinToString(", ") + " and " + found.last() else found.joinToString()
-                    item { SectionHead("Not in MusicBrainz", subtitle = "${extReleases.size}") }
-                    item {
-                        NoteText(
-                            "Found on $foundText. Requests download from Soulseek, streamrip, YouTube Music or Bandcamp; files are tagged from the source's data. " +
-                                "Add them to MusicBrainz with Harmony and Encore re-tags them automatically.",
-                            Modifier.padding(bottom = 6.dp),
+                    item { Spacer(Modifier.height(24.dp)) }
+                }
+                if (byName && d.libraryAlbums.isNotEmpty()) {
+                    // the library's albums start after the header and their title (by name there is no bio or Popular)
+                    val libStart = 1 + (if (x != null && x.bio.isNotEmpty()) 1 else 0) + (if (x != null && x.top.isNotEmpty()) 1 + x.top.size else 0) + 1
+                    val target = remember(listState, libStart, libColumns) {
+                        ScrollerTarget(
+                            firstVisible = { (listState.firstVisibleItemIndex - libStart).coerceAtLeast(0) * libColumns },
+                            visibleCount = { listState.layoutInfo.visibleItemsInfo.size * libColumns },
+                            scrolling = { listState.isScrollInProgress },
+                            scrollTo = { listState.scrollToItem(libStart + it / libColumns) },
                         )
                     }
-                    tileRows(extReleases, 2, key = "ext") { m -> ExtReleaseTile(nav, a.name, m, statuses, onOpen = { extTracks = m }) }
+                    FastScroller(sections, target, extent = d.libraryAlbums.size, modifier = Modifier.align(Alignment.CenterEnd))
                 }
-                // similar artists
-                if (sim != null && sim.artists.isNotEmpty()) {
-                    item { SectionHead("Similar artists", subtitle = sim.source) }
-                    tileRows(sim.artists, 3, key = "similar") { s -> CatalogArtistTile(nav, s, subtitle = " ") }
-                }
-                if (localOnly.isNotEmpty()) {
-                    item { SectionHead("Only in your library", subtitle = "${localOnly.size}") }
-                    item { NoteText("Albums MusicBrainz doesn't list for this artist (or not matched yet).", Modifier.padding(bottom = 6.dp)) }
-                    tileRows(localOnly, 2, key = "local") { l ->
-                        Tile(
-                            title = l.album,
-                            subtitle = listOf(l.albumArtist, l.year).filter { it.isNotEmpty() }.joinToString(" · "),
-                            onClick = { nav.open(Screen.Album(l.albumId)) },
-                        ) { m -> Cover(nav.graph.api.coverUrl(l.albumId, 400), nav.graph.imageLoader, m, corner = 12.dp, label = l.album) }
-                    }
-                }
-                item { Spacer(Modifier.height(24.dp)) }
             }
 
             if (discoSheet) {

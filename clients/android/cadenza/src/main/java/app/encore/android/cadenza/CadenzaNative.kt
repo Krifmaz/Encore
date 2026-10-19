@@ -1,5 +1,7 @@
 package app.encore.android.cadenza
 
+import java.nio.ByteBuffer
+
 /**
  * The JNI binding of `libencore_cadenza.so` (clients/android/cadenza/rust): cadenza-dsp on the phone. One
  * instance owns one native engine for one stream format; [create] builds it, [destroy] frees it. The JNI symbol
@@ -7,8 +9,11 @@ package app.encore.android.cadenza
  * class and package must not be renamed without it.
  *
  * The library may be missing from the APK (a build without cargo-ndk), so [available] is checked first and
- * every call on an instance without a handle is a no-op. The DspEngine adapter the player uses is
- * `app.encore.android.cadenza.CadenzaEngine` in the app module.
+ * every call on an instance without a handle is a no-op. The player's side is `app.encore.android.cadenza.CadenzaEngine`
+ * in the app module.
+ *
+ * Audio crosses as direct, native-order `ByteBuffer`s of floats that the caller owns and reuses ([process]): the
+ * native side reads and writes their memory directly, so no array is made or copied per buffer.
  */
 class CadenzaNative {
     /**
@@ -51,13 +56,26 @@ class CadenzaNative {
         if (h != 0L) nativeSetParams(h, json)
     }
 
-    /** Interleaved float PCM in, interleaved float PCM (at the output rate) out; `input` itself when closed, nothing when failing. */
-    fun process(input: FloatArray, frames: Int): FloatArray {
+    /**
+     * Runs `frames` interleaved frames of float PCM through the engine. `io` holds them (a direct buffer in native
+     * byte order, from index 0); the output goes back into `io` (in place) when `out` is null, else into `out`
+     * (the second buffer for upsampling, whose output is longer). Returns the number of float samples written;
+     * a negative `-n` when the output is `n` samples and the target buffer is smaller (grow it, then [fetch]);
+     * [CLOSED] without an engine (nothing was touched); [FAILED] when the engine went away under us or failed
+     * (the chunk is lost: passed through it would go out at the input rate where the sink was configured for the
+     * engine's output rate).
+     */
+    fun process(io: ByteBuffer, frames: Int, out: ByteBuffer?): Int {
         val h = handle
-        if (h == 0L) return input
-        // null: the engine went away under us (or failed) – the chunk is dropped: passed through it would go out at
-        // the input rate where the sink was configured for the engine's (upsampled) output rate
-        return nativeProcess(h, input, frames.coerceIn(0, input.size)) ?: EMPTY
+        if (h == 0L) return CLOSED
+        return nativeProcess(h, io, frames.coerceAtLeast(0), out)
+    }
+
+    /** The output of the last [process] again, into `out` (after a negative answer): as [process] answers. */
+    fun fetch(out: ByteBuffer): Int {
+        val h = handle
+        if (h == 0L) return CLOSED
+        return nativeFetch(h, out)
     }
 
     /** The tail at the end of a stream; resets the filters. */
@@ -82,7 +100,8 @@ class CadenzaNative {
     private external fun nativeCreate(sampleRate: Int, channels: Int, filterId: String, ditherId: String, outRate: Int, cacheDir: String): Long
     private external fun nativeOutputRate(handle: Long): Int
     private external fun nativeSetParams(handle: Long, json: String)
-    private external fun nativeProcess(handle: Long, input: FloatArray, frames: Int): FloatArray?
+    private external fun nativeProcess(handle: Long, io: ByteBuffer, frames: Int, out: ByteBuffer?): Int
+    private external fun nativeFetch(handle: Long, out: ByteBuffer): Int
     private external fun nativeFlush(handle: Long): FloatArray?
     private external fun nativeSignalPath(handle: Long): String?
     private external fun nativeDestroy(handle: Long)
@@ -90,6 +109,12 @@ class CadenzaNative {
     companion object {
         const val LIBRARY = "encore_cadenza"
         private val EMPTY = FloatArray(0)
+
+        /** [process] / [fetch]: the engine failed or went away (lib.rs `FAILED`). */
+        const val FAILED = Int.MIN_VALUE
+
+        /** [process] / [fetch]: no engine on this instance (nothing was processed). */
+        const val CLOSED = Int.MIN_VALUE + 1
 
         /** `true` when `libencore_cadenza.so` loaded (it is only in APKs built with cargo-ndk). */
         @JvmStatic

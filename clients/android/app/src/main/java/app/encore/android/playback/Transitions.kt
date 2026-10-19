@@ -12,10 +12,13 @@ import androidx.media3.exoplayer.ExoPlayer
 import androidx.media3.exoplayer.audio.AudioSink
 import androidx.media3.exoplayer.audio.DefaultAudioSink
 import androidx.media3.exoplayer.source.MediaSource
+import app.encore.android.cadenza.CadenzaEngine
+import app.encore.android.core.dbl
 import app.encore.android.data.api.EncoreApi
 import app.encore.android.data.prefs.PlaybackPrefs
+import app.encore.android.playback.output.EffectsAudioProcessor
+import app.encore.android.playback.output.EffectsChain
 import kotlinx.serialization.json.JsonObject
-import kotlinx.serialization.json.JsonPrimitive
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.ExecutorService
 
@@ -33,8 +36,8 @@ import java.util.concurrent.ExecutorService
  *
  * Not done (falls back to the normal gapless change): bit-perfect USB output, a server-made stream as the old song
  * (it can't be reopened at a spot without a new request), repeat one, a held (restored, not yet played) queue, and
- * songs shorter than twice the transition. The aux player runs the effects in Kotlin (no phone Cadenza upsampling,
- * no native engine): only the fading-out tail is affected.
+ * songs shorter than twice the transition. The aux player has its own Cadenza engine with the same effects but no
+ * phone upsampling (it plays at the song's rate): only the fading-out tail is affected.
  */
 class Transitions(
     private val context: Context,
@@ -281,9 +284,12 @@ class Transitions(
         }
     }
 
-    /** The second player: the same streams, the effects in Kotlin, no audio focus of its own (the main player has it). */
+    /**
+     * The second player: the same streams, the same effects through a second Cadenza engine (effects only: no
+     * beforeConfigure, so no upsampling), no audio focus of its own (the main player has it).
+     */
     private fun build(): ExoPlayer {
-        val fx = EffectsAudioProcessor(KotlinDspEngine())
+        val fx = EffectsAudioProcessor(CadenzaEngine())
         fx.params = prefs().engineParams()
         auxFx = fx
         val renderers = object : DefaultRenderersFactory(context) {
@@ -312,8 +318,8 @@ class Transitions(
         io.execute {
             try {
                 val o = api.get("/api/library/tracks/$id/edges") as? JsonObject ?: return@execute
-                val s = (o["start_s"] as? JsonPrimitive)?.content?.toDoubleOrNull() ?: 0.0
-                val end = (o["end_s"] as? JsonPrimitive)?.content?.toDoubleOrNull() ?: 0.0
+                val s = o.dbl("start_s")
+                val end = o.dbl("end_s")
                 if (end > 0) edges[id] = s.coerceAtLeast(0.0) to end
             } catch (_: Exception) {
                 // offline or an older server: Smart overlap works like Overlap for this song

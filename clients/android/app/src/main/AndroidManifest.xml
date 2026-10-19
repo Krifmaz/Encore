@@ -8,6 +8,15 @@
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MEDIA_PLAYBACK" />
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+    <!-- Offline songs (features/offline): Android 8–9 write Music/Encore as plain files; Android 10+ use MediaStore,
+         which needs no permission for the app's own files -->
+    <uses-permission
+        android:name="android.permission.WRITE_EXTERNAL_STORAGE"
+        android:maxSdkVersion="28" />
+    <!-- Updates (features/update): install a newer, verified APK of this app through a PackageInstaller session.
+         The second one lets Android 12+ skip the confirm screen for an update to this same app (Android may still ask). -->
+    <uses-permission android:name="android.permission.REQUEST_INSTALL_PACKAGES" />
+    <uses-permission android:name="android.permission.UPDATE_PACKAGES_WITHOUT_USER_ACTION" />
     <!-- Encore Lyrics car app: a point-of-interest app allowed the map templates, drawing the lyrics on the map surface -->
     <uses-permission android:name="androidx.car.app.MAP_TEMPLATES" />
     <uses-permission android:name="androidx.car.app.ACCESS_SURFACE" />
@@ -76,6 +85,22 @@
             android:authorities="${applicationId}.covers"
             android:exported="true"
             tools:ignore="ExportedContentProvider" />
+
+        <!-- Updates: the install session's outcome (only the session's own PendingIntent reaches it) -->
+        <receiver
+            android:name=".features.update.UpdateInstallReceiver"
+            android:exported="false" />
+
+        <!-- Bug reports: an export (cacheDir/shared/) handed to the share sheet (res/xml/file_paths.xml) -->
+        <provider
+            android:name="androidx.core.content.FileProvider"
+            android:authorities="${applicationId}.files"
+            android:exported="false"
+            android:grantUriPermissions="true">
+            <meta-data
+                android:name="android.support.FILE_PROVIDER_PATHS"
+                android:resource="@xml/file_paths" />
+        </provider>
 
         <!-- Encore Lyrics: a second car app (template app, category POI, not navigation) showing the playing song's
              synced lyrics on the map surface of MapWithContentTemplate (car/LyricsCarAppService.kt) -->

@@ -2,6 +2,9 @@ package app.encore.android.remote
 
 import androidx.media3.common.MediaItem
 import androidx.media3.common.Player
+import app.encore.android.core.bool
+import app.encore.android.core.dbl
+import app.encore.android.core.str
 import app.encore.android.data.api.EncoreApi
 import app.encore.android.data.api.Track
 import app.encore.android.playback.MediaItems
@@ -78,8 +81,8 @@ class ServiceHost(
         player.playWhenReady && player.playbackState != Player.STATE_ENDED && player.playbackState != Player.STATE_IDLE
 
     override fun snapshot(): JsonObject {
-        val item = player.currentMediaItem ?: return IDLE
-        val t = MediaItems.toTrack(item) ?: return IDLE
+        val item = player.currentMediaItem ?: return RemoteDevice.IDLE
+        val t = MediaItems.toTrack(item) ?: return RemoteDevice.IDLE
         val all = ArrayList<Track>(player.mediaItemCount)
         var index = 0
         for (i in 0 until player.mediaItemCount) {
@@ -133,21 +136,21 @@ class ServiceHost(
     }
 
     override fun run(c: JsonObject) {
-        when (c.s("action")) {
+        when (c.str("action")) {
             "toggle" -> if (player.isPlaying || player.playWhenReady && player.playbackState == Player.STATE_BUFFERING) player.pause() else play()
             "play" -> play()
             "pause", "stop" -> player.pause()
             "next" -> if (player.hasNextMediaItem()) player.seekToNextMediaItem()
             // like the web player: back to the start after 3 s, otherwise the previous song
             "prev" -> if (positionMs() > 3000L || !player.hasPreviousMediaItem()) seekTo(0L) else player.seekToPreviousMediaItem()
-            "seek" -> seekTo(Math.round(c.d("value").coerceAtLeast(0.0) * 1000))
+            "seek" -> seekTo(Math.round(c.dbl("value").coerceAtLeast(0.0) * 1000))
             "volume" -> {
-                val v = c.d("value")
+                val v = c.dbl("value")
                 player.volume = (if (v.isNaN()) 0.9 else v).toFloat().coerceIn(0f, 1f)
             }
             // the app shuffle (the player is the session's, so this is the shuffle the car and the phone show)
-            "shuffle" -> player.shuffleModeEnabled = c.b("value")
-            "repeat" -> when (c.s("value")) {
+            "shuffle" -> player.shuffleModeEnabled = c.bool("value")
+            "repeat" -> when (c.str("value")) {
                 "off" -> player.repeatMode = Player.REPEAT_MODE_OFF
                 "all" -> player.repeatMode = Player.REPEAT_MODE_ALL
                 "one" -> player.repeatMode = Player.REPEAT_MODE_ONE
@@ -175,8 +178,8 @@ class ServiceHost(
             "play_queue" -> {
                 val tracks = RemoteDevice.tracksOf(c["tracks"])
                 if (tracks.isEmpty()) return
-                val index = c.d("index").toInt().coerceIn(0, tracks.size - 1)
-                val at = c.d("position")
+                val index = c.dbl("index").toInt().coerceIn(0, tracks.size - 1)
+                val at = c.dbl("position")
                 newQueue()
                 val list = items(tracks)
                 player.setMediaItems(list, index, if (at > 1) Math.round(at * 1000) else 0L)
@@ -188,8 +191,6 @@ class ServiceHost(
     }
 
     companion object {
-        private val IDLE = buildJsonObject { put("playing", false) }
-
         /** Media3's repeat mode as the remote says it: "off" | "all" | "one". */
         fun repeatName(mode: Int): String = when (mode) {
             Player.REPEAT_MODE_ALL -> "all"

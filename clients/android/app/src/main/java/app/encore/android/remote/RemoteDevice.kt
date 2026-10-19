@@ -6,6 +6,9 @@ import android.os.Build
 import android.os.Handler
 import android.os.Looper
 import app.encore.android.AppGraph
+import app.encore.android.core.bool
+import app.encore.android.core.dbl
+import app.encore.android.core.str
 import app.encore.android.data.api.ArtistCredit
 import app.encore.android.data.api.EncoreApi
 import app.encore.android.data.api.Track
@@ -28,7 +31,6 @@ import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeoutOrNull
 import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonElement
-import kotlinx.serialization.json.JsonNull
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.buildJsonArray
@@ -54,9 +56,9 @@ interface PlayerHost {
 
 /** Another signed-in device, as GET /api/remote/devices and the event stream list it. */
 data class DeviceInfo(val id: String, val name: String, val state: JsonObject) {
-    val remoteOf: String get() = state.s("remote_of")
-    val title: String get() = state.s("title")
-    val playing: Boolean get() = state.b("playing")
+    val remoteOf: String get() = state.str("remote_of")
+    val title: String get() = state.str("title")
+    val playing: Boolean get() = state.bool("playing")
 }
 
 /** This phone is locked as a remote for [id] until you unlink. `state` is that device's latest check-in. */
@@ -69,25 +71,25 @@ data class Link(
     val at: Long = System.currentTimeMillis(),
 ) {
     /** Playing there (and still checking in). */
-    val playing: Boolean get() = online && state.b("playing")
+    val playing: Boolean get() = online && state.bool("playing")
     /** Its song, or null when nothing plays there. */
     val track: Track? get() = RemoteDevice.trackOf(state)
     /** Its queue (at most 300 songs around the current one) and where its song is in it. */
     val queue: List<Track> get() = RemoteDevice.tracksOf(state["queue"])
-    val index: Int get() = state.d("index").toInt()
-    val durationSec: Double get() = state.d("duration")
-    val volume: Double get() = if (state.containsKey("volume")) state.d("volume").coerceIn(0.0, 1.0) else 0.9
+    val index: Int get() = state.dbl("index").toInt()
+    val durationSec: Double get() = state.dbl("duration")
+    val volume: Double get() = if (state.containsKey("volume")) state.dbl("volume").coerceIn(0.0, 1.0) else 0.9
     /** player.js `quality()` of what plays there ("FLAC 1411k" …). */
-    val signalLabel: String get() = (state["signal"] as? JsonObject)?.s("label") ?: ""
+    val signalLabel: String get() = (state["signal"] as? JsonObject)?.str("label") ?: ""
     /** Its shuffle mode and repeat ("off" | "all" | "one"), as its check-ins say. */
-    val shuffle: Boolean get() = state.b("shuffle")
-    val repeat: String get() = state.s("repeat").takeIf { it == "all" || it == "one" } ?: "off"
+    val shuffle: Boolean get() = state.bool("shuffle")
+    val repeat: String get() = state.str("repeat").takeIf { it == "all" || it == "one" } ?: "off"
 
     /** The linked device's position now, in seconds. */
     fun positionSec(now: Long = System.currentTimeMillis()): Double {
-        val p = state.d("position")
-        val d = state.d("duration")
-        val moved = if (state.b("playing") && online) (now - at).coerceAtLeast(0L) / 1000.0 else 0.0
+        val p = state.dbl("position")
+        val d = state.dbl("duration")
+        val moved = if (state.bool("playing") && online) (now - at).coerceAtLeast(0L) / 1000.0 else 0.0
         val out = p + moved
         return if (d > 0) out.coerceAtMost(d) else out
     }
@@ -359,8 +361,8 @@ class RemoteDevice private constructor(context: Context, private val graph: AppG
             if (pending.size < 20) pending.add(System.currentTimeMillis() to c)
             return
         }
-        val from = c.s("from")
-        if (c.s("action") == "play_queue" && from.isNotEmpty()) Toasts.show("Music sent here from $from", "ok")
+        val from = c.str("from")
+        if (c.str("action") == "play_queue" && from.isNotEmpty()) Toasts.show("Music sent here from $from", "ok")
         try { h.run(c) } catch (_: Exception) {}
         beatSoon()
     }
@@ -374,9 +376,9 @@ class RemoteDevice private constructor(context: Context, private val graph: AppG
         val out = ArrayList<DeviceInfo>()
         for (e in arr) {
             val o = e as? JsonObject ?: continue
-            val id = o.s("id")
+            val id = o.str("id")
             if (id.isEmpty() || id == mine) continue
-            out.add(DeviceInfo(id, o.s("name"), o["state"] as? JsonObject ?: JsonObject(emptyMap())))
+            out.add(DeviceInfo(id, o.str("name"), o["state"] as? JsonObject ?: JsonObject(emptyMap())))
         }
         _devices.value = out
         val l = _link.value ?: return
@@ -418,10 +420,10 @@ class RemoteDevice private constructor(context: Context, private val graph: AppG
     private fun savedLink(): Link? {
         val raw = try { prefs.getString(K_LINK, null) } catch (_: Exception) { null } ?: return null
         val o = try { graph.api.json.parseToJsonElement(raw) as? JsonObject } catch (_: Exception) { null } ?: return null
-        val id = o.s("id")
+        val id = o.str("id")
         if (id.isEmpty()) return null
         // until its first check-in arrives
-        return Link(id, o.s("name").ifEmpty { "another device" }, JsonObject(emptyMap()), online = true)
+        return Link(id, o.str("name").ifEmpty { "another device" }, JsonObject(emptyMap()), online = true)
     }
 
     // ---- sending commands ------------------------------------------------------------------------------
@@ -448,17 +450,17 @@ class RemoteDevice private constructor(context: Context, private val graph: AppG
     fun sendToLink(body: JsonObject): Boolean {
         val l = _link.value ?: return false
         send(l.id, body)
-        val action = body.s("action")
+        val action = body.str("action")
         val s = l.state
         val pos = l.positionSec()
         val patched: Map<String, JsonElement>? = when (action) {
-            "toggle" -> if (s.s("title").isNotEmpty()) mapOf("playing" to JsonPrimitive(!s.b("playing")), "position" to JsonPrimitive(pos)) else null
+            "toggle" -> if (s.str("title").isNotEmpty()) mapOf("playing" to JsonPrimitive(!s.bool("playing")), "position" to JsonPrimitive(pos)) else null
             "pause" -> mapOf("playing" to JsonPrimitive(false), "position" to JsonPrimitive(pos))
             "play" -> mapOf("playing" to JsonPrimitive(true), "position" to JsonPrimitive(pos))
-            "seek" -> mapOf("position" to JsonPrimitive(body.d("value")))
-            "volume" -> mapOf("volume" to JsonPrimitive(body.d("value")))
-            "shuffle" -> mapOf("shuffle" to JsonPrimitive(body.b("value")))
-            "repeat" -> mapOf("repeat" to JsonPrimitive(body.s("value")))
+            "seek" -> mapOf("position" to JsonPrimitive(body.dbl("value")))
+            "volume" -> mapOf("volume" to JsonPrimitive(body.dbl("value")))
+            "shuffle" -> mapOf("shuffle" to JsonPrimitive(body.bool("value")))
+            "repeat" -> mapOf("repeat" to JsonPrimitive(body.str("value")))
             else -> null
         }
         if (patched != null) {
@@ -473,7 +475,8 @@ class RemoteDevice private constructor(context: Context, private val graph: AppG
     companion object {
         private const val K_NAME = "device_name"
         private const val K_LINK = "link"
-        private val IDLE = buildJsonObject { put("playing", false) }
+        /** What a device reports while nothing plays (this phone's service, or no service). */
+        val IDLE: JsonObject = buildJsonObject { put("playing", false) }
 
         @Volatile private var instance: RemoteDevice? = null
 
@@ -521,42 +524,23 @@ class RemoteDevice private constructor(context: Context, private val graph: AppG
 
         /** The song a device's state describes (id, title, artist, album, album_id, format, duration), or null. */
         fun trackOf(s: JsonObject): Track? {
-            if (s.s("title").isEmpty()) return null
-            val id = s.d("id").toLong()
+            if (s.str("title").isEmpty()) return null
+            val id = s.dbl("id").toLong()
             return Track(
                 id = id,
-                title = s.s("title"),
-                artist = s.s("artist"),
-                album = s.s("album"),
-                albumArtist = s.s("artist"),
-                albumId = s.s("album_id"),
+                title = s.str("title"),
+                artist = s.str("artist"),
+                album = s.str("album"),
+                albumArtist = s.str("artist"),
+                albumId = s.str("album_id"),
                 trackNo = 0,
                 disc = 0,
                 year = "",
-                durationSec = s.d("duration"),
-                format = s.s("format").lowercase(),
+                durationSec = s.dbl("duration"),
+                format = s.str("format").lowercase(),
                 bitrate = 0,
                 artists = ArtistCredit.fromJson(s["artists"]),
             )
         }
     }
-}
-
-// lenient readers for device states (any client may have sent them)
-internal fun JsonObject.s(key: String): String {
-    val v = this[key] ?: return ""
-    if (v is JsonNull) return ""
-    return if (v is JsonPrimitive) v.content else ""
-}
-
-internal fun JsonObject.d(key: String): Double {
-    val v = this[key] as? JsonPrimitive ?: return 0.0
-    if (v is JsonNull) return 0.0
-    return v.content.toDoubleOrNull() ?: 0.0
-}
-
-internal fun JsonObject.b(key: String): Boolean {
-    val v = this[key] as? JsonPrimitive ?: return false
-    if (v is JsonNull) return false
-    return v.content == "true"
 }

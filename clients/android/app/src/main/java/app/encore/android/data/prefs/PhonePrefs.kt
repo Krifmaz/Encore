@@ -1,7 +1,8 @@
 package app.encore.android.data.prefs
 
+import app.encore.android.core.bool
+import app.encore.android.core.stringOnly
 import kotlinx.serialization.json.JsonObject
-import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.put
 
@@ -43,15 +44,13 @@ data class PhonePrefs(
         /** Read back what [toJson] wrote; anything missing or unknown keeps its default. */
         fun from(o: JsonObject?): PhonePrefs {
             if (o == null) return PhonePrefs()
-            fun str(k: String) = (o[k] as? JsonPrimitive)?.takeIf { it.isString }?.content
-            fun bool(k: String) = (o[k] as? JsonPrimitive)?.content == "true"
-            val rate = str("rate")?.takeIf { it == "device" || RATES.contains(it.toIntOrNull() ?: 0) } ?: "device"
+            val rate = o.stringOnly("rate").takeIf { it == "device" || RATES.contains(it.toIntOrNull() ?: 0) } ?: "device"
             return PhonePrefs(
-                cadenza = bool("cadenza"),
-                filter = str("filter") ?: "",
-                dither = str("dither") ?: "",
+                cadenza = o.bool("cadenza"),
+                filter = o.stringOnly("filter"),
+                dither = o.stringOnly("dither"),
                 rate = rate,
-                bitPerfect = bool("bit_perfect"),
+                bitPerfect = o.bool("bit_perfect"),
             )
         }
     }

@@ -15,6 +15,7 @@ import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import app.encore.android.AppGraph
 import app.encore.android.data.session.ThemeChoice
+import app.encore.android.features.update.Updater
 import app.encore.android.graph
 import app.encore.android.ui.theme.EncoreTheme
 
@@ -31,6 +32,8 @@ class MainActivity : ComponentActivity() {
         player = PlayerConnection(applicationContext, appGraph.api)
         applySystemBars(appGraph.store.settings.value.theme)
         askForNotifications()
+        // the app's own update: at most once a day, when "Look for a new version when Encore starts" is on
+        Updater.checkAtStart(this)
         setContent {
             val settings by appGraph.store.settings.collectAsState()
             LaunchedEffect(settings.theme) { applySystemBars(settings.theme) }

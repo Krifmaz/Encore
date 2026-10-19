@@ -1,55 +1,21 @@
 package app.encore.android.data.api
 
+import app.encore.android.core.arr
+import app.encore.android.core.bool
+import app.encore.android.core.dbl
+import app.encore.android.core.int
+import app.encore.android.core.long
+import app.encore.android.core.obj
+import app.encore.android.core.objects
+import app.encore.android.core.str
 import kotlinx.serialization.SerialName
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonElement
-import kotlinx.serialization.json.JsonNull
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
 
-// The server's rows come straight from SQLite (dynamic types: `year` may be text or a number, counts may be
-// null), so responses are read leniently from JsonObject instead of strict generated decoders. Requests we
-// send are @Serializable classes.
-
-internal fun JsonObject.str(key: String): String {
-    val v = this[key] ?: return ""
-    if (v is JsonNull) return ""
-    return if (v is JsonPrimitive) v.content else v.toString()
-}
-
-internal fun JsonObject.dbl(key: String): Double {
-    val v = this[key] as? JsonPrimitive ?: return 0.0
-    if (v is JsonNull) return 0.0
-    return v.content.toDoubleOrNull() ?: 0.0
-}
-
-internal fun JsonObject.long(key: String): Long = dbl(key).toLong()
-
-internal fun JsonObject.int(key: String): Int = dbl(key).toInt()
-
-internal fun JsonObject.bool(key: String): Boolean {
-    val v = this[key] as? JsonPrimitive ?: return false
-    if (v is JsonNull) return false
-    val c = v.content
-    return c == "true" || (c.toDoubleOrNull() ?: 0.0) != 0.0
-}
-
-internal fun JsonObject.obj(key: String): JsonObject? = this[key] as? JsonObject
-
-internal fun JsonObject.arr(key: String): JsonArray? = this[key] as? JsonArray
-
-/** A list response: a bare array, or `{items: [...]}` (albums), as JSON objects. */
-internal fun JsonElement?.objects(): List<JsonObject> {
-    val list: JsonArray = when (this) {
-        is JsonArray -> this
-        is JsonObject -> this.arr("items") ?: return emptyList()
-        else -> return emptyList()
-    }
-    val out = ArrayList<JsonObject>(list.size)
-    for (e in list) if (e is JsonObject) out.add(e)
-    return out
-}
+// Responses are read leniently (app.encore.android.core: Json.kt); requests we send are @Serializable classes.
 
 /**
  * One artist of a song (the server's `artists` on a song: "Travis Scott feat. The Weeknd" → two), with its

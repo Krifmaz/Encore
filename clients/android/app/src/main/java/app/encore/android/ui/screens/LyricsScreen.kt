@@ -25,9 +25,9 @@ import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
-import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.getValue
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -38,13 +38,15 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import app.encore.android.R
+import app.encore.android.features.offline.OfflineStore
+import app.encore.android.core.bool
+import app.encore.android.core.str
 import app.encore.android.ui.Nav
 import app.encore.android.ui.theme.palette
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import kotlinx.serialization.json.JsonObject
-import kotlinx.serialization.json.JsonPrimitive
 
 /** One line of a time-synced (.lrc) lyric. */
 data class LyricLine(val timeSec: Double, val text: String)
@@ -70,15 +72,14 @@ class Lyrics(val lines: List<LyricLine>, val plain: String, val instrumental: Bo
         }
 
         fun from(o: JsonObject): Lyrics {
-            fun s(k: String): String { val v = o[k] as? JsonPrimitive ?: return ""; return if (v.isString) v.content else v.content.takeIf { it != "null" } ?: "" }
-            val synced = (o["synced"] as? JsonPrimitive)?.content == "true"
-            val text = s("lyrics")
+            val synced = o.bool("synced")
+            val text = o.str("lyrics")
             return Lyrics(
                 lines = if (synced) parseLrc(text) else emptyList(),
                 plain = if (synced) "" else text,
-                instrumental = (o["instrumental"] as? JsonPrimitive)?.content == "true",
+                instrumental = o.bool("instrumental"),
                 synced = synced,
-                source = s("source"),
+                source = o.str("source"),
             )
         }
     }
@@ -105,7 +106,11 @@ fun LyricsScreen(nav: Nav, onClose: () -> Unit) {
         error = null
         lyrics = null
         try {
-            lyrics = withContext(Dispatchers.IO) { Lyrics.from(nav.graph.api.lyrics(id)) }
+            lyrics = withContext(Dispatchers.IO) {
+                // offline: the lyrics saved with a downloaded song
+                val o = try { nav.graph.api.lyrics(id) } catch (e: Exception) { OfflineStore.of(nav.graph.app).savedLyrics(id) ?: throw e }
+                Lyrics.from(o)
+            }
         } catch (e: CancellationException) {
             throw e
         } catch (e: Exception) {

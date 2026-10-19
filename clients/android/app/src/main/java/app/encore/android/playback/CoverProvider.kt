@@ -6,6 +6,7 @@ import android.database.Cursor
 import android.net.Uri
 import android.os.ParcelFileDescriptor
 import app.encore.android.data.api.EncoreApi
+import app.encore.android.features.offline.OfflineStore
 import app.encore.android.graph
 import kotlinx.coroutines.runBlocking
 import java.io.File
@@ -47,7 +48,13 @@ class CoverProvider : ContentProvider() {
         // keyed by server too: album ids are only unique within one library
         val file = File(dir, Integer.toHexString(api.base.hashCode()) + "_" + safeName(albumId) + "_" + size + ".jpg")
         val fresh = file.isFile && System.currentTimeMillis() - file.lastModified() < MAX_AGE_MS
-        if (!fresh) download(api, albumId, size, file)
+        try {
+            if (!fresh) download(api, albumId, size, file)
+        } catch (e: FileNotFoundException) {
+            // offline, nothing cached: the cover saved with a downloaded album (features/offline)
+            val saved = OfflineStore.of(ctx).coverFile(albumId) ?: throw e
+            return ParcelFileDescriptor.open(saved, ParcelFileDescriptor.MODE_READ_ONLY)
+        }
         return ParcelFileDescriptor.open(file, ParcelFileDescriptor.MODE_READ_ONLY)
     }
 

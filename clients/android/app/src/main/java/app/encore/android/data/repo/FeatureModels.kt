@@ -1,40 +1,46 @@
 package app.encore.android.data.repo
 
+import app.encore.android.core.Checked
+import app.encore.android.core.Items
+import app.encore.android.core.LBool
+import app.encore.android.core.LBoolOrNull
+import app.encore.android.core.LDouble
+import app.encore.android.core.LInt
+import app.encore.android.core.LLong
+import app.encore.android.core.LObject
+import app.encore.android.core.LString
+import app.encore.android.core.LTexts
+import app.encore.android.core.LYear
+import app.encore.android.core.Nested
+import app.encore.android.core.arr
+import app.encore.android.core.decodeModel
+import app.encore.android.core.obj
+import app.encore.android.core.objectsOf
+import app.encore.android.core.str
 import app.encore.android.data.api.Track
-import app.encore.android.data.api.arr
-import app.encore.android.data.api.bool
-import app.encore.android.data.api.dbl
-import app.encore.android.data.api.int
-import app.encore.android.data.api.long
-import app.encore.android.data.api.obj
-import app.encore.android.data.api.objectsOf
-import app.encore.android.data.api.str
+import kotlinx.serialization.KSerializer
+import kotlinx.serialization.SerialName
+import kotlinx.serialization.Serializable
+import kotlinx.serialization.Transient
+import kotlinx.serialization.descriptors.SerialDescriptor
+import kotlinx.serialization.encoding.Decoder
+import kotlinx.serialization.encoding.Encoder
 import kotlinx.serialization.json.JsonArray
+import kotlinx.serialization.json.JsonDecoder
 import kotlinx.serialization.json.JsonElement
 import kotlinx.serialization.json.JsonNull
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.put
+import java.io.IOException
 import java.util.Date
 
-// Rows of the Discover / For you / Requests / Picker / Account / Leaderboard pages (web/js/pages/*.js), read
-// leniently from the server's JSON like data/api/Models.kt does.
-
-/** A JSON array of strings (or nothing). */
-internal fun JsonArray?.strings(): List<String> {
-    if (this == null) return emptyList()
-    val out = ArrayList<String>(size)
-    for (e in this) if (e is JsonPrimitive && e !is JsonNull) out.add(e.content)
-    return out
-}
-
-/** `str` that reads JSON null as "" and a missing key as "" (the server sends `null` for unknown fields). */
-internal fun JsonObject.text(key: String): String {
-    val v = this[key] ?: return ""
-    if (v is JsonNull) return ""
-    return if (v is JsonPrimitive) (if (v.isString) v.content else v.content.takeIf { it != "null" } ?: "") else v.toString()
-}
+// Rows of the Discover / For you / Requests / Picker / Account / Leaderboard pages (web/js/pages/*.js), as
+// @Serializable models read leniently (app.encore.android.core, Json.kt): the `L…` field types turn a missing, null
+// or odd value into the empty value, [Items] lists skip rows that don't decode, and [Checked] leaves out rows
+// without what they need (a title, an id) and fills fields that fall back on others. FeaturesApi reads answers with
+// [page] and [rows].
 
 // ---- web/js/ui.js STATUS / statusBadge ----------------------------------------------------------------------
 
@@ -77,59 +83,74 @@ fun formatAgo(epochSeconds: Double): String {
     }
 }
 
+// ---- reading the answers ------------------------------------------------------------------------------------
+
+/** A page's answer as its model (every field lenient: only a broken structure fails, as a server error would). */
+internal fun <T> JsonObject.page(serializer: KSerializer<T>): T =
+    decodeModel(serializer) ?: throw IOException("Unexpected reply from the server")
+
+/** A list answer's rows as models; a row that doesn't decode, or that its model leaves out, is skipped. */
+internal fun <T> List<JsonObject>.rows(serializer: KSerializer<T>): List<T> = mapNotNull { it.decodeModel(serializer) }
+
+/** A library song inside a row (`library`), or null when it is anything but a song of the library. */
+internal object LibraryTrack : KSerializer<Track?> {
+    override val descriptor: SerialDescriptor = JsonObject.serializer().descriptor
+    override fun deserialize(decoder: Decoder): Track? {
+        val o = (decoder as? JsonDecoder)?.decodeJsonElement() as? JsonObject ?: return null
+        return Track.from(o)
+    }
+    override fun serialize(encoder: Encoder, value: Track?) = throw UnsupportedOperationException("read only")
+}
+
+private typealias LTrack = @Serializable(with = LibraryTrack::class) Track?
+
+/** `perms` of GET /api/auth/me: permission → granted (`true` or 1, as the server's SQLite flags come). */
+internal object Perms : KSerializer<Map<String, Boolean>> {
+    override val descriptor: SerialDescriptor = JsonObject.serializer().descriptor
+    override fun deserialize(decoder: Decoder): Map<String, Boolean> {
+        val o = (decoder as? JsonDecoder)?.decodeJsonElement() as? JsonObject ?: return emptyMap()
+        val out = HashMap<String, Boolean>()
+        for ((k, v) in o) out[k] = (v as? JsonPrimitive)?.content.let { it == "true" || it == "1" }
+        return out
+    }
+    override fun serialize(encoder: Encoder, value: Map<String, Boolean>) = throw UnsupportedOperationException("read only")
+}
+
 // ---- the signed-in user (GET /api/auth/me) ---------------------------------------------------------------------
 
 /** GET /api/auth/me with what the pages gate on (web/js/app.js `session.user`). */
+@Serializable
 data class Me(
-    val id: Long,
-    val username: String,
-    val role: String,
-    val email: String,
-    val perms: Map<String, Boolean>,
-    val requestLimit: Int,
-    val requestsThisWeek: Int,
-    val autoApprove: Boolean,
-    val totpEnabled: Boolean,
-    val avatarAt: Double,
-    val createdAt: Double,
+    val id: LLong = 0L,
+    val username: LString = "",
+    val role: LString = "",
+    val email: LString = "",
+    @Serializable(with = Perms::class) val perms: Map<String, Boolean> = emptyMap(),
+    @SerialName("request_limit") val requestLimit: LInt = 0,
+    @SerialName("requests_this_week") val requestsThisWeek: LInt = 0,
+    @SerialName("auto_approve") val autoApprove: LBool = false,
+    @SerialName("totp_enabled") val totpEnabled: LBool = false,
+    @SerialName("avatar_at") val avatarAt: LDouble = 0.0,
+    @SerialName("created_at") val createdAt: LDouble = 0.0,
 ) {
     val isAdmin: Boolean get() = role == "admin" || role == "owner"
 
     /** `auth::can`: admins can do everything, others what their perms say. */
     fun can(perm: String): Boolean = isAdmin || (perms[perm] ?: false)
-
-    companion object {
-        fun from(o: JsonObject): Me {
-            val perms = HashMap<String, Boolean>()
-            o.obj("perms")?.forEach { (k, v) -> perms[k] = (v as? JsonPrimitive)?.content.let { it == "true" || it == "1" } }
-            return Me(
-                id = o.long("id"),
-                username = o.str("username"),
-                role = o.str("role"),
-                email = o.text("email"),
-                perms = perms,
-                requestLimit = o.int("request_limit"),
-                requestsThisWeek = o.int("requests_this_week"),
-                autoApprove = o.bool("auto_approve"),
-                totpEnabled = o.bool("totp_enabled"),
-                avatarAt = o.dbl("avatar_at"),
-                createdAt = o.dbl("created_at"),
-            )
-        }
-    }
 }
 
 /** One row of GET /api/auth/sessions. */
+@Serializable
 data class SessionRow(
-    val id: String,
-    val current: Boolean,
-    val createdAt: Double,
-    val lastSeenAt: Double,
-    val userAgent: String,
-    val ip: String,
-    val device: String,
-    val kind: String,
-    val deviceName: String,
+    val id: LString = "",
+    val current: LBool = false,
+    @SerialName("created_at") val createdAt: LDouble = 0.0,
+    @SerialName("last_seen_at") val lastSeenAt: LDouble = 0.0,
+    @SerialName("user_agent") val userAgent: LString = "",
+    val ip: LString = "",
+    val device: LString = "",
+    val kind: LString = "",
+    @SerialName("device_name") val deviceName: LString = "",
 ) {
     /** The web's title: "Encore app · <device> · last used …" for apps, else the device name. */
     val title: String
@@ -138,481 +159,345 @@ data class SessionRow(
         } else {
             deviceName.ifEmpty { device.ifEmpty { userAgent.ifEmpty { "Unknown device" } } }
         }
-
-    companion object {
-        fun from(o: JsonObject): SessionRow = SessionRow(
-            id = o.str("id"),
-            current = o.bool("current"),
-            createdAt = o.dbl("created_at"),
-            lastSeenAt = o.dbl("last_seen_at"),
-            userAgent = o.text("user_agent"),
-            ip = o.text("ip"),
-            device = o.text("device"),
-            kind = o.str("kind"),
-            deviceName = o.text("device_name"),
-        )
-    }
 }
 
 /** POST /api/auth/2fa/setup. */
-data class TotpSetup(val secret: String, val otpauthUrl: String, val qrBase64: String) {
-    companion object {
-        fun from(o: JsonObject): TotpSetup = TotpSetup(o.str("secret"), o.str("otpauth_url"), o.text("qr"))
-    }
-}
+@Serializable
+data class TotpSetup(
+    val secret: LString = "",
+    @SerialName("otpauth_url") val otpauthUrl: LString = "",
+    @SerialName("qr") val qrBase64: LString = "",
+)
 
 // ---- Discover (MusicBrainz) ------------------------------------------------------------------------------------
 
-/** An artist from search (mb::search_artists) or a similar/For-you artist card. */
+/** An artist from search (mb::search_artists) or a similar/For-you artist card (those send the id as `mbid`). */
+@Serializable
 data class CatalogArtist(
-    val id: String,
-    val name: String,
-    val type: String,
-    val country: String,
-    val disambiguation: String,
-    val inLibrary: Boolean,
-    val image: String,
-) {
-    companion object {
-        fun from(o: JsonObject): CatalogArtist? {
-            val name = o.text("name")
-            if (name.isEmpty()) return null
-            return CatalogArtist(
-                id = o.text("id").ifEmpty { o.text("mbid") },
-                name = name,
-                type = o.text("type"),
-                country = o.text("country"),
-                disambiguation = o.text("disambiguation"),
-                inLibrary = o.bool("in_library"),
-                image = o.text("image"),
-            )
-        }
+    val id: LString = "",
+    val name: LString = "",
+    val type: LString = "",
+    val country: LString = "",
+    val disambiguation: LString = "",
+    @SerialName("in_library") val inLibrary: LBool = false,
+    val image: LString = "",
+    /** the id as similar / For-you cards send it; [id] falls back on it */
+    val mbid: LString = "",
+) : Checked<CatalogArtist> {
+    override fun checked(): CatalogArtist? = when {
+        name.isEmpty() -> null
+        id.isEmpty() -> copy(id = mbid)
+        else -> this
     }
 }
 
 /** A release group (search, discography) with the library annotations (`annotate_albums`). */
+@Serializable
 data class CatalogAlbum(
-    val id: String,
-    val title: String,
-    val artist: String,
-    val artistId: String,
-    val type: String,
-    val secondary: List<String>,
-    val year: String,
-    val date: String,
-    val cover: String,
-    val inLibrary: Boolean,
-    val libraryAlbumId: String,
-    val requestStatus: String,
+    val id: LString = "",
+    val title: LString = "",
+    val artist: LString = "",
+    @SerialName("artist_id") val artistId: LString = "",
+    val type: LString = "",
+    val secondary: LTexts = emptyList(),
+    val year: LYear = "",
+    val date: LString = "",
+    val cover: LString = "",
+    @SerialName("in_library") val inLibrary: LBool = false,
+    @SerialName("library_album_id") val libraryAlbumId: LString = "",
+    @SerialName("request_status") val requestStatus: LString = "",
     /** Deezer / Apple ids of an album only they know (search results): requested without a MusicBrainz id. */
-    val ext: JsonObject? = null,
+    val ext: LObject = null,
     /** The words the pages show for the request ("Requested", "Not found"…), when the server sent them. */
-    val requestLabel: String = "",
+    @SerialName("request_label") val requestLabel: LString = "",
     /** The group the server files it under ("Album", "Live", "Compilation" …; 0.26), "" from older servers. */
-    val kind: String = "",
+    val kind: LString = "",
     /** Whether Settings → Release types wants it (0.26: `allowed`; older servers: no `skipped` reason). */
-    val allowed: Boolean = true,
+    @Transient val allowed: Boolean = true,
     /** Why the release types leave it out ("Live", "Single" …), or "". */
-    val skipped: String = "",
-) {
-    companion object {
-        fun from(o: JsonObject): CatalogAlbum? {
-            val id = o.text("id")
-            val title = o.text("title")
-            if (id.isEmpty() && title.isEmpty()) return null
-            return CatalogAlbum(
-                id = id,
-                title = title,
-                artist = o.text("artist"),
-                artistId = o.text("artist_id"),
-                type = o.text("type"),
-                secondary = o.arr("secondary").strings(),
-                year = o.text("year").take(4),
-                date = o.text("date"),
-                cover = o.text("cover"),
-                inLibrary = o.bool("in_library"),
-                libraryAlbumId = o.text("library_album_id"),
-                requestStatus = o.text("request_status"),
-                ext = o.obj("ext"),
-                requestLabel = o.text("request_label"),
-                kind = o.text("kind"),
-                allowed = if (o.containsKey("allowed")) o.bool("allowed") else o.text("skipped").isEmpty(),
-                skipped = o.text("skipped"),
-            )
-        }
-    }
+    val skipped: LString = "",
+    /** `allowed` as sent (null: an older server, decided by [skipped]) */
+    @SerialName("allowed") val allowedSent: LBoolOrNull = null,
+) : Checked<CatalogAlbum> {
+    override fun checked(): CatalogAlbum? =
+        if (id.isEmpty() && title.isEmpty()) null else copy(allowed = allowedSent ?: skipped.isEmpty())
 }
 
-
 /** A recording from search (mb::search_recordings) with the library match. */
+@Serializable
 data class CatalogTrack(
-    val id: String,
-    val title: String,
-    val artist: String,
-    val artistId: String,
-    val album: String,
-    val releaseGroupId: String,
-    val year: String,
-    val lengthSec: Double,
-    val cover: String,
-    val inLibrary: Boolean,
-    val library: Track?,
-    val requestStatus: String,
-    val isrc: String = "",
-    val requestLabel: String = "",
-) {
+    val id: LString = "",
+    val title: LString = "",
+    val artist: LString = "",
+    @SerialName("artist_id") val artistId: LString = "",
+    val album: LString = "",
+    @SerialName("release_group_id") val releaseGroupId: LString = "",
+    val year: LYear = "",
+    @SerialName("length") val lengthSec: LDouble = 0.0,
+    val cover: LString = "",
+    @SerialName("in_library") val inLibrary: LBool = false,
+    val library: LTrack = null,
+    @SerialName("request_status") val requestStatus: LString = "",
+    val isrc: LString = "",
+    @SerialName("request_label") val requestLabel: LString = "",
+) : Checked<CatalogTrack> {
     /** The key request statuses are kept under (songs only Deezer / Apple know have no MusicBrainz id). */
     val key: String get() = id.ifEmpty { "ext:$artist/$title" }
 
-    companion object {
-        fun from(o: JsonObject): CatalogTrack? {
-            val title = o.text("title")
-            if (title.isEmpty()) return null
-            return CatalogTrack(
-                id = o.text("id"),
-                title = title,
-                artist = o.text("artist"),
-                artistId = o.text("artist_id"),
-                album = o.text("album"),
-                releaseGroupId = o.text("release_group_id"),
-                year = o.text("year").take(4),
-                lengthSec = o.dbl("length"),
-                cover = o.text("cover"),
-                inLibrary = o.bool("in_library"),
-                library = o.obj("library")?.let { Track.from(it) },
-                requestStatus = o.text("request_status"),
-                isrc = o.text("isrc"),
-                requestLabel = o.text("request_label"),
-            )
-        }
-    }
+    override fun checked(): CatalogTrack? = if (title.isEmpty()) null else this
 }
 
 /** The Top result of a Discover search: one of [track], [album] or [artist], by [kind] (song | album | artist). */
 data class CatalogTop(val kind: String, val track: CatalogTrack?, val album: CatalogAlbum?, val artist: CatalogArtist?) {
-    companion object {
-        fun from(o: JsonObject?): CatalogTop? {
-            if (o == null) return null
-            val kind = o.text("kind")
+    /** `{kind, item}` of the search answer. */
+    internal object Reader : KSerializer<CatalogTop?> {
+        override val descriptor: SerialDescriptor = JsonObject.serializer().descriptor
+        override fun deserialize(decoder: Decoder): CatalogTop? {
+            val o = (decoder as? JsonDecoder)?.decodeJsonElement() as? JsonObject ?: return null
+            val kind = o.str("kind")
             val item = o.obj("item") ?: return null
             val top = CatalogTop(
                 kind,
-                if (kind == "song") CatalogTrack.from(item) else null,
-                if (kind == "album") CatalogAlbum.from(item) else null,
-                if (kind == "artist") CatalogArtist.from(item) else null,
+                if (kind == "song") item.decodeModel(CatalogTrack.serializer()) else null,
+                if (kind == "album") item.decodeModel(CatalogAlbum.serializer()) else null,
+                if (kind == "artist") item.decodeModel(CatalogArtist.serializer()) else null,
             )
             return if (top.track == null && top.album == null && top.artist == null) null else top
         }
+        override fun serialize(encoder: Encoder, value: CatalogTop?) = throw UnsupportedOperationException("read only")
     }
 }
 
+@Serializable
 data class SearchResults(
-    val artists: List<CatalogArtist>,
-    val albums: List<CatalogAlbum>,
-    val tracks: List<CatalogTrack>,
-    val top: CatalogTop? = null,
+    @Serializable(with = Items::class) val artists: List<CatalogArtist> = emptyList(),
+    @Serializable(with = Items::class) val albums: List<CatalogAlbum> = emptyList(),
+    @Serializable(with = Items::class) val tracks: List<CatalogTrack> = emptyList(),
+    @Serializable(with = CatalogTop.Reader::class) val top: CatalogTop? = null,
 ) {
     val isEmpty: Boolean get() = artists.isEmpty() && albums.isEmpty() && tracks.isEmpty()
-
-    companion object {
-        fun from(o: JsonObject): SearchResults = SearchResults(
-            artists = o.arr("artists").objectsOf().mapNotNull { CatalogArtist.from(it) },
-            albums = o.arr("albums").objectsOf().mapNotNull { CatalogAlbum.from(it) },
-            tracks = o.arr("tracks").objectsOf().mapNotNull { CatalogTrack.from(it) },
-            top = CatalogTop.from(o.obj("top")),
-        )
-    }
 }
 
 /** An album of this artist that is in the library (GET /api/discover/artist/{mbid} `library_albums[]`). */
-data class LibraryAlbumRef(val albumId: String, val album: String, val albumArtist: String, val year: String, val rgid: String) {
-    companion object {
-        fun from(o: JsonObject): LibraryAlbumRef? {
-            val id = o.text("album_id")
-            if (id.isEmpty()) return null
-            return LibraryAlbumRef(id, o.text("album").ifEmpty { "Unknown album" }, o.text("albumartist"), o.text("year").take(4), o.text("rgid"))
-        }
-    }
-}
-
-/** GET /api/discover/artist/{mbid}. */
-data class ArtistPage(
-    val id: String,
-    val name: String,
-    val type: String,
-    val country: String,
-    val begin: String,
-    val disambiguation: String,
-    val tags: List<String>,
-    val links: List<Pair<String, String>>,
-    val releaseGroups: List<CatalogAlbum>,
-    val libraryAlbums: List<LibraryAlbumRef>,
-    val libraryTracks: Int,
-    val requestStatus: String,
-    val requestLabel: String = "",
-    /** What "Request discography" includes: singles too (server setting), Deezer / Apple Music releases too. */
-    val discographySingles: Boolean = false,
-    val catalogMerge: Boolean = false,
-    /** The Request discography panel's boxes (Settings → Release types, ticked as set): kinds, then extras to skip. */
-    val releaseKinds: List<ReleaseTypeOption> = emptyList(),
-    val releaseSkip: List<ReleaseTypeOption> = emptyList(),
-) {
-    companion object {
-        /** The links the web shows (discover.js `links`). */
-        private val LINK_KINDS = listOf("official homepage", "bandcamp", "soundcloud", "youtube", "streaming", "free streaming", "wikidata", "discogs", "last.fm")
-
-        fun from(o: JsonObject): ArtistPage {
-            val links = ArrayList<Pair<String, String>>()
-            o.obj("links")?.forEach { (k, v) ->
-                if (k in LINK_KINDS && v is JsonPrimitive) links.add(k to v.content)
-            }
-            return ArtistPage(
-                id = o.text("id"),
-                name = o.text("name"),
-                type = o.text("type"),
-                country = o.text("country"),
-                begin = o.text("begin"),
-                disambiguation = o.text("disambiguation"),
-                tags = o.arr("tags").strings(),
-                links = links.take(6),
-                releaseGroups = o.arr("release_groups").objectsOf().mapNotNull { CatalogAlbum.from(it) },
-                libraryAlbums = o.arr("library_albums").objectsOf().mapNotNull { LibraryAlbumRef.from(it) },
-                libraryTracks = o.int("library_tracks"),
-                requestStatus = o.text("request_status"),
-                requestLabel = o.text("request_label"),
-                discographySingles = o.bool("discography_singles"),
-                catalogMerge = o.bool("catalog_merge"),
-                releaseKinds = o.obj("release_types")?.arr("kinds").objectsOf().mapNotNull { ReleaseTypeOption.from(it) },
-                releaseSkip = o.obj("release_types")?.arr("skip").objectsOf().mapNotNull { ReleaseTypeOption.from(it) },
-            )
-        }
+@Serializable
+data class LibraryAlbumRef(
+    @SerialName("album_id") val albumId: LString = "",
+    val album: LString = "",
+    @SerialName("albumartist") val albumArtist: LString = "",
+    val year: LYear = "",
+    val rgid: LString = "",
+) : Checked<LibraryAlbumRef> {
+    override fun checked(): LibraryAlbumRef? = when {
+        albumId.isEmpty() -> null
+        album.isEmpty() -> copy(album = "Unknown album")
+        else -> this
     }
 }
 
 /** One box of the release-type panel (`release_types.kinds[]` / `.skip[]` on the artist page). */
-data class ReleaseTypeOption(val key: String, val label: String, val on: Boolean) {
-    companion object {
-        fun from(o: JsonObject): ReleaseTypeOption? {
-            val key = o.text("key").ifEmpty { return null }
-            return ReleaseTypeOption(key, o.text("label").ifEmpty { key }, o.bool("on"))
-        }
+@Serializable
+data class ReleaseTypeOption(val key: LString = "", val label: LString = "", val on: LBool = false) : Checked<ReleaseTypeOption> {
+    override fun checked(): ReleaseTypeOption? = when {
+        key.isEmpty() -> null
+        label.isEmpty() -> copy(label = key)
+        else -> this
     }
+}
+
+/** The artist page's `release_types`: the Request discography panel's boxes, ticked as Settings → Release types has them. */
+@Serializable
+data class ReleaseTypes(
+    @Serializable(with = Items::class) val kinds: List<ReleaseTypeOption> = emptyList(),
+    @Serializable(with = Items::class) val skip: List<ReleaseTypeOption> = emptyList(),
+) {
+    internal object OrNull : Nested<ReleaseTypes>(serializer())
+}
+
+/** The links the web shows on an artist page (discover.js `links`): (kind, url), at most six. */
+internal object ArtistLinks : KSerializer<List<Pair<String, String>>> {
+    private val KINDS = listOf("official homepage", "bandcamp", "soundcloud", "youtube", "streaming", "free streaming", "wikidata", "discogs", "last.fm")
+    override val descriptor: SerialDescriptor = JsonObject.serializer().descriptor
+    override fun deserialize(decoder: Decoder): List<Pair<String, String>> {
+        val o = (decoder as? JsonDecoder)?.decodeJsonElement() as? JsonObject ?: return emptyList()
+        val links = ArrayList<Pair<String, String>>()
+        for ((k, v) in o) if (k in KINDS && v is JsonPrimitive && v !is JsonNull) links.add(k to v.content)
+        return links.take(6)
+    }
+    override fun serialize(encoder: Encoder, value: List<Pair<String, String>>) = throw UnsupportedOperationException("read only")
+}
+
+/** GET /api/discover/artist/{mbid}. */
+@Serializable
+data class ArtistPage(
+    val id: LString = "",
+    val name: LString = "",
+    val type: LString = "",
+    val country: LString = "",
+    val begin: LString = "",
+    val disambiguation: LString = "",
+    val tags: LTexts = emptyList(),
+    @Serializable(with = ArtistLinks::class) val links: List<Pair<String, String>> = emptyList(),
+    @SerialName("release_groups") @Serializable(with = Items::class) val releaseGroups: List<CatalogAlbum> = emptyList(),
+    @SerialName("library_albums") @Serializable(with = Items::class) val libraryAlbums: List<LibraryAlbumRef> = emptyList(),
+    @SerialName("library_tracks") val libraryTracks: LInt = 0,
+    @SerialName("request_status") val requestStatus: LString = "",
+    @SerialName("request_label") val requestLabel: LString = "",
+    /** What "Request discography" includes: singles too (server setting), Deezer / Apple Music releases too. */
+    @SerialName("discography_singles") val discographySingles: LBool = false,
+    @SerialName("catalog_merge") val catalogMerge: LBool = false,
+    @SerialName("release_types") @Serializable(with = ReleaseTypes.OrNull::class) val releaseTypes: ReleaseTypes? = null,
+) {
+    /** The Request discography panel's boxes (Settings → Release types, ticked as set): kinds, then extras to skip. */
+    val releaseKinds: List<ReleaseTypeOption> get() = releaseTypes?.kinds ?: emptyList()
+    val releaseSkip: List<ReleaseTypeOption> get() = releaseTypes?.skip ?: emptyList()
 }
 
 /** GET /api/discover/artist/{mbid}/extras `top[]` (Deezer's popular songs). */
-data class TopTrack(val title: String, val version: String, val album: String, val cover: String, val durationSec: Double, val isrc: String, val library: Track?) {
-    companion object {
-        fun from(o: JsonObject): TopTrack? {
-            val title = o.text("title")
-            if (title.isEmpty()) return null
-            return TopTrack(title, o.text("version"), o.text("album"), o.text("cover"), o.dbl("duration"), o.text("isrc"), o.obj("library")?.let { Track.from(it) })
-        }
-    }
+@Serializable
+data class TopTrack(
+    val title: LString = "",
+    val version: LString = "",
+    val album: LString = "",
+    val cover: LString = "",
+    @SerialName("duration") val durationSec: LDouble = 0.0,
+    val isrc: LString = "",
+    val library: LTrack = null,
+) : Checked<TopTrack> {
+    override fun checked(): TopTrack? = if (title.isEmpty()) null else this
 }
 
-data class ArtistExtras(val image: String, val bio: String, val bioUrl: String, val top: List<TopTrack>) {
-    companion object {
-        fun from(o: JsonObject): ArtistExtras = ArtistExtras(o.text("image"), o.text("bio"), o.text("bio_url"), o.arr("top").objectsOf().mapNotNull { TopTrack.from(it) })
-    }
-}
+@Serializable
+data class ArtistExtras(
+    val image: LString = "",
+    val bio: LString = "",
+    @SerialName("bio_url") val bioUrl: LString = "",
+    @Serializable(with = Items::class) val top: List<TopTrack> = emptyList(),
+)
 
-data class SimilarArtists(val source: String, val artists: List<CatalogArtist>) {
-    companion object {
-        fun from(o: JsonObject): SimilarArtists = SimilarArtists(o.text("source"), o.arr("artists").objectsOf().mapNotNull { CatalogArtist.from(it) })
+@Serializable
+data class SimilarArtists(val source: LString = "", @Serializable(with = Items::class) val artists: List<CatalogArtist> = emptyList())
+
+/** Where an outside release is listed: (source name, url) of its `sources[]`, those with a name. */
+internal object SourceLinks : KSerializer<List<Pair<String, String>>> {
+    override val descriptor: SerialDescriptor = JsonArray.serializer().descriptor
+    override fun deserialize(decoder: Decoder): List<Pair<String, String>> {
+        val a = (decoder as? JsonDecoder)?.decodeJsonElement() as? JsonArray
+        return a.objectsOf().map { it.str("name") to it.str("url") }.filter { it.first.isNotEmpty() }
     }
+    override fun serialize(encoder: Encoder, value: List<Pair<String, String>>) = throw UnsupportedOperationException("read only")
 }
 
 /** A release Deezer / Apple Music / Bandcamp / Discogs know that MusicBrainz doesn't (GET …/catalog `releases[]`). */
+@Serializable
 data class ExtRelease(
-    val title: String,
-    val year: String,
-    val date: String,
-    val type: String,
-    val tracks: Int,
-    val cover: String,
-    val inLibrary: Boolean,
-    val libraryAlbumId: String,
-    val requestStatus: String,
-    val sources: List<Pair<String, String>>,
-    val harmony: String,
-    val ext: JsonElement,
-    val requestLabel: String = "",
+    val title: LString = "",
+    val year: LYear = "",
+    val date: LString = "",
+    val type: LString = "",
+    val tracks: LInt = 0,
+    val cover: LString = "",
+    @SerialName("in_library") val inLibrary: LBool = false,
+    @SerialName("library_album_id") val libraryAlbumId: LString = "",
+    @SerialName("request_status") val requestStatus: LString = "",
+    @Serializable(with = SourceLinks::class) val sources: List<Pair<String, String>> = emptyList(),
+    val harmony: LString = "",
+    val ext: JsonElement = JsonNull,
+    @SerialName("request_label") val requestLabel: LString = "",
     /** The server's "ext-…" id (Deezer / Apple ids), the one a discography request names it by; "" from older servers. */
-    val id: String = "",
+    val id: LString = "",
     /** The group the server files it under ("Album", "Compilation", "Live" …; 0.26), "" from older servers. */
-    val kind: String = "",
+    val kind: LString = "",
     /** Whether Settings → Release types wants it (0.26: `allowed`; older servers: no `skipped` reason). */
-    val allowed: Boolean = true,
+    @Transient val allowed: Boolean = true,
     /** Why the release types leave it out ("Live", "Single" …), or "". */
-    val skipped: String = "",
-) {
-    companion object {
-        fun from(o: JsonObject): ExtRelease? {
-            val title = o.text("title")
-            if (title.isEmpty()) return null
-            val sources = o.arr("sources").objectsOf().map { it.text("name") to it.text("url") }.filter { it.first.isNotEmpty() }
-            return ExtRelease(
-                id = o.text("id"),
-                kind = o.text("kind"),
-                allowed = if (o.containsKey("allowed")) o.bool("allowed") else o.text("skipped").isEmpty(),
-                skipped = o.text("skipped"),
-                title = title,
-
-                year = o.text("year").take(4),
-                date = o.text("date"),
-                type = o.text("type"),
-                tracks = o.int("tracks"),
-                cover = o.text("cover"),
-                inLibrary = o.bool("in_library"),
-                libraryAlbumId = o.text("library_album_id"),
-                requestStatus = o.text("request_status"),
-                sources = sources,
-                harmony = o.text("harmony"),
-                ext = o["ext"] ?: JsonNull,
-                requestLabel = o.text("request_label"),
-            )
-        }
-    }
+    val skipped: LString = "",
+    /** `allowed` as sent (null: an older server, decided by [skipped]) */
+    @SerialName("allowed") val allowedSent: LBoolOrNull = null,
+) : Checked<ExtRelease> {
+    override fun checked(): ExtRelease? = if (title.isEmpty()) null else copy(allowed = allowedSent ?: skipped.isEmpty())
 }
 
 /** A track of an external release (POST /api/discover/catalog/tracks), with its library copy (playable) and any request. */
+@Serializable
 data class ExtTrack(
-    val track: Int,
-    val title: String,
-    val artist: String,
-    val lengthSec: Double,
-    val isrc: String = "",
-    val inLibrary: Boolean = false,
-    val library: Track? = null,
-    val requestStatus: String = "",
-    val requestLabel: String = "",
-) {
-    companion object {
-        fun from(o: JsonObject): ExtTrack? {
-            val title = o.text("title")
-            if (title.isEmpty()) return null
-            return ExtTrack(
-                o.int("track"), title, o.text("artist"), o.dbl("length"), o.text("isrc"), o.bool("in_library"),
-                o.obj("library")?.let { Track.from(it) }, o.text("request_status"), o.text("request_label"),
-            )
-        }
-    }
+    val track: LInt = 0,
+    val title: LString = "",
+    val artist: LString = "",
+    @SerialName("length") val lengthSec: LDouble = 0.0,
+    val isrc: LString = "",
+    @SerialName("in_library") val inLibrary: LBool = false,
+    val library: LTrack = null,
+    @SerialName("request_status") val requestStatus: LString = "",
+    @SerialName("request_label") val requestLabel: LString = "",
+) : Checked<ExtTrack> {
+    override fun checked(): ExtTrack? = if (title.isEmpty()) null else this
 }
 
 /** One track of a MusicBrainz release (GET /api/discover/album/{rgid} `release.tracks[]`). */
+@Serializable
 data class ReleaseTrack(
-    val disc: Int,
-    val track: Int,
-    val title: String,
-    val artist: String,
-    val lengthSec: Double,
-    val recordingId: String,
-    val inLibrary: Boolean,
-    val library: Track?,
-    val isrc: String = "",
-    val requestStatus: String = "",
-    val requestLabel: String = "",
-) {
-    companion object {
-        fun from(o: JsonObject): ReleaseTrack? {
-            val title = o.text("title")
-            if (title.isEmpty()) return null
-            return ReleaseTrack(
-                disc = o.int("disc"),
-                track = o.int("track"),
-                title = title,
-                artist = o.text("artist"),
-                lengthSec = o.dbl("length"),
-                recordingId = o.text("recording_id"),
-                inLibrary = o.bool("in_library"),
-                library = o.obj("library")?.let { Track.from(it) },
-                isrc = o.text("isrc"),
-                requestStatus = o.text("request_status"),
-                requestLabel = o.text("request_label"),
-            )
-        }
-    }
+    val disc: LInt = 0,
+    val track: LInt = 0,
+    val title: LString = "",
+    val artist: LString = "",
+    @SerialName("length") val lengthSec: LDouble = 0.0,
+    @SerialName("recording_id") val recordingId: LString = "",
+    @SerialName("in_library") val inLibrary: LBool = false,
+    val library: LTrack = null,
+    val isrc: LString = "",
+    @SerialName("request_status") val requestStatus: LString = "",
+    @SerialName("request_label") val requestLabel: LString = "",
+) : Checked<ReleaseTrack> {
+    override fun checked(): ReleaseTrack? = if (title.isEmpty()) null else this
 }
 
-data class Release(val tracks: List<ReleaseTrack>, val discCount: Int, val label: String) {
-    companion object {
-        fun from(o: JsonObject): Release = Release(o.arr("tracks").objectsOf().mapNotNull { ReleaseTrack.from(it) }, o.int("disc_count"), o.text("label"))
-    }
+@Serializable
+data class Release(
+    @Serializable(with = Items::class) val tracks: List<ReleaseTrack> = emptyList(),
+    @SerialName("disc_count") val discCount: LInt = 0,
+    val label: LString = "",
+) {
+    internal object OrNull : Nested<Release>(serializer())
 }
 
 /** GET /api/discover/album/{rgid}: the release group plus the best release's track list. */
+@Serializable
 data class AlbumPage(
-    val id: String,
-    val title: String,
-    val artist: String,
-    val artistId: String,
-    val type: String,
-    val secondary: List<String>,
-    val year: String,
-    val cover: String,
-    val tags: List<String>,
-    val inLibrary: Boolean,
-    val libraryAlbumId: String,
-    val requestStatus: String,
-    val release: Release?,
-    val requestLabel: String = "",
+    val id: LString = "",
+    val title: LString = "",
+    val artist: LString = "",
+    @SerialName("artist_id") val artistId: LString = "",
+    val type: LString = "",
+    val secondary: LTexts = emptyList(),
+    val year: LYear = "",
+    val cover: LString = "",
+    val tags: LTexts = emptyList(),
+    @SerialName("in_library") val inLibrary: LBool = false,
+    @SerialName("library_album_id") val libraryAlbumId: LString = "",
+    @SerialName("request_status") val requestStatus: LString = "",
+    @Serializable(with = Release.OrNull::class) val release: Release? = null,
+    @SerialName("request_label") val requestLabel: LString = "",
     /** Songs of the album in the library (Play / Shuffle show when there is any). */
-    val ownedTracks: Int = 0,
-) {
-    companion object {
-        fun from(o: JsonObject): AlbumPage = AlbumPage(
-            id = o.text("id"),
-            title = o.text("title"),
-            artist = o.text("artist"),
-            artistId = o.text("artist_id"),
-            type = o.text("type"),
-            secondary = o.arr("secondary").strings(),
-            year = o.text("year").take(4),
-            cover = o.text("cover"),
-            tags = o.arr("tags").strings(),
-            inLibrary = o.bool("in_library"),
-            libraryAlbumId = o.text("library_album_id"),
-            requestStatus = o.text("request_status"),
-            release = o.obj("release")?.let { Release.from(it) },
-            requestLabel = o.text("request_label"),
-            ownedTracks = o.int("owned_tracks"),
-        )
-    }
-}
+    @SerialName("owned_tracks") val ownedTracks: LInt = 0,
+)
 
 // ---- For you ---------------------------------------------------------------------------------------------------
 
 /** A recommended song (annotate_tracks): the library match when there is one, else a request status. */
+@Serializable
 data class FyTrack(
-    val mbid: String,
-    val title: String,
-    val artist: String,
-    val artistMbid: String,
-    val album: String,
-    val cover: String,
-    val lengthSec: Double,
-    val isrc: String,
-    val library: Track?,
-    val requestStatus: String,
-) {
-    companion object {
-        fun from(o: JsonObject): FyTrack? {
-            val title = o.text("title")
-            if (title.isEmpty()) return null
-            return FyTrack(
-                mbid = o.text("mbid"),
-                title = title,
-                artist = o.text("artist"),
-                artistMbid = o.text("artist_mbid"),
-                album = o.text("album"),
-                cover = o.text("cover"),
-                lengthSec = o.dbl("length"),
-                isrc = o.text("isrc"),
-                library = o.obj("library")?.let { Track.from(it) },
-                requestStatus = o.text("request_status"),
-            )
-        }
-    }
+    val mbid: LString = "",
+    val title: LString = "",
+    val artist: LString = "",
+    @SerialName("artist_mbid") val artistMbid: LString = "",
+    val album: LString = "",
+    val cover: LString = "",
+    @SerialName("length") val lengthSec: LDouble = 0.0,
+    val isrc: LString = "",
+    val library: LTrack = null,
+    @SerialName("request_status") val requestStatus: LString = "",
+) : Checked<FyTrack> {
+    override fun checked(): FyTrack? = if (title.isEmpty()) null else this
 
     /** The body of POST /api/requests for this song (foryou.js `reqBody`). */
     fun requestBody(): JsonObject = buildJsonObject {
@@ -627,88 +512,80 @@ data class FyTrack(
     }
 }
 
-data class FyPlaylist(val id: String, val title: String, val kind: String, val tracks: List<FyTrack>) {
-    companion object {
-        fun from(o: JsonObject): FyPlaylist = FyPlaylist(o.text("id"), o.text("title"), o.text("kind"), o.arr("tracks").objectsOf().mapNotNull { FyTrack.from(it) })
-    }
-}
+@Serializable
+data class FyPlaylist(
+    val id: LString = "",
+    val title: LString = "",
+    val kind: LString = "",
+    @Serializable(with = Items::class) val tracks: List<FyTrack> = emptyList(),
+)
 
 /** A Last.fm album pick ("Albums for you"). */
-data class FyAlbum(val title: String, val artist: String, val cover: String, val year: String, val inLibrary: Boolean, val requestStatus: String) {
-    companion object {
-        fun from(o: JsonObject): FyAlbum? {
-            val title = o.text("title")
-            if (title.isEmpty()) return null
-            return FyAlbum(title, o.text("artist"), o.text("cover"), o.text("year").take(4), o.bool("in_library"), o.text("request_status"))
-        }
-    }
+@Serializable
+data class FyAlbum(
+    val title: LString = "",
+    val artist: LString = "",
+    val cover: LString = "",
+    val year: LYear = "",
+    @SerialName("in_library") val inLibrary: LBool = false,
+    @SerialName("request_status") val requestStatus: LString = "",
+) : Checked<FyAlbum> {
+    override fun checked(): FyAlbum? = if (title.isEmpty()) null else this
 }
 
-data class LastFm(val user: String, val tracks: List<FyTrack>, val artists: List<CatalogArtist>, val albums: List<FyAlbum>) {
-    companion object {
-        fun from(o: JsonObject): LastFm = LastFm(
-            user = o.text("user"),
-            tracks = o.arr("tracks").objectsOf().mapNotNull { FyTrack.from(it) },
-            artists = o.arr("artists").objectsOf().mapNotNull { CatalogArtist.from(it) },
-            albums = o.arr("albums").objectsOf().mapNotNull { FyAlbum.from(it) },
-        )
-    }
+@Serializable
+data class LastFm(
+    val user: LString = "",
+    @Serializable(with = Items::class) val tracks: List<FyTrack> = emptyList(),
+    @Serializable(with = Items::class) val artists: List<CatalogArtist> = emptyList(),
+    @Serializable(with = Items::class) val albums: List<FyAlbum> = emptyList(),
+) {
+    internal object OrNull : Nested<LastFm>(serializer())
 }
 
 /** GET /api/discover/for-you. */
-data class ForYou(val connected: Boolean, val user: String, val playlists: List<FyPlaylist>, val lastfm: LastFm?, val errors: List<String>) {
-    companion object {
-        fun from(o: JsonObject): ForYou = ForYou(
-            connected = o.bool("connected"),
-            user = o.text("user"),
-            playlists = o.arr("playlists").objectsOf().map { FyPlaylist.from(it) },
-            lastfm = o.obj("lastfm")?.let { LastFm.from(it) },
-            errors = o.arr("errors").strings(),
-        )
-    }
-}
+@Serializable
+data class ForYou(
+    val connected: LBool = false,
+    val user: LString = "",
+    @Serializable(with = Items::class) val playlists: List<FyPlaylist> = emptyList(),
+    @Serializable(with = LastFm.OrNull::class) val lastfm: LastFm? = null,
+    val errors: LTexts = emptyList(),
+)
 
-data class Tags(val library: List<String>, val top: List<String>) {
-    companion object {
-        fun from(o: JsonObject): Tags = Tags(o.arr("library").strings(), o.arr("top").strings())
-    }
-}
+@Serializable
+data class Tags(val library: LTexts = emptyList(), val top: LTexts = emptyList())
 
-data class TagPage(val source: String, val summary: String, val artists: List<CatalogArtist>) {
-    companion object {
-        fun from(o: JsonObject): TagPage = TagPage(o.text("source"), o.text("summary"), o.arr("artists").objectsOf().mapNotNull { CatalogArtist.from(it) })
-    }
-}
+@Serializable
+data class TagPage(val source: LString = "", val summary: LString = "", @Serializable(with = Items::class) val artists: List<CatalogArtist> = emptyList())
 
-data class SimilarTracks(val source: String, val tracks: List<FyTrack>) {
-    companion object {
-        fun from(o: JsonObject): SimilarTracks = SimilarTracks(o.text("source"), o.arr("tracks").objectsOf().mapNotNull { FyTrack.from(it) })
-    }
-}
+@Serializable
+data class SimilarTracks(val source: LString = "", @Serializable(with = Items::class) val tracks: List<FyTrack> = emptyList())
 
 // ---- Requests --------------------------------------------------------------------------------------------------
 
 /** One row of GET /api/requests. */
+@Serializable
 data class RequestRow(
-    val id: Long,
-    val kind: String,
-    val mbid: String,
-    val artist: String,
-    val title: String,
-    val album: String,
-    val url: String,
-    val status: String,
-    val message: String,
-    val source: String,
-    val progress: Int,
-    val coverUrl: String,
-    val createdAt: Double,
-    val username: String,
-    val parentId: Long,
-    val lengthSec: Double,
+    val id: LLong = 0L,
+    val kind: LString = "",
+    val mbid: LString = "",
+    val artist: LString = "",
+    val title: LString = "",
+    val album: LString = "",
+    val url: LString = "",
+    val status: LString = "",
+    val message: LString = "",
+    val source: LString = "",
+    val progress: LInt = 0,
+    @SerialName("cover_url") val coverUrl: LString = "",
+    @SerialName("created_at") val createdAt: LDouble = 0.0,
+    val username: LString = "",
+    @SerialName("parent_id") val parentId: LLong = 0L,
+    @SerialName("length") val lengthSec: LDouble = 0.0,
     /** How many times the song was requested or retried on this row (1 for a first request). */
-    val attempts: Int = 1,
-) {
+    val attempts: LInt = 1,
+) : Checked<RequestRow> {
     val isActive: Boolean get() = status in ACTIVE_STATUSES
 
     /** The web's `what` line: "Title · Artist", "Artist · full discography", "Title · playlist import"… */
@@ -729,31 +606,7 @@ data class RequestRow(
             else -> artist
         }
 
-    companion object {
-        fun from(o: JsonObject): RequestRow? {
-            val id = o.long("id")
-            if (id <= 0L) return null
-            return RequestRow(
-                id = id,
-                kind = o.text("kind"),
-                mbid = o.text("mbid"),
-                artist = o.text("artist"),
-                title = o.text("title"),
-                album = o.text("album"),
-                url = o.text("url"),
-                status = o.text("status"),
-                message = o.text("message"),
-                source = o.text("source"),
-                progress = o.int("progress"),
-                coverUrl = o.text("cover_url"),
-                createdAt = o.dbl("created_at"),
-                username = o.text("username"),
-                parentId = o.long("parent_id"),
-                lengthSec = o.dbl("length"),
-                attempts = o.int("attempts").coerceAtLeast(1),
-            )
-        }
-    }
+    override fun checked(): RequestRow? = if (id <= 0L) null else if (attempts < 1) copy(attempts = 1) else this
 }
 
 // ---- Picker ----------------------------------------------------------------------------------------------------
@@ -762,57 +615,45 @@ data class RequestRow(
  * One source of GET /api/picker/sources. `state`: ready | sign_in | not_connected | not_installed | off; `hint`
  * says why when not ready, `settings` is the web UI's settings link (`#/settings?s=…`) with its label.
  */
-data class PickerSource(val id: String, val name: String, val state: String = "ready", val hint: String = "", val settings: String = "", val settingsLabel: String = "") {
+@Serializable
+data class PickerSource(
+    val id: LString = "",
+    val name: LString = "",
+    val state: LString = "ready",
+    val hint: LString = "",
+    val settings: LString = "",
+    @SerialName("settings_label") val settingsLabel: LString = "",
+) : Checked<PickerSource> {
     /** Only a ready source is searched; the others show their hint under their tab. */
     val ready: Boolean get() = state.isEmpty() || state == "ready"
-}
 
-data class PickerInfo(val allowed: Boolean, val sources: List<PickerSource>) {
-    companion object {
-        fun from(o: JsonObject): PickerInfo = PickerInfo(
-            allowed = o.bool("allowed"),
-            sources = o.arr("sources").objectsOf().map {
-                PickerSource(it.text("id"), it.text("name"), it.text("state").ifEmpty { "ready" }, it.text("hint"), it.text("settings"), it.text("settings_label"))
-            }.filter { it.id.isNotEmpty() },
-        )
+    override fun checked(): PickerSource? = when {
+        id.isEmpty() -> null
+        state.isEmpty() -> copy(state = "ready")
+        else -> this
     }
 }
+
+@Serializable
+data class PickerInfo(val allowed: LBool = false, @Serializable(with = Items::class) val sources: List<PickerSource> = emptyList())
 
 /** One result of POST /api/picker/search. */
+@Serializable
 data class PickResult(
-    val source: String,
-    val title: String,
-    val subtitle: String,
-    val quality: String,
-    val lossless: Boolean,
-    val tracks: Int,
-    val size: Long,
-    val durationSec: Double,
-    val info: String,
-    val warning: String,
-    val cover: String,
-    val payload: JsonElement,
-) {
-    companion object {
-        fun from(o: JsonObject): PickResult? {
-            val title = o.text("title")
-            if (title.isEmpty()) return null
-            return PickResult(
-                source = o.text("source"),
-                title = title,
-                subtitle = o.text("subtitle"),
-                quality = o.text("quality"),
-                lossless = o.bool("lossless"),
-                tracks = o.int("tracks"),
-                size = o.long("size"),
-                durationSec = o.dbl("duration"),
-                info = o.text("info"),
-                warning = o.text("warning"),
-                cover = o.text("cover"),
-                payload = o["payload"] ?: JsonObject(emptyMap()),
-            )
-        }
-    }
+    val source: LString = "",
+    val title: LString = "",
+    val subtitle: LString = "",
+    val quality: LString = "",
+    val lossless: LBool = false,
+    val tracks: LInt = 0,
+    val size: LLong = 0L,
+    @SerialName("duration") val durationSec: LDouble = 0.0,
+    val info: LString = "",
+    val warning: LString = "",
+    val cover: LString = "",
+    val payload: JsonElement = JsonObject(emptyMap()),
+) : Checked<PickResult> {
+    override fun checked(): PickResult? = if (title.isEmpty()) null else this
 }
 
 /** What the picker is looking for (picker.js `opts`). */
@@ -835,107 +676,95 @@ data class PickerOpts(
 // ---- Playlists -------------------------------------------------------------------------------------------------
 
 /** One row of GET /api/playlists/{id} `items[]`, with the item id needed to remove and move it. */
+@Serializable
 data class PlaylistItem(
-    val id: Long,
-    val title: String,
-    val artist: String,
-    val album: String,
-    val albumId: String,
-    val trackId: Long,
-    val requestId: Long,
-    val requestStatus: String,
-    val verifyStatus: String,
-    val matchReason: String,
-    val track: Track?,
+    val id: LLong = 0L,
+    val title: LString = "",
+    val artist: LString = "",
+    val album: LString = "",
+    @SerialName("album_id") val albumId: LString = "",
+    @SerialName("track_id") val trackId: LLong = 0L,
+    @SerialName("request_id") val requestId: LLong = 0L,
+    @SerialName("request_status") val requestStatus: LString = "",
+    @SerialName("verify_status") val verifyStatus: LString = "",
+    @SerialName("match_reason") val matchReason: LString = "",
+    /** the matched library song (the row itself carries its fields, see [Rows]) */
+    @Transient val track: Track? = null,
 ) {
-    companion object {
-        fun from(o: JsonObject): PlaylistItem? {
-            val id = o.long("id")
-            if (id <= 0L) return null
-            return PlaylistItem(
-                id = id,
-                title = o.text("title"),
-                artist = o.text("artist"),
-                album = o.text("album"),
-                albumId = o.text("album_id"),
-                trackId = o.long("track_id"),
-                requestId = o.long("request_id"),
-                requestStatus = o.text("request_status"),
-                verifyStatus = o.text("verify_status"),
-                matchReason = o.text("match_reason"),
-                track = Track.fromPlaylistItem(o),
-            )
+    /** The rows: each is a playlist item and, when matched, the library song (`track_id`) at once. */
+    internal object Rows : KSerializer<List<PlaylistItem>> {
+        override val descriptor: SerialDescriptor = JsonArray.serializer().descriptor
+        override fun deserialize(decoder: Decoder): List<PlaylistItem> {
+            val a = (decoder as? JsonDecoder)?.decodeJsonElement() as? JsonArray
+            return a.objectsOf().mapNotNull { o ->
+                o.decodeModel(serializer())?.takeIf { it.id > 0L }?.copy(track = Track.fromPlaylistItem(o))
+            }
         }
+        override fun serialize(encoder: Encoder, value: List<PlaylistItem>) = throw UnsupportedOperationException("read only")
     }
 }
 
+@Serializable
 data class PlaylistPage(
-    val id: Long,
-    val name: String,
-    val kind: String,
-    val source: String,
-    val sourceUrl: String,
-    val follow: Boolean,
-    val total: Int,
-    val matched: Int,
-    val coverUrl: String,
-    val items: List<PlaylistItem>,
+    val id: LLong = 0L,
+    val name: LString = "",
+    val kind: LString = "",
+    val source: LString = "",
+    @SerialName("source_url") val sourceUrl: LString = "",
+    val follow: LBool = false,
+    val total: LInt = 0,
+    val matched: LInt = 0,
+    @SerialName("cover_url") val coverUrl: LString = "",
+    @Serializable(with = PlaylistItem.Rows::class) val items: List<PlaylistItem> = emptyList(),
 ) {
     val isLiked: Boolean get() = kind == "liked"
-
-    companion object {
-        fun from(o: JsonObject): PlaylistPage = PlaylistPage(
-            id = o.long("id"),
-            name = o.text("name"),
-            kind = o.text("kind"),
-            source = o.text("source"),
-            sourceUrl = o.text("source_url"),
-            follow = o.bool("follow"),
-            total = o.int("total"),
-            matched = o.int("matched"),
-            coverUrl = o.text("cover_url"),
-            items = o.arr("items").objectsOf().mapNotNull { PlaylistItem.from(it) },
-        )
-    }
 }
 
 /** POST /api/playlists/preview. */
+@Serializable
 data class ImportPreview(
-    val name: String,
-    val source: String,
-    val count: Int,
-    val inLibrary: Int,
-    val duplicates: Int,
-    val warning: String,
-    val tracks: List<ImportTrack>,
-) {
-    companion object {
-        fun from(o: JsonObject): ImportPreview = ImportPreview(
-            name = o.text("name"),
-            source = o.text("source"),
-            count = o.int("count"),
-            inLibrary = o.int("in_library"),
-            duplicates = o.int("duplicates"),
-            warning = o.text("warning"),
-            tracks = o.arr("tracks").objectsOf().map { ImportTrack(it.text("artist"), it.text("title"), it.text("album"), it.text("isrc").isNotEmpty(), it.long("track_id") > 0, it.text("match_reason")) },
-        )
-    }
-}
+    val name: LString = "",
+    val source: LString = "",
+    val count: LInt = 0,
+    @SerialName("in_library") val inLibrary: LInt = 0,
+    val duplicates: LInt = 0,
+    val warning: LString = "",
+    @Serializable(with = Items::class) val tracks: List<ImportTrack> = emptyList(),
+)
 
-data class ImportTrack(val artist: String, val title: String, val album: String, val hasIsrc: Boolean, val inLibrary: Boolean, val matchReason: String)
+@Serializable
+data class ImportTrack(
+    val artist: LString = "",
+    val title: LString = "",
+    val album: LString = "",
+    val isrc: LString = "",
+    @SerialName("track_id") val trackId: LLong = 0L,
+    @SerialName("match_reason") val matchReason: LString = "",
+) {
+    val hasIsrc: Boolean get() = isrc.isNotEmpty()
+    val inLibrary: Boolean get() = trackId > 0
+}
 
 /** POST /api/playlists/import. */
-data class ImportResult(val id: Long, val added: Int, val duplicatesSkipped: Int, val requested: Int) {
-    companion object {
-        fun from(o: JsonObject): ImportResult = ImportResult(o.long("id"), o.int("added"), o.int("duplicates_skipped"), o.int("requested"))
-    }
-}
+@Serializable
+data class ImportResult(
+    val id: LLong = 0L,
+    val added: LInt = 0,
+    @SerialName("duplicates_skipped") val duplicatesSkipped: LInt = 0,
+    val requested: LInt = 0,
+)
 
 /** A song "Download missing" couldn't request, and why. */
-data class MissingFailure(val title: String, val reason: String)
+@Serializable
+data class MissingFailure(val title: LString = "", val reason: LString = "")
 
 /** POST /api/playlists/{id}/request-missing: what "Download missing" did, song by song. */
-data class MissingReport(val requested: Int, val inProgress: Int, val failed: List<MissingFailure>) {
+@Serializable
+data class MissingReport(
+    val requested: LInt = 0,
+    @SerialName("in_progress") val inProgress: LInt = 0,
+    @Serializable(with = Items::class) val failed: List<MissingFailure> = emptyList(),
+) {
     /** The toast, the web's words: "Requested 120 · 600 already in progress · 64 couldn't be requested (why)". */
     fun toastText(): String {
         val sb = StringBuilder("Requested $requested")
@@ -948,14 +777,6 @@ data class MissingReport(val requested: Int, val inProgress: Int, val failed: Li
         }
         return sb.toString()
     }
-
-    companion object {
-        fun from(o: JsonObject): MissingReport = MissingReport(
-            requested = o.int("requested"),
-            inProgress = o.int("in_progress"),
-            failed = o.arr("failed").objectsOf().map { MissingFailure(it.text("title"), it.text("reason")) },
-        )
-    }
 }
 
 /** web/js/pages/playlists.js `SRC`: where a playlist came from. */
@@ -967,43 +788,50 @@ val PLAYLIST_SOURCES: Map<String, String> = mapOf(
 
 // ---- Leaderboard -----------------------------------------------------------------------------------------------
 
-data class BoardRow(val username: String, val value: Double, val me: Boolean)
+@Serializable
+data class BoardRow(val username: LString = "", val value: LDouble = 0.0, val me: LBool = false)
 
-data class Board(val key: String, val label: String, val rows: List<BoardRow>)
+/** One board of `boards` (an object by key): its label and rows. */
+data class Board(val key: String, val label: String, val rows: List<BoardRow>) {
+    /** `boards`: `{key: {label, rows}}` in the server's order. */
+    internal object All : KSerializer<List<Board>> {
+        override val descriptor: SerialDescriptor = JsonObject.serializer().descriptor
+        override fun deserialize(decoder: Decoder): List<Board> {
+            val o = (decoder as? JsonDecoder)?.decodeJsonElement() as? JsonObject ?: return emptyList()
+            return o.mapNotNull { (k, v) ->
+                if (v !is JsonObject) null else Board(k, v.str("label"), v.arr("rows").objectsOf().rows(BoardRow.serializer()))
+            }
+        }
+        override fun serialize(encoder: Encoder, value: List<Board>) = throw UnsupportedOperationException("read only")
+    }
+}
 
-data class TopSong(val title: String, val artist: String, val albumId: String, val plays: Long)
+@Serializable
+data class TopSong(val title: LString = "", val artist: LString = "", @SerialName("album_id") val albumId: LString = "", val plays: LLong = 0L)
 
-data class TopArtist(val artist: String, val plays: Long, val listeners: Int)
+@Serializable
+data class TopArtist(val artist: LString = "", val plays: LLong = 0L, val listeners: LInt = 0)
 
-data class LibraryArtistStat(val artist: String, val albums: Int, val songs: Long)
+@Serializable
+data class LibraryArtistStat(val artist: LString = "", val albums: LInt = 0, val songs: LLong = 0L)
 
-data class Fact(val label: String, val value: String)
+@Serializable
+data class Fact(val label: LString = "", val value: LString = "")
+
+/** A row of `this_week`: who played how many songs. */
+@Serializable
+data class WeekRow(val username: LString = "", val plays: LLong = 0L)
 
 /** GET /api/stats/leaderboard. */
+@Serializable
 data class Leaderboard(
-    val boards: List<Board>,
-    val topSongs: List<TopSong>,
-    val topArtists: List<TopArtist>,
-    val thisWeek: List<Pair<String, Long>>,
-    val libraryArtists: List<LibraryArtistStat>,
-    val facts: List<Fact>,
+    @Serializable(with = Board.All::class) val boards: List<Board> = emptyList(),
+    @SerialName("top_songs") @Serializable(with = Items::class) val topSongs: List<TopSong> = emptyList(),
+    @SerialName("top_artists") @Serializable(with = Items::class) val topArtists: List<TopArtist> = emptyList(),
+    @SerialName("this_week") @Serializable(with = Items::class) val weekRows: List<WeekRow> = emptyList(),
+    @SerialName("library_artists") @Serializable(with = Items::class) val libraryArtists: List<LibraryArtistStat> = emptyList(),
+    @Serializable(with = Items::class) val facts: List<Fact> = emptyList(),
 ) {
-    companion object {
-        fun from(o: JsonObject): Leaderboard {
-            val boards = ArrayList<Board>()
-            o.obj("boards")?.forEach { (k, v) ->
-                if (v is JsonObject) {
-                    boards.add(Board(k, v.text("label"), v.arr("rows").objectsOf().map { BoardRow(it.text("username"), it.dbl("value"), it.bool("me")) }))
-                }
-            }
-            return Leaderboard(
-                boards = boards,
-                topSongs = o.arr("top_songs").objectsOf().map { TopSong(it.text("title"), it.text("artist"), it.text("album_id"), it.long("plays")) },
-                topArtists = o.arr("top_artists").objectsOf().map { TopArtist(it.text("artist"), it.long("plays"), it.int("listeners")) },
-                thisWeek = o.arr("this_week").objectsOf().map { it.text("username") to it.long("plays") },
-                libraryArtists = o.arr("library_artists").objectsOf().map { LibraryArtistStat(it.text("artist"), it.int("albums"), it.long("songs")) },
-                facts = o.arr("facts").objectsOf().map { Fact(it.text("label"), it.text("value")) },
-            )
-        }
-    }
+    /** (username, songs played this week), most first. */
+    val thisWeek: List<Pair<String, Long>> get() = weekRows.map { it.username to it.plays }
 }

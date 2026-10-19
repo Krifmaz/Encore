@@ -4,7 +4,8 @@ plugins {
     alias(libs.plugins.kotlin.serialization)
 }
 
-// Version from the release pipeline: -PencoreVersionName=1.4.0 -PencoreVersionCode=26101300 (YYMMDDNN, PLAN §2.1).
+// Version from the release pipeline: -PencoreVersionName=0.30.0 -PencoreVersionCode=260300000 (release.yml: 260000000 +
+// major × 1000000 + minor × 10000 + patch × 10, above the old date-based codes).
 val encoreVersionName: String = providers.gradleProperty("encoreVersionName").orElse("0.0.1-dev").get()
 val encoreVersionCode: Int = providers.gradleProperty("encoreVersionCode").orElse("1").get().toInt()
 
@@ -96,4 +97,7 @@ dependencies {
 
     // Cadenza on the phone (JNI binding + libencore_cadenza.so when built with cargo-ndk); CadenzaEngine adapts it
     implementation(project(":cadenza"))
+
+    // JUnit 4 for app/src/test (pure Kotlin rules; no Android classes, so no Robolectric). Not in the APK.
+    testImplementation(libs.junit)
 }

@@ -2,6 +2,7 @@ package app.encore.android.data.api
 
 import android.content.Context
 import android.content.SharedPreferences
+import app.encore.android.core.str
 import kotlinx.serialization.json.JsonObject
 
 /**

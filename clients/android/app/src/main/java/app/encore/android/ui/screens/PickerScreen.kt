@@ -43,8 +43,8 @@ import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import app.encore.android.R
+import app.encore.android.core.str
 import app.encore.android.data.api.ApiException
-import app.encore.android.data.api.str
 import app.encore.android.data.repo.PickResult
 import app.encore.android.data.repo.PickerInfo
 import app.encore.android.data.repo.PickerOpts

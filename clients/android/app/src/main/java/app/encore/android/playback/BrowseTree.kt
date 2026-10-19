@@ -5,16 +5,18 @@ import android.os.Bundle
 import androidx.media3.common.MediaItem
 import androidx.media3.common.MediaMetadata
 import androidx.media3.session.MediaConstants
+import app.encore.android.core.arr
+import app.encore.android.core.int
+import app.encore.android.core.obj
+import app.encore.android.core.objects
+import app.encore.android.core.objectsOf
+import app.encore.android.core.str
 import app.encore.android.data.api.Album
 import app.encore.android.data.api.Artist
 import app.encore.android.data.api.EncoreApi
 import app.encore.android.data.api.Track
-import app.encore.android.data.api.arr
-import app.encore.android.data.api.int
-import app.encore.android.data.api.obj
-import app.encore.android.data.api.objects
-import app.encore.android.data.api.objectsOf
-import app.encore.android.data.api.str
+import app.encore.android.features.offline.OfflineIndex
+import app.encore.android.features.offline.OfflineStore
 import app.encore.android.ui.components.libraryIndex
 import kotlinx.serialization.json.JsonPrimitive
 import java.text.Normalizer
@@ -25,24 +27,47 @@ import java.util.concurrent.ConcurrentHashMap
  * Tauri app's CarService.Tree. Calls are blocking: the service runs them on its executor.
  *
  * Root (at most 4 tabs, PLAN §10): Home (recently added, recently played, made for you, shuffle everything),
- * Playlists (liked songs first), Library (albums, artists, songs). Every node id CarService used still resolves.
+ * Playlists (liked songs first), Library (albums, artists, songs), and Downloaded (the songs saved on this phone,
+ * by album; read from the offline index, so it works without the server) when there are any. Every node id
+ * CarService used still resolves.
  *
  * Android Auto stops scrolling after a few screens (the "speed bump", which an app can't turn off), so the long
  * lists are split into A–Z letter folders (only letters that have items, from GET /api/library/index, else
  * grouped here): a letter is one tap and a short list. Big song letters split once more by their first two
  * letters. Search results come grouped as Songs, Albums, Artists.
  */
-class BrowseTree(private val api: EncoreApi) {
+class BrowseTree(private val api: EncoreApi, private val offline: OfflineStore? = null) {
     /** parent id → what we listed under it (playing a listed song plays its siblings). */
     private val children = ConcurrentHashMap<String, List<MediaItem>>()
 
     fun root(): MediaItem = folder(ROOT, "Encore", null, MediaMetadata.MEDIA_TYPE_FOLDER_MIXED, grid = false)
 
-    private fun tabs(): List<MediaItem> = listOf(
+    private fun tabs(): List<MediaItem> = listOfNotNull(
         folder("home", "Home", null, MediaMetadata.MEDIA_TYPE_FOLDER_MIXED, grid = false),
         folder("playlists", "Playlists", null, MediaMetadata.MEDIA_TYPE_FOLDER_PLAYLISTS, grid = false),
         folder("library", "Library", null, MediaMetadata.MEDIA_TYPE_FOLDER_MIXED, grid = false),
+        if (saved().isNotEmpty()) downloadedRoot() else null,
     )
+
+    /** The Downloaded node: also the root a browser gets when it asks for what plays offline. */
+    fun downloadedRoot(): MediaItem = folder(DOWNLOADED, "Downloaded", null, MediaMetadata.MEDIA_TYPE_FOLDER_ALBUMS, grid = false)
+
+    /** The signed-in server's songs saved on this phone. */
+    private fun saved() = offline?.songsNow() ?: emptyList()
+
+    /** Downloaded: shuffle them, all songs, then the albums (newest download first). */
+    private fun downloaded(): List<MediaItem> {
+        val songs = saved()
+        if (songs.isEmpty()) return emptyList()
+        val albums = OfflineIndex.group(songs)
+        return listOf(
+            action(DL_SHUFFLE, "Shuffle downloaded songs", plural(songs.size, "song")),
+            folder(DL_SONGS, "All songs", plural(songs.size, "song"), MediaMetadata.MEDIA_TYPE_FOLDER_MIXED, grid = false),
+        ) + albums.map { a ->
+            folder(DL_ALBUM + a.key, a.album.ifEmpty { "Unknown album" }, listOf(a.artist, plural(a.songs.size, "song")).filter { it.isNotEmpty() }.joinToString(" · "),
+                MediaMetadata.MEDIA_TYPE_ALBUM, grid = true, art = a.albumId.takeIf { it.isNotEmpty() }?.let { MediaItems.coverUri(it) })
+        }
+    }
 
     private fun home(): List<MediaItem> = listOf(
         folder("recent", "Recently added", "New in your library", MediaMetadata.MEDIA_TYPE_FOLDER_ALBUMS, grid = true),
@@ -61,6 +86,13 @@ class BrowseTree(private val api: EncoreApi) {
     fun list(parent: String): List<MediaItem> {
         val out: List<MediaItem> = when {
             parent == ROOT -> tabs()
+            parent == DOWNLOADED -> downloaded()
+            parent == DL_SONGS -> saved().sortedBy { it.title.lowercase() }.map { track(OfflineStore.trackOf(it), parent) }
+            parent == DL_SHUFFLE -> saved().shuffled().take(500).map { track(OfflineStore.trackOf(it), parent) }
+            parent.startsWith(DL_ALBUM) -> {
+                val key = parent.removePrefix(DL_ALBUM)
+                OfflineIndex.group(saved()).firstOrNull { it.key == key }?.songs.orEmpty().map { track(OfflineStore.trackOf(it), parent) }
+            }
             parent == "home" -> home()
             parent == "library" -> library()
             parent == "recent" -> albums(api.recentAlbums(60))
@@ -150,7 +182,15 @@ class BrowseTree(private val api: EncoreApi) {
      */
     fun search(q: String): List<MediaItem> {
         val key = "search:$q"
-        val songs = api.tracks(q = q, limit = 30).map { track(it, key) }
+        // the server can't be reached: the saved songs that match
+        val songs = try {
+            api.tracks(q = q, limit = 30).map { track(it, key) }
+        } catch (e: Exception) {
+            val found = saved().filter { OfflineIndex.matches(it, q) }.take(30).map { track(OfflineStore.trackOf(it), key) }
+            if (found.isEmpty()) throw e
+            children[key] = found
+            return found.map { grouped(it, "Songs") }
+        }
         children[key] = songs
         val out = ArrayList<MediaItem>()
         out += songs.map { grouped(it, "Songs") }
@@ -318,11 +358,20 @@ class BrowseTree(private val api: EncoreApi) {
                     if (at >= 0) return songs to at
                 }
             }
-            val t = api.track(tid) ?: return emptyList<MediaItem>() to 0
+            // a song saved on this phone needs no server
+            val t = try { api.track(tid) } catch (e: Exception) { offline?.record(tid)?.let { OfflineStore.trackOf(it) } ?: throw e }
+                ?: return emptyList<MediaItem>() to 0
             return listOf(track(t, null)) to 0
         }
         val songs = (songsFor(mediaId) ?: list(mediaId)).filter { it.mediaId.startsWith("track:") }
         return songs to 0
+    }
+
+    /** Voice requests without the server: the saved songs that match ("play music": all of them, shuffled). */
+    fun downloadedFor(q: String): List<MediaItem> {
+        val songs = saved()
+        val found = if (q.isBlank()) songs.shuffled() else songs.filter { OfflineIndex.matches(it, q) }
+        return found.take(500).map { track(OfflineStore.trackOf(it), null) }
     }
 
     /** A playable entry that isn't a folder ("Shuffle all songs", "Shuffle <artist>"): tapping it plays. */
@@ -343,7 +392,7 @@ class BrowseTree(private val api: EncoreApi) {
             putInt(MediaConstants.EXTRAS_KEY_CONTENT_STYLE_PLAYABLE, MediaConstants.EXTRAS_VALUE_CONTENT_STYLE_LIST_ITEM)
         }
         val playable = id == "shuffle" || id == "liked" || id.startsWith("playlist:") || id.startsWith("album:") || id.startsWith("mfy:") ||
-            id.startsWith(SONG_LETTER)
+            id.startsWith(SONG_LETTER) || id == DL_SONGS || id.startsWith(DL_ALBUM)
         val md = MediaMetadata.Builder()
             .setTitle(title)
             .setSubtitle(subtitle)
@@ -368,6 +417,11 @@ class BrowseTree(private val api: EncoreApi) {
         private const val SONG_LETTER = "songs:letter:"
         private const val SONGS_SHUFFLE = "songs:shuffle"
         private const val ARTIST_SHUFFLE = "artist-shuffle:"
+        /** the songs saved on this phone (features/offline) */
+        private const val DOWNLOADED = "downloaded"
+        private const val DL_SONGS = "downloaded:songs"
+        private const val DL_SHUFFLE = "downloaded:shuffle"
+        private const val DL_ALBUM = "downloaded:album:"
 
         private const val INDEX_TTL_MS = 10 * 60_000L
         /** without the server index: how many rows of a list we group here */

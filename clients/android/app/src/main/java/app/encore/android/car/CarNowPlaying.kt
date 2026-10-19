@@ -3,6 +3,7 @@ package app.encore.android.car
 import android.net.Uri
 import android.os.SystemClock
 import app.encore.android.data.api.EncoreApi
+import app.encore.android.features.offline.OfflineStore
 import app.encore.android.ui.screens.Lyrics
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -64,7 +65,9 @@ object LyricsCache {
         val key = api.base + "#" + trackId
         synchronized(cache) { cache[key]?.let { return it } }
         val lines = try {
-            val l = Lyrics.from(api.lyrics(trackId))
+            // offline: the lyrics saved with a downloaded song
+            val o = try { api.lyrics(trackId) } catch (e: Exception) { OfflineStore.instance?.savedLyrics(trackId) ?: throw e }
+            val l = Lyrics.from(o)
             if (l.synced) l.lines.map { CarLine((it.timeSec * 1000).toLong(), it.text) } else emptyList()
         } catch (_: Exception) {
             return emptyList()

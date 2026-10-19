@@ -387,6 +387,11 @@ impl Engine {
         &self.out
     }
 
+    /// The output of the last [`Engine::process`] or [`Engine::flush`] (what they returned), until the next call.
+    pub fn last_output(&self) -> &[f32] {
+        &self.out
+    }
+
     /// The resampler's latency in seconds (0 without one).
     pub fn latency_seconds(&self) -> f64 {
         self.resampler.as_ref().map(Pipeline::latency_seconds).unwrap_or(0.0)

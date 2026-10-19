@@ -1,7 +1,7 @@
 # Cadenza on the phone: the cadenza-dsp crate (the same engine as the server) behind a JNI surface that
 # clients/android/cadenza/src/main/java/app/encore/android/cadenza/CadenzaNative.kt calls. Built for Android by
 # cargo-ndk from cadenza/build.gradle.kts (cargoNdkBuild) into libencore_cadenza.so; `cargo build` / `cargo test`
-# on the host build and test the engine itself (docs/android-native/PLAN.md §6.3).
+# on the host build and test the engine itself (cadenza/README.md).
 [package]
 name = "encore-cadenza-jni"
 version = "0.1.0"

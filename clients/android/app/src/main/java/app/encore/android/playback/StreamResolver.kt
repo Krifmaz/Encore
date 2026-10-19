@@ -6,6 +6,7 @@ import android.net.Uri
 import androidx.media3.datasource.DataSpec
 import androidx.media3.datasource.ResolvingDataSource
 import app.encore.android.data.api.EncoreApi
+import app.encore.android.data.api.Track
 import app.encore.android.data.prefs.DspInfo
 import app.encore.android.data.prefs.PlaybackPrefs
 import app.encore.android.data.prefs.Quality
@@ -25,14 +26,17 @@ data class StreamVariant(
     val offsetSec: Double = 0.0,
     /** what the pre-render cache said about this song: cached | rendering | queued | busy | "" */
     val dspState: String = "",
+    /** the song plays from its downloaded copy on this phone (features/offline): that copy's content:// or file:// URI */
+    val local: String = "",
 ) {
     val lossy: Boolean get() = rung > 0
 
     /** A stream the server makes as it goes (no Range): seeking means asking for it again at `t=`. */
     val serverStream: Boolean get() = lossy || transcode || (dsp && dspState != "cached")
 
-    /** "original" | "flac" | "aac-96" | "cadenza-96000" – the transport kind the web player reports. */
+    /** "original" | "flac" | "aac-96" | "cadenza-96000" | "local" – the transport kind the web player reports. */
     val kind: String get() = when {
+        local.isNotEmpty() -> "local"
         rung > 0 -> "aac-$rung"
         dsp -> "cadenza-$dspRate"
         transcode -> "flac"
@@ -41,7 +45,11 @@ data class StreamVariant(
 }
 
 /** What the resolver needs to know about a song. */
-data class StreamTrack(val id: Long, val format: String, val bitrate: Int, val durationSec: Double)
+data class StreamTrack(val id: Long, val format: String, val bitrate: Int, val durationSec: Double) {
+    companion object {
+        fun of(t: Track): StreamTrack = StreamTrack(t.id, t.format, t.bitrate, t.durationSec)
+    }
+}
 
 /**
  * The bandwidth estimate for Auto quality (player.js `est`): an exponentially weighted average of measured
@@ -109,8 +117,6 @@ class StreamResolver(private val api: EncoreApi, private val estimator: Bandwidt
     /** this device's output sample rate, for `dsp_rate = "device"` */
     @Volatile var deviceRate: Int = 0
 
-    /** track id → sample rate from /info (what the server will upsample from) */
-    val sourceRates = ConcurrentHashMap<Long, Int>()
     /** track id → what the pre-render cache said (prepare) */
     val dspStates = ConcurrentHashMap<Long, String>()
     /** track id → the song's data as last queued */
@@ -121,6 +127,21 @@ class StreamResolver(private val api: EncoreApi, private val estimator: Bandwidt
     private val pending = ConcurrentHashMap<Long, StreamVariant>()
 
     fun remember(t: StreamTrack) { tracks[t.id] = t }
+
+    /**
+     * The downloaded copy of a song (features/offline/OfflineStore): its URI, null when it has none or should stream
+     * ("Play downloaded songs from this device" off while the server can be reached). A song with a copy plays from
+     * it: no stream, no quality steps, no server processing.
+     */
+    @Volatile var localCopy: (Long) -> String? = { null }
+
+    /** songs whose downloaded copy would not play this session: they stream from the server */
+    private val brokenCopies: MutableSet<Long> = ConcurrentHashMap.newKeySet()
+
+    /** The downloaded copy of a song would not play: this session it streams from the server. */
+    fun copyFailed(id: Long) { brokenCopies.add(id) }
+
+    private fun localOf(id: Long): String? = if (id in brokenCopies) null else try { localCopy(id) } catch (_: Exception) { null }
 
     fun track(id: Long): StreamTrack? = tracks[id]
 
@@ -170,9 +191,13 @@ class StreamResolver(private val api: EncoreApi, private val estimator: Bandwidt
         else -> prefs.dspRate.toIntOrNull() ?: 0
     }
 
-    /** The rate the server will send (its rule: at most max_rate, never below the file's; 0 → the highest multiple of the file's rate). */
-    fun dspOutRate(id: Long): Int {
-        val src = sourceRates[id] ?: 44100
+    /**
+     * The rate the server will send (its rule: at most max_rate, never below the file's; 0 → the highest multiple of
+     * the file's rate). The phone does not know the file's rate before it plays, so it counts with 44.1 kHz: the
+     * badge and the Auto ladder can be low for a hi-res file under server processing.
+     */
+    fun dspOutRate(): Int {
+        val src = SOURCE_RATE
         val max = dspInfo?.maxRate?.takeIf { it > 0 } ?: 192000
         val want = dspRequestRate()
         var r = if (want > 0) minOf(want, max) else src
@@ -192,7 +217,7 @@ class StreamResolver(private val api: EncoreApi, private val estimator: Bandwidt
     fun fileKbps(t: StreamTrack): Int = if (t.bitrate > 0) t.bitrate else 0
 
     /** kbit/s the song needs as the "original" rung: the Cadenza stream's when the server upsamples it, else the file's. */
-    fun origKbps(t: StreamTrack): Int = if (wantDsp(false)) dspKbps(dspOutRate(t.id)) else fileKbps(t)
+    fun origKbps(t: StreamTrack): Int = if (wantDsp(false)) dspKbps(dspOutRate()) else fileKbps(t)
 
     /** Which rung a song starts on: Original never converts, Data saver is fixed at 96 kbps, Auto follows the estimated bandwidth. */
     fun rungFor(t: StreamTrack): Int = when (prefs.quality) {
@@ -203,12 +228,13 @@ class StreamResolver(private val api: EncoreApi, private val estimator: Bandwidt
 
     /** The variant a song starts with. */
     fun startVariant(t: StreamTrack): StreamVariant {
+        localOf(t.id)?.let { return StreamVariant(local = it) }
         val rung = rungFor(t)
         val dsp = wantDsp(rung > 0)
         return StreamVariant(
             rung = rung,
             dsp = dsp,
-            dspRate = if (dsp) dspOutRate(t.id) else 0,
+            dspRate = if (dsp) dspOutRate() else 0,
             transcode = rung == 0 && !dsp && EncoreApi.needsTranscode(t.format),
             dspState = if (dsp) (dspStates[t.id] ?: "") else "",
         )
@@ -216,13 +242,15 @@ class StreamResolver(private val api: EncoreApi, private val estimator: Bandwidt
 
     /** The same song again at `offsetSec` on `rung` (null = the rung it has), with or without the server's Cadenza. */
     fun reopenVariant(t: StreamTrack, rung: Int?, dsp: Boolean?, offsetSec: Double): StreamVariant {
+        // a downloaded copy is a whole file: the same spot again is a seek in it
+        localOf(t.id)?.let { return StreamVariant(local = it, offsetSec = offsetSec) }
         val cur = chosen[t.id] ?: startVariant(t)
         val r = rung ?: cur.rung
         val d = (dsp ?: cur.dsp) && wantDsp(r > 0)
         return StreamVariant(
             rung = r,
             dsp = d,
-            dspRate = if (d) dspOutRate(t.id) else 0,
+            dspRate = if (d) dspOutRate() else 0,
             transcode = r == 0 && !d && EncoreApi.needsTranscode(t.format),
             offsetSec = offsetSec,
             dspState = if (d) (dspStates[t.id] ?: "") else "",
@@ -231,6 +259,7 @@ class StreamResolver(private val api: EncoreApi, private val estimator: Bandwidt
 
     /** The stream URL for a song in a given variant (player.js streamUrl). */
     fun url(id: Long, v: StreamVariant): String {
+        if (v.local.isNotEmpty()) return v.local
         val q = ArrayList<String>()
         if (v.rung > 0) {
             q.add("q=aac"); q.add("kbps=${v.rung}")
@@ -257,6 +286,9 @@ class StreamResolver(private val api: EncoreApi, private val estimator: Bandwidt
 
     companion object {
         private const val NONE = -1L
+
+        /** The source rate the server's output rate is predicted from (CD audio). */
+        private const val SOURCE_RATE = 44100
 
         /** `/api/library/tracks/{id}/stream` → id */
         fun trackIdOf(uri: Uri): Long? {

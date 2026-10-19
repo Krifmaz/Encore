@@ -21,10 +21,10 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.collectAsState
-import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.getValue
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -33,6 +33,8 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import app.encore.android.R
+import app.encore.android.core.int
+import app.encore.android.core.str
 import app.encore.android.data.api.Album
 import app.encore.android.data.api.Track
 import app.encore.android.data.api.User
@@ -78,18 +80,11 @@ private val MFY_KIND = mapOf(
     "lastfm" to "Similar to your most played songs on Last.fm",
 )
 
-private fun JsonObject.text(key: String): String {
-    val v = this[key] as? JsonPrimitive ?: return ""
-    return if (v.isString) v.content else v.content.takeIf { it != "null" } ?: ""
-}
-
-private fun JsonObject.number(key: String): Int = (this[key] as? JsonPrimitive)?.content?.toDoubleOrNull()?.toInt() ?: 0
-
 private fun parseMadeForYou(rows: List<JsonObject>, base: String): List<MadeForYou> = rows.map { p ->
     val covers = (p["covers"] as? JsonArray)?.mapNotNull { (it as? JsonPrimitive)?.content }?.filter { it.isNotEmpty() }
         ?.map { if (it.startsWith("/")) base + it else it } ?: emptyList()
     val tracks = (p["tracks"] as? JsonArray)?.mapNotNull { (it as? JsonObject)?.get("library") as? JsonObject }?.mapNotNull { Track.from(it) } ?: emptyList()
-    MadeForYou(p.text("title").ifEmpty { "Made for you" }, p.text("kind"), covers, p.number("owned"), p.number("total"), tracks)
+    MadeForYou(p.str("title").ifEmpty { "Made for you" }, p.str("kind"), covers, p.int("owned"), p.int("total"), tracks)
 }
 
 /** web/js/pages/home.js: the greeting by the hour. */
@@ -152,6 +147,7 @@ fun HomeScreen(nav: Nav, session: Session) {
                                 MenuSeparator,
                                 MenuEntry("Account", R.drawable.ic_person) { nav.open(Screen.Account) },
                                 MenuEntry("Settings", R.drawable.ic_settings) { nav.open(Screen.Settings) },
+                                MenuEntry("Bug reports", R.drawable.ic_bug) { nav.open(Screen.BugReports("Home")) },
                             ),
                         )
                     }

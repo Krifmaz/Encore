@@ -3,9 +3,7 @@ package app.encore.android.ui.screens
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
-import androidx.compose.foundation.lazy.grid.rememberLazyGridState
 import androidx.compose.foundation.layout.Column
-import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.WindowInsets
@@ -15,10 +13,6 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.lazy.LazyColumn
-import androidx.compose.foundation.lazy.grid.GridCells
-import androidx.compose.foundation.lazy.grid.GridItemSpan
-import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
-import androidx.compose.foundation.lazy.grid.items
 import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.ExperimentalMaterial3Api
@@ -30,8 +24,8 @@ import androidx.compose.material3.Text
 import androidx.compose.material3.TopAppBarDefaults
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.collectAsState
-import androidx.compose.runtime.getValue
 import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.getValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.shadow
@@ -44,17 +38,15 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import app.encore.android.R
+import app.encore.android.core.dbl
+import app.encore.android.core.str
 import app.encore.android.data.api.Album
 import app.encore.android.data.api.AlbumDetail
 import app.encore.android.data.api.EncoreApi
 import app.encore.android.data.api.Track
 import app.encore.android.data.api.Tr
+import app.encore.android.features.offline.rememberOfflineMenu
 import app.encore.android.ui.Nav
-import app.encore.android.ui.Screen
-import app.encore.android.ui.components.AlbumCard
-import app.encore.android.ui.components.FastScroller
-import app.encore.android.ui.components.rememberLibraryIndex
-import app.encore.android.ui.components.rememberScrollerTarget
 import app.encore.android.ui.components.Badge
 import app.encore.android.ui.components.Cover
 import app.encore.android.ui.components.EncoreButton
@@ -65,7 +57,6 @@ import app.encore.android.ui.components.LoadableContent
 import app.encore.android.ui.components.MenuEntry
 import app.encore.android.ui.components.ReportUi
 import app.encore.android.ui.components.MoreButton
-import app.encore.android.ui.components.RoundCover
 import app.encore.android.ui.components.Toasts
 import app.encore.android.ui.components.TrackRow
 import app.encore.android.ui.components.formatDay
@@ -74,12 +65,8 @@ import app.encore.android.ui.components.formatSize
 import app.encore.android.ui.components.rememberLoad
 import app.encore.android.ui.components.shareLinkOf
 import app.encore.android.ui.theme.palette
-import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.launch
-import kotlinx.coroutines.withContext
 import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonObject
-import kotlinx.serialization.json.JsonPrimitive
 
 /** A back arrow and a title, for pages stacked on a tab (kept for screens that don't use a scrolling top bar). */
 @Composable
@@ -105,13 +92,6 @@ fun PlayButtons(nav: Nav, tracks: List<Track>, modifier: Modifier = Modifier, tr
 /** What the album page shows beyond [AlbumDetail]: size, the history line and per-track "requested by" notes. */
 private class AlbumPage(val detail: AlbumDetail, val size: Long, val history: String, val notes: Map<Long, String>)
 
-private fun JsonObject.s(key: String): String {
-    val v = this[key] as? JsonPrimitive ?: return ""
-    return if (v.isString) v.content else v.content.takeIf { it != "null" } ?: ""
-}
-
-private fun JsonObject.d(key: String): Double = (this[key] as? JsonPrimitive)?.content?.toDoubleOrNull() ?: 0.0
-
 /**
  * GET /api/library/albums/{id} (server/src/routes/library.rs `album`): the rows carry `requested_by`,
  * `requested_at` and `added_at`, which web/js/pages/library.js turns into the history line.
@@ -122,19 +102,19 @@ private fun loadAlbumPage(nav: Nav, id: String): AlbumPage {
     val tracks = rows.mapNotNull { Track.from(it) }
     val album = Album(
         id = id,
-        title = o.s("album").ifEmpty { "Unknown album" },
-        artist = o.s("albumartist"),
-        year = o.s("year").take(4),
+        title = o.str("album").ifEmpty { "Unknown album" },
+        artist = o.str("albumartist"),
+        year = o.str("year").take(4),
         trackCount = tracks.size,
         formats = tracks.map { it.format }.distinct().joinToString(","),
         titleTr = Tr.of(o, "album"),
         artistTr = Tr.of(o, "albumartist"),
     )
-    val detail = AlbumDetail(album, tracks, o.d("duration"))
+    val detail = AlbumDetail(album, tracks, o.dbl("duration"))
 
-    val requesters = rows.map { it.s("requested_by") }.filter { it.isNotEmpty() }.distinct().joinToString(", ")
-    val requestedAt = rows.map { it.d("requested_at") }.filter { it > 0 }.minOrNull()
-    val addedAt = rows.map { it.d("added_at") }.filter { it > 0 }.minOrNull()
+    val requesters = rows.map { it.str("requested_by") }.filter { it.isNotEmpty() }.distinct().joinToString(", ")
+    val requestedAt = rows.map { it.dbl("requested_at") }.filter { it > 0 }.minOrNull()
+    val addedAt = rows.map { it.dbl("added_at") }.filter { it > 0 }.minOrNull()
     val history = listOf(
         if (requesters.isNotEmpty()) "Requested by $requesters" + (if (requestedAt != null) " on ${formatDay(requestedAt)}" else "") else "",
         if (addedAt != null) (if (requesters.isNotEmpty()) "added " else "Added ") + formatDay(addedAt) else "",
@@ -142,13 +122,13 @@ private fun loadAlbumPage(nav: Nav, id: String): AlbumPage {
 
     val notes = HashMap<Long, String>()
     for (r in rows) {
-        val who = r.s("requested_by")
+        val who = r.str("requested_by")
         if (who.isEmpty()) continue
-        val at = r.d("requested_at")
-        val id2 = r.d("id").toLong()
+        val at = r.dbl("requested_at")
+        val id2 = r.dbl("id").toLong()
         notes[id2] = "requested by $who" + if (at > 0) " on ${formatDay(at)}" else ""
     }
-    return AlbumPage(detail, o.d("size").toLong(), history, notes)
+    return AlbumPage(detail, o.dbl("size").toLong(), history, notes)
 }
 
 @OptIn(ExperimentalMaterial3Api::class)
@@ -158,6 +138,8 @@ fun AlbumScreen(nav: Nav, albumId: String) {
     val liked by nav.graph.likes.liked.collectAsState()
     val nowPlaying by nav.player.nowPlaying.collectAsState()
     val loader = rememberLoad(albumId) { loadAlbumPage(nav, albumId) }
+    // "Download for offline" / "Remove download" (features/offline)
+    val offlineMenu = rememberOfflineMenu(nav)
     val p = MaterialTheme.palette
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
@@ -244,6 +226,7 @@ fun AlbumScreen(nav: Nav, albumId: String) {
                                     MenuEntry("Add to queue", R.drawable.ic_queue_music) { tracks.forEach { nav.player.addToQueue(it) }; Toasts.show("Added to queue", "ok") },
                                     MenuEntry("Play next", R.drawable.ic_skip_next) { tracks.asReversed().forEach { nav.player.playNext(it) }; Toasts.show("Plays next", "ok") },
                                     MenuEntry("Add to playlist", R.drawable.ic_playlist_add) { nav.addToPlaylist(tracks.map { it.id }) },
+                                    *offlineMenu.entries(tracks).toTypedArray(),
                                     MenuEntry("Share link", R.drawable.ic_share) { shareAlbum(album.title, album.artist) },
                                     MenuEntry("Report a problem", R.drawable.ic_flag) { ReportUi.album(albumId, album.title) { nav.back() } },
                                 ),
@@ -278,97 +261,6 @@ fun AlbumScreen(nav: Nav, albumId: String) {
                     )
                 }
                 item { Spacer(Modifier.height(24.dp)) }
-            }
-        }
-    }
-}
-
-// ---- artist ----------------------------------------------------------------------------------------------------
-
-/** An artist in the library: a round portrait, the counts and their albums (the web's artist page header + grid). */
-@OptIn(ExperimentalMaterial3Api::class)
-@Composable
-fun ArtistScreen(nav: Nav, name: String) {
-    val api = nav.graph.api
-    val loader = rememberLoad(name) { api.albums(sort = "released", artist = name, limit = 200) }
-    val grid = rememberLazyGridState()
-    val sections = rememberLibraryIndex(api, "albums", "released", artist = name)
-    val p = MaterialTheme.palette
-    val context = LocalContext.current
-    val scope = rememberCoroutineScope()
-    val scrollBehavior = TopAppBarDefaults.enterAlwaysScrollBehavior()
-    // GET /api/library/artist-tracks?name= (every spelling, alias and collaboration of this artist), then play
-    fun playAll(shuffle: Boolean) {
-        scope.launch {
-            val songs = try { withContext(Dispatchers.IO) { api.artistTracks(name) } } catch (e: Exception) { Toasts.show(e.message ?: "Couldn't load the songs", "err"); return@launch }
-            if (songs.isEmpty()) Toasts.show("Nothing by this artist in your library", "err") else nav.player.play(songs, shuffle = shuffle)
-        }
-    }
-    Scaffold(
-        modifier = Modifier.fillMaxSize().nestedScroll(scrollBehavior.nestedScrollConnection),
-        containerColor = p.bg,
-        contentWindowInsets = WindowInsets(0, 0, 0, 0),
-        topBar = {
-            EncoreTopBar(name, scrollBehavior = scrollBehavior, onBack = nav.back) {
-                IconButton(onClick = {
-                    shareLinkOf(
-                        context, scope,
-                        subject = name,
-                        text = name,
-                        toast = "Link copied – anyone with it can play this artist",
-                    ) { api.shareArtistLink(name) }
-                }) {
-                    Icon(painterResource(R.drawable.ic_share), contentDescription = "Share link")
-                }
-            }
-        },
-    ) { padding ->
-        LoadableContent(loader) { albums ->
-            val songs = albums.sumOf { it.trackCount }
-            Box(Modifier.fillMaxSize().padding(padding)) {
-                LazyVerticalGrid(
-                    columns = GridCells.Adaptive(140.dp),
-                    state = grid,
-                    modifier = Modifier.fillMaxSize(),
-                    contentPadding = PaddingValues(start = Gutter, end = Gutter, bottom = 24.dp),
-                    horizontalArrangement = Arrangement.spacedBy(14.dp),
-                    verticalArrangement = Arrangement.spacedBy(14.dp),
-                ) {
-                    item(span = { GridItemSpan(maxLineSpan) }) {
-                        Column(Modifier.fillMaxWidth().padding(bottom = 8.dp), horizontalAlignment = Alignment.CenterHorizontally) {
-                            RoundCover(
-                                albums.firstOrNull()?.let { api.coverUrl(it.id, 400) },
-                                nav.graph.imageLoader,
-                                size = 140.dp,
-                                label = name,
-                            )
-                            Spacer(Modifier.height(14.dp))
-                            Text("ARTIST · IN YOUR LIBRARY", style = MaterialTheme.typography.labelSmall, color = p.muted, letterSpacing = 1.2.sp)
-                            Text(name, style = MaterialTheme.typography.headlineMedium, textAlign = TextAlign.Center, modifier = Modifier.padding(top = 6.dp))
-                            Text(
-                                "${albums.size} album${if (albums.size == 1) "" else "s"} · $songs tracks",
-                                style = MaterialTheme.typography.bodyMedium,
-                                color = p.muted,
-                                modifier = Modifier.padding(top = 2.dp),
-                            )
-                            // the catalog artist page's Play / Shuffle
-                            Row(Modifier.padding(top = 14.dp, bottom = 10.dp), horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
-                                EncoreButton("Play", iconRes = R.drawable.ic_play, primary = true) { playAll(false) }
-                                EncoreButton("Shuffle", iconRes = R.drawable.ic_shuffle) { playAll(true) }
-                            }
-                        }
-                    }
-                    items(albums, key = { it.id }) { a ->
-                        AlbumCard(a, api.coverUrl(a.id, 400), nav.graph.imageLoader) { nav.open(Screen.Album(a.id)) }
-                    }
-                }
-                // years, newest first (the header is item 0)
-                FastScroller(
-                    sections.filter { it.offset < albums.size },
-                    rememberScrollerTarget(grid, header = 1),
-                    extent = albums.size,
-                    modifier = Modifier.align(Alignment.CenterEnd),
-                )
             }
         }
     }

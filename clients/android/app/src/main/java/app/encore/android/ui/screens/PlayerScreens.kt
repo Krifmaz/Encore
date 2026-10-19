@@ -57,6 +57,7 @@ import app.encore.android.remote.DevicesButton
 import app.encore.android.remote.LinkedVolume
 import app.encore.android.ui.Nav
 import app.encore.android.ui.Screen
+import app.encore.android.features.offline.rememberOfflineMenu
 import app.encore.android.ui.components.Badge
 import app.encore.android.ui.components.Cover
 import app.encore.android.ui.components.LikeButton
@@ -191,6 +192,8 @@ fun FullPlayer(nav: Nav, actions: PlayerMenuActions, onClose: () -> Unit) {
     val shuffle by nav.player.shuffle.collectAsState()
     val repeat by nav.player.repeat.collectAsState()
     val p = MaterialTheme.palette
+    // "Download for offline" / "Remove download" for the song (features/offline); not while this phone is a remote
+    val offlineMenu = rememberOfflineMenu(nav)
     var dragging by remember { mutableStateOf<Float?>(null) }
     val coverUrl = if (track.albumId.isNotEmpty()) nav.graph.api.coverUrl(track.albumId, 1000) else null
 
@@ -369,6 +372,7 @@ fun FullPlayer(nav: Nav, actions: PlayerMenuActions, onClose: () -> Unit) {
                         MenuEntry("Lyrics", R.drawable.ic_lyrics) { actions.lyrics() },
                         MenuEntry("Share link", R.drawable.ic_share) { actions.shareLink() },
                         MenuEntry("Signal path", R.drawable.ic_signal) { actions.signalPath() },
+                        *(if (link == null) offlineMenu.entries(listOf(track)) else emptyList()).toTypedArray(),
                     ),
                     tint = p.text,
                 )

@@ -41,10 +41,9 @@
 -dontwarn org.bouncycastle.**
 -dontwarn org.openjsse.**
 
-# ---- JNI (Cadenza, from M2 on) ----
+# ---- JNI (Cadenza) ----
+# The engine is referenced directly (no reflection); the JNI class itself is kept by the :cadenza module's
+# consumer-rules.pro, and native methods by this rule.
 -keepclasseswithmembernames class * {
     native <methods>;
 }
-# DspEngines.create() finds the Cadenza engine by name (Class.forName + no-arg constructor); nothing references it
-# statically, so without this R8 strips it and every release build silently falls back to the Kotlin DSP.
--keep class app.encore.android.cadenza.CadenzaEngine { public <init>(); }
