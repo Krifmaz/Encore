@@ -1,6 +1,8 @@
 package app.encore.android.ui.components
 
+import android.provider.Settings
 import androidx.compose.foundation.background
+import androidx.compose.foundation.basicMarquee
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.horizontalScroll
@@ -46,6 +48,7 @@ import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.hapticfeedback.HapticFeedbackType
 import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalHapticFeedback
 import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.text.AnnotatedString
@@ -72,6 +75,19 @@ import java.util.Locale
 
 /** The web's phone gutter (`.main { padding: 16px }`). */
 val Gutter: Dp = 16.dp
+
+// ---- scrolling titles ------------------------------------------------------------------------------------------
+
+/** False when the phone's animations are off (Accessibility → Remove animations); titles then end in "…". */
+@Composable
+fun rememberMotionOn(): Boolean {
+    val ctx = LocalContext.current
+    return remember(ctx) { Settings.Global.getFloat(ctx.contentResolver, Settings.Global.ANIMATOR_DURATION_SCALE, 1f) != 0f }
+}
+
+/** A title too long for its line scrolls sideways, pausing at the start each time round; one that fits stays still. */
+fun Modifier.scrollingTitle(on: Boolean): Modifier =
+    if (on) basicMarquee(iterations = Int.MAX_VALUE, initialDelayMillis = 1500, repeatDelayMillis = 2500, velocity = 32.dp) else this
 
 // ---- loading ---------------------------------------------------------------------------------------------------
 

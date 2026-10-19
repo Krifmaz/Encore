@@ -85,6 +85,8 @@ import app.encore.android.ui.components.MoreButton
 import app.encore.android.ui.components.PlayerMenuActions
 import app.encore.android.ui.components.Toasts
 import app.encore.android.ui.components.formatDuration
+import app.encore.android.ui.components.rememberMotionOn
+import app.encore.android.ui.components.scrollingTitle
 import app.encore.android.ui.theme.palette
 import coil3.compose.AsyncImage
 
@@ -174,8 +176,9 @@ fun MiniPlayer(nav: Nav, onOpen: () -> Unit) {
             )
             Spacer(Modifier.width(12.dp))
             Column(Modifier.weight(1f)) {
-                Text(track.shownTitle(), style = MaterialTheme.typography.bodyMedium, fontWeight = FontWeight.SemiBold, maxLines = 1, overflow = TextOverflow.Ellipsis)
-                Text(track.shownArtist(), style = MaterialTheme.typography.bodySmall, color = p.muted, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                val motion = rememberMotionOn()
+                Text(track.shownTitle(), style = MaterialTheme.typography.bodyMedium, fontWeight = FontWeight.SemiBold, maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.scrollingTitle(motion))
+                Text(track.shownArtist(), style = MaterialTheme.typography.bodySmall, color = p.muted, maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.scrollingTitle(motion))
             }
             DevicesButton(nav, tint = p.muted)
             IconButton(onClick = { nav.player.togglePlay() }) {
@@ -290,8 +293,9 @@ fun FullPlayer(nav: Nav, actions: PlayerMenuActions, onClose: () -> Unit) {
                             verticalAlignment = Alignment.CenterVertically,
                         ) {
                             Column(Modifier.weight(1f)) {
-                                Text(track.shownTitle(), style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold, maxLines = 1, overflow = TextOverflow.Ellipsis)
-                                Text(track.shownArtist(), style = MaterialTheme.typography.bodySmall, color = p.muted, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                                val motion = rememberMotionOn()
+                                Text(track.shownTitle(), style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold, maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.scrollingTitle(motion))
+                                Text(track.shownArtist(), style = MaterialTheme.typography.bodySmall, color = p.muted, maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.scrollingTitle(motion))
                             }
                             IconButton(onClick = { nav.player.togglePlay() }) {
                                 Icon(
@@ -340,14 +344,17 @@ fun FullPlayer(nav: Nav, actions: PlayerMenuActions, onClose: () -> Unit) {
                 Column(Modifier.fillMaxWidth()) {
                     // .np-meta
                     Column(Modifier.fillMaxWidth().padding(horizontal = 28.dp), horizontalAlignment = Alignment.CenterHorizontally) {
+                        // a title too long for the line scrolls sideways instead of ending in "…"
+                        val motion = rememberMotionOn()
                         Text(
                             track.shownTitle(),
                             style = MaterialTheme.typography.headlineSmall,
                             textAlign = TextAlign.Center,
                             maxLines = 1,
                             overflow = TextOverflow.Ellipsis,
+                            modifier = Modifier.scrollingTitle(motion),
                         )
-                        track.titleUnder()?.let { Text(it, style = MaterialTheme.typography.bodyMedium, color = p.muted, textAlign = TextAlign.Center, maxLines = 1, overflow = TextOverflow.Ellipsis) }
+                        track.titleUnder()?.let { Text(it, style = MaterialTheme.typography.bodyMedium, color = p.muted, textAlign = TextAlign.Center, maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.scrollingTitle(motion)) }
                         // each artist and the album open their pages (closing the player)
                         Text(
                             rememberSongLinks(nav, track, before = onClose),
@@ -356,7 +363,7 @@ fun FullPlayer(nav: Nav, actions: PlayerMenuActions, onClose: () -> Unit) {
                             textAlign = TextAlign.Center,
                             maxLines = 1,
                             overflow = TextOverflow.Ellipsis,
-                            modifier = Modifier.padding(top = 4.dp),
+                            modifier = Modifier.padding(top = 4.dp).scrollingTitle(motion),
                         )
                         val q = badge
                         if (!q.isNullOrEmpty()) {
