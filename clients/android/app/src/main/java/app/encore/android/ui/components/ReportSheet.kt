@@ -42,13 +42,16 @@ import kotlinx.serialization.json.put
  * blocks the source the file came from, moves it to the trash and gets the music again from somewhere else.
  */
 object ReportUi {
-    /** kind "track" (id = track id) or "album" (id = album id). */
-    class Request(val kind: String, val id: String, val title: String, val onDone: (() -> Unit)? = null)
+    /** kind "track" (id = track id) or "album" (id = album id); [reason] is ticked to start with ("" for none). */
+    class Request(val kind: String, val id: String, val title: String, val onDone: (() -> Unit)? = null, val reason: String = "")
 
     private val _open = MutableStateFlow<Request?>(null)
     val open: StateFlow<Request?> = _open
 
     fun track(id: Long, title: String, onDone: (() -> Unit)? = null) { _open.value = Request("track", id.toString(), title, onDone) }
+
+    /** Settings → Blocked → Replace: the reason the quality check suggests is ticked to start with. */
+    fun track(id: Long, title: String, reason: String, onDone: (() -> Unit)?) { _open.value = Request("track", id.toString(), title, onDone, reason) }
     fun album(id: String, title: String, onDone: (() -> Unit)? = null) { _open.value = Request("album", id, title, onDone) }
     fun close() { _open.value = null }
 }
@@ -77,7 +80,7 @@ private fun ReportSheet(nav: Nav, req: ReportUi.Request, onDismiss: () -> Unit) 
     val p = MaterialTheme.palette
     val scope = rememberCoroutineScope()
     val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
-    var reason by remember { mutableStateOf("") }
+    var reason by remember(req) { mutableStateOf(req.reason) }
     var note by remember { mutableStateOf("") }
     var busy by remember { mutableStateOf(false) }
     val what = if (req.kind == "album") "album" else "song"

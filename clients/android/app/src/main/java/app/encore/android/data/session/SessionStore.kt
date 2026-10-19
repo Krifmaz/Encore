@@ -15,6 +15,8 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
+import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.JsonPrimitive
 import java.util.UUID
 
 /** How requests are authenticated: a bearer app token (server feature `app_tokens`) or the web session cookie. */
@@ -23,9 +25,29 @@ enum class AuthKind { BEARER, COOKIE }
 /** A signed-in server. `server` is the base URL without a trailing slash. */
 data class Session(val server: String, val token: String, val kind: AuthKind, val username: String)
 
-enum class ThemeChoice { ENCORE, OLED, LIGHT }
+/** Settings → Appearance → Theme (the web's `theme`: encore, dark, oled, light, system = Match device). */
+enum class ThemeChoice(val id: String) {
+    ENCORE("encore"), DARK("dark"), OLED("oled"), LIGHT("light"), SYSTEM("system");
 
-data class Settings(val theme: ThemeChoice = ThemeChoice.ENCORE, val autoplay: Boolean = true)
+    companion object {
+        fun of(id: String?): ThemeChoice = entries.firstOrNull { it.id == id } ?: ENCORE
+    }
+}
+
+/**
+ * The app's own settings. [theme], [accent], [custom] and [background] are the web's appearance keys (Settings →
+ * Appearance, account prefs `appearance`): kept on this device and synced with the account.
+ */
+data class Settings(
+    val theme: ThemeChoice = ThemeChoice.ENCORE,
+    val autoplay: Boolean = true,
+    /** an accent id (logo, violet, encore, lilac, pink, sky, teal, green, amber, red) or "custom" */
+    val accent: String = "logo",
+    /** the custom accent colour, "#rrggbb" */
+    val custom: String = "#f0ead6",
+    /** "solid" or "fade" (a faint wash of the accent colour) */
+    val background: String = "solid",
+)
 
 /** Where the app is: still reading the store, signed out, or signed in. */
 sealed interface AuthState {
@@ -82,12 +104,13 @@ class SessionStore(context: Context, private val scope: CoroutineScope) {
         val s = if (server.isNotEmpty() && token.isNotEmpty()) Session(server, token, kind, p[USERNAME] ?: "") else null
         current = s
         _auth.value = if (s != null) AuthState.SignedIn(s) else AuthState.SignedOut
-        val theme = when (p[THEME]) {
-            "oled" -> ThemeChoice.OLED
-            "light" -> ThemeChoice.LIGHT
-            else -> ThemeChoice.ENCORE
-        }
-        _settings.value = Settings(theme = theme, autoplay = p[AUTOPLAY] ?: true)
+        _settings.value = Settings(
+            theme = ThemeChoice.of(p[THEME]),
+            autoplay = p[AUTOPLAY] ?: true,
+            accent = p[ACCENT] ?: "logo",
+            custom = p[CUSTOM] ?: "#f0ead6",
+            background = if (p[BACKGROUND] == "fade") "fade" else "solid",
+        )
         _servers.value = (p[SERVERS] ?: emptySet()).sorted()
         val id = p[DEVICE_ID]
         if (id.isNullOrEmpty()) {
@@ -139,7 +162,37 @@ class SessionStore(context: Context, private val scope: CoroutineScope) {
     }
 
     fun setTheme(theme: ThemeChoice) {
-        scope.launch { store.edit { it[THEME] = theme.name.lowercase() } }
+        scope.launch { store.edit { it[THEME] = theme.id } }
+    }
+
+    /**
+     * After sign-in / on start: the account's look (`prefs.appearance`, the web's keys) wins over this device's,
+     * as the web's `adoptAccount` does. Nothing changes when the account has none.
+     */
+    fun adoptAppearance(a: JsonObject?) {
+        if (a == null) return
+        fun s(k: String): String? = (a[k] as? JsonPrimitive)?.takeIf { it.isString }?.content
+        val cur = _settings.value
+        val theme = s("theme")?.let { ThemeChoice.of(it) } ?: cur.theme
+        val accent = s("accent")?.takeIf { it.isNotEmpty() } ?: cur.accent
+        val custom = s("custom")?.takeIf { it.startsWith("#") } ?: cur.custom
+        val background = s("background")?.let { if (it == "fade") "fade" else "solid" } ?: cur.background
+        if (theme != cur.theme || accent != cur.accent || custom != cur.custom || background != cur.background) {
+            setAppearance(theme, accent, custom, background)
+        }
+    }
+
+    /** The whole look at once (Settings → Appearance, or the account's `prefs.appearance` after sign-in). */
+    fun setAppearance(theme: ThemeChoice, accent: String, custom: String, background: String) {
+        _settings.value = _settings.value.copy(theme = theme, accent = accent, custom = custom, background = background)
+        scope.launch {
+            store.edit {
+                it[THEME] = theme.id
+                it[ACCENT] = accent
+                it[CUSTOM] = custom
+                it[BACKGROUND] = background
+            }
+        }
     }
 
     fun setAutoplay(on: Boolean) {
@@ -154,6 +207,9 @@ class SessionStore(context: Context, private val scope: CoroutineScope) {
         val SERVERS = stringSetPreferencesKey("servers")
         val DEVICE_ID = stringPreferencesKey("device_id")
         val THEME = stringPreferencesKey("theme")
+        val ACCENT = stringPreferencesKey("accent")
+        val CUSTOM = stringPreferencesKey("accent_custom")
+        val BACKGROUND = stringPreferencesKey("background")
         val AUTOPLAY = booleanPreferencesKey("autoplay")
     }
 }

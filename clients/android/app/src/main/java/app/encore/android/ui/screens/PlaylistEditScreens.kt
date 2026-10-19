@@ -300,16 +300,17 @@ fun PlaylistEditScreen(nav: Nav, id: Long) {
 
 /**
  * playlists.js `importModal`: a playlist from a link or a pasted list, with a preview; `into` adds the songs to an
- * existing playlist ("Add tracks from a link") instead of making a new one.
+ * existing playlist ("Add tracks from a link") instead of making a new one; [startUrl] fills the link in.
  */
 @OptIn(ExperimentalMaterial3Api::class, ExperimentalLayoutApi::class)
 @Composable
-fun PlaylistImportScreen(nav: Nav, into: Long?) {
+fun PlaylistImportScreen(nav: Nav, into: Long?, startUrl: String = "") {
     val features = nav.features
     val p = MaterialTheme.palette
     val scope = rememberCoroutineScope()
     var mode by remember { mutableStateOf(0) }
-    var url by remember { mutableStateOf("") }
+    // Settings → Connections → Import Liked Songs opens this with the service's liked-songs link filled in
+    var url by remember { mutableStateOf(startUrl) }
     var text by remember { mutableStateOf("") }
     var name by remember { mutableStateOf("") }
     var follow by remember { mutableStateOf(false) }

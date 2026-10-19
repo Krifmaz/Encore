@@ -20,6 +20,8 @@ import app.encore.android.features.group.GroupListen
 import app.encore.android.features.update.Updater
 import app.encore.android.graph
 import app.encore.android.ui.theme.EncoreTheme
+import app.encore.android.ui.theme.isDarkTheme
+import androidx.compose.foundation.isSystemInDarkTheme
 
 class MainActivity : ComponentActivity() {
     private lateinit var appGraph: AppGraph
@@ -32,7 +34,7 @@ class MainActivity : ComponentActivity() {
         super.onCreate(savedInstanceState)
         appGraph = graph
         player = PlayerConnection(applicationContext, appGraph.api)
-        applySystemBars(appGraph.store.settings.value.theme)
+        applySystemBars(appGraph.store.settings.value.theme != ThemeChoice.LIGHT)
         askForNotifications()
         // the app's own update: at most once a day, when "Look for a new version when Encore starts" is on
         Updater.checkAtStart(this)
@@ -40,8 +42,10 @@ class MainActivity : ComponentActivity() {
         if (savedInstanceState == null) handleIntent(intent)
         setContent {
             val settings by appGraph.store.settings.collectAsState()
-            LaunchedEffect(settings.theme) { applySystemBars(settings.theme) }
-            EncoreTheme(settings.theme) {
+            // Match device follows the system's dark mode
+            val dark = isDarkTheme(settings, isSystemInDarkTheme())
+            LaunchedEffect(dark) { applySystemBars(dark) }
+            EncoreTheme(settings) {
                 EncoreRoot(appGraph, player)
             }
         }
@@ -73,8 +77,8 @@ class MainActivity : ComponentActivity() {
         super.onStop()
     }
 
-    private fun applySystemBars(theme: ThemeChoice) {
-        val style = if (theme == ThemeChoice.LIGHT) {
+    private fun applySystemBars(dark: Boolean) {
+        val style = if (!dark) {
             SystemBarStyle.light(Color.TRANSPARENT, Color.TRANSPARENT)
         } else {
             SystemBarStyle.dark(Color.TRANSPARENT)

@@ -2,6 +2,7 @@ package app.encore.android.ui.screens
 
 import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.background
+import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -23,9 +24,7 @@ import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
-import androidx.compose.material3.RadioButton
 import androidx.compose.material3.Slider
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
@@ -33,15 +32,19 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
+import androidx.compose.runtime.mutableIntStateOf
+import androidx.compose.runtime.mutableStateListOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.key
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.rotate
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.text.font.FontWeight
@@ -56,146 +59,229 @@ import app.encore.android.data.prefs.NormPrefs
 import app.encore.android.data.prefs.PlaybackPrefs
 import app.encore.android.playback.Normalization
 import app.encore.android.data.prefs.Quality
-import app.encore.android.data.session.AuthKind
+import app.encore.android.core.long
+import app.encore.android.core.str
+import app.encore.android.data.api.settingsApi
 import app.encore.android.data.session.Session
-import app.encore.android.data.session.ThemeChoice
+import app.encore.android.features.files.FilesAccess
+import app.encore.android.features.settings.AppearanceScreen
+import app.encore.android.features.settings.AutoDownloadScreen
+import app.encore.android.features.settings.BlockedScreen
+import app.encore.android.features.settings.ConnectionsScreen
+import app.encore.android.features.settings.ContributeScreen
+import app.encore.android.features.settings.DiagnosticsScreen
+import app.encore.android.features.settings.InvitesScreen
+import app.encore.android.features.settings.LanguageScreen
+import app.encore.android.features.settings.SECTION_TITLES
+import app.encore.android.features.settings.SchemaFormState
+import app.encore.android.features.settings.ServerSchema
+import app.encore.android.features.settings.ServerSectionScreen
+import app.encore.android.features.settings.SettingsRules
+import app.encore.android.features.settings.ThisDeviceScreen
+import app.encore.android.features.settings.UsersScreen
+import app.encore.android.features.settings.appearanceSummary
+import app.encore.android.features.settings.loadState
+import app.encore.android.features.settings.schemaApi
+import app.encore.android.ui.components.Badge
 import app.encore.android.cadenza.CadenzaCatalog
 import app.encore.android.cadenza.CadenzaEngine
-import app.encore.android.features.bugs.BugReportsEntry
-import app.encore.android.features.offline.OfflineStorageSection
-import app.encore.android.features.update.UpdatesSection
 import app.encore.android.playback.CarPrefs
-import app.encore.android.playback.ResumeStore
 import app.encore.android.playback.output.DeviceOutput
 import app.encore.android.playback.output.UsbOutputManager
-import app.encore.android.remote.RemoteDevice
-import app.encore.android.remote.RemoteUi
 import app.encore.android.ui.Nav
-import app.encore.android.ui.components.SectionTitle
 import app.encore.android.ui.theme.palette
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import kotlinx.serialization.json.JsonArray
+import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.JsonPrimitive
 
+/**
+ * Settings: the web's sections in the web's order (web-rs/src/settings/mod.rs), as a list that opens one page at a
+ * time. You – Account, Appearance, Language, Playback, Connections and This device (the phone's own); for admins
+ * also People – Users & permissions, Invites; Server – the pages of the server's settings schema (General, Apps &
+ * sources, Email & notifications, Auto-download, Contribute, Blocked, Scheduled tasks) and Files; System –
+ * Diagnostics. The schema and its values are asked for once when Settings opens, so what was typed on a Server page
+ * and not saved yet is still there after going to another page and back.
+ */
 @Composable
 fun SettingsScreen(nav: Nav, session: Session) {
-    val store = nav.graph.store
-    val settings by store.settings.collectAsState()
-    val prefs by nav.graph.prefs.playback.collectAsState()
-    val scope = rememberCoroutineScope()
-    val context = LocalContext.current
+    val graph = nav.graph
+    val api = graph.settingsApi
     val p = MaterialTheme.palette
-    var showPlayback by remember { mutableStateOf(false) }
+    val settings by graph.store.settings.collectAsState()
+    val prefs by graph.prefs.playback.collectAsState()
+    // the pages opened from the list (and from one page to another: Users → Invites), the top one shown
+    val pages = remember { mutableStateListOf<String>() }
+    var focus by remember { mutableStateOf<String?>(null) }
+    var me by remember { mutableStateOf<JsonObject?>(null) }
+    var info by remember { mutableStateOf<JsonObject?>(null) }
+    var schemaVersion by remember { mutableIntStateOf(0) }
+    var schemaState by remember { mutableStateOf<SchemaFormState?>(null) }
+    var schemaError by remember { mutableStateOf<String?>(null) }
+    var update by remember { mutableStateOf<JsonObject?>(null) }
+    val filesHere by FilesAccess.available.collectAsState()
 
-    if (showPlayback) {
-        PlaybackSettingsScreen(nav, onBack = { showPlayback = false })
+    LaunchedEffect(session) {
+        try {
+            val (m, i) = withContext(Dispatchers.IO) { api.me() to (try { api.info() } catch (_: Exception) { JsonObject(emptyMap()) }) }
+            me = m
+            info = i
+        } catch (e: CancellationException) {
+            throw e
+        } catch (_: Exception) {
+            me = JsonObject(emptyMap())
+        }
+    }
+    val role = me?.str("role").orEmpty()
+    val admin = role == "admin" || role == "owner"
+    val features = info?.get("features")?.let { el -> (el as? JsonArray)?.mapNotNull { (it as? JsonPrimitive)?.content } } ?: emptyList()
+    // Show and Copy of saved secrets: the server's route is the owner's (and needs its "reveal" feature)
+    val canReveal = "reveal" in features && role == "owner"
+    LaunchedEffect(admin, canReveal, schemaVersion) {
+        if (!admin) return@LaunchedEffect
+        schemaError = null
+        try {
+            schemaState = withContext(Dispatchers.IO) { graph.schemaApi.loadState(canReveal) }
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            schemaError = e.message ?: "Something went wrong"
+        }
+    }
+    LaunchedEffect(admin) {
+        if (!admin) return@LaunchedEffect
+        FilesAccess.probe(graph)
+        // the banner: the server's kept check for a newer Encore (GitHub is asked only when that check is old)
+        update = try { withContext(Dispatchers.IO) { api.serverUpdate(false) } } catch (e: CancellationException) { throw e } catch (_: Exception) { null }
+    }
+    val schema = schemaState?.schema
+    // a key saved outside the schema cards (Invites' sign-up mode, a tool switch, a task's cleanup) shows on its card too
+    val mainScope = rememberCoroutineScope()
+    DisposableEffect(schemaState) {
+        val st = schemaState
+        api.onSettingsSaved = if (st == null) null else { v -> mainScope.launch { st.replaceValues(v) } }
+        onDispose { api.onSettingsSaved = null }
+    }
+
+    fun open(id: String) {
+        // a card's id (old links name cards) opens its page with that card open
+        val page = schema?.pageOf(id) ?: id
+        focus = if (page != id) id else null
+        pages.add(page)
+    }
+    val back: () -> Unit = { if (pages.isNotEmpty()) pages.removeAt(pages.lastIndex); focus = null }
+
+    val page = pages.lastOrNull()
+    if (page != null) {
+        BackHandler(onBack = back)
+        val server = ServerSchema(schemaState, schemaError) { schemaVersion += 1 }
+        // one page's state never carries over to the next (Users → Invites, Auto-download → Apps & sources)
+        key(page, pages.size) { when (page) {
+            "account" -> AccountScreen(nav, session, onBack = back)
+            "appearance" -> AppearanceScreen(nav, serverPrefs = "theme" in features, onBack = back)
+            "language" -> LanguageScreen(nav, onBack = back)
+            "playback" -> PlaybackSettingsScreen(nav, onBack = back)
+            "connections" -> ConnectionsScreen(nav, admin, onBack = back)
+            "device" -> ThisDeviceScreen(nav, onBack = back)
+            "users" -> UsersScreen(nav, me?.long("id") ?: 0L, onBack = back, onOpenInvites = { open("invites") })
+            "invites" -> InvitesScreen(nav, onBack = back)
+            "autodownload" -> AutoDownloadScreen(nav, onBack = back, onOpen = { open(it) })
+            "contribute" -> ContributeScreen(nav, onBack = back)
+            "blocked" -> BlockedScreen(nav, admin, onBack = back)
+            "diagnostics" -> DiagnosticsScreen(nav, onBack = back)
+            else -> ServerSectionScreen(page, server, graph.schemaApi, api, info, focus, onBack = back, onOpen = { open(it) })
+        } }
         return
     }
 
     Column(Modifier.fillMaxSize()) {
         BackBar("Settings", nav.back)
         Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState())) {
-            SectionTitle("Account")
-            Column(Modifier.padding(horizontal = 16.dp)) {
-                Text(session.username, style = MaterialTheme.typography.bodyLarge)
-                Text(session.server, style = MaterialTheme.typography.bodySmall, color = p.muted)
-                Text(
-                    if (session.kind == AuthKind.BEARER) "Signed in with an app token" else "Signed in with a web session (expires after 30 days)",
-                    style = MaterialTheme.typography.bodySmall,
-                    color = p.muted,
-                )
-                Spacer(Modifier.height(12.dp))
-                OutlinedButton(onClick = {
-                    nav.player.stopAndClear()
-                    ResumeStore(context).clear()
-                    scope.launch {
-                        withContext(Dispatchers.IO) { nav.graph.api.logout() }
-                        nav.graph.likes.clear()
-                        nav.graph.prefs.clear()
-                        store.signOut()
-                    }
-                }) { Text("Sign out") }
-            }
-
-            SectionTitle("Appearance")
-            ThemeOption("Encore (charcoal and cream)", settings.theme == ThemeChoice.ENCORE) { store.setTheme(ThemeChoice.ENCORE) }
-            ThemeOption("OLED black", settings.theme == ThemeChoice.OLED) { store.setTheme(ThemeChoice.OLED) }
-            ThemeOption("Light", settings.theme == ThemeChoice.LIGHT) { store.setTheme(ThemeChoice.LIGHT) }
-
-            SectionTitle("Playback")
-            Row(
-                Modifier.fillMaxWidth().clickable { showPlayback = true }.padding(horizontal = 16.dp, vertical = 10.dp),
-                verticalAlignment = Alignment.CenterVertically,
-            ) {
-                Column(Modifier.weight(1f)) {
-                    Text("Playback")
-                    Text(
-                        playbackSummary(prefs),
-                        style = MaterialTheme.typography.bodySmall,
-                        color = p.muted,
-                    )
+            // admins: the server's last check found a newer Encore ("Encore 0.31.0 is available – Diagnostics")
+            val u = update
+            if (admin && u != null && SettingsRules.truthy(u["is_newer"]) && u.str("latest").isNotEmpty()) {
+                Row(
+                    Modifier
+                        .fillMaxWidth()
+                        .padding(horizontal = 16.dp, vertical = 6.dp)
+                        .clip(RoundedCornerShape(12.dp))
+                        .background(p.panel)
+                        .border(1.dp, p.border, RoundedCornerShape(12.dp))
+                        .clickable { open("diagnostics") }
+                        .padding(horizontal = 14.dp, vertical = 10.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    Badge("Update", kind = "info")
+                    Spacer(Modifier.width(8.dp))
+                    Text("Encore ${u.str("latest")} is available – Diagnostics", style = MaterialTheme.typography.bodySmall)
                 }
-                Icon(painterResource(R.drawable.ic_expand_more), contentDescription = null, tint = p.muted)
             }
-
-            // admins: Settings → Server → Files (the file manager, 0.33; hidden on older servers)
-            app.encore.android.features.files.FilesEntry(nav) { nav.open(app.encore.android.ui.Screen.Files) }
-
-            SectionTitle("This device")
-            DeviceNameRow(nav)
-            // songs saved on this phone: the room they take, per-album remove, Remove all (features/offline)
-            OfflineStorageSection(nav)
-            UpdatesSection()
-            // the reports to the admin, with the count of those that have something new (features/bugs)
-            BugReportsEntry(nav)
-
-            SectionTitle("About")
+            NavLabel("You")
+            // which server this phone is signed in to (This device has the whole address and how)
+            NavRow("Account", "${session.username} · ${session.server.substringAfter("://")}") { open("account") }
+            NavRow("Appearance", appearanceSummary(settings)) { open("appearance") }
+            NavRow("Language") { open("language") }
+            NavRow("Playback", playbackSummary(prefs)) { open("playback") }
+            NavRow("Connections") { open("connections") }
+            NavRow("This device") { open("device") }
+            if (admin) {
+                NavLabel("People")
+                NavRow("Users & permissions") { open("users") }
+                NavRow("Invites") { open("invites") }
+                NavLabel("Server")
+                val sections = schema?.sections?.map { it.id to it.title } ?: SERVER_PAGES.map { it to (SECTION_TITLES[it] ?: it) }
+                for ((id, title) in sections) NavRow(title) { open(id) }
+                // the admin file manager (features/files, 0.33; not on older servers)
+                if (filesHere == true) NavRow("Files") { nav.open(app.encore.android.ui.Screen.Files) }
+                NavLabel("System")
+                NavRow("Diagnostics", badge = if (u != null && SettingsRules.truthy(u["is_newer"]) && u.str("latest").isNotEmpty()) "Update" else null) { open("diagnostics") }
+            }
             Text(
                 "Encore for Android ${BuildConfig.VERSION_NAME} (${BuildConfig.VERSION_CODE})",
                 style = MaterialTheme.typography.bodySmall,
                 color = p.muted,
-                modifier = Modifier.padding(horizontal = 16.dp),
+                modifier = Modifier.padding(start = 16.dp, end = 16.dp, top = 24.dp),
             )
             Spacer(Modifier.height(32.dp))
         }
     }
 }
 
-/**
- * The name your other devices see this phone under (web/js/remote.js `encore.device.name`; empty = the default
- * "Android app (<model>)"), and the Devices sheet.
- */
+/** The Server pages when the schema has not loaded (an older server, or an error): the web's ids and order. */
+private val SERVER_PAGES = listOf("general", "apps", "accounts", "autodownload", "contribute", "blocked", "tasks")
+
+/** A group label of the list (the web's `.nav-label`). */
 @Composable
-private fun DeviceNameRow(nav: Nav) {
-    val remote = nav.player.remote
-    val custom by remote.customName.collectAsState()
+private fun NavLabel(text: String) {
+    Text(
+        text.uppercase(),
+        style = MaterialTheme.typography.labelSmall,
+        fontWeight = FontWeight.SemiBold,
+        color = MaterialTheme.palette.muted,
+        modifier = Modifier.padding(start = 16.dp, end = 16.dp, top = 20.dp, bottom = 4.dp),
+    )
+}
+
+/** One page of the list: its title, a line of what it holds, and the arrow. */
+@Composable
+private fun NavRow(title: String, summary: String = "", badge: String? = null, onClick: () -> Unit) {
     val p = MaterialTheme.palette
-    var text by remember { mutableStateOf(custom) }
-    Column(Modifier.padding(horizontal = 16.dp)) {
-        OutlinedTextField(
-            value = text,
-            onValueChange = { v -> text = v.take(60); remote.setName(text) },
-            label = { Text("Device name") },
-            placeholder = { Text(RemoteDevice.defaultName()) },
-            singleLine = true,
-            modifier = Modifier.fillMaxWidth(),
-        )
-        Text(
-            "Shown on your other devices, and in \"was playing on\" when another device offers to continue your music",
-            style = MaterialTheme.typography.bodySmall,
-            color = p.muted,
-            modifier = Modifier.padding(top = 4.dp),
-        )
-    }
     Row(
-        Modifier.fillMaxWidth().clickable { RemoteUi.openDevices() }.padding(horizontal = 16.dp, vertical = 10.dp),
+        Modifier.fillMaxWidth().clickable(onClick = onClick).padding(horizontal = 16.dp, vertical = 12.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
         Column(Modifier.weight(1f)) {
-            Text("Your devices")
-            Text("Play here, send your music to another device, or use this phone as a remote", style = MaterialTheme.typography.bodySmall, color = p.muted)
+            Text(title, style = MaterialTheme.typography.bodyLarge)
+            if (summary.isNotEmpty()) Text(summary, style = MaterialTheme.typography.bodySmall, color = p.muted, maxLines = 1)
         }
-        Icon(painterResource(R.drawable.ic_devices), contentDescription = null, tint = p.muted)
+        if (badge != null) {
+            Badge(badge, kind = "info")
+            Spacer(Modifier.width(8.dp))
+        }
+        Icon(painterResource(R.drawable.ic_expand_more), contentDescription = null, tint = p.muted, modifier = Modifier.rotate(-90f))
     }
 }
 
@@ -209,17 +295,6 @@ private fun playbackSummary(p: PlaybackPrefs): String {
     val fx = p.effectsSummary(withCrossfade = false)
     if (fx.isNotEmpty()) parts.add(fx)
     return parts.joinToString(" · ")
-}
-
-@Composable
-private fun ThemeOption(label: String, selected: Boolean, onClick: () -> Unit) {
-    Row(
-        Modifier.fillMaxWidth().clickable(onClick = onClick).padding(horizontal = 8.dp),
-        verticalAlignment = Alignment.CenterVertically,
-    ) {
-        RadioButton(selected = selected, onClick = onClick)
-        Text(label)
-    }
 }
 
 // ---- Settings → Playback (web/js/pages/settings.js renderPlayback, the same sections and words) -------------------

@@ -102,6 +102,9 @@ object CrashLog {
         })
     }
 
+    /** How many reports wait for the server (Settings → This device). */
+    fun pendingCount(): Int = dir?.listFiles { f -> f.name.endsWith(".json") }?.size ?: 0
+
     /** Collects the system's exit records and sends every waiting report, in the background. */
     fun uploadPending(app: Application, graph: AppGraph) {
         graph.scope.launch(Dispatchers.IO) {

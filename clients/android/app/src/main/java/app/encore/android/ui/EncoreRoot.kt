@@ -110,8 +110,8 @@ sealed interface Screen {
     data class Picker(val opts: PickerOpts) : Screen
     /** Reorder / remove songs of a playlist. */
     data class PlaylistEdit(val id: Long) : Screen
-    /** Import a playlist (`into == null`) or add songs from a link to one. */
-    data class PlaylistImport(val into: Long?) : Screen
+    /** Import a playlist (`into == null`) or add songs from a link to one; [url] fills the link in. */
+    data class PlaylistImport(val into: Long?, val url: String = "") : Screen
 
     // bug reports (features/bugs): the list (opened from the Home menu or Settings → This device; [from] is sent along
     // with a new report as the page it came from) and one report with its thread
@@ -290,7 +290,7 @@ private fun MainScreen(graph: AppGraph, player: PlayerConnection, session: Sessi
                     is Screen.Tag -> TagScreen(nav, top.name)
                     is Screen.Picker -> PickerScreen(nav, top.opts)
                     is Screen.PlaylistEdit -> PlaylistEditScreen(nav, top.id)
-                    is Screen.PlaylistImport -> PlaylistImportScreen(nav, top.into)
+                    is Screen.PlaylistImport -> PlaylistImportScreen(nav, top.into, top.url)
                     is Screen.BugReports -> BugReportsScreen(nav, top.from)
                     is Screen.BugReport -> BugReportScreen(nav, top.id)
                     is Screen.Files -> FilesScreen(nav)

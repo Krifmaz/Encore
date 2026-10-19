@@ -154,6 +154,8 @@ class PrefsRepository(context: Context, private val api: EncoreApi, private val 
                 adoptAccount((me["prefs"] as? JsonObject)?.get("playback") as? JsonObject)
                 // Settings → Language (translated titles) follows the account too
                 app.encore.android.data.api.Translations.adopt(me["prefs"] as? JsonObject)
+                // and Settings → Appearance (theme, accent colour, background)
+                store?.adoptAppearance((me["prefs"] as? JsonObject)?.get("appearance") as? JsonObject)
             } catch (_: Exception) { /* offline, or signed out */ }
             refreshDsp()
         }

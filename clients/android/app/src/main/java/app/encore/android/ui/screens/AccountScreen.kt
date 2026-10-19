@@ -56,7 +56,9 @@ import app.encore.android.data.repo.Me
 import app.encore.android.data.repo.SessionRow
 import app.encore.android.data.repo.TotpSetup
 import app.encore.android.data.repo.formatAgo
+import app.encore.android.data.api.settingsApi
 import app.encore.android.data.session.Session
+import app.encore.android.features.settings.AboutEncore
 import app.encore.android.playback.ResumeStore
 import app.encore.android.ui.Nav
 import app.encore.android.ui.components.Avatar
@@ -83,7 +85,7 @@ private class AccountData(val me: Me, val info: AuthInfo)
  */
 @OptIn(ExperimentalMaterial3Api::class, ExperimentalLayoutApi::class)
 @Composable
-fun AccountScreen(nav: Nav, session: Session) {
+fun AccountScreen(nav: Nav, session: Session, onBack: () -> Unit = nav.back) {
     val features = nav.features
     val graph = nav.graph
     val p = MaterialTheme.palette
@@ -146,7 +148,7 @@ fun AccountScreen(nav: Nav, session: Session) {
         modifier = Modifier.fillMaxSize().nestedScroll(scrollBehavior.nestedScrollConnection),
         containerColor = p.bg,
         contentWindowInsets = WindowInsets(0, 0, 0, 0),
-        topBar = { EncoreTopBar("Account", scrollBehavior = scrollBehavior, onBack = nav.back) },
+        topBar = { EncoreTopBar("Account", scrollBehavior = scrollBehavior, onBack = onBack) },
     ) { padding ->
         LoadableContent(loader) { data ->
             val me = data.me
@@ -335,6 +337,10 @@ fun AccountScreen(nav: Nav, session: Session) {
                             }
                         }
                     }
+                }
+                // members get the About card here; admins have it under Settings → General (as on the web)
+                if (!admin) {
+                    item { Box(Modifier.padding(horizontal = Gutter)) { AboutEncore(graph.settingsApi) } }
                 }
                 item {
                     Row(Modifier.fillMaxWidth().padding(Gutter), horizontalArrangement = Arrangement.Center) {
