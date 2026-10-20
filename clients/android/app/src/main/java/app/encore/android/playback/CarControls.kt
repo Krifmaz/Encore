@@ -30,7 +30,9 @@ import java.util.concurrent.Executors
 /**
  * "Live lyrics in the car": device-only settings (SharedPreferences "encore_car"), shared in this process by
  * the playback service and Settings → Playback. On / off (the Lyrics button), and how: a lyrics card as the
- * artwork ([MODE_CARD], the default) or the current line as the title ([MODE_TITLE]).
+ * artwork ([MODE_CARD], the default) or the current line as the title ([MODE_TITLE]). Also the Car buttons page
+ * (CarButtonsScreen): which buttons Android Auto gets in what order ([carButtons]) and the car's number of spots
+ * for its preview ([carSpots]).
  */
 object CarPrefs {
     const val MODE_CARD = "card"
@@ -38,8 +40,55 @@ object CarPrefs {
     private const val FILE = "encore_car"
     private const val LIVE_LYRICS = "live_lyrics"
     private const val MODE = "lyrics_mode"
+    private const val BUTTONS = "buttons"
+    private const val SPOTS = "spots"
     @Volatile private var flow: MutableStateFlow<Boolean>? = null
     @Volatile private var modeFlow: MutableStateFlow<String>? = null
+    @Volatile private var buttonsFlow: MutableStateFlow<CarButtonRules.Layout>? = null
+    @Volatile private var spotsFlow: MutableStateFlow<Int>? = null
+
+    /** The car's buttons in their three groups (CarButtonRules.encode in the file); the service follows changes at once. */
+    fun carButtons(context: Context): StateFlow<CarButtonRules.Layout> = buttonsState(context).asStateFlow()
+
+    fun setCarButtons(context: Context, layout: CarButtonRules.Layout) {
+        val f = buttonsState(context)
+        if (f.value == layout) return
+        f.value = layout
+        try {
+            context.applicationContext.getSharedPreferences(FILE, Context.MODE_PRIVATE).edit().putString(BUTTONS, CarButtonRules.encode(layout)).apply()
+        } catch (_: Exception) {}
+    }
+
+    @Synchronized
+    private fun buttonsState(context: Context): MutableStateFlow<CarButtonRules.Layout> {
+        buttonsFlow?.let { return it }
+        val s = try {
+            context.applicationContext.getSharedPreferences(FILE, Context.MODE_PRIVATE).getString(BUTTONS, null)
+        } catch (_: Exception) { null }
+        return MutableStateFlow(CarButtonRules.decode(s)).also { buttonsFlow = it }
+    }
+
+    /** How many button spots the listener's car has (only the Car buttons page's preview uses it). */
+    fun carSpots(context: Context): StateFlow<Int> = spotsState(context).asStateFlow()
+
+    fun setCarSpots(context: Context, spots: Int) {
+        val n = CarButtonRules.spots(spots)
+        val f = spotsState(context)
+        if (f.value == n) return
+        f.value = n
+        try {
+            context.applicationContext.getSharedPreferences(FILE, Context.MODE_PRIVATE).edit().putInt(SPOTS, n).apply()
+        } catch (_: Exception) {}
+    }
+
+    @Synchronized
+    private fun spotsState(context: Context): MutableStateFlow<Int> {
+        spotsFlow?.let { return it }
+        val n = try {
+            context.applicationContext.getSharedPreferences(FILE, Context.MODE_PRIVATE).getInt(SPOTS, CarButtonRules.DEFAULT_SPOTS)
+        } catch (_: Exception) { CarButtonRules.DEFAULT_SPOTS }
+        return MutableStateFlow(CarButtonRules.spots(n)).also { spotsFlow = it }
+    }
 
     /** [MODE_CARD] or [MODE_TITLE]. */
     fun lyricsMode(context: Context): StateFlow<String> = modeState(context).asStateFlow()
@@ -150,13 +199,15 @@ class CarPlayer(private val exo: Player) : ForwardingPlayer(exo) {
 }
 
 /**
- * The buttons next to the transport in the car, the notification and the lock screen: Shuffle, Repeat, Like and
- * Lyrics in Android Auto (exactly the four its now-playing row shows without a "⋯"), Like first on the phone
- * ([CarRules.buttons]), as media button preferences with custom session commands; the quality of the song on the
- * car's subtitle line ("DROELOE · FLAC 24/96", [CarRules.subtitle]); and live lyrics: a card with the current line
- * as large as it fits as the now-playing artwork (title and artist stay as they are), or the current synced line
- * as the title ([CarPrefs.lyricsMode]). It also publishes what plays to [CarNowPlaying] for the Encore Lyrics car
- * app (car/LyricsCarAppService.kt), and the playing song's artist for Home's "More by <artist>" ([onArtist]).
+ * The buttons next to the transport in the car, the notification and the lock screen: in Android Auto the
+ * listener's Car buttons (Settings → Playback → In the car; [CarPrefs.carButtons], [CarButtonRules.sent]; by default
+ * Shuffle, Repeat, Like, Lyrics), Like first on the phone ([CarRules.PHONE]), as media button preferences with custom
+ * session commands; the quality of the song on the car's subtitle line ("DROELOE · FLAC 24/96", [CarRules.subtitle]);
+ * short notes on that line (a button's answer: the Signal path, "Added 25 songs by …"), which win over the lyrics
+ * while they last; and live lyrics: a card with the current line as large as it fits as the now-playing artwork
+ * (title and artist stay as they are), or the current synced line as the title ([CarPrefs.lyricsMode]). It also
+ * publishes what plays to [CarNowPlaying] for the Encore Lyrics car app (car/LyricsCarAppService.kt), and the playing
+ * song's artist for Home's "More by <artist>" ([onArtist]).
  */
 class CarControls(
     private val context: Context,
@@ -165,6 +216,10 @@ class CarControls(
     private val io: ExecutorService,
     /** the position in the song (server-made streams count from where they started) */
     private val positionMs: () -> Long,
+    /** the rate Android gets from the player (Hz, 0 not known), for the Signal path button */
+    private val outputRate: () -> Int = { 0 },
+    /** Data saver is on (an AAC stream is the saver's, not adaptive quality's), for the Signal path button */
+    private val dataSaver: () -> Boolean = { false },
 ) {
     val player = CarPlayer(exo)
     private val main = Handler(Looper.getMainLooper())
@@ -219,6 +274,30 @@ class CarControls(
     private var artNow: android.net.Uri? = null
     private var artistShown = false
 
+    /** the Car buttons setting: what Android Auto gets while a car is connected */
+    private var layout = CarPrefs.carButtons(context).value
+    private var buttonsJob: Job? = null
+
+    /**
+     * Set by the service: the Artist button was pressed for [ArtistNode]. It adds up to [CarRules.MORE_BY_SONGS] of
+     * the artist's songs after the playing one (a group's Up next in a group listen) and calls back with how many
+     * (null: they couldn't be loaded). Main thread, the callback too.
+     */
+    var onArtistPress: ((ArtistNode, (Int?) -> Unit) -> Unit)? = null
+    /** the press loading now (artist key + song) and the last press that added songs */
+    private var artistLoading: Pair<String, String>? = null
+    private var addedKey: String? = null
+    private var addedSong: String? = null
+
+    // the note on the subtitle line (main thread): [noteText] for the song [noteFor] until [noteUntil] (elapsed ms)
+    private var noteText: String? = null
+    private var noteFor: String? = null
+    private var noteUntil = 0L
+    private var noteIsSignal = false
+    /** what the session shows without the note ([shownMd] null: the song as it is), for the song [shownFor] */
+    private var shownFor: String? = null
+    private var shownMd: MediaMetadata? = null
+
     private val listener = object : Player.Listener {
         override fun onMediaItemTransition(mediaItem: MediaItem?, reason: Int) {
             if (reason != Player.MEDIA_ITEM_TRANSITION_REASON_PLAYLIST_CHANGED || currentId() != lyricsFor) {
@@ -260,6 +339,14 @@ class CarControls(
         this.session = session
         refreshButtons()
         likesJob = graph.scope.launch { graph.likes.liked.collect { if (!released) refreshButtons() } }
+        // Settings → Car buttons: a connected car gets the new list at once
+        buttonsJob = graph.scope.launch {
+            CarPrefs.carButtons(context).collect { l ->
+                if (released || l == layout) return@collect
+                layout = l
+                refreshButtons()
+            }
+        }
         lyricsJob = graph.scope.launch {
             CarPrefs.liveLyrics(context).collect { on ->
                 if (released || on == lyricsOn) return@collect
@@ -296,6 +383,7 @@ class CarControls(
     fun release() {
         released = true
         likesJob?.cancel()
+        buttonsJob?.cancel()
         lyricsJob?.cancel()
         modeJob?.cancel()
         watchJob?.cancel()
@@ -356,9 +444,82 @@ class CarControls(
                 else -> Player.REPEAT_MODE_OFF
             }
             CMD_LYRICS -> CarPrefs.setLiveLyrics(context, !lyricsOn)
+            CMD_ARTIST -> moreByArtist()
+            CMD_SIGNAL -> signalPath()
             else -> return false
         }
         return true
+    }
+
+    /**
+     * The Signal path button: the whole path on the subtitle line for 10 s ([CarButtonRules.signalLine]); pressed
+     * again while it shows, the line goes back. Title, cover or lyrics and playback stay as they are.
+     */
+    private fun signalPath() {
+        val item = exo.currentMediaItem ?: return
+        if (noteIsSignal && noteFor == item.mediaId && noteText != null && SystemClock.elapsedRealtime() < noteUntil) {
+            main.removeCallbacks(clearNote)
+            clearNote.run()
+            return
+        }
+        note(signalText(item), CarButtonRules.SIGNAL_NOTE_MS, signal = true)
+    }
+
+    /** The Signal path of the song playing, from the same StreamInfo the phone's Signal path sheet reads. */
+    private fun signalText(item: MediaItem): String {
+        val x = item.mediaMetadata.extras
+        val id = MediaItems.trackId(item.mediaId)
+        // the stream info of another song (just before the service published this one): not known yet
+        val s = stream?.takeIf { it.trackId == id } ?: return CarButtonRules.SIGNAL_UNKNOWN
+        val file = CarQuality.ofFile(
+            x?.getString(MediaItems.EXTRA_FORMAT) ?: "",
+            x?.getInt(MediaItems.EXTRA_BITRATE) ?: 0,
+            x?.getInt(MediaItems.EXTRA_SAMPLE_RATE) ?: 0,
+            x?.getInt(MediaItems.EXTRA_BIT_DEPTH) ?: 0,
+        )?.detail ?: ""
+        val local = if (s.transportKind == "local") app.encore.android.features.offline.OfflineStore.instance?.record(id ?: 0L)?.quality ?: "" else ""
+        return CarButtonRules.signalLine(
+            CarButtonRules.Signal(
+                file = file,
+                transportKind = s.transportKind,
+                dataSaver = dataSaver(),
+                localLabel = local,
+                phoneRate = s.phoneRate,
+                usbBitPerfect = s.usbBitPerfect,
+                usbDevice = s.usbDevice,
+                effects = s.effectsEngine.isNotEmpty(),
+                outputRate = outputRate(),
+                normDb = s.normDb,
+            ),
+        )
+    }
+
+    /**
+     * The Artist button: up to 25 songs by the playing song's artist right after it (in a group listen, to the
+     * group's Up next), said on the subtitle line. The song playing goes on as it is. A second press for the same
+     * song adds nothing.
+     */
+    private fun moreByArtist() {
+        val item = exo.currentMediaItem ?: return
+        val a = currentArtist()
+        if (a == null || a.name.isEmpty()) { note(CarButtonRules.NO_ARTIST); return }
+        val inGroup = group || app.encore.android.features.group.GroupListen.inGroup
+        if (CarButtonRules.alreadyAdded(addedKey, addedSong, a.key, item.mediaId)) {
+            note(CarButtonRules.alreadyAddedMessage(a.name, inGroup))
+            return
+        }
+        val press = a.key to item.mediaId
+        note(CarButtonRules.addingMessage(a.name))
+        if (artistLoading == press) return
+        val cb = onArtistPress ?: return
+        artistLoading = press
+        cb(a) { added ->
+            if (artistLoading == press) artistLoading = null
+            if (released) return@cb
+            if (added == null) { note(CarRules.moreByFailed(a.name)); return@cb }
+            if (added > 0) { addedKey = a.key; addedSong = item.mediaId }
+            note(CarRules.moreByMessage(a.name, added, group || app.encore.android.features.group.GroupListen.inGroup))
+        }
     }
 
     /** [handle] with the result a controller gets back; null when it isn't one of ours. Main thread. */
@@ -462,15 +623,31 @@ class CarControls(
     /** The song as it is, with the quality detail on the subtitle line in the car. Main thread. */
     private fun plain() {
         val item = exo.currentMediaItem
-        if (item == null || (detail() == null && !(group && cars > 0))) { player.showMetadata(null, null); return }
+        if (item == null) { player.showMetadata(null, null); return }
+        if (detail() == null && !(group && cars > 0)) { show(item, null); return }
         val base = exo.mediaMetadata
-        player.showMetadata(item.mediaId, base.buildUpon().setArtist(subtitleOf(base.artist?.toString() ?: "")).build())
+        show(item, base.buildUpon().setArtist(subtitleOf(base.artist?.toString() ?: "")).build())
+    }
+
+    /**
+     * What the session shows for [item]: [md] (null: the song's own metadata), with the note on the subtitle line
+     * while there is one for this song ([CarButtonRules.subtitleNow]). Every lyric line, card and plain update goes
+     * through here, so a note keeps its line until it ends, then the line underneath comes back. Main thread.
+     */
+    private fun show(item: MediaItem, md: MediaMetadata?) {
+        shownFor = item.mediaId
+        shownMd = md
+        val base = md ?: exo.mediaMetadata
+        val normal = base.artist?.toString() ?: ""
+        val note = if (noteFor == item.mediaId) noteText else null
+        val line = CarButtonRules.subtitleNow(note, noteUntil, SystemClock.elapsedRealtime(), normal)
+        if (line == normal) player.showMetadata(if (md == null) null else item.mediaId, md)
+        else player.showMetadata(item.mediaId, base.buildUpon().setArtist(line).build())
     }
 
     /** The subtitle again after the car or the quality changed: the lyric line or card drawn anew, else [plain]. */
     private fun refreshText() {
         if (released) return
-        main.removeCallbacks(clearNote)
         if (lyricsOn && lines.isNotEmpty()) {
             lineAt = -2
             showLine()
@@ -482,12 +659,20 @@ class CarControls(
     /** [note] for the service: why the car's request was not done (in a group listen, "Only Alex controls playback"). */
     fun say(text: String) = note(text)
 
-    /** A short note on the subtitle line for 3 s (title and cover stay). Main thread. */
-    private fun note(text: String) {
+    /**
+     * A note on the subtitle line for [ms] (title, cover, lyric line or card stay; a new song ends it). It wins over
+     * the lyric lines and cards that come while it shows ([show]). [signal]: the Signal path's, which a second
+     * press takes away. Main thread.
+     */
+    private fun note(text: String, ms: Long = CarButtonRules.NOTE_MS, signal: Boolean = false) {
         val item = exo.currentMediaItem ?: return
-        player.showMetadata(item.mediaId, exo.mediaMetadata.buildUpon().setArtist(text).build())
+        noteText = text
+        noteFor = item.mediaId
+        noteUntil = SystemClock.elapsedRealtime() + ms
+        noteIsSignal = signal
         main.removeCallbacks(clearNote)
-        main.postDelayed(clearNote, 3000L)
+        main.postDelayed(clearNote, ms)
+        if (shownFor == item.mediaId) show(item, shownMd) else refreshText()
     }
 
     /** A new queue replaced the old one (any controller, a remote device): shuffle starts off. Main thread. */
@@ -543,13 +728,17 @@ class CarControls(
     }
 
     /**
-     * [CarRules.buttons] as Media3 buttons: in the car Shuffle, Repeat, Like, Lyrics; on the phone Like first. Each
+     * [CarRules.buttons] as Media3 buttons: in the car the Car buttons setting's list ([CarButtonRules.sent]: the
+     * screen group, then the ⋯ menu group, never the hidden ones), on the phone Like first ([CarRules.PHONE]). Each
      * one is in the overflow slot only ([CarRules.SLOTS]), so Media3 hands them to the platform session as custom
-     * actions in exactly this order and none takes the place of Previous or Next.
+     * actions in exactly this order and none takes the place of Previous or Next. Every one is enabled and sent even
+     * when it can't act, so no button moves into another spot between songs.
      */
     private fun buttons(): List<CommandButton> {
         val liked = currentId()?.let { graph.likes.isLiked(it) } == true
-        return CarRules.buttons(cars > 0, liked, player.shuffled, exo.repeatMode, lyricsOn).map { b ->
+        val state = CarRules.State(liked, player.shuffled, exo.repeatMode, lyricsOn, currentArtist()?.name ?: "")
+        val ids = if (cars > 0) CarButtonRules.sent(layout) else CarRules.PHONE
+        return CarRules.buttons(ids, state).map { b ->
             val builder = CommandButton.Builder(b.icon)
                 .setDisplayName(b.name)
                 .setSessionCommand(SessionCommand(b.command, Bundle.EMPTY))
@@ -569,13 +758,22 @@ class CarControls(
         }
     }
 
-    /** After a note: the lyric line or card when they own the screen, else the song with its quality detail. */
-    private val clearNote = Runnable { if (!released) refreshText() }
+    /**
+     * A note ended: what was under it comes back as it was (the lyric line or card, else the song with its quality
+     * detail), without drawing the card again.
+     */
+    private val clearNote = Runnable {
+        if (released) return@Runnable
+        noteText = null
+        noteFor = null
+        noteIsSignal = false
+        val item = exo.currentMediaItem ?: return@Runnable
+        if (shownFor == item.mediaId) show(item, shownMd) else refreshText()
+    }
 
     /** The current song's synced lyrics, fetched once per song while live lyrics are on (LyricsCache). */
     private fun loadLyrics() {
         main.removeCallbacks(lyricTick)
-        main.removeCallbacks(clearNote)
         val id = currentId()
         lyricsFor = id
         lines = emptyList()
@@ -611,7 +809,6 @@ class CarControls(
 
     private fun stopLyrics() {
         main.removeCallbacks(lyricTick)
-        main.removeCallbacks(clearNote)
         lines = emptyList()
         lyricsFor = null
         lineAt = -2
@@ -641,7 +838,7 @@ class CarControls(
             .setDisplayTitle(text)
             .setArtist(CarRules.lineSubtitle(title, artist, detail(), group && cars > 0))
             .build()
-        player.showMetadata(item.mediaId, md)
+        show(item, md)
     }
 
     /**
@@ -670,7 +867,7 @@ class CarControls(
                         .setArtworkUri(r.uri)
                         .setArtist(subtitleOf(base.artist?.toString() ?: ""))
                         .build()
-                    player.showMetadata(item.mediaId, md)
+                    show(item, md)
                 }
             }
         } catch (_: java.util.concurrent.RejectedExecutionException) {}
@@ -681,9 +878,12 @@ class CarControls(
         const val CMD_SHUFFLE = "app.encore.android.CAR_SHUFFLE"
         const val CMD_REPEAT = "app.encore.android.CAR_REPEAT"
         const val CMD_LYRICS = "app.encore.android.CAR_LYRICS"
+        /** Car buttons: "More by <artist>" after this song, and the Signal path on the subtitle line */
+        const val CMD_ARTIST = "app.encore.android.CAR_ARTIST"
+        const val CMD_SIGNAL = "app.encore.android.CAR_SIGNAL"
 
         /** The session commands controllers need to see the buttons (MediaSession hides buttons whose command they lack). */
-        val COMMANDS = listOf(CMD_LIKE, CMD_SHUFFLE, CMD_REPEAT, CMD_LYRICS)
+        val COMMANDS = listOf(CMD_LIKE, CMD_SHUFFLE, CMD_REPEAT, CMD_LYRICS, CMD_ARTIST, CMD_SIGNAL)
 
         /** Android Auto and the desktop head unit: the controllers the car's button order and the subtitle detail are for. */
         val CAR_PACKAGES = setOf("com.google.android.projection.gearhead", "com.google.android.autosimulator")

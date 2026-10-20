@@ -338,8 +338,16 @@ fun PlaybackSettingsScreen(nav: Nav, onBack: () -> Unit) {
     val phone by repo.phone.collectAsState()
     val context = LocalContext.current
     val p = MaterialTheme.palette
-    BackHandler(onBack = onBack)
+    // In the car → Car buttons: its own page over this one (CarButtonsScreen.kt). The scroll position and the DSP
+    // refresh sit above the early return, so Back lands where the page was left and does not fetch again.
+    val scroll = rememberScrollState()
     LaunchedEffect(Unit) { repo.refreshDsp() }
+    var carButtons by androidx.compose.runtime.saveable.rememberSaveable { mutableStateOf(false) }
+    if (carButtons) {
+        CarButtonsScreen(onBack = { carButtons = false })
+        return
+    }
+    BackHandler(onBack = onBack)
     val set: ((PlaybackPrefs) -> PlaybackPrefs) -> Unit = { change -> repo.update(change) }
     val deviceRate = remember { DeviceOutput.of(context).rateHz }
     // a USB DAC shows up here while nothing plays too (the playback service only watches while it runs; no-op below Android 14)
@@ -352,7 +360,7 @@ fun PlaybackSettingsScreen(nav: Nav, onBack: () -> Unit) {
 
     Column(Modifier.fillMaxSize()) {
         BackBar("Playback", onBack)
-        Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(horizontal = 16.dp)) {
+        Column(Modifier.fillMaxSize().verticalScroll(scroll).padding(horizontal = 16.dp)) {
             Help("Saved to your account, so it follows you to every device.")
 
             H3("Quality")
@@ -380,12 +388,13 @@ fun PlaybackSettingsScreen(nav: Nav, onBack: () -> Unit) {
             ) { v -> CarPrefs.setLyricsMode(context, v) }
             Help(
                 if (carLyricsMode == CarPrefs.MODE_TITLE) {
-                    "Android Auto shows the current line of a song's synced lyrics in place of its title (the Lyrics button next to Repeat turns it on and off). Only on this phone."
+                    "Android Auto shows the current line of a song's synced lyrics in place of its title. The Lyrics button (Car buttons, below) turns it on and off. Only on this phone."
                 } else {
-                    "Android Auto shows a lyrics card in place of the cover: the current line of a song's synced lyrics, large, with the lines around it, over the blurred cover. Title and artist stay as they are. The Lyrics button next to Repeat turns it on and off. Only on this phone."
+                    "Android Auto shows a lyrics card in place of the cover: the current line of a song's synced lyrics, large, with the lines around it, over the blurred cover. Title and artist stay as they are. The Lyrics button (Car buttons, below) turns it on and off. Only on this phone."
                 },
             )
             Help("For the whole song text on the car screen, open Encore Lyrics in the car's app list.")
+            CarButtonsRow { carButtons = true }
 
             H3("Sound (on this device)")
             val norm by repo.norm.collectAsState()

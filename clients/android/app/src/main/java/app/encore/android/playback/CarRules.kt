@@ -28,37 +28,70 @@ object CarRules {
     val SLOTS = intArrayOf(CommandButton.SLOT_OVERFLOW)
 
     /**
-     * The custom buttons. In the car ([car]): Shuffle, Repeat, Like, Lyrics, exactly four, which is what Android
-     * Auto's now-playing row shows beside Play/Pause, Previous and Next before it needs its "⋯" (a fifth button
-     * would push the last ones behind it). On the phone (notification, lock screen) Like comes first, since the
-     * system media controls show the first two.
+     * The phone's buttons (notification, lock screen): Like first, since the system media controls show the first
+     * two. In the car the listener's Car buttons setting decides ([CarButtonRules.sent]).
      */
-    fun buttons(car: Boolean, liked: Boolean, shuffled: Boolean, repeatMode: Int, lyricsOn: Boolean): List<Button> {
-        val like = Button(
+    val PHONE = listOf(CarButtonRules.Id.LIKE, CarButtonRules.Id.SHUFFLE, CarButtonRules.Id.REPEAT, CarButtonRules.Id.LYRICS)
+
+    /** What the buttons draw: the song's and the app's state. [artist]: the playing song's artist ("" none). */
+    data class State(
+        val liked: Boolean = false,
+        val shuffled: Boolean = false,
+        val repeatMode: Int = Player.REPEAT_MODE_OFF,
+        val lyricsOn: Boolean = false,
+        val artist: String = "",
+    )
+
+    /** The session command of a button. */
+    fun command(id: CarButtonRules.Id): String = when (id) {
+        CarButtonRules.Id.SHUFFLE -> CarControls.CMD_SHUFFLE
+        CarButtonRules.Id.REPEAT -> CarControls.CMD_REPEAT
+        CarButtonRules.Id.LIKE -> CarControls.CMD_LIKE
+        CarButtonRules.Id.LYRICS -> CarControls.CMD_LYRICS
+        CarButtonRules.Id.ARTIST -> CarControls.CMD_ARTIST
+        CarButtonRules.Id.SIGNAL -> CarControls.CMD_SIGNAL
+    }
+
+    /**
+     * One button as it looks now. A button that can't act (Artist for a song without an artist) is still sent, with
+     * an "off" icon, so the buttons after it never shift into another spot between songs; its press says why.
+     */
+    fun button(id: CarButtonRules.Id, s: State): Button = when (id) {
+        CarButtonRules.Id.LIKE -> Button(
             CarControls.CMD_LIKE,
-            if (liked) "Unlike" else "Like",
-            if (liked) CommandButton.ICON_HEART_FILLED else CommandButton.ICON_HEART_UNFILLED,
-            if (liked) R.drawable.ic_favorite else R.drawable.ic_favorite_border,
+            if (s.liked) "Unlike" else "Like",
+            if (s.liked) CommandButton.ICON_HEART_FILLED else CommandButton.ICON_HEART_UNFILLED,
+            if (s.liked) R.drawable.ic_favorite else R.drawable.ic_favorite_border,
         )
-        val shuffle = Button(
+        CarButtonRules.Id.SHUFFLE -> Button(
             CarControls.CMD_SHUFFLE,
-            if (shuffled) "Shuffle on" else "Shuffle off",
-            if (shuffled) CommandButton.ICON_SHUFFLE_ON else CommandButton.ICON_SHUFFLE_OFF,
+            if (s.shuffled) "Shuffle on" else "Shuffle off",
+            if (s.shuffled) CommandButton.ICON_SHUFFLE_ON else CommandButton.ICON_SHUFFLE_OFF,
         )
-        val repeat = when (repeatMode) {
+        CarButtonRules.Id.REPEAT -> when (s.repeatMode) {
             Player.REPEAT_MODE_ALL -> Button(CarControls.CMD_REPEAT, "Repeat all", CommandButton.ICON_REPEAT_ALL)
             Player.REPEAT_MODE_ONE -> Button(CarControls.CMD_REPEAT, "Repeat one", CommandButton.ICON_REPEAT_ONE)
             else -> Button(CarControls.CMD_REPEAT, "Repeat off", CommandButton.ICON_REPEAT_OFF)
         }
         // no predefined lyrics icon in Media3: ours
-        val lyrics = Button(
+        CarButtonRules.Id.LYRICS -> Button(
             CarControls.CMD_LYRICS,
-            if (lyricsOn) "Live lyrics on" else "Live lyrics off",
+            if (s.lyricsOn) "Live lyrics on" else "Live lyrics off",
             CommandButton.ICON_UNDEFINED,
-            if (lyricsOn) R.drawable.ic_lyrics_on else R.drawable.ic_lyrics,
+            if (s.lyricsOn) R.drawable.ic_lyrics_on else R.drawable.ic_lyrics,
         )
-        return if (car) listOf(shuffle, repeat, like, lyrics) else listOf(like, shuffle, repeat, lyrics)
+        // without an artist: our crossed-out person (a predefined icon would replace it on hosts that draw those)
+        CarButtonRules.Id.ARTIST -> if (s.artist.isEmpty()) {
+            Button(CarControls.CMD_ARTIST, "Artist", CommandButton.ICON_UNDEFINED, R.drawable.ic_person_off)
+        } else {
+            Button(CarControls.CMD_ARTIST, moreByTitle(s.artist), CommandButton.ICON_ARTIST, R.drawable.ic_person)
+        }
+        // the phone's Signal path icon (Media3's "quality" icon reads as a settings button)
+        CarButtonRules.Id.SIGNAL -> Button(CarControls.CMD_SIGNAL, "Signal path", CommandButton.ICON_UNDEFINED, R.drawable.ic_signal)
     }
+
+    /** [ids] in this order, as they look now ([PHONE] on the phone, [CarButtonRules.sent] in the car). */
+    fun buttons(ids: List<CarButtonRules.Id>, s: State): List<Button> = ids.map { button(it, s) }
 
     // ---- the subtitle line ---------------------------------------------------------------------------------------
 

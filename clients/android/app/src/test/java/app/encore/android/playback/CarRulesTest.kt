@@ -30,31 +30,47 @@ class CarRulesTest {
     }
 
     @Test
-    fun theCarGetsShuffleRepeatLikeLyricsAndNothingElse() {
-        val car = CarRules.buttons(car = true, liked = false, shuffled = false, repeatMode = Player.REPEAT_MODE_OFF, lyricsOn = false)
+    fun theCarGetsTheDefaultLayoutShuffleRepeatLikeLyrics() {
+        val ids = CarButtonRules.sent(CarButtonRules.DEFAULT)
+        val car = CarRules.buttons(ids, CarRules.State())
         assertEquals(
             listOf(CarControls.CMD_SHUFFLE, CarControls.CMD_REPEAT, CarControls.CMD_LIKE, CarControls.CMD_LYRICS),
             car.map { it.command },
         )
-        // four: what Android Auto's now-playing row shows beside Play/Pause, Previous and Next without its "⋯"
+        // four: what the owner's car shows beside Play/Pause, Previous and Next without its "⋯"
         assertEquals(4, car.size)
         // overflow only: none of them replaces Previous or Next, and the platform's custom actions keep this order
         assertArrayEquals(intArrayOf(CommandButton.SLOT_OVERFLOW), CarRules.SLOTS)
         assertEquals(car.map { it.command }, platformOrder(car.map { it.command to CarRules.SLOTS }))
+        // any order the listener picks reaches the platform as it is
+        val mine = CarButtonRules.Layout(
+            listOf(CarButtonRules.Id.LYRICS, CarButtonRules.Id.SIGNAL),
+            listOf(CarButtonRules.Id.LIKE, CarButtonRules.Id.ARTIST, CarButtonRules.Id.SHUFFLE),
+            listOf(CarButtonRules.Id.REPEAT),
+        )
+        val sent = CarRules.buttons(CarButtonRules.sent(mine), CarRules.State(artist = "DROELOE")).map { it.command }
+        assertEquals(
+            listOf(CarControls.CMD_LYRICS, CarControls.CMD_SIGNAL, CarControls.CMD_LIKE, CarControls.CMD_ARTIST, CarControls.CMD_SHUFFLE),
+            sent,
+        )
+        assertEquals(sent, platformOrder(sent.map { it to CarRules.SLOTS }))
         // the phone keeps Like first (the system media controls show the first two)
-        val phone = CarRules.buttons(car = false, liked = false, shuffled = false, repeatMode = Player.REPEAT_MODE_OFF, lyricsOn = false)
+        val phone = CarRules.buttons(CarRules.PHONE, CarRules.State())
         assertEquals(
             listOf(CarControls.CMD_LIKE, CarControls.CMD_SHUFFLE, CarControls.CMD_REPEAT, CarControls.CMD_LYRICS),
             phone.map { it.command },
         )
-        // the commands the session hands out are exactly these
-        assertEquals(car.map { it.command }.toSet(), CarControls.COMMANDS.toSet())
+        // the session hands out a command for every button the setting can send
+        assertTrue(CarControls.COMMANDS.containsAll(CarButtonRules.Id.entries.map { CarRules.command(it) }))
+        assertEquals(CarButtonRules.Id.entries.size, CarButtonRules.Id.entries.map { CarRules.command(it) }.toSet().size)
+        CarButtonRules.Id.entries.forEach { assertEquals(CarRules.command(it), CarRules.button(it, CarRules.State()).command) }
     }
 
     @Test
     fun buttonsFollowTheirState() {
-        val off = CarRules.buttons(true, liked = false, shuffled = false, repeatMode = Player.REPEAT_MODE_OFF, lyricsOn = false).associateBy { it.command }
-        val on = CarRules.buttons(true, liked = true, shuffled = true, repeatMode = Player.REPEAT_MODE_ONE, lyricsOn = true).associateBy { it.command }
+        val all = CarButtonRules.Id.entries
+        val off = CarRules.buttons(all, CarRules.State()).associateBy { it.command }
+        val on = CarRules.buttons(all, CarRules.State(liked = true, shuffled = true, repeatMode = Player.REPEAT_MODE_ONE, lyricsOn = true, artist = "DROELOE")).associateBy { it.command }
         assertEquals(CommandButton.ICON_HEART_UNFILLED, off.getValue(CarControls.CMD_LIKE).icon)
         assertEquals(CommandButton.ICON_HEART_FILLED, on.getValue(CarControls.CMD_LIKE).icon)
         assertEquals("Unlike", on.getValue(CarControls.CMD_LIKE).name)
@@ -62,9 +78,16 @@ class CarRulesTest {
         assertEquals(CommandButton.ICON_SHUFFLE_ON, on.getValue(CarControls.CMD_SHUFFLE).icon)
         assertEquals(CommandButton.ICON_REPEAT_OFF, off.getValue(CarControls.CMD_REPEAT).icon)
         assertEquals(CommandButton.ICON_REPEAT_ONE, on.getValue(CarControls.CMD_REPEAT).icon)
-        assertEquals(CommandButton.ICON_REPEAT_ALL, CarRules.buttons(true, false, false, Player.REPEAT_MODE_ALL, false)[1].icon)
+        assertEquals(CommandButton.ICON_REPEAT_ALL, CarRules.button(CarButtonRules.Id.REPEAT, CarRules.State(repeatMode = Player.REPEAT_MODE_ALL)).icon)
         assertEquals("Live lyrics on", on.getValue(CarControls.CMD_LYRICS).name)
         assertTrue(on.getValue(CarControls.CMD_LYRICS).customIcon != off.getValue(CarControls.CMD_LYRICS).customIcon)
+        // Artist: "More by <artist>" with the artist icon; without an artist it is still sent, with an "off" icon
+        assertEquals("More by DROELOE", on.getValue(CarControls.CMD_ARTIST).name)
+        assertEquals(CommandButton.ICON_ARTIST, on.getValue(CarControls.CMD_ARTIST).icon)
+        assertEquals("Artist", off.getValue(CarControls.CMD_ARTIST).name)
+        assertEquals(CommandButton.ICON_UNDEFINED, off.getValue(CarControls.CMD_ARTIST).icon)
+        assertTrue(on.getValue(CarControls.CMD_ARTIST).customIcon != off.getValue(CarControls.CMD_ARTIST).customIcon)
+        assertEquals("Signal path", off.getValue(CarControls.CMD_SIGNAL).name)
         // no button has an icon Media3 would place in the back or forward slot on its own
         val moving = setOf(CommandButton.ICON_PREVIOUS, CommandButton.ICON_NEXT, CommandButton.ICON_SKIP_BACK, CommandButton.ICON_SKIP_FORWARD, CommandButton.ICON_REWIND, CommandButton.ICON_FAST_FORWARD)
         assertTrue((off.values + on.values).none { it.icon in moving })

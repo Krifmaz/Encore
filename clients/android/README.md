@@ -269,11 +269,22 @@ shuffle of the library. It never repeats songs heard in this session. It can be 
 - Voice requests ("play <album or artist>") search the library.
 - The artist's page `artist:<mbid or name>` (0.31): "Shuffle <name>", "Popular songs" (the ones in the library),
   "Liked from this artist", then the albums under "Albums". Old `artist:<name>` ids still resolve.
-- While Android Auto (or the desktop head unit) is connected, the quality badge (lossless, hi-res, lossy, Cadenza;
-  `CarQuality.kt`, it does nothing when pressed) and an Artist button come after Like, and the quality detail ("FLAC
-  24/96") goes on the subtitle line after the artist, also while live lyrics own the title line. The now-playing
-  screen can't open a browse node, so Artist pins the artist at the top of Home and says so for 3 s. In a group
-  listen the subtitle starts with "Group listen · ".
+- While Android Auto (or the desktop head unit) is connected, the quality detail ("FLAC 24/96", `CarQuality.kt`)
+  goes on the subtitle line after the artist, also while live lyrics own the title line, and Home starts with
+  "More by <artist>". In a group listen the subtitle starts with "Group listen · ".
+- The now-playing buttons in the car are the listener's **Car buttons** (Settings → Playback → In the car,
+  `ui/screens/CarButtonsScreen.kt`, rules in `playback/CarButtonRules.kt`, stored on the phone in `CarPrefs`).
+  Three groups: "On the car screen", "In the ⋯ menu", "Hidden". The app sends the screen group, then the menu group,
+  in exactly the listener's order, and never the hidden ones; Android Auto fills its spots in that order and puts
+  the rest behind ⋯ (Media3 1.11.1 gives the platform session no slots, only the order). The page's preview uses
+  "Spots in your car" (default 4) to show what the car will show and says when a button, Like in plain words,
+  lands behind ⋯. Default: Shuffle, Repeat, Like, Lyrics on the screen; Artist and Signal path hidden. "Reset to
+  default" puts the buttons back and leaves the spot count alone; Undo stays until the next change. A connected
+  car gets every change at once. The list is session-wide: without a car the phone's notification keeps Like,
+  Shuffle, Repeat, Lyrics; while one is connected the notification and lock screen show the car's buttons.
+- Artist adds up to 25 of the artist's songs right after the playing one (the group's Up next in a group listen) and
+  says so; Signal path shows the whole path ("FLAC 24/96 → as is → Android 48 kHz") for 10 s, a second press takes
+  it away. Both answer on the subtitle line, and these notes win over live-lyrics updates while they last.
 - Resume uses the last queue, which is stored on the phone.
 - Artwork is `content://<applicationId>.covers/album/<id>?s=600`. Android Auto and System UI can't send our session,
   so `CoverProvider` fetches each cover once with the app's client and serves it from the cache.
@@ -287,7 +298,7 @@ shuffle of the library. It never repeats songs heard in this session. It can be 
 
 ### Lyrics in the car
 
-- The Lyrics button (next to Repeat) turns live lyrics on and off; Settings → Playback → In the car picks the look:
+- The Lyrics button (one of the Car buttons) turns live lyrics on and off; Settings → Playback → In the car picks the look:
   **Card** (default) or **Title line**. Both only change what the session reports (`CarPlayer.showMetadata`), so
   playback never rebuffers.
 - Card: `LyricsCard` draws an 800×800 picture (blurred, darkened cover; two past lines faded above, the current

@@ -246,7 +246,13 @@ class EncorePlaybackService : MediaLibraryService() {
 
         val open = Intent(this, MainActivity::class.java).addFlags(Intent.FLAG_ACTIVITY_SINGLE_TOP)
         val sessionActivity = PendingIntent.getActivity(this, 0, open, PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT)
-        car = CarControls(this, graph, player, io) { current.absPositionMs() }
+        car = CarControls(
+            this, graph, player, io,
+            positionMs = { current.absPositionMs() },
+            // the Signal path button: what Android gets (the effects processor's rate, else the device's)
+            outputRate = { effects.configuredOutputRate.takeIf { it > 0 } ?: output.deviceRate },
+            dataSaver = { prefs.quality == "saver" },
+        )
         session = MediaLibrarySession.Builder(this, car.player, Callback())
             .setSessionActivity(sessionActivity)
             // covers are content:// URIs from CoverProvider, read with the default data source
@@ -259,6 +265,8 @@ class EncorePlaybackService : MediaLibraryService() {
                 try { session.notifyChildrenChanged("home", tree.homeSize(), null) } catch (_: Exception) {}
             }
         }
+        // the car's Artist button: the artist's songs after this one ("More by <artist>", as in Encore Lyrics)
+        car.onArtistPress = { a, done -> moreBy(a, done) }
         // an artist page's Popular songs that came after the page was shown: the car asks for it again
         tree.onLate = { id, count ->
             main.post { if (!released) try { session.notifyChildrenChanged(id, count, null) } catch (_: Exception) {} }
@@ -719,7 +727,10 @@ class EncorePlaybackService : MediaLibraryService() {
 
         /** Android Auto came or went: the car's button order and the quality on its subtitle line follow (CarControls). */
         override fun onPostConnect(session: MediaSession, controller: MediaSession.ControllerInfo) {
-            car.controller(controller.packageName in CarControls.CAR_PACKAGES, connected = true)
+            val isCar = controller.packageName in CarControls.CAR_PACKAGES
+            // 0: a platform (legacy) controller, which gets the session-wide buttons only (Car buttons relies on it)
+            if (isCar) CrashLog.log("car connected: ${controller.packageName}, controller version ${controller.controllerVersion}")
+            car.controller(isCar, connected = true)
         }
 
         override fun onDisconnected(session: MediaSession, controller: MediaSession.ControllerInfo) {
@@ -920,6 +931,44 @@ class EncorePlaybackService : MediaLibraryService() {
             putParcelable(MediaConstants.EXTRAS_KEY_ERROR_RESOLUTION_ACTION_INTENT_COMPAT, pi)
         }
         return LibraryResult.ofError<T>(LibraryResult.RESULT_ERROR_SESSION_AUTHENTICATION_EXPIRED, LibraryParams.Builder().setExtras(extras).build())
+    }
+
+    /**
+     * The car's Artist button: up to [CarRules.MORE_BY_SONGS] of [a]'s songs (the "Shuffle <artist>" list, already
+     * shuffled), none that plays now or comes up next, right after the song playing; in a group listen to the group's
+     * Up next. The song playing goes on as it is. [done] gets how many were added (null: the list couldn't be
+     * loaded), on the main thread.
+     */
+    private fun moreBy(a: ArtistNode, done: (Int?) -> Unit) {
+        io.execute {
+            val list = try {
+                runBlocking { graph.store.awaitLoaded() }
+                tree.list(CarRules.ARTIST_SHUFFLE + a.name)
+            } catch (e: Exception) {
+                CrashLog.log("car More by ${a.name} failed: $e")
+                null
+            }
+            main.post {
+                if (released) return@post
+                if (list == null) { done(null); return@post }
+                val byId = LinkedHashMap<Long, MediaItem>()
+                for (item in list) MediaItems.trackId(item.mediaId)?.let { id -> if (!byId.containsKey(id)) byId[id] = item }
+                val playing = player.currentMediaItem?.let { MediaItems.trackId(it.mediaId) }
+                val upcoming = HashSet<Long>()
+                for (i in player.currentMediaItemIndex + 1 until player.mediaItemCount) MediaItems.trackId(player.getMediaItemAt(i).mediaId)?.let { upcoming.add(it) }
+                val items = CarButtonRules.moreByPick(byId.keys.toList(), playing, upcoming, CarRules.MORE_BY_SONGS).mapNotNull { byId[it] }
+                if (items.isEmpty()) { done(0); return@post }
+                if (GroupListen.inGroup) {
+                    GroupListen.enqueue(items.mapNotNull { MediaItems.toTrack(it) })
+                } else {
+                    rememberAll(items)
+                    val at = if (player.mediaItemCount == 0) 0 else (player.currentMediaItemIndex + 1).coerceIn(0, player.mediaItemCount)
+                    player.addMediaItems(at, items)
+                    resume.save()
+                }
+                done(items.size)
+            }
+        }
     }
 
     private fun rememberAll(items: List<MediaItem>) {
