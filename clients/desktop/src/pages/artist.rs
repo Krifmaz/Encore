@@ -571,7 +571,7 @@ pub fn update(state: &mut State, msg: Message, ctx: &mut Ctx) -> Task<Message> {
         Message::Shared(Ok(r)) => {
             let url = format!("{}{}", ctx.base(), fmt::s(&r, "path"));
             ctx.copy(url);
-            ctx.toast_ok("Link copied – anyone with it can play this song");
+            ctx.toast_ok("Link copied – anyone with it can play this artist");
         }
         Message::Shared(Err(e)) => ctx.toast_err(e.message),
         Message::PlayAlbum(id) => {

@@ -9,6 +9,7 @@ import app.encore.android.core.obj
 import app.encore.android.core.objects
 import app.encore.android.core.objectsOf
 import app.encore.android.core.str
+import app.encore.android.features.library.PlaylistShareRules
 import kotlinx.serialization.SerialName
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.json.JsonArray
@@ -231,14 +232,16 @@ data class ArtistSongs(val total: Int, val tracks: List<Track>) {
     }
 }
 
-data class Playlist(val id: Long, val name: String, val kind: String, val total: Int, val matched: Int, val coverUrl: String) {
+/** [sharePath]: the public link's path ("/s/<token>") while the playlist is shared, else "". */
+data class Playlist(val id: Long, val name: String, val kind: String, val total: Int, val matched: Int, val coverUrl: String, val sharePath: String = "") {
     val isLiked: Boolean get() = kind == "liked"
+    val isShared: Boolean get() = sharePath.isNotEmpty()
 
     companion object {
         fun from(o: JsonObject): Playlist? {
             val id = o.long("id")
             if (id <= 0L) return null
-            return Playlist(id, o.str("name"), o.str("kind"), o.int("total"), o.int("matched"), o.str("cover_url"))
+            return Playlist(id, o.str("name"), o.str("kind"), o.int("total"), o.int("matched"), o.str("cover_url"), PlaylistShareRules.sharePathOf(o))
         }
     }
 }

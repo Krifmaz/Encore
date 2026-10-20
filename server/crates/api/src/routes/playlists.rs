@@ -2,6 +2,7 @@
 use crate::enrich::enrich_now;
 use crate::auth::{MaybeUser, User};
 use crate::signin;
+use super::library;
 use encore_db::{now, Row, RowExt};
 use encore_core::error::{err, ApiResult};
 use encore_requests::sources::links;
@@ -33,6 +34,7 @@ pub fn router() -> Router<AppState> {
         .route("/api/playlists/{pid}/items/{iid}", delete(remove_item))
         .route("/api/playlists/{pid}/move", post(move_item))
         .route("/api/playlists/{pid}/sync", post(sync_me))
+        .route("/api/playlists/{pid}/share", post(share).delete(unshare))
         .route("/api/connections", get(list_connections))
         .route("/api/connections/plex/check", post(plex_check))
         .route("/api/connections/ytmusic/check", post(ytmusic_check))
@@ -51,13 +53,47 @@ fn bad(e: anyhow::Error) -> encore_core::error::ApiError {
     err(400, e.to_string())
 }
 
-/// Your playlists with their counts (one GROUP BY for all of them), on the blocking pool.
+/// Your playlists with their counts (one GROUP BY for all of them) and their share links, on the
+/// blocking pool.
 async fn list(State(st): State<AppState>, User(u): User) -> ApiResult<Json<Value>> {
     st.blocking(move |st| {
         playlists::get_liked(st, u.i("id")).map_err(bad)?;
         let rows = st.db.query("SELECT * FROM playlists WHERE user_id=? ORDER BY kind='liked' DESC, updated_at DESC", p![u.i("id")])?;
-        Ok(Json(json!(playlists::summaries(st, &rows))))
+        let links: std::collections::HashMap<String, String> = st.db.query("SELECT ref, token FROM shares WHERE user_id=? AND kind='playlist'", p![u.i("id")])?
+            .into_iter().map(|r| (r.s("ref"), r.s("token"))).collect();
+        let mut list = playlists::summaries(st, &rows);
+        for v in &mut list {
+            let pid = v["id"].as_i64().unwrap_or(0).to_string();
+            v["share"] = links.get(&pid).map_or(Value::Null, |t| library::share_json(st, t));
+        }
+        Ok(Json(json!(list)))
     }).await
+}
+
+/// A playlist's share link (`{token, path, url}`), or null when it isn't shared.
+fn share_of(st: &AppState, pid: i64, uid: i64) -> ApiResult<Value> {
+    Ok(st.db.one("SELECT token FROM shares WHERE kind='playlist' AND ref=? AND user_id=?", p![pid.to_string(), uid])?
+        .map_or(Value::Null, |r| library::share_json(st, &r.s("token"))))
+}
+
+/// Ends a playlist's share link for good: sharing it again makes a new one.
+fn unshare_now(st: &AppState, pid: i64, uid: i64) -> ApiResult<()> {
+    st.db.execute("DELETE FROM shares WHERE kind='playlist' AND ref=? AND user_id=?", p![pid.to_string(), uid])?;
+    Ok(())
+}
+
+/// Share: a public link that always shows the playlist as it is now (Liked Songs too; only its owner may
+/// share it). Asking again gives the same link: `{token, path, url}`.
+async fn share(State(st): State<AppState>, User(u): User, Path(pid): Path<i64>) -> ApiResult<Json<Value>> {
+    own(&st, pid, &u)?;
+    library::share_link(&st, u.i("id"), "playlist", 0, &pid.to_string())
+}
+
+/// Stop sharing: the link stops working for everyone who has it. A playlist that isn't shared answers ok too.
+async fn unshare(State(st): State<AppState>, User(u): User, Path(pid): Path<i64>) -> ApiResult<Json<Value>> {
+    own(&st, pid, &u)?;
+    unshare_now(&st, pid, u.i("id"))?;
+    Ok(Json(json!({ "ok": true })))
 }
 
 #[derive(Deserialize, Default)]
@@ -152,6 +188,7 @@ async fn detail(State(st): State<AppState>, User(u): User, Path(pid): Path<i64>)
             FROM playlist_items i LEFT JOIN tracks t ON t.id=i.track_id LEFT JOIN requests r ON r.id=i.request_id
             WHERE i.playlist_id=? ORDER BY i.position, i.id", p![pid])?);
         v["remote_ids"] = serde_json::from_str(&pl.s("remote_ids")).unwrap_or(json!({}));
+        v["share"] = share_of(st, pid, u.i("id"))?;
         enrich_now(st, Some(&u), &mut v);
         Ok(Json(v))
     }).await
@@ -190,6 +227,7 @@ async fn remove(State(st): State<AppState>, User(u): User, Path(pid): Path<i64>)
     }
     st.db.execute("DELETE FROM playlist_items WHERE playlist_id=?", p![pid])?;
     st.db.execute("DELETE FROM playlists WHERE id=?", p![pid])?;
+    unshare_now(&st, pid, u.i("id"))?;
     Ok(Json(json!({ "ok": true })))
 }
 
@@ -283,6 +321,7 @@ async fn merge(State(st): State<AppState>, User(u): User, Json(b): Json<MergeBod
                 if st.db.one("SELECT kind FROM playlists WHERE id=? AND user_id=?", p![pid, u.i("id")])?.is_some_and(|p| p.s("kind") != "liked") {
                     st.db.execute("DELETE FROM playlist_items WHERE playlist_id=?", p![pid])?;
                     st.db.execute("DELETE FROM playlists WHERE id=?", p![pid])?;
+                    unshare_now(st, *pid, u.i("id"))?;
                 }
             }
         }

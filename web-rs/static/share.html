@@ -26,9 +26,17 @@
   .songs button { width: 100%; display: flex; gap: 10px; align-items: baseline; background: none; border: 0; border-radius: 8px; padding: 7px 8px; color: inherit; font: inherit; text-align: left; cursor: pointer; }
   .songs button:hover, .songs button.on { background: #22223a; }
   .songs button.on .t { color: var(--accent); }
-  .songs .n { width: 22px; flex: none; text-align: right; font-size: 13px; }
+  .songs .n { width: max(22px, calc(var(--nw, 0px) + 2px)); flex: none; text-align: right; font-size: 13px; font-variant-numeric: tabular-nums; }
   .songs .t { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .songs .d { flex: none; font-size: 13px; }
+  .songs .more button { justify-content: center; color: var(--accent); }
+  .btns { display: flex; gap: 8px; justify-content: center; flex-wrap: wrap; margin-top: 14px; }
+  .btn { background: #22223a; color: var(--text); border: 0; border-radius: 99px; padding: 8px 18px; font: inherit; font-weight: 600; cursor: pointer; }
+  .btn:hover { background: #2c2c48; }
+  .btn.accent { background: var(--accent); color: #fff; }
+  .btn:disabled { opacity: .6; cursor: default; }
+  .desc { display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
+  .empty { padding: 24px 0 8px; }
 </style>
 </head>
 <body>
@@ -44,6 +52,118 @@
     const t = await r.json();
     const tok = encodeURIComponent(token);
     const mmss = (d) => { const s = Math.round(d); return `${Math.floor(s / 60)}:${String(s % 60).padStart(2, '0')}`; };
+    if (t.kind === 'playlist') {
+      // a playlist as it is now: the header counts the whole list, the songs come in pages of 200
+      document.title = `${t.title} · ${t.owner}`;
+      const n = t.count || 0;
+      const long = (d) => { const s = Math.round(d); return s < 3600 ? mmss(s) : `${Math.floor(s / 3600)} h ${Math.floor((s % 3600) / 60)} min`; };
+      const head = `${n} ${n === 1 ? 'song' : 'songs'}${t.duration ? ' · ' + long(t.duration) : ''}`;
+      const viewer = t.viewer || {};
+      card.innerHTML = `<div class="art"><img src="/api/share/${tok}/cover" alt="" onerror="this.remove()"></div>
+        <h1>${esc(t.title)}</h1><div class="muted">${t.liked ? 'Liked songs' : 'Playlist'} · ${esc(t.owner)}</div>
+        ${t.description ? `<div class="muted small desc">${esc(t.description)}</div>` : ''}
+        <div class="muted small">${esc(head)}</div>
+        ${n ? `<div class="btns"><button type="button" class="btn accent" id="play">Play</button><button type="button" class="btn" id="shuffle">Shuffle</button>${viewer.signed_in && !viewer.own ? '<button type="button" class="btn" id="copy">Save a copy</button>' : ''}</div>
+        <div class="muted small" id="copy-msg" hidden></div>
+        <audio controls preload="none"></audio>
+        <ol class="songs"></ol>` : '<div class="muted empty">No songs here right now</div>'}
+        <div class="foot muted">Shared from ${esc(t.app_name || 'Encore')}${viewer.signed_in ? '' : ' · <a href="/#/login">Sign in</a> for the whole library'}</div>`;
+      if (!n) return;
+      const a = card.querySelector('audio');
+      const list = card.querySelector('.songs');
+      // the number column fits the longest number (song 1000 of a long list)
+      list.style.setProperty('--nw', `${String(n).length}ch`);
+      const first = { rows: t.tracks || [], more: !!t.has_more };
+      let songs = first.rows.slice(), more = first.more;
+      let seed = null, cur = -1, loading = null, gen = 0;
+      const io = 'IntersectionObserver' in window ? new IntersectionObserver((es) => { if (es.some((x) => x.isIntersecting)) load(); }, { root: list, rootMargin: '120px' }) : null;
+      const mark = () => list.querySelectorAll('button[data-i]').forEach((b) => b.classList.toggle('on', Number(b.dataset.i) === cur));
+      const render = (rows, from) => {
+        list.querySelector('.more')?.remove();
+        list.insertAdjacentHTML('beforeend', rows.map((x, j) => `<li><button type="button" data-i="${from + j}"><span class="n muted">${from + j + 1}</span><span class="t">${esc(x.title)}${x.artist ? `<span class="muted"> · ${esc(x.artist)}</span>` : ''}</span><span class="d muted">${x.duration ? mmss(x.duration) : ''}</span></button></li>`).join(''));
+        if (more) {
+          list.insertAdjacentHTML('beforeend', '<li class="more"><button type="button">More songs</button></li>');
+          if (io) { io.disconnect(); io.observe(list.querySelector('.more')); }
+        }
+        mark();
+      };
+      // the next page (one request at a time); a shuffle asks for the same seed, so its pages fit together
+      const load = () => {
+        if (loading || !more) return loading || Promise.resolve();
+        const g = gen;
+        loading = fetch(`/api/share/${tok}?offset=${songs.length}&limit=200${seed ? `&shuffle=${seed}` : ''}`)
+          .then((r) => r.ok ? r.json() : Promise.reject(new Error()))
+          .then((p) => {
+            if (g !== gen) return;
+            const from = songs.length;
+            songs = songs.concat(p.tracks || []);
+            more = !!p.has_more;
+            render(p.tracks || [], from);
+          })
+          .catch(() => {})
+          .finally(() => { if (g === gen) loading = null; });
+        return loading;
+      };
+      const restart = (rows, hasMore, s) => {
+        gen++; loading = null; seed = s; songs = rows; more = hasMore; cur = -1;
+        list.innerHTML = '';
+        render(rows, 0);
+      };
+      const pick = (i, play) => {
+        if (!songs[i]) return;
+        cur = i;
+        mark();
+        a.src = `/api/share/${tok}/stream?track=${encodeURIComponent(songs[i].id)}`;
+        if (play) a.play().catch(() => {});
+      };
+      list.onclick = (e) => {
+        const b = e.target.closest('button');
+        if (!b) return;
+        if (b.closest('.more')) load(); else pick(Number(b.dataset.i), true);
+      };
+      // Play: the list order again, from the top
+      card.querySelector('#play').onclick = () => {
+        if (seed !== null) restart(first.rows.slice(), first.more, null);
+        pick(0, true);
+      };
+      // Shuffle: the whole list in a new order, shown as it plays. Safari only lets sound start inside the
+      // click, and the new order's first page comes after it: a stopped player is started (muted) and paused
+      // now, which lets it play the first song once the page is here.
+      card.querySelector('#shuffle').onclick = async () => {
+        if (a.paused) {
+          const muted = a.muted;
+          a.muted = true;
+          a.play().then(() => a.pause()).catch(() => {}).finally(() => { a.muted = muted; });
+        }
+        restart([], true, 1 + Math.floor(Math.random() * 2147483646));
+        await load();
+        pick(0, true);
+      };
+      a.onended = async () => {
+        if (cur + 1 >= songs.length && more) await load();
+        if (cur + 1 < songs.length) pick(cur + 1, true);
+      };
+      a.onerror = () => { if (cur >= 0 && a.src && !a.src.includes('transcode')) { a.src += '&transcode=true'; a.play().catch(() => {}); } };
+      const copy = card.querySelector('#copy');
+      if (copy) copy.onclick = async () => {
+        const msg = card.querySelector('#copy-msg');
+        copy.disabled = true;
+        msg.hidden = true;
+        try {
+          const r = await fetch(`/api/share/${tok}/copy`, { method: 'POST', headers: { 'x-requested-with': 'encore', 'content-type': 'application/json' }, body: '{}' });
+          const j = await r.json().catch(() => ({}));
+          if (!r.ok) throw new Error(j.detail || 'Could not save a copy');
+          copy.outerHTML = `<span class="muted small">Saved to your playlists · <a href="/#/playlists/${encodeURIComponent(j.id)}">Open</a></span>`;
+        } catch (e) {
+          msg.textContent = e.message;
+          msg.hidden = false;
+          copy.disabled = false;
+        }
+      };
+      render(songs, 0);
+      pick(0, false);
+      return;
+    }
     if (t.kind === 'album' || t.kind === 'artist') {
       document.title = t.kind === 'album' ? `${t.title} – ${t.artist}` : t.title;
       const songs = t.tracks || [];
@@ -86,6 +206,7 @@
     const a = card.querySelector('audio');
     a.onerror = () => { if (!a.src.includes('transcode')) a.src += '?transcode=true'; };
   } catch (e) {
+    document.title = 'Link not available';
     card.innerHTML = `<div class="err"><h1>Link not available</h1><div class="muted">${esc(e.message)}</div></div>`;
   }
 })();

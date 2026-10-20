@@ -420,25 +420,38 @@ fn navigator_share() -> Option<js_sys::Function> {
 /// Share a library song: the system share sheet where there is one, otherwise the link goes to the clipboard.
 pub async fn share_track(t: Value) {
     let res = crate::api::post_empty(&format!("/library/tracks/{}/share", t.s("id"))).await;
-    share_link(res, &t.s("title"), &format!("{} – {}", t.s("title"), t.s("artist"))).await
+    share_link(res, &t.s("title"), &format!("{} – {}", t.s("title"), t.s("artist")), "Link copied – anyone with it can play this song").await
 }
 /// Share a library album (same as `share_track`).
 pub async fn share_album(id: String, a: Value) {
     let res = crate::api::post_empty(&format!("/library/albums/{id}/share")).await;
-    share_link(res, &a.s("album"), &format!("{} – {}", a.s("album"), a.s("albumartist"))).await
+    share_link(res, &a.s("album"), &format!("{} – {}", a.s("album"), a.s("albumartist")), "Link copied – anyone with it can play this album").await
 }
 /// Share a library artist by any spelling of its name (same as `share_track`).
 pub async fn share_artist(name: String) {
     let res = crate::api::post("/library/artists/share", serde_json::json!({ "name": name })).await;
-    share_link(res, &name, &name).await
+    share_link(res, &name, &name, "Link copied – anyone with it can play this artist").await
 }
-async fn share_link(res: crate::api::ApiResult, title: &str, text: &str) {
+/// Share a playlist (Liked Songs too): a link that always shows it as it is now (same as `share_track`).
+pub async fn share_playlist(id: String, name: String) {
+    let res = crate::api::post_empty(&format!("/playlists/{id}/share")).await;
+    share_link(res, &name, &name, PLAYLIST_LINK_COPIED).await
+}
+/// The toast when a playlist's link went to the clipboard.
+pub const PLAYLIST_LINK_COPIED: &str = "Link copied – anyone with it can play this playlist";
+/// A path on this server (`/s/abc`) as a whole address, for the clipboard.
+pub fn absolute_url(path: &str) -> Result<String, String> {
+    let href = dom::location().href().unwrap_or_default();
+    web_sys::Url::new_with_base(path, &href).map(|u| u.href())
+        .map_err(|e| e.dyn_ref::<js_sys::Error>().map(|e| String::from(e.message())).unwrap_or_else(|| e.as_string().unwrap_or_default()))
+}
+/// The system share sheet where there is one, otherwise the link goes to the clipboard and `copied` is toasted.
+async fn share_link(res: crate::api::ApiResult, title: &str, text: &str, copied: &str) {
     match res {
         Ok(r) => {
-            let href = dom::location().href().unwrap_or_default();
-            let url = match web_sys::Url::new_with_base(&r.s("path"), &href) {
-                Ok(u) => u.href(),
-                Err(e) => { toast(&e.dyn_ref::<js_sys::Error>().map(|e| String::from(e.message())).unwrap_or_else(|| e.as_string().unwrap_or_default()), "err"); return; }
+            let url = match absolute_url(&r.s("path")) {
+                Ok(u) => u,
+                Err(e) => { toast(&e, "err"); return; }
             };
             if let Some(share) = navigator_share() {
                 let data = js_sys::Object::new();
@@ -453,8 +466,8 @@ async fn share_link(res: crate::api::ApiResult, title: &str, text: &str) {
                 }
                 // cancelled → copy
             }
-            copy_text(&url);
-            toast("Link copied – anyone with it can play this song", "ok");
+            // one toast: what the link does when it was copied, else why it wasn't
+            copy_then(&url, copied);
         }
         Err(e) => toast(&e.message, "err"),
     }
@@ -464,22 +477,27 @@ async fn share_link(res: crate::api::ApiResult, title: &str, text: &str) {
 /// over plain http on the home network has no `navigator.clipboard` – the text is selected in a hidden box and
 /// copied the old way. The toast says which way it went.
 pub fn copy_text(t: &str) {
+    copy_then(t, "Copied to clipboard");
+}
+
+/// [`copy_text`] with `copied` as the toast when it worked (a share link says what the link does instead).
+fn copy_then(t: &str, copied: &str) {
     let has_api = js_sys::Reflect::get(&dom::window().navigator(), &"clipboard".into()).map(|c| !c.is_undefined() && !c.is_null()).unwrap_or(false);
     if !has_api {
         // no await before this: the browser still counts the click that asked for it
-        copy_done(copy_by_selection(t));
+        copy_done(copy_by_selection(t), copied);
         return;
     }
-    let t = t.to_string();
+    let (t, copied) = (t.to_string(), copied.to_string());
     dom::spawn(async move {
         let clip = dom::window().navigator().clipboard();
         let ok = wasm_bindgen_futures::JsFuture::from(clip.write_text(&t)).await.is_ok() || copy_by_selection(&t);
-        copy_done(ok);
+        copy_done(ok, &copied);
     });
 }
 
-fn copy_done(ok: bool) {
-    if ok { toast("Copied to clipboard", "ok") } else { toast(COPY_FAILED, "err") }
+fn copy_done(ok: bool, copied: &str) {
+    if ok { toast(copied, "ok") } else { toast(COPY_FAILED, "err") }
 }
 
 /// The old way: the text in an off-screen box, selected, `document.execCommand('copy')`.

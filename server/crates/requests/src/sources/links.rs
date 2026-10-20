@@ -246,7 +246,7 @@ async fn spotify(st: &impl Ctx, url: &str, uid: Option<i64>) -> anyhow::Result<V
     }
     match spotify_embed(st, &kind, &id).await {
         Ok(mut v) => {
-            v["description"] = json!("Imported without Spotify login – connect Spotify for ISRCs and >100-track playlists");
+            // what was missed goes in `warning` (the import shows it); the description stays the playlist's
             v["warning"] = json!(if errors.is_empty() {
                 "Read from Spotify's public page, which stops at 100 tracks and has no ISRCs. Add the Spotify app credentials in Settings and connect your account on the Connections page for the whole playlist.".to_string()
             } else {

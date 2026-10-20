@@ -22,6 +22,7 @@ import androidx.compose.foundation.lazy.grid.items
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
+import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Text
@@ -29,11 +30,13 @@ import androidx.compose.material3.TopAppBarDefaults
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.shadow
 import androidx.compose.ui.input.nestedscroll.nestedScroll
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
@@ -42,6 +45,7 @@ import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import app.encore.android.features.library.OnSongFixed
+import app.encore.android.features.library.PlaylistShareRules
 import app.encore.android.R
 import app.encore.android.data.api.Playlist
 import app.encore.android.ui.Nav
@@ -59,6 +63,7 @@ import app.encore.android.features.offline.rememberOfflineMenu
 import app.encore.android.ui.components.Tile
 import app.encore.android.ui.components.TrackRow
 import app.encore.android.ui.components.rememberLoad
+import app.encore.android.ui.components.shareLinkOf
 import app.encore.android.ui.theme.EncoreColors
 import app.encore.android.ui.theme.palette
 
@@ -120,10 +125,9 @@ fun PlaylistsScreen(nav: Nav) {
                 verticalArrangement = Arrangement.spacedBy(14.dp),
             ) {
                 items(sorted, key = { it.id }) { pl ->
-                    val pct = if (pl.total > 0) Math.round(pl.matched * 100.0 / pl.total).toInt() else 0
                     Tile(
                         title = pl.name,
-                        subtitle = "${pl.total} tracks · $pct% in library",
+                        subtitle = PlaylistShareRules.tileSubtitle(pl.total, pl.matched, pl.isShared),
                         onClick = { nav.open(Screen.Playlist(pl.id, pl.name)) },
                     ) { m ->
                         if (pl.isLiked) LikedArt(m, 12.dp, 48.dp) else PlaylistArt(nav, pl, m)
@@ -149,13 +153,29 @@ fun PlaylistScreen(nav: Nav, id: Long, name: String) {
     val offlineMenu = rememberOfflineMenu(nav)
     val p = MaterialTheme.palette
     val scrollBehavior = TopAppBarDefaults.enterAlwaysScrollBehavior()
+    val context = LocalContext.current
+    val scope = rememberCoroutineScope()
+    // the loaded playlist (its current name, and its link while it is shared)
+    val loaded = (loader.state.value as? Loadable.Ready)?.value?.playlist
     Scaffold(
         modifier = Modifier.fillMaxSize().nestedScroll(scrollBehavior.nestedScrollConnection),
         containerColor = p.bg,
         contentWindowInsets = WindowInsets(0, 0, 0, 0),
         topBar = {
             EncoreTopBar("", scrollBehavior = scrollBehavior, onBack = nav.back, actions = {
-                PlaylistMenu(nav, id, name, isLiked = name == "Liked Songs", onChanged = { loader.retry() })
+                // the playlist's public link (Liked Songs too): made, copied, then the system share sheet
+                IconButton(onClick = {
+                    val title = loaded?.name?.ifEmpty { null } ?: name
+                    shareLinkOf(context, scope, subject = title, text = title, toast = PlaylistShareRules.LINK_COPIED, after = { loader.refresh() }) {
+                        api.sharePlaylistLink(id)
+                    }
+                }) {
+                    Icon(painterResource(R.drawable.ic_share), contentDescription = "Share link")
+                }
+                PlaylistMenu(
+                    nav, id, name, isLiked = name == "Liked Songs", onChanged = { loader.retry() },
+                    shareUrl = loaded?.takeIf { it.isShared }?.let { api.url(it.sharePath) },
+                )
             })
         },
     ) { padding ->
@@ -189,6 +209,8 @@ fun PlaylistScreen(nav: Nav, id: Long, name: String) {
                             Text("${tracks.size}", style = MaterialTheme.typography.bodyMedium, fontWeight = FontWeight.Bold, color = EncoreColors.Ok)
                             Text(" in library · $missing missing", style = MaterialTheme.typography.bodyMedium, color = p.muted)
                         }
+                        // the web's Shared mark: anyone with the link can play these songs
+                        if (pl.isShared) Badge("Shared", "accent", Modifier.padding(top = 8.dp))
                         // .progress
                         val frac = if (rows.isNotEmpty()) tracks.size.toFloat() / rows.size else 0f
                         Box(Modifier.padding(top = 12.dp).width(240.dp).height(6.dp).clip(RoundedCornerShape(99.dp)).background(p.panel2)) {

@@ -460,7 +460,7 @@ pub fn update(state: &mut State, msg: Message, ctx: &mut Ctx) -> Task<Message> {
         }
         Message::ShareGot(Ok(r)) => {
             ctx.copy(format!("{}{}", ctx.base(), fmt::s(&r, "path")));
-            ctx.toast_ok("Link copied – anyone with it can play this song");
+            ctx.toast_ok("Link copied – anyone with it can play this album");
         }
         Message::ShareGot(Err(e)) => ctx.toast_err(e.message),
         Message::Menu => state.menu = Some(ctx.cursor),

@@ -2360,7 +2360,7 @@ pub fn update(state: &mut State, msg: Message, ctx: &mut Ctx) -> Task<Message> {
         }
         Message::ArtistShared(Ok(r)) => {
             ctx.copy(format!("{}{}", ctx.base(), fmt::s(&r, "path")));
-            ctx.toast_ok("Link copied – anyone with it can play this song");
+            ctx.toast_ok("Link copied – anyone with it can play this artist");
         }
         Message::ArtistShared(Err(e)) => ctx.toast_err(e.message),
         Message::CloseDialog => state.dialog = None,

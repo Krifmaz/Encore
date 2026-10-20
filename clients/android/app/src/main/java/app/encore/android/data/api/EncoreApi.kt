@@ -186,6 +186,16 @@ class EncoreApi(private val client: OkHttpClient, private val store: SessionStor
         return if (path.isNotEmpty()) url(path) else o.str("url")
     }
 
+    /**
+     * POST /api/playlists/{id}/share → the playlist's public link (same reply as a song: {token, path, url}). Liked
+     * Songs is a playlist too; asking again gives the same link.
+     */
+    fun sharePlaylistLink(id: Long): String {
+        val o = post("/api/playlists/$id/share", JsonObject(emptyMap())) as? JsonObject ?: throw IOException("Couldn't create the link")
+        val path = o.str("path")
+        return if (path.isNotEmpty()) url(path) else o.str("url")
+    }
+
     // ---- library ---------------------------------------------------------------------------------------
 
     /** [dir] "asc" / "desc", or "" for the sort's own default (as GET /api/library/index takes it). */

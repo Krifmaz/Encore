@@ -514,6 +514,20 @@ fn like_key(r: &Row) -> String {
     if r.i("track_id") > 0 { format!("t:{}", r.i("track_id")) } else { playlists::identity(r, false) }
 }
 
+/// The likes a service lists that the last sync didn't see, in the order they go into Liked Songs. Services
+/// list the newest like first (Spotify, Deezer, YouTube Music, Last.fm, ListenBrainz), so these go in oldest
+/// first: a later like gets a later place, and Liked Songs (newest first) shows them in the service's order.
+/// A song listed twice goes in once.
+fn new_likes(rows: &[Row], prev: &HashSet<String>) -> Vec<Value> {
+    let mut seen = HashSet::new();
+    let mut out: Vec<Value> = rows.iter().filter(|r| {
+        let k = like_key(r);
+        !prev.contains(&k) && seen.insert(k)
+    }).map(|r| Value::Object(r.clone())).collect();
+    out.reverse();
+    out
+}
+
 fn set_error(st: &impl Ctx, cid: i64, msg: String) {
     let _ = st.db().execute("UPDATE connections SET last_error=? WHERE id=?", p![msg.chars().take(220).collect::<String>(), cid]);
 }
@@ -551,10 +565,10 @@ pub async fn sync_user(st: &impl Ctx, uid: i64, log: &mut Vec<String>) -> Value 
                 r.insert("track_id".into(), json!(h.i("id")));
             }
         }
-        let keys: HashMap<String, Row> = rows.into_iter().map(|r| (like_key(&r), r)).collect();
         let prev = snap(st, cid, "likes");
+        let new = new_likes(&rows, &prev);
+        let keys: HashMap<String, Row> = rows.into_iter().map(|r| (like_key(&r), r)).collect();
         let now_keys: HashSet<String> = keys.keys().cloned().collect();
-        let new: Vec<Value> = now_keys.difference(&prev).filter_map(|k| keys.get(k)).map(|r| Value::Object(r.clone())).collect();
         if !new.is_empty() {
             if let Ok((n, _)) = playlists::add_tracks(st, lid, &new, &a.conn.s("service")) {
                 added_n += n;
@@ -720,4 +734,25 @@ pub async fn sync_all(st: impl Ctx) {
         sync_user(&st, u.i("user_id"), &mut log).await;
     }
     st.jobs().set("sync", json!({ "running": false, "last": now() }));
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn like(track: i64) -> Row {
+        json!({ "track_id": track, "title": format!("Song {track}") }).as_object().cloned().unwrap()
+    }
+
+    #[test]
+    fn new_likes_go_in_oldest_first() {
+        // a service lists 5 (newest) .. 1; 2 was there at the last sync, and 4 is listed twice
+        let rows: Vec<Row> = [5, 4, 3, 4, 2, 1].into_iter().map(like).collect();
+        let prev: HashSet<String> = ["t:2".to_string()].into();
+        let got: Vec<i64> = new_likes(&rows, &prev).iter().map(|v| v["track_id"].as_i64().unwrap()).collect();
+        assert_eq!(got, [1, 3, 4, 5]);
+        // the same list again: nothing new
+        let all: HashSet<String> = rows.iter().map(like_key).collect();
+        assert!(new_likes(&rows, &all).is_empty());
+    }
 }

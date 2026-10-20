@@ -580,6 +580,38 @@ fn make_thumbs(db: &Db, src: &Path, album_id: &str, v: u64, want: &[(u32, bool)]
     n
 }
 
+/// Side of the picture [`mosaic`] makes, in pixels.
+pub const MOSAIC_SIZE: u32 = 600;
+
+/// The picture of a shared playlist: the first four `srcs` cropped to squares in a 2x2 grid (top left, top
+/// right, bottom left, bottom right), a 600x600 JPEG at `out`. It is written next to `out` and then renamed
+/// into place, so a reader never sees half a file. False, and no file, when there are fewer than four
+/// pictures or one of them can't be read.
+pub fn mosaic(srcs: &[PathBuf], out: &Path) -> bool {
+    let tile = MOSAIC_SIZE / 2;
+    if srcs.len() < 4 {
+        return false;
+    }
+    let mut canvas = image::RgbImage::new(MOSAIC_SIZE, MOSAIC_SIZE);
+    for (i, src) in srcs.iter().take(4).enumerate() {
+        let Ok(img) = image::ImageReader::open(src).and_then(|r| r.with_guessed_format()).map_err(anyhow::Error::from).and_then(|r| r.decode().map_err(anyhow::Error::from)) else { return false };
+        let square = img.resize_to_fill(tile, tile, image::imageops::FilterType::Triangle).to_rgb8();
+        let (x, y) = ((i as u32 % 2) * tile, (i as u32 / 2) * tile);
+        image::imageops::replace(&mut canvas, &square, x as i64, y as i64);
+    }
+    let mut buf = Vec::new();
+    if image::codecs::jpeg::JpegEncoder::new_with_quality(&mut buf, JPEG_QUALITY).encode_image(&canvas).is_err() {
+        return false;
+    }
+    // a hidden name in the same folder: the rename is atomic, and folder tidying knows these
+    let tmp = out.parent().unwrap_or(Path::new(".")).join(format!(".{}.tmp.jpg", encore_core::ids::random_hex(6)));
+    if std::fs::write(&tmp, &buf).is_ok() && std::fs::rename(&tmp, out).is_ok() {
+        return true;
+    }
+    let _ = std::fs::remove_file(&tmp);
+    false
+}
+
 /// The thumbnail for a request (made now if needed), or the original when it can't be made.
 pub fn thumbnail(db: &Db, src: &Path, album_id: &str, v: u64, size: u32, webp: bool) -> PathBuf {
     let out = thumb_path(db, album_id, size, v, webp);
@@ -798,6 +830,46 @@ mod tests {
         // the same answer every time
         assert_eq!(dominant_color(&img), dominant_color(&img));
         assert_eq!(dominant_color(&image::RgbImage::new(0, 0)), None);
+    }
+
+    #[test]
+    fn mosaic_puts_four_covers_in_the_corners() {
+        let dir = std::env::temp_dir().join(format!("encore-mosaic-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        // different sizes, shapes and formats: each is cropped to a square of its own corner
+        let colours = [[220u8, 20, 20], [20, 200, 40], [30, 40, 220], [250, 250, 250]];
+        let shapes = [(500u32, 500u32, "a.jpg"), (120, 80, "b.png"), (64, 300, "c.png"), (1000, 900, "d.jpg")];
+        let srcs: Vec<PathBuf> = colours.iter().zip(shapes).map(|(c, (w, h, name))| {
+            let p = dir.join(name);
+            image::RgbImage::from_pixel(w, h, image::Rgb(*c)).save(&p).unwrap();
+            p
+        }).collect();
+        let out = dir.join("tok.mosaic.jpg");
+        assert!(mosaic(&srcs, &out));
+        let img = image::open(&out).unwrap().to_rgb8();
+        assert_eq!((img.width(), img.height()), (600, 600));
+        for (i, (x, y)) in [(150u32, 150u32), (450, 150), (150, 450), (450, 450)].into_iter().enumerate() {
+            let px = img.get_pixel(x, y).0;
+            for (got, want) in px.iter().zip(colours[i]) {
+                assert!((*got as i32 - want as i32).abs() < 24, "quadrant {i}: {px:?} vs {:?}", colours[i]);
+            }
+        }
+        // nothing else left in the folder (the temp file was renamed)
+        let mut names: Vec<String> = std::fs::read_dir(&dir).unwrap().flatten().map(|e| e.file_name().to_string_lossy().into_owned()).collect();
+        names.sort();
+        assert_eq!(names, ["a.jpg", "b.png", "c.png", "d.jpg", "tok.mosaic.jpg"]);
+
+        // a picture that can't be read, or fewer than four: false and no file
+        std::fs::write(dir.join("bad.jpg"), b"\xff\xd8\xff not a real jpeg").unwrap();
+        let out2 = dir.join("tok.other.jpg");
+        let bad = vec![srcs[0].clone(), srcs[1].clone(), dir.join("bad.jpg"), srcs[3].clone()];
+        assert!(!mosaic(&bad, &out2));
+        assert!(!mosaic(&srcs[..3], &out2));
+        assert!(!mosaic(&[srcs[0].clone(), srcs[1].clone(), srcs[2].clone(), dir.join("missing.jpg")], &out2));
+        assert!(!out2.exists());
+        assert!(!std::fs::read_dir(&dir).unwrap().flatten().any(|e| e.file_name().to_string_lossy().contains(".tmp")));
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

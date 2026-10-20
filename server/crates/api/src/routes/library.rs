@@ -1,5 +1,5 @@
 //! /api/library: browse, play, download, share, likes, storage, and removing things.
-use crate::auth::{self, Admin, User};
+use crate::auth::{self, Admin, MaybeUser, User};
 use encore_db::{now, Conn, RowExt};
 use crate::enrich::{enrich, enrich_now};
 use encore_core::error::{err, ApiResult};
@@ -58,6 +58,7 @@ pub fn router() -> Router<AppState> {
         .route("/api/share/{token}/stream", get(shared_stream))
         .route("/api/share/{token}/cover", get(shared_cover))
         .route("/api/share/{token}/video.mp4", get(shared_video))
+        .route("/api/share/{token}/copy", post(shared_copy))
         .route("/s/{token}", get(share_page))
 }
 
@@ -741,8 +742,32 @@ struct CoverQ {
     v: String,
 }
 
+/// Whether `If-None-Match` names this ETag (or `*`).
+fn etag_matches(headers: &axum::http::HeaderMap, etag: &str) -> bool {
+    headers.get(header::IF_NONE_MATCH).and_then(|h| h.to_str().ok())
+        .is_some_and(|h| h.split(',').any(|t| { let t = t.trim(); t == etag || t == "*" || t.strip_prefix("W/") == Some(etag) }))
+}
+
+/// A file answered after the ETag check: 304 when `If-None-Match` names `etag`. A request that sends an ETag
+/// is answered by it alone (as HTTP says): the file's date is not looked at, since the same URL may serve
+/// another, older file now (another album's cover under a playlist link).
+async fn serve_tagged(path: &std::path::Path, mut req: Request, content_type: Option<&str>, etag: &str) -> ApiResult<Response> {
+    let mut r = if etag_matches(req.headers(), etag) {
+        axum::http::StatusCode::NOT_MODIFIED.into_response()
+    } else {
+        if req.headers().contains_key(header::IF_NONE_MATCH) {
+            req.headers_mut().remove(header::IF_MODIFIED_SINCE);
+        }
+        serve_file(&path.to_string_lossy(), req, content_type, None).await?
+    };
+    r.headers_mut().insert(header::ETAG, HeaderValue::from_str(etag).unwrap_or(HeaderValue::from_static("\"0\"")));
+    Ok(r)
+}
+
 /// A cover (or a thumbnail of it, WebP when the client takes it). With the current `v` the answer is
-/// immutable; without it, clients keep it a day and revalidate with ETag / Last-Modified.
+/// immutable; without it, clients keep it a day and revalidate with ETag / Last-Modified. The ETag names the
+/// album too, so one URL that stands for different albums over time (a playlist link) never gets a 304 for
+/// another album's cover.
 pub async fn cover_response(st: &AppState, album_id: &str, size: u32, v: &str, req: Request) -> ApiResult<Response> {
     let size = encore_media::covers::snap(size);
     let webp = size > 0 && req.headers().get(header::ACCEPT).and_then(|a| a.to_str().ok()).is_some_and(|a| a.contains("image/webp"));
@@ -752,18 +777,12 @@ pub async fn cover_response(st: &AppState, album_id: &str, size: u32, v: &str, r
         Some((if size > 0 { encore_media::covers::thumbnail(&st2.db, &p, &aid, cv, size, webp) } else { p }, cv))
     }).await.ok().flatten().ok_or_else(|| err(404, "No cover"))?;
     let ext = path.extension().map(|e| e.to_string_lossy().to_lowercase()).unwrap_or_default();
-    let etag = format!("\"{cur:x}-{size}-{ext}\"");
+    let album: String = album_id.chars().filter(char::is_ascii_alphanumeric).collect();
+    let etag = format!("\"{album}-{cur:x}-{size}-{ext}\"");
     let cache = if !v.is_empty() && v == cur.to_string() { "private, max-age=31536000, immutable" } else { "private, max-age=86400, stale-while-revalidate=604800" };
-    let fresh = req.headers().get(header::IF_NONE_MATCH).and_then(|h| h.to_str().ok())
-        .is_some_and(|h| h.split(',').any(|t| { let t = t.trim(); t == etag || t == "*" || t.strip_prefix("W/") == Some(etag.as_str()) }));
-    let mut r = if fresh {
-        axum::http::StatusCode::NOT_MODIFIED.into_response()
-    } else {
-        serve_file(&path.to_string_lossy(), req, None, None).await?
-    };
+    let mut r = serve_tagged(&path, req, None, &etag).await?;
     let h = r.headers_mut();
     h.insert(header::CACHE_CONTROL, HeaderValue::from_static(cache));
-    h.insert(header::ETAG, HeaderValue::from_str(&etag).unwrap_or(HeaderValue::from_static("\"0\"")));
     if size > 0 {
         h.insert(header::VARY, HeaderValue::from_static("Accept"));
     }
@@ -1013,8 +1032,8 @@ fn link_gone() -> encore_core::error::ApiError {
     err(404, "This link doesn't work any more")
 }
 
-/// The link for one thing a user shares: one token per user and song / album / artist.
-fn share_link(st: &AppState, uid: i64, kind: &str, track_id: i64, r: &str) -> ApiResult<Json<Value>> {
+/// The link for one thing a user shares: one token per user and song / album / artist / playlist.
+pub(super) fn share_link(st: &AppState, uid: i64, kind: &str, track_id: i64, r: &str) -> ApiResult<Json<Value>> {
     let found = if kind == "track" {
         st.db.one("SELECT token FROM shares WHERE track_id=? AND user_id=? AND COALESCE(kind,'track')='track'", p![track_id, uid])?
     } else {
@@ -1029,8 +1048,13 @@ fn share_link(st: &AppState, uid: i64, kind: &str, track_id: i64, r: &str) -> Ap
             t
         }
     };
+    Ok(Json(share_json(st, &token)))
+}
+
+/// A link as the apps get it: `{token, path, url}` (`url` starts with the public URL from Settings, when set).
+pub(super) fn share_json(st: &AppState, token: &str) -> Value {
     let base = st.cfg.str("base_url");
-    Ok(Json(json!({ "token": token, "path": format!("/s/{token}"), "url": format!("{}/s/{token}", base.trim_end_matches('/')) })))
+    json!({ "token": token, "path": format!("/s/{token}"), "url": format!("{}/s/{token}", base.trim_end_matches('/')) })
 }
 
 async fn share(State(st): State<AppState>, User(u): User, Path(id): Path<i64>) -> ApiResult<Json<Value>> {
@@ -1075,16 +1099,18 @@ async fn share_artist(State(st): State<AppState>, User(u): User, Json(b): Json<S
     }).await
 }
 
-/// What a token points at: kind "track" (track_id), "album" (ref = album id) or "artist" (ref = name).
+/// What a token points at: kind "track" (track_id), "album" (ref = album id), "artist" (ref = name) or
+/// "playlist" (ref = playlist id). `user_id` is who made the link.
 struct Shared {
     kind: String,
     r: String,
     track_id: i64,
+    user_id: i64,
 }
 
 fn share_row(st: &AppState, token: &str) -> ApiResult<Shared> {
-    let s = st.db.one("SELECT track_id, COALESCE(kind,'track') kind, COALESCE(ref,'') ref FROM shares WHERE token=?", p![token])?.ok_or_else(link_gone)?;
-    Ok(Shared { kind: s.s("kind"), r: s.s("ref"), track_id: s.i("track_id") })
+    let s = st.db.one("SELECT track_id, user_id, COALESCE(kind,'track') kind, COALESCE(ref,'') ref FROM shares WHERE token=?", p![token])?.ok_or_else(link_gone)?;
+    Ok(Shared { kind: s.s("kind"), r: s.s("ref"), track_id: s.i("track_id"), user_id: s.i("user_id") })
 }
 
 const SHARE_COLS: &str = "id, title, artist, album, albumartist, album_id, year, track, disc, duration, format, bitrate, path";
@@ -1092,10 +1118,86 @@ const SHARE_COLS: &str = "id, title, artist, album, albumartist, album_id, year,
 /// Most songs an artist link lists.
 const SHARE_ARTIST_MAX: usize = 100;
 
+/// Songs in one page of a playlist link (`?limit=` asks for up to [`SHARE_PAGE_MAX`]).
+const SHARE_PAGE: usize = 200;
+const SHARE_PAGE_MAX: usize = 500;
+
+/// A shared playlist as it is now.
+struct SharedPlaylist {
+    id: i64,
+    /// "Liked Songs" for the liked list
+    name: String,
+    liked: bool,
+    description: String,
+    /// the owner's user name (the page shows it)
+    owner: String,
+}
+
+/// The playlist a link shares, looked at every time: it is still there, still the link maker's, and its
+/// owner is not disabled or deleted (the page names the owner, so a link doesn't outlive them). Otherwise
+/// the link is gone.
+fn shared_playlist(st: &AppState, s: &Shared) -> ApiResult<SharedPlaylist> {
+    let pid: i64 = s.r.parse().map_err(|_| link_gone())?;
+    let r = st.db.one(
+        "SELECT p.id, p.name, p.kind, COALESCE(p.description,'') description, u.username FROM playlists p JOIN users u ON u.id = p.user_id
+         WHERE p.id = ? AND p.user_id = ? AND u.disabled = 0", p![pid, s.user_id])?.ok_or_else(link_gone)?;
+    let liked = r.s("kind") == "liked";
+    Ok(SharedPlaylist { id: r.i("id"), name: if liked { "Liked Songs".into() } else { r.s("name") }, liked, description: public_description(&r.s("description")), owner: r.s("username") })
+}
+
+/// Most characters of a playlist's description a link shows (the page shows two lines).
+const SHARE_DESCRIPTION_MAX: usize = 300;
+
+/// A playlist's description as its link shows it: plain text on one line (the tags of a service's HTML
+/// description, such as Spotify's `<a href=spotify:…>`, taken out), at most [`SHARE_DESCRIPTION_MAX`]
+/// characters. The note older Spotify imports left there for the owner is not shown.
+pub(crate) fn public_description(d: &str) -> String {
+    static TAG: std::sync::LazyLock<regex::Regex> = std::sync::LazyLock::new(|| regex::Regex::new(r"</?[A-Za-z][^<>]*>").unwrap());
+    let text = TAG.replace_all(d, " ").split_whitespace().collect::<Vec<_>>().join(" ");
+    if text.starts_with("Imported without Spotify login") {
+        return String::new();
+    }
+    match text.char_indices().nth(SHARE_DESCRIPTION_MAX) {
+        Some((cut, _)) => format!("{}…", text[..cut].trim_end()),
+        None => text,
+    }
+}
+
+/// The order a playlist link lists its songs in: Liked Songs newest first (a like goes to the end of the
+/// list and an unlike numbers it again, so the highest position is the latest like), any other playlist in
+/// its own order.
+fn playlist_order(pl: &SharedPlaylist) -> &'static str {
+    if pl.liked { "i.position DESC, i.id DESC" } else { "i.position, i.id" }
+}
+
+/// The ids of the songs a playlist link lists, in list order (the first `limit`, or all): only items that are
+/// in the library, and a song listed twice is there twice.
+fn playlist_song_ids(st: &AppState, pl: &SharedPlaylist, limit: Option<usize>) -> ApiResult<Vec<i64>> {
+    let limit = limit.map_or(-1, |l| l as i64);
+    let rows = st.db.query(&format!("SELECT i.track_id FROM playlist_items i JOIN tracks t ON t.id = i.track_id WHERE i.playlist_id = ? ORDER BY {} LIMIT ?", playlist_order(pl)),
+        p![pl.id, limit])?;
+    Ok(rows.iter().map(|r| r.i("track_id")).collect())
+}
+
+/// `cols` of these songs in this order, like [`rows_by_id`], but a song listed twice comes back twice (a
+/// playlist may hold one song twice).
+fn rows_in_order(db: &impl encore_db::Query, cols: &str, ids: &[i64]) -> rusqlite::Result<Vec<encore_db::Row>> {
+    let mut uniq = ids.to_vec();
+    uniq.sort_unstable();
+    uniq.dedup();
+    let by_id: HashMap<i64, encore_db::Row> = rows_by_id(db, cols, &uniq)?.into_iter().map(|r| (r.i("id"), r)).collect();
+    Ok(ids.iter().filter_map(|i| by_id.get(i).cloned()).collect())
+}
+
 /// The songs a link plays, in page order: the song; the album's songs; the artist's songs (every
-/// spelling, alias and collaboration), most played first, else newest albums first.
+/// spelling, alias and collaboration), most played first, else newest albums first; the first page of a
+/// playlist. Only a playlist may have none: it is empty, or none of its songs is in the library.
 fn shared_tracks(st: &AppState, s: &Shared) -> ApiResult<Vec<encore_db::Row>> {
     let rows = match s.kind.as_str() {
+        "playlist" => {
+            let pl = shared_playlist(st, s)?;
+            return Ok(rows_in_order(&st.db, SHARE_COLS, &playlist_song_ids(st, &pl, Some(SHARE_PAGE))?)?);
+        }
         "album" => st.db.query(&format!("SELECT {SHARE_COLS} FROM tracks WHERE album_id=? ORDER BY disc, track, lower(title) LIMIT 500"), p![s.r])?,
         "artist" => {
             let (cond, params) = st.library.artists.track_filter(&st.db, &s.r);
@@ -1111,7 +1213,8 @@ fn shared_tracks(st: &AppState, s: &Shared) -> ApiResult<Vec<encore_db::Row>> {
     Ok(rows)
 }
 
-/// Whether a song belongs to what the link shares: the song, a song of the album, or of the artist.
+/// Whether a song belongs to what the link shares: the song, a song of the album, of the artist, or one the
+/// playlist lists now (a song taken out of it, or unliked, stops playing at once).
 fn shared_has(st: &AppState, s: &Shared, id: i64) -> ApiResult<bool> {
     Ok(match s.kind.as_str() {
         "album" => st.db.one("SELECT 1 FROM tracks WHERE album_id=? AND id=?", p![s.r, id])?.is_some(),
@@ -1120,52 +1223,186 @@ fn shared_has(st: &AppState, s: &Shared, id: i64) -> ApiResult<bool> {
             params.push(json!(id));
             st.db.one(&format!("SELECT 1 FROM tracks WHERE {cond} AND id=?"), params)?.is_some()
         }
+        "playlist" => {
+            let pl = shared_playlist(st, s)?;
+            st.db.one("SELECT 1 FROM playlist_items i JOIN tracks t ON t.id = i.track_id WHERE i.playlist_id = ? AND i.track_id = ? LIMIT 1", p![pl.id, id])?.is_some()
+        }
         _ => id == s.track_id && st.db.one("SELECT 1 FROM tracks WHERE id=?", p![id])?.is_some(),
     })
 }
 
-/// The album whose cover stands for the link: the album, the artist's picture as the library shows it
-/// (its cover album), or the song's album.
+/// The album whose cover stands for a song, album or artist link: the album, the artist's picture as the
+/// library shows it (its cover album), or the song's album.
 fn shared_cover_album(st: &AppState, s: &Shared, tracks: &[encore_db::Row]) -> String {
+    let first = || tracks.first().map(|t| t.s("album_id")).unwrap_or_default();
     match s.kind.as_str() {
         "album" => s.r.clone(),
-        "artist" => st.library.artists.index(&st.db).find(&s.r).map(|a| a.cover_album.clone()).filter(|c| !c.is_empty()).unwrap_or_else(|| tracks[0].s("album_id")),
-        _ => tracks[0].s("album_id"),
+        "artist" => st.library.artists.index(&st.db).find(&s.r).map(|a| a.cover_album.clone()).filter(|c| !c.is_empty()).unwrap_or_else(first),
+        _ => first(),
     }
 }
 
-/// Everything the share page shows (no file paths). Songs: the song and its quality; albums and
-/// artists: title, artist, year and the song list.
-async fn shared_meta(st: &AppState, token: &str) -> ApiResult<Value> {
+/// What stands for a link in its page and preview: an album's cover, or a playlist's mosaic.
+enum LinkCover {
+    Album(String),
+    Mosaic(std::path::PathBuf),
+}
+
+/// How many of a playlist's albums are looked at for covers before its picture settles for fewer than four.
+const MOSAIC_LOOK: usize = 64;
+
+/// The covers of the first four albums, in list order, among a playlist link's songs that have one:
+/// (album id, cover file, cover version).
+fn playlist_covers(st: &AppState, pl: &SharedPlaylist) -> ApiResult<Vec<(String, std::path::PathBuf, u64)>> {
+    let rows = st.db.query(&format!("SELECT t.album_id FROM playlist_items i JOIN tracks t ON t.id = i.track_id WHERE i.playlist_id = ? ORDER BY {} LIMIT 2000", playlist_order(pl)),
+        p![pl.id])?;
+    let mut seen = std::collections::HashSet::new();
+    let mut out = vec![];
+    for aid in rows.iter().map(|r| r.s("album_id")) {
+        if out.len() == 4 || seen.len() >= MOSAIC_LOOK {
+            break;
+        }
+        if aid.is_empty() || !seen.insert(aid.clone()) {
+            continue;
+        }
+        if let Some((path, v)) = st.library.covers.get(&st.db, &aid) {
+            out.push((aid, path, v));
+        }
+    }
+    Ok(out)
+}
+
+/// A playlist link's picture: a mosaic of the first four album covers in list order, or with fewer, the
+/// first of them. None when no listed song has a cover (or nothing is listed). The playlist's own picture
+/// from where it was imported (a Spotify address) is never used: the viewer's browser would ask another
+/// site for it, and those addresses expire.
+fn playlist_cover(st: &AppState, token: &str, pl: &SharedPlaylist) -> ApiResult<Option<LinkCover>> {
+    let covers = playlist_covers(st, pl)?;
+    if covers.len() == 4 {
+        if let Some(m) = playlist_mosaic(st, token, &covers) {
+            return Ok(Some(LinkCover::Mosaic(m)));
+        }
+    }
+    Ok(covers.into_iter().next().map(|(aid, _, _)| LinkCover::Album(aid)))
+}
+
+/// The mosaic of four covers, made once per set of four (album and cover version) and kept under
+/// <config>/cache/share-cover/<token>.<album>-<version>….jpg; this link's older mosaics and those of links
+/// that are gone are tidied away before a new one is made. None when one of the four can't be read.
+fn playlist_mosaic(st: &AppState, token: &str, covers: &[(String, std::path::PathBuf, u64)]) -> Option<std::path::PathBuf> {
+    let dir = st.db.data_dir.join("cache").join("share-cover");
+    std::fs::create_dir_all(&dir).ok()?;
+    let name = format!("{token}.{}.jpg", covers.iter().map(|(aid, _, v)| format!("{aid}-{v:x}")).collect::<Vec<_>>().join("."));
+    let out = dir.join(&name);
+    if out.is_file() {
+        return Some(out);
+    }
+    share_video_tidy(st, &dir, token, &name);
+    // the 400 px thumbnails (made ahead of time for every album) are plenty for 300 px squares
+    let thumbs: Vec<std::path::PathBuf> = covers.iter().map(|(aid, path, v)| encore_media::covers::thumbnail(&st.db, path, aid, *v, 400, false)).collect();
+    encore_media::covers::mosaic(&thumbs, &out).then_some(out)
+}
+
+/// What stands for a link (see [`LinkCover`]): a playlist's picture, else the album of [`shared_cover_album`].
+fn link_cover(st: &AppState, token: &str, s: &Shared, tracks: &[encore_db::Row]) -> ApiResult<Option<LinkCover>> {
+    if s.kind == "playlist" {
+        return playlist_cover(st, token, &shared_playlist(st, s)?);
+    }
+    Ok(Some(LinkCover::Album(shared_cover_album(st, s, tracks))))
+}
+
+/// The picture of a link's preview video: a playlist's mosaic or cover, else the cover of its album.
+fn shared_cover_file(st: &AppState, token: &str, s: &Shared, tracks: &[encore_db::Row]) -> ApiResult<Option<std::path::PathBuf>> {
+    Ok(match link_cover(st, token, s, tracks)? {
+        Some(LinkCover::Mosaic(path)) => Some(path),
+        Some(LinkCover::Album(aid)) => st.library.find_cover(&st.db, &aid),
+        None => None,
+    })
+}
+
+/// `GET /api/share/{token}` of a playlist link: which page of its songs. Song, album and artist links
+/// ignore it.
+#[derive(Deserialize, Default, Clone)]
+#[serde(default)]
+struct SharePageQ {
+    /// the first song of the page (0 = the top)
+    offset: i64,
+    /// songs in the page: 200 when not given, at most 500
+    limit: Option<i64>,
+    /// a seed: the whole list in a random order that is the same for the same seed, so the pages of one
+    /// shuffle fit together
+    shuffle: Option<u64>,
+}
+
+/// A playlist link's data: the playlist as it is now, its count and length over the whole list, and one
+/// page of its songs (no file paths).
+fn playlist_meta(st: &AppState, s: &Shared, q: &SharePageQ) -> ApiResult<Value> {
+    use rand::seq::SliceRandom;
+    use rand::SeedableRng;
+    let pl = shared_playlist(st, s)?;
+    let mut ids = playlist_song_ids(st, &pl, None)?;
+    let count = ids.len();
+    let duration = st.db.one("SELECT COALESCE(SUM(t.duration), 0.0) d FROM playlist_items i JOIN tracks t ON t.id = i.track_id WHERE i.playlist_id = ?", p![pl.id])?
+        .map_or(0.0, |r| r.f("d"));
+    // the first song in list order is what the link plays first (its stream, the preview's audio)
+    let format = match ids.first() {
+        Some(id) => st.db.one("SELECT format FROM tracks WHERE id=?", p![id])?.map(|r| r.s("format")).unwrap_or_default(),
+        None => String::new(),
+    };
+    if let Some(seed) = q.shuffle {
+        ids.shuffle(&mut rand::rngs::StdRng::seed_from_u64(seed));
+    }
+    let offset = q.offset.max(0) as usize;
+    let limit = q.limit.unwrap_or(SHARE_PAGE as i64).clamp(1, SHARE_PAGE_MAX as i64) as usize;
+    let page: Vec<i64> = ids.iter().skip(offset).take(limit).copied().collect();
+    let tracks = rows_in_order(&st.db, "id, title, artist, album, track, disc, duration", &page)?;
+    Ok(json!({
+        "kind": "playlist", "liked": pl.liked, "title": pl.name, "owner": pl.owner, "description": pl.description,
+        "count": count, "duration": duration,
+        "offset": offset, "limit": limit, "has_more": offset + page.len() < count, "shuffle": q.shuffle,
+        "tracks": tracks, "format": format, "app_name": st.cfg.str("app_name"),
+    }))
+}
+
+/// Everything the share page shows (no file paths), and who made the link. Songs: the song and its
+/// quality; albums and artists: title, artist, year and the song list; playlists: see [`playlist_meta`].
+async fn shared_meta(st: &AppState, token: &str, q: &SharePageQ) -> ApiResult<(Value, i64)> {
     // the link, its songs and, for an artist, the name the library shows (the artist index): on the blocking
     // pool, since anyone with the link (and every link-preview bot) can ask
-    let token = token.to_string();
-    let (s, tracks, artist_name) = st.blocking(move |st| {
+    let (token, q) = (token.to_string(), q.clone());
+    let (s, tracks, artist_name, playlist) = st.blocking(move |st| {
         let s = share_row(st, &token)?;
+        if s.kind == "playlist" {
+            let v = playlist_meta(st, &s, &q)?;
+            return Ok((s, vec![], None, Some(v)));
+        }
         let tracks = shared_tracks(st, &s)?;
         let name = (s.kind == "artist").then(|| st.library.artists.index(&st.db).find(&s.r).map(|a| a.name.clone()).filter(|n| !n.is_empty()).unwrap_or_else(|| s.r.clone()));
-        Ok((s, tracks, name))
+        Ok((s, tracks, name, None))
     }).await?;
+    if let Some(v) = playlist {
+        return Ok((v, s.user_id));
+    }
     let app = st.cfg.str("app_name");
+    let first = tracks.first().ok_or_else(link_gone)?;
     if s.kind != "album" && s.kind != "artist" {
-        let t = &tracks[0];
+        let t = first;
         let path = t.s("path");
         let media = st.media.clone();
         let info = tokio::task::spawn_blocking(move || media.audio_info(&path)).await.unwrap_or(json!({}));
-        return Ok(json!({
+        return Ok((json!({
             "kind": "track",
             "title": t.get("title"), "artist": t.get("artist"), "album": t.get("album"), "albumartist": t.get("albumartist"), "year": t.get("year"), "track": t.get("track"),
             "duration": t.get("duration"), "format": t.get("format"), "bitrate": t.get("bitrate"),
             "sample_rate": info["sample_rate"], "bit_depth": info["bit_depth"], "channels": info["channels"], "lossless": info["lossless"],
             "app_name": app,
-        }));
+        }), s.user_id));
     }
     let list: Vec<Value> = tracks.iter().map(|t| json!({
         "id": t.get("id"), "title": t.get("title"), "artist": t.get("artist"), "album": t.get("album"),
         "track": t.get("track"), "disc": t.get("disc"), "duration": t.get("duration"),
     })).collect();
     let duration: f64 = tracks.iter().map(|t| t.f("duration")).sum();
-    let first = &tracks[0];
     let (title, artist, album, year) = if s.kind == "album" {
         let year = tracks.iter().map(|t| t.s("year")).filter(|y| !y.is_empty()).max().unwrap_or_default();
         let aa = first.s("albumartist");
@@ -1174,52 +1411,106 @@ async fn shared_meta(st: &AppState, token: &str) -> ApiResult<Value> {
         let name = artist_name.unwrap_or_else(|| s.r.clone());
         (name.clone(), name, String::new(), String::new())
     };
-    Ok(json!({
+    Ok((json!({
         "kind": s.kind, "title": title, "artist": artist, "album": album, "year": year,
         "duration": duration, "count": list.len(), "tracks": list,
         "format": first.get("format"), "app_name": app,
-    }))
+    }), s.user_id))
 }
 
 /// A share link's data, for anyone who has the link: a signed-in listener who has translations on gets
-/// theirs too.
-async fn shared(State(st): State<AppState>, Path(token): Path<String>, headers: axum::http::HeaderMap) -> ApiResult<Json<Value>> {
-    let mut v = shared_meta(&st, &token).await?;
-    let viewer = crate::enrich::viewer(&st, &headers).await;
-    enrich(&st, viewer.as_ref(), &mut v).await;
+/// theirs too. A playlist link answers one page of its songs ([`SharePageQ`]) and `viewer`: whether the
+/// viewer is signed in on this server and made the link (the page offers Save a copy to the others). The
+/// owner's id is never in the answer.
+async fn shared(State(st): State<AppState>, MaybeUser(me): MaybeUser, Path(token): Path<String>, Query(q): Query<SharePageQ>) -> ApiResult<Json<Value>> {
+    let (mut v, owner) = shared_meta(&st, &token, &q).await?;
+    if v["kind"] == "playlist" {
+        v["viewer"] = json!({ "signed_in": me.is_some(), "own": me.as_ref().is_some_and(|u| u.i("id") == owner) });
+    }
+    enrich(&st, me.as_ref(), &mut v).await;
     Ok(Json(v))
 }
 
 #[derive(Deserialize, Default)]
 #[serde(default)]
 struct SharedTrackQ {
-    /// album / artist links: which of the listed songs (default the first)
+    /// album, artist and playlist links: which of the listed songs (default the first)
     track: Option<i64>,
 }
 
 async fn shared_stream(State(st): State<AppState>, Path(token): Path<String>, Query(q): Query<StreamQ>, Query(w): Query<SharedTrackQ>, req: Request) -> ApiResult<Response> {
-    // only songs of what the link shares (checked on its own: the artist list changes with plays, so a
-    // song a page shows may have left the top songs since); an artist link reads the artist index, so on
-    // the blocking pool
+    // only songs of what the link shares (checked on its own: the artist list changes with plays and a
+    // playlist with its owner, so a song a page shows may have left it since); an artist link reads the
+    // artist index, so on the blocking pool
     let id = st.blocking(move |st| {
         let s = share_row(st, &token)?;
         match w.track {
             Some(id) if shared_has(st, &s, id)? => Ok(id),
             Some(_) => Err(err(404, "Track not found")),
-            None => Ok(shared_tracks(st, &s)?[0].i("id")),
+            None => shared_tracks(st, &s)?.first().map(|t| t.i("id")).ok_or_else(|| err(404, "Track not found")),
         }
     }).await?;
     // share links play the file (or a plain conversion) – never server processing
     stream_track(&st, id, &q, req, None).await
 }
 
+/// `Cache-Control` of a playlist link's picture and preview video. The playlist changes under the same URL and
+/// Stop sharing ends the link at once, so no shared cache (a CDN, a proxy) keeps them, and the browser asks
+/// again each time (a 304 while the file is the same). Song, album and artist links never change.
+const SHARE_LIVE_CACHE: &str = "private, no-cache";
+
+/// A playlist link's mosaic or preview video ([`SHARE_LIVE_CACHE`]). The ETag stands for the file's name,
+/// which says which covers, song and versions it holds.
+async fn share_live_file(path: &std::path::Path, req: Request, content_type: &str) -> ApiResult<Response> {
+    let name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+    let etag = format!("\"{}\"", &encore_core::ids::sha256_hex(&name)[..20]);
+    let mut r = serve_tagged(path, req, Some(content_type), &etag).await?;
+    r.headers_mut().insert(header::CACHE_CONTROL, HeaderValue::from_static(SHARE_LIVE_CACHE));
+    Ok(r)
+}
+
 async fn shared_cover(State(st): State<AppState>, Path(token): Path<String>, Query(q): Query<CoverQ>, req: Request) -> ApiResult<Response> {
-    let album = st.blocking(move |st| {
+    let (cover, live) = st.blocking(move |st| {
         let s = share_row(st, &token)?;
-        let tracks = shared_tracks(st, &s)?;
-        Ok(shared_cover_album(st, &s, &tracks))
+        // a playlist's picture comes from its own list (an empty one is not gone, it has no picture)
+        let live = s.kind == "playlist";
+        let tracks = if live { vec![] } else { shared_tracks(st, &s)? };
+        Ok((link_cover(st, &token, &s, &tracks)?.ok_or_else(|| err(404, "No cover"))?, live))
     }).await?;
-    cover_response(&st, &album, q.s, &q.v, req).await
+    match cover {
+        LinkCover::Album(album) => {
+            let mut r = cover_response(&st, &album, q.s, &q.v, req).await?;
+            if live {
+                r.headers_mut().insert(header::CACHE_CONTROL, HeaderValue::from_static(SHARE_LIVE_CACHE));
+            }
+            Ok(r)
+        }
+        // always 600x600 (`s` is not looked at)
+        LinkCover::Mosaic(path) => share_live_file(&path, req, "image/jpeg").await,
+    }
+}
+
+/// Save a copy: a signed-in listener on this server keeps a playlist link as a playlist of their own, with
+/// every song of the link in its order (not shuffled) at this moment; it doesn't follow the link afterwards.
+/// Liked Songs is saved as "Liked Songs · <owner>", never into the viewer's own Liked Songs. Body `{}`, or
+/// `{"name": …}` for another name.
+async fn shared_copy(State(st): State<AppState>, User(u): User, Path(token): Path<String>, body: Option<Json<Value>>) -> ApiResult<Json<Value>> {
+    let name = body.and_then(|Json(b)| b["name"].as_str().map(|n| n.trim().to_string())).filter(|n| !n.is_empty());
+    st.blocking(move |st| {
+        let s = share_row(st, &token)?;
+        if s.kind != "playlist" {
+            return Err(err(400, "Only playlists can be copied"));
+        }
+        let pl = shared_playlist(st, &s)?;
+        let ids = playlist_song_ids(st, &pl, None)?;
+        let name = name.unwrap_or_else(|| if pl.liked { format!("Liked Songs · {}", pl.owner) } else { pl.name.clone() });
+        let bad = |e: anyhow::Error| err(400, e.to_string());
+        let made = encore_sync::playlists::create(st, u.i("id"), &name, &[], "library", None, &format!("Shared by {}", pl.owner), None, false).map_err(bad)?;
+        let pid = made["id"].as_i64().unwrap_or(0);
+        let (added, dupes) = encore_sync::playlists::add_library_tracks(st, pid, &ids).map_err(bad)?;
+        st.db.log("info", &format!("{} saved a copy of {}'s playlist '{}' ({added} songs)", u.s("username"), pl.owner, pl.name));
+        Ok(Json(json!({ "id": pid, "name": name, "added": added, "duplicates_skipped": dupes })))
+    }).await
 }
 
 /// Largest preview video: chat apps (Discord) embed files up to 8 MB.
@@ -1260,16 +1551,17 @@ async fn share_video(st: &AppState, token: &str) -> Option<std::path::PathBuf> {
 }
 
 async fn share_video_build(st: &AppState, token: &str) -> Option<std::path::PathBuf> {
-    // the link's songs, its cover album (an artist link reads the artist index) and the cover file, on the
-    // blocking pool
+    // the link's songs, its cover album (an artist link reads the artist index) or a playlist's picture, and
+    // the cover file, on the blocking pool
     let tk = token.to_string();
     let (tracks, cover) = st.blocking(move |st| {
         let s = share_row(st, &tk)?;
         let tracks = shared_tracks(st, &s)?;
-        let aid = shared_cover_album(st, &s, &tracks);
-        Ok((tracks, st.library.find_cover(&st.db, &aid)))
+        let cover = shared_cover_file(st, &tk, &s, &tracks)?;
+        Ok((tracks, cover))
     }).await.ok()?;
-    let t = &tracks[0];
+    // (an empty playlist has no song to play)
+    let t = tracks.first()?;
     let audio = t.s("path");
     let meta = std::fs::metadata(&audio).ok()?;
     let mtime = meta.modified().ok().and_then(|m| m.duration_since(std::time::UNIX_EPOCH).ok()).map(|d| d.as_secs()).unwrap_or(0);
@@ -1299,7 +1591,7 @@ async fn share_video_build(st: &AppState, token: &str) -> Option<std::path::Path
             None
         } else {
             let _slot = st.web.share_video_slots.acquire().await.ok()?;
-            share_video_tidy(st, &dir, token);
+            share_video_tidy(st, &dir, token, &format!("{stem}.mp4"));
             let made = share_video_make(&dir, cover.as_deref(), &audio, t.f("duration"), &out).await;
             if made.is_none() {
                 let _ = std::fs::write(&failed, b"");
@@ -1317,16 +1609,19 @@ async fn share_video_build(st: &AppState, token: &str) -> Option<std::path::Path
     res
 }
 
-/// Before a build: drops this link's older videos (song, file or cover changed), videos of links that
-/// no longer exist, and half-made files a stopped build left behind.
-fn share_video_tidy(st: &AppState, dir: &std::path::Path, token: &str) {
+/// Before a build of `keep` in `dir` (the preview videos, or the playlist pictures): drops this link's older
+/// files (song, file or cover changed), files of links that no longer exist, and half-made files a stopped
+/// build left behind.
+fn share_video_tidy(st: &AppState, dir: &std::path::Path, token: &str, keep: &str) {
     let Ok(rd) = std::fs::read_dir(dir) else { return };
     let mut known: HashMap<String, bool> = HashMap::new();
     let prefix = format!("{token}.");
     for e in rd.flatten() {
         let name = e.file_name().to_string_lossy().into_owned();
-        let gone = if name.starts_with('.') {
-            name.ends_with(".tmp.mp4") && e.metadata().ok().and_then(|m| m.modified().ok()).and_then(|m| m.elapsed().ok()).is_some_and(|a| a.as_secs() > 900)
+        let gone = if name == keep {
+            false
+        } else if name.starts_with('.') {
+            name.contains(".tmp.") && e.metadata().ok().and_then(|m| m.modified().ok()).and_then(|m| m.elapsed().ok()).is_some_and(|a| a.as_secs() > 900)
         } else if name.starts_with(&prefix) {
             true
         } else {
@@ -1372,11 +1667,15 @@ async fn share_video_make(dir: &std::path::Path, cover: Option<&std::path::Path>
 
 /// Only in "playable" mode: the other modes never start ffmpeg for a public link.
 async fn shared_video(State(st): State<AppState>, Path(token): Path<String>, req: Request) -> ApiResult<Response> {
-    share_row(&st, &token)?;
+    let s = share_row(&st, &token)?;
     if st.cfg.str("share_preview").trim() != "playable" {
         return Err(err(404, "No video for this link"));
     }
     let path = share_video(&st, &token).await.ok_or_else(|| err(404, "No video for this link"))?;
+    // a playlist's video holds its first song now: never kept where Stop sharing or a removed song can't reach
+    if s.kind == "playlist" {
+        return share_live_file(&path, req, "video/mp4").await;
+    }
     let mut r = serve_file(&path.to_string_lossy(), req, Some("video/mp4"), None).await?;
     r.headers_mut().insert(header::CACHE_CONTROL, HeaderValue::from_static("public, max-age=3600"));
     Ok(r)
@@ -1414,13 +1713,13 @@ fn mmss(secs: f64) -> String {
 const SHARE_PAGE_VIDEO_WAIT: u64 = 6;
 
 /// The share page, with Open Graph / Twitter tags filled in on the server so chat apps show the song,
-/// album or artist with its cover in the link preview before anyone opens it. The `share_preview`
+/// album, artist or playlist with its cover in the link preview before anyone opens it. The `share_preview`
 /// setting picks the card: "small" (small cover), "large" (big picture) or "playable" (a video with
 /// the cover and the song, falling back to "small" when it can't be made).
 async fn share_page(State(st): State<AppState>, Path(token): Path<String>, req: Request) -> ApiResult<Response> {
     let html = tokio::fs::read_to_string(st.static_dir.join("share.html")).await.map_err(|_| err(404, "Not found"))?;
-    let meta = match shared_meta(&st, &token).await {
-        Ok(m) => m,
+    let meta = match shared_meta(&st, &token, &SharePageQ::default()).await {
+        Ok((m, _)) => m,
         Err(_) => return Ok(([(header::CONTENT_TYPE, "text/html; charset=utf-8")], html.replace("<!--META-->", "")).into_response()),
     };
     // absolute URLs for the preview image and audio: the public URL from Settings, else what the browser asked for
@@ -1449,11 +1748,14 @@ pub(crate) fn share_page_html(html: &str, meta: &Value, base: &str, token: &str,
     let ystr = match &meta["year"] { Value::String(s) => s.clone(), Value::Number(n) => n.to_string(), _ => String::new() };
     let title = match kind {
         "artist" => e(&meta["title"]),
+        // "Liked Songs · anna", "Road trip · anna"
+        "playlist" => format!("{} · {}", e(&meta["title"]), e(&meta["owner"])),
         _ => format!("{} – {}", e(&meta["title"]), e(&meta["artist"])),
     };
     let mut desc = vec![];
     match kind {
-        "album" | "artist" => {
+        // a playlist's length is left out: it can be hundreds of hours
+        "album" | "artist" | "playlist" => {
             if kind == "album" && !ystr.is_empty() { desc.push(esc(&ystr)); }
             if kind == "artist" { desc.push("Artist".to_string()); }
             let n = meta["count"].as_u64().unwrap_or(0);
@@ -1476,9 +1778,11 @@ pub(crate) fn share_page_html(html: &str, meta: &Value, base: &str, token: &str,
     let tok = esc(token);
     let base = esc(base);
     let app = e(&meta["app_name"]);
-    let og_type = if video { "video.other" } else { match kind { "album" => "music.album", "artist" => "profile", _ => "music.song" } };
+    let og_type = if video { "video.other" } else { match kind { "album" => "music.album", "artist" => "profile", "playlist" => "music.playlist", _ => "music.song" } };
     let card = if video { "player" } else if mode == "large" { "summary_large_image" } else { "summary" };
     let mime = browser_type(meta["format"].as_str().unwrap_or("")).unwrap_or("audio/flac");
+    // a playlist with no song in the library has nothing to play and no picture
+    let empty = kind == "playlist" && meta["count"].as_u64().unwrap_or(0) == 0;
     let mut tags = format!(
         r#"<title>{title}</title>
 <meta property="og:type" content="{og_type}">
@@ -1486,14 +1790,18 @@ pub(crate) fn share_page_html(html: &str, meta: &Value, base: &str, token: &str,
 <meta property="og:title" content="{title}">
 <meta property="og:description" content="{desc}">
 <meta property="og:url" content="{base}/s/{tok}">
-<meta property="og:image" content="{base}/api/share/{tok}/cover?s=600">
+"#);
+    if !empty {
+        tags.push_str(&format!(
+            r#"<meta property="og:image" content="{base}/api/share/{tok}/cover?s=600">
 <meta property="og:image:width" content="600"><meta property="og:image:height" content="600">
 <meta property="og:audio" content="{base}/api/share/{tok}/stream">
 <meta property="og:audio:type" content="{mime}">
-"#);
+"#));
+    }
     match kind {
         "album" => tags.push_str(&format!("<meta property=\"music:musician\" content=\"{}\">\n", e(&meta["artist"]))),
-        "artist" => {}
+        "artist" | "playlist" => {}
         _ => tags.push_str(&format!(
             "<meta property=\"music:musician\" content=\"{}\">\n<meta property=\"music:album\" content=\"{}\">\n<meta property=\"music:duration\" content=\"{}\">\n",
             e(&meta["artist"]), e(&meta["album"]), meta["duration"].as_f64().unwrap_or(0.0).round() as u64)),
@@ -1514,8 +1822,11 @@ pub(crate) fn share_page_html(html: &str, meta: &Value, base: &str, token: &str,
         r#"<meta name="twitter:card" content="{card}">
 <meta name="twitter:title" content="{title}">
 <meta name="twitter:description" content="{desc}">
-<meta name="twitter:image" content="{base}/api/share/{tok}/cover?s=600">
-<meta name="description" content="{desc}">"#));
+"#));
+    if !empty {
+        tags.push_str(&format!("<meta name=\"twitter:image\" content=\"{base}/api/share/{tok}/cover?s=600\">\n"));
+    }
+    tags.push_str(&format!(r#"<meta name="description" content="{desc}">"#));
     html.replace("<title>Shared song</title>", "").replace("<!--META-->", &tags)
 }
 

@@ -138,6 +138,7 @@
   "matched": 4,
   "name": "Liked Songs",
   "remote_ids": {},
+  "share": null,
   "source": "manual",
   "source_url": null,
   "sync_targets": [],

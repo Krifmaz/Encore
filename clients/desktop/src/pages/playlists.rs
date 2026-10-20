@@ -519,12 +519,13 @@ pub fn merged_text(r: &Value) -> String {
     )
 }
 
-/// The two lines under a playlist's name: "12 tracks · 80% in library · following" and the
+/// The two lines under a playlist's name: "12 tracks · 80% in library · following · shared" and the
 /// source with its sync targets.
 pub fn tile_sub(p: &Value) -> String {
     let (total, matched) = (fmt::f(p, "total"), fmt::f(p, "matched"));
     let pct = if total > 0.0 { (matched / total * 100.0).round() as i64 } else { 0 };
     let follow = if fmt::truthy(p, "follow") { " · following" } else { "" };
+    let shared = if p["share"].is_object() { " · shared" } else { "" };
     let targets: Vec<String> = fmt::items(&p["sync_targets"])
         .iter()
         .filter_map(|t| t.as_str().map(|t| target_name(t).unwrap_or(t).to_string()))
@@ -535,7 +536,7 @@ pub fn tile_sub(p: &Value) -> String {
         format!(" → {}", targets.join(", "))
     };
     let second = format!("{}{sync}", src_label(p));
-    let first = format!("{} tracks · {pct}% in library{follow}", fmt::s(p, "total"));
+    let first = format!("{} tracks · {pct}% in library{follow}{shared}", fmt::s(p, "total"));
     if second.is_empty() {
         first
     } else {
@@ -672,6 +673,14 @@ mod tests {
         let p = json!({ "total": 10, "matched": 8, "follow": 1, "source": "spotify", "sync_targets": ["plex", "x"] });
         assert_eq!(tile_sub(&p), "10 tracks · 80% in library · following\nSpotify → Plex / Plexamp, x");
         assert_eq!(tile_sub(&json!({ "total": 0, "matched": 0, "source": "" })), "0 tracks · 0% in library");
+        let mut shared = p.clone();
+        shared["share"] = json!({ "token": "abc", "path": "/s/abc", "url": "http://x/s/abc" });
+        assert_eq!(tile_sub(&shared), "10 tracks · 80% in library · following · shared\nSpotify → Plex / Plexamp, x");
+        assert_eq!(
+            tile_sub(&json!({ "total": 0, "matched": 0, "share": null })),
+            "0 tracks · 0% in library",
+            "not shared"
+        );
     }
 
     #[test]

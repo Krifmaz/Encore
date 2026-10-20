@@ -3,6 +3,10 @@
 //! Liked Songs is the playlist the server marks `kind: liked` (no rename, no delete, the heart
 //! as its cover). "Download N missing" asks for the album choice first and toasts the counts
 //! (`missing_report_text`).
+//!
+//! Share makes the playlist's public link (`POST /api/playlists/{id}/share`) and copies it; the
+//! link always shows the playlist as it is now, Liked Songs too. While shared, a line under the
+//! progress bar has Copy link and Stop sharing (`DELETE /api/playlists/{id}/share`).
 
 use crate::api::ApiError;
 use crate::fmt;
@@ -14,7 +18,7 @@ use crate::widgets::{
     self, badge, btn, btn_icon, btn_sm, card, card_flat, confirm, empty, error_box, h1, icon_btn, modal, muted,
     pop_menu, skeleton_rows, small, small_muted, t, Icon, MenuItem, TrackRow,
 };
-use iced::widget::{column, container, progress_bar, row, text_input, toggler};
+use iced::widget::{column, container, progress_bar, row, text_input, toggler, tooltip};
 use iced::{Alignment, Length, Point, Subscription, Task};
 use serde_json::{json, Value};
 
@@ -74,6 +78,21 @@ pub fn playable(items: &[Value]) -> Vec<Value> {
         .collect()
 }
 
+/// The toast after Share copied the link (the web's `share_playlist`).
+pub const LINK_COPIED: &str = "Link copied – anyone with it can play this playlist";
+/// The line beside the Shared mark.
+pub const SHARED_HINT: &str = "Anyone with the link can play these songs";
+/// The Stop sharing confirm: title (also its button) and text.
+pub const STOP_TITLE: &str = "Stop sharing";
+pub const STOP_TEXT: &str = "The link stops working for everyone who has it. Sharing again makes a new link.";
+/// The toast once the link is gone.
+pub const STOPPED: &str = "Sharing stopped";
+
+/// The playlist's share path (`share.path`, "/s/<token>") when it is shared, else None.
+pub fn shared_path(p: &Value) -> Option<String> {
+    p["share"]["path"].as_str().filter(|s| !s.is_empty()).map(str::to_string)
+}
+
 /// Which request an `Acted` answer belongs to, for its toast.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Act {
@@ -123,6 +142,8 @@ pub enum Dialog {
     AlbumChoice,
     /// The confirm's text.
     Delete(String),
+    /// "Stop sharing": the link stops working.
+    StopSharing,
 }
 
 #[derive(Debug, Default)]
@@ -165,6 +186,15 @@ pub enum Message {
     Delete,
     DeleteConfirmed,
     Deleted(Result<Value, ApiError>),
+    /// Make (or get) the public link and copy it.
+    Share,
+    ShareGot(Result<Value, ApiError>),
+    /// Copy the link of a shared playlist again.
+    CopyLink,
+    /// Ask before the link stops working.
+    StopSharing,
+    StopSharingConfirmed,
+    Unshared(Result<Value, ApiError>),
     RemoveItem(i64),
     ItemRemoved(i64, Result<Value, ApiError>),
     Menu(i64),
@@ -369,6 +399,35 @@ pub fn update(state: &mut State, msg: Message, ctx: &mut Ctx) -> Task<Message> {
         }
         Message::Deleted(Ok(_)) => ctx.navigate(Page::Playlists),
         Message::Deleted(Err(e)) => ctx.toast_err(e.message),
+        Message::Share => {
+            let api = ctx.api.clone();
+            let path = format!("/playlists/{}/share", state.id);
+            return Task::perform(async move { api.post_empty(&path).await }, Message::ShareGot);
+        }
+        Message::ShareGot(Ok(r)) => {
+            ctx.copy(format!("{}{}", ctx.base(), fmt::s(&r, "path")));
+            ctx.toast_ok(LINK_COPIED);
+            // the Shared line appears
+            return load(state, ctx);
+        }
+        Message::ShareGot(Err(e)) => ctx.toast_err(e.message),
+        Message::CopyLink => {
+            if let Some(path) = state.playlist().and_then(shared_path) {
+                ctx.copy_text(format!("{}{path}", ctx.base()));
+            }
+        }
+        Message::StopSharing => state.dialog = Some(Dialog::StopSharing),
+        Message::StopSharingConfirmed => {
+            state.dialog = None;
+            let api = ctx.api.clone();
+            let path = format!("/playlists/{}/share", state.id);
+            return Task::perform(async move { api.del(&path).await }, Message::Unshared);
+        }
+        Message::Unshared(Ok(_)) => {
+            ctx.toast_ok(STOPPED);
+            return load(state, ctx);
+        }
+        Message::Unshared(Err(e)) => ctx.toast_err(e.message),
         Message::RemoveItem(iid) => {
             state.menu = None;
             let api = ctx.api.clone();
@@ -498,6 +557,14 @@ fn header<'a>(state: &'a State, p: &'a Value, ctx: &Ctx<'a>) -> El<'a, Message> 
         actions = actions.push(btn_icon(Icon::Play, "Play", Btn::Primary, Some(Message::Play(0))));
         actions = actions.push(btn_icon(Icon::Download, "Save for offline", Btn::Default, Some(Message::SaveOffline)));
     }
+    actions = actions.push(
+        tooltip(
+            btn_icon(Icon::External, "Share", Btn::Default, Some(Message::Share)),
+            widgets::tip_box("Share link"),
+            tooltip::Position::Bottom,
+        )
+        .gap(4),
+    );
     if missing > 0 {
         actions = actions.push(btn_icon(
             Icon::Download,
@@ -531,15 +598,21 @@ fn header<'a>(state: &'a State, p: &'a Value, ctx: &Ctx<'a>) -> El<'a, Message> 
     if !liked {
         actions = actions.push(icon_btn(Icon::Trash, "Delete playlist", Some(Message::Delete)));
     }
-    let right = column![
-        catalog::kicker(kicker),
-        title,
-        counts,
-        progress,
-        container(actions.wrap()).padding([6, 0]),
-    ]
-    .spacing(8)
-    .width(Length::Fill);
+    let mut right = column![catalog::kicker(kicker), title, counts, progress].spacing(8).width(Length::Fill);
+    if shared_path(p).is_some() {
+        right = right.push(
+            row![
+                badge("Shared", Badge::Accent),
+                small_muted(SHARED_HINT),
+                btn_icon(Icon::Copy, "Copy link", Btn::Default, Some(Message::CopyLink)),
+                btn_icon(Icon::X, STOP_TITLE, Btn::Ghost, Some(Message::StopSharing)),
+            ]
+            .spacing(8)
+            .align_y(Alignment::Center)
+            .wrap(),
+        );
+    }
+    let right = right.push(container(actions.wrap()).padding([6, 0]));
     row![cover, right].spacing(24).align_y(Alignment::End).into()
 }
 
@@ -712,6 +785,14 @@ pub fn overlay<'a>(state: &'a State, ctx: &Ctx<'a>) -> Option<El<'a, Message>> {
             Message::DeleteConfirmed,
             Message::CloseDialog,
         )),
+        Dialog::StopSharing => Some(confirm(
+            STOP_TITLE,
+            STOP_TEXT,
+            STOP_TITLE,
+            true,
+            Message::StopSharingConfirmed,
+            Message::CloseDialog,
+        )),
     }
 }
 
@@ -782,5 +863,23 @@ mod tests {
             Some("Synced with 1 error(s): plex: nope".into())
         );
         assert_eq!(act_text(Act::Follow, &json!({})), None);
+    }
+
+    #[test]
+    fn shared_path_reads_the_share() {
+        assert_eq!(shared_path(&json!({ "share": { "token": "abc", "path": "/s/abc", "url": "http://x/s/abc" } })).as_deref(), Some("/s/abc"));
+        assert_eq!(shared_path(&json!({ "share": null })), None);
+        assert_eq!(shared_path(&json!({ "name": "Road trip" })), None);
+        assert_eq!(shared_path(&json!({ "share": { "path": "" } })), None);
+    }
+
+    #[test]
+    fn share_texts_match_the_web() {
+        // web-rs/src/ui.rs share_playlist and pages/playlists.rs (the Shared line and the Stop sharing confirm)
+        assert_eq!(LINK_COPIED, "Link copied – anyone with it can play this playlist");
+        assert_eq!(SHARED_HINT, "Anyone with the link can play these songs");
+        assert_eq!(STOP_TITLE, "Stop sharing");
+        assert_eq!(STOP_TEXT, "The link stops working for everyone who has it. Sharing again makes a new link.");
+        assert_eq!(STOPPED, "Sharing stopped");
     }
 }

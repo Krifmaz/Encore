@@ -13,9 +13,10 @@ import kotlinx.coroutines.withContext
  * Share an album or artist link the way the player shares a song (PlayerConnection.shareLink): create the link
  * on the server, copy it, show the toast and open the system share sheet.
  *
- * [create] runs on Dispatchers.IO and returns the public url (EncoreApi.shareAlbumLink / shareArtistLink).
+ * [create] runs on Dispatchers.IO and returns the public url (EncoreApi.shareAlbumLink / shareArtistLink /
+ * sharePlaylistLink). [after] runs once the link is made, before the share sheet (the playlist shows its Shared mark).
  */
-fun shareLinkOf(context: Context, scope: CoroutineScope, subject: String, text: String, toast: String, create: () -> String) {
+fun shareLinkOf(context: Context, scope: CoroutineScope, subject: String, text: String, toast: String, after: () -> Unit = {}, create: () -> String) {
     scope.launch {
         try {
             val url = withContext(Dispatchers.IO) { create() }
@@ -24,6 +25,7 @@ fun shareLinkOf(context: Context, scope: CoroutineScope, subject: String, text: 
                 cm?.setPrimaryClip(ClipData.newPlainText("Encore", url))
             } catch (_: Exception) {}
             Toasts.show(toast, "ok")
+            after()
             val send = Intent(Intent.ACTION_SEND).apply {
                 type = "text/plain"
                 putExtra(Intent.EXTRA_SUBJECT, subject)

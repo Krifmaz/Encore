@@ -74,6 +74,20 @@ fn reload() {
     if let Ok(ev) = web_sys::HashChangeEvent::new("hashchange") { let _ = dom::window().dispatch_event(&ev); }
 }
 
+/// " · shared" on a playlist's tile when it has a share link.
+fn shared_suffix(p: &Value) -> &'static str {
+    if p.g("share").is_object() { " · shared" } else { "" }
+}
+
+/// The line under a shared playlist's progress bar: the mark, what it means, Copy link and Stop sharing.
+/// Empty when the playlist isn't shared.
+fn share_line(pl: &Value) -> String {
+    if !pl.g("share").is_object() {
+        return String::new();
+    }
+    format!(r#"<div class="row wrap mt" id="pl-shared"><span class="badge accent">Shared</span><span class="small muted">Anyone with the link can play these songs</span><button class="btn sm" id="pl-copy">{}Copy link</button><button class="btn sm ghost" id="pl-unshare">Stop sharing</button></div>"#, icon("copy"))
+}
+
 fn pl_card(p: &Value) -> String {
     let pct = if p.truthy("total") { (p.f("matched") / p.f("total") * 100.0).round() as i64 } else { 0 };
     let liked = p.s("kind") == "liked";
@@ -83,7 +97,7 @@ fn pl_card(p: &Value) -> String {
     <label class="corner" style="z-index:2" onclick="event.stopPropagation()">{check}</label>
     <div class="art">{art}</div>
     <div class="t ellipsis">{name}</div>
-    <div class="s ellipsis">{total} tracks · {pct}% in library{follow}</div>
+    <div class="s ellipsis">{total} tracks · {pct}% in library{follow}{shared}</div>
     <div class="s ellipsis faint">{src}{sync}</div>
   </div>"#,
         id = p.s("id"),
@@ -92,6 +106,7 @@ fn pl_card(p: &Value) -> String {
         name = esc(&p.s("name")),
         total = p.s("total"),
         follow = if p.truthy("follow") { " · following" } else { "" },
+        shared = shared_suffix(p),
         src = esc(&src_label(p)),
         sync = if targets.is_empty() { String::new() } else {
             format!(" → {}", targets.iter().map(|t| { let t = js_string(t); esc(target_name(&t).unwrap_or(&t)) }).collect::<Vec<_>>().join(", "))
@@ -328,9 +343,11 @@ pub fn render_playlist(view: Element, ctx: Ctx) -> PageFuture {
         <h1 {h1attr}>{name}</h1>
         <div class="muted">{total} tracks · <b style="color:var(--ok)">{matched}</b> in library · {missing_n} missing</div>
         <div class="progress mt" style="max-width:360px"><i style="width:{pct}%"></i></div>
+        {shared}
         <div class="row wrap mt">
           {play}
           {pl_menu}
+          <button class="btn" id="pl-share" title="Share link">{external}Share</button>
           {req}
           <button class="btn" id="add">{plus}Add from link</button>
           <button class="btn" id="dedupe">{check}Remove duplicates</button>
@@ -364,6 +381,8 @@ pub fn render_playlist(view: Element, ctx: Ctx) -> PageFuture {
             total = pl.s("total"), matched = pl.s("matched"), missing_n = js_string(&json!(total - matched)),
             pct = if pl.truthy("total") { js_string(&json!(matched / total * 100.0)) } else { "0".to_string() },
             play = if pl.truthy("matched") { format!(r#"<button class="btn primary" id="pl-play">{}Play</button>"#, icon("play")) } else { String::new() },
+            shared = share_line(&pl),
+            external = icon("external"),
             pl_menu = if pl.truthy("matched") && crate::pages::downloads::enabled() { format!(r#"<button class="btn icon" id="pl-menu" aria-label="More options" title="More options">{}</button>"#, icon("more")) } else { String::new() },
             req = if missing > 0 { format!(r#"<button class="btn {}" id="req">{}Download {missing} missing</button>"#, if pl.truthy("matched") { "" } else { "primary" }, icon("download")) } else { String::new() },
             plus = icon("plus"), check = icon("check"), refresh = icon("refresh"),
@@ -402,6 +421,35 @@ pub fn render_playlist(view: Element, ctx: Ctx) -> PageFuture {
             });
         }
         dom::on_sel(&view, "#pl-play", "click", move |_| player::play_queue(playable.clone(), 0, "list"));
+        // Share: the system share sheet (or the clipboard), then the Shared line
+        {
+            let (id2, name) = (id.clone(), pl.s("name"));
+            dom::on_sel(&view, "#pl-share", "click", move |_| {
+                let (id3, name) = (id2.clone(), name.clone());
+                dom::spawn(async move {
+                    crate::ui::share_playlist(id3, name).await;
+                    reload();
+                });
+            });
+        }
+        {
+            // copied in the click itself: the clipboard needs the click
+            let path = pl.g("share").s("path");
+            dom::on_sel(&view, "#pl-copy", "click", move |_| match crate::ui::absolute_url(&path) {
+                Ok(url) => crate::ui::copy_text(&url),
+                Err(e) => toast(&e, "err"),
+            });
+        }
+        {
+            let id2 = id.clone();
+            dom::on_sel(&view, "#pl-unshare", "click", move |_| {
+                let id3 = id2.clone();
+                dom::spawn(async move {
+                    if !confirm_dialog("Stop sharing", STOP_SHARING_TEXT, "Stop sharing", true).await { return; }
+                    act(async move { api::del(&format!("/playlists/{id3}/share")).await }, |_| "Sharing stopped".to_string()).await;
+                });
+            });
+        }
         {
             let id2 = id.clone();
             dom::on_sel(&view, "#req", "click", move |_| {
@@ -509,6 +557,9 @@ pub fn render_playlist(view: Element, ctx: Ctx) -> PageFuture {
     })
 }
 
+/// What Stop sharing asks first.
+const STOP_SHARING_TEXT: &str = "The link stops working for everyone who has it. Sharing again makes a new link.";
+
 /// A playlist row that is in the library, as the player and the song menu want it.
 fn as_track(i: &Value) -> Value {
     json!({
@@ -571,6 +622,32 @@ pub fn add_to_playlist_modal(track_ids: Vec<i64>) {
             });
         }
     });
+}
+
+#[cfg(test)]
+mod share_tests {
+    use super::*;
+
+    #[test]
+    fn the_share_line_shows_only_when_shared() {
+        assert_eq!(share_line(&json!({ "share": null })), "");
+        assert_eq!(share_line(&json!({ "name": "Road trip" })), "");
+        let line = share_line(&json!({ "share": { "token": "abc", "path": "/s/abc", "url": "https://m.example/s/abc" } }));
+        for part in ["Shared", "Anyone with the link can play these songs", "Copy link", "Stop sharing", r#"id="pl-copy""#, r#"id="pl-unshare""#, r#"class="badge accent""#] {
+            assert!(line.contains(part), "{part}: {line}");
+        }
+    }
+
+    #[test]
+    fn the_tile_says_shared() {
+        assert_eq!(shared_suffix(&json!({ "share": { "path": "/s/abc" } })), " · shared");
+        assert_eq!(shared_suffix(&json!({ "share": null })), "");
+        assert_eq!(shared_suffix(&json!({})), "");
+        let tile = pl_card(&json!({ "id": 3, "name": "Road trip", "total": 10, "matched": 8, "follow": 1, "share": { "path": "/s/abc" }, "source": "spotify", "sync_targets": [] }));
+        assert!(tile.contains("10 tracks · 80% in library · following · shared"), "{tile}");
+        let tile = pl_card(&json!({ "id": 3, "name": "Road trip", "total": 10, "matched": 8, "share": null, "source": "spotify", "sync_targets": [] }));
+        assert!(tile.contains("10 tracks · 80% in library</div>"), "{tile}");
+    }
 }
 
 #[cfg(test)]

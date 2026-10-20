@@ -34,6 +34,7 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.input.nestedscroll.nestedScroll
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.ImeAction
@@ -46,6 +47,8 @@ import app.encore.android.data.repo.ImportPreview
 import app.encore.android.data.repo.PLAYLIST_SOURCES
 import app.encore.android.data.repo.PlaylistItem
 import app.encore.android.data.repo.PlaylistPage
+import app.encore.android.features.library.PlaylistShareRules
+import app.encore.android.features.settings.copyToClipboard
 import app.encore.android.ui.Nav
 import app.encore.android.ui.Screen
 import app.encore.android.ui.components.Badge
@@ -149,13 +152,16 @@ fun PlaylistsActions(nav: Nav) {
 /**
  * The "⋯" of one playlist (the web's header buttons): Edit (reorder / remove), Add from link, Download missing,
  * Remove duplicates, Re-check library, Pull from source, Rename, Delete. For the design part's Playlist top bar.
+ * [shareUrl] is the public link while the playlist is shared: Copy link and Stop sharing join the menu.
  */
 @Composable
-fun PlaylistMenu(nav: Nav, id: Long, name: String, isLiked: Boolean, onChanged: () -> Unit = {}) {
+fun PlaylistMenu(nav: Nav, id: Long, name: String, isLiked: Boolean, onChanged: () -> Unit = {}, shareUrl: String? = null) {
     val scope = rememberCoroutineScope()
+    val context = LocalContext.current
     val features = nav.features
     var rename by remember { mutableStateOf(false) }
     var confirmDelete by remember { mutableStateOf(false) }
+    var confirmStop by remember { mutableStateOf(false) }
     var missingChoice by remember { mutableStateOf(false) }
     MoreButton(
         entries = listOf(
@@ -166,6 +172,12 @@ fun PlaylistMenu(nav: Nav, id: Long, name: String, isLiked: Boolean, onChanged: 
                 act(scope, { val n = features.dedupePlaylist(id); if (n > 0) "Removed $n duplicate(s)" else "No duplicates" }, onChanged)
             },
             MenuEntry("Re-check library", R.drawable.ic_refresh) { act(scope, { "${features.rematchPlaylist(id)} newly matched" }, onChanged) },
+            *PlaylistShareRules.shareEntries(shareUrl != null).map { e ->
+                when (e) {
+                    PlaylistShareRules.ShareEntry.COPY_LINK -> MenuEntry(e.label, R.drawable.ic_content_copy) { copyToClipboard(context, shareUrl.orEmpty()) }
+                    PlaylistShareRules.ShareEntry.STOP -> MenuEntry(e.label, R.drawable.ic_close, danger = true) { confirmStop = true }
+                }
+            }.toTypedArray(),
             if (!isLiked) MenuSeparator else null,
             if (!isLiked) MenuEntry("Rename", R.drawable.ic_edit) { rename = true } else null,
             if (!isLiked) MenuEntry("Delete playlist", R.drawable.ic_delete, danger = true) { confirmDelete = true } else null,
@@ -179,6 +191,11 @@ fun PlaylistMenu(nav: Nav, id: Long, name: String, isLiked: Boolean, onChanged: 
     if (confirmDelete) {
         ConfirmDialog("Delete playlist", "Delete “$name”? Songs stay in the library.", "Delete", danger = true, onDismiss = { confirmDelete = false }) {
             act(scope, { features.deletePlaylist(id); "" }) { nav.back() }
+        }
+    }
+    if (confirmStop) {
+        ConfirmDialog(PlaylistShareRules.STOP_TITLE, PlaylistShareRules.STOP_TEXT, PlaylistShareRules.STOP_TITLE, danger = true, onDismiss = { confirmStop = false }) {
+            act(scope, { features.stopSharingPlaylist(id); PlaylistShareRules.STOPPED }, onChanged)
         }
     }
     if (missingChoice) {

@@ -508,6 +508,11 @@ class FeaturesApi(private val api: EncoreApi, private val client: OkHttpClient) 
         call("DELETE", "/api/playlists/$id", null)
     }
 
+    /** DELETE /api/playlists/{id}/share: the link stops working for good (sharing again makes a new one). */
+    fun stopSharingPlaylist(id: Long) {
+        call("DELETE", "/api/playlists/$id/share", null)
+    }
+
     fun removePlaylistItem(playlistId: Long, itemId: Long) {
         call("DELETE", "/api/playlists/$playlistId/items/$itemId", null)
     }
