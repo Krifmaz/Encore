@@ -273,7 +273,7 @@ jobs:
     if: >-
       always() && (
         (inputs.only == 'android' && needs.apps.result == 'success') ||
-        (inputs.only != 'android' && needs.server.result == 'success' && needs.docker.result == 'success' && (needs.apps.result == 'success' || needs.apps.result == 'skipped'))
+        (inputs.only != 'android' && needs.server.result == 'success' && needs.docker.result == 'success')
       )
     runs-on: ubuntu-latest
     steps:
@@ -287,8 +287,11 @@ jobs:
           pattern: server-*
           path: out
           merge-multiple: true
+      # the apps that did build, also when one of them didn't (a Mac build that never got a machine): the
+      # notes below name what is attached and what is not
       - uses: actions/download-artifact@v4
-        if: needs.apps.result == 'success'
+        if: needs.apps.result != 'skipped'
+        continue-on-error: true
         with:
           pattern: Encore-*
           path: out
@@ -335,6 +338,16 @@ jobs:
           * **Android**: \`Encore-android-$V.apk\`
           * **Desktop app** (new: native, with Cadenza playing on this computer; it updates itself from here on): **Windows** \`Encore-$V-windows-x86_64.exe\` · **macOS** \`Encore-$V-macos-universal.dmg\` (if macOS will not open it the first time: System Settings → Privacy & Security → Open Anyway) · **Linux** \`Encore-$V-linux-x86_64.AppImage\` or \`encore_${V}_amd64.deb\` · checksums in \`SHA256SUMS\`
           EOT
+          elif compgen -G "out/Encore-android-*.apk" >/dev/null || compgen -G "out/Encore-*-windows-*.exe" >/dev/null; then
+            # some apps built, some didn't: name what is attached
+            have() { compgen -G "out/$1" >/dev/null; }
+            if have "Encore-android-$V.apk"; then echo "* **Android**: \`Encore-android-$V.apk\`" >> notes.md; else echo "* **Android**: not in this release (its build did not finish); the next release has it" >> notes.md; fi
+            D=""; M=""
+            if have "Encore-$V-windows-x86_64.exe"; then D="$D **Windows** \`Encore-$V-windows-x86_64.exe\` ·"; else M="$M Windows,"; fi
+            if have "Encore-$V-macos-universal.dmg"; then D="$D **macOS** \`Encore-$V-macos-universal.dmg\` ·"; else M="$M macOS,"; fi
+            if have "Encore-$V-linux-x86_64.AppImage"; then D="$D **Linux** \`Encore-$V-linux-x86_64.AppImage\` or \`encore_${V}_amd64.deb\` ·"; else M="$M Linux,"; fi
+            echo "* **Desktop app** (new: native, with Cadenza playing on this computer; it updates itself from here on):$D checksums in \`SHA256SUMS\`" >> notes.md
+            if [ -n "$M" ]; then echo "* **Not in this release:**${M%,} desktop app – its build did not run this time; the next release has it" >> notes.md; fi
           else echo "* **Apps**: the desktop and Android apps were not rebuilt for this release – the ones attached are from the last build that made them." >> notes.md; fi
           sed -i 's/^          //' notes.md
       - name: Publish
@@ -343,9 +356,10 @@ jobs:
           V: ${{ needs.version.outputs.version }}
           APPS: ${{ needs.apps.result }}
         run: |
-          # app installers from the previous release when this run didn't build them
+          # app installers from the previous release when this run built none of them (a run with some of the
+          # apps attaches only those: an older build beside a newer one would offer two versions)
           # (encore_*.deb is the desktop app's Debian package)
-          if [ "$APPS" != success ]; then
+          if [ "$APPS" != success ] && ! compgen -G "out/Encore-android-*.apk" >/dev/null && ! compgen -G "out/Encore-*-windows-*.exe" >/dev/null; then
             mkdir -p prev && gh release download --dir prev --pattern 'Encore-*' --pattern 'encore_*.deb' 2>/dev/null || true
             rm -f prev/Encore-youtube-extension-*.zip   # built fresh above
             # the classic Tauri desktop app (removed in 0.29) is not carried over
