@@ -94,12 +94,13 @@ fn qobuz_v2(text: &str) -> bool {
 /// Write the credentials entered in Encore's settings into streamrip's config file. Keys the settings
 /// leave empty stay as they are in the file, so a login typed into config.toml by hand is kept.
 pub fn apply_credentials(st: &impl Ctx) -> anyhow::Result<PathBuf> {
-    apply_credentials_for(st, None)
+    apply_credentials_for(st, None, None)
 }
 
-/// [`apply_credentials`] for the streamrip of `version` (its `--version`, when known): the update check is
-/// switched off the way that streamrip reads it ([`quiet_config`]).
-pub fn apply_credentials_for(st: &impl Ctx, version: Option<&str>) -> anyhow::Result<PathBuf> {
+/// [`apply_credentials`] for the streamrip of `version` (its `--version`, when known) whose own code does or
+/// does not read the update-check switch (`switch`, when known): the update check is switched off the way
+/// that streamrip reads it ([`quiet_config`]).
+pub fn apply_credentials_for(st: &impl Ctx, version: Option<&str>, switch: Option<bool>) -> anyhow::Result<PathBuf> {
     let path = config_path(st);
     fsx::mkdir_all(path.parent().unwrap(), Step::Config)?;
     // a file that is there but can't be read is never written over with the credentials alone
@@ -120,7 +121,7 @@ pub fn apply_credentials_for(st: &impl Ctx, version: Option<&str>) -> anyhow::Re
         }
     }
     text = set_toml(&text, "database", "downloads_enabled", "false");
-    text = quiet_config(&text, version);
+    text = quiet_config(&text, version, switch);
     write_config(&path, &text)?;
     Ok(path)
 }
@@ -170,18 +171,21 @@ pub fn write_config(path: &Path, text: &str) -> Result<(), StepError> {
 ///   `[cli]` refuses a key it does not know ("CliConfig.__init__() got an unexpected keyword argument"),
 ///   so nothing is written for it.
 ///
+/// `switch` is what the streamrip's own code says (see [`reads_update_switch`]) and wins over the version:
+/// the fork's v2.4.10 tag still calls itself 2.4.9.
+///
 /// Only keys whose section the file already has are set: a section of only Encore's keys would not load.
-pub fn quiet_config(text: &str, version: Option<&str>) -> String {
+pub fn quiet_config(text: &str, version: Option<&str>, switch: Option<bool>) -> String {
     let mut text = text.to_string();
     let cli = section_body(&text, "cli").to_string();
     let has_key = |body: &str, key: &str| Regex::new(&format!(r"(?m)^\s*{key}\s*=")).unwrap().is_match(body);
     if has_key(&cli, "progress_bars") {
         text = set_toml(&text, "cli", "progress_bars", "false");
-        let reads_it = match version.and_then(encore_core::version::extract_version) {
+        let reads_it = switch.unwrap_or_else(|| match version.and_then(encore_core::version::extract_version) {
             Some(v) => encore_core::version::compare(&v, "2.4.10") != std::cmp::Ordering::Less,
             // unknown (a streamrip of the owner's): the template of a streamrip that reads it names the key
             None => cli.contains("no_update_check"),
-        };
+        });
         if reads_it {
             text = set_toml(&text, "cli", "no_update_check", "true");
         }
@@ -492,8 +496,21 @@ pub async fn check_config(st: &impl Ctx, force: bool) -> anyhow::Result<ConfigCh
         out.problem = validate_config(&bin, &path, &home).await.err();
     }
     let version = version_of(st, &bin).await;
-    apply_credentials_for(st, version.as_deref())?;
+    apply_credentials_for(st, version.as_deref(), reads_update_switch(Path::new(&bin)))?;
     Ok(out)
+}
+
+/// Does the streamrip at `bin` read `[cli] no_update_check`? Its own code says so, where a venv keeps it
+/// (`lib/python*/site-packages/streamrip/config.py` beside the program's `bin` folder): the fork's v2.4.10
+/// tag still calls itself 2.4.9, so its version alone can't tell. None when the code is not found there.
+fn reads_update_switch(bin: &Path) -> Option<bool> {
+    let root = std::fs::canonicalize(bin).ok()?.parent()?.parent()?.to_path_buf();
+    for dir in std::fs::read_dir(root.join("lib")).ok()?.flatten() {
+        if let Ok(code) = std::fs::read_to_string(dir.path().join("site-packages/streamrip/config.py")) {
+            return Some(code.contains("no_update_check"));
+        }
+    }
+    None
 }
 
 /// The version of the streamrip at `bin` (its `--version`, kept by the tools' cache for 10 minutes; the
@@ -1568,33 +1585,53 @@ hires_token_client_id = "fX2JxdmntZWK0ixT"
     const MISC_20: &str = "[cli]\ntext_output = true\nprogress_bars = true\n\n[misc]\nversion = \"2.0.6\"\ncheck_for_updates = true\n";
 
     #[test]
+    fn the_update_switch_is_read_from_the_streamrip_code_in_its_venv() {
+        let root = std::env::temp_dir().join(format!("encore-rip-switch-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let bin = root.join("bin/streamrip");
+        std::fs::create_dir_all(bin.parent().unwrap()).unwrap();
+        std::fs::write(&bin, "#!/bin/sh\n").unwrap();
+        assert_eq!(reads_update_switch(&bin), None, "no code beside it");
+        let code = root.join("lib/python3.14/site-packages/streamrip");
+        std::fs::create_dir_all(&code).unwrap();
+        std::fs::write(code.join("config.py"), "class CliConfig:\n    progress_bars: bool\n").unwrap();
+        assert_eq!(reads_update_switch(&bin), Some(false));
+        std::fs::write(code.join("config.py"), "class CliConfig:\n    no_update_check: bool = False\n").unwrap();
+        assert_eq!(reads_update_switch(&bin), Some(true));
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
     fn the_update_check_is_switched_off_the_way_each_streamrip_reads_it() {
         // 2.4.9 (the image's before 0.29): progress bars off, no update-check key (its [cli] would refuse one)
         for v in [Some("streamrip, version 2.4.9"), Some("2.4.9"), None] {
-            let t = quiet_config(CLI_249, v);
+            let t = quiet_config(CLI_249, v, None);
             assert_eq!(toml_value(&t, "cli", "progress_bars"), "false", "{v:?}");
             assert!(!t.lines().any(|l| l.trim_start().starts_with("no_update_check")), "{v:?}: {t}");
             assert_eq!(toml_value(&t, "cli", "max_search_results"), "100");
         }
         // 2.4.10 and later read [cli] no_update_check; known by the version or by the template's line
         for v in [Some("streamrip, version 2.4.10"), Some("2.5.0"), None] {
-            let t = quiet_config(CLI_2410, v);
+            let t = quiet_config(CLI_2410, v, None);
             assert_eq!(toml_value(&t, "cli", "no_update_check"), "true", "{v:?}: {t}");
             assert_eq!(toml_value(&t, "cli", "progress_bars"), "false");
         }
-        assert_eq!(toml_value(&quiet_config(CLI_249, Some("2.4.10")), "cli", "no_update_check"), "true", "a config from 2.4.9 run by 2.4.10");
-        assert_eq!(toml_value(&quiet_config(CLI_2410, Some("2.4.9")), "cli", "no_update_check"), "", "a downgraded streamrip never gets the key");
+        assert_eq!(toml_value(&quiet_config(CLI_249, Some("2.4.10"), None), "cli", "no_update_check"), "true", "a config from 2.4.9 run by 2.4.10");
+        assert_eq!(toml_value(&quiet_config(CLI_2410, Some("2.4.9"), None), "cli", "no_update_check"), "", "a downgraded streamrip never gets the key");
         // nathom's 2.x: [misc] check_for_updates
-        let t = quiet_config(MISC_20, Some("2.0.6"));
+        let t = quiet_config(MISC_20, Some("2.0.6"), None);
         assert_eq!(toml_value(&t, "misc", "check_for_updates"), "false");
         assert_eq!(toml_value(&t, "misc", "version"), "2.0.6");
         assert_eq!(toml_value(&t, "cli", "no_update_check"), "");
         // a file without those sections gets none of Encore's (a section of only its keys would not load)
         let bare = "[deezer]\narl = \"x\"\n";
-        assert_eq!(quiet_config(bare, Some("2.4.10")), bare);
+        assert_eq!(quiet_config(bare, Some("2.4.10"), None), bare);
+        // the streamrip's own code wins over its version (the fork's v2.4.10 tag says 2.4.9)
+        assert_eq!(toml_value(&quiet_config(CLI_2410, Some("streamrip, version 2.4.9"), Some(true)), "cli", "no_update_check"), "true");
+        assert_eq!(toml_value(&quiet_config(CLI_249, Some("2.4.10"), Some(false)), "cli", "no_update_check"), "");
         // written twice, the same file
-        let once = quiet_config(CLI_2410, None);
-        assert_eq!(quiet_config(&once, None), once);
+        let once = quiet_config(CLI_2410, None, None);
+        assert_eq!(quiet_config(&once, None, None), once);
     }
 
     #[test]

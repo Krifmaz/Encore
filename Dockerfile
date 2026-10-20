@@ -47,6 +47,9 @@ RUN apt-get update \
 # streamrip (Qobuz/Tidal/Deezer with your own subscription). Build with --build-arg INSTALL_STREAMRIP=false to skip it.
 ARG INSTALL_STREAMRIP=true
 ARG STREAMRIP_REF=v2.4.10
+# what that tag says it is: the fork's v2.4.10 tag still declares 2.4.9 in its pyproject.toml, so the check
+# below also looks for the [cli] no_update_check switch that 2.4.10 brings (Encore turns the update check off)
+ARG STREAMRIP_VERSION=2.4.9
 # The streamrip fork needs Python 3.14+, newer than Debian's python3, so uv fetches a standalone 3.14 for the
 # tools' venv. No silent fallback to PyPI's streamrip 2.1.0: its Tidal client was revoked, so a failed install
 # must fail the build instead of shipping a streamrip that cannot sign in to Tidal.
@@ -56,7 +59,8 @@ RUN python3 -m venv /opt/uv && /opt/uv/bin/pip install --no-cache-dir uv \
  && /opt/uv/bin/uv pip install --python /opt/tools/bin/python "yt-dlp[default]" \
  && if [ "$INSTALL_STREAMRIP" = "true" ]; then \
       /opt/uv/bin/uv pip install --python /opt/tools/bin/python "https://github.com/Stensel8/streamrip/archive/refs/tags/${STREAMRIP_REF}.zip" \
-      && { /opt/tools/bin/streamrip --version 2>/dev/null || /opt/tools/bin/rip --version; } | tee /dev/stderr | grep -q "${STREAMRIP_REF#v}" \
+      && { /opt/tools/bin/streamrip --version 2>/dev/null || /opt/tools/bin/rip --version; } | tee /dev/stderr | grep -q "version ${STREAMRIP_VERSION}" \
+      && grep -q no_update_check /opt/tools/lib/python3*/site-packages/streamrip/config.py \
       || { echo "streamrip ${STREAMRIP_REF} failed to install"; exit 1; }; \
     fi \
  && rm -rf /opt/uv
