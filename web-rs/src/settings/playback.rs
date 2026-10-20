@@ -398,6 +398,8 @@ fn paint_playback(st: &Rc<Look>) {
         dom::on(&c, "change", move |_| set_playback(&st2, json!({ "resume": dom::checked(&c2) })));
     }
     bind_sound(st);
+    // Volume normalization (player/norm.rs): first in Sound (on this device), before "Use sound effects"
+    crate::player::norm_setting(&st.el);
     crate::player::offline_setting(&st.el);
     if let Some(c) = dom::qs_in(&st.el, "#pb-dsp") {
         let (st2, c2) = (st.clone(), c.clone());

@@ -14,7 +14,7 @@ mod link;
 mod spot;
 
 pub use devices::open;
-pub use link::{link_to, unlink};
+pub use link::{link_to, unlink, unlink_quiet};
 pub use spot::resume;
 
 use link::*;
@@ -52,6 +52,9 @@ thread_local! {
 }
 
 fn me() -> String { ME.with(|m| m.clone()) }
+
+/// This device's id and name, as its check-ins carry them (a group listen's member is one device, client-shapes §2.2).
+pub fn device() -> (String, String) { (me(), device_name()) }
 
 fn device_id() -> String {
     let fallback = || format!("tab-{}", rand36());

@@ -11,19 +11,24 @@
 //! The player is split by concern: queue.rs (the queue, shuffle and repeat, the saved spot), load.rs (which
 //! stream to ask for and starting it, seeking, play/pause, volume), recovery.rs (a stream that breaks off),
 //! bandwidth.rs (Auto quality), transitions.rs (crossfade and overlap), fx.rs (Web Audio effects), bar.rs (the
-//! bar at the bottom), full.rs (the full-screen player), lyrics.rs, media_session.rs (lock screen and the native
-//! apps), link.rs (this device as a remote, and remote control of it) and signal.rs (the Signal path window).
+//! bar at the bottom), full.rs (the full-screen player and its lyrics mode), lyrics.rs, marquee.rs (long titles
+//! scroll), media_session.rs (lock screen and the native apps), link.rs (this device as a remote, and remote control of
+//! it), norm.rs (volume normalization), signal.rs (the Signal path window) and group.rs (following a group listen,
+//! crate::group).
 //! The shared state, the <audio> elements and the small helpers every part uses live here, with `mount()`.
 
 mod bandwidth;
 mod bar;
 mod full;
 mod fx;
+mod group;
 mod link;
 mod load;
 mod local;
 mod lyrics;
+mod marquee;
 mod media_session;
+mod norm;
 mod queue;
 mod recovery;
 mod signal;
@@ -32,10 +37,12 @@ mod transitions;
 pub use bar::{bar_buttons, customize_bar_modal, set_bar_buttons, BAR_ACTIONS};
 pub use full::set_full;
 pub use fx::device_rate;
+pub use group::{group_changed, group_resync};
 pub use link::{command, link_state, linked, set_link, snapshot, Link};
 pub use load::{seek_to, set_volume, toggle};
 pub(crate) use load::can_play;
 pub use local::{offline_setting, prefer_local, set_prefer_local};
+pub use norm::norm_setting;
 pub use queue::{enqueue, next, play_next, play_queue, prev, preview, queue, restore, saved_spot, shuffle_library};
 pub(crate) use crate::num::{khz, to_fixed1};
 
@@ -43,11 +50,14 @@ use bandwidth::*;
 use bar::*;
 use full::*;
 use fx::*;
+use group::*;
 use link::*;
 use load::*;
 use local::*;
 use lyrics::*;
+use marquee::*;
 use media_session::*;
+use norm::*;
 use queue::*;
 use recovery::*;
 use signal::*;
@@ -307,7 +317,7 @@ pub fn mount() {
     // a pause nobody here made (headphones unplugged, a call or another app took the sound) is a real pause too: it stays
     // paused – not the end of the song and not a stream being picked up again
     on_both(&a, &sp, "pause", Rc::new(|_| {
-        if !audio().is_some_and(|a| a.ended()) && !rec_need() && !HELD.with(|h| h.get()) { st_mut(|s| s.want = false); }
+        if !audio().is_some_and(|a| a.ended()) && !rec_need() && !HELD.with(|h| h.get()) { st_mut(|s| s.want = false); paused_by_listener(); }
         if let Some(out) = FADE.with(|f| f.borrow().as_ref().map(|f| f.out.clone())) { let _ = out.pause(); }
         render(); emit(); save_spot(true); media_state();
     }));
@@ -387,7 +397,11 @@ pub fn mount() {
     }
     let keydown = EventListener::new_with_options(&document(), "keydown", EventListenerOptions::enable_prevent_default(), |e: &Event| {
         let ae = document().active_element();
-        if dom::key(e) == "Escape" && st(|s| s.full) { if dom::qs(".modal-bg, .menu-pop").is_none() { set_full(false); } return; }   // a window on top closes first
+        // a window on top closes first; lyrics mode goes back to the cover before the player closes
+        if dom::key(e) == "Escape" && st(|s| s.full) {
+            if dom::qs(".modal-bg, .menu-pop").is_none() { if st(|s| s.pane == "lyrics") { set_pane("now"); } else { set_full(false); } }
+            return;
+        }
         let linked = is_linked();
         // Space is play/pause anywhere except while typing – even when a player button has focus
         // (otherwise the browser "presses" the focused button again, e.g. Previous, which restarts the song)
@@ -436,9 +450,11 @@ pub fn mount() {
     dom::on_window("storage", |e| {
         let key = e.dyn_ref::<web_sys::StorageEvent>().and_then(|s| s.key());
         if key.as_deref() == Some("encore.playback") { new_prefs(playback::current()); }
+        if key.as_deref().is_some_and(|k| k.starts_with("encore.norm.")) { reload_norm(); }
     });
     fetch_dsp();
     local::start();
     dom::interval_forever(2000, adapt_tick);
+    start_marquee();
     render();
 }

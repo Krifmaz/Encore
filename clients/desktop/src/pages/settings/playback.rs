@@ -10,7 +10,7 @@
 
 use super::{block, card, help, select, select_table, switch, switch_maybe, Opt};
 use crate::api::ApiError;
-use crate::engine::{self, settings as es};
+use crate::engine::{self, normalize as norm, settings as es};
 use crate::fmt;
 use crate::pages::{Ctx, El};
 use crate::theme::{self, Badge, Btn};
@@ -157,6 +157,9 @@ pub struct State {
     dragging: bool,
     /// Settings were just handed over; the engine may not report them yet.
     wrote_at: Option<Instant>,
+    /// Volume normalization on this computer (kept in the config, as the web keeps it in
+    /// localStorage).
+    norm: norm::Prefs,
 }
 
 impl Default for State {
@@ -172,6 +175,7 @@ impl Default for State {
             test_busy: false,
             dragging: false,
             wrote_at: None,
+            norm: norm::Prefs::default(),
         }
     }
 }
@@ -228,6 +232,13 @@ pub enum Message {
     RefreshDevices,
     /// The player's Signal path dialog (source, server step, the engine's stages, output).
     SignalPath,
+    /// Volume normalization: Off / Track / Album.
+    NormMode(String),
+    /// The target level while the slider moves (LUFS).
+    NormTarget(f64),
+    NormTargetDone,
+    /// Prevent clipping.
+    NormClip(bool),
 }
 
 fn list_devices() -> Task<Message> {
@@ -243,6 +254,7 @@ fn list_devices() -> Task<Message> {
 
 pub fn open(state: &mut State, ctx: &mut Ctx) -> Task<Message> {
     state.prefs = clean(&ctx.session.user["prefs"]["playback"]);
+    state.norm = norm::prefs();
     state.dsp = Value::Null;
     state.settings = es::settings();
     state.bands = state.settings.dsp.eq.iter().map(band_edit).collect();
@@ -604,8 +616,56 @@ pub fn update(state: &mut State, msg: Message, ctx: &mut Ctx) -> Task<Message> {
             return list_devices();
         }
         Message::SignalPath => ctx.player_msg(crate::player::Message::Signal),
+        Message::NormMode(m) => {
+            state.norm.mode = norm::Mode::parse(&m);
+            store_norm(state, ctx);
+        }
+        Message::NormTarget(v) => {
+            state.norm.target = (v.round() as i32).clamp(norm::MIN_TARGET, norm::MAX_TARGET);
+            norm::set_prefs(state.norm);
+        }
+        Message::NormTargetDone => store_norm(state, ctx),
+        Message::NormClip(on) => {
+            state.norm.clip = on;
+            store_norm(state, ctx);
+        }
     }
     Task::none()
+}
+
+/// Normalization changed: the song that plays gets its new gain, and the config keeps it.
+fn store_norm(state: &State, ctx: &mut Ctx) {
+    let p = state.norm;
+    norm::set_prefs(p);
+    ctx.edit_config(move |c| p.store(c));
+}
+
+/// Settings → Playback → Sound (on this device): volume normalization (client-shapes §5.7), the
+/// first thing of the web's section. It rides on the engine's volume, which bit-perfect playback
+/// leaves alone, so it says so while "Play through Cadenza on this device" is off.
+fn sound<'a>(state: &'a State) -> Vec<El<'a, Message>> {
+    let n = state.norm;
+    let mut lines: Vec<El<'a, Message>> = vec![
+        help("Volume normalization").into(),
+        seg(&[("off", "Off"), ("track", "Track"), ("album", "Album")], n.mode.id(), Message::NormMode),
+        help(n.mode.help()).into(),
+        column![
+            row![help("Target level"), help(norm::lufs_text(n.target))].spacing(6),
+            slider(f64::from(norm::MIN_TARGET)..=f64::from(norm::MAX_TARGET), f64::from(n.target), Message::NormTarget)
+                .on_release(Message::NormTargetDone)
+                .step(1.0)
+                .style(theme::slider_style)
+                .width(260),
+        ]
+        .spacing(4)
+        .into(),
+        switch(n.clip, "Prevent clipping", Message::NormClip),
+        help("Uses the ReplayGain tags in your files, or Encore's own measurement when a file has none. Higher targets are louder; \u{2212}14 LUFS is about what streaming services play at. Prevent clipping never turns a song up further than its loudest peak allows. Only on this device.").into(),
+    ];
+    if state.settings.dsp.bit_perfect {
+        lines.push(help("Normalization is off while this computer plays bit-perfect (Cadenza on this device, above).").into());
+    }
+    lines
 }
 
 fn seg_str<'a>(items: &[(&'a str, &'a str)], current: &str, key: &'static str) -> El<'a, Message> {
@@ -996,6 +1056,7 @@ pub fn view<'a>(state: &'a State, ctx: &Ctx<'a>) -> El<'a, Message> {
                     switch(fmt::truthy(p, "resume"), "Resume where I left off when the app opens", |v| Message::Pref("resume".into(), json!(v))),
                 ],
             ),
+            block("Sound (on this device)", sound(state)),
             block(
                 "Pure playback",
                 vec![help("Encore streams the original file untouched – the quality badge on the player opens the Signal path, which shows what the file is, what was sent and what this device does with it. On this computer the sound goes through Cadenza, which can hand it to the DAC bit-perfect in exclusive mode.").into()],

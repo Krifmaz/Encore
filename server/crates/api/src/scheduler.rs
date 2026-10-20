@@ -33,7 +33,7 @@ impl Tasks for AppState {
 async fn run(st: &AppState, key: &str) -> anyhow::Result<String> {
     Ok(match key {
         "scan" => {
-            st.library.scan(st.db.clone(), st.cfg.str("library_path"), false).await;
+            st.library.scan_all(st.db.clone(), encore_library::folders::scan_roots(&st.cfg), false).await;
             st.library.scan.lock().unwrap().message.clone()
         }
         "sync" => {
@@ -66,6 +66,7 @@ async fn run(st: &AppState, key: &str) -> anyhow::Result<String> {
             format!("backups/{}{}", b.name, if gone.is_empty() { String::new() } else { format!(", {} old backup(s) removed", gone.len()) })
         }
         "quality" => encore_media::quality::scan(st, 300).await?,
+        "loudness" => encore_library::loudness::scheduled(st).await?,
         "update" => encore_system::update::scheduled(st).await?,
         _ => encore_requests::upkeep::cleanup(st)?,
     })

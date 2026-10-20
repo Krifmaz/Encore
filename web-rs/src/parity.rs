@@ -31,6 +31,8 @@ const LEGACY_ONLY: &[(&str, &str)] = &[
     ("Download sources", "a part heading of Apps & sources; its cards are the Downloads page since R2"),
     ("Services", "a part heading of Apps & sources; its cards are the Integrations and Server processing pages since R2"),
     ("Add a free AcoustID API key in Settings → Verification first", "there is no Verification page: the key is in Settings → Library → Verification & duplicates since R2, which the toast now names"),
+    // 0.31 (p6 item 9, the owner on Oct 18): the Library's box searches the whole library, whatever the tab
+    ("Filter library…", "the Library's search box reads \"Search artists, albums, songs in your library…\" since 0.31 (one search for the whole library)"),
 ];
 
 /// Whole files of the JavaScript UI whose page web-rs no longer has, as (file, why). Like [`LEGACY_ONLY`], an

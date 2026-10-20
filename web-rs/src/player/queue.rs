@@ -66,6 +66,8 @@ pub async fn shuffle_library() -> usize {
 /// context: 'album' | 'single' | 'list' – decides what happens when the queue ends.
 fn sendable(tracks: &[Value]) -> Vec<Value> { tracks.iter().filter(|t| json::truthy(t) && t.g("id").is_number()).map(slim).collect() }
 pub fn play_queue(tracks: Vec<Value>, start: usize, context: &str) {
+    // in a group listen the list becomes the group's queue (player/group.rs)
+    if g_play_queue(&tracks, start, context, 0.0) { return; }
     if is_linked() && !is_local() && context != "preview" {
         let list: Vec<Value> = tracks.into_iter().filter(json::truthy).collect();
         let at = (start as i64).min(list.len() as i64 - 1).max(0);
@@ -87,6 +89,7 @@ pub fn play_queue(tracks: Vec<Value>, start: usize, context: &str) {
 }
 
 pub fn enqueue(tracks: Vec<Value>) {
+    if g_add("enqueue", &tracks) { return; }
     if is_linked() && !is_local() {
         let out = sendable(&tracks);
         if !out.is_empty() { via_link(json!({ "action": "enqueue", "tracks": out })); }
@@ -101,6 +104,7 @@ pub fn enqueue(tracks: Vec<Value>) {
 }
 
 pub fn play_next(tracks: Vec<Value>) {
+    if g_add("play_next", &tracks) { return; }
     if is_linked() && !is_local() {
         let out = sendable(&tracks);
         if !out.is_empty() { via_link(json!({ "action": "play_next", "tracks": out })); }
@@ -135,6 +139,7 @@ pub fn queue() -> (Vec<Value>, usize) {
 }
 
 pub fn next(auto: bool) {
+    if g_next(auto) { return; }
     if !auto && via_link(json!({ "action": "next" })) { return; }
     if auto && st(|s| s.repeat == "one") { seek_to(0.0); if let Some(a) = audio() { play(&a); } return; }
     if st(|s| s.index < s.queue.len() as i64 - 1) { st_mut(|s| s.index += 1); load(false, 0.0, None, None); return; }
@@ -149,6 +154,7 @@ pub fn next(auto: bool) {
 
 /// Queue ran out: keep the music going with a shuffle of the whole library.
 async fn continue_with_library() -> bool {
+    if grouped() { return false; }
     if !prefs().truthy("autoplay") { return false; }
     match fresh_shuffle(50).await {
         Ok(more) => {
@@ -161,14 +167,18 @@ async fn continue_with_library() -> bool {
 }
 
 pub fn prev() {
+    if g_prev() { return; }
     if via_link(json!({ "action": "prev" })) { return; }
     if position() > 3.0 || st(|s| s.index == 0) { seek_to(0.0); return; }
     st_mut(|s| s.index -= 1);
     load(false, 0.0, None, None);
 }
 
-pub(super) fn jump(i: i64) { st_mut(|s| s.index = i); load(false, 0.0, None, None); }
+pub(super) fn jump(i: i64) {
+    if g_entry("jump", i, 0) { return; }
+    st_mut(|s| s.index = i); load(false, 0.0, None, None); }
 pub(super) fn remove_at(i: i64) {
+    if g_entry("remove", i, 0) { return; }
     if st(|s| i == s.index) { return; }
     st_mut(|s| {
         if i >= 0 && (i as usize) < s.queue.len() { s.queue.remove(i as usize); }
@@ -177,6 +187,7 @@ pub(super) fn remove_at(i: i64) {
     render(); emit(); preload_next();
 }
 pub(super) fn move_to(from: i64, to: i64) {
+    if g_entry("move", from, to) { return; }
     if st(|s| from == s.index || to <= s.index || to >= s.queue.len() as i64) { return; }
     st_mut(|s| {
         if from >= 0 && (from as usize) < s.queue.len() {
@@ -214,6 +225,7 @@ fn unshuffled(s: &State) -> Vec<Rc<Value>> {
 }
 /// `setShuffle(on)`: shuffle mode – on shuffles the rest of the queue, off puts the original order back (the song playing stays).
 pub(super) fn set_shuffle(on: bool) {
+    if g_modes() { return; }
     if via_link(json!({ "action": "shuffle", "value": on })) {
         LINK.with(|l| if let Some(l) = l.borrow_mut().as_mut() { if let Some(o) = l.state.as_object_mut() { o.insert("shuffle".into(), json!(on)); } });
         render();
@@ -235,6 +247,7 @@ pub(super) fn set_shuffle(on: bool) {
 }
 /// `setRepeat(v)`: 'off' | 'all' | 'one'.
 pub(super) fn set_repeat(v: &str) {
+    if g_modes() { return; }
     if !["off", "all", "one"].contains(&v) { return; }
     if via_link(json!({ "action": "repeat", "value": v })) {
         LINK.with(|l| if let Some(l) = l.borrow_mut().as_mut() { if let Some(o) = l.state.as_object_mut() { o.insert("repeat".into(), json!(v)); } });
@@ -252,7 +265,7 @@ pub(super) fn repeat_title(r: &str) -> &'static str { match r { "one" => "Repeat
 
 /// Near the end of the queue: fetch the library shuffle ahead of time, so the next song is ready too.
 pub(super) fn top_up() {
-    if TOPPING.with(|t| t.get()) || st(|s| s.context == "preview" || s.index < s.queue.len() as i64 - 2) { return; }
+    if TOPPING.with(|t| t.get()) || grouped() || st(|s| s.context == "preview" || s.index < s.queue.len() as i64 - 2) { return; }
     if !prefs().truthy("autoplay") { return; }
     TOPPING.with(|t| t.set(true));
     dom::spawn(async move {
@@ -273,7 +286,8 @@ pub(super) const RESUME: &str = "encore.resume";
 pub(super) fn is_lib(x: &Value) -> bool { json::truthy(x) && !x.truthy("preview") && x.g("id").is_number() }
 /// Save the queue and the spot (every 5 s while playing; at once on pause, a new song and when the page goes away).
 pub(super) fn save_spot(force: bool) {
-    if is_linked() || HELD.with(|h| h.get()) || audio().is_none() { return; }
+    // a group listen's queue is the group's, not this device's spot
+    if is_linked() || grouped() || HELD.with(|h| h.get()) || audio().is_none() { return; }
     let Some(t) = cur() else { return };
     if !is_lib(&t) { return; }
     let now = now_ms();
@@ -317,7 +331,7 @@ pub fn saved_spot() -> Option<Value> {
 /// Put a saved spot back: the queue, paused at the song and position you left off (one tap plays).
 pub fn restore(s: Option<Value>) -> bool {
     let Some(s) = s else { return false };
-    if is_linked() || cur().is_some() || audio().is_none() || !s.g("queue").is_array() { return false; }
+    if is_linked() || grouped() || cur().is_some() || audio().is_none() || !s.g("queue").is_array() { return false; }
     let q: Vec<Value> = s.a("queue").into_iter().filter(is_lib).collect();
     if q.is_empty() { return false; }
     let ctx = s.s("context");

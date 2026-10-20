@@ -200,6 +200,23 @@ async fn shuffle_and_repeat_commands_reach_the_device_and_its_state_shows_them()
 }
 
 #[tokio::test]
+async fn a_prefs_command_reaches_the_device_and_its_state_shows_its_normalization() {
+    let e = setup("prefs", 9106).await;
+    let mut s = playing(1, 5.0);
+    s["norm"] = json!({ "mode": "off", "target": -14, "clip": true });
+    e.beat("tab", "Chrome on Linux", s).await;
+    let d = call(&e.app, "GET", "/api/remote/devices", &e.cookie, None).await.1;
+    assert_eq!(d[0]["state"]["norm"]["mode"], json!("off"), "{d}");
+    let c = json!({ "action": "prefs", "norm": { "mode": "album", "target": -12 } });
+    let r = call(&e.app, "POST", "/api/remote/tab/command", &e.cookie, Some(c)).await;
+    assert_eq!(r.0, StatusCode::OK, "{:?}", r.1);
+    let r = call(&e.app, "POST", "/api/remote/heartbeat", &e.cookie, Some(json!({ "id": "tab", "name": "Chrome on Linux", "state": playing(1, 6.0) }))).await;
+    let cmds = r.1["commands"].as_array().unwrap().clone();
+    assert_eq!(cmds.len(), 1, "{cmds:?}");
+    assert_eq!((cmds[0]["action"].clone(), cmds[0]["norm"].clone()), (json!("prefs"), json!({ "mode": "album", "target": -12 })));
+}
+
+#[tokio::test]
 async fn songs_carry_each_artist_for_links() {
     let e = setup("credits", 9106).await;
     e.st.db.execute("INSERT INTO tracks (id, path, title, artist, albumartist, album, album_id, duration) VALUES (?,?,?,?,?,?,?,?)",

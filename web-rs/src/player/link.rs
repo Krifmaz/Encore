@@ -98,15 +98,26 @@ pub(super) fn now_track() -> Option<Value> { if is_linked() { remote_track() } e
 pub(super) fn now_position() -> f64 { if is_linked() { link_state_value().f("position") } else { position() } }
 pub(super) fn now_playing() -> bool { if is_linked() { link_state_value().truthy("playing") } else { audio().is_some() && shows_playing() } }
 
+/// A field of the linked device's state set here before its next check-in confirms it (a setting sent to it).
+pub(super) fn patch_link_state(key: &str, v: Value) {
+    LINK.with(|l| {
+        if let Some(o) = l.borrow_mut().as_mut().and_then(|l| l.state.as_object_mut()) { o.insert(key.into(), v); }
+    });
+}
+
 // ---- remote control: what this device is playing, and commands from your other devices ----
-const SLIM_KEYS: [&str; 7] = ["id", "title", "artist", "album", "album_id", "format", "duration"];
+/// What a queue entry carries between devices (and into the saved spot): the song, and since 0.31 its loudness, sample
+/// rate and bit depth (client-shapes §2.1), so normalization and the quality badge work wherever it plays next.
+const SLIM_KEYS: [&str; 10] = ["id", "title", "artist", "album", "album_id", "format", "duration", "gain", "sample_rate", "bit_depth"];
 pub(super) fn slim(t: &Value) -> Value {
     let mut m = Map::new();
     for k in SLIM_KEYS { if t.has(k) { m.insert(k.into(), t.g(k).clone()); } }
     Value::Object(m)
 }
+/// What this device is playing, for the other devices – and its volume normalization settings (`norm`, client-shapes
+/// §5.1), which a device controlling this one shows and changes with the `prefs` command.
 pub fn snapshot() -> Value {
-    let (Some(t), Some(_)) = (cur(), audio()) else { return json!({ "playing": false }) };
+    let (Some(t), Some(_)) = (cur(), audio()) else { return json!({ "playing": false, "norm": norm_prefs().to_json() }) };
     let mut m = match slim(&t) { Value::Object(m) => m, _ => Map::new() };
     // `...withArtists(t)`: each artist of the song for links, only when it has them
     if !t.a("artists").is_empty() { m.insert("artists".into(), t.g("artists").clone()); }
@@ -121,7 +132,12 @@ pub fn snapshot() -> Value {
     m.insert("shuffle".into(), json!(shuffle));
     m.insert("repeat".into(), json!(repeat));
     let rate = CTX.with(|c| c.borrow().as_ref().map(|c| c.sample_rate() as f64));
-    m.insert("signal".into(), json!({ "label": quality(&t), "transport": transport().map(|(k, _)| k), "output_rate": rate }));
+    let mut signal = json!({ "label": quality(&t), "transport": transport().map(|(k, _)| k), "output_rate": rate });
+    // the Signal path's normalization line for this song ("−3.2 dB (album gain, target −14 LUFS)"), while it is on
+    let norm = norm_for(&t);
+    if norm.on { signal["norm"] = json!(norm.line()); }
+    m.insert("signal".into(), signal);
+    m.insert("norm".into(), norm_prefs().to_json());
     let (q, index) = lib_window();
     m.insert("index".into(), json!(index));
     m.insert("queue".into(), Value::Array(q));
@@ -146,8 +162,12 @@ fn run_command(c: &Value) {
         "repeat" => set_repeat(&c.s("value")),
         "enqueue" => { if c.g("tracks").is_array() { enqueue(c.a("tracks")); } }
         "play_next" => { if c.g("tracks").is_array() { play_next(c.a("tracks")); } }
+        // volume normalization settings from a device controlling this one (any of mode, target, clip)
+        "prefs" => { if c.g("norm").is_object() { set_norm_prefs(norm_prefs().with(c.g("norm"))); } }
         "play_queue" => {
             if !c.g("tracks").is_array() || c.a("tracks").is_empty() { return; }
+            // in a group listen: the group's queue, at that spot (for those who control it)
+            if g_play_queue(&c.a("tracks"), c.i("index").max(0) as usize, "list", c.f("position")) { return; }
             play_queue(c.a("tracks"), c.i("index").max(0) as usize, "list");
             if c.f("position") > 1.0 {
                 let at = c.f("position");

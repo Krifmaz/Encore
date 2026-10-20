@@ -54,11 +54,12 @@ async fn main() -> anyhow::Result<()> {
 }
 
 /// The library at start: cover thumbnails and colours for albums that have none yet (a new install, a
-/// cleared cache, an update that added sizes) at once, then a scan. Later scans come from the scheduler.
+/// cleared cache, an update that added sizes) at once, then a scan of every library folder. Later scans come
+/// from the scheduler.
 fn start_library(st: &AppState) {
     st.library.warm_covers(st.db.clone());
     let st = st.clone();
-    tokio::spawn(async move { st.library.scan(st.db.clone(), st.cfg.str("library_path"), false).await });
+    tokio::spawn(async move { st.library.scan_all(st.db.clone(), encore_library::folders::scan_roots(&st.cfg), false).await });
 }
 
 /// The loops that run beside the web server, each from the crate it belongs to. Before a restart the
@@ -77,6 +78,11 @@ fn background(st: &AppState) -> Vec<Arc<dyn Supervisor>> {
         // the Soulseek server session: Encore's reconnect schedule (slskd's own loop is kept off)
         looping("soulseek session", { let st = s.clone(); move || encore_requests::slskd_session::supervisor(st.clone()) }),
         looping("roon", { let st = s.clone(); move || encore_playback::roon::supervisor(st.clone()) }),
+        // group listens: the end of a song, members gone 2 minutes, idle groups; saved before a restart
+        with_stop("group listens", { let st = s.clone(); move || encore_api::routes::group::run(st.clone()) }, {
+            let st = s.clone();
+            move || encore_api::routes::group::flush(st.clone())
+        }),
         looping("contributions", { let st = s.clone(); move || encore_library::contribute::worker(st.clone()) }),
         looping("youtube sign-in", { let st = s.clone(); move || encore_requests::ytauth::supervisor(st.clone()) }),
         with_stop("translator", { let st = s.clone(); move || encore_library::translate::worker(st.clone()) }, {

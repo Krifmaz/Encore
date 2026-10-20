@@ -470,7 +470,7 @@ pub fn handle(app: &mut App, m: Message) -> Task<AppMsg> {
                 .player
                 .now()
                 .map(|n| n.volume)
-                .unwrap_or(app.player.status.volume_linear);
+                .unwrap_or_else(crate::engine::volume_level);
             let step = if m == Message::VolumeUp { 0.05 } else { -0.05 };
             set_volume(app, v + step)
         }

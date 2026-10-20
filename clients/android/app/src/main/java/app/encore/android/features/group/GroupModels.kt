@@ -13,7 +13,7 @@ import kotlinx.serialization.json.JsonElement
 import kotlinx.serialization.json.JsonObject
 
 // Group listen (0.31): several people on this server listen to the same queue at the same time, each on their own
-// device. The shapes below are the ones written down in docs/contracts/0.31-0.33-client-shapes.md (§2.2, §2.3);
+// device. The shapes below are the ones written down in docs/contracts/client-shapes-0.31-0.33.md (§2.2, §2.3);
 // every field is read leniently, so an older or newer server never costs the whole answer.
 
 /** One person (one device) in a group listen. */
@@ -284,19 +284,38 @@ object GroupRules {
     /** "Alex · 3 listening" on a tile of the server's list. */
     fun tileLine(g: GroupSummary): String = "${g.hostName} · ${g.membersCount} listening"
 
-    /** The toasts for people who came or went between two states ("Sam joined", "Sam left"); this device left out. */
+    /**
+     * The toasts for people who came or went between two states ("Sam joined", "Sam left"); this device left out. Its
+     * membership before counts as this device too: after being dropped (2 minutes without the event stream) the phone
+     * joins again with the code and gets a new membership id, which is not "<you> left".
+     */
     fun comings(old: GroupState?, new: GroupState): List<String> {
         if (old == null || old.id != new.id) return emptyList()
-        val me = new.youMember
+        val me = setOf(old.youMember, new.youMember) - ""
         val before = old.members.associateBy { it.key }
         val after = new.members.associateBy { it.key }
         val out = ArrayList<String>()
-        for ((k, m) in after) if (k !in before && k != me) out.add("${m.name} joined")
-        for ((k, m) in before) if (k !in after && k != me) out.add("${m.name} left")
+        for ((k, m) in after) if (k !in before && k !in me) out.add("${m.name} joined")
+        for ((k, m) in before) if (k !in after && k !in me) out.add("${m.name} left")
         if (old.hostUser != new.hostUser && new.hostUser != 0L && old.hostUser != 0L) {
             out.add(if (new.youHost) "You host the group listen now" else "${new.hostName} hosts the group listen now")
         }
         return out
+    }
+
+    /**
+     * Why this phone is out of its group when joining again after being dropped was refused (client-shapes §3.9, §3.17):
+     * the server's own sentence (it always sends one: the group is full, too many tries, turned off), else one by the
+     * status.
+     */
+    fun rejoinRefused(code: Int, detail: String?): String {
+        val d = detail?.trim().orEmpty()
+        if (d.isNotEmpty() && !d.startsWith("HTTP ")) return d
+        return when (code) {
+            429 -> "Too many tries. Wait a moment and try again."
+            403 -> "Group listens are turned off on this server"
+            else -> "Couldn't join"
+        }
     }
 
     /** What the end of a group listen is called, by the `ended` event's reason. */

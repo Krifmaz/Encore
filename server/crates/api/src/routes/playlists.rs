@@ -1,6 +1,7 @@
 //! /api/playlists, /api/connections, /api/sync
 use crate::enrich::enrich_now;
 use crate::auth::{MaybeUser, User};
+use crate::signin;
 use encore_db::{now, Row, RowExt};
 use encore_core::error::{err, ApiResult};
 use encore_requests::sources::links;
@@ -10,6 +11,7 @@ use encore_sync::playlists;
 use encore_sync::connections;
 use encore_db::p;
 use axum::extract::{Path, Query, State};
+use axum::http::HeaderMap;
 use axum::response::{IntoResponse, Redirect, Response};
 use axum::routing::{delete, get, post};
 use axum::{Json, Router};
@@ -329,7 +331,7 @@ struct ConnectBody {
     headers: Option<String>,
 }
 
-async fn connect(State(st): State<AppState>, User(u): User, Path(service): Path<String>, Json(b): Json<ConnectBody>) -> ApiResult<Json<Value>> {
+async fn connect(State(st): State<AppState>, User(u): User, headers: HeaderMap, Path(service): Path<String>, Json(b): Json<ConnectBody>) -> ApiResult<Json<Value>> {
     let uid = u.i("id");
     let s = |o: &Option<String>| o.clone().unwrap_or_default().trim().to_string();
     let res = match service.as_str() {
@@ -338,7 +340,8 @@ async fn connect(State(st): State<AppState>, User(u): User, Path(service): Path<
         "listenbrainz" => connections::connect_listenbrainz(&st, uid, &s(&b.token)).await,
         "lastfm" => match s(&b.username) {
             n if !n.is_empty() => connections::connect_lastfm(&st, uid, &n).await,
-            _ => connections::lastfm_start(&st).map(|url| json!({ "url": url })),
+            // the sign-in's single-use state rides in the callback address (crate::signin)
+            _ => signin::start(&st, uid, "lastfm", &headers, |state, _| connections::lastfm_start(&st, state)).map(|url| json!({ "url": url })),
         },
         "deezer" => connections::connect_deezer(&st, uid, &s(&b.profile)).await,
         "plex" => connections::plex_pin_start(&st).await,
@@ -346,7 +349,8 @@ async fn connect(State(st): State<AppState>, User(u): User, Path(service): Path<
             Some(h) => connections::ytmusic_connect_browser(&st, uid, h).await,
             None => connections::ytmusic_oauth_start(&st).await,
         },
-        "spotify" | "tidal" => connections::oauth_start(&st, uid, &service).map(|url| json!({ "url": url })),
+        "spotify" | "tidal" => signin::start(&st, uid, &service, &headers, |state, verifier| connections::oauth_url(&st, &service, state, verifier))
+            .map(|url| json!({ "url": url })),
         _ => return Err(err(404, "Unknown service")),
     };
     res.map(Json).map_err(bad)
@@ -376,26 +380,18 @@ fn callback_error(msg: &str) -> Response {
     Redirect::to(&format!("/#/connections?error={}", urlencoding::encode(&msg.chars().take(200).collect::<String>()))).into_response()
 }
 
+/// Spotify, Tidal and Last.fm come back here. The account goes to the user who started the sign-in (its
+/// single-use `state`), not to whoever this browser is signed in as; a browser that is not signed in as that
+/// user is asked first (crate::signin).
 async fn callback(State(st): State<AppState>, MaybeUser(u): MaybeUser, Path(service): Path<String>, Query(q): Query<CallbackQ>) -> Response {
-    if !q.error.is_empty() {
-        let why = if q.error == "access_denied" { "You did not allow Encore – try again and approve the access".to_string() } else { q.error.replace('_', " ") };
-        return callback_error(&why);
-    }
-    let Some(u) = u else {
-        return callback_error("Sign in to Encore in this browser first, then connect the account again");
-    };
     if !matches!(service.as_str(), "lastfm" | "spotify" | "tidal") {
         return callback_error("Unknown service");
     }
-    let done = if service == "lastfm" {
-        connections::lastfm_finish(&st, u.i("id"), &q.token).await.map(|_| ())
-    } else {
-        connections::oauth_finish(&st, &service, &q.code, &q.state, u.i("id")).await.map(|_| ())
-    };
-    match done {
-        Ok(_) => Redirect::to(&format!("/#/connections?connected={service}")).into_response(),
-        Err(e) => callback_error(&e.to_string()),
-    }
+    let code = if service == "lastfm" { &q.token } else { &q.code };
+    signin::callback(&st, u, &service, &q.state, &q.error, code, |r| match r {
+        Ok(()) => Redirect::to(&format!("/#/connections?connected={service}")).into_response(),
+        Err(e) => callback_error(&e),
+    }).await
 }
 
 #[derive(Deserialize, Default)]

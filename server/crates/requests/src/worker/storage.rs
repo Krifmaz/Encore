@@ -160,11 +160,13 @@ fn save(st: &impl Ctx, h: &HealthState) {
 }
 
 /// The folders Encore downloads into or imports to, registered with [`fsx::roots`] so a storage error on
-/// them reads as one: the library, the staging folder, Soulseek's and the download clients' folders.
+/// them reads as one: the library and the extra library folders, the staging folder, Soulseek's and the
+/// download clients' folders.
 pub fn register_roots(st: &impl Ctx) {
     let mut roots: Vec<PathBuf> = ["library_path", "staging_path", "slskd_download_path", "qbit_download_path", "transmission_download_path",
         "deluge_download_path", "rtorrent_download_path", "sab_download_path", "nzbget_download_path"]
         .iter().map(|k| st.cfg().str(k)).filter(|s| !s.trim().is_empty()).map(PathBuf::from).collect();
+    roots.extend(encore_library::folders::extra_folders(st.cfg()));
     roots.push(crate::slskd_managed::download_dir(st));
     fsx::roots::add(roots);
 }
@@ -1056,6 +1058,11 @@ pub fn remove_staging(st: &impl Ctx, id: i64) -> bool {
         return false;
     }
     let dir = root.join(format!("request-{id}"));
+    // a folder kept in place as an extra library folder (or holding one) is the library's now: it stays
+    if encore_library::folders::touches_extra(st.cfg(), &dir) {
+        tracing::info!("{} holds an extra library folder: it is not removed with its request", dir.display());
+        return false;
+    }
     dir.is_dir() && std::fs::remove_dir_all(&dir).is_ok()
 }
 

@@ -1,7 +1,8 @@
-//! The music library: scanning files into the database ([`scan`]), artists and their spellings
-//! ([`artists`]), searching the library and the catalogues ([`search`], [`nlsearch`]), telling versions of
-//! a song apart ([`matcher`]), fingerprints ([`acoustid`]), tagging and importing ([`tagger`], [`meta`]),
-//! lyrics, duplicates, organizing folders, the side index of the library lists ([`sections`]), and giving
+//! The music library: scanning files into the database ([`scan`], over the library's folders: [`folders`]),
+//! artists and their spellings ([`artists`]), searching the library and the catalogues ([`search`],
+//! [`nlsearch`]), telling versions of a song apart ([`matcher`]), fingerprints ([`acoustid`]), tagging and
+//! importing ([`tagger`], [`meta`]), lyrics, duplicates, organizing folders, the side index of the library
+//! lists ([`sections`]), each song's loudness for volume normalization ([`loudness`]), and giving
 //! fingerprints and ISRCs back to AcoustID and MusicBrainz ([`contribute`]).
 //!
 //! Functions that need the server's database, settings, HTTP client or caches take a [`Ctx`], which the
@@ -11,8 +12,10 @@ pub mod artists;
 pub mod catalog;
 pub mod contribute;
 pub mod dupes;
+pub mod folders;
 pub mod lists;
 pub mod lookup;
+pub mod loudness;
 pub mod lyrics;
 pub mod matcher;
 pub mod meta;

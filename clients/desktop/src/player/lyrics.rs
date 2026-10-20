@@ -4,13 +4,19 @@
 use crate::api::{Api, ApiError};
 use crate::widgets::{self, t, El};
 use crate::theme;
-use iced::widget::{column, container, scrollable};
+use iced::widget::text::Wrapping;
+use iced::widget::{column, container, scrollable, space};
 use iced::{Alignment, Length, Task};
 use serde_json::Value;
 use std::sync::Arc;
 
 /// The id of the lyrics scroll area.
 pub const SCROLL_ID: &str = "player-lyrics";
+/// The id of the current line's box (the one kept in the middle).
+pub const LINE_ID: &str = "player-lyrics-now";
+/// Lyrics mode's sizes on the desktop: the current line, the others (the phone's 28 / 22 sp).
+pub const CURRENT_PX: f32 = 30.0;
+pub const LINE_PX: f32 = 24.0;
 
 /// One synced line.
 #[derive(Clone, Debug, PartialEq)]
@@ -96,21 +102,17 @@ impl Lyrics {
         true
     }
 
-    /// Where the scroll area should sit so the current line is in the middle (0…1).
-    pub fn scroll_offset(&self) -> f32 {
-        if self.lines.len() < 2 || self.current < 0 {
-            return 0.0;
-        }
-        (self.current as f32 / (self.lines.len() - 1) as f32).clamp(0.0, 1.0)
-    }
-
-    /// The pane: the synced lines (the current one lit), the plain text, or a line saying why
-    /// there is nothing. `song` is the current song's library id (None for files).
-    pub fn view<'a, M: Clone + 'a>(&'a self, song: Option<i64>, on_seek: impl Fn(f64) -> M + 'a) -> El<'a, M> {
+    /// Lyrics mode's column (p6 item 4, client-shapes §5.2): the synced lines at 24 px with the
+    /// current one at 30 px and bold, the ones already sung dimmed, a click on a line seeks there;
+    /// the plain text; or a line saying why there is nothing. `pad` is the room above the first
+    /// and below the last line, so those can sit in the middle too. The current line carries
+    /// [`LINE_ID`]: the player scrolls it into the middle (`player::lyrics_scroll`). `song` is the
+    /// current song's library id (None for files).
+    pub fn view<'a, M: Clone + 'a>(&'a self, song: Option<i64>, pad: f32, on_seek: impl Fn(f64) -> M + 'a) -> El<'a, M> {
         let p = theme::look();
         let note = |s: &'a str| -> El<'a, M> {
-            container(widgets::muted(s).size(14))
-                .padding([24, 8])
+            container(widgets::muted(s).size(16))
+                .padding([32, 8])
                 .width(Length::Fill)
                 .center_x(Length::Fill)
                 .into()
@@ -122,13 +124,15 @@ impl Lyrics {
             return note("Looking for lyrics…");
         }
         if !self.lines.is_empty() {
-            let mut col = column![].spacing(10).width(Length::Fill).align_x(Alignment::Center);
+            let mut col = column![space().height(pad)].spacing(14).width(Length::Fill).align_x(Alignment::Center);
             for (i, ln) in self.lines.iter().enumerate() {
                 let on = i as i64 == self.current;
                 let text = if ln.text.is_empty() { "♪" } else { ln.text.as_str() };
                 let label = t(text)
-                    .size(if on { 22 } else { 18 })
+                    .size(if on { CURRENT_PX } else { LINE_PX })
                     .font(if on { theme::bold() } else { iced::Font::DEFAULT })
+                    .line_height(1.3)
+                    .wrapping(Wrapping::WordOrGlyph)
                     .color(if on {
                         p.text
                     } else if (i as i64) < self.current {
@@ -136,29 +140,107 @@ impl Lyrics {
                     } else {
                         p.muted
                     })
+                    .width(Length::Fill)
                     .center();
-                col = col.push(
-                    iced::widget::button(label)
-                        .padding([4, 8])
-                        .style(theme::btn(theme::Btn::Row))
-                        .on_press(on_seek(ln.t)),
-                );
+                let line = iced::widget::button(label)
+                    .padding([4, 12])
+                    .width(Length::Fill)
+                    .style(theme::btn(theme::Btn::Row))
+                    .on_press(on_seek(ln.t));
+                col = col.push(if on { El::from(container(line).id(LINE_ID)) } else { El::from(line) });
             }
-            return scrollable(container(col).padding([16, 8]).width(Length::Fill))
+            col = col.push(space().height(pad));
+            // the lines move by themselves: no scrollbar (the wheel still scrolls)
+            return scrollable(container(col).width(Length::Fill))
                 .id(SCROLL_ID)
+                .direction(scrollable::Direction::Vertical(scrollable::Scrollbar::hidden()))
                 .height(Length::Fill)
                 .style(theme::scroll)
                 .into();
         }
         if !self.plain.is_empty() {
-            return scrollable(container(t(self.plain.as_str()).size(17).line_height(1.6)).padding([16, 12]))
-                .id(SCROLL_ID)
-                .height(Length::Fill)
-                .style(theme::scroll)
-                .into();
+            return scrollable(
+                container(
+                    t(self.plain.as_str())
+                        .size(LINE_PX)
+                        .line_height(1.5)
+                        .wrapping(Wrapping::WordOrGlyph)
+                        .width(Length::Fill)
+                        .center(),
+                )
+                .padding([24, 12]),
+            )
+            .id(SCROLL_ID)
+            .height(Length::Fill)
+            .style(theme::scroll)
+            .into();
         }
         note(if self.instrumental { "Instrumental" } else { "No lyrics found for this song." })
     }
+}
+
+/// Where the lyrics scroll area is and where it should go so the current line sits in the
+/// middle: `(now, wanted)`, in pixels from the top of its content. Nothing when the lyrics
+/// column is not on screen.
+pub fn centre_task() -> Task<(f32, f32)> {
+    iced::advanced::widget::operate(Centre::default())
+}
+
+/// Finds the scroll area, its offset and the current line's box.
+#[derive(Default)]
+struct Centre {
+    /// (the content's top, the visible height, the offset now)
+    area: Option<(f32, f32, f32)>,
+    /// (the line's top, its height)
+    line: Option<(f32, f32)>,
+}
+
+impl iced::advanced::widget::Operation<(f32, f32)> for Centre {
+    fn traverse(&mut self, operate: &mut dyn FnMut(&mut dyn iced::advanced::widget::Operation<(f32, f32)>)) {
+        operate(self);
+    }
+
+    fn container(&mut self, id: Option<&iced::advanced::widget::Id>, bounds: iced::Rectangle) {
+        if id == Some(&iced::advanced::widget::Id::new(LINE_ID)) {
+            self.line = Some((bounds.y, bounds.height));
+        }
+    }
+
+    fn scrollable(
+        &mut self,
+        id: Option<&iced::advanced::widget::Id>,
+        bounds: iced::Rectangle,
+        content_bounds: iced::Rectangle,
+        translation: iced::Vector,
+        _state: &mut dyn iced::advanced::widget::operation::Scrollable,
+    ) {
+        if id == Some(&iced::advanced::widget::Id::new(SCROLL_ID)) {
+            self.area = Some((content_bounds.y, bounds.height, translation.y));
+        }
+    }
+
+    fn finish(&self) -> iced::advanced::widget::operation::Outcome<(f32, f32)> {
+        match (self.area, self.line) {
+            (Some((top, height, now)), Some((y, h))) => {
+                iced::advanced::widget::operation::Outcome::Some((now, centred_offset(y - top, h, height)))
+            }
+            _ => iced::advanced::widget::operation::Outcome::None,
+        }
+    }
+}
+
+/// The offset that puts a line (`line_y` from the top of the content, `line_h` high) in the
+/// middle of a scroll area `visible` high.
+pub fn centred_offset(line_y: f32, line_h: f32, visible: f32) -> f32 {
+    (line_y + line_h / 2.0 - visible / 2.0).max(0.0)
+}
+
+/// The eased offset `elapsed` into a scroll from `from` to `to` that takes `total`.
+pub fn eased(from: f32, to: f32, elapsed: std::time::Duration, total: std::time::Duration) -> f32 {
+    let x = (elapsed.as_secs_f32() / total.as_secs_f32().max(1e-3)).clamp(0.0, 1.0);
+    // ease out (cubic)
+    let k = 1.0 - (1.0 - x).powi(3);
+    from + (to - from) * k
 }
 
 /// The index of the last line at or before `p` (−1 before the first).
@@ -275,9 +357,21 @@ mod tests {
         assert!(l.sync(12.3), "0.3 s ahead lights the line");
         assert_eq!(l.current, 1);
         assert!(!l.sync(12.4));
-        assert!((l.scroll_offset() - 1.0 / 3.0).abs() < 1e-6);
         assert!(parse_stamp("ab:12").is_none());
         assert_eq!(parse_stamp("2:03.5"), Some(123.5));
+    }
+
+    #[test]
+    fn the_current_line_is_scrolled_into_the_middle() {
+        // a line 300 px down the content, 40 px high, in an area 500 px high: 70 px of scroll
+        assert_eq!(centred_offset(300.0, 40.0, 500.0), 70.0);
+        // near the top the area stays at the top
+        assert_eq!(centred_offset(10.0, 40.0, 500.0), 0.0);
+        let total = std::time::Duration::from_millis(400);
+        assert_eq!(eased(0.0, 100.0, std::time::Duration::ZERO, total), 0.0);
+        assert_eq!(eased(0.0, 100.0, total, total), 100.0);
+        let mid = eased(0.0, 100.0, std::time::Duration::from_millis(200), total);
+        assert!(mid > 50.0 && mid < 100.0, "it slows down towards the end: {mid}");
     }
 
     #[test]

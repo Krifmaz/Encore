@@ -289,6 +289,10 @@ class EncorePlaybackService : MediaLibraryService() {
             newQueue = { resolver.forgetAll(); car.queueReplaced() },
             volume = { transitions?.volume() ?: player.volume },
             fading = { transitions?.fading == true },
+            // normalization for a device controlling this one: the snapshot's `norm` and the `prefs` command (§5.1)
+            norm = { graph.prefs.norm.value },
+            setNorm = { n -> graph.prefs.setNorm(n) },
+            normLine = { current.track()?.let { normRow(it).first } ?: "" },
         ).also { it.start() }
         // a group listen: the player follows the group's queue and clock, and this phone's controls go to the group
         GroupListen.init(this)

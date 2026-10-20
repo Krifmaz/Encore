@@ -114,6 +114,8 @@ fn match_route(path: &str) -> Option<(&'static str, Vec<String>)> {
             if let Some(r) = p("/album/") { return seg(&r).map(|s| ("album", vec![s])); }
             if let Some(r) = p("/library/album/") { return seg(&r).map(|s| ("library-album", vec![s])); }
             if let Some(r) = p("/playlists/") { return if r.chars().all(|c| c.is_ascii_digit()) { Some(("playlist", vec![r])) } else { None }; }
+            // a group listen's invite link (0.31): "Join <host>'s group listen?"
+            if let Some(r) = p("/group/") { return seg(&r).map(|s| ("group", vec![s])); }
             return None;
         }
     })
@@ -141,6 +143,7 @@ fn page_for(name: &str) -> Option<PageFn> {
         "leaderboard" => pages::leaderboard::render,
         "bug-reports" => pages::bugreports::render,
         "bug-report" => pages::bugreports::render_one,
+        "group" => crate::group::ui::render_link,
         _ => return None,
     })
 }
@@ -302,6 +305,11 @@ async fn route_async() {
     let (path, query) = parse_hash();
     let path = crate::offline::mode::route_path(path);
     let Some(u) = user() else {
+        // an invite link opened by someone who is not signed in: the group listen's guest page
+        if let Some(code) = path.strip_prefix("/group/").filter(|c| !c.is_empty()) {
+            if let Some(app) = by_id("app") { crate::group::guest::render(app, code.to_string()).await; }
+            return;
+        }
         if let Some(app) = by_id("app") { pages::auth::render(app, path, query).await; }
         return;
     };
@@ -358,6 +366,8 @@ pub async fn boot() {
         remote::start();
         player::mount();
         remote::resume();
+        // back into the group listen this browser was in, and a group link opened before signing in
+        crate::group::start();
         dom::spawn(refresh_pending_badge());
         dom::interval_forever(30000, || dom::spawn(refresh_pending_badge()));
         dom::interval_forever(60000, || dom::spawn(refresh_bugs_badge()));

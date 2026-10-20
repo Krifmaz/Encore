@@ -318,7 +318,8 @@ object GroupListen {
         scope.launch {
             try {
                 api.end(s.id)
-                stop("You ended the group listen")
+                // the event stream's `ended` may have come first and said it already
+                if (_state.value?.id == s.id) stop("You ended the group listen")
             } catch (e: CancellationException) {
                 throw e
             } catch (e: Exception) {
@@ -537,6 +538,7 @@ object GroupListen {
 
     private suspend fun eventsLoop(id: String) {
         var backoff = 1000L
+        var rejoinedAt = Long.MIN_VALUE / 2
         while (currentCoroutineContext().isActive && _state.value?.id == id) {
             val opened = SystemClock.elapsedRealtime()
             try {
@@ -545,8 +547,16 @@ object GroupListen {
                 throw e
             } catch (e: ApiException) {
                 if (e.code in GONE) {
-                    gone(id, e)
-                    return
+                    when (gone(id, e)) {
+                        Back.IN -> {
+                            // in again: its stream opens at once (after the usual wait when that was a moment ago too)
+                            val again = opened - rejoinedAt < 30_000L
+                            rejoinedAt = opened
+                            if (!again) { backoff = 1000L; continue }
+                        }
+                        Back.RETRY -> {}
+                        Back.OUT -> return
+                    }
                 }
             } catch (_: Exception) {
             }
@@ -637,27 +647,50 @@ object GroupListen {
         return false
     }
 
+    /** What [gone] found: back in the group, ask again later (the server could not be asked), or out. */
+    private enum class Back { IN, RETRY, OUT }
+
     /**
      * The event stream answered 404 / 403 / 410: this device was dropped (offline over 2 minutes) or the group is gone.
-     * Back in with the code when it is still there; else ended (after a server restart, said so).
+     * Back in with the code when it is still there (client-shapes §3.17); else out: ended (after a server restart,
+     * said so), or the join's own reason when the group is there but this device can't get back in (full, too many
+     * tries, turned off).
      */
-    private fun gone(id: String, e: ApiException) {
-        val s = _state.value ?: return
-        if (s.id != id) return
+    private fun gone(id: String, e: ApiException): Back {
+        val s = _state.value ?: return Back.OUT
+        if (s.id != id) return Back.OUT
         if (e.code == 403) {
             stop(e.message?.takeIf { !it.startsWith("HTTP ") } ?: GroupRules.endedText("off", ""))
-            return
+            return Back.OUT
         }
-        val back = try { api.joinCode(s.code) } catch (_: Exception) { null }
-        if (back != null && back.id == id) {
-            apply(back)
-            openFor = ""
-            openEvents(id)
-            return
+        val back = try {
+            api.joinCode(s.code)
+        } catch (j: ApiException) {
+            when {
+                j.code == 404 -> null
+                // the server is in trouble for a moment: asked again with the stream
+                j.code >= 500 -> return Back.RETRY
+                else -> {
+                    stop(GroupRules.rejoinRefused(j.code, j.message))
+                    return Back.OUT
+                }
+            }
+        } catch (_: Exception) {
+            // the server can't be asked now: the stream is tried again, and with it the join
+            return Back.RETRY
+        }
+        if (back != null) {
+            if (back.id == id) {
+                apply(back)
+                return Back.IN
+            }
+            // the code belongs to another group now (this one ended and the code was given out again): not that one
+            try { api.leave(back.id) } catch (_: Exception) {}
         }
         val nowBoot = try { api.time().second } catch (_: Exception) { "" }
         val restarted = nowBoot.isNotEmpty() && boot.isNotEmpty() && nowBoot != boot
         stop(GroupRules.endedText(if (restarted) "restart" else "", s.hostName))
+        return Back.OUT
     }
 
     // ---- helpers -------------------------------------------------------------------------------------------

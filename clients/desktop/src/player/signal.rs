@@ -77,14 +77,11 @@ pub fn source_line(format: &str, bitrate: f64, info: Option<&Value>) -> String {
     parts.join(" · ")
 }
 
-/// `44100 → 44.1`, `48000 → 48`.
+/// `44100 → 44.1`, `48000 → 48`, `22050 → 22.05`, `11025 → 11.025`: exact for every common rate (up to three
+/// decimals, no trailing zeros).
 pub fn khz(hz: f64) -> String {
-    let k = hz / 1000.0;
-    if (k - k.round()).abs() < 1e-9 {
-        format!("{}", k.round() as i64)
-    } else {
-        format!("{k:.1}")
-    }
+    let s = format!("{:.3}", hz / 1000.0);
+    s.trim_end_matches('0').trim_end_matches('.').to_string()
 }
 
 /// The words of the quality badge: the engine's path label while it plays (`FLAC 16/44.1 →
@@ -212,6 +209,9 @@ pub fn rows(st: &Status, info: Option<&Value>, linked: Option<&Linked>) -> (Vec<
         "The original file, byte for byte – nothing was converted or resampled on the way".into(),
         String::new(),
     ));
+    if let Some(r) = norm_row(st, info, crate::engine::normalize::prefs()) {
+        rows.push(r);
+    }
     let engine_rows = crate::engine::settings::signal_rows(st);
     let bit_perfect = st.signal_path.as_ref().is_some_and(|p| p.bit_perfect);
     if engine_rows.is_empty() {
@@ -241,6 +241,24 @@ pub fn rows(st: &Status, info: Option<&Value>, linked: Option<&Linked>) -> (Vec<
         )
     };
     (rows, verdict)
+}
+
+/// The "Normalization" row while normalization is on: the gain this song plays with (the row's
+/// `gain`, else the one `/info` reports), why, and where the numbers come from.
+pub fn norm_row(st: &Status, info: Option<&Value>, prefs: crate::engine::normalize::Prefs) -> Option<Row> {
+    use crate::engine::normalize::{self, Gain};
+    if !prefs.on() {
+        return None;
+    }
+    let known = st
+        .track
+        .as_ref()
+        .and_then(crate::engine::tracks::encore_id)
+        .and_then(normalize::gain_of)
+        .or_else(|| info.and_then(Gain::from_row));
+    let d = normalize::decide(prefs, known.as_ref(), st.settings.dsp.bit_perfect);
+    let source = info.map(|i| fmt::s(&i["gain"], "source")).unwrap_or_default();
+    Some(("Normalization".into(), d.line(), d.note(&source)))
 }
 
 /// The dialog's body.
@@ -279,6 +297,7 @@ mod tests {
         let info = json!({ "codec": "flac", "lossless": true, "bit_depth": 24, "sample_rate": 96000, "channels": 2, "bitrate": 2304 });
         assert_eq!(source_line("flac", 0.0, Some(&info)), "FLAC · 24-bit / 96 kHz · stereo · 2304 kbps");
         assert_eq!(khz(44100.0), "44.1");
+        assert_eq!((khz(22050.0).as_str(), khz(48000.0).as_str(), khz(11025.0).as_str(), khz(352800.0).as_str()), ("22.05", "48", "11.025", "352.8"));
         let st = Status {
             track: Some(Track {
                 format: Some("FLAC".into()),
@@ -301,5 +320,24 @@ mod tests {
         assert_eq!(r[0].2, "A lossy file: what the file lost is gone before Encore touches it");
         assert_eq!(r[1].0, "Encore → this computer");
         assert_eq!(head, "Played by Cadenza on this computer");
+    }
+
+    #[test]
+    fn the_normalization_row() {
+        use crate::engine::normalize::{Mode, Prefs};
+        let mut st = Status::default();
+        let info = json!({ "gain": { "track": -8.0, "album": -6.5, "track_peak": 0.5, "album_peak": 0.6, "source": "tags", "lufs": -10.0 } });
+        let off = Prefs::default();
+        assert!(norm_row(&st, Some(&info), off).is_none(), "only while normalization is on");
+        let album = Prefs { mode: Mode::Album, target: -14, clip: true };
+        let (name, value, note) = norm_row(&st, Some(&info), album).unwrap();
+        assert_eq!(name, "Normalization");
+        assert_eq!(value, "\u{2212}2.5 dB (album gain, target \u{2212}14 LUFS)");
+        assert_eq!(note, "From the file's ReplayGain tags.");
+        let (_, value, note) = norm_row(&st, None, album).unwrap();
+        assert_eq!((value.as_str(), note.as_str()), ("No loudness data for this song", "It plays at its own level until Encore has measured it."));
+        st.settings.dsp.bit_perfect = true;
+        let (_, value, note) = norm_row(&st, Some(&info), album).unwrap();
+        assert_eq!((value.as_str(), note.as_str()), ("Off for bit-perfect output", "The DAC gets the samples untouched."));
     }
 }

@@ -99,8 +99,16 @@ pub const SECTIONS: &[Card] = &[
         s("musicbrainz_rate", "MusicBrainz requests / second", "number").step("0.1").help("Keep at 1 for the public server"),
         s("github_token", "GitHub token (optional)", "password").full().help("Only for the Download tools update checks: GitHub allows 60 checks an hour per address without a token and 5,000 with one. A fine-grained token with no permissions is enough (github.com → Settings → Developer settings)."),
     ] },
+    // 0.31: the server's settings.toml card `grouplisten`, on Server → General after the General card
+    Card { id: "grouplisten", title: "Group listens", desc: "Several people on this server hear the same songs at the same time, each on their own device. Anyone signed in can start one and invite others with a code or a link.", test: None, test_label: None, fields: &[
+        s("group_listen", "Allow group listens", "bool").help("Off hides every group listen entry in the apps and ends the ones that are running"),
+        s("group_listen_guests", "Let people without an account join with the invite link", "bool").help("The host also switches “Guests can join with the link” on for their group; both must be on. Guests listen on a web page: they can't add songs or control playback, and nothing they hear is logged or scrobbled. Their access ends with the group, when they leave, or after 12 hours."),
+        s("group_listen_max", "Most people in one group listen", "number").help("Guests count too. A host can set a lower limit for their group."),
+        s("group_listen_keep", "Keep group listens through a server restart", "bool").help("They come back paused where they were, the apps join again by themselves and the host presses play. Off: a restart ends them. Group listens nobody used for 12 hours end either way."),
+    ] },
     Card { id: "library", title: "Library & tagging", desc: "Where your music lives, and how downloaded files are tagged, named and organised.", test: None, test_label: None, fields: &[
         s("library_path", "Music library path", "text").help("Inside the container (mount your music folder here)"),
+        s("library_extra_roots", "Extra library folders", "textarea").full().help("One folder per line, inside the container. Their songs are in the library where and as they are: Encore never moves, renames or retags files there. Files → Import with “Keep the files where they are” adds a folder here."),
         s("staging_path", "Staging folder for downloads", "text").help("Where downloads (streamrip, yt-dlp, links) are saved before they are tagged and moved into the library"),
         s("scan_interval_minutes", "Rescan library every (minutes)", "number").help("0 disables periodic scans"),
         s("autotag_on_import", "Tag downloads from MusicBrainz on import", "bool"),
@@ -264,7 +272,7 @@ impl Group {
 }
 
 pub const GROUPS: &[Group] = &[
-    Group { id: "general", parts: &[("", &["general"])] },
+    Group { id: "general", parts: &[("", &["general", "grouplisten"])] },
     // Apps & sources until R2, now four pages (the server's settings.toml sections)
     Group { id: "library", parts: &[("", &["library", "verify"])] },
     Group { id: "downloads", parts: &[("", &["pipeline", "releases", "streamrip", "torznab", "slskd", "ytdlp", "youtube"])] },
@@ -295,7 +303,7 @@ mod tests {
 
     #[test]
     fn the_table_matches_the_web() {
-        assert_eq!(SECTIONS.len(), 17);
+        assert_eq!(SECTIONS.len(), 18);
         assert_eq!(GROUPS.iter().map(|g| g.id).collect::<Vec<_>>(), ["general", "library", "downloads", "integrations", "processing", "accounts", "tasks"]);
         let general = card("general").unwrap();
         assert_eq!(general.fields[0].key, "app_name");
@@ -312,6 +320,8 @@ mod tests {
         assert_eq!(group_of("torznab").unwrap().id, "downloads");
         assert_eq!(group_of("roon").unwrap().id, "integrations");
         assert_eq!(group_of("sync").unwrap().id, "tasks");
+        assert_eq!(group_of("grouplisten").unwrap().id, "general");
+        assert_eq!(card("grouplisten").unwrap().fields.iter().map(|f| f.key).collect::<Vec<_>>(), ["group_listen", "group_listen_guests", "group_listen_max", "group_listen_keep"]);
         assert!(group_of("nowhere").is_none());
         // every card of every group exists
         for g in GROUPS {

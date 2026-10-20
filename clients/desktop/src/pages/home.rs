@@ -1,4 +1,5 @@
-//! Home: the greeting, the search and link boxes, the stats, Made for you (ListenBrainz),
+//! Home: the greeting, the search and link boxes, the stats, the group listens of the server
+//! ("Listening together now", p6 item 8), Made for you (ListenBrainz),
 //! New releases from library artists, a taste of For you, the downloads in progress and the
 //! Recently added albums. Behaviour reference: web-rs/src/pages/home.rs.
 
@@ -46,6 +47,11 @@ pub struct State {
     /// The user's active downloads.
     pub reqs: Option<Vec<Value>>,
     pub dialog: Option<MfyDialog>,
+    /// `/group`: the live group listens this account may see ("Listening together now").
+    pub groups: Vec<crate::player::group::Summary>,
+    /// The server has no group listens: not asked again before then.
+    groups_off_until: Option<std::time::Instant>,
+    ticks: u64,
 }
 
 impl State {
@@ -98,6 +104,15 @@ pub enum Message {
     Anyway(i64, request_list::Anyway),
     Anywayed(&'static str, Result<Value, ApiError>),
     CloseDialog,
+    Groups(Result<Value, ApiError>),
+    /// Join the group listen of a tile (or open it when this computer is in it).
+    GroupOpen(String),
+}
+
+/// `GET /api/group` (asked every 20 s while Home is shown).
+fn load_groups(ctx: &Ctx) -> Task<Message> {
+    let api = ctx.api.clone();
+    Task::perform(async move { api.get("/group").await }, Message::Groups)
 }
 
 fn load_reqs(ctx: &Ctx) -> Task<Message> {
@@ -123,6 +138,7 @@ pub fn open(state: &mut State, ctx: &mut Ctx) -> Task<Message> {
         get("/discover/made-for-you", Message::MadeForYou),
         get("/discover/for-you", Message::ForYou),
         load_reqs(ctx),
+        load_groups(ctx),
     ])
 }
 
@@ -176,7 +192,30 @@ pub fn update(state: &mut State, msg: Message, ctx: &mut Ctx) -> Task<Message> {
                 state.reqs = Some(Vec::new());
             }
         }
-        Message::Tick => return load_reqs(ctx),
+        Message::Tick => {
+            state.ticks += 1;
+            let groups = state.ticks.is_multiple_of(4)
+                && state.groups_off_until.is_none_or(|t| std::time::Instant::now() >= t);
+            if groups {
+                return Task::batch([load_reqs(ctx), load_groups(ctx)]);
+            }
+            return load_reqs(ctx);
+        }
+        Message::Groups(r) => match r {
+            Ok(v) => {
+                state.groups = crate::player::group::Summary::list(&v);
+                state.groups_off_until = None;
+            }
+            // turned off, or a server before 0.31: hidden, asked again in 10 minutes
+            Err(e) if matches!(e.status, 403 | 404 | 405 | 410) => {
+                state.groups.clear();
+                state.groups_off_until = Some(std::time::Instant::now() + Duration::from_secs(600));
+            }
+            Err(_) => {}
+        },
+        Message::GroupOpen(id) => {
+            ctx.player_msg(crate::player::Message::Group(crate::player::group::Msg::JoinId(id)));
+        }
         Message::Query(q) => state.query = q,
         Message::Search => {
             let q = state.query.trim().to_string();
@@ -476,16 +515,21 @@ fn stats_row<'a>(s: &'a Value) -> El<'a, Message> {
     ];
     let requests = fmt::f(me, "requests");
     let things = if requests == 1.0 { "thing" } else { "things" };
+    // the rank on a line of its own: the card is 200px wide, and the words wrap there rather than run out of it
     let rank_label: El<'a, Message> = if fmt::truthy(me, "rank") {
-        row![
-            small_muted(format!("{things} you requested · #{} on the", fmt::s(me, "rank"))),
-            button(small_muted("leaderboard").color(theme::look().accent))
-                .padding(0)
-                .style(theme::btn(Btn::Row))
-                .on_press(Message::Leaderboard),
+        column![
+            small_muted(format!("{things} you requested")),
+            row![
+                small_muted(format!("#{} on the", fmt::s(me, "rank"))),
+                button(small_muted("leaderboard").color(theme::look().accent))
+                    .padding(0)
+                    .style(theme::btn(Btn::Row))
+                    .on_press(Message::Leaderboard),
+            ]
+            .spacing(4)
+            .align_y(Alignment::Center)
+            .wrap(),
         ]
-        .spacing(4)
-        .align_y(Alignment::Center)
         .into()
     } else {
         small_muted(format!("{things} you requested")).into()
@@ -608,6 +652,16 @@ pub fn view<'a>(state: &'a State, ctx: &Ctx<'a>) -> El<'a, Message> {
 
     if let Some(s) = &state.stats {
         page = page.push(stats_row(s));
+    }
+
+    // the group listens on this server (p6 item 8); nothing when there are none
+    if let Some(row) = crate::player::group::view::listening_row(
+        ctx,
+        &state.groups,
+        ctx.player.group_id.as_deref(),
+        Message::GroupOpen,
+    ) {
+        page = page.push(row);
     }
 
     // Made for you

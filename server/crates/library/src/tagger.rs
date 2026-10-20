@@ -143,17 +143,24 @@ use encore_media::tags::write_tags;
 fn tag_file(st: &impl Ctx, path: &Path, vals: &Row, cover: Option<&[u8]>) -> Result<(), StepError> {
     let cover = if st.cfg().bool("embed_cover") { cover } else { None };
     fsx::fault_point(Step::Import, "write", path)?;
-    if let Err(e) = write_tags(path, vals, cover) {
-        if let Some(io) = io_error_of(&e) {
-            let se = StepError::new(Step::Import, "write", path, None, io);
-            if se.is_storage() {
-                return Err(se);
-            }
-            st.db().log("warning", &format!("Could not tag {}: {se}", path.file_name().unwrap_or_default().to_string_lossy()));
-            return Ok(());
-        }
-        st.db().log("warning", &format!("Could not tag {}: {e:#}", path.file_name().unwrap_or_default().to_string_lossy()));
+    match write_tags(path, vals, cover) {
+        Ok(()) => Ok(()),
+        Err(e) => tag_failed(st, path, e),
     }
+}
+
+/// What a failed tag write of an import means: a storage error stops the import (a [`fsx::StepError`]); a
+/// tag the file can't take is only logged.
+pub fn tag_failed(st: &impl Ctx, path: &Path, e: anyhow::Error) -> Result<(), StepError> {
+    if let Some(io) = io_error_of(&e) {
+        let se = StepError::new(Step::Import, "write", path, None, io);
+        if se.is_storage() {
+            return Err(se);
+        }
+        st.db().log("warning", &format!("Could not tag {}: {se}", path.file_name().unwrap_or_default().to_string_lossy()));
+        return Ok(());
+    }
+    st.db().log("warning", &format!("Could not tag {}: {e:#}", path.file_name().unwrap_or_default().to_string_lossy()));
     Ok(())
 }
 
@@ -427,10 +434,31 @@ pub async fn place_all(st: &impl Ctx, moves: &[(PathBuf, PathBuf)], replace_same
         taken.insert(d.clone());
         plan.push(Place::New(d));
     }
+    place_planned(moves, &plan)
+}
+
+/// [`place_all`] that never replaces or drops anything: a file whose destination is taken gets a free name
+/// ("Song (2).flac"), and only a source that is now in its new place is removed. For the file manager's
+/// import, where nothing is deleted except from Trash.
+pub fn place_new(moves: &[(PathBuf, PathBuf)]) -> anyhow::Result<Vec<PathBuf>> {
+    let mut taken = std::collections::HashSet::new();
+    let plan: Vec<Place> = moves.iter().map(|(src, dest)| {
+        if src == dest {
+            return Place::Same;
+        }
+        let d = free_name(dest, &taken);
+        taken.insert(d.clone());
+        Place::New(d)
+    }).collect();
+    place_planned(moves, &plan)
+}
+
+/// The moves of [`place_all`] as planned.
+fn place_planned(moves: &[(PathBuf, PathBuf)], plan: &[Place]) -> anyhow::Result<Vec<PathBuf>> {
     // 1. every new file next to its destination, under its temporary name
     let mut parts: Vec<PathBuf> = vec![];
     let placed: Result<(), StepError> = (|| {
-        for ((src, _), p) in moves.iter().zip(&plan) {
+        for ((src, _), p) in moves.iter().zip(plan) {
             let (Place::New(d) | Place::Replace(d)) = p else { continue };
             fsx::mkdir_all(d.parent().unwrap(), Step::Import)?;
             let part = part_name(d);
@@ -452,7 +480,7 @@ pub async fn place_all(st: &impl Ctx, moves: &[(PathBuf, PathBuf)], replace_same
     }
     // 2. into place
     let mut done: Vec<PathBuf> = vec![];
-    for p in &plan {
+    for p in plan {
         let (Place::New(d) | Place::Replace(d)) = p else { continue };
         if let Err(e) = fsx::rename(part_name(d), d, Step::Import) {
             for q in &parts {
@@ -472,7 +500,7 @@ pub async fn place_all(st: &impl Ctx, moves: &[(PathBuf, PathBuf)], replace_same
     // 3. the downloaded copies go: the files are in the library now, so a copy that can't be removed only
     // stays behind (the download folder's clean-up takes it later)
     let mut out = vec![];
-    for ((src, _), p) in moves.iter().zip(&plan) {
+    for ((src, _), p) in moves.iter().zip(plan) {
         match p {
             Place::Same => out.push(src.clone()),
             Place::New(d) | Place::Replace(d) | Place::Keep(d) => {
@@ -526,10 +554,15 @@ pub fn mark_manual(st: &impl Ctx, artist: &str, album: &str) {
     let _ = st.db().execute("INSERT OR REPLACE INTO manual_albums (key, edited_at) VALUES (?,?)", p![manual_key(artist, album), now()]);
 }
 
-/// After a hand edit: move the files to where the naming template puts the new names.
+/// After a hand edit: move the files to where the naming template puts the new names. A song in an extra
+/// library folder stays where it is ([`crate::folders::in_library_path`]).
 pub async fn rename_to_tags(st: &impl Ctx, paths: &[PathBuf]) -> Vec<PathBuf> {
     let mut out = vec![];
     for p in paths {
+        if !crate::folders::in_library_path(st.cfg(), p) {
+            out.push(p.clone());
+            continue;
+        }
         let tags = read_tags(&p.to_string_lossy());
         let ext = p.extension().map(|e| format!(".{}", e.to_string_lossy())).unwrap_or_default();
         let dest = render_path(st, &tags, &ext, false);
@@ -673,15 +706,11 @@ pub async fn preview(st: &impl Ctx, paths: &[PathBuf], release_id: &str, single:
     Ok(json!({ "release": r, "tracks": tracks, "rows": rows, "confidence": conf }))
 }
 
+/// Tag the preview's files and, with `rename`, move them to their `new_path`: from `source_root` (a download
+/// or the staging folder) all together, or one by one for songs already in the library. A song in an extra
+/// library folder is tagged but stays where it is ([`crate::folders::in_library_path`]).
 pub async fn apply_preview(st: &impl Ctx, pv: &Value, rename: bool, source_root: Option<&Path>, hint: Option<&str>) -> anyhow::Result<Vec<PathBuf>> {
-    let rel = &pv["release"];
-    let mut cover = match rel["cover_url"].as_str() { Some(u) => get_image(st, u).await, None => None };
-    if cover.is_none() && rel["provider"].as_str().is_none_or(|p| p == "MusicBrainz") {
-        cover = fetch_cover(st, rel["id"].as_str(), rel["release_group_id"].as_str()).await;
-    }
-    if cover.is_none() {
-        cover = find_art(st, rel["artist"].as_str().unwrap_or(""), rel["title"].as_str(), None, hint).await.map(|x| x.0);
-    }
+    let cover = preview_cover(st, pv, hint).await;
     let mut new_paths = vec![];
     let mut old_dirs = std::collections::HashSet::new();
     // a download goes into the library all together ([`place_all`]): (row, download, destination)
@@ -693,7 +722,9 @@ pub async fn apply_preview(st: &impl Ctx, pv: &Value, rename: bool, source_root:
             continue;
         };
         tag_file(st, &path, vals, cover.as_deref())?;
-        if rename {
+        // a song in the library is moved only inside `library_path`: one in an extra library folder stays
+        let stays = source_root.is_none() && !crate::folders::in_library_path(st.cfg(), &path);
+        if rename && !stays {
             old_dirs.insert(path.parent().map(|p| p.to_path_buf()).unwrap_or_default());
             let np = PathBuf::from(row["new_path"].as_str().unwrap_or(""));
             if source_root.is_some() {
@@ -720,7 +751,21 @@ pub async fn apply_preview(st: &impl Ctx, pv: &Value, rename: bool, source_root:
     Ok(new_paths)
 }
 
-fn save_cover_file(st: &impl Ctx, paths: &[PathBuf], cover: Option<&[u8]>) {
+/// The cover of a preview's release: its own picture, the Cover Art Archive's, or one found by its names.
+pub async fn preview_cover(st: &impl Ctx, pv: &Value, hint: Option<&str>) -> Option<Vec<u8>> {
+    let rel = &pv["release"];
+    let mut cover = match rel["cover_url"].as_str() { Some(u) => get_image(st, u).await, None => None };
+    if cover.is_none() && rel["provider"].as_str().is_none_or(|p| p == "MusicBrainz") {
+        cover = fetch_cover(st, rel["id"].as_str(), rel["release_group_id"].as_str()).await;
+    }
+    if cover.is_none() {
+        cover = find_art(st, rel["artist"].as_str().unwrap_or(""), rel["title"].as_str(), None, hint).await.map(|x| x.0);
+    }
+    cover
+}
+
+/// `cover.jpg` beside the songs when they share a folder that has no cover file yet (the `save_cover` setting).
+pub fn save_cover_file(st: &impl Ctx, paths: &[PathBuf], cover: Option<&[u8]>) {
     let (Some(c), Some(first)) = (cover, paths.first()) else { return };
     if !st.cfg().bool("save_cover") {
         return;
@@ -862,9 +907,14 @@ pub async fn import_single(st: &impl Ctx, path: &Path, artist: &str, title: &str
     encore_media::quality::store(st, &new, &qrep);
     let mut note = String::new();
     if let Some(ex) = existing {
-        let nid = st.db().one("SELECT id FROM tracks WHERE path=?", p![new.to_string_lossy()])?.map(|r| r.i("id"));
-        library::delete_tracks(st, &[ex.i("id")], nid);
-        note = "replaced a lower-quality copy".into();
+        // a copy in an extra library folder is never deleted (Encore doesn't touch the files there): both stay
+        if crate::folders::in_library_path(st.cfg(), Path::new(&ex.s("path"))) {
+            let nid = st.db().one("SELECT id FROM tracks WHERE path=?", p![new.to_string_lossy()])?.map(|r| r.i("id"));
+            library::delete_tracks(st, &[ex.i("id")], nid);
+            note = "replaced a lower-quality copy".into();
+        } else {
+            note = "kept the copy in an extra library folder too".into();
+        }
     }
     Ok((new, note))
 }
@@ -1137,18 +1187,34 @@ pub async fn import_album_files(st: &impl Ctx, paths: &[PathBuf], what: AlbumImp
     Ok(out)
 }
 
-/// After an album import, remove copies it makes redundant: loose singles of the same recordings and
-/// lower-quality copies. Playlists follow the new file.
-pub async fn drop_superseded(st: &impl Ctx, new_paths: &[PathBuf]) {
+/// A copy an album import makes redundant (see [`superseded`]).
+pub struct Superseded {
+    /// the copy that goes, and its path
+    pub old: i64,
+    pub old_path: PathBuf,
+    /// the imported song that takes its place (its playlist entries and likes)
+    pub new: i64,
+    /// a loose single (an album of one song), else a lower-quality copy
+    pub loose: bool,
+    pub artist: String,
+    pub title: String,
+}
+
+/// The copies an album import makes redundant: loose singles of the same recordings and lower-quality
+/// copies, each once. Only songs in `library_path` are ever dropped: a song in an extra library folder stays
+/// where and as it is ([`crate::folders::in_library_path`]), next to the new copy.
+pub async fn superseded(st: &impl Ctx, new_paths: &[PathBuf]) -> Vec<Superseded> {
+    let mut out: Vec<Superseded> = vec![];
     if !st.cfg().bool("dedupe_on_import") {
-        return;
+        return out;
     }
     let new_set: std::collections::HashSet<String> = new_paths.iter().map(|p| p.to_string_lossy().into_owned()).collect();
     let sizes: std::collections::HashMap<String, i64> = st.db().query("SELECT album_id, COUNT(*) n FROM tracks GROUP BY album_id", p![]).unwrap_or_default()
         .into_iter().map(|r| (r.s("album_id"), r.i("n"))).collect();
-    let others: Vec<Row> = all_tracks(st).into_iter().filter(|t| !new_set.contains(&t.s("path"))).collect();
+    let others: Vec<Row> = all_tracks(st).into_iter()
+        .filter(|t| !new_set.contains(&t.s("path")) && crate::folders::in_library_path(st.cfg(), Path::new(&t.s("path")))).collect();
     if others.is_empty() {
-        return;
+        return out;
     }
     let ix = LibraryIndex::new(others);
     for p in new_paths {
@@ -1156,6 +1222,9 @@ pub async fn drop_superseded(st: &impl Ctx, new_paths: &[PathBuf]) {
         let want = describe(&t.s("title"), &t.s("artist"), Some(t.f("duration")), Some(&t.s("isrc")), Some(&t.s("mb_trackid")));
         let Some((hit, _)) = ix.find(&want) else { continue };
         let hit = hit.clone();
+        if out.iter().any(|s| s.old == hit.i("id")) {
+            continue;
+        }
         let loose = sizes.get(&hit.s("album_id")).copied().unwrap_or(0) == 1;
         let better = quality(&t) > quality(&hit);
         if !(loose || better) {
@@ -1165,21 +1234,35 @@ pub async fn drop_superseded(st: &impl Ctx, new_paths: &[PathBuf]) {
         if st.cfg().bool("upgrade_check_audio") && hp.is_file() && acoustid::same_audio(p, &hp).await == Some(false) {
             continue; // same song by name, different audio: keep both
         }
-        library::delete_tracks(st, &[hit.i("id")], Some(t.i("id")));
-        st.db().log("info", &format!("Removed {} of “{} – {}” – replaced by the new album import", if loose { "loose single" } else { "lower-quality copy" }, hit.s("artist"), hit.s("title")));
+        out.push(Superseded { old: hit.i("id"), old_path: hp, new: t.i("id"), loose, artist: hit.s("artist"), title: hit.s("title") });
+    }
+    out
+}
+
+/// After an album import, remove copies it makes redundant ([`superseded`]). Playlists follow the new file.
+pub async fn drop_superseded(st: &impl Ctx, new_paths: &[PathBuf]) {
+    for s in superseded(st, new_paths).await {
+        library::delete_tracks(st, &[s.old], Some(s.new));
+        st.db().log("info", &format!("Removed {} of “{} – {}” – replaced by the new album import", if s.loose { "loose single" } else { "lower-quality copy" }, s.artist, s.title));
     }
 }
 
 /// Albums imported from Deezer/Apple data: once the release is in MusicBrainz, tag them properly.
 pub async fn retag_external(st: &impl Ctx) -> usize {
+    // songs in `library_path` only (`path > 'lib/' AND path < 'lib0'`): one in an extra library folder is kept as it is
+    let lib = st.cfg().str("library_path").trim().trim_end_matches('/').to_string();
     let rows = st.db().query("SELECT t.album_id, MIN(t.albumartist) artist, MIN(t.album) album FROM tracks t JOIN requests r ON r.id=t.request_id
-        WHERE (t.mb_albumid IS NULL OR t.mb_albumid='') AND r.mbid IS NULL AND r.detail LIKE '%\"ext\"%' GROUP BY t.album_id LIMIT 25", p![]).unwrap_or_default();
+        WHERE (t.mb_albumid IS NULL OR t.mb_albumid='') AND r.mbid IS NULL AND r.detail LIKE '%\"ext\"%' AND t.path > ? AND t.path < ?
+        GROUP BY t.album_id LIMIT 25", p![format!("{lib}/"), format!("{lib}0")]).unwrap_or_default();
     let mut done = 0;
     for a in rows {
         if is_manual(st, &a.s("artist"), &a.s("album")) {
             continue; // fixed by hand
         }
         let paths: Vec<PathBuf> = st.db().query("SELECT path FROM tracks WHERE album_id=?", p![a.s("album_id")]).unwrap_or_default().iter().map(|r| PathBuf::from(r.s("path"))).collect();
+        if paths.iter().any(|p| !crate::folders::in_library_path(st.cfg(), p)) {
+            continue; // in an extra library folder: kept where and as it is
+        }
         let res: anyhow::Result<bool> = async {
             let Some(pv) = auto_match(st, &paths, &a.s("artist"), &a.s("album"), None).await? else { return Ok(false) };
             let new = apply_preview(st, &pv, true, None, None).await?;

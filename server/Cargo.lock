@@ -697,6 +697,7 @@ dependencies = [
  "encore-config",
  "encore-core",
  "encore-db",
+ "encore-files",
  "encore-http",
  "encore-jobs",
  "encore-library",
@@ -771,6 +772,26 @@ dependencies = [
  "serde_json",
  "tokio",
  "tracing",
+]
+
+[[package]]
+name = "encore-files"
+version = "2.0.0"
+dependencies = [
+ "anyhow",
+ "encore-config",
+ "encore-core",
+ "encore-db",
+ "encore-library",
+ "encore-media",
+ "libc",
+ "lofty",
+ "rusqlite",
+ "serde_json",
+ "tokio",
+ "tracing",
+ "unicode-normalization",
+ "walkdir",
 ]
 
 [[package]]

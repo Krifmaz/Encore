@@ -7,6 +7,7 @@
 //! writes, `test_sound.rs` the two-second tone, `tracks.rs` the Encore rows as queue entries.
 //! The functions here keep their signatures: the app and the pages call them.
 
+pub mod normalize;
 pub mod settings;
 pub mod test_sound;
 pub mod tracks;
@@ -78,7 +79,8 @@ pub fn start() -> Result<Engine, String> {
         }
         engine.update_settings(s);
     }
-    engine.set_volume_linear(crate::config::Config::load().volume);
+    // the fader, plus the normalization gain of each song as it starts
+    normalize::watch(&engine, crate::config::Config::load().volume);
     log::info!("Cadenza engine running ({})", dir.display());
     *slot = Some(Arc::new(player));
     drop(slot);
@@ -185,12 +187,16 @@ pub fn shuffle_on() -> bool {
     SHUFFLE.load(Ordering::SeqCst)
 }
 
-/// Replace the queue and play `index` (starting the engine if needed). While this computer is
-/// linked to another device the list goes there instead (see `player::devices`), and with
-/// shuffle on the songs after `index` play in random order.
+/// Replace the queue and play `index` (starting the engine if needed). In a group listen the
+/// list becomes the group's queue (see `player::group`); while this computer is linked to
+/// another device the list goes there instead (see `player::devices`), and with shuffle on the
+/// songs after `index` play in random order.
 pub fn play(tracks: Vec<Track>, index: usize, position: f64) -> Result<(), String> {
     if tracks.is_empty() {
         return Err("Nothing to play".into());
+    }
+    if crate::player::group::forward_play(&tracks, index, position) {
+        return Ok(());
     }
     if crate::player::devices::forward_play(&tracks, index) {
         return Ok(());
@@ -209,7 +215,7 @@ pub fn play(tracks: Vec<Track>, index: usize, position: f64) -> Result<(), Strin
 
 /// Append to the queue (starts the engine if needed; plays when nothing is playing).
 pub fn enqueue(tracks: Vec<Track>) -> Result<(), String> {
-    if crate::player::devices::forward_queue(&tracks, false) {
+    if crate::player::group::forward_queue(&tracks, false) || crate::player::devices::forward_queue(&tracks, false) {
         return Ok(());
     }
     let e = start()?;
@@ -224,7 +230,7 @@ pub fn enqueue(tracks: Vec<Track>) -> Result<(), String> {
 
 /// Insert after the current song.
 pub fn play_next(tracks: Vec<Track>) -> Result<(), String> {
-    if crate::player::devices::forward_queue(&tracks, true) {
+    if crate::player::group::forward_queue(&tracks, true) || crate::player::devices::forward_queue(&tracks, true) {
         return Ok(());
     }
     let e = start()?;
@@ -238,11 +244,15 @@ pub fn play_next(tracks: Vec<Track>) -> Result<(), String> {
     Ok(())
 }
 
-/// Volume as a 0…1 fader.
+/// Volume as a 0…1 fader (the song's normalization gain goes on top, see `normalize`).
 pub fn set_volume(level: f64) {
-    if let Some(e) = engine() {
-        e.set_volume_linear(level.clamp(0.0, 1.0));
-    }
+    normalize::set_level(engine().as_ref(), level);
+}
+
+/// The fader as the user set it (0…1): what the volume slider shows. The engine's own volume
+/// also carries the song's normalization gain.
+pub fn volume_level() -> f64 {
+    normalize::level()
 }
 
 /// Stop the link and the engine (the output device is released). Called when the app quits.

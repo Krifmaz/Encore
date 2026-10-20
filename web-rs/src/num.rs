@@ -27,7 +27,11 @@ pub fn to_fixed1(x: f64) -> String {
     }
 }
 /// `String(Math.round(hz / 100) / 10)` – a sample rate in kHz ("44.1", "48", "192").
-pub fn khz(hz: f64) -> String { js_num((hz / 100.0).round() / 10.0) }
+pub fn khz(hz: f64) -> String {
+    // exact for every common rate: 44.1, 48, 22.05, 11.025 (up to three decimals, no trailing zeros)
+    let s = format!("{:.3}", hz / 1000.0);
+    s.trim_end_matches('0').trim_end_matches('.').to_string()
+}
 
 /// JavaScript's `Number(x)` for a JSON value (NaN where JS gives NaN).
 pub fn js_number(v: &Value) -> f64 {

@@ -331,7 +331,9 @@ fn device_card<'a>(d: &'a Value, state: &'a State, ctx: &Ctx<'a>, me: &str, play
     ]
     .spacing(8)
     .align_y(Alignment::Center);
-    if !is_remote {
+    // in a group listen this computer plays the group's music itself: no linking (p6 item 8)
+    let grouped = state.group.state.is_some();
+    if !is_remote && !grouped {
         if linked {
             head = head.push(widgets::btn_icon(Icon::Link, "Linked · Unlink", Btn::Primary, Some(Message::Unlink)));
         } else {
@@ -374,11 +376,11 @@ fn device_card<'a>(d: &'a Value, state: &'a State, ctx: &Ctx<'a>, me: &str, play
                 .width(110)
                 .style(theme::slider_style),
             );
-            if !linked {
+            if !linked && !grouped {
                 controls = controls.push(iced::widget::tooltip(widgets::btn_sm("Play here", Btn::Default, Some(Message::PlayHere(d.clone()))), crate::widgets::tip_box("Continue this song on this device"), iced::widget::tooltip::Position::Bottom).gap(4));
             }
         }
-        if playing_here && state.devices.linked.is_none() {
+        if playing_here && state.devices.linked.is_none() && !grouped {
             controls = controls.push(widgets::btn_sm(
                 "Send my music there",
                 Btn::Primary,
@@ -519,6 +521,9 @@ pub fn view<'a>(state: &'a State, ctx: &Ctx<'a>) -> El<'a, Message> {
         ));
     }
     col = col.push(me_row);
+    if let Some(note) = super::group::view::link_note(state) {
+        col = col.push(note);
+    }
     if let Some(l) = state.devices.linked.as_ref() {
         col = col.push(
             row![
@@ -555,6 +560,11 @@ pub fn view<'a>(state: &'a State, ctx: &Ctx<'a>) -> El<'a, Message> {
         for d in &state.devices.list {
             col = col.push(device_card(d, state, ctx, &me, playing_here));
         }
+    }
+    // the group listens on this server (p6 item 8): the one this computer is in, the others,
+    // Start a group listen / Join with a code
+    if let Some(g) = super::group::view::devices_section(state, ctx) {
+        col = col.push(g);
     }
     col.into()
 }

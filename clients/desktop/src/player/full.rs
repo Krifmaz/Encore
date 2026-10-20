@@ -1,11 +1,18 @@
 //! The full view: Now playing, Lyrics and Up next, laid over the whole window.
+//!
+//! Lyrics is lyrics mode (p6 item 4, the web's player/full.rs, the phone's PlayerScreens.kt):
+//! the cover becomes a 56 px thumbnail in a compact bar at the top (title and artist, play /
+//! pause, a thin seek line) and the lyrics take the column, the current line in the middle.
+//! "Back to the cover" (or a click on the thumbnail) goes back to Now playing; the mode is
+//! remembered (`encore.lyricsMode`). Long titles scroll sideways (widgets::marquee).
 
 use super::{bar, cover_handle, Message, Now, Pane, State};
 use crate::fmt;
 use crate::pages::{Ctx, El};
 use crate::theme::{self, Btn};
-use crate::widgets::{self, icon, icon_btn, t, Icon};
-use iced::widget::{button, column, container, image, opaque, row, scrollable, space, toggler};
+use crate::widgets::marquee::marquee;
+use crate::widgets::{self, icon, icon_btn, t, tip_box, Icon};
+use iced::widget::{button, column, container, image, opaque, row, scrollable, slider, space, toggler, tooltip};
 use iced::{Alignment, ContentFit, Length};
 
 /// A row of Up next, from the engine's queue or the linked device's.
@@ -63,51 +70,83 @@ fn art<'a>(ctx: &Ctx<'a>, cover: Option<&str>, size: f32) -> El<'a, Message> {
     }
 }
 
+/// About how wide a line of text is (to share a line between the artist and the album).
+fn text_width(s: &str, size: f32) -> f32 {
+    s.chars().count() as f32 * size * 0.55
+}
+
+/// How the artist · album line shares `width`: the room each gets (None: no limit), so a long
+/// artist name leaves room for the album and each scrolls in its own part.
+pub fn line_shares(artist: &str, album: &str, size: f32, width: f32) -> (Option<f32>, Option<f32>) {
+    let (a, b) = (text_width(artist, size), text_width(album, size));
+    let room = (width - size * 1.5).max(0.0);
+    if artist.is_empty() || album.is_empty() || a + b <= room {
+        return (None, None);
+    }
+    let share = (a / (a + b)).clamp(0.3, 0.7);
+    let first = (room * share).min(a);
+    (Some(first), Some(room - first))
+}
+
+/// "artist · album": the artist opens the artist page, the album the album; each scrolls when
+/// it is too long for its part of `width`.
+fn artist_line<'a>(now: &Now, size: f32, width: f32, fade: iced::Color) -> El<'a, Message> {
+    let p = theme::look();
+    let (wa, wb) = line_shares(&now.artist, &now.album, size, width);
+    let part = |s: &str, w: Option<f32>, msg: Option<Message>| -> El<'a, Message> {
+        let words = container(marquee(s.to_string()).size(size).color(p.muted).fade(fade)).max_width(w.unwrap_or(width));
+        match msg {
+            Some(m) => button(words).padding(0).style(theme::btn(Btn::Row)).on_press(m).into(),
+            None => words.into(),
+        }
+    };
+    let mut line = row![].spacing(4).align_y(Alignment::Center);
+    if !now.artist.is_empty() {
+        line = line.push(part(&now.artist, wa, Some(Message::GoToArtist)));
+    }
+    if !now.album.is_empty() {
+        if !now.artist.is_empty() {
+            line = line.push(widgets::muted("·").size(size));
+        }
+        line = line.push(part(&now.album, wb, now.album_id.as_ref().map(|_| Message::ViewAlbum)));
+    }
+    line.into()
+}
+
 /// The left column: art, words, seek, controls, volume, actions.
 fn main_column<'a>(state: &'a State, ctx: &Ctx<'a>, now: &Now, art_size: f32) -> El<'a, Message> {
     let p = ctx.look;
     let (shuffle_on, repeat) = state.modes();
     let lib = now.id;
-    let mut meta = column![t(now.title.clone()).size(22).font(theme::bold()).center()]
+    // the words take the column's width; a title or line too long for it scrolls sideways
+    let words_w = (art_size + 160.0).min((ctx.size.width - 96.0).max(200.0));
+    let mut meta = column![container(marquee(now.title.clone()).size(22).font(theme::bold()).center().fade(p.bg)).max_width(words_w)]
         .spacing(4)
         .align_x(Alignment::Center);
-    let mut line = row![].spacing(4).align_y(Alignment::Center);
-    if !now.artist.is_empty() {
-        line = line.push(
-            button(t(now.artist.clone()).size(14).color(p.muted))
-                .padding(0)
-                .style(theme::btn(Btn::Row))
-                .on_press(Message::GoToArtist),
-        );
-    }
-    if !now.album.is_empty() {
-        if !now.artist.is_empty() {
-            line = line.push(widgets::muted("·").size(14));
-        }
-        let album = t(now.album.clone()).size(14).color(p.muted);
-        line = line.push(match now.album_id {
-            Some(_) => button(album)
-                .padding(0)
-                .style(theme::btn(Btn::Row))
-                .on_press(Message::ViewAlbum)
-                .into(),
-            None => El::from(album),
-        });
-    }
-    meta = meta.push(line);
+    meta = meta.push(artist_line(now, 14.0, words_w, p.bg));
     if let Some(q) = bar::quality(state) {
         meta = meta.push(q);
     }
 
+    // in a group listen shuffle and repeat are off, with the reason
+    let grouped = state.group.state.is_some();
     let controls = row![
-        bar_mode(Icon::Shuffle, shuffle_on, None, Message::SetShuffle(!shuffle_on)),
-        bar::transport(Some(now), true),
-        bar_mode(
-            Icon::Refresh,
-            repeat != super::Repeat::Off,
-            (repeat == super::Repeat::One).then_some("1"),
-            Message::SetRepeat(repeat.next())
-        ),
+        if grouped {
+            super::group::view::off(Icon::Shuffle, super::group::view::NO_MODES, 18.0)
+        } else {
+            bar_mode(Icon::Shuffle, shuffle_on, None, Message::SetShuffle(!shuffle_on))
+        },
+        bar::transport(state, Some(now), true),
+        if grouped {
+            super::group::view::off(Icon::Refresh, super::group::view::NO_MODES, 18.0)
+        } else {
+            bar_mode(
+                Icon::Refresh,
+                repeat != super::Repeat::Off,
+                (repeat == super::Repeat::One).then_some("1"),
+                Message::SetRepeat(repeat.next()),
+            )
+        },
     ]
     .spacing(18)
     .align_y(Alignment::Center);
@@ -150,8 +189,12 @@ fn bar_mode<'a>(i: Icon, on: bool, sup: Option<&'static str>, msg: Message) -> E
     button(inner).padding(9).style(theme::btn(Btn::Icon)).on_press(msg).into()
 }
 
-/// Up next: the songs after the current one, with move up and remove.
+/// Up next: the songs after the current one, with move up and remove (in a group listen the
+/// group's queue, with who added each song).
 fn queue_pane<'a>(state: &'a State, ctx: &Ctx<'a>) -> El<'a, Message> {
+    if state.group.state.is_some() {
+        return super::group::view::up_next(state, ctx);
+    }
     let p = ctx.look;
     let linked = state.devices.linked.as_ref();
     let (rows, idx) = queue_rows(state);
@@ -233,6 +276,69 @@ fn queue_pane<'a>(state: &'a State, ctx: &Ctx<'a>) -> El<'a, Message> {
     column![head, list].spacing(12).width(Length::Fill).height(Length::Fill).into()
 }
 
+/// The widest the lyrics column gets.
+const LYRICS_W: f32 = 760.0;
+
+/// Lyrics mode: the compact bar (the 56 px cover, title and artist, play / pause, a thin seek
+/// line), the lyrics, "Back to the cover".
+fn lyrics_mode<'a>(state: &'a State, ctx: &Ctx<'a>, now: &Now) -> El<'a, Message> {
+    let p = ctx.look;
+    let thumb = tooltip(
+        button(art(ctx, now.cover.as_deref(), 56.0))
+            .padding(0)
+            .style(theme::btn(Btn::Row))
+            .on_press(Message::SetPane(Pane::Now)),
+        tip_box("Back to the cover"),
+        tooltip::Position::Bottom,
+    )
+    .gap(4);
+    let width = LYRICS_W.min(ctx.size.width - 48.0);
+    let words = column![
+        marquee(now.title.clone()).size(17).font(theme::semibold()).width(Length::Fill).fade(p.bg),
+        artist_line(now, 13.0, (width - 140.0).max(120.0), p.bg),
+    ]
+    .spacing(3)
+    .width(Length::Fill);
+    let play = button(
+        container(icon(if now.playing { Icon::Pause } else { Icon::Play }, 18.0, p.on_accent)).center(40.0),
+    )
+    .padding(0)
+    .style(theme::btn(Btn::Play))
+    .on_press(Message::Toggle);
+    let compact = row![thumb, words, play].spacing(14).align_y(Alignment::Center);
+    let head = column![compact, thin_seek(state, now)].spacing(8).width(Length::Fill);
+    // room above the first line and below the last, so both can sit in the middle
+    let pad = (ctx.size.height * 0.32).max(60.0);
+    let lyrics = state.lyrics.view(now.id, pad, Message::SeekTo);
+    let back = widgets::btn("Back to the cover", Btn::Default, Some(Message::SetPane(Pane::Now)));
+    let body = column![
+        container(head).max_width(width),
+        container(lyrics).max_width(width).height(Length::Fill),
+        back,
+    ]
+    .spacing(14)
+    .align_x(Alignment::Center)
+    .width(Length::Fill)
+    .height(Length::Fill);
+    container(body).width(Length::Fill).height(Length::Fill).center_x(Length::Fill).into()
+}
+
+/// A seek line without the times (lyrics mode's compact bar); in a group listen only the
+/// position for a member who may not control it.
+fn thin_seek<'a>(state: &'a State, now: &Now) -> El<'a, Message> {
+    let dur = now.duration.max(0.001);
+    let pos = state.seek_drag.unwrap_or(now.position).clamp(0.0, dur);
+    let denied = state.group.denied();
+    let s = slider(0.0..=dur, pos, move |v| if denied { Message::Nothing } else { Message::SeekDrag(v) })
+        .step(0.25)
+        .height(12.0)
+        .style(theme::slider_style);
+    if denied {
+        return tooltip(s, tip_box(&state.group.deny), tooltip::Position::Bottom).gap(4).into();
+    }
+    s.on_release(Message::SeekDone).into()
+}
+
 /// The whole view.
 pub fn view<'a>(state: &'a State, ctx: &Ctx<'a>) -> El<'a, Message> {
     let p = ctx.look;
@@ -269,6 +375,9 @@ pub fn view<'a>(state: &'a State, ctx: &Ctx<'a>) -> El<'a, Message> {
             let mut top = row![icon_btn(Icon::X, "Close", Some(Message::CloseFull)), space().width(Length::Fill), tabs, space().width(Length::Fill)]
                 .spacing(12)
                 .align_y(Alignment::Center);
+            if let Some(pill) = super::group::view::pill(state) {
+                top = top.push(pill);
+            }
             if ctx.has_feature("remote") {
                 let label = match linked {
                     Some(l) => format!("Playing on {}", l.name),
@@ -282,15 +391,13 @@ pub fn view<'a>(state: &'a State, ctx: &Ctx<'a>) -> El<'a, Message> {
             let base: f32 = if pane == Pane::Now { 340.0 } else { 260.0 };
             let art_size = base.min(ctx.size.height * 0.38);
             // a right-click on the song opens ⋯ at the pointer (the web's #f-more)
-            let main = iced::widget::mouse_area(main_column(state, ctx, &now, art_size)).on_right_press(Message::Menu);
+            let main = || iced::widget::mouse_area(main_column(state, ctx, &now, art_size)).on_right_press(Message::Menu);
             let body: El<'a, Message> = match pane {
-                Pane::Now => container(main).width(Length::Fill).height(Length::Fill).center(Length::Fill).into(),
-                Pane::Lyrics | Pane::Queue => {
-                    let side: El<'a, Message> = match pane {
-                        Pane::Lyrics => state.lyrics.view(now.id, Message::SeekTo),
-                        _ => queue_pane(state, ctx),
-                    };
-                    let side = container(side).width(Length::Fill).height(Length::Fill).padding([0, 12]);
+                Pane::Now => container(main()).width(Length::Fill).height(Length::Fill).center(Length::Fill).into(),
+                Pane::Lyrics => lyrics_mode(state, ctx, &now),
+                Pane::Queue => {
+                    let main = main();
+                    let side = container(queue_pane(state, ctx)).width(Length::Fill).height(Length::Fill).padding([0, 12]);
                     if wide {
                         row![
                             container(main).width(Length::FillPortion(2)).center_y(Length::Fill),

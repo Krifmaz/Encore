@@ -148,7 +148,7 @@ const NAV: &[(&str, &str)] = &[
 /// still opens the page that holds what it named, `apps` opens Downloads; anything else stays as it is (the hub
 /// then shows Account, or General for about/api/keys).
 const LINKS: &[(&str, &str)] = &[
-    ("general", "general"), ("apps", "downloads"), ("downloads", "downloads"), ("tagging", "library"), ("services", "integrations"),
+    ("general", "general"), ("grouplisten", "general"), ("apps", "downloads"), ("downloads", "downloads"), ("tagging", "library"), ("services", "integrations"),
     ("library", "library"), ("verify", "library"),
     ("pipeline", "downloads"), ("releases", "downloads"), ("streamrip", "downloads"), ("torznab", "downloads"), ("slskd", "downloads"),
     ("ytdlp", "downloads"), ("youtube", "downloads"),

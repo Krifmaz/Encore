@@ -27,6 +27,8 @@ pub(super) fn link_sender(id: String) -> Rc<dyn Fn(Value)> {
 }
 
 pub fn link_to(d: Value) {
+    // a group listen plays here: linking to another device is off until it is left
+    if crate::group::in_group() { toast("Leave the group listen to control another device", ""); return; }
     let name = d.s("name");
     hide_spot();
     let id = d.s("id");
@@ -40,5 +42,13 @@ pub fn unlink() {
     dom::ls_remove(CHAIN);
     player::set_link(None);
     toast("Unlinked – music plays on this device again", "ok");
+    dom::spawn(beat());
+}
+
+/// Unlink without a word: starting or joining a group listen, which says what happened itself.
+pub fn unlink_quiet() {
+    if player::linked().is_none() { return; }
+    dom::ls_remove(CHAIN);
+    player::set_link(None);
     dom::spawn(beat());
 }

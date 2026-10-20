@@ -52,12 +52,14 @@ pub enum Section {
     Blocked,
     Tasks,
     Diagnostics,
+    /// The admin file manager (pages/files.rs, 0.33).
+    Files,
     /// Desktop only: autostart, hotkeys, mini player, updates, offline songs.
     Computer,
 }
 
 impl Section {
-    pub const ALL: [Section; 19] = [
+    pub const ALL: [Section; 20] = [
         Section::Account,
         Section::Appearance,
         Section::Language,
@@ -76,6 +78,7 @@ impl Section {
         Section::Blocked,
         Section::Tasks,
         Section::Diagnostics,
+        Section::Files,
         Section::Computer,
     ];
 
@@ -100,6 +103,7 @@ impl Section {
             Section::Blocked => "blocked",
             Section::Tasks => "tasks",
             Section::Diagnostics => "diagnostics",
+            Section::Files => "files",
             Section::Computer => "computer",
         }
     }
@@ -149,6 +153,7 @@ impl Section {
             Section::Blocked => "Blocked",
             Section::Tasks => "Scheduled tasks",
             Section::Diagnostics => "Diagnostics",
+            Section::Files => "Files",
             Section::Computer => "This computer",
         }
     }
@@ -168,7 +173,7 @@ impl Section {
             | Section::Contribute
             | Section::Blocked
             | Section::Tasks => "Server",
-            Section::Diagnostics => "System",
+            Section::Diagnostics | Section::Files => "System",
             Section::Computer => "This computer",
         }
     }
@@ -202,6 +207,7 @@ pub struct State {
     pub invites: invites::State,
     pub server: server::State,
     pub diagnostics: diagnostics::State,
+    pub files: crate::pages::files::State,
     pub computer: this_computer::State,
 }
 
@@ -217,6 +223,7 @@ pub enum Message {
     Invites(invites::Message),
     Server(server::Message),
     Diagnostics(diagnostics::Message),
+    Files(crate::pages::files::Message),
     Computer(this_computer::Message),
 }
 
@@ -242,6 +249,7 @@ pub fn open(state: &mut State, section: Section, ctx: &mut Ctx) -> Task<Message>
         | Section::Blocked
         | Section::Tasks => server::open(&mut state.server, section, ctx).map(Message::Server),
         Section::Diagnostics => diagnostics::open(&mut state.diagnostics, ctx).map(Message::Diagnostics),
+        Section::Files => crate::pages::files::open(&mut state.files, ctx).map(Message::Files),
         Section::Computer => this_computer::open(&mut state.computer, ctx).map(Message::Computer),
     }
 }
@@ -261,6 +269,7 @@ pub fn update(state: &mut State, msg: Message, ctx: &mut Ctx) -> Task<Message> {
         Message::Invites(m) => invites::update(&mut state.invites, m, ctx).map(Message::Invites),
         Message::Server(m) => server::update(&mut state.server, m, ctx).map(Message::Server),
         Message::Diagnostics(m) => diagnostics::update(&mut state.diagnostics, m, ctx).map(Message::Diagnostics),
+        Message::Files(m) => crate::pages::files::update(&mut state.files, m, ctx).map(Message::Files),
         Message::Computer(m) => this_computer::update(&mut state.computer, m, ctx).map(Message::Computer),
     }
 }
@@ -312,6 +321,7 @@ pub fn view<'a>(state: &'a State, ctx: &Ctx<'a>) -> El<'a, Message> {
         | Section::Blocked
         | Section::Tasks => server::view(&state.server, ctx).map(Message::Server),
         Section::Diagnostics => diagnostics::view(&state.diagnostics, ctx).map(Message::Diagnostics),
+        Section::Files => crate::pages::files::view(&state.files, ctx).map(Message::Files),
         Section::Computer => this_computer::view(&state.computer, ctx).map(Message::Computer),
     };
     column![
@@ -343,6 +353,7 @@ pub fn overlay<'a>(state: &'a State, ctx: &Ctx<'a>) -> Option<El<'a, Message>> {
         | Section::Blocked
         | Section::Tasks => server::overlay(&state.server, ctx).map(|e| e.map(Message::Server)),
         Section::Diagnostics => diagnostics::overlay(&state.diagnostics, ctx).map(|e| e.map(Message::Diagnostics)),
+        Section::Files => crate::pages::files::overlay(&state.files, ctx).map(|e| e.map(Message::Files)),
         Section::Computer => this_computer::overlay(&state.computer, ctx).map(|e| e.map(Message::Computer)),
     }
 }
@@ -361,6 +372,7 @@ pub fn subscription(state: &State) -> Subscription<Message> {
         | Section::Contribute
         | Section::Blocked
         | Section::Tasks => server::subscription(&state.server).map(Message::Server),
+        Section::Files => crate::pages::files::subscription(&state.files).map(Message::Files),
         Section::Computer => this_computer::subscription(&state.computer).map(Message::Computer),
         _ => Subscription::none(),
     }
@@ -671,6 +683,24 @@ pub fn truthy(v: &Value) -> bool {
 /// `_meta.<key>.source == "env"`: the setting is locked by an environment variable.
 pub fn env_locked(values: &Value, key: &str) -> bool {
     values["_meta"][key]["source"].as_str() == Some("env")
+}
+
+/// Runs `f` with a page context against a server nobody answers (tests of `update`: a task that would call the
+/// server is only made, never run).
+#[cfg(test)]
+pub fn with_test_ctx(f: impl FnOnce(&mut Ctx)) {
+    let api = crate::api::Api::new("http://s");
+    let config = crate::config::Config::default();
+    let session = crate::api::Session { user: serde_json::json!({ "username": "a", "role": "owner", "perms": {} }), info: Value::Null };
+    let covers = crate::widgets::Covers::new();
+    let mut ctx = Ctx::new(api, &config, &session, Default::default(), &covers, crate::theme::look(), iced::Size::new(1000.0, 700.0), iced::Point::ORIGIN);
+    f(&mut ctx);
+}
+
+/// The note under a value an environment variable sets ("🔒 Set by ENCORE_… in your compose/env"), or None when
+/// none does. The Server pages' fields, the Users page and the Invites page use it alike (as the web does).
+pub fn env_note(values: &Value, key: &str) -> Option<String> {
+    env_locked(values, key).then(|| format!("🔒 Set by {} in your compose/env – change it there (environment always wins)", crate::fmt::s(&values["_meta"][key], "env")))
 }
 
 /// The saved value the server masks (`•••• (saved)`).

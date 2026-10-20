@@ -44,8 +44,9 @@ import okio.source
 import java.io.IOException
 import java.util.concurrent.TimeUnit
 
-// The admin file manager (0.33): the routes and JSON written down in docs/contracts/0.31-0.33-client-shapes.md, §2.4
-// and Part 4.
+// The admin file manager (0.33): the routes and JSON written down in docs/contracts/client-shapes-0.31-0.33.md, §2.4,
+// Part 4 and §4.17 (what the 0.33 server adds), checked against server/crates/api/src/routes/files.rs and the
+// encore-files crate.
 // Everything is read leniently; a server before 0.33 answers 404 on /api/files/roots and the entries hide.
 
 /** A place the file manager may touch (`GET /api/files/roots`). */
@@ -103,8 +104,21 @@ data class FileEntry(
     }
 }
 
-/** A page of a folder (500 entries at a time). */
-data class FileListing(val entries: List<FileEntry>, val total: Int, val offset: Int)
+/**
+ * A page of a folder (500 entries at a time). [viaLink]: the server reached the folder through a link (§4.17), so
+ * nothing in it is written.
+ */
+data class FileListing(val entries: List<FileEntry>, val total: Int, val offset: Int, val viaLink: Boolean) {
+    companion object {
+        /** `{root, path, total, offset, entries, via_link}` (a bare array of entries is read too). */
+        fun from(e: JsonElement?, offset: Int): FileListing {
+            val obj = e as? JsonObject
+            val entries = (obj?.get("entries") ?: e).objects().mapNotNull { FileEntry.from(it) }
+            val total = obj?.int("total")?.takeIf { it > 0 } ?: (offset + entries.size)
+            return FileListing(entries, maxOf(total, offset + entries.size), offset, obj?.bool("via_link") == true)
+        }
+    }
+}
 
 /** Something in the trash, with where it came from. */
 data class TrashItem(val id: String, val name: String, val root: String, val path: String, val at: Double, val by: String, val size: Long, val kind: String) {
@@ -151,15 +165,31 @@ data class ImportAlbum(
             val rows = o.arr("rows").objectsOf().map { r ->
                 ImportRow(r.str("path"), r.str("old_title"), r.str("new_title"), r.int("new_track"), r.str("new_path"))
             }
+            val release = ImportRelease.from(o.obj("release"))
             return ImportAlbum(
                 folder = folder,
                 artist = o.str("artist"),
                 album = o.str("album").ifEmpty { folder.substringAfterLast('/') },
                 files = if (o.containsKey("files")) o.int("files") else rows.size,
-                release = ImportRelease.from(o.obj("release")),
-                confidence = o.dbl("confidence"),
+                release = release,
+                // the album's own confidence, else its release's (as the web reads it)
+                confidence = o.dbl("confidence").takeIf { it > 0.0 } ?: release?.score ?: 0.0,
                 rows = rows,
             )
+        }
+    }
+}
+
+/**
+ * What an import did (`POST /api/files/import/apply`): the server's line ("Imported 12 songs", or "Imported 10
+ * songs. 1 weren't imported. <folder>: <reason>") and how many album folders weren't imported (§4.17 `failed`).
+ */
+data class ImportResult(val message: String, val failed: Int) {
+    companion object {
+        fun from(o: JsonObject?): ImportResult {
+            val n = o?.int("imported") ?: 0
+            val message = o?.str("message")?.ifEmpty { null } ?: if (n == 1) "Imported 1 song" else "Imported $n songs"
+            return ImportResult(message, o?.arr("failed").objectsOf().size)
         }
     }
 }
@@ -188,10 +218,7 @@ class FilesApi(private val api: EncoreApi, private val client: OkHttpClient) {
     /** sort: name | size | mtime; dir: asc | desc. */
     fun list(root: String, path: String, sort: String, dir: String, offset: Int, limit: Int = 500): FileListing {
         val o = call("GET", "/api/files/list?root=${enc(root)}&path=${enc(path)}&sort=${enc(sort)}&dir=${enc(dir)}&offset=$offset&limit=$limit", null)
-        val obj = o as? JsonObject
-        val entries = (obj?.get("entries") ?: o).objects().mapNotNull { FileEntry.from(it) }
-        val total = obj?.int("total")?.takeIf { it > 0 } ?: (offset + entries.size)
-        return FileListing(entries, total, offset)
+        return FileListing.from(o, offset)
     }
 
     fun mkdir(root: String, path: String, name: String) {
@@ -258,14 +285,23 @@ class FilesApi(private val api: EncoreApi, private val client: OkHttpClient) {
         return ((e as? JsonObject)?.get("albums") ?: e).objects().mapNotNull { ImportAlbum.from(it) }
     }
 
-    /** POST /api/files/import/match: other releases for one album folder. */
-    fun importMatch(root: String, folder: String, artist: String, album: String): List<ImportRelease> {
-        val e = call("POST", "/api/files/import/match", body { put("root", root); put("path", folder); put("artist", artist); put("album", album) })
+    /**
+     * POST /api/files/import/match: other releases for one album folder from one metadata source ([provider]: one of
+     * [PROVIDERS]' keys, the match review's sources; the server's default is MusicBrainz).
+     */
+    fun importMatch(root: String, folder: String, artist: String, album: String, provider: String = "musicbrainz"): List<ImportRelease> {
+        val e = call("POST", "/api/files/import/match", body {
+            put("root", root)
+            put("path", folder)
+            put("artist", artist)
+            put("album", album)
+            put("provider", provider)
+        })
         return ((e as? JsonObject)?.get("candidates") ?: e).objects().mapNotNull { ImportRelease.from(it) }
     }
 
-    /** POST /api/files/import/apply → the server's line ("Imported 12 songs"). */
-    fun importApply(root: String, path: String, mode: String, albums: List<Pair<String, String?>>): String {
+    /** POST /api/files/import/apply → the server's line ("Imported 12 songs") and how many album folders failed. */
+    fun importApply(root: String, path: String, mode: String, albums: List<Pair<String, String?>>): ImportResult {
         val o = call("POST", "/api/files/import/apply", body {
             put("root", root)
             put("path", path)
@@ -277,8 +313,7 @@ class FilesApi(private val api: EncoreApi, private val client: OkHttpClient) {
                 })
             }
         }) as? JsonObject
-        val n = o?.int("imported") ?: 0
-        return o?.str("message")?.ifEmpty { null } ?: if (n == 1) "Imported 1 song" else "Imported $n songs"
+        return ImportResult.from(o)
     }
 
     /**
@@ -307,13 +342,7 @@ class FilesApi(private val api: EncoreApi, private val client: OkHttpClient) {
             val text = res.body.string()
             val o = try { api.json.parseToJsonElement(text) as? JsonObject } catch (_: Exception) { null }
             if (!res.isSuccessful) throw ApiException(res.code, o?.str("detail")?.ifEmpty { null } ?: "HTTP ${res.code}", o)
-            val renamed = o?.arr("renamed").objectsOf().firstOrNull()
-            val skipped = o?.arr("skipped").objectsOf().firstOrNull()
-            return when {
-                skipped != null -> UploadOutcome("skipped", item.name, skipped.str("reason"))
-                renamed != null -> UploadOutcome("renamed", renamed.str("to").ifEmpty { item.name }, "")
-                else -> UploadOutcome("uploaded", item.name, "")
-            }
+            return FilesRules.uploadOutcome(o, item.name)
         }
     }
 
@@ -321,15 +350,8 @@ class FilesApi(private val api: EncoreApi, private val client: OkHttpClient) {
 
     private fun body(build: JsonObjectBuilder.() -> Unit): JsonObject = buildJsonObject(build)
 
-    /** `{failed: [{path, reason}]}` as one line ("" when nothing failed). */
-    private fun failures(e: JsonElement?): String {
-        val failed = (e as? JsonObject)?.arr("failed").objectsOf()
-        if (failed.isEmpty()) return ""
-        val first = failed.first()
-        val what = first.str("path").substringAfterLast('/').ifEmpty { first.str("id") }
-        val why = first.str("reason")
-        return (if (failed.size == 1) "$what: $why" else "${failed.size} weren't done. $what: $why").trim()
-    }
+    /** `{failed: [{path | id, reason}]}` as one line ("" when nothing failed). */
+    private fun failures(e: JsonElement?): String = FilesRules.failureLine(e)
 
     private fun call(method: String, path: String, body: JsonElement?): JsonElement? {
         if (api.base.isEmpty()) throw IOException("Not signed in")
@@ -416,8 +438,17 @@ class FilesApi(private val api: EncoreApi, private val client: OkHttpClient) {
             for ((id, name) in dirs) walk(resolver, treeUri, id, "$prefix$name/", out, max, depth + 1)
         }
 
-        /** A name the server accepts as one path part: no slashes or control characters. */
-        fun safeName(name: String): String = name.replace('/', '_').replace('\\', '_').filter { it >= ' ' }.trim()
+        /** A name the server accepts as one path part ([FilesRules.uploadPart]: no slashes, nothing the server refuses). */
+        fun safeName(name: String): String = FilesRules.uploadPart(name)
+
+        /** The metadata sources Other matches searches (the match review's, the server's keys), with their names. */
+        val PROVIDERS = listOf(
+            "musicbrainz" to "MusicBrainz",
+            "deezer" to "Deezer",
+            "apple" to "Apple Music",
+            "discogs" to "Discogs",
+            "fingerprint" to "By audio (AcoustID)",
+        )
 
         private fun Cursor.stringAt(col: String): String {
             val i = getColumnIndex(col)

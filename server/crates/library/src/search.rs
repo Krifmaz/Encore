@@ -9,7 +9,9 @@
 //!   merged by ISRC or artist + title + length, ranked (exact artist + exact title first; joke, karaoke,
 //!   tribute and uploader-style results last), with a Top result.
 //! - The library: the same splits over the library index, typos forgiven ("trvis scot 90210"), accents
-//!   folded, with a Top result (GET /api/library/search).
+//!   folded, initials read ("crazy gb" is Crazy by Gnarls Barkley, "rhcp" Red Hot Chili Peppers), with a
+//!   Top result and the number of matches per section (GET /api/library/search). The list endpoints
+//!   (`?q=` on /api/library/tracks, /albums, /artists) use the same matcher, so a tab agrees with it.
 use crate::artists::{fold, strip_the, Index, Track};
 use crate::catalog;
 use crate::Ctx;
@@ -86,7 +88,7 @@ pub fn base_title(s: &str) -> String {
 }
 
 /// `base_title` of a title whose `fold` is known, without the regexes when there is nothing to strip.
-fn base_of(raw: &str, folded: &str) -> String {
+pub(crate) fn base_of(raw: &str, folded: &str) -> String {
     if raw.contains(['(', '[']) || raw.contains(" - ") { base_title(raw) } else { folded.to_string() }
 }
 
@@ -1002,7 +1004,7 @@ pub fn library_fuzzy<'a>(idx: &'a Index, q: &str) -> LibHits<'a> {
     out.artists = arts.iter().map(|&g| (70.0, g)).collect();
     out.artists.sort_by(|a, b| idx.artists[b.1].tracks.cmp(&idx.artists[a.1].tracks));
     for (i, al) in idx.albums.iter().enumerate() {
-        if fuzzy_eq(&base_of(&al.title, &al.title_f), &qf) {
+        if fuzzy_eq(&al.base_f, &qf) {
             out.albums.push((70.0, i, 2));
         }
     }
@@ -1017,10 +1019,213 @@ pub fn library_fuzzy<'a>(idx: &'a Index, q: &str) -> LibHits<'a> {
     out
 }
 
+// ---- initials -------------------------------------------------------------------------------------
+
+/// A folded query word that can be initials: 2–6 letters of an alphabet with capitals (Latin, Greek,
+/// Cyrillic …). Kana and Chinese characters are not: a word of theirs is a word, not a row of initials.
+pub fn initials_word(w: &str) -> bool {
+    (2..=6).contains(&w.chars().count()) && w.chars().all(|c| c.is_alphabetic() && c.is_lowercase())
+}
+
+/// The first letters of the words of a folded name spell `w` ("rhcp": red hot chili peppers; "atcq": a tribe
+/// called quest). A leading "the" and an "and" (also from "&") may be left out ("ewf": earth wind and fire).
+pub fn spells(w: &str, name: &str) -> bool {
+    if !may_spell(w, name) {
+        return false;
+    }
+    let words: Vec<&str> = name.split(' ').filter(|x| !x.is_empty()).collect();
+    if words.len() < 2 || words.len() > 2 * w.len() + 1 {
+        return false;
+    }
+    let try_with = |skip_the: bool, skip_and: bool| {
+        let mut firsts = words.iter().enumerate()
+            .filter(|(i, x)| !(skip_the && *i == 0 && **x == "the") && !(skip_and && **x == "and"))
+            .filter_map(|(_, x)| x.chars().next());
+        let mut want = w.chars();
+        loop {
+            match (firsts.next(), want.next()) {
+                (None, None) => return true,
+                (Some(a), Some(b)) if a == b => {}
+                _ => return false,
+            }
+        }
+    };
+    try_with(false, false) || try_with(true, false) || try_with(false, true) || try_with(true, true)
+}
+
+/// The cheap first test of `spells`: the name starts with the word's first letter, or with a word it may
+/// leave out. Most names fail here (it runs for every artist and album of the library).
+fn may_spell(w: &str, name: &str) -> bool {
+    name.chars().next() == w.chars().next() || name.starts_with("the ") || name.starts_with("and ")
+}
+
+/// `spells` for a song's album title without "(Deluxe)", "[Live]" or " - Remastered" (`base_of`), and without
+/// the regexes for the titles that cannot spell it.
+fn title_spells(w: &str, raw: &str, folded: &str) -> bool {
+    // base_of keeps the first word unless the title opens with a bracket
+    if !raw.trim_start().starts_with(['(', '[']) && !may_spell(w, folded) {
+        return false;
+    }
+    spells(w, &base_of(raw, folded))
+}
+
+/// Library artists one of whose names (spellings, aliases) the initials word spells, most songs first.
+fn initials_artists(idx: &Index, w: &str) -> Vec<usize> {
+    let mut out: Vec<usize> = idx.artists.iter().enumerate()
+        .filter(|(_, a)| a.folds.iter().any(|(_, f, _)| spells(w, f)))
+        .map(|(g, _)| g).collect();
+    out.sort_by(|a, b| idx.artists[*b].tracks.cmp(&idx.artists[*a].tracks).then(a.cmp(b)));
+    out
+}
+
+/// An initials artist counts for this much of an exact one in a split (a typo counts 0.7).
+const INITIALS_W: f64 = 0.6;
+
+/// What initials in a query find. The callers rank these below every whole-word match (after the plain
+/// search's hits) and above typo guesses:
+/// - a query of one initials word ("atcq"): the artists whose names it spells (most songs first), their
+///   albums and songs, and the albums whose titles it spells with their songs (scores 0: the Top result
+///   reads these on its own);
+/// - a split whose artist part is an initials word and whose title part names one of that artist's songs or
+///   albums ("crazy gb" → Crazy by Gnarls Barkley; words across title, artist and album as the splits read
+///   them); nothing when the rest of the query matches nothing;
+/// - a split whose artist part is a library artist (typos forgiven) and whose title part spells one of its
+///   albums ("pink floyd dsotm"), with that album's songs.
+pub fn library_initials<'a>(idx: &'a Index, q: &str) -> LibHits<'a> {
+    let qf = fold(q);
+    let mut out = LibHits::default();
+    if qf.is_empty() {
+        return out;
+    }
+    if !qf.contains(' ') {
+        if !initials_word(&qf) {
+            return out;
+        }
+        let arts = initials_artists(idx, &qf);
+        let set: HashSet<usize> = arts.iter().copied().collect();
+        let by = |ix: usize| idx.names[ix].groups.iter().any(|g| set.contains(g));
+        let mut titled: HashMap<&str, bool> = HashMap::new();
+        for (i, al) in idx.albums.iter().enumerate() {
+            let spelled = *titled.entry(al.title_f.as_str()).or_insert_with(|| spells(&qf, &al.base_f));
+            if spelled || by(al.aa_ix) || al.artist_ixs.iter().any(|&ix| by(ix)) {
+                out.albums.push((0.0, i, if spelled { 1 } else { 0 }));
+            }
+        }
+        if out.albums.is_empty() {
+            return out; // no artist and no album it spells (most words): no pass over every song
+        }
+        // the albums it spells first, then the artists' albums (each kept in library order)
+        out.albums.sort_by_key(|a| std::cmp::Reverse(a.2));
+        for t in &idx.tracks {
+            let on_album = *titled.entry(t.album_f.as_str()).or_insert_with(|| title_spells(&qf, &t.album_raw, &t.album_f));
+            if on_album || by(t.artist_ix) || by(t.aa_ix) {
+                out.tracks.push((0.0, t));
+            }
+        }
+        out.artists = arts.into_iter().map(|g| (0.0, g)).collect();
+        return out;
+    }
+    let mut tracks: HashMap<i64, (f64, &Track)> = HashMap::new();
+    let mut albums: HashMap<usize, (f64, usize)> = HashMap::new();
+    let mut artists: HashMap<usize, f64> = HashMap::new();
+    let keep = |tracks: &mut HashMap<i64, (f64, &'a Track)>, t: &'a Track, sc: f64| {
+        let e = tracks.entry(t.id).or_insert((sc, t));
+        e.0 = e.0.max(sc);
+    };
+    for sp in splits(q) {
+        let (af, tf) = (fold(&sp.artist), fold(&sp.title));
+        // the artist part is initials: "crazy gb", "gb crazy", "crazy by gb"
+        if initials_word(&af) {
+            let arts: HashSet<usize> = initials_artists(idx, &af).into_iter().collect();
+            let by = |ix: usize| idx.names[ix].groups.iter().any(|g| arts.contains(g));
+            let mut found = false;
+            if !arts.is_empty() {
+                for t in &idx.tracks {
+                    if !by(t.artist_ix) && !by(t.aa_ix) {
+                        continue;
+                    }
+                    let tg = lib_title_grade(&t.title, &sp.title);
+                    if tg > 0 {
+                        found = true;
+                        keep(&mut tracks, t, INITIALS_W * 100.0 + TITLE_W[tg]);
+                    }
+                }
+                for (i, al) in idx.albums.iter().enumerate() {
+                    if !by(al.aa_ix) && !al.artist_ixs.iter().any(|&ix| by(ix)) {
+                        continue;
+                    }
+                    let mut tg = lib_title_grade(&al.title, &sp.title);
+                    if tg == 0 && initials_word(&tf) && spells(&tf, &al.base_f) {
+                        tg = 1;
+                    }
+                    if tg > 0 {
+                        found = true;
+                        let sc = INITIALS_W * 100.0 + TITLE_W[tg];
+                        let e = albums.entry(i).or_insert((sc, tg));
+                        if sc > e.0 {
+                            *e = (sc, tg);
+                        }
+                    }
+                }
+            }
+            if found {
+                for g in arts {
+                    let e = artists.entry(g).or_insert(0.0);
+                    *e = e.max(INITIALS_W * 100.0);
+                }
+            }
+        }
+        // the title part spells an album of the artist part: "pink floyd dsotm"
+        if initials_word(&tf) {
+            let ws: HashMap<usize, f64> = artist_matches(idx, &sp.artist).into_iter().collect();
+            if ws.is_empty() {
+                continue;
+            }
+            let weight = |ixs: &mut dyn Iterator<Item = usize>| -> f64 {
+                ixs.flat_map(|ix| idx.names[ix].groups.iter()).filter_map(|g| ws.get(g)).fold(0.0, |a: f64, b| a.max(*b))
+            };
+            let mut hit: Vec<(usize, f64)> = vec![];
+            for (i, al) in idx.albums.iter().enumerate() {
+                let w = weight(&mut std::iter::once(al.aa_ix).chain(al.artist_ixs.iter().copied()));
+                if w > 0.0 && spells(&tf, &al.base_f) {
+                    hit.push((i, w));
+                }
+            }
+            if hit.is_empty() {
+                continue;
+            }
+            for &(i, w) in &hit {
+                let sc = w * 100.0 + TITLE_W[1];
+                let e = albums.entry(i).or_insert((sc, 1));
+                if sc > e.0 {
+                    *e = (sc, 1);
+                }
+                let al = &idx.albums[i];
+                for t in idx.tracks.iter().filter(|t| t.aa_ix == al.aa_ix && t.album_f == al.title_f) {
+                    keep(&mut tracks, t, w * 100.0);
+                }
+            }
+            for (g, w) in ws {
+                let e = artists.entry(g).or_insert(0.0);
+                *e = e.max(w * 100.0);
+            }
+        }
+    }
+    out.tracks = tracks.into_values().collect();
+    out.albums = albums.into_iter().map(|(i, (sc, tg))| (sc, i, tg)).collect();
+    out.artists = artists.into_iter().map(|(g, sc)| (sc, g)).collect();
+    out.tracks.sort_by(|a, b| b.0.total_cmp(&a.0).then(a.1.id.cmp(&b.1.id)));
+    out.albums.sort_by(|a, b| b.0.total_cmp(&a.0).then(a.1.cmp(&b.1)));
+    out.artists.sort_by(|a, b| b.0.total_cmp(&a.0).then(a.1.cmp(&b.1)));
+    out
+}
+
+// ---- the list endpoints and the library search ---------------------------------------------------
+
 /// `/api/library/tracks?q=`: songs by a split first ("travis scott 90210"), then the plain ranked search, then
-/// typo matches when that found little; the same song twice only once.
+/// what initials find, then typo matches when the plain search found little; the same song twice only once.
 pub fn library_track_ids(idx: &Index, q: &str, sort: &str, dir: &str) -> Vec<i64> {
-    track_ids_with(idx, q, sort, dir, &library_splits(idx, q), &Fuzzy::new(idx, q))
+    track_ids_with(idx, q, sort, dir, &library_splits(idx, q), &library_initials(idx, q), &Fuzzy::new(idx, q))
 }
 
 /// `library_fuzzy` worked out once, when first needed (library_search shares it between songs, albums and
@@ -1040,11 +1245,16 @@ impl<'a> Fuzzy<'a> {
     }
 }
 
-fn track_ids_with(idx: &Index, q: &str, sort: &str, dir: &str, split: &LibHits, fuzzy: &Fuzzy) -> Vec<i64> {
+fn track_ids_with(idx: &Index, q: &str, sort: &str, dir: &str, split: &LibHits, initials: &LibHits, fuzzy: &Fuzzy) -> Vec<i64> {
     let plain = idx.search_track_refs(q, sort, dir);
     let mut seq: Vec<&Track> = split.tracks.iter().map(|x| x.1).collect();
     let few = plain.len() < 5;
     seq.extend(plain);
+    // initials: by score (a split's), then in the list's order
+    let ord = idx.track_order(sort, dir);
+    let mut ini: Vec<(f64, &Track)> = initials.tracks.clone();
+    ini.sort_by(|a, b| b.0.total_cmp(&a.0).then_with(|| ord(a.1, b.1)));
+    seq.extend(ini.into_iter().map(|x| x.1));
     if few {
         seq.extend(fuzzy.get().tracks.iter().map(|x| x.1));
     }
@@ -1052,16 +1262,36 @@ fn track_ids_with(idx: &Index, q: &str, sort: &str, dir: &str, split: &LibHits, 
     idx.dedupe(seq.into_iter().filter(|t| seen.insert(t.id))).into_iter().map(|t| t.id).collect()
 }
 
-/// `/api/library/albums?q=`: album ids and their tier (0 for a split's album, the plain search's tiers after).
+/// `/api/library/albums?q=`: album ids and their tier: 0 for a split's album and the albums of the songs a
+/// split found ("I didn't know what album the song was on"), the plain search's tiers after (1–4), then
+/// what initials find (5), then typo matches when the plain search found nothing (6).
 pub fn library_album_ranks(idx: &Index, q: &str) -> Vec<(String, u8)> {
-    album_ranks_with(idx, q, &library_splits(idx, q), &Fuzzy::new(idx, q))
+    album_ranks_with(idx, q, &library_splits(idx, q), &library_initials(idx, q), &Fuzzy::new(idx, q))
 }
 
-fn album_ranks_with(idx: &Index, q: &str, split: &LibHits, fuzzy: &Fuzzy) -> Vec<(String, u8)> {
+/// The album a song is on.
+fn album_of<'a>(idx: &'a Index, t: &Track) -> Option<&'a crate::artists::Album> {
+    idx.albums.iter().find(|al| al.aa_ix == t.aa_ix && al.title_f == t.album_f)
+}
+
+fn album_ranks_with(idx: &Index, q: &str, split: &LibHits, initials: &LibHits, fuzzy: &Fuzzy) -> Vec<(String, u8)> {
     let mut out: Vec<(String, u8)> = split.albums.iter().map(|(_, i, _)| (idx.albums[*i].id.clone(), 0)).collect();
+    for (_, t) in split.tracks.iter().take(3) {
+        if let Some(al) = album_of(idx, t) {
+            out.push((al.id.clone(), 0));
+        }
+    }
     let plain = idx.search_albums(q);
     let empty = plain.is_empty();
     out.extend(plain.into_iter().map(|(id, t)| (id, t + 1)));
+    out.extend(initials.albums.iter().map(|(_, i, _)| (idx.albums[*i].id.clone(), 5)));
+    if fold(q).contains(' ') {
+        for (_, t) in initials.tracks.iter().take(3) {
+            if let Some(al) = album_of(idx, t) {
+                out.push((al.id.clone(), 5));
+            }
+        }
+    }
     if empty {
         out.extend(fuzzy.get().albums.iter().map(|(_, i, _)| (idx.albums[*i].id.clone(), 6)));
     }
@@ -1070,32 +1300,34 @@ fn album_ranks_with(idx: &Index, q: &str, split: &LibHits, fuzzy: &Fuzzy) -> Vec
     out
 }
 
-/// `/api/library/artists?q=`: the plain ranked search, with a split's artist first and typo matches when it
-/// found nothing.
+/// `/api/library/artists?q=`: the plain ranked search, with a split's artist first, then what initials find,
+/// and typo matches when the plain search found nothing.
 pub fn library_artists(idx: &Index, q: &str, limit: usize) -> Vec<Value> {
-    artists_with(idx, q, limit, &library_splits(idx, q), &Fuzzy::new(idx, q))
+    artist_rows(idx, &artists_with(idx, q, &library_splits(idx, q), &library_initials(idx, q), &Fuzzy::new(idx, q)), limit)
 }
 
-fn artists_with(idx: &Index, q: &str, limit: usize, split: &LibHits, fuzzy: &Fuzzy) -> Vec<Value> {
-    let mut out: Vec<Value> = split.artists.iter().map(|(_, g)| {
-        let mut v = Index::to_json(&idx.artists[*g]);
-        v["match"] = json!("name");
-        v
-    }).collect();
-    let plain = idx.search_artists(q, limit);
+/// Every artist a query finds, best first, as (artist index, "match"): name | alias | album | song | initials.
+fn artists_with(idx: &Index, q: &str, split: &LibHits, initials: &LibHits, fuzzy: &Fuzzy) -> Vec<(usize, &'static str)> {
+    let mut out: Vec<(usize, &'static str)> = split.artists.iter().map(|&(_, g)| (g, "name")).collect();
+    let plain = idx.search_artist_ixs(q);
     let empty = plain.is_empty();
     out.extend(plain);
+    out.extend(initials.artists.iter().map(|&(_, g)| (g, "initials")));
     if empty {
-        out.extend(fuzzy.get().artists.iter().map(|&(_, g)| {
-            let mut v = Index::to_json(&idx.artists[g]);
-            v["match"] = json!("name");
-            v
-        }));
+        out.extend(fuzzy.get().artists.iter().map(|&(_, g)| (g, "name")));
     }
     let mut seen = HashSet::new();
-    out.retain(|v| seen.insert(v["name"].as_str().unwrap_or("").to_lowercase()));
-    out.truncate(limit);
+    out.retain(|(g, _)| seen.insert(idx.artists[*g].name.to_lowercase()));
     out
+}
+
+/// The first `limit` of `artists_with` as artist rows with their "match".
+fn artist_rows(idx: &Index, found: &[(usize, &'static str)], limit: usize) -> Vec<Value> {
+    found.iter().take(limit).map(|&(g, m)| {
+        let mut v = Index::to_json(&idx.artists[g]);
+        v["match"] = json!(m);
+        v
+    }).collect()
 }
 
 const ALBUM_COLS: &str = "album_id AS id, MAX(album) album, MAX(albumartist) albumartist, MAX(year) year, MAX(genre) genre,
@@ -1103,28 +1335,30 @@ const ALBUM_COLS: &str = "album_id AS id, MAX(album) album, MAX(albumartist) alb
     GROUP_CONCAT(DISTINCT format) formats, MAX(mb_albumid) mb_albumid, MAX(mb_releasegroupid) mb_releasegroupid,
     SUM(CASE WHEN mb_albumid IS NULL OR mb_albumid='' THEN 1 ELSE 0 END) untagged";
 
-/// {top: {kind, item}, songs, albums, artists} over the library (GET /api/library/search?q=: the phone's
-/// Search tab and Discover's "In your library" row).
+/// Most songs, albums and artists `library_search` returns per section (`limit`).
+pub const SEARCH_MAX: usize = 50;
+
+/// {top: {kind, item}, songs, albums, artists, counts} over the library (GET /api/library/search?q=&limit=: the
+/// Library page's results view, the phone's Search tab and Discover's "In your library"). At most `n` songs,
+/// albums (singles too) and artists each; `counts` {artists, albums, songs} has every match per section, which
+/// is what the Artists, Albums and Songs tabs list for the same query ("Show all N").
 pub fn library_search(st: &impl Ctx, q: &str, n: usize) -> ApiResult<Value> {
-    let empty = json!({ "top": null, "songs": [], "albums": [], "artists": [] });
+    let empty = json!({ "top": null, "songs": [], "albums": [], "artists": [], "counts": { "artists": 0, "albums": 0, "songs": 0 } });
     if q.chars().count() < 2 {
         return Ok(empty);
     }
+    let n = n.clamp(1, SEARCH_MAX);
     let idx = st.library().artists.index(st.db());
     let split = library_splits(&idx, q);
+    let initials = library_initials(&idx, q);
     let fuzzy = Fuzzy::new(&idx, q);
-    let song_ids: Vec<i64> = track_ids_with(&idx, q, "", "", &split, &fuzzy).into_iter().take(n).collect();
-    let mut album_ids: Vec<String> = album_ranks_with(&idx, q, &split, &fuzzy).into_iter().map(|x| x.0).collect();
-    // the albums of the songs a split found ("I didn't know what album the song was on")
-    for (_, t) in split.tracks.iter().take(3) {
-        if let Some(al) = idx.albums.iter().find(|al| al.aa_ix == t.aa_ix && al.title_f == t.album_f) {
-            if !album_ids.contains(&al.id) {
-                album_ids.insert(album_ids.len().min(split.albums.len()), al.id.clone());
-            }
-        }
-    }
-    album_ids.truncate(n.min(40));
-    let artists = artists_with(&idx, q, n.min(20), &split, &fuzzy);
+    let all_songs = track_ids_with(&idx, q, "", "", &split, &initials, &fuzzy);
+    let all_albums = album_ranks_with(&idx, q, &split, &initials, &fuzzy);
+    let all_artists = artists_with(&idx, q, &split, &initials, &fuzzy);
+    let counts = json!({ "artists": all_artists.len(), "albums": all_albums.len(), "songs": all_songs.len() });
+    let song_ids: Vec<i64> = all_songs.into_iter().take(n).collect();
+    let album_ids: Vec<String> = all_albums.into_iter().take(n).map(|x| x.0).collect();
+    let artists = artist_rows(&idx, &all_artists, n);
 
     let songs = if song_ids.is_empty() { vec![] } else {
         let rows = st.db().query(&format!("SELECT {} FROM tracks WHERE id IN ({})", crate::lists::TRACK_COLS, crate::artists::marks(song_ids.len())),
@@ -1141,9 +1375,26 @@ pub fn library_search(st: &impl Ctx, q: &str, n: usize) -> ApiResult<Value> {
 
     // the Top result
     let qf = fold(q);
+    let one_word = !qf.contains(' ');
     let is_artist = idx.find(q).is_some() || artists.first().is_some_and(|a| fold(a["name"].as_str().unwrap_or("")) == qf);
-    let best_song = split.tracks.first().map(|x| x.0).unwrap_or(0.0);
-    let best_album = split.albums.first().map(|x| x.0 + if x.2 == 3 { 5.0 } else { 0.0 }).unwrap_or(0.0);
+    // initials weigh in through a split ("crazy gb"); one initials word ("atcq") has its own step below
+    let album_score = |x: &(f64, usize, usize)| x.0 + if x.2 == 3 { 5.0 } else { 0.0 };
+    let ini = |v: Option<f64>| if one_word { 0.0 } else { v.unwrap_or(0.0) };
+    let best_song = split.tracks.first().map(|x| x.0).unwrap_or(0.0).max(ini(initials.tracks.first().map(|x| x.0)));
+    let best_album = split.albums.first().map(album_score).unwrap_or(0.0).max(ini(initials.albums.first().map(album_score)));
+    // one initials word: the artist it spells, else the album it spells, when nothing whole-word ranks above it
+    let word_top = || -> Option<(&'static str, Value)> {
+        if !one_word {
+            return None;
+        }
+        if let (Some(&(_, g)), Some(a)) = (initials.artists.first(), artists.first()) {
+            if a["name"].as_str() == Some(idx.artists[g].name.as_str()) {
+                return Some(("artist", a.clone()));
+            }
+        }
+        let spelled = initials.albums.first().filter(|x| x.2 == 1).map(|x| idx.albums[x.1].id.as_str());
+        albums.first().filter(|al| spelled.is_some_and(|id| al.s("id") == id)).map(|al| ("album", json!(al)))
+    };
     let top = if is_artist && !artists.is_empty() && best_song < 160.0 {
         Some(("artist", artists[0].clone()))
     } else if best_album > best_song && !albums.is_empty() {
@@ -1154,6 +1405,8 @@ pub fn library_search(st: &impl Ctx, q: &str, n: usize) -> ApiResult<Value> {
         Some(("song", json!(sg)))
     } else if let Some(al) = albums.iter().find(|r| base_title(&r.s("album")) == qf) {
         Some(("album", json!(al)))
+    } else if let Some(t) = word_top() {
+        Some(t)
     } else if let Some(a) = artists.first() {
         Some(("artist", a.clone()))
     } else if let Some(sg) = songs.first() {
@@ -1163,7 +1416,7 @@ pub fn library_search(st: &impl Ctx, q: &str, n: usize) -> ApiResult<Value> {
     };
     Ok(json!({
         "top": top.map(|(k, item)| json!({ "kind": k, "item": item })).unwrap_or(Value::Null),
-        "songs": songs, "albums": albums, "artists": artists,
+        "songs": songs, "albums": albums, "artists": artists, "counts": counts,
     }))
 }
 

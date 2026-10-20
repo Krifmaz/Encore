@@ -1,4 +1,5 @@
-//! Sound effects on this device (Web Audio): the graph, its AudioContext and this device's output rate.
+//! Sound effects on this device (Web Audio): the graph, its AudioContext and this device's output rate. Each element's
+//! first stage is its volume normalization gain (norm.rs), before the preamp and the effects.
 
 use super::*;
 
@@ -25,11 +26,13 @@ pub(super) fn output_rate() -> f64 {
 pub fn device_rate() -> f64 { output_rate() }
 
 // ---- sound effects on this device (Web Audio) ----------------------------------------------------
-// Built the first time an effect is switched on; until then the <audio> elements play straight out, untouched.
-// An element wrapped in a MediaElementSource can only be heard through the graph, so once built the graph stays
-// and turns into a pass-through when the effects are switched off.
-/// `out` feeds the graph: the fade gain, or the source itself when no gain could be made
-pub(super) struct FxSource { pub(super) el: HtmlMediaElement, out: web_sys::AudioNode, pub(super) gain: Option<web_sys::GainNode>, on: bool }
+// Built the first time an effect or volume normalization is switched on; until then the <audio> elements play
+// straight out, untouched. An element wrapped in a MediaElementSource can only be heard through the graph, so once
+// built the graph stays and turns into a pass-through when the effects are switched off.
+// Each wrapped element: source → normalization gain (the song's own, norm.rs) → fade gain (song transitions) → the
+// shared input (the preamp) → EQ, crossfeed, mono, balance → the speakers.
+/// `out` feeds the graph: the fade gain, or the last node that could be made · `norm`: the normalization gain
+pub(super) struct FxSource { pub(super) el: HtmlMediaElement, out: web_sys::AudioNode, pub(super) gain: Option<web_sys::GainNode>, pub(super) norm: Option<web_sys::GainNode>, on: bool }
 #[derive(Default)]
 pub(super) struct Fx {
     built: bool,
@@ -65,9 +68,12 @@ pub(super) fn ensure_fx() -> bool {
             el.set_cross_origin(Some("anonymous"));
             let src = ctx.create_media_element_source(&el)?;
             // kept at once: an element can be wrapped only once, and from now on is heard only through the graph
-            let i = FX.with(|f| { let mut f = f.borrow_mut(); f.sources.push(FxSource { el, out: src.clone().into(), gain: None, on: false }); f.sources.len() - 1 });
+            let i = FX.with(|f| { let mut f = f.borrow_mut(); f.sources.push(FxSource { el, out: src.clone().into(), gain: None, norm: None, on: false }); f.sources.len() - 1 });
+            let norm = ctx.create_gain()?;
+            src.connect_with_audio_node(&norm)?;
+            FX.with(|f| { let mut f = f.borrow_mut(); f.sources[i].out = norm.clone().into(); f.sources[i].norm = Some(norm.clone()); });
             let gain = ctx.create_gain()?;
-            src.connect_with_audio_node(&gain)?;
+            norm.connect_with_audio_node(&gain)?;
             FX.with(|f| { let mut f = f.borrow_mut(); f.sources[i].out = gain.clone().into(); f.sources[i].gain = Some(gain); });
         }
         Ok(())
@@ -85,9 +91,13 @@ pub(super) fn ensure_fx() -> bool {
     if ok { apply_fx(); }
     else if let Some(i) = FX.with(|f| f.borrow().input.clone()) { let _ = i.connect_with_audio_node(&ctx.destination()); }   // half built: a pass-through
     route();
+    // the song playing now takes its normalization gain (the next ones when they start)
+    norm_now(false);
     resume_fx();
     true
 }
+/// The graph is needed: an effect changes the sound, or volume normalization is on.
+pub(super) fn wants_graph() -> bool { playback::fx_active(&prefs()) || norm_on() }
 /// Resume the graph's context on play: suspended by the autoplay policy, or 'interrupted' (Safari after a call or Siri).
 pub(super) fn resume_fx() {
     if !fx_built() { return; }

@@ -440,7 +440,17 @@ pub async fn download_anyway(st: &impl Ctx, id: i64, which: Option<i64>, who: &s
 
 /// Remove a request's rejected downloads (it completed, or it was deleted).
 pub fn remove(st: &impl Ctx, id: i64) -> bool {
-    dir_of(st, id).is_some_and(|d| d.is_dir() && std::fs::remove_dir_all(&d).is_ok())
+    dir_of(st, id).is_some_and(|d| d.is_dir() && !kept_in_library(st, &d) && std::fs::remove_dir_all(&d).is_ok())
+}
+
+/// A folder that is (or holds) an extra library folder (kept where it is by the file manager's import) is
+/// never removed by the clean-up: its songs are the library's.
+fn kept_in_library(st: &impl Ctx, dir: &Path) -> bool {
+    let kept = encore_library::folders::touches_extra(st.cfg(), dir);
+    if kept {
+        tracing::info!("{} holds an extra library folder: the clean-up leaves it", dir.display());
+    }
+    kept
 }
 
 /// How long a folder no request names yet is left alone by [`sweep`] (seconds): [`keep`] fills it (a copy
@@ -473,6 +483,9 @@ pub fn sweep(st: &impl Ctx) -> usize {
                 continue;
             }
         };
+        if kept_in_library(st, &dir) {
+            continue;
+        }
         let gone = row.as_ref().is_none_or(|r| r.s("status") == "completed");
         if gone {
             if std::fs::remove_dir_all(&dir).is_ok() {

@@ -139,6 +139,28 @@ mod limiter_tests {
     use super::*;
 
     #[test]
+    fn x_forwarded_for_counts_only_from_a_trusted_proxy_and_from_the_right() {
+        let ip = |s: &str| s.parse::<std::net::IpAddr>().ok();
+        // straight from the internet: the header is the client's own words
+        assert_eq!(client_ip_from(ip("203.0.113.9"), Some("1.1.1.1"), ""), "203.0.113.9");
+        assert_eq!(client_ip_from(ip("203.0.113.9"), None, ""), "203.0.113.9");
+        // a proxy in another container: the address it appended, not what the client wrote in front of it
+        assert_eq!(client_ip_from(ip("172.18.0.2"), Some("1.1.1.1, 203.0.113.9"), ""), "203.0.113.9");
+        assert_eq!(client_ip_from(ip("127.0.0.1"), Some(" 203.0.113.9 "), ""), "203.0.113.9");
+        assert_eq!(client_ip_from(ip("::ffff:10.0.0.3"), Some("203.0.113.9"), ""), "203.0.113.9", "IPv4-mapped");
+        // a chain of trusted proxies is passed over; all of them trusted: the left-most (a LAN client)
+        assert_eq!(client_ip_from(ip("10.0.0.3"), Some("203.0.113.9, 192.168.1.2"), ""), "203.0.113.9");
+        assert_eq!(client_ip_from(ip("10.0.0.3"), Some("192.168.1.5"), ""), "192.168.1.5");
+        assert_eq!(client_ip_from(ip("10.0.0.3"), Some("[2001:db8::1]:443"), ""), "2001:db8::1");
+        // the setting replaces the private networks: a public proxy (Cloudflare) is trusted, the LAN is not
+        assert_eq!(client_ip_from(ip("198.51.100.7"), Some("1.1.1.1, 203.0.113.9"), "198.51.100.0/24"), "203.0.113.9");
+        assert_eq!(client_ip_from(ip("10.0.0.3"), Some("203.0.113.9"), "198.51.100.0/24"), "10.0.0.3");
+        assert_eq!(client_ip_from(ip("2001:db8::5"), Some("203.0.113.9"), "2001:db8::/32, 198.51.100.7"), "203.0.113.9");
+        // no connection address (not served over a socket): nothing to trust
+        assert_eq!(client_ip_from(None, Some("1.1.1.1"), ""), "");
+    }
+
+    #[test]
     fn limits_count_per_key_and_old_keys_are_swept() {
         let l = RateLimiter::default();
         for _ in 0..3 {
@@ -306,15 +328,68 @@ pub fn ensure_owner(st: &AppState) -> anyhow::Result<()> {
     Ok(())
 }
 
-pub fn client_ip(parts: &Parts) -> String {
-    if let Some(f) = parts.headers.get("x-forwarded-for").and_then(|v| v.to_str().ok()) {
-        return f.split(',').next().unwrap_or("").trim().to_string();
+/// The networks trusted as proxies while `trusted_proxies` is empty: loopback, the private networks (a proxy
+/// in another container or on the same LAN), shared address space (Tailscale) and link-local.
+const DEFAULT_PROXIES: &[&str] = &["127.0.0.0/8", "10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16", "100.64.0.0/10", "169.254.0.0/16", "::1/128", "fc00::/7", "fe80::/10"];
+
+/// An address, also with a port ("1.2.3.4:80", "[::1]:80"); IPv4-mapped IPv6 as IPv4.
+fn parse_ip(s: &str) -> Option<std::net::IpAddr> {
+    let s = s.trim();
+    s.parse::<std::net::IpAddr>().ok().or_else(|| s.parse::<std::net::SocketAddr>().ok().map(|a| a.ip())).map(|ip| ip.to_canonical())
+}
+
+/// Whether `ip` is in `net` ("10.0.0.0/8", "2001:db8::/32", or one address).
+fn in_net(ip: std::net::IpAddr, net: &str) -> bool {
+    use std::net::IpAddr;
+    let (addr, bits) = match net.trim().split_once('/') {
+        Some((a, b)) => (a, b.trim().parse::<u32>().ok()),
+        None => (net.trim(), None),
+    };
+    let Some(base) = parse_ip(addr) else { return false };
+    match (ip, base) {
+        (IpAddr::V4(a), IpAddr::V4(b)) => {
+            let n = bits.unwrap_or(32).min(32);
+            let mask = if n == 0 { 0 } else { u32::MAX << (32 - n) };
+            u32::from(a) & mask == u32::from(b) & mask
+        }
+        (IpAddr::V6(a), IpAddr::V6(b)) => {
+            let n = bits.unwrap_or(128).min(128);
+            let mask = if n == 0 { 0 } else { u128::MAX << (128 - n) };
+            u128::from(a) & mask == u128::from(b) & mask
+        }
+        _ => false,
     }
-    parts
-        .extensions
-        .get::<axum::extract::ConnectInfo<std::net::SocketAddr>>()
-        .map(|c| c.0.ip().to_string())
-        .unwrap_or_default()
+}
+
+/// The client's address from the connection's address (`peer`, None when unknown), the `X-Forwarded-For`
+/// header and the trusted proxies (networks, comma-separated; empty: [`DEFAULT_PROXIES`]). The header counts
+/// only when the connection comes from a trusted proxy; then the right-most entry that is not itself a
+/// trusted proxy is the client (a proxy appends the address it saw, so what a client wrote at the front of the
+/// header can't name another address), and when every entry is a trusted proxy, the left-most. Without a
+/// connection address there is nothing to trust: "".
+pub fn client_ip_from(peer: Option<std::net::IpAddr>, forwarded: Option<&str>, trusted: &str) -> String {
+    let nets: Vec<&str> = trusted.split(',').map(str::trim).filter(|n| !n.is_empty()).collect();
+    let nets: &[&str] = if nets.is_empty() { DEFAULT_PROXIES } else { &nets };
+    let is_proxy = |ip: std::net::IpAddr| nets.iter().any(|n| in_net(ip, n));
+    let Some(peer) = peer.map(|p| p.to_canonical()) else { return String::new() };
+    let Some(f) = forwarded.filter(|_| is_proxy(peer)) else { return peer.to_string() };
+    let entries: Vec<&str> = f.split(',').map(str::trim).filter(|e| !e.is_empty()).collect();
+    for e in entries.iter().rev() {
+        match parse_ip(e) {
+            Some(ip) if is_proxy(ip) => continue,
+            Some(ip) => return ip.to_string(),
+            // not an address ("unknown"): what the proxy wrote, as it is
+            None => return e.to_string(),
+        }
+    }
+    entries.first().and_then(|e| parse_ip(e)).map(|ip| ip.to_string()).unwrap_or_else(|| peer.to_string())
+}
+
+/// The address a request came from (see [`client_ip_from`]; `trusted_proxies` names the proxies).
+pub fn client_ip(st: &AppState, parts: &Parts) -> String {
+    let peer = parts.extensions.get::<axum::extract::ConnectInfo<std::net::SocketAddr>>().map(|c| c.0.ip());
+    let forwarded = parts.headers.get("x-forwarded-for").and_then(|v| v.to_str().ok());
+    client_ip_from(peer, forwarded, &st.cfg.str("trusted_proxies"))
 }
 
 /// How a request signed in. Only cookies need the CSRF header: a browser never adds the other two on its own.
@@ -347,7 +422,7 @@ fn user_from_parts(st: &AppState, parts: &Parts) -> ApiResult<Option<(Row, Via)>
             let ua: String = parts.headers.get(header::USER_AGENT).and_then(|v| v.to_str().ok()).unwrap_or("").chars().take(200).collect();
             st.db.execute(
                 "UPDATE sessions SET last_seen_at=?, expires_at=?, ip=?, user_agent=CASE WHEN ?='' THEN user_agent ELSE ? END WHERE token=?",
-                p![t, t + app_session_secs(st) as f64, client_ip(parts), ua, ua, key],
+                p![t, t + app_session_secs(st) as f64, client_ip(st, parts), ua, ua, key],
             )?;
         }
         return Ok(Some((u, Via::Bearer)));
@@ -443,10 +518,10 @@ pub struct ClientInfo {
 
 impl FromRequestParts<AppState> for ClientInfo {
     type Rejection = ApiError;
-    async fn from_request_parts(parts: &mut Parts, _st: &AppState) -> Result<Self, Self::Rejection> {
+    async fn from_request_parts(parts: &mut Parts, st: &AppState) -> Result<Self, Self::Rejection> {
         let h = |k: &str| parts.headers.get(k).and_then(|v| v.to_str().ok()).unwrap_or("").to_string();
         let https = h("x-forwarded-proto") == "https" || parts.uri.scheme_str() == Some("https");
         let host = if !h("x-forwarded-host").is_empty() { h("x-forwarded-host") } else { h("host") };
-        Ok(ClientInfo { ip: client_ip(parts), ua: h("user-agent"), https, base_url: format!("{}://{}", if https { "https" } else { "http" }, host) })
+        Ok(ClientInfo { ip: client_ip(st, parts), ua: h("user-agent"), https, base_url: format!("{}://{}", if https { "https" } else { "http" }, host) })
     }
 }

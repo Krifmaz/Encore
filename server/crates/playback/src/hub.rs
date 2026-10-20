@@ -11,8 +11,9 @@ use tokio::sync::{broadcast, mpsc};
 /// A device that checked in this long ago (seconds) or less is online.
 pub const ALIVE: f64 = 15.0;
 /// "shuffle" {value: bool} shuffles the rest of the queue (false puts the order back); "repeat" {value: "off"|"all"|"one"}.
-/// A device's check-in state carries `shuffle` and `repeat` the same way.
-pub const ACTIONS: [&str; 14] = ["toggle", "play", "pause", "next", "prev", "seek", "volume", "play_queue", "enqueue", "play_next", "stop", "engine", "shuffle", "repeat"];
+/// A device's check-in state carries `shuffle` and `repeat` the same way. "prefs" {norm: {mode, target, clip}} sets the
+/// device's own volume normalization (0.31; its state reports them as `norm`, client-shapes §5.1).
+pub const ACTIONS: [&str; 15] = ["toggle", "play", "pause", "next", "prev", "seek", "volume", "play_queue", "enqueue", "play_next", "stop", "engine", "shuffle", "repeat", "prefs"];
 
 pub struct Device {
     pub name: String,

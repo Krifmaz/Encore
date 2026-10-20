@@ -100,6 +100,8 @@ pub fn id_of(v: &Value) -> Option<i64> {
 /// One Encore track as a queue entry.
 pub fn from_encore(base: &str, auth: &Auth, v: &Value) -> Option<Track> {
     let id = id_of(v)?;
+    // the row's loudness, for normalization when the song starts
+    super::normalize::remember(v);
     let album_id = v
         .get("album_id")
         .and_then(|a| {
@@ -142,6 +144,7 @@ pub fn many(base: &str, auth: &Auth, rows: &[Value]) -> Vec<Track> {
 
 /// An offline song from disk.
 pub fn from_file(path: std::path::PathBuf, v: &Value) -> Track {
+    super::normalize::remember(v);
     let s = |k: &str| v.get(k).and_then(Value::as_str).unwrap_or("").to_string();
     Track {
         id: id_of(v).map(|i| i.to_string()),

@@ -226,6 +226,9 @@ async fn every_answer_is_already_enriched() {
     let db = &st.db;
     encore_library::translate::store::set_manual(db, "ペルソナ4 サウンドトラック", "en", "album", Some("Persona 4 Soundtrack"), None).unwrap();
     db.execute("UPDATE tracks SET verify_status='mismatch', verify_detail='test' WHERE id=13", encore_db::p![]).unwrap();
+    // loudness and audio properties (0.31): the rows' `gain`, `sample_rate`, `bit_depth` are stamped once too
+    db.execute("UPDATE tracks SET rg_track_gain=-6.5, rg_track_peak=0.95, rg_album_gain=-6.0, loudness_lufs=-11.5, loudness_source='tags', sample_rate=44100, bit_depth=16
+                WHERE id IN (13, 32)", encore_db::p![]).unwrap();
     db.execute("UPDATE requests SET source='torznab', status='downloading' WHERE id=4", encore_db::p![]).unwrap();
     db.execute("INSERT INTO reports (user_id, kind, track_id, album_id, reason, artist, title, album, status, created_at) VALUES
                 (1, 'track', 32, '52b52b2323b5df9d', 'other', '平田志穂子', 'Reach Out To The Truth', 'ペルソナ4 サウンドトラック', 'done', 1)", encore_db::p![]).unwrap();
@@ -242,6 +245,11 @@ async fn every_answer_is_already_enriched() {
     let (code, _) = call(app, "GET", "/api/bug-reports", cookie, None).await;
     assert_eq!(code, StatusCode::OK);
     db.execute("INSERT INTO bug_reports (user_id, username, kind, title, body, status, created_at, updated_at) VALUES (1, 'admin', 'bug', 'ペルソナ4 サウンドトラック', 'x', 'new', 1, 1)", encore_db::p![]).unwrap();
+    // a group listen (0.31): its queue rows are enriched once per change, and the list's tiles carry the song
+    let group = json!({ "device_id": "audit-desk", "device_name": "Audit", "visibility": "anyone", "everyone_controls": false,
+                        "tracks": [32, 13], "index": 0, "position": 0.0, "playing": false });
+    let (code, b) = call(app, "POST", "/api/group", cookie, Some(group)).await;
+    assert_eq!(code, StatusCode::OK, "{}", String::from_utf8_lossy(&b));
     let urls = [
         "/api/library/recent?limit=12",
         "/api/library/albums?kind=albums&limit=120",
@@ -254,6 +262,8 @@ async fn every_answer_is_already_enriched() {
         "/api/library/tracks?q=reach",
         "/api/library/tracks?ids=32,13,1",
         "/api/library/artist-tracks?name=%E5%B9%B3%E7%94%B0%E5%BF%97%E7%A9%82%E5%AD%90",
+        "/api/library/artists/%E5%B9%B3%E7%94%B0%E5%BF%97%E7%A9%82%E5%AD%90/tracks",
+        "/api/library/artists/_/liked?name=%E5%B9%B3%E7%94%B0%E5%BF%97%E7%A9%82%E5%AD%90",
         "/api/library/search?q=reach",
         "/api/library/shuffle?limit=40",
         "/api/library/tracks/32",
@@ -280,6 +290,8 @@ async fn every_answer_is_already_enriched() {
         "/api/discover/artist/none/library-tracks?name=%E5%B9%B3%E7%94%B0%E5%BF%97%E7%A9%82%E5%AD%90",
         "/api/discover/for-you",
         "/api/discover/made-for-you",
+        "/api/group",
+        "/api/group/current?device_id=audit-desk",
     ];
     let mut admin = db.one("SELECT * FROM users WHERE id=1", encore_db::p![]).unwrap().unwrap();
     admin.remove("password_hash");

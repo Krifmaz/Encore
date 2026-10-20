@@ -225,35 +225,73 @@ pub fn remember_engine_values(saved: &str) {
     ENGINE.with(|en| if let Some(en) = en.borrow_mut().as_mut() { en.values = serde_json::from_str(saved).unwrap_or_else(|_| json!({})); });
 }
 
+/// What one engine setting's field holds, as JSON (None: a number field left empty or not a number).
+fn engine_field_value(s: &Value, raw: &str, checked: bool) -> Option<Value> {
+    match s.s("type").as_str() {
+        "bool" => Some(Value::Bool(checked)),
+        "number" => {
+            let n = if raw.trim().is_empty() { f64::NAN } else { to_num(&Value::String(raw.to_string())) };
+            if !n.is_finite() { return None; }
+            Some(if n.fract() == 0.0 && n.abs() < 1e15 { Value::from(n as i64) } else { Value::from(n) })
+        }
+        _ => Some(engine_options(s).into_iter().find(|(o, _)| js_string(o) == raw).map(|(o, _)| o).unwrap_or_else(|| Value::String(raw.to_string()))),
+    }
+}
+
+/// The engine settings after the form: `saved` with each field's value (`fields`: key → value, None for an empty
+/// number), a value equal to the setting's default left out; keys this engine doesn't have stay as saved.
+fn engine_values_after(settings: &[Value], saved: &Value, fields: &[(String, Option<Value>)]) -> Map<String, Value> {
+    let mut out = saved.as_object().cloned().unwrap_or_default();
+    for (key, v) in fields {
+        let Some(s) = settings.iter().find(|x| &x.s("key") == key) else { continue };
+        match v {
+            None => { out.remove(key); }
+            Some(v) if s.s("type") == "number" && to_num(v) == to_num(s.g("default")) => { out.remove(key); }
+            Some(v) if s.s("type") != "number" && v == s.g("default") => { out.remove(key); }
+            Some(v) => { out.insert(key.clone(), v.clone()); }
+        }
+    }
+    out
+}
+
+/// The values the engine runs with: each of its settings' value (its default when not set; numbers as
+/// numbers, so `3` and `3.0` and `"3"` are one value), and the keys it doesn't have as they are.
+fn engine_effective(settings: &[Value], values: &Value) -> Map<String, Value> {
+    let mut out = values.as_object().cloned().unwrap_or_default();
+    for s in settings {
+        let key = s.s("key");
+        let v = values.get(key.as_str()).filter(|v| !v.is_null()).unwrap_or(s.g("default"));
+        let v = match s.s("type").as_str() {
+            "number" => { let n = to_num(v); if n.is_finite() { Value::from(n) } else { Value::from(to_num(s.g("default"))) } }
+            "bool" => Value::Bool(truthy(v)),
+            _ => Value::String(js_string(v)),
+        };
+        out.insert(key, v);
+    }
+    out
+}
+
+/// Whether the form changes what the engine runs with (`saved` → `after`).
+fn engine_changed(settings: &[Value], saved: &Value, after: &Map<String, Value>) -> bool {
+    engine_effective(settings, saved) != engine_effective(settings, &Value::Object(after.clone()))
+}
+
 /// The engine settings as the JSON text for cadenza_engine_settings (only values that differ from the default;
-/// keys this engine doesn't have stay as saved), or None when the block isn't drawn.
+/// keys this engine doesn't have stay as saved), or None when the block isn't drawn or nothing in it changed:
+/// Save and Test send cadenza_engine_settings only when the admin changed an engine setting.
 pub fn engine_settings_value(root: &Element) -> Option<String> {
     let bx = dom::qs_in(root, "#cadenza-engine-fields")?;
     if dom::data(&bx, "loaded").is_empty() { return None; }
     ENGINE.with(|e| {
         let e = e.borrow();
         let en = e.as_ref()?;
-        let mut out = en.values.as_object().cloned().unwrap_or_default();
-        for el in dom::qsa_in(&bx, "[data-ek]") {
-            let key = dom::data(&el, "ek");
-            let Some(s) = en.settings.iter().find(|x| x.s("key") == key) else { continue };
-            let v = match s.s("type").as_str() {
-                "bool" => Value::Bool(dom::checked(&el)),
-                "number" => {
-                    let raw = dom::value(&el);
-                    let n = if raw.trim().is_empty() { f64::NAN } else { to_num(&Value::String(raw)) };
-                    if !n.is_finite() { out.remove(&key); continue; }
-                    if n == to_num(s.g("default")) { out.remove(&key); continue; }
-                    if n.fract() == 0.0 && n.abs() < 1e15 { Value::from(n as i64) } else { Value::from(n) }
-                }
-                _ => {
-                    let raw = dom::value(&el);
-                    engine_options(s).into_iter().find(|(o, _)| js_string(o) == raw).map(|(o, _)| o).unwrap_or(Value::String(raw))
-                }
-            };
-            if s.s("type") != "number" && &v == s.g("default") { out.remove(&key); } else { out.insert(key, v); }
-        }
-        Some(Value::Object(out).to_string())
+        let fields: Vec<(String, Option<Value>)> = dom::qsa_in(&bx, "[data-ek]").iter().filter_map(|el| {
+            let key = dom::data(el, "ek");
+            let s = en.settings.iter().find(|x| x.s("key") == key)?;
+            Some((key, engine_field_value(s, &dom::value(el), dom::checked(el))))
+        }).collect();
+        let out = engine_values_after(&en.settings, &en.values, &fields);
+        engine_changed(&en.settings, &en.values, &out).then(|| Value::Object(out).to_string())
     })
 }
 
@@ -1032,5 +1070,72 @@ mod session_words_tests {
         assert_eq!(session_details(&s(3), now), "3 searches waiting for their turn");
         let down = json!({ "state": "waiting", "searches_waiting": 1 });
         assert_eq!(session_details(&down, now), "1 search waiting for the connection");
+    }
+}
+
+#[cfg(test)]
+mod engine_settings_tests {
+    use super::*;
+    use serde_json::json;
+
+    fn settings() -> Vec<Value> {
+        vec![
+            json!({ "key": "filter", "type": "select", "default": "poly-sinc-long", "options": [["poly-sinc-long", "Long"], ["poly-sinc-short", "Short"]] }),
+            json!({ "key": "headroom_db", "type": "number", "default": -3, "min": -12, "max": 0, "step": 0.5 }),
+            json!({ "key": "dither", "type": "bool", "default": true }),
+        ]
+    }
+
+    fn f(k: &str, v: Option<Value>) -> (String, Option<Value>) { (k.to_string(), v) }
+
+    #[test]
+    fn an_untouched_form_changes_nothing() {
+        let s = settings();
+        // nothing saved, the form shows the defaults
+        let saved = json!({});
+        let form = [f("filter", Some(json!("poly-sinc-long"))), f("headroom_db", Some(json!(-3))), f("dither", Some(json!(true)))];
+        let after = engine_values_after(&s, &saved, &form);
+        assert!(after.is_empty(), "{after:?}");
+        assert!(!engine_changed(&s, &saved, &after));
+        // saved values, shown as they are; a saved default and a number saved as text are the same values
+        let saved = json!({ "filter": "poly-sinc-short", "headroom_db": "-6", "dither": true, "other_engine_key": 1 });
+        let form = [f("filter", Some(json!("poly-sinc-short"))), f("headroom_db", Some(json!(-6))), f("dither", Some(json!(true)))];
+        let after = engine_values_after(&s, &saved, &form);
+        assert!(!engine_changed(&s, &saved, &after), "{after:?}");
+        assert_eq!(after.get("other_engine_key"), Some(&json!(1)), "keys this engine doesn't have stay");
+    }
+
+    #[test]
+    fn a_changed_field_is_sent() {
+        let s = settings();
+        let saved = json!({ "headroom_db": -6 });
+        let form = [f("filter", Some(json!("poly-sinc-long"))), f("headroom_db", Some(json!(-4.5))), f("dither", Some(json!(true)))];
+        let after = engine_values_after(&s, &saved, &form);
+        assert!(engine_changed(&s, &saved, &after));
+        assert_eq!(Value::Object(after), json!({ "headroom_db": -4.5 }));
+        // back to the default: changed, and left out
+        let form = [f("headroom_db", Some(json!(-3)))];
+        let after = engine_values_after(&s, &saved, &form);
+        assert!(engine_changed(&s, &saved, &after));
+        assert!(after.is_empty());
+        // a switch turned off
+        let after = engine_values_after(&s, &json!({}), &[f("dither", Some(json!(false)))]);
+        assert!(engine_changed(&s, &json!({}), &after));
+        // an emptied number field falls back to the default: a change only when something else was saved
+        let after = engine_values_after(&s, &json!({}), &[f("headroom_db", None)]);
+        assert!(!engine_changed(&s, &json!({}), &after));
+        let after = engine_values_after(&s, &json!({ "headroom_db": -9 }), &[f("headroom_db", None)]);
+        assert!(engine_changed(&s, &json!({ "headroom_db": -9 }), &after));
+    }
+
+    #[test]
+    fn field_values_read_like_the_form() {
+        let s = settings();
+        assert_eq!(engine_field_value(&s[1], "-4.5", false), Some(json!(-4.5)));
+        assert_eq!(engine_field_value(&s[1], "-4", false), Some(json!(-4)));
+        assert_eq!(engine_field_value(&s[1], " ", false), None);
+        assert_eq!(engine_field_value(&s[1], "abc", false), None);
+        assert_eq!(engine_field_value(&s[2], "", true), Some(json!(true)));
+        assert_eq!(engine_field_value(&s[0], "poly-sinc-short", false), Some(json!("poly-sinc-short")));
     }
 }

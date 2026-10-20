@@ -18,13 +18,26 @@ use web_sys::Element;
 const MASK: &str = "••••";
 fn is_masked(v: &str) -> bool { v.starts_with(MASK) }
 
+/// Whether an environment variable sets `key` (`meta`: the `_meta` of GET /admin/settings): the value is shown
+/// locked, and Save leaves it out.
+pub fn env_locked(meta: &Value, key: &str) -> bool {
+    meta.o(key).s("source") == "env"
+}
+
+/// The note under a value an environment variable sets ("🔒 Set by ENCORE_… in your compose/env"), or "" when
+/// none does. The schema's fields, the Users page and the Invites page use it alike.
+pub fn env_note(meta: &Value, key: &str) -> String {
+    if !env_locked(meta, key) { return String::new(); }
+    format!(r##"<small class="src env">🔒 Set by <span class="mono">{}</span> in your compose/env – change it there (environment always wins)</small>"##, esc(&meta.o(key).s("env")))
+}
+
 /// The note under a field: set by an environment variable (locked), a saved secret (with clear), a secret that
 /// is not set, or the environment variable that would set it.
 fn source_note(f: &Field, v: &Value, meta: &Value) -> String {
     let m = meta.o(&f.key);
     let secret = f.is_secret();
-    if m.s("source") == "env" {
-        return format!(r##"<small class="src env">🔒 Set by <span class="mono">{}</span> in your compose/env – change it there (environment always wins)</small>"##, esc(&m.s("env")));
+    if env_locked(meta, &f.key) {
+        return env_note(meta, &f.key);
     }
     if secret && truthy(v) { return format!(r##"<small class="src">Saved ✓ (hidden) · <a href="#" data-clear="{}">clear</a></small>"##, esc(&f.key)); }
     if secret {

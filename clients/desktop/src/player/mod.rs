@@ -1,7 +1,7 @@
 //! The player: the engine's status as the app sees it, the bar along the bottom (`bar.rs`),
 //! the full view with Now playing / Lyrics / Up next (`full.rs`), the queue's order, repeat
 //! and the saved spot (`queue.rs`), lyrics (`lyrics.rs`), the Signal path dialog (`signal.rs`)
-//! and Your devices with the linked mode (`devices.rs`).
+//! and Your devices with the linked mode (`devices.rs`), and the group listen (`group/`, p6 item 8).
 //!
 //! `Snapshot`, `State`, `Message::Engine`, `update`, `bar`, `overlay` and `subscription` keep
 //! their shapes: the app and the pages call them. Pages reach the player through
@@ -11,6 +11,7 @@
 pub mod bar;
 pub mod devices;
 pub mod full;
+pub mod group;
 pub mod lyrics;
 pub mod queue;
 pub mod signal;
@@ -33,6 +34,8 @@ use std::time::Duration;
 #[derive(Clone, Debug, Default)]
 pub struct Snapshot {
     pub status: Arc<Status>,
+    /// The group listen this computer is in (its id), if any.
+    pub group_id: Option<String>,
 }
 
 impl Snapshot {
@@ -129,11 +132,15 @@ pub struct State {
     likes_loading: bool,
     pending_like: Option<i64>,
     pub lyrics: lyrics::Lyrics,
+    /// Lyrics mode's glide to the current line: (from, to, started).
+    lyrics_glide: Option<(f32, f32, std::time::Instant)>,
     /// The ⋯ menu, open at this point.
     pub menu: Option<Point>,
     pub dialog: Option<Dialog>,
     pub signal: signal::Info,
     pub devices: devices::Devices,
+    /// The group listen this computer is in, its dialogs and the server's list.
+    pub group: group::Group,
     pub spot: Option<SpotOffer>,
     spot_checked: bool,
     spot_dismissed: Option<String>,
@@ -187,10 +194,12 @@ impl Default for State {
             likes_loading: false,
             pending_like: None,
             lyrics: lyrics::Lyrics::default(),
+            lyrics_glide: None,
             menu: None,
             dialog: None,
             signal: signal::Info::default(),
             devices: d,
+            group: group::Group::default(),
             spot: None,
             spot_checked: false,
             spot_dismissed: None,
@@ -214,6 +223,7 @@ impl State {
     pub fn snapshot(&self) -> Snapshot {
         Snapshot {
             status: Arc::clone(&self.status),
+            group_id: self.group.state.as_ref().map(|s| s.id.clone()),
         }
     }
 
@@ -252,7 +262,7 @@ impl State {
             playing: st.state == PlayState::Playing,
             position: st.position,
             duration: st.duration.or(t.duration).unwrap_or(0.0),
-            volume: st.volume_linear,
+            volume: engine::volume_level(),
             remote: false,
         })
     }
@@ -348,6 +358,12 @@ pub enum Message {
     OpenLibrary,
     OpenMini,
     Lyrics(i64, Result<Value, ApiError>),
+    /// Lyrics mode: the scroll area is at `.0` and the current line needs `.1`.
+    LyricsScroll(f32, f32),
+    /// A frame while the lyrics glide to the current line.
+    LyricsFrame(std::time::Instant),
+    /// Bring the current line to the middle once the lyrics are on screen.
+    LyricsCentre,
     SeekTo(f64),
     Jump(usize),
     RemoveAt(usize),
@@ -356,6 +372,8 @@ pub enum Message {
     More(bool, Result<Value, ApiError>),
     Signal,
     TrackInfo(i64, Result<Value, ApiError>),
+    /// The row of a song queued from elsewhere (its loudness, for normalization).
+    GainRow(i64, Result<Value, ApiError>),
     Devices,
     DevicesList(Result<Value, ApiError>),
     Zones(Result<Value, ApiError>),
@@ -375,6 +393,8 @@ pub enum Message {
     SpotDismiss,
     SpotTracks(Value, Result<Value, ApiError>),
     AddToPlaylist(Vec<i64>),
+    /// The group listen (start, join, the group dialog, its event stream).
+    Group(group::Msg),
     Playlists(Result<Value, ApiError>),
     AddTo(i64),
     NewPlaylistName(String),
@@ -439,14 +459,46 @@ fn close_views(state: &mut State) {
     state.dialog = None;
 }
 
-fn lyrics_scroll(state: &State) -> Task<Message> {
-    iced::widget::operation::snap_to(
+/// Bring the current line of the lyrics to the middle (measured on screen; see
+/// `Message::LyricsScroll`).
+fn lyrics_scroll(_state: &State) -> Task<Message> {
+    lyrics::centre_task().map(|(now, to)| Message::LyricsScroll(now, to))
+}
+
+/// The lyrics just appeared (the mode opened, they loaded): centre the current line once they
+/// are drawn.
+fn lyrics_scroll_soon() -> Task<Message> {
+    Task::perform(tokio::time::sleep(Duration::from_millis(80)), |_| Message::LyricsCentre)
+}
+
+/// How long the lyrics take to glide to the next line.
+const LYRICS_GLIDE: Duration = Duration::from_millis(450);
+
+fn scroll_lyrics_to(y: f32) -> Task<Message> {
+    iced::widget::operation::scroll_to(
         lyrics::SCROLL_ID,
-        iced::widget::scrollable::RelativeOffset {
-            x: 0.0,
-            y: state.lyrics.scroll_offset(),
-        },
+        iced::widget::operation::AbsoluteOffset { x: None, y: Some(y.max(0.0)) },
     )
+}
+
+/// The web's `encore.lyricsMode`: the full view opens on the lyrics when it was left there.
+pub const LYRICS_MODE_KEY: &str = "encore.lyricsMode";
+
+/// Whether the full view was last left in lyrics mode.
+pub fn lyrics_mode(c: &crate::config::Config) -> bool {
+    match c.local(LYRICS_MODE_KEY) {
+        Some(Value::Bool(b)) => *b,
+        Some(Value::String(s)) => matches!(s.as_str(), "1" | "true"),
+        _ => false,
+    }
+}
+
+fn remember_lyrics_mode(ctx: &mut Ctx, on: bool) {
+    if lyrics_mode(ctx.config) != on {
+        ctx.edit_config(move |c| {
+            c.local.insert(LYRICS_MODE_KEY.into(), Value::Bool(on));
+        });
+    }
 }
 
 fn on_event(state: &mut State, ev: Event, ctx: &mut Ctx) -> Task<Message> {
@@ -454,6 +506,9 @@ fn on_event(state: &mut State, ev: Event, ctx: &mut Ctx) -> Task<Message> {
         Event::Status(s) => {
             let prev = std::mem::replace(&mut state.status, s);
             let now = Arc::clone(&state.status);
+            group::on_status(state, &prev);
+            // in a group the group's queue plays as it is: no repeat, no library shuffle after it
+            let grouped = group::active();
             let mut tasks = Vec::new();
             if let Some(e) = now.error.as_ref() {
                 if state.last_error.as_ref() != Some(e) {
@@ -465,7 +520,7 @@ fn on_event(state: &mut State, ev: Event, ctx: &mut Ctx) -> Task<Message> {
             }
             // A queue of only the Test sound just stops: no repeat, no library shuffle after it.
             let only_tone = now.queue.iter().all(engine::test_sound::is_tone);
-            if queue::reached_end(&prev, &now) && !state.user_stop && !only_tone {
+            if queue::reached_end(&prev, &now) && !state.user_stop && !only_tone && !grouped {
                 let last = now.queue.len() - 1;
                 match queue::at_end(state.repeat, state.autoplay(ctx), last) {
                     queue::AtEnd::Nothing => {}
@@ -477,7 +532,7 @@ fn on_event(state: &mut State, ev: Event, ctx: &mut Ctx) -> Task<Message> {
             if now.state == PlayState::Stopped {
                 state.user_stop = false;
             }
-            if now.index != prev.index {
+            if now.index != prev.index && !grouped {
                 // The song changed: on its own (the previous one ended) or because the user
                 // pressed Next / Previous / a queue row.
                 let auto = !state.user_skip;
@@ -504,7 +559,7 @@ fn on_event(state: &mut State, ev: Event, ctx: &mut Ctx) -> Task<Message> {
                 tasks.push(lyrics_scroll(state));
             }
             let paused_now = prev.state == PlayState::Playing && now.state == PlayState::Paused;
-            if now.state == PlayState::Playing || paused_now {
+            if (now.state == PlayState::Playing || paused_now) && !grouped {
                 save_spot(state, paused_now);
             }
             Task::batch(tasks)
@@ -513,6 +568,15 @@ fn on_event(state: &mut State, ev: Event, ctx: &mut Ctx) -> Task<Message> {
             let mut tasks = Vec::new();
             state.user_stop = false;
             let id = engine::tracks::encore_id(&t);
+            // a song queued from elsewhere (another device through the link): its row says how
+            // loud it is, for normalization
+            if let Some(id) = id.filter(|i| engine::normalize::prefs().on() && !engine::normalize::seen(*i)) {
+                let api = ctx.api.clone();
+                tasks.push(Task::perform(
+                    async move { api.get(&format!("/library/tracks/{id}")).await },
+                    move |r| Message::GainRow(id, r),
+                ));
+            }
             if state.full == Some(Pane::Lyrics) && state.devices.linked.is_none() {
                 match id {
                     Some(id) => tasks.push(state.lyrics.load(ctx.api.clone(), id, Message::Lyrics)),
@@ -540,7 +604,9 @@ fn on_event(state: &mut State, ev: Event, ctx: &mut Ctx) -> Task<Message> {
                 ));
             }
             state.spot = None;
-            save_spot(state, true);
+            if !group::active() {
+                save_spot(state, true);
+            }
             Task::batch(tasks)
         }
         Event::TrackPlayed { track, seconds } => {
@@ -604,6 +670,8 @@ fn tick(state: &mut State, ctx: &mut Ctx) -> Task<Message> {
         let rate = state.status.output_format.map(|f| f.rate).unwrap_or(0);
         engine::tracks::set_query(engine::tracks::stream_query(&playback_prefs(ctx), &state.dsp_info, rate));
     }
+    let ticks = state.ticks;
+    tasks.push(group::on_tick(state, ticks, ctx));
     if !state.spot_checked && ctx.session.signed_in() {
         state.spot_checked = true;
         let resume = playback_prefs(ctx)["resume"] != Value::Bool(false);
@@ -633,7 +701,7 @@ fn play_rows(ctx: &mut Ctx, rows: &[Value], index: usize, position: f64) {
 }
 
 fn offer_spot(state: &mut State, ctx: &Ctx, remote: Value) {
-    if state.status.track.is_some() || state.devices.linked.is_some() {
+    if state.status.track.is_some() || state.devices.linked.is_some() || state.group.state.is_some() {
         return;
     }
     let me = crate::link::device_id(&ctx.config.server);
@@ -661,6 +729,20 @@ fn offer_spot(state: &mut State, ctx: &Ctx, remote: Value) {
 
 pub fn update(state: &mut State, msg: Message, ctx: &mut Ctx) -> Task<Message> {
     match msg {
+        Message::Toggle if state.group.state.is_some() => return group::toggle(state, ctx),
+        Message::Next | Message::Prev if state.group.state.is_some() => {
+            return group::skip(state, matches!(msg, Message::Next), ctx)
+        }
+        Message::SeekTo(v) if state.group.state.is_some() => return group::seek(state, v, ctx),
+        Message::SetShuffle(_) | Message::SetRepeat(_) if state.group.state.is_some() => group::no_modes(ctx),
+        // Up next shows the group's queue (its own messages): the engine's indices mean nothing
+        Message::Jump(_) | Message::RemoveAt(_) | Message::MoveUp(_) if state.group.state.is_some() => {}
+        Message::LinkTo(_) | Message::PlayHere(_) | Message::SendThere(_) if state.group.state.is_some() => {
+            group::no_linking(ctx)
+        }
+        // the group plays on: the bar has no close button in a group
+        Message::ClosePlayer if state.group.state.is_some() => {}
+        Message::Group(m) => return group::update(state, m, ctx),
         Message::Toggle => {
             if state.devices.linked.is_some() {
                 let playing = state.devices.linked.as_ref().is_some_and(|l| fmt::truthy(&l.state, "playing"));
@@ -691,7 +773,11 @@ pub fn update(state: &mut State, msg: Message, ctx: &mut Ctx) -> Task<Message> {
         }
         Message::KeyToggle => {
             // a window of the player on top takes the key; nothing to toggle without a song
-            let window = state.menu.is_some() || state.dialog.is_some() || state.customize || state.shared.dialog.is_some();
+            let window = state.menu.is_some()
+                || state.dialog.is_some()
+                || state.customize
+                || state.shared.dialog.is_some()
+                || state.group.dialog.is_some();
             if !window && (state.status.track.is_some() || state.devices.linked.is_some()) {
                 return update(state, Message::Toggle, ctx);
             }
@@ -728,7 +814,9 @@ pub fn update(state: &mut State, msg: Message, ctx: &mut Ctx) -> Task<Message> {
         Message::Engine(ev) => return on_event(state, *ev, ctx),
         Message::Tick => return tick(state, ctx),
         Message::Escape => {
-            if state.menu.is_some() {
+            if state.group.dialog.is_some() {
+                state.group.dialog = None;
+            } else if state.menu.is_some() {
                 state.menu = None;
             } else if state.shared.dialog.is_some() {
                 state.shared.reset();
@@ -736,6 +824,9 @@ pub fn update(state: &mut State, msg: Message, ctx: &mut Ctx) -> Task<Message> {
                 state.dialog = None;
             } else if state.customize {
                 state.customize = false;
+            } else if state.full == Some(Pane::Lyrics) {
+                // lyrics mode: back to the cover first
+                return update(state, Message::SetPane(Pane::Now), ctx);
             } else if state.full.is_some() {
                 state.full = None;
             }
@@ -761,13 +852,23 @@ pub fn update(state: &mut State, msg: Message, ctx: &mut Ctx) -> Task<Message> {
         Message::ResetBar => ctx.edit_config(|c| c.bar_buttons = BAR_DEFAULT.iter().map(|s| s.to_string()).collect()),
         Message::OpenFull(pane) => {
             state.menu = None;
+            // the player opens in lyrics mode when it was left in it (encore.lyricsMode)
+            let pane = if state.full.is_none() && pane == Pane::Now && lyrics_mode(ctx.config) {
+                Pane::Lyrics
+            } else {
+                pane
+            };
+            if pane == Pane::Lyrics {
+                remember_lyrics_mode(ctx, true);
+            }
+            state.lyrics_glide = None;
             state.full = Some(pane);
             if pane == Pane::Lyrics {
                 match state.now().filter(|n| !n.remote).and_then(|n| n.id) {
                     Some(id) => {
                         let t = state.lyrics.load(ctx.api.clone(), id, Message::Lyrics);
                         state.lyrics.sync(state.status.position);
-                        return Task::batch([t, lyrics_scroll(state)]);
+                        return Task::batch([t, lyrics_scroll_soon()]);
                     }
                     None => {
                         if let Some(id) = state.now().and_then(|n| n.id) {
@@ -779,7 +880,15 @@ pub fn update(state: &mut State, msg: Message, ctx: &mut Ctx) -> Task<Message> {
             }
         }
         Message::CloseFull => state.full = None,
-        Message::SetPane(p) => return update(state, Message::OpenFull(p), ctx),
+        Message::SetPane(p) => {
+            if p == Pane::Now {
+                // "Back to the cover"
+                remember_lyrics_mode(ctx, false);
+            }
+            // the pane asked for, not the remembered one
+            state.full.get_or_insert(p);
+            return update(state, Message::OpenFull(p), ctx);
+        }
         Message::ClosePlayer => {
             state.user_stop = true;
             if let Some(e) = engine::engine() {
@@ -973,7 +1082,31 @@ pub fn update(state: &mut State, msg: Message, ctx: &mut Ctx) -> Task<Message> {
             state.lyrics.loaded(id, r);
             let pos = state.now().map(|n| n.position).unwrap_or(0.0);
             state.lyrics.sync(pos);
-            return lyrics_scroll(state);
+            return lyrics_scroll_soon();
+        }
+        Message::LyricsCentre => {
+            if state.full == Some(Pane::Lyrics) {
+                return lyrics_scroll(state);
+            }
+        }
+        Message::LyricsScroll(now, to) => {
+            if (to - now).abs() < 1.0 {
+                state.lyrics_glide = None;
+            } else if crate::widgets::marquee::motion_on() {
+                state.lyrics_glide = Some((now, to, std::time::Instant::now()));
+            } else {
+                state.lyrics_glide = None;
+                return scroll_lyrics_to(to);
+            }
+        }
+        Message::LyricsFrame(at) => {
+            if let Some((from, to, started)) = state.lyrics_glide {
+                let elapsed = at.saturating_duration_since(started);
+                if elapsed >= LYRICS_GLIDE || state.full != Some(Pane::Lyrics) {
+                    state.lyrics_glide = None;
+                }
+                return scroll_lyrics_to(lyrics::eased(from, to, elapsed, LYRICS_GLIDE));
+            }
         }
         Message::Jump(i) => {
             if let Some(l) = state.devices.linked.as_ref() {
@@ -1018,10 +1151,21 @@ pub fn update(state: &mut State, msg: Message, ctx: &mut Ctx) -> Task<Message> {
             }
         }
         Message::TrackInfo(id, r) => state.signal.loaded(id, r),
+        Message::GainRow(id, r) => {
+            if let Ok(mut row) = r {
+                if row.is_object() && engine::tracks::id_of(&row).is_none() {
+                    row["id"] = json!(id);
+                }
+                engine::normalize::remember(&row);
+                if state.snapshot().current_id() == Some(id) {
+                    engine::normalize::reapply();
+                }
+            }
+        }
         Message::Devices => {
             state.menu = None;
             state.dialog = Some(Dialog::Devices);
-            let mut tasks = vec![devices::fetch(ctx.api.clone())];
+            let mut tasks = vec![devices::fetch(ctx.api.clone()), group::refresh_list(&mut state.group, ctx)];
             if ctx.has_feature("roon") {
                 tasks.push(devices::fetch_zones(ctx.api.clone()));
             }
@@ -1268,6 +1412,9 @@ pub fn bar<'a>(state: &'a State, ctx: &Ctx<'a>) -> El<'a, Message> {
 
 /// The full view, the dialogs and the ⋯ menu, whichever is open.
 pub fn overlay<'a>(state: &'a State, ctx: &Ctx<'a>) -> Option<El<'a, Message>> {
+    if let Some(o) = group::view::overlay(state, ctx) {
+        return Some(o);
+    }
     if state.customize {
         return Some(bar::customize(state, ctx));
     }
@@ -1307,9 +1454,17 @@ pub fn cover_handle(ctx: &Ctx, url: &str, size: u32) -> Option<image::Handle> {
 /// The engine's events, a tick every second, Escape, and the web player's in-app keys: Space
 /// plays or pauses, Left / Right seek 10 s – only when no widget took the key (a focused text
 /// field keeps it) and without Ctrl, Alt or the logo key (the global hotkeys use those).
-pub fn subscription(_state: &State) -> Subscription<Message> {
+pub fn subscription(state: &State) -> Subscription<Message> {
     use iced::keyboard::{key::Named, Event as Kb, Key};
+    // frames only while the lyrics glide to a line
+    let glide = if state.lyrics_glide.is_some() {
+        iced::window::frames().map(Message::LyricsFrame)
+    } else {
+        Subscription::none()
+    };
     Subscription::batch([
+        glide,
+        group::subscription(&state.group),
         engine::subscription().map(|e| Message::Engine(Box::new(e))),
         iced::time::every(Duration::from_secs(1)).map(|_| Message::Tick),
         iced::event::listen_with(|e, status, _| match e {
@@ -1341,6 +1496,18 @@ pub fn subscription(_state: &State) -> Subscription<Message> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn lyrics_mode_is_read_like_the_web_keeps_it() {
+        let mut c = crate::config::Config::default();
+        assert!(!lyrics_mode(&c));
+        c.local.insert(LYRICS_MODE_KEY.into(), json!(true));
+        assert!(lyrics_mode(&c));
+        c.local.insert(LYRICS_MODE_KEY.into(), json!("1"));
+        assert!(lyrics_mode(&c));
+        c.local.insert(LYRICS_MODE_KEY.into(), json!("false"));
+        assert!(!lyrics_mode(&c));
+    }
 
     #[test]
     fn panes() {

@@ -111,17 +111,18 @@ async fn run_isrc(State(st): State<AppState>, Admin(_): Admin) -> ApiResult<Json
     }
 }
 
-async fn mb_connect(State(st): State<AppState>, Admin(u): Admin) -> ApiResult<Json<Value>> {
+async fn mb_connect(State(st): State<AppState>, Admin(u): Admin, headers: axum::http::HeaderMap) -> ApiResult<Json<Value>> {
     let cid = st.cfg.str("mb_client_id");
     if cid.is_empty() || st.cfg.str("mb_client_secret").is_empty() {
         return Err(err(400, "Add the MusicBrainz application's client ID and secret first"));
     }
     let redirect = mb_redirect_uri(&st).ok_or_else(|| err(400, "Set the Public URL in Settings → General first (the sign-in needs a callback address)"))?;
-    let state = encore_core::ids::random_token(24);
-    st.cache_put(&format!("mboauth:{state}"), json!({ "user_id": u.i("id") }), 900);
-    let q = [("response_type", "code"), ("client_id", cid.as_str()), ("redirect_uri", redirect.as_str()), ("scope", "submit_isrc tag rating"),
-             ("state", state.as_str()), ("access_type", "offline"), ("approval_prompt", "force")];
-    let url = format!("{}/oauth2/authorize?{}", mb::MAIN, q.iter().map(|(k, v)| format!("{k}={}", urlencoding::encode(v))).collect::<Vec<_>>().join("&"));
+    // a single-use state for this admin (crate::signin): the callback links the account for them only
+    let url = crate::signin::start(&st, u.i("id"), "musicbrainz", &headers, |state, _| {
+        let q = [("response_type", "code"), ("client_id", cid.as_str()), ("redirect_uri", redirect.as_str()), ("scope", "submit_isrc tag rating"),
+                 ("state", state), ("access_type", "offline"), ("approval_prompt", "force")];
+        Ok(format!("{}/oauth2/authorize?{}", mb::MAIN, q.iter().map(|(k, v)| format!("{k}={}", urlencoding::encode(v))).collect::<Vec<_>>().join("&")))
+    }).map_err(|e| err(400, e.to_string()))?;
     Ok(Json(json!({ "url": url })))
 }
 
@@ -138,35 +139,45 @@ fn back(msg: &str, ok: bool) -> Response {
     Redirect::to(&format!("/#/settings?s=contribute&{k}={}", urlencoding::encode(&msg.chars().take(200).collect::<String>()))).into_response()
 }
 
+/// MusicBrainz comes back here. The account is linked for the admin who started the sign-in (its single-use
+/// `state`); a browser that is not signed in as that admin is asked first (crate::signin).
 async fn mb_callback(State(st): State<AppState>, MaybeUser(u): MaybeUser, Query(q): Query<CallbackQ>) -> Response {
-    if !q.error.is_empty() {
-        return back(if q.error == "access_denied" { "You did not allow Encore – connect again and approve the access" } else { &q.error }, false);
+    crate::signin::callback(&st, u, "musicbrainz", &q.state, &q.error, &q.code, |r| match r {
+        Ok(()) => back("connected", true),
+        Err(e) => back(&e, false),
+    }).await
+}
+
+/// The callback's code exchanged for MusicBrainz tokens → (the account's name, the token answer).
+pub async fn mb_exchange(st: &AppState, code: &str) -> anyhow::Result<(String, Value)> {
+    let redirect = mb_redirect_uri(st).ok_or_else(|| anyhow::anyhow!("Set the Public URL first"))?;
+    let r = mb::oauth_token(st, &[("grant_type", "authorization_code"), ("code", code), ("redirect_uri", redirect.as_str()),
+        ("client_id", &st.cfg.str("mb_client_id")), ("client_secret", &st.cfg.str("mb_client_secret"))]).send().await
+        .map_err(|e| anyhow::anyhow!("Could not reach MusicBrainz: {e}"))?;
+    let status = r.status().as_u16();
+    let d: Value = r.json().await.unwrap_or(Value::Null);
+    if d["access_token"].is_null() {
+        anyhow::bail!("MusicBrainz did not accept the sign-in (HTTP {status}): {}", d["error_description"].as_str().or(d["error"].as_str()).unwrap_or("check the client ID, secret and callback URL"));
     }
-    let Some(u) = u.filter(encore_config::perms::is_admin) else { return back("Sign in to Encore as an admin in this browser first, then connect again", false) };
-    let key = format!("mboauth:{}", q.state);
-    if st.cache_get(&key).filter(|p| p["user_id"].as_i64() == Some(u.i("id"))).is_none() {
-        return back("The sign-in expired or was started in another browser – connect again", false);
+    let tok = d["access_token"].as_str().unwrap_or("");
+    let who: Value = match mb::userinfo(st, tok).send().await { Ok(r) => r.json().await.unwrap_or(Value::Null), Err(_) => Value::Null };
+    Ok((who["sub"].as_str().unwrap_or("").to_string(), d))
+}
+
+/// Saves the MusicBrainz account `account` (token answer `d`) as the server's, for the admin `u` who started
+/// the sign-in. An error when `u` is no longer an admin, or when MusicBrainz gave no refresh token (saved
+/// anyway: it works for an hour).
+pub fn mb_link(st: &AppState, u: &encore_db::Row, account: &str, d: &Value) -> Result<(), String> {
+    if !encore_config::perms::is_admin(u) {
+        return Err("Only an admin can connect the server's MusicBrainz account".into());
     }
-    st.cache_put(&key, Value::Null, 0);
-    let Some(redirect) = mb_redirect_uri(&st) else { return back("Set the Public URL first", false) };
-    let r = mb::oauth_token(&st, &[("grant_type", "authorization_code"), ("code", q.code.as_str()), ("redirect_uri", redirect.as_str()),
-        ("client_id", &st.cfg.str("mb_client_id")), ("client_secret", &st.cfg.str("mb_client_secret"))]).send().await;
-    let d: Value = match r {
-        Ok(r) => { let code = r.status().as_u16(); let d: Value = r.json().await.unwrap_or(Value::Null); if d["access_token"].is_null() {
-            return back(&format!("MusicBrainz did not accept the sign-in (HTTP {code}): {}", d["error_description"].as_str().or(d["error"].as_str()).unwrap_or("check the client ID, secret and callback URL")), false);
-        } d }
-        Err(e) => return back(&format!("Could not reach MusicBrainz: {e}"), false),
-    };
-    let tok = d["access_token"].as_str().unwrap_or("").to_string();
-    let who: Value = match mb::userinfo(&st, &tok).send().await { Ok(r) => r.json().await.unwrap_or(Value::Null), Err(_) => Value::Null };
-    let account = who["sub"].as_str().unwrap_or("").to_string();
-    st.cfg.set_many(&json!({ "mb_oauth_access_token": tok, "mb_oauth_refresh_token": d["refresh_token"].as_str().unwrap_or(""),
+    st.cfg.set_many(&json!({ "mb_oauth_access_token": d["access_token"].as_str().unwrap_or(""), "mb_oauth_refresh_token": d["refresh_token"].as_str().unwrap_or(""),
         "mb_oauth_expires_at": now() + d["expires_in"].as_f64().unwrap_or(3600.0), "mb_oauth_account": account }));
     st.db.log("info", &format!("{} connected the MusicBrainz account {account} for ISRC submissions", u.s("username")));
     if d["refresh_token"].as_str().unwrap_or("").is_empty() {
-        return back("MusicBrainz gave no refresh token – submissions stop after an hour. Connect again", false);
+        return Err("MusicBrainz gave no refresh token – submissions stop after an hour. Connect again".into());
     }
-    back("connected", true)
+    Ok(())
 }
 
 async fn mb_disconnect(State(st): State<AppState>, Admin(_): Admin) -> Json<Value> {

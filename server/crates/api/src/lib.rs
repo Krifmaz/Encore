@@ -13,6 +13,7 @@ pub mod enrich;
 pub mod routes;
 pub mod scheduler;
 pub mod search;
+pub mod signin;
 pub mod state;
 pub mod timing;
 pub mod translate;
@@ -110,12 +111,15 @@ pub fn app(st: AppState) -> Router {
         .merge(routes::stats::router())
         .merge(routes::bugreports::router())
         .merge(routes::remote::router())
+        .merge(routes::group::router())
         .merge(routes::roon::router())
         .merge(routes::playback::router())
         .merge(contribute::router())
+        .merge(signin::router())
         .merge(translate::router())
         .merge(routes::ytauth::router())
         .merge(routes::perf::router())
+        .merge(routes::files::router())
         // the handlers add covers, credits and translations to their answers themselves (crate::enrich)
         .with_state(st)
         // every API call timed per route (the web app's files below are not): a slow one is logged, and all

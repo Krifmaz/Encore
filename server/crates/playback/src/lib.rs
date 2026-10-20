@@ -1,11 +1,13 @@
 //! Playing music: how a song is streamed ([`stream`]: one decision, `plan_stream`, between the original, a
 //! conversion made on the fly and server processing; codec negotiation), server processing with Cadenza and
 //! its render cache ([`dsp`], [`cadenza`]), the devices
-//! hub behind the remote ([`hub`]) and each user's resume spot ([`spot`]), and Roon ([`roon`]).
+//! hub behind the remote ([`hub`]), group listens ([`group`]), each user's resume spot ([`spot`]), and Roon
+//! ([`roon`]).
 //!
 //! Functions that need the server take a [`Ctx`], which the server's state implements.
 pub mod cadenza;
 pub mod dsp;
+pub mod group;
 pub mod hub;
 pub mod roon;
 pub mod spot;
@@ -29,6 +31,8 @@ pub struct Playback {
     pub engine: dsp::EngineCache,
     /// every user's devices (the remote)
     pub devices: hub::Devices,
+    /// the group listens (0.31)
+    pub groups: group::Groups,
     /// the last resume spot written per user
     pub spots: spot::Spots,
     /// the link to a Roon Core

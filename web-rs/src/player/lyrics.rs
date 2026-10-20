@@ -137,6 +137,8 @@ pub(super) fn sync_lyrics(force: bool) {
     LAST_LINE.with(|x| x.set(i));
     let Some(b) = by_id("np-lyrics") else { return };
     for n in qsa_in(&b, "p.on") { dom::remove_class(&n, "on"); }
+    // the lines already sung are dimmed (once per line, not per tick)
+    for n in qsa_in(&b, "p[data-li]") { dom::toggle_class(&n, "past", num(&dom::data(&n, "li")) < i as f64); }
     if let Some(c) = qs_in(&b, &format!(r#"p[data-li="{i}"]"#)) {
         dom::add_class(&c, "on");
         let (top, h) = c.dyn_ref::<HtmlElement>().map(|h| (h.offset_top() as f64, h.offset_height() as f64)).unwrap_or((0.0, 0.0));

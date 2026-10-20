@@ -323,7 +323,16 @@ impl App {
         if let Err(e) = engine::play(list, index, 0.0) {
             self.toast(e, ToastKind::Err);
         }
-        Task::none()
+        self.group_flush()
+    }
+
+    /// In a group listen a play goes to the group (player::group): sent at once.
+    fn group_flush(&mut self) -> Task<Message> {
+        if player::group::has_pending() {
+            self.update(Message::Player(player::Message::Group(player::group::Msg::Flush)))
+        } else {
+            Task::none()
+        }
     }
 
     fn queue(&mut self, tracks: Vec<Value>, next: bool) -> Task<Message> {
@@ -335,7 +344,7 @@ impl App {
             Ok(()) => self.toast(if next { "Plays next" } else { "Added to queue" }, ToastKind::Ok),
             Err(e) => self.toast(e, ToastKind::Err),
         }
-        Task::none()
+        self.group_flush()
     }
 
     /// The sidebar's counts: storage, pending requests (admins), bug reports.
@@ -483,10 +492,15 @@ impl App {
             None => String::new(),
         };
         self.config.save();
+        // out of a group listen first, while the session still counts
+        let leave = player::group::sign_out(&mut self.player, &server);
         // The app token is a session of its own: the cookie logout leaves it, so it is ended too.
         let api = self.api.clone();
         let logout = Task::perform(
             async move {
+                if let Some((path, body)) = leave {
+                    let _ = api.post(&path, body).await;
+                }
                 let _ = api.revoke_app_token(&server, &token).await;
                 api.logout().await
             },
@@ -508,6 +522,12 @@ impl App {
             match e {
                 Effect::Navigate(p) => tasks.push(self.navigate(p, true)),
                 Effect::Replace(p) => tasks.push(self.navigate(p, false)),
+                Effect::Route(p) => {
+                    // the same page, its route changed: nothing to open again
+                    if std::mem::discriminant(&p) == std::mem::discriminant(&self.page) {
+                        self.page = p;
+                    }
+                }
                 Effect::Toast(t, k) => self.toast(t, k),
                 Effect::Play { tracks, index } => tasks.push(self.play(tracks, index)),
                 Effect::PlayNext(t) => tasks.push(self.queue(t, true)),

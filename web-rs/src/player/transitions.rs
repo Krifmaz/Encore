@@ -64,7 +64,8 @@ pub(super) fn seekable_to(el: &HtmlMediaElement, at: f64) -> bool {
 pub(super) fn maybe_transition() {
     let p = prefs();
     let mode = p.s("transition");
-    if mode.is_empty() || mode == "off" || fading() || is_linked() || HELD.with(|h| h.get()) || st(|s| s.repeat == "one" || s.dragging) || audio().is_none_or(|a| a.paused()) { return; }
+    // crossfade is off in a group listen (gapless stays)
+    if mode.is_empty() || mode == "off" || fading() || is_linked() || grouped() || HELD.with(|h| h.get()) || st(|s| s.repeat == "one" || s.dragging) || audio().is_none_or(|a| a.paused()) { return; }
     let (t, n) = st(|s| (
         if s.index < 0 { None } else { s.queue.get(s.index as usize).cloned() },
         if s.index + 1 < 0 { None } else { s.queue.get((s.index + 1) as usize).cloned() },
@@ -129,7 +130,7 @@ pub(super) fn end_fade() {
     maybe_preload(false);
 }
 /// `p.cancelAndHoldAtTime(t)` where the browser has it (not in web-sys), else `cancelScheduledValues(t)`.
-fn cancel_and_hold(p: &web_sys::AudioParam, t: f64) {
+pub(super) fn cancel_and_hold(p: &web_sys::AudioParam, t: f64) {
     let f = js_sys::Reflect::get(p, &JsValue::from_str("cancelAndHoldAtTime")).ok().and_then(|f| f.dyn_into::<js_sys::Function>().ok());
     match f {
         Some(f) => { let _ = f.call1(p, &JsValue::from_f64(t)); }

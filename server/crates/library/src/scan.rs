@@ -9,8 +9,10 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
 use encore_core::audio::AUDIO_EXTS;
+/// The columns a scan writes from the file's tags and audio properties (the loudness columns are written
+/// beside them, see [`crate::loudness::tag_columns`]).
 const COLS: &[&str] = &["title", "artist", "album", "albumartist", "track", "disc", "year", "genre", "duration", "bitrate", "format",
-    "mb_trackid", "mb_albumid", "mb_releasegroupid", "mb_artistid", "mb_albumartistid", "isrc"];
+    "mb_trackid", "mb_albumid", "mb_releasegroupid", "mb_artistid", "mb_albumartistid", "isrc", "sample_rate", "bit_depth"];
 
 #[derive(Default, Clone, serde::Serialize)]
 pub struct ScanState {
@@ -35,6 +37,11 @@ pub struct Library {
     /// every song's identity for matching (requests, playlist imports, the sync), kept while the songs are
     /// unchanged (see crate::matcher::Songs)
     pub songs: crate::matcher::Songs,
+    /// when the app was last used: background passes (the "Measure loudness" task) wait while it is
+    pub busy: encore_jobs::Busy,
+    /// the library folders a scan has warned about (not there, looks empty, a part unreadable): each warning
+    /// is written to the activity log once, not on every scan, until the folder is fine again
+    pub warned: Arc<Mutex<HashSet<String>>>,
 }
 
 pub fn album_key(albumartist: &str, album: &str, path: &str) -> String {
@@ -46,7 +53,7 @@ pub fn album_key(albumartist: &str, album: &str, path: &str) -> String {
     hex::encode(Sha1::digest(key.as_bytes()))[..16].to_string()
 }
 
-use encore_media::tags::read_tags;
+use encore_media::tags::{read_tags_and_facts, GainTags};
 
 fn mtime_size(meta: &std::fs::Metadata) -> (f64, i64) {
     let mt = meta.modified().ok().and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok()).map(|d| d.as_secs_f64()).unwrap_or(0.0);
@@ -64,6 +71,9 @@ pub struct FileRow {
     mtime: f64,
     size: i64,
     vals: Vec<Value>,
+    /// its ReplayGain / R128 tags
+    gain: GainTags,
+    duration: f64,
 }
 
 /// Reads a file's tags (no database work): `meta` is its metadata when the caller has it already.
@@ -73,20 +83,32 @@ fn read_file(path: &str, meta: Option<std::fs::Metadata>) -> std::io::Result<Fil
         None => std::fs::metadata(path)?,
     };
     let (mtime, size) = mtime_size(&meta);
-    let t = read_tags(path);
+    let (mut t, facts) = read_tags_and_facts(path);
+    t.insert("sample_rate".into(), json!(facts.sample_rate));
+    t.insert("bit_depth".into(), json!(facts.bit_depth));
     let album_id = album_key(&t.s("albumartist"), &t.s("album"), path);
     let vals: Vec<Value> = COLS.iter().map(|c| t.get(*c).cloned().unwrap_or(Value::Null)).collect();
-    Ok(FileRow { path: path.to_string(), album_id, mtime, size, vals })
+    Ok(FileRow { path: path.to_string(), album_id, mtime, size, vals, gain: facts.gain, duration: t.f("duration") })
 }
 
 /// Writes one file's row (a new song, or the new tags of a known one). The albums it touched come back: its
 /// album, and the one it was in before when its tags moved it.
 fn store_file(c: &Conn, f: &FileRow) -> rusqlite::Result<Vec<String>> {
+    use crate::loudness::{keeps_measurement, tag_columns, tag_values, TagColumns, COLUMNS};
     let mut albums = vec![f.album_id.clone()];
-    if let Some(ex) = c.one("SELECT id, mtime, size, verified_at, album_id FROM tracks WHERE path=?", p![f.path])? {
-        let sets = COLS.iter().map(|c| format!("{c}=?")).collect::<Vec<_>>().join(", ");
+    if let Some(ex) = c.one("SELECT id, mtime, size, verified_at, album_id, duration, loudness_source FROM tracks WHERE path=?", p![f.path])? {
+        let mut sets = COLS.iter().map(|c| format!("{c}=?")).collect::<Vec<_>>().join(", ");
         let mut params = vec![json!(f.album_id), json!(f.mtime), json!(f.size)];
         params.extend(f.vals.iter().cloned());
+        // the loudness: a track gain tag wins; a measurement of the same audio stays; else measured again
+        let (cols, vals): (&[&str], Vec<Value>) = match tag_columns(&f.gain, keeps_measurement(&ex.s("loudness_source"), ex.f("duration"), f.duration)) {
+            TagColumns::All(v) => (&COLUMNS, v.to_vec()),
+            TagColumns::AlbumOnly(v) => (&COLUMNS[2..4], v.to_vec()),
+        };
+        for col in cols {
+            sets.push_str(&format!(", {col}=?"));
+        }
+        params.extend(vals);
         params.push(json!(ex.i("id")));
         c.execute(&format!("UPDATE tracks SET album_id=?, mtime=?, size=?, {sets} WHERE id=?"), params)?;
         // the audio may have changed: check it again (tag-only writes after a verification keep it)
@@ -101,10 +123,12 @@ fn store_file(c: &Conn, f: &FileRow) -> rusqlite::Result<Vec<String>> {
     } else {
         let mut params = vec![json!(f.path), json!(f.album_id), json!(f.mtime), json!(f.size)];
         params.extend(f.vals.iter().cloned());
+        params.extend(tag_values(&f.gain));
         // stamped as it is written, in the order the files come: `added_at` keeps the order the files were found in
         params.push(json!(now()));
         c.execute(
-            &format!("INSERT INTO tracks (path, album_id, mtime, size, {}, added_at) VALUES (?,?,?,?,{},?)", COLS.join(", "), vec!["?"; COLS.len()].join(",")),
+            &format!("INSERT INTO tracks (path, album_id, mtime, size, {}, {}, added_at) VALUES (?,?,?,?,{},?)", COLS.join(", "), COLUMNS.join(", "),
+                vec!["?"; COLS.len() + COLUMNS.len()].join(",")),
             params,
         )?;
     }
@@ -182,23 +206,45 @@ pub struct Scanned {
     pub removed: usize,
     /// albums whose songs were added, changed or removed
     pub albums: BTreeSet<String>,
+    /// the folder had no songs although the library has songs in it (a disk that isn't mounted leaves its
+    /// empty mount point behind): nothing was removed
+    pub looked_empty: bool,
 }
 
 impl Library {
     /// An empty library whose background passes wait while `busy` says the app is in use.
     pub fn new(busy: encore_jobs::Busy) -> Self {
-        Library { covers: encore_media::covers::CoverIndex::new(busy), ..Default::default() }
+        Library { covers: encore_media::covers::CoverIndex::new(busy.clone()), busy, ..Default::default() }
     }
 
     /// Walk the library folder: new/changed files are read, vanished ones removed. Writes go in
     /// transactions of [`SCAN_BATCH`] files (tags are read before each one, outside it).
     pub fn scan_sync(&self, db: &Db, root: &str, full: bool) -> Scanned {
+        self.scan_folder(db, root, full, 0)
+    }
+
+    /// [`Library::scan_sync`] as one folder of several: the progress counts on from `before` files.
+    fn scan_folder(&self, db: &Db, root: &str, full: bool, before: usize) -> Scanned {
         let prefix = format!("{}/%", root.trim_end_matches('/'));
+        // LIKE ignores the case of ASCII letters and reads `_` as any letter: only the rows really in this folder
+        // (another library folder may be named like it)
         let known: HashMap<String, f64> = db.query("SELECT path, mtime FROM tracks WHERE path LIKE ?", p![prefix]).unwrap_or_default()
-            .into_iter().map(|r| (r.s("path"), r.f("mtime"))).collect();
+            .into_iter().map(|r| (r.s("path"), r.f("mtime"))).filter(|(path, _)| Path::new(path).starts_with(root)).collect();
+        // what the walk couldn't read (a folder without permission, a link to a disk that is away): the rows
+        // under it are not taken for vanished files; an error without a path keeps every row
+        let (mut unreadable, mut unread_all): (Vec<PathBuf>, bool) = (vec![], false);
         let files: Vec<PathBuf> = walkdir::WalkDir::new(root).follow_links(true).into_iter()
             .filter_entry(|e| e.depth() == 0 || !e.file_name().to_string_lossy().starts_with('.'))
-            .filter_map(|e| e.ok())
+            .filter_map(|e| match e {
+                Ok(e) => Some(e),
+                Err(err) => {
+                    match err.path() {
+                        Some(p) => unreadable.push(p.to_path_buf()),
+                        None => unread_all = true,
+                    }
+                    None
+                }
+            })
             .filter(|e| e.file_type().is_file())
             .map(|e| e.into_path())
             .filter(|p| {
@@ -206,12 +252,12 @@ impl Library {
                 !name.starts_with("._") && p.extension().map(|x| AUDIO_EXTS.contains(&x.to_string_lossy().to_lowercase().as_str())).unwrap_or(false)
             })
             .collect();
-        self.scan.lock().unwrap().total = files.len();
+        self.scan.lock().unwrap().total = before + files.len();
         let mut seen = HashSet::new();
         let mut out = Indexed::default();
         let mut batch: Vec<FileRow> = Vec::with_capacity(SCAN_BATCH);
         for (i, f) in files.iter().enumerate() {
-            self.scan.lock().unwrap().progress = i + 1;
+            self.scan.lock().unwrap().progress = before + i + 1;
             let path = f.to_string_lossy().into_owned();
             seen.insert(path.clone());
             let Ok(meta) = std::fs::metadata(f) else { continue };
@@ -232,7 +278,20 @@ impl Library {
         for (path, e) in &out.failed {
             db.log("warning", &format!("Could not read {path}: {e}"));
         }
-        let removed: Vec<&String> = known.keys().filter(|p| !seen.contains(*p)).collect();
+        // a folder with no songs at all while the library has songs in it is taken for a disk that isn't there
+        // (an unmounted disk leaves its empty mount point): its songs stay, as for a folder that is missing
+        let looked_empty = files.is_empty() && !known.is_empty();
+        let removed: Vec<&String> = if looked_empty || unread_all {
+            vec![]
+        } else {
+            known.keys().filter(|p| !seen.contains(*p) && !unreadable.iter().any(|u| Path::new(p.as_str()).starts_with(u))).collect()
+        };
+        self.warn_once(db, &format!("empty:{root}"), looked_empty,
+            &format!("Library folder {root} looks empty: not scanned as empty, its songs stay in the library (is its disk mounted?)"));
+        for u in &unreadable {
+            self.warn_once(db, &format!("unreadable:{}", u.display()), true, &format!("Couldn't read {} while scanning: the songs under it stay in the library", u.display()));
+        }
+        self.warn_once(db, &format!("unreadable:{root}"), unread_all, &format!("Couldn't read all of {root} while scanning: no songs were removed"));
         let mut albums = out.albums;
         for chunk in removed.chunks(500) {
             let marks = crate::artists::marks(chunk.len());
@@ -248,12 +307,45 @@ impl Library {
                 Err(e) => tracing::warn!("scan: removing {} vanished files failed: {e}", chunk.len()),
             }
         }
-        Scanned { changed: out.changed, removed: removed.len(), albums }
+        Scanned { changed: out.changed, removed: removed.len(), albums, looked_empty }
     }
 
+    /// A warning about a library folder in the activity log, once until the folder is fine again (`on` false
+    /// clears it).
+    fn warn_once(&self, db: &Db, key: &str, on: bool, text: &str) {
+        let mut w = self.warned.lock().unwrap_or_else(|e| e.into_inner());
+        if !on {
+            w.remove(key);
+        } else if w.insert(key.to_string()) {
+            db.log("warning", text);
+        }
+    }
+
+    /// Scan one folder (see [`Library::scan_all`]).
     pub async fn scan(&self, db: Db, root: String, full: bool) {
-        if !Path::new(&root).is_dir() {
-            self.scan.lock().unwrap().message = format!("Library path {root} does not exist");
+        self.scan_all(db, vec![root], full).await
+    }
+
+    /// Scan every library folder in one scanning session: `library_path` and the extra library folders
+    /// (`library_extra_roots`, see [`crate::folders::scan_roots`]). A folder that isn't there is skipped, never
+    /// taken as empty: its songs stay in the library until it is back. Each folder's scan only looks at and
+    /// removes the rows under that folder, and extra folders are never inside each other or the library.
+    pub async fn scan_all(&self, db: Db, roots: Vec<String>, full: bool) {
+        let mut roots: Vec<String> = roots.iter().map(|r| r.trim()).filter(|r| !r.is_empty())
+            .map(|r| if r.len() > 1 { r.trim_end_matches('/') } else { r }.to_string()).collect();
+        // a folder inside one scanned before it (typed into the setting by hand) is walked with that one
+        let mut i = 0;
+        while i < roots.len() {
+            if roots[..i].iter().any(|r| Path::new(&roots[i]).starts_with(r)) {
+                roots.remove(i);
+            } else {
+                i += 1;
+            }
+        }
+        let (here, gone): (Vec<String>, Vec<String>) = roots.into_iter().partition(|r| Path::new(r).is_dir());
+        if here.is_empty() {
+            let first = gone.first().cloned().unwrap_or_default();
+            self.scan.lock().unwrap().message = format!("Library path {first} does not exist");
             return;
         }
         {
@@ -263,16 +355,40 @@ impl Library {
             }
             *s = ScanState { scanning: true, message: "Scanning…".into(), ..s.clone() };
         }
+        for r in &gone {
+            self.warn_once(&db, &format!("gone:{r}"), true, &format!("Library folder {r} isn't there: not scanned, its songs stay in the library"));
+        }
+        for r in &here {
+            self.warn_once(&db, &format!("gone:{r}"), false, "");
+        }
         let me = self.clone();
         let db2 = db.clone();
         let done = tokio::task::spawn_blocking(move || {
-            let n = me.scan_sync(&db2, &root, full);
+            let mut all = (Scanned::default(), vec![]);
+            for (i, root) in here.iter().enumerate() {
+                // the progress goes on over the folders: the files of the folders before this one are done
+                let before = if i == 0 { 0 } else { me.scan.lock().unwrap().total };
+                let n = me.scan_folder(&db2, root, full, before);
+                all.0.changed += n.changed;
+                all.0.removed += n.removed;
+                all.0.albums.extend(n.albums);
+                if n.looked_empty {
+                    all.1.push(root.clone());
+                }
+            }
             // the planner's statistics follow what the scan's queries wanted (cheap when there is nothing to do)
             db2.optimize();
-            n
+            all
         }).await.unwrap_or_default();
+        let (done, empty) = done;
         let (changed, removed) = (done.changed, done.removed);
-        let msg = format!("Scan complete: {changed} updated, {removed} removed");
+        let mut msg = format!("Scan complete: {changed} updated, {removed} removed");
+        if !gone.is_empty() {
+            msg.push_str(&format!(" (not there, so not scanned: {})", gone.join(", ")));
+        }
+        if !empty.is_empty() {
+            msg.push_str(&format!(" (looks empty, so its songs were kept: {})", empty.join(", ")));
+        }
         if changed + removed > 0 {
             db.log("info", &msg);
             // thumbnails and colours of the albums that changed; the others' covers are left alone (a scan
@@ -467,6 +583,88 @@ mod tests {
         assert_eq!(db.one("SELECT COUNT(*) n FROM tracks", p![]).unwrap().unwrap().i("n"), 448);
         let item = db.one("SELECT track_id FROM playlist_items WHERE playlist_id=1", p![]).unwrap().unwrap();
         assert!(item.get("track_id").is_some_and(|v| v.is_null()), "the playlist entry of a vanished song is cleared");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// scan_all walks the library folder and the extra library folders in one session: a folder that isn't
+    /// there is skipped and keeps its songs, a folder named like another (other case, `_` for a letter) keeps
+    /// its own rows (SQLite's LIKE would mix them up), a folder inside an earlier one is walked once.
+    #[tokio::test]
+    async fn scan_all_walks_every_library_folder_and_skips_a_missing_one() {
+        let dir = encore_core::tmp::dir("scan-all");
+        let add = |root: &Path, rel: &str| {
+            let f = root.join(rel);
+            std::fs::create_dir_all(f.parent().unwrap()).unwrap();
+            std::fs::write(f, b"").unwrap();
+        };
+        let (music, lower, under, other, usb) = (dir.join("Music"), dir.join("music"), dir.join("x_y"), dir.join("xzy"), dir.join("usb"));
+        add(&music, "A/One/1.mp3");
+        add(&lower, "B/Two/1.mp3");
+        add(&lower, "B/Two/2.mp3");
+        add(&under, "C/Three/1.mp3");
+        add(&other, "D/Four/1.mp3");
+        add(&usb, "E/Five/1.mp3");
+        let db = Db::open(&dir.join("cfg")).unwrap();
+        let lib = Library::default();
+        let text = |p: &Path| p.to_string_lossy().into_owned();
+        let roots = vec![text(&music), format!("{}/", text(&lower)), text(&under), text(&other), text(&usb)];
+        let ids = |db: &Db| -> Vec<(i64, String)> {
+            db.query("SELECT id, path FROM tracks ORDER BY id", p![]).unwrap().iter().map(|r| (r.i("id"), r.s("path"))).collect()
+        };
+        lib.scan_all(db.clone(), roots.clone(), false).await;
+        let first = ids(&db);
+        assert_eq!(first.len(), 6, "{first:?}");
+        {
+            let s = lib.scan.lock().unwrap();
+            assert_eq!((s.scanning, s.progress, s.total), (false, 6, 6), "the progress goes on over the folders");
+            assert_eq!(s.message, "Scan complete: 6 updated, 0 removed");
+        }
+        // the USB disk is gone: its song stays, and no folder takes another's rows for vanished files
+        std::fs::remove_dir_all(&usb).unwrap();
+        lib.scan_all(db.clone(), roots.clone(), false).await;
+        assert_eq!(ids(&db), first, "same rows, same ids");
+        assert_eq!(lib.scan.lock().unwrap().message, format!("Scan complete: 0 updated, 0 removed (not there, so not scanned: {})", text(&usb)));
+        // a song leaves an extra folder: only that one goes
+        std::fs::remove_file(lower.join("B/Two/2.mp3")).unwrap();
+        lib.scan_all(db.clone(), roots.clone(), false).await;
+        let left = ids(&db);
+        assert_eq!(left.len(), 5);
+        assert!(left.iter().all(|(_, p)| !p.ends_with("Two/2.mp3")));
+        assert!(left.iter().any(|(_, p)| p.ends_with("E/Five/1.mp3")), "the missing folder's song is still there");
+        // only missing folders: nothing is scanned
+        lib.scan_all(db.clone(), vec![text(&usb)], false).await;
+        assert_eq!(lib.scan.lock().unwrap().message, format!("Library path {} does not exist", text(&usb)));
+        assert_eq!(ids(&db), left);
+        // a folder inside an earlier one is walked with it, once
+        lib.scan_all(db.clone(), vec![text(&music), text(&music.join("A"))], true).await;
+        assert_eq!(lib.scan.lock().unwrap().total, 1);
+        assert_eq!(ids(&db), left, "a full scan rewrites the rows in place");
+        // a disk that isn't mounted leaves its empty mount point: the folder is not taken for one whose songs
+        // all went, and the warning is written once
+        std::fs::remove_dir_all(other.join("D")).unwrap();
+        for _ in 0..2 {
+            lib.scan_all(db.clone(), roots.clone(), false).await;
+            assert_eq!(ids(&db), left, "the empty folder's song stays");
+        }
+        let msg = lib.scan.lock().unwrap().message.clone();
+        assert!(msg.ends_with(&format!("(looks empty, so its songs were kept: {})", text(&other))), "{msg}");
+        let warned = |what: &str| db.query("SELECT message FROM activity WHERE message LIKE ?", p![format!("%{what}%")]).unwrap().len();
+        assert_eq!(warned("looks empty"), 1, "warned once, not on every scan");
+        assert_eq!(warned(&format!("Library folder {} isn't there", text(&usb))), 1);
+        // a link to a folder that is away (a walk error): the songs under it stay, the others are scanned
+        let away = dir.join("away");
+        add(&away, "G/1.mp3");
+        std::os::unix::fs::symlink(&away, music.join("Linked")).unwrap();
+        lib.scan_all(db.clone(), roots.clone(), false).await;
+        let linked = ids(&db);
+        assert!(linked.iter().any(|(_, p)| p.ends_with("Linked/G/1.mp3")), "{linked:?}");
+        std::fs::remove_dir_all(&away).unwrap();
+        std::fs::remove_file(music.join("A/One/1.mp3")).unwrap();
+        add(&music, "A/One/2.mp3");
+        lib.scan_all(db.clone(), roots.clone(), false).await;
+        let now = ids(&db);
+        assert!(now.iter().any(|(_, p)| p.ends_with("Linked/G/1.mp3")), "the song behind the broken link stays: {now:?}");
+        assert!(!now.iter().any(|(_, p)| p.ends_with("A/One/1.mp3")) && now.iter().any(|(_, p)| p.ends_with("A/One/2.mp3")), "the rest is scanned: {now:?}");
         let _ = std::fs::remove_dir_all(&dir);
     }
 

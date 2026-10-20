@@ -28,6 +28,8 @@ pub fn router() -> Router<AppState> {
         .route("/api/library/artists", get(artists).delete(delete_artist))
         .route("/api/library/tracks", get(tracks))
         .route("/api/library/artist-tracks", get(artist_tracks))
+        .route("/api/library/artists/{name}/liked", get(library_artist::liked))
+        .route("/api/library/artists/{name}/tracks", get(library_artist::songs))
         .route("/api/library/search", get(crate::search::library_search_route))
         .route("/api/library/index", get(library_index::index))
         .route("/api/library/recent", get(recent))
@@ -62,6 +64,10 @@ pub fn router() -> Router<AppState> {
 /// GET /api/library/index: the side scrubber's sections.
 #[path = "library_index.rs"]
 mod library_index;
+
+/// GET /api/library/artists/{name}/liked and /tracks: an artist page's liked songs and its songs in the library.
+#[path = "library_artist.rs"]
+mod library_artist;
 
 /// GET /api/library/tracks/{id}/edges: where a song's sound starts and stops (Smart overlap transitions).
 #[path = "track_edges.rs"]
@@ -149,8 +155,9 @@ async fn scan(State(st): State<AppState>, Admin(_): Admin, Query(q): Query<ScanQ
     }
     let l = st.library.clone();
     let db = st.db.clone();
-    let root = st.cfg.str("library_path");
-    tokio::spawn(async move { l.scan(db, root, q.full).await });
+    // the library folder and the extra library folders, in one scanning session
+    let roots = encore_library::folders::scan_roots(&st.cfg);
+    tokio::spawn(async move { l.scan_all(db, roots, q.full).await });
     Ok(Json(json!({ "ok": true })))
 }
 
@@ -429,9 +436,12 @@ struct ShuffleBody {
     exclude: Vec<i64>,
 }
 
-/// Random songs nobody heard yet this session (the web player sends what it already played).
+/// Random songs nobody heard yet this session (the web player sends what it already played), with their
+/// loudness for normalization (the player queues them as they are).
 async fn shuffle_post(State(st): State<AppState>, User(_): User, Json(b): Json<ShuffleBody>) -> ApiResult<Json<Value>> {
-    shuffle_inner(&st, b.limit.unwrap_or(50), &b.exclude[..b.exclude.len().min(20000)])
+    let Json(mut v) = shuffle_inner(&st, b.limit.unwrap_or(50), &b.exclude[..b.exclude.len().min(20000)])?;
+    encore_library::loudness::stamp(&st.db, &mut v);
+    Ok(Json(v))
 }
 
 fn shuffle_inner(st: &AppState, limit: i64, exclude: &[i64]) -> ApiResult<Json<Value>> {
@@ -653,6 +663,8 @@ struct InfoQ {
 /// `x-encore-stream` label the stream would carry, `codec` the file's codec, `reason` why it is not the
 /// original) – given the same `X-Encore-Decoders` header or `?codecs=` list as the stream request.
 /// `offline_ok` is true when that stream is the original, so a copy saved for offline play is the file itself.
+/// `gain` (0.31, when anything is known): the song's loudness as its track rows carry it, with `source`
+/// ("tags" | "measured") and `lufs` (see encore_library::loudness).
 async fn track_info(State(st): State<AppState>, User(_): User, Path(id): Path<i64>, Query(q): Query<InfoQ>, headers: axum::http::HeaderMap) -> ApiResult<Json<Value>> {
     let t = st.db.one("SELECT id, path, format, size, bitrate, duration FROM tracks WHERE id=?", p![id])?.ok_or_else(|| err(404, "Track not found"))?;
     let (path, media) = (t.s("path"), st.media.clone());
@@ -667,6 +679,9 @@ async fn track_info(State(st): State<AppState>, User(_): User, Path(id): Path<i6
     if info["bitrate"].is_null() { info["bitrate"] = json!(t.i("bitrate")); }
     if info["duration"].is_null() { info["duration"] = json!(t.f("duration")); }
     info["quality"] = encore_media::quality::for_track(&st, id); // "Fake lossless? cutoff 16 kHz" in the signal path
+    if let Some(gain) = encore_library::loudness::info_gain(&st.db, id) {
+        info["gain"] = gain;
+    }
     Ok(Json(info))
 }
 

@@ -76,6 +76,8 @@ pub(super) async fn signal_path() {
     }
     let pure;
     let mut untouched = false;
+    // volume normalization changes this song's level here (so it isn't "Pure playback")
+    let mut normed = false;
     let cadenza = linked.is_none() && transport().is_some_and(|(k, _)| k.starts_with("cadenza"));
     // a Cadenza device reports every stage of its own pipeline; a browser device just plays
     let stages: Vec<Value> = linked.as_ref().map(|l| l.state.g("signal").a("stages")).unwrap_or_default();
@@ -96,6 +98,8 @@ pub(super) async fn signal_path() {
             rows.push(("Output".into(), format!("{}{}{}", eng.s("output"), if eng.truthy("exclusive") { " · exclusive" } else { "" }, if sig.truthy("bitperfect") { " · bit-perfect" } else { "" }), String::new()));
         } else {
             rows.push((esc(&l.name), if sig.truthy("output_rate") { format!("Plays through its browser audio at {} kHz", khz(sig.f("output_rate"))) } else { "Playing there".into() }, String::new()));
+            // what that device's volume normalization does to the song (its own settings), while it is on there
+            if let Some(n) = sig.st("norm") { rows.push(("Normalization".into(), n.to_string(), String::new())); }
         }
         pure = false;
     } else {
@@ -110,11 +114,16 @@ pub(super) async fn signal_path() {
             if resampled { format!("Your device resamples {} → {} kHz. A browser can't hand bits straight to the DAC; for true bit-perfect output play through a Cadenza device or an exclusive-mode player.", khz(src), khz(out)) }
             else if truthy_num(out) && truthy_num(src) { "Same rate as the file – no resampling in the browser. Whether the operating system mixes it with other sounds is up to your audio settings.".into() }
             else { String::new() }));
+        // volume normalization: the first stage on this device, before the effects (a row only while it is on)
+        if !t.truthy("preview") {
+            if let Some((v, note)) = norm_row(&t, info.as_ref()) { rows.push(("Normalization".into(), v, note)); }
+            normed = norm_changes(&t);
+        }
         let effects = playback::effects_summary(&prefs(), true);
         if !effects.is_empty() { rows.push(("Effects on this device".into(), effects, String::new())); }
         let tr = transport();
         untouched = tr.as_ref().is_some_and(|(k, _)| k == "original") && !info.as_ref().is_some_and(|i| i.g("lossless") == &json!(false));
-        pure = untouched && !playback::fx_active(&prefs());
+        pure = untouched && !playback::fx_active(&prefs()) && !normed;
     }
     let Some(body_el) = m.qs(".modal-body") else { return };
     let rows_html: String = rows.iter().map(|(k, v, note)| format!(r#"<div class="stack" style="gap:2px"><div class="small muted">{k}</div><div style="font-weight:600">{}</div>{}</div>"#,
@@ -131,10 +140,14 @@ pub(super) async fn signal_path() {
         ("Not the untouched file".to_string(), "This download is a converted copy: the original file doesn't play in this browser, or the server converted it. Where the original plays, Downloads → ⋯ → Download again in original quality replaces it.")
     } else if copy && playback::fx_active(&prefs()) {
         ("Not the untouched file".to_string(), "The original file, downloaded byte for byte; this device adds the effects you chose under Settings → Playback → Sound.")
+    } else if copy && normed {
+        ("Not the untouched file".to_string(), "The original file, downloaded byte for byte; this device changes its volume for normalization (Settings → Playback → Sound).")
     } else if copy {
         ("Pure playback from this device".to_string(), "The original file, downloaded byte for byte. Everything after that – volume, mixing, resampling – is your browser and operating system.")
     } else if pure {
         ("Pure playback from Encore".to_string(), "Encore sent the file exactly as it is stored. Everything after that – volume, mixing, resampling – is your browser and operating system.")
+    } else if untouched && !playback::fx_active(&prefs()) {
+        ("Not the untouched file".to_string(), "Encore sent the file untouched; this device changes its volume for normalization (Settings → Playback → Sound).")
     } else if untouched {
         ("Not the untouched file".to_string(), "Encore sent the file untouched; this device adds the effects you chose under Settings → Playback → Sound.")
     } else {

@@ -112,6 +112,7 @@ class OfflineIndexTest {
         assertEquals("44.1", OfflineIndex.khz(44100.0))
         assertEquals("96", OfflineIndex.khz(96000.0))
         assertEquals("88.2", OfflineIndex.khz(88200.0))
+        assertEquals("22.05", OfflineIndex.khz(22050.0))
         assertEquals("vorbis", OfflineIndex.codecOf("", "ogg"))
         assertEquals("aac", OfflineIndex.codecOf("", "m4a"))
         assertEquals("alac", OfflineIndex.codecOf("ALAC", "m4a"))

@@ -398,3 +398,260 @@ async fn album_search_in_memory_answers_as_the_in_list_query() {
     }
     assert!(checked > 100, "the cases found albums: {checked}");
 }
+
+// ---- initials, counts and the list endpoints agreeing (0.31) ------------------------------------------
+
+/// Artists with initials people type ("gb", "atcq", "rhcp"), real short words ("Go" by Moby), and a Japanese
+/// title by an artist with a Latin name.
+async fn initials_library(name: &str) -> Env {
+    let mut e = setup(name).await;
+    for title in ["Crazy", "Smiley Faces", "Gone Daddy Gone"] {
+        e.add(t(title, "Gnarls Barkley", "St. Elsewhere", "Gnarls Barkley"));
+    }
+    e.add(t("Crazy", "Seal", "Seal", "Seal"));
+    e.add(t("Crazy in Love", "Beyoncé", "Dangerously in Love", "Beyoncé"));
+    for title in ["Can I Kick It?", "Bonita Applebum"] {
+        e.add(t(title, "A Tribe Called Quest", "People's Instinctive Travels and the Paths of Rhythm", "A Tribe Called Quest"));
+    }
+    e.add(t("Award Tour", "A Tribe Called Quest", "Midnight Marauders", "A Tribe Called Quest"));
+    for title in ["Californication", "Scar Tissue", "Otherside"] {
+        e.add(t(title, "Red Hot Chili Peppers", "Californication", "Red Hot Chili Peppers"));
+    }
+    e.add(t("Under the Bridge", "Red Hot Chili Peppers", "Blood Sugar Sex Magik", "Red Hot Chili Peppers"));
+    // "go": a real song called Go, and an artist whose initials are "go"
+    e.add(t("Go", "Moby", "Moby", "Moby"));
+    e.add(t("Porcelain", "Moby", "Play", "Moby"));
+    e.add(t("The Other Black", "Genesis Owusu", "Smiling with No Teeth", "Genesis Owusu"));
+    e.add(t("Waitin' on Ya", "Genesis Owusu", "Smiling with No Teeth", "Genesis Owusu"));
+    e.add(t("Feel Good Inc.", "Gorillaz", "Demon Days", "Gorillaz"));
+    // mixed scripts
+    e.add(t("真夏の果実", "Southern All Stars", "稲村ジェーン", "Southern All Stars"));
+    e.add(t("いとしのエリー", "Southern All Stars", "10ナンバーズ・からっと", "Southern All Stars"));
+    // an album people know by its initials
+    for title in ["Speak to Me", "Breathe", "Time", "Money"] {
+        e.add(t(title, "Pink Floyd", "The Dark Side of the Moon", "Pink Floyd"));
+    }
+    e.add(t("Wish You Were Here", "Pink Floyd", "Wish You Were Here", "Pink Floyd"));
+    e
+}
+
+fn titles(v: &Value) -> Vec<String> {
+    v.as_array().unwrap().iter().map(|x| x["title"].as_str().unwrap_or("").to_string()).collect()
+}
+
+#[tokio::test]
+async fn initials_find_artists_albums_and_songs() {
+    let e = initials_library("initials").await;
+    // "crazy gb": the song Crazy by Gnarls Barkley, not Seal's or Beyoncé's, in either order and with "by"
+    for q in ["crazy%20gb", "gb%20crazy", "crazy%20by%20gb", "CRAZY%20GB"] {
+        let r = e.get(&format!("/api/library/search?q={q}")).await;
+        assert_eq!(r["top"]["kind"], "song", "{q}: {r}");
+        assert_eq!(r["top"]["item"]["title"], "Crazy", "{q}: {r}");
+        assert_eq!(r["top"]["item"]["artist"], "Gnarls Barkley", "{q}: {r}");
+        assert_eq!(r["songs"][0]["artist"], "Gnarls Barkley", "{q}: {r}");
+        assert_eq!(r["artists"][0]["name"], "Gnarls Barkley", "{q}: {r}");
+        assert_eq!(r["albums"][0]["album"], "St. Elsewhere", "{q}: {r}");
+        // the Songs, Albums and Artists tabs read it the same way
+        let tr = e.get(&format!("/api/library/tracks?q={q}")).await;
+        assert_eq!((tr[0]["title"].as_str(), tr[0]["artist"].as_str()), (Some("Crazy"), Some("Gnarls Barkley")), "{q}: {tr}");
+        let al = e.get(&format!("/api/library/albums?q={q}")).await;
+        assert_eq!(al["items"][0]["album"], "St. Elsewhere", "{q}: {al}");
+        assert_eq!(e.artist_names(&format!("/api/library/artists?q={q}")).await.first().map(String::as_str), Some("Gnarls Barkley"));
+    }
+    // initials only when the rest of the query matches too: no song "smile" by Gnarls Barkley
+    let r = e.get("/api/library/search?q=gb%20nothing").await;
+    assert_eq!(r["songs"], json!([]), "{r}");
+    assert_eq!(r["top"], Value::Null, "{r}");
+    // one word of initials: the artist on top, its albums and songs
+    let r = e.get("/api/library/search?q=atcq").await;
+    assert_eq!(r["top"]["kind"], "artist", "{r}");
+    assert_eq!(r["top"]["item"]["name"], "A Tribe Called Quest", "{r}");
+    assert_eq!(r["artists"][0]["match"], "initials", "{r}");
+    let mut songs = titles(&r["songs"]);
+    songs.sort();
+    assert_eq!(songs, ["Award Tour", "Bonita Applebum", "Can I Kick It?"], "{r}");
+    assert_eq!(r["albums"].as_array().unwrap().len(), 2, "{r}");
+    let r = e.get("/api/library/search?q=rhcp").await;
+    assert_eq!(r["top"]["kind"], "artist", "{r}");
+    assert_eq!(r["top"]["item"]["name"], "Red Hot Chili Peppers", "{r}");
+    assert_eq!(r["songs"].as_array().unwrap().len(), 4, "{r}");
+    assert_eq!(e.artist_names("/api/library/artists?q=rhcp").await, vec!["Red Hot Chili Peppers"]);
+    // initials and a title: "rhcp under the bridge", either order
+    for q in ["rhcp%20under%20the%20bridge", "under%20the%20bridge%20rhcp"] {
+        let r = e.get(&format!("/api/library/search?q={q}")).await;
+        assert_eq!(r["top"]["item"]["title"], "Under the Bridge", "{q}: {r}");
+    }
+    // an album by its initials, alone or with its artist
+    for q in ["dsotm", "pink%20floyd%20dsotm", "dsotm%20pink%20floyd"] {
+        let r = e.get(&format!("/api/library/search?q={q}")).await;
+        assert_eq!(r["top"]["kind"], "album", "{q}: {r}");
+        assert_eq!(r["top"]["item"]["album"], "The Dark Side of the Moon", "{q}: {r}");
+        assert_eq!(r["albums"][0]["album"], "The Dark Side of the Moon", "{q}: {r}");
+        assert!(!titles(&r["songs"]).contains(&"Wish You Were Here".to_string()), "{q}: {r}");
+    }
+}
+
+#[tokio::test]
+async fn a_short_real_word_is_not_read_as_initials_first() {
+    let e = initials_library("go").await;
+    // "go" is the song Go by Moby, first everywhere; Genesis Owusu's initials only come after whole-word matches
+    let r = e.get("/api/library/search?q=go").await;
+    assert_eq!(r["top"]["kind"], "song", "{r}");
+    assert_eq!(r["top"]["item"]["title"], "Go", "{r}");
+    assert_eq!(r["top"]["item"]["artist"], "Moby", "{r}");
+    assert_eq!(r["songs"][0]["title"], "Go", "{r}");
+    let tr = e.get("/api/library/tracks?q=go").await;
+    assert_eq!(tr[0]["title"], "Go", "{tr}");
+    let all = titles(&tr);
+    let pos = |t: &str| all.iter().position(|x| x == t).unwrap_or_else(|| panic!("{t} in {all:?}"));
+    // whole-word matches (Go, then Gone Daddy Gone and Gorillaz's songs) before what the initials found
+    assert!(pos("Gone Daddy Gone") < pos("The Other Black"), "{all:?}");
+    let names = e.artist_names("/api/library/artists?q=go").await;
+    let at = |n: &str| names.iter().position(|x| x == n).unwrap_or_else(|| panic!("{n} in {names:?}"));
+    assert!(at("Gorillaz") < at("Genesis Owusu"), "{names:?}");
+    assert!(at("Moby") < at("Genesis Owusu"), "{names:?}");
+    // both found through a song: a song called Go puts Moby before Gnarls Barkley, whose song only starts with
+    // it ("Gone Daddy Gone"), though Gnarls Barkley has more songs
+    assert!(at("Moby") < at("Gnarls Barkley"), "{names:?}");
+    let r = e.get("/api/library/search?q=go").await;
+    let shown: Vec<&str> = r["artists"].as_array().unwrap().iter().map(|a| a["name"].as_str().unwrap()).collect();
+    let moby = shown.iter().position(|n| *n == "Moby");
+    assert!(moby.is_some() && moby < shown.iter().position(|n| *n == "Gnarls Barkley"), "{shown:?}");
+    // two real words: "go moby" is the song, not an artist with the initials "go"
+    let r = e.get("/api/library/search?q=go%20moby").await;
+    assert_eq!(r["top"]["item"]["title"], "Go", "{r}");
+    assert_eq!(r["top"]["item"]["artist"], "Moby", "{r}");
+}
+
+#[tokio::test]
+async fn initials_beside_a_japanese_title() {
+    let e = initials_library("mixed").await;
+    // a Japanese title and a Latin artist's initials, in either order
+    for q in ["%E7%9C%9F%E5%A4%8F%E3%81%AE%E6%9E%9C%E5%AE%9F%20sas", "sas%20%E7%9C%9F%E5%A4%8F%E3%81%AE%E6%9E%9C%E5%AE%9F"] {
+        let r = e.get(&format!("/api/library/search?q={q}")).await;
+        assert_eq!(r["top"]["kind"], "song", "{q}: {r}");
+        assert_eq!(r["top"]["item"]["title"], "真夏の果実", "{q}: {r}");
+        assert_eq!(r["top"]["item"]["artist"], "Southern All Stars", "{q}: {r}");
+        let tr = e.get(&format!("/api/library/tracks?q={q}")).await;
+        assert_eq!(tr[0]["title"], "真夏の果実", "{q}: {tr}");
+    }
+    // the initials alone are the artist; the Japanese title alone is the song
+    let r = e.get("/api/library/search?q=sas").await;
+    assert_eq!(r["top"]["item"]["name"], "Southern All Stars", "{r}");
+    let r = e.get("/api/library/search?q=%E7%9C%9F%E5%A4%8F%E3%81%AE%E6%9E%9C%E5%AE%9F").await;
+    assert_eq!(r["top"]["item"]["title"], "真夏の果実", "{r}");
+}
+
+#[tokio::test]
+async fn search_counts_every_match_and_limits_each_section() {
+    let mut e = initials_library("counts").await;
+    e.many(60, "Gnarls Barkley", "The Odd Couple", "");
+    // counts: what the Artists, Albums and Songs tabs list for the same query
+    for q in ["gnarls", "atcq", "crazy%20gb", "go", "crazy", "song", "zzzz"] {
+        let r = e.get(&format!("/api/library/search?q={q}&limit=5")).await;
+        let tracks = e.get(&format!("/api/library/tracks?q={q}&limit=1000")).await;
+        let albums = e.get(&format!("/api/library/albums?q={q}&limit=500")).await;
+        let artists = e.get(&format!("/api/library/artists?q={q}")).await;
+        assert_eq!(r["counts"]["songs"], json!(tracks.as_array().unwrap().len()), "{q}: {r}");
+        assert_eq!(r["counts"]["albums"], albums["total"], "{q}: {r}");
+        assert_eq!(r["counts"]["artists"], json!(artists.as_array().unwrap().len()), "{q}: {r}");
+        for (k, c) in [("songs", "songs"), ("albums", "albums"), ("artists", "artists")] {
+            let n = r[k].as_array().unwrap().len() as u64;
+            assert_eq!(n, r["counts"][c].as_u64().unwrap().min(5), "{q} {k}: {r}");
+        }
+    }
+    let r = e.get("/api/library/search?q=gnarls&limit=5").await;
+    assert_eq!(r["counts"], json!({ "artists": 1, "albums": 2, "songs": 63 }), "{r}");
+    // at most 50 per section
+    let r = e.get("/api/library/search?q=gnarls&limit=500").await;
+    assert_eq!(r["songs"].as_array().unwrap().len(), 50);
+    assert_eq!(r["counts"]["songs"], 63);
+    // nothing typed: empty sections and zero counts
+    let r = e.get("/api/library/search?q=").await;
+    assert_eq!(r["counts"], json!({ "artists": 0, "albums": 0, "songs": 0 }), "{r}");
+}
+
+// ---- an artist's liked songs and songs in the library (0.31, client-shapes §3.2, §3.3) -----------------
+
+#[tokio::test]
+async fn artist_liked_and_library_songs() {
+    let mut e = owners_library("artist_sections").await;
+    encore_library::artists::store_aliases(&e.st.library.artists, &e.st.db, "ye", &["Kanye West".into()]).unwrap();
+    let acdc = e.add(t("Back in Black", "AC/DC", "Back in Black", "AC/DC"));
+    // a song credited to Ye's MusicBrainz id under another spelling
+    let other = e.add(t("Ultralight Beam", "Kanye", "The Life of Pablo", "Kanye"));
+    e.st.db.execute("UPDATE tracks SET mb_artistid=? WHERE id=?", p![YE, other]).unwrap();
+    // years: 808s 2008, Graduation 2007, one song with no year
+    e.st.db.execute("UPDATE tracks SET year='2008' WHERE album='808s & Heartbreak'", p![]).unwrap();
+    e.st.db.execute("UPDATE tracks SET year='2007' WHERE album='Graduation'", p![]).unwrap();
+    e.st.db.execute("UPDATE tracks SET year='' WHERE album='True Love'", p![]).unwrap();
+    e.st.library.artists.invalidate();
+    let id_of = |title: &str| e.st.db.one("SELECT id FROM tracks WHERE title=?", p![title]).unwrap().unwrap().i("id");
+    use encore_db::RowExt;
+    let (g1, h1, love, x1) = (id_of("Graduation song 1"), id_of("808s & Heartbreak song 1"), id_of("True Love song 0"), id_of("17 song 0"));
+
+    // nothing liked yet (no Liked Songs playlist either): 200, empty
+    let r = e.get("/api/library/artists/Ye/liked").await;
+    assert_eq!(r, json!({ "total": 0, "tracks": [] }));
+    for (i, id) in [g1, h1, love, x1, acdc].into_iter().enumerate() {
+        let (code, _) = call(&e.app, "POST", &format!("/api/likes/{id}"), &e.cookie).await;
+        assert_eq!(code, StatusCode::OK);
+        e.st.db.execute("UPDATE playlist_items SET added_at=? WHERE track_id=?", p![1000.0 + i as f64, id]).unwrap();
+    }
+    // Ye's: his own songs and the collaboration, newest like first; XXXTENTACION's song is not his
+    let r = e.get("/api/library/artists/Ye/liked").await;
+    assert_eq!(r["total"], 3, "{r}");
+    let ids: Vec<i64> = r["tracks"].as_array().unwrap().iter().map(|x| x["id"].as_i64().unwrap()).collect();
+    assert_eq!(ids, vec![love, h1, g1], "{r}");
+    // the usual row enrichment (credits; covers when the album has one)
+    assert!(r["tracks"][0]["artists"].is_array(), "{r}");
+    // an alias, the name in the query winning over the path, a limit
+    let r = e.get("/api/library/artists/_/liked?name=Kanye%20West&limit=1").await;
+    assert_eq!(r["total"], 3, "{r}");
+    assert_eq!(r["tracks"].as_array().unwrap().len(), 1, "{r}");
+    assert_eq!(r["tracks"][0]["id"], love, "{r}");
+    // a name with "/" through the query (the phone puts "_" in the path)
+    let r = e.get("/api/library/artists/AC_DC/liked?name=AC%2FDC").await;
+    assert_eq!(r["total"], 1, "{r}");
+    assert_eq!(r["tracks"][0]["title"], "Back in Black", "{r}");
+    // XXXTENTACION: the collaboration counts for him too
+    let r = e.get("/api/library/artists/XXXTENTACION/liked").await;
+    assert_eq!(r["total"], 2, "{r}");
+    // an unknown artist: 200, empty
+    let r = e.get("/api/library/artists/Nobody/liked").await;
+    assert_eq!(r, json!({ "total": 0, "tracks": [] }));
+    // somebody else's likes are theirs
+    crate::auth::create_user(&e.st, "other", PW, "user", None, None).unwrap();
+    let req = Request::builder().method("POST").uri("/api/auth/login").header("x-requested-with", "encore").header("content-type", "application/json")
+        .body(Body::from(json!({ "username": "other", "password": PW }).to_string())).unwrap();
+    let resp = e.app.clone().oneshot(req).await.unwrap();
+    let other_cookie = resp.headers().get("set-cookie").and_then(|v| v.to_str().ok()).unwrap_or("").split(';').next().unwrap().to_string();
+    let (code, r) = call(&e.app, "GET", "/api/library/artists/Ye/liked", &other_cookie).await;
+    assert_eq!(code, StatusCode::OK);
+    assert_eq!(r["total"], 0, "{r}");
+    // signed in only
+    let (code, _) = call(&e.app, "GET", "/api/library/artists/Ye/liked", "").await;
+    assert_eq!(code, StatusCode::UNAUTHORIZED);
+
+    // the library songs: oldest album first, no year last, then disc and track; paged with the total
+    let r = e.get("/api/library/artists/Ye/tracks").await;
+    assert_eq!(r["total"], 12, "{r}");
+    assert_eq!(r["offset"], 0);
+    let albums: Vec<&str> = r["tracks"].as_array().unwrap().iter().map(|x| x["album"].as_str().unwrap()).collect();
+    assert_eq!(albums.first(), Some(&"Graduation"), "{albums:?}");
+    assert_eq!(albums.last(), Some(&"True Love"), "{albums:?}");
+    assert_eq!(albums.iter().filter(|a| **a == "808s & Heartbreak").count(), 6);
+    let page = e.get("/api/library/artists/Ye/tracks?offset=4&limit=3").await;
+    assert_eq!(page["total"], 12);
+    assert_eq!(page["offset"], 4);
+    assert_eq!(page["tracks"], json!(r["tracks"].as_array().unwrap()[4..7]), "{page}");
+    // a MusicBrainz id adds the songs credited to it under another spelling
+    let r = e.get(&format!("/api/library/artists/Ye/tracks?mbid={YE}&limit=500")).await;
+    assert_eq!(r["total"], 13, "{r}");
+    assert!(r["tracks"].as_array().unwrap().iter().any(|x| x["id"] == other), "{r}");
+    let r = e.get(&format!("/api/library/artists/Kanye%20West/tracks?name=&mbid={YE}")).await;
+    assert_eq!(r["total"], 13, "{r}");
+    // unknown: 200, empty
+    let r = e.get("/api/library/artists/Nobody/tracks").await;
+    assert_eq!(r, json!({ "total": 0, "offset": 0, "tracks": [] }));
+}

@@ -20,7 +20,7 @@ import okhttp3.RequestBody.Companion.toRequestBody
 import java.io.IOException
 
 /**
- * The group listen routes (0.31; the shapes in docs/contracts/0.31-0.33-client-shapes.md, §3.6–§3.18). Blocking like
+ * The group listen routes (0.31; the shapes in docs/contracts/client-shapes-0.31-0.33.md, §3.6–§3.18). Blocking like
  * [EncoreApi]: callers run them on Dispatchers.IO. Every call carries this phone's device id, so the server knows which
  * membership it is.
  */

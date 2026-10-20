@@ -1,13 +1,19 @@
 //! Discover: search MusicBrainz (and the library) for artists, albums and songs; the best hit
 //! big as the Top result; everything can be requested with one click. Behaviour reference:
 //! web-rs/src/pages/discover.rs `render_search`.
+//!
+//! Every search also asks the library (`/api/library/search`, p6 item 9, client-shapes §3.4), on
+//! every tab, the newest query winning: "In your library" comes first with the library's
+//! artists, albums and songs of the tab's kind (all three on Top results). When the catalogue
+//! has nothing but the library has, the library shows instead of "No results"; when the
+//! catalogue fails, the library's matches stay with the reason under them.
 
 use crate::api::ApiError;
 use crate::fmt;
 use crate::pages::{urlencode, Ctx, El, Page};
 use crate::theme::{self, Btn};
 use crate::widgets::catalog::{self, AlbumTile, Live, SongRow};
-use crate::widgets::{self, btn_icon, empty, error_box, grid, h1, muted, search_box, section_head, skeleton_tiles, small_muted, Icon, TrackRow};
+use crate::widgets::{self, btn_icon, empty, error_box, grid, h1, muted, search_box, section_head, skeleton_tiles, small_muted, Icon, Tile, TileKind, TrackRow};
 use iced::widget::{button, column, container, row, space};
 use iced::{Alignment, Length, Subscription, Task};
 use serde_json::Value;
@@ -33,8 +39,9 @@ pub struct State {
     typing: u64,
     /// The catalogue's answer: None while loading, Err(message) when it failed.
     results: Option<Result<Value, String>>,
-    /// `GET /api/library/search` (Top results only).
+    /// `GET /api/library/search` for `lib_for` (None while it runs or when it failed).
     lib: Option<Value>,
+    lib_for: String,
     /// Request keys being sent.
     sending: HashSet<String>,
     /// The live request stream's identity (server + session).
@@ -48,7 +55,8 @@ pub enum Message {
     Submit,
     Tab(String),
     Results(u64, Result<Value, ApiError>),
-    Lib(u64, Result<Value, ApiError>),
+    /// The library's answer for this query.
+    Lib(String, Result<Value, ApiError>),
     Open(Page),
     /// Play a library album by its id (its tracks are fetched first).
     PlayAlbum(String),
@@ -74,12 +82,14 @@ pub fn open(state: &mut State, q: String, ctx: &mut Ctx) -> Task<Message> {
 }
 
 /// Start the search for `state.q` (the library answers at once, the catalogue takes a moment).
+/// The library is asked once per query, whatever the tab.
 fn run(state: &mut State, ctx: &Ctx) -> Task<Message> {
     state.seq += 1;
     let seq = state.seq;
     state.results = None;
-    state.lib = None;
     if state.q.is_empty() {
+        state.lib = None;
+        state.lib_for.clear();
         return Task::none();
     }
     let api = ctx.api.clone();
@@ -91,9 +101,12 @@ fn run(state: &mut State, ctx: &Ctx) -> Task<Message> {
         },
         move |r| Message::Results(seq, r),
     )];
-    if state.typ == "all" {
-        let lib_q = format!("/library/search?q={}&limit=12", urlencode(&state.q));
-        tasks.push(Task::perform(async move { api.get(&lib_q).await }, move |r| Message::Lib(seq, r)));
+    if state.lib_for != state.q {
+        state.lib = None;
+        state.lib_for = state.q.clone();
+        let q = state.q.clone();
+        let lib_q = format!("/library/search?q={}&limit=12", urlencode(&q));
+        tasks.push(Task::perform(async move { api.get(&lib_q).await }, move |r| Message::Lib(q.clone(), r)));
     }
     Task::batch(tasks)
 }
@@ -145,8 +158,8 @@ pub fn update(state: &mut State, msg: Message, ctx: &mut Ctx) -> Task<Message> {
                 state.results = Some(r.map_err(|e| e.message));
             }
         }
-        Message::Lib(seq, r) => {
-            if seq == state.seq {
+        Message::Lib(q, r) => {
+            if q == state.lib_for {
                 state.lib = r.ok();
             }
         }
@@ -345,14 +358,42 @@ fn top_result<'a>(state: &State, ctx: &Ctx<'a>, top: &Value) -> Option<El<'a, Me
     )
 }
 
-/// `libraryRow(lib)`: what the library already has for the search.
-fn library_row<'a>(ctx: &Ctx<'a>, lib: &Value) -> Option<El<'a, Message>> {
-    let songs = fmt::items(&lib["songs"]);
-    let albums = fmt::items(&lib["albums"]);
-    if songs.is_empty() && albums.is_empty() {
+/// How many of the library's artists, albums and songs a tab shows: Top results all three,
+/// the other tabs a short strip of their own kind.
+pub fn library_counts(typ: &str) -> (usize, usize, usize) {
+    match typ {
+        "artist" => (6, 0, 0),
+        "album" => (0, 6, 0),
+        "track" => (0, 0, 3),
+        _ => (6, 6, 5),
+    }
+}
+
+/// `libraryRow(lib)`: what the library already has for the search, of the tab's kind.
+fn library_row<'a>(ctx: &Ctx<'a>, lib: &Value, typ: &str) -> Option<El<'a, Message>> {
+    let (na, nb, ns) = library_counts(typ);
+    let artists: Vec<Value> = fmt::items(&lib["artists"]).into_iter().take(na).collect();
+    let songs: Vec<Value> = fmt::items(&lib["songs"]).into_iter().take(ns).collect();
+    let albums: Vec<Value> = fmt::items(&lib["albums"]).into_iter().take(nb).collect();
+    if songs.is_empty() && albums.is_empty() && artists.is_empty() {
         return None;
     }
     let mut col = column![section_head("In your library", None)].spacing(14);
+    if !artists.is_empty() {
+        let tiles = artists
+            .iter()
+            .map(|a| {
+                let name = fmt::s(a, "name");
+                let open = if fmt::truthy(a, "mbid") { Page::Artist(fmt::s(a, "mbid")) } else { Page::ArtistName(name.clone()) };
+                let n = fmt::i(a, "albums");
+                Tile::new(crate::pages::library::tr(ctx, a, "name"), TileKind::Artist, Message::Open(open))
+                    .sub(format!("{n} album{}", if n == 1 { "" } else { "s" }))
+                    .cover(ctx.cover(&fmt::s(a, "cover_album"), &a["cover_v"], 400))
+                    .view()
+            })
+            .collect();
+        col = col.push(grid(tiles));
+    }
     if !albums.is_empty() {
         let tiles = albums
             .iter()
@@ -367,7 +408,7 @@ fn library_row<'a>(ctx: &Ctx<'a>, lib: &Value) -> Option<El<'a, Message>> {
     if !songs.is_empty() {
         let current = ctx.player.current_id();
         let mut list = column![];
-        for tr in songs.iter().take(5) {
+        for tr in songs.iter() {
             let id = fmt::i(tr, "id");
             list = list.push(
                 TrackRow::new(fmt::s(tr, "title"))
@@ -394,11 +435,15 @@ fn results<'a>(state: &'a State, ctx: &Ctx<'a>) -> El<'a, Message> {
         );
     }
     let mut col = column![].spacing(22);
-    if let Some(lib) = state.lib.as_ref().and_then(|l| library_row(ctx, l)) {
+    let lib = state.lib.as_ref().filter(|_| state.lib_for == state.q).and_then(|l| library_row(ctx, l, &state.typ));
+    let lib_has = lib.is_some();
+    if let Some(lib) = lib {
         col = col.push(lib);
     }
     match &state.results {
-        None => col = col.push(skeleton_tiles(if state.lib.is_some() { 8 } else { 12 }, widgets::tile::WIDTH)),
+        None => col = col.push(skeleton_tiles(if lib_has { 8 } else { 12 }, widgets::tile::WIDTH)),
+        // the catalogue failed: the library's matches stay, with the reason under them
+        Some(Err(e)) if lib_has => col = col.push(muted(format!("Couldn't search the catalogue: {e}")).size(13)),
         Some(Err(e)) => col = col.push(error_box(e)),
         Some(Ok(data)) => {
             let mut any = false;
@@ -446,8 +491,12 @@ fn results<'a>(state: &'a State, ctx: &Ctx<'a>) -> El<'a, Message> {
                     .collect();
                 col = col.push(column![section_head("Artists", None), grid(tiles)].spacing(14));
             }
-            if !any && state.lib.as_ref().and_then(|l| library_row(ctx, l)).is_none() {
-                col = col.push(catalog::empty_text(Icon::Search, format!("No results for “{}”", state.q), String::new()));
+            if !any {
+                col = col.push(if lib_has {
+                    El::from(muted(format!("Nothing in the catalogue matches “{}”", state.q)).size(13))
+                } else {
+                    catalog::empty_text(Icon::Search, format!("No results for “{}”", state.q), String::new())
+                });
             }
         }
     }
@@ -491,6 +540,14 @@ pub fn subscription(state: &State) -> Subscription<Message> {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn the_library_strip_follows_the_tab() {
+        assert_eq!(library_counts("all"), (6, 6, 5));
+        assert_eq!(library_counts("artist"), (6, 0, 0));
+        assert_eq!(library_counts("album"), (0, 6, 0));
+        assert_eq!(library_counts("track"), (0, 0, 3));
+    }
 
     #[test]
     fn requests_follow_the_rows() {

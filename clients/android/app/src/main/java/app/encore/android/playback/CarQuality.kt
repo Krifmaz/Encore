@@ -107,8 +107,7 @@ data class CarQuality(val kind: Kind, val detail: String) {
             }
         }
 
-        /** 44100 → "44.1", 96000 → "96". */
-        fun khz(hz: Int): String =
-            if (hz % 1000 == 0) (hz / 1000).toString() else String.format(Locale.US, "%.1f", hz / 1000.0)
+        /** 44100 → "44.1", 96000 → "96", 22050 → "22.05". */
+        fun khz(hz: Int): String = String.format(Locale.US, "%.3f", hz / 1000.0).trimEnd('0').trimEnd('.')
     }
 }

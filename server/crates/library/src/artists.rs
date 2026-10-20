@@ -274,7 +274,7 @@ pub struct Track {
     title_l: String,
     pub(crate) album_f: String,
     album_l: String,
-    album_raw: String,
+    pub(crate) album_raw: String,
     pub(crate) artist_ix: usize,
     pub(crate) aa_ix: usize,
     disc: i64,
@@ -290,6 +290,8 @@ pub struct Album {
     pub id: String,
     pub(crate) title: String,
     pub(crate) title_f: String,
+    /// `title_f` without "(Deluxe)", "[Live]" or " - Remastered" (search::base_of), worked out once per index
+    pub(crate) base_f: String,
     pub(crate) aa_ix: usize,
     pub(crate) artist_ixs: Vec<usize>,
 }
@@ -506,7 +508,7 @@ impl Index {
             let artist_ix = intern(&r.s("artist"), &mut names);
             let aid = r.s("album_id");
             let ai = *album_map.entry(aid.clone()).or_insert_with(|| {
-                albums.push(Album { id: aid.clone(), title: String::new(), title_f: String::new(), aa_ix, artist_ixs: vec![] });
+                albums.push(Album { id: aid.clone(), title: String::new(), title_f: String::new(), base_f: String::new(), aa_ix, artist_ixs: vec![] });
                 albums.len() - 1
             });
             let al = &mut albums[ai];
@@ -537,6 +539,10 @@ impl Index {
                 lossless: LOSSLESS.contains(&r.s("format").to_lowercase().as_str()),
                 bitrate: r.i("bitrate"),
             });
+        }
+
+        for al in albums.iter_mut() {
+            al.base_f = crate::search::base_of(&al.title, &al.title_f);
         }
 
         // numbers, display names and the names each artist's songs go by
@@ -661,38 +667,49 @@ impl Index {
     /// Artists for a search, best first: their names and aliases, then (lowest) their albums' and songs'
     /// titles. Each comes with "match": name | alias | album | song.
     pub fn search_artists(&self, q: &str, limit: usize) -> Vec<Value> {
+        self.search_artist_ixs(q).into_iter().take(limit).map(|(g, m)| {
+            let mut v = Self::to_json(&self.artists[g]);
+            v["match"] = json!(m);
+            v
+        }).collect()
+    }
+
+    /// `search_artists` as artist indexes with their "match", every match (the library search counts them
+    /// before it takes a page).
+    pub(crate) fn search_artist_ixs(&self, q: &str) -> Vec<(usize, &'static str)> {
         let q = Q::new(q);
         let at = self.artist_tiers(&q);
-        let mut hit: Vec<Option<(u8, &str)>> = at.iter().map(|t| t.map(|(t, alias)| (t, if alias { "alias" } else { "name" }))).collect();
+        // (tier, how well the album or song title matched, "match"): an artist found through an album or a song
+        // ranks by its best title, so a song called the query ("Go") puts its artist before one whose song only
+        // starts with it ("Gone")
+        let mut hit: Vec<Option<(u8, u8, &'static str)>> = at.iter().map(|t| t.map(|(t, alias)| (t, 0, if alias { "alias" } else { "name" }))).collect();
+        let better = |hit: &mut Vec<Option<(u8, u8, &'static str)>>, g: usize, tier: u8, sub: u8, m: &'static str| match hit[g] {
+            None => hit[g] = Some((tier, sub, m)),
+            Some((t, s, _)) if t == tier && sub < s => hit[g] = Some((tier, sub, m)),
+            _ => {}
+        };
         for al in &self.albums {
-            if q.tier(&al.title, &al.title_f).is_some() {
+            if let Some(sub) = q.tier(&al.title, &al.title_f) {
                 for &g in &self.names[al.aa_ix].groups {
-                    if hit[g].is_none() {
-                        hit[g] = Some((4, "album"));
-                    }
+                    better(&mut hit, g, 4, sub, "album");
                 }
             }
         }
         if hit.iter().any(|h| h.is_none()) {
             for t in &self.tracks {
-                if q.tier_fast(&t.title, &t.title_f).is_some() {
+                if let Some(sub) = q.tier_fast(&t.title, &t.title_f) {
                     for ix in [t.artist_ix, t.aa_ix] {
                         for &g in &self.names[ix].groups {
-                            if hit[g].is_none() {
-                                hit[g] = Some((5, "song"));
-                            }
+                            better(&mut hit, g, 5, sub, "song");
                         }
                     }
                 }
             }
         }
-        let mut found: Vec<(u8, &str, &Artist)> = hit.iter().enumerate().filter_map(|(i, h)| h.map(|(t, m)| (t, m, &self.artists[i]))).collect();
-        found.sort_by(|a, b| a.0.cmp(&b.0).then(b.2.tracks.cmp(&a.2.tracks)).then_with(|| a.2.name.to_lowercase().cmp(&b.2.name.to_lowercase())));
-        found.into_iter().take(limit).map(|(_, m, a)| {
-            let mut v = Self::to_json(a);
-            v["match"] = json!(m);
-            v
-        }).collect()
+        let mut found: Vec<(u8, u8, &'static str, usize)> = hit.iter().enumerate().filter_map(|(i, h)| h.map(|(t, s, m)| (t, s, m, i))).collect();
+        let a = |i: usize| &self.artists[i];
+        found.sort_by(|x, y| (x.0, x.1).cmp(&(y.0, y.1)).then(a(y.3).tracks.cmp(&a(x.3).tracks)).then_with(|| a(x.3).name.to_lowercase().cmp(&a(y.3).name.to_lowercase())));
+        found.into_iter().map(|(_, _, m, i)| (i, m)).collect()
     }
 
     /// Album ids for a search, best first (title, album artist, the songs' artists), with their tier.
@@ -724,6 +741,14 @@ impl Index {
             tier = best(tier, q.tier_fast(&t.album_raw, &t.album_f).map(|x| x.max(1)));
             tier.map(|x| (x, t))
         }).collect();
+        let ord = self.track_order(sort, dir);
+        hits.sort_by(|a, b| a.0.cmp(&b.0).then_with(|| ord(a.1, b.1)));
+        hits.into_iter().map(|(_, t)| t).collect()
+    }
+
+    /// How `/api/library/tracks` orders songs for `sort` and `dir` (artist, title, album, added, released,
+    /// duration; the id breaks ties).
+    pub(crate) fn track_order<'s>(&'s self, sort: &'s str, dir: &str) -> impl Fn(&Track, &Track) -> Ordering + 's {
         let artist_l = |t: &Track| self.names[t.artist_ix].lower.as_str();
         let (by, desc_default): (&str, bool) = match sort {
             "title" | "album" => (sort, false),
@@ -731,7 +756,7 @@ impl Index {
             _ => ("artist", false),
         };
         let desc = if dir == "asc" { false } else if dir == "desc" { true } else { desc_default };
-        let ord = |a: &Track, b: &Track| -> Ordering {
+        move |a: &Track, b: &Track| -> Ordering {
             let first = match by {
                 "title" => a.title_l.cmp(&b.title_l),
                 "album" => a.album_l.cmp(&b.album_l),
@@ -747,9 +772,7 @@ impl Index {
                 "released" => artist_l(a).cmp(artist_l(b)),
                 _ => Ordering::Equal,
             }).then(a.id.cmp(&b.id))
-        };
-        hits.sort_by(|a, b| a.0.cmp(&b.0).then_with(|| ord(a.1, b.1)));
-        hits.into_iter().map(|(_, t)| t).collect()
+        }
     }
 
     /// The same song twice (same title, artist and album, length within 2 s) only once, in its best

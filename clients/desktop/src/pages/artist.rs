@@ -3,13 +3,19 @@
 //! Apple Music know, the Request discography dialog, links. Opened by name it looks the artist
 //! up first. Behaviour reference: web-rs/src/pages/discover.rs `render_artist`,
 //! `render_artist_by_name`, `discography_dialog`, `ext_sheet`.
+//!
+//! Between Popular and the discography (p6 item 5, client-shapes §3.2 / §3.3): "Liked from this
+//! artist" (the songs the listener liked, Play all; hidden when there are none) and "In your
+//! library" with the artist's Songs (the first ten, "Show all N" loads every one) and Albums.
+//! Both are asked only when the library has songs of the artist; an older server's 404 hides
+//! them.
 
 use crate::api::ApiError;
 use crate::fmt;
 use crate::pages::{urlencode, Ctx, El, Page};
 use crate::theme::{self, Badge, Btn};
 use crate::widgets::catalog::{self, AlbumTile, Live};
-use crate::widgets::{self, badge, btn, btn_icon, btn_sm, empty, error_box, grid, h1, h2, h3, icon_btn, modal, muted, picker, section_head, small_muted, t, Icon};
+use crate::widgets::{self, badge, btn, btn_icon, btn_sm, empty, error_box, grid, h1, h2, h3, icon_btn, modal, muted, picker, section_head, small_muted, t, Icon, TrackRow};
 use iced::widget::{checkbox, column, container, row, space, toggler};
 use iced::{Alignment, Length, Subscription, Task};
 use serde_json::{json, Map, Value};
@@ -78,6 +84,16 @@ pub struct State {
     more_like: Option<widgets::more_like::State>,
     /// The download picker, while open.
     picker: Option<picker::State>,
+    /// `/library/artists/{name}/liked`: `(total, songs)`; None until it answers (or when it
+    /// failed: the section is hidden).
+    liked: Option<(usize, Vec<Value>)>,
+    /// `/library/artists/{name}/tracks`, the first page: `(total, songs)`.
+    songs: Option<(usize, Vec<Value>)>,
+    /// Every song of the artist, after "Show all N".
+    all_songs: Option<Vec<Value>>,
+    loading_all: bool,
+    /// The library name and mbid the two lists are for (answers for another artist are dropped).
+    lib_for: (String, String),
 }
 
 impl Default for State {
@@ -98,6 +114,11 @@ impl Default for State {
             live: None,
             more_like: None,
             picker: None,
+            liked: None,
+            songs: None,
+            all_songs: None,
+            loading_all: false,
+            lib_for: (String::new(), String::new()),
         }
     }
 }
@@ -153,6 +174,53 @@ pub enum Message {
     MoreLike(widgets::more_like::Message),
     CloseDialog,
     Live(Live),
+    /// `/library/artists/{name}/liked` for (name, mbid).
+    Liked((String, String), Result<Value, ApiError>),
+    /// `/library/artists/{name}/tracks`, the first ten.
+    Songs((String, String), Result<Value, ApiError>),
+    /// "Show all N": every song, page by page.
+    ShowAllSongs,
+    AllSongs((String, String), Result<Vec<Value>, ApiError>),
+    /// Play the liked songs from this one (Play all: 0).
+    PlayLiked(usize),
+    /// Play the artist's library songs from this one.
+    PlaySong(usize),
+}
+
+/// The first songs "In your library" shows.
+const SONGS_FIRST: usize = 10;
+/// Songs per page of "Show all N", and the most loaded.
+const SONGS_PAGE: usize = 200;
+const SONGS_MAX: usize = 5000;
+
+/// `/library/artists/<name>/<tail>?name=<name>[&mbid=]` (client-shapes §3.2): the name also goes
+/// in `name=`, which the server prefers. The path gets `_` in place of a name that can't stand
+/// there: one with "/" or "\" (some proxies answer 404 for `%2F` in a path: "AC/DC"), a blank one
+/// ("//" matches no route) and one made only of dots ("." and ".." are path steps the HTTP client
+/// resolves, so the request would go to another route). The phone's rule (EncoreApi.kt `artistSegment`).
+pub fn artist_route(name: &str, mbid: &str, tail: &str) -> String {
+    let odd = name.trim().is_empty() || name.contains('/') || name.contains('\\') || name.trim_matches('.').is_empty();
+    let seg = if odd { "_".to_string() } else { urlencode(name) };
+    let mut url = format!("/library/artists/{seg}/{tail}?name={}", urlencode(name));
+    if !mbid.is_empty() {
+        url.push_str(&format!("&mbid={}", urlencode(mbid)));
+    }
+    url
+}
+
+/// `{total, tracks}` (a bare array is the whole list).
+pub fn songs_answer(v: &Value) -> (usize, Vec<Value>) {
+    if let Some(a) = v.as_array() {
+        return (a.len(), a.clone());
+    }
+    let tracks = fmt::items(&v["tracks"]);
+    let total = v["total"].as_u64().map(|n| n as usize).unwrap_or(tracks.len()).max(tracks.len());
+    (total, tracks)
+}
+
+/// "1 song", "12 songs".
+fn plural(n: usize, one: &str) -> String {
+    format!("{n} {one}{}", if n == 1 { "" } else { "s" })
 }
 
 /// The web's `encore.artistFilter`: the discography filter (`all`, `missing`, `owned`).
@@ -172,6 +240,11 @@ pub fn open(state: &mut State, id: String, ctx: &mut Ctx) -> Task<Message> {
     state.busy_kinds.clear();
     state.more_like = None;
     state.picker = None;
+    state.liked = None;
+    state.songs = None;
+    state.all_songs = None;
+    state.loading_all = false;
+    state.lib_for = (String::new(), String::new());
     state.filter = match ctx.config.local_str(FILTER_KEY) {
         "" => "all".into(),
         f => f.to_string(),
@@ -369,7 +442,81 @@ pub fn update(state: &mut State, msg: Message, ctx: &mut Ctx) -> Task<Message> {
         },
         Message::Loaded(Ok(a)) => {
             state.groups = group(&fmt::items(&a["release_groups"]));
+            // the liked and library songs, when the library has songs of the artist
+            let task = if fmt::f(&a, "library_tracks") > 0.0 {
+                let key = (fmt::s(&a, "name"), fmt::s(&a, "id"));
+                state.lib_for = key.clone();
+                let api = ctx.api.clone();
+                let liked = artist_route(&key.0, &key.1, "liked") + "&limit=200";
+                let first = artist_route(&key.0, &key.1, "tracks") + &format!("&offset=0&limit={SONGS_FIRST}");
+                let (k1, k2) = (key.clone(), key);
+                let api2 = api.clone();
+                Task::batch([
+                    Task::perform(async move { api.get(&liked).await }, move |r| Message::Liked(k1.clone(), r)),
+                    Task::perform(async move { api2.get(&first).await }, move |r| Message::Songs(k2.clone(), r)),
+                ])
+            } else {
+                Task::none()
+            };
             state.a = Some(Ok(a));
+            return task;
+        }
+        Message::Liked(key, r) => {
+            if key == state.lib_for {
+                state.liked = r.ok().map(|v| songs_answer(&v));
+            }
+        }
+        Message::Songs(key, r) => {
+            if key == state.lib_for {
+                state.songs = r.ok().map(|v| songs_answer(&v));
+            }
+        }
+        Message::ShowAllSongs => {
+            if state.loading_all || state.all_songs.is_some() || state.lib_for.0.is_empty() {
+                return Task::none();
+            }
+            state.loading_all = true;
+            let key = state.lib_for.clone();
+            let api = ctx.api.clone();
+            let (name, mbid) = key.clone();
+            return Task::perform(
+                async move {
+                    let mut out: Vec<Value> = Vec::new();
+                    while out.len() < SONGS_MAX {
+                        let url = artist_route(&name, &mbid, "tracks") + &format!("&offset={}&limit={SONGS_PAGE}", out.len());
+                        let (total, page) = songs_answer(&api.get(&url).await?);
+                        let n = page.len();
+                        out.extend(page);
+                        if n < SONGS_PAGE || out.len() >= total {
+                            break;
+                        }
+                    }
+                    Ok(out)
+                },
+                move |r| Message::AllSongs(key.clone(), r),
+            );
+        }
+        Message::AllSongs(key, r) => {
+            if key == state.lib_for {
+                state.loading_all = false;
+                match r {
+                    Ok(list) => state.all_songs = Some(list),
+                    Err(e) => ctx.toast_err(e.message),
+                }
+            }
+        }
+        Message::PlayLiked(i) => {
+            if let Some((_, list)) = &state.liked {
+                if !list.is_empty() {
+                    ctx.play(list.clone(), i.min(list.len() - 1));
+                }
+            }
+        }
+        Message::PlaySong(i) => {
+            let list = state.all_songs.clone().or_else(|| state.songs.as_ref().map(|s| s.1.clone())).unwrap_or_default();
+            if !list.is_empty() {
+                ctx.play(list.clone(), i.min(list.len() - 1));
+            }
         }
         Message::Loaded(Err(e)) => state.a = Some(Err(e.message)),
         Message::Extras(r) => state.extras = r.ok(),
@@ -1113,17 +1260,11 @@ pub fn view<'a>(state: &'a State, ctx: &Ctx<'a>) -> El<'a, Message> {
             col = col.push(pp);
         }
     }
-    if !library_albums.is_empty() {
-        let tiles = library_albums.iter().map(|l| library_tile(ctx, l)).collect();
-        col = col.push(
-            column![
-                row![h2("In your library"), small_muted(library_albums.len().to_string()).color(ctx.look.faint)]
-                    .spacing(8)
-                    .align_y(Alignment::Center),
-                grid(tiles)
-            ]
-            .spacing(14),
-        );
+    if let Some(l) = liked_section(state, ctx) {
+        col = col.push(l);
+    }
+    if let Some(l) = library_section(state, ctx, &library_albums) {
+        col = col.push(l);
     }
     col = col.push(discography(state, ctx, n_rg));
     col = col.push(ext_releases(state, ctx, a));
@@ -1173,6 +1314,93 @@ pub fn view<'a>(state: &'a State, ctx: &Ctx<'a>) -> El<'a, Message> {
         );
     }
     col.into()
+}
+
+/// A song of the artist's lists: the cover, title, album · year, quality, length.
+fn song_row<'a>(ctx: &Ctx<'a>, v: &Value, on_play: Message, sub: String) -> El<'a, Message> {
+    let id = fmt::i(v, "id");
+    TrackRow::new(crate::pages::library::tr(ctx, v, "title"))
+        .sub(sub)
+        .cover(ctx.cover(&fmt::s(v, "album_id"), &v["cover_v"], 80))
+        .quality(fmt::quality(v))
+        .duration(Some(fmt::f(v, "duration")).filter(|d| *d > 0.0))
+        .playing(ctx.player.current_id() == Some(id))
+        .on_play(on_play)
+        .view()
+}
+
+/// "Liked from this artist": the songs the listener liked, newest first, with Play all.
+fn liked_section<'a>(state: &'a State, ctx: &Ctx<'a>) -> Option<El<'a, Message>> {
+    let (total, list) = state.liked.as_ref().filter(|(_, l)| !l.is_empty())?;
+    let head = row![
+        row![h2("Liked from this artist"), small_muted(plural(*total, "song")).color(ctx.look.faint)]
+            .spacing(8)
+            .align_y(Alignment::Center),
+        space().width(Length::Fill),
+        btn_icon(Icon::Play, "Play all", Btn::Primary, Some(Message::PlayLiked(0))),
+    ]
+    .align_y(Alignment::Center);
+    let mut rows = column![];
+    for (i, v) in list.iter().enumerate() {
+        let sub = {
+            let album = crate::pages::library::tr(ctx, v, "album");
+            if album.is_empty() { crate::pages::library::tr(ctx, v, "artist") } else { album }
+        };
+        rows = rows.push(song_row(ctx, v, Message::PlayLiked(i), sub));
+    }
+    Some(column![head, widgets::card_flat(rows)].spacing(14).into())
+}
+
+/// "In your library": the artist's songs (the first ten, "Show all N") and albums.
+fn library_section<'a>(state: &'a State, ctx: &Ctx<'a>, albums: &[Value]) -> Option<El<'a, Message>> {
+    let (total, first) = state.songs.clone().unwrap_or((0, Vec::new()));
+    let songs: &[Value] = match &state.all_songs {
+        Some(all) => all,
+        None => match &state.songs {
+            Some((_, l)) => l,
+            None => &[],
+        },
+    };
+    if songs.is_empty() && albums.is_empty() {
+        return None;
+    }
+    let counts = [
+        (total > 0).then(|| plural(total, "song")),
+        (!albums.is_empty()).then(|| plural(albums.len(), "album")),
+    ]
+    .into_iter()
+    .flatten()
+    .collect::<Vec<_>>()
+    .join(" · ");
+    let mut col = column![row![h2("In your library"), small_muted(counts).color(ctx.look.faint)]
+        .spacing(8)
+        .align_y(Alignment::Center)]
+    .spacing(14);
+    if !songs.is_empty() {
+        let mut head = row![h3("Songs"), space().width(Length::Fill)].align_y(Alignment::Center);
+        if state.all_songs.is_none() && total > first.len() {
+            head = head.push(if state.loading_all {
+                btn_sm("Loading…", Btn::Ghost, None)
+            } else {
+                btn_sm(format!("Show all {total}"), Btn::Ghost, Some(Message::ShowAllSongs))
+            });
+        }
+        let mut rows = column![];
+        for (i, v) in songs.iter().enumerate() {
+            let sub = catalog::join_truthy(&[crate::pages::library::tr(ctx, v, "album"), fmt::s(v, "year").chars().take(4).collect()], " · ");
+            rows = rows.push(song_row(ctx, v, Message::PlaySong(i), sub));
+        }
+        col = col.push(column![head, widgets::card_flat(rows)].spacing(10));
+    }
+    if !albums.is_empty() {
+        let tiles = albums.iter().map(|l| library_tile(ctx, l)).collect();
+        let mut part = column![].spacing(10);
+        if !songs.is_empty() {
+            part = part.push(h3("Albums"));
+        }
+        col = col.push(part.push(grid(tiles)));
+    }
+    Some(col.into())
 }
 
 fn discography_dialog<'a>(a: &'a Value, rows: &'a [DiscoRow], sending: bool) -> El<'a, Message> {
@@ -1345,6 +1573,29 @@ mod tests {
 
     fn rg(id: &str, typ: &str, sec: &[&str]) -> Value {
         json!({ "id": id, "title": id, "artist": "A", "type": typ, "secondary": sec, "year": "2001", "cover": "" })
+    }
+
+    #[test]
+    fn the_artist_routes_and_their_answers() {
+        assert_eq!(artist_route("Beta Band", "", "liked"), "/library/artists/Beta%20Band/liked?name=Beta%20Band");
+        assert_eq!(
+            artist_route("AC/DC", "66c662b6", "tracks"),
+            "/library/artists/_/tracks?name=AC%2FDC&mbid=66c662b6",
+            "a name with / goes as _ in the path and whole in name="
+        );
+        // path steps ("%2E%2E" is ".." to the URL parser too), blank names and "\\" go as _ as well
+        assert_eq!(artist_route("..", "", "liked"), "/library/artists/_/liked?name=%2E%2E");
+        assert_eq!(artist_route(".", "", "tracks"), "/library/artists/_/tracks?name=%2E");
+        assert_eq!(artist_route("", "", "liked"), "/library/artists/_/liked?name=");
+        assert_eq!(artist_route(" ", "", "liked"), "/library/artists/_/liked?name=%20");
+        assert_eq!(artist_route("a\\b", "", "liked"), "/library/artists/_/liked?name=a%5Cb");
+        assert_eq!(artist_route("...And You", "", "liked"), "/library/artists/%2E%2E%2EAnd%20You/liked?name=%2E%2E%2EAnd%20You", "dots and more: as it is");
+        let (total, list) = songs_answer(&json!({ "total": 143, "offset": 0, "tracks": [{ "id": 1 }, { "id": 2 }] }));
+        assert_eq!((total, list.len()), (143, 2));
+        assert_eq!(songs_answer(&json!([{ "id": 1 }])).0, 1, "a bare array is the whole list");
+        assert_eq!(songs_answer(&json!({ "total": 0, "tracks": [] })).0, 0);
+        assert_eq!(plural(1, "song"), "1 song");
+        assert_eq!(plural(3, "album"), "3 albums");
     }
 
     #[test]

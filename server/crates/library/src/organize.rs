@@ -125,11 +125,17 @@ fn ext(p: &Path) -> String {
     p.extension().map(|e| format!(".{}", e.to_string_lossy())).unwrap_or_default()
 }
 
+/// Organize only touches songs in the library folder: a song in an extra library folder
+/// (`library_extra_roots`, imported with "Keep the files where they are") is never moved, renamed or retagged.
+fn organized_here(st: &impl Ctx, path: &Path) -> bool {
+    crate::folders::in_library_path(st.cfg(), path)
+}
+
 /// Move one song to where its tags say it belongs (after a manual fix). Never merges with another file.
 pub async fn organize_track(st: &impl Ctx, id: i64) -> Option<PathBuf> {
     let t = st.db().one(&format!("{COLS} WHERE id=?"), p![id]).ok()??;
     let path = PathBuf::from(t.s("path"));
-    if !path.is_file() {
+    if !path.is_file() || !organized_here(st, &path) {
         return None;
     }
     let n = st.db().one("SELECT COUNT(*) n FROM tracks WHERE album_id=?", p![t.s("album_id")]).ok()??.i("n");
@@ -158,7 +164,7 @@ pub async fn organize_library(st: impl Ctx, fill_missing: bool) {
         st.jobs().set("organize", json!({ "current": format!("{} – {}", t.s("artist"), t.s("title")) }));
         st.jobs().add("organize", "done", 1);
         let path = PathBuf::from(t.s("path"));
-        if !path.is_file() {
+        if !path.is_file() || !organized_here(&st, &path) {
             continue;
         }
         let (fix, t) = if fill_missing { fill(&st, &t).await } else { (Row::new(), t) };

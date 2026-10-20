@@ -147,6 +147,19 @@ async fn art_candidates(State(st): State<AppState>, Admin(viewer): Admin, Path(i
 fn embed_album_art(st: &AppState, id: &str, data: &[u8]) -> usize {
     let paths: Vec<PathBuf> = st.db.query("SELECT path FROM tracks WHERE album_id=?", p![id]).unwrap_or_default().iter().map(|r| PathBuf::from(r.s("path"))).collect();
     let n = paths.iter().filter(|pth| encore_media::tags::write_tags(pth, &Map::new(), Some(data)).is_ok()).count();
+    keep_album_art(st, id, data);
+    let dirs: std::collections::HashSet<PathBuf> = paths.iter().filter_map(|p| p.parent().map(|d| d.to_path_buf())).collect();
+    if st.cfg.bool("save_cover") && dirs.len() == 1 {
+        let _ = std::fs::write(dirs.into_iter().next().unwrap().join("cover.jpg"), data);
+    }
+    st.library.forget_cover(Some(id));
+    // indexed only now: it starts the cover pass, which must find the new picture, not the old one
+    tagger::index_paths(st, &paths);
+    n
+}
+
+/// The album's picture in Encore's own cover store (`<config>/covers/<album>.jpg`), its old thumbnails gone.
+fn keep_album_art(st: &AppState, id: &str, data: &[u8]) {
     let covers = st.data_dir().join("covers");
     let _ = std::fs::create_dir_all(&covers);
     let _ = std::fs::write(covers.join(format!("{id}.jpg")), data);
@@ -157,14 +170,6 @@ fn embed_album_art(st: &AppState, id: &str, data: &[u8]) -> usize {
             }
         }
     }
-    let dirs: std::collections::HashSet<PathBuf> = paths.iter().filter_map(|p| p.parent().map(|d| d.to_path_buf())).collect();
-    if st.cfg.bool("save_cover") && dirs.len() == 1 {
-        let _ = std::fs::write(dirs.into_iter().next().unwrap().join("cover.jpg"), data);
-    }
-    st.library.forget_cover(Some(id));
-    // indexed only now: it starts the cover pass, which must find the new picture, not the old one
-    tagger::index_paths(st, &paths);
-    n
 }
 
 /// Cover Art Archive for MusicBrainz-tagged albums, otherwise Deezer/iTunes by artist + album/title.
@@ -235,8 +240,22 @@ pub async fn find_missing_artwork(st: AppState) -> String {
     }).await.unwrap_or_default();
     st.jobs.set("artwork", json!({ "total": missing.len() }));
     for a in &missing {
+        // an album in an extra library folder is kept as it is: its picture goes into Encore's own cover
+        // store only, nothing is written into its files or its folder
+        let paths = st.db.query("SELECT path FROM tracks WHERE album_id=?", p![a]).unwrap_or_default();
+        let kept = paths.iter().any(|r| !encore_library::folders::in_library_path(&st.cfg, std::path::Path::new(&r.s("path"))));
         if let Some(d) = lookup_art(&st, a).await {
-            embed_off(&st, a, d).await;
+            if kept {
+                let id = a.clone();
+                let _ = st.blocking(move |st| {
+                    keep_album_art(st, &id, &d);
+                    st.library.forget_cover(Some(&id));
+                    st.library.refresh_covers(st.db.clone(), vec![id]);
+                    Ok(())
+                }).await;
+            } else {
+                embed_off(&st, a, d).await;
+            }
             st.jobs.add("artwork", "found", 1);
         }
         st.jobs.add("artwork", "done", 1);
@@ -300,8 +319,10 @@ async fn run_bulk(st: AppState) {
         let label = format!("{} – {}", a.s("artist"), a.s("album"));
         st.jobs.set("bulk", json!({ "current": label }));
         let paths: Vec<PathBuf> = st.db.query("SELECT path FROM tracks WHERE album_id=?", p![a.s("album_id")]).unwrap_or_default().iter().map(|r| PathBuf::from(r.s("path"))).collect();
-        if tagger::is_manual(&st, &a.s("artist"), &a.s("album")) {
+        // fixed by hand, or in an extra library folder (kept where and as it is): left alone
+        if tagger::is_manual(&st, &a.s("artist"), &a.s("album")) || paths.iter().any(|p| !encore_library::folders::in_library_path(&st.cfg, p)) {
             st.jobs.add("bulk", "skipped", 1);
+            st.jobs.add("bulk", "done", 1);
             continue;
         }
         let artist = if a.s("artist") == "Unknown Artist" { String::new() } else { a.s("artist") };

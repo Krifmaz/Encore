@@ -179,11 +179,8 @@ object OfflineIndex {
         else -> c.uppercase(Locale.ROOT)
     }
 
-    /** Hz as kHz with one decimal at most and no trailing `.0`: 44100 → "44.1", 96000 → "96". */
-    fun khz(hz: Double): String {
-        val v = Math.round(hz / 100.0) / 10.0
-        return if (v == Math.floor(v)) v.toLong().toString() else v.toString()
-    }
+    /** Hz as kHz, exact for every common rate (up to three decimals, no trailing zeros): 44100 → "44.1", 96000 → "96", 22050 → "22.05". */
+    fun khz(hz: Double): String = String.format(java.util.Locale.US, "%.3f", hz / 1000.0).trimEnd('0').trimEnd('.')
 
     private val LOSSLESS = setOf("flac", "alac", "wav", "aiff", "aif", "ape", "wavpack", "wv", "tta")
 

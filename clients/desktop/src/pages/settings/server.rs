@@ -41,6 +41,8 @@ pub struct State {
     bools: HashMap<String, bool>,
     checks: HashMap<String, Vec<String>>,
     areas: HashMap<String, text_editor::Content>,
+    /// Plain (not secret) text areas typed into: they keep their text when the values come again.
+    typed: HashSet<String>,
     open: HashSet<&'static str>,
     /// Test and save results under a card.
     flash: HashMap<&'static str, Vec<(bool, String)>>,
@@ -122,6 +124,7 @@ pub fn open(state: &mut State, section: Section, ctx: &mut Ctx) -> Task<Message>
     state.bools.clear();
     state.checks.clear();
     state.areas.clear();
+    state.typed.clear();
     state.flash.clear();
     state.busy.clear();
     state.open.clear();
@@ -166,7 +169,13 @@ fn first_open(state: &State) -> Option<&'static str> {
 fn make_areas(state: &mut State, values: &Value) {
     for c in fields::SECTIONS {
         for f in c.fields.iter().filter(|f| f.kind == "textarea" && values.get(f.key).is_some()) {
-            state.areas.entry(f.key.to_string()).or_default();
+            if f.is_secret() {
+                state.areas.entry(f.key.to_string()).or_default();
+            } else if !state.typed.contains(f.key) {
+                // a plain text area shows what is saved, so a Save sends it back whole (a secret
+                // one starts empty and is sent only when something was pasted)
+                state.areas.insert(f.key.to_string(), text_editor::Content::with_text(&vs(&values[f.key])));
+            }
         }
     }
 }
@@ -250,8 +259,13 @@ fn settle(state: &mut State, card: &Card) {
         state.shown.remove(f.key);
         state.revealed.remove(f.key);
         if f.kind == "textarea" {
+            state.typed.remove(f.key);
+            let saved = match &state.values {
+                Some(v) if !f.is_secret() => vs(&v[f.key]),
+                _ => String::new(),
+            };
             if let Some(c) = state.areas.get_mut(f.key) {
-                *c = text_editor::Content::new();
+                *c = text_editor::Content::with_text(&saved);
             }
         }
     }
@@ -314,6 +328,9 @@ pub fn update(state: &mut State, msg: Message, ctx: &mut Ctx) -> Task<Message> {
             state.checks.insert(k, list);
         }
         Message::Area(k, a) => {
+            if a.is_edit() {
+                state.typed.insert(k.clone());
+            }
             if let Some(c) = state.areas.get_mut(&k) {
                 c.perform(a);
             }
@@ -489,8 +506,8 @@ pub fn update(state: &mut State, msg: Message, ctx: &mut Ctx) -> Task<Message> {
 fn source_note<'a>(f: &Field, values: &Value) -> Option<El<'a, Message>> {
     let m = &values["_meta"][f.key];
     let set = super::truthy(&values[f.key]);
-    if m["source"].as_str() == Some("env") {
-        return Some(help(format!("🔒 Set by {} in your compose/env – change it there (environment always wins)", fmt::s(m, "env"))).into());
+    if let Some(note) = super::env_note(values, f.key) {
+        return Some(help(note).into());
     }
     if f.is_secret() && set {
         return Some(
@@ -549,10 +566,10 @@ fn field_view<'a>(state: &'a State, values: &'a Value, f: &'static Field, reveal
             lines.push(widgets::small_muted(f.label).font(theme::semibold()).into());
             if let Some(c) = state.areas.get(f.key) {
                 let k = key.clone();
-                let placeholder = if super::truthy(v) { "Saved – paste to replace" } else { "" };
+                let placeholder = if f.is_secret() && super::truthy(v) { "Saved – paste to replace" } else { "" };
                 lines.push(text_area(c, placeholder, 5, move |a| Message::Area(k.clone(), a)));
             }
-            if reveal && super::truthy(v) && f.key != "vpn_wireguard_config" && !locked {
+            if reveal && f.is_secret() && super::truthy(v) && f.key != "vpn_wireguard_config" && !locked {
                 let shown = state.shown.contains(f.key);
                 lines.push(
                     row![
@@ -835,6 +852,32 @@ pub fn subscription(state: &State) -> Subscription<Message> {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn a_plain_text_area_keeps_what_is_saved() {
+        let values = json!({ "library_path": "/music", "library_extra_roots": "/mnt/a\n/mnt/b", "staging_path": "/s" });
+        let card = fields::card("library").unwrap();
+        let mut st = State::default();
+        take_values(&mut st, values.clone());
+        assert_eq!(save_body(&st, &values, card)["library_extra_roots"], "/mnt/a\n/mnt/b", "an untouched Save keeps the folders");
+        // a value changed on the server (an in-place import) shows when the values come again
+        let newer = json!({ "library_path": "/music", "library_extra_roots": "/mnt/a\n/mnt/b\n/mnt/c", "staging_path": "/s" });
+        take_values(&mut st, newer.clone());
+        assert_eq!(save_body(&st, &newer, card)["library_extra_roots"], "/mnt/a\n/mnt/b\n/mnt/c");
+        // what was typed stays until it is saved
+        st.areas.insert("library_extra_roots".into(), text_editor::Content::with_text("/x"));
+        st.typed.insert("library_extra_roots".into());
+        take_values(&mut st, newer.clone());
+        assert_eq!(save_body(&st, &newer, card)["library_extra_roots"], "/x");
+        st.values = Some(newer.clone());
+        settle(&mut st, card);
+        assert_eq!(st.areas["library_extra_roots"].text().trim(), "/mnt/a\n/mnt/b\n/mnt/c");
+        // a secret one still starts empty and is left out until something is pasted
+        let wg = json!({ "vpn_wireguard_config": "•••• (saved)" });
+        let mut st = State::default();
+        take_values(&mut st, wg.clone());
+        assert!(save_body(&st, &wg, fields::card("slskd").unwrap()).get("vpn_wireguard_config").is_none());
+    }
 
     #[test]
     fn the_save_body_follows_the_web_rules() {

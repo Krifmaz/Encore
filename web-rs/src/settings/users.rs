@@ -5,6 +5,7 @@ use crate::app::{self, Ctx, PageFuture};
 use crate::dom::{self, set_html};
 use crate::json::J;
 use crate::ui::{confirm_dialog, esc, fmt, icon, modal, toast, ModalOpts};
+use super::schema_form::{env_locked, env_note};
 use serde_json::{json, Map, Value};
 use std::rc::Rc;
 use wasm_bindgen::JsCast;
@@ -54,6 +55,22 @@ const NEW: [(&str, &str); 6] = [
     ("new_user_pick", "Pick the exact version to download"), ("new_user_fix", "Fix their own downloads"), ("new_user_storage", "See server storage"),
     ("new_user_auto_download", "Auto-download (likes and followed playlists)"),
 ];
+
+/// "New members start with": a switch per default permission and the weekly request limit. A value an
+/// environment variable sets is shown locked, with the same note as the Server pages' fields.
+fn new_defaults_html(v: &Value) -> String {
+    let meta = v.o("_meta");
+    let dis = |k: &str| if env_locked(&meta, k) { "disabled" } else { "" };
+    let switches: String = NEW.iter().map(|(k, l)| {
+        let note = env_note(&meta, k);
+        let switch = format!(r#"<label class="switch"><input type="checkbox" data-nd="{k}" {} {}><i></i>{}</label>"#, if v.truthy(k) { "checked" } else { "" }, dis(k), esc(l));
+        if note.is_empty() { switch } else { format!(r#"<div class="field">{switch}{note}</div>"#) }
+    }).collect();
+    format!(r#"<div class="stack">{switches}
+      <label class="field" style="max-width:260px"><span>Weekly request limit (0 = unlimited)</span><input class="input" type="number" min="0" data-nd="default_request_limit" value="{}" {}>{}</label></div>"#,
+        esc(&if v.is_nullish("default_request_limit") { "0".to_string() } else { v.s("default_request_limit") }),
+        dis("default_request_limit"), env_note(&meta, "default_request_limit"))
+}
 
 /// One `<tr>` of the users table.
 fn user_row(u: &Value, me: &Value) -> String {
@@ -166,10 +183,7 @@ pub fn render_users(view: Element, ctx: Ctx) -> PageFuture {
             dom::spawn(async move {
                 match api::get("/admin/settings").await {
                     Ok(v) => {
-                        set_html(&db, &format!(r#"<div class="stack">{}
-      <label class="field" style="max-width:260px"><span>Weekly request limit (0 = unlimited)</span><input class="input" type="number" min="0" data-nd="default_request_limit" value="{}"></label></div>"#,
-                            NEW.iter().map(|(k, l)| format!(r#"<label class="switch"><input type="checkbox" data-nd="{k}" {}><i></i>{}</label>"#, if v.truthy(k) { "checked" } else { "" }, esc(l))).collect::<String>(),
-                            esc(&if v.is_nullish("default_request_limit") { "0".to_string() } else { v.s("default_request_limit") })));
+                        set_html(&db, &new_defaults_html(&v));
                         dom::on(&db, "change", move |e| {
                             let Some(t) = dom::target_el(e) else { return };
                             let k = dom::data(&t, "nd");
@@ -282,4 +296,37 @@ pub fn render_users(view: Element, ctx: Ctx) -> PageFuture {
         }
         load_users(&bx, &me).await
     })
+}
+
+#[cfg(test)]
+mod new_defaults_tests {
+    use super::*;
+
+    /// The `<input …>` of `key` in `html`.
+    fn input_of<'a>(html: &'a str, key: &str) -> &'a str {
+        let at = html.find(&format!(r#"data-nd="{key}""#)).unwrap_or_else(|| panic!("{key} in {html}"));
+        let end = html[at..].find('>').unwrap() + at;
+        &html[at..end]
+    }
+
+    #[test]
+    fn values_set_by_the_environment_are_locked() {
+        let v = json!({ "new_user_pick": true, "new_user_fix": false, "default_request_limit": 5,
+            "_meta": { "new_user_pick": { "source": "env", "env": "ENCORE_NEW_USER_PICK" }, "new_user_fix": { "source": "ui", "env": "ENCORE_NEW_USER_FIX" },
+                       "default_request_limit": { "source": "env", "env": "ENCORE_REQUEST_LIMIT" } } });
+        let html = new_defaults_html(&v);
+        assert!(input_of(&html, "new_user_pick").contains("checked") && input_of(&html, "new_user_pick").contains("disabled"), "{html}");
+        assert!(!input_of(&html, "new_user_fix").contains("disabled"), "{html}");
+        assert!(input_of(&html, "default_request_limit").contains("disabled"), "{html}");
+        assert!(html.contains(r#"🔒 Set by <span class="mono">ENCORE_NEW_USER_PICK</span> in your compose/env – change it there (environment always wins)"#), "{html}");
+        assert!(html.contains("ENCORE_REQUEST_LIMIT"), "{html}");
+        assert!(!html.contains("ENCORE_NEW_USER_FIX"), "set in the UI: no note");
+    }
+
+    #[test]
+    fn without_meta_everything_stays_editable() {
+        let html = new_defaults_html(&json!({ "new_user_pick": true }));
+        assert!(!html.contains("disabled") && !html.contains("🔒"), "{html}");
+        assert!(input_of(&html, "default_request_limit").contains(r#"value="0""#), "{html}");
+    }
 }

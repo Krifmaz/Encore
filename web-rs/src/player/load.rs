@@ -41,7 +41,7 @@ pub(super) fn new_prefs(p: Value) {
         DSP_ASKED.with(|m| m.borrow_mut().clear());
     }
     PREFS.with(|x| *x.borrow_mut() = p);
-    if playback::fx_active(&prefs()) { ensure_fx(); }
+    if wants_graph() { ensure_fx(); }
     apply_fx();
 }
 pub(super) fn dsp_state(id: i64) -> String { DSP_CACHE.with(|m| m.borrow().get(&id).cloned()).unwrap_or_default() }
@@ -257,8 +257,10 @@ pub(super) fn load_opts(o: LoadOpts) {
         if el.ready_state() >= 1 { el.set_current_time(offset); }
         else { EventListener::once(&a, "loadedmetadata", move |_| el.set_current_time(offset)).forget(); }
     }
-    if playback::fx_active(&prefs()) { ensure_fx(); }
+    if wants_graph() { ensure_fx(); }
     route();
+    // this song's volume normalization, on the element it plays on (an old song fading out keeps its own)
+    apply_norm(&a, Some(&*t), false);
     resume_fx();
     if !o.hold { play_el(&a); }
     st_mut(|s| s.slow_start = None);
@@ -395,6 +397,8 @@ pub(super) fn duration() -> f64 {
 pub(super) fn position() -> f64 { st(|s| s.offset) + audio().map(|a| a.current_time()).unwrap_or(0.0) }
 
 pub fn seek_to(sec: f64) {
+    // in a group listen: the group's seek (or the reason this member can't)
+    if g_seek(sec) { return; }
     if via_link(json!({ "action": "seek", "value": sec.max(0.0) })) {
         LINK.with(|l| if let Some(l) = l.borrow_mut().as_mut() { if let Some(o) = l.state.as_object_mut() { o.insert("position".into(), json!(sec)); } });
         update_linked_time();
@@ -420,7 +424,9 @@ pub fn seek_to(sec: f64) {
     emit();
 }
 /// Whole files (the original, a pre-rendered Cadenza file) seek in the browser; server-made streams restart at the point.
-fn seek_now(sec: f64) {
+fn seek_now(sec: f64) { seek_now_opts(sec, false); }
+/// `seek_now`, where a server-made stream asked for again stays paused when `hold` (a paused group listen).
+pub(super) fn seek_now_opts(sec: f64, hold: bool) {
     let Some(a) = audio() else { return };
     let cached = st(|s| s.dsp) && cur().is_some_and(|t| dsp_state(t.i("id")) == "cached");
     let mut local = !st(|s| s.transcoded);
@@ -433,13 +439,14 @@ fn seek_now(sec: f64) {
     if local && !rec_need() { a.set_current_time(sec); }
     else {
         let (rung, dsp, transcoded) = st(|s| (s.rung, s.dsp, s.transcoded));
-        load_opts(LoadOpts { transcode: transcoded, rung: Some(rung), dsp: Some(dsp), offset: sec, resume: true, ..Default::default() });
+        load_opts(LoadOpts { transcode: transcoded, rung: Some(rung), dsp: Some(dsp), offset: sec, resume: true, hold, ..Default::default() });
     }
     update_time();
     media_state();
 }
 
 pub fn toggle() {
+    if g_toggle() { return; }
     if via_link(json!({ "action": "toggle" })) {
         LINK.with(|l| if let Some(l) = l.borrow_mut().as_mut() {
             let p = !l.state.truthy("playing");
@@ -453,6 +460,7 @@ pub fn toggle() {
 }
 /// Play pressed (button, headset, lock screen, another device): a stream that broke off is loaded again where it was.
 pub(super) fn user_play() {
+    if g_play() { return; }
     let (Some(a), Some(t)) = (audio(), cur()) else { return };
     st_mut(|s| s.want = true);
     resume_fx();
@@ -461,6 +469,7 @@ pub(super) fn user_play() {
 }
 /// A real pause: it stays paused – nothing picks the song up again until play is pressed.
 pub(super) fn user_pause() {
+    if g_pause() { return; }
     st_mut(|s| s.want = false);
     let t = REC.with(|r| r.borrow_mut().timer.take());
     drop(t);
@@ -486,6 +495,7 @@ pub(super) fn play_el(a: &HtmlMediaElement) {
 }
 fn blocked() {
     st_mut(|s| s.want = false);
+    play_refused();
     render(); emit(); media_state();
     toast("Tap play to keep listening", "");
 }

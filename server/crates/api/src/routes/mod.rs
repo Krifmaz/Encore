@@ -1,6 +1,8 @@
 pub mod admin;
 pub mod auth;
 pub mod bugreports;
+pub mod files;
+pub mod group;
 pub mod library;
 pub mod perf;
 pub mod picker;

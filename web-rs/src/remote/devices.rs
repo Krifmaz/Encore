@@ -27,10 +27,12 @@ fn device_card(d: &Value, devices: &[Value], l: Option<&player::Link>, me: &str)
     } else {
         r#"<div class="small muted">Nothing playing</div>"#.to_string()
     };
-    let link_btn = if remote_of_me || s.truthy("remote_of") { String::new() }
+    // in a group listen this browser plays the group's music itself: no linking, no controlling another device
+    let grouped = crate::group::in_group();
+    let link_btn = if remote_of_me || s.truthy("remote_of") || grouped { String::new() }
         else if is_linked { format!(r#"<button class="btn sm primary" data-a="unlink">{}Linked · Unlink</button>"#, icon("link")) }
         else { format!(r#"<button class="btn sm" data-a="link" title="Lock this device as a remote for {}: everything you play here plays there">{}Link as remote</button>"#, esc(&name), icon("link")) };
-    let controls = if s.truthy("remote_of") { String::new() } else {
+    let controls = if s.truthy("remote_of") || grouped { String::new() } else {
         let transport = if s.truthy("title") {
             format!(r#"<button class="btn sm ghost icon" data-a="prev" aria-label="Previous">{}</button>
             <button class="btn sm" data-a="toggle">{}</button>
@@ -95,8 +97,10 @@ fn zone_card(z: &Value) -> String {
 
 /// The Devices window: what every other device is playing, with controls, and Link / Unlink.
 pub fn open() {
-    let m = ui::modal(ModalOpts::new("Your devices", r#"<div id="dev-me" class="stack" style="margin-bottom:12px"></div><div id="dev-list" class="stack"><div class="skeleton" style="height:90px"></div></div>"#));
+    let m = ui::modal(ModalOpts::new("Your devices", r#"<div id="dev-me" class="stack" style="margin-bottom:12px"></div><div id="dev-list" class="stack"><div class="skeleton" style="height:90px"></div></div><div id="dev-groups" class="stack" style="margin-top:18px"></div>"#));
     let (Some(list), Some(me_box)) = (m.qs("#dev-list"), m.qs("#dev-me")) else { return };
+    // group listens (0.31): the one this browser is in, the others on the server, Start and Join with a code
+    if let Some(g) = m.qs("#dev-groups") { crate::group::ui::devices_section(&g, &m); }
     let timer: Rc<RefCell<Option<dom::Interval>>> = Rc::new(RefCell::new(None));
     // Roon zones (when Roon is enabled): shown before the Encore devices, refreshed with them
     let roon_on = app::has_feature("roon");
@@ -207,7 +211,8 @@ pub fn open() {
       {}"##,
                 esc(&device_name()),
                 l.as_ref().map(|l| format!(r#"<button class="btn sm" id="dev-unlink">{}Unlink from {}</button>"#, icon("link"), esc(&l.name))).unwrap_or_default(),
-                l.as_ref().map(|l| format!(r#"<div class="small muted">🔗 Linked: everything you play here goes to <b>{}</b>. Unlink to listen on this device.</div>"#, esc(&l.name))).unwrap_or_default()));
+                if crate::group::in_group() { r#"<div class="small muted">Leave the group listen to control another device</div>"#.to_string() }
+                else { l.as_ref().map(|l| format!(r#"<div class="small muted">🔗 Linked: everything you play here goes to <b>{}</b>. Unlink to listen on this device.</div>"#, esc(&l.name))).unwrap_or_default() }));
             let again = { let cell = cell.clone(); move || { let f = cell.borrow().clone(); if let Some(f) = f { f() } } };
             if let Some(b) = dom::qs_in(&me_box, "#dev-unlink") {
                 let (again, paint) = (again.clone(), paint.clone());

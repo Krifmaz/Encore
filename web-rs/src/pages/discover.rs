@@ -256,20 +256,56 @@ fn library_song_row(t: &Value) -> String {
         availability(&json!({ "in_library": true })))
 }
 
-/// `libraryRow(lib)`: what the library already has for the search (GET /api/library/search).
-fn library_row(lib: Option<&Value>) -> String {
+/// How many of the library's artists, albums and songs a Discover tab shows (p6 item 9): Top results all three,
+/// the Artists, Albums and Songs tabs a short strip of their own kind (the phone and the desktop show as many).
+pub(crate) fn library_counts(typ: &str) -> (usize, usize, usize) {
+    match typ {
+        "artist" => (6, 0, 0),
+        "album" => (0, 6, 0),
+        "track" => (0, 0, 3),
+        _ => (6, 6, 5),
+    }
+}
+
+/// A library artist of the "In your library" strip: a round tile that opens the artist's page.
+fn library_artist_tile(a: &Value) -> String {
+    let href = if a.truthy("mbid") { format!("/artist/{}", a.s("mbid")) } else { format!("/artist-name/{}", encode(&a.s("name"))) };
+    let n = a.f("albums");
+    format!(r#"<div class="tile round" data-href="{}">
+    <div class="art">{}</div>
+    <div class="t ellipsis" style="text-align:center">{}</div>
+    <div class="s" style="text-align:center">{} album{}</div>
+  </div>"#, esc(&href), art(&format!("/api/library/albums/{}/cover{}", a.s("cover_album"), ui::cover_q(a)), &a.s("name"), ""),
+        esc(&ui::tr_inline(a, "name")), a.s("albums"), if n == 1.0 { "" } else { "s" })
+}
+
+/// `libraryRow(lib)`: what the library already has for the search (GET /api/library/search), of the tab's kind:
+/// artists, albums and songs on Top results, a short strip of its own kind on the other tabs. "" when it has none.
+fn library_row(lib: Option<&Value>, typ: &str) -> String {
     let Some(lib) = lib else { return String::new() };
-    let (songs, albums) = (lib.a("songs"), lib.a("albums"));
-    if songs.is_empty() && albums.is_empty() { return String::new(); }
+    let (na, nb, ns) = library_counts(typ);
+    let artists: Vec<Value> = lib.a("artists").into_iter().take(na).collect();
+    let albums: Vec<Value> = lib.a("albums").into_iter().take(nb).collect();
+    let songs: Vec<Value> = lib.a("songs").into_iter().take(ns).collect();
+    if artists.is_empty() && songs.is_empty() && albums.is_empty() { return String::new(); }
+    let people = if artists.is_empty() { String::new() } else {
+        format!(r#"<div class="grid">{}</div>"#, artists.iter().map(library_artist_tile).collect::<String>())
+    };
     let grid = if albums.is_empty() { String::new() } else {
-        format!(r#"<div class="grid">{}</div>"#, albums.iter().take(6).map(common::library_tile).collect::<String>())
+        format!(r#"<div class="grid{}">{}</div>"#, if artists.is_empty() { "" } else { " mt" }, albums.iter().map(common::library_tile).collect::<String>())
     };
     let list = if songs.is_empty() { String::new() } else {
-        format!(r#"<div class="card flat mt"><div class="list">{}</div></div>"#, songs.iter().take(5).map(library_song_row).collect::<String>())
+        format!(r#"<div class="card flat{}"><div class="list">{}</div></div>"#, if artists.is_empty() && albums.is_empty() { "" } else { " mt" }, songs.iter().map(library_song_row).collect::<String>())
     };
     format!(r#"<div class="section-head"><h2>In your library</h2></div>
+    {people}
     {grid}
     {list}"#)
+}
+
+/// Whether the catalogue's answer has nothing to show.
+fn catalogue_empty(data: &Value) -> bool {
+    !crate::json::truthy(data.g("top")) && data.a("tracks").is_empty() && data.a("albums").is_empty() && data.a("artists").is_empty()
 }
 
 /// `albumBody(a)`: the request body of a catalogue album (a MusicBrainz release group, or a Deezer / Apple album).
@@ -426,11 +462,13 @@ pub fn render_search(view: Element, ctx: Ctx) -> PageFuture {
         common::bind_tiles(&results);
         bind_request_buttons(&results);
         let seq = Rc::new(Cell::new(0u64));
+        // the library's answer for a query (asked once per query, whatever the tab; p6 item 9)
+        let lib_cache: Rc<RefCell<Option<(String, Value)>>> = Rc::new(RefCell::new(None));
         // results update in place – the page (and the search box with the phone keyboard) is never rebuilt while typing
         let run: Rc<dyn Fn() -> Pin<Box<dyn Future<Output = ()>>>> = {
-            let (view, results, q, typ, seq) = (view.clone(), results.clone(), q.clone(), typ.clone(), seq.clone());
+            let (view, results, q, typ, seq, lib_cache) = (view.clone(), results.clone(), q.clone(), typ.clone(), seq.clone(), lib_cache.clone());
             Rc::new(move || {
-                let (view, results, q, typ, seq) = (view.clone(), results.clone(), q.clone(), typ.clone(), seq.clone());
+                let (view, results, q, typ, seq, lib_cache) = (view.clone(), results.clone(), q.clone(), typ.clone(), seq.clone(), lib_cache.clone());
                 Box::pin(async move {
                     let t = typ.borrow().clone();
                     let qv = q.borrow().clone();
@@ -443,34 +481,50 @@ pub fn render_search(view: Element, ctx: Ctx) -> PageFuture {
                         return;
                     }
                     set_html(&results, &skeleton_grid(12));
-                    // the library answers at once; the catalogue (MusicBrainz, Deezer, Apple) takes a moment
+                    // every search also asks the library, in parallel (p6 item 9): it answers at once; the catalogue
+                    // (MusicBrainz, Deezer, Apple) takes a moment
                     let lib_q = format!("/library/search?q={}&limit=12", encode(&qv));
                     let disc_q = format!("/discover/search?q={}&type={}", encode(&qv), t);
+                    let cached = lib_cache.borrow().as_ref().filter(|(k, _)| *k == qv).map(|(_, v)| v.clone());
                     // the library row shows as soon as it's there, and stays when the catalogue fails
                     let got_data = Rc::new(Cell::new(false));
                     let (data, lib) = futures::join!(
                         async { let d = api::get(&disc_q).await; got_data.set(true); d },
                         async {
-                            if t != "all" { return None; }
-                            let l = api::get(&lib_q).await.ok();
-                            let row = library_row(l.as_ref());
+                            let l = match cached {
+                                Some(v) => Some(v),
+                                None => {
+                                    let l = api::get(&lib_q).await.ok();
+                                    // kept for the other tabs while this is still the query
+                                    if let Some(v) = &l { if *q.borrow() == qv { *lib_cache.borrow_mut() = Some((qv.clone(), v.clone())); } }
+                                    l
+                                }
+                            };
+                            let row = library_row(l.as_ref(), &t);
                             if mine == seq.get() && view.is_connected() && !got_data.get() && !row.is_empty() {
                                 set_html(&results, &(row + &skeleton_grid(8)));
                             }
                             l
                         },
                     );
+                    if mine != seq.get() || !view.is_connected() { return; }   // a newer search is already running
+                    let lib_row = library_row(lib.as_ref(), &t);
                     let data = match data {
                         Ok(d) => d,
                         Err(e) => {
-                            if mine == seq.get() && view.is_connected() {
-                                set_html(&results, &(library_row(lib.as_ref()) + &format!(r#"<div class="error-box">{}</div>"#, esc(&e.message))));
-                            }
+                            // the library's matches stay, with the reason under them
+                            set_html(&results, &if lib_row.is_empty() { format!(r#"<div class="error-box">{}</div>"#, esc(&e.message)) }
+                                else { lib_row + &format!(r#"<div class="error-box mt">Couldn't search the catalogue: {}</div>"#, esc(&e.message)) });
                             return;
                         }
                     };
-                    if mine != seq.get() || !view.is_connected() { return; }   // a newer search is already running
-                    let mut html = library_row(lib.as_ref()) + &top_result(data.g("top"));
+                    // the catalogue has nothing but the library has: its matches show instead of "No results"
+                    if catalogue_empty(&data) {
+                        set_html(&results, &if lib_row.is_empty() { empty_state(&icon("search"), &format!("No results for “{qv}”"), "") }
+                            else { lib_row + &format!(r#"<p class="muted mt">Nothing in the catalogue matches “{}”</p>"#, esc(&qv)) });
+                        return;
+                    }
+                    let mut html = lib_row + &top_result(data.g("top"));
                     let tracks = data.a("tracks");
                     if !tracks.is_empty() {
                         html += &format!(r#"<div class="section-head"><h2>Songs</h2></div><div class="card flat"><div class="list">{}</div></div>"#,
@@ -486,7 +540,7 @@ pub fn render_search(view: Element, ctx: Ctx) -> PageFuture {
                         html += &format!(r#"<div class="section-head"><h2>Artists</h2></div><div class="grid">{}</div>"#,
                             artists.iter().take(if t == "all" { 6 } else { 60 }).map(artist_tile).collect::<String>());
                     }
-                    set_html(&results, &if html.is_empty() { empty_state(&icon("search"), &format!("No results for “{}”", esc(&qv)), "") } else { html });
+                    set_html(&results, &html);
                 })
             })
         };
@@ -719,10 +773,10 @@ pub fn render_artist(view: Element, ctx: Ctx) -> PageFuture {
         });
         let tracks_badge = if a.truthy("library_tracks") { format!(r#"<span class="badge">{} tracks</span>"#, a.s("library_tracks")) } else { String::new() };
         let link_btns: String = links.iter().map(|(k, u)| format!(r#"<a class="btn sm ghost" target="_blank" rel="noopener noreferrer" href="{}">{}</a>"#, esc(u), esc(k))).collect();
-        let in_library = if !library_albums.is_empty() {
-            format!(r#"<div class="section-head"><h2>In your library <span class="faint small">{}</span></h2></div>
-      <div class="grid">{}</div>"#, library_albums.len(), library_albums.iter().map(lib_tile).collect::<String>())
-        } else { String::new() };
+        // "Liked from this artist" and "In your library" (its songs and albums) between Popular and the
+        // discography (p6 item 5); the songs fill in when the library answers
+        let lib_songs = Rc::new(ArtistSongs::new(&a.s("name"), &a.s("id"), library_albums.clone()));
+        let in_library = lib_songs.library_html();
         let disco_tabs: String = [("all", "All"), ("missing", "Missing"), ("owned", "In library")].iter()
             .map(|(k, l)| format!(r#"<button data-f="{k}">{l}</button>"#)).collect();
         let only_local = if !local_only.is_empty() {
@@ -753,7 +807,8 @@ pub fn render_artist(view: Element, ctx: Ctx) -> PageFuture {
     </div>
     <div id="artist-bio"></div>
     <div id="artist-top"></div>
-    {in_library}
+    <div id="artist-liked"></div>
+    <div id="artist-lib">{in_library}</div>
     <div class="section-head"><h2>Discography <span class="faint small">{n_rg}</span></h2>
       <div class="row wrap" style="gap:10px;justify-content:flex-end"><span id="disco-skipped"></span><div class="tabs" id="disco-filter">{disco_tabs}</div></div>
     </div>
@@ -908,6 +963,9 @@ pub fn render_artist(view: Element, ctx: Ctx) -> PageFuture {
         };
         { let p = play_all.clone(); dom::on_sel(&view, "#play-artist", "click", move |_| p(false)); }
         { let p = play_all.clone(); dom::on_sel(&view, "#shuffle-artist", "click", move |_| p(true)); }
+        // the liked songs and the library's songs of the artist, asked only when the library has some (an older
+        // server's 404 leaves both out)
+        if a.truthy("library_tracks") { lib_songs.clone().start(&view); }
         { let name = a.s("name"); dom::on_sel(&view, "#share-artist", "click", move |_| dom::spawn(ui::share_artist(name.clone()))); }
 
         // similar artists (Last.fm → ListenBrainz → Deezer)
@@ -1120,6 +1178,192 @@ pub fn render_artist(view: Element, ctx: Ctx) -> PageFuture {
         }
         Ok(())
     })
+}
+
+// ---- the artist page's "Liked from this artist" and "In your library" songs (p6 item 5) -----------------------
+
+/// "In your library": the first songs shown, the page size of "Show all N", and the most it loads.
+const ARTIST_SONGS_FIRST: usize = 10;
+const ARTIST_SONGS_PAGE: usize = 200;
+const ARTIST_SONGS_MAX: usize = 5000;
+
+/// `/api/library/artists/<name>/<tail>?name=<name>[&mbid=]` (client-shapes §3.2): the name also goes in `name=`,
+/// which the server prefers. The path gets `_` in place of a name that can't stand there: one with "/" or "\"
+/// (some proxies answer 404 for `%2F` in a path: "AC/DC"), a blank one ("//" matches no route) and one made only
+/// of dots ("." and ".." are path steps the browser resolves, so the request would go to another route). The
+/// phone's rule (EncoreApi.kt `artistSegment`).
+pub(crate) fn artist_route(name: &str, mbid: &str, tail: &str) -> String {
+    let enc = crate::pages::library::uri_component;
+    let odd = name.trim().is_empty() || name.contains('/') || name.contains('\\') || name.trim_matches('.').is_empty();
+    let seg = if odd { "_".to_string() } else { enc(name) };
+    let mut url = format!("/library/artists/{seg}/{tail}?name={}", enc(name));
+    if !mbid.is_empty() { url.push_str(&format!("&mbid={}", enc(mbid))); }
+    url
+}
+
+/// `{total, tracks}` of §3.2 / §3.3 as (total, songs); a bare array is the whole list.
+pub(crate) fn songs_answer(v: &Value) -> (usize, Vec<Value>) {
+    if let Some(a) = v.as_array() { return (a.len(), a.clone()); }
+    let tracks = v.a("tracks");
+    let total = v.g("total").as_u64().map(|n| n as usize).unwrap_or(tracks.len()).max(tracks.len());
+    (total, tracks)
+}
+
+/// "1 song", "12 songs".
+fn plural(n: usize, one: &str) -> String { format!("{n} {one}{}", if n == 1 { "" } else { "s" }) }
+
+/// The two lists of the artist page and what they show.
+struct ArtistSongs {
+    name: String,
+    mbid: String,
+    /// `library_albums` of the artist page
+    albums: Vec<Value>,
+    /// GET …/liked: (total, the songs, newest like first); None until it answers, or when it failed
+    liked: RefCell<Option<(usize, Vec<Value>)>>,
+    /// GET …/tracks, the first page: (total, the songs)
+    first: RefCell<Option<(usize, Vec<Value>)>>,
+    /// every song, after "Show all N"
+    all: RefCell<Option<Vec<Value>>>,
+    loading_all: Cell<bool>,
+}
+
+impl ArtistSongs {
+    fn new(name: &str, mbid: &str, albums: Vec<Value>) -> Self {
+        Self { name: name.to_string(), mbid: mbid.to_string(), albums, liked: RefCell::new(None), first: RefCell::new(None), all: RefCell::new(None), loading_all: Cell::new(false) }
+    }
+
+    /// The songs "In your library" shows now: every one after "Show all N", else the first page.
+    fn shown(&self) -> Vec<Value> {
+        if let Some(all) = self.all.borrow().as_ref() { return all.clone(); }
+        self.first.borrow().as_ref().map(|(_, l)| l.clone()).unwrap_or_default()
+    }
+
+    /// "Liked from this artist": song rows that play, Play all; "" when there are none.
+    fn liked_html(&self) -> String {
+        let liked = self.liked.borrow();
+        let Some((total, list)) = liked.as_ref().filter(|(_, l)| !l.is_empty()) else { return String::new() };
+        let rows: String = list.iter().enumerate().map(|(i, t)| {
+            let sub = if t.truthy("album") { ui::album_link(t) } else { esc(&ui::tr_inline(t, "artist")) };
+            artist_song_row(t, &format!("liked:{i}"), &sub)
+        }).collect();
+        // (the head is the first child of its spot, which `.section-head:first-child` would leave without its margin)
+        format!(r#"<div class="section-head" style="margin-top:28px"><h2>Liked from this artist <span class="faint small">{}</span></h2>
+      <button class="btn sm primary" data-liked-all>{}Play all</button></div>
+    <div class="card flat"><div class="list">{rows}</div></div>"#, plural(*total, "song"), icon("play"))
+    }
+
+    /// "In your library": the artist's songs (the first ten, "Show all N") and albums; "" when it has neither.
+    fn library_html(&self) -> String {
+        let songs = self.shown();
+        let total = self.first.borrow().as_ref().map(|(t, _)| *t).unwrap_or(0);
+        if songs.is_empty() && self.albums.is_empty() { return String::new(); }
+        let counts = [(total > 0).then(|| plural(total, "song")), (!self.albums.is_empty()).then(|| plural(self.albums.len(), "album"))]
+            .into_iter().flatten().collect::<Vec<_>>().join(" · ");
+        let mut html = format!(r#"<div class="section-head" style="margin-top:28px"><h2>In your library <span class="faint small">{counts}</span></h2></div>"#);
+        if !songs.is_empty() {
+            let more = if self.all.borrow().is_none() && total > songs.len() {
+                if self.loading_all.get() { r#"<button class="btn sm ghost" disabled>Loading…</button>"#.to_string() }
+                else { format!(r#"<button class="btn sm ghost" data-lib-all>Show all {total}</button>"#) }
+            } else { String::new() };
+            let rows: String = songs.iter().enumerate().map(|(i, t)| {
+                let year: String = t.s("year").chars().take(4).collect();
+                let sub = [ui::album_link(t), esc(&year)].into_iter().filter(|x| !x.is_empty()).collect::<Vec<_>>().join(" · ");
+                artist_song_row(t, &format!("lib:{i}"), &sub)
+            }).collect();
+            html += &format!(r#"<div class="section-head"><h3>Songs</h3>{more}</div>
+    <div class="card flat"><div class="list">{rows}</div></div>"#);
+        }
+        if !self.albums.is_empty() {
+            if !songs.is_empty() { html += r#"<div class="section-head"><h3>Albums</h3></div>"#; }
+            html += &format!(r#"<div class="grid">{}</div>"#, self.albums.iter().map(lib_tile).collect::<String>());
+        }
+        html
+    }
+
+    fn paint(&self, view: &Element) {
+        if let Some(el) = dom::qs_in(view, "#artist-liked") { set_html(&el, &self.liked_html()); }
+        if let Some(el) = dom::qs_in(view, "#artist-lib") { set_html(&el, &self.library_html()); }
+    }
+
+    /// Ask the server for both lists and wire the rows' buttons.
+    fn start(self: Rc<Self>, view: &Element) {
+        {
+            let (me, view) = (self.clone(), view.clone());
+            dom::spawn(async move {
+                let liked = artist_route(&me.name, &me.mbid, "liked") + "&limit=200";
+                let first = artist_route(&me.name, &me.mbid, "tracks") + &format!("&offset=0&limit={ARTIST_SONGS_FIRST}");
+                let (l, f) = futures::join!(api::get(&liked), api::get(&first));
+                if !view.is_connected() { return; }
+                *me.liked.borrow_mut() = l.ok().map(|v| songs_answer(&v));
+                *me.first.borrow_mut() = f.ok().map(|v| songs_answer(&v));
+                me.paint(&view);
+            });
+        }
+        for sel in ["#artist-liked", "#artist-lib"] {
+            let (me, v) = (self.clone(), view.clone());
+            dom::on_sel(view, sel, "click", move |e| {
+                if dom::closest(e, "[data-liked-all]").is_some() {
+                    let list = me.liked.borrow().as_ref().map(|(_, l)| l.clone()).unwrap_or_default();
+                    if !list.is_empty() { player::play_queue(list, 0, "list"); }
+                    return;
+                }
+                if dom::closest(e, "[data-lib-all]").is_some() { me.clone().show_all(&v); return; }
+                let Some(b) = dom::closest(e, "[data-artist-play]") else { return };
+                let at = dom::data(&b, "artistPlay");
+                let Some((which, i)) = at.split_once(':').and_then(|(w, i)| Some((w.to_string(), i.parse::<usize>().ok()?))) else { return };
+                let list = if which == "liked" { me.liked.borrow().as_ref().map(|(_, l)| l.clone()).unwrap_or_default() } else { me.shown() };
+                if i < list.len() { player::play_queue(list, i, "list"); }
+            });
+        }
+    }
+
+    /// "Show all N": every song of the artist, page by page, in place of the first ten.
+    fn show_all(self: Rc<Self>, view: &Element) {
+        if self.loading_all.get() || self.all.borrow().is_some() { return; }
+        self.loading_all.set(true);
+        self.paint(view);
+        let view = view.clone();
+        dom::spawn(async move {
+            let mut out: Vec<Value> = Vec::new();
+            let mut failed = None;
+            while out.len() < ARTIST_SONGS_MAX {
+                let url = artist_route(&self.name, &self.mbid, "tracks") + &format!("&offset={}&limit={ARTIST_SONGS_PAGE}", out.len());
+                match api::get(&url).await {
+                    Ok(v) => {
+                        let (total, page) = songs_answer(&v);
+                        let n = page.len();
+                        out.extend(page);
+                        if n < ARTIST_SONGS_PAGE || out.len() >= total { break; }
+                    }
+                    Err(e) => { failed = Some(e.message); break; }
+                }
+            }
+            self.loading_all.set(false);
+            if !view.is_connected() { return; }
+            match failed {
+                Some(m) => toast(&m, "err"),
+                None => *self.all.borrow_mut() = Some(out),
+            }
+            self.paint(&view);
+        });
+    }
+}
+
+/// A song of the artist page's lists: play from it (`at`: "liked:3", "lib:0"), the title, `sub` (HTML), the
+/// length and the song's ⋯.
+fn artist_song_row(t: &Value, at: &str, sub: &str) -> String {
+    let label = if t.truthy("album") { t.s("album") } else { t.s("title") };
+    let len = if t.truthy("duration") { fmt::dur(t.f("duration")) } else { String::new() };
+    format!(r#"<div class="list-item">
+    <button class="thumb play-thumb" data-artist-play="{at}" title="Play" aria-label="Play">{}<i>{}</i></button>
+    <div class="grow">
+      <div class="ellipsis" style="font-weight:600">{}</div>{}
+      <div class="small muted ellipsis">{sub}</div>
+    </div>
+    <span class="small faint hide-sm">{len}</span>
+    <button class="btn sm ghost icon" data-song-menu='{}' aria-label="More" title="More">{}</button>
+  </div>"#, art(&format!("/api/library/albums/{}/cover{}", t.s("album_id"), ui::cover_q(t)), &label, ""), icon("play"),
+        esc(&ui::tr(t, "title")), ui::tr_sub(t, "title"), esc_json(t), icon("more"))
 }
 
 /// `extSheet(m, tracks, artist)`: the track list of a release only Deezer / Apple Music (…) know: owned songs play, missing ones can be requested.
@@ -1371,5 +1615,46 @@ pub fn render_album(view: Element, ctx: Ctx) -> PageFuture {
 fn reload_page() {
     if let Ok(ev) = web_sys::HashChangeEvent::new("hashchange") {
         let _ = crate::dom::window().dispatch_event(&ev);
+    }
+}
+
+#[cfg(test)]
+mod library_tests {
+    use super::*;
+
+    #[test]
+    fn the_library_strip_follows_the_tab() {
+        assert_eq!(library_counts("all"), (6, 6, 5));
+        assert_eq!(library_counts("artist"), (6, 0, 0));
+        assert_eq!(library_counts("album"), (0, 6, 0));
+        assert_eq!(library_counts("track"), (0, 0, 3));
+    }
+
+    #[test]
+    fn the_artist_routes_and_their_answers() {
+        assert_eq!(artist_route("Beta Band", "", "liked"), "/library/artists/Beta%20Band/liked?name=Beta%20Band");
+        assert_eq!(artist_route("AC/DC", "66c662b6", "tracks"), "/library/artists/_/tracks?name=AC%2FDC&mbid=66c662b6", "a name with / goes as _ in the path and whole in name=");
+        assert_eq!(artist_route("..", "", "liked"), "/library/artists/_/liked?name=..", "a path step");
+        assert_eq!(artist_route(".", "", "tracks"), "/library/artists/_/tracks?name=.");
+        assert_eq!(artist_route("", "", "liked"), "/library/artists/_/liked?name=");
+        assert_eq!(artist_route("  ", "", "liked"), "/library/artists/_/liked?name=%20%20");
+        assert_eq!(artist_route("a\\b", "", "liked"), "/library/artists/_/liked?name=a%5Cb");
+        assert_eq!(artist_route("...And You Will Know Us", "", "liked"), "/library/artists/...And%20You%20Will%20Know%20Us/liked?name=...And%20You%20Will%20Know%20Us", "dots and more: as it is");
+        let (total, list) = songs_answer(&json!({ "total": 143, "offset": 0, "tracks": [{ "id": 1 }, { "id": 2 }] }));
+        assert_eq!((total, list.len()), (143, 2));
+        // a bare array is the whole list; a missing total is the rows'
+        assert_eq!(songs_answer(&json!([{ "id": 1 }])).0, 1);
+        assert_eq!(songs_answer(&json!({ "tracks": [{ "id": 1 }, { "id": 2 }] })).0, 2);
+        assert_eq!(songs_answer(&json!({ "total": 0, "tracks": [] })).0, 0);
+        assert_eq!(plural(1, "song"), "1 song");
+        assert_eq!(plural(3, "album"), "3 albums");
+    }
+
+    #[test]
+    fn an_empty_catalogue_answer() {
+        assert!(catalogue_empty(&json!({ "top": null, "tracks": [], "albums": [], "artists": [] })));
+        assert!(catalogue_empty(&json!({})));
+        assert!(!catalogue_empty(&json!({ "tracks": [{ "title": "x" }] })));
+        assert!(!catalogue_empty(&json!({ "top": { "kind": "artist", "item": {} } })));
     }
 }

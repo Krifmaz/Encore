@@ -3,6 +3,12 @@
 //! admin's Scan / Auto-tag / Organize / Verify / Find artwork with the progress card, the
 //! duplicates and wrong-audio lists).
 //!
+//! The search box searches the whole library whatever tab is selected (p6 item 9, client-shapes
+//! §3.4): while it has a query the page shows one results view – Artists, Albums (singles too)
+//! and Songs, each with its first matches and "Show all N", which opens that tab filtered by the
+//! query; a tab clicked while a query is typed shows that tab filtered. Nothing anywhere:
+//! "Search everywhere" opens Discover. The query is in the route, so Back keeps it.
+//!
 //! This file also holds what the album and artist pages share with it: the song ⋯ menu and
 //! its dialogs ([`Shared`], [`Act`], `track_menu`, `shared_update`, `shared_overlay`), and the
 //! small helpers of the web's library.rs (`format_text`, `verify_badge`, `tr`, `long_dur`).
@@ -1500,7 +1506,15 @@ pub struct State {
     want: usize,
     /// The limit of the last songs request (a full answer means there may be more).
     songs_limit: usize,
+    /// With a query: the one results view (true) or the selected tab filtered by it (false).
+    pub results: bool,
+    /// `/library/search` for `found_for`: the answer or why it failed; None while it runs.
+    found: Option<Result<Value, String>>,
+    found_for: String,
 }
+
+/// The first matches each section of the results view shows (the phone's and the web's 12).
+pub const RESULTS_LIMIT: usize = 12;
 
 /// The id of the row a scrubber jump scrolls to.
 const JUMP_ID: &str = "lib-jump";
@@ -1564,6 +1578,15 @@ pub enum Message {
     ArtistShared(Result<Value, ApiError>),
     CloseDialog,
     Shared(Act),
+    /// `/library/search` answered for this query.
+    Found(String, Result<Value, ApiError>),
+    /// "Show all N" of a section: that tab, filtered by the query.
+    ShowAll(String),
+    /// Nothing in the library: Discover with the query.
+    SearchEverywhere,
+    /// A song of the results view: play the found songs from it.
+    PlayFound(usize),
+    FoundMenu(usize),
 }
 
 /// Called when the app navigates here (with the route's parameters).
@@ -1613,6 +1636,10 @@ fn open_inner(
     if FILTERS.iter().any(|f| f.0 == query.filter) {
         state.filter = query.filter;
     }
+    // a query in the route opens on the results view
+    state.results = !state.q.trim().is_empty();
+    state.found = None;
+    state.found_for.clear();
     let mut tasks = vec![load(state, ctx, false)];
     if state.admin {
         tasks.push(poll_stats(ctx));
@@ -1678,6 +1705,9 @@ fn poll_stats(ctx: &Ctx) -> Task<Message> {
 fn load(state: &mut State, ctx: &Ctx, append: bool) -> Task<Message> {
     if append {
         return load_list(state, ctx, true);
+    }
+    if results_view(state) {
+        return search(state, ctx);
     }
     state.jump = None;
     state.target = None;
@@ -1815,6 +1845,46 @@ fn mark_row<'a>(state: &State, i: usize, el: El<'a, Message>) -> El<'a, Message>
     }
 }
 
+/// Whether the page shows the one results view: a query, typed (not a tab clicked since), on
+/// the whole library (the artist page's filter keeps its tabs).
+pub fn results_view(state: &State) -> bool {
+    state.results && !state.q.trim().is_empty() && state.artist.is_empty()
+}
+
+/// `GET /api/library/search?q=&limit=12` for the results view (the newest query wins).
+fn search(state: &mut State, ctx: &Ctx) -> Task<Message> {
+    let q = state.q.trim().to_string();
+    state.found = None;
+    state.found_for = q.clone();
+    let api = ctx.api.clone();
+    let url = format!("/library/search?q={}&limit={RESULTS_LIMIT}", urlencode(&q));
+    Task::perform(async move { api.get(&url).await }, move |r| Message::Found(q.clone(), r))
+}
+
+/// Keep the query (and the tab) in the route, so Back comes back to it.
+fn keep_route(state: &State, ctx: &mut Ctx) {
+    if state.artist.is_empty() {
+        ctx.set_route(Page::Library {
+            tab: state.tab.clone(),
+            query: crate::pages::LibraryQuery {
+                q: state.q.trim().to_string(),
+                filter: state.filter.clone(),
+                ..Default::default()
+            },
+        });
+    }
+}
+
+/// The album kind a list asks for: the Albums tab with a query lists the singles too, as the
+/// results view's count does (client-shapes §3.4).
+fn album_kind(state: &State) -> &str {
+    if state.tab == "albums" && !state.q.trim().is_empty() {
+        ""
+    } else {
+        state.tab.as_str()
+    }
+}
+
 fn load_list(state: &mut State, ctx: &Ctx, append: bool) -> Task<Message> {
     state.seq += 1;
     let seq = state.seq;
@@ -1842,7 +1912,7 @@ fn load_list(state: &mut State, ctx: &Ctx, append: bool) -> Task<Message> {
                 urlencode(&state.q),
                 state.sort,
                 state.dir,
-                state.tab,
+                album_kind(state),
                 state.filter,
                 urlencode(&state.artist),
                 state.offset
@@ -1911,21 +1981,58 @@ pub fn update(state: &mut State, msg: Message, ctx: &mut Ctx) -> Task<Message> {
         }
         Message::ScrollToJump => return scroll_to_jump(),
         Message::Tab(tab) => {
-            if tab == state.tab {
+            // with a query, a tab shows that tab filtered by it
+            if tab == state.tab && !results_view(state) {
                 return Task::none();
             }
+            state.results = false;
             state.tab = tab;
             apply_sort(state);
+            keep_route(state, ctx);
             return load(state, ctx, false);
+        }
+        Message::ShowAll(tab) => {
+            state.results = false;
+            state.tab = tab;
+            apply_sort(state);
+            keep_route(state, ctx);
+            return load(state, ctx, false);
+        }
+        Message::SearchEverywhere => {
+            let q = state.q.trim().to_string();
+            ctx.navigate(Page::Search { q });
+        }
+        Message::Found(q, r) => {
+            if q == state.found_for {
+                state.found = Some(r.map_err(|e| e.message));
+            }
+        }
+        Message::PlayFound(i) => {
+            if let Some(Ok(v)) = &state.found {
+                let songs = fmt::items(&v["songs"]);
+                if i < songs.len() {
+                    ctx.play(songs, i);
+                }
+            }
+        }
+        Message::FoundMenu(i) => {
+            if let Some(Ok(v)) = &state.found {
+                if let Some(t) = fmt::items(&v["songs"]).get(i).cloned() {
+                    track_menu(&mut state.shared, &t, ctx);
+                }
+            }
         }
         Message::Query(q) => {
             state.q = q;
+            // typing shows the results view again
+            state.results = true;
             state.settle += 1;
             let n = state.settle;
             return Task::perform(tokio::time::sleep(Duration::from_millis(300)), move |_| Message::Settled(n));
         }
         Message::Settled(n) => {
             if n == state.settle {
+                keep_route(state, ctx);
                 return load(state, ctx, false);
             }
         }
@@ -2271,6 +2378,9 @@ pub fn update(state: &mut State, msg: Message, ctx: &mut Ctx) -> Task<Message> {
 
 /// The line under the title: what the list holds.
 fn sub_line(state: &State) -> String {
+    if results_view(state) {
+        return String::new();
+    }
     match state.tab.as_str() {
         "albums" | "singles" => {
             if state.albums.is_some() {
@@ -2467,16 +2577,18 @@ pub fn view<'a>(state: &'a State, ctx: &Ctx<'a>) -> El<'a, Message> {
     if state.admin {
         tab_items.extend([("duplicates", "Duplicates"), ("issues", "Wrong audio")]);
     }
-    let mut tools = row![tabs(&tab_items, &state.tab, Message::Tab)]
+    let results = results_view(state);
+    // the results view has no tab selected; a tab clicked shows that tab filtered by the query
+    let mut tools = row![tabs(&tab_items, if results { "" } else { state.tab.as_str() }, Message::Tab)]
         .spacing(10)
         .align_y(Alignment::Center);
-    if !matches!(state.tab.as_str(), "duplicates" | "issues") {
+    if results || !matches!(state.tab.as_str(), "duplicates" | "issues") {
         tools = tools.push(
-            container(search_box("Filter library…", &state.q, Message::Query, None))
-                .width(Length::Fixed(300.0)),
+            container(search_box("Search artists, albums, songs in your library…", &state.q, Message::Query, None))
+                .width(Length::Fixed(400.0)),
         );
     }
-    if let Some(opts) = sort_opts(&state.tab) {
+    if let Some(opts) = sort_opts(&state.tab).filter(|_| !results) {
         let options: Vec<Opt> = opts
             .iter()
             .map(|(k, l)| Opt {
@@ -2504,7 +2616,7 @@ pub fn view<'a>(state: &'a State, ctx: &Ctx<'a>) -> El<'a, Message> {
             .align_y(Alignment::Center),
         );
     }
-    if matches!(state.tab.as_str(), "albums" | "singles") {
+    if !results && matches!(state.tab.as_str(), "albums" | "singles") {
         let options: Vec<Opt> = FILTERS
             .iter()
             .map(|(k, l)| Opt {
@@ -2547,6 +2659,9 @@ pub fn view<'a>(state: &'a State, ctx: &Ctx<'a>) -> El<'a, Message> {
     }
     page = page.push(tools.wrap());
 
+    if results {
+        return page.push(results_body(state, ctx)).into();
+    }
     page = page.push(body(state, ctx));
     if state.more {
         page = page.push(
@@ -2573,6 +2688,9 @@ fn body<'a>(state: &'a State, ctx: &Ctx<'a>) -> El<'a, Message> {
                 if !state.error.is_empty() {
                     return widgets::error_box(&state.error);
                 }
+                if !state.q.trim().is_empty() {
+                    return widgets::catalog::empty_text(Icon::Library, format!("No albums match “{}”", state.q.trim()), String::new());
+                }
                 empty(
                     Icon::Library,
                     "No albums found",
@@ -2592,30 +2710,15 @@ fn body<'a>(state: &'a State, ctx: &Ctx<'a>) -> El<'a, Message> {
                 if !state.error.is_empty() {
                     return widgets::error_box(&state.error);
                 }
+                if !state.q.trim().is_empty() {
+                    return widgets::catalog::empty_text(Icon::Users, format!("No artists match “{}”", state.q.trim()), String::new());
+                }
                 empty(Icon::Users, "No artists found", "")
             }
             Some(list) => grid(
                 list.iter()
                     .enumerate()
-                    .map(|(i, a)| {
-                        let name = fmt::s(a, "name");
-                        let albums = fmt::i(a, "albums");
-                        let mut tile = Tile::new(tr(ctx, a, "name"), TileKind::Artist, Message::OpenArtist(fmt::s(a, "mbid"), name.clone()))
-                            .sub(format!(
-                                "{albums} album{} · {} tracks",
-                                if albums == 1 { "" } else { "s" },
-                                fmt::s(a, "tracks")
-                            ))
-                            .cover(ctx.cover(&fmt::s(a, "cover_album"), &a["cover_v"], 400));
-                        if state.admin {
-                            tile = tile.action(
-                                Icon::Trash,
-                                "Remove this artist from the library",
-                                Message::RemoveArtistAsk(name),
-                            );
-                        }
-                        mark_row(state, i, tile.view())
-                    })
+                    .map(|(i, a)| mark_row(state, i, artist_tile(state, ctx, a)))
                     .collect(),
             ),
         },
@@ -2704,6 +2807,9 @@ fn body<'a>(state: &'a State, ctx: &Ctx<'a>) -> El<'a, Message> {
                 if !state.error.is_empty() {
                     return widgets::error_box(&state.error);
                 }
+                if !state.q.trim().is_empty() {
+                    return widgets::catalog::empty_text(Icon::Music, format!("No songs match “{}”", state.q.trim()), String::new());
+                }
                 empty(Icon::Music, "No songs found", "")
             }
             Some(rows) => {
@@ -2736,6 +2842,95 @@ fn body<'a>(state: &'a State, ctx: &Ctx<'a>) -> El<'a, Message> {
 }
 
 /// `libraryTile(a)`: an album of the library with its Untagged corner and the play button.
+/// An artist of the library (a round tile; the admin can remove it).
+fn artist_tile<'a>(state: &State, ctx: &Ctx<'a>, a: &Value) -> El<'a, Message> {
+    let name = fmt::s(a, "name");
+    let albums = fmt::i(a, "albums");
+    let mut tile = Tile::new(tr(ctx, a, "name"), TileKind::Artist, Message::OpenArtist(fmt::s(a, "mbid"), name.clone()))
+        .sub(format!(
+            "{albums} album{} · {} tracks",
+            if albums == 1 { "" } else { "s" },
+            fmt::s(a, "tracks")
+        ))
+        .cover(ctx.cover(&fmt::s(a, "cover_album"), &a["cover_v"], 400));
+    if state.admin {
+        tile = tile.action(Icon::Trash, "Remove this artist from the library", Message::RemoveArtistAsk(name));
+    }
+    tile.view()
+}
+
+/// "Show all N" of a results section: the server's count when it sent one (§3.4), else "Show
+/// all" when the section came back full (an older server).
+pub fn show_all_label(count: Option<u64>, shown: usize) -> Option<String> {
+    match count {
+        Some(total) if total as usize > shown => Some(format!("Show all {total}")),
+        Some(_) => None,
+        None if shown >= RESULTS_LIMIT => Some("Show all".into()),
+        None => None,
+    }
+}
+
+/// The one results view: Artists, Albums (singles too), Songs, each with "Show all N"; with
+/// nothing anywhere, "Search everywhere".
+fn results_body<'a>(state: &'a State, ctx: &Ctx<'a>) -> El<'a, Message> {
+    let q = state.q.trim();
+    let v = match &state.found {
+        None => return skeleton_tiles(8, widgets::tile::WIDTH),
+        Some(Err(e)) => return widgets::error_box(e),
+        Some(Ok(v)) => v,
+    };
+    let (artists, albums, songs) = (fmt::items(&v["artists"]), fmt::items(&v["albums"]), fmt::items(&v["songs"]));
+    if artists.is_empty() && albums.is_empty() && songs.is_empty() {
+        return column![
+            widgets::catalog::empty_text(Icon::Search, format!("Nothing in your library matches “{q}”"), String::new()),
+            container(btn_icon(Icon::Search, "Search everywhere", Btn::Primary, Some(Message::SearchEverywhere)))
+                .width(Length::Fill)
+                .center_x(Length::Fill),
+        ]
+        .spacing(4)
+        .into();
+    }
+    let counts = &v["counts"];
+    let head = |title: &'a str, key: &str, shown: usize, tab: &str| -> El<'a, Message> {
+        let action = show_all_label(counts[key].as_u64(), shown).map(|label| El::from(btn_sm(label, Btn::Ghost, Some(Message::ShowAll(tab.to_string())))));
+        widgets::section_head(title, action)
+    };
+    let mut col = column![].spacing(26).width(Length::Fill);
+    if !artists.is_empty() {
+        let tiles = artists.iter().map(|a| artist_tile(state, ctx, a)).collect();
+        col = col.push(column![head("Artists", "artists", artists.len(), "artists"), grid(tiles)].spacing(14));
+    }
+    if !albums.is_empty() {
+        let tiles = albums.iter().map(|a| album_tile(a, ctx)).collect();
+        col = col.push(column![head("Albums", "albums", albums.len(), "albums"), grid(tiles)].spacing(14));
+    }
+    if !songs.is_empty() {
+        let cur = ctx.player.current_id();
+        let mut list = column![];
+        for (i, v) in songs.iter().enumerate() {
+            let id = fmt::i(v, "id");
+            let mut sub = tr(ctx, v, "artist");
+            if fmt::truthy(v, "album") {
+                sub.push_str(&format!(" · {}", tr(ctx, v, "album")));
+            }
+            list = list.push(
+                TrackRow::new(tr(ctx, v, "title"))
+                    .sub(sub)
+                    .cover(ctx.cover(&fmt::s(v, "album_id"), &v["cover_v"], 80))
+                    .quality(format_text(v))
+                    .badge_maybe(verify_badge(v))
+                    .duration(Some(fmt::f(v, "duration")))
+                    .playing(cur == Some(id))
+                    .on_play(Message::PlayFound(i))
+                    .on_menu(Message::FoundMenu(i))
+                    .view(),
+            );
+        }
+        col = col.push(column![head("Songs", "songs", songs.len(), "tracks"), widgets::card_flat(list)].spacing(14));
+    }
+    col.into()
+}
+
 pub fn album_tile<'a>(a: &Value, ctx: &Ctx<'a>) -> El<'a, Message> {
     let id = fmt::s(a, "id");
     let title = if fmt::truthy(a, "album") { tr(ctx, a, "album") } else { "Unknown album".to_string() };
@@ -2891,6 +3086,32 @@ pub fn subscription(state: &State) -> Subscription<Message> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn one_search_for_the_whole_library() {
+        let mut st = State { tab: "albums".into(), q: "crazy gb".into(), results: true, ..Default::default() };
+        assert!(results_view(&st));
+        // with a query the Albums tab lists the singles too, as the count does
+        assert_eq!(album_kind(&st), "");
+        st.tab = "singles".into();
+        assert_eq!(album_kind(&st), "singles");
+        st.tab = "albums".into();
+        // a tab clicked shows that tab filtered; no query, no results view; the artist page keeps its tabs
+        st.results = false;
+        assert!(!results_view(&st));
+        st.results = true;
+        st.q = "  ".into();
+        assert!(!results_view(&st));
+        assert_eq!(album_kind(&st), "albums");
+        st.q = "x".into();
+        st.artist = "Beta Band".into();
+        assert!(!results_view(&st));
+        // "Show all N" from the server's count, else when a section came back full (an older server)
+        assert_eq!(show_all_label(Some(230), 12).as_deref(), Some("Show all 230"));
+        assert_eq!(show_all_label(Some(4), 4), None);
+        assert_eq!(show_all_label(None, RESULTS_LIMIT).as_deref(), Some("Show all"));
+        assert_eq!(show_all_label(None, 3), None);
+    }
 
     #[test]
     fn scrubber_sections_come_from_the_index() {

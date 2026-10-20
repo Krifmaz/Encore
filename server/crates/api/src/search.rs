@@ -84,11 +84,12 @@ pub struct LibSearchQ {
     limit: Option<usize>,
 }
 
-/// GET /api/library/search?q=: {top: {kind, item}, songs, albums, artists} over the library (the phone's
-/// Search tab and Discover's "In your library" row).
+/// GET /api/library/search?q=&limit=: {top: {kind, item}, songs, albums, artists, counts} over the library
+/// (the Library page's results view, the phone's Search tab, Discover's "In your library"); `limit` per
+/// section, 1–50 (default 30).
 pub async fn library_search_route(State(st): State<AppState>, User(u): User, Query(a): Query<LibSearchQ>) -> ApiResult<Json<Value>> {
     let q = a.q.trim().to_string();
-    let n = a.limit.unwrap_or(30).clamp(1, 200);
+    let n = a.limit.unwrap_or(30).clamp(1, SEARCH_MAX);
     st.blocking(move |st| {
         let mut v = library_search(st, &q, n)?;
         crate::enrich::enrich_now(st, Some(&u), &mut v);

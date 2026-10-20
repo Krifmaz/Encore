@@ -374,6 +374,7 @@ private fun LastfmDialog(api: SettingsApi, onDismiss: () -> Unit, onSignIn: () -
     var user by remember { mutableStateOf("") }
     FormDialog("Connect Last.fm", onDismiss = onDismiss) {
         Muted("Sign in on last.fm and allow Encore – then everything you play here is scrobbled, and For you suggests artists from your listening.")
+        Muted("Only approve Encore on Last.fm when you started the sign-in yourself.")
         EncoreButton("Sign in with Last.fm", iconRes = R.drawable.ic_link, primary = true) { onSignIn() }
         TextLink("Or just enter a username (loved tracks and recommendations, no scrobbling)", color = MaterialTheme.palette.muted) { more = !more }
         if (more) {

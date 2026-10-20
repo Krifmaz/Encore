@@ -1,5 +1,6 @@
 //! Port of web/js/pages/admin.js (renderInvites) – see docs/archive/ui-rewrite/CONTRACT.md
 //! Settings → Invites: the sign-up mode, the invites table and New invite.
+use super::schema_form::{env_locked, env_note};
 use super::users::{form_entries, js_plus, must};
 use crate::api;
 use crate::app::{Ctx, PageFuture};
@@ -39,6 +40,18 @@ fn invite_row(i: &Value, now: f64) -> String {
         icon("trash"))
 }
 
+/// The Sign-up mode card's content: its title and the three modes, locked (with the Server pages' note) when an
+/// environment variable sets the mode.
+fn signup_mode_html(settings: &Value) -> String {
+    const MODES: [(&str, &str); 3] = [("invite", "Invite only"), ("open", "Open"), ("closed", "Closed")];
+    let meta = settings.o("_meta");
+    let dis = if env_locked(&meta, "signup_mode") { "disabled" } else { "" };
+    format!(r#"<div><b>Sign-up mode</b><div class="small muted">Who is allowed to create an account on the login page.</div>{}</div>
+      <div class="tabs" id="mode">{}</div>"#,
+        env_note(&meta, "signup_mode"),
+        MODES.iter().map(|(k, l)| format!(r#"<button data-m="{k}" class="{}" {dis}>{l}</button>"#, if settings.s("signup_mode") == *k { "active" } else { "" })).collect::<String>())
+}
+
 /// The `load` of renderInvites: `GET /admin/invites` into the table (or the empty state).
 async fn load_invites(bx: &Element) -> Result<(), String> {
     let rows = api::get("/admin/invites").await.map_err(|e| e.message)?;
@@ -56,22 +69,20 @@ async fn load_invites(bx: &Element) -> Result<(), String> {
 pub fn render_invites(view: Element, _ctx: Ctx) -> PageFuture {
     Box::pin(async move {
         let settings = api::get("/admin/settings").await.map_err(|e| e.message)?;
-        const MODES: [(&str, &str); 3] = [("invite", "Invite only"), ("open", "Open"), ("closed", "Closed")];
         set_html(&view, &format!(r#"
     <div class="row wrap between" style="margin-bottom:18px">
       <div><h1>Invites</h1><div class="small muted">Share an invite link so friends can create an account.</div></div>
       <button class="btn primary" id="new">{}New invite</button>
     </div>
     <div class="card row wrap between" style="margin-bottom:18px">
-      <div><b>Sign-up mode</b><div class="small muted">Who is allowed to create an account on the login page.</div></div>
-      <div class="tabs" id="mode">{}</div>
+      {}
     </div>
-    <div class="card flat" id="inv"></div>"#, icon("plus"),
-            MODES.iter().map(|(k, l)| format!(r#"<button data-m="{k}" class="{}">{l}</button>"#, if settings.s("signup_mode") == *k { "active" } else { "" })).collect::<String>()));
+    <div class="card flat" id="inv"></div>"#, icon("plus"), signup_mode_html(&settings)));
         {
             let v = view.clone();
             dom::on_sel(&view, "#mode", "click", move |e| {
                 let Some(b) = dom::closest(e, "[data-m]") else { return };
+                if b.has_attribute("disabled") { return; }   // set by an environment variable
                 let v = v.clone();
                 dom::spawn(async move {
                     if api::put("/admin/settings", json!({ "signup_mode": dom::data(&b, "m") })).await.is_err() { return; }
@@ -150,4 +161,21 @@ pub fn render_invites(view: Element, _ctx: Ctx) -> PageFuture {
         }
         load_invites(&bx).await
     })
+}
+
+#[cfg(test)]
+mod signup_mode_tests {
+    use super::*;
+
+    #[test]
+    fn a_mode_set_by_the_environment_is_locked() {
+        let s = json!({ "signup_mode": "open", "_meta": { "signup_mode": { "source": "env", "env": "ENCORE_SIGNUP_MODE" } } });
+        let html = signup_mode_html(&s);
+        assert_eq!(html.matches("disabled").count(), 3, "{html}");
+        assert!(html.contains(r#"<button data-m="open" class="active" disabled>Open</button>"#), "{html}");
+        assert!(html.contains(r#"🔒 Set by <span class="mono">ENCORE_SIGNUP_MODE</span>"#), "{html}");
+        let html = signup_mode_html(&json!({ "signup_mode": "invite", "_meta": { "signup_mode": { "source": "ui", "env": "ENCORE_SIGNUP_MODE" } } }));
+        assert!(!html.contains("disabled") && !html.contains("🔒"), "{html}");
+        assert!(html.contains(r#"<button data-m="invite" class="active" >Invite only</button>"#), "{html}");
+    }
 }

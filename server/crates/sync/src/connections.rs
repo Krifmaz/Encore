@@ -93,11 +93,15 @@ pub fn token_exchange_error(service: &str, status: u16, body: &str) -> String {
 
 // ---- OAuth (Spotify / Tidal, PKCE) ----------------------------------------------------------------
 
-pub fn oauth_start(st: &impl Ctx, uid: i64, service: &str) -> anyhow::Result<String> {
-    let verifier: String = encore_core::ids::random_token(64).chars().take(96).collect();
+/// A new PKCE code verifier (96 URL-safe characters): kept with the sign-in's state until the callback.
+pub fn pkce_verifier() -> String {
+    encore_core::ids::random_token(72).chars().take(96).collect()
+}
+
+/// The Spotify / Tidal sign-in page for the single-use `state` the caller keeps (with `verifier`) until the
+/// callback comes back with it.
+pub fn oauth_url(st: &impl Ctx, service: &str, state: &str, verifier: &str) -> anyhow::Result<String> {
     let challenge = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(Sha256::digest(verifier.as_bytes()));
-    let state = encore_core::ids::random_token(24);
-    st.cache_put(&format!("oauth:{state}"), json!({ "user_id": uid, "service": service, "verifier": verifier }), 900);
     let (base, cid, scope) = match service {
         "spotify" => ("https://accounts.spotify.com/authorize", st.cfg().str("spotify_client_id"), "playlist-read-private playlist-read-collaborative user-library-read"),
         "tidal" => ("https://login.tidal.com/authorize", st.cfg().str("tidal_client_id"), "user.read collection.read playlists.read"),
@@ -107,18 +111,21 @@ pub fn oauth_start(st: &impl Ctx, uid: i64, service: &str) -> anyhow::Result<Str
         anyhow::bail!("The admin needs to add a {} Client ID in Settings → Integrations{}", service_label(service), register_hint(st, service));
     }
     let q = [("client_id", cid), ("response_type", "code".into()), ("redirect_uri", redirect_uri(st, service)?), ("code_challenge_method", "S256".into()),
-             ("code_challenge", challenge), ("state", state), ("scope", scope.into())];
+             ("code_challenge", challenge), ("state", state.to_string()), ("scope", scope.into())];
     Ok(format!("{base}?{}", q.iter().map(|(k, v)| format!("{k}={}", urlencoding::encode(v))).collect::<Vec<_>>().join("&")))
 }
 
-pub async fn oauth_finish(st: &impl Ctx, service: &str, code: &str, state: &str, uid: i64) -> anyhow::Result<()> {
-    let key = format!("oauth:{state}");
-    let pend = st.cache_get(&key).filter(|p| p["service"] == service && p["user_id"].as_i64() == Some(uid))
-        .ok_or_else(|| anyhow::anyhow!("Sign-in expired or was started in another session – try again"))?;
-    st.cache_put(&key, Value::Null, 0);
-    let (url, cid) = if service == "spotify" { ("https://accounts.spotify.com/api/token", st.cfg().str("spotify_client_id")) } else { ("https://auth.tidal.com/v1/oauth2/token", st.cfg().str("tidal_client_id")) };
+/// The callback's code exchanged for tokens (with the sign-in's PKCE `verifier`) → (the account's name, the
+/// connection's data). Nothing is saved: the caller links it to the user the sign-in's state names
+/// ([`save`]), at once or after the browser confirmed it.
+pub async fn oauth_exchange(st: &impl Ctx, service: &str, code: &str, verifier: &str) -> anyhow::Result<(String, Value)> {
+    let (url, cid) = match service {
+        "spotify" => ("https://accounts.spotify.com/api/token", st.cfg().str("spotify_client_id")),
+        "tidal" => ("https://auth.tidal.com/v1/oauth2/token", st.cfg().str("tidal_client_id")),
+        _ => anyhow::bail!("Unsupported sign-in service"),
+    };
     let r = st.http().post(url).form(&[("grant_type", "authorization_code"), ("code", code), ("redirect_uri", &redirect_uri(st, service)?),
-        ("client_id", &cid), ("code_verifier", pend["verifier"].as_str().unwrap_or(""))]).send().await
+        ("client_id", &cid), ("code_verifier", verifier)]).send().await
         .map_err(|e| anyhow::anyhow!("{} could not be reached from this server: {e}", service_label(service)))?;
     let status = r.status().as_u16();
     let body = r.text().await.unwrap_or_default();
@@ -129,15 +136,14 @@ pub async fn oauth_finish(st: &impl Ctx, service: &str, code: &str, state: &str,
     let expires = now() + tok["expires_in"].as_f64().unwrap_or(3600.0);
     if service == "spotify" {
         let me: Value = st.http().get("https://api.spotify.com/v1/me").bearer_auth(access).send().await?.json().await?;
-        let name = me["display_name"].as_str().or(me["id"].as_str()).unwrap_or("Spotify");
-        save(st, uid, "spotify", name, &json!({ "access_token": access, "refresh_token": tok["refresh_token"], "expires": expires, "user_id": me["id"] }))?;
+        let name = me["display_name"].as_str().or(me["id"].as_str()).unwrap_or("Spotify").to_string();
+        Ok((name, json!({ "access_token": access, "refresh_token": tok["refresh_token"], "expires": expires, "user_id": me["id"] })))
     } else {
         let tuid = tok["user_id"].as_i64().map(|x| x.to_string()).or(tok["user"]["userId"].as_i64().map(|x| x.to_string())).unwrap_or_default();
         let name = tok["user"]["username"].as_str().map(String::from).unwrap_or(if tuid.is_empty() { "Tidal".into() } else { tuid.clone() });
-        save(st, uid, "tidal", &name, &json!({ "access_token": access, "refresh_token": tok["refresh_token"], "expires": expires, "user_id": tuid,
-            "country": tok["user"]["countryCode"].as_str().unwrap_or("US") }))?;
+        Ok((name, json!({ "access_token": access, "refresh_token": tok["refresh_token"], "expires": expires, "user_id": tuid,
+            "country": tok["user"]["countryCode"].as_str().unwrap_or("US") })))
     }
-    Ok(())
 }
 
 async fn refresh(st: &impl Ctx, c: &Row, url: &str, client_id: &str) -> Option<String> {
@@ -313,21 +319,26 @@ pub async fn connect_listenbrainz(st: &impl Ctx, uid: i64, token: &str) -> anyho
     Ok(json!({ "account": name }))
 }
 
-/// Last.fm sign-in (needs the shared secret): the user approves Encore on last.fm and comes back with a token.
-pub fn lastfm_start(st: &impl Ctx) -> anyhow::Result<String> {
+/// Last.fm sign-in (needs the shared secret): the user approves Encore on last.fm and comes back to the callback
+/// with a token; `state` (the caller's single-use sign-in state) rides along in the callback address, as
+/// Last.fm keeps the address's query and adds `&token=…`. Last.fm takes `cb` from the link as given and does not
+/// tie the token to it, so whoever starts a sign-in can send the approval to an address of their own: the
+/// confirmation page of crates/api signin.rs can't protect a Last.fm sign-in, only the approval on last.fm does.
+pub fn lastfm_start(st: &impl Ctx, state: &str) -> anyhow::Result<String> {
     let key = st.cfg().str("lastfm_api_key");
     if key.is_empty() || st.cfg().str("lastfm_shared_secret").is_empty() {
         anyhow::bail!("The admin needs to add the Last.fm API key and shared secret in Settings → Integrations");
     }
-    let cb = redirect_uri(st, "lastfm")?;
+    let cb = format!("{}?state={}", redirect_uri(st, "lastfm")?, urlencoding::encode(state));
     Ok(format!("https://www.last.fm/api/auth/?api_key={}&cb={}", urlencoding::encode(&key), urlencoding::encode(&cb)))
 }
 
-pub async fn lastfm_finish(st: &impl Ctx, uid: i64, token: &str) -> anyhow::Result<Value> {
+/// The callback's token exchanged for a Last.fm session → (the account's name, the connection's data). Nothing
+/// is saved: the caller links it to the user the sign-in's state names ([`save`]).
+pub async fn lastfm_session(st: &impl Ctx, token: &str) -> anyhow::Result<(String, Value)> {
     let d = encore_http::lastfm::signed(st, "auth.getSession", vec![("token", token.to_string())]).await?;
     let (Some(name), Some(sk)) = (d["session"]["name"].as_str(), d["session"]["key"].as_str()) else { anyhow::bail!("Last.fm didn't return a session") };
-    save(st, uid, "lastfm", name, &json!({ "user": name, "sk": sk, "scrobble": true }))?;
-    Ok(json!({ "account": name }))
+    Ok((name.to_string(), json!({ "user": name, "sk": sk, "scrobble": true })))
 }
 
 pub async fn connect_lastfm(st: &impl Ctx, uid: i64, user: &str) -> anyhow::Result<Value> {

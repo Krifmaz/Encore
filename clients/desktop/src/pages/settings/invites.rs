@@ -1,12 +1,12 @@
 //! Settings → Invites. Behaviour reference: web-rs/src/pages/admin.rs `render_invites`: the sign-up
 //! mode, the invites table (code, uses, role, expires, used by, Copy link, delete) and New invite.
 
-use super::{help, input, js_plus, select_table};
+use super::{env_locked, env_note, help, input, js_plus, select_table};
 use crate::api::ApiError;
 use crate::fmt;
 use crate::pages::{Ctx, El};
 use crate::theme::{self, Badge, Btn};
-use crate::widgets::{self, badge, btn, btn_icon, icon_btn, modal, small_muted, t, tabs, Icon};
+use crate::widgets::{self, badge, btn, btn_icon, icon_btn, modal, small_muted, t, tabs_maybe, Icon};
 use iced::widget::{column, container, row};
 use iced::{Alignment, Length, Task};
 use serde_json::{json, Value};
@@ -86,6 +86,8 @@ pub fn update(state: &mut State, msg: Message, ctx: &mut Ctx) -> Task<Message> {
         Message::Invites(Err(e)) => state.error = e.message,
         Message::Settings(Ok(v)) => state.settings = v,
         Message::Settings(Err(_)) => {}
+        // set by an environment variable: never sent (the environment would win at the next start)
+        Message::Mode(_) if env_locked(&state.settings, "signup_mode") => {}
         Message::Mode(m) => {
             let api = ctx.api.clone();
             let body = json!({ "signup_mode": m });
@@ -209,6 +211,17 @@ fn invite_row<'a>(i: &'a Value, now: f64, p: crate::theme::Palette) -> El<'a, Me
     column![container(r).padding([10, 14]), widgets::divider()].into()
 }
 
+/// The Sign-up mode card's content: its title and the three modes, locked (with the Server pages' note) when an
+/// environment variable sets the mode.
+fn signup_mode<'a>(settings: &Value) -> El<'a, Message> {
+    let locked = env_locked(settings, "signup_mode");
+    let mut title = column![t("Sign-up mode").size(14).font(theme::bold()), help("Who is allowed to create an account on the login page.")].spacing(2);
+    if let Some(note) = env_note(settings, "signup_mode") {
+        title = title.push(help(note));
+    }
+    super::between(title.into(), tabs_maybe(&MODES, &fmt::s(settings, "signup_mode"), (!locked).then_some(Message::Mode)))
+}
+
 pub fn view<'a>(state: &'a State, ctx: &Ctx<'a>) -> El<'a, Message> {
     if !state.error.is_empty() {
         return widgets::error_box(&state.error);
@@ -218,11 +231,7 @@ pub fn view<'a>(state: &'a State, ctx: &Ctx<'a>) -> El<'a, Message> {
         Some(help("Share an invite link so friends can create an account.").into()),
         vec![btn_icon(Icon::Plus, "New invite", Btn::Primary, Some(Message::OpenNew)).into()],
     );
-    let mode = widgets::card(super::between(
-        column![t("Sign-up mode").size(14).font(theme::bold()), help("Who is allowed to create an account on the login page.")].spacing(2).into(),
-        tabs(&MODES, &fmt::s(&state.settings, "signup_mode"), Message::Mode),
-    ))
-    .width(Length::Fill);
+    let mode = widgets::card(signup_mode(&state.settings)).width(Length::Fill);
     let now = super::now_s();
     let table: El<'a, Message> = match &state.invites {
         None => widgets::skeleton_rows(3),
@@ -304,6 +313,25 @@ pub fn overlay<'a>(state: &'a State, ctx: &Ctx<'a>) -> Option<El<'a, Message>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_mode_set_by_the_environment_is_locked() {
+        let s = json!({ "signup_mode": "open", "_meta": { "signup_mode": { "source": "env", "env": "ENCORE_SIGNUP_MODE" } } });
+        assert!(env_locked(&s, "signup_mode"));
+        assert_eq!(env_note(&s, "signup_mode").as_deref(), Some("🔒 Set by ENCORE_SIGNUP_MODE in your compose/env – change it there (environment always wins)"));
+        let _ = signup_mode(&s);
+        let ui = json!({ "signup_mode": "invite", "_meta": { "signup_mode": { "source": "ui", "env": "ENCORE_SIGNUP_MODE" } } });
+        assert!(!env_locked(&ui, "signup_mode") && env_note(&ui, "signup_mode").is_none());
+        assert!(!env_locked(&json!({ "signup_mode": "invite" }), "signup_mode"), "without _meta: editable");
+        // a press on a locked mode sends nothing; an editable one is saved
+        super::super::with_test_ctx(|ctx| {
+            let mut state = State { settings: s.clone(), ..Default::default() };
+            assert_eq!(update(&mut state, Message::Mode("closed".into()), ctx).units(), 0, "nothing was sent");
+            assert_eq!(state.settings["signup_mode"], "open");
+            let mut state = State { settings: ui.clone(), ..Default::default() };
+            assert_eq!(update(&mut state, Message::Mode("closed".into()), ctx).units(), 1);
+        });
+    }
 
     #[test]
     fn links_and_liveness() {

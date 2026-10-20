@@ -32,6 +32,8 @@ pub enum Step {
     Config,
     /// starting a program
     Start,
+    /// the admin file manager (encore-files): browse, upload, move, rename, trash
+    Files,
 }
 
 impl Step {
@@ -43,11 +45,12 @@ impl Step {
             Step::Import => "import",
             Step::Config => "config",
             Step::Start => "start",
+            Step::Files => "files",
         }
     }
 
     pub fn parse(s: &str) -> Option<Step> {
-        [Step::Download, Step::Stage, Step::Import, Step::Config, Step::Start].into_iter().find(|x| x.as_str() == s)
+        [Step::Download, Step::Stage, Step::Import, Step::Config, Step::Start, Step::Files].into_iter().find(|x| x.as_str() == s)
     }
 
     /// The words that start the error ("import failed").
@@ -58,6 +61,7 @@ impl Step {
             Step::Import => "import failed",
             Step::Config => "config failed",
             Step::Start => "start failed",
+            Step::Files => "file operation failed",
         }
     }
 }

@@ -156,3 +156,31 @@ fn junk_words_the_query_asked_for_are_not_junk() {
     assert!(junk(&["Tribute (Karaoke Version)", "Sing King", ""], &fold("tenacious d tribute")));
     assert!(junk(&["Blinding Lights (Lullaby Version)", "Rockabye Baby!", ""], &fold("the weeknd blinding lights")));
 }
+
+#[test]
+fn initials_spell_the_first_letters_of_a_names_words() {
+    use crate::artists::fold;
+    let sp = |w: &str, name: &str| spells(w, &fold(name));
+    assert!(sp("gb", "Gnarls Barkley"));
+    assert!(sp("atcq", "A Tribe Called Quest"));
+    assert!(sp("rhcp", "Red Hot Chili Peppers"));
+    assert!(sp("rhcp", "The Red Hot Chili Peppers"));
+    assert!(sp("trhcp", "The Red Hot Chili Peppers"));
+    assert!(sp("ewf", "Earth, Wind & Fire"));
+    assert!(sp("ewaf", "Earth, Wind & Fire"));
+    assert!(sp("dsotm", "The Dark Side of the Moon"));
+    assert!(sp("sas", "Southern All Stars"));
+    assert!(sp("jz", "Jay-Z"));
+    // every word, in order, nothing more
+    assert!(!sp("gb", "Gnarls Barkley Band"));
+    assert!(!sp("bg", "Gnarls Barkley"));
+    assert!(!sp("go", "Go"));
+    assert!(!sp("go", "Gorillaz"));
+    // which query words can be initials: 2–6 letters of an alphabet with capitals
+    for w in ["gb", "atcq", "rhcp", "dsotm", "go", "αβ", "бг"] {
+        assert!(initials_word(w), "{w}");
+    }
+    for w in ["g", "abcdefg", "4ad", "真夏", "いと", "a b"] {
+        assert!(!initials_word(w), "{w}");
+    }
+}

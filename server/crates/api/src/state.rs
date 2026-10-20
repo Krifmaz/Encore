@@ -93,6 +93,9 @@ pub struct Web {
     /// held while Home's new releases are made with nothing kept yet (60 Deezer look-ups), so callers that
     /// arrive together wait for one answer instead of making one each
     pub(crate) new_releases: Arc<tokio::sync::Mutex<()>>,
+    /// sign-ins with Spotify, Tidal, Last.fm and MusicBrainz in progress: their single-use states and
+    /// confirmation pages, each for 10 minutes (crate::signin)
+    pub(crate) sign_ins: Arc<crate::signin::SignIns>,
 }
 
 /// How long the Storage page's folder sizes and disk usage are reused before they are worked out again (in
@@ -115,6 +118,7 @@ impl Default for Web {
             slskd_probe: Refreshed::new(SLSKD_PROBE_EVERY),
             perf: Default::default(),
             new_releases: Default::default(),
+            sign_ins: Default::default(),
         }
     }
 }

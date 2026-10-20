@@ -274,6 +274,7 @@ fn connect(svc: &str, d: &Value, admin: bool) {
 /// `connectLastfm()`: sign in on last.fm, or just a username.
 fn connect_lastfm() {
     let m = modal(ModalOpts::new("Connect Last.fm", &format!(r#"<p class="muted" style="margin-top:0">Sign in on last.fm and allow Encore – then everything you play here is scrobbled, and For you suggests artists from your listening.</p>
+      <p class="small muted">Only approve Encore on Last.fm when you started the sign-in yourself.</p>
       <button class="btn primary" id="lf-auth">{}Sign in with Last.fm</button>
       <details class="mt"><summary class="small muted" style="cursor:pointer">Or just enter a username (loved tracks and recommendations, no scrobbling)</summary>
         <div class="row mt" style="gap:8px"><input class="input grow" id="lf-user" placeholder="Last.fm username"><button class="btn" id="lf-ok">Connect</button></div></details>"#, icon("link"))));

@@ -66,6 +66,7 @@ fn embedded(id: &str) -> Option<app::PageFn> {
         "contribute" => crate::pages::contribute::render,
         "blocked" => crate::pages::report::render,
         "diagnostics" => diagnostics::render,
+        "files" => crate::pages::files::render,
         _ => return None,
     })
 }
@@ -118,7 +119,7 @@ pub fn render(view: Element, ctx: Ctx) -> PageFuture {
         if admin {
             nav.push(("People", vec![("users", "Users & permissions"), ("invites", "Invites")]));
             nav.push(("Server", schema.sections.iter().map(|x| (x.id.as_str(), x.title.as_str())).collect()));
-            nav.push(("System", vec![("diagnostics", "Diagnostics")]));
+            nav.push(("System", vec![("diagnostics", "Diagnostics"), ("files", "Files")]));
         }
         let pages: Vec<&str> = nav.iter().flat_map(|(_, items)| items.iter().map(|(id, _)| *id)).collect();
         if !pages.iter().any(|p| *p == current) { current = "account".to_string(); }

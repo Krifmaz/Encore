@@ -11,6 +11,7 @@ pub mod app;
 pub mod appearance;
 pub mod details;
 pub mod dom;
+pub mod group;
 pub mod json;
 pub mod num;
 pub mod offline;

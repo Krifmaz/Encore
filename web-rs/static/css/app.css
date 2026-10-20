@@ -377,6 +377,8 @@ button.badge { font: inherit; font-size: 11px; cursor: pointer; }
 /* ---------- misc ---------- */
 .empty { text-align: center; padding: 50px 20px; color: var(--muted); }
 .empty svg { width: 46px; height: 46px; color: var(--faint); margin-bottom: 10px; }
+/* a button in an empty state ("Search everywhere") keeps a button's icon */
+.empty .btn svg { width: 16px; height: 16px; color: inherit; margin-bottom: 0; }
 .skeleton { background: linear-gradient(90deg, var(--panel) 0%, var(--panel-2) 50%, var(--panel) 100%); background-size: 200% 100%; animation: shimmer 1.2s infinite; border-radius: 12px; }
 @keyframes shimmer { to { background-position: -200% 0; } }
 .spinner { width: 18px; height: 18px; border: 2px solid var(--border); border-top-color: var(--accent); border-radius: 50%; animation: spin .7s linear infinite; display: inline-block; }
@@ -517,9 +519,38 @@ body.np-open { overflow: hidden; }
 .np-lyrics, .np-queue { min-height: 0; overflow-y: auto; }
 .np-body.pane-now .np-lyrics, .np-body.pane-queue .np-lyrics, .np-body.pane-lyrics .np-queue, .np-body.pane-now .np-queue { display: none; }
 .np-body.pane-now .np-queue { display: block; }
-.np-lyrics { padding: 30vh 8px; mask-image: linear-gradient(transparent, #000 18%, #000 82%, transparent); }
+/* positioned, so a line's offsetTop is measured from the lyrics' own top (lyrics.rs keeps the line sung in the middle) */
+.np-lyrics { position: relative; padding: 30vh 8px; mask-image: linear-gradient(transparent, #000 18%, #000 82%, transparent); -webkit-mask-image: linear-gradient(transparent, #000 18%, #000 82%, transparent); }
 .np-lyrics p { font-size: 24px; font-weight: 700; line-height: 1.35; margin: 0 0 18px; color: var(--muted); opacity: .55; cursor: pointer; transition: opacity .2s, color .2s; }
+.np-lyrics p.past { opacity: .3; }
 .np-lyrics p.on { opacity: 1; color: var(--text); }
+/* lyrics mode (player/full.rs): the big cover gives way to a compact bar at the top and the lyrics take the column */
+.np-mini, .np-back { display: none; }
+.np-body.pane-lyrics { display: flex; flex-direction: column; gap: 6px; width: min(860px, 100%); margin: 0 auto; padding: 4px 28px 18px; }
+.np-body.pane-lyrics .np-main { display: none; }
+.np-body.pane-lyrics .np-mini { display: grid; grid-template-columns: 56px minmax(0, 1fr) auto; align-items: center; gap: 8px 14px; padding: 0 4px; animation: np-mini-in .3s ease-out; }
+.np-mini-art { width: 56px; height: 56px; padding: 0; border: 0; border-radius: 8px; background: none; cursor: pointer; box-shadow: 0 8px 22px rgba(0,0,0,.35); }
+.np-body.pane-lyrics .np-mini-art { animation: np-thumb-in .36s ease-out; transform-origin: top left; }
+.np-mini-art .thumb { width: 56px; height: 56px; border-radius: 8px; }
+.np-mini-art:hover .thumb, .np-mini-art:focus-visible .thumb { outline: 2px solid var(--accent); }
+.np-mini-meta { min-width: 0; }
+.np-mini-title { font-weight: 650; font-size: 17px; }
+.np-mini .play-btn { width: 44px; height: 44px; }
+#lseek { grid-column: 1 / -1; -webkit-appearance: none; appearance: none; width: 100%; height: 14px; margin: 0; background: transparent; cursor: pointer; touch-action: none; --p: 0%; }
+#lseek::-webkit-slider-runnable-track { height: 3px; border-radius: 99px; background: linear-gradient(90deg, var(--accent) var(--p), var(--border) var(--p)); }
+#lseek::-moz-range-track { height: 3px; border-radius: 99px; background: linear-gradient(90deg, var(--accent) var(--p), var(--border) var(--p)); }
+#lseek::-webkit-slider-thumb { -webkit-appearance: none; width: 11px; height: 11px; margin-top: -4px; border-radius: 50%; background: var(--text); }
+#lseek::-moz-range-thumb { width: 11px; height: 11px; border-radius: 50%; background: var(--text); border: 0; }
+/* the lines' box is the panel less the bar above (about 70px) and the button below (about 40px): half the panel less 90px
+   puts the first line in the middle before it is sung, and lets the first and last lines be scrolled to the middle */
+.np-body.pane-lyrics { container-type: size; }
+.np-body.pane-lyrics .np-lyrics { display: block; flex: 1; min-height: 0; padding: 24vh 8px; padding: calc(50cqh - 90px) 8px; animation: fade .3s; }
+.np-body.pane-lyrics .np-lyrics p { font-size: 30px; line-height: 1.3; margin-bottom: 20px; }
+.np-body.pane-lyrics .np-lyrics .np-plain { font-size: 22px; }
+.np-body.pane-lyrics .np-back { display: flex; justify-content: center; padding-top: 4px; }
+.np-back .btn { background: color-mix(in srgb, var(--panel-2) 85%, transparent); }
+@keyframes np-mini-in { from { opacity: 0; transform: translateY(-10px); } }
+@keyframes np-thumb-in { from { transform: scale(2.4); opacity: .3; } }
 .np-lyrics .np-plain { white-space: pre-wrap; font-size: 18px; line-height: 1.6; }
 .np-lyrics .np-empty { padding-top: 10vh; text-align: center; }
 .np-queue h3 { margin: 6px 0 10px; }
@@ -532,12 +563,29 @@ body.np-open { overflow: hidden; }
   .np-body { display: block; padding: 6px 18px 18px; overflow-y: auto; }
   .np-body .np-main, .np-body .np-lyrics, .np-body .np-queue { display: none !important; }
   .np-body.pane-now .np-main { display: flex !important; min-height: 100%; }
-  .np-body.pane-lyrics .np-lyrics { display: block !important; height: 100%; padding: 25vh 4px; }
+  .np-body.pane-lyrics { display: flex; overflow: hidden; padding: 2px 16px 12px; }
+  .np-body.pane-lyrics .np-lyrics { display: block !important; height: auto; padding: 18vh 4px; }
+  .np-body.pane-lyrics .np-lyrics p { font-size: 26px; }
+  .np-body.pane-lyrics .np-lyrics .np-plain { font-size: 20px; }
   .np-body.pane-queue .np-queue { display: block !important; }
   .np-art { width: min(82vw, 46vh); }
   .np-meta h2 { font-size: 21px; }
-  .np-lyrics p { font-size: 21px; }
   .player .right .btn#p-queue { display: inline-flex; }
+}
+/* long titles scroll (player/marquee.rs): the line reaches the fade's width to its left, so a line resting at the start
+   shows its first letter in full; a copy of the text follows after the gap, and each round ends where the next begins */
+.mq.mq-run { text-overflow: clip; text-align: left; margin-left: -12px;
+  -webkit-mask-image: linear-gradient(90deg, transparent, #000 12px, #000 calc(100% - 12px), transparent);
+  mask-image: linear-gradient(90deg, transparent, #000 12px, #000 calc(100% - 12px), transparent); }
+.mq-run > .mq-in { display: inline-block; padding-left: 12px; animation: mq-a var(--marquee-time, 10s) linear 1.5s 1 both; will-change: transform; }
+.mq-run > .mq-in.mq-alt { animation-name: mq-b; }
+.mq-run > .mq-in::after { content: attr(data-mq); content: attr(data-mq) / ""; padding-left: var(--marquee-gap, 48px); }
+@keyframes mq-a { from { transform: translateX(0); } to { transform: translateX(calc(-1 * var(--marquee-dist, 0px))); } }
+@keyframes mq-b { from { transform: translateX(0); } to { transform: translateX(calc(-1 * var(--marquee-dist, 0px))); } }
+@media (prefers-reduced-motion: reduce) {
+  .mq.mq-run { text-overflow: ellipsis; margin-left: 0; -webkit-mask-image: none; mask-image: none; }
+  .mq-run > .mq-in { display: inline; padding-left: 0; animation: none; }
+  .mq-run > .mq-in::after { content: none; }
 }
 .art-grid { grid-template-columns: repeat(auto-fill, minmax(140px, 1fr)); }
 .art-pick { background: none; border: 1px solid transparent; border-radius: 12px; padding: 6px; cursor: pointer; text-align: left; color: inherit; }
@@ -765,3 +813,29 @@ body.offline-mode .shell { min-height: calc(100vh - var(--offline-bar)); }
 .pk-found .linkish { background: none; border: 0; padding: 0; font: inherit; color: var(--accent); cursor: pointer; }
 .pk-found .linkish:hover { text-decoration: underline; }
 .pk-again-err { margin: 0 0 8px; }
+
+/* ---------- group listen (0.31): the pill, Paused here · Catch up, the group's dialog, Home's row, the guest page ---------- */
+.group-pill { gap: 5px; cursor: pointer; font: inherit; font-size: 11.5px; }
+.group-pill svg { flex: none; }
+/* the pill stays on phones, where the bar hides its other badges */
+.player .right .badge.group-pill { display: inline-flex; }
+.group-paused { display: flex; align-items: center; gap: 4px; color: var(--accent); font-weight: 600; min-width: 0; }
+.group-paused .linkish { background: none; border: 0; padding: 0; font: inherit; color: var(--accent); cursor: pointer; text-decoration: underline; }
+.np-meta .group-paused { justify-content: center; margin-top: 8px; }
+.np-top-r { display: flex; align-items: center; justify-content: flex-end; gap: 8px; min-width: 0; }
+/* a control the member may not use: dimmed, its reason as the tooltip */
+.player button:disabled, .np-full button:disabled, .player input:disabled, .np-full input:disabled { opacity: .4; cursor: not-allowed; }
+.card.group-code { display: flex; flex-direction: column; align-items: center; gap: 6px; padding: 14px; }
+.group-code-v { font-family: ui-monospace, monospace; font-weight: 800; font-size: 30px; letter-spacing: .06em; }
+.group-tile .group-host { position: absolute; left: 8px; bottom: 8px; border-radius: 50%; box-shadow: 0 0 0 3px var(--bg); }
+.group-tile .group-host .avatar { display: grid; }
+.guest-card { max-width: 460px; }
+.guest-art { position: relative; width: min(260px, 70vw); aspect-ratio: 1; margin: 0 auto; border-radius: 14px; overflow: hidden; background: var(--panel-2); box-shadow: var(--shadow); }
+.guest-art > img { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: cover; }
+.guest-seek { display: flex; align-items: center; gap: 10px; margin-top: 10px; font-size: 12px; color: var(--faint); font-variant-numeric: tabular-nums; }
+.guest-line { flex: 1; height: 5px; border-radius: 99px; background: var(--border); overflow: hidden; }
+.guest-line i { display: block; height: 100%; width: 0; background: var(--accent); transition: width .4s linear; }
+@media (max-width: 760px) {
+  .group-code-v { font-size: 26px; }
+  .guest-card { padding: 22px 18px; }
+}

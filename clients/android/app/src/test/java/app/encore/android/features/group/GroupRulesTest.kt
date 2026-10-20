@@ -145,6 +145,103 @@ class GroupRulesTest {
         assertFalse(GroupRules.comings(after.copy(youMember = "m5b"), me).any { it.startsWith("Sam") })
     }
 
+    /**
+     * The first `state` event the 0.31 server sent in a smoke run of the real binary (two devices of one account, three
+     * songs; song rows straight from SQLite, with nulls). The next two events of that run came 3 s and 6 s later with
+     * `index` 1 and 2 at `position` 0: the server moves on at a song's end with `anchor_ms` at that moment, which is
+     * exactly where the phone's own prediction puts the group.
+     */
+    private val fromTheServer = """{"anchor_ms":1792503497853,"boot":"0e9336","code":"J68ANU","everyone_controls":false,"guests_allowed":false,"guests_possible":false,"host":{"avatar":"","name":"admin","user":1},"id":"g_b442cdbc96998cf60bc8","index":0,"invite_url":"http://localhost:18931/#/group/J68ANU","max_members":20,"members":[{"avatar":"","device_name":"Smoke PC","guest":false,"host":true,"joined_at":1792503497,"member":"m1","name":"admin","user":1},{"avatar":"","device_name":"Smoke phone","guest":false,"host":false,"joined_at":1792503497,"member":"m2","name":"admin","user":1}],"playing":true,"position":0.0,"queue":[{"added_by":{"guest":false,"name":"admin","user":1},"album":"Record","album_id":"al1","albumartist":null,"artist":"Band","artists":[{"in_library":false,"name":"Band"}],"bitrate":null,"disc":null,"duration":3.0,"format":"mp3","id":1,"qid":"q1","title":"Song 1","track":null,"year":null},{"added_by":{"guest":false,"name":"admin","user":1},"album":"Record","album_id":"al1","albumartist":null,"artist":"Band","artists":[{"in_library":false,"name":"Band"}],"bitrate":null,"disc":null,"duration":3.0,"format":"mp3","id":2,"qid":"q2","title":"Song 2","track":null,"year":null},{"added_by":{"guest":false,"name":"admin","user":1},"album":"Record","album_id":"al1","albumartist":null,"artist":"Band","artists":[{"in_library":false,"name":"Band"}],"bitrate":null,"disc":null,"duration":100.0,"format":"mp3","id":3,"qid":"q3","title":"Song 3","track":null,"year":null}],"rev":2,"server_max_members":20,"started_at":1792503497,"track":{"added_by":{"guest":false,"name":"admin","user":1},"album":"Record","album_id":"al1","albumartist":null,"artist":"Band","artists":[{"in_library":false,"name":"Band"}],"bitrate":null,"disc":null,"duration":3.0,"format":"mp3","id":1,"qid":"q1","title":"Song 1","track":null,"year":null},"visibility":"anyone","you":{"can_control":true,"host":true,"member":"m2"}}"""
+
+    @Test
+    fun readsTheServersOwnState() {
+        val s = state(fromTheServer)
+        assertEquals("g_b442cdbc96998cf60bc8", s.id)
+        assertEquals("J68ANU", s.code)
+        assertEquals(2L, s.rev)
+        assertEquals("0e9336", s.boot)
+        assertEquals("http://localhost:18931/#/group/J68ANU", GroupRules.inviteLink(s, "https://elsewhere.example"))
+        assertEquals("admin", s.hostName)
+        assertEquals(1L, s.hostUser)
+        assertEquals(listOf("q1", "q2", "q3"), s.queue.map { it.qid })
+        assertEquals("admin", s.queue[1].addedBy)
+        assertEquals(1L, s.queue[1].addedByUser)
+        // the row's nulls read as empty: no track number, the artist for the album artist, no bitrate
+        val t = s.queue[0].track
+        assertEquals("Song 1", t.title)
+        assertEquals("Band", t.albumArtist)
+        assertEquals(0, t.trackNo)
+        assertEquals(0, t.bitrate)
+        assertEquals("mp3", t.format)
+        assertEquals(3.0, t.durationSec, 0.0)
+        assertNull(t.gain)
+        assertEquals(0, t.sampleRate)
+        assertEquals(1L, s.track?.id)
+        // one account on two devices: two members; `you` is this device's membership, the account hosts
+        assertEquals(2, s.count)
+        assertEquals("m2", s.youMember)
+        assertTrue(s.youHost)
+        assertTrue(s.youCanControl)
+        assertEquals(20, s.maxMembers)
+        assertEquals(20, s.serverMax)
+        assertFalse(s.guestsPossible)
+        assertEquals("anyone", s.visibility)
+        assertEquals(1792503497853L, s.anchorMs)
+        // where the server's next two events put the group
+        assertEquals(1 to 0.0, GroupRules.expected(s, 1792503500853L))
+        assertEquals(2 to 0.0, GroupRules.expected(s, 1792503503853L))
+        assertEquals(1 to 0.5, GroupRules.expected(s, 1792503501353L))
+    }
+
+    /** §2.1's three fields on a queue row, as the server's enrichment (encore_library::loudness::stamp) writes them. */
+    @Test
+    fun queueRowsCarryLoudnessAndFormat() {
+        fun entry(json: String) = GroupEntry.from(EncoreJson.parseToJsonElement(json) as kotlinx.serialization.json.JsonObject, 0)!!
+        val hires = entry(
+            """{"id": 7, "title": "Crazy", "album_id": "al_7", "format": "flac", "duration": 178.4, "qid": "q4",
+                "added_by": {"user": 5, "name": "Sam", "guest": false},
+                "gain": {"track": -7.21, "album": -6.84, "track_peak": 0.988, "album_peak": 1.0}, "sample_rate": 96000, "bit_depth": 24}""",
+        ).track
+        assertEquals(-7.21, hires.gain!!.track!!, 0.0)
+        assertEquals(-6.84, hires.gain!!.album!!, 0.0)
+        assertEquals(0.988, hires.gain!!.trackPeak!!, 0.0)
+        assertEquals(1.0, hires.gain!!.albumPeak!!, 0.0)
+        assertEquals(96000, hires.sampleRate)
+        assertEquals(24, hires.bitDepth)
+        // an album whose songs are all measured but this one has only the album's gain; a lossy file has no bit depth
+        val lossy = entry("""{"id": 8, "title": "x", "album_id": "a", "format": "mp3", "qid": "q5", "gain": {"album": -3.5}, "sample_rate": 44100}""").track
+        assertNull(lossy.gain!!.track)
+        assertEquals(-3.5, lossy.gain!!.album!!, 0.0)
+        assertEquals(0, lossy.bitDepth)
+    }
+
+    @Test
+    fun joiningAgainAfterBeingDroppedIsNotALeave() {
+        // dropped after 2 minutes without the stream, this phone joins again with the code: a new membership id
+        val before = state(fromTheServer)
+        val pc = before.members.first { it.key == "m1" }
+        val again = before.copy(
+            rev = 7,
+            members = listOf(pc, GroupMember("m4", 1, "admin", "", "Smoke phone", 1792503700.0, false, false)),
+            youMember = "m4",
+        )
+        assertTrue(GroupRules.comings(before, again).isEmpty())
+        // someone else who left meanwhile is still said
+        val kim = GroupMember("m3", 9, "Kim", "", "Firefox", 1792503600.0, false, false)
+        assertEquals(listOf("Kim left"), GroupRules.comings(before.copy(members = before.members + kim), again))
+    }
+
+    @Test
+    fun aRefusedJoinAgainSaysWhy() {
+        // the server's sentence as it sends it (§3.9)
+        assertEquals("This group listen is full", GroupRules.rejoinRefused(409, "This group listen is full"))
+        // a proxy's answer without one
+        assertEquals("Couldn't join", GroupRules.rejoinRefused(409, "HTTP 409"))
+        assertEquals("Too many tries. Wait a moment and try again.", GroupRules.rejoinRefused(429, null))
+        assertEquals("Group listens are turned off on this server", GroupRules.rejoinRefused(403, ""))
+        assertEquals("Couldn't join", GroupRules.rejoinRefused(400, " "))
+    }
+
     @Test
     fun theListAndTheEnd() {
         val g = GroupSummary.from(EncoreJson.parseToJsonElement(

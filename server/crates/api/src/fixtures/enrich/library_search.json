@@ -49,6 +49,11 @@
       "tracks": 12
     }
   ],
+  "counts": {
+    "albums": 2,
+    "artists": 1,
+    "songs": 6
+  },
   "songs": [
     {
       "added_at": 1792360592.387313,

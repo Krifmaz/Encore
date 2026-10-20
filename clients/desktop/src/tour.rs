@@ -33,6 +33,8 @@ enum Step {
     NavSoulseek,
     PlayFirstAlbum,
     Customize(bool),
+    /// Open one of the file manager's roots (Settings → Files).
+    FilesRoot(&'static str),
     /// Open the first song's ⋯ menu on the album page, where a right-click would.
     RowMenu,
     /// Close the menu again.
@@ -45,6 +47,21 @@ enum Step {
     RequestPick,
     /// Close the picker.
     ClosePick,
+    /// The full player on this pane (None: closed again).
+    Full(Option<crate::player::Pane>),
+    /// A message to the player (the Signal path dialog and closing it).
+    Player(crate::player::Message),
+    /// Volume normalization on (Album, −14 LUFS) and Cadenza on at the source rate, so the
+    /// Signal path shows the gain.
+    Normalize,
+    /// Scroll the page to its end (Settings → Playback's Sound block).
+    ScrollToEnd,
+    /// The Library's search, Discover's search and the artist page for the played album's artist
+    /// (0.31: one library search, Discover asking the library, the artist page's sections;
+    /// skipped when no album played).
+    NavLibrarySearch,
+    NavDiscoverSearch,
+    NavArtist,
     Exit,
 }
 
@@ -56,6 +73,8 @@ pub struct State {
     next: usize,
     wait: u32,
     first_album: Option<String>,
+    /// The played album's artist (the searches' query).
+    artist: String,
     pub saved: Vec<String>,
 }
 
@@ -69,14 +88,35 @@ impl State {
         steps.extend([
             Shot("home"),
             PlayFirstAlbum,
-            Wait(8),
+            Wait(6),
+            Normalize,
+            Wait(3),
             Shot("playing"),
+            Player(crate::player::Message::Signal),
+            Wait(2),
+            Shot("signal-path"),
+            Player(crate::player::Message::CloseDialog),
+            Full(Some(crate::player::Pane::Now)),
+            Shot("player-full"),
+            Full(Some(crate::player::Pane::Lyrics)),
+            Wait(2),
+            Shot("player-lyrics"),
+            Full(Some(crate::player::Pane::Now)),
+            Full(None),
             Nav(Page::Search { q: String::new() }),
             Shot("search"),
             Nav(Page::ForYou),
             Shot("for-you"),
             Nav(Page::library("")),
             Shot("library"),
+            NavLibrarySearch,
+            Shot("library-search"),
+            NavDiscoverSearch,
+            Wait(4),
+            Shot("search-library"),
+            NavArtist,
+            Wait(6),
+            Shot("artist"),
             NavFirstAlbum,
             Shot("library-album"),
             RowMenu,
@@ -108,18 +148,96 @@ impl State {
             Shot("settings-appearance"),
             Nav(Page::Settings(Section::Playback)),
             Shot("settings-playback"),
+            ScrollToEnd,
+            Shot("settings-playback-end"),
             Nav(Page::Settings(Section::Computer)),
             Shot("settings-computer"),
             Nav(Page::Settings(Section::Downloads)),
             Shot("settings-downloads"),
+            // 0.33, the file manager: the roots, then the library's folder
+            Nav(Page::Settings(Section::Files)),
+            Wait(2),
+            Shot("settings-files"),
+            FilesRoot("library"),
+            Shot("settings-files-library"),
             Nav(Page::Home),
             Customize(true),
             Shot("player-customize"),
             Customize(false),
             Nav(Page::Offline),
             Shot("offline"),
-            Exit,
         ]);
+        // 0.31, group listen. By default a group listen started from what plays (the start
+        // dialog, the group dialog, the bar's pill, Up next with who added each song, Your
+        // devices and Home's row). With ENCORE_TOUR_GROUP_JOIN=<invite link> this computer
+        // joins that group instead, as a member who may not control it (the invite question,
+        // the controls that are off, a pause here only and Catch up). Left again at the end.
+        {
+            use crate::player::group::Msg as G;
+            use crate::player::Message as P;
+            match std::env::var("ENCORE_TOUR_GROUP_JOIN").ok().filter(|l| !l.trim().is_empty()) {
+                Some(link) => {
+                    let code = crate::player::group::model::code_from(&link).unwrap_or_default();
+                    steps.extend([
+                        Nav(Page::Home),
+                        Wait(4),
+                        Shot("group-home-join"),
+                        Player(P::Group(G::OpenJoin)),
+                        Player(P::Group(G::JoinText(link))),
+                        Shot("group-join"),
+                        Player(P::Group(G::JoinSubmit)),
+                        Wait(3),
+                        Shot("group-invite"),
+                        Player(P::Group(G::JoinCode(code))),
+                        Wait(8),
+                        Shot("group-member-bar"),
+                        Player(P::Toggle),
+                        Wait(3),
+                        Shot("group-paused-here"),
+                        Full(Some(crate::player::Pane::Queue)),
+                        Wait(2),
+                        Shot("group-member-up-next"),
+                        Full(None),
+                        Player(P::Group(G::OpenSheet)),
+                        Shot("group-member-dialog"),
+                        Player(P::Group(G::Close)),
+                        Player(P::Group(G::CatchUp)),
+                        Wait(6),
+                        Shot("group-caught-up"),
+                        Wait(10),
+                        Player(P::Group(G::Leave)),
+                        Wait(2),
+                    ]);
+                }
+                None => steps.extend([
+                    Nav(Page::Home),
+                    PlayFirstAlbum,
+                    Wait(6),
+                    Player(P::Group(G::OpenStart)),
+                    Shot("group-start"),
+                    Player(P::Group(G::Start)),
+                    Wait(6),
+                    Shot("group-dialog"),
+                    Player(P::Group(G::Close)),
+                    Wait(4),
+                    Shot("group-bar"),
+                    Full(Some(crate::player::Pane::Queue)),
+                    Wait(2),
+                    Shot("group-up-next"),
+                    Full(None),
+                    Player(P::Devices),
+                    Wait(4),
+                    Shot("group-devices"),
+                    Player(P::CloseDialog),
+                    Nav(Page::Home),
+                    Wait(4),
+                    Shot("group-home"),
+                    Player(P::Group(G::Leave)),
+                    Wait(2),
+                ]),
+            }
+        }
+        steps.push(Exit);
         Self {
             dir,
             login,
@@ -127,6 +245,7 @@ impl State {
             next: 0,
             wait: 0,
             first_album: None,
+            artist: String::new(),
             saved: Vec::new(),
         }
     }
@@ -164,6 +283,11 @@ pub fn update(app: &mut App, msg: Message) -> Task<AppMsg> {
             let tracks = crate::fmt::items(&album["tracks"]);
             if let Some(t) = app.tour.as_mut() {
                 t.first_album = (!id.is_empty()).then_some(id);
+                let first = tracks.first().cloned().unwrap_or_default();
+                t.artist = [crate::fmt::s(&album, "albumartist"), crate::fmt::s(&first, "albumartist"), crate::fmt::s(&first, "artist")]
+                    .into_iter()
+                    .find(|a| !a.is_empty())
+                    .unwrap_or_default();
             }
             if tracks.is_empty() {
                 log::warn!("tour: the first album has no tracks");
@@ -292,6 +416,52 @@ fn step(app: &mut App) -> Task<AppMsg> {
         Step::ClosePick => app.update(AppMsg::Requests(crate::pages::requests::Message::List(
             crate::widgets::request_list::Msg::Picker(crate::widgets::picker::Message::Close),
         ))),
+        Step::Full(pane) => {
+            t.wait = 2;
+            match pane {
+                Some(p) => app.update(AppMsg::Player(crate::player::Message::SetPane(p))),
+                None => app.update(AppMsg::Player(crate::player::Message::CloseFull)),
+            }
+        }
+        Step::Normalize => {
+            use crate::engine::normalize::{set_prefs, Mode, Prefs};
+            set_prefs(Prefs { mode: Mode::Album, target: -14, clip: true });
+            let mut s = crate::engine::settings::settings();
+            s.dsp.bit_perfect = false;
+            s.output.rate = cadenza::config::RateSetting::Source;
+            if let Err(e) = crate::engine::settings::apply(s) {
+                log::warn!("tour: Cadenza did not take the settings: {e}");
+            }
+            Task::none()
+        }
+        Step::ScrollToEnd => {
+            t.wait = 1;
+            iced::widget::operation::snap_to(
+                crate::app::MAIN_SCROLL,
+                iced::widget::scrollable::RelativeOffset { x: 0.0, y: 1.0 },
+            )
+        }
+        Step::Player(m) => {
+            t.wait = 1;
+            app.update(AppMsg::Player(m))
+        }
+        Step::NavLibrarySearch | Step::NavDiscoverSearch | Step::NavArtist => {
+            if t.artist.is_empty() {
+                t.next += 1;
+                return Task::none();
+            }
+            t.wait = 4;
+            let q = t.artist.clone();
+            let page = match step {
+                Step::NavLibrarySearch => Page::Library {
+                    tab: String::new(),
+                    query: crate::pages::LibraryQuery { q, ..Default::default() },
+                },
+                Step::NavDiscoverSearch => Page::Search { q },
+                _ => Page::ArtistName(q),
+            };
+            app.update(AppMsg::Nav(page))
+        }
         Step::CloseRowMenu => {
             app.update(AppMsg::LibraryAlbum(crate::pages::library_album::Message::Shared(
                 crate::pages::library::Act::CloseMenu,
@@ -300,6 +470,12 @@ fn step(app: &mut App) -> Task<AppMsg> {
         Step::Customize(on) => {
             t.wait = 2;
             app.update(AppMsg::Player(crate::player::Message::Customize(on)))
+        }
+        Step::FilesRoot(id) => {
+            t.wait = 3;
+            app.update(AppMsg::Settings(crate::pages::settings::Message::Files(
+                crate::pages::files::Message::OpenRoot(id.to_string()),
+            )))
         }
         Step::Exit => {
             let saved = t.saved.len();

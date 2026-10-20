@@ -11,7 +11,7 @@ import org.junit.Test
 
 /**
  * The car's quality badge (CarQuality) and the 0.31 response shapes the phone reads
- * (docs/contracts/0.31-0.33-client-shapes.md, §2.1 and §5.4).
+ * (docs/contracts/client-shapes-0.31-0.33.md, §2.1 and §5.4).
  */
 class CarQualityTest {
     private fun q(format: String, bitrate: Int = 0, rate: Int = 0, bits: Int = 0, kind: String = "", phoneRate: Int = 0, local: String = "") =

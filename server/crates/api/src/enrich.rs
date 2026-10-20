@@ -6,7 +6,9 @@
 //!   `encore_media::covers::stamp`,
 //! - `artists` on every song: each artist of a collaboration on its own, for links (`Artists::stamp_credits`),
 //! - `<field>_t` / `<field>_r` (translation, romanization) on titles, albums and artists for a listener who
-//!   has translations on, and the titles with none yet queued for the Translator (`translate::stamp`).
+//!   has translations on, and the titles with none yet queued for the Translator (`translate::stamp`),
+//! - `gain` (the song's loudness for volume normalization, when known), `sample_rate` and `bit_depth` on
+//!   every library track row (0.31, `encore_library::loudness::stamp`; with the covers and credits).
 //!
 //! Until 0.29 two middlewares did this to every JSON answer of a GET, reading the body back in to do it. The
 //! pass does the same, in the same order (covers and credits, then translations, which see the credits) and
@@ -81,6 +83,8 @@ fn apply(st: &AppState, covers: bool, target: Option<&'static str>, v: &mut Valu
         if covers {
             encore_media::covers::stamp(st, v);
             st.library.artists.stamp_credits(&st.db, v);
+            // every track row names its album, so this is the place for its loudness and format details
+            encore_library::loudness::stamp(&st.db, v);
         }
         // while nobody has translations on this is one look at a cached list
         if let Some(t) = target.filter(|_| st.library.translator.anyone_on(&st.db)) {

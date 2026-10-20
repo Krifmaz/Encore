@@ -86,7 +86,7 @@ pub(super) fn more_menu(anchor: &Element) {
     if t.truthy("album_id") { items.push(MenuItem::link("View album", &icon("disc"), &format!("#/library/album/{}", t.s("album_id")), false)); }
     if lib { let t2 = t.clone(); items.push(MenuItem::new(if is_liked(&t) { "Remove from Liked Songs" } else { "Like" }, &icon("heart"), move || dom::spawn(toggle_like(t2.clone())))); }
     if lib { let id = t.i("id"); items.push(MenuItem::new("Add to playlist", &icon("plus"), move || crate::pages::playlists::add_to_playlist_modal(vec![id]))); }
-    if lib { items.push(MenuItem::new("Lyrics", &icon("music"), || { st_mut(|s| s.pane = "lyrics".into()); set_full(true); })); }
+    if lib { items.push(MenuItem::new("Lyrics", &icon("music"), || open_full("lyrics"))); }
     if lib { let t2 = t.clone(); items.push(MenuItem::new("Share link", &icon("external"), move || dom::spawn(share_track(t2.clone())))); }
     if lib { items.push(MenuItem::link("Download this song", &icon("download"), &format!("/api/library/tracks/{}/file", t.s("id")), true)); }
     if lib && !linked { items.extend(crate::pages::downloads::menu_items(std::slice::from_ref(&t))); }
@@ -94,6 +94,9 @@ pub(super) fn more_menu(anchor: &Element) {
     if lib { let t2 = t.clone(); items.push(MenuItem::new("Report a problem", &icon("shield"), move || crate::pages::report::report_modal("track", t2.g("id").clone(), &t2.s("title"), "", None))); }
     if lib && crate::ui::translate_mode() != "off" { let t2 = t.clone(); items.push(MenuItem::new("Edit translation", &icon("edit"), move || crate::pages::translate::edit_translation(t2.s("title"), "title", None))); }
     if has_encore_remote() { items.push(MenuItem::new(if linked { "Your devices…" } else { "Play on another device…" }, &icon("devices"), remote_open)); }
+    // group listen (0.31): start one with what plays here, or open the one this browser is in
+    if grouped() { items.push(MenuItem::new("Group listen", &icon("users"), crate::group::ui::sheet)); }
+    else if !linked && crate::group::available() != Some(false) { items.push(MenuItem::new("Start a group listen", &icon("users"), crate::group::ui::start_dialog)); }
     items.push(MenuItem::new("Customize the bar…", &icon("settings"), customize_bar_modal));
     pop_menu(anchor, items);
 }
@@ -102,7 +105,8 @@ pub(super) fn update_time() {
     if is_linked() { update_linked_time(); return; }
     let dur = duration();
     let dragging = st(|s| s.dragging);
-    for (sid, cid, did) in [("seek", "t-cur", "t-dur"), ("fseek", "f-cur", "f-dur")] {
+    // the bar's, the full player's and lyrics mode's thin one (no times beside it)
+    for (sid, cid, did) in [("seek", "t-cur", "t-dur"), ("fseek", "f-cur", "f-dur"), ("lseek", "", "")] {
         let Some(seek) = by_id(sid) else { continue };
         if !dragging {
             dom::set_value(&seek, &js_num(if truthy_num(dur) { (position() / dur) * 1000.0 } else { 0.0 }));
@@ -163,7 +167,7 @@ pub(super) fn update_linked_time() {
     let s = link_state_value();
     let dur = s.f("duration");
     let pos = s.f("position").min(if truthy_num(dur) { dur } else { f64::INFINITY });
-    for (sid, cid, did) in [("seek", "t-cur", "t-dur"), ("fseek", "f-cur", "f-dur")] {
+    for (sid, cid, did) in [("seek", "t-cur", "t-dur"), ("fseek", "f-cur", "f-dur"), ("lseek", "", "")] {
         let Some(seek) = by_id(sid) else { continue };
         dom::set_value(&seek, &js_num(if truthy_num(dur) { (pos / dur) * 1000.0 } else { 0.0 }));
         set_p(&seek);
@@ -261,12 +265,12 @@ fn right_html(t: Option<&Value>, closable: bool) -> String {
     let badge = match t { Some(t) if bar_has("quality") && !t.truthy("preview") => format!(r#"<button class="badge hide-sm" id="p-signal" type="button" title="{} – click for the signal path">{}</button>"#, esc(&quality_title(t)), esc(&quality(t))), _ => String::new() };
     let (shuffle_on, repeat) = mode_state();
     let shuffle = if bar_has("shuffle") && t.is_some() {
-        format!(r#"<button class="btn ghost icon mode {}" id="p-shuffle" title="{}" aria-label="Shuffle" aria-pressed="{shuffle_on}">{}</button>"#,
-            if shuffle_on { "on" } else { "" }, if shuffle_on { "Shuffle: on" } else { "Shuffle: off" }, icon("shuffle"))
+        format!(r#"<button class="btn ghost icon mode {}" id="p-shuffle" title="{}" aria-label="Shuffle" aria-pressed="{shuffle_on}"{}>{}</button>"#,
+            if shuffle_on { "on" } else { "" }, mode_title(if shuffle_on { "Shuffle: on" } else { "Shuffle: off" }), mode_attr(), icon("shuffle"))
     } else { String::new() };
     let repeat_btn = if bar_has("repeat") && t.is_some() {
-        format!(r#"<button class="btn ghost icon mode {}" id="p-repeat" title="{}" aria-label="Repeat" aria-pressed="{}">{}{}</button>"#,
-            if repeat != "off" { "on" } else { "" }, repeat_title(&repeat), repeat != "off", icon("refresh"), if repeat == "one" { "<sup>1</sup>" } else { "" })
+        format!(r#"<button class="btn ghost icon mode {}" id="p-repeat" title="{}" aria-label="Repeat" aria-pressed="{}"{}>{}{}</button>"#,
+            if repeat != "off" { "on" } else { "" }, mode_title(repeat_title(&repeat)), repeat != "off", mode_attr(), icon("refresh"), if repeat == "one" { "<sup>1</sup>" } else { "" })
     } else { String::new() };
     let like = if bar_has("like") && can_like(t) { like_button("p-like", if t.is_some_and(is_liked) { "on" } else { "" }) } else { String::new() };
     let album = if bar_has("album") && t.is_some_and(|t| t.truthy("album_id")) { btn("album", "View album", "disc") } else { String::new() };
@@ -277,6 +281,7 @@ fn right_html(t: Option<&Value>, closable: bool) -> String {
     let devices = if bar_has("devices") && has_encore_remote() { format!(r#"<button class="btn ghost icon" id="p-devices" aria-label="Other devices" title="Play on or control your other devices">{}</button>"#, icon("devices")) } else { String::new() };
     let vol = if is_linked() { let s = link_state_value(); if s.is_nullish("volume") { "0.9".to_string() } else { s.s("volume") } } else { js_num(user_vol()) };
     format!(r#"<div class="right">
+      {pill}
       {badge}
       {shuffle}
       {repeat_btn}
@@ -292,6 +297,7 @@ fn right_html(t: Option<&Value>, closable: bool) -> String {
       <input type="range" id="vol" min="0" max="1" step="0.01" value="{vol}">
       {close}
     </div>"#,
+        pill = pill_html("p-group"),
         more = icon("more"), volume = icon_attr("volume", r#"width="18""#),
         close = if closable { format!(r#"<button class="btn ghost icon" id="p-close" aria-label="Close player">{}</button>"#, icon("x")) } else { String::new() })
 }
@@ -302,11 +308,12 @@ fn bind_right(ls: &mut Vec<EventListener>, el: &Element) {
     wire(ls, el, "#p-repeat", "click", |_| { let (_, r) = mode_state(); set_repeat(next_repeat(&r)); });
     wire(ls, el, "#p-album", "click", |_| { if let Some(t) = now_track() { if t.truthy("album_id") { app::navigate(&format!("/library/album/{}", t.s("album_id"))); } } });
     wire(ls, el, "#p-playlist", "click", |_| { if let Some(t) = now_track() { if t.g("id").is_number() { crate::pages::playlists::add_to_playlist_modal(vec![t.i("id")]); } } });
-    wire(ls, el, "#p-lyrics", "click", |_| { st_mut(|s| s.pane = "lyrics".into()); set_full(true); });
+    wire(ls, el, "#p-lyrics", "click", |_| open_full("lyrics"));
     wire(ls, el, "#p-share", "click", |_| { if let Some(t) = now_track() { if t.g("id").is_number() { dom::spawn(share_track(t)); } } });
-    wire(ls, el, "#p-queue", "click", |_| { st_mut(|s| s.pane = "queue".into()); set_full(true); });
+    wire(ls, el, "#p-queue", "click", |_| open_full("queue"));
     wire(ls, el, "#p-devices", "click", |_| remote_open());
     wire(ls, el, "#p-signal", "click", |_| dom::spawn(signal_path()));
+    wire_group(ls, el, "#p-group", "#p-catchup");
     if is_linked() {
         wire(ls, el, "#vol", "change", |e| { if let Some(v) = dom::target_el(e) { set_volume(num(&dom::value(&v))); } });
     } else {
@@ -333,8 +340,8 @@ fn render_linked(el: &Element) {
     <div class="now" id="p-open" role="button" tabindex="0" aria-label="Open the full-screen player" title="Open player">
       <div class="thumb">{thumb}</div>
       <div class="grow">
-        <div class="ellipsis" style="font-weight:650">{title}</div>
-        <div class="ellipsis small muted">{sub}</div>
+        <div class="ellipsis mq" style="font-weight:650"><span class="mq-in">{title}</span></div>
+        <div class="ellipsis mq small muted"><span class="mq-in">{sub}</span></div>
         <div class="ellipsis small">{where_}</div>
       </div>
     </div>
@@ -352,13 +359,14 @@ fn render_linked(el: &Element) {
     wire(&mut ls, el, "#p-toggle", "click", |_| toggle());
     wire(&mut ls, el, "#p-next", "click", |_| next(false));
     wire(&mut ls, el, "#p-prev", "click", |_| prev());
-    wire(&mut ls, el, "#p-open", "click", |_| { st_mut(|s| s.pane = "now".into()); set_full(true); });
-    wire(&mut ls, el, "#p-open", "keydown", |e| { if dom::key(e) == "Enter" { set_full(true); } });
+    wire(&mut ls, el, "#p-open", "click", |_| open_full("now"));
+    wire(&mut ls, el, "#p-open", "keydown", |e| { if dom::key(e) == "Enter" { open_full("now"); } });
     wire(&mut ls, el, "#p-unlink", "click", |_| remote_unlink());
     bind_right(&mut ls, el);
     if let Some(seek) = qs_in(el, "#seek") { bind_seek(&mut ls, &seek, "t-cur"); }
     set_bar(ls);
     update_linked_time();
+    measure_titles();
 }
 
 pub(super) fn render() {
@@ -383,13 +391,15 @@ pub(super) fn render() {
         <div class="seek"><span>0:00</span><input type="range" min="0" max="1000" value="0" disabled aria-label="Seek"><span>0:00</span></div>
       </div>
       <div class="right">
+        {pill}
         {devices}
         <span class="faint vol-ic">{volume}</span>
         <input type="range" id="vol" min="0" max="1" step="0.01" value="{vol}">
       </div>"##, music = icon_attr("music", r#"width="20""#), prev = icon("prev"), play = icon("play"), next = icon("next"),
-            volume = icon_attr("volume", r#"width="18""#), vol = js_num(user_vol())));
+            volume = icon_attr("volume", r#"width="18""#), vol = js_num(user_vol()), pill = pill_html("p-group")));
         let mut ls = Vec::new();
         wire(&mut ls, &el, "#p-devices", "click", |_| remote_open());
+        wire_group(&mut ls, &el, "#p-group", "#p-catchup");
         wire(&mut ls, &el, "#vol", "input", |e| { if let Some(v) = dom::target_el(e) { local_volume(num(&dom::value(&v))); } });
         set_bar(ls);
         if st(|s| s.full) { set_full(false); }
@@ -400,26 +410,30 @@ pub(super) fn render() {
     <div class="now" id="p-open" role="button" tabindex="0" aria-label="Open the full-screen player" title="Open player">
       <div class="thumb">{thumb}</div>
       <div class="grow">
-        <div class="ellipsis" style="font-weight:650">{title}</div>
-        <div class="ellipsis small muted">{artist}{album}</div>
+        <div class="ellipsis mq" style="font-weight:650"><span class="mq-in">{title}</span></div>
+        <div class="ellipsis mq small muted"><span class="mq-in">{artist}{album}</span></div>
+        {paused}
       </div>
     </div>
     <div class="ctrls">
       <div class="row">
-        <button class="btn ghost icon" id="p-prev" aria-label="Previous">{prev}</button>
+        <button class="btn ghost icon" id="p-prev" aria-label="Previous"{ctl}>{prev}</button>
         <button class="play-btn" id="p-toggle" aria-label="Play/Pause">{pp}</button>
-        <button class="btn ghost icon" id="p-next" aria-label="Next">{next}</button>
+        <button class="btn ghost icon" id="p-next" aria-label="Next"{ctl}>{next}</button>
       </div>
-      <div class="seek"><span id="t-cur">0:00</span><input type="range" id="seek" min="0" max="1000" value="0"><span id="t-dur">0:00</span></div>
+      <div class="seek"{ctl_title}><span id="t-cur">0:00</span><input type="range" id="seek" min="0" max="1000" value="0"{ctl}><span id="t-dur">0:00</span></div>
     </div>
     {right}"##,
+        paused = paused_html("p-catchup"), ctl = ctl_attr(), ctl_title = ctl_attr().replace(" disabled", ""),
         thumb = crate::ui::art_sized(&cover(&t), &album_or_title(&t), "", 200),
         title = esc(&crate::ui::tr(&t, "title")),
         artist = esc(&crate::ui::tr_inline(&t, "artist")),
         album = if t.truthy("album") { format!(" · {}", esc(&crate::ui::tr_inline(&t, "album"))) } else { String::new() },
         prev = icon("prev"), pp = super::full::PP, next = icon("next"),
         right = right_html(Some(&t), true));
-    if !super::full::draw(super::full::View::Bar, &el, "#p-toggle", &html, &if shows_playing() { icon("pause") } else { icon("play") }) {
+    let drawn = super::full::draw(super::full::View::Bar, &el, "#p-toggle", &html, &if shows_playing() { icon("pause") } else { icon("play") });
+    show_paused(&el, "p-catchup");
+    if !drawn {
         update_time();
         if st(|s| s.full) { render_full(); }
         return;
@@ -428,8 +442,8 @@ pub(super) fn render() {
     wire(&mut ls, &el, "#p-toggle", "click", |_| toggle());
     wire(&mut ls, &el, "#p-next", "click", |_| next(false));
     wire(&mut ls, &el, "#p-prev", "click", |_| prev());
-    wire(&mut ls, &el, "#p-open", "click", |_| { st_mut(|s| s.pane = "now".into()); set_full(true); });
-    wire(&mut ls, &el, "#p-open", "keydown", |e| { if dom::key(e) == "Enter" { set_full(true); } });
+    wire(&mut ls, &el, "#p-open", "click", |_| open_full("now"));
+    wire(&mut ls, &el, "#p-open", "keydown", |e| { if dom::key(e) == "Enter" { open_full("now"); } });
     bind_right(&mut ls, &el);
     if let Some(seek) = qs_in(&el, "#seek") { bind_seek(&mut ls, &seek, "t-cur"); }
     wire(&mut ls, &el, "#p-close", "click", |_| {
@@ -452,4 +466,6 @@ pub(super) fn render() {
     set_bar(ls);
     update_time();
     if st(|s| s.full) { render_full(); }
+    // drawn anew: a title too long for the bar scrolls (marquee.rs) – measured here, never on a tick
+    measure_titles();
 }

@@ -42,6 +42,7 @@ pub fn render(view: Element, ctx: Ctx) -> PageFuture {
       <form class="search" id="home-link" style="margin-top:10px">{link}<input class="input" name="url" type="url" enterkeyhint="go" placeholder="…or paste a song, album or playlist link to download" autocomplete="off"></form>
     </section>
     <div class="stats mt" id="stats"></div>
+    <div id="groups-now"></div>
     <div id="made-for-you"></div>
     <div id="new-releases"></div>
     <div id="fy-preview"></div>
@@ -91,6 +92,8 @@ pub fn render(view: Element, ctx: Ctx) -> PageFuture {
             });
         }
         bind_tiles(&view);
+        // group listens on this server (0.31): "Listening together now", refreshed every 20 s
+        crate::group::ui::home_row(&view);
 
         if let Some(reqs) = dom::qs_in(&view, "#reqs") { bind_request_actions(&reqs, reload.clone()); }
 

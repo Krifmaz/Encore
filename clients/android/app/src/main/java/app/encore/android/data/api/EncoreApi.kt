@@ -250,11 +250,9 @@ class EncoreApi(private val client: OkHttpClient, private val store: SessionStor
 
     /**
      * `/api/library/artists/{name}/<tail>?name=<name>` (client-shapes §3.2): the name always goes in `name=` too, which
-     * the server prefers; a name with "/" puts `_` in the path, because proxies such as Apache (AllowEncodedSlashes
-     * Off) answer 404 for `%2F` in a path ("AC/DC").
+     * the server prefers ([artistSegment] for the path).
      */
-    private fun artistRoute(name: String, tail: String): String =
-        "/api/library/artists/" + (if (name.contains('/')) "_" else enc(name)) + "/$tail?name=" + enc(name)
+    private fun artistRoute(name: String, tail: String): String = artistPath(name, tail)
 
     /** GET /api/library/tracks?ids=1,2,3: these songs in this order (unknown ids left out), 300 per call. */
     fun tracksByIds(ids: List<Long>): List<Track> {
@@ -397,6 +395,19 @@ class EncoreApi(private val client: OkHttpClient, private val store: SessionStor
         }
 
         fun enc(s: String): String = URLEncoder.encode(s, "UTF-8").replace("+", "%20")
+
+        /**
+         * The artist's name as the `{name}` segment of `/api/library/artists/{name}/…`, or `_` where the path would not
+         * reach the server as written: a "/" or "\" (proxies such as Apache with AllowEncodedSlashes Off answer 404
+         * for `%2F` in a path: "AC/DC"), and a name of dots only ("." and ".." are path steps OkHttp resolves before
+         * sending, so the request would go to another route). The server reads the real name from `name=`.
+         */
+        fun artistSegment(name: String): String =
+            if (name.isBlank() || name.contains('/') || name.contains('\\') || name.trim('.').isEmpty()) "_" else enc(name)
+
+        /** `/api/library/artists/{name}/<tail>?name=<name>` (client-shapes §3.2, §3.3). */
+        fun artistPath(name: String, tail: String): String =
+            "/api/library/artists/" + artistSegment(name) + "/$tail?name=" + enc(name)
     }
 }
 

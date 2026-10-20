@@ -115,16 +115,13 @@ fun FilesScreen(nav: Nav) {
     var rootsKey by remember { mutableIntStateOf(0) }
     var root by remember { mutableStateOf<FileRoot?>(null) }
     var path by remember { mutableStateOf("") }
-    // the folder the browsing entered through a link (its path): nothing at or below it is written (client-shapes §2.4)
+    // the folder the browsing entered through a link (its path): nothing at or below it is written (client-shapes §2.4;
+    // the server's `via_link` says the same for a folder it reached through a link, §4.17)
     var linkAt by remember { mutableStateOf<String?>(null) }
-    fun under(p: String): Boolean = linkAt?.let { p == it || p.startsWith("$it/") } == true
+    fun under(p: String): Boolean = linkAt != null && FilesRules.linkAfter(linkAt, p, false) != null
     /** Opens [p]; [link]: it is a link to a folder (the first one on the way is remembered). */
     fun go(p: String, link: Boolean = false) {
-        linkAt = when {
-            under(p) -> linkAt
-            link -> p
-            else -> null
-        }
+        linkAt = FilesRules.linkAfter(linkAt, p, link)
         path = p
     }
 
@@ -170,10 +167,9 @@ fun FilesScreen(nav: Nav) {
     }
 }
 
-/** "a/b/c" → "a/b"; "a" → "". */
-private fun parentOf(path: String): String = if (path.contains('/')) path.substringBeforeLast('/') else ""
+private fun parentOf(path: String): String = FilesRules.parentOf(path)
 
-private fun join(path: String, name: String): String = if (path.isEmpty()) name else "$path/$name"
+private fun join(path: String, name: String): String = FilesRules.join(path, name)
 
 // ---- roots ------------------------------------------------------------------------------------------------------
 
@@ -199,7 +195,8 @@ private fun RootsList(roots: List<FileRoot>, onPick: (FileRoot) -> Unit) {
                 Column(Modifier.weight(1f)) {
                     Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp)) {
                         Text(r.name, fontWeight = FontWeight.SemiBold, maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.weight(1f, fill = false))
-                        if (!r.writable) Badge("Read-only")
+                        // the server lists Trash as not writable (nothing is written into it but Move to trash)
+                        if (!r.writable && !r.isTrash) Badge("Read-only")
                     }
                     if (r.path.isNotEmpty()) Text(r.path, style = MaterialTheme.typography.bodySmall, color = p.muted, maxLines = 1, overflow = TextOverflow.Ellipsis)
                 }
@@ -211,15 +208,6 @@ private fun RootsList(roots: List<FileRoot>, onPick: (FileRoot) -> Unit) {
 }
 
 // ---- a folder -----------------------------------------------------------------------------------------------------
-
-private val SORTS = listOf("name" to "Name", "size" to "Size", "mtime" to "Date modified")
-
-/** The order of a sort in words: "A–Z" / "Z–A", "smallest first" / "largest first", "oldest first" / "newest first". */
-private fun sortOrderText(key: String, dir: String): String = when (key) {
-    "size" -> if (dir == "asc") "smallest first" else "largest first"
-    "mtime" -> if (dir == "asc") "oldest first" else "newest first"
-    else -> if (dir == "asc") "A–Z" else "Z–A"
-}
 
 /** What a dialog of the folder view is about. */
 private sealed interface FolderDialog {
@@ -246,7 +234,10 @@ private fun FolderView(
     onOpen: (String, Boolean) -> Unit,
 ) {
     val p = MaterialTheme.palette
-    val canWrite = root.writable && !throughLink
+    // the server's word on it: the folder was reached through a link (§4.17 `via_link`)
+    var viaLink by remember(root.id, path) { mutableStateOf(false) }
+    val linked = throughLink || viaLink
+    val canWrite = root.writable && !linked
     val scope = rememberCoroutineScope()
     val context = LocalContext.current
     var sort by remember { mutableStateOf("name") }
@@ -268,6 +259,7 @@ private fun FolderView(
             entries.clear()
             entries.addAll(page.entries)
             total = page.total
+            viaLink = page.viaLink
             selected.keys.retainAll(page.entries.map { it.name }.toSet())
         } catch (e: CancellationException) {
             throw e
@@ -294,6 +286,26 @@ private fun FolderView(
         }
     }
 
+    /**
+     * A name dialog's work (New folder, Rename): when it went, the dialog closes and [done] is said; when the server
+     * says no, its words go under the name box ([fail]) and the dialog stays, as on the web.
+     */
+    fun named(done: String, fail: (String) -> Unit, block: () -> Unit) {
+        scope.launch {
+            try {
+                withContext(Dispatchers.IO) { block() }
+                dialog = null
+                Toasts.show(done, "ok")
+                selected.clear()
+                refresh()
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                fail(e.message ?: "That didn't work")
+            }
+        }
+    }
+
     val pickFiles = rememberLauncherForActivityResult(ActivityResultContracts.OpenMultipleDocuments()) { uris ->
         if (uris.isNotEmpty()) {
             scope.launch {
@@ -314,7 +326,7 @@ private fun FolderView(
     val picked = selected.keys.toList()
     Column(Modifier.fillMaxSize()) {
         Breadcrumbs(root, path) { onOpen(it, false) }
-        if (throughLink) {
+        if (linked) {
             Text(
                 "This folder is reached through a link, so Encore doesn't change anything in it.",
                 style = MaterialTheme.typography.bodySmall,
@@ -331,11 +343,13 @@ private fun FolderView(
                 verticalArrangement = Arrangement.spacedBy(8.dp),
             ) {
                 Box {
-                    SmallButton("Sort: " + (SORTS.firstOrNull { it.first == sort }?.second ?: "Name") + if (dir == "desc") " ↓" else " ↑") { sortMenu = true }
-                    PopMenu(sortMenu, { sortMenu = false }, SORTS.map { (k, label) ->
+                    SmallButton(FilesRules.sortButton(sort, dir)) { sortMenu = true }
+                    PopMenu(sortMenu, { sortMenu = false }, FilesRules.SORTS.map { (k, label) ->
                         // the chosen sort says its order; choosing it again turns the order round
-                        MenuEntry(label + if (k == sort) " (" + sortOrderText(k, dir) + ")" else "") {
-                            if (k == sort) dir = if (dir == "asc") "desc" else "asc" else { sort = k; dir = if (k == "name") "asc" else "desc" }
+                        MenuEntry(label + if (k == sort) " (" + FilesRules.sortOrderText(k, dir) + ")" else "") {
+                            val (s, d) = FilesRules.nextSort(sort, dir, k)
+                            sort = s
+                            dir = d
                         }
                     })
                 }
@@ -349,7 +363,7 @@ private fun FolderView(
                         ))
                     }
                 }
-                if (!throughLink) SmallButton("Import…", iconRes = R.drawable.ic_download) { dialog = FolderDialog.Import(path) }
+                if (!linked) SmallButton("Import…", iconRes = R.drawable.ic_download) { dialog = FolderDialog.Import(path) }
             }
         } else {
             // multi-select: what to do with the picked entries
@@ -394,7 +408,7 @@ private fun FolderView(
                             if (e.audio?.trackId?.let { it > 0L } == true) MenuEntry("Play", R.drawable.ic_play) { playTrack(nav, e.audio.trackId) } else null,
                             if (e.isAudio && e.kind == "file" && canWrite) MenuEntry("Edit tags", R.drawable.ic_edit) { dialog = FolderDialog.Tags(e.name) } else null,
                             // nothing is imported through a link
-                            if (e.isDir && e.kind != "link" && !throughLink) MenuEntry("Import…", R.drawable.ic_download) { dialog = FolderDialog.Import(join(path, e.name)) } else null,
+                            if (e.isDir && e.kind != "link" && !linked) MenuEntry("Import…", R.drawable.ic_download) { dialog = FolderDialog.Import(join(path, e.name)) } else null,
                             MenuSeparator,
                             // on a link these act on the link itself, never on what it points to
                             if (canWrite) MenuEntry("Rename", R.drawable.ic_edit) { dialog = FolderDialog.Rename(e.name) } else null,
@@ -428,13 +442,11 @@ private fun FolderView(
 
     when (val d = dialog) {
         null -> {}
-        FolderDialog.NewFolder -> NameDialog("New folder", "", "Make folder", onDismiss = { dialog = null }) { name ->
-            dialog = null
-            run("Folder made") { api.mkdir(root.id, path, name); "" }
+        FolderDialog.NewFolder -> NameDialog("New folder", "", "Make folder", onDismiss = { dialog = null }) { name, fail ->
+            named("Folder made", fail) { api.mkdir(root.id, path, name) }
         }
-        is FolderDialog.Rename -> NameDialog("Rename", d.name, "Rename", onDismiss = { dialog = null }) { name ->
-            dialog = null
-            if (name != d.name) run("Renamed") { api.rename(root.id, join(path, d.name), name); "" }
+        is FolderDialog.Rename -> NameDialog("Rename", d.name, "Rename", onDismiss = { dialog = null }) { name, fail ->
+            named("Renamed", fail) { api.rename(root.id, join(path, d.name), name) }
         }
         is FolderDialog.Trash -> AlertDialog(
             onDismissRequest = { dialog = null },
@@ -545,12 +557,23 @@ private fun FileRow(e: FileEntry, selected: Boolean, selecting: Boolean, onClick
 
 // ---- dialogs ---------------------------------------------------------------------------------------------------
 
+/**
+ * A dialog with one name box ("New folder" / "Make folder", "Rename" / "Rename"). The name is checked as it is typed
+ * (the server's rule and words, [FilesRules.nameProblem]); [onSubmit] gets the name and a callback for the server's
+ * refusal, which shows under the box while the dialog stays open (the caller closes it when the name went).
+ */
 @Composable
-private fun NameDialog(title: String, initial: String, confirm: String, onDismiss: () -> Unit, onConfirm: (String) -> Unit) {
+private fun NameDialog(title: String, initial: String, confirm: String, onDismiss: () -> Unit, onSubmit: (String, (String) -> Unit) -> Unit) {
     val p = MaterialTheme.palette
     var text by remember { mutableStateOf(initial) }
+    var refused by remember { mutableStateOf<String?>(null) }
+    var busy by remember { mutableStateOf(false) }
     val name = text.trim()
-    val ok = name.isNotEmpty() && name != "." && name != ".." && !name.contains('/') && !name.contains('\\') && name.toByteArray().size <= 255
+    val problem = FilesRules.nameProblem(name)
+    // a rename to the same name has nothing to do
+    val ok = problem == null && !busy && !(initial.isNotEmpty() && name == initial)
+    // an empty box says nothing yet; the button waits
+    val shown = refused ?: if (name.isEmpty()) null else problem
     AlertDialog(
         onDismissRequest = onDismiss,
         containerColor = p.panel,
@@ -559,11 +582,16 @@ private fun NameDialog(title: String, initial: String, confirm: String, onDismis
         title = { Text(title) },
         text = {
             Column {
-                OutlinedTextField(value = text, onValueChange = { text = it }, singleLine = true, placeholder = { Text("Name") })
-                if (name.contains('/') || name.contains('\\')) Text("A name can't contain / or \\", style = MaterialTheme.typography.bodySmall, color = EncoreColors.Err)
+                OutlinedTextField(value = text, onValueChange = { text = it; refused = null }, singleLine = true, placeholder = { Text("Name") })
+                if (shown != null) Text(shown, style = MaterialTheme.typography.bodySmall, color = EncoreColors.Err, modifier = Modifier.padding(top = 6.dp))
             }
         },
-        confirmButton = { TextButton(enabled = ok, onClick = { onConfirm(name) }) { Text(confirm, color = if (ok) p.text else p.faint, fontWeight = FontWeight.SemiBold) } },
+        confirmButton = {
+            TextButton(enabled = ok, onClick = {
+                busy = true
+                onSubmit(name) { why -> busy = false; refused = why }
+            }) { Text(confirm, color = if (ok) p.text else p.faint, fontWeight = FontWeight.SemiBold) }
+        },
         dismissButton = { TextButton(onClick = onDismiss) { Text("Cancel", color = p.muted) } },
     )
 }
@@ -594,7 +622,7 @@ private fun FolderPicker(api: FilesApi, roots: List<FileRoot>, startRoot: FileRo
                     }
                 }
                 Spacer(Modifier.height(8.dp))
-                Text((root?.name ?: "") + (if (path.isNotEmpty()) " › " + path.replace("/", " › ") else ""), style = MaterialTheme.typography.bodySmall, color = p.muted)
+                Text(FilesRules.place(root?.name ?: "", path), style = MaterialTheme.typography.bodySmall, color = p.muted)
                 Spacer(Modifier.height(4.dp))
                 LazyColumn(Modifier.fillMaxWidth().heightIn(max = 320.dp)) {
                     if (path.isNotEmpty()) {
@@ -630,13 +658,14 @@ private fun FolderPicker(api: FilesApi, roots: List<FileRoot>, startRoot: FileRo
     )
 }
 
+/** The labels of the Fix song dialog (SongFix.kt, the web's tag editor: "Track #", "Year"), with "Disc #" and "Genre". */
 private val TAG_LABELS = mapOf(
     "title" to "Title",
     "artist" to "Artist",
     "album" to "Album",
     "albumartist" to "Album artist",
-    "tracknumber" to "Track",
-    "discnumber" to "Disc",
+    "tracknumber" to "Track #",
+    "discnumber" to "Disc #",
     "date" to "Year",
     "genre" to "Genre",
 )
@@ -727,7 +756,7 @@ private fun UploadDialog(items: List<UploadItem>, root: FileRoot, path: String, 
         title = { Text(if (items.size == 1) "Upload “${items[0].name.substringAfterLast('/')}”?" else "Upload ${items.size} files?") },
         text = {
             Column {
-                Text("To ${root.name}" + (if (path.isNotEmpty()) " › " + path.replace("/", " › ") else "") + (if (size > 0) " · ${formatSize(size)}" else ""), style = MaterialTheme.typography.bodySmall)
+                Text("To " + FilesRules.place(root.name, path) + (if (size > 0) " · ${formatSize(size)}" else ""), style = MaterialTheme.typography.bodySmall)
                 Spacer(Modifier.height(10.dp))
                 Text("When a file with the same name is there", style = MaterialTheme.typography.bodyMedium, color = p.text)
                 // a replaced file is moved to Trash first, never deleted (client-shapes §4.3)
@@ -745,6 +774,9 @@ private fun UploadDialog(items: List<UploadItem>, root: FileRoot, path: String, 
 }
 
 // ---- import --------------------------------------------------------------------------------------------------
+
+/** The import preview's empty answer (the server says it with a 404, §4.14). */
+private const val NO_SONGS = "No songs in this folder"
 
 /**
  * Import… on a folder: the album folders in it with the release each was matched to (the match review), or – with
@@ -773,6 +805,9 @@ private fun ImportSheet(api: FilesApi, root: FileRoot, folder: String, onDismiss
             albums = withContext(Dispatchers.IO) { api.importPreview(root.id, folder, mode) }
         } catch (e: CancellationException) {
             throw e
+        } catch (e: ApiException) {
+            // the server's 404 for a folder without songs is the empty answer, not an error (as the web shows it)
+            if (e.code == 404 && e.message == NO_SONGS) albums = emptyList() else error = e.message ?: "Couldn't read the folder"
         } catch (e: Exception) {
             error = e.message ?: "Couldn't read the folder"
         }
@@ -783,7 +818,7 @@ private fun ImportSheet(api: FilesApi, root: FileRoot, folder: String, onDismiss
             item {
                 Column(Modifier.padding(horizontal = 20.dp)) {
                     Text("Import", style = MaterialTheme.typography.titleMedium)
-                    Text(root.name + (if (folder.isNotEmpty()) " › " + folder.replace("/", " › ") else ""), style = MaterialTheme.typography.bodySmall, color = p.muted)
+                    Text(FilesRules.place(root.name, folder), style = MaterialTheme.typography.bodySmall, color = p.muted)
                     Row(Modifier.fillMaxWidth().clickable { keep = !keep }.padding(vertical = 8.dp), verticalAlignment = Alignment.CenterVertically) {
                         Column(Modifier.weight(1f)) {
                             Text("Keep the files where they are", style = MaterialTheme.typography.bodyMedium)
@@ -812,7 +847,7 @@ private fun ImportSheet(api: FilesApi, root: FileRoot, folder: String, onDismiss
                         Text(if (keep) "Reading the folder…" else "Looking for matches…", color = p.muted, style = MaterialTheme.typography.bodySmall)
                     }
                 }
-                list.isEmpty() -> item { Text("No songs in this folder", color = p.muted, style = MaterialTheme.typography.bodySmall, modifier = Modifier.padding(20.dp)) }
+                list.isEmpty() -> item { Text(NO_SONGS, color = p.muted, style = MaterialTheme.typography.bodySmall, modifier = Modifier.padding(20.dp)) }
                 else -> items(list, key = { it.folder }) { a ->
                     ImportAlbumCard(a, keep, on = skip[a.folder] != true, onToggle = { skip[a.folder] = !(skip[a.folder] ?: false) }, onOthers = { others = a })
                 }
@@ -826,8 +861,9 @@ private fun ImportSheet(api: FilesApi, root: FileRoot, folder: String, onDismiss
                         applying = true
                         scope.launch {
                             try {
-                                val msg = withContext(Dispatchers.IO) { api.importApply(root.id, folder, mode, chosen.map { it.folder to (if (keep) null else it.release?.id) }) }
-                                Toasts.show(msg, "ok")
+                                val done = withContext(Dispatchers.IO) { api.importApply(root.id, folder, mode, chosen.map { it.folder to (if (keep) null else it.release?.id) }) }
+                                // some album folders weren't imported: the server's line names the first and why
+                                Toasts.show(done.message, if (done.failed > 0) "warn" else "ok")
                                 onDone()
                             } catch (e: CancellationException) {
                                 throw e
@@ -838,7 +874,7 @@ private fun ImportSheet(api: FilesApi, root: FileRoot, folder: String, onDismiss
                         }
                     }) {
                         val n = chosen.size
-                        Text(if (applying) "Importing…" else if (n == 1) "Import 1 album" else "Import $n albums", color = if (n > 0) p.text else p.faint, fontWeight = FontWeight.SemiBold)
+                        Text(if (applying) "Importing…" else FilesRules.importButton(n), color = if (n > 0) p.text else p.faint, fontWeight = FontWeight.SemiBold)
                     }
                 }
             }
@@ -896,20 +932,40 @@ private fun ImportAlbumCard(a: ImportAlbum, keep: Boolean, on: Boolean, onToggle
     }
 }
 
-/** Other releases for one album folder (the match review's search); picking one shows its preview. */
+/**
+ * Other releases for one album folder: the match review's search over its metadata sources (MusicBrainz first, as
+ * on the web); picking one shows its preview.
+ */
 @Composable
 private fun OtherMatches(api: FilesApi, root: FileRoot, a: ImportAlbum, mode: String, onDismiss: () -> Unit, onPicked: (ImportAlbum) -> Unit) {
     val p = MaterialTheme.palette
     val scope = rememberCoroutineScope()
+    var provider by remember { mutableStateOf(FilesApi.PROVIDERS[0].first) }
     var artist by remember { mutableStateOf(a.artist) }
     var album by remember { mutableStateOf(a.album) }
     var found by remember { mutableStateOf<List<ImportRelease>?>(null) }
+    var failed by remember { mutableStateOf<String?>(null) }
     var searching by remember { mutableStateOf(false) }
+    var seq by remember { mutableIntStateOf(0) }
     fun search() {
         searching = true
+        failed = null
+        val n = ++seq
+        val (source, ar, al) = Triple(provider, artist.trim(), album.trim())
         scope.launch {
-            found = try { withContext(Dispatchers.IO) { api.importMatch(root.id, a.folder, artist.trim(), album.trim()) } } catch (e: CancellationException) { throw e } catch (e: Exception) { Toasts.show(e.message ?: "The search didn't work", "err"); emptyList() }
-            searching = false
+            val res = try {
+                withContext(Dispatchers.IO) { api.importMatch(root.id, a.folder, ar, al, source) }
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                if (n == seq) failed = "The search didn't work: " + (e.message ?: "")
+                emptyList()
+            }
+            // a search for another source that answered later is not shown
+            if (n == seq) {
+                found = res
+                searching = false
+            }
         }
     }
     LaunchedEffect(Unit) { search() }
@@ -921,6 +977,12 @@ private fun OtherMatches(api: FilesApi, root: FileRoot, a: ImportAlbum, mode: St
         title = { Text("Other matches") },
         text = {
             Column(Modifier.heightIn(max = 480.dp)) {
+                LazyRow(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                    items(FilesApi.PROVIDERS, key = { it.first }) { (k, label) ->
+                        Badge(label, kind = if (k == provider) "accent" else "", onClick = { if (k != provider) { provider = k; search() } })
+                    }
+                }
+                Spacer(Modifier.height(6.dp))
                 OutlinedTextField(value = artist, onValueChange = { artist = it }, singleLine = true, label = { Text("Artist") }, modifier = Modifier.fillMaxWidth())
                 OutlinedTextField(value = album, onValueChange = { album = it }, singleLine = true, label = { Text("Album") }, modifier = Modifier.fillMaxWidth())
                 Spacer(Modifier.height(6.dp))
@@ -928,7 +990,9 @@ private fun OtherMatches(api: FilesApi, root: FileRoot, a: ImportAlbum, mode: St
                 Spacer(Modifier.height(6.dp))
                 LazyColumn(Modifier.fillMaxWidth().heightIn(max = 280.dp)) {
                     val list = found
-                    if (list != null && list.isEmpty() && !searching) item { Text("Nothing found", color = p.muted, style = MaterialTheme.typography.bodySmall) }
+                    val why = failed
+                    if (why != null && !searching) item { Text(why, color = EncoreColors.Err, style = MaterialTheme.typography.bodySmall) }
+                    else if (list != null && list.isEmpty() && !searching) item { Text("Nothing found", color = p.muted, style = MaterialTheme.typography.bodySmall) }
                     items(list ?: emptyList(), key = { it.id }) { r ->
                         Column(Modifier.fillMaxWidth().clickable {
                             scope.launch {
@@ -1007,7 +1071,7 @@ private fun TrashView(nav: Nav, api: FilesApi, roots: List<FileRoot>) {
                     Column(Modifier.weight(1f)) {
                         Text(t.name, maxLines = 1, overflow = TextOverflow.Ellipsis)
                         Text(
-                            listOf("From $rootName" + (if (t.path.contains('/')) " › " + parentOf(t.path).replace("/", " › ") else ""), formatDay(t.at), if (t.by.isNotEmpty()) "by ${t.by}" else "", if (t.size > 0) formatSize(t.size) else "")
+                            listOf(FilesRules.trashFrom(rootName, t.path), formatDay(t.at), if (t.by.isNotEmpty()) "by ${t.by}" else "", if (t.size > 0) formatSize(t.size) else "")
                                 .filter { it.isNotEmpty() }.joinToString(" · "),
                             style = MaterialTheme.typography.bodySmall,
                             color = p.muted,
@@ -1095,7 +1159,7 @@ object FileUploads {
                                 _progress.value = UploadProgress(i, items.size, item.name, sentBefore + sent, total, failed)
                             }
                         }
-                        if (out.result == "skipped") { failed++; if (firstError.isEmpty()) firstError = "${item.name.substringAfterLast('/')}: ${out.reason.ifEmpty { "skipped" }}" } else ok++
+                        if (out.result == "skipped") { failed++; if (firstError.isEmpty()) firstError = "${item.name.substringAfterLast('/')}: ${out.reason}" } else ok++
                     } catch (e: CancellationException) {
                         throw e
                     } catch (e: Exception) {
@@ -1109,11 +1173,8 @@ object FileUploads {
                 _progress.value = null
             }
             _done.value = _done.value + 1
-            when {
-                cancelled -> Toasts.show("Upload stopped after $ok of ${items.size}", "info")
-                failed == 0 -> Toasts.show(if (ok == 1) "Uploaded 1 file" else "Uploaded $ok files", "ok")
-                else -> Toasts.show("Uploaded $ok of ${items.size}. $firstError", "warn")
-            }
+            val (line, kind) = FilesRules.uploadEnd(ok, items.size, cancelled, firstError)
+            Toasts.show(line, kind)
         }
         UploadService.start(graph.app)
     }

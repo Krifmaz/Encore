@@ -80,6 +80,11 @@ section = "general"
 title = "General"
 desc = "Your server's name and address, who can sign up, and how requests are approved."
 
+[groups.grouplisten]
+section = "general"
+title = "Group listens"
+desc = "Several people on this server hear the same songs at the same time, each on their own device. Anyone signed in can start one and invite others with a code or a link."
+
 [groups.library]
 section = "library"
 title = "Library & tagging"
@@ -308,6 +313,43 @@ label = "GitHub token (optional)"
 type = "password"
 full = true
 help = "For the update checks of the download tools and of Encore itself: GitHub allows 60 checks an hour per address without a token and 5,000 with one. A fine-grained token with no permissions is enough (github.com → Settings → Developer settings); if the Encore repository is private, give the token read access to it."
+
+# ---- General → Group listens
+
+[keys.group_listen]
+env = "ENCORE_GROUP_LISTEN"
+default = true
+group = "grouplisten"
+label = "Allow group listens"
+type = "bool"
+help = "Off hides every group listen entry in the apps and ends the ones that are running"
+
+[keys.group_listen_guests]
+env = "ENCORE_GROUP_LISTEN_GUESTS"
+default = false
+group = "grouplisten"
+label = "Let people without an account join with the invite link"
+type = "bool"
+help = "The host also switches “Guests can join with the link” on for their group; both must be on. Guests listen on a web page: they can't add songs or control playback, and nothing they hear is logged or scrobbled. Their access ends with the group, when they leave, or after 12 hours."
+
+[keys.group_listen_max]
+env = "ENCORE_GROUP_LISTEN_MAX"
+default = 20
+group = "grouplisten"
+label = "Most people in one group listen"
+type = "number"
+unit = "people"
+min = 2
+max = 100
+help = "Guests count too. A host can set a lower limit for their group."
+
+[keys.group_listen_keep]
+env = "ENCORE_GROUP_LISTEN_KEEP"
+default = true
+group = "grouplisten"
+label = "Keep group listens through a server restart"
+type = "bool"
+help = "They come back paused where they were, the apps join again by themselves and the host presses play. Off: a restart ends them. Group listens nobody used for 12 hours end either way."
 
 # ---- Downloads → Download pipeline
 
@@ -999,6 +1041,15 @@ label = "Music library path"
 type = "path"
 help = "Inside the container (mount your music folder here)"
 
+[keys.library_extra_roots]
+env = "ENCORE_LIBRARY_EXTRA_ROOTS"
+default = ""
+group = "library"
+label = "Extra library folders"
+type = "textarea"
+full = true
+help = "One folder per line, inside the container. Their songs are in the library where and as they are: Encore never moves, renames or retags files there. Files → Import with “Keep the files where they are” adds a folder here."
+
 [keys.staging_path]
 env = "ENCORE_STAGING_PATH"
 default = "/downloads/encore"
@@ -1479,6 +1530,14 @@ env = "TASK_QUALITY_MINUTES"
 default = 360
 help = "How often the Quality scan task runs, in minutes."
 
+[keys.task_loudness_enabled]
+default = true
+help = "Measure loudness task on/off (volume normalization in the apps)."
+
+[keys.task_loudness_minutes]
+default = 1440
+help = "How often the Measure loudness task runs, in minutes (each run goes on where the last one stopped)."
+
 [keys.task_cleanup_enabled]
 default = true
 help = "Clean up task on/off."
@@ -1699,6 +1758,11 @@ help = "Songs quieter than this loudness (LUFS) are reported as very quiet by th
 env = "ENCORE_SELF_UPDATE"
 default = ""
 help = "Whether Diagnostics may offer Update now through the Docker socket: off, false, no or 0 switch it off."
+
+[keys.trusted_proxies]
+env = "ENCORE_TRUSTED_PROXIES"
+default = ""
+help = "The reverse proxies in front of Encore, as addresses or networks (10.0.0.0/8), comma-separated. Encore reads a visitor's address from X-Forwarded-For only on connections from them, for sign-in limits and the like. Empty: loopback and the private networks. Name a proxy with a public address (Cloudflare, a proxy on another server) here, with the private networks it still needs."
 
 # ---- Lyrics (no field in the UI; set them through the environment)
 

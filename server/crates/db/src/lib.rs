@@ -149,13 +149,14 @@ pub const MIGRATIONS: &[(i64, &str, &str)] = &[
     (24, "reports_quality_contributions", include_str!("../migrations/0024_reports_quality_contributions.sql")),
     (25, "translations", include_str!("../migrations/0025_translations.sql")),
     (26, "indexes", include_str!("../migrations/0026_indexes.sql")),
+    (27, "loudness", include_str!("../migrations/0027_loudness.sql")),
 ];
 
 /// The schema this server writes, stamped into `PRAGMA user_version`: the number of the last file in
 /// MIGRATIONS. An older server that finds a higher number refuses to touch the file (it would otherwise
 /// fail half-way through and leave a database neither version can read), and a lower number means
 /// "back up, then migrate" (and ANALYZE after it: new indexes have no statistics yet).
-pub const SCHEMA_VERSION: i64 = 26;
+pub const SCHEMA_VERSION: i64 = 27;
 
 /// Exit code of the server when the database comes from a newer Encore.
 pub const EXIT_NEWER_DB: i32 = 3;
@@ -1186,6 +1187,79 @@ mod tests {
         assert_eq!(db.one("SELECT title FROM tracks WHERE lower(artist)=lower('ANN')", p![]).unwrap().unwrap().s("title"), "A");
         // the statement cache and the WAL limit are on every connection
         assert_eq!(db.conn.lock().unwrap().query_row("PRAGMA journal_size_limit", [], |r| r.get::<_, i64>(0)).unwrap(), 67108864);
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    /// A database exactly as a schema 26 server (0.29, 0.30) leaves it: every migration up to 26 run on it,
+    /// stamped 26, with songs in it.
+    fn schema_26_database(d: &Path) {
+        std::fs::create_dir_all(d).unwrap();
+        let c = Connection::open(d.join("encore.db")).unwrap();
+        c.pragma_update(None, "journal_mode", "WAL").unwrap();
+        for (n, _, sql) in MIGRATIONS.iter().filter(|(n, _, _)| *n <= 26) {
+            migrate(&c, sql).unwrap_or_else(|e| panic!("migration {n}: {e}"));
+        }
+        c.pragma_update(None, "user_version", 26).unwrap();
+        c.execute_batch("INSERT INTO settings VALUES ('kept', '1');
+                         INSERT INTO tracks (id, path, title, artist, album, albumartist, album_id, format, bitrate, duration)
+                         VALUES (7, '/m/a.flac', 'A', 'Ann', 'Alb', 'Ann', 'x1', 'flac', 900, 200.5), (8, '/m/b.mp3', 'B', 'Ann', 'Alb', 'Ann', 'x1', 'mp3', 320, 180);").unwrap();
+    }
+
+    /// Schema 27 (0.31): the loudness, sample rate and bit depth columns on the songs (empty for the songs
+    /// already there: the scan and the "Measure loudness" task fill them), the group listen tables, a backup
+    /// first and ANALYZE after; opening it again changes nothing.
+    #[test]
+    fn schema_27_adds_loudness_and_group_listens_to_a_schema_26_database() {
+        const { assert!(SCHEMA_VERSION >= 27) };
+        let d = tmp("schema27");
+        schema_26_database(&d);
+        {
+            let c = Connection::open(d.join("encore.db")).unwrap();
+            let cols: Vec<String> = c.prepare("PRAGMA table_info(tracks)").unwrap().query_map([], |r| r.get::<_, String>(1)).unwrap().map(|r| r.unwrap()).collect();
+            assert!(!cols.iter().any(|c| c == "loudness_source" || c == "sample_rate"), "a schema 26 database has none of them: {cols:?}");
+        }
+        let db = Db::open(&d).unwrap();
+        assert_eq!(db.user_version().unwrap(), SCHEMA_VERSION);
+        let backups = crate::backup::list(&d);
+        assert_eq!(backups.len(), 1);
+        assert_eq!(backups[0].kind, crate::backup::Kind::BeforeUpgrade);
+        assert_eq!(crate::backup::validate_file(&backups[0].path).unwrap(), 26);
+        // the songs are kept, with nothing known yet about their loudness
+        let t = db.one("SELECT * FROM tracks WHERE id=7", p![]).unwrap().unwrap();
+        assert_eq!((t.s("title"), t.s("format"), t.i("bitrate")), ("A".to_string(), "flac".to_string(), 900));
+        for col in ["rg_track_gain", "rg_track_peak", "rg_album_gain", "rg_album_peak", "loudness_lufs", "loudness_source", "sample_rate", "bit_depth"] {
+            assert!(t.get(col).is_some_and(|v| v.is_null()), "{col}: {t:?}");
+        }
+        db.execute("UPDATE tracks SET rg_track_gain=-7.21, rg_track_peak=0.988, rg_album_gain=-6.84, rg_album_peak=1.0, loudness_lufs=-10.79,
+                    loudness_source='tags', sample_rate=96000, bit_depth=24 WHERE id=7", p![]).unwrap();
+        let t = db.one("SELECT rg_track_gain, loudness_source, sample_rate, bit_depth FROM tracks WHERE id=7", p![]).unwrap().unwrap();
+        assert_eq!((t.f("rg_track_gain"), t.s("loudness_source"), t.i("sample_rate"), t.i("bit_depth")), (-7.21, "tags".to_string(), 96000, 24));
+        // the "Measure loudness" task's look-up of the songs it has not looked at goes through its index
+        let plan = db.query("EXPLAIN QUERY PLAN SELECT id FROM tracks WHERE loudness_source IS NULL AND id > ? ORDER BY id LIMIT 200", p![0]).unwrap();
+        assert!(plan.iter().any(|r| r.s("detail").contains("idx_tracks_loudness")), "{plan:?}");
+        assert!(db.one("SELECT COUNT(*) n FROM sqlite_stat1", p![]).unwrap().unwrap().i("n") > 0, "ANALYZE ran after the migration");
+        // a group listen with its members; ending it takes the members with it
+        db.execute("INSERT INTO group_listens (id, code, host_user_id, visibility, everyone_controls, guests_allowed, max_members, queue, idx, position, rev, started_at, created_at, updated_at)
+                    VALUES ('g_1', 'K7QM4X', 1, 'link', 1, 0, 8, '[{\"id\":7,\"qid\":\"q1\"}]', 0, 63.25, 42, 1, 1, 2)", p![]).unwrap();
+        db.execute("INSERT INTO group_listen_members (group_id, member, user_id, name, device_id, device_name, is_host, joined_at) VALUES ('g_1', 'm1', 1, 'Alex', 'd1', 'Firefox on Linux', 1, 1)", p![]).unwrap();
+        db.execute("INSERT INTO group_listen_members (group_id, member, guest_id, name, joined_at) VALUES ('g_1', 'm2', 'gst_1', 'Kim', 2)", p![]).unwrap();
+        let g = db.one("SELECT * FROM group_listens WHERE code='K7QM4X'", p![]).unwrap().unwrap();
+        assert_eq!((g.s("visibility"), g.i("max_members"), g.f("position"), g.i("rev"), g.s("data")), ("link".to_string(), 8, 63.25, 42, "{}".to_string()));
+        assert_eq!(db.one("SELECT COUNT(*) n FROM group_listen_members WHERE group_id='g_1'", p![]).unwrap().unwrap().i("n"), 2);
+        db.execute("DELETE FROM group_listens WHERE id='g_1'", p![]).unwrap();
+        assert_eq!(db.one("SELECT COUNT(*) n FROM group_listen_members", p![]).unwrap().unwrap().i("n"), 0);
+        assert_eq!(db.one("SELECT value FROM settings WHERE key='kept'", p![]).unwrap().unwrap().s("value"), "1");
+        drop(db);
+        // opened again: same version, no second backup, the values stay
+        let db = Db::open(&d).unwrap();
+        assert_eq!(crate::backup::list(&d).len(), 1);
+        assert_eq!(db.one("SELECT sample_rate FROM tracks WHERE id=7", p![]).unwrap().unwrap().i("sample_rate"), 96000);
+        // and it ends up like a new database
+        let fresh = Connection::open_in_memory().unwrap();
+        for (_, _, sql) in MIGRATIONS {
+            migrate(&fresh, sql).unwrap();
+        }
+        assert_eq!(layout(&db.conn.lock().unwrap()), layout(&fresh));
         let _ = std::fs::remove_dir_all(&d);
     }
 

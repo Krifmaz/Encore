@@ -491,7 +491,7 @@ class RemoteDevice private constructor(context: Context, private val graph: AppG
             return if (model.isEmpty()) "Android app" else "Android app ($model)"
         }
 
-        /** player.js `slim(t)`: what a queue entry carries between devices. */
+        /** The web's `slim(t)`: what a queue entry carries between devices (client-shapes §5.1). */
         fun slim(t: Track): JsonObject = buildJsonObject {
             put("id", t.id)
             put("title", t.title)
@@ -500,6 +500,10 @@ class RemoteDevice private constructor(context: Context, private val graph: AppG
             put("album_id", t.albumId)
             if (t.format.isNotEmpty()) put("format", t.format)
             put("duration", t.durationSec)
+            // the loudness data and the file's facts travel with the song, so it plays normalized on the next device too
+            t.gain?.let { put("gain", it.toJson()) }
+            if (t.sampleRate > 0) put("sample_rate", t.sampleRate)
+            if (t.bitDepth > 0) put("bit_depth", t.bitDepth)
         }
 
         fun slimList(tracks: List<Track>): JsonArray = buildJsonArray { for (t in tracks) add(slim(t)) }

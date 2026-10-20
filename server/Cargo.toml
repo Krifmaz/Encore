@@ -25,6 +25,7 @@ encore-vpn = { path = "crates/vpn" }
 encore-system = { path = "crates/system" }
 encore-requests = { path = "crates/requests" }
 encore-api = { path = "crates/api" }
+encore-files = { path = "crates/files" }
 axum = { version = "0.8", features = ["multipart", "ws", "macros"] }
 axum-extra = { version = "0.10", features = ["cookie"] }
 tokio = { version = "1", features = ["full"] }

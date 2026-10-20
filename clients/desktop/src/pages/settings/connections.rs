@@ -623,6 +623,7 @@ pub fn overlay<'a>(state: &'a State, ctx: &Ctx<'a>) -> Option<El<'a, Message>> {
             "Connect Last.fm",
             column![
                 widgets::muted("Sign in on last.fm and allow Encore – then everything you play here is scrobbled, and For you suggests artists from your listening.").size(14),
+                help("Only approve Encore on Last.fm when you started the sign-in yourself."),
                 container(btn_icon(Icon::Link, "Sign in with Last.fm", Btn::Primary, Some(Message::LastfmAuth))),
                 help("Or just enter a username (loved tracks and recommendations, no scrobbling)"),
                 row![

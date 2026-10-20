@@ -9,6 +9,8 @@ pub mod contribute;
 pub mod discover;
 pub mod download;
 pub mod downloads;
+/// System → Files (0.33): the admin file manager (no web/js page; written for web-rs).
+pub mod files;
 pub mod foryou;
 pub mod home;
 pub mod leaderboard;

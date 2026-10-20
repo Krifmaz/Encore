@@ -6,6 +6,7 @@ import app.encore.android.BuildConfig
 import app.encore.android.data.session.AuthKind
 import app.encore.android.data.session.SessionStore
 import okhttp3.Cache
+import okhttp3.HttpUrl
 import okhttp3.HttpUrl.Companion.toHttpUrlOrNull
 import okhttp3.Interceptor
 import okhttp3.OkHttpClient
@@ -28,6 +29,8 @@ fun buildHttpClient(context: Context, store: SessionStore): OkHttpClient =
         .followSslRedirects(true)
         .cache(Cache(File(context.cacheDir, "http"), 50L * 1024L * 1024L))
         .addInterceptor(AuthInterceptor(store))
+        // every hop of a redirect: the session stays on the server's own host
+        .addNetworkInterceptor(SessionOffHostInterceptor(store))
         .build()
 
 /**
@@ -42,11 +45,8 @@ class AuthInterceptor(private val store: SessionStore) : Interceptor {
         val s = store.current
         val path = req.url.encodedPath
         val isAuthCall = path.startsWith("/api/auth/login") || path.startsWith("/api/auth/info") || path.startsWith("/api/health")
-        // compare by parts: HttpUrl lower-cases the host and drops default ports, a stored server may not
         val su = s?.server?.toHttpUrlOrNull()
-        val authed = su != null && !isAuthCall &&
-            req.url.scheme == su.scheme && req.url.host == su.host && req.url.port == su.port &&
-            path.startsWith(su.encodedPath.trimEnd('/'))
+        val authed = su != null && !isAuthCall && SessionRules.sameHost(req.url, su) && path.startsWith(su.encodedPath.trimEnd('/'))
         if (s != null && authed) {
             if (s.kind == AuthKind.BEARER) {
                 b.header("Authorization", "Bearer " + s.token)
@@ -57,7 +57,62 @@ class AuthInterceptor(private val store: SessionStore) : Interceptor {
         // the server's CSRF check for cookie sessions; harmless with a bearer token
         if (req.method != "GET" && req.method != "HEAD") b.header("X-Requested-With", "encore")
         val res = chain.proceed(b.build())
-        if (s != null && authed && res.code == 401) store.onUnauthorized(s.token)
+        // only the server's own 401 signs out, not one from the host a redirect went on to
+        if (s != null && su != null && authed && res.code == 401 && SessionRules.sameHost(res.request.url, su)) store.onUnauthorized(s.token)
         return res
+    }
+}
+
+/**
+ * The session never leaves the server's host. AuthInterceptor adds it once, to the request as the app made it;
+ * OkHttp then follows redirects with that request's headers, and drops `Authorization` on another host but
+ * keeps `Cookie`. So on every network hop (a network interceptor sees each redirect) a request for another host
+ * loses Encore's own `encore_session` cookie and its own bearer token, and nothing else: other cookies and the
+ * headers of calls made for other hosts (the GitHub update check's) stay as they are.
+ */
+class SessionOffHostInterceptor(private val store: SessionStore) : Interceptor {
+    override fun intercept(chain: Interceptor.Chain): Response {
+        val req = chain.request()
+        val s = store.current ?: return chain.proceed(req)
+        val server = s.server.toHttpUrlOrNull()
+        if (server != null && SessionRules.sameHost(req.url, server)) return chain.proceed(req)
+        val cookie = req.header("Cookie")
+        val auth = req.header("Authorization")
+        val keptCookie = cookie?.let { SessionRules.cookieWithout(it, s.token) }
+        val dropAuth = auth != null && SessionRules.isOwnBearer(auth, s.token)
+        if (cookie == keptCookie && !dropAuth) return chain.proceed(req)
+        val b = req.newBuilder()
+        if (keptCookie == null) b.removeHeader("Cookie") else b.header("Cookie", keptCookie)
+        if (dropAuth) b.removeHeader("Authorization")
+        return chain.proceed(b.build())
+    }
+}
+
+/** What goes with the session and what never does (unit-tested in SessionRulesTest). */
+object SessionRules {
+    const val COOKIE = "encore_session"
+
+    /**
+     * The same server: scheme, host and port (OkHttp's HttpUrl lower-cases the host and fills in default ports,
+     * so a stored "HTTPS://Music.Example.org:443" matches "https://music.example.org").
+     */
+    fun sameHost(url: HttpUrl, server: HttpUrl): Boolean =
+        url.scheme == server.scheme && url.host == server.host && url.port == server.port
+
+    /**
+     * A `Cookie` header without Encore's own `encore_session=<token>` pair, the other cookies as they were; null
+     * when nothing is left. An `encore_session` with another value is not Encore's session and stays.
+     */
+    fun cookieWithout(cookie: String, token: String): String? {
+        val own = "$COOKIE=$token"
+        val rest = cookie.split(';').map { it.trim() }.filter { it.isNotEmpty() && it != own }
+        return if (rest.isEmpty()) null else rest.joinToString("; ")
+    }
+
+    /** `Authorization: Bearer <token>` with the app's own token (another value is someone else's header). */
+    fun isOwnBearer(authorization: String, token: String): Boolean {
+        val value = authorization.trim()
+        val scheme = "Bearer "
+        return token.isNotEmpty() && value.startsWith(scheme, ignoreCase = true) && value.substring(scheme.length).trim() == token
     }
 }

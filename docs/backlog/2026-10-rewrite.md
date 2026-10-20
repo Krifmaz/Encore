@@ -44,6 +44,10 @@ Nothing here is started until the owner says "go".
    - Browse, upload (folders too), move, rename, delete to trash, make folders, edit tags.
    - Manual import with match review, and a "keep the files where and as they are" option.
    - The database stays in sync. Paths are confined to the configured roots.
+   - **Done 0.33.0** (website, desktop app and phone; admins only): Settings → System → Files over the library,
+     staging, the download folders and Trash, with "Keep the files where they are" adding the folder to the new
+     setting *Extra library folders*, which the scan walks and nothing moves. Notes in docs/releases/0.33.0.md,
+     shapes in docs/contracts/client-shapes-0.31-0.33.md §2.4 and Part 4.
 8. **Cadenza no audio on Windows.** Setup: RTX 3070; USB → Singxer SU-2 → Fosi ZD3 (ES9038Q2M), and the ZD3
    directly over USB.
    Seen on screen:
@@ -216,3 +220,11 @@ Nothing here is started until the owner says "go".
     can sit on the bar; "Customize the bar…" (⋮ menu and Settings → Appearance) picks which of Like, View album,
     Add to playlist, Lyrics, Share, Up next, Other devices and the quality badge are shown (⋮ and the volume stay).
     Saved per browser (`encore.barButtons`); phones keep the short bar.
+23. **Group listen** – done 0.31.0 (owner, Oct 18: "add the option to start a group listen"). Several people on this
+    server listen to the same queue at the same time, each on their own device: start from the player or Your devices,
+    join with a code, an invite link or the list of live group listens (Home and Your devices), the host controls
+    playback unless "Everyone can control" is on, everyone with an account adds songs to Up next, a pause pauses only
+    that device ("Paused here · Catch up"). Guests without an account listen on a web page from the invite link when
+    the admin and the host allow it. Admin settings in Server → General → Group listens (allowed, guests off, at most
+    20 people, kept through a restart). Website, desktop app (keeps in step by seeking) and phone; notes in
+    docs/releases/0.31.0.md, shapes in docs/contracts/client-shapes-0.31-0.33.md §2.2, §2.3, §3.6–3.19.

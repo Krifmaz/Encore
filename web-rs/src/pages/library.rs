@@ -17,11 +17,57 @@ use std::rc::Rc;
 use web_sys::Element;
 
 const PAGE: usize = 120;
+/// The first matches each section of the search's results view shows (the phone and the desktop ask for as many).
+const RESULTS_LIMIT: usize = 12;
 
 // ---- small helpers for the JS idioms used in this file ----
 
 /// `encodeURIComponent(s)`.
 fn enc(s: &str) -> String { js_sys::encode_uri_component(s).into() }
+
+/// `encodeURIComponent(s)` in plain Rust (the same characters stay as they are), so the addresses built from it
+/// can be tested off the browser.
+pub(crate) fn uri_component(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for b in s.bytes() {
+        if b.is_ascii_alphanumeric() || b"-_.!~*'()".contains(&b) { out.push(b as char); } else { out.push_str(&format!("%{b:02X}")); }
+    }
+    out
+}
+
+/// The library page's address for what it shows (p6 item 9): the search stays in it (`#/library?q=`), so Back and
+/// reload keep it. The results view has no `tab`; a tab filtered by the search has one (Albums, the default tab,
+/// only when there is a search, or reload would show the results view instead).
+fn library_hash(tab: &str, results: bool, q: &str, artist: &str, filter: &str) -> String {
+    let mut parts: Vec<String> = Vec::new();
+    if !results && (tab != "albums" || !q.is_empty()) { parts.push(format!("tab={}", uri_component(tab))); }
+    if !q.is_empty() { parts.push(format!("q={}", uri_component(q))); }
+    if !artist.is_empty() { parts.push(format!("artist={}", uri_component(artist))); }
+    if !filter.is_empty() { parts.push(format!("filter={}", uri_component(filter))); }
+    if parts.is_empty() { "#/library".to_string() } else { format!("#/library?{}", parts.join("&")) }
+}
+
+/// "Show all N" of a results section: the server's count when it sent one (client-shapes §3.4), else "Show all"
+/// when the section came back full (an older server without `counts`); nothing when every match is shown.
+pub(crate) fn show_all_label(count: Option<u64>, shown: usize, limit: usize) -> Option<String> {
+    match count {
+        Some(total) if total as usize > shown => Some(format!("Show all {total}")),
+        Some(_) => None,
+        None if shown >= limit => Some("Show all".to_string()),
+        None => None,
+    }
+}
+
+/// The album kind a list asks for: the Albums tab with a search lists the singles too, as the results view's
+/// count does (client-shapes §3.4: `counts.albums` includes singles), so "Show all N" opens N albums.
+fn album_kind<'a>(tab: &'a str, q: &str) -> &'a str {
+    if tab == "albums" && !q.is_empty() { "" } else { tab }
+}
+
+/// `history.replaceState(null, '', url)`: the address follows the page without a new history entry or a redraw.
+fn replace_hash(url: &str) {
+    let _ = dom::window().history().and_then(|h| h.replace_state_with_url(&wasm_bindgen::JsValue::NULL, "", Some(url)));
+}
 /// `window.dispatchEvent(new HashChangeEvent('hashchange'))` – re-renders the current page.
 fn hashchange() {
     if let Ok(ev) = web_sys::HashChangeEvent::new("hashchange") { let _ = dom::window().dispatch_event(&ev); }
@@ -266,8 +312,29 @@ fn cover_v_text(a: &Value) -> String {
     }
 }
 
-/// The JS `st` object.
-struct St { tab: String, q: String, sort: String, dir: String, filter: String, artist: String, offset: usize }
+/// The JS `st` object. `results`: with a search, the one results view (true) or the selected tab filtered by it
+/// (false: a tab was clicked, or "Show all N" opened one).
+struct St { tab: String, q: String, sort: String, dir: String, filter: String, artist: String, offset: usize, results: bool }
+
+/// The rows of the Songs table from `base` on (`data-i` and the ⋯ index count from there).
+fn song_rows(rows: &[Value], base: usize) -> String {
+    rows.iter().enumerate().map(|(i, t)| format!(r##"<tr data-i="{idx}">
+        <td style="width:52px"><button class="thumb play-thumb" data-play-track="{id}" aria-label="Play">{art}<i>{play}</i></button></td>
+        <td><div style="font-weight:600" class="ellipsis">{title}</div>{title_sub}<div class="small muted ellipsis">{artist}<span class="show-sm"> · {album_ln}</span></div></td>
+        <td class="hide-sm"><a href="#/library/album/{album_id}">{album}</a></td>
+        <td class="hide-sm"><span class="badge">{fmt}</span> {vb}</td>
+        <td class="muted hide-sm">{dur}</td>
+        <td style="text-align:right"><button class="btn sm ghost icon" data-tmenu="{idx}" aria-label="More">{more}</button></td></tr>"##,
+        idx = base + i, id = t.s("id"),
+        art = ui::art_sized(&format!("/api/library/albums/{}/cover{}", t.s("album_id"), ui::cover_q(t)), &if t.truthy("album") { t.s("album") } else { t.s("title") }, "", 200),
+        play = icon("play"), title = esc(&ui::tr(t, "title")), title_sub = ui::tr_sub(t, "title"), artist = ui::artist_links(t), album_ln = ui::album_link(t), album = esc(&ui::tr_inline(t, "album")), album_id = esck(t, "album_id"),
+        fmt = format_text(t), vb = verify_badge(t), dur = ui::fmt::dur(t.f("duration")), more = icon("more"))).collect()
+}
+
+/// The Songs table around its rows; `attrs` go on the card (`data-found` marks the results view's songs).
+fn songs_table(rows_html: &str, attrs: &str) -> String {
+    format!(r##"<div class="card flat"{attrs}><div class="table-wrap"><table class="table"><thead><tr><th></th><th>Title</th><th class="hide-sm">Album</th><th class="hide-sm">Format</th><th class="hide-sm">Time</th><th></th></tr></thead><tbody>{rows_html}</tbody></table></div></div>"##)
+}
 
 /// Everything the closures of `render` shared.
 struct Lib {
@@ -291,9 +358,69 @@ struct Lib {
     index_seq: Cell<u32>,
     /// `nextPage`: the albums page after the last one shown, fetched ahead (url, the answer once it came)
     next_page: Rc<RefCell<Option<(String, Option<Value>)>>>,
+    /// Counts the lists drawn from scratch: an answer for an older one (a search typed further, another tab) is
+    /// dropped, so the newest query wins.
+    load_seq: Cell<u32>,
 }
 
 impl Lib {
+    /// The one results view shows: a search is typed, no tab was picked for it, and the page isn't one artist's
+    /// (`?artist=`, whose search filters the tab as before).
+    fn results_view(&self) -> bool {
+        let st = self.st.borrow();
+        st.results && !st.q.is_empty() && st.artist.is_empty()
+    }
+
+    /// The address follows the search and the tab (no history entry).
+    fn sync_url(&self) {
+        let results = self.results_view();
+        let st = self.st.borrow();
+        replace_hash(&library_hash(&st.tab, results, &st.q, &st.artist, &st.filter));
+    }
+
+    /// The results view of a search (GET /api/library/search, p6 item 9): Artists, Albums (singles too) and
+    /// Songs, each with its first matches and "Show all N", which opens that tab with the search kept; with no
+    /// match anywhere, "Search everywhere" opens Discover with it.
+    async fn render_results(self: Rc<Self>, mine: u32) -> Result<(), ApiError> {
+        dom::add_class(&self.more, "hidden");
+        set_sub(&self.view, "");
+        let q = self.st.borrow().q.clone();
+        let res = api::get(&format!("/library/search?q={}&limit={RESULTS_LIMIT}", uri_component(&q))).await;
+        if self.load_seq.get() != mine { return Ok(()); }   // a newer search (or a tab) is showing
+        let res = match res {
+            Ok(r) => r,
+            Err(e) => { dom::set_html(&self.body, &format!(r#"<div class="error-box">{}</div>"#, esc(&e.message))); return Ok(()); }
+        };
+        let (artists, albums, songs) = (res.a("artists"), res.a("albums"), res.a("songs"));
+        if artists.is_empty() && albums.is_empty() && songs.is_empty() {
+            self.tracks.borrow_mut().clear();
+            dom::set_html(&self.body, &empty_state(&icon("search"), &format!("Nothing in your library matches “{q}”"),
+                &format!(r#"<button class="btn primary" data-search-everywhere>{}Search everywhere</button>"#, icon("search"))));
+            return Ok(());
+        }
+        let counts = res.g("counts");
+        let head = |title: &str, key: &str, shown: usize, tab: &str| -> String {
+            let more = show_all_label(counts.g(key).as_u64(), shown, RESULTS_LIMIT)
+                .map(|l| format!(r#"<button class="btn sm ghost" data-show-all="{tab}">{l}</button>"#)).unwrap_or_default();
+            format!(r#"<div class="section-head"><h2>{title}</h2>{more}</div>"#)
+        };
+        let mut html = String::new();
+        if !artists.is_empty() {
+            html += &head("Artists", "artists", artists.len(), "artists");
+            html += &format!(r#"<div class="grid">{}</div>"#, artists.iter().map(|a| self.artist_tile(a)).collect::<String>());
+        }
+        if !albums.is_empty() {
+            html += &head("Albums", "albums", albums.len(), "albums");
+            html += &format!(r#"<div class="grid">{}</div>"#, albums.iter().map(common::library_tile).collect::<String>());
+        }
+        if !songs.is_empty() {
+            html += &head("Songs", "songs", songs.len(), "tracks");
+            html += &songs_table(&song_rows(&songs, 0), " data-found");
+        }
+        *self.tracks.borrow_mut() = songs;
+        dom::set_html(&self.body, &html);
+        Ok(())
+    }
     fn paint_sort(&self) {
         let tab = self.st.borrow().tab.clone();
         let opts = sort_opts(&tab);
@@ -370,11 +497,19 @@ impl Lib {
     }
 
     async fn load(self: Rc<Self>, append: bool, want: usize) -> Result<(), ApiError> {
+        // more rows of the list on screen keep its number; a list drawn from scratch takes the next one
+        let mine = if append { self.load_seq.get() } else { self.load_seq.get().wrapping_add(1) };
+        self.load_seq.set(mine);
+        let results = self.results_view();
         if !append { self.st.borrow_mut().offset = 0; dom::set_html(&self.body, &skeleton_grid(12)); }
         let tab = self.st.borrow().tab.clone();
-        if let Some(filt) = dom::qs_in(&self.view, "#lib-filter") { dom::toggle_class(&filt, "hidden", !matches!(tab.as_str(), "albums" | "singles")); }
-        if let Some(p) = dom::qs_in(&self.view, "#lib-q").and_then(|q| q.parent_element()) { dom::toggle_class(&p, "hidden", matches!(tab.as_str(), "duplicates" | "issues")); }
+        // the results view: no tab is the selected one, and sorting and the album filter don't apply
+        for b in dom::qsa_in(&self.view, "#lib-tabs button") { dom::toggle_class(&b, "active", !results && dom::data(&b, "t") == tab); }
+        if let Some(p) = self.sort_el.parent_element() { dom::toggle_class(&p, "hidden", results || sort_opts(&tab).is_none()); }
+        if let Some(filt) = dom::qs_in(&self.view, "#lib-filter") { dom::toggle_class(&filt, "hidden", results || !matches!(tab.as_str(), "albums" | "singles")); }
+        if let Some(p) = dom::qs_in(&self.view, "#lib-q").and_then(|q| q.parent_element()) { dom::toggle_class(&p, "hidden", !results && matches!(tab.as_str(), "duplicates" | "issues")); }
         if !append { self.load_index(); }
+        if results { return self.render_results(mine).await; }
         if tab == "duplicates" { return self.clone().render_duplicates().await; }
         if tab == "issues" { return render_issues(&self.body, &self.view, &self.more).await; }
         let (q, sort, dir, filter, artist, offset) = {
@@ -382,17 +517,20 @@ impl Lib {
             (s.q.clone(), s.sort.clone(), s.dir.clone(), s.filter.clone(), s.artist.clone(), s.offset)
         };
         if tab == "albums" || tab == "singles" {
-            let page_url = |offset: usize, limit: usize| format!("/library/albums?q={}&sort={sort}&dir={dir}&kind={tab}&filter={filter}&artist={}&limit={limit}&offset={offset}", enc(&q), enc(&artist));
+            let kind = album_kind(&tab, &q);
+            let page_url = |offset: usize, limit: usize| format!("/library/albums?q={}&sort={sort}&dir={dir}&kind={kind}&filter={filter}&artist={}&limit={limit}&offset={offset}", enc(&q), enc(&artist));
             let url = page_url(offset, if want > 0 { want.clamp(PAGE, 500) } else { PAGE });
             // the next page was fetched ahead (with its covers) when this one showed
             let ahead = self.next_page.borrow_mut().take().filter(|(u, _)| append && *u == url).and_then(|(_, r)| r);
             let res = match ahead { Some(r) => r, None => api::get(&url).await? };
+            if self.load_seq.get() != mine { return Ok(()); }   // another list is showing now
             let items = res.a("items");
             let html: String = items.iter().map(common::library_tile).collect();
             if append {
                 if let Some(g) = dom::qs_in(&self.body, ".grid") { let _ = g.insert_adjacent_html("beforeend", &html); }
             } else {
                 dom::set_html(&self.body, &if !items.is_empty() { format!(r##"<div class="grid">{html}</div>"##) }
+                    else if !q.is_empty() { empty_state(&icon("library"), &format!("No albums match “{q}”"), "") }
                     else { empty_state(&icon("library"), "No albums found", if filter == "untagged" { "Everything is tagged 🎉" } else { "" }) });
             }
             let off = { let mut s = self.st.borrow_mut(); s.offset += items.len(); s.offset };
@@ -410,29 +548,22 @@ impl Lib {
             set_sub(&self.view, &format!("{} {tab}", ui::fmt::num(res.f("total"))));
         } else if tab == "artists" {
             let rows = api::get(&format!("/library/artists?q={}&sort={sort}&dir={dir}", enc(&q))).await?.items();
+            if self.load_seq.get() != mine { return Ok(()); }
             dom::add_class(&self.more, "hidden");
             set_sub(&self.view, &format!("{} artists", ui::fmt::num(rows.len() as f64)));
             dom::set_html(&self.body, &if !rows.is_empty() { format!(r##"<div class="grid">{}</div>"##, rows.iter().map(|a| self.artist_tile(a)).collect::<String>()) }
+                else if !q.is_empty() { empty_state(&icon("users"), &format!("No artists match “{q}”"), "") }
                 else { empty_state(&icon("users"), "No artists found", "") });
         } else {
             let lim = if want > 0 { want.clamp(300, 1000) } else { 300 };
             let rows = api::get(&format!("/library/tracks?q={}&sort={sort}&dir={dir}&limit={lim}&offset={}", enc(&q), if append { offset } else { 0 })).await?.items();
+            if self.load_seq.get() != mine { return Ok(()); }
             let base = if append { self.tracks.borrow().len() } else { 0 };
-            let html: String = rows.iter().enumerate().map(|(i, t)| format!(r##"<tr data-i="{idx}">
-        <td style="width:52px"><button class="thumb play-thumb" data-play-track="{id}" aria-label="Play">{art}<i>{play}</i></button></td>
-        <td><div style="font-weight:600" class="ellipsis">{title}</div>{title_sub}<div class="small muted ellipsis">{artist}<span class="show-sm"> · {album_ln}</span></div></td>
-        <td class="hide-sm"><a href="#/library/album/{album_id}">{album}</a></td>
-        <td class="hide-sm"><span class="badge">{fmt}</span> {vb}</td>
-        <td class="muted hide-sm">{dur}</td>
-        <td style="text-align:right"><button class="btn sm ghost icon" data-tmenu="{idx}" aria-label="More">{more}</button></td></tr>"##,
-                idx = base + i, id = t.s("id"),
-                art = ui::art_sized(&format!("/api/library/albums/{}/cover{}", t.s("album_id"), ui::cover_q(t)), &if t.truthy("album") { t.s("album") } else { t.s("title") }, "", 200),
-                play = icon("play"), title = esc(&ui::tr(t, "title")), title_sub = ui::tr_sub(t, "title"), artist = ui::artist_links(t), album_ln = ui::album_link(t), album = esc(&ui::tr_inline(t, "album")), album_id = esck(t, "album_id"),
-                fmt = format_text(t), vb = verify_badge(t), dur = ui::fmt::dur(t.f("duration")), more = icon("more"))).collect();
+            let html = song_rows(&rows, base);
             if !append {
-                dom::set_html(&self.body, &if !rows.is_empty() {
-                    format!(r##"<div class="card flat"><div class="table-wrap"><table class="table"><thead><tr><th></th><th>Title</th><th class="hide-sm">Album</th><th class="hide-sm">Format</th><th class="hide-sm">Time</th><th></th></tr></thead><tbody>{html}</tbody></table></div></div>"##)
-                } else { empty_state(&icon("music"), "No songs found", "") });
+                dom::set_html(&self.body, &if !rows.is_empty() { songs_table(&html, "") }
+                    else if !q.is_empty() { empty_state(&icon("music"), &format!("No songs match “{q}”"), "") }
+                    else { empty_state(&icon("music"), "No songs found", "") });
                 *self.tracks.borrow_mut() = rows.clone();
             } else {
                 if let Some(tb) = dom::qs_in(&self.body, "tbody") { let _ = tb.insert_adjacent_html("beforeend", &html); }
@@ -584,7 +715,9 @@ pub fn render(view: Element, ctx: Ctx) -> PageFuture {
     Box::pin(async move {
         let admin = matches!(ctx.user.s("role").as_str(), "admin" | "owner");
         let tab = { let t = ctx.q("tab"); if t.is_empty() { "albums".to_string() } else { t } };
-        let st = St { tab, q: ctx.q("q"), sort: ctx.q("sort"), dir: ctx.q("dir"), filter: ctx.q("filter"), artist: ctx.q("artist"), offset: 0 };
+        // `#/library?q=` opens the results view of that search; with a `tab` too, that tab filtered by it
+        let results = ctx.q("tab").is_empty();
+        let st = St { tab, q: ctx.q("q").trim().to_string(), sort: ctx.q("sort"), dir: ctx.q("dir"), filter: ctx.q("filter"), artist: ctx.q("artist"), offset: 0, results };
         let mut tabs: Vec<(&str, &str)> = vec![("albums", "Albums"), ("singles", "Singles"), ("artists", "Artists"), ("tracks", "Songs")];
         if admin { tabs.extend([("duplicates", "Duplicates"), ("issues", "Wrong audio")]); }
         let tabs_html: String = tabs.iter().map(|(k, l)| format!(r##"<button data-t="{k}" class="{}">{l}</button>"##, if *k == st.tab { "active" } else { "" })).collect();
@@ -611,7 +744,7 @@ pub fn render(view: Element, ctx: Ctx) -> PageFuture {
       <div class="tabs" id="lib-tabs">
         {tabs_html}
       </div>
-      <div class="search grow" style="max-width:360px">{search}<input class="input" id="lib-q" placeholder="Filter library…" value="{q}"></div>
+      <div class="search grow" style="max-width:360px">{search}<input class="input" id="lib-q" placeholder="Search artists, albums, songs in your library…" value="{q}"></div>
       <div class="row" style="gap:6px"><select class="input" id="lib-sort" style="width:auto"></select>
         <button class="btn sm dir-btn" id="lib-dir" title="Ascending / descending"></button></div>
       <select class="input" id="lib-filter" style="width:auto">
@@ -633,7 +766,7 @@ pub fn render(view: Element, ctx: Ctx) -> PageFuture {
         let lib = Rc::new(Lib {
             view: view.clone(), body: body.clone(), more: more.clone(), sort_el: sort_el.clone(), dir_el: dir_el.clone(),
             admin, query_tab: ctx.q("tab"), st: RefCell::new(st), saved: RefCell::new(saved), tracks: RefCell::new(Vec::new()), body_onclick: RefCell::new(None),
-            scrub: RefCell::new(None), index_seq: Cell::new(0), next_page: Rc::new(RefCell::new(None)),
+            scrub: RefCell::new(None), index_seq: Cell::new(0), next_page: Rc::new(RefCell::new(None)), load_seq: Cell::new(0),
         });
         lib.paint_sort();
         if let Some(f) = dom::qs_in(&view, "#lib-filter") { let filter = lib.st.borrow().filter.clone(); dom::set_value(&f, &filter); }
@@ -680,8 +813,26 @@ pub fn render(view: Element, ctx: Ctx) -> PageFuture {
                     }
                     return;
                 }
+                // the results view: "Show all N" opens that tab with the search kept (a step Back undoes), and
+                // "Search everywhere" opens Discover with it
+                if let Some(b) = dom::closest(e, "[data-show-all]") {
+                    let q = lib.st.borrow().q.clone();
+                    dom::set_hash(&library_hash(&dom::data(&b, "showAll"), false, &q, "", ""));
+                    return;
+                }
+                if dom::closest(e, "[data-search-everywhere]").is_some() {
+                    let q = lib.st.borrow().q.clone();
+                    app::navigate(&format!("/search?q={}", uri_component(&q)));
+                    return;
+                }
                 let Some(b) = dom::closest(e, "[data-play-track]") else { return };
                 let id = dom::data(&b, "playTrack");
+                // the results view's songs play as a list, from the one clicked
+                if dom::closest(e, "[data-found]").is_some() {
+                    let list = lib.tracks.borrow().clone();
+                    if let Some(i) = list.iter().position(|t| t.s("id") == id) { player::play_queue(list, i, "list"); }
+                    return;
+                }
                 let t = lib.tracks.borrow().iter().find(|t| t.s("id") == id).cloned();
                 if let Some(t) = t { player::play_queue(vec![t], 0, "single"); }   // a single song: library shuffle continues after it
             });
@@ -690,7 +841,9 @@ pub fn render(view: Element, ctx: Ctx) -> PageFuture {
             let lib = lib.clone();
             dom::on_sel(&view, "#lib-tabs", "click", move |e| {
                 let Some(t) = dom::closest(e, "[data-t]") else { return };
-                lib.st.borrow_mut().tab = dom::data(&t, "t");
+                // with a search, a tab shows that tab filtered by it
+                { let mut st = lib.st.borrow_mut(); st.tab = dom::data(&t, "t"); st.results = false; }
+                lib.sync_url();
                 for b in dom::qsa_in(&lib.view, "#lib-tabs button") { dom::toggle_class(&b, "active", b == t); }
                 lib.paint_sort();
                 lib.reload();
@@ -698,7 +851,12 @@ pub fn render(view: Element, ctx: Ctx) -> PageFuture {
         }
         if let Some(q_el) = dom::qs_in(&view, "#lib-q") {
             let (lib2, q2) = (lib.clone(), q_el.clone());
-            let deb = ui::Debounce::new(300, move || { lib2.st.borrow_mut().q = dom::value(&q2).trim().to_string(); lib2.reload(); });
+            // typing shows the results view again (the search searches the whole library, whatever the tab)
+            let deb = ui::Debounce::new(300, move || {
+                { let mut st = lib2.st.borrow_mut(); st.q = dom::value(&q2).trim().to_string(); st.results = true; }
+                lib2.sync_url();
+                lib2.reload();
+            });
             dom::on(&q_el, "input", move |_| deb.run());
         }
         {
@@ -1317,4 +1475,43 @@ fn edit_modal(id: &str, _shown: &Value) {
             });
         });
     });
+}
+
+#[cfg(test)]
+mod search_tests {
+    use super::*;
+
+    #[test]
+    fn the_address_keeps_the_search() {
+        assert_eq!(uri_component("crazy gb"), "crazy%20gb");
+        assert_eq!(uri_component("AC/DC & “Ü”"), "AC%2FDC%20%26%20%E2%80%9C%C3%9C%E2%80%9D");
+        assert_eq!(uri_component("a-b_c.d!~*'()"), "a-b_c.d!~*'()");
+        // the results view: the search only
+        assert_eq!(library_hash("albums", true, "crazy gb", "", ""), "#/library?q=crazy%20gb");
+        assert_eq!(library_hash("tracks", true, "crazy gb", "", ""), "#/library?q=crazy%20gb");
+        // a tab filtered by the search names the tab, Albums too (or reload would show the results view)
+        assert_eq!(library_hash("albums", false, "crazy gb", "", ""), "#/library?tab=albums&q=crazy%20gb");
+        assert_eq!(library_hash("tracks", false, "x", "", ""), "#/library?tab=tracks&q=x");
+        // no search: as before
+        assert_eq!(library_hash("albums", false, "", "", ""), "#/library");
+        assert_eq!(library_hash("artists", false, "", "", ""), "#/library?tab=artists");
+        assert_eq!(library_hash("albums", false, "", "Beta Band", "lossless"), "#/library?artist=Beta%20Band&filter=lossless");
+    }
+
+    #[test]
+    fn show_all_counts_from_the_server() {
+        assert_eq!(show_all_label(Some(230), 12, RESULTS_LIMIT).as_deref(), Some("Show all 230"));
+        assert_eq!(show_all_label(Some(12), 12, RESULTS_LIMIT), None);
+        assert_eq!(show_all_label(Some(3), 3, RESULTS_LIMIT), None);
+        // an older server without counts: "Show all" when a section came back full
+        assert_eq!(show_all_label(None, RESULTS_LIMIT, RESULTS_LIMIT).as_deref(), Some("Show all"));
+        assert_eq!(show_all_label(None, 4, RESULTS_LIMIT), None);
+    }
+
+    #[test]
+    fn the_albums_tab_with_a_search_lists_the_singles_too() {
+        assert_eq!(album_kind("albums", "crazy"), "");
+        assert_eq!(album_kind("albums", ""), "albums");
+        assert_eq!(album_kind("singles", "crazy"), "singles");
+    }
 }

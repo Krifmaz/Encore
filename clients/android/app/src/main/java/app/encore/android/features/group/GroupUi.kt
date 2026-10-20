@@ -400,7 +400,7 @@ private fun StartDialog(nav: Nav, onDismiss: () -> Unit) {
                 Spacer(Modifier.height(10.dp))
                 RadioRow("Anyone on this server can see and join", !linkOnly) { linkOnly = false }
                 RadioRow("Only people with the link", linkOnly) { linkOnly = true }
-                SwitchRow("Everyone can control", "", everyone) { everyone = it }
+                SwitchRow("Everyone can control", "Anyone in the group can play, pause, skip and change the queue.", everyone) { everyone = it }
             }
         },
         confirmButton = {

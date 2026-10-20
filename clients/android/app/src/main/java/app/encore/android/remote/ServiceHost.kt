@@ -7,9 +7,11 @@ import app.encore.android.core.dbl
 import app.encore.android.core.str
 import app.encore.android.data.api.EncoreApi
 import app.encore.android.data.api.Track
+import app.encore.android.data.prefs.NormPrefs
 import app.encore.android.features.group.GroupListen
 import app.encore.android.playback.MediaItems
 import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.buildJsonArray
 import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.put
@@ -42,6 +44,12 @@ class ServiceHost(
     private val volume: () -> Float = { player.volume },
     /** a song transition is running: its volume steps are not news for the other devices */
     private val fading: () -> Boolean = { false },
+    /** volume normalization on this device (Settings → Playback → Sound), reported as the snapshot's `norm` */
+    private val norm: () -> NormPrefs = { NormPrefs() },
+    /** the `prefs` command of another device (client-shapes §5.1): new normalization settings for this device */
+    private val setNorm: (NormPrefs) -> Unit = {},
+    /** the Signal path's normalization value for the song that plays ("" while normalization is off) */
+    private val normLine: () -> String = { "" },
 ) : PlayerHost {
 
     private val listener = object : Player.Listener {
@@ -81,9 +89,22 @@ class ServiceHost(
     private fun playingNow(): Boolean =
         player.playWhenReady && player.playbackState != Player.STATE_ENDED && player.playbackState != Player.STATE_IDLE
 
+    /** `{mode, target, clip}`: the normalization settings as the snapshot reports them, also while nothing plays. */
+    private fun normJson(): JsonObject {
+        val n = norm()
+        return buildJsonObject {
+            put("mode", n.mode)
+            put("target", n.target)
+            put("clip", n.clip)
+        }
+    }
+
+    /** Nothing plays here: the idle state, with this device's normalization settings. */
+    private fun idle(): JsonObject = JsonObject(RemoteDevice.IDLE + ("norm" to normJson()))
+
     override fun snapshot(): JsonObject {
-        val item = player.currentMediaItem ?: return RemoteDevice.IDLE
-        val t = MediaItems.toTrack(item) ?: return RemoteDevice.IDLE
+        val item = player.currentMediaItem ?: return idle()
+        val t = MediaItems.toTrack(item) ?: return idle()
         val all = ArrayList<Track>(player.mediaItemCount)
         var index = 0
         for (i in 0 until player.mediaItemCount) {
@@ -121,7 +142,9 @@ class ServiceHost(
                 put("label", label)
                 if (transport.isNotEmpty()) put("transport", transport) else put("transport", null as String?)
                 if (rate > 0) put("output_rate", rate) else put("output_rate", null as Int?)
+                normLine().takeIf { it.isNotEmpty() }?.let { put("norm", it) }
             })
+            put("norm", normJson())
         }
     }
 
@@ -184,6 +207,21 @@ class ServiceHost(
                 } else {
                     player.addMediaItems(player.currentMediaItemIndex + 1, list)
                 }
+            }
+            // new normalization settings from the device controlling this one; a field left out keeps its value
+            "prefs" -> {
+                val n = c["norm"] as? JsonObject ?: return
+                val was = norm()
+                val target = (n["target"] as? JsonPrimitive)?.content?.trim()?.toDoubleOrNull()?.takeIf { it.isFinite() }
+                val clip = (n["clip"] as? JsonPrimitive)?.takeIf { !it.isString }?.content?.toBooleanStrictOrNull()
+                setNorm(
+                    NormPrefs(
+                        mode = n.str("mode").trim().ifEmpty { was.mode },
+                        target = target?.let { Math.round(it).toInt() } ?: was.target,
+                        clip = clip ?: was.clip,
+                    ).clean(),
+                )
+                remote.beatSoon()
             }
             "play_queue" -> {
                 val tracks = RemoteDevice.tracksOf(c["tracks"])

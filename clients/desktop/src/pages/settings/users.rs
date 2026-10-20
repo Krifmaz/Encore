@@ -2,7 +2,7 @@
 //! The users table (role, requests, weekly limit, auto-approve, last seen, permissions, password
 //! reset, disable, delete), Add user, Permissions for everyone and what new members start with.
 
-use super::{help, input, js_plus, patch, select_table, switch};
+use super::{env_locked, env_note, help, input, input_locked, js_plus, patch, select_table, switch, switch_maybe};
 use crate::api::ApiError;
 use crate::fmt;
 use crate::pages::{Ctx, El, Page, Section};
@@ -237,6 +237,9 @@ pub fn update(state: &mut State, msg: Message, ctx: &mut Ctx) -> Task<Message> {
             let body = json!({ "perm": perm, "value": on });
             return Task::perform(async move { api.post("/admin/users/bulk", body).await }, Message::BulkDone);
         }
+        // set by an environment variable: never sent (the environment would win at the next start)
+        Message::NewDefault(key, _) if env_locked(&state.settings, key) => {}
+        Message::DefaultLimitCommit if env_locked(&state.settings, "default_request_limit") => {}
         Message::NewDefault(key, on) => {
             state.settings[key] = json!(on);
             let api = ctx.api.clone();
@@ -463,16 +466,7 @@ pub fn view<'a>(state: &'a State, ctx: &Ctx<'a>) -> El<'a, Message> {
         }
     };
     // New members start with
-    let mut defaults = column![].spacing(10);
-    if !state.settings.is_null() {
-        for (k, l) in NEW {
-            defaults = defaults.push(switch(fmt::truthy(&state.settings, k), l, move |on| Message::NewDefault(k, on)));
-        }
-        defaults = defaults.push(widgets::field(
-            "Weekly request limit (0 = unlimited)",
-            input("0", &state.default_limit, Message::DefaultLimitInput).on_submit(Message::DefaultLimitCommit).width(120),
-        ));
-    }
+    let defaults = new_defaults(state);
     column![
         head,
         widgets::card_flat(table).width(Length::Fill),
@@ -484,6 +478,28 @@ pub fn view<'a>(state: &'a State, ctx: &Ctx<'a>) -> El<'a, Message> {
     .spacing(16)
     .width(Length::Fill)
     .into()
+}
+
+/// "New members start with": a switch per default permission and the weekly request limit. A value an
+/// environment variable sets is shown locked, with the same note as the Server pages' fields.
+fn new_defaults<'a>(state: &'a State) -> iced::widget::Column<'a, Message> {
+    let mut defaults = column![].spacing(10);
+    if state.settings.is_null() {
+        return defaults;
+    }
+    let v = &state.settings;
+    for (k, l) in NEW {
+        let on = fmt::truthy(v, k);
+        defaults = match env_note(v, k) {
+            Some(note) => defaults.push(column![switch_maybe(on, l, None::<fn(bool) -> Message>), help(note)].spacing(4)),
+            None => defaults.push(switch(on, l, move |on| Message::NewDefault(k, on))),
+        };
+    }
+    let limit: El<'a, Message> = match env_note(v, "default_request_limit") {
+        Some(note) => column![input_locked(&state.default_limit).width(120), help(note)].spacing(4).into(),
+        None => input("0", &state.default_limit, Message::DefaultLimitInput).on_submit(Message::DefaultLimitCommit).width(120).into(),
+    };
+    defaults.push(widgets::field("Weekly request limit (0 = unlimited)", limit))
 }
 
 pub fn overlay<'a>(state: &'a State, _ctx: &Ctx<'a>) -> Option<El<'a, Message>> {
@@ -576,6 +592,27 @@ fn role_options() -> Vec<super::Opt> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn values_set_by_the_environment_are_locked() {
+        let v = json!({ "new_user_pick": true, "new_user_fix": false, "default_request_limit": 5,
+            "_meta": { "new_user_pick": { "source": "env", "env": "ENCORE_NEW_USER_PICK" }, "new_user_fix": { "source": "ui", "env": "ENCORE_NEW_USER_FIX" },
+                       "default_request_limit": { "source": "env", "env": "ENCORE_REQUEST_LIMIT" } } });
+        assert_eq!(env_note(&v, "new_user_pick").as_deref(), Some("🔒 Set by ENCORE_NEW_USER_PICK in your compose/env – change it there (environment always wins)"));
+        assert!(env_note(&v, "new_user_fix").is_none(), "set in the UI: no note");
+        assert!(env_note(&v, "default_request_limit").is_some_and(|n| n.contains("ENCORE_REQUEST_LIMIT")));
+        super::super::with_test_ctx(|ctx| {
+            let mut state = State::default();
+            let _ = update(&mut state, Message::Settings(Ok(v.clone())), ctx);
+            let _ = new_defaults(&state);
+            // a locked switch and the locked limit send nothing; an editable switch is saved
+            assert_eq!(update(&mut state, Message::NewDefault("new_user_pick", false), ctx).units(), 0);
+            assert_eq!(state.settings["new_user_pick"], true);
+            state.default_limit = "9".into();
+            assert_eq!(update(&mut state, Message::DefaultLimitCommit, ctx).units(), 0);
+            assert_eq!(update(&mut state, Message::NewDefault("new_user_fix", true), ctx).units(), 1);
+        });
+    }
 
     #[test]
     fn numbers_parse_like_javascript() {

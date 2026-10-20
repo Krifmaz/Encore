@@ -288,6 +288,6 @@ object Quality {
         else -> Math.round(kbps / 1000).toString()
     }
 
-    /** 44100 → "44.1", 96000 → "96" */
-    fun khz(hz: Int): String = PlaybackPrefs.fmt(Math.round(hz / 100.0) / 10.0)
+    /** 44100 → "44.1", 96000 → "96", 22050 → "22.05" (exact for every common rate) */
+    fun khz(hz: Int): String = String.format(java.util.Locale.US, "%.3f", hz / 1000.0).trimEnd('0').trimEnd('.')
 }

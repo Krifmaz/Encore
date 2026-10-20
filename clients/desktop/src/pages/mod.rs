@@ -19,6 +19,7 @@ pub mod artist;
 pub mod bug_report;
 pub mod bug_reports;
 pub mod download;
+pub mod files;
 pub mod for_you;
 pub mod home;
 pub mod leaderboard;
@@ -278,6 +279,9 @@ pub enum Effect {
     Navigate(Page),
     /// Navigate without adding to the history (a redirect).
     Replace(Page),
+    /// The current page's route changed without opening it again (the Library's query, so
+    /// Back keeps it).
+    Route(Page),
     Toast(String, ToastKind),
     /// Play these Encore track rows (JSON as the server sends them) from `index`.
     Play { tracks: Vec<Value>, index: usize },
@@ -318,6 +322,7 @@ impl std::fmt::Debug for Effect {
         match self {
             Effect::Navigate(p) => write!(f, "Navigate({p:?})"),
             Effect::Replace(p) => write!(f, "Replace({p:?})"),
+            Effect::Route(p) => write!(f, "Route({p:?})"),
             Effect::Toast(t, k) => write!(f, "Toast({t:?}, {k:?})"),
             Effect::Play { tracks, index } => write!(f, "Play({} tracks, {index})", tracks.len()),
             Effect::PlayNext(t) => write!(f, "PlayNext({})", t.len()),
@@ -466,6 +471,11 @@ impl<'a> Ctx<'a> {
     /// Go to a page without leaving the current one in the history.
     pub fn replace(&mut self, page: Page) {
         self.push(Effect::Replace(page));
+    }
+
+    /// Change the current page's route without opening it again (what Back comes back to).
+    pub fn set_route(&mut self, page: Page) {
+        self.push(Effect::Route(page));
     }
 
     /// Play these track rows (as the server sends them) from `index`, through the engine.

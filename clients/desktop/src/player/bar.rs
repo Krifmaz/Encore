@@ -7,6 +7,7 @@ use crate::config::{BAR_ACTIONS, BAR_DEFAULT};
 use crate::fmt;
 use crate::pages::{Ctx, El};
 use crate::theme::{self, Badge, Btn};
+use crate::widgets::marquee::marquee;
 use crate::widgets::{self, badge, icon, icon_btn, list_row, modal, pop_menu, small_muted, t, tip_box, Icon, MenuItem};
 use iced::widget::{button, column, container, image, mouse_area, row, slider, space, text_input, toggler, tooltip};
 use iced::{Alignment, ContentFit, Length, Point};
@@ -42,10 +43,12 @@ fn thumb<'a>(ctx: &Ctx<'a>, cover: Option<&str>, size: f32, fallback: Icon) -> E
     }
 }
 
-/// Previous / play-pause / next.
-pub fn transport<'a>(now: Option<&Now>, large: bool) -> El<'a, Message> {
+/// Previous / play-pause / next. In a group listen, Previous and Next are the group's: off with
+/// the reason for a member who may not control it (play / pause stays: a pause here only).
+pub fn transport<'a>(state: &'a State, now: Option<&Now>, large: bool) -> El<'a, Message> {
     let p = theme::look();
     let has = now.is_some();
+    let denied = state.group.denied();
     let playing = now.is_some_and(|n| n.playing);
     let size = if large { 56.0 } else { 40.0 };
     let play = button(
@@ -59,27 +62,39 @@ pub fn transport<'a>(now: Option<&Now>, large: bool) -> El<'a, Message> {
     .padding(0)
     .style(theme::btn(Btn::Play))
     .on_press_maybe(has.then_some(Message::Toggle));
-    row![
-        icon_btn(Icon::Prev, "Previous", has.then_some(Message::Prev)),
-        play,
-        icon_btn(Icon::Next, "Next", has.then_some(Message::Next)),
-    ]
+    let skip = |i: Icon, label: &'static str, msg: Message| -> El<'a, Message> {
+        if denied {
+            super::group::view::off(i, &state.group.deny, 16.0)
+        } else {
+            icon_btn(i, label, has.then_some(msg))
+        }
+    };
+    row![skip(Icon::Prev, "Previous", Message::Prev), play, skip(Icon::Next, "Next", Message::Next)]
     .spacing(if large { 14 } else { 6 })
     .align_y(Alignment::Center)
     .into()
 }
 
-/// The seek bar with the times.
-pub fn seek<'a>(state: &State, now: Option<&Now>) -> El<'a, Message> {
+/// The seek bar with the times. In a group listen a member who may not control it can't seek:
+/// the bar only shows the position, with the reason as its tooltip.
+pub fn seek<'a>(state: &'a State, now: Option<&Now>) -> El<'a, Message> {
     let dur = now.map(|n| n.duration).unwrap_or(0.0).max(0.001);
     let pos = match now {
         Some(n) => state.seek_drag.unwrap_or(n.position).clamp(0.0, dur),
         None => 0.0,
     };
-    let mut s = slider(0.0..=dur, pos, Message::SeekDrag).step(0.25).style(theme::slider_style);
-    if now.is_some() {
+    let denied = state.group.denied();
+    let mut s = slider(0.0..=dur, pos, move |v| if denied { Message::Nothing } else { Message::SeekDrag(v) })
+        .step(0.25)
+        .style(theme::slider_style);
+    if now.is_some() && !denied {
         s = s.on_release(Message::SeekDone);
     }
+    let s: El<'a, Message> = if denied {
+        tooltip(s, tip_box(&state.group.deny), tooltip::Position::Top).gap(4).into()
+    } else {
+        s.into()
+    };
     row![
         widgets::faint(fmt::mmss(pos)).size(11).width(36).center(),
         s,
@@ -100,7 +115,7 @@ pub fn volume<'a>(state: &State, now: Option<&Now>, width: f32) -> El<'a, Messag
         .vol_drag
         .unwrap_or_else(|| match now {
             Some(n) if n.remote => n.volume,
-            _ => state.status.volume_linear,
+            _ => crate::engine::volume_level(),
         })
         .clamp(0.0, 1.0);
     row![
@@ -148,7 +163,16 @@ fn right_buttons<'a>(state: &'a State, ctx: &Ctx<'a>, now: Option<&Now>) -> Vec<
             out.push(b);
         }
     }
-    if has("shuffle") && now.is_some() {
+    let grouped = state.group.state.is_some();
+    if grouped && now.is_some() && (has("shuffle") || has("repeat")) {
+        if has("shuffle") {
+            out.push(super::group::view::off(Icon::Shuffle, super::group::view::NO_MODES, 16.0));
+        }
+        if has("repeat") {
+            out.push(super::group::view::off(Icon::Refresh, super::group::view::NO_MODES, 16.0));
+        }
+    }
+    if has("shuffle") && now.is_some() && !grouped {
         out.push(mode_btn(
             Icon::Shuffle,
             if shuffle_on { "Shuffle: on" } else { "Shuffle: off" },
@@ -157,7 +181,7 @@ fn right_buttons<'a>(state: &'a State, ctx: &Ctx<'a>, now: Option<&Now>) -> Vec<
             Message::SetShuffle(!shuffle_on),
         ));
     }
-    if has("repeat") && now.is_some() {
+    if has("repeat") && now.is_some() && !grouped {
         out.push(mode_btn(
             Icon::Refresh,
             repeat.title(),
@@ -261,9 +285,15 @@ pub fn view<'a>(state: &'a State, ctx: &Ctx<'a>) -> El<'a, Message> {
                 .cloned()
                 .collect::<Vec<_>>()
                 .join(" · ");
-            let mut info = column![t(n.title.clone()).size(14).font(theme::semibold())].spacing(2);
+            // a title or line too long for the bar scrolls sideways (widgets::marquee)
+            let mut info = column![marquee(n.title.clone()).size(14).font(theme::semibold()).width(Length::Fill).fade(p.bg2)]
+                .spacing(2)
+                .width(Length::Fill);
             if !sub.is_empty() {
-                info = info.push(small_muted(sub).size(12.5));
+                info = info.push(marquee(sub).size(12.5).color(p.muted).width(Length::Fill).fade(p.bg2));
+            }
+            if let Some(gl) = super::group::view::bar_line(state) {
+                info = info.push(gl);
             }
             if let Some(l) = linked {
                 info = info.push(
@@ -283,10 +313,12 @@ pub fn view<'a>(state: &'a State, ctx: &Ctx<'a>) -> El<'a, Message> {
             }
             let content = row![thumb(ctx, n.cover.as_deref(), 48.0, Icon::Music), info]
                 .spacing(12)
+                .width(Length::Fill)
                 .align_y(Alignment::Center);
             tooltip(
                 button(content)
                     .padding(0)
+                    .width(Length::Fill)
                     .style(theme::btn(Btn::Row))
                     .on_press(Message::OpenFull(Pane::Now)),
                 tip_box("Open player"),
@@ -341,7 +373,7 @@ pub fn view<'a>(state: &'a State, ctx: &Ctx<'a>) -> El<'a, Message> {
 
     // centre: transport and seek
     let center = mouse_area(
-        column![transport(now.as_ref(), false), seek(state, now.as_ref())]
+        column![transport(state, now.as_ref(), false), seek(state, now.as_ref())]
             .spacing(2)
             .align_x(Alignment::Center)
             .width(Length::FillPortion(4)),
@@ -378,7 +410,8 @@ pub fn view<'a>(state: &'a State, ctx: &Ctx<'a>) -> El<'a, Message> {
     }
     right = right.push(space().width(6));
     right = right.push(volume(state, now.as_ref(), 100.0));
-    if now.as_ref().is_some_and(|n| !n.remote) {
+    // in a group listen the group plays on: Leave is in the group's dialog
+    if now.as_ref().is_some_and(|n| !n.remote) && state.group.state.is_none() {
         right = right.push(icon_btn(Icon::X, "Close player", Some(Message::ClosePlayer)));
     }
     // the right side takes what its buttons need (the chosen ones, the badge and the volume
@@ -387,6 +420,11 @@ pub fn view<'a>(state: &'a State, ctx: &Ctx<'a>) -> El<'a, Message> {
 
     let mut col = column![widgets::divider()];
     if let Some(s) = spot_bar(state, ctx) {
+        col = col.push(s);
+        col = col.push(widgets::divider());
+    }
+    // a group listen paused here only: "Paused here" and "Catch up" (p6 item 8)
+    if let Some(s) = super::group::view::paused_strip(state) {
         col = col.push(s);
         col = col.push(widgets::divider());
     }
@@ -450,6 +488,13 @@ pub fn more_menu<'a>(state: &'a State, ctx: &Ctx<'a>, at: Point) -> El<'a, Messa
             )
             .icon(Icon::Devices),
         );
+    }
+    // the group listen (p6 item 8): its dialog while in one, else start or join one
+    if state.group.state.is_some() {
+        items.push(MenuItem::new("Group listen", Message::Group(super::group::Msg::OpenSheet)).icon(Icon::Users));
+    } else if state.group.shown() {
+        items.push(MenuItem::new("Start a group listen", Message::Group(super::group::Msg::OpenStart)).icon(Icon::Users));
+        items.push(MenuItem::new("Join a group listen", Message::Group(super::group::Msg::OpenJoin)).icon(Icon::Users));
     }
     items.push(MenuItem::new("Customize the bar…", Message::Customize(true)).icon(Icon::Settings));
     pop_menu(at, items, Message::CloseMenu, ctx.size)

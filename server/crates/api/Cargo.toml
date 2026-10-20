@@ -18,6 +18,7 @@ encore-playback = { workspace = true }
 encore-vpn = { workspace = true }
 encore-system = { workspace = true }
 encore-requests = { workspace = true }
+encore-files = { workspace = true }
 axum = { workspace = true }
 axum-extra = { workspace = true }
 tokio = { workspace = true }
