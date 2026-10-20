@@ -20,10 +20,10 @@ import app.encore.android.R
 import java.util.concurrent.Executors
 
 /**
- * A page of the media app's browse tree in the Encore Lyrics car app (0.31): the artist's page from the artist row
- * (`artist:<mbid or name>`: Shuffle, Popular songs, Liked from this artist, the albums), and the lists it opens,
- * read through the session's browse API ([LyricsCarSession.children]). A song or Shuffle plays and goes back to the
- * lyrics; a folder or album opens its own list.
+ * A page of the media app's browse tree in the Encore Lyrics car app: "More by <artist>" from a tap on the song
+ * (`more-by:<mbid or name>`: Shuffle, Popular songs, Albums, Liked from this artist, as on the media app's Home),
+ * and the lists it opens, read through the session's browse API ([LyricsCarSession.children]). A song or Shuffle
+ * plays and goes back to the lyrics; a folder or album opens its own list.
  */
 class BrowseScreen(
     carContext: CarContext,

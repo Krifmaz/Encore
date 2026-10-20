@@ -10,7 +10,7 @@ import org.junit.Assert.assertNull
 import org.junit.Test
 
 /**
- * The car's quality badge (CarQuality) and the 0.31 response shapes the phone reads
+ * The quality on the car's subtitle line (CarQuality) and the 0.31 response shapes the phone reads
  * (docs/contracts/client-shapes-0.31-0.33.md, §2.1 and §5.4).
  */
 class CarQualityTest {
@@ -32,18 +32,18 @@ class CarQualityTest {
     @Test
     fun m4aIsAlacWithABitDepthElseAac() {
         assertEquals(CarQuality(CarQuality.Kind.LOSSLESS, "ALAC 16/44.1"), q("m4a", 800, 44100, 16))
-        assertEquals(CarQuality(CarQuality.Kind.LOSSY, "M4A 256k"), q("m4a", 256, 44100, 0))
-        assertEquals(CarQuality(CarQuality.Kind.LOSSY, "MP3 320k"), q("mp3", 320, 44100))
+        assertEquals(CarQuality(CarQuality.Kind.LOSSY, "AAC 256"), q("m4a", 256, 44100, 0))
+        assertEquals(CarQuality(CarQuality.Kind.LOSSY, "MP3 320"), q("mp3", 320, 44100))
         assertEquals(CarQuality(CarQuality.Kind.LOSSY, "OPUS"), q("opus"))
     }
 
     @Test
     fun theStreamWinsOverTheFile() {
-        assertEquals(CarQuality(CarQuality.Kind.LOSSY, "AAC 96k"), q("flac", 2800, 96000, 24, "aac-96"))
-        assertEquals(CarQuality(CarQuality.Kind.CADENZA, "Cadenza 24/192"), q("flac", 900, 44100, 16, "cadenza-192000"))
-        assertEquals(CarQuality(CarQuality.Kind.CADENZA, "Cadenza 88.2 kHz"), q("flac", 900, 44100, 16, "original", phoneRate = 88200))
+        assertEquals(CarQuality(CarQuality.Kind.LOSSY, "FLAC → AAC 96"), q("flac", 2800, 96000, 24, "aac-96"))
+        assertEquals(CarQuality(CarQuality.Kind.CADENZA, "FLAC → Cadenza 192 kHz"), q("flac", 900, 44100, 16, "cadenza-192000"))
+        assertEquals(CarQuality(CarQuality.Kind.CADENZA, "FLAC → Cadenza 88.2 kHz"), q("flac", 900, 44100, 16, "original", phoneRate = 88200))
         assertEquals(CarQuality(CarQuality.Kind.HIRES, "FLAC 24/96"), q("flac", kind = "local", local = "FLAC 24/96"))
-        assertEquals(CarQuality(CarQuality.Kind.LOSSY, "AAC 256k"), q("flac", kind = "local", local = "AAC 256k"))
+        assertEquals(CarQuality(CarQuality.Kind.LOSSY, "AAC 256"), q("flac", kind = "local", local = "AAC 256k"))
         assertEquals(CarQuality(CarQuality.Kind.LOSSLESS, "FLAC (converted)"), q("dsf", kind = "local", local = "FLAC (converted)"))
     }
 
@@ -52,7 +52,7 @@ class CarQualityTest {
         assertEquals(CarQuality(CarQuality.Kind.LOSSLESS, "FLAC"), q("flac", 1000))
         assertNull(q(""))
         assertNull(q("xyz"))
-        assertEquals("Hi-res: FLAC 24/96", q("flac", 0, 96000, 24)?.name)
+        assertEquals(CarQuality(CarQuality.Kind.HIRES, "FLAC 24/96"), q("flac", 0, 96000, 24))
     }
 
     @Test

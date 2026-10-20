@@ -1,37 +1,36 @@
 package app.encore.android.car
 
 import android.content.Context
+import android.graphics.Bitmap
 import android.graphics.Canvas
 import android.graphics.Color
 import android.graphics.LinearGradient
 import android.graphics.Paint
 import android.graphics.Rect
+import android.graphics.RectF
 import android.graphics.Shader
 import android.graphics.Typeface
 import android.os.Handler
 import android.os.HandlerThread
 import android.os.Looper
 import android.os.SystemClock
-import android.text.Layout
-import android.text.StaticLayout
 import android.text.TextPaint
-import android.text.TextUtils
 import android.view.Surface
 import androidx.car.app.SurfaceCallback
 import androidx.car.app.SurfaceContainer
 import app.encore.android.graph
+import app.encore.android.playback.CarRules
 import java.util.concurrent.ExecutorService
 import java.util.concurrent.Executors
-import kotlin.math.abs
-import kotlin.math.exp
 
 /**
  * The live lyrics on the car's map surface (Encore Lyrics, a POI car app with MapWithContentTemplate): the
- * song's synced lines scrolling smoothly, the current one larger in cream, the others fading with distance,
- * over a background in the cover's colour. Draws on its own thread at up to 30 frames a second while a line
- * moves, and only checks the position (10 times a second, no drawing) when nothing moves; nothing at all while
- * the screen isn't shown ([setShown]) or there is no surface. A tap on a line seeks to it ([onSeek], main
- * thread); a drag scrolls the lines by hand for a few seconds.
+ * lyrics take all of the free area the car reports. The current line as large as it fits (bold, wrapped,
+ * centred), the next line at about half that size below it, the lines before it dimmed above when there is
+ * room ([CarRules.surface]), over the song's cover blurred and darkened across the whole screen. A new line
+ * slides up and fades in (about 0.3 s, up to 30 frames a second); otherwise the thread only checks the
+ * position, 10 times a second, without drawing; nothing at all while the screen isn't shown ([setShown]) or
+ * there is no surface. A tap on a line plays from its start ([onSeek], main thread).
  */
 class LyricsSurface(
     private val context: Context,
@@ -41,7 +40,7 @@ class LyricsSurface(
     private val h = Handler(thread.looper)
     private val main = Handler(Looper.getMainLooper())
     private val fetch: ExecutorService = Executors.newSingleThreadExecutor { r -> Thread(r, "car-lyrics-fetch").apply { isDaemon = true } }
-    // the cover colour on its own thread: a slow cover download mustn't hold the lyrics back
+    // the cover on its own thread: a slow cover download mustn't hold the lyrics back
     private val coverFetch: ExecutorService = Executors.newSingleThreadExecutor { r -> Thread(r, "car-lyrics-cover").apply { isDaemon = true } }
 
     // the surface (main thread writes, render thread draws; [lock] keeps a destroyed surface from being drawn on)
@@ -57,36 +56,38 @@ class LyricsSurface(
     // render thread only from here on
     private var songFor: String? = null
     private var title = ""
-    private var artist = ""
     private var lines: List<CarLine> = emptyList()
+    private var texts: List<String> = emptyList()
     private var loading = false
     private val bgDefault = Color.rgb(0x1C, 0x1C, 0x1E)
     private var bgTop = bgDefault
-    private var layouts: List<StaticLayout> = emptyList()
-    private var tops = FloatArray(0)
-    private var emphasis = FloatArray(0)
-    private var laidFor: Any? = null
-    private var laidLines: List<CarLine>? = null
-    private var lineAt = -2
-    private var scroll = Float.NaN
-    private var manual = 0f
-    private var manualUntil = 0L
-    private var lastFrame = 0L
+    /** the cover, blurred, at half the surface's size (drawn stretched over all of it) */
+    private var cover: Bitmap? = null
+    /** bumped when the song, its lines or the area change: the layout is made again without sliding */
+    private var gen = 0
+    private var laidGen = -1
+    private var laidAt = Int.MIN_VALUE
+    private var blocks: List<CarRules.Block> = emptyList()
+    /** the blocks of the line before, sliding away while [blocks] come in */
+    private var leaving: List<CarRules.Block> = emptyList()
+    private var changedAt = 0L
     private var running = false
     private var dirty = true
 
     private val cream = Color.rgb(0xF0, 0xEA, 0xD6)
-    private val muted = Color.rgb(0xAA, 0xA4, 0x93)
-    private val linePaint = TextPaint(Paint.ANTI_ALIAS_FLAG).apply {
+    private val muted = Color.rgb(0xC9, 0xC2, 0xAE)
+    private val bold = TextPaint(Paint.ANTI_ALIAS_FLAG).apply {
         color = cream
         typeface = Typeface.create(Typeface.DEFAULT, Typeface.BOLD)
+        textAlign = Paint.Align.CENTER
     }
-    private val notePaint = TextPaint(Paint.ANTI_ALIAS_FLAG).apply { color = muted }
-    private val titlePaint = TextPaint(Paint.ANTI_ALIAS_FLAG).apply {
+    private val regular = TextPaint(Paint.ANTI_ALIAS_FLAG).apply {
         color = cream
         typeface = Typeface.create(Typeface.DEFAULT, Typeface.BOLD)
+        textAlign = Paint.Align.CENTER
     }
     private val shade = Paint()
+    private val coverPaint = Paint(Paint.FILTER_BITMAP_FLAG)
 
     /** The screen is started (true) or stopped: frames only run while it is shown. Main thread. */
     fun setShown(on: Boolean) {
@@ -103,6 +104,7 @@ class LyricsSurface(
         released = true
         synchronized(lock) { surface = null }
         h.removeCallbacksAndMessages(null)
+        h.post { cover?.recycle(); cover = null }
         thread.quitSafely()
         fetch.shutdownNow()
         coverFetch.shutdownNow()
@@ -118,12 +120,12 @@ class LyricsSurface(
             dpi = surfaceContainer.dpi.takeIf { it > 0 } ?: 160
             if (visible.isEmpty) visible.set(0, 0, width, height)
         }
-        h.post { laidFor = null; dirty = true; kick() }
+        h.post { gen++; dirty = true; kick() }
     }
 
     override fun onVisibleAreaChanged(visibleArea: Rect) {
         synchronized(lock) { visible.set(visibleArea) }
-        h.post { laidFor = null; dirty = true; kick() }
+        h.post { gen++; dirty = true; kick() }
     }
 
     override fun onStableAreaChanged(stableArea: Rect) {}
@@ -132,21 +134,12 @@ class LyricsSurface(
         synchronized(lock) { surface = null }
     }
 
-    override fun onScroll(distanceX: Float, distanceY: Float) {
-        h.post {
-            manual += distanceY
-            manualUntil = SystemClock.uptimeMillis() + 4000L
-            kick()
-        }
-    }
-
     /** A tap (car API level 5 and up): the line under it plays from its start. */
     override fun onClick(x: Float, y: Float) {
         h.post {
             val i = lineAtY(y)
-            if (i >= 0) {
+            if (i in lines.indices) {
                 val ms = lines[i].timeMs
-                manual = 0f
                 main.post { if (!released) onSeek(ms) }
             }
         }
@@ -157,7 +150,6 @@ class LyricsSurface(
     private fun kick() {
         if (running) return
         running = true
-        lastFrame = SystemClock.uptimeMillis()
         h.post(frame)
     }
 
@@ -166,26 +158,22 @@ class LyricsSurface(
             if (released || !shown || synchronized(lock) { surface == null }) { running = false; return }
             val np = CarNowPlaying.state.value
             if (np?.mediaId != songFor) newSong(np)
-            relayout()
             val now = SystemClock.uptimeMillis()
-            val dt = (now - lastFrame).coerceIn(1L, 100L)
-            lastFrame = now
-            val k = (1.0 - exp(-dt / 140.0)).toFloat()
-
             val at = if (lines.isEmpty()) -1 else LyricsCache.lineAt(lines, np?.positionNow() ?: 0L)
-            if (at != lineAt) { lineAt = at; dirty = true }
-            if (manual != 0f && now > manualUntil) manual = 0f
-            val target = targetScroll(at) + manual
-            var moving = false
-            if (scroll.isNaN()) { scroll = target; dirty = true }
-            if (abs(target - scroll) > 0.5f) { scroll += (target - scroll) * k; moving = true; dirty = true } else if (scroll != target) { scroll = target; dirty = true }
-            for (i in emphasis.indices) {
-                val want = if (i == at) 1f else 0f
-                val e = emphasis[i]
-                if (abs(want - e) > 0.01f) { emphasis[i] = e + (want - e) * k; moving = true; dirty = true } else if (e != want) { emphasis[i] = want; dirty = true }
+            if (at != laidAt || gen != laidGen) {
+                // a new line of the same layout slides in; a new song or area just shows
+                val slide = gen == laidGen && blocks.isNotEmpty()
+                leaving = if (slide) blocks else emptyList()
+                blocks = layout(at)
+                laidAt = at
+                laidGen = gen
+                changedAt = now
+                dirty = true
             }
-            if (dirty) draw()
-            // ≤ 30 frames a second while something moves; otherwise a cheap position check
+            val moving = leaving.isNotEmpty() && now - changedAt < SLIDE_MS
+            if (!moving && leaving.isNotEmpty()) { leaving = emptyList(); dirty = true }
+            if (dirty || moving) draw(now)
+            // ≤ 30 frames a second while a line slides in; otherwise a cheap position check
             h.postDelayed(this, if (moving) FRAME_MS else IDLE_MS)
         }
     }
@@ -193,22 +181,34 @@ class LyricsSurface(
     private fun newSong(np: NowPlaying?) {
         songFor = np?.mediaId
         title = np?.title ?: ""
-        artist = np?.artist ?: ""
         lines = emptyList()
-        laidFor = null
-        lineAt = -2
-        scroll = Float.NaN
-        manual = 0f
+        texts = emptyList()
+        gen++
         bgTop = bgDefault
+        cover?.recycle()
+        cover = null
         dirty = true
         val id = np?.trackId
         val mediaId = np?.mediaId
         loading = id != null
         val uri = np?.artworkUri
+        val (w, hgt) = synchronized(lock) { width to height }
         try {
             coverFetch.execute {
-                val color = CoverArt.backgroundColor(CoverArt.load(context, uri, 200))
-                h.post { if (songFor == mediaId) { bgTop = color; dirty = true; kick() } }
+                val src = CoverArt.load(context, uri, 300)
+                val color = CoverArt.backgroundColor(src)
+                val blurred = if (src != null && w > 0 && hgt > 0) {
+                    try { CoverArt.blurred(src, (w / 2).coerceAtLeast(1), (hgt / 2).coerceAtLeast(1)) } catch (_: Throwable) { null }
+                } else null
+                if (blurred !== src) src?.recycle()
+                h.post {
+                    if (songFor != mediaId || released) { blurred?.recycle(); return@post }
+                    bgTop = color
+                    cover?.recycle()
+                    cover = blurred
+                    dirty = true
+                    kick()
+                }
             }
         } catch (_: java.util.concurrent.RejectedExecutionException) {}
         try {
@@ -217,10 +217,9 @@ class LyricsSurface(
                 h.post {
                     if (songFor != mediaId) return@post
                     lines = got
+                    texts = got.map { it.text }
                     loading = false
-                    laidFor = null
-                    lineAt = -2
-                    scroll = Float.NaN
+                    gen++
                     dirty = true
                     kick()
                 }
@@ -232,61 +231,28 @@ class LyricsSurface(
 
     private fun density(): Float = synchronized(lock) { dpi } / 160f
 
-    /** Lays the lines out for the visible area's width (again when it or the song changes). */
-    private fun relayout() {
+    private fun measureBold(t: String, size: Float): Float { bold.textSize = size; return bold.measureText(t) }
+
+    private fun measureRegular(t: String, size: Float): Float { regular.textSize = size; return regular.measureText(t) }
+
+    /** [CarRules.surface] for line [at] in the free area. */
+    private fun layout(at: Int): List<CarRules.Block> {
+        if (texts.isEmpty()) return emptyList()
         val a = area()
-        val d = density()
-        val size = (a.height() / 9f).coerceIn(18f * d, 40f * d)
-        val key = a.width() to size
-        if (laidFor == key && laidLines === lines) return
-        laidFor = key
-        laidLines = lines
-        linePaint.textSize = size
-        notePaint.textSize = size * 0.7f
-        titlePaint.textSize = size * 1.1f
-        val margin = a.width() * 0.06f
-        // room for the current line's 12 % enlargement
-        val w = ((a.width() - 2 * margin) / MAX_SCALE).toInt().coerceAtLeast(1)
-        layouts = lines.map { layout(it.text.ifBlank { "♪" }, linePaint, w, 3) }
-        tops = FloatArray(layouts.size)
-        var y = 0f
-        val gap = size * 0.7f
-        for (i in layouts.indices) { tops[i] = y; y += layouts[i].height + gap }
-        emphasis = FloatArray(layouts.size)
-        dirty = true
+        return CarRules.surface(texts, at, a.width().toFloat(), a.height().toFloat(), density(), ::measureBold, ::measureRegular)
     }
-
-    private fun layout(text: String, paint: TextPaint, width: Int, maxLines: Int): StaticLayout =
-        StaticLayout.Builder.obtain(text, 0, text.length, paint, width)
-            .setAlignment(Layout.Alignment.ALIGN_NORMAL)
-            .setLineSpacing(0f, 1.05f)
-            .setMaxLines(maxLines)
-            .setEllipsize(TextUtils.TruncateAt.END)
-            .setIncludePad(false)
-            .build()
-
-    /** The content y to put at the anchor (a little above the middle of the visible area). */
-    private fun targetScroll(at: Int): Float {
-        if (layouts.isEmpty()) return 0f
-        if (at < 0) return -linePaint.textSize * 2
-        val i = at.coerceAtMost(layouts.size - 1)
-        return tops[i] + layouts[i].height / 2f
-    }
-
-    private fun anchorY(a: Rect): Float = a.top + a.height() * 0.42f
 
     private fun lineAtY(y: Float): Int {
-        if (layouts.isEmpty() || scroll.isNaN()) return -1
         val a = area()
-        val off = anchorY(a) - scroll
-        for (i in layouts.indices) {
-            val top = off + tops[i]
-            if (y >= top - linePaint.textSize * 0.35f && y <= top + layouts[i].height + linePaint.textSize * 0.35f) return i
+        val slack = 12f * density()
+        for (b in blocks) {
+            val top = a.top + b.top
+            if (y >= top - slack && y <= top + b.fit.height(CarRules.SURFACE_LEADING) + slack) return b.index
         }
         return -1
     }
 
-    private fun draw() {
+    private fun draw(now: Long) {
         synchronized(lock) {
             val s = surface ?: return
             if (!s.isValid) return
@@ -296,7 +262,7 @@ class LyricsSurface(
                 try { s.lockCanvas(null) } catch (_: Exception) { return }
             }
             try {
-                paint(c)
+                paint(c, now)
                 dirty = false
             } finally {
                 try { s.unlockCanvasAndPost(c) } catch (_: Exception) {}
@@ -304,73 +270,84 @@ class LyricsSurface(
         }
     }
 
-    private fun paint(c: Canvas) {
-        val a = area()
-        val full = Rect(0, 0, width, height)
-        // the cover's colour into near black
-        shade.shader = LinearGradient(0f, 0f, 0f, full.height().toFloat(), bgTop, Color.rgb(0x10, 0x10, 0x11), Shader.TileMode.CLAMP)
+    /** The cover across the whole screen (the free area and what the car draws over), darkened for the text. */
+    private fun background(c: Canvas) {
+        val full = RectF(0f, 0f, width.toFloat(), height.toFloat())
+        val b = cover
+        if (b != null) {
+            c.drawBitmap(b, null, full, coverPaint)
+            c.drawColor(Color.argb(150, 0, 0, 0))
+            shade.shader = LinearGradient(0f, 0f, 0f, full.height(), Color.argb(70, 0, 0, 0), Color.argb(130, 0, 0, 0), Shader.TileMode.CLAMP)
+        } else {
+            // no cover (yet): its colour into near black
+            shade.shader = LinearGradient(0f, 0f, 0f, full.height(), bgTop, Color.rgb(0x10, 0x10, 0x11), Shader.TileMode.CLAMP)
+        }
         c.drawRect(full, shade)
-        val margin = a.left + a.width() * 0.06f
-
-        if (layouts.isEmpty()) {
-            val note = when {
-                songFor == null -> "Nothing playing. Start something in Encore."
-                loading -> "Loading lyrics"
-                else -> "No synced lyrics for this song"
-            }
-            val w = (a.width() - 2 * a.width() * 0.06f).toInt().coerceAtLeast(1)
-            val t = if (title.isNotEmpty()) layout(title, titlePaint, w, 2) else null
-            val n = layout(note, notePaint, w, 2)
-            val total = (t?.height ?: 0) + n.height + linePaint.textSize * 0.5f
-            var y = a.top + (a.height() - total) / 2f
-            if (t != null) {
-                c.save(); c.translate(margin, y); t.draw(c); c.restore()
-                y += t.height + linePaint.textSize * 0.5f
-            }
-            c.save(); c.translate(margin, y); n.draw(c); c.restore()
-            return
-        }
-
-        val off = anchorY(a) - scroll
-        val fadeZone = a.height() * 0.18f
-        for (i in layouts.indices) {
-            val l = layouts[i]
-            val top = off + tops[i]
-            if (top > a.bottom || top + l.height * MAX_SCALE < a.top) continue
-            val e = emphasis.getOrElse(i) { 0f }
-            // distance from the anchor fades the context lines; the visible edges fade everything
-            val mid = top + l.height / 2f
-            val dist = abs(mid - anchorY(a)) / a.height()
-            var alpha = (0.55f - dist * 0.9f).coerceIn(0.12f, 0.55f)
-            alpha += (1f - alpha) * e
-            val edge = minOf((mid - a.top) / fadeZone, (a.bottom - mid) / fadeZone).coerceIn(0f, 1f)
-            alpha *= edge
-            if (alpha <= 0.01f) continue
-            l.paint.color = if (e > 0.5f) cream else blend(muted, cream, e * 2f)
-            l.paint.alpha = (alpha * 255).toInt()
-            val scale = 1f + (MAX_SCALE - 1f) * e
-            c.save()
-            c.translate(margin, top)
-            c.scale(scale, scale, 0f, l.height / 2f)
-            l.draw(c)
-            c.restore()
-        }
-        linePaint.color = cream
-        linePaint.alpha = 255
     }
 
-    private fun blend(a: Int, b: Int, t: Float): Int {
-        val u = t.coerceIn(0f, 1f)
-        return Color.rgb(
-            (Color.red(a) + (Color.red(b) - Color.red(a)) * u).toInt(),
-            (Color.green(a) + (Color.green(b) - Color.green(a)) * u).toInt(),
-            (Color.blue(a) + (Color.blue(b) - Color.blue(a)) * u).toInt(),
-        )
+    private fun paint(c: Canvas, now: Long) {
+        background(c)
+        val a = area()
+        if (blocks.isEmpty()) {
+            note(c, a)
+            return
+        }
+        val t = ((now - changedAt).toFloat() / SLIDE_MS).coerceIn(0f, 1f)
+        val ease = 1f - (1f - t) * (1f - t) * (1f - t)
+        val sliding = leaving.isNotEmpty() && t < 1f
+        val shift = (blocks.firstOrNull { it.current }?.fit?.size ?: 0f) * 0.45f
+        if (sliding) for (b in leaving) block(c, a, b, b.alpha * (1f - ease), -shift * ease)
+        for (b in blocks) block(c, a, b, if (sliding) b.alpha * ease else b.alpha, if (sliding) shift * (1f - ease) else 0f)
+    }
+
+    /** One block: each line centred across the area, its glyphs centred in a line box of size × leading. */
+    private fun block(c: Canvas, a: Rect, b: CarRules.Block, alpha: Float, dy: Float) {
+        if (alpha <= 0.01f) return
+        val p = if (b.current) bold else regular
+        p.textSize = b.fit.size
+        p.color = if (b.current) cream else muted
+        p.alpha = (alpha * 255).toInt().coerceIn(0, 255)
+        // the shadow colour is semi-transparent, so its own alpha is used instead of the paint's: scale it here,
+        // or dimmed and fading lines keep full dark halos
+        val shadow = ((if (b.current) SHADOW_CURRENT else SHADOW_OTHER) * alpha).toInt().coerceIn(0, 255)
+        p.setShadowLayer(if (b.current) 10f else 8f, 0f, 2f, Color.argb(shadow, 0, 0, 0))
+        val lh = b.fit.size * CarRules.SURFACE_LEADING
+        val fm = p.fontMetrics
+        val x = a.exactCenterX()
+        b.fit.lines.forEachIndexed { i, line ->
+            val baseline = a.top + b.top + dy + i * lh + lh / 2f - (fm.ascent + fm.descent) / 2f
+            c.drawText(line, x, baseline, p)
+        }
+    }
+
+    /** No lines to show: the title large and why, in the middle of the free area. */
+    private fun note(c: Canvas, a: Rect) {
+        val text = when {
+            songFor == null -> "Nothing playing. Start something in Encore."
+            loading -> "Loading lyrics"
+            else -> "No synced lyrics for this song"
+        }
+        val d = density()
+        val w = a.width() * 0.9f
+        val titleMax = minOf(a.height() * 0.14f, 56f * d).coerceAtLeast(20f * d)
+        val t = if (title.isEmpty()) null else CarRules.fit(title, w, a.height() * 0.4f, 20f * d, titleMax, CarRules.SURFACE_LEADING, 2, ::measureBold)
+        val nSize = (t?.size?.times(0.55f) ?: (22f * d)).coerceIn(16f * d, 30f * d)
+        val n = CarRules.fit(text, w, nSize * CarRules.SURFACE_LEADING * 2, nSize * 0.8f, nSize, CarRules.SURFACE_LEADING, 2, ::measureRegular)
+        val gap = nSize * 0.8f
+        val total = (t?.height(CarRules.SURFACE_LEADING)?.plus(gap) ?: 0f) + n.height(CarRules.SURFACE_LEADING)
+        var top = (a.height() - total) / 2f
+        if (t != null) {
+            block(c, a, CarRules.Block(-1, t, top, 1f, true), 1f, 0f)
+            top += t.height(CarRules.SURFACE_LEADING) + gap
+        }
+        block(c, a, CarRules.Block(-1, n, top, 0.75f, false), 0.75f, 0f)
     }
 
     private companion object {
         const val FRAME_MS = 33L
         const val IDLE_MS = 100L
-        const val MAX_SCALE = 1.12f
+        const val SLIDE_MS = 300L
+        const val SHADOW_CURRENT = 190
+        const val SHADOW_OTHER = 170
     }
 }

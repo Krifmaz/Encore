@@ -9,17 +9,18 @@ import android.graphics.Paint
 import android.graphics.Shader
 import android.graphics.Typeface
 import android.net.Uri
-import android.text.Layout
-import android.text.StaticLayout
 import android.text.TextPaint
 import app.encore.android.BuildConfig
+import app.encore.android.playback.CarRules
 import java.io.ByteArrayOutputStream
 import java.io.File
 
 /**
  * The lyrics card: the now-playing artwork in the car while live lyrics are on (Settings → Playback → In the
- * car → Card). A square picture of the blurred, darkened cover with the lines around the current one: two
- * past lines faded above, the current line large in cream, the next three faded below.
+ * car → Card). A square picture ([SIZE] px, sharp in a car's cover box) of the blurred, darkened cover with the
+ * current line as large as it fits (bold, wrapped, centred) and the next line smaller below it, nothing else
+ * ([CarRules.card]). Android Auto draws its own player screen and decides how big the cover box is; the card
+ * makes the most of that box.
  *
  * Each card is written to `cacheDir/car-lyrics/<version>.jpg` and served by CoverProvider as
  * `content://<app>.covers/lyrics/<version>`, so every line change is a new artwork URI the car loads afresh.
@@ -36,14 +37,15 @@ class LyricsCard(private val context: Context) {
 
     private val current = TextPaint(Paint.ANTI_ALIAS_FLAG).apply {
         color = cream
-        textSize = 60f
         typeface = Typeface.create(Typeface.DEFAULT, Typeface.BOLD)
-        setShadowLayer(12f, 0f, 2f, Color.argb(160, 0, 0, 0))
+        textAlign = Paint.Align.CENTER
+        setShadowLayer(16f, 0f, 3f, Color.argb(200, 0, 0, 0))
     }
     private val faded = TextPaint(Paint.ANTI_ALIAS_FLAG).apply {
         color = cream
-        textSize = 36f
-        typeface = Typeface.DEFAULT
+        typeface = Typeface.create(Typeface.DEFAULT, Typeface.BOLD)
+        textAlign = Paint.Align.CENTER
+        setShadowLayer(12f, 0f, 2f, Color.argb(190, 0, 0, 0))
     }
 
     /** A rendered card: the JPEG bytes (for artworkData) and its content:// address (for artworkUri). */
@@ -59,7 +61,7 @@ class LyricsCard(private val context: Context) {
         drawBackground(c, coverKey, coverUri)
         drawLines(c, lines, at)
         val out = ByteArrayOutputStream(96 * 1024)
-        bmp.compress(Bitmap.CompressFormat.JPEG, 88, out)
+        bmp.compress(Bitmap.CompressFormat.JPEG, 85, out)
         bmp.recycle()
         val bytes = out.toByteArray()
         return try {
@@ -90,65 +92,45 @@ class LyricsCard(private val context: Context) {
         }
         val b = bg
         if (b != null) c.drawBitmap(b, 0f, 0f, null) else c.drawColor(Color.rgb(0x1C, 0x1C, 0x1E))
-        // darkened, a little more at the top and bottom where the faded lines are
-        c.drawColor(Color.argb(140, 0, 0, 0))
+        // darkened evenly (the text sits in the middle), a little more towards the edges
+        c.drawColor(Color.argb(150, 0, 0, 0))
         val shade = Paint().apply {
             shader = LinearGradient(
                 0f, 0f, 0f, SIZE.toFloat(),
-                intArrayOf(Color.argb(120, 0, 0, 0), Color.argb(0, 0, 0, 0), Color.argb(0, 0, 0, 0), Color.argb(140, 0, 0, 0)),
-                floatArrayOf(0f, 0.3f, 0.7f, 1f),
+                intArrayOf(Color.argb(90, 0, 0, 0), Color.argb(0, 0, 0, 0), Color.argb(0, 0, 0, 0), Color.argb(110, 0, 0, 0)),
+                floatArrayOf(0f, 0.25f, 0.75f, 1f),
                 Shader.TileMode.CLAMP,
             )
         }
         c.drawRect(0f, 0f, SIZE.toFloat(), SIZE.toFloat(), shade)
     }
 
-    private fun layout(text: String, paint: TextPaint, maxLines: Int): StaticLayout =
-        StaticLayout.Builder.obtain(text, 0, text.length, paint, SIZE - 2 * MARGIN)
-            .setAlignment(Layout.Alignment.ALIGN_NORMAL)
-            .setLineSpacing(0f, 1.08f)
-            .setMaxLines(maxLines)
-            .setEllipsize(android.text.TextUtils.TruncateAt.END)
-            .setIncludePad(false)
-            .build()
-
+    /** The current line ([at]; before the first line a note) and the next one, laid out by [CarRules.card]. */
     private fun drawLines(c: Canvas, lines: List<CarLine>, at: Int) {
-        val curText = if (at in lines.indices) lines[at].text.ifBlank { "♪" } else "♪"
-        val cur = layout(curText, current, 4)
-        val gap = 30f
-        val curTop = (SIZE - cur.height) / 2f - 20f
-        draw(c, cur, curTop, 255)
-
-        // the next lines below, fading out
-        var y = curTop + cur.height + gap
-        val alphas = intArrayOf(150, 105, 65)
-        for (k in 1..3) {
-            val i = at + k
-            if (i !in lines.indices || y > SIZE - 40) break
-            val l = layout(lines[i].text.ifBlank { "♪" }, faded, 2)
-            draw(c, l, y, alphas[k - 1])
-            y += l.height + gap * 0.6f
-        }
-        // the past lines above, fading out upwards
-        y = curTop - gap
-        val pastAlphas = intArrayOf(90, 50)
-        for (k in 1..2) {
-            val i = at - k
-            if (i < 0 || y < 40) break
-            val l = layout(lines[i].text.ifBlank { "♪" }, faded, 2)
-            y -= l.height
-            draw(c, l, y, pastAlphas[k - 1])
-            y -= gap * 0.6f
-        }
+        val curText = if (at in lines.indices) lines[at].text else ""
+        val nextText = lines.getOrNull(at + 1)?.text
+        val card = CarRules.card(
+            curText,
+            nextText,
+            { t, size -> current.textSize = size; current.measureText(t) },
+            { t, size -> faded.textSize = size; faded.measureText(t) },
+        )
+        drawFit(c, card.current, card.currentTop, current, 255)
+        card.next?.let { drawFit(c, it, card.nextTop, faded, 190) }
     }
 
-    private fun draw(c: Canvas, l: StaticLayout, top: Float, alpha: Int) {
-        l.paint.alpha = alpha
-        c.save()
-        c.translate(MARGIN.toFloat(), top)
-        l.draw(c)
-        c.restore()
-        l.paint.alpha = 255
+    /** Each line centred on the card, its glyphs centred in a line box of size × leading. */
+    private fun drawFit(c: Canvas, fit: CarRules.Fit, top: Float, paint: TextPaint, alpha: Int) {
+        paint.textSize = fit.size
+        paint.alpha = alpha
+        val lh = fit.size * CarRules.CARD_LEADING
+        val fm = paint.fontMetrics
+        val x = SIZE / 2f
+        fit.lines.forEachIndexed { i, line ->
+            val baseline = top + i * lh + lh / 2f - (fm.ascent + fm.descent) / 2f
+            c.drawText(line, x, baseline, paint)
+        }
+        paint.alpha = 255
     }
 
     /** Keeps the newest few cards: the car may still be reading the one before the current one. */
@@ -163,8 +145,7 @@ class LyricsCard(private val context: Context) {
     }
 
     companion object {
-        const val SIZE = 800
-        private const val MARGIN = 56
+        const val SIZE = CarRules.CARD_SIZE
         private const val KEEP = 6
         const val DIR = "car-lyrics"
 

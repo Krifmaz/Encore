@@ -28,21 +28,19 @@ import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import app.encore.android.R
 import app.encore.android.features.settings.copyToClipboard
-import app.encore.android.ui.theme.EncoreColors
 import app.encore.android.ui.theme.palette
 import kotlinx.coroutines.delay
 
 /**
  * The whole of a text a list cuts off (web-rs/src/details.rs): a dialog with the text wrapped and selectable, **Copy**
- * (the whole text, "Copied to clipboard" or "Copy failed – select and copy manually") and Close. Used for log lines,
- * transfer errors, torrent messages and app crashes. The dialog sits above the app's toasts, so it says itself how the
- * copy went.
+ * (the whole text) and Close. Used for log lines, transfer errors, torrent messages and app crashes. The toast
+ * "Copied to clipboard" (or "Copy failed – select and copy manually") shows above the dialog, as toasts show above
+ * every sheet and dialog (Toasts.kt).
  */
 @Composable
 fun DetailsDialog(title: String, text: String, onDismiss: () -> Unit) {
     val p = MaterialTheme.palette
     val context = LocalContext.current
-    val copied = rememberCopied()
     AlertDialog(
         onDismissRequest = onDismiss,
         containerColor = p.panel,
@@ -51,22 +49,24 @@ fun DetailsDialog(title: String, text: String, onDismiss: () -> Unit) {
         title = { Text(title.ifEmpty { "Details" }, maxLines = 2, overflow = TextOverflow.Ellipsis) },
         text = {
             Column(Modifier.fillMaxWidth().verticalScroll(rememberScrollState())) {
-                if (copied.value == false) Text(Toasts.COPY_FAILED, style = MaterialTheme.typography.bodySmall, color = EncoreColors.Err)
                 SelectionContainer {
                     Text(text, style = MaterialTheme.typography.bodySmall, fontFamily = FontFamily.Monospace, modifier = Modifier.fillMaxWidth())
                 }
             }
         },
         confirmButton = {
-            TextButton(onClick = { copied.value = copyToClipboard(context, text) }) {
-                Text(copyLabel(copied.value), color = p.text, fontWeight = FontWeight.SemiBold)
+            TextButton(onClick = { copyToClipboard(context, text) }) {
+                Text("Copy", color = p.text, fontWeight = FontWeight.SemiBold)
             }
         },
         dismissButton = { TextButton(onClick = onDismiss) { Text("Close", color = p.muted) } },
     )
 }
 
-/** How the last Copy went, for a sheet or dialog above the toasts: true, false, or null (none lately; clears after 3 s). */
+/**
+ * How the last Copy went, for a sheet that also says it on its own button: true, false, or null (none lately; clears
+ * after 3 s). The toast says it too, above the sheet.
+ */
 class CopyState {
     var value: Boolean? by mutableStateOf(null)
 }

@@ -8,18 +8,17 @@ import android.os.Bundle
 import androidx.car.app.AppManager
 import androidx.car.app.CarAppService
 import androidx.car.app.CarContext
+import androidx.car.app.CarToast
 import androidx.car.app.Screen
 import androidx.car.app.Session
 import androidx.car.app.model.Action
 import androidx.car.app.model.ActionStrip
 import androidx.car.app.model.CarIcon
-import androidx.car.app.model.Header
 import androidx.car.app.model.ItemList
 import androidx.car.app.model.ListTemplate
 import androidx.car.app.model.MessageTemplate
 import androidx.car.app.model.Row
 import androidx.car.app.model.Template
-import androidx.car.app.navigation.model.MapController
 import androidx.car.app.navigation.model.MapWithContentTemplate
 import androidx.car.app.validation.HostValidator
 import androidx.core.content.ContextCompat
@@ -33,7 +32,12 @@ import androidx.media3.session.MediaController
 import androidx.media3.session.SessionCommand
 import androidx.media3.session.SessionToken
 import app.encore.android.R
+import app.encore.android.features.group.GroupListen
+import app.encore.android.graph
+import app.encore.android.playback.ArtistNode
+import app.encore.android.playback.CarRules
 import app.encore.android.playback.EncorePlaybackService
+import app.encore.android.playback.MediaItems
 import com.google.common.util.concurrent.ListenableFuture
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -45,13 +49,17 @@ import java.util.concurrent.Executors
 /**
  * Encore Lyrics: a second car app (besides the media app Android Auto builds from EncorePlaybackService) that
  * shows the playing song's synced lyrics on the car screen. A point-of-interest template app (it is not a
- * navigation app) with the map templates permission: MapWithContentTemplate's map surface draws the lyrics
- * ([LyricsSurface]), its content list shows the song with previous / play-pause / next, and the song's artist as
- * a row that opens the artist's page ([BrowseScreen], 0.31).
+ * navigation app) with the map templates permission. For that category MapWithContentTemplate is the template
+ * with the largest surface the app draws on itself (NavigationTemplate's full-screen map is for navigation apps
+ * only), so: the surface draws the lyrics over all the free area ([LyricsSurface]); the content card Android
+ * Auto requires holds one row, the song with a Like button (a tap opens "More by <artist>", [BrowseScreen]); and
+ * the controls are one strip of icons: Previous, Play/Pause, Next, and "More by <artist>" (the person icon: adds
+ * a shuffle of the artist's songs after the current one).
  *
  * It reads the song and position from the playback service in this process ([CarNowPlaying]) and controls it
  * through a MediaBrowser on the service's session (which also starts the service when the car app opens first);
- * the artist's page is the media app's browse node `artist:<mbid or name>`, read through the same browser.
+ * "More by <artist>" reads the media app's browse nodes (`more-by:…`, `artist-shuffle:<name>`) through the same
+ * browser.
  */
 class LyricsCarAppService : CarAppService() {
     override fun createHostValidator(): HostValidator {
@@ -115,6 +123,28 @@ class LyricsCarSession : Session() {
 
     fun previous() { controller?.seekToPrevious() }
 
+    /** Like or unlike the song (the same likes the phone, the car's media buttons and the web use). */
+    fun toggleLike(trackId: Long) { carContext.graph.likes.toggle(trackId) }
+
+    /**
+     * "More by <artist>": up to [CarRules.MORE_BY_SONGS] of the artist's songs, shuffled, after the current one (in
+     * a group listen the service adds them to the group's Up next). [onDone] gets the short message to show.
+     * Main thread.
+     */
+    fun moreBy(artist: ArtistNode, onDone: (String) -> Unit) {
+        children(CarRules.ARTIST_SHUFFLE + artist.name) { list ->
+            val c = controller
+            if (list == null || c == null) { onDone(CarRules.moreByFailed(artist.name)); return@children }
+            val playing = c.currentMediaItem?.mediaId?.let { MediaItems.trackId(it) }
+            val songs = list.filter { it.mediaId.startsWith("track:") && MediaItems.trackId(it.mediaId) != playing }.take(CarRules.MORE_BY_SONGS)
+            if (songs.isNotEmpty()) {
+                val at = if (c.mediaItemCount == 0) 0 else (c.currentMediaItemIndex + 1).coerceIn(0, c.mediaItemCount)
+                c.addMediaItems(at, songs)
+            }
+            onDone(CarRules.moreByMessage(artist.name, songs.size, GroupListen.inGroup))
+        }
+    }
+
     /**
      * The children of a browse node of the media app ([onDone] gets null when the phone's Encore can't answer).
      * Main thread; [onDone] runs on the main thread.
@@ -160,7 +190,10 @@ class LyricsCarSession : Session() {
     }
 }
 
-/** The one screen: lyrics on the map surface, the song and its controls in the content pane. */
+/**
+ * The one screen: the lyrics on the map surface (all the free area), the song in a one-row card with Like, the
+ * controls in the action strip.
+ */
 class LyricsScreen(
     carContext: CarContext,
     private val surface: LyricsSurface,
@@ -169,11 +202,12 @@ class LyricsScreen(
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main)
     private val covers = Executors.newSingleThreadExecutor { r -> Thread(r, "car-lyrics-cover").apply { isDaemon = true } }
 
-    /** what the pane shows now: a new template only when it changes (hosts limit template updates) */
+    /** what the template shows now: a new template only when it changes (hosts limit template updates) */
     private var shownKey: List<Any?>? = null
     private var np: NowPlaying? = null
     private var coverFor: String? = null
     private var cover: Bitmap? = null
+    private var liked = false
 
     init {
         lifecycle.addObserver(object : DefaultLifecycleObserver {
@@ -187,13 +221,21 @@ class LyricsScreen(
         scope.launch {
             CarNowPlaying.state.collect { now ->
                 np = now
-                val key = listOf(now?.mediaId, now?.title, now?.artist, now?.album, now?.artistNode, now?.playing, coverFor == now?.artworkUri?.toString() && cover != null)
                 if (now?.artworkUri?.toString() != coverFor) loadCover(now)
-                if (key != shownKey) {
-                    shownKey = key
-                    invalidate()
-                }
+                refresh()
             }
+        }
+        scope.launch { carContext.graph.likes.liked.collect { refresh() } }
+    }
+
+    /** A new template when what it shows changed. */
+    private fun refresh() {
+        val now = np
+        liked = now?.trackId?.let { carContext.graph.likes.isLiked(it) } == true
+        val key = listOf(now?.mediaId, now?.title, now?.artist, now?.album, now?.artistNode, now?.playing, liked, coverFor == now?.artworkUri?.toString() && cover != null)
+        if (key != shownKey) {
+            shownKey = key
+            invalidate()
         }
     }
 
@@ -205,12 +247,12 @@ class LyricsScreen(
         val want = coverFor
         try {
             covers.execute {
-                val b = CoverArt.load(carContext, uri, 256)
+                val b = CoverArt.load(carContext, uri, 128)
                 scope.launch {
                     if (coverFor != want || b == null) return@launch
                     cover = b
                     shownKey = null
-                    invalidate()
+                    refresh()
                 }
             }
         } catch (_: java.util.concurrent.RejectedExecutionException) {}
@@ -225,56 +267,56 @@ class LyricsScreen(
         }
         val now = np
         val row = Row.Builder()
-        val list = ItemList.Builder()
         if (now == null) {
             row.setTitle("Nothing playing")
             row.addText("Start a song in Encore")
-            list.addItem(row.build())
         } else {
             row.setTitle(now.title.ifEmpty { "Unknown title" })
-            val artistNode = now.artistNode
-            if (now.artist.isNotEmpty()) row.addText(now.artist)
-            if (now.album.isNotEmpty()) row.addText(now.album)
-            cover?.let { row.setImage(CarIcon.Builder(IconCompat.createWithBitmap(it)).build(), Row.IMAGE_TYPE_LARGE) }
-            list.addItem(row.build())
-            if (artistNode != null) {
-                // the artist row opens the artist's page (Shuffle, Popular songs, Liked from this artist, albums);
-                // with several artists on the song it is the first one in the library
-                list.addItem(
-                    Row.Builder()
-                        .setTitle(artistNode.name)
-                        .addText("Artist")
-                        .setImage(CarIcon.Builder(IconCompat.createWithResource(carContext, R.drawable.ic_person)).build())
-                        .setBrowsable(true)
-                        .setOnClickListener { screenManager.push(BrowseScreen(carContext, session, artistNode.id, artistNode.name)) }
+            val sub = listOf(now.artist, now.album).filter { it.isNotEmpty() }.joinToString(" · ")
+            if (sub.isNotEmpty()) row.addText(sub)
+            cover?.let { row.setImage(CarIcon.Builder(IconCompat.createWithBitmap(it)).build(), Row.IMAGE_TYPE_SMALL) }
+            now.trackId?.let { id ->
+                row.addAction(
+                    Action.Builder()
+                        .setIcon(icon(if (liked) R.drawable.ic_favorite else R.drawable.ic_favorite_border))
+                        .setOnClickListener { session.toggleLike(id) }
                         .build(),
                 )
             }
+            // the artist's page (Shuffle, Popular songs, Albums, Liked from this artist), as on the media app's Home
+            now.artistNode?.let { a ->
+                row.setOnClickListener { screenManager.push(BrowseScreen(carContext, session, CarRules.MORE_BY + a.key, CarRules.moreByTitle(a.name))) }
+            }
         }
+        // no header: the card Android Auto keeps beside the lyrics stays one row high
         val content = ListTemplate.Builder()
-            .setHeader(Header.Builder().setTitle("Encore Lyrics").setStartHeaderAction(Action.APP_ICON).build())
-            .setSingleList(list.build())
+            .setSingleList(ItemList.Builder().addItem(row.build()).build())
             .build()
         val playing = now?.playing == true
         val strip = ActionStrip.Builder()
             .addAction(iconAction(R.drawable.ic_skip_previous) { session.previous() })
             .addAction(iconAction(if (playing) R.drawable.ic_pause else R.drawable.ic_play) { session.playPause() })
             .addAction(iconAction(R.drawable.ic_skip_next) { session.next() })
-            .build()
-        // the PAN action makes the host forward drags on the surface (SurfaceCallback.onScroll / onFling)
-        val map = MapController.Builder()
-            .setMapActionStrip(ActionStrip.Builder().addAction(Action.PAN).build())
-            .build()
+        // the icon alone, like the other three, so the strip stays small on wide screens too; the message after a
+        // tap names the artist and what was added
+        now?.artistNode?.let { a ->
+            strip.addAction(
+                iconAction(R.drawable.ic_person) {
+                    session.moreBy(a) { msg -> CarToast.makeText(carContext, msg, CarToast.LENGTH_SHORT).show() }
+                },
+            )
+        }
         return MapWithContentTemplate.Builder()
             .setContentTemplate(content)
-            .setMapController(map)
-            .setActionStrip(strip)
+            .setActionStrip(strip.build())
             .build()
     }
 
+    private fun icon(res: Int): CarIcon = CarIcon.Builder(IconCompat.createWithResource(carContext, res)).build()
+
     private fun iconAction(res: Int, onClick: () -> Unit): Action =
         Action.Builder()
-            .setIcon(CarIcon.Builder(IconCompat.createWithResource(carContext, res)).build())
+            .setIcon(icon(res))
             .setOnClickListener { onClick() }
             .build()
 }

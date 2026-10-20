@@ -253,10 +253,11 @@ class EncorePlaybackService : MediaLibraryService() {
             .setBitmapLoader(CacheBitmapLoader(DataSourceBitmapLoader.Builder(this).build()))
             .build()
         car.attach(session)
-        // the car's Artist button: the artist goes to the top of Home (Android Auto can't be sent to a browse node)
+        // Home starts with "More by <artist>" for the playing song's artist; the car is told when it changes
         car.onArtist = { a, art ->
-            tree.pinArtist(a, art)
-            try { session.notifyChildrenChanged("home", 5, null) } catch (_: Exception) {}
+            if (tree.playingArtist(a, art)) {
+                try { session.notifyChildrenChanged("home", tree.homeSize(), null) } catch (_: Exception) {}
+            }
         }
         // an artist page's Popular songs that came after the page was shown: the car asks for it again
         tree.onLate = { id, count ->
@@ -716,7 +717,7 @@ class EncorePlaybackService : MediaLibraryService() {
                 .build()
         }
 
-        /** Android Auto came or went: the car's quality badge, Artist button and subtitle detail follow (CarControls). */
+        /** Android Auto came or went: the car's button order and the quality on its subtitle line follow (CarControls). */
         override fun onPostConnect(session: MediaSession, controller: MediaSession.ControllerInfo) {
             car.controller(controller.packageName in CarControls.CAR_PACKAGES, connected = true)
         }

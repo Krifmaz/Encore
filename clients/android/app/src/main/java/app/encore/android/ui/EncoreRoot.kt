@@ -173,7 +173,10 @@ fun EncoreRoot(graph: AppGraph, player: PlayerConnection) {
     val auth by graph.store.auth.collectAsState()
     when (val a = auth) {
         is AuthState.Loading -> Box(Modifier.fillMaxSize().background(MaterialTheme.colorScheme.background))
-        is AuthState.SignedOut -> AuthFlow(graph)
+        is AuthState.SignedOut -> {
+            AuthFlow(graph)
+            ToastHost(bottomPadding = 24.dp)
+        }
         is AuthState.SignedIn -> MainScreen(graph, player, a.session)
     }
 }
@@ -359,8 +362,8 @@ private fun MainScreen(graph: AppGraph, player: PlayerConnection, session: Sessi
         ReportHost(nav)
         // ⋯ → Edit song details… / Delete song from disk (correcting a library song)
         SongFixHost(nav)
-        // toasts sit above the mini player and the tabs
-        ToastHost(Modifier.align(Alignment.BottomCenter).padding(bottom = if (nowPlaying != null) 150.dp else 84.dp))
+        // toasts sit above the mini player and the tabs, in a window of their own above every sheet and dialog
+        ToastHost(bottomPadding = if (nowPlaying != null) 150.dp else 84.dp)
     }
 }
 
