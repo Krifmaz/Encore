@@ -73,7 +73,7 @@ pub fn spectrum(mono: &[f32], rate: u32) -> (Vec<f64>, f64) {
     let mut acc = vec![0.0f64; FFT / 2];
     let mut frames = 0usize;
     let mut buf = vec![Complex::new(0.0, 0.0); FFT];
-    for chunk in mono.chunks_exact(FFT) {
+    for chunk in mono.as_chunks::<FFT>().0 {
         let rms = (chunk.iter().map(|x| (*x as f64) * (*x as f64)).sum::<f64>() / FFT as f64).sqrt();
         if rms < 1e-4 {
             continue; // silence says nothing about the bandwidth
@@ -243,7 +243,7 @@ async fn decode_segment(path: &Path, start: f64, channels: usize, low: bool) -> 
     if !out.status.success() || out.stdout.len() < FFT * 4 * channels {
         return None;
     }
-    Some(out.stdout.chunks_exact(4).map(|b| f32::from_le_bytes([b[0], b[1], b[2], b[3]])).collect())
+    Some(out.stdout.as_chunks::<4>().0.iter().map(|b| f32::from_le_bytes(*b)).collect())
 }
 
 /// Measure one file. `expected` is the length (s) of the recording that was asked for, if known.
@@ -265,7 +265,7 @@ pub async fn analyze(media: &Media, path: &Path, expected: Option<f64>, min_lufs
     let start = if duration > 60.0 { (duration * 0.33).min(duration - 32.0).max(0.0) } else { 0.0 };
     if let Some(pcm) = decode_segment(path, start, 2, low_priority).await {
         let seconds = pcm.len() as f64 / 2.0 / rate as f64;
-        let mono: Vec<f32> = pcm.chunks_exact(2).map(|c| (c[0] + c[1]) * 0.5).collect();
+        let mono: Vec<f32> = pcm.as_chunks::<2>().0.iter().map(|c| (c[0] + c[1]) * 0.5).collect();
         let (power, bin_hz) = tokio::task::spawn_blocking(move || spectrum(&mono, rate)).await.unwrap_or((vec![], 1.0));
         let (issue, cut) = spectral_issue(&power, bin_hz, rate, lossless, bitrate);
         rep.cutoff_hz = cut;

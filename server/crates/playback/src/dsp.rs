@@ -43,6 +43,7 @@ impl Slots {
     }
 
     /// Take a slot when fewer than `max` jobs are running.
+    #[allow(deprecated)] // `fetch_update` is called `try_update` from Rust 1.99 on; this builds on both
     pub fn try_acquire(&self, max: usize) -> Option<Slot> {
         self.0.fetch_update(Ordering::SeqCst, Ordering::SeqCst, |n| (n < max).then_some(n + 1)).ok().map(|_| Slot(self.0.clone()))
     }

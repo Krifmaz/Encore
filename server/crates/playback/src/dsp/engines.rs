@@ -150,7 +150,7 @@ fn builtin(
             continue;
         }
         samples.clear();
-        samples.extend(pending[..whole].chunks_exact(8).map(|b| f64::from_le_bytes(b.try_into().unwrap())));
+        samples.extend(pending[..whole].as_chunks::<8>().0.iter().map(|b| f64::from_le_bytes(*b)));
         pending.drain(..whole);
         if !write(pipe.process(&samples), &mut bytes, &mut frames_out) {
             return false; // the listener went away

@@ -212,12 +212,10 @@ fn arrange(source_order: &str, quality_first: bool, lossless_only: bool, ytdlp_l
         // qobuz / tidal / deezer are streamrip services: the first one marks where streamrip runs
         .map(|s| if streamrip::SERVICES.contains(&s.as_str()) { "streamrip".to_string() } else { s })
         .filter(|s| !s.is_empty()).collect();
-    for (src, before) in [("torznab", "ytdlp")] {
-        if !order.iter().any(|s| s == src) {
-            // saved orders that predate this source
-            let at = order.iter().position(|s| s == before).unwrap_or(order.len());
-            order.insert(at, src.into());
-        }
+    if !order.iter().any(|s| s == "torznab") {
+        // saved orders that predate the torrent and Usenet source get it before yt-dlp
+        let at = order.iter().position(|s| s == "ytdlp").unwrap_or(order.len());
+        order.insert(at, "torznab".into());
     }
     if quality_first || lossless_only {
         // every lossless option first, then lossy fallbacks (each part in the admin's order)
