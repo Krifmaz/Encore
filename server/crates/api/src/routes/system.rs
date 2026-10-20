@@ -45,7 +45,7 @@ pub fn router() -> Router<AppState> {
         .route("/api/system/restart", post(super::update::post_restart))
 }
 
-// ---- download tools (Settings → Apps & sources → Download tools) --------------------------------
+// ---- download tools (Settings → Downloads → Download tools) ------------------------------------
 
 /// What is installed and what the last check found (no network).
 async fn tools_list(State(st): State<AppState>, Admin(_): Admin) -> ApiResult<Json<Vec<encore_system::tools::ToolInfo>>> {
@@ -138,6 +138,8 @@ async fn backup_restore(State(st): State<AppState>, Admin(u): Admin, Path(name):
     st.cfg.reload()?;
     st.cache.clear();
     st.web.lists.clear();
+    // kept searches name requests by id, and the ids may point at other requests now
+    st.requests.search_cache.clear(st.data_dir());
     crate::auth::ensure_owner(&st)?;
     st.db.log("warning", &format!("{} restored the database from backups/{} (the data from before is in backups/{})", u.s("username"), name, safety.name));
     tracing::info!("database restored from backups/{name} by {}", u.s("username"));

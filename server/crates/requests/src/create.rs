@@ -124,6 +124,12 @@ pub fn detail_for_retry(old_detail: &Value, old_status: &str, old_message: &str,
     if old_detail["kept"].is_object() && detail["pick"].is_null() {
         detail["kept"] = old_detail["kept"].clone();
     }
+    // the downloads the audio check turned away stay offered (Keep anyway) until they are 7 days old
+    for k in ["rejected", "rejected_seq"] {
+        if !old_detail[k].is_null() && detail[k].is_null() {
+            detail[k] = old_detail[k].clone();
+        }
+    }
     detail
 }
 

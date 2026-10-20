@@ -50,11 +50,16 @@ impl State {
     /// The request whose details the screenshot tour opens: the first that did not complete,
     /// else the first.
     pub fn first_request(&self) -> Option<i64> {
+        self.first_request_row().map(|r| fmt::i(&r, "id"))
+    }
+
+    /// The same request's row (the tour opens the picker for it).
+    pub fn first_request_row(&self) -> Option<Value> {
         let rows = self.list.rows();
         rows.iter()
             .find(|r| r["status"].as_str() != Some("completed"))
             .or(rows.first())
-            .map(|r| fmt::i(r, "id"))
+            .cloned()
     }
 }
 
@@ -142,9 +147,12 @@ pub fn view<'a>(state: &'a State, ctx: &Ctx<'a>) -> El<'a, Message> {
                 .style(theme::switch),
         );
     }
-    controls = controls.push(
-        request_list::retry_failed_btn(&state.list, "Queue every failed request again").map(Message::List),
-    );
+    // members without Fix their own downloads may not retry (the server answers "Ask an admin to retry")
+    if request_list::may_fix(ctx.is_admin(), ctx.session.perm("fix")) {
+        controls = controls.push(
+            request_list::retry_failed_btn(&state.list, "Queue every failed request again").map(Message::List),
+        );
+    }
     if state.admin {
         controls = controls.push(request_list::clear_btn("Clear finished").map(Message::List));
     }

@@ -285,7 +285,10 @@ fun RequestsScreen(nav: Nav) {
                                     Spacer(Modifier.width(8.dp))
                                 }
                             }
-                            SmallButton("Retry failed", iconRes = R.drawable.ic_refresh, enabled = !retrying, modifier = Modifier.align(Alignment.CenterVertically)) { retryFailed() }
+                            // only for those who may retry (Fix their own downloads), as the rows' Retry
+                            if (RequestRules.mayFix(m)) {
+                                SmallButton("Retry failed", iconRes = R.drawable.ic_refresh, enabled = !retrying, modifier = Modifier.align(Alignment.CenterVertically)) { retryFailed() }
+                            }
                             Box(Modifier.align(Alignment.CenterVertically)) {
                                 SmallButton("Clear…", iconRes = R.drawable.ic_delete) { clearMenu = true }
                                 PopMenu(

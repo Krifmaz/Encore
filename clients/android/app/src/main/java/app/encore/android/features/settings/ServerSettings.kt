@@ -8,11 +8,13 @@ import app.encore.android.ui.components.ErrorBox
 import app.encore.android.ui.screens.Spinner
 import kotlinx.serialization.json.JsonObject
 
-// Settings → Server pages drawn from the server's settings schema (General, Apps & sources, Email & notifications,
-// and the Playlists & sync card of Scheduled tasks): SchemaPage (SchemaForm.kt) draws the cards; this file adds what
-// each page has of its own, as web-rs/src/settings/groups.rs show_page does: the task list above Scheduled tasks'
-// card, Download tools under the "Download sources" heading, the cards' extras (apps.rs card_body), How requests are
-// fulfilled at the end of Apps & sources, and the API key and About cards at the end of General.
+// Settings → Server pages drawn from the server's settings schema (General, Library, Downloads, Integrations, Server
+// processing, Email & notifications, and the Playlists & sync card of Scheduled tasks): SchemaPage (SchemaForm.kt)
+// draws the cards; this file adds what each page has of its own, as web-rs/src/settings/groups.rs show_page does: the
+// task list above Scheduled tasks' card, the cards' extras (apps.rs card_body), Download tools at the top and How
+// requests are fulfilled at the end of the page with the Download pipeline card (Downloads; on a server before R2,
+// Apps & sources, where Download tools sits under its "Download sources" heading), and the API key and About cards at
+// the end of General.
 
 /** The schema and values the Server pages share while Settings is open (null while loading). */
 class ServerSchema(val state: SchemaFormState?, val error: String?, val retry: () -> Unit)
@@ -29,7 +31,8 @@ fun ServerSectionScreen(
     onOpen: (String) -> Unit,
 ) {
     val state = schema.state
-    val section = state?.schema?.section(sectionId) ?: state?.schema?.sections?.firstOrNull()
+    // a page this server calls otherwise (apps on a server since R2, downloads on an older one) opens its page here
+    val section = state?.schema?.let { it.section(it.pageOf(sectionId)) } ?: state?.schema?.sections?.firstOrNull()
     SettingsPage(section?.title ?: SECTION_TITLES[sectionId] ?: "Settings", onBack) {
         if (state == null || section == null) {
             if (schema.error != null) ErrorBox(schema.error) { schema.retry() } else Spinner(24.dp)
@@ -39,15 +42,18 @@ fun ServerSectionScreen(
         // one engine-settings holder per page, so the Cadenza card's Save carries what was changed in its block
         val engine = remember(section.id) { EngineState() }
         val slots = remember(section.id, state) { cardSlots(api, state, engine) }
+        // Download tools starts the first part of the page with the Download pipeline card
+        val downloads = section.groups.any { it.id == "pipeline" }
+        val firstPart = SchemaRules.visibleCards(section, state.values).firstOrNull()?.first?.part
         SchemaPage(
             state = state,
             api = schemaApi,
             section = section,
             focus = focus,
-            partTop = { part -> if (part == "Download sources") DownloadToolsCard(api, state, onOpen) },
+            partTop = { part -> if (downloads && part == firstPart) DownloadToolsCard(api, state, onOpen) },
             slots = { g -> slots[g.id] ?: CardSlots.None },
         )
-        if (section.id == "apps") PipelineHelp()
+        if (downloads) PipelineHelp()
         if (section.id == "general") {
             ApiKeyCard(api)
             AboutCard(info)
@@ -86,7 +92,10 @@ val SECTION_TITLES: Map<String, String> = mapOf(
     "users" to "Users & permissions",
     "invites" to "Invites",
     "general" to "General",
-    "apps" to "Apps & sources",
+    "library" to "Library",
+    "downloads" to "Downloads",
+    "integrations" to "Integrations",
+    "processing" to "Server processing",
     "accounts" to "Email & notifications",
     "autodownload" to "Auto-download",
     "contribute" to "Contribute",

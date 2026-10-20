@@ -3,22 +3,43 @@
 use super::*;
 
 /// Import downloaded files for this request; a wrong-audio rejection becomes Err(Rejected). `hint`: a cover
-/// to look at besides the request's own.
-pub(super) async fn import(st: &impl Ctx, r: &Req, files: &[PathBuf], root: &Path, hint: Option<&str>) -> anyhow::Result<(Vec<PathBuf>, String)> {
+/// to look at besides the request's own. The audio check is off when a person said to take the download as
+/// it is (Keep anyway, Download anyway, a hand pick with "Don't check the audio": [`rejected::skips_check`]);
+/// its songs are then confirmed by that person. The quality and release checks stay on: a fake-lossless
+/// file or another artist's album is turned away all the same. A title that asks for a nightcore, sped up, slowed …
+/// version is not fingerprinted (the request's log says so): only its length and title are checked.
+pub(super) async fn import(st: &impl Ctx, r: &mut Req, files: &[PathBuf], root: &Path, hint: Option<&str>) -> anyhow::Result<(Vec<PathBuf>, String)> {
     let hint = r.hint().or(hint.map(String::from));
-    if r.s("kind") == "album" {
+    let check = !rejected::skips_check(&r.d);
+    let album = r.s("kind") == "album";
+    if check {
+        let title = if album { r.album_title() } else { r.s("title") };
+        if let (Some(words), Some(f)) = (encore_library::matcher::altered_words(&title), files.first()) {
+            if tagger::will_verify(st, f) {
+                let src = r.opt("source").unwrap_or("import".into());
+                log_push(r, format!("{src}: {}", encore_library::acoustid::skipped_detail(&words)));
+            }
+        }
+    }
+    let (new, note) = if album {
         let mbid = r.opt("mbid");
         let new = tagger::import_album_files(st, files, tagger::AlbumImport {
-            artist: &r.s("artist"), album: &r.album_title(), rgid: mbid.as_deref(), source_root: root, reject: true,
+            artist: &r.s("artist"), album: &r.album_title(), rgid: mbid.as_deref(), source_root: root, reject: true, audio: check,
             source_meta: source_meta(r).as_ref(), hint: hint.as_deref(),
         }).await?;
-        Ok((new, String::new()))
+        (new, String::new())
     } else {
         let f = files.first().ok_or_else(|| anyhow::anyhow!("no audio file"))?;
         let mbid = r.opt("mbid");
-        let (p, note) = tagger::import_single(st, f, &r.s("artist"), &r.s("title"), mbid.as_deref(), root, r.length(), true, hint.as_deref()).await?;
-        Ok((vec![p], note))
+        let (p, note) = tagger::import_single(st, f, &r.s("artist"), &r.s("title"), mbid.as_deref(), root, r.length(), true, check, hint.as_deref()).await?;
+        (vec![p], note)
+    };
+    let Some(skipped) = rejected::skip_note(&r.d) else { return Ok((new, note)) };
+    // the person's word confirms the songs (not a copy that was already there and stayed)
+    if !note.starts_with("already in library") {
+        rejected::confirm(st, &r.d, &new);
     }
+    Ok((new, if note.is_empty() { skipped } else { format!("{note}; {skipped}") }))
 }
 
 /// Remember where each new file came from (shown on the album page).

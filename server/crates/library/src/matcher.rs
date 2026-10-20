@@ -8,7 +8,7 @@ use unicode_normalization::UnicodeNormalization;
 
 // version markers → category. Categories in IGNORED don't change the song's identity.
 const VERSION_PATTERNS: [(&str, &str); 15] = [
-    (r"\bslowed\b|\breverb\b|\bsped[\s-]*up\b|\bnightcore\b|\b8d\b|\bdaycore\b|\bchopped\b|\bbass[\s-]?boost(?:ed)?\b|\blo[\s-]?fi\b|\bpitched\b|\btik[\s-]?tok version\b", "altered"),
+    (r"\bslowed\b|\breverb\b|\bsped[\s-]*up\b|\bnightcore\b|\b8d\b|\bdaycore\b|\bchopped\b|\bbass[\s-]?boost(?:ed)?\b|\blo[\s-]?fi\b|\bpitched\b|\btik[\s-]?tok version\b|\bchipmunk(?:ed|s)?\b", "altered"),
     (r"\bkaraoke\b", "karaoke"),
     (r"\ba[\s-]?cappella\b|\bacapella\b|\bvocals? only\b", "acappella"),
     (r"\binstrumental\b|\boff[\s-]?vocal\b", "instrumental"),
@@ -111,6 +111,44 @@ pub fn parse_title(title: &str) -> (String, BTreeSet<&'static str>, String) {
     }
     (fold(&rest), versions, remixer)
 }
+
+/// A title that asks for a re-pitched or re-timed copy of a song – nightcore, sped up, slowed (+ reverb), 8D,
+/// bass boosted, daycore, chipmunk … (the "altered" version above) → the words that say so ("nightcore").
+/// The fingerprint can't judge such a copy: AcoustID knows its audio as the original or as something
+/// unrelated, so it is checked by its length and title only.
+///
+/// The words count inside brackets or after " - " ("Song (Slowed)", "Song - Sped Up"). At the bare end of a
+/// title only the ones that never end an ordinary title do ("Song nightcore", "Song slowed + reverb"): a
+/// song called "Slowed", "Lofi" or "Fade Into Reverb" is still fingerprinted.
+pub fn altered_words(title: &str) -> Option<String> {
+    let (base, versions, _) = parse_title(title);
+    if !versions.contains("altered") || base.is_empty() {
+        return None;
+    }
+    // the bracketed parts and what follows " - ", as parse_title reads them
+    let mut marked: Vec<String> = GROUP.captures_iter(title).map(|c| c[1].to_lowercase()).collect();
+    let rest = GROUP.replace_all(title, " ").to_lowercase();
+    let head = match rest.split_once(" - ") {
+        Some((head, tail)) => {
+            marked.push(tail.to_string());
+            head.to_string()
+        }
+        None => rest,
+    };
+    let altered = &PATS.iter().find(|(_, _, c)| *c == "altered")?.0;
+    let words = marked.iter().filter(|m| !FEAT_START.is_match(m)).find_map(|m| altered.find(m).ok().flatten().map(|w| (w.as_str().to_string(), m.contains("reverb"))))
+        .or_else(|| STRONG_TAIL.captures(&format!(" {}", head.trim_end())).map(|c| (c[1].to_string(), false)))?;
+    Some(match words {
+        (w, true) if w == "slowed" => "slowed + reverb".to_string(),
+        (w, _) if w.starts_with("slowed") && w.contains("reverb") => "slowed + reverb".to_string(),
+        (w, _) => w.split_whitespace().collect::<Vec<_>>().join(" "),
+    })
+}
+
+/// The version words that never end an ordinary title, so they count at its bare end too.
+static STRONG_TAIL: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"(?i)\s(nightcore|sped[\s-]*up|daycore|8d|slowed\s*(?:\+|&|and)\s*reverb|bass[\s-]?boost(?:ed)?)\s*$").unwrap()
+});
 
 /// A download candidate's name (file name, release or video title) carries a version mark the requested
 /// song doesn't: live, remix, acoustic, instrumental, a cappella, sped up / slowed / reverb / 8D /
@@ -451,6 +489,23 @@ mod tests {
         assert!((sim("abcd", "bcde") - 0.75).abs() < 1e-9);
         assert!(parse_title("Song (Bass Boosted)").1.contains("altered"));
         assert!(parse_title("Song (Lo-Fi)").1.contains("altered"));
+    }
+
+    /// Titles that ask for a re-pitched copy say which words do; others (the band Live, "Slow Hands", a song
+    /// called "Slowed" or "Fade Into Reverb") none.
+    #[test]
+    fn altered_words_name_the_version() {
+        for (title, words) in [("Moonlight Shadow (nightcore)", "nightcore"), ("Moonlight Shadow (Sped Up)", "sped up"), ("90210 (Slowed + Reverb)", "slowed + reverb"),
+                               ("Song - Slowed", "slowed"), ("Song (8D Audio)", "8d"), ("Song (Bass Boosted)", "bass boosted"), ("Song (Daycore)", "daycore"),
+                               ("Song (Chipmunk Version)", "chipmunk"), ("Moonlight Shadow nightcore", "nightcore"), ("Song (Slowed)", "slowed"),
+                               ("90210 slowed + reverb", "slowed + reverb"), ("Song Sped Up", "sped up"), ("Song (feat. Lofi Girl) [Daycore]", "daycore")] {
+            assert_eq!(altered_words(title).as_deref(), Some(words), "{title}");
+        }
+        // songs that are called so, or end with such a word, are still fingerprinted
+        for title in ["Moonlight Shadow", "Slow Hands", "Live Forever", "Song (Remastered 2011)", "Song (Live)", "Slowed", "Reverb", "Fade Into Reverb", "Lofi",
+                      "Chopped", "Pitched", "Track Slowed"] {
+            assert_eq!(altered_words(title), None, "{title}");
+        }
     }
 
     /// The kept index is used again until the songs change, then built again with the new song.

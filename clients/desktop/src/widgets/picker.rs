@@ -5,6 +5,12 @@
 //!
 //! `opts` is the web's: `{ kind: 'album'|'track', artist, title, album, mbid, artist_mbid,
 //! track_count, length, year, cover_url, isrc, request_id, ext }`.
+//!
+//! Since R2 the server keeps Soulseek and Torrents & Usenet searches (`POST /api/picker/search`
+//! answers `{items, from, cached_at, found, query, can_search, notice}`): a kept answer shows at
+//! once with "Found at 14:02 · Search again" under its source, and Search again asks that one
+//! source anew (`fresh`). The switch "Don't check the audio" (beside Lossless only, kept on this
+//! computer) sends the pick with `no_check`, so the audio check can't turn it away.
 
 use super::catalog;
 use super::{badge, btn, btn_icon, btn_sm, h3, modal, muted, small_muted, t, El, Icon};
@@ -12,10 +18,26 @@ use crate::api::ApiError;
 use crate::fmt;
 use crate::pages::{Ctx, Page, Section};
 use crate::theme::{self, Badge, Btn};
-use iced::widget::{button, checkbox, column, container, row, space, text_input};
+use iced::widget::{button, checkbox, column, container, row, text_input, tooltip};
 use iced::{Alignment, Border, Length, Task};
 use serde_json::{json, Map, Value};
 use std::collections::{HashMap, HashSet};
+use std::time::Duration;
+
+/// Where the "Don't check the audio" switch is kept on this computer (the config's copy of the
+/// web's localStorage): "1" on, anything else off.
+pub const NO_CHECK_KEY: &str = "encore.pickNoCheck";
+
+/// The switch beside Lossless only, and its tooltip.
+pub const NO_CHECK: &str = "Don't check the audio";
+pub const NO_CHECK_TIP: &str = "Imports what you pick even when the audio check says it is another song";
+
+/// The last line of the dialog, with the switch off and on (the web's `note_text`).
+pub const FOOT: &str = "The file you pick is still fingerprint-checked, tagged with MusicBrainz data and de-duplicated. If it fails, the request fails instead of trying other sources.";
+pub const FOOT_NO_CHECK: &str = "The audio check is off: the file you pick is imported even when the check says it is another song. It is still tagged with MusicBrainz data and de-duplicated. If it fails, the request fails instead of trying other sources.";
+
+/// Another Soulseek search holds the turn (one runs at a time): this one waits for it.
+pub const SLSK_WAITING: &str = "Waiting for another Soulseek search, then searching…";
 
 /// A failed search on one source: the message and, when the server pointed at a setting (a 409:
 /// the source is signed out, stopped or off), the settings link and its label.
@@ -47,6 +69,90 @@ fn state_word(state: &str) -> &'static str {
     }
 }
 
+/// Whether the picker asks a source: a ready one, and Soulseek while it is not connected too –
+/// a server that keeps searches still answers from them (one that keeps none says 409, and the
+/// source's hint shows as before).
+fn searches(s: &Value) -> bool {
+    let st = fmt::s(s, "state");
+    st.is_empty() || st == "ready" || (fmt::s(s, "id") == "slskd" && st == "not_connected")
+}
+
+/// "Searching Soulseek… (Soulseek takes a few seconds)" while a first search runs.
+pub fn searching_text(id: &str, name: &str) -> String {
+    format!("Searching {name}…{}", if id == "slskd" { " (Soulseek takes a few seconds)" } else { "" })
+}
+
+/// While Search again runs, the kept rows stay and this line shows.
+pub fn searching_again_text(name: &str) -> String {
+    format!("Searching {name} again…")
+}
+
+/// The words of a search, compared without case, punctuation or word order.
+fn words(s: &str) -> Vec<String> {
+    let mut w: Vec<String> = s
+        .to_lowercase()
+        .split(|c: char| !(c.is_alphanumeric() || c == '\''))
+        .filter(|w| !w.is_empty())
+        .map(str::to_string)
+        .collect();
+    w.sort();
+    w
+}
+
+/// Whether two searches are the same words.
+pub fn same_query(a: &str, b: &str) -> bool {
+    words(a) == words(b)
+}
+
+/// Whether an answer came from a kept search.
+pub fn is_kept(answer: &Value) -> bool {
+    answer["from"].as_str() == Some("cache")
+}
+
+/// Whether Search again can run now: true unless the server says it can't (`can_search`
+/// false or 0, Soulseek not connected).
+pub fn can_search(answer: &Value) -> bool {
+    match &answer["can_search"] {
+        Value::Bool(b) => *b,
+        Value::Number(n) => n.as_f64() != Some(0.0),
+        _ => true,
+    }
+}
+
+/// The line under a source whose rows came from a kept search, and whether Search again follows
+/// it; None for a live answer (nothing to say):
+/// - "Found at 14:02" (the server's words, on its clock – the clock of its "next attempt at")
+/// - "No results. · Found at 14:02" when the kept search found nothing
+/// - "Found at 14:02 for "Illuminate EP"" when it was searched with other words than these
+/// - "Found at 14:02 · Soulseek isn't connected – next attempt at 14:20", with no Search again,
+///   while it can't search
+pub fn found_line(answer: &Value, searched: &str, empty: bool) -> Option<(String, bool)> {
+    if !is_kept(answer) {
+        return None;
+    }
+    let mut parts: Vec<String> = vec![];
+    if empty {
+        parts.push("No results.".into());
+    }
+    let mut found = fmt::s(answer, "found").trim().to_string();
+    if found.is_empty() && fmt::f(answer, "cached_at") > 0.0 {
+        // a server that sends no sentence: the time in UTC, as the app's other times
+        found = format!("Found at {}", fmt::stamp(fmt::f(answer, "cached_at")));
+    }
+    let query = fmt::s(answer, "query");
+    if !found.is_empty() && !query.trim().is_empty() && !same_query(&query, searched) {
+        found = format!("{found} for \"{}\"", query.trim());
+    }
+    if !found.is_empty() {
+        parts.push(found);
+    }
+    let again = can_search(answer);
+    if !again && fmt::truthy(answer, "notice") {
+        parts.push(fmt::s(answer, "notice").trim().to_string());
+    }
+    Some((parts.join(" · "), again))
+}
+
 #[derive(Debug)]
 pub struct State {
     opts: Value,
@@ -59,9 +165,22 @@ pub struct State {
     link: String,
     tab: String,
     lossless: bool,
+    /// "Don't check the audio": the pick goes with `no_check`.
+    no_check: bool,
+    /// Whether the switch is offered: to those who may take a download the check turned away (Keep
+    /// anyway's people – admins, members with Fix their own downloads); the server refuses it from others.
+    may_skip: bool,
+    /// The words the shown rows were searched with.
+    searched: String,
     results: HashMap<String, Vec<Value>>,
+    /// The answer's fields (without its rows) for a source whose rows came from a kept search.
+    kept: HashMap<String, Value>,
     errors: HashMap<String, PickErr>,
     loading: HashSet<String>,
+    /// Search again is running for these sources (their kept rows stay meanwhile) …
+    again: HashSet<String>,
+    /// … and why one failed (the rows stay, the error shows under the line).
+    again_errors: HashMap<String, PickErr>,
     /// Another Soulseek search held the turn when this one was sent (one runs at a time): say it waits.
     slsk_waiting: bool,
     /// The search generation: answers of an older search are dropped.
@@ -85,10 +204,19 @@ pub enum Message {
     GetLink,
     Tab(String),
     Lossless(bool),
+    /// "Don't check the audio".
+    NoCheck(bool),
     /// `(generation, source, answer)`.
     Searched(u64, String, Result<Value, ApiError>),
+    /// Search again: a new search of this one source (`fresh`).
+    Again(String),
+    /// `(generation, source, answer)` of Search again.
+    Agained(u64, String, Result<Value, ApiError>),
     /// GET /system/soulseek as a search starts: whether the Soulseek one waits for another search.
     SlskTurn(u64, Result<Value, ApiError>),
+    /// A second after a Soulseek search that had to wait for its turn started: say it waits,
+    /// unless it answered meanwhile (a kept answer comes at once).
+    SlskWait(u64),
     /// Get the `i`th result of `source`.
     Get(String, usize),
     Picked(Result<Value, ApiError>),
@@ -109,14 +237,14 @@ pub fn is_url(v: &str) -> bool {
     matches!(rest, Some(r) if !r.is_empty() && !r.chars().any(char::is_whitespace))
 }
 
-/// The settings page of a web link (`#/settings?s=slskd`): a section the app has, or Apps &
-/// sources, where the server's download sources are set up.
+/// The settings page of a web link (`#/settings?s=slskd`): a section the app has, or Downloads,
+/// where the server's download sources are set up.
 pub fn settings_page(hash: &str) -> Page {
     let id = hash
         .split_once("s=")
         .map(|(_, r)| r.split('&').next().unwrap_or(""))
         .unwrap_or("");
-    Page::Settings(Section::by_id(id).unwrap_or(Section::Apps))
+    Page::Settings(Section::by_id(id).unwrap_or(Section::Downloads))
 }
 
 /// The picker's options from `(key, value)` pairs, as the web's `copy`/`put` build them: a
@@ -159,6 +287,7 @@ pub fn open(opts: Value, ctx: &Ctx) -> (State, Task<Message>) {
         .map(js)
         .collect::<Vec<_>>()
         .join(" ");
+    let may_skip = super::request_list::may_fix(ctx.is_admin(), ctx.session.perm("fix"));
     let state = State {
         title: format!("Pick a download · {}", js(&toa)),
         opts,
@@ -168,9 +297,15 @@ pub fn open(opts: Value, ctx: &Ctx) -> (State, Task<Message>) {
         link: String::new(),
         tab: "all".into(),
         lossless: false,
+        no_check: may_skip && ctx.config.local_str(NO_CHECK_KEY) == "1",
+        may_skip,
+        searched: String::new(),
         results: HashMap::new(),
+        kept: HashMap::new(),
         errors: HashMap::new(),
         loading: HashSet::new(),
+        again: HashSet::new(),
+        again_errors: HashMap::new(),
         slsk_waiting: false,
         gen: 0,
         sending: false,
@@ -213,67 +348,107 @@ impl State {
     }
 }
 
+/// The body of `POST /api/picker/search` for one source: the opts' words, the search text, the
+/// request it is for (the server finds the request's own kept searches) and, for Search again,
+/// `fresh`.
+fn search_body(state: &State, src: &str, q: &str, fresh: bool) -> Value {
+    let o = &state.opts;
+    let mut body = Map::new();
+    body.insert("source".into(), json!(src));
+    body.insert("kind".into(), json!(state.kind));
+    body.insert(
+        "artist".into(),
+        if fmt::truthy(o, "artist") { o["artist"].clone() } else { json!("") },
+    );
+    body.insert(
+        "title".into(),
+        if fmt::truthy(o, "title") {
+            o["title"].clone()
+        } else if fmt::truthy(o, "album") {
+            o["album"].clone()
+        } else {
+            json!("")
+        },
+    );
+    body.insert("query".into(), json!(q));
+    if state.kind == "track" && o.get("album").is_some() {
+        body.insert("album".into(), o["album"].clone());
+    }
+    // JSON.stringify drops undefined: only keys opts has go out
+    for k in ["mbid", "artist_mbid", "track_count", "length"] {
+        if o.get(k).is_some() {
+            body.insert(k.into(), o[k].clone());
+        }
+    }
+    if fmt::truthy(o, "request_id") {
+        body.insert("request_id".into(), o["request_id"].clone());
+    }
+    if fresh {
+        body.insert("fresh".into(), json!(true));
+    }
+    Value::Object(body)
+}
+
+/// One search of one source; `done` wraps the answer. A Soulseek search that can search live
+/// first asks whether another search holds the turn (asked before this one is sent, so it can't
+/// be this one).
+fn search_task(
+    state: &State,
+    src: &str,
+    q: &str,
+    fresh: bool,
+    ctx: &Ctx,
+    done: impl Fn(u64, String, Result<Value, ApiError>) -> Message + Send + 'static,
+) -> Task<Message> {
+    let api = ctx.api.clone();
+    let gen = state.gen;
+    let id = src.to_string();
+    let body = search_body(state, src, q, fresh);
+    let search = Task::perform(async move { api.post("/picker/search", body).await }, move |r| done(gen, id, r));
+    if src == "slskd" && state.ready(src) {
+        let api = ctx.api.clone();
+        return Task::perform(async move { api.get("/system/soulseek").await }, move |r| Message::SlskTurn(gen, r))
+            .chain(search);
+    }
+    search
+}
+
 /// `run(q)`: one search per source, painting as each one lands.
 fn run(state: &mut State, q: &str, ctx: &Ctx) -> Task<Message> {
     state.gen += 1;
     state.results.clear();
+    state.kept.clear();
     state.errors.clear();
     state.loading.clear();
+    state.again.clear();
+    state.again_errors.clear();
     state.slsk_waiting = false;
-    let o = &state.opts;
+    state.searched = q.to_string();
     let mut tasks = Vec::new();
-
     for s in state.sources().to_vec() {
-        let id = fmt::s(&s, "id");
-        if !state.ready(&id) {
+        if !searches(&s) {
             continue;
         }
+        let id = fmt::s(&s, "id");
         state.loading.insert(id.clone());
-        let mut body = Map::new();
-        if s.get("id").is_some() {
-            body.insert("source".into(), s["id"].clone());
-        }
-        body.insert("kind".into(), json!(state.kind));
-        body.insert(
-            "artist".into(),
-            if fmt::truthy(o, "artist") { o["artist"].clone() } else { json!("") },
-        );
-        body.insert(
-            "title".into(),
-            if fmt::truthy(o, "title") {
-                o["title"].clone()
-            } else if fmt::truthy(o, "album") {
-                o["album"].clone()
-            } else {
-                json!("")
-            },
-        );
-        body.insert("query".into(), json!(q));
-        if state.kind == "track" && o.get("album").is_some() {
-            body.insert("album".into(), o["album"].clone());
-        }
-        // JSON.stringify drops undefined: only keys opts has go out
-        for k in ["mbid", "artist_mbid", "track_count", "length"] {
-            if o.get(k).is_some() {
-                body.insert(k.into(), o[k].clone());
-            }
-        }
-        let api = ctx.api.clone();
-        let gen = state.gen;
-        let search = Task::perform(
-            async move { api.post("/picker/search", Value::Object(body)).await },
-            move |r| Message::Searched(gen, id.clone(), r),
-        );
-        if fmt::s(&s, "id") == "slskd" {
-            // Soulseek searches one at a time: when another one runs, this one waits for it (30 s at most) –
-            // asked before this search is sent, so it can't be this one
-            let api = ctx.api.clone();
-            tasks.push(Task::perform(async move { api.get("/system/soulseek").await }, move |r| Message::SlskTurn(gen, r)).chain(search));
-        } else {
-            tasks.push(search);
-        }
+        tasks.push(search_task(state, &id, q, false, ctx, Message::Searched));
     }
     Task::batch(tasks)
+}
+
+/// An answer in place: its rows, and the kept search's fields when it came from one.
+fn land(state: &mut State, src: String, v: &Value) {
+    if is_kept(v) {
+        let mut meta = v.clone();
+        if let Some(o) = meta.as_object_mut() {
+            o.remove("items");
+        }
+        state.kept.insert(src.clone(), meta);
+    } else {
+        state.kept.remove(&src);
+    }
+    state.errors.remove(&src);
+    state.results.insert(src, fmt::items(v));
 }
 
 /// `download(source, payload, title)`: `POST /api/picker/pick`.
@@ -282,6 +457,14 @@ fn download(state: &mut State, source: &str, payload: Option<Value>, title: Opti
         return Task::none();
     }
     state.sending = true;
+    let body = pick_body(state, source, payload, title);
+    let api = ctx.api.clone();
+    Task::perform(async move { api.post("/picker/pick", body).await }, Message::Picked)
+}
+
+/// The body of `POST /api/picker/pick`: the result, and the request it is for (or the request to
+/// make), with `no_check` when "Don't check the audio" is on.
+fn pick_body(state: &State, source: &str, payload: Option<Value>, title: Option<Value>) -> Value {
     let o = &state.opts;
     let mut req = Map::new();
     req.insert("kind".into(), json!(state.kind));
@@ -330,11 +513,10 @@ fn download(state: &mut State, source: &str, payload: Option<Value>, title: Opti
     } else {
         body.insert("request".into(), Value::Object(req));
     }
-    let api = ctx.api.clone();
-    Task::perform(
-        async move { api.post("/picker/pick", Value::Object(body)).await },
-        Message::Picked,
-    )
+    if state.no_check && state.may_skip {
+        body.insert("no_check".into(), json!(true));
+    }
+    Value::Object(body)
 }
 
 pub fn update(state: &mut State, msg: Message, ctx: &mut Ctx) -> Task<Message> {
@@ -376,8 +558,20 @@ pub fn update(state: &mut State, msg: Message, ctx: &mut Ctx) -> Task<Message> {
         }
         Message::Tab(t) => state.tab = t,
         Message::Lossless(on) => state.lossless = on,
+        Message::NoCheck(on) => {
+            state.no_check = on;
+            ctx.edit_config(move |c| {
+                c.local.insert(NO_CHECK_KEY.into(), Value::String(if on { "1" } else { "0" }.into()));
+            });
+        }
         Message::SlskTurn(gen, r) => {
-            if gen == state.gen && state.loading.contains("slskd") && r.is_ok_and(|v| fmt::truthy(&v, "search_running")) {
+            if gen == state.gen && r.is_ok_and(|v| fmt::truthy(&v, "search_running")) {
+                // the waiting line shows only when the answer takes more than a moment
+                return Task::perform(tokio::time::sleep(Duration::from_secs(1)), move |_| Message::SlskWait(gen));
+            }
+        }
+        Message::SlskWait(gen) => {
+            if gen == state.gen && (state.loading.contains("slskd") || state.again.contains("slskd")) {
                 state.slsk_waiting = true;
             }
         }
@@ -386,13 +580,39 @@ pub fn update(state: &mut State, msg: Message, ctx: &mut Ctx) -> Task<Message> {
                 return Task::none();
             }
             state.loading.remove(&src);
+            if src == "slskd" {
+                state.slsk_waiting = false;
+            }
             match r {
-                Ok(v) => {
-                    state.results.insert(src, fmt::items(&v));
-                }
+                Ok(v) => land(state, src, &v),
                 // a 409 carries the source's state and settings link
                 Err(e) => {
                     state.errors.insert(src, PickErr::from_api(&e));
+                }
+            }
+        }
+        Message::Again(src) => {
+            if state.loading.contains(&src) || !state.again.insert(src.clone()) {
+                return Task::none();
+            }
+            state.again_errors.remove(&src);
+            let q = state.searched.clone();
+            return search_task(state, &src, &q, true, ctx, Message::Agained);
+        }
+        Message::Agained(gen, src, r) => {
+            // a new search started meanwhile: its answer wins
+            if gen != state.gen {
+                return Task::none();
+            }
+            state.again.remove(&src);
+            if src == "slskd" {
+                state.slsk_waiting = false;
+            }
+            match r {
+                Ok(v) => land(state, src, &v),
+                // the kept rows stay, with why it could not search again
+                Err(e) => {
+                    state.again_errors.insert(src, PickErr::from_api(&e));
                 }
             }
         }
@@ -530,6 +750,53 @@ fn result_row<'a>(ctx: &Ctx<'a>, state: &State, src: &str, i: usize, x: &Value) 
     column![container(r).padding([8, 4]), super::divider()].into()
 }
 
+/// A source's error in full, wrapped, with its settings link and Copy for a bug report.
+fn error_line<'a>(name: &str, err: &PickErr) -> El<'a, Message> {
+    let copy = super::details::copy_btn(Message::CopyError(format!("{name}: {}", err.message)));
+    container(
+        row![
+            container(hint_line(&err.message, &err.settings, &err.label, true)).width(Length::Fill),
+            copy
+        ]
+        .spacing(8)
+        .align_y(Alignment::Center),
+    )
+    .padding([8, 12])
+    .width(Length::Fill)
+    .style(theme::error_box)
+    .into()
+}
+
+/// The line of a kept answer: "Found at 14:02 · Search again"; while Search again runs
+/// "Searching Soulseek again…" (or the wait for another Soulseek search); then, when it failed,
+/// why, with the kept rows still shown.
+fn found_row<'a>(state: &State, src: &str, name: &str, answer: &Value, empty: bool) -> El<'a, Message> {
+    let mut col = column![].spacing(6);
+    if state.again.contains(src) {
+        col = col.push(small_muted(if src == "slskd" && state.slsk_waiting {
+            SLSK_WAITING.to_string()
+        } else {
+            searching_again_text(name)
+        }));
+    } else if let Some((text, again)) = found_line(answer, &state.searched, empty) {
+        let mut r = row![].spacing(4).align_y(Alignment::Center);
+        if !text.is_empty() {
+            r = r.push(small_muted(text.clone()));
+        }
+        if again {
+            if !text.is_empty() {
+                r = r.push(small_muted("·"));
+            }
+            r = r.push(link("Search again".into(), Message::Again(src.to_string())));
+        }
+        col = col.push(r.wrap());
+    }
+    if let Some(err) = state.again_errors.get(src).filter(|e| !e.message.is_empty() && !state.again.contains(src)) {
+        col = col.push(error_line(name, err));
+    }
+    col.into()
+}
+
 /// The JS `section(src)`.
 fn section<'a>(ctx: &Ctx<'a>, state: &State, src: &str) -> El<'a, Message> {
     let p = ctx.look;
@@ -541,49 +808,38 @@ fn section<'a>(ctx: &Ctx<'a>, state: &State, src: &str) -> El<'a, Message> {
         .filter(|(_, x)| !state.lossless || fmt::truthy(x, "lossless"))
         .collect();
     let name = state.name(src);
+    let kept = state.kept.get(src);
     let mut col = column![].spacing(8);
     if state.tab == "all" {
         let mut head = row![h3(name.clone())].spacing(8).align_y(Alignment::Center);
-        if state.ready(src) {
+        if state.ready(src) || kept.is_some() {
             head = head.push(small_muted(list.len().to_string()).color(p.faint));
         }
         col = col.push(container(head).padding(super::pad(8.0, 0.0, 0.0, 0.0)));
     }
-    // a signed-out, stopped or switched-off source: "Sign in to Tidal – Settings → streamrip"
-    if let Some(s) = state.source(src).filter(|_| !state.ready(src)) {
+    // a signed-out, stopped or switched-off source: "Sign in to Tidal – Settings → streamrip" –
+    // unless the server answered from a kept search (Soulseek while it is not connected)
+    if let Some(s) = state.source(src).filter(|_| !state.ready(src) && kept.is_none()) {
         return col
             .push(hint_line(&fmt::s(s, "hint"), &fmt::s(s, "settings"), &fmt::s(s, "settings_label"), false))
             .into();
     }
     if let Some(err) = state.errors.get(src).filter(|e| !e.message.is_empty()) {
         // the whole error, wrapped, and Copy for a bug report
-        let copy = super::details::copy_btn(Message::CopyError(format!("{name}: {}", err.message)));
-        return col
-            .push(
-                container(
-                    row![
-                        container(hint_line(&err.message, &err.settings, &err.label, true)).width(Length::Fill),
-                        copy
-                    ]
-                    .spacing(8)
-                    .align_y(Alignment::Center),
-                )
-                .padding([8, 12])
-                .width(Length::Fill)
-                .style(theme::error_box),
-            )
-            .into();
+        return col.push(error_line(&name, err)).into();
     }
     if state.loading.contains(src) && src == "slskd" && state.slsk_waiting {
-        return col.push(small_muted("Waiting for another Soulseek search, then searching…")).into();
+        return col.push(small_muted(SLSK_WAITING)).into();
     }
     if state.loading.contains(src) {
-        return col
-            .push(small_muted(format!(
-                "Searching {name}…{}",
-                if src == "slskd" { " (Soulseek takes a few seconds)" } else { "" }
-            )))
-            .into();
+        return col.push(small_muted(searching_text(src, &name))).into();
+    }
+    if let Some(answer) = kept {
+        // "Found at 14:02 · Search again" ("No results. · Found at …" when it found nothing)
+        col = col.push(found_row(state, src, &name, answer, list.is_empty()));
+        if list.is_empty() {
+            return col.into();
+        }
     }
     if list.is_empty() {
         return col.push(small_muted("No results.")).into();
@@ -660,8 +916,10 @@ pub fn view<'a>(state: &'a State, ctx: &Ctx<'a>) -> El<'a, Message> {
     for s in state.sources() {
         let id = fmt::s(s, "id");
         let n = state.results.get(&id).map(Vec::len).unwrap_or(0);
-        let word = if state.ready(&id) { "" } else { state_word(&fmt::s(s, "state")) };
-        let suffix = if state.loading.contains(&id) {
+        // a source not ready that answered from a kept search counts its rows
+        let word = if state.ready(&id) || state.kept.contains_key(&id) { "" } else { state_word(&fmt::s(s, "state")) };
+        // (Search again keeps the rows, and the tab says it is searching, as the web's spinner)
+        let suffix = if state.loading.contains(&id) || state.again.contains(&id) {
             "…".to_string()
         } else if word.is_empty() {
             n.to_string()
@@ -670,18 +928,35 @@ pub fn view<'a>(state: &'a State, ctx: &Ctx<'a>) -> El<'a, Message> {
         };
         entries.push((id, fmt::s(s, "name"), suffix));
     }
+    // the switches sit beside the tabs, and under them when the tabs take the width; "Don't check the
+    // audio" only for those who may take it
+    let mut switches = row![checkbox(state.lossless)
+        .label("Lossless only")
+        .on_toggle(Message::Lossless)
+        .size(18)
+        .text_size(13)]
+    .spacing(16)
+    .align_y(Alignment::Center);
+    if state.may_skip {
+        switches = switches.push(
+            tooltip(
+                checkbox(state.no_check)
+                    .label(NO_CHECK)
+                    .on_toggle(Message::NoCheck)
+                    .size(18)
+                    .text_size(13),
+                super::tip_box(NO_CHECK_TIP),
+                tooltip::Position::Bottom,
+            )
+            .gap(4),
+        );
+    }
     body = body.push(
-        row![
-            count_tabs(&entries, &state.tab, Message::Tab),
-            space().width(Length::Fill),
-            checkbox(state.lossless)
-                .label("Lossless only")
-                .on_toggle(Message::Lossless)
-                .size(18)
-                .text_size(13),
-        ]
-        .spacing(12)
-        .align_y(Alignment::Center),
+        row![count_tabs(&entries, &state.tab, Message::Tab), switches]
+            .spacing(16)
+            .align_y(Alignment::Center)
+            .wrap()
+            .vertical_spacing(10),
     );
     let out: El<'a, Message> = match &state.sources {
         None => super::skeleton_rows(3),
@@ -724,10 +999,7 @@ pub fn view<'a>(state: &'a State, ctx: &Ctx<'a>) -> El<'a, Message> {
         .align_y(Alignment::Center),
     );
     body = body.push(
-        super::faint(
-            "The file you pick is still fingerprint-checked, tagged with MusicBrainz data and de-duplicated. If it fails, the request fails instead of trying other sources.",
-        )
-        .size(12),
+        super::faint(if state.no_check { FOOT_NO_CHECK } else { FOOT }).size(12),
     );
     modal(state.title.clone(), body, None, true, Message::Close)
 }
@@ -744,10 +1016,142 @@ mod tests {
         assert!(!is_url("https://a b"));
         assert!(!is_url("daft punk discovery"));
         assert_eq!(settings_page("#/settings?s=playback"), Page::Settings(Section::Playback));
-        assert_eq!(settings_page("#/settings?s=slskd"), Page::Settings(Section::Apps));
-        assert_eq!(settings_page("#/settings"), Page::Settings(Section::Apps));
+        assert_eq!(settings_page("#/settings?s=slskd"), Page::Settings(Section::Downloads));
+        assert_eq!(settings_page("#/settings"), Page::Settings(Section::Downloads));
         assert_eq!(state_word("sign_in"), "sign in");
         assert_eq!(state_word("ready"), "");
+    }
+
+    /// A picker state without a server (the tests build the bodies and lines from it).
+    fn state(opts: Value, sources: Value) -> State {
+        State {
+            kind: if opts["kind"].as_str() == Some("track") { "track" } else { "album" },
+            title: String::new(),
+            opts,
+            sources: Some(fmt::items(&sources)),
+            q: String::new(),
+            link: String::new(),
+            tab: "all".into(),
+            lossless: false,
+            no_check: false,
+            may_skip: true,
+            searched: "Duumu Illuminate EP".into(),
+            results: HashMap::new(),
+            kept: HashMap::new(),
+            errors: HashMap::new(),
+            loading: HashSet::new(),
+            again: HashSet::new(),
+            again_errors: HashMap::new(),
+            slsk_waiting: false,
+            gen: 0,
+            sending: false,
+            closed: false,
+            picked: None,
+        }
+    }
+
+    #[test]
+    fn kept_searches_read_like_the_design() {
+        let kept = json!({ "from": "cache", "cached_at": 1_760_875_320, "found": "Found at 14:02",
+            "query": "Duumu Illuminate EP", "can_search": true, "notice": null });
+        let typed = "Duumu Illuminate EP";
+        assert_eq!(found_line(&kept, typed, false), Some(("Found at 14:02".into(), true)));
+        // a kept search that found nothing
+        assert_eq!(found_line(&kept, typed, true), Some(("No results. · Found at 14:02".into(), true)));
+        // searched with other words (the worker's album-only search)
+        let mut other = kept.clone();
+        other["query"] = json!("Illuminate EP");
+        assert_eq!(found_line(&other, typed, false), Some(("Found at 14:02 for \"Illuminate EP\"".into(), true)));
+        // the same words in another order or case are the same search
+        assert_eq!(found_line(&kept, "illuminate ep, DUUMU", false), Some(("Found at 14:02".into(), true)));
+        // Soulseek not connected: the reason instead of Search again
+        let mut down = kept.clone();
+        down["can_search"] = json!(false);
+        down["notice"] = json!("Soulseek isn't connected – next attempt at 14:20");
+        assert_eq!(
+            found_line(&down, typed, false),
+            Some(("Found at 14:02 · Soulseek isn't connected – next attempt at 14:20".into(), false))
+        );
+        assert_eq!(
+            found_line(&down, typed, true),
+            Some(("No results. · Found at 14:02 · Soulseek isn't connected – next attempt at 14:20".into(), false))
+        );
+        down["can_search"] = json!(0);
+        assert!(!can_search(&down));
+        // a live answer, an older server's bare list: nothing to say
+        assert_eq!(found_line(&json!({ "items": [], "from": "live", "cached_at": null }), typed, false), None);
+        assert_eq!(found_line(&json!([]), typed, false), None);
+        assert!(can_search(&json!({ "items": [] })));
+        // no sentence from the server: the time it was kept, in UTC
+        assert_eq!(
+            found_line(&json!({ "from": "cache", "cached_at": 1_792_427_497.2 }), typed, false),
+            Some(("Found at 2026-10-19 16:31 UTC".into(), true))
+        );
+        assert_eq!(searching_text("slskd", "Soulseek"), "Searching Soulseek… (Soulseek takes a few seconds)");
+        assert_eq!(searching_text("deezer", "Deezer"), "Searching Deezer…");
+        assert_eq!(searching_again_text("Soulseek"), "Searching Soulseek again…");
+        assert_eq!(SLSK_WAITING, "Waiting for another Soulseek search, then searching…");
+    }
+
+    #[test]
+    fn soulseek_is_asked_while_it_is_not_connected() {
+        assert!(searches(&json!({ "id": "deezer", "state": "ready" })));
+        assert!(searches(&json!({ "id": "deezer" })), "an older server sends no state");
+        assert!(searches(&json!({ "id": "slskd", "state": "not_connected" })), "a kept search can still answer");
+        assert!(!searches(&json!({ "id": "slskd", "state": "off" })));
+        assert!(!searches(&json!({ "id": "torznab", "state": "not_connected" })), "no download client: its rows can't be used");
+        assert!(!searches(&json!({ "id": "qobuz", "state": "sign_in" })));
+    }
+
+    #[test]
+    fn a_kept_answer_lands_with_its_fields() {
+        let mut st = state(json!({ "kind": "album", "artist": "Duumu", "album": "Illuminate EP" }), json!([{ "id": "slskd" }]));
+        land(&mut st, "slskd".into(), &json!({ "items": [{ "title": "Illuminate EP" }], "from": "cache", "found": "Found at 14:02" }));
+        assert_eq!(st.results["slskd"].len(), 1);
+        assert_eq!(st.kept["slskd"]["found"], "Found at 14:02");
+        assert!(st.kept["slskd"].get("items").is_none(), "the rows are kept once");
+        // Search again answered live: the line goes
+        land(&mut st, "slskd".into(), &json!({ "items": [], "from": "live" }));
+        assert!(st.kept.is_empty() && st.results["slskd"].is_empty());
+        // today's bare list
+        land(&mut st, "slskd".into(), &json!([{ "title": "x" }]));
+        assert_eq!(st.results["slskd"].len(), 1);
+        assert!(st.kept.is_empty());
+    }
+
+    #[test]
+    fn searches_name_their_request_and_search_again_is_fresh() {
+        let st = state(
+            json!({ "kind": "album", "artist": "Duumu", "album": "Illuminate EP", "track_count": 4, "request_id": 123 }),
+            json!([{ "id": "slskd" }]),
+        );
+        let b = search_body(&st, "slskd", "Duumu Illuminate EP", false);
+        assert_eq!(
+            b,
+            json!({ "source": "slskd", "kind": "album", "artist": "Duumu", "title": "Illuminate EP",
+                    "query": "Duumu Illuminate EP", "track_count": 4, "request_id": 123 })
+        );
+        assert_eq!(search_body(&st, "slskd", "Duumu Illuminate EP", true)["fresh"], true);
+        // opened for an album, not a request: no request id
+        let st = state(json!({ "kind": "album", "artist": "Duumu", "album": "Illuminate EP" }), json!([]));
+        assert!(search_body(&st, "deezer", "x", false).get("request_id").is_none());
+    }
+
+    #[test]
+    fn dont_check_the_audio_goes_with_the_pick() {
+        let mut st = state(json!({ "kind": "track", "artist": "Machine Time", "title": "Moonlight Shadow (nightcore)", "request_id": 12 }), json!([]));
+        let b = pick_body(&st, "ytmusic", Some(json!({ "url": "https://music.youtube.com/watch?v=x" })), Some(json!("Moonlight Shadow")));
+        assert_eq!(b, json!({ "source": "ytmusic", "payload": { "url": "https://music.youtube.com/watch?v=x" }, "title": "Moonlight Shadow", "request_id": 12 }));
+        st.no_check = true;
+        let b = pick_body(&st, "ytmusic", None, None);
+        assert_eq!(b["no_check"], true);
+        assert_eq!(b["request_id"], 12);
+        // without Fix their own downloads the switch isn't offered, and a switch left on on this computer
+        // isn't sent (the server would refuse the pick)
+        st.may_skip = false;
+        assert!(pick_body(&st, "ytmusic", None, None).get("no_check").is_none());
+        assert_eq!(NO_CHECK, "Don't check the audio");
+        assert!(FOOT.starts_with("The file you pick is still fingerprint-checked"));
     }
 
     #[test]

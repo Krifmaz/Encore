@@ -162,7 +162,7 @@ Nothing here is started until the owner says "go".
     - iOS Safari limits: storage is evicted for sites not added to the Home Screen. Tell iPhone users to "Add
       to Home Screen" for reliable offline use.
     - The phone and desktop apps already have offline songs; reuse the same model so they behave the same.
-15. **Plugins tab (own Settings tab, replaces the Download tools list in Apps & sources):**
+15. **Plugins tab (own Settings tab, replaces the Download tools list in Downloads):**
     - Every download source/tool is a plugin: yt-dlp, streamrip, slskd, Cadenza (server processing), the
       translator, the Torznab/Newznab + qBittorrent/SABnzbd bridges, the Jellyfin/Plex/Navidrome/Lidarr
       connections. They ship as "available, not installed"; the admin installs the ones they want with one

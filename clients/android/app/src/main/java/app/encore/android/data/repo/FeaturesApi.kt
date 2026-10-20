@@ -239,6 +239,16 @@ class FeaturesApi(private val api: EncoreApi, private val client: OkHttpClient) 
     }
 
     /**
+     * POST /api/requests/{id}/keep-anyway or /download-anyway (`action`) with `{rejected: id}`: the download the audio
+     * check turned away that the row showed (0: the server's newest). Keep anyway imports its kept files without the
+     * check; Download anyway asks for the same source and link again without it. Errors come back as the server's
+     * `detail` ("The rejected download is gone – Download anyway asks for it again").
+     */
+    fun requestAnyway(id: Long, action: String, rejected: Long) {
+        call("POST", "/api/requests/$id/$action", if (rejected > 0L) buildJsonObject { put("rejected", rejected) } else JsonObject(emptyMap()))
+    }
+
+    /**
      * GET /api/requests/storage: whether imports go on (the Requests page's banner). Null from a server without it
      * (an older one answers 404): no banner then.
      */
@@ -440,12 +450,23 @@ class FeaturesApi(private val api: EncoreApi, private val client: OkHttpClient) 
     fun soulseekSearchRunning(): Boolean? =
         try { (call("GET", "/api/system/soulseek", null) as? JsonObject)?.get("search_running")?.let { it.toString() == "true" } } catch (e: CancellationException) { throw e } catch (_: Exception) { null }
 
-    /** POST /api/picker/pick: a request locked to this result; returns its status (`pending` or `queued`). */
-    fun pick(source: String, payload: JsonElement, title: String, opts: PickerOpts): String {
-        val body = buildJsonObject {
+    /**
+     * POST /api/picker/pick: a request locked to this result; returns its status (`pending` or `queued`). [noCheck]:
+     * "Don't check the audio" – the pick is imported even when the audio check says it is another song.
+     */
+    fun pick(source: String, payload: JsonElement, title: String, opts: PickerOpts, noCheck: Boolean = false): String =
+        (call("POST", "/api/picker/pick", pickBody(source, payload, title, opts, noCheck)) as? JsonObject)?.str("status") ?: ""
+
+    companion object {
+        /**
+         * The body of POST /api/picker/pick: the result, and either the request it replaces or the request to make;
+         * `no_check: true` only with "Don't check the audio" on (an older server ignores it).
+         */
+        fun pickBody(source: String, payload: JsonElement, title: String, opts: PickerOpts, noCheck: Boolean = false): JsonObject = buildJsonObject {
             put("source", source)
             put("payload", payload)
             put("title", title)
+            if (noCheck) put("no_check", true)
             if (opts.requestId > 0L) {
                 put("request_id", opts.requestId)
             } else {
@@ -466,7 +487,6 @@ class FeaturesApi(private val api: EncoreApi, private val client: OkHttpClient) 
                 })
             }
         }
-        return (call("POST", "/api/picker/pick", body) as? JsonObject)?.str("status") ?: ""
     }
 
     // ---- Playlists -----------------------------------------------------------------------------------------

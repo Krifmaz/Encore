@@ -4,14 +4,10 @@ use super::*;
 
 /// A search query from a request's names: bracketed parts and symbols out, the symbols that stand for
 /// letters spelled out first (Ke$ha → Kesha, P!nk → Pink; see `torznab::fold_symbols`), so indexers and
-/// Soulseek get "Kesha Cannibal" and not "Ke ha Cannibal".
+/// Soulseek get "Kesha Cannibal" and not "Ke ha Cannibal". The same words as the picker's first search
+/// ([`slskd::query_text`]), so the picker finds what the worker searched.
 pub(super) fn q(parts: &[&str]) -> String {
-    static BR: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"[\(\[].*?[\)\]]").unwrap());
-    static NW: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"[^\w\s']").unwrap());
-    let s = parts.iter().filter(|p| !p.is_empty()).cloned().collect::<Vec<_>>().join(" ");
-    let s = crate::sources::torznab::fold_symbols(&s);
-    let s = BR.replace_all(&s, " ");
-    NW.replace_all(&s, " ").split_whitespace().collect::<Vec<_>>().join(" ")
+    slskd::query_text(parts)
 }
 
 /// A request's message while its step runs, without touching the rest of the row (the worker's search
@@ -27,7 +23,20 @@ async fn slskd_search(st: &impl Ctx, id: i64, query: &str, searching: &'static s
     if st.requests().slskd.session().searching() {
         note_message(st, id, "Waiting for another Soulseek search…");
     }
-    slskd::search_as(st, query, slskd::Who::Worker, |pause| note_message(st, id, pause.unwrap_or(searching))).await
+    // kept with the request, for the picker opened for it
+    slskd::search_kept(st, query, slskd::Who::Worker, Some(id), |pause| note_message(st, id, pause.unwrap_or(searching))).await
+}
+
+/// The end of the reason a Soulseek download failed because its user is offline.
+pub(super) const SLSKD_OFFLINE: &str = "is offline on Soulseek";
+
+/// slskd's answer when it couldn't ask `user` for the files, in words: "<user> is offline on Soulseek" for
+/// Soulseek's "User x appears to be offline", else its own words.
+pub(super) fn enqueue_failure(user: &str, said: &str) -> String {
+    if said.to_lowercase().contains("appears to be offline") {
+        return format!("{user} {SLSKD_OFFLINE}");
+    }
+    said.to_string()
 }
 
 pub(super) async fn start_slskd(st: &impl Ctx, r: &mut Req, lossless_only: bool) -> anyhow::Result<Out> {
@@ -148,7 +157,7 @@ pub(super) async fn slskd_try_next(st: &impl Ctx, r: &mut Req, reason: &str) -> 
                              ("message", json!(format!("Waiting for Soulseek to take the download from {user} (it is busy with other downloads)")))]);
                 return Ok(Out::Wait);
             }
-            reason = e.to_string();
+            reason = enqueue_failure(&user, &e.to_string());
             continue;
         }
         if let Some(d) = r.d.as_object_mut() {
@@ -316,18 +325,31 @@ pub(super) async fn import_slskd(st: &impl Ctx, r: &mut Req, c: &Value) -> anyho
 
 pub(super) async fn start_torznab(st: &impl Ctx, r: &mut Req, lossless_only: bool) -> anyhow::Result<Out> {
     let lossless_only = lossless_only || r.d["lossless_only"].as_bool().unwrap_or(false);
-    upd(st, r, &[("status", json!("searching")), ("message", json!("Searching torrent and Usenet indexers (Prowlarr)…"))]);
+    let searching = "Searching torrent and Usenet indexers (Prowlarr)…";
+    upd(st, r, &[("status", json!("searching")), ("message", json!(searching))]);
+    let rel = release_info(st, r).await;
     let album = r.album_title();
+    let (artist, year) = (r.s("artist"), r.s("year").get(..4).and_then(|y| y.parse::<i32>().ok()));
+    let want = torznab::Want { artist: &artist, album: &album, year, tracks: n_tracks(&rel), lossless_only };
     let mut cands = vec![];
-    for query in [q(&[&r.s("artist"), &album]), q(&[&album])] {
+    for query in [q(&[&artist, &album]), q(&[&album])] {
+        if torznab::SEARCHES.available_permits() == 0 {
+            note_message(st, r.id, "Waiting for other requests' indexer searches (two at a time)…");
+        }
         let res = torznab::search(st, &query).await?;
-        cands = torznab::rank_album(st, &res, &r.s("artist"), &album, lossless_only);
-        if !cands.is_empty() {
+        note_message(st, r.id, searching);
+        // kept with the request, for the picker opened for it
+        crate::search_cache::keep_releases(st, &query, &["3000"], Some(r.id), &res).await;
+        cands = torznab::rank_album(st, &res, &want);
+        // the indexers had releases for "artist album" (none of them fit): the album's name alone finds
+        // the same and more of the artist's other releases – not worth another of the indexers' searches
+        if !cands.is_empty() || !res.is_empty() {
             break;
         }
     }
     check(st, r.id)?;
     cands.retain(|c| !crate::report::release_blocked(st, c)); // reported releases are never picked again
+    torznab_drop_old(st, r).await;
     if cands.is_empty() {
         return Ok(Out::Next("no matching release on your indexers".into()));
     }
@@ -358,6 +380,7 @@ pub(super) async fn torznab_try_next(st: &impl Ctx, r: &mut Req, reason: &str) -
                 r.d["torznab"]["started"] = json!(t);
                 r.d["torznab"]["last_change"] = json!(t);
                 r.d["torznab"]["last_progress"] = json!(0);
+                r.d["torznab"]["queued_since"] = Value::Null;
                 let via = torznab::client_name(st, c["protocol"].as_str().unwrap_or("torrent"));
                 upd(st, r, &[("status", json!("downloading")), ("progress", json!(0)),
                              ("message", json!(format!("{via}: {} ({})", c["title"].as_str().unwrap_or(""), c["indexer"].as_str().unwrap_or(""))))]);
@@ -368,13 +391,77 @@ pub(super) async fn torznab_try_next(st: &impl Ctx, r: &mut Req, reason: &str) -
     }
 }
 
+/// How long a download client may take to list a download it was just given (qBittorrent takes a
+/// magnet in the background).
+const CLIENT_TAKES: f64 = 120.0;
+
+/// How many stall times (Settings → Downloads → Torrents & Usenet, "Try the next release after a stall
+/// of") a download may wait in its client's queue before the next release is tried.
+const QUEUED_STALLS: f64 = 6.0;
+
+/// "13 hours", "45 minutes": how long something took, in words.
+fn span(secs: f64) -> String {
+    if secs >= 2.0 * 3600.0 { format!("{} hours", (secs / 3600.0).round()) } else { format!("{} minutes", (secs / 60.0).round().max(1.0)) }
+}
+
+/// The client a request's current release went to ("qBittorrent", "SABnzbd" …).
+fn torznab_client(st: &impl Ctx, r: &Req) -> &'static str {
+    let idx = r.d["torznab"]["idx"].as_u64().unwrap_or(0) as usize;
+    torznab::client_name(st, r.d["torznab"]["candidates"][idx]["protocol"].as_str().unwrap_or("torrent"))
+}
+
+/// Why a finished download with no audio files is no use when it holds archives (RAR/ZIP/7z), which
+/// Encore doesn't unpack: a Usenet client is asked to unpack Encore's downloads (so it failed to, or
+/// the archive held no audio), a torrent client never unpacks. None without archives.
+fn packed(path: &Path, via: &str, usenet: bool) -> Option<String> {
+    let archives = walkdir::WalkDir::new(path).max_depth(3).into_iter().flatten().any(|e| {
+        let n = e.file_name().to_string_lossy().to_lowercase();
+        [".rar", ".zip", ".7z", ".r00", ".001"].iter().any(|x| n.ends_with(x))
+    });
+    archives.then(|| if usenet {
+        format!("the release is still packed (RAR/ZIP/7z) – {via} didn't unpack it")
+    } else {
+        "the release is packed (RAR/ZIP/7z), which Encore doesn't unpack".to_string()
+    })
+}
+
 pub(super) async fn poll_torznab(st: &impl Ctx, r: &mut Req) -> anyhow::Result<()> {
     let Some(id) = r.d["torznab"]["id"].as_str().map(String::from) else {
         let o = torznab_try_next(st, r, "lost track of the download").await?;
         return after_slskd(st, r, o).await;
     };
     let t = now();
-    // a song from a release with several files: download only the song's file
+    let via = torznab_client(st, r);
+    let limit = st.cfg().int("torznab_timeout_minutes").max(1) as f64 * 60.0;
+    let polled = match torznab::poll(st, &id).await {
+        Ok(p) => {
+            if let Some(o) = r.d["torznab"].as_object_mut().filter(|o| o.contains_key("err_since")) {
+                // back: the time it didn't answer was no stall of the download
+                o.remove("err_since");
+                o.insert("last_change".into(), json!(t));
+                log_push(r, format!("torznab: {via} answers again"));
+            }
+            p
+        }
+        Err(e) => {
+            // the client restarting, or slow to answer once, is no reason to drop the download: it is
+            // asked again at the next look, and given up after as long as a stalled download
+            let why = encore_core::fsx::explain(&e);
+            let since = r.d["torznab"]["err_since"].as_f64().unwrap_or(t);
+            if t - since > limit {
+                let o = torznab_try_next(st, r, &format!("{via} didn't answer for {} minutes ({why})", (limit / 60.0).round())).await?;
+                return after_slskd(st, r, o).await;
+            }
+            if r.d["torznab"]["err_since"].is_null() {
+                r.d["torznab"]["err_since"] = json!(t);
+                log_push(r, format!("torznab: {via} not answering ({why}) – asking again"));
+                st.db().log("warning", &format!("{via} not answering for {}: {why} – asking again", r.label()));
+            }
+            upd(st, r, &[("message", json!(format!("{via} not answering – asking again ({why})")))]);
+            return Ok(());
+        }
+    };
+    // a song from a release with several files: download only the song's file (once the client answers)
     if r.s("kind") == "track" && r.d["torznab"]["selected"].is_null() {
         let cand = r.d["torznab"]["candidates"][r.d["torznab"]["idx"].as_u64().unwrap_or(0) as usize].clone();
         let track_no = cand["track_no"].as_u64().map(|n| n as u32);
@@ -396,28 +483,74 @@ pub(super) async fn poll_torznab(st: &impl Ctx, r: &mut Req) -> anyhow::Result<(
             }
         }
     }
-    match torznab::poll(st, &id).await? {
+    match polled {
         torznab::Poll::Progress(pct, msg) => {
+            if let Some(o) = r.d["torznab"].as_object_mut() {
+                o.remove("queued_since");
+            }
             if pct > r.d["torznab"]["last_progress"].as_f64().unwrap_or(0.0) {
                 r.d["torznab"]["last_progress"] = json!(pct);
                 r.d["torznab"]["last_change"] = json!(t);
             }
-            if t - r.d["torznab"]["last_change"].as_f64().unwrap_or(t) > st.cfg().int("torznab_timeout_minutes") as f64 * 60.0 {
+            if t - r.d["torznab"]["last_change"].as_f64().unwrap_or(t) > limit {
                 let o = torznab_try_next(st, r, "download stalled").await?;
                 return after_slskd(st, r, o).await;
             }
             upd(st, r, &[("progress", json!(pct)), ("message", json!(msg))]);
             Ok(())
         }
-        torznab::Poll::Failed(why) => {
+        torznab::Poll::Queued(pct, msg) => {
+            // waiting for the client's turn is no stall: the stall time starts once it downloads. A queue
+            // that doesn't move for six stall times (its limit filled by stalled downloads of other apps) is
+            // given up as a stall is
+            r.d["torznab"]["last_change"] = json!(t);
+            let since = r.d["torznab"]["queued_since"].as_f64().unwrap_or(t);
+            r.d["torznab"]["queued_since"] = json!(since);
+            if t - since > QUEUED_STALLS * limit {
+                let o = torznab_try_next(st, r, &format!("{via} kept it queued for {}", span(t - since))).await?;
+                return after_slskd(st, r, o).await;
+            }
+            upd(st, r, &[("progress", json!(pct)), ("message", json!(msg))]);
+            Ok(())
+        }
+        torznab::Poll::Missing(_) if t - r.d["torznab"]["started"].as_f64().unwrap_or(0.0) < CLIENT_TAKES => {
+            // just added: the client may still be taking it in (a download without its start time is no
+            // longer new)
+            upd(st, r, &[("message", json!(format!("{via}: adding the download…")))]);
+            Ok(())
+        }
+        torznab::Poll::Missing(why) | torznab::Poll::Failed(why) => {
             let o = torznab_try_next(st, r, &why).await?;
             after_slskd(st, r, o).await
         }
         torznab::Poll::Done(path) => {
+            storage::register_roots(st);
+            // only a path that isn't there is "can't see it": a mount that doesn't answer (EIO, ENOTCONN,
+            // ESTALE) waits for the storage, and a folder Encore may not open is "can't read it"
+            let is_file = match encore_core::fsx::metadata(&path, encore_core::fsx::Step::Import) {
+                Ok(m) => m.is_file(),
+                Err(e) if e.source.kind() == std::io::ErrorKind::NotFound => {
+                    // finished where Encore can't look: the client keeps it (nothing is deleted), and the other
+                    // releases would land in the same place
+                    let why = format!("{via} finished the download, but Encore can't see it at {} – mount the client's download folder in Encore's container at the \
+                        same path (e.g. /downloads), or correct the download folder in Settings → Downloads → Torrents & Usenet (Prowlarr)", path.display());
+                    return torznab_left_in_client(st, r, why).await;
+                }
+                Err(e) if e.is_storage() => return Err(e.into()),
+                Err(e) => return torznab_unreadable(st, r, via, &e).await,
+            };
             upd(st, r, &[("status", json!("importing")), ("progress", json!(100)), ("message", json!("Verifying, tagging and importing…"))]);
-            let mut files = if path.is_file() { vec![path.clone()] } else { streamrip::audio_files(&path, &encore_core::audio::DOWNLOAD_EXTS) };
+            let listed = if is_file { Ok(vec![path.clone()]) } else { streamrip::audio_files_checked(&path, &encore_core::audio::DOWNLOAD_EXTS) };
+            let mut files = match listed {
+                Ok(f) => f,
+                // the disk's problem: the request waits for the storage, and the download stays in the client
+                Err(e) if e.is_storage() => return Err(e.into()),
+                Err(e) => return torznab_unreadable(st, r, via, &e).await,
+            };
             if files.is_empty() {
-                let o = torznab_try_next(st, r, "the download had no audio files").await?;
+                let usenet = r.d["torznab"]["candidates"][r.d["torznab"]["idx"].as_u64().unwrap_or(0) as usize]["protocol"] == "usenet";
+                let why = packed(&path, via, usenet).unwrap_or_else(|| "the download had no audio files".to_string());
+                let o = torznab_try_next(st, r, &why).await?;
                 return after_slskd(st, r, o).await;
             }
             let root = path.parent().map(|p| p.to_path_buf()).unwrap_or(path.clone());
@@ -452,6 +585,34 @@ pub(super) async fn poll_torznab(st: &impl Ctx, r: &mut Req) -> anyhow::Result<(
                 Err(e) => Err(e),
             }
         }
+    }
+}
+
+/// A finished torrent or Usenet download Encore can't import where it is: it stays in its client (nothing
+/// is deleted, and the request no longer looks after it), and the other releases are not tried – they
+/// would land in the same place. The request goes on to its next source.
+async fn torznab_left_in_client(st: &impl Ctx, r: &mut Req, why: String) -> anyhow::Result<()> {
+    st.db().log("warning", &format!("{}: {why}", r.label()));
+    r.d["torznab"]["id"] = Value::Null;
+    let n = r.d["torznab"]["candidates"].as_array().map(|a| a.len()).unwrap_or(0);
+    r.d["torznab"]["idx"] = json!(n);
+    after_slskd(st, r, Out::Next(why)).await
+}
+
+/// [`torznab_left_in_client`] for a download Encore may not read (the client writes as another user):
+/// never deleted as "no audio files".
+async fn torznab_unreadable(st: &impl Ctx, r: &mut Req, via: &str, e: &encore_core::fsx::StepError) -> anyhow::Result<()> {
+    let hint = e.hint().map(|h| format!(" – {h}")).unwrap_or_default();
+    torznab_left_in_client(st, r, format!("{via} finished the download, but Encore can't read it: {}{hint}", e.what())).await
+}
+
+/// A request's torrent or Usenet download that a new search or pick replaces (`detail.torznab.id`, still
+/// set): it leaves its client first, so that nothing is left downloading or finished there that no request
+/// looks after.
+pub(super) async fn torznab_drop_old(st: &impl Ctx, r: &mut Req) {
+    if let Some(id) = r.d["torznab"]["id"].as_str().map(String::from) {
+        torznab::remove(st, &id).await;
+        r.d["torznab"]["id"] = Value::Null;
     }
 }
 
@@ -755,7 +916,32 @@ pub(super) async fn run_streamrip_url(st: &impl Ctx, r: &mut Req) -> anyhow::Res
 
 #[cfg(test)]
 mod tests {
-    use super::q;
+    use super::{enqueue_failure, q, SLSKD_OFFLINE};
+
+    /// A finished download that holds archives and no audio says so, in the words for its kind of client
+    /// (diagnosis item 31): a torrent client has no unpacking to turn on.
+    #[test]
+    fn packed_releases_are_named_as_such() {
+        let dir = std::env::temp_dir().join(format!("encore-packed-{}", std::process::id()));
+        std::fs::create_dir_all(dir.join("CD1")).unwrap();
+        assert_eq!(super::packed(&dir, "qBittorrent", false), None, "no archives: no audio files, as before");
+        std::fs::write(dir.join("CD1/album.part01.rar"), b"x").unwrap();
+        // a torrent client never unpacks: no setting to point at
+        assert_eq!(super::packed(&dir, "qBittorrent", false).as_deref(), Some("the release is packed (RAR/ZIP/7z), which Encore doesn't unpack"));
+        // SABnzbd and NZBGet are asked to unpack Encore's downloads
+        assert_eq!(super::packed(&dir, "SABnzbd", true).as_deref(), Some("the release is still packed (RAR/ZIP/7z) – SABnzbd didn't unpack it"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// slskd's 500 for a user who is offline reads as such; a pick of that user's files then says what
+    /// to do (pick.rs) instead of "All sources exhausted (… 500 …)".
+    #[test]
+    fn an_offline_user_is_named() {
+        let said = "Soulseek engine returned 500 Internal Server Error: User dave appears to be offline";
+        assert_eq!(enqueue_failure("dave", said), "dave is offline on Soulseek");
+        assert!(enqueue_failure("dave", said).ends_with(SLSKD_OFFLINE));
+        assert_eq!(enqueue_failure("dave", "Soulseek engine returned 404 Not Found: x"), "Soulseek engine returned 404 Not Found: x");
+    }
 
     #[test]
     fn queries_spell_out_the_symbols_that_stand_for_letters() {

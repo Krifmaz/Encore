@@ -1,4 +1,5 @@
-//! Port of web/js/pages/settings.js (the Apps & sources extras) – see docs/archive/ui-rewrite/CONTRACT.md
+//! Port of web/js/pages/settings.js (the Apps & sources extras, on Downloads, Integrations and Server processing
+//! since R2) – see docs/archive/ui-rewrite/CONTRACT.md
 //! What the Server cards show besides their fields, drawn by this web app and not by the schema: the Download
 //! tools card, Tidal sign-in and the streamrip config reset (streamrip), the VPN sub-block and the engine's
 //! status (Soulseek), the pre-render cache and the engine's own settings (Cadenza), and How requests are fulfilled.
@@ -349,9 +350,10 @@ pub fn session_text(s: &Value) -> String {
 
 /// The sentence away from the card (the Soulseek page, Diagnostics): "fix them below" points at the card's
 /// fields, which aren't there – the line links to the card instead. (The server's Diagnostics line already
-/// says "fix them in Settings → Soulseek", for the apps without a link; the link says it here.)
+/// says "fix them in Settings → Downloads → Soulseek" – "Settings → Soulseek" before R2 – for the apps
+/// without a link; the link says it here.)
 pub fn session_text_elsewhere(text: &str) -> String {
-    text.replace(" – fix them below", "").replace(" – fix them in Settings → Soulseek", "")
+    text.replace(" – fix them below", "").replace(" – fix them in Settings → Downloads → Soulseek", "").replace(" – fix them in Settings → Soulseek", "")
 }
 
 /// What goes under the sentence, in the browser's own clock: "Next attempt in 3 m 12 s · 12 searches waiting for
@@ -540,7 +542,7 @@ pub fn bind_soulseek(hub: &Rc<Hub>, card: &Element) {
     });
 }
 
-// Settings → Apps & sources → Download tools: yt-dlp, streamrip, Cadenza (server processing) and slskd
+// Settings → Downloads → Download tools: yt-dlp, streamrip, Cadenza (server processing) and slskd
 // (Soulseek engine) update in place – kept in the config folder, so no new Encore image is needed.
 const TOOL_SPIN: &str = r##"<span class="spinner" style="width:10px;height:10px;border-width:2px"></span>"##;
 fn tool_list(r: &Value) -> Vec<Value> { if r.is_array() { r.items() } else { r.a("tools") } }
@@ -993,7 +995,8 @@ mod soulseek_tests {
         assert!(soulseek_state_html(&r, now).contains("Rejected: invalid username or password – fix them below"));
         assert_eq!(session_text_elsewhere(&session_text(&r["session"])), "Rejected: invalid username or password");
         // the server's Diagnostics line names the card itself (for the apps without a link); here the link does
-        assert_eq!(session_text_elsewhere("Rejected: invalid username or password – fix them in Settings → Soulseek"), "Rejected: invalid username or password");
+        assert_eq!(session_text_elsewhere("Rejected: invalid username or password – fix them in Settings → Downloads → Soulseek"), "Rejected: invalid username or password");
+        assert_eq!(session_text_elsewhere("Rejected: invalid username or password – fix them in Settings → Soulseek"), "Rejected: invalid username or password", "an older server");
     }
 
     #[test]
@@ -1001,8 +1004,8 @@ mod soulseek_tests {
         let now = 1_760_000_000.0;
         // not installed: the engine line only (the session would only repeat it)
         let r = json!({ "enabled": true, "configured": true, "state": "not_installed", "hint": "Install or update it under Download tools",
-            "session": { "state": "stopped", "message": "Soulseek is not installed – install it under Settings → Download tools (slskd – Soulseek engine)", "can_reconnect": false,
-                "text": "Soulseek is not installed – install it under Settings → Download tools (slskd – Soulseek engine)" } });
+            "session": { "state": "stopped", "message": "Soulseek is not installed – install it under Settings → Downloads → Download tools (slskd – Soulseek engine)", "can_reconnect": false,
+                "text": "Soulseek is not installed – install it under Settings → Downloads → Download tools (slskd – Soulseek engine)" } });
         assert_eq!(soulseek_state_html(&r, now), "Not installed · Install or update it under Download tools");
         assert_eq!(reconnect_wait(&r), None);
         // a server before 0.29: no session

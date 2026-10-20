@@ -15,6 +15,7 @@ pub mod events;
 pub mod missing;
 pub mod notify;
 pub mod report;
+pub mod search_cache;
 pub mod slskd_managed;
 pub mod slskd_session;
 pub mod sources;
@@ -54,6 +55,8 @@ pub struct Requests {
     pub tidal: sources::streamrip::TidalLogins,
     /// whether the library and the staging folder can be written (imports pause while they can't)
     pub storage: worker::Health,
+    /// Soulseek and indexer answers kept for the picker (<config>/cache/search-cache.db)
+    pub search_cache: search_cache::Cache,
 }
 
 impl Default for Requests {
@@ -67,6 +70,7 @@ impl Default for Requests {
             youtube: Default::default(),
             tidal: Default::default(),
             storage: Default::default(),
+            search_cache: Default::default(),
         }
     }
 }

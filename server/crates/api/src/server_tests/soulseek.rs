@@ -62,6 +62,8 @@ struct Search {
     cancelled: bool,
     /// slskd still knows it (not deleted)
     known: bool,
+    /// its searchText
+    text: String,
 }
 
 struct Fake {
@@ -108,6 +110,10 @@ struct Fake {
     enqueue_secs: u64,
     /// the session is gone under slskd: a download is refused with Soulseek.NET's "must be connected"
     enqueue_not_connected: bool,
+    /// what a search for a searchText finds (slskd's responses), handed out once it is over; none: nothing
+    answers: HashMap<String, Value>,
+    /// users gone offline: a download from them is refused as slskd refuses it ("User x appears to be offline")
+    offline: Vec<String>,
 }
 
 type Shared = Arc<Mutex<Fake>>;
@@ -435,7 +441,8 @@ async fn start_search(State(f): State<Shared>, Json(b): Json<Value>) -> (StatusC
     let id = b["id"].as_str().unwrap_or("").to_string();
     f.posts.push((Instant::now(), b["searchText"].as_str().unwrap_or("").to_string()));
     f.most = f.most.max(running(&f) + 1);
-    f.searches.insert(id.clone(), Search { started: Instant::now(), cancelled: false, known: true });
+    let text = b["searchText"].as_str().unwrap_or("").to_string();
+    f.searches.insert(id.clone(), Search { started: Instant::now(), cancelled: false, known: true, text });
     (StatusCode::OK, json!({ "id": id }).to_string())
 }
 
@@ -480,7 +487,12 @@ async fn responses(State(f): State<Shared>, Path(id): Path<String>) -> (StatusCo
     if f.down {
         return down();
     }
-    if f.searches.get(&id).is_some_and(|s| s.known) { (StatusCode::OK, Json(json!([]))) } else { (StatusCode::NOT_FOUND, Json(Value::Null)) }
+    // as slskd 0.26.1: the responses are there once the search is over, none before
+    match f.searches.get(&id).filter(|s| s.known) {
+        Some(s) if search_done(&f, s) && !s.cancelled => (StatusCode::OK, Json(f.answers.get(&s.text).cloned().unwrap_or(json!([])))),
+        Some(_) => (StatusCode::OK, Json(json!([]))),
+        None => (StatusCode::NOT_FOUND, Json(Value::Null)),
+    }
 }
 
 /// POST /transfers/downloads/{user}, as slskd 0.26.1's TransfersController.EnqueueAsync: two at once (its
@@ -499,6 +511,10 @@ async fn enqueue(State(sh): State<Shared>, Path(user): Path<String>, Json(files)
         }
         if f.enqueue_not_connected || f.client != Client::LoggedIn {
             return (StatusCode::INTERNAL_SERVER_ERROR, "The server connection must be connected and logged in to perform the operation (currently: Disconnected)".into());
+        }
+        if f.offline.contains(&user) {
+            // slskd asks the server for the user's address first; Soulseek.NET's answer for an offline user
+            return (StatusCode::INTERNAL_SERVER_ERROR, format!("User {user} appears to be offline"));
         }
         f.enqueuing += 1;
         f.most_enqueuing = f.most_enqueuing.max(f.enqueuing);
@@ -561,7 +577,7 @@ fn setup(name: &str) -> (TestServer, Shared) {
         login: Login::TimesOut, reached: vec![], client: Client::Disconnected, pass: None, enabled: false, looping: false, epoch: 0,
         puts: vec![], deletes: vec![], posts: vec![], refused: vec![], too_many: 0, searches: HashMap::new(), stopped: vec![], most: 0,
         search_secs: 10, down: false, session: m.session().clone(), transfers: HashMap::new(), enqueues: vec![], enqueue_refused: vec![],
-        enqueue_too_many: 0, enqueuing: 0, most_enqueuing: 0, enqueue_secs: 1, enqueue_not_connected: false,
+        enqueue_too_many: 0, enqueuing: 0, most_enqueuing: 0, enqueue_secs: 1, enqueue_not_connected: false, answers: HashMap::new(), offline: vec![],
     }));
     m.set_target(Target::App(fake_slskd(f.clone())));
     (ts, f)
@@ -812,7 +828,7 @@ async fn a_rejected_login_stops_the_loop_and_a_new_password_is_tried_on_the_new_
     assert_eq!(code, StatusCode::OK, "{body}");
     assert_eq!((body["state"].as_str(), body["logged_in"].as_bool()), (Some("running"), Some(false)), "{body}");
     assert_eq!(body["session"]["reason"], "rejected", "{body}");
-    assert_eq!(body["error"], "Rejected: invalid username or password – fix them in Settings → Soulseek", "{body}");
+    assert_eq!(body["error"], "Rejected: invalid username or password – fix them in Settings → Downloads → Soulseek", "{body}");
     // a request parked before the rejection goes on at the worker's next look: not "waiting"
     request(&st, "Parked", "queued", json!({ "soulseek_wait": { "since": encore_db::now() }, "sources": ["slskd"] }));
     assert_eq!(session::status(&st)["searches_waiting"], 0);
@@ -1515,3 +1531,7 @@ async fn real_slskd_behind_the_door() {
     encore_requests::slskd_managed::stop(&st).await;
     ts.remove();
 }
+
+/// Soulseek results kept for the picker, against this stand-in.
+#[path = "soulseek_cache.rs"]
+mod kept;

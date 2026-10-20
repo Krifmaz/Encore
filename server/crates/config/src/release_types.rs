@@ -1,4 +1,4 @@
-//! Release types (Settings → Apps & sources → Release types), like Lidarr's metadata profiles: which
+//! Release types (Settings → Downloads → Release types), like Lidarr's metadata profiles: which
 //! kinds of release a discography request, the artist page and New releases count (Album, EP, Single …)
 //! and which extras are skipped (live, remix, compilation, interview … and Encore's own instrumental,
 //! acoustic, sped up, karaoke and covers, read from titles). MusicBrainz release groups carry their

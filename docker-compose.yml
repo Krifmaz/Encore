@@ -1,6 +1,6 @@
-# Encore runs Soulseek itself (its Soulseek engine, slskd, is installed from Settings → Download tools).
+# Encore runs Soulseek itself (its Soulseek engine, slskd, is installed from Settings → Downloads → Download tools).
 # Only Encore is published to the outside world (web UI + Soulseek peer port).
-# Torrents/Usenet: add Prowlarr + qBittorrent/SABnzbd to this network and fill in Settings → Torrents & Usenet.
+# Torrents/Usenet: add Prowlarr + qBittorrent/SABnzbd to this network and fill in Settings → Downloads → Torrents & Usenet.
 #
 # Paths are absolute on purpose: relative paths (./config) resolve to odd places
 # under Portainer and other stack managers. Change APPDATA/MUSIC_DIR/DOWNLOADS_DIR
@@ -50,7 +50,7 @@ services:
 
   # ── Soulseek through a VPN? ───────────────────────────────────────────────
   # Encore has WireGuard built in and sends only Soulseek through it: no gluetun, no NET_ADMIN, no tun device.
-  # Turn it on under Settings → Apps & sources → Soulseek → VPN for Soulseek (or VPN_ENABLED / VPN_WIREGUARD_CONFIG).
+  # Turn it on under Settings → Downloads → Soulseek → VPN for Soulseek (or VPN_ENABLED / VPN_WIREGUARD_CONFIG).
 
 networks:
   music:

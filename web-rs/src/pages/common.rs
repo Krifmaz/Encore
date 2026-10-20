@@ -154,6 +154,52 @@ pub fn can_import_again(r: &Value) -> bool {
 /// staging folder is deleted) and Import again is gone.
 pub const KEPT_FILES_LOST: &str = "Its downloaded files have not been imported yet and can't be imported after this.";
 
+/// Keep anyway / Download anyway (R2, the owner on Oct 19: "i cant overide to have it download it anyways"): what a
+/// request offers for a download the audio check turned away, from the list's `anyway`.
+#[derive(Debug, PartialEq)]
+pub struct Anyway {
+    /// the route after `/requests/{id}/`: `keep-anyway` (the kept files are imported without the check) or
+    /// `download-anyway` (the files are gone: the same source and link are asked for again without the check)
+    pub act: &'static str,
+    pub label: &'static str,
+    pub title: &'static str,
+    /// the toast once the server took it
+    pub done: &'static str,
+    /// which rejected download (`{rejected: id}`), so the server acts on the one the page showed
+    pub id: Value,
+    /// why the check turned it away, in full: "The audio sounds like Diase – Sun, not Moonlight Shadow"
+    pub text: String,
+}
+
+/// The offer of a request row (`anyway` of `GET /api/requests`), or None. The server offers it only where it can
+/// be taken (a failed request, or one still looking); the page shows the button to those who may take it
+/// ([`may_fix`]).
+pub fn anyway(r: &Value) -> Option<Anyway> {
+    let a = r.g("anyway");
+    let (act, label, title, done) = match a.s("action").as_str() {
+        "keep" => ("keep-anyway", "Keep anyway", "Import the download the audio check turned away, without the check", "It will be imported without the audio check"),
+        "download" => ("download-anyway", "Download anyway", "Download it again from the same place, without the audio check", "Downloading it again without the audio check"),
+        _ => return None,
+    };
+    // the server's sentence; else the rejected download's own
+    let text = if a.truthy("text") { a.s("text") } else {
+        r.a("rejected").iter().find(|e| e.g("id") == a.g("id")).map(|e| if e.truthy("text") { e.s("text") } else { e.s("reason") }).unwrap_or_default()
+    };
+    Some(Anyway { act, label, title, done, id: a.g("id").clone(), text })
+}
+
+/// Keep anyway and Download anyway are taken as Retry is: by admins, and by the request's owner with the `fix`
+/// permission (members see only their own requests). Others would only get "Ask an admin to keep it anyway".
+/// The same people get Retry, Retry failed and the picker's "Don't check the audio".
+pub fn may_fix() -> bool {
+    app::is_admin() || app::user().is_some_and(|u| u.g("perms").truthy("fix"))
+}
+
+/// The Keep anyway / Download anyway button of a row or of its details.
+fn anyway_button(a: &Anyway, class: &str) -> String {
+    format!(r#"<button class="{class}" data-act="{}" title="{}">{}{}</button>"#, a.act, esc(a.title), icon(if a.act == "keep-anyway" { "check" } else { "download" }), a.label)
+}
+
 /// `requestRow(r, { admin })`.
 pub fn request_row(r: &Value, admin: bool) -> String {
     ROWS.with(|m| m.borrow_mut().insert(r.s("id"), r.clone()));
@@ -167,6 +213,11 @@ pub fn request_row(r: &Value, admin: bool) -> String {
         _ => format!(r#"{} <span class="muted">· {}</span>"#, esck(r, "title"), esck(r, "artist")),
     };
     let active = matches!(status.as_str(), "searching" | "downloading" | "importing" | "monitoring");
+    // a download the audio check turned away: the reason in full under the line, and Keep anyway / Download anyway
+    let offer = anyway(r);
+    // (a hand pick the check turned away has the reason as its message: it shows once, in full)
+    let same = offer.as_ref().is_some_and(|a| a.text.trim() == r.s("message").trim());
+    let shown_message = r.truthy("message") && !same;
     format!(r#"<div class="list-item req-row" data-id="{id}">
     <div class="thumb">{thumb}</div>
     <div class="grow req-text" data-act="details" title="Show the whole text">
@@ -179,12 +230,14 @@ pub fn request_row(r: &Value, admin: bool) -> String {
         {by}
         · <span class="faint">{ago}</span>
       </div>
+      {why}
       {progress}
     </div>
     <div class="row">
       {badge}
       {approve}
       {pick}
+      {keep}
       {retry}
       {cancel}
       {menu}
@@ -193,10 +246,13 @@ pub fn request_row(r: &Value, admin: bool) -> String {
         id = r.s("id"),
         thumb = ui::art(&r.s("cover_url"), &or(r, "title", "artist"), ""),
         kind = esc(&kind),
-        attempts = { let n = r.f("attempts") as i64; if n > 1 { format!(r#"<span class="faint" title="Requested or retried {n} times">{n} attempts</span> ·"#) } else { String::new() } },
-        source = if r.truthy("source") { format!(r#"<span class="faint">via {}</span> ·"#, esck(r, "source")) } else { String::new() },
-        message = if r.truthy("message") { esck(r, "message") } else { String::new() },
+        // the dot after attempts and source only when something follows it (a hand pick's reason shows on its own line)
+        attempts = { let n = r.f("attempts") as i64; if n > 1 { format!(r#"<span class="faint" title="Requested or retried {n} times">{n} attempts</span>{}"#, if r.truthy("source") || shown_message { " ·" } else { "" }) } else { String::new() } },
+        source = if r.truthy("source") { format!(r#"<span class="faint">via {}</span>{}"#, esck(r, "source"), if shown_message { " ·" } else { "" }) } else { String::new() },
+        message = if shown_message { esck(r, "message") } else { String::new() },
         full = if r.truthy("message") { format!(r#" title="{}""#, esck(r, "message")) } else { String::new() },
+        why = match &offer { Some(a) if !a.text.trim().is_empty() => format!(r#"<div class="small req-why">{}{}</div>"#, icon("alert"), esc(&a.text)), _ => String::new() },
+        keep = match &offer { Some(a) if may_fix() => anyway_button(a, "btn sm"), _ => String::new() },
         by = if admin && r.truthy("username") { format!(r#" · <span class="faint">by {}</span>"#, esck(r, "username")) } else { String::new() },
         ago = ui::fmt::ago(r.f("created_at")),
         progress = if active && r.truthy("progress") { format!(r#"<div class="progress" style="margin-top:6px;max-width:420px"><i style="width:{}%"></i></div>"#, r.s("progress")) } else { String::new() },
@@ -205,7 +261,9 @@ pub fn request_row(r: &Value, admin: bool) -> String {
         pick = if matches!(kind.as_str(), "album" | "track") && status != "completed" { format!(r#"<button class="btn sm" data-act="pick" data-req='{}' title="Search the sources and pick the exact download">{}Pick</button>"#, esc(&pick_json(r)), icon("search")) } else { String::new() },
         // a failed or waiting import whose files are kept: Import again takes Retry's place
         retry = if can_import_again(r) { format!(r#"<button class="btn sm" data-act="import-again" title="Import the downloaded files again – nothing is downloaded again">{}Import again</button>"#, icon("refresh")) }
-            else if matches!(status.as_str(), "failed" | "cancelled") || kind == "playlist" { format!(r#"<button class="btn sm" data-act="retry" title="Retry">{}</button>"#, icon("refresh")) } else { String::new() },
+            // a playlist's songs anyone may queue again; any other request needs Fix their own downloads (the
+            // server answers "Ask an admin to retry")
+            else if kind == "playlist" || (matches!(status.as_str(), "failed" | "cancelled") && may_fix()) { format!(r#"<button class="btn sm" data-act="retry" title="Retry">{}</button>"#, icon("refresh")) } else { String::new() },
         cancel = if matches!(status.as_str(), "pending" | "queued" | "searching" | "downloading" | "monitoring" | "importing" | "waiting") { format!(r#"<button class="btn sm" data-act="cancel" title="Cancel">{}</button>"#, icon("x")) } else { String::new() },
         menu = if !active { format!(r#"<button class="btn sm ghost icon" data-act="menu" data-status="{}"{} aria-label="More">{}</button>"#, esc(&status), if r.truthy("has_files") { r#" data-files="1""# } else { "" }, icon("more")) } else { String::new() })
 }
@@ -220,7 +278,11 @@ pub fn bind_request_actions(root: &Element, reload: Rc<dyn Fn()>) {
         if act == "details" {
             // a click that ends a text selection on the row is not a request for the dialog
             if dom::closest(e, "a, button").is_some() || details::selecting() { return; }
-            show_request_details(&id);
+            show_request_details(&id, reload.clone());
+            return;
+        }
+        if act == "keep-anyway" || act == "download-anyway" {
+            take_anyway(&id, &act, b, reload.clone(), None);
             return;
         }
         if act == "menu" {
@@ -248,9 +310,9 @@ pub fn bind_request_actions(root: &Element, reload: Rc<dyn Fn()>) {
                     });
                 })
             };
-            let id2 = id.clone();
+            let (id2, reload2) = (id.clone(), reload.clone());
             let mut items = vec![
-                MenuItem::new("Details", &icon("list"), move || show_request_details(&id2)),
+                MenuItem::new("Details", &icon("list"), move || show_request_details(&id2, reload2.clone())),
                 MenuItem::new("Remove from list", &icon("x"), { let del = del.clone(); move || del(false) }),
             ];
             if app::is_admin() {
@@ -290,12 +352,68 @@ pub fn bind_request_actions(root: &Element, reload: Rc<dyn Fn()>) {
     });
 }
 
-/// Details of a request row: everything the row cuts off, in a dialog with Copy.
-fn show_request_details(id: &str) {
+/// Keep anyway / Download anyway (`act` is the route) for request `id`, on the rejected download the page showed:
+/// the server's words as a toast, then the lists reload (and `modal`, the details it was pressed in, closes).
+fn take_anyway(id: &str, act: &str, btn: Element, reload: Rc<dyn Fn()>, modal: Option<Rc<ui::Modal>>) {
+    let Some(a) = drawn_row(id).as_ref().and_then(anyway).filter(|a| a.act == act) else { return };
+    dom::set_disabled(&btn, true);
+    let path = format!("/requests/{id}/{act}");
+    dom::spawn(async move {
+        let body = if a.id.is_null() { json!({}) } else { json!({ "rejected": a.id }) };
+        match api::post(&path, body).await {
+            Ok(_) => {
+                toast(a.done, "ok");
+                if let Some(m) = &modal { m.close(); }
+                dom::dispatch("encore:requests-changed", None);
+                reload();
+            }
+            Err(err) => {
+                // "The rejected download is gone – Download anyway asks for it again": the row is redrawn with what
+                // the server offers now
+                toast(&err.message, "err");
+                dom::set_disabled(&btn, false);
+                reload();
+            }
+        }
+    });
+}
+
+/// Details of a request row: everything the row cuts off, in a dialog with Copy. A download the audio check turned
+/// away shows its reason in full at the top, with Keep anyway / Download anyway beside Copy.
+fn show_request_details(id: &str, reload: Rc<dyn Fn()>) {
     let Some(r) = drawn_row(id) else { return };
     let text = request_text(&r, &app::info().s("version"), &ui::fmt::date);
     let what = request_what(&r);
-    details::show(if what.is_empty() { "Details" } else { &what }, &text);
+    let title = if what.is_empty() { "Details" } else { &what };
+    let Some(a) = anyway(&r) else { return details::show(title, &text) };
+    let take = if may_fix() { anyway_button(&a, "btn primary") } else { String::new() };
+    let body = format!("{}{}", anyway_box_html(&r, &a), details::body_html(&text));
+    let footer = format!(r#"<button class="btn" data-close>Close</button><button class="btn" data-copy-text="{}">{}Copy</button>{take}"#, esc(&text), icon("copy"));
+    let m = Rc::new(ui::modal(ui::ModalOpts::new(&esc(title), &body).footer(&footer).wide(true)));
+    let (el, id, m2) = (m.el.clone(), id.to_string(), m.clone());
+    dom::on(&el, "click", move |e| {
+        let Some(b) = dom::closest(e, "[data-act]") else { return };
+        let act = dom::data(&b, "act");
+        take_anyway(&id, &act, b, reload.clone(), Some(m2.clone()));
+    });
+}
+
+/// The top of a request's details when the audio check turned a download away: why, in full, and where it came from.
+pub fn anyway_box_html(r: &Value, a: &Anyway) -> String {
+    let e = r.a("rejected").into_iter().find(|e| e.g("id") == &a.id).unwrap_or(Value::Null);
+    let from = rejected_from(&e);
+    format!(r#"<div class="anyway-box">{}<div><div class="anyway-text">{}</div>{}</div></div>"#,
+        icon("alert"), esc(&a.text), if from.is_empty() { String::new() } else { format!(r#"<div class="small muted">{}</div>"#, esc(&from)) })
+}
+
+/// Where a rejected download came from, in one line: "Deezer · via streamrip · https://www.deezer.com/track/1 ·
+/// 01. Moonlight Shadow.flac".
+fn rejected_from(e: &Value) -> String {
+    let files = match e.i("count") {
+        n if n > 1 && e.truthy("file") => format!("{} and {} more", e.s("file"), n - 1),
+        _ => e.s("file"),
+    };
+    [e.s("via"), e.s("detail"), e.s("url"), files].into_iter().filter(|x| !x.trim().is_empty()).collect::<Vec<_>>().join(" · ")
 }
 
 /// What a request asked for, in one line: "Illuminate EP – Duumu", "Duumu – full discography", the link.
@@ -369,6 +487,22 @@ pub fn request_text(r: &Value, version: &str, date: &dyn Fn(f64) -> String) -> S
     }
     // (other users than admins get no server folder: the files are on the server, in staging or a download client's folder)
     if r.truthy("has_files") { add("Downloaded files kept in", if r.truthy("kept_path") { r.s("kept_path") } else { "the server".into() }); }
+    if r.truthy("skip_check") { add("Audio check", "off for this request".into()); }
+    // the downloads the audio check turned away (R2), oldest first: why in full, where from, and whether the files are kept
+    let rejected = r.a("rejected");
+    if !rejected.is_empty() {
+        out.push(String::new());
+        out.push("Turned away by the audio check (oldest first):".into());
+    }
+    for e in rejected {
+        let why = if e.truthy("text") { e.s("text") } else { e.s("reason") };
+        out.push(if why.trim().is_empty() { "The audio sounds like another song".to_string() } else { why });
+        let mut sub = |k: &str, v: String| { if !v.trim().is_empty() { out.push(format!("  {k}: {v}")); } };
+        sub("From", rejected_from(&e));
+        if e.truthy("text") && e.truthy("reason") { sub("Check", e.s("reason")); }
+        if e.f("at") > 0.0 { sub("When", date(e.f("at"))); }
+        sub("Files", if !e.truthy("has_file") { "gone".into() } else if e.truthy("path") { format!("kept in {}", e.s("path")) } else { "kept on the server".into() });
+    }
     let log: Vec<String> = r.a("log").iter().map(crate::json::js_string).filter(|l| !l.trim().is_empty()).collect();
     if !log.is_empty() {
         out.push(String::new());
@@ -547,10 +681,18 @@ mod tests {
         f["wait_reason"] = Value::Null;
         let html = request_row(&f, false);
         assert!(html.contains("Import again</button>") && !html.contains(r#"data-act="retry""#), "{html}");
-        // a plain failure keeps Retry; a Soulseek wait has no files and no Import again
+        // a plain failure keeps Retry, for those who may retry (Fix their own downloads, as the phone has it); a
+        // Soulseek wait has no files and no Import again
         f["has_files"] = json!(false);
+        crate::app::set_user(Some(json!({ "role": "user", "username": "mia", "perms": { "fix": true } })));
         let html = request_row(&f, false);
         assert!(html.contains(r#"data-act="retry""#) && !html.contains("Import again"), "{html}");
+        crate::app::set_user(Some(json!({ "role": "user", "username": "mia", "perms": { "fix": false } })));
+        assert!(!request_row(&f, false).contains(r#"data-act="retry""#), "the server would answer \"Ask an admin to retry\"");
+        let mut pl = f.clone();
+        pl["kind"] = json!("playlist");
+        assert!(request_row(&pl, false).contains(r#"data-act="retry""#), "a playlist's songs anyone may queue again");
+        crate::app::set_user(None);
         let s = json!({ "id": 13, "kind": "track", "status": "waiting", "title": "Blow", "artist": "Ke$ha", "created_at": 0, "attempts": 1,
             "message": "Waiting for Soulseek – next attempt at 14:20", "wait_reason": "soulseek", "has_files": false });
         let html = request_row(&s, false);
@@ -605,6 +747,106 @@ Server version: 0.29.0";
         assert_eq!(request_what(&waiting_row()), "Illuminate EP – Duumu");
         assert_eq!(request_what(&r), "https://www.youtube.com/watch?v=x");
         assert_eq!(request_what(&json!({ "kind": "artist", "artist": "Duumu" })), "Duumu – full discography");
+    }
+
+    /// A row of GET /api/requests after the audio check turned the download away (package A's answer, R2).
+    fn rejected_row() -> Value {
+        json!({ "id": 21, "kind": "track", "status": "failed", "title": "Moonlight Shadow (nightcore)", "artist": "Machine Time", "album": "Moonlight Shadow (nightcore)",
+            "source": "ytdlp", "username": "alice", "created_at": 0, "attempts": 10, "picked": false, "has_files": false, "skip_check": false,
+            "message": "All sources exhausted (ytdlp: YouTube match was the wrong audio (audio is “Diase – Sun” (different title)))",
+            "rejected": [
+                { "id": 1, "source": "streamrip", "via": "Deezer", "detail": "via streamrip", "url": "https://www.deezer.com/track/3135556", "file": "01. Moonlight Shadow.flac",
+                  "count": 1, "check": "audio", "reason": "audio is “Diase – Sun” (different title)", "heard": "Diase – Sun",
+                  "text": "The audio sounds like Diase – Sun, not Moonlight Shadow (nightcore)", "at": 1760890000.5, "has_file": false, "path": null },
+                { "id": 2, "source": "ytdlp", "via": "YouTube Music", "detail": null, "url": "https://music.youtube.com/watch?v=x", "file": "Moonlight Shadow.opus",
+                  "count": 1, "check": "audio", "reason": "audio is “Diase – Sun” (different title)", "heard": "Diase – Sun",
+                  "text": "The audio sounds like Diase – Sun, not Moonlight Shadow (nightcore)", "at": 1760890100.0, "has_file": true, "path": "/downloads/encore/rejected-21/2" }
+            ],
+            "anyway": { "action": "keep", "id": 2, "text": "The audio sounds like Diase – Sun, not Moonlight Shadow (nightcore)" },
+            "log": ["ytdlp: YouTube match was the wrong audio"] })
+    }
+
+    #[test]
+    fn a_download_the_audio_check_turned_away_offers_keep_anyway_with_the_reason_in_full() {
+        crate::app::set_user(Some(json!({ "role": "admin", "username": "caz" })));
+        let r = rejected_row();
+        let a = anyway(&r).expect("offered");
+        assert_eq!((a.act, a.label, a.id.clone()), ("keep-anyway", "Keep anyway", json!(2)));
+        assert_eq!(a.text, "The audio sounds like Diase – Sun, not Moonlight Shadow (nightcore)");
+        let html = request_row(&r, true);
+        // the reason in full on its own line (it wraps: no ellipsis), and the button beside Retry
+        assert!(html.contains(r#"<div class="small req-why">"#) && html.contains("The audio sounds like Diase – Sun, not Moonlight Shadow (nightcore)</div>"), "{html}");
+        assert!(html.contains(r#"data-act="keep-anyway""#) && html.contains("Keep anyway</button>"), "{html}");
+        assert!(html.contains(r#"data-act="retry""#), "Retry stays: {html}");
+        // Download anyway when the kept files are gone
+        let mut d = r.clone();
+        d["anyway"] = json!({ "action": "download", "id": 1, "text": "The audio sounds like Diase – Sun, not Moonlight Shadow (nightcore)" });
+        let html = request_row(&d, true);
+        assert!(html.contains(r#"data-act="download-anyway""#) && html.contains("Download anyway</button>") && !html.contains("Keep anyway"), "{html}");
+        assert_eq!(anyway(&d).map(|a| a.done), Some("Downloading it again without the audio check"));
+        // no offer: no line and no button
+        let mut n = r.clone();
+        n["anyway"] = Value::Null;
+        let html = request_row(&n, true);
+        assert!(!html.contains("req-why") && !html.contains("anyway"), "{html}");
+        // a hand pick turned away has the reason as its message: shown once, on the line that wraps
+        let mut p = r.clone();
+        p["message"] = json!("The audio sounds like Diase – Sun, not Moonlight Shadow (nightcore)");
+        let html = request_row(&p, true);
+        assert_eq!(html.matches("The audio sounds like Diase").count(), 2, "the wrapping line and the status line's title only: {html}");
+        // members: with the fix permission as Retry; without it the reason shows and the button doesn't
+        crate::app::set_user(Some(json!({ "role": "user", "perms": { "fix": true } })));
+        assert!(request_row(&r, false).contains(r#"data-act="keep-anyway""#));
+        crate::app::set_user(Some(json!({ "role": "user", "perms": { "fix": false } })));
+        let html = request_row(&r, false);
+        assert!(!html.contains(r#"data-act="keep-anyway""#) && html.contains("req-why"), "{html}");
+        // an older server without the field, or an action this page doesn't know
+        assert!(anyway(&json!({ "status": "failed" })).is_none());
+        assert!(anyway(&json!({ "anyway": { "action": "later" } })).is_none());
+        // without the server's text, the rejected download's own
+        let t = anyway(&json!({ "anyway": { "action": "keep", "id": 4 }, "rejected": [{ "id": 4, "reason": "audio is “X – Y”" }] })).map(|a| a.text);
+        assert_eq!(t.as_deref(), Some("audio is “X – Y”"));
+        crate::app::set_user(None);
+    }
+
+    #[test]
+    fn the_details_name_every_download_the_audio_check_turned_away() {
+        let mut r = rejected_row();
+        r["skip_check"] = json!(true);
+        let t = request_text(&r, "0.31.0", &date);
+        let want = "
+Turned away by the audio check (oldest first):
+The audio sounds like Diase – Sun, not Moonlight Shadow (nightcore)
+  From: Deezer · via streamrip · https://www.deezer.com/track/3135556 · 01. Moonlight Shadow.flac
+  Check: audio is “Diase – Sun” (different title)
+  When: <1760890000>
+  Files: gone
+The audio sounds like Diase – Sun, not Moonlight Shadow (nightcore)
+  From: YouTube Music · https://music.youtube.com/watch?v=x · Moonlight Shadow.opus
+  Check: audio is “Diase – Sun” (different title)
+  When: <1760890100>
+  Files: kept in /downloads/encore/rejected-21/2
+";
+        assert!(t.contains(&format!("Audio check: off for this request\n{want}")), "{t}");
+        // members get no server folder; an album names its first file and how many more
+        let mut m = rejected_row();
+        m["rejected"][1]["path"] = Value::Null;
+        m["rejected"][1]["count"] = json!(10);
+        let t = request_text(&m, "", &date);
+        assert!(t.contains("  From: YouTube Music · https://music.youtube.com/watch?v=x · Moonlight Shadow.opus and 9 more\n"), "{t}");
+        assert!(t.contains("  Files: kept on the server\n"), "{t}");
+        // the top of the dialog: the reason in full and where it came from
+        let a = anyway(&r).expect("offered");
+        let top = anyway_box_html(&r, &a);
+        assert!(top.contains(r#"<div class="anyway-text">The audio sounds like Diase – Sun, not Moonlight Shadow (nightcore)</div>"#), "{top}");
+        assert!(top.contains("YouTube Music · https://music.youtube.com/watch?v=x · Moonlight Shadow.opus"), "{top}");
+        // no rejected downloads: nothing more in the text
+        assert!(!request_text(&waiting_row(), "", &date).contains("Turned away"));
+        // the row's line: no stray dot where the hand pick's reason (shown on its own line) was
+        let mut p = rejected_row();
+        p["message"] = json!("The audio sounds like Diase – Sun, not Moonlight Shadow (nightcore)");
+        let html = request_row(&p, true);
+        assert!(html.contains("10 attempts</span> ·") && html.contains("via ytdlp</span>\n") && !html.contains("via ytdlp</span> ·"), "{html}");
     }
 
     #[test]

@@ -43,14 +43,14 @@ old static table drew a field only when the answer had its key).
 {
   "sections": [
     {
-      "id": "apps",
-      "title": "Apps & sources",
-      "aliases": ["downloads", "tagging", "services"],
+      "id": "downloads",
+      "title": "Downloads",
+      "aliases": ["apps"],
       "groups": [
         {
           "id": "torznab",
           "title": "Torrents & Usenet (Prowlarr)",
-          "part": "Download sources",
+          "part": "",
           "desc": "Searches your torrent and Usenet indexers (through Prowlarr) for whole albums …",
           "test": "torznab",
           "test_label": "Test connection",
@@ -92,8 +92,18 @@ Every attribute is always there; one that does not apply is `null` (or `[]`, `fa
 | `aliases` | older `?s=` names that open this page (`[]` for none) |
 | `groups` | the cards on the page, in order. **Empty** for a page the web app draws with its own code (Auto-download, Contribute, Blocked): the section is listed so the nav order comes from one place |
 
-Sections come in nav order: General, Apps & sources, Email & notifications, Auto-download, Contribute,
-Blocked, Scheduled tasks.
+Sections come in nav order: General, Library, Downloads, Integrations, Server processing, Email &
+notifications, Auto-download, Contribute, Blocked, Scheduled tasks.
+
+Until R2 (October 2026) Library, Downloads, Integrations and Server processing were one page, Apps & sources (`apps`).
+Its old links still work: `apps` is an alias of Downloads, `tagging` of Library and `services` of
+Integrations, and a link that names a card (`?s=cadenza`) opens the page that holds it now, with that card
+open (an alias opens the page's first card, as a plain link to the page does). A name is looked up as a page
+id first, then as an alias, then as a card: Library's own card is also called `library`. The build
+refuses a name (page id, alias or card id) that would open two different pages. A client that also talks
+to older servers finds a page's extras by the cards it holds, not by its id: the Download tools card and
+"How requests are fulfilled" go on the page with the `pipeline` card (Downloads; Apps & sources on an
+older server).
 
 ### Group (a card)
 
@@ -101,7 +111,7 @@ Blocked, Scheduled tasks.
 |---|---|
 | `id` | the card's id (also the old `?s=` name of the card, which opens its page) |
 | `title`, `desc` | the card's heading and the line under it |
-| `part` | the heading over a run of cards on the page ("Download sources", "Library & tagging", "Services" on Apps & sources); `""` for none. A new heading starts where `part` changes |
+| `part` | the heading over a run of cards on the page; `""` for none. A new heading starts where `part` changes. No page uses one since R2 (Apps & sources had "Download sources", "Library & tagging" and "Services" before it was split) |
 | `test` | the card's Test button calls `POST /api/system/test/<test>`; `null`: no button |
 | `test_label` | the button's words; set whenever `test` is (the web app's old default was "Test connection") |
 | `fields` | the card's fields, in order |
@@ -178,5 +188,6 @@ MusicBrainz sign-in). `settings.toml` says for each where it is edited.
 - web-rs keeps the HTML the old static table drew (`web-rs/src/settings/fixtures/settings-cards.html`) and
   its tests compare the schema renderer with it, using a recorded schema answer
   (`web-rs/src/settings/fixtures/settings-schema.json`). After an intended change to the table, record
-  both again: the schema answer from `GET /api/admin/settings/schema`, then
+  both again: the schema answer with `ENCORE_WRITE_SETTINGS_SCHEMA=1 cargo test -p encore-config
+  schema_fixture` in `server/` (a config test fails while the recorded answer is not the table's), then
   `ENCORE_WRITE_SETTINGS_CARDS=1 cargo test settings::` in `web-rs/`.

@@ -106,7 +106,7 @@ data class SchemaField(
 data class SchemaGroup(
     val id: LString = "",
     val title: LString = "",
-    /** the heading over a run of cards ("Download sources"); "" for none */
+    /** the heading over a run of cards ("Download sources" on Apps & sources before R2); "" for none */
     val part: LString = "",
     /** the line under the title */
     val desc: LString = "",
@@ -143,11 +143,13 @@ data class SettingsSchema(
     fun group(id: String): SchemaGroup? = sections.asSequence().flatMap { it.groups.asSequence() }.firstOrNull { it.id == id }
 
     /**
-     * The page that shows [id]: a page's own id, one of its aliases, or the id of one of its cards (old
-     * `#/settings?s=` links name cards). Anything else comes back as it is.
+     * The page that shows [id]: a page's own id, one of its aliases (apps, the page Apps & sources was until R2,
+     * opens Downloads), or the id of one of its cards (old `#/settings?s=` links name cards), in that order, as
+     * web-rs settings/fields.rs `page_of`. Anything else comes back as it is.
      */
     fun pageOf(id: String): String =
-        sections.firstOrNull { s -> s.id == id || id in s.aliases || s.groups.any { it.id == id } }?.id ?: id
+        (sections.firstOrNull { it.id == id } ?: sections.firstOrNull { id in it.aliases }
+            ?: sections.firstOrNull { s -> s.groups.any { it.id == id } })?.id ?: id
 }
 
 /** One line under a card: a Test result, or a warning that came back with Save (a folder Encore can't write to). */

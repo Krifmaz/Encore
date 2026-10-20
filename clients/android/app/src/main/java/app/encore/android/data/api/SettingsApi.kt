@@ -179,7 +179,7 @@ class SettingsApi(private val api: EncoreApi, private val client: OkHttpClient) 
 
     fun runTask(key: String) { call("POST", "/api/admin/tasks/${enc(key)}/run", null) }
 
-    // ---- Apps & sources: the cards' extras ----------------------------------------------------------------------
+    // ---- Downloads and Server processing: the cards' extras ----------------------------------------------------
 
     /** GET /api/system/tools: a list, or `{tools}`. */
     fun tools(): JsonElement? = call("GET", "/api/system/tools", null)

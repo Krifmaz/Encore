@@ -38,7 +38,7 @@ import kotlinx.coroutines.withContext
 import kotlinx.serialization.json.JsonObject
 
 /**
- * Settings → Apps & sources → YouTube sign-in, above its fields (web-rs/src/pages/youtube.rs): which cookies yt-dlp
+ * Settings → Downloads → YouTube sign-in, above its fields (web-rs/src/pages/youtube.rs): which cookies yt-dlp
  * uses (a sign-in handed over by the Encore browser extension, the extension's sync of an everyday browser, or the
  * pasted cookies of the field below), Refresh now, Sign out and the extension token. The cookie paste itself is the
  * schema's `ytdlp_cookies` field of the same card.

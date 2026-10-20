@@ -353,7 +353,7 @@ class SchemaCardScope internal constructor(
 /**
  * The cards of one Server page ([section]) that this server has, under the heading of their part, as groups.rs
  * `cards_html`: the first card starts open (or [focus], the card a link asked for; a page with one card has it open).
- * [partTop] draws what a part starts with under its heading (Download sources: the Download tools card); [slots]
+ * [partTop] draws what a part starts with under its heading (Downloads: the Download tools card); [slots]
  * gives a card's extras. The caller scrolls (put it in a scrolling Column) and draws what the page has of its own
  * (the task list, How requests are fulfilled, the API key and About).
  */

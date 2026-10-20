@@ -116,7 +116,7 @@ fun ContributeScreen(nav: Nav, onBack: () -> Unit) {
             CardHead("AcoustID fingerprints") {
                 SmallButton("Send now", iconRes = R.drawable.ic_refresh, enabled = a?.bool("ready") == true) { run(scope, api, "acoustid") { version += 1 } }
             }
-            Muted("When a download's audio confirms the MusicBrainz recording it was asked for, its fingerprint is sent to AcoustID in batches, once per song. Your user key says who sent it; the API key under Apps & sources → Verification is Encore's application key.")
+            Muted("When a download's audio confirms the MusicBrainz recording it was asked for, its fingerprint is sent to AcoustID in batches, once per song. Your user key says who sent it; the API key under Settings → Library → Verification & duplicates is Encore's application key.")
             StatTiles(
                 listOf(
                     formatNumber(a?.dbl("queued")?.toLong() ?: 0) to "Waiting to send",

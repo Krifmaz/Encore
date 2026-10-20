@@ -112,7 +112,7 @@ pub const SECTIONS: &[Card] = &[
         s("embed_cover", "Embed cover art in files", "bool"),
     ] },
     Card { id: "pipeline", title: "Download pipeline", desc: "Which sources are searched for a request, and in what order. The first one that has it wins.", test: None, test_label: None, fields: &[
-        s("source_order", "Source order", "text").full().help("The one place to set what is searched, in order, comma-separated: qobuz, tidal, deezer (all through streamrip), slskd (Soulseek), torznab (torrents/Usenet, albums only), ytdlp (YouTube Music). Leave one out to never use it; sources you haven’t set up are skipped. Recommended (the default): qobuz, tidal, deezer, slskd, torznab, ytdlp – exact hi-res/lossless releases first, then Soulseek, then torrents/Usenet for whole albums, YouTube Music last."),
+        s("source_order", "Source order", "text").full().help("The one place to set what is searched, in order, comma-separated: qobuz, tidal, deezer (all through streamrip), slskd (Soulseek), torznab (torrents/Usenet, albums only), ytdlp (YouTube Music). Leave one out to never use it; sources you haven’t set up are skipped. Recommended (the default): qobuz, tidal, deezer, slskd, torznab, ytdlp – exact hi-res/lossless releases first, then Soulseek, then torrents/Usenet for whole albums, YouTube Music last. With Highest quality first on (the default), requests try Qobuz/Tidal/Deezer, then FLAC on Soulseek, then torrents/Usenet, then Soulseek in any format, then YouTube Music."),
     ] },
     Card { id: "releases", title: "Release types", desc: "Which releases Request discography, the artist pages and New releases count, like the metadata profiles in Lidarr. Song requests skip other versions (live, remix, sped up and so on) unless the song asked for is one.", test: None, test_label: None, fields: &[
         s("release_types", "Kinds to request", "checks").full().options(RELEASE_KINDS).help("Request discography gets these. Each request can change them in its own panel."),
@@ -139,7 +139,7 @@ pub const SECTIONS: &[Card] = &[
         s("auto_request_followed", "Automatically download new tracks in followed playlists (more rules under Admin → Auto-download)", "bool"),
     ] },
     Card { id: "torznab", title: "Torrents & Usenet (Prowlarr)", desc: "Searches your torrent and Usenet indexers (through Prowlarr) for whole albums and sends them to your torrent client (qBittorrent, Transmission, Deluge or rTorrent) or Usenet client (SABnzbd or NZBGet), or drops them into a watch folder.", test: Some("torznab"), test_label: None, fields: &[
-        s("torznab_enabled", "Search torrent and Usenet indexers through Prowlarr", "bool").help("Albums only. Prowlarr searches every indexer you added there; torrents go to the torrent client below, Usenet to the Usenet client."),
+        s("torznab_enabled", "Search torrent and Usenet indexers through Prowlarr", "bool").help("Albums only (a song can still be picked from them by hand with Pick). Prowlarr searches every indexer you added there; torrents go to the torrent client below, Usenet to the Usenet client."),
         s("prowlarr_url", "Prowlarr URL", "text").help("Internal address, e.g. http://prowlarr:9696"),
         s("prowlarr_api_key", "Prowlarr API key", "password").help("Prowlarr → Settings → General → API Key"),
         s("torznab_min_seeders", "Minimum seeders", "number"),
@@ -159,7 +159,7 @@ pub const SECTIONS: &[Card] = &[
         s("deluge_password", "Deluge Web UI password", "password").when("torrent_client", &["deluge"]),
         s("deluge_label", "Deluge label", "text").help("Needs the Label plugin; skipped when it is off").when("torrent_client", &["deluge"]),
         s("deluge_download_path", "Torrent download folder (same path in both containers)", "text").full().when("torrent_client", &["deluge"]),
-        s("rtorrent_url", "rTorrent XML-RPC URL", "text").full().help("e.g. http://rutorrent:8080/RPC2 or http://rutorrent/plugins/httprpc/action.php (leave empty to skip torrents)").when("torrent_client", &["rtorrent"]),
+        s("rtorrent_url", "rTorrent XML-RPC URL", "text").full().help("e.g. http://rutorrent:8080/RPC2 or http://rutorrent/plugins/rpc/rpc.php (leave empty to skip torrents)").when("torrent_client", &["rtorrent"]),
         s("rtorrent_user", "rTorrent user", "text").help("Leave empty when the address asks for no login").when("torrent_client", &["rtorrent"]),
         s("rtorrent_password", "rTorrent password", "password").when("torrent_client", &["rtorrent"]),
         s("rtorrent_label", "rTorrent label (shown in ruTorrent)", "text").when("torrent_client", &["rtorrent"]),
@@ -210,7 +210,7 @@ pub const SECTIONS: &[Card] = &[
     Card { id: "spotify", title: "Integrations", desc: "API keys that let users connect their Spotify, Tidal, Last.fm, Discogs and YouTube Music accounts, and power recommendations.", test: Some("spotify"), test_label: Some("Test all"), fields: &[
         s("spotify_client_id", "Spotify Client ID", "text").help("developer.spotify.com – add <Public URL>/api/connections/spotify/callback as redirect URI. Development-mode apps allow 5 users and need a Premium owner (2026 rules); without it, public playlists still import via the embed fallback."),
         s("spotify_client_secret", "Spotify Client secret", "password"),
-        s("tidal_client_id", "Tidal Client ID", "text").help("Only for looking up Tidal albums/songs by ISRC and for the Tidal connection. Get one at developer.tidal.com → Dashboard → Create new app (any name), redirect URI <Public URL>/api/connections/tidal/callback, then copy the Client ID and Client secret here. Downloads from Tidal use your own account instead: Apps & sources → Qobuz / Tidal / Deezer (streamrip) → Sign in to Tidal."),
+        s("tidal_client_id", "Tidal Client ID", "text").help("Only for looking up Tidal albums/songs by ISRC and for the Tidal connection. Get one at developer.tidal.com → Dashboard → Create new app (any name), redirect URI <Public URL>/api/connections/tidal/callback, then copy the Client ID and Client secret here. Downloads from Tidal use your own account instead: Downloads → Qobuz / Tidal / Deezer (streamrip) → Sign in to Tidal."),
         s("tidal_client_secret", "Tidal Client secret", "password"),
         s("lastfm_api_key", "Last.fm API key", "password").help("last.fm/api/account/create (free) – loved tracks, similar artists/songs, genre pages, For you"),
         s("lastfm_shared_secret", "Last.fm shared secret", "password").help("Shown next to the API key. Needed for scrobbling: users sign in with Last.fm on the Connections page."),
@@ -265,11 +265,11 @@ impl Group {
 
 pub const GROUPS: &[Group] = &[
     Group { id: "general", parts: &[("", &["general"])] },
-    Group { id: "apps", parts: &[
-        ("Download sources", &["pipeline", "releases", "streamrip", "torznab", "slskd", "ytdlp", "youtube"]),
-        ("Library & tagging", &["library", "verify"]),
-        ("Services", &["spotify", "media", "roon", "cadenza"]),
-    ] },
+    // Apps & sources until R2, now four pages (the server's settings.toml sections)
+    Group { id: "library", parts: &[("", &["library", "verify"])] },
+    Group { id: "downloads", parts: &[("", &["pipeline", "releases", "streamrip", "torznab", "slskd", "ytdlp", "youtube"])] },
+    Group { id: "integrations", parts: &[("", &["spotify", "media", "roon"])] },
+    Group { id: "processing", parts: &[("", &["cadenza"])] },
     Group { id: "accounts", parts: &[("", &["email", "notify"])] },
     Group { id: "tasks", parts: &[("", &["sync"])] },
 ];
@@ -284,7 +284,7 @@ pub fn group(id: &str) -> Option<&'static Group> {
     GROUPS.iter().find(|g| g.id == id)
 }
 
-/// The group a card belongs to (`torznab` → `apps`).
+/// The group a card belongs to (`torznab` → `downloads`).
 pub fn group_of(card_id: &str) -> Option<&'static Group> {
     GROUPS.iter().find(|g| g.sections().any(|s| s == card_id))
 }
@@ -296,7 +296,7 @@ mod tests {
     #[test]
     fn the_table_matches_the_web() {
         assert_eq!(SECTIONS.len(), 17);
-        assert_eq!(GROUPS.iter().map(|g| g.id).collect::<Vec<_>>(), ["general", "apps", "accounts", "tasks"]);
+        assert_eq!(GROUPS.iter().map(|g| g.id).collect::<Vec<_>>(), ["general", "library", "downloads", "integrations", "processing", "accounts", "tasks"]);
         let general = card("general").unwrap();
         assert_eq!(general.fields[0].key, "app_name");
         assert_eq!(general.fields.last().unwrap().kind, "password");
@@ -307,7 +307,10 @@ mod tests {
         let slskd = card("slskd").unwrap();
         let wg = slskd.fields.iter().find(|f| f.key == "vpn_wireguard_config").unwrap();
         assert!(wg.is_secret() && wg.spans() && wg.kind == "textarea");
-        assert_eq!(group_of("cadenza").unwrap().id, "apps");
+        assert_eq!(group_of("cadenza").unwrap().id, "processing");
+        assert_eq!(group_of("verify").unwrap().id, "library");
+        assert_eq!(group_of("torznab").unwrap().id, "downloads");
+        assert_eq!(group_of("roon").unwrap().id, "integrations");
         assert_eq!(group_of("sync").unwrap().id, "tasks");
         assert!(group_of("nowhere").is_none());
         // every card of every group exists

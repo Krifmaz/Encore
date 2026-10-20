@@ -6,6 +6,7 @@ use encore_library::matcher::{compare, describe};
 use crate::routes::requests::get_owned;
 use encore_requests::create::{quota, NewRequest};
 use encore_http::{deezer, tidal, ytmusic};
+use encore_requests::search_cache;
 use encore_requests::sources::{slskd, streamrip, torznab, ytdlp};
 use crate::state::AppState;
 use encore_db::p;
@@ -55,11 +56,11 @@ fn state(state: &'static str, hint: impl Into<String>, section: &'static str) ->
 /// The settings link for a section, as the web UI addresses it, and its label.
 fn settings_link(section: &str) -> (String, &'static str) {
     let label = match section {
-        "slskd" => "Settings → Soulseek",
-        "torznab" => "Settings → Torrents & Usenet",
-        "streamrip" => "Settings → streamrip",
-        "ytdlp" => "Settings → yt-dlp",
-        "pipeline" => "Settings → Download pipeline",
+        "slskd" => "Settings → Downloads → Soulseek",
+        "torznab" => "Settings → Downloads → Torrents & Usenet",
+        "streamrip" => "Settings → Downloads → Qobuz / Tidal / Deezer (streamrip)",
+        "ytdlp" => "Settings → Downloads → YouTube Music & links",
+        "pipeline" => "Settings → Downloads → Download pipeline",
         _ => "Settings",
     };
     (format!("#/settings?s={section}"), label)
@@ -145,10 +146,30 @@ fn state_error(id: &str, s: &SourceState) -> ApiError {
     err(409, s.hint.clone()).with(json!({ "source": id, "state": s.state, "settings": settings, "settings_label": label }))
 }
 
+/// What someone who isn't an admin sees of a source that can't search: no link to a Server settings page
+/// (only admins can open them, and the page would show them nothing to fix) – "ask an admin" instead. All
+/// the apps leave the link out when `settings` is empty.
+/// `x`: the source's `{settings, settings_label}` (blanked); → the hint.
+fn without_settings_link(hint: &str, x: &mut Value) -> String {
+    x["settings"] = json!("");
+    x["settings_label"] = json!("");
+    if hint.is_empty() { String::new() } else { format!("{hint} – ask an admin") }
+}
+
 /// On the blocking pool: whether streamrip is installed asks its program for its version (a Python start) the
-/// first time after a start, or after the program changed.
+/// first time after a start, or after the program changed. Members get no settings links ([`without_settings_link`]).
 async fn sources(State(st): State<AppState>, User(u): User) -> ApiResult<Json<Value>> {
-    st.blocking(move |st| Ok(Json(json!({ "sources": available(st), "allowed": auth::can(st, &u, "pick") })))).await
+    let admin = encore_config::perms::is_admin(&u);
+    st.blocking(move |st| {
+        let mut list = available(st);
+        if !admin {
+            for s in list.iter_mut() {
+                let hint = s["hint"].as_str().unwrap_or("").to_string();
+                s["hint"] = json!(without_settings_link(&hint, s));
+            }
+        }
+        Ok(Json(json!({ "sources": list, "allowed": auth::can(st, &u, "pick") })))
+    }).await
 }
 
 fn quality(fmt: &str, bitrate: i64, depth: i64, rate: i64) -> String {
@@ -167,18 +188,14 @@ fn score(want_t: &str, want_a: &str, t: &str, a: &str, len: Option<f64>, got: Op
 }
 
 /// The share of `needle`'s words in `hay`, the better of two readings of both: the plain words and the
-/// symbols spelled out (Ke$ha → kesha, P!nk → pink, accents folded: [`torznab::match_words`]).
+/// symbols spelled out (Ke$ha → kesha, P!nk → pink, accents folded, apostrophes dropped:
+/// [`torznab::match_words`]); a name written as one word counts (AC/DC as "ACDC"). 0 for a needle
+/// without words.
 fn contains(hay: &str, needle: &str) -> f64 {
-    let share = |words: fn(&str) -> String| {
-        let n = words(needle);
-        let w: Vec<&str> = n.split_whitespace().collect();
-        if w.is_empty() {
-            return 0.0;
-        }
-        let h = format!(" {} ", words(hay));
-        w.iter().filter(|x| h.contains(&format!(" {x} "))).count() as f64 / w.len() as f64
-    };
-    share(encore_core::text::ascii_words).max(share(torznab::match_words))
+    if encore_core::text::ascii_words(needle).is_empty() && torznab::match_words(needle).is_empty() {
+        return 0.0;
+    }
+    torznab::share(hay, needle)
 }
 
 #[derive(Deserialize, Default)]
@@ -194,13 +211,115 @@ pub struct SearchBody {
     pub mbid: Option<String>,
     pub track_count: Option<usize>,
     pub length: Option<f64>,
+    /// The request the picker was opened for: its kept searches are looked up, and what this search finds
+    /// is kept with it. Ignored when the caller may not see that request.
+    pub request_id: Option<i64>,
+    /// "Search again": what is kept is passed over and the source searched now (`true` or `1`).
+    #[serde(deserialize_with = "flag")]
+    pub fresh: bool,
 }
 
-async fn search_slskd(st: &AppState, b: &SearchBody, q: &str) -> anyhow::Result<Vec<Value>> {
-    // symbols that stand for letters spelled out first (Ke$ha → Kesha, not "Ke ha")
-    let q: String = torznab::fold_symbols(q).chars().map(|c| if c.is_alphanumeric() || c.is_whitespace() || c == '\'' { c } else { ' ' }).collect();
+/// `true`, `1` or "1" (a form's or a query string's way of saying yes).
+fn flag<'de, D: serde::Deserializer<'de>>(d: D) -> Result<bool, D::Error> {
+    Ok(match Value::deserialize(d)? {
+        Value::Bool(b) => b,
+        Value::Number(n) => n.as_f64().is_some_and(|x| x != 0.0),
+        Value::String(s) => matches!(s.trim(), "1" | "true" | "yes"),
+        _ => false,
+    })
+}
+
+/// The search box holds other words than the picker was opened with ("artist title"): typed by hand.
+fn typed(b: &SearchBody) -> bool {
+    b.query.as_deref().map(str::trim).is_some_and(|q| !q.is_empty() && search_cache::words(q) != search_cache::words(&format!("{} {}", b.artist, b.title)))
+}
+
+/// The words Soulseek is asked: typed words as typed (symbols that stand for letters spelled out first,
+/// Ke$ha → Kesha, the other symbols out), else the request's names as the worker searches them
+/// (`slskd::query_text`, without anything in brackets), so the picker finds what the worker found.
+fn slskd_text(b: &SearchBody, q: &str) -> String {
+    let typed_words = || torznab::fold_symbols(q).chars().map(|c| if c.is_alphanumeric() || c.is_whitespace() || c == '\'' { c } else { ' ' }).collect::<String>()
+        .split_whitespace().collect::<Vec<_>>().join(" ");
+    if typed(b) {
+        return typed_words();
+    }
+    let t = slskd::query_text(&[&b.artist, &b.title]);
+    if t.is_empty() { typed_words() } else { t }
+}
+
+/// The request the picker was opened for, as far as its kept searches go.
+#[derive(Debug, Clone, Default)]
+pub struct ForRequest {
+    pub id: i64,
+    /// kept searches written for this id before then belong to an earlier request of that id (a restored
+    /// database)
+    pub created_at: f64,
+    pub kind: String,
+    pub artist: String,
+    pub title: String,
+    pub album: String,
+}
+
+impl ForRequest {
+    /// From a request row (`get_owned`).
+    pub fn of(r: &Value) -> ForRequest {
+        let s = |k: &str| r[k].as_str().unwrap_or("").to_string();
+        ForRequest { id: r["id"].as_i64().unwrap_or(0), created_at: r["created_at"].as_f64().unwrap_or(0.0), kind: s("kind"), artist: s("artist"), title: s("title"), album: s("album") }
+    }
+
+    /// The keys of the request's own attempts' searches (`kind`: slskd or torznab).
+    fn keys(&self, kind: &str) -> Vec<String> {
+        search_cache::worker_texts(&self.kind, &self.artist, &self.title, &self.album).iter()
+            .map(|t| if kind == "slskd" { search_cache::slskd_key(t) } else { search_cache::torznab_key(t, &["3000"]) }).collect()
+    }
+}
+
+/// One source's answer: its rows, and where they came from.
+#[derive(Debug, Default)]
+pub struct Answer {
+    pub items: Vec<Value>,
+    /// when the kept search the rows come from ended (unix seconds); None for a live search
+    pub cached_at: Option<f64>,
+    /// the words the rows were searched with (a kept search may have other words than the box)
+    pub query: String,
+    /// "Search again" would run now (false while Soulseek isn't connected)
+    pub can_search: bool,
+    /// why it would not: the source's hint ("Soulseek isn't connected – next attempt at 14:20")
+    pub notice: Option<String>,
+}
+
+impl Answer {
+    fn live(items: Vec<Value>, query: String) -> Answer {
+        Answer { items, cached_at: None, query, can_search: true, notice: None }
+    }
+
+    /// `{items, from: cache|live, cached_at, found: "Found at 14:02", query, can_search, notice}`.
+    pub fn json(&self) -> Value {
+        json!({ "items": self.items, "from": if self.cached_at.is_some() { "cache" } else { "live" },
+            "cached_at": self.cached_at.map(|t| t.round() as i64),
+            "found": self.cached_at.map(|t| search_cache::found_words(t, encore_core::time::now())),
+            "query": self.query, "can_search": self.can_search, "notice": self.notice })
+    }
+}
+
+/// What is kept for the picker's words (`key`), else – when that found nothing or nothing is kept – the
+/// newest answer with results of the request it was opened for (`mine`: id, created_at, the keys of its
+/// own attempts' searches), e.g. the worker's album search that fell back to the album's name alone.
+/// On the blocking pool.
+fn kept_for(st: &AppState, kind: &str, key: &str, mine: Option<(i64, f64, Vec<String>)>) -> Option<search_cache::Found> {
+    let (cache, dir, now) = (&st.requests.search_cache, st.data_dir(), encore_core::time::now());
+    let own = cache.get(dir, key, now);
+    if own.as_ref().is_some_and(|f| !f.results.is_empty()) {
+        return own;
+    }
+    mine.and_then(|(id, since, keys)| cache.get_for_request(dir, kind, Some(id), &keys, since, now)).or(own)
+}
+
+/// Picker rows from slskd's answers (live, or kept): per folder for an album, per file for a song, scored
+/// against what the picker was opened for, the best 150.
+fn slskd_rows(b: &SearchBody, responses: &[Value]) -> Vec<Value> {
     let mut out = vec![];
-    for resp in slskd::search_now(st, &q).await? {
+    for resp in responses {
         let user = resp["username"].as_str().unwrap_or("").to_string();
         let (free, queue, speed) = (resp["hasFreeUploadSlot"].as_bool().unwrap_or(false), resp["queueLength"].as_f64().unwrap_or(0.0), resp["uploadSpeed"].as_f64().unwrap_or(0.0));
         let audio: Vec<Value> = resp["files"].as_array().cloned().unwrap_or_default().into_iter().filter(|f| encore_core::audio::DOWNLOAD_EXTS.contains(&slskd::ext(f["filename"].as_str().unwrap_or("")).as_str())).collect();
@@ -245,14 +364,56 @@ async fn search_slskd(st: &AppState, b: &SearchBody, q: &str) -> anyhow::Result<
     }
     out.sort_by(|a, b| b["score"].as_f64().partial_cmp(&a["score"].as_f64()).unwrap_or(std::cmp::Ordering::Equal));
     out.truncate(150);
-    Ok(out)
+    out
+}
+
+/// Soulseek for the picker. Unless it searches again (`fresh`), a kept search answers at once: the one for
+/// these words, else (opened for a request, nothing typed) the newest with results the request's own
+/// attempts or pickers made – also while Soulseek isn't connected (the rows can still be picked: the
+/// download waits for Soulseek), then without "Search again". Otherwise it searches through the gate (one
+/// search at a time, 3 s apart, never while disconnected) as a task of its own: a picker closed meanwhile
+/// doesn't stop it, it is kept, and a second picker asking the same words waits for the same search.
+async fn slskd_answer(st: &AppState, b: &SearchBody, q: &str, s: &SourceState, req: Option<&ForRequest>) -> ApiResult<Answer> {
+    let ready = s.state == "ready";
+    if !ready && (s.state != "not_connected" || b.fresh) {
+        return Err(state_error("slskd", s));
+    }
+    let text = slskd_text(b, q);
+    if text.is_empty() {
+        return Err(err(400, "Type something to search for"));
+    }
+    let key = search_cache::slskd_key(&text);
+    if !b.fresh {
+        let mine = req.filter(|_| !typed(b)).map(|r| (r.id, r.created_at, r.keys("slskd")));
+        let k = key.clone();
+        let kept = st.blocking(move |st| Ok(kept_for(st, "slskd", &k, mine))).await?;
+        if let Some(f) = kept {
+            // the words after "Found at 14:02 for …": the box's own when the kept search is the one they make
+            // (brackets and symbols aside), the other search's when it came from the request's own attempts
+            let query = if f.key == key { q.to_string() } else { f.query };
+            return Ok(Answer { items: slskd_rows(b, &f.results), cached_at: Some(f.searched_at), query, can_search: ready, notice: (!ready).then(|| s.hint.clone()) });
+        }
+    }
+    if !ready {
+        return Err(state_error("slskd", s));
+    }
+    let rid = req.map(|r| r.id);
+    let (st2, text2, key2) = (st.clone(), text.clone(), key.clone());
+    let found = st.requests.search_cache.single(&key, async move {
+        match slskd::search_kept(&st2, &text2, slskd::Who::Person, rid, |_| {}).await {
+            Ok(results) => Ok(search_cache::Found { key: key2, query: text2, searched_at: encore_core::time::now(), request_id: rid, results }),
+            Err(e) => Err(search_cache::Failure::of(&e)),
+        }
+    }).await.map_err(|f| search_error(st, "slskd", f.into_error()))?;
+    Ok(Answer::live(slskd_rows(b, &found.results), found.query.clone()))
 }
 
 /// One indexer result as a picker row. `album` marks a release of the album the song is on: only the
-/// song's file downloads from it.
-fn torznab_row(r: &Value, sc: f64, album: Option<(&str, &str, Option<u32>)>) -> Value {
+/// song's file downloads from it. Prowlarr's API key in the release's link is sealed
+/// ([`torznab::seal_key`]): the worker puts it back when the pick is downloaded.
+fn torznab_row(st: &AppState, r: &Value, sc: f64, album: Option<(&str, &str, Option<u32>)>) -> Value {
     let proto = r["protocol"].as_str().unwrap_or("torrent").to_string();
-    let url = r["magnetUrl"].as_str().filter(|m| !m.is_empty()).or(r["downloadUrl"].as_str()).unwrap_or("").to_string();
+    let url = torznab::seal_key(st, r["magnetUrl"].as_str().filter(|m| !m.is_empty()).or(r["downloadUrl"].as_str()).unwrap_or(""));
     let title = r["title"].as_str().unwrap_or("").to_string();
     let lossless = regex::Regex::new(r"(?i)\b(flac|lossless|alac|24[\s-]?bit|hi-?res)\b").unwrap().is_match(&title);
     let seeds = r["seeders"].as_i64();
@@ -293,31 +454,95 @@ fn lossless_re() -> regex::Regex {
     regex::Regex::new(r"(?i)\b(flac|lossless|alac|24[\s-]?bit|hi-?res)\b").unwrap()
 }
 
+/// The picker's Prowlarr searches: answered from what is kept unless it searches again (`fresh`), else
+/// searched and kept (Prowlarr asks every indexer, which can take tens of seconds, and many indexers allow
+/// only so many searches a day). Notes the oldest kept answer used, for the answer's "Found at" line.
+struct Prowlarr<'a> {
+    st: &'a AppState,
+    fresh: bool,
+    /// kept with what this search finds
+    request_id: Option<i64>,
+    /// opened for a request with nothing typed: (id, created_at, the keys of the request's own album
+    /// searches), looked up when these words have nothing kept
+    mine: Option<(i64, f64, Vec<String>)>,
+    /// (when, words) of the oldest kept answer used; the words only when it is another search than the one
+    /// asked for (the request's own album search under other words)
+    kept: std::sync::Mutex<Option<(f64, Option<String>)>>,
+}
+
+impl<'a> Prowlarr<'a> {
+    fn of(st: &'a AppState, b: &SearchBody, req: Option<&ForRequest>) -> Prowlarr<'a> {
+        let mine = req.filter(|_| !typed(b)).map(|r| (r.id, r.created_at, r.keys("torznab")));
+        Prowlarr { st, fresh: b.fresh, request_id: req.map(|r| r.id), mine, kept: Default::default() }
+    }
+
+    /// Releases for `q` in `cats`; `own`: the album search the request's own attempts make too.
+    async fn search(&self, q: &str, cats: &[&str], own: bool) -> anyhow::Result<Vec<Value>> {
+        if !self.fresh {
+            let key = search_cache::torznab_key(q, cats);
+            let mine = self.mine.clone().filter(|_| own);
+            let k = key.clone();
+            let found = self.st.blocking(move |st| Ok(kept_for(st, "torznab", &k, mine))).await.ok().flatten();
+            if let Some(f) = found {
+                let mut kept = self.kept.lock().unwrap_or_else(|e| e.into_inner());
+                if kept.as_ref().is_none_or(|(at, _)| f.searched_at < *at) {
+                    *kept = Some((f.searched_at, (f.key != key).then_some(f.query)));
+                }
+                return Ok(f.results);
+            }
+        }
+        let res = torznab::search_in(self.st, q, cats).await?;
+        search_cache::keep_releases(self.st, q, cats, self.request_id, &res).await;
+        Ok(res)
+    }
+}
+
+/// The indexers' rows for `b` (kept answers as the body says), without a request: the tests' way in.
+#[cfg(test)]
 async fn search_torznab(st: &AppState, b: &SearchBody, q: &str) -> anyhow::Result<Vec<Value>> {
+    search_torznab_in(&Prowlarr::of(st, b, None), b, q).await
+}
+
+async fn search_torznab_in(p: &Prowlarr<'_>, b: &SearchBody, q: &str) -> anyhow::Result<Vec<Value>> {
+    let st = p.st;
     if b.kind == "track" {
-        return search_torznab_song(st, b, q).await;
+        return search_torznab_song(p, b, q).await;
     }
     let mut out = vec![];
     let lossless_re = lossless_re();
-    for r in torznab::search(st, q).await? {
+    for r in p.search(q, &["3000"], true).await? {
         if !torznab_usable(st, &r) {
             continue;
         }
         let title = r["title"].as_str().unwrap_or("");
         let lossless = lossless_re.is_match(title);
-        let sc = contains(title, &b.title) * 40.0 + contains(title, &b.artist) * 15.0 + if lossless { 30.0 } else { 0.0 } + (r["seeders"].as_i64().unwrap_or(0) as f64 + 1.0).log2().min(10.0);
-        out.push(torznab_row(&r, sc, None));
+        // the album's title without its edition counts: releases are named "Rodeo", not "Rodeo (Expanded Edition)"
+        let sc = torznab::album_share(title, &b.title) * 40.0 + contains(title, &b.artist) * 15.0 + if lossless { 30.0 } else { 0.0 } + (r["seeders"].as_i64().unwrap_or(0) as f64 + 1.0).log2().min(10.0);
+        out.push(torznab_row(st, &r, sc, None));
     }
     by_score(&mut out);
     Ok(out)
 }
 
 /// The album a song is on, and its track number when known: what the client sent, else MusicBrainz
-/// (the song's first studio album or EP), else Deezer.
+/// (the song's first studio album or EP), else Deezer – looked up once a day per song (kept in memory).
 async fn song_album(st: &AppState, b: &SearchBody) -> Option<(String, Option<u32>)> {
     if let Some(a) = b.album.as_deref().map(str::trim).filter(|a| !a.is_empty() && !a.eq_ignore_ascii_case(&b.title)) {
         return Some((a.to_string(), None));
     }
+    let key = format!("picker:song_album:{}|{}|{}", b.artist.to_lowercase(), b.title.to_lowercase(), b.mbid.as_deref().unwrap_or(""));
+    if let Some(v) = st.cache_get(&key) {
+        return serde_json::from_value(v).ok();
+    }
+    let found = song_album_lookup(st, b).await;
+    if let Some(f) = &found {
+        st.cache_put(&key, json!(f), 86_400);
+    }
+    found
+}
+
+/// [`song_album`] from MusicBrainz, else Deezer.
+async fn song_album_lookup(st: &AppState, b: &SearchBody) -> Option<(String, Option<u32>)> {
     let t = std::time::Duration::from_secs(4);
     if let Some(id) = b.mbid.as_deref().filter(|m| !m.is_empty()) {
         if let Ok(Ok(Some(g))) = tokio::time::timeout(t, encore_http::mb::album_for_recording(st, id, true)).await {
@@ -345,11 +570,13 @@ async fn song_album(st: &AppState, b: &SearchBody) -> Option<(String, Option<u32
 
 /// A song: single-track releases of it (searched in the audio, MP3 and lossless categories), plus
 /// releases of the album it is on, from which only the song's file downloads.
-async fn search_torznab_song(st: &AppState, b: &SearchBody, q: &str) -> anyhow::Result<Vec<Value>> {
-    let custom = b.query.as_deref().map(str::trim).is_some_and(|x| !x.is_empty() && x != [b.artist.as_str(), b.title.as_str()].join(" ").trim());
-    let (songs, album) = tokio::join!(torznab::search_in(st, q, &torznab::SONG_CATS), async {
+async fn search_torznab_song(p: &Prowlarr<'_>, b: &SearchBody, q: &str) -> anyhow::Result<Vec<Value>> {
+    let st = p.st;
+    let custom = typed(b);
+    let (songs, album) = tokio::join!(p.search(q, &torznab::SONG_CATS, false), async {
         let (name, no) = song_album(st, b).await?;
-        let res = torznab::search(st, &[b.artist.as_str(), name.as_str()].join(" ")).await;
+        // the album's names as the worker searches them: "Travis Scott Rodeo", not "… Rodeo (Expanded Edition)"
+        let res = p.search(&slskd::query_text(&[&b.artist, &name]), &["3000"], false).await;
         Some((name, no, res))
     });
     let mut out = vec![];
@@ -369,7 +596,7 @@ async fn search_torznab_song(st: &AppState, b: &SearchBody, q: &str) -> anyhow::
                     None => continue,
                 };
                 seen.insert(r["guid"].as_str().unwrap_or(title).to_string());
-                out.push(torznab_row(&r, sc, None));
+                out.push(torznab_row(st, &r, sc, None));
             }
             None
         }
@@ -382,14 +609,14 @@ async fn search_torznab_song(st: &AppState, b: &SearchBody, q: &str) -> anyhow::
             if !torznab_usable(st, &r) || !seen.insert(r["guid"].as_str().unwrap_or(title).to_string()) {
                 continue;
             }
-            let (a, ar) = (contains(title, &name), contains(title, &b.artist));
+            let (a, ar) = (torznab::album_share(title, &name), contains(title, &b.artist));
             if a < 0.8 || ar < 0.5 {
                 continue;
             }
             let lossless = lossless_re.is_match(title);
             // below the song's own releases of the same quality: the whole album has to arrive first
             let sc = a * 30.0 + ar * 15.0 + if lossless { 30.0 } else { 0.0 } + (r["seeders"].as_i64().unwrap_or(0) as f64 + 1.0).log2().min(10.0) - 10.0;
-            out.push(torznab_row(&r, sc, Some((&name, &b.title, no))));
+            out.push(torznab_row(st, &r, sc, Some((&name, &b.title, no))));
         }
     }
     if out.is_empty() {
@@ -482,7 +709,7 @@ async fn tidal_read(req: reqwest::RequestBuilder) -> anyhow::Result<Value> {
     let r = req.send().await?;
     let code = r.status().as_u16();
     if code == 401 || code == 403 {
-        anyhow::bail!("Tidal rejected the sign-in token – sign in again in Settings → streamrip");
+        anyhow::bail!("Tidal rejected the sign-in token – sign in again in Settings → Downloads → Qobuz / Tidal / Deezer (streamrip)");
     }
     tidal::read(r).await
 }
@@ -629,8 +856,13 @@ async fn search_qobuz(st: &AppState, b: &SearchBody, q: &str) -> anyhow::Result<
 
 /// One source's search. A source that is not ready answers 409 with its state and settings link (see
 /// `state_error`), as does Soulseek when its engine runs without a server session, so the client shows the
-/// hint under that tab alone.
-pub async fn run_search(st: &AppState, b: &SearchBody) -> ApiResult<Vec<Value>> {
+/// hint under that tab alone – unless Soulseek has a kept search to show (`slskd_answer`).
+pub async fn run_search(st: &AppState, b: &SearchBody) -> ApiResult<Answer> {
+    run_search_for(st, b, None).await
+}
+
+/// [`run_search`] for the picker opened for request `req` (the caller may see it).
+pub async fn run_search_for(st: &AppState, b: &SearchBody, req: Option<&ForRequest>) -> ApiResult<Answer> {
     if b.kind != "album" && b.kind != "track" {
         return Err(err(400, "Manual search works for albums and songs"));
     }
@@ -639,36 +871,66 @@ pub async fn run_search(st: &AppState, b: &SearchBody) -> ApiResult<Vec<Value>> 
     }
     let source = b.source.clone();
     let s = st.blocking(move |st| Ok(source_state(st, &source))).await?;
+    let q = b.query.clone().map(|q| q.trim().to_string()).filter(|q| !q.is_empty())
+        .unwrap_or_else(|| [b.artist.as_str(), b.title.as_str()].iter().filter(|s| !s.is_empty()).cloned().collect::<Vec<_>>().join(" "));
+    if b.source == "slskd" {
+        return slskd_answer(st, b, &q, &s, req).await;
+    }
     if s.state != "ready" {
         return Err(state_error(&b.source, &s));
     }
-    let q = b.query.clone().map(|q| q.trim().to_string()).filter(|q| !q.is_empty())
-        .unwrap_or_else(|| [b.artist.as_str(), b.title.as_str()].iter().filter(|s| !s.is_empty()).cloned().collect::<Vec<_>>().join(" "));
+    if b.source == "torznab" {
+        // the names the picker was opened with, as the worker searches them: bracketed parts ("(feat. …)",
+        // "(Expanded Edition)") and symbols out – indexers want every word of the search in a release's
+        // name, and releases are named without them. Words typed by hand go as typed.
+        let boxed = q.clone();
+        let q = if typed(b) { q } else { Some(slskd::query_text(&[&b.artist, &b.title])).filter(|t| !t.is_empty()).unwrap_or(q) };
+        let p = Prowlarr::of(st, b, req);
+        let items = search_torznab_in(&p, b, &q).await.map_err(|e| search_error(st, &b.source, e))?;
+        let kept = p.kept.into_inner().unwrap_or_else(|e| e.into_inner());
+        // kept: the box's words, unless the rows came from another search (as for Soulseek); live: the words sent
+        let query = match &kept { Some((_, Some(other))) => other.clone(), Some(_) => boxed, None => q };
+        return Ok(Answer { items, cached_at: kept.map(|k| k.0), query, can_search: true, notice: None });
+    }
+    // the streaming catalogues answer in a second or two: always live
     let res = match b.source.as_str() {
-        "slskd" => search_slskd(st, b, &q).await,
-        "torznab" => search_torznab(st, b, &q).await,
         "qobuz" => search_qobuz(st, b, &q).await,
         "tidal" => search_tidal(st, b, &q).await,
         "deezer" => search_deezer(st, b, &q).await,
         _ => search_ytmusic(st, b, &q).await,
     };
-    res.map_err(|e| {
-        let msg = e.to_string();
-        if b.source == "slskd" && (e.is::<slskd::NotConnected>() || slskd::not_ready(st).is_some()) {
-            return state_error("slskd", &state("not_connected", msg, "slskd"));
-        }
-        if b.source == "slskd" && e.is::<slskd::Busy>() {
-            return err(429, msg); // another search held the turn for 30 s, or searches are rate limited
-        }
-        err(502, format!("{} search failed: {}", source_name(&b.source), msg.chars().take(160).collect::<String>()))
-    })
+    res.map(|items| Answer::live(items, q)).map_err(|e| search_error(st, &b.source, e))
 }
 
+/// A failed search as the answer: Soulseek not connected is 409 with its state (the client shows the hint
+/// under its tab), Soulseek busy 429, anything else 502 with the source's words.
+fn search_error(st: &AppState, source: &str, e: anyhow::Error) -> ApiError {
+    let msg = e.to_string();
+    if source == "slskd" && (e.is::<slskd::NotConnected>() || slskd::not_ready(st).is_some()) {
+        return state_error("slskd", &state("not_connected", msg, "slskd"));
+    }
+    if source == "slskd" && e.is::<slskd::Busy>() {
+        return err(429, msg); // another search held the turn for 30 s, or searches are rate limited
+    }
+    err(502, format!("{} search failed: {}", source_name(source), msg.chars().take(160).collect::<String>()))
+}
+
+/// POST /api/picker/search: one source's rows, `{items, from, cached_at, found, query, can_search,
+/// notice}` (see [`Answer::json`]).
 async fn search(State(st): State<AppState>, User(u): User, Json(b): Json<SearchBody>) -> ApiResult<Json<Value>> {
     if !auth::can(&st, &u, "pick") {
         return Err(err(403, "Ask an admin for permission to pick downloads"));
     }
-    run_search(&st, &b).await.map(|v| Json(json!(v)))
+    // the request the picker was opened for, when this person may see it (else as if none was sent)
+    let req = b.request_id.and_then(|id| get_owned(&st, id, &u).ok()).map(|r| ForRequest::of(&r));
+    let admin = encore_config::perms::is_admin(&u);
+    run_search_for(&st, &b, req.as_ref()).await.map(|a| Json(a.json())).map_err(|mut e| {
+        // a source that can't search (409 with its settings link): members get "ask an admin" instead
+        if let Some(x) = e.extra.as_mut().filter(|x| !admin && x["settings"].is_string()) {
+            e.detail = without_settings_link(&e.detail, x);
+        }
+        e
+    })
 }
 
 #[derive(Deserialize)]
@@ -678,6 +940,10 @@ struct PickBody {
     title: Option<String>,
     request_id: Option<i64>,
     request: Option<NewRequest>,
+    /// "Don't check the audio": the pick is imported without the audio check (and its songs confirmed by
+    /// the caller); off, a pick the check turns away is kept for Keep anyway
+    #[serde(default)]
+    no_check: bool,
 }
 
 /// Create a request locked to the chosen result. An existing request's row is reused (stopped first when
@@ -685,6 +951,11 @@ struct PickBody {
 async fn pick(State(st): State<AppState>, User(u): User, Json(mut b): Json<PickBody>) -> ApiResult<Json<Value>> {
     if !auth::can(&st, &u, "pick") {
         return Err(err(403, "Ask an admin for permission to pick downloads"));
+    }
+    // "Don't check the audio" is Keep anyway's and Download anyway's power: admins, and members with Fix
+    // their own downloads
+    if b.no_check && !auth::can(&st, &u, "fix") {
+        return Err(err(403, "Ask an admin to pick without the audio check"));
     }
     if b.source == "link" {
         let url = b.payload["url"].as_str().unwrap_or("").trim().to_string();
@@ -701,6 +972,9 @@ async fn pick(State(st): State<AppState>, User(u): User, Json(mut b): Json<PickB
             b.payload = json!({ "url": format!("https://music.youtube.com/playlist?list={pl}"), "title": title });
         }
     }
+    // a running request's place in the queue stays taken from its stop until the pick is written: a step
+    // started in between would act on the download stopped here
+    let mut hold: Option<worker::Hold> = None;
     let req = if let Some(rid) = b.request_id {
         let old = get_owned(&st, rid, &u)?;
         let s = |k: &str| old[k].as_str().map(String::from);
@@ -713,7 +987,7 @@ async fn pick(State(st): State<AppState>, User(u): User, Json(mut b): Json<PickB
             return Err(err(409, "This request has downloaded files waiting to be imported – Import again or cancel it first"));
         }
         if worker::ACTIVE.contains(&status) {
-            worker::cancel(&st, rid).await;
+            hold = Some(worker::cancel_holding(&st, rid).await);
         }
         req
     } else if let Some(r) = b.request.clone() {
@@ -723,7 +997,9 @@ async fn pick(State(st): State<AppState>, User(u): User, Json(mut b): Json<PickB
         return Err(err(400, "Nothing to download"));
     };
     let label = b.title.clone().or(b.payload["title"].as_str().map(String::from)).unwrap_or_default();
-    let (id, status) = create_pick_for(&st, &u, &req, &b.source, b.payload, &label, b.request_id)?;
+    let skip = b.no_check.then(|| json!({ "by": u.s("username"), "why": "pick", "at": encore_db::now() }));
+    let (id, status) = create_pick_checked(&st, &u, &req, &b.source, b.payload, &label, b.request_id, skip)?;
+    drop(hold);
     Ok(Json(json!({ "id": id, "status": status })))
 }
 
@@ -735,16 +1011,30 @@ pub fn create_pick(st: &AppState, u: &encore_db::Row, req: &NewRequest, source: 
 
 /// `create_pick` for an existing request (`reuse`): its row is reset and locked to the pick.
 pub fn create_pick_for(st: &AppState, u: &encore_db::Row, req: &NewRequest, source: &str, payload: Value, label: &str, reuse: Option<i64>) -> ApiResult<(i64, String)> {
+    create_pick_checked(st, u, req, source, payload, label, reuse, None)
+}
+
+/// `create_pick_for` with the audio check off for the pick when `skip_check` ({by, why: "pick", at}) is
+/// given: the picker's "Don't check the audio".
+#[allow(clippy::too_many_arguments)]
+fn create_pick_checked(st: &AppState, u: &encore_db::Row, req: &NewRequest, source: &str, payload: Value, label: &str, reuse: Option<i64>,
+                       skip_check: Option<Value>) -> ApiResult<(i64, String)> {
     if req.kind != "album" && req.kind != "track" {
         return Err(err(400, "Manual picks work for albums and songs"));
     }
-    let id = encore_requests::create::create_or_reuse(st, u, req, None, Some(json!({ "pick": { "source": source, "payload": payload, "title": label } })), reuse)?;
+    let unchecked = skip_check.is_some();
+    let mut extra = json!({ "pick": { "source": source, "payload": payload, "title": label } });
+    if let Some(s) = skip_check {
+        extra["skip_check"] = s;
+    }
+    let id = encore_requests::create::create_or_reuse(st, u, req, None, Some(extra), reuse)?;
     let status = st.db.one("SELECT status FROM requests WHERE id=?", p![id])?.map(|r| r.s("status")).unwrap_or_default();
     if status == "queued" {
         let msg: String = if label.is_empty() { "Manual pick".into() } else { format!("Manual pick: {label}").chars().take(200).collect() };
         st.db.execute("UPDATE requests SET message=? WHERE id=?", p![msg, id])?;
     }
-    st.db.log("info", &format!("{} manually picked {source} result for {}: {label}", u.s("username"), req.title.clone().or(req.album.clone()).unwrap_or_default()));
+    st.db.log("info", &format!("{} manually picked {source} result for {}: {label}{}", u.s("username"), req.title.clone().or(req.album.clone()).unwrap_or_default(),
+        if unchecked { " (without the audio check)" } else { "" }));
     Ok((id, status))
 }
 

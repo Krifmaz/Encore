@@ -67,6 +67,9 @@ pub enum Message {
     CopyToast(u64),
     /// The details dialog (an error or a request in full, with Copy).
     Details(details::Msg),
+    /// The details dialog's action was sent (Keep anyway, Download anyway): its toast when it
+    /// worked.
+    DetailsActed(String, Result<Value, ApiError>),
     /// A copy was checked against the clipboard: whether it took.
     Copied(bool),
     WindowOpened(window::Id),
@@ -511,7 +514,7 @@ impl App {
                 Effect::Enqueue(t) => tasks.push(self.queue(t, false)),
                 Effect::Clipboard(s) => tasks.push(iced::clipboard::write(s)),
                 Effect::CopyText(s) => tasks.push(Self::copy_checked(s)),
-                Effect::Details { title, text } => self.details = Some(Details::new(title, text)),
+                Effect::Details { title, text, lead, act } => self.details = Some(Details::new(title, text, lead, act)),
                 Effect::OpenUrl(u) => {
                     if let Err(e) = open::that_detached(&u) {
                         self.toast(format!("Could not open the browser: {e}"), ToastKind::Err);
@@ -642,8 +645,30 @@ impl App {
                     return Task::none();
                 }
                 match self.details.as_mut().and_then(|d| d.update(m)) {
-                    Some(text) => Self::copy_checked(text),
+                    Some(details::Out::Copy(text)) => Self::copy_checked(text),
+                    // the dialog closes; the page's list reloads once the server answered
+                    Some(details::Out::Act(a)) => {
+                        self.details = None;
+                        let api = self.api.clone();
+                        let done = a.done.clone();
+                        Task::perform(async move { api.post(&a.path, a.body).await }, move |r| {
+                            Message::DetailsActed(done.clone(), r)
+                        })
+                    }
                     None => Task::none(),
+                }
+            }
+            Message::DetailsActed(done, r) => {
+                match r {
+                    Ok(_) => self.toast(done, ToastKind::Ok),
+                    Err(e) => self.toast(e.message, ToastKind::Err),
+                }
+                // the list shows the change at once (or, after an error, what the server offers now)
+                let reload = crate::widgets::request_list::Msg::Reload;
+                match self.page {
+                    Page::Requests => self.update(Message::Requests(pages::requests::Message::List(reload))),
+                    Page::Download => self.update(Message::Download(pages::download::Message::List(reload))),
+                    _ => Task::none(),
                 }
             }
             Message::Copied(ok) => {

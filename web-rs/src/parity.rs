@@ -26,6 +26,11 @@ const LEGACY_ONLY: &[(&str, &str)] = &[
     ("Saving song(s) to this device…", "the Tauri Android app's Save for offline, gone in 0.29"),
     // R1 (the owner, Oct 19): streamrip and links are staged in that folder too
     ("Staging path for yt-dlp downloads", "renamed \"Staging folder for downloads\" in the server's settings table (0.29, R1): streamrip and links use the folder too"),
+    // R2 (the owner, Oct 19): Apps & sources became four Server pages, so the page and its part headings are gone
+    ("Apps & sources", "the page became Library, Downloads, Integrations and Server processing in R2 (`apps` links open Downloads)"),
+    ("Download sources", "a part heading of Apps & sources; its cards are the Downloads page since R2"),
+    ("Services", "a part heading of Apps & sources; its cards are the Integrations and Server processing pages since R2"),
+    ("Add a free AcoustID API key in Settings → Verification first", "there is no Verification page: the key is in Settings → Library → Verification & duplicates since R2, which the toast now names"),
 ];
 
 /// Whole files of the JavaScript UI whose page web-rs no longer has, as (file, why). Like [`LEGACY_ONLY`], an

@@ -139,7 +139,7 @@ fn schema_answer_has_every_field_with_its_attributes() {
     let cfg = Config::load_with(Db::open(&d).unwrap(), |name| (name == "NTFY_URL").then(|| "https://ntfy.example/topic".to_string())).unwrap();
     let v = cfg.schema();
     let ids: Vec<&str> = v["sections"].as_array().unwrap().iter().map(|s| s["id"].as_str().unwrap()).collect();
-    assert_eq!(ids, ["general", "apps", "accounts", "autodownload", "contribute", "blocked", "tasks"]);
+    assert_eq!(ids, ["general", "library", "downloads", "integrations", "processing", "accounts", "autodownload", "contribute", "blocked", "tasks"]);
     let attrs = ["key", "label", "help", "type", "options", "when", "secret", "env", "env_locked", "default", "unit", "min", "max", "step", "full", "advanced"];
     let mut n = 0;
     let mut by_key: HashMap<String, Value> = HashMap::new();
@@ -171,6 +171,51 @@ fn schema_answer_has_every_field_with_its_attributes() {
     assert_eq!(by_key["share_preview"]["options"][0], json!({ "value": "small", "label": "Small card (small cover)" }));
     assert_eq!(by_key["streamrip_quality"]["default"], json!(2));
     let _ = std::fs::remove_dir_all(d);
+}
+
+/// R2 (the owner, Oct 19): Apps & sources is four pages, and every link to the old page, its aliases and its
+/// cards still opens the page that holds the card.
+#[test]
+fn apps_and_sources_is_four_pages_and_old_links_still_open() {
+    let page_of = |name: &str| {
+        SCHEMA.iter().find(|s| s.id == name || s.aliases.contains(&name) || s.groups.iter().any(|g| g.id == name)).map(|s| s.id)
+    };
+    let cards = |id: &str| SCHEMA.iter().find(|s| s.id == id).unwrap().groups.iter().map(|g| g.id).collect::<Vec<_>>();
+    assert_eq!(cards("library"), ["library", "verify"]);
+    assert_eq!(cards("downloads"), ["pipeline", "releases", "streamrip", "torznab", "slskd", "ytdlp", "youtube"]);
+    assert_eq!(cards("integrations"), ["spotify", "media", "roon"]);
+    assert_eq!(cards("processing"), ["cadenza"]);
+    let titles: Vec<&str> = SCHEMA.iter().map(|s| s.title).collect();
+    assert_eq!(titles[..5], ["General", "Library", "Downloads", "Integrations", "Server processing"]);
+    for (link, page) in [
+        ("apps", "downloads"), ("downloads", "downloads"), ("tagging", "library"), ("services", "integrations"),
+        ("pipeline", "downloads"), ("releases", "downloads"), ("streamrip", "downloads"), ("torznab", "downloads"),
+        ("slskd", "downloads"), ("ytdlp", "downloads"), ("youtube", "downloads"), ("library", "library"),
+        ("verify", "library"), ("spotify", "integrations"), ("media", "integrations"), ("roon", "integrations"),
+        ("cadenza", "processing"), ("general", "general"), ("email", "accounts"), ("sync", "tasks"),
+    ] {
+        assert_eq!(page_of(link), Some(page), "?s={link}");
+    }
+    // no page has headings over its cards any more (each page is one subject)
+    assert!(SCHEMA.iter().flat_map(|s| s.groups.iter()).all(|g| g.part.is_empty()));
+}
+
+/// web-rs draws its settings tests from a saved schema answer (web-rs/src/settings/fixtures/settings-schema.json,
+/// from a server with ENCORE_LIBRARY_PATH set): it has to be this table's. `ENCORE_WRITE_SETTINGS_SCHEMA=1 cargo test
+/// -p encore-config schema_fixture` writes it again. A checkout without web-rs skips the comparison.
+#[test]
+fn the_web_schema_fixture_is_this_table() {
+    let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../web-rs/src/settings/fixtures/settings-schema.json");
+    let d = encore_core::tmp::dir("settings-fixture");
+    let cfg = Config::load_with(Db::open(&d).unwrap(), |name| (name == "ENCORE_LIBRARY_PATH").then(|| "/music".to_string())).unwrap();
+    let schema = cfg.schema();
+    let _ = std::fs::remove_dir_all(d);
+    if std::env::var_os("ENCORE_WRITE_SETTINGS_SCHEMA").is_some() {
+        std::fs::write(&path, serde_json::to_string_pretty(&schema).unwrap() + "\n").expect("write the schema fixture");
+    }
+    let Ok(saved) = std::fs::read_to_string(&path) else { return };
+    let saved: Value = serde_json::from_str(&saved).expect("the fixture is JSON");
+    assert!(saved == schema, "{} is not this table's schema: write it again (see above)", path.display());
 }
 
 /// Every key the server's code reads through `cfg.str("…")` and its siblings is in the table: a misspelt key

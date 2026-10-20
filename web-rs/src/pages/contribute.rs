@@ -96,7 +96,7 @@ pub fn render(view: Element, ctx: Ctx) -> PageFuture {
     </div>
     <div class="card stack" data-part="acoustid" style="margin-bottom:16px">
       <div class="row between wrap" style="gap:8px"><h2>AcoustID fingerprints</h2><button class="btn sm" data-run="acoustid" {a_dis}>{refresh}Send now</button></div>
-      <p class="muted small" style="margin:0">When a download's audio confirms the MusicBrainz recording it was asked for, its fingerprint is sent to AcoustID in batches, once per song. Your user key says who sent it; the API key under Apps &amp; sources → Verification is Encore's application key.</p>
+      <p class="muted small" style="margin:0">When a download's audio confirms the MusicBrainz recording it was asked for, its fingerprint is sent to AcoustID in batches, once per song. Your user key says who sent it; the API key under Settings → Library → Verification & duplicates is Encore's application key.</p>
       <div class="stats">{a_stats}</div>
       {why}
       {a_last}

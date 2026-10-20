@@ -2,8 +2,8 @@
 //! A Settings → Server page drawn from the schema: its cards in the schema's order, under the heading of their
 //! part, each a drop-down with its title, description, Test button, fields (schema_form.rs) and Save; plus what
 //! the page has of its own: the task list (Scheduled tasks), Download tools and How requests are fulfilled
-//! (Apps & sources), the API key and About cards (General). Save, clear, the eye and copy buttons and Test are
-//! wired here.
+//! (Downloads, the page with the Download pipeline card), the API key and About cards (General). Save, clear,
+//! the eye and copy buttons and Test are wired here.
 
 use super::fields::{Field, Group};
 use super::schema_form::{bind_show_when, form_html, form_values};
@@ -55,9 +55,10 @@ pub fn visible_cards<'a>(groups: &'a [Rc<Group>], values: &Value) -> Vec<(&'a Gr
 }
 
 /// The cards of a page with their part headings, as one string. `focus` is the card a link asked for (it starts
-/// open instead of the first one); a page with one card has it open. Download sources starts with the host of
-/// the Download tools card.
+/// open instead of the first one); a page with one card has it open. A link that names no card shown here (an
+/// alias such as `apps`, or a card this server hides) opens the first card, as a plain link to the page does.
 pub fn cards_html(cards: &[(&Group, Vec<&Field>)], values: &Value, reveal: bool, focus: Option<&str>) -> String {
+    let focus = focus.filter(|f| cards.iter().any(|(g, _)| g.id == *f));
     let n = cards.len();
     let mut html = String::new();
     let mut first = true;
@@ -66,7 +67,6 @@ pub fn cards_html(cards: &[(&Group, Vec<&Field>)], values: &Value, reveal: bool,
         if part != Some(g.part.as_str()) {
             part = Some(g.part.as_str());
             if !g.part.is_empty() { html.push_str(&format!(r##"<div class="nav-label" style="padding:18px 4px 8px">{}</div>"##, esc(&g.part))); }
-            if g.part == "Download sources" { html.push_str(r##"<div id="tools-host"></div>"##); }
         }
         let open = (first && focus.is_none()) || n == 1 || focus == Some(g.id.as_str());
         first = false;
@@ -82,9 +82,13 @@ pub async fn show_page(hub: &Rc<Hub>, id: &str) {
     let values = hub.values.borrow().clone();
     let focus = hub.focus.borrow_mut().take();
     let cards = visible_cards(&page.groups, &values);
+    // Downloads (the page with the Download pipeline card) starts with the Download tools card and ends with
+    // How requests are fulfilled
+    let downloads = schema.holds(&page.id, "pipeline");
     let mut html = if page.id == "tasks" { r##"<div id="tasks-host" style="margin-bottom:16px"></div>"##.to_string() } else { String::new() };
+    if downloads { html.push_str(r##"<div id="tools-host"></div>"##); }
     html.push_str(&cards_html(&cards, &values, hub.reveal, focus.as_deref()));
-    if page.id == "apps" { html.push_str(&apps::pipeline_help()); }
+    if downloads { html.push_str(&apps::pipeline_help()); }
     if page.id == "general" { html.push_str(&general::api_card(&hub.panel).await); html.push_str(&general::about_card().await); }
     dom::set_html(&hub.panel, &html);
     if page.id == "tasks" { if let Some(host) = dom::qs_in(&hub.panel, "#tasks-host") { dom::spawn(tasks::render_tasks(host)); } }

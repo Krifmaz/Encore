@@ -99,10 +99,30 @@ class SchemaRulesTest {
 
     @Test
     fun linksOpenThePageOfAnAliasOrACard() {
+        // this answer is a server's before R2: downloads was an alias of Apps & sources
         assertEquals("apps", schema.pageOf("apps"))
         assertEquals("apps", schema.pageOf("downloads"))
         assertEquals("apps", schema.pageOf("torznab"))
         assertEquals("users", schema.pageOf("users"))
+    }
+
+    @Test
+    fun aPageIdWinsOverAnAliasOrACardOfTheSameName() {
+        // R2: Library holds a card called library too; a page's own id is looked up first, then aliases, then cards
+        val split = EncoreJson.decodeFromString(
+            SettingsSchema.serializer(),
+            """
+            {"sections":[
+              {"id":"general","title":"General","aliases":["library"],"groups":[{"id":"downloads","title":"x"}]},
+              {"id":"library","title":"Library","aliases":["tagging"],"groups":[{"id":"verify","title":"y"}]},
+              {"id":"downloads","title":"Downloads","aliases":["apps"],"groups":[{"id":"tagging","title":"z"}]}]}
+            """.trimIndent(),
+        )
+        assertEquals("library", split.pageOf("library"))
+        assertEquals("downloads", split.pageOf("downloads"))
+        assertEquals("library", split.pageOf("tagging"))
+        assertEquals("downloads", split.pageOf("apps"))
+        assertEquals("library", split.pageOf("verify"))
     }
 
     @Test
@@ -340,8 +360,17 @@ class SchemaRulesTest {
         assertTrue(all.filter { it.kind == "password" }.all { it.secret })
         assertTrue(all.filter { it.kind == "select" || it.kind == "checks" }.all { it.options.isNotEmpty() })
         assertTrue(s.sections.flatMap { it.groups }.filter { it.test.isNotEmpty() }.all { it.testLabel.isNotEmpty() })
-        assertEquals("apps", s.pageOf("downloads"))
-        assertEquals("apps", s.pageOf("slskd"))
+        // Apps & sources is four pages since R2: its old names and its cards open the page that holds them
+        assertEquals(listOf("general", "library", "downloads", "integrations", "processing"), s.sections.take(5).map { it.id })
+        assertEquals("downloads", s.pageOf("apps"))
+        assertEquals("downloads", s.pageOf("downloads"))
+        assertEquals("downloads", s.pageOf("slskd"))
+        assertEquals("library", s.pageOf("tagging"))
+        assertEquals("library", s.pageOf("verify"))
+        assertEquals("integrations", s.pageOf("services"))
+        assertEquals("processing", s.pageOf("cadenza"))
+        // the Download tools card and How requests are fulfilled go on the page with the pipeline card
+        assertEquals(listOf("downloads"), s.sections.filter { sec -> sec.groups.any { it.id == "pipeline" } }.map { it.id })
         val vpn = SchemaRules.layout(s.group("slskd")!!.fields)
         assertTrue(vpn.vpn.map { it.key }.contains("vpn_wireguard_config"))
     }

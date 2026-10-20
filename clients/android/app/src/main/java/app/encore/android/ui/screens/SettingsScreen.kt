@@ -101,9 +101,9 @@ import kotlinx.serialization.json.JsonPrimitive
 /**
  * Settings: the web's sections in the web's order (web-rs/src/settings/mod.rs), as a list that opens one page at a
  * time. You – Account, Appearance, Language, Playback, Connections and This device (the phone's own); for admins
- * also People – Users & permissions, Invites; Server – the pages of the server's settings schema (General, Apps &
- * sources, Email & notifications, Auto-download, Contribute, Blocked, Scheduled tasks) and Files; System –
- * Diagnostics. The schema and its values are asked for once when Settings opens, so what was typed on a Server page
+ * also People – Users & permissions, Invites; Server – the pages of the server's settings schema (General, Library,
+ * Downloads, Integrations, Server processing, Email & notifications, Auto-download, Contribute, Blocked, Scheduled
+ * tasks) and Files; System – Diagnostics. The schema and its values are asked for once when Settings opens, so what was typed on a Server page
  * and not saved yet is still there after going to another page and back.
  */
 @Composable
@@ -198,7 +198,7 @@ fun SettingsScreen(nav: Nav, session: Session, startAt: String? = null) {
     if (page != null) {
         BackHandler(onBack = back)
         val server = ServerSchema(schemaState, schemaError) { schemaVersion += 1 }
-        // one page's state never carries over to the next (Users → Invites, Auto-download → Apps & sources)
+        // one page's state never carries over to the next (Users → Invites, Auto-download → Downloads)
         key(page, pages.size) { when (page) {
             "account" -> AccountScreen(nav, session, onBack = back)
             "appearance" -> AppearanceScreen(nav, serverPrefs = "theme" in features, onBack = back)
@@ -271,7 +271,9 @@ fun SettingsScreen(nav: Nav, session: Session, startAt: String? = null) {
 }
 
 /** The Server pages when the schema has not loaded (an older server, or an error): the web's ids and order. */
-private val SERVER_PAGES = listOf("general", "apps", "accounts", "autodownload", "contribute", "blocked", "tasks")
+private val SERVER_PAGES = listOf(
+    "general", "library", "downloads", "integrations", "processing", "accounts", "autodownload", "contribute", "blocked", "tasks",
+)
 
 /** A group label of the list (the web's `.nav-label`). */
 @Composable
@@ -400,7 +402,7 @@ fun PlaybackSettingsScreen(nav: Nav, onBack: () -> Unit) {
             val d = dsp
             if (d == null || !d.enabled) {
                 GreyedDsp()
-                Help("Turned off on this server. Cadenza upsampling for streams uses the server's processor, so an admin has to switch it on (Settings → Apps & sources → Server processing) and allow your account.")
+                Help("Turned off on this server. Cadenza upsampling for streams uses the server's processor, so an admin has to switch it on (Settings → Server processing) and allow your account.")
             } else if (!d.allowed) {
                 GreyedDsp()
                 Help("Your account isn't allowed to use the server's processing. Ask an admin.")

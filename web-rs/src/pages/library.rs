@@ -746,7 +746,7 @@ pub fn render(view: Element, ctx: Ctx) -> PageFuture {
                 });
             }
             dom::on_sel(&view, "#organize-btn", "click", |_| dom::spawn(async {
-                if !confirm_dialog("Organize files", "Every song is moved into folders from its tags using your naming template (Settings → Library, tagging & IDs), e.g. Artist/Album (Year)/01 - Title. Missing tags are filled in first from the file name, AcoustID and Deezer. Playlists and likes keep working.", "Organize", false).await { return; }
+                if !confirm_dialog("Organize files", "Every song is moved into folders from its tags using your naming template (Settings → Library → Library & tagging), e.g. Artist/Album (Year)/01 - Title. Missing tags are filled in first from the file name, AcoustID and Deezer. Playlists and likes keep working.", "Organize", false).await { return; }
                 match api::post_empty("/library/organize").await {
                     Ok(_) => { toast("Organizing…", "ok"); dom::timeout(800, hashchange); }
                     Err(e) => toast(&e.message, "err"),
@@ -782,7 +782,7 @@ pub fn render(view: Element, ctx: Ctx) -> PageFuture {
                 let b2 = btn.clone();
                 dom::on(&btn, "click", move |_| {
                     if dom::data(&b2, "acoustid").is_empty() {
-                        toast("Add a free AcoustID API key in Settings → Verification first", "err");
+                        toast("Add a free AcoustID API key in Settings → Library → Verification & duplicates first", "err");
                         return;
                     }
                     let (view, bulk, wb) = (view.clone(), bulk.clone(), wb.clone());

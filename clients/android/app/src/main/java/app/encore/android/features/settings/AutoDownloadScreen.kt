@@ -168,7 +168,7 @@ fun AutoDownloadScreen(nav: Nav, onBack: () -> Unit, onOpen: (String) -> Unit) {
                 }
             }
             Muted("Which sources are searched, and in what order:")
-            TextLink("Settings → Apps & sources → Download pipeline") { onOpen("pipeline") }
+            TextLink("Settings → Downloads → Download pipeline") { onOpen("pipeline") }
         }
         PageSection("Users", "Who auto-downloads are enabled for")
         SetCard(flat = true) {

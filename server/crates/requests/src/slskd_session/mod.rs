@@ -303,8 +303,8 @@ pub fn when_text(c: &Conn) -> String {
             None => "connecting shortly".into(),
         },
         State::Stopped => match c.reason {
-            Some(Reason::Rejected) => format!("the login was rejected: {}", rejected(c, " – fix it in Settings → Soulseek")),
-            Some(r) => format!("{} – press Reconnect now in Settings → Soulseek", describe(r, c.message.as_deref())),
+            Some(Reason::Rejected) => format!("the login was rejected: {}", rejected(c, " – fix it in Settings → Downloads → Soulseek")),
+            Some(r) => format!("{} – press Reconnect now in Settings → Downloads → Soulseek", describe(r, c.message.as_deref())),
             None => c.message.clone().unwrap_or_else(|| "Soulseek is off".into()),
         },
         State::Disconnected if c.message.is_some() => c.message.clone().unwrap_or_default(),
@@ -377,7 +377,7 @@ pub fn parked_waiting(st: &impl Ctx, c: &Conn) -> i64 {
 /// The card's sentence away from the card (Diagnostics, the phone, older apps): "fix them below" points
 /// at the card's fields, so it names the card instead.
 pub fn text_elsewhere(text: &str) -> String {
-    text.replace(" – fix them below", " – fix them in Settings → Soulseek")
+    text.replace(" – fix them below", " – fix them in Settings → Downloads → Soulseek")
 }
 
 /// Requests parked until Soulseek is back.
@@ -443,7 +443,7 @@ mod tests {
         assert_eq!(sentence(&c), "Rejected: invalid username or password – fix them below");
         assert!(when_text(&c).contains("fix it in Settings"));
         // away from the card (Diagnostics, the phone): the card is named instead of "below"
-        assert_eq!(text_elsewhere(&sentence(&c)), "Rejected: invalid username or password – fix them in Settings → Soulseek");
+        assert_eq!(text_elsewhere(&sentence(&c)), "Rejected: invalid username or password – fix them in Settings → Downloads → Soulseek");
         assert_eq!((supervisor::searches(1), supervisor::searches(37)), ("1 search".to_string(), "37 searches".to_string()));
         // the server's other refusals say what to do, without pointing at the username and password
         let mut v = c.clone();

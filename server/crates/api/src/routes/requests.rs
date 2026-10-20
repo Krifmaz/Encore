@@ -1,5 +1,6 @@
 //! /api/requests: ask for artists, albums, songs or any link; approve, retry, cancel, clear; import again a
-//! download whose import waited or failed; the storage health that pauses imports.
+//! download whose import waited or failed; keep (or download again) a download the audio check turned
+//! away; the storage health that pauses imports.
 use crate::enrich::enrich_now;
 use crate::auth::{self, Admin, User};
 use encore_db::{now, Row, RowExt};
@@ -31,6 +32,8 @@ pub fn router() -> Router<AppState> {
         .route("/api/requests/storage/check", post(storage_check))
         .route("/api/requests/{rid}", delete(remove))
         .route("/api/requests/{rid}/import-again", post(import_again))
+        .route("/api/requests/{rid}/keep-anyway", post(keep_anyway))
+        .route("/api/requests/{rid}/download-anyway", post(download_anyway))
         .route("/api/requests/{rid}/approve", post(approve))
         .route("/api/requests/{rid}/deny", post(deny))
         .route("/api/requests/{rid}/retry", post(retry))
@@ -83,14 +86,18 @@ async fn list(State(st): State<AppState>, User(u): User, Query(q): Query<ListQ>)
 }
 
 /// The requests list's rows as the page shows them: the `detail` JSON read for the log, the length, the
-/// attempts, whether it was picked by hand, the candidate being downloaded, and what a waiting or failed
+/// attempts, whether it was picked by hand, the candidate being downloaded, what a waiting or failed
 /// import keeps ([`worker::storage::row_fields`]: `wait_reason`, `next_try_at`, `has_files`, `kept_path`,
-/// `error`, `output`). Other users than admins see no server folders: a wait for the storage in plain words.
+/// `error`, `output`) and the downloads the audio check turned away ([`worker::rejected::row_fields`]:
+/// `rejected`, `anyway`). Other users than admins see no server folders: a wait for the storage in plain
+/// words.
 fn list_rows(rows: Vec<Row>, admin: bool) -> Vec<Value> {
     rows.into_iter().map(|mut r| {
         let d: Value = serde_json::from_str(&r.s("detail")).unwrap_or(json!({}));
         r.remove("detail");
         r.extend(worker::storage::row_fields(&r.s("status"), &d, admin));
+        r.extend(worker::rejected::row_fields(&r.s("status"), &d, admin));
+        r.insert("skip_check".into(), json!(d["skip_check"].is_object()));
         let log = d.get("log").cloned().unwrap_or(json!([]));
         if admin {
             r.insert("log".into(), log);
@@ -320,6 +327,44 @@ async fn import_again(State(st): State<AppState>, User(u): User, Path(rid): Path
     Ok(Json(json!({ "ok": true, "status": "waiting" })))
 }
 
+/// Which rejected download Keep anyway or Download anyway means (`{rejected: id}`; none: the newest that
+/// fits).
+#[derive(Deserialize, Default)]
+#[serde(default)]
+struct AnywayBody {
+    rejected: Option<i64>,
+}
+
+/// Keep anyway and Download anyway are the request's admin's, or its owner's with the `fix` permission
+/// (as Retry).
+fn may_fix(st: &AppState, u: &Row, rid: i64, refused: &str) -> ApiResult<()> {
+    get_owned(st, rid, u)?;
+    if !encore_config::perms::is_admin(u) && !auth::can(st, u, "fix") {
+        return Err(err(403, refused));
+    }
+    Ok(())
+}
+
+/// Keep anyway (`POST /api/requests/{id}/keep-anyway`, `{rejected?: id}`): the download the audio check
+/// turned away is imported without the check at the queue's next look and its songs are marked as
+/// confirmed by the caller; a running request stops what it does first. → `{ok, status: "waiting"}`
+async fn keep_anyway(State(st): State<AppState>, User(u): User, Path(rid): Path<i64>, body: Option<Json<AnywayBody>>) -> ApiResult<Json<Value>> {
+    may_fix(&st, &u, rid, "Ask an admin to keep it anyway")?;
+    let which = body.map(|j| j.0).unwrap_or_default().rejected;
+    worker::rejected::keep_anyway(&st, rid, which, &u.s("username")).await.map_err(|(code, why)| err(code, why))?;
+    Ok(Json(json!({ "ok": true, "status": "waiting" })))
+}
+
+/// Download anyway (`POST /api/requests/{id}/download-anyway`, `{rejected?: id}`): the rejected download's
+/// source and link are asked for again as a hand pick with the audio check off for this request, its songs
+/// marked as confirmed by the caller. → `{ok, status: "queued"}`
+async fn download_anyway(State(st): State<AppState>, User(u): User, Path(rid): Path<i64>, body: Option<Json<AnywayBody>>) -> ApiResult<Json<Value>> {
+    may_fix(&st, &u, rid, "Ask an admin to download it anyway")?;
+    let which = body.map(|j| j.0).unwrap_or_default().rejected;
+    worker::rejected::download_anyway(&st, rid, which, &u.s("username")).await.map_err(|(code, why)| err(code, why))?;
+    Ok(Json(json!({ "ok": true, "status": "queued" })))
+}
+
 /// `GET /api/requests/storage`: whether imports go on, for the banner on the Requests page. Admins get the
 /// folder, the operation and the error; everyone else whether imports are paused and the plain words.
 async fn storage(State(st): State<AppState>, User(u): User) -> ApiResult<Json<Value>> {
@@ -363,7 +408,8 @@ async fn cancel(State(st): State<AppState>, User(u): User, Path(rid): Path<i64>)
         if let Ok(c) = get_request(&st, i) {
             let s = c["status"].as_str().unwrap_or("");
             if s == "pending" || ACTIVE.contains(&s) {
-                worker::cancel(&st, i).await;
+                // no step starts on the old state before it says cancelled
+                let _hold = worker::cancel_holding(&st, i).await;
                 set(&st, i, "cancelled", &format!("Cancelled by {}", u.s("username")))?;
             }
         }
@@ -411,12 +457,12 @@ async fn remove(State(st): State<AppState>, User(u): User, Path(rid): Path<i64>,
     if q.files && !encore_config::perms::is_admin(&u) {
         return Err(err(403, "Only admins can delete files"));
     }
-    if ACTIVE.contains(&r["status"].as_str().unwrap_or("")) {
-        worker::cancel(&st, rid).await;
-    }
+    // no step starts on the old state before the row is gone
+    let _hold = if ACTIVE.contains(&r["status"].as_str().unwrap_or("")) { Some(worker::cancel_holding(&st, rid).await) } else { None };
     let n = if q.files { delete_files(&st, &r) } else { 0 };
     for i in family(&st, rid) {
         worker::storage::remove_staging(&st, i);
+        worker::rejected::remove(&st, i); // the downloads the audio check turned away go with it
     }
     st.db.execute("DELETE FROM requests WHERE id=? OR parent_id=?", p![rid, rid])?;
     if n > 0 {

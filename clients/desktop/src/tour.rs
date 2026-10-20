@@ -41,6 +41,10 @@ enum Step {
     RequestDetails,
     /// Close the details dialog.
     CloseDetails,
+    /// Open the picker for the first request (skipped when the list is empty).
+    RequestPick,
+    /// Close the picker.
+    ClosePick,
     Exit,
 }
 
@@ -83,6 +87,9 @@ impl State {
             RequestDetails,
             Shot("request-details"),
             CloseDetails,
+            RequestPick,
+            Shot("request-picker"),
+            ClosePick,
             Nav(Page::Playlists),
             Shot("playlists"),
             Nav(Page::Download),
@@ -103,8 +110,8 @@ impl State {
             Shot("settings-playback"),
             Nav(Page::Settings(Section::Computer)),
             Shot("settings-computer"),
-            Nav(Page::Settings(Section::Apps)),
-            Shot("settings-apps"),
+            Nav(Page::Settings(Section::Downloads)),
+            Shot("settings-downloads"),
             Nav(Page::Home),
             Customize(true),
             Shot("player-customize"),
@@ -270,6 +277,21 @@ fn step(app: &mut App) -> Task<AppMsg> {
             }
         },
         Step::CloseDetails => app.update(AppMsg::Details(crate::widgets::details::Msg::Close)),
+        Step::RequestPick => match app.requests.first_request_row() {
+            Some(r) => {
+                t.wait = 4;
+                app.update(AppMsg::Requests(crate::pages::requests::Message::List(
+                    crate::widgets::request_list::Msg::Pick(r),
+                )))
+            }
+            None => {
+                t.next += 1;
+                Task::none()
+            }
+        },
+        Step::ClosePick => app.update(AppMsg::Requests(crate::pages::requests::Message::List(
+            crate::widgets::request_list::Msg::Picker(crate::widgets::picker::Message::Close),
+        ))),
         Step::CloseRowMenu => {
             app.update(AppMsg::LibraryAlbum(crate::pages::library_album::Message::Shared(
                 crate::pages::library::Act::CloseMenu,

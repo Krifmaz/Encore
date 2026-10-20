@@ -13,7 +13,7 @@ pub(super) async fn start(st: &impl Ctx, r: &mut Req) -> anyhow::Result<()> {
         let url = r.s("url");
         if RIP_LINK.is_match(&url) {
             if !streamrip::enabled(st) {
-                fail(st, r, "Qobuz/Tidal/Deezer links need streamrip enabled in Settings → Downloaders").await;
+                fail(st, r, "Qobuz/Tidal/Deezer links need streamrip switched on in Settings → Downloads → Qobuz / Tidal / Deezer (streamrip)").await;
                 return Ok(());
             }
             upd(st, r, &[("source", json!("streamrip")), ("status", json!("downloading")), ("message", json!("Downloading with streamrip…"))]);
@@ -187,7 +187,28 @@ pub(super) fn park_download(st: &impl Ctx, r: &mut Req, when: &str) -> anyhow::R
 }
 
 pub(super) fn source_order(st: &impl Ctx, r: &Req) -> Vec<String> {
-    let mut order: Vec<String> = st.cfg().str("source_order").split(',').map(|s| s.trim().to_lowercase())
+    let lossless_only = r.d["lossless_only"].as_bool().unwrap_or(false);
+    let order = arrange(&st.cfg().str("source_order"), st.cfg().bool("quality_first"), lossless_only, st.cfg().bool("ytdlp_last_resort"));
+    let album = r.s("kind") == "album";
+    let avail = |s: &str| match s {
+        "torznab" => torznab::enabled(st) && album,
+        "slskd" | "slskd_lossless" => slskd::enabled(st),
+        "ytdlp" => ytdlp::enabled(st) || st.cfg().bool("ytdlp_last_resort"),
+        "streamrip" => streamrip::enabled(st),
+        _ => false,
+    };
+    order.into_iter().filter(|s| avail(s)).collect()
+}
+
+/// The sources in the order they are tried, before the ones that aren't set up are left out: the
+/// admin's `source_order` (qobuz / tidal / deezer read as streamrip). With highest quality first (and for
+/// a request for a lossless copy) the lossless options come first: streamrip, FLAC on Soulseek, then the
+/// torrent and Usenet indexers – whose best releases are lossless, and which only get a turn when
+/// Soulseek has no copy in any format otherwise – and only then the lossy fallbacks (Soulseek in any
+/// format, YouTube Music). A lossless-only request keeps the indexers too: their search keeps only
+/// lossless releases then.
+fn arrange(source_order: &str, quality_first: bool, lossless_only: bool, ytdlp_last_resort: bool) -> Vec<String> {
+    let mut order: Vec<String> = source_order.split(',').map(|s| s.trim().to_lowercase())
         // qobuz / tidal / deezer are streamrip services: the first one marks where streamrip runs
         .map(|s| if streamrip::SERVICES.contains(&s.as_str()) { "streamrip".to_string() } else { s })
         .filter(|s| !s.is_empty()).collect();
@@ -198,33 +219,30 @@ pub(super) fn source_order(st: &impl Ctx, r: &Req) -> Vec<String> {
             order.insert(at, src.into());
         }
     }
-    let lossless_only = r.d["lossless_only"].as_bool().unwrap_or(false);
-    if st.cfg().bool("quality_first") || lossless_only {
-        // every lossless option first (in the admin's order), then lossy fallbacks
+    if quality_first || lossless_only {
+        // every lossless option first, then lossy fallbacks (each part in the admin's order)
+        let first = |s: &String| s == "streamrip" || s == "torznab";
         let mut lossless: Vec<String> = order.iter().filter(|s| *s == "streamrip").cloned().collect();
         if order.iter().any(|s| s == "slskd") {
             lossless.push("slskd_lossless".into());
         }
-        lossless.extend(order.iter().filter(|s| *s != "streamrip").cloned());
+        if order.iter().any(|s| s == "torznab") {
+            lossless.push("torznab".into());
+        }
+        lossless.extend(order.iter().filter(|s| !first(s)).cloned());
         order = lossless;
     }
     if lossless_only {
-        order.retain(|s| ["streamrip", "slskd_lossless"].contains(&s.as_str()));
-    } else if st.cfg().bool("ytdlp_last_resort") {
+        order.retain(|s| ["streamrip", "slskd_lossless", "torznab"].contains(&s.as_str()));
+    } else if ytdlp_last_resort {
         // downloads should basically never fail: YouTube Music is always the final fallback
         order.retain(|s| s != "ytdlp");
         order.push("ytdlp".into());
     }
-    let album = r.s("kind") == "album";
-    let avail = |s: &str| match s {
-        "torznab" => torznab::enabled(st) && album,
-        "slskd" | "slskd_lossless" => slskd::enabled(st),
-        "ytdlp" => ytdlp::enabled(st) || st.cfg().bool("ytdlp_last_resort"),
-        "streamrip" => streamrip::enabled(st),
-        _ => false,
-    };
+    // each once (qobuz, tidal and deezer are all streamrip)
     let mut seen = std::collections::HashSet::new();
-    order.into_iter().filter(|s| avail(s) && seen.insert(s.clone())).collect()
+    order.retain(|s| seen.insert(s.clone()));
+    order
 }
 
 /// Download exactly the chosen result – no fallback to other sources. A picked Soulseek file waits for
@@ -253,13 +271,14 @@ pub(super) async fn start_pick(st: &impl Ctx, r: &mut Req) -> anyhow::Result<()>
             }
         }
         "torznab" => {
+            torznab_drop_old(st, r).await;
             r.d["torznab"] = json!({ "candidates": [pick["payload"]], "idx": -1 });
             upd(st, r, &[("source", json!("torznab"))]);
             torznab_try_next(st, r, "").await?
         }
         "deezer" | "tidal" | "qobuz" | "link" if src != "link" || RIP_LINK.is_match(&url) => {
             if !streamrip::enabled(st) {
-                fail(st, r, "Qobuz/Tidal/Deezer links need streamrip enabled in Settings → Downloaders").await;
+                fail(st, r, "Qobuz/Tidal/Deezer links need streamrip switched on in Settings → Downloads → Qobuz / Tidal / Deezer (streamrip)").await;
                 return Ok(());
             }
             upd(st, r, &[("source", json!("streamrip"))]);
@@ -272,6 +291,14 @@ pub(super) async fn start_pick(st: &impl Ctx, r: &mut Req) -> anyhow::Result<()>
         other => Out::Next(format!("unknown source {other}")),
     };
     if let Out::Next(why) = out {
+        // a picked Soulseek file whose user is offline: the request says what to do instead of "All
+        // sources exhausted"
+        if src == "slskd" && why.ends_with(SLSKD_OFFLINE) {
+            storage::log_failure(st, r, "slskd", &why);
+            log_push(r, format!("slskd: {why}"));
+            fail(st, r, &format!("{why} – open Pick and choose another result, or Search again")).await;
+            return Ok(());
+        }
         next_source(st, r, &why).await?;
     }
     Ok(())
@@ -404,4 +431,39 @@ pub(super) async fn poll_album(st: &impl Ctx, r: &mut Req) -> anyhow::Result<()>
     r.d["no_album"] = json!(true);
     upd(st, r, &[("status", json!("queued")), ("source", Value::Null), ("message", json!(format!("Getting the song on its own ({reason})")))]);
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::arrange;
+
+    fn order(setting: &str, quality_first: bool, lossless_only: bool) -> Vec<String> {
+        arrange(setting, quality_first, lossless_only, true)
+    }
+
+    /// The README's order with highest quality first: Qobuz/Tidal/Deezer → FLAC on Soulseek →
+    /// torrents/Usenet → Soulseek in any format → YouTube Music. Torrents and Usenet used to come after
+    /// Soulseek in any format, so they only ran when nobody on Soulseek had the album at all.
+    #[test]
+    fn quality_first_tries_the_indexers_before_soulseek_in_any_format() {
+        assert_eq!(order("tidal,deezer,slskd,torznab,ytdlp", true, false), ["streamrip", "slskd_lossless", "torznab", "slskd", "ytdlp"]);
+        // wherever the admin put the indexers
+        assert_eq!(order("qobuz,tidal,deezer,torznab,slskd,ytdlp", true, false), ["streamrip", "slskd_lossless", "torznab", "slskd", "ytdlp"]);
+        assert_eq!(order("slskd,ytdlp,torznab,deezer", true, false), ["streamrip", "slskd_lossless", "torznab", "slskd", "ytdlp"]);
+        // an order saved before the indexers existed gets them before YouTube Music
+        assert_eq!(order("deezer,slskd,ytdlp", true, false), ["streamrip", "slskd_lossless", "torznab", "slskd", "ytdlp"]);
+        // no Soulseek in the order: no Soulseek steps
+        assert_eq!(order("deezer,torznab,ytdlp", true, false), ["streamrip", "torznab", "ytdlp"]);
+        // without highest quality first the admin's order stands
+        assert_eq!(order("tidal,slskd,torznab,ytdlp", false, false), ["streamrip", "slskd", "torznab", "ytdlp"]);
+        assert_eq!(arrange("ytdlp,slskd", false, false, false), ["torznab", "ytdlp", "slskd"]);
+    }
+
+    /// A request for a lossless copy (an upgrade) asks the indexers too: their search keeps only lossless
+    /// releases then. They used to be dropped, so upgrades never reached torrents or Usenet.
+    #[test]
+    fn a_lossless_copy_is_looked_for_on_the_indexers_too() {
+        assert_eq!(order("tidal,deezer,slskd,torznab,ytdlp", true, true), ["streamrip", "slskd_lossless", "torznab"]);
+        assert_eq!(order("tidal,deezer,slskd,torznab,ytdlp", false, true), ["streamrip", "slskd_lossless", "torznab"]);
+    }
 }

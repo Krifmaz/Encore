@@ -855,9 +855,12 @@ fn status_line<'a>(state: &'a State, ctx: &Ctx<'a>) -> El<'a, Message> {
     let (r_words, linked) = status_words_linked(&parts);
     let n = parts.len();
     for (i, (words, warn)) in parts.into_iter().enumerate() {
-        // a sentence that ends "… – fix them in Settings → Soulseek" (the server's words) links its own
-        // last words to the card instead of repeating them
-        let words = if linked && i + 1 == n { words[..words.len() - SETTINGS_LINK.len()].trim_end().to_string() } else { words };
+        // a sentence that ends "… – fix them in Settings → Downloads → Soulseek" (the server's words) links its
+        // own last words to the card instead of repeating them
+        let words = match linked_words(&words) {
+            Some(cut) if linked && i + 1 == n => words[..cut].trim_end().to_string(),
+            _ => words,
+        };
         let mut txt = t(words).size(12.5);
         txt = if warn { txt.color(p.warn) } else { txt.color(p.muted) };
         r = r.push(txt);
@@ -876,13 +879,19 @@ fn status_line<'a>(state: &'a State, ctx: &Ctx<'a>) -> El<'a, Message> {
 }
 
 /// The settings link's words, which the server's sentences end with away from the card.
-const SETTINGS_LINK: &str = "Settings → Soulseek";
+const SETTINGS_LINK: &str = "Settings → Downloads → Soulseek";
+
+/// Where the settings link's words start at the end of a sentence: the server's words since R2, or an older
+/// server's "Settings → Soulseek".
+fn linked_words(w: &str) -> Option<usize> {
+    [SETTINGS_LINK, "Settings → Soulseek"].iter().find(|l| w.ends_with(*l) && w.len() > l.len()).map(|l| w.len() - l.len())
+}
 
 /// The status line's words as one text (for Copy), and whether its last sentence ends with the
 /// settings link's words.
 fn status_words_linked(parts: &[(String, bool)]) -> (String, bool) {
     let all = parts.iter().map(|(w, _)| w.as_str()).collect::<Vec<_>>().join(" · ");
-    let linked = parts.last().is_some_and(|(w, _)| w.ends_with(SETTINGS_LINK) && w.len() > SETTINGS_LINK.len());
+    let linked = parts.last().is_some_and(|(w, _)| linked_words(w).is_some());
     (all, linked)
 }
 
@@ -1074,7 +1083,7 @@ fn search_view<'a>(state: &'a State, ctx: &Ctx<'a>) -> El<'a, Message> {
                 Some(
                     row![
                         muted("An admin can turn it on under").size(13),
-                        link("Settings → Soulseek", Message::GoSettings),
+                        link(SETTINGS_LINK, Message::GoSettings),
                     ]
                     .spacing(4)
                     .align_y(Alignment::Center)
@@ -1523,9 +1532,10 @@ mod tests {
         assert!(parts[0].1 && parts[0].0.starts_with("Disconnected – the login timed out"));
         let rejected = json!({ "enabled": true, "state": "running", "session": { "state": "stopped", "reason": "rejected", "text": "Rejected: invalid username or password – fix them below" } });
         let (dot, parts, _) = status_parts(&rejected, "");
-        assert_eq!((dot, parts[0].0.as_str()), ("err", "Rejected: invalid username or password – fix them in Settings → Soulseek"));
+        assert_eq!((dot, parts[0].0.as_str()), ("err", "Rejected: invalid username or password – fix them in Settings → Downloads → Soulseek"));
         // the line links the sentence's last words to the card instead of saying them twice
-        assert_eq!(status_words_linked(&parts), ("Rejected: invalid username or password – fix them in Settings → Soulseek".to_string(), true));
+        assert_eq!(status_words_linked(&parts), ("Rejected: invalid username or password – fix them in Settings → Downloads → Soulseek".to_string(), true));
+        assert!(status_words_linked(&[("Rejected – fix them in Settings → Soulseek".to_string(), true)]).1, "an older server's words");
         assert!(!status_words_linked(&[("Signed in as me".to_string(), false)]).1);
         let limited = json!({ "enabled": true, "state": "running", "logged_in": true, "username": "me", "shares": { "files": 0 },
             "session": { "state": "logged_in", "reason": "rate_limited", "text": "Logged in as me since 14:02. Rate limited by the Soulseek server – next search at 14:05" } });

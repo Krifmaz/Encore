@@ -1,4 +1,5 @@
-//! rTorrent over XML-RPC (its SCGI mount, e.g. ruTorrent's /RPC2 or /plugins/httprpc/action.php).
+//! rTorrent over XML-RPC (its SCGI mount, e.g. /RPC2, or ruTorrent's XML-RPC plugin at /plugins/rpc/rpc.php –
+//! not /plugins/httprpc/action.php, which speaks ruTorrent's own requests).
 //! .torrent files are fetched by Encore and sent with load.raw_start so the info hash is known up
 //! front; magnets go in with load.start. Downloads are found again by hash.
 use encore_http::Ctx;

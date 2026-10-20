@@ -48,14 +48,15 @@ import kotlinx.serialization.json.JsonElement
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
 
-// What the Settings → Apps & sources cards show besides their fields (web-rs/src/settings/apps.rs): the Download
-// tools card, the Soulseek engine's status and the VPN's state with Test VPN, the Cadenza pre-render cache and the
-// engine's own settings, the streamrip config reset, How requests are fulfilled; and General's API key and About.
+// What the Settings → Downloads and Server processing cards show besides their fields (web-rs/src/settings/apps.rs):
+// the Download tools card, the Soulseek engine's status and the VPN's state with Test VPN, the Cadenza pre-render cache
+// and the engine's own settings, the streamrip config reset, How requests are fulfilled; and General's API key and
+// About.
 
 // ---- Download tools ------------------------------------------------------------------------------------------------
 
 /**
- * Settings → Apps & sources → Download tools: yt-dlp, streamrip, Cadenza, slskd and the Translator update in place,
+ * Settings → Downloads → Download tools: yt-dlp, streamrip, Cadenza, slskd and the Translator update in place,
  * with the automatic-update switches and the Translator's model (saved one key at a time).
  */
 @Composable
@@ -480,7 +481,7 @@ fun StreamripConfigBlock(api: SettingsApi) {
     }
 }
 
-// ---- How requests are fulfilled (the end of Apps & sources) ------------------------------------------------------------
+// ---- How requests are fulfilled (the end of Downloads) -----------------------------------------------------------------
 
 @Composable
 fun PipelineHelp() {

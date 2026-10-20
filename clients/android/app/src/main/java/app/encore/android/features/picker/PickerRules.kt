@@ -42,6 +42,32 @@ object PickerRules {
     fun errorCopy(name: String, message: String): String = "$name: $message"
 
     /**
+     * The switch beside Lossless only (R2): what is picked is imported without the audio check (`no_check` on
+     * POST /api/picker/pick). Off by default, remembered on this phone.
+     */
+    const val NO_CHECK = "Don't check the audio"
+
+    /** What the switch does (the web's title on it), shown under the switch (a phone has no tooltip). */
+    const val NO_CHECK_HELP = "Imports what you pick even when the audio check says it is another song"
+
+    /** The note at the foot of the picker (picker.rs `note_text`): what happens to the file picked, with the switch on or off. */
+    fun note(noCheck: Boolean): String =
+        if (noCheck) "The audio check is off: the file you pick is imported even when the check says it is another song. It is still tagged with MusicBrainz data and de-duplicated. If it fails, the request fails instead of trying other sources."
+        else "The file you pick is still fingerprint-checked, tagged with MusicBrainz data and de-duplicated. If it fails, the request fails instead of trying other sources."
+
+    /** How the switch is kept on this phone ("1" or "0", as the web's localStorage `encore.pickNoCheck`); anything else is off. */
+    fun noCheckOf(stored: String?): Boolean = stored == "1"
+
+    fun noCheckValue(on: Boolean): String = if (on) "1" else "0"
+
+    /**
+     * The switch is offered, and sent, only to those who may take a download the check turned away (Keep anyway's
+     * people: admins and members with Fix their own downloads, RequestRules.mayFix); the server refuses `no_check`
+     * from others ("Ask an admin to pick without the audio check"), also when this phone kept the switch on.
+     */
+    fun noCheckSent(noCheck: Boolean, mayFix: Boolean): Boolean = noCheck && mayFix
+
+    /**
      * "Found at 14:02" for a kept answer: the server's own words when it sent them (the same clock as its "next attempt
      * at 14:20"), else made here from `cached_at`: today, yesterday, or the day.
      */

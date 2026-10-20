@@ -10,7 +10,11 @@
 //! until 0.29) drew for them, icons and the cards' own extra blocks shortened to a marker. It was written while
 //! both renderers were here, after a test had compared them for every page and case and found the same HTML
 //! byte for byte; the schema renderer has to keep drawing it. When a change to the form is meant, run
-//! `ENCORE_WRITE_SETTINGS_CARDS=1 cargo test settings::` to write the file again and read its diff.
+//! `ENCORE_WRITE_SETTINGS_CARDS=1 cargo test settings::` to write the file again and read its diff. R2 wrote it
+//! again when Apps & sources became Library, Downloads, Integrations and Server processing: the same cards, on
+//! those four pages, without the part headings, and the Tidal Client ID's help naming Downloads.
+//! (The schema fixture is recorded by the server's config tests: `ENCORE_WRITE_SETTINGS_SCHEMA=1 cargo test -p
+//! encore-config schema_fixture` in server/.)
 
 use super::apps::{cadenza_cache_block, engine_settings_block, soulseek_status_block, streamrip_config_block, tidal_block};
 use super::fields::{Schema, When};
@@ -118,8 +122,8 @@ fn all_pages(page: impl Fn(&str, &Value, bool, Option<&str>) -> String) -> Strin
     }
     // a link that names a card opens that one instead of the first
     let values = &cases()[0].1;
-    out.push_str("<!-- page apps, defaults, the Soulseek card asked for -->\n");
-    out.push_str(&page("apps", values, false, Some("slskd")));
+    out.push_str("<!-- page downloads, defaults, the Soulseek card asked for -->\n");
+    out.push_str(&page("downloads", values, false, Some("slskd")));
     out.push('\n');
     out
 }
@@ -132,31 +136,53 @@ fn from_schema(schema: &Schema) -> impl Fn(&str, &Value, bool, Option<&str>) -> 
     }
 }
 
-/// The nav entries of Settings → Server in 0.28 (the static table's GROUPS).
-const NAV_028: &[(&str, &str)] = &[
-    ("general", "General"), ("apps", "Apps & sources"), ("accounts", "Email & notifications"), ("autodownload", "Auto-download"),
+/// The nav entries of Settings → Server: the static table's GROUPS of 0.28, with Apps & sources split into
+/// Library, Downloads, Integrations and Server processing (R2, the owner on Oct 19).
+const NAV: &[(&str, &str)] = &[
+    ("general", "General"), ("library", "Library"), ("downloads", "Downloads"), ("integrations", "Integrations"),
+    ("processing", "Server processing"), ("accounts", "Email & notifications"), ("autodownload", "Auto-download"),
     ("contribute", "Contribute"), ("blocked", "Blocked"), ("tasks", "Scheduled tasks"),
 ];
 
-/// `#/settings?s=` names and the page they opened in 0.28: pages, their aliases and the cards on them; anything
-/// else stays as it is (the hub then shows Account, or General for about/api/keys).
-const LINKS_028: &[(&str, &str)] = &[
-    ("general", "general"), ("apps", "apps"), ("downloads", "apps"), ("tagging", "apps"), ("services", "apps"),
-    ("pipeline", "apps"), ("releases", "apps"), ("streamrip", "apps"), ("torznab", "apps"), ("slskd", "apps"), ("ytdlp", "apps"),
-    ("youtube", "apps"), ("library", "apps"), ("verify", "apps"), ("spotify", "apps"), ("media", "apps"), ("roon", "apps"),
-    ("cadenza", "apps"), ("accounts", "accounts"), ("email", "accounts"), ("notify", "accounts"), ("autodownload", "autodownload"),
+/// `#/settings?s=` names and the page they open: every name of 0.28 (pages, their aliases and the cards on them)
+/// still opens the page that holds what it named, `apps` opens Downloads; anything else stays as it is (the hub
+/// then shows Account, or General for about/api/keys).
+const LINKS: &[(&str, &str)] = &[
+    ("general", "general"), ("apps", "downloads"), ("downloads", "downloads"), ("tagging", "library"), ("services", "integrations"),
+    ("library", "library"), ("verify", "library"),
+    ("pipeline", "downloads"), ("releases", "downloads"), ("streamrip", "downloads"), ("torznab", "downloads"), ("slskd", "downloads"),
+    ("ytdlp", "downloads"), ("youtube", "downloads"),
+    ("integrations", "integrations"), ("spotify", "integrations"), ("media", "integrations"), ("roon", "integrations"),
+    ("processing", "processing"), ("cadenza", "processing"),
+    ("accounts", "accounts"), ("email", "accounts"), ("notify", "accounts"), ("autodownload", "autodownload"),
     ("contribute", "contribute"), ("blocked", "blocked"), ("tasks", "tasks"), ("sync", "tasks"),
     ("about", "about"), ("api", "api"), ("keys", "keys"), ("account", "account"), ("users", "users"), ("nothing", "nothing"),
 ];
 
 #[test]
-fn the_nav_and_old_links_are_the_ones_of_0_28() {
+fn the_nav_is_the_split_one_and_old_links_still_open() {
     let schema = schema();
     let ours: Vec<(&str, &str)> = schema.sections.iter().map(|s| (s.id.as_str(), s.title.as_str())).collect();
-    assert_eq!(ours, NAV_028);
-    for (id, page) in LINKS_028 { assert_eq!(schema.page_of(id), *page, "?s={id}"); }
+    assert_eq!(ours, NAV);
+    for (id, page) in LINKS { assert_eq!(schema.page_of(id), *page, "?s={id}"); }
     // every card of the schema is one of them
-    for g in schema.sections.iter().flat_map(|s| &s.groups) { assert!(LINKS_028.iter().any(|(id, _)| *id == g.id), "card {}", g.id); }
+    for g in schema.sections.iter().flat_map(|s| &s.groups) { assert!(LINKS.iter().any(|(id, _)| *id == g.id), "card {}", g.id); }
+    // the Download tools card and How requests are fulfilled go on the page with the Download pipeline card
+    let with_tools: Vec<&str> = schema.sections.iter().map(|s| s.id.as_str()).filter(|id| schema.holds(id, "pipeline")).collect();
+    assert_eq!(with_tools, ["downloads"]);
+    // a page id wins over a card of the same name on another page (Library's own card is called library too)
+    let mut moved = schema_json();
+    let lib = moved["sections"].as_array_mut().unwrap().iter_mut().find(|s| s["id"] == "library").unwrap()["groups"].as_array_mut().unwrap().remove(0);
+    moved["sections"].as_array_mut().unwrap().iter_mut().find(|s| s["id"] == "general").unwrap()["groups"].as_array_mut().unwrap().push(lib);
+    assert_eq!(Schema::from_json(&moved).page_of("library"), "library");
+    // a link that names a page by an alias (`apps`, `tagging`, `services`) opens that page's first card
+    let values = &cases()[0].1;
+    for (alias, page) in [("apps", "downloads"), ("tagging", "library"), ("services", "integrations")] {
+        let html = from_schema(&schema)(page, values, false, Some(alias));
+        assert_eq!(html, from_schema(&schema)(page, values, false, None), "?s={alias}");
+        let first = visible_cards(&schema.section(page).unwrap().groups, values)[0].0.id.clone();
+        assert!(html.contains(&format!(r#"data-sec="{first}" open>"#)), "?s={alias} opens {first}");
+    }
 }
 
 #[test]
@@ -194,7 +220,7 @@ fn a_not_equal_rule_is_drawn_and_hides_its_field() {
     let mut v = schema_json();
     field_mut(&mut v, "qbit_url")["when"] = json!("torrent_client!=blackhole");
     let schema = Schema::from_json(&v);
-    let page = schema.section("apps").unwrap();
+    let page = schema.section("downloads").unwrap();
     let draw = |client: &str| {
         let mut values = cases()[0].1.clone();
         values["torrent_client"] = json!(client);
@@ -216,6 +242,6 @@ fn every_field_type_of_the_schema_is_drawn() {
     let html = from_schema(&schema)("general", values, false, None);
     assert!(html.contains(r#"<input class="input" type="text" data-k="app_name" "#), "{html}");
     assert!(html.contains(r#"<input class="input" type="text" data-k="base_url" "#), "url as text");
-    let apps = from_schema(&schema)("apps", values, false, None);
-    assert!(apps.contains(r#"<input class="input" type="text" data-k="streamrip_bin" "#), "path as text");
+    let downloads = from_schema(&schema)("downloads", values, false, None);
+    assert!(downloads.contains(r#"<input class="input" type="text" data-k="streamrip_bin" "#), "path as text");
 }

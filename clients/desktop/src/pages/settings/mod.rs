@@ -41,7 +41,11 @@ pub enum Section {
     Users,
     Invites,
     General,
-    Apps,
+    Library,
+    Downloads,
+    Integrations,
+    /// Server processing (Cadenza).
+    Processing,
     Accounts,
     Autodownload,
     Contribute,
@@ -53,7 +57,7 @@ pub enum Section {
 }
 
 impl Section {
-    pub const ALL: [Section; 16] = [
+    pub const ALL: [Section; 19] = [
         Section::Account,
         Section::Appearance,
         Section::Language,
@@ -62,7 +66,10 @@ impl Section {
         Section::Users,
         Section::Invites,
         Section::General,
-        Section::Apps,
+        Section::Library,
+        Section::Downloads,
+        Section::Integrations,
+        Section::Processing,
         Section::Accounts,
         Section::Autodownload,
         Section::Contribute,
@@ -83,7 +90,10 @@ impl Section {
             Section::Users => "users",
             Section::Invites => "invites",
             Section::General => "general",
-            Section::Apps => "apps",
+            Section::Library => "library",
+            Section::Downloads => "downloads",
+            Section::Integrations => "integrations",
+            Section::Processing => "processing",
             Section::Accounts => "accounts",
             Section::Autodownload => "autodownload",
             Section::Contribute => "contribute",
@@ -94,16 +104,18 @@ impl Section {
         }
     }
 
-    /// The section of a web page id, including the old aliases (`downloads`, `tagging`,
-    /// `services`) and the ids of single cards (`torznab` opens Apps & sources). A card id is
-    /// also remembered, so the section opens with that card unfolded (see [`take_focus`]), the
-    /// way the web's `#/settings?s=torznab` link does.
+    /// The section of a web page id, including the old aliases (`apps`, the page Apps & sources was
+    /// until R2, opens Downloads; `tagging` Library; `services` Integrations) and the ids of single
+    /// cards (`torznab` opens Downloads). A card id is also remembered, so the section opens with
+    /// that card unfolded (see [`take_focus`]), the way the web's `#/settings?s=torznab` link does.
     pub fn by_id(id: &str) -> Option<Section> {
         if let Some(s) = Section::ALL.into_iter().find(|s| s.id() == id) {
             return Some(s);
         }
         match id {
-            "downloads" | "tagging" | "services" => Some(Section::Apps),
+            "apps" => Some(Section::Downloads),
+            "tagging" => Some(Section::Library),
+            "services" => Some(Section::Integrations),
             "about" | "api" | "keys" => Some(Section::General),
             _ => {
                 let g = fields::group_of(id)?;
@@ -127,7 +139,10 @@ impl Section {
             Section::Users => "Users & permissions",
             Section::Invites => "Invites",
             Section::General => "General",
-            Section::Apps => "Apps & sources",
+            Section::Library => "Library",
+            Section::Downloads => "Downloads",
+            Section::Integrations => "Integrations",
+            Section::Processing => "Server processing",
             Section::Accounts => "Email & notifications",
             Section::Autodownload => "Auto-download",
             Section::Contribute => "Contribute",
@@ -144,7 +159,10 @@ impl Section {
             Section::Account | Section::Appearance | Section::Language | Section::Playback | Section::Connections => "You",
             Section::Users | Section::Invites => "People",
             Section::General
-            | Section::Apps
+            | Section::Library
+            | Section::Downloads
+            | Section::Integrations
+            | Section::Processing
             | Section::Accounts
             | Section::Autodownload
             | Section::Contribute
@@ -214,7 +232,10 @@ pub fn open(state: &mut State, section: Section, ctx: &mut Ctx) -> Task<Message>
         Section::Users => users::open(&mut state.users, ctx).map(Message::Users),
         Section::Invites => invites::open(&mut state.invites, ctx).map(Message::Invites),
         Section::General
-        | Section::Apps
+        | Section::Library
+        | Section::Downloads
+        | Section::Integrations
+        | Section::Processing
         | Section::Accounts
         | Section::Autodownload
         | Section::Contribute
@@ -281,7 +302,10 @@ pub fn view<'a>(state: &'a State, ctx: &Ctx<'a>) -> El<'a, Message> {
         Section::Users => users::view(&state.users, ctx).map(Message::Users),
         Section::Invites => invites::view(&state.invites, ctx).map(Message::Invites),
         Section::General
-        | Section::Apps
+        | Section::Library
+        | Section::Downloads
+        | Section::Integrations
+        | Section::Processing
         | Section::Accounts
         | Section::Autodownload
         | Section::Contribute
@@ -309,7 +333,10 @@ pub fn overlay<'a>(state: &'a State, ctx: &Ctx<'a>) -> Option<El<'a, Message>> {
         Section::Users => users::overlay(&state.users, ctx).map(|e| e.map(Message::Users)),
         Section::Invites => invites::overlay(&state.invites, ctx).map(|e| e.map(Message::Invites)),
         Section::General
-        | Section::Apps
+        | Section::Library
+        | Section::Downloads
+        | Section::Integrations
+        | Section::Processing
         | Section::Accounts
         | Section::Autodownload
         | Section::Contribute
@@ -325,7 +352,10 @@ pub fn subscription(state: &State) -> Subscription<Message> {
         Section::Playback => playback::subscription(&state.playback).map(Message::Playback),
         Section::Connections => connections::subscription(&state.connections).map(Message::Connections),
         Section::General
-        | Section::Apps
+        | Section::Library
+        | Section::Downloads
+        | Section::Integrations
+        | Section::Processing
         | Section::Accounts
         | Section::Autodownload
         | Section::Contribute
@@ -655,12 +685,23 @@ mod tests {
     #[test]
     fn sections_resolve_like_the_web_router() {
         assert_eq!(Section::by_id("playback"), Some(Section::Playback));
-        assert_eq!(Section::by_id("downloads"), Some(Section::Apps));
-        assert_eq!(Section::by_id("torznab"), Some(Section::Apps));
+        // Apps & sources became four pages (R2); its old names and its cards open the page that holds them
+        assert_eq!(Section::by_id("downloads"), Some(Section::Downloads));
+        assert_eq!(Section::by_id("apps"), Some(Section::Downloads));
+        assert_eq!(Section::by_id("tagging"), Some(Section::Library));
+        assert_eq!(Section::by_id("services"), Some(Section::Integrations));
+        assert_eq!(Section::by_id("library"), Some(Section::Library));
+        assert_eq!(Section::by_id("verify"), Some(Section::Library));
+        assert_eq!(Section::by_id("roon"), Some(Section::Integrations));
+        assert_eq!(Section::by_id("cadenza"), Some(Section::Processing));
+        assert_eq!(Section::by_id("processing"), Some(Section::Processing));
+        assert_eq!(Section::by_id("torznab"), Some(Section::Downloads));
         assert_eq!(Section::by_id("sync"), Some(Section::Tasks));
         assert_eq!(Section::by_id("about"), Some(Section::General));
         assert_eq!(Section::by_id("nowhere"), None);
-        assert_eq!(Section::by_id("slskd"), Some(Section::Apps));
+        assert_eq!(Section::by_id("slskd"), Some(Section::Downloads));
+        let server: Vec<&str> = Section::ALL.into_iter().filter(|s| s.group() == "Server").map(Section::label).collect();
+        assert_eq!(server[..5], ["General", "Library", "Downloads", "Integrations", "Server processing"]);
         // (other tests parse settings links at the same time, so only "something" is certain)
         assert!(take_focus().is_some());
         assert!(Section::Users.admin_only() && !Section::Computer.admin_only());

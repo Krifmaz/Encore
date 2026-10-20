@@ -2,21 +2,23 @@
 //! it comes from, `fetch` runs the sources (streamrip, Soulseek, Prowlarr → the download clients,
 //! YouTube), `verify` holds what a download is checked against, and `import` tags and imports the files
 //! and finishes the request. [`storage`] keeps a download whose import hits a storage error and runs its
-//! import again later (the `waiting` status), with the health check that pauses imports.
+//! import again later (the `waiting` status), with the health check that pauses imports. [`rejected`]
+//! keeps a download the audio check turned away, for Keep anyway and Download anyway.
 mod fetch;
 mod import;
 mod pick;
 mod queue;
+pub mod rejected;
 pub mod storage;
 mod verify;
 
-pub use queue::{cancel, recover, run, step};
+pub use queue::{cancel, cancel_holding, recover, run, step, Hold};
 
 use crate::sources::{slskd, streamrip, torznab, ytdlp};
 use crate::{notify, Ctx};
 use encore_db::{now, p, Row, RowExt};
 use encore_http::mb;
-use encore_library::tagger::{self, Rejected};
+use encore_library::tagger::{self, Check, Rejected};
 use fetch::*;
 use import::*;
 use pick::*;
@@ -40,6 +42,14 @@ static RIP_LINK: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"qobuz\.com|tida
 /// Running request tasks, so a cancel can stop them.
 #[derive(Clone, Default)]
 pub struct Tasks(Arc<Mutex<HashMap<i64, tokio::task::AbortHandle>>>);
+
+impl Tasks {
+    /// Whether the request's place in the queue is taken now (a step running, or held by [`Hold`]): the
+    /// queue starts no step for it.
+    pub fn taken(&self, id: i64) -> bool {
+        self.0.lock().unwrap_or_else(|p| p.into_inner()).get(&id).is_some_and(|h| !h.is_finished())
+    }
+}
 
 /// The request was cancelled/removed while we worked on it.
 #[derive(Debug)]

@@ -420,8 +420,9 @@ mod schema_route_tests {
         let (code, v) = get(&app, "/api/admin/settings/schema", Some(&admin)).await;
         assert_eq!(code, StatusCode::OK);
         assert_eq!(v, s.st.cfg.schema());
-        let apps = v["sections"].as_array().unwrap().iter().find(|x| x["id"] == "apps").unwrap();
-        let torznab = apps["groups"].as_array().unwrap().iter().find(|g| g["id"] == "torznab").unwrap();
+        let downloads = v["sections"].as_array().unwrap().iter().find(|x| x["id"] == "downloads").unwrap();
+        assert_eq!(downloads["aliases"], json!(["apps"]), "old links to Apps & sources open Downloads");
+        let torznab = downloads["groups"].as_array().unwrap().iter().find(|g| g["id"] == "torznab").unwrap();
         let qbit = torznab["fields"].as_array().unwrap().iter().find(|f| f["key"] == "qbit_password").unwrap();
         assert_eq!((qbit["type"].as_str(), qbit["secret"].as_bool(), qbit["when"].as_str()), (Some("password"), Some(true), Some("torrent_client=qbittorrent")));
         // the answer never carries a setting's value (a saved secret least of all)

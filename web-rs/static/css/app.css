@@ -749,3 +749,19 @@ body.offline-mode .shell { min-height: calc(100vh - var(--offline-bar)); }
   #toasts { left: 12px; right: 12px; }
   .toast { max-width: none; }
 }
+
+/* ---------- R2: a download the audio check turned away (Keep anyway / Download anyway), kept picker searches ---------- */
+/* the reason under a request row's line, in full: it wraps instead of being cut */
+.req-row .req-why { display: flex; align-items: flex-start; gap: 6px; margin-top: 3px; color: var(--warn); overflow-wrap: anywhere; line-height: 1.4; }
+.req-row .req-why svg { width: 13px; height: 13px; flex: none; margin-top: 2px; }
+/* the top of a request's details: why, and where the download came from */
+.anyway-box { display: flex; align-items: flex-start; gap: 10px; padding: 11px 14px; border-radius: 10px; margin-bottom: 12px;
+  border: 1px solid rgba(245,158,11,.35); background: rgba(245,158,11,.1); color: var(--text); overflow-wrap: anywhere; }
+.anyway-box > svg { width: 18px; height: 18px; flex: none; margin-top: 1px; color: var(--warn); }
+.anyway-box > div { flex: 1; min-width: 0; user-select: text; -webkit-user-select: text; }
+.anyway-text { font-weight: 600; margin-bottom: 2px; }
+/* the picker: "Found at 14:02 · Search again" under a source that answered from a kept search */
+.pk-found { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 6px; margin: 0 0 6px; }
+.pk-found .linkish { background: none; border: 0; padding: 0; font: inherit; color: var(--accent); cursor: pointer; }
+.pk-found .linkish:hover { text-decoration: underline; }
+.pk-again-err { margin: 0 0 8px; }

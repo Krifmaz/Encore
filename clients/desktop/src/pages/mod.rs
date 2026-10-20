@@ -290,7 +290,12 @@ pub enum Effect {
     CopyText(String),
     /// Show a text in full in a dialog: wrapped, selectable, with a Copy button (an error or a
     /// status that a row cuts short, a request's details).
-    Details { title: String, text: String },
+    Details {
+        title: String,
+        text: String,
+        lead: Option<crate::widgets::details::Lead>,
+        act: Option<crate::widgets::details::Act>,
+    },
     /// Open in the browser.
     OpenUrl(String),
     /// Change and save the config (the look is re-applied after).
@@ -489,9 +494,23 @@ impl<'a> Ctx<'a> {
 
     /// Open `text` in full in the details dialog (wrapped, selectable, with Copy).
     pub fn details(&mut self, title: impl Into<String>, text: impl Into<String>) {
+        self.details_with(title, text, None, None);
+    }
+
+    /// The details dialog with a few words above the text (`lead`: why the audio check turned a
+    /// download away) and a button that acts on what it shows (`act`: Keep anyway).
+    pub fn details_with(
+        &mut self,
+        title: impl Into<String>,
+        text: impl Into<String>,
+        lead: Option<crate::widgets::details::Lead>,
+        act: Option<crate::widgets::details::Act>,
+    ) {
         self.push(Effect::Details {
             title: title.into(),
             text: text.into(),
+            lead,
+            act,
         });
     }
 

@@ -557,7 +557,7 @@ async fn tick(st: &impl Ctx) {
 
 // ---- status -------------------------------------------------------------------------------------
 
-/// Settings → YouTube. Never holds a cookie value.
+/// Settings → Downloads → YouTube sign-in. Never holds a cookie value.
 pub fn status(st: &impl Ctx) -> Value {
     let data = st.data_dir();
     let s = load(data);

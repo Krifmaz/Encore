@@ -107,6 +107,12 @@ class RequestActions(val nav: Nav, private val scope: CoroutineScope, private va
     /** Rows with an action on its way: their buttons wait (the web disables the button it pressed). */
     internal var busy by mutableStateOf(emptySet<Long>())
 
+    /**
+     * Why Keep anyway or Download anyway failed when it was pressed in the details sheet (request id, the server's
+     * words): the sheet shows it itself, as it sits above the toasts.
+     */
+    internal var anywayError by mutableStateOf<Pair<Long, String>?>(null)
+
     /** The server's version for the copied text (GET /api/auth/info, asked once when a request is first copied). */
     private var serverVersion: String? = null
 
@@ -148,6 +154,34 @@ class RequestActions(val nav: Nav, private val scope: CoroutineScope, private va
         }
     }
 
+    /**
+     * Keep anyway / Download anyway (common.rs `take_anyway`) on the rejected download the row showed: the server's
+     * words as a toast ("It will be imported without the audio check"), the details sheet it was pressed in closes,
+     * and the list reloads – after an error too, so the row shows what the server offers now ("The rejected download
+     * is gone – Download anyway asks for it again").
+     */
+    fun takeAnyway(r: RequestRow, inSheet: Boolean = false) {
+        val a = RequestRules.anyway(r) ?: return
+        if (r.id in busy) return
+        busy = busy + r.id
+        anywayError = null
+        scope.launch {
+            try {
+                withContext(Dispatchers.IO) { nav.features.requestAnyway(r.id, a.action, a.rejected) }
+                Toasts.show(a.done, "ok")
+                if (inSheet && detailsFor == r.id) detailsFor = 0L
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                val why = e.message ?: "That didn't work"
+                Toasts.show(why, "err")
+                if (inSheet) anywayError = r.id to why
+            }
+            busy = busy - r.id
+            reload()
+        }
+    }
+
     /** Cancel: a request that keeps downloaded files asks first – they go with it (the web's confirm). */
     fun cancel(r: RequestRow) {
         if (r.hasFiles) confirmLose = r to "cancel" else act(r, "cancel")
@@ -184,6 +218,7 @@ class RequestActions(val nav: Nav, private val scope: CoroutineScope, private va
     }
 
     fun showDetails(r: RequestRow) {
+        anywayError = null
         detailsFor = r.id
     }
 
@@ -203,20 +238,35 @@ fun rememberRequestActions(nav: Nav, reload: () -> Unit): RequestActions {
 }
 
 /**
- * The buttons of a request (common.rs `request_row`): Approve, Deny, Pick, Retry or Import again (kept files: nothing
- * is downloaded again), Cancel – whichever apply.
+ * The buttons of a request (common.rs `request_row`): Approve, Deny, Pick, Keep anyway or Download anyway (a download
+ * the audio check turned away; the details sheet's [inSheet] makes it the primary button), Retry or Import again (kept
+ * files: nothing is downloaded again), Cancel – whichever apply.
  */
 @Composable
-private fun RequestButtons(a: RequestActions, r: RequestRow) {
+private fun RequestButtons(a: RequestActions, r: RequestRow, inSheet: Boolean = false) {
     val wait = r.id in a.busy
     if (RequestRules.canApprove(r, a.admin)) {
         SmallButton("Approve", iconRes = R.drawable.ic_check, primary = true, enabled = !wait) { a.act(r, "approve") }
         SmallButton("Deny", danger = true, enabled = !wait) { a.act(r, "deny") }
     }
     if (RequestRules.canPick(r, a.me)) SmallButton("Pick", iconRes = R.drawable.ic_search) { a.pick(r) }
+    val offer = RequestRules.anyway(r)
+    if (offer != null && RequestRules.mayFix(a.me)) {
+        SmallButton(offer.label, iconRes = if (offer.keep) R.drawable.ic_check else R.drawable.ic_download, primary = inSheet, enabled = !wait) { a.takeAnyway(r, inSheet) }
+    }
     if (RequestRules.canImportAgain(r)) SmallButton("Import again", iconRes = R.drawable.ic_refresh, enabled = !wait) { a.act(r, "import-again") }
     if (RequestRules.canRetry(r, a.me)) SmallButton("Retry", iconRes = R.drawable.ic_refresh, enabled = !wait) { a.act(r, "retry") }
     if (RequestRules.canCancel(r)) SmallButton("Cancel", iconRes = R.drawable.ic_close, enabled = !wait) { a.cancel(r) }
+}
+
+/** Why the audio check turned a download away, under a request's status line (common.rs `.req-why`): warn colour, whole. */
+@Composable
+private fun AnywayReason(text: String, modifier: Modifier = Modifier) {
+    Row(modifier, verticalAlignment = Alignment.Top) {
+        Icon(painterResource(R.drawable.ic_warning), contentDescription = null, tint = EncoreColors.Warn, modifier = Modifier.padding(top = 1.dp).size(14.dp))
+        Spacer(Modifier.width(6.dp))
+        Text(text, style = MaterialTheme.typography.bodySmall, color = EncoreColors.Warn)
+    }
 }
 
 @Composable
@@ -255,6 +305,9 @@ fun RequestItem(a: RequestActions, r: RequestRow, indent: Dp = 0.dp) {
                 Badge(r.kind)
                 Text(" " + RequestRules.statusLine(r, a.admin, formatAgo(r.createdAt)), style = MaterialTheme.typography.bodySmall, color = p.muted, maxLines = 2, overflow = TextOverflow.Ellipsis)
             }
+            // a download the audio check turned away: why, in full on its own line (it wraps, never cut)
+            val why = RequestRules.anywayLine(r)
+            if (why.isNotEmpty()) AnywayReason(why, Modifier.padding(top = 4.dp))
             if (r.isActive && r.progress > 0) ProgressBar(r.progress, Modifier.padding(top = 6.dp).fillMaxWidth(0.8f))
             FlowRow(Modifier.padding(top = 6.dp), horizontalArrangement = Arrangement.spacedBy(6.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
                 StatusBadge(r.status, Modifier.align(Alignment.CenterVertically))
@@ -332,9 +385,34 @@ private fun RequestDetailsSheet(a: RequestActions, r: RequestRow, onDismiss: () 
                 }
             }
             if (copied.value == false) Text(Toasts.COPY_FAILED, style = MaterialTheme.typography.bodySmall, color = EncoreColors.Err, modifier = Modifier.padding(top = 6.dp))
+            // a download the audio check turned away, offered again: why, in full, and where it came from (common.rs
+            // `anyway_box_html`); Keep anyway / Download anyway is the primary button below
+            if (d.anyway.isNotEmpty()) {
+                val shape = RoundedCornerShape(10.dp)
+                Row(
+                    Modifier
+                        .padding(top = 12.dp)
+                        .fillMaxWidth()
+                        .clip(shape)
+                        .background(EncoreColors.Warn.copy(alpha = 0.10f))
+                        .border(1.dp, EncoreColors.Warn.copy(alpha = 0.40f), shape)
+                        .padding(horizontal = 12.dp, vertical = 10.dp),
+                    verticalAlignment = Alignment.Top,
+                ) {
+                    Icon(painterResource(R.drawable.ic_warning), contentDescription = null, tint = EncoreColors.Warn, modifier = Modifier.padding(top = 2.dp).size(18.dp))
+                    Spacer(Modifier.width(10.dp))
+                    SelectionContainer(Modifier.weight(1f)) {
+                        Column {
+                            Text(d.anyway, style = MaterialTheme.typography.bodyMedium, color = p.text)
+                            if (d.anywayFrom.isNotEmpty()) Text(d.anywayFrom, style = MaterialTheme.typography.bodySmall, color = p.muted, modifier = Modifier.padding(top = 2.dp))
+                        }
+                    }
+                }
+            }
             if (d.status.isNotEmpty()) Text(d.status, style = MaterialTheme.typography.bodySmall, color = EncoreColors.Warn, modifier = Modifier.padding(top = 8.dp))
             if (r.isActive && r.progress > 0) ProgressBar(r.progress, Modifier.padding(top = 10.dp).fillMaxWidth())
-            if (d.message.isNotEmpty()) {
+            // (a hand pick the check turned away has the reason as its message: it shows once, above)
+            if (d.message.isNotEmpty() && d.message.trim() != d.anyway) {
                 SelectionContainer {
                     Text(d.message, style = MaterialTheme.typography.bodyMedium, modifier = Modifier.padding(top = 12.dp))
                 }
@@ -349,6 +427,22 @@ private fun RequestDetailsSheet(a: RequestActions, r: RequestRow, onDismiss: () 
                     Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
                         if (d.error.isNotEmpty() && d.error != d.message) Text(d.error, style = MaterialTheme.typography.bodySmall, color = EncoreColors.Err)
                         for (f in d.errorFacts) Text(f, style = MaterialTheme.typography.bodySmall, color = p.muted)
+                    }
+                }
+            }
+            // every download the audio check turned away, oldest first: why, where from, the check's words, when, its files
+            if (d.rejected.isNotEmpty()) {
+                Text("Turned away by the audio check", style = MaterialTheme.typography.titleSmall, modifier = Modifier.padding(top = 16.dp, bottom = 4.dp))
+                SelectionContainer {
+                    Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                        for (e in d.rejected) {
+                            Column {
+                                Text(e.text, style = MaterialTheme.typography.bodySmall, fontWeight = FontWeight.SemiBold)
+                                for ((k, v) in listOf("From" to e.from, "Check" to e.check, "When" to e.at, "Files" to e.files)) {
+                                    if (v.isNotBlank()) Text("$k: $v", style = MaterialTheme.typography.bodySmall, color = p.muted)
+                                }
+                            }
+                        }
                     }
                 }
             }
@@ -377,7 +471,7 @@ private fun RequestDetailsSheet(a: RequestActions, r: RequestRow, onDismiss: () 
                 }
             }
             FlowRow(Modifier.padding(top = 18.dp), horizontalArrangement = Arrangement.spacedBy(6.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
-                RequestButtons(a, r)
+                RequestButtons(a, r, inSheet = true)
                 if (RequestRules.canRemove(r)) {
                     val wait = r.id in a.busy
                     SmallButton("Remove from list", iconRes = R.drawable.ic_close, enabled = !wait) { a.removeFromList(r) }
@@ -385,6 +479,12 @@ private fun RequestDetailsSheet(a: RequestActions, r: RequestRow, onDismiss: () 
                 }
             }
             if (RequestRules.canImportAgain(r)) Text(RequestRules.IMPORT_AGAIN_HELP, style = MaterialTheme.typography.bodySmall, color = p.faint, modifier = Modifier.padding(top = 6.dp))
+            // what Keep anyway / Download anyway does (the web's title on the button), and why it failed when it did
+            val offer = RequestRules.anyway(r)
+            if (offer != null && RequestRules.mayFix(a.me)) Text(offer.help, style = MaterialTheme.typography.bodySmall, color = p.faint, modifier = Modifier.padding(top = 6.dp))
+            a.anywayError?.takeIf { it.first == r.id }?.let { (_, why) ->
+                SelectionContainer { Text(why, style = MaterialTheme.typography.bodySmall, color = EncoreColors.Err, modifier = Modifier.padding(top = 6.dp)) }
+            }
         }
     }
 }

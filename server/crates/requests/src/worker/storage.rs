@@ -461,7 +461,8 @@ impl Spec {
 
 /// What happened to an import that [`import_checked`] ran.
 pub(super) enum Imported {
-    /// the request is finished (completed, or for a link that imported nothing, failed)
+    /// the request is finished (completed; failed for a link that imported nothing, or for a hand pick the
+    /// audio check turned away)
     Finished,
     /// a storage problem: the request waits with its files kept
     Waiting,
@@ -567,6 +568,23 @@ pub(super) async fn import_checked(st: &impl Ctx, r: &mut Req, files: &[PathBuf]
                 Ok(Imported::Stopped)
             }
             _ => {
+                // a download the audio check turned away is kept for Keep anyway ([`rejected`]); a hand pick
+                // fails at once with the reason (it never falls through to other sources)
+                if let Some(rej) = e.downcast_ref::<Rejected>().filter(|x| x.check == Check::Audio) {
+                    let kept = r.d["kept"].clone();
+                    rejected::keep(st, r, files, &kept, rej).await;
+                    if r.d["pick"].is_object() {
+                        if let Some(d) = r.d.as_object_mut() {
+                            d.remove("kept");
+                            d.remove("wait");
+                        }
+                        if let Some(id) = kept["torznab_id"].as_str() {
+                            torznab::remove(st, id).await;
+                        }
+                        rejected::fail_pick(st, r, rej).await;
+                        return Ok(Imported::Finished);
+                    }
+                }
                 // the source's own handling decides; the files are not kept for a later import (written now:
                 // the queue reads the request again after an error)
                 if let Some(d) = r.d.as_object_mut() {
@@ -626,7 +644,8 @@ async fn run_import(st: &impl Ctx, r: &mut Req, files: &[PathBuf], root: &Path) 
 }
 
 /// The files are in the library: Encore's own staging folder goes, a torrent leaves its client, the kept
-/// record and the wait are cleared.
+/// record and the wait are cleared; so do the downloads the audio check turned away and a check that was
+/// off for this download ([`rejected`]).
 async fn finish(st: &impl Ctx, r: &mut Req) {
     let kept = r.d["kept"].clone();
     if kept["own"].as_bool().unwrap_or(false) {
@@ -635,9 +654,11 @@ async fn finish(st: &impl Ctx, r: &mut Req) {
     if let Some(id) = kept["torznab_id"].as_str() {
         torznab::remove(st, id).await;
     }
+    rejected::remove(st, r.id);
     if let Some(d) = r.d.as_object_mut() {
         d.remove("kept");
         d.remove("wait");
+        d.remove("skip_check");
     }
 }
 
@@ -677,7 +698,7 @@ async fn import_link_files(st: &impl Ctx, r: &mut Req, files: &[PathBuf], root: 
         let res: anyhow::Result<()> = async {
             if let Some((artist, album)) = &album {
                 let got = tagger::import_album_files(st, &fs, tagger::AlbumImport {
-                    artist, album, rgid: None, source_root: root, reject: false, source_meta: None, hint: hint.as_deref(),
+                    artist, album, rgid: None, source_root: root, reject: false, audio: false, source_meta: None, hint: hint.as_deref(),
                 }).await?;
                 new.extend(got);
                 return Ok(());
@@ -699,7 +720,7 @@ async fn import_link_files(st: &impl Ctx, r: &mut Req, files: &[PathBuf], root: 
                     artist = "Unknown Artist".into();
                 }
             }
-            let (p, note) = tagger::import_single(st, f, &artist, &title, None, root, None, false, if rip { None } else { hint.as_deref() }).await?;
+            let (p, note) = tagger::import_single(st, f, &artist, &title, None, root, None, false, false, if rip { None } else { hint.as_deref() }).await?;
             if note.starts_with("already in library") {
                 already += 1;
             }
@@ -758,7 +779,7 @@ fn park(st: &impl Ctx, r: &mut Req, e: &StepError, reason: &str) -> anyhow::Resu
     let since = if same { r.d["wait"]["since"].as_f64().unwrap_or(t) } else { t };
     let text = e.to_string();
     let news = r.d["wait"]["error"]["text"].as_str() != Some(text.as_str());
-    if reason == STORAGE_DOWNLOAD && !r.d["pick"].is_object() && r.s("kind") != "url" {
+    if reason == STORAGE_DOWNLOAD && !r.d["pick"].is_object() && r.s("kind") != "url" && !finished_in_client(r) {
         // the source step runs again: it goes back first in the sources
         let src = r.s("source");
         let mut srcs: Vec<Value> = r.d["sources"].as_array().cloned().unwrap_or_default();
@@ -805,6 +826,12 @@ async fn fail_kept(st: &impl Ctx, r: &mut Req, e: &anyhow::Error) {
     fail(st, r, &text).await;
 }
 
+/// A request whose torrent or Usenet download is still its client's (`detail.torznab.id`): a storage wait
+/// with it looks at that download again, not at the indexers.
+fn finished_in_client(r: &Req) -> bool {
+    r.s("source") == "torznab" && r.d["torznab"]["id"].is_string()
+}
+
 /// A waiting request's turn ([`super::queue::step`]): once its next try is due, the import runs again from
 /// the kept files (`storage_import`), or the source step does (`storage_download`) once the staging folder is
 /// writable.
@@ -819,6 +846,16 @@ pub(super) async fn retry(st: &impl Ctx, r: &mut Req) -> anyhow::Result<()> {
             }
             if let Some(d) = r.d.as_object_mut() {
                 d.remove("wait");
+            }
+            if finished_in_client(r) {
+                // the torrent or Usenet download it waited with is looked at again where it is (never
+                // searched for and added again)
+                if let Some(o) = r.d["torznab"].as_object_mut() {
+                    o.insert("last_change".into(), json!(now()));
+                    o.remove("err_since");
+                }
+                upd(st, r, &[("status", json!("downloading")), ("message", json!("Looking at the finished download again…"))]);
+                return poll_torznab(st, r).await;
             }
             if r.d["pick"].is_object() || r.s("kind") == "url" {
                 return start(st, r).await;
@@ -891,6 +928,9 @@ fn static_source(s: &str) -> &'static str {
 async fn wrong_files(st: &impl Ctx, r: &mut Req, kept: &Value, files: &[PathBuf], e: &anyhow::Error) -> anyhow::Result<()> {
     let why = format!("wrong audio ({e})");
     st.db().log("warning", &format!("Rejected the kept files of {}: {e}", r.label()));
+    if r.d["skip_check"]["why"] == "keep" {
+        return rejected::kept_turned_away(st, r, e).await;
+    }
     match kept["source"].as_str().unwrap_or("") {
         "slskd" | "slskd_lossless" if r.d["slskd"]["candidates"].is_array() => {
             let root = PathBuf::from(kept["root"].as_str().unwrap_or(""));
@@ -1028,8 +1068,15 @@ pub fn remove_staging(st: &impl Ctx, id: i64) -> bool {
 pub fn row_fields(status: &str, d: &Value, admin: bool) -> serde_json::Map<String, Value> {
     let mut m = serde_json::Map::new();
     let waiting = status == "waiting";
-    // a request parked for Soulseek by an older version (queued with soulseek_wait) reads as waiting too
-    let reason = if waiting { d["wait"]["reason"].as_str().map(String::from).or_else(|| d["soulseek_wait"].is_object().then(|| SOULSEEK.to_string())) } else { None };
+    // a request parked for Soulseek by an older version (queued with soulseek_wait) reads as waiting too.
+    // Keep anyway parks its import as a kept-files import, which only waits for the queue's next look: no
+    // reason, unless the storage really failed it
+    let kept_anyway = d["skip_check"]["why"] == "keep" && !d["wait"]["error"].is_object();
+    let reason = if waiting && !kept_anyway {
+        d["wait"]["reason"].as_str().map(String::from).or_else(|| d["soulseek_wait"].is_object().then(|| SOULSEEK.to_string()))
+    } else {
+        None
+    };
     m.insert("wait_reason".into(), json!(reason));
     m.insert("next_try_at".into(), if waiting { d["wait"]["next_try_at"].clone() } else { Value::Null });
     let has = d["kept"].is_object() && matches!(status, "failed" | "waiting" | "importing" | "completed") && has_files(d);
@@ -1127,6 +1174,11 @@ mod tests {
         let m = row_fields("queued", &json!({ "soulseek_wait": { "since": 1.0 } }), true);
         assert_eq!(m["wait_reason"], Value::Null);
         assert_eq!(row_fields("waiting", &json!({ "soulseek_wait": { "since": 1.0 } }), true)["wait_reason"], "soulseek");
+        // Keep anyway's import waits for nothing but the queue's next look; a storage error is still named
+        let mut kept = json!({ "skip_check": { "by": "a", "why": "keep" }, "wait": { "reason": "storage_import", "next_try_at": 1.0 } });
+        assert_eq!(row_fields("waiting", &kept, true)["wait_reason"], Value::Null);
+        kept["wait"]["error"] = json!({ "step": "import", "op": "mkdir", "storage": true });
+        assert_eq!(row_fields("waiting", &kept, true)["wait_reason"], "storage_import");
         // other users see no server folders
         let d = json!({ "wait": { "reason": "storage_import", "next_try_at": 100.0, "error": { "step": "import", "op": "mkdir", "path": "/music/A", "storage": true, "text": "import failed: mkdir /music/A: …" } },
                         "output": { "source": "streamrip", "text": "/downloads/encore/request-1" } });

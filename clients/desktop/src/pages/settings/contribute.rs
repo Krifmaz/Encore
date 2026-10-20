@@ -244,7 +244,7 @@ pub fn view<'a>(state: &'a State, _ctx: &Ctx<'a>) -> El<'a, Message> {
     let intro_card = super::card("Contribute", intro);
 
     let mut acoustid: Vec<El<'a, Message>> = vec![
-        help("When a download's audio confirms the MusicBrainz recording it was asked for, its fingerprint is sent to AcoustID in batches, once per song. Your user key says who sent it; the API key under Apps & sources → Verification is Encore's application key.").into(),
+        help("When a download's audio confirms the MusicBrainz recording it was asked for, its fingerprint is sent to AcoustID in batches, once per song. Your user key says who sent it; the API key under Settings → Library → Verification & duplicates is Encore's application key.").into(),
         widgets::stat::stats(vec![
             stat::stat(stat::num(fmt::f(a, "queued")), "Waiting to send"),
             stat::stat(stat::num(fmt::f(a, "submitted")), "Sent, being processed"),

@@ -25,7 +25,7 @@ pub fn enabled(st: &impl Ctx) -> bool {
 /// Why slskd can't answer right now, in words for the user (None while it runs or is starting).
 pub fn not_ready(st: &impl Ctx) -> Option<String> {
     if !slskd_managed::configured(st) {
-        return Some("Soulseek: switch it on and set a username and password in Settings → Apps & sources → Soulseek (an account is created on first login)".into());
+        return Some("Soulseek: switch it on and set a username and password in Settings → Downloads → Soulseek (an account is created on first login)".into());
     }
     let s = st.requests().slskd.status();
     match s["state"].as_str().unwrap_or("off") {
@@ -33,7 +33,7 @@ pub fn not_ready(st: &impl Ctx) -> Option<String> {
         "not_installed" => Some(slskd_managed::NOT_INSTALLED.into()),
         "waiting_vpn" => Some(slskd_managed::WAITING_FOR_VPN.into()),
         "crashed" => Some(format!("Soulseek engine stopped: {}", s["error"].as_str().unwrap_or("unknown problem"))),
-        "blocked" => Some(format!("Soulseek can't start – {}", s["error"].as_str().unwrap_or("see Settings → Soulseek"))),
+        "blocked" => Some(format!("Soulseek can't start – {}", s["error"].as_str().unwrap_or("see Settings → Downloads → Soulseek"))),
         _ if slskd_managed::installed_version(st).is_none() => Some(slskd_managed::NOT_INSTALLED.into()),
         _ => Some("Soulseek is starting – try again in a moment".into()),
     }
@@ -108,7 +108,33 @@ pub async fn search_now(st: &impl Ctx, text: &str) -> anyhow::Result<Vec<Value>>
 /// [`search`] for `who`. `note` says what the search is doing, for the worker's request: `None` when it
 /// searches (its turn has come, or the server's pause is over: "Searching Soulseek…"), `Some(words)` while
 /// it sits out a pause of the server's ("Rate limited by the Soulseek server – searching again at 14:05").
+/// The answers of a search that ends well are kept for the picker ([`crate::search_cache`]).
 pub async fn search_as(st: &impl Ctx, text: &str, who: Who, note: impl Fn(Option<&str>) + Send + Sync) -> anyhow::Result<Vec<Value>> {
+    search_kept(st, text, who, None, note).await
+}
+
+/// [`search_as`], kept with the request it was made for (`request_id`), so the picker opened for that
+/// request finds it. Errors and searches cut short are never kept.
+pub async fn search_kept(st: &impl Ctx, text: &str, who: Who, request_id: Option<i64>, note: impl Fn(Option<&str>) + Send + Sync) -> anyhow::Result<Vec<Value>> {
+    let res = search_live(st, text, who, note).await?;
+    crate::search_cache::keep_slskd(st, text, request_id, &res).await;
+    Ok(res)
+}
+
+/// The words Soulseek (and the indexers) are asked for a request's names: bracketed parts and symbols
+/// out, the symbols that stand for letters spelled out first (Ke$ha → Kesha, P!nk → Pink; see
+/// `torznab::fold_symbols`), so they get "Kesha Cannibal" and not "Ke ha Cannibal". The worker's searches
+/// and the picker's first search use it, so the picker finds what the worker searched.
+pub fn query_text(parts: &[&str]) -> String {
+    static NW: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"[^\w\s']").unwrap());
+    let s = parts.iter().filter(|p| !p.is_empty()).cloned().collect::<Vec<_>>().join(" ");
+    let s = super::torznab::fold_symbols(&s);
+    let s = BRACKETS.replace_all(&s, " ");
+    NW.replace_all(&s, " ").split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+/// The search itself, behind [`search_kept`].
+async fn search_live(st: &impl Ctx, text: &str, who: Who, note: impl Fn(Option<&str>) + Send + Sync) -> anyhow::Result<Vec<Value>> {
     if let Some(why) = not_ready(st) {
         anyhow::bail!(why);
     }
@@ -288,10 +314,18 @@ pub async fn search_start(st: &impl Ctx, text: &str) -> anyhow::Result<String> {
 
 /// The responses a search has so far and whether it is over ("search expired" once slskd forgot it).
 pub async fn search_poll(st: &impl Ctx, id: &str) -> anyhow::Result<(Vec<Value>, bool)> {
+    search_poll_whole(st, id).await.map(|(res, done, _)| (res, done))
+}
+
+/// [`search_poll`], and whether a search that is over ran to its end – not cut short by the session
+/// ending under it (slskd cancels the searches then): only such an answer is kept for the picker.
+pub async fn search_poll_whole(st: &impl Ctx, id: &str) -> anyhow::Result<(Vec<Value>, bool, bool)> {
     let s = req(st, reqwest::Method::GET, &format!("searches/{id}"), None, &[]).await
         .map_err(|e| if e.to_string().contains("returned 404") { anyhow::anyhow!("search expired") } else { e })?;
     let res = req(st, reqwest::Method::GET, &format!("searches/{id}/responses"), None, &[]).await?;
-    Ok((res.as_array().cloned().unwrap_or_default(), s["isComplete"].as_bool().unwrap_or(false)))
+    let done = s["isComplete"].as_bool().unwrap_or(false);
+    let cut_short = s["state"].as_str().is_some_and(|x| x.contains("Cancelled") || x.contains("Errored"));
+    Ok((res.as_array().cloned().unwrap_or_default(), done, done && !cut_short && not_ready(st).is_none()))
 }
 
 /// End a polled search: stopped if it still runs, then forgotten (slskd keeps them until told).

@@ -108,7 +108,7 @@ pub enum Message {
     YtToken(Result<Value, ApiError>),
     YtCopyToken,
     OpenUrl(String),
-    /// Every 5 s while the Apps group is open: the Soulseek and VPN states.
+    /// Every 5 s while Downloads is open: the Soulseek and VPN states.
     Tick,
     CloseDialog,
 }
@@ -118,7 +118,8 @@ fn get(ctx: &Ctx, path: &'static str, f: fn(Result<Value, ApiError>) -> Message)
     Task::perform(async move { api.get(path).await }, f)
 }
 
-/// What the Apps & sources group needs, loaded when it opens.
+/// What Downloads (the Download tools card and the source cards' blocks) and Server processing (the
+/// Cadenza card's blocks) need, loaded when one of them opens.
 pub fn open(state: &mut State, ctx: &mut Ctx) -> Task<Message> {
     state.tools = None;
     state.busy = None;
@@ -244,7 +245,7 @@ pub fn session_text(s: &Value) -> String {
 /// The sentence away from the card (the Soulseek page, Diagnostics): "fix them below" points at the card's
 /// fields, which aren't there – it names the card instead, in the server's words (`text_elsewhere`).
 pub fn session_text_elsewhere(text: &str) -> String {
-    text.replace(" – fix them below", " – fix them in Settings → Soulseek")
+    text.replace(" – fix them below", " – fix them in Settings → Downloads → Soulseek")
 }
 
 /// What goes under the sentence, on this computer's clock: "Next attempt in 3 m 12 s · 12 searches waiting
@@ -864,7 +865,7 @@ fn tool_row<'a>(state: &'a State, t: &'a Value) -> El<'a, Message> {
     column![container(row![left, action].spacing(12).align_y(Alignment::Center)).padding([10, 14]), widgets::divider()].into()
 }
 
-/// Settings → Apps & sources → Download tools.
+/// Settings → Downloads → Download tools.
 pub fn tools_card<'a>(state: &'a State, values: &'a Value) -> El<'a, Message> {
     let Some(tools) = &state.tools else {
         return widgets::card(widgets::skeleton_rows(3)).width(Length::Fill).into();
@@ -1322,7 +1323,7 @@ mod tests {
         // rejected: red; away from the card the line names it (the server's words) instead of saying "below"
         let s = json!({ "state": "stopped", "reason": "rejected", "text": "Rejected: invalid username or password – fix them below" });
         assert_eq!(session_tone(&s), "err");
-        assert_eq!(session_text_elsewhere(&session_text(&s)), "Rejected: invalid username or password – fix them in Settings → Soulseek");
+        assert_eq!(session_text_elsewhere(&session_text(&s)), "Rejected: invalid username or password – fix them in Settings → Downloads → Soulseek");
         // not installed: the engine line only
         let r = json!({ "state": "not_installed", "hint": "Install or update it under Download tools", "session": { "state": "stopped", "text": "Soulseek is not installed" } });
         assert!(!has_session(&r));

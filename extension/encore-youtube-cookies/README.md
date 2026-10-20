@@ -20,7 +20,7 @@ was made in.
 
 ## Install
 
-1. In Encore: Settings → Apps & sources → YouTube sign-in → **Connect the browser extension**. Copy the
+1. In Encore: Settings → Downloads → YouTube sign-in → **Connect the browser extension**. Copy the
    token (it is shown once and can only upload YouTube cookies).
 2. Download `Encore-youtube-extension-<version>.zip` from the Encore releases page and unzip it.
    * **Chrome, Edge, Brave**: open `chrome://extensions` (`edge://extensions`, `brave://extensions`),
@@ -38,7 +38,7 @@ was made in.
    says whether the permission was given and to click the button once more. The extension's
    **Options** in the browser's extension settings open the same page in a tab.
 4. Click the extension's button → **Hand over a YouTube sign-in**, sign in to Google in the private window,
-   and let it count down. Settings → Apps & sources → YouTube sign-in in Encore then shows "Handed-over
+   and let it count down. Settings → Downloads → YouTube sign-in in Encore then shows "Handed-over
    sign-in" as the source, with the browser it came from; "Everyday browser (extension)" is the optional
    sync below. Encore refreshes the handed-over sign-in every 4 hours and says so on the card; when Google
    answers a refresh without new cookies, the card says the sign-in was only checked.

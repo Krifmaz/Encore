@@ -123,6 +123,10 @@ Asks (collected during `update`, applied by the app right after):
   dialog over everything: the text whole, wrapped and selectable (a read-only editor), with Close and
   Copy. `widgets::details::copy_btn(msg)` is the small Copy button an error line carries. Use them for
   any error or status a line cuts short or that someone may paste into a bug report.
+  `ctx.details_with(title, text, lead, act)` adds a warning box above the text (`details::Lead`: why,
+  in full, and where from) and one button beside Copy (`details::Act`: label, the path to POST with its
+  body, the toast once it worked); the app sends it, closes the dialog and reloads the open page's request
+  list. A request's Keep anyway / Download anyway uses it.
 - `ctx.edit_config(|c| c.appearance.theme = "oled".into())` – saved, look re-applied.
 - `ctx.player_msg(player::Message::…)` – e.g. open the queue or Customize the bar.
 - `ctx.signed_in(user)` (login only), `ctx.sign_out()`, `ctx.refresh_session()` (after a profile change),

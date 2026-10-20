@@ -232,7 +232,7 @@ pub fn view<'a>(state: &'a State, _ctx: &Ctx<'a>) -> El<'a, Message> {
                 .align_y(Alignment::Center),
             ]
             .spacing(4),
-            help("Which sources are searched, and in what order: Settings → Apps & sources → Download pipeline."),
+            help("Which sources are searched, and in what order: Settings → Downloads → Download pipeline."),
         ]
         .spacing(14)
         .width(Length::Fill),

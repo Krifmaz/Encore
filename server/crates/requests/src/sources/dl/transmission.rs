@@ -66,6 +66,8 @@ pub async fn add(st: &impl Ctx, url: &str) -> anyhow::Result<String> {
     if !label.trim().is_empty() {
         args["labels"] = json!([label]);
     }
+    // started at once, whatever "Start added torrents" says
+    args["paused"] = json!(false);
     let v = rpc(st, "torrent-add", args).await?;
     let t = if v["torrent-added"].is_object() { &v["torrent-added"] } else { &v["torrent-duplicate"] };
     let hash = t["hashString"].as_str().filter(|h| !h.is_empty()).ok_or_else(|| anyhow::anyhow!("Transmission didn't accept the torrent"))?;
@@ -87,6 +89,16 @@ pub async fn poll(st: &impl Ctx, hash: &str) -> anyhow::Result<Poll> {
         let remote = format!("{}/{}", t["downloadDir"].as_str().unwrap_or("").trim_end_matches('/'), t["name"].as_str().unwrap_or(""));
         return Ok(Poll::Done(local(st, &remote, "transmission_download_path")));
     }
+    let pct = (done * 1000.0).round() / 10.0;
+    if status == 3 {
+        // waiting for its turn in Transmission's download queue: no stall
+        return Ok(Poll::Queued(pct, "Transmission: queued – its limit of downloads at once is reached".into()));
+    }
+    if status == 0 {
+        // stopped before it finished ("Start added torrents" off, or stopped by hand): started again
+        let _ = rpc(st, "torrent-start", json!({ "ids": [hash] })).await;
+        return Ok(Poll::Progress(pct, "Transmission: starting the download (it was stopped)".into()));
+    }
     let speed = t["rateDownload"].as_f64().unwrap_or(0.0) / 1e6;
     let msg = if status == 1 || status == 2 {
         "Transmission: checking files".to_string()
@@ -95,7 +107,7 @@ pub async fn poll(st: &impl Ctx, hash: &str) -> anyhow::Result<Poll> {
     } else {
         format!("Transmission: {speed:.1} MB/s")
     };
-    Ok(Poll::Progress((done * 1000.0).round() / 10.0, msg))
+    Ok(Poll::Progress(pct, msg))
 }
 
 pub async fn remove(st: &impl Ctx, hash: &str) {

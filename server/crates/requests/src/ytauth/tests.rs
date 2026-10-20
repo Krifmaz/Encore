@@ -301,7 +301,7 @@ fn extension_manifests_are_valid() {
     // and one path to the card in Settings
     let ext_readme = read("README.md");
     for f in ["README.md", "extension/encore-youtube-cookies/README.md"] {
-        assert!(std::fs::read_to_string(repo.join(f)).unwrap().contains("Apps & sources"), "{f} points at Settings → Apps & sources → YouTube sign-in");
+        assert!(std::fs::read_to_string(repo.join(f)).unwrap().contains("Settings → Downloads → YouTube sign-in"), "{f} points at Settings → Downloads → YouTube sign-in");
     }
     assert!(ext_readme.contains("Connect the browser extension") && ext_readme.contains("Hand over a YouTube sign-in"));
 }

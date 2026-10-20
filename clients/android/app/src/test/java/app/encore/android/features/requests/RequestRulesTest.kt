@@ -399,4 +399,224 @@ class RequestRulesTest {
             RequestRules.transferErrorText(SlskTransfer(username = "alice", filename = "01 - Intro.flac", error = "Transfer rejected: File not shared.")))
         assertEquals(RequestRules.IMPORT_AGAIN_HELP, "Import the downloaded files again – nothing is downloaded again")
     }
+
+    // ---- R2: downloads the audio check turned away, Keep anyway / Download anyway ------------------------------------
+
+    /** A row of GET /api/requests after the audio check turned the download away (package A's answer; the web's `rejected_row`). */
+    private val rejected = """{"id": 21, "kind": "track", "status": "failed", "title": "Moonlight Shadow (nightcore)", "artist": "Machine Time", "album": "Moonlight Shadow (nightcore)",
+        "source": "ytdlp", "username": "alice", "created_at": 0, "attempts": 10, "picked": false, "has_files": false, "skip_check": false,
+        "message": "All sources exhausted (ytdlp: YouTube match was the wrong audio (audio is “Diase – Sun” (different title)))",
+        "rejected": [
+            {"id": 1, "source": "streamrip", "via": "Deezer", "detail": "via streamrip", "url": "https://www.deezer.com/track/3135556", "file": "01. Moonlight Shadow.flac",
+             "count": 1, "check": "audio", "reason": "audio is “Diase – Sun” (different title)", "heard": "Diase – Sun",
+             "text": "The audio sounds like Diase – Sun, not Moonlight Shadow (nightcore)", "at": 1760890000.5, "has_file": false, "path": null},
+            {"id": 2, "source": "ytdlp", "via": "YouTube Music", "detail": null, "url": "https://music.youtube.com/watch?v=x", "file": "Moonlight Shadow.opus",
+             "count": 1, "check": "audio", "reason": "audio is “Diase – Sun” (different title)", "heard": "Diase – Sun",
+             "text": "The audio sounds like Diase – Sun, not Moonlight Shadow (nightcore)", "at": 1760890100.0, "has_file": true, "path": "/downloads/encore/rejected-21/2"}
+        ],
+        "anyway": {"action": "keep", "id": 2, "text": "The audio sounds like Diase – Sun, not Moonlight Shadow (nightcore)"},
+        "log": ["ytdlp: YouTube match was the wrong audio"]}"""
+
+    private val because = "The audio sounds like Diase – Sun, not Moonlight Shadow (nightcore)"
+
+    @Test
+    fun theRejectedDownloadsAreRead() {
+        val r = row(rejected)
+        assertFalse(r.skipCheck)
+        assertEquals(2, r.rejected.size)
+        val (deezer, yt) = r.rejected
+        assertEquals(1L, deezer.id)
+        assertEquals("Deezer", deezer.via)
+        assertEquals("via streamrip", deezer.detail)
+        assertEquals(1760890000.5, deezer.at, 0.001)
+        assertFalse(deezer.hasFile)
+        assertEquals("", deezer.path)
+        assertEquals("", yt.detail)
+        assertTrue(yt.hasFile)
+        assertEquals("/downloads/encore/rejected-21/2", yt.path)
+        assertEquals("Diase – Sun", yt.heard)
+        assertEquals("keep", r.anyway?.action)
+        assertEquals(2L, r.anyway?.id)
+        // an older server, or odd values: nothing offered, never a lost row
+        val old = row("""{"id": 8, "status": "failed"}""")
+        assertEquals(0, old.rejected.size)
+        assertNull(old.anyway)
+        assertFalse(old.skipCheck)
+        val odd = row("""{"id": 9, "status": "failed", "rejected": "x", "anyway": "keep", "skip_check": null}""")
+        assertEquals(0, odd.rejected.size)
+        assertNull(odd.anyway)
+        assertNull(RequestRules.anyway(odd))
+        assertTrue(row("""{"id": 9, "skip_check": true}""").skipCheck)
+    }
+
+    @Test
+    fun aDownloadTheAudioCheckTurnedAwayOffersKeepAnywayWithTheReasonInFull() {
+        val r = row(rejected)
+        val keep = RequestRules.anyway(r)!!
+        assertEquals("keep-anyway", keep.action)
+        assertTrue(keep.keep)
+        assertEquals("Keep anyway", keep.label)
+        assertEquals(2L, keep.rejected)
+        assertEquals(because, keep.text)
+        assertEquals("It will be imported without the audio check", keep.done)
+        assertEquals("Import the download the audio check turned away, without the check", keep.help)
+        // the reason in full on the row's own line
+        assertEquals(because, RequestRules.anywayLine(r))
+        // Download anyway when the kept files are gone
+        val gone = row(rejected.replace(""""anyway": {"action": "keep", "id": 2""", """"anyway": {"action": "download", "id": 1"""))
+        val download = RequestRules.anyway(gone)!!
+        assertEquals("download-anyway", download.action)
+        assertFalse(download.keep)
+        assertEquals("Download anyway", download.label)
+        assertEquals(1L, download.rejected)
+        assertEquals("Downloading it again without the audio check", download.done)
+        assertEquals("Download it again from the same place, without the audio check", download.help)
+        // no offer: no line and no button
+        val none = row(rejected.replace(""""anyway": {"action": "keep", "id": 2, "text": "$because"}""", """"anyway": null"""))
+        assertNull(none.anyway)
+        assertNull(RequestRules.anyway(none))
+        assertEquals("", RequestRules.anywayLine(none))
+        assertFalse(RequestRules.canTakeAnyway(none, Me(role = "admin")))
+        // an action this phone doesn't know
+        assertNull(RequestRules.anyway(row("""{"id": 3, "anyway": {"action": "later", "id": 1}}""")))
+        // without the server's text, the rejected download's own; without that, the check's words
+        assertEquals("The audio sounds like X", RequestRules.anyway(row("""{"id": 4, "anyway": {"action": "keep", "id": 4}, "rejected": [{"id": 4, "text": "The audio sounds like X", "reason": "audio is “X – Y”"}]}"""))?.text)
+        assertEquals("audio is “X – Y”", RequestRules.anyway(row("""{"id": 4, "anyway": {"action": "keep", "id": 4}, "rejected": [{"id": 4, "reason": "audio is “X – Y”"}]}"""))?.text)
+        // no id: the server's newest (the body goes without `rejected`)
+        assertEquals(0L, RequestRules.anyway(row("""{"id": 4, "anyway": {"action": "keep"}}"""))?.rejected)
+    }
+
+    @Test
+    fun keepAnywayIsTakenAsRetryIs() {
+        val r = row(rejected)
+        // admins, and members with the fix permission; others see the reason and no button
+        assertTrue(RequestRules.mayFix(Me(role = "admin")))
+        assertTrue(RequestRules.mayFix(Me(role = "owner")))
+        assertTrue(RequestRules.mayFix(Me(role = "user", perms = mapOf("fix" to true))))
+        assertFalse(RequestRules.mayFix(Me(role = "user", perms = mapOf("pick" to true))))
+        assertFalse(RequestRules.mayFix(null))
+        assertTrue(RequestRules.canTakeAnyway(r, Me(role = "user", perms = mapOf("fix" to true))))
+        assertFalse(RequestRules.canTakeAnyway(r, Me(role = "user")))
+        assertEquals(because, RequestRules.anywayLine(r))
+        // Retry stays beside it on a failed row
+        assertTrue(RequestRules.canRetry(r, Me(role = "admin")))
+    }
+
+    @Test
+    fun aHandPicksReasonShowsOnce() {
+        // a hand pick the check turned away has the reason as its message: shown on the row's own line, not twice
+        val pick = row(rejected.replace(""""message": "All sources exhausted (ytdlp: YouTube match was the wrong audio (audio is “Diase – Sun” (different title)))"""", """"message": "$because""""))
+        assertEquals("10 attempts · via ytdlp · by alice · 8m ago", RequestRules.statusLine(pick, admin = true, ago = "8m ago"))
+        assertEquals(because, RequestRules.anywayLine(pick))
+        val d = RequestRules.details(pick, admin = true, ago = "8m ago", date = date)
+        assertEquals(because, d.anyway)
+        assertEquals(because, d.message)   // the sheet shows it once, in the box at the top
+        // another message stays on the status line
+        assertEquals(
+            "10 attempts · via ytdlp · All sources exhausted (ytdlp: YouTube match was the wrong audio (audio is “Diase – Sun” (different title))) · 8m ago",
+            RequestRules.statusLine(row(rejected), admin = false, ago = "8m ago"),
+        )
+    }
+
+    @Test
+    fun theDetailsNameEveryDownloadTheAudioCheckTurnedAway() {
+        // the same block as web-rs/src/pages/common.rs `request_text` (its test `the_details_name_every_download_the_audio_check_turned_away`)
+        val r = row(rejected.replace(""""skip_check": false""", """"skip_check": true"""))
+        val want = "\n" +
+            "Turned away by the audio check (oldest first):\n" +
+            "The audio sounds like Diase – Sun, not Moonlight Shadow (nightcore)\n" +
+            "  From: Deezer · via streamrip · https://www.deezer.com/track/3135556 · 01. Moonlight Shadow.flac\n" +
+            "  Check: audio is “Diase – Sun” (different title)\n" +
+            "  When: <1760890000>\n" +
+            "  Files: gone\n" +
+            "The audio sounds like Diase – Sun, not Moonlight Shadow (nightcore)\n" +
+            "  From: YouTube Music · https://music.youtube.com/watch?v=x · Moonlight Shadow.opus\n" +
+            "  Check: audio is “Diase – Sun” (different title)\n" +
+            "  When: <1760890100>\n" +
+            "  Files: kept in /downloads/encore/rejected-21/2\n"
+        val t = RequestRules.requestText(r, "0.31.0", date)
+        assertTrue(t, t.contains("Audio check: off for this request\n$want"))
+        assertTrue(t, t.contains(want + "\nLog (every attempt, oldest first):\nytdlp: YouTube match was the wrong audio\n"))
+        // members get no server folder; an album names its first file and how many more
+        val m = row("""{"id": 22, "kind": "album", "status": "failed", "rejected": [{"id": 2, "via": "YouTube Music", "url": "https://music.youtube.com/watch?v=x",
+            "file": "Moonlight Shadow.opus", "count": 10, "text": "$because", "has_file": true, "path": null}]}""")
+        val mt = RequestRules.requestText(m, "", date)
+        assertTrue(mt, mt.contains("  From: YouTube Music · https://music.youtube.com/watch?v=x · Moonlight Shadow.opus and 9 more\n"))
+        assertTrue(mt, mt.contains("  Files: kept on the server\n"))
+        assertFalse(mt, mt.contains("Audio check: off"))
+        // no rejected downloads: nothing more in the text
+        assertFalse(RequestRules.requestText(row(waiting), "", date).contains("Turned away"))
+        // an entry without a sentence: the check's words, no Check line; without either, the plain sentence
+        val bare = RequestRules.rejectedLines(row("""{"id": 5, "rejected": [{"id": 1, "reason": "audio is “X – Y”", "has_file": true}, {"id": 2}]}"""), date)
+        assertEquals(RejectedLine("audio is “X – Y”", "", "", "", "kept on the server"), bare[0])
+        assertEquals(RejectedLine("The audio sounds like another song", "", "", "", "gone"), bare[1])
+    }
+
+    @Test
+    fun afterKeepAnywayAndDownloadAnyway() {
+        // Keep anyway taken (package A's final answer): waiting for the queue's next look, no storage reason
+        // (wait_reason null), the kept files waiting, nothing more offered – plain "Waiting", no storage words
+        val kept = row(rejected
+            .replace(""""status": "failed"""", """"status": "waiting", "wait_reason": null""")
+            .replace(""""has_files": false""", """"has_files": true""")
+            .replace(""""skip_check": false""", """"skip_check": true""")
+            .replace(""""anyway": {"action": "keep", "id": 2, "text": "$because"}""", """"anyway": null""")
+            .replace(Regex(""""message": "[^"]*""""), """"message": "Waiting to import the kept download""""))
+        assertEquals("Waiting", RequestRules.statusText(kept))
+        assertNull(RequestRules.anyway(kept))
+        assertEquals("", RequestRules.anywayLine(kept))
+        assertFalse(RequestRules.canTakeAnyway(kept, Me(role = "admin")))
+        // R1's Import again stands in Retry's place while the kept files wait, and Cancel stays
+        assertTrue(RequestRules.canImportAgain(kept))
+        assertFalse(RequestRules.canRetry(kept, Me(role = "admin")))
+        assertTrue(RequestRules.canCancel(kept))
+        val d = RequestRules.details(kept, admin = true, ago = "1m ago", date = date)
+        assertEquals("", d.status)
+        assertEquals("Waiting to import the kept download", d.message)
+        assertTrue(d.facts.toString(), d.facts.contains(RequestRules.SKIP_CHECK))
+        // the turned-away downloads stay listed (a later Retry keeps them)
+        assertEquals(2, d.rejected.size)
+        // a storage error recorded for that import: then it says so
+        assertEquals("Waiting – the downloaded files are kept and the import waits for the storage",
+            RequestRules.statusText(row(rejected.replace(""""status": "failed"""", """"status": "waiting", "wait_reason": "storage_import""""))))
+        // Download anyway taken: queued again without the check; the status line carries the server's message
+        val again = row(rejected
+            .replace(""""status": "failed"""", """"status": "queued"""")
+            .replace(""""skip_check": false""", """"skip_check": true""")
+            .replace(""""anyway": {"action": "keep", "id": 2, "text": "$because"}""", """"anyway": null""")
+            .replace(Regex(""""message": "[^"]*""""), """"message": "Downloading it again without the audio check""""))
+        assertNull(RequestRules.anyway(again))
+        assertEquals("10 attempts · via ytdlp · Downloading it again without the audio check · 8m ago", RequestRules.statusLine(again, admin = false, ago = "8m ago"))
+        assertTrue(RequestRules.canCancel(again))
+        assertFalse(RequestRules.canRetry(again, Me(role = "admin")))
+        // a Keep anyway the quality check turned away: failed with its reason, nothing more offered, Retry back
+        val refused = row(rejected
+            .replace(""""anyway": {"action": "keep", "id": 2, "text": "$because"}""", """"anyway": null""")
+            .replace(Regex(""""message": "[^"]*""""), """"message": "Kept anyway, but the quality check turned it away: Wrong version: 3:18 shorter than the recording""""))
+        assertEquals("", RequestRules.anywayLine(refused))
+        assertTrue(RequestRules.statusLine(refused, admin = false, ago = "8m ago").contains("Kept anyway, but the quality check turned it away: Wrong version"))
+        assertTrue(RequestRules.canRetry(refused, Me(role = "user", perms = mapOf("fix" to true))))
+        assertFalse(RequestRules.canRetry(refused, Me(role = "user")))
+    }
+
+    @Test
+    fun theDetailsSheetShowsTheReasonAndWhereItCameFrom() {
+        val r = row(rejected.replace(""""skip_check": false""", """"skip_check": true"""))
+        val d = RequestRules.details(r, admin = true, ago = "8m ago", date = date)
+        assertEquals(because, d.anyway)
+        assertEquals("YouTube Music · https://music.youtube.com/watch?v=x · Moonlight Shadow.opus", d.anywayFrom)
+        assertEquals(2, d.rejected.size)
+        assertEquals(RejectedLine(because, "Deezer · via streamrip · https://www.deezer.com/track/3135556 · 01. Moonlight Shadow.flac", "audio is “Diase – Sun” (different title)", "<1760890000>", "gone"), d.rejected[0])
+        assertEquals("kept in /downloads/encore/rejected-21/2", d.rejected[1].files)
+        assertTrue(d.facts.toString(), d.facts.contains("Audio check: off for this request"))
+        // nothing turned away: no box, no list
+        val plain = RequestRules.details(row(illuminate), admin = false, ago = "8m ago", date = date)
+        assertEquals("", plain.anyway)
+        assertEquals("", plain.anywayFrom)
+        assertEquals(0, plain.rejected.size)
+        // an offer whose entry the list doesn't have: the reason without a source line
+        val lone = RequestRules.details(row("""{"id": 6, "status": "failed", "anyway": {"action": "download", "id": 9, "text": "$because"}}"""), admin = false, ago = "1m ago", date = date)
+        assertEquals(because, lone.anyway)
+        assertEquals("", lone.anywayFrom)
+    }
 }

@@ -1,6 +1,7 @@
 [
   {
     "album": "ペルソナ4",
+    "anyway": null,
     "artist": "平田志穂子",
     "artists": [
       {
@@ -26,6 +27,8 @@
     "parent_id": null,
     "picked": false,
     "progress": 100.0,
+    "rejected": [],
+    "skip_check": false,
     "source": null,
     "status": "completed",
     "title": "Reach Out To The Truth",
@@ -38,6 +41,7 @@
   },
   {
     "album": null,
+    "anyway": null,
     "artist": "Nobody 3",
     "artists": [
       {
@@ -65,6 +69,8 @@
     "parent_id": null,
     "picked": false,
     "progress": 0.0,
+    "rejected": [],
+    "skip_check": false,
     "source": "ytdlp",
     "status": "failed",
     "title": "Missing Song 3",
@@ -77,6 +83,7 @@
   },
   {
     "album": null,
+    "anyway": null,
     "artist": "Nobody 2",
     "artists": [
       {
@@ -104,6 +111,8 @@
     "parent_id": null,
     "picked": false,
     "progress": 0.0,
+    "rejected": [],
+    "skip_check": false,
     "source": "ytdlp",
     "status": "failed",
     "title": "Missing Song 2",
@@ -116,6 +125,7 @@
   },
   {
     "album": null,
+    "anyway": null,
     "artist": "Nobody 1",
     "artists": [
       {
@@ -143,6 +153,8 @@
     "parent_id": null,
     "picked": false,
     "progress": 0.0,
+    "rejected": [],
+    "skip_check": false,
     "source": "ytdlp",
     "status": "failed",
     "title": "Missing Song 1",

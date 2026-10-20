@@ -73,7 +73,8 @@ pub async fn status(st: &impl Ctx) -> anyhow::Result<String> {
 }
 
 pub async fn add(st: &impl Ctx, url: &str) -> anyhow::Result<String> {
-    let mut opts = json!({});
+    // started at once, whatever "Add torrents in Paused state" says
+    let mut opts = json!({ "add_paused": false });
     let dir = st.cfg().str("deluge_download_path");
     if !dir.trim().is_empty() {
         opts["download_location"] = json!(dir);
@@ -111,9 +112,21 @@ pub async fn poll(st: &impl Ctx, hash: &str) -> anyhow::Result<Poll> {
         let remote = format!("{}/{}", t["save_path"].as_str().unwrap_or("").trim_end_matches('/'), t["name"].as_str().unwrap_or(""));
         return Ok(Poll::Done(local(st, &remote, "deluge_download_path")));
     }
+    let pct = (progress * 10.0).round() / 10.0;
+    if state == "Queued" {
+        // waiting for its turn in Deluge's queue: no stall
+        return Ok(Poll::Queued(pct, "Deluge: queued – its limit of downloads at once is reached".into()));
+    }
+    if state == "Paused" {
+        // paused before it finished: resumed (Deluge 2 takes a list in resume_torrents, 1.3 in resume_torrent)
+        if rpc(st, "core.resume_torrents", json!([[hash]])).await.is_err() {
+            let _ = rpc(st, "core.resume_torrent", json!([[hash]])).await;
+        }
+        return Ok(Poll::Progress(pct, "Deluge: starting the download (it was paused)".into()));
+    }
     let speed = t["download_payload_rate"].as_f64().unwrap_or(0.0) / 1e6;
     let msg = if state == "Downloading" { format!("Deluge: {speed:.1} MB/s") } else { format!("Deluge: {}", state.to_lowercase()) };
-    Ok(Poll::Progress((progress * 10.0).round() / 10.0, msg))
+    Ok(Poll::Progress(pct, msg))
 }
 
 pub async fn remove(st: &impl Ctx, hash: &str) {

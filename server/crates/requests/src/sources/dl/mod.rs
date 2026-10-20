@@ -13,10 +13,17 @@ pub mod rtorrent;
 pub mod sab;
 pub mod transmission;
 
+#[derive(Debug)]
 pub enum Poll {
     Progress(f64, String),
+    /// Waiting in the client's own queue (its limit of downloads at once is reached): not a stall, the
+    /// download starts when the client's turn comes.
+    Queued(f64, String),
     Done(PathBuf),
     Failed(String),
+    /// The client doesn't list the download (yet): right after it was added the client may still be
+    /// taking it in, later it is gone.
+    Missing(String),
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -209,15 +216,26 @@ pub(crate) fn base(st: &impl Ctx, key: &str) -> String {
     st.cfg().str(key).trim().trim_end_matches('/').to_string()
 }
 
-/// Where Encore finds a path the client reported: the same path when it is mounted the same way,
-/// else the same name under the folder Encore sees (`key`).
+/// Where Encore finds a path the client reported: the same path when it is mounted the same way, else
+/// under the folder Encore sees (`key`) – the download's own folder name, or with the folders above it
+/// that the client added (a category folder: SABnzbd's ".../complete/music/encore-12" seen from its
+/// "complete" folder), the shortest that is there. A Windows client's path ("D:\Usenet\complete\…") is
+/// read the same way. When none is there: the folder name under it (what the request then names). A
+/// reported path that can't be looked at because its storage fails (EIO, ENOTCONN, ESTALE …: a mount that
+/// went away) is that path, not a guess under the folder: the import then waits for the storage.
 pub(crate) fn local(st: &impl Ctx, remote: &str, key: &str) -> PathBuf {
     let p = PathBuf::from(remote);
-    if !remote.is_empty() && p.exists() {
-        return p;
+    if !remote.is_empty() {
+        match std::fs::metadata(&p) {
+            Ok(_) => return p,
+            Err(e) if e.raw_os_error().is_some_and(encore_core::fsx::is_storage) => return p,
+            Err(_) => {}
+        }
     }
-    // client sees a different mount: same name under the folder Encore sees
-    PathBuf::from(st.cfg().str(key)).join(p.file_name().unwrap_or_default())
+    let root = PathBuf::from(st.cfg().str(key));
+    let parts: Vec<&str> = remote.split(['/', '\\']).filter(|x| !x.is_empty() && *x != "." && *x != ".." && !x.ends_with(':')).collect();
+    let under = |n: usize| parts[parts.len() - n..].iter().fold(root.clone(), |at, x| at.join(x));
+    (1..=parts.len()).map(under).find(|at| at.exists()).unwrap_or_else(|| root.join(parts.last().copied().unwrap_or("")))
 }
 
 /// Delete a finished download's files, but only inside the client's download folder as Encore sees it.
@@ -234,7 +252,31 @@ pub(crate) fn delete_inside(st: &impl Ctx, path: &std::path::Path, key: &str) {
 }
 
 pub(crate) fn unreachable(name: &str, e: reqwest::Error) -> anyhow::Error {
-    anyhow::anyhow!("{name} unreachable: {e}")
+    anyhow::anyhow!("{name} unreachable: {}", http_error(e))
+}
+
+/// An HTTP error in words without the query of its address – where API keys travel (SABnzbd's, and the
+/// one in Prowlarr's download links) – and with its causes ("connection refused").
+pub fn http_error(e: reqwest::Error) -> String {
+    let at = e.url().map(|u| {
+        let mut u = u.clone();
+        u.set_query(None);
+        u.to_string()
+    });
+    let e = e.without_url();
+    let mut words = e.to_string();
+    let mut cause = std::error::Error::source(&e);
+    while let Some(c) = cause {
+        let c_words = c.to_string();
+        if !words.contains(&c_words) {
+            words.push_str(&format!(": {c_words}"));
+        }
+        cause = c.source();
+    }
+    match at {
+        Some(at) => format!("{words} ({at})"),
+        None => words,
+    }
 }
 
 // ---- torrents: files and magnets -----------------------------------------------------------------
@@ -253,7 +295,7 @@ pub(crate) async fn fetch_torrent(st: &impl Ctx, url: &str) -> anyhow::Result<Fe
     let http = st.http_no_redirects();
     let mut url = url.to_string();
     for _ in 0..6 {
-        let r = http.get(&url).send().await.map_err(|e| anyhow::anyhow!("couldn't fetch the torrent: {e}"))?;
+        let r = http.get(&url).send().await.map_err(|e| anyhow::anyhow!("couldn't fetch the torrent: {}", http_error(e)))?;
         if r.status().is_redirection() {
             let loc = r.headers().get("location").and_then(|h| h.to_str().ok()).unwrap_or("").to_string();
             if loc.starts_with("magnet:") {
@@ -265,13 +307,27 @@ pub(crate) async fn fetch_torrent(st: &impl Ctx, url: &str) -> anyhow::Result<Fe
         if !r.status().is_success() {
             anyhow::bail!("couldn't fetch the torrent (HTTP {})", r.status().as_u16());
         }
-        let bytes = r.bytes().await?.to_vec();
+        let bytes = r.bytes().await.map_err(|e| anyhow::anyhow!("couldn't fetch the torrent: {}", http_error(e)))?.to_vec();
         if bytes.first() != Some(&b'd') {
             anyhow::bail!("the indexer didn't send a torrent file");
         }
         return Ok(Fetched::File(bytes));
     }
     anyhow::bail!("too many redirects fetching the torrent")
+}
+
+/// A release URL's .nzb file. Encore fetches it for the Usenet clients too: Prowlarr's links point at
+/// Prowlarr, which a client on another network (or behind a VPN) may not reach.
+pub(crate) async fn fetch_nzb(st: &impl Ctx, url: &str) -> anyhow::Result<Vec<u8>> {
+    let r = st.http().get(url).timeout(std::time::Duration::from_secs(60)).send().await.map_err(|e| anyhow::anyhow!("couldn't fetch the NZB: {}", http_error(e)))?;
+    if !r.status().is_success() {
+        anyhow::bail!("couldn't fetch the NZB (HTTP {})", r.status().as_u16());
+    }
+    let data = r.bytes().await.map_err(|e| anyhow::anyhow!("couldn't fetch the NZB: {}", http_error(e)))?.to_vec();
+    if !String::from_utf8_lossy(&data[..data.len().min(4096)]).contains("<nzb") {
+        anyhow::bail!("the indexer didn't send an NZB file");
+    }
+    Ok(data)
 }
 
 /// End of the bencoded value starting at `i`.

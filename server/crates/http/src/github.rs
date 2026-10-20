@@ -59,7 +59,7 @@ pub fn rate_limit_message(reset_epoch: Option<i64>, has_token: bool, now: i64) -
     if has_token {
         format!("GitHub is rate-limiting update checks for the GitHub token{when} – try again then")
     } else {
-        format!("GitHub is rate-limiting update checks from this server's address (60 an hour without a token){when} – try again then, or add a GitHub token under Settings → Apps & sources → General, which allows 5,000 an hour")
+        format!("GitHub is rate-limiting update checks from this server's address (60 an hour without a token){when} – try again then, or add a GitHub token under Settings → General, which allows 5,000 an hour")
     }
 }
 

@@ -80,7 +80,7 @@ pub struct Group {
     pub id: String,
     pub title: String,
     pub desc: String,
-    /// the heading over a run of cards ("Download sources"); empty for none
+    /// the heading over a run of cards; empty for none (no page has one since R2)
     pub part: String,
     /// POST /api/system/test/<test>
     pub test: Option<String>,
@@ -138,13 +138,20 @@ impl Schema {
         self.sections.iter().flat_map(|s| s.groups.iter()).find(|g| g.id == id).cloned()
     }
 
-    /// The page that shows `id`: a page's own id, one of its aliases, or the id of one of its cards (old
-    /// `#/settings?s=` links name cards). Anything else is returned as it is.
+    /// The page that shows `id`: a page's own id, one of its aliases (`apps`, the page Apps & sources was
+    /// until R2, opens Downloads), or the id of one of its cards (old `#/settings?s=` links name cards), in that
+    /// order. Anything else is returned as it is.
     pub fn page_of(&self, id: &str) -> String {
-        self.sections.iter()
-            .find(|s| s.id == id || s.aliases.iter().any(|a| a == id) || s.groups.iter().any(|g| g.id == id))
-            .map(|s| s.id.clone())
-            .unwrap_or_else(|| id.to_string())
+        let page = self.sections.iter().find(|s| s.id == id)
+            .or_else(|| self.sections.iter().find(|s| s.aliases.iter().any(|a| a == id)))
+            .or_else(|| self.sections.iter().find(|s| s.groups.iter().any(|g| g.id == id)));
+        page.map(|s| s.id.clone()).unwrap_or_else(|| id.to_string())
+    }
+
+    /// Whether page `id` holds the card `card` (the Download tools card and How requests are fulfilled go on
+    /// the page with the Download pipeline card).
+    pub fn holds(&self, id: &str, card: &str) -> bool {
+        self.section(id).is_some_and(|s| s.groups.iter().any(|g| g.id == card))
     }
 }
 

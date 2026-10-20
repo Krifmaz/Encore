@@ -48,14 +48,7 @@ pub async fn add_torrent(st: &impl Ctx, url: &str, title: &str, rid: i64) -> any
 
 pub async fn add_nzb(st: &impl Ctx, url: &str, title: &str, rid: i64) -> anyhow::Result<String> {
     let name = if safe_name(title).is_empty() { format!("encore-{rid}") } else { safe_name(title) };
-    let r = st.http().get(url).timeout(std::time::Duration::from_secs(60)).send().await.map_err(|e| anyhow::anyhow!("couldn't fetch the NZB: {e}"))?;
-    if !r.status().is_success() {
-        anyhow::bail!("couldn't fetch the NZB (HTTP {})", r.status().as_u16());
-    }
-    let data = r.bytes().await?;
-    if !String::from_utf8_lossy(&data[..data.len().min(4096)]).contains("<nzb") {
-        anyhow::bail!("the indexer didn't send an NZB file");
-    }
+    let data = super::fetch_nzb(st, url).await?;
     write(&st.cfg().str("nzb_blackhole_watch"), &format!("{name}.nzb"), &data)?;
     Ok(name)
 }

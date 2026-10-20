@@ -25,13 +25,36 @@ pub async fn fingerprint(path: &Path) -> Option<(f64, String)> {
 
 use encore_http::acoustid::lookup;
 
-/// → {status: verified|mismatch|unknown, acoustid, detail}
+/// Whether `path` would be fingerprinted (an AcoustID key and fpcalc, or the tests' stand-in for it).
+pub fn can_check(st: &impl Ctx, path: &Path) -> bool {
+    available(st) || faked(path)
+}
+
+/// The words of a check that was not made because the title asks for a re-pitched copy ([`check_file`]).
+pub fn skipped_detail(words: &str) -> String {
+    let mut w = words.chars();
+    let words = w.next().map(|c| c.to_uppercase().chain(w).collect::<String>()).unwrap_or_default();
+    format!("{words} version – the fingerprint can't judge re-pitched audio; checked by length and title only")
+}
+
+/// → {status: verified|mismatch|unknown, acoustid, detail}. A title that asks for a nightcore, sped up,
+/// slowed … copy ([`crate::matcher::altered_words`]) is not fingerprinted: its audio is a re-pitched copy,
+/// which AcoustID knows as the original or as something unrelated ("unknown", `skipped`: the words).
 pub async fn check_file(st: &impl Ctx, path: &Path, title: &str, artist: &str, length: Option<f64>, recording_id: Option<&str>) -> anyhow::Result<Value> {
-    let Some((dur, fp)) = fingerprint(path).await else { return Ok(json!({ "status": "unknown", "acoustid": null, "detail": "fingerprinting failed" })) };
-    let results: Vec<Value> = lookup(st, dur, &fp).await?.into_iter().filter(|r| r["score"].as_f64().unwrap_or(0.0) >= 0.6).collect();
-    let Some(best) = results.first() else { return Ok(json!({ "status": "unknown", "acoustid": null, "detail": "audio not in AcoustID database" })) };
-    let aid = best["acoustid"].clone();
-    let recs: Vec<Value> = results.iter().flat_map(|r| r["recordings"].as_array().cloned().unwrap_or_default()).collect();
+    if let Some(words) = crate::matcher::altered_words(title) {
+        return Ok(json!({ "status": "unknown", "acoustid": null, "skipped": words, "detail": skipped_detail(&words) }));
+    }
+    let (aid, recs, fp, dur) = match heard(path) {
+        Some(recs) => (json!("test"), recs, String::new(), 0.0),
+        None => {
+            let Some((dur, fp)) = fingerprint(path).await else { return Ok(json!({ "status": "unknown", "acoustid": null, "detail": "fingerprinting failed" })) };
+            let results: Vec<Value> = lookup(st, dur, &fp).await?.into_iter().filter(|r| r["score"].as_f64().unwrap_or(0.0) >= 0.6).collect();
+            let Some(best) = results.first() else { return Ok(json!({ "status": "unknown", "acoustid": null, "detail": "audio not in AcoustID database" })) };
+            let aid = best["acoustid"].clone();
+            let recs: Vec<Value> = results.iter().flat_map(|r| r["recordings"].as_array().cloned().unwrap_or_default()).collect();
+            (aid, recs, fp, dur)
+        }
+    };
     if recs.is_empty() {
         return Ok(json!({ "status": "unknown", "acoustid": aid, "detail": "fingerprint known but not linked to MusicBrainz" }));
     }
@@ -64,6 +87,51 @@ pub async fn check_file(st: &impl Ctx, path: &Path, title: &str, artist: &str, l
     }
     Ok(json!({ "status": "mismatch", "acoustid": aid, "actual": top,
         "detail": format!("audio is “{} – {}” ({})", top["artist"].as_str().unwrap_or(""), top["title"].as_str().unwrap_or(""), v.reason) }))
+}
+
+/// What the tests' stand-in heard in `path` (as AcoustID's recordings), None outside tests.
+fn heard(_path: &Path) -> Option<Vec<Value>> {
+    #[cfg(any(test, feature = "test-support"))]
+    if let Some((artist, title)) = fake::heard(_path) {
+        return Some(vec![json!({ "id": "00000000-0000-0000-0000-000000000000", "title": title, "artist": artist, "length": null })]);
+    }
+    None
+}
+
+/// The tests' stand-in covers `path` (never outside tests).
+pub fn faked(_path: &Path) -> bool {
+    #[cfg(any(test, feature = "test-support"))]
+    if fake::heard(_path).is_some() {
+        return true;
+    }
+    false
+}
+
+/// A stand-in for fpcalc and AcoustID in tests: every file under a folder is heard as one song.
+#[cfg(any(test, feature = "test-support"))]
+pub mod fake {
+    use std::path::{Path, PathBuf};
+    use std::sync::Mutex;
+
+    static HEARD: Mutex<Vec<(PathBuf, String, String)>> = Mutex::new(Vec::new());
+
+    /// Files under `dir` sound like `artist – title` to the fingerprint check.
+    pub fn hear(dir: impl AsRef<Path>, artist: &str, title: &str) {
+        let mut h = HEARD.lock().unwrap_or_else(|p| p.into_inner());
+        h.retain(|(d, _, _)| d != dir.as_ref());
+        h.push((dir.as_ref().to_path_buf(), artist.to_string(), title.to_string()));
+    }
+
+    /// Files under `dir` are fingerprinted for real again.
+    pub fn clear(dir: impl AsRef<Path>) {
+        HEARD.lock().unwrap_or_else(|p| p.into_inner()).retain(|(d, _, _)| d != dir.as_ref());
+    }
+
+    /// (artist, title) heard in `path`: the deepest folder registered that holds it.
+    pub fn heard(path: &Path) -> Option<(String, String)> {
+        let h = HEARD.lock().unwrap_or_else(|p| p.into_inner());
+        h.iter().filter(|(d, _, _)| path.starts_with(d)).max_by_key(|(d, _, _)| d.as_os_str().len()).map(|(_, a, t)| (a.clone(), t.clone()))
+    }
 }
 
 /// Mostly Latin letters? (false for Japanese, Korean, Cyrillic … titles)

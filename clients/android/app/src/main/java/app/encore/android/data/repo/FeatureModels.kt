@@ -613,6 +613,12 @@ data class RequestRow(
     @Serializable(with = RequestError.OrNull::class) val error: RequestError? = null,
     /** A source's own output (streamrip's stdout and stderr), on every outcome. */
     @Serializable(with = RequestOutput.OrNull::class) val output: RequestOutput? = null,
+    /** The downloads the audio check turned away (R2), oldest first, at most 3; empty on older servers. */
+    @Serializable(with = Items::class) val rejected: List<RejectedDownload> = emptyList(),
+    /** What the row offers for one of them: Keep anyway or Download anyway; null when nothing is offered. */
+    @Serializable(with = AnywayOffer.OrNull::class) val anyway: AnywayOffer? = null,
+    /** The request runs (or ran and failed) without the audio check. */
+    @SerialName("skip_check") val skipCheck: LBool = false,
 ) : Checked<RequestRow> {
     val isActive: Boolean get() = status in ACTIVE_STATUSES
 
@@ -677,6 +683,46 @@ data class RequestOutput(
     val at: LDouble = 0.0,
 ) {
     internal object OrNull : Nested<RequestOutput>(serializer())
+}
+
+/**
+ * One entry of a request row's `rejected`: a download the audio check turned away, its files kept on the server
+ * (`has_file`) for Keep anyway. `source` is the worker's id (ytdlp, streamrip, slskd…), `via` the source as people
+ * read it (YouTube Music, Deezer, Soulseek, the indexer's name), `detail` e.g. "via streamrip" or "user u1 ·
+ * Music/Singles", `url` the link (none for Soulseek and torrents), `file` the first file and `count` how many,
+ * `reason` the check's own words, `heard` what the fingerprint matched, `text` the sentence to show in full, `path`
+ * the kept folder (admins only).
+ */
+@Serializable
+data class RejectedDownload(
+    val id: LLong = 0L,
+    val source: LString = "",
+    val via: LString = "",
+    val detail: LString = "",
+    val url: LString = "",
+    val file: LString = "",
+    val count: LInt = 0,
+    val check: LString = "",
+    val reason: LString = "",
+    val heard: LString = "",
+    val text: LString = "",
+    val at: LDouble = 0.0,
+    @SerialName("has_file") val hasFile: LBool = false,
+    val path: LString = "",
+)
+
+/**
+ * `anyway` of a request row: `keep` (Keep anyway: the kept files are imported without the audio check) or `download`
+ * (Download anyway: the files are gone, the same source and link are asked for again without the check), which
+ * rejected download (`id`) and why it was turned away (`text`).
+ */
+@Serializable
+data class AnywayOffer(
+    val action: LString = "",
+    val id: LLong = 0L,
+    val text: LString = "",
+) {
+    internal object OrNull : Nested<AnywayOffer>(serializer())
 }
 
 /**

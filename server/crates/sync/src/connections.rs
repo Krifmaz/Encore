@@ -187,7 +187,7 @@ pub fn jellyfin_headers(token: Option<&str>, device: &str) -> Vec<(String, Strin
 pub async fn connect_jellyfin(st: &impl Ctx, uid: i64, user: &str, password: &str) -> anyhow::Result<Value> {
     let url = st.cfg().str("jellyfin_url").trim_end_matches('/').to_string();
     if url.is_empty() {
-        anyhow::bail!("The admin hasn't set a Jellyfin URL in Settings → Media servers");
+        anyhow::bail!("The admin hasn't set a Jellyfin URL in Settings → Integrations → Media servers");
     }
     let mut rb = st.http().post(format!("{url}/Users/AuthenticateByName")).json(&json!({ "Username": user, "Pw": password }));
     for (k, v) in jellyfin_headers(None, &format!("encore-{uid}")) {
@@ -276,7 +276,7 @@ pub fn subsonic_params(user: &str, password: &str) -> Vec<(&'static str, String)
 pub async fn connect_navidrome(st: &impl Ctx, uid: i64, user: &str, password: &str) -> anyhow::Result<Value> {
     let url = st.cfg().str("navidrome_url").trim_end_matches('/').to_string();
     if url.is_empty() {
-        anyhow::bail!("The admin hasn't set a Navidrome URL in Settings → Media servers");
+        anyhow::bail!("The admin hasn't set a Navidrome URL in Settings → Integrations → Media servers");
     }
     let d: Value = st.http().get(format!("{url}/rest/ping")).query(&subsonic_params(user, password)).send().await?.json().await?;
     if d["subsonic-response"]["status"] != "ok" {
@@ -317,7 +317,7 @@ pub async fn connect_listenbrainz(st: &impl Ctx, uid: i64, token: &str) -> anyho
 pub fn lastfm_start(st: &impl Ctx) -> anyhow::Result<String> {
     let key = st.cfg().str("lastfm_api_key");
     if key.is_empty() || st.cfg().str("lastfm_shared_secret").is_empty() {
-        anyhow::bail!("The admin needs to add the Last.fm API key and shared secret in Settings → Apps & sources → Integrations");
+        anyhow::bail!("The admin needs to add the Last.fm API key and shared secret in Settings → Integrations");
     }
     let cb = redirect_uri(st, "lastfm")?;
     Ok(format!("https://www.last.fm/api/auth/?api_key={}&cb={}", urlencoding::encode(&key), urlencoding::encode(&cb)))

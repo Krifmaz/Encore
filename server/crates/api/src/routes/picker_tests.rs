@@ -137,7 +137,7 @@ async fn every_source_is_listed_with_its_state() {
     assert_eq!(e.status.as_u16(), 409);
     assert_eq!(e.detail, "Deezer needs an ARL cookie");
     let x = e.extra.unwrap();
-    assert_eq!((x["state"].as_str(), x["settings"].as_str(), x["settings_label"].as_str()), (Some("sign_in"), Some("#/settings?s=streamrip"), Some("Settings → streamrip")));
+    assert_eq!((x["state"].as_str(), x["settings"].as_str(), x["settings_label"].as_str()), (Some("sign_in"), Some("#/settings?s=streamrip"), Some("Settings → Downloads → Qobuz / Tidal / Deezer (streamrip)")));
     // the accounts: the ARL in the settings, a Tidal token and a Qobuz login in config.toml
     st.cfg.set_many(&json!({ "streamrip_deezer_arl": "arl-cookie" }));
     assert_eq!(state_of(&st, "deezer").0, "ready");
@@ -373,4 +373,168 @@ async fn qobuz_app_id_is_read_from_the_web_player_when_streamrip_has_not_stored_
     write_config(&st, "[qobuz]\napp_id = \"111111111\"\n");
     assert_eq!(streamrip::qobuz_app_id(&st).await.unwrap(), "111111111");
     let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// The indexers' answers are kept for the picker (req-slsk-cache 3.9): a second identical search asks
+/// Prowlarr nothing and says when it was found; a download client set up after the search makes the kept
+/// releases usable (usability is decided when they are read); Search again asks Prowlarr again; a picker
+/// opened for a request finds the request's own album search; a song's album is looked up once.
+#[tokio::test]
+async fn indexer_answers_are_kept_for_the_picker() {
+    let (st, dir) = state("kept");
+    let queries: Arc<Mutex<Vec<String>>> = Default::default();
+    let q2 = queries.clone();
+    let app = Router::new().route("/api/v1/search", get(move |RawQuery(q): RawQuery| {
+        let queries = q2.clone();
+        async move {
+            queries.lock().unwrap().push(q.unwrap_or_default());
+            axum::Json(json!([rel("a1", "Travis Scott - Rodeo (2015) [FLAC]", 700.0, 40), rel("a2", "Travis Scott - Rodeo [MP3 320]", 180.0, 5)]))
+        }
+    }));
+    let url = serve(app).await;
+    st.cfg.set_many(&json!({ "torznab_enabled": true, "prowlarr_url": url, "prowlarr_api_key": "k" }));
+    let calls = || queries.lock().unwrap().len();
+    let b = SearchBody { source: "torznab".into(), kind: "album".into(), artist: "Travis Scott".into(), title: "Rodeo".into(), query: Some("Travis Scott Rodeo".into()), ..Default::default() };
+    // no download client yet: nothing usable, but what Prowlarr said is kept
+    assert!(search_torznab(&st, &b, "Travis Scott Rodeo").await.unwrap().is_empty());
+    assert_eq!(calls(), 1);
+    st.cfg.set_many(&json!({ "qbit_url": "http://qbit.invalid" }));
+    let a = run_search(&st, &b).await.unwrap();
+    assert_eq!(calls(), 1, "answered from what is kept");
+    assert_eq!(a.items.len(), 2, "usable now: {:?}", a.items);
+    let j = a.json();
+    assert_eq!((j["from"].as_str(), j["query"].as_str(), j["can_search"].as_bool()), (Some("cache"), Some("Travis Scott Rodeo"), Some(true)), "{j}");
+    assert!(j["cached_at"].is_i64() && j["found"].as_str().unwrap().starts_with("Found at "), "{j}");
+    // Search again
+    let fresh = SearchBody { fresh: true, ..SearchBody { source: "torznab".into(), kind: "album".into(), artist: "Travis Scott".into(), title: "Rodeo".into(), query: Some("Travis Scott Rodeo".into()), ..Default::default() } };
+    let a = run_search(&st, &fresh).await.unwrap();
+    assert_eq!((calls(), a.json()["from"].as_str(), a.cached_at), (2, Some("live"), None));
+    // opened for the request (its title has an edition the worker's search leaves out): the request's
+    // own album search answers
+    let req = ForRequest { id: 7, created_at: encore_core::time::now() - 60.0, kind: "album".into(), artist: "Travis Scott".into(), title: "Rodeo (Expanded Edition)".into(), album: String::new() };
+    let eb = SearchBody { source: "torznab".into(), kind: "album".into(), artist: "Travis Scott".into(), title: "Rodeo (Expanded Edition)".into(), query: Some("Travis Scott Rodeo (Expanded Edition)".into()), ..Default::default() };
+    let a = run_search_for(&st, &eb, Some(&req)).await.unwrap();
+    // the box's words come back: the kept search is the one they make (the edition left out, as the worker
+    // does), so the clients add no "for …" to "Found at 14:02"
+    assert_eq!((calls(), a.json()["from"].as_str(), a.query.as_str()), (2, Some("cache"), "Travis Scott Rodeo (Expanded Edition)"));
+    // the request's own album search fell back to the album's name alone ("artist album" found nothing):
+    // the picker opened for it answers from that, with the words it was found with
+    let found = [rel("d1", "Travis Scott - Days Before Rodeo [FLAC]", 500.0, 12)];
+    encore_requests::search_cache::keep_releases(&st, "Travis Scott Days Before Rodeo", &["3000"], Some(8), &[]).await;
+    encore_requests::search_cache::keep_releases(&st, "Days Before Rodeo", &["3000"], Some(8), &found).await;
+    let req8 = ForRequest { id: 8, created_at: encore_core::time::now() - 60.0, kind: "album".into(), artist: "Travis Scott".into(), title: "Days Before Rodeo".into(), album: String::new() };
+    let db = SearchBody { source: "torznab".into(), kind: "album".into(), artist: "Travis Scott".into(), title: "Days Before Rodeo".into(), query: Some("Travis Scott Days Before Rodeo".into()), ..Default::default() };
+    let a = run_search_for(&st, &db, Some(&req8)).await.unwrap();
+    assert_eq!((calls(), a.json()["from"].as_str(), a.query.as_str(), a.items.len()), (2, Some("cache"), "Days Before Rodeo", 1), "{:?}", a.items);
+    // without the request, the empty answer kept for the box's words
+    let a = run_search(&st, &db).await.unwrap();
+    assert_eq!((calls(), a.json()["from"].as_str(), a.items.len()), (2, Some("cache"), 0));
+    // typed words are searched as typed
+    let typed = SearchBody { query: Some("Rodeo Travis Scott FLAC".into()), ..eb };
+    let a = run_search_for(&st, &typed, Some(&req)).await.unwrap();
+    assert_eq!((calls(), a.cached_at), (3, None));
+    // a song: both of its Prowlarr searches are kept
+    let sb = SearchBody { source: "torznab".into(), kind: "track".into(), artist: "Travis Scott".into(), title: "90210".into(), album: Some("Rodeo".into()), query: Some("Travis Scott 90210".into()), ..Default::default() };
+    run_search(&st, &sb).await.unwrap();
+    let n = calls();
+    let a = run_search(&st, &sb).await.unwrap();
+    assert_eq!((calls(), a.json()["from"].as_str()), (n, Some("cache")));
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// The body's `fresh` reads true, 1 and "1" as yes; `request_id` is optional.
+#[test]
+fn the_search_body_reads_fresh_and_request_id() {
+    let b: SearchBody = serde_json::from_value(json!({ "source": "slskd", "kind": "album", "fresh": 1, "request_id": 12 })).unwrap();
+    assert!(b.fresh);
+    assert_eq!(b.request_id, Some(12));
+    for (v, want) in [(json!(true), true), (json!("1"), true), (json!(0), false), (json!(false), false), (Value::Null, false)] {
+        let b: SearchBody = serde_json::from_value(json!({ "fresh": v })).unwrap();
+        assert_eq!(b.fresh, want, "{v}");
+    }
+    let b: SearchBody = serde_json::from_value(json!({ "source": "deezer" })).unwrap();
+    assert!(!b.fresh && b.request_id.is_none());
+}
+
+/// The picker asks Prowlarr with the names as the worker does – "Travis Scott 3500", not "Travis Scott
+/// 3500 (feat. Future & 2 Chainz)", which no release name holds – and takes the releases of the song's
+/// album named without the album's edition; words typed by hand go as typed (diagnosis items 4 and 5).
+#[tokio::test]
+async fn the_picker_searches_the_indexers_with_the_names_as_the_worker_does() {
+    let (st, dir) = state("names");
+    let queries: Arc<Mutex<Vec<String>>> = Default::default();
+    let q2 = queries.clone();
+    let app = Router::new().route("/api/v1/search", get(move |Query(q): Query<std::collections::HashMap<String, String>>| {
+        let queries = q2.clone();
+        async move {
+            let words = q.get("query").cloned().unwrap_or_default();
+            queries.lock().unwrap().push(words.clone());
+            let list = match words.as_str() {
+                "Travis Scott Rodeo" => vec![rel("a1", "Travis Scott - Rodeo (2015) [FLAC]", 700.0, 40)],
+                "Travis Scott 3500" => vec![rel("s1", "Travis Scott - 3500 [FLAC]", 40.0, 9)],
+                _ => vec![],
+            };
+            axum::Json(json!(list))
+        }
+    }));
+    let url = serve(app).await;
+    st.cfg.set_many(&json!({ "torznab_enabled": true, "prowlarr_url": url, "prowlarr_api_key": "k", "qbit_url": "http://qbit.invalid" }));
+    let song = SearchBody { source: "torznab".into(), kind: "track".into(), artist: "Travis Scott".into(), title: "3500 (feat. Future & 2 Chainz)".into(),
+        album: Some("Rodeo (Expanded Edition)".into()), query: Some("Travis Scott 3500 (feat. Future & 2 Chainz)".into()), ..Default::default() };
+    let a = run_search(&st, &song).await.unwrap();
+    let mut asked = queries.lock().unwrap().clone();
+    asked.sort();
+    assert_eq!(asked, ["Travis Scott 3500", "Travis Scott Rodeo"]);
+    let titles: Vec<&str> = a.items.iter().map(|x| x["title"].as_str().unwrap()).collect();
+    assert_eq!(titles, ["Travis Scott - 3500 [FLAC]", "Travis Scott - Rodeo (2015) [FLAC]"], "{:?}", a.items);
+    assert_eq!(a.query, "Travis Scott 3500");
+    // an album with its edition
+    let album = SearchBody { source: "torznab".into(), kind: "album".into(), artist: "Travis Scott".into(), title: "Rodeo (Expanded Edition)".into(), fresh: true, ..Default::default() };
+    let a = run_search(&st, &album).await.unwrap();
+    assert_eq!(queries.lock().unwrap().last().unwrap(), "Travis Scott Rodeo");
+    assert_eq!(a.items.len(), 1);
+    // the title counts as matched in full: 40 + 15 (artist) + 30 (lossless) + log2(41 seeders)
+    assert_eq!(a.items[0]["score"], 90.4, "{:?}", a.items);
+    // typed words go as typed
+    let typed = SearchBody { query: Some("Rodeo Travis FLAC".into()), ..album };
+    run_search(&st, &typed).await.unwrap();
+    assert_eq!(queries.lock().unwrap().last().unwrap(), "Rodeo Travis FLAC");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// Members see why a source can't search, but no link to a Server settings page they can't open: "ask an
+/// admin" instead, in the sources list and in a search's 409. Admins get the link.
+#[tokio::test]
+async fn members_get_no_links_to_server_settings() {
+    use crate::test_support::{call, user, TestServer};
+    let ts = TestServer::new("picker-member-links");
+    ts.st.cfg.set_many(&json!({ "streamrip_enabled": false }));
+    user(&ts.st, "boss-links", "admin");
+    user(&ts.st, "mia-links", "user");
+    let app = ts.app();
+    for (name, admin) in [("boss-links", true), ("mia-links", false)] {
+        let (code, _, cookie) = call(&app, "POST", "/api/auth/login", "", Some(json!({ "username": name, "password": "a-long-password-1" }))).await;
+        assert_eq!(code, axum::http::StatusCode::OK);
+        let cookie = cookie.split(';').next().unwrap_or("").to_string();
+        let (code, body, _) = call(&app, "GET", "/api/picker/sources", &cookie, None).await;
+        assert_eq!(code, axum::http::StatusCode::OK, "{body}");
+        let deezer = body["sources"].as_array().unwrap().iter().find(|s| s["id"] == "deezer").cloned().unwrap();
+        let search = json!({ "source": "deezer", "kind": "track", "artist": "Travis Scott", "title": "90210" });
+        let (code, err, _) = call(&app, "POST", "/api/picker/search", &cookie, Some(search)).await;
+        assert_eq!(code, axum::http::StatusCode::CONFLICT, "{err}");
+        let got = |v: &Value, hint: &str| (v[hint].as_str().unwrap_or("").to_string(), v["settings"].as_str().unwrap_or("").to_string(),
+                                           v["settings_label"].as_str().unwrap_or("").to_string());
+        if admin {
+            let want = ("Deezer downloads need streamrip switched on".to_string(), "#/settings?s=streamrip".to_string(),
+                        "Settings → Downloads → Qobuz / Tidal / Deezer (streamrip)".to_string());
+            assert_eq!(got(&deezer, "hint"), want);
+            assert_eq!(got(&err, "detail"), want);
+        } else {
+            let want = ("Deezer downloads need streamrip switched on – ask an admin".to_string(), String::new(), String::new());
+            assert_eq!(got(&deezer, "hint"), want);
+            assert_eq!(got(&err, "detail"), want);
+            assert_eq!(err["state"], "off", "the state stays: {err}");
+        }
+    }
+    ts.remove();
 }

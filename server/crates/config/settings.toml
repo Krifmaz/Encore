@@ -45,9 +45,20 @@ listed_last = [
 [sections.general]
 title = "General"
 
-[sections.apps]
-title = "Apps & sources"
-aliases = ["downloads", "tagging", "services"]
+[sections.library]
+title = "Library"
+aliases = ["tagging"]
+
+[sections.downloads]
+title = "Downloads"
+aliases = ["apps"]
+
+[sections.integrations]
+title = "Integrations"
+aliases = ["services"]
+
+[sections.processing]
+title = "Server processing"
 
 [sections.accounts]
 title = "Email & notifications"
@@ -69,97 +80,84 @@ section = "general"
 title = "General"
 desc = "Your server's name and address, who can sign up, and how requests are approved."
 
+[groups.library]
+section = "library"
+title = "Library & tagging"
+desc = "Where your music lives, and how downloaded files are tagged, named and organised."
+
+[groups.verify]
+section = "library"
+title = "Verification & duplicates"
+desc = "Listens to each download and checks it's really the song you asked for, not a remix, live or wrong track."
+test = "acoustid"
+test_label = "Test connection"
+
 [groups.pipeline]
-section = "apps"
-part = "Download sources"
+section = "downloads"
 title = "Download pipeline"
 desc = "Which sources are searched for a request, and in what order. The first one that has it wins."
 
 [groups.releases]
-section = "apps"
-part = "Download sources"
+section = "downloads"
 title = "Release types"
 desc = "Which releases Request discography, the artist pages and New releases count, like the metadata profiles in Lidarr. Song requests skip other versions (live, remix, sped up and so on) unless the song asked for is one."
 
 [groups.streamrip]
-section = "apps"
-part = "Download sources"
+section = "downloads"
 title = "Qobuz / Tidal / Deezer (streamrip)"
 desc = "Searches Qobuz, Tidal and Deezer with your own accounts and downloads lossless (FLAC). Usually the best quality. streamrip is only used for these three: its SoundCloud support would give the same quality as yt-dlp, so SoundCloud links go through yt-dlp."
 test = "streamrip"
 test_label = "Test & write config"
 
 [groups.torznab]
-section = "apps"
-part = "Download sources"
+section = "downloads"
 title = "Torrents & Usenet (Prowlarr)"
 desc = "Searches your torrent and Usenet indexers (through Prowlarr) for whole albums and sends them to your torrent client (qBittorrent, Transmission, Deluge or rTorrent) or Usenet client (SABnzbd or NZBGet), or drops them into a watch folder."
 test = "torznab"
 test_label = "Test connection"
 
 [groups.slskd]
-section = "apps"
-part = "Download sources"
+section = "downloads"
 title = "Soulseek"
 desc = "Searches the Soulseek file-sharing network – great for FLAC and rare releases. Encore runs Soulseek for you: enter any username and password and an account is created at the first sign-in. Forward the port for the best speeds."
 test = "slskd"
 test_label = "Test connection"
 
 [groups.ytdlp]
-section = "apps"
-part = "Download sources"
+section = "downloads"
 title = "YouTube Music & links (yt-dlp)"
 desc = "Last-resort source: finds the song on YouTube Music. yt-dlp also downloads SoundCloud links you paste in the Downloader, along with YouTube, Bandcamp, Mixcloud and about 1,800 other sites."
 
 [groups.youtube]
-section = "apps"
-part = "Download sources"
+section = "downloads"
 title = "YouTube sign-in"
 desc = "Signs yt-dlp in to YouTube: YouTube Music Premium unlocks 256 kbps audio, and signed-in downloads see fewer bot checks. Best: connect the Encore browser extension and hand over a sign-in from a private window – Encore then owns that session and keeps it alive by itself. Pasted cookies are the backup."
 test = "youtube"
 test_label = "Test cookies"
 
-[groups.library]
-section = "apps"
-part = "Library & tagging"
-title = "Library & tagging"
-desc = "Where your music lives, and how downloaded files are tagged, named and organised."
-
-[groups.verify]
-section = "apps"
-part = "Library & tagging"
-title = "Verification & duplicates"
-desc = "Listens to each download and checks it's really the song you asked for, not a remix, live or wrong track."
-test = "acoustid"
-test_label = "Test connection"
-
 [groups.spotify]
-section = "apps"
-part = "Services"
+section = "integrations"
 title = "Integrations"
 desc = "API keys that let users connect their Spotify, Tidal, Last.fm, Discogs and YouTube Music accounts, and power recommendations."
 test = "spotify"
 test_label = "Test all"
 
 [groups.media]
-section = "apps"
-part = "Services"
+section = "integrations"
 title = "Media servers"
 desc = "Tells Navidrome, Jellyfin or Plex to rescan after new music arrives, so it shows up there right away."
 test = "mediaservers"
 test_label = "Trigger refresh"
 
 [groups.roon]
-section = "apps"
-part = "Services"
+section = "integrations"
 title = "Roon"
 desc = "Encore as a Roon extension: your Roon zones show up under Your devices with what they play, transport and volume, and “Play in Roon” starts a search result in a zone. Enable it here, then approve Encore once in Roon → Settings → Extensions."
 test = "roon"
 test_label = "Test connection"
 
 [groups.cadenza]
-section = "apps"
-part = "Services"
+section = "processing"
 title = "Server processing (Cadenza)"
 desc = "Lets permitted users have their streams upsampled on this server by Cadenza (long-filter upsampling, dither and noise shaping, lossless 24-bit FLAC out). Off by default: it costs real processor time per stream. Allow users under People → Users & permissions."
 test = "cadenza"
@@ -311,7 +309,7 @@ type = "password"
 full = true
 help = "For the update checks of the download tools and of Encore itself: GitHub allows 60 checks an hour per address without a token and 5,000 with one. A fine-grained token with no permissions is enough (github.com → Settings → Developer settings); if the Encore repository is private, give the token read access to it."
 
-# ---- Apps & sources → Download pipeline
+# ---- Downloads → Download pipeline
 
 [keys.source_order]
 env = "ENCORE_SOURCE_ORDER"
@@ -320,9 +318,9 @@ group = "pipeline"
 label = "Source order"
 type = "text"
 full = true
-help = "The one place to set what is searched, in order, comma-separated: qobuz, tidal, deezer (all through streamrip), slskd (Soulseek), torznab (torrents/Usenet, albums only), ytdlp (YouTube Music). Leave one out to never use it; sources you haven’t set up are skipped. Recommended (the default): qobuz, tidal, deezer, slskd, torznab, ytdlp – exact hi-res/lossless releases first, then Soulseek, then torrents/Usenet for whole albums, YouTube Music last."
+help = "The one place to set what is searched, in order, comma-separated: qobuz, tidal, deezer (all through streamrip), slskd (Soulseek), torznab (torrents/Usenet, albums only), ytdlp (YouTube Music). Leave one out to never use it; sources you haven’t set up are skipped. Recommended (the default): qobuz, tidal, deezer, slskd, torznab, ytdlp – exact hi-res/lossless releases first, then Soulseek, then torrents/Usenet for whole albums, YouTube Music last. With Highest quality first on (the default), requests try Qobuz/Tidal/Deezer, then FLAC on Soulseek, then torrents/Usenet, then Soulseek in any format, then YouTube Music."
 
-# ---- Apps & sources → Release types
+# ---- Downloads → Release types
 
 [keys.release_types]
 env = "RELEASE_TYPES"
@@ -368,7 +366,7 @@ options = [
 full = true
 help = "A release with any ticked extra is left out. Instrumental, acoustic, sped up, karaoke and covers are read from the titles."
 
-# ---- Apps & sources → Qobuz / Tidal / Deezer (streamrip)
+# ---- Downloads → Qobuz / Tidal / Deezer (streamrip)
 
 [keys.streamrip_enabled]
 env = "STREAMRIP_ENABLED"
@@ -434,7 +432,7 @@ type = "text"
 full = true
 advanced = true
 
-# ---- Apps & sources → Torrents & Usenet (Prowlarr)
+# ---- Downloads → Torrents & Usenet (Prowlarr)
 
 [keys.torznab_enabled]
 env = "TORZNAB_ENABLED"
@@ -442,7 +440,7 @@ default = false
 group = "torznab"
 label = "Search torrent and Usenet indexers through Prowlarr"
 type = "bool"
-help = "Albums only. Prowlarr searches every indexer you added there; torrents go to the torrent client below, Usenet to the Usenet client."
+help = "Albums only (a song can still be picked from them by hand with Pick). Prowlarr searches every indexer you added there; torrents go to the torrent client below, Usenet to the Usenet client."
 
 [keys.prowlarr_url]
 env = "PROWLARR_URL"
@@ -624,7 +622,7 @@ label = "rTorrent XML-RPC URL"
 type = "url"
 when = "torrent_client=rtorrent"
 full = true
-help = "e.g. http://rutorrent:8080/RPC2 or http://rutorrent/plugins/httprpc/action.php (leave empty to skip torrents)"
+help = "e.g. http://rutorrent:8080/RPC2 or http://rutorrent/plugins/rpc/rpc.php (leave empty to skip torrents)"
 
 [keys.rtorrent_user]
 env = "RTORRENT_USER"
@@ -791,7 +789,7 @@ when = "nzb_client=blackhole"
 full = true
 help = "Where your client puts finished downloads, as mounted in this container"
 
-# ---- Apps & sources → Soulseek
+# ---- Downloads → Soulseek
 
 [keys.slskd_enabled]
 env = "SLSKD_ENABLED"
@@ -933,7 +931,7 @@ group = "slskd"
 label = "Keep Soulseek off while the VPN is down"
 type = "bool"
 
-# ---- Apps & sources → YouTube Music & links (yt-dlp)
+# ---- Downloads → YouTube Music & links (yt-dlp)
 
 [keys.ytdlp_enabled]
 env = "YTDLP_ENABLED"
@@ -971,7 +969,7 @@ label = "MP3/M4A quality"
 type = "text"
 help = "Bitrate like 320, or 0 for best VBR"
 
-# ---- Apps & sources → YouTube sign-in
+# ---- Downloads → YouTube sign-in
 
 [keys.ytdlp_cookies]
 env = "YTDLP_COOKIES"
@@ -991,7 +989,7 @@ label = "Refresh pasted cookies every 4 hours"
 type = "bool"
 help = "Only for pasted cookies while they are in use: Encore renews them the way an open YouTube tab does and saves the new ones. A handed-over sign-in is always refreshed every 4 hours; an everyday browser’s cookies never are (that would sign that browser out)."
 
-# ---- Apps & sources → Library & tagging
+# ---- Library → Library & tagging
 
 [keys.library_path]
 env = "ENCORE_LIBRARY_PATH"
@@ -1075,7 +1073,7 @@ group = "library"
 label = "Embed cover art in files"
 type = "bool"
 
-# ---- Apps & sources → Verification & duplicates
+# ---- Library → Verification & duplicates
 
 [keys.acoustid_api_key]
 env = "ACOUSTID_API_KEY"
@@ -1115,7 +1113,7 @@ group = "verify"
 label = "Before replacing a song with a better copy, compare the audio – a different recording is kept as its own song"
 type = "bool"
 
-# ---- Apps & sources → Integrations
+# ---- Integrations → Integrations
 
 [keys.spotify_client_id]
 env = "SPOTIFY_CLIENT_ID"
@@ -1139,7 +1137,7 @@ default = ""
 group = "spotify"
 label = "Tidal Client ID"
 type = "text"
-help = "Only for looking up Tidal albums/songs by ISRC and for the Tidal connection. Get one at developer.tidal.com → Dashboard → Create new app (any name), redirect URI <Public URL>/api/connections/tidal/callback, then copy the Client ID and Client secret here. Downloads from Tidal use your own account instead: Apps & sources → Qobuz / Tidal / Deezer (streamrip) → Sign in to Tidal."
+help = "Only for looking up Tidal albums/songs by ISRC and for the Tidal connection. Get one at developer.tidal.com → Dashboard → Create new app (any name), redirect URI <Public URL>/api/connections/tidal/callback, then copy the Client ID and Client secret here. Downloads from Tidal use your own account instead: Downloads → Qobuz / Tidal / Deezer (streamrip) → Sign in to Tidal."
 
 [keys.tidal_client_secret]
 env = "TIDAL_CLIENT_SECRET"
@@ -1192,7 +1190,7 @@ group = "spotify"
 label = "YouTube Music OAuth Client secret"
 type = "password"
 
-# ---- Apps & sources → Media servers
+# ---- Integrations → Media servers
 
 [keys.navidrome_url]
 env = "NAVIDROME_URL"
@@ -1247,7 +1245,7 @@ group = "media"
 label = "Plex token"
 type = "password"
 
-# ---- Apps & sources → Roon
+# ---- Integrations → Roon
 
 [keys.roon_enabled]
 env = "ROON_ENABLED"
@@ -1265,7 +1263,7 @@ label = "Roon Core address"
 type = "text"
 help = "Leave empty to find the Core on the network. Running Encore in Docker? Multicast does not cross the bridge network – enter the Core’s IP here (add :port if it is not 9330)."
 
-# ---- Apps & sources → Server processing (Cadenza)
+# ---- Server processing → Server processing (Cadenza)
 
 [keys.cadenza_server_enabled]
 env = "CADENZA_SERVER_ENABLED"

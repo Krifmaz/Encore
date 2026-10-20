@@ -161,7 +161,7 @@ fn dsp_opt(v: &Value, l: &Value, cur: &Value) -> String {
 /// `dspHtml()` of the JS renderPlayback: the Server processing section, greyed out unless switched on and allowed.
 fn dsp_html(p: &Value, dsp: &Value) -> String {
     let greyed = r#"<div class="stack" style="gap:8px;opacity:.45;pointer-events:none" aria-disabled="true"><label class="row" style="gap:8px;align-items:center"><input type="checkbox" disabled> Upsample my streams on the server</label><label class="stack" style="gap:4px"><span class="small muted">Upsampling filter</span><select class="input" disabled><option>–</option></select></label><label class="stack" style="gap:4px"><span class="small muted">Dither / noise shaping</span><select class="input" disabled><option>–</option></select></label><label class="stack" style="gap:4px"><span class="small muted">Output rate</span><select class="input" disabled><option>–</option></select></label></div>"#;
-    if !dsp.truthy("enabled") { return format!(r#"{greyed}<span class="small muted">Turned off on this server. Cadenza upsampling for streams uses the server's processor, so an admin has to switch it on (Settings → Apps & sources → Server processing) and allow your account.</span>"#); }
+    if !dsp.truthy("enabled") { return format!(r#"{greyed}<span class="small muted">Turned off on this server. Cadenza upsampling for streams uses the server's processor, so an admin has to switch it on (Settings → Server processing) and allow your account.</span>"#); }
     if !dsp.truthy("allowed") { return format!(r#"{greyed}<span class="small muted">Your account isn't allowed to use the server's processing. Ask an admin.</span>"#); }
     let dev = crate::player::device_rate();
     let off = if p.truthy("dsp") { "" } else { "disabled" };

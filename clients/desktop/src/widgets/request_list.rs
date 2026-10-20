@@ -7,6 +7,12 @@
 //! `waiting` status, Import again for a request whose downloaded files are kept, the storage
 //! banner ([`storage_banner`], `GET /api/requests/storage`) with Check again for admins, and a
 //! request's details in full with Copy ([`request_text`]).
+//!
+//! And what a request keeps when the audio check turns a download away (servers since R2): the
+//! `rejected` downloads, with the reason in full on the row and in the details, and the row's
+//! `anyway` – **Keep anyway** (import the kept file without the check) or **Download anyway**
+//! (the file is gone: ask the same source for it again without the check), on the row and in
+//! the details dialog ([`anyway`]).
 
 use super::catalog::status_badge;
 use super::{
@@ -39,6 +45,18 @@ pub fn can_cancel(status: &str) -> bool {
 /// imports them without downloading anything again. It takes Retry's place on a failed row.
 pub fn can_import_again(r: &Value) -> bool {
     fmt::truthy(r, "has_files") && matches!(r["status"].as_str(), Some("failed" | "waiting" | "completed"))
+}
+
+/// Retry on a row (the phone's `canRetry`, the web's row): a playlist's songs anyone may queue
+/// again; a failed or cancelled request only admins and members with Fix their own downloads (the
+/// server answers others "Ask an admin to retry"). Import again takes its place when the
+/// downloaded files are kept.
+pub fn can_retry(r: &Value, admin: bool, fix: bool) -> bool {
+    if can_import_again(r) {
+        return false;
+    }
+    r["kind"].as_str() == Some("playlist")
+        || (matches!(r["status"].as_str(), Some("failed" | "cancelled")) && may_fix(admin, fix))
 }
 
 /// What Cancel and Remove from list say first when a request keeps downloaded files (the web's
@@ -88,6 +106,204 @@ pub fn request_what(r: &Value) -> String {
         (true, false) => artist,
         _ => String::new(),
     }
+}
+
+/// What a request offers after the audio check turned a download away (the row's `anyway`):
+/// Keep anyway or Download anyway, the rejected download it acts on, and the reason in full.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Anyway {
+    /// Keep anyway (the kept file is there); false: Download anyway (it is gone).
+    pub keep: bool,
+    /// `rejected[].id`, sent as `{"rejected": id}`.
+    pub id: i64,
+    /// "The audio sounds like Diase – Sun, not Moonlight Shadow".
+    pub text: String,
+}
+
+impl Anyway {
+    /// The button's words.
+    pub fn label(&self) -> &'static str {
+        if self.keep {
+            "Keep anyway"
+        } else {
+            "Download anyway"
+        }
+    }
+
+    /// The button's tooltip.
+    pub fn tip(&self) -> &'static str {
+        if self.keep {
+            "Import the download the audio check turned away, without the check"
+        } else {
+            "Download it again from the same place, without the audio check"
+        }
+    }
+
+    /// `POST /api/requests/{id}/keep-anyway` or `…/download-anyway`.
+    pub fn path(&self, request: i64) -> String {
+        format!("/requests/{request}/{}", if self.keep { "keep-anyway" } else { "download-anyway" })
+    }
+
+    /// `{"rejected": id}`, so the server acts on the download the page showed (`{}`: its newest).
+    pub fn body(&self) -> Value {
+        if self.id > 0 {
+            json!({ "rejected": self.id })
+        } else {
+            json!({})
+        }
+    }
+
+    /// The toast once the server took it.
+    pub fn done(&self) -> &'static str {
+        if self.keep {
+            "It will be imported without the audio check"
+        } else {
+            "Downloading it again without the audio check"
+        }
+    }
+
+    /// The details dialog's button.
+    pub fn act(&self, request: i64) -> super::details::Act {
+        super::details::Act {
+            label: self.label().into(),
+            path: self.path(request),
+            body: self.body(),
+            done: self.done().into(),
+        }
+    }
+}
+
+/// The row's `anyway` (null, or from an older server none: nothing to offer).
+pub fn anyway(r: &Value) -> Option<Anyway> {
+    let a = &r["anyway"];
+    let keep = match a["action"].as_str()? {
+        "keep" => true,
+        "download" => false,
+        _ => return None,
+    };
+    let mut text = fmt::s(a, "text");
+    if text.trim().is_empty() {
+        // the server's sentence; else the rejected download's own
+        text = rejected_of(r, &a["id"])
+            .map(|x| if fmt::truthy(x, "text") { fmt::s(x, "text") } else { fmt::s(x, "reason") })
+            .unwrap_or_default();
+    }
+    Some(Anyway { keep, id: fmt::i(a, "id"), text: text.trim().to_string() })
+}
+
+/// The rejected download with this id.
+fn rejected_of<'r>(r: &'r Value, id: &Value) -> Option<&'r Value> {
+    r["rejected"].as_array().and_then(|l| l.iter().find(|x| &x["id"] == id))
+}
+
+/// Who may press Keep anyway and Download anyway (the server's rule, as for Retry): admins, and
+/// a member with the `fix` permission on their own requests. Others see the reason without the
+/// button (the server would only answer "Ask an admin to keep it anyway"). The same people get
+/// Retry, Retry failed and the picker's "Don't check the audio".
+pub fn may_fix(admin: bool, fix: bool) -> bool {
+    admin || fix
+}
+
+/// Where a rejected download came from, in one line: "Deezer · via streamrip ·
+/// https://www.deezer.com/track/1 · 01. Moonlight Shadow.flac" (an album: "… and 9 more").
+pub fn rejected_from(x: &Value) -> String {
+    let n = fmt::i(x, "count");
+    let files = if n > 1 && fmt::truthy(x, "file") {
+        format!("{} and {} more", fmt::s(x, "file"), n - 1)
+    } else {
+        fmt::s(x, "file")
+    };
+    [fmt::s(x, "via"), fmt::s(x, "detail"), fmt::s(x, "url"), files]
+        .into_iter()
+        .filter(|p| !p.trim().is_empty())
+        .collect::<Vec<_>>()
+        .join(" · ")
+}
+
+/// The top of a request's details when the audio check turned a download away: why, in full,
+/// and where it came from.
+pub fn anyway_lead(r: &Value, a: &Anyway) -> super::details::Lead {
+    super::details::Lead {
+        text: a.text.clone(),
+        from: rejected_of(r, &json!(a.id)).map(rejected_from).unwrap_or_default(),
+    }
+}
+
+/// The reason in full on a row's line of its own (warn colour, wrapped: never cut).
+pub fn anyway_reason<'a, M: 'a>(a: &Anyway) -> El<'a, M> {
+    t(a.text.clone())
+        .size(12)
+        .color(theme::look().warn)
+        .wrapping(iced::widget::text::Wrapping::WordOrGlyph)
+        .into()
+}
+
+/// The row's Keep anyway / Download anyway button with its tooltip (`on` None while busy).
+pub fn anyway_btn<'a, M: Clone + 'a>(a: &Anyway, on: Option<M>) -> El<'a, M> {
+    let p = theme::look();
+    tooltip(
+        button(
+            row![
+                icon(if a.keep { Icon::Check } else { Icon::Download }, 14.0, p.text),
+                t(a.label()).size(13).font(theme::semibold()),
+            ]
+            .spacing(6)
+            .align_y(Alignment::Center),
+        )
+        .padding([6, 11])
+        .style(theme::btn(Btn::Default))
+        .on_press_maybe(on),
+        tip_box(a.tip()),
+        tooltip::Position::Bottom,
+    )
+    .gap(4)
+    .into()
+}
+
+/// Whether a row shows its message: not when it is the reason the offer shows in full on a line
+/// of its own (a hand pick turned away has it as its message: it shows once).
+pub fn shows_message(r: &Value, offer: Option<&Anyway>) -> bool {
+    fmt::truthy(r, "message") && !offer.is_some_and(|a| a.text == fmt::s(r, "message").trim())
+}
+
+/// The lines of the details for the downloads the audio check turned away, oldest first: a
+/// heading, then for each why in full, where from, the check's own words, when, and whether the
+/// files are kept (the web's and the phone's words, so a copied text reads the same everywhere).
+pub fn rejected_lines(r: &Value) -> Vec<String> {
+    let list = r["rejected"].as_array().map(Vec::as_slice).unwrap_or(&[]);
+    let mut out = vec![];
+    if !list.is_empty() {
+        out.push(String::new());
+        out.push("Turned away by the audio check (oldest first):".into());
+    }
+    for x in list {
+        let why = if fmt::truthy(x, "text") { fmt::s(x, "text") } else { fmt::s(x, "reason") };
+        out.push(if why.trim().is_empty() { "The audio sounds like another song".to_string() } else { why });
+        let mut sub = |k: &str, v: String| {
+            if !v.trim().is_empty() {
+                out.push(format!("  {k}: {v}"));
+            }
+        };
+        sub("From", rejected_from(x));
+        if fmt::truthy(x, "text") && fmt::truthy(x, "reason") {
+            sub("Check", fmt::s(x, "reason"));
+        }
+        if fmt::f(x, "at") > 0.0 {
+            sub("When", fmt::stamp(fmt::f(x, "at")));
+        }
+        sub(
+            "Files",
+            if !fmt::truthy(x, "has_file") {
+                "gone".into()
+            } else if fmt::truthy(x, "path") {
+                format!("kept in {}", fmt::s(x, "path"))
+            } else {
+                // (other users than admins get no server folder)
+                "kept on the server".into()
+            },
+        );
+    }
+    out
 }
 
 /// The words for what a waiting request waits for (`wait_reason`), as the web says them.
@@ -155,6 +371,11 @@ pub fn request_text(r: &Value, server_version: &str) -> String {
             if fmt::truthy(r, "kept_path") { fmt::s(r, "kept_path") } else { "the server".into() },
         );
     }
+    if fmt::truthy(r, "skip_check") {
+        add("Audio check", "off for this request".into());
+    }
+    // the downloads the audio check turned away (R2), oldest first
+    out.extend(rejected_lines(r));
     let log: Vec<String> = r["log"]
         .as_array()
         .map(|a| a.iter().map(|l| l.as_str().map(str::to_string).unwrap_or_else(|| l.to_string())).collect())
@@ -462,8 +683,13 @@ pub enum Msg {
     Cleared(bool, Result<Value, ApiError>),
     RetryFailed,
     RetriedFailed(Result<Value, ApiError>),
+    /// Keep anyway or Download anyway on a request the audio check turned a download away for.
+    Anyway(i64),
+    Anywayed(i64, &'static str, Result<Value, ApiError>),
     /// Open a request's details (the whole message, the log, the failed step) with Copy.
     Details(i64),
+    /// Load the rows now (the details dialog's Keep anyway or Download anyway was sent).
+    Reload,
     Storage(Result<Value, ApiError>),
     /// Check again (admins): probe the folders now.
     CheckStorage,
@@ -516,6 +742,10 @@ impl List {
             .find(|r| fmt::i(r, "id") == id)
             .map(|r| fmt::s(r, "status"))
             .unwrap_or_default()
+    }
+
+    fn row(&self, id: i64) -> Option<&Value> {
+        self.rows().iter().find(|r| fmt::i(r, "id") == id)
     }
 
     fn kept(&self, id: i64) -> bool {
@@ -572,6 +802,32 @@ pub fn update(l: &mut List, msg: Msg, ctx: &mut Ctx) -> Task<Msg> {
             match r {
                 Ok(_) => return l.load(ctx),
                 Err(e) => ctx.toast_err(e.message),
+            }
+        }
+        Msg::Anyway(id) => {
+            let Some(a) = l.row(id).and_then(anyway) else {
+                return Task::none();
+            };
+            if !l.busy.insert(id) {
+                return Task::none();
+            }
+            let api = ctx.api.clone();
+            let (path, body, done) = (a.path(id), a.body(), a.done());
+            return Task::perform(async move { api.post(&path, body).await }, move |r| Msg::Anywayed(id, done, r));
+        }
+        Msg::Anywayed(id, done, r) => {
+            l.busy.remove(&id);
+            match r {
+                Ok(_) => {
+                    ctx.toast_ok(done);
+                    return l.load(ctx);
+                }
+                // the server's words ("The rejected download is gone – Download anyway asks for it
+                // again", "It is being imported now" …); the row then shows what it offers now
+                Err(e) => {
+                    ctx.toast_err(e.message);
+                    return l.load(ctx);
+                }
             }
         }
         Msg::Pick(r) => {
@@ -712,12 +968,20 @@ pub fn update(l: &mut List, msg: Msg, ctx: &mut Ctx) -> Task<Msg> {
         }
         Msg::Details(id) => {
             l.menu = None;
-            if let Some(r) = l.rows().iter().find(|r| fmt::i(r, "id") == id) {
+            if let Some(r) = l.row(id) {
                 let title = request_what(r);
                 let text = request_text(r, &fmt::s(&ctx.session.info, "version"));
-                ctx.details(if title.is_empty() { "Details".to_string() } else { title }, text);
+                // a download the audio check turned away: why, in full, at the top, and Keep anyway /
+                // Download anyway beside Copy for whoever may press it
+                let offer = anyway(r);
+                let lead = offer.as_ref().map(|a| anyway_lead(r, a));
+                let act = offer
+                    .filter(|_| may_fix(ctx.is_admin(), ctx.session.perm("fix")))
+                    .map(|a| a.act(id));
+                ctx.details_with(if title.is_empty() { "Details".to_string() } else { title }, text, lead, act);
             }
         }
+        Msg::Reload => return l.load(ctx),
         Msg::Storage(Ok(v)) => l.storage = v,
         // an older server has no storage state (no banner); a failed look keeps the last one
         Msg::Storage(Err(_)) => {}
@@ -785,10 +1049,15 @@ pub fn request_row<'a>(ctx: &Ctx<'a>, l: &List, r: &Value) -> El<'a, Msg> {
             .gap(4),
         );
     }
+    // a download the audio check turned away: its reason in full on a line of its own (a hand
+    // pick turned away has it as its message: it shows once)
+    let offer = anyway(r);
+    let message = shows_message(r, offer.as_ref());
     if fmt::truthy(r, "source") {
-        line = line.push(super::faint(format!("via {} ·", fmt::s(r, "source"))).size(12));
+        // (the dot goes with the message that follows)
+        line = line.push(super::faint(format!("via {}{}", fmt::s(r, "source"), if message { " ·" } else { "" })).size(12));
     }
-    if fmt::truthy(r, "message") {
+    if message {
         line = line.push(small_muted(fmt::s(r, "message")));
     }
     if l.admin && fmt::truthy(r, "username") {
@@ -804,6 +1073,9 @@ pub fn request_row<'a>(ctx: &Ctx<'a>, l: &List, r: &Value) -> El<'a, Msg> {
                 .size(12)
                 .wrapping(iced::widget::text::Wrapping::WordOrGlyph),
         );
+    }
+    if let Some(a) = offer.as_ref().filter(|a| !a.text.is_empty()) {
+        lines = lines.push(anyway_reason(a));
     }
     if active && fmt::truthy(r, "progress") {
         lines = lines.push(
@@ -846,6 +1118,10 @@ pub fn request_row<'a>(ctx: &Ctx<'a>, l: &List, r: &Value) -> El<'a, Msg> {
             .gap(4),
         );
     }
+    if let Some(a) = offer.as_ref().filter(|_| may_fix(ctx.is_admin(), ctx.session.perm("fix"))) {
+        // the audio check said it is another song: take it anyway (members need `fix`, as for Retry)
+        right = right.push(anyway_btn(a, (!busy).then_some(Msg::Anyway(id))));
+    }
     if can_import_again(r) {
         // the downloaded files are kept: import them, nothing is downloaded again
         right = right.push(
@@ -863,7 +1139,7 @@ pub fn request_row<'a>(ctx: &Ctx<'a>, l: &List, r: &Value) -> El<'a, Msg> {
             )
             .gap(4),
         );
-    } else if matches!(status.as_str(), "failed" | "cancelled") || kind == "playlist" {
+    } else if can_retry(r, ctx.is_admin(), ctx.session.perm("fix")) {
         right = right.push(icon_btn(Icon::Refresh, "Retry", (!busy).then_some(Msg::Act(id, "retry"))));
     }
     if can_cancel(&status) {
@@ -960,7 +1236,7 @@ pub fn view<'a>(ctx: &Ctx<'a>, l: &'a List) -> Option<El<'a, Msg>> {
     })
 }
 
-/// "Retry failed" (every list has it).
+/// "Retry failed" (every list has it, for those who may retry: [`may_fix`]).
 pub fn retry_failed_btn<'a>(l: &List, tip: &'a str) -> El<'a, Msg> {
     tooltip(
         super::btn_icon(
@@ -1055,6 +1331,23 @@ mod tests {
         );
     }
 
+    /// Retry is for those the server lets retry (the phone's `canRetry`): a member without Fix
+    /// their own downloads gets no button that only answers "Ask an admin to retry".
+    #[test]
+    fn retry_is_for_those_who_may_retry() {
+        let failed = json!({ "kind": "track", "status": "failed" });
+        assert!(can_retry(&failed, true, false), "an admin");
+        assert!(can_retry(&failed, false, true), "a member with fix");
+        assert!(!can_retry(&failed, false, false), "a member without fix");
+        assert!(can_retry(&json!({ "kind": "album", "status": "cancelled" }), false, true));
+        assert!(!can_retry(&json!({ "kind": "track", "status": "completed" }), true, true));
+        assert!(!can_retry(&json!({ "kind": "track", "status": "downloading" }), true, true));
+        // a playlist's songs anyone may queue again
+        assert!(can_retry(&json!({ "kind": "playlist", "status": "completed" }), false, false));
+        // the kept files: Import again in Retry's place
+        assert!(!can_retry(&json!({ "kind": "track", "status": "failed", "has_files": true }), true, true));
+    }
+
     #[test]
     fn a_waiting_request_and_its_kept_files() {
         assert!(can_cancel("waiting") && !is_active("waiting"));
@@ -1066,6 +1359,12 @@ mod tests {
         assert!(can_import_again(&json!({ "status": "completed", "has_files": true })), "a link's files that could not be imported");
         assert!(!can_import_again(&json!({ "status": "cancelled", "has_files": true })));
         assert!(!can_import_again(&json!({ "status": "failed" })), "an older server sends no has_files");
+        // Keep anyway's import waits for the queue's next look, not for the storage: the server sends
+        // no reason (R2), so the details read plain "Waiting"
+        let kept = json!({ "id": 7, "kind": "track", "title": "One", "status": "waiting", "wait_reason": null,
+                           "message": "Waiting to import the kept download", "has_files": true });
+        let text = request_text(&kept, "");
+        assert!(text.contains("Status: Waiting\n") && text.contains("Message: Waiting to import the kept download\n"), "{text}");
     }
 
     #[test]
@@ -1117,6 +1416,117 @@ mod tests {
         assert!(!old.contains("Error:") && !old.contains("Log ("), "{old}");
         assert!(text.ends_with("Server version: 0.29.0"), "the same last line as the web's and the phone's: {text}");
         assert_eq!(wait_words("soulseek"), "Soulseek isn't connected yet");
+    }
+
+    /// A song the audio check turned away (the server's answer, wf/r2-a.md).
+    fn turned_away() -> Value {
+        json!({
+            "id": 12, "kind": "track", "title": "Moonlight Shadow (nightcore)", "artist": "Machine Time", "status": "failed",
+            "message": "All sources exhausted (ytdlp: YouTube match was the wrong audio (audio is \"diase – sun\"))",
+            "attempts": 10, "source": "ytdlp",
+            "rejected": [
+                { "id": 1, "source": "streamrip", "via": "Deezer", "detail": "via streamrip", "url": "https://www.deezer.com/track/3135556",
+                  "file": "01. Moonlight Shadow.flac", "count": 1, "check": "audio", "reason": "audio is “Diase – Sun” (different title)",
+                  "heard": "Diase – Sun", "text": "The audio sounds like Diase – Sun, not Moonlight Shadow", "at": 1_792_427_497.2,
+                  "has_file": false, "path": null },
+                { "id": 2, "source": "ytdlp", "via": "YouTube Music", "detail": null, "url": "https://music.youtube.com/watch?v=x",
+                  "file": "Moonlight Shadow.opus", "count": 3, "check": "audio", "reason": "audio is “Diase – Sun” (different title)",
+                  "heard": "Diase – Sun", "text": "The audio sounds like Diase – Sun, not Moonlight Shadow (nightcore)", "at": 1_792_427_557.0,
+                  "has_file": true, "path": "/downloads/encore/rejected-12/2" }
+            ],
+            "anyway": { "action": "keep", "id": 2, "text": "The audio sounds like Diase – Sun, not Moonlight Shadow (nightcore)" },
+            "skip_check": false,
+        })
+    }
+
+    #[test]
+    fn keep_anyway_and_download_anyway() {
+        let r = turned_away();
+        let a = anyway(&r).unwrap();
+        assert_eq!(a, Anyway { keep: true, id: 2, text: "The audio sounds like Diase – Sun, not Moonlight Shadow (nightcore)".into() });
+        assert_eq!(a.label(), "Keep anyway");
+        assert_eq!(a.tip(), "Import the download the audio check turned away, without the check");
+        assert_eq!(a.path(12), "/requests/12/keep-anyway");
+        assert_eq!(a.body(), json!({ "rejected": 2 }));
+        assert_eq!(a.done(), "It will be imported without the audio check");
+        let act = a.act(12);
+        assert_eq!((act.label.as_str(), act.path.as_str()), ("Keep anyway", "/requests/12/keep-anyway"));
+        // the top of the details: why in full, and where it came from
+        let lead = anyway_lead(&r, &a);
+        assert_eq!(lead.text, "The audio sounds like Diase – Sun, not Moonlight Shadow (nightcore)");
+        assert_eq!(lead.from, "YouTube Music · https://music.youtube.com/watch?v=x · Moonlight Shadow.opus and 2 more");
+        // the kept file is gone: Download anyway
+        let mut r2 = r.clone();
+        r2["anyway"] = json!({ "action": "download", "id": 1, "text": "The audio sounds like Diase – Sun, not Moonlight Shadow" });
+        let d = anyway(&r2).unwrap();
+        assert!(!d.keep);
+        assert_eq!(d.label(), "Download anyway");
+        assert_eq!(d.tip(), "Download it again from the same place, without the audio check");
+        assert_eq!(d.path(12), "/requests/12/download-anyway");
+        assert_eq!(d.done(), "Downloading it again without the audio check");
+        // no text on the offer: the rejected download's own, else the check's words
+        r2["anyway"] = json!({ "action": "download", "id": 1 });
+        assert_eq!(anyway(&r2).unwrap().text, "The audio sounds like Diase – Sun, not Moonlight Shadow");
+        let t = anyway(&json!({ "anyway": { "action": "keep", "id": 4 }, "rejected": [{ "id": 4, "reason": "audio is “X – Y”" }] }));
+        assert_eq!(t.map(|a| a.text).as_deref(), Some("audio is “X – Y”"));
+        // no id: the server takes its newest
+        assert_eq!(anyway(&json!({ "anyway": { "action": "keep" } })).unwrap().body(), json!({}));
+        // nothing offered, an unknown action, an older server
+        r2["anyway"] = Value::Null;
+        assert_eq!(anyway(&r2), None);
+        r2["anyway"] = json!({ "action": "later", "id": 1 });
+        assert_eq!(anyway(&r2), None);
+        assert_eq!(anyway(&json!({ "id": 3, "status": "failed" })), None);
+        // who may press it: admins, and members with `fix` (as Retry)
+        assert!(may_fix(true, false) && may_fix(false, true) && !may_fix(false, false));
+        // a hand pick turned away has the reason as its message: the row shows it once, on its own line
+        let mut pick = turned_away();
+        pick["message"] = json!("The audio sounds like Diase – Sun, not Moonlight Shadow (nightcore)");
+        assert!(!shows_message(&pick, anyway(&pick).as_ref()));
+        assert!(shows_message(&turned_away(), anyway(&turned_away()).as_ref()), "another message stays");
+        assert!(shows_message(&json!({ "message": "Searching Soulseek" }), None));
+        assert!(!shows_message(&json!({ "message": "" }), None));
+    }
+
+    #[test]
+    fn the_details_name_every_download_the_audio_check_turned_away() {
+        let mut r = turned_away();
+        r["skip_check"] = json!(true);
+        let text = request_text(&r, "0.29.0");
+        let want = "Audio check: off for this request
+
+Turned away by the audio check (oldest first):
+The audio sounds like Diase – Sun, not Moonlight Shadow
+  From: Deezer · via streamrip · https://www.deezer.com/track/3135556 · 01. Moonlight Shadow.flac
+  Check: audio is “Diase – Sun” (different title)
+  When: 2026-10-19 16:31 UTC
+  Files: gone
+The audio sounds like Diase – Sun, not Moonlight Shadow (nightcore)
+  From: YouTube Music · https://music.youtube.com/watch?v=x · Moonlight Shadow.opus and 2 more
+  Check: audio is “Diase – Sun” (different title)
+  When: 2026-10-19 16:32 UTC
+  Files: kept in /downloads/encore/rejected-12/2
+";
+        assert!(text.contains(want), "missing\n{want}\nin\n{text}");
+        // a member gets no server folder
+        let mut m = turned_away();
+        m["rejected"][1]["path"] = Value::Null;
+        assert!(request_text(&m, "").contains("  Files: kept on the server\n"));
+        assert!(!request_text(&m, "").contains("Audio check:"));
+        // nothing turned away, an older server: none of it
+        let old = request_text(&json!({ "id": 3, "kind": "track", "title": "One", "status": "failed" }), "");
+        assert!(!old.contains("Turned away") && !old.contains("Audio check"), "{old}");
+        // no words at all
+        let bare = rejected_lines(&json!({ "rejected": [{ "id": 1, "has_file": true }] }));
+        assert_eq!(
+            bare,
+            vec![
+                String::new(),
+                "Turned away by the audio check (oldest first):".into(),
+                "The audio sounds like another song".into(),
+                "  Files: kept on the server".into()
+            ]
+        );
     }
 
     #[test]

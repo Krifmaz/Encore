@@ -2136,12 +2136,12 @@ pub fn update(state: &mut State, msg: Message, ctx: &mut Ctx) -> Task<Message> {
             AdminAct::Verify => {
                 let has_key = state.stats.as_ref().is_some_and(|s| fmt::truthy(s, "acoustid"));
                 if !has_key {
-                    ctx.toast_err("Add a free AcoustID API key in Settings → Verification first");
+                    ctx.toast_err("Add a free AcoustID API key in Settings → Library → Verification & duplicates first");
                     return Task::none();
                 }
                 confirm_dialog(state, "Verify audio", "Every unchecked file is fingerprinted and compared against AcoustID/MusicBrainz, so wrong songs, remixes posing as originals, covers and mislabeled tracks get flagged. Takes ~0.4s per track.", "Start", false, Message::AdminGo(act));
             }
-            AdminAct::Organize => confirm_dialog(state, "Organize files", "Every song is moved into folders from its tags using your naming template (Settings → Library, tagging & IDs), e.g. Artist/Album (Year)/01 - Title. Missing tags are filled in first from the file name, AcoustID and Deezer. Playlists and likes keep working.", "Organize", false, Message::AdminGo(act)),
+            AdminAct::Organize => confirm_dialog(state, "Organize files", "Every song is moved into folders from its tags using your naming template (Settings → Library → Library & tagging), e.g. Artist/Album (Year)/01 - Title. Missing tags are filled in first from the file name, AcoustID and Deezer. Playlists and likes keep working.", "Organize", false, Message::AdminGo(act)),
             AdminAct::Autotag => confirm_dialog(state, "Auto-tag library", "Every album without MusicBrainz tags will be matched automatically. Confident matches get retagged and renamed using your naming template; the rest are left for manual matching.", "Start", false, Message::AdminGo(act)),
         },
         Message::AdminGo(act) => {

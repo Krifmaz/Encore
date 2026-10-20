@@ -100,7 +100,7 @@ pub fn acoustid_ready(st: &impl Ctx) -> Result<(String, String), &'static str> {
         return Err("Fingerprint submissions are off");
     }
     if client.is_empty() {
-        return Err("Add the AcoustID API key under Apps & sources → Verification first");
+        return Err("Add the AcoustID API key under Settings → Library → Verification & duplicates first");
     }
     if user.is_empty() {
         return Err("Add your AcoustID user key to send fingerprints");

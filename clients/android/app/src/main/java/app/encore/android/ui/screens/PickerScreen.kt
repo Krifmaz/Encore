@@ -1,5 +1,6 @@
 package app.encore.android.ui.screens
 
+import android.content.Context
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
@@ -54,6 +55,7 @@ import app.encore.android.data.repo.PickerInfo
 import app.encore.android.data.repo.PickerOpts
 import app.encore.android.data.repo.PickerSource
 import app.encore.android.features.picker.PickerRules
+import app.encore.android.features.requests.RequestRules
 import app.encore.android.ui.Nav
 import app.encore.android.ui.Screen
 import app.encore.android.ui.components.Badge
@@ -83,6 +85,19 @@ import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.put
 
 private fun isUrl(v: String): Boolean = Regex("^https?://\\S+$", RegexOption.IGNORE_CASE).matches(v.trim())
+
+/** "Don't check the audio" is remembered on this phone, like the web's `encore.pickNoCheck` (off by default). */
+private object NoCheckPref {
+    private const val FILE = "encore_picker"
+    private const val KEY = "no_check"
+
+    fun read(context: Context): Boolean =
+        try { PickerRules.noCheckOf(context.applicationContext.getSharedPreferences(FILE, Context.MODE_PRIVATE).getString(KEY, null)) } catch (_: Exception) { false }
+
+    fun write(context: Context, on: Boolean) {
+        try { context.applicationContext.getSharedPreferences(FILE, Context.MODE_PRIVATE).edit().putString(KEY, PickerRules.noCheckValue(on)).apply() } catch (_: Exception) {}
+    }
+}
 
 /** A failed search on one source: the message and, for a 409 (signed out, stopped, off), the settings link. */
 private class PickErr(val message: String, val settings: String = "", val label: String = "")
@@ -168,7 +183,7 @@ private fun FoundRow(name: String, text: String, again: Boolean, running: String
  * The manual download picker (web/js/pages/picker.js): search every source, see quality / size / uploader and
  * download the exact result you choose. Opened for an album or a song, or for an existing request.
  */
-@OptIn(ExperimentalMaterial3Api::class)
+@OptIn(ExperimentalMaterial3Api::class, ExperimentalLayoutApi::class)
 @Composable
 fun PickerScreen(nav: Nav, opts: PickerOpts) {
     val features = nav.features
@@ -179,6 +194,9 @@ fun PickerScreen(nav: Nav, opts: PickerOpts) {
     var linkUrl by remember { mutableStateOf("") }
     var tab by remember { mutableStateOf(0) }
     var lossless by remember { mutableStateOf(false) }
+    val context = LocalContext.current
+    // "Don't check the audio": what is picked is imported even when the audio check says it is another song
+    var noCheck by remember { mutableStateOf(NoCheckPref.read(context)) }
     val results = remember { mutableStateMapOf<String, List<PickResult>>() }
     val errors = remember { mutableStateMapOf<String, PickErr>() }
     val loading = remember { mutableStateMapOf<String, Boolean>() }
@@ -194,6 +212,9 @@ fun PickerScreen(nav: Nav, opts: PickerOpts) {
     var me by remember { mutableStateOf<Me?>(null) }
     val scrollBehavior = TopAppBarDefaults.enterAlwaysScrollBehavior()
     LaunchedEffect(Unit) { me = try { withContext(Dispatchers.IO) { features.me() } } catch (e: CancellationException) { throw e } catch (_: Exception) { null } }
+    // the switch is only for those who may take a download the check turned away (as Keep anyway)
+    val maySkip = RequestRules.mayFix(me)
+    val skipCheck = PickerRules.noCheckSent(noCheck, maySkip)
 
     /** One answer in place: its rows, and its kept-search fields when it came from a kept search. */
     fun land(id: String, r: PickSearch) {
@@ -245,7 +266,7 @@ fun PickerScreen(nav: Nav, opts: PickerOpts) {
         busy = true
         scope.launch {
             try {
-                val status = withContext(Dispatchers.IO) { features.pick(source, payload, title, opts) }
+                val status = withContext(Dispatchers.IO) { features.pick(source, payload, title, opts, skipCheck) }
                 Toasts.show(if (status == "pending") "Sent for approval – your pick will be used" else "Downloading your pick", "ok")
                 nav.back()
             } catch (e: Exception) {
@@ -343,10 +364,21 @@ fun PickerScreen(nav: Nav, opts: PickerOpts) {
                     }
                 }
                 item {
-                    Row(Modifier.padding(horizontal = Gutter), verticalAlignment = Alignment.CenterVertically) {
-                        Checkbox(checked = lossless, onCheckedChange = { lossless = it })
-                        Text("Lossless only", style = MaterialTheme.typography.bodyMedium)
+                    // Lossless only and Don't check the audio side by side (one under the other on a narrow screen)
+                    FlowRow(Modifier.padding(horizontal = Gutter), horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            Checkbox(checked = lossless, onCheckedChange = { lossless = it })
+                            Text("Lossless only", style = MaterialTheme.typography.bodyMedium)
+                        }
+                        if (maySkip) {
+                            Row(verticalAlignment = Alignment.CenterVertically) {
+                                Checkbox(checked = noCheck, onCheckedChange = { noCheck = it; NoCheckPref.write(context, it) })
+                                Text(PickerRules.NO_CHECK, style = MaterialTheme.typography.bodyMedium)
+                            }
+                        }
                     }
+                    // what the switch does, under it (a phone has no tooltip): faint while off, warn while on
+                    if (maySkip) Text(PickerRules.NO_CHECK_HELP, style = MaterialTheme.typography.bodySmall, color = if (skipCheck) EncoreColors.Warn else p.faint, modifier = Modifier.padding(horizontal = Gutter).padding(bottom = 4.dp))
                 }
                 if (sources.isEmpty()) {
                     item { Text("No download sources are enabled – set them up in Settings.", color = p.muted, modifier = Modifier.padding(Gutter)) }
@@ -416,10 +448,7 @@ fun PickerScreen(nav: Nav, opts: PickerOpts) {
                     }
                 }
                 item {
-                    Text(
-                        "The file you pick is still fingerprint-checked, tagged with MusicBrainz data and de-duplicated. If it fails, the request fails instead of trying other sources.",
-                        style = MaterialTheme.typography.bodySmall, color = p.faint, modifier = Modifier.padding(horizontal = Gutter),
-                    )
+                    Text(PickerRules.note(skipCheck), style = MaterialTheme.typography.bodySmall, color = p.faint, modifier = Modifier.padding(horizontal = Gutter))
                 }
                 item { Spacer(Modifier.height(24.dp)) }
             }

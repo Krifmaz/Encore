@@ -1,9 +1,16 @@
 package app.encore.android.features.picker
 
 import app.encore.android.core.EncoreJson
+import app.encore.android.data.repo.FeaturesApi
 import app.encore.android.data.repo.PickSearch
+import app.encore.android.data.repo.PickerOpts
 import app.encore.android.data.repo.PickerSource
 import app.encore.android.data.repo.pickSearchOf
+import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.JsonPrimitive
+import kotlinx.serialization.json.buildJsonObject
+import kotlinx.serialization.json.jsonPrimitive
+import kotlinx.serialization.json.put
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
@@ -100,6 +107,72 @@ class PickerRulesTest {
         assertEquals("sign in", PickerRules.stateWord("sign_in"))
         assertEquals("not connected", PickerRules.stateWord("not_connected"))
         assertEquals("", PickerRules.stateWord("ready"))
+    }
+
+    @Test
+    fun theServersFinalAnswerReads() {
+        // package B's answer as the server sends it (R2): cached_at in whole seconds, found on the server's clock
+        val kept = pickSearchOf(EncoreJson.parseToJsonElement(
+            """{"items": [{"source": "slskd", "key": "alice|Music/Duumu/Illuminate EP", "title": "Duumu/Illuminate EP", "subtitle": "Music / Duumu / Illuminate EP",
+                 "quality": "FLAC 16-bit", "lossless": true, "tracks": 2, "size": 60000000, "duration": null, "info": "alice · free slot · 2.0 MB/s", "score": 93.0,
+                 "payload": {"username": "alice", "directory": "Music/Duumu/Illuminate EP", "format": "flac", "bitrate": 0, "files": []}}],
+               "from": "cache", "cached_at": 1760875320, "found": "Found at 14:02", "query": "Illuminate EP", "can_search": true, "notice": null}""",
+        ))
+        assertEquals(1, kept.items.size)
+        assertEquals("FLAC 16-bit", kept.items[0].quality)
+        assertTrue(kept.kept)
+        assertEquals(1760875320.0, kept.cachedAt, 0.001)
+        assertEquals(FoundLine("Found at 14:02 for \"Illuminate EP\"", again = true), foundLineOf(kept))
+        // B's final words: a kept search the box's words make comes back with the box's own words (brackets and
+        // symbols included), so nothing follows "Found at"; only the request's other search ("Days Before Rodeo",
+        // the album-only fallback) names its words
+        val box = "Machine Time Moonlight Shadow (nightcore)"
+        val own = kept.copy(query = box)
+        assertEquals(FoundLine("Found at 14:02", again = true), foundLineOf(own, typed = box))
+        assertEquals(FoundLine("Found at 14:02", again = true), foundLineOf(kept.copy(query = "Ke\$ha Tik Tok"), typed = "Ke\$ha Tik Tok"))
+        assertEquals(FoundLine("Found at 14:02 for \"Days Before Rodeo\"", again = true), foundLineOf(kept.copy(query = "Days Before Rodeo"), typed = "Travis Scott Days Before Rodeo"))
+        // kept rows while Soulseek isn't connected: no Search again, the server's reason instead
+        val down = pickSearchOf(EncoreJson.parseToJsonElement(
+            """{"items": [], "from": "cache", "cached_at": 1760875320, "found": "Found yesterday at 22:10", "query": "Duumu Illuminate EP",
+               "can_search": false, "notice": "Soulseek isn't connected – next attempt at 14:20"}""",
+        ))
+        assertEquals(FoundLine("No results. · Found yesterday at 22:10 · Soulseek isn't connected – next attempt at 14:20", again = false), foundLineOf(down, empty = true))
+        // a live answer of every other source: nothing to say
+        val live = pickSearchOf(EncoreJson.parseToJsonElement("""{"items": [], "from": "live", "cached_at": null, "found": null, "query": "Duumu Illuminate EP", "can_search": true, "notice": null}"""))
+        assertFalse(live.kept)
+        assertNull(foundLineOf(live))
+    }
+
+    @Test
+    fun theAudioCheckSwitch() {
+        assertEquals("Don't check the audio", PickerRules.NO_CHECK)
+        assertEquals("Imports what you pick even when the audio check says it is another song", PickerRules.NO_CHECK_HELP)
+        assertTrue(PickerRules.note(false).startsWith("The file you pick is still fingerprint-checked"))
+        assertTrue(PickerRules.note(true).startsWith("The audio check is off: the file you pick is imported even when the check says it is another song."))
+        // remembered on this phone as the web keeps it ("1" / "0"); off by default
+        assertTrue(PickerRules.noCheckOf("1"))
+        assertFalse(PickerRules.noCheckOf("0"))
+        assertFalse(PickerRules.noCheckOf(null))
+        assertFalse(PickerRules.noCheckOf("true"))
+        assertEquals("1", PickerRules.noCheckValue(true))
+        assertEquals("0", PickerRules.noCheckValue(false))
+        // only for those who may Keep anyway: a switch kept on by someone without Fix their own downloads isn't sent
+        assertTrue(PickerRules.noCheckSent(noCheck = true, mayFix = true))
+        assertFalse(PickerRules.noCheckSent(noCheck = true, mayFix = false))
+        assertFalse(PickerRules.noCheckSent(noCheck = false, mayFix = true))
+        // the pick sends no_check only with the switch on
+        val payload = buildJsonObject { put("url", "https://music.youtube.com/watch?v=x") }
+        val forRequest = PickerOpts(kind = "track", artist = "Machine Time", title = "Moonlight Shadow (nightcore)", requestId = 21)
+        val on = FeaturesApi.pickBody("ytmusic", payload, "Moonlight Shadow", forRequest, noCheck = true)
+        assertEquals(JsonPrimitive(true), on["no_check"])
+        assertEquals(JsonPrimitive(21L), on["request_id"])
+        assertNull(on["request"])
+        val off = FeaturesApi.pickBody("ytmusic", payload, "Moonlight Shadow", forRequest)
+        assertNull(off["no_check"])
+        // a pick with no request yet asks for one
+        val fresh = FeaturesApi.pickBody("deezer", payload, "Moonlight Shadow", PickerOpts(kind = "track", artist = "Machine Time", title = "Moonlight Shadow"), noCheck = true)
+        assertEquals(JsonPrimitive(true), fresh["no_check"])
+        assertEquals("track", (fresh["request"] as JsonObject)["kind"]?.jsonPrimitive?.content)
     }
 
     @Test

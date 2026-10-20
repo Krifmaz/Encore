@@ -7,6 +7,7 @@ use crate::api::ApiError;
 use crate::fmt;
 use crate::pages::{urlencode, Ctx, El, Page};
 use crate::theme::{self, Badge, Btn};
+use crate::widgets::request_list;
 use crate::widgets::{
     self, badge, btn_icon, btn_sm, grid, h1, h2, icon, icon_btn, modal, muted, search_box, section_head, skeleton_tiles,
     small_muted, t, Icon, Tile, TileKind,
@@ -92,6 +93,10 @@ pub enum Message {
     PlayFy(usize),
     CancelReq(i64),
     ReqDone(Result<Value, ApiError>),
+    /// Keep anyway or Download anyway on a download in progress the audio check turned a file
+    /// away for (the same button as on Requests).
+    Anyway(i64, request_list::Anyway),
+    Anywayed(&'static str, Result<Value, ApiError>),
     CloseDialog,
 }
 
@@ -388,6 +393,19 @@ pub fn update(state: &mut State, msg: Message, ctx: &mut Ctx) -> Task<Message> {
         }
         Message::ReqDone(Ok(_)) => return load_reqs(ctx),
         Message::ReqDone(Err(e)) => ctx.toast_err(e.message),
+        Message::Anyway(id, a) => {
+            let api = ctx.api.clone();
+            let (path, body, done) = (a.path(id), a.body(), a.done());
+            return Task::perform(async move { api.post(&path, body).await }, move |r| Message::Anywayed(done, r));
+        }
+        Message::Anywayed(done, r) => {
+            // the server's words when it says no; the rows then show what it offers now
+            match r {
+                Ok(_) => ctx.toast_ok(done),
+                Err(e) => ctx.toast_err(e.message),
+            }
+            return load_reqs(ctx);
+        }
         Message::CloseDialog => state.dialog = None,
     }
     Task::none()
@@ -515,14 +533,20 @@ fn request_row<'a>(r: &'a Value, ctx: &Ctx<'a>) -> El<'a, Message> {
     if attempts > 1 {
         line = line.push(widgets::faint(format!("{attempts} attempts ·")).size(12));
     }
+    // a download the audio check turned away: the reason in full on a line of its own (shown once)
+    let offer = request_list::anyway(r);
+    let message = request_list::shows_message(r, offer.as_ref());
     if fmt::truthy(r, "source") {
-        line = line.push(widgets::faint(format!("via {} ·", fmt::s(r, "source"))).size(12));
+        line = line.push(widgets::faint(format!("via {}{}", fmt::s(r, "source"), if message { " ·" } else { "" })).size(12));
     }
-    if fmt::truthy(r, "message") {
+    if message {
         line = line.push(small_muted(fmt::s(r, "message")));
     }
     line = line.push(widgets::faint(format!("· {}", fmt::ago(fmt::f(r, "created_at")))).size(12));
     let mut lines = column![t(what).size(14).font(theme::semibold()), line].spacing(3);
+    if let Some(a) = offer.as_ref().filter(|a| !a.text.is_empty()) {
+        lines = lines.push(request_list::anyway_reason(a));
+    }
     if active && fmt::truthy(r, "progress") {
         lines = lines.push(
             container(
@@ -534,6 +558,11 @@ fn request_row<'a>(r: &'a Value, ctx: &Ctx<'a>) -> El<'a, Message> {
         );
     }
     let mut right = row![status_badge(&status)].spacing(6).align_y(Alignment::Center);
+    // Keep anyway / Download anyway beside Cancel, for those who may (admins, members with `fix`)
+    if let Some(a) = offer.filter(|_| request_list::may_fix(ctx.is_admin(), ctx.session.perm("fix"))) {
+        let on = Message::Anyway(fmt::i(r, "id"), a.clone());
+        right = right.push(request_list::anyway_btn(&a, Some(on)));
+    }
     if matches!(
         status.as_str(),
         "pending" | "queued" | "searching" | "downloading" | "monitoring" | "importing" | "waiting"

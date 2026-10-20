@@ -363,7 +363,7 @@ async fn identify(State(st): State<AppState>, Admin(viewer): Admin, Path(id): Pa
 async fn identify_answer(State(st): State<AppState>, Admin(_): Admin, Path(id): Path<i64>) -> ApiResult<Value> {
     let t = st.db.one("SELECT path FROM tracks WHERE id=?", p![id])?.ok_or_else(|| err(404, "Track not found"))?;
     if !acoustid::available(&st) {
-        return Err(err(400, "Add an AcoustID API key (Settings → API keys) to identify songs by their audio"));
+        return Err(err(400, "Add an AcoustID API key (Settings → Library → Verification & duplicates) to identify songs by their audio"));
     }
     let Some((d, fp)) = acoustid::fingerprint(std::path::Path::new(&t.s("path"))).await else { return Ok(json!([])) };
     let res = encore_http::acoustid::lookup(&st, d, &fp).await.map_err(|e| err(502, e.to_string()))?;
@@ -413,7 +413,7 @@ struct AllQ {
 
 async fn verify_all(State(st): State<AppState>, Admin(_): Admin, Query(q): Query<AllQ>) -> ApiResult<Json<Value>> {
     if !acoustid::available(&st) {
-        return Err(err(400, "Add an AcoustID API key in Settings → Verification (and make sure fpcalc is installed)"));
+        return Err(err(400, "Add an AcoustID API key in Settings → Library → Verification & duplicates (and make sure fpcalc is installed)"));
     }
     if st.jobs.running("verify") {
         return Err(err(409, "Verification already running"));

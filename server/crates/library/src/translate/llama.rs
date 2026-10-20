@@ -446,11 +446,11 @@ pub async fn stop(st: &impl Ctx) {
 
 async fn start(st: &impl Ctx) -> anyhow::Result<Running> {
     let data = st.data_dir();
-    let (exe, _) = installed(data).ok_or_else(|| anyhow::anyhow!("The Translator is not installed (Settings → Download tools)"))?;
+    let (exe, _) = installed(data).ok_or_else(|| anyhow::anyhow!("The Translator is not installed (Settings → Downloads → Download tools)"))?;
     let m = model(st);
     let model = model_path(data, &m);
     if !model.is_file() {
-        anyhow::bail!("The {} model is not downloaded (Settings → Download tools → Translator)", m.id);
+        anyhow::bail!("The {} model is not downloaded (Settings → Downloads → Download tools → Translator)", m.id);
     }
     let port = free_port()?;
     let threads = std::thread::available_parallelism().map(|n| (n.get() / 2).max(1)).unwrap_or(2);

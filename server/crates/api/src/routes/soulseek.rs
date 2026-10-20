@@ -194,7 +194,7 @@ async fn search_poll(State(st): State<AppState>, User(u): User, Path(id): Path<S
     sweep(&st);
     let over = || err(404, "That search is over – start a new one");
     let (q, was_done) = st.web.soulseek_searches.lock().unwrap().get(&id).map(|s| (s.q.clone(), s.done)).ok_or_else(over)?;
-    let (responses, done) = match slskd::search_poll(&st, &id).await {
+    let (responses, done, whole) = match slskd::search_poll_whole(&st, &id).await {
         Ok(x) => x,
         Err(e) if e.to_string().contains("expired") => { st.web.soulseek_searches.lock().unwrap().remove(&id); return Err(over()); }
         Err(e) => return Err(upstream(e)),
@@ -203,6 +203,11 @@ async fn search_poll(State(st): State<AppState>, User(u): User, Path(id): Path<S
     if done {
         if let Some(s) = st.web.soulseek_searches.lock().unwrap().get_mut(&id) {
             s.done = true;
+        }
+        // the first look at a search that ran to its end keeps it for the picker (not words that leave
+        // some out, "-live": the picker never searches those)
+        if whole && !was_done && !q.split_whitespace().any(|w| w.starts_with('-')) {
+            encore_requests::search_cache::keep_slskd(&st, &q, None, &responses).await;
         }
     }
     Ok(Json(json!({ "id": id, "q": q, "done": done, "results": group(&responses) })))

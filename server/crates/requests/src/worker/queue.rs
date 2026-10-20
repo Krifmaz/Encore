@@ -69,8 +69,10 @@ pub fn recover(st: &impl Ctx) {
         // reported song's replacement keeps what it replaces and which source to avoid
         let old: Value = serde_json::from_str(&r.s("detail")).unwrap_or(json!({}));
         let mut d = json!({});
-        // (downloaded files kept for their import stay too: the import runs again, nothing is downloaded)
-        for k in ["replace", "avoid", "album_mode", "release_filter", "release_ids", "length", "isrc", "ext", "attempts", "log", "pick", "kept"] {
+        // (downloaded files kept for their import stay too: the import runs again, nothing is downloaded; so
+        // do the downloads the audio check turned away and a check a person turned off)
+        for k in ["replace", "avoid", "album_mode", "release_filter", "release_ids", "length", "isrc", "ext", "attempts", "log", "pick", "kept",
+                  "rejected", "rejected_seq", "skip_check"] {
 
             if !old[k].is_null() {
                 d[k] = old[k].clone();
@@ -84,6 +86,7 @@ pub async fn run<C: Ctx>(st: C) {
     recover(&st);
     loop {
         let _ = storage::tick(&st); // a paused import's health check every 10 minutes, started and not waited for
+        let _ = rejected::tick(&st); // rejected downloads past their 7 days go, once an hour, not waited for
         let ids: Vec<i64> = st.db().query(&format!("SELECT id FROM requests WHERE status IN ({}) ORDER BY id", vec!["?"; ACTIVE.len()].join(",")),
             ACTIVE.iter().map(|s| json!(s)).collect()).unwrap_or_default().into_iter().map(|r| r.i("id")).collect();
         {
@@ -107,10 +110,44 @@ pub async fn run<C: Ctx>(st: C) {
 /// Encore's own staging folder of the request goes. Finished files that wait in a download client's folder
 /// for their import are never deleted (the client's folder is the client's).
 pub async fn cancel(st: &impl Ctx, id: i64) {
-    let Some(r) = get(st, id) else { return };
-    if let Some(h) = st.requests().tasks.0.lock().unwrap().remove(&id) {
-        h.abort();
+    drop(stop(st, id, false).await);
+}
+
+/// A request's place in the queue, held by a task that never ends ([`cancel_holding`]): the queue starts
+/// no step for the request while it is there. The place is given back when this goes – after the new state
+/// is written, and also when the caller returns early or its connection closes.
+pub struct Hold(Option<tokio::task::AbortHandle>);
+
+impl Drop for Hold {
+    fn drop(&mut self) {
+        if let Some(h) = self.0.take() {
+            h.abort();
+        }
     }
+}
+
+/// [`cancel`] for whoever writes the request's new state next (Keep anyway, Download anyway, a pick, a
+/// cancel): its place in the queue stays taken from the moment its task stops until the returned [`Hold`]
+/// goes. Without it the queue could start a step on the old state in between, which would find the
+/// download stopped here and start the next one (another user's files, another release) that nothing then
+/// looks after.
+pub async fn cancel_holding(st: &impl Ctx, id: i64) -> Hold {
+    stop(st, id, true).await
+}
+
+async fn stop(st: &impl Ctx, id: i64, hold: bool) -> Hold {
+    let Some(r) = get(st, id) else { return Hold(None) };
+    let held = {
+        let mut tasks = st.requests().tasks.0.lock().unwrap_or_else(|p| p.into_inner());
+        if let Some(h) = tasks.remove(&id) {
+            h.abort();
+        }
+        hold.then(|| {
+            let h = tokio::spawn(std::future::pending::<()>()).abort_handle();
+            tasks.insert(id, h.clone());
+            h
+        })
+    };
     let kept = r.d["kept"].is_object();
     let src = r.s("source");
     if src.starts_with("slskd") && !kept {
@@ -123,4 +160,5 @@ pub async fn cancel(st: &impl Ctx, id: i64) {
         torznab::remove(st, tid).await;
     }
     storage::remove_staging(st, id);
+    Hold(held)
 }

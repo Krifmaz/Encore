@@ -599,13 +599,13 @@ pub fn view<'a>(state: &'a State, ctx: &Ctx<'a>) -> El<'a, Message> {
     if let Some(p) = probe_view(state, ctx) {
         form = form.push(p);
     }
-    let recent_actions: El<'a, Message> = row![
-        request_list::retry_failed_btn(&state.list, "Queue every failed download again").map(Message::List),
-        request_list::clear_btn("Clear…").map(Message::List),
-    ]
-    .spacing(8)
-    .align_y(Alignment::Center)
-    .into();
+    // Retry failed for those who may retry (the server answers others "Ask an admin to retry")
+    let mut recent_actions = row![].spacing(8).align_y(Alignment::Center);
+    if request_list::may_fix(ctx.is_admin(), ctx.session.perm("fix")) {
+        recent_actions = recent_actions
+            .push(request_list::retry_failed_btn(&state.list, "Queue every failed download again").map(Message::List));
+    }
+    let recent_actions: El<'a, Message> = recent_actions.push(request_list::clear_btn("Clear…").map(Message::List)).into();
     let list = match request_list::view(ctx, &state.list) {
         Some(rows) => rows.map(Message::List),
         None => container(muted("Nothing yet – paste a link above.").size(13))

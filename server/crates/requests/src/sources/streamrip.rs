@@ -57,8 +57,8 @@ fn tstr(s: &str) -> String {
 
 pub const NOT_INSTALLED_MSG: &str = "streamrip is not installed in this container (use the default Docker image or set its path)";
 /// Deezer runs need the ARL cookie; streamrip would ask for it on a terminal, which a server has none of.
-pub const ARL_MSG: &str = "Deezer needs an ARL cookie – Settings → streamrip";
-pub const CONFIG_BROKEN_MSG: &str = "streamrip can't load its config – press Reset streamrip config in Settings → streamrip";
+pub const ARL_MSG: &str = "Deezer needs an ARL cookie – Settings → Downloads → Qobuz / Tidal / Deezer (streamrip)";
+pub const CONFIG_BROKEN_MSG: &str = "streamrip can't load its config – press Reset streamrip config in Settings → Downloads → Qobuz / Tidal / Deezer (streamrip)";
 /// The line streamrip prints when its config does not load (the text after the colon says why).
 const CONFIG_ERROR: &str = "Error loading config";
 /// How much of a run's output the request's log keeps.
@@ -519,10 +519,10 @@ pub async fn config_loads_check(st: &impl Ctx) -> Value {
     let bin = binary(st).unwrap_or("streamrip".into());
     let (ok, detail) = match binary(st) {
         None => (false, NOT_INSTALLED_MSG.to_string()),
-        Some(_) if !path.is_file() => (false, format!("No config file at {} yet – it is written on the first download, or press Reset streamrip config in Settings → streamrip", path.display())),
+        Some(_) if !path.is_file() => (false, format!("No config file at {} yet – it is written on the first download, or press Reset streamrip config in Settings → Downloads → Qobuz / Tidal / Deezer (streamrip)", path.display())),
         Some(bin) => match validate_config(&bin, &path, st.data_dir()).await {
             Ok(()) => (true, format!("OK – {}", path.display())),
-            Err(e) => (false, format!("{e} – press Reset streamrip config in Settings → streamrip")),
+            Err(e) => (false, format!("{e} – press Reset streamrip config in Settings → Downloads → Qobuz / Tidal / Deezer (streamrip)")),
         },
     };
     serde_json::json!({ "name": "streamrip config loads", "kind": "tool", "request": format!("{bin} --config-path {} config path", path.display()), "ok": ok, "detail": detail })
@@ -1309,7 +1309,7 @@ pub async fn qobuz_search(st: &impl Ctx, kind: &str, q: &str) -> anyhow::Result<
         let d: Value = r.json().await.unwrap_or(Value::Null);
         let msg = d["message"].as_str().unwrap_or("no message");
         anyhow::bail!(match code {
-            401 => "Qobuz rejected the login – check the user id and token in Settings → streamrip".to_string(),
+            401 => "Qobuz rejected the login – check the user id and token in Settings → Downloads → Qobuz / Tidal / Deezer (streamrip)".to_string(),
             400 => format!("Qobuz rejected the app id ({msg}) – run one Qobuz download so streamrip stores a fresh one"),
             _ => format!("Qobuz API {code}: {msg}"),
         });
@@ -1331,7 +1331,7 @@ fn http_error_without_url(e: reqwest::Error) -> String {
     s
 }
 
-pub const TIDAL_LAPSED_MSG: &str = "Tidal sign-in has lapsed – sign in again in Settings → streamrip";
+pub const TIDAL_LAPSED_MSG: &str = "Tidal sign-in has lapsed – sign in again in Settings → Downloads → Qobuz / Tidal / Deezer (streamrip)";
 
 /// The signed-in Tidal account's token for Encore's own API calls (the picker's Tidal search), as
 /// (access_token, country_code). A lapsed token is refreshed through the OAuth client it came from and
@@ -1539,9 +1539,9 @@ hires_token_client_id = "fX2JxdmntZWK0ixT"
         // the owner's case: the complaint continues on the next line, which the old picker lost
         let owner = "Error loading config from /config/streamrip/config.toml: \nQobuzConfig.__init__() got an unexpected keyword argument 'user_id'\nTry running rip config reset\n";
         let m = failure_message(owner);
-        assert!(m.starts_with("streamrip can't load its config – press Reset streamrip config in Settings → streamrip – "), "{m}");
+        assert!(m.starts_with("streamrip can't load its config – press Reset streamrip config in Settings → Downloads → Qobuz / Tidal / Deezer (streamrip) – "), "{m}");
         assert!(m.contains("unexpected keyword argument 'user_id'"), "{m}");
-        assert_eq!(ARL_MSG, "Deezer needs an ARL cookie – Settings → streamrip");
+        assert_eq!(ARL_MSG, "Deezer needs an ARL cookie – Settings → Downloads → Qobuz / Tidal / Deezer (streamrip)");
         assert_eq!(failure_message("Copy the ARL cookie from your browser and paste it here\nEnter your ARL:"), ARL_MSG);
         assert_eq!(failure_message("Finding-Your-Deezer-ARL-Cookie\nEOFError: EOF when reading a line"), ARL_MSG);
         // an unrelated failure keeps streamrip's own words, boxes and progress lines stripped

@@ -4,6 +4,7 @@ import app.encore.android.data.repo.CANCELLABLE_STATUSES
 import app.encore.android.data.repo.LinkProbe
 import app.encore.android.data.repo.LinkResult
 import app.encore.android.data.repo.Me
+import app.encore.android.data.repo.RejectedDownload
 import app.encore.android.data.repo.RequestCandidate
 import app.encore.android.data.repo.RequestError
 import app.encore.android.data.repo.RequestOutput
@@ -17,11 +18,28 @@ import app.encore.android.data.repo.statusLabel
 data class LogEntry(val source: String, val text: String)
 
 /**
+ * Keep anyway / Download anyway (R2, the owner on Oct 19: "i cant overide to have it download it anyways"): what a
+ * request offers for a download the audio check turned away (common.rs `Anyway`).
+ * - [action]: the route after `/api/requests/{id}/`: `keep-anyway` (the kept files are imported without the check) or
+ *   `download-anyway` (the files are gone: the same source and link are asked for again without the check);
+ * - [label] the button, [help] what it does (the web's title on it), [done] the toast once the server took it;
+ * - [rejected]: which rejected download (`{rejected: id}`, 0: the server's newest), so the server acts on the one shown;
+ * - [text]: why the check turned it away, in full ("The audio sounds like Diase – Sun, not Moonlight Shadow").
+ */
+data class Anyway(val action: String, val label: String, val help: String, val done: String, val rejected: Long, val text: String) {
+    val keep: Boolean get() = action == "keep-anyway"
+}
+
+/** One download the audio check turned away, as the details sheet lists it: why, where from, the check's words, when, its files. */
+data class RejectedLine(val text: String, val from: String, val check: String, val at: String, val files: String)
+
+/**
  * What the details sheet of a request shows: the "what" line, the whole status message (never cut), the facts the
  * row's status line squeezes in, and every log line the worker wrote, one per source and attempt. A waiting request
  * also has what it waits for ([status], "" otherwise); a failed file step its sentence ([error]) and its step,
  * operation, path and errno ([errorFacts]); a source's own output its head ("streamrip output", "<link> · failed ·
- * <date>") and text.
+ * <date>") and text; a download the audio check turned away, offered again, its reason and source ([anyway],
+ * [anywayFrom]); and every download the check turned away ([rejected]).
  */
 data class RequestDetails(
     val title: String,
@@ -35,6 +53,11 @@ data class RequestDetails(
     val outputTitle: String = "",
     val outputHead: String = "",
     val output: String = "",
+    /** A download the audio check turned away and the row offers again: why, in full, and where it came from. */
+    val anyway: String = "",
+    val anywayFrom: String = "",
+    /** Every download the audio check turned away, oldest first. */
+    val rejected: List<RejectedLine> = emptyList(),
 )
 
 /**
@@ -65,12 +88,16 @@ object RequestRules {
 
     // ---- the row ---------------------------------------------------------------------------------------------
 
-    /** The status line after the kind badge: "3 attempts · via streamrip · <message> · by Caz · 8m ago". */
+    /**
+     * The status line after the kind badge: "3 attempts · via streamrip · <message> · by Caz · 8m ago". A hand pick the
+     * audio check turned away has the reason as its message: it shows once, in full, on the row's own line
+     * ([anywayLine]), not here as well.
+     */
     fun statusLine(r: RequestRow, admin: Boolean, ago: String): String {
         val bits = ArrayList<String>()
         if (r.attempts > 1) bits.add("${r.attempts} attempts")
         if (r.source.isNotEmpty()) bits.add("via ${r.source}")
-        if (r.message.isNotEmpty()) bits.add(r.message)
+        if (r.message.isNotEmpty() && r.message.trim() != anywayLine(r)) bits.add(r.message)
         if (admin && r.username.isNotEmpty()) bits.add("by ${r.username}")
         bits.add(ago)
         return bits.joinToString(" · ")
@@ -162,6 +189,73 @@ object RequestRules {
     /** The toast after Check again and its kind. */
     fun checkToast(s: StorageHealth): Pair<String, String> = if (s.paused) "Imports are still paused" to "warn" else "Imports resumed" to "ok"
 
+    // ---- a download the audio check turned away (R2) -------------------------------------------------------------
+
+    /**
+     * The offer of a request row (`anyway` of GET /api/requests, common.rs `anyway`), or null: an older server, no
+     * offer, or an action this phone doesn't know. The server offers it only where it can be taken (a failed request,
+     * or one still looking); [mayFix] says who sees the button. The text is the server's sentence, else the rejected
+     * download's own.
+     */
+    fun anyway(r: RequestRow): Anyway? {
+        val a = r.anyway ?: return null
+        val (action, label, help, done) = when (a.action) {
+            "keep" -> listOf("keep-anyway", "Keep anyway", "Import the download the audio check turned away, without the check", "It will be imported without the audio check")
+            "download" -> listOf("download-anyway", "Download anyway", "Download it again from the same place, without the audio check", "Downloading it again without the audio check")
+            else -> return null
+        }
+        val text = a.text.ifBlank {
+            r.rejected.firstOrNull { it.id == a.id }?.let { e -> e.text.ifBlank { e.reason } }.orEmpty()
+        }
+        return Anyway(action, label, help, done, a.id, text)
+    }
+
+    /**
+     * Keep anyway and Download anyway are taken as Retry is: by admins, and by the request's owner with the `fix`
+     * permission (members see only their own requests). Others would only get "Ask an admin to keep it anyway", so
+     * they see the reason and no button.
+     */
+    fun mayFix(me: Me?): Boolean = me?.can("fix") == true
+
+    /** The row's button: an offer, for someone who may take it. */
+    fun canTakeAnyway(r: RequestRow, me: Me?): Boolean = anyway(r) != null && mayFix(me)
+
+    /** The reason under the row's status line, in full (it wraps, never cut): "" when nothing is offered. */
+    fun anywayLine(r: RequestRow): String = anyway(r)?.text?.trim().orEmpty()
+
+    /** "Audio check: off for this request" while it runs (or ran and failed) without the check. */
+    const val SKIP_CHECK = "Audio check: off for this request"
+
+    /**
+     * Where a rejected download came from, in one line (common.rs `rejected_from`): "Deezer · via streamrip ·
+     * https://www.deezer.com/track/1 · 01. Moonlight Shadow.flac"; an album names its first file "and 9 more".
+     */
+    fun rejectedFrom(e: RejectedDownload): String {
+        val files = if (e.count > 1 && e.file.isNotBlank()) "${e.file} and ${e.count - 1} more" else e.file
+        return listOf(e.via, e.detail, e.url, files).filter { it.isNotBlank() }.joinToString(" · ")
+    }
+
+    /** Its files: "kept in <folder>" (admins), "kept on the server" (everyone else), or "gone". */
+    fun rejectedFiles(e: RejectedDownload): String = when {
+        !e.hasFile -> "gone"
+        e.path.isNotBlank() -> "kept in ${e.path}"
+        else -> "kept on the server"
+    }
+
+    /** Why it was turned away, in full; the check's own words when the server sent no sentence. */
+    fun rejectedText(e: RejectedDownload): String = e.text.ifBlank { e.reason }.ifBlank { "The audio sounds like another song" }
+
+    /** Every download the audio check turned away, oldest first, as the details sheet lists them; [date] formats `at`. */
+    fun rejectedLines(r: RequestRow, date: (Double) -> String): List<RejectedLine> = r.rejected.map { e ->
+        RejectedLine(
+            text = rejectedText(e),
+            from = rejectedFrom(e),
+            check = if (e.text.isNotBlank() && e.reason.isNotBlank()) e.reason else "",
+            at = if (e.at > 0) date(e.at) else "",
+            files = rejectedFiles(e),
+        )
+    }
+
     // ---- the text Copy takes (a bug report's) ------------------------------------------------------------------
 
     /** What a request asked for, in one line: "Illuminate EP – Duumu", "Duumu – full discography", the link (common.rs `request_what`). */
@@ -238,6 +332,21 @@ object RequestRules {
             out.addAll(errorFacts(e))
         }
         keptLine(r)?.let { out.add(it) }
+        if (r.skipCheck) out.add(SKIP_CHECK)
+        // the downloads the audio check turned away (R2), oldest first: why in full, where from, and whether the files are kept
+        val rejected = rejectedLines(r, date)
+        if (rejected.isNotEmpty()) {
+            out.add("")
+            out.add("Turned away by the audio check (oldest first):")
+        }
+        for (e in rejected) {
+            out.add(e.text)
+            fun sub(k: String, v: String) { if (v.isNotBlank()) out.add("  $k: $v") }
+            sub("From", e.from)
+            sub("Check", e.check)
+            sub("When", e.at)
+            sub("Files", e.files)
+        }
         val log = r.log.filter { it.isNotBlank() }
         if (log.isNotEmpty()) {
             out.add("")
@@ -320,9 +429,11 @@ object RequestRules {
         candidateLine(r).takeIf { it.isNotEmpty() }?.let { facts.add(it) }
         if (r.status == "waiting" && r.nextTryAt > 0) facts.add("Next try: " + date(r.nextTryAt))
         keptLine(r)?.let { facts.add(it) }
+        if (r.skipCheck) facts.add(SKIP_CHECK)
         if (admin && r.username.isNotEmpty()) facts.add("by ${r.username}")
         facts.add(ago)
         val o = r.output?.takeIf { it.text.isNotEmpty() }
+        val offer = anyway(r)
         return RequestDetails(
             title = r.what,
             note = r.whatNote,
@@ -335,6 +446,9 @@ object RequestRules {
             outputTitle = o?.let { outputTitle(it) }.orEmpty(),
             outputHead = o?.let { outputHead(it, date) }.orEmpty(),
             output = o?.text?.trimEnd().orEmpty(),
+            anyway = offer?.text?.trim().orEmpty(),
+            anywayFrom = offer?.let { a -> r.rejected.firstOrNull { it.id == a.rejected }?.let { rejectedFrom(it) } }.orEmpty(),
+            rejected = rejectedLines(r, date),
         )
     }
 

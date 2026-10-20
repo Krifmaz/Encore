@@ -2,7 +2,7 @@
 //! loader reads, `SCHEMA` (pages, cards and fields) and a typed accessor per key on `Config`. Anything in
 //! the file that does not fit (an unknown attribute, a type that does not match the default, a card or rule
 //! that names something missing) stops the build with the reason.
-use std::collections::{BTreeMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fmt::Write as _;
 use toml::{Table, Value};
 
@@ -144,6 +144,21 @@ fn generate(text: &str) -> Result<String, String> {
         }
     }
     let group_ids: HashSet<&str> = groups.iter().map(|(id, _)| *id).collect();
+    // `#/settings?s=<name>` opens the page of that name, alias or card: each name leads to one page only
+    let mut opens: HashMap<&str, &str> = HashMap::new();
+    let mut names: Vec<(&str, &str)> = sections.iter().map(|(id, _)| (*id, *id)).collect();
+    for (id, t) in &sections {
+        if let Some(Value::Array(a)) = t.get("aliases") {
+            names.extend(a.iter().filter_map(Value::as_str).map(|alias| (alias, *id)));
+        }
+    }
+    names.extend(groups.iter().filter_map(|(id, t)| Some((*id, t.get("section")?.as_str()?))));
+    for (name, page) in names {
+        match opens.insert(name, page) {
+            Some(other) if other != page => return Err(format!("?s={name} would open both {other} and {page}")),
+            _ => {}
+        }
+    }
 
     // keys
     let mut keys: Vec<Key> = vec![];

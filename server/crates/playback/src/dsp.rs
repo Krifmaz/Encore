@@ -79,7 +79,7 @@ impl Drop for Slot {
     }
 }
 
-/// The admin's limits (Settings → Apps & sources → Server processing).
+/// The admin's limits (Settings → Server processing).
 #[derive(Clone, Copy, Debug)]
 pub struct Limits {
     pub enabled: bool,

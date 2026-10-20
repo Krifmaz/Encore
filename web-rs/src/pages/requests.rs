@@ -27,7 +27,12 @@ pub fn render(view: Element, ctx: Ctx) -> PageFuture {
             format!(r#"<label class="switch"><input type="checkbox" id="mine"><i></i>Only mine</label>
           <button class="btn sm" id="retry-failed" title="Queue every failed request again">{}Retry failed</button>
           <button class="btn sm" id="clear">{}Clear finished</button>"#, icon("refresh"), icon("trash"))
-        } else { format!(r#"<button class="btn sm" id="retry-failed" title="Queue every failed request again">{}Retry failed</button>"#, icon("refresh")) };
+        } else if common::may_fix() {
+            format!(r#"<button class="btn sm" id="retry-failed" title="Queue every failed request again">{}Retry failed</button>"#, icon("refresh"))
+        } else {
+            // members without Fix their own downloads may not retry (the server answers "Ask an admin to retry")
+            String::new()
+        };
         dom::set_html(&view, &format!(r#"
     <div class="row wrap between" style="margin-bottom:18px">
       <div><h1>Requests</h1><div class="small muted" id="quota"></div></div>

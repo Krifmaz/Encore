@@ -540,7 +540,7 @@ pub fn view<'a>(state: &'a State, ctx: &Ctx<'a>) -> El<'a, Message> {
             widgets::muted(format!(
                 "No other devices right now. Open Encore on your phone, computer or the apps (signed in as you) and they show up here.{}",
                 if roon {
-                    " Roon zones appear once Encore is connected to your Roon Core (Settings → Apps & sources → Roon)."
+                    " Roon zones appear once Encore is connected to your Roon Core (Settings → Integrations → Roon)."
                 } else {
                     ""
                 }

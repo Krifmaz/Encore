@@ -34,7 +34,7 @@ const NO_WEB_UI: &str = "no-web-ui";
 const RELEASES: &str = "https://api.github.com/repos/slskd/slskd/releases/latest";
 
 pub const WAITING_FOR_VPN: &str = "Waiting for the VPN – Soulseek stays off until it is connected";
-pub const NOT_INSTALLED: &str = "Soulseek is not installed – install it under Settings → Download tools (slskd – Soulseek engine)";
+pub const NOT_INSTALLED: &str = "Soulseek is not installed – install it under Settings → Downloads → Download tools (slskd – Soulseek engine)";
 
 // ---- status ---------------------------------------------------------------------------------------
 

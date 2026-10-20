@@ -14,12 +14,26 @@ if [ "$(id -u)" = "0" ] && [ "${PUID}" != "0" ]; then
   # the staging and Soulseek folders (their defaults too), every *_DOWNLOAD_PATH and the blackhole folders.
   # Only the folder itself is chowned, never its contents (-R): the files in a /downloads mount are the
   # owner's. Folders saved in Settings instead of the environment are checked by the server itself.
+  # The download clients' own folders (qBittorrent, SABnzbd, NZBGet, Transmission, Deluge, rTorrent, and the
+  # blackhole clients' completed folders) are the client's, which may run as another user: one that exists
+  # is left as it is, so the client can still write there; only one this script creates is handed to the
+  # Encore user. An existing blackhole watch folder (Encore drops the .torrent/.nzb files there, the client
+  # takes them away) is handed over only when the Encore user can't write to it yet.
   old_ifs=$IFS
   IFS='
 '
-  for d in "${ENCORE_STAGING_PATH:-/downloads/encore}" "${SLSKD_DOWNLOAD_PATH:-/downloads/slskd}" \
-           $(env | sed -n -e 's/^[A-Z0-9_]*_DOWNLOAD_PATH=//p' -e 's/^[A-Z0-9_]*_BLACKHOLE_WATCH=//p' -e 's/^[A-Z0-9_]*_BLACKHOLE_COMPLETED=//p'); do
+  for line in "ENCORE_STAGING_PATH=${ENCORE_STAGING_PATH:-/downloads/encore}" "SLSKD_DOWNLOAD_PATH=${SLSKD_DOWNLOAD_PATH:-/downloads/slskd}" \
+              $(env | grep -E '^[A-Z0-9_]+_(DOWNLOAD_PATH|BLACKHOLE_WATCH|BLACKHOLE_COMPLETED)=' || true); do
+    name=${line%%=*}
+    d=${line#*=}
     [ -n "$d" ] || continue
+    case "$name" in
+      QBIT_DOWNLOAD_PATH|SAB_DOWNLOAD_PATH|NZBGET_DOWNLOAD_PATH|TRANSMISSION_DOWNLOAD_PATH|DELUGE_DOWNLOAD_PATH|RTORRENT_DOWNLOAD_PATH|\
+      TORRENT_BLACKHOLE_COMPLETED|NZB_BLACKHOLE_COMPLETED)
+        [ -d "$d" ] && continue ;;
+      *_BLACKHOLE_WATCH)
+        [ -d "$d" ] && setpriv --reuid="${PUID}" --regid="${PGID}" --init-groups /bin/sh -c '[ -w "$1" ]' sh "$d" 2>/dev/null && continue ;;
+    esac
     if mkdir -p "$d" 2>/dev/null; then
       chown "${PUID}:${PGID}" "$d" 2>/dev/null || true
     fi

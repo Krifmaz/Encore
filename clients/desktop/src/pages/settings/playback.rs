@@ -630,7 +630,7 @@ fn server_processing<'a>(state: &'a State, ctx: &Ctx<'a>) -> Vec<El<'a, Message>
         return vec![widgets::skeleton_rows(1)];
     }
     if !fmt::truthy(dsp, "enabled") {
-        return vec![help("Turned off on this server. Cadenza upsampling for streams uses the server's processor, so an admin has to switch it on (Settings → Apps & sources → Server processing) and allow your account.").into()];
+        return vec![help("Turned off on this server. Cadenza upsampling for streams uses the server's processor, so an admin has to switch it on (Settings → Server processing) and allow your account.").into()];
     }
     if !fmt::truthy(dsp, "allowed") {
         return vec![help("Your account isn't allowed to use the server's processing. Ask an admin.").into()];

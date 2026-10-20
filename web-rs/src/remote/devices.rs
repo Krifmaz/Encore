@@ -112,7 +112,7 @@ pub fn open() {
             let zs = zones.borrow();
             if devs.is_empty() && zs.is_empty() {
                 dom::set_html(&list, &format!(r#"<p class="muted" style="margin:0">No other devices right now. Open Encore on your phone, computer or the apps (signed in as you) and they show up here.{}</p>"#,
-                    if roon_on { " Roon zones appear once Encore is connected to your Roon Core (Settings → Apps & sources → Roon)." } else { "" }));
+                    if roon_on { " Roon zones appear once Encore is connected to your Roon Core (Settings → Integrations → Roon)." } else { "" }));
                 return;
             }
             let l = player::linked();

@@ -14,15 +14,70 @@ use encore_core::fsx::{self, Step, StepError};
 use std::path::{Path, PathBuf};
 use std::sync::LazyLock;
 
-/// Downloaded audio turned out to be a different song/version.
+/// A download the import turned away: its audio is a different song/version (the fingerprint check), it
+/// failed the quality checks, or it is another release than the one asked for. The file is left where it
+/// was: the request worker keeps it (an audio check's, for Keep anyway) or removes it.
 #[derive(Debug)]
-pub struct Rejected(pub String);
+pub struct Rejected {
+    /// the check's own words ("audio is “Diase – Sun” (different song)", "Bad quality: …", "Wrong release: …")
+    pub why: String,
+    pub check: Check,
+    /// what the fingerprint heard ("Diase – Sun"), for the audio check
+    pub heard: Option<String>,
+    /// the sentence a person reads ("The audio sounds like Diase – Sun, not Moonlight Shadow")
+    pub text: String,
+}
+
+/// Which check turned a download away.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Check {
+    /// the fingerprint: another song or version
+    Audio,
+    /// the quality checks: fake lossless, upsampled, very quiet, the wrong length
+    Quality,
+    /// the album's tags: another artist or songs that aren't on it
+    Release,
+}
+
+impl Check {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Check::Audio => "audio",
+            Check::Quality => "quality",
+            Check::Release => "release",
+        }
+    }
+}
+
+impl Rejected {
+    fn audio(why: String, heard: Option<String>, text: String) -> Rejected {
+        Rejected { why, check: Check::Audio, heard, text }
+    }
+    fn quality(why: String) -> Rejected {
+        Rejected { text: why.clone(), why, check: Check::Quality, heard: None }
+    }
+    fn release(why: String) -> Rejected {
+        Rejected { text: why.clone(), why, check: Check::Release, heard: None }
+    }
+}
+
 impl std::fmt::Display for Rejected {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(&self.0)
+        f.write_str(&self.why)
     }
 }
 impl std::error::Error for Rejected {}
+
+/// "Diase – Sun": the recording a fingerprint check heard (its `actual`).
+fn heard_of(c: &Value) -> Option<String> {
+    let a = &c["actual"];
+    let (artist, title) = (a["artist"].as_str().unwrap_or(""), a["title"].as_str().unwrap_or(""));
+    match (artist.is_empty(), title.is_empty()) {
+        (_, true) => None,
+        (true, false) => Some(title.to_string()),
+        (false, false) => Some(format!("{artist} – {title}")),
+    }
+}
 
 use encore_core::audio::LOSSLESS;
 
@@ -49,8 +104,13 @@ pub fn quality(t: &Row) -> (bool, bool, i64, bool) {
 
 // ---- verification -------------------------------------------------------------------------------
 
+/// Whether an import fingerprints `path` (the setting, an AcoustID key and fpcalc).
+pub fn will_verify(st: &impl Ctx, path: &Path) -> bool {
+    st.cfg().bool("verify_on_import") && acoustid::can_check(st, path)
+}
+
 async fn verify(st: &impl Ctx, path: &Path, title: &str, artist: &str, length: Option<f64>, rid: Option<&str>) -> Option<Value> {
-    if !(st.cfg().bool("verify_on_import") && acoustid::available(st)) {
+    if !will_verify(st, path) {
         return None;
     }
     match acoustid::check_file(st, path, title, artist, length, rid).await {
@@ -711,22 +771,32 @@ fn all_tracks(st: &impl Ctx) -> Vec<Row> {
 }
 
 /// Verify, tag (from the MusicBrainz recording if possible), de-duplicate and move one song into the library.
-/// → (final path, note)
+/// `reject`: a failed quality check turns the file away (automatic downloads; the file is deleted, unless
+/// `audio` is off); `audio`: so does a fingerprint that says it is another song (off when a person said to
+/// take it: Keep anyway, Download anyway, "Don't check the audio"). → (final path, note)
 #[allow(clippy::too_many_arguments)]
 pub async fn import_single(st: &impl Ctx, path: &Path, artist: &str, title: &str, recording_id: Option<&str>, source_root: &Path,
-                           length: Option<f64>, reject: bool, hint: Option<&str>) -> anyhow::Result<(PathBuf, String)> {
+                           length: Option<f64>, reject: bool, audio: bool, hint: Option<&str>) -> anyhow::Result<(PathBuf, String)> {
     let check = verify(st, path, title, artist, length, recording_id).await;
     if let Some(c) = &check {
-        if c["status"] == "mismatch" && reject && st.cfg().bool("reject_mismatch") {
-            let _ = std::fs::remove_file(path);
-            return Err(Rejected(c["detail"].as_str().unwrap_or("").into()).into());
+        if c["status"] == "mismatch" && audio && st.cfg().bool("reject_mismatch") {
+            // the file stays: the request worker keeps it for Keep anyway
+            let heard = heard_of(c);
+            let text = match &heard {
+                Some(h) => format!("The audio sounds like {h}, not {title}"),
+                None => format!("The audio is not {title}"),
+            };
+            return Err(Rejected::audio(c["detail"].as_str().unwrap_or("").into(), heard, text).into());
         }
     }
     // quality checks (encore_media::quality): fake lossless, upsampled, very quiet or the wrong length is turned away
     let (qrep, qres) = encore_media::quality::gate(st, path, length).await;
     if let (Err(why), true) = (qres, reject) {
-        let _ = std::fs::remove_file(path);
-        return Err(Rejected(why).into());
+        // a file a person said to take (`audio` off: Keep anyway keeps it for them) is left to the caller
+        if audio {
+            let _ = std::fs::remove_file(path);
+        }
+        return Err(Rejected::quality(why).into());
     }
     let mut vals = Row::new();
     vals.insert("title".into(), json!(title));
@@ -842,6 +912,62 @@ pub fn check_release(files: &[Row], artist: &str, album: &str, expected_titles: 
     Ok(())
 }
 
+/// The words of an album name that tell one album from another: accents folded, without what is in brackets,
+/// a disc number, edition words ("Deluxe Edition", "Remastered", "EP") and small words ("the", "of"). Empty
+/// when nothing is left, or when the name is not in Latin letters (it can't be compared with one that is).
+fn album_words(name: &str) -> std::collections::BTreeSet<String> {
+    static BRACKETS: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"[\(\[\{][^\)\]\}]*[\)\]\}]").unwrap());
+    static DISC: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"(?i)\b(cd|disc|disk)\s*\d+\b").unwrap());
+    const SMALL: &[&str] = &["the", "a", "an", "of", "and", "deluxe", "edition", "expanded", "remaster", "remastered",
+        "anniversary", "reissue", "special", "collector", "collectors", "bonus", "track", "tracks", "version", "ep", "lp",
+        "single", "album", "vol", "volume", "explicit", "clean", "mono", "stereo"];
+    const NO_NAME: &[&str] = &["unknown", "unknown album", "untitled", "no album", "non album", "non album tracks", "singles"];
+    let folded = crate::matcher::fold(&DISC.replace_all(&BRACKETS.replace_all(name, " "), " "));
+    if NO_NAME.contains(&folded.as_str()) || !folded.is_ascii() {
+        return Default::default();
+    }
+    folded.split_whitespace().filter(|w| !SMALL.contains(w)).map(String::from).collect()
+}
+
+/// A word that numbers an album in a series: "II", "IV", "2" (not a year).
+fn numbers_an_album(w: &str) -> bool {
+    const ROMAN: &[&str] = &["ii", "iii", "iv", "vi", "vii", "viii", "ix", "xi", "xii", "xiii", "xiv", "xv", "xvi", "xvii", "xviii", "xix", "xx"];
+    ROMAN.contains(&w) || (w.len() <= 2 && w.chars().all(|c| c.is_ascii_digit()))
+}
+
+/// For a download with no track list to compare against, the album tags are what tells another album of the
+/// right artist ("Homework" for "Discovery") from the one asked for. It is turned away only when that is
+/// clear: at least half the files carry an album tag that can be compared, and none of them shares a word with
+/// the album asked for (nor is close to it letter by letter: "Ilmatic"), or each adds or lacks a number in the
+/// series ("Led Zeppelin II" for "Led Zeppelin"). Editions, a year or the artist's name in the tag ("Daft
+/// Punk - Discovery (Deluxe) 2001", "50 Cent - Get Rich or Die Tryin'") still count as the album.
+pub fn check_album_tags(files: &[Row], artist: &str, album: &str) -> Result<(), String> {
+    let want = album_words(album);
+    if want.is_empty() {
+        return Ok(());
+    }
+    let by = album_words(artist);
+    // a tag in another script, "Unknown Album", or only the artist's name can't say which album it is
+    let tags: Vec<String> = files.iter().map(|f| f.s("album")).filter(|a| { let w = album_words(a); !w.is_empty() && !w.is_subset(&by) }).collect();
+    if tags.len() < (files.len() / 2).max(1) {
+        return Ok(());
+    }
+    let another = |tag: &str| {
+        let have = album_words(tag);
+        if have.is_disjoint(&want) {
+            return sim(tag, album) < 0.6;
+        }
+        have.symmetric_difference(&want).any(|w| numbers_an_album(w) && !by.contains(w))
+    };
+    if !tags.iter().all(|t| another(t)) {
+        return Ok(());
+    }
+    let mut counts: std::collections::HashMap<&str, usize> = Default::default();
+    tags.iter().for_each(|t| *counts.entry(t.as_str()).or_default() += 1);
+    let top = counts.into_iter().max_by(|a, b| a.1.cmp(&b.1).then(b.0.cmp(a.0))).map(|x| x.0).unwrap_or_default();
+    Err(format!("the download is the album “{top}”, not “{album}”"))
+}
+
 /// What `import_album_files` is importing: the album asked for and where the files came from.
 pub struct AlbumImport<'a> {
     pub artist: &'a str,
@@ -852,12 +978,15 @@ pub struct AlbumImport<'a> {
     pub source_root: &'a Path,
     /// refuse a wrong release or a failed quality check (automatic downloads) instead of importing it as it is
     pub reject: bool,
+    /// refuse files the fingerprint says are other songs (off when a person said to take the download:
+    /// Keep anyway, Download anyway, "Don't check the audio")
+    pub audio: bool,
     pub source_meta: Option<&'a Value>,
     pub hint: Option<&'a str>,
 }
 
 pub async fn import_album_files(st: &impl Ctx, paths: &[PathBuf], what: AlbumImport<'_>) -> anyhow::Result<Vec<PathBuf>> {
-    let AlbumImport { artist, album, rgid, source_root, reject, source_meta, hint } = what;
+    let AlbumImport { artist, album, rgid, source_root, reject, audio, source_meta, hint } = what;
     let mut paths = paths.to_vec();
     paths.sort();
     // what the files say they are, before anything is rewritten
@@ -865,7 +994,7 @@ pub async fn import_album_files(st: &impl Ctx, paths: &[PathBuf], what: AlbumImp
     let mut source_meta = source_meta;
     if let Err(why) = check_release(&originals, artist, album, &[]) {
         if reject {
-            return Err(Rejected(format!("Wrong release: {why}")).into());
+            return Err(Rejected::release(format!("Wrong release: {why}")).into());
         }
         // a manual pick: import it as what it is, never relabelled as the request
         source_meta = None;
@@ -887,9 +1016,12 @@ pub async fn import_album_files(st: &impl Ctx, paths: &[PathBuf], what: AlbumImp
         None => source_meta.and_then(|m| m["tracks"].as_array().cloned()).unwrap_or_default().iter().filter_map(|t| t["title"].as_str().map(String::from)).collect(),
     };
     let mut pv = pv;
-    if let Err(why) = check_release(&originals, artist, album, &expected) {
+    // with no track list, the album tags are what tells another album of the same artist from this one
+    let release = check_release(&originals, artist, album, &expected)
+        .and_then(|()| if expected.is_empty() { check_album_tags(&originals, artist, album) } else { Ok(()) });
+    if let Err(why) = release {
         if reject {
-            return Err(Rejected(format!("Wrong release: {why}")).into());
+            return Err(Rejected::release(format!("Wrong release: {why}")).into());
         }
         pv = None;
         source_meta = None;
@@ -897,11 +1029,13 @@ pub async fn import_album_files(st: &impl Ctx, paths: &[PathBuf], what: AlbumImp
     // quality checks (encore_media::quality): most of the files fake lossless / upsampled / very quiet → turned away
     let (qreports, qres) = encore_media::quality::gate_album(st, &paths).await;
     if let (Err(why), true) = (qres, reject) {
-        return Err(Rejected(format!("Bad quality: {why}")).into());
+        return Err(Rejected::quality(format!("Bad quality: {why}")).into());
     }
     if let Some(pv) = pv {
         let mut checks = vec![];
         let mut mism = vec![];
+        // the first file that is another song: its title and what it sounds like
+        let mut first: Option<(String, Option<String>)> = None;
         for row in pv["rows"].as_array().cloned().unwrap_or_default() {
             let Some(v) = row["values"].as_object() else { continue };
             let p = PathBuf::from(row["path"].as_str().unwrap_or(""));
@@ -909,12 +1043,18 @@ pub async fn import_album_files(st: &impl Ctx, paths: &[PathBuf], what: AlbumImp
             if let Some(r) = &res {
                 if r["status"] == "mismatch" {
                     mism.push(format!("{}: {}", v.s("title"), r["detail"].as_str().unwrap_or("")));
+                    first.get_or_insert_with(|| (v.s("title"), heard_of(r)));
                 }
             }
             checks.push((p, res));
         }
-        if !mism.is_empty() && reject && st.cfg().bool("reject_mismatch") && mism.len() > (paths.len() / 4).max(1) {
-            return Err(Rejected(format!("{} of {} files are not what they claim – e.g. {}", mism.len(), paths.len(), mism[0])).into());
+        if !mism.is_empty() && audio && st.cfg().bool("reject_mismatch") && mism.len() > (paths.len() / 4).max(1) {
+            let (title, heard) = first.unwrap_or_default();
+            let text = match &heard {
+                Some(h) => format!("The audio of {} of {} files is another song – “{title}” sounds like {h}", mism.len(), paths.len()),
+                None => format!("The audio of {} of {} files is another song", mism.len(), paths.len()),
+            };
+            return Err(Rejected::audio(format!("{} of {} files are not what they claim – e.g. {}", mism.len(), paths.len(), mism[0]), heard, text).into());
         }
         let new = apply_preview(st, &pv, true, Some(source_root), hint).await?;
         let rows = pv["rows"].as_array().cloned().unwrap_or_default();
@@ -1083,6 +1223,53 @@ mod tests {
         assert!(super::check_release(&untagged, "Daft Punk", "Discovery", &["One More Time".into()]).is_ok());
         let feat = vec![f("TAK feat. Hatsune Miku", "PPPP", "PPPP")];
         assert!(super::check_release(&feat, "TAK", "PPPP", &[]).is_ok());
+    }
+
+    #[test]
+    fn another_album_of_the_artist_is_caught_by_its_tags() {
+        use encore_db::Row;
+        let tagged = |album: &str, n: usize| -> Vec<Row> {
+            (0..n).map(|i| {
+                let mut r = Row::new();
+                r.insert("artist".into(), serde_json::json!("Daft Punk"));
+                r.insert("album".into(), serde_json::json!(album));
+                r.insert("title".into(), serde_json::json!(format!("Song {i}")));
+                r
+            }).collect()
+        };
+        let check = |album_tag: &str, artist: &str, album: &str| super::check_album_tags(&tagged(album_tag, 4), artist, album);
+        // clearly another album: turned away, naming it
+        assert_eq!(check("Homework", "Daft Punk", "Discovery").unwrap_err(), "the download is the album “Homework”, not “Discovery”");
+        assert!(check("Alive 2007", "Daft Punk", "Discovery").is_err());
+        assert!(check("25", "Adele", "21").is_err());
+        assert!(check("Led Zeppelin II", "Led Zeppelin", "Led Zeppelin").is_err(), "a self-titled album is not its sequel");
+        assert!(check("Led Zeppelin II", "Led Zeppelin", "Led Zeppelin IV").is_err());
+        assert!(check("Greatest Hits Vol. 2", "Queen", "Greatest Hits").is_err());
+        // the same album, however it is written
+        for tag in ["Discovery", "Discovery (Deluxe Edition)", "Discovery [2001 Remaster]", "Daft Punk - Discovery", "2001 - Discovery",
+                    "discovery", "Discovery CD1", "Discovery - Disc 1", "Discovery Remastered 2021"] {
+            assert!(check(tag, "Daft Punk", "Discovery").is_ok(), "{tag}");
+        }
+        assert!(check("Rodeo", "Travis Scott", "Rodeo (Expanded Edition)").is_ok());
+        assert!(check("Illuminate", "Duumu", "Illuminate EP").is_ok());
+        assert!(check("Ilmatic", "Nas", "Illmatic").is_ok(), "a typo is not another album");
+        assert!(check("Canción Animal", "Soda Stereo", "Cancion Animal").is_ok());
+        assert!(check("Led Zeppelin IV (Remaster)", "Led Zeppelin", "Led Zeppelin IV").is_ok());
+        assert!(check("IV", "Led Zeppelin", "Led Zeppelin IV").is_ok());
+        assert!(check("50 Cent - Get Rich or Die Tryin'", "50 Cent", "Get Rich or Die Tryin'").is_ok());
+        assert!(check("Greatest Hits, Volume 2", "Queen", "Greatest Hits Vol. 2").is_ok());
+        // tags that can't say: another script, no name, the artist's name, too few files tagged
+        assert!(check("ディスカバリー", "Daft Punk", "Discovery").is_ok());
+        assert!(check("Discovery", "Daft Punk", "ディスカバリー").is_ok());
+        assert!(check("Unknown Album", "Daft Punk", "Discovery").is_ok());
+        assert!(check("Daft Punk", "Daft Punk", "Discovery").is_ok());
+        let mut few = tagged("Homework", 1);
+        few.extend((0..3).map(|_| Row::new()));
+        assert!(super::check_album_tags(&few, "Daft Punk", "Discovery").is_ok());
+        // one file tagged with the album asked for is enough
+        let mut mixed = tagged("Homework", 3);
+        mixed.extend(tagged("Discovery", 1));
+        assert!(super::check_album_tags(&mixed, "Daft Punk", "Discovery").is_ok());
     }
 
     #[test]

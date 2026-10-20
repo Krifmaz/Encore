@@ -231,7 +231,7 @@ async fn find_core(st: &impl Ctx) -> Result<Core> {
         return Ok(Core { host: h.trim_start_matches("http://").trim_matches('/').to_string(), port: p, name: "Roon Core".into(), ..Default::default() });
     }
     let found = discover(Duration::from_secs(3)).await?;
-    found.into_iter().next().ok_or_else(|| anyhow!("No Roon Core answered on the network. Running Encore in Docker? Multicast doesn't cross the bridge: enter the Core's address under Settings → Apps & sources → Roon."))
+    found.into_iter().next().ok_or_else(|| anyhow!("No Roon Core answered on the network. Running Encore in Docker? Multicast doesn't cross the bridge: enter the Core's address under Settings → Integrations → Roon."))
 }
 
 // ---- the session -----------------------------------------------------------------------------------
@@ -367,7 +367,7 @@ pub async fn supervisor(st: impl Ctx) {
     let mut backoff = 5u64;
     loop {
         if !st.cfg().bool("roon_enabled") {
-            roon.set_status("off", "Roon is off (Settings → Apps & sources → Roon)", None);
+            roon.set_status("off", "Roon is off (Settings → Integrations → Roon)", None);
             tokio::time::sleep(Duration::from_secs(10)).await;
             backoff = 5;
             continue;

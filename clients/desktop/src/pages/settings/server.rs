@@ -1,8 +1,9 @@
-//! The Server group of Settings: General, Apps & sources, Email & notifications and Scheduled
-//! tasks are the admin settings form of web-rs/src/pages/settings.rs (`show`), drawn from the
-//! field table in `fields.rs`: one card per section with its fields, secrets with Show saved /
-//! Copy, Save and Test, the live blocks of `tools.rs`, the API key card and About. Auto-download,
-//! Contribute and Blocked are pages of their own and are routed to their modules.
+//! The Server group of Settings: General, Library, Downloads, Integrations, Server processing,
+//! Email & notifications and Scheduled tasks are the admin settings form of web-rs/src/pages/settings.rs
+//! (`show`), drawn from the field table in `fields.rs`: one card per section with its fields, secrets
+//! with Show saved / Copy, Save and Test, the live blocks of `tools.rs` (the Download tools card on
+//! Downloads), the API key card and About. Auto-download, Contribute and Blocked are pages of their own
+//! and are routed to their modules.
 
 use super::fields::{self, Card, Field};
 use super::{autodownload, blocked, contribute, tasks, tools, Section};
@@ -97,7 +98,10 @@ pub enum Message {
 fn group_id(s: Section) -> Option<&'static str> {
     match s {
         Section::General => Some("general"),
-        Section::Apps => Some("apps"),
+        Section::Library => Some("library"),
+        Section::Downloads => Some("downloads"),
+        Section::Integrations => Some("integrations"),
+        Section::Processing => Some("processing"),
         Section::Accounts => Some("accounts"),
         Section::Tasks => Some("tasks"),
         _ => None,
@@ -134,7 +138,8 @@ pub fn open(state: &mut State, section: Section, ctx: &mut Ctx) -> Task<Message>
     let mut tasks = vec![load_values(ctx)];
     match section {
         Section::Tasks => tasks.push(tasks::open(&mut state.tasks, ctx).map(Message::Tasks)),
-        Section::Apps => tasks.push(tools::open(&mut state.tools, ctx).map(Message::Tools)),
+        // the Download tools card and the blocks of the source cards; Cadenza's blocks need its state too
+        Section::Downloads | Section::Processing => tasks.push(tools::open(&mut state.tools, ctx).map(Message::Tools)),
         Section::General if ctx.session.is_owner() => {
             let api = ctx.api.clone();
             tasks.push(Task::perform(async move { api.get("/system/api-key").await }, Message::ApiKey));
@@ -755,6 +760,9 @@ pub fn view<'a>(state: &'a State, ctx: &Ctx<'a>) -> El<'a, Message> {
     if section == Section::Tasks {
         page = page.push(tasks::view(&state.tasks, ctx).map(Message::Tasks));
     }
+    if section == Section::Downloads {
+        page = page.push(tools::tools_card(&state.tools, values).map(Message::Tools));
+    }
     for (label, ids) in group.parts {
         let cards: Vec<&'static Card> = ids
             .iter()
@@ -767,14 +775,11 @@ pub fn view<'a>(state: &'a State, ctx: &Ctx<'a>) -> El<'a, Message> {
         if !label.is_empty() {
             page = page.push(container(t(*label).size(11).color(ctx.look.faint).font(theme::bold())).padding(widgets::pad(10.0, 4.0, 0.0, 4.0)));
         }
-        if *label == "Download sources" {
-            page = page.push(tools::tools_card(&state.tools, values).map(Message::Tools));
-        }
         for c in cards {
             page = page.push(card_view(state, values, c, ctx));
         }
     }
-    if section == Section::Apps {
+    if section == Section::Downloads {
         page = page.push(pipeline_help());
     }
     if section == Section::General {
@@ -815,7 +820,8 @@ pub fn overlay<'a>(state: &'a State, ctx: &Ctx<'a>) -> Option<El<'a, Message>> {
 }
 
 pub fn subscription(state: &State) -> Subscription<Message> {
-    if state.section != Some(Section::Apps) {
+    // the Soulseek and VPN states and the Tidal sign-in are on Downloads
+    if state.section != Some(Section::Downloads) {
         return Subscription::none();
     }
     let mut subs = vec![iced::time::every(Duration::from_secs(5)).map(|_| Message::Tools(tools::Message::Tick))];
@@ -871,9 +877,10 @@ mod tests {
         assert_eq!(test_words(&json!({ "ok": false, "message": "no" })), (false, "no".to_string()));
         assert_eq!(group_id(Section::Tasks), Some("tasks"));
         assert_eq!(group_id(Section::Blocked), None);
+        assert_eq!(group_id(Section::Processing), Some("processing"));
         // the first card the server has starts open, or the one a link asked for
         let mut st = State {
-            section: Some(Section::Apps),
+            section: Some(Section::Downloads),
             values: Some(json!({ "release_types": "Album" })),
             ..State::default()
         };
