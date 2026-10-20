@@ -390,9 +390,13 @@ async fn processing_is_checked_and_never_reaches_share_links() {
     // on, but a member needs the server_dsp permission
     let r = e.get(&uri, None).await;
     assert_eq!((r.status, r.json()["detail"].as_str()), (StatusCode::FORBIDDEN, Some("Your account can't use server processing")));
-    // the lossy stream wins over processing: no permission needed
-    let r = e.stream(wav, "?dsp=1&q=aac&kbps=96", None).await;
-    assert_eq!(r.h("x-encore-stream"), "aac-96");
+    // the lossy stream wins over processing: no permission needed (the AAC encode needs ffmpeg)
+    if encore_media::ffmpeg::available() {
+        let r = e.stream(wav, "?dsp=1&q=aac&kbps=96", None).await;
+        assert_eq!(r.h("x-encore-stream"), "aac-96");
+    } else {
+        eprintln!("ffmpeg not found: skipping the lossy stream check");
+    }
     // a missing file is 404 before anything is checked
     std::fs::rename(e.music.join("f.wav"), e.music.join("g.wav")).unwrap();
     assert_eq!(e.get(&uri, None).await.status, StatusCode::NOT_FOUND);
