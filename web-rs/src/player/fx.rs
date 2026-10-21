@@ -31,6 +31,8 @@ pub fn device_rate() -> f64 { output_rate() }
 // built the graph stays and turns into a pass-through when the effects are switched off.
 // Each wrapped element: source → normalization gain (the song's own, norm.rs) → fade gain (song transitions) → the
 // shared input (the preamp) → EQ, crossfeed, mono, balance → the speakers.
+// The EQ is Cadenza's (cadenza-eq, the same bands and maths as the desktop app and the phone): its biquads, computed in
+// f64, run as Web Audio IIR filters, one per section, between the input and `eq_out`.
 /// `out` feeds the graph: the fade gain, or the last node that could be made · `norm`: the normalization gain
 pub(super) struct FxSource { pub(super) el: HtmlMediaElement, out: web_sys::AudioNode, pub(super) gain: Option<web_sys::GainNode>, pub(super) norm: Option<web_sys::GainNode>, on: bool }
 #[derive(Default)]
@@ -41,7 +43,11 @@ pub(super) struct Fx {
     pub(super) sources: Vec<FxSource>,
     input: Option<web_sys::GainNode>,
     key: String,
-    eq: Vec<web_sys::BiquadFilterNode>,
+    /// the EQ's biquad sections, input → … → eq_out; swapped as a whole when the bands change
+    eq: Vec<web_sys::IirFilterNode>,
+    eq_out: Option<web_sys::GainNode>,
+    /// what `eq` was built from (the output rate and the sections' coefficients)
+    eq_key: String,
     cross: Vec<web_sys::GainNode>,
     trim: Option<web_sys::GainNode>,
     pan: Option<web_sys::StereoPannerNode>,
@@ -49,9 +55,39 @@ pub(super) struct Fx {
 }
 fn db_gain(v: f64) -> f64 { 10f64.powf(v / 20.0) }
 fn xfeed_db(x: &str) -> f64 { match x { "light" => -9.0, "medium" => -6.0, "strong" => -4.5, _ => -6.0 } }
-fn biquad_type(t: &str) -> web_sys::BiquadFilterType {
-    use web_sys::BiquadFilterType as B;
-    match t { "lowshelf" => B::Lowshelf, "highshelf" => B::Highshelf, "lowpass" => B::Lowpass, "highpass" => B::Highpass, "notch" => B::Notch, _ => B::Peaking }
+/// Rebuild the EQ chain (input → sections → eq_out) when its sections change. The new chain is wired up before the old
+/// one is cut, so the music never stops; if a filter can't be made the old chain stays.
+fn retune_eq(ctx: &web_sys::AudioContext, fx: &mut Fx, input: &web_sys::GainNode, bands: &[Value]) {
+    let Some(out) = fx.eq_out.clone() else { return };
+    let rate = ctx.sample_rate() as f64;
+    let sections: Vec<cadenza_eq::Coefficients> = bands.iter().filter_map(playback::cadenza_band).take(cadenza_eq::MAX_BANDS)
+        .flat_map(|b| b.sections(rate)).collect();
+    let key = format!("{rate}{sections:?}");
+    if key == fx.eq_key { return; }
+    let mut fresh: Vec<web_sys::IirFilterNode> = vec![];
+    let wired = (|| -> Result<(), JsValue> {
+        let mut last: web_sys::AudioNode = input.clone().into();
+        for c in &sections {
+            let ff: js_sys::Array = [c.b0, c.b1, c.b2].iter().map(|v| JsValue::from_f64(*v)).collect();
+            let fb: js_sys::Array = [1.0, c.a1, c.a2].iter().map(|v| JsValue::from_f64(*v)).collect();
+            let n = ctx.create_iir_filter(&ff, &fb)?;
+            fresh.push(n.clone());
+            last.connect_with_audio_node(&n)?;
+            last = n.into();
+        }
+        last.connect_with_audio_node(&out)?;
+        Ok(())
+    })();
+    if wired.is_err() {
+        if let Some(first) = fresh.first() { let _ = input.disconnect_with_audio_node(first); }
+        for n in &fresh { let _ = n.disconnect(); }
+        dom::console_error("Sound effects: could not build the equalizer");
+        return;
+    }
+    let _ = match fx.eq.first() { Some(first) => input.disconnect_with_audio_node(first), None => input.disconnect_with_audio_node(&out) };
+    for n in fx.eq.drain(..) { let _ = n.disconnect(); }
+    fx.eq = fresh;
+    fx.eq_key = key;
 }
 
 pub(super) fn ensure_fx() -> bool {
@@ -135,7 +171,7 @@ pub(super) fn apply_fx() {
     let bands = if on { playback::eq_bands(&p) } else { vec![] };
     let mono = on && p.truthy("mono");
     let xfeed = if on && !mono { p.s("crossfeed") } else { "off".to_string() };
-    let key = json!([on, bands.iter().map(|b| b.g("type").clone()).collect::<Vec<_>>(), xfeed != "off", mono]).to_string();
+    let key = json!([on, xfeed != "off", mono]).to_string();
     FX.with(|f| {
         let mut fx = f.borrow_mut();
         let Some(input) = fx.input.clone() else { return };
@@ -143,7 +179,8 @@ pub(super) fn apply_fx() {
             fx.key = key;
             let _ = input.disconnect();
             for n in fx.nodes.drain(..) { let _ = n.disconnect(); }
-            fx.eq.clear(); fx.cross.clear(); fx.trim = None; fx.pan = None;
+            for n in fx.eq.drain(..) { let _ = n.disconnect(); }
+            fx.eq_key.clear(); fx.eq_out = None; fx.cross.clear(); fx.trim = None; fx.pan = None;
             let wired = (|fx: &mut Fx| -> Result<(), JsValue> {
                 let mut last: web_sys::AudioNode = input.clone().into();
                 let add = |fx: &mut Fx, last: &mut web_sys::AudioNode, n: web_sys::AudioNode| -> Result<(), JsValue> {
@@ -153,12 +190,10 @@ pub(super) fn apply_fx() {
                     Ok(())
                 };
                 if on {
-                    for b in &bands {
-                        let f = ctx.create_biquad_filter()?;
-                        f.set_type(biquad_type(&b.s("type")));
-                        add(fx, &mut last, f.clone().into())?;
-                        fx.eq.push(f);
-                    }
+                    // the EQ's sections go in between (retune_eq, below); until then the input feeds eq_out straight
+                    let out = ctx.create_gain()?;
+                    add(fx, &mut last, out.clone().into())?;
+                    fx.eq_out = Some(out);
                     if xfeed != "off" {
                         // each channel gets a low-passed, slightly delayed, quieter copy of the other one
                         let pre = ctx.create_gain()?;
@@ -219,12 +254,7 @@ pub(super) fn apply_fx() {
             if wired.is_err() { dom::console_error("Sound effects: could not build the audio graph"); }
         }
         input.gain().set_value(if on { db_gain(p.f("eq_preamp")) as f32 } else { 1.0 });
-        for (f, b) in fx.eq.iter().zip(bands.iter()) {
-            f.set_type(biquad_type(&b.s("type")));
-            f.frequency().set_value(b.f("freq") as f32);
-            f.gain().set_value(b.f("gain") as f32);
-            f.q().set_value(b.f("q") as f32);
-        }
+        retune_eq(&ctx, &mut fx, &input, &bands);
         if !fx.cross.is_empty() {
             let g = db_gain(xfeed_db(&xfeed));
             for n in &fx.cross { n.gain().set_value(g as f32); }

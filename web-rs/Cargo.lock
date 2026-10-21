@@ -15,6 +15,13 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "fc652a48c352aef3ea3aed32080501cf3ef6ed5da78602a020c991775b0aff04"
 
 [[package]]
+name = "cadenza-eq"
+version = "3.0.6"
+dependencies = [
+ "serde",
+]
+
+[[package]]
 name = "cfg-if"
 version = "1.0.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -34,6 +41,7 @@ dependencies = [
 name = "encore-web"
 version = "0.0.0"
 dependencies = [
+ "cadenza-eq",
  "console_error_panic_hook",
  "futures",
  "gloo-events",

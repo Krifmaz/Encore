@@ -93,6 +93,25 @@ fn clean_band(x: &Value) -> Value {
         "q": jnum(round_to(clamp_num(x.g("q"), 0.1, 18.0, 1.0), 2)),
     })
 }
+/// A band as Cadenza's EQ runs it (the same mapping as the phone's engine, clients/android/cadenza/rust/src/engine.rs):
+/// the stored bands keep Web Audio's meaning, whose shelves ignore Q (slope 1, i.e. Q = 1/√2) and whose low-/high-pass
+/// Q is in dB; peaking and notch use Q as it is.
+pub fn cadenza_band(x: &Value) -> Option<cadenza_eq::Band> {
+    use cadenza_eq::BandKind as K;
+    let q = x.num("q").unwrap_or(1.0);
+    let (kind, q) = match x.s("type").as_str() {
+        "peaking" => (K::Peaking, q),
+        "lowshelf" => (K::LowShelf, std::f64::consts::FRAC_1_SQRT_2),
+        "highshelf" => (K::HighShelf, std::f64::consts::FRAC_1_SQRT_2),
+        "lowpass" => (K::LowPass, 10f64.powf(q / 20.0)),
+        "highpass" => (K::HighPass, 10f64.powf(q / 20.0)),
+        "notch" => (K::Notch, q),
+        _ => return None,
+    };
+    let (freq, gain) = (x.f("freq"), x.f("gain"));
+    if !freq.is_finite() || !gain.is_finite() || !q.is_finite() { return None; }
+    Some(cadenza_eq::Band { kind, freq, gain_db: gain, q: q.max(0.0001), enabled: true, slope_db: 12 })
+}
 /// The bands that play: a named preset's own, or your custom ones (as JSON band objects).
 pub fn eq_bands(p: &Value) -> Vec<Value> {
     if p.s("eq_preset") == "custom" { return p.a("eq_bands"); }
@@ -231,5 +250,30 @@ pub fn adopt_account(user: &Value) {
     let a = user.g("prefs").g("playback").clone();
     if a.is_object() {
         dom::spawn(async move { save(&a, false).await; });
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn stored_bands_map_to_cadenza_bands_like_the_phone() {
+        let pk = cadenza_band(&json!({ "type": "peaking", "freq": 1000, "gain": 6, "q": 2 })).unwrap();
+        assert_eq!((pk.kind, pk.freq, pk.gain_db, pk.q), (cadenza_eq::BandKind::Peaking, 1000.0, 6.0, 2.0));
+        // shelves: Web Audio ignores Q (slope 1)
+        let sh = cadenza_band(&json!({ "type": "lowshelf", "freq": 105, "gain": 6, "q": 0.2 })).unwrap();
+        assert!((sh.q - std::f64::consts::FRAC_1_SQRT_2).abs() < 1e-12);
+        // low-/high-pass: Q in dB
+        let hp = cadenza_band(&json!({ "type": "highpass", "freq": 80, "gain": 0, "q": 0 })).unwrap();
+        assert!((hp.q - 1.0).abs() < 1e-12);
+        assert!(cadenza_band(&json!({ "type": "allpass", "freq": 80 })).is_none());
+        // every preset band maps
+        for p in EQ_PRESETS {
+            let bands: Vec<_> = p.bands.iter().map(band_json).filter_map(|b| cadenza_band(&b)).collect();
+            assert_eq!(bands.len(), p.bands.len(), "{}", p.id);
+        }
+        let eq = cadenza_eq::Equalizer::new(48_000, 2, &[pk]);
+        assert!((eq.response_db(1000.0) - 6.0).abs() < 1e-9);
     }
 }

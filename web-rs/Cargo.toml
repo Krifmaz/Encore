@@ -16,6 +16,8 @@ js-sys = "0.3"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 serde-wasm-bindgen = "0.6"
+# the equalizer: Cadenza's bands and maths (the same as the desktop app and the phone)
+cadenza-eq = { path = "../../Cadenza/crates/cadenza-eq" }
 console_error_panic_hook = "0.1"
 gloo-events = "0.3"
 gloo-timers = { version = "0.4", features = ["futures"] }
@@ -28,13 +30,13 @@ web-sys = { version = "0.3", features = [
   "Navigator", "Clipboard", "ServiceWorkerContainer", "Screen", "Performance", "MediaQueryList",
   "ServiceWorker", "ServiceWorkerRegistration", "ServiceWorkerState",
   "MediaMetadata", "MediaSessionActionDetails",
-  "Event", "EventTarget", "KeyboardEvent", "MouseEvent", "PointerEvent", "CustomEvent", "CustomEventInit",
+  "Event", "EventTarget", "KeyboardEvent", "MouseEvent", "PointerEvent", "WheelEvent", "CustomEvent", "CustomEventInit",
   "HashChangeEvent", "StorageEvent", "MessageEvent", "EventSource",
   "Node", "NodeList", "Text", "DomRect", "CssStyleDeclaration", "DomTokenList", "TimeRanges",
   "File", "FileList", "FileReader", "FormData", "Url", "UrlSearchParams", "ScrollToOptions", "ScrollBehavior",
   "MutationObserver", "MutationObserverInit", "MutationRecord", "console",
   "AudioContext", "AudioContextState", "AudioNode", "AudioParam", "AudioDestinationNode", "MediaElementAudioSourceNode",
-  "BiquadFilterNode", "BiquadFilterType", "GainNode", "DelayNode", "StereoPannerNode", "ChannelSplitterNode", "ChannelMergerNode",
+  "BiquadFilterNode", "BiquadFilterType", "IirFilterNode", "BaseAudioContext", "GainNode", "DelayNode", "StereoPannerNode", "ChannelSplitterNode", "ChannelMergerNode",
   "ChannelCountMode", "ChannelInterpretation",
   # the offline store (src/offline): the Cache API, storage estimate/persist, downloads read in pieces
   "CacheStorage", "Cache", "StorageManager", "StorageEstimate", "Blob", "BlobPropertyBag", "ReadableStream",
