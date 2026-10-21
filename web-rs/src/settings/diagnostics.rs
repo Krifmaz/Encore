@@ -606,7 +606,7 @@ fn updates_html(d: &Value) -> String {
         if error.is_empty() { r#"<span class="small muted">Not checked yet – press Check now</span>"#.to_string() } else { String::new() }
     } else if newer {
         let day = published_day(d.g("published_at"));
-        format!(r#"<span class="badge info">Encore {} is available</span>{}"#, esc(&latest),
+        format!(r#"<span class="badge info">Encore {}{} is available</span>{}"#, esc(&latest), if d.truthy("hotfix") { " (hotfix)" } else { "" },
             if day.is_empty() { String::new() } else { format!(r#"<span class="small muted">released {}</span>"#, esc(&day)) })
     } else {
         r#"<span class="small muted">You have the newest version</span>"#.to_string()
@@ -614,6 +614,10 @@ fn updates_html(d: &Value) -> String {
     let github = if d.truthy("url") {
         format!(r#"<a class="btn sm" href="{}" target="_blank" rel="noopener">{}View on GitHub</a>"#, esck(d, "url"), icon("external"))
     } else { String::new() };
+    let hotfix = d.g("channel").as_str() == Some("hotfix");
+    let channel = format!(r#"<select class="input" id="up-channel" style="width:auto;padding:6px 10px" title="Stable: full releases only. Hotfix: also the build of every push to GitHub; a full release still wins when it is newer.">
+        <option value="stable"{}>Stable releases</option><option value="hotfix"{}>Hotfixes (every push)</option></select>"#,
+        if hotfix { "" } else { " selected" }, if hotfix { " selected" } else { "" });
     let ready = d.g("self_update").as_str() == Some("ready");
     let update_btn = if ready && newer { r#"<button class="btn sm primary" id="up-now">Update now</button>"#.to_string() } else { String::new() };
     let notes = notes_text(&d.s("notes"));
@@ -629,7 +633,7 @@ fn updates_html(d: &Value) -> String {
     let shell = crate::sw::shell_cache().map(|c| format!(r#"<div class="small faint">This browser keeps the web app for offline use ({})</div>"#, esc(&c))).unwrap_or_default();
     format!(r#"
     <div class="section-head"><h2>Updates</h2>
-      <div class="row"><button class="btn sm" id="up-check">{refresh}Check now</button><button class="btn sm" id="up-restart">Restart server</button></div>
+      <div class="row">{channel}<button class="btn sm" id="up-check">{refresh}Check now</button><button class="btn sm" id="up-restart">Restart server</button></div>
     </div>
     <div class="card stack">
       <div class="row wrap between">
@@ -646,6 +650,20 @@ fn updates_html(d: &Value) -> String {
 
 fn draw_updates(up: &Element, d: &Value) {
     dom::set_html(up, &updates_html(d));
+    {
+        // the channel is the update_channel setting; a change checks GitHub again for that channel
+        let up2 = up.clone();
+        dom::on_sel(up, "#up-channel", "change", move |e| {
+            let Some(sel) = dom::target_el(e) else { return };
+            let (up, channel) = (up2.clone(), dom::value(&sel));
+            dom::spawn(async move {
+                match api::put("/admin/settings", json!({ "update_channel": channel })).await {
+                    Ok(_) => load_updates(&up, true).await,
+                    Err(e) => toast(&e.message, "err"),
+                }
+            });
+        });
+    }
     {
         let up2 = up.clone();
         dom::on_sel(up, "#up-check", "click", move |e| {
@@ -703,7 +721,7 @@ fn draw_updates(up: &Element, d: &Value) {
 
 /// The buttons of the card while the server restarts.
 fn busy(up: &Element, on: bool) {
-    for sel in ["#up-check", "#up-restart", "#up-now"] {
+    for sel in ["#up-channel", "#up-check", "#up-restart", "#up-now"] {
         if let Some(b) = dom::qs_in(up, sel) { dom::set_disabled(&b, on); }
     }
 }

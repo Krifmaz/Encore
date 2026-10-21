@@ -18,6 +18,12 @@ name: release
 #   for every crate of the workspace, the web app's checks, and whether Cadenza is pinned to one rev everywhere.
 #   The x86_64 server build also runs the speed table (server/benches/perf.rs) into its job summary.
 #   SHA256SUMS covers every file of the release; the desktop app checks its updates against it.
+#   Hotfixes: hotfix.yml calls this file with channel = hotfix on every push to the default branch. Version
+#   <newest release>.<run number> (0.35.2.17), the server and Docker image only (no apps, no speed table), image
+#   tags :<version> and :hotfix (never :latest), a GitHub *prerelease* tagged hotfix-<version> that is never
+#   "Latest" – so the stable channel, the desktop app and the version bump above never see it. Only the newest
+#   three hotfixes are kept (their releases, tags and images); a full release counts as newer than all of them.
+#   Servers on Settings → Diagnostics → Updates → "Hotfixes" (update_channel = hotfix) are offered them.
 on:
   workflow_dispatch:
     inputs:
@@ -46,15 +52,21 @@ on:
         type: string
         required: false
         default: test
+      # hotfix.yml: hotfix (see above); stable otherwise
+      channel:
+        type: string
+        required: false
+        default: stable
 
 permissions:
   contents: write
   packages: write
 
-# releases queue one after the other; a test-only call (docker.yml) gets a group of its own
+# releases queue one after the other; a test-only call (docker.yml) gets a group of its own; a hotfix gets
+# its own too, where a newer push cancels the hotfix still on its way
 concurrency:
-  group: ${{ inputs.only == 'test' && format('release-test-{0}', github.run_id) || 'release' }}
-  cancel-in-progress: false
+  group: ${{ inputs.only == 'test' && format('release-test-{0}', github.run_id) || inputs.channel == 'hotfix' && 'release-hotfix' || 'release' }}
+  cancel-in-progress: ${{ inputs.channel == 'hotfix' }}
 
 jobs:
   version:
@@ -72,9 +84,22 @@ jobs:
         env:
           BUMP: ${{ inputs.bump }}
           WANT: ${{ inputs.version }}
+          CHANNEL: ${{ inputs.channel }}
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           semver() { echo "$1" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+$'; }
+          if [ "$CHANNEL" = hotfix ]; then
+            # a hotfix: the newest full release with the run number as a fourth part (0.35.2.17)
+            LAST=$(gh release list --limit 200 --json tagName -q '.[].tagName' 2>/dev/null | sed -n 's/^v\([0-9][0-9]*\.[0-9][0-9]*\.[0-9][0-9]*\)$/\1/p' \
+                    | sort -t. -k1,1n -k2,2n -k3,3n | tail -1)
+            V="${LAST:-0.20.0}.$GITHUB_RUN_NUMBER"
+            IFS=. read -r A B C <<< "${LAST:-0.20.0}"
+            echo "version=$V" >> "$GITHUB_OUTPUT"
+            echo "semver=$A.$B.$C" >> "$GITHUB_OUTPUT"
+            echo "code=$(( 260000000 + A * 1000000 + B * 10000 + C * 10 ))" >> "$GITHUB_OUTPUT"
+            echo "Hotfix $V"
+            exit 0
+          fi
           if [ "$GITHUB_REF_TYPE" = "tag" ]; then
             V="${GITHUB_REF_NAME#v}"
           elif [ -n "$WANT" ]; then
@@ -215,7 +240,7 @@ jobs:
       # A GitHub runner is another machine with other neighbours, so compare its numbers only with other runs here.
       # Only the x86_64 build can run on the runner; a failed bench does not hold the release back.
       - name: Speed table (cargo bench --bench perf)
-        if: matrix.arch == 'x86_64'
+        if: matrix.arch == 'x86_64' && inputs.channel != 'hotfix'
         continue-on-error: true
         working-directory: server
         env:
@@ -245,7 +270,8 @@ jobs:
         id: tags
         run: |
           I="ghcr.io/${GITHUB_REPOSITORY_OWNER,,}/encore"
-          T="$I:${{ needs.version.outputs.version }},$I:latest"
+          # a hotfix moves :hotfix, a release :latest
+          T="$I:${{ needs.version.outputs.version }},$I:${{ inputs.channel == 'hotfix' && 'hotfix' || 'latest' }}"
           echo "tags=$T" >> "$GITHUB_OUTPUT"
       - uses: docker/build-push-action@v6
         with:
@@ -271,10 +297,80 @@ jobs:
     # the Android release key lives in repository secrets; a called workflow only sees them when passed on
     secrets: inherit
 
+  # a hotfix: a prerelease of the server and the image, then only the newest three hotfixes stay
+  hotfix:
+    needs: [version, server, docker]
+    if: inputs.channel == 'hotfix'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: server-*
+          path: out
+          merge-multiple: true
+      - name: Publish the hotfix
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          V: ${{ needs.version.outputs.version }}
+        run: |
+          cp docker-compose.yml out/
+          (cd out && sha256sum -- * > SHA256SUMS)
+          PREV=$(git tag -l 'v[0-9]*' --sort=-creatordate | head -1)
+          {
+            echo "Hotfix build of \`${GITHUB_SHA::7}\` (the main branch after ${PREV:-the first release}). Servers on the hotfix channel"
+            echo "(Settings → Diagnostics → Updates → Hotfixes) are offered it; the next full release replaces it."
+            echo; echo "## Changes since ${PREV:-the start}"
+            git log --no-merges --pretty='- %s' ${PREV:+$PREV..}HEAD | head -60
+            echo; echo "---"
+            echo "* **Docker**: \`ghcr.io/krifmaz/encore:hotfix\` (\`:$V\` pins this build)"
+            echo "* **Linux without Docker**: \`encore-$V-linux-x86_64.tar.gz\` / \`-aarch64\`"
+            echo "* The desktop and Android apps are built for full releases only."
+          } > notes.md
+          gh release delete "hotfix-$V" --yes --cleanup-tag 2>/dev/null || true
+          gh release create "hotfix-$V" out/* --title "Encore $V (hotfix)" --notes-file notes.md --target "$GITHUB_SHA" --prerelease --latest=false
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Keep only the newest three hotfixes
+        # a failed clean-up never fails the hotfix: the next one tries again
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          KEEP: 3
+        run: |
+          # releases and their tags: hotfix-<a>.<b>.<c>.<n>, newest version first
+          OLD=$(gh release list --limit 200 --json tagName -q '.[].tagName' | sed -n 's/^hotfix-\([0-9]*\.[0-9]*\.[0-9]*\.[0-9]*\)$/\1/p' \
+                | sort -t. -k1,1n -k2,2n -k3,3n -k4,4n -r | tail -n +$((KEEP + 1)))
+          for v in $OLD; do echo "deleting release hotfix-$v"; gh release delete "hotfix-$v" --yes --cleanup-tag || true; done
+          # images: a package version whose tags are all hotfix versions not kept, and the per-platform manifests
+          # under it (they show as untagged versions; another image's untagged ones are never touched)
+          OWNER="${GITHUB_REPOSITORY_OWNER,,}"
+          API="/users/$OWNER/packages/container/encore/versions"
+          gh api --paginate "$API?per_page=100" > versions.json 2>/dev/null || { echo "can't list the image's versions"; exit 0; }
+          jq -s 'add' versions.json > all.json
+          KEPT=$(jq -r '.[].metadata.container.tags[]' all.json | grep -E '^[0-9]+(\.[0-9]+){3}$' | sort -t. -k1,1n -k2,2n -k3,3n -k4,4n -r | head -n "$KEEP")
+          jq -c '.[] | select((.metadata.container.tags | length) > 0)' all.json | while read -r ver; do
+            TAGS=$(echo "$ver" | jq -r '.metadata.container.tags[]')
+            # only versions tagged with hotfix numbers alone (never :latest, :hotfix or a release's)
+            echo "$TAGS" | grep -qvE '^[0-9]+(\.[0-9]+){3}$' && continue
+            for t in $TAGS; do echo "$KEPT" | grep -qx "$t" && continue 2; done
+            ID=$(echo "$ver" | jq -r .id); DIGEST=$(echo "$ver" | jq -r .name)
+            for child in $(docker buildx imagetools inspect --raw "ghcr.io/$OWNER/encore@$DIGEST" 2>/dev/null | jq -r '.manifests[]?.digest'); do
+              CID=$(jq -r --arg d "$child" '.[] | select(.name == $d and (.metadata.container.tags | length) == 0) | .id' all.json)
+              [ -n "$CID" ] && gh api -X DELETE "$API/$CID" >/dev/null && echo "deleted $child"
+            done
+            gh api -X DELETE "$API/$ID" >/dev/null && echo "deleted image $(echo $TAGS) ($DIGEST)"
+          done
+
   publish:
     needs: [version, server, docker, apps]
     if: >-
-      always() && (
+      always() && inputs.channel != 'hotfix' && (
         (inputs.only == 'android' && needs.apps.result == 'success') ||
         (inputs.only != 'android' && needs.server.result == 'success' && needs.docker.result == 'success')
       )

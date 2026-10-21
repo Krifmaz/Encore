@@ -44,6 +44,33 @@ fn newer_is_a_version_comparison_and_a_dev_build_is_older_than_any_release() {
 }
 
 #[test]
+fn the_hotfix_channel_takes_the_highest_of_releases_and_hotfixes() {
+    assert_eq!(Channel::parse("hotfix"), Channel::Hotfix);
+    assert_eq!(Channel::parse(" Hotfix "), Channel::Hotfix);
+    for s in ["", "stable", "nightly"] {
+        assert_eq!(Channel::parse(s), Channel::Stable, "{s:?}");
+    }
+    let list = json!([
+        { "tag_name": "hotfix-0.35.2.18", "prerelease": true, "draft": true },
+        { "tag_name": "hotfix-0.35.2.17", "prerelease": true },
+        { "tag_name": "v0.36.0-beta", "prerelease": true },
+        { "tag_name": "v0.35.2" },
+        { "tag_name": "hotfix-0.35.1.9", "prerelease": true },
+    ]);
+    let r = pick_newest(&list, 0.0).unwrap();
+    assert_eq!((r["tag"].as_str(), r["latest"].as_str(), r["hotfix"].as_bool()), (Some("hotfix-0.35.2.17"), Some("0.35.2.17"), Some(true)),
+               "the draft and the other prerelease don't count");
+    // a full release after the hotfixes is newer than all of them
+    let list = json!([{ "tag_name": "v0.35.3" }, { "tag_name": "hotfix-0.35.2.17", "prerelease": true }]);
+    assert_eq!(pick_newest(&list, 0.0).unwrap()["latest"], json!("0.35.3"));
+    assert!(is_newer("0.35.3", "0.35.2.17", false));
+    assert!(is_newer("0.35.2.17", "0.35.2", false));
+    assert!(!is_newer("0.35.2", "0.35.2.17", false), "the stable channel does not go back from a hotfix");
+    assert!(pick_newest(&json!([]), 0.0).is_none());
+    assert_eq!(check_tag("0.35.2.17").as_deref(), Ok("0.35.2.17"));
+}
+
+#[test]
 fn image_tags_are_checked() {
     assert_eq!(check_tag("0.29.0").as_deref(), Ok("0.29.0"));
     assert_eq!(check_tag("v0.29.0").as_deref(), Ok("0.29.0"), "the images are tagged without the v");
