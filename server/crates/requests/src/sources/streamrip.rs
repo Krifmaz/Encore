@@ -553,6 +553,7 @@ pub async fn config_loads_check(st: &impl Ctx) -> Value {
 /// The useful part of streamrip's output, one line: box drawing stripped, numbered progress lines
 /// dropped, the last three lines that name an error (each with the line that continues it), capped.
 fn summary(text: &str, max: usize) -> String {
+    let text = &log_records(text);
     let boxes = Regex::new(r"[│╭╰╮╯─━┃]+").unwrap();
     let num = Regex::new(r"^\d+\s").unwrap();
     let errs = Regex::new(r"(?i)error|invalid|fail|not (found|available)|login|arl|token|subscription|traceback|exception").unwrap();
@@ -573,6 +574,38 @@ fn summary(text: &str, max: usize) -> String {
     }
     let pick: Vec<String> = if groups.is_empty() { lines.iter().rev().take(3).rev().cloned().collect() } else { groups.into_iter().rev().take(3).rev().collect() };
     cap(&pick.join(" / "), max)
+}
+
+/// streamrip's log as one line per record: its console wraps a record over several lines, with the time and
+/// level in front of the first and the source file (`track.py:354`) at its right edge, so a summary of the
+/// raw lines read "…not available. / failed / INFO Run `streamrip repair` to retry the failed main.py:246
+/// tracks". Each record becomes its message on one line, without the file names; INFO and DEBUG records (the
+/// tally, the repair hint) are left out. Output without such records comes back as it is.
+fn log_records(text: &str) -> String {
+    let start = Regex::new(r"^\s*(?:\[\d{1,2}:\d{2}:\d{2}\]\s+)?(ERROR|WARNING|CRITICAL|INFO|DEBUG)\s{2,}(.*)$").unwrap();
+    if !text.lines().any(|l| start.is_match(l)) {
+        return text.to_string();
+    }
+    let file = Regex::new(r"\s[\w./-]+\.py:\d+\b").unwrap();
+    // (level, message); a line before any record, or one that isn't indented, stands alone
+    let mut records: Vec<(Option<String>, String)> = vec![];
+    for line in text.lines() {
+        if let Some(c) = start.captures(line) {
+            records.push((Some(c[1].to_string()), c[2].trim().to_string()));
+        } else if line.starts_with("          ") && records.last().is_some_and(|r| r.0.is_some()) {
+            let last = records.last_mut().unwrap();
+            last.1.push(' ');
+            last.1.push_str(line.trim());
+        } else if !line.trim().is_empty() {
+            records.push((None, line.trim().to_string()));
+        }
+    }
+    records
+        .into_iter()
+        .filter(|(level, _)| !matches!(level.as_deref(), Some("INFO" | "DEBUG")))
+        .map(|(_, m)| file.replace_all(&format!(" {m}"), "").split_whitespace().collect::<Vec<_>>().join(" "))
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
 fn cap(s: &str, max: usize) -> String {
@@ -608,8 +641,15 @@ pub fn failure_message(text: &str) -> String {
     if text.contains(CONFIG_ERROR) {
         return format!("{CONFIG_BROKEN_MSG} – {}", summary(text, MESSAGE_CAP));
     }
+    // the service has the track but won't stream it here (Deezer's and Qobuz's licences by country)
+    if text.contains("NonStreamableError") || text.contains("may be due to your country") {
+        return NOT_STREAMABLE_MSG.to_string();
+    }
     format!("streamrip produced no files: {}", summary(text, MESSAGE_CAP))
 }
+
+/// [`failure_message`] for a track the service won't stream in this country.
+pub const NOT_STREAMABLE_MSG: &str = "the service has this track but doesn't stream it in your country (streamrip: NonStreamableError)";
 
 /// The reason a run produced nothing, from its output and how it ended: [`failure_message`], or what is
 /// known when it printed nothing, or that it was stopped at the time limit.
@@ -1309,6 +1349,12 @@ hires_token_client_id = "fX2JxdmntZWK0ixT"
         let m = failure_message(&long);
         assert_eq!(m.chars().count(), "streamrip produced no files: ".len() + 300, "{m}");
         assert!(m.ends_with('…'));
+        // the owner's Deezer case (Oct 21): a record the console wrapped over three lines, then the tally
+        let geo = "Deezer: Deezer does not have lyrics for every track, so the others are looked up\non lrclib.net, which is told their artist, title and length.\n[10:28:12] ERROR    Error fetching download info for track          track.py:354\n                    640944882: NonStreamableError: The requested                \n                    track is not available. This may be due to your             \n                    country/location.                                           \n           INFO     Download completed: 0 track(s) downloaded, 1     main.py:244\n                    failed                                                      \n           INFO     Run `streamrip repair` to retry the failed       main.py:246\n                    tracks.\n";
+        assert_eq!(failure_message(geo), NOT_STREAMABLE_MSG);
+        // any other wrapped record reads as one line, without the file names, the tally or the repair hint
+        let other = geo.replace("NonStreamableError: The requested", "KeyError: 'md5_origin' for the     ").replace("This may be due to your", "the response was odd    ");
+        assert_eq!(failure_message(&other), "streamrip produced no files: Error fetching download info for track 640944882: KeyError: 'md5_origin' for the track is not available. the response was odd country/location.");
         // "early" is not the ARL
         assert!(failure_message("Login failed early: token expired").starts_with("streamrip produced no files: Login failed early"));
         assert!(!asks_for_arl("an early prompt"));
