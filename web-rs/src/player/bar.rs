@@ -95,10 +95,19 @@ pub(super) fn more_menu(anchor: &Element) {
     if lib && crate::ui::translate_mode() != "off" { let t2 = t.clone(); items.push(MenuItem::new("Edit translation", &icon("edit"), move || crate::pages::translate::edit_translation(t2.s("title"), "title", None))); }
     if has_encore_remote() { items.push(MenuItem::new(if linked { "Your devices…" } else { "Play on another device…" }, &icon("devices"), remote_open)); }
     // group listen (0.31): start one with what plays here, or open the one this browser is in
-    if grouped() { items.push(MenuItem::new("Group listen", &icon("users"), crate::group::ui::sheet)); }
-    else if !linked && crate::group::available() != Some(false) { items.push(MenuItem::new("Start a group listen", &icon("users"), crate::group::ui::start_dialog)); }
+    // and the group's own pause (Pause pauses only here), for those who control it while it plays
+    let group = grouped().then(|| crate::group::current().unwrap_or(Value::Null));
+    for label in crate::group::rules::menu_entries(group.as_ref(), !linked && crate::group::available() != Some(false)) {
+        items.push(match label {
+            "Group listen" => MenuItem::new(label, &icon("users"), crate::group::ui::sheet),
+            "Start a group listen" => MenuItem::new(label, &icon("users"), crate::group::ui::start_dialog),
+            _ => MenuItem::new(label, &icon("pause"), super::group::pause_for_everyone),
+        });
+    }
     items.push(MenuItem::new("Customize the bar…", &icon("settings"), customize_bar_modal));
-    pop_menu(anchor, items);
+    let menu = crate::ui::pop_menu_el(anchor, items);
+    // a library song: who added it, the menu's first line once the server says
+    if lib { crate::pages::library::show_added(&menu, &t.s("id")); }
 }
 
 pub(super) fn update_time() {

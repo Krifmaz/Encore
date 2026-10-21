@@ -395,35 +395,64 @@ object GroupListen {
         putJsonArray("tracks") { for (t in tracks) if (t.id > 0L) add(JsonPrimitive(t.id)) }
     }
 
-    /** "Play" on a list while in a group: it becomes the group's queue (those who control). True when the group took it. */
-    fun playList(tracks: List<Track>, index: Int, positionSec: Double = 0.0): Boolean {
+    /**
+     * Whether Play in the group starts it with the songs (`set_queue`) rather than adding them to its Up next: it plays
+     * nothing and has nothing in Up next ([GroupRules.playStarts]), and this device may control it.
+     */
+    private fun playStarts(): Boolean {
+        val s = _state.value ?: return false
+        return s.youCanControl && GroupRules.playStarts(s, serverNow())
+    }
+
+    /**
+     * "Play" on a list (an album, a playlist, an artist, a song) while in a group (the owner on Oct 21: "it should just
+     * add it to the que"): the songs from the one asked for are added to the group's Up next ("Added 12 songs to the
+     * group's Up next", or to [said] – the car's line); a group with nothing to play starts with the list instead (those
+     * who control it). True when it went to the group.
+     */
+    fun playList(tracks: List<Track>, index: Int, positionSec: Double = 0.0, said: (String) -> Unit = { Toasts.show(it, "ok") }): Boolean {
         if (!inGroup) return false
-        if (deniedHere()) return true
         val lib = tracks.filter { it.id > 0L }
         if (lib.isEmpty()) { Toasts.show("Only songs from your library can be played in a group listen", "err"); return true }
-        val idx = tracks.take(index.coerceAtLeast(0)).count { it.id > 0L }.coerceIn(0, lib.size - 1)
-        val (win, at) = RemoteDevice.window(lib, idx, 1000)
-        command("set_queue") { ids(win); put("index", at); put("position", positionSec) }
+        val before = tracks.take(index.coerceAtLeast(0)).count { it.id > 0L }
+        if (playStarts()) {
+            val (win, at) = RemoteDevice.window(lib, before.coerceIn(0, lib.size - 1), 1000)
+            command("set_queue") { ids(win); put("index", at); put("position", positionSec) }
+            return true
+        }
+        val adding = GroupRules.toAdd(lib.map { it.id }, before)
+        if (adding.isEmpty()) { Toasts.show("Only songs from your library can be played in a group listen", "err"); return true }
+        command("enqueue", onDone = { said(GroupRules.addedText(adding.size, false)) }) { putJsonArray("tracks") { for (id in adding) add(JsonPrimitive(id)) } }
         return true
     }
 
     /**
-     * A list's Shuffle (a playlist, an album, an artist) in a group: it becomes the group's queue, shuffled by the
-     * server, from its first song (`set_queue` with `shuffle`) for those who control; the others add it to the group's
-     * Up next, shuffled (`enqueue` with `shuffle`). The list is shuffled here too (an older server plays it as sent),
-     * and a list of more than 1000 songs sends 1000 of them, picked at random. True when the group took it.
+     * A list's Shuffle (a playlist, an album, an artist) in a group: added to the group's Up next in a random order
+     * (`enqueue` with `shuffle`); a group with nothing to play starts with it shuffled instead (`set_queue` with
+     * `shuffle`, those who control it). The list is shuffled here too (an older server plays it as sent), and a list of
+     * more than 1000 songs sends 1000 of them, picked at random. True when it went to the group.
      */
     fun shuffleList(tracks: List<Track>): Boolean {
         if (!inGroup) return false
         val lib = tracks.filter { it.id > 0L }
         if (lib.isEmpty()) { Toasts.show("Only songs from your library can be played in a group listen", "err"); return true }
         val mixed = lib.shuffled().take(1000)
-        if (canControl()) {
+        if (playStarts()) {
             command("set_queue") { ids(mixed); put("index", 0); put("position", 0.0); put("shuffle", true) }
         } else {
-            command("enqueue", onDone = { Toasts.show("Added to the group's Up next, shuffled", "ok") }) { ids(mixed); put("shuffle", true) }
+            command("enqueue", onDone = { Toasts.show(GroupRules.addedText(mixed.size, true), "ok") }) { ids(mixed); put("shuffle", true) }
         }
         return true
+    }
+
+    /**
+     * "Pause for everyone" (the player's ⋯ and the group panel): the group's own pause, for those who control it. A
+     * Pause anywhere else pauses only this phone ([GroupSync]).
+     */
+    fun pauseForEveryone() {
+        if (!inGroup || deniedHere()) return
+        _localPaused.value = false
+        command("pause")
     }
 
     /** Up next's Shuffle in a group (those who control): the songs after the playing one, in a new order for everyone. */

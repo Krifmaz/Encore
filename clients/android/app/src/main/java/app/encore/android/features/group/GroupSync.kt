@@ -6,6 +6,7 @@ import androidx.media3.common.MediaItem
 import androidx.media3.common.Player
 import app.encore.android.data.api.Track
 import app.encore.android.playback.MediaItems
+import app.encore.android.ui.components.Toasts
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -18,8 +19,13 @@ import kotlinx.serialization.json.put
 /**
  * The playback service's side of a group listen: the player follows the group's queue, song, position and play /
  * pause ([GroupListen.state]), and what the listener does on this phone – the app, the notification, the lock screen,
- * headphones, the car – goes to the group when this device may control it (else the player goes back to the group,
- * and a pause stays a pause here only: "Paused here · Catch up").
+ * headphones, the car – goes to the group when this device may control it (else the player goes back to the group).
+ *
+ * Every pause pauses only this phone and is never sent to the group (the owner on Oct 21: "it may pause for me but dont
+ * stop the other users playback"): the Pause button, the notification, the lock screen and the car ("Paused for you –
+ * the group keeps playing"), audio focus lost to another app or a call, headphones taken out ("Paused here · Catch
+ * up"). Play then rejoins the group where it is now, with one hard seek there. The group's own pause is "Pause for
+ * everyone" ([GroupListen.pauseForEveryone]).
  *
  * Sync rule (the same on web, desktop and phone, Oct 21; [SyncRules]): expected position = position +
  * (server_now − anchor_ms) / 1000 while playing. Drift under 40 ms: nothing; 40 ms to 1.5 s: the playback speed is
@@ -196,17 +202,36 @@ class GroupSync(
         val s = GroupListen.state.value ?: return
         val byUser = reason == Player.PLAY_WHEN_READY_CHANGE_REASON_USER_REQUEST
         if (!playWhenReady) {
-            // headphones out, another app took the sound, or a member's own pause: only here
-            if (byUser && s.youCanControl && s.playing) { hold(s); GroupListen.command("pause") }
-            else if (s.playing) GroupListen.setLocalPaused(true)
+            // every pause is only here: a person's own (said once), headphones out, another app or a call took the sound
+            if (s.playing && !GroupListen.localPaused.value) {
+                GroupListen.setLocalPaused(true)
+                if (byUser) Toasts.show(GroupRules.PAUSED_FOR_YOU, "info")
+            }
             return
         }
         if (!byUser) return
         when {
-            GroupListen.localPaused.value -> GroupListen.catchUp()
+            GroupListen.localPaused.value -> {
+                GroupListen.catchUp()
+                // back where the group is now: one hard seek there (not the old spot first, then a correction)
+                if (s.playing) later { rejoin() }
+                else if (s.youCanControl) { hold(s); GroupListen.command("play") }
+            }
             !s.playing && s.youCanControl -> { hold(s); GroupListen.command("play") }
             !s.playing -> { GroupListen.deniedHere(); later { follow(GroupListen.state.value) } }
         }
+    }
+
+    /** Play after a pause here: straight to where the playing group is now (ahead by the seek lag). */
+    private fun rejoin() {
+        val s = GroupListen.state.value ?: return
+        if (groupId != s.id || !s.playing || GroupListen.localPaused.value || !sameQueue(s)) { follow(s); return }
+        // the group's state was followed meanwhile and already sought there
+        if (now() < quietUntil) return
+        val (ei, epos) = GroupRules.expected(s, GroupListen.serverNow())
+        if (ei < 0) return
+        if (speed != 1.0) setSpeed(1.0)
+        applying { seekGroup(s, ei, Math.round(epos * 1000)) }
     }
 
     // ---- following the group ---------------------------------------------------------------------------------

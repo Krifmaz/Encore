@@ -107,7 +107,7 @@ import java.io.IOException
  * are". Admins only; opened from Settings → Server → Files or the Home menu.
  */
 @Composable
-fun FilesScreen(nav: Nav) {
+fun FilesScreen(nav: Nav, startRoot: String = "") {
     val api = remember(nav.graph) { nav.graph.files }
     val p = MaterialTheme.palette
     var roots by remember { mutableStateOf<List<FileRoot>?>(null) }
@@ -125,10 +125,16 @@ fun FilesScreen(nav: Nav) {
         path = p
     }
 
+    // opened on a root (0.36: "Open Trash" after albums went to the Trash): that root once the roots are in
+    var started by remember { mutableStateOf(startRoot.isEmpty()) }
     LaunchedEffect(rootsKey) {
         rootsError = null
         try {
             roots = withContext(Dispatchers.IO) { api.roots() }
+            if (!started) {
+                started = true
+                roots?.firstOrNull { it.id == startRoot }?.let { root = it; go("") }
+            }
         } catch (e: CancellationException) {
             throw e
         } catch (e: Exception) {

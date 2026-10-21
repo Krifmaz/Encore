@@ -221,9 +221,13 @@ async fn artist(State(st): State<AppState>, User(u): User, Path(mbid): Path<Stri
         let (acond, aparams) = st.library.artists.album_filter(&st.db, &name);
         let mut ps = p![mbid];
         ps.extend(aparams);
-        a["library_albums"] = json!(st.db.query(&format!(
+        // One-offs (a song or two of a compilation …) are on the page's One-offs shelf instead
+        let types = st.library.types.get(&st.db);
+        let albums: Vec<_> = st.db.query(&format!(
             "SELECT album_id, album, albumartist, year, COUNT(*) tracks, MAX(mb_releasegroupid) rgid FROM tracks
-             WHERE mb_albumartistid=? OR {acond} GROUP BY album_id ORDER BY year DESC"), ps)?);
+             WHERE mb_albumartistid=? OR {acond} GROUP BY album_id ORDER BY year DESC"), ps)?
+            .into_iter().filter(|r| types.get(r.get("album_id").and_then(|v| v.as_str()).unwrap_or("")).is_none_or(|c| c.format != "one_off")).collect();
+        a["library_albums"] = json!(albums);
         let (tcond, tparams) = st.library.artists.track_filter(&st.db, &name);
         let mut ps = p![mbid, mbid];
         ps.extend(tparams);

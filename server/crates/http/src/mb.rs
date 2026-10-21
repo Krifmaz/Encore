@@ -59,6 +59,11 @@ pub fn is_busy(e: &anyhow::Error) -> bool {
     e.chain().any(|c| c.is::<Busy>())
 }
 
+/// Whether MusicBrainz said it doesn't have the thing asked for (404, or 400 for an id it can't read).
+pub fn is_not_found(e: &anyhow::Error) -> bool {
+    e.chain().any(|c| c.downcast_ref::<reqwest::Error>().and_then(|r| r.status()).is_some_and(|s| s.as_u16() == 404 || s.as_u16() == 400))
+}
+
 /// The time between two calls to MusicBrainz: `musicbrainz_rate` calls a second for the whole server.
 pub fn gap(st: &impl Ctx) -> Duration {
     Duration::from_secs_f64(1.0 / st.cfg().float("musicbrainz_rate").max(0.1))
@@ -297,6 +302,9 @@ pub async fn release(st: &impl Ctx, rid: &str) -> anyhow::Result<Value> {
         "id": s(&r["id"]), "title": s(&r["title"]), "artist": credit(&r["artist-credit"]), "artist_id": credit_id(&r["artist-credit"]),
         "date": date, "year": year, "country": s(&r["country"]), "status": s(&r["status"]), "release_group_id": g.get("id").cloned().unwrap_or(Value::Null),
         "type": s(&g["primary-type"]), "label": labels.join(", "), "barcode": s(&r["barcode"]), "disc_count": media.len(),
+        // the release group's secondary types (["Live"], ["Compilation", "Remix"]) and its songs over all media:
+        // what the library's album types are told at import
+        "secondary": g.get("secondary-types").cloned().unwrap_or(json!([])), "track_count": tracks.len(),
         "genre": genre,
         "tracks": tracks, "cover": cover_release(&s(&r["id"]), 500),
     }))
@@ -359,10 +367,30 @@ pub async fn recording(st: &impl Ctx, rid: &str) -> anyhow::Result<Value> {
     let r = st.mb().get(st, &format!("recording/{rid}"), &[("inc", RECORDING_INC.into())]).await?;
     let rel = r["releases"].as_array().and_then(|a| a.first()).cloned().unwrap_or_default();
     let year: String = { let d = s(&r["first-release-date"]); if d.is_empty() { s(&rel["date"]) } else { d } }.chars().take(4).collect();
+    let g = &rel["release-group"];
     Ok(json!({ "id": s(&r["id"]), "title": s(&r["title"]), "artist": credit(&r["artist-credit"]), "artist_id": credit_id(&r["artist-credit"]),
         "length": r["length"].as_f64().unwrap_or(0.0) / 1000.0, "album": s(&rel["title"]), "release_id": rel.get("id").cloned().unwrap_or(Value::Null),
-        "release_group_id": rel["release-group"].get("id").cloned().unwrap_or(Value::Null), "year": year,
+        "release_group_id": g.get("id").cloned().unwrap_or(Value::Null), "year": year,
+        // what the release it picked is: its group's types and its songs (0 when MusicBrainz didn't say)
+        "release_type": s(&g["primary-type"]), "release_secondary": g.get("secondary-types").cloned().unwrap_or(json!([])),
+        "release_track_count": release_track_count(&rel),
         "isrc": r["isrcs"].as_array().and_then(|a| a.first()).cloned().unwrap_or(Value::Null) }))
+}
+
+/// Songs on a release as a recording's answer lists it: the sum of its media's `track-count` (0 when not given).
+fn release_track_count(rel: &Value) -> i64 {
+    rel["media"].as_array().map(|m| m.iter().map(|x| x["track-count"].as_i64().unwrap_or(0)).sum()).unwrap_or(0)
+}
+
+/// Every release a recording is on (the answer [`recording`] asks for, so its cache entry): `{title,
+/// release_group_id, type, secondary, track_count}` each.
+pub async fn recording_releases(st: &impl Ctx, rid: &str) -> anyhow::Result<Vec<Value>> {
+    let r = st.mb().get(st, &format!("recording/{rid}"), &[("inc", RECORDING_INC.into())]).await?;
+    Ok(r["releases"].as_array().map(|a| a.as_slice()).unwrap_or(&[]).iter().map(|rel| {
+        let g = &rel["release-group"];
+        json!({ "title": s(&rel["title"]), "release_group_id": s(&g["id"]), "type": s(&g["primary-type"]),
+            "secondary": g.get("secondary-types").cloned().unwrap_or(json!([])), "track_count": release_track_count(rel) })
+    }).collect())
 }
 
 pub async fn recordings_for_isrc(st: &impl Ctx, isrc: &str) -> Vec<String> {

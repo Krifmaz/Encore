@@ -495,13 +495,24 @@ pub fn more_menu<'a>(state: &'a State, ctx: &Ctx<'a>, at: Point) -> El<'a, Messa
         );
     }
     // the group listen (p6 item 8): its dialog while in one, else start or join one
-    if state.group.state.is_some() {
+    if let Some(s) = state.group.state.as_ref() {
         items.push(MenuItem::new("Group listen", Message::Group(super::group::Msg::OpenSheet)).icon(Icon::Users));
+        // the group's own pause (Pause pauses only here), for those who control it while it plays
+        if super::group::model::offers_pause_for_everyone(s) {
+            items.push(
+                MenuItem::new(super::group::model::PAUSE_FOR_EVERYONE, Message::Group(super::group::Msg::PauseForEveryone))
+                    .icon(Icon::Pause),
+            );
+        }
     } else if state.group.shown() {
         items.push(MenuItem::new("Start a group listen", Message::Group(super::group::Msg::OpenStart)).icon(Icon::Users));
         items.push(MenuItem::new("Join a group listen", Message::Group(super::group::Msg::OpenJoin)).icon(Icon::Users));
     }
     items.push(MenuItem::new("Customize the bar…", Message::Customize(true)).icon(Icon::Settings));
+    // who added the song, once the server said (0.36)
+    if let Some((_, text)) = state.menu_added.as_ref().filter(|(id, _)| lib == Some(*id)) {
+        items.insert(0, MenuItem::info(text.clone()));
+    }
     pop_menu(at, items, Message::CloseMenu, ctx.size)
 }
 

@@ -194,9 +194,14 @@ pub fn modal(o: ModalOpts) -> Modal {
 
 /// `confirmDialog(title, text, okLabel, danger)` – resolves to true on OK, false when dismissed.
 pub async fn confirm_dialog(title: &str, text: &str, ok_label: &str, danger: bool) -> bool {
+    confirm_dialog_html(title, &format!(r#"<p class="muted" style="margin:0">{}</p>"#, esc(text)), ok_label, danger).await
+}
+
+/// [`confirm_dialog`] with a body that is HTML already (escaped by the caller).
+pub async fn confirm_dialog_html(title: &str, body: &str, ok_label: &str, danger: bool) -> bool {
     let (tx, rx) = futures::channel::oneshot::channel::<bool>();
     let tx = Rc::new(RefCell::new(Some(tx)));
-    let m = modal(ModalOpts::new(&esc(title), &format!(r#"<p class="muted" style="margin:0">{}</p>"#, esc(text)))
+    let m = modal(ModalOpts::new(&esc(title), body)
         .footer(&format!(r#"<button class="btn" data-close>Cancel</button><button class="btn {}" data-ok>{}</button>"#, if danger { "danger" } else { "primary" }, esc(ok_label))));
     if let Some(ok) = m.qs("[data-ok]") {
         let m2 = m.clone();
@@ -548,19 +553,52 @@ pub struct MenuItem {
     pub href: Option<String>,
     pub download: bool,
     pub on_click: Option<Rc<dyn Fn()>>,
+    /// a muted line of text, not an action (the song ⋯ menu's "Requested by alex on Oct 13, 2026")
+    pub info: bool,
 }
 impl MenuItem {
     pub fn new(label: &str, icon: &str, on_click: impl Fn() + 'static) -> Option<Self> {
-        Some(Self { label: label.into(), icon: icon.into(), danger: false, href: None, download: false, on_click: Some(Rc::new(on_click)) })
+        Some(Self { label: label.into(), icon: icon.into(), danger: false, href: None, download: false, on_click: Some(Rc::new(on_click)), info: false })
     }
     pub fn danger(label: &str, icon: &str, on_click: impl Fn() + 'static) -> Option<Self> {
         Self::new(label, icon, on_click).map(|mut m| { m.danger = true; m })
     }
     pub fn link(label: &str, icon: &str, href: &str, download: bool) -> Option<Self> {
-        Some(Self { label: label.into(), icon: icon.into(), danger: false, href: Some(href.into()), download, on_click: None })
+        Some(Self { label: label.into(), icon: icon.into(), danger: false, href: Some(href.into()), download, on_click: None, info: false })
+    }
+    /// A line of text at the top of a menu: muted, not tappable (0.36).
+    pub fn info(label: &str) -> Option<Self> {
+        Some(Self { label: label.into(), icon: String::new(), danger: false, href: None, download: false, on_click: None, info: true })
     }
     /// A separator ("-" in the JS).
     pub const SEP: Option<MenuItem> = None;
+}
+
+/// One entry of a menu as HTML: actions carry `data-i` (what a click runs), an info line has none.
+pub fn menu_item_html(i: usize, it: &Option<MenuItem>) -> String {
+    match it {
+        None => "<hr>".to_string(),
+        Some(it) if it.info => info_line_html(&it.label),
+        Some(it) => {
+            let cls = if it.danger { "danger" } else { "" };
+            match &it.href {
+                Some(h) => format!(r#"<a role="menuitem" class="{cls}" href="{}" {} data-i="{i}">{}<span>{}</span></a>"#, esc(h), if it.download { "download" } else { "" }, it.icon, esc(&it.label)),
+                None => format!(r#"<button role="menuitem" class="{cls}" data-i="{i}">{}<span>{}</span></button>"#, it.icon, esc(&it.label)),
+            }
+        }
+    }
+}
+
+/// A menu's info line (see [`MenuItem::info`]).
+fn info_line_html(text: &str) -> String {
+    format!(r#"<div class="menu-info" role="note">{}</div>"#, esc(text))
+}
+
+/// Puts an info line at the top of `menu` (a menu [`pop_menu`] opened) while it is still open: for a line whose
+/// text comes after the menu opened.
+pub fn menu_add_info(menu: &Element, text: &str) {
+    if text.is_empty() || !menu.is_connected() || qs_in(menu, ".menu-info").is_some() { return; }
+    let _ = menu.insert_adjacent_html("afterbegin", &info_line_html(text));
 }
 
 thread_local! {
@@ -574,6 +612,11 @@ pub fn next_menu_at(x: f64, y: f64) { MENU_AT.with(|m| m.set(Some((x, y)))); }
 /// `popMenu(anchor, items)`: pops up next to the button on desktop, slides up as a sheet on phones.
 /// Items are `Option<MenuItem>`; `None` is a separator (the JS `'-'`). Entries you want to skip: filter them out before.
 pub fn pop_menu(anchor: &Element, items: Vec<Option<MenuItem>>) {
+    pop_menu_el(anchor, items);
+}
+
+/// [`pop_menu`], giving the menu it opened (to add to it while it is open: [`menu_add_info`]).
+pub fn pop_menu_el(anchor: &Element, items: Vec<Option<MenuItem>>) -> Element {
     let at = MENU_AT.with(|m| m.take());
     for n in dom::qsa(".menu-pop, .menu-bg") { n.remove(); }
     let bg = create("div");
@@ -581,16 +624,7 @@ pub fn pop_menu(anchor: &Element, items: Vec<Option<MenuItem>>) {
     let el = create("div");
     el.set_class_name("menu-pop");
     let _ = el.set_attribute("role", "menu");
-    let html: String = items.iter().enumerate().map(|(i, it)| match it {
-        None => "<hr>".to_string(),
-        Some(it) => {
-            let cls = if it.danger { "danger" } else { "" };
-            match &it.href {
-                Some(h) => format!(r#"<a role="menuitem" class="{cls}" href="{}" {} data-i="{i}">{}<span>{}</span></a>"#, esc(h), if it.download { "download" } else { "" }, it.icon, esc(&it.label)),
-                None => format!(r#"<button role="menuitem" class="{cls}" data-i="{i}">{}<span>{}</span></button>"#, it.icon, esc(&it.label)),
-            }
-        }
-    }).collect();
+    let html: String = items.iter().enumerate().map(|(i, it)| menu_item_html(i, it)).collect();
     set_html(&el, &html);
     let key_listener: Rc<RefCell<Option<EventListener>>> = Rc::new(RefCell::new(None));
     let (el2, bg2, kl) = (el.clone(), bg.clone(), key_listener.clone());
@@ -634,6 +668,7 @@ pub fn pop_menu(anchor: &Element, items: Vec<Option<MenuItem>>) {
         dom::set_style(&el, "top", &format!("{top}px"));
     }
     keep(key_listener);
+    el
 }
 
 // ---- show / hide for anything sensitive (same markup as ui.js) ----
@@ -831,5 +866,24 @@ mod error_toast_tests {
         assert!(h.contains(r#"data-copy-text="download failed: start /config/tools/venv/bin/rip: Input/output error (os error 5) &lt;x&gt;">"#) && h.contains("Copy</button>"), "{h}");
         assert!(h.contains(r#"data-toast-close title="Close""#), "{h}");
         assert_eq!(status_info("waiting"), ("warn", "Waiting".to_string()));
+    }
+}
+
+#[cfg(test)]
+mod menu_info_tests {
+    use super::*;
+
+    /// A menu's info line (0.36: who added a song) is text, not an action: no click, no link, no `data-i`.
+    #[test]
+    fn an_info_line_is_not_clickable() {
+        let it = MenuItem::info("Requested by alex on Oct 13, 2026 <b>");
+        let m = it.as_ref().unwrap();
+        assert!(m.info && m.on_click.is_none() && m.href.is_none());
+        let html = menu_item_html(0, &it);
+        assert_eq!(html, r#"<div class="menu-info" role="note">Requested by alex on Oct 13, 2026 &lt;b&gt;</div>"#);
+        assert!(!html.contains("data-i"));
+        let action = MenuItem::new("Play next", "", || {});
+        assert!(menu_item_html(3, &action).contains(r#"data-i="3""#));
+        assert_eq!(menu_item_html(1, &MenuItem::SEP), "<hr>");
     }
 }

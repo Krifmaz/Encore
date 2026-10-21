@@ -77,6 +77,10 @@ import app.encore.android.ui.components.shareLinkOf
 import app.encore.android.ui.theme.palette
 import app.encore.android.data.repo.Me
 import app.encore.android.features.library.AlbumArtworkSheet
+import app.encore.android.features.library.AlbumSelect
+import app.encore.android.features.library.AlbumTypesRules
+import app.encore.android.features.library.ChangeTypeDialog
+import app.encore.android.features.library.TrashConfirm
 import app.encore.android.features.library.AlbumEditSheet
 import app.encore.android.features.library.AlbumMatchSheet
 import app.encore.android.features.library.LibraryFixRules
@@ -128,11 +132,14 @@ private class AlbumPage(
     val notes: Map<Long, String>,
     val rgid: String = "",
     val surround: SurroundState? = null,
+    /** its type (0.36): `{key, label, format, kind, chosen, auto, why, why_text}`; null on a Surround album / older server */
+    val type: JsonObject? = null,
 )
 
 /**
- * GET /api/library/albums/{id} (server/src/routes/library.rs `album`): the rows carry `requested_by`,
- * `requested_at` and `added_at`, which web/js/pages/library.js turns into the history line.
+ * GET /api/library/albums/{id} (server/src/routes/library.rs `album`): the album's `history` of who added its songs
+ * and `added_at` (0.36) make the history line (an older server: the rows' `requested_by`, `requested_at` and
+ * `added_at`); a row's note names who asked for it, kept on the song after Clear finished.
  */
 private fun loadAlbumPage(nav: Nav, id: String): AlbumPage {
     val o = nav.graph.api.getObject("/api/library/albums/${EncoreApi.enc(id)}")
@@ -154,23 +161,14 @@ private fun loadAlbumPage(nav: Nav, id: String): AlbumPage {
     )
     val detail = AlbumDetail(album, tracks, o.dbl("duration"))
 
-    val requesters = rows.map { it.str("requested_by") }.filter { it.isNotEmpty() }.distinct().joinToString(", ")
-    val requestedAt = rows.map { it.dbl("requested_at") }.filter { it > 0 }.minOrNull()
-    val addedAt = rows.map { it.dbl("added_at") }.filter { it > 0 }.minOrNull()
-    val history = listOf(
-        if (requesters.isNotEmpty()) "Requested by $requesters" + (if (requestedAt != null) " on ${formatDay(requestedAt)}" else "") else "",
-        if (addedAt != null) (if (requesters.isNotEmpty()) "added " else "Added ") + formatDay(addedAt) else "",
-    ).filter { it.isNotEmpty() }.joinToString(" · ")
+    val history = AlbumTypesRules.albumHistory(o, ::formatDay)
 
     val notes = HashMap<Long, String>()
     for (r in rows) {
-        val who = r.str("requested_by")
-        if (who.isEmpty()) continue
-        val at = r.dbl("requested_at")
-        val id2 = r.dbl("id").toLong()
-        notes[id2] = "requested by $who" + if (at > 0) " on ${formatDay(at)}" else ""
+        val note = AlbumTypesRules.requesterNote(r, ::formatDay)
+        if (note.isNotEmpty()) notes[r.dbl("id").toLong()] = note
     }
-    return AlbumPage(detail, o.dbl("size").toLong(), history, notes, o.str("mb_releasegroupid"), SurroundState.from(o["surround"]))
+    return AlbumPage(detail, o.dbl("size").toLong(), history, notes, o.str("mb_releasegroupid"), SurroundState.from(o["surround"]), o.obj("type"))
 }
 
 /**
@@ -196,7 +194,9 @@ fun AlbumScreen(nav: Nav, albumId: String) {
     val scrollBehavior = TopAppBarDefaults.enterAlwaysScrollBehavior()
     var me by remember { mutableStateOf<Me?>(null) }
     LaunchedEffect(Unit) { me = try { withContext(Dispatchers.IO) { nav.features.me() } } catch (e: CancellationException) { throw e } catch (_: Exception) { null } }
-    var confirmDelete by remember { mutableStateOf<Pair<String, Int>?>(null) }
+    // ⋯ → Move album to Trash: the dialog of its dry run; ⋯ → Change type…
+    var trashDialog by remember { mutableStateOf<AlbumTypesRules.TrashDialog?>(null) }
+    var changeType by remember { mutableStateOf(false) }
     // the admin's sheets: "match" (Tag / match metadata), "edit" (Edit details), "artwork" (Change artwork…)
     var albumSheet by remember { mutableStateOf("") }
     // "Get the rest of the album": the album on Discover, where the songs that aren't here yet can be requested
@@ -298,12 +298,17 @@ fun AlbumScreen(nav: Nav, albumId: String) {
                             Text(page.history, style = MaterialTheme.typography.bodySmall, color = p.muted, textAlign = TextAlign.Center, modifier = Modifier.padding(top = 4.dp))
                         }
                         // the format, and the links between the stereo and surround versions (0.35)
-                        if (formats.isNotEmpty() || surround || page.surround != null) {
+                        if (formats.isNotEmpty() || surround || page.surround != null || page.type != null) {
                             FlowRow(
                                 Modifier.padding(top = 12.dp),
                                 horizontalArrangement = Arrangement.spacedBy(6.dp, Alignment.CenterHorizontally),
                                 verticalArrangement = Arrangement.spacedBy(6.dp),
                             ) {
+                                // its type (0.36): "Album", "Live · EP", "Compilation · One-off"; admins tap it for why
+                                page.type?.let { t ->
+                                    val why = t.str("why_text")
+                                    Badge(t.str("label"), kind = "accent", onClick = if (me?.isAdmin == true && why.isNotEmpty()) ({ Toasts.show(why, "info") }) else null)
+                                }
                                 if (formats.isNotEmpty()) Badge(formats, kind = if (surround) "accent" else "")
                                 SurroundVersions(nav, album, page.surround)
                             }
@@ -352,6 +357,7 @@ fun AlbumScreen(nav: Nav, albumId: String) {
                                     if (me?.isAdmin == true) MenuSeparator else null,
                                     if (me?.isAdmin == true) MenuEntry("Tag / match metadata", R.drawable.ic_note) { albumSheet = "match" } else null,
                                     if (me?.isAdmin == true) MenuEntry("Edit details (album, artist, songs)", R.drawable.ic_edit) { albumSheet = "edit" } else null,
+                                    if (me?.isAdmin == true && page.type != null) MenuEntry(AlbumTypesRules.CHANGE_TYPE, R.drawable.ic_note) { changeType = true } else null,
                                     if (me?.isAdmin == true) MenuEntry("Change artwork…", R.drawable.ic_disc) { albumSheet = "artwork" } else null,
                                     if (me?.isAdmin == true) MenuEntry("Find artwork automatically", R.drawable.ic_refresh) {
                                         albumAction {
@@ -361,8 +367,12 @@ fun AlbumScreen(nav: Nav, albumId: String) {
                                         }
                                     } else null,
                                     if (me?.isAdmin == true) MenuSeparator else null,
-                                    if (me?.isAdmin == true) MenuEntry("Delete album from disk", R.drawable.ic_delete, danger = true) {
-                                        confirmDelete = album.title to tracks.size
+                                    // to the Trash of Files (0.36), restorable there: the dialog of a dry run of this album
+                                    if (me?.isAdmin == true) MenuEntry(AlbumTypesRules.MOVE_ALBUM, R.drawable.ic_delete, danger = true) {
+                                        albumAction {
+                                            val d = withContext(Dispatchers.IO) { api.trashAlbums(listOf(albumId), dryRun = true) }
+                                            trashDialog = AlbumTypesRules.trashDialog(d)
+                                        }
                                     } else null,
                                 ),
                             )
@@ -413,19 +423,29 @@ fun AlbumScreen(nav: Nav, albumId: String) {
         "edit" -> AlbumEditSheet(nav, albumId, onDismiss = { albumSheet = "" })
         "artwork" -> AlbumArtworkSheet(nav, albumId, shown?.title.orEmpty(), onDismiss = { albumSheet = "" })
     }
-    // ⋯ → Delete album from disk (admins)
-    confirmDelete?.let { (title, files) ->
-        ConfirmDialog(
-            title = "Delete album",
-            text = "Permanently delete \"$title\" ($files files) from disk?",
-            okLabel = "Delete",
-            danger = true,
-            onDismiss = { confirmDelete = null },
-        ) {
+    // ⋯ → Move album to Trash (admins): the dry run's words, then the album goes; Open Trash in the toast
+    trashDialog?.let { d ->
+        TrashConfirm(d, onDismiss = { trashDialog = null }) {
             albumAction {
-                withContext(Dispatchers.IO) { nav.features.deleteAlbum(albumId) }
-                Toasts.show("Album deleted", "ok")
+                val r = withContext(Dispatchers.IO) { api.moveAlbumToTrash(albumId) }
+                Toasts.show(r.str("text").ifEmpty { AlbumTypesRules.movedText(1, 1, "") }, "ok", action = AlbumTypesRules.OPEN_TRASH, showMs = AlbumTypesRules.TOAST_MS) {
+                    nav.open(Screen.Files("trash"))
+                }
+                // the Library's albums list and Type counts load again
+                AlbumSelect.generation += 1
                 nav.back()
+            }
+        }
+    }
+    // ⋯ → Change type… (admins): saved, the page again
+    val typeNow = (loader.state.value as? Loadable.Ready)?.value?.type
+    if (changeType && typeNow != null) {
+        ChangeTypeDialog(shown?.title.orEmpty(), typeNow, onDismiss = { changeType = false }) { format ->
+            albumAction {
+                withContext(Dispatchers.IO) { api.setAlbumType(albumId, format) }
+                Toasts.show(AlbumTypesRules.TYPE_SAVED, "ok")
+                AlbumSelect.generation += 1
+                loader.refresh()
             }
         }
     }

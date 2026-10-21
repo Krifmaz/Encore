@@ -10,6 +10,7 @@ import app.encore.android.data.repo.LinkProbe
 import app.encore.android.data.repo.LinkResult
 import app.encore.android.data.repo.Me
 import app.encore.android.data.repo.RequestRow
+import app.encore.android.data.repo.RequestUser
 import app.encore.android.data.repo.RetryFailedResult
 import app.encore.android.data.repo.SlskTransfer
 import app.encore.android.data.repo.StorageHealth
@@ -792,5 +793,31 @@ class RequestRulesTest {
         assertEquals(emptyList<String>(), RequestRules.downloadNowLines(old, date))
         val oldText = RequestRules.requestText(old, "", date)
         assertFalse(oldText, oldText.contains("In line") || oldText.contains("Download now") || oldText.contains("No progress"))
+    }
+
+    /** An import that hasn't moved for 15 minutes offers Import again, with why; one that moves doesn't. */
+    @Test
+    fun aStalledImportOffersImportAgain() {
+        val stalled = row("""{"id": 15, "kind": "album", "status": "importing", "title": "Illuminate EP", "artist": "Duumu", "has_files": true,
+            "import_stalled": true, "import_moved_at": 1792427000.0}""")
+        assertTrue(stalled.importStalled)
+        assertEquals(1792427000.0, stalled.importMovedAt, 0.0)
+        assertTrue(RequestRules.stalledImport(stalled))
+        assertFalse("not the kept files' Import again", RequestRules.canImportAgain(stalled))
+        assertFalse(RequestRules.stalledImport(row("""{"id": 16, "status": "importing", "import_stalled": false}""")))
+        assertFalse("an older server says nothing", RequestRules.stalledImport(row("""{"id": 17, "status": "importing"}""")))
+        assertFalse(RequestRules.stalledImport(row("""{"id": 18, "status": "failed", "import_stalled": true}""")))
+        assertEquals("The import hasn't moved for 15 minutes", RequestRules.STALLED_IMPORT)
+    }
+
+    /** The admin's User list, as the web draws it: "All users", then each person with their count. */
+    @Test
+    fun theUserList() {
+        val users = listOf(RequestUser(1L, "boss", 1), RequestUser(7L, "Caz", 612))
+        assertEquals(listOf(0L to "All users", 1L to "boss (1)", 7L to "Caz (612)"), RequestRules.userOptions(users, null))
+        // the person picked stays with 0 once their requests were cleared, listed once while they have some
+        assertEquals(7L to "Caz (0)", RequestRules.userOptions(users.take(1), 7L to "Caz").last())
+        assertEquals(3, RequestRules.userOptions(users, 7L to "Caz").size)
+        assertEquals("Caz (612)", RequestRules.userLabel("Caz", 612))
     }
 }

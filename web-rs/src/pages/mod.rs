@@ -15,6 +15,8 @@ pub mod foryou;
 pub mod home;
 pub mod leaderboard;
 pub mod library;
+/// Library types, Select / Delete… and who added it (0.36): the pure helpers and their words.
+pub mod library_types;
 pub mod lyrics;
 pub mod picker;
 pub mod playlists;

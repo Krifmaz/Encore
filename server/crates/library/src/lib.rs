@@ -9,6 +9,7 @@
 //! Functions that need the server's database, settings, HTTP client or caches take a [`Ctx`], which the
 //! server's state implements.
 pub mod acoustid;
+pub mod album_types;
 pub mod artists;
 pub mod catalog;
 pub mod contribute;

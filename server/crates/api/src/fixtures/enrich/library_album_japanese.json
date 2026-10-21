@@ -1,10 +1,12 @@
 {
+  "added_at": 1792280755.5703678,
   "album": "ペルソナ4 サウンドトラック",
   "albumartist": "平田志穂子",
   "cover_color": "#b3f50c",
   "cover_v": 80461843779493,
   "duration": 18.0,
   "genre": null,
+  "history": [],
   "id": "52b52b2323b5df9d",
   "mb_albumartistid": null,
   "mb_albumid": null,
@@ -20,6 +22,10 @@
     {
       "acoustid_id": null,
       "added_at": 1792280755.5703678,
+      "added_by": null,
+      "added_by_deleted": false,
+      "added_by_name": null,
+      "added_via": null,
       "album": "ペルソナ4 サウンドトラック",
       "album_id": "52b52b2323b5df9d",
       "albumartist": "平田志穂子",
@@ -67,6 +73,10 @@
     {
       "acoustid_id": null,
       "added_at": 1792360592.3973174,
+      "added_by": null,
+      "added_by_deleted": false,
+      "added_by_name": null,
+      "added_via": null,
       "album": "ペルソナ4 サウンドトラック",
       "album_id": "52b52b2323b5df9d",
       "albumartist": "平田志穂子",
@@ -114,6 +124,10 @@
     {
       "acoustid_id": null,
       "added_at": 1792280825.868864,
+      "added_by": null,
+      "added_by_deleted": false,
+      "added_by_name": null,
+      "added_via": null,
       "album": "ペルソナ4 サウンドトラック",
       "album_id": "52b52b2323b5df9d",
       "albumartist": "平田志穂子",
@@ -161,6 +175,10 @@
     {
       "acoustid_id": null,
       "added_at": 1792360592.397678,
+      "added_by": null,
+      "added_by_deleted": false,
+      "added_by_name": null,
+      "added_via": null,
       "album": "ペルソナ4 サウンドトラック",
       "album_id": "52b52b2323b5df9d",
       "albumartist": "平田志穂子",
@@ -208,6 +226,10 @@
     {
       "acoustid_id": null,
       "added_at": 1792280825.8685322,
+      "added_by": null,
+      "added_by_deleted": false,
+      "added_by_name": null,
+      "added_via": null,
       "album": "ペルソナ4 サウンドトラック",
       "album_id": "52b52b2323b5df9d",
       "albumartist": "平田志穂子",
@@ -255,6 +277,10 @@
     {
       "acoustid_id": null,
       "added_at": 1792360592.396241,
+      "added_by": null,
+      "added_by_deleted": false,
+      "added_by_name": null,
+      "added_via": null,
       "album": "ペルソナ4 サウンドトラック",
       "album_id": "52b52b2323b5df9d",
       "albumartist": "平田志穂子",
@@ -300,5 +326,22 @@
       "year": "2008"
     }
   ],
+  "type": {
+    "auto": {
+      "format": "album",
+      "key": "album",
+      "kind": "studio",
+      "label": "Album",
+      "why": "size",
+      "why_text": "Guessed from the number of songs"
+    },
+    "chosen": null,
+    "format": "album",
+    "key": "album",
+    "kind": "studio",
+    "label": "Album",
+    "why": "size",
+    "why_text": "Guessed from the number of songs"
+  },
   "year": "2008"
 }

@@ -2,8 +2,9 @@
 //! list in exactly the order and filters the list endpoint uses (crate::lists), so a client can jump to
 //! a section with the list's own paging.
 //!
-//! - `kind=albums` (all albums, like the phone), `kind=singles`, or `kind=albums&album_kind=albums`
-//!   (the web's Albums tab: `kind=albums` on `/albums`); `filter=` and `artist=` as `/albums` takes them
+//! - `kind=albums` (every album but the One-offs, like the phone), `kind=singles` (Singles & EPs), or
+//!   `kind=albums&album_kind=albums` (the web's Albums tab: `kind=albums` on `/albums`); `type=`, `filter=` and
+//!   `artist=` as `/albums` takes them
 //! - `kind=artists`, `kind=tracks`
 //! - `sort=` / `dir=`: the list's sort keys
 //!
@@ -30,6 +31,8 @@ pub struct Spec<'a> {
     pub artist: &'a str,
     pub filter: &'a str,
     pub album_kind: &'a str,
+    /// the Type filter (`type=`), as /albums takes it
+    pub album_type: &'a str,
 }
 
 #[derive(Clone, Copy, PartialEq, Debug)]
@@ -44,7 +47,7 @@ pub enum By {
     TrackCount,
 }
 
-pub fn sections_for(db: &Db, artists: &Artists, a: &Spec) -> ApiResult<Value> {
+pub fn sections_for(db: &Db, artists: &Artists, types: &crate::album_types::Types, a: &Spec) -> ApiResult<Value> {
     let values: Vec<(Value, By)> = match a.kind {
         "artists" => {
             let by = match a.sort {
@@ -93,28 +96,25 @@ pub fn sections_for(db: &Db, artists: &Artists, a: &Spec) -> ApiResult<Value> {
                 params.extend(ps);
             }
             // the same HAVING as /albums
-            let mut having: Vec<&str> = vec![];
-            match a.filter {
-                "untagged" => having.push("SUM(CASE WHEN mb_albumid IS NULL OR mb_albumid='' THEN 1 ELSE 0 END) > 0"),
-                "tagged" => having.push("SUM(CASE WHEN mb_albumid IS NULL OR mb_albumid='' THEN 1 ELSE 0 END) = 0"),
-                "lossless" => having.push("SUM(CASE WHEN format IN ('flac','wav','alac','aiff','ape','wv') THEN 1 ELSE 0 END) = COUNT(*)"),
-                _ => {}
-            }
+            let having = match a.filter {
+                "untagged" => "HAVING SUM(CASE WHEN mb_albumid IS NULL OR mb_albumid='' THEN 1 ELSE 0 END) > 0",
+                "tagged" => "HAVING SUM(CASE WHEN mb_albumid IS NULL OR mb_albumid='' THEN 1 ELSE 0 END) = 0",
+                "lossless" => "HAVING SUM(CASE WHEN format IN ('flac','wav','alac','aiff','ape','wv') THEN 1 ELSE 0 END) = COUNT(*)",
+                _ => "",
+            };
+            // and the same albums: the kinds and types the list shows (crate::album_types)
             let album_kind = if a.kind == "singles" { "singles" } else { a.album_kind };
-            match album_kind {
-                "singles" => having.push("COUNT(*) <= 2"),
-                "albums" => having.push("COUNT(*) > 2"),
-                _ => {}
-            }
-            let having = if having.is_empty() { String::new() } else { format!("HAVING {}", having.join(" AND ")) };
+            let pick = crate::album_types::Pick::of(a.album_type, album_kind, false).map_err(|e| encore_core::error::err(400, e))?;
+            let classes = types.get(db);
             // the columns the list's ORDER BY names, under the same aliases
             let sql = format!(
-                "SELECT MAX(album) album, MAX(albumartist) albumartist, MAX(year) year, SUM(duration) duration, SUM(size) size, MAX(added_at) added
+                "SELECT album_id, MAX(album) album, MAX(albumartist) albumartist, MAX(year) year, SUM(duration) duration, SUM(size) size, MAX(added_at) added
                  FROM tracks WHERE {} GROUP BY album_id {having} ORDER BY {}",
                 wh.join(" AND "),
                 order(ALBUM_SORTS, key, a.dir, "name")
             );
-            db.query(&sql, params)?.into_iter().map(|r| (r.get(col).cloned().unwrap_or(Value::Null), by)).collect()
+            db.query(&sql, params)?.into_iter().filter(|r| pick.wants(r.get("album_id").and_then(|v| v.as_str()).and_then(|id| classes.get(id))))
+                .map(|r| (r.get(col).cloned().unwrap_or(Value::Null), by)).collect()
         }
     };
     let labels: Vec<(String, Option<String>)> = match values.first().map(|(_, by)| *by) {

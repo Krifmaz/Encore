@@ -2,8 +2,9 @@
 //! list order. `offset` is where the section's first item sits in exactly the ordering (and filters) the
 //! list endpoint uses, so a client can jump to it with the list's own paging.
 //!
-//! - `kind=albums` (all albums, like the phone), `kind=singles`, or `kind=albums&album_kind=albums`
-//!   (the web's Albums tab: `kind=albums` on `/albums`); `filter=` and `artist=` as `/albums` takes them
+//! - `kind=albums` (every album but the One-offs, like the phone), `kind=singles` (Singles & EPs), or
+//!   `kind=albums&album_kind=albums` (the web's Albums tab: `kind=albums` on `/albums`); `type=`, `filter=` and
+//!   `artist=` as `/albums` takes them
 //! - `kind=artists`, `kind=tracks`
 //! - `sort=` / `dir=`: the list's sort keys
 //!
@@ -36,6 +37,9 @@ pub struct IndexQ {
     artist: String,
     filter: String,
     album_kind: String,
+    /// the Type filter, as /albums takes it
+    #[serde(rename = "type")]
+    types: String,
     q: String,
 }
 
@@ -45,9 +49,9 @@ pub async fn index(State(st): State<AppState>, User(_): User, Query(a): Query<In
     }
     // the same sections until the songs change (see super::cached_list); built on the blocking pool
     st.blocking(move |st| {
-        let key = format!("index\u{1f}{}\u{1f}{}\u{1f}{}\u{1f}{}\u{1f}{}\u{1f}{}", a.kind, a.sort, a.dir, a.artist, a.filter, a.album_kind);
-        let spec = Spec { kind: &a.kind, sort: &a.sort, dir: &a.dir, artist: &a.artist, filter: &a.filter, album_kind: &a.album_kind };
-        let v = super::cached_list(st, &key, || sections_for(&st.db, &st.library.artists, &spec))?;
+        let key = format!("index\u{1f}{}\u{1f}{}\u{1f}{}\u{1f}{}\u{1f}{}\u{1f}{}\u{1f}{}", a.kind, a.sort, a.dir, a.artist, a.filter, a.album_kind, a.types);
+        let spec = Spec { kind: &a.kind, sort: &a.sort, dir: &a.dir, artist: &a.artist, filter: &a.filter, album_kind: &a.album_kind, album_type: &a.types };
+        let v = super::cached_list(st, &key, || sections_for(&st.db, &st.library.artists, &st.library.types, &spec))?;
         Ok(Json((*v).clone()))
     }).await
 }

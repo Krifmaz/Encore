@@ -854,3 +854,85 @@ async fn trash_notes_are_checked_and_the_config_folder_is_fenced_off() {
     assert!(e.ts.dir.join("trash").is_dir());
     e.done();
 }
+
+/// Who added it (0.36): an upload is the uploader's, a move from a download folder into the library and a Files
+/// import are the importer's; the 0.33 activity lines give the songs added before then their admin back, once.
+#[tokio::test]
+async fn files_say_who_added_the_songs() {
+    let e = env("who").await;
+    let who = |path: &Path| e.st().db.one("SELECT added_by, added_via FROM tracks WHERE path=?", p![path.to_string_lossy()]).unwrap()
+        .map(|r| (r.get("added_by").and_then(|v| v.as_i64()), r.s("added_via")));
+    let r = upload(&e, "/api/files/upload?root=library&path=", &[("Up/Song.flac", b"not really".to_vec())]).await;
+    assert_eq!(r.status, StatusCode::OK, "{}", r.text());
+    assert_eq!(who(&e.lib.join("Up/Song.flac")), Some((Some(e.admin), "upload".to_string())));
+    std::fs::create_dir_all(e.staging.join("Moved")).unwrap();
+    std::fs::write(e.staging.join("Moved/a.flac"), b"x").unwrap();
+    let r = e.post("/api/files/move", json!({ "root": "staging", "from": ["Moved"], "to_root": "library", "to_path": "" })).await;
+    assert_eq!(r.json()["moved"], 1, "{}", r.text());
+    assert_eq!(who(&e.lib.join("Moved/a.flac")), Some((Some(e.admin), "import".to_string())));
+    std::fs::create_dir_all(e.slsk.join("Kept/Album")).unwrap();
+    std::fs::write(e.slsk.join("Kept/Album/k.flac"), b"x").unwrap();
+    let r = e.post("/api/files/import/apply", json!({ "root": "slskd", "path": "Kept", "mode": "in_place", "albums": [{ "folder": "Kept/Album" }] })).await;
+    assert_eq!(r.status, StatusCode::OK, "{}", r.text());
+    assert_eq!(who(&e.slsk.join("Kept/Album/k.flac")), Some((Some(e.admin), "import".to_string())));
+    // a rename inside the library keeps who added it
+    let r = e.post("/api/files/rename", json!({ "root": "library", "path": "Up/Song.flac", "name": "Renamed.flac" })).await;
+    assert_eq!(r.status, StatusCode::OK, "{}", r.text());
+    assert_eq!(who(&e.lib.join("Up/Renamed.flac")), Some((Some(e.admin), "upload".to_string())));
+    // the activity log of 0.33: an upload and an import in place, matched once
+    std::fs::create_dir_all(e.lib.join("Old")).unwrap();
+    std::fs::write(e.lib.join("Old/1.flac"), b"x").unwrap();
+    std::fs::create_dir_all(e.slsk.join("Kept2")).unwrap();
+    std::fs::write(e.slsk.join("Kept2/2.flac"), b"x").unwrap();
+    encore_library::index_files(&e.st().db, &[e.lib.join("Old/1.flac").to_string_lossy().into_owned()]);
+    e.st().cfg.set_many(&json!({ "library_extra_roots": format!("{}\n{}", e.slsk.join("Kept/Album").display(), e.slsk.join("Kept2").display()) }));
+    encore_library::index_files(&e.st().db, &[e.slsk.join("Kept2/2.flac").to_string_lossy().into_owned()]);
+    let name = e.st().db.one("SELECT username FROM users WHERE id=?", p![e.admin]).unwrap().unwrap().s("username");
+    for line in [format!("File manager: {name} uploaded library:Old/1.flac"), format!("File manager: {name} imported in place slskd:Kept2"),
+                 "File manager: nobody-here uploaded library:Up/Renamed.flac".to_string()] {
+        e.st().db.execute("INSERT INTO activity (ts, level, message) VALUES (?, 'info', ?)", p![now(), line]).unwrap();
+    }
+    let roots = encore_files::roots::all(&e.st().cfg, e.st().data_dir(), &e.slsk);
+    assert_eq!(encore_files::backfill_added_from_log(e.st(), &roots), 2);
+    assert_eq!(who(&e.lib.join("Old/1.flac")), Some((Some(e.admin), "upload".to_string())));
+    assert_eq!(who(&e.slsk.join("Kept2/2.flac")), Some((Some(e.admin), "import".to_string())));
+    assert_eq!(encore_files::backfill_added_from_log(e.st(), &roots), 0, "once");
+    e.done();
+}
+
+/// Trash and Restore keep what the file can't say (who added it, where it came from, its check); a note written
+/// before 0.36 (no `keep`, no `extras`) still restores; the surround version of a trashed song loses its link.
+#[tokio::test]
+async fn trash_keeps_who_added_and_old_notes_still_restore() {
+    let e = env("keep").await;
+    std::fs::create_dir_all(e.lib.join("A/B")).unwrap();
+    for n in ["1.flac", "2.flac"] {
+        std::fs::write(e.lib.join("A/B").join(n), b"x").unwrap();
+    }
+    encore_library::index_files(&e.st().db, &[e.lib.join("A/B/1.flac").to_string_lossy().into_owned(), e.lib.join("A/B/2.flac").to_string_lossy().into_owned()]);
+    let one = e.row(&e.lib.join("A/B/1.flac")).unwrap();
+    let two = e.row(&e.lib.join("A/B/2.flac")).unwrap();
+    e.st().db.execute("UPDATE tracks SET added_by=?, added_via='request', requested_at=1000, source='Soulseek', verify_status='manual' WHERE id=?", p![e.admin, one]).unwrap();
+    let sid = e.st().db.execute("INSERT INTO surround_tracks (path, title, stereo_track_id) VALUES ('/m/s.m4a', 'S', ?)", p![one]).unwrap();
+    let r = e.post("/api/files/trash", json!({ "root": "library", "paths": ["A/B/1.flac", "A/B/2.flac"] })).await.json();
+    assert_eq!(r["trashed"], 2, "{r}");
+    assert!(e.st().db.one("SELECT stereo_track_id FROM surround_tracks WHERE id=?", p![sid]).unwrap().unwrap().get("stereo_track_id").unwrap().is_null());
+    let items: Vec<Value> = e.get("/api/files/trash").await.json().as_array().unwrap().clone();
+    // the second song's note as 0.33 wrote it: no `keep` per row, no `extras`
+    let old = items.iter().find(|i| i["name"] == "2.flac").unwrap()["id"].as_str().unwrap().to_string();
+    let note = encore_files::trash::dir_of(e.st()).join(&old).join(encore_files::trash::ORIGIN);
+    let mut o: Value = serde_json::from_str(&std::fs::read_to_string(&note).unwrap()).unwrap();
+    o.as_object_mut().unwrap().remove("extras");
+    for t in o["tracks"].as_array_mut().unwrap() {
+        t.as_object_mut().unwrap().remove("keep");
+    }
+    std::fs::write(&note, o.to_string()).unwrap();
+    let ids: Vec<Value> = items.iter().map(|i| i["id"].clone()).collect();
+    let r = e.post("/api/files/restore", json!({ "items": ids })).await.json();
+    assert_eq!(r["restored"], 2, "{r}");
+    let row = e.st().db.one("SELECT id, added_by, added_via, requested_at, source, verify_status FROM tracks WHERE path=?", p![e.lib.join("A/B/1.flac").to_string_lossy()]).unwrap().unwrap();
+    assert_eq!((row.i("id"), row.i("added_by"), row.s("added_via"), row.f("requested_at"), row.s("source"), row.s("verify_status")),
+               (one, e.admin, "request".to_string(), 1000.0, "Soulseek".to_string(), "manual".to_string()));
+    assert_eq!(e.row(&e.lib.join("A/B/2.flac")), Some(two), "the old note gives the id back too");
+    e.done();
+}

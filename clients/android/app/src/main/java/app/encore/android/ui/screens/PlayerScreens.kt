@@ -49,6 +49,7 @@ import androidx.compose.material3.SliderDefaults
 import androidx.compose.material3.Text
 import androidx.compose.material3.rememberModalBottomSheetState
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -70,12 +71,15 @@ import androidx.compose.ui.unit.dp
 import app.encore.android.R
 import app.encore.android.data.api.Track
 import app.encore.android.remote.DevicesButton
+import app.encore.android.features.library.AlbumTypesRules
 import app.encore.android.features.group.GroupListen
 import app.encore.android.features.group.GroupPill
+import app.encore.android.features.group.GroupRules
 import app.encore.android.features.group.GroupUpNextSheet
 import app.encore.android.remote.LinkedVolume
 import app.encore.android.ui.Nav
 import app.encore.android.ui.Screen
+import app.encore.android.features.offline.OfflineMode
 import app.encore.android.features.offline.rememberOfflineMenu
 import app.encore.android.ui.components.Badge
 import app.encore.android.ui.components.Cover
@@ -85,11 +89,15 @@ import app.encore.android.ui.components.MoreButton
 import app.encore.android.ui.components.PlayerMenuActions
 import app.encore.android.ui.components.SmallButton
 import app.encore.android.ui.components.Toasts
+import app.encore.android.ui.components.formatDay
 import app.encore.android.ui.components.formatDuration
 import app.encore.android.ui.components.rememberMotionOn
 import app.encore.android.ui.components.scrollingTitle
 import app.encore.android.ui.theme.palette
 import coil3.compose.AsyncImage
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
 
 /**
  * The "⋯" menu of the player (web/js/player.js `moreMenu`). Navigation (Go to artist, View album, Up next,
@@ -235,6 +243,20 @@ fun FullPlayer(nav: Nav, actions: PlayerMenuActions, onClose: () -> Unit) {
     val lyrics = rememberLyrics(nav, track.id, active = lyricsMode)
     // "Download for offline" / "Remove download" for the song (features/offline); not while this phone is a remote
     val offlineMenu = rememberOfflineMenu(nav)
+    // who added the song (0.36, GET /api/library/tracks/{id}/added): the ⋯ menu's first line, asked when the menu
+    // opens as in every song list; none until the server said, when it has nothing to say, offline, or from an older server
+    var askAdded by remember(track.id) { mutableStateOf(false) }
+    var added by remember(track.id) { mutableStateOf("") }
+    LaunchedEffect(track.id, askAdded) {
+        if (!askAdded || track.id <= 0 || OfflineMode.active.value) return@LaunchedEffect
+        added = try {
+            withContext(Dispatchers.IO) { AlbumTypesRules.addedOf(nav.graph.api.trackAdded(track.id), ::formatDay) }
+        } catch (e: CancellationException) {
+            throw e
+        } catch (_: Exception) {
+            ""
+        }
+    }
     var dragging by remember { mutableStateOf<Float?>(null) }
     val coverUrl = if (track.albumId.isNotEmpty()) nav.graph.api.coverUrl(track.albumId, 1000) else null
 
@@ -467,7 +489,9 @@ fun FullPlayer(nav: Nav, actions: PlayerMenuActions, onClose: () -> Unit) {
                             Icon(painterResource(R.drawable.ic_lyrics), contentDescription = "Lyrics", tint = p.text)
                         }
                         MoreButton(
+                            onOpen = { askAdded = true },
                             entries = listOf(
+                                if (added.isNotEmpty()) MenuEntry(added, info = true, onClick = {}) else null,
                                 if (track.artist.isNotEmpty() || track.albumArtist.isNotEmpty()) MenuEntry("Go to artist", R.drawable.ic_person) { actions.goToArtist() } else null,
                                 if (track.albumId.isNotEmpty()) MenuEntry("View album", R.drawable.ic_album) { actions.viewAlbum() } else null,
                                 if (!track.isSurround) MenuEntry("Add to playlist", R.drawable.ic_playlist_add) { actions.addToPlaylist() } else null,
@@ -478,6 +502,10 @@ fun FullPlayer(nav: Nav, actions: PlayerMenuActions, onClose: () -> Unit) {
                                     group != null -> MenuEntry("Group listen", R.drawable.ic_group) { GroupListen.sheetOpen.value = true }
                                     groupsHere == true && link == null -> MenuEntry("Start a group listen", R.drawable.ic_group) { GroupListen.startOpen.value = true }
                                     else -> null
+                                },
+                                // the group's own pause (Pause pauses only this phone), for those who control it while it plays
+                                group?.takeIf { GroupRules.offersPauseForEveryone(it) }?.let {
+                                    MenuEntry(GroupRules.PAUSE_FOR_EVERYONE, R.drawable.ic_pause) { GroupListen.pauseForEveryone() }
                                 },
                                 *(if (link == null && !track.isSurround) offlineMenu.entries(listOf(track)) else emptyList()).toTypedArray(),
                             ),

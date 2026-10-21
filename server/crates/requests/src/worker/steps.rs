@@ -44,6 +44,9 @@ struct Inner {
     next: Mutex<u64>,
     wake: Notify,
     task: Mutex<Option<tokio::task::JoinHandle<()>>>,
+    /// request → when a step of it last said anything (new words, a wait, the same words again): an import
+    /// that says nothing for a long while hasn't moved ([`super::stall`])
+    heard: Mutex<HashMap<i64, f64>>,
 }
 
 /// The steps running now and the task that writes their words. Clones share them.
@@ -74,6 +77,7 @@ impl Steps {
         let ended = Arc::new(Notify::new());
         lock(&self.0.entries).insert(key, Entry { id, status: status.into(), before: before.into(), have: before.into(), want: before.into(),
                                                    done: false, lost: false, ended: ended.clone() });
+        lock(&self.0.heard).insert(id, now());
         let mut task = lock(&self.0.task);
         if task.as_ref().is_none_or(|t| t.is_finished()) {
             *task = Some(tokio::spawn(run(self.0.clone(), db.clone())));
@@ -81,25 +85,42 @@ impl Steps {
         Scope { steps: self.clone(), key, ended, finished: false }
     }
 
+    /// When a running step of request `id` last said anything (None: no step of it runs).
+    pub fn heard(&self, id: i64) -> Option<f64> {
+        lock(&self.0.heard).get(&id).copied()
+    }
+
     /// The step's row should say `words` now.
     fn say(&self, key: u64, words: String) {
-        let changed = match lock(&self.0.entries).get_mut(&key) {
+        let mut entries = lock(&self.0.entries);
+        if let Some(e) = entries.get(&key).filter(|e| !e.done) {
+            lock(&self.0.heard).insert(e.id, now());
+        }
+        let changed = match entries.get_mut(&key) {
             Some(e) if !e.done && !e.lost && e.want != words => {
                 e.want = words;
                 true
             }
             _ => false,
         };
+        drop(entries);
         if changed {
             self.0.wake.notify_one();
         }
     }
 
     fn finish(&self, key: u64) {
-        if let Some(e) = lock(&self.0.entries).get_mut(&key) {
+        let mut entries = lock(&self.0.entries);
+        if let Some(e) = entries.get_mut(&key) {
             e.want = e.before.clone();
             e.done = true;
+            let id = e.id;
+            // (another step of the same request still running keeps its time)
+            if !entries.values().any(|o| o.id == id && !o.done) {
+                lock(&self.0.heard).remove(&id);
+            }
         }
+        drop(entries);
         self.0.wake.notify_one();
     }
 }
@@ -260,6 +281,31 @@ mod tests {
         drop(scope);
         says(&db, id, "Importing…").await;
         entries_gone(&steps).await;
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// Every word of a running step counts as it moving – the same words again too (a wait in MusicBrainz's
+    /// line says itself every few seconds) – and the time is forgotten once the step is over.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_step_is_heard_while_it_says_anything() {
+        let (db, dir) = db();
+        let steps = Steps::default();
+        let id = request(&db, "importing", "Importing…");
+        assert_eq!(steps.heard(id), None);
+        let t0 = now();
+        let scope = steps.begin(&db, id, "importing", "Importing…");
+        let began = steps.heard(id).unwrap();
+        assert!(began >= t0);
+        tokio::time::sleep(Duration::from_millis(20)).await;
+        let say = scope.sayer();
+        say("Importing – waiting for MusicBrainz (next in line)".into());
+        let first = steps.heard(id).unwrap();
+        assert!(first > began);
+        tokio::time::sleep(Duration::from_millis(20)).await;
+        say("Importing – waiting for MusicBrainz (next in line)".into());
+        assert!(steps.heard(id).unwrap() > first, "the same words again count");
+        scope.end().await;
+        assert_eq!(steps.heard(id), None);
         let _ = std::fs::remove_dir_all(dir);
     }
 

@@ -13,10 +13,14 @@ import app.encore.android.core.str
 import app.encore.android.data.session.AuthKind
 import app.encore.android.data.session.Session
 import app.encore.android.data.session.SessionStore
+import app.encore.android.features.library.AlbumTypesRules
 import app.encore.android.features.library.PlaylistLinkRules
 import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonElement
+import kotlinx.serialization.json.JsonNull
 import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.JsonPrimitive
 import okhttp3.HttpUrl.Companion.toHttpUrlOrNull
 import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.OkHttpClient
@@ -199,16 +203,51 @@ class EncoreApi(private val client: OkHttpClient, private val store: SessionStor
 
     // ---- library ---------------------------------------------------------------------------------------
 
-    /** [dir] "asc" / "desc", or "" for the sort's own default (as GET /api/library/index takes it). */
-    fun albums(sort: String = "name", offset: Int = 0, limit: Int = 120, q: String = "", artist: String = "", dir: String = ""): List<Album> {
-        val qs = StringBuilder("/api/library/albums?sort=").append(enc(sort)).append("&limit=").append(limit).append("&offset=").append(offset)
-        if (dir.isNotEmpty()) qs.append("&dir=").append(enc(dir))
-        if (q.isNotEmpty()) qs.append("&q=").append(enc(q))
-        if (artist.isNotEmpty()) qs.append("&artist=").append(enc(artist))
-        val page = get(qs.toString()).objects().mapNotNull { Album.from(it) }
+    /**
+     * [dir] "asc" / "desc", or "" for the sort's own default (as GET /api/library/index takes it). No `kind`: every
+     * album but the One-offs (0.36; a search finds them too); [type] a Type of the Type dropdown, which then decides alone.
+     */
+    fun albums(sort: String = "name", offset: Int = 0, limit: Int = 120, q: String = "", artist: String = "", dir: String = "", type: String = ""): List<Album> =
+        albumsPage(sort, offset, limit, q, artist, dir, type).albums
+
+    /** A page of [albums] with the list's `total` (Select all N). */
+    fun albumsPage(sort: String = "name", offset: Int = 0, limit: Int = 120, q: String = "", artist: String = "", dir: String = "", type: String = ""): AlbumsPage {
+        val e = get(AlbumTypesRules.albumsUrl(sort, dir, q, artist, type, offset, limit))
+        val page = e.objects().mapNotNull { Album.from(it) }
         if (offset > 0 || page.size > 24) onAlbumPage?.invoke(page.map { it.id })
-        return page
+        val total = (e as? JsonObject)?.let { if (it.containsKey("total")) it.int("total") else null } ?: (offset + page.size)
+        return AlbumsPage(total, page)
     }
+
+    // ---- library types, Select / Delete…, who added it (0.36, docs/contracts/library-types.md §4) -------------------
+
+    /** GET /api/library/album-types: the Type dropdown's types with their counts (an older server: none). */
+    fun albumTypes(artist: String = "", filter: String = ""): List<AlbumTypesRules.TypeCount> =
+        AlbumTypesRules.typeCounts(getObject(AlbumTypesRules.typesUrl(artist, filter)))
+
+    /** Every album id of the list as it is filtered (`ids_only=1`, at most 5000). */
+    fun albumIds(sort: String, dir: String, q: String, artist: String, type: String): AlbumTypesRules.AlbumIds =
+        AlbumTypesRules.AlbumIds.from(getObject(AlbumTypesRules.idsUrl(sort, dir, q, artist, type)))
+
+    /** POST /api/library/albums/trash: a dry run (what would go, the dialog's words) or a real run of ≤ 100 albums. */
+    fun trashAlbums(ids: List<String>, dryRun: Boolean): JsonObject =
+        post("/api/library/albums/trash", JsonObject(mapOf("ids" to JsonArray(ids.map { JsonPrimitive(it) }), "dry_run" to JsonPrimitive(dryRun)))) as? JsonObject
+            ?: JsonObject(emptyMap())
+
+    /** DELETE /api/library/albums/{id}: one album to the Trash (`text`: "Moved 1 album to the Trash"). */
+    fun moveAlbumToTrash(id: String): JsonObject = call("DELETE", url("/api/library/albums/${enc(id)}"), null) as? JsonObject ?: JsonObject(emptyMap())
+
+    /** PUT /api/library/albums/{id}/type: the owner's format (album | ep | single | one_off), "" for Automatic. */
+    fun setAlbumType(id: String, format: String): JsonObject =
+        call("PUT", url("/api/library/albums/${enc(id)}/type"), JsonObject(mapOf("format" to if (format.isEmpty()) JsonNull else JsonPrimitive(format)))) as? JsonObject
+            ?: JsonObject(emptyMap())
+
+    /** GET /api/library/tracks/{id}/added: who added the song (the song ⋯ menu's first line). */
+    fun trackAdded(id: Long): JsonObject = getObject("/api/library/tracks/$id/added")
+
+    /** GET /api/library/artists/{name}/one-offs: the artist's songs on One-off albums, newest first. */
+    fun artistOneOffs(name: String, mbid: String = "", offset: Int = 0, limit: Int = AlbumTypesRules.ONE_OFFS_FIRST): OneOffs =
+        OneOffs.from(get(artistRoute(name, "one-offs") + "&offset=$offset&limit=$limit" + if (mbid.isNotEmpty()) "&mbid=${enc(mbid)}" else ""))
 
     fun album(id: String): AlbumDetail {
         val o = getObject("/api/library/albums/${enc(id)}")

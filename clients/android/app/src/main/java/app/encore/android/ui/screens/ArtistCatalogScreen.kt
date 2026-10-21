@@ -54,6 +54,9 @@ import app.encore.android.features.library.OnSongFixed
 import app.encore.android.R
 import app.encore.android.data.api.Album
 import app.encore.android.data.api.ArtistSongs
+import app.encore.android.data.api.OneOffs
+import app.encore.android.features.library.AlbumTypesRules
+import app.encore.android.features.library.oneOffsShelf
 import app.encore.android.data.api.Track
 import app.encore.android.data.repo.AlbumPage
 import app.encore.android.data.repo.ArtistExtras
@@ -359,6 +362,30 @@ private fun ArtistPageScreen(nav: Nav, mbid: String, name: String) {
             val songsLoad = rememberLoad("artist-songs", libName, mbid) {
                 if (libName.isEmpty()) ArtistSongs.EMPTY else try { api.artistSongs(libName, mbid, 0, ARTIST_SONGS_FIRST) } catch (_: Exception) { ArtistSongs.EMPTY }
             }
+            // 0.36: the One-offs shelf – the artist's songs on compilations, remix albums and soundtracks the library
+            // has only a few songs of (the first ten; "Show all N" loads up to 500)
+            val oneOffsLoad = rememberLoad("artist-oneoffs", libName, mbid) {
+                if (libName.isEmpty()) OneOffs.EMPTY else try { api.artistOneOffs(libName, mbid, 0, AlbumTypesRules.ONE_OFFS_FIRST) } catch (_: Exception) { OneOffs.EMPTY }
+            }
+            var oneOffsAll by remember(libName, mbid) { mutableStateOf<OneOffs?>(null) }
+            var loadingOneOffs by remember(libName, mbid) { mutableStateOf(false) }
+            val oneOffs = oneOffsAll ?: (oneOffsLoad.state.value as? Loadable.Ready)?.value ?: OneOffs.EMPTY
+            // again: the whole shelf once more (a song in it was corrected or deleted)
+            fun showAllOneOffs(again: Boolean = false) {
+                if (loadingOneOffs || (oneOffsAll != null && !again)) return
+                loadingOneOffs = true
+                scope.launch {
+                    try {
+                        oneOffsAll = withContext(Dispatchers.IO) { api.artistOneOffs(libName, mbid, 0, AlbumTypesRules.ONE_OFFS_ALL) }
+                    } catch (e: kotlinx.coroutines.CancellationException) {
+                        throw e
+                    } catch (e: Exception) {
+                        Toasts.show(e.message ?: "Couldn't load the songs", "err")
+                    } finally {
+                        loadingOneOffs = false
+                    }
+                }
+            }
             val liked = (likedLoad.state.value as? Loadable.Ready)?.value ?: ArtistSongs.EMPTY
             val firstSongs = (songsLoad.state.value as? Loadable.Ready)?.value ?: ArtistSongs.EMPTY
             // "Show all N": every song, loaded page by page into this list
@@ -397,6 +424,8 @@ private fun ArtistPageScreen(nav: Nav, mbid: String, name: String) {
             OnSongFixed {
                 likedLoad.refresh()
                 songsLoad.refresh()
+                oneOffsLoad.refresh()
+                if (oneOffsAll != null) showAllOneOffs(again = true)
                 if (allSongs != null) showAllSongs(again = true)
             }
 
@@ -581,6 +610,8 @@ private fun ArtistPageScreen(nav: Nav, mbid: String, name: String) {
                             ) { m -> Cover(nav.graph.api.coverUrl(l.albumId, 400), nav.graph.imageLoader, m, corner = 12.dp, label = l.album) }
                         }
                     }
+                    // the One-offs shelf (0.36), after the library's albums
+                    oneOffsShelf(nav, oneOffs, loadingOneOffs, likedIds, nowPlaying?.id) { showAllOneOffs() }
                     // discography with the All / Missing / In library filter (MusicBrainz's)
                     if (!byName) item { SectionHead("Discography", subtitle = "${a.releaseGroups.size}") }
                     if (!byName) item { ChoiceRow(listOf("All", "Missing", "In library"), filter, onSelect = { filter = it }) }

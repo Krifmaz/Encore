@@ -153,13 +153,14 @@ pub const MIGRATIONS: &[(i64, &str, &str)] = &[
     (28, "plugins", include_str!("../migrations/0028_plugins.sql")),
     (29, "translation_tiers", include_str!("../migrations/0029_translation_tiers.sql")),
     (30, "surround", include_str!("../migrations/0030_surround.sql")),
+    (31, "library_types", include_str!("../migrations/0031_library_types.sql")),
 ];
 
 /// The schema this server writes, stamped into `PRAGMA user_version`: the number of the last file in
 /// MIGRATIONS. An older server that finds a higher number refuses to touch the file (it would otherwise
 /// fail half-way through and leave a database neither version can read), and a lower number means
 /// "back up, then migrate" (and ANALYZE after it: new indexes have no statistics yet).
-pub const SCHEMA_VERSION: i64 = 30;
+pub const SCHEMA_VERSION: i64 = 31;
 
 /// Exit code of the server when the database comes from a newer Encore.
 pub const EXIT_NEWER_DB: i32 = 3;
@@ -329,8 +330,8 @@ fn tables_written(sql: &str) -> Vec<String> {
 }
 
 /// The tables the library answers (lists, the side bar, the artist index) are built from: a write to
-/// one of them moves `library_version`.
-const LIBRARY_TABLES: &[&str] = &["tracks", "artist_alias"];
+/// one of them moves `library_version` (`album_types`: each album's type, which the album lists filter by).
+const LIBRARY_TABLES: &[&str] = &["tracks", "artist_alias", "album_types"];
 /// A write to one of these moves `users_version` (who has translations on, roles, prefs).
 const USER_TABLES: &[&str] = &["users"];
 /// The per-user totals (the leaderboard, the rank on Home) count these: a write to one of them moves
@@ -1104,9 +1105,13 @@ mod tests {
         assert_eq!(db.library_version(), lv + 1);
         db.execute("DELETE FROM artist_alias WHERE alias_key='nothing'", p![]).unwrap();
         assert_eq!((db.library_version(), db.users_version()), (lv + 2, uv));
+        // each album's type (the lists filter by it) is part of the library too
+        assert_eq!(t("UPDATE album_types SET chosen='album' WHERE album_id=?"), vec!["album_types"]);
+        db.execute("UPDATE album_types SET chosen='album' WHERE album_id='nothing'", p![]).unwrap();
+        assert_eq!((db.library_version(), db.users_version()), (lv + 3, uv));
         // the accounts have their own counter (who has translations on)
         db.execute("UPDATE users SET prefs='{}' WHERE id=-1", p![]).unwrap();
-        assert_eq!((db.library_version(), db.users_version()), (lv + 2, uv + 1));
+        assert_eq!((db.library_version(), db.users_version()), (lv + 3, uv + 1));
         let _ = std::fs::remove_dir_all(&d);
     }
 
@@ -1662,6 +1667,63 @@ mod tests {
         // opening again changes nothing (the seed runs once)
         let db = Db::open(&d).unwrap();
         assert_eq!(db.execute("INSERT INTO surround_tracks (path) VALUES ('/music/Surround/b.m4a')", p![]).unwrap(), 1_000_000_001);
+        drop(db);
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    /// Schema 31 fills in who added the songs already there from the requests still in the table: a request
+    /// (its user and day), one whose row was cleared (no name), a link, a Soulseek-page download, a song no
+    /// request brought (found in the music folder), a request whose detail isn't JSON; running it again changes
+    /// nothing.
+    #[test]
+    fn schema_31_backfills_who_added() {
+        const { assert!(SCHEMA_VERSION >= 31) };
+        let d = tmp("who-added");
+        drop(Db::open(&d).unwrap());
+        // what a schema 30 server left: tracks without the who-added columns
+        {
+            let c = Connection::open(d.join("encore.db")).unwrap();
+            c.execute_batch(
+                "DROP INDEX idx_tracks_added_by; DROP TABLE album_types;
+                 ALTER TABLE tracks DROP COLUMN added_by; ALTER TABLE tracks DROP COLUMN added_via; ALTER TABLE tracks DROP COLUMN requested_at;
+                 ALTER TABLE tracks DROP COLUMN releasetype; ALTER TABLE tracks DROP COLUMN tracktotal; ALTER TABLE tracks DROP COLUMN compilation;
+                 INSERT INTO requests (id, user_id, kind, status, created_at, updated_at, detail) VALUES (1, 3, 'album', 'completed', 100, 100, '{}');
+                 INSERT INTO requests (id, user_id, kind, status, created_at, updated_at, detail) VALUES (2, 4, 'url', 'completed', 200, 200, '{}');
+                 INSERT INTO requests (id, user_id, kind, mbid, status, created_at, updated_at, detail)
+                     VALUES (3, 5, 'track', NULL, 'completed', 300, 300, '{\"pick\": {\"source\": \"slskd\", \"payload\": {\"username\": \"peer\"}}}');
+                 INSERT INTO requests (id, user_id, kind, status, created_at, updated_at, detail) VALUES (4, 6, 'track', 'completed', 400, 400, 'not json');
+                 INSERT INTO tracks (id, path, title, request_id) VALUES (1, '/m/a.flac', 'A', 1);
+                 INSERT INTO tracks (id, path, title, request_id, source) VALUES (2, '/m/b.flac', 'B', 99, 'slskd');
+                 INSERT INTO tracks (id, path, title, request_id) VALUES (3, '/m/c.flac', 'C', 2);
+                 INSERT INTO tracks (id, path, title, request_id) VALUES (4, '/m/d.flac', 'D', 3);
+                 INSERT INTO tracks (id, path, title) VALUES (5, '/m/e.flac', 'E');
+                 INSERT INTO tracks (id, path, title, request_id) VALUES (6, '/m/f.flac', 'F', 4);",
+            )
+            .unwrap();
+            c.pragma_update(None, "user_version", 30).unwrap();
+        }
+        let db = Db::open(&d).unwrap();
+        assert_eq!(db.user_version().unwrap(), SCHEMA_VERSION);
+        let rows = |db: &Db| -> Vec<(i64, Option<i64>, String, Option<f64>)> {
+            db.query("SELECT id, added_by, added_via, requested_at FROM tracks ORDER BY id", p![]).unwrap().iter()
+                .map(|r| (r.i("id"), r.get("added_by").and_then(|v| v.as_i64()), r.s("added_via"), r.get("requested_at").and_then(|v| v.as_f64()))).collect()
+        };
+        let want = vec![
+            (1, Some(3), "request".to_string(), Some(100.0)),
+            (2, None, "request".to_string(), None),
+            (3, Some(4), "link".to_string(), Some(200.0)),
+            (4, Some(5), "soulseek".to_string(), Some(300.0)),
+            (5, None, "scan".to_string(), None),
+            (6, Some(6), "request".to_string(), Some(400.0)),
+        ];
+        assert_eq!(rows(&db), want);
+        // the album types table is there, empty
+        assert_eq!(db.one("SELECT COUNT(*) n FROM album_types", p![]).unwrap().unwrap().i("n"), 0);
+        // the request rows go (Clear finished): what the songs say stays; opening again changes nothing
+        db.execute("DELETE FROM requests", p![]).unwrap();
+        drop(db);
+        let db = Db::open(&d).unwrap();
+        assert_eq!(rows(&db), want);
         drop(db);
         let _ = std::fs::remove_dir_all(&d);
     }

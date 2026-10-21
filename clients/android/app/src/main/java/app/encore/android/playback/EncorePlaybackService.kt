@@ -42,7 +42,6 @@ import app.encore.android.data.prefs.NormPrefs
 import app.encore.android.data.prefs.PlaybackPrefs
 import app.encore.android.data.prefs.Quality
 import app.encore.android.features.group.GroupListen
-import app.encore.android.features.group.GroupRules
 import app.encore.android.features.group.GroupSync
 import app.encore.android.features.offline.OfflineMode
 import app.encore.android.features.offline.OfflineStore
@@ -1001,10 +1000,10 @@ class EncorePlaybackService : MediaLibraryService() {
 
     /**
      * In a group listen the queue is the group's: what a controller asks to play or add (Android Auto's browse tree, a
-     * voice request, the Encore Lyrics car app) goes to the group, which plays it on every device,
-     * or is refused with the reason ("Only Alex controls playback", also on the car's subtitle line). The queue here is
-     * never replaced: the returned exception fails the controller's request. [index] null: added to Up next (every
-     * member may).
+     * voice request, the Encore Lyrics car app) goes to the group. Play adds the songs from the one asked for to the
+     * group's Up next ("Added 12 songs to the group's Up next" on the car's subtitle line); only a group with nothing to
+     * play starts with them, for those who control it ([GroupListen.playList]). The queue here is never replaced: the
+     * returned exception fails the controller's request. [index] null: added to Up next (every member may).
      */
     private fun toGroup(items: List<MediaItem>, index: Int?, positionMs: Long = 0L): Exception {
         val all = items.map { MediaItems.toTrack(it) }
@@ -1012,12 +1011,11 @@ class EncorePlaybackService : MediaLibraryService() {
         val at = if (index == null) 0 else all.take(index).count { it != null }
         main.post {
             if (released) return@post
-            val s = GroupListen.state.value ?: return@post
+            if (GroupListen.state.value == null) return@post
             if (index == null) {
                 GroupListen.enqueue(tracks)
             } else {
-                if (!s.youCanControl) car.say(GroupRules.onlyHost(s))
-                GroupListen.playList(tracks, at, if (positionMs > 0L) positionMs / 1000.0 else 0.0)
+                GroupListen.playList(tracks, at, if (positionMs > 0L) positionMs / 1000.0 else 0.0) { car.say(it) }
             }
         }
         return UnsupportedOperationException(GROUP_QUEUE)

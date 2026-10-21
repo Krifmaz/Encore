@@ -50,8 +50,9 @@ fn new_item(trash: &Dir) -> Result<String, ApiError> {
 }
 
 /// Moves one item to the trash: `dir`/`name` (the item `t` names) into a new item folder, with its origin.
-/// The library's rows of it are taken out through `change`. → the trash id
-pub fn trash_one(st: &impl Ctx, who: &Who, t: &Target, dir: &Dir, name: &str, change: &mut Change) -> Result<String, ApiError> {
+/// `extras`: files beside it in `dir` that go with it into the same item (a song's .lrc / .txt lyrics) and come
+/// back beside it on a restore. The library's rows of it are taken out through `change`. → the trash id
+pub fn trash_one(st: &impl Ctx, who: &Who, t: &Target, dir: &Dir, name: &str, change: &mut Change, extras: &[String]) -> Result<String, ApiError> {
     let kind = dir.lstat(name).map_err(io_error)?.ok_or_else(|| err(404, MISSING))?.kind;
     let real = dir.path.join(name);
     // a folder that holds an extra library folder: its songs' rows can't go to Trash with it (they are named
@@ -61,8 +62,12 @@ pub fn trash_one(st: &impl Ctx, who: &Who, t: &Target, dir: &Dir, name: &str, ch
     }
     let dirs = LibraryDirs::of(st.cfg());
     let trash = trash_root(st)?;
+    // the extras that are there, plain files beside it (never the item itself, never twice)
+    let mut extras: Vec<&str> = extras.iter().map(String::as_str).filter(|e| *e != name && *e != ORIGIN && names::check_name(e).is_ok()).collect();
+    extras.dedup();
+    extras.retain(|e| dir.lstat(e).ok().flatten().is_some_and(|x| x.kind == Kind::File));
     // on another disk the trash holds a whole copy: there must be room for it
-    let size = size_of(dir, name).unwrap_or(0);
+    let size = size_of(dir, name).unwrap_or(0) + extras.iter().map(|e| size_of(dir, e).unwrap_or(0)).sum::<u64>();
     let other_disk = dir.stat().map(|s| s.dev).ok() != trash.stat().map(|s| s.dev).ok();
     if other_disk && size > 0 && size > crate::dirfd::free_bytes(&trash.path) {
         return Err(err(507, format!("There isn't room for it in the trash ({})", trash.path.display())));
@@ -74,10 +79,18 @@ pub fn trash_one(st: &impl Ctx, who: &Who, t: &Target, dir: &Dir, name: &str, ch
     };
     // the item keeps its name, unless it is called like the origin file
     let stored = if name == ORIGIN { format!("{ORIGIN} (item)") } else { name.to_string() };
+    // each extra under a name of its own in the item folder
+    let mut taken: Vec<String> = vec![stored.clone(), ORIGIN.to_string()];
+    let extra_names: Vec<(String, String)> = extras.iter().map(|e| {
+        let n = names::free_name(e, false, |x| taken.iter().any(|t| t == x));
+        taken.push(n.clone());
+        (e.to_string(), n)
+    }).collect();
     let origin = json!({
         "root": t.root.id, "path": t.rel(), "at": now() as i64, "by": who.name, "name": name, "stored": stored,
         "kind": if kind == Kind::Dir { "dir" } else { "file" }, "link": kind == Kind::Link, "size": size,
         "tracks": rows::saved_rows(st, &dirs, &real),
+        "extras": extra_names.iter().map(|(n, stored)| json!({ "name": n, "stored": stored })).collect::<Vec<_>>(),
     });
     let written = item.create_new(ORIGIN).map_err(io_error).and_then(|mut f| {
         use std::io::Write;
@@ -91,6 +104,12 @@ pub fn trash_one(st: &impl Ctx, who: &Who, t: &Target, dir: &Dir, name: &str, ch
     if let Err(e) = crate::ops::move_entry(dir, name, &item, &stored) {
         undo(&trash);
         return Err(e);
+    }
+    // the extras follow it; one that can't be moved stays where it is (the item went all the same)
+    for (n, stored) in &extra_names {
+        if let Err(e) = crate::ops::move_entry(dir, n, &item, stored) {
+            tracing::warn!("files: {} stays beside the place {name} left: {}", n, e.detail);
+        }
     }
     if other_disk && size > 0 {
         tracing::info!("files: {} went to the trash on another disk ({size} bytes copied)", real.display());
@@ -106,7 +125,7 @@ pub fn trash(st: &impl Ctx, who: &Who, items: &[Target]) -> Result<Value, ApiErr
     let mut change = Change::default();
     let (mut ids, mut failed) = (vec![], vec![]);
     for t in items {
-        let res = t.open_existing().and_then(|(dir, name, _)| trash_one(st, who, t, &dir, &name, &mut change));
+        let res = t.open_existing().and_then(|(dir, name, _)| trash_one(st, who, t, &dir, &name, &mut change, &[]));
         match res {
             Ok(id) => ids.push(id),
             Err(e) => failed.push(json!({ "path": t.rel(), "reason": e.detail })),
@@ -230,6 +249,21 @@ fn restore_one(st: &impl Ctx, who: &Who, roots: &[Root], trash: &Dir, dirs: &Lib
     let is_dir = item.lstat(&stored).map_err(io_error)?.ok_or_else(|| err(404, "Its file is missing from the trash"))?.kind == Kind::Dir;
     let back = names::free_name(name, is_dir, |n| parent.lstat(n).ok().flatten().is_some());
     crate::ops::move_entry(&item, &stored, &parent, &back)?;
+    // the files that went with it (its lyrics) come back beside it, each under a free name
+    for x in o["extras"].as_array().map(|a| a.as_slice()).unwrap_or(&[]) {
+        let (Some(n), Some(kept)) = (x["name"].as_str(), x["stored"].as_str()) else { continue };
+        if names::check_name(n).is_err() || names::check_name(kept).is_err() || kept == ORIGIN || kept == stored {
+            continue;
+        }
+        if item.lstat(kept).ok().flatten().is_none() {
+            tracing::info!("files: {kept} is missing from trash item {id}: not restored");
+            continue;
+        }
+        let to = names::free_name(n, false, |x| parent.lstat(x).ok().flatten().is_some());
+        if let Err(e) = crate::ops::move_entry(&item, kept, &parent, &to) {
+            tracing::warn!("files: {n} stays in trash item {id}: {}", e.detail);
+        }
+    }
     if let Err(e) = remove_item(trash, id) {
         tracing::warn!("files: the restored item's folder stays in the trash: {e}");
     }

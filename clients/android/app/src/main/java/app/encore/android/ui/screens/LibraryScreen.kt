@@ -1,6 +1,7 @@
 package app.encore.android.ui.screens
 
 import android.content.Context
+import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
@@ -68,7 +69,13 @@ import app.encore.android.R
 import app.encore.android.data.api.Album
 import app.encore.android.data.api.LibrarySearch
 import app.encore.android.data.api.Track
+import app.encore.android.features.library.AlbumSelect
+import app.encore.android.features.library.AlbumSelectDialog
+import app.encore.android.features.library.AlbumSelectTopBar
+import app.encore.android.features.library.AlbumTypeRow
+import app.encore.android.features.library.AlbumTypesRules
 import app.encore.android.features.library.OnSongFixed
+import app.encore.android.features.library.PickableAlbumCard
 import app.encore.android.features.library.SongFixUi
 import app.encore.android.features.library.SurroundUi
 import app.encore.android.features.library.WrongAudioList
@@ -134,6 +141,8 @@ private object LibraryState {
     /** with a query: the one results view (true), or the selected tab filtered by the query (false) */
     var results by mutableStateOf(true)
     var tab by mutableStateOf(0)
+    /** the albums list's Type (0.36): a key of GET /api/library/album-types, "" = All types */
+    var albumType by mutableStateOf("")
 }
 
 /** The first matches each section of the results view shows. */
@@ -258,12 +267,17 @@ fun LibraryScreen(nav: Nav) {
     }
     val resultsView = q.isNotEmpty() && LibraryState.results
     val scrollBehavior = TopAppBarDefaults.enterAlwaysScrollBehavior()
+    // select mode (0.36) is the albums list's: another tab or the results view ends it; Back leaves it
+    val onAlbums = !resultsView && tabs.getOrNull(shown)?.first == "albums"
+    LaunchedEffect(onAlbums) { if (!onAlbums && AlbumSelect.selecting && !AlbumSelect.moving) AlbumSelect.leave() }
+    BackHandler(enabled = AlbumSelect.selecting) { if (!AlbumSelect.moving) AlbumSelect.leave() }
+    AlbumSelectDialog(nav)
     Scaffold(
         modifier = Modifier.fillMaxSize().nestedScroll(scrollBehavior.nestedScrollConnection),
         containerColor = MaterialTheme.palette.bg,
         contentWindowInsets = WindowInsets(0, 0, 0, 0),
         topBar = {
-            EncoreTopBar("Library", scrollBehavior = scrollBehavior, actions = {
+            if (AlbumSelect.selecting) AlbumSelectTopBar(nav, scrollBehavior) else EncoreTopBar("Library", scrollBehavior = scrollBehavior, actions = {
                 SmallButton("Shuffle", iconRes = R.drawable.ic_shuffle, primary = true, modifier = Modifier.padding(end = Gutter)) {
                     scope.launch {
                         val songs = try { withContext(Dispatchers.IO) { nav.graph.api.shuffle(50, emptyList()) } } catch (_: Exception) { emptyList() }
@@ -295,7 +309,7 @@ fun LibraryScreen(nav: Nav) {
                     LibraryState.results = false
                 }
             } else when (tabs[shown].first) {
-                "albums" -> AlbumsTab(nav, sort, q)
+                "albums" -> AlbumsTab(nav, sort, q, me?.isAdmin == true)
                 "artists" -> ArtistsTab(nav, sort, q)
                 "tracks" -> SongsTab(nav, sort, q)
                 "surround" -> SurroundTab(nav, q)
@@ -461,24 +475,53 @@ private fun TrackPlaceholder() {
     }
 }
 
+/**
+ * The albums list: every album but the One-offs (they are on the artist pages; a search finds them too), or one Type
+ * of the Type chip (0.36: Studio albums, Live, Compilations … One-offs); admins pick albums to move to the Trash
+ * (a long press or Select, [AlbumSelect]).
+ */
 @Composable
-private fun AlbumsTab(nav: Nav, sort: LibSort, q: String = "") {
+private fun AlbumsTab(nav: Nav, sort: LibSort, q: String = "", admin: Boolean = false) {
     val api = nav.graph.api
     val scope = rememberCoroutineScope()
-    // a new list per sort (and query); the index is for the same sort and direction, so its offsets are this list's
-    // rows (a filtered list has no index)
-    val paged = remember(sort, q) { Paged<Album>(120) }
+    val type = LibraryState.albumType
+    val generation = AlbumSelect.generation
+    // the Type chip's types and counts (an older server: none, no chip); again after albums went to the Trash
+    var types by remember { mutableStateOf<List<AlbumTypesRules.TypeCount>>(emptyList()) }
+    LaunchedEffect(generation) {
+        types = try { withContext(Dispatchers.IO) { api.albumTypes() } } catch (e: CancellationException) { throw e } catch (_: Exception) { emptyList() }
+    }
+    // a new list per sort, query and Type (and after a move); the index is for the same sort, direction and Type, so
+    // its offsets are this list's rows (a filtered list has no index)
+    val paged = remember(sort, q, type, generation) { Paged<Album>(120) }
     paged.scope = scope
-    paged.fetch = { offset, limit -> api.albums(sort = sort.key, offset = offset, limit = limit, q = q, dir = sort.dir) }
+    paged.fetch = { offset, limit ->
+        val page = api.albumsPage(sort = sort.key, offset = offset, limit = limit, q = q, dir = sort.dir, type = type)
+        AlbumSelect.total = page.total
+        page.albums
+    }
+    // what Select all asks for; a new sort, search or Type clears the picks
+    AlbumSelect.query = AlbumSelect.Query(sort.key, sort.dir, q, type)
+    LaunchedEffect(sort, q, type) { AlbumSelect.clear() }
     val grid = rememberLazyGridState()
-    LaunchedEffect(sort, q) { if (grid.firstVisibleItemIndex > 0) grid.scrollToItem(0) }
-    val index = rememberLibraryIndex(api, "albums", sort.key, dir = sort.dir)
+    LaunchedEffect(sort, q, type) { if (grid.firstVisibleItemIndex > 0) grid.scrollToItem(0) }
+    val index = rememberLibraryIndex(api, "albums", sort.key, dir = sort.dir, type = type, generation = generation)
     val sections = if (q.isEmpty()) index else emptyList()
     // covers 2–3 screens ahead of the scroll, and around the spot after a scrubber jump
     PreloadCoversAhead(grid, paged.rows.size, 400) { i -> paged.rows.getOrNull(i)?.id }
     Column(Modifier.fillMaxSize()) {
+        if (!AlbumSelect.selecting) {
+            AlbumTypeRow(types, type, admin) { picked -> LibraryState.albumType = picked }
+        }
         if (paged.done && paged.rows.isEmpty()) {
-            EmptyState(R.drawable.ic_library, if (q.isEmpty()) "No albums found" else "No albums match “$q”")
+            EmptyState(
+                R.drawable.ic_library,
+                when {
+                    q.isNotEmpty() -> "No albums match “$q”"
+                    type.isNotEmpty() -> AlbumTypesRules.NO_ALBUMS_OF_TYPE
+                    else -> "No albums found"
+                },
+            )
             return@Column
         }
         Box(Modifier.fillMaxSize()) {
@@ -495,7 +538,7 @@ private fun AlbumsTab(nav: Nav, sort: LibSort, q: String = "") {
                     if (a == null) {
                         Placeholder(paged, i) { AlbumPlaceholder() }
                     } else {
-                        AlbumCard(a, api.coverUrl(a.id, 400), nav.graph.imageLoader) { nav.open(Screen.Album(a.id)) }
+                        PickableAlbumCard(a, api.coverUrl(a.id, 400), nav.graph.imageLoader, admin) { nav.open(Screen.Album(a.id)) }
                     }
                 }
                 if (!paged.done) {

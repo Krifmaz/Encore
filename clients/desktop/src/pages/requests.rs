@@ -1,13 +1,14 @@
 //! Requests: Your requests and, for admins, everyone's. Behaviour reference: web-rs/src/pages/requests.rs.
-//! The tabs filter by status, admins see everyone's requests with an "Only mine" switch, Retry
-//! failed and Clear finished; everyone has Clear waiting (admins: everyone's waiting requests
-//! unless Only mine is on; members: their own), counted by the server before it asks "Cancel N
-//! waiting requests?"; the list reloads every 4 s. The rows, their buttons and menus
+//! The tabs filter by status, admins see everyone's requests or one person's with a User list
+//! ("All users", then each person with their requests: "Caz (612)", `GET /api/requests/users`),
+//! Retry failed and Clear finished; everyone has Clear waiting (admins: everyone's waiting
+//! requests, or the person picked; members: their own), counted by the server before it asks
+//! "Cancel N waiting requests?"; the list reloads every 4 s. The rows, their buttons and menus
 //! live in `widgets::request_list` (the Downloader shares them), and so does the banner that says
 //! imports are paused while the library can't be written. "Active" includes waiting requests
 //! (the server's `status=active`). Admins also get Download all now beside Retry failed, on a
 //! server with Download now: every waiting request is woken and requests move up in their lines
-//! (with Only mine, the admin's own first) – never more at once than each source allows.
+//! (with a person picked, only theirs) – never more at once than each source allows.
 
 use crate::api::ApiError;
 use crate::fmt;
@@ -15,7 +16,7 @@ use crate::pages::{Ctx, El, Page};
 use crate::theme::{self, Btn};
 use crate::widgets::request_list::{self, List};
 use crate::widgets::{self, card_flat, h1, muted, small_muted, tabs, Icon};
-use iced::widget::{button, column, row, space, toggler};
+use iced::widget::{button, column, pick_list, row, space};
 use iced::{Alignment, Length, Subscription, Task};
 use serde_json::Value;
 use std::time::Duration;
@@ -37,13 +38,65 @@ pub struct State {
     /// "{n} of {m} requests used this week" for members with a limit.
     quota: String,
     list: List,
+    /// The admin's User list: the people who have requests (`GET /api/requests/users`).
+    users: Vec<Value>,
+    /// The person picked in it (kept while they have no requests left).
+    picked: Option<UserChoice>,
+}
+
+/// An entry of the User list: everyone's requests (`id` None) or one person's.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct UserChoice {
+    pub id: Option<i64>,
+    pub label: String,
+}
+
+impl std::fmt::Display for UserChoice {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.label)
+    }
+}
+
+/// The User list's first entry.
+pub const ALL_USERS: &str = "All users";
+
+/// "Caz (612)": a person in the User list with their requests.
+pub fn user_label(name: &str, count: i64) -> String {
+    format!("{name} ({count})")
+}
+
+/// The User list (the web's `user_options`): "All users", then each person who has requests with
+/// their count; the person picked stays in it with 0 once their requests are gone (the list
+/// doesn't jump to everyone's).
+pub fn user_options(users: &[Value], picked: Option<(i64, &str)>) -> Vec<UserChoice> {
+    let mut out = vec![UserChoice { id: None, label: ALL_USERS.into() }];
+    for u in users.iter().filter(|u| u["id"].is_i64()) {
+        out.push(UserChoice { id: Some(fmt::i(u, "id")), label: user_label(&fmt::s(u, "username"), fmt::i(u, "count")) });
+    }
+    if let Some((id, name)) = picked {
+        if !users.iter().any(|u| u["id"].as_i64() == Some(id)) {
+            out.push(UserChoice { id: Some(id), label: user_label(name, 0) });
+        }
+    }
+    out
+}
+
+/// The name in a User list entry ("Caz (612)" → "Caz").
+fn name_of(label: &str) -> &str {
+    match label.rfind(" (") {
+        Some(i) if label.ends_with(')') => &label[..i],
+        _ => label,
+    }
 }
 
 #[derive(Clone, Debug)]
 pub enum Message {
     List(request_list::Msg),
     Filter(String),
-    Mine(bool),
+    /// A person picked in the admin's User list.
+    User(UserChoice),
+    /// `GET /api/requests/users`.
+    Users(Result<Value, ApiError>),
     /// `/api/auth/me` for the quota line.
     Me(Result<Value, ApiError>),
     Tick,
@@ -67,21 +120,29 @@ impl State {
     }
 }
 
-/// The query of the current tab and switch, as the web builds it.
-pub fn query(filter: &str, mine: bool) -> String {
+/// The query of the current tab and whose requests, as the web builds it.
+pub fn query(filter: &str, mine: bool, user: Option<i64>) -> String {
     let mut q = String::from("limit=300");
     if filter != "all" {
         q.push_str(&format!("&status={}", crate::pages::urlencode(filter)));
     }
     if mine {
         q.push_str("&mine=true");
+    } else if let Some(u) = user {
+        q.push_str(&format!("&user={u}"));
     }
     q
 }
 
 fn reload(state: &mut State, ctx: &Ctx) -> Task<Message> {
-    state.list.query = query(&state.filter, state.list.mine);
-    state.list.load(ctx).map(Message::List)
+    state.list.query = query(&state.filter, state.list.mine, state.list.user);
+    let list = state.list.load(ctx).map(Message::List);
+    if !state.admin {
+        return list;
+    }
+    // the User list's counts follow the list
+    let api = ctx.api.clone();
+    Task::batch([list, Task::perform(async move { api.get("/requests/users").await }, Message::Users)])
 }
 
 /// Called when the app navigates here.
@@ -93,6 +154,7 @@ pub fn open(state: &mut State, ctx: &mut Ctx) -> Task<Message> {
     state.list.reset();
     state.list.admin = state.admin;
     state.list.mine = !state.admin;
+    state.list.user = state.picked.as_ref().and_then(|p| p.id);
     state.list.keep = None;
     state.list.take = 0;
     state.quota.clear();
@@ -110,10 +172,16 @@ pub fn update(state: &mut State, msg: Message, ctx: &mut Ctx) -> Task<Message> {
             state.filter = f;
             reload(state, ctx)
         }
-        Message::Mine(on) => {
-            state.list.mine = on;
+        Message::User(choice) => {
+            state.list.user = choice.id;
+            state.picked = choice.id.map(|_| choice);
             reload(state, ctx)
         }
+        Message::Users(Ok(v)) => {
+            state.users = v.as_array().cloned().unwrap_or_default();
+            Task::none()
+        }
+        Message::Users(Err(_)) => Task::none(),
         Message::Me(Ok(me)) => {
             let admin = matches!(me["role"].as_str(), Some("admin" | "owner"));
             if fmt::truthy(&me, "request_limit") && !admin {
@@ -142,13 +210,21 @@ pub fn view<'a>(state: &'a State, ctx: &Ctx<'a>) -> El<'a, Message> {
     }
     let mut controls = row![].spacing(8).align_y(Alignment::Center);
     if state.admin {
+        // everyone's requests, or one person's (the buttons beside it take the same)
+        let picked = state.picked.as_ref().and_then(|p| Some((p.id?, name_of(&p.label))));
+        let options = user_options(&state.users, picked);
+        let selected = options.iter().find(|o| o.id == state.list.user).cloned();
         controls = controls.push(
-            toggler(state.list.mine)
-                .label("Only mine")
-                .text_size(13)
-                .spacing(8)
-                .on_toggle(Message::Mine)
-                .style(theme::switch),
+            row![
+                small_muted("User"),
+                pick_list(options, selected, Message::User)
+                    .text_size(13)
+                    .padding([6, 10])
+                    .style(theme::pick)
+                    .menu_style(theme::pick_menu),
+            ]
+            .spacing(6)
+            .align_y(Alignment::Center),
         );
     }
     // members without Fix their own downloads may not retry (the server answers "Ask an admin to retry")
@@ -164,7 +240,7 @@ pub fn view<'a>(state: &'a State, ctx: &Ctx<'a>) -> El<'a, Message> {
     if state.admin {
         controls = controls.push(request_list::clear_btn("Clear finished").map(Message::List));
     }
-    // admins: everyone's waiting requests unless Only mine is on; members: their own
+    // admins: everyone's waiting requests, or the person picked; members: their own
     controls = controls.push(request_list::clear_waiting_btn(&state.list).map(Message::List));
     // the controls wrap onto a second line in a narrow window (four of them for an admin)
     let head = row![title, space().width(Length::Fill), controls.wrap()]
@@ -209,8 +285,25 @@ mod tests {
 
     #[test]
     fn the_query_matches_the_web() {
-        assert_eq!(query("all", false), "limit=300");
-        assert_eq!(query("pending", true), "limit=300&status=pending&mine=true");
+        assert_eq!(query("all", false, None), "limit=300");
+        assert_eq!(query("pending", true, None), "limit=300&status=pending&mine=true");
+        assert_eq!(query("failed", false, Some(7)), "limit=300&status=failed&user=7");
         assert_eq!(TABS.iter().map(|(k, _)| *k).collect::<Vec<_>>(), ["all", "active", "pending", "completed", "failed"]);
+    }
+
+    /// The admin's User list, as the web draws it: "All users", then each person with their count;
+    /// the person picked stays with 0 once their requests were cleared.
+    #[test]
+    fn the_user_list() {
+        let users = vec![serde_json::json!({ "id": 1, "username": "boss", "count": 1 }), serde_json::json!({ "id": 7, "username": "Caz", "count": 612 })];
+        let o = user_options(&users, None);
+        assert_eq!(o.iter().map(|c| c.label.as_str()).collect::<Vec<_>>(), ["All users", "boss (1)", "Caz (612)"]);
+        assert_eq!((o[0].id, o[2].id), (None, Some(7)));
+        let o = user_options(&users[..1], Some((7, "Caz")));
+        assert_eq!(o.last(), Some(&UserChoice { id: Some(7), label: "Caz (0)".into() }));
+        assert_eq!(user_options(&users, Some((7, "Caz"))).len(), 3, "listed once");
+        assert_eq!(user_label("Caz", 612), "Caz (612)");
+        assert_eq!(name_of("Caz (612)"), "Caz");
+        assert_eq!(name_of("Dr. (Who) (3)"), "Dr. (Who)");
     }
 }

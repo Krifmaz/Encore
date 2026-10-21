@@ -285,6 +285,26 @@ data class SearchCounts(val artists: Int, val albums: Int, val songs: Int)
  * GET /api/library/artists/{name}/tracks and /liked (0.31): one page of an artist's songs in the library and how
  * many there are in all.
  */
+/** A page of the library's albums and how many the list has (GET /api/library/albums). */
+data class AlbumsPage(val total: Int, val albums: List<Album>)
+
+/**
+ * GET /api/library/artists/{name}/one-offs (0.36): the artist's songs whose album is a One-off, with each song's
+ * `release_label` ("Compilation", "Various artists", "Album" …) in [labels] (same order).
+ */
+data class OneOffs(val total: Int, val tracks: List<Track>, val labels: List<String>) {
+    companion object {
+        val EMPTY = OneOffs(0, emptyList(), emptyList())
+
+        fun from(e: JsonElement?): OneOffs {
+            val o = e as? JsonObject ?: return EMPTY
+            val rows = o.arr("tracks").objectsOf().mapNotNull { r -> Track.from(r)?.let { it to r.str("release_label") } }
+            val total = if (o.containsKey("total")) o.int("total").coerceAtLeast(rows.size) else rows.size
+            return OneOffs(total, rows.map { it.first }, rows.map { it.second })
+        }
+    }
+}
+
 data class ArtistSongs(val total: Int, val tracks: List<Track>) {
     companion object {
         val EMPTY = ArtistSongs(0, emptyList())

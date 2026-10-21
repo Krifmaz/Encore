@@ -70,10 +70,12 @@ data class IndexSection(val label: String, val offset: Int, val short: String = 
  * offset is the row's position in the same list endpoint with the same sort (see server routes/library_index.rs).
  * kind: albums | artists | tracks. An empty list when the server is older than the index.
  */
-fun EncoreApi.libraryIndex(kind: String, sort: String, dir: String = "", artist: String = ""): List<IndexSection> {
+fun EncoreApi.libraryIndex(kind: String, sort: String, dir: String = "", artist: String = "", type: String = ""): List<IndexSection> {
     val qs = StringBuilder("/api/library/index?kind=").append(EncoreApi.enc(kind)).append("&sort=").append(EncoreApi.enc(sort))
     if (dir.isNotEmpty()) qs.append("&dir=").append(EncoreApi.enc(dir))
     if (artist.isNotEmpty()) qs.append("&artist=").append(EncoreApi.enc(artist))
+    // the albums list's Type (0.36): the same albums as the list, so the offsets land on them
+    if (type.isNotEmpty()) qs.append("&type=").append(EncoreApi.enc(type))
     return get(qs.toString()).objects().mapNotNull { o ->
         val label = o.str("label")
         if (label.isEmpty()) null else IndexSection(label, o.int("offset").coerceAtLeast(0), o.str("short"))
@@ -85,11 +87,11 @@ fun EncoreApi.libraryIndex(kind: String, sort: String, dir: String = "", artist:
  * errors. [dir] "" is the sort's own default direction (as the list endpoints take it).
  */
 @Composable
-fun rememberLibraryIndex(api: EncoreApi, kind: String, sort: String, artist: String = "", dir: String = ""): List<IndexSection> {
-    var sections by remember(kind, sort, artist, dir) { mutableStateOf<List<IndexSection>>(emptyList()) }
-    LaunchedEffect(kind, sort, artist, dir) {
+fun rememberLibraryIndex(api: EncoreApi, kind: String, sort: String, artist: String = "", dir: String = "", type: String = "", generation: Int = 0): List<IndexSection> {
+    var sections by remember(kind, sort, artist, dir, type) { mutableStateOf<List<IndexSection>>(emptyList()) }
+    LaunchedEffect(kind, sort, artist, dir, type, generation) {
         sections = try {
-            withContext(Dispatchers.IO) { api.libraryIndex(kind, sort, dir = dir, artist = artist) }
+            withContext(Dispatchers.IO) { api.libraryIndex(kind, sort, dir = dir, artist = artist, type = type) }
         } catch (e: CancellationException) {
             throw e
         } catch (_: Exception) {

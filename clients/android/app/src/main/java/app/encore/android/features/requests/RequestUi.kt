@@ -292,6 +292,8 @@ private fun RequestButtons(a: RequestActions, r: RequestRow, inSheet: Boolean = 
         SmallButton(offer.label, iconRes = if (offer.keep) R.drawable.ic_check else R.drawable.ic_download, primary = inSheet, enabled = !wait) { a.takeAnyway(r, inSheet) }
     }
     if (RequestRules.canImportAgain(r)) SmallButton("Import again", iconRes = R.drawable.ic_refresh, enabled = !wait) { a.act(r, "import-again") }
+    // an import that hasn't moved for 15 minutes: stopped, and the kept files imported at once
+    else if (RequestRules.stalledImport(r)) SmallButton("Import again", iconRes = R.drawable.ic_refresh, enabled = !wait) { a.act(r, "import-again") }
     if (RequestRules.canRetry(r, a.me)) SmallButton("Retry", iconRes = R.drawable.ic_refresh, enabled = !wait) { a.act(r, "retry") }
     // the server says what it does (go first in line, try the wait now, switch Soulseek users…); the answer is the toast
     if (RequestRules.canDownloadNow(r)) SmallButton("Download now", iconRes = R.drawable.ic_download, enabled = !wait) { a.downloadNow(r, inSheet) }
@@ -347,6 +349,8 @@ fun RequestItem(a: RequestActions, r: RequestRow, indent: Dp = 0.dp) {
             // a download the audio check turned away: why, in full on its own line (it wraps, never cut)
             val why = RequestRules.anywayLine(r)
             if (why.isNotEmpty()) AnywayReason(why, Modifier.padding(top = 4.dp))
+            // an import that hasn't moved: why Import again is offered (the web's tooltip)
+            if (RequestRules.stalledImport(r)) AnywayReason(RequestRules.STALLED_IMPORT, Modifier.padding(top = 4.dp))
             if (r.isActive && r.progress > 0) ProgressBar(r.progress, Modifier.padding(top = 6.dp).fillMaxWidth(0.8f))
             FlowRow(Modifier.padding(top = 6.dp), horizontalArrangement = Arrangement.spacedBy(6.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
                 StatusBadge(r.status, Modifier.align(Alignment.CenterVertically), label = RequestRules.badgeLabel(r))

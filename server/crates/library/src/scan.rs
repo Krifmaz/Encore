@@ -12,7 +12,28 @@ use encore_core::audio::AUDIO_EXTS;
 /// The columns a scan writes from the file's tags and audio properties (the loudness columns are written
 /// beside them, see [`crate::loudness::tag_columns`]).
 pub(crate) const COLS: &[&str] = &["title", "artist", "album", "albumartist", "track", "disc", "year", "genre", "duration", "bitrate", "format",
-    "mb_trackid", "mb_albumid", "mb_releasegroupid", "mb_artistid", "mb_albumartistid", "isrc", "sample_rate", "bit_depth"];
+    "mb_trackid", "mb_albumid", "mb_releasegroupid", "mb_artistid", "mb_albumartistid", "isrc", "sample_rate", "bit_depth",
+    "releasetype", "tracktotal", "compilation"];
+
+/// Who brought a new song into the library (`tracks.added_by`, `added_via`), written when its row is made and
+/// never by a rescan: a scan ([`Added::SCAN`]), a Files upload or import (the admin who did it). A request's
+/// songs are stamped by the request worker right after the import (`record_origin`), as `request_id` is.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Added {
+    pub by: Option<i64>,
+    pub via: &'static str,
+}
+
+impl Added {
+    /// Found in a library folder: nobody added it.
+    pub const SCAN: Added = Added { by: None, via: "scan" };
+}
+
+impl Default for Added {
+    fn default() -> Self {
+        Added::SCAN
+    }
+}
 
 #[derive(Default, Clone, serde::Serialize)]
 pub struct ScanState {
@@ -42,6 +63,8 @@ pub struct Library {
     /// the library folders a scan has warned about (not there, looks empty, a part unreadable): each warning
     /// is written to the activity log once, not on every scan, until the folder is fine again
     pub warned: Arc<Mutex<HashSet<String>>>,
+    /// every album's type (Album, EP, Single, One-off; live, compilation …), once per state of the library
+    pub types: crate::album_types::Types,
 }
 
 pub fn album_key(albumartist: &str, album: &str, path: &str) -> String {
@@ -93,7 +116,7 @@ fn read_file(path: &str, meta: Option<std::fs::Metadata>) -> std::io::Result<Fil
 
 /// Writes one file's row (a new song, or the new tags of a known one). The albums it touched come back: its
 /// album, and the one it was in before when its tags moved it.
-fn store_file(c: &Conn, f: &FileRow) -> rusqlite::Result<Vec<String>> {
+fn store_file(c: &Conn, f: &FileRow, added: Added) -> rusqlite::Result<Vec<String>> {
     use crate::loudness::{keeps_measurement, tag_columns, tag_values, TagColumns, COLUMNS};
     let mut albums = vec![f.album_id.clone()];
     if let Some(ex) = c.one("SELECT id, mtime, size, verified_at, album_id, duration, loudness_source FROM tracks WHERE path=?", p![f.path])? {
@@ -126,8 +149,10 @@ fn store_file(c: &Conn, f: &FileRow) -> rusqlite::Result<Vec<String>> {
         params.extend(tag_values(&f.gain));
         // stamped as it is written, in the order the files come: `added_at` keeps the order the files were found in
         params.push(json!(now()));
+        // who brought it in: only when the row is made (a rescan or a retag never changes it)
+        params.extend([json!(added.by), json!(added.via)]);
         c.execute(
-            &format!("INSERT INTO tracks (path, album_id, mtime, size, {}, {}, added_at) VALUES (?,?,?,?,{},?)", COLS.join(", "), COLUMNS.join(", "),
+            &format!("INSERT INTO tracks (path, album_id, mtime, size, {}, {}, added_at, added_by, added_via) VALUES (?,?,?,?,{},?,?,?)", COLS.join(", "), COLUMNS.join(", "),
                 vec!["?"; COLS.len() + COLUMNS.len()].join(",")),
             params,
         )?;
@@ -148,14 +173,14 @@ pub struct Indexed {
 
 /// Writes `rows` in one transaction (one library version move). A file whose statements fail is left out and
 /// named in `failed`; the others are saved. When the transaction itself can't be had, every file is named.
-fn write_batch(db: &Db, rows: &[FileRow], out: &mut Indexed) {
+fn write_batch(db: &Db, rows: &[FileRow], added: Added, out: &mut Indexed) {
     if rows.is_empty() {
         return;
     }
     let done = db.write_now(|c| c.transaction(|c| {
         let mut res = Vec::with_capacity(rows.len());
         for f in rows {
-            res.push(store_file(c, f));
+            res.push(store_file(c, f, added));
         }
         Ok::<_, rusqlite::Error>(res)
     }));
@@ -175,8 +200,14 @@ fn write_batch(db: &Db, rows: &[FileRow], out: &mut Indexed) {
     }
 }
 
-/// Reads and writes these files, [`SCAN_BATCH`] per transaction (imports, a report's fix).
+/// Reads and writes these files, [`SCAN_BATCH`] per transaction (imports, a report's fix); new songs are
+/// found in the music folder ([`Added::SCAN`]).
 pub fn index_files(db: &Db, paths: &[String]) -> Indexed {
+    index_files_as(db, paths, Added::SCAN)
+}
+
+/// [`index_files`] with who brought the new songs in (a Files upload or import).
+pub fn index_files_as(db: &Db, paths: &[String], added: Added) -> Indexed {
     let mut out = Indexed::default();
     for chunk in paths.chunks(SCAN_BATCH) {
         let mut rows = Vec::with_capacity(chunk.len());
@@ -186,7 +217,7 @@ pub fn index_files(db: &Db, paths: &[String]) -> Indexed {
                 Err(e) => out.failed.push((path.clone(), e.to_string())),
             }
         }
-        write_batch(db, &rows, &mut out);
+        write_batch(db, &rows, added, &mut out);
     }
     out
 }
@@ -272,11 +303,11 @@ impl Library {
                 Err(e) => out.failed.push((path, e.to_string())),
             }
             if batch.len() >= SCAN_BATCH {
-                write_batch(db, &batch, &mut out);
+                write_batch(db, &batch, Added::SCAN, &mut out);
                 batch.clear();
             }
         }
-        write_batch(db, &batch, &mut out);
+        write_batch(db, &batch, Added::SCAN, &mut out);
         for (path, e) in &out.failed {
             db.log("warning", &format!("Could not read {path}: {e}"));
         }
@@ -454,8 +485,9 @@ pub fn stats(db: &impl encore_db::Query) -> Value {
     Value::Object(s)
 }
 
-/// Delete files (and their lyrics) and their rows; playlist entries move to `replacement` if given. One
-/// lookup, one playlist update and one delete per 500 songs (in a transaction).
+/// Delete files (and their lyrics) and their rows; playlist entries move to `replacement` if given, and so does
+/// who added the song ([`inherit_added`]). One lookup, one playlist update and one delete per 500 songs (in a
+/// transaction).
 pub fn delete_tracks(st: &impl Ctx, ids: &[i64], replacement: Option<i64>) -> usize {
     let db = st.db();
     let mut n = 0;
@@ -481,6 +513,9 @@ pub fn delete_tracks(st: &impl Ctx, ids: &[i64], replacement: Option<i64>) -> us
         let mut params = vec![json!(replacement)];
         params.extend(id_params.iter().cloned());
         let _ = db.write_now(|c| c.transaction(|c| {
+            if let (Some(new), Some(old)) = (replacement, found.first()) {
+                inherit_added(c, *old, new)?;
+            }
             c.execute(&format!("UPDATE playlist_items SET track_id=? WHERE track_id IN ({marks})"), params)?;
             // the surround versions of these songs follow the replacement, or keep no stereo song
             crate::surround::stereo_gone(c, &found, replacement)?;
@@ -492,6 +527,19 @@ pub fn delete_tracks(st: &impl Ctx, ids: &[i64], replacement: Option<i64>) -> us
         }
     }
     n
+}
+
+/// A new copy (`new`) takes the place of a song (`old`): it takes who added the old one, when nobody is named
+/// for it yet (its `added_via` is still `scan`, a fresh import a request hasn't stamped). A user's request
+/// stamps it afterwards all the same; a request without a user (a lossless upgrade) leaves it as inherited.
+pub fn inherit_added(c: &Conn, old: i64, new: i64) -> rusqlite::Result<()> {
+    if old == new {
+        return Ok(());
+    }
+    c.execute("UPDATE tracks SET added_by=o.added_by, added_via=o.added_via, requested_at=o.requested_at
+               FROM (SELECT added_by, added_via, requested_at FROM tracks WHERE id=?) o
+               WHERE tracks.id=? AND tracks.added_via='scan' AND o.added_via IS NOT NULL", p![old, new])?;
+    Ok(())
 }
 
 /// Remove empty folders (and leftover junk files) upwards from `path`, never above `stop`.
@@ -685,6 +733,44 @@ mod tests {
         let now = ids(&db);
         assert!(now.iter().any(|(_, p)| p.ends_with("Linked/G/1.mp3")), "the song behind the broken link stays: {now:?}");
         assert!(!now.iter().any(|(_, p)| p.ends_with("A/One/1.mp3")) && now.iter().any(|(_, p)| p.ends_with("A/One/2.mp3")), "the rest is scanned: {now:?}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Who added a song is written when its row is made, never by a rescan; a new file's type tags are read
+    /// ('' / 0 without them); a new copy takes who added the copy it replaces only while nobody is named for it.
+    #[test]
+    fn who_added_is_kept_on_the_song() {
+        let dir = encore_core::tmp::dir("scan-added");
+        let album = dir.join("music/A/B");
+        std::fs::create_dir_all(&album).unwrap();
+        for n in ["1.flac", "2.flac", "3.flac"] {
+            std::fs::write(album.join(n), b"").unwrap();
+        }
+        let db = Db::open(&dir.join("cfg")).unwrap();
+        let path = |n: &str| album.join(n).to_string_lossy().to_string();
+        index_files(&db, &[path("1.flac")]);
+        index_files_as(&db, &[path("2.flac")], Added { by: Some(7), via: "upload" });
+        let row = |n: &str| db.one("SELECT id, added_by, added_via, requested_at, releasetype, tracktotal, compilation FROM tracks WHERE path=?", p![path(n)]).unwrap().unwrap();
+        let r1 = row("1.flac");
+        assert_eq!((r1.s("added_via"), r1.get("added_by").unwrap().is_null()), ("scan".to_string(), true));
+        assert_eq!((r1.s("releasetype"), r1.i("tracktotal"), r1.i("compilation")), (String::new(), 0, 0), "read: '' / 0 without the tags");
+        let r2 = row("2.flac");
+        assert_eq!((r2.s("added_via"), r2.i("added_by")), ("upload".to_string(), 7));
+        // a request stamped song 1; a full rescan (and an index of the same file) never changes it
+        db.execute("UPDATE tracks SET added_by=3, added_via='request', requested_at=1000 WHERE id=?", p![r1.i("id")]).unwrap();
+        Library::default().scan_sync(&db, &dir.join("music").to_string_lossy(), true);
+        index_files_as(&db, &[path("1.flac")], Added { by: Some(9), via: "import" });
+        let r1 = row("1.flac");
+        assert_eq!((r1.s("added_via"), r1.i("added_by"), r1.f("requested_at")), ("request".to_string(), 3, 1000.0));
+        // song 3 is found by the scan: a fresh copy that takes song 1's place inherits who asked for it …
+        let r3 = row("3.flac");
+        assert_eq!(r3.s("added_via"), "scan");
+        db.write_now(|c| inherit_added(c, r1.i("id"), r3.i("id"))).unwrap();
+        let r3 = row("3.flac");
+        assert_eq!((r3.s("added_via"), r3.i("added_by"), r3.f("requested_at")), ("request".to_string(), 3, 1000.0));
+        // … but a copy someone is named for keeps its own
+        db.write_now(|c| inherit_added(c, r1.i("id"), r2.i("id"))).unwrap();
+        assert_eq!(row("2.flac").s("added_via"), "upload");
         let _ = std::fs::remove_dir_all(&dir);
     }
 

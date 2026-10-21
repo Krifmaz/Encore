@@ -8,6 +8,7 @@ use crate::app::{self, Ctx, PageFuture};
 use crate::dom::{self, EventListener};
 use crate::json::{js_string, json, J};
 use crate::pages::{artwork, common, foryou, lyrics, playlists};
+use crate::pages::library_types as lt;
 use crate::player;
 use crate::ui::{self, confirm_dialog, empty_state, esc, esck, icon, modal, pop_menu, skeleton_grid, toast, MenuItem, Modal, ModalOpts};
 use serde_json::{Map, Value};
@@ -38,12 +39,14 @@ pub(crate) fn uri_component(s: &str) -> String {
 /// The library page's address for what it shows (p6 item 9): the search stays in it (`#/library?q=`), so Back and
 /// reload keep it. The results view has no `tab`; a tab filtered by the search has one (Albums, the default tab,
 /// only when there is a search, or reload would show the results view instead).
-fn library_hash(tab: &str, results: bool, q: &str, artist: &str, filter: &str) -> String {
+/// The Albums tab's Type (0.36) stays in it too: `#/library?type=live`.
+fn library_hash(tab: &str, results: bool, q: &str, artist: &str, filter: &str, album_type: &str) -> String {
     let mut parts: Vec<String> = Vec::new();
     if !results && (tab != "albums" || !q.is_empty()) { parts.push(format!("tab={}", uri_component(tab))); }
     if !q.is_empty() { parts.push(format!("q={}", uri_component(q))); }
     if !artist.is_empty() { parts.push(format!("artist={}", uri_component(artist))); }
     if !filter.is_empty() { parts.push(format!("filter={}", uri_component(filter))); }
+    if !album_type.is_empty() && tab == "albums" && !results { parts.push(format!("type={}", uri_component(album_type))); }
     if parts.is_empty() { "#/library".to_string() } else { format!("#/library?{}", parts.join("&")) }
 }
 
@@ -134,8 +137,9 @@ fn source_line(t: &Value) -> String {
     let link = if t.truthy("source_url") {
         format!(r##" · <a href="{}" target="_blank" rel="noopener noreferrer" style="color:var(--accent)">link</a>"##, esck(t, "source_url"))
     } else { String::new() };
-    let who = if t.truthy("requested_by") {
-        format!(" · requested by {}{}", esck(t, "requested_by"), if t.truthy("requested_at") { format!(" on {}", ui::fmt::day(t.f("requested_at"))) } else { String::new() })
+    let (by, at) = requester(t);
+    let who = if !by.is_empty() {
+        format!(" · requested by {}{}", esc(&by), if at > 0.0 { format!(" on {}", ui::fmt::day(at)) } else { String::new() })
     } else { String::new() };
     format!(r##"<div class="small faint ellipsis" style="max-width:520px" title="{}">⬇ {}{}{link}{when}{who}</div>"##,
         esc(&join_truthy(t, &["source", "source_detail"], " – ")), esck(t, "source"),
@@ -213,7 +217,8 @@ pub fn track_menu(anchor: &Element, t: &Value, admin: bool, on_deleted: Option<R
             });
         }));
     }
-    pop_menu(anchor, items);
+    let menu = ui::pop_menu_el(anchor, items);
+    show_added(&menu, &t.s("id"));
 }
 
 /// "⋯" for a Surround song: playing it, its lyrics and file, and its stereo version.
@@ -226,7 +231,8 @@ fn surround_track_menu(anchor: &Element, t: &Value) {
     items.push(MenuItem::link("Download this song", &icon("download"), &format!("/api/library/tracks/{}/file", t.s("id")), true));
     if t.truthy("album_id") { items.push(MenuItem::link("Go to album", &icon("disc"), &format!("#/library/album/{}", t.s("album_id")), false)); }
     if t.truthy("stereo_album_id") { items.push(MenuItem::link("Go to the stereo version", &icon("disc"), &format!("#/library/album/{}", t.s("stereo_album_id")), false)); }
-    pop_menu(anchor, items);
+    let menu = ui::pop_menu_el(anchor, items);
+    show_added(&menu, &t.s("id"));
 }
 
 // ---- fixSongModal ----
@@ -340,7 +346,7 @@ fn cover_v_text(a: &Value) -> String {
 
 /// The JS `st` object. `results`: with a search, the one results view (true) or the selected tab filtered by it
 /// (false: a tab was clicked, or "Show all N" opened one).
-struct St { tab: String, q: String, sort: String, dir: String, filter: String, artist: String, offset: usize, results: bool }
+struct St { tab: String, q: String, sort: String, dir: String, filter: String, artist: String, offset: usize, results: bool, album_type: String }
 
 /// The rows of the Songs table from `base` on (`data-i` and the ⋯ index count from there).
 fn song_rows(rows: &[Value], base: usize) -> String {
@@ -387,6 +393,15 @@ struct Lib {
     /// Counts the lists drawn from scratch: an answer for an older one (a search typed further, another tab) is
     /// dropped, so the newest query wins.
     load_seq: Cell<u32>,
+    /// Select mode (0.36, admins): the grid's tiles pick albums instead of opening them
+    selecting: Cell<bool>,
+    sel: RefCell<lt::Selection>,
+    /// the Type dropdown's entries (GET /api/library/album-types)
+    types: RefCell<Vec<Value>>,
+    /// how many albums the list shows in all (Select all's N)
+    total: Cell<usize>,
+    /// a Move to Trash is running
+    moving: Cell<bool>,
 }
 
 impl Lib {
@@ -401,7 +416,7 @@ impl Lib {
     fn sync_url(&self) {
         let results = self.results_view();
         let st = self.st.borrow();
-        replace_hash(&library_hash(&st.tab, results, &st.q, &st.artist, &st.filter));
+        replace_hash(&library_hash(&st.tab, results, &st.q, &st.artist, &st.filter, &st.album_type));
     }
 
     /// The results view of a search (GET /api/library/search, p6 item 9): Artists, Albums (singles too) and
@@ -476,6 +491,158 @@ impl Lib {
     /// `dirEl.textContent = st.dir === 'asc' ? '↑' : '↓'`.
     fn paint_dir(&self) { dom::set_text(&self.dir_el, if self.st.borrow().dir == "asc" { "↑" } else { "↓" }); }
 
+    /// The albums list's query (GET /api/library/albums): the tab's kind, or the Type when one is picked (Albums tab).
+    fn albums_query(&self) -> lt::AlbumsQuery {
+        let st = self.st.borrow();
+        lt::AlbumsQuery {
+            q: st.q.clone(), sort: st.sort.clone(), dir: st.dir.clone(), kind: album_kind(&st.tab, &st.q).to_string(), filter: st.filter.clone(),
+            artist: st.artist.clone(), album_type: if st.tab == "albums" { st.album_type.clone() } else { String::new() },
+        }
+    }
+
+    /// The Type dropdown's counts (GET /api/library/album-types) for this artist and filter; not offline.
+    fn load_types(self: &Rc<Self>) {
+        if crate::offline::mode::active() { return; }
+        let (artist, filter) = { let st = self.st.borrow(); (st.artist.clone(), st.filter.clone()) };
+        let me = self.clone();
+        dom::spawn(async move {
+            let Ok(r) = api::get(&format!("/library/album-types?artist={}&filter={}", enc(&artist), enc(&filter))).await else { return };
+            *me.types.borrow_mut() = r.a("types");
+            me.paint_types();
+        });
+    }
+
+    /// The Type dropdown: on the Albums tab (not the results view), "All types" first, each type with its count.
+    fn paint_types(&self) {
+        let Some(el) = dom::qs_in(&self.view, "#lib-type") else { return };
+        let show = !self.types.borrow().is_empty() && !self.results_view() && self.st.borrow().tab == "albums";
+        dom::toggle_class(&el, "hidden", !show);
+        if !show { return; }
+        let cur = self.st.borrow().album_type.clone();
+        let opts = lt::type_options(&self.types.borrow(), &cur);
+        dom::set_html(&el, &opts.iter().map(|(v, t)| format!(r##"<option value="{}">{}</option>"##, esc(v), esc(t))).collect::<String>());
+        dom::set_value(&el, &cur);
+    }
+
+    // ---- Select mode (0.36, admins) ----
+
+    fn enter_select(&self) {
+        self.selecting.set(true);
+        self.sel.borrow_mut().clear();
+        self.mark_tiles();
+        self.paint_bar();
+    }
+
+    fn leave_select(&self) {
+        self.selecting.set(false);
+        self.sel.borrow_mut().clear();
+        self.mark_tiles();
+        self.paint_bar();
+    }
+
+    /// Changing the tab, Type, filter, sort or search clears what was picked.
+    fn clear_selection(&self) {
+        if !self.selecting.get() { return; }
+        self.sel.borrow_mut().clear();
+        self.mark_tiles();
+        self.paint_bar();
+    }
+
+    /// The bar in place of the filter row: "N selected", Select all N, Clear selection, Delete…, Done.
+    fn paint_bar(&self) {
+        let (Some(bar), Some(row)) = (dom::qs_in(&self.view, "#lib-selbar"), dom::qs_in(&self.view, "#lib-row")) else { return };
+        let on = self.selecting.get();
+        dom::toggle_class(&bar, "hidden", !on);
+        dom::toggle_class(&row, "hidden", on);
+        if !on || self.moving.get() { return; }
+        let n = self.sel.borrow().len();
+        dom::set_html(&bar, &format!(r##"<span class="badge accent">{sel}</span>
+      <button class="btn sm" data-sel-all>{all}</button>
+      <button class="btn sm" data-sel-clear{none}>Clear selection</button>
+      <button class="btn sm danger" data-sel-delete{none}>{trash}Delete…</button>
+      <button class="btn sm primary" data-sel-done>Done</button>"##,
+            sel = esc(&lt::selected_text(n)), all = esc(&lt::select_all_text(self.total.get())), trash = icon("trash"), none = if n == 0 { " disabled" } else { "" }));
+    }
+
+    /// The grid's tiles in select mode: a tap picks (no `data-href`, no play button), a check mark on the picked ones.
+    fn mark_tiles(&self) {
+        let on = self.selecting.get();
+        let sel = self.sel.borrow();
+        for tile in dom::qsa_in(&self.body, ".grid > .tile") {
+            let id = dom::data_opt(&tile, "pick").unwrap_or_else(|| dom::data(&tile, "href").trim_start_matches("/library/album/").to_string());
+            if id.is_empty() { continue; }
+            if on {
+                dom::set_data(&tile, "pick", &id);
+                let _ = tile.remove_attribute("data-href");
+                dom::add_class(&tile, "pickable");
+                dom::toggle_class(&tile, "picked", sel.contains(&id));
+                if let Some(art) = dom::qs_in(&tile, ".art") {
+                    if dom::qs_in(&art, ".pick-mark").is_none() { let _ = art.insert_adjacent_html("beforeend", &format!(r##"<span class="pick-mark" aria-hidden="true">{}</span>"##, icon("check"))); }
+                }
+            } else if dom::data_opt(&tile, "pick").is_some() {
+                dom::set_data(&tile, "href", &format!("/library/album/{id}"));
+                let _ = tile.remove_attribute("data-pick");
+                dom::remove_class(&tile, "pickable");
+                dom::remove_class(&tile, "picked");
+                if let Some(m) = dom::qs_in(&tile, ".pick-mark") { m.remove(); }
+            }
+        }
+    }
+
+    /// Select all N: every album of the list as it is filtered (at most 5000).
+    fn select_all(self: &Rc<Self>) {
+        let me = self.clone();
+        let url = self.albums_query().ids();
+        dom::spawn(async move {
+            match api::get(&url).await {
+                Ok(r) => {
+                    let ids: Vec<String> = r.a("ids").iter().map(|v| v.as_str().unwrap_or("").to_string()).filter(|s| !s.is_empty()).collect();
+                    let capped = me.sel.borrow_mut().select_all(&ids) || r.truthy("capped");
+                    if capped { toast(lt::AT_MOST, "warn"); }
+                    me.mark_tiles();
+                    me.paint_bar();
+                }
+                Err(e) => toast(&e.message, "err"),
+            }
+        });
+    }
+
+    /// Delete…: a dry run over the picked albums, the dialog, then the moves in chunks of 100 with the progress in
+    /// the bar, one toast at the end (with Open Trash); the list, the Type counts and the side index follow.
+    fn delete_selected(self: &Rc<Self>) {
+        let ids: Vec<String> = self.sel.borrow().ids().to_vec();
+        if ids.is_empty() || self.moving.get() { return; }
+        let me = self.clone();
+        dom::spawn(async move {
+            let d = match api::post("/library/albums/trash", json!({ "ids": ids, "dry_run": true })).await {
+                Ok(d) => d,
+                Err(e) => { toast(&e.message, "err"); return; }
+            };
+            if !trash_dialog(&d).await { return; }
+            me.moving.set(true);
+            let n = ids.len();
+            let bar = dom::qs_in(&me.view, "#lib-selbar");
+            let (mut moved, mut done, mut first_reason) = (0usize, 0usize, String::new());
+            for chunk in lt::chunks(&ids) {
+                if let Some(b) = &bar { dom::set_html(b, &format!(r##"<span class="spinner"></span><span class="muted">{}</span>"##, esc(&lt::moving_text(done, n)))); }
+                match api::post("/library/albums/trash", json!({ "ids": chunk, "dry_run": false })).await {
+                    Ok(r) => {
+                        moved += r.f("albums") as usize;
+                        if first_reason.is_empty() { first_reason = r.a("failed").first().map(|f| f.s("reason")).unwrap_or_default(); }
+                    }
+                    Err(e) => if first_reason.is_empty() { first_reason = e.message.clone(); },
+                }
+                done += chunk.len();
+            }
+            me.moving.set(false);
+            if first_reason.is_empty() && moved < n { first_reason = "It is no longer in the library".into(); }
+            ui::toast_action(&lt::moved_text(moved, n, &first_reason), "Open Trash", 8000, || dom::set_hash(lt::TRASH_HREF));
+            me.leave_select();
+            me.load_types();
+            me.reload();
+        });
+    }
+
     /// `load()` as the handlers call it (not awaited; a failure only reaches the console).
     fn reload(self: &Rc<Self>) {
         let me = self.clone();
@@ -513,10 +680,11 @@ impl Lib {
             (s.tab.clone(), s.q.clone(), s.sort.clone(), s.dir.clone(), s.filter.clone(), s.artist.clone())
         };
         if !matches!(tab.as_str(), "albums" | "singles" | "artists" | "tracks") || !q.is_empty() { return; }
+        let album_type = if tab == "albums" { self.st.borrow().album_type.clone() } else { String::new() };
         let kind = if tab == "albums" { "albums&album_kind=albums".to_string() } else { tab };
         let me = self.clone();
         dom::spawn(async move {
-            if let Ok(sections) = api::get(&format!("/library/index?kind={kind}&sort={sort}&dir={dir}&filter={filter}&artist={}", enc(&artist))).await {
+            if let Ok(sections) = api::get(&format!("/library/index?kind={kind}&sort={sort}&dir={dir}&filter={filter}&artist={}&type={}", enc(&artist), enc(&album_type))).await {
                 if me.index_seq.get() == seq { scrub.set(&sections); }
             }
         });
@@ -533,19 +701,22 @@ impl Lib {
         for b in dom::qsa_in(&self.view, "#lib-tabs button") { dom::toggle_class(&b, "active", !results && dom::data(&b, "t") == tab); }
         if let Some(p) = self.sort_el.parent_element() { dom::toggle_class(&p, "hidden", results || sort_opts(&tab).is_none()); }
         if let Some(filt) = dom::qs_in(&self.view, "#lib-filter") { dom::toggle_class(&filt, "hidden", results || !matches!(tab.as_str(), "albums" | "singles")); }
+        self.paint_types();
+        if let Some(b) = dom::qs_in(&self.view, "#lib-select") { dom::toggle_class(&b, "hidden", results || !matches!(tab.as_str(), "albums" | "singles")); }
         if let Some(p) = dom::qs_in(&self.view, "#lib-q").and_then(|q| q.parent_element()) { dom::toggle_class(&p, "hidden", !results && matches!(tab.as_str(), "duplicates" | "issues")); }
         if !append { self.load_index(); }
         if results { return self.render_results(mine).await; }
         if tab == "duplicates" { return self.clone().render_duplicates().await; }
         if tab == "issues" { return render_issues(&self.body, &self.view, &self.more).await; }
-        let (q, sort, dir, filter, artist, offset) = {
+        let (q, sort, dir, filter, offset) = {
             let s = self.st.borrow();
-            (s.q.clone(), s.sort.clone(), s.dir.clone(), s.filter.clone(), s.artist.clone(), s.offset)
+            (s.q.clone(), s.sort.clone(), s.dir.clone(), s.filter.clone(), s.offset)
         };
         if tab == "surround" { return self.render_surround(mine, &q, &sort, append).await; }
         if tab == "albums" || tab == "singles" {
-            let kind = album_kind(&tab, &q);
-            let page_url = |offset: usize, limit: usize| format!("/library/albums?q={}&sort={sort}&dir={dir}&kind={kind}&filter={filter}&artist={}&limit={limit}&offset={offset}", enc(&q), enc(&artist));
+            let query = self.albums_query();
+            let typed = !query.album_type.is_empty();
+            let page_url = |offset: usize, limit: usize| query.page(offset, limit);
             let url = page_url(offset, if want > 0 { want.clamp(PAGE, 500) } else { PAGE });
             // the next page was fetched ahead (with its covers) when this one showed
             let ahead = self.next_page.borrow_mut().take().filter(|(u, _)| append && *u == url).and_then(|(_, r)| r);
@@ -558,8 +729,11 @@ impl Lib {
             } else {
                 dom::set_html(&self.body, &if !items.is_empty() { format!(r##"<div class="grid">{html}</div>"##) }
                     else if !q.is_empty() { empty_state(&icon("library"), &format!("No albums match “{q}”"), "") }
+                    else if typed { empty_state(&icon("library"), lt::NO_ALBUMS_OF_TYPE, "") }
                     else { empty_state(&icon("library"), "No albums found", if filter == "untagged" { "Everything is tagged 🎉" } else { "" }) });
             }
+            self.total.set(res.f("total") as usize);
+            if self.selecting.get() { self.mark_tiles(); self.paint_bar(); }
             let off = { let mut s = self.st.borrow_mut(); s.offset += items.len(); s.offset };
             dom::toggle_class(&self.more, "hidden", off as f64 >= res.f("total"));
             if (off as f64) < res.f("total") {
@@ -765,8 +939,9 @@ pub fn render(view: Element, ctx: Ctx) -> PageFuture {
         let tab = { let t = ctx.q("tab"); if t.is_empty() { "albums".to_string() } else { t } };
         // `#/library?q=` opens the results view of that search; with a `tab` too, that tab filtered by it
         let results = ctx.q("tab").is_empty();
-        let st = St { tab, q: ctx.q("q").trim().to_string(), sort: ctx.q("sort"), dir: ctx.q("dir"), filter: ctx.q("filter"), artist: ctx.q("artist"), offset: 0, results };
-        let mut tabs: Vec<(&str, &str)> = vec![("albums", "Albums"), ("singles", "Singles"), ("artists", "Artists"), ("tracks", "Songs"), ("surround", "Surround")];
+        let st = St { tab, q: ctx.q("q").trim().to_string(), sort: ctx.q("sort"), dir: ctx.q("dir"), filter: ctx.q("filter"), artist: ctx.q("artist"), offset: 0, results,
+                      album_type: ctx.q("type") };
+        let mut tabs: Vec<(&str, &str)> = vec![("albums", "Albums"), ("singles", "Singles & EPs"), ("artists", "Artists"), ("tracks", "Songs"), ("surround", "Surround")];
         if admin { tabs.extend([("duplicates", "Duplicates"), ("issues", "Wrong audio")]); }
         let tabs_html: String = tabs.iter().map(|(k, l)| format!(r##"<button data-t="{k}" class="{}">{l}</button>"##, if *k == st.tab { "active" } else { "" })).collect();
         let admin_html = if admin {
@@ -788,7 +963,7 @@ pub fn render(view: Element, ctx: Ctx) -> PageFuture {
       {admin_html}
     </div>
     <div id="bulk" class="hidden card" style="margin-bottom:16px"></div>
-    <div class="row wrap" style="margin-bottom:18px">
+    <div class="row wrap" id="lib-row" style="margin-bottom:18px">
       <div class="tabs" id="lib-tabs">
         {tabs_html}
       </div>
@@ -799,11 +974,15 @@ pub fn render(view: Element, ctx: Ctx) -> PageFuture {
         <option value="">All albums</option><option value="untagged">Needs tagging</option>
         <option value="tagged">MusicBrainz tagged</option><option value="lossless">Lossless only</option>
       </select>
+      <select class="input hidden" id="lib-type" style="width:auto" aria-label="Type"></select>
+      {select_btn}
       {artist_html}
     </div>
+    <div class="row wrap sel-bar hidden" id="lib-selbar" style="margin-bottom:18px"></div>
     <div id="lib-body"></div>
     <div class="row mt" style="justify-content:center"><button class="btn hidden" id="more">Load more</button></div>"##,
-            shuffle = icon("shuffle"), search = icon("search"), q = esc(&st.q)));
+            shuffle = icon("shuffle"), search = icon("search"), q = esc(&st.q),
+            select_btn = if admin && !crate::offline::mode::active() { format!(r##"<button class="btn sm hidden" id="lib-select" title="Pick albums to delete">{}Select</button>"##, icon("check")) } else { String::new() }));
         dom::on_sel(&view, "#shuffle-lib", "click", |_| dom::spawn(async { if player::shuffle_library().await == 0 { toast("Your library is empty", "err"); } }));
         { let name = st.artist.clone(); dom::on_sel(&view, "#artist-share", "click", move |_| dom::spawn(ui::share_artist(name.clone()))); }
         let body = need(&view, "#lib-body")?;
@@ -815,6 +994,7 @@ pub fn render(view: Element, ctx: Ctx) -> PageFuture {
             view: view.clone(), body: body.clone(), more: more.clone(), sort_el: sort_el.clone(), dir_el: dir_el.clone(),
             admin, query_tab: ctx.q("tab"), st: RefCell::new(st), saved: RefCell::new(saved), tracks: RefCell::new(Vec::new()), body_onclick: RefCell::new(None),
             scrub: RefCell::new(None), index_seq: Cell::new(0), next_page: Rc::new(RefCell::new(None)), load_seq: Cell::new(0),
+            selecting: Cell::new(false), sel: RefCell::new(lt::Selection::default()), types: RefCell::new(Vec::new()), total: Cell::new(0), moving: Cell::new(false),
         });
         lib.paint_sort();
         if let Some(f) = dom::qs_in(&view, "#lib-filter") { let filter = lib.st.borrow().filter.clone(); dom::set_value(&f, &filter); }
@@ -840,6 +1020,18 @@ pub fn render(view: Element, ctx: Ctx) -> PageFuture {
         {
             let lib = lib.clone();
             dom::on(&body, "click", move |e| {
+                // Select mode: a tile picks or unpicks its album
+                if lib.selecting.get() {
+                    if let Some(t) = dom::closest(e, "[data-pick]") {
+                        dom::stop(e);
+                        let id = dom::data(&t, "pick");
+                        lib.sel.borrow_mut().toggle(&id);
+                        let on = lib.sel.borrow().contains(&id);
+                        dom::toggle_class(&t, "picked", on);
+                        lib.paint_bar();
+                        return;
+                    }
+                }
                 if let Some(rm) = dom::closest(e, "[data-rm-artist]") {
                     dom::stop(e);
                     let name = dom::data(&rm, "rmArtist");
@@ -865,7 +1057,7 @@ pub fn render(view: Element, ctx: Ctx) -> PageFuture {
                 // "Search everywhere" opens Discover with it
                 if let Some(b) = dom::closest(e, "[data-show-all]") {
                     let q = lib.st.borrow().q.clone();
-                    dom::set_hash(&library_hash(&dom::data(&b, "showAll"), false, &q, "", ""));
+                    dom::set_hash(&library_hash(&dom::data(&b, "showAll"), false, &q, "", "", ""));
                     return;
                 }
                 if dom::closest(e, "[data-search-everywhere]").is_some() {
@@ -891,6 +1083,7 @@ pub fn render(view: Element, ctx: Ctx) -> PageFuture {
                 let Some(t) = dom::closest(e, "[data-t]") else { return };
                 // with a search, a tab shows that tab filtered by it
                 { let mut st = lib.st.borrow_mut(); st.tab = dom::data(&t, "t"); st.results = false; }
+                if matches!(lib.st.borrow().tab.as_str(), "albums" | "singles") { lib.clear_selection(); } else if lib.selecting.get() { lib.leave_select(); }
                 lib.sync_url();
                 for b in dom::qsa_in(&lib.view, "#lib-tabs button") { dom::toggle_class(&b, "active", b == t); }
                 lib.paint_sort();
@@ -902,6 +1095,7 @@ pub fn render(view: Element, ctx: Ctx) -> PageFuture {
             // typing shows the results view again (the search searches the whole library, whatever the tab)
             let deb = ui::Debounce::new(300, move || {
                 { let mut st = lib2.st.borrow_mut(); st.q = dom::value(&q2).trim().to_string(); st.results = true; }
+                lib2.clear_selection();
                 lib2.sync_url();
                 lib2.reload();
             });
@@ -911,6 +1105,7 @@ pub fn render(view: Element, ctx: Ctx) -> PageFuture {
             let lib = lib.clone();
             dom::on(&sort_el, "change", move |_| {
                 { let mut st = lib.st.borrow_mut(); st.sort = dom::value(&lib.sort_el); st.dir = if desc_first(&st.sort) { "desc".into() } else { "asc".into() }; }
+                lib.clear_selection();
                 lib.paint_dir();
                 lib.save_sort();
                 lib.reload();
@@ -920,6 +1115,7 @@ pub fn render(view: Element, ctx: Ctx) -> PageFuture {
             let lib = lib.clone();
             dom::on(&dir_el, "click", move |_| {
                 { let mut st = lib.st.borrow_mut(); st.dir = if st.dir == "asc" { "desc".into() } else { "asc".into() }; }
+                lib.clear_selection();
                 lib.paint_dir();
                 lib.save_sort();
                 lib.reload();
@@ -929,9 +1125,43 @@ pub fn render(view: Element, ctx: Ctx) -> PageFuture {
             let lib = lib.clone();
             dom::on_sel(&view, "#lib-filter", "change", move |e| {
                 if let Some(el) = dom::target_el(e) { lib.st.borrow_mut().filter = dom::value(&el); }
+                lib.clear_selection();
+                lib.load_types();
                 lib.reload();
             });
         }
+        // the Type dropdown (0.36): the Albums tab of one type, kept in the address
+        {
+            let lib = lib.clone();
+            dom::on_sel(&view, "#lib-type", "change", move |e| {
+                if let Some(el) = dom::target_el(e) { lib.st.borrow_mut().album_type = dom::value(&el); }
+                lib.clear_selection();
+                lib.sync_url();
+                lib.reload();
+            });
+        }
+        // Select (admins): pick albums, Select all, Delete… to the Trash
+        {
+            let lib = lib.clone();
+            dom::on_sel(&view, "#lib-select", "click", move |_| lib.enter_select());
+        }
+        {
+            let lib = lib.clone();
+            dom::on_sel(&view, "#lib-selbar", "click", move |e| {
+                if dom::closest(e, "[data-sel-all]").is_some() { lib.select_all(); }
+                else if dom::closest(e, "[data-sel-clear]").is_some() { lib.clear_selection(); }
+                else if dom::closest(e, "[data-sel-delete]").is_some() { lib.delete_selected(); }
+                else if dom::closest(e, "[data-sel-done]").is_some() { lib.leave_select(); }
+            });
+        }
+        {
+            let lib = lib.clone();
+            dom::on_document("keydown", move |e| {
+                if !lib.selecting.get() || lib.moving.get() || !lib.view.is_connected() || dom::qs(".modal-bg").is_some() || dom::qs(".menu-pop").is_some() { return; }
+                if dom::key(e) == "Escape" { lib.leave_select(); }
+            });
+        }
+        lib.load_types();
         {
             let lib = lib.clone();
             dom::on(&more, "click", move |_| { let lib = lib.clone(); dom::spawn(async move { let _ = lib.load(true, 0).await; }); });
@@ -1020,6 +1250,39 @@ pub fn render(view: Element, ctx: Ctx) -> PageFuture {
     })
 }
 
+/// The Delete… / Move album to Trash dialog from a dry run (POST /api/library/albums/trash `dry_run`): its title is the
+/// server's ("Delete 12 albums (3.4 GB)?"), the Trash's words, the other-disk sentence and what stays; Move to Trash /
+/// Cancel. When the Trash's disk hasn't room: the server's words and Close only. → true on Move to Trash
+async fn trash_dialog(d: &Value) -> bool {
+    if d.g("room") == &json!(false) {
+        modal(ModalOpts::new(&esc(&d.s("text")), &format!(r##"<p class="muted" style="margin:0">{}</p>"##, esck(d, "room_text")))
+            .footer(r##"<button class="btn" data-close>Close</button>"##));
+        return false;
+    }
+    let body = lt::confirm_body(d.truthy("other_disk"), &d.s("skipped_text"));
+    ui::confirm_dialog_html(&d.s("text"), &format!(r##"<p class="muted" style="margin:0;white-space:pre-line">{}</p>"##, esc(&body)), "Move to Trash", true).await
+}
+
+/// The song ⋯ menu's first line (0.36): who added the song, asked when the menu opens (the line shows once it
+/// answers, and not at all when it has nothing to say). Every list's song menu and the player's ⋯.
+pub(crate) fn show_added(menu: &Element, id: &str) {
+    if id.is_empty() || crate::offline::mode::active() { return; }
+    let (menu, id) = (menu.clone(), id.to_string());
+    dom::spawn(async move {
+        let Ok(v) = api::get(&format!("/library/tracks/{id}/added")).await else { return };
+        ui::menu_add_info(&menu, &lt::added_of(&v, ui::fmt::day));
+    });
+}
+
+/// Who asked for a song, for its source line: the adder of a request-like song (kept after Clear finished), or
+/// – from a server before 0.36 – the request's user.
+fn requester(t: &Value) -> (String, f64) {
+    if t.truthy("added_via") {
+        return if lt::request_like(&t.s("added_via")) { (t.s("added_by_name"), t.f("requested_at")) } else { (String::new(), 0.0) };
+    }
+    (t.s("requested_by"), t.f("requested_at"))
+}
+
 fn verify_badge(t: &Value) -> String {
     match t.g("verify_status").as_str() {
         Some("manual") => format!(r##"<span class="badge ok" title="{}">✓ confirmed</span>"##, esc(&or_str(t, "verify_detail", "Confirmed by hand"))),
@@ -1062,10 +1325,24 @@ pub fn render_album(view: Element, ctx: Ctx) -> PageFuture {
         // `Math.min(...dates)` – infinity when there are none
         let earliest = |key: &str| tracks.iter().filter(|t| t.truthy(key)).map(|t| t.f(key)).fold(f64::INFINITY, f64::min);
         let (requested_at, added_at) = (earliest("requested_at"), earliest("added_at"));
-        let history = [
-            if requesters.is_empty() { String::new() } else { format!("Requested by {}{}", esc(&requesters), if requested_at.is_finite() { format!(" on {}", ui::fmt::day(requested_at)) } else { String::new() }) },
-            if added_at.is_finite() { format!("{} {}", if requesters.is_empty() { "Added" } else { "added" }, ui::fmt::day(added_at)) } else { String::new() },
-        ].into_iter().filter(|x| !x.is_empty()).collect::<Vec<_>>().join(" · ");
+        // who added it (0.36): the server's groups (kept on the songs, so Clear finished doesn't lose the names);
+        // an older server: its requesters, joined here
+        let history = if a.g("history").is_array() {
+            let groups: Vec<String> = a.a("history").iter().map(|g| lt::added_of(g, ui::fmt::day)).collect();
+            let added = a.g("added_at").as_f64().filter(|t| *t > 0.0).or(added_at.is_finite().then_some(added_at)).map(ui::fmt::day);
+            esc(&lt::history_line(&groups, added.as_deref()))
+        } else {
+            [
+                if requesters.is_empty() { String::new() } else { format!("Requested by {}{}", esc(&requesters), if requested_at.is_finite() { format!(" on {}", ui::fmt::day(requested_at)) } else { String::new() }) },
+                if added_at.is_finite() { format!("{} {}", if requesters.is_empty() { "Added" } else { "added" }, ui::fmt::day(added_at)) } else { String::new() },
+            ].into_iter().filter(|x| !x.is_empty()).collect::<Vec<_>>().join(" · ")
+        };
+        // its type (0.36): "Album", "Live · EP", "Compilation · One-off"; admins see why on hover
+        let type_chip = if a.g("type").is_object() {
+            let t = a.o("type");
+            let title = if admin && t.truthy("why_text") { format!(r##" title="{}""##, esck(&t, "why_text")) } else { String::new() };
+            format!(r##"<span class="badge accent"{title}>{}</span>"##, esck(&t, "label"))
+        } else { String::new() };
         let rows: String = tracks.iter().enumerate().map(|(i, t)| format!(r##"<tr data-i="{i}">
         <td class="num"><span class="n">{disc}{track}</span><span class="rowplay" aria-hidden="true">{rowplay}</span></td>
         <td><div style="font-weight:600">{title}</div>{title_sub}{relpath}{source}</td>
@@ -1092,6 +1369,7 @@ pub fn render_album(view: Element, ctx: Ctx) -> PageFuture {
           {year} · {n} tracks · {dur} · {size}</div>
         {requested}
         <div class="chips mt">
+          {type_chip}
           <span class="badge">{formats}</span>
           {genre}
           {tagged}
@@ -1123,7 +1401,7 @@ pub fn render_album(view: Element, ctx: Ctx) -> PageFuture {
             tagged = if surround { String::new() } else if untagged > 0 { format!(r##"<span class="badge warn">{untagged} track(s) not MusicBrainz-tagged</span>"##) } else { r##"<span class="badge ok">MusicBrainz tagged</span>"##.to_string() },
             play = icon("play"), shuffle = icon("shuffle"), external = icon("external"),
             edit = if admin && !surround { format!(r##"<button class="btn" id="album-edit" title="Change the album, artist and song names">{}Edit details</button>"##, icon("edit")) } else { String::new() },
-            more = icon("more")));
+            more = icon("more"), type_chip = type_chip));
         let queue_tracks = Rc::new(with_album_id(&tracks, &id));
         { let qt = queue_tracks.clone(); dom::on_sel(&view, "#play-all", "click", move |_| player::play_queue((*qt).clone(), 0, "album")); }
         { let qt = queue_tracks.clone(); dom::on_sel(&view, "#shuffle-all", "click", move |_| { if !player::group_shuffle(&qt) { player::play_queue(shuffled(&qt), 0, "album"); } }); }
@@ -1298,6 +1576,7 @@ fn album_menu(anchor: &Element, a: &Value, id: &str, qt: &Rc<Vec<Value>>, admin:
         items.push(MenuItem::SEP);
         { let (id, a) = (id.to_string(), a.clone()); items.push(MenuItem::new("Tag / match metadata", &icon("tag"), move || match_modal(&id, &a))); }
         { let (id, a) = (id.to_string(), a.clone()); items.push(MenuItem::new("Edit details (album, artist, songs)", &icon("edit"), move || edit_modal(&id, &a))); }
+        if a.g("type").is_object() { let (id, a, reload) = (id.to_string(), a.clone(), reload.clone()); items.push(MenuItem::new(lt::CHANGE_TYPE, &icon("tag"), move || change_type_modal(&id, &a, reload.clone()))); }
         { let (id, a, reload) = (id.to_string(), a.clone(), reload.clone()); items.push(MenuItem::new("Change artwork…", &icon("disc"), move || artwork::artwork_modal(&id, &a, reload.clone()))); }
         {
             let (id, reload) = (id.to_string(), reload.clone());
@@ -1313,19 +1592,59 @@ fn album_menu(anchor: &Element, a: &Value, id: &str, qt: &Rc<Vec<Value>>, admin:
         }
         items.push(MenuItem::SEP);
         {
-            let (id, a) = (id.to_string(), a.clone());
-            items.push(MenuItem::danger("Delete album from disk", &icon("trash"), move || {
-                let (id, a) = (id.clone(), a.clone());
+            let id = id.to_string();
+            // to the Trash of Files (0.36), restorable there: the dialog of a dry run of this album
+            items.push(MenuItem::danger(lt::MOVE_ALBUM, &icon("trash"), move || {
+                let id = id.clone();
                 dom::spawn(async move {
-                    if !confirm_dialog("Delete album", &format!("Permanently delete \"{}\" ({} files) from disk?", a.s("album"), a.a("tracks").len()), "Delete", true).await { return; }
-                    if api::del(&format!("/library/albums/{id}")).await.is_err() { return; }
-                    toast("Album deleted", "ok");
-                    app::navigate("/library");
+                    let d = match api::post("/library/albums/trash", json!({ "ids": [id], "dry_run": true })).await {
+                        Ok(d) => d,
+                        Err(e) => { toast(&e.message, "err"); return; }
+                    };
+                    if !trash_dialog(&d).await { return; }
+                    match api::del(&format!("/library/albums/{id}")).await {
+                        Ok(r) => {
+                            let text = if r.truthy("text") { r.s("text") } else { lt::moved_text(1, 1, "") };
+                            ui::toast_action(&text, "Open Trash", 8000, || dom::set_hash(lt::TRASH_HREF));
+                            app::navigate("/library");
+                        }
+                        Err(e) => toast(&e.message, "err"),
+                    }
                 });
             }));
         }
     }
     pop_menu(anchor, items);
+}
+
+// ---- Change type (0.36) ----
+
+/// Change type…: Album, EP, Single, One-off (with what a One-off is), or Automatic with what the server guesses
+/// and why; the current one is checked. Save → PUT …/type → "Type saved", the page again.
+fn change_type_modal(id: &str, a: &Value, reload: Rc<dyn Fn()>) {
+    let t = a.o("type");
+    let current = t.s("chosen");
+    let rows: String = lt::type_choices(&t).iter().map(|(v, label)| {
+        let help = if *v == "one_off" { format!(r##"<div class="small muted help">{}</div>"##, esc(lt::ONE_OFF_HELP)) } else { String::new() };
+        format!(r##"<label class="radio-row"><input type="radio" name="ct" value="{v}"{checked}><span>{label}{help}</span></label>"##,
+            checked = if *v == current.as_str() { " checked" } else { "" }, label = esc(label))
+    }).collect();
+    let body = format!(r##"<p class="muted" style="margin-top:0">{}</p><div class="type-opts">{rows}</div>"##, esc(&lt::what_is(&a.s("album"))));
+    let m = modal(ModalOpts::new("Change type", &body).footer(r##"<button class="btn" data-close>Cancel</button><button class="btn primary" id="ct-save">Save</button>"##));
+    let (m2, id) = (m.clone(), id.to_string());
+    dom::on_sel(&m.el.clone(), "#ct-save", "click", move |e| {
+        let target = dom::target_el(e);
+        let picked = m2.qs("input[name=ct]:checked").map(|i| dom::value(&i)).unwrap_or_default();
+        let (m, id, reload) = (m2.clone(), id.clone(), reload.clone());
+        dom::spawn(async move {
+            if let Some(b) = &target { dom::set_disabled(b, true); }
+            let format = if picked.is_empty() { Value::Null } else { Value::String(picked) };
+            match api::put(&format!("/library/albums/{id}/type"), json!({ "format": format })).await {
+                Ok(_) => { toast("Type saved", "ok"); m.close(); reload(); }
+                Err(e) => { toast(&e.message, "err"); if let Some(b) = &target { dom::set_disabled(b, false); } }
+            }
+        });
+    });
 }
 
 // ---- matchModal ----
@@ -1592,15 +1911,19 @@ mod search_tests {
         assert_eq!(uri_component("AC/DC & “Ü”"), "AC%2FDC%20%26%20%E2%80%9C%C3%9C%E2%80%9D");
         assert_eq!(uri_component("a-b_c.d!~*'()"), "a-b_c.d!~*'()");
         // the results view: the search only
-        assert_eq!(library_hash("albums", true, "crazy gb", "", ""), "#/library?q=crazy%20gb");
-        assert_eq!(library_hash("tracks", true, "crazy gb", "", ""), "#/library?q=crazy%20gb");
+        assert_eq!(library_hash("albums", true, "crazy gb", "", "", ""), "#/library?q=crazy%20gb");
+        assert_eq!(library_hash("tracks", true, "crazy gb", "", "", ""), "#/library?q=crazy%20gb");
         // a tab filtered by the search names the tab, Albums too (or reload would show the results view)
-        assert_eq!(library_hash("albums", false, "crazy gb", "", ""), "#/library?tab=albums&q=crazy%20gb");
-        assert_eq!(library_hash("tracks", false, "x", "", ""), "#/library?tab=tracks&q=x");
+        assert_eq!(library_hash("albums", false, "crazy gb", "", "", ""), "#/library?tab=albums&q=crazy%20gb");
+        assert_eq!(library_hash("tracks", false, "x", "", "", ""), "#/library?tab=tracks&q=x");
         // no search: as before
-        assert_eq!(library_hash("albums", false, "", "", ""), "#/library");
-        assert_eq!(library_hash("artists", false, "", "", ""), "#/library?tab=artists");
-        assert_eq!(library_hash("albums", false, "", "Beta Band", "lossless"), "#/library?artist=Beta%20Band&filter=lossless");
+        assert_eq!(library_hash("albums", false, "", "", "", ""), "#/library");
+        assert_eq!(library_hash("artists", false, "", "", "", ""), "#/library?tab=artists");
+        assert_eq!(library_hash("albums", false, "", "Beta Band", "lossless", ""), "#/library?artist=Beta%20Band&filter=lossless");
+        // the Albums tab's Type (0.36) stays in the address; other tabs and the results view have none
+        assert_eq!(library_hash("albums", false, "", "", "", "live"), "#/library?type=live");
+        assert_eq!(library_hash("singles", false, "", "", "", "live"), "#/library?tab=singles");
+        assert_eq!(library_hash("albums", true, "x", "", "", "live"), "#/library?q=x");
     }
 
     #[test]

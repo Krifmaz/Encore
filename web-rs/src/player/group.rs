@@ -1,8 +1,18 @@
 //! The player in a group listen (crate::group holds the group): it follows the group's queue, song, position and
 //! play / pause, and what the listener does here – the bar, the full player, Up next, the keyboard, the lock screen,
-//! another device's remote commands – goes to the group when this device may control it. A pause by a member who
-//! may not control (or headphones taken out, another app taking the sound) pauses only this browser: "Paused here ·
-//! Catch up".
+//! another device's remote commands – goes to the group when this device may control it.
+//!
+//! Pause (the owner on Oct 21: "it may pause for me but dont stop the other users playback"): every pause in a group
+//! pauses only this browser – the Pause button ("Paused for you – the group keeps playing"), the keyboard, the lock
+//! screen and the OS media controls, headphones taken out, another app or a call taking the sound, the browser
+//! refusing to start – and is never sent to the group: "Paused here · Catch up". Play (or Catch up) then rejoins the
+//! group where it is now, with one hard seek there. The group's own pause is "Pause for everyone" (the player's ⋯ and
+//! the group panel) for those who control it.
+//!
+//! Play on a list (the owner on Oct 21: "it should just add it to the que"): an album's, a playlist's, an artist's or a
+//! song's Play adds the songs from the one asked for to the group's Up next (`enqueue`), and Shuffle adds them
+//! shuffled; only a group that plays nothing and has nothing in Up next starts with them (`set_queue`,
+//! rules::play_starts). "Added 12 songs to the group's Up next".
 //!
 //! Sync rule (the same on web, desktop and phone, client-shapes §5.6, rules::sync_step): expected position = position +
 //! (server_now − anchor_ms) / 1000 while playing. Under 40 ms nothing; 40 ms – 1.5 s a `playbackRate` nudge
@@ -320,28 +330,43 @@ pub(super) fn g_toggle() -> bool {
     true
 }
 
-/// Pause: the group's (the host, or everyone with "Everyone can control"), else only here ("Paused here").
+/// Pause in a group: only here, for everyone who presses it ("Paused for you – the group keeps playing"); the group
+/// plays on. The group's own pause is [`pause_for_everyone`].
 pub(super) fn g_pause() -> bool {
     let Some(s) = g::current() else { return false };
-    if s.truthy("playing") && !g::local_paused() && g::can_control() {
-        hold(&s);
-        own_pause();
-        st_mut(|x| x.want = false);
-        g::command("pause", json!({}));
-    } else {
-        own_pause();
-        st_mut(|x| x.want = false);
-        if s.truthy("playing") { g::set_local_paused(true); }
+    own_pause();
+    st_mut(|x| x.want = false);
+    if s.truthy("playing") && !g::local_paused() {
+        g::set_local_paused(true);
+        toast(rules::PAUSED_FOR_YOU, "");
     }
     render();
     media_state();
     true
 }
 
-/// Play: after a pause here, back with the group ("Catch up"); a paused group plays for those who control it.
+/// "Pause for everyone" (the player's ⋯ and the group panel): the group's pause, for those who control it.
+pub fn pause_for_everyone() {
+    let Some(s) = g::current() else { return };
+    if !g::can_control() { deny(); return; }
+    hold(&s);
+    own_pause();
+    st_mut(|x| x.want = false);
+    // (the group pauses: nothing is paused here only any more)
+    g::set_local_paused(false);
+    g::command("pause", json!({}));
+    render();
+    media_state();
+}
+
+/// Play: after a pause here, back with the group where it is now (one hard seek there: "Catch up"); a paused group
+/// plays for those who control it.
 pub(super) fn g_play() -> bool {
     let Some(s) = g::current() else { return false };
-    if g::local_paused() { g::catch_up(); return true; }
+    if g::local_paused() {
+        g::catch_up();
+        if s.truthy("playing") { return true; }
+    }
     if !s.truthy("playing") {
         // (after the queue ran out the server plays the first song added since, or the last song again from its
         // start when nothing was added)
@@ -403,15 +428,35 @@ pub(super) fn g_entry(op: &str, i: i64, to: i64) -> bool {
 /// The library songs of `tracks` (ids).
 fn lib_ids(tracks: &[Value]) -> Vec<i64> { tracks.iter().filter(|t| t.g("id").is_number() && !t.truthy("preview")).map(|t| t.i("id")).collect() }
 
-/// "Play" on a list while in a group: it becomes the group's queue (for those who control it).
+/// Whether Play in the group starts it with the songs (`set_queue`) rather than adding them to its Up next: the group
+/// plays nothing and has nothing in Up next (rules::play_starts), and this device may control it.
+fn play_starts() -> bool {
+    g::current().is_some_and(|s| rules::play_starts(&s, g::server_now())) && g::can_control()
+}
+
+/// Adds `ids` to the group's Up next and says so once the group took them ("Added 12 songs to the group's Up next").
+fn add_to_group(ids: Vec<i64>, shuffled: bool) {
+    let n = ids.len();
+    let mut fields = json!({ "tracks": ids });
+    if shuffled { fields["shuffle"] = json!(true); }
+    g::command_then("enqueue", fields, move || toast(&rules::added_text(n, shuffled), "ok"));
+}
+
+/// "Play" on a list (an album, a playlist, an artist, a song) while in a group: the songs from the one asked for are
+/// added to the group's Up next; a group with nothing to play starts with the list instead (for those who control it).
 pub(super) fn g_play_queue(tracks: &[Value], start: usize, context: &str, position: f64) -> bool {
     if !grouped() { return false; }
     let ids = lib_ids(tracks);
     if context == "preview" || ids.is_empty() { toast("Only songs from your library can be played in a group listen", "err"); return true; }
-    if !g::can_control() { deny(); return true; }
     let at = tracks.iter().take(start).filter(|t| t.g("id").is_number() && !t.truthy("preview")).count();
-    let (win, at) = rules::window(&ids, at, 1000);
-    g::command("set_queue", json!({ "tracks": win, "index": at, "position": position.max(0.0) }));
+    if play_starts() {
+        let (win, at) = rules::window(&ids, at, 1000);
+        g::command("set_queue", json!({ "tracks": win, "index": at, "position": position.max(0.0) }));
+        return true;
+    }
+    let add = rules::to_add(&ids, at, 1000);
+    if add.is_empty() { toast("Only songs from your library can be played in a group listen", "err"); return true; }
+    add_to_group(add, false);
     true
 }
 
@@ -453,20 +498,21 @@ pub(super) fn g_clear() -> bool {
     true
 }
 
-/// A Shuffle button of an album, an artist or a playlist in a group: the songs become the group's queue in a random
-/// order (`set_queue` with `shuffle`) for those who control it; anyone else adds them to the group's Up next,
-/// shuffled. At most 1000 songs, picked at random from the whole list. False outside a group.
+/// A Shuffle button of an album, an artist or a playlist in a group: the songs are added to the group's Up next in a
+/// random order (`enqueue` with `shuffle`); a group with nothing to play starts with them shuffled instead (`set_queue`
+/// with `shuffle`, for those who control it). At most 1000 songs, picked at random from the whole list. False outside
+/// a group.
 pub(super) fn g_shuffle_play(tracks: &[Value]) -> bool {
     if !grouped() { return false; }
     let ids = lib_ids(tracks);
     if ids.is_empty() { toast("Only songs from your library can be played in a group listen", "err"); return true; }
     // shuffled here too, and a long list sends 1000 songs picked from all of it (the server shuffles them again)
     let win = rules::pick_shuffled(&ids, 1000, js_sys::Math::random);
-    if g::can_control() {
+    if play_starts() {
         g::command("set_queue", json!({ "tracks": win, "index": 0, "position": 0.0, "shuffle": true }));
     } else {
         // said once the group took them (a full queue or an ended group refuses)
-        g::command_then("enqueue", json!({ "tracks": win, "shuffle": true }), || toast("Added to the group's Up next, shuffled", "ok"));
+        add_to_group(win, true);
     }
     true
 }

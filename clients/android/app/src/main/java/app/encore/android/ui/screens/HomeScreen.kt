@@ -193,7 +193,7 @@ fun HomeScreen(nav: Nav, session: Session) {
                                 MenuSeparator,
                                 MenuEntry("Account", R.drawable.ic_person) { nav.open(Screen.Account) },
                                 MenuEntry("Settings", R.drawable.ic_settings) { nav.open(Screen.Settings) },
-                                if (data.me?.isAdmin == true && filesHere == true) MenuEntry("Files", R.drawable.ic_folder) { nav.open(Screen.Files) } else null,
+                                if (data.me?.isAdmin == true && filesHere == true) MenuEntry("Files", R.drawable.ic_folder) { nav.open(Screen.Files()) } else null,
                                 MenuEntry("Bug reports", R.drawable.ic_bug) { nav.open(Screen.BugReports("Home")) },
                             ),
                         )

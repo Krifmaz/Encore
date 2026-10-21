@@ -55,8 +55,32 @@ pub fn last_lines(text: &str, n: usize) -> String {
     lines[lines.len().saturating_sub(n)..].join("\n")
 }
 
+/// A number of bytes as the apps show it (the web's `ui::fmt::size`, exactly): 1024 steps, "{v:.1} MB" from MB up,
+/// "{n} KB" / "{n} B" below, "0 B" for nothing.
+pub fn size_text(bytes: u64) -> String {
+    let b = bytes as f64;
+    if b <= 0.0 {
+        return "0 B".into();
+    }
+    let u = ["B", "KB", "MB", "GB", "TB"];
+    let i = ((b.ln() / 1024f64.ln()).floor() as usize).min(4);
+    let v = b / 1024f64.powi(i as i32);
+    if i > 1 { format!("{v:.1} {}", u[i]) } else { format!("{} {}", v.round() as i64, u[i]) }
+}
+
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn sizes_as_the_apps_show_them() {
+        use super::size_text;
+        assert_eq!(size_text(0), "0 B");
+        assert_eq!(size_text(512), "512 B");
+        assert_eq!(size_text(1536), "2 KB");
+        assert_eq!(size_text(1_572_864), "1.5 MB");
+        assert_eq!(size_text(3_650_722_201), "3.4 GB");
+        assert_eq!(size_text(2 * 1024u64.pow(4)), "2.0 TB");
+    }
+
     #[test]
     fn escapes_the_five() {
         assert_eq!(super::html_escape(r#"<a href="x">Tom & Jerry's</a>"#), "&lt;a href=&quot;x&quot;&gt;Tom &amp; Jerry&#39;s&lt;/a&gt;");

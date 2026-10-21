@@ -249,6 +249,8 @@ private fun GroupSheet(nav: Nav, s: GroupState, onDismiss: () -> Unit) {
                     horizontalArrangement = Arrangement.spacedBy(8.dp),
                     verticalArrangement = Arrangement.spacedBy(8.dp),
                 ) {
+                    // the group's own pause (Pause in the player pauses only this phone), for those who control it
+                    if (GroupRules.offersPauseForEveryone(s)) EncoreButton(GroupRules.PAUSE_FOR_EVERYONE) { GroupListen.pauseForEveryone() }
                     if (s.youHost) EncoreButton("End for everyone") { confirmEnd = true }
                     EncoreButton("Leave") { GroupListen.leave(); onDismiss() }
                 }

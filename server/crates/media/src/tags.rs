@@ -68,7 +68,28 @@ fn tags_of(tagged: Option<&TaggedFile>, path: &str) -> Row {
     m.insert("mb_artistid".into(), json!(first(tag, &[ItemKey::MusicBrainzArtistId])));
     m.insert("mb_albumartistid".into(), json!(first(tag, &[ItemKey::MusicBrainzReleaseArtistId])));
     m.insert("isrc".into(), json!(isrc));
+    // the release's type, as Picard and the stores write it ('' / 0 when the file has none: read, so a later
+    // pass doesn't read it again)
+    let (releasetype, tracktotal, compilation) = type_tags(tag);
+    m.insert("releasetype".into(), json!(releasetype));
+    m.insert("tracktotal".into(), json!(tracktotal));
+    m.insert("compilation".into(), json!(compilation));
     m
+}
+
+/// (RELEASETYPE, track total, compilation flag) of a tag: the release type as written ("album; live"; '' when
+/// absent), TRACKTOTAL / TOTALTRACKS or the "/n" of the track number (0 when absent), COMPILATION / TCMP / cpil
+/// (1 or 0).
+fn type_tags(tag: Option<&Tag>) -> (String, i64, i64) {
+    let releasetype = first(tag, &[ItemKey::MusicBrainzReleaseType]).unwrap_or_default();
+    let total = first(tag, &[ItemKey::TrackTotal]).and_then(|v| v.trim().parse::<i64>().ok())
+        .or_else(|| first(tag, &[ItemKey::TrackNumber]).and_then(|v| v.split_once('/').and_then(|(_, n)| n.trim().parse::<i64>().ok())))
+        .filter(|n| *n > 0)
+        .unwrap_or(0);
+    let compilation = first(tag, &[ItemKey::FlagCompilation])
+        .map(|v| matches!(v.trim().to_ascii_lowercase().as_str(), "1" | "true" | "yes"))
+        .unwrap_or(false) as i64;
+    (releasetype, total, compilation)
 }
 
 // ---- loudness tags, sample rate and bit depth ----------------------------------------------------
@@ -218,6 +239,9 @@ fn key(k: &str) -> Option<ItemKey> {
         "barcode" => ItemKey::Barcode,
         "catalognumber" => ItemKey::CatalogNumber,
         "releasecountry" => ItemKey::ReleaseCountry,
+        // Picard's words: "album; live", and 1 on the songs of a various-artists album (other servers read them too)
+        "releasetype" => ItemKey::MusicBrainzReleaseType,
+        "compilation" => ItemKey::FlagCompilation,
         _ => return None,
     })
 }
@@ -404,6 +428,42 @@ mod tests {
         // a file lofty can't read: nothing
         std::fs::write(d.join("broken.flac"), b"not audio").unwrap();
         assert_eq!(read_facts(&d.join("broken.flac").to_string_lossy()), AudioFacts::default());
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    /// The release type tags as Picard and the stores write them – RELEASETYPE (FLAC), TXXX "MusicBrainz Album Type"
+    /// (MP3), the iTunes freeform atom (M4A), TCMP / cpil / COMPILATION, TRACKTOTAL and the "/n" of the track
+    /// number – are read; writing `releasetype` / `compilation` comes back the same; a file without them reads
+    /// '' / 0 / 0.
+    #[test]
+    fn release_type_tags_are_read_and_written() {
+        let d = encore_core::tmp::dir("type-tags");
+        let get = |p: &Path| {
+            let t = read_tags(&p.to_string_lossy());
+            (t.get("releasetype").and_then(|v| v.as_str()).unwrap_or("?").to_string(), t.get("tracktotal").and_then(|v| v.as_i64()).unwrap_or(-1),
+             t.get("compilation").and_then(|v| v.as_i64()).unwrap_or(-1))
+        };
+        let Some(flac) = audio(&d, "a.flac", &["-c:a", "flac"]) else { return };
+        assert_eq!(get(&flac), (String::new(), 0, 0), "no such tags: '' / 0 / 0");
+        tag_file(&flac, TagType::VorbisComments, &[(ItemKey::MusicBrainzReleaseType, "album; live"), (ItemKey::TrackTotal, "12"), (ItemKey::FlagCompilation, "1")]);
+        assert_eq!(get(&flac), ("album; live".to_string(), 12, 1));
+        let Some(mp3) = audio(&d, "a.mp3", &["-c:a", "libmp3lame", "-b:a", "128k"]) else { return };
+        tag_file(&mp3, TagType::Id3v2, &[(ItemKey::MusicBrainzReleaseType, "Album/Live"), (ItemKey::TrackNumber, "3"), (ItemKey::TrackTotal, "14"), (ItemKey::FlagCompilation, "1")]);
+        assert_eq!(get(&mp3), ("Album/Live".to_string(), 14, 1));
+        let Some(m4a) = audio(&d, "a.m4a", &["-c:a", "aac", "-b:a", "128k"]) else { return };
+        tag_file(&m4a, TagType::Mp4Ilst, &[(ItemKey::MusicBrainzReleaseType, "single"), (ItemKey::TrackNumber, "1"), (ItemKey::TrackTotal, "2"), (ItemKey::FlagCompilation, "1")]);
+        assert_eq!(get(&m4a), ("single".to_string(), 2, 1));
+        // written through write_tags (the import's keys), read back the same
+        let Some(w) = audio(&d, "w.flac", &["-c:a", "flac"]) else { return };
+        let mut vals = Row::new();
+        vals.insert("releasetype".into(), json!("album; compilation"));
+        vals.insert("compilation".into(), json!("1"));
+        write_tags(&w, &vals, None).unwrap();
+        assert_eq!(get(&w), ("album; compilation".to_string(), 0, 1));
+        let Some(wm) = audio(&d, "w.mp3", &["-c:a", "libmp3lame", "-b:a", "128k"]) else { return };
+        write_tags(&wm, &vals, None).unwrap();
+        assert_eq!(get(&wm).0, "album; compilation");
+        assert_eq!(get(&wm).2, 1);
         let _ = std::fs::remove_dir_all(&d);
     }
 

@@ -72,11 +72,13 @@ impl Env {
         let id = self.next;
         self.next += 1;
         let aid = encore_library::album_key(x.albumartist, x.album, "");
+        // numbered within its album, as tagged albums are (0.36: an album's size is read from its track numbers)
+        let track = self.st.db.one("SELECT COUNT(*) n FROM tracks WHERE album_id=?", p![aid]).unwrap().map(|r| encore_db::RowExt::i(&r, "n")).unwrap_or(0) + 1;
         self.st.db.execute(
             "INSERT INTO tracks (id, path, title, artist, album, albumartist, album_id, format, bitrate, duration, mb_albumartistid, size, year, disc, track, added_at)
              VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
             p![id, format!("/m/{id}.{}", x.format), x.title, x.artist, x.album, x.albumartist, aid, x.format, x.bitrate, x.duration,
-               if x.mbid.is_empty() { Value::Null } else { json!(x.mbid) }, 1000, "2010", 1, id, id as f64]).unwrap();
+               if x.mbid.is_empty() { Value::Null } else { json!(x.mbid) }, 1000, "2010", 1, track, id as f64]).unwrap();
         self.st.library.artists.invalidate();
         id
     }
@@ -367,9 +369,6 @@ async fn album_search_in_memory_answers_as_the_in_list_query() {
         if filter == "lossless" {
             having.push("SUM(CASE WHEN format IN ('flac','wav','alac','aiff','ape','wv') THEN 1 ELSE 0 END) = COUNT(*)");
         }
-        if kind == "singles" {
-            having.push("COUNT(*) <= 2");
-        }
         let having = if having.is_empty() { String::new() } else { format!("HAVING {}", having.join(" AND ")) };
         let sql = format!(
             "SELECT album_id AS id, MAX(album) album, MAX(albumartist) albumartist, MAX(year) year, MAX(genre) genre,
@@ -380,6 +379,13 @@ async fn album_search_in_memory_answers_as_the_in_list_query() {
         let tier: std::collections::HashMap<String, u8> = r.into_iter().collect();
         let mut items = e.st.db.query(&sql, params).unwrap();
         use encore_db::RowExt;
+        // each album's type (0.36): Singles & EPs are the albums of those formats
+        let types = e.st.library.types.get(&e.st.db);
+        items.retain(|i| kind != "singles" || types.get(&i.s("id")).is_some_and(|c| matches!(c.format, "single" | "ep")));
+        for i in items.iter_mut() {
+            let key = types.get(&i.s("id")).map(|c| c.key()).unwrap_or("album");
+            i.insert("type".into(), json!(key));
+        }
         items.sort_by_key(|i| tier.get(&i.s("id")).copied().unwrap_or(9));
         let total = items.len();
         json!({ "total": total, "items": items.into_iter().skip(offset).take(limit).collect::<Vec<_>>() })

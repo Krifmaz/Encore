@@ -1,6 +1,8 @@
 //! /api/requests: ask for artists, albums, songs or any link; approve, retry, cancel, clear; import again a
 //! download whose import waited or failed; keep (or download again) a download the audio check turned
-//! away; the storage health that pauses imports; Download now (one request, or all of them for admins).
+//! away; the storage health that pauses imports; Download now (one request, or all of them for admins). An
+//! admin looks at everyone's requests or one person's (`user`, with the people who have requests from
+//! `GET /api/requests/users`); a member only ever at their own.
 use crate::enrich::enrich_now;
 use crate::auth::{self, Admin, User};
 use encore_db::{now, Row, RowExt};
@@ -25,6 +27,7 @@ pub fn router() -> Router<AppState> {
         .route("/api/requests", get(list).post(create))
         .route("/api/requests/from-link", post(from_link))
         .route("/api/requests/link", post(link))
+        .route("/api/requests/users", get(users))
         .route("/api/requests/clear", post(clear))
         .route("/api/requests/clear-waiting", post(clear_waiting))
         .route("/api/requests/retry-failed", post(retry_failed))
@@ -58,15 +61,31 @@ fn get_request(st: &AppState, id: i64) -> ApiResult<Value> {
 struct ListQ {
     status: Option<String>,
     mine: bool,
+    /// an admin's look at one person's requests (a user id; empty: everyone's)
+    user: Option<String>,
     limit: Option<i64>,
+}
+
+/// Whose requests a list or a bulk action takes: a member's own, always; an admin's own with `mine`, one
+/// person's with `user`, everyone's otherwise. → the owner to keep to (None: everyone's)
+pub fn whose(u: &Row, mine: bool, user: Option<i64>) -> Option<i64> {
+    if !encore_config::perms::is_admin(u) || mine {
+        return Some(u.i("id"));
+    }
+    user
+}
+
+/// A `user` that came as text (a query string): a user id, or nothing.
+fn user_id(user: Option<&str>) -> Option<i64> {
+    user.and_then(|x| x.trim().parse().ok())
 }
 
 async fn list(State(st): State<AppState>, User(u): User, Query(q): Query<ListQ>) -> ApiResult<Json<Value>> {
     let mut sql = "SELECT r.*, u.username FROM requests r LEFT JOIN users u ON u.id=r.user_id WHERE 1=1".to_string();
     let mut params = vec![];
-    if !encore_config::perms::is_admin(&u) || q.mine {
+    if let Some(owner) = whose(&u, q.mine, user_id(q.user.as_deref())) {
         sql += " AND r.user_id=?";
-        params.push(json!(u.i("id")));
+        params.push(json!(owner));
     }
     match q.status.as_deref() {
         Some("active") => sql += " AND r.status IN ('pending','queued','searching','downloading','monitoring','importing','waiting')",
@@ -88,19 +107,30 @@ async fn list(State(st): State<AppState>, User(u): User, Query(q): Query<ListQ>)
     }).await
 }
 
+/// `GET /api/requests/users` (admins): the people who have requests, for the Requests page's User list. →
+/// `[{id, username, count}]` by name, `count` their requests (as many rows as the list shows for them)
+async fn users(State(st): State<AppState>, Admin(_): Admin) -> ApiResult<Json<Value>> {
+    let rows = st.db.query("SELECT u.id, u.username, COUNT(r.id) AS count FROM requests r JOIN users u ON u.id=r.user_id
+                            GROUP BY u.id, u.username ORDER BY LOWER(u.username), u.id", p![])?;
+    Ok(Json(json!(rows.into_iter().map(|r| json!({ "id": r.i("id"), "username": r.s("username"), "count": r.i("count") })).collect::<Vec<_>>())))
+}
+
 /// The requests list's rows as the page shows them: the `detail` JSON read for the log, the length, the
 /// attempts, whether it was picked by hand, the candidate being downloaded, what a waiting or failed
 /// import keeps ([`worker::storage::row_fields`]: `wait_reason`, `next_try_at`, `has_files`, `kept_path`,
 /// `error`, `output`) and the downloads the audio check turned away ([`worker::rejected::row_fields`]:
 /// `rejected`, `anyway`) and Download now ([`worker::now::row_fields`]: `can_download_now`, `download_now`,
 /// `line`, `remote_queue`, `stalled_since`, `pressed`; a request waiting in a source's line reads where it
-/// stands, "2nd in line for Deezer", as its message). Other users than admins see no server folders: a wait for
+/// stands, "2nd in line for Deezer", as its message) and an import that hasn't moved for 15 minutes
+/// ([`worker::stall::row_fields`]: `import_stalled`, `import_moved_at`). Other users than admins see no server folders: a wait for
 /// the storage in plain words.
 fn list_rows(st: &AppState, rows: Vec<Row>, admin: bool) -> Vec<Value> {
     rows.into_iter().map(|mut r| {
         let d: Value = serde_json::from_str(&r.s("detail")).unwrap_or(json!({}));
         r.remove("detail");
-        let now_fields = worker::now::row_fields(st, &worker::Req { id: r.i("id"), row: r.clone(), d: d.clone() });
+        let req = worker::Req { id: r.i("id"), row: r.clone(), d: d.clone() };
+        let now_fields = worker::now::row_fields(st, &req);
+        r.extend(worker::stall::row_fields(st, &req));
         r.extend(worker::storage::row_fields(&r.s("status"), &d, admin));
         r.extend(worker::rejected::row_fields(&r.s("status"), &d, admin));
         r.insert("skip_check".into(), json!(d["skip_check"].is_object()));
@@ -254,19 +284,20 @@ async fn retry(State(st): State<AppState>, User(u): User, Path(rid): Path<i64>) 
 }
 
 /// Retry failed (the button beside Clear): every failed top-level request the caller may retry is queued
-/// again in one go. Admins retry everyone's unless `mine` is set.
+/// again in one go. Admins retry everyone's unless `mine` (their own) or `user` (that person's) is set.
 #[derive(serde::Deserialize, Default)]
+#[serde(default)]
 struct RetryFailedBody {
-    #[serde(default)]
     mine: bool,
+    user: Option<i64>,
 }
 async fn retry_failed(State(st): State<AppState>, User(u): User, body: Option<Json<RetryFailedBody>>) -> ApiResult<Json<Value>> {
     let b = body.map(|j| j.0).unwrap_or_default();
     let mut sql = "SELECT id FROM requests WHERE parent_id IS NULL AND status='failed'".to_string();
     let mut params: Vec<Value> = vec![];
-    if !encore_config::perms::is_admin(&u) || b.mine {
+    if let Some(owner) = whose(&u, b.mine, b.user) {
         sql += " AND user_id=?";
-        params.push(json!(u.i("id")));
+        params.push(json!(owner));
     }
     let (mut retried, mut skipped) = (0, 0);
     let mut why: Option<String> = None;
@@ -330,9 +361,16 @@ fn requeue(st: &AppState, rid: i64, r: &Value) -> ApiResult<()> {
 
 /// Import again (`POST /api/requests/{id}/import-again`, the request's admin or owner): a failed or waiting
 /// request whose downloaded files are still there imports them at the queue's next look, without
-/// downloading anything again or counting an attempt. → `{ok, status: "waiting"}`
+/// downloading anything again or counting an attempt. → `{ok, status: "waiting"}`. An import that hasn't
+/// moved for 15 minutes (or whose task is gone: `import_stalled`) is stopped and imports its kept files at
+/// once ([`worker::stall::import_again`]); 409 while it still moves. → `{ok, status}`
 async fn import_again(State(st): State<AppState>, User(u): User, Path(rid): Path<i64>) -> ApiResult<Json<Value>> {
-    get_owned(&st, rid, &u)?;
+    let r = get_owned(&st, rid, &u)?;
+    if r["status"] == "importing" {
+        worker::stall::import_again(&st, rid, &u.s("username")).await.map_err(|(code, why)| err(code, why))?;
+        let status = get_request(&st, rid).map(|r| r["status"].clone()).unwrap_or(json!("importing"));
+        return Ok(Json(json!({ "ok": true, "status": status })));
+    }
     worker::storage::import_again(&st, rid).map_err(|e| err(400, e))?;
     st.db.log("info", &format!("{} asked to import request #{rid} again", u.s("username")));
     Ok(Json(json!({ "ok": true, "status": "waiting" })))
@@ -428,14 +466,16 @@ async fn download_now(State(st): State<AppState>, User(u): User, Path(rid): Path
 #[serde(default)]
 struct AllNowBody {
     mine: bool,
+    user: Option<i64>,
 }
 
-/// Download all now (`POST /api/requests/download-now`, admins, `{mine?}`): every request in a line moves up in
-/// the order it stands (only the admin's own with `mine`), the waits with a timer are tried once. →
-/// `{ok, pressed, woken, later, lines, text}`
+/// Download all now (`POST /api/requests/download-now`, admins, `{mine?, user?}`): every request in a line
+/// moves up in the order it stands (only the admin's own with `mine`, one person's with `user`), the waits with
+/// a timer are tried once. → `{ok, pressed, woken, later, lines, text}`
 async fn download_all_now(State(st): State<AppState>, Admin(a): Admin, body: Option<Json<AllNowBody>>) -> ApiResult<Json<Value>> {
-    let mine = body.map(|j| j.0).unwrap_or_default().mine;
-    Ok(Json(worker::now::download_all_now(&st, &a.s("username"), mine.then(|| a.i("id"))).await))
+    let b = body.map(|j| j.0).unwrap_or_default();
+    let owner = whose(&a, b.mine, b.user);
+    Ok(Json(worker::now::download_all_now(&st, &a.s("username"), owner, owner == Some(a.i("id"))).await))
 }
 
 async fn cancel(State(st): State<AppState>, User(u): User, Path(rid): Path<i64>) -> ApiResult<Json<Value>> {
@@ -513,14 +553,16 @@ struct ClearBody {
     statuses: Vec<String>,
     files: bool,
     mine: bool,
+    user: Option<i64>,
 }
 impl Default for ClearBody {
     fn default() -> Self {
-        ClearBody { statuses: vec!["completed".into(), "denied".into(), "cancelled".into()], files: false, mine: false }
+        ClearBody { statuses: vec!["completed".into(), "denied".into(), "cancelled".into()], files: false, mine: false, user: None }
     }
 }
 
-/// Clear finished requests from the list (everyone's for admins), optionally deleting their files.
+/// Clear finished requests from the list (everyone's for admins, or one person's with `user`), optionally
+/// deleting their files.
 async fn clear(State(st): State<AppState>, User(u): User, body: Option<Json<ClearBody>>) -> ApiResult<Json<Value>> {
     let b = body.map(|j| j.0).unwrap_or_default();
     let statuses: Vec<String> = b.statuses.into_iter().filter(|s| ["completed", "failed", "denied", "cancelled"].contains(&s.as_str())).collect();
@@ -532,9 +574,9 @@ async fn clear(State(st): State<AppState>, User(u): User, body: Option<Json<Clea
     }
     let mut sql = format!("SELECT id FROM requests WHERE parent_id IS NULL AND status IN ({})", vec!["?"; statuses.len()].join(","));
     let mut params: Vec<Value> = statuses.iter().map(|s| json!(s)).collect();
-    if !encore_config::perms::is_admin(&u) || b.mine {
+    if let Some(owner) = whose(&u, b.mine, b.user) {
         sql += " AND user_id=?";
-        params.push(json!(u.i("id")));
+        params.push(json!(owner));
     }
     let (mut removed, mut files) = (0, 0);
     for row in st.db.query(&sql, params)? {
@@ -567,6 +609,7 @@ fn holds_files(detail: &str) -> bool {
 #[serde(default)]
 struct ClearWaitingBody {
     mine: bool,
+    user: Option<i64>,
     dry_run: bool,
 }
 
@@ -580,9 +623,9 @@ pub fn waiting_text(n: usize, done: bool) -> String {
     }
 }
 
-/// Clear waiting (`POST /api/requests/clear-waiting {mine?, dry_run?}`): cancels every request that waits
-/// ([`WAITING`]: pending, queued, waiting, searching; not one that [`holds_files`]) – the caller's own, or
-/// everyone's for an admin unless `mine`. Each one the way Cancel does it: its place in the worker's queue held
+/// Clear waiting (`POST /api/requests/clear-waiting {mine?, user?, dry_run?}`): cancels every request that
+/// waits ([`WAITING`]: pending, queued, waiting, searching; not one that [`holds_files`]) – the caller's own, or
+/// everyone's for an admin unless `mine` (their own) or `user` (that person's). Each one the way Cancel does it: its place in the worker's queue held
 /// while it is written (a search under way stops), then "Cancelled by <name>". `dry_run` only counts (the
 /// question before it). → `{count, text}`
 async fn clear_waiting(State(st): State<AppState>, User(u): User, body: Option<Json<ClearWaitingBody>>) -> ApiResult<Json<Value>> {
@@ -590,9 +633,9 @@ async fn clear_waiting(State(st): State<AppState>, User(u): User, body: Option<J
     let marks = vec!["?"; WAITING.len()].join(",");
     let mut sql = format!("SELECT id, detail FROM requests WHERE status IN ({marks})");
     let mut params: Vec<Value> = WAITING.iter().map(|s| json!(s)).collect();
-    if !encore_config::perms::is_admin(&u) || b.mine {
+    if let Some(owner) = whose(&u, b.mine, b.user) {
         sql += " AND user_id=?";
-        params.push(json!(u.i("id")));
+        params.push(json!(owner));
     }
     sql += " ORDER BY id";
     let ids: Vec<i64> = st.db.query(&sql, params)?.into_iter().filter(|r| !holds_files(&r.s("detail"))).map(|r| r.i("id")).collect();
@@ -634,6 +677,10 @@ mod labels_tests;
 #[cfg(test)]
 #[path = "requests_tests.rs"]
 mod requests_tests;
+
+#[cfg(test)]
+#[path = "requests_users_tests.rs"]
+mod requests_users_tests;
 
 #[cfg(test)]
 mod ext_id_tests {

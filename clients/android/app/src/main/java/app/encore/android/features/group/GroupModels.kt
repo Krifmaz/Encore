@@ -246,6 +246,45 @@ object GroupRules {
         return index to pos.coerceAtLeast(0.0)
     }
 
+    // ---- Play and Pause in a group (the owner on Oct 21: "it should just add it to the que", "it may pause for me but
+    // dont stop the other users playback"; the same on web, phone and desktop) --------------------------------------
+
+    /**
+     * Play (or Shuffle) of an album, a playlist, an artist or a song in a group starts the group – the songs become its
+     * queue (`set_queue`) – only when it plays nothing (paused, or past its last song) and has nothing in Up next, or
+     * its queue is empty. Otherwise the songs are added to its Up next (`enqueue`). The web's `rules::play_starts`.
+     */
+    fun playStarts(state: GroupState, serverNowMs: Long): Boolean {
+        if (state.queue.isEmpty()) return true
+        val (ei, epos) = expected(state, serverNowMs)
+        val last = ei >= state.queue.size - 1
+        val dur = state.queue[ei].track.durationSec
+        val atEnd = last && dur > 0.0 && epos >= dur - 0.3
+        return (!state.playing || atEnd) && last
+    }
+
+    /**
+     * The songs Play adds to the group's Up next: those that would have played – the library songs (id > 0) from the one
+     * asked for ([index] in [ids]) to the end of the list, at most [max].
+     */
+    fun toAdd(ids: List<Long>, index: Int, max: Int = 1000): List<Long> =
+        ids.drop(index.coerceAtLeast(0)).filter { it > 0L }.take(max)
+
+    /** The toast once the group took songs into its Up next: "Added 12 songs to the group's Up next", "…, shuffled". */
+    fun addedText(n: Int, shuffled: Boolean): String {
+        val songs = if (n == 1) "1 song" else "$n songs"
+        return "Added $songs to the group's Up next" + if (shuffled) ", shuffled" else ""
+    }
+
+    /** Pause in a group pauses only this phone; the group plays on. */
+    const val PAUSED_FOR_YOU = "Paused for you – the group keeps playing"
+
+    /** The group's own pause (the player's ⋯ and the group panel, for those who control the group). */
+    const val PAUSE_FOR_EVERYONE = "Pause for everyone"
+
+    /** Whether "Pause for everyone" is offered: this device may control the group and the group plays. */
+    fun offersPauseForEveryone(state: GroupState): Boolean = state.youCanControl && state.playing
+
     /** "Only Alex controls playback": why a member's control is off. */
     fun onlyHost(state: GroupState): String = "Only ${state.hostName} controls playback"
 

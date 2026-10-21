@@ -187,7 +187,7 @@ pub fn finish(st: &impl Ctx, who: &Who, mut inc: Incoming, size: u64, conflict: 
         }
         (Some(_), Conflict::Replace) => {
             // the file that is there goes to Trash first; when it can't, the new one is dropped and the old stays
-            if crate::trash::trash_one(st, who, &inc.at.child(&name), dir, &name, change).is_err() {
+            if crate::trash::trash_one(st, who, &inc.at.child(&name), dir, &name, change, &[]).is_err() {
                 return skipped(&mut inc, "Couldn't move the old file to Trash");
             }
         }
@@ -199,6 +199,7 @@ pub fn finish(st: &impl Ctx, who: &Who, mut inc: Incoming, size: u64, conflict: 
     inc.done = true;
     let _ = inc.dir.sync();
     let dirs = LibraryDirs::of(st.cfg());
+    change.added = encore_library::Added { by: Some(who.id), via: "upload" };
     change.arrived(&dirs, &inc.dir.path.join(&final_name));
     let placed = inc.at.child(&final_name);
     crate::audit(st, who, "uploaded", &placed, None);

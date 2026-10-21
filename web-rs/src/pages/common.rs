@@ -152,6 +152,41 @@ pub fn can_import_again(r: &Value) -> bool {
     r.truthy("has_files") && matches!(r.s("status").as_str(), "failed" | "waiting" | "completed")
 }
 
+/// An import that hasn't moved for 15 minutes (or whose task is gone: `import_stalled` of the list): the row offers
+/// Import again, which stops it and imports the kept files at once.
+pub fn stalled_import(r: &Value) -> bool {
+    r.s("status") == "importing" && r.g("import_stalled") == &Value::Bool(true)
+}
+
+/// The tooltip of Import again on a stalled import (the server's words, the same on the phone and the desktop).
+pub const STALLED_IMPORT: &str = "The import hasn't moved for 15 minutes";
+
+/// Whose requests the Requests page's buttons take: the admin's User list (`user`: one person's; none: everyone's),
+/// or `mine` (members, and the Downloads page). The server keeps a member to their own whatever this says.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct Whose {
+    pub mine: bool,
+    pub user: Option<i64>,
+}
+
+impl Whose {
+    /// Only the caller's own.
+    pub fn mine() -> Whose { Whose { mine: true, user: None } }
+
+    /// `body` with `mine`, and `user` when one person is picked.
+    pub fn body(self, mut body: Value) -> Value {
+        body["mine"] = json!(self.mine);
+        if let Some(u) = self.user { body["user"] = json!(u); }
+        body
+    }
+
+    /// The list's query for it: "&mine=true", "&user=12", or nothing (everyone's).
+    pub fn query(self) -> String {
+        if self.mine { return "&mine=true".into(); }
+        self.user.map(|u| format!("&user={u}")).unwrap_or_default()
+    }
+}
+
 /// What Cancel and Remove from list say first when a request keeps downloaded files: they go with it (Encore's own
 /// staging folder is deleted) and Import again is gone.
 pub const KEPT_FILES_LOST: &str = "Its downloaded files have not been imported yet and can't be imported after this.";
@@ -262,8 +297,10 @@ pub fn request_row(r: &Value, admin: bool) -> String {
         badge = request_badge(r),
         approve = if admin && status == "pending" { format!(r#"<button class="btn sm primary" data-act="approve">{}Approve</button><button class="btn sm danger" data-act="deny">Deny</button>"#, icon("check")) } else { String::new() },
         pick = if matches!(kind.as_str(), "album" | "track") && status != "completed" { format!(r#"<button class="btn sm" data-act="pick" data-req='{}' title="Search the sources and pick the exact download">{}Pick</button>"#, esc(&pick_json(r)), icon("search")) } else { String::new() },
-        // a failed or waiting import whose files are kept: Import again takes Retry's place
+        // a failed or waiting import whose files are kept: Import again takes Retry's place; an import that hasn't moved
+        // for 15 minutes is stopped and imported again
         retry = if can_import_again(r) { format!(r#"<button class="btn sm" data-act="import-again" title="Import the downloaded files again – nothing is downloaded again">{}Import again</button>"#, icon("refresh")) }
+            else if stalled_import(r) { format!(r#"<button class="btn sm" data-act="import-again" title="{STALLED_IMPORT}">{}Import again</button>"#, icon("refresh")) }
             // a playlist's songs anyone may queue again; any other request needs Fix their own downloads (the
             // server answers "Ask an admin to retry")
             else if kind == "playlist" || (matches!(status.as_str(), "failed" | "cancelled") && may_fix()) { format!(r#"<button class="btn sm" data-act="retry" title="Retry">{}</button>"#, icon("refresh")) } else { String::new() },
@@ -336,10 +373,10 @@ fn press_download_now(id: &str, btn: Element, reload: Rc<dyn Fn()>) {
 }
 
 /// Download all now (admins, the Requests page): every waiting request is woken and the lines move up – never more
-/// at once than each source allows (`mine`: only the admin's own requests move up).
-pub fn download_all_now(mine: bool, reload: Rc<dyn Fn()>) {
+/// at once than each source allows (`whose`: only the admin's own, or one person's, requests move up).
+pub fn download_all_now(whose: Whose, reload: Rc<dyn Fn()>) {
     dom::spawn(async move {
-        match api::post("/requests/download-now", json!({ "mine": mine })).await {
+        match api::post("/requests/download-now", whose.body(json!({}))).await {
             Ok(v) => {
                 let (text, kind) = download_all_now_toast(&v);
                 toast(&text, kind);
@@ -712,14 +749,14 @@ pub fn storage_banner(view: &Element, slot: &Element, admin: bool) {
 }
 
 /// `clearMenu(anchor, reload, { mine })`: "Clear" button menu for download lists – clear finished entries,
-/// optionally deleting their files.
-pub fn clear_menu(anchor: &Element, reload: Rc<dyn Fn()>, mine: bool) {
+/// optionally deleting their files (`whose`: the caller's own, one person's or everyone's).
+pub fn clear_menu(anchor: &Element, reload: Rc<dyn Fn()>, whose: Whose) {
     let admin = app::is_admin();
     let go = Rc::new(move |statuses: &'static [&'static str], files: bool, label: &'static str| {
         let reload = reload.clone();
         dom::spawn(async move {
             if files && !ui::confirm_dialog("Delete files", &format!("{label}: this permanently deletes the files from disk."), "Delete", true).await { return; }
-            match api::post("/requests/clear", json!({ "statuses": statuses, "files": files, "mine": mine })).await {
+            match api::post("/requests/clear", whose.body(json!({ "statuses": statuses, "files": files }))).await {
                 Ok(r) => {
                     toast(&format!("{} cleared{}", r.s("removed"), if files { format!(" · {} file(s) deleted", r.s("deleted_files")) } else { String::new() }), "ok");
                     dom::dispatch("encore:requests-changed", None);
@@ -757,18 +794,18 @@ pub fn waiting_done(n: i64) -> String {
     }
 }
 
-/// Clear waiting: every request still waiting (pending, queued, waiting, searching) is cancelled – admins: everyone's
-/// unless `mine`; members: their own (the server decides). Counted first (a dry run) for the question; the server's
-/// words after ("Cancelled 612 waiting requests", "Nothing is waiting").
-pub fn clear_waiting(mine: bool, reload: Rc<dyn Fn()>) {
+/// Clear waiting: every request still waiting (pending, queued, waiting, searching) is cancelled – admins: everyone's,
+/// one person's (`whose.user`) or their own (`whose.mine`); members: their own (the server decides). Counted first (a
+/// dry run) for the question; the server's words after ("Cancelled 612 waiting requests", "Nothing is waiting").
+pub fn clear_waiting(whose: Whose, reload: Rc<dyn Fn()>) {
     dom::spawn(async move {
-        let n = match api::post("/requests/clear-waiting", json!({ "mine": mine, "dry_run": true })).await {
+        let n = match api::post("/requests/clear-waiting", whose.body(json!({ "dry_run": true }))).await {
             Ok(r) if r.i("count") > 0 => r.i("count"),
             Ok(r) => { let text = r.s("text"); toast(if text.is_empty() { waiting_done(0) } else { text }.as_str(), ""); return; }
             Err(e) => { toast(&e.message, "err"); return; }
         };
         if !ui::confirm_dialog("Clear waiting", &waiting_question(n), "Clear waiting", true).await { return; }
-        match api::post("/requests/clear-waiting", json!({ "mine": mine })).await {
+        match api::post("/requests/clear-waiting", whose.body(json!({}))).await {
             Ok(r) => {
                 let text = r.s("text");
                 toast(if text.is_empty() { waiting_done(r.i("count")) } else { text }.as_str(), "ok");
@@ -780,10 +817,11 @@ pub fn clear_waiting(mine: bool, reload: Rc<dyn Fn()>) {
     });
 }
 
-/// Retry failed: queue every failed request again (admins: everyone's, unless `mine`), say how many, reload.
-pub fn retry_failed(mine: bool, reload: Rc<dyn Fn()>) {
+/// Retry failed: queue every failed request again (admins: everyone's, one person's or their own: `whose`), say how
+/// many, reload.
+pub fn retry_failed(whose: Whose, reload: Rc<dyn Fn()>) {
     dom::spawn(async move {
-        match api::post("/requests/retry-failed", serde_json::json!({ "mine": mine })).await {
+        match api::post("/requests/retry-failed", whose.body(json!({}))).await {
             Ok(r) => {
                 let (n, skipped) = (r.g("retried").as_i64().unwrap_or(0), r.g("skipped").as_i64().unwrap_or(0));
                 let msg = match (n, skipped) {
@@ -865,6 +903,34 @@ mod tests {
             "message": "Downloaded 1 of 2 file(s) – the rest could not be imported: …" });
         assert!(can_import_again(&c) && request_row(&c, true).contains("Import again</button>"));
         assert!(!can_import_again(&json!({ "status": "completed", "has_files": false })));
+    }
+
+    /// An import that hasn't moved for 15 minutes offers Import again, with why; one that moves doesn't.
+    #[test]
+    fn a_stalled_import_offers_import_again() {
+        let mut r = json!({ "id": 15, "kind": "album", "status": "importing", "title": "Illuminate EP", "artist": "Duumu", "created_at": 0, "attempts": 1,
+            "progress": 100, "message": "Importing – checking the audio (3 of 12)", "has_files": true, "import_stalled": true, "import_moved_at": 1792427000.0 });
+        assert!(stalled_import(&r));
+        let html = request_row(&r, true);
+        assert!(html.contains(r#"data-act="import-again" title="The import hasn't moved for 15 minutes""#) && html.contains("Import again</button>"), "{html}");
+        assert!(html.contains(r#"data-act="cancel""#), "{html}");
+        r["import_stalled"] = json!(false);
+        assert!(!stalled_import(&r));
+        assert!(!request_row(&r, true).contains("Import again"));
+        // an older server says nothing: no button
+        assert!(!stalled_import(&json!({ "status": "importing" })));
+        assert!(!stalled_import(&json!({ "status": "failed", "import_stalled": true })));
+    }
+
+    /// The bulk buttons' bodies and the list's query: one person's, everyone's or the caller's own.
+    #[test]
+    fn whose_requests_the_buttons_take() {
+        assert_eq!(Whose::default().body(json!({ "dry_run": true })), json!({ "dry_run": true, "mine": false }));
+        assert_eq!(Whose { mine: false, user: Some(12) }.body(json!({})), json!({ "mine": false, "user": 12 }));
+        assert_eq!(Whose::mine().body(json!({})), json!({ "mine": true }));
+        assert_eq!(Whose::default().query(), "");
+        assert_eq!(Whose { mine: false, user: Some(12) }.query(), "&user=12");
+        assert_eq!(Whose::mine().query(), "&mine=true");
     }
 
     #[test]

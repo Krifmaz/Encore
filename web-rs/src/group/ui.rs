@@ -149,6 +149,7 @@ pub fn sheet() {
         match dom::data(&b, "g").as_str() {
             "copy" => copy_link(&rules::invite_link(&s, &origin())),
             "catchup" => super::catch_up(),
+            "pause-all" => crate::player::pause_for_everyone(),
             "leave" => { super::leave(); m2.close(); }
             "end" => {
                 let m3 = m2.clone();
@@ -249,8 +250,10 @@ fn paint_sheet(root: &Element, s: &Value, admin: bool, pending_limit: Option<i64
       {paused}
       <div><h3 style="margin:0 0 6px">People ({n})</h3><div class="list">{people}</div></div>
       {settings}
-      <div class="row wrap" style="gap:8px;justify-content:flex-end">{end}<button class="btn" data-g="leave">Leave</button></div>"#,
+      <div class="row wrap" style="gap:8px;justify-content:flex-end">{pause_all}{end}<button class="btn" data-g="leave">Leave</button></div>"#,
         intro = esc(&intro), code = esc(&rules::spaced(&s.s("code"))), copy = icon("copy"), n = members.len(),
+        // the group's own pause (Pause in the player pauses only here), for those who control it while it plays
+        pause_all = if rules::offers_pause_for_everyone(s) { format!(r#"<button class="btn" data-g="pause-all">{}{}</button>"#, icon("pause"), rules::PAUSE_FOR_EVERYONE) } else { String::new() },
         end = if you.truthy("host") { r#"<button class="btn danger" data-g="end">End for everyone</button>"# } else { "" }));
     if !focused.is_empty() { if let Some(el) = dom::by_id(&focused) { dom::focus(&el); } }
 }

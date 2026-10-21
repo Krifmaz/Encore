@@ -5,6 +5,7 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.basicMarquee
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -434,7 +435,8 @@ fun ChoiceRow(options: List<String>, selected: Int, onSelect: (Int) -> Unit, mod
 
 // ---- tiles and rows --------------------------------------------------------------------------------------------
 
-/** The web's `.tile`: square art with 12px corners, a 650-weight title and a muted subtitle. */
+/** The web's `.tile`: square art with 12px corners, a 650-weight title and a muted subtitle; [onLongClick] (0.36) picks it. */
+@OptIn(androidx.compose.foundation.ExperimentalFoundationApi::class)
 @Composable
 fun Tile(
     title: String,
@@ -442,11 +444,14 @@ fun Tile(
     modifier: Modifier = Modifier,
     subtitle2: String? = null,
     centered: Boolean = false,
+    onLongClick: (() -> Unit)? = null,
     onClick: () -> Unit,
     art: @Composable (Modifier) -> Unit,
 ) {
     Column(
-        modifier.clip(RoundedCornerShape(12.dp)).clickable(onClick = onClick),
+        modifier.clip(RoundedCornerShape(12.dp)).then(
+            if (onLongClick != null) Modifier.combinedClickable(onLongClick = onLongClick, onClick = onClick) else Modifier.clickable(onClick = onClick),
+        ),
         horizontalAlignment = if (centered) Alignment.CenterHorizontally else Alignment.Start,
     ) {
         art(Modifier.fillMaxWidth().aspectRatio(1f))
@@ -488,13 +493,14 @@ fun Tile(
  * the corner: Dolby Atmos, E-AC-3 5.1 …
  */
 @Composable
-fun AlbumCard(album: Album, coverUrl: String, imageLoader: ImageLoader, modifier: Modifier = Modifier, onClick: () -> Unit) {
+fun AlbumCard(album: Album, coverUrl: String, imageLoader: ImageLoader, modifier: Modifier = Modifier, onLongClick: (() -> Unit)? = null, onClick: () -> Unit) {
     val corner = if (album.isSurround) SurroundRules.badge(album.atmos, album.quality) else ""
     Tile(
         title = album.shownTitle(),
         subtitle = listOf(album.shownArtist(), album.year).filter { it.isNotEmpty() }.joinToString(" · "),
         subtitle2 = album.titleUnder(),
         modifier = modifier,
+        onLongClick = onLongClick,
         onClick = onClick,
     ) { m ->
         if (corner.isEmpty()) {
@@ -631,8 +637,14 @@ fun RowDivider(modifier: Modifier = Modifier, startIndent: Dp = Gutter) {
 
 // ---- menus -----------------------------------------------------------------------------------------------------
 
-/** One line of a "⋯" menu (the web's `popMenu`). A null `onClick` draws a separator; `badge` is a count after the label. */
-class MenuEntry(val label: String, val iconRes: Int? = null, val danger: Boolean = false, val badge: String? = null, val onClick: (() -> Unit)?)
+/**
+ * One line of a "⋯" menu (the web's `popMenu`). A null `onClick` draws a separator; `badge` is a count after the label.
+ * [info] (0.36): a muted line of text, not an action (the song ⋯ menu's "Requested by alex on Oct 13, 2026").
+ */
+class MenuEntry(val label: String, val iconRes: Int? = null, val danger: Boolean = false, val badge: String? = null, val info: Boolean = false, val onClick: (() -> Unit)?) {
+    /** A line that runs something when tapped (not a separator, not an info line). */
+    val isAction: Boolean get() = !info && onClick != null
+}
 
 /** A separator for [PopMenu]. */
 val MenuSeparator: MenuEntry = MenuEntry("-", onClick = null)
@@ -649,6 +661,16 @@ fun PopMenu(expanded: Boolean, onDismiss: () -> Unit, entries: List<MenuEntry?>)
     ) {
         for (e in entries) {
             if (e == null) continue
+            if (e.info) {
+                // text, not an action: nothing to tap
+                Text(
+                    e.label,
+                    style = MaterialTheme.typography.bodySmall,
+                    color = p.muted,
+                    modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp),
+                )
+                continue
+            }
             if (e.onClick == null) {
                 Box(Modifier.fillMaxWidth().padding(vertical = 4.dp).height(1.dp).background(p.border))
                 continue
@@ -672,10 +694,10 @@ fun PopMenu(expanded: Boolean, onDismiss: () -> Unit, entries: List<MenuEntry?>)
 
 /** A "⋯" button with its menu. */
 @Composable
-fun MoreButton(entries: List<MenuEntry?>, modifier: Modifier = Modifier, tint: Color = Color.Unspecified, iconSize: Dp = 24.dp) {
+fun MoreButton(entries: List<MenuEntry?>, modifier: Modifier = Modifier, tint: Color = Color.Unspecified, iconSize: Dp = 24.dp, onOpen: () -> Unit = {}) {
     var open by remember { mutableStateOf(false) }
     Box(modifier) {
-        IconButton(onClick = { open = true }) {
+        IconButton(onClick = { open = true; onOpen() }) {
             Icon(
                 painterResource(R.drawable.ic_more_vert),
                 contentDescription = "More",

@@ -941,6 +941,23 @@ their own device."
   server." under "Limit to N people". A member who may not control, in the sheet and in Up next: "Only Alex controls
   playback. You can add songs with Add to queue."
 - The car's now-playing subtitle starts with "Group listen · ".
+- Play and Pause in a group (Oct 21, the owner: "it should just add it to the que", "it may pause for me but dont stop
+  the other users playback"): Play on an album, a playlist, an artist or a song sends `enqueue` with the songs from the
+  one asked for (Shuffle: `enqueue` with `shuffle: true`); only a group that plays nothing (paused, or past its last
+  song) and has nothing in Up next, or whose queue is empty, starts with them (`set_queue`, those who control it).
+  "Added 12 songs to the group's Up next", "Added 1 song to the group's Up next", "Added 40 songs to the group's Up
+  next, shuffled". Every pause pauses only this device and is never sent to the group (the Pause button, the keyboard,
+  the lock screen and the system's media controls, the car, headphones out, another app or a call): "Paused for you –
+  the group keeps playing" after the Pause button, then "Paused here · Catch up"; Play rejoins the group where it is
+  now (one hard seek there). "Pause for everyone" (the player's ⋯ and the group panel, for those who control it while
+  it plays) sends `pause`.
+- Requests (Oct 21, not a group word, the same on the three clients): admins pick whose requests show in a "User" list
+  – "All users", then each person with their requests, "Caz (612)" (`GET /api/requests/users` → `[{id, username,
+  count}]`; `GET /api/requests?user=<id>`; Retry failed, Download all now, Clear finished and Clear waiting take
+  `user` too; members only ever see their own) – in place of "Only mine". An import that hasn't moved for 15 minutes
+  (or whose task is gone: the list's `import_stalled`, with `import_moved_at`) offers "Import again" ("The import hasn't
+  moved for 15 minutes"): `POST /api/requests/{id}/import-again` on an `importing` request stops it and imports the
+  kept files at once (409 "It is being imported now" while it moves).
 
 **Files** (Settings → Server → Files on the phone; System → Files on the web): "Files", "Server", "Browse, upload,
 move, rename and import in the library and download folders" (the entry's line), "The folders Encore may change.

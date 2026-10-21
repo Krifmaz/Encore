@@ -219,12 +219,24 @@ class FeaturesApi(private val api: EncoreApi, private val client: OkHttpClient) 
 
     // ---- Requests ------------------------------------------------------------------------------------------
 
-    /** GET /api/requests?status=&mine=&limit=300 (`status` "all" means no filter). */
-    fun requests(status: String, mine: Boolean, limit: Int = 300): List<RequestRow> {
+    /**
+     * GET /api/requests?status=&mine=&user=&limit=300 (`status` "all" means no filter; [user] > 0: that person's, the
+     * admin's User list – members only ever get their own).
+     */
+    fun requests(status: String, mine: Boolean, limit: Int = 300, user: Long = 0L): List<RequestRow> {
         val qs = StringBuilder("/api/requests?limit=").append(limit)
         if (status.isNotEmpty() && status != "all") qs.append("&status=").append(EncoreApi.enc(status))
-        if (mine) qs.append("&mine=true")
+        if (mine) qs.append("&mine=true") else if (user > 0L) qs.append("&user=").append(user)
         return call("GET", qs.toString(), null).objects().rows(RequestRow.serializer())
+    }
+
+    /** GET /api/requests/users (admins): the people who have requests, by name, with their counts. */
+    fun requestUsers(): List<RequestUser> = call("GET", "/api/requests/users", null).objects().rows(RequestUser.serializer())
+
+    /** `mine`, and `user` when one person is picked in the admin's User list (the bulk actions' bodies). */
+    private fun kotlinx.serialization.json.JsonObjectBuilder.whose(mine: Boolean, user: Long) {
+        put("mine", mine)
+        if (user > 0L) put("user", user)
     }
 
     /** POST /api/requests: the new row; its `status` is `pending` (needs approval) or `queued`. */
@@ -267,11 +279,11 @@ class FeaturesApi(private val api: EncoreApi, private val client: OkHttpClient) 
         (call("DELETE", "/api/requests/$id" + if (files) "?files=true" else "", null) as? JsonObject)?.int("deleted_files") ?: 0
 
     /** POST /api/requests/clear → (removed, deleted_files). */
-    fun clearRequests(statuses: List<String>, files: Boolean, mine: Boolean): Pair<Int, Int> {
+    fun clearRequests(statuses: List<String>, files: Boolean, mine: Boolean, user: Long = 0L): Pair<Int, Int> {
         val body = buildJsonObject {
             put("statuses", buildJsonArray { for (s in statuses) add(JsonPrimitive(s)) })
             put("files", files)
-            put("mine", mine)
+            whose(mine, user)
         }
         val o = call("POST", "/api/requests/clear", body) as? JsonObject
         return (o?.int("removed") ?: 0) to (o?.int("deleted_files") ?: 0)
@@ -283,8 +295,8 @@ class FeaturesApi(private val api: EncoreApi, private val client: OkHttpClient) 
      * own, or everyone's for an admin unless [mine]. [dryRun] only counts. Answers the count and the server's
      * sentence ("Cancelled 612 waiting requests", "Nothing is waiting").
      */
-    fun clearWaiting(mine: Boolean, dryRun: Boolean): ClearWaitingResult {
-        val o = call("POST", "/api/requests/clear-waiting", buildJsonObject { put("mine", mine); put("dry_run", dryRun) }) as? JsonObject
+    fun clearWaiting(mine: Boolean, dryRun: Boolean, user: Long = 0L): ClearWaitingResult {
+        val o = call("POST", "/api/requests/clear-waiting", buildJsonObject { whose(mine, user); put("dry_run", dryRun) }) as? JsonObject
         return ClearWaitingResult(o?.int("count") ?: 0, o?.str("text") ?: "")
     }
 
@@ -306,9 +318,9 @@ class FeaturesApi(private val api: EncoreApi, private val client: OkHttpClient) 
     /** GET /api/discover/probe?url=: title, site, uploader, length or item count, thumbnail (the Downloader's Preview). */
     fun probeLink(url: String): LinkProbe = getObject("/api/discover/probe?url=${EncoreApi.enc(url)}").page(LinkProbe.serializer())
 
-    /** POST /api/requests/retry-failed {mine}: queue every failed request again (members: their own). */
-    fun retryFailed(mine: Boolean): RetryFailedResult {
-        val o = call("POST", "/api/requests/retry-failed", buildJsonObject { put("mine", mine) }) as? JsonObject
+    /** POST /api/requests/retry-failed {mine, user}: queue every failed request again (members: their own). */
+    fun retryFailed(mine: Boolean, user: Long = 0L): RetryFailedResult {
+        val o = call("POST", "/api/requests/retry-failed", buildJsonObject { whose(mine, user) }) as? JsonObject
         return RetryFailedResult(o?.int("retried") ?: 0, o?.int("skipped") ?: 0, o?.str("why") ?: "")
     }
 
@@ -325,8 +337,8 @@ class FeaturesApi(private val api: EncoreApi, private val client: OkHttpClient) 
      * POST /api/requests/download-now {mine} (admins, Download all now): every waiting request is woken and every
      * request in a line moves up (with `mine`, the admin's own first) – never more at once than each source allows.
      */
-    fun downloadAllNow(mine: Boolean): DownloadAllNowResult =
-        (call("POST", "/api/requests/download-now", buildJsonObject { put("mine", mine) }) as? JsonObject ?: JsonObject(emptyMap()))
+    fun downloadAllNow(mine: Boolean, user: Long = 0L): DownloadAllNowResult =
+        (call("POST", "/api/requests/download-now", buildJsonObject { whose(mine, user) }) as? JsonObject ?: JsonObject(emptyMap()))
             .page(DownloadAllNowResult.serializer())
 
     /** How many requests wait for an admin's approval (the web's sidebar count: GET /api/requests?status=pending). */

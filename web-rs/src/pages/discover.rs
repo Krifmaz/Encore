@@ -809,6 +809,7 @@ pub fn render_artist(view: Element, ctx: Ctx) -> PageFuture {
     <div id="artist-top"></div>
     <div id="artist-liked"></div>
     <div id="artist-lib">{in_library}</div>
+    <div id="artist-oneoffs"></div>
     <div class="section-head"><h2>Discography <span class="faint small">{n_rg}</span></h2>
       <div class="row wrap" style="gap:10px;justify-content:flex-end"><span id="disco-skipped"></span><div class="tabs" id="disco-filter">{disco_tabs}</div></div>
     </div>
@@ -1227,11 +1228,15 @@ struct ArtistSongs {
     /// every song, after "Show all N"
     all: RefCell<Option<Vec<Value>>>,
     loading_all: Cell<bool>,
+    /// GET …/one-offs (0.36): (total, the songs shown – the first ten, or up to 500 after "Show all N")
+    one_offs: RefCell<Option<(usize, Vec<Value>)>>,
+    loading_one_offs: Cell<bool>,
 }
 
 impl ArtistSongs {
     fn new(name: &str, mbid: &str, albums: Vec<Value>) -> Self {
-        Self { name: name.to_string(), mbid: mbid.to_string(), albums, liked: RefCell::new(None), first: RefCell::new(None), all: RefCell::new(None), loading_all: Cell::new(false) }
+        Self { name: name.to_string(), mbid: mbid.to_string(), albums, liked: RefCell::new(None), first: RefCell::new(None), all: RefCell::new(None), loading_all: Cell::new(false),
+               one_offs: RefCell::new(None), loading_one_offs: Cell::new(false) }
     }
 
     /// The songs "In your library" shows now: every one after "Show all N", else the first page.
@@ -1282,9 +1287,39 @@ impl ArtistSongs {
         html
     }
 
+    /// "One-offs" (0.36): the artist's songs on compilations, remix albums and soundtracks the library has only a
+    /// few songs of – the first ten, "Show all N"; "" when there are none.
+    fn one_offs_html(&self) -> String {
+        let one_offs = self.one_offs.borrow();
+        let Some((total, list)) = one_offs.as_ref().filter(|(t, l)| *t > 0 && !l.is_empty()) else { return String::new() };
+        let more = if self.loading_one_offs.get() { r#"<button class="btn sm ghost" disabled>Loading…</button>"#.to_string() }
+            else { let t = crate::pages::library_types::show_all_text(*total, list.len()); if t.is_empty() { t } else { format!(r#"<button class="btn sm ghost" data-oneoffs-all>{t}</button>"#) } };
+        let rows: String = list.iter().enumerate().map(|(i, t)| artist_song_row(t, &format!("off:{i}"), &esc(&crate::pages::library_types::one_off_sub(t)))).collect();
+        format!(r#"<div class="section-head" style="margin-top:28px"><h2>One-offs <span class="faint small">{total}</span></h2>{more}</div>
+    <p class="small muted" style="margin-top:-6px">{}</p>
+    <div class="card flat"><div class="list">{rows}</div></div>"#, esc(crate::pages::library_types::ONE_OFFS_LINE))
+    }
+
     fn paint(&self, view: &Element) {
         if let Some(el) = dom::qs_in(view, "#artist-liked") { set_html(&el, &self.liked_html()); }
         if let Some(el) = dom::qs_in(view, "#artist-lib") { set_html(&el, &self.library_html()); }
+        if let Some(el) = dom::qs_in(view, "#artist-oneoffs") { set_html(&el, &self.one_offs_html()); }
+    }
+
+    /// The One-offs shelf's songs: the first ten, or up to 500 ("Show all N").
+    fn load_one_offs(self: Rc<Self>, view: &Element, limit: usize) {
+        let view = view.clone();
+        dom::spawn(async move {
+            let url = artist_route(&self.name, &self.mbid, "one-offs") + &format!("&offset=0&limit={limit}");
+            let r = api::get(&url).await;
+            self.loading_one_offs.set(false);
+            if !view.is_connected() { return; }
+            match r {
+                Ok(v) => *self.one_offs.borrow_mut() = Some(songs_answer(&v)),
+                Err(e) => if limit > ARTIST_SONGS_FIRST { toast(&e.message, "err") },
+            }
+            self.paint(&view);
+        });
     }
 
     /// Ask the server for both lists and wire the rows' buttons.
@@ -1301,7 +1336,8 @@ impl ArtistSongs {
                 me.paint(&view);
             });
         }
-        for sel in ["#artist-liked", "#artist-lib"] {
+        self.clone().load_one_offs(view, ARTIST_SONGS_FIRST);
+        for sel in ["#artist-liked", "#artist-lib", "#artist-oneoffs"] {
             let (me, v) = (self.clone(), view.clone());
             dom::on_sel(view, sel, "click", move |e| {
                 if dom::closest(e, "[data-liked-all]").is_some() {
@@ -1310,10 +1346,18 @@ impl ArtistSongs {
                     return;
                 }
                 if dom::closest(e, "[data-lib-all]").is_some() { me.clone().show_all(&v); return; }
+                if dom::closest(e, "[data-oneoffs-all]").is_some() {
+                    if !me.loading_one_offs.get() { me.loading_one_offs.set(true); me.paint(&v); me.clone().load_one_offs(&v, 500); }
+                    return;
+                }
                 let Some(b) = dom::closest(e, "[data-artist-play]") else { return };
                 let at = dom::data(&b, "artistPlay");
                 let Some((which, i)) = at.split_once(':').and_then(|(w, i)| Some((w.to_string(), i.parse::<usize>().ok()?))) else { return };
-                let list = if which == "liked" { me.liked.borrow().as_ref().map(|(_, l)| l.clone()).unwrap_or_default() } else { me.shown() };
+                let list = match which.as_str() {
+                    "liked" => me.liked.borrow().as_ref().map(|(_, l)| l.clone()).unwrap_or_default(),
+                    "off" => me.one_offs.borrow().as_ref().map(|(_, l)| l.clone()).unwrap_or_default(),
+                    _ => me.shown(),
+                };
                 if i < list.len() { player::play_queue(list, i, "list"); }
             });
         }

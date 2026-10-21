@@ -798,12 +798,13 @@ async fn next_source_now<C: Ctx>(st: &C, id: i64, who: &str, next: &str, minutes
 // ---- Download all now ------------------------------------------------------------------------------------
 
 /// `POST /api/requests/download-now` (admins): every request in a line that it targets (everyone's, or only
-/// `mine`'s – the admin's user id) is pressed in the order it stands, so nobody among them overtakes anybody;
+/// `mine`'s – a user id: the admin's own when `own`, else the person the admin looks at) is pressed in the
+/// order it stands, so nobody among them overtakes anybody;
 /// the storage and the downloads folders are checked once, Soulseek's planned attempt made due once (as
 /// Download now does) when a target waits for it, and the queue's loop is woken. It never switches Soulseek
 /// users, never drops a torrent, never approves and never starts more than a line's limit.
 /// → `{ok, pressed, woken, later, lines: [{source, label, limit, running, waiting}], text}`
-pub async fn download_all_now<C: Ctx>(st: &C, who: &str, mine: Option<i64>) -> Value {
+pub async fn download_all_now<C: Ctx>(st: &C, who: &str, mine: Option<i64>, own: bool) -> Value {
     let lines = &st.requests().lines;
     let t = now();
     let owner_of = |id: i64| st.db().one("SELECT user_id FROM requests WHERE id=?", p![id]).ok().flatten().map(|r| r.i("user_id"));
@@ -901,11 +902,16 @@ pub async fn download_all_now<C: Ctx>(st: &C, who: &str, mine: Option<i64>) -> V
         };
         json!({ "source": l.source, "label": label, "limit": l.limit, "running": l.running(), "waiting": l.waiting() })
     }).collect();
-    let text = all_text(mine.is_some(), pressed, woken, &in_lines, &notes);
+    let text = all_text(mine.is_some() && own, pressed, woken, &in_lines, &notes);
     for id in &touched {
         crate::events::emit(st, *id);
     }
-    let line = format!("{who} asked to download {} waiting requests now: {text}", if mine.is_some() { "their" } else { "all" });
+    let whose = match (mine, own) {
+        (None, _) => "all".to_string(),
+        (Some(_), true) => "their".to_string(),
+        (Some(u), false) => format!("user #{u}'s"),
+    };
+    let line = format!("{who} asked to download {whose} waiting requests now: {text}");
     tracing::info!("{line}");
     st.db().log("info", &line);
     json!({ "ok": pressed + woken > 0, "pressed": pressed, "woken": woken, "later": later, "lines": if pressed + woken + later == 0 { json!([]) } else { json!(in_lines) }, "text": text })

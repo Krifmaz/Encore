@@ -272,6 +272,33 @@ pub fn copy(from: impl AsRef<Path>, to: impl AsRef<Path>, step: Step) -> Result<
     run(step, "copy", f, Some(t), || std::fs::copy(f, t)).map_err(blame_source)
 }
 
+/// [`copy`] that calls `beat` after every 8 MiB it moved: a long copy onto a slow disk shows it is moving,
+/// one stuck on a mount that went away says nothing. The copy gets the source's permissions, as `fs::copy`.
+pub fn copy_beating(from: impl AsRef<Path>, to: impl AsRef<Path>, step: Step, beat: &dyn Fn()) -> Result<u64, StepError> {
+    let (f, t) = (from.as_ref(), to.as_ref());
+    run(step, "copy", f, Some(t), || {
+        use std::io::{Read, Write};
+        let mut src = std::fs::File::open(f)?;
+        let perms = src.metadata()?.permissions();
+        let mut dst = std::fs::File::create(t)?;
+        let mut buf = vec![0u8; 8 << 20];
+        let mut n = 0u64;
+        loop {
+            let k = match src.read(&mut buf) {
+                Ok(0) => break,
+                Ok(k) => k,
+                Err(e) if e.kind() == io::ErrorKind::Interrupted => continue,
+                Err(e) => return Err(e),
+            };
+            dst.write_all(&buf[..k])?;
+            n += k as u64;
+            beat();
+        }
+        dst.set_permissions(perms)?;
+        Ok(n)
+    }).map_err(blame_source)
+}
+
 /// `fs::hard_link` ("link from to"), the failing side told as for [`copy`].
 pub fn hard_link(from: impl AsRef<Path>, to: impl AsRef<Path>, step: Step) -> Result<(), StepError> {
     let (f, t) = (from.as_ref(), to.as_ref());
@@ -488,6 +515,28 @@ mod tests {
         let _ = std::fs::remove_dir_all(&d);
         std::fs::create_dir_all(&d).unwrap();
         d
+    }
+
+    /// A copy that beats says so after every 8 MiB, ends with the same bytes and the source's permissions,
+    /// and fails as [`copy`] does.
+    #[test]
+    fn a_beating_copy_moves_the_bytes_and_beats_as_it_goes() {
+        use std::os::unix::fs::PermissionsExt;
+        let d = tmp("beat");
+        let src = d.join("a.flac");
+        let data: Vec<u8> = (0..(20u32 << 20)).map(|i| (i % 251) as u8).collect();
+        std::fs::write(&src, &data).unwrap();
+        std::fs::set_permissions(&src, std::fs::Permissions::from_mode(0o640)).unwrap();
+        let beats = std::cell::Cell::new(0);
+        let n = copy_beating(&src, d.join("b.flac"), Step::Import, &|| beats.set(beats.get() + 1)).unwrap();
+        assert_eq!(n, data.len() as u64);
+        assert_eq!(beats.get(), 3, "8 + 8 + 4 MiB");
+        assert_eq!(std::fs::read(d.join("b.flac")).unwrap(), data);
+        assert_eq!(std::fs::metadata(d.join("b.flac")).unwrap().permissions().mode() & 0o777, 0o640);
+        let e = copy_beating(d.join("gone.flac"), d.join("c.flac"), Step::Import, &|| {}).unwrap_err();
+        assert_eq!(e.json()["op"], "copy");
+        assert_eq!(e.errno, Some(2));
+        let _ = std::fs::remove_dir_all(&d);
     }
 
     #[test]

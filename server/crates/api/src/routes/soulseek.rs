@@ -2,7 +2,7 @@
 //! shares, download files or folders as requests (the worker fetches, tags and imports them like a
 //! manual pick), and follow the transfers – all through the Soulseek engine Encore runs (slskd).
 use crate::auth::{self, Admin, User};
-use encore_db::{Row, RowExt};
+use encore_db::{p, Row, RowExt};
 use encore_core::error::{err, ApiError, ApiResult};
 use crate::routes::picker::create_pick;
 use encore_requests::create::{quota, NewRequest};
@@ -328,6 +328,8 @@ async fn download(State(st): State<AppState>, User(u): User, Json(b): Json<Downl
         "files": files.iter().map(|f| json!({ "filename": f["filename"], "size": f["size"].as_u64().unwrap_or(0) })).collect::<Vec<_>>() });
     let req = NewRequest { kind: kind.into(), artist: Some(artist.clone()), title: Some(title.clone()), album: Some(album).filter(|a| !a.is_empty()), ..Default::default() };
     let (id, status) = create_pick(&st, &u, &req, "slskd", payload, &format!("{artist} – {title}"))?;
+    // the songs say they came from the Soulseek page ("Requested by …" all the same: tracks.added_via)
+    st.db.execute("UPDATE requests SET detail=json_set(CASE WHEN json_valid(detail) THEN detail ELSE '{}' END, '$.via', 'soulseek') WHERE id=?", p![id])?;
     Ok(Json(json!({ "request_id": id, "status": status })))
 }
 

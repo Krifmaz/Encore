@@ -317,6 +317,12 @@ pub fn finish(st: &impl Ctx, d: &Value, new: &[PathBuf], since: f64) {
             let _ = st.db().execute("DELETE FROM track_parked WHERE id=?", p![oid]);
             kept += 1;
         } else if rekey(st, n.i("id"), oid) {
+            // the replacement is still the song its first adder asked for: "Requested by alex" stays
+            if old.get("added_via").is_some_and(|v| !v.is_null()) {
+                let _ = st.db().execute("UPDATE tracks SET added_by=?, added_via=?, requested_at=? WHERE id=?",
+                    p![old.get("added_by").cloned().unwrap_or(Value::Null), old.get("added_via").cloned().unwrap_or(Value::Null),
+                       old.get("requested_at").cloned().unwrap_or(Value::Null), oid]);
+            }
             let _ = st.db().execute("DELETE FROM track_parked WHERE id=?", p![oid]);
             done += 1;
         } else {

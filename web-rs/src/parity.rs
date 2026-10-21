@@ -36,6 +36,8 @@ const LEGACY_ONLY: &[(&str, &str)] = &[
     ("Filter library…", "the Library's search box reads \"Search artists, albums, songs in your library…\" since 0.31 (one search for the whole library)"),
     // 0.32 (plugins): every download tool is a plugin with its own card, Update and auto-update switch
     ("Download tools", "the card became Settings → Plugins in 0.32 (its Check for updates, Update to and the Translator's model moved there)"),
+    // 0.36 (the owner on Oct 21): an album goes to the Trash of Files, restorable, instead of being deleted for good
+    ("Album deleted", "the album ⋯ \"Delete album from disk\" became \"Move album to Trash\" in 0.36; its toast is \"Moved 1 album to the Trash\""),
 ];
 
 /// Whole files of the JavaScript UI whose page web-rs no longer has, as (file, why). Like [`LEGACY_ONLY`], an

@@ -1,5 +1,6 @@
 //! Tests of the domain crates that need a whole server (a database, the settings, the HTTP client): they run
 //! here, on a [`crate::test_support::TestServer`].
+mod album_types;
 mod download_now;
 mod downloads;
 mod github;
@@ -8,6 +9,7 @@ mod musicbrainz;
 mod plugins;
 mod rejected;
 mod soulseek;
+mod stall;
 mod storage;
 mod surround;
 mod streamrip;

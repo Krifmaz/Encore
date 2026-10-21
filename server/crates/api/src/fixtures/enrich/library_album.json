@@ -1,10 +1,12 @@
 {
+  "added_at": 1792280084.9141605,
   "album": "First Album",
   "albumartist": "Alpha Artist",
   "cover_color": "#b7cb00",
   "cover_v": 2907780667060,
   "duration": 24.0,
   "genre": null,
+  "history": [],
   "id": "150c2e63e67a8f86",
   "mb_albumartistid": null,
   "mb_albumid": null,
@@ -20,6 +22,10 @@
     {
       "acoustid_id": null,
       "added_at": 1792280084.9141605,
+      "added_by": null,
+      "added_by_deleted": false,
+      "added_by_name": null,
+      "added_via": null,
       "album": "First Album",
       "album_id": "150c2e63e67a8f86",
       "albumartist": "Alpha Artist",
@@ -67,6 +73,10 @@
     {
       "acoustid_id": null,
       "added_at": 1792360592.3903716,
+      "added_by": null,
+      "added_by_deleted": false,
+      "added_by_name": null,
+      "added_via": null,
       "album": "First Album",
       "album_id": "150c2e63e67a8f86",
       "albumartist": "Alpha Artist",
@@ -114,6 +124,10 @@
     {
       "acoustid_id": null,
       "added_at": 1792280084.9142768,
+      "added_by": null,
+      "added_by_deleted": false,
+      "added_by_name": null,
+      "added_via": null,
       "album": "First Album",
       "album_id": "150c2e63e67a8f86",
       "albumartist": "Alpha Artist",
@@ -161,6 +175,10 @@
     {
       "acoustid_id": null,
       "added_at": 1792360592.3907473,
+      "added_by": null,
+      "added_by_deleted": false,
+      "added_by_name": null,
+      "added_via": null,
       "album": "First Album",
       "album_id": "150c2e63e67a8f86",
       "albumartist": "Alpha Artist",
@@ -208,6 +226,10 @@
     {
       "acoustid_id": null,
       "added_at": 1792280084.9143884,
+      "added_by": null,
+      "added_by_deleted": false,
+      "added_by_name": null,
+      "added_via": null,
       "album": "First Album",
       "album_id": "150c2e63e67a8f86",
       "albumartist": "Alpha Artist",
@@ -255,6 +277,10 @@
     {
       "acoustid_id": null,
       "added_at": 1792360592.391323,
+      "added_by": null,
+      "added_by_deleted": false,
+      "added_by_name": null,
+      "added_via": null,
       "album": "First Album",
       "album_id": "150c2e63e67a8f86",
       "albumartist": "Alpha Artist",
@@ -300,5 +326,22 @@
       "year": "2021"
     }
   ],
+  "type": {
+    "auto": {
+      "format": "album",
+      "key": "album",
+      "kind": "studio",
+      "label": "Album",
+      "why": "size",
+      "why_text": "Guessed from the number of songs"
+    },
+    "chosen": null,
+    "format": "album",
+    "key": "album",
+    "kind": "studio",
+    "label": "Album",
+    "why": "size",
+    "why_text": "Guessed from the number of songs"
+  },
   "year": "2021"
 }

@@ -222,11 +222,11 @@ pub fn render(view: Element, ctx: Ctx) -> PageFuture {
         {
             let clear = need(&view, "#dl-clear")?;
             let (c, l) = (clear.clone(), load.clone());
-            dom::on(&clear, "click", move |_| common::clear_menu(&c, l.clone(), true));
+            dom::on(&clear, "click", move |_| common::clear_menu(&c, l.clone(), common::Whose::mine()));
         }
         if let Some(retry) = dom::qs_in(&view, "#dl-retry-failed") {
             let l = load.clone();
-            dom::on(&retry, "click", move |_| { let l = l.clone(); common::retry_failed(true, l); });
+            dom::on(&retry, "click", move |_| { let l = l.clone(); common::retry_failed(common::Whose::mine(), l); });
         }
         load_rows(&list).await.map_err(|e| e.message)?;
         {

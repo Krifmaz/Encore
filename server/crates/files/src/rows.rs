@@ -30,6 +30,9 @@ pub struct Change {
     removals: Vec<PathBuf>,
     /// files that arrived in the library: read in as a scan reads them
     arrivals: Vec<PathBuf>,
+    /// who brought the arrivals in (an upload, an import, a move from a download folder: that admin); a scan's
+    /// [`encore_library::Added::SCAN`] when nobody did (a restore gives the songs their saved values back)
+    pub added: encore_library::Added,
 }
 
 /// What [`Change::apply`] did.
@@ -41,6 +44,11 @@ pub struct Applied {
 }
 
 impl Change {
+    /// A change whose arrivals are brought in by `added` (an admin's upload, import or move into the library).
+    pub fn by(added: encore_library::Added) -> Change {
+        Change { added, ..Default::default() }
+    }
+
     pub fn is_empty(&self) -> bool {
         self.moves.is_empty() && self.removals.is_empty() && self.arrivals.is_empty()
     }
@@ -72,6 +80,11 @@ impl Change {
         }
     }
 
+    /// The row at `row` (a row path) leaves the library: a song whose file is gone already.
+    pub fn row_removed(&mut self, row: PathBuf) {
+        self.removals.push(row);
+    }
+
     /// A file or folder arrived at `new` (resolved): its songs are read in when it is in the library.
     pub fn arrived(&mut self, dirs: &LibraryDirs, new: &Path) {
         if dirs.db_path(new).is_none() {
@@ -101,6 +114,8 @@ impl Change {
             let mut albums: BTreeSet<String> = BTreeSet::new();
             let mut removed: Vec<i64> = vec![];
             let mut moved = 0;
+            // album ids that changed (a song without an album tag is its folder's album): old → new ones
+            let mut renamed: std::collections::BTreeMap<String, BTreeSet<String>> = Default::default();
             for (old, new) in &moves {
                 let (o, n) = (old.to_string_lossy().into_owned(), new.to_string_lossy().into_owned());
                 for r in rows_at(c, old)? {
@@ -118,6 +133,9 @@ impl Change {
                     // a song without an album tag is its folder's album: its album follows the folder
                     let album_id = if r.s("album").trim().is_empty() { encore_library::album_key(&r.s("albumartist"), "", &np) } else { r.s("album_id") };
                     c.execute("UPDATE tracks SET path=?, album_id=? WHERE id=?", p![np, album_id, r.i("id")])?;
+                    if album_id != r.s("album_id") {
+                        renamed.entry(r.s("album_id")).or_default().insert(album_id.clone());
+                    }
                     albums.insert(r.s("album_id"));
                     albums.insert(album_id);
                     moved += 1;
@@ -130,11 +148,20 @@ impl Change {
                 }
                 let ids: Vec<Value> = rows.iter().map(|r| json!(r.i("id"))).collect();
                 let marks = encore_library::artists::marks(ids.len());
-                // likes and playlist entries stay, as missing songs (a delete does the same)
+                // likes and playlist entries stay, as missing songs (a delete does the same), and the surround
+                // versions of these songs lose their stereo link
                 c.execute(&format!("UPDATE playlist_items SET track_id=NULL WHERE track_id IN ({marks})"), ids.clone())?;
+                let gone: Vec<i64> = rows.iter().map(|r| r.i("id")).collect();
+                encore_library::surround::stereo_gone(c, &gone, None)?;
                 c.execute(&format!("DELETE FROM tracks WHERE id IN ({marks})"), ids)?;
                 albums.extend(rows.iter().map(|r| r.s("album_id")));
                 removed.extend(rows.iter().map(|r| r.i("id")));
+            }
+            // the album's type (the owner's choice) follows a folder of an untagged album that moved whole
+            for (old, new) in &renamed {
+                if let [new] = new.iter().collect::<Vec<_>>().as_slice() {
+                    encore_library::album_types::carry_in(c, old, new, false)?;
+                }
             }
             Ok::<_, rusqlite::Error>((moved, removed, albums))
         }))?;
@@ -148,15 +175,21 @@ impl Change {
             st.library().refresh_covers(st.db().clone(), albums);
         }
         if !self.arrivals.is_empty() {
-            encore_library::tagger::index_paths(st, &self.arrivals);
+            encore_library::tagger::index_paths_as(st, &self.arrivals, self.added);
             out.indexed = self.arrivals.len();
         }
         Ok(out)
     }
 }
 
+/// What a restored song gets back besides its id and playlist entries (0.36): when and how it was added, where it
+/// came from and its check, which the file's tags can't say.
+pub const KEEP: &[&str] = &["added_at", "added_by", "added_via", "requested_at", "request_id", "source", "source_detail", "source_url",
+    "downloaded_at", "verify_status", "verify_detail", "verified_at", "acoustid_id"];
+
 /// A song's row before it went to Trash: its id, where it was relative to the trashed item ("" for the item
-/// itself) and the playlist entries (likes too) that pointed at it, so a restore can put all of it back.
+/// itself), the playlist entries (likes too) that pointed at it and the columns in [`KEEP`], so a restore can
+/// put all of it back.
 pub fn saved_rows(st: &impl Ctx, dirs: &LibraryDirs, real: &Path) -> Vec<Value> {
     let Some(base) = dirs.db_path(real) else { return vec![] };
     let rows = st.db().read_now(|c| rows_at(c, &base)).unwrap_or_default();
@@ -164,7 +197,9 @@ pub fn saved_rows(st: &impl Ctx, dirs: &LibraryDirs, real: &Path) -> Vec<Value> 
     rows.iter().map(|r| {
         let items: Vec<i64> = st.db().query("SELECT id FROM playlist_items WHERE track_id=?", p![r.i("id")]).unwrap_or_default().iter().map(|x| x.i("id")).collect();
         let rel = r.s("path")[b.len()..].trim_start_matches('/').to_string();
-        json!({ "id": r.i("id"), "rel": rel, "items": items })
+        let keep = st.db().one(&format!("SELECT {} FROM tracks WHERE id=?", KEEP.join(", ")), p![r.i("id")]).ok().flatten()
+            .map(Value::Object).unwrap_or_else(|| json!({}));
+        json!({ "id": r.i("id"), "rel": rel, "items": items, "keep": keep })
     }).collect()
 }
 
@@ -187,6 +222,16 @@ pub fn give_back(st: &impl Ctx, base: &Path, saved: &[Value]) -> usize {
             }
             for item in s["items"].as_array().cloned().unwrap_or_default() {
                 c.execute("UPDATE playlist_items SET track_id=? WHERE id=? AND track_id IS NULL", p![id, item])?;
+            }
+            // what the re-read can't know (a note written before 0.36 has none: nothing changes then)
+            if let Some(keep) = s["keep"].as_object().filter(|k| !k.is_empty()) {
+                let cols: Vec<&str> = KEEP.iter().copied().filter(|k| keep.contains_key(*k)).collect();
+                if !cols.is_empty() {
+                    let sets = cols.iter().map(|k| format!("{k}=?")).collect::<Vec<_>>().join(", ");
+                    let mut params: Vec<Value> = cols.iter().map(|k| keep[*k].clone()).collect();
+                    params.push(json!(id));
+                    c.execute(&format!("UPDATE tracks SET {sets} WHERE id=?"), params)?;
+                }
             }
             n += 1;
         }

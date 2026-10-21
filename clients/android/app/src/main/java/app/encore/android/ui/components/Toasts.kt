@@ -102,12 +102,14 @@ object Toasts {
 
     /**
      * A toast; with [action] and [onAction] it has that button ("Undo"), which runs [onAction] and closes it. A toast
-     * that is not an error goes after [showMs].
+     * that is not an error goes after [showMs]. Gives the toast's id (0 for none), so a toast that counts something
+     * can [close] its last one before it shows the next ("Moving to the Trash… 100 of 340").
      */
-    fun show(message: String, kind: String = "info", action: String = "", showMs: Long = ToastRules.SHOW_MS, onAction: (() -> Unit)? = null) {
-        if (message.isBlank()) return
+    fun show(message: String, kind: String = "info", action: String = "", showMs: Long = ToastRules.SHOW_MS, onAction: (() -> Unit)? = null): Long {
+        if (message.isBlank()) return 0L
         val n = counter.incrementAndGet()
         items.update { ToastRules.add(it, n, n, message, kind, action, onAction, showMs) }
+        return items.value.firstOrNull { it.seq == n }?.id ?: n
     }
 
     /** An error toast's Close. */

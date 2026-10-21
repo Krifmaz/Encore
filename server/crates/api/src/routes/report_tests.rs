@@ -94,6 +94,32 @@ async fn report_blocks_parks_and_the_replacement_keeps_the_id() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// A replacement that takes over the reported song's id keeps who first asked for the song (contract
+/// library-types §9.2 #16): the new download's own adder (another user's request, or none) doesn't replace
+/// "Requested by alex".
+#[tokio::test]
+async fn the_replacement_keeps_who_asked_for_the_song() {
+    let (st, dir) = state("adder");
+    let admin = user(&st, "boss", "admin");
+    let alex = user(&st, "alex", "user");
+    for (title, via, new_adder, new_via) in [("Antidote", "request", Some(admin.i("id")), "request"), ("Maria", "link", None, "scan")] {
+        let (tid, _f) = song(&st, &dir, &format!("Travis Scott/Singles/Travis Scott - {title}.flac"), title, 0, &format!("single-{title}"));
+        st.db.execute("UPDATE tracks SET added_by=?, added_via=?, requested_at=1234 WHERE id=?", p![alex.i("id"), via, tid]).unwrap();
+        let rep = file_report(&st, &admin, &ReportBody { kind: "track".into(), track_id: Some(tid), reason: "other".into(), note: Some("hiss".into()), ..Default::default() }).unwrap();
+        let req = encore_requests::worker::get(&st, rep["request_id"].as_i64().unwrap()).unwrap();
+        // the replacement arrives under a new row stamped by its own import
+        let (nid, nf) = song(&st, &dir, &format!("Travis Scott/Singles/Travis Scott - {title} (2).flac"), title, 0, &format!("single-{title}"));
+        st.db.execute("UPDATE tracks SET added_at=?, added_by=?, added_via=?, requested_at=? WHERE id=?", p![now(), new_adder, new_via, now(), nid]).unwrap();
+        finish(&st, &req.d, std::slice::from_ref(&nf), req.row.f("created_at"));
+        let t = st.db.one("SELECT * FROM tracks WHERE id=?", p![tid]).unwrap().unwrap();
+        assert_eq!(t.s("path"), nf.to_string_lossy(), "{title}");
+        assert_eq!((t.i("added_by"), t.s("added_via"), t.f("requested_at")), (alex.i("id"), via.to_string(), 1234.0), "{title}");
+        assert!(st.db.one("SELECT 1 FROM tracks WHERE id=?", p![nid]).unwrap().is_none());
+        assert_eq!(report_json(&st, rep["id"].as_i64().unwrap()).unwrap()["status"], "replaced");
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 #[tokio::test]
 async fn a_failed_replacement_puts_the_album_back() {
     let (st, dir) = state("album");

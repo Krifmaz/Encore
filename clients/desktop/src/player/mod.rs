@@ -136,6 +136,9 @@ pub struct State {
     lyrics_glide: Option<(f32, f32, std::time::Instant)>,
     /// The ⋯ menu, open at this point.
     pub menu: Option<Point>,
+    /// Who added the song the ⋯ menu was opened for (0.36, `/library/tracks/{id}/added`): (song id, words), the
+    /// menu's first line.
+    pub menu_added: Option<(i64, String)>,
     pub dialog: Option<Dialog>,
     pub signal: signal::Info,
     pub devices: devices::Devices,
@@ -211,6 +214,7 @@ impl Default for State {
             lyrics: lyrics::Lyrics::default(),
             lyrics_glide: None,
             menu: None,
+            menu_added: None,
             dialog: None,
             signal: signal::Info::default(),
             devices: d,
@@ -372,6 +376,8 @@ pub enum Message {
     GoToArtist,
     /// The "Library" link of the empty bar.
     OpenLibrary,
+    /// "Open Trash" of the toast after albums went to the Trash (0.36): Settings → Files on the Trash.
+    OpenTrash,
     OpenMini,
     Lyrics(i64, Result<Value, ApiError>),
     /// Lyrics mode: the scroll area is at `.0` and the current line needs `.1`.
@@ -421,6 +427,8 @@ pub enum Message {
     CreatePlaylist,
     Created(Result<Value, ApiError>),
     Added(Result<Value, ApiError>),
+    /// `/library/tracks/{id}/added` for the song the ⋯ menu opened for.
+    MenuAdded(i64, Result<Value, ApiError>),
     Nothing,
 }
 
@@ -930,7 +938,24 @@ pub fn update(state: &mut State, msg: Message, ctx: &mut Ctx) -> Task<Message> {
             state.lyrics.clear();
             close_views(state);
         }
-        Message::Menu => state.menu = Some(ctx.cursor),
+        Message::Menu => {
+            state.menu = Some(ctx.cursor);
+            state.menu_added = None;
+            // a library song: who added it, the menu's first line once the server says
+            if let Some(id) = state.now().and_then(|n| n.id) {
+                let api = ctx.api.clone();
+                return Task::perform(async move { api.get(&format!("/library/tracks/{id}/added")).await }, move |r| {
+                    Message::MenuAdded(id, r)
+                });
+            }
+        }
+        Message::MenuAdded(id, Ok(v)) => {
+            let text = crate::pages::library_types::added_of(&v, fmt::date);
+            if state.menu.is_some() && state.now().and_then(|n| n.id) == Some(id) && !text.is_empty() {
+                state.menu_added = Some((id, text));
+            }
+        }
+        Message::MenuAdded(_, Err(_)) => {}
         Message::CloseMenu => state.menu = None,
         Message::DownloadSong => {
             state.menu = None;
@@ -1104,6 +1129,10 @@ pub fn update(state: &mut State, msg: Message, ctx: &mut Ctx) -> Task<Message> {
             }
         }
         Message::OpenLibrary => ctx.navigate(Page::library("")),
+        Message::OpenTrash => {
+            crate::pages::files::open_on_trash();
+            ctx.navigate(Page::Settings(crate::pages::Section::Files));
+        }
         Message::OpenMini => {
             state.menu = None;
             ctx.edit_config(|c| c.mini_player = true);

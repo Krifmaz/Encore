@@ -6,11 +6,18 @@
 //! host's settings, the playback commands), and makes the engine follow the group (`sync.rs`).
 //!
 //! While in a group:
-//! - what this computer plays is the group's: a page's Play becomes the group's queue (those who
-//!   control), Add to queue and Play next go to the group (everyone may), see [`forward_play`];
-//! - play / pause, next, previous, seek and Up next go to the group when this device may control
-//!   it, else the control is off with the reason ("Only Alex controls playback"); a pause by a
-//!   member who may not control pauses only this computer ("Paused here · Catch up");
+//! - what this computer plays is the group's: a page's Play (an album, a playlist, an artist, a
+//!   song) adds the songs from the one asked for to the group's Up next and Shuffle adds them
+//!   shuffled ("Added 12 songs to the group's Up next"); only a group that plays nothing and has
+//!   nothing in Up next starts with them ([`model::play_starts`], those who control). Add to queue
+//!   and Play next go to the group (everyone may), see [`forward_play`];
+//! - every pause pauses only this computer and is never sent to the group (the owner on Oct 21:
+//!   "it may pause for me but dont stop the other users playback"): the Pause button ("Paused for
+//!   you – the group keeps playing"), the media keys and the system's media controls, the output
+//!   going away. "Paused here · Catch up"; Play then rejoins the group where it is now. The group's
+//!   own pause is "Pause for everyone" (the player's ⋯ and the group panel) for those who control it;
+//! - play, next, previous, seek and Up next go to the group when this device may control it, else
+//!   the control is off with the reason ("Only Alex controls playback");
 //! - repeat and the library shuffle after the queue are off; Shuffle shuffles the group's Up next
 //!   once (those who control it), and a page's Shuffle plays the songs in a random order the
 //!   server makes, the same for everyone; linking to another device is off ("Leave the group
@@ -308,9 +315,11 @@ pub enum Msg {
     Patch(Value),
     /// A state answer (a command, the host's settings, a removal).
     Answer(Result<Value, ApiError>),
-    /// The answer to a member's Shuffle of a list (added to the group's Up next): said once the
-    /// group took the songs.
-    Shuffled(Result<Value, ApiError>),
+    /// The answer to a Play or Shuffle that added `n` songs to the group's Up next (`shuffled`):
+    /// said once the group took them ("Added 12 songs to the group's Up next").
+    Added(usize, bool, Result<Value, ApiError>),
+    /// "Pause for everyone": the group's own pause (those who control it).
+    PauseForEveryone,
     LimitDown,
     LimitUp,
     LimitSend(u64),
@@ -397,7 +406,13 @@ fn command(gr: &Group, ctx: &Ctx, op: &str, fields: Value) -> Task<Message> {
 }
 
 /// [`command`] with the answer as `done`'s message.
-fn send(gr: &Group, ctx: &Ctx, op: &str, fields: Value, done: fn(Result<Value, ApiError>) -> Msg) -> Task<Message> {
+fn send(
+    gr: &Group,
+    ctx: &Ctx,
+    op: &str,
+    fields: Value,
+    done: impl FnOnce(Result<Value, ApiError>) -> Msg + Send + 'static,
+) -> Task<Message> {
     let Some(s) = gr.state.as_ref() else {
         return Task::none();
     };
@@ -737,29 +752,29 @@ pub fn on_status(st: &mut State, prev: &engine::Status) {
 
 // ----- the player's controls in a group --------------------------------------------------------
 
-/// What a member who may not control the group hears after a page's Shuffle.
-pub const SHUFFLED_IN: &str = "Added to the group's Up next, shuffled";
-
-/// Play / pause: the group's when this device may control it; else a pause here only.
+/// Play / pause in a group: a pause is only here, for everyone who presses it ("Paused for you –
+/// the group keeps playing"); Play after it rejoins the group where it is now (Catch up); a paused
+/// group plays for those who control it.
 pub fn toggle(st: &mut State, ctx: &mut Ctx) -> Task<Message> {
     let Some(s) = st.group.state.as_ref() else {
         return Task::none();
     };
+    let playing = s.playing;
     if st.group.local_paused {
-        return update(st, Msg::CatchUp, ctx);
-    }
-    if s.playing {
-        if s.you_can_control {
-            return command(&st.group, ctx, "pause", json!({}));
+        let t = update(st, Msg::CatchUp, ctx);
+        if playing {
+            return t;
         }
-        // a member's own pause: only here
+    } else if playing {
+        // only here: the group plays on
         st.group.local_paused = true;
         st.group.mem.own_pause_at = Some(mono_ms());
         st.group.mem.lag.cancel();
         engine::send(Command::Pause);
+        ctx.toast(model::PAUSED_FOR_YOU);
         return Task::none();
     }
-    if s.you_can_control {
+    if st.group.state.as_ref().is_some_and(|s| s.you_can_control) {
         return command(&st.group, ctx, "play", json!({}));
     }
     ctx.toast(st.group.deny.clone());
@@ -1033,13 +1048,28 @@ pub fn update(st: &mut State, msg: Msg, ctx: &mut Ctx) -> Task<Message> {
                 follow(st, ctx);
             }
         },
-        Msg::Shuffled(r) => {
+        Msg::Added(n, shuffled, r) => {
             let took = r.is_ok();
             let t = update(st, Msg::Answer(r), ctx);
             if took {
-                ctx.toast_ok(SHUFFLED_IN);
+                ctx.toast_ok(model::added_text(n, shuffled));
             }
             return t;
+        }
+        Msg::PauseForEveryone => {
+            let Some(s) = st.group.state.as_ref() else {
+                return Task::none();
+            };
+            if !s.you_can_control {
+                ctx.toast(st.group.deny.clone());
+                return Task::none();
+            }
+            // the group pauses: nothing is paused here only any more
+            st.group.local_paused = false;
+            st.group.mem.own_pause_at = Some(mono_ms());
+            st.group.mem.lag.cancel();
+            engine::send(Command::Pause);
+            return command(&st.group, ctx, "pause", json!({}));
         }
         Msg::LimitDown | Msg::LimitUp => {
             let Some(s) = st.group.state.as_ref() else {
@@ -1206,15 +1236,25 @@ pub fn update(st: &mut State, msg: Msg, ctx: &mut Ctx) -> Task<Message> {
                 if st.group.state.is_none() {
                     break;
                 }
+                // a group with nothing to play starts with the songs (those who control it); else they
+                // go to its Up next
+                let starts = st.group.state.as_ref().is_some_and(|s| model::play_starts(s, st.group.server_now()))
+                    && !st.group.denied();
                 match p {
                     Pend::Play { ids, index, position } => {
-                        if st.group.denied() {
-                            ctx.toast(st.group.deny.clone());
-                            continue;
-                        }
                         let (win, at) = model::window(&ids, index, 1000);
                         if win.is_empty() {
                             ctx.toast_err("Only songs from your library can be played in a group listen");
+                            continue;
+                        }
+                        if !starts {
+                            let add = model::to_add(&ids, index, 1000);
+                            let n = add.len();
+                            if n == 0 {
+                                ctx.toast_err("Only songs from your library can be played in a group listen");
+                                continue;
+                            }
+                            tasks.push(send(&st.group, ctx, "enqueue", json!({ "tracks": add }), move |r| Msg::Added(n, false, r)));
                             continue;
                         }
                         // the position belongs to the song asked for, when it is a library song
@@ -1236,10 +1276,11 @@ pub fn update(st: &mut State, msg: Msg, ctx: &mut Ctx) -> Task<Message> {
                             ctx.toast_err("Only songs from your library can be played in a group listen");
                             continue;
                         }
-                        // the server shuffles, the same order for everyone: the group's queue for
-                        // those who control it, else added to its Up next (said once it took them)
-                        if st.group.denied() {
-                            tasks.push(send(&st.group, ctx, "enqueue", json!({ "tracks": win, "shuffle": true }), Msg::Shuffled));
+                        // the server shuffles, the same order for everyone: added to the group's Up
+                        // next (said once it took them), or the queue of a group with nothing to play
+                        if !starts {
+                            let n = win.len();
+                            tasks.push(send(&st.group, ctx, "enqueue", json!({ "tracks": win, "shuffle": true }), move |r| Msg::Added(n, true, r)));
                         } else {
                             tasks.push(command(
                                 &st.group,

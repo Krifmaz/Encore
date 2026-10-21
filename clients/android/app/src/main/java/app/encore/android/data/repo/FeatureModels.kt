@@ -566,6 +566,10 @@ data class SimilarTracks(val source: LString = "", @Serializable(with = Items::c
 
 // ---- Requests --------------------------------------------------------------------------------------------------
 
+/** A person who has requests (GET /api/requests/users, admins): the Requests page's User list ("Caz (612)"). */
+@Serializable
+data class RequestUser(val id: LLong = 0L, val username: LString = "", val count: LInt = 0)
+
 /** One row of GET /api/requests. */
 @Serializable
 data class RequestRow(
@@ -636,6 +640,13 @@ data class RequestRow(
     @SerialName("stalled_since") val stalledSince: LDouble = 0.0,
     /** Who pressed Download now and when, while the server remembers the press; null otherwise. */
     @Serializable(with = DownloadNowPress.OrNull::class) val pressed: DownloadNowPress? = null,
+    /**
+     * An import that hasn't moved for 15 minutes (or whose task is gone): the row offers Import again, which stops it
+     * and imports the kept files at once. False from an older server.
+     */
+    @SerialName("import_stalled") val importStalled: LBool = false,
+    /** When an import last moved (unix seconds; 0 when the request isn't importing). */
+    @SerialName("import_moved_at") val importMovedAt: LDouble = 0.0,
 ) : Checked<RequestRow> {
     val isActive: Boolean get() = status in ACTIVE_STATUSES
 

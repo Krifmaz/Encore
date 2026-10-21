@@ -44,7 +44,8 @@ pub fn rename(st: &impl Ctx, who: &Who, t: &Target, name: &str) -> Result<Value,
         None => dir.rename_noreplace(&old, &dir, name).map_err(io_error)?,
     }
     let followed = follow_extra_roots(st, &dir.path.join(&old), &dir.path.join(name));
-    let mut change = Change::default();
+    // a file that comes into the library from a download folder is this admin's import
+    let mut change = Change::by(encore_library::Added { by: Some(who.id), via: "import" });
     change.moved(&before, &LibraryDirs::of(st.cfg()), &dir.path.join(&old), &dir.path.join(name));
     rows_follow(&mut change, &before, &dir.path.join(&old), followed);
     if let Err(e) = change.apply(st) {
@@ -126,7 +127,8 @@ pub fn move_items(st: &impl Ctx, who: &Who, from: &[Target], to: &Target) -> Res
     let _g = crate::lock();
     let dest = to.open_dir()?;
     let dest_real = to.real()?;
-    let mut change = Change::default();
+    // a file that comes into the library from a download folder is this admin's import
+    let mut change = Change::by(encore_library::Added { by: Some(who.id), via: "import" });
     let (mut moved, mut failed) = (0, vec![]);
     for t in from {
         let res = (|| -> Result<bool, ApiError> {

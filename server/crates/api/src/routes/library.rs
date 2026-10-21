@@ -3,7 +3,7 @@ use crate::auth::{self, Admin, MaybeUser, User};
 use encore_db::{now, Conn, RowExt};
 use crate::enrich::{enrich, enrich_now};
 use encore_core::error::{err, ApiResult};
-use encore_library::{self as lib, delete_tracks, prune_empty};
+use encore_library::{self as lib, album_types, delete_tracks, prune_empty};
 use encore_db::p;
 use crate::state::AppState;
 use axum::extract::{Path, Query, Request, State};
@@ -25,6 +25,11 @@ pub fn router() -> Router<AppState> {
         .route("/api/library/scan", post(scan))
         .route("/api/library/storage", get(storage))
         .route("/api/library/albums", get(albums))
+        .route("/api/library/album-types", get(album_type_counts))
+        .route("/api/library/albums/trash", post(trash_albums))
+        .route("/api/library/albums/{id}/type", axum::routing::put(set_album_type))
+        .route("/api/library/artists/{name}/one-offs", get(library_artist::one_offs))
+        .route("/api/library/tracks/{id}/added", get(track_added))
         .route("/api/library/artists", get(artists).delete(delete_artist))
         .route("/api/library/tracks", get(tracks))
         .route("/api/library/artist-tracks", get(artist_tracks))
@@ -73,6 +78,10 @@ mod library_artist;
 /// GET /api/library/tracks/{id}/edges: where a song's sound starts and stops (Smart overlap transitions).
 #[path = "track_edges.rs"]
 mod track_edges;
+
+#[cfg(test)]
+#[path = "library_types_tests.rs"]
+mod library_types_tests;
 
 // ---- cached list answers ---------------------------------------------------------------------------
 
@@ -219,8 +228,17 @@ struct AlbumQ {
     limit: Option<i64>,
     offset: i64,
     dir: String,
+    /// `albums` (format Album), `singles` (Singles & EPs), or every album but the One-offs
     kind: String,
+    /// the Type filter: one key or a comma list (encore_library::album_types::TYPES, or `ep` / `single`); wins over `kind`
+    #[serde(rename = "type")]
+    types: String,
+    /// `1`: `{total, ids}` of the whole filtered list (Select all), at most `IDS_MAX`
+    ids_only: String,
 }
+
+/// Most album ids one `ids_only` answer gives (Select all).
+const IDS_MAX: usize = 5000;
 
 /// The albums list (the web's Albums tab, an artist's albums, the phone's library). The artist index (a
 /// search's ranks, the artist filter) and the queries run on the blocking pool.
@@ -232,60 +250,152 @@ async fn albums(State(st): State<AppState>, User(u): User, Query(a): Query<Album
     }).await
 }
 
-fn albums_answer(st: &AppState, a: &AlbumQ) -> ApiResult<Value> {
+/// Every album of a list (an artist's, a filter's) in list order, each with its Type filter key (`type`), once per
+/// state of the library: the kinds and types are slices of it in memory, and so are the pages.
+fn album_list(st: &AppState, artist: &str, filter: &str, sort: &str, dir: &str) -> ApiResult<Arc<Value>> {
     let mut wh = vec!["1=1".to_string()];
     let mut params: Vec<Value> = vec![];
-    // a search is ranked in memory (exact > starts with > a word starts with > contains, accents ignored)
-    let ranked = (!a.q.trim().is_empty()).then(|| {
-        let mut r = encore_library::search::library_album_ranks(&st.library.artists.index(&st.db), &a.q);
-        r.truncate(30000);
-        r
-    });
-    if !a.artist.is_empty() {
+    if !artist.is_empty() {
         // every spelling of the artist, its aliases and the collaborations it is part of
-        let (cond, ps) = st.library.artists.album_filter(&st.db, &a.artist);
+        let (cond, ps) = st.library.artists.album_filter(&st.db, artist);
         wh.push(cond);
         params.extend(ps);
     }
-    let mut having: Vec<&str> = vec![];
-    match a.filter.as_str() {
-        "untagged" => having.push("SUM(CASE WHEN mb_albumid IS NULL OR mb_albumid='' THEN 1 ELSE 0 END) > 0"),
-        "tagged" => having.push("SUM(CASE WHEN mb_albumid IS NULL OR mb_albumid='' THEN 1 ELSE 0 END) = 0"),
-        "lossless" => having.push("SUM(CASE WHEN format IN ('flac','wav','alac','aiff','ape','wv') THEN 1 ELSE 0 END) = COUNT(*)"),
-        _ => {}
-    }
-    match a.kind.as_str() {
-        "singles" => having.push("COUNT(*) <= 2"),
-        "albums" => having.push("COUNT(*) > 2"),
-        _ => {}
-    }
-    let having = if having.is_empty() { String::new() } else { format!("HAVING {}", having.join(" AND ")) };
+    let having = match filter {
+        "untagged" => "HAVING SUM(CASE WHEN mb_albumid IS NULL OR mb_albumid='' THEN 1 ELSE 0 END) > 0",
+        "tagged" => "HAVING SUM(CASE WHEN mb_albumid IS NULL OR mb_albumid='' THEN 1 ELSE 0 END) = 0",
+        "lossless" => "HAVING SUM(CASE WHEN format IN ('flac','wav','alac','aiff','ape','wv') THEN 1 ELSE 0 END) = COUNT(*)",
+        _ => "",
+    };
     let w = wh.join(" AND ");
-    // every album in list order, once per state of the library; pages are slices of it
     let sql = format!(
         "SELECT album_id AS id, MAX(album) album, MAX(albumartist) albumartist, MAX(year) year, MAX(genre) genre,
                 COUNT(*) tracks, SUM(duration) duration, SUM(size) size, MAX(added_at) added,
                 GROUP_CONCAT(DISTINCT format) formats, MAX(mb_albumid) mb_albumid, MAX(mb_releasegroupid) mb_releasegroupid,
                 SUM(CASE WHEN mb_albumid IS NULL OR mb_albumid='' THEN 1 ELSE 0 END) untagged
          FROM tracks WHERE {w} GROUP BY album_id {having} ORDER BY {}",
-        order(ALBUM_SORTS, &a.sort, &a.dir, "name")
+        order(ALBUM_SORTS, sort, dir, "name")
     );
     let key = format!("albums\u{1f}{sql}\u{1f}{}", Value::Array(params.clone()));
-    let all = cached_list(st, &key, || Ok(json!(st.db.query(&sql, params)?)))?;
-    let limit = a.limit.unwrap_or(120).clamp(1, 500) as usize;
+    cached_list(st, &key, || {
+        let mut rows = st.db.query(&sql, params)?;
+        // the type is part of the list: both follow the library's state
+        let types = st.library.types.get(&st.db);
+        for r in rows.iter_mut() {
+            let key = types.get(r.get("id").and_then(|v| v.as_str()).unwrap_or("")).map(|c| c.key()).unwrap_or("album");
+            r.insert("type".into(), json!(key));
+        }
+        Ok(json!(rows))
+    })
+}
+
+fn albums_answer(st: &AppState, a: &AlbumQ) -> ApiResult<Value> {
+    let searching = !a.q.trim().is_empty();
+    let pick = album_types::Pick::of(&a.types, &a.kind, searching).map_err(|e| err(400, e))?;
+    // a search is ranked in memory (exact > starts with > a word starts with > contains, accents ignored)
+    let ranked = searching.then(|| {
+        let mut r = encore_library::search::library_album_ranks(&st.library.artists.index(&st.db), &a.q);
+        r.truncate(30000);
+        r
+    });
+    let all = album_list(st, &a.artist, &a.filter, &a.sort, &a.dir)?;
+    let types = st.library.types.get(&st.db);
+    let mut items: Vec<&Value> = all.as_array().map(|v| v.iter().filter(|i| pick.wants(i["id"].as_str().and_then(|id| types.get(id)))).collect()).unwrap_or_default();
     if let Some(r) = ranked {
         // a search: the matches out of the same list, best rank first (the sort breaks ties; an album's
         // numbers don't depend on the search, which picks whole albums), instead of asking the database
         // again with every matching album id in an IN list
         let tier: HashMap<String, u8> = r.into_iter().collect();
-        let mut items: Vec<&Value> = all.as_array().map(|v| v.iter().filter(|i| i["id"].as_str().is_some_and(|id| tier.contains_key(id))).collect()).unwrap_or_default();
+        items.retain(|i| i["id"].as_str().is_some_and(|id| tier.contains_key(id)));
         items.sort_by_key(|i| i["id"].as_str().and_then(|id| tier.get(id)).copied().unwrap_or(9));   // stable
-        let total = items.len();
-        let items: Vec<&Value> = items.into_iter().skip(a.offset.max(0) as usize).take(limit).collect();
-        return Ok(json!({ "total": total, "items": items }));
     }
-    let total = all.as_array().map_or(0, |a| a.len());
-    Ok(json!({ "total": total, "items": page(&all, a.offset, limit) }))
+    let total = items.len();
+    if matches!(a.ids_only.as_str(), "1" | "true") {
+        let ids: Vec<&Value> = items.iter().take(IDS_MAX).map(|i| &i["id"]).collect();
+        return Ok(json!({ "total": total, "ids": ids, "capped": total > IDS_MAX }));
+    }
+    let limit = a.limit.unwrap_or(120).clamp(1, 500) as usize;
+    let page: Vec<&Value> = items.into_iter().skip(a.offset.max(0) as usize).take(limit).collect();
+    Ok(json!({ "total": total, "items": page }))
+}
+
+#[derive(Deserialize, Default)]
+#[serde(default)]
+struct TypeCountsQ {
+    artist: String,
+    filter: String,
+}
+
+/// GET /api/library/album-types: the Type dropdown's entries – every filter key in its order with its label and
+/// how many albums it has (0 too), over every album (One-offs included) under the same `artist` / `filter`.
+async fn album_type_counts(State(st): State<AppState>, User(_): User, Query(q): Query<TypeCountsQ>) -> ApiResult<Json<Value>> {
+    st.blocking(move |st| {
+        let all = album_list(st, &q.artist, &q.filter, "", "")?;
+        let mut counts: HashMap<&str, usize> = HashMap::new();
+        let items = all.as_array().map(|a| a.as_slice()).unwrap_or(&[]);
+        for i in items {
+            *counts.entry(i["type"].as_str().unwrap_or("album")).or_default() += 1;
+        }
+        let types: Vec<Value> = album_types::TYPES.iter().map(|(k, l)| json!({ "key": k, "label": l, "count": counts.get(k).copied().unwrap_or(0) })).collect();
+        Ok(Json(json!({ "total": items.len(), "types": types })))
+    }).await
+}
+
+#[derive(Deserialize)]
+struct TypeBody {
+    #[serde(default)]
+    format: Option<String>,
+}
+
+/// PUT /api/library/albums/{id}/type (admins): the owner's format for an album – Album, EP, Single or One-off – or
+/// null for automatic again. → the album's `type` object.
+async fn set_album_type(State(st): State<AppState>, Admin(u): Admin, Path(id): Path<String>, Json(b): Json<TypeBody>) -> ApiResult<Json<Value>> {
+    let format: Option<&'static str> = match b.format.as_deref() {
+        None => None,
+        Some(f) => Some(album_types::FORMATS.iter().find(|x| x.0 == f).map(|x| x.0).ok_or_else(|| err(400, "Pick Album, EP, Single or One-off"))?),
+    };
+    st.blocking(move |st| {
+        if st.db.one("SELECT 1 x FROM tracks WHERE album_id=? LIMIT 1", p![id])?.is_none() {
+            return Err(err(404, "Album not found"));
+        }
+        album_types::choose(&st.db, &id, format, u.i("id"))?;
+        Ok(Json(st.library.types.of(&st.db, &id).json()))
+    }).await
+}
+
+/// The folders the file manager may use (what Trash's items are relative to).
+fn file_roots(st: &AppState) -> Vec<encore_files::roots::Root> {
+    encore_files::roots::all(&st.cfg, st.data_dir(), &encore_requests::slskd_managed::download_dir(st))
+}
+
+#[derive(Deserialize)]
+struct TrashBody {
+    #[serde(default)]
+    ids: Vec<String>,
+    #[serde(default)]
+    dry_run: bool,
+}
+
+/// POST /api/library/albums/trash (admins) `{ids, dry_run}`: what moving these albums to the Trash would do, or
+/// doing it (encore_files::albums).
+async fn trash_albums(State(st): State<AppState>, Admin(u): Admin, Json(b): Json<TrashBody>) -> ApiResult<Json<Value>> {
+    st.blocking(move |st| {
+        let roots = file_roots(st);
+        encore_files::albums::trash_albums(st, &encore_files::Who::of(&u), &roots, &b.ids, b.dry_run).map(Json)
+    }).await
+}
+
+/// GET /api/library/tracks/{id}/added: who brought a song in (the song ⋯ menu's first line).
+async fn track_added(State(st): State<AppState>, User(_): User, Path(id): Path<i64>) -> ApiResult<Json<Value>> {
+    let r = st.db.one(&format!("SELECT t.added_by, t.added_via, t.requested_at, t.added_at, u.username FROM {} t LEFT JOIN users u ON u.id=t.added_by WHERE t.id=?", table_of(id)), p![id])?
+        .ok_or_else(|| err(404, "Track not found"))?;
+    let by_id = r.get("added_by").filter(|v| !v.is_null()).cloned();
+    let name = r.get("username").filter(|v| !v.is_null()).cloned();
+    Ok(Json(json!({
+        "via": r.get("added_via").cloned().unwrap_or(Value::Null), "by": name.clone().unwrap_or(Value::Null), "by_id": by_id.clone().unwrap_or(Value::Null),
+        "by_deleted": by_id.is_some() && name.is_none(), "requested_at": r.get("requested_at").cloned().unwrap_or(Value::Null),
+        "added_at": r.get("added_at").cloned().unwrap_or(Value::Null),
+    })))
 }
 
 #[derive(Deserialize, Default)]
@@ -584,15 +694,21 @@ async fn now_playing(State(st): State<AppState>, User(u): User, Json(b): Json<Pl
     Json(json!({ "ok": true }))
 }
 
-/// Users with the "fix" permission may act on songs that came from their own requests.
-fn owns_request(st: &AppState, u: &encore_db::Row, request_id: i64) -> bool {
-    request_id > 0 && auth::can(st, u, "fix")
-        && st.db.one("SELECT user_id FROM requests WHERE id=?", p![request_id]).ok().flatten().is_some_and(|r| r.i("user_id") == u.i("id"))
+/// Users with the "fix" permission may act on songs they requested: the request is theirs, or – after Clear
+/// finished deleted it – the song says they asked for it (`added_by`, a request-like `added_via`).
+fn owns_song(st: &AppState, u: &encore_db::Row, t: &encore_db::Row) -> bool {
+    if !auth::can(st, u, "fix") {
+        return false;
+    }
+    let me = u.i("id");
+    let request_id = t.i("request_id");
+    (request_id > 0 && st.db.one("SELECT user_id FROM requests WHERE id=?", p![request_id]).ok().flatten().is_some_and(|r| r.i("user_id") == me))
+        || (t.i("added_by") == me && matches!(t.s("added_via").as_str(), "request" | "link" | "soulseek"))
 }
 
 async fn delete_track(State(st): State<AppState>, User(u): User, Path(id): Path<i64>) -> ApiResult<Json<Value>> {
-    let t = st.db.one("SELECT path, artist, title, request_id FROM tracks WHERE id=?", p![id])?.ok_or_else(|| err(404, "Track not found"))?;
-    if !encore_config::perms::is_admin(&u) && !owns_request(&st, &u, t.i("request_id")) {
+    let t = st.db.one("SELECT path, artist, title, request_id, added_by, added_via FROM tracks WHERE id=?", p![id])?.ok_or_else(|| err(404, "Track not found"))?;
+    if !encore_config::perms::is_admin(&u) && !owns_song(&st, &u, &t) {
         return Err(err(403, "You can only remove songs you requested"));
     }
     delete_tracks(&st, &[id], None);
@@ -745,10 +861,13 @@ async fn album(State(st): State<AppState>, User(u): User, Path(id): Path<String>
     if encore_library::surround::is_album(&id) {
         return surround_album(&st, &u, &id).await;
     }
-    // who asked for it: the request that brought the file in, when there was one
+    // who brought each song in: kept on the song (0.36), so Clear finished – which deletes the request – doesn't
+    // lose the name; the request's own user and day for rows from before
     let aid = id.clone();
-    let rows = st.db.read(move |c| c.query("SELECT t.*, u.username requested_by, r.created_at requested_at, q.status quality_status, q.summary quality_note FROM tracks t LEFT JOIN requests r ON r.id=t.request_id
-                            LEFT JOIN users u ON u.id=r.user_id LEFT JOIN track_quality q ON q.track_id=t.id WHERE t.album_id=? ORDER BY t.disc, t.track, t.path", p![aid])).await?;
+    let rows = st.db.read(move |c| c.query("SELECT t.*, ua.username added_by_name, u.username request_user, r.created_at request_created,
+                            q.status quality_status, q.summary quality_note FROM tracks t LEFT JOIN requests r ON r.id=t.request_id
+                            LEFT JOIN users u ON u.id=r.user_id LEFT JOIN users ua ON ua.id=t.added_by LEFT JOIN track_quality q ON q.track_id=t.id
+                            WHERE t.album_id=? ORDER BY t.disc, t.track, t.path", p![aid])).await?;
     if rows.is_empty() {
         return Err(err(404, "Album not found"));
     }
@@ -761,13 +880,20 @@ async fn album(State(st): State<AppState>, User(u): User, Path(id): Path<String>
         if !admin {
             r.remove("path");
         }
+        who_added(&mut r);
         Value::Object(r)
     }).collect();
     let f = &rows[0];
+    let class = {
+        let id = id.clone();
+        st.blocking(move |st| Ok(st.library.types.of(&st.db, &id))).await?
+    };
     let mut v = json!({
         "id": id, "album": f.get("album"), "albumartist": f.get("albumartist"), "year": f.get("year"), "genre": f.get("genre"),
         "mb_albumid": f.get("mb_albumid"), "mb_releasegroupid": f.get("mb_releasegroupid"), "mb_albumartistid": f.get("mb_albumartistid"),
         "tracks": tracks, "duration": rows.iter().map(|r| r.f("duration")).sum::<f64>(), "size": rows.iter().map(|r| r.i("size")).sum::<i64>(),
+        "type": class.json(), "history": history(&tracks_of(&rows)),
+        "added_at": rows.iter().filter_map(|r| r.get("added_at").and_then(|v| v.as_f64())).reduce(f64::min),
     });
     enrich(&st, Some(&u), &mut v).await;
     // its Surround versions (0.35): the surround albums, the request fetching one, whether Apple has one; and
@@ -783,6 +909,77 @@ async fn album(State(st): State<AppState>, User(u): User, Path(id): Path<String>
         }
     }
     Ok(Json(v))
+}
+
+/// Is this way of adding a request (a request, a link, a Soulseek-page download)?
+fn request_like(via: &str) -> bool {
+    matches!(via, "request" | "link" | "soulseek")
+}
+
+/// A song row of the album page with who added it: `added_via`, `added_by` (id), `added_by_name`,
+/// `added_by_deleted`, and – for older apps – `requested_by` / `requested_at` (the adder of a request-like song, else
+/// the request's user; the song's request day, else the request's).
+fn who_added(r: &mut encore_db::Row) {
+    let via = r.s("added_via");
+    let name = r.get("added_by_name").filter(|v| !v.is_null()).cloned();
+    let by = r.get("added_by").filter(|v| !v.is_null()).cloned();
+    let requester = r.remove("request_user").filter(|v| !v.is_null());
+    let request_day = r.remove("request_created").filter(|v| !v.is_null());
+    r.insert("added_by_deleted".into(), json!(by.is_some() && name.is_none()));
+    let requested_by = if request_like(&via) { name.clone() } else { name.clone().or(requester) };
+    r.insert("requested_by".into(), requested_by.unwrap_or(Value::Null));
+    let at = r.get("requested_at").filter(|v| !v.is_null()).cloned().or(request_day);
+    r.insert("requested_at".into(), at.unwrap_or(Value::Null));
+    r.insert("added_by_name".into(), name.unwrap_or(Value::Null));
+    // the files' type tags are the server's business (the album's `type` says what they mean)
+    for k in ["releasetype", "tracktotal", "compilation"] {
+        r.remove(k);
+    }
+}
+
+/// (via, by id, by name, requested_at, added_at) of a song, for [`history`].
+type Added = (String, Option<i64>, Option<String>, Option<f64>, f64);
+
+/// [`Added`] of each song.
+fn tracks_of(rows: &[encore_db::Row]) -> Vec<Added> {
+    rows.iter().map(|r| {
+        (r.s("added_via"), r.get("added_by").and_then(|v| v.as_i64()), r.get("added_by_name").and_then(|v| v.as_str()).map(String::from),
+         r.get("requested_at").and_then(|v| v.as_f64()).or_else(|| r.get("request_created").and_then(|v| v.as_f64())), r.f("added_at"))
+    }).collect()
+}
+
+/// The album page's history line, as groups: the songs by (how they came – requests, links and Soulseek-page
+/// downloads are one – and who), most songs first, then the earliest. `[{via, by, by_deleted, requested_at, songs}]`
+fn history(songs: &[Added]) -> Value {
+    struct G {
+        via: String,
+        by_id: Option<i64>,
+        by: Option<String>,
+        at: Option<f64>,
+        first: f64,
+        songs: usize,
+    }
+    let mut groups: Vec<G> = vec![];
+    for (via, by_id, by, at, added) in songs {
+        if via.is_empty() {
+            continue;
+        }
+        fn class(v: &str) -> &str {
+            if request_like(v) { "request" } else { v }
+        }
+        match groups.iter_mut().find(|g| class(&g.via) == class(via) && g.by_id == *by_id) {
+            Some(g) => {
+                g.songs += 1;
+                g.at = match (g.at, *at) { (Some(a), Some(b)) => Some(a.min(b)), (a, b) => a.or(b) };
+                g.first = g.first.min(*added);
+            }
+            None => groups.push(G { via: via.clone(), by_id: *by_id, by: by.clone(), at: *at, first: *added, songs: 1 }),
+        }
+    }
+    groups.sort_by(|a, b| b.songs.cmp(&a.songs).then(a.at.unwrap_or(a.first).partial_cmp(&b.at.unwrap_or(b.first)).unwrap_or(std::cmp::Ordering::Equal)));
+    json!(groups.iter().map(|g| json!({
+        "via": g.via, "by": g.by, "by_deleted": g.by_id.is_some() && g.by.is_none(), "requested_at": g.at, "songs": g.songs,
+    })).collect::<Vec<_>>())
 }
 
 /// A Surround album: its songs (what each file is: "Dolby Atmos (E-AC-3 5.1)") and the stereo album it belongs to.
@@ -950,22 +1147,21 @@ mod write_zip_tests {
     }
 }
 
+/// DELETE /api/library/albums/{id} (admins): the album to the Trash (restorable from Files → Trash), as the
+/// Library's Delete… moves several (encore_files::albums).
 async fn delete_album(State(st): State<AppState>, Admin(u): Admin, Path(id): Path<String>) -> ApiResult<Json<Value>> {
-    let rows = st.db.query("SELECT id, path FROM tracks WHERE album_id=?", p![id])?;
-    if rows.is_empty() {
-        return Err(err(404, "Album not found"));
-    }
-    let ids: Vec<i64> = rows.iter().map(|r| r.i("id")).collect();
-    delete_tracks(&st, &ids, None);
-    let stop = st.cfg.str("library_path");
-    for r in &rows {
-        if let Some(d) = FsPath::new(&r.s("path")).parent() {
-            prune_empty(d, FsPath::new(&stop));
+    st.blocking(move |st| {
+        if st.db.one("SELECT 1 x FROM tracks WHERE album_id=? LIMIT 1", p![id])?.is_none() {
+            return Err(err(404, "Album not found"));
         }
-    }
-    st.library.forget_cover(Some(&id));
-    st.db.log("info", &format!("{} deleted album {id} ({} files)", u.s("username"), rows.len()));
-    Ok(Json(json!({ "ok": true })))
+        let roots = file_roots(st);
+        let r = encore_files::albums::trash_albums(st, &encore_files::Who::of(&u), &roots, std::slice::from_ref(&id), false)?;
+        if r["albums"].as_u64().unwrap_or(0) == 0 {
+            let why = r["failed"][0]["reason"].as_str().unwrap_or("It couldn't be moved to the Trash").to_string();
+            return Err(err(409, why));
+        }
+        Ok(Json(json!({ "ok": true, "text": r["text"], "items": r["items"] })))
+    }).await
 }
 
 #[derive(Deserialize)]
@@ -1036,8 +1232,8 @@ fn yes() -> bool {
 /// "This is the right song" – overrides the fingerprint check (e.g. matched to Deezer, not MusicBrainz).
 async fn verify_manual(State(st): State<AppState>, User(u): User, Json(b): Json<ManualVerify>) -> ApiResult<Json<Value>> {
     for id in b.track_ids {
-        let Some(t) = st.db.one("SELECT request_id FROM tracks WHERE id=?", p![id])? else { continue };
-        if !encore_config::perms::is_admin(&u) && !owns_request(&st, &u, t.i("request_id")) {
+        let Some(t) = st.db.one("SELECT request_id, added_by, added_via FROM tracks WHERE id=?", p![id])? else { continue };
+        if !encore_config::perms::is_admin(&u) && !owns_song(&st, &u, &t) {
             return Err(err(403, "You can only confirm songs you requested"));
         }
         if b.correct {

@@ -180,6 +180,8 @@ pub struct State {
     dialog: Option<Dialog>,
     /// The ⋯ menu: where, and the item id.
     menu: Option<(Point, i64)>,
+    /// Who added the open menu's song (0.36, `/library/tracks/{id}/added`): (song id, words), its first line.
+    added: Option<(i64, String)>,
     /// The name while it is being edited.
     rename: Option<String>,
     busy: bool,
@@ -232,6 +234,8 @@ pub enum Message {
     RemoveItem(i64),
     ItemRemoved(i64, Result<Value, ApiError>),
     Menu(i64),
+    /// `/library/tracks/{id}/added` for the open menu's song.
+    Added(i64, Result<Value, ApiError>),
     CloseMenu,
     PlayNext(i64),
     Enqueue(i64),
@@ -525,7 +529,22 @@ pub fn update(state: &mut State, msg: Message, ctx: &mut Ctx) -> Task<Message> {
             }
         }
         Message::ItemRemoved(_, Err(e)) => ctx.toast_err(e.message),
-        Message::Menu(iid) => state.menu = Some((ctx.cursor, iid)),
+        Message::Menu(iid) => {
+            state.menu = Some((ctx.cursor, iid));
+            state.added = None;
+            let tid = state.item(iid).map(|it| fmt::i(&it, "track_id")).unwrap_or(0);
+            if tid > 0 {
+                let api = ctx.api.clone();
+                return Task::perform(async move { api.get(&format!("/library/tracks/{tid}/added")).await }, move |r| {
+                    Message::Added(tid, r)
+                });
+            }
+        }
+        Message::Added(tid, r) => {
+            if let Ok(v) = r {
+                state.added = Some((tid, crate::pages::library_types::added_of(&v, fmt::date)));
+            }
+        }
         Message::CloseMenu => state.menu = None,
         Message::PlayNext(iid) => {
             state.menu = None;
@@ -863,6 +882,12 @@ pub fn overlay<'a>(state: &'a State, ctx: &Ctx<'a>) -> Option<El<'a, Message>> {
     if let Some((at, iid)) = state.menu {
         let it = state.item(iid)?;
         let mut items = Vec::new();
+        // who added the song (0.36): its first line once the server said
+        if let Some((tid, text)) = &state.added {
+            if *tid == fmt::i(&it, "track_id") && !text.is_empty() {
+                items.push(MenuItem::info(text.clone()));
+            }
+        }
         if fmt::truthy(&it, "track_id") {
             items.push(MenuItem::new("Play next", Message::PlayNext(iid)).icon(Icon::Play));
             items.push(MenuItem::new("Add to queue", Message::Enqueue(iid)).icon(Icon::Plus));

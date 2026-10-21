@@ -274,7 +274,7 @@ fun SettingsScreen(nav: Nav, session: Session, startAt: String? = null) {
                 val sections = schema?.sections?.map { it.id to it.title } ?: SERVER_PAGES.map { it to (SECTION_TITLES[it] ?: it) }
                 for ((id, title) in withPlugins(sections, plugins != false)) NavRow(title) { open(id) }
                 // the admin file manager (features/files, 0.33; not on older servers)
-                if (filesHere == true) NavRow("Files") { nav.open(app.encore.android.ui.Screen.Files) }
+                if (filesHere == true) NavRow("Files") { nav.open(app.encore.android.ui.Screen.Files()) }
                 NavLabel("System")
                 NavRow("Diagnostics", badge = if (u != null && SettingsRules.truthy(u["is_newer"]) && u.str("latest").isNotEmpty()) "Update" else null) { open("diagnostics") }
             }

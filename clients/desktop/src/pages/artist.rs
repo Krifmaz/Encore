@@ -8,10 +8,13 @@
 //! artist" (the songs the listener liked, Play all; hidden when there are none) and "In your
 //! library" with the artist's Songs (the first ten, "Show all N" loads every one) and Albums.
 //! Both are asked only when the library has songs of the artist; an older server's 404 hides
-//! them.
+//! them. After them the One-offs shelf (0.36, web `ArtistSongs::one_offs_html`): the artist's songs on
+//! compilations, remix albums and soundtracks the library has only a few songs of, with the song ⋯ menu.
 
 use crate::api::ApiError;
 use crate::fmt;
+use crate::pages::library::{self as lib, Act};
+use crate::pages::library_types as lt;
 use crate::pages::{urlencode, Ctx, El, Page};
 use crate::theme::{self, Badge, Btn};
 use crate::widgets::catalog::{self, AlbumTile, Live};
@@ -94,6 +97,12 @@ pub struct State {
     loading_all: bool,
     /// The library name and mbid the two lists are for (answers for another artist are dropped).
     lib_for: (String, String),
+    /// `/library/artists/{name}/one-offs` (0.36): `(total, songs)` – the first ten, or up to 500 after
+    /// "Show all N"; None until it answers (or when it failed: no shelf).
+    one_offs: Option<(usize, Vec<Value>)>,
+    loading_one_offs: bool,
+    /// The song ⋯ menu of the One-offs shelf and its dialogs.
+    shared: lib::Shared,
 }
 
 impl Default for State {
@@ -119,6 +128,9 @@ impl Default for State {
             all_songs: None,
             loading_all: false,
             lib_for: (String::new(), String::new()),
+            one_offs: None,
+            loading_one_offs: false,
+            shared: lib::Shared::default(),
         }
     }
 }
@@ -185,6 +197,23 @@ pub enum Message {
     PlayLiked(usize),
     /// Play the artist's library songs from this one.
     PlaySong(usize),
+    /// `/library/artists/{name}/one-offs` for (name, mbid) (0.36).
+    OneOffs((String, String), Result<Value, ApiError>),
+    /// "Show all N" of the One-offs shelf (up to 500).
+    OneOffsAll,
+    /// Play the shelf from this song.
+    PlayOneOff(usize),
+    /// The ⋯ of a One-off.
+    OneOffMenu(usize),
+    /// The song menu and its dialogs.
+    Song(Act),
+}
+
+/// `/library/artists/{name}/one-offs` (0.36): the first `limit` songs of the One-offs shelf.
+fn load_one_offs(ctx: &Ctx, key: (String, String), limit: usize) -> Task<Message> {
+    let api = ctx.api.clone();
+    let url = artist_route(&key.0, &key.1, "one-offs") + &format!("&offset=0&limit={limit}");
+    Task::perform(async move { api.get(&url).await }, move |r| Message::OneOffs(key.clone(), r))
 }
 
 /// The first songs "In your library" shows.
@@ -245,6 +274,9 @@ pub fn open(state: &mut State, id: String, ctx: &mut Ctx) -> Task<Message> {
     state.all_songs = None;
     state.loading_all = false;
     state.lib_for = (String::new(), String::new());
+    state.one_offs = None;
+    state.loading_one_offs = false;
+    state.shared.reset();
     state.filter = match ctx.config.local_str(FILTER_KEY) {
         "" => "all".into(),
         f => f.to_string(),
@@ -449,11 +481,12 @@ pub fn update(state: &mut State, msg: Message, ctx: &mut Ctx) -> Task<Message> {
                 let api = ctx.api.clone();
                 let liked = artist_route(&key.0, &key.1, "liked") + "&limit=200";
                 let first = artist_route(&key.0, &key.1, "tracks") + &format!("&offset=0&limit={SONGS_FIRST}");
-                let (k1, k2) = (key.clone(), key);
+                let (k1, k2) = (key.clone(), key.clone());
                 let api2 = api.clone();
                 Task::batch([
                     Task::perform(async move { api.get(&liked).await }, move |r| Message::Liked(k1.clone(), r)),
                     Task::perform(async move { api2.get(&first).await }, move |r| Message::Songs(k2.clone(), r)),
+                    load_one_offs(ctx, key, lt::ONE_OFFS_FIRST),
                 ])
             } else {
                 Task::none()
@@ -517,6 +550,48 @@ pub fn update(state: &mut State, msg: Message, ctx: &mut Ctx) -> Task<Message> {
             if !list.is_empty() {
                 ctx.play(list.clone(), i.min(list.len() - 1));
             }
+        }
+        Message::OneOffs(key, r) => {
+            if key == state.lib_for {
+                let all = state.loading_one_offs;
+                state.loading_one_offs = false;
+                match r {
+                    Ok(v) => state.one_offs = Some(songs_answer(&v)),
+                    // the first ten failing hides the shelf (an older server); Show all says why
+                    Err(e) if all => ctx.toast_err(e.message),
+                    Err(_) => {}
+                }
+            }
+        }
+        Message::OneOffsAll => {
+            if !state.loading_one_offs && !state.lib_for.0.is_empty() {
+                state.loading_one_offs = true;
+                return load_one_offs(ctx, state.lib_for.clone(), lt::ONE_OFFS_ALL);
+            }
+        }
+        Message::PlayOneOff(i) => {
+            if let Some((_, list)) = &state.one_offs {
+                if i < list.len() {
+                    ctx.play(list.clone(), i);
+                }
+            }
+        }
+        Message::OneOffMenu(i) => {
+            if let Some(t) = state.one_offs.as_ref().and_then(|(_, l)| l.get(i)).cloned() {
+                return lib::track_menu(&mut state.shared, &t, ctx).map(Message::Song);
+            }
+        }
+        Message::Song(a) => {
+            let task = lib::shared_update(&mut state.shared, a, ctx).map(Message::Song);
+            if state.shared.take_changed() {
+                state.shared.moved_to = None;
+                // a song changed or went: the shelf again
+                if !state.lib_for.0.is_empty() {
+                    let n = state.one_offs.as_ref().map_or(lt::ONE_OFFS_FIRST, |(_, l)| l.len().max(lt::ONE_OFFS_FIRST));
+                    return Task::batch([task, load_one_offs(ctx, state.lib_for.clone(), n)]);
+                }
+            }
+            return task;
         }
         Message::Loaded(Err(e)) => state.a = Some(Err(e.message)),
         Message::Extras(r) => state.extras = r.ok(),
@@ -1265,6 +1340,16 @@ pub fn view<'a>(state: &'a State, ctx: &Ctx<'a>) -> El<'a, Message> {
     if let Some(l) = library_section(state, ctx, &library_albums) {
         col = col.push(l);
     }
+    if let Some(l) = lt::one_offs_section(
+        ctx,
+        state.one_offs.as_ref(),
+        state.loading_one_offs,
+        Message::PlayOneOff,
+        Message::OneOffMenu,
+        Message::OneOffsAll,
+    ) {
+        col = col.push(l);
+    }
     col = col.push(discography(state, ctx, n_rg));
     col = col.push(ext_releases(state, ctx, a));
     if let Some(x) = &state.similar {
@@ -1531,6 +1616,9 @@ fn ext_sheet<'a>(state: &'a State, a: &'a Value, m: &'a Value, tracks: &'a [Valu
 
 /// A modal or ⋯ menu to lay over the whole window, when one is open.
 pub fn overlay<'a>(state: &'a State, ctx: &Ctx<'a>) -> Option<El<'a, Message>> {
+    if let Some(o) = lib::shared_overlay(&state.shared, ctx) {
+        return Some(o.map(Message::Song));
+    }
     if let Some(p) = &state.picker {
         return Some(picker::view(p, ctx).map(Message::Picker));
     }

@@ -8,15 +8,16 @@
 //! has "Get Dolby Atmos version" (web `album_versions`, `atmos_button`, `surround_album_menu`).
 
 use super::library::{self, format_text, long_dur, size_text, tr, verify_badge, Act, Shared};
+use super::library_types as lt;
 use crate::api::ApiError;
 use crate::fmt;
 use crate::pages::{urlencode, Ctx, El, Page};
 use crate::theme::{self, Badge, Btn};
 use crate::widgets::{
-    self, badge, btn, btn_icon, confirm, empty, grid, h1, h3, icon, icon_btn, modal, pop_menu, skeleton_rows,
+    self, badge, btn, btn_icon, empty, grid, h1, h3, icon, icon_btn, modal, pop_menu, skeleton_rows,
     small_muted, t, tabs, Icon, MenuItem, Tile, TileKind, TrackRow,
 };
-use iced::widget::{button, column, container, image, row, space, text_input, toggler, tooltip};
+use iced::widget::{button, column, container, image, radio, row, space, text_input, toggler, tooltip};
 use iced::{Alignment, ContentFit, Length, Point, Subscription, Task};
 use serde_json::{json, Value};
 use std::collections::HashSet;
@@ -64,13 +65,10 @@ pub enum Dialog {
     Edit(Box<EditState>),
     Match(Box<MatchState>),
     Artwork(Box<ArtState>),
-    Confirm {
-        title: String,
-        text: String,
-        ok: String,
-        danger: bool,
-        on_ok: Box<Message>,
-    },
+    /// Change type… (0.36): the format picked ("" = Automatic).
+    ChangeType { picked: &'static str, busy: bool },
+    /// Move album to Trash (0.36): the dry run's title and words; `can_go` false when the Trash has no room.
+    Trash { title: String, text: String, can_go: bool },
 }
 
 #[derive(Debug, Default)]
@@ -167,9 +165,16 @@ pub enum Message {
     ArtSet(Result<Value, ApiError>),
     FindArt,
     FoundArt(Result<Value, ApiError>),
-    DeleteAsk,
-    Delete,
-    Deleted(Result<Value, ApiError>),
+    /// Change type… (0.36): open the dialog, pick, save.
+    TypeOpen,
+    TypePick(&'static str),
+    TypeSave,
+    TypeSaved(Result<Value, ApiError>),
+    /// Move album to Trash (0.36): a dry run of this album, the dialog, then DELETE.
+    TrashAsk,
+    TrashDry(Result<Value, ApiError>),
+    TrashGo,
+    Trashed(Result<Value, ApiError>),
     TrackMenu(usize),
     Suspect(usize),
     /// The other version of this album (stereo or surround).
@@ -209,17 +214,6 @@ fn queue_tracks(state: &State) -> Vec<Value> {
         Some(a) => library::with_album_id(&fmt::items(&a["tracks"]), &state.id),
         None => Vec::new(),
     }
-}
-
-fn confirm_dialog(state: &mut State, title: &str, text: String, ok: &str, danger: bool, on_ok: Message) {
-    state.menu = None;
-    state.dialog = Some(Dialog::Confirm {
-        title: title.into(),
-        text,
-        ok: ok.into(),
-        danger,
-        on_ok: Box::new(on_ok),
-    });
 }
 
 /// `str.match(uuid | deezer | apple | discogs)` of the Tag this album link box.
@@ -910,29 +904,69 @@ pub fn update(state: &mut State, msg: Message, ctx: &mut Ctx) -> Task<Message> {
             return load(state, ctx);
         }
         Message::FoundArt(Err(e)) => ctx.toast_err(e.message),
-        Message::DeleteAsk => {
-            let a = state.album.clone().unwrap_or(Value::Null);
-            let text = format!(
-                "Permanently delete \"{}\" ({} files) from disk?",
-                fmt::s(&a, "album"),
-                fmt::items(&a["tracks"]).len()
-            );
-            confirm_dialog(state, "Delete album", text, "Delete", true, Message::Delete);
+        Message::TypeOpen => {
+            state.menu = None;
+            let chosen = state.album.as_ref().map(|a| fmt::s(&a["type"], "chosen")).unwrap_or_default();
+            let picked = ["album", "ep", "single", "one_off"].into_iter().find(|k| *k == chosen).unwrap_or("");
+            state.dialog = Some(Dialog::ChangeType { picked, busy: false });
         }
-        Message::Delete => {
+        Message::TypePick(v) => {
+            if let Some(Dialog::ChangeType { picked, .. }) = &mut state.dialog {
+                *picked = v;
+            }
+        }
+        Message::TypeSave => {
+            if let Some(Dialog::ChangeType { picked, busy }) = &mut state.dialog {
+                if *busy {
+                    return Task::none();
+                }
+                *busy = true;
+                let format = if picked.is_empty() { Value::Null } else { json!(picked) };
+                let api = ctx.api.clone();
+                let path = format!("/library/albums/{}/type", state.id);
+                return Task::perform(async move { api.put(&path, json!({ "format": format })).await }, Message::TypeSaved);
+            }
+        }
+        Message::TypeSaved(Ok(_)) => {
+            state.dialog = None;
+            ctx.toast_ok(lt::TYPE_SAVED);
+            return load(state, ctx);
+        }
+        Message::TypeSaved(Err(e)) => {
+            if let Some(Dialog::ChangeType { busy, .. }) = &mut state.dialog {
+                *busy = false;
+            }
+            ctx.toast_err(e.message);
+        }
+        Message::TrashAsk => {
+            state.menu = None;
+            let api = ctx.api.clone();
+            let id = state.id.clone();
+            return Task::perform(
+                async move { api.post("/library/albums/trash", json!({ "ids": [id], "dry_run": true })).await },
+                Message::TrashDry,
+            );
+        }
+        Message::TrashDry(Ok(d)) => {
+            let (title, text, can_go) = lt::trash_dialog_words(&d);
+            state.dialog = Some(Dialog::Trash { title, text, can_go });
+        }
+        Message::TrashDry(Err(e)) => ctx.toast_err(e.message),
+        Message::TrashGo => {
             state.dialog = None;
             let api = ctx.api.clone();
             let path = format!("/library/albums/{}", state.id);
-            return Task::perform(async move { api.del(&path).await }, Message::Deleted);
+            return Task::perform(async move { api.del(&path).await }, Message::Trashed);
         }
-        Message::Deleted(Ok(_)) => {
-            ctx.toast_ok("Album deleted");
+        Message::Trashed(Ok(r)) => {
+            let text = if fmt::truthy(&r, "text") { fmt::s(&r, "text") } else { lt::moved_text(1, 1, "") };
+            ctx.toast_action(text, lt::OPEN_TRASH, crate::player::Message::OpenTrash, lt::TOAST_MS);
             ctx.navigate(Page::library(""));
         }
-        Message::Deleted(Err(e)) => ctx.toast_err(e.message),
+        Message::Trashed(Err(e)) => ctx.toast_err(e.message),
         Message::TrackMenu(i) => {
             if let Some(t) = queue_tracks(state).get(i) {
-                library::track_menu(&mut state.shared, t, ctx);
+                return library::track_menu(&mut state.shared, t, ctx).map(Message::Shared);
             }
         }
         Message::OpenVersion(id) => ctx.navigate(Page::LibraryAlbum(id)),
@@ -980,10 +1014,12 @@ fn source_line(t: &Value) -> String {
     if fmt::truthy(t, "downloaded_at") {
         s.push_str(&format!(" · {}", fmt::ago(fmt::f(t, "downloaded_at"))));
     }
-    if fmt::truthy(t, "requested_by") {
-        s.push_str(&format!(" · requested by {}", fmt::s(t, "requested_by")));
-        if fmt::truthy(t, "requested_at") {
-            s.push_str(&format!(" on {}", fmt::date(fmt::f(t, "requested_at"))));
+    // who asked for it: kept on the song since 0.36, so Clear finished doesn't lose the name
+    let (by, at) = lt::requester(t);
+    if !by.is_empty() {
+        s.push_str(&format!(" · requested by {by}"));
+        if at > 0.0 {
+            s.push_str(&format!(" on {}", fmt::date(at)));
         }
     }
     s
@@ -1014,36 +1050,8 @@ pub fn view<'a>(state: &'a State, ctx: &Ctx<'a>) -> El<'a, Message> {
         }
     }
     let untagged = tracks.iter().filter(|t| !fmt::truthy(t, "mb_albumid")).count();
-    let mut requesters: Vec<String> = Vec::new();
-    for t in &tracks {
-        let w = fmt::s(t, "requested_by");
-        if !w.is_empty() && !requesters.contains(&w) {
-            requesters.push(w);
-        }
-    }
-    let earliest = |key: &str| {
-        tracks
-            .iter()
-            .filter(|t| fmt::truthy(t, key))
-            .map(|t| fmt::f(t, key))
-            .fold(f64::INFINITY, f64::min)
-    };
-    let (requested_at, added_at) = (earliest("requested_at"), earliest("added_at"));
-    let mut history: Vec<String> = Vec::new();
-    if !requesters.is_empty() {
-        let mut s = format!("Requested by {}", requesters.join(", "));
-        if requested_at.is_finite() {
-            s.push_str(&format!(" on {}", fmt::date(requested_at)));
-        }
-        history.push(s);
-    }
-    if added_at.is_finite() {
-        history.push(format!(
-            "{} {}",
-            if requesters.is_empty() { "Added" } else { "added" },
-            fmt::date(added_at)
-        ));
-    }
+    // who added it (0.36): the server's groups, kept on the songs; an older server: its requesters
+    let history = lt::album_history(a, fmt::date);
 
     // the header
     let cover: El<'a, Message> = match ctx.cover(&state.id, &a["cover_v"], 600) {
@@ -1082,7 +1090,18 @@ pub fn view<'a>(state: &'a State, ctx: &Ctx<'a>) -> El<'a, Message> {
     .spacing(0)
     .align_y(Alignment::Center);
     let quality = if surround { fmt::s(a, "quality") } else { formats.join(" / ") };
-    let mut chips = row![badge(quality, Badge::Plain)].spacing(6);
+    let mut chips = row![].spacing(6);
+    // its type (0.36): "Album", "Live · EP", "Compilation · One-off"; admins see why on hover
+    if a["type"].is_object() {
+        let t = &a["type"];
+        let chip = badge(fmt::s(t, "label"), Badge::Accent);
+        chips = chips.push(if admin && fmt::truthy(t, "why_text") {
+            tooltip(chip, widgets::tip_box(fmt::s(t, "why_text")), tooltip::Position::Top).gap(4).into()
+        } else {
+            chip
+        });
+    }
+    chips = chips.push(badge(quality, Badge::Plain));
     if fmt::truthy(a, "genre") {
         chips = chips.push(badge(fmt::s(a, "genre"), Badge::Plain));
     }
@@ -1151,7 +1170,7 @@ pub fn view<'a>(state: &'a State, ctx: &Ctx<'a>) -> El<'a, Message> {
     .spacing(6)
     .width(Length::Fill);
     if !history.is_empty() {
-        info = info.push(small_muted(history.join(" · ")));
+        info = info.push(small_muted(history));
     }
     info = info.push(container(chips.wrap()).padding([6, 0]));
     info = info.push(actions.wrap());
@@ -1255,16 +1274,17 @@ fn album_menu<'a>(state: &State, ctx: &Ctx<'a>, at: Point) -> El<'a, Message> {
         items.push(MenuItem::new("Release info", Message::ReleaseInfo).icon(Icon::Disc));
     }
     items.push(MenuItem::new("Report a problem", Message::ReportAlbum).icon(Icon::Shield));
-    if admin {
-        items.push(MenuItem::new("Tag / match metadata", Message::MatchOpen).icon(Icon::Tag));
-        items.push(MenuItem::new("Edit details (album, artist, songs)", Message::EditOpen).icon(Icon::Edit));
-        items.push(MenuItem::new("Change artwork…", Message::ArtOpen).icon(Icon::Disc));
-        items.push(MenuItem::new("Find artwork automatically", Message::FindArt).icon(Icon::Refresh));
-        items.push(
-            MenuItem::new("Delete album from disk", Message::DeleteAsk)
-                .icon(Icon::Trash)
-                .danger(),
-        );
+    // the admin's part, in the web's order: Change type… (0.36) after Edit details; the album goes to the Trash
+    // of Files, restorable there
+    for label in lt::album_admin_items(admin, a["type"].is_object()) {
+        items.push(match label {
+            "Tag / match metadata" => MenuItem::new(label, Message::MatchOpen).icon(Icon::Tag),
+            "Edit details (album, artist, songs)" => MenuItem::new(label, Message::EditOpen).icon(Icon::Edit),
+            lt::CHANGE_TYPE => MenuItem::new(label, Message::TypeOpen).icon(Icon::Tag),
+            "Change artwork…" => MenuItem::new(label, Message::ArtOpen).icon(Icon::Disc),
+            "Find artwork automatically" => MenuItem::new(label, Message::FindArt).icon(Icon::Refresh),
+            _ => MenuItem::new(label, Message::TrashAsk).icon(Icon::Trash).danger(),
+        });
     }
     pop_menu(at, items, Message::CloseMenu, ctx.size)
 }
@@ -1544,6 +1564,42 @@ fn art_dialog<'a>(a: &'a ArtState, ctx: &Ctx<'a>) -> El<'a, Message> {
     modal("Change artwork", body, None, true, Message::CloseDialog)
 }
 
+/// Change type… (0.36): Album, EP, Single, One-off (with what a One-off is), or Automatic with what the server
+/// guesses and why; the current one is checked. Save → PUT …/type.
+fn change_type_dialog<'a>(state: &'a State, picked: &'static str, busy: bool) -> El<'a, Message> {
+    let a = state.album.as_ref().unwrap_or(&Value::Null);
+    let mut opts = column![].spacing(10);
+    for (v, label) in lt::type_choices(&a["type"]) {
+        let r = radio(label, v, Some(picked), Message::TypePick).size(16).text_size(13.5).spacing(8);
+        opts = opts.push(if v == "one_off" {
+            column![r, container(small_muted(lt::ONE_OFF_HELP)).padding(iced::Padding::ZERO.left(24))].spacing(3).into()
+        } else {
+            El::from(r)
+        });
+    }
+    let body = column![widgets::muted(lt::what_is(&fmt::s(a, "album"))).size(13.5), opts].spacing(14);
+    let footer = row![
+        btn("Cancel", Btn::Default, Some(Message::CloseDialog)),
+        btn("Save", Btn::Primary, (!busy).then_some(Message::TypeSave)),
+    ]
+    .spacing(10);
+    modal(lt::CHANGE_TYPE_TITLE, body, Some(footer.into()), false, Message::CloseDialog)
+}
+
+/// Move album to Trash (0.36): the dry run's words; Move to Trash / Cancel, or Close when there is no room.
+fn trash_dialog<'a>(title: &'a str, text: &'a str, can_go: bool) -> El<'a, Message> {
+    let footer = if can_go {
+        row![
+            btn("Cancel", Btn::Default, Some(Message::CloseDialog)),
+            btn(lt::MOVE_TO_TRASH, Btn::Danger, Some(Message::TrashGo)),
+        ]
+        .spacing(10)
+    } else {
+        row![btn("Close", Btn::Default, Some(Message::CloseDialog))]
+    };
+    modal(title, widgets::muted(text).size(14), Some(footer.into()), false, Message::CloseDialog)
+}
+
 /// A modal or ⋯ menu to lay over the whole window, when one is open.
 pub fn overlay<'a>(state: &'a State, ctx: &Ctx<'a>) -> Option<El<'a, Message>> {
     if let Some(o) = library::shared_overlay(&state.shared, ctx) {
@@ -1553,13 +1609,8 @@ pub fn overlay<'a>(state: &'a State, ctx: &Ctx<'a>) -> Option<El<'a, Message>> {
         Some(Dialog::Edit(e)) => return Some(edit_dialog(e)),
         Some(Dialog::Match(m)) => return Some(match_dialog(m, ctx)),
         Some(Dialog::Artwork(a)) => return Some(art_dialog(a, ctx)),
-        Some(Dialog::Confirm {
-            title,
-            text,
-            ok,
-            danger,
-            on_ok,
-        }) => return Some(confirm(title, text, ok, *danger, (**on_ok).clone(), Message::CloseDialog)),
+        Some(Dialog::ChangeType { picked, busy }) => return Some(change_type_dialog(state, picked, *busy)),
+        Some(Dialog::Trash { title, text, can_go }) => return Some(trash_dialog(title, text, *can_go)),
         None => {}
     }
     state.menu.map(|at| album_menu(state, ctx, at))
@@ -1608,6 +1659,11 @@ mod tests {
         assert_eq!(source_line(&json!({})), "");
         let s = source_line(&json!({ "source": "soulseek", "source_detail": "user1", "requested_by": "ann" }));
         assert_eq!(s, "⬇ soulseek · user1 · requested by ann");
+        // 0.36: the adder kept on the song, after Clear finished too; an upload names nobody here
+        let s = source_line(&json!({ "source": "soulseek", "added_via": "soulseek", "added_by_name": "alex", "requested_by": null }));
+        assert_eq!(s, "⬇ soulseek · requested by alex");
+        let s = source_line(&json!({ "source": "upload", "added_via": "upload", "added_by_name": "sam", "requested_by": "sam" }));
+        assert_eq!(s, "⬇ upload");
     }
     #[test]
     fn stereo_and_surround_versions_link_to_each_other() {

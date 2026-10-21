@@ -11,6 +11,7 @@
 //! - nothing is replaced and nothing is deleted except from Trash ([`trash`]);
 //! - the library's rows follow what happens to its files, in one transaction ([`rows`]);
 //! - every operation writes one line to the activity log: who, what, from and to ([`audit`]).
+pub mod albums;
 pub mod dirfd;
 pub mod import;
 pub mod list;
@@ -23,6 +24,7 @@ pub mod tags;
 pub mod trash;
 pub mod upload;
 
+pub use albums::backfill_added_from_log;
 pub use resolve::{confine, Target};
 
 use encore_db::{Row, RowExt};

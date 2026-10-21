@@ -16,6 +16,7 @@
 
 use crate::api::ApiError;
 use crate::fmt;
+use crate::pages::library_types as lt;
 use crate::pages::{urlencode, Ctx, El, Page};
 use crate::theme::{self, Badge, Btn};
 use crate::widgets::{
@@ -380,6 +381,8 @@ pub enum Act {
     /// Ask for the Dolby Atmos version: `POST <path>` (an album's or a song's `/surround`, admins).
     GetAtmos(String),
     AtmosAsked(Result<Value, ApiError>),
+    /// `GET /library/tracks/{id}/added` for the open menu's song (0.36): who added it, its first line.
+    AddedGot(i64, Result<Value, ApiError>),
 }
 
 /// Edit song details.
@@ -451,6 +454,8 @@ pub enum Dialog {
 #[derive(Debug, Default)]
 pub struct Shared {
     pub menu: Option<(Point, Vec<MenuItem<Act>>)>,
+    /// The song the open menu is for (its who-added line arrives after it opened).
+    pub menu_song: i64,
     pub dialog: Option<Dialog>,
     /// A song changed or was removed; the page reloads and clears it.
     pub changed: bool,
@@ -469,11 +474,30 @@ impl Shared {
     }
 }
 
-/// Build the ⋯ menu of one song at the pointer (web `track_menu`).
-pub fn track_menu(sh: &mut Shared, t: &Value, ctx: &Ctx) {
+/// Build the ⋯ menu of one song at the pointer (web `track_menu`); the task asks who added the song, whose
+/// words become the menu's first line when they come (0.36, [`Act::AddedGot`]).
+pub fn track_menu(sh: &mut Shared, t: &Value, ctx: &Ctx) -> Task<Act> {
     if is_surround(t) {
-        return surround_track_menu(sh, t, ctx);
+        surround_track_menu(sh, t, ctx);
+    } else {
+        song_menu(sh, t, ctx);
     }
+    ask_added(sh, t, ctx)
+}
+
+/// `GET /library/tracks/{id}/added` for the song whose menu just opened.
+fn ask_added(sh: &mut Shared, t: &Value, ctx: &Ctx) -> Task<Act> {
+    let id = fmt::i(t, "id");
+    sh.menu_song = id;
+    if id <= 0 {
+        return Task::none();
+    }
+    let api = ctx.api.clone();
+    Task::perform(async move { api.get(&format!("/library/tracks/{id}/added")).await }, move |r| Act::AddedGot(id, r))
+}
+
+/// The menu of a stereo song.
+fn song_menu(sh: &mut Shared, t: &Value, ctx: &Ctx) {
     let admin = ctx.is_admin();
     let can_fix = admin || (ctx.session.perm("fix") && fmt::truthy(t, "request_id"));
     let b = || Box::new(t.clone());
@@ -1163,6 +1187,17 @@ pub fn shared_update(sh: &mut Shared, act: Act, ctx: &mut Ctx) -> Task<Act> {
                 ctx.toast_err(e.message);
             }
         }
+        // who added the song: the first line of its menu while that menu is still open (nothing to say, or an
+        // older server: no line)
+        Act::AddedGot(id, Ok(v)) => {
+            let text = crate::pages::library_types::added_of(&v, fmt::date);
+            if let Some((_, items)) = sh.menu.as_mut().filter(|_| sh.menu_song == id && !text.is_empty()) {
+                if !items.first().is_some_and(|i| i.info) {
+                    items.insert(0, MenuItem::info(text));
+                }
+            }
+        }
+        Act::AddedGot(_, Err(_)) => {}
     }
     Task::none()
 }
@@ -1566,6 +1601,22 @@ pub enum LibDialog {
         danger: bool,
         on_ok: Box<Message>,
     },
+    /// Delete… of the picked albums (0.36): the dry run's title and words; `can_go` false when the Trash's
+    /// disk has no room (then only Close).
+    Trash { title: String, text: String, can_go: bool },
+}
+
+/// A Move to Trash on its way (0.36): the selection in chunks of 100, one call after the other.
+#[derive(Debug, Default)]
+pub struct Moving {
+    chunks: Vec<Vec<String>>,
+    /// The chunk whose answer is awaited.
+    next: usize,
+    /// Albums asked for in all, and so far.
+    n: usize,
+    done: usize,
+    moved: usize,
+    first_reason: String,
 }
 
 #[derive(Debug, Default)]
@@ -1621,6 +1672,16 @@ pub struct State {
     /// `/library/search` for `found_for`: the answer or why it failed; None while it runs.
     found: Option<Result<Value, String>>,
     found_for: String,
+    /// The Albums tab's Type (0.36): a filter key of `/library/album-types` ("" = All types).
+    pub album_type: String,
+    /// The Type dropdown's entries (`/library/album-types`); empty: no dropdown (an older server).
+    pub types: Vec<Value>,
+    types_seq: u64,
+    /// Select mode (0.36, admins): the grid's tiles pick albums instead of opening them.
+    pub selecting: bool,
+    pub sel: lt::Selection,
+    /// A Move to Trash running (the bar shows how far it is).
+    pub moving: Option<Moving>,
 }
 
 /// The first matches each section of the results view shows (the phone's and the web's 12).
@@ -1702,6 +1763,26 @@ pub enum Message {
     /// A song of the results view: play the found songs from it.
     PlayFound(usize),
     FoundMenu(usize),
+    /// The Type dropdown (0.36).
+    TypePick(lt::TypeOpt),
+    /// `/library/album-types` answered.
+    Types(u64, Result<Value, ApiError>),
+    /// Select (admins): pick albums to move to the Trash.
+    SelectMode,
+    /// Done: leave select mode.
+    SelectDone,
+    /// A tile in select mode: pick or unpick its album.
+    Pick(String),
+    /// Select all N: every album of the list as it is filtered.
+    SelectAll,
+    SelectAllGot(Result<Value, ApiError>),
+    ClearSelection,
+    /// Delete…: a dry run over the picked albums, then the dialog.
+    DeleteSelected,
+    DryRun(Result<Value, ApiError>),
+    /// The dialog's Move to Trash: the real runs, 100 albums a call.
+    MoveToTrash,
+    TrashChunk(Result<Value, ApiError>),
 }
 
 /// Called when the app navigates here (with the route's parameters).
@@ -1753,11 +1834,15 @@ fn open_inner(
     if FILTERS.iter().any(|f| f.0 == query.filter) {
         state.filter = query.filter;
     }
+    state.album_type = query.album_type;
+    state.selecting = false;
+    state.sel.clear();
+    state.moving = None;
     // a query in the route opens on the results view
     state.results = !state.q.trim().is_empty();
     state.found = None;
     state.found_for.clear();
-    let mut tasks = vec![load(state, ctx, false)];
+    let mut tasks = vec![load(state, ctx, false), load_types(state, ctx)];
     if state.admin {
         tasks.push(poll_stats(ctx));
     }
@@ -1842,12 +1927,14 @@ fn load_index(state: &mut State, ctx: &Ctx) -> Task<Message> {
     }
     let seq = state.index_seq;
     let kind = if state.tab == "albums" { "albums&album_kind=albums".to_string() } else { state.tab.clone() };
+    let album_type = if state.tab == "albums" { state.album_type.as_str() } else { "" };
     let path = format!(
-        "/library/index?kind={kind}&sort={}&dir={}&filter={}&artist={}",
+        "/library/index?kind={kind}&sort={}&dir={}&filter={}&artist={}&type={}",
         state.sort,
         state.dir,
         state.filter,
-        urlencode(&state.artist)
+        urlencode(&state.artist),
+        urlencode(album_type)
     );
     let api = ctx.api.clone();
     Task::perform(async move { api.get(&path).await }, move |r| Message::Index(seq, r))
@@ -1987,6 +2074,7 @@ fn keep_route(state: &State, ctx: &mut Ctx) {
             query: crate::pages::LibraryQuery {
                 q: state.q.trim().to_string(),
                 filter: state.filter.clone(),
+                album_type: if state.tab == "albums" { state.album_type.clone() } else { String::new() },
                 ..Default::default()
             },
         });
@@ -2001,6 +2089,63 @@ fn album_kind(state: &State) -> &str {
     } else {
         state.tab.as_str()
     }
+}
+
+/// The albums list's query (GET /api/library/albums): the tab's kind, or the Type when one is picked (Albums tab).
+fn albums_query(state: &State) -> lt::AlbumsQuery {
+    lt::AlbumsQuery {
+        q: state.q.clone(),
+        sort: state.sort.clone(),
+        dir: state.dir.clone(),
+        kind: album_kind(state).to_string(),
+        filter: state.filter.clone(),
+        artist: state.artist.clone(),
+        album_type: if state.tab == "albums" { state.album_type.clone() } else { String::new() },
+    }
+}
+
+/// The Type dropdown's counts (GET /api/library/album-types) for this artist and filter.
+fn load_types(state: &mut State, ctx: &Ctx) -> Task<Message> {
+    state.types_seq += 1;
+    let seq = state.types_seq;
+    let url = format!("/library/album-types?artist={}&filter={}", urlencode(&state.artist), urlencode(&state.filter));
+    let api = ctx.api.clone();
+    Task::perform(async move { api.get(&url).await }, move |r| Message::Types(seq, r))
+}
+
+/// Select mode can be on: an admin on the Albums or Singles & EPs tab (not the results view).
+fn can_select(state: &State) -> bool {
+    state.admin && matches!(state.tab.as_str(), "albums" | "singles") && !results_view(state)
+}
+
+/// Changing the tab, Type, filter, sort or search clears what was picked (select mode stays on).
+fn clear_selection(state: &mut State) {
+    state.sel.clear();
+}
+
+fn leave_select(state: &mut State) {
+    state.selecting = false;
+    state.sel.clear();
+}
+
+/// The next chunk of a Move to Trash, or – all done – the toast (with Open Trash), and the list, the Type counts
+/// and the side index again.
+fn trash_next(state: &mut State, ctx: &mut Ctx) -> Task<Message> {
+    let Some(m) = state.moving.as_mut() else {
+        return Task::none();
+    };
+    if let Some(chunk) = m.chunks.get(m.next).cloned() {
+        let api = ctx.api.clone();
+        return Task::perform(
+            async move { api.post("/library/albums/trash", json!({ "ids": chunk, "dry_run": false })).await },
+            Message::TrashChunk,
+        );
+    }
+    let m = state.moving.take().unwrap_or_default();
+    let reason = if m.first_reason.is_empty() && m.moved < m.n { "It is no longer in the library".to_string() } else { m.first_reason };
+    ctx.toast_action(lt::moved_text(m.moved, m.n, &reason), lt::OPEN_TRASH, crate::player::Message::OpenTrash, lt::TOAST_MS);
+    leave_select(state);
+    Task::batch([load_types(state, ctx), load(state, ctx, false)])
 }
 
 fn load_list(state: &mut State, ctx: &Ctx, append: bool) -> Task<Message> {
@@ -2026,16 +2171,7 @@ fn load_list(state: &mut State, ctx: &Ctx, append: bool) -> Task<Message> {
     match state.tab.as_str() {
         "albums" | "singles" => {
             let limit = if want > 0 { want.clamp(PAGE, 500) } else { PAGE };
-            let url = format!(
-                "/library/albums?q={}&sort={}&dir={}&kind={}&filter={}&artist={}&limit={limit}&offset={}",
-                urlencode(&state.q),
-                state.sort,
-                state.dir,
-                album_kind(state),
-                state.filter,
-                urlencode(&state.artist),
-                state.offset
-            );
+            let url = albums_query(state).page(state.offset, limit);
             Task::perform(async move { api.get(&url).await }, move |res| Message::Albums { seq, append, res })
         }
         "artists" => {
@@ -2115,6 +2251,11 @@ pub fn update(state: &mut State, msg: Message, ctx: &mut Ctx) -> Task<Message> {
             }
             state.results = false;
             state.tab = tab;
+            if can_select(state) {
+                clear_selection(state);
+            } else {
+                leave_select(state);
+            }
             apply_sort(state);
             keep_route(state, ctx);
             return load(state, ctx, false);
@@ -2146,7 +2287,7 @@ pub fn update(state: &mut State, msg: Message, ctx: &mut Ctx) -> Task<Message> {
         Message::FoundMenu(i) => {
             if let Some(Ok(v)) = &state.found {
                 if let Some(t) = fmt::items(&v["songs"]).get(i).cloned() {
-                    track_menu(&mut state.shared, &t, ctx);
+                    return track_menu(&mut state.shared, &t, ctx).map(Message::Shared);
                 }
             }
         }
@@ -2154,6 +2295,11 @@ pub fn update(state: &mut State, msg: Message, ctx: &mut Ctx) -> Task<Message> {
             state.q = q;
             // typing shows the results view again
             state.results = true;
+            if can_select(state) {
+                clear_selection(state);
+            } else {
+                leave_select(state);
+            }
             state.settle += 1;
             let n = state.settle;
             return Task::perform(tokio::time::sleep(Duration::from_millis(300)), move |_| Message::Settled(n));
@@ -2165,6 +2311,7 @@ pub fn update(state: &mut State, msg: Message, ctx: &mut Ctx) -> Task<Message> {
             }
         }
         Message::Sort(o) => {
+            clear_selection(state);
             state.sort = o.key.to_string();
             state.dir = if desc_first(o.key) { "desc".into() } else { "asc".into() };
             save_sort(state);
@@ -2172,14 +2319,119 @@ pub fn update(state: &mut State, msg: Message, ctx: &mut Ctx) -> Task<Message> {
             return load(state, ctx, false);
         }
         Message::Dir => {
+            clear_selection(state);
             state.dir = if state.dir == "asc" { "desc".into() } else { "asc".into() };
             save_sort(state);
             persist_sorts(state, ctx);
             return load(state, ctx, false);
         }
         Message::Filter(o) => {
+            clear_selection(state);
             state.filter = o.key.to_string();
+            return Task::batch([load_types(state, ctx), load(state, ctx, false)]);
+        }
+        Message::TypePick(o) => {
+            clear_selection(state);
+            state.album_type = o.key;
+            keep_route(state, ctx);
             return load(state, ctx, false);
+        }
+        Message::Types(seq, r) => {
+            if seq == state.types_seq {
+                // an older server has no types: no dropdown
+                state.types = r.map(|v| fmt::items(&v["types"])).unwrap_or_default();
+            }
+        }
+        Message::SelectMode => {
+            if can_select(state) {
+                state.selecting = true;
+                state.sel.clear();
+            }
+        }
+        Message::SelectDone => {
+            if state.moving.is_none() {
+                leave_select(state);
+            }
+        }
+        Message::Pick(id) => {
+            if state.selecting && state.moving.is_none() {
+                state.sel.toggle(&id);
+            }
+        }
+        Message::SelectAll => {
+            if state.selecting && state.moving.is_none() {
+                let url = albums_query(state).ids();
+                let api = ctx.api.clone();
+                return Task::perform(async move { api.get(&url).await }, Message::SelectAllGot);
+            }
+        }
+        Message::SelectAllGot(Ok(v)) => {
+            if state.selecting {
+                let ids: Vec<String> = fmt::items(&v["ids"])
+                    .iter()
+                    .filter_map(|x| x.as_str().map(str::to_string))
+                    .filter(|x| !x.is_empty())
+                    .collect();
+                if state.sel.select_all(&ids) || fmt::truthy(&v, "capped") {
+                    ctx.toast_warn(lt::AT_MOST);
+                }
+            }
+        }
+        Message::SelectAllGot(Err(e)) => ctx.toast_err(e.message),
+        Message::ClearSelection => {
+            if state.moving.is_none() {
+                clear_selection(state);
+            }
+        }
+        Message::DeleteSelected => {
+            if !state.selecting || state.sel.is_empty() || state.moving.is_some() {
+                return Task::none();
+            }
+            let ids = state.sel.ids().to_vec();
+            let api = ctx.api.clone();
+            return Task::perform(
+                async move { api.post("/library/albums/trash", json!({ "ids": ids, "dry_run": true })).await },
+                Message::DryRun,
+            );
+        }
+        Message::DryRun(Ok(d)) => {
+            let (title, text, can_go) = lt::trash_dialog_words(&d);
+            state.dialog = Some(LibDialog::Trash { title, text, can_go });
+        }
+        Message::DryRun(Err(e)) => ctx.toast_err(e.message),
+        Message::MoveToTrash => {
+            state.dialog = None;
+            if state.sel.is_empty() || state.moving.is_some() {
+                return Task::none();
+            }
+            let ids = state.sel.ids().to_vec();
+            state.moving = Some(Moving {
+                chunks: lt::chunks(&ids),
+                n: ids.len(),
+                ..Default::default()
+            });
+            return trash_next(state, ctx);
+        }
+        Message::TrashChunk(r) => {
+            let Some(m) = state.moving.as_mut() else {
+                return Task::none();
+            };
+            match r {
+                Ok(v) => {
+                    m.moved += fmt::i(&v, "albums").max(0) as usize;
+                    if m.first_reason.is_empty() {
+                        m.first_reason = fmt::items(&v["failed"]).first().map(|f| fmt::s(f, "reason")).unwrap_or_default();
+                    }
+                }
+                Err(e) => {
+                    if m.first_reason.is_empty() {
+                        m.first_reason = e.message;
+                    }
+                }
+            }
+            m.done += m.chunks.get(m.next).map_or(0, Vec::len);
+            m.next += 1;
+            return trash_next(state, ctx);
         }
         Message::LoadMore => {
             if state.more && !state.loading_more {
@@ -2366,7 +2618,7 @@ pub fn update(state: &mut State, msg: Message, ctx: &mut Ctx) -> Task<Message> {
         }
         Message::TrackMenu(i) => {
             if let Some(t) = state.tracks.as_ref().and_then(|l| l.get(i)).cloned() {
-                track_menu(&mut state.shared, &t, ctx);
+                return track_menu(&mut state.shared, &t, ctx).map(Message::Shared);
             }
         }
         Message::Shuffle => {
@@ -2732,7 +2984,7 @@ pub fn view<'a>(state: &'a State, ctx: &Ctx<'a>) -> El<'a, Message> {
     // the tab row with its tools
     let mut tab_items: Vec<(&'a str, &'a str)> = vec![
         ("albums", "Albums"),
-        ("singles", "Singles"),
+        ("singles", lt::SINGLES_TAB),
         ("artists", "Artists"),
         ("tracks", "Songs"),
     ];
@@ -2801,6 +3053,34 @@ pub fn view<'a>(state: &'a State, ctx: &Ctx<'a>) -> El<'a, Message> {
                 .menu_style(theme::pick_menu),
         );
     }
+    // the Type dropdown (0.36): the Albums tab of one type – live albums, compilations, One-offs …
+    if !results && state.tab == "albums" && !state.types.is_empty() {
+        let options = lt::type_options(&state.types, &state.album_type);
+        let selected = options.iter().find(|o| o.key == state.album_type).cloned();
+        tools = tools.push(
+            tooltip(
+                pick_list(options, selected, Message::TypePick)
+                    .text_size(13)
+                    .padding([7, 10])
+                    .style(theme::pick)
+                    .menu_style(theme::pick_menu),
+                widgets::tip_box(lt::TYPE),
+                tooltip::Position::Bottom,
+            )
+            .gap(4),
+        );
+    }
+    // Select (admins): pick albums, Select all, Delete… to the Trash
+    if can_select(state) && !state.selecting {
+        tools = tools.push(
+            tooltip(
+                btn_icon(Icon::Check, lt::SELECT, Btn::Default, Some(Message::SelectMode)),
+                widgets::tip_box("Pick albums to delete"),
+                tooltip::Position::Bottom,
+            )
+            .gap(4),
+        );
+    }
     if !state.artist.is_empty() {
         tools = tools.push(
             button(
@@ -2828,6 +3108,9 @@ pub fn view<'a>(state: &'a State, ctx: &Ctx<'a>) -> El<'a, Message> {
 
     if results {
         return page.push(results_body(state, ctx)).into();
+    }
+    if state.selecting && can_select(state) {
+        page = page.push(select_bar(state));
     }
     page = page.push(body(state, ctx));
     if state.more {
@@ -2858,12 +3141,21 @@ fn body<'a>(state: &'a State, ctx: &Ctx<'a>) -> El<'a, Message> {
                 if !state.q.trim().is_empty() {
                     return widgets::catalog::empty_text(Icon::Library, format!("No albums match “{}”", state.q.trim()), String::new());
                 }
+                if state.tab == "albums" && !state.album_type.is_empty() {
+                    return empty(Icon::Library, lt::NO_ALBUMS_OF_TYPE, "");
+                }
                 empty(
                     Icon::Library,
                     "No albums found",
                     if state.filter == "untagged" { "Everything is tagged" } else { "" },
                 )
             }
+            Some(list) if state.selecting && can_select(state) => grid(
+                list.iter()
+                    .enumerate()
+                    .map(|(i, a)| mark_row(state, i, pick_tile(a, ctx, state.sel.contains(&fmt::s(a, "id")))))
+                    .collect(),
+            ),
             Some(list) => grid(
                 list.iter()
                     .enumerate()
@@ -3139,6 +3431,49 @@ pub fn album_tile<'a>(a: &Value, ctx: &Ctx<'a>) -> El<'a, Message> {
     tile.view()
 }
 
+/// An album tile in select mode (0.36): a tap picks or unpicks it (no play button), a check mark on the picked.
+fn pick_tile<'a>(a: &Value, ctx: &Ctx<'a>, picked: bool) -> El<'a, Message> {
+    let id = fmt::s(a, "id");
+    let title = if fmt::truthy(a, "album") { tr(ctx, a, "album") } else { "Unknown album".to_string() };
+    let mut sub = tr(ctx, a, "albumartist");
+    if fmt::truthy(a, "year") {
+        sub.push_str(&format!(" · {}", fmt::s(a, "year")));
+    }
+    let mut tile = Tile::new(title, TileKind::Album, Message::Pick(id.clone()))
+        .sub(sub)
+        .cover(ctx.cover(&id, &a["cover_v"], 400));
+    if picked {
+        tile = tile.corner(
+            container(icon(Icon::Check, 16.0, ctx.look.on_accent))
+                .padding(5)
+                .style(theme::accent_box)
+                .into(),
+        );
+    }
+    tile.view()
+}
+
+/// The bar above the grid in select mode: "N selected", Select all N, Clear selection, Delete…, Done; while
+/// the albums move, how far it is.
+fn select_bar<'a>(state: &'a State) -> El<'a, Message> {
+    if let Some(m) = &state.moving {
+        return row![small_muted(lt::moving_text(m.done, m.n))].align_y(Alignment::Center).into();
+    }
+    let n = state.sel.len();
+    let some = n > 0;
+    row![
+        badge(lt::selected_text(n), Badge::Accent),
+        btn_sm(lt::select_all_text(state.total), Btn::Default, Some(Message::SelectAll)),
+        btn_sm(lt::CLEAR_SELECTION, Btn::Default, some.then_some(Message::ClearSelection)),
+        btn_icon(Icon::Trash, lt::DELETE, Btn::Danger, some.then_some(Message::DeleteSelected)),
+        btn_sm(lt::DONE, Btn::Primary, Some(Message::SelectDone)),
+    ]
+    .spacing(8)
+    .align_y(Alignment::Center)
+    .wrap()
+    .into()
+}
+
 /// One duplicate group: the header with its buttons and a row per copy with the keep radio.
 fn dup_card<'a>(g: &'a Value, state: &State, p: theme::Palette) -> El<'a, Message> {
     let key = fmt::s(g, "key");
@@ -3213,6 +3548,18 @@ pub fn overlay<'a>(state: &'a State, ctx: &Ctx<'a>) -> Option<El<'a, Message>> {
             danger,
             on_ok,
         }) => Some(confirm(title, text, ok, *danger, (**on_ok).clone(), Message::CloseDialog)),
+        Some(LibDialog::Trash { title, text, can_go }) => {
+            let footer = if *can_go {
+                row![
+                    btn("Cancel", Btn::Default, Some(Message::CloseDialog)),
+                    btn(lt::MOVE_TO_TRASH, Btn::Danger, Some(Message::MoveToTrash)),
+                ]
+                .spacing(10)
+            } else {
+                row![btn("Close", Btn::Default, Some(Message::CloseDialog))]
+            };
+            Some(modal(title.as_str(), widgets::muted(text.as_str()).size(14), Some(footer.into()), false, Message::CloseDialog))
+        }
         None => scrubber(state, ctx),
     }
 }
@@ -3263,10 +3610,29 @@ fn scrubber<'a>(state: &'a State, ctx: &Ctx<'a>) -> Option<El<'a, Message>> {
 const SCRUB_LABEL_PX: f32 = 18.0;
 
 pub fn subscription(state: &State) -> Subscription<Message> {
+    let mut subs = Vec::new();
     if state.admin {
-        iced::time::every(Duration::from_millis(2500)).map(|_| Message::Poll)
-    } else {
-        Subscription::none()
+        subs.push(iced::time::every(Duration::from_millis(2500)).map(|_| Message::Poll));
+    }
+    // select mode (0.36): Esc leaves, Ctrl+A selects all, Delete is Delete… (not while a dialog or menu is open)
+    if state.selecting && state.moving.is_none() && state.dialog.is_none() && state.shared.menu.is_none() && state.shared.dialog.is_none() {
+        subs.push(iced::event::listen_with(select_key));
+    }
+    Subscription::batch(subs)
+}
+
+/// The keys of select mode (those no text box took).
+fn select_key(e: iced::Event, status: iced::event::Status, _: iced::window::Id) -> Option<Message> {
+    use iced::keyboard::{key::Named, Event as Kb, Key};
+    let iced::Event::Keyboard(Kb::KeyPressed { key, modifiers, .. }) = e else {
+        return None;
+    };
+    match key.as_ref() {
+        Key::Named(Named::Escape) => Some(Message::SelectDone),
+        _ if status == iced::event::Status::Captured => None,
+        Key::Named(Named::Delete) => Some(Message::DeleteSelected),
+        Key::Character(c) if modifiers.command() && c.eq_ignore_ascii_case("a") => Some(Message::SelectAll),
+        _ => None,
     }
 }
 
@@ -3407,7 +3773,7 @@ mod tests {
             Point::ORIGIN,
         );
         let mut sh = Shared::default();
-        track_menu(&mut sh, &json!({ "id": 1, "title": "x", "album_id": "al" }), &ctx);
+        let _ = track_menu(&mut sh, &json!({ "id": 1, "title": "x", "album_id": "al" }), &ctx);
         let labels: Vec<String> = sh.menu.as_ref().unwrap().1.iter().map(|m| m.label.clone()).collect();
         assert!(labels.contains(&"Delete song from disk".to_string()));
         assert!(labels.contains(&"Edit song details…".to_string()));
@@ -3426,11 +3792,70 @@ mod tests {
             iced::Size::new(1000.0, 700.0),
             Point::ORIGIN,
         );
-        track_menu(&mut sh, &json!({ "id": 1, "title": "x" }), &ctx);
+        let _ = track_menu(&mut sh, &json!({ "id": 1, "title": "x" }), &ctx);
         let labels: Vec<String> = sh.menu.as_ref().unwrap().1.iter().map(|m| m.label.clone()).collect();
         assert!(!labels.iter().any(|l| l.contains("Delete")));
         assert!(!labels.contains(&"Go to album".to_string()));
     }
+    fn key(key: iced::keyboard::Key, modifiers: iced::keyboard::Modifiers) -> iced::Event {
+        iced::Event::Keyboard(iced::keyboard::Event::KeyPressed {
+            modified_key: key.clone(),
+            key,
+            physical_key: iced::keyboard::key::Physical::Unidentified(iced::keyboard::key::NativeCode::Unidentified),
+            location: iced::keyboard::Location::Standard,
+            modifiers,
+            text: None,
+            repeat: false,
+        })
+    }
+
+    /// Select mode (0.36): Esc leaves, Ctrl+A is Select all, Delete is Delete… – the last two only when no
+    /// text box took the key.
+    #[test]
+    fn select_mode_keys() {
+        use iced::event::Status;
+        use iced::keyboard::{key::Named, Key, Modifiers};
+        let id = iced::window::Id::unique();
+        let name = |e: Option<Message>| e.map(|m| format!("{m:?}")).unwrap_or_default();
+        assert_eq!(name(select_key(key(Key::Named(Named::Escape), Modifiers::empty()), Status::Ignored, id)), "SelectDone");
+        assert_eq!(name(select_key(key(Key::Named(Named::Escape), Modifiers::empty()), Status::Captured, id)), "SelectDone");
+        assert_eq!(name(select_key(key(Key::Named(Named::Delete), Modifiers::empty()), Status::Ignored, id)), "DeleteSelected");
+        assert_eq!(name(select_key(key(Key::Character("a".into()), Modifiers::COMMAND), Status::Ignored, id)), "SelectAll");
+        assert_eq!(name(select_key(key(Key::Character("A".into()), Modifiers::COMMAND), Status::Ignored, id)), "SelectAll");
+        assert!(select_key(key(Key::Character("a".into()), Modifiers::COMMAND), Status::Captured, id).is_none(), "the search box's own Ctrl+A");
+        assert!(select_key(key(Key::Character("a".into()), Modifiers::empty()), Status::Ignored, id).is_none());
+        assert!(select_key(key(Key::Named(Named::Delete), Modifiers::empty()), Status::Captured, id).is_none());
+    }
+
+    /// The Type dropdown and Select (0.36): a Type decides the Albums tab alone, picking clears the selection,
+    /// select mode is for admins on the album tabs only, and the Singles tab says what it lists.
+    #[test]
+    fn types_and_select_mode() {
+        let mut st = State { tab: "albums".into(), sort: "added".into(), dir: "desc".into(), album_type: "live".into(), ..Default::default() };
+        assert_eq!(albums_query(&st).page(0, PAGE), "/library/albums?q=&sort=added&dir=desc&type=live&filter=&artist=&limit=120&offset=0");
+        st.tab = "singles".into();
+        assert_eq!(albums_query(&st).page(0, PAGE), "/library/albums?q=&sort=added&dir=desc&kind=singles&filter=&artist=&limit=120&offset=0", "the Type is the Albums tab's");
+        assert!(!can_select(&st), "members don't select");
+        st.admin = true;
+        assert!(can_select(&st));
+        st.tab = "tracks".into();
+        assert!(!can_select(&st));
+        st.tab = "albums".into();
+        st.selecting = true;
+        st.sel.toggle("a1");
+        st.sel.toggle("a2");
+        clear_selection(&mut st);
+        assert!(st.selecting && st.sel.is_empty(), "the mode stays, the picks go");
+        st.sel.toggle("a1");
+        leave_select(&mut st);
+        assert!(!st.selecting && st.sel.is_empty());
+        // the results view of a search can't select
+        st.q = "x".into();
+        st.results = true;
+        assert!(!can_select(&st));
+        assert_eq!(lt::SINGLES_TAB, "Singles & EPs");
+    }
+
     #[test]
     fn surround_songs_and_albums_are_told_apart() {
         assert!(is_surround(&json!({ "id": "s0123456789abcde", "class": "surround" })));
@@ -3466,7 +3891,7 @@ mod tests {
                 Point::ORIGIN,
             );
             let mut sh = Shared::default();
-            track_menu(&mut sh, &t, &ctx);
+            let _ = track_menu(&mut sh, &t, &ctx);
             sh.menu.unwrap().1.iter().map(|m| m.label.clone()).collect()
         };
         let admin = ctx_for("admin", json!(["surround"]));

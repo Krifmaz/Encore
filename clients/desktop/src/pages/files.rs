@@ -1251,6 +1251,14 @@ fn play(ctx: &Ctx, id: i64) -> Task<Message> {
     Task::perform(async move { api.get(&format!("/library/tracks/{id}")).await }, Message::PlayRow)
 }
 
+/// Set by "Open Trash" (the toast after albums went to the Trash, 0.36): Files opens on the Trash next time.
+static OPEN_ON_TRASH: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Make the next opening of Files show the Trash (then navigate to Settings → Files).
+pub fn open_on_trash() {
+    OPEN_ON_TRASH.store(true, std::sync::atomic::Ordering::Relaxed);
+}
+
 /// Called when Settings opens this section.
 pub fn open(state: &mut State, ctx: &mut Ctx) -> Task<Message> {
     state.menu = None;
@@ -1258,6 +1266,9 @@ pub fn open(state: &mut State, ctx: &mut Ctx) -> Task<Message> {
     state.shared.reset();
     if !ctx.is_admin() {
         return Task::none();
+    }
+    if OPEN_ON_TRASH.swap(false, std::sync::atomic::Ordering::Relaxed) {
+        return Task::batch([load_roots(ctx), open_root(state, "trash".into(), ctx)]);
     }
     if !state.sort_read {
         state.sort_read = true;

@@ -192,6 +192,10 @@ fn sheet<'a>(st: &'a State, ctx: &Ctx<'a>) -> Option<El<'a, Message>> {
         column![left, right].spacing(14).into()
     };
     let mut actions = row![iced::widget::space().width(Length::Fill)].spacing(10);
+    // the group's own pause (Pause in the player pauses only here), for those who control it
+    if model::offers_pause_for_everyone(s) {
+        actions = actions.push(btn(model::PAUSE_FOR_EVERYONE, Btn::Default, Some(g(Msg::PauseForEveryone))));
+    }
     if s.you_host {
         actions = actions.push(btn("End for everyone", Btn::Danger, Some(g(Msg::AskEnd))));
     }

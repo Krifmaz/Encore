@@ -294,6 +294,9 @@ struct TagEdit {
 }
 
 async fn edit_tags(State(st): State<AppState>, Admin(_): Admin, Json(b): Json<TagEdit>) -> ApiResult<Json<Value>> {
+    // the albums the songs were in: when every song of one was edited into one new album, its type (the owner's
+    // choice) follows it
+    let before = album_ids_of(&st, &b.track_ids);
     let mut paths = tagger::edit_tags(&st, &b.track_ids, &b.values).map_err(|e| err(500, format!("Could not write tags: {e}")))?;
     if b.lock {
         for p in &paths {
@@ -305,7 +308,25 @@ async fn edit_tags(State(st): State<AppState>, Admin(_): Admin, Json(b): Json<Ta
         paths = tagger::rename_to_tags(&st, &paths).await;
     }
     tagger::index_paths(&st, &paths);
+    for old in before {
+        encore_library::album_types::carry(&st.db, &old, &b.track_ids, false);
+    }
     Ok(Json(json!({ "ok": true, "album_id": paths.first().map(|p| album_of(&st, p)).unwrap_or(Value::Null) })))
+}
+
+/// The albums these songs are in.
+fn album_ids_of(st: &AppState, ids: &[i64]) -> Vec<String> {
+    let mut out: Vec<String> = vec![];
+    for chunk in ids.chunks(500) {
+        let marks = encore_library::artists::marks(chunk.len());
+        for r in st.db.query(&format!("SELECT DISTINCT album_id FROM tracks WHERE id IN ({marks})"), chunk.iter().map(|i| json!(i)).collect()).unwrap_or_default() {
+            let a = r.s("album_id");
+            if !a.is_empty() && !out.contains(&a) {
+                out.push(a);
+            }
+        }
+    }
+    out
 }
 
 /// Match every untagged album to MusicBrainz (only confident matches are applied).
@@ -328,10 +349,14 @@ async fn run_bulk(st: AppState) {
         let artist = if a.s("artist") == "Unknown Artist" { String::new() } else { a.s("artist") };
         let res: anyhow::Result<bool> = async {
             let Some(pv) = tagger::auto_match(&st, &paths, &artist, &a.s("album"), None).await? else { return Ok(false) };
+            let ids: Vec<i64> = st.db.query("SELECT id FROM tracks WHERE album_id=?", p![a.s("album_id")])?.iter().map(|r| r.i("id")).collect();
             let new = tagger::apply_preview(&st, &pv, st.cfg.bool("rename_on_import"), None, None).await?;
             let old: Vec<PathBuf> = pv["rows"].as_array().cloned().unwrap_or_default().iter().map(|r| PathBuf::from(r["path"].as_str().unwrap_or(""))).collect();
             tagger::relink(&st, &old, &new);
             tagger::index_paths(&st, &new);
+            // the owner's type choice follows the album to its new id; the facts are the release's
+            encore_library::album_types::carry(&st.db, &a.s("album_id"), &ids, true);
+            tagger::record_release(&st, &pv, &new);
             Ok(true)
         }.await;
         match res {

@@ -19,7 +19,6 @@ import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Scaffold
-import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.material3.TopAppBarDefaults
 import androidx.compose.runtime.Composable
@@ -43,6 +42,7 @@ import app.encore.android.R
 import app.encore.android.data.repo.LinkProbe
 import app.encore.android.data.repo.Me
 import app.encore.android.data.repo.RequestRow
+import app.encore.android.data.repo.RequestUser
 import app.encore.android.features.requests.RequestItem
 import app.encore.android.features.requests.RequestRules
 import app.encore.android.features.requests.RequestSheets
@@ -92,8 +92,9 @@ private object AlbumModePref {
 /**
  * Requests (web-rs/src/pages/requests.rs, with the web Downloader's link box and bulk actions, download.rs): the list
  * with status filters, every row's buttons (common.rs), a tap for the whole message and log, a link box with the
- * album choice, Preview, Import as playlist and Exactly this link, Retry failed, Clear… and Clear waiting beside Only
- * mine (as the web shows them), the admin's Download all now (servers with Download now), the storage banner while imports are
+ * album choice, Preview, Import as playlist and Exactly this link, Retry failed, Clear… and Clear waiting beside the
+ * admin's User list ("All users", then each person with their requests: "Caz (612)"; the buttons take the person
+ * picked) as the web shows them, the admin's Download all now (servers with Download now), the storage banner while imports are
  * paused, and for admins Activity in ⋯.
  */
 @OptIn(ExperimentalMaterial3Api::class, ExperimentalLayoutApi::class)
@@ -106,6 +107,12 @@ fun RequestsScreen(nav: Nav) {
     var me by remember { mutableStateOf<Me?>(null) }
     var filter by remember { mutableStateOf(0) }
     var mine by remember { mutableStateOf(false) }
+    // the admin's User list: the people who have requests, and the one picked (0: everyone's; kept with its name while
+    // that person has no requests left)
+    var users by remember { mutableStateOf<List<RequestUser>>(emptyList()) }
+    var picked by remember { mutableStateOf<Pair<Long, String>?>(null) }
+    var userMenu by remember { mutableStateOf(false) }
+    val user = picked?.first ?: 0L
     var rows by remember { mutableStateOf<List<RequestRow>?>(null) }
     var error by remember { mutableStateOf<String?>(null) }
     var generation by remember { mutableStateOf(0) }
@@ -131,7 +138,16 @@ fun RequestsScreen(nav: Nav) {
     suspend fun load() {
         try {
             val m = me ?: withContext(Dispatchers.IO) { features.me() }.also { me = it; actions.me = it; if (!it.isAdmin && !mine) mine = true }
-            rows = withContext(Dispatchers.IO) { features.requests(FILTERS[filter].first, mine && m.isAdmin) }
+            rows = withContext(Dispatchers.IO) { features.requests(FILTERS[filter].first, mine && m.isAdmin, user = if (m.isAdmin) user else 0L) }
+            // the User list's counts follow the list (an older server has none: the list stays as it was)
+            if (m.isAdmin) {
+                try {
+                    users = withContext(Dispatchers.IO) { features.requestUsers() }
+                } catch (e: CancellationException) {
+                    throw e
+                } catch (_: Exception) {
+                }
+            }
             error = null
         } catch (e: CancellationException) {
             throw e
@@ -140,7 +156,7 @@ fun RequestsScreen(nav: Nav) {
         }
     }
 
-    LaunchedEffect(filter, mine, generation) { load() }
+    LaunchedEffect(filter, mine, user, generation) { load() }
     // the web refreshes every 4 s while the page is open
     LaunchedEffect(Unit) {
         while (true) {
@@ -152,7 +168,7 @@ fun RequestsScreen(nav: Nav) {
     fun clear(statuses: List<String>, files: Boolean) {
         scope.launch {
             try {
-                val (removed, deleted) = withContext(Dispatchers.IO) { features.clearRequests(statuses, files, mine) }
+                val (removed, deleted) = withContext(Dispatchers.IO) { features.clearRequests(statuses, files, mine, user) }
                 Toasts.show(RequestRules.clearToast(removed, deleted, files), "ok")
                 reload()
             } catch (e: CancellationException) {
@@ -168,7 +184,7 @@ fun RequestsScreen(nav: Nav) {
         countingWaiting = true
         scope.launch {
             try {
-                val r = withContext(Dispatchers.IO) { features.clearWaiting(mine, dryRun = true) }
+                val r = withContext(Dispatchers.IO) { features.clearWaiting(mine, dryRun = true, user = user) }
                 if (r.count > 0) confirmWaiting = r.count else Toasts.show(RequestRules.clearWaitingToast(r), "info")
             } catch (e: CancellationException) {
                 throw e
@@ -181,7 +197,7 @@ fun RequestsScreen(nav: Nav) {
     fun clearWaitingNow() {
         scope.launch {
             try {
-                val r = withContext(Dispatchers.IO) { features.clearWaiting(mine, dryRun = false) }
+                val r = withContext(Dispatchers.IO) { features.clearWaiting(mine, dryRun = false, user = user) }
                 Toasts.show(RequestRules.clearWaitingToast(r), if (r.count > 0) "ok" else "info")
                 reload()
             } catch (e: CancellationException) {
@@ -196,7 +212,7 @@ fun RequestsScreen(nav: Nav) {
         retrying = true
         scope.launch {
             try {
-                val r = withContext(Dispatchers.IO) { features.retryFailed(mine) }
+                val r = withContext(Dispatchers.IO) { features.retryFailed(mine, user) }
                 val (msg, kind) = RequestRules.retryFailedToast(r)
                 Toasts.show(msg, kind)
                 reload()
@@ -208,14 +224,14 @@ fun RequestsScreen(nav: Nav) {
             retrying = false
         }
     }
-    // Download all now (admins): wake every waiting request and move requests up in their lines (with Only mine, the
-    // admin's own first) – never more at once than each source allows; the server's words are the toast
+    // Download all now (admins): wake every waiting request and move requests up in their lines (with a person picked in
+    // the User list, only theirs) – never more at once than each source allows; the server's words are the toast
     fun downloadAllNow() {
         if (downloadingAll) return
         downloadingAll = true
         scope.launch {
             try {
-                val r = withContext(Dispatchers.IO) { features.downloadAllNow(mine) }
+                val r = withContext(Dispatchers.IO) { features.downloadAllNow(mine, user) }
                 val (msg, kind) = RequestRules.downloadAllNowToast(r)
                 Toasts.show(msg, kind)
             } catch (e: CancellationException) {
@@ -318,7 +334,7 @@ fun RequestsScreen(nav: Nav) {
         val list = rows
         val err = error
         LazyColumn(Modifier.fillMaxSize().padding(padding)) {
-            // quota, the admin's "Only mine", and the web's Retry failed and Clear buttons (members' Clear entries
+            // quota, the admin's User list, and the web's Retry failed and Clear buttons (members' Clear entries
             // only clear the list; the admin's also delete files, after a confirm)
             item {
                 Column(Modifier.padding(horizontal = Gutter)) {
@@ -332,11 +348,20 @@ fun RequestsScreen(nav: Nav) {
                             verticalArrangement = Arrangement.spacedBy(4.dp),
                         ) {
                             if (admin) {
-                                Row(verticalAlignment = Alignment.CenterVertically) {
-                                    Switch(checked = mine, onCheckedChange = { mine = it })
-                                    Spacer(Modifier.width(8.dp))
-                                    Text("Only mine", style = MaterialTheme.typography.bodyMedium)
-                                    Spacer(Modifier.width(8.dp))
+                                // everyone's requests, or one person's (the buttons beside it take the same)
+                                val options = RequestRules.userOptions(users, picked)
+                                val shown = options.firstOrNull { it.first == user }?.second ?: RequestRules.ALL_USERS
+                                Row(Modifier.align(Alignment.CenterVertically), verticalAlignment = Alignment.CenterVertically) {
+                                    Text("User", style = MaterialTheme.typography.bodySmall, color = p.muted)
+                                    Spacer(Modifier.width(6.dp))
+                                    Box {
+                                        SmallButton(shown, iconRes = R.drawable.ic_expand_more) { userMenu = true }
+                                        PopMenu(userMenu, { userMenu = false }, options.map { (id, label) ->
+                                            MenuEntry(label) {
+                                                picked = if (id > 0L) id to (users.firstOrNull { it.id == id }?.username ?: picked?.second ?: label) else null
+                                            }
+                                        })
+                                    }
                                 }
                             }
                             // only for those who may retry (Fix their own downloads), as the rows' Retry
@@ -364,7 +389,7 @@ fun RequestsScreen(nav: Nav) {
                                     ),
                                 )
                             }
-                            // every request still waiting (admins: everyone's unless Only mine is on; members: their own)
+                            // every request still waiting (admins: everyone's, or the person picked; members: their own)
                             SmallButton("Clear waiting", iconRes = R.drawable.ic_close, enabled = !countingWaiting, modifier = Modifier.align(Alignment.CenterVertically)) { clearWaiting() }
                         }
                     }

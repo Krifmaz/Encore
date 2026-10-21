@@ -1627,6 +1627,14 @@ help = "Measure loudness task on/off (volume normalization in the apps)."
 default = 1440
 help = "How often the Measure loudness task runs, in minutes (each run goes on where the last one stopped)."
 
+[keys.task_types_enabled]
+default = true
+help = "Sort albums by type task on/off (the Type filter of Library → Albums, One-offs)."
+
+[keys.task_types_minutes]
+default = 360
+help = "How often the Sort albums by type task runs, in minutes (it reads the type tags of songs scanned before 0.36 once, and asks MusicBrainz about at most 300 albums a run)."
+
 [keys.task_cleanup_enabled]
 default = true
 help = "Clean up task on/off."

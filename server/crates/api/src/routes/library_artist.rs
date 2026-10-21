@@ -106,3 +106,28 @@ pub(super) async fn songs(State(st): State<AppState>, User(u): User, Path(path):
         Ok(Json(v))
     }).await
 }
+
+/// `{total, offset, tracks}`: the artist's songs whose album is a One-off (a song or two of a compilation, a remix
+/// album, a soundtrack …: encore_library::album_types), newest first, each with its `release_label` ("Compilation",
+/// "Various artists", "Album" …). `offset` (default 0), `limit` 1–500 (default 50).
+pub(super) async fn one_offs(State(st): State<AppState>, User(u): User, Path(path): Path<String>, Query(q): Query<ArtistSongsQ>) -> ApiResult<Json<Value>> {
+    let name = q.artist(&path);
+    let (offset, limit) = (q.offset.max(0) as usize, q.limit.unwrap_or(50).clamp(1, 500) as usize);
+    st.blocking(move |st| {
+        let Some((cond, params)) = artist_filter(st, &name, &q.mbid) else {
+            return Ok(Json(json!({ "total": 0, "offset": offset, "tracks": [] })));
+        };
+        let types = st.library.types.get(&st.db);
+        let found: Vec<(i64, String)> = st.db.query(&format!("SELECT id, album_id FROM tracks WHERE {cond} ORDER BY added_at DESC, id DESC"), params)?
+            .iter().map(|r| (r.i("id"), r.s("album_id"))).filter(|(_, a)| types.get(a).is_some_and(|c| c.format == "one_off")).collect();
+        let page: Vec<i64> = found.iter().skip(offset).take(limit).map(|(id, _)| *id).collect();
+        let mut tracks = rows_by_id(&st.db, TRACK_COLS, &page)?;
+        for t in tracks.iter_mut() {
+            let label = types.get(&t.s("album_id")).map(|c| c.release_label.clone()).unwrap_or_default();
+            t.insert("release_label".into(), json!(label));
+        }
+        let mut v = json!({ "total": found.len(), "offset": offset, "tracks": tracks });
+        enrich_now(st, Some(&u), &mut v);
+        Ok(Json(v))
+    }).await
+}

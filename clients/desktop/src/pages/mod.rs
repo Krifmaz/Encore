@@ -26,6 +26,7 @@ pub mod leaderboard;
 pub mod library;
 pub mod library_album;
 pub mod library_artist;
+pub mod library_types;
 pub mod login;
 pub mod offline;
 pub mod playlist;
@@ -99,6 +100,8 @@ pub struct LibraryQuery {
     pub dir: String,
     pub q: String,
     pub filter: String,
+    /// The Albums tab's Type (0.36, `type=`: live, one_off …; "" = All types).
+    pub album_type: String,
 }
 
 impl Page {
@@ -150,6 +153,7 @@ impl Page {
                     ("dir", &query.dir),
                     ("q", &query.q),
                     ("filter", &query.filter),
+                    ("type", &query.album_type),
                 ] {
                     if !v.is_empty() {
                         p.push(format!("{k}={}", urlencode(v)));
@@ -208,6 +212,7 @@ impl Page {
                             dir: q("dir"),
                             q: q("q"),
                             filter: q("filter"),
+                            album_type: q("type"),
                         },
                     }
                 } else {
@@ -631,6 +636,16 @@ mod tests {
                 }
             })
         );
+        // the Albums tab's Type stays in the route (0.36)
+        let live = Page::Library {
+            tab: String::new(),
+            query: LibraryQuery {
+                album_type: "live".into(),
+                ..Default::default()
+            },
+        };
+        assert_eq!(live.hash(), "#/library?type=live");
+        assert_eq!(Page::from_hash("#/library?type=live"), Some(live));
         assert_eq!(Page::from_hash("#/account"), Some(Page::Settings(Section::Account)));
         assert_eq!(Page::from_hash("#/nowhere"), None);
         assert_eq!(Page::LibraryAlbum("x".into()).nav_key(), "library");

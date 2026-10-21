@@ -163,6 +163,15 @@ pub fn warm_up(st: &AppState) {
     });
     let s = st.clone();
     tokio::spawn(async move { routes::discover::warm_new_releases(&s).await });
+    // 0.36, once: who uploaded or imported the songs the file manager brought in before songs kept it
+    let s = st.clone();
+    tokio::task::spawn_blocking(move || {
+        let roots = encore_files::roots::all(&s.cfg, s.data_dir(), &encore_requests::slskd_managed::download_dir(&s));
+        let n = encore_files::backfill_added_from_log(&s, &roots);
+        if n > 0 {
+            tracing::info!("who added it: {n} file manager lines read back from the activity log");
+        }
+    });
 }
 
 /// The server's state from the environment: the config folder `ENCORE_CONFIG_DIR` (default /config) and the web

@@ -53,6 +53,20 @@ pub fn resume() {
     });
 }
 
+/// What work done off the step's task (a copy on the blocking pool, where the sink doesn't follow) calls as
+/// it moves: each call says the step's words again – nothing changes in the message, but whoever watches the
+/// step hears it is moving (an import that says nothing for 15 minutes counts as stalled). Taken inside the
+/// sink, callable from any thread; outside a sink it does nothing.
+pub fn beat() -> impl Fn() + Send + Sync + 'static {
+    let sink = SINK.try_with(Sink::clone).ok();
+    move || {
+        if let Some(s) = &sink {
+            let step = s.step.lock().unwrap_or_else(|p| p.into_inner()).clone();
+            (s.say)(&step);
+        }
+    }
+}
+
 /// How long a wait of `secs` is, in round words: "under a minute", "about a minute", "about 12 minutes",
 /// "about an hour", "about 3 hours".
 pub fn about(secs: f64) -> String {
@@ -94,6 +108,23 @@ mod tests {
             tokio::spawn(async { step("elsewhere") }).await.unwrap();
         }).await;
         assert_eq!(said.lock().unwrap().len(), 5);
+    }
+
+    /// A beat taken inside a sink says the step's words again from another thread; one taken outside does
+    /// nothing.
+    #[tokio::test]
+    async fn a_beat_says_the_step_again_from_another_thread() {
+        let said = Arc::new(Mutex::new(Vec::<String>::new()));
+        let s = said.clone();
+        with_sink(move |w| s.lock().unwrap().push(w.to_string()), async {
+            step("moving into the library");
+            let b = beat();
+            tokio::task::spawn_blocking(move || { b(); b(); }).await.unwrap();
+        }).await;
+        assert_eq!(*said.lock().unwrap(), ["moving into the library"; 3]);
+        let b = beat();
+        b();
+        assert_eq!(said.lock().unwrap().len(), 3);
     }
 
     #[test]

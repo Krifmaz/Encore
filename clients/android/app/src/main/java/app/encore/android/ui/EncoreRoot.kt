@@ -47,6 +47,7 @@ import app.encore.android.remote.LinkedBar
 import app.encore.android.remote.RemoteUi
 import app.encore.android.ui.components.AddToPlaylistSheet
 import app.encore.android.ui.components.MenuEntry
+import app.encore.android.ui.components.formatDay
 import app.encore.android.ui.components.PopMenu
 import app.encore.android.ui.components.ReportHost
 import app.encore.android.ui.components.ReportUi
@@ -57,6 +58,7 @@ import app.encore.android.ui.screens.AccountScreen
 import app.encore.android.ui.screens.AlbumScreen
 import app.encore.android.ui.screens.ArtistScreen
 import app.encore.android.ui.screens.AuthFlow
+import app.encore.android.features.library.AlbumTypesRules
 import app.encore.android.features.library.PlaylistLinkHost
 import app.encore.android.features.library.SongFixHost
 import app.encore.android.features.library.SongFixUi
@@ -140,8 +142,11 @@ sealed interface Screen {
     data class BugReports(val from: String = "") : Screen
     data class BugReport(val id: Long) : Screen
 
-    /** The admin file manager (features/files, 0.33): Settings → Server → Files, or the Home menu. */
-    data object Files : Screen
+    /**
+     * The admin file manager (features/files, 0.33): Settings → Server → Files, or the Home menu. [startRoot] (0.36):
+     * a root to open at once ("trash": the toast after albums went to the Trash, "Open Trash").
+     */
+    data class Files(val startRoot: String = "") : Screen
 }
 
 /** The bottom tabs (the web's main nav on phones): Home, Search, Library, Playlists, Discover. */
@@ -329,7 +334,7 @@ private fun MainScreen(graph: AppGraph, player: PlayerConnection, session: Sessi
                     is Screen.SettingsAt -> SettingsScreen(nav, session, startAt = top.id)
                     is Screen.BugReports -> BugReportsScreen(nav, top.from)
                     is Screen.BugReport -> BugReportScreen(nav, top.id)
-                    is Screen.Files -> FilesScreen(nav)
+                    is Screen.Files -> FilesScreen(nav, top.startRoot)
                     null -> when (tab) {
                         Tab.HOME -> HomeScreen(nav, session)
                         Tab.SEARCH -> SearchScreen(nav)
@@ -384,11 +389,25 @@ private fun TrackMenu(nav: Nav, req: TrackMenuRequest, offlineMenu: OfflineMenu,
     val t = req.track
     val player = nav.player
     val surround = t.isSurround
+    // who added the song (0.36, GET /api/library/tracks/{id}/added): the menu's first line once the server said; none
+    // until then, when it has nothing to say, offline, or from an older server
+    var added by remember(t.id) { mutableStateOf("") }
+    LaunchedEffect(t.id) {
+        if (OfflineMode.active.value) return@LaunchedEffect
+        added = try {
+            withContext(Dispatchers.IO) { AlbumTypesRules.addedOf(nav.graph.api.trackAdded(t.id), ::formatDay) }
+        } catch (e: CancellationException) {
+            throw e
+        } catch (_: Exception) {
+            ""
+        }
+    }
     Box(Modifier.fillMaxSize(), contentAlignment = Alignment.BottomCenter) {
         PopMenu(
             expanded = true,
             onDismiss = onDismiss,
             entries = listOf(
+                if (added.isNotEmpty()) MenuEntry(added, info = true, onClick = {}) else null,
                 MenuEntry("Play next", R.drawable.ic_skip_next) { player.playNext(t); Toasts.show("Plays next", "ok") },
                 MenuEntry("Add to queue", R.drawable.ic_queue_music) { player.addToQueue(t); Toasts.show("Added to queue", "ok") },
                 if (!surround) MenuEntry("Add to playlist", R.drawable.ic_playlist_add) { nav.addToPlaylist(listOf(t.id)) } else null,

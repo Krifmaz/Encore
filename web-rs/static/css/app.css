@@ -843,3 +843,15 @@ body.offline-mode .shell { min-height: calc(100vh - var(--offline-bar)); }
   .group-code-v { font-size: 26px; }
   .guest-card { padding: 22px 18px; }
 }
+/* Library types, Select and who added it (0.36) */
+.menu-pop .menu-info { padding: 8px 10px 9px; font-size: 13px; color: var(--muted); cursor: default; border-bottom: 1px solid var(--border); margin-bottom: 4px; }
+.tile.pickable .art { outline: 3px solid transparent; outline-offset: 2px; transition: outline-color .15s; }
+.tile.pickable.picked .art { outline-color: var(--accent); }
+.tile .pick-mark { position: absolute; top: 8px; right: 8px; width: 26px; height: 26px; border-radius: 50%; display: grid; place-items: center; background: rgba(0,0,0,.45); color: #fff; border: 2px solid #fff; z-index: 2; }
+.tile .pick-mark svg { width: 14px; height: 14px; opacity: 0; }
+.tile.picked .pick-mark { background: var(--accent); border-color: var(--accent); }
+.tile.picked .pick-mark svg { opacity: 1; }
+.sel-bar { position: sticky; top: 0; z-index: 5; background: var(--bg); padding: 8px 0; gap: 8px; }
+.type-opts label.radio-row { display: flex; align-items: flex-start; gap: 10px; padding: 8px 0; cursor: pointer; }
+.type-opts .help { margin: 2px 0 0 26px; }
+.tile.pickable .overlay { display: none; }

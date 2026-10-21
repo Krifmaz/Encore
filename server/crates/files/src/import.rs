@@ -293,9 +293,11 @@ fn confirmed(st: &impl Ctx, paths: &[PathBuf], who: &str) {
 
 /// Imports one album folder; → the row paths of its songs in the library.
 async fn import_one(st: &impl Ctx, who: &Who, t: &Target, f: &Folder, mode: Mode, release_id: Option<&str>, dirs: &LibraryDirs) -> Result<Vec<PathBuf>, ApiError> {
+    // songs new to the library are this admin's import (a song that was the library's keeps who added it)
+    let added = encore_library::Added { by: Some(who.id), via: "import" };
     if mode == Mode::InPlace {
         let paths: Vec<PathBuf> = f.files.iter().filter_map(|p| dirs.db_path(p)).collect();
-        tagger::index_paths(st, &paths);
+        tagger::index_paths_as(st, &paths, added);
         return Ok(paths);
     }
     // the release's tags (and cover) for each file, or none: each file's tags and where it goes
@@ -351,7 +353,7 @@ async fn import_one(st: &impl Ctx, who: &Who, t: &Target, f: &Folder, mode: Mode
     if let Err(e) = change.apply(st) {
         tracing::warn!("files: the rows after clearing an imported folder: {e:#}");
     }
-    tagger::index_paths(st, &row_paths);
+    tagger::index_paths_as(st, &row_paths, added);
     if release_id.is_some() {
         confirmed(st, &row_paths, &who.name);
     }
@@ -395,7 +397,7 @@ fn clear_emptied(st: &impl Ctx, who: &Who, at: &Target, keep: usize, change: &mu
                 break;
             }
         } else if names.iter().all(|n| parent.child(&name).is_ok_and(|d| leftover(&d, n))) {
-            if crate::trash::trash_one(st, who, &cur, &parent, &name, change).is_err() {
+            if crate::trash::trash_one(st, who, &cur, &parent, &name, change, &[]).is_err() {
                 break;
             }
         } else {
@@ -422,14 +424,14 @@ async fn trash_superseded(st: &impl Ctx, who: &Who, new: &[PathBuf]) {
             let rel = s.old_path.strip_prefix(library_path.trim()).map_err(|_| err(400, "not in the library folder"))?;
             let t = Target::new(&lib, &rel.to_string_lossy())?;
             let (dir, name, _) = t.open_existing()?;
-            crate::trash::trash_one(st, who, &t, &dir, &name, &mut change)?;
+            crate::trash::trash_one(st, who, &t, &dir, &name, &mut change, &[])?;
             let _ = st.db().execute("UPDATE playlist_items SET track_id=? WHERE track_id=?", p![s.new, s.old]);
             for side in ["lrc", "txt"] {
                 let side_name = Path::new(&name).with_extension(side).to_string_lossy().into_owned();
                 if side_name != name && dir.lstat(&side_name).ok().flatten().is_some_and(|x| x.kind == Kind::File) {
                     let mut st_t = t.clone();
                     *st_t.parts.last_mut().unwrap() = side_name.clone();
-                    let _ = crate::trash::trash_one(st, who, &st_t, &dir, &side_name, &mut change);
+                    let _ = crate::trash::trash_one(st, who, &st_t, &dir, &side_name, &mut change, &[]);
                 }
             }
             Ok(())

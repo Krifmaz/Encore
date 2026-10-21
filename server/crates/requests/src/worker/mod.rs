@@ -8,6 +8,8 @@
 //! written waits for it (the `waiting` status again) instead of failing. [`now`] is Download now: what a
 //! waiting or queued request offers, and doing it without breaking a source's limit or a ban
 //! (the lines are [`crate::line`]). [`steps`] writes what a long step is at into its request's message.
+//! [`stall`] finds an import that hasn't moved for 15 minutes (Import again stops it and imports the kept
+//! files at once) and is the watchdog that starts a search or an import whose task is gone again.
 pub mod downloads;
 mod fetch;
 mod import;
@@ -15,12 +17,14 @@ pub mod now;
 mod pick;
 mod queue;
 pub mod rejected;
+pub mod stall;
 mod steps;
 pub mod storage;
 mod verify;
 
 pub use pick::{ALBUM_RETRY_SECS, ALBUM_TRIES, ALBUM_WAIT};
-pub use queue::{cancel, cancel_holding, hold_idle, recover, run, step, take_turn, Hold};
+pub use queue::{cancel, cancel_holding, hold_idle, recover, run, step, stop_holding, take_turn, Hold};
+pub use stall::watchdog;
 use queue::on_error;
 
 use crate::sources::{slskd, streamrip, torznab, ytdlp};
@@ -30,6 +34,8 @@ use encore_http::mb;
 use encore_library::tagger::{self, Check, Rejected};
 use fetch::*;
 use import::*;
+// who added a request's songs (tracks.added_by / added_via / requested_at), for the server's tests too
+pub use import::{adder_of, record_origin};
 use pick::*;
 use regex::Regex;
 use serde_json::{json, Value};

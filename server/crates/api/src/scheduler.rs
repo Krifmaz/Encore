@@ -67,6 +67,7 @@ async fn run(st: &AppState, key: &str) -> anyhow::Result<String> {
         }
         "quality" => encore_media::quality::scan(st, 300).await?,
         "loudness" => encore_library::loudness::scheduled(st).await?,
+        "types" => encore_library::album_types::scheduled(st).await?,
         "update" => encore_system::update::scheduled(st).await?,
         _ => encore_requests::upkeep::cleanup(st)?,
     })

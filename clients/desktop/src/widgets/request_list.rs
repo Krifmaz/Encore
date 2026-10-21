@@ -55,6 +55,25 @@ pub fn can_import_again(r: &Value) -> bool {
     fmt::truthy(r, "has_files") && matches!(r["status"].as_str(), Some("failed" | "waiting" | "completed"))
 }
 
+/// An import that hasn't moved for 15 minutes (or whose task is gone: `import_stalled` of the
+/// list): the row offers Import again, which stops it and imports the kept files at once.
+pub fn stalled_import(r: &Value) -> bool {
+    r["status"].as_str() == Some("importing") && r["import_stalled"].as_bool() == Some(true)
+}
+
+/// The tooltip of Import again on a stalled import (the server's words, as the web and the phone).
+pub const STALLED_IMPORT: &str = "The import hasn't moved for 15 minutes";
+
+/// `body` with whose requests a bulk action takes (Clear, Clear waiting, Retry failed, Download
+/// all now): `mine`, and `user` when the admin picked one person in the User list.
+pub fn whose_body(mut body: Value, mine: bool, user: Option<i64>) -> Value {
+    body["mine"] = json!(mine);
+    if let Some(u) = user {
+        body["user"] = json!(u);
+    }
+    body
+}
+
 /// Retry on a row (the phone's `canRetry`, the web's row): a playlist's songs anyone may queue
 /// again; a failed or cancelled request only admins and members with Fix their own downloads (the
 /// server answers others "Ask an admin to retry"). Import again takes its place when the
@@ -676,9 +695,9 @@ impl Clear {
         }
     }
 
-    /// `POST /api/requests/clear`.
-    pub fn body(self, mine: bool) -> Value {
-        json!({ "statuses": self.statuses(), "files": self.files(), "mine": mine })
+    /// `POST /api/requests/clear` (`user`: one person's, from the admin's User list).
+    pub fn body(self, mine: bool, user: Option<i64>) -> Value {
+        whose_body(json!({ "statuses": self.statuses(), "files": self.files() }), mine, user)
     }
 }
 
@@ -821,6 +840,8 @@ pub struct List {
     pub admin: bool,
     /// Clear and Retry failed act on the user's own requests only.
     pub mine: bool,
+    /// … or on this person's (the admin's User list on the Requests page; None: everyone's).
+    pub user: Option<i64>,
     /// None while the first load runs; Err(message) when it failed.
     pub rows: Option<Result<Vec<Value>, String>>,
     /// Parents whose child requests are shown.
@@ -1081,7 +1102,7 @@ pub fn update(l: &mut List, msg: Msg, ctx: &mut Ctx) -> Task<Msg> {
                 return Task::none();
             }
             let api = ctx.api.clone();
-            let body = c.body(l.mine);
+            let body = c.body(l.mine, l.user);
             return Task::perform(
                 async move { api.post("/requests/clear", body).await },
                 |r| Msg::Cleared(false, r),
@@ -1109,7 +1130,7 @@ pub fn update(l: &mut List, msg: Msg, ctx: &mut Ctx) -> Task<Msg> {
                     Task::perform(async move { api.post_empty(&url).await }, move |r| Msg::Acted(id, r))
                 }
                 Then::Clear(k) => {
-                    let body = k.body(l.mine);
+                    let body = k.body(l.mine, l.user);
                     Task::perform(
                         async move { api.post("/requests/clear", body).await },
                         |r| Msg::Cleared(true, r),
@@ -1117,7 +1138,7 @@ pub fn update(l: &mut List, msg: Msg, ctx: &mut Ctx) -> Task<Msg> {
                 }
                 Then::ClearWaiting => {
                     l.clearing_waiting = true;
-                    let body = json!({ "mine": l.mine });
+                    let body = whose_body(json!({}), l.mine, l.user);
                     Task::perform(
                         async move { api.post("/requests/clear-waiting", body).await },
                         Msg::ClearedWaiting,
@@ -1125,7 +1146,7 @@ pub fn update(l: &mut List, msg: Msg, ctx: &mut Ctx) -> Task<Msg> {
                 }
             };
         }
-        // Clear waiting: admins everyone's (unless Only mine), members their own (the server
+        // Clear waiting: admins everyone's (or the person picked), members their own (the server
         // decides); counted first for the question
         Msg::ClearWaiting => {
             if l.clearing_waiting {
@@ -1133,7 +1154,7 @@ pub fn update(l: &mut List, msg: Msg, ctx: &mut Ctx) -> Task<Msg> {
             }
             l.clearing_waiting = true;
             let api = ctx.api.clone();
-            let body = json!({ "mine": l.mine, "dry_run": true });
+            let body = whose_body(json!({ "dry_run": true }), l.mine, l.user);
             return Task::perform(
                 async move { api.post("/requests/clear-waiting", body).await },
                 Msg::WaitingCounted,
@@ -1187,7 +1208,7 @@ pub fn update(l: &mut List, msg: Msg, ctx: &mut Ctx) -> Task<Msg> {
             }
             l.retrying = true;
             let api = ctx.api.clone();
-            let body = json!({ "mine": l.mine });
+            let body = whose_body(json!({}), l.mine, l.user);
             return Task::perform(
                 async move { api.post("/requests/retry-failed", body).await },
                 Msg::RetriedFailed,
@@ -1278,7 +1299,7 @@ pub fn update(l: &mut List, msg: Msg, ctx: &mut Ctx) -> Task<Msg> {
             }
             l.downloading_all = true;
             let api = ctx.api.clone();
-            let body = json!({ "mine": l.mine });
+            let body = whose_body(json!({}), l.mine, l.user);
             return Task::perform(async move { api.post("/requests/download-now", body).await }, Msg::DownloadedAllNow);
         }
         Msg::DownloadedAllNow(r) => {
@@ -1419,6 +1440,23 @@ pub fn request_row<'a>(ctx: &Ctx<'a>, l: &List, r: &Value) -> El<'a, Msg> {
                 .style(theme::btn(Btn::Default))
                 .on_press_maybe((!busy).then_some(Msg::Act(id, "import-again"))),
                 tip_box("Import the downloaded files again – nothing is downloaded again"),
+                tooltip::Position::Bottom,
+            )
+            .gap(4),
+        );
+    } else if stalled_import(r) {
+        // an import that hasn't moved for 15 minutes: stopped, and the kept files imported at once
+        right = right.push(
+            tooltip(
+                button(
+                    row![icon(Icon::Refresh, 14.0, p.text), t("Import again").size(13).font(theme::semibold())]
+                        .spacing(6)
+                        .align_y(Alignment::Center),
+                )
+                .padding([6, 11])
+                .style(theme::btn(Btn::Default))
+                .on_press_maybe((!busy).then_some(Msg::Act(id, "import-again"))),
+                tip_box(STALLED_IMPORT),
                 tooltip::Position::Bottom,
             )
             .gap(4),
@@ -1662,7 +1700,18 @@ mod tests {
     fn clear_and_retry_words() {
         assert_eq!(Clear::Failed.statuses(), &["failed", "cancelled", "denied"]);
         assert!(Clear::CompletedFiles.files() && !Clear::Completed.files());
-        assert_eq!(Clear::FailedFiles.body(true), json!({ "statuses": ["failed", "cancelled", "denied"], "files": true, "mine": true }));
+        assert_eq!(Clear::FailedFiles.body(true, None), json!({ "statuses": ["failed", "cancelled", "denied"], "files": true, "mine": true }));
+        // one person's, from the admin's User list
+        assert_eq!(Clear::Completed.body(false, Some(7)), json!({ "statuses": ["completed"], "files": false, "mine": false, "user": 7 }));
+        assert_eq!(whose_body(json!({ "dry_run": true }), false, None), json!({ "dry_run": true, "mine": false }));
+        assert_eq!(whose_body(json!({}), false, Some(12)), json!({ "mine": false, "user": 12 }));
+        // an import that hasn't moved for 15 minutes offers Import again (with why); one that moves doesn't
+        let stalled = json!({ "status": "importing", "import_stalled": true, "has_files": true });
+        assert!(stalled_import(&stalled) && !can_import_again(&stalled));
+        assert!(!stalled_import(&json!({ "status": "importing", "import_stalled": false })));
+        assert!(!stalled_import(&json!({ "status": "importing" })), "an older server says nothing");
+        assert!(!stalled_import(&json!({ "status": "failed", "import_stalled": true })));
+        assert_eq!(STALLED_IMPORT, "The import hasn't moved for 15 minutes");
         assert_eq!(clear_menu::<()>(true, |_| ()).len(), 4);
         assert_eq!(clear_menu::<()>(false, |_| ()).len(), 2);
         assert_eq!(row_menu::<()>(false, "failed", false, (), |_| ()).len(), 2);

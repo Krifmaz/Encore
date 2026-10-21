@@ -227,4 +227,35 @@ class GroupRulesTest {
         assertEquals("Alex ended the group listen", GroupRules.endedText("ended", "Alex"))
         assertEquals("Group listens are turned off on this server", GroupRules.endedText("off", ""))
     }
+
+    /** Play in a group adds to Up next unless the group plays nothing and has nothing after its song (as on the web). */
+    @Test
+    fun playStartsTheGroupOnlyWhenItHasNothingToPlay() {
+        fun at(index: Int, position: Double, playing: Boolean) =
+            state(two.replace("\"index\": 0, \"playing\": true, \"position\": 50.0", "\"index\": $index, \"playing\": $playing, \"position\": $position"))
+        assertTrue(GroupRules.playStarts(state("""{"id": "g", "queue": []}"""), 1_000_000L))
+        assertFalse("playing, with Up next", GroupRules.playStarts(at(0, 10.0, true), 1_000_000L))
+        assertFalse("paused, with Up next", GroupRules.playStarts(at(0, 10.0, false), 1_000_000L))
+        assertFalse("playing its last song", GroupRules.playStarts(at(1, 10.0, true), 1_000_000L))
+        assertTrue("paused on its last song", GroupRules.playStarts(at(1, 10.0, false), 1_000_000L))
+        assertTrue("its last song ran out", GroupRules.playStarts(at(1, 10.0, true), 1_000_000L + 300_000L))
+        assertFalse("into its last song", GroupRules.playStarts(at(0, 10.0, true), 1_000_000L + 250_000L))
+    }
+
+    @Test
+    fun whatPlayAddsAndSays() {
+        assertEquals(listOf(1L, 3L, 4L), GroupRules.toAdd(listOf(1L, 0L, 3L, 4L), 0))
+        assertEquals("from the song asked for", listOf(3L, 4L), GroupRules.toAdd(listOf(1L, 0L, 3L, 4L), 2))
+        assertEquals(listOf(3L), GroupRules.toAdd(listOf(1L, 0L, 3L, 4L), 1, max = 1))
+        assertTrue(GroupRules.toAdd(listOf(1L, 2L), 2).isEmpty())
+        assertEquals("Added 12 songs to the group's Up next", GroupRules.addedText(12, false))
+        assertEquals("Added 1 song to the group's Up next", GroupRules.addedText(1, false))
+        assertEquals("Added 40 songs to the group's Up next, shuffled", GroupRules.addedText(40, true))
+        assertEquals("Paused for you – the group keeps playing", GroupRules.PAUSED_FOR_YOU)
+        assertEquals("Pause for everyone", GroupRules.PAUSE_FOR_EVERYONE)
+        assertFalse("a member who may not control", GroupRules.offersPauseForEveryone(state(two)))
+        val host = two.replace("\"can_control\": false", "\"can_control\": true")
+        assertTrue(GroupRules.offersPauseForEveryone(state(host)))
+        assertFalse("a paused group", GroupRules.offersPauseForEveryone(state(host.replace("\"playing\": true", "\"playing\": false"))))
+    }
 }

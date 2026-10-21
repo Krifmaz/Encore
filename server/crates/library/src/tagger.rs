@@ -418,6 +418,8 @@ fn part_name(dest: &Path) -> PathBuf {
 /// at the destination is the same song and only the better copy stays (as [`move_file`]). → the final paths,
 /// in the order of `moves`.
 pub async fn place_all(st: &impl Ctx, moves: &[(PathBuf, PathBuf)], replace_same: bool) -> anyhow::Result<Vec<PathBuf>> {
+    // planned once no earlier placement of these files still moves them ([`MOVING`])
+    let claim = Claim::wait(moves.iter().flat_map(|(s, d)| [s.clone(), d.clone()]).collect()).await;
     let mut taken = std::collections::HashSet::new();
     let mut plan = vec![];
     for (src, dest) in moves {
@@ -435,9 +437,74 @@ pub async fn place_all(st: &impl Ctx, moves: &[(PathBuf, PathBuf)], replace_same
         plan.push(Place::New(d));
     }
     // the copies (a FLAC album onto another disk takes a while) on the blocking pool, never on a thread that
-    // serves the API
+    // serves the API; as they move they keep the step heard ([`progress::beat`]), so a long copy onto a slow
+    // disk never looks stalled, while one stuck on a mount that went away says nothing
     let moves = moves.to_vec();
-    tokio::task::spawn_blocking(move || place_planned(&moves, &plan)).await?
+    let beat = every_few_seconds(progress::beat());
+    tokio::task::spawn_blocking(move || {
+        let _claim = claim;
+        place_planned(&moves, &plan, &beat)
+    }).await?
+}
+
+/// The downloads and destinations a placement ([`place_all`]) is moving now. Its copies run on the blocking
+/// pool, which stopping the import's task (Import again on a stalled import) doesn't reach: a second
+/// placement of the same files waits until the first one has really ended, so the two never write the same
+/// temporary files or move the same download twice.
+static MOVING: LazyLock<std::sync::Mutex<std::collections::HashSet<PathBuf>>> = LazyLock::new(Default::default);
+
+/// Paths taken in [`MOVING`], let go when dropped (where the placement's blocking work ends).
+struct Claim(std::collections::HashSet<PathBuf>);
+
+impl Claim {
+    /// Take every one of `paths`, or none while another placement has any of them.
+    fn take(paths: &std::collections::HashSet<PathBuf>) -> Option<Claim> {
+        let mut m = MOVING.lock().unwrap_or_else(|p| p.into_inner());
+        if paths.iter().any(|p| m.contains(p)) {
+            return None;
+        }
+        m.extend(paths.iter().cloned());
+        Some(Claim(paths.clone()))
+    }
+
+    /// Take `paths` once no other placement has any of them, saying the wait while there is one.
+    async fn wait(paths: std::collections::HashSet<PathBuf>) -> Claim {
+        let mut said = false;
+        loop {
+            if let Some(c) = Claim::take(&paths) {
+                if said {
+                    progress::resume();
+                }
+                return c;
+            }
+            if !said {
+                progress::waiting("waiting for an earlier import of these files to end");
+                said = true;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+        }
+    }
+}
+
+impl Drop for Claim {
+    fn drop(&mut self) {
+        let mut m = MOVING.lock().unwrap_or_else(|p| p.into_inner());
+        for p in &self.0 {
+            m.remove(p);
+        }
+    }
+}
+
+/// `beat` at most once every 5 seconds.
+fn every_few_seconds(beat: impl Fn()) -> impl Fn() {
+    let last = std::cell::Cell::new(None::<std::time::Instant>);
+    move || {
+        let now = std::time::Instant::now();
+        if last.get().is_none_or(|t| now.duration_since(t) >= std::time::Duration::from_secs(5)) {
+            last.set(Some(now));
+            beat();
+        }
+    }
 }
 
 /// [`place_all`] that never replaces or drops anything: a file whose destination is taken gets a free name
@@ -453,11 +520,11 @@ pub fn place_new(moves: &[(PathBuf, PathBuf)]) -> anyhow::Result<Vec<PathBuf>> {
         taken.insert(d.clone());
         Place::New(d)
     }).collect();
-    place_planned(moves, &plan)
+    place_planned(moves, &plan, &|| {})
 }
 
-/// The moves of [`place_all`] as planned.
-fn place_planned(moves: &[(PathBuf, PathBuf)], plan: &[Place]) -> anyhow::Result<Vec<PathBuf>> {
+/// The moves of [`place_all`] as planned, `beat` called as they move.
+fn place_planned(moves: &[(PathBuf, PathBuf)], plan: &[Place], beat: &dyn Fn()) -> anyhow::Result<Vec<PathBuf>> {
     // 1. every new file next to its destination, under its temporary name
     let mut parts: Vec<PathBuf> = vec![];
     let placed: Result<(), StepError> = (|| {
@@ -467,9 +534,10 @@ fn place_planned(moves: &[(PathBuf, PathBuf)], plan: &[Place]) -> anyhow::Result
             let part = part_name(d);
             let _ = std::fs::remove_file(&part); // left by an import that stopped part way
             parts.push(part.clone());
+            beat();
             if fsx::hard_link(src, &part, Step::Import).is_err() {
                 // another file system (or one without hard links): a copy, on the disk before the source goes
-                fsx::copy(src, &part, Step::Import)?;
+                fsx::copy_beating(src, &part, Step::Import, beat)?;
                 fsx::fsync(&part, Step::Import)?;
             }
         }
@@ -520,8 +588,13 @@ fn place_planned(moves: &[(PathBuf, PathBuf)], plan: &[Place]) -> anyhow::Result
 /// Imported files into the library ([`library::index_files`]: one transaction per 200 files), then the
 /// covers of the albums they landed in.
 pub fn index_paths(st: &impl Ctx, paths: &[PathBuf]) {
+    index_paths_as(st, paths, library::Added::SCAN)
+}
+
+/// [`index_paths`] with who brought the new songs in (a Files upload or import: that admin).
+pub fn index_paths_as(st: &impl Ctx, paths: &[PathBuf], added: library::Added) {
     let names: Vec<String> = paths.iter().map(|p| p.to_string_lossy().into_owned()).collect();
-    let done = library::index_files(st.db(), &names);
+    let done = library::index_files_as(st.db(), &names, added);
     for (path, e) in &done.failed {
         st.db().log("warning", &format!("Could not index {path}: {e}"));
     }
@@ -602,12 +675,17 @@ pub fn edit_tags(st: &impl Ctx, ids: &[i64], values: &serde_json::Map<String, Va
 
 /// Tag an album from a chosen release (any provider) and move it to the naming template.
 pub async fn retag_album(st: &impl Ctx, album_id: &str, release_id: &str, rename: Option<bool>) -> anyhow::Result<Vec<PathBuf>> {
-    let old: Vec<PathBuf> = st.db().query("SELECT path FROM tracks WHERE album_id=? ORDER BY disc, track, path", p![album_id])?.iter().map(|r| PathBuf::from(r.s("path"))).collect();
+    let found = st.db().query("SELECT id, path FROM tracks WHERE album_id=? ORDER BY disc, track, path", p![album_id])?;
+    let old: Vec<PathBuf> = found.iter().map(|r| PathBuf::from(r.s("path"))).collect();
+    let ids: Vec<i64> = found.iter().map(|r| r.i("id")).collect();
     let pv = preview(st, &old, release_id, false).await?;
     let new = apply_preview(st, &pv, rename.unwrap_or(st.cfg().bool("rename_on_import")), None, None).await?;
     let rows: Vec<PathBuf> = pv["rows"].as_array().cloned().unwrap_or_default().iter().map(|r| PathBuf::from(r["path"].as_str().unwrap_or(""))).collect();
     relink(st, &rows, &new);
     index_paths(st, &new);
+    // the owner's type choice follows the album to its new id; the release's facts are the new release's
+    crate::album_types::carry(st.db(), album_id, &ids, true);
+    record_release(st, &pv, &new);
     let _ = std::fs::remove_file(st.data_dir().join("covers").join(format!("{album_id}.jpg")));
     st.db().log("info", &format!("Tagged album '{}' by {} from {}", pv["release"]["title"].as_str().unwrap_or(""), pv["release"]["artist"].as_str().unwrap_or(""),
         pv["release"]["provider"].as_str().unwrap_or("MusicBrainz")));
@@ -679,8 +757,29 @@ pub fn release_values(rel: &Value, t: &Value) -> Row {
     if rel["provider"].as_str().is_some_and(|p| p != "MusicBrainz") {
         // Deezer/Apple/Discogs metadata: no MusicBrainz ids
         m.retain(|k, _| !k.starts_with("musicbrainz_"));
+    } else {
+        // the release group's types as Picard writes them ("album; live"), and the compilation flag of a
+        // various-artists album: the library's Type filter reads them back, and so do other servers
+        let secondary: Vec<String> = rel["secondary"].as_array().map(|a| a.iter().filter_map(|x| x.as_str().map(String::from)).collect()).unwrap_or_default();
+        let tag = crate::album_types::releasetype_tag(rel["type"].as_str().unwrap_or(""), &secondary);
+        if !tag.is_empty() {
+            m.insert("releasetype".into(), json!(tag));
+        }
+        if crate::album_types::is_various(rel["artist"].as_str().unwrap_or(""), &encore_core::json::text(&rel["artist_id"])) {
+            m.insert("compilation".into(), json!("1"));
+        }
     }
     m
+}
+
+/// The facts of the release a preview tagged these files from, for the albums they landed in (`album_types`:
+/// the Type filter, One-offs). Nothing is asked: the release was fetched for the preview.
+pub fn record_release(st: &impl Ctx, pv: &Value, paths: &[PathBuf]) {
+    let tracks = pv["tracks"].as_array().map(|a| a.len()).unwrap_or(0);
+    if let Some(f) = crate::album_types::facts_of_release(&pv["release"], tracks) {
+        let albums = crate::album_types::albums_of_paths(st.db(), paths);
+        crate::album_types::store_facts(st.db(), &albums, &f);
+    }
 }
 
 /// Files → MusicBrainz release: per-file new values and paths, plus a confidence.
@@ -883,6 +982,9 @@ pub async fn import_single(st: &impl Ctx, path: &Path, artist: &str, title: &str
             None
         }
     };
+    // what the release MusicBrainz picked for the song is (a compilation, a remix album …): kept for its album
+    // below, never as its release group (the whole compilation would count as in the library)
+    let release_facts = rec.as_ref().and_then(crate::album_types::facts_of_recording);
     if let Some(r) = rec {
         for (k, v) in [("title", &r["title"]), ("artist", &r["artist"]), ("albumartist", &r["artist"]), ("album", &r["album"]), ("date", &r["year"]),
                        ("year", &r["year"]), ("isrc", &r["isrc"]), ("musicbrainz_trackid", &r["id"]), ("musicbrainz_artistid", &r["artist_id"]),
@@ -930,6 +1032,10 @@ pub async fn import_single(st: &impl Ctx, path: &Path, artist: &str, title: &str
     let new = place_all(st, &[(path.to_path_buf(), dest)], true).await?.remove(0);
     library::prune_empty(path.parent().unwrap(), source_root);
     index_paths(st, std::slice::from_ref(&new));
+    if let Some(f) = &release_facts {
+        let albums = crate::album_types::albums_of_paths(st.db(), std::slice::from_ref(&new));
+        crate::album_types::store_facts(st.db(), &albums, f);
+    }
     record_verification(st, &[(new.clone(), check)]);
     encore_media::quality::store(st, &new, &qrep);
     let mut note = String::new();
@@ -1153,6 +1259,7 @@ pub async fn import_album_files(st: &impl Ctx, paths: &[PathBuf], what: AlbumImp
             (np.clone(), checks.iter().find(|(p, _)| *p == old).and_then(|(_, r)| r.clone()))
         }).collect();
         index_paths(st, &new);
+        record_release(st, &pv, &new);
         record_verification(st, &results);
         for (row, np) in rows.iter().zip(new.iter()) {
             let old = PathBuf::from(row["path"].as_str().unwrap_or(""));
@@ -1307,9 +1414,12 @@ pub async fn retag_external(st: &impl Ctx) -> usize {
         }
         let res: anyhow::Result<bool> = async {
             let Some(pv) = auto_match(st, &paths, &a.s("artist"), &a.s("album"), None).await? else { return Ok(false) };
+            let ids: Vec<i64> = st.db().query("SELECT id FROM tracks WHERE album_id=?", p![a.s("album_id")])?.iter().map(|r| r.i("id")).collect();
             let new = apply_preview(st, &pv, true, None, None).await?;
             relink(st, &paths, &new);
             index_paths(st, &new);
+            crate::album_types::carry(st.db(), &a.s("album_id"), &ids, true);
+            record_release(st, &pv, &new);
             Ok(true)
         }.await;
         match res {
@@ -1395,6 +1505,34 @@ mod tests {
         let mut mixed = tagged("Homework", 3);
         mixed.extend(tagged("Discovery", 1));
         assert!(super::check_album_tags(&mixed, "Daft Punk", "Discovery").is_ok());
+    }
+
+    /// A placement of files another placement still moves waits until that one has really ended (its claim
+    /// goes with its blocking work, not with the import's task), and a beat is passed on at most every 5 s.
+    #[tokio::test]
+    async fn a_placement_waits_for_an_earlier_one_of_the_same_files() {
+        let d = std::env::temp_dir().join(format!("encore-claim-{}", std::process::id()));
+        let set = |names: &[&str]| names.iter().map(|n| d.join(n)).collect::<std::collections::HashSet<_>>();
+        let first = Claim::take(&set(&["a.flac", "lib/a.flac"])).expect("nothing moves yet");
+        assert!(Claim::take(&set(&["a.flac", "b.flac"])).is_none(), "the same download");
+        assert!(Claim::take(&set(&["c.flac", "lib/a.flac"])).is_none(), "the same destination");
+        drop(Claim::take(&set(&["b.flac", "lib/b.flac"])).expect("other files"));
+        let second = tokio::spawn(Claim::wait(set(&["a.flac", "lib/a.flac"])));
+        tokio::time::sleep(std::time::Duration::from_millis(700)).await;
+        assert!(!second.is_finished(), "waits while the first one moves");
+        // the first placement's blocking work ends (its import's task was stopped long ago)
+        std::thread::spawn(move || drop(first)).join().unwrap();
+        let second = tokio::time::timeout(std::time::Duration::from_secs(5), second).await.expect("goes on once it ended").unwrap();
+        drop(second);
+        drop(Claim::take(&set(&["a.flac", "lib/a.flac"])).expect("all let go"));
+
+        let n = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let n2 = n.clone();
+        let beat = every_few_seconds(move || { n2.fetch_add(1, std::sync::atomic::Ordering::SeqCst); });
+        for _ in 0..100 {
+            beat();
+        }
+        assert_eq!(n.load(std::sync::atomic::Ordering::SeqCst), 1);
     }
 
     #[test]

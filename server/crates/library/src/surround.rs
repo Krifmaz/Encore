@@ -155,8 +155,9 @@ fn store(c: &Conn, f: &FileRow) -> rusqlite::Result<String> {
         let mut params = vec![json!(f.path), json!(f.album_id), json!(f.mtime), json!(f.size)];
         params.extend(vals);
         params.push(json!(now()));
+        // found in the Surround folder; a request's import is stamped by its worker afterwards
         c.execute(
-            &format!("INSERT INTO surround_tracks (path, album_id, mtime, size, {}, stereo_track_id, stereo_album_id, added_at) VALUES (?,?,?,?,{},?,?,?)",
+            &format!("INSERT INTO surround_tracks (path, album_id, mtime, size, {}, stereo_track_id, stereo_album_id, added_at, added_via) VALUES (?,?,?,?,{},?,?,?,'scan')",
                 cols.join(", "), vec!["?"; cols.len()].join(",")),
             params,
         )?;

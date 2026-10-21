@@ -79,25 +79,29 @@ pub fn recover(st: &impl Ctx) {
             let _ = st.db().execute("UPDATE requests SET status='downloading', message='Importing again after a server restart', updated_at=? WHERE id=?", p![now(), r.i("id")]);
             continue;
         }
-        // what was asked for stays (length, ISRC, Deezer/Apple ids, the ticked release types), and a
-        // reported song's replacement keeps what it replaces and which source to avoid
         let old: Value = serde_json::from_str(&r.s("detail")).unwrap_or(json!({}));
-        let mut d = json!({});
-        // (downloaded files kept for their import stay too: the import runs again, nothing is downloaded; so
-        // do the downloads the audio check turned away and a check a person turned off). What MusicBrainz
-        // already said stays as well – which album the song is on (or that it is on none), its recording, the
-        // album's track list – so a restart doesn't ask it all again at once (a few hundred lookups in the
-        // line after an upgrade); a lossless upgrade stays one (without `lossless_only` it found the lossy copy
-        // in the library and ended "Already in library"), and an auto-download stays one.
-        for k in ["replace", "avoid", "album_mode", "release_filter", "release_ids", "length", "isrc", "ext", "attempts", "log", "pick", "kept",
-                  "rejected", "rejected_seq", "skip_check", "no_album", "recording", "album_checked_at", "album_lookup", "album_note", "release", "lossless_only", "auto"] {
-
-            if !old[k].is_null() {
-                d[k] = old[k].clone();
-            }
-        }
-        let _ = st.db().execute("UPDATE requests SET status='queued', message='Restarted after server restart', detail=?, updated_at=? WHERE id=?", p![d.to_string(), now(), r.i("id")]);
+        let _ = st.db().execute("UPDATE requests SET status='queued', message='Restarted after server restart', detail=?, updated_at=? WHERE id=?",
+            p![restart_detail(&old).to_string(), now(), r.i("id")]);
     }
+}
+
+/// What a request starting over keeps of its `detail`: what was asked for stays (length, ISRC, Deezer/Apple
+/// ids, the ticked release types), and a reported song's replacement keeps what it replaces and which source
+/// to avoid. Downloaded files kept for their import stay too (the import runs again, nothing is downloaded),
+/// so do the downloads the audio check turned away and a check a person turned off. What MusicBrainz already
+/// said stays as well – which album the song is on (or that it is on none), its recording, the album's track
+/// list – so a restart doesn't ask it all again at once (a few hundred lookups in the line after an
+/// upgrade); a lossless upgrade stays one (without `lossless_only` it found the lossy copy in the library and
+/// ended "Already in library"), and an auto-download stays one.
+pub(super) fn restart_detail(old: &Value) -> Value {
+    let mut d = json!({});
+    for k in ["replace", "avoid", "album_mode", "release_filter", "release_ids", "length", "isrc", "ext", "attempts", "log", "pick", "kept",
+              "rejected", "rejected_seq", "skip_check", "no_album", "recording", "album_checked_at", "album_lookup", "album_note", "release", "lossless_only", "auto"] {
+        if !old[k].is_null() {
+            d[k] = old[k].clone();
+        }
+    }
+    d
 }
 
 pub async fn run<C: Ctx>(st: C) {
@@ -105,6 +109,8 @@ pub async fn run<C: Ctx>(st: C) {
     loop {
         let _ = storage::tick(&st); // a paused import's health check every 10 minutes, started and not waited for
         let _ = rejected::tick(&st); // rejected downloads past their 7 days go, once an hour, not waited for
+        // the watchdog: a search or an import whose task is gone starts again now, not at the next restart
+        stall::watchdog(&st);
         let ids: Vec<i64> = st.db().query(&format!("SELECT id FROM requests WHERE status IN ({}) ORDER BY id", vec!["?"; ACTIVE.len()].join(",")),
             ACTIVE.iter().map(|s| json!(s)).collect()).unwrap_or_default().into_iter().map(|r| r.i("id")).collect();
         // the download folders' probe: every minute while requests are active, started and not waited for
@@ -188,6 +194,24 @@ impl Drop for Hold {
             h.abort();
         }
     }
+}
+
+/// Stop request `id`'s task and hold its place in the queue until the returned [`Hold`] goes, touching
+/// nothing else: no download is cancelled and no folder removed (Import again on an import that hasn't
+/// moved: its kept files are imported again in that place).
+pub fn stop_holding(st: &impl Ctx, id: i64) -> Hold {
+    let mut tasks = st.requests().tasks.0.lock().unwrap_or_else(|p| p.into_inner());
+    if let Some(h) = tasks.remove(&id) {
+        h.abort();
+    }
+    hold_place(&mut tasks, id)
+}
+
+/// Hold request `id`'s place in the running tasks (`tasks`, locked by the caller) with a task that never ends.
+pub(super) fn hold_place(tasks: &mut HashMap<i64, tokio::task::AbortHandle>, id: i64) -> Hold {
+    let h = tokio::spawn(std::future::pending::<()>()).abort_handle();
+    tasks.insert(id, h.clone());
+    Hold(Some(h))
 }
 
 /// [`cancel`] for whoever writes the request's new state next (Keep anyway, Download anyway, a pick, a

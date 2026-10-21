@@ -483,6 +483,46 @@ pub fn playing_now(g: Option<&Summary>) -> String {
     }
 }
 
+// ----- Play and Pause in a group (the owner on Oct 21: "it should just add it to the que", "it may
+// pause for me but dont stop the other users playback"; the same on web, phone and desktop) -----
+
+/// Play (or Shuffle) of an album, a playlist, an artist or a song in a group starts the group – the
+/// songs become its queue (`set_queue`) – only when it plays nothing (paused, or past its last
+/// song) and has nothing in Up next, or its queue is empty. Otherwise the songs are added to its
+/// Up next (`enqueue`). The web's `rules::play_starts`.
+pub fn play_starts(s: &GroupState, server_now_ms: i64) -> bool {
+    let Some((ei, epos)) = expected(s, server_now_ms) else {
+        return true;
+    };
+    let last = ei + 1 >= s.queue.len();
+    let dur = s.queue[ei].duration();
+    let at_end = last && dur > 0.0 && epos >= dur - 0.3;
+    (!s.playing || at_end) && last
+}
+
+/// The songs Play adds to the group's Up next: those that would have played – the library songs
+/// from the one asked for (`index` in `ids`) to the end of the list, at most `max`.
+pub fn to_add(ids: &[Option<i64>], index: usize, max: usize) -> Vec<i64> {
+    ids.iter().skip(index).flatten().take(max).copied().collect()
+}
+
+/// What the toast says once the group took songs into its Up next: "Added 12 songs to the
+/// group's Up next", "Added 1 song to the group's Up next", "…, shuffled".
+pub fn added_text(n: usize, shuffled: bool) -> String {
+    let songs = if n == 1 { "1 song".to_string() } else { format!("{n} songs") };
+    format!("Added {songs} to the group's Up next{}", if shuffled { ", shuffled" } else { "" })
+}
+
+/// Pause in a group pauses only this computer; the group plays on.
+pub const PAUSED_FOR_YOU: &str = "Paused for you – the group keeps playing";
+/// The group's own pause (the player's ⋯ and the group panel, for those who control the group).
+pub const PAUSE_FOR_EVERYONE: &str = "Pause for everyone";
+
+/// Whether "Pause for everyone" is offered: this device may control the group and it plays.
+pub fn offers_pause_for_everyone(s: &GroupState) -> bool {
+    s.you_can_control && s.playing
+}
+
 /// The library songs of a queue (ids), at most `max` around the current one, and where the
 /// current song is in them (the phone's `RemoteDevice.window`).
 pub fn window(ids: &[Option<i64>], index: usize, max: usize) -> (Vec<i64>, usize) {
@@ -517,6 +557,48 @@ mod tests {
 
     fn state(v: Value) -> GroupState {
         GroupState::from(&v).unwrap()
+    }
+
+    /// Play in a group adds to Up next unless the group plays nothing and has nothing after its
+    /// song (or nothing at all), as on the web.
+    #[test]
+    fn play_starts_the_group_only_when_it_has_nothing_to_play() {
+        let at = |index: i64, position: f64, playing: bool| {
+            let mut v = two();
+            v["index"] = json!(index);
+            v["position"] = json!(position);
+            v["playing"] = json!(playing);
+            state(v)
+        };
+        let mut empty = two();
+        empty["queue"] = json!([]);
+        assert!(play_starts(&state(empty), 1_000_000));
+        assert!(!play_starts(&at(0, 10.0, true), 1_000_000), "playing, with Up next");
+        assert!(!play_starts(&at(0, 10.0, false), 1_000_000), "paused, with Up next");
+        assert!(!play_starts(&at(1, 10.0, true), 1_000_000), "playing its last song");
+        assert!(play_starts(&at(1, 10.0, false), 1_000_000), "paused on its last song");
+        assert!(play_starts(&at(1, 10.0, true), 1_000_000 + 300_000), "its last song ran out");
+        assert!(!play_starts(&at(0, 10.0, true), 1_000_000 + 250_000), "into its last song");
+    }
+
+    #[test]
+    fn what_play_adds_and_says() {
+        let ids = [Some(1), None, Some(3), Some(4)];
+        assert_eq!(to_add(&ids, 0, 1000), vec![1, 3, 4]);
+        assert_eq!(to_add(&ids, 2, 1000), vec![3, 4], "from the song asked for");
+        assert_eq!(to_add(&ids, 1, 1), vec![3]);
+        assert!(to_add(&ids, 4, 1000).is_empty());
+        assert_eq!(added_text(12, false), "Added 12 songs to the group's Up next");
+        assert_eq!(added_text(1, false), "Added 1 song to the group's Up next");
+        assert_eq!(added_text(40, true), "Added 40 songs to the group's Up next, shuffled");
+        assert_eq!(PAUSED_FOR_YOU, "Paused for you – the group keeps playing");
+        assert_eq!(PAUSE_FOR_EVERYONE, "Pause for everyone");
+        let mut v = two();
+        assert!(!offers_pause_for_everyone(&state(v.clone())), "a member who may not control");
+        v["you"]["can_control"] = json!(true);
+        assert!(offers_pause_for_everyone(&state(v.clone())));
+        v["playing"] = json!(false);
+        assert!(!offers_pause_for_everyone(&state(v)), "a paused group");
     }
 
     fn two() -> Value {

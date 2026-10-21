@@ -81,21 +81,37 @@ async fn import_surround(st: &impl Ctx, r: &mut Req, files: &[PathBuf]) -> anyho
     Ok((new, note))
 }
 
-/// Remember where each new file came from (shown on the album page).
-pub(super) fn record_origin(st: &impl Ctx, paths: &[PathBuf], origin: &Value, rid: i64, since: f64) {
+/// Who brought a request's songs in (`tracks.added_by`, `added_via`, `requested_at`): its user, how it was asked
+/// (a link → `link`, a download from the Soulseek page → `soulseek`, else `request`) and when. None for a request
+/// without a user (a lossless upgrade): the new copy keeps who it inherited from the copy it replaced.
+pub fn adder_of(row: &Row, d: &Value) -> Option<(i64, &'static str, f64)> {
+    let user = row.get("user_id").and_then(|v| v.as_i64()).filter(|u| *u > 0)?;
+    let via = if d["via"] == "soulseek" { "soulseek" } else if row.s("kind") == "url" { "link" } else { "request" };
+    Some((user, via, row.f("created_at")))
+}
+
+/// Remember where each new file came from (shown on the album page) and who asked for it (kept on the song, so
+/// Clear finished – which deletes the request – doesn't lose the name).
+pub fn record_origin(st: &impl Ctx, paths: &[PathBuf], origin: &Value, rid: i64, since: f64, adder: Option<(i64, &str, f64)>) {
+    let (by, via, at) = match adder {
+        Some((u, v, t)) => (json!(u), json!(v), json!(t)),
+        None => (Value::Null, Value::Null, Value::Null),
+    };
+    // without a user the three stay as they are (COALESCE keeps them: `via` NULL means "leave it")
+    let who = "added_by=CASE WHEN ? IS NULL THEN added_by ELSE ? END, added_via=COALESCE(?, added_via), requested_at=CASE WHEN ? IS NULL THEN requested_at ELSE ? END";
     for pth in paths {
-        let _ = st.db().execute("UPDATE surround_tracks SET source=?, source_detail=?, source_url=?, request_id=?, downloaded_at=? WHERE path=?",
-            p![origin["source"], origin["detail"], origin["url"], rid, now(), pth.to_string_lossy()]);
-        let _ = st.db().execute("UPDATE tracks SET source=?, source_detail=?, source_url=?, request_id=?, downloaded_at=?
-                               WHERE path=? AND (downloaded_at IS NULL OR downloaded_at >= ?) AND added_at >= ?",
-            p![origin["source"], origin["detail"], origin["url"], rid, now(), pth.to_string_lossy(), since, since - 1.0]);
+        let _ = st.db().execute(&format!("UPDATE surround_tracks SET source=?, source_detail=?, source_url=?, request_id=?, downloaded_at=?, {who} WHERE path=?"),
+            p![origin["source"], origin["detail"], origin["url"], rid, now(), via, by, via, via, at, pth.to_string_lossy()]);
+        let _ = st.db().execute(&format!("UPDATE tracks SET source=?, source_detail=?, source_url=?, request_id=?, downloaded_at=?, {who}
+                               WHERE path=? AND (downloaded_at IS NULL OR downloaded_at >= ?) AND added_at >= ?"),
+            p![origin["source"], origin["detail"], origin["url"], rid, now(), via, by, via, via, at, pth.to_string_lossy(), since, since - 1.0]);
     }
     crate::report::record_origin(st, paths, origin); // the exact source, for Report a problem
 }
 
 pub(super) async fn complete(st: &impl Ctx, r: &mut Req, message: &str, new: &[PathBuf], origin: Value) {
     if !new.is_empty() {
-        record_origin(st, new, &origin, r.id, r.row.f("created_at"));
+        record_origin(st, new, &origin, r.id, r.row.f("created_at"), adder_of(&r.row, &r.d));
     }
     if r.d["replace"].is_object() {
         // a reported song's replacement: it takes over the reported track's id

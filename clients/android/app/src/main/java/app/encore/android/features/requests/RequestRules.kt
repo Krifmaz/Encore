@@ -12,6 +12,7 @@ import app.encore.android.data.repo.RequestCandidate
 import app.encore.android.data.repo.RequestError
 import app.encore.android.data.repo.RequestOutput
 import app.encore.android.data.repo.RequestRow
+import app.encore.android.data.repo.RequestUser
 import app.encore.android.data.repo.RetryFailedResult
 import app.encore.android.data.repo.SlskTransfer
 import app.encore.android.data.repo.StorageHealth
@@ -134,6 +135,33 @@ object RequestRules {
      * downloaded again. A Soulseek wait has no files.
      */
     fun canImportAgain(r: RequestRow): Boolean = r.hasFiles && (r.status == "failed" || r.status == "waiting" || r.status == "completed")
+
+    /**
+     * An import that hasn't moved for 15 minutes (or whose task is gone: the list's `import_stalled`): the row offers
+     * Import again, which stops it and imports the kept files at once (common.rs `stalled_import`).
+     */
+    fun stalledImport(r: RequestRow): Boolean = r.status == "importing" && r.importStalled
+
+    /** Why a stalled import offers Import again (the web's and the desktop's tooltip; a line under the row here). */
+    const val STALLED_IMPORT = "The import hasn't moved for 15 minutes"
+
+    /** The admin's User list on the Requests page: its first entry (everyone's requests). */
+    const val ALL_USERS = "All users"
+
+    /** "Caz (612)": a person in the User list with their requests. */
+    fun userLabel(name: String, count: Int): String = "$name ($count)"
+
+    /**
+     * The User list (requests.rs `user_options`): (user id, label) – 0 and "All users" first, then each person who has
+     * requests with their count; the person [picked] (id to name) stays in it with 0 once their requests are gone, so
+     * the list doesn't jump to everyone's.
+     */
+    fun userOptions(users: List<RequestUser>, picked: Pair<Long, String>?): List<Pair<Long, String>> {
+        val out = mutableListOf(0L to ALL_USERS)
+        for (u in users) if (u.id > 0L) out += u.id to userLabel(u.username, u.count)
+        if (picked != null && picked.first > 0L && users.none { it.id == picked.first }) out += picked.first to userLabel(picked.second, 0)
+        return out
+    }
 
     /** What Cancel and Remove from list say first when a request keeps downloaded files (common.rs `KEPT_FILES_LOST`). */
     const val KEPT_FILES_LOST = "Its downloaded files have not been imported yet and can't be imported after this."
