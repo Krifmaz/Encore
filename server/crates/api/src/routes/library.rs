@@ -32,6 +32,7 @@ pub fn router() -> Router<AppState> {
         .route("/api/library/tracks/{id}/added", get(track_added))
         .route("/api/library/artists", get(artists).delete(delete_artist))
         .route("/api/library/tracks", get(tracks))
+        .route("/api/library/match-local", post(local_match::match_local))
         .route("/api/library/artist-tracks", get(artist_tracks))
         .route("/api/library/artists/{name}/liked", get(library_artist::liked))
         .route("/api/library/artists/{name}/tracks", get(library_artist::songs))
@@ -66,6 +67,10 @@ pub fn router() -> Router<AppState> {
         .route("/api/share/{token}/copy", post(shared_copy))
         .route("/s/{token}", get(share_page))
 }
+
+/// POST /api/library/match-local: which songs in a listener's own folders the library already has.
+#[path = "local_match.rs"]
+mod local_match;
 
 /// GET /api/library/index: the side scrubber's sections.
 #[path = "library_index.rs"]

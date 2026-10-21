@@ -124,12 +124,17 @@ pub fn from_encore(base: &str, auth: &Auth, v: &Value) -> Option<Track> {
             a
         }
     };
-    Some(Track {
-        id: Some(id.to_string()),
-        source: Source::Url {
+    // a song a local folder on this computer has plays from that file (desktop/local.rs)
+    let source = match crate::desktop::local::file_for(base, id) {
+        Some(path) => Source::Path { path },
+        None => Source::Url {
             url: play_url(base, id),
             headers: stream_headers(auth),
         },
+    };
+    Some(Track {
+        id: Some(id.to_string()),
+        source,
         title: s("title"),
         artist,
         album: s("album"),
@@ -174,6 +179,8 @@ pub fn encore_id(t: &Track) -> Option<i64> {
     match &t.source {
         Source::Url { url, .. } if url.contains("/api/library/tracks/") => Some(id),
         Source::Live { live } if live.starts_with(GROUP_LIVE) => Some(id),
+        // the library song's file in a local folder
+        Source::Path { path } if crate::desktop::local::is_library_file(path) => Some(id),
         _ => None,
     }
 }

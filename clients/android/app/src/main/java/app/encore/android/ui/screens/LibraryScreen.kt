@@ -79,6 +79,7 @@ import app.encore.android.features.library.PickableAlbumCard
 import app.encore.android.features.library.SongFixUi
 import app.encore.android.features.library.SurroundUi
 import app.encore.android.features.library.WrongAudioList
+import app.encore.android.features.localfolders.LocalFoldersTab
 import app.encore.android.features.offline.DownloadedList
 import app.encore.android.features.offline.OfflineLibraryScreen
 import app.encore.android.features.offline.OfflineMode
@@ -222,7 +223,8 @@ private fun SortChip(tab: String, sort: LibSort, onChange: (LibSort) -> Unit, mo
 
 /**
  * Library: Albums / Artists / Songs (the web's #/library tabs), Surround on servers with the Surround library (0.35),
- * Downloaded once songs are saved on this phone (features/offline), and for admins Wrong audio (the songs the audio
+ * On this device (the listener's own folders, features/localfolders), Downloaded once songs are saved on this
+ * phone (features/offline), and for admins Wrong audio (the songs the audio
  * check flagged). In offline mode the saved songs are the whole library.
  *
  * The search box (0.31) searches the whole library whatever tab is selected: while it has a query the page shows
@@ -247,6 +249,8 @@ fun LibraryScreen(nav: Nav) {
     // the Surround library's albums (after Songs, for everyone, when the server has it)
     val surround by SurroundUi.available.collectAsState()
     val tabs = TABS + (if (surround) listOf("surround" to "Surround") else emptyList()) +
+        // the listener's own folders on this phone (features/localfolders)
+        listOf("device" to "On this device") +
         (if (saved.songs(savedAll).isNotEmpty()) listOf("downloaded" to "Downloaded") else emptyList()) +
         (if (me?.isAdmin == true) listOf("issues" to "Wrong audio") else emptyList())
     val labels = tabs.map { it.second }
@@ -314,6 +318,7 @@ fun LibraryScreen(nav: Nav) {
                 "tracks" -> SongsTab(nav, sort, q)
                 "surround" -> SurroundTab(nav, q)
                 "issues" -> WrongAudioList(nav, q)
+                "device" -> LocalFoldersTab(nav)
                 else -> DownloadedList(nav)
             }
         }
