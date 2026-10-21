@@ -203,6 +203,7 @@ fn render_shell() {
       </aside>
       <main class="main">
         <button class="btn ghost icon mobile-only" id="menu-btn" style="margin:-6px 0 10px -6px">{menu}</button>
+        <div id="server-notice"></div>
         <div id="view"></div>
       </main>
     </div>"##,
@@ -223,6 +224,8 @@ fn render_shell() {
         role = if u.s("role") == "owner" { "Owner" } else if admin { "Admin" } else { "Member" },
         settings = icon("settings"), logout = icon("logout"), menu = icon("menu"),
     ));
+    // the admin's banner of a downloads folder that can't be written, on every page (notice.rs)
+    crate::notice::paint();
     if let Some(b) = qs("#logout-btn") {
         dom::on_forever(&b, "click", |_| dom::spawn(async {
             // a sign-out the server does not confirm is finished at the next start that reaches it (offline/mode.rs)
@@ -371,6 +374,7 @@ pub async fn boot() {
         dom::spawn(refresh_pending_badge());
         dom::interval_forever(30000, || dom::spawn(refresh_pending_badge()));
         dom::interval_forever(60000, || dom::spawn(refresh_bugs_badge()));
+        crate::notice::start();
     }
     route();
 }

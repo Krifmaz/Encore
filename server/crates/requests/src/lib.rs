@@ -8,10 +8,11 @@
 //!
 //! Functions that need the server take a [`Ctx`], which the server's state implements.
 use std::sync::Arc;
-use tokio::sync::Semaphore;
+use tokio::sync::Notify;
 
 pub mod create;
 pub mod events;
+pub mod line;
 pub mod missing;
 pub mod notify;
 pub mod report;
@@ -37,16 +38,17 @@ pub trait Ctx: encore_sync::Ctx + encore_system::Ctx {
 }
 
 /// What the request queue keeps while the server runs. Clones share it.
-#[derive(Clone)]
+#[derive(Clone, Default)]
 pub struct Requests {
     /// the request tasks running now, so a cancel can stop them
     pub tasks: worker::Tasks,
     /// the live request events of open pages
     pub events: events::Events,
-    /// streamrip downloads one release at a time
-    streamrip: Arc<Semaphore>,
-    /// yt-dlp downloads two at a time
-    ytdlp: Arc<Semaphore>,
+    /// the sources' lines: streamrip one release at a time, yt-dlp two, the indexers two searches, the
+    /// worker's Soulseek searches one – and the requests someone asked to download now ([`line`])
+    pub lines: line::Lines,
+    /// wakes the queue's loop before its 5 s are up (Download now on a queued request)
+    pub wake: Arc<Notify>,
     /// the managed Soulseek engine: its state, log tail and wake-ups
     pub slskd: slskd_managed::Managed,
     /// the YouTube sign-in's locks (its state file, a rotation in progress)
@@ -59,18 +61,3 @@ pub struct Requests {
     pub search_cache: search_cache::Cache,
 }
 
-impl Default for Requests {
-    fn default() -> Self {
-        Requests {
-            tasks: Default::default(),
-            events: Default::default(),
-            streamrip: Arc::new(Semaphore::new(1)),
-            ytdlp: Arc::new(Semaphore::new(2)),
-            slskd: Default::default(),
-            youtube: Default::default(),
-            tidal: Default::default(),
-            storage: Default::default(),
-            search_cache: Default::default(),
-        }
-    }
-}

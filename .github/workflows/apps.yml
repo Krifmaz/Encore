@@ -15,7 +15,7 @@ on:
   workflow_call:
     inputs:
       only:
-        # release.yml doesn't pass it: a release builds every job
+        # release.yml passes `all` (every job), or `android-native` for a release run with only=android
         type: string
         required: false
         default: all

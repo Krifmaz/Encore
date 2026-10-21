@@ -38,7 +38,7 @@ const PW: &str = "a-long-password-1";
 
 /// How the Soulseek server answers a connection that reaches it.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
-enum Login {
+pub(super) enum Login {
     /// the login is never answered: "The wait timed out after 5000 milliseconds"
     TimesOut,
     /// the connection itself is never answered (through the VPN's proxy: 30 s, then "Operation timed out")
@@ -50,14 +50,14 @@ enum Login {
 
 /// slskd's client.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
-enum Client {
+pub(super) enum Client {
     Disconnected,
     Connecting,
     LoggingIn,
     LoggedIn,
 }
 
-struct Search {
+pub(super) struct Search {
     started: Instant,
     cancelled: bool,
     /// slskd still knows it (not deleted)
@@ -66,57 +66,57 @@ struct Search {
     text: String,
 }
 
-struct Fake {
-    login: Login,
+pub(super) struct Fake {
+    pub(super) login: Login,
     /// connections that reached the server (let through by the door)
-    reached: Vec<Instant>,
-    client: Client,
+    pub(super) reached: Vec<Instant>,
+    pub(super) client: Client,
     /// the connection through the door, while it lasts
-    pass: Option<Pass>,
+    pub(super) pass: Option<Pass>,
     /// slskd's watchdog: on, its loop running, and a counter its cancels bump
-    enabled: bool,
-    looping: bool,
-    epoch: u64,
-    puts: Vec<Instant>,
-    deletes: Vec<Instant>,
+    pub(super) enabled: bool,
+    pub(super) looping: bool,
+    pub(super) epoch: u64,
+    pub(super) puts: Vec<Instant>,
+    pub(super) deletes: Vec<Instant>,
     /// searches slskd took: (when, text)
-    posts: Vec<(Instant, String)>,
+    pub(super) posts: Vec<(Instant, String)>,
     /// searches turned away with 429
-    refused: Vec<Instant>,
+    pub(super) refused: Vec<Instant>,
     /// turn the next N searches away with 429
-    too_many: usize,
-    searches: HashMap<String, Search>,
+    pub(super) too_many: usize,
+    pub(super) searches: HashMap<String, Search>,
     /// searches stopped with PUT /searches/{id}: (when, id)
-    stopped: Vec<(Instant, String)>,
+    pub(super) stopped: Vec<(Instant, String)>,
     /// the most searches running at once
-    most: usize,
-    search_secs: u64,
+    pub(super) most: usize,
+    pub(super) search_secs: u64,
     /// slskd's API doesn't answer (it is restarting)
-    down: bool,
+    pub(super) down: bool,
     /// where slskd's log lines go
-    session: Session,
+    pub(super) session: Session,
     /// downloads slskd knows, per user: (file name, state)
-    transfers: HashMap<String, Vec<(String, String)>>,
+    pub(super) transfers: HashMap<String, Vec<(String, String)>>,
     /// downloads slskd took (POST /transfers/downloads/{user}): (when, user)
-    enqueues: Vec<(Instant, String)>,
+    pub(super) enqueues: Vec<(Instant, String)>,
     /// downloads turned away with 429
-    enqueue_refused: Vec<Instant>,
+    pub(super) enqueue_refused: Vec<Instant>,
     /// turn the next N downloads away with 429
-    enqueue_too_many: usize,
+    pub(super) enqueue_too_many: usize,
     /// downloads being taken right now, and the most at once
-    enqueuing: usize,
-    most_enqueuing: usize,
+    pub(super) enqueuing: usize,
+    pub(super) most_enqueuing: usize,
     /// how long slskd takes to take a download (it asks the server, then the user's client)
-    enqueue_secs: u64,
+    pub(super) enqueue_secs: u64,
     /// the session is gone under slskd: a download is refused with Soulseek.NET's "must be connected"
-    enqueue_not_connected: bool,
+    pub(super) enqueue_not_connected: bool,
     /// what a search for a searchText finds (slskd's responses), handed out once it is over; none: nothing
-    answers: HashMap<String, Value>,
+    pub(super) answers: HashMap<String, Value>,
     /// users gone offline: a download from them is refused as slskd refuses it ("User x appears to be offline")
-    offline: Vec<String>,
+    pub(super) offline: Vec<String>,
 }
 
-type Shared = Arc<Mutex<Fake>>;
+pub(super) type Shared = Arc<Mutex<Fake>>;
 
 /// A line of slskd's log.
 fn say(f: &Fake, line: &str) {
@@ -312,7 +312,7 @@ async fn connect(sh: &Shared, epoch: u64, pass: Option<Pass>) -> Result<(), Opti
 }
 
 /// The server ends a session that was logged in.
-fn server_closes(sh: &Shared, why: &str) {
+pub(super) fn server_closes(sh: &Shared, why: &str) {
     let mut f = sh.lock().unwrap();
     assert_eq!(f.client, Client::LoggedIn);
     session_ends(&mut f);
@@ -561,7 +561,7 @@ fn fake_slskd(f: Shared) -> Router {
 
 /// A server with Soulseek switched on, its engine "installed" and running, and slskd's API answered by
 /// the stand-in (logged out, logins timing out, until a test says otherwise).
-fn setup(name: &str) -> (TestServer, Shared) {
+pub(super) fn setup(name: &str) -> (TestServer, Shared) {
     let ts = TestServer::new(&format!("soulseek-{name}"))
         .with_sources()
         .with_urls(encore_http::Urls { ytmusic: "http://127.0.0.1:9".into(), ..Default::default() })
@@ -594,7 +594,7 @@ fn logged_in_already(st: &AppState, f: &Shared) {
 }
 
 /// Wait (in the runtime's time) until `cond` holds; fails after `max`.
-async fn until(what: &str, max: Duration, cond: impl Fn() -> bool) {
+pub(super) async fn until(what: &str, max: Duration, cond: impl Fn() -> bool) {
     let t = Instant::now();
     while !cond() {
         assert!(t.elapsed() < max, "waited {max:?} for: {what}");
@@ -602,7 +602,7 @@ async fn until(what: &str, max: Duration, cond: impl Fn() -> bool) {
     }
 }
 
-fn state(st: &AppState) -> S {
+pub(super) fn state(st: &AppState) -> S {
     st.requests.slskd.session().snapshot().state
 }
 

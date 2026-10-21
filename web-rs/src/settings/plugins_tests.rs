@@ -199,6 +199,12 @@ fn installed_available_and_third_party_cards() {
         assert!(html.contains(want), "{want}: {html}");
     }
     assert!(!html.contains("Third-party"));
+    // it works but needs setting up (a connection without its address, streamrip without an account): amber
+    let mut setup = c.clone();
+    setup["status"] = json!({ "ok": true, "signed_in": false, "message": "Jellyfin needs its address (Settings → Integrations)" });
+    assert!(dot_html(&setup).contains("dot warn"), "{}", dot_html(&setup));
+    setup["status"]["signed_in"] = json!(true);
+    assert!(dot_html(&setup).contains("dot ok"));
     // an update found
     c["latest"] = json!("2026.11.01");
     c["update_available"] = json!(true);

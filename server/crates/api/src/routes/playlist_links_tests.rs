@@ -167,6 +167,8 @@ fn the_share_link_parser_takes_every_form_the_server_makes() {
 async fn adding_a_shared_playlist_makes_a_live_read_only_entry() {
     let mut e = setup("live").await;
     let (a1, a2, a3) = (e.add("One", "First"), e.add("Two", "First"), e.add("Three", "Second"));
+    // one album has a cover: the entry has a picture
+    std::fs::write(e.music.join(encore_library::album_key("Band", "Second", "")).join("cover.jpg"), b"not really a jpeg").unwrap();
     let pid = e.playlist(&e.anna, "Road trip", &[a1, a2, a3]).await;
     let (tok, url) = e.share(pid).await;
     let r = e.add_link(&e.ben, &url).await;
@@ -379,7 +381,7 @@ async fn stop_sharing_ends_it_and_sharing_again_does_not_bring_it_back() {
     assert_eq!((r["id"].as_i64(), r["added"].as_bool()), (Some(entry), Some(true)));
     let row = e.row(&e.ben, entry).await;
     assert_eq!((row["linked"]["active"].clone(), row["total"].as_i64()), (json!(true), Some(2)));
-    assert_eq!(row["cover_url"], format!("/api/share/{tok2}/cover"));
+    assert_eq!(row["cover_url"], Value::Null, "no listed song has a cover: no picture to ask for");
     assert_eq!(e.linked_rows("ben"), 1);
     assert_eq!(e.added_by(pid).await, 1);
 }
@@ -436,6 +438,9 @@ async fn liked_songs_are_added_as_liked_songs_of_the_owner() {
     let list = e.get(&e.ben, "/api/playlists").await;
     assert_eq!((list[0]["kind"].as_str(), list[0]["total"].as_i64()), (Some("liked"), Some(0)));
     assert_eq!(e.get(&e.ben, "/api/likes").await, json!([]));
+    // the owner's activity log names Liked Songs as such
+    let logged: Vec<String> = e.st.db.query("SELECT message FROM activity WHERE message LIKE 'Someone added%'", p![]).unwrap().iter().map(|r| r.s("message")).collect();
+    assert_eq!(logged, vec!["Someone added anna's Liked Songs to their playlists"]);
 }
 
 #[tokio::test]

@@ -184,3 +184,21 @@ fn the_backlog_comes_from_the_index_and_moves_on() {
     assert_eq!(next[1].kind, Kind::Album, "the album comes first, as the album column came before the title");
     let _ = std::fs::remove_dir_all(dir);
 }
+
+/// The letter-by-letter romanization of Hebrew, Arabic, Thai and Devanagari only fills a gap: it never replaces
+/// the model's (or anyone's), and the model replaces it later.
+#[test]
+fn a_letter_by_letter_romanization_only_fills_a_gap() {
+    let (db, dir) = db("letters");
+    store::put(&db, "שלום", "en", "title", Some("Hello"), Some("Shalom"), Source::Model).unwrap();
+    store::put(&db, "שלום", "en", "title", None, Some("Shlvm"), Source::Letters).unwrap();
+    assert_eq!(shown(&db, "שלום", "en").unwrap().romanization.as_deref(), Some("Shalom"), "the model's stays");
+    store::put(&db, "حبيبي", "en", "title", None, Some("Hbyby"), Source::Letters).unwrap();
+    let s = shown(&db, "حبيبي", "en").unwrap();
+    assert_eq!((s.romanization.as_deref(), s.source.as_str()), (Some("Hbyby"), "letters"), "a gap is filled");
+    store::put(&db, "حبيبي", "en", "title", Some("My darling"), Some("Habibi"), Source::Model).unwrap();
+    assert_eq!(shown(&db, "حبيبي", "en").unwrap().romanization.as_deref(), Some("Habibi"), "the model replaces it");
+    // stamped as the built-in romanization's tier: the backfill doesn't give it the row again
+    assert!(store::unseen(&db, "en", Source::Romanized, 10).is_empty());
+    let _ = std::fs::remove_dir_all(dir);
+}

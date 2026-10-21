@@ -75,7 +75,11 @@ pub async fn poll(st: &impl Ctx, id: &str) -> anyhow::Result<Poll> {
             // behind NZBGet's other downloads: no stall
             return Ok(Poll::Queued(pct, "NZBGet: queued behind its other downloads".into()));
         }
-        return Ok(Poll::Progress(pct, format!("NZBGet: {status}")));
+        // downloaded, and NZBGet verifies, repairs, unpacks or moves it
+        let post = matches!(status.as_str(), "pp queued" | "loading pars" | "verifying sources" | "repairing" | "verifying repaired" | "renaming"
+            | "unpacking" | "moving" | "executing script" | "pp finished");
+        let msg = format!("NZBGet: {status}");
+        return Ok(if post { Poll::Busy(pct, msg) } else { Poll::Progress(pct, msg) });
     }
     let Some(h) = find(&rpc(st, "history", json!([false])).await?, id) else { return Ok(Poll::Failed("download disappeared from NZBGet".into())) };
     let status = h["Status"].as_str().unwrap_or("");

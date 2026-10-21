@@ -181,7 +181,8 @@ fn apps_and_sources_is_four_pages_and_old_links_still_open() {
         SCHEMA.iter().find(|s| s.id == name || s.aliases.contains(&name) || s.groups.iter().any(|g| g.id == name)).map(|s| s.id)
     };
     let cards = |id: &str| SCHEMA.iter().find(|s| s.id == id).unwrap().groups.iter().map(|g| g.id).collect::<Vec<_>>();
-    assert_eq!(cards("library"), ["library", "verify"]);
+    // 0.33: the sources of translated titles on the Library page
+    assert_eq!(cards("library"), ["library", "verify", "translations"]);
     assert_eq!(cards("downloads"), ["pipeline", "releases", "streamrip", "torznab", "slskd", "ytdlp", "youtube"]);
     assert_eq!(cards("integrations"), ["spotify", "media", "roon"]);
     assert_eq!(cards("processing"), ["cadenza"]);
@@ -191,7 +192,7 @@ fn apps_and_sources_is_four_pages_and_old_links_still_open() {
         ("apps", "downloads"), ("downloads", "downloads"), ("tagging", "library"), ("services", "integrations"),
         ("pipeline", "downloads"), ("releases", "downloads"), ("streamrip", "downloads"), ("torznab", "downloads"),
         ("slskd", "downloads"), ("ytdlp", "downloads"), ("youtube", "downloads"), ("library", "library"),
-        ("verify", "library"), ("spotify", "integrations"), ("media", "integrations"), ("roon", "integrations"),
+        ("verify", "library"), ("translations", "library"), ("spotify", "integrations"), ("media", "integrations"), ("roon", "integrations"),
         ("cadenza", "processing"), ("general", "general"), ("email", "accounts"), ("sync", "tasks"),
     ] {
         assert_eq!(page_of(link), Some(page), "?s={link}");

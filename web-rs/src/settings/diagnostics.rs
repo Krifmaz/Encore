@@ -296,6 +296,7 @@ async fn run(view: Element, diag: Element, last: Rc<RefCell<Option<Value>>>) -> 
       </div>
       {server}
       {groups}
+      {folders}
       <div class="section-head"><h2>Where settings come from</h2><span class="small muted">Environment variables always win over values saved in Encore</span></div>
       <div class="card flat"><div class="table-wrap"><table class="table"><thead><tr><th>Setting</th><th>Source</th><th>Value</th></tr></thead><tbody>
         {rows}
@@ -305,8 +306,58 @@ async fn run(view: Element, diag: Element, last: Rc<RefCell<Option<Value>>>) -> 
         version = esck(&data, "version"),
         uid = js_str(&data, "uid"),
         time = fmt::date(data.f("time")),
+        folders = download_folders_html(data.g("download_folders"), &fmt::date),
     ));
     Ok(())
+}
+
+// ---- the download folders (backlog item 17): each folder downloads are saved in, its probe's result and time ----
+
+/// A download folder's lines in words (Diagnostics and its copied report): (what it is, the result with a
+/// note or the banner's sentence, when it was probed). `date` formats a unix time.
+pub fn folder_lines(r: &Value, date: &dyn Fn(f64) -> String) -> (String, String, String) {
+    let what = format!("{} – {}", r.s("label"), r.s("path"));
+    let result = if r.truthy("result") { r.s("result") } else { "Not checked yet".to_string() };
+    let detail = if !r.truthy("ok") && r.truthy("text") { r.s("text") }
+        else if r.truthy("note") { format!("{result} – {}", r.s("note")) }
+        else { result };
+    let when = if r.f("checked_at") > 0.0 {
+        let since = if !r.truthy("ok") && r.f("since") > 0.0 { format!(" · not writable since {}", date(r.f("since"))) } else { String::new() };
+        format!("Checked {}{since}", date(r.f("checked_at")))
+    } else { "Not checked yet".to_string() };
+    (what, detail, when)
+}
+
+/// What the Download folders section says about the probe.
+pub const FOLDERS_HELP: &str = "Probed every minute while downloads run: a file is written, flushed to the disk and removed. While nothing downloads they are looked at every 10 minutes without writing, so idle disks can spin down";
+
+/// The Download folders section (nothing from a server without the probe).
+pub fn download_folders_html(d: &Value, date: &dyn Fn(f64) -> String) -> String {
+    let roots = d.a("roots");
+    if !d.is_object() || roots.is_empty() { return String::new(); }
+    let items: String = roots.iter().map(|r| {
+        let (_, detail, when) = folder_lines(r, date);
+        let ok = r.truthy("ok");
+        let dot = if !ok { "err" } else if matches!(r.s("state").as_str(), "ok" | "unknown") { "ok" } else { "warn" };
+        let result = if r.truthy("result") { r.s("result") } else { "Not checked yet".to_string() };
+        // the badge says the result: the lines under it only what it doesn't (a note, the banner's sentence, the time)
+        let detail = if detail == result { String::new() }
+            else { format!(r#"<div class="small" style="color:{}">{}</div>"#, if ok { "var(--muted)" } else { "var(--err)" }, esc(&detail)) };
+        let when = if r.f("checked_at") > 0.0 { format!(r#"<div class="small muted">{}</div>"#, esc(&when)) } else { String::new() };
+        format!(r#"
+          <div class="list-item" style="align-items:flex-start">
+            <span class="dot {dot}" style="margin-top:7px"></span>
+            <div class="grow" style="min-width:0">
+              <div class="row wrap"><b>{label}</b><span class="badge {badge}">{result}</span></div>
+              <div class="small mono faint ellipsis">{path}</div>{detail}{when}
+            </div>
+          </div>"#,
+            label = esck(r, "label"), path = esck(r, "path"), badge = if ok { if dot == "warn" { "warn" } else { "ok" } } else { "err" },
+            result = esc(&result))
+    }).collect();
+    format!(r#"
+        <div class="section-head"><h2>Download folders</h2><span class="small muted">{FOLDERS_HELP}</span></div>
+        <div class="card flat"><div class="list">{items}</div></div>"#)
 }
 
 /// The "Server" block (0.26, `machine` in the diagnostics answer): what the owner's box looks like from inside
@@ -397,6 +448,15 @@ fn copy_report(last: &Value) {
         // `c.body.slice(0, 300)` – JS slices by UTF-16 units
         let body = if c.truthy("body") && !ok { format!("\n     body: {}", String::from(js_sys::JsString::from(c.s("body")).slice(0, 300))) } else { String::new() };
         lines.push(format!("{} {} – {}{status}{ms}\n     {}{body}", if ok { "OK  " } else { "FAIL" }, js_str(&c, "name"), or_empty(&c, "request"), or_empty(&c, "detail")));
+    }
+    let folders = last.g("download_folders").a("roots");
+    if !folders.is_empty() {
+        lines.push(String::new());
+        lines.push("Download folders:".into());
+        for r in &folders {
+            let (what, detail, when) = folder_lines(r, &fmt::date);
+            lines.push(format!("{} {what}\n     {detail} ({when})", if r.truthy("ok") { "OK  " } else { "FAIL" }));
+        }
     }
     if last.g("machine").is_object() {
         lines.push(String::new());
@@ -826,5 +886,38 @@ mod update_tests {
         // late after 90 s
         assert_eq!(judge(Wait::Update, "0.28.0", None, true, 0.0, BACK_BUDGET_MS), Back::Late);
         assert_eq!(judge(Wait::Restart, "0.28.0", None, true, 0.0, BACK_BUDGET_MS + 2000.0), Back::Late);
+    }
+}
+
+#[cfg(test)]
+mod folder_tests {
+    use super::*;
+
+    #[test]
+    fn each_download_folder_with_its_result_and_time() {
+        let date = |t: f64| format!("t{t}");
+        let d = json!({ "ok": false, "text": "x", "roots": [
+            { "key": "staging_path", "label": "Staging folder (yt-dlp, streamrip, links)", "path": "/downloads/encore", "state": "read_only", "result": "Read-only", "ok": false,
+              "text": "The downloads folder /downloads/encore is read-only – check the disk (dmesg, fsck) or the mount", "checked_at": 20.0, "since": 10.0 },
+            { "key": "qbit_download_path", "label": "Torrent downloads (qBittorrent)", "path": "/downloads/torrents", "state": "denied", "result": "Permission denied", "ok": true,
+              "note": "Encore may not write here, which is fine", "checked_at": 20.0, "since": null },
+            { "key": "sab_download_path", "label": "Usenet downloads (SABnzbd)", "path": "/downloads/usenet", "state": "unknown", "result": "Not checked yet", "ok": true, "checked_at": null } ] });
+        let roots = d.a("roots");
+        assert_eq!(folder_lines(&roots[0], &date), ("Staging folder (yt-dlp, streamrip, links) – /downloads/encore".to_string(),
+            "The downloads folder /downloads/encore is read-only – check the disk (dmesg, fsck) or the mount".to_string(), "Checked t20 · not writable since t10".to_string()));
+        assert_eq!(folder_lines(&roots[1], &date).1, "Permission denied – Encore may not write here, which is fine");
+        assert_eq!(folder_lines(&roots[1], &date).2, "Checked t20");
+        assert_eq!(folder_lines(&roots[2], &date).2, "Not checked yet");
+        let html = download_folders_html(&d, &date);
+        assert!(html.contains("<h2>Download folders</h2>"), "{html}");
+        assert!(html.contains(r#"<span class="dot err""#) && html.contains(r#"<span class="dot warn""#) && html.contains(r#"<span class="dot ok""#), "{html}");
+        assert!(html.contains(r#"<span class="badge err">Read-only</span>"#), "{html}");
+        assert_eq!(download_folders_html(&Value::Null, &date), "", "an older server");
+        // the result is said once: in the badge, not again under the path; no time before the first probe
+        assert_eq!(html.matches("Not checked yet").count(), 1, "{html}");
+        let fine = json!({ "roots": [{ "key": "staging_path", "label": "Staging folder", "path": "/downloads/encore", "state": "ok", "result": "Writable", "ok": true, "checked_at": 20.0 }] });
+        let html = download_folders_html(&fine, &date);
+        assert_eq!(html.matches("Writable").count(), 1, "{html}");
+        assert!(html.contains("Checked t20") && html.contains(FOLDERS_HELP), "{html}");
     }
 }

@@ -114,7 +114,7 @@ fun DiagnosticsScreen(nav: Nav, onBack: () -> Unit) {
     ) {
         Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.padding(bottom = 12.dp)) {
             EncoreButton("Copy report", iconRes = R.drawable.ic_content_copy, enabled = data != null) {
-                data?.let { copyToClipboard(context, SettingsRules.diagnosticsReport(it) { b -> formatSize(b.toLong()) }) }
+                data?.let { copyToClipboard(context, SettingsRules.diagnosticsReport(it, ::dateTime) { b -> formatSize(b.toLong()) }) }
             }
             EncoreButton("Run checks", iconRes = R.drawable.ic_refresh, primary = true, enabled = !checking) { run += 1 }
         }
@@ -166,6 +166,7 @@ private fun Checks(d: JsonObject) {
             }
         }
     }
+    DownloadFolders(d, ::dateTime)
     PageSection("Where settings come from", "Environment variables always win over values saved in Encore")
     SetCard(flat = true) {
         val rows = d.arr("settings").objectsOf()

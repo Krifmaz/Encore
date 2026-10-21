@@ -80,6 +80,9 @@ pub struct Urls {
     pub qobuz_player: String,
     /// YouTube Music's web API
     pub ytmusic: String,
+    /// DeepL's API; empty: the one the key is for (api-free.deepl.com for a key ending in `:fx`, else
+    /// api.deepl.com – encore_library::translate::deepl)
+    pub deepl: String,
 }
 
 impl Default for Urls {
@@ -89,6 +92,7 @@ impl Default for Urls {
             qobuz_api: "https://www.qobuz.com/api.json/0.2".into(),
             qobuz_player: "https://play.qobuz.com".into(),
             ytmusic: ytmusic::API.into(),
+            deepl: String::new(),
         }
     }
 }

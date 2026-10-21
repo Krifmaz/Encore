@@ -106,9 +106,22 @@ fn facts(st: &AppState) -> Vec<Value> {
     let love = one("SELECT COUNT(*) n FROM tracks WHERE lower(title) LIKE '%love%'").map(|r| r.i("n")).unwrap_or(0);
     out.push(json!({ "label": "songs with “love” in the title", "value": love.to_string() }));
     let floppies = (lib.f("s") / 1_474_560.0).round() as i64;
-    out.push(json!({ "label": "floppy disks to hold the library", "value": floppies.to_string().as_bytes().rchunks(3).rev().map(|c| std::str::from_utf8(c).unwrap()).collect::<Vec<_>>().join(",") }));
-    out.push(json!({ "label": "times through the library to listen to a year non-stop", "value": format!("{:.1}", 31_536_000.0 / lib.f("d").max(1.0)) }));
+    out.push(json!({ "label": "floppy disks to hold the library", "value": thousands(floppies) }));
+    out.push(json!({ "label": "times through the library to listen to a year non-stop", "value": times_through(31_536_000.0 / lib.f("d").max(1.0)) }));
     out
+}
+
+/// 1234567 → "1,234,567".
+fn thousands(n: i64) -> String {
+    let digits = n.unsigned_abs().to_string();
+    let grouped = digits.as_bytes().rchunks(3).rev().map(|c| std::str::from_utf8(c).unwrap_or("")).collect::<Vec<_>>().join(",");
+    if n < 0 { format!("-{grouped}") } else { grouped }
+}
+
+/// How many times a year of listening goes through the library: one decimal below 10 ("2.4"), a whole number
+/// with thousands separators above ("157,680" for a small library, not "157680.0").
+fn times_through(x: f64) -> String {
+    if x < 10.0 { format!("{x:.1}") } else { thousands(x.round() as i64) }
 }
 
 /// One listener's own numbers on Home (plays, time listened, top artist, requests): the plays and requests
@@ -380,7 +393,10 @@ async fn diagnostics(State(st): State<AppState>, Admin(_): Admin) -> ApiResult<J
         settings.push(json!({ "key": k, "source": src, "env": if src == "env" { json!(d.env) } else { Value::Null }, "value": dump[k] }));
     }
     let uid = Some(effective_uid() as i64);
-    Ok(Json(json!({ "version": crate::VERSION, "server": "rust", "uid": uid, "checks": checks, "settings": settings, "machine": super::system::server_block(&st), "time": now() })))
+    // every folder downloads are saved in, with its last probe's result and time (the probe runs every minute)
+    let folders = st.blocking(|st| Ok(encore_requests::worker::downloads::status(st, true))).await?;
+    Ok(Json(json!({ "version": crate::VERSION, "server": "rust", "uid": uid, "checks": checks, "settings": settings, "machine": super::system::server_block(&st),
+                    "download_folders": folders, "time": now() })))
 }
 
 /// How far the cover thumbnail pass is: "Cover thumbnails: 12 340 / 18 000".

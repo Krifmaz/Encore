@@ -121,7 +121,7 @@ img.avatar { object-fit: cover; background: var(--panel-2); }
 .swatch { width: 44px; height: 44px; border-radius: 50%; border: 2px solid transparent; cursor: pointer; padding: 0; position: relative; }
 .swatch.on { border-color: var(--text); box-shadow: 0 0 0 3px var(--bg); }
 .swatch input { position: absolute; inset: 0; opacity: 0; cursor: pointer; width: 100%; height: 100%; }
-.seg { display: inline-flex; width: fit-content; max-width: 100%; border: 1px solid var(--border); border-radius: 12px; overflow: hidden; }
+.seg { display: inline-flex; flex-wrap: wrap; width: fit-content; max-width: 100%; border: 1px solid var(--border); border-radius: 12px; overflow: hidden; }
 .seg button { border: 0; background: transparent; padding: 8px 14px; cursor: pointer; color: var(--muted); }
 .presets { display: grid; grid-template-columns: repeat(auto-fill, minmax(130px, 1fr)); gap: 10px; }
 .preset { display: flex; flex-direction: column; gap: 8px; padding: 10px; border-radius: 12px; border: 2px solid var(--border); background: var(--panel-2); color: var(--text); cursor: pointer; text-align: left; font-weight: 600; }

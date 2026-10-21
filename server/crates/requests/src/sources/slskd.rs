@@ -116,7 +116,7 @@ pub async fn search_as(st: &impl Ctx, text: &str, who: Who, note: impl Fn(Option
 /// [`search_as`], kept with the request it was made for (`request_id`), so the picker opened for that
 /// request finds it. Errors and searches cut short are never kept.
 pub async fn search_kept(st: &impl Ctx, text: &str, who: Who, request_id: Option<i64>, note: impl Fn(Option<&str>) + Send + Sync) -> anyhow::Result<Vec<Value>> {
-    let res = search_live(st, text, who, note).await?;
+    let res = search_live(st, text, who, request_id, note).await?;
     crate::search_cache::keep_slskd(st, text, request_id, &res).await;
     Ok(res)
 }
@@ -133,13 +133,14 @@ pub fn query_text(parts: &[&str]) -> String {
     NW.replace_all(&s, " ").split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
-/// The search itself, behind [`search_kept`].
-async fn search_live(st: &impl Ctx, text: &str, who: Who, note: impl Fn(Option<&str>) + Send + Sync) -> anyhow::Result<Vec<Value>> {
+/// The search itself, behind [`search_kept`]. The worker's search for a request waits in the Soulseek line
+/// under the request's id ([`crate::line`]), so Download now can move it up.
+async fn search_live(st: &impl Ctx, text: &str, who: Who, request_id: Option<i64>, note: impl Fn(Option<&str>) + Send + Sync) -> anyhow::Result<Vec<Value>> {
     if let Some(why) = not_ready(st) {
         anyhow::bail!(why);
     }
     let session = st.requests().slskd.session();
-    let turn = session.turn(st, who).await?;
+    let turn = session.turn(st, who, request_id).await?;
     note(None);
     let deadline = turn.deadline();
     let timeout = search_timeout(st);
@@ -281,7 +282,7 @@ pub async fn search_start(st: &impl Ctx, text: &str) -> anyhow::Result<String> {
     if let Some(why) = not_ready(st) {
         anyhow::bail!(why);
     }
-    let turn = st.requests().slskd.session().turn(st, Who::Person).await?;
+    let turn = st.requests().slskd.session().turn(st, Who::Person, None).await?;
     let deadline = turn.deadline();
     let sid = uuid();
     let timeout = search_timeout(st);
@@ -401,6 +402,28 @@ pub async fn enqueue(st: &impl Ctx, username: &str, files: &[Value]) -> anyhow::
     }
 }
 
+/// How long a user is asked about their upload slots, or a download's place in their queue.
+pub const USER_WAIT: Duration = Duration::from_secs(10);
+
+/// What the user's client says about it (GET users/{u}/info, 10 s at most): `hasFreeUploadSlot`,
+/// `queueLength`, `uploadSlots`. An offline user, or one whose client doesn't answer, is an error.
+pub async fn user_info(st: &impl Ctx, username: &str) -> anyhow::Result<Value> {
+    let path = format!("users/{}/info", urlencoding::encode(username));
+    match tokio::time::timeout(USER_WAIT, req_within(st, reqwest::Method::GET, &path, None, &[], Some(USER_WAIT))).await {
+        Ok(r) => r,
+        Err(_) => anyhow::bail!("{username} did not answer within {} s", USER_WAIT.as_secs()),
+    }
+}
+
+/// A queued download's place in the user's upload queue, asked of the user (GET
+/// transfers/downloads/{u}/{id}/position, 10 s at most): slskd answers the place, or the transfer with its
+/// `placeInQueue`. None when it couldn't be asked.
+pub async fn place_in_queue(st: &impl Ctx, username: &str, id: &str) -> Option<u64> {
+    let path = format!("transfers/downloads/{}/{}/position", urlencoding::encode(username), urlencoding::encode(id));
+    let v = tokio::time::timeout(USER_WAIT, req_within(st, reqwest::Method::GET, &path, None, &[], Some(USER_WAIT))).await.ok()?.ok()?;
+    v.as_u64().or_else(|| v["placeInQueue"].as_u64()).filter(|p| *p > 0)
+}
+
 pub async fn user_downloads(st: &impl Ctx, username: &str) -> Vec<Value> {
     let Ok(d) = req(st, reqwest::Method::GET, &format!("transfers/downloads/{}", urlencoding::encode(username)), None, &[]).await else { return vec![] };
     d["directories"].as_array().cloned().unwrap_or_default().iter().flat_map(|d| d["files"].as_array().cloned().unwrap_or_default()).collect()
@@ -471,7 +494,7 @@ fn contains(hay: &str, needle: &str) -> f64 {
     words.iter().filter(|w| h.contains(&format!(" {w} "))).count() as f64 / words.len() as f64
 }
 
-fn format_score(st: &impl Ctx, files: &[&Value], lossless_only: bool) -> Option<f64> {
+fn format_score(st: &impl encore_http::Ctx, files: &[&Value], lossless_only: bool) -> Option<f64> {
     let pref = st.cfg().str("slskd_preferred_format");
     let min_br = st.cfg().int("slskd_min_bitrate");
     let exts: std::collections::HashSet<String> = files.iter().map(|f| ext(f["filename"].as_str().unwrap_or(""))).collect();
@@ -505,7 +528,14 @@ fn round1(x: f64) -> f64 {
     (x * 10.0).round() / 10.0
 }
 
-pub fn rank_album(st: &impl Ctx, responses: &[Value], artist: &str, album: &str, track_count: Option<usize>, lossless_only: bool) -> Vec<Value> {
+pub fn rank_album(st: &impl encore_http::Ctx, responses: &[Value], artist: &str, album: &str, track_count: Option<usize>, lossless_only: bool) -> Vec<Value> {
+    rank_album_where(st, responses, artist, album, track_count, lossless_only, |_| true)
+}
+
+/// [`rank_album`] of only the folders `keep` lets through – left out before each user's best folder is chosen
+/// and before the cut to `slskd_max_candidates`, so what is left out can't take the places of folders that qualify.
+pub fn rank_album_where(st: &impl encore_http::Ctx, responses: &[Value], artist: &str, album: &str, track_count: Option<usize>, lossless_only: bool,
+                        keep: impl Fn(&Value) -> bool) -> Vec<Value> {
     let mut cands = vec![];
     for resp in responses {
         let mut dirs: Vec<(String, Vec<&Value>)> = vec![];
@@ -553,13 +583,20 @@ pub fn rank_album(st: &impl Ctx, responses: &[Value], artist: &str, album: &str,
         }
     }
     cands.sort_by(|a, b| b["score"].as_f64().partial_cmp(&a["score"].as_f64()).unwrap_or(std::cmp::Ordering::Equal));
+    cands.retain(&keep);
     let mut seen = std::collections::HashSet::new();
     cands.retain(|c| seen.insert(c["username"].as_str().unwrap_or("").to_string()));
     cands.truncate(st.cfg().int("slskd_max_candidates").max(1) as usize);
     cands
 }
 
-pub fn rank_track(st: &impl Ctx, responses: &[Value], artist: &str, title: &str, length: Option<f64>, lossless_only: bool) -> Vec<Value> {
+pub fn rank_track(st: &impl encore_http::Ctx, responses: &[Value], artist: &str, title: &str, length: Option<f64>, lossless_only: bool) -> Vec<Value> {
+    rank_track_where(st, responses, artist, title, length, lossless_only, |_| true)
+}
+
+/// [`rank_track`] of only the files `keep` lets through – left out before the cut to `slskd_max_candidates`.
+pub fn rank_track_where(st: &impl encore_http::Ctx, responses: &[Value], artist: &str, title: &str, length: Option<f64>, lossless_only: bool,
+                        keep: impl Fn(&Value) -> bool) -> Vec<Value> {
     let mut cands = vec![];
     for resp in responses {
         for f in resp["files"].as_array().map(|a| a.as_slice()).unwrap_or(&[]) {
@@ -597,6 +634,7 @@ pub fn rank_track(st: &impl Ctx, responses: &[Value], artist: &str, title: &str,
         }
     }
     cands.sort_by(|a, b| b["score"].as_f64().partial_cmp(&a["score"].as_f64()).unwrap_or(std::cmp::Ordering::Equal));
+    cands.retain(&keep);
     cands.truncate(st.cfg().int("slskd_max_candidates").max(1) as usize);
     cands
 }

@@ -97,6 +97,11 @@ desc = "Listens to each download and checks it's really the song you asked for, 
 test = "acoustid"
 test_label = "Test connection"
 
+[groups.translations]
+section = "library"
+title = "Translated titles"
+desc = "Where translated and romanized titles come from, strongest first: corrections by hand, official names, romanization built into the server, DeepL with your API key, and the local model when the Translator plugin is installed. Each listener turns translations on under Settings → Language, which also shows admins the state of each source."
+
 [groups.pipeline]
 section = "downloads"
 title = "Download pipeline"
@@ -1163,6 +1168,61 @@ default = true
 group = "verify"
 label = "Before replacing a song with a better copy, compare the audio – a different recording is kept as its own song"
 type = "bool"
+
+# ---- Library → Translated titles (the sources of translated and romanized titles, strongest first; their state
+# is on Settings → Language: encore_library::translate::tiers)
+
+[keys.translate_official]
+env = "TRANSLATE_OFFICIAL"
+default = true
+group = "translations"
+label = "Official names from MusicBrainz and Apple"
+type = "bool"
+help = "MusicBrainz pseudo-releases and aliases, and Apple's English names for Japanese releases. Asks MusicBrainz and Apple about the songs in your library."
+
+[keys.translate_romanize]
+env = "TRANSLATE_ROMANIZE"
+default = true
+group = "translations"
+label = "Romanization built into the server"
+type = "bool"
+help = "Japanese kana, Korean, Cyrillic, Greek, Hebrew, Arabic, Thai and Devanagari, made on this server. Titles with kanji and Chinese titles are left to the other sources."
+
+[keys.translate_deepl]
+env = "TRANSLATE_DEEPL"
+default = true
+group = "translations"
+label = "DeepL, when an API key is set"
+type = "bool"
+help = "Translates song and album titles, never lyrics or artist names."
+
+[keys.deepl_api_key]
+env = "DEEPL_API_KEY"
+default = ""
+secret = true
+group = "translations"
+label = "DeepL API key"
+type = "password"
+full = true
+help = "From deepl.com → Account → API keys. A key ending in :fx is a free-plan key (500,000 characters a month at DeepL)."
+
+[keys.deepl_char_budget]
+env = "DEEPL_CHAR_BUDGET"
+default = 400000
+group = "translations"
+label = "DeepL characters per month"
+type = "number"
+unit = "characters"
+min = 0
+help = "Encore stops asking DeepL for the rest of the month at this many characters. 0 = no limit."
+
+[keys.translate_local_model]
+env = "TRANSLATE_LOCAL_MODEL"
+default = true
+group = "translations"
+label = "Local model, when it is installed"
+type = "bool"
+help = "Translates and romanizes what the other sources leave, on this server, with the Translator plugin (llama.cpp and a model). It is not installed by default: install the Translator in Plugins."
 
 # ---- Integrations → Integrations
 

@@ -201,11 +201,31 @@ async fn a_plugin_programs_source_answers_the_picker_and_the_worker() {
     assert_eq!(message, "Downloaded from Test tone");
     let files: Vec<PathBuf> = walkdir::WalkDir::new(ts.dir.join("lib")).into_iter().flatten().filter(|e| e.path().extension().is_some_and(|x| x == "wav")).map(|e| e.into_path()).collect();
     assert_eq!(files.len(), 1, "{files:?}");
-    // in the source order: the worker searches it and downloads the best match
+    // in the source order: the worker searches it and downloads the best match – one request at a time per
+    // plugin: while another holds the plugin's slot it waits in the plugin's line, and Download now offers to
+    // move it up there
+    let line = st.requests.lines.plugin("test-tone");
+    let slot = line.acquire(-7, "Test tone", &st.requests.lines.pressed, || {}).await;
     let id = queue(&st, "track", "Test Tones", "A 440", json!({}));
-    encore_requests::worker::step(st.clone(), id).await;
+    let task = tokio::spawn(encore_requests::worker::step(st.clone(), id));
+    for _ in 0..200 {
+        if line.waiting() == 1 {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+    }
+    let (status, message, _) = request_row(&st, id);
+    assert_eq!((status.as_str(), message.as_str(), line.running()), ("queued", "In line for Test tone", 1));
+    let r = encore_requests::worker::get(&st, id).unwrap();
+    let o = encore_requests::worker::now::offer(&st, &r).unwrap();
+    assert_eq!((o.kind(), o.title.as_str()), ("line", "Go first in line for Test tone"));
+    let place = st.requests.lines.place(id).unwrap();
+    assert_eq!((place.source, place.text(), place.limit_text()), ("plugin", "Next in line for Test tone".to_string(), "1 download at a time".to_string()));
+    drop(slot);
+    task.await.unwrap();
     let (status, message, d) = request_row(&st, id);
     assert_eq!(status, "completed", "{message}\n{}", log_text(&d));
+    assert_eq!((line.running(), line.waiting()), (0, 0), "the slot is given back");
     assert_eq!(st.db.one("SELECT COUNT(*) n FROM tracks WHERE request_id=?", p![id]).unwrap().unwrap().i("n"), 1);
     // nothing that matches: the next source, with the plugin's words
     let id = queue(&st, "track", "Somebody", "Nothing Like It", json!({}));
@@ -299,10 +319,20 @@ echo 'JSON {{"title":"Light 1","artist":"Duumu"}}'"#, fixture.join("01. Duumu - 
     std::fs::write(ts.dir.join("tools/translator/models/Qwen3-4B-Instruct-2507-Q4_K_M.gguf"), b"GGUF\x03").unwrap();
     assert_eq!(llama::installed(&st).map(|(_, t)| t).as_deref(), Some("b6800"));
     assert!(llama::ready(&st));
+    // Settings → Language's local model line follows the plugin
+    let model_line = |st: &crate::state::AppState| {
+        let t = encore_library::translate::tiers::states(st).into_iter().find(|t| t["id"] == "model").unwrap();
+        (t["state"].as_str().unwrap().to_string(), t["ready"].as_bool())
+    };
+    assert_eq!(model_line(&st), ("Local model: ready (small model) – starts when there is something to translate".to_string(), Some(true)));
+    std::fs::rename(ts.dir.join("tools/translator/models/Qwen3-4B-Instruct-2507-Q4_K_M.gguf"), ts.dir.join("model.gguf")).unwrap();
+    assert_eq!(model_line(&st), ("Local model: installed, the small model is not downloaded yet – download it in Plugins".to_string(), Some(false)));
+    std::fs::rename(ts.dir.join("model.gguf"), ts.dir.join("tools/translator/models/Qwen3-4B-Instruct-2507-Q4_K_M.gguf")).unwrap();
     let t = st.plugins.test("translator").await.unwrap();
     assert_eq!((t["ok"].as_bool(), t["message"].as_str()), (Some(true), Some("llama.cpp b6800 runs")), "{t}");
     st.plugins.enable("translator", false).await.unwrap();
     assert!(!llama::ready(&st));
+    assert_eq!(model_line(&st), ("Local model: switched off in Plugins – switch the Translator on there".to_string(), Some(false)));
     // the old Download tools routes, in their old shape, from the plugins
     let app = ts.app();
     let (_, _, cookie) = call(&app, "POST", "/api/auth/login", "", Some(json!({ "username": "boss", "password": "a-long-password-1" }))).await;

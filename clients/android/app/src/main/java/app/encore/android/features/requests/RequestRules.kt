@@ -1,6 +1,8 @@
 package app.encore.android.features.requests
 
 import app.encore.android.data.repo.CANCELLABLE_STATUSES
+import app.encore.android.data.repo.DownloadAllNowResult
+import app.encore.android.data.repo.DownloadNowResult
 import app.encore.android.data.repo.LinkProbe
 import app.encore.android.data.repo.LinkResult
 import app.encore.android.data.repo.Me
@@ -159,8 +161,17 @@ object RequestRules {
         "soulseek" -> "Soulseek isn't connected yet"
         "storage_import" -> "the downloaded files are kept and the import waits for the storage"
         "storage_download" -> "the download waits for the staging folder"
+        "waiting_disk" -> "the downloads folder can't be written now"
+        "plugin_install" -> "its source's plugin is still being installed"
         else -> ""
     }
+
+    /** The status of a request waiting for a downloads folder (`wait_reason` "waiting_disk", common.rs `WAITING_DISK`). */
+    const val WAITING_DISK = "Waiting for the downloads folder"
+
+    /** A row's badge words (common.rs `request_badge`): its status, and for a request waiting for a downloads folder that it is. */
+    fun badgeLabel(r: RequestRow): String =
+        if (r.status == "waiting" && r.waitReason == "waiting_disk") WAITING_DISK else statusLabel(r.status)
 
     /** The status in words, with what a waiting request waits for: "Waiting – the downloaded files are kept and …". */
     fun statusText(r: RequestRow): String {
@@ -186,8 +197,102 @@ object RequestRules {
         }
     }
 
-    /** The toast after Check again and its kind. */
-    fun checkToast(s: StorageHealth): Pair<String, String> = if (s.paused) "Imports are still paused" to "warn" else "Imports resumed" to "ok"
+    /**
+     * The banner's sentence for the download folders (`downloads`, servers since 0.33): for admins, while a folder
+     * downloads are saved in can't be written; null otherwise and from an older server.
+     */
+    fun downloadsBanner(s: StorageHealth?, admin: Boolean): String? =
+        s?.downloads?.takeIf { admin && it.failing && it.text.isNotEmpty() }?.text
+
+    /** The whole banner over a request list: imports paused, a downloads folder that fails, or both; null when neither. */
+    fun banner(s: StorageHealth?, admin: Boolean): String? =
+        listOfNotNull(storageBanner(s, admin), downloadsBanner(s, admin)).takeIf { it.isNotEmpty() }?.joinToString("\n")
+
+    /** Imports are paused or a downloads folder fails: the banner asks again sooner ([pollMillis]). */
+    fun failing(s: StorageHealth?): Boolean = s != null && (s.paused || s.downloads?.failing == true)
+
+    /**
+     * How long the banner waits before it asks again: 5 s while imports are paused (an import may resume them any
+     * moment), 15 s while only a downloads folder fails (the server probes it once a minute; the web's notice asks
+     * as often), else 30 s.
+     */
+    fun pollMillis(s: StorageHealth?): Long = when {
+        s?.paused == true -> 5_000
+        s?.downloads?.failing == true -> 15_000
+        else -> 30_000
+    }
+
+    /**
+     * The toast after Check again and its kind, from the answer and the state before it: "Imports resumed" only
+     * when imports were paused; a downloads folder that can be written again says that (as the web's banner); a
+     * check that still runs (a folder that doesn't answer) says so.
+     */
+    fun checkToast(s: StorageHealth, before: StorageHealth?): Pair<String, String> = when {
+        s.paused -> "Imports are still paused" to "warn"
+        s.downloads?.failing == true -> "A downloads folder still can't be written" to "warn"
+        s.downloads?.checking == true -> "Still checking the downloads folders" to "warn"
+        before?.paused == true -> "Imports resumed" to "ok"
+        else -> "The downloads folders can be written" to "ok"
+    }
+
+    // ---- Download now (Oct 21: "for the que can i get a download now button") ---------------------------------------
+
+    /**
+     * Download now (common.rs `request_row`): only where the server offers it (`can_download_now`). It never breaks a
+     * source's limit: the request goes first in its source's line, a wait is tried now, a Soulseek download queued at
+     * a user switches to one with a free upload slot, or a torrent with no progress goes to the next source. An older
+     * server sends no such field: no button.
+     */
+    fun canDownloadNow(r: RequestRow): Boolean = r.canDownloadNow == true
+
+    /** The server has Download now (its rows carry `can_download_now`): admins get Download all now beside Retry failed. */
+    fun hasDownloadNow(rows: List<RequestRow>): Boolean = rows.any { it.canDownloadNow != null }
+
+    /**
+     * What Download now does on this row, in the server's words ("Go first in line for Deezer"): the web's and the
+     * desktop's tooltip, the details sheet's line under its buttons (the phone has no tooltips). "" when not offered.
+     */
+    fun downloadNowHelp(r: RequestRow): String = if (canDownloadNow(r)) r.downloadNow?.title?.trim().orEmpty() else ""
+
+    /** What the toast says when the server answered a press without words. */
+    const val STARTING_NOW = "Starting now"
+
+    /**
+     * The toast after Download now and its kind: the server's words ("Next in line for Deezer (1 download at a
+     * time)"), "ok" when something changed or started, "warn" when nothing could be sooner ("Soulseek asked Encore to
+     * wait – next attempt at 14:20"). Null when a press that changed nothing came back without words.
+     */
+    fun downloadNowToast(res: DownloadNowResult): Pair<String, String>? {
+        val text = res.text.trim().ifEmpty { if (res.ok) STARTING_NOW else return null }
+        return text to if (res.ok) "ok" else "warn"
+    }
+
+    /** Download all now with nothing to do (the server's words). */
+    const val NOTHING_WAITING = "Nothing is waiting – every request is downloading or done"
+
+    /** The toast after Download all now and its kind: the server's words; "warn" when nothing was waiting. */
+    fun downloadAllNowToast(res: DownloadAllNowResult): Pair<String, String> =
+        res.text.trim().ifEmpty { if (res.ok) STARTING_NOW else NOTHING_WAITING } to if (res.ok) "ok" else "warn"
+
+    /**
+     * The Download now lines of the details and of the copied text (common.rs `request_text`): the request's place in
+     * its source's line, the Soulseek user's upload queue it waits in, a torrent or Usenet download with no progress,
+     * and who asked to download it now. [date] formats a unix time.
+     */
+    fun downloadNowLines(r: RequestRow, date: (Double) -> String): List<String> {
+        val out = ArrayList<String>()
+        r.line?.takeIf { it.text.isNotBlank() }?.let { l ->
+            out.add("In line: ${l.text.trim()}" + if (l.limitText.isNotBlank()) " (${l.limitText.trim()})" else "")
+        }
+        r.remoteQueue?.takeIf { it.text.isNotBlank() }?.let { q ->
+            out.add("Soulseek queue: ${q.text.trim()}" + if (q.since > 0) " (since ${date(q.since)})" else "")
+        }
+        if (r.stalledSince > 0) out.add("No progress since: ${date(r.stalledSince)}")
+        r.pressed?.takeIf { it.by.isNotBlank() || it.at > 0 }?.let { p ->
+            out.add("Download now: asked" + (if (p.by.isNotBlank()) " by ${p.by}" else "") + (if (p.at > 0) " at ${date(p.at)}" else ""))
+        }
+        return out
+    }
 
     // ---- a download the audio check turned away (R2) -------------------------------------------------------------
 
@@ -323,6 +428,7 @@ object RequestRules {
         add("Status", statusText(r))
         add("Message", r.message)
         if (r.status == "waiting" && r.nextTryAt > 0) add("Next try", date(r.nextTryAt))
+        out.addAll(downloadNowLines(r, date))
         add("Attempts", r.attempts.toString())
         add("Source", r.source)
         if (r.picked) add("Picked by hand", "yes")
@@ -428,6 +534,7 @@ object RequestRules {
         if (r.picked) facts.add("Picked by hand")
         candidateLine(r).takeIf { it.isNotEmpty() }?.let { facts.add(it) }
         if (r.status == "waiting" && r.nextTryAt > 0) facts.add("Next try: " + date(r.nextTryAt))
+        facts.addAll(downloadNowLines(r, date))
         keptLine(r)?.let { facts.add(it) }
         if (r.skipCheck) facts.add(SKIP_CHECK)
         if (admin && r.username.isNotEmpty()) facts.add("by ${r.username}")

@@ -239,6 +239,7 @@ pub fn request_row(r: &Value, admin: bool) -> String {
       {pick}
       {keep}
       {retry}
+      {now}
       {cancel}
       {menu}
     </div>
@@ -256,7 +257,7 @@ pub fn request_row(r: &Value, admin: bool) -> String {
         by = if admin && r.truthy("username") { format!(r#" · <span class="faint">by {}</span>"#, esck(r, "username")) } else { String::new() },
         ago = ui::fmt::ago(r.f("created_at")),
         progress = if active && r.truthy("progress") { format!(r#"<div class="progress" style="margin-top:6px;max-width:420px"><i style="width:{}%"></i></div>"#, r.s("progress")) } else { String::new() },
-        badge = status_badge(&status),
+        badge = request_badge(r),
         approve = if admin && status == "pending" { format!(r#"<button class="btn sm primary" data-act="approve">{}Approve</button><button class="btn sm danger" data-act="deny">Deny</button>"#, icon("check")) } else { String::new() },
         pick = if matches!(kind.as_str(), "album" | "track") && status != "completed" { format!(r#"<button class="btn sm" data-act="pick" data-req='{}' title="Search the sources and pick the exact download">{}Pick</button>"#, esc(&pick_json(r)), icon("search")) } else { String::new() },
         // a failed or waiting import whose files are kept: Import again takes Retry's place
@@ -264,11 +265,95 @@ pub fn request_row(r: &Value, admin: bool) -> String {
             // a playlist's songs anyone may queue again; any other request needs Fix their own downloads (the
             // server answers "Ask an admin to retry")
             else if kind == "playlist" || (matches!(status.as_str(), "failed" | "cancelled") && may_fix()) { format!(r#"<button class="btn sm" data-act="retry" title="Retry">{}</button>"#, icon("refresh")) } else { String::new() },
+        now = download_now_button(r),
         cancel = if matches!(status.as_str(), "pending" | "queued" | "searching" | "downloading" | "monitoring" | "importing" | "waiting") { format!(r#"<button class="btn sm" data-act="cancel" title="Cancel">{}</button>"#, icon("x")) } else { String::new() },
         menu = if !active { format!(r#"<button class="btn sm ghost icon" data-act="menu" data-status="{}"{} aria-label="More">{}</button>"#, esc(&status), if r.truthy("has_files") { r#" data-files="1""# } else { "" }, icon("more")) } else { String::new() })
 }
 
-/// `bindRequestActions(root, reload)`: approve / deny / retry / cancel / pick and the ⋯ menu of request rows.
+/// Download now (the owner on Oct 21: "for the que can i get a download now button"): the row's button, where the
+/// server offers it (`can_download_now`, with what it does as the tooltip: "Go first in line for Deezer"). An older
+/// server has no such field: no button.
+pub fn download_now_button(r: &Value) -> String {
+    if r.g("can_download_now") != &Value::Bool(true) { return String::new(); }
+    let title = r.g("download_now").s("title");
+    format!(r#"<button class="btn sm" data-act="download-now" title="{}">{}Download now</button>"#, esc(if title.is_empty() { "Download now" } else { &title }), icon("download"))
+}
+
+/// The toast kind of Download now's answer: `ok` when something changed or started, `warn` when nothing could be
+/// sooner (the answer says when).
+pub fn download_now_kind(v: &Value) -> &'static str {
+    if v.g("ok") == &Value::Bool(true) { "ok" } else { "warn" }
+}
+
+/// What the toast says when the server answered a press without words.
+pub const STARTING_NOW: &str = "Starting now";
+/// Download all now with nothing to do.
+pub const NOTHING_WAITING: &str = "Nothing is waiting – every request is downloading or done";
+
+/// The toast after Download now: the server's words and their kind ([`download_now_kind`]); an answer without words
+/// says "Starting now" when it started something, and nothing when it changed nothing (as the phone and the desktop).
+pub fn download_now_toast(v: &Value) -> Option<(String, &'static str)> {
+    let text = v.s("text").trim().to_string();
+    if text.is_empty() {
+        return (download_now_kind(v) == "ok").then(|| (STARTING_NOW.to_string(), "ok"));
+    }
+    Some((text, download_now_kind(v)))
+}
+
+/// The toast after Download all now: the server's words; without them "Starting now", or "Nothing is waiting – every
+/// request is downloading or done" when nothing was waiting.
+pub fn download_all_now_toast(v: &Value) -> (String, &'static str) {
+    let text = v.s("text").trim().to_string();
+    let kind = download_now_kind(v);
+    if !text.is_empty() {
+        return (text, kind);
+    }
+    ((if kind == "ok" { STARTING_NOW } else { NOTHING_WAITING }).to_string(), kind)
+}
+
+/// Press Download now on request `id`: the server's words as a toast, then the lists reload; an error's words, and the
+/// button back.
+fn press_download_now(id: &str, btn: Element, reload: Rc<dyn Fn()>) {
+    dom::set_disabled(&btn, true);
+    let path = format!("/requests/{id}/download-now");
+    dom::spawn(async move {
+        match api::post(&path, json!({})).await {
+            Ok(v) => {
+                if let Some((text, kind)) = download_now_toast(&v) {
+                    toast(&text, kind);
+                }
+                dom::dispatch("encore:requests-changed", None);
+                reload();
+            }
+            Err(err) => {
+                toast(&err.message, "err");
+                dom::set_disabled(&btn, false);
+            }
+        }
+    });
+}
+
+/// Download all now (admins, the Requests page): every waiting request is woken and the lines move up – never more
+/// at once than each source allows (`mine`: only the admin's own requests move up).
+pub fn download_all_now(mine: bool, reload: Rc<dyn Fn()>) {
+    dom::spawn(async move {
+        match api::post("/requests/download-now", json!({ "mine": mine })).await {
+            Ok(v) => {
+                let (text, kind) = download_all_now_toast(&v);
+                toast(&text, kind);
+                dom::dispatch("encore:requests-changed", None);
+                reload();
+            }
+            Err(e) => toast(&e.message, "err"),
+        }
+    });
+}
+
+/// The tooltip of Download all now.
+pub const DOWNLOAD_ALL_NOW_TITLE: &str = "Wake every waiting request and move requests up in their lines – never more at once than each source allows";
+
+/// `bindRequestActions(root, reload)`: approve / deny / retry / cancel / pick / Download now and the ⋯ menu of request
+/// rows.
 pub fn bind_request_actions(root: &Element, reload: Rc<dyn Fn()>) {
     dom::on(root, "click", move |e| {
         let Some(b) = dom::closest(e, "[data-act]") else { return };
@@ -283,6 +368,10 @@ pub fn bind_request_actions(root: &Element, reload: Rc<dyn Fn()>) {
         }
         if act == "keep-anyway" || act == "download-anyway" {
             take_anyway(&id, &act, b, reload.clone(), None);
+            return;
+        }
+        if act == "download-now" {
+            press_download_now(&id, b, reload.clone());
             return;
         }
         if act == "menu" {
@@ -440,8 +529,21 @@ pub fn wait_words(reason: &str) -> &'static str {
         "soulseek" => "Soulseek isn't connected yet",
         "storage_import" => "the downloaded files are kept and the import waits for the storage",
         "storage_download" => "the download waits for the staging folder",
+        "waiting_disk" => "the downloads folder can't be written now",
+        "plugin_install" => "its source's plugin is still being installed",
         _ => "",
     }
+}
+
+/// The status of a request waiting for a downloads folder (`wait_reason` "waiting_disk", backlog item 17).
+pub const WAITING_DISK: &str = "Waiting for the downloads folder";
+
+/// A request row's badge: its status, and for a request waiting for a downloads folder that it is.
+pub fn request_badge(r: &Value) -> String {
+    if r.s("status") == "waiting" && r.s("wait_reason") == "waiting_disk" {
+        return format!(r#"<span class="badge warn">{}</span>"#, esc(WAITING_DISK));
+    }
+    status_badge(&r.s("status"))
 }
 
 /// A request in plain text, for the Details dialog and its Copy – what a bug report needs: title, artist, status
@@ -464,6 +566,21 @@ pub fn request_text(r: &Value, version: &str, date: &dyn Fn(f64) -> String) -> S
     add("Status", if why.is_empty() { label } else { format!("{label} – {why}") });
     add("Message", r.s("message"));
     if status == "waiting" && r.f("next_try_at") > 0.0 { add("Next try", date(r.f("next_try_at"))); }
+    // Download now: where it stands in its source's line, its place in a Soulseek user's upload queue, a torrent
+    // without progress, and who asked for it to go first
+    let line = r.g("line");
+    if line.is_object() && line.truthy("text") {
+        add("In line", if line.truthy("limit_text") { format!("{} ({})", line.s("text"), line.s("limit_text")) } else { line.s("text") });
+    }
+    let rq = r.g("remote_queue");
+    if rq.is_object() && rq.truthy("text") {
+        add("Soulseek queue", if rq.f("since") > 0.0 { format!("{} (since {})", rq.s("text"), date(rq.f("since"))) } else { rq.s("text") });
+    }
+    if r.f("stalled_since") > 0.0 { add("No progress since", date(r.f("stalled_since"))); }
+    let pressed = r.g("pressed");
+    if pressed.is_object() && pressed.truthy("by") {
+        add("Download now", if pressed.f("at") > 0.0 { format!("asked by {} at {}", pressed.s("by"), date(pressed.f("at"))) } else { format!("asked by {}", pressed.s("by")) });
+    }
     add("Attempts", r.s("attempts"));
     add("Source", r.s("source"));
     if r.truthy("picked") { add("Picked by hand", "yes".into()); }
@@ -543,7 +660,8 @@ pub fn storage_banner_html(s: &Value, admin: bool) -> String {
 
 /// Draw the storage banner into `slot` now and every 30 s while the page is open (every 5 s while imports
 /// are paused, so it goes as soon as an import or the 10-minute check finds the folder writable again, not up
-/// to 30 s after the request shows Available); Check again probes at once.
+/// to 30 s after the request shows Available); Check again probes at once – the download folders too, so the
+/// banner on every page ([`crate::notice`]) takes its answer, and this one is drawn again after that one's.
 pub fn storage_banner(view: &Element, slot: &Element, admin: bool) {
     let paused = Rc::new(std::cell::Cell::new(false));
     let paint = {
@@ -559,6 +677,7 @@ pub fn storage_banner(view: &Element, slot: &Element, admin: bool) {
         Rc::new(move || { let paint = paint.clone(); dom::spawn(async move { if let Ok(s) = api::get("/requests/storage").await { paint(&s); } }); })
     };
     load();
+    dom::on(&dom::window(), "encore:storage-checked", { let load = load.clone(); move |_| load() });
     let ticks = std::cell::Cell::new(0u32);
     dom::interval(view, 5_000, {
         let load = load.clone();
@@ -576,6 +695,7 @@ pub fn storage_banner(view: &Element, slot: &Element, admin: bool) {
             match api::post_empty("/requests/storage/check").await {
                 Ok(s) => {
                     paint(&s);
+                    crate::notice::keep(&s);
                     if s.g("ok") == &Value::Bool(false) { toast("Imports are still paused", "warn"); }
                     else { toast("Imports resumed", "ok"); dom::dispatch("encore:requests-changed", None); }
                 }
@@ -698,6 +818,7 @@ mod tests {
         let html = request_row(&s, false);
         assert!(html.contains(r#"<span class="badge warn">Waiting</span>"#) && !html.contains("Import again") && html.contains(r#"data-act="cancel""#), "{html}");
         assert_eq!(wait_words("soulseek"), "Soulseek isn't connected yet");
+        assert_eq!(wait_words("plugin_install"), "its source's plugin is still being installed");
         // a link's request that kept the files it could not import offers Import again for them
         let c = json!({ "id": 14, "kind": "url", "status": "completed", "title": "Mix", "created_at": 0, "has_files": true,
             "message": "Downloaded 1 of 2 file(s) – the rest could not be imported: …" });
@@ -847,6 +968,90 @@ The audio sounds like Diase – Sun, not Moonlight Shadow (nightcore)
         p["message"] = json!("The audio sounds like Diase – Sun, not Moonlight Shadow (nightcore)");
         let html = request_row(&p, true);
         assert!(html.contains("10 attempts</span> ·") && html.contains("via ytdlp</span>\n") && !html.contains("via ytdlp</span> ·"), "{html}");
+    }
+
+    #[test]
+    fn a_request_waiting_for_the_downloads_folder_says_so() {
+        let mut r = json!({ "id": 21, "kind": "album", "status": "waiting", "title": "Illuminate EP", "artist": "Duumu", "album": "Illuminate EP", "created_at": 0,
+            "attempts": 1, "source": "torznab", "message": "Waiting for the downloads folder – /downloads/torrents is missing", "wait_reason": "waiting_disk",
+            "next_try_at": null, "has_files": false });
+        assert_eq!(request_badge(&r), r#"<span class="badge warn">Waiting for the downloads folder</span>"#);
+        let html = request_row(&r, true);
+        assert!(html.contains(r#"<span class="badge warn">Waiting for the downloads folder</span>"#), "{html}");
+        assert!(html.contains("Waiting for the downloads folder – /downloads/torrents is missing"), "{html}");
+        let text = request_text(&r, "0.33.0", &|_| "date".to_string());
+        assert!(text.contains("Status: Waiting – the downloads folder can't be written now"), "{text}");
+        assert!(!text.contains("Next try"), "no time: it goes on when the probe passes – {text}");
+        // other waits keep the plain badge
+        r["wait_reason"] = json!("soulseek");
+        assert_eq!(request_badge(&r), status_badge("waiting"));
+    }
+
+    /// A row of GET /api/requests waiting in the streamrip line (Download now, Oct 21).
+    fn in_line_row() -> Value {
+        json!({ "id": 31, "kind": "album", "status": "queued", "title": "Illuminate EP", "artist": "Duumu", "album": "Illuminate EP", "source": "streamrip",
+            "created_at": 0, "attempts": 1, "message": "2nd in line for Deezer", "has_files": false,
+            "can_download_now": true, "download_now": { "act": "line", "title": "Go first in line for Deezer", "until": null },
+            "line": { "source": "streamrip", "label": "Deezer", "position": 2, "waiting": 5, "running": 1, "limit": 1, "limit_text": "1 download at a time",
+                      "first": false, "text": "2nd in line for Deezer" },
+            "remote_queue": null, "stalled_since": null, "pressed": null })
+    }
+
+    #[test]
+    fn download_now_only_where_the_server_offers_it() {
+        let r = in_line_row();
+        let html = request_row(&r, false);
+        let button = r#"<button class="btn sm" data-act="download-now" title="Go first in line for Deezer">"#;
+        assert!(html.contains(button) && html.contains("Download now</button>"), "{html}");
+        // before Cancel
+        assert!(html.find(button).unwrap() < html.find(r#"data-act="cancel""#).unwrap(), "{html}");
+        assert!(html.contains("2nd in line for Deezer"), "the server's message: {html}");
+        // the server doesn't offer it, or an older server says nothing: no button
+        let mut no = r.clone();
+        no["can_download_now"] = json!(false);
+        no["download_now"] = Value::Null;
+        assert!(!request_row(&no, false).contains("download-now"));
+        let mut old = r.clone();
+        old.as_object_mut().unwrap().retain(|k, _| !["can_download_now", "download_now", "line", "remote_queue", "stalled_since", "pressed"].contains(&k.as_str()));
+        assert!(!request_row(&old, true).contains("download-now"));
+        // the title is the server's (it says what pressing does)
+        let mut sw = r.clone();
+        sw["download_now"] = json!({ "act": "switch", "title": "Switch to a user with a free upload slot – it is 12th in alice's queue" });
+        assert!(request_row(&sw, true).contains(r#"title="Switch to a user with a free upload slot – it is 12th in alice&#39;s queue""#));
+        // the toast: ok when something changed or started, warn when nothing could be sooner
+        assert_eq!(download_now_kind(&json!({ "ok": true, "action": "line" })), "ok");
+        assert_eq!(download_now_kind(&json!({ "ok": false, "action": "later", "at": 1792500000 })), "warn");
+        assert!(DOWNLOAD_ALL_NOW_TITLE.contains("never more at once than each source allows"));
+        // the toast is the server's words; without them a press that started something says so, one that changed
+        // nothing says nothing (as the phone and the desktop)
+        assert_eq!(download_now_toast(&json!({ "ok": true, "action": "line", "text": "Next in line for Deezer (1 download at a time)" })),
+            Some(("Next in line for Deezer (1 download at a time)".to_string(), "ok")));
+        assert_eq!(download_now_toast(&json!({ "ok": false, "action": "kept", "text": "No one with a free upload slot has it – it stays 12th in alice's queue" })),
+            Some(("No one with a free upload slot has it – it stays 12th in alice's queue".to_string(), "warn")));
+        assert_eq!(download_now_toast(&json!({ "ok": true, "action": "now" })), Some(("Starting now".to_string(), "ok")));
+        assert_eq!(download_now_toast(&json!({ "ok": false, "action": "later", "text": " " })), None);
+        assert_eq!(download_all_now_toast(&json!({ "ok": true, "pressed": 2, "woken": 1, "text": "Woke 1 waiting request" })), ("Woke 1 waiting request".to_string(), "ok"));
+        assert_eq!(download_all_now_toast(&json!({ "ok": false, "pressed": 0, "woken": 0 })),
+            ("Nothing is waiting – every request is downloading or done".to_string(), "warn"));
+        assert_eq!(download_all_now_toast(&json!({ "ok": true })), ("Starting now".to_string(), "ok"));
+    }
+
+    #[test]
+    fn request_text_has_the_line_the_queue_and_the_press() {
+        let mut r = in_line_row();
+        r["pressed"] = json!({ "by": "carol", "at": 1792500300.0 });
+        let t = request_text(&r, "0.33.0", &date);
+        assert!(t.contains("\nIn line: 2nd in line for Deezer (1 download at a time)\n"), "{t}");
+        assert!(t.contains("\nDownload now: asked by carol at <1792500300>\n"), "{t}");
+        assert!(!t.contains("Soulseek queue") && !t.contains("No progress since"), "{t}");
+        let q = json!({ "id": 32, "kind": "album", "status": "downloading", "title": "Illuminate EP", "artist": "Duumu", "created_at": 0, "attempts": 1,
+            "message": "Queued by alice – 12th in their queue, 0/12 files", "remote_queue": { "user": "alice", "place": 12, "since": 1792500000.0, "text": "12th in alice's upload queue" },
+            "stalled_since": null, "line": null, "pressed": null });
+        let t = request_text(&q, "", &date);
+        assert!(t.contains("\nSoulseek queue: 12th in alice's upload queue (since <1792500000>)\n"), "{t}");
+        let s = json!({ "id": 33, "kind": "album", "status": "downloading", "title": "Rodeo", "artist": "Travis Scott", "created_at": 0, "attempts": 1,
+            "message": "qBittorrent: stalled", "stalled_since": 1792499000.0 });
+        assert!(request_text(&s, "", &date).contains("\nNo progress since: <1792499000>\n"));
     }
 
     #[test]

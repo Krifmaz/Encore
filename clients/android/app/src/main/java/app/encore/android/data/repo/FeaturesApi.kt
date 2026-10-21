@@ -301,6 +301,23 @@ class FeaturesApi(private val api: EncoreApi, private val client: OkHttpClient) 
         return RetryFailedResult(o?.int("retried") ?: 0, o?.int("skipped") ?: 0, o?.str("why") ?: "")
     }
 
+    /**
+     * POST /api/requests/{id}/download-now (the request's owner or an admin): it goes first in its source's line, a
+     * wait is tried now, a Soulseek download queued at a user switches to one with a free upload slot, or a torrent
+     * with no progress goes to the next source – never past a source's limit. The 200 answer says what happened (its
+     * `text` is the toast, `ok` false when nothing could be sooner); a refusal (403, 404, 409) comes back as the
+     * server's `detail` ("It is searching now").
+     */
+    fun downloadNow(id: Long): DownloadNowResult = postObject("/api/requests/$id/download-now").page(DownloadNowResult.serializer())
+
+    /**
+     * POST /api/requests/download-now {mine} (admins, Download all now): every waiting request is woken and every
+     * request in a line moves up (with `mine`, the admin's own first) – never more at once than each source allows.
+     */
+    fun downloadAllNow(mine: Boolean): DownloadAllNowResult =
+        (call("POST", "/api/requests/download-now", buildJsonObject { put("mine", mine) }) as? JsonObject ?: JsonObject(emptyMap()))
+            .page(DownloadAllNowResult.serializer())
+
     /** How many requests wait for an admin's approval (the web's sidebar count: GET /api/requests?status=pending). */
     fun pendingCount(): Int = call("GET", "/api/requests?status=pending&limit=500", null).objects().size
 

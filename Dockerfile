@@ -56,7 +56,7 @@ ENV UV_PYTHON_INSTALL_DIR=/opt/python UV_NO_CACHE=1 UV_PYTHON_DOWNLOADS=never
 RUN python3 -m venv /opt/uv && /opt/uv/bin/pip install --no-cache-dir "uv==${UV_VERSION}" \
  && UV_PYTHON_DOWNLOADS=automatic /opt/uv/bin/uv python install 3.14 \
  && cd /opt/python && real="$(ls -d cpython-3.14.*-linux-*-gnu | grep -v '\.lock$' | sort -V | tail -1)" \
- && [ -x "$real/bin/python3.14" ] || { echo "Python 3.14 failed to install"; exit 1; } \
+ && [ -x "$real/bin/python3.14" ] || { echo "uv ${UV_VERSION} or Python 3.14 failed to install"; exit 1; } \
  && tail="${real#cpython-3.14.*-}" \
  && for n in $(seq 0 30); do [ -e "cpython-3.14.$n-$tail" ] || ln -s "$real" "cpython-3.14.$n-$tail"; done \
  && { [ -e "cpython-3.14-$tail" ] || ln -s "$real" "cpython-3.14-$tail"; } \

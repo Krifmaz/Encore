@@ -391,7 +391,7 @@ object SettingsRules {
     )
 
     /** The plain-text report of Copy report. */
-    fun diagnosticsReport(last: JsonObject, size: (Double) -> String): String {
+    fun diagnosticsReport(last: JsonObject, date: (Double) -> String = { "$it" }, size: (Double) -> String): String {
         val lines = arrayListOf("Encore ${jsStr(last, "version")} diagnostics (uid ${jsStr(last, "uid")})")
         for (e in last.arr("checks") ?: JsonArray(emptyList())) {
             val c = e as? JsonObject ?: continue
@@ -401,6 +401,7 @@ object SettingsRules {
             val body = if (truthy(c["body"]) && !ok) "\n     body: ${c.str("body").take(300)}" else ""
             lines.add("${if (ok) "OK  " else "FAIL"} ${jsStr(c, "name")} – ${c.str("request")}$status$ms\n     ${c.str("detail")}$body")
         }
+        lines.addAll(DownloadFolderRules.reportLines(last, date))
         last.obj("machine")?.let { m ->
             lines.add("")
             lines.add("Server:")

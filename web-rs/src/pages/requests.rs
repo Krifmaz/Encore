@@ -23,20 +23,11 @@ pub fn render(view: Element, ctx: Ctx) -> PageFuture {
                 .map(|(k, l)| format!(r#"<button data-s="{k}" class="{}">{l}</button>"#, if *k == f.as_str() { "active" } else { "" }))
                 .collect()
         };
-        let controls = if admin {
-            format!(r#"<label class="switch"><input type="checkbox" id="mine"><i></i>Only mine</label>
-          <button class="btn sm" id="retry-failed" title="Queue every failed request again">{}Retry failed</button>
-          <button class="btn sm" id="clear">{}Clear finished</button>"#, icon("refresh"), icon("trash"))
-        } else if common::may_fix() {
-            format!(r#"<button class="btn sm" id="retry-failed" title="Queue every failed request again">{}Retry failed</button>"#, icon("refresh"))
-        } else {
-            // members without Fix their own downloads may not retry (the server answers "Ask an admin to retry")
-            String::new()
-        };
+        let controls = header_controls(admin, common::may_fix());
         dom::set_html(&view, &format!(r#"
     <div class="row wrap between" style="margin-bottom:18px">
       <div><h1>Requests</h1><div class="small muted" id="quota"></div></div>
-      <div class="row">
+      <div class="row wrap" style="gap:8px">
         {controls}
       </div>
     </div>
@@ -79,6 +70,11 @@ pub fn render(view: Element, ctx: Ctx) -> PageFuture {
                 dom::on(&btn, "click", move |_| clear_menu(&b, reload.clone(), mine.get()));
             }
         }
+        // Download all now (admins): every waiting request woken, the lines moved up (only mine with Only mine)
+        if let Some(btn) = dom::qs_in(&view, "#download-all-now") {
+            let (mine, reload) = (mine.clone(), reload.clone());
+            dom::on(&btn, "click", move |_| common::download_all_now(mine.get(), reload.clone()));
+        }
         // members have the button too (their own failed requests): it was only wired for admins
         if let Some(btn) = dom::qs_in(&view, "#retry-failed") {
             let (mine, reload) = (mine.clone(), reload.clone());
@@ -98,6 +94,21 @@ pub fn render(view: Element, ctx: Ctx) -> PageFuture {
         }
         Ok(())
     })
+}
+
+/// The buttons over the list: admins get Only mine, Retry failed, Download all now and Clear finished; members who
+/// may fix their downloads Retry failed (the others would only be told "Ask an admin to retry").
+fn header_controls(admin: bool, may_fix: bool) -> String {
+    if admin {
+        format!(r#"<label class="switch"><input type="checkbox" id="mine"><i></i>Only mine</label>
+          <button class="btn sm" id="retry-failed" title="Queue every failed request again">{}Retry failed</button>
+          <button class="btn sm" id="download-all-now" title="{}">{}Download all now</button>
+          <button class="btn sm" id="clear">{}Clear finished</button>"#, icon("refresh"), common::DOWNLOAD_ALL_NOW_TITLE, icon("download"), icon("trash"))
+    } else if may_fix {
+        format!(r#"<button class="btn sm" id="retry-failed" title="Queue every failed request again">{}Retry failed</button>"#, icon("refresh"))
+    } else {
+        String::new()
+    }
 }
 
 /// The JS `load`: fetch the rows for the current filter and render them into `#r-list`.
@@ -124,4 +135,21 @@ async fn load(list: &Element, filter: &str, mine: bool, admin: bool) -> Result<(
     };
     dom::set_html(list, &html);
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::header_controls;
+
+    /// Download all now is the admins' (the server answers "Admin only" to anyone else), beside Retry failed.
+    #[test]
+    fn download_all_now_is_for_admins() {
+        let admin = header_controls(true, true);
+        assert!(admin.contains(r#"id="download-all-now" title="Wake every waiting request and move requests up in their lines – never more at once than each source allows""#), "{admin}");
+        assert!(admin.contains("Download all now</button>"), "{admin}");
+        assert!(admin.find("retry-failed").unwrap() < admin.find("download-all-now").unwrap(), "beside Retry failed: {admin}");
+        assert!(!header_controls(false, true).contains("download-all-now"));
+        assert!(header_controls(false, true).contains("retry-failed"));
+        assert_eq!(header_controls(false, false), "");
+    }
 }

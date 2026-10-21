@@ -1273,6 +1273,12 @@ fn playlist_covers(st: &AppState, pl: &SharedPlaylist) -> ApiResult<Vec<(String,
     Ok(out)
 }
 
+/// Whether a shared playlist has a picture (a listed song with a cover): an entry for it asks for
+/// `/api/share/<token>/cover` only then, so a list without art draws its letter without a failed request.
+pub(super) fn playlist_has_cover(st: &AppState, pl: &SharedPlaylist) -> bool {
+    playlist_covers(st, pl).is_ok_and(|c| !c.is_empty())
+}
+
 /// A playlist link's picture: a mosaic of the first four album covers in list order, or with fewer, the
 /// first of them. None when no listed song has a cover (or nothing is listed). The playlist's own picture
 /// from where it was imported (a Spotify address) is never used: the viewer's browser would ask another

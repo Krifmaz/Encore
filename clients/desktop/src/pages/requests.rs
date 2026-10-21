@@ -3,7 +3,9 @@
 //! failed and Clear finished; the list reloads every 4 s. The rows, their buttons and menus
 //! live in `widgets::request_list` (the Downloader shares them), and so does the banner that says
 //! imports are paused while the library can't be written. "Active" includes waiting requests
-//! (the server's `status=active`).
+//! (the server's `status=active`). Admins also get Download all now beside Retry failed, on a
+//! server with Download now: every waiting request is woken and requests move up in their lines
+//! (with Only mine, the admin's own first) – never more at once than each source allows.
 
 use crate::api::ApiError;
 use crate::fmt;
@@ -153,10 +155,15 @@ pub fn view<'a>(state: &'a State, ctx: &Ctx<'a>) -> El<'a, Message> {
             request_list::retry_failed_btn(&state.list, "Queue every failed request again").map(Message::List),
         );
     }
+    // admins, on a server with Download now (its rows say whether it offers the button)
+    if state.admin && request_list::has_download_now(state.list.rows()) {
+        controls = controls.push(request_list::download_all_now_btn(&state.list).map(Message::List));
+    }
     if state.admin {
         controls = controls.push(request_list::clear_btn("Clear finished").map(Message::List));
     }
-    let head = row![title, space().width(Length::Fill), controls]
+    // the controls wrap onto a second line in a narrow window (four of them for an admin)
+    let head = row![title, space().width(Length::Fill), controls.wrap()]
         .align_y(Alignment::Center)
         .spacing(12);
     // "Head to Discover to request music."

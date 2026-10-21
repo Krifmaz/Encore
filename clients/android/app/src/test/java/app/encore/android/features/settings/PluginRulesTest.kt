@@ -145,6 +145,8 @@ class PluginRulesTest {
         assertNull(PluginRules.dotTone(obj("""{"installed":false}""")))
         assertEquals("", PluginRules.dotTone(off))
         assertEquals("ok", PluginRules.dotTone(obj("""{"installed":true,"enabled":true,"status":{"ok":true}}""")))
+        assertEquals("warn", PluginRules.dotTone(obj("""{"installed":true,"enabled":true,"status":{"ok":true,"signed_in":false}}""")))
+        assertEquals("ok", PluginRules.dotTone(obj("""{"installed":true,"enabled":true,"status":{"ok":true,"signed_in":true}}""")))
         assertEquals("err", PluginRules.dotTone(obj("""{"installed":true,"enabled":true,"status":{"ok":false}}""")))
         assertEquals("err", PluginRules.dotTone(obj("""{"installed":true,"enabled":true,"status":null,"last_error":"sha256 mismatch"}""")))
         assertEquals("", PluginRules.dotTone(obj("""{"installed":true,"enabled":true,"status":null}""")))

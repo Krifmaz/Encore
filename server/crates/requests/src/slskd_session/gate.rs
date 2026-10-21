@@ -2,10 +2,12 @@
 //! while the session is down, and 60 s of quiet when the server (or slskd) turns a search away.
 //!
 //! People go first: the request worker's searches line up behind one another before they wait for the
-//! turn, so a person's search waits at most for the search that is running (and gives up after 30 s).
+//! turn, so a person's search waits at most for the search that is running (and gives up after 30 s). The
+//! worker's line is the Soulseek line of [`crate::line::Lines`], keyed by request id: Download now moves a
+//! request to its front, and the Requests page says where each one stands ("2nd in line for Soulseek").
 use super::{clock, unix_at, Busy, NotConnected, Session};
 use crate::Ctx;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicI64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tokio::sync::{OwnedSemaphorePermit, Semaphore};
@@ -32,8 +34,6 @@ pub enum Who {
 pub(super) struct Limiter {
     /// the one search that may run
     turn: Arc<Semaphore>,
-    /// the worker's searches line up here first, so at most one of them stands in front of a person
-    line: Arc<Semaphore>,
     /// when the last search started
     last_start: Mutex<Option<Instant>>,
     /// searches waiting for the turn
@@ -42,7 +42,7 @@ pub(super) struct Limiter {
 
 impl Default for Limiter {
     fn default() -> Self {
-        Limiter { turn: Arc::new(Semaphore::new(1)), line: Arc::new(Semaphore::new(1)), last_start: Mutex::new(None), queued: Default::default() }
+        Limiter { turn: Arc::new(Semaphore::new(1)), last_start: Mutex::new(None), queued: Default::default() }
     }
 }
 
@@ -60,7 +60,8 @@ impl Limiter {
 /// lets the next one go).
 pub struct Turn {
     _turn: OwnedSemaphorePermit,
-    _line: Option<OwnedSemaphorePermit>,
+    /// the worker's slot of the Soulseek line (at most one worker search stands in front of a person)
+    _line: Option<crate::line::Slot>,
     /// a person's search starts by then or not at all (30 s after it asked)
     deadline: Option<Instant>,
 }
@@ -89,11 +90,15 @@ impl Drop for Queued {
     }
 }
 
+/// Searches of the worker made for no request (tests, older callers): a key of their own in the line.
+static ANON: AtomicI64 = AtomicI64::new(0);
+
 impl Session {
     /// Wait for the turn to search: never while the session is down (NotConnected at once), a person
     /// for at most 30 s (Busy) – counted from here to the moment the search is sent. The session is
-    /// looked at again once the turn is there.
-    pub async fn turn(&self, st: &impl Ctx, who: Who) -> anyhow::Result<Turn> {
+    /// looked at again once the turn is there. The worker's search for request `rid` waits in the Soulseek
+    /// line first: its row reads "In line for Soulseek" (status `queued`) while it does.
+    pub async fn turn(&self, st: &impl Ctx, who: Who, rid: Option<i64>) -> anyhow::Result<Turn> {
         let deadline = (who == Who::Person).then(|| Instant::now() + PERSON_WAIT);
         self.check(st).await?;
         if let Some(d) = deadline {
@@ -110,7 +115,18 @@ impl Session {
             let _q = Queued::new(&g.queued);
             match deadline {
                 None => {
-                    let line = g.line.clone().acquire_owned().await?;
+                    let lines = &st.requests().lines;
+                    let key = rid.unwrap_or_else(|| -1 - ANON.fetch_add(1, Ordering::SeqCst));
+                    let mut waited = false;
+                    let line = lines.soulseek.acquire(key, crate::line::SOULSEEK_LABEL, &lines.pressed, || {
+                        waited = true;
+                        if let Some(id) = rid {
+                            crate::worker::now::in_line_row(st, id, crate::line::SOULSEEK_LABEL);
+                        }
+                    }).await;
+                    if let (true, Some(id)) = (waited, rid) {
+                        crate::worker::now::left_line_row(st, id, "searching", "Waiting for another Soulseek search…");
+                    }
                     let turn = g.turn.clone().acquire_owned().await?;
                     Turn { _turn: turn, _line: Some(line), deadline: None }
                 }

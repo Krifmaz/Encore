@@ -107,7 +107,7 @@ pub async fn poll(st: &impl Ctx, hash: &str) -> anyhow::Result<Poll> {
     } else {
         format!("Transmission: {speed:.1} MB/s")
     };
-    Ok(Poll::Progress(pct, msg))
+    Ok(if status == 1 || status == 2 { Poll::Busy(pct, msg) } else { Poll::Progress(pct, msg) })
 }
 
 pub async fn remove(st: &impl Ctx, hash: &str) {

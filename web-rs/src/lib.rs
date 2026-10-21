@@ -13,6 +13,7 @@ pub mod details;
 pub mod dom;
 pub mod group;
 pub mod json;
+pub mod notice;
 pub mod num;
 pub mod offline;
 pub mod pages;

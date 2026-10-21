@@ -13,8 +13,16 @@
 //! `anyway` – **Keep anyway** (import the kept file without the check) or **Download anyway**
 //! (the file is gone: ask the same source for it again without the check), on the row and in
 //! the details dialog ([`anyway`]).
+//!
+//! And **Download now** (Oct 21, the owner: "for the que can i get a download now button"): the
+//! server says on each row whether it offers the button (`can_download_now`) and what it does
+//! (`download_now.title`, the tooltip) – go first in the source's line, try a wait now, switch a
+//! Soulseek download queued at a user to one with a free upload slot, or give up a torrent with no
+//! progress for the next source; never past a source's limit or a ban. The answer's words are the
+//! toast. Admins get **Download all now** on the Requests page ([`download_all_now_btn`]), and the
+//! details name the line, the Soulseek queue, a download with no progress and the press
+//! ([`download_now_facts`]).
 
-use super::catalog::status_badge;
 use super::{
     badge, btn_sm, confirm, icon, icon_btn, picker, pop_menu, small_muted, t, tip_box, El, Icon, MenuItem,
 };
@@ -306,14 +314,153 @@ pub fn rejected_lines(r: &Value) -> Vec<String> {
     out
 }
 
+/// Download now: the server offers the button on this row (`can_download_now`; an older server
+/// sends no such field: no button).
+pub fn can_download_now(r: &Value) -> bool {
+    r["can_download_now"].as_bool() == Some(true)
+}
+
+/// The server has Download now (its rows carry `can_download_now`, an older server's don't):
+/// admins get Download all now.
+pub fn has_download_now(rows: &[Value]) -> bool {
+    rows.iter().any(|r| r.get("can_download_now").is_some_and(|v| !v.is_null()))
+}
+
+/// What Download now does on this row, in the server's words ("Go first in line for Deezer"): the
+/// button's tooltip. "" when it isn't offered.
+pub fn download_now_title(r: &Value) -> String {
+    if can_download_now(r) {
+        fmt::s(&r["download_now"], "title").trim().to_string()
+    } else {
+        String::new()
+    }
+}
+
+/// What the toast says when the server answered a press without words.
+pub const STARTING_NOW: &str = "Starting now";
+
+/// Download all now with nothing to do (the server's words).
+pub const NOTHING_WAITING: &str = "Nothing is waiting – every request is downloading or done";
+
+/// The tooltip of the admin's Download all now.
+pub const DOWNLOAD_ALL_NOW_HELP: &str =
+    "Wake every waiting request and move requests up in their lines – never more at once than each source allows";
+
+/// The toast after Download now: (good news, the server's words). `ok` false means nothing could
+/// be sooner ("Soulseek asked Encore to wait – next attempt at 14:20"): a warning. None when such
+/// an answer came without words.
+pub fn download_now_toast(v: &Value) -> Option<(bool, String)> {
+    let ok = v["ok"].as_bool() == Some(true);
+    let text = fmt::s(v, "text").trim().to_string();
+    if text.is_empty() {
+        return ok.then(|| (true, STARTING_NOW.to_string()));
+    }
+    Some((ok, text))
+}
+
+/// The toast after Download all now: (good news, the server's words); a warning when nothing
+/// was waiting.
+pub fn download_all_now_toast(v: &Value) -> (bool, String) {
+    let ok = v["ok"].as_bool() == Some(true);
+    let text = fmt::s(v, "text").trim().to_string();
+    if !text.is_empty() {
+        return (ok, text);
+    }
+    (ok, if ok { STARTING_NOW } else { NOTHING_WAITING }.to_string())
+}
+
+/// The Download now lines of the details and Copy, as `(key, value)` – the web's and the phone's
+/// words: "In line: 2nd in line for Deezer (1 download at a time)", "Soulseek queue: 12th in
+/// alice's upload queue (since …)", "No progress since: …", "Download now: asked by carol at …"
+/// (times are UTC, as the rest of the details).
+pub fn download_now_facts(r: &Value) -> Vec<(&'static str, String)> {
+    let mut out = vec![];
+    let l = &r["line"];
+    let text = fmt::s(l, "text").trim().to_string();
+    if !text.is_empty() {
+        let limit = fmt::s(l, "limit_text").trim().to_string();
+        out.push(("In line", if limit.is_empty() { text } else { format!("{text} ({limit})") }));
+    }
+    let q = &r["remote_queue"];
+    let text = fmt::s(q, "text").trim().to_string();
+    if !text.is_empty() {
+        let since = fmt::f(q, "since");
+        out.push((
+            "Soulseek queue",
+            if since > 0.0 { format!("{text} (since {})", fmt::stamp(since)) } else { text },
+        ));
+    }
+    if fmt::f(r, "stalled_since") > 0.0 {
+        out.push(("No progress since", fmt::stamp(fmt::f(r, "stalled_since"))));
+    }
+    let p = &r["pressed"];
+    let (by, at) = (fmt::s(p, "by").trim().to_string(), fmt::f(p, "at"));
+    if !by.is_empty() || at > 0.0 {
+        let mut said = "asked".to_string();
+        if !by.is_empty() {
+            said.push_str(&format!(" by {by}"));
+        }
+        if at > 0.0 {
+            said.push_str(&format!(" at {}", fmt::stamp(at)));
+        }
+        out.push(("Download now", said));
+    }
+    out
+}
+
 /// The words for what a waiting request waits for (`wait_reason`), as the web says them.
 pub fn wait_words(reason: &str) -> &'static str {
     match reason {
         "soulseek" => "Soulseek isn't connected yet",
         "storage_import" => "the downloaded files are kept and the import waits for the storage",
         "storage_download" => "the download waits for the staging folder",
+        "waiting_disk" => "the downloads folder can't be written now",
+        "plugin_install" => "its source's plugin is still being installed",
         _ => "",
     }
+}
+
+/// The status of a request waiting for a downloads folder (`wait_reason` "waiting_disk", servers
+/// since 0.33), as the web's `WAITING_DISK`.
+pub const WAITING_DISK: &str = "Waiting for the downloads folder";
+
+/// A request row's badge: its status, and for a request waiting for a downloads folder that it
+/// is (the web's `request_badge`).
+pub fn row_status(r: &Value) -> (Badge, String) {
+    let status = fmt::s(r, "status");
+    if status == "waiting" && fmt::s(r, "wait_reason") == "waiting_disk" {
+        return (Badge::Warn, WAITING_DISK.to_string());
+    }
+    super::catalog::status_words(&status)
+}
+
+/// The banner's sentence for the download folders (`downloads` of `GET /api/requests/storage`,
+/// servers since 0.33): for admins, while a folder downloads are saved in can't be written.
+pub fn downloads_text(s: &Value, admin: bool) -> Option<String> {
+    let d = &s["downloads"];
+    (admin && d["ok"].as_bool() == Some(false) && fmt::truthy(d, "text")).then(|| fmt::s(d, "text"))
+}
+
+/// The toast after Check again, from the answer and the state before it: (whether it is good news, the words).
+/// Imports resumed only when they were paused; a downloads folder that can be written again says that, as the
+/// web's banner does; a check that still runs (a folder that doesn't answer) says so.
+pub fn check_toast(after: &Value, before: &Value) -> (bool, &'static str) {
+    if after["ok"].as_bool() == Some(false) {
+        (false, "Imports are still paused")
+    } else if after["downloads"]["ok"].as_bool() == Some(false) {
+        (false, "A downloads folder still can't be written")
+    } else if after["downloads"]["checking"].as_bool() == Some(true) {
+        (false, "Still checking the downloads folders")
+    } else if before["ok"].as_bool() == Some(false) {
+        (true, "Imports resumed")
+    } else {
+        (true, "The downloads folders can be written")
+    }
+}
+
+/// Imports are paused or a downloads folder fails: the storage state is asked for at every load.
+fn storage_failing(s: &Value) -> bool {
+    s["ok"].as_bool() == Some(false) || s["downloads"]["ok"].as_bool() == Some(false)
 }
 
 /// A request in plain text for the details dialog and its Copy, laid out as the web's
@@ -342,6 +489,10 @@ pub fn request_text(r: &Value, server_version: &str) -> String {
     add("Message", fmt::s(r, "message"));
     if status == "waiting" && fmt::f(r, "next_try_at") > 0.0 {
         add("Next try", fmt::stamp(fmt::f(r, "next_try_at")));
+    }
+    // Download now: the line, the Soulseek queue, no progress, the press
+    for (k, v) in download_now_facts(r) {
+        add(k, v);
     }
     add("Attempts", fmt::s(r, "attempts"));
     add("Source", fmt::s(r, "source"));
@@ -659,6 +810,8 @@ pub struct List {
     checking: bool,
     /// Loads since the page opened (the storage state goes with every eighth).
     storage_loads: u64,
+    /// Download all now is running.
+    downloading_all: bool,
 }
 
 #[derive(Clone, Debug)]
@@ -694,6 +847,12 @@ pub enum Msg {
     /// Check again (admins): probe the folders now.
     CheckStorage,
     Checked(Result<Value, ApiError>),
+    /// Download now on a request the server offers it for.
+    DownloadNow(i64),
+    DownloadedNow(i64, Result<Value, ApiError>),
+    /// Download all now (admins): wake every waiting request, move requests up in their lines.
+    DownloadAllNow,
+    DownloadedAllNow(Result<Value, ApiError>),
 }
 
 impl List {
@@ -709,6 +868,7 @@ impl List {
         self.storage = Value::Null;
         self.checking = false;
         self.storage_loads = 0;
+        self.downloading_all = false;
     }
 
     pub fn rows(&self) -> &[Value] {
@@ -729,7 +889,7 @@ impl List {
         let url = format!("/requests?{}", self.query);
         let rows = Task::perform(async move { api.get(&url).await }, move |r| Msg::Loaded(gen, r));
         self.storage_loads += 1;
-        if self.storage_loads % 8 != 1 && self.storage["ok"].as_bool() != Some(false) {
+        if self.storage_loads % 8 != 1 && !storage_failing(&self.storage) {
             return rows;
         }
         let api = ctx.api.clone();
@@ -998,16 +1158,57 @@ pub fn update(l: &mut List, msg: Msg, ctx: &mut Ctx) -> Task<Msg> {
             match r {
                 // when the folders can be written again the waiting imports resume: show them move
                 Ok(v) => {
-                    if v["ok"].as_bool() == Some(false) {
-                        ctx.toast_warn("Imports are still paused");
-                    } else {
-                        ctx.toast_ok("Imports resumed");
+                    match check_toast(&v, &l.storage) {
+                        (true, words) => ctx.toast_ok(words),
+                        (false, words) => ctx.toast_warn(words),
                     }
                     l.storage = v;
                     return l.load(ctx);
                 }
                 Err(e) => ctx.toast_err(e.message),
             }
+        }
+        Msg::DownloadNow(id) => {
+            if !l.row(id).is_some_and(can_download_now) || !l.busy.insert(id) {
+                return Task::none();
+            }
+            let api = ctx.api.clone();
+            let url = format!("/requests/{id}/download-now");
+            return Task::perform(async move { api.post_empty(&url).await }, move |r| Msg::DownloadedNow(id, r));
+        }
+        Msg::DownloadedNow(id, r) => {
+            l.busy.remove(&id);
+            match r {
+                Ok(v) => match download_now_toast(&v) {
+                    Some((true, words)) => ctx.toast_ok(words),
+                    Some((false, words)) => ctx.toast_warn(words),
+                    None => {}
+                },
+                // the server's words ("It is searching now", "Not your request" …); the row then
+                // shows what it offers now
+                Err(e) => ctx.toast_err(e.message),
+            }
+            return l.load(ctx);
+        }
+        Msg::DownloadAllNow => {
+            if l.downloading_all {
+                return Task::none();
+            }
+            l.downloading_all = true;
+            let api = ctx.api.clone();
+            let body = json!({ "mine": l.mine });
+            return Task::perform(async move { api.post("/requests/download-now", body).await }, Msg::DownloadedAllNow);
+        }
+        Msg::DownloadedAllNow(r) => {
+            l.downloading_all = false;
+            match r {
+                Ok(v) => match download_all_now_toast(&v) {
+                    (true, words) => ctx.toast_ok(words),
+                    (false, words) => ctx.toast_warn(words),
+                },
+                Err(e) => ctx.toast_err(e.message),
+            }
+            return l.load(ctx);
         }
     }
     Task::none()
@@ -1087,7 +1288,8 @@ pub fn request_row<'a>(ctx: &Ctx<'a>, l: &List, r: &Value) -> El<'a, Msg> {
             .max_width(420),
         );
     }
-    let mut right = row![status_badge(&status)].spacing(6).align_y(Alignment::Center);
+    let (badge_kind, badge_words) = row_status(r);
+    let mut right = row![super::badge(badge_words, badge_kind)].spacing(6).align_y(Alignment::Center);
     if l.admin && status == "pending" {
         right = right.push(
             button(
@@ -1142,6 +1344,10 @@ pub fn request_row<'a>(ctx: &Ctx<'a>, l: &List, r: &Value) -> El<'a, Msg> {
     } else if can_retry(r, ctx.is_admin(), ctx.session.perm("fix")) {
         right = right.push(icon_btn(Icon::Refresh, "Retry", (!busy).then_some(Msg::Act(id, "retry"))));
     }
+    if can_download_now(r) {
+        // the server says what it does (go first in line, try the wait now, switch Soulseek users …)
+        right = right.push(download_now_btn(download_now_title(r), (!busy).then_some(Msg::DownloadNow(id))));
+    }
     if can_cancel(&status) {
         right = right.push(icon_btn(Icon::X, "Cancel", (!busy).then_some(Msg::Act(id, "cancel"))));
     }
@@ -1158,10 +1364,15 @@ pub fn request_row<'a>(ctx: &Ctx<'a>, l: &List, r: &Value) -> El<'a, Msg> {
 
 /// The banner over a request list while imports are paused (`GET /api/requests/storage`): for
 /// admins the folder, the operation and the error with Check again; for everyone else that the
-/// downloads are kept. None while imports go on.
+/// downloads are kept. Admins also read when a folder downloads are saved in can't be written
+/// ([`downloads_text`]). None while imports go on and every folder can be written.
 pub fn storage_banner<'a>(ctx: &Ctx<'a>, l: &List) -> Option<El<'a, Msg>> {
     let admin = ctx.is_admin();
-    let text = storage_text(&l.storage, admin)?;
+    let texts: Vec<String> = [storage_text(&l.storage, admin), downloads_text(&l.storage, admin)].into_iter().flatten().collect();
+    if texts.is_empty() {
+        return None;
+    }
+    let text = texts.join("\n");
     let p = ctx.look;
     let mut r = row![
         icon(Icon::Download, 18.0, p.warn),
@@ -1177,6 +1388,23 @@ pub fn storage_banner<'a>(ctx: &Ctx<'a>, l: &List) -> Option<El<'a, Msg>> {
         ));
     }
     Some(container(r).padding([12, 16]).width(Length::Fill).style(theme::warn_box).into())
+}
+
+/// The row's Download now, with what it does as its tooltip (`on` None while busy).
+pub fn download_now_btn<'a, M: Clone + 'a>(title: String, on: Option<M>) -> El<'a, M> {
+    let p = theme::look();
+    let b = button(
+        row![icon(Icon::Download, 14.0, p.text), t("Download now").size(13).font(theme::semibold())]
+            .spacing(6)
+            .align_y(Alignment::Center),
+    )
+    .padding([6, 11])
+    .style(theme::btn(Btn::Default))
+    .on_press_maybe(on);
+    if title.is_empty() {
+        return b.into();
+    }
+    tooltip(b, tip_box_owned(title), tooltip::Position::Bottom).gap(4).into()
 }
 
 /// A tooltip box with an owned text.
@@ -1246,6 +1474,23 @@ pub fn retry_failed_btn<'a>(l: &List, tip: &'a str) -> El<'a, Msg> {
             (!l.retrying).then_some(Msg::RetryFailed),
         ),
         tip_box(tip),
+        tooltip::Position::Bottom,
+    )
+    .gap(4)
+    .into()
+}
+
+/// The admin's "Download all now" (the Requests page, beside Retry failed, on a server with
+/// Download now: [`has_download_now`]).
+pub fn download_all_now_btn<'a>(l: &List) -> El<'a, Msg> {
+    tooltip(
+        super::btn_icon(
+            Icon::Download,
+            "Download all now",
+            Btn::Default,
+            (!l.downloading_all).then_some(Msg::DownloadAllNow),
+        ),
+        tip_box(DOWNLOAD_ALL_NOW_HELP),
         tooltip::Position::Bottom,
     )
     .gap(4)
@@ -1416,6 +1661,7 @@ mod tests {
         assert!(!old.contains("Error:") && !old.contains("Log ("), "{old}");
         assert!(text.ends_with("Server version: 0.29.0"), "the same last line as the web's and the phone's: {text}");
         assert_eq!(wait_words("soulseek"), "Soulseek isn't connected yet");
+        assert_eq!(wait_words("plugin_install"), "its source's plugin is still being installed");
     }
 
     /// A song the audio check turned away (the server's answer, wf/r2-a.md).
@@ -1550,6 +1796,33 @@ The audio sounds like Diase – Sun, not Moonlight Shadow (nightcore)
         assert_eq!(candidate_line(&Value::Null), "");
     }
 
+    /// A request waiting for a downloads folder (servers since 0.33) says so on its badge and in its
+    /// details, and admins read the folder's sentence on the banner.
+    #[test]
+    fn a_request_waiting_for_the_downloads_folder() {
+        let mut r = json!({ "id": 21, "kind": "album", "status": "waiting", "title": "Illuminate EP", "artist": "Duumu", "album": "Illuminate EP",
+            "message": "Waiting for the downloads folder – /downloads/torrents is missing", "wait_reason": "waiting_disk", "next_try_at": null });
+        assert_eq!(row_status(&r), (Badge::Warn, "Waiting for the downloads folder".to_string()));
+        let text = request_text(&r, "0.33.0");
+        assert!(text.contains("Status: Waiting – the downloads folder can't be written now"), "{text}");
+        assert!(!text.contains("Next try"), "{text}");
+        r["wait_reason"] = json!("soulseek");
+        assert_eq!(row_status(&r), (Badge::Warn, "Waiting".to_string()));
+        let s = json!({ "ok": true, "downloads": { "ok": false, "text": "The downloads folder /downloads is read-only – check the disk (dmesg, fsck) or the mount" } });
+        assert_eq!(downloads_text(&s, true).as_deref(), Some("The downloads folder /downloads is read-only – check the disk (dmesg, fsck) or the mount"));
+        assert_eq!(downloads_text(&s, false), None, "members get no banner for it");
+        assert_eq!(downloads_text(&json!({ "ok": true, "downloads": { "ok": true } }), true), None);
+        assert_eq!(downloads_text(&json!({ "ok": true }), true), None, "an older server");
+        assert!(storage_failing(&s) && !storage_failing(&json!({ "ok": true, "downloads": { "ok": true } })));
+        // Check again on the downloads sentence: imports were never paused, so they don't "resume"
+        let fine = json!({ "ok": true, "downloads": { "ok": true } });
+        assert_eq!(check_toast(&fine, &s), (true, "The downloads folders can be written"));
+        assert_eq!(check_toast(&fine, &json!({ "ok": false, "downloads": { "ok": true } })), (true, "Imports resumed"));
+        assert_eq!(check_toast(&s, &s), (false, "A downloads folder still can't be written"));
+        assert_eq!(check_toast(&json!({ "ok": false }), &s), (false, "Imports are still paused"));
+        assert_eq!(check_toast(&json!({ "ok": true, "downloads": { "ok": true, "checking": true } }), &s), (false, "Still checking the downloads folders"));
+    }
+
     #[test]
     fn children_hang_under_their_parent() {
         let rows = vec![
@@ -1561,5 +1834,98 @@ The audio sounds like Diase – Sun, not Moonlight Shadow (nightcore)
         assert_eq!(t.len(), 2, "an orphan is a parent");
         assert_eq!(t[0].1.len(), 1);
         assert!(t[1].1.is_empty());
+    }
+
+    /// A request in the streamrip line that carol asked to download now (download-now.md §3.2).
+    fn in_line() -> Value {
+        json!({
+            "id": 12, "kind": "album", "status": "queued", "title": "Illuminate EP", "artist": "Duumu", "album": "Illuminate EP",
+            "source": "streamrip", "message": "2nd in line for Deezer", "attempts": 1, "username": "carol",
+            "can_download_now": true,
+            "download_now": { "act": "line", "title": "Go first in line for Deezer", "until": null },
+            "line": { "source": "streamrip", "label": "Deezer", "position": 2, "waiting": 5, "running": 1, "limit": 1,
+                      "limit_text": "1 download at a time", "first": false, "text": "2nd in line for Deezer" },
+            "remote_queue": null, "stalled_since": null,
+            "pressed": { "by": "carol", "at": 1_792_500_300.0 },
+        })
+    }
+
+    #[test]
+    fn download_now_only_where_the_server_offers_it() {
+        let r = in_line();
+        assert!(can_download_now(&r));
+        assert_eq!(download_now_title(&r), "Go first in line for Deezer");
+        // false: no button, no tooltip
+        let no = json!({ "id": 14, "status": "searching", "can_download_now": false, "download_now": null });
+        assert!(!can_download_now(&no));
+        assert_eq!(download_now_title(&no), "");
+        assert_eq!(download_now_title(&json!({ "can_download_now": false, "download_now": { "title": "Go first in line for Deezer" } })), "");
+        // an older server sends no such field: no button, and no Download all now
+        let old = json!({ "id": 15, "status": "queued" });
+        assert!(!can_download_now(&old));
+        assert!(!has_download_now(std::slice::from_ref(&old)));
+        assert!(!has_download_now(&[]));
+        assert!(!has_download_now(&[json!({ "id": 16, "can_download_now": null })]));
+        // a newer server: Download all now, even when no row offers its own button
+        assert!(has_download_now(&[old, no]));
+        // odd values: no button
+        assert!(!can_download_now(&json!({ "can_download_now": "yes" })));
+        // the row's message is the server's line text
+        assert_eq!(fmt::s(&r, "message"), "2nd in line for Deezer");
+    }
+
+    #[test]
+    fn download_now_toasts_are_the_servers_words() {
+        assert_eq!(
+            download_now_toast(&json!({ "ok": true, "action": "line", "text": "Next in line for Deezer (1 download at a time)", "status": "queued" })),
+            Some((true, "Next in line for Deezer (1 download at a time)".to_string()))
+        );
+        assert_eq!(
+            download_now_toast(&json!({ "ok": false, "action": "later", "at": 1_792_501_200, "status": "waiting",
+                "text": "Another Soulseek client logged in with this username – Encore tries again at 14:35" })),
+            Some((false, "Another Soulseek client logged in with this username – Encore tries again at 14:35".to_string()))
+        );
+        assert_eq!(
+            download_now_toast(&json!({ "ok": false, "action": "kept", "text": "No one with a free upload slot has it – it stays 12th in alice's queue" })),
+            Some((false, "No one with a free upload slot has it – it stays 12th in alice's queue".to_string()))
+        );
+        // without words: a press that started something says so; one that changed nothing says nothing
+        assert_eq!(download_now_toast(&json!({ "ok": true, "action": "now" })), Some((true, "Starting now".to_string())));
+        assert_eq!(download_now_toast(&json!({ "ok": false, "action": "later", "text": " " })), None);
+        // Download all now
+        let text = "Woke 3 waiting requests; 8 stay in line: Deezer 1 download at a time (6 in line), YouTube 2 downloads at a time (2 in line). Soulseek asked Encore to wait – next attempt at 14:20";
+        assert_eq!(download_all_now_toast(&json!({ "ok": true, "pressed": 8, "woken": 3, "later": 1, "lines": [], "text": text })), (true, text.to_string()));
+        assert_eq!(
+            download_all_now_toast(&json!({ "ok": false, "pressed": 0, "woken": 0, "later": 0, "lines": [], "text": "Nothing is waiting – every request is downloading or done" })),
+            (false, "Nothing is waiting – every request is downloading or done".to_string())
+        );
+        assert_eq!(download_all_now_toast(&json!({})), (false, NOTHING_WAITING.to_string()));
+    }
+
+    #[test]
+    fn request_text_has_the_line_the_queue_and_the_press() {
+        let text = request_text(&in_line(), "0.34.0");
+        let want = "\nMessage: 2nd in line for Deezer\nIn line: 2nd in line for Deezer (1 download at a time)\nDownload now: asked by carol at 2026-10-20 12:45 UTC\nAttempts: 1\n";
+        assert!(text.contains(want), "missing {want:?} in\n{text}");
+        // a Soulseek download queued at alice
+        let remote = json!({ "id": 13, "kind": "album", "status": "downloading", "can_download_now": true,
+            "remote_queue": { "user": "alice", "place": 12, "since": 1_792_500_000.0, "text": "12th in alice's upload queue" } });
+        assert_eq!(download_now_facts(&remote), vec![("Soulseek queue", "12th in alice's upload queue (since 2026-10-20 12:40 UTC)".to_string())]);
+        // its place unknown, no time
+        let unknown = json!({ "remote_queue": { "user": "alice", "place": null, "text": "in alice's upload queue" } });
+        assert_eq!(download_now_facts(&unknown), vec![("Soulseek queue", "in alice's upload queue".to_string())]);
+        // a torrent with no progress
+        let stalled = json!({ "id": 18, "kind": "track", "status": "downloading", "source": "torznab", "stalled_since": 1_792_499_000 });
+        assert!(request_text(&stalled, "").contains("\nNo progress since: 2026-10-20 12:23 UTC\n"));
+        // what is known of a press, and a line without its limit's words
+        let bare = json!({ "line": { "text": "Next in line for Soulseek" }, "pressed": { "by": "", "at": 1_792_500_300.0 } });
+        assert_eq!(
+            download_now_facts(&bare),
+            vec![("In line", "Next in line for Soulseek".to_string()), ("Download now", "asked at 2026-10-20 12:45 UTC".to_string())]
+        );
+        // nothing of it from an older server
+        let old = request_text(&json!({ "id": 3, "kind": "track", "title": "One", "status": "queued", "attempts": 1 }), "");
+        assert!(!old.contains("In line") && !old.contains("Download now") && !old.contains("No progress"), "{old}");
+        assert!(download_now_facts(&json!({ "line": null, "remote_queue": null, "pressed": null, "stalled_since": null })).is_empty());
     }
 }

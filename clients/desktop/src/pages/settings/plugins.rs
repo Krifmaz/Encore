@@ -289,7 +289,8 @@ pub fn status_words(c: &Value, acting: Option<&str>) -> Option<(&'static str, St
     }
 }
 
-/// The dot beside an installed plugin's name: "ok", "err" or "" (off, or not known yet).
+/// The dot beside an installed plugin's name: "ok", "err", "warn" (it works but needs setting up: not signed in,
+/// no address yet – `status.signed_in` false) or "" (off, or not known yet).
 pub fn dot_tone(c: &Value) -> &'static str {
     if !fmt::truthy(c, "installed") || !fmt::truthy(c, "enabled") {
         return "";
@@ -297,6 +298,8 @@ pub fn dot_tone(c: &Value) -> &'static str {
     let st = &c["status"];
     if fmt::truthy(c, "last_error") || (st.is_object() && !fmt::truthy(st, "ok")) {
         "err"
+    } else if st["signed_in"] == json!(false) {
+        "warn"
     } else if fmt::truthy(st, "ok") {
         "ok"
     } else {
@@ -2183,6 +2186,9 @@ mod tests {
         c["status"] = json!({ "ok": true, "message": "yt-dlp 2026.10.14" });
         assert_eq!(status_words(&c, None), Some(("ok", "yt-dlp 2026.10.14".to_string())));
         assert_eq!(dot_tone(&c), "ok");
+        c["status"] = json!({ "ok": true, "signed_in": false, "message": "Jellyfin needs its address (Settings → Integrations)" });
+        assert_eq!(dot_tone(&c), "warn", "works, but needs setting up");
+        c["status"] = json!({ "ok": true, "message": "yt-dlp 2026.10.14" });
         c["enabled"] = json!(false);
         assert_eq!(status_words(&c, None).unwrap().1, "Disabled – Encore does not use it until you enable it again");
         assert_eq!(dot_tone(&c), "");

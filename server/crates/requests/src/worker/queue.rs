@@ -14,6 +14,8 @@ pub async fn step<C: Ctx>(st: C, id: i64) {
     let res = match (status.as_str(), source.as_str()) {
         // waiting for the storage: the import (or the staging folder's source step) again once it's due
         ("waiting", _) if reason == storage::STORAGE_IMPORT || reason == storage::STORAGE_DOWNLOAD => storage::retry(&st, &mut r).await,
+        // waiting for a downloads folder: on once the probe finds it writable again
+        ("waiting", _) if reason == downloads::REASON => downloads::retry(&st, &mut r).await,
         // waiting for Soulseek: go on where it stopped (the Soulseek step is first in its sources; a picked
         // file starts over from its pick). A request parked by an older version is still `queued`.
         ("waiting", _) | ("queued", "slskd" | "slskd_lossless") if r.d["soulseek_wait"].is_object() && r.d["sources"].is_array() && !r.d["pick"].is_object() => next_source(&st, &mut r, "").await,
@@ -32,22 +34,28 @@ pub async fn step<C: Ctx>(st: C, id: i64) {
         _ => Ok(()), // searching/importing: handled inside a running task; stale ones are reset on startup
     };
     if let Err(e) = res {
-        if e.is::<Cancelled>() {
-            return;
-        }
-        tracing::warn!("request {id}: {e:#}");
-        if let Some(mut r) = get(&st, id) {
-            if ACTIVE.contains(&r.s("status").as_str()) {
-                storage::register_roots(&st);
-                if let Some(se) = encore_core::fsx::storage(&e) {
-                    // a storage error that came this far (a download's folder): the step waits, it didn't fail
-                    let reason = if r.d["kept"].is_object() { storage::STORAGE_IMPORT } else { storage::STORAGE_DOWNLOAD };
-                    let _ = storage::wait_for_storage(&st, &mut r, se, reason);
-                } else if !r.s("source").is_empty() && r.d["sources"].is_array() {
-                    let _ = next_source(&st, &mut r, &format!("error: {}", encore_core::fsx::explain(&e))).await;
-                } else {
-                    fail(&st, &mut r, &encore_core::fsx::explain(&e)).await;
-                }
+        on_error(&st, id, e).await;
+    }
+}
+
+/// A step (or Download now's work in the request's place) ended with an error: a storage error waits for the
+/// storage, another goes on to the next source, or the request fails.
+pub(super) async fn on_error(st: &impl Ctx, id: i64, e: anyhow::Error) {
+    if e.is::<Cancelled>() {
+        return;
+    }
+    tracing::warn!("request {id}: {e:#}");
+    if let Some(mut r) = get(st, id) {
+        if ACTIVE.contains(&r.s("status").as_str()) {
+            storage::register_roots(st);
+            if let Some(se) = encore_core::fsx::storage(&e) {
+                // a storage error that came this far (a download's folder): the step waits, it didn't fail
+                let reason = if r.d["kept"].is_object() { storage::STORAGE_IMPORT } else { storage::STORAGE_DOWNLOAD };
+                let _ = storage::wait_for_storage(st, &mut r, se, reason);
+            } else if !r.s("source").is_empty() && r.d["sources"].is_array() {
+                let _ = next_source(st, &mut r, &format!("error: {}", encore_core::fsx::explain(&e))).await;
+            } else {
+                fail(st, &mut r, &encore_core::fsx::explain(&e)).await;
             }
         }
     }
@@ -60,7 +68,9 @@ pub async fn step<C: Ctx>(st: C, id: i64) {
 pub fn recover(st: &impl Ctx) {
     storage::register_roots(st);
     storage::recover(st);
-    for r in st.db().query("SELECT id, status, source, detail FROM requests WHERE status IN ('searching','importing','downloading')", p![]).unwrap_or_default() {
+    // (a request that waited in a source's line reads `queued` with `detail.in_line`: it starts over too)
+    for r in st.db().query("SELECT id, status, source, detail FROM requests WHERE status IN ('searching','importing','downloading')
+                            OR (status='queued' AND json_extract(detail, '$.in_line') IS NOT NULL)", p![]).unwrap_or_default() {
         let client = ["slskd", "slskd_lossless", "torznab"].contains(&r.s("source").as_str());
         if r.s("status") == "downloading" && client {
             continue;
@@ -93,6 +103,10 @@ pub async fn run<C: Ctx>(st: C) {
         let _ = rejected::tick(&st); // rejected downloads past their 7 days go, once an hour, not waited for
         let ids: Vec<i64> = st.db().query(&format!("SELECT id FROM requests WHERE status IN ({}) ORDER BY id", vec!["?"; ACTIVE.len()].join(",")),
             ACTIVE.iter().map(|s| json!(s)).collect()).unwrap_or_default().into_iter().map(|r| r.i("id")).collect();
+        // the download folders' probe: every minute while requests are active, started and not waited for
+        let _ = downloads::tick(&st, !ids.is_empty());
+        // Download now's presses last while their request is active
+        st.requests().lines.retain(&ids.iter().copied().collect());
         {
             let mut tasks = st.requests().tasks.0.lock().unwrap();
             tasks.retain(|_, h| !h.is_finished());
@@ -106,8 +120,49 @@ pub async fn run<C: Ctx>(st: C) {
         }
         crate::report::reconcile(&st); // reports whose replacement was cancelled get their song back
         let _ = st.db().execute("DELETE FROM sessions WHERE expires_at < ?", p![now()]);
-        tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+        // the next look in 5 s, or at once when Download now asks for it
+        let wake = st.requests().wake.clone();
+        tokio::select! {
+            _ = tokio::time::sleep(std::time::Duration::from_secs(5)) => {}
+            _ = wake.notified() => {}
+        }
     }
+}
+
+/// Wait up to `max` for request `id`'s running step to end (a step of a waiting or downloading request only
+/// looks and returns), then hold its place in the queue so no step starts on it while the caller writes
+/// (Download now). None: its step was still running after `max`.
+pub async fn hold_idle(st: &impl Ctx, id: i64, max: std::time::Duration) -> Option<Hold> {
+    let until = tokio::time::Instant::now() + max;
+    loop {
+        {
+            let mut tasks = st.requests().tasks.0.lock().unwrap_or_else(|p| p.into_inner());
+            if !tasks.get(&id).is_some_and(|h| !h.is_finished()) {
+                let h = tokio::spawn(std::future::pending::<()>()).abort_handle();
+                tasks.insert(id, h.clone());
+                return Some(Hold(Some(h)));
+            }
+        }
+        if tokio::time::Instant::now() >= until {
+            return None;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
+}
+
+/// Run `work` (the request's step, or what Download now does) as request `id`'s task now, in the place
+/// `hold` kept: a cancel stops it like any step, and the queue starts no other step for it meanwhile.
+pub fn take_turn<F>(st: &impl Ctx, id: i64, hold: Hold, work: F) -> tokio::task::JoinHandle<()>
+where
+    F: std::future::Future<Output = ()> + Send + 'static,
+{
+    let mut tasks = st.requests().tasks.0.lock().unwrap_or_else(|p| p.into_inner());
+    let h = tokio::spawn(work);
+    tasks.insert(id, h.abort_handle());
+    drop(tasks);
+    // the held place's own task ends; the map holds the new one
+    drop(hold);
+    h
 }
 
 /// Stop work on a request: a download in progress is cancelled in slskd / the download client, and

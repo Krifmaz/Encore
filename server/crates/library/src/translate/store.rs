@@ -1,31 +1,56 @@
 //! The translation cache: one row per (text, source language, target language). A row keeps what
-//! each source said – official (MusicBrainz, Apple) beats the model, field by field – and the manual
-//! correction beside it, which beats both and is never touched by the background work.
+//! each source said, field by field, with the source – official (MusicBrainz, Apple) beats the built-in
+//! romanization, which beats DeepL, which beats the model (the tier order of tiers.rs), and the built-in
+//! letter-by-letter romanization of Hebrew, Arabic, Thai and Devanagari only fills a gap – and the manual
+//! correction beside it, which beats them all and is never touched by the background work. Each source
+//! stamps the rows it looked at (official_at, romanized_at, deepl_at, model_at), so a source switched on
+//! later takes the rows it has not seen and replaces a weaker source's text.
 use super::script;
 use encore_db::{now, Db, RowExt};
 use encore_db::p;
 use serde_json::{json, Value};
 use std::collections::HashMap;
 
-/// Where a translation came from, weakest first.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+/// Where a translation came from, weakest first (a manual correction is kept apart and beats them all).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum Source {
+    /// the built-in romanization spelled letter by letter (romanize.rs: Hebrew, Arabic, Thai, Devanagari):
+    /// fills a romanization that is missing, and any other source replaces it
+    Letters,
+    /// the local model (llama.rs)
     Model,
+    /// DeepL (deepl.rs): translations only
+    Deepl,
+    /// the built-in romanization (romanize.rs): romanizations only
+    Romanized,
+    /// MusicBrainz and Apple (official.rs)
     Official,
 }
 
 impl Source {
+    pub const ALL: [Source; 5] = [Source::Letters, Source::Model, Source::Deepl, Source::Romanized, Source::Official];
+
     pub fn as_str(self) -> &'static str {
         match self {
+            Source::Letters => "letters",
             Source::Model => "model",
+            Source::Deepl => "deepl",
+            Source::Romanized => "romanized",
             Source::Official => "official",
         }
     }
     fn rank(s: &str) -> u8 {
-        match s {
-            "official" => 2,
-            "model" => 1,
-            _ => 0,
+        Source::ALL.iter().position(|x| x.as_str() == s).map(|i| i as u8 + 1).unwrap_or(0)
+    }
+    /// The column with the time this source last looked at a row.
+    fn stamp(self) -> &'static str {
+        match self {
+            Source::Model => "model_at",
+            // the built-in romanization's tier, as the tables'
+            Source::Letters => "romanized_at",
+            Source::Deepl => "deepl_at",
+            Source::Romanized => "romanized_at",
+            Source::Official => "official_at",
         }
     }
 }
@@ -43,7 +68,7 @@ pub fn key(text: &str) -> (String, &'static str) {
 pub struct Shown {
     pub translation: Option<String>,
     pub romanization: Option<String>,
-    /// official | model | manual (of the translation, or of the romanization when there is none)
+    /// official | romanized | letters | deepl | model | manual (of the translation, or of the romanization when there is none)
     pub source: String,
 }
 
@@ -67,7 +92,7 @@ pub fn put(db: &Db, text: &str, target: &str, kind: &str, translation: Option<&s
     let mine = Source::rank(source.as_str());
     let tr = translation.map(str::trim).filter(|x| !x.is_empty() && !script::same(x, &t)).filter(|_| mine >= Source::rank(&row.s("translation_source")));
     let ro = romanization.map(str::trim).filter(|x| !x.is_empty() && !script::same(x, &t)).filter(|_| mine >= Source::rank(&row.s("romanization_source")));
-    let stamp = if source == Source::Official { "official_at" } else { "model_at" };
+    let stamp = source.stamp();
     db.execute(
         &format!(
             "UPDATE translations SET
@@ -189,6 +214,56 @@ pub fn waiting_for_model(db: &Db, target: &str, limit: usize) -> Vec<(String, St
            AND manual_translation IS NULL AND (translation IS NULL OR romanization IS NULL) ORDER BY updated_at LIMIT ?",
         p![target, limit as i64],
     ).unwrap_or_default().into_iter().map(|r| (r.s("text"), r.s("kind"))).collect()
+}
+
+/// Rows of `target` that `source` has not looked at yet and that it may still improve, oldest first: (text,
+/// kind). Romanization: texts in a script it romanizes without a manual romanization. DeepL: song and album
+/// titles without a manual translation whose translation is missing or the model's. Official: any row.
+pub fn unseen(db: &Db, target: &str, source: Source, limit: usize) -> Vec<(String, String)> {
+    let what = match source {
+        Source::Romanized | Source::Letters => format!(
+            "romanized_at IS NULL AND manual_romanization IS NULL AND src_lang IN ({})",
+            super::romanize::SCRIPTS.iter().map(|s| format!("'{s}'")).collect::<Vec<_>>().join(",")
+        ),
+        Source::Deepl => "deepl_at IS NULL AND manual_translation IS NULL AND COALESCE(kind,'title') IN ('title','album')
+                          AND (translation IS NULL OR translation_source='model')".to_string(),
+        Source::Official => "official_at IS NULL".to_string(),
+        Source::Model => return waiting_for_model(db, target, limit),
+    };
+    db.query(
+        &format!("SELECT text, COALESCE(kind,'title') kind FROM translations WHERE target=? AND {what} ORDER BY updated_at LIMIT ?"),
+        p![target, limit as i64],
+    ).unwrap_or_default().into_iter().map(|r| (r.s("text"), r.s("kind"))).collect()
+}
+
+/// Of these texts, the ones whose translation `source` could still give: no correction by hand, and no
+/// translation yet or one from a weaker source (no row at all counts too).
+pub fn improvable(db: &Db, target: &str, texts: &[String], source: Source) -> std::collections::HashSet<String> {
+    let mut out: std::collections::HashSet<String> = texts.iter().map(|t| script::normalize(t)).filter(|t| !t.is_empty()).collect();
+    let keys: Vec<String> = out.iter().cloned().collect();
+    let mine = Source::rank(source.as_str());
+    for chunk in keys.chunks(400) {
+        let mut params = vec![json!(target)];
+        params.extend(chunk.iter().map(|t| json!(t)));
+        let sql = format!(
+            "SELECT text, translation, translation_source, manual_translation FROM translations WHERE target=? AND text IN ({})",
+            crate::artists::marks(chunk.len())
+        );
+        for r in db.query(&sql, params).unwrap_or_default() {
+            let manual = r.get("manual_translation").is_some_and(|v| v.is_string());
+            let has = !r.s("translation").is_empty();
+            if manual || (has && Source::rank(&r.s("translation_source")) >= mine) {
+                out.remove(&r.s("text"));
+            }
+        }
+    }
+    out
+}
+
+/// How many titles have a correction by hand (any language).
+pub fn manual_count(db: &Db) -> i64 {
+    db.one("SELECT COUNT(*) n FROM translations WHERE manual_translation IS NOT NULL OR manual_romanization IS NOT NULL", p![])
+        .ok().flatten().map(|r| r.i("n")).unwrap_or(0)
 }
 
 /// Counts for the status line: (rows, with something to show, waiting for the model).

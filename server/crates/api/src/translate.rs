@@ -58,21 +58,26 @@ async fn languages(User(_): User) -> Json<Value> {
     }))
 }
 
-/// Whether the Translator can run, and (for admins) how far the cache is.
+/// Whether the local model can run, which sources this server uses (`summary`, one line for everyone), and for
+/// admins how far the cache is and each source with its switch and state (`tiers`, strongest first).
 async fn status(State(st): State<AppState>, User(u): User) -> ApiResult<Json<Value>> {
     let admin = encore_config::perms::is_admin(&u);
     let st2 = st.clone();
-    let (ready, counts) = tokio::task::spawn_blocking(move || (llama::ready(&st2), store::counts(&st2.db))).await.map_err(|e| err(500, e.to_string()))?;
+    let (ready, counts, sources, summary) = tokio::task::spawn_blocking(move || {
+        (llama::ready(&st2), store::counts(&st2.db), admin.then(|| tiers::states(&st2)), tiers::summary(&st2))
+    }).await.map_err(|e| err(500, e.to_string()))?;
     let m = llama::model(&st);
     let mut out = json!({
         "translator": ready, "model": m.id, "running": llama::running(&st),
         "can_edit": auth::can(&st, &u, "translate"), "background": st.cfg.bool("translate_background"),
+        "summary": summary,
     });
     if admin {
         out["rows"] = json!(counts.0);
         out["shown"] = json!(counts.1);
         out["waiting"] = json!(counts.2);
         out["queued"] = json!(st.library.translator.queued());
+        out["tiers"] = json!(sources);
     }
     Ok(Json(out))
 }
@@ -144,7 +149,8 @@ async fn delete_entry(State(st): State<AppState>, User(u): User, Query(q): Query
     Ok(Json(out))
 }
 
-/// Start a pass now (Settings → Language after a change; Download tools after an install).
+/// Start a pass now (Settings → Language after a change or a source switched on; the Translator plugin wakes the
+/// worker itself after an install).
 async fn run_now(State(st): State<AppState>, User(_): User) -> Json<Value> {
     st.library.translator.wake();
     Json(json!({ "ok": true }))

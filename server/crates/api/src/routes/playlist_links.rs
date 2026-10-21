@@ -160,7 +160,8 @@ fn view(st: &AppState, row: &Row) -> ApiResult<(Value, Option<SharedPlaylist>)> 
             v["description"] = json!(pl.description);
             v["total"] = json!(n);
             v["matched"] = json!(n);
-            v["cover_url"] = if n > 0 { json!(format!("/api/share/{}/cover", row.s("source_url"))) } else { Value::Null };
+            // only when a listed song has a cover: the link's picture route answers 404 otherwise
+            v["cover_url"] = if n > 0 && super::library::playlist_has_cover(st, pl) { json!(format!("/api/share/{}/cover", row.s("source_url"))) } else { Value::Null };
             v["linked"] = json!({ "owner": pl.owner, "active": true, "liked": pl.liked });
         }
         None => {
@@ -261,7 +262,8 @@ pub(super) fn add_link(st: &AppState, u: &Row, token: &str) -> ApiResult<Value> 
     }))?;
     if added {
         // the owner sees how many people added it, never who: an admin who shares reads this log too
-        st.db.log("info", &format!("Someone added {}'s playlist '{name}' to their playlists", pl.owner));
+        let what = if pl.liked { format!("{}'s Liked Songs", pl.owner) } else { format!("{}'s playlist '{name}'", pl.owner) };
+        st.db.log("info", &format!("Someone added {what} to their playlists"));
     }
     Ok(json!({ "id": id, "name": name, "added": added }))
 }

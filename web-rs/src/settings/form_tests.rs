@@ -151,7 +151,7 @@ const NAV: &[(&str, &str)] = &[
 /// then shows Account, or General for about/api/keys).
 const LINKS: &[(&str, &str)] = &[
     ("general", "general"), ("grouplisten", "general"), ("apps", "downloads"), ("downloads", "downloads"), ("tagging", "library"), ("services", "integrations"),
-    ("library", "library"), ("verify", "library"),
+    ("library", "library"), ("verify", "library"), ("translations", "library"),
     ("pipeline", "downloads"), ("releases", "downloads"), ("streamrip", "plugins"), ("torznab", "plugins"), ("slskd", "plugins"),
     ("ytdlp", "plugins"), ("youtube", "plugins"),
     ("integrations", "integrations"), ("spotify", "integrations"), ("media", "integrations"), ("roon", "integrations"),

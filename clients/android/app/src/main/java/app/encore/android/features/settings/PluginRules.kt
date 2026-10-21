@@ -251,6 +251,8 @@ object PluginRules {
         return when {
             !c.bool("enabled") -> ""
             c.str("last_error").isNotEmpty() || (st != null && !st.bool("ok")) -> "err"
+            // it works but needs setting up (not signed in, no address yet)
+            (st?.get("signed_in") as? JsonPrimitive)?.let { !it.isString && it.content == "false" } == true -> "warn"
             st != null && st.bool("ok") -> "ok"
             else -> ""
         }

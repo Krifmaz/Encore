@@ -161,7 +161,7 @@ async fn eio_on_the_move_into_the_library_waits_with_the_files_kept() {
     user(&st, "plain-eio", "user");
     let plain = login(&app, "plain-eio").await;
     let (_, s, _) = call(&app, "GET", "/api/requests/storage", &plain, None).await;
-    assert_eq!(s, json!({ "ok": false, "since": s["since"], "text": storage::PLAIN_BANNER }));
+    assert_eq!(s, json!({ "ok": false, "since": s["since"], "text": storage::PLAIN_BANNER, "downloads": { "ok": true } }));
 
     // nothing happens before its next try
     let at = st.db.one("SELECT updated_at FROM requests WHERE id=?", p![id]).unwrap().unwrap().f("updated_at");

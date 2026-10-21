@@ -53,7 +53,6 @@ import app.encore.android.ui.components.SmallButton
 import app.encore.android.ui.components.Toasts
 import app.encore.android.ui.screens.Spinner
 import app.encore.android.ui.theme.Appearance
-import app.encore.android.ui.theme.EncoreColors
 import app.encore.android.ui.theme.palette
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
@@ -185,8 +184,8 @@ private fun SubHead(text: String) {
 
 /**
  * Settings → Language (web-rs/src/pages/translate.rs render_language): how titles in another script show (the
- * server's modes) and into which language, saved to the account (`translate_mode`, `translate_lang`); the
- * Translator's state under it.
+ * server's modes) and into which language, saved to the account (`translate_mode`, `translate_lang`); which sources
+ * the server uses under it, and for admins each source with its state and switch (the server's `tiers`).
  */
 @Composable
 fun LanguageScreen(nav: Nav, onBack: () -> Unit) {
@@ -231,6 +230,21 @@ fun LanguageScreen(nav: Nav, onBack: () -> Unit) {
             }
         }
     }
+    // an admin switched a source on or off: saved as a server setting, then the states are read again
+    fun switchTier(key: String, on: Boolean) {
+        scope.launch {
+            try {
+                withContext(Dispatchers.IO) { api.putSettings(JsonObject(mapOf(key to JsonPrimitive(on)))) }
+                scope.launch { try { withContext(Dispatchers.IO) { api.translateRun() } } catch (e: CancellationException) { throw e } catch (_: Exception) {} }
+                Toasts.show("Saved", "ok")
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                Toasts.show(e.message ?: "Something went wrong", "err")
+            }
+            version += 1
+        }
+    }
     SettingsPage("Language", onBack) {
         val o = opts
         if (o == null) {
@@ -243,24 +257,35 @@ fun LanguageScreen(nav: Nav, onBack: () -> Unit) {
             SubHead("Translated titles")
             SegRow(o.arr("modes").objectsOf().map { it.str("id") to it.str("label") }, mode) { save("translate_mode", it) }
             Dropdown("Translate into", o.arr("languages").objectsOf().map { it.str("code") to it.str("name") }, lang, enabled = mode != "off") { save("translate_lang", it) }
-            Muted("Official translations come first (MusicBrainz and Apple, where the label published one); the rest come from the Translator on this server. Titles on your screen are translated first, the rest of the library in the background. Fix any title with ⋯ → Edit translation (on the website).")
+            // the phone has no edit dialog: the correction is made on this server's website
+            val site = nav.graph.store.current?.server?.trim()?.trimEnd('/').orEmpty()
+            val where = if (site.isEmpty()) "." else " at $site."
+            Muted("Corrections by hand come first, then official names (MusicBrainz and Apple, where the label published one), romanization made on this server, then DeepL and the local model where an admin set them up. Titles on your screen are translated first, the rest of the library in the background. Fix any title with ⋯ → Edit translation$where")
             val st = status
             if (st != null) {
-                val t = st["translator"] as? JsonPrimitive
-                if (t != null && !t.isString && t.content == "false") {
-                    Text(
-                        "The Translator is not installed on this server, so only official translations show. An admin can install it under Settings → Plugins.",
-                        style = MaterialTheme.typography.bodySmall,
-                        color = EncoreColors.Warn,
-                    )
+                // which sources this server uses (the server's words)
+                if (st.str("summary").isNotEmpty()) Muted(st.str("summary"))
+                LanguageRules.counts(st)?.let { Muted(it, color = MaterialTheme.palette.faint) }
+            }
+        }
+        // admins: the sources of translated titles, strongest first, each with its state and its switch
+        val tiers = status?.arr("tiers").objectsOf()
+        if (tiers.isNotEmpty()) {
+            SetCard {
+                Text("Translation sources", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold)
+                Muted("Strongest first: a source higher up wins over the ones below it, and its results replace theirs when it gets to a title later.")
+                for (tier in tiers) {
+                    val key = tier.str("setting")
+                    if (key.isEmpty()) {
+                        Column(Modifier.padding(vertical = 4.dp)) {
+                            Text(tier.str("state"), style = MaterialTheme.typography.bodyMedium)
+                            Muted(tier.str("help"))
+                        }
+                    } else {
+                        SwitchRow(tier.str("state"), tier.bool("on"), help = tier.str("help")) { on -> switchTier(key, on) }
+                    }
                 }
-                if (!SettingsRules.nullish(st, "rows")) {
-                    Muted(
-                        "${st.str("shown").ifEmpty { "0" }} of ${st.str("rows")} titles have a translation · ${st.str("waiting").ifEmpty { "0" }} waiting for the Translator" +
-                            if (st.bool("running")) " · running now" else "",
-                        color = MaterialTheme.palette.faint,
-                    )
-                }
+                Muted("The DeepL API key and the monthly limit are under Settings → Library → Translated titles.")
             }
         }
     }

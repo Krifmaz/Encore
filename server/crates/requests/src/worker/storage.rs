@@ -51,6 +51,8 @@ pub struct Health {
     checking: Arc<Mutex<()>>,
     /// the 10-minute look is running (the worker's loop starts it and goes on)
     ticking: Arc<std::sync::atomic::AtomicBool>,
+    /// the download folders' probe every minute ([`super::downloads`])
+    pub(super) downloads: Arc<super::downloads::Roots>,
 }
 
 #[derive(Default)]
@@ -163,10 +165,11 @@ fn save(st: &impl Ctx, h: &HealthState) {
 
 /// The folders Encore downloads into or imports to, registered with [`fsx::roots`] so a storage error on
 /// them reads as one: the library and the extra library folders, the staging folder, Soulseek's and the
-/// download clients' folders.
+/// download clients' folders, the blackhole folders.
 pub fn register_roots(st: &impl Ctx) {
     let mut roots: Vec<PathBuf> = ["library_path", "staging_path", "slskd_download_path", "qbit_download_path", "transmission_download_path",
-        "deluge_download_path", "rtorrent_download_path", "sab_download_path", "nzbget_download_path"]
+        "deluge_download_path", "rtorrent_download_path", "sab_download_path", "nzbget_download_path", "torrent_blackhole_watch",
+        "torrent_blackhole_completed", "nzb_blackhole_watch", "nzb_blackhole_completed"]
         .iter().map(|k| st.cfg().str(k)).filter(|s| !s.trim().is_empty()).map(PathBuf::from).collect();
     roots.extend(encore_library::folders::extra_folders(st.cfg()));
     roots.push(crate::slskd_managed::download_dir(st));
@@ -367,10 +370,18 @@ pub fn tick<C: Ctx>(st: &C) -> Option<tokio::task::JoinHandle<()>> {
     }))
 }
 
-/// Check again (`POST /api/requests/storage/check`): every folder probed now; the answer is the new state.
+/// Check again (`POST /api/requests/storage/check`): every folder probed now, the download folders too
+/// ([`super::downloads`]: a request waiting for one goes on at the queue's next look); the answer is the new
+/// state. A check that doesn't end (a network mount that stopped answering) is not waited for longer than
+/// 15 s: the answer then says a check still runs (`downloads.checking`), and the folder it waits on counts as
+/// failing after half a minute.
 pub async fn check_now<C: Ctx>(st: &C, admin: bool) -> Value {
     let s = st.clone();
-    let _ = tokio::task::spawn_blocking(move || health_check(&s, None, None, true, true)).await;
+    let check = tokio::task::spawn_blocking(move || {
+        let _ = health_check(&s, None, None, true, true);
+        super::downloads::probe_now(&s);
+    });
+    let _ = tokio::time::timeout(std::time::Duration::from_secs(15), check).await;
     status(st, admin)
 }
 
@@ -406,10 +417,18 @@ fn forget_stale(st: &impl Ctx, p: &Problem) -> bool {
 }
 
 /// `GET /api/requests/storage`. Admins: `{ok, since, checked_at, next_check_at, path, op, error, errno, step,
-/// waiting, text}` (`text`: "Imports are paused: /music is not writable – mkdir /music/.encore-probe-1-0:
+/// waiting, text, downloads}` (`text`: "Imports are paused: /music is not writable – mkdir /music/.encore-probe-1-0:
 /// Input/output error (os error 5). Checked 14:10, next check 14:20", null while ok). Everyone else:
-/// `{ok, since, text}` with the plain words. Times are unix seconds.
+/// `{ok, since, text, downloads}` with the plain words. `downloads`: the download folders' probe, the banner on
+/// every page ([`super::downloads::status`]). Times are unix seconds.
 pub fn status(st: &impl Ctx, admin: bool) -> Value {
+    let mut v = imports_status(st, admin);
+    v["downloads"] = super::downloads::status(st, admin);
+    v
+}
+
+/// [`status`] without the download folders.
+fn imports_status(st: &impl Ctx, admin: bool) -> Value {
     let h = lock(st);
     let (problem, checked_at) = (h.problem.clone(), h.checked_at);
     drop(h);
@@ -977,8 +996,8 @@ pub fn import_again(st: &impl Ctx, id: i64) -> Result<(), String> {
     if !matches!(status.as_str(), "failed" | "waiting" | "completed") {
         return Err("Only a failed or waiting import can be imported again".into());
     }
-    // a wait for Soulseek has nothing downloaded yet
-    if status == "waiting" && (r.d["wait"]["reason"] == SOULSEEK || r.d["wait"]["reason"] == PLUGIN_INSTALL) {
+    // a wait for Soulseek, for a plugin's install or for a downloads folder has nothing downloaded yet
+    if status == "waiting" && (r.d["wait"]["reason"] == SOULSEEK || r.d["wait"]["reason"] == PLUGIN_INSTALL || r.d["wait"]["reason"] == super::downloads::REASON) {
         return Err("There are no downloaded files to import".into());
     }
     if !has_files(&r.d) {
@@ -1070,7 +1089,7 @@ pub fn remove_staging(st: &impl Ctx, id: i64) -> bool {
 }
 
 /// What the requests list adds to a row from its `detail`: `wait_reason` ("soulseek", "storage_import",
-/// "storage_download" or null), `next_try_at` (unix seconds or null), `has_files` (downloaded files kept for
+/// "storage_download", "waiting_disk", "plugin_install" or null), `next_try_at` (unix seconds or null), `has_files` (downloaded files kept for
 /// Import again), `kept_path` (where they are), `error` (the last file or program step that failed: {step,
 /// op, path, to, errno, error, storage, text} or null) and `output` (a source's own output: {source, url,
 /// text, ok} or null). Other users than admins see no server folders, as in the storage banner: no
@@ -1107,22 +1126,47 @@ pub fn row_fields(status: &str, d: &Value, admin: bool) -> serde_json::Map<Strin
 }
 
 /// `text` with the server's own folders (the library, the staging folder, the download clients') left out,
-/// for other users than admins: "mkdir …/Duumu/Illuminate EP: Input/output error (os error 5)".
+/// for other users than admins: "mkdir …/Duumu/Illuminate EP: Input/output error (os error 5)", "Waiting for
+/// the downloads folder – … is read-only". A folder is left out where its name ends (a "/", ":", space,
+/// bracket, comma or the end of the text follows), never inside a longer name.
 pub fn hide_folders(text: &str) -> String {
     let mut roots: Vec<String> = fsx::roots::all().iter().map(|r| r.to_string_lossy().trim_end_matches('/').to_string()).filter(|r| !r.is_empty()).collect();
     roots.sort_by_key(|r| std::cmp::Reverse(r.len()));
     let mut out = text.to_string();
     for r in roots {
-        if out.contains(&r) {
-            out = out.replace(&format!("{r}/"), "…/").replace(&format!("{r}:"), "…:");
+        let mut from = 0;
+        while let Some(i) = out[from..].find(&r).map(|i| i + from) {
+            let end = i + r.len();
+            if out[end..].chars().next().is_none_or(|c| matches!(c, '/' | ':' | ' ' | ')' | ',')) {
+                out.replace_range(i..end, "…");
+                from = i + "…".len();
+            } else {
+                from = end;
+            }
         }
     }
     out
 }
 
-/// A waiting request's message as other users than admins read it: a wait for the storage in plain words,
-/// without the server's folders (None: the message as it is).
+/// A link or a pick that failed because its plugin can't run: what admins read (it names the admin's page)
+/// and what everyone else reads.
+pub const LINKS_NEED_YTDLP: (&str, &str) = ("Links need the yt-dlp plugin – install it under Settings → Plugins",
+    "Links can't be downloaded on this server yet – an admin needs to install the yt-dlp plugin");
+pub const PICKS_NEED_YTDLP: (&str, &str) = ("YouTube Music and links need the yt-dlp plugin – install it under Settings → Plugins",
+    "YouTube Music and links can't be downloaded on this server yet – an admin needs to install the yt-dlp plugin");
+pub const LINKS_NEED_STREAMRIP: (&str, &str) = ("Qobuz/Tidal/Deezer links need the streamrip plugin switched on in Settings → Plugins → streamrip",
+    "Qobuz/Tidal/Deezer links can't be downloaded on this server yet – an admin needs to switch on the streamrip plugin");
+
+/// A request's message as other users than admins read it: a wait for the storage or for a downloads folder,
+/// and a link that needs a plugin, in plain words, without the server's folders or the admin's pages (None:
+/// the message as it is).
 pub fn plain_message(status: &str, message: &str, d: &Value) -> Option<String> {
+    if status == "failed" {
+        return [LINKS_NEED_YTDLP, PICKS_NEED_YTDLP, LINKS_NEED_STREAMRIP].iter().find(|(admin, _)| message == *admin).map(|(_, plain)| plain.to_string());
+    }
+    if status == "waiting" && d["wait"]["reason"] == super::downloads::REASON && message.starts_with(super::downloads::WAITING) {
+        return Some(super::downloads::PLAIN_WAITING.to_string());
+    }
     if status != "waiting" || !(message.starts_with("Waiting: library storage error") || message.starts_with("Waiting: storage error")) {
         return None;
     }
@@ -1200,5 +1244,21 @@ mod tests {
         assert!(!plain.contains("/music"));
         assert_eq!(plain_message("waiting", "Waiting to import the downloaded files", &d), None);
         assert_eq!(plain_message("failed", "Waiting: storage error", &d), None);
+        // a wait for a downloads folder: the reason and the plain words, no folder
+        let disk = json!({ "wait": { "reason": "waiting_disk", "source": "ytdlp", "dir": "/downloads/encore", "next_try_at": null,
+                                     "error": { "step": "stage", "op": "write", "path": "/downloads/encore/.encore-probe-1", "errno": 30, "storage": true, "text": "staging failed: …" } } });
+        let m = row_fields("waiting", &disk, true);
+        assert_eq!((m["wait_reason"].clone(), m["next_try_at"].clone(), m["error"]["errno"].clone()), (json!("waiting_disk"), Value::Null, json!(30)));
+        assert_eq!(row_fields("waiting", &disk, false)["error"], json!({ "storage": true, "text": "A storage problem on the server – not the source" }));
+        assert_eq!(plain_message("waiting", "Waiting for the downloads folder – /downloads/encore is read-only", &disk).as_deref(),
+            Some("Waiting for the downloads folder – a storage problem on the server; the download starts when it is fixed"));
+        fsx::roots::add(["/srv/encore-hide-test"]);
+        assert_eq!(hide_folders("ytdlp: Waiting for the downloads folder – /srv/encore-hide-test is read-only"), "ytdlp: Waiting for the downloads folder – … is read-only");
+        // a link whose plugin can't run: members read no admin page
+        assert_eq!(plain_message("failed", LINKS_NEED_YTDLP.0, &json!({})).as_deref(), Some("Links can't be downloaded on this server yet – an admin needs to install the yt-dlp plugin"));
+        assert_eq!(plain_message("failed", LINKS_NEED_STREAMRIP.0, &json!({})).as_deref(), Some(LINKS_NEED_STREAMRIP.1));
+        assert_eq!(plain_message("failed", "All sources exhausted (no download sources enabled)", &json!({})), None);
+        assert_eq!(hide_folders("mkdir /srv/encore-hide-test/A: x (/srv/encore-hide-test)"), "mkdir …/A: x (…)");
+        assert_eq!(hide_folders("/srv/encore-hide-test2 and /srv/encore-hide-test"), "/srv/encore-hide-test2 and …");
     }
 }

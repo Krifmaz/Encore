@@ -22,9 +22,11 @@ fn state(name: &str) -> (AppState, PathBuf) {
 /// A stand-in for streamrip's `rip`, in `dir`: `config path` writes the 2.x default file when there is
 /// none and complains the way the fork does about a file marked `broken = true`; `url` does what the
 /// `mode` file beside it says (prompt for the ARL, fail to load the config, download one song, download the
-/// FLACs in `fixture/` as an album, or fail with output and exit 1). Every call, with what its stdin is,
-/// lands in `calls.log`; a `url` run first writes to and reads from /dev/tty (which must neither hang nor
-/// fail the run), and leaves its /proc stat and environment in `stat` and `env`.
+/// FLACs in `fixture/` as an album, fail with output and exit 1, or `hold`: note the run in `runs.log` – and
+/// in `overlap.log` when another run is under way –, then wait for a `release` file, which it takes, or for
+/// `release-all`, and download one song). Every call, with what its stdin is, lands in `calls.log`; a `url`
+/// run first writes to and reads from /dev/tty (which must neither hang nor fail the run), and leaves its
+/// /proc stat and environment in `stat` and `env`.
 pub(super) fn fake_rip(dir: &Path) -> PathBuf {
     use std::os::unix::fs::PermissionsExt;
     std::fs::create_dir_all(dir).unwrap();
@@ -123,6 +125,13 @@ case "$mode" in
     echo "  File \"rip/main.py\", line 120, in rip" >&2
     echo "NonStreamableError: This album is not available in your country" >&2
     exit 1;;
+  hold)
+    echo "start $url" >> "$here/runs.log"
+    if ls "$here"/running.* >/dev/null 2>&1; then echo "overlap $url" >> "$here/overlap.log"; fi
+    touch "$here/running.$$"
+    while [ ! -f "$here/release" ] && [ ! -f "$here/release-all" ]; do sleep 0.05; done
+    rm -f "$here/release" "$here/running.$$"
+    mkdir -p "$folder/Album"; printf 'fLaC' > "$folder/Album/01 Song.flac";;
   *) mkdir -p "$folder/Album"; printf 'fLaC' > "$folder/Album/01 Song.flac";;
 esac;;
 esac
@@ -432,6 +441,10 @@ async fn a_staging_folder_that_cannot_be_made_names_mkdir_and_its_path() {
     let st = r.ts.st.clone();
     let id = picked_album(&st, &r.cover);
     let folder = r.staging.join(format!("request-{id}/streamrip"));
+    // the staging folder itself is there and can be written (the download folders' probe passes; one that
+    // can't be made holds the request up instead – server_tests/downloads.rs): only the request's own folder
+    // in it can't be made
+    std::fs::create_dir_all(&r.staging).unwrap();
     // what a read-only parent gives (as root, which may write anywhere, through the fault seam)
     fsx::fault::fail(&r.staging, "mkdir", 13);
     encore_requests::worker::step(st.clone(), id).await;

@@ -108,3 +108,13 @@ async fn the_boards_and_the_rank_follow_every_write() {
     assert_eq!((me["me"]["plays"].as_i64(), me["me"]["listened"].as_f64()), (Some(2), Some(90.0)), "{me}");
     assert_eq!(me["library"]["tracks"], json!(3), "{me}");
 }
+
+/// The library's fun numbers: whole numbers with thousands separators, one decimal only below ten.
+#[test]
+fn library_numbers_read_as_numbers() {
+    assert_eq!(super::times_through(157_680.04), "157,680");
+    assert_eq!(super::times_through(12.6), "13");
+    assert_eq!(super::times_through(2.44), "2.4");
+    assert_eq!(super::thousands(1_234_567), "1,234,567");
+    assert_eq!(super::thousands(0), "0");
+}

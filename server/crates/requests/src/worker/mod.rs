@@ -3,16 +3,23 @@
 //! YouTube), `verify` holds what a download is checked against, and `import` tags and imports the files
 //! and finishes the request. [`storage`] keeps a download whose import hits a storage error and runs its
 //! import again later (the `waiting` status), with the health check that pauses imports. [`rejected`]
-//! keeps a download the audio check turned away, for Keep anyway and Download anyway.
+//! keeps a download the audio check turned away, for Keep anyway and Download anyway. [`downloads`] probes
+//! the folders downloads are saved in every minute; a request whose source saves in one that can't be
+//! written waits for it (the `waiting` status again) instead of failing. [`now`] is Download now: what a
+//! waiting or queued request offers, and doing it without breaking a source's limit or a ban
+//! (the lines are [`crate::line`]).
+pub mod downloads;
 mod fetch;
 mod import;
+pub mod now;
 mod pick;
 mod queue;
 pub mod rejected;
 pub mod storage;
 mod verify;
 
-pub use queue::{cancel, cancel_holding, recover, run, step, Hold};
+pub use queue::{cancel, cancel_holding, hold_idle, recover, run, step, take_turn, Hold};
+use queue::on_error;
 
 use crate::sources::{slskd, streamrip, torznab, ytdlp};
 use crate::{notify, Ctx};
@@ -31,8 +38,9 @@ use verify::*;
 
 /// The states of a request the worker is busy with. `waiting`: the request waits for something outside it
 /// (`detail.wait.reason`: "soulseek" for the Soulseek session, "storage_import" for its import after a
-/// storage error, its files kept, "storage_download" for the staging folder); the worker looks at it again
-/// when its turn comes (`detail.wait.next_try_at`) and never starts it as a new download.
+/// storage error, its files kept, "storage_download" for the staging folder, "waiting_disk" for a downloads
+/// folder the probe found unwritable); the worker looks at it again when its turn comes
+/// (`detail.wait.next_try_at`, or the probe passing) and never starts it as a new download.
 pub const ACTIVE: [&str; 6] = ["queued", "searching", "downloading", "monitoring", "importing", "waiting"];
 
 pub use storage::Health;

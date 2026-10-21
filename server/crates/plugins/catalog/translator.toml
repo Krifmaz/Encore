@@ -6,7 +6,7 @@
 id = "translator"
 name = "Translator"
 version = "0.32.0"
-description = "Translated song and artist names with llama.cpp and a local model. It runs on this server at low priority, only while there is something to translate, and stops two minutes after the last one."
+description = "Translates and romanizes the song and album titles and artist names the other sources leave (official names, the built-in romanization, DeepL), with llama.cpp and a local model. It runs on this server at low priority, only while there is something to translate, and stops two minutes after the last one."
 kind = "tool"
 protocol = 1
 homepage = "https://github.com/ggml-org/llama.cpp"

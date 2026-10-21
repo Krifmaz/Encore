@@ -674,9 +674,12 @@ async fn qbit_gets_the_release_from_encore_and_is_followed_by_hash() {
     q.lock().unwrap().listed = Some(listed("stoppedDL", 0.1));
     assert!(matches!(c.poll(st, &own).await.unwrap(), Poll::Progress(_, m) if m.contains("starting the download")));
     assert!(q.lock().unwrap().calls.iter().any(|(p, v)| p == "torrents/start" && v["hashes"] == own));
-    // at 100 % but still moving out of the folder for incomplete downloads: not done yet
+    // at 100 % but still moving out of the folder for incomplete downloads, or checking the files: not done
+    // yet, and busy with them (no stall Download now may give up)
     q.lock().unwrap().listed = Some(listed("moving", 1.0));
-    assert!(matches!(c.poll(st, &own).await.unwrap(), Poll::Progress(_, m) if m == "qBittorrent: moving the files"));
+    assert!(matches!(c.poll(st, &own).await.unwrap(), Poll::Busy(_, m) if m == "qBittorrent: moving the files"));
+    q.lock().unwrap().listed = Some(listed("checkingUP", 1.0));
+    assert!(matches!(c.poll(st, &own).await.unwrap(), Poll::Busy(p, _) if p == 100.0));
     q.lock().unwrap().listed = Some(listed("stalledUP", 1.0));
     match c.poll(st, &own).await.unwrap() {
         Poll::Done(p) => assert_eq!(p, PathBuf::from("/downloads/torrents/Some Album")),
@@ -767,6 +770,7 @@ fn fake_sab(hostcheck: bool, uploads: Log) -> Router {
                 "queue" if p.get("nzo_ids").map(String::as_str) == Some("SABnzbd_nzo_3") => json!({ "queue": { "paused": true, "slots": [{ "status": "Queued", "percentage": "10", "timeleft": "0:00:00" }] } }),
                 "queue" => json!({ "queue": { "slots": [] } }),
                 "history" if p.get("archive").map(String::as_str) == Some("1") => json!({ "history": { "slots": [{ "nzo_id": "SABnzbd_nzo_1", "status": "Completed", "storage": "/sab/complete/encore-1" }] } }),
+                "history" if p.get("nzo_ids").map(String::as_str) == Some("SABnzbd_nzo_4") => json!({ "history": { "slots": [{ "nzo_id": "SABnzbd_nzo_4", "status": "Repairing", "storage": "" }] } }),
                 "history" => json!({ "history": { "slots": [] } }),
                 _ => json!({ "status": true }),
             },
@@ -806,6 +810,8 @@ async fn sab_test_needs_the_api_key_and_says_what_is_wrong() {
     assert!(matches!(c.poll(st, "SABnzbd_nzo_2").await.unwrap(), Poll::Queued(_, m) if m == "SABnzbd: queued behind its other downloads"));
     // the whole queue paused (SABnzbd's own pause on a low disk): nothing moves, so the stall time runs
     assert!(matches!(c.poll(st, "SABnzbd_nzo_3").await.unwrap(), Poll::Progress(_, m) if m == "SABnzbd: its queue is paused"));
+    // downloaded, and SABnzbd repairs it: busy with the files, not stalled
+    assert!(matches!(c.poll(st, "SABnzbd_nzo_4").await.unwrap(), Poll::Busy(p, m) if p == 99.0 && m == "SABnzbd: Repairing"));
     // the host name check
     let url = serve(fake_sab(true, Default::default())).await;
     st.cfg().set_many(&json!({ "sab_url": url }));

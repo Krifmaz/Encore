@@ -133,6 +133,15 @@ pub const SECTIONS: &[Card] = &[
         s("dedupe_on_import", "Never import a second copy of a song (keep the better-quality file)", "bool"),
         s("upgrade_check_audio", "Before replacing a song with a better copy, compare the audio – a different recording is kept as its own song", "bool"),
     ] },
+    // 0.33: the server's settings.toml card `translations` (the sources of translated titles), on Server → Library
+    Card { id: "translations", title: "Translated titles", desc: "Where translated and romanized titles come from, strongest first: corrections by hand, official names, romanization built into the server, DeepL with your API key, and the local model when the Translator plugin is installed. Each listener turns translations on under Settings → Language, which also shows admins the state of each source.", test: None, test_label: None, fields: &[
+        s("translate_official", "Official names from MusicBrainz and Apple", "bool").help("MusicBrainz pseudo-releases and aliases, and Apple's English names for Japanese releases. Asks MusicBrainz and Apple about the songs in your library."),
+        s("translate_romanize", "Romanization built into the server", "bool").help("Japanese kana, Korean, Cyrillic, Greek, Hebrew, Arabic, Thai and Devanagari, made on this server. Titles with kanji and Chinese titles are left to the other sources."),
+        s("translate_deepl", "DeepL, when an API key is set", "bool").help("Translates song and album titles, never lyrics or artist names."),
+        s("deepl_api_key", "DeepL API key", "password").full().help("From deepl.com → Account → API keys. A key ending in :fx is a free-plan key (500,000 characters a month at DeepL)."),
+        s("deepl_char_budget", "DeepL characters per month", "number").help("Encore stops asking DeepL for the rest of the month at this many characters. 0 = no limit."),
+        s("translate_local_model", "Local model, when it is installed", "bool").help("Translates and romanizes what the other sources leave, on this server, with the Translator plugin (llama.cpp and a model). It is not installed by default: install the Translator in Plugins."),
+    ] },
     Card { id: "streamrip", title: "Qobuz / Tidal / Deezer (streamrip)", desc: "Searches Qobuz, Tidal and Deezer with your own accounts and downloads lossless (FLAC). Usually the best quality. streamrip is only used for these three: its SoundCloud support would give the same quality as yt-dlp, so SoundCloud links go through yt-dlp.", test: Some("streamrip"), test_label: Some("Test & write config"), fields: &[
         s("streamrip_enabled", "Enable streamrip source", "bool").help("Downloads lossless from your own paid accounts. Respect each service’s terms – use at your own risk."),
         s("streamrip_quality", "Max quality", "select").options(&[("1", "MP3 320 / AAC"), ("2", "CD – 16-bit FLAC"), ("3", "Hi-res ≤ 24/96"), ("4", "Hi-res max")]),
@@ -274,7 +283,7 @@ impl Group {
 pub const GROUPS: &[Group] = &[
     Group { id: "general", parts: &[("", &["general", "grouplisten"])] },
     // Apps & sources until R2, now four pages (the server's settings.toml sections)
-    Group { id: "library", parts: &[("", &["library", "verify"])] },
+    Group { id: "library", parts: &[("", &["library", "verify", "translations"])] },
     // 0.32: the source cards are plugin cards on Settings → Plugins (plugins.rs); see LEGACY_SOURCES
     Group { id: "downloads", parts: &[("", &["pipeline", "releases"])] },
     Group { id: "integrations", parts: &[("", &["spotify", "media", "roon"])] },
@@ -307,7 +316,7 @@ mod tests {
 
     #[test]
     fn the_table_matches_the_web() {
-        assert_eq!(SECTIONS.len(), 18);
+        assert_eq!(SECTIONS.len(), 19);
         assert_eq!(GROUPS.iter().map(|g| g.id).collect::<Vec<_>>(), ["general", "library", "downloads", "integrations", "processing", "accounts", "tasks"]);
         let general = card("general").unwrap();
         assert_eq!(general.fields[0].key, "app_name");
@@ -322,6 +331,7 @@ mod tests {
         assert_eq!(group_of("cadenza").unwrap().id, "processing");
         assert_eq!(group_of("verify").unwrap().id, "library");
         assert_eq!(group_of("releases").unwrap().id, "downloads");
+        assert_eq!(group_of("translations").unwrap().id, "library");
         assert!(group_of("torznab").is_none(), "a plugin card since 0.32");
         for id in LEGACY_SOURCES {
             assert!(card(id).is_some(), "{id}");

@@ -19,6 +19,9 @@ pub enum Poll {
     /// Waiting in the client's own queue (its limit of downloads at once is reached): not a stall, the
     /// download starts when the client's turn comes.
     Queued(f64, String),
+    /// The client works on the files it has – it checks, repairs, unpacks or moves them (a finished
+    /// download, mostly): progress as [`Poll::Progress`], but no stall Download now may give up.
+    Busy(f64, String),
     Done(PathBuf),
     Failed(String),
     /// The client doesn't list the download (yet): right after it was added the client may still be

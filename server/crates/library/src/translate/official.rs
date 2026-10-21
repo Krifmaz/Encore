@@ -196,10 +196,28 @@ pub async fn release(st: &impl Ctx, rid: &str, target: &str) -> anyhow::Result<V
     Ok(out)
 }
 
-/// Official names of a MusicBrainz artist for `target`.
+/// Official names of a MusicBrainz artist for `target`; without a romanization among the aliases, the artist's
+/// sort name gives one when it is in Latin letters (see [`sort_name_reading`]).
 pub async fn artist(st: &impl Ctx, mbid: &str, name: &str, target: &str) -> anyhow::Result<(Option<String>, Option<String>)> {
     let a = st.mb().get(st, &format!("artist/{mbid}"), &[("inc", "aliases".into())]).await?;
-    Ok(pick_aliases(&a["aliases"], target, name))
+    let (t, r) = pick_aliases(&a["aliases"], target, name);
+    Ok((t, r.or_else(|| sort_name_reading(&s(&a["sort-name"]), name))))
+}
+
+/// The reading of a name in another script from MusicBrainz's sort name, when that is in Latin letters:
+/// "Yonezu, Kenshi" for 米津玄師 reads "Yonezu Kenshi" (the order the sort name keeps is the name's own),
+/// "Beatles, The" reads "The Beatles". None when the name is in Latin letters already or the sort name is not.
+pub fn sort_name_reading(sort: &str, name: &str) -> Option<String> {
+    let sort = sort.trim();
+    if sort.is_empty() || matches!(script::detect(name), "latn" | "") || script::detect(sort) != "latn" || script::same(sort, name) {
+        return None;
+    }
+    let reading = match sort.rsplit_once(", ") {
+        Some((head, article)) if ["The", "A", "An"].contains(&article) => format!("{article} {head}"),
+        Some((family, given)) if !family.contains(',') => format!("{family} {given}"),
+        _ => sort.to_string(),
+    };
+    Some(reading)
 }
 
 // Apple's iTunes Search API, paced (shared with every other caller) and tried once more when throttled
@@ -275,6 +293,16 @@ mod tests {
         assert_eq!(pick_aliases(&en_only, "en", "宇多田ヒカル"), (Some("Hikaru Utada".into()), Some("Hikaru Utada".into())));
         assert_eq!(pick_aliases(&json!([]), "en", "x"), (None, None));
         assert_eq!(pick_aliases(&json!([{ "name": "Kino", "locale": "de" }]), "en", "Кино"), (None, None));
+    }
+
+    #[test]
+    fn sort_names_give_readings() {
+        assert_eq!(sort_name_reading("Yonezu, Kenshi", "米津玄師").as_deref(), Some("Yonezu Kenshi"));
+        assert_eq!(sort_name_reading("Beatles, The", "ザ・ビートルズ").as_deref(), Some("The Beatles"));
+        assert_eq!(sort_name_reading("Yorushika", "ヨルシカ").as_deref(), Some("Yorushika"));
+        assert_eq!(sort_name_reading("米津玄師", "米津玄師"), None, "not in Latin letters");
+        assert_eq!(sort_name_reading("Beatles, The", "The Beatles"), None, "the name is in Latin letters");
+        assert_eq!(sort_name_reading("", "ヨルシカ"), None);
     }
 
     #[test]

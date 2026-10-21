@@ -11,12 +11,17 @@ pub(super) async fn start(st: &impl Ctx, r: &mut Req) -> anyhow::Result<()> {
     }
     if kind == "url" {
         let url = r.s("url");
+        // the plugin first (a link nothing can download fails at once), then the staging folder the link is
+        // saved in: while that can't be written the link waits for it
         if RIP_LINK.is_match(&url) {
             if let Some(why) = wait_for_install(st, r, "streamrip") {
                 return why;
             }
             if !streamrip::enabled(st) {
-                fail(st, r, "Qobuz/Tidal/Deezer links need the streamrip plugin switched on in Settings → Plugins → streamrip").await;
+                fail(st, r, storage::LINKS_NEED_STREAMRIP.0).await;
+                return Ok(());
+            }
+            if downloads::hold(st, r, "url", false).await? {
                 return Ok(());
             }
             upd(st, r, &[("source", json!("streamrip")), ("status", json!("downloading")), ("message", json!("Downloading with streamrip…"))]);
@@ -26,7 +31,10 @@ pub(super) async fn start(st: &impl Ctx, r: &mut Req) -> anyhow::Result<()> {
             return why;
         }
         if !ytdlp::plugin_on(st) {
-            fail(st, r, "Links need the yt-dlp plugin – install it under Settings → Plugins").await;
+            fail(st, r, storage::LINKS_NEED_YTDLP.0).await;
+            return Ok(());
+        }
+        if downloads::hold(st, r, "url", false).await? {
             return Ok(());
         }
         upd(st, r, &[("source", json!("ytdlp")), ("status", json!("downloading")), ("message", json!("Starting download…"))]);
@@ -88,6 +96,10 @@ pub(super) async fn next_source(st: &impl Ctx, r: &mut Req, reason: &str) -> any
         }
         let src = srcs.remove(0);
         r.d["sources"] = json!(srcs);
+        // the folder this source saves in can't be written: the request waits for it, this source first again
+        if downloads::hold(st, r, &src, true).await? {
+            return Ok(());
+        }
         let soulseek = src == "slskd" || src == "slskd_lossless";
         // a plugin the upgrade is still installing: the request waits for it (at most an hour) instead of
         // going on to a lower-quality source
@@ -368,6 +380,30 @@ pub(super) async fn start_pick(st: &impl Ctx, r: &mut Req) -> anyhow::Result<()>
     }
     let src = pick["source"].as_str().unwrap_or("");
     let url = pick["payload"]["url"].as_str().unwrap_or("").to_string();
+    let rip = matches!(src, "deezer" | "tidal" | "qobuz") || (src == "link" && RIP_LINK.is_match(&url));
+    // the plugin first: a pick nothing can download fails at once (or waits for its plugin's install) instead
+    // of waiting for the folder and failing after
+    if rip {
+        if let Some(why) = wait_for_install(st, r, "streamrip") {
+            return why;
+        }
+        if !streamrip::enabled(st) {
+            fail(st, r, storage::LINKS_NEED_STREAMRIP.0).await;
+            return Ok(());
+        }
+    } else if matches!(src, "ytmusic" | "link") {
+        if let Some(why) = wait_for_install(st, r, "ytdlp") {
+            return why;
+        }
+        if !ytdlp::plugin_on(st) {
+            fail(st, r, storage::PICKS_NEED_YTDLP.0).await;
+            return Ok(());
+        }
+    }
+    // the folder the pick is saved in can't be written: the pick waits for it
+    if downloads::hold(st, r, downloads::pick_source(src, &url), false).await? {
+        return Ok(());
+    }
     let out = match src {
         "slskd" => {
             upd(st, r, &[("source", json!("slskd"))]);
@@ -389,25 +425,12 @@ pub(super) async fn start_pick(st: &impl Ctx, r: &mut Req) -> anyhow::Result<()>
             upd(st, r, &[("source", json!("torznab"))]);
             torznab_try_next(st, r, "").await?
         }
-        "deezer" | "tidal" | "qobuz" | "link" if src != "link" || RIP_LINK.is_match(&url) => {
-            if let Some(why) = wait_for_install(st, r, "streamrip") {
-                return why;
-            }
-            if !streamrip::enabled(st) {
-                fail(st, r, "Qobuz/Tidal/Deezer links need the streamrip plugin switched on in Settings → Plugins → streamrip").await;
-                return Ok(());
-            }
+        // the plugin was checked above
+        "deezer" | "tidal" | "qobuz" | "link" if rip => {
             upd(st, r, &[("source", json!("streamrip"))]);
             start_streamrip(st, r, Some(vec![url])).await?
         }
         "ytmusic" | "link" => {
-            if let Some(why) = wait_for_install(st, r, "ytdlp") {
-                return why;
-            }
-            if !ytdlp::plugin_on(st) {
-                fail(st, r, "YouTube Music and links need the yt-dlp plugin – install it under Settings → Plugins").await;
-                return Ok(());
-            }
             upd(st, r, &[("source", json!("ytdlp"))]);
             start_ytdlp(st, r, Some(url)).await?
         }

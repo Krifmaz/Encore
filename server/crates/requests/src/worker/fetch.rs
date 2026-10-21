@@ -17,14 +17,54 @@ fn note_message(st: &impl Ctx, id: i64, msg: &str) {
     crate::events::emit(st, id);
 }
 
-/// One Soulseek search for a request: it waits its turn behind the other searches (one at a time) and
-/// says so while it waits, and while it sits out a pause of the server's.
+/// One Soulseek search for a request: it waits its turn behind the other searches (one at a time, in the
+/// Soulseek line: "In line for Soulseek") and says so while it waits, and while it sits out a pause of the
+/// server's.
 async fn slskd_search(st: &impl Ctx, id: i64, query: &str, searching: &'static str) -> anyhow::Result<Vec<Value>> {
     if st.requests().slskd.session().searching() {
         note_message(st, id, "Waiting for another Soulseek search…");
     }
     // kept with the request, for the picker opened for it
     slskd::search_kept(st, query, slskd::Who::Worker, Some(id), |pause| note_message(st, id, pause.unwrap_or(searching))).await
+}
+
+/// Wait for a slot of `line` for the request (`label`: what the line is for it, "Deezer"). While it waits
+/// its row reads `queued`, "In line for Deezer" (the list says where it stands); once the slot comes the row
+/// reads `status` and `message` again, and a request Download now moved up says so in its log. A row set to
+/// cancelled while it waited (Remove artist writes its rows before it stops their tasks) stays cancelled: the
+/// slot is given back and the step ends (Err([`Cancelled`])).
+async fn take_line(st: &impl Ctx, r: &mut Req, line: &Arc<crate::line::Line>, label: &str, status: &str, message: &str) -> anyhow::Result<crate::line::Slot> {
+    let lines = &st.requests().lines;
+    let id = r.id;
+    let mut waited = false;
+    let slot = line.acquire(id, label, &lines.pressed, || {
+        waited = true;
+        now::in_line_row(st, id, label);
+    }).await;
+    if waited {
+        served_first(st, r, line.source);
+        // only over the row that still waits in the line
+        let back = st.db().query("UPDATE requests SET status=?, message=?, detail=?, updated_at=? WHERE id=? AND status='queued' RETURNING id",
+            p![status, message, r.d.to_string(), now(), id]).is_ok_and(|rows| !rows.is_empty());
+        if back {
+            r.row.insert("status".into(), json!(status));
+            r.row.insert("message".into(), json!(message));
+            crate::events::emit(st, id);
+        } else {
+            check(st, id)?;
+            upd(st, r, &[("status", json!(status)), ("message", json!(message))]);
+        }
+    }
+    Ok(slot)
+}
+
+/// A request Download now moved up in line `source` got its slot: one line in its log ("streamrip: started
+/// first in line (Download now by carol)").
+pub(super) fn served_first(st: &impl Ctx, r: &mut Req, source: &str) {
+    if let Some(p) = st.requests().lines.pressed.take_served(r.id, source) {
+        let src = r.opt("source").unwrap_or(source.to_string());
+        log_push(r, format!("{src}: started first in line (Download now by {})", p.by));
+    }
 }
 
 /// The end of the reason a Soulseek download failed because its user is offline.
@@ -48,6 +88,7 @@ pub(super) async fn start_slskd(st: &impl Ctx, r: &mut Req, lossless_only: bool)
         let album = r.album_title();
         for query in [q(&[&r.s("artist"), &album]), q(&[&album])] {
             let res = slskd_search(st, r.id, &query, searching).await?;
+            served_first(st, r, crate::line::SOULSEEK);
             cands = slskd::rank_album(st, &res, &r.s("artist"), &album, n_tracks(&rel), lossless_only);
             if !cands.is_empty() {
                 break;
@@ -55,6 +96,7 @@ pub(super) async fn start_slskd(st: &impl Ctx, r: &mut Req, lossless_only: bool)
         }
     } else {
         let res = slskd_search(st, r.id, &q(&[&r.s("artist"), &r.s("title")]), searching).await?;
+        served_first(st, r, crate::line::SOULSEEK);
         cands = slskd::rank_track(st, &res, &r.s("artist"), &r.s("title"), r.length(), lossless_only);
     }
     check(st, r.id)?;
@@ -89,7 +131,7 @@ pub(super) async fn slskd_cancel_current(st: &impl Ctx, c: &Value) {
 const ENQUEUE_BUSY_MAX: f64 = 600.0;
 
 /// The candidate's key in `slskd_tried`: "user|folder".
-fn slskd_key(c: &Value) -> String {
+pub(super) fn slskd_key(c: &Value) -> String {
     format!("{}|{}", c["username"].as_str().unwrap_or(""), c["directory"].as_str().unwrap_or(""))
 }
 
@@ -131,6 +173,7 @@ pub(super) async fn slskd_try_next(st: &impl Ctx, r: &mut Req, reason: &str) -> 
         r.d["slskd"]["idx"] = json!(idx);
         if let Some(o) = r.d["slskd"].as_object_mut() {
             o.remove("pending");
+            o.remove("remote");
         }
         let Some(c) = cands.get(idx as usize).cloned() else {
             return Ok(Out::Next(if reason.is_empty() { "all Soulseek candidates failed".into() } else { reason }));
@@ -168,12 +211,41 @@ pub(super) async fn slskd_try_next(st: &impl Ctx, r: &mut Req, reason: &str) -> 
         r.d["slskd"]["started"] = json!(t);
         r.d["slskd"]["last_change"] = json!(t);
         r.d["slskd"]["last_bytes"] = json!(0);
-        let br = c["bitrate"].as_i64().unwrap_or(0);
-        let msg = format!("Downloading {} file(s) from {user} ({}{})", c["files"].as_array().map(|a| a.len()).unwrap_or(0),
-            c["format"].as_str().unwrap_or("").to_uppercase(), if br > 0 { format!(" {br}k") } else { String::new() });
-        upd(st, r, &[("status", json!("downloading")), ("progress", json!(0)), ("message", json!(msg))]);
+        upd(st, r, &[("status", json!("downloading")), ("progress", json!(0)), ("message", json!(slskd_message(&c)))]);
         return Ok(Out::Wait);
     }
+}
+
+/// "Downloading 12 file(s) from bob (FLAC)", "… (MP3 320k)": a Soulseek candidate handed to slskd.
+pub(super) fn slskd_message(c: &Value) -> String {
+    format!("Downloading {} file(s) from {} ({})", c["files"].as_array().map(|a| a.len()).unwrap_or(0), c["username"].as_str().unwrap_or(""), slskd_format(c))
+}
+
+/// "FLAC", "MP3 320k": a Soulseek candidate's format.
+pub(super) fn slskd_format(c: &Value) -> String {
+    let br = c["bitrate"].as_i64().unwrap_or(0);
+    format!("{}{}", c["format"].as_str().unwrap_or("").to_uppercase(), if br > 0 { format!(" {br}k") } else { String::new() })
+}
+
+/// How often a download waiting in a user's upload queue asks for its place there, when slskd doesn't say.
+const REMOTE_ASK_SECS: f64 = 300.0;
+
+/// Every file of a Soulseek download waits in the user's own upload queue ("Queued, Remotely") and no byte
+/// arrived: Some(its place there – the smallest `placeInQueue` slskd reports; None when it reports none).
+/// None otherwise: a file that downloads, bytes that arrived, slskd's own queue ("Queued, Locally").
+pub(super) fn remote_queue<'a>(files: impl IntoIterator<Item = &'a Value>) -> Option<Option<u64>> {
+    let mut any = false;
+    let mut place: Option<u64> = None;
+    for f in files {
+        any = true;
+        if f["state"].as_str() != Some("Queued, Remotely") || f["bytesTransferred"].as_f64().unwrap_or(0.0) > 0.0 {
+            return None;
+        }
+        if let Some(p) = f["placeInQueue"].as_u64().filter(|p| *p > 0) {
+            place = Some(place.map_or(p, |q| q.min(p)));
+        }
+    }
+    any.then_some(place)
 }
 
 pub(super) async fn after_slskd(st: &impl Ctx, r: &mut Req, out: Out) -> anyhow::Result<()> {
@@ -277,8 +349,40 @@ async fn poll_slskd_once(st: &impl Ctx, r: &mut Req) -> anyhow::Result<()> {
         return after_slskd(st, r, o).await;
     }
     let queued = states.iter().all(|s| s.starts_with("Queued"));
-    upd(st, r, &[("progress", json!((got / total * 1000.0).round() / 10.0)),
-                 ("message", json!(format!("{} {user} – {done}/{} files", if queued { "Queued by" } else { "Downloading from" }, wanted.len())))]);
+    // every file waits in the user's own upload queue: where it stands there (Download now can switch to a
+    // user with a free upload slot); gone as soon as anything moves
+    let remote = remote_queue(latest.values()).filter(|_| got <= 0.0);
+    match remote {
+        Some(found) => {
+            let prev = r.d["slskd"]["remote"].clone();
+            let since = prev["since"].as_f64().unwrap_or(t);
+            let mut asked_at = prev["asked_at"].as_f64();
+            let place = match found {
+                Some(p) => Some(p),
+                // slskd doesn't say: the user is asked, every 5 minutes at most
+                None if asked_at.is_none_or(|a| t - a >= REMOTE_ASK_SECS) => {
+                    asked_at = Some(t);
+                    let first = wanted.iter().find_map(|n| latest.get(n)).map(|f| f["id"].as_str().map(String::from).unwrap_or(f["id"].to_string()));
+                    match first {
+                        Some(fid) => slskd::place_in_queue(st, &user, &fid).await,
+                        None => None,
+                    }
+                }
+                None => prev["place"].as_u64(),
+            };
+            r.d["slskd"]["remote"] = json!({ "place": place, "since": since, "asked_at": asked_at });
+        }
+        None => {
+            if let Some(o) = r.d["slskd"].as_object_mut() {
+                o.remove("remote");
+            }
+        }
+    }
+    let msg = match r.d["slskd"]["remote"]["place"].as_u64().filter(|_| remote.is_some()) {
+        Some(p) => format!("Queued by {user} – {} in their queue, {done}/{} files", crate::line::ordinal(p as usize), wanted.len()),
+        None => format!("{} {user} – {done}/{} files", if queued { "Queued by" } else { "Downloading from" }, wanted.len()),
+    };
+    upd(st, r, &[("progress", json!((got / total * 1000.0).round() / 10.0)), ("message", json!(msg))]);
     Ok(())
 }
 
@@ -326,6 +430,13 @@ pub(super) async fn import_slskd(st: &impl Ctx, r: &mut Req, c: &Value) -> anyho
 pub(super) async fn start_torznab(st: &impl Ctx, r: &mut Req, lossless_only: bool) -> anyhow::Result<Out> {
     let lossless_only = lossless_only || r.d["lossless_only"].as_bool().unwrap_or(false);
     let searching = "Searching torrent and Usenet indexers (Prowlarr)…";
+    // the requests' indexer searches, two at a time: its turn in the indexers' line (held for its searches)
+    let _slot = take_line(st, r, &st.requests().lines.indexers, crate::line::TORRENTS, "searching", searching).await?;
+    check(st, r.id)?;
+    // a client's folder may have broken while it waited in line
+    if downloads::hold(st, r, "torznab", true).await? {
+        return Ok(Out::Wait);
+    }
     upd(st, r, &[("status", json!("searching")), ("message", json!(searching))]);
     let rel = release_info(st, r).await;
     let album = r.album_title();
@@ -333,11 +444,7 @@ pub(super) async fn start_torznab(st: &impl Ctx, r: &mut Req, lossless_only: boo
     let want = torznab::Want { artist: &artist, album: &album, year, tracks: n_tracks(&rel), lossless_only };
     let mut cands = vec![];
     for query in [q(&[&artist, &album]), q(&[&album])] {
-        if torznab::SEARCHES.available_permits() == 0 {
-            note_message(st, r.id, "Waiting for other requests' indexer searches (two at a time)…");
-        }
         let res = torznab::search(st, &query).await?;
-        note_message(st, r.id, searching);
         // kept with the request, for the picker opened for it
         crate::search_cache::keep_releases(st, &query, &["3000"], Some(r.id), &res).await;
         cands = torznab::rank_album(st, &res, &want);
@@ -367,12 +474,24 @@ pub(super) async fn torznab_try_next(st: &impl Ctx, r: &mut Req, reason: &str) -
     if r.d["torznab"].is_object() {
         r.d["torznab"]["selected"] = Value::Null;
     }
+    // a release whose client's folder can't be written is not handed over (downloads.rs)
+    let mut held: Option<(String, downloads::Probed)> = None;
     loop {
         let idx = r.d["torznab"]["idx"].as_i64().unwrap_or(-1) + 1;
         r.d["torznab"]["idx"] = json!(idx);
         let Some(c) = r.d["torznab"]["candidates"].get(idx as usize).cloned() else {
+            // the releases left all go to a client whose folder fails: wait for it
+            if let Some((proto, p)) = held {
+                downloads::park_release(st, r, &proto, &p)?;
+                return Ok(Out::Wait);
+            }
             return Ok(Out::Next(if reason.is_empty() { "no indexer release worked".into() } else { reason }));
         };
+        let proto = c["protocol"].as_str().unwrap_or("torrent");
+        if let Some(p) = downloads::failing_client(st, proto) {
+            held.get_or_insert((proto.to_string(), p));
+            continue;
+        }
         match torznab::add(st, &c, r.id).await {
             Ok(id) => {
                 let t = now();
@@ -381,6 +500,7 @@ pub(super) async fn torznab_try_next(st: &impl Ctx, r: &mut Req, reason: &str) -
                 r.d["torznab"]["last_change"] = json!(t);
                 r.d["torznab"]["last_progress"] = json!(0);
                 r.d["torznab"]["queued_since"] = Value::Null;
+                r.d["torznab"]["busy"] = Value::Null;
                 let via = torznab::client_name(st, c["protocol"].as_str().unwrap_or("torrent"));
                 upd(st, r, &[("status", json!("downloading")), ("progress", json!(0)),
                              ("message", json!(format!("{via}: {} ({})", c["title"].as_str().unwrap_or(""), c["indexer"].as_str().unwrap_or(""))))]);
@@ -393,7 +513,7 @@ pub(super) async fn torznab_try_next(st: &impl Ctx, r: &mut Req, reason: &str) -
 
 /// How long a download client may take to list a download it was just given (qBittorrent takes a
 /// magnet in the background).
-const CLIENT_TAKES: f64 = 120.0;
+pub(super) const CLIENT_TAKES: f64 = 120.0;
 
 /// How many stall times (Settings → Plugins → Torrents & Usenet (Prowlarr), "Try the next release after a
 /// stall of") a download may wait in its client's queue before the next release is tried.
@@ -405,7 +525,7 @@ fn span(secs: f64) -> String {
 }
 
 /// The client a request's current release went to ("qBittorrent", "SABnzbd" …).
-fn torznab_client(st: &impl Ctx, r: &Req) -> &'static str {
+pub(super) fn torznab_client(st: &impl Ctx, r: &Req) -> &'static str {
     let idx = r.d["torznab"]["idx"].as_u64().unwrap_or(0) as usize;
     torznab::client_name(st, r.d["torznab"]["candidates"][idx]["protocol"].as_str().unwrap_or("torrent"))
 }
@@ -483,10 +603,18 @@ pub(super) async fn poll_torznab(st: &impl Ctx, r: &mut Req) -> anyhow::Result<(
             }
         }
     }
+    let busy = matches!(polled, torznab::Poll::Busy(..));
     match polled {
-        torznab::Poll::Progress(pct, msg) => {
+        torznab::Poll::Progress(pct, msg) | torznab::Poll::Busy(pct, msg) => {
             if let Some(o) = r.d["torznab"].as_object_mut() {
                 o.remove("queued_since");
+                // the client works on the files it has (checks, repairs, unpacks or moves them): the stall time
+                // runs as before, but Download now never gives it up (`now::stalled_since`)
+                if busy {
+                    o.insert("busy".into(), json!(t));
+                } else {
+                    o.remove("busy");
+                }
             }
             if pct > r.d["torznab"]["last_progress"].as_f64().unwrap_or(0.0) {
                 r.d["torznab"]["last_progress"] = json!(pct);
@@ -629,9 +757,16 @@ pub(super) async fn isrc_for(st: &impl Ctx, r: &mut Req) -> Option<String> {
 }
 
 pub(super) async fn start_streamrip(st: &impl Ctx, r: &mut Req, urls: Option<Vec<String>>) -> anyhow::Result<Out> {
-    let _slot = st.requests().streamrip.acquire().await?;
+    // one release at a time: its turn in the streamrip line ("In line for Deezer" meanwhile)
+    let label = crate::line::streamrip_label(urls.as_ref().and_then(|u| u.first()).map(String::as_str), &streamrip::services(st));
+    let looking = "Looking for an exact lossless match…";
+    let _slot = take_line(st, r, &st.requests().lines.streamrip, &label, "searching", looking).await?;
     check(st, r.id)?;
-    upd(st, r, &[("status", json!("searching")), ("message", json!("Looking for an exact lossless match…"))]);
+    // the staging folder may have broken while it waited in line
+    if downloads::hold(st, r, "streamrip", !r.d["pick"].is_object()).await? {
+        return Ok(Out::Wait);
+    }
+    upd(st, r, &[("status", json!("searching")), ("message", json!(looking))]);
     let mut urls = urls.unwrap_or_default();
     if urls.is_empty() {
         if let (Some(dz), true) = (r.d["ext"]["deezer"].as_i64().map(|x| x.to_string()).or(r.d["ext"]["deezer"].as_str().map(String::from)), streamrip::services(st).iter().any(|s| s == "deezer")) {
@@ -715,8 +850,18 @@ pub(super) fn progress_cb(st: &impl Ctx, id: i64) -> impl Fn(f64) + Send + Sync 
 }
 
 pub(super) async fn start_ytdlp(st: &impl Ctx, r: &mut Req, pick_url: Option<String>) -> anyhow::Result<Out> {
-    let _slot = st.requests().ytdlp.acquire().await?;
+    // two at a time: its turn in the yt-dlp line ("In line for YouTube" meanwhile)
+    let label = match (r.d["pick"]["source"].as_str(), pick_url.as_deref()) {
+        (Some("link"), Some(u)) => crate::line::link_site(u),
+        _ => crate::line::YOUTUBE.to_string(),
+    };
+    let searching = if r.s("kind") == "track" { "Searching YouTube Music…" } else { "Searching YouTube Music for the album…" };
+    let _slot = take_line(st, r, &st.requests().lines.ytdlp, &label, "searching", searching).await?;
     check(st, r.id)?;
+    // the staging folder may have broken while it waited in line
+    if downloads::hold(st, r, "ytdlp", !r.d["pick"].is_object()).await? {
+        return Ok(Out::Wait);
+    }
     let out = staging(st, r);
     let cb = progress_cb(st, r.id);
     if r.s("kind") == "track" {
@@ -852,11 +997,23 @@ pub(super) async fn start_ytdlp(st: &impl Ctx, r: &mut Req, pick_url: Option<Str
 /// A plugin program's source (protocol 1, through the registry: in the sandbox, its settings on stdin): the
 /// best matching result of its search – or the result picked by hand (`picked`: the picker row's payload) –
 /// downloaded into the request's staging folder, then checked, tagged and imported like any other download. A
-/// search or download the plugin could not do goes on to the next source with the plugin's own words.
+/// search or download the plugin could not do goes on to the next source with the plugin's own words. One
+/// request at a time per plugin: its search and download hold the plugin's line ("In line for Internet
+/// Archive" meanwhile, Download now moves a request up in it).
 pub(super) async fn start_plugin(st: &impl Ctx, r: &mut Req, source: &crate::sources::plugin::PluginSource, picked: Option<Value>) -> anyhow::Result<Out> {
     use crate::sources::plugin::{self as p, Ask};
     check(st, r.id)?;
     let name = source.name.clone();
+    let line = st.requests().lines.plugin(&source.plugin);
+    let _slot = match picked {
+        Some(_) => take_line(st, r, &line, &name, "downloading", &format!("Downloading from {name}…")).await?,
+        None => take_line(st, r, &line, &name, "searching", &format!("Searching {name}…")).await?,
+    };
+    check(st, r.id)?;
+    // the staging folder may have broken while it waited in line
+    if downloads::hold(st, r, &source.id, picked.is_none()).await? {
+        return Ok(Out::Wait);
+    }
     let kind = r.s("kind");
     let ask = Ask {
         kind: kind.clone(),
@@ -926,7 +1083,14 @@ pub(super) async fn start_plugin(st: &impl Ctx, r: &mut Req, source: &crate::sou
 /// not be imported is a failure with its reason, never "Downloaded 0 file(s)"; one whose songs were all in
 /// the library already says so.
 pub(super) async fn run_url(st: &impl Ctx, r: &mut Req) -> anyhow::Result<()> {
-    let _slot = st.requests().ytdlp.acquire().await?;
+    // two at a time, with the requests' YouTube downloads: "In line for bandcamp.com" meanwhile
+    let label = crate::line::link_site(&r.s("url"));
+    let _slot = take_line(st, r, &st.requests().lines.ytdlp, &label, "downloading", "Starting download…").await?;
+    check(st, r.id)?;
+    // the staging folder may have broken while it waited in line
+    if downloads::hold(st, r, "url", false).await? {
+        return Ok(());
+    }
     let out = staging(st, r);
     let cb = progress_cb(st, r.id);
     let res = ytdlp::download(st, &r.s("url"), &out, true, Some(&cb)).await?;
@@ -961,9 +1125,16 @@ pub(super) async fn run_url(st: &impl Ctx, r: &mut Req) -> anyhow::Result<()> {
 
 /// A Qobuz, Tidal or Deezer link: downloaded with streamrip, each folder it made imported by its tags.
 pub(super) async fn run_streamrip_url(st: &impl Ctx, r: &mut Req) -> anyhow::Result<()> {
-    let _slot = st.requests().streamrip.acquire().await?;
-    let out = staging(st, r);
     let url = r.s("url");
+    // one release at a time, with the requests' streamrip downloads: "In line for Tidal" meanwhile
+    let label = crate::line::streamrip_label(Some(&url), &streamrip::services(st));
+    let _slot = take_line(st, r, &st.requests().lines.streamrip, &label, "downloading", "Downloading with streamrip…").await?;
+    check(st, r.id)?;
+    // the staging folder may have broken while it waited in line
+    if downloads::hold(st, r, "url", false).await? {
+        return Ok(());
+    }
+    let out = staging(st, r);
     let files = match streamrip::download_run(st, &url, &out).await {
         Ok(run) => {
             storage::keep_output(r, "streamrip", &url, &run.log, true);
@@ -989,7 +1160,21 @@ pub(super) async fn run_streamrip_url(st: &impl Ctx, r: &mut Req) -> anyhow::Res
 
 #[cfg(test)]
 mod tests {
-    use super::{enqueue_failure, q, SLSKD_OFFLINE};
+    use super::{enqueue_failure, q, remote_queue, SLSKD_OFFLINE};
+    use serde_json::json;
+
+    /// A download waits in the user's own upload queue only while every file is "Queued, Remotely" and nothing
+    /// arrived; its place there is the smallest slskd reports (Download now: switch to a free slot).
+    #[test]
+    fn the_remote_queue_place_is_read() {
+        let f = |state: &str, place: Option<u64>, bytes: f64| json!({ "state": state, "placeInQueue": place, "bytesTransferred": bytes });
+        assert_eq!(remote_queue(&[f("Queued, Remotely", Some(12), 0.0), f("Queued, Remotely", Some(15), 0.0)]), Some(Some(12)));
+        assert_eq!(remote_queue(&[f("Queued, Remotely", None, 0.0), f("Queued, Remotely", None, 0.0)]), Some(None), "the place unknown");
+        assert_eq!(remote_queue(&[f("Queued, Remotely", Some(12), 0.0), f("InProgress", None, 0.0)]), None, "one downloads");
+        assert_eq!(remote_queue(&[f("Queued, Remotely", Some(12), 0.0), f("Queued, Remotely", Some(15), 100.0)]), None, "bytes arrived");
+        assert_eq!(remote_queue(&[f("Queued, Locally", None, 0.0)]), None, "slskd's own limit");
+        assert_eq!(remote_queue(&[] as &[serde_json::Value]), None);
+    }
 
     /// A finished download that holds archives and no audio says so, in the words for its kind of client
     /// (diagnosis item 31): a torrent client has no unpacking to turn on.

@@ -201,6 +201,15 @@ pub fn report(last: &Value) -> String {
             fmt::s(&c, "detail")
         ));
     }
+    let folders = fmt::items(&last["download_folders"]["roots"]);
+    if !folders.is_empty() {
+        lines.push(String::new());
+        lines.push("Download folders:".into());
+        for r in &folders {
+            let (what, detail, when) = folder_lines(r);
+            lines.push(format!("{} {what}\n     {detail} ({when})", if fmt::truthy(r, "ok") { "OK  " } else { "FAIL" }));
+        }
+    }
     if last["machine"].is_object() {
         lines.push(String::new());
         lines.push("Server:".into());
@@ -219,6 +228,68 @@ pub fn report(last: &Value) -> String {
         ));
     }
     lines.join("\n")
+}
+
+/// A download folder in words, as the web's `folder_lines` (servers since 0.33, backlog item 17): (what
+/// it is, the result with a note or the banner's sentence, when it was probed).
+pub fn folder_lines(r: &Value) -> (String, String, String) {
+    let what = format!("{} – {}", fmt::s(r, "label"), fmt::s(r, "path"));
+    let result = if fmt::truthy(r, "result") { fmt::s(r, "result") } else { "Not checked yet".to_string() };
+    let detail = if !fmt::truthy(r, "ok") && fmt::truthy(r, "text") {
+        fmt::s(r, "text")
+    } else if fmt::truthy(r, "note") {
+        format!("{result} – {}", fmt::s(r, "note"))
+    } else {
+        result
+    };
+    let when = if fmt::f(r, "checked_at") > 0.0 {
+        let since = if !fmt::truthy(r, "ok") && fmt::f(r, "since") > 0.0 { format!(" · not writable since {}", fmt::date(fmt::f(r, "since"))) } else { String::new() };
+        format!("Checked {}{since}", fmt::date(fmt::f(r, "checked_at")))
+    } else {
+        "Not checked yet".to_string()
+    };
+    (what, detail, when)
+}
+
+/// What a download folder's item shows, as the web's: the badge (the result and its kind, Warn for a folder
+/// with a note – a client's folder Encore only reads), the detail line only when it says more than the badge,
+/// and the time only once the folder was probed.
+pub fn folder_shown(r: &Value) -> (String, Badge, Option<String>, Option<String>) {
+    let ok = fmt::truthy(r, "ok");
+    let (_, detail, when) = folder_lines(r);
+    let noted = ok && !matches!(fmt::s(r, "state").as_str(), "ok" | "unknown" | "");
+    let result = if fmt::truthy(r, "result") { fmt::s(r, "result") } else { "Not checked yet".to_string() };
+    let kind = if !ok { Badge::Err } else if noted { Badge::Warn } else { Badge::Ok };
+    let detail = (detail != result).then_some(detail);
+    (result, kind, detail, (fmt::f(r, "checked_at") > 0.0).then_some(when))
+}
+
+/// One download folder of the Download folders section: its probe's result and time.
+fn folder_item<'a>(r: &Value) -> El<'a, Message> {
+    let p = theme::look();
+    let (result, kind, detail, when) = folder_shown(r);
+    let mut body = column![
+        row![t(fmt::s(r, "label")).size(14).font(theme::bold()), badge(result, kind)].spacing(8).align_y(Alignment::Center),
+        widgets::faint(fmt::s(r, "path")).size(12).font(theme::mono()),
+    ]
+    .spacing(3)
+    .width(Length::Fill);
+    if let Some(d) = detail {
+        body = body.push(t(d).size(12.5).color(if kind == Badge::Err { p.err } else { p.muted }));
+    }
+    if let Some(w) = when {
+        body = body.push(widgets::faint(w).size(12));
+    }
+    let colour = match kind {
+        Badge::Err => p.err,
+        Badge::Warn => p.warn,
+        _ => p.ok,
+    };
+    column![
+        container(row![container(dot_in(colour)).padding([6, 0]), body].spacing(12).align_y(Alignment::Start)).padding([10, 14]),
+        widgets::divider(),
+    ]
+    .into()
 }
 
 /// One check in full for Copy, as the web's dialog has it: the name, the request, what it said
@@ -410,9 +481,14 @@ pub fn update(state: &mut State, msg: Message, ctx: &mut Ctx) -> Task<Message> {
 
 fn dot<'a>(ok: bool) -> El<'a, Message> {
     let p = theme::look();
+    dot_in(if ok { p.ok } else { p.err })
+}
+
+/// A status dot in `colour`.
+fn dot_in<'a>(colour: iced::Color) -> El<'a, Message> {
     container(space().width(8).height(8))
         .style(move |_| container::Style {
-            background: Some(iced::Background::Color(if ok { p.ok } else { p.err })),
+            background: Some(iced::Background::Color(colour)),
             border: iced::Border {
                 color: iced::Color::TRANSPARENT,
                 width: 0.0,
@@ -536,6 +612,18 @@ pub fn view<'a>(state: &'a State, ctx: &Ctx<'a>) -> El<'a, Message> {
                 for c in group {
                     list = list.push(check_item(state, c, i));
                     i += 1;
+                }
+                page = page.push(widgets::card_flat(list).width(Length::Fill));
+            }
+            let folders = fmt::items(&d["download_folders"]["roots"]);
+            if !folders.is_empty() {
+                page = page.push(widgets::section_head(
+                    "Download folders",
+                    Some(help("Probed every minute while downloads run: a file is written, flushed to the disk and removed. While nothing downloads they are looked at every 10 minutes without writing, so idle disks can spin down").into()),
+                ));
+                let mut list = column![];
+                for r in &folders {
+                    list = list.push(folder_item(r));
                 }
                 page = page.push(widgets::card_flat(list).width(Length::Fill));
             }
@@ -745,5 +833,32 @@ mod tests {
         assert_eq!(check_text(&c), format!("MusicBrainz\nGET x\ntimeout\n{long}"));
         let cr = json!({ "kind": "anr", "first_line": "ANR in app", "device": "Pixel", "app_version": "0.30", "time": 1_792_427_497.0, "text": "trace\n" });
         assert_eq!(crash_text(&cr), "ANR in app\nNot responding\nPixel · 0.30\n2026-10-19 16:31 UTC\n\ntrace");
+    }
+
+    /// Each download folder with its probe's result and time, as the web shows them.
+    #[test]
+    fn the_download_folders() {
+        let d = json!({ "version": "0.33.0", "uid": 1000, "checks": [], "download_folders": { "ok": false, "roots": [
+            { "key": "staging_path", "label": "Staging folder (yt-dlp, streamrip, links)", "path": "/downloads/encore", "state": "read_only", "result": "Read-only", "ok": false,
+              "text": "The downloads folder /downloads/encore is read-only – check the disk (dmesg, fsck) or the mount", "checked_at": 1_792_427_497.0, "since": 1_792_427_437.0 },
+            { "key": "qbit_download_path", "label": "Torrent downloads (qBittorrent)", "path": "/downloads/torrents", "state": "denied", "result": "Permission denied", "ok": true,
+              "note": "Encore may not write here, which is fine", "checked_at": 1_792_427_497.0 },
+            { "key": "sab_download_path", "label": "Usenet downloads (SABnzbd)", "path": "/downloads/usenet", "state": "unknown", "result": "Not checked yet", "ok": true, "checked_at": null } ] } });
+        let roots = fmt::items(&d["download_folders"]["roots"]);
+        assert_eq!(folder_lines(&roots[0]), ("Staging folder (yt-dlp, streamrip, links) – /downloads/encore".to_string(),
+            "The downloads folder /downloads/encore is read-only – check the disk (dmesg, fsck) or the mount".to_string(),
+            format!("Checked {} · not writable since {}", fmt::date(1_792_427_497.0), fmt::date(1_792_427_437.0))));
+        assert_eq!(folder_lines(&roots[1]).1, "Permission denied – Encore may not write here, which is fine");
+        assert_eq!(folder_lines(&roots[2]).2, "Not checked yet");
+        // on the page the result is said once (the badge), a noted folder gets the warn colour, no time before
+        // the first probe
+        assert_eq!(folder_shown(&roots[1]).1, Badge::Warn);
+        assert_eq!(folder_shown(&roots[2]), ("Not checked yet".to_string(), Badge::Ok, None, None));
+        let fine = json!({ "state": "ok", "result": "Writable", "ok": true, "checked_at": 1_792_427_497.0 });
+        assert_eq!(folder_shown(&fine), ("Writable".to_string(), Badge::Ok, None, Some(format!("Checked {}", fmt::date(1_792_427_497.0)))));
+        assert_eq!(folder_shown(&roots[0]).2.as_deref(), Some("The downloads folder /downloads/encore is read-only – check the disk (dmesg, fsck) or the mount"));
+        let r = report(&d);
+        assert!(r.contains("Download folders:\nFAIL Staging folder (yt-dlp, streamrip, links) – /downloads/encore\n     The downloads folder /downloads/encore is read-only"), "{r}");
+        assert!(r.contains("OK   Torrent downloads (qBittorrent) – /downloads/torrents"), "{r}");
     }
 }

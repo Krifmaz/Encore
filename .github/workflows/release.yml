@@ -9,6 +9,9 @@ name: release
 #   so they are off by default and a release without them is just the server + Docker image). They can be
 #   built on your own machine instead and attached to the release: scripts/release-apps.sh.
 #   Desktop: the native app (apps.yml `desktop`, clients/desktop).
+#   If the macOS desktop job waits for a runner, cancel the run after the server, Docker, Android, Windows and Linux
+#   jobs are done: publish still runs and the notes name what is missing. A cancel after the server and Docker jobs
+#   succeeded does not stop the release; delete it afterwards if that was the point.
 #   Docker: :<version> and :latest.
 #   Notes: docs/releases/<version>.md if it exists, otherwise the commit list since the previous release.
 #   Checks first (the `test` job, which pull requests run too through docker.yml): the server's tests and clippy
@@ -328,7 +331,7 @@ jobs:
           ---
           ### Install
           * **Docker**: \`ghcr.io/krifmaz/encore:latest\` (\`:$V\` pins this build) · compose file attached
-          * **Linux without Docker**: \`encore-$V-linux-x86_64.tar.gz\` / \`-aarch64\` – run \`ENCORE_CONFIG_DIR=./config ENCORE_STATIC_DIR=./static ./encore\`
+          * **Linux without Docker**: \`encore-$V-linux-x86_64.tar.gz\` / \`-aarch64\` – run \`ENCORE_CONFIG_DIR=./config ENCORE_STATIC_DIR=./static ./encore\` (the yt-dlp and streamrip plugins need uv and Python 3.14 on the host, python3.14 in /usr/bin or /usr/local/bin; the Docker image has both)
           * **YouTube sign-in extension**: \`Encore-youtube-extension-$V.zip\` – load the chrome or firefox folder (see extension/encore-youtube-cookies/README.md)
           EOT
           if [ "$ONLY" = android ]; then cat >> notes.md <<EOT
@@ -336,17 +339,18 @@ jobs:
           EOT
           elif [ "$APPS" = success ]; then cat >> notes.md <<EOT
           * **Android**: \`Encore-android-$V.apk\`
-          * **Desktop app** (new: native, with Cadenza playing on this computer; it updates itself from here on): **Windows** \`Encore-$V-windows-x86_64.exe\` · **macOS** \`Encore-$V-macos-universal.dmg\` (if macOS will not open it the first time: System Settings → Privacy & Security → Open Anyway) · **Linux** \`Encore-$V-linux-x86_64.AppImage\` or \`encore_${V}_amd64.deb\` · checksums in \`SHA256SUMS\`
+          * **Desktop app** (native, with Cadenza playing on this computer; it updates itself): **Windows** \`Encore-$V-windows-x86_64.exe\` · **macOS** \`Encore-$V-macos-universal.dmg\` (if macOS will not open it the first time: System Settings → Privacy & Security → Open Anyway) · **Linux** \`Encore-$V-linux-x86_64.AppImage\` or \`encore_${V}_amd64.deb\` · checksums in \`SHA256SUMS\`
           EOT
-          elif compgen -G "out/Encore-android-*.apk" >/dev/null || compgen -G "out/Encore-*-windows-*.exe" >/dev/null; then
+          elif compgen -G "out/Encore-android-*.apk" >/dev/null || compgen -G "out/Encore-*-windows-*.exe" >/dev/null \
+            || compgen -G "out/Encore-*-linux-x86_64.AppImage" >/dev/null || compgen -G "out/Encore-*-macos-universal.dmg" >/dev/null; then
             # some apps built, some didn't: name what is attached
             have() { compgen -G "out/$1" >/dev/null; }
             if have "Encore-android-$V.apk"; then echo "* **Android**: \`Encore-android-$V.apk\`" >> notes.md; else echo "* **Android**: not in this release (its build did not finish); the next release has it" >> notes.md; fi
             D=""; M=""
             if have "Encore-$V-windows-x86_64.exe"; then D="$D **Windows** \`Encore-$V-windows-x86_64.exe\` ·"; else M="$M Windows,"; fi
-            if have "Encore-$V-macos-universal.dmg"; then D="$D **macOS** \`Encore-$V-macos-universal.dmg\` ·"; else M="$M macOS,"; fi
+            if have "Encore-$V-macos-universal.dmg"; then D="$D **macOS** \`Encore-$V-macos-universal.dmg\` (if macOS will not open it the first time: System Settings → Privacy & Security → Open Anyway) ·"; else M="$M macOS,"; fi
             if have "Encore-$V-linux-x86_64.AppImage"; then D="$D **Linux** \`Encore-$V-linux-x86_64.AppImage\` or \`encore_${V}_amd64.deb\` ·"; else M="$M Linux,"; fi
-            echo "* **Desktop app** (new: native, with Cadenza playing on this computer; it updates itself from here on):$D checksums in \`SHA256SUMS\`" >> notes.md
+            if [ -n "$D" ]; then echo "* **Desktop app** (native, with Cadenza playing on this computer; it updates itself):$D checksums in \`SHA256SUMS\`" >> notes.md; fi
             if [ -n "$M" ]; then echo "* **Not in this release:**${M%,} desktop app – its build did not run this time; the next release has it" >> notes.md; fi
           else echo "* **Apps**: the desktop and Android apps were not rebuilt for this release – the ones attached are from the last build that made them." >> notes.md; fi
           sed -i 's/^          //' notes.md
@@ -359,7 +363,8 @@ jobs:
           # app installers from the previous release when this run built none of them (a run with some of the
           # apps attaches only those: an older build beside a newer one would offer two versions)
           # (encore_*.deb is the desktop app's Debian package)
-          if [ "$APPS" != success ] && ! compgen -G "out/Encore-android-*.apk" >/dev/null && ! compgen -G "out/Encore-*-windows-*.exe" >/dev/null; then
+          if [ "$APPS" != success ] && ! compgen -G "out/Encore-android-*.apk" >/dev/null && ! compgen -G "out/Encore-*-windows-*.exe" >/dev/null \
+            && ! compgen -G "out/Encore-*-linux-x86_64.AppImage" >/dev/null && ! compgen -G "out/Encore-*-macos-universal.dmg" >/dev/null; then
             mkdir -p prev && gh release download --dir prev --pattern 'Encore-*' --pattern 'encore_*.deb' 2>/dev/null || true
             rm -f prev/Encore-youtube-extension-*.zip   # built fresh above
             # the classic Tauri desktop app (removed in 0.29) is not carried over

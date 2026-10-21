@@ -2,6 +2,9 @@ package app.encore.android.features.requests
 
 import app.encore.android.core.EncoreJson
 import app.encore.android.core.decodeModel
+import app.encore.android.data.repo.DownloadAllNowResult
+import app.encore.android.data.repo.DownloadNowResult
+import app.encore.android.data.repo.DownloadsHealth
 import app.encore.android.data.repo.LinkProbe
 import app.encore.android.data.repo.LinkResult
 import app.encore.android.data.repo.Me
@@ -243,6 +246,7 @@ class RequestRulesTest {
         assertEquals("the downloaded files are kept and the import waits for the storage", RequestRules.waitWords("storage_import"))
         assertEquals("Soulseek isn't connected yet", RequestRules.waitWords("soulseek"))
         assertEquals("the download waits for the staging folder", RequestRules.waitWords("storage_download"))
+        assertEquals("its source's plugin is still being installed", RequestRules.waitWords("plugin_install"))
         assertEquals("", RequestRules.waitWords(""))
         assertEquals("Waiting – the downloaded files are kept and the import waits for the storage", RequestRules.statusText(r))
         assertEquals("Failed", RequestRules.statusText(row("""{"id": 2, "status": "failed", "wait_reason": "soulseek"}""")))
@@ -293,8 +297,39 @@ class RequestRulesTest {
         val bare = StorageHealth(ok = false, path = "/music", op = "mkdir", error = "Read-only file system (os error 30)")
         assertEquals("Imports are paused: /music is not writable – mkdir: Read-only file system (os error 30).", RequestRules.storageBanner(bare, admin = true))
         assertEquals(RequestRules.PLAIN_BANNER, RequestRules.storageBanner(bare, admin = false))
-        assertEquals("Imports are still paused" to "warn", RequestRules.checkToast(bare))
-        assertEquals("Imports resumed" to "ok", RequestRules.checkToast(StorageHealth(ok = true)))
+        assertEquals("Imports are still paused" to "warn", RequestRules.checkToast(bare, before = bare))
+        assertEquals("Imports resumed" to "ok", RequestRules.checkToast(StorageHealth(ok = true), before = bare))
+        assertEquals(5_000L, RequestRules.pollMillis(bare))
+        assertEquals(30_000L, RequestRules.pollMillis(StorageHealth(ok = true)))
+    }
+
+    /** A request waiting for a downloads folder (servers since 0.33) and the banner of the folder for admins. */
+    @Test
+    fun aRequestWaitingForTheDownloadsFolder() {
+        val r = row("""{"id": 21, "kind": "album", "artist": "Duumu", "title": "Illuminate EP", "status": "waiting", "source": "torznab",
+            "message": "Waiting for the downloads folder – /downloads/torrents is missing", "wait_reason": "waiting_disk", "next_try_at": null}""")
+        assertEquals("Waiting for the downloads folder", RequestRules.badgeLabel(r))
+        assertEquals("Waiting – the downloads folder can't be written now", RequestRules.statusText(r))
+        assertEquals("Waiting", RequestRules.badgeLabel(row("""{"id": 22, "status": "waiting", "wait_reason": "soulseek"}""")))
+        assertEquals("Failed", RequestRules.badgeLabel(row("""{"id": 23, "status": "failed", "wait_reason": "waiting_disk"}""")))
+        val s = (EncoreJson.parseToJsonElement("""{"ok": true, "downloads": {"ok": false, "waiting": 2,
+            "text": "The downloads folder /downloads is read-only – check the disk (dmesg, fsck) or the mount"}}""") as JsonObject).decodeModel(StorageHealth.serializer())!!
+        assertEquals("The downloads folder /downloads is read-only – check the disk (dmesg, fsck) or the mount", RequestRules.downloadsBanner(s, admin = true))
+        assertEquals("The downloads folder /downloads is read-only – check the disk (dmesg, fsck) or the mount", RequestRules.banner(s, admin = true))
+        assertNull("members get no banner for it", RequestRules.banner(s, admin = false))
+        assertTrue(RequestRules.failing(s))
+        assertEquals("A downloads folder still can't be written" to "warn", RequestRules.checkToast(s, before = s))
+        assertEquals("a failing downloads folder is asked for every 15 s", 15_000L, RequestRules.pollMillis(s))
+        // Check again on the downloads sentence: imports were never paused, so they don't "resume"
+        val fine = StorageHealth(ok = true, downloads = DownloadsHealth(ok = true))
+        assertEquals("The downloads folders can be written" to "ok", RequestRules.checkToast(fine, before = s))
+        assertEquals("Still checking the downloads folders" to "warn", RequestRules.checkToast(StorageHealth(ok = true, downloads = DownloadsHealth(ok = true, checking = true)), before = s))
+        // both at once: one banner, the imports first
+        val both = StorageHealth(ok = false, text = "Imports are paused: x", downloads = s.downloads)
+        assertEquals("Imports are paused: x\nThe downloads folder /downloads is read-only – check the disk (dmesg, fsck) or the mount", RequestRules.banner(both, admin = true))
+        // an older server: no `downloads`
+        assertNull(RequestRules.downloadsBanner(StorageHealth(ok = true), admin = true))
+        assertFalse(RequestRules.failing(StorageHealth(ok = true)))
         // the server's JSON as it comes
         val decoded = (EncoreJson.parseToJsonElement("""{"ok": false, "since": 1792426891.6, "checked_at": 1792426891.6, "next_check_at": 1792427491.6, "path": "/music", "op": "mkdir",
             "error": "Input/output error (os error 5)", "errno": 5, "step": "import", "waiting": 3, "text": null}""") as JsonObject).decodeModel(StorageHealth.serializer())!!
@@ -618,5 +653,132 @@ class RequestRulesTest {
         val lone = RequestRules.details(row("""{"id": 6, "status": "failed", "anyway": {"action": "download", "id": 9, "text": "$because"}}"""), admin = false, ago = "1m ago", date = date)
         assertEquals(because, lone.anyway)
         assertEquals("", lone.anywayFrom)
+    }
+
+    // ---- Download now (Oct 21) ------------------------------------------------------------------------------------
+
+    // a request in the streamrip line, pressed by carol, as GET /api/requests sends it (download-now.md §3.2)
+    private val inLine = """{"id": 12, "kind": "album", "status": "queued", "title": "Illuminate EP", "artist": "Duumu", "album": "Illuminate EP",
+        "source": "streamrip", "message": "2nd in line for Deezer", "attempts": 1, "username": "carol",
+        "can_download_now": true,
+        "download_now": {"act": "line", "title": "Go first in line for Deezer", "until": null},
+        "line": {"source": "streamrip", "label": "Deezer", "position": 2, "waiting": 5, "running": 1, "limit": 1,
+                 "limit_text": "1 download at a time", "first": false, "text": "2nd in line for Deezer"},
+        "remote_queue": null, "stalled_since": null,
+        "pressed": {"by": "carol", "at": 1792500300.0}}"""
+
+    // a Soulseek download queued at alice, and a torrent with no progress (one row each)
+    private val remote = """{"id": 13, "kind": "album", "status": "downloading", "source": "slskd", "message": "Queued by alice – 12th in their queue, 0/12 files",
+        "can_download_now": true,
+        "download_now": {"act": "switch", "title": "Switch to a user with a free upload slot – it is 12th in alice's queue"},
+        "line": null, "remote_queue": {"user": "alice", "place": 12, "since": 1792500000.0, "text": "12th in alice's upload queue"},
+        "stalled_since": null, "pressed": null}"""
+
+    @Test
+    fun downloadNowOnlyWhereTheServerOffersIt() {
+        val r = row(inLine)
+        assertTrue(RequestRules.canDownloadNow(r))
+        assertEquals("Go first in line for Deezer", RequestRules.downloadNowHelp(r))
+        assertEquals("line", r.downloadNow?.act)
+        assertEquals(2, r.line?.position)
+        assertEquals(1, r.line?.limit)
+        assertEquals("carol", r.pressed?.by)
+        // the row reads the line's words as its message (the server writes them)
+        assertTrue(RequestRules.statusLine(r, admin = true, ago = "1m ago").contains("2nd in line for Deezer"))
+        // false: no button, no help line
+        val no = row("""{"id": 14, "status": "searching", "can_download_now": false, "download_now": null}""")
+        assertFalse(RequestRules.canDownloadNow(no))
+        assertEquals("", RequestRules.downloadNowHelp(no))
+        // an older server sends no such field: no button, and no Download all now
+        val old = row("""{"id": 15, "status": "queued"}""")
+        assertNull(old.canDownloadNow)
+        assertFalse(RequestRules.canDownloadNow(old))
+        assertNull(old.downloadNow)
+        assertNull(old.line)
+        assertEquals(0.0, old.stalledSince, 0.0)
+        assertFalse(RequestRules.hasDownloadNow(listOf(old)))
+        assertFalse(RequestRules.hasDownloadNow(emptyList()))
+        // a newer server: Download all now, even when no row offers its own button
+        assertTrue(RequestRules.hasDownloadNow(listOf(old, no)))
+        // odd values never cost the row
+        val odd = row("""{"id": 16, "status": "queued", "can_download_now": 1, "download_now": "x", "line": [], "remote_queue": 5, "pressed": "carol"}""")
+        assertTrue(RequestRules.canDownloadNow(odd))
+        assertNull(odd.line)
+        assertNull(odd.remoteQueue)
+        assertNull(odd.pressed)
+        assertEquals("", RequestRules.downloadNowHelp(odd))
+        // a remote queue whose place is unknown
+        val unknown = row("""{"id": 17, "status": "downloading", "remote_queue": {"user": "alice", "place": null, "since": 1792500000, "text": "in alice's upload queue"}}""")
+        assertEquals(0, unknown.remoteQueue?.place)
+        assertEquals("in alice's upload queue", unknown.remoteQueue?.text)
+    }
+
+    private fun answer(json: String): DownloadNowResult =
+        (EncoreJson.parseToJsonElement(json) as JsonObject).decodeModel(DownloadNowResult.serializer())!!
+
+    @Test
+    fun downloadNowToastIsTheServersWords() {
+        val line = answer("""{"ok": true, "action": "line", "text": "Next in line for Deezer (1 download at a time)", "status": "queued",
+            "line": {"source": "streamrip", "label": "Deezer", "position": 1, "waiting": 5, "running": 1, "limit": 1, "limit_text": "1 download at a time", "first": true, "text": "Next in line for Deezer"}}""")
+        assertEquals("Next in line for Deezer (1 download at a time)" to "ok", RequestRules.downloadNowToast(line))
+        assertEquals(1, line.line?.position)
+        assertTrue(line.line!!.first)
+        val later = answer("""{"ok": false, "action": "later", "text": "The Soulseek server isn't answering logins – Encore tries again at 14:20 so it isn't shut out", "at": 1792501200, "status": "waiting"}""")
+        assertEquals("The Soulseek server isn't answering logins – Encore tries again at 14:20 so it isn't shut out" to "warn", RequestRules.downloadNowToast(later))
+        assertEquals(1792501200.0, later.at, 0.0)
+        val kept = answer("""{"ok": false, "action": "kept", "text": "No one with a free upload slot has it – it stays 12th in alice's queue", "at": null, "status": "downloading"}""")
+        assertEquals("warn", RequestRules.downloadNowToast(kept)?.second)
+        assertEquals(0.0, kept.at, 0.0)
+        assertEquals("Switched to bob, who has a free upload slot (FLAC, 12 files)" to "ok",
+            RequestRules.downloadNowToast(answer("""{"ok": true, "action": "switched", "text": "Switched to bob, who has a free upload slot (FLAC, 12 files)", "status": "downloading"}""")))
+        // without words: a press that started something says so; one that changed nothing says nothing
+        assertEquals("Starting now" to "ok", RequestRules.downloadNowToast(answer("""{"ok": true, "action": "now"}""")))
+        assertNull(RequestRules.downloadNowToast(answer("""{"ok": false, "action": "later", "text": " "}""")))
+    }
+
+    @Test
+    fun downloadAllNowToastIsTheServersWords() {
+        val text = "Woke 3 waiting requests; 8 stay in line: Deezer 1 download at a time (6 in line), YouTube 2 downloads at a time (2 in line). Soulseek asked Encore to wait – next attempt at 14:20"
+        val r = (EncoreJson.parseToJsonElement("""{"ok": true, "pressed": 8, "woken": 3, "later": 1,
+            "lines": [{"source": "streamrip", "label": "Deezer", "limit": 1, "running": 1, "waiting": 6},
+                      {"source": "ytdlp", "label": "YouTube", "limit": 2, "running": 2, "waiting": 2}, "odd"],
+            "text": "$text"}""") as JsonObject).decodeModel(DownloadAllNowResult.serializer())!!
+        assertEquals(8, r.pressed)
+        assertEquals(3, r.woken)
+        assertEquals(1, r.later)
+        assertEquals(listOf("Deezer", "YouTube"), r.lines.map { it.label })
+        assertEquals(6, r.lines[0].waiting)
+        assertEquals(text to "ok", RequestRules.downloadAllNowToast(r))
+        val nothing = DownloadAllNowResult(ok = false, text = "Nothing is waiting – every request is downloading or done")
+        assertEquals("Nothing is waiting – every request is downloading or done" to "warn", RequestRules.downloadAllNowToast(nothing))
+        assertEquals(RequestRules.NOTHING_WAITING to "warn", RequestRules.downloadAllNowToast(DownloadAllNowResult()))
+    }
+
+    @Test
+    fun theDetailsAndTheCopiedTextHaveTheLineTheQueueAndThePress() {
+        val r = row(inLine)
+        assertEquals(
+            listOf("In line: 2nd in line for Deezer (1 download at a time)", "Download now: asked by carol at <1792500300>"),
+            RequestRules.downloadNowLines(r, date),
+        )
+        val text = RequestRules.requestText(r, "0.34.0", date)
+        assertTrue(text, text.contains("\nMessage: 2nd in line for Deezer\nIn line: 2nd in line for Deezer (1 download at a time)\nDownload now: asked by carol at <1792500300>\nAttempts: 1\n"))
+        val d = RequestRules.details(r, admin = true, ago = "1m ago", date = date)
+        assertTrue(d.facts.toString(), d.facts.contains("In line: 2nd in line for Deezer (1 download at a time)"))
+        assertTrue(d.facts.toString(), d.facts.contains("Download now: asked by carol at <1792500300>"))
+        // the Soulseek user's upload queue
+        assertEquals(listOf("Soulseek queue: 12th in alice's upload queue (since <1792500000>)"), RequestRules.downloadNowLines(row(remote), date))
+        // a torrent with no progress
+        val stalled = row("""{"id": 18, "status": "downloading", "source": "torznab", "stalled_since": 1792499000}""")
+        assertEquals(listOf("No progress since: <1792499000>"), RequestRules.downloadNowLines(stalled, date))
+        assertTrue(RequestRules.requestText(stalled, "", date).contains("\nNo progress since: <1792499000>\n"))
+        // what is known of a press, and a line without its limit's words
+        val bare = row("""{"id": 19, "status": "queued", "line": {"text": "Next in line for Soulseek"}, "pressed": {"by": "", "at": 1792500300}}""")
+        assertEquals(listOf("In line: Next in line for Soulseek", "Download now: asked at <1792500300>"), RequestRules.downloadNowLines(bare, date))
+        // nothing of it on a row from an older server, and none in its copied text
+        val old = row(illuminate)
+        assertEquals(emptyList<String>(), RequestRules.downloadNowLines(old, date))
+        val oldText = RequestRules.requestText(old, "", date)
+        assertFalse(oldText, oldText.contains("In line") || oldText.contains("Download now") || oldText.contains("No progress"))
     }
 }

@@ -7,16 +7,23 @@
 //! the same names ending in `_r` with the romanization, wherever one is known; clients choose what to
 //! show from the mode.
 //!
-//! Where translations come from, strongest first: a manual correction (⋯ → Edit translation, shared by
-//! everyone reading the same language), official ones (MusicBrainz pseudo-releases and aliases, Apple's
-//! English names for Japanese releases; see official.rs), then the local model (llama.cpp with a Qwen3
-//! GGUF, the "Translator" download tool; see llama.rs). The background worker goes through the library
-//! in small batches at low priority; titles a listener has on screen are queued first.
+//! Where translations come from, strongest first (tiers.rs): a manual correction (⋯ → Edit translation,
+//! shared by everyone reading the same language), official ones (MusicBrainz pseudo-releases and aliases,
+//! Apple's English names for Japanese releases; see official.rs), the romanization built into the server
+//! (romanize.rs: kana, Hangul, Cyrillic, Greek and more from tables), DeepL with the owner's API key (deepl.rs),
+//! then the local model when it is installed (llama.cpp with a Qwen3 GGUF; see llama.rs) – each optional. The
+//! background worker goes through the library in small batches at low priority; titles a listener has on
+//! screen are queued first.
+pub mod deepl;
+pub mod hangul;
 pub mod llama;
 pub mod official;
 pub mod prompt;
+pub mod romaji;
+pub mod romanize;
 pub mod script;
 pub mod store;
+pub mod tiers;
 
 use crate::Ctx;
 use encore_core::ids::is_mbid;
@@ -48,6 +55,8 @@ struct Inner {
     reaper: AtomicBool,
     /// the library's texts to translate, per target language (see `library_backlog`)
     backlog: Mutex<HashMap<&'static str, Backlog>>,
+    /// DeepL paused after an error (deepl::Hold)
+    deepl_hold: Mutex<Option<deepl::Hold>>,
 }
 
 /// The library's candidates for one target language, worked out once per artist index (a change to the songs
@@ -120,6 +129,28 @@ impl Translator {
     /// Start a pass now (a listener turned translations on, the Translator was installed).
     pub fn wake(&self) {
         self.0.wake.notify_one();
+    }
+
+    /// Why DeepL pauses now, if it does (DeepL's settings at `generation`, `Tiers::deepl_generation`: a change
+    /// since the error lifts it).
+    pub fn deepl_hold(&self, generation: u64) -> Option<deepl::Error> {
+        let h = self.0.deepl_hold.lock().unwrap_or_else(|e| e.into_inner());
+        h.as_ref().filter(|h| h.holds(encore_db::now(), generation)).map(|h| h.error.clone())
+    }
+
+    /// Whether DeepL may be asked now.
+    pub fn deepl_usable(&self, generation: u64) -> bool {
+        self.deepl_hold(generation).is_none()
+    }
+
+    /// DeepL failed: pause it (how long depends on the error).
+    pub fn deepl_failed(&self, e: deepl::Error, generation: u64) {
+        *self.0.deepl_hold.lock().unwrap_or_else(|e| e.into_inner()) = Some(deepl::Hold::after(e, encore_db::now(), generation));
+    }
+
+    /// DeepL answered: no pause.
+    pub fn deepl_worked(&self) {
+        *self.0.deepl_hold.lock().unwrap_or_else(|e| e.into_inner()) = None;
     }
 }
 
@@ -284,12 +315,29 @@ fn rows_for(db: &Db, texts: &[String]) -> Vec<Row> {
     out
 }
 
-/// Translate these texts for `target`: official sources (by the library's MusicBrainz ids) first,
-/// then the model for what is still missing.
+/// Translate these texts for `target`, source by source in the tier order (tiers.rs): the official names (by the
+/// library's MusicBrainz ids), the built-in romanization, DeepL, then the model for what is still missing. A
+/// source that is switched off is left out.
 async fn process(st: &impl Ctx, target: &'static str, items: Vec<Pending>, model_ok: &mut bool) {
     if items.is_empty() {
         return;
     }
+    let t = tiers::Tiers::read(st.cfg());
+    if t.official {
+        official_pass(st, target, &items).await;
+    }
+    if t.romanize {
+        romanize_pass(st, target, &items).await;
+    }
+    deepl_pass(st, target, &items).await;
+    if t.model {
+        model_pass(st, target, items, model_ok).await;
+    }
+}
+
+/// The official names of these texts (MusicBrainz releases and artists by the library's ids, Apple's English
+/// titles); every text is stamped as asked.
+async fn official_pass(st: &impl Ctx, target: &'static str, items: &[Pending]) {
     let want: HashMap<String, &Pending> = items.iter().map(|p| (p.text.clone(), p)).collect();
     let texts: Vec<String> = want.keys().cloned().collect();
     let db = st.db().clone();
@@ -332,24 +380,60 @@ async fn process(st: &impl Ctx, target: &'static str, items: Vec<Pending>, model
             Err(e) => tracing::debug!("translate: MusicBrainz artist {id}: {e}"),
         }
     }
-    {
-        let db = st.db().clone();
-        let items2 = items.clone();
-        let _ = tokio::task::spawn_blocking(move || {
-            for (kind, text, t, r) in &found {
-                let _ = store::put(&db, text, target, kind.as_str(), t.as_deref(), r.as_deref(), store::Source::Official);
-            }
-            for p in &items2 {
-                let _ = store::mark(&db, &p.text, target, p.kind.as_str(), store::Source::Official);
-            }
-        }).await;
+    let db = st.db().clone();
+    let items2 = items.to_vec();
+    let _ = tokio::task::spawn_blocking(move || {
+        for (kind, text, t, r) in &found {
+            let _ = store::put(&db, text, target, kind.as_str(), t.as_deref(), r.as_deref(), store::Source::Official);
+        }
+        for p in &items2 {
+            let _ = store::mark(&db, &p.text, target, p.kind.as_str(), store::Source::Official);
+        }
+    }).await;
+}
+
+/// The built-in romanization of these texts (those in a script it romanizes); each is stamped as seen, also
+/// when it has none (Japanese with kanji).
+async fn romanize_pass(st: &impl Ctx, target: &'static str, items: &[Pending]) {
+    let found: Vec<(String, Kind, Option<String>)> = items.iter()
+        .filter(|p| romanize::supported(script::detect(&p.text)))
+        .map(|p| (p.text.clone(), p.kind, romanize::romanize(&p.text)))
+        .collect();
+    if found.is_empty() {
+        return;
     }
-    model_pass(st, target, items, model_ok).await;
+    let db = st.db().clone();
+    let _ = tokio::task::spawn_blocking(move || {
+        for (text, kind, r) in &found {
+            // a letter-by-letter spelling only fills a gap (romanize.rs)
+            let source = if romanize::letters_only(script::detect(text)) { store::Source::Letters } else { store::Source::Romanized };
+            let _ = store::put(&db, text, target, kind.as_str(), None, r.as_deref(), source);
+        }
+    }).await;
+}
+
+/// DeepL for the song and album titles among these that have no translation yet, or only the model's (deepl.rs
+/// decides whether it may ask: switched on, a key, not paused, within the budget).
+async fn deepl_pass(st: &impl Ctx, target: &'static str, items: &[Pending]) {
+    let texts: Vec<String> = items.iter().filter(|p| deepl::wanted(p.kind)).map(|p| p.text.clone()).collect();
+    if texts.is_empty() || !tiers::Tiers::read(st.cfg()).deepl_ready() {
+        return;
+    }
+    let db = st.db().clone();
+    let open = tokio::task::spawn_blocking(move || store::improvable(&db, target, &texts, store::Source::Deepl)).await.unwrap_or_default();
+    let list: Vec<(String, Kind)> = items.iter().filter(|p| deepl::wanted(p.kind) && open.contains(&p.text)).map(|p| (p.text.clone(), p.kind)).collect();
+    if list.is_empty() {
+        return;
+    }
+    if let Err(e) = deepl::pass(st, target, &list).await {
+        let level = if matches!(e, deepl::Error::Budget | deepl::Error::Busy) { "info" } else { "warning" };
+        st.db().log(level, &format!("Translations: {e}"));
+    }
 }
 
 /// Ask the model for the items whose row still misses a translation or a romanization.
 async fn model_pass(st: &impl Ctx, target: &'static str, items: Vec<Pending>, model_ok: &mut bool) {
-    if !*model_ok || items.is_empty() || !llama::ready(st) {
+    if !*model_ok || items.is_empty() || !st.cfg().bool("translate_local_model") || !llama::ready(st) {
         return;
     }
     let db = st.db().clone();
@@ -447,6 +531,8 @@ async fn run_pass(st: &impl Ctx) {
     let tr = st.library().translator.clone();
     let targets = tokio::task::spawn_blocking(move || tr.active_targets(&db)).await.unwrap_or_default();
     let mut model_ok = true;
+    // the rows each source was given in this pass: a row it cannot stamp is not given twice
+    let mut backfilled: HashSet<(store::Source, String)> = HashSet::new();
     loop {
         let queued = st.library().translator.take_queued(BATCH);
         if !queued.is_empty() {
@@ -473,11 +559,14 @@ async fn run_pass(st: &impl Ctx) {
             }
         }
         if !did {
+            did = backfill(st, &targets, &mut backfilled).await;
+        }
+        if !did {
             break;
         }
     }
     // rows the official pass looked at before the Translator was installed
-    if st.cfg().bool("translate_background") && llama::ready(st) {
+    if st.cfg().bool("translate_background") && st.cfg().bool("translate_local_model") && llama::ready(st) {
         for &t in &targets {
             loop {
                 if !model_ok {
@@ -509,6 +598,61 @@ async fn run_pass(st: &impl Ctx) {
             }
         }
     }
+}
+
+/// Rows a source has not looked at yet – made while it was off, or before this version – one batch per source
+/// and target language, in the tier order (the model's turn comes after, in `run_pass`). Whether there were
+/// any: each batch is stamped, and `given` keeps a row from going to the same source twice in a pass, so the
+/// passes come to an end.
+async fn backfill(st: &impl Ctx, targets: &[&'static str], given: &mut HashSet<(store::Source, String)>) -> bool {
+    use store::Source;
+    let t = tiers::Tiers::read(st.cfg());
+    let mut did = false;
+    for &target in targets {
+        let mut sources = vec![];
+        if t.official {
+            sources.push(Source::Official);
+        }
+        if t.romanize {
+            sources.push(Source::Romanized);
+        }
+        if t.deepl_ready() && deepl::target_lang(target).is_some() && st.library().translator.deepl_usable(t.deepl_generation()) {
+            sources.push(Source::Deepl);
+        }
+        for source in sources {
+            let limit = match source {
+                Source::Romanized => 500,
+                Source::Deepl => deepl::BATCH,
+                _ => BATCH,
+            };
+            let db = st.db().clone();
+            let rows = tokio::task::spawn_blocking(move || store::unseen(&db, target, source, limit)).await.unwrap_or_default();
+            let rows: Vec<(String, String)> = rows.into_iter().filter(|(text, _)| given.insert((source, format!("{target}\u{0}{text}")))).collect();
+            if rows.is_empty() {
+                continue;
+            }
+            did = true;
+            let items: Vec<Pending> = rows.into_iter().map(|(text, kind)| Pending { text, kind: Kind::parse(&kind), artist: None, target }).collect();
+            match source {
+                Source::Official => official_pass(st, target, &items).await,
+                Source::Romanized => romanize_pass(st, target, &items).await,
+                // what DeepL did not get to (it paused) stays unseen until the pause ends
+                _ => deepl_pass(st, target, &items).await,
+            }
+            if source != Source::Romanized {
+                tokio::time::sleep(PAUSE).await;
+            }
+            if st.library().translator.queued() > 0 {
+                return true;
+            }
+        }
+    }
+    did
+}
+
+/// One pass now, as the worker makes them (tests; the worker runs them by itself).
+pub async fn pass_now(st: &impl Ctx) {
+    run_pass(st).await;
 }
 
 /// The background worker: a pass when woken (titles on screen, settings changed) and every 30

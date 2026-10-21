@@ -126,7 +126,7 @@ pub async fn poll(st: &impl Ctx, hash: &str) -> anyhow::Result<Poll> {
     }
     let speed = t["download_payload_rate"].as_f64().unwrap_or(0.0) / 1e6;
     let msg = if state == "Downloading" { format!("Deluge: {speed:.1} MB/s") } else { format!("Deluge: {}", state.to_lowercase()) };
-    Ok(Poll::Progress(pct, msg))
+    Ok(if matches!(state, "Checking" | "Moving" | "Allocating") { Poll::Busy(pct, msg) } else { Poll::Progress(pct, msg) })
 }
 
 pub async fn remove(st: &impl Ctx, hash: &str) {

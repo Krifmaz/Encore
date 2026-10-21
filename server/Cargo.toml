@@ -59,6 +59,8 @@ tower = { version = "0.5", features = ["util"] }
 regex = "1.13.1"
 fancy-regex = "0.19.2"
 unicode-normalization = "0.1.25"
+# ASCII spellings of Hebrew, Arabic, Thai and Devanagari titles (translate/romanize.rs)
+deunicode = "1.6.0"
 md5 = "0.8.1"
 flate2 = "1"
 tokio-tungstenite = "0.26"

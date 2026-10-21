@@ -253,8 +253,9 @@ async fn serve(app: axum::Router) -> String {
     url
 }
 
-/// The requests' own searches go to Prowlarr two at a time (a discography queues every album at once),
-/// and the picker's don't wait behind them (diagnosis item 7).
+/// The requests' own searches go to Prowlarr two at a time (a discography queues every album at once) – in
+/// the indexers' line the worker takes around them –, and the picker's don't wait behind them (diagnosis
+/// item 7).
 #[tokio::test]
 async fn request_searches_take_turns() {
     use std::sync::atomic::{AtomicUsize, Ordering};
@@ -274,15 +275,23 @@ async fn request_searches_take_turns() {
     let url = serve(app).await;
     let st = crate::test_ctx::TestCtx::new("turns");
     st.cfg.set_many(&json!({ "prowlarr_url": url, "prowlarr_api_key": "k" }));
-    let all = (0..6).map(|i| search(&st, if i % 2 == 0 { "a b" } else { "c d" }));
+    let lines = crate::line::Lines::default();
+    let all = (0..6).map(|i| {
+        let lines = lines.clone();
+        let st = &st;
+        async move {
+            let _slot = lines.indexers.acquire(i, crate::line::TORRENTS, &lines.pressed, || {}).await;
+            search(st, if i % 2 == 0 { "a b" } else { "c d" }).await
+        }
+    });
     for r in futures_util::future::join_all(all).await {
         assert!(r.unwrap().is_empty());
     }
     assert_eq!(most.load(Ordering::SeqCst), 2, "two at a time");
     // the picker's search goes at once, even while two requests' searches run
     most.store(0, Ordering::SeqCst);
-    let _a = SEARCHES.acquire().await.unwrap();
-    let _b = SEARCHES.acquire().await.unwrap();
+    let _a = lines.indexers.acquire(10, crate::line::TORRENTS, &lines.pressed, || {}).await;
+    let _b = lines.indexers.acquire(11, crate::line::TORRENTS, &lines.pressed, || {}).await;
     let r = tokio::time::timeout(std::time::Duration::from_secs(5), search_in(&st, "x y", &["3000"])).await;
     assert!(r.is_ok_and(|r| r.is_ok()));
 }

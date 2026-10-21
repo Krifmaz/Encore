@@ -598,7 +598,9 @@ data class RequestRow(
     @Serializable(with = RequestCandidate.OrNull::class) val candidate: RequestCandidate? = null,
     @SerialName("updated_at") val updatedAt: LDouble = 0.0,
     /**
-     * What a `waiting` request waits for: `soulseek` (the session is down), `storage_import` (the files are
+     * What a `waiting` request waits for: `soulseek` (the session is down), `waiting_disk` (a folder its source saves in
+     * can't be written, servers since 0.33), `plugin_install` (its source's plugin is still being installed after the
+     * upgrade, servers since 0.32), `storage_import` (the files are
      * downloaded, the import waits for the storage) or `storage_download` (the staging folder failed before any file
      * existed); "" for every other status.
      */
@@ -619,6 +621,21 @@ data class RequestRow(
     @Serializable(with = AnywayOffer.OrNull::class) val anyway: AnywayOffer? = null,
     /** The request runs (or ran and failed) without the audio check. */
     @SerialName("skip_check") val skipCheck: LBool = false,
+    /**
+     * Download now (Oct 21): the server offers the button on this row. Null from an older server (the key is missing):
+     * no Download now and no Download all now there.
+     */
+    @SerialName("can_download_now") val canDownloadNow: LBoolOrNull = null,
+    /** What Download now does on this row (`act`, the server's `title`, `until`); null when it isn't offered. */
+    @SerialName("download_now") @Serializable(with = DownloadNowOffer.OrNull::class) val downloadNow: DownloadNowOffer? = null,
+    /** The source's line the request waits in ("2nd in line for Deezer"); null when it isn't in one. */
+    @Serializable(with = RequestLine.OrNull::class) val line: RequestLine? = null,
+    /** A Soulseek download queued at the remote user ("12th in alice's upload queue"); null otherwise. */
+    @SerialName("remote_queue") @Serializable(with = RemoteQueue.OrNull::class) val remoteQueue: RemoteQueue? = null,
+    /** A torrent or Usenet download with no progress since this time (unix seconds; 0 otherwise). */
+    @SerialName("stalled_since") val stalledSince: LDouble = 0.0,
+    /** Who pressed Download now and when, while the server remembers the press; null otherwise. */
+    @Serializable(with = DownloadNowPress.OrNull::class) val pressed: DownloadNowPress? = null,
 ) : Checked<RequestRow> {
     val isActive: Boolean get() = status in ACTIVE_STATUSES
 
@@ -742,8 +759,26 @@ data class StorageHealth(
     val step: LString = "",
     val waiting: LInt = 0,
     val text: LString = "",
+    @Serializable(with = DownloadsHealth.OrNull::class) val downloads: DownloadsHealth? = null,
 ) {
     val paused: Boolean get() = ok == false
+}
+
+/**
+ * `downloads` of GET /api/requests/storage (servers since 0.33): whether every folder downloads are saved in can be
+ * written. `ok` false means requests that save in a failing one wait; admins also get `text`, the banner's sentence
+ * ("The downloads folder /downloads is read-only – check the disk (dmesg, fsck) or the mount"), and `waiting`.
+ */
+@Serializable
+data class DownloadsHealth(
+    val ok: LBoolOrNull = null,
+    val text: LString = "",
+    val waiting: LInt = 0,
+    /** a probe still runs (Check again answered before it ended: a folder that doesn't answer) */
+    val checking: LBool = false,
+) {
+    val failing: Boolean get() = ok == false
+    internal object OrNull : Nested<DownloadsHealth>(serializer())
 }
 
 /** POST /api/requests/link: `mode` direct (one download) or matched (songs requested one by one). */
@@ -770,6 +805,92 @@ data class LinkProbe(
 
 /** POST /api/requests/retry-failed: how many were queued again, how many the server refused and why. */
 data class RetryFailedResult(val retried: Int, val skipped: Int, val why: String)
+
+// ---- Download now (Oct 21: "for the que can i get a download now button") -------------------------------------
+
+/**
+ * `download_now` of a request row: what the button does (`act`: line | wake | switch | next_source), the server's
+ * `title` ("Go first in line for Deezer", "Soulseek asked Encore to wait – next attempt at 14:20") and `until`, the
+ * time a "later" press would name (0 when none).
+ */
+@Serializable
+data class DownloadNowOffer(
+    val act: LString = "",
+    val title: LString = "",
+    val until: LDouble = 0.0,
+) {
+    internal object OrNull : Nested<DownloadNowOffer>(serializer())
+}
+
+/**
+ * `line` of a request row (and one entry of Download all now's `lines`): the source's line a request waits in, behind
+ * the source's limit. `label` is the source in plain words ("Deezer"), `position` 1-based among the waiters, `first`
+ * that Download now was pressed for it, `limit_text` "1 download at a time", `text` "2nd in line for Deezer".
+ */
+@Serializable
+data class RequestLine(
+    val source: LString = "",
+    val label: LString = "",
+    val position: LInt = 0,
+    val waiting: LInt = 0,
+    val running: LInt = 0,
+    val limit: LInt = 0,
+    @SerialName("limit_text") val limitText: LString = "",
+    val first: LBool = false,
+    val text: LString = "",
+) {
+    internal object OrNull : Nested<RequestLine>(serializer())
+}
+
+/** `remote_queue` of a request row: the Soulseek user whose upload queue holds it, its place (0: unknown), since when, the words. */
+@Serializable
+data class RemoteQueue(
+    val user: LString = "",
+    val place: LInt = 0,
+    val since: LDouble = 0.0,
+    val text: LString = "",
+) {
+    internal object OrNull : Nested<RemoteQueue>(serializer())
+}
+
+/** `pressed` of a request row: who asked to download it now, and when. */
+@Serializable
+data class DownloadNowPress(
+    val by: LString = "",
+    val at: LDouble = 0.0,
+) {
+    internal object OrNull : Nested<DownloadNowPress>(serializer())
+}
+
+/**
+ * POST /api/requests/{id}/download-now: `ok` true when something changed or started (`action` line | now | switched |
+ * switching | next_source), false when nothing could be sooner (later | kept, `at` when known); `text` is the toast,
+ * `status` the request's status after the press, `line` its line after a "line" answer.
+ */
+@Serializable
+data class DownloadNowResult(
+    val ok: LBool = false,
+    val action: LString = "",
+    val text: LString = "",
+    val at: LDouble = 0.0,
+    val status: LString = "",
+    @Serializable(with = RequestLine.OrNull::class) val line: RequestLine? = null,
+)
+
+/**
+ * POST /api/requests/download-now (admins, Download all now): how many requests moved up in their lines (`pressed`),
+ * how many waits were woken (`woken`) and how many must wait longer (`later`), each line's limit and length, and the
+ * toast's `text`.
+ */
+@Serializable
+data class DownloadAllNowResult(
+    val ok: LBool = false,
+    val pressed: LInt = 0,
+    val woken: LInt = 0,
+    val later: LInt = 0,
+    @Serializable(with = Items::class) val lines: List<RequestLine> = emptyList(),
+    val text: LString = "",
+)
 
 // ---- Activity (admins: web-rs/src/pages/activity.rs) -------------------------------------------------------------
 

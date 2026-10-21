@@ -171,9 +171,9 @@ fun CardBox(modifier: Modifier = Modifier, flat: Boolean = false, content: @Comp
 
 /** The web's `statusBadge(status)`: "Awaiting approval", "Queued", "Available"… in the status colour. */
 @Composable
-fun StatusBadge(status: String, modifier: Modifier = Modifier) {
+fun StatusBadge(status: String, modifier: Modifier = Modifier, label: String = statusLabel(status)) {
     if (status.isEmpty()) return
-    Badge(statusLabel(status), kind = statusKind(status), modifier = modifier)
+    Badge(label, kind = statusKind(status), modifier = modifier)
 }
 
 /** The web's `availability(item)`: "In library" when owned, else the request status, else nothing. */

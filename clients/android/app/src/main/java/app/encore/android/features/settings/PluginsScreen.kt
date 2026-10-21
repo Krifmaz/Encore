@@ -586,6 +586,7 @@ private fun StateDot(tone: String) {
     val color = when (tone) {
         "ok" -> EncoreColors.Ok
         "err" -> EncoreColors.Err
+        "warn" -> EncoreColors.Warn
         else -> MaterialTheme.palette.faint
     }
     Box(Modifier.size(9.dp).clip(CircleShape).background(color))

@@ -93,7 +93,8 @@ private object AlbumModePref {
  * Requests (web-rs/src/pages/requests.rs, with the web Downloader's link box and bulk actions, download.rs): the list
  * with status filters, every row's buttons (common.rs), a tap for the whole message and log, a link box with the
  * album choice, Preview, Import as playlist and Exactly this link, Retry failed and Clear… beside Only mine (as the
- * web shows them), the storage banner while imports are paused, and for admins Activity in ⋯.
+ * web shows them), the admin's Download all now (servers with Download now), the storage banner while imports are
+ * paused, and for admins Activity in ⋯.
  */
 @OptIn(ExperimentalMaterial3Api::class, ExperimentalLayoutApi::class)
 @Composable
@@ -118,6 +119,8 @@ fun RequestsScreen(nav: Nav) {
     var clearMenu by remember { mutableStateOf(false) }
     // Retry failed on its way (its button waits)
     var retrying by remember { mutableStateOf(false) }
+    // Download all now on its way (its button waits)
+    var downloadingAll by remember { mutableStateOf(false) }
     val scrollBehavior = TopAppBarDefaults.enterAlwaysScrollBehavior()
     fun reload() { generation += 1 }
     val actions = rememberRequestActions(nav) { reload() }
@@ -171,6 +174,25 @@ fun RequestsScreen(nav: Nav) {
                 Toasts.show(e.message ?: "That didn't work", "err")
             }
             retrying = false
+        }
+    }
+    // Download all now (admins): wake every waiting request and move requests up in their lines (with Only mine, the
+    // admin's own first) – never more at once than each source allows; the server's words are the toast
+    fun downloadAllNow() {
+        if (downloadingAll) return
+        downloadingAll = true
+        scope.launch {
+            try {
+                val r = withContext(Dispatchers.IO) { features.downloadAllNow(mine) }
+                val (msg, kind) = RequestRules.downloadAllNowToast(r)
+                Toasts.show(msg, kind)
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                Toasts.show(e.message ?: "That didn't work", "err")
+            }
+            downloadingAll = false
+            reload()
         }
     }
     fun importAsPlaylist() {
@@ -288,6 +310,10 @@ fun RequestsScreen(nav: Nav) {
                             // only for those who may retry (Fix their own downloads), as the rows' Retry
                             if (RequestRules.mayFix(m)) {
                                 SmallButton("Retry failed", iconRes = R.drawable.ic_refresh, enabled = !retrying, modifier = Modifier.align(Alignment.CenterVertically)) { retryFailed() }
+                            }
+                            // admins, on a server with Download now (its rows say whether it offers the button)
+                            if (admin && RequestRules.hasDownloadNow(rows.orEmpty())) {
+                                SmallButton("Download all now", iconRes = R.drawable.ic_download, enabled = !downloadingAll, modifier = Modifier.align(Alignment.CenterVertically)) { downloadAllNow() }
                             }
                             Box(Modifier.align(Alignment.CenterVertically)) {
                                 SmallButton("Clear…", iconRes = R.drawable.ic_delete) { clearMenu = true }

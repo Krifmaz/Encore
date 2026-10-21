@@ -171,7 +171,7 @@ pub async fn poll(st: &impl Ctx, id: &str) -> anyhow::Result<Poll> {
     } else {
         format!("qBittorrent: {speed:.1} MB/s")
     };
-    Ok(Poll::Progress(pct, msg))
+    Ok(if busy { Poll::Busy(pct, msg) } else { Poll::Progress(pct, msg) })
 }
 
 pub async fn remove(st: &impl Ctx, id: &str) {

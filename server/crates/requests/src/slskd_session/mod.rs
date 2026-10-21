@@ -32,7 +32,7 @@ mod supervisor;
 
 pub use door::{DoorSeen, Pass, DOOR_WINDOW};
 pub use gate::{Turn, Who, PERSON_WAIT, RATE_LIMIT_PAUSE, RATE_LIMIT_TRIES, SPACING};
-pub use schedule::{backoff, classify, describe, jittered, read_line, span, Conn, Line, Reason, Refused, State, ATTEMPT_MAX, KICK_PAUSE, MIN_GAP, STABLE};
+pub use schedule::{backoff, classify, describe, jittered, read_line, span, AttemptNow, Conn, Line, Reason, Refused, State, ATTEMPT_MAX, KICK_PAUSE, MIN_GAP, PRESS_GAP, STABLE};
 pub use supervisor::supervisor;
 
 use crate::Ctx;
@@ -174,6 +174,17 @@ impl Session {
     pub fn reconnect_now(&self) -> Result<(), Refused> {
         let r = self.conn().reconnect_now(Instant::now(), encore_core::time::now());
         if r.is_ok() {
+            self.wake();
+        }
+        r
+    }
+
+    /// Download now on a request waiting for Soulseek ([`Conn::attempt_now`]): the planned attempt due now
+    /// where Encore's own schedule holds the session (the supervisor is woken), else when it can be.
+    pub fn attempt_now(&self) -> AttemptNow {
+        let r = self.conn().attempt_now(Instant::now());
+        if r == AttemptNow::Due {
+            tracing::info!("soulseek: an attempt is due now (Download now)");
             self.wake();
         }
         r
@@ -382,7 +393,8 @@ pub fn text_elsewhere(text: &str) -> String {
 
 /// Requests parked until Soulseek is back.
 pub fn parked(st: &impl Ctx) -> i64 {
-    st.db().one("SELECT COUNT(*) AS n FROM requests WHERE status IN ('waiting','queued') AND json_extract(detail, '$.soulseek_wait') IS NOT NULL", encore_db::p![])
+    st.db().one("SELECT COUNT(*) AS n FROM requests WHERE status IN ('waiting','queued') AND json_extract(detail, '$.soulseek_wait') IS NOT NULL
+                 AND json_extract(detail, '$.in_line') IS NULL", encore_db::p![])
         .ok().flatten().map(|r| encore_db::RowExt::i(&r, "n")).unwrap_or(0)
 }
 

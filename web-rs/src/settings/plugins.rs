@@ -208,10 +208,15 @@ pub fn badges_html(c: &Value) -> String {
     b.concat()
 }
 
-/// The dot beside an installed plugin's name: ok, a problem, or off.
+/// The dot beside an installed plugin's name: ok, a problem, needs setting up (it works but isn't signed in or
+/// has no address yet: `status.signed_in` false), or off.
 pub fn dot_html(c: &Value) -> String {
     if !c.truthy("installed") { return String::new(); }
-    let tone = if !c.truthy("enabled") { "" } else if c.truthy("last_error") || (c.g("status").is_object() && !c.g("status").truthy("ok")) { "err" } else if c.g("status").truthy("ok") { "ok" } else { "" };
+    let st = c.g("status");
+    let tone = if !c.truthy("enabled") { "" }
+        else if c.truthy("last_error") || (st.is_object() && !st.truthy("ok")) { "err" }
+        else if st.g("signed_in") == &Value::Bool(false) { "warn" }
+        else if st.truthy("ok") { "ok" } else { "" };
     format!(r##"<span class="dot {tone}" style="vertical-align:middle;margin-right:8px"></span>"##)
 }
 

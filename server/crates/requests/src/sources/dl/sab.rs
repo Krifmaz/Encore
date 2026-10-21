@@ -112,7 +112,8 @@ pub async fn poll(st: &impl Ctx, nzo: &str) -> anyhow::Result<Poll> {
     Ok(match s["status"].as_str().unwrap_or("") {
         "Completed" => Poll::Done(local(st, s["storage"].as_str().unwrap_or(""), "sab_download_path")),
         "Failed" => Poll::Failed(format!("SABnzbd: {}", s["fail_message"].as_str().unwrap_or("failed"))),
-        other => Poll::Progress(99.0, format!("SABnzbd: {other}")),
+        // downloaded, and SABnzbd verifies, repairs, unpacks or moves it
+        other => Poll::Busy(99.0, format!("SABnzbd: {other}")),
     })
 }
 

@@ -17,6 +17,26 @@ pub const JITTER: f64 = 0.2;
 pub const ATTEMPT_MAX: Duration = Duration::from_secs(75);
 /// The waits before the 2nd, 3rd … attempt of a run of failures: 30 s, 1 m, 2 m, 5 m, 10 m, then 15 m.
 const SCHEDULE: [u64; 6] = [30, 60, 120, 300, 600, 900];
+/// Download now makes the planned attempt due at most this often, so pressing can't drive the Soulseek
+/// server harder than every 2 minutes.
+pub const PRESS_GAP: Duration = Duration::from_secs(120);
+
+/// What Download now could do about the session ([`Conn::attempt_now`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum AttemptNow {
+    /// the planned attempt is due now (the schedule's count stays: a new failure backs off further)
+    Due,
+    LoggedIn,
+    /// an attempt is under way (or the supervisor is looking at a session that may be gone)
+    Connecting,
+    /// Encore doesn't connect (a rejected login, a ban, kicked again, Soulseek off): the request goes on to
+    /// its next source
+    Stopped,
+    /// not before then: the Soulseek server asked Encore to wait (it didn't answer the login, another
+    /// client took the username), the last attempt was less than 30 s ago, or a press made one due less than
+    /// 2 minutes ago
+    Later(Instant),
+}
 
 /// The wait after the `n`-th failure in a row (n ≥ 1; 0 counts as 1).
 pub fn backoff(n: u32) -> Duration {
@@ -238,6 +258,8 @@ pub struct Conn {
     /// the reason (and words) the planned attempt was for, kept while the engine is down: the attempt
     /// stays planned, and once the engine is back the card says why again, not "connecting shortly"
     pub held: Option<(Reason, Option<String>)>,
+    /// when Download now last made an attempt due ([`PRESS_GAP`])
+    pub last_press: Option<Instant>,
 }
 
 impl Default for Conn {
@@ -245,7 +267,7 @@ impl Default for Conn {
         Conn {
             state: State::Disconnected, reason: None, message: None, since: 0.0, attempts: 0, next_at: None, last_attempt: None,
             attempt_started: None, logged_in_at: None, username: None, kicked_retry: false, checked: None, lost: false, last_line: None,
-            rate_limited_until: None, last_search_at: None, held: None,
+            rate_limited_until: None, last_search_at: None, held: None, last_press: None,
         }
     }
 }
@@ -410,6 +432,32 @@ impl Conn {
         Ok(())
     }
 
+    /// Download now on a request waiting for Soulseek: the planned attempt is due now – only where Encore's
+    /// own schedule holds it (a lost connection, nothing planned), never within `MIN_GAP` of the last attempt
+    /// and at most once per `PRESS_GAP`, and without starting the schedule over (unlike Reconnect now: a new
+    /// failure backs off further). Where the Soulseek server asked Encore to wait (a login it didn't answer –
+    /// it shuts out addresses that knock too often –, another client with the username) nothing changes.
+    pub fn attempt_now(&mut self, now: Instant) -> AttemptNow {
+        match self.state {
+            State::LoggedIn if !self.lost => return AttemptNow::LoggedIn,
+            State::LoggedIn | State::Connecting => return AttemptNow::Connecting,
+            State::Stopped => return AttemptNow::Stopped,
+            State::Waiting if matches!(self.reason, Some(Reason::Timeout | Reason::Kicked)) => {
+                return AttemptNow::Later(self.next_at.unwrap_or(self.earliest(now)).max(self.earliest(now)));
+            }
+            _ => {}
+        }
+        let earliest = self.earliest(now);
+        let at = self.last_press.map(|p| p + PRESS_GAP).filter(|t| *t > earliest).unwrap_or(earliest);
+        if at > now {
+            // the planned attempt when it comes first, else the moment a press could make one due
+            return AttemptNow::Later(self.next_at.map_or(at, |n| n.max(earliest).min(at)));
+        }
+        self.next_at = Some(now);
+        self.last_press = Some(now);
+        AttemptNow::Due
+    }
+
     /// The login settings changed: whatever the server said about the old ones no longer counts, and an
     /// attempt under way (with the old ones) is given up.
     pub fn settings_changed(&mut self, now: Instant, unix: f64) {
@@ -567,6 +615,60 @@ mod tests {
         assert_eq!(span(Duration::from_secs(130)), "2 m 10 s");
         assert_eq!(span(Duration::from_secs(45)), "45 s");
         assert_eq!(span(Duration::from_secs(900)), "15 m");
+    }
+
+    /// Download now makes the planned attempt due only where Encore's own schedule holds the session (a lost
+    /// connection): never within 30 s of the last attempt, at most once per 2 minutes, without resetting the
+    /// count. Where the server asked Encore to wait (a login it didn't answer, a kick) nothing changes.
+    #[test]
+    fn attempt_now_only_where_encores_own_schedule_holds_it() {
+        let s = |n: u64| Duration::from_secs(n);
+        let t0 = Instant::now();
+        let mut c = Conn::default();
+        c.engine_up(t0, 0.0);
+        c.attempt_begins(t0, 0.0);
+        assert_eq!(c.attempt_now(t0), AttemptNow::Connecting);
+        c.dropped(Reason::Network, "Remote connection closed", t0 + s(5), 0.0, 0.0);
+        // within 30 s of the last attempt: later, at the earliest
+        assert_eq!(c.attempt_now(t0 + s(10)), AttemptNow::Later(t0 + MIN_GAP));
+        // a lost connection: due now, the count unchanged
+        let n = c.attempts;
+        let now = t0 + s(31);
+        assert!(!c.due(now), "not due yet by the schedule");
+        assert_eq!(c.attempt_now(now), AttemptNow::Due);
+        assert!(c.due(now));
+        assert_eq!(c.attempts, n, "the schedule's count stays");
+        c.attempt_begins(now, 0.0);
+        c.dropped(Reason::Network, "Remote connection closed", now + s(5), 0.0, 0.0);
+        assert_eq!(c.next_at.unwrap().duration_since(now + s(5)), backoff(n + 1), "a new failure backs off further");
+        // a 2nd press within 2 minutes: later, with the time
+        let again = now + s(60);
+        match c.attempt_now(again) {
+            AttemptNow::Later(t) => assert!(t > again && t <= now + PRESS_GAP, "{:?}", t.duration_since(again)),
+            other => panic!("{other:?}"),
+        }
+        assert!(!c.due(again), "nothing made due");
+        // the login timed out (the server shuts out addresses that knock too often): later at the planned time
+        let t = now + s(300);
+        c.attempt_begins(t, 0.0);
+        c.dropped(Reason::Timeout, "The wait timed out after 5000 milliseconds", t + s(5), 0.0, 0.0);
+        let planned = c.next_at;
+        assert_eq!(c.attempt_now(t + s(60)), AttemptNow::Later(planned.unwrap()));
+        assert_eq!(c.next_at, planned, "nothing planned changes");
+        // another client logged in with the username: later at the planned time (15 minutes)
+        let t = planned.unwrap();
+        c.attempt_begins(t, 0.0);
+        c.dropped(Reason::Kicked, "Kicked from server: another client logged in", t + s(1), 0.0, 0.0);
+        let planned = c.next_at;
+        assert_eq!(c.attempt_now(t + s(200)), AttemptNow::Later(planned.unwrap()));
+        assert_eq!(planned.unwrap().duration_since(t + s(1)), KICK_PAUSE);
+        // logged in: nothing to do; stopped: the request goes on to its next source
+        let t = planned.unwrap();
+        c.attempt_begins(t, 0.0);
+        c.logged_in("me", t, 0.0);
+        assert_eq!(c.attempt_now(t), AttemptNow::LoggedIn);
+        c.dropped(Reason::Banned, "banned", t + s(1), 0.0, 0.0);
+        assert_eq!(c.attempt_now(t + s(600)), AttemptNow::Stopped);
     }
 
     /// A run of failures follows the schedule (within the jitter) and never puts two attempts closer than

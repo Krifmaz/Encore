@@ -1,6 +1,6 @@
 //! /api/requests: ask for artists, albums, songs or any link; approve, retry, cancel, clear; import again a
 //! download whose import waited or failed; keep (or download again) a download the audio check turned
-//! away; the storage health that pauses imports.
+//! away; the storage health that pauses imports; Download now (one request, or all of them for admins).
 use crate::enrich::enrich_now;
 use crate::auth::{self, Admin, User};
 use encore_db::{now, Row, RowExt};
@@ -27,6 +27,7 @@ pub fn router() -> Router<AppState> {
         .route("/api/requests/link", post(link))
         .route("/api/requests/clear", post(clear))
         .route("/api/requests/retry-failed", post(retry_failed))
+        .route("/api/requests/download-now", post(download_all_now))
         .route("/api/requests/events", get(crate::routes::request_events::events))
         .route("/api/requests/storage", get(storage))
         .route("/api/requests/storage/check", post(storage_check))
@@ -37,7 +38,8 @@ pub fn router() -> Router<AppState> {
         .route("/api/requests/{rid}/approve", post(approve))
         .route("/api/requests/{rid}/deny", post(deny))
         .route("/api/requests/{rid}/retry", post(retry))
-        .route("/api/requests/{rid}/cancel", post(cancel));
+        .route("/api/requests/{rid}/cancel", post(cancel))
+        .route("/api/requests/{rid}/download-now", post(download_now));
     #[cfg(feature = "fault-io")]
     let r = r.route("/api/requests/storage/fault", post(fault_set).delete(fault_clear));
     r
@@ -79,7 +81,7 @@ async fn list(State(st): State<AppState>, User(u): User, Query(q): Query<ListQ>)
     // candidate lists) and the enrichment
     st.blocking(move |st| {
         let rows = st.db.read_now(|c| c.query(&sql, params))?;
-        let mut v = json!(list_rows(rows, encore_config::perms::is_admin(&u)));
+        let mut v = json!(list_rows(st, rows, encore_config::perms::is_admin(&u)));
         enrich_now(st, Some(&u), &mut v);
         Ok(Json(v))
     }).await
@@ -89,12 +91,15 @@ async fn list(State(st): State<AppState>, User(u): User, Query(q): Query<ListQ>)
 /// attempts, whether it was picked by hand, the candidate being downloaded, what a waiting or failed
 /// import keeps ([`worker::storage::row_fields`]: `wait_reason`, `next_try_at`, `has_files`, `kept_path`,
 /// `error`, `output`) and the downloads the audio check turned away ([`worker::rejected::row_fields`]:
-/// `rejected`, `anyway`). Other users than admins see no server folders: a wait for the storage in plain
-/// words.
-fn list_rows(rows: Vec<Row>, admin: bool) -> Vec<Value> {
+/// `rejected`, `anyway`) and Download now ([`worker::now::row_fields`]: `can_download_now`, `download_now`,
+/// `line`, `remote_queue`, `stalled_since`, `pressed`; a request waiting in a source's line reads where it
+/// stands, "2nd in line for Deezer", as its message). Other users than admins see no server folders: a wait for
+/// the storage in plain words.
+fn list_rows(st: &AppState, rows: Vec<Row>, admin: bool) -> Vec<Value> {
     rows.into_iter().map(|mut r| {
         let d: Value = serde_json::from_str(&r.s("detail")).unwrap_or(json!({}));
         r.remove("detail");
+        let now_fields = worker::now::row_fields(st, &worker::Req { id: r.i("id"), row: r.clone(), d: d.clone() });
         r.extend(worker::storage::row_fields(&r.s("status"), &d, admin));
         r.extend(worker::rejected::row_fields(&r.s("status"), &d, admin));
         r.insert("skip_check".into(), json!(d["skip_check"].is_object()));
@@ -124,6 +129,11 @@ fn list_rows(rows: Vec<Row>, admin: bool) -> Vec<Value> {
             cand = json!({ "username": c["indexer"], "format": if c["lossless"].as_bool().unwrap_or(false) { "flac" } else { "" }, "directory": c["title"], "files": null });
         }
         r.insert("candidate".into(), cand);
+        // in a source's line: where it stands (no server folder in it)
+        if let Some(text) = now_fields.get("line").and_then(|l| l["text"].as_str()) {
+            r.insert("message".into(), json!(text));
+        }
+        r.extend(now_fields);
         Value::Object(r)
     }).collect()
 }
@@ -400,6 +410,31 @@ async fn fault_clear(Admin(_): Admin, Query(q): Query<std::collections::HashMap<
 #[cfg(feature = "fault-io")]
 fn fault_list() -> Value {
     json!({ "faults": encore_core::fsx::fault::list().into_iter().map(|(p, op, errno)| json!({ "prefix": p, "op": op, "errno": errno })).collect::<Vec<_>>() })
+}
+
+/// Download now (`POST /api/requests/{id}/download-now`, the request's owner or an admin): a request in a
+/// source's line goes first, a wait with a timer is tried now, a Soulseek download queued at its user switches
+/// to one with a free upload slot, a torrent with no progress goes to the next source – never more at once than
+/// a source allows. → `{ok, action, text, at?, line?, status}`; 409 with why not.
+async fn download_now(State(st): State<AppState>, User(u): User, Path(rid): Path<i64>) -> ApiResult<Json<Value>> {
+    get_owned(&st, rid, &u)?;
+    let admin = encore_config::perms::is_admin(&u);
+    let v = worker::now::download_now(&st, rid, &u.s("username"), admin).await.map_err(|(code, why)| err(code, why))?;
+    Ok(Json(v))
+}
+
+#[derive(Deserialize, Default)]
+#[serde(default)]
+struct AllNowBody {
+    mine: bool,
+}
+
+/// Download all now (`POST /api/requests/download-now`, admins, `{mine?}`): every request in a line moves up in
+/// the order it stands (only the admin's own with `mine`), the waits with a timer are tried once. →
+/// `{ok, pressed, woken, later, lines, text}`
+async fn download_all_now(State(st): State<AppState>, Admin(a): Admin, body: Option<Json<AllNowBody>>) -> ApiResult<Json<Value>> {
+    let mine = body.map(|j| j.0).unwrap_or_default().mine;
+    Ok(Json(worker::now::download_all_now(&st, &a.s("username"), mine.then(|| a.i("id"))).await))
 }
 
 async fn cancel(State(st): State<AppState>, User(u): User, Path(rid): Path<i64>) -> ApiResult<Json<Value>> {

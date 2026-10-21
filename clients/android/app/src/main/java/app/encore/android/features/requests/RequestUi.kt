@@ -86,7 +86,8 @@ internal fun requestDate(t: Double): String =
 
 /**
  * What a list of request rows can do (web-rs/src/pages/common.rs `bind_request_actions`), one per list: Approve, Deny,
- * Retry, Import again and Cancel (POST /api/requests/{id}/{action}), Remove from list (DELETE /api/requests/{id}),
+ * Retry, Import again and Cancel (POST /api/requests/{id}/{action}), Download now (POST /api/requests/{id}/download-now,
+ * the server's answer as the toast), Remove from list (DELETE /api/requests/{id}),
  * the admin's Delete files (`?files=true`, after a confirm), Pick (the picker, for this request), the details sheet
  * and its Copy. [me] is set by the screen once GET /api/auth/me has answered.
  */
@@ -112,6 +113,12 @@ class RequestActions(val nav: Nav, private val scope: CoroutineScope, private va
      * words): the sheet shows it itself, as it sits above the toasts.
      */
     internal var anywayError by mutableStateOf<Pair<Long, String>?>(null)
+
+    /**
+     * The server's answer to Download now pressed in the details sheet (request id, words, kind ok | warn | err): the
+     * sheet shows it itself, as it sits above the toasts.
+     */
+    internal var nowAnswer by mutableStateOf<Triple<Long, String, String>?>(null)
 
     /** The server's version for the copied text (GET /api/auth/info, asked once when a request is first copied). */
     private var serverVersion: String? = null
@@ -182,6 +189,35 @@ class RequestActions(val nav: Nav, private val scope: CoroutineScope, private va
         }
     }
 
+    /**
+     * Download now (common.rs `download-now`): the server's words as the toast ("Next in line for Deezer (1 download
+     * at a time)" ok, "Soulseek asked Encore to wait – next attempt at 14:20" warn, a refusal's `detail` err), and the
+     * list reloads – after a refusal too, so the row shows what the server offers now. Pressed in the details sheet
+     * ([inSheet]), the sheet shows the answer under its buttons.
+     */
+    fun downloadNow(r: RequestRow, inSheet: Boolean = false) {
+        if (!RequestRules.canDownloadNow(r) || r.id in busy) return
+        busy = busy + r.id
+        nowAnswer = null
+        scope.launch {
+            try {
+                val res = withContext(Dispatchers.IO) { nav.features.downloadNow(r.id) }
+                RequestRules.downloadNowToast(res)?.let { (msg, kind) ->
+                    Toasts.show(msg, kind)
+                    if (inSheet) nowAnswer = Triple(r.id, msg, kind)
+                }
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                val why = e.message ?: "That didn't work"
+                Toasts.show(why, "err")
+                if (inSheet) nowAnswer = Triple(r.id, why, "err")
+            }
+            busy = busy - r.id
+            reload()
+        }
+    }
+
     /** Cancel: a request that keeps downloaded files asks first – they go with it (the web's confirm). */
     fun cancel(r: RequestRow) {
         if (r.hasFiles) confirmLose = r to "cancel" else act(r, "cancel")
@@ -219,6 +255,7 @@ class RequestActions(val nav: Nav, private val scope: CoroutineScope, private va
 
     fun showDetails(r: RequestRow) {
         anywayError = null
+        nowAnswer = null
         detailsFor = r.id
     }
 
@@ -240,7 +277,7 @@ fun rememberRequestActions(nav: Nav, reload: () -> Unit): RequestActions {
 /**
  * The buttons of a request (common.rs `request_row`): Approve, Deny, Pick, Keep anyway or Download anyway (a download
  * the audio check turned away; the details sheet's [inSheet] makes it the primary button), Retry or Import again (kept
- * files: nothing is downloaded again), Cancel – whichever apply.
+ * files: nothing is downloaded again), Download now (where the server offers it), Cancel – whichever apply.
  */
 @Composable
 private fun RequestButtons(a: RequestActions, r: RequestRow, inSheet: Boolean = false) {
@@ -256,6 +293,8 @@ private fun RequestButtons(a: RequestActions, r: RequestRow, inSheet: Boolean = 
     }
     if (RequestRules.canImportAgain(r)) SmallButton("Import again", iconRes = R.drawable.ic_refresh, enabled = !wait) { a.act(r, "import-again") }
     if (RequestRules.canRetry(r, a.me)) SmallButton("Retry", iconRes = R.drawable.ic_refresh, enabled = !wait) { a.act(r, "retry") }
+    // the server says what it does (go first in line, try the wait now, switch Soulseek users…); the answer is the toast
+    if (RequestRules.canDownloadNow(r)) SmallButton("Download now", iconRes = R.drawable.ic_download, enabled = !wait) { a.downloadNow(r, inSheet) }
     if (RequestRules.canCancel(r)) SmallButton("Cancel", iconRes = R.drawable.ic_close, enabled = !wait) { a.cancel(r) }
 }
 
@@ -310,7 +349,7 @@ fun RequestItem(a: RequestActions, r: RequestRow, indent: Dp = 0.dp) {
             if (why.isNotEmpty()) AnywayReason(why, Modifier.padding(top = 4.dp))
             if (r.isActive && r.progress > 0) ProgressBar(r.progress, Modifier.padding(top = 6.dp).fillMaxWidth(0.8f))
             FlowRow(Modifier.padding(top = 6.dp), horizontalArrangement = Arrangement.spacedBy(6.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
-                StatusBadge(r.status, Modifier.align(Alignment.CenterVertically))
+                StatusBadge(r.status, Modifier.align(Alignment.CenterVertically), label = RequestRules.badgeLabel(r))
                 RequestButtons(a, r)
                 Box {
                     IconButton(onClick = { menu = true }, modifier = Modifier.size(32.dp)) {
@@ -379,7 +418,7 @@ private fun RequestDetailsSheet(a: RequestActions, r: RequestRow, onDismiss: () 
             }
             FlowRow(Modifier.padding(top = 10.dp), horizontalArrangement = Arrangement.spacedBy(6.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
                 Badge(r.kind, modifier = Modifier.align(Alignment.CenterVertically))
-                StatusBadge(r.status, Modifier.align(Alignment.CenterVertically))
+                StatusBadge(r.status, Modifier.align(Alignment.CenterVertically), label = RequestRules.badgeLabel(r))
                 SmallButton(copyLabel(copied.value), iconRes = if (copied.value == true) R.drawable.ic_check else R.drawable.ic_content_copy) {
                     a.copy(r, context) { copied.value = it }
                 }
@@ -479,6 +518,17 @@ private fun RequestDetailsSheet(a: RequestActions, r: RequestRow, onDismiss: () 
                 }
             }
             if (RequestRules.canImportAgain(r)) Text(RequestRules.IMPORT_AGAIN_HELP, style = MaterialTheme.typography.bodySmall, color = p.faint, modifier = Modifier.padding(top = 6.dp))
+            // what Download now does (the web's title on the button), and the server's answer when it was pressed here
+            val nowHelp = RequestRules.downloadNowHelp(r)
+            if (nowHelp.isNotEmpty()) Text(nowHelp, style = MaterialTheme.typography.bodySmall, color = p.faint, modifier = Modifier.padding(top = 6.dp))
+            a.nowAnswer?.takeIf { it.first == r.id }?.let { (_, words, kind) ->
+                val color = when (kind) {
+                    "ok" -> p.text
+                    "warn" -> EncoreColors.Warn
+                    else -> EncoreColors.Err
+                }
+                SelectionContainer { Text(words, style = MaterialTheme.typography.bodySmall, color = color, modifier = Modifier.padding(top = 6.dp)) }
+            }
             // what Keep anyway / Download anyway does (the web's title on the button), and why it failed when it did
             val offer = RequestRules.anyway(r)
             if (offer != null && RequestRules.mayFix(a.me)) Text(offer.help, style = MaterialTheme.typography.bodySmall, color = p.faint, modifier = Modifier.padding(top = 6.dp))
@@ -491,9 +541,10 @@ private fun RequestDetailsSheet(a: RequestActions, r: RequestRow, onDismiss: () 
 
 /**
  * The storage banner over a request list (common.rs `storage_banner`): imports are paused because a folder can't be
- * written. Asks GET /api/requests/storage when shown and every 30 s (every 5 s while imports are paused, so it goes as
- * soon as the request shows the import done, as the web's). Admins read the folder, the operation and the
- * error and get Check again (POST /api/requests/storage/check: "Imports resumed" or "Imports are still paused");
+ * written, or (admins, servers since 0.33) a folder downloads are saved in can't be written so requests that save there
+ * wait (notice.rs, the website's banner on every page). Asks GET /api/requests/storage when shown and every 30 s (every 5 s while imports are paused, so it goes as
+ * soon as the request shows the import done, as the web's; every 15 s while only a downloads folder fails). Admins read the folder, the operation and the
+ * error and get Check again (POST /api/requests/storage/check: "Imports resumed", "Imports are still paused" or the downloads folders' words, [RequestRules.checkToast]);
  * everyone else reads the plain words. Nothing while imports go on, or from a server without the check.
  */
 @Composable
@@ -511,10 +562,10 @@ fun StorageBanner(nav: Nav, admin: Boolean, modifier: Modifier = Modifier, onRes
             } catch (_: Exception) {
                 // offline or a server error: the banner keeps what it last knew
             }
-            delay(if (state?.paused == true) 5_000 else 30_000)
+            delay(RequestRules.pollMillis(state))
         }
     }
-    val text = RequestRules.storageBanner(state, admin) ?: return
+    val text = RequestRules.banner(state, admin) ?: return
     val shape = RoundedCornerShape(10.dp)
     Row(
         modifier
@@ -537,8 +588,8 @@ fun StorageBanner(nav: Nav, admin: Boolean, modifier: Modifier = Modifier, onRes
                     scope.launch {
                         try {
                             val s = withContext(Dispatchers.IO) { nav.features.checkStorage() }
+                            val (msg, kind) = RequestRules.checkToast(s, before = state)
                             state = s
-                            val (msg, kind) = RequestRules.checkToast(s)
                             Toasts.show(msg, kind)
                             if (!s.paused) onResumed()
                         } catch (e: CancellationException) {

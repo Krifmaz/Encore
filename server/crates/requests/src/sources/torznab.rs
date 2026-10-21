@@ -105,16 +105,12 @@ pub fn unseal_key(st: &impl Ctx, url: &str) -> String {
 /// Audio (3000), MP3 (3010) and lossless (3040): where single-track releases are filed.
 pub const SONG_CATS: [&str; 3] = ["3000", "3010", "3040"];
 
-/// The requests' own indexer searches, two at a time: "Request discography" queues every release at
-/// once, and each album's search would otherwise reach Prowlarr in the same second – indexers allow only
-/// so many searches a day, and Prowlarr spaces its searches per indexer anyway. The picker's searches
-/// (someone waiting for them) don't wait behind these.
-pub static SEARCHES: tokio::sync::Semaphore = tokio::sync::Semaphore::const_new(2);
-
-/// A request's album search (in the audio category), in turn with the other requests' searches
-/// ([`SEARCHES`]).
+/// A request's album search (in the audio category). The requests' own indexer searches take turns in the
+/// indexers' line, two at a time ([`crate::line::Lines::indexers`], taken by the worker around its searches):
+/// "Request discography" queues every release at once, and each album's search would otherwise reach Prowlarr
+/// in the same second – indexers allow only so many searches a day, and Prowlarr spaces its searches per
+/// indexer anyway. The picker's searches (someone waiting for them) don't wait in that line.
 pub async fn search(st: &impl Ctx, query: &str) -> anyhow::Result<Vec<Value>> {
-    let _turn = SEARCHES.acquire().await?;
     search_in(st, query, &["3000"]).await
 }
 
