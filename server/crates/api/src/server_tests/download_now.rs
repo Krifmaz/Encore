@@ -69,7 +69,7 @@ async fn until(what: &str, max: Duration, cond: impl Fn() -> bool) {
 
 // ---- the streamrip line --------------------------------------------------------------------------------
 
-/// Four picked Deezer albums with streamrip one at a time: one runs, the others wait in line in the order
+/// Four picked Deezer albums with streamrip one at a time on Deezer: one runs, the others wait in line in the order
 /// they came ("Next/2nd/3rd in line for Deezer", status queued); the owner presses the last one, which then
 /// rips next. The stand-in never sees two runs at once, and a run is never interrupted.
 #[tokio::test]
@@ -91,7 +91,7 @@ async fn the_streamrip_line_honours_download_now_and_its_limit() {
     let ids: Vec<i64> = (1..=4).map(|n| insert(&st, owner, "album", &format!("Album {n}"), "queued", "", "",
         json!({ "pick": { "source": "deezer", "payload": { "url": format!("https://www.deezer.com/album/{n}") }, "title": format!("Album {n}") } }))).collect();
     let runs = || std::fs::read_to_string(fake.join("runs.log")).unwrap_or_default().lines().map(String::from).collect::<Vec<_>>();
-    let line = st.requests.lines.streamrip.clone();
+    let line = st.requests.lines.streamrip("deezer");
     let mut tasks = vec![];
     for (i, id) in ids.iter().enumerate() {
         tasks.push(tokio::spawn(worker::step(st.clone(), *id)));
@@ -165,7 +165,7 @@ async fn a_waiter_cancelled_meanwhile_stays_cancelled() {
     let ids: Vec<i64> = (1..=2).map(|n| insert(&st, owner, "album", &format!("Album {n}"), "queued", "", "",
         json!({ "pick": { "source": "deezer", "payload": { "url": format!("https://www.deezer.com/album/{n}") }, "title": format!("Album {n}") } }))).collect();
     let runs = || std::fs::read_to_string(fake.join("runs.log")).unwrap_or_default().lines().count();
-    let line = st.requests.lines.streamrip.clone();
+    let line = st.requests.lines.streamrip("deezer");
     let first = tokio::spawn(worker::step(st.clone(), ids[0]));
     until("the first rip runs", Duration::from_secs(30), || runs() == 1).await;
     let second = tokio::spawn(worker::step(st.clone(), ids[1]));
@@ -805,7 +805,7 @@ async fn who_may_press() {
     // six in the streamrip line behind a running one (mia's and the admin's in turn), held as the worker holds them
     let lines = st.requests.lines.clone();
     let running = insert(&st, mia, "album", "Running", "downloading", "streamrip", "streamrip: …", json!({}));
-    let slot = lines.streamrip.acquire(running, "Deezer", &lines.pressed, || {}).await;
+    let slot = lines.streamrip("deezer").acquire(running, "Deezer", &lines.pressed, || {}).await;
     let mut waiting = vec![];
     let mut tasks = vec![];
     for n in 0..6 {
@@ -813,10 +813,10 @@ async fn who_may_press() {
         let id = insert(&st, owner, "album", &format!("In line {n}"), "queued", "streamrip", "In line for Deezer", json!({}));
         let l = lines.clone();
         tasks.push(tokio::spawn(async move {
-            let _s = l.streamrip.acquire(id, "Deezer", &l.pressed, || {}).await;
+            let _s = l.streamrip("deezer").acquire(id, "Deezer", &l.pressed, || {}).await;
             std::future::pending::<()>().await;
         }));
-        until("in line", Duration::from_secs(5), || lines.streamrip.waiting() == n + 1).await;
+        until("in line", Duration::from_secs(5), || lines.streamrip("deezer").waiting() == n + 1).await;
         waiting.push(id);
     }
     // two downloads waiting for the staging folder (writable again), one for Soulseek (off), one pending
@@ -826,7 +826,7 @@ async fn who_may_press() {
     let sk = insert(&st, boss, "track", "Song", "waiting", "slskd", "Waiting for Soulseek – connecting shortly",
         json!({ "sources": ["slskd"], "soulseek_wait": { "since": t }, "wait": { "reason": "soulseek", "since": t } }));
     let pending = insert(&st, mia, "album", "Pending", "pending", "", "", json!({}));
-    let order = || lines.streamrip.waiters(&lines.pressed).into_iter().map(|w| w.0).collect::<Vec<_>>();
+    let order = || lines.streamrip("deezer").waiters(&lines.pressed).into_iter().map(|w| w.0).collect::<Vec<_>>();
     assert_eq!(order(), waiting);
     // mine: the admin's first, in their order
     let (code, v, _) = call(&app, "POST", "/api/requests/download-now", &admin, Some(json!({ "mine": true }))).await;
@@ -841,7 +841,7 @@ async fn who_may_press() {
     assert_eq!(v["lines"], json!([{ "source": "streamrip", "label": "Deezer", "limit": 1, "running": 1, "waiting": 6 }]), "{v}");
     assert_eq!(v["text"], "Woke 3 waiting requests; 6 stay in line: Deezer 1 download at a time (6 in line)", "{v}");
     assert_eq!(order(), [waiting[1], waiting[3], waiting[5], waiting[0], waiting[2], waiting[4]], "the order stays");
-    assert_eq!((lines.streamrip.running(), lines.streamrip.waiting()), (1, 6), "never more than its slot");
+    assert_eq!((lines.streamrip("deezer").running(), lines.streamrip("deezer").waiting()), (1, 6), "never more than its slot");
     for id in &storage {
         assert!(row(&st, *id).2["wait"]["next_try_at"].as_f64().unwrap() <= now() + 1.0, "the storage waits are due now");
     }

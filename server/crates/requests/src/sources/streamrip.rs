@@ -148,6 +148,12 @@ pub fn write_config(path: &Path, text: &str) -> Result<(), StepError> {
         _ => path.to_path_buf(),
     };
     fsx::fault_point(Step::Config, "write", &target)?;
+    // the same text: left alone. Deezer, Qobuz and Tidal each run one download at once, and streamrip saves
+    // what it learns (Tidal's fresh tokens, Qobuz's app id) when it ends, so a rewrite with nothing new would
+    // only race a running streamrip's save
+    if std::fs::read_to_string(&target).is_ok_and(|old| old == text) {
+        return Ok(());
+    }
     let name = target.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_else(|| "config.toml".into());
     let tmp = target.with_file_name(format!(".{name}.encore-new"));
     let written = std::fs::write(&tmp, text).and_then(|_| match std::fs::metadata(&target) {
@@ -733,7 +739,7 @@ async fn tidal_by_isrc(st: &impl Ctx, isrc: &str, albums: bool) -> anyhow::Resul
     })
 }
 
-pub const SERVICES: [&str; 3] = ["qobuz", "tidal", "deezer"];
+pub const SERVICES: [&str; 3] = crate::line::SERVICES;
 
 /// The streamrip services to search, in the order they appear in the one Source order setting
 /// (e.g. "tidal, deezer, slskd, ytdlp"). Older setups that just say "streamrip" keep their old list.
@@ -1462,6 +1468,11 @@ hires_token_client_id = "fX2JxdmntZWK0ixT"
         write_config(&p, "x = 1\n").unwrap();
         assert!(std::fs::symlink_metadata(&p).unwrap().file_type().is_symlink());
         assert_eq!(std::fs::read_to_string(&real).unwrap(), "x = 1\n");
+        // the same text again: the file is left alone (a running streamrip's own save isn't raced)
+        let inode = |p: &Path| std::os::unix::fs::MetadataExt::ino(&std::fs::metadata(p).unwrap());
+        let before = inode(&real);
+        write_config(&p, "x = 1\n").unwrap();
+        assert_eq!(inode(&real), before, "not replaced");
         // a config folder that is a file: the error names the write of the config
         let blocked = d.join("real.toml").join("config.toml");
         let e = write_config(&blocked, "x").unwrap_err();

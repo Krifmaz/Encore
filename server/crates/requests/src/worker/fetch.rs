@@ -757,12 +757,11 @@ pub(super) async fn isrc_for(st: &impl Ctx, r: &mut Req) -> Option<String> {
 }
 
 pub(super) async fn start_streamrip(st: &impl Ctx, r: &mut Req, urls: Option<Vec<String>>) -> anyhow::Result<Out> {
-    // one release at a time: its turn in the streamrip line ("In line for Deezer" meanwhile)
-    let label = crate::line::streamrip_label(urls.as_ref().and_then(|u| u.first()).map(String::as_str), &streamrip::services(st));
+    // the lookups one at a time; each download then waits for its service's line below
     let looking = "Looking for an exact lossless match…";
-    let _slot = take_line(st, r, &st.requests().lines.streamrip, &label, "searching", looking).await?;
+    let search = st.requests().lines.streamrip_search.clone();
+    let lookup = search.lock().await;
     check(st, r.id)?;
-    // the staging folder may have broken while it waited in line
     if downloads::hold(st, r, "streamrip", !r.d["pick"].is_object()).await? {
         return Ok(Out::Wait);
     }
@@ -791,12 +790,22 @@ pub(super) async fn start_streamrip(st: &impl Ctx, r: &mut Req, urls: Option<Vec
         }
     }
     urls.retain(|u| !crate::report::url_blocked(st, u)); // reported items are never picked again
+    drop(lookup);
     if urls.is_empty() {
         return Ok(Out::Next("not found on Deezer/Tidal".into()));
     }
     let mut last = String::new();
     for url in urls {
+        // one release at a time per service: its turn in that service's line ("In line for Deezer" meanwhile);
+        // Deezer, Qobuz and Tidal are separate accounts, so one of each runs at once
+        let service = crate::line::service_of(&url).unwrap_or("deezer");
+        let label = crate::line::service_name(service);
+        let _slot = take_line(st, r, &st.requests().lines.streamrip(service), &label, "downloading", &format!("streamrip: {url}")).await?;
         check(st, r.id)?;
+        // the staging folder may have broken while it waited in line
+        if downloads::hold(st, r, "streamrip", !r.d["pick"].is_object()).await? {
+            return Ok(Out::Wait);
+        }
         let out = staging(st, r).join("streamrip");
         rm(&out);
         upd(st, r, &[("status", json!("downloading")), ("message", json!(format!("streamrip: {url}")))]);
@@ -1129,9 +1138,10 @@ pub(super) async fn run_url(st: &impl Ctx, r: &mut Req) -> anyhow::Result<()> {
 /// A Qobuz, Tidal or Deezer link: downloaded with streamrip, each folder it made imported by its tags.
 pub(super) async fn run_streamrip_url(st: &impl Ctx, r: &mut Req) -> anyhow::Result<()> {
     let url = r.s("url");
-    // one release at a time, with the requests' streamrip downloads: "In line for Tidal" meanwhile
+    // one release at a time per service, with the requests' streamrip downloads: "In line for Tidal" meanwhile
     let label = crate::line::streamrip_label(Some(&url), &streamrip::services(st));
-    let _slot = take_line(st, r, &st.requests().lines.streamrip, &label, "downloading", "Downloading with streamrip…").await?;
+    let line = st.requests().lines.streamrip(crate::line::service_of(&url).unwrap_or("deezer"));
+    let _slot = take_line(st, r, &line, &label, "downloading", "Downloading with streamrip…").await?;
     check(st, r.id)?;
     // the staging folder may have broken while it waited in line
     if downloads::hold(st, r, "url", false).await? {

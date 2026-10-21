@@ -667,7 +667,7 @@ dependencies = [
 
 [[package]]
 name = "encore"
-version = "0.35.0"
+version = "0.35.1"
 dependencies = [
  "anyhow",
  "axum",
@@ -691,7 +691,7 @@ dependencies = [
 
 [[package]]
 name = "encore-api"
-version = "0.35.0"
+version = "0.35.1"
 dependencies = [
  "anyhow",
  "axum",
@@ -741,7 +741,7 @@ dependencies = [
 
 [[package]]
 name = "encore-config"
-version = "0.35.0"
+version = "0.35.1"
 dependencies = [
  "anyhow",
  "encore-core",
@@ -753,7 +753,7 @@ dependencies = [
 
 [[package]]
 name = "encore-core"
-version = "0.35.0"
+version = "0.35.1"
 dependencies = [
  "anyhow",
  "axum",
@@ -771,7 +771,7 @@ dependencies = [
 
 [[package]]
 name = "encore-db"
-version = "0.35.0"
+version = "0.35.1"
 dependencies = [
  "anyhow",
  "encore-core",
@@ -783,7 +783,7 @@ dependencies = [
 
 [[package]]
 name = "encore-files"
-version = "0.35.0"
+version = "0.35.1"
 dependencies = [
  "anyhow",
  "encore-config",
@@ -803,7 +803,7 @@ dependencies = [
 
 [[package]]
 name = "encore-http"
-version = "0.35.0"
+version = "0.35.1"
 dependencies = [
  "anyhow",
  "encore-config",
@@ -820,7 +820,7 @@ dependencies = [
 
 [[package]]
 name = "encore-jobs"
-version = "0.35.0"
+version = "0.35.1"
 dependencies = [
  "anyhow",
  "axum",
@@ -834,7 +834,7 @@ dependencies = [
 
 [[package]]
 name = "encore-library"
-version = "0.35.0"
+version = "0.35.1"
 dependencies = [
  "anyhow",
  "deunicode",
@@ -869,7 +869,7 @@ dependencies = [
 
 [[package]]
 name = "encore-media"
-version = "0.35.0"
+version = "0.35.1"
 dependencies = [
  "anyhow",
  "encore-core",
@@ -890,7 +890,7 @@ dependencies = [
 
 [[package]]
 name = "encore-playback"
-version = "0.35.0"
+version = "0.35.1"
 dependencies = [
  "anyhow",
  "axum",
@@ -915,7 +915,7 @@ dependencies = [
 
 [[package]]
 name = "encore-plugins"
-version = "0.35.0"
+version = "0.35.1"
 dependencies = [
  "anyhow",
  "axum",
@@ -939,7 +939,7 @@ dependencies = [
 
 [[package]]
 name = "encore-requests"
-version = "0.35.0"
+version = "0.35.1"
 dependencies = [
  "anyhow",
  "axum",
@@ -978,7 +978,7 @@ dependencies = [
 
 [[package]]
 name = "encore-sync"
-version = "0.35.0"
+version = "0.35.1"
 dependencies = [
  "anyhow",
  "base64 0.22.1",
@@ -1001,7 +1001,7 @@ dependencies = [
 
 [[package]]
 name = "encore-system"
-version = "0.35.0"
+version = "0.35.1"
 dependencies = [
  "anyhow",
  "axum",
@@ -1027,7 +1027,7 @@ dependencies = [
 
 [[package]]
 name = "encore-vpn"
-version = "0.35.0"
+version = "0.35.1"
 dependencies = [
  "base64 0.22.1",
  "boringtun",

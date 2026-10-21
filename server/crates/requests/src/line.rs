@@ -1,5 +1,6 @@
 //! The lines (Download now, the owner on Oct 21: "for the que can i get a download now button"): the sources
-//! that run only so many at a time – streamrip one download, yt-dlp two, the indexers two searches, the
+//! that run only so many at a time – streamrip one download per service (Deezer, Qobuz and Tidal are separate
+//! accounts, so one of each runs at once; [`Lines::streamrip`]), yt-dlp two, the indexers two searches, the
 //! worker's Soulseek searches one, each plugin program one download ([`Lines::plugin`]) – keep the requests
 //! that wait for them in a line, keyed by request id, so
 //! the Requests page can say where each one stands ("2nd in line for Deezer") and Download now can move one to
@@ -310,11 +311,14 @@ impl Place {
     }
 }
 
-/// The four lines, the plugin programs' lines and the presses. Clones share them.
+/// The streamrip lines, the other three, the plugin programs' lines and the presses. Clones share them.
 #[derive(Clone)]
 pub struct Lines {
-    /// streamrip: one download at a time
-    pub streamrip: Arc<Line>,
+    /// streamrip: one download at a time per service, in [`SERVICES`] order (Qobuz, Tidal, Deezer)
+    streamrip: [Arc<Line>; 3],
+    /// streamrip's lookups (Encore's own calls to Deezer's and Tidal's APIs, a few seconds): one at a time, as
+    /// when they held the one streamrip line; nobody waits here long enough for a line of its own
+    pub streamrip_search: Arc<tokio::sync::Mutex<()>>,
     /// yt-dlp: two downloads at a time
     pub ytdlp: Arc<Line>,
     /// the requests' indexer searches: two at a time (the picker's don't wait here)
@@ -329,7 +333,8 @@ pub struct Lines {
 impl Default for Lines {
     fn default() -> Self {
         Lines {
-            streamrip: Arc::new(Line::new(STREAMRIP, 1)),
+            streamrip: SERVICES.map(|_| Arc::new(Line::new(STREAMRIP, 1))),
+            streamrip_search: Arc::default(),
             ytdlp: Arc::new(Line::new(YTDLP, 2)),
             indexers: Arc::new(Line::new(INDEXERS, 2)),
             soulseek: Arc::new(Line::new(SOULSEEK, 1)),
@@ -340,11 +345,19 @@ impl Default for Lines {
 }
 
 impl Lines {
-    /// The lines, in the order the Requests page names them: the four, then the plugin programs' by plugin id.
+    /// The lines, in the order the Requests page names them: streamrip's (by service), the other three, then the plugin programs' by plugin id.
     pub fn all(&self) -> Vec<Arc<Line>> {
-        let mut out = vec![self.streamrip.clone(), self.ytdlp.clone(), self.indexers.clone(), self.soulseek.clone()];
+        let mut out = self.streamrip.to_vec();
+        out.extend([self.ytdlp.clone(), self.indexers.clone(), self.soulseek.clone()]);
         out.extend(self.plugins.lock().unwrap_or_else(|p| p.into_inner()).values().cloned());
         out
+    }
+
+    /// The streamrip line of `service` ("deezer", "qobuz", "tidal"; the service a link names, see
+    /// [`service_of`]). Anything else gets Deezer's.
+    pub fn streamrip(&self, service: &str) -> Arc<Line> {
+        let i = SERVICES.iter().position(|s| *s == service).unwrap_or(SERVICES.len() - 1);
+        self.streamrip[i].clone()
     }
 
     /// The line of plugin program `plugin` (all of its sources): [`PLUGIN_LIMIT`] download at a time.
@@ -439,6 +452,15 @@ pub fn service_name(s: &str) -> String {
     }
 }
 
+/// streamrip's services, in the order of its lines (`sources::streamrip::SERVICES` is this list).
+pub const SERVICES: [&str; 3] = ["qobuz", "tidal", "deezer"];
+
+/// The streamrip service a link is on ("deezer"), None for another site.
+pub fn service_of(url: &str) -> Option<&'static str> {
+    let u = url.to_lowercase();
+    SERVICES.into_iter().find(|s| u.contains(s))
+}
+
 /// What the streamrip line is for a request: the service of the pick's or link's `url`, else the only
 /// enabled service, else the enabled services in source order joined by "/" ("Tidal/Deezer").
 pub fn streamrip_label(url: Option<&str>, services: &[String]) -> String {
@@ -512,11 +534,32 @@ mod tests {
         assert_eq!((l.running(), l.waiting()), (0, 0));
     }
 
+    /// Deezer, Qobuz and Tidal are separate accounts: one download of each at once, never two on one.
+    #[tokio::test(start_paused = true)]
+    async fn streamrip_runs_one_download_per_service() {
+        let lines = Lines::default();
+        let p = lines.pressed.clone();
+        let deezer = lines.streamrip("deezer").acquire(1, "Deezer", &p, || {}).await;
+        let _qobuz = lines.streamrip("qobuz").acquire(2, "Qobuz", &p, || {}).await;
+        let _tidal = lines.streamrip(service_of("https://tidal.com/browse/album/9").unwrap()).acquire(3, "Tidal", &p, || {}).await;
+        let (l, p2) = (lines.streamrip("deezer"), p.clone());
+        let second = tokio::spawn(async move { l.acquire(4, "Deezer", &p2, || {}).await });
+        waiters(&lines.streamrip("deezer"), 1).await;
+        assert_eq!(lines.place(4).map(|pl| pl.text()), Some("Next in line for Deezer".to_string()));
+        assert_eq!(lines.all().iter().filter(|l| l.source == STREAMRIP).map(|l| l.running()).collect::<Vec<_>>(), [1, 1, 1]);
+        drop(deezer);
+        let _s = second.await.unwrap();
+        assert_eq!((lines.streamrip("deezer").running(), lines.streamrip("deezer").waiting()), (1, 0));
+        assert_eq!(service_of("https://www.deezer.com/album/1"), Some("deezer"));
+        assert_eq!(service_of("https://youtube.com/watch?v=1"), None);
+        assert!(Arc::ptr_eq(&lines.streamrip("unknown"), &lines.streamrip("deezer")));
+    }
+
     /// a, b, c, d arrive behind a running request; d is pressed, then b: d, b, a, c.
     #[tokio::test(start_paused = true)]
     async fn download_now_goes_first_behind_earlier_presses() {
         let lines = Lines::default();
-        let l = lines.streamrip.clone();
+        let l = lines.streamrip("deezer");
         let busy = l.acquire(100, "Deezer", &lines.pressed, || {}).await;
         let order = Arc::new(Mutex::new(vec![]));
         let mut tasks = vec![];
@@ -554,7 +597,7 @@ mod tests {
     #[tokio::test(start_paused = true)]
     async fn a_press_never_takes_a_running_slot() {
         let lines = Lines::default();
-        let l = lines.streamrip.clone();
+        let l = lines.streamrip("deezer");
         let running = l.acquire(1, "Deezer", &lines.pressed, || {}).await;
         let (l2, p2) = (l.clone(), lines.pressed.clone());
         let waiting = tokio::spawn(async move { l2.acquire(2, "Deezer", &p2, || {}).await });
@@ -665,12 +708,12 @@ mod tests {
         assert_eq!(line_text(11, TORRENTS), "11th in line for torrents and Usenet");
         assert_eq!(line_text(21, SOULSEEK_LABEL), "21st in line for Soulseek");
         let lines = Lines::default();
-        assert_eq!(lines.all().iter().map(|l| l.limit_text()).collect::<Vec<_>>(), ["1 download at a time", "2 downloads at a time", "2 searches at a time", "1 search at a time"]);
+        assert_eq!(lines.all().iter().map(|l| l.limit_text()).collect::<Vec<_>>(), ["1 download at a time", "1 download at a time", "1 download at a time", "2 downloads at a time", "2 searches at a time", "1 search at a time"]);
         // a plugin program's line: made when first needed, one per plugin, one download at a time
         let ia = lines.plugin("internet-archive");
         assert!(Arc::ptr_eq(&ia, &lines.plugin("internet-archive")) && !Arc::ptr_eq(&ia, &lines.plugin("other")));
         assert_eq!((ia.source, ia.limit, ia.limit_text()), (PLUGIN, 1, "1 download at a time".to_string()));
-        assert_eq!(lines.all().len(), 6);
+        assert_eq!(lines.all().len(), 8, "three streamrip lines, the other three, two plugins");
         // the streamrip label: from the link, from the one service, from several (in source order)
         let svc = |v: &[&str]| v.iter().map(|s| s.to_string()).collect::<Vec<_>>();
         assert_eq!(streamrip_label(Some("https://www.deezer.com/album/302127"), &svc(&["tidal", "deezer"])), "Deezer");
