@@ -48,7 +48,7 @@ fn every_catalog_manifest_reads() {
     assert_eq!(
         ids,
         [
-            "ytdlp", "streamrip", "slskd", "torznab", "qbittorrent", "transmission", "deluge", "rtorrent", "torrent-blackhole", "sabnzbd", "nzbget",
+            "ytdlp", "streamrip", "slskd", "zotify", "gamdl", "torznab", "qbittorrent", "transmission", "deluge", "rtorrent", "torrent-blackhole", "sabnzbd", "nzbget",
             "usenet-blackhole", "cadenza", "translator", "jellyfin", "plex", "navidrome"
         ]
     );
@@ -155,7 +155,7 @@ fn the_old_tools_and_sources_are_all_taken_over() {
         assert_eq!(m.migration.as_ref().unwrap().auto_key.as_deref(), Some(format!("tools_auto_{tool}").as_str()));
     }
     // every id source_order and the picker use today
-    for (source, plugin) in [("qobuz", "streamrip"), ("tidal", "streamrip"), ("deezer", "streamrip"), ("slskd", "slskd"), ("torznab", "torznab"), ("ytdlp", "ytdlp"), ("ytmusic", "ytdlp")] {
+    for (source, plugin) in [("qobuz", "streamrip"), ("tidal", "streamrip"), ("deezer", "streamrip"), ("slskd", "slskd"), ("torznab", "torznab"), ("ytdlp", "ytdlp"), ("ytmusic", "ytdlp"), ("zotify", "zotify"), ("gamdl", "gamdl")] {
         assert_eq!(for_source(source).map(|m| m.id()), Some(plugin), "{source}");
     }
     let order = encore_keys()["source_order"]["default"].as_str().unwrap().to_string();
@@ -173,7 +173,10 @@ fn every_program_has_both_machines_a_sum_and_a_version_check() {
         let id = m.id();
         let u = m.update.as_ref().unwrap_or_else(|| panic!("{id}: [update]"));
         assert_ne!(u.source(), "none", "{id}: where new versions come from");
-        assert!(m.migration.as_ref().and_then(|g| g.from_tool.as_ref()).is_some(), "{id}: a program the old Download tools card had");
+        // the programs of 0.32 took over a tool of the old Download tools card; zotify and gamdl (0.34) are new
+        if !crate::catalog::THROUGH_REGISTRY.contains(&id) {
+            assert!(m.migration.as_ref().and_then(|g| g.from_tool.as_ref()).is_some(), "{id}: a program the old Download tools card had");
+        }
         let argv = m.verify_argv();
         assert_eq!(argv[0], "{bin}", "{id}: the version command runs the program");
         if !m.binaries.is_empty() {
@@ -336,4 +339,20 @@ fn the_docs_examples_are_the_real_thing() {
     let read = |rel: &str| std::fs::read_to_string(repo.join(rel)).unwrap_or_else(|e| panic!("{rel}: {e}"));
     assert_eq!(read("docs/plugins/example-tone/plugin.toml"), format!("{tone}\n"), "docs/plugins/example-tone/plugin.toml is the doc's example");
     assert_eq!(read("docs/plugins/example-tone/encore_plugin.py"), read("plugins/sdk/encore_plugin.py"), "the example carries the SDK as it is");
+}
+
+#[test]
+fn the_sources_through_the_registry_are_catalog_sources_with_a_venv() {
+    for id in crate::catalog::THROUGH_REGISTRY {
+        let m = find(id).unwrap_or_else(|| panic!("{id} is in the catalog"));
+        assert!(m.plugin.builtin && m.plugin.kind == "source", "{id}: a builtin source");
+        assert!(m.python.is_some() && m.update.as_ref().and_then(|u| u.pin.as_ref()).is_some(), "{id}: a venv, Install pinned to a tested version");
+        assert!(m.migration.is_none(), "{id}: new in 0.34, nothing to take over");
+        assert_eq!(for_source(id).map(|m| m.id()), Some(id));
+    }
+    // zotify's librespot is a git URL in its own requirements: the archive of a fixed commit replaces it
+    let z = find("zotify").unwrap().python.as_ref().unwrap();
+    assert_eq!(z.overrides.len(), 1);
+    assert!(z.overrides[0].starts_with("librespot @ https://github.com/Googolplexed0/librespot-python/archive/") && z.overrides[0].ends_with(".zip"));
+    assert!(z.packages[0].contains("{tag}"));
 }

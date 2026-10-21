@@ -118,10 +118,16 @@ fn state_of(st: &AppState, id: &str) -> (String, String, String) {
 async fn every_source_is_listed_with_its_state() {
     let (st, dir) = state("states");
     let ids: Vec<String> = available(&st).iter().map(|s| s["id"].as_str().unwrap().to_string()).collect();
-    assert_eq!(ids, ["slskd", "torznab", "qobuz", "tidal", "deezer", "ytmusic"]);
+    assert_eq!(ids, ["slskd", "torznab", "qobuz", "tidal", "deezer", "ytmusic", "zotify", "gamdl"]);
+    // zotify and gamdl (0.34) are not installed here: their tabs say where to install them
+    for id in ["zotify", "gamdl"] {
+        let (state, hint, settings) = state_of(&st, id);
+        assert_eq!((state.as_str(), settings.as_str()), ("not_installed", "#/settings?s=plugins"), "{id}");
+        assert!(hint.starts_with(&format!("Install the {id} plugin")), "{hint}");
+    }
     // nothing set up (yt-dlp is on by default): every source is still listed, off, with a hint and a settings link
     st.cfg.set_many(&json!({ "ytdlp_enabled": false }));
-    for s in available(&st) {
+    for s in available(&st).into_iter().filter(|s| s["id"] != "zotify" && s["id"] != "gamdl") {
         assert_eq!(s["state"], "off", "{s}");
         assert!(!s["hint"].as_str().unwrap().is_empty() && !s["name"].as_str().unwrap().is_empty(), "{s}");
         assert!(s["settings"].as_str().unwrap().starts_with("#/settings?s="), "{s}");
@@ -167,6 +173,13 @@ async fn every_source_is_listed_with_its_state() {
     // yt-dlp
     st.cfg.set_many(&json!({ "ytdlp_enabled": true }));
     assert_eq!(state_of(&st, "ytmusic"), ("ready".into(), String::new(), "#/settings?s=ytdlp".into()));
+    // zotify and gamdl installed: they want their sign-ins first
+    st.plugins.adopt("zotify", None).unwrap();
+    st.plugins.adopt("gamdl", None).unwrap();
+    assert_eq!(state_of(&st, "zotify"), ("sign_in".into(), "Sign in to Spotify: Test on the zotify card".into(), "#/settings?s=plugins".into()));
+    assert_eq!(state_of(&st, "gamdl"), ("sign_in".into(), "Apple Music needs your media-user-token (gamdl card)".into(), "#/settings?s=plugins".into()));
+    st.cfg.set_many(&json!({ "gamdl_media_user_token": "media-user-token-abcdef" }));
+    assert_eq!(state_of(&st, "gamdl").0, "ready");
     // Soulseek's 409 (the engine runs without a server session) reads as not connected, other errors as before
     assert_eq!(slskd::http_error(409, "The server connection must be connected and logged in").to_string(), slskd::NOT_CONNECTED);
     assert_eq!(slskd::http_error(500, "boom").to_string(), "Soulseek engine returned 500 Internal Server Error: boom");

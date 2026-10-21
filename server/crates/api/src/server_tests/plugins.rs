@@ -116,7 +116,7 @@ async fn a_fresh_server_has_nothing_installed_and_its_picker_says_where_to_insta
     assert!(st.plugins.rows().is_empty(), "every plugin available, none installed");
     let sources = picker::available(&st);
     let ids: Vec<&str> = sources.iter().map(|s| s["id"].as_str().unwrap()).collect();
-    assert_eq!(ids, ["slskd", "torznab", "qobuz", "tidal", "deezer", "ytmusic"], "the picker's tabs as before");
+    assert_eq!(ids, ["slskd", "torznab", "qobuz", "tidal", "deezer", "ytmusic", "zotify", "gamdl"], "the picker's tabs as before, then Spotify and Apple Music (0.34)");
     for s in &sources {
         assert_eq!(s["state"], "not_installed", "{s}");
         assert_eq!(s["settings"], "#/settings?s=plugins", "{s}");
@@ -187,7 +187,7 @@ async fn a_plugin_programs_source_answers_the_picker_and_the_worker() {
     let sources = picker::available(&st);
     let tone = sources.iter().find(|x| x["id"] == "test-tone").unwrap();
     assert_eq!((tone["name"].as_str(), tone["state"].as_str()), (Some("Test tone"), Some("ready")));
-    assert_eq!(sources.iter().position(|x| x["id"] == "test-tone"), Some(6));
+    assert_eq!(sources.iter().position(|x| x["id"] == "test-tone"), Some(8), "after the builtin tabs and the catalog's zotify and gamdl");
     let b = SearchBody { source: "test-tone".into(), kind: "track".into(), artist: "Test Tones".into(), title: "Middle C".into(), ..Default::default() };
     let a = picker::run_search(&st, &b).await.unwrap();
     let first = &a.items[0];

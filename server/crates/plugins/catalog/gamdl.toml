@@ -1,0 +1,102 @@
+# gamdl: Apple Music for requests and the picker, searched in the catalog of the owner's storefront and downloaded with
+# the owner's subscription. Encore's own code (sources/gamdl.rs) runs it; the plugin installs gamdl from PyPI into a venv
+# of its own. docs/contracts/plugin-manifest.md describes every key.
+
+[plugin]
+id = "gamdl"
+name = "gamdl"
+version = "0.34.0"
+description = "Apple Music through gamdl: searches the catalog and downloads with your subscription as AAC 256k, or ALAC and Dolby Atmos through a wrapper-v2 server you run."
+kind = "source"
+protocol = 1
+homepage = "https://github.com/glomatico/gamdl"
+license = "MIT"
+commands = ["status", "test", "search", "download", "update"]
+kinds = ["track", "album"]
+lossless = true
+needs_sign_in = true
+builtin = true
+
+[[sources]]
+id = "gamdl"
+name = "Apple Music"
+
+[run.timeouts]
+search = 120
+download = 7200
+test = 120
+
+# The newest gamdl on PyPI; Install puts in the one this Encore was tested with.
+[update]
+from = "pypi"
+pypi = "gamdl"
+pin = "3.9.1"
+auto = false
+
+[python]
+python = "3.14"
+packages = ["gamdl=={version}"]
+bin = "gamdl"
+
+[install]
+verify = ["{bin}", "--version"]
+
+# No field in the settings table (their card is this one), so their words are here.
+[[settings]]
+key = "gamdl_media_user_token"
+label = "media-user-token"
+type = "password"
+default = ""
+part = "Sign-in"
+help = "Sign in at music.apple.com in a browser, open the developer tools (Application or Storage, Cookies, https://music.apple.com) and copy the value of media-user-token. It lasts months; Test checks it."
+
+[[settings]]
+key = "gamdl_codec"
+label = "Format"
+type = "select"
+options = [["aac-web", "AAC 256k"], ["aac-he-web", "HE-AAC 64k"], ["alac", "ALAC lossless (needs the wrapper)"], ["atmos", "Dolby Atmos (needs the wrapper)"]]
+default = "aac-web"
+part = "Downloads"
+help = "ALAC and Atmos fall back to AAC 256k for songs Apple has no such stream for."
+
+[[settings]]
+key = "gamdl_wrapper_url"
+label = "Wrapper URL"
+type = "url"
+default = ""
+help = "A wrapper-v2 server signed in to Apple Music, for example http://wrapper:30020. Needed for ALAC and Atmos; with it the media-user-token is optional."
+
+[[settings]]
+key = "gamdl_wrapper_decrypt"
+label = "Wrapper decrypt address"
+type = "text"
+default = ""
+advanced = true
+help = "host:port of the wrapper's decrypt socket. Empty uses the wrapper URL's host and port 10020."
+
+[[settings]]
+key = "gamdl_storefront"
+label = "Storefront"
+type = "text"
+default = ""
+help = "Two-letter country of the catalog to search (us, gb, de …). Empty uses your account's."
+
+[[settings]]
+key = "gamdl_lyrics"
+label = "Synced lyrics"
+type = "select"
+options = [["lrc", "Save as .lrc"], ["srt", "Save as .srt"], ["ttml", "Save as .ttml"], ["none", "Don't save"]]
+default = "lrc"
+help = "Unsynced lyrics always go into the file's tags."
+
+[[settings]]
+key = "gamdl_language"
+label = "Metadata language"
+type = "text"
+default = "en-US"
+advanced = true
+help = "Language for titles and tags, as Apple writes it (en-US, de-DE, ja-JP …)."
+
+[permissions]
+network = true
+filesystem = "folder"

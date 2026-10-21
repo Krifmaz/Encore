@@ -6,6 +6,8 @@
 //! |---|---|
 //! | ytdlp | encore_requests::sources::ytdlp (YouTube Music, links; the YouTube sign-in) |
 //! | streamrip | encore_requests::sources::streamrip (Qobuz, Tidal with its sign-in, Deezer) |
+//! | zotify | encore_requests::sources::zotify (Spotify: its two-step sign-in, search, downloads) |
+//! | gamdl | encore_requests::sources::gamdl (Apple Music: search, downloads, the wrapper) |
 //! | slskd | encore_requests::slskd_managed (the managed slskd) with the session supervisor (slskd_session) |
 //! | torznab | encore_requests::sources::torznab (Prowlarr) |
 //! | qbittorrent … usenet-blackhole | encore_requests::sources::dl (the download clients) |
@@ -15,7 +17,8 @@
 //!
 //! Installing, updating and removing are the registry's (the one installer); an adapter is told afterwards
 //! (`installed`, `removing`, `enable`) so it restarts, stops or forgets what it runs. Searches answer in the
-//! picker's row shape. A yt-dlp or streamrip download is one run into the folder given; Soulseek and torrent or
+//! picker's row shape; zotify and gamdl answer in the SDK's shapes instead, as their picker tabs and request steps
+//! go through the registry like a plugin program's (encore_plugins::catalog::THROUGH_REGISTRY). A yt-dlp or streamrip download is one run into the folder given; Soulseek and torrent or
 //! Usenet downloads are watched by the request worker over minutes or days and are started there, not here.
 //!
 //! The adapters hold the server's state weakly: [`register`] gives back the one strong handle, which the
@@ -26,7 +29,7 @@ use crate::state::AppState;
 use encore_plugins::plugin::BoxFuture;
 use encore_plugins::{Call, Code, Downloaded, Failure, FileEntry, Manifest, Plugin, Status};
 use encore_requests::sources::dl::Client;
-use encore_requests::sources::{streamrip, ytdlp};
+use encore_requests::sources::{gamdl, streamrip, ytdlp, zotify};
 use serde_json::Value;
 use std::path::Path;
 use std::sync::{Arc, Weak};
@@ -36,6 +39,8 @@ use std::sync::{Arc, Weak};
 enum Kind {
     Ytdlp,
     Streamrip,
+    Zotify,
+    Gamdl,
     Slskd,
     Torznab,
     Client(Client),
@@ -49,6 +54,8 @@ impl Kind {
         Some(match id {
             "ytdlp" => Kind::Ytdlp,
             "streamrip" => Kind::Streamrip,
+            "zotify" => Kind::Zotify,
+            "gamdl" => Kind::Gamdl,
             "slskd" => Kind::Slskd,
             "torznab" => Kind::Torznab,
             "cadenza" => Kind::Cadenza,
@@ -112,6 +119,8 @@ impl Builtin {
 
     async fn status_of(&self, st: &AppState) -> Result<Status, Failure> {
         match self.kind {
+            Kind::Zotify => zotify::status(st).await,
+            Kind::Gamdl => gamdl::status(st).await,
             Kind::Ytdlp | Kind::Streamrip => {
                 let id = self.m.id();
                 let st2 = st.clone();
@@ -207,6 +216,8 @@ impl Builtin {
 
     async fn test_of(&self, st: &AppState) -> Result<String, Failure> {
         match self.kind {
+            Kind::Zotify => zotify::test(st).await,
+            Kind::Gamdl => gamdl::test(st).await,
             Kind::Client(c) => c.status(st).await.map_err(fail),
             Kind::Translator => {
                 let m = self.m.clone();
@@ -243,6 +254,12 @@ impl Builtin {
     /// A search in the picker's terms: `source` names the picker tab when a plugin has several (streamrip's
     /// qobuz, tidal, deezer).
     async fn search_of(&self, st: &AppState, request: &Value) -> Result<Vec<Value>, Failure> {
+        // the SDK's request and results: the registry's path (sources::plugin) asks these two
+        match self.kind {
+            Kind::Zotify => return zotify::search(st, request).await,
+            Kind::Gamdl => return gamdl::search(st, request).await,
+            _ => {}
+        }
         let source = match (self.kind, request["source"].as_str()) {
             (Kind::Ytdlp, _) => "ytmusic",
             (Kind::Slskd, _) => "slskd",
@@ -284,6 +301,8 @@ impl Builtin {
             files.into_iter().map(|path| FileEntry { size: std::fs::metadata(&path).ok().map(|m| m.len()), path, title: None, artist: None, album: None, track: None, disc: None, duration: None, format: None, isrc: None }).collect()
         };
         match self.kind {
+            Kind::Zotify => zotify::download(st, call, request, folder).await,
+            Kind::Gamdl => gamdl::download(st, call, request, folder).await,
             Kind::Ytdlp => {
                 if !url.starts_with("http") {
                     return Err(Failure::new(Code::NotFound, "Nothing to download: the result has no link"));

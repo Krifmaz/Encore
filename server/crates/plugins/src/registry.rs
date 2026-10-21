@@ -286,12 +286,13 @@ impl Registry {
         self.plugin_sources().into_iter().find(|s| s.id == source || s.picker == source).map(|s| s.plugin)
     }
 
-    /// The sources of the installed plugin programs (not the catalog's), in the Plugins page's order.
+    /// The sources of the installed plugin programs, and the catalog's that go through the registry
+    /// ([`catalog::THROUGH_REGISTRY`]: zotify, gamdl), in the Plugins page's order.
     pub fn plugin_sources(&self) -> Vec<PluginSource> {
         let rows: HashMap<String, Row> = self.rows().into_iter().map(|r| (r.s("id"), r)).collect();
         self.known()
             .into_iter()
-            .filter(|m| !m.plugin.builtin && catalog::find(m.id()).is_none())
+            .filter(|m| (!m.plugin.builtin && catalog::find(m.id()).is_none()) || catalog::THROUGH_REGISTRY.contains(&m.id()))
             .flat_map(|m| {
                 let enabled = rows.get(m.id()).is_some_and(|r| r.b("enabled"));
                 let (kinds, lossless) = (m.plugin.kinds.clone(), m.plugin.lossless);

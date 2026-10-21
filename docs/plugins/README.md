@@ -167,5 +167,6 @@ folder of a repository).
 - Small payloads (at most 64 KB) and quick `status` answers, off the network when possible.
 - Write only into the download folder and the data folder, and through `.part` files.
 - Respect the services you use: their terms, their rate limits (`rate_limited` with `retry_after` makes
-  Encore wait), and the people whose music it is. Encore's catalog holds no plugin whose purpose is removing
-  DRM, and these pages are not a guide to writing one.
+  Encore wait), and the people whose music it is. From 0.34 the catalog has zotify (Spotify) and gamdl
+  (Apple Music), which download from those services with your own accounts: read their terms before you switch
+  them on. These pages are not a guide to removing DRM.

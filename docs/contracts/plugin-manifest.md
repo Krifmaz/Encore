@@ -71,7 +71,9 @@ for three (`qobuz`, `tidal`, `deezer`); yt-dlp answers for `ytdlp` in `source_or
 | `name` | text | yes | The picker tab's name ("YouTube Music") |
 | `picker` | text | no | The picker's tab id when it differs from `id` |
 
-The `source_order` ids of 0.31 stay as they are: `qobuz`, `tidal`, `deezer`, `slskd`, `torznab`, `ytdlp`.
+The `source_order` ids of 0.31 stay as they are: `qobuz`, `tidal`, `deezer`, `slskd`, `torznab`, `ytdlp`. 0.34 adds
+`zotify` (the Spotify tab) and `gamdl` (the Apple Music tab): their searches and downloads go through the registry as
+a plugin program's do (`catalog::THROUGH_REGISTRY`), answered by Encore's own code in the SDK's shapes.
 
 ## `[run]` and `[run.timeouts]`
 
@@ -174,6 +176,7 @@ A venv made with uv and the image's Python, for programs published as Python pac
 | `python` | text | yes | The Python the venv is made with (`3.14`): the image's, under /opt/python, which uv finds with `uv venv --python 3.14` (no download) |
 | `packages` | list | yes | What `uv pip install` puts in, `{version}` and `{tag}` filled in: `yt-dlp[default]=={version}`, `streamrip @ https://github.com/Stensel8/streamrip/archive/refs/tags/{tag}.zip`. A requirement, never an option (nothing starting with `-`) |
 | `bin` | text or list | yes | The program in the venv's `bin` folder; a list: the first one that is there (`["rip", "streamrip"]`) |
+| `overrides` | list | no | Requirements that replace what the packages ask for the same project (`uv pip install --override`), `{version}` and `{tag}` filled in. zotify names librespot by a git URL and the image has no git: `librespot @ https://github.com/…/archive/<commit>.zip`. A requirement, never an option |
 
 The venv is made where it stays (`<plugin>/<version>/venv`): a venv's scripts name their own path, so it is
 never moved after it is made. The image keeps uv (pinned) and /opt/python at the same path, so an adopted
@@ -360,14 +363,16 @@ The plan (docs/backlog/2026-10-plan.md, 0.32) listed `[runtime]`, `[[binary]]`, 
 
 ## The catalog
 
-`server/crates/plugins/catalog/<id>.toml`, embedded in the server. All are Encore's own code in 0.32
-(`builtin = true`); five install a program.
+`server/crates/plugins/catalog/<id>.toml`, embedded in the server. All are Encore's own code
+(`builtin = true`); seven install a program (zotify and gamdl since 0.34).
 
 | id | kind | Program it installs | From | Sum | Adopts |
 |---|---|---|---|---|---|
 | `ytdlp` | source | yt-dlp, venv | PyPI `yt-dlp` | none of Encore's (https; the version command) | `tools/venv` |
 | `streamrip` | source (qobuz, tidal, deezer) | streamrip fork, venv; Install pins v2.4.10 | GitHub `Stensel8/streamrip` releases or tags | none of Encore's (https; the version command and the `no_update_check` check) | `tools/venv`, `streamrip` |
 | `slskd` | source | slskd | GitHub `slskd/slskd` releases | GitHub's asset digest | `tools/slskd`, `slskd` |
+| `zotify` | source (Spotify) | zotify fork, venv (librespot through `[python] overrides`); Install pins v0.21.0 | GitHub `Googolplexed0/zotify` tags | none of Encore's (https; the version command) | |
+| `gamdl` | source (Apple Music) | gamdl, venv; Install pins 3.9.1 | PyPI `gamdl` | none of Encore's (https; the version command) | |
 | `torznab` | source | none | | | |
 | `qbittorrent`, `transmission`, `deluge`, `rtorrent`, `torrent-blackhole` | client (torrent) | none | | | |
 | `sabnzbd`, `nzbget`, `usenet-blackhole` | client (usenet) | none | | | |
@@ -382,6 +387,11 @@ cadenza belongs to exactly one plugin; the catalog test checks it):
   `youtube_light_refresh` (the YouTube sign-in card becomes a part of the yt-dlp card);
 - `streamrip`: `streamrip_enabled`, `streamrip_quality`, `streamrip_deezer_arl`, `streamrip_qobuz_user`,
   `streamrip_qobuz_token`, `streamrip_bin`, `streamrip_command`, `streamrip_sources` (internal);
+- `zotify`: `zotify_client_id`, `zotify_sign_in_link`, `zotify_format`, `zotify_quality`, `zotify_lyrics_file`,
+  `zotify_bulk_wait`, `zotify_real_time`, `zotify_language` (in the settings table without a card: their words
+  are in the manifest, as the Translator's);
+- `gamdl`: `gamdl_media_user_token`, `gamdl_codec`, `gamdl_wrapper_url`, `gamdl_wrapper_decrypt`, `gamdl_storefront`,
+  `gamdl_lyrics`, `gamdl_language` (the same way);
 - `slskd`: `slskd_enabled`, `soulseek_username`, `soulseek_password`, `soulseek_port`, `soulseek_share`,
   `soulseek_upload_slots`, `slskd_download_path`, `slskd_preferred_format`, `slskd_min_bitrate`,
   `slskd_search_timeout`, `slskd_stall_minutes`, `slskd_max_candidates`, `vpn_enabled`,
@@ -406,7 +416,7 @@ catalog: it installs through Upload plugin.
 Keys a catalog plugin adds that `settings.toml` does not have. Each one is listed here as `- `key`` with what
 it does, and its manifest entry has a label and a type; the catalog test checks both ways.
 
-None in 0.32.0: every catalog setting is one Encore already had.
+None: every catalog setting is in `settings.toml` (zotify's and gamdl's since 0.34, without a card).
 
 ## Example: yt-dlp (catalog)
 

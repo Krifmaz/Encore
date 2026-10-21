@@ -121,7 +121,7 @@ async fn the_list_has_the_catalog_and_the_sandbox_line() {
     assert_eq!(r.status, StatusCode::OK);
     let v = r.json();
     let plugins = v["plugins"].as_array().unwrap();
-    assert_eq!(plugins.len(), 17);
+    assert_eq!(plugins.len(), 19);
     assert!(plugins.iter().all(|p| p["installed"] == false), "a fresh install has nothing installed");
     assert!(!plugins.iter().any(|p| p["id"] == "internet-archive"), "the owner's plugin is not in the catalog");
     assert!(matches!(v["sandbox"]["level"].as_str(), Some("full" | "limits")));

@@ -6,10 +6,12 @@ use std::sync::OnceLock;
 
 /// Every catalog manifest as (id, text), in the order the Plugins page lists them: the sources, the download
 /// clients, the tools and playback, the connections. The text is what the plugins table keeps.
-pub const FILES: [(&str, &str); 17] = [
+pub const FILES: [(&str, &str); 19] = [
     ("ytdlp", include_str!("../catalog/ytdlp.toml")),
     ("streamrip", include_str!("../catalog/streamrip.toml")),
     ("slskd", include_str!("../catalog/slskd.toml")),
+    ("zotify", include_str!("../catalog/zotify.toml")),
+    ("gamdl", include_str!("../catalog/gamdl.toml")),
     ("torznab", include_str!("../catalog/torznab.toml")),
     ("qbittorrent", include_str!("../catalog/qbittorrent.toml")),
     ("transmission", include_str!("../catalog/transmission.toml")),
@@ -43,6 +45,11 @@ pub fn catalog() -> &'static [Manifest] {
             .collect()
     })
 }
+
+/// The catalog's sources that the picker and the request worker reach through the registry, as they reach a
+/// plugin program's (encore_requests::sources::plugin): no hand-written path of their own. Their adapters (the
+/// builtin crates') answer `search` and `download` with the SDK's shapes.
+pub const THROUGH_REGISTRY: [&str; 2] = ["zotify", "gamdl"];
 
 /// A catalog plugin by id.
 pub fn find(id: &str) -> Option<&'static Manifest> {

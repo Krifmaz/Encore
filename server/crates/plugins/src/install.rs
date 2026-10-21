@@ -493,6 +493,13 @@ pub async fn install_python_reporting(m: &Manifest, versions: &Versions, version
         };
         uv_run(vec!["venv".into(), "--python".into(), py2.python.clone(), venv2.display().to_string()], "Making the venv", 300)?;
         let mut args: Vec<String> = vec!["pip".into(), "install".into(), "--python".into(), venv2.join("bin/python").display().to_string()];
+        if !py2.overrides.is_empty() {
+            // one requirement per line, beside the venv (removed with the version that made it)
+            let file = venv2.with_file_name("overrides.txt");
+            let lines: Vec<String> = py2.overrides.iter().map(|o| crate::manifest::fill(o, &version2, &tag2)).collect();
+            std::fs::write(&file, lines.join("\n") + "\n")?;
+            args.extend(["--override".into(), file.display().to_string()]);
+        }
         args.extend(py2.packages.iter().map(|p| crate::manifest::fill(p, &version2, &tag2)));
         uv_run(args, &format!("Installing {}", m2.plugin.name), 900)?;
         let bin = py2.bin.0.iter().map(|b| venv2.join("bin").join(b)).find(|p| p.is_file()).ok_or_else(|| anyhow::anyhow!("{} was installed but its program is missing", m2.plugin.name))?;

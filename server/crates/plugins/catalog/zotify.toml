@@ -1,0 +1,120 @@
+# zotify: Spotify for requests and the picker, searched through the owner's own Spotify developer app and downloaded
+# with the owner's Spotify account. Encore's own code (sources/zotify.rs) runs it; the plugin installs zotify into a
+# venv of its own. docs/contracts/plugin-manifest.md describes every key.
+
+[plugin]
+id = "zotify"
+name = "zotify"
+version = "0.34.0"
+description = "Spotify through zotify: searches with your own Spotify developer app and downloads with your Spotify account, as Ogg Vorbis up to 320k (Premium) or converted to MP3, AAC or Opus."
+kind = "source"
+protocol = 1
+homepage = "https://github.com/Googolplexed0/zotify"
+license = "Unlicense"
+commands = ["status", "test", "search", "download", "update"]
+kinds = ["track", "album"]
+lossless = false
+needs_sign_in = true
+builtin = true
+
+[[sources]]
+id = "zotify"
+name = "Spotify"
+
+[run.timeouts]
+search = 120
+download = 7200
+test = 180
+
+# The fork's tags (v0.21.0 …); Install puts in the one this Encore was tested with.
+[update]
+from = "github"
+github = "Googolplexed0/zotify"
+tag = "v{version}"
+tags = true
+pin = "v0.21.0"
+auto = false
+
+# zotify names librespot by a git URL and the image has no git: librespot's archive (a fixed commit) goes in instead.
+[python]
+python = "3.14"
+packages = ["zotify @ https://github.com/Googolplexed0/zotify/archive/refs/tags/{tag}.zip"]
+overrides = ["librespot @ https://github.com/Googolplexed0/librespot-python/archive/01abfc8ad012dbc40e90417e640faaf271ea2f98.zip"]
+bin = "zotify"
+
+[install]
+verify = ["{bin}", "--version"]
+
+# No field in the settings table (their card is this one), so their words are here.
+[[settings]]
+key = "zotify_client_id"
+label = "Developer app Client ID"
+type = "text"
+default = ""
+part = "Sign-in"
+help = "Search runs through your own app from developer.spotify.com (Dashboard, Create app, Web API). Set its Redirect URI to http://127.0.0.1:4381/login. Downloads work without it; search does not."
+
+[[settings]]
+key = "zotify_sign_in_link"
+label = "Sign-in link"
+type = "text"
+default = ""
+full = true
+help = "Press Test: it answers with a Spotify link. Open it, sign in, and paste the address your browser ends on (http://127.0.0.1:4381/login?code=…, the page itself does not load) here, then Test again. Two rounds: your account, then your developer app."
+
+[[settings]]
+key = "zotify_format"
+label = "Format"
+type = "select"
+options = [["copy", "Ogg Vorbis, as streamed (no re-encode)"], ["mp3", "MP3"], ["aac", "AAC (.m4a)"], ["opus", "Opus"]]
+default = "copy"
+part = "Downloads"
+help = "Anything but Ogg Vorbis is re-encoded from the stream with ffmpeg, which loses a little quality."
+
+[[settings]]
+key = "zotify_quality"
+label = "Stream quality"
+type = "select"
+options = [["auto", "Best the account gets"], ["very_high", "320k (Premium)"], ["high", "160k"], ["normal", "96k"]]
+default = "auto"
+help = "Free accounts are limited to 160k."
+
+[[settings]]
+key = "zotify_lyrics_file"
+label = "Save synced lyrics as .lrc"
+type = "bool"
+default = true
+help = "Lyrics always go into the file's tags when Spotify has them."
+
+[[settings]]
+key = "zotify_bulk_wait"
+label = "Wait between tracks"
+type = "number"
+default = 1
+min = 0
+max = 120
+unit = "seconds"
+help = "Spotify refuses audio keys when tracks are fetched too fast. If albums fail with \"Failed fetching audio key\", try 30."
+
+[[settings]]
+key = "zotify_real_time"
+label = "Real-time factor"
+type = "number"
+default = 0.0
+min = 0
+max = 1
+step = 0.1
+advanced = true
+help = "0 downloads at full speed. 1 takes as long as the track plays, which looks like normal listening."
+
+[[settings]]
+key = "zotify_language"
+label = "Metadata language"
+type = "text"
+default = "en"
+advanced = true
+help = "Language code for titles and tags (en, de, ja …)."
+
+[permissions]
+network = true
+filesystem = "folder"

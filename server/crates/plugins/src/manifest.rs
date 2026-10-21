@@ -315,6 +315,10 @@ pub struct Python {
     pub packages: Vec<String>,
     /// the program in the venv's bin folder; a list: the first one that is there
     pub bin: Names,
+    /// requirements that replace what the packages name for the same project (`uv pip install --override`):
+    /// zotify names librespot by a git URL, and the image has no git, so its archive goes in instead
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub overrides: Vec<String>,
 }
 
 /// `[[download]]` (extension): a data file the plugin needs besides its program.
@@ -1304,6 +1308,11 @@ impl Manifest {
             for pkg in &py.packages {
                 if pkg.trim().is_empty() || pkg.trim_start().starts_with('-') || pkg.contains(['\n', '\0']) {
                     p.push(format!("[python] packages {pkg:?}: a requirement, not an option"));
+                }
+            }
+            for o in &py.overrides {
+                if o.trim().is_empty() || o.trim_start().starts_with('-') || o.contains(['\n', '\0']) {
+                    p.push(format!("[python] overrides {o:?}: a requirement, not an option"));
                 }
             }
             if py.bin.0.is_empty() || py.bin.0.iter().any(|n| n.is_empty() || n.contains(['/', '\\', '\0'])) {

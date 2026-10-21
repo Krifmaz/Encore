@@ -58,7 +58,7 @@ KNOWN = {
     "update": {"from", "github", "tag", "asset", "sums", "auto", "pypi", "prerelease", "tags", "pin", "pin_reports"},
     "install": {"verify", "version_from", "timeout", "max_mb", "remove", "check"},
     "binary": {"arch", "asset", "url", "sha256", "sums", "unpack", "bin"},
-    "python": {"python", "packages", "bin"},
+    "python": {"python", "packages", "bin", "overrides"},
     "download": {"when", "url", "sha256", "sums", "path", "max_mb", "magic"},
     "settings": {"key", "label", "type", "options", "default", "min", "max", "help", "when", "unit", "step", "full",
                  "advanced", "part"},

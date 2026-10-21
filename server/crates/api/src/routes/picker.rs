@@ -7,7 +7,7 @@ use crate::routes::requests::get_owned;
 use encore_requests::create::{quota, NewRequest};
 use encore_http::{deezer, tidal, ytmusic};
 use encore_requests::search_cache;
-use encore_requests::sources::{slskd, streamrip, torznab, ytdlp};
+use encore_requests::sources::{gamdl, slskd, streamrip, torznab, ytdlp, zotify};
 use crate::state::AppState;
 use encore_db::p;
 use encore_requests::worker;
@@ -148,6 +148,10 @@ pub fn source_state(st: &AppState, id: &str) -> SourceState {
             state("ready", "", "torznab")
         }
         "qobuz" | "tidal" | "deezer" => streamrip_state(st, id),
+        // through the registry like a plugin program's source, after their own sign-ins
+        "zotify" if !zotify::signed_in(st) => state("sign_in", "Sign in to Spotify: Test on the zotify card", "plugins"),
+        "zotify" if !zotify::search_ready(st) => state("sign_in", "Spotify search needs your developer app: Test on the zotify card", "plugins"),
+        "gamdl" if !gamdl::signed_in(st) => state("sign_in", "Apple Music needs your media-user-token (gamdl card)", "plugins"),
         "ytmusic" => if ytdlp::enabled(st) { state("ready", "", "ytdlp") } else { state("off", "YouTube Music is off (yt-dlp)", "ytdlp") },
         other => match encore_requests::sources::plugin::find(st, other) {
             Some(p) if p.enabled => state("ready", "", "plugins"),

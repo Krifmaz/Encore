@@ -1669,6 +1669,85 @@ env = "TRANSLATE_BACKGROUND"
 default = true
 help = "Translate the library in the background (titles on screen always are)."
 
+# ---- Settings → Plugins → zotify and gamdl (0.34): their words are in the plugins' manifests (catalog/zotify.toml,
+# catalog/gamdl.toml), so these keys have no card here
+
+[keys.zotify_client_id]
+env = "ZOTIFY_CLIENT_ID"
+default = ""
+help = "zotify: the Client ID of the owner's Spotify developer app, which searches."
+
+[keys.zotify_sign_in_link]
+env = "ZOTIFY_SIGN_IN_LINK"
+default = ""
+help = "zotify: the address the browser ended on after a Spotify sign-in (Test reads it once)."
+
+[keys.zotify_format]
+env = "ZOTIFY_FORMAT"
+default = "copy"
+help = "zotify: copy (Ogg Vorbis as streamed), mp3, aac or opus."
+
+[keys.zotify_quality]
+env = "ZOTIFY_QUALITY"
+default = "auto"
+help = "zotify: auto, very_high (320k, Premium), high (160k) or normal (96k)."
+
+[keys.zotify_lyrics_file]
+env = "ZOTIFY_LYRICS_FILE"
+default = true
+help = "zotify: save synced lyrics as .lrc beside the songs."
+
+[keys.zotify_bulk_wait]
+env = "ZOTIFY_BULK_WAIT"
+default = 1
+help = "zotify: seconds between tracks."
+
+[keys.zotify_real_time]
+env = "ZOTIFY_REAL_TIME"
+default = 0.0
+help = "zotify: 0 downloads at full speed, 1 as long as the track plays."
+
+[keys.zotify_language]
+env = "ZOTIFY_LANGUAGE"
+default = "en"
+help = "zotify: the language of titles and tags."
+
+[keys.gamdl_media_user_token]
+env = "GAMDL_MEDIA_USER_TOKEN"
+default = ""
+secret = true
+help = "gamdl: the media-user-token cookie of music.apple.com."
+
+[keys.gamdl_codec]
+env = "GAMDL_CODEC"
+default = "aac-web"
+help = "gamdl: aac-web, aac-he-web, alac or atmos (the last two through the wrapper)."
+
+[keys.gamdl_wrapper_url]
+env = "GAMDL_WRAPPER_URL"
+default = ""
+help = "gamdl: a wrapper-v2 server's address, for ALAC and Dolby Atmos."
+
+[keys.gamdl_wrapper_decrypt]
+env = "GAMDL_WRAPPER_DECRYPT"
+default = ""
+help = "gamdl: host:port of the wrapper's decrypt socket (empty: the wrapper's host, port 10020)."
+
+[keys.gamdl_storefront]
+env = "GAMDL_STOREFRONT"
+default = ""
+help = "gamdl: the catalog's country (us, gb, de …); empty: the account's."
+
+[keys.gamdl_lyrics]
+env = "GAMDL_LYRICS"
+default = "lrc"
+help = "gamdl: lrc, srt, ttml or none."
+
+[keys.gamdl_language]
+env = "GAMDL_LANGUAGE"
+default = "en-US"
+help = "gamdl: the language of titles and tags (en-US, de-DE …)."
+
 # ---- Settings → Server processing (Cadenza): the engine's own settings, drawn from its description
 
 [keys.cadenza_engine_settings]

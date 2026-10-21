@@ -383,6 +383,12 @@ bin = ["py-tool", "pytool"]
     assert!(has(&p, "[python] python"), "{p:?}");
     let p = problems_of(&base.replace("[python]\npython = \"3.14\"\npackages = [\"py-tool=={version}\"]\nbin = [\"py-tool\", \"pytool\"]\n", ""));
     assert!(has(&p, "installs a [python] venv"), "{p:?}");
+    // overrides: requirements too (a git URL a package names, replaced by an archive)
+    let with = |o: &str| base.replace("bin = [\"py-tool\", \"pytool\"]\n", &format!("bin = [\"py-tool\", \"pytool\"]\noverrides = [{o}]\n"));
+    let m = parse(&with("\"dep @ https://example.com/dep.zip\"")).unwrap();
+    assert_eq!(m.python.as_ref().unwrap().overrides, ["dep @ https://example.com/dep.zip"]);
+    let p = problems_of(&with("\"--extra-index-url=https://evil.example\""));
+    assert!(has(&p, "[python] overrides"), "{p:?}");
 }
 
 #[test]

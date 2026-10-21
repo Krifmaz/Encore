@@ -319,6 +319,9 @@ pub(super) fn source_order(st: &impl Ctx, r: &Req) -> Vec<String> {
         "ytdlp" => ytdlp::plugin_on(st) && (ytdlp::enabled(st) || st.cfg().bool("ytdlp_last_resort")),
         // still being installed after the upgrade: kept in its place, the request waits for it there
         "streamrip" => streamrip::enabled(st) || being_installed(st, "streamrip").is_some(),
+        // through the registry like a plugin program's source, once signed in
+        "zotify" => plugins.iter().any(|p| p.id == "zotify" && p.enabled && p.kinds.contains(&kind)) && crate::sources::zotify::search_ready(st),
+        "gamdl" => plugins.iter().any(|p| p.id == "gamdl" && p.enabled && p.kinds.contains(&kind)) && crate::sources::gamdl::signed_in(st),
         other => plugins.iter().any(|p| p.id == other && p.enabled && p.kinds.contains(&kind)),
     };
     order.into_iter().filter(|s| avail(s)).collect()
