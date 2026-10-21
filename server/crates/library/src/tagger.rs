@@ -6,7 +6,7 @@ use crate::scan as library;
 use encore_media::tags::read_tags;
 use crate::matcher::{describe, ratio, LibraryIndex};
 use crate::Ctx;
-use encore_http::mb;
+use encore_http::{mb, progress};
 use encore_db::p;
 use regex::Regex;
 use serde_json::{json, Value};
@@ -434,7 +434,10 @@ pub async fn place_all(st: &impl Ctx, moves: &[(PathBuf, PathBuf)], replace_same
         taken.insert(d.clone());
         plan.push(Place::New(d));
     }
-    place_planned(moves, &plan)
+    // the copies (a FLAC album onto another disk takes a while) on the blocking pool, never on a thread that
+    // serves the API
+    let moves = moves.to_vec();
+    tokio::task::spawn_blocking(move || place_planned(&moves, &plan)).await?
 }
 
 /// [`place_all`] that never replaces or drops anything: a file whose destination is taken gets a free name
@@ -811,6 +814,10 @@ pub async fn auto_match(st: &impl Ctx, paths: &[PathBuf], artist: &str, album: &
     }))
 }
 
+/// How long an import waits for MusicBrainz's tags before it goes on without them (an import's lookups go
+/// before a request's in MusicBrainz's line, so this is only reached when MusicBrainz is very busy or slow).
+pub const IMPORT_MB_WAIT: std::time::Duration = std::time::Duration::from_secs(300);
+
 fn all_tracks(st: &impl Ctx) -> Vec<Row> {
     st.db().query("SELECT id, path, title, artist, album, album_id, duration, isrc, mb_trackid, format, bitrate, verify_status FROM tracks", p![]).unwrap_or_default()
 }
@@ -822,6 +829,10 @@ fn all_tracks(st: &impl Ctx) -> Vec<Row> {
 #[allow(clippy::too_many_arguments)]
 pub async fn import_single(st: &impl Ctx, path: &Path, artist: &str, title: &str, recording_id: Option<&str>, source_root: &Path,
                            length: Option<f64>, reject: bool, audio: bool, hint: Option<&str>) -> anyhow::Result<(PathBuf, String)> {
+    // what it is at shows in the request's message ("Importing – checking the audio": encore_http::progress)
+    if will_verify(st, path) {
+        progress::step("checking the audio");
+    }
     let check = verify(st, path, title, artist, length, recording_id).await;
     if let Some(c) = &check {
         if c["status"] == "mismatch" && audio && st.cfg().bool("reject_mismatch") {
@@ -848,18 +859,29 @@ pub async fn import_single(st: &impl Ctx, path: &Path, artist: &str, title: &str
     vals.insert("artist".into(), json!(artist));
     vals.insert("albumartist".into(), json!(artist));
     let mut cover = None;
-    let rec = match recording_id.filter(|r| !r.is_empty()) {
-        Some(r) => mb::recording(st, r).await.ok(),
-        None => match mb::search_recordings(st, title, 5, Some(artist)).await {
-            Ok(res) => match res.iter().find(|r| sim(r["title"].as_str().unwrap_or(""), title) > 0.8 && sim(r["artist"].as_str().unwrap_or(""), artist) > 0.6) {
-                Some(r) => mb::recording(st, r["id"].as_str().unwrap_or("")).await.ok(),
-                None => None,
+    progress::step("looking it up on MusicBrainz");
+    let lookup = async {
+        match recording_id.filter(|r| !r.is_empty()) {
+            Some(r) => mb::recording(st, r).await.ok(),
+            None => match mb::search_recordings(st, title, 5, Some(artist)).await {
+                Ok(res) => match res.iter().find(|r| sim(r["title"].as_str().unwrap_or(""), title) > 0.8 && sim(r["artist"].as_str().unwrap_or(""), artist) > 0.6) {
+                    Some(r) => mb::recording(st, r["id"].as_str().unwrap_or("")).await.ok(),
+                    None => None,
+                },
+                Err(e) => {
+                    st.db().log("warning", &format!("MusicBrainz lookup failed for {artist} - {title}: {e}"));
+                    None
+                }
             },
-            Err(e) => {
-                st.db().log("warning", &format!("MusicBrainz lookup failed for {artist} - {title}: {e}"));
-                None
-            }
-        },
+        }
+    };
+    // MusicBrainz's line is long: the song goes in with the names it has, as when MusicBrainz fails
+    let rec = match tokio::time::timeout(IMPORT_MB_WAIT, lookup).await {
+        Ok(rec) => rec,
+        Err(_) => {
+            st.db().log("warning", &format!("MusicBrainz was too busy to tag {artist} - {title} – imported with the names it has"));
+            None
+        }
     };
     if let Some(r) = rec {
         for (k, v) in [("title", &r["title"]), ("artist", &r["artist"]), ("albumartist", &r["artist"]), ("album", &r["album"]), ("date", &r["year"]),
@@ -867,17 +889,22 @@ pub async fn import_single(st: &impl Ctx, path: &Path, artist: &str, title: &str
                        ("musicbrainz_albumartistid", &r["artist_id"])] {
             vals.insert(k.into(), v.clone());
         }
+        progress::step("finding the cover");
         cover = fetch_cover(st, r["release_id"].as_str(), r["release_group_id"].as_str()).await;
     }
     if cover.is_none() {
+        progress::step("finding the cover");
         let album = vals.s("album");
         cover = find_art(st, &vals.s("artist"), Some(&album), Some(&vals.s("title")), hint).await.map(|x| x.0);
     }
+    progress::step("moving into the library");
     let ext = path.extension().map(|e| format!(".{}", e.to_string_lossy())).unwrap_or_default();
     // the same song already in the library?
     let mut existing = None;
     if st.cfg().bool("dedupe_on_import") {
-        let ix = LibraryIndex::new(all_tracks(st));
+        // every song read and indexed on the blocking pool, not on a thread that serves the API
+        let s = st.clone();
+        let ix = tokio::task::spawn_blocking(move || LibraryIndex::new(all_tracks(&s))).await?;
         let want = describe(&vals.s("title"), &vals.s("artist"), length, Some(&vals.s("isrc")), Some(&vals.s("musicbrainz_trackid")));
         if let Some((hit, _)) = ix.find(&want) {
             existing = Some(hit.clone());
@@ -1039,6 +1066,8 @@ pub async fn import_album_files(st: &impl Ctx, paths: &[PathBuf], what: AlbumImp
     let AlbumImport { artist, album, rgid, source_root, reject, audio, source_meta, hint } = what;
     let mut paths = paths.to_vec();
     paths.sort();
+    // what it is at shows in the request's message ("Importing – reading tags": encore_http::progress)
+    progress::step("reading tags");
     // what the files say they are, before anything is rewritten
     let originals: Vec<Row> = paths.iter().map(|p| read_tags(&p.to_string_lossy())).collect();
     let mut source_meta = source_meta;
@@ -1050,10 +1079,16 @@ pub async fn import_album_files(st: &impl Ctx, paths: &[PathBuf], what: AlbumImp
         source_meta = None;
     }
     let pv = if st.cfg().bool("autotag_on_import") {
-        match auto_match(st, &paths, artist, album, rgid).await {
-            Ok(p) => p,
-            Err(e) => {
+        progress::step("looking it up on MusicBrainz");
+        match tokio::time::timeout(IMPORT_MB_WAIT, auto_match(st, &paths, artist, album, rgid)).await {
+            Ok(Ok(p)) => p,
+            Ok(Err(e)) => {
                 st.db().log("warning", &format!("Auto-tag failed for {artist} - {album}: {e}"));
+                None
+            }
+            // MusicBrainz's line is long: the album goes in with its own tags, as when MusicBrainz fails
+            Err(_) => {
+                st.db().log("warning", &format!("MusicBrainz was too busy to tag {artist} - {album} – imported with the files' own tags"));
                 None
             }
         }
@@ -1086,9 +1121,13 @@ pub async fn import_album_files(st: &impl Ctx, paths: &[PathBuf], what: AlbumImp
         let mut mism = vec![];
         // the first file that is another song: its title and what it sounds like
         let mut first: Option<(String, Option<String>)> = None;
-        for row in pv["rows"].as_array().cloned().unwrap_or_default() {
+        let rows = pv["rows"].as_array().cloned().unwrap_or_default();
+        for (i, row) in rows.iter().enumerate() {
             let Some(v) = row["values"].as_object() else { continue };
             let p = PathBuf::from(row["path"].as_str().unwrap_or(""));
+            if will_verify(st, &p) {
+                progress::step(&format!("checking the audio ({} of {})", i + 1, rows.len()));
+            }
             let res = verify(st, &p, &v.s("title"), &v.s("artist"), None, Some(&v.s("musicbrainz_trackid"))).await;
             if let Some(r) = &res {
                 if r["status"] == "mismatch" {
@@ -1106,6 +1145,7 @@ pub async fn import_album_files(st: &impl Ctx, paths: &[PathBuf], what: AlbumImp
             };
             return Err(Rejected::audio(format!("{} of {} files are not what they claim – e.g. {}", mism.len(), paths.len(), mism[0]), heard, text).into());
         }
+        progress::step("moving into the library");
         let new = apply_preview(st, &pv, true, Some(source_root), hint).await?;
         let rows = pv["rows"].as_array().cloned().unwrap_or_default();
         let results: Vec<(PathBuf, Option<Value>)> = rows.iter().zip(new.iter()).map(|(row, np)| {
@@ -1125,10 +1165,12 @@ pub async fn import_album_files(st: &impl Ctx, paths: &[PathBuf], what: AlbumImp
     }
     // the requested album's cover only goes on files that are tagged as that album
     let cover = if source_meta.is_some() || originals.iter().any(|t| sim(&t.s("album"), album) >= 0.75) {
+        progress::step("finding the cover");
         find_art(st, artist, Some(album), None, hint).await.map(|x| x.0)
     } else {
         None
     };
+    progress::step("moving into the library");
     let src_tracks: Vec<Value> = source_meta.and_then(|m| m["tracks"].as_array().cloned()).unwrap_or_default();
     let unique_numbers = src_tracks.iter().map(|x| x["track"].as_i64()).collect::<std::collections::HashSet<_>>().len() == src_tracks.len();
     let mut out = vec![];

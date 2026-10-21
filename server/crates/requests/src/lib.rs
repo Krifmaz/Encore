@@ -60,5 +60,7 @@ pub struct Requests {
     pub storage: worker::Health,
     /// Soulseek and indexer answers kept for the picker (<config>/cache/search-cache.db)
     pub search_cache: search_cache::Cache,
+    /// what the long steps running now are at, and the task that writes it into their requests' messages
+    pub steps: worker::Steps,
 }
 

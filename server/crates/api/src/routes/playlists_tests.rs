@@ -109,3 +109,37 @@ async fn an_already_requested_song_links_to_that_request() {
     assert_eq!(d["items"][0]["request_id"], json!(theirs));
     assert_eq!(d["items"][0]["request_status"], json!(theirs_status));
 }
+
+/// The auto-download asks again for a song whose request failed only after a wait that doubles with each
+/// failed attempt (15 minutes, 30, an hour … at most a day) – it used to ask at every sync, every 15 minutes, for
+/// days. "Download missing" (a person) asks at once.
+#[tokio::test]
+async fn the_auto_download_waits_longer_after_each_failed_attempt() {
+    use encore_requests::missing::auto_retry_after;
+    assert_eq!((auto_retry_after(1), auto_retry_after(2), auto_retry_after(3), auto_retry_after(8), auto_retry_after(40)), (900.0, 1800.0, 3600.0, 86_400.0, 86_400.0));
+    let st = state("backoff");
+    let u = user(&st, "owner1", "admin");
+    st.db.execute("UPDATE users SET auto_download=1 WHERE id=?", p![u.i("id")]).unwrap();
+    let pid = playlist(&st, &u);
+    let rid = request(&st, &u, "Band", "Nowhere", "failed");
+    st.db.execute("UPDATE requests SET detail=? WHERE id=?", p![json!({ "attempts": 3, "auto": true }).to_string(), rid]).unwrap();
+    let iid = item(&st, pid, 0, "Nowhere", "Band", Some(rid));
+    // failed just now, its third attempt: an hour's wait
+    let rep = encore_requests::missing::request_missing(&*st, &u, pid, true, None).unwrap();
+    assert_eq!(rep.requested, 0, "{rep:?}");
+    assert_eq!(linked(&st, iid), (rid, "failed".to_string()));
+    // 59 minutes later still not
+    st.db.execute("UPDATE requests SET updated_at=? WHERE id=?", p![now() - 59.0 * 60.0, rid]).unwrap();
+    assert_eq!(encore_requests::missing::request_missing(&*st, &u, pid, true, None).unwrap().requested, 0);
+    // a person's Download missing asks at once
+    let rep = encore_requests::missing::request_missing(&*st, &u, pid, false, None).unwrap();
+    assert_eq!(rep.requested, 1, "{rep:?}");
+    assert_eq!(linked(&st, iid), (rid, "queued".to_string()));
+    // that was its fourth attempt: when it fails, the auto-download waits two hours, then asks
+    st.db.execute("UPDATE requests SET status='failed', updated_at=? WHERE id=?", p![now() - 119.0 * 60.0, rid]).unwrap();
+    assert_eq!(encore_requests::missing::request_missing(&*st, &u, pid, true, None).unwrap().requested, 0);
+    st.db.execute("UPDATE requests SET updated_at=? WHERE id=?", p![now() - 121.0 * 60.0, rid]).unwrap();
+    let rep = encore_requests::missing::request_missing(&*st, &u, pid, true, None).unwrap();
+    assert_eq!(rep.requested, 1, "{rep:?}");
+    assert_eq!(linked(&st, iid), (rid, "queued".to_string()));
+}

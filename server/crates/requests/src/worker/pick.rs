@@ -61,7 +61,8 @@ pub(super) async fn start(st: &impl Ctx, r: &mut Req) -> anyhow::Result<()> {
         complete(st, r, "Already in library", &[], Value::Null).await;
         return Ok(());
     }
-    if kind == "track" && try_album_upgrade(st, r).await? {
+    // (boxed: the lookup's future is large, and a step's runs on a worker thread's stack)
+    if kind == "track" && Box::pin(try_album_upgrade(st, r)).await? {
         return Ok(());
     }
     if kind == "artist" {
@@ -75,6 +76,10 @@ pub(super) async fn start(st: &impl Ctx, r: &mut Req) -> anyhow::Result<()> {
     crate::report::avoid_source(&r.d, &mut order); // a replacement tries the reported file's source last
     r.d["sources"] = json!(order);
     r.d["log"] = json!([]);
+    // why the song goes on its own (MusicBrainz couldn't say which album it is on), for its details
+    if let Some(note) = r.d["album_note"].as_str().map(String::from) {
+        log_push(r, format!("album lookup: {note}"));
+    }
     next_source(st, r, "").await
 }
 
@@ -89,7 +94,8 @@ pub(super) async fn next_source(st: &impl Ctx, r: &mut Req, reason: &str) -> any
         }
         let mut srcs: Vec<String> = r.d["sources"].as_array().map(|a| a.iter().filter_map(|x| x.as_str().map(String::from)).collect()).unwrap_or_default();
         if srcs.is_empty() {
-            let log: Vec<String> = r.d["log"].as_array().map(|a| a.iter().filter_map(|x| x.as_str().map(String::from)).collect()).unwrap_or_default();
+            // (what the sources said: the album lookup's line is not a source's)
+            let log: Vec<String> = r.d["log"].as_array().map(|a| a.iter().filter_map(|x| x.as_str().map(String::from)).filter(|l| !l.starts_with("album lookup:")).collect()).unwrap_or_default();
             let tried = if log.is_empty() { "no download sources enabled".to_string() } else { log[log.len().saturating_sub(3)..].join("; ") };
             fail(st, r, &format!("All sources exhausted ({tried})")).await;
             return Ok(());
@@ -461,15 +467,22 @@ pub(super) async fn start_pick(st: &impl Ctx, r: &mut Req) -> anyhow::Result<()>
 }
 
 pub(super) async fn expand_artist(st: &impl Ctx, r: &mut Req) -> anyhow::Result<()> {
-    upd(st, r, &[("status", json!("searching")), ("message", json!("Looking up discography…"))]);
-    let art = mb::artist(st, &r.s("mbid")).await?;
+    const LOOKING: &str = "Looking up discography…";
+    upd(st, r, &[("status", json!("searching")), ("message", json!(LOOKING))]);
+    // (while MusicBrainz's line is long the message says so: "Looking up discography – waiting for MusicBrainz …")
+    let mbid = r.s("mbid");
+    let art = with_steps(st, r.id, "searching", "Looking up discography", LOOKING, mb::artist(st, &mbid)).await?;
     // the request's own boxes (Request discography panel), else Settings → Release types; the releases ticked
     // in the dialog (`release_ids`) take the place of the filter altogether
     let filter = encore_config::release_types::ReleaseFilter::from_value(&r.d["release_filter"], &encore_config::release_types::ReleaseFilter::from_cfg(st.cfg()));
     let only: Option<Vec<String>> = r.d["release_ids"].as_array().map(|a| a.iter().filter_map(|v| v.as_str().map(String::from)).collect());
 
     // the merged catalog: MusicBrainz plus the Deezer / Apple Music releases MusicBrainz doesn't list
-    let ext = if st.cfg().bool("discover_catalog_merge") { encore_library::catalog::merged(st, &art).await } else { vec![] };
+    let ext = if st.cfg().bool("discover_catalog_merge") {
+        with_steps(st, r.id, "searching", "Looking up discography", LOOKING, encore_library::catalog::merged(st, &art)).await
+    } else {
+        vec![]
+    };
     let name = art["name"].as_str().unwrap_or("").to_string();
     let skip = |x: &Value| {
         let title = x["title"].as_str().unwrap_or("");
@@ -518,49 +531,315 @@ pub(super) async fn track_in_library(st: &impl Ctx, r: &Req) -> bool {
     st.library().songs.load(st.db()).await.find(&want).is_some()
 }
 
-/// If the song is on an official album, fetch the whole album instead (best quality available).
-pub(super) async fn try_album_upgrade(st: &impl Ctx, r: &mut Req) -> anyhow::Result<bool> {
-    let mode = match r.d["album_mode"].as_str() { Some("song") => "off".to_string(), Some("album") => "album_ep".to_string(), _ => st.cfg().str("album_upgrade") };
-    if mode == "off" || r.d["no_album"].as_bool().unwrap_or(false) {
-        return Ok(false);
+/// The album lookup's words while it runs (and its base for what it waits for: "Looking up which album this
+/// song is on – waiting for MusicBrainz (about 2 minutes, 120 lookups ahead)").
+pub(super) const LOOKING_UP_ALBUM: &str = "Looking up which album this song is on…";
+const LOOKING_UP_ALBUM_BASE: &str = "Looking up which album this song is on";
+/// How long one try of the album lookup waits for its first turn in MusicBrainz's line before it stops
+/// waiting, and how long the rest of it may take after that turn (its next calls keep the first one's place).
+pub const ALBUM_WAIT: std::time::Duration = std::time::Duration::from_secs(300);
+/// The tries before the song goes on without its album, and the time between two of them (seconds).
+pub const ALBUM_TRIES: u64 = 3;
+pub const ALBUM_RETRY_SECS: f64 = 300.0;
+/// A try that gave up in the line looks this often whether the line has got short, so its next try can start
+/// sooner (seconds; a little more for some requests, so they don't all come back at once).
+const ALBUM_LOOK_SECS: f64 = 30.0;
+
+/// What one try of the album lookup came to.
+enum Lookup {
+    /// MusicBrainz answered: the recording it found and the album it is on (either may be none)
+    Answer(Option<String>, Option<Value>),
+    /// MusicBrainz is busy: why, in words, and whether it was the line here (no turn in time) rather than
+    /// MusicBrainz saying so
+    Busy(String, bool),
+    /// MusicBrainz failed (down, out of reach, an error of its own): why, in words
+    Failed(String),
+}
+
+fn status_of(e: &anyhow::Error) -> Option<reqwest::StatusCode> {
+    e.chain().find_map(|c| c.downcast_ref::<reqwest::Error>().and_then(|r| r.status()))
+}
+
+/// Whether MusicBrainz said no for good (a 4xx other than 429: an id it doesn't know, say) rather than "not now".
+fn refused_for_good(e: &anyhow::Error) -> bool {
+    status_of(e).is_some_and(|s| s.is_client_error() && s.as_u16() != 429)
+}
+
+/// Whether MusicBrainz said it is busy: still a 503 after its back-off, or a 429.
+fn said_busy(e: &anyhow::Error) -> bool {
+    mb::is_busy(e) || status_of(e).is_some_and(|s| s.as_u16() == 429)
+}
+
+/// "MusicBrainz is busy (1 lookup ahead)", "MusicBrainz is busy (412 lookups ahead)".
+fn busy_words(ahead: usize) -> String {
+    match ahead {
+        0 => "MusicBrainz is busy".into(),
+        1 => "MusicBrainz is busy (1 lookup ahead)".into(),
+        n => format!("MusicBrainz is busy ({n} lookups ahead)"),
     }
-    upd(st, r, &[("status", json!("searching")), ("message", json!("Looking up which album this song is on…"))]);
-    let (mut rid, mut alb) = (None, None);
-    let found: anyhow::Result<()> = async {
-        rid = match r.opt("mbid") { Some(m) => Some(m), None => encore_library::matcher::resolve_recording(st, &r.s("artist"), &r.s("title"), r.length(), r.d["isrc"].as_str()).await? };
-        if let Some(id) = &rid {
-            alb = mb::album_for_recording(st, id, mode == "album_ep").await?;
-        }
-        Ok(())
-    }.await;
-    if let Err(e) = found {
-        st.db().log("warning", &format!("Album lookup failed for {}: {e}", r.label()));
-    }
-    r.d["recording"] = json!(rid);
-    let Some(alb) = alb.filter(|a| !encore_library::has_release_group(st.db(), a["id"].as_str().unwrap_or(""))) else {
-        r.d["no_album"] = json!(true);
-        upd(st, r, &[]);
-        return Ok(false);
+}
+
+/// One try: the recording (its MusicBrainz id, else the ISRC, else the names) and the album it is on. Its
+/// calls keep one place in MusicBrainz's line: it waits at most [`ALBUM_WAIT`] for its first turn, and its
+/// next call comes right after that turn instead of at the back of the line. While it waits the request's
+/// message says how long and behind how many lookups.
+async fn album_on_musicbrainz(st: &impl Ctx, r: &Req, allow_ep: bool) -> Lookup {
+    let (mbid, artist, title, length, isrc) = (r.opt("mbid"), r.s("artist"), r.s("title"), r.length(), r.d["isrc"].as_str().map(String::from));
+    let lookup = async {
+        let rid = match mbid {
+            Some(m) => Some(m),
+            None => encore_library::matcher::resolve_recording(st, &artist, &title, length, isrc.as_deref()).await?,
+        };
+        let alb = match &rid {
+            Some(id) => mb::album_for_recording(st, id, allow_ep).await?,
+            None => None,
+        };
+        anyhow::Ok((rid, alb))
     };
+    // (boxed: a step's future stays small on the worker thread's stack)
+    let tried = mb::one_place_within(ALBUM_WAIT, ALBUM_WAIT, Box::pin(lookup));
+    match with_steps(st, r.id, "searching", LOOKING_UP_ALBUM_BASE, LOOKING_UP_ALBUM, tried).await {
+        Some(Ok((rid, alb))) => Lookup::Answer(rid, alb),
+        Some(Err(e)) => {
+            st.db().log("warning", &format!("Album lookup failed for {}: {e}", r.label()));
+            if refused_for_good(&e) {
+                Lookup::Answer(None, None)
+            } else if said_busy(&e) {
+                Lookup::Busy(busy_words(0), false)
+            } else {
+                Lookup::Failed("MusicBrainz didn't answer".into())
+            }
+        }
+        None => Lookup::Busy(busy_words(st.mb().ahead_of(mb::Priority::Request)), true),
+    }
+}
+
+/// Words in a Deezer album title that mark a best-of or another collection, besides the extras the catalog
+/// merge reads from titles ([`encore_config::release_types::marks`]: live, remix, soundtrack, "greatest hits" …).
+static COLLECTION: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"(?i)\bbest of\b|\bvery best\b|\bgreatest\b|\bhits\b|\bcollection\b|\banthology\b|\bessentials?\b|\bthe singles\b|\bretrospective\b").unwrap()
+});
+
+/// The album the song is on as Deezer names it, by the song's ISRC: an album (or an EP when EPs count) of the
+/// song's own artist – never a single, a compilation or best-of, a live album, a soundtrack or a remix album
+/// (Deezer often names a later release of the song: those are left out as MusicBrainz's lookup leaves them
+/// out). → (title, artist, "Album"/"EP", year, cover, the catalogue ids for the album request's `ext`)
+async fn deezer_album(st: &impl Ctx, isrc: &str, artist: &str, allow_ep: bool) -> Option<Value> {
+    use encore_http::deezer;
+    let t = std::time::Duration::from_secs(15);
+    let track = deezer::get(st, deezer::track_by_isrc(st, isrc).timeout(t)).await.ok()?;
+    let id = track["album"]["id"].as_i64()?;
+    let a = deezer::get(st, deezer::album(st, id).timeout(t)).await.ok()?;
+    let typ = match a["record_type"].as_str()? {
+        "album" => "Album",
+        "ep" if allow_ep => "EP",
+        _ => return None,
+    };
+    let name = a["artist"]["name"].as_str().filter(|n| !n.is_empty())?;
+    if tagger::sim(name, artist) < 0.75 {
+        return None; // another artist's album (a various-artists release, say)
+    }
+    let title = a["title"].as_str().filter(|x| !x.is_empty())?;
+    let mut ext = json!({ "deezer": id });
+    if !encore_config::release_types::marks(&json!({ "title": title, "type": typ, "ext": ext })).is_empty() || COLLECTION.is_match(title) {
+        return None;
+    }
+    let year: String = a["release_date"].as_str().unwrap_or("").chars().take(4).collect();
+    let cover = ["cover_xl", "cover_big", "cover"].iter().find_map(|k| a[*k].as_str().filter(|c| !c.is_empty())).map(String::from);
+    if let Some(upc) = a["upc"].as_str().filter(|u| !u.is_empty()) {
+        ext["upc"] = json!(upc);
+    }
+    Some(json!({ "title": title, "artist": name, "type": typ, "year": year, "cover": cover, "ext": ext }))
+}
+
+/// An album request already there for this album, whichever way it was made: the same release group, the same
+/// Deezer album or barcode, or the same artist and title (edition notes aside: "Discovery" and "Discovery
+/// (Remastered)"). MusicBrainz's answer for one song and Deezer's for another song of the same album (while
+/// MusicBrainz was busy) used to make two album requests, and both downloaded.
+fn album_request_for(st: &impl Ctx, mbid: Option<&str>, artist: &str, title: &str, ext: &Value) -> anyhow::Result<Option<i64>> {
+    let deezer = ext["deezer"].as_i64().map(|d| d.to_string()).or_else(|| ext["deezer"].as_str().map(String::from)).filter(|d| !d.is_empty());
+    let upc = ext["upc"].as_str().filter(|u| !u.is_empty());
+    let rows = st.db().query("SELECT id, mbid, artist, title, album, detail FROM requests WHERE kind='album' AND status NOT IN ('failed','denied','cancelled')
+                              AND (mbid=? OR lower(artist)=lower(?) OR CAST(json_extract(detail, '$.ext.deezer') AS TEXT)=? OR json_extract(detail, '$.ext.upc')=?)
+                              ORDER BY id", p![mbid, artist, deezer, upc])?;
+    let same_ext = |row: &Row| {
+        let d: Value = serde_json::from_str(&row.s("detail")).unwrap_or(json!({}));
+        let theirs = d["ext"]["deezer"].as_i64().map(|x| x.to_string()).or_else(|| d["ext"]["deezer"].as_str().map(String::from));
+        (deezer.is_some() && theirs == deezer) || (upc.is_some() && d["ext"]["upc"].as_str() == upc)
+    };
+    let key = encore_library::catalog::title_key(title);
+    let same_name = |row: &Row| {
+        let theirs = Some(row.s("album")).filter(|a| !a.is_empty()).unwrap_or_else(|| row.s("title"));
+        !key.is_empty() && encore_library::catalog::title_key(&theirs) == key && encore_core::text::norm(&row.s("artist")) == encore_core::text::norm(artist)
+    };
+    let found = rows.iter().find(|row| mbid.is_some_and(|m| row.s("mbid") == m))
+        .or_else(|| rows.iter().find(|row| same_ext(row)))
+        .or_else(|| rows.iter().find(|row| same_name(row)));
+    Ok(found.map(|row| row.i("id")))
+}
+
+/// The whole album instead of the song: the album request (one that is already there, or a new one) and the
+/// song following it. `alb`: {title, artist, type, year, cover} with `id` (a MusicBrainz release group) or
+/// `ext` (the album only Deezer named). None: the album is in the library already (the song isn't on it in
+/// this version), so the song goes on its own.
+fn follow_album(st: &impl Ctx, r: &mut Req, alb: &Value) -> anyhow::Result<Option<i64>> {
+    let title = alb["title"].as_str().unwrap_or("").to_string();
+    let artist = alb["artist"].as_str().filter(|a| !a.is_empty()).map(String::from).unwrap_or_else(|| r.s("artist"));
+    let mbid = alb["id"].as_str().filter(|x| !x.is_empty());
+    let there = match mbid {
+        Some(id) => encore_library::has_release_group(st.db(), id),
+        None => encore_library::has_album(st.db(), &artist, &title),
+    };
+    if there {
+        return Ok(None);
+    }
     let typ = alb["type"].as_str().unwrap_or("album").to_lowercase();
-    let aid = match st.db().one("SELECT id FROM requests WHERE kind='album' AND mbid=? AND status NOT IN ('failed','denied','cancelled')", p![alb["id"]])? {
-        Some(e) => e.i("id"),
+    let aid = match album_request_for(st, mbid, &artist, &title, &alb["ext"])? {
+        Some(e) => e,
         None => {
             let t = now();
-            let artist = if alb["artist"].as_str().unwrap_or("").is_empty() { json!(r.s("artist")) } else { alb["artist"].clone() };
+            let detail = if mbid.is_none() && alb["ext"].is_object() { json!({ "ext": alb["ext"] }) } else { json!({}) };
+            let year = alb["year"].as_str().filter(|y| !y.is_empty()).map(|y| json!(y)).unwrap_or(Value::Null);
             let id = st.db().execute("INSERT INTO requests (user_id, kind, mbid, artist, title, album, year, cover_url, status, message, detail, created_at, updated_at)
                                     VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
-                p![r.row.get("user_id"), "album", alb["id"], artist, alb["title"], alb["title"], alb["year"], alb["cover"], "queued",
-                   format!("Full album for “{}”", r.s("title")), "{}", t, t])?;
-            st.db().log("info", &format!("“{}” is on {typ} “{}” – downloading the whole {typ}", r.s("title"), alb["title"].as_str().unwrap_or("")));
+                p![r.row.get("user_id"), "album", mbid, artist, title, title, year, alb["cover"], "queued",
+                   format!("Full album for “{}”", r.s("title")), detail.to_string(), t, t])?;
+            st.db().log("info", &format!("“{}” is on {typ} “{title}” – downloading the whole {typ}", r.s("title")));
+            crate::events::emit(st, id);
             id
         }
     };
     r.d["album_request"] = json!(aid);
     let cover = r.opt("cover_url").map(|c| json!(c)).unwrap_or(alb["cover"].clone());
     upd(st, r, &[("status", json!("monitoring")), ("source", json!("album")), ("cover_url", cover),
-                 ("message", json!(format!("Getting the whole {typ} “{}”", alb["title"].as_str().unwrap_or(""))))]);
-    Ok(true)
+                 ("message", json!(format!("Getting the whole {typ} “{title}”")))]);
+    Ok(Some(aid))
+}
+
+/// The lookup is over without an album: the song goes on its own. `note`: why, for the request's log – the
+/// lookup gave up (MusicBrainz couldn't answer), and the next attempt of the request looks again. Without a
+/// note MusicBrainz answered, and a request asked for again within a day doesn't ask it again
+/// ([`crate::create::detail_for_retry`]).
+fn no_album(r: &mut Req, note: Option<String>) {
+    r.d["no_album"] = json!(true);
+    if let Some(d) = r.d.as_object_mut() {
+        d.remove("album_lookup");
+    }
+    match note {
+        Some(n) => r.d["album_note"] = json!(n),
+        None => r.d["album_checked_at"] = json!(now()),
+    }
+}
+
+/// Whether MusicBrainz's line is short enough now for a lookup's first turn to come well within [`ALBUM_WAIT`].
+fn line_is_short(st: &impl Ctx) -> bool {
+    st.mb().ahead_of(mb::Priority::Request) as f64 * mb::gap(st).as_secs_f64() < ALBUM_WAIT.as_secs_f64() / 2.0
+}
+
+/// Wait for the next try, due at `at`. A try that gave up in the line here (`in_line`) starts sooner once the
+/// line is short – MusicBrainz would sit idle meanwhile; a try MusicBrainz said it was too busy for waits it out.
+async fn until_next_try(st: &impl Ctx, id: i64, at: f64, in_line: bool) {
+    let look = ALBUM_LOOK_SECS + id.rem_euclid(15) as f64;
+    loop {
+        let left = at - now();
+        if left <= 0.0 {
+            return;
+        }
+        tokio::time::sleep(std::time::Duration::from_secs_f64(if in_line { left.min(look) } else { left })).await;
+        if in_line && line_is_short(st) {
+            return;
+        }
+    }
+}
+
+/// If the song is on an official album, fetch the whole album instead (best quality available).
+///
+/// The lookup asks MusicBrainz, behind pages and imports in its line (it says how long it waits). When
+/// MusicBrainz can't answer now the album Deezer names for the song's ISRC is taken. Without one:
+/// - MusicBrainz busy ([`ALBUM_WAIT`] passed without a turn in the line, or MusicBrainz said so): the lookup
+///   tries again [`ALBUM_RETRY_SECS`] later – sooner once the line is short – its message saying why and when
+///   ("… – MusicBrainz is busy (412 lookups ahead). Next try by 14:20"), and after [`ALBUM_TRIES`] tries the
+///   song goes on its own, the request's log saying why;
+/// - MusicBrainz failing (down, out of reach, an error): the song goes on its own at once, as it did before the
+///   tries, the request's log saying why – waiting would make every request wait while it is down.
+pub(super) async fn try_album_upgrade(st: &impl Ctx, r: &mut Req) -> anyhow::Result<bool> {
+    let mode = match r.d["album_mode"].as_str() { Some("song") => "off".to_string(), Some("album") => "album_ep".to_string(), _ => st.cfg().str("album_upgrade") };
+    if mode == "off" || r.d["no_album"].as_bool().unwrap_or(false) {
+        return Ok(false);
+    }
+    let allow_ep = mode == "album_ep";
+    loop {
+        // a try that is due later (the server restarted between two tries): its wait first
+        if let Some(at) = r.d["album_lookup"]["next_try_at"].as_f64().filter(|t| *t > now()) {
+            let why = r.d["album_lookup"]["why"].as_str().unwrap_or("MusicBrainz is busy").to_string();
+            let in_line = r.d["album_lookup"]["in_line"].as_bool().unwrap_or(false);
+            // (a try that gave up in the line may come sooner: "by")
+            let when = format!("{} {}", if in_line { "by" } else { "at" }, crate::slskd_session::clock(at));
+            upd(st, r, &[("status", json!("searching")), ("message", json!(format!("{LOOKING_UP_ALBUM_BASE} – {why}. Next try {when}")))]);
+            until_next_try(st, r.id, at, in_line).await;
+            check(st, r.id)?;
+        }
+        upd(st, r, &[("status", json!("searching")), ("message", json!(LOOKING_UP_ALBUM))]);
+        let (why, in_line) = match Box::pin(album_on_musicbrainz(st, r, allow_ep)).await {
+            Lookup::Answer(rid, alb) => {
+                check(st, r.id)?;
+                if rid.is_some() {
+                    r.d["recording"] = json!(rid);
+                }
+                if let Some(alb) = alb {
+                    r.d["album_checked_at"] = json!(now());
+                    if let Some(d) = r.d.as_object_mut() {
+                        d.remove("album_lookup");
+                    }
+                    if follow_album(st, r, &alb)?.is_some() {
+                        return Ok(true);
+                    }
+                }
+                // on no official album (or on one the library has, without this version of the song)
+                no_album(r, None);
+                upd(st, r, &[]);
+                return Ok(false);
+            }
+            Lookup::Busy(why, in_line) => (why, Some(in_line)),
+            Lookup::Failed(why) => (why, None),
+        };
+        check(st, r.id)?;
+        // the album the streaming service names for the song, while MusicBrainz can't say
+        if let Some(isrc) = r.d["isrc"].as_str().filter(|i| !i.is_empty()).map(String::from) {
+            if let Some(alb) = Box::pin(deezer_album(st, &isrc, &r.s("artist"), allow_ep)).await {
+                check(st, r.id)?;
+                let note = format!("{why} – Deezer says the song is on the {} “{}”", alb["type"].as_str().unwrap_or("Album").to_lowercase(), alb["title"].as_str().unwrap_or(""));
+                if follow_album(st, r, &alb)?.is_some() {
+                    st.db().log("info", &format!("Album lookup for {}: {note}", r.label()));
+                    r.d["album_checked_at"] = json!(now());
+                    r.d["album_note"] = json!(note);
+                    if let Some(d) = r.d.as_object_mut() {
+                        d.remove("album_lookup");
+                    }
+                    upd(st, r, &[]);
+                    return Ok(true);
+                }
+            }
+        }
+        let Some(in_line) = in_line else {
+            let note = format!("{why} – the song is downloaded on its own");
+            st.db().log("warning", &format!("Album lookup for {}: {note}", r.label()));
+            no_album(r, Some(note));
+            upd(st, r, &[]);
+            return Ok(false);
+        };
+        let tries = r.d["album_lookup"]["tries"].as_u64().unwrap_or(0) + 1;
+        if tries >= ALBUM_TRIES {
+            let note = format!("{why} – after {tries} tries the song is downloaded on its own");
+            st.db().log("warning", &format!("Album lookup for {}: {note}", r.label()));
+            no_album(r, Some(note));
+            upd(st, r, &[]);
+            return Ok(false);
+        }
+        let at = now() + ALBUM_RETRY_SECS;
+        r.d["album_lookup"] = json!({ "tries": tries, "next_try_at": at, "why": why, "in_line": in_line });
+        upd(st, r, &[]);
+    }
 }
 
 pub(super) async fn poll_album(st: &impl Ctx, r: &mut Req) -> anyhow::Result<()> {
@@ -585,6 +864,7 @@ pub(super) async fn poll_album(st: &impl Ctx, r: &mut Req) -> anyhow::Result<()>
         }
     };
     r.d["no_album"] = json!(true);
+    r.d["album_checked_at"] = json!(now()); // asked for again within a day, the song goes on its own at once
     upd(st, r, &[("status", json!("queued")), ("source", Value::Null), ("message", json!(format!("Getting the song on its own ({reason})")))]);
     Ok(())
 }

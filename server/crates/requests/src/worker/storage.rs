@@ -578,7 +578,11 @@ pub(super) async fn import_checked(st: &impl Ctx, r: &mut Req, files: &[PathBuf]
         wait_for_storage(st, r, &e, STORAGE_IMPORT)?;
         return Ok(Imported::Waiting);
     }
-    let res = run_import(st, r, files, root).await;
+    // the import's MusicBrainz lookups go before the other requests' (a page someone looks at still goes
+    // first), and its message says what it is at: "Importing – checking the audio", "Importing – waiting for
+    // MusicBrainz (about 2 minutes, 120 lookups ahead)"
+    let (id, before) = (r.id, r.s("message"));
+    let res = Box::pin(mb::with_priority(mb::Priority::Import, with_steps(st, id, "importing", "Importing", &before, run_import(st, r, files, root)))).await;
     match res {
         Ok(()) => Ok(Imported::Finished),
         Err(e) if e.is::<Cancelled>() => Err(e),

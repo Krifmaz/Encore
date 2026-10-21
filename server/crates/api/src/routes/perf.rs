@@ -28,6 +28,8 @@ async fn perf(State(st): State<AppState>, Admin(_): Admin) -> Json<Value> {
         "slskd_status_age_s": age(st.web.slskd_probe.age()),
         "tool_lines": st.system.tools.kept(),
         "cover_pass": { "done": done, "total": total, "running": running },
+        // who waits for MusicBrainz at each priority (a page, an import, a request's lookup, background work)
+        "musicbrainz_line": st.mb.line_stats(),
     });
     Json(v)
 }
@@ -73,6 +75,9 @@ mod tests {
         }
         assert!(v["db"]["write"]["waits"].is_u64(), "{v}");
         assert!(v["background"]["cover_pass"].is_object());
+        for k in ["interactive", "import", "request", "background"] {
+            assert_eq!(v["background"]["musicbrainz_line"][k]["waiting"], 0, "{v}");
+        }
         // the web app's files are not timed
         let _ = call("/index.html", None).await.unwrap();
         let v = s.st.web.perf.report();

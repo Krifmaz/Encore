@@ -4,6 +4,7 @@ mod download_now;
 mod downloads;
 mod github;
 mod loudness;
+mod musicbrainz;
 mod plugins;
 mod rejected;
 mod soulseek;

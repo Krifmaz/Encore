@@ -1,5 +1,6 @@
-//! MusicBrainz web service: rate limited (1 request/second by default) and cached for an hour; and the
-//! calls that always go to musicbrainz.org itself (the account sign-in, ISRC submissions).
+//! MusicBrainz web service: rate limited (1 request/second by default, every caller in one line that serves
+//! the most urgent first – [`crate::mb_line`]) and cached for an hour; and the calls that always go to
+//! musicbrainz.org itself (the account sign-in, ISRC submissions).
 use crate::Ctx;
 use encore_core::json::s;
 use reqwest::RequestBuilder;
@@ -7,12 +8,15 @@ use serde_json::{json, Value};
 use encore_core::cache::{json_bytes, ByteCache, CacheStats};
 use std::collections::HashMap;
 use std::sync::Arc;
-use std::time::{Duration, Instant};
-use tokio::sync::Mutex;
+use std::time::Duration;
+
+pub use crate::mb_line::{one_place, one_place_within, priority, with_priority, Priority};
+use crate::mb_line::Line;
 
 #[derive(Clone)]
 pub struct Mb {
-    last: Arc<Mutex<Option<Instant>>>,
+    /// the line every call waits in for its turn
+    line: Line,
     /// answers by path and query, for an hour, held to `CACHE_BYTES`
     cache: Arc<ByteCache<Value>>,
 }
@@ -37,13 +41,36 @@ pub fn submit_isrcs(st: &impl Ctx, token: &str, client: &str, xml: String) -> Re
         .header("Content-Type", "application/xml; charset=utf-8").body(xml)
 }
 
+/// MusicBrainz said it was busy (503) every time a call asked: a reason to ask again later, unlike a
+/// failure (a refused connection, a 500).
+#[derive(Debug)]
+pub struct Busy;
+
+impl std::fmt::Display for Busy {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("MusicBrainz is rate limiting requests, try again shortly")
+    }
+}
+
+impl std::error::Error for Busy {}
+
+/// Whether a call failed because MusicBrainz was busy ([`Busy`]).
+pub fn is_busy(e: &anyhow::Error) -> bool {
+    e.chain().any(|c| c.is::<Busy>())
+}
+
+/// The time between two calls to MusicBrainz: `musicbrainz_rate` calls a second for the whole server.
+pub fn gap(st: &impl Ctx) -> Duration {
+    Duration::from_secs_f64(1.0 / st.cfg().float("musicbrainz_rate").max(0.1))
+}
+
 const TTL: Duration = Duration::from_secs(3600);
 /// Most bytes the cached MusicBrainz answers may take in memory.
 pub const CACHE_BYTES: usize = 16 << 20;
 
 impl Default for Mb {
     fn default() -> Self {
-        Mb { last: Default::default(), cache: Arc::new(ByteCache::new(CACHE_BYTES, 3000)) }
+        Mb { line: Line::default(), cache: Arc::new(ByteCache::new(CACHE_BYTES, 3000)) }
     }
 }
 
@@ -53,29 +80,40 @@ impl Mb {
         self.cache.stats()
     }
 
+    /// Who waits in the line at each priority (`/api/admin/perf`).
+    pub fn line_stats(&self) -> Value {
+        self.line.stats()
+    }
+
+    /// How many calls wait at `p` or a more urgent priority: what a call at `p` made now has ahead of it.
+    pub fn ahead_of(&self, p: Priority) -> usize {
+        self.line.ahead_of(p)
+    }
+
+    /// The answer kept for this call, without asking MusicBrainz.
+    pub fn cached(&self, path: &str, params: &[(&str, String)]) -> Option<Value> {
+        self.cache.get(&cache_key(path, params))
+    }
+
+    /// One call: the hour-long cache, else a turn in the line at the caller's [`priority`] (inside [`one_place`]
+    /// at the place of the work's first call) and the call. A 503 (MusicBrainz says it is busy) waits 1.5, 3,
+    /// 4.5 s and joins the line again at the place it had; the fourth one gives up with [`Busy`].
     pub async fn get(&self, st: &impl Ctx, path: &str, params: &[(&str, String)]) -> anyhow::Result<Value> {
-        let mut ps: Vec<(String, String)> = params.iter().map(|(k, v)| (k.to_string(), v.clone())).collect();
-        ps.push(("fmt".into(), "json".into()));
-        ps.sort();
-        let key = format!("{path}?{}", ps.iter().map(|(k, v)| format!("{k}={v}")).collect::<Vec<_>>().join("&"));
+        let key = cache_key(path, params);
         if let Some(v) = self.cache.get(&key) {
             return Ok(v);
         }
+        let mut ps: Vec<(String, String)> = params.iter().map(|(k, v)| (k.to_string(), v.clone())).collect();
+        ps.push(("fmt".into(), "json".into()));
         let base = st.cfg().str("musicbrainz_url");
         let base = if base.is_empty() { "https://musicbrainz.org".to_string() } else { base.trim_end_matches('/').to_string() };
-        let gap = Duration::from_secs_f64(1.0 / st.cfg().float("musicbrainz_rate").max(0.1));
+        let gap = gap(st);
         let contact = st.cfg().str("contact_email");
         let ua = format!("Encore/{} ( {} )", encore_core::VERSION, if contact.is_empty() { "https://github.com/Krifmaz/Encore".into() } else { contact });
+        let class = priority();
+        let mut place = None;
         for attempt in 0..4 {
-            {
-                let mut last = self.last.lock().await;
-                if let Some(l) = *last {
-                    if l.elapsed() < gap {
-                        tokio::time::sleep(gap - l.elapsed()).await;
-                    }
-                }
-                *last = Some(Instant::now());
-            }
+            place = Some(self.line.turn(class, gap, place).await);
             let r = st.http().get(format!("{base}/ws/2/{path}")).query(&ps).header("User-Agent", &ua).send().await?;
             if r.status().as_u16() == 503 {
                 tokio::time::sleep(Duration::from_millis(1500 * (attempt + 1))).await;
@@ -86,8 +124,16 @@ impl Mb {
             self.cache.insert(key, v.clone(), bytes, Some(TTL), 0);
             return Ok(v);
         }
-        anyhow::bail!("MusicBrainz is rate limiting requests, try again shortly")
+        Err(Busy.into())
     }
+}
+
+/// The cache key of a call: its path and its parameters in order (`fmt=json` among them).
+fn cache_key(path: &str, params: &[(&str, String)]) -> String {
+    let mut ps: Vec<(String, String)> = params.iter().map(|(k, v)| (k.to_string(), v.clone())).collect();
+    ps.push(("fmt".into(), "json".into()));
+    ps.sort();
+    format!("{path}?{}", ps.iter().map(|(k, v)| format!("{k}={v}")).collect::<Vec<_>>().join("&"))
 }
 
 pub fn esc(s: &str) -> String {
@@ -306,8 +352,11 @@ pub async fn search_releases(st: &impl Ctx, artist: &str, album: &str, limit: us
     }).collect())
 }
 
+/// What a recording is asked for with (by [`recording`] and [`album_for_recording`] alike: one cache entry).
+const RECORDING_INC: &str = "artist-credits+releases+release-groups+isrcs";
+
 pub async fn recording(st: &impl Ctx, rid: &str) -> anyhow::Result<Value> {
-    let r = st.mb().get(st, &format!("recording/{rid}"), &[("inc", "artist-credits+releases+release-groups+isrcs".into())]).await?;
+    let r = st.mb().get(st, &format!("recording/{rid}"), &[("inc", RECORDING_INC.into())]).await?;
     let rel = r["releases"].as_array().and_then(|a| a.first()).cloned().unwrap_or_default();
     let year: String = { let d = s(&r["first-release-date"]); if d.is_empty() { s(&rel["date"]) } else { d } }.chars().take(4).collect();
     Ok(json!({ "id": s(&r["id"]), "title": s(&r["title"]), "artist": credit(&r["artist-credit"]), "artist_id": credit_id(&r["artist-credit"]),
@@ -322,9 +371,10 @@ pub async fn recordings_for_isrc(st: &impl Ctx, isrc: &str) -> Vec<String> {
 }
 
 /// The official studio album (or EP) a recording first appeared on. Compilations, live albums, soundtracks,
-/// remix albums and other artists' releases are skipped.
+/// remix albums and other artists' releases are skipped. (It asks for what [`recording`] asks for, so the
+/// import of the song that follows finds the answer in the cache instead of waiting for MusicBrainz again.)
 pub async fn album_for_recording(st: &impl Ctx, rid: &str, allow_ep: bool) -> anyhow::Result<Option<Value>> {
-    let d = st.mb().get(st, &format!("recording/{rid}"), &[("inc", "releases+release-groups+artist-credits".into())]).await?;
+    let d = st.mb().get(st, &format!("recording/{rid}"), &[("inc", RECORDING_INC.into())]).await?;
     let ids = |ac: &Value| -> std::collections::HashSet<String> {
         ac.as_array().map(|a| a.iter().filter_map(|c| c["artist"]["id"].as_str().map(String::from)).collect()).unwrap_or_default()
     };

@@ -7,14 +7,25 @@ use encore_db::{p, Row, RowExt};
 use encore_sync::playlists::{opt, MissingFailure, MissingReport, REREQUEST};
 use serde_json::{json, Value};
 
+/// How long the auto-download waits before it asks again for a song whose request failed (seconds): 15
+/// minutes after its first failed attempt, twice as long after each one after that (30 minutes, an hour, 2
+/// hours …), at most a day. It used to ask again at every sync – every 15 minutes, for days, for a song no
+/// source has.
+pub fn auto_retry_after(attempts: u64) -> f64 {
+    (900.0 * 2f64.powi(attempts.saturating_sub(1).min(16) as i32)).min(86_400.0)
+}
+
 /// Request every item that's not in the library yet. auto=true (auto-download rules) skips approval.
 /// An item whose request is gone, failed, cancelled or denied is requested again; one whose request is
 /// pending, running or done counts as in progress; when someone already asked for the song (409) the item
 /// is linked to that request instead of being skipped.
 pub fn request_missing(st: &impl Ctx, u: &Row, pid: i64, auto: bool, album_mode: Option<String>) -> anyhow::Result<MissingReport> {
     let mut rep = MissingReport::default();
-    let rows = st.db().query("SELECT i.*, r.status AS request_status FROM playlist_items i LEFT JOIN requests r ON r.id=i.request_id
+    let rows = st.db().query("SELECT i.*, r.status AS request_status, r.updated_at AS request_updated_at,
+                                   COALESCE(json_extract(r.detail, '$.attempts'), 1) AS request_attempts
+                            FROM playlist_items i LEFT JOIN requests r ON r.id=i.request_id
                             WHERE i.playlist_id=? ORDER BY i.position, i.id", p![pid])?;
+    let t = encore_db::now();
     // once the weekly limit is hit the rest of the rows are reported, not requested
     let mut limit: Option<String> = None;
     for r in rows {
@@ -24,6 +35,11 @@ pub fn request_missing(st: &impl Ctx, u: &Row, pid: i64, auto: bool, album_mode:
         let status = r.s("request_status");
         if r.i("request_id") > 0 && !status.is_empty() && !REREQUEST.contains(&status.as_str()) {
             rep.in_progress += 1;
+            continue;
+        }
+        // the auto-download asks again for a failed song only once its wait is over ([`auto_retry_after`]);
+        // "Download missing" asks at once
+        if auto && status == "failed" && t - r.f("request_updated_at") < auto_retry_after(r.i("request_attempts").max(1) as u64) {
             continue;
         }
         let what = || match r.s("title") { t if !t.is_empty() => t, _ => r.s("artist") };

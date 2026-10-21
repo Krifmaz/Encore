@@ -15,13 +15,18 @@ pub(super) async fn release_info(st: &impl Ctx, r: &mut Req) -> Option<Value> {
                 }
             };
         } else if !r.s("mbid").is_empty() {
-            let res: anyhow::Result<Value> = async {
-                let Some(rid) = mb::best_release_for_group(st, &r.s("mbid"), None).await? else { return Ok(Value::Null) };
+            let mbid = r.s("mbid");
+            let lookup = async {
+                let Some(rid) = mb::best_release_for_group(st, &mbid, None).await? else { return Ok(Value::Null) };
                 let rel = mb::release(st, &rid).await?;
                 let tracks: Vec<Value> = rel["tracks"].as_array().cloned().unwrap_or_default().iter()
                     .map(|t| json!({ "title": t["title"], "artist": t["artist"], "length": t["length"], "recording_id": t["recording_id"], "isrc": t["isrc"] })).collect();
                 Ok(json!({ "id": rel["id"], "tracks": tracks }))
-            }.await;
+            };
+            // while MusicBrainz's line is long the message says so ("Looking up the album's songs – waiting for
+            // MusicBrainz …"), then it is what it was
+            let (status, before) = (r.s("status"), r.s("message"));
+            let res: anyhow::Result<Value> = with_steps(st, r.id, &status, "Looking up the album's songs", &before, lookup).await;
             r.d["release"] = res.unwrap_or_else(|e| {
                 st.db().log("warning", &format!("MusicBrainz release lookup failed: {e}"));
                 Value::Null

@@ -76,6 +76,11 @@ pub fn ext_from_id(id: &str) -> Option<Value> {
     (!ext.is_empty()).then_some(Value::Object(ext))
 }
 
+/// How long what the album lookup found out holds for a song asked for again (seconds): within a day a new
+/// attempt doesn't ask MusicBrainz again which album the song is on (the sync's auto-download asks again for a
+/// failed song many times a day, and each time the lookup waited in MusicBrainz's line again).
+pub const ALBUM_CHECK_KEEP_SECS: f64 = 86_400.0;
+
 /// How many of the previous attempt's log lines a reused row keeps, and how long each may be.
 pub const KEPT_LOG_LINES: usize = 40;
 pub const KEPT_LOG_CHARS: usize = 500;
@@ -128,6 +133,16 @@ pub fn detail_for_retry(old_detail: &Value, old_status: &str, old_message: &str,
     for k in ["rejected", "rejected_seq"] {
         if !old_detail[k].is_null() && detail[k].is_null() {
             detail[k] = old_detail[k].clone();
+        }
+    }
+    // what MusicBrainz answered about the song's album (it is on none, or the album couldn't be had) and its
+    // recording hold for a day: the new attempt goes on with the song on its own at once
+    let checked = old_detail["album_checked_at"].as_f64().filter(|t| now() - t < ALBUM_CHECK_KEEP_SECS);
+    if checked.is_some() && old_detail["no_album"].as_bool() == Some(true) {
+        for k in ["no_album", "album_checked_at", "recording"] {
+            if !old_detail[k].is_null() && detail[k].is_null() {
+                detail[k] = old_detail[k].clone();
+            }
         }
     }
     detail

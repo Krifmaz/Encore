@@ -162,6 +162,24 @@ fn retry_detail_counts_attempts_and_keeps_a_bounded_log() {
     assert_eq!(d["log"][0], "line 61");
 }
 
+/// What MusicBrainz answered about a song's album holds for a day: asked for again (the auto-download asks for a
+/// failed song again and again), the song goes on its own at once instead of waiting in MusicBrainz's line for
+/// the same answer. A lookup that only gave up (MusicBrainz busy) is not carried: the next attempt asks again.
+#[test]
+fn what_musicbrainz_said_about_the_album_is_kept_for_a_day() {
+    let answered = json!({ "no_album": true, "album_checked_at": now() - 3600.0, "recording": "rec-1", "album_note": "x" });
+    let d = detail_for_retry(&answered, "failed", "All sources exhausted", json!({ "isrc": "X" }));
+    assert_eq!((d["no_album"].as_bool(), d["recording"].as_str(), d["isrc"].as_str()), (Some(true), Some("rec-1"), Some("X")));
+    assert!(d["album_checked_at"].is_f64() && d["album_note"].is_null(), "{d}");
+    // a day later it is looked up again
+    let old = json!({ "no_album": true, "album_checked_at": now() - encore_requests::create::ALBUM_CHECK_KEEP_SECS - 1.0, "recording": "rec-1" });
+    let d = detail_for_retry(&old, "failed", "", json!({}));
+    assert!(d["no_album"].is_null() && d["recording"].is_null(), "{d}");
+    // the lookup gave up (no answer, no time it was checked): looked up again
+    let d = detail_for_retry(&json!({ "no_album": true, "album_note": "MusicBrainz is busy – after 3 tries …" }), "failed", "", json!({}));
+    assert!(d["no_album"].is_null(), "{d}");
+}
+
 #[test]
 fn a_discography_request_keeps_the_ticked_releases() {
     let st = state("ticked");

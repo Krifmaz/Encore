@@ -7,7 +7,7 @@
 //! the folders downloads are saved in every minute; a request whose source saves in one that can't be
 //! written waits for it (the `waiting` status again) instead of failing. [`now`] is Download now: what a
 //! waiting or queued request offers, and doing it without breaking a source's limit or a ban
-//! (the lines are [`crate::line`]).
+//! (the lines are [`crate::line`]). [`steps`] writes what a long step is at into its request's message.
 pub mod downloads;
 mod fetch;
 mod import;
@@ -15,9 +15,11 @@ pub mod now;
 mod pick;
 mod queue;
 pub mod rejected;
+mod steps;
 pub mod storage;
 mod verify;
 
+pub use pick::{ALBUM_RETRY_SECS, ALBUM_TRIES, ALBUM_WAIT};
 pub use queue::{cancel, cancel_holding, hold_idle, recover, run, step, take_turn, Hold};
 use queue::on_error;
 
@@ -43,6 +45,7 @@ use verify::*;
 /// (`detail.wait.next_try_at`, or the probe passing) and never starts it as a new download.
 pub const ACTIVE: [&str; 6] = ["queued", "searching", "downloading", "monitoring", "importing", "waiting"];
 
+pub use steps::Steps;
 pub use storage::Health;
 
 static RIP_LINK: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"qobuz\.com|tidal\.com|deezer\.com").unwrap());
@@ -166,4 +169,23 @@ fn log_push(r: &mut Req, line: String) {
 
 fn with_note(msg: &str, note: &str) -> String {
     if note.is_empty() { msg.into() } else { format!("{msg} – {note}") }
+}
+
+/// Run `f` with what it is at written into request `id`'s message while the row's status is `status`:
+/// "{base} – {step}" for each step it names and each wait it sits in ("Importing – checking the audio",
+/// "Importing – waiting for MusicBrainz (about 2 minutes, 120 lookups ahead)": encore_http::progress), and
+/// `before` – the message it had – when it is at no named step. The words are written from one place, off
+/// the async threads ([`steps`]); the message alone changing tells no open page (the request events carry no
+/// message). Once `f` is done the message is `before` again, unless something else wrote one meanwhile (the
+/// request finished, say). `f`'s MusicBrainz calls keep one place in the line ([`mb::one_place`]), so a step
+/// that makes several finishes before the ones that started after it.
+async fn with_steps<F: std::future::Future>(st: &impl Ctx, id: i64, status: &str, base: &str, before: &str, f: F) -> F::Output {
+    let scope = st.requests().steps.begin(st.db(), id, status, before);
+    let (say, base_s, before_s) = (scope.sayer(), base.to_string(), before.to_string());
+    // (`f` boxed: an import's future is large, and a step's runs on a worker thread's stack)
+    let out = encore_http::progress::with_sink(move |step: &str| {
+        say(if step.is_empty() { before_s.clone() } else { format!("{base_s} – {step}") });
+    }, mb::one_place(Box::pin(f))).await;
+    scope.end().await;
+    out
 }

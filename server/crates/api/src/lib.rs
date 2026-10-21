@@ -126,6 +126,8 @@ pub fn app(st: AppState) -> Router {
         .merge(routes::plugins::router())
         // the handlers add covers, credits and translations to their answers themselves (crate::enrich)
         .with_state(st)
+        // someone waits for every API call: its MusicBrainz lookups go first in the line (encore_http::mb)
+        .layer(middleware::from_fn(musicbrainz_first))
         // every API call timed per route (the web app's files below are not): a slow one is logged, and all
         // of them show in /api/admin/perf
         .layer(middleware::from_fn_with_state(perf, timing::layer));
@@ -136,6 +138,12 @@ pub fn app(st: AppState) -> Router {
         .layer(middleware::from_fn_with_state(busy, encore_jobs::busy::layer))
         // gzip for JSON and pages – never for audio: it only burns CPU and gets in the way of range requests
         .layer(CompressionLayer::new().compress_when(DefaultPredicate::new().and(NotForContentType::new("audio/"))))
+}
+
+/// An API call's MusicBrainz lookups are for a page someone is looking at: they go before imports, requests
+/// and background work in MusicBrainz's line (work the call starts in a task of its own is not hurried).
+async fn musicbrainz_first(req: Request, next: Next) -> Response {
+    encore_http::mb::with_priority(encore_http::mb::Priority::Interactive, next.run(req)).await
 }
 
 /// What the first requests after a start would otherwise wait for, made in the background right away: the

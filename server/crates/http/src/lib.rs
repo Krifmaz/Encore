@@ -19,6 +19,8 @@ pub mod lastfm;
 pub mod listenbrainz;
 pub mod lrclib;
 pub mod mb;
+mod mb_line;
+pub mod progress;
 pub mod pypi;
 pub mod tidal;
 pub mod ytmusic;
@@ -83,6 +85,8 @@ pub struct Urls {
     /// DeepL's API; empty: the one the key is for (api-free.deepl.com for a key ending in `:fx`, else
     /// api.deepl.com – encore_library::translate::deepl)
     pub deepl: String,
+    /// Deezer's public API
+    pub deezer: String,
 }
 
 impl Default for Urls {
@@ -93,6 +97,7 @@ impl Default for Urls {
             qobuz_player: "https://play.qobuz.com".into(),
             ytmusic: ytmusic::API.into(),
             deepl: String::new(),
+            deezer: deezer::API.into(),
         }
     }
 }

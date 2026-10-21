@@ -484,8 +484,8 @@ async fn a_failed_run_keeps_streamrips_words_and_its_whole_output() {
     encore_requests::worker::step(st.clone(), id).await;
     let (status, message, d) = request_row(&st, id);
     assert_eq!(status, "failed", "{message}");
-    // (said plainly since 2318cac: the service has it, but not for this country)
-    assert!(message.contains("doesn't stream it in your country"), "{message}");
+    // the message says it in plain words (2318cac); streamrip's own words are in the output below
+    assert!(message.contains(encore_requests::sources::streamrip::NOT_STREAMABLE_MSG), "{message}");
     // the whole output, both pipes, in the request's details (once: the log says where it is)
     let output = d["output"]["text"].as_str().unwrap_or("").to_string();
     // (the stand-in's write to /dev/tty is not in it: there is no terminal, and the shell said so)

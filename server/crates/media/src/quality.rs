@@ -252,7 +252,15 @@ pub async fn analyze(media: &Media, path: &Path, expected: Option<f64>, min_lufs
     if !media.ffmpeg_ok() || !path.is_file() {
         return rep;
     }
+    // both checks taken (another import, Report a problem, the quality scan): the import says what it waits for
+    let busy = media.checks.available_permits() == 0;
+    if busy {
+        encore_http::progress::waiting("waiting for another sound check to finish");
+    }
     let _slot = media.checks.acquire().await;
+    if busy {
+        encore_http::progress::resume();
+    }
     let ps = path.to_string_lossy().to_string();
     let m = media.clone();
     let info = tokio::task::spawn_blocking(move || m.audio_info(&ps)).await.unwrap_or(json!({}));
@@ -298,6 +306,7 @@ pub async fn gate(st: &impl Ctx, path: &Path, expected: Option<f64>) -> (Report,
     if !on_import(st) {
         return (Report::default(), Ok(()));
     }
+    encore_http::progress::step("checking the sound quality");
     let rep = analyze(st.media(), path, expected, min_lufs(st), false).await;
     let res = match rep.rejection() {
         Some(i) => Err(i.text.clone()),
@@ -313,7 +322,8 @@ pub async fn gate_album(st: &impl Ctx, paths: &[std::path::PathBuf]) -> (Vec<(st
         return (vec![], Ok(()));
     }
     let mut out = vec![];
-    for p in paths {
+    for (i, p) in paths.iter().enumerate() {
+        encore_http::progress::step(&format!("checking the sound quality ({} of {})", i + 1, paths.len()));
         out.push((p.clone(), analyze(st.media(), p, None, min_lufs(st), false).await));
     }
     let bad: Vec<&Issue> = out.iter().filter_map(|(_, r)| r.rejection()).collect();

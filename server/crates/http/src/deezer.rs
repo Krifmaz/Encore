@@ -16,7 +16,7 @@ const GAP: Duration = Duration::from_millis(125);
 
 /// A GET on one path of the API (`album/302127`, `user/5/tracks`).
 pub fn path(st: &impl Ctx, path: &str) -> RequestBuilder {
-    st.http().get(format!("{API}/{path}"))
+    st.http().get(format!("{}/{path}", st.urls().deezer.trim_end_matches('/')))
 }
 
 /// `search` (`kind` "") or `search/<kind>` (album, artist, track) for `q`.

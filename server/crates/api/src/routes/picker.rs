@@ -1051,7 +1051,10 @@ async fn pick(State(st): State<AppState>, User(u): User, Json(mut b): Json<PickB
         let status = old["status"].as_str().unwrap_or("");
         // a pick starts the request over, and its downloaded files would go with it: they are imported (or
         // the request cancelled) first
-        if matches!(status, "failed" | "waiting" | "importing" | "completed") && worker::storage::has_files(&old["detail"]) {
+        if status == "importing" && worker::storage::has_files(&old["detail"]) {
+            return Err(err(409, "It is being imported now – Pick works again once the import has finished or failed"));
+        }
+        if matches!(status, "failed" | "waiting" | "completed") && worker::storage::has_files(&old["detail"]) {
             return Err(err(409, "This request has downloaded files waiting to be imported – Import again or cancel it first"));
         }
         if worker::ACTIVE.contains(&status) {

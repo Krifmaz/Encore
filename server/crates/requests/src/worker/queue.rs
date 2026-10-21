@@ -84,9 +84,13 @@ pub fn recover(st: &impl Ctx) {
         let old: Value = serde_json::from_str(&r.s("detail")).unwrap_or(json!({}));
         let mut d = json!({});
         // (downloaded files kept for their import stay too: the import runs again, nothing is downloaded; so
-        // do the downloads the audio check turned away and a check a person turned off)
+        // do the downloads the audio check turned away and a check a person turned off). What MusicBrainz
+        // already said stays as well – which album the song is on (or that it is on none), its recording, the
+        // album's track list – so a restart doesn't ask it all again at once (a few hundred lookups in the
+        // line after an upgrade); a lossless upgrade stays one (without `lossless_only` it found the lossy copy
+        // in the library and ended "Already in library"), and an auto-download stays one.
         for k in ["replace", "avoid", "album_mode", "release_filter", "release_ids", "length", "isrc", "ext", "attempts", "log", "pick", "kept",
-                  "rejected", "rejected_seq", "skip_check"] {
+                  "rejected", "rejected_seq", "skip_check", "no_album", "recording", "album_checked_at", "album_lookup", "album_note", "release", "lossless_only", "auto"] {
 
             if !old[k].is_null() {
                 d[k] = old[k].clone();
@@ -114,7 +118,8 @@ pub async fn run<C: Ctx>(st: C) {
                 if tasks.contains_key(&id) {
                     continue;
                 }
-                let h = tokio::spawn(step(st.clone(), id));
+                // a request's MusicBrainz lookups wait behind pages and imports (encore_http::mb)
+                let h = tokio::spawn(mb::with_priority(mb::Priority::Request, step(st.clone(), id)));
                 tasks.insert(id, h.abort_handle());
             }
         }
@@ -157,7 +162,7 @@ where
     F: std::future::Future<Output = ()> + Send + 'static,
 {
     let mut tasks = st.requests().tasks.0.lock().unwrap_or_else(|p| p.into_inner());
-    let h = tokio::spawn(work);
+    let h = tokio::spawn(mb::with_priority(mb::Priority::Request, work));
     tasks.insert(id, h.abort_handle());
     drop(tasks);
     // the held place's own task ends; the map holds the new one

@@ -46,7 +46,9 @@ pub(super) async fn import(st: &impl Ctx, r: &mut Req, files: &[PathBuf], root: 
         (new, String::new())
     } else {
         let f = files.first().ok_or_else(|| anyhow::anyhow!("no audio file"))?;
-        let mbid = r.opt("mbid");
+        // the recording the album lookup found (the right version of the song): the import asks MusicBrainz
+        // for it alone (one lookup, and one the cache may already hold) instead of searching first
+        let mbid = r.opt("mbid").or_else(|| r.d["recording"].as_str().filter(|x| !x.is_empty()).map(String::from));
         let (p, note) = tagger::import_single(st, f, &r.s("artist"), &r.s("title"), mbid.as_deref(), root, r.length(), true, check, hint.as_deref()).await?;
         (vec![p], note)
     };
@@ -135,6 +137,12 @@ pub(super) async fn fail(st: &impl Ctx, r: &mut Req, message: &str) {
     if r.d["lossless_only"].as_bool().unwrap_or(false) {
         upd(st, r, &[("status", json!("failed")), ("message", json!("No lossless copy available yet – will try again later"))]);
         return;
+    }
+    if r.d["auto"].as_bool() == Some(true) {
+        // the playlist's auto-download asks for it again – not at once, and later after each failed attempt
+        let attempts = r.d["attempts"].as_u64().unwrap_or(1);
+        let at = now() + crate::missing::auto_retry_after(attempts);
+        log_push(r, format!("auto-download: asks for it again after {} (the wait doubles after each failed attempt, at most a day)", crate::slskd_session::clock(at)));
     }
     upd(st, r, &[("status", json!("failed")), ("message", json!(message))]);
     if r.surround() {

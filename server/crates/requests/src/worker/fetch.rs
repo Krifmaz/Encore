@@ -430,6 +430,8 @@ pub(super) async fn import_slskd(st: &impl Ctx, r: &mut Req, c: &Value) -> anyho
 pub(super) async fn start_torznab(st: &impl Ctx, r: &mut Req, lossless_only: bool) -> anyhow::Result<Out> {
     let lossless_only = lossless_only || r.d["lossless_only"].as_bool().unwrap_or(false);
     let searching = "Searching torrent and Usenet indexers (Prowlarr)…";
+    // the album's songs from MusicBrainz before its turn in the line, not while it holds a slot others wait for
+    release_info(st, r).await;
     // the requests' indexer searches, two at a time: its turn in the indexers' line (held for its searches)
     let _slot = take_line(st, r, &st.requests().lines.indexers, crate::line::TORRENTS, "searching", searching).await?;
     check(st, r.id)?;
@@ -759,6 +761,16 @@ pub(super) async fn isrc_for(st: &impl Ctx, r: &mut Req) -> Option<String> {
 pub(super) async fn start_streamrip(st: &impl Ctx, r: &mut Req, urls: Option<Vec<String>>) -> anyhow::Result<Out> {
     // the lookups one at a time; each download then waits for its service's line below
     let looking = "Looking for an exact lossless match…";
+    // what it asks MusicBrainz for (the album's songs, the song's ISRC), asked before the lookup lock: the lock then
+    // goes to searches, not to waits for MusicBrainz (under the lock they are read from the request)
+    let by_deezer = streamrip::services(st).iter().any(|s| s == "deezer") && (r.d["ext"]["deezer"].is_i64() || r.d["ext"]["deezer"].is_string());
+    if urls.is_none() && !by_deezer {
+        if r.s("kind") == "album" {
+            release_info(st, r).await;
+        } else {
+            isrc_for(st, r).await;
+        }
+    }
     let search = st.requests().lines.streamrip_search.clone();
     let lookup = search.lock().await;
     check(st, r.id)?;
@@ -865,6 +877,10 @@ pub(super) async fn start_ytdlp(st: &impl Ctx, r: &mut Req, pick_url: Option<Str
         _ => crate::line::YOUTUBE.to_string(),
     };
     let searching = if r.s("kind") == "track" { "Searching YouTube Music…" } else { "Searching YouTube Music for the album…" };
+    // the album's songs from MusicBrainz before its turn in the line, not while it holds a slot others wait for
+    if r.s("kind") != "track" {
+        release_info(st, r).await;
+    }
     let _slot = take_line(st, r, &st.requests().lines.ytdlp, &label, "searching", searching).await?;
     check(st, r.id)?;
     // the staging folder may have broken while it waited in line
