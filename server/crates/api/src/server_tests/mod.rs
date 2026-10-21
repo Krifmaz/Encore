@@ -2,6 +2,7 @@
 //! here, on a [`crate::test_support::TestServer`].
 mod github;
 mod loudness;
+mod plugins;
 mod rejected;
 mod soulseek;
 mod storage;

@@ -1,4 +1,4 @@
-//! The downloaded Cadenza program server processing runs (Download tools → Cadenza): where it lives, what
+//! The downloaded Cadenza program server processing runs (the cadenza plugin): where it lives, what
 //! it says about itself (`cadenza render --describe`), and the version of the engine built into Encore.
 use encore_core::version::extract_version;
 use serde_json::{json, Value};
@@ -80,11 +80,23 @@ pub fn parse_describe(text: &str) -> Result<Describe, String> {
     Ok(Describe { version, protocol, gpu: v["gpu"].as_bool().unwrap_or(false), settings })
 }
 
-/// Run `<exe> args…` with stdin closed, stopping it after `limit`.
+/// The downloaded program's start, through the plugins' spawn builder (encore_plugins::sandbox: a session of
+/// its own, no new privileges, no other open files; Encore's environment without its settings; full priority – it streams in real
+/// time). Killed when dropped.
+pub fn command<S: AsRef<std::ffi::OsStr>>(exe: &Path, args: &[S]) -> tokio::process::Command {
+    use encore_plugins::sandbox::{Sandbox, Spawn};
+    let env = encore_plugins::sandbox::program_env();
+    Spawn::new(&Sandbox::limits_only(), exe).args(args.iter().map(|a| a.as_ref().to_os_string())).env(env).tokio_command()
+}
+
+/// Run `<exe> args…` with stdin closed (through the spawn builder), stopping it after `limit`.
 fn output_within(exe: &Path, args: &[&str], limit: Duration) -> Result<std::process::Output, String> {
+    use encore_plugins::sandbox::{Sandbox, Spawn};
+    let env = encore_plugins::sandbox::program_env();
+    let spawn = Spawn::new(&Sandbox::limits_only(), exe).args(args.iter().copied()).env(env);
     let mut tries = 0;
     let child = loop {
-        let r = std::process::Command::new(exe).args(args).stdin(std::process::Stdio::null())
+        let r = spawn.command().stdin(std::process::Stdio::null())
             .stdout(std::process::Stdio::piped()).stderr(std::process::Stdio::piped()).spawn();
         match r {
             // "Text file busy": just written
@@ -174,11 +186,16 @@ impl Programs {
 
     /// The downloaded program `current` points at, when its description works and speaks our protocol;
     /// None → the built-in engine.
-    pub fn external(&self, data: &Path) -> Option<CadenzaProgram> {
-        let ver = cadenza_current(data)?;
-        let path = cadenza_bin(data, &ver);
-        let d = self.describe(&path).ok()?;
-        Some(CadenzaProgram { path, version: d.version, settings: d.settings })
+    /// The program server processing runs: the cadenza plugin's (its own install under
+    /// `<config>/plugins/cadenza`, else the `tools/cadenza` it adopted) while the plugin is installed and
+    /// switched on and the program's description works and speaks our protocol; None → the built-in engine.
+    pub fn external_of(&self, plugins: &encore_plugins::Registry) -> Option<CadenzaProgram> {
+        if !plugins.enabled("cadenza") {
+            return None;
+        }
+        let p = plugins.program_or_adopted("cadenza")?;
+        let d = self.describe(&p.path).ok()?;
+        Some(CadenzaProgram { path: p.path, version: d.version, settings: d.settings })
     }
 }
 

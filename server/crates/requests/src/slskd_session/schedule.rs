@@ -530,7 +530,7 @@ pub fn describe(reason: Reason, message: Option<&str>) -> String {
         Reason::Rejected => {
             let l = m.to_lowercase();
             if l.contains("invalidversion") {
-                "the Soulseek server refused this engine version – update slskd under Download tools".into()
+                "the Soulseek server refused this engine version – update the Soulseek plugin under Settings → Plugins".into()
             } else if l.contains("invalidusername") {
                 "the Soulseek server does not allow this username – choose another".into()
             } else {

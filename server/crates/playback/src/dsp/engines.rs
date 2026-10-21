@@ -1,5 +1,5 @@
 //! The engines a Cadenza job runs on, behind one trait ([`Renderer`]): [`BuiltIn`], the cadenza-dsp compiled
-//! into Encore, and [`Downloaded`], the `cadenza render` program an admin installed under Download tools.
+//! into Encore, and [`Downloaded`], the `cadenza render` program an admin installed with the Cadenza plugin (Settings → Plugins).
 //!
 //! Live streams and the render cache run every job the same way ([`super::spawn_chain`]): ffmpeg decodes
 //! the file, the renderer upsamples, ffmpeg encodes 24-bit FLAC. A renderer that fails before any of its
@@ -247,11 +247,11 @@ async fn external(ext: &External, cache: &CoefficientCache, job: &Job, mut io: I
         Some(Ok(s)) => s,
         _ => return unavailable("the decoder's output could not be passed on".into(), io),
     };
-    let mut cmd = tokio::process::Command::new(&ext.path);
-    cmd.args(render_args(job, cache.dir())).stdin(stdin).stdout(Stdio::piped()).stderr(Stdio::piped()).kill_on_drop(true);
-    let mut child = match cmd.spawn() {
+    let mut cmd = crate::cadenza::command(&ext.path, &render_args(job, cache.dir()));
+    cmd.stdin(stdin).stdout(Stdio::piped()).stderr(Stdio::piped());
+    let mut child = match encore_core::fsx::spawn(encore_core::fsx::Step::Start, &ext.path, || cmd.spawn()) {
         Ok(c) => c,
-        Err(e) => return unavailable(format!("could not start {}: {e}", ext.path.display()), io),
+        Err(e) => return unavailable(e.to_string(), io),
     };
     let stderr = child.stderr.take().map(|mut e| {
         tokio::spawn(async move {
@@ -332,9 +332,9 @@ async fn external(ext: &External, cache: &CoefficientCache, job: &Job, mut io: I
 
 /// Run 1 s of silence in the job's input format through a downloaded engine; Ok(output bytes).
 pub async fn external_self_test(ext: &External, job: &Job, cache: &CoefficientCache) -> Result<usize, String> {
-    let mut cmd = tokio::process::Command::new(&ext.path);
-    cmd.args(render_args(job, cache.dir())).stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped()).kill_on_drop(true);
-    let mut child = cmd.spawn().map_err(|e| format!("could not start {}: {e}", ext.path.display()))?;
+    let mut cmd = crate::cadenza::command(&ext.path, &render_args(job, cache.dir()));
+    cmd.stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped());
+    let mut child = encore_core::fsx::spawn(encore_core::fsx::Step::Start, &ext.path, || cmd.spawn()).map_err(|e| e.to_string())?;
     let mut stdin = child.stdin.take().ok_or("no input")?;
     let frames = job.input.rate as usize;
     let silence = vec![0u8; frames * job.input.channels as usize * 8];

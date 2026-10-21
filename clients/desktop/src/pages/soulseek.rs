@@ -855,7 +855,7 @@ fn status_line<'a>(state: &'a State, ctx: &Ctx<'a>) -> El<'a, Message> {
     let (r_words, linked) = status_words_linked(&parts);
     let n = parts.len();
     for (i, (words, warn)) in parts.into_iter().enumerate() {
-        // a sentence that ends "… – fix them in Settings → Downloads → Soulseek" (the server's words) links its
+        // a sentence that ends "… – fix them in Settings → Plugins → Soulseek" (the server's words) links its
         // own last words to the card instead of repeating them
         let words = match linked_words(&words) {
             Some(cut) if linked && i + 1 == n => words[..cut].trim_end().to_string(),
@@ -878,13 +878,14 @@ fn status_line<'a>(state: &'a State, ctx: &Ctx<'a>) -> El<'a, Message> {
     r.wrap().into()
 }
 
-/// The settings link's words, which the server's sentences end with away from the card.
-const SETTINGS_LINK: &str = "Settings → Downloads → Soulseek";
+/// The settings link's words, which the server's sentences end with away from the card (the Soulseek plugin's
+/// card since 0.32).
+const SETTINGS_LINK: &str = super::settings::tools::SOULSEEK_CARD;
 
-/// Where the settings link's words start at the end of a sentence: the server's words since R2, or an older
-/// server's "Settings → Soulseek".
+/// Where the settings link's words start at the end of a sentence: the card's place since 0.32, the server's
+/// words from R2 to 0.31 ("Settings → Downloads → Soulseek"), or an older server's "Settings → Soulseek".
 fn linked_words(w: &str) -> Option<usize> {
-    [SETTINGS_LINK, "Settings → Soulseek"].iter().find(|l| w.ends_with(*l) && w.len() > l.len()).map(|l| w.len() - l.len())
+    [SETTINGS_LINK, "Settings → Downloads → Soulseek", "Settings → Soulseek"].iter().find(|l| w.ends_with(*l) && w.len() > l.len()).map(|l| w.len() - l.len())
 }
 
 /// The status line's words as one text (for Copy), and whether its last sentence ends with the
@@ -1532,9 +1533,10 @@ mod tests {
         assert!(parts[0].1 && parts[0].0.starts_with("Disconnected – the login timed out"));
         let rejected = json!({ "enabled": true, "state": "running", "session": { "state": "stopped", "reason": "rejected", "text": "Rejected: invalid username or password – fix them below" } });
         let (dot, parts, _) = status_parts(&rejected, "");
-        assert_eq!((dot, parts[0].0.as_str()), ("err", "Rejected: invalid username or password – fix them in Settings → Downloads → Soulseek"));
+        assert_eq!((dot, parts[0].0.as_str()), ("err", "Rejected: invalid username or password – fix them in Settings → Plugins → Soulseek"));
         // the line links the sentence's last words to the card instead of saying them twice
-        assert_eq!(status_words_linked(&parts), ("Rejected: invalid username or password – fix them in Settings → Downloads → Soulseek".to_string(), true));
+        assert_eq!(status_words_linked(&parts), ("Rejected: invalid username or password – fix them in Settings → Plugins → Soulseek".to_string(), true));
+        assert!(status_words_linked(&[("Rejected – fix them in Settings → Downloads → Soulseek".to_string(), true)]).1, "the words of 0.31");
         assert!(status_words_linked(&[("Rejected – fix them in Settings → Soulseek".to_string(), true)]).1, "an older server's words");
         assert!(!status_words_linked(&[("Signed in as me".to_string(), false)]).1);
         let limited = json!({ "enabled": true, "state": "running", "logged_in": true, "username": "me", "shares": { "files": 0 },

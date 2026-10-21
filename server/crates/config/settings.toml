@@ -312,7 +312,7 @@ group = "general"
 label = "GitHub token (optional)"
 type = "password"
 full = true
-help = "For the update checks of the download tools and of Encore itself: GitHub allows 60 checks an hour per address without a token and 5,000 with one. A fine-grained token with no permissions is enough (github.com → Settings → Developer settings); if the Encore repository is private, give the token read access to it."
+help = "For the update checks of the plugins and of Encore itself: GitHub allows 60 checks an hour per address without a token and 5,000 with one. A fine-grained token with no permissions is enough (github.com → Settings → Developer settings); if the Encore repository is private, give the token read access to it."
 
 # ---- General → Group listens
 
@@ -1188,7 +1188,7 @@ default = ""
 group = "spotify"
 label = "Tidal Client ID"
 type = "text"
-help = "Only for looking up Tidal albums/songs by ISRC and for the Tidal connection. Get one at developer.tidal.com → Dashboard → Create new app (any name), redirect URI <Public URL>/api/connections/tidal/callback, then copy the Client ID and Client secret here. Downloads from Tidal use your own account instead: Downloads → Qobuz / Tidal / Deezer (streamrip) → Sign in to Tidal."
+help = "Only for looking up Tidal albums/songs by ISRC and for the Tidal connection. Get one at developer.tidal.com → Dashboard → Create new app (any name), redirect URI <Public URL>/api/connections/tidal/callback, then copy the Client ID and Client secret here. Downloads from Tidal use your own account instead: Plugins → streamrip → Sign in to Tidal."
 
 [keys.tidal_client_secret]
 env = "TIDAL_CLIENT_SECRET"
@@ -1552,11 +1552,11 @@ help = "The cleanup age: finished downloads older than this many days leave the 
 
 [keys.task_tools_enabled]
 default = true
-help = "Update download tools task on/off."
+help = "Update plugins task on/off."
 
 [keys.task_tools_minutes]
 default = 1440
-help = "How often the Update download tools task runs, in minutes."
+help = "How often the Update plugins task runs, in minutes."
 
 [keys.task_backup_enabled]
 env = "TASK_BACKUP_ENABLED"
@@ -1577,7 +1577,7 @@ help = "Check for Encore updates task on/off."
 default = 1440
 help = "How often the Check for Encore updates task runs, in minutes."
 
-# ---- Settings → Download tools (switches on the tools card)
+# ---- The auto-update switch of each builtin plugin (Settings → Plugins; the Download tools card until 0.32)
 
 [keys.tools_auto_ytdlp]
 default = true

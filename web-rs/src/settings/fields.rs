@@ -148,8 +148,8 @@ impl Schema {
         page.map(|s| s.id.clone()).unwrap_or_else(|| id.to_string())
     }
 
-    /// Whether page `id` holds the card `card` (the Download tools card and How requests are fulfilled go on
-    /// the page with the Download pipeline card).
+    /// Whether page `id` holds the card `card` (How requests are fulfilled goes on the page with the Download
+    /// pipeline card, and the Plugins page follows it in the nav).
     pub fn holds(&self, id: &str, card: &str) -> bool {
         self.section(id).is_some_and(|s| s.groups.iter().any(|g| g.id == card))
     }

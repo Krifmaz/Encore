@@ -1,0 +1,32 @@
+# Plex: a connection to another music server (crates/sync connections, the media-server refresh). Encore's own
+# code; nothing to download. Its fields stay on Settings → Integrations → Media servers.
+# docs/contracts/plugin-manifest.md describes every key.
+
+[plugin]
+id = "plex"
+name = "Plex"
+version = "0.32.0"
+description = "Users link their Plex (or Plexamp) accounts to keep likes and playlists in step, and Plex rescans when new music arrives."
+kind = "connection"
+protocol = 1
+homepage = "https://www.plex.tv"
+license = "MIT"
+commands = ["status", "test"]
+builtin = true
+settings_on = "integrations"
+
+[[settings]]
+key = "plex_url"
+
+[[settings]]
+key = "plex_token"
+
+# internal: this server's Plex client identifier, made at the first Plex sign-in
+[[settings]]
+key = "plex_client_id"
+
+[permissions]
+network = true
+
+[migration]
+in_use = [["plex_url"]]

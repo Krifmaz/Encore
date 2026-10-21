@@ -145,7 +145,7 @@ pub fn view<'a>(state: &'a State, _ctx: &Ctx<'a>) -> El<'a, Message> {
         help("Official translations come first (MusicBrainz and Apple, where the label published one); the rest come from the Translator on this server. Titles on your screen are translated first, the rest of the library in the background. Fix any title with ⋯ → Edit translation.").into(),
     ];
     if s["translator"].as_bool() == Some(false) {
-        lines.push(warn_text("The Translator is not installed on this server, so only official translations show. An admin can install it under Settings → Downloads → Download tools.").into());
+        lines.push(warn_text("The Translator is not installed on this server, so only official translations show. An admin can install it under Settings → Plugins.").into());
     }
     if s.get("rows").is_some_and(|r| !r.is_null()) {
         lines.push(

@@ -19,6 +19,7 @@ encore-vpn = { workspace = true }
 encore-system = { workspace = true }
 encore-requests = { workspace = true }
 encore-files = { workspace = true }
+encore-plugins = { workspace = true }
 axum = { workspace = true }
 axum-extra = { workspace = true }
 tokio = { workspace = true }
@@ -58,11 +59,13 @@ encore-vpn = { workspace = true, features = ["test-support"] }
 encore-library = { workspace = true, features = ["test-support"] }
 # the Soulseek tests talk to a stand-in slskd, in tokio's paused time
 encore-requests = { workspace = true, features = ["test-support"] }
+# the plugin tests install from stand-ins on 127.0.0.1 (plain http)
+encore-plugins = { workspace = true, features = ["test-support"] }
 tokio = { workspace = true, features = ["test-util"] }
 
 [features]
 # the TestServer helper (a server on a temporary config folder) for other crates' tests
-test-support = []
+test-support = ["encore-plugins/test-support"]
 # the fault seam of encore_core::fsx and its admin route (POST/DELETE /api/requests/storage/fault) for the
 # integrator's live run: `cargo run --features fault-io`. Never a release build.
 fault-io = ["encore-core/fault-io", "encore-requests/fault-io"]

@@ -1,9 +1,9 @@
 //! Keeping the server up to date: Encore's own updates and "Restart server" ([`update`]), the container
-//! swap of "Update now" ([`selfupdate`], over the Docker Engine API in [`docker`]), and the download tools
-//! that update without a new image ([`tools`]: yt-dlp, streamrip, Cadenza; slskd and the translator are
-//! installed and run by other crates and reach the tools card through [`Ctx`]).
+//! swap of "Update now" ([`selfupdate`], over the Docker Engine API in [`docker`]), and the programs of the
+//! builtin plugins with the old Download tools routes and the "Update plugins" task ([`tools`]; installing and
+//! updating are the plugins', encore_plugins; slskd and the translator are run by other crates and reach the
+//! old card through [`Ctx`]).
 use serde_json::Value;
-use std::future::Future;
 use std::path::PathBuf;
 use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
@@ -18,15 +18,9 @@ pub use tools::ToolInfo;
 /// What the update and tool functions need from the server.
 pub trait Ctx: encore_playback::Ctx {
     fn system(&self) -> &System;
-    /// The newest release of a helper program run by another crate ("slskd", "translator"):
-    /// (version or tag, download address).
-    fn helper_latest(&self, id: &str) -> impl Future<Output = anyhow::Result<(String, String)>> + Send;
-    /// Install release `tag` of a helper program from `url`; Ok(the version now installed).
-    fn helper_install(&self, id: &str, tag: &str, url: &str) -> impl Future<Output = anyhow::Result<String>> + Send;
-    /// A helper program's card, with what the last check found (`last`).
+    /// The old card's row of a program run by another crate ("slskd", "translator"), with what the last check
+    /// found (`last`: {latest, checked_at, error}).
     fn helper_info(&self, id: &str, last: &Value) -> ToolInfo;
-    /// Remove a helper program's downloaded copy.
-    fn helper_reset(&self, id: &str) -> anyhow::Result<()>;
 }
 
 /// What the update and tool functions keep while the server runs. Clones share it.

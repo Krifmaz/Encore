@@ -1,5 +1,5 @@
 //! Translated and romanized titles in the API: the routes of Settings → Language and the edit dialog, and
-//! the Translator's row on the Download tools card. Answers gain a listener's translations through the
+//! the Translator's row on the old Download tools card. Answers gain a listener's translations through the
 //! enrichment pass (crate::enrich); the translations themselves (sources, cache, the model, the background
 //! worker) live in encore_library::translate.
 use encore_library::translate::*;
@@ -16,22 +16,21 @@ use prompt::Kind;
 use serde::Deserialize;
 use serde_json::{json, Value};
 
-/// The Translator's row on the Download tools card.
+/// The Translator's row on the old Download tools card (`/api/system/tools`, answered from the plugin).
 pub fn tool_info(st: &AppState, last: &Value) -> ToolInfo {
-    let data = st.data_dir();
-    let inst = llama::installed(data).map(|(_, t)| t);
+    let inst = llama::installed(st).map(|(_, t)| t);
     let m = llama::model(st);
-    let has_model = llama::model_path(data, &m).is_file();
+    let has_model = llama::model_path(st, &m).is_file();
     let latest = last["latest"].as_str().map(String::from);
     let newer = inst.as_deref().zip(latest.as_deref()).is_some_and(|(i, l)| llama::newer_build(l, i));
     let note = match (&inst, has_model) {
         (Some(_), true) => format!("Translates titles on this server with the {} model – starts when needed, stops after 2 minutes idle", m.id),
         (Some(_), false) => format!("The {} model is not downloaded yet – Update downloads it (about {:.1} GB)", m.id, m.gb),
-        (None, _) => format!("Not installed – Install downloads llama.cpp and the {} model (about {:.1} GB) to translate titles on this server", m.id, m.gb),
+        (None, _) => format!("Not installed – install the Translator plugin under Settings → Plugins (llama.cpp and the {} model, about {:.1} GB)", m.id, m.gb),
     };
     ToolInfo {
         id: "translator".into(), name: encore_system::tools::label("translator").into(),
-        source: if inst.is_some() { "updated" } else { "missing" }.into(), resettable: inst.is_some() || llama::dir(data).exists(),
+        source: if inst.is_some() { "updated" } else { "missing" }.into(), resettable: st.plugins.installed("translator"),
         update_available: inst.is_some() && (newer || !has_model),
         // a missing model counts as an update: the button downloads it
         latest: if inst.is_some() && !has_model && !newer { inst.clone() } else { latest },

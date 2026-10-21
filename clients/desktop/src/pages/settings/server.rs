@@ -1,9 +1,11 @@
 //! The Server group of Settings: General, Library, Downloads, Integrations, Server processing,
 //! Email & notifications and Scheduled tasks are the admin settings form of web-rs/src/pages/settings.rs
 //! (`show`), drawn from the field table in `fields.rs`: one card per section with its fields, secrets
-//! with Show saved / Copy, Save and Test, the live blocks of `tools.rs` (the Download tools card on
-//! Downloads), the API key card and About. Auto-download, Contribute and Blocked are pages of their own
-//! and are routed to their modules.
+//! with Show saved / Copy, Save and Test, the live blocks of `tools.rs` (Cadenza's on Server processing),
+//! the API key card and About. Auto-download, Contribute and Blocked are pages of their own and are routed
+//! to their modules; Plugins is plugins.rs. Since 0.32 Downloads holds the Download pipeline and Release
+//! types only: the source cards are plugin cards on Plugins, and the Download tools card is gone. A server
+//! without plugins (before 0.32) still gets its source cards here.
 
 use super::fields::{self, Card, Field};
 use super::{autodownload, blocked, contribute, tasks, tools, Section};
@@ -53,6 +55,8 @@ pub struct State {
     key_shown: bool,
     dialog: Option<Dialog>,
     pub tools: tools::State,
+    /// Downloads on a server without plugins (before 0.32): its source cards are drawn here as before.
+    no_plugins: bool,
     pub tasks: tasks::State,
     pub autodownload: autodownload::State,
     pub contribute: contribute::State,
@@ -87,7 +91,11 @@ pub enum Message {
     Regen,
     Regenerated(Result<Value, ApiError>),
     OpenReleases,
+    /// The line under How requests are fulfilled: Settings → Plugins.
+    GoPlugins,
     Tools(tools::Message),
+    /// GET /plugins on Downloads: whether this server has plugins (an older one answers with its web page).
+    PluginsProbe(Result<Value, ApiError>),
     Tasks(tasks::Message),
     Autodownload(autodownload::Message),
     Contribute(contribute::Message),
@@ -141,8 +149,14 @@ pub fn open(state: &mut State, section: Section, ctx: &mut Ctx) -> Task<Message>
     let mut tasks = vec![load_values(ctx)];
     match section {
         Section::Tasks => tasks.push(tasks::open(&mut state.tasks, ctx).map(Message::Tasks)),
-        // the Download tools card and the blocks of the source cards; Cadenza's blocks need its state too
-        Section::Downloads | Section::Processing => tasks.push(tools::open(&mut state.tools, ctx).map(Message::Tools)),
+        // the source cards are on Plugins, unless this server has none (then they stay here, with their blocks)
+        Section::Downloads => {
+            state.no_plugins = false;
+            let api = ctx.api.clone();
+            tasks.push(Task::perform(async move { api.get("/plugins").await }, Message::PluginsProbe));
+        }
+        // Cadenza's blocks: the cache and the engine's settings
+        Section::Processing => tasks.push(tools::open_processing(&mut state.tools, ctx).map(Message::Tools)),
         Section::General if ctx.session.is_owner() => {
             let api = ctx.api.clone();
             tasks.push(Task::perform(async move { api.get("/system/api-key").await }, Message::ApiKey));
@@ -481,6 +495,7 @@ pub fn update(state: &mut State, msg: Message, ctx: &mut Ctx) -> Task<Message> {
         }
         Message::Regenerated(Err(e)) => ctx.toast_err(e.message),
         Message::OpenReleases => ctx.open_url("https://github.com/Krifmaz/Encore/releases"),
+        Message::GoPlugins => ctx.navigate(crate::pages::Page::Settings(Section::Plugins)),
         Message::Tools(tools::Message::VpnTest) => {
             // save the Soulseek card first, then run the test
             let (Some(values), Some(card)) = (&state.values, fields::card("slskd")) else { return Task::none() };
@@ -490,6 +505,12 @@ pub fn update(state: &mut State, msg: Message, ctx: &mut Ctx) -> Task<Message> {
             return Task::perform(async move { api.put("/admin/settings", Value::Object(body)).await }, Message::VpnSaved);
         }
         Message::Tools(m) => return tools::update(&mut state.tools, m, ctx).map(Message::Tools),
+        Message::PluginsProbe(r) => {
+            state.no_plugins = no_plugins(&r);
+            if state.no_plugins && state.section == Some(Section::Downloads) {
+                return tools::open_sources(&mut state.tools, ctx).map(Message::Tools);
+            }
+        }
         Message::Tasks(m) => return tasks::update(&mut state.tasks, m, ctx).map(Message::Tasks),
         Message::Autodownload(m) => return autodownload::update(&mut state.autodownload, m, ctx).map(Message::Autodownload),
         Message::Contribute(m) => return contribute::update(&mut state.contribute, m, ctx).map(Message::Contribute),
@@ -501,6 +522,25 @@ pub fn update(state: &mut State, msg: Message, ctx: &mut Ctx) -> Task<Message> {
 }
 
 // ----- views -------------------------------------------------------------------------------
+
+/// Whether GET /plugins says this server has no plugins: an older server answers the address with its web page
+/// (or not at all). A refusal for another reason (signed out, not an admin) says nothing either way.
+pub fn no_plugins(r: &Result<Value, ApiError>) -> bool {
+    match r {
+        Ok(v) => !v["plugins"].is_array(),
+        Err(e) => e.status == 404,
+    }
+}
+
+/// The cards of a page, under their part headings: the group's own, and on Downloads of a server without plugins
+/// the source cards that were there before 0.32.
+fn page_parts(group: &fields::Group, section: Section, no_plugins: bool) -> Vec<(&'static str, &'static [&'static str])> {
+    let mut parts: Vec<(&'static str, &'static [&'static str])> = group.parts.to_vec();
+    if section == Section::Downloads && no_plugins {
+        parts.push(("", fields::LEGACY_SOURCES));
+    }
+    parts
+}
 
 /// The note under a field about where its value comes from.
 fn source_note<'a>(f: &Field, values: &Value) -> Option<El<'a, Message>> {
@@ -727,7 +767,8 @@ fn api_key_card<'a>(state: &'a State) -> Option<El<'a, Message>> {
     ))
 }
 
-fn pipeline_help<'a>() -> El<'a, Message> {
+/// How requests are fulfilled (Downloads); since 0.32 a line under it says where the sources are installed.
+fn pipeline_help<'a>(plugins: bool) -> El<'a, Message> {
     let steps = [
         ("Library check", "if the album/track is already in your library (by MusicBrainz id or name) it's marked available instantly."),
         ("streamrip", "lossless from Qobuz, Tidal or Deezer with your own accounts, matched by ISRC."),
@@ -753,6 +794,14 @@ fn pipeline_help<'a>() -> El<'a, Message> {
     for l in lines {
         c = c.push(l);
     }
+    if plugins {
+        c = c.push(
+            row![help("Each source is a plugin: install, update or disable it under"), super::link("Settings → Plugins", Message::GoPlugins)]
+                .spacing(2)
+                .align_y(Alignment::Center)
+                .wrap(),
+        );
+    }
     widgets::card(c.width(Length::Fill)).width(Length::Fill).into()
 }
 
@@ -777,10 +826,7 @@ pub fn view<'a>(state: &'a State, ctx: &Ctx<'a>) -> El<'a, Message> {
     if section == Section::Tasks {
         page = page.push(tasks::view(&state.tasks, ctx).map(Message::Tasks));
     }
-    if section == Section::Downloads {
-        page = page.push(tools::tools_card(&state.tools, values).map(Message::Tools));
-    }
-    for (label, ids) in group.parts {
+    for (label, ids) in page_parts(group, section, state.no_plugins) {
         let cards: Vec<&'static Card> = ids
             .iter()
             .filter_map(|id| fields::card(id))
@@ -790,14 +836,14 @@ pub fn view<'a>(state: &'a State, ctx: &Ctx<'a>) -> El<'a, Message> {
             continue;
         }
         if !label.is_empty() {
-            page = page.push(container(t(*label).size(11).color(ctx.look.faint).font(theme::bold())).padding(widgets::pad(10.0, 4.0, 0.0, 4.0)));
+            page = page.push(container(t(label).size(11).color(ctx.look.faint).font(theme::bold())).padding(widgets::pad(10.0, 4.0, 0.0, 4.0)));
         }
         for c in cards {
             page = page.push(card_view(state, values, c, ctx));
         }
     }
     if section == Section::Downloads {
-        page = page.push(pipeline_help());
+        page = page.push(pipeline_help(!state.no_plugins));
     }
     if section == Section::General {
         if let Some(k) = api_key_card(state) {
@@ -837,8 +883,8 @@ pub fn overlay<'a>(state: &'a State, ctx: &Ctx<'a>) -> Option<El<'a, Message>> {
 }
 
 pub fn subscription(state: &State) -> Subscription<Message> {
-    // the Soulseek and VPN states and the Tidal sign-in are on Downloads
-    if state.section != Some(Section::Downloads) {
+    // the Soulseek and VPN states and the Tidal sign-in are on Downloads of a server without plugins
+    if state.section != Some(Section::Downloads) || !state.no_plugins {
         return Subscription::none();
     }
     let mut subs = vec![iced::time::every(Duration::from_secs(5)).map(|_| Message::Tools(tools::Message::Tick))];
@@ -928,7 +974,20 @@ mod tests {
             ..State::default()
         };
         assert_eq!(first_open(&st), Some("releases"));
-        st.focus = Some("slskd");
-        assert_eq!(first_open(&st), Some("slskd"));
+        st.focus = Some("pipeline");
+        assert_eq!(first_open(&st), Some("pipeline"));
+    }
+
+    #[test]
+    fn downloads_keeps_the_pipeline_and_the_release_types() {
+        let g = fields::group("downloads").unwrap();
+        let ids = |parts: Vec<(&'static str, &'static [&'static str])>| parts.iter().flat_map(|(_, ids)| ids.iter().copied()).collect::<Vec<_>>();
+        assert_eq!(ids(page_parts(g, Section::Downloads, false)), ["pipeline", "releases"]);
+        // a server without plugins (before 0.32) keeps its source cards here
+        assert_eq!(ids(page_parts(g, Section::Downloads, true)), ["pipeline", "releases", "streamrip", "torznab", "slskd", "ytdlp", "youtube"]);
+        assert!(no_plugins(&Ok(Value::String("<!doctype html>".into()))));
+        assert!(no_plugins(&Err(ApiError::new(404, "Not Found"))));
+        assert!(!no_plugins(&Ok(json!({ "plugins": [] }))));
+        assert!(!no_plugins(&Err(ApiError::new(403, "Admins only"))));
     }
 }

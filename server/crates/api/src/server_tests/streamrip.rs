@@ -15,6 +15,7 @@ fn state(name: &str) -> (AppState, PathBuf) {
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).unwrap();
     let st = crate::test_support::state_in(&dir);
+    crate::test_support::with_sources(&st);
     (st, dir)
 }
 
@@ -24,7 +25,7 @@ fn state(name: &str) -> (AppState, PathBuf) {
 /// FLACs in `fixture/` as an album, or fail with output and exit 1). Every call, with what its stdin is,
 /// lands in `calls.log`; a `url` run first writes to and reads from /dev/tty (which must neither hang nor
 /// fail the run), and leaves its /proc stat and environment in `stat` and `env`.
-fn fake_rip(dir: &Path) -> PathBuf {
+pub(super) fn fake_rip(dir: &Path) -> PathBuf {
     use std::os::unix::fs::PermissionsExt;
     std::fs::create_dir_all(dir).unwrap();
     let body = r#"here=$(dirname "$0")
@@ -244,7 +245,7 @@ const DEEZER_ALBUM: &str = "https://www.deezer.com/album/302127";
 
 /// Four small FLACs of "Illuminate EP" by Duumu, tagged the way streamrip tags them, in `dir`. False when
 /// there is no ffmpeg here to make them.
-fn album_fixture(dir: &Path) -> bool {
+pub(super) fn album_fixture(dir: &Path) -> bool {
     std::fs::create_dir_all(dir).unwrap();
     for n in 1..=4 {
         let out = dir.join(format!("{n:02}. Duumu - Light {n}.flac"));
@@ -260,7 +261,7 @@ fn album_fixture(dir: &Path) -> bool {
 }
 
 /// A cover for the request (served from here, so the import asks no catalogue for one).
-async fn cover_server(dir: &Path) -> Option<String> {
+pub(super) async fn cover_server(dir: &Path) -> Option<String> {
     let jpg = dir.join("cover.jpg");
     let ok = std::process::Command::new("ffmpeg").args(["-v", "error", "-y", "-f", "lavfi", "-i", "testsrc=size=320x320", "-frames:v", "1"]).arg(&jpg)
         .stdin(std::process::Stdio::null()).status().map(|s| s.success()).unwrap_or(false);
@@ -288,7 +289,7 @@ struct Rip {
 }
 
 async fn rip_server(name: &str) -> Option<Rip> {
-    let ts = crate::test_support::TestServer::new(&format!("rip-e2e-{name}"));
+    let ts = crate::test_support::TestServer::new(&format!("rip-e2e-{name}")).with_sources();
     let (fake, staging, lib) = (ts.dir.join("fake"), ts.dir.join("staging"), ts.dir.join("lib"));
     let rip = fake_rip(&fake);
     if !album_fixture(&fake.join("fixture")) {
@@ -314,12 +315,12 @@ fn picked_album(st: &AppState, cover: &str) -> i64 {
         p![cover, detail.to_string(), t, t]).unwrap()
 }
 
-fn request_row(st: &AppState, id: i64) -> (String, String, Value) {
+pub(super) fn request_row(st: &AppState, id: i64) -> (String, String, Value) {
     let r = st.db.one("SELECT status, message, detail FROM requests WHERE id=?", p![id]).unwrap().unwrap();
     (r.s("status"), r.s("message"), serde_json::from_str(&r.s("detail")).unwrap_or(json!({})))
 }
 
-fn log_text(d: &Value) -> String {
+pub(super) fn log_text(d: &Value) -> String {
     d["log"].as_array().map(|a| a.iter().filter_map(|l| l.as_str()).collect::<Vec<_>>().join("\n")).unwrap_or_default()
 }
 
@@ -369,6 +370,46 @@ async fn a_picked_deezer_album_downloads_and_imports_through_the_worker() {
     assert_eq!(toml_value(&text, "database", "downloads_enabled"), "false");
     assert_eq!(toml_value(&text, "cli", "progress_bars"), "false");
     assert_eq!(toml_value(&text, "cli", "no_update_check"), "true", "{text}");
+    r.ts.remove();
+}
+
+/// After an upgrade whose streamrip is still being installed (adopted, switched on, no program yet), a request
+/// that needs it waits for it instead of going on to a lower-quality source or failing; once the program is
+/// there it downloads from streamrip.
+#[tokio::test]
+async fn a_request_waits_for_a_streamrip_that_is_still_being_installed() {
+    let Some(r) = rip_server("installing").await else { return };
+    let st = r.ts.st.clone();
+    let rip = st.cfg.str("streamrip_bin");
+    // as the first start after an upgrade has it: the install pass not done, streamrip's program not there
+    st.cfg.set_many(&json!({ "streamrip_bin": "" }));
+    st.db.execute("INSERT OR REPLACE INTO plugin_state (key, value) VALUES ('migration', 'install')", p![]).unwrap();
+    assert!(st.plugins.installing_after_upgrade("streamrip"));
+    // a picked album and a song from the sources (Deezer first)
+    let id = picked_album(&st, &r.cover);
+    let t = encore_db::now();
+    let song = st.db.execute("INSERT INTO requests (user_id, kind, artist, title, status, message, detail, created_at, updated_at) VALUES (1,'track','Duumu','Illuminate','queued','',?,?,?)",
+        p![json!({ "album_mode": "song" }).to_string(), t, t]).unwrap();
+    for _ in 0..2 {
+        encore_requests::worker::step(st.clone(), id).await;
+        encore_requests::worker::step(st.clone(), song).await;
+    }
+    let (status, message, d) = request_row(&st, id);
+    assert_eq!((status.as_str(), message.as_str()), ("waiting", "Waiting for the streamrip plugin to finish installing"), "{}", log_text(&d));
+    assert_eq!(d["wait"]["reason"], "plugin_install");
+    assert_eq!(log_text(&d).matches("waiting for the streamrip plugin").count(), 1, "said once: {}", log_text(&d));
+    let (status, message, d) = request_row(&st, song);
+    assert_eq!((status.as_str(), message.as_str()), ("waiting", "Waiting for the streamrip plugin to finish installing"), "{}", log_text(&d));
+    assert_eq!((d["sources"].clone(), d["install_wait"]["step"].clone()), (json!(["streamrip"]), json!("source")), "streamrip stays in its place: {d}");
+    st.db.execute("UPDATE requests SET status='cancelled' WHERE id=?", p![song]).unwrap();
+    // the program arrives (here: the stand-in): the picked album downloads from streamrip
+    st.cfg.set_many(&json!({ "streamrip_bin": rip }));
+    assert!(!st.plugins.installing_after_upgrade("streamrip") || encore_requests::sources::streamrip::binary(&st).is_some());
+    encore_requests::worker::step(st.clone(), id).await;
+    let (status, message, d) = request_row(&st, id);
+    assert_eq!(status, "completed", "{message}\n{}", log_text(&d));
+    assert!(message.starts_with("Downloaded from Deezer via streamrip"), "{message}");
+    assert!(d["wait"].is_null() && d["install_wait"].is_null(), "{d}");
     r.ts.remove();
 }
 

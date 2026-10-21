@@ -1,0 +1,50 @@
+# Torrents and Usenet through Prowlarr (sources/torznab.rs). What it finds goes to the download client chosen by
+# torrent_client and nzb_client: the client plugins (qbittorrent, transmission, deluge, rtorrent,
+# torrent-blackhole, sabnzbd, nzbget, usenet-blackhole). Encore's own code; nothing to download.
+# docs/contracts/plugin-manifest.md describes every key.
+
+[plugin]
+id = "torznab"
+name = "Torrents & Usenet (Prowlarr)"
+version = "0.32.0"
+description = "Searches your torrent and Usenet indexers (through Prowlarr) for whole albums and sends them to your torrent client (qBittorrent, Transmission, Deluge or rTorrent) or Usenet client (SABnzbd or NZBGet), or drops them into a watch folder."
+kind = "source"
+protocol = 1
+homepage = "https://prowlarr.com"
+license = "MIT"
+commands = ["status", "test", "search", "download"]
+kinds = ["track", "album"]
+lossless = true
+needs_sign_in = false
+builtin = true
+
+[[sources]]
+id = "torznab"
+name = "Torrents & Usenet"
+
+[[settings]]
+key = "torznab_enabled"
+
+[[settings]]
+key = "prowlarr_url"
+
+[[settings]]
+key = "prowlarr_api_key"
+
+[[settings]]
+key = "torznab_min_seeders"
+
+[[settings]]
+key = "torznab_timeout_minutes"
+
+[[settings]]
+key = "torrent_client"
+
+[[settings]]
+key = "nzb_client"
+
+[permissions]
+network = true
+
+[migration]
+in_use = [["torznab_enabled", "prowlarr_url", "prowlarr_api_key"]]

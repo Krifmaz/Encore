@@ -369,7 +369,7 @@ class SchemaRulesTest {
         assertEquals("library", s.pageOf("verify"))
         assertEquals("integrations", s.pageOf("services"))
         assertEquals("processing", s.pageOf("cadenza"))
-        // the Download tools card and How requests are fulfilled go on the page with the pipeline card
+        // How requests are fulfilled goes on the page with the pipeline card
         assertEquals(listOf("downloads"), s.sections.filter { sec -> sec.groups.any { it.id == "pipeline" } }.map { it.id })
         val vpn = SchemaRules.layout(s.group("slskd")!!.fields)
         assertTrue(vpn.vpn.map { it.key }.contains("vpn_wireguard_config"))

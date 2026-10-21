@@ -1,0 +1,38 @@
+# Deluge: a download client of the torznab source (sources/dl). Encore's own code talks to it; nothing to download.
+# docs/contracts/plugin-manifest.md describes every key.
+
+[plugin]
+id = "deluge"
+name = "Deluge"
+version = "0.32.0"
+description = "Sends the torrents Prowlarr finds to your Deluge (through its Web UI) and imports the album when it is done."
+kind = "client"
+protocol = 1
+homepage = "https://deluge-torrent.org"
+license = "MIT"
+commands = ["status", "test"]
+builtin = true
+
+[client]
+source = "torznab"
+protocol = "torrent"
+chosen_by = "torrent_client=deluge"
+
+[[settings]]
+key = "deluge_url"
+
+[[settings]]
+key = "deluge_password"
+
+[[settings]]
+key = "deluge_label"
+
+[[settings]]
+key = "deluge_download_path"
+
+[permissions]
+network = true
+paths = [{ setting = "deluge_download_path", access = "write" }]
+
+[migration]
+in_use = [["torznab_enabled", "torrent_client=deluge", "deluge_url"]]

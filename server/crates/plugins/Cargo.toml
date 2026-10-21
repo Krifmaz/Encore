@@ -1,0 +1,34 @@
+[package]
+name = "encore-plugins"
+description = "Encore: plugins – the plugin.toml manifest (protocol 1 of the plugin SDK, with the catalog's extensions), the catalog Encore ships, the registry, the one installer, the sandbox and the process protocol"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+encore-core = { workspace = true }
+encore-db = { workspace = true }
+encore-config = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+tracing = { workspace = true }
+anyhow = { workspace = true }
+tokio = { workspace = true }
+tokio-util = { workspace = true }
+futures-util = { workspace = true }
+reqwest = { workspace = true }
+zip = { workspace = true }
+flate2 = { workspace = true }
+sha2 = { workspace = true }
+hex = { workspace = true }
+libc = { workspace = true }
+# plugin.toml: the same toml release the settings table's build script reads (serde support is always on in 0.8)
+toml = { version = "0.8.23", default-features = false, features = ["parse"] }
+
+[features]
+# lets another crate's tests install from plain-http stand-ins (Registry::allow_plain_http); never a release build
+test-support = []
+
+[dev-dependencies]
+# stand-ins for GitHub, PyPI and download hosts on 127.0.0.1
+axum = { workspace = true }

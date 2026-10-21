@@ -1,8 +1,9 @@
 #!/bin/sh
 set -e
 
-# yt-dlp and streamrip are kept fresh by Encore's "Update download tools" task: updates go to
-# /config/tools/venv as the Encore user and survive a new image. YTDLP_AUTO_UPDATE=false still turns off
+# yt-dlp, streamrip and Encore's other helper programs are plugins (Settings → Plugins): they install into
+# /config/plugins/<id> as the Encore user, survive a new image and are kept fresh by the "Update plugins" task
+# (a /config/tools/venv from before 0.32 is adopted where it is). YTDLP_AUTO_UPDATE=false still turns off
 # yt-dlp's automatic updates (read by Encore).
 
 # Run as PUID/PGID (like linuxserver.io images) unless started as a non-root user.

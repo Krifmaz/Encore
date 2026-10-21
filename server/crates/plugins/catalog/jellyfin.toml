@@ -1,0 +1,28 @@
+# Jellyfin: a connection to another music server (crates/sync connections, the media-server refresh). Encore's own
+# code; nothing to download. Its fields stay on Settings → Integrations → Media servers.
+# docs/contracts/plugin-manifest.md describes every key.
+
+[plugin]
+id = "jellyfin"
+name = "Jellyfin"
+version = "0.32.0"
+description = "Users link their Jellyfin (or Finamp) accounts to keep likes and playlists in step, and Jellyfin rescans when new music arrives."
+kind = "connection"
+protocol = 1
+homepage = "https://jellyfin.org"
+license = "MIT"
+commands = ["status", "test"]
+builtin = true
+settings_on = "integrations"
+
+[[settings]]
+key = "jellyfin_url"
+
+[[settings]]
+key = "jellyfin_api_key"
+
+[permissions]
+network = true
+
+[migration]
+in_use = [["jellyfin_url"]]

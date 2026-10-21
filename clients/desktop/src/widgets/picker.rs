@@ -237,14 +237,15 @@ pub fn is_url(v: &str) -> bool {
     matches!(rest, Some(r) if !r.is_empty() && !r.chars().any(char::is_whitespace))
 }
 
-/// The settings page of a web link (`#/settings?s=slskd`): a section the app has, or Downloads,
-/// where the server's download sources are set up.
+/// The settings page of a web link (`#/settings?s=slskd`): a section the app has, or Plugins,
+/// where the server's download sources are set up since 0.32 (on an older server that page
+/// points to Downloads).
 pub fn settings_page(hash: &str) -> Page {
     let id = hash
         .split_once("s=")
         .map(|(_, r)| r.split('&').next().unwrap_or(""))
         .unwrap_or("");
-    Page::Settings(Section::by_id(id).unwrap_or(Section::Downloads))
+    Page::Settings(Section::by_id(id).unwrap_or(Section::Plugins))
 }
 
 /// The picker's options from `(key, value)` pairs, as the web's `copy`/`put` build them: a
@@ -1016,8 +1017,10 @@ mod tests {
         assert!(!is_url("https://a b"));
         assert!(!is_url("daft punk discovery"));
         assert_eq!(settings_page("#/settings?s=playback"), Page::Settings(Section::Playback));
-        assert_eq!(settings_page("#/settings?s=slskd"), Page::Settings(Section::Downloads));
-        assert_eq!(settings_page("#/settings"), Page::Settings(Section::Downloads));
+        // the source cards are plugin cards since 0.32; the server's hints link the Plugins page itself
+        assert_eq!(settings_page("#/settings?s=slskd"), Page::Settings(Section::Plugins));
+        assert_eq!(settings_page("#/settings?s=plugins"), Page::Settings(Section::Plugins));
+        assert_eq!(settings_page("#/settings"), Page::Settings(Section::Plugins));
         assert_eq!(state_word("sign_in"), "sign in");
         assert_eq!(state_word("ready"), "");
     }

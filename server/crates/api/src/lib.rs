@@ -6,6 +6,7 @@
 pub use encore_core::VERSION;
 
 pub mod auth;
+pub mod builtins;
 pub mod contribute;
 pub mod covers;
 pub mod email;
@@ -120,6 +121,7 @@ pub fn app(st: AppState) -> Router {
         .merge(routes::ytauth::router())
         .merge(routes::perf::router())
         .merge(routes::files::router())
+        .merge(routes::plugins::router())
         // the handlers add covers, credits and translations to their answers themselves (crate::enrich)
         .with_state(st)
         // every API call timed per route (the web app's files below are not): a slow one is logged, and all
@@ -155,6 +157,26 @@ pub fn warm_up(st: &AppState) {
 
 /// The server's state from the environment: the config folder `ENCORE_CONFIG_DIR` (default /config) and the web
 /// app in `ENCORE_STATIC_DIR` (default /app/static).
+/// The plugins at start: the builtin adapters registered (keep the answer while the server runs: they reach
+/// the state through it), what was in use before plugins adopted (the first start after an upgrade; rows only,
+/// at once), then – in the background – the programs that were in use but are missing installed, tried again
+/// after 1, 2, 5, 10 and 30 minutes, then every hour, until they are (no network at the first start).
+pub fn start_plugins(st: &AppState) -> std::sync::Arc<AppState> {
+    let anchor = builtins::register(st);
+    let adopted = st.plugins.adopt_in_use();
+    if !adopted.is_empty() {
+        tracing::info!("plugins: adopted {}", adopted.join(", "));
+    }
+    let reg = st.plugins.clone();
+    tokio::spawn(async move {
+        let r = reg.migrate_until_done(encore_plugins::migrate::retry_after).await;
+        if r["installed"].as_array().is_some_and(|a| !a.is_empty()) || r["failed"].as_array().is_some_and(|a| !a.is_empty()) {
+            tracing::info!("plugins: {r}");
+        }
+    });
+    anchor
+}
+
 pub fn build_state() -> anyhow::Result<AppState> {
     let data = PathBuf::from(std::env::var("ENCORE_CONFIG_DIR").unwrap_or_else(|_| "/config".into()));
     let static_dir = PathBuf::from(std::env::var("ENCORE_STATIC_DIR").unwrap_or_else(|_| "/app/static".into()));

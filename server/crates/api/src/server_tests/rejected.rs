@@ -140,7 +140,7 @@ async fn cover_server(dir: &Path) -> Option<String> {
 /// A server whose streamrip is the stand-in, whose fingerprint check hears "Diase – Sun" in every file of
 /// its folder, with its own library, staging and Soulseek folders; no MusicBrainz, lyrics or quality gate.
 async fn env(name: &str) -> Option<Env> {
-    let ts = TestServer::new(&format!("rejected-{name}"));
+    let ts = TestServer::new(&format!("rejected-{name}")).with_sources();
     let (lib, staging, slsk, fk) = (ts.dir.join("music"), ts.dir.join("staging"), ts.dir.join("slskd"), ts.dir.join("fake"));
     for d in [&lib, &staging, &slsk, &fk] {
         std::fs::create_dir_all(d).unwrap();

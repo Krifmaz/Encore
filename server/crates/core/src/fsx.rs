@@ -34,10 +34,12 @@ pub enum Step {
     Start,
     /// the admin file manager (encore-files): browse, upload, move, rename, trash
     Files,
+    /// a plugin's install, update, removal or run (encore-plugins): its folder, its download, its program
+    Plugin,
 }
 
 impl Step {
-    /// The step's name in the API ("download", "stage", "import", "config", "start").
+    /// The step's name in the API ("download", "stage", "import", "config", "start", "files", "plugin").
     pub fn as_str(self) -> &'static str {
         match self {
             Step::Download => "download",
@@ -46,11 +48,12 @@ impl Step {
             Step::Config => "config",
             Step::Start => "start",
             Step::Files => "files",
+            Step::Plugin => "plugin",
         }
     }
 
     pub fn parse(s: &str) -> Option<Step> {
-        [Step::Download, Step::Stage, Step::Import, Step::Config, Step::Start, Step::Files].into_iter().find(|x| x.as_str() == s)
+        [Step::Download, Step::Stage, Step::Import, Step::Config, Step::Start, Step::Files, Step::Plugin].into_iter().find(|x| x.as_str() == s)
     }
 
     /// The words that start the error ("import failed").
@@ -62,6 +65,7 @@ impl Step {
             Step::Config => "config failed",
             Step::Start => "start failed",
             Step::Files => "file operation failed",
+            Step::Plugin => "plugin step failed",
         }
     }
 }

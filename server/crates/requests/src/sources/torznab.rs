@@ -11,15 +11,19 @@ use serde_json::{json, Value};
 use std::sync::LazyLock;
 
 /// The chosen torrent client is set up (the name is from when qBittorrent was the only one).
-pub fn qbit_ready(st: &impl Ctx) -> bool {
-    Client::torrent(st).ready(st)
+pub fn qbit_ready(st: &impl crate::Ctx) -> bool {
+    let c = Client::torrent(st);
+    st.plugins().enabled(c.plugin_id()) && c.ready(st)
 }
-/// The chosen Usenet client is set up.
-pub fn sab_ready(st: &impl Ctx) -> bool {
-    Client::usenet(st).ready(st)
+/// The chosen Usenet client is set up (and its plugin installed and switched on).
+pub fn sab_ready(st: &impl crate::Ctx) -> bool {
+    let c = Client::usenet(st);
+    st.plugins().enabled(c.plugin_id()) && c.ready(st)
 }
-pub fn enabled(st: &impl Ctx) -> bool {
-    st.cfg().bool("torznab_enabled") && !st.cfg().str("prowlarr_url").is_empty() && !st.cfg().str("prowlarr_api_key").is_empty() && (qbit_ready(st) || sab_ready(st))
+/// Torrents and Usenet are a source now: the torznab plugin is installed and switched on, Prowlarr is set up
+/// and a client is ready.
+pub fn enabled(st: &impl crate::Ctx) -> bool {
+    st.plugins().enabled("torznab") && st.cfg().bool("torznab_enabled") && !st.cfg().str("prowlarr_url").is_empty() && !st.cfg().str("prowlarr_api_key").is_empty() && (qbit_ready(st) || sab_ready(st))
 }
 
 fn base(st: &impl Ctx, key: &str) -> String {
@@ -367,7 +371,8 @@ pub fn rank_album(st: &impl Ctx, results: &[Value], want: &Want) -> Vec<Value> {
     for r in results {
         let title = r["title"].as_str().unwrap_or("");
         let proto = r["protocol"].as_str().unwrap_or("torrent");
-        if (proto == "torrent" && !qbit_ready(st)) || (proto == "usenet" && !sab_ready(st)) {
+        // a release only its own kind of client can take (the client's plugin was checked before the search)
+        if (proto == "torrent" && !Client::torrent(st).ready(st)) || (proto == "usenet" && !Client::usenet(st).ready(st)) {
             continue;
         }
         let (a, b) = (album_share(title, album), contains(title, artist));

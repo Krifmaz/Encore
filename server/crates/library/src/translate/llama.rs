@@ -1,13 +1,14 @@
-//! The Translator tool: llama.cpp's `llama-server` from its GitHub releases plus one GGUF model from
-//! Hugging Face, both under `<config>/tools/translator`. The server is started when there is
-//! something to translate, listens on 127.0.0.1 only, runs at low priority, and is stopped after two
-//! minutes without work.
+//! The Translator plugin's program: llama.cpp's `llama-server` plus one GGUF model from Hugging Face. The
+//! plugin installs both (encore_plugins: the program into `<config>/plugins/translator/<build>/`, the model the
+//! translator_model setting picks into its data folder); an Encore before plugins kept them under
+//! `<config>/tools/translator`, which the plugin adopts in place. The server is started when there is
+//! something to translate (and the plugin is switched on), listens on 127.0.0.1 only, runs at low priority
+//! through the plugins' spawn builder, and is stopped after two minutes without work.
 use serde_json::{json, Value};
 use std::path::{Path, PathBuf};
 use crate::Ctx;
 use std::time::{Duration, Instant};
 
-pub const LLAMA_REPO: &str = "ggml-org/llama.cpp";
 /// Stop the model this long after the last request.
 pub const IDLE: Duration = Duration::from_secs(120);
 /// How long a model may take to load before the start counts as failed.
@@ -33,7 +34,7 @@ pub const MODELS: [Model; 2] = [
     Model { id: "best", label: "Best – Qwen3 8B (about 5 GB)", repo: "Qwen/Qwen3-8B-GGUF", file: "Qwen3-8B-Q4_K_M.gguf", gb: 5.0, thinking: true },
 ];
 
-/// The model chosen under Download tools (translator_model).
+/// The model chosen on the Translator's card (translator_model).
 pub fn model(st: &impl Ctx) -> Model {
     model_by_id(&st.cfg().str("translator_model"))
 }
@@ -48,17 +49,22 @@ pub fn model_url(m: &Model) -> String {
 
 // ---- files --------------------------------------------------------------------------------------
 
-/// `<config>/tools/translator`
+/// `<config>/tools/translator`: where an Encore before plugins kept the program and the models (adopted).
 pub fn dir(data: &Path) -> PathBuf {
     data.join("tools").join("translator")
 }
 
-fn models_dir(data: &Path) -> PathBuf {
-    dir(data).join("models")
+/// The plugin's own models folder (`[[download]] path = "models/…"` in its data folder).
+fn plugin_models(st: &impl Ctx) -> PathBuf {
+    st.plugins().folders("translator").data().join("models")
 }
 
-pub fn model_path(data: &Path, m: &Model) -> PathBuf {
-    models_dir(data).join(m.file)
+/// Where the chosen model is: the plugin's own copy, else the adopted one; a model that is in neither goes into
+/// the plugin's folder.
+pub fn model_path(st: &impl Ctx, m: &Model) -> PathBuf {
+    let own = plugin_models(st).join(m.file);
+    let adopted = dir(st.data_dir()).join("models").join(m.file);
+    if !own.is_file() && adopted.is_file() { adopted } else { own }
 }
 
 fn server_root(data: &Path) -> PathBuf {
@@ -77,45 +83,23 @@ fn find_server(dir: &Path) -> Option<PathBuf> {
         .map(|e| e.into_path())
 }
 
-/// (llama-server, build) when installed.
-pub fn installed(data: &Path) -> Option<(PathBuf, String)> {
-    let tag = current(data)?;
-    Some((find_server(&server_root(data).join(&tag))?, tag))
+/// (llama-server, build) while the Translator plugin is installed and switched on: its own install, else the
+/// one an Encore before plugins installed (adopted). The build reads as llama.cpp tags it ("b6800").
+pub fn installed(st: &impl Ctx) -> Option<(PathBuf, String)> {
+    if !st.plugins().enabled("translator") {
+        return None;
+    }
+    if let Some((v, bin)) = st.plugins().program("translator") {
+        let tag = if v.starts_with(['b', 'B']) { v } else { format!("b{v}") };
+        return Some((bin, tag));
+    }
+    let tag = current(st.data_dir())?;
+    Some((find_server(&server_root(st.data_dir()).join(&tag))?, tag))
 }
 
 /// Whether the translator can run now: the server and the chosen model are there.
 pub fn ready(st: &impl Ctx) -> bool {
-    installed(st.data_dir()).is_some() && model_path(st.data_dir(), &model(st)).is_file()
-}
-
-// ---- releases -----------------------------------------------------------------------------------
-
-/// The CPU build for this machine in a release's assets: `llama-<tag>-bin-ubuntu-x64.tar.gz` (or
-/// .zip, arm64). GPU builds (vulkan, cuda, rocm, sycl, openvino) are skipped.
-pub fn asset_for(release: &Value, arch: &str) -> Option<(String, String)> {
-    let a = match arch {
-        "x86_64" => "x64",
-        "aarch64" => "arm64",
-        _ => return None,
-    };
-    let want = format!("-bin-ubuntu-{a}.");
-    release["assets"].as_array()?.iter().find_map(|x| {
-        let name = x["name"].as_str()?;
-        let url = x["browser_download_url"].as_str()?;
-        (name.starts_with("llama-") && name.contains(&want) && (name.ends_with(".tar.gz") || name.ends_with(".zip")))
-            .then(|| (name.to_string(), url.to_string()))
-    })
-}
-
-/// From GitHub's release list: the newest release with a CPU build for this machine
-/// (tag, asset name, url). Drafts are skipped; llama.cpp marks its builds as pre-releases at times,
-/// so those count.
-pub fn pick_release(list: &Value, arch: &str) -> Option<(String, String, String)> {
-    list.as_array()?.iter().filter(|r| !r["draft"].as_bool().unwrap_or(false)).find_map(|r| {
-        let tag = r["tag_name"].as_str()?.to_string();
-        let (name, url) = asset_for(r, arch)?;
-        Some((tag, name, url))
-    })
+    installed(st).is_some() && model_path(st, &model(st)).is_file()
 }
 
 /// llama.cpp tags are build numbers ("b6800"); newer = higher number.
@@ -127,173 +111,7 @@ pub fn newer_build(latest: &str, installed: &str) -> bool {
     }
 }
 
-/// The newest llama.cpp build for this server: (tag, download url).
-pub async fn latest(st: &impl Ctx) -> anyhow::Result<(String, String)> {
-    let (code, v) = encore_http::github::get(st, &format!("https://api.github.com/repos/{LLAMA_REPO}/releases?per_page=20")).await?;
-    if code >= 400 {
-        anyhow::bail!("GitHub returned {code} for llama.cpp releases: {}", v["message"].as_str().unwrap_or(""));
-    }
-    let arch = std::env::consts::ARCH;
-    pick_release(&v, arch).map(|(t, _, u)| (t, u)).ok_or_else(|| anyhow::anyhow!("llama.cpp has no recent CPU build for this server ({arch})"))
-}
-
-// ---- unpacking ----------------------------------------------------------------------------------
-
-/// A path inside an archive that stays inside the folder it is unpacked to.
-fn safe_rel(name: &str) -> Option<PathBuf> {
-    let p = Path::new(name.trim_start_matches("./"));
-    let mut out = PathBuf::new();
-    for c in p.components() {
-        match c {
-            std::path::Component::Normal(x) => out.push(x),
-            std::path::Component::CurDir => {}
-            _ => return None,
-        }
-    }
-    (!out.as_os_str().is_empty()).then_some(out)
-}
-
-/// Unpack a .tar.gz into `dest`: files (with their mode), folders and symbolic links (which must point
-/// inside the archive's folder: the shared libraries come as `libllama.so -> libllama.so.0`).
-pub fn untar_gz_all(archive: &[u8], dest: &Path) -> anyhow::Result<()> {
-    use std::io::Read;
-    use std::os::unix::fs::PermissionsExt;
-    let mut tar = Vec::new();
-    flate2::read::GzDecoder::new(archive).take(2 << 30).read_to_end(&mut tar)?;
-    let mut at = 0usize;
-    let mut long_name: Option<String> = None;
-    let mut long_link: Option<String> = None;
-    while at + 512 <= tar.len() {
-        let h = &tar[at..at + 512];
-        if h.iter().all(|b| *b == 0) {
-            break;
-        }
-        let field = |a: usize, b: usize| String::from_utf8_lossy(&h[a..b]).trim_end_matches('\0').to_string();
-        let size_field = field(124, 136);
-        let size = u64::from_str_radix(size_field.trim().trim_end_matches(' '), 8).map_err(|_| anyhow::anyhow!("broken archive (size {size_field:?})"))? as usize;
-        let mode = u32::from_str_radix(field(100, 108).trim(), 8).unwrap_or(0o644);
-        let kind = h[156];
-        let mut name = field(0, 100);
-        if &h[257..262] == b"ustar" {
-            let prefix = field(345, 500);
-            if !prefix.is_empty() {
-                name = format!("{prefix}/{name}");
-            }
-        }
-        if let Some(n) = long_name.take() {
-            name = n;
-        }
-        let mut link = field(157, 257);
-        if let Some(l) = long_link.take() {
-            link = l;
-        }
-        let start = at + 512;
-        let end = start.checked_add(size).filter(|e| *e <= tar.len()).ok_or_else(|| anyhow::anyhow!("archive is cut off"))?;
-        let data = &tar[start..end];
-        match kind {
-            b'L' => long_name = Some(String::from_utf8_lossy(data).trim_end_matches('\0').to_string()),
-            b'K' => long_link = Some(String::from_utf8_lossy(data).trim_end_matches('\0').to_string()),
-            b'x' | b'g' => {}
-            b'5' => {
-                if let Some(rel) = safe_rel(&name) {
-                    std::fs::create_dir_all(dest.join(rel))?;
-                }
-            }
-            b'0' | 0 | b'7' => {
-                let rel = safe_rel(&name).ok_or_else(|| anyhow::anyhow!("odd path in the archive: {name}"))?;
-                let p = dest.join(rel);
-                if let Some(d) = p.parent() {
-                    std::fs::create_dir_all(d)?;
-                }
-                std::fs::write(&p, data)?;
-                std::fs::set_permissions(&p, std::fs::Permissions::from_mode(if mode & 0o111 != 0 { 0o755 } else { 0o644 }))?;
-            }
-            b'2' | b'1' => {
-                let rel = safe_rel(&name).ok_or_else(|| anyhow::anyhow!("odd path in the archive: {name}"))?;
-                let p = dest.join(&rel);
-                // the target, seen from the link's folder, has to stay inside dest
-                let base = rel.parent().map(Path::to_path_buf).unwrap_or_default();
-                let joined = if kind == b'1' { safe_rel(&link) } else { safe_rel(&base.join(&link).to_string_lossy()).or_else(|| resolve_up(&base, &link)) };
-                let Some(target_rel) = joined else { anyhow::bail!("a link in the archive points outside it: {name} -> {link}") };
-                if let Some(d) = p.parent() {
-                    std::fs::create_dir_all(d)?;
-                }
-                let _ = std::fs::remove_file(&p);
-                if kind == b'1' {
-                    std::fs::copy(dest.join(target_rel), &p)?;
-                } else {
-                    std::os::unix::fs::symlink(&link, &p)?;
-                }
-            }
-            _ => {}
-        }
-        at = start + size.div_ceil(512) * 512;
-    }
-    Ok(())
-}
-
-/// `base` + a relative link with `..` parts, when it stays inside (base "a/b" + "../c" → "a/c").
-fn resolve_up(base: &Path, link: &str) -> Option<PathBuf> {
-    let mut parts: Vec<String> = base.components().map(|c| c.as_os_str().to_string_lossy().to_string()).collect();
-    for c in Path::new(link).components() {
-        match c {
-            std::path::Component::ParentDir => { parts.pop()?; }
-            std::path::Component::Normal(x) => parts.push(x.to_string_lossy().to_string()),
-            std::path::Component::CurDir => {}
-            _ => return None,
-        }
-    }
-    (!parts.is_empty()).then(|| parts.iter().collect())
-}
-
-fn unzip_all(archive: &Path, dest: &Path) -> anyhow::Result<()> {
-    use std::os::unix::fs::PermissionsExt;
-    let mut a = zip::ZipArchive::new(std::fs::File::open(archive)?).map_err(|e| anyhow::anyhow!("not a zip file: {e}"))?;
-    a.extract(dest).map_err(|e| anyhow::anyhow!("unpacking failed: {e}"))?;
-    if let Some(s) = find_server(dest) {
-        std::fs::set_permissions(&s, std::fs::Permissions::from_mode(0o755))?;
-    }
-    Ok(())
-}
-
-// ---- install ------------------------------------------------------------------------------------
-
-/// Stream a download to `to` (through `<to>.part`), returning its SHA-256.
-async fn fetch_to(st: &impl Ctx, url: &str, to: &Path, max: u64, limit: Duration) -> anyhow::Result<String> {
-    use futures_util::StreamExt;
-    use sha2::Digest;
-    let part = to.with_extension("part");
-    if let Some(d) = to.parent() {
-        tokio::fs::create_dir_all(d).await?;
-    }
-    let r = st.http().get(url).timeout(limit).send().await.map_err(|e| anyhow::anyhow!("download failed: {e}"))?;
-    if !r.status().is_success() {
-        anyhow::bail!("download failed: {url} returned {}", r.status());
-    }
-    let mut hash = sha2::Sha256::new();
-    let res: anyhow::Result<()> = async {
-        let mut f = tokio::fs::File::create(&part).await?;
-        let mut body = r.bytes_stream();
-        let mut n: u64 = 0;
-        while let Some(chunk) = body.next().await {
-            let chunk = chunk.map_err(|e| anyhow::anyhow!("download failed: {e}"))?;
-            n += chunk.len() as u64;
-            if n > max {
-                anyhow::bail!("download failed: larger than {} MB", max >> 20);
-            }
-            hash.update(&chunk);
-            tokio::io::AsyncWriteExt::write_all(&mut f, &chunk).await?;
-        }
-        tokio::io::AsyncWriteExt::flush(&mut f).await?;
-        Ok(())
-    }.await;
-    if let Err(e) = res {
-        let _ = tokio::fs::remove_file(&part).await;
-        return Err(e);
-    }
-    tokio::fs::rename(&part, to).await?;
-    Ok(hex::encode(hash.finalize()))
-}
+// ---- the model ----------------------------------------------------------------------------------
 
 /// The SHA-256 Hugging Face lists for a model file (its LFS oid), when the API answers.
 async fn model_sha256(st: &impl Ctx, m: &Model) -> Option<String> {
@@ -308,110 +126,46 @@ pub fn is_gguf(path: &Path) -> bool {
     std::fs::File::open(path).and_then(|mut f| f.read_exact(&mut magic)).is_ok() && &magic == b"GGUF"
 }
 
-/// Download the chosen model when it is missing (checked against Hugging Face's SHA-256 when the API
-/// answers, and the GGUF header always); other models are removed to free the disk.
-async fn ensure_model(st: &impl Ctx) -> anyhow::Result<()> {
+/// Download the chosen model when it is missing (a model chosen after the plugin was installed), checked against
+/// Hugging Face's SHA-256 when the API answers and the GGUF header always, through the one installer; the other
+/// models in the plugin's folder are removed to free the disk.
+pub async fn ensure_model(st: &impl Ctx) -> anyhow::Result<()> {
     let m = model(st);
-    let path = model_path(st.data_dir(), &m);
+    let path = model_path(st, &m);
     if path.is_file() && is_gguf(&path) {
         return Ok(());
     }
+    let path = plugin_models(st).join(m.file);
     st.db().log("info", &format!("Translator: downloading the {} model ({:.1} GB)", m.id, m.gb));
     let want = model_sha256(st, &m).await;
-    let got = fetch_to(st, &model_url(&m), &path, 12 << 30, Duration::from_secs(4 * 3600)).await?;
-    if want.as_ref().is_some_and(|w| *w != got) || !is_gguf(&path) {
-        let _ = std::fs::remove_file(&path);
-        anyhow::bail!("the model download is damaged (checksum or file header does not match) – try again");
-    }
-    if let Ok(rd) = std::fs::read_dir(models_dir(st.data_dir())) {
+    let net = encore_plugins::install::Net { http: st.http().clone(), allow_http: false };
+    encore_plugins::install::data_file(&net, &model_url(&m), &path, want.as_deref(), Some("GGUF"), 12 << 30)
+        .await
+        .map_err(|e| anyhow::anyhow!("the model download failed: {e:#} – try again"))?;
+    if let Ok(rd) = std::fs::read_dir(plugin_models(st)) {
         for e in rd.flatten() {
             if e.file_name().to_string_lossy() != m.file {
                 let _ = std::fs::remove_file(e.path());
             }
         }
     }
-    Ok(())
-}
-
-/// Install llama.cpp build `tag` from `url` (unless it is the one installed), then the chosen model.
-pub async fn install(st: &impl Ctx, tag: &str, url: &str) -> anyhow::Result<String> {
-    if tag.is_empty() || tag.contains('/') || tag.starts_with('.') {
-        anyhow::bail!("odd version {tag:?}");
-    }
-    let data = st.data_dir().to_path_buf();
-    if installed(&data).map(|(_, t)| t) != Some(tag.to_string()) {
-        stop(st).await;
-        let root = server_root(&data);
-        std::fs::create_dir_all(&root)?;
-        let file = root.join(format!(".{tag}.{}", if url.ends_with(".zip") { "zip" } else { "tar.gz" }));
-        fetch_to(st, url, &file, 1 << 30, Duration::from_secs(1800)).await?;
-        let (root2, tag2, file2) = (root.clone(), tag.to_string(), file.clone());
-        let unpacked = tokio::task::spawn_blocking(move || -> anyhow::Result<PathBuf> {
-            let tmp = root2.join(format!(".{tag2}.new"));
-            let _ = std::fs::remove_dir_all(&tmp);
-            std::fs::create_dir_all(&tmp)?;
-            if file2.extension().is_some_and(|e| e == "zip") {
-                unzip_all(&file2, &tmp)?;
-            } else {
-                untar_gz_all(&std::fs::read(&file2)?, &tmp)?;
-            }
-            let dest = root2.join(&tag2);
-            let _ = std::fs::remove_dir_all(&dest);
-            std::fs::rename(&tmp, &dest)?;
-            find_server(&dest).ok_or_else(|| anyhow::anyhow!("the download has no llama-server program"))
-        }).await?;
-        let _ = std::fs::remove_file(&file);
-        let exe = unpacked?;
-        let o = tokio::time::timeout(Duration::from_secs(60), command(&exe).arg("--version").output()).await;
-        if !matches!(&o, Ok(Ok(o)) if o.status.success()) {
-            let why = match o {
-                Ok(Ok(o)) => String::from_utf8_lossy(&o.stderr).lines().last().unwrap_or("").to_string(),
-                Ok(Err(e)) => e.to_string(),
-                Err(_) => "no answer within 60 s".into(),
-            };
-            let _ = std::fs::remove_dir_all(root.join(tag));
-            anyhow::bail!("llama.cpp {tag} was downloaded but does not start here ({why})");
-        }
-        std::fs::write(root.join(".current.tmp"), format!("{tag}\n"))?;
-        std::fs::rename(root.join(".current.tmp"), root.join("current"))?;
-        if let Ok(rd) = std::fs::read_dir(&root) {
-            for e in rd.flatten() {
-                if e.path().is_dir() && e.file_name().to_string_lossy() != tag {
-                    let _ = std::fs::remove_dir_all(e.path());
-                }
-            }
-        }
-    }
-    ensure_model(st).await?;
-    st.db().log("info", &format!("Translator: llama.cpp {tag} with the {} model is ready", model(st).id));
     super::wake(st);
-    Ok(tag.to_string())
-}
-
-/// Remove the program and the models (never under a running translation).
-pub fn reset(st: &impl Ctx) -> anyhow::Result<()> {
-    let data = st.data_dir();
-    let mut g = st.library().translator.0.server.try_lock().map_err(|_| anyhow::anyhow!("The Translator is busy – try again in a minute"))?;
-    if let Some(mut r) = g.take() {
-        let _ = r.child.start_kill();
-    }
-    let d = dir(data);
-    if d.exists() {
-        std::fs::remove_dir_all(d)?;
-    }
     Ok(())
 }
 
 // ---- running ------------------------------------------------------------------------------------
 
+/// llama-server's start through the plugins' spawn builder: Encore's environment (without its settings) with the shared libraries
+/// next to the program, a session of its own, low priority (nice 10, idle disk) – it is background work.
 fn command(exe: &Path) -> tokio::process::Command {
-    let mut c = tokio::process::Command::new(exe);
+    let mut env: Vec<(String, String)> = encore_plugins::sandbox::program_env().into_iter().filter(|(k, _)| k != "LD_LIBRARY_PATH").collect();
     if let Some(d) = exe.parent() {
-        // the shared libraries sit next to the program
         let old = std::env::var("LD_LIBRARY_PATH").unwrap_or_default();
-        c.env("LD_LIBRARY_PATH", if old.is_empty() { d.display().to_string() } else { format!("{}:{old}", d.display()) });
+        env.push(("LD_LIBRARY_PATH".into(), if old.is_empty() { d.display().to_string() } else { format!("{}:{old}", d.display()) }));
     }
-    c.stdin(std::process::Stdio::null()).kill_on_drop(true);
+    let spawn = encore_plugins::sandbox::Spawn::new(&encore_plugins::sandbox::Sandbox::limits_only(), exe).env(env).low_priority(true);
+    let mut c = spawn.tokio_command();
+    c.stdin(std::process::Stdio::null());
     c
 }
 
@@ -445,19 +199,18 @@ pub async fn stop(st: &impl Ctx) {
 }
 
 async fn start(st: &impl Ctx) -> anyhow::Result<Running> {
-    let data = st.data_dir();
-    let (exe, _) = installed(data).ok_or_else(|| anyhow::anyhow!("The Translator is not installed (Settings → Downloads → Download tools)"))?;
+    let (exe, _) = installed(st).ok_or_else(|| anyhow::anyhow!("The Translator is not installed (Settings → Plugins → Translator)"))?;
     let m = model(st);
-    let model = model_path(data, &m);
+    let model = model_path(st, &m);
     if !model.is_file() {
-        anyhow::bail!("The {} model is not downloaded (Settings → Downloads → Download tools → Translator)", m.id);
+        anyhow::bail!("The {} model is not downloaded (Settings → Plugins → Translator)", m.id);
     }
     let port = free_port()?;
     let threads = std::thread::available_parallelism().map(|n| (n.get() / 2).max(1)).unwrap_or(2);
     let mut cmd = command(&exe);
     cmd.arg("-m").arg(&model).args(["--host", "127.0.0.1", "--port", &port.to_string(), "-c", "4096", "-t", &threads.to_string(), "-np", "1"])
         .stdout(std::process::Stdio::null()).stderr(std::process::Stdio::null());
-    // background work: below everything else on the box
+    // background work: below everything else on the box (nice 15, on top of the builder's low priority)
     unsafe {
         cmd.pre_exec(|| {
             libc::setpriority(libc::PRIO_PROCESS, 0, 15);
@@ -465,7 +218,7 @@ async fn start(st: &impl Ctx) -> anyhow::Result<Running> {
             Ok(())
         });
     }
-    let mut child = cmd.spawn().map_err(|e| anyhow::anyhow!("could not start llama-server: {e}"))?;
+    let mut child = encore_core::fsx::spawn(encore_core::fsx::Step::Start, &exe, || cmd.spawn()).map_err(|e| anyhow::anyhow!("could not start llama-server: {e}"))?;
     let until = Instant::now() + LOAD_LIMIT;
     loop {
         if let Ok(Some(s)) = child.try_wait() {
@@ -488,7 +241,7 @@ async fn start(st: &impl Ctx) -> anyhow::Result<Running> {
 /// Ask the model; starts the server when it is not running (or runs another model).
 pub async fn chat(st: &impl Ctx, messages: Value, thinking: bool) -> anyhow::Result<String> {
     let mut g = st.library().translator.0.server.lock().await;
-    let want = model_path(st.data_dir(), &model(st));
+    let want = model_path(st, &model(st));
     let alive = match g.as_mut() {
         Some(r) => r.model == want && matches!(r.child.try_wait(), Ok(None)),
         None => false,
@@ -543,31 +296,6 @@ fn ensure_reaper(st: &impl Ctx) {
 mod tests {
     use super::*;
 
-    fn releases() -> Value {
-        json!([
-            { "tag_name": "v0.7.0", "draft": false, "assets": [{ "name": "source.tar.gz", "browser_download_url": "https://x/src" }] },
-            { "tag_name": "b11669", "draft": false, "prerelease": true, "assets": [
-                { "name": "llama-b11669-bin-ubuntu-vulkan-x64.tar.gz", "browser_download_url": "https://x/vulkan" },
-                { "name": "llama-b11669-bin-ubuntu-cuda-12.8-x64.tar.gz", "browser_download_url": "https://x/cuda" },
-                { "name": "llama-b11669-bin-ubuntu-x64.tar.gz", "browser_download_url": "https://x/cpu-x64" },
-                { "name": "llama-b11669-bin-ubuntu-arm64.tar.gz", "browser_download_url": "https://x/cpu-arm64" },
-                { "name": "cudart-llama-b11669-bin-ubuntu-cuda-13.4-x64.tar.gz", "browser_download_url": "https://x/cudart" },
-            ] },
-            { "tag_name": "b11662", "assets": [{ "name": "llama-b11662-bin-ubuntu-x64.zip", "browser_download_url": "https://x/old" }] },
-        ])
-    }
-
-    #[test]
-    fn picks_the_cpu_build_for_the_machine() {
-        assert_eq!(pick_release(&releases(), "x86_64"), Some(("b11669".into(), "llama-b11669-bin-ubuntu-x64.tar.gz".into(), "https://x/cpu-x64".into())));
-        assert_eq!(pick_release(&releases(), "aarch64").unwrap().2, "https://x/cpu-arm64");
-        assert_eq!(pick_release(&releases(), "riscv64"), None);
-        let zip_only = json!([{ "tag_name": "b6000", "assets": [{ "name": "llama-b6000-bin-ubuntu-x64.zip", "browser_download_url": "https://x/z" }] }]);
-        assert_eq!(pick_release(&zip_only, "x86_64").unwrap().0, "b6000");
-        let draft = json!([{ "tag_name": "b7000", "draft": true, "assets": [{ "name": "llama-b7000-bin-ubuntu-x64.zip", "browser_download_url": "https://x/d" }] }]);
-        assert_eq!(pick_release(&draft, "x86_64"), None);
-    }
-
     #[test]
     fn build_numbers_compare() {
         assert!(newer_build("b11669", "b11662"));
@@ -584,7 +312,8 @@ mod tests {
         assert!(!MODELS[0].thinking && MODELS[1].thinking);
     }
 
-    /// A .tar.gz made by the system's tar, with a program, a library and a link to it.
+    /// A .tar.gz made by the system's tar, with a program, a library and a link to it, unpacked by the one
+    /// installer: the program is found, the link resolves inside.
     #[test]
     fn unpacks_files_and_links() {
         let root = std::env::temp_dir().join(format!("encore-llama-tar-{}-{}", std::process::id(), encore_core::ids::random_hex(4)));
@@ -600,21 +329,12 @@ mod tests {
             return;
         }
         let out = root.join("out");
-        untar_gz_all(&std::fs::read(root.join("a.tar.gz")).unwrap(), &out).unwrap();
+        encore_plugins::archive::unpack(&root.join("a.tar.gz"), encore_plugins::archive::Kind::TarGz, &out, Default::default()).unwrap();
         let exe = find_server(&out).unwrap();
         assert_eq!(exe, out.join("build/bin/llama-server"));
         assert_eq!(std::fs::metadata(&exe).unwrap().permissions().mode() & 0o777, 0o755);
         assert_eq!(std::fs::read(out.join("build/bin/libllama.so")).unwrap(), b"lib", "the link resolves inside");
         let _ = std::fs::remove_dir_all(&root);
-    }
-
-    #[test]
-    fn archive_paths_stay_inside() {
-        assert_eq!(safe_rel("./build/bin/x"), Some(PathBuf::from("build/bin/x")));
-        assert_eq!(safe_rel("../etc/passwd"), None);
-        assert_eq!(safe_rel("/etc/passwd"), None);
-        assert_eq!(resolve_up(Path::new("a/b"), "../c"), Some(PathBuf::from("a/c")));
-        assert_eq!(resolve_up(Path::new("a"), "../../c"), None);
     }
 
     #[test]

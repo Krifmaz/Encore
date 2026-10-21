@@ -2,7 +2,6 @@ package app.encore.android.features.settings
 
 import app.encore.android.core.EncoreJson
 import app.encore.android.features.settings.SettingsRules.Back
-import app.encore.android.features.settings.SettingsRules.ToolAction
 import app.encore.android.features.settings.SettingsRules.Wait
 import app.encore.android.ui.theme.Appearance
 import kotlinx.serialization.json.JsonNull
@@ -138,18 +137,6 @@ class SettingsRulesTest {
         // a real change: the whole value, as engineValue writes it
         assertEquals(obj("""{"taps":4096,"gone":1,"fast":true}"""), obj(SettingsRules.engineChange(settings, saved, mapOf("fast" to "true"))!!))
         assertEquals(obj("""{"gone":1}"""), obj(SettingsRules.engineChange(settings, saved, mapOf("taps" to "2048"))!!))
-    }
-
-    @Test
-    fun toolRows() {
-        assertEquals(ToolAction.Install("0.24.1"), SettingsRules.toolAction(obj("""{"id":"slskd","updatable":true,"latest":"0.24.1"}""")))
-        assertEquals(ToolAction.Update("2025.1"), SettingsRules.toolAction(obj("""{"id":"ytdlp","installed":"2024.9","updatable":true,"update_available":true,"latest":"2025.1"}""")))
-        assertEquals(ToolAction.Available("2025.1"), SettingsRules.toolAction(obj("""{"id":"ytdlp","installed":"2024.9","update_available":true,"latest":"2025.1"}""")))
-        assertEquals(ToolAction.UpToDate, SettingsRules.toolAction(obj("""{"id":"ytdlp","installed":"2025.1","latest":"2025.1","updatable":true}""")))
-        assertEquals(ToolAction.NotChecked, SettingsRules.toolAction(obj("""{"id":"ytdlp","installed":"2025.1","updatable":true}""")))
-        assertEquals("Back to the bundled yt-dlp", SettingsRules.toolReset(obj("""{"id":"ytdlp","name":"yt-dlp"}""")).third)
-        assertEquals(2, SettingsRules.toolList(obj("""{"tools":[{"id":"a"},{"id":"b"}]}""")).size)
-        assertEquals(1, SettingsRules.toolList(EncoreJson.parseToJsonElement("""[{"id":"a"}]""")).size)
     }
 
     @Test

@@ -1,0 +1,41 @@
+# Transmission: a download client of the torznab source (sources/dl). Encore's own code talks to it; nothing to download.
+# docs/contracts/plugin-manifest.md describes every key.
+
+[plugin]
+id = "transmission"
+name = "Transmission"
+version = "0.32.0"
+description = "Sends the torrents Prowlarr finds to your Transmission and imports the album when it is done."
+kind = "client"
+protocol = 1
+homepage = "https://transmissionbt.com"
+license = "MIT"
+commands = ["status", "test"]
+builtin = true
+
+[client]
+source = "torznab"
+protocol = "torrent"
+chosen_by = "torrent_client=transmission"
+
+[[settings]]
+key = "transmission_url"
+
+[[settings]]
+key = "transmission_user"
+
+[[settings]]
+key = "transmission_password"
+
+[[settings]]
+key = "transmission_label"
+
+[[settings]]
+key = "transmission_download_path"
+
+[permissions]
+network = true
+paths = [{ setting = "transmission_download_path", access = "write" }]
+
+[migration]
+in_use = [["torznab_enabled", "torrent_client=transmission", "transmission_url"]]

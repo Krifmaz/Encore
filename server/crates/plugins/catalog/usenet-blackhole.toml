@@ -1,0 +1,32 @@
+# Usenet watch folder: a download client of the torznab source (sources/dl). Encore's own code talks to it; nothing to download.
+# docs/contracts/plugin-manifest.md describes every key.
+
+[plugin]
+id = "usenet-blackhole"
+name = "Usenet watch folder"
+version = "0.32.0"
+description = "Drops the .nzb files Prowlarr finds into a folder any Usenet client watches, and imports the album from the folder its finished downloads land in."
+kind = "client"
+protocol = 1
+homepage = "https://github.com/Krifmaz/Encore"
+license = "MIT"
+commands = ["status", "test"]
+builtin = true
+
+[client]
+source = "torznab"
+protocol = "usenet"
+chosen_by = "nzb_client=blackhole"
+
+[[settings]]
+key = "nzb_blackhole_watch"
+
+[[settings]]
+key = "nzb_blackhole_completed"
+
+[permissions]
+network = false
+paths = [{ setting = "nzb_blackhole_watch", access = "write" }, { setting = "nzb_blackhole_completed", access = "write" }]
+
+[migration]
+in_use = [["torznab_enabled", "nzb_client=blackhole"]]

@@ -1,5 +1,5 @@
 //! Soulseek, run by Encore: slskd (github.com/slskd/slskd) as a headless child process. Encore
-//! downloads it from slskd's GitHub releases (Download tools → Install/Update), writes its slskd.yml
+//! downloads it from slskd's GitHub releases (the Soulseek plugin: Settings → Plugins → Install/Update), writes its slskd.yml
 //! from Encore's settings, starts it on 127.0.0.1 with an API key only Encore knows, restarts it when
 //! it exits or the settings change, and keeps it inside the VPN when the VPN is on (a local SOCKS5
 //! proxy for every outbound connection, the forwarded port relayed in). `sources::slskd` talks to it.
@@ -18,7 +18,7 @@ use encore_config::Config;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 use tokio::io::{AsyncBufReadExt, AsyncRead, BufReader};
-use tokio::process::{Child, Command};
+use tokio::process::Child;
 
 /// slskd's HTTP API, on loopback only.
 pub const WEB_PORT: u16 = 5031;
@@ -31,10 +31,9 @@ const LOG_MAX: u64 = 5 * 1024 * 1024;
 pub const CONNECT_TIMEOUT_MS: u64 = 30_000;
 /// The empty folder slskd.yml names as the web UI's content (beside the binary; wwwroot is deleted).
 const NO_WEB_UI: &str = "no-web-ui";
-const RELEASES: &str = "https://api.github.com/repos/slskd/slskd/releases/latest";
 
 pub const WAITING_FOR_VPN: &str = "Waiting for the VPN – Soulseek stays off until it is connected";
-pub const NOT_INSTALLED: &str = "Soulseek is not installed – install it under Settings → Downloads → Download tools (slskd – Soulseek engine)";
+pub const NOT_INSTALLED: &str = "Soulseek is not installed – install the Soulseek (slskd) plugin under Settings → Plugins";
 
 // ---- status ---------------------------------------------------------------------------------------
 
@@ -69,7 +68,6 @@ struct Inner {
     log_tail: Mutex<VecDeque<String>>,
     wake: tokio::sync::Notify,
     /// an install is running
-    installing: AtomicBool,
     /// set by Start now: the next check starts slskd at once instead of waiting out the backoff
     start_now: AtomicBool,
     /// the last downloads-folder probe, by what was probed
@@ -96,7 +94,6 @@ impl Default for Managed {
             status: Mutex::new(Status { state: "off", ..Default::default() }),
             log_tail: Default::default(),
             wake: Default::default(),
-            installing: Default::default(),
             start_now: Default::default(),
             probed: Default::default(),
             server_ip: Default::default(),
@@ -324,7 +321,7 @@ pub fn server_hint(line: &str) -> Option<Option<String>> {
         return Some(Some("Soulseek doesn't allow this username – choose another".into()));
     }
     if l.contains("invalidversion") {
-        return Some(Some("Soulseek refused this engine version – update it under Download tools".into()));
+        return Some(Some("Soulseek refused this engine version – update the Soulseek plugin under Settings → Plugins".into()));
     }
     if l.contains("kicked") || l.contains("same username") || l.contains("another client") || l.contains("elsewhere") {
         return Some(Some("signed out because the same username signed in from another Soulseek client – close it, or use a different username here".into()));
@@ -428,13 +425,27 @@ fn installed_in(data: &Path) -> Option<(String, PathBuf)> {
     bin.is_file().then_some((ver, bin))
 }
 
-pub fn installed_version(st: &impl Ctx) -> Option<String> {
-    installed_in(st.data_dir()).map(|(v, _)| v)
+/// The slskd the Soulseek plugin runs: (version, program) – the plugin's own install
+/// (`<config>/plugins/slskd/<version>/slskd`), else the `tools/slskd` an Encore before plugins installed (adopted
+/// in place). None while the plugin is not installed or switched off.
+pub fn program(st: &impl Ctx) -> Option<(String, PathBuf)> {
+    if !st.plugins().enabled("slskd") {
+        return None;
+    }
+    if let Some((v, bin)) = st.plugins().program("slskd") {
+        return Some((v, bin));
+    }
+    installed_in(st.data_dir())
 }
 
-/// Soulseek is switched on with a login (whether or not slskd is installed yet).
+pub fn installed_version(st: &impl Ctx) -> Option<String> {
+    program(st).map(|(v, _)| v)
+}
+
+/// Soulseek is switched on with a login (whether or not slskd is installed yet), and its plugin is installed
+/// and switched on.
 pub fn configured(st: &impl Ctx) -> bool {
-    st.cfg().bool("slskd_enabled") && !st.cfg().str("soulseek_username").trim().is_empty() && !st.cfg().str("soulseek_password").is_empty()
+    st.plugins().enabled("slskd") && st.cfg().bool("slskd_enabled") && !st.cfg().str("soulseek_username").trim().is_empty() && !st.cfg().str("soulseek_password").is_empty()
 }
 
 pub fn base_url() -> String {
@@ -607,198 +618,72 @@ pub fn api_key(st: &impl Ctx) -> String {
     st.cfg().str(API_KEY_SETTING)
 }
 
-// ---- releases and install -------------------------------------------------------------------------
+// ---- install (the plugin's: encore_plugins installs the release; the helpers below are the tests') -------
 
-/// The token slskd's release assets use for this machine.
-fn arch_token(arch: &str) -> Option<&'static str> {
-    match arch {
-        "x86_64" => Some("x64"),
-        "aarch64" => Some("arm64"),
-        _ => None,
-    }
-}
-
-/// From a GitHub release: (version, URL of the glibc Linux .zip for `arch`) – e.g.
-/// slskd-0.26.1-linux-x64.zip, never the musl or 32-bit arm builds.
-pub fn pick_asset(release: &Value, arch: &str) -> Option<(String, String)> {
-    let tok = arch_token(arch)?;
-    let ver = release["tag_name"].as_str()?.trim().trim_start_matches('v').to_string();
-    if ver.is_empty() {
-        return None;
-    }
-    let url = release["assets"].as_array()?.iter().find_map(|a| {
-        let name = a["name"].as_str()?.to_lowercase();
-        let parts: Vec<&str> = name.trim_end_matches(".zip").split(['-', '_', '.']).collect();
-        let ok = name.ends_with(".zip") && parts.contains(&"linux") && parts.contains(&tok) && !parts.contains(&"musl");
-        ok.then(|| a["browser_download_url"].as_str().map(String::from)).flatten()
-    })?;
-    Some((ver, url))
-}
-
-/// The newest slskd release for this machine: (version, asset URL).
-pub async fn latest(st: &impl Ctx) -> anyhow::Result<(String, String)> {
-    let (code, v) = encore_http::github::get(st, RELEASES).await?;
-    if code >= 400 {
-        anyhow::bail!("GitHub returned {code} for the latest slskd release: {}", v["message"].as_str().unwrap_or(""));
-    }
-    pick_asset(&v, std::env::consts::ARCH)
-        .ok_or_else(|| anyhow::anyhow!("The latest slskd release has no Linux build for {}", std::env::consts::ARCH))
-}
-
-/// Clears the installing flag when an install ends, however it ends.
-struct InstallGuard(Managed);
-impl Drop for InstallGuard {
-    fn drop(&mut self) {
-        self.0 .0.installing.store(false, Ordering::SeqCst);
-    }
-}
-
-/// Download `url`, unpack it as `ver`, check that it runs, switch to it, restart slskd on it and
-/// delete older versions.
-pub async fn install(st: &impl Ctx, ver: &str, url: &str) -> anyhow::Result<()> {
-    let ver = ver.trim().trim_start_matches('v').to_string();
-    if ver.is_empty() || !ver.chars().all(|c| c.is_ascii_alphanumeric() || ".-+_".contains(c)) {
-        anyhow::bail!("not a version: {ver:?}");
-    }
-    let managed = st.requests().slskd.clone();
-    if managed.0.installing.swap(true, Ordering::SeqCst) {
-        anyhow::bail!("slskd is already being installed");
-    }
-    let _guard = InstallGuard(managed);
-    let root = tools_dir(st.data_dir());
-    std::fs::create_dir_all(&root)?;
-    let zip = root.join(format!(".{ver}.zip"));
-    let res = async {
-        download(st, url, &zip).await?;
-        let (root2, zip2, ver2) = (root.clone(), zip.clone(), ver.clone());
-        let bin = tokio::task::spawn_blocking(move || unpack(&root2, &ver2, &zip2)).await??;
-        verify(&bin).await?;
-        let (root2, ver2) = (root.clone(), ver.clone());
-        tokio::task::spawn_blocking(move || switch_to(&root2, &ver2)).await??;
-        anyhow::Ok(())
-    }
-    .await;
-    let _ = std::fs::remove_file(&zip);
-    let _ = std::fs::remove_dir_all(root.join(format!(".{ver}.new")));
-    res?;
-    st.db().log("info", &format!("Soulseek engine slskd {ver} installed"));
-    st.requests().slskd.poke(); // the supervisor (re)starts it on the new binary
-    Ok(())
-}
-
-async fn download(st: &impl Ctx, url: &str, to: &Path) -> anyhow::Result<()> {
-    use futures_util::StreamExt;
-    let r = st.http().get(url).timeout(Duration::from_secs(900)).send().await.map_err(|e| anyhow::anyhow!("download failed: {e}"))?;
-    if !r.status().is_success() {
-        anyhow::bail!("download failed: {} returned {}", url, r.status());
-    }
-    let mut f = tokio::fs::File::create(to).await?;
-    let mut body = r.bytes_stream();
-    let mut n: u64 = 0;
-    while let Some(chunk) = body.next().await {
-        let chunk = chunk.map_err(|e| anyhow::anyhow!("download failed: {e}"))?;
-        n += chunk.len() as u64;
-        if n > 1024 * 1024 * 1024 {
-            anyhow::bail!("download failed: more than 1 GB");
-        }
-        tokio::io::AsyncWriteExt::write_all(&mut f, &chunk).await?;
-    }
-    tokio::io::AsyncWriteExt::flush(&mut f).await?;
-    Ok(())
-}
-
-/// Unzip into tools/slskd/.<ver>.new, drop the web UI (wwwroot: Encore runs it headless) and make
-/// the binary executable. Returns the binary's path.
+#[cfg(test)]
+/// Unzip into tools/slskd/.<ver>.new (names checked: nothing outside the folder), drop the web UI (wwwroot:
+/// Encore runs it headless) and make the binary executable. Returns the binary's path.
 fn unpack(root: &Path, ver: &str, zip: &Path) -> anyhow::Result<PathBuf> {
-    use std::os::unix::fs::PermissionsExt;
-    let dest = root.join(format!(".{ver}.new"));
-    let _ = std::fs::remove_dir_all(&dest);
-    std::fs::create_dir_all(&dest)?;
-    let mut a = zip::ZipArchive::new(std::fs::File::open(zip)?).map_err(|e| anyhow::anyhow!("not a zip file: {e}"))?;
-    for i in 0..a.len() {
-        let mut f = a.by_index(i)?;
-        let Some(rel) = f.enclosed_name() else { continue }; // "../" and absolute names are skipped
-        let out = dest.join(rel);
-        if f.is_dir() {
-            std::fs::create_dir_all(&out)?;
-            continue;
-        }
-        if let Some(p) = out.parent() {
-            std::fs::create_dir_all(p)?;
-        }
-        let mut w = std::fs::File::create(&out)?;
-        std::io::copy(&mut f, &mut w)?;
-        if let Some(mode) = f.unix_mode() {
-            let _ = std::fs::set_permissions(&out, std::fs::Permissions::from_mode(mode & 0o755));
-        }
+    use encore_plugins::{archive, install};
+    let dest = install::Versions::new(root).stage(ver)?;
+    archive::unpack(zip, archive::Kind::Zip, &dest, archive::Limits { bytes: 2 << 30, ..archive::Limits::default() }).map_err(|e| anyhow::anyhow!("unpacking slskd {ver} failed: {e:#}"))?;
+    let web = dest.join("wwwroot");
+    if web.is_dir() {
+        encore_core::fsx::remove_dir_all(&web, encore_core::fsx::Step::Plugin)?;
     }
-    let _ = std::fs::remove_dir_all(dest.join("wwwroot"));
-    std::fs::create_dir_all(dest.join(NO_WEB_UI))?; // web.content_path must name a folder beside the binary
+    encore_core::fsx::mkdir_all(dest.join(NO_WEB_UI), encore_core::fsx::Step::Plugin)?; // web.content_path must name a folder beside the binary
     let bin = dest.join("slskd");
-    if !bin.is_file() {
+    if !std::fs::symlink_metadata(&bin).is_ok_and(|m| m.is_file()) {
         anyhow::bail!("the download has no slskd program in it");
     }
-    std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755))?;
+    install::make_executable(&bin)?;
     Ok(bin)
 }
 
-fn child_env(cmd: &mut Command) {
-    // the container's own SLSKD_* variables (old compose files) would configure slskd behind Encore's back
-    for (k, _) in std::env::vars_os() {
-        if k.to_string_lossy().to_uppercase().starts_with("SLSKD_") || k == "APP_DIR" {
-            cmd.env_remove(k);
-        }
+/// slskd's environment: Encore's without Encore's settings (encore_plugins::sandbox::program_env), without the
+/// container's own SLSKD_* variables (old compose files would configure slskd behind Encore's back), with
+/// .NET's switches (no culture data in the image, the workstation garbage collector, plain logs).
+fn child_env() -> Vec<(String, String)> {
+    let mut env: Vec<(String, String)> = encore_plugins::sandbox::program_env()
+        .into_iter()
+        .filter(|(k, _)| !k.to_uppercase().starts_with("SLSKD_") && k != "APP_DIR")
+        .collect();
+    for (k, v) in [("DOTNET_SYSTEM_GLOBALIZATION_INVARIANT", "1"), ("DOTNET_gcServer", "0"), ("NO_COLOR", "1"), ("DOTNET_CLI_TELEMETRY_OPTOUT", "1")] {
+        env.retain(|(x, _)| x != k);
+        env.push((k.into(), v.into()));
     }
-    cmd.env("DOTNET_SYSTEM_GLOBALIZATION_INVARIANT", "1").env("DOTNET_gcServer", "0").env("NO_COLOR", "1").env("DOTNET_CLI_TELEMETRY_OPTOUT", "1");
+    env
 }
 
-/// The new binary must run `--version` on this machine.
+#[cfg(test)]
+/// The new binary must run `--version` on this machine (through the spawn builder: a cleared environment with
+/// .NET's switches, a session of its own, 60 seconds).
 async fn verify(bin: &Path) -> anyhow::Result<String> {
-    let mut cmd = Command::new(bin);
-    cmd.arg("--version").stdin(Stdio::null()).kill_on_drop(true);
-    child_env(&mut cmd);
-    let o = tokio::time::timeout(Duration::from_secs(60), cmd.output()).await
-        .map_err(|_| anyhow::anyhow!("slskd --version did not finish within 60 s"))?
-        .map_err(|e| anyhow::anyhow!("slskd doesn't run on this machine: {e}"))?;
-    let text = format!("{}{}", String::from_utf8_lossy(&o.stdout), String::from_utf8_lossy(&o.stderr));
-    if !o.status.success() {
-        anyhow::bail!("slskd --version failed ({}): {}", o.status, text.trim().chars().take(300).collect::<String>());
+    use encore_plugins::sandbox::{Sandbox, Spawn};
+    let home = bin.parent().map(|d| d.join(".home")).unwrap_or_else(|| PathBuf::from("/tmp"));
+    let env: Vec<(String, String)> = vec![
+        ("PATH".into(), "/usr/local/bin:/usr/bin:/bin".into()),
+        ("HOME".into(), home.display().to_string()),
+        ("DOTNET_SYSTEM_GLOBALIZATION_INVARIANT".into(), "1".into()),
+        ("DOTNET_gcServer".into(), "0".into()),
+        ("DOTNET_CLI_TELEMETRY_OPTOUT".into(), "1".into()),
+        ("NO_COLOR".into(), "1".into()),
+    ];
+    let spawn = Spawn::new(&Sandbox::limits_only(), bin).arg("--version").env(env).cwd(bin.parent().unwrap_or(Path::new("/")));
+    let o = tokio::task::spawn_blocking(move || encore_plugins::install::output(&spawn, Duration::from_secs(60))).await?
+        .map_err(|e| anyhow::anyhow!("slskd doesn't run on this machine: {e:#}"))?;
+    let text = format!("{}{}", o.stdout, o.stderr);
+    if !o.ok {
+        anyhow::bail!("slskd --version failed (exit status {}): {}", o.code.map(|c| c.to_string()).unwrap_or_else(|| "none".into()), text.trim().chars().take(300).collect::<String>());
     }
     Ok(encore_core::version::extract_version(&text).unwrap_or_else(|| text.trim().to_string()))
 }
 
+#[cfg(test)]
 /// Move .<ver>.new into place, point `current` at it and delete every other version.
 fn switch_to(root: &Path, ver: &str) -> anyhow::Result<()> {
-    let dest = root.join(ver);
-    let _ = std::fs::remove_dir_all(&dest);
-    std::fs::rename(root.join(format!(".{ver}.new")), &dest)?;
-    let tmp = root.join(".current.tmp");
-    std::fs::write(&tmp, format!("{ver}\n"))?;
-    std::fs::rename(&tmp, root.join("current"))?;
-    for e in std::fs::read_dir(root)?.flatten() {
-        let name = e.file_name().to_string_lossy().to_string();
-        if e.path().is_dir() && name != ver && !name.starts_with('.') {
-            let _ = std::fs::remove_dir_all(e.path());
-        }
-    }
+    encore_plugins::install::Versions::new(root).commit(ver)?;
     Ok(())
-}
-
-/// Stop slskd and delete it (the Soulseek data under config/slskd – its database and settings – stays).
-pub fn reset(st: &impl Ctx) {
-    let managed = &st.requests().slskd;
-    if let Some(pid) = managed.0.status.lock().unwrap().pid {
-        signal(pid, "KILL");
-    }
-    let _ = std::fs::remove_dir_all(tools_dir(st.data_dir()));
-    managed.set_status(|s| {
-        s.state = "not_installed";
-        s.version = None;
-        s.pid = None;
-        s.error = None;
-    });
-    st.db().log("info", "Soulseek engine slskd removed");
-    managed.poke();
 }
 
 // ---- slskd.yml ------------------------------------------------------------------------------------
@@ -1166,11 +1051,12 @@ impl Runner {
         let _ = std::fs::set_permissions(&yml, std::fs::Permissions::from_mode(0o600)); // the Soulseek password is in it
         let log = Arc::new(RunLog { path: plan.app_dir.join("encore-run.log"), tail: Mutex::new(VecDeque::new()) });
         log.line(&format!("---- Encore starts slskd {} ----", plan.version));
-        let mut cmd = Command::new(&plan.bin);
-        cmd.arg("--app-dir").arg(&plan.app_dir).current_dir(&plan.app_dir)
-            .stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped()).kill_on_drop(true);
-        child_env(&mut cmd);
-        let mut child = cmd.spawn()?;
+        // through the plugins' spawn builder: a session of its own, no new privileges, no other open files
+        let spawn = encore_plugins::sandbox::Spawn::new(&encore_plugins::sandbox::Sandbox::limits_only(), &plan.bin)
+            .arg("--app-dir").arg(&plan.app_dir).env(child_env()).cwd(&plan.app_dir);
+        let mut cmd = spawn.tokio_command();
+        cmd.stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped());
+        let mut child = encore_core::fsx::spawn(encore_core::fsx::Step::Start, &plan.bin, || cmd.spawn())?;
         if let Some(o) = child.stdout.take() {
             pipe(o, log.clone(), self.managed.clone());
         }
@@ -1209,7 +1095,7 @@ async fn want(st: &impl Ctx) -> Want {
         st.vpn().relay(None);
         return Want::Off;
     }
-    let Some((version, bin)) = installed_in(st.data_dir()) else {
+    let Some((version, bin)) = program(st) else {
         st.vpn().relay(None);
         return Want::NotInstalled;
     };
@@ -1304,25 +1190,14 @@ pub async fn stop(st: &impl Ctx) {
     }
 }
 
-/// Keeps slskd in step with the settings: installs nothing by itself unless tools_auto_slskd is on.
+/// Keeps slskd in step with the settings and the Soulseek plugin (installed and switched on). Installs nothing
+/// itself: the plugin's Install and Update (and the "Update plugins" task) do.
 pub async fn supervisor(st: impl Ctx) {
     kill_stale(&app_dir(st.data_dir()));
     let managed = st.requests().slskd.clone();
     let mut run = Runner::new(managed.clone());
-    let mut auto_tried: Option<Instant> = None;
     loop {
         let w = want(&st).await;
-        if matches!(w, Want::NotInstalled) && st.cfg().bool("tools_auto_slskd") && !managed.0.installing.load(Ordering::SeqCst)
-            && auto_tried.map(|t| t.elapsed() > Duration::from_secs(3600)).unwrap_or(true) {
-            auto_tried = Some(Instant::now());
-            let st2 = st.clone();
-            tokio::spawn(async move {
-                let res = async { let (v, u) = latest(&st2).await?; install(&st2, &v, &u).await }.await;
-                if let Err(e) = res {
-                    tracing::warn!("soulseek: automatic slskd install failed: {e}");
-                }
-            });
-        }
         run.apply(w).await;
         if managed.state() == "starting" && run.child.is_some() && answers(&st).await {
             managed.set_status(|s| {
@@ -1368,28 +1243,6 @@ mod tests {
     use std::os::unix::fs::PermissionsExt;
 
     use encore_core::tmp::dir as tmp;
-
-    fn release() -> Value {
-        let names = ["slskd-0.26.1-linux-arm.zip", "slskd-0.26.1-linux-musl-x64.zip", "slskd-0.26.1-linux-musl-arm64.zip", "slskd-0.26.1-osx-arm64.zip",
-                     "slskd-0.26.1-win-x64.zip", "slskd-0.26.1-linux-arm64.zip", "slskd-0.26.1-linux-x64.zip"];
-        json!({ "tag_name": "0.26.1", "assets": names.iter().map(|n| json!({ "name": n, "browser_download_url": format!("https://github.com/slskd/slskd/releases/download/0.26.1/{n}") })).collect::<Vec<_>>() })
-    }
-
-    #[test]
-    fn picks_the_glibc_linux_zip_for_the_arch() {
-        let (v, u) = pick_asset(&release(), "x86_64").unwrap();
-        assert_eq!(v, "0.26.1");
-        assert!(u.ends_with("/slskd-0.26.1-linux-x64.zip"), "{u}");
-        let (_, u) = pick_asset(&release(), "aarch64").unwrap();
-        assert!(u.ends_with("/slskd-0.26.1-linux-arm64.zip"), "{u}");
-        assert_eq!(pick_asset(&release(), "riscv64"), None);
-        let mut only_musl = release();
-        only_musl["assets"] = json!([{ "name": "slskd-0.26.1-linux-musl-x64.zip", "browser_download_url": "x" }]);
-        assert_eq!(pick_asset(&only_musl, "x86_64"), None, "never the musl build");
-        let mut v = release();
-        v["tag_name"] = json!("v0.27.0");
-        assert_eq!(pick_asset(&v, "x86_64").unwrap().0, "0.27.0");
-    }
 
     fn yml(proxy: bool, shares: bool) -> Yml {
         Yml {
@@ -1449,19 +1302,28 @@ mod tests {
     #[tokio::test]
     async fn unpacks_verifies_and_switches_versions() {
         let root = tmp("install");
-        let zip_path = root.join("a.zip");
-        {
-            let mut z = zip::ZipWriter::new(std::fs::File::create(&zip_path).unwrap());
+        let make_zip = |path: &Path, evil: bool| {
+            let mut z = zip::ZipWriter::new(std::fs::File::create(path).unwrap());
             let o = zip::write::SimpleFileOptions::default().unix_permissions(0o644);
             z.start_file("slskd", o).unwrap();
             z.write_all(b"#!/bin/sh\necho '0.26.1+abc'\n").unwrap();
             z.add_directory("wwwroot/", o).unwrap();
             z.start_file("wwwroot/index.html", o).unwrap();
             z.write_all(b"<html>").unwrap();
-            z.start_file("../evil", o).unwrap();
-            z.write_all(b"x").unwrap();
+            if evil {
+                z.start_file("../evil", o).unwrap();
+                z.write_all(b"x").unwrap();
+            }
             z.finish().unwrap();
-        }
+        };
+        // a release whose zip names a file outside its folder is refused whole, and nothing lands outside
+        let evil_zip = root.join("evil.zip");
+        make_zip(&evil_zip, true);
+        let e = unpack(&root, "0.26.1", &evil_zip).unwrap_err().to_string();
+        assert!(e.contains("leaves its folder"), "{e}");
+        assert!(!root.join("evil").exists() && !root.parent().unwrap().join("evil").exists());
+        let zip_path = root.join("a.zip");
+        make_zip(&zip_path, false);
         std::fs::create_dir_all(root.join("0.25.0")).unwrap();
         let bin = unpack(&root, "0.26.1", &zip_path).unwrap();
         assert!(!root.join(".0.26.1.new").join("wwwroot").exists(), "headless: no web UI files");

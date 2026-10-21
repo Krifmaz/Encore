@@ -1,0 +1,31 @@
+# Navidrome: a connection to another music server (crates/sync connections, the media-server refresh). Encore's own
+# code; nothing to download. Its fields stay on Settings → Integrations → Media servers.
+# docs/contracts/plugin-manifest.md describes every key.
+
+[plugin]
+id = "navidrome"
+name = "Navidrome"
+version = "0.32.0"
+description = "Users link their Navidrome (or any Subsonic server) accounts to keep likes and playlists in step, and Navidrome rescans when new music arrives."
+kind = "connection"
+protocol = 1
+homepage = "https://www.navidrome.org"
+license = "MIT"
+commands = ["status", "test"]
+builtin = true
+settings_on = "integrations"
+
+[[settings]]
+key = "navidrome_url"
+
+[[settings]]
+key = "navidrome_user"
+
+[[settings]]
+key = "navidrome_password"
+
+[permissions]
+network = true
+
+[migration]
+in_use = [["navidrome_url"]]

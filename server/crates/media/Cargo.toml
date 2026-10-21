@@ -10,6 +10,7 @@ encore-core = { workspace = true }
 encore-db = { workspace = true }
 encore-http = { workspace = true }
 encore-jobs = { workspace = true }
+encore-plugins = { workspace = true }
 anyhow = { workspace = true }
 image = { workspace = true }
 libc = { workspace = true }

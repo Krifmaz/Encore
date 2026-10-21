@@ -18,6 +18,8 @@ pub struct TestServer {
     pub st: AppState,
     /// the config folder (database, caches); the web app's folder is `static` inside it
     pub dir: PathBuf,
+    /// the builtin plugins' adapters reach the state through this (crate::builtins::register)
+    _plugins: std::sync::Arc<AppState>,
 }
 
 static SEQ: AtomicUsize = AtomicUsize::new(0);
@@ -35,7 +37,24 @@ impl TestServer {
     pub fn in_dir(dir: &Path) -> TestServer {
         std::fs::create_dir_all(dir).unwrap();
         let st = AppState::open_with(dir, dir.join("static"), |db| encore_config::Config::load_with(db, |_| None)).unwrap();
-        TestServer { st, dir: dir.to_path_buf() }
+        let plugins = crate::builtins::register(&st);
+        TestServer { st, dir: dir.to_path_buf(), _plugins: plugins }
+    }
+
+    /// The same with these catalog plugins installed and switched on, as an upgraded server has them adopted
+    /// (rows only: nothing is downloaded; a program the test needs is its own stand-in).
+    pub fn with_plugins(self, ids: &[&str]) -> TestServer {
+        for id in ids {
+            self.st.plugins.adopt(id, None).unwrap();
+        }
+        self
+    }
+
+    /// The same with every download source's plugin and every download client's installed and switched on
+    /// ([`SOURCE_PLUGINS`]): the sources then answer to their settings alone, as before plugins.
+    pub fn with_sources(self) -> TestServer {
+        with_sources(&self.st);
+        self
     }
 
     /// The same with settings changed first (`{"library_path": …, "musicbrainz_url": …}`).
@@ -47,6 +66,8 @@ impl TestServer {
     /// The same with the services it calls at other addresses (stand-ins for Tidal, Qobuz, YouTube Music).
     pub fn with_urls(mut self, urls: encore_http::Urls) -> TestServer {
         self.st.urls = std::sync::Arc::new(urls);
+        // the adapters run on the state as it is now
+        self._plugins = crate::builtins::register(&self.st);
         self
     }
 
@@ -116,6 +137,17 @@ pub async fn send(app: &Router, method: &str, uri: &str, cookie: &str, body: Opt
 pub async fn call(app: &Router, method: &str, uri: &str, cookie: &str, body: Option<Value>) -> (StatusCode, Value, String) {
     let r = send(app, method, uri, cookie, body, &[]).await;
     (r.status, r.json(), r.h("set-cookie"))
+}
+
+/// The catalog plugins of the download sources and their download clients.
+pub const SOURCE_PLUGINS: [&str; 12] =
+    ["ytdlp", "streamrip", "slskd", "torznab", "qbittorrent", "transmission", "deluge", "rtorrent", "torrent-blackhole", "sabnzbd", "nzbget", "usenet-blackhole"];
+
+/// Install and switch on every source's and client's plugin on `st` ([`SOURCE_PLUGINS`]; rows only).
+pub fn with_sources(st: &AppState) {
+    for id in SOURCE_PLUGINS {
+        st.plugins.adopt(id, None).unwrap();
+    }
 }
 
 /// The state of a server on `dir`: `TestServer::in_dir(dir).st`.

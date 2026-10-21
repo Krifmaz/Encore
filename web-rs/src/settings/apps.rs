@@ -1,8 +1,9 @@
 //! Port of web/js/pages/settings.js (the Apps & sources extras, on Downloads, Integrations and Server processing
-//! since R2) – see docs/archive/ui-rewrite/CONTRACT.md
-//! What the Server cards show besides their fields, drawn by this web app and not by the schema: the Download
-//! tools card, Tidal sign-in and the streamrip config reset (streamrip), the VPN sub-block and the engine's
-//! status (Soulseek), the pre-render cache and the engine's own settings (Cadenza), and How requests are fulfilled.
+//! since R2, and on the Plugins page since 0.32) – see docs/archive/ui-rewrite/CONTRACT.md
+//! What the Server cards show besides their fields, drawn by this web app and not by the schema: Tidal sign-in
+//! and the streamrip config reset (streamrip), the VPN sub-block and the engine's status (Soulseek), the
+//! pre-render cache and the engine's own settings (Cadenza), and How requests are fulfilled. The Download tools
+//! card of 0.31 became the Plugins page (plugins.rs): each tool is a plugin with its own Update and auto-update.
 
 use super::diagnostics;
 use super::fields::Group;
@@ -388,10 +389,11 @@ pub fn session_text(s: &Value) -> String {
 
 /// The sentence away from the card (the Soulseek page, Diagnostics): "fix them below" points at the card's
 /// fields, which aren't there – the line links to the card instead. (The server's Diagnostics line already
-/// says "fix them in Settings → Downloads → Soulseek" – "Settings → Soulseek" before R2 – for the apps
-/// without a link; the link says it here.)
+/// says where the card is – "Settings → Plugins → Soulseek" since 0.32, "Settings → Downloads → Soulseek"
+/// before, "Settings → Soulseek" before R2 – for the apps without a link; the link says it here.)
 pub fn session_text_elsewhere(text: &str) -> String {
-    text.replace(" – fix them below", "").replace(" – fix them in Settings → Downloads → Soulseek", "").replace(" – fix them in Settings → Soulseek", "")
+    text.replace(" – fix them below", "").replace(" – fix them in Settings → Plugins → Soulseek", "")
+        .replace(" – fix them in Settings → Downloads → Soulseek", "").replace(" – fix them in Settings → Soulseek", "")
 }
 
 /// What goes under the sentence, in the browser's own clock: "Next attempt in 3 m 12 s · 12 searches waiting for
@@ -580,204 +582,6 @@ pub fn bind_soulseek(hub: &Rc<Hub>, card: &Element) {
     });
 }
 
-// Settings → Downloads → Download tools: yt-dlp, streamrip, Cadenza (server processing) and slskd
-// (Soulseek engine) update in place – kept in the config folder, so no new Encore image is needed.
-const TOOL_SPIN: &str = r##"<span class="spinner" style="width:10px;height:10px;border-width:2px"></span>"##;
-fn tool_list(r: &Value) -> Vec<Value> { if r.is_array() { r.items() } else { r.a("tools") } }
-fn tool_updatable(t: &Value) -> bool { t.truthy("updatable") }
-/// `a || b`: the first truthy of the two, as text.
-fn tool_or(t: &Value, a: &str, b: &str) -> String { if t.truthy(a) { t.s(a) } else if t.truthy(b) { t.s(b) } else { String::new() } }
-
-/// The reset link of a row (link, confirm question, toast): Cadenza goes back to the engine built into Encore,
-/// slskd is removed, the rest go back to the bundled copy.
-fn tool_reset(t: &Value) -> (String, String, String) {
-    match t.s("id").as_str() {
-        "cadenza" => ("Use the built-in engine".into(), "Go back to the engine built into Encore? The downloaded Cadenza is removed.".into(), "Back to the built-in engine".into()),
-        "slskd" => ("Remove slskd".into(), "Remove slskd? Soulseek stays off until you install it again.".into(), "slskd removed".into()),
-        "translator" => ("Remove the Translator".into(), "Remove the Translator and its model? Translations made so far are kept; new titles only get official translations until you install it again.".into(), "Translator removed".into()),
-        _ => {
-            let name = tool_or(t, "name", "id");
-            ("Use the bundled version".into(), format!("Go back to the {name} version that came with Encore? The updated copy is removed."), format!("Back to the bundled {name}"))
-        }
-    }
-}
-/// slskd and the Translator are installed by Encore, not bundled: before that their button says Install.
-fn tool_install(t: &Value) -> bool { (t.s("id") == "slskd" || t.s("id") == "translator") && !t.truthy("installed") }
-
-fn tool_row(t: &Value, busy: Option<&str>) -> String {
-    let id = t.s("id");
-    let latest = if t.truthy("latest") { t.s("latest") } else { String::new() };
-    let action = if busy == Some(id.as_str()) {
-        format!(r##"<button class="btn sm" type="button" disabled>{TOOL_SPIN} {}</button>"##, if tool_install(t) { "Installing…" } else { "Updating…" })
-    } else if tool_install(t) && tool_updatable(t) {
-        format!(r##"<button class="btn sm primary" type="button" data-tool-update="{}" {}>{}Install{}</button>"##,
-            esc(&id), if busy.is_some() { "disabled" } else { "" }, icon("download"), if latest.is_empty() { String::new() } else { format!(" {}", esc(&latest)) })
-    } else if t.truthy("update_available") && tool_updatable(t) {
-        format!(r##"<button class="btn sm primary" type="button" data-tool-update="{}" {}>{}Update to {}</button>"##,
-            esc(&id), if busy.is_some() { "disabled" } else { "" }, icon("download"), esc(&latest))
-    } else if t.truthy("update_available") {
-        format!(r##"<span class="badge warn">{} available</span>"##, esc(&latest))
-    } else if t.truthy("latest") {
-        format!(r##"<span class="badge ok">{} Up to date</span>"##, icon("check"))
-    } else if tool_updatable(t) {
-        r##"<span class="small faint">Not checked yet</span>"##.to_string()
-    } else { String::new() };
-    let updated = t.s("source") == "updated" && id != "slskd" && id != "translator";
-    format!(r##"<div class="list-item" style="align-items:flex-start;flex-wrap:wrap;gap:12px" data-tool="{eid}">
-      <div class="grow" style="min-width:200px"><div style="font-weight:650">{name} <span class="small muted mono">{ver}</span>{upd}</div>
-        {note}
-        {err}
-        {reset}</div>
-      <div class="row" style="gap:8px;align-items:center">{action}</div></div>"##,
-        eid = esc(&id),
-        name = esc(&tool_or(t, "name", "id")),
-        ver = if t.truthy("installed") { esc(&t.s("installed")) } else { "not installed".to_string() },
-        upd = if updated { r##" <span class="small muted">(updated)</span>"## } else { "" },
-        note = if t.truthy("note") { format!(r##"<div class="small muted">{}</div>"##, esc(&t.s("note"))) } else { String::new() },
-        err = if t.truthy("error") { format!(r##"<div class="small" style="color:var(--err)">{}</div>"##, esc(&t.s("error"))) } else { String::new() },
-        reset = if t.truthy("resettable") && tool_updatable(t) {
-            format!(r##"<a href="#" class="small muted" data-tool-reset="{}" {}>{}</a>"##, esc(&id), if busy.is_some() { "hidden" } else { "" }, esc(&tool_reset(t).0))
-        } else { String::new() })
-}
-
-/// What the Download tools card shows: the tool list, the tool being updated, and whether a check runs.
-struct Tools {
-    list: Element,
-    check: Element,
-    tools: RefCell<Vec<Value>>,
-    busy: RefCell<Option<String>>,
-    checking: Cell<bool>,
-}
-
-impl Tools {
-    fn paint(&self) {
-        let busy = self.busy.borrow().clone();
-        let rows: String = self.tools.borrow().iter().map(|t| tool_row(t, busy.as_deref())).collect();
-        dom::set_html(&self.list, &rows);
-        dom::set_disabled(&self.check, self.checking.get() || busy.is_some());
-        dom::set_html(&self.check, &if self.checking.get() { format!("{TOOL_SPIN} Checking…") } else { format!("{}Check for updates", icon("refresh")) });
-    }
-    async fn reload(&self) { if let Ok(r) = api::get("/system/tools").await { *self.tools.borrow_mut() = tool_list(&r); } }
-    fn name_of(&self, id: &str) -> String {
-        self.tools.borrow().iter().find(|t| t.s("id") == id).map(|t| t.s("name")).filter(|n| !n.is_empty()).unwrap_or_else(|| id.to_string())
-    }
-    fn tool(&self, id: &str) -> Value {
-        self.tools.borrow().iter().find(|t| t.s("id") == id).cloned().unwrap_or_else(|| json!({ "id": id }))
-    }
-}
-
-pub async fn render_tools(host: Element, hub: Rc<Hub>) {
-    let tools = match api::get("/system/tools").await { Ok(r) => tool_list(&r), Err(_) => { dom::set_html(&host, ""); return; } };
-    let values = hub.values.borrow().clone();
-    let meta = values.o("_meta");
-    let toggle = |key: &str, label: &str| -> String {
-        if !values.has(key) { return String::new(); }
-        let locked = meta.o(key).s("source") == "env";
-        format!(r##"<label class="switch"><input type="checkbox" data-tool-auto="{key}" {} {}><i></i>{}</label>"##,
-            if values.truthy(key) { "checked" } else { "" }, if locked { "disabled" } else { "" }, esc(label))
-    };
-    let toggles = toggle("tools_auto_ytdlp", "Update yt-dlp automatically (recommended – sites change often)")
-        + &toggle("tools_auto_streamrip", "Update streamrip automatically when a new release is out")
-        + &toggle("tools_auto_cadenza", "Update Cadenza automatically when a new release is out")
-        + &toggle("tools_auto_slskd", "Update slskd automatically when a new release is out")
-        + &toggle("tools_auto_translator", "Update the Translator (llama.cpp) automatically")
-        + &toggle("translate_background", "Translate the whole library in the background (titles on screen are always translated first)");
-    // the Translator's model: changing it downloads the other one on the next Install / Update
-    let model_pick = if values.has("translator_model") {
-        let opts: String = [("small", "Small – Qwen3 4B Instruct (about 2.5 GB)"), ("best", "Best – Qwen3 8B (about 5 GB)")].iter()
-            .map(|(v, l)| format!(r##"<option value="{v}" {}>{l}</option>"##, if values.s("translator_model") == *v { "selected" } else { "" })).collect();
-        format!(r##"<label class="stack" style="gap:4px;max-width:420px"><span class="small muted">Translator model</span>
-    <select class="input" id="tools-model" {}>{opts}</select>
-    <span class="small muted">Small runs on most servers (about 4 GB of memory while it works); Best translates better and needs about 7 GB. It only runs while there is something to translate.</span></label>"##,
-            if meta.o("translator_model").s("source") == "env" { "disabled" } else { "" })
-    } else { String::new() };
-    dom::set_html(&host, &format!(r##"<div class="card" id="tools-card" style="margin-bottom:12px">
-    <div class="row between" style="margin-bottom:8px;gap:10px"><h2>Download tools</h2><button class="btn sm" type="button" id="tools-check">{refresh}Check for updates</button></div>
-    <p class="muted small" style="margin:0 0 14px">yt-dlp, streamrip, Cadenza, slskd and the Translator update in place – no new Encore image needed. Updates are kept in the config folder.</p>
-    <div class="list" id="tools-list"></div>
-    <div class="stack mt" style="gap:8px">{model_pick}{toggles}<div class="small muted">Every tool is checked daily; updates install by themselves only where the switch is on. Change the schedule under <a href="#/settings?s=tasks">Scheduled tasks</a>.</div></div>
-  </div>"##, refresh = icon("refresh")));
-    let (Some(list), Some(check)) = (dom::qs_in(&host, "#tools-list"), dom::qs_in(&host, "#tools-check")) else { return };
-    let st = Rc::new(Tools { list: list.clone(), check: check.clone(), tools: RefCell::new(tools), busy: RefCell::new(None), checking: Cell::new(false) });
-    st.paint();
-    {
-        let st = st.clone();
-        dom::on(&check, "click", move |_| {
-            let st = st.clone();
-            st.checking.set(true); st.paint();
-            dom::spawn(async move {
-                match api::post_empty("/system/tools/check").await {
-                    Ok(r) => *st.tools.borrow_mut() = tool_list(&r),
-                    Err(e) => toast(&e.message, "err"),
-                }
-                st.checking.set(false); st.paint();
-            });
-        });
-    }
-    {
-        let st = st.clone();
-        dom::on(&list, "click", move |e| {
-            let idle = st.busy.borrow().is_none();
-            if let Some(up) = dom::closest(e, "[data-tool-update]") {
-                if !idle { return; }
-                let id = dom::data(&up, "toolUpdate");
-                let (name, install) = (st.name_of(&id), tool_install(&st.tool(&id)));
-                *st.busy.borrow_mut() = Some(id.clone()); st.paint();
-                let st = st.clone();
-                dom::spawn(async move {
-                    match api::post_empty(&format!("/system/tools/{id}/update")).await {
-                        Ok(r) => toast(&format!("{name} {} {}", if install { "installed" } else { "updated to" }, tool_or(&r, "installed", "latest")), "ok"),
-                        Err(err) => toast(&err.message, "err"),
-                    }
-                    *st.busy.borrow_mut() = None;
-                    st.reload().await; st.paint();
-                });
-            } else if let Some(reset) = dom::closest(e, "[data-tool-reset]") {
-                if !idle { return; }
-                dom::prevent(e);
-                let id = dom::data(&reset, "toolReset");
-                let (_, ask, done) = tool_reset(&st.tool(&id));
-                if !dom::confirm(&ask) { return; }
-                let st = st.clone();
-                dom::spawn(async move {
-                    match api::post_empty(&format!("/system/tools/{id}/reset")).await {
-                        Ok(_) => toast(&done, "ok"),
-                        Err(err) => toast(&err.message, "err"),
-                    }
-                    st.reload().await; st.paint();
-                });
-            }
-        });
-    }
-    if let Some(sel) = dom::qs_in(&host, "#tools-model") {
-        let (sel2, hub, st) = (sel.clone(), hub.clone(), st.clone());
-        dom::on(&sel, "change", move |_| {
-            let (v, hub, st) = (dom::value(&sel2), hub.clone(), st.clone());
-            dom::spawn(async move {
-                match api::put("/admin/settings", json!({ "translator_model": v })).await {
-                    Ok(v) => { *hub.values.borrow_mut() = v; toast("Saved – Install or Update the Translator to download this model", "ok"); st.reload().await; st.paint(); }
-                    Err(err) => toast(&err.message, "err"),
-                }
-            });
-        });
-    }
-    for b in dom::qsa_in(&host, "[data-tool-auto]") {
-        let (b2, hub) = (b.clone(), hub.clone());
-        dom::on(&b, "change", move |_| {
-            let (b, hub) = (b2.clone(), hub.clone());
-            let (key, on) = (dom::data(&b, "toolAuto"), dom::checked(&b));
-            dom::spawn(async move {
-                let mut body = Map::new();
-                body.insert(key, Value::Bool(on));
-                match api::put("/admin/settings", Value::Object(body)).await {
-                    Ok(v) => { *hub.values.borrow_mut() = v; toast("Saved", "ok"); }
-                    Err(err) => { dom::set_checked(&b, !dom::checked(&b)); toast(&err.message, "err"); }
-                }
-            });
-        });
-    }
-}
-
 // Tidal downloads need your Tidal account, not an API key: Encore signs in once through a link
 // (device code, one step per streamrip "lane"). This block shows the link and waits for the approval;
 // when Tidal blocks the server's address the tokens can be pasted from a computer that has access.
@@ -963,7 +767,8 @@ pub fn pipeline_help() -> String {
       <li><b>Soulseek</b> – Encore searches the network, results are ranked by track count, format, bitrate, folder name and the uploader's free slots/speed. Stalled or failed users are skipped automatically.</li>
       <li><b>yt-dlp</b> – each track from the MusicBrainz tracklist is matched on YouTube (preferring official "Topic" uploads with matching length).</li>
       <li><b>Import</b> – files are matched to the MusicBrainz release, tagged (incl. MBIDs, ISRCs, cover art), renamed with your template, and your media servers are refreshed.</li>
-    </ol></div>"##.to_string()
+    </ol>
+    <p class="small muted" style="margin:10px 0 0">Each source is a plugin: install, update or disable it under <a href="#/settings?s=plugins" style="color:var(--accent)">Settings → Plugins</a>.</p></div>"##.to_string()
 }
 
 #[cfg(test)]

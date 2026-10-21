@@ -104,6 +104,12 @@ async fn exchange(method: &str, path: &str, body: Option<Value>, signal: Option<
         },
         Err(_) => return Err(ApiError { status: 0, message: "Bad request".into(), data: Value::Null }),
     };
+    answer(res, path).await
+}
+
+/// What the server answered, read the same way for JSON and form bodies: the JSON (or the text), or an
+/// [`ApiError`] with the server's sentence (`detail`) and the whole answer in `data`.
+async fn answer(res: gloo_net::http::Response, path: &str) -> ApiResult {
     let status = res.status();
     let text = res.text().await.unwrap_or_default();
     // a proxy's error page while the server is down: the same as no answer
@@ -140,6 +146,28 @@ pub async fn patch(path: &str, body: Value) -> ApiResult { request("PATCH", path
 pub async fn del(path: &str) -> ApiResult { request("DELETE", path, None).await }
 /// `api.post(p)` with the default empty body.
 pub async fn post_empty(path: &str) -> ApiResult { request("POST", path, Some(serde_json::json!({}))).await }
+
+/// POST a multipart form (a file upload): the browser sets the content type with its boundary. The answer and
+/// the errors read as for [`post`] (the server's `detail`, the whole answer in `ApiError::data`).
+pub async fn post_form(path: &str, form: web_sys::FormData) -> ApiResult {
+    use gloo_net::http::RequestBuilder;
+    let built = RequestBuilder::new(&format!("/api{path}"))
+        .method(gloo_net::http::Method::POST)
+        .credentials(RequestCredentials::SameOrigin)
+        .header("X-Requested-With", "encore")
+        .body(form);
+    let res = match built {
+        Ok(r) => match r.send().await {
+            Ok(r) => r,
+            Err(_) => {
+                dom::dispatch("encore:server-down", None);
+                return Err(not_connected());
+            }
+        },
+        Err(_) => return Err(ApiError { status: 0, message: "Bad request".into(), data: Value::Null }),
+    };
+    answer(res, path).await
+}
 
 #[cfg(test)]
 mod tests {

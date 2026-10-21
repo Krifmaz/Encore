@@ -9,6 +9,7 @@ license.workspace = true
 encore-core = { workspace = true }
 encore-db = { workspace = true }
 encore-media = { workspace = true }
+encore-plugins = { workspace = true }
 anyhow = { workspace = true }
 axum = { workspace = true }
 cadenza-dsp = { workspace = true }

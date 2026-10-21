@@ -101,9 +101,12 @@ Integrations, and a link that names a card (`?s=cadenza`) opens the page that ho
 open (an alias opens the page's first card, as a plain link to the page does). A name is looked up as a page
 id first, then as an alias, then as a card: Library's own card is also called `library`. The build
 refuses a name (page id, alias or card id) that would open two different pages. A client that also talks
-to older servers finds a page's extras by the cards it holds, not by its id: the Download tools card and
-"How requests are fulfilled" go on the page with the `pipeline` card (Downloads; Apps & sources on an
-older server).
+to older servers finds a page's extras by the cards it holds, not by its id: "How requests are fulfilled"
+goes on the page with the `pipeline` card (Downloads; Apps & sources on an older server). Since 0.32 the cards
+`streamrip`, `torznab`, `slskd`, `ytdlp` and `youtube` (YouTube sign-in, a part of yt-dlp's card) are drawn on
+Settings → Plugins (`GET /api/plugins`, after Downloads in the nav), and their `?s=` links, plus `tools` and
+the catalog ids of the download clients, the translator and the media servers, open that page. An older server
+(no `/api/plugins`) keeps them on Downloads.
 
 ### Group (a card)
 
@@ -167,7 +170,8 @@ its card.
 ## What is not in the schema
 
 Settings that no generic card shows are in the table but not in the answer: the scheduled tasks' switches
-and intervals (drawn by the tasks page), the download tools' auto-update switches, the Translator's model,
+and intervals (drawn by the tasks page), the auto-update switches (each plugin card has its own, since 0.32),
+the Translator's model and background switch (drawn from its manifest, `translator.toml`'s `[[settings]]`),
 the Cadenza engine's own settings (drawn from the engine's description, `GET /api/playback/dsp`), the
 Auto-download page, what a new member gets (People → Users & permissions), the Contribute page, and
 values the server keeps for itself (the API key, the Roon and Plex ids, the managed slskd's key, the

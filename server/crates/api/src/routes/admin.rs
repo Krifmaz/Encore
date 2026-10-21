@@ -268,7 +268,10 @@ async fn put_settings(State(st): State<AppState>, Admin(me): Admin, Json(values)
     keys.sort();
     st.db.log("info", &format!("{} updated settings: {}", me.s("username"), keys.iter().map(|s| s.as_str()).collect::<Vec<_>>().join(", ")));
     let warnings = folder_warnings(&clean, |k| st.cfg.get(k));
+    let saved: Vec<String> = clean.keys().cloned().collect();
     st.cfg.set_many(&Value::Object(clean));
+    // the 0.30 apps' auto-update switches (tools_auto_<id>) are the plugins' own for one more release
+    st.plugins.follow_auto_keys(&saved.iter().map(String::as_str).collect::<Vec<_>>());
     st.requests.slskd.poke(); // a changed Soulseek login or port takes effect now, not at the next check
     let mut out = st.cfg.public_dump();
     if !warnings.is_empty() {

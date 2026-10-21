@@ -1,4 +1,4 @@
-//! /api/youtube: Settings → Downloads → YouTube sign-in (the sign-in yt-dlp uses) and the browser extension's
+//! /api/youtube: Settings → Plugins → yt-dlp → YouTube sign-in (the sign-in yt-dlp uses) and the browser extension's
 //! cookie upload.
 //! The sign-in itself lives in encore_requests::ytauth.
 use crate::auth::Admin;
@@ -98,7 +98,7 @@ async fn extension_cookies(State(st): State<AppState>, headers: HeaderMap, Json(
     use axum::response::IntoResponse;
     let s = load(st.data_dir());
     let mut resp = if !token_ok(&headers, s.ext_token.as_deref()) {
-        err(401, "Unknown token – make a new one under Settings → Downloads → YouTube sign-in → Connect the browser extension").into_response()
+        err(401, "Unknown token – make a new one under Settings → Plugins → yt-dlp → YouTube sign-in → Connect the browser extension").into_response()
     } else {
         let r = if body["handoff"].as_bool() == Some(true) { accept_handoff(&st, &body).await } else { accept_extension(&st, &body).await };
         match r {

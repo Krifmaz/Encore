@@ -1,0 +1,58 @@
+# Test tone: the plugin the encore-plugins and encore-api tests install. A harmless source written with the SDK
+# (plugins/sdk/encore_plugin.py, copied beside it by the tests): it "searches" a short built-in list and
+# "downloads" a generated sine tone as a WAV file. No network.
+
+[plugin]
+id = "test-tone"
+name = "Test tone"
+version = "0.1.0"
+description = "Searches a short built-in list of tones and writes the one picked as a WAV file. For Encore's tests."
+kind = "source"
+protocol = 1
+license = "MIT"
+commands = ["describe", "status", "test", "search", "download"]
+kinds = ["track", "album"]
+lossless = true
+needs_sign_in = false
+
+[run]
+script = "plugin.py"
+interpreter = "python3"
+
+[run.timeouts]
+search = 20
+download = 60
+test = 20
+
+[[settings]]
+key = "seconds"
+label = "Tone length"
+type = "number"
+default = 1
+min = 1
+max = 30
+help = "How long each tone lasts."
+
+[[settings]]
+key = "rate"
+label = "Sample rate"
+type = "select"
+options = [["44100", "44.1 kHz"], ["48000", "48 kHz"]]
+default = "44100"
+
+[[settings]]
+key = "token"
+label = "Token"
+type = "password"
+default = ""
+help = "A secret the tests check travels on stdin only."
+
+[[settings]]
+key = "slow"
+label = "Slow download"
+type = "bool"
+default = false
+
+[permissions]
+network = false
+filesystem = "folder"

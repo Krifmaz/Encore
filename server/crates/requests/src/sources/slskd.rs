@@ -25,7 +25,7 @@ pub fn enabled(st: &impl Ctx) -> bool {
 /// Why slskd can't answer right now, in words for the user (None while it runs or is starting).
 pub fn not_ready(st: &impl Ctx) -> Option<String> {
     if !slskd_managed::configured(st) {
-        return Some("Soulseek: switch it on and set a username and password in Settings → Downloads → Soulseek (an account is created on first login)".into());
+        return Some("Soulseek: switch it on and set a username and password in Settings → Plugins → Soulseek (an account is created on first login)".into());
     }
     let s = st.requests().slskd.status();
     match s["state"].as_str().unwrap_or("off") {
@@ -33,7 +33,7 @@ pub fn not_ready(st: &impl Ctx) -> Option<String> {
         "not_installed" => Some(slskd_managed::NOT_INSTALLED.into()),
         "waiting_vpn" => Some(slskd_managed::WAITING_FOR_VPN.into()),
         "crashed" => Some(format!("Soulseek engine stopped: {}", s["error"].as_str().unwrap_or("unknown problem"))),
-        "blocked" => Some(format!("Soulseek can't start – {}", s["error"].as_str().unwrap_or("see Settings → Downloads → Soulseek"))),
+        "blocked" => Some(format!("Soulseek can't start – {}", s["error"].as_str().unwrap_or("see Settings → Plugins → Soulseek"))),
         _ if slskd_managed::installed_version(st).is_none() => Some(slskd_managed::NOT_INSTALLED.into()),
         _ => Some("Soulseek is starting – try again in a moment".into()),
     }

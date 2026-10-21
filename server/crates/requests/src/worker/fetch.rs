@@ -395,8 +395,8 @@ pub(super) async fn torznab_try_next(st: &impl Ctx, r: &mut Req, reason: &str) -
 /// magnet in the background).
 const CLIENT_TAKES: f64 = 120.0;
 
-/// How many stall times (Settings → Downloads → Torrents & Usenet, "Try the next release after a stall
-/// of") a download may wait in its client's queue before the next release is tried.
+/// How many stall times (Settings → Plugins → Torrents & Usenet (Prowlarr), "Try the next release after a
+/// stall of") a download may wait in its client's queue before the next release is tried.
 const QUEUED_STALLS: f64 = 6.0;
 
 /// "13 hours", "45 minutes": how long something took, in words.
@@ -533,7 +533,7 @@ pub(super) async fn poll_torznab(st: &impl Ctx, r: &mut Req) -> anyhow::Result<(
                     // finished where Encore can't look: the client keeps it (nothing is deleted), and the other
                     // releases would land in the same place
                     let why = format!("{via} finished the download, but Encore can't see it at {} – mount the client's download folder in Encore's container at the \
-                        same path (e.g. /downloads), or correct the download folder in Settings → Downloads → Torrents & Usenet (Prowlarr)", path.display());
+                        same path (e.g. /downloads), or correct the download folder on the {via} card under Settings → Plugins", path.display());
                     return torznab_left_in_client(st, r, why).await;
                 }
                 Err(e) if e.is_storage() => return Err(e.into()),
@@ -846,6 +846,79 @@ pub(super) async fn start_ytdlp(st: &impl Ctx, r: &mut Req, pick_url: Option<Str
             }
             Err(e) => Err(e),
         }
+    }
+}
+
+/// A plugin program's source (protocol 1, through the registry: in the sandbox, its settings on stdin): the
+/// best matching result of its search – or the result picked by hand (`picked`: the picker row's payload) –
+/// downloaded into the request's staging folder, then checked, tagged and imported like any other download. A
+/// search or download the plugin could not do goes on to the next source with the plugin's own words.
+pub(super) async fn start_plugin(st: &impl Ctx, r: &mut Req, source: &crate::sources::plugin::PluginSource, picked: Option<Value>) -> anyhow::Result<Out> {
+    use crate::sources::plugin::{self as p, Ask};
+    check(st, r.id)?;
+    let name = source.name.clone();
+    let kind = r.s("kind");
+    let ask = Ask {
+        kind: kind.clone(),
+        artist: r.s("artist"),
+        title: if kind == "album" { r.album_title() } else { r.s("title") },
+        album: r.opt("album").unwrap_or_default(),
+        query: None,
+        length: r.length(),
+        track_count: None,
+        lossless_only: r.d["lossless_only"].as_bool().unwrap_or(false),
+        isrc: r.d["isrc"].as_str().map(String::from),
+        limit: 25,
+    };
+    let chosen = match picked {
+        Some(c) => c,
+        None => {
+            upd(st, r, &[("status", json!("searching")), ("message", json!(format!("Searching {name}…")))]);
+            let results = match p::search(st, source, &ask, None).await {
+                Ok(r) => r,
+                Err(f) => return Ok(Out::Next(format!("{name}: {}", f.message))),
+            };
+            let blocked = |x: &Value| x["url"].as_str().is_some_and(|u| crate::report::url_blocked(st, u));
+            match p::best(&ask, &results, blocked) {
+                Some(b) => b.clone(),
+                None if results.is_empty() => return Ok(Out::Next(format!("nothing found on {name}"))),
+                None => return Ok(Out::Next(format!("{name} found nothing that matches"))),
+            }
+        }
+    };
+    check(st, r.id)?;
+    let out = staging(st, r).join(format!("plugin-{}", source.id));
+    rm(&out);
+    encore_core::fsx::mkdir_all(&out, encore_core::fsx::Step::Stage)?;
+    let title = chosen["title"].as_str().unwrap_or("").to_string();
+    upd(st, r, &[("status", json!("downloading")), ("progress", json!(0)), ("message", json!(format!("{name}: {title}").trim_end_matches(": ").to_string()))]);
+    let cb = progress_cb(st, r.id);
+    let call = encore_plugins::Call { progress: Some(std::sync::Arc::new(move |pct: f64, _: Option<String>| cb(pct))), ..Default::default() };
+    let req = p::download_request(&source.id, &ask, &chosen);
+    let dl = match st.plugins().download(&source.plugin, &req, &out, Some(call)).await {
+        Ok(d) => d,
+        Err(f) => {
+            rm(&out);
+            return Ok(Out::Next(format!("{name}: {}", f.message)));
+        }
+    };
+    check(st, r.id)?;
+    let files: Vec<PathBuf> = dl.files.iter().map(|f| f.path.clone()).collect();
+    let url = dl.source_url.clone().or_else(|| chosen["url"].as_str().map(String::from));
+    let lossless = chosen["lossless"].as_bool().unwrap_or(source.lossless);
+    if let Some(m) = dl.message.as_deref().filter(|m| !m.is_empty()) {
+        log_push(r, format!("{}: {m}", source.id));
+    }
+    let mut spec = storage::Spec::new("plugin", true, json!({ "source": name, "detail": "plugin", "plugin": source.plugin, "url": url, "lossless": lossless }),
+        format!("Downloaded from {name}"));
+    spec.hint = dl.cover_url.clone().or_else(|| chosen["cover"].as_str().map(String::from));
+    match storage::import_checked(st, r, &files, &out, spec).await {
+        Ok(_) => Ok(Out::Done),
+        Err(e) if e.is::<Rejected>() => {
+            rm(&out);
+            Ok(Out::Next(format!("{name} gave the wrong audio ({e})")))
+        }
+        Err(e) => Err(e),
     }
 }
 

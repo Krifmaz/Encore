@@ -1,0 +1,117 @@
+# slskd: Encore's Soulseek engine, run headless as a child process (slskd_managed.rs, the session supervisor in
+# slskd_session). The plugin installs slskd's release for this machine.
+# docs/contracts/plugin-manifest.md describes every key.
+
+[plugin]
+id = "slskd"
+name = "Soulseek (slskd)"
+version = "0.32.0"
+description = "Searches the Soulseek file-sharing network – great for FLAC and rare releases. Encore runs Soulseek for you: enter any username and password and an account is created at the first sign-in. Forward the port for the best speeds."
+kind = "source"
+protocol = 1
+homepage = "https://github.com/slskd/slskd"
+license = "AGPL-3.0"
+commands = ["status", "test", "search", "download", "update"]
+kinds = ["track", "album"]
+lossless = true
+needs_sign_in = true
+builtin = true
+
+[[sources]]
+id = "slskd"
+name = "Soulseek"
+
+[run]
+# slskd is a .NET program: no culture data in the image, the workstation garbage collector, plain logs
+env = { DOTNET_SYSTEM_GLOBALIZATION_INVARIANT = "1", DOTNET_gcServer = "0", DOTNET_CLI_TELEMETRY_OPTOUT = "1", NO_COLOR = "1" }
+
+[update]
+github = "slskd/slskd"
+tag = "{version}"
+sums = "github"
+auto = false
+
+[[binary]]
+arch = "x86_64"
+asset = "slskd-{version}-linux-x64.zip"
+bin = "slskd"
+
+[[binary]]
+arch = "aarch64"
+asset = "slskd-{version}-linux-arm64.zip"
+bin = "slskd"
+
+[install]
+verify = ["{bin}", "--version"]
+max_mb = 1024
+# Encore runs it headless: the web UI is not kept
+remove = ["wwwroot"]
+
+[[settings]]
+key = "slskd_enabled"
+
+[[settings]]
+key = "soulseek_username"
+
+[[settings]]
+key = "soulseek_password"
+
+[[settings]]
+key = "soulseek_port"
+
+[[settings]]
+key = "soulseek_share"
+
+[[settings]]
+key = "soulseek_upload_slots"
+
+[[settings]]
+key = "slskd_download_path"
+
+[[settings]]
+key = "slskd_preferred_format"
+
+[[settings]]
+key = "slskd_min_bitrate"
+
+[[settings]]
+key = "slskd_search_timeout"
+
+[[settings]]
+key = "slskd_stall_minutes"
+
+[[settings]]
+key = "slskd_max_candidates"
+
+[[settings]]
+key = "vpn_enabled"
+
+[[settings]]
+key = "vpn_wireguard_config"
+
+[[settings]]
+key = "vpn_port_forwarding"
+
+[[settings]]
+key = "vpn_kill_switch"
+
+# internal: the API key of the slskd Encore runs
+[[settings]]
+key = "slskd_managed_api_key"
+
+[permissions]
+network = true
+filesystem = "folder"
+# .NET reserves far more address space than it uses: no memory limit
+memory = 0
+paths = [
+    { setting = "slskd_download_path", access = "write" },
+    { setting = "library_path", access = "read" },
+    { config = "slskd", access = "write" },
+]
+
+[migration]
+from_tool = "slskd"
+auto_key = "tools_auto_slskd"
+adopt = ["tools/slskd", "slskd"]
+in_use = [["file:tools/slskd/current"], ["slskd_enabled", "soulseek_username", "soulseek_password"], ["saved:tools_auto_slskd"]]

@@ -97,7 +97,7 @@ pub const SECTIONS: &[Card] = &[
         s("contact_email", "Contact email for MusicBrainz", "text").help("MusicBrainz asks API clients to identify themselves"),
         s("musicbrainz_url", "MusicBrainz server", "text").help("Use your own mirror for faster lookups"),
         s("musicbrainz_rate", "MusicBrainz requests / second", "number").step("0.1").help("Keep at 1 for the public server"),
-        s("github_token", "GitHub token (optional)", "password").full().help("Only for the Download tools update checks: GitHub allows 60 checks an hour per address without a token and 5,000 with one. A fine-grained token with no permissions is enough (github.com → Settings → Developer settings)."),
+        s("github_token", "GitHub token (optional)", "password").full().help("For the update checks of the plugins and of Encore itself: GitHub allows 60 checks an hour per address without a token and 5,000 with one. A fine-grained token with no permissions is enough (github.com → Settings → Developer settings); if the Encore repository is private, give the token read access to it."),
     ] },
     // 0.31: the server's settings.toml card `grouplisten`, on Server → General after the General card
     Card { id: "grouplisten", title: "Group listens", desc: "Several people on this server hear the same songs at the same time, each on their own device. Anyone signed in can start one and invite others with a code or a link.", test: None, test_label: None, fields: &[
@@ -218,7 +218,7 @@ pub const SECTIONS: &[Card] = &[
     Card { id: "spotify", title: "Integrations", desc: "API keys that let users connect their Spotify, Tidal, Last.fm, Discogs and YouTube Music accounts, and power recommendations.", test: Some("spotify"), test_label: Some("Test all"), fields: &[
         s("spotify_client_id", "Spotify Client ID", "text").help("developer.spotify.com – add <Public URL>/api/connections/spotify/callback as redirect URI. Development-mode apps allow 5 users and need a Premium owner (2026 rules); without it, public playlists still import via the embed fallback."),
         s("spotify_client_secret", "Spotify Client secret", "password"),
-        s("tidal_client_id", "Tidal Client ID", "text").help("Only for looking up Tidal albums/songs by ISRC and for the Tidal connection. Get one at developer.tidal.com → Dashboard → Create new app (any name), redirect URI <Public URL>/api/connections/tidal/callback, then copy the Client ID and Client secret here. Downloads from Tidal use your own account instead: Downloads → Qobuz / Tidal / Deezer (streamrip) → Sign in to Tidal."),
+        s("tidal_client_id", "Tidal Client ID", "text").help("Only for looking up Tidal albums/songs by ISRC and for the Tidal connection. Get one at developer.tidal.com → Dashboard → Create new app (any name), redirect URI <Public URL>/api/connections/tidal/callback, then copy the Client ID and Client secret here. Downloads from Tidal use your own account instead: Plugins → streamrip → Sign in to Tidal."),
         s("tidal_client_secret", "Tidal Client secret", "password"),
         s("lastfm_api_key", "Last.fm API key", "password").help("last.fm/api/account/create (free) – loved tracks, similar artists/songs, genre pages, For you"),
         s("lastfm_shared_secret", "Last.fm shared secret", "password").help("Shown next to the API key. Needed for scrobbling: users sign in with Last.fm on the Connections page."),
@@ -275,12 +275,16 @@ pub const GROUPS: &[Group] = &[
     Group { id: "general", parts: &[("", &["general", "grouplisten"])] },
     // Apps & sources until R2, now four pages (the server's settings.toml sections)
     Group { id: "library", parts: &[("", &["library", "verify"])] },
-    Group { id: "downloads", parts: &[("", &["pipeline", "releases", "streamrip", "torznab", "slskd", "ytdlp", "youtube"])] },
+    // 0.32: the source cards are plugin cards on Settings → Plugins (plugins.rs); see LEGACY_SOURCES
+    Group { id: "downloads", parts: &[("", &["pipeline", "releases"])] },
     Group { id: "integrations", parts: &[("", &["spotify", "media", "roon"])] },
     Group { id: "processing", parts: &[("", &["cadenza"])] },
     Group { id: "accounts", parts: &[("", &["email", "notify"])] },
     Group { id: "tasks", parts: &[("", &["sync"])] },
 ];
+
+/// The source cards Downloads had before 0.32, still drawn there for a server without plugins.
+pub const LEGACY_SOURCES: &[&str] = &["streamrip", "torznab", "slskd", "ytdlp", "youtube"];
 
 /// The card with this id.
 pub fn card(id: &str) -> Option<&'static Card> {
@@ -292,7 +296,7 @@ pub fn group(id: &str) -> Option<&'static Group> {
     GROUPS.iter().find(|g| g.id == id)
 }
 
-/// The group a card belongs to (`torznab` → `downloads`).
+/// The group a card belongs to (`releases` → `downloads`).
 pub fn group_of(card_id: &str) -> Option<&'static Group> {
     GROUPS.iter().find(|g| g.sections().any(|s| s == card_id))
 }
@@ -317,7 +321,11 @@ mod tests {
         assert!(wg.is_secret() && wg.spans() && wg.kind == "textarea");
         assert_eq!(group_of("cadenza").unwrap().id, "processing");
         assert_eq!(group_of("verify").unwrap().id, "library");
-        assert_eq!(group_of("torznab").unwrap().id, "downloads");
+        assert_eq!(group_of("releases").unwrap().id, "downloads");
+        assert!(group_of("torznab").is_none(), "a plugin card since 0.32");
+        for id in LEGACY_SOURCES {
+            assert!(card(id).is_some(), "{id}");
+        }
         assert_eq!(group_of("roon").unwrap().id, "integrations");
         assert_eq!(group_of("sync").unwrap().id, "tasks");
         assert_eq!(group_of("grouplisten").unwrap().id, "general");

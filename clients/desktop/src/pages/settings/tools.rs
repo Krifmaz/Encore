@@ -1,7 +1,8 @@
-//! The live blocks inside the Server settings cards (web-rs/src/pages/settings.rs): Download
-//! tools (yt-dlp, streamrip, Cadenza, slskd, the Translator), the Tidal sign-in and streamrip
-//! config file, the Soulseek engine's status, the VPN for Soulseek, the server's Cadenza cache
-//! and engine settings, and the YouTube sign-in card.
+//! The live blocks inside the settings cards (web-rs/src/settings/apps.rs): the Tidal sign-in and
+//! streamrip config file, the Soulseek engine's status, the VPN for Soulseek and the YouTube sign-in
+//! (on the plugin cards of Settings → Plugins since 0.32, and on Downloads for a server without
+//! plugins), and the server's Cadenza cache and engine settings (Server processing). The Download
+//! tools card that was here went with 0.32: each plugin installs and updates on its own card.
 
 use super::{help, link_muted, result_line, result_line_copy, select, switch_maybe, vs, Opt};
 use crate::api::ApiError;
@@ -9,7 +10,7 @@ use crate::fmt;
 use crate::pages::{Ctx, El};
 use crate::theme::{self, Badge, Btn};
 use crate::widgets::text_area::text_area;
-use crate::widgets::{self, badge, btn, btn_icon, btn_sm, modal, Icon};
+use crate::widgets::{self, badge, btn_icon, btn_sm, Icon};
 use iced::widget::text_editor;
 use iced::widget::{column, container, row};
 use iced::{Alignment, Length, Task};
@@ -18,8 +19,6 @@ use std::collections::HashMap;
 
 #[derive(Debug)]
 pub enum Dialog {
-    /// "Use the built-in engine" / "Remove slskd" / "Use the bundled version".
-    ToolReset { id: String, ask: String, done: String },
     RipReset,
     YtSignOut,
     YtNewToken,
@@ -27,9 +26,6 @@ pub enum Dialog {
 
 #[derive(Debug, Default)]
 pub struct State {
-    tools: Option<Vec<Value>>,
-    busy: Option<String>,
-    checking: bool,
     tidal: Value,
     tidal_busy: bool,
     /// The sign-in link the server is waiting on; polled every 3 s.
@@ -55,18 +51,6 @@ pub struct State {
 
 #[derive(Clone, Debug)]
 pub enum Message {
-    Tools(Result<Value, ApiError>),
-    Check,
-    Checked(Result<Value, ApiError>),
-    Update(String),
-    Updated(String, bool, Result<Value, ApiError>),
-    AskReset(String),
-    Reset,
-    ResetDone(String, Result<Value, ApiError>),
-    Auto(String, bool),
-    AutoSaved(Result<Value, ApiError>),
-    Model(String),
-    ModelSaved(Result<Value, ApiError>),
     Tidal(Result<Value, ApiError>),
     TidalSignIn,
     TidalStarted(Result<Value, ApiError>),
@@ -108,7 +92,7 @@ pub enum Message {
     YtToken(Result<Value, ApiError>),
     YtCopyToken,
     OpenUrl(String),
-    /// Every 5 s while Downloads is open: the Soulseek and VPN states.
+    /// Every 5 s while the Soulseek card is open: the Soulseek and VPN states.
     Tick,
     CloseDialog,
 }
@@ -118,60 +102,33 @@ fn get(ctx: &Ctx, path: &'static str, f: fn(Result<Value, ApiError>) -> Message)
     Task::perform(async move { api.get(path).await }, f)
 }
 
-/// What Downloads (the Download tools card and the source cards' blocks) and Server processing (the
-/// Cadenza card's blocks) need, loaded when one of them opens.
-pub fn open(state: &mut State, ctx: &mut Ctx) -> Task<Message> {
-    state.tools = None;
-    state.busy = None;
-    state.checking = false;
+fn reset_sources(state: &mut State) {
     state.tidal_waiting = false;
     state.tidal_paste = false;
     state.rip_out = None;
-    state.engine_loaded = false;
-    state.engine_edits.clear();
     state.yt_token = None;
     state.dialog = None;
+}
+
+/// What the source cards' blocks need (the Tidal sign-in, Soulseek, the VPN, the YouTube sign-in), loaded when
+/// Settings → Plugins opens (or Downloads, on a server without plugins).
+pub fn open_sources(state: &mut State, ctx: &mut Ctx) -> Task<Message> {
+    reset_sources(state);
     Task::batch([
-        get(ctx, "/system/tools", Message::Tools),
         get(ctx, "/system/streamrip/tidal-login", Message::Tidal),
         get(ctx, "/soulseek/status", Message::Slsk),
         get(ctx, "/system/vpn", Message::Vpn),
-        get(ctx, "/playback/dsp", Message::Dsp),
         get(ctx, "/youtube/auth", Message::Youtube),
     ])
 }
 
-fn tool_list(r: &Value) -> Vec<Value> {
-    if r.is_array() { fmt::items(r) } else { fmt::items(&r["tools"]) }
-}
-
-/// `a || b`: the first truthy of the two, as text.
-fn tool_or(t: &Value, a: &str, b: &str) -> String {
-    if fmt::truthy(t, a) {
-        fmt::s(t, a)
-    } else if fmt::truthy(t, b) {
-        fmt::s(t, b)
-    } else {
-        String::new()
-    }
-}
-
-/// The reset link of a tool row `(link, question, toast)`.
-pub fn tool_reset(t: &Value) -> (String, String, String) {
-    match fmt::s(t, "id").as_str() {
-        "cadenza" => ("Use the built-in engine".into(), "Go back to the engine built into Encore? The downloaded Cadenza is removed.".into(), "Back to the built-in engine".into()),
-        "slskd" => ("Remove slskd".into(), "Remove slskd? Soulseek stays off until you install it again.".into(), "slskd removed".into()),
-        "translator" => ("Remove the Translator".into(), "Remove the Translator and its model? Translations made so far are kept; new titles only get official translations until you install it again.".into(), "Translator removed".into()),
-        _ => {
-            let name = tool_or(t, "name", "id");
-            ("Use the bundled version".into(), format!("Go back to the {name} version that came with Encore? The updated copy is removed."), format!("Back to the bundled {name}"))
-        }
-    }
-}
-
-/// slskd and the Translator are installed by Encore, not bundled: before that their button says Install.
-fn tool_install(t: &Value) -> bool {
-    matches!(fmt::s(t, "id").as_str(), "slskd" | "translator") && !fmt::truthy(t, "installed")
+/// What the Cadenza card's blocks need (the pre-render cache, the engine's settings), loaded when Server
+/// processing opens.
+pub fn open_processing(state: &mut State, ctx: &mut Ctx) -> Task<Message> {
+    state.engine_loaded = false;
+    state.engine_edits.clear();
+    state.dialog = None;
+    get(ctx, "/playback/dsp", Message::Dsp)
 }
 
 /// A wait in the server's words: "45 s", "3 m 12 s", "15 m", "2 h 5 m".
@@ -242,10 +199,15 @@ pub fn session_text(s: &Value) -> String {
     }
 }
 
+/// Where the Soulseek login is set since 0.32: the Soulseek plugin's card.
+pub const SOULSEEK_CARD: &str = "Settings → Plugins → Soulseek";
+
 /// The sentence away from the card (the Soulseek page, Diagnostics): "fix them below" points at the card's
-/// fields, which aren't there – it names the card instead, in the server's words (`text_elsewhere`).
+/// fields, which aren't there – it names the card instead, as the server's `text_elsewhere` does (whose words
+/// still name the card's place before 0.32, Downloads: they name the Plugins page here).
 pub fn session_text_elsewhere(text: &str) -> String {
-    text.replace(" – fix them below", " – fix them in Settings → Downloads → Soulseek")
+    text.replace(" – fix them below", &format!(" – fix them in {SOULSEEK_CARD}"))
+        .replace("Settings → Downloads → Soulseek", SOULSEEK_CARD)
 }
 
 /// What goes under the sentence, on this computer's clock: "Next attempt in 3 m 12 s · 12 searches waiting
@@ -469,78 +431,6 @@ fn source_line(key: &str, s: &Value) -> String {
 
 pub fn update(state: &mut State, msg: Message, ctx: &mut Ctx) -> Task<Message> {
     match msg {
-        Message::Tools(Ok(r)) => state.tools = Some(tool_list(&r)),
-        Message::Tools(Err(_)) => state.tools = Some(Vec::new()),
-        Message::Check => {
-            state.checking = true;
-            let api = ctx.api.clone();
-            return Task::perform(async move { api.post_empty("/system/tools/check").await }, Message::Checked);
-        }
-        Message::Checked(r) => {
-            state.checking = false;
-            match r {
-                Ok(r) => state.tools = Some(tool_list(&r)),
-                Err(e) => ctx.toast_err(e.message),
-            }
-        }
-        Message::Update(id) => {
-            if state.busy.is_some() {
-                return Task::none();
-            }
-            let tool = state.tools.as_ref().and_then(|l| l.iter().find(|t| fmt::s(t, "id") == id)).cloned().unwrap_or(json!({ "id": id }));
-            let name = {
-                let n = fmt::s(&tool, "name");
-                if n.is_empty() { id.clone() } else { n }
-            };
-            let install = tool_install(&tool);
-            state.busy = Some(id.clone());
-            let api = ctx.api.clone();
-            let i2 = id.clone();
-            return Task::perform(async move { api.post_empty(&format!("/system/tools/{i2}/update")).await }, move |r| Message::Updated(name.clone(), install, r));
-        }
-        Message::Updated(name, install, r) => {
-            state.busy = None;
-            match r {
-                Ok(r) => ctx.toast_ok(format!("{name} {} {}", if install { "installed" } else { "updated to" }, tool_or(&r, "installed", "latest"))),
-                Err(e) => ctx.toast_err(e.message),
-            }
-            return get(ctx, "/system/tools", Message::Tools);
-        }
-        Message::AskReset(id) => {
-            let tool = state.tools.as_ref().and_then(|l| l.iter().find(|t| fmt::s(t, "id") == id)).cloned().unwrap_or(json!({ "id": id }));
-            let (_, ask, done) = tool_reset(&tool);
-            state.dialog = Some(Dialog::ToolReset { id, ask, done });
-        }
-        Message::Reset => {
-            if let Some(Dialog::ToolReset { id, done, .. }) = state.dialog.take() {
-                let api = ctx.api.clone();
-                return Task::perform(async move { api.post_empty(&format!("/system/tools/{id}/reset")).await }, move |r| Message::ResetDone(done.clone(), r));
-            }
-        }
-        Message::ResetDone(done, r) => {
-            match r {
-                Ok(_) => ctx.toast_ok(done),
-                Err(e) => ctx.toast_err(e.message),
-            }
-            return get(ctx, "/system/tools", Message::Tools);
-        }
-        Message::Auto(key, on) => {
-            let api = ctx.api.clone();
-            let mut body = Map::new();
-            body.insert(key, Value::Bool(on));
-            return Task::perform(async move { api.put("/admin/settings", Value::Object(body)).await }, Message::AutoSaved);
-        }
-        Message::AutoSaved(Ok(_)) => ctx.toast_ok("Saved"),
-        Message::AutoSaved(Err(e)) => ctx.toast_err(e.message),
-        Message::Model(v) => {
-            let api = ctx.api.clone();
-            return Task::perform(async move { api.put("/admin/settings", json!({ "translator_model": v })).await }, Message::ModelSaved);
-        }
-        Message::ModelSaved(Ok(_)) => {
-            ctx.toast_ok("Saved – Install or Update the Translator to download this model");
-            return get(ctx, "/system/tools", Message::Tools);
-        }
-        Message::ModelSaved(Err(e)) => ctx.toast_err(e.message),
         Message::Tidal(Ok(r)) => {
             state.tidal_waiting = fmt::s(&r, "status") == "waiting" && !fmt::s(&r, "url").is_empty();
             if fmt::s(&r, "status") != "waiting" {
@@ -820,110 +710,6 @@ pub fn vpn_test_failed(state: &mut State, message: String) {
 
 fn flat<'a, M: 'a>(body: impl Into<El<'a, M>>) -> El<'a, M> {
     container(body).padding([12, 14]).width(Length::Fill).style(theme::card).into()
-}
-
-fn tool_row<'a>(state: &'a State, t: &'a Value) -> El<'a, Message> {
-    let id = fmt::s(t, "id");
-    let latest = if fmt::truthy(t, "latest") { fmt::s(t, "latest") } else { String::new() };
-    let updatable = fmt::truthy(t, "updatable");
-    let busy_any = state.busy.is_some();
-    let action: El<'a, Message> = if state.busy.as_deref() == Some(id.as_str()) {
-        btn_sm(if tool_install(t) { "Installing…" } else { "Updating…" }, Btn::Default, None::<Message>).into()
-    } else if tool_install(t) && updatable {
-        btn_icon(Icon::Download, if latest.is_empty() { "Install".to_string() } else { format!("Install {latest}") }, Btn::Primary, (!busy_any).then_some(Message::Update(id.clone()))).into()
-    } else if fmt::truthy(t, "update_available") && updatable {
-        btn_icon(Icon::Download, format!("Update to {latest}"), Btn::Primary, (!busy_any).then_some(Message::Update(id.clone()))).into()
-    } else if fmt::truthy(t, "update_available") {
-        badge(format!("{latest} available"), Badge::Warn)
-    } else if fmt::truthy(t, "latest") {
-        badge("Up to date", Badge::Ok)
-    } else if updatable {
-        widgets::faint("Not checked yet").size(12).into()
-    } else {
-        container(iced::widget::space()).into()
-    };
-    let updated = fmt::s(t, "source") == "updated" && id != "slskd" && id != "translator";
-    let mut head = row![
-        crate::widgets::t(tool_or(t, "name", "id")).size(14).font(theme::semibold()),
-        widgets::small_muted(if fmt::truthy(t, "installed") { fmt::s(t, "installed") } else { "not installed".into() }).font(theme::mono()),
-    ]
-    .spacing(6)
-    .align_y(Alignment::Center);
-    if updated {
-        head = head.push(widgets::small_muted("(updated)"));
-    }
-    let mut left = column![head].spacing(3).width(Length::Fill);
-    if fmt::truthy(t, "note") {
-        left = left.push(help(fmt::s(t, "note")));
-    }
-    if fmt::truthy(t, "error") {
-        left = left.push(super::err_text(fmt::s(t, "error")));
-    }
-    if fmt::truthy(t, "resettable") && updatable && !busy_any {
-        left = left.push(link_muted(tool_reset(t).0, Message::AskReset(id.clone())));
-    }
-    column![container(row![left, action].spacing(12).align_y(Alignment::Center)).padding([10, 14]), widgets::divider()].into()
-}
-
-/// Settings → Downloads → Download tools.
-pub fn tools_card<'a>(state: &'a State, values: &'a Value) -> El<'a, Message> {
-    let Some(tools) = &state.tools else {
-        return widgets::card(widgets::skeleton_rows(3)).width(Length::Fill).into();
-    };
-    let meta = &values["_meta"];
-    let mut list = column![];
-    for t in tools {
-        list = list.push(tool_row(state, t));
-    }
-    let toggle = |key: &'static str, label: &'static str| -> Option<El<'a, Message>> {
-        values.get(key)?;
-        let locked = meta[key]["source"].as_str() == Some("env");
-        Some(switch_maybe(fmt::truthy(values, key), label, (!locked).then_some(move |on| Message::Auto(key.to_string(), on))))
-    };
-    let mut extra = column![].spacing(10);
-    if values.get("translator_model").is_some() {
-        let locked = meta["translator_model"]["source"].as_str() == Some("env");
-        let opts = vec![
-            Opt::new("small", "Small – Qwen3 4B Instruct (about 2.5 GB)"),
-            Opt::new("best", "Best – Qwen3 8B (about 5 GB)"),
-        ];
-        let current = fmt::s(values, "translator_model");
-        let pick: El<'a, Message> = if locked {
-            help(opts.iter().find(|o| o.key == current).map(|o| o.label.clone()).unwrap_or(current.clone())).into()
-        } else {
-            select(opts, &current, Message::Model)
-        };
-        extra = extra.push(widgets::field("Translator model", pick));
-        extra = extra.push(help("Small runs on most servers (about 4 GB of memory while it works); Best translates better and needs about 7 GB. It only runs while there is something to translate."));
-    }
-    for (k, l) in [
-        ("tools_auto_ytdlp", "Update yt-dlp automatically (recommended – sites change often)"),
-        ("tools_auto_streamrip", "Update streamrip automatically when a new release is out"),
-        ("tools_auto_cadenza", "Update Cadenza automatically when a new release is out"),
-        ("tools_auto_slskd", "Update slskd automatically when a new release is out"),
-        ("tools_auto_translator", "Update the Translator (llama.cpp) automatically"),
-        ("translate_background", "Translate the whole library in the background (titles on screen are always translated first)"),
-    ] {
-        if let Some(sw) = toggle(k, l) {
-            extra = extra.push(sw);
-        }
-    }
-    extra = extra.push(help("Every tool is checked daily; updates install by themselves only where the switch is on. Change the schedule under Scheduled tasks."));
-    widgets::card(
-        column![
-            super::between(
-                widgets::h2("Download tools").into(),
-                btn_icon(Icon::Refresh, if state.checking { "Checking…" } else { "Check for updates" }, Btn::Default, (!state.checking && state.busy.is_none()).then_some(Message::Check)).into(),
-            ),
-            help("yt-dlp, streamrip, Cadenza, slskd and the Translator update in place – no new Encore image needed. Updates are kept in the config folder."),
-            widgets::card_flat(list).width(Length::Fill),
-            extra,
-        ]
-        .spacing(12)
-        .width(Length::Fill),
-    )
-    .width(Length::Fill)
-    .into()
 }
 
 /// The Tidal account block of the streamrip card.
@@ -1235,20 +1021,6 @@ pub fn youtube_block<'a>(state: &'a State) -> El<'a, Message> {
 
 pub fn overlay<'a>(state: &'a State) -> Option<El<'a, Message>> {
     Some(match state.dialog.as_ref()? {
-        Dialog::ToolReset { ask, .. } => modal(
-            "Download tools",
-            widgets::muted(ask.as_str()).size(14),
-            Some(
-                row![
-                    btn("Cancel", Btn::Default, Some(Message::CloseDialog)),
-                    btn("Go back", Btn::Danger, Some(Message::Reset)),
-                ]
-                .spacing(10)
-                .into(),
-            ),
-            false,
-            Message::CloseDialog,
-        ),
         Dialog::RipReset => widgets::confirm(
             "Reset streamrip config",
             "Replace streamrip's config.toml with a fresh one from its defaults? The current file is kept as a backup, and the Tidal sign-in, Deezer ARL and Qobuz login are carried over.",
@@ -1323,7 +1095,12 @@ mod tests {
         // rejected: red; away from the card the line names it (the server's words) instead of saying "below"
         let s = json!({ "state": "stopped", "reason": "rejected", "text": "Rejected: invalid username or password – fix them below" });
         assert_eq!(session_tone(&s), "err");
-        assert_eq!(session_text_elsewhere(&session_text(&s)), "Rejected: invalid username or password – fix them in Settings → Downloads → Soulseek");
+        assert_eq!(session_text_elsewhere(&session_text(&s)), "Rejected: invalid username or password – fix them in Settings → Plugins → Soulseek");
+        // the server's own sentence for elsewhere still names Downloads, where the card was before 0.32
+        assert_eq!(
+            session_text_elsewhere("Rejected: invalid username or password – fix them in Settings → Downloads → Soulseek"),
+            "Rejected: invalid username or password – fix them in Settings → Plugins → Soulseek"
+        );
         // not installed: the engine line only
         let r = json!({ "state": "not_installed", "hint": "Install or update it under Download tools", "session": { "state": "stopped", "text": "Soulseek is not installed" } });
         assert!(!has_session(&r));
@@ -1335,9 +1112,6 @@ mod tests {
         assert_eq!(cadenza_cache_text(&json!({ "used_mb": 812.4, "max_mb": 4096, "files": 23, "last_factor": 6.2 })), "Cache: 812 MB of 4096 MB · 23 songs · renders at 6.2× real time");
         assert_eq!(cadenza_engine_text(&json!({ "source": "updated", "version": "2.1.0" })), "Engine: Cadenza 2.1.0 (updated)");
         assert_eq!(cadenza_engine_text(&Value::Null), "Engine: Cadenza (built in)");
-        assert_eq!(tool_reset(&json!({ "id": "cadenza" })).0, "Use the built-in engine");
-        assert_eq!(tool_reset(&json!({ "id": "ytdlp", "name": "yt-dlp" })).2, "Back to the bundled yt-dlp");
-        assert!(tool_install(&json!({ "id": "slskd" })) && !tool_install(&json!({ "id": "slskd", "installed": "1.0" })));
         assert_eq!(source_line("pasted", &json!({})), "Pasted cookies: none");
         assert_eq!(source_line("handoff", &json!({ "has_cookies": true, "signed_in": true, "account": "me" })), "Handed-over sign-in: signed in as me");
     }

@@ -12,12 +12,22 @@ pub(super) async fn start(st: &impl Ctx, r: &mut Req) -> anyhow::Result<()> {
     if kind == "url" {
         let url = r.s("url");
         if RIP_LINK.is_match(&url) {
+            if let Some(why) = wait_for_install(st, r, "streamrip") {
+                return why;
+            }
             if !streamrip::enabled(st) {
-                fail(st, r, "Qobuz/Tidal/Deezer links need streamrip switched on in Settings → Downloads → Qobuz / Tidal / Deezer (streamrip)").await;
+                fail(st, r, "Qobuz/Tidal/Deezer links need the streamrip plugin switched on in Settings → Plugins → streamrip").await;
                 return Ok(());
             }
             upd(st, r, &[("source", json!("streamrip")), ("status", json!("downloading")), ("message", json!("Downloading with streamrip…"))]);
             return run_streamrip_url(st, r).await;
+        }
+        if let Some(why) = wait_for_install(st, r, "ytdlp") {
+            return why;
+        }
+        if !ytdlp::plugin_on(st) {
+            fail(st, r, "Links need the yt-dlp plugin – install it under Settings → Plugins").await;
+            return Ok(());
         }
         upd(st, r, &[("source", json!("ytdlp")), ("status", json!("downloading")), ("message", json!("Starting download…"))]);
         return run_url(st, r).await;
@@ -79,6 +89,20 @@ pub(super) async fn next_source(st: &impl Ctx, r: &mut Req, reason: &str) -> any
         let src = srcs.remove(0);
         r.d["sources"] = json!(srcs);
         let soulseek = src == "slskd" || src == "slskd_lossless";
+        // a plugin the upgrade is still installing: the request waits for it (at most an hour) instead of
+        // going on to a lower-quality source
+        if let Some(name) = being_installed(st, &src) {
+            match install_waited_out(r, &src) {
+                Some(why) => {
+                    stop_waiting_for_install(r, &src);
+                    log_push(r, format!("{src}: {why}"));
+                    reason.clear();
+                    continue;
+                }
+                None => return park_for_install(st, r, &src, name, true),
+            }
+        }
+        stop_waiting_for_install(r, &src);
         if soulseek {
             match soulseek_turn(st, r).await {
                 Turn::Go => {}
@@ -97,7 +121,12 @@ pub(super) async fn next_source(st: &impl Ctx, r: &mut Req, reason: &str) -> any
             "torznab" => start_torznab(st, r, false).await,
             "ytdlp" => start_ytdlp(st, r, None).await,
             "streamrip" => start_streamrip(st, r, None).await,
-            other => Ok(Out::Next(format!("unknown source {other}"))),
+            // a plugin program's source (uploaded or installed from a URL): searched and downloaded through the
+            // registry
+            other => match crate::sources::plugin::find(st, other) {
+                Some(p) => start_plugin(st, r, &p, None).await,
+                None => Ok(Out::Next(format!("unknown source {other}"))),
+            },
         };
         match res {
             Ok(Out::Done) | Ok(Out::Wait) => return Ok(()),
@@ -179,6 +208,83 @@ pub(super) fn park_for_soulseek(st: &impl Ctx, r: &mut Req, src: &str, when: &st
     Ok(())
 }
 
+/// How long a request waits for a source plugin the upgrade is still installing before it goes on to its next
+/// source (seconds).
+pub(super) const INSTALL_WAIT_MAX: f64 = 3600.0;
+
+/// A source whose plugin the upgrade adopted but whose program Encore is still installing (the first start's
+/// install pass, tried again until it works – encore_plugins::Registry::installing_after_upgrade): the
+/// plugin's name. None: the source is there, or simply missing.
+pub(super) fn being_installed(st: &impl Ctx, src: &str) -> Option<&'static str> {
+    match src {
+        "streamrip" => (streamrip::plugin_on(st) && st.cfg().bool("streamrip_enabled") && streamrip::binary(st).is_none() && st.plugins().installing_after_upgrade("streamrip")).then_some("streamrip"),
+        "ytdlp" => (ytdlp::plugin_on(st) && !ytdlp::program_found(st) && st.plugins().installing_after_upgrade("ytdlp")).then_some("yt-dlp"),
+        _ => None,
+    }
+}
+
+/// The request has waited an hour for `src`'s plugin: why it goes on without it.
+fn install_waited_out(r: &Req, src: &str) -> Option<String> {
+    let w = &r.d["install_wait"];
+    let long = w["source"].as_str() == Some(src) && w["since"].as_f64().is_some_and(|t| now() - t >= INSTALL_WAIT_MAX);
+    long.then(|| format!("the {src} plugin was still being installed after 60 minutes – trying the next source"))
+}
+
+/// A link or a pick that needs `src` (streamrip, ytdlp) whose plugin is still being installed: parked
+/// (`Some(Ok)`), or `Some(fail…)` after an hour; None: go on.
+fn wait_for_install(st: &impl Ctx, r: &mut Req, src: &str) -> Option<anyhow::Result<()>> {
+    let Some(name) = being_installed(st, src) else {
+        stop_waiting_for_install(r, src);
+        return None;
+    };
+    if install_waited_out(r, src).is_some() {
+        stop_waiting_for_install(r, src);
+        return None; // the step runs and says what is missing
+    }
+    Some(park_for_install(st, r, src, name, false))
+}
+
+/// The request goes on with `src`: it no longer waits for a plugin's install.
+fn stop_waiting_for_install(r: &mut Req, src: &str) {
+    if let Some(d) = r.d.as_object_mut() {
+        if d.get("wait").is_some_and(|w| w["reason"] == storage::PLUGIN_INSTALL) {
+            d.remove("wait");
+        }
+        if d.get("install_wait").is_some_and(|w| w["source"] == src) {
+            d.remove("install_wait");
+        }
+    }
+}
+
+/// Park the request until `src`'s plugin is installed: `waiting` (reason "plugin_install"), "Waiting for the
+/// streamrip plugin to finish installing". `in_sources`: a request's source step (it goes first in its
+/// sources again, and the queue goes on from there); else a link or a pick, started again. The queue looks at
+/// it again every few seconds ([`super::queue`]). Writes only what changed.
+pub(super) fn park_for_install(st: &impl Ctx, r: &mut Req, src: &str, name: &str, in_sources: bool) -> anyhow::Result<()> {
+    check(st, r.id)?;
+    if in_sources {
+        let mut srcs: Vec<Value> = r.d["sources"].as_array().cloned().unwrap_or_default();
+        srcs.insert(0, json!(src));
+        r.d["sources"] = json!(srcs);
+    }
+    let mut changed = false;
+    if r.d["install_wait"]["source"].as_str() != Some(src) {
+        r.d["install_wait"] = json!({ "source": src, "since": now(), "step": if in_sources { "source" } else { "start" } });
+        log_push(r, format!("{src}: waiting for the {name} plugin to finish installing (Encore installs the programs that were in use before the upgrade)"));
+        changed = true;
+    }
+    let wait = json!({ "reason": storage::PLUGIN_INSTALL, "since": r.d["install_wait"]["since"] });
+    if r.d["wait"] != wait {
+        r.d["wait"] = wait;
+        changed = true;
+    }
+    let msg = format!("Waiting for the {name} plugin to finish installing");
+    if changed || r.s("status") != "waiting" || r.s("message") != msg || r.s("source") != src {
+        upd(st, r, &[("status", json!("waiting")), ("source", json!(src)), ("progress", json!(0)), ("message", json!(msg))]);
+    }
+    Ok(())
+}
+
 /// A Soulseek download (a picked file, or a request's Soulseek step) that can't go on while the session is
 /// down waits for Soulseek ([`park_for_soulseek`]).
 pub(super) fn park_download(st: &impl Ctx, r: &mut Req, when: &str) -> anyhow::Result<()> {
@@ -188,14 +294,20 @@ pub(super) fn park_download(st: &impl Ctx, r: &mut Req, when: &str) -> anyhow::R
 
 pub(super) fn source_order(st: &impl Ctx, r: &Req) -> Vec<String> {
     let lossless_only = r.d["lossless_only"].as_bool().unwrap_or(false);
-    let order = arrange(&st.cfg().str("source_order"), st.cfg().bool("quality_first"), lossless_only, st.cfg().bool("ytdlp_last_resort"));
-    let album = r.s("kind") == "album";
+    // the sources of plugin programs: the lossless ones count with the lossless options
+    let plugins = st.plugins().plugin_sources();
+    let lossless: Vec<String> = plugins.iter().filter(|p| p.lossless).map(|p| p.id.clone()).collect();
+    let order = arrange(&st.cfg().str("source_order"), st.cfg().bool("quality_first"), lossless_only, st.cfg().bool("ytdlp_last_resort"), &lossless);
+    let kind = r.s("kind");
+    let album = kind == "album";
+    // every source through its plugin: installed and switched on (the registry), then set up
     let avail = |s: &str| match s {
         "torznab" => torznab::enabled(st) && album,
         "slskd" | "slskd_lossless" => slskd::enabled(st),
-        "ytdlp" => ytdlp::enabled(st) || st.cfg().bool("ytdlp_last_resort"),
-        "streamrip" => streamrip::enabled(st),
-        _ => false,
+        "ytdlp" => ytdlp::plugin_on(st) && (ytdlp::enabled(st) || st.cfg().bool("ytdlp_last_resort")),
+        // still being installed after the upgrade: kept in its place, the request waits for it there
+        "streamrip" => streamrip::enabled(st) || being_installed(st, "streamrip").is_some(),
+        other => plugins.iter().any(|p| p.id == other && p.enabled && p.kinds.contains(&kind)),
     };
     order.into_iter().filter(|s| avail(s)).collect()
 }
@@ -207,7 +319,7 @@ pub(super) fn source_order(st: &impl Ctx, r: &Req) -> Vec<String> {
 /// Soulseek has no copy in any format otherwise – and only then the lossy fallbacks (Soulseek in any
 /// format, YouTube Music). A lossless-only request keeps the indexers too: their search keeps only
 /// lossless releases then.
-fn arrange(source_order: &str, quality_first: bool, lossless_only: bool, ytdlp_last_resort: bool) -> Vec<String> {
+fn arrange(source_order: &str, quality_first: bool, lossless_only: bool, ytdlp_last_resort: bool, lossless_plugins: &[String]) -> Vec<String> {
     let mut order: Vec<String> = source_order.split(',').map(|s| s.trim().to_lowercase())
         // qobuz / tidal / deezer are streamrip services: the first one marks where streamrip runs
         .map(|s| if streamrip::SERVICES.contains(&s.as_str()) { "streamrip".to_string() } else { s })
@@ -219,7 +331,8 @@ fn arrange(source_order: &str, quality_first: bool, lossless_only: bool, ytdlp_l
     }
     if quality_first || lossless_only {
         // every lossless option first, then lossy fallbacks (each part in the admin's order)
-        let first = |s: &String| s == "streamrip" || s == "torznab";
+        let plugin = |s: &String| lossless_plugins.contains(s);
+        let first = |s: &String| s == "streamrip" || s == "torznab" || plugin(s);
         let mut lossless: Vec<String> = order.iter().filter(|s| *s == "streamrip").cloned().collect();
         if order.iter().any(|s| s == "slskd") {
             lossless.push("slskd_lossless".into());
@@ -227,11 +340,13 @@ fn arrange(source_order: &str, quality_first: bool, lossless_only: bool, ytdlp_l
         if order.iter().any(|s| s == "torznab") {
             lossless.push("torznab".into());
         }
+        // a plugin program that delivers lossless files: after the builtin lossless options, in the admin's order
+        lossless.extend(order.iter().filter(|s| plugin(s)).cloned());
         lossless.extend(order.iter().filter(|s| !first(s)).cloned());
         order = lossless;
     }
     if lossless_only {
-        order.retain(|s| ["streamrip", "slskd_lossless", "torznab"].contains(&s.as_str()));
+        order.retain(|s| ["streamrip", "slskd_lossless", "torznab"].contains(&s.as_str()) || lossless_plugins.contains(s));
     } else if ytdlp_last_resort {
         // downloads should basically never fail: YouTube Music is always the final fallback
         order.retain(|s| s != "ytdlp");
@@ -248,8 +363,8 @@ fn arrange(source_order: &str, quality_first: bool, lossless_only: bool, ytdlp_l
 pub(super) async fn start_pick(st: &impl Ctx, r: &mut Req) -> anyhow::Result<()> {
     let pick = r.d["pick"].clone();
     r.d["sources"] = json!([]);
-    if !r.d["soulseek_wait"].is_object() {
-        r.d["log"] = json!([]); // a pick that waited for Soulseek keeps the line that says so
+    if !r.d["soulseek_wait"].is_object() && !r.d["install_wait"].is_object() {
+        r.d["log"] = json!([]); // a pick that waited for Soulseek (or a plugin's install) keeps the line that says so
     }
     let src = pick["source"].as_str().unwrap_or("");
     let url = pick["payload"]["url"].as_str().unwrap_or("").to_string();
@@ -275,18 +390,35 @@ pub(super) async fn start_pick(st: &impl Ctx, r: &mut Req) -> anyhow::Result<()>
             torznab_try_next(st, r, "").await?
         }
         "deezer" | "tidal" | "qobuz" | "link" if src != "link" || RIP_LINK.is_match(&url) => {
+            if let Some(why) = wait_for_install(st, r, "streamrip") {
+                return why;
+            }
             if !streamrip::enabled(st) {
-                fail(st, r, "Qobuz/Tidal/Deezer links need streamrip switched on in Settings → Downloads → Qobuz / Tidal / Deezer (streamrip)").await;
+                fail(st, r, "Qobuz/Tidal/Deezer links need the streamrip plugin switched on in Settings → Plugins → streamrip").await;
                 return Ok(());
             }
             upd(st, r, &[("source", json!("streamrip"))]);
             start_streamrip(st, r, Some(vec![url])).await?
         }
         "ytmusic" | "link" => {
+            if let Some(why) = wait_for_install(st, r, "ytdlp") {
+                return why;
+            }
+            if !ytdlp::plugin_on(st) {
+                fail(st, r, "YouTube Music and links need the yt-dlp plugin – install it under Settings → Plugins").await;
+                return Ok(());
+            }
             upd(st, r, &[("source", json!("ytdlp"))]);
             start_ytdlp(st, r, Some(url)).await?
         }
-        other => Out::Next(format!("unknown source {other}")),
+        // a plugin program's result: downloaded through the registry
+        other => match crate::sources::plugin::find(st, other) {
+            Some(p) => {
+                upd(st, r, &[("source", json!(p.id))]);
+                start_plugin(st, r, &p, Some(pick["payload"].clone())).await?
+            }
+            None => Out::Next(format!("unknown source {other}")),
+        },
     };
     if let Out::Next(why) = out {
         // a picked Soulseek file whose user is offline: the request says what to do instead of "All
@@ -436,7 +568,7 @@ mod tests {
     use super::arrange;
 
     fn order(setting: &str, quality_first: bool, lossless_only: bool) -> Vec<String> {
-        arrange(setting, quality_first, lossless_only, true)
+        arrange(setting, quality_first, lossless_only, true, &[])
     }
 
     /// The README's order with highest quality first: Qobuz/Tidal/Deezer → FLAC on Soulseek →
@@ -454,7 +586,17 @@ mod tests {
         assert_eq!(order("deezer,torznab,ytdlp", true, false), ["streamrip", "torznab", "ytdlp"]);
         // without highest quality first the admin's order stands
         assert_eq!(order("tidal,slskd,torznab,ytdlp", false, false), ["streamrip", "slskd", "torznab", "ytdlp"]);
-        assert_eq!(arrange("ytdlp,slskd", false, false, false), ["torznab", "ytdlp", "slskd"]);
+        assert_eq!(arrange("ytdlp,slskd", false, false, false, &[]), ["torznab", "ytdlp", "slskd"]);
+    }
+
+    /// A plugin program's source keeps its place in the admin's order; a lossless one joins the lossless
+    /// options (after the builtin ones) with highest quality first and for a lossless copy, a lossy one does not.
+    #[test]
+    fn plugin_sources_take_their_place() {
+        let lossless = vec!["tone".to_string()];
+        assert_eq!(arrange("tone,deezer,slskd,lossy,ytdlp", false, false, true, &lossless), ["tone", "streamrip", "slskd", "lossy", "torznab", "ytdlp"]);
+        assert_eq!(arrange("deezer,slskd,lossy,tone,ytdlp", true, false, true, &lossless), ["streamrip", "slskd_lossless", "torznab", "tone", "slskd", "lossy", "ytdlp"]);
+        assert_eq!(arrange("deezer,slskd,lossy,tone,ytdlp", true, true, true, &lossless), ["streamrip", "slskd_lossless", "torznab", "tone"]);
     }
 
     /// A request for a lossless copy (an upgrade) asks the indexers too: their search keeps only lossless

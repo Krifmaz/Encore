@@ -15,6 +15,7 @@ pub mod fields;
 pub mod invites;
 pub mod language;
 pub mod playback;
+pub mod plugins;
 pub mod server;
 pub mod tasks;
 pub mod this_computer;
@@ -43,6 +44,8 @@ pub enum Section {
     General,
     Library,
     Downloads,
+    /// The plugins (0.32): sources, download clients, connections and tools, installed, updated and set up.
+    Plugins,
     Integrations,
     /// Server processing (Cadenza).
     Processing,
@@ -59,7 +62,7 @@ pub enum Section {
 }
 
 impl Section {
-    pub const ALL: [Section; 20] = [
+    pub const ALL: [Section; 21] = [
         Section::Account,
         Section::Appearance,
         Section::Language,
@@ -70,6 +73,7 @@ impl Section {
         Section::General,
         Section::Library,
         Section::Downloads,
+        Section::Plugins,
         Section::Integrations,
         Section::Processing,
         Section::Accounts,
@@ -95,6 +99,7 @@ impl Section {
             Section::General => "general",
             Section::Library => "library",
             Section::Downloads => "downloads",
+            Section::Plugins => "plugins",
             Section::Integrations => "integrations",
             Section::Processing => "processing",
             Section::Accounts => "accounts",
@@ -110,11 +115,18 @@ impl Section {
 
     /// The section of a web page id, including the old aliases (`apps`, the page Apps & sources was
     /// until R2, opens Downloads; `tagging` Library; `services` Integrations) and the ids of single
-    /// cards (`torznab` opens Downloads). A card id is also remembered, so the section opens with
-    /// that card unfolded (see [`take_focus`]), the way the web's `#/settings?s=torznab` link does.
+    /// cards (`verify` opens Library; `torznab`, a source card on Downloads until 0.32, opens Plugins
+    /// with that plugin's card). A card id is also remembered, so the section opens with that card
+    /// unfolded (see [`take_focus`]), the way the web's `#/settings?s=torznab` link does.
     pub fn by_id(id: &str) -> Option<Section> {
         if let Some(s) = Section::ALL.into_iter().find(|s| s.id() == id) {
             return Some(s);
+        }
+        if plugins::opens_plugins(id) {
+            if let Some(p) = plugins::card_for(id) {
+                *FOCUS.lock().unwrap_or_else(|e| e.into_inner()) = Some(p);
+            }
+            return Some(Section::Plugins);
         }
         match id {
             "apps" => Some(Section::Downloads),
@@ -145,6 +157,7 @@ impl Section {
             Section::General => "General",
             Section::Library => "Library",
             Section::Downloads => "Downloads",
+            Section::Plugins => "Plugins",
             Section::Integrations => "Integrations",
             Section::Processing => "Server processing",
             Section::Accounts => "Email & notifications",
@@ -166,6 +179,7 @@ impl Section {
             Section::General
             | Section::Library
             | Section::Downloads
+            | Section::Plugins
             | Section::Integrations
             | Section::Processing
             | Section::Accounts
@@ -206,6 +220,7 @@ pub struct State {
     pub users: users::State,
     pub invites: invites::State,
     pub server: server::State,
+    pub plugins: plugins::State,
     pub diagnostics: diagnostics::State,
     pub files: crate::pages::files::State,
     pub computer: this_computer::State,
@@ -222,6 +237,7 @@ pub enum Message {
     Users(users::Message),
     Invites(invites::Message),
     Server(server::Message),
+    Plugins(plugins::Message),
     Diagnostics(diagnostics::Message),
     Files(crate::pages::files::Message),
     Computer(this_computer::Message),
@@ -248,6 +264,7 @@ pub fn open(state: &mut State, section: Section, ctx: &mut Ctx) -> Task<Message>
         | Section::Contribute
         | Section::Blocked
         | Section::Tasks => server::open(&mut state.server, section, ctx).map(Message::Server),
+        Section::Plugins => plugins::open(&mut state.plugins, ctx).map(Message::Plugins),
         Section::Diagnostics => diagnostics::open(&mut state.diagnostics, ctx).map(Message::Diagnostics),
         Section::Files => crate::pages::files::open(&mut state.files, ctx).map(Message::Files),
         Section::Computer => this_computer::open(&mut state.computer, ctx).map(Message::Computer),
@@ -268,6 +285,7 @@ pub fn update(state: &mut State, msg: Message, ctx: &mut Ctx) -> Task<Message> {
         Message::Users(m) => users::update(&mut state.users, m, ctx).map(Message::Users),
         Message::Invites(m) => invites::update(&mut state.invites, m, ctx).map(Message::Invites),
         Message::Server(m) => server::update(&mut state.server, m, ctx).map(Message::Server),
+        Message::Plugins(m) => plugins::update(&mut state.plugins, m, ctx).map(Message::Plugins),
         Message::Diagnostics(m) => diagnostics::update(&mut state.diagnostics, m, ctx).map(Message::Diagnostics),
         Message::Files(m) => crate::pages::files::update(&mut state.files, m, ctx).map(Message::Files),
         Message::Computer(m) => this_computer::update(&mut state.computer, m, ctx).map(Message::Computer),
@@ -320,6 +338,7 @@ pub fn view<'a>(state: &'a State, ctx: &Ctx<'a>) -> El<'a, Message> {
         | Section::Contribute
         | Section::Blocked
         | Section::Tasks => server::view(&state.server, ctx).map(Message::Server),
+        Section::Plugins => plugins::view(&state.plugins, ctx).map(Message::Plugins),
         Section::Diagnostics => diagnostics::view(&state.diagnostics, ctx).map(Message::Diagnostics),
         Section::Files => crate::pages::files::view(&state.files, ctx).map(Message::Files),
         Section::Computer => this_computer::view(&state.computer, ctx).map(Message::Computer),
@@ -352,6 +371,7 @@ pub fn overlay<'a>(state: &'a State, ctx: &Ctx<'a>) -> Option<El<'a, Message>> {
         | Section::Contribute
         | Section::Blocked
         | Section::Tasks => server::overlay(&state.server, ctx).map(|e| e.map(Message::Server)),
+        Section::Plugins => plugins::overlay(&state.plugins).map(|e| e.map(Message::Plugins)),
         Section::Diagnostics => diagnostics::overlay(&state.diagnostics, ctx).map(|e| e.map(Message::Diagnostics)),
         Section::Files => crate::pages::files::overlay(&state.files, ctx).map(|e| e.map(Message::Files)),
         Section::Computer => this_computer::overlay(&state.computer, ctx).map(|e| e.map(Message::Computer)),
@@ -372,6 +392,7 @@ pub fn subscription(state: &State) -> Subscription<Message> {
         | Section::Contribute
         | Section::Blocked
         | Section::Tasks => server::subscription(&state.server).map(Message::Server),
+        Section::Plugins => plugins::subscription(&state.plugins).map(Message::Plugins),
         Section::Files => crate::pages::files::subscription(&state.files).map(Message::Files),
         Section::Computer => this_computer::subscription(&state.computer).map(Message::Computer),
         _ => Subscription::none(),
@@ -725,13 +746,20 @@ mod tests {
         assert_eq!(Section::by_id("roon"), Some(Section::Integrations));
         assert_eq!(Section::by_id("cadenza"), Some(Section::Processing));
         assert_eq!(Section::by_id("processing"), Some(Section::Processing));
-        assert_eq!(Section::by_id("torznab"), Some(Section::Downloads));
+        // the source cards moved to Plugins (0.32): their links open the plugin's card there
+        assert_eq!(Section::by_id("torznab"), Some(Section::Plugins));
+        assert_eq!(Section::by_id("plugins"), Some(Section::Plugins));
+        assert_eq!(Section::by_id("youtube"), Some(Section::Plugins));
+        assert_eq!(Section::by_id("tools"), Some(Section::Plugins), "the Download tools card");
+        assert_eq!(Section::by_id("pipeline"), Some(Section::Downloads));
+        assert_eq!(Section::by_id("releases"), Some(Section::Downloads));
         assert_eq!(Section::by_id("sync"), Some(Section::Tasks));
         assert_eq!(Section::by_id("about"), Some(Section::General));
         assert_eq!(Section::by_id("nowhere"), None);
-        assert_eq!(Section::by_id("slskd"), Some(Section::Downloads));
+        assert_eq!(Section::by_id("slskd"), Some(Section::Plugins));
         let server: Vec<&str> = Section::ALL.into_iter().filter(|s| s.group() == "Server").map(Section::label).collect();
-        assert_eq!(server[..5], ["General", "Library", "Downloads", "Integrations", "Server processing"]);
+        assert_eq!(server[..6], ["General", "Library", "Downloads", "Plugins", "Integrations", "Server processing"]);
+        assert!(Section::Plugins.admin_only());
         // (other tests parse settings links at the same time, so only "something" is certain)
         assert!(take_focus().is_some());
         assert!(Section::Users.admin_only() && !Section::Computer.admin_only());

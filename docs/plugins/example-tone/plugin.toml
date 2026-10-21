@@ -1,0 +1,48 @@
+# Example tone: a source for plugin authors to copy. docs/contracts/plugin-manifest.md describes every key.
+
+[plugin]
+id = "example-tone"
+name = "Example tone"
+version = "0.1.0"
+description = "An example source for plugin authors: searches a short built-in list of tones and downloads the one picked as a generated sine-tone FLAC. No network, no account."
+kind = "source"
+protocol = 1
+homepage = "https://github.com/Krifmaz/Encore/tree/main/docs/plugins/example-tone"
+license = "MIT"
+commands = ["describe", "status", "test", "search", "download"]
+kinds = ["track", "album"]
+lossless = true
+needs_sign_in = false
+min_encore = "0.32.0"
+
+[run]
+script = "plugin.py"
+interpreter = "python3"
+
+# Seconds per command. Writing a 10-minute tone at 96 kHz takes Python a while on a small server.
+[run.timeouts]
+search = 10
+download = 1800
+test = 10
+
+[[settings]]
+key = "seconds"
+label = "Tone length"
+type = "number"
+default = 30
+min = 1
+max = 600
+unit = "seconds"
+help = "How long each downloaded tone lasts. A song Encore knows the length of gets a tone of that length."
+
+[[settings]]
+key = "rate"
+label = "Sample rate"
+type = "select"
+options = [["44100", "44.1 kHz"], ["48000", "48 kHz"], ["96000", "96 kHz"]]
+default = "44100"
+help = "The sample rate of the FLAC files it makes."
+
+[permissions]
+network = false
+filesystem = "folder"

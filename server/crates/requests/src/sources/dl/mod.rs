@@ -59,6 +59,23 @@ impl Client {
             _ => Client::Sab,
         }
     }
+    /// The catalog plugin of this client (encore_plugins' catalog: `qbittorrent`, `torrent-blackhole` …).
+    pub fn plugin_id(self) -> &'static str {
+        match self {
+            Client::Qbit => "qbittorrent",
+            Client::Transmission => "transmission",
+            Client::Deluge => "deluge",
+            Client::Rtorrent => "rtorrent",
+            Client::TorrentHole => "torrent-blackhole",
+            Client::Sab => "sabnzbd",
+            Client::NzbGet => "nzbget",
+            Client::NzbHole => "usenet-blackhole",
+        }
+    }
+    /// The client a catalog plugin stands for.
+    pub fn of_plugin(id: &str) -> Option<Client> {
+        ALL.into_iter().find(|c| c.plugin_id() == id)
+    }
     fn prefix(self) -> &'static str {
         match self {
             Client::Qbit => "qbit",

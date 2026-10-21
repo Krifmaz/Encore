@@ -1,9 +1,9 @@
 //! Port of web/js/pages/settings.js (show) – see docs/archive/ui-rewrite/CONTRACT.md
 //! A Settings → Server page drawn from the schema: its cards in the schema's order, under the heading of their
 //! part, each a drop-down with its title, description, Test button, fields (schema_form.rs) and Save; plus what
-//! the page has of its own: the task list (Scheduled tasks), Download tools and How requests are fulfilled
-//! (Downloads, the page with the Download pipeline card), the API key and About cards (General). Save, clear,
-//! the eye and copy buttons and Test are wired here.
+//! the page has of its own: the task list (Scheduled tasks), How requests are fulfilled (Downloads, the page
+//! with the Download pipeline card), the API key and About cards (General). Save, clear, the eye and copy
+//! buttons and Test are wired here. The source cards of Downloads are plugin cards since 0.32 (plugins.rs).
 
 use super::fields::{Field, Group};
 use super::schema_form::{bind_show_when, form_html, form_values};
@@ -54,6 +54,12 @@ pub fn visible_cards<'a>(groups: &'a [Rc<Group>], values: &Value) -> Vec<(&'a Gr
         .collect()
 }
 
+/// The cards a Server page draws: [`visible_cards`] without those that are plugin cards since 0.32 (streamrip,
+/// Torrents & Usenet, Soulseek, yt-dlp and YouTube sign-in are drawn on the Plugins page, plugins.rs).
+pub fn page_cards<'a>(groups: &'a [Rc<Group>], values: &Value) -> Vec<(&'a Group, Vec<&'a Field>)> {
+    visible_cards(groups, values).into_iter().filter(|(g, _)| !super::plugins::moved(&g.id)).collect()
+}
+
 /// The cards of a page with their part headings, as one string. `focus` is the card a link asked for (it starts
 /// open instead of the first one); a page with one card has it open. A link that names no card shown here (an
 /// alias such as `apps`, or a card this server hides) opens the first card, as a plain link to the page does.
@@ -81,18 +87,15 @@ pub async fn show_page(hub: &Rc<Hub>, id: &str) {
     let Some(page) = schema.section(id).or_else(|| schema.sections.first()) else { return };
     let values = hub.values.borrow().clone();
     let focus = hub.focus.borrow_mut().take();
-    let cards = visible_cards(&page.groups, &values);
-    // Downloads (the page with the Download pipeline card) starts with the Download tools card and ends with
-    // How requests are fulfilled
+    let cards = page_cards(&page.groups, &values);
+    // Downloads (the page with the Download pipeline card) ends with How requests are fulfilled
     let downloads = schema.holds(&page.id, "pipeline");
     let mut html = if page.id == "tasks" { r##"<div id="tasks-host" style="margin-bottom:16px"></div>"##.to_string() } else { String::new() };
-    if downloads { html.push_str(r##"<div id="tools-host"></div>"##); }
     html.push_str(&cards_html(&cards, &values, hub.reveal, focus.as_deref()));
     if downloads { html.push_str(&apps::pipeline_help()); }
     if page.id == "general" { html.push_str(&general::api_card(&hub.panel).await); html.push_str(&general::about_card().await); }
     dom::set_html(&hub.panel, &html);
     if page.id == "tasks" { if let Some(host) = dom::qs_in(&hub.panel, "#tasks-host") { dom::spawn(tasks::render_tasks(host)); } }
-    if let Some(host) = dom::qs_in(&hub.panel, "#tools-host") { dom::spawn(apps::render_tools(host, hub.clone())); }
     if let Some(f) = focus { if let Some(c) = dom::qs_in(&hub.panel, &format!(r#"[data-sec="{f}"]"#)) { c.scroll_into_view(); } }
     for card in dom::qsa_in(&hub.panel, "[data-sec]") {
         let Some(g) = schema.group(&dom::data(&card, "sec")) else { continue };
@@ -113,26 +116,53 @@ fn bind_card(hub: &Rc<Hub>, g: Rc<Group>, card: &Element, page: &str) {
             dom::spawn(async move { let _ = hub.save(&g, false, &card).await; });
         });
     }
-    {
-        let (hub2, page2) = (hub.clone(), page.to_string());
-        dom::on_each(card, "[data-clear]", "click", move |a, e| {
-            dom::prevent(e);
-            let key = dom::data(a, "clear");
-            let (hub, page) = (hub2.clone(), page2.clone());
+    bind_clear(hub, card, page);
+    bind_secret_buttons(card);
+    if let Some(t) = dom::qs_in(card, "[data-test]") {
+        let (hub2, g2, card2, out2, t2, paint2) = (hub.clone(), g.clone(), card.clone(), out.clone(), t.clone(), paint.clone());
+        dom::on(&t, "click", move |ev| {
+            dom::prevent(ev);
+            let _ = card2.set_attribute("open", "");
+            dom::set_disabled(&t2, true);
+            dom::set_html(&out2, r##"<div class="test-result"><span class="spinner"></span><span>Testing…</span></div>"##);
+            let (hub, g, card, t, paint) = (hub2.clone(), g2.clone(), card2.clone(), t2.clone(), paint2.clone());
             dom::spawn(async move {
-                let mut body = Map::new();
-                body.insert(key, Value::String(String::new()));
-                match api::put("/admin/settings", Value::Object(body)).await {
-                    Ok(v) => {
-                        *hub.values.borrow_mut() = v;
-                        toast("Cleared", "ok");
-                        show(&hub, page).await;
-                    }
-                    Err(e) => dom::console_error(&e.message),
-                }
+                let failed = |e: ApiError| json!({ "ok": false, "message": if e.message.is_empty() { "Test failed".to_string() } else { e.message } });
+                let r = match hub.save(&g, true, &card).await {
+                    Ok(()) => match api::post_empty(&format!("/system/test/{}", g.test.as_deref().unwrap_or(""))).await { Ok(r) => r, Err(e) => failed(e) },
+                    Err(e) => failed(e),
+                };
+                paint(&r);
+                dom::set_disabled(&t, false);
             });
         });
     }
+}
+
+/// A saved secret's clear link: saves it empty (PUT /admin/settings) and draws page `page` again.
+pub(super) fn bind_clear(hub: &Rc<Hub>, card: &Element, page: &str) {
+    let (hub2, page2) = (hub.clone(), page.to_string());
+    dom::on_each(card, "[data-clear]", "click", move |a, e| {
+        dom::prevent(e);
+        let key = dom::data(a, "clear");
+        let (hub, page) = (hub2.clone(), page2.clone());
+        dom::spawn(async move {
+            let mut body = Map::new();
+            body.insert(key, Value::String(String::new()));
+            match api::put("/admin/settings", Value::Object(body)).await {
+                Ok(v) => {
+                    *hub.values.borrow_mut() = v;
+                    toast("Cleared", "ok");
+                    show(&hub, page).await;
+                }
+                Err(e) => dom::console_error(&e.message),
+            }
+        });
+    });
+}
+
+/// The eye and copy buttons of saved secrets (asked for from the server only when pressed).
+pub(super) fn bind_secret_buttons(card: &Element) {
     {
         let card2 = card.clone();
         dom::on_each(card, "[data-reveal]", "click", move |b, e| {
@@ -178,25 +208,6 @@ fn bind_card(hub: &Rc<Hub>, g: Rc<Group>, card: &Element, page: &str) {
                     match secret_of(&key).await { Ok(s) => s, Err(err) => { toast(&err.message, "err"); return; } }
                 };
                 copy_text(&text);
-            });
-        });
-    }
-    if let Some(t) = dom::qs_in(card, "[data-test]") {
-        let (hub2, g2, card2, out2, t2, paint2) = (hub.clone(), g.clone(), card.clone(), out.clone(), t.clone(), paint.clone());
-        dom::on(&t, "click", move |ev| {
-            dom::prevent(ev);
-            let _ = card2.set_attribute("open", "");
-            dom::set_disabled(&t2, true);
-            dom::set_html(&out2, r##"<div class="test-result"><span class="spinner"></span><span>Testing…</span></div>"##);
-            let (hub, g, card, t, paint) = (hub2.clone(), g2.clone(), card2.clone(), t2.clone(), paint2.clone());
-            dom::spawn(async move {
-                let failed = |e: ApiError| json!({ "ok": false, "message": if e.message.is_empty() { "Test failed".to_string() } else { e.message } });
-                let r = match hub.save(&g, true, &card).await {
-                    Ok(()) => match api::post_empty(&format!("/system/test/{}", g.test.as_deref().unwrap_or(""))).await { Ok(r) => r, Err(e) => failed(e) },
-                    Err(e) => failed(e),
-                };
-                paint(&r);
-                dom::set_disabled(&t, false);
             });
         });
     }

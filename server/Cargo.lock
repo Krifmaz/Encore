@@ -661,7 +661,7 @@ dependencies = [
 
 [[package]]
 name = "encore"
-version = "2.0.0"
+version = "0.33.0"
 dependencies = [
  "anyhow",
  "axum",
@@ -685,7 +685,7 @@ dependencies = [
 
 [[package]]
 name = "encore-api"
-version = "2.0.0"
+version = "0.33.0"
 dependencies = [
  "anyhow",
  "axum",
@@ -703,6 +703,7 @@ dependencies = [
  "encore-library",
  "encore-media",
  "encore-playback",
+ "encore-plugins",
  "encore-requests",
  "encore-sync",
  "encore-system",
@@ -734,7 +735,7 @@ dependencies = [
 
 [[package]]
 name = "encore-config"
-version = "2.0.0"
+version = "0.33.0"
 dependencies = [
  "anyhow",
  "encore-core",
@@ -746,7 +747,7 @@ dependencies = [
 
 [[package]]
 name = "encore-core"
-version = "2.0.0"
+version = "0.33.0"
 dependencies = [
  "anyhow",
  "axum",
@@ -764,7 +765,7 @@ dependencies = [
 
 [[package]]
 name = "encore-db"
-version = "2.0.0"
+version = "0.33.0"
 dependencies = [
  "anyhow",
  "encore-core",
@@ -776,7 +777,7 @@ dependencies = [
 
 [[package]]
 name = "encore-files"
-version = "2.0.0"
+version = "0.33.0"
 dependencies = [
  "anyhow",
  "encore-config",
@@ -796,7 +797,7 @@ dependencies = [
 
 [[package]]
 name = "encore-http"
-version = "2.0.0"
+version = "0.33.0"
 dependencies = [
  "anyhow",
  "encore-config",
@@ -813,7 +814,7 @@ dependencies = [
 
 [[package]]
 name = "encore-jobs"
-version = "2.0.0"
+version = "0.33.0"
 dependencies = [
  "anyhow",
  "axum",
@@ -827,7 +828,7 @@ dependencies = [
 
 [[package]]
 name = "encore-library"
-version = "2.0.0"
+version = "0.33.0"
 dependencies = [
  "anyhow",
  "encore-config",
@@ -836,6 +837,7 @@ dependencies = [
  "encore-http",
  "encore-jobs",
  "encore-media",
+ "encore-plugins",
  "fancy-regex",
  "flate2",
  "futures-util",
@@ -860,13 +862,14 @@ dependencies = [
 
 [[package]]
 name = "encore-media"
-version = "2.0.0"
+version = "0.33.0"
 dependencies = [
  "anyhow",
  "encore-core",
  "encore-db",
  "encore-http",
  "encore-jobs",
+ "encore-plugins",
  "image",
  "libc",
  "lofty",
@@ -880,7 +883,7 @@ dependencies = [
 
 [[package]]
 name = "encore-playback"
-version = "2.0.0"
+version = "0.33.0"
 dependencies = [
  "anyhow",
  "axum",
@@ -888,6 +891,7 @@ dependencies = [
  "encore-core",
  "encore-db",
  "encore-media",
+ "encore-plugins",
  "futures-util",
  "hex",
  "serde",
@@ -903,8 +907,32 @@ dependencies = [
 ]
 
 [[package]]
+name = "encore-plugins"
+version = "0.33.0"
+dependencies = [
+ "anyhow",
+ "axum",
+ "encore-config",
+ "encore-core",
+ "encore-db",
+ "flate2",
+ "futures-util",
+ "hex",
+ "libc",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "sha2",
+ "tokio",
+ "tokio-util",
+ "toml",
+ "tracing",
+ "zip",
+]
+
+[[package]]
 name = "encore-requests"
-version = "2.0.0"
+version = "0.33.0"
 dependencies = [
  "anyhow",
  "axum",
@@ -915,6 +943,7 @@ dependencies = [
  "encore-http",
  "encore-library",
  "encore-media",
+ "encore-plugins",
  "encore-sync",
  "encore-system",
  "encore-vpn",
@@ -942,7 +971,7 @@ dependencies = [
 
 [[package]]
 name = "encore-sync"
-version = "2.0.0"
+version = "0.33.0"
 dependencies = [
  "anyhow",
  "base64 0.22.1",
@@ -965,7 +994,7 @@ dependencies = [
 
 [[package]]
 name = "encore-system"
-version = "2.0.0"
+version = "0.33.0"
 dependencies = [
  "anyhow",
  "axum",
@@ -975,6 +1004,7 @@ dependencies = [
  "encore-http",
  "encore-jobs",
  "encore-playback",
+ "encore-plugins",
  "flate2",
  "hex",
  "http-body-util",
@@ -990,7 +1020,7 @@ dependencies = [
 
 [[package]]
 name = "encore-vpn"
-version = "2.0.0"
+version = "0.33.0"
 dependencies = [
  "base64 0.22.1",
  "boringtun",

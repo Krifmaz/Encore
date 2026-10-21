@@ -1,6 +1,9 @@
-# Encore runs Soulseek itself (its Soulseek engine, slskd, is installed from Settings → Downloads → Download tools).
+# Encore runs Soulseek itself (its Soulseek engine, slskd, is the Soulseek (slskd) plugin: install it under Settings → Plugins).
 # Only Encore is published to the outside world (web UI + Soulseek peer port).
-# Torrents/Usenet: add Prowlarr + qBittorrent/SABnzbd to this network and fill in Settings → Downloads → Torrents & Usenet.
+# Torrents/Usenet: add Prowlarr + qBittorrent/SABnzbd to this network, install the Torrents & Usenet (Prowlarr) plugin and
+# your client's plugin under Settings → Plugins and fill in their cards.
+# A new install has no plugin installed: the SOULSEEK_*, STREAMRIP_* and TORZNAB_* settings below take effect once
+# their plugin is installed under Settings → Plugins (an upgrade from 0.30 keeps what was in use).
 #
 # Paths are absolute on purpose: relative paths (./config) resolve to odd places
 # under Portainer and other stack managers. Change APPDATA/MUSIC_DIR/DOWNLOADS_DIR
@@ -14,6 +17,12 @@ services:
     # build: .                          # or build from this repo instead
     container_name: encore
     restart: unless-stopped
+    # Plugins written by other people run in full isolation only with these two (README, "Plugins"; the
+    # catalog's plugins are fine without them). They switch off Docker's seccomp and AppArmor profiles for this
+    # container.
+    # security_opt:
+    #   - seccomp=unconfined
+    #   - apparmor=unconfined
     ports:
       - "8080:8080"
       - "2234:2234"   # Soulseek peer port (forward it on your router; not used while the VPN is on)
@@ -50,7 +59,7 @@ services:
 
   # ── Soulseek through a VPN? ───────────────────────────────────────────────
   # Encore has WireGuard built in and sends only Soulseek through it: no gluetun, no NET_ADMIN, no tun device.
-  # Turn it on under Settings → Downloads → Soulseek → VPN for Soulseek (or VPN_ENABLED / VPN_WIREGUARD_CONFIG).
+  # Turn it on under Settings → Plugins → Soulseek → VPN for Soulseek (or VPN_ENABLED / VPN_WIREGUARD_CONFIG).
 
 networks:
   music:

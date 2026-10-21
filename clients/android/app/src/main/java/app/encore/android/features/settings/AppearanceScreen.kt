@@ -249,7 +249,7 @@ fun LanguageScreen(nav: Nav, onBack: () -> Unit) {
                 val t = st["translator"] as? JsonPrimitive
                 if (t != null && !t.isString && t.content == "false") {
                     Text(
-                        "The Translator is not installed on this server, so only official translations show. An admin can install it under Settings → Downloads → Download tools.",
+                        "The Translator is not installed on this server, so only official translations show. An admin can install it under Settings → Plugins.",
                         style = MaterialTheme.typography.bodySmall,
                         color = EncoreColors.Warn,
                     )

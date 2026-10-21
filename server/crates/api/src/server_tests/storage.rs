@@ -34,7 +34,7 @@ impl Env {
 
 /// A server whose library, staging folder and Soulseek folder are its own; no MusicBrainz answers.
 fn env(name: &str) -> Env {
-    let ts = TestServer::new(&format!("storage-{name}"));
+    let ts = TestServer::new(&format!("storage-{name}")).with_sources();
     let (lib, staging, slsk) = (ts.dir.join("music"), ts.dir.join("staging"), ts.dir.join("slskd"));
     for d in [&lib, &staging, &slsk] {
         std::fs::create_dir_all(d).unwrap();

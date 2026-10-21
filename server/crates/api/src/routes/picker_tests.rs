@@ -11,6 +11,8 @@ fn state(name: &str) -> (AppState, std::path::PathBuf) {
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).unwrap();
     let st = crate::test_support::state_in(&dir);
+    // the sources' plugins installed (an upgraded server's, adopted): the states below are the sources' own
+    crate::test_support::with_sources(&st);
     (st, dir)
 }
 
@@ -137,7 +139,7 @@ async fn every_source_is_listed_with_its_state() {
     assert_eq!(e.status.as_u16(), 409);
     assert_eq!(e.detail, "Deezer needs an ARL cookie");
     let x = e.extra.unwrap();
-    assert_eq!((x["state"].as_str(), x["settings"].as_str(), x["settings_label"].as_str()), (Some("sign_in"), Some("#/settings?s=streamrip"), Some("Settings → Downloads → Qobuz / Tidal / Deezer (streamrip)")));
+    assert_eq!((x["state"].as_str(), x["settings"].as_str(), x["settings_label"].as_str()), (Some("sign_in"), Some("#/settings?s=streamrip"), Some("Settings → Plugins → streamrip")));
     // the accounts: the ARL in the settings, a Tidal token and a Qobuz login in config.toml
     st.cfg.set_many(&json!({ "streamrip_deezer_arl": "arl-cookie" }));
     assert_eq!(state_of(&st, "deezer").0, "ready");
@@ -507,7 +509,7 @@ async fn the_picker_searches_the_indexers_with_the_names_as_the_worker_does() {
 #[tokio::test]
 async fn members_get_no_links_to_server_settings() {
     use crate::test_support::{call, user, TestServer};
-    let ts = TestServer::new("picker-member-links");
+    let ts = TestServer::new("picker-member-links").with_sources();
     ts.st.cfg.set_many(&json!({ "streamrip_enabled": false }));
     user(&ts.st, "boss-links", "admin");
     user(&ts.st, "mia-links", "user");
@@ -526,7 +528,7 @@ async fn members_get_no_links_to_server_settings() {
                                            v["settings_label"].as_str().unwrap_or("").to_string());
         if admin {
             let want = ("Deezer downloads need streamrip switched on".to_string(), "#/settings?s=streamrip".to_string(),
-                        "Settings → Downloads → Qobuz / Tidal / Deezer (streamrip)".to_string());
+                        "Settings → Plugins → streamrip".to_string());
             assert_eq!(got(&deezer, "hint"), want);
             assert_eq!(got(&err, "detail"), want);
         } else {

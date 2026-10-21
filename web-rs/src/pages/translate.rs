@@ -111,7 +111,7 @@ fn paint(st: &Rc<Lang>) {
         esc(&l.s("code")), if l.s("code") == lang { "selected" } else { "" }, esc(&l.s("name")))).collect();
     let s = &st.status;
     let missing = if s.g("translator").as_bool() == Some(false) {
-        r#"<div class="small" style="color:var(--warn)">The Translator is not installed on this server, so only official translations show. An admin can install it under Settings → Downloads → Download tools.</div>"#.to_string()
+        r#"<div class="small" style="color:var(--warn)">The Translator is not installed on this server, so only official translations show. An admin can install it under Settings → Plugins.</div>"#.to_string()
     } else { String::new() };
     let counts = if !s.is_nullish("rows") && s.has("rows") {
         format!(r#"<div class="small faint">{} of {} titles have a translation · {} waiting for the Translator{}</div>"#,

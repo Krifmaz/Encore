@@ -2,8 +2,6 @@ package app.encore.android.features.settings
 
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
-import androidx.compose.foundation.layout.ExperimentalLayoutApi
-import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxWidth
@@ -32,7 +30,6 @@ import app.encore.android.core.obj
 import app.encore.android.core.parseJsonObject
 import app.encore.android.core.str
 import app.encore.android.data.api.SettingsApi
-import app.encore.android.ui.components.Badge
 import app.encore.android.ui.components.SmallButton
 import app.encore.android.ui.components.Toasts
 import app.encore.android.ui.screens.ConfirmDialog
@@ -48,145 +45,10 @@ import kotlinx.serialization.json.JsonElement
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
 
-// What the Settings → Downloads and Server processing cards show besides their fields (web-rs/src/settings/apps.rs):
-// the Download tools card, the Soulseek engine's status and the VPN's state with Test VPN, the Cadenza pre-render cache
-// and the engine's own settings, the streamrip config reset, How requests are fulfilled; and General's API key and
-// About.
-
-// ---- Download tools ------------------------------------------------------------------------------------------------
-
-/**
- * Settings → Downloads → Download tools: yt-dlp, streamrip, Cadenza, slskd and the Translator update in place,
- * with the automatic-update switches and the Translator's model (saved one key at a time).
- */
-@Composable
-fun DownloadToolsCard(api: SettingsApi, state: SchemaFormState, onOpen: (String) -> Unit) {
-    val p = MaterialTheme.palette
-    val scope = rememberCoroutineScope()
-    var tools by remember { mutableStateOf<List<JsonObject>?>(null) }
-    var busy by remember { mutableStateOf<String?>(null) }
-    var checking by remember { mutableStateOf(false) }
-    var reset by remember { mutableStateOf<JsonObject?>(null) }
-    suspend fun reload() {
-        try { tools = SettingsRules.toolList(withContext(Dispatchers.IO) { api.tools() }) } catch (e: CancellationException) { throw e } catch (_: Exception) {}
-    }
-    // a server without the endpoint (or an error): nothing shows, as on the web
-    LaunchedEffect(Unit) { reload() }
-    val list = tools ?: return
-    val values = state.values
-    SetCard(Modifier.padding(bottom = 12.dp)) {
-        CardHead("Download tools") {
-            SmallButton(if (checking) "Checking…" else "Check for updates", iconRes = R.drawable.ic_refresh, enabled = !checking && busy == null) {
-                checking = true
-                scope.launch {
-                    try { tools = SettingsRules.toolList(withContext(Dispatchers.IO) { api.toolsCheck() }) } catch (e: CancellationException) { throw e } catch (e: Exception) { Toasts.show(e.message ?: "Something went wrong", "err") }
-                    checking = false
-                }
-            }
-        }
-        Muted("yt-dlp, streamrip, Cadenza, slskd and the Translator update in place – no new Encore image needed. Updates are kept in the config folder.")
-        for (t in list) {
-            ToolRow(t, busy) { action ->
-                val id = t.str("id")
-                when (action) {
-                    "update" -> {
-                        val name = t.str("name").ifEmpty { id }
-                        val install = SettingsRules.toolInstall(t)
-                        busy = id
-                        scope.launch {
-                            try {
-                                val r = withContext(Dispatchers.IO) { api.toolUpdate(id) }
-                                Toasts.show("$name ${if (install) "installed" else "updated to"} ${r.str("installed").ifEmpty { r.str("latest") }}", "ok")
-                            } catch (e: CancellationException) {
-                                throw e
-                            } catch (e: Exception) {
-                                Toasts.show(e.message ?: "Something went wrong", "err")
-                            }
-                            busy = null
-                            reload()
-                        }
-                    }
-                    "reset" -> reset = t
-                }
-            }
-        }
-        if (values.containsKey("translator_model")) {
-            val locked = SchemaRules.source(values, "translator_model") == "env"
-            Dropdown("Translator model", SettingsRules.TRANSLATOR_MODELS, SchemaRules.textOf(values["translator_model"]), enabled = !locked) { v ->
-                scope.serverCall(after = { r: JsonObject ->
-                    state.replaceValues(r)
-                    Toasts.show("Saved – Install or Update the Translator to download this model", "ok")
-                    scope.launch { reload() }
-                }) { api.putSettings(JsonObject(mapOf("translator_model" to JsonPrimitive(v)))) }
-            }
-            Muted("Small runs on most servers (about 4 GB of memory while it works); Best translates better and needs about 7 GB. It only runs while there is something to translate.")
-        }
-        for ((key, label) in SettingsRules.TOOL_TOGGLES) {
-            if (!values.containsKey(key)) continue
-            val locked = SchemaRules.source(values, key) == "env"
-            SwitchRow(label, SchemaRules.truthy(values[key]), enabled = !locked) { on ->
-                scope.serverCall(ok = "Saved", after = { r: JsonObject -> state.replaceValues(r) }) { api.putSettings(JsonObject(mapOf(key to JsonPrimitive(on)))) }
-            }
-        }
-        Muted("Every tool is checked daily; updates install by themselves only where the switch is on. Change the schedule under")
-        TextLink("Scheduled tasks") { onOpen("tasks") }
-    }
-    reset?.let { t ->
-        val (link, ask, done) = SettingsRules.toolReset(t)
-        ConfirmDialog(link, ask, "OK", danger = true, onDismiss = { reset = null }) {
-            val id = t.str("id")
-            scope.launch {
-                try {
-                    withContext(Dispatchers.IO) { api.toolReset(id) }
-                    Toasts.show(done, "ok")
-                } catch (e: CancellationException) {
-                    throw e
-                } catch (e: Exception) {
-                    Toasts.show(e.message ?: "Something went wrong", "err")
-                }
-                reload()
-            }
-        }
-    }
-}
-
-@OptIn(ExperimentalLayoutApi::class)
-@Composable
-private fun ToolRow(t: JsonObject, busy: String?, onAction: (String) -> Unit) {
-    val p = MaterialTheme.palette
-    val id = t.str("id")
-    Column(Modifier.fillMaxWidth().padding(vertical = 6.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
-        FlowRow(horizontalArrangement = Arrangement.spacedBy(6.dp), verticalArrangement = Arrangement.spacedBy(2.dp)) {
-            Text(t.str("name").ifEmpty { id }, style = MaterialTheme.typography.bodyMedium, fontWeight = FontWeight.SemiBold)
-            Mono(if (SchemaRules.truthy(t["installed"])) t.str("installed") else "not installed", color = p.muted)
-            if (t.str("source") == "updated" && id != "slskd" && id != "translator") Muted("(updated)")
-        }
-        Muted(t.str("note"))
-        if (t.str("error").isNotEmpty()) Text(t.str("error"), style = MaterialTheme.typography.bodySmall, color = EncoreColors.Err)
-        Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-            if (busy == id) {
-                Spinner(14.dp)
-                Muted(if (SettingsRules.toolInstall(t)) "Installing…" else "Updating…")
-            } else {
-                when (val a = SettingsRules.toolAction(t)) {
-                    is SettingsRules.ToolAction.Install ->
-                        SmallButton("Install" + if (a.latest.isNotEmpty()) " ${a.latest}" else "", iconRes = R.drawable.ic_download, primary = true, enabled = busy == null) { onAction("update") }
-                    is SettingsRules.ToolAction.Update ->
-                        SmallButton("Update to ${a.latest}", iconRes = R.drawable.ic_download, primary = true, enabled = busy == null) { onAction("update") }
-                    is SettingsRules.ToolAction.Available -> Badge("${a.latest} available", kind = "warn")
-                    SettingsRules.ToolAction.UpToDate -> Badge("Up to date", kind = "ok")
-                    SettingsRules.ToolAction.NotChecked -> Muted("Not checked yet", color = p.faint)
-                    SettingsRules.ToolAction.None -> {}
-                }
-            }
-            if (t.bool("resettable") && t.bool("updatable") && busy == null) {
-                TextLink(SettingsRules.toolReset(t).first, color = p.muted) { onAction("reset") }
-            }
-        }
-    }
-}
-
-private fun JsonObject.bool(key: String): Boolean = SchemaRules.truthy(this[key])
+// What the source cards (plugin cards on Settings → Plugins since 0.32) and the Server processing card show besides
+// their fields (web-rs/src/settings/apps.rs): the Soulseek engine's status and the VPN's state with Test VPN, the
+// streamrip config reset, the Cadenza pre-render cache and the engine's own settings; How requests are fulfilled at the
+// end of Downloads; and General's API key and About.
 
 // ---- Soulseek: the engine's status, the VPN's state and Test VPN ----------------------------------------------------
 
@@ -483,8 +345,9 @@ fun StreamripConfigBlock(api: SettingsApi) {
 
 // ---- How requests are fulfilled (the end of Downloads) -----------------------------------------------------------------
 
+/** The end of Downloads; [plugins]: this server's sources are plugins (0.32), set up under Settings → Plugins. */
 @Composable
-fun PipelineHelp() {
+fun PipelineHelp(plugins: Boolean, onOpen: (String) -> Unit) {
     val steps = listOf(
         "Library check" to "if the album/track is already in your library (by MusicBrainz id or name) it's marked available instantly.",
         "streamrip" to "lossless from Qobuz, Tidal or Deezer with your own accounts, matched by ISRC.",
@@ -512,6 +375,10 @@ fun PipelineHelp() {
                     )
                 }
             }
+        }
+        if (plugins) {
+            Muted("Each source is a plugin: install, update or disable it under")
+            TextLink("Settings → Plugins") { onOpen("plugins") }
         }
     }
 }

@@ -42,6 +42,9 @@ async fn main() -> anyhow::Result<()> {
     let port: u16 = std::env::var("ENCORE_PORT").ok().and_then(|p| p.parse().ok()).unwrap_or(8080);
     let addr = SocketAddr::from(([0, 0, 0, 0], port));
     tracing::info!("Encore {VERSION} listening on {addr}");
+    // the builtin plugins' adapters, and on the first start after an upgrade what was in use adopted (its
+    // missing programs installed in the background); kept for as long as the server runs
+    let _plugins = encore_api::start_plugins(&st);
     start_library(&st);
     // the artist index, the tools' versions and Home's new releases, made before anyone asks
     encore_api::warm_up(&st);
@@ -88,6 +91,12 @@ fn background(st: &AppState) -> Vec<Arc<dyn Supervisor>> {
         with_stop("translator", { let st = s.clone(); move || encore_library::translate::worker(st.clone()) }, {
             let st = s.clone();
             move || { let st = st.clone(); async move { encore_library::translate::llama::stop(&st).await } }
+        }),
+        // plugin programs run only while a command runs: before a restart the running ones are stopped
+        // (SIGTERM to their processes, SIGKILL to their groups 10 seconds later)
+        with_stop("plugins", std::future::pending::<()>, {
+            let st = s.clone();
+            move || { let st = st.clone(); async move { st.plugins.stop_all().await } }
         }),
     ]
 }

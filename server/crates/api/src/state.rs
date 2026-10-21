@@ -48,6 +48,8 @@ pub struct AppState {
     pub system: encore_system::System,
     /// what the API's own routes keep (list answers, slots of slow routes, Soulseek searches)
     pub web: Web,
+    /// the plugins: the catalog, what is installed (the plugins table), the installer, the sandbox
+    pub plugins: encore_plugins::Registry,
 }
 
 /// Most bytes the answers of other services may take in memory (`AppState::cache`).
@@ -142,10 +144,11 @@ impl AppState {
         let busy = encore_jobs::Busy::default();
         let jobs = encore_jobs::Jobs::default();
         let scheduler = encore_jobs::Scheduler::new(db.clone(), cfg.clone(), jobs.clone());
+        let plugins = encore_plugins::Registry::new(data, db.clone(), cfg.clone());
         let st = AppState {
             db, cfg, http, http_no_redirects, urls: Default::default(), limits: Arc::new(RateLimiter::default()), static_dir, library: Library::new(busy.clone()), mb: Default::default(),
             pace: Default::default(), cache: Arc::new(ByteCache::new(REMOTE_CACHE_BYTES, REMOTE_CACHE_ENTRIES)), requests: Default::default(), busy, jobs, scheduler, media: Default::default(),
-            playback: Default::default(), vpn: Default::default(), system: Default::default(), web: Default::default(),
+            playback: Default::default(), vpn: Default::default(), system: Default::default(), web: Default::default(), plugins,
         };
         crate::auth::ensure_owner(&st)?;
         Ok(st)
@@ -216,6 +219,9 @@ impl encore_media::Ctx for AppState {
     fn covers(&self) -> &encore_media::CoverIndex {
         &self.library.covers
     }
+    fn plugins(&self) -> &encore_plugins::Registry {
+        &self.plugins
+    }
 }
 
 /// The library (encore_library) takes its caches and job table from here, and tells the server when a song
@@ -252,41 +258,17 @@ impl encore_playback::Ctx for AppState {
     }
 }
 
-/// Encore's updates and the download tools (encore_system) keep their state here; slskd and the translator,
-/// installed and run by the request and library crates, reach the tools card through the helper calls.
+/// Encore's updates and the builtin plugins' programs (encore_system) keep their state here; slskd and the
+/// translator, run by the request and library crates, reach the old tools card through `helper_info`.
 impl encore_system::Ctx for AppState {
     fn system(&self) -> &encore_system::System {
         &self.system
-    }
-    fn helper_latest(&self, id: &str) -> impl std::future::Future<Output = anyhow::Result<(String, String)>> + Send {
-        let (st, translator) = (self.clone(), id == "translator");
-        async move {
-            if translator { encore_library::translate::llama::latest(&st).await } else { encore_requests::slskd_managed::latest(&st).await }
-        }
-    }
-    fn helper_install(&self, id: &str, tag: &str, url: &str) -> impl std::future::Future<Output = anyhow::Result<String>> + Send {
-        let (st, translator, tag, url) = (self.clone(), id == "translator", tag.to_string(), url.to_string());
-        async move {
-            if translator {
-                encore_library::translate::llama::install(&st, &tag, &url).await
-            } else {
-                encore_requests::slskd_managed::install(&st, &tag, &url).await.map(|_| tag)
-            }
-        }
     }
     fn helper_info(&self, id: &str, last: &Value) -> encore_system::ToolInfo {
         if id == "translator" {
             crate::translate::tool_info(self, last)
         } else {
             encore_system::tools::slskd_info(encore_requests::slskd_managed::installed_version(self), last)
-        }
-    }
-    fn helper_reset(&self, id: &str) -> anyhow::Result<()> {
-        if id == "translator" {
-            encore_library::translate::llama::reset(self)
-        } else {
-            encore_requests::slskd_managed::reset(self);
-            Ok(())
         }
     }
 }

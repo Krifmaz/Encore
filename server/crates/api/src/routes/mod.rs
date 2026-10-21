@@ -8,6 +8,7 @@ pub mod perf;
 pub mod picker;
 pub mod playback;
 pub mod playlists;
+pub mod plugins;
 pub mod remote;
 pub mod roon;
 pub mod report;
@@ -22,3 +23,5 @@ pub mod ytauth;
 pub mod discover;
 pub mod foryou;
 pub mod catalog;
+#[cfg(test)]
+mod plugins_tests;

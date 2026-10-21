@@ -91,9 +91,17 @@ import kotlinx.serialization.json.JsonPrimitive
  *
  * [canReveal]: Show and Copy for saved secrets. The route (GET /api/admin/settings/secret/{key}) is the server
  * owner's: pass `"reveal" in /api/auth/info features && the account's role is "owner"`.
+ *
+ * [target]: where Save and clear send the keys instead of PUT /api/admin/settings, answering the values from then
+ * on (a plugin's own settings: PUT /api/plugins/{id}/settings, PluginsScreen.kt). Blocking; run on Dispatchers.IO.
  */
 @Stable
-class SchemaFormState(val schema: SettingsSchema, values: JsonObject, val canReveal: Boolean) {
+class SchemaFormState(
+    val schema: SettingsSchema,
+    values: JsonObject,
+    val canReveal: Boolean,
+    private val target: ((JsonObject) -> JsonObject)? = null,
+) {
     /** GET /api/admin/settings, then each Save's answer. */
     var values: JsonObject by mutableStateOf(SchemaRules.withoutWarnings(values))
         private set
@@ -130,7 +138,7 @@ class SchemaFormState(val schema: SettingsSchema, values: JsonObject, val canRev
     /** What Save would send for [group] now. */
     fun changes(group: SchemaGroup): JsonObject = SchemaRules.changes(fieldsOf(group), values, drafts, revealed)
 
-    /** Values that changed elsewhere (a card's extras saved something, Download tools, a reload): unsaved edits stay. */
+    /** Values that changed elsewhere (a card's extras saved something, a plugin card, a reload): unsaved edits stay. */
     fun replaceValues(answer: JsonObject) {
         values = SchemaRules.withoutWarnings(answer)
     }
@@ -168,7 +176,7 @@ class SchemaFormState(val schema: SettingsSchema, values: JsonObject, val canRev
         }
         saving[group.id] = true
         try {
-            val answer = withContext(Dispatchers.IO) { api.save(JsonObject(body)) }
+            val answer = withContext(Dispatchers.IO) { send(api, JsonObject(body)) }
             saved(answer, fields)
             if (extra != null) onSaved?.invoke()
             val warnings = SchemaRules.warnings(answer)
@@ -185,6 +193,9 @@ class SchemaFormState(val schema: SettingsSchema, values: JsonObject, val canRev
             saving.remove(group.id)
         }
     }
+
+    /** The keys of a Save or a clear, to [target] or PUT /api/admin/settings: the values from then on. */
+    private fun send(api: SchemaApi, body: JsonObject): JsonObject = target?.invoke(body) ?: api.save(body)
 
     /** Test (groups.rs): saves the card quietly, then POST /api/system/test/<test>; the answer is the line under it. */
     suspend fun test(api: SchemaApi, group: SchemaGroup, extra: JsonObject? = null, onSaved: (() -> Unit)? = null) {
@@ -214,7 +225,7 @@ class SchemaFormState(val schema: SettingsSchema, values: JsonObject, val canRev
     /** "clear" under a saved secret: PUT {key: ""} (the web's `data-clear`). */
     suspend fun clear(api: SchemaApi, key: String) {
         try {
-            val answer = withContext(Dispatchers.IO) { api.save(JsonObject(mapOf(key to JsonPrimitive("")))) }
+            val answer = withContext(Dispatchers.IO) { send(api, JsonObject(mapOf(key to JsonPrimitive("")))) }
             values = SchemaRules.withoutWarnings(answer)
             drafts.remove(key)
             revealed.remove(key)
@@ -353,7 +364,7 @@ class SchemaCardScope internal constructor(
 /**
  * The cards of one Server page ([section]) that this server has, under the heading of their part, as groups.rs
  * `cards_html`: the first card starts open (or [focus], the card a link asked for; a page with one card has it open).
- * [partTop] draws what a part starts with under its heading (Downloads: the Download tools card); [slots]
+ * [partTop] draws what a part starts with under its heading; [slots]
  * gives a card's extras. The caller scrolls (put it in a scrolling Column) and draws what the page has of its own
  * (the task list, How requests are fulfilled, the API key and About).
  */
@@ -461,32 +472,8 @@ fun SchemaCard(
         Column(Modifier.fillMaxWidth().padding(start = 14.dp, end = 14.dp, bottom = 14.dp)) {
             ResultLines(testing, state.results[group.id].orEmpty())
             slots.above?.invoke(this, cardScope)
-            val showAdvanced = state.advanced[group.id] == true
-            val shown = { f: SchemaField ->
-                (!f.advanced || showAdvanced) && SchemaRules.isShown(f) { k -> state.current(k) } && slots.hide?.invoke(f) { k -> state.current(k) } != true
-            }
-            val layout = SchemaRules.layout(fields)
-            // keyed, so a field's own state (an open drop-down) stays with it when a rule hides the one above
-            for (f in layout.before) if (shown(f)) key(f.key) { SchemaFieldView(state, api, f) }
-            if (layout.vpn.isNotEmpty()) {
-                VpnBlock {
-                    for (f in layout.vpn) if (shown(f)) key(f.key) { SchemaFieldView(state, api, f) }
-                    slots.vpnFooter?.invoke(this, cardScope)
-                }
-            }
-            for (f in layout.after) if (shown(f)) key(f.key) { SchemaFieldView(state, api, f) }
-            if (SchemaRules.hasAdvanced(fields)) {
-                Text(
-                    if (showAdvanced) "Hide advanced" else "Show advanced",
-                    style = MaterialTheme.typography.labelLarge,
-                    color = p.accent,
-                    modifier = Modifier
-                        .padding(top = 6.dp)
-                        .clip(RoundedCornerShape(6.dp))
-                        .clickable { state.advanced[group.id] = !showAdvanced }
-                        .padding(vertical = 6.dp, horizontal = 2.dp),
-                )
-            }
+            SchemaFields(state, api, group, fields, slots, cardScope)
+            AdvancedToggle(state, group, fields)
             slots.below?.invoke(this, cardScope)
             Row(Modifier.fillMaxWidth().padding(top = 12.dp), horizontalArrangement = Arrangement.End) {
                 EncoreButton("Save", iconRes = R.drawable.ic_check, primary = true, enabled = state.saving[group.id] != true && !testing) {
@@ -495,6 +482,53 @@ fun SchemaCard(
             }
         }
     }
+}
+
+/**
+ * The fields of a card (or of one run of a plugin card, PluginsScreen.kt), each shown by its rules: advanced ones
+ * after Show advanced, `when` rules, the card's own [CardSlots.hide]; the `vpn_` fields in the VPN block with the
+ * card's [CardSlots.vpnFooter].
+ */
+@Composable
+fun ColumnScope.SchemaFields(
+    state: SchemaFormState,
+    api: SchemaApi,
+    group: SchemaGroup,
+    fields: List<SchemaField>,
+    slots: CardSlots,
+    cardScope: SchemaCardScope,
+) {
+    val showAdvanced = state.advanced[group.id] == true
+    val shown = { f: SchemaField ->
+        (!f.advanced || showAdvanced) && SchemaRules.isShown(f) { k -> state.current(k) } && slots.hide?.invoke(f) { k -> state.current(k) } != true
+    }
+    val layout = SchemaRules.layout(fields)
+    // keyed, so a field's own state (an open drop-down) stays with it when a rule hides the one above
+    for (f in layout.before) if (shown(f)) key(f.key) { SchemaFieldView(state, api, f) }
+    if (layout.vpn.isNotEmpty()) {
+        VpnBlock {
+            for (f in layout.vpn) if (shown(f)) key(f.key) { SchemaFieldView(state, api, f) }
+            slots.vpnFooter?.invoke(this, cardScope)
+        }
+    }
+    for (f in layout.after) if (shown(f)) key(f.key) { SchemaFieldView(state, api, f) }
+}
+
+/** Show advanced / Hide advanced under a card's fields, when it has advanced ones. */
+@Composable
+fun AdvancedToggle(state: SchemaFormState, group: SchemaGroup, fields: List<SchemaField>) {
+    if (!SchemaRules.hasAdvanced(fields)) return
+    val showAdvanced = state.advanced[group.id] == true
+    Text(
+        if (showAdvanced) "Hide advanced" else "Show advanced",
+        style = MaterialTheme.typography.labelLarge,
+        color = MaterialTheme.palette.accent,
+        modifier = Modifier
+            .padding(top = 6.dp)
+            .clip(RoundedCornerShape(6.dp))
+            .clickable { state.advanced[group.id] = !showAdvanced }
+            .padding(vertical = 6.dp, horizontal = 2.dp),
+    )
 }
 
 /** The VPN for Soulseek block around the `vpn_` fields (apps.rs `vpn_block`). */
@@ -512,7 +546,7 @@ private fun VpnBlock(content: @Composable ColumnScope.() -> Unit) {
 
 /** The lines under a card's title: "Testing…" while a Test runs, then its result (mod.rs `test_result`). */
 @Composable
-private fun ResultLines(testing: Boolean, lines: List<ResultLine>) {
+internal fun ResultLines(testing: Boolean, lines: List<ResultLine>) {
     val p = MaterialTheme.palette
     if (testing) {
         Row(Modifier.padding(bottom = 8.dp), verticalAlignment = Alignment.CenterVertically) {

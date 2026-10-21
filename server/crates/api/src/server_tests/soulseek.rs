@@ -563,6 +563,7 @@ fn fake_slskd(f: Shared) -> Router {
 /// the stand-in (logged out, logins timing out, until a test says otherwise).
 fn setup(name: &str) -> (TestServer, Shared) {
     let ts = TestServer::new(&format!("soulseek-{name}"))
+        .with_sources()
         .with_urls(encore_http::Urls { ytmusic: "http://127.0.0.1:9".into(), ..Default::default() })
         .with(json!({ "slskd_enabled": true, "soulseek_username": "alice", "soulseek_password": "a-password", "slskd_search_timeout": 5,
                       "album_upgrade": "off", "quality_first": false, "source_order": "slskd", "ytdlp_enabled": false, "ytdlp_last_resort": false, "auto_approve": true }));
@@ -828,7 +829,7 @@ async fn a_rejected_login_stops_the_loop_and_a_new_password_is_tried_on_the_new_
     assert_eq!(code, StatusCode::OK, "{body}");
     assert_eq!((body["state"].as_str(), body["logged_in"].as_bool()), (Some("running"), Some(false)), "{body}");
     assert_eq!(body["session"]["reason"], "rejected", "{body}");
-    assert_eq!(body["error"], "Rejected: invalid username or password – fix them in Settings → Downloads → Soulseek", "{body}");
+    assert_eq!(body["error"], "Rejected: invalid username or password – fix them in Settings → Plugins → Soulseek", "{body}");
     // a request parked before the rejection goes on at the worker's next look: not "waiting"
     request(&st, "Parked", "queued", json!({ "soulseek_wait": { "since": encore_db::now() }, "sources": ["slskd"] }));
     assert_eq!(session::status(&st)["searches_waiting"], 0);
@@ -1476,7 +1477,7 @@ async fn real_slskd_behind_the_door() {
     }
     // SAFETY: this test runs alone (ignored, started by name); nothing else reads the environment meanwhile
     unsafe { std::env::set_var("SOULSEEK_SERVER", format!("127.0.0.1:{port}")) };
-    let ts = TestServer::new("soulseek-real");
+    let ts = TestServer::new("soulseek-real").with_sources();
     let st = ts.st.clone();
     let dl = st.data_dir().join("dl");
     std::fs::create_dir_all(&dl).unwrap();

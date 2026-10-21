@@ -129,7 +129,7 @@ impl Env {
 
 /// A server whose only source is the indexers, with qBittorrent; no MusicBrainz answers.
 async fn env(name: &str) -> Env {
-    let ts = TestServer::new(&format!("torrents-{name}"));
+    let ts = TestServer::new(&format!("torrents-{name}")).with_sources();
     let f: Shared = Default::default();
     let url = fake(f.clone()).await;
     let dl = ts.dir.join("torrents");
@@ -303,6 +303,7 @@ async fn a_finished_download_encore_cannot_see_stays_in_the_client() {
     let seen = e.ts.dir.join("torrents/Rodeo");
     assert_eq!(status, "failed");
     assert!(msg.contains(&format!("qBittorrent finished the download, but Encore can't see it at {}", seen.display())), "{msg}");
+    assert!(msg.contains("correct the download folder on the qBittorrent card under Settings → Plugins"), "the client's own card has the field: {msg}");
     assert!(e.calls("torrents/delete").is_empty(), "left in qBittorrent");
     e.ts.remove();
 }

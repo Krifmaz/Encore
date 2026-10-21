@@ -1,0 +1,43 @@
+# qBittorrent: a download client of the torznab source (sources/dl). Encore's own code talks to it; nothing to download.
+# docs/contracts/plugin-manifest.md describes every key.
+
+[plugin]
+id = "qbittorrent"
+name = "qBittorrent"
+version = "0.32.0"
+description = "Sends the torrents Prowlarr finds to your qBittorrent and imports the album when it is done."
+kind = "client"
+protocol = 1
+homepage = "https://www.qbittorrent.org"
+license = "MIT"
+commands = ["status", "test"]
+builtin = true
+
+[client]
+source = "torznab"
+protocol = "torrent"
+chosen_by = "torrent_client=qbittorrent"
+
+[[settings]]
+key = "qbit_url"
+
+[[settings]]
+key = "qbit_user"
+
+[[settings]]
+key = "qbit_password"
+
+[[settings]]
+key = "qbit_category"
+
+[[settings]]
+key = "qbit_download_path"
+
+[permissions]
+network = true
+paths = [{ setting = "qbit_download_path", access = "write" }]
+
+[migration]
+# qBittorrent is the client for every torrent_client value that names no other one (an empty one, "qbit", a
+# typo), as Encore picks it
+in_use = [["torznab_enabled", "torrent_client!=transmission", "torrent_client!=deluge", "torrent_client!=rtorrent", "torrent_client!=rutorrent", "torrent_client!=blackhole", "qbit_url"]]

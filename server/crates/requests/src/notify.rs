@@ -33,10 +33,13 @@ pub async fn send(st: &impl Ctx, title: &str, message: &str, image: Option<&str>
     }
 }
 
+/// Ask the media servers to scan for the new music: each one whose connection plugin (navidrome, jellyfin,
+/// plex) is installed and switched on, with its address and sign-in set.
 pub async fn refresh_media_servers(st: &impl Ctx) -> Vec<&'static str> {
     let mut done = vec![];
+    let on = |id: &str| st.plugins().enabled(id);
     let (nu, nus) = (st.cfg().str("navidrome_url"), st.cfg().str("navidrome_user"));
-    if !nu.is_empty() && !nus.is_empty() {
+    if on("navidrome") && !nu.is_empty() && !nus.is_empty() {
         let salt = hex::encode(rand::random::<[u8; 6]>());
         let token = format!("{:x}", md5::compute(format!("{}{salt}", st.cfg().str("navidrome_password"))));
         match st.http().get(format!("{}/rest/startScan", nu.trim_end_matches('/')))
@@ -46,14 +49,14 @@ pub async fn refresh_media_servers(st: &impl Ctx) -> Vec<&'static str> {
         }
     }
     let (ju, jk) = (st.cfg().str("jellyfin_url"), st.cfg().str("jellyfin_api_key"));
-    if !ju.is_empty() && !jk.is_empty() {
+    if on("jellyfin") && !ju.is_empty() && !jk.is_empty() {
         match st.http().post(format!("{}/Library/Refresh", ju.trim_end_matches('/'))).header("X-Emby-Token", jk).send().await {
             Ok(_) => done.push("Jellyfin"),
             Err(e) => st.db().log("warning", &format!("Jellyfin refresh failed: {e}")),
         }
     }
     let (pu, pt) = (st.cfg().str("plex_url"), st.cfg().str("plex_token"));
-    if !pu.is_empty() && !pt.is_empty() {
+    if on("plex") && !pu.is_empty() && !pt.is_empty() {
         match st.http().get(format!("{}/library/sections/all/refresh", pu.trim_end_matches('/'))).query(&[("X-Plex-Token", pt)]).send().await {
             Ok(_) => done.push("Plex"),
             Err(e) => st.db().log("warning", &format!("Plex refresh failed: {e}")),

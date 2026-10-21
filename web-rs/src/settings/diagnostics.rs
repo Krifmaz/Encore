@@ -356,7 +356,7 @@ fn check_item(c: &Value, now: f64) -> String {
     let soulseek = c.g("soulseek");
     let extra = if soulseek.is_object() {
         let details = super::apps::session_details(soulseek, now);
-        let link = if ok { String::new() } else { r##"<a href="#/settings?s=slskd" style="color:var(--accent)">Settings → Downloads → Soulseek</a>"##.to_string() };
+        let link = if ok { String::new() } else { r##"<a href="#/settings?s=slskd" style="color:var(--accent)">Settings → Plugins → Soulseek</a>"##.to_string() };
         let parts: Vec<String> = [esc(&details), link].into_iter().filter(|p| !p.is_empty()).collect();
         if parts.is_empty() { String::new() } else { format!(r#"<div class="small faint">{}</div>"#, parts.join(" · ")) }
     } else { String::new() };

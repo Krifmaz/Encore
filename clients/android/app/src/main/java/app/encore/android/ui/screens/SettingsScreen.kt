@@ -72,6 +72,8 @@ import app.encore.android.features.settings.ContributeScreen
 import app.encore.android.features.settings.DiagnosticsScreen
 import app.encore.android.features.settings.InvitesScreen
 import app.encore.android.features.settings.LanguageScreen
+import app.encore.android.features.settings.PluginRules
+import app.encore.android.features.settings.PluginsScreen
 import app.encore.android.features.settings.SECTION_TITLES
 import app.encore.android.features.settings.SchemaFormState
 import app.encore.android.features.settings.ServerSchema
@@ -103,7 +105,8 @@ import kotlinx.serialization.json.JsonPrimitive
  * time. You – Account, Appearance, Language, Playback, Connections and This device (the phone's own); for admins
  * also People – Users & permissions, Invites; Server – the pages of the server's settings schema (General, Library,
  * Downloads, Integrations, Server processing, Email & notifications, Auto-download, Contribute, Blocked, Scheduled
- * tasks) and Files; System – Diagnostics. The schema and its values are asked for once when Settings opens, so what was typed on a Server page
+ * tasks) with Plugins after Downloads (0.32: the schema has no page for it, the web adds it there too) and Files;
+ * System – Diagnostics. The schema and its values are asked for once when Settings opens, so what was typed on a Server page
  * and not saved yet is still there after going to another page and back.
  */
 @Composable
@@ -123,6 +126,9 @@ fun SettingsScreen(nav: Nav, session: Session, startAt: String? = null) {
     var schemaError by remember { mutableStateOf<String?>(null) }
     var update by remember { mutableStateOf<JsonObject?>(null) }
     val filesHere by FilesAccess.available.collectAsState()
+    // whether this server has plugins (0.32): null while not known (taken as yes); `probed` once it was asked
+    var plugins by remember { mutableStateOf<Boolean?>(null) }
+    var probed by remember { mutableStateOf(false) }
 
     LaunchedEffect(session) {
         try {
@@ -153,6 +159,11 @@ fun SettingsScreen(nav: Nav, session: Session, startAt: String? = null) {
     }
     LaunchedEffect(admin) {
         if (!admin) return@LaunchedEffect
+        plugins = withContext(Dispatchers.IO) { api.pluginsProbe() }
+        probed = true
+    }
+    LaunchedEffect(admin) {
+        if (!admin) return@LaunchedEffect
         FilesAccess.probe(graph)
         // the banner: the server's kept check for a newer Encore (GitHub is asked only when that check is old)
         update = try { withContext(Dispatchers.IO) { api.serverUpdate(false) } } catch (e: CancellationException) { throw e } catch (_: Exception) { null }
@@ -167,6 +178,13 @@ fun SettingsScreen(nav: Nav, session: Session, startAt: String? = null) {
     }
 
     fun open(id: String) {
+        // the source cards are plugin cards since 0.32: their old links (and the Download tools card's, the client,
+        // Translator and connection plugins') open the Plugins page with that plugin's card open
+        if (plugins != false && PluginRules.opensPlugins(id)) {
+            focus = id.takeIf { it != "plugins" }
+            pages.add("plugins")
+            return
+        }
         // a card's id (old links name cards) opens its page with that card open
         val page = schema?.pageOf(id) ?: id
         focus = if (page != id) id else null
@@ -175,9 +193,9 @@ fun SettingsScreen(nav: Nav, session: Session, startAt: String? = null) {
     // opened at one page (a `#/settings?s=…` link): it opens once the schema has said which page holds that card, and
     // going back from it leaves Settings
     var started by remember { mutableStateOf(startAt == null) }
-    LaunchedEffect(startAt, me, schemaState, schemaError) {
+    LaunchedEffect(startAt, me, schemaState, schemaError, probed) {
         if (started || startAt == null || me == null) return@LaunchedEffect
-        if (admin && schemaState == null && schemaError == null) return@LaunchedEffect
+        if (admin && ((schemaState == null && schemaError == null) || !probed)) return@LaunchedEffect
         started = true
         open(startAt)
     }
@@ -212,7 +230,8 @@ fun SettingsScreen(nav: Nav, session: Session, startAt: String? = null) {
             "contribute" -> ContributeScreen(nav, onBack = back)
             "blocked" -> BlockedScreen(nav, admin, onBack = back)
             "diagnostics" -> DiagnosticsScreen(nav, onBack = back)
-            else -> ServerSectionScreen(page, server, graph.schemaApi, api, info, focus, onBack = back, onOpen = { open(it) })
+            "plugins" -> PluginsScreen(server, graph.schemaApi, api, focus, onBack = back, onOpen = { open(it) })
+            else -> ServerSectionScreen(page, server, graph.schemaApi, api, info, focus, plugins, onBack = back, onOpen = { open(it) })
         } }
         return
     }
@@ -253,7 +272,7 @@ fun SettingsScreen(nav: Nav, session: Session, startAt: String? = null) {
                 NavRow("Invites") { open("invites") }
                 NavLabel("Server")
                 val sections = schema?.sections?.map { it.id to it.title } ?: SERVER_PAGES.map { it to (SECTION_TITLES[it] ?: it) }
-                for ((id, title) in sections) NavRow(title) { open(id) }
+                for ((id, title) in withPlugins(sections, plugins != false)) NavRow(title) { open(id) }
                 // the admin file manager (features/files, 0.33; not on older servers)
                 if (filesHere == true) NavRow("Files") { nav.open(app.encore.android.ui.Screen.Files) }
                 NavLabel("System")
@@ -268,6 +287,17 @@ fun SettingsScreen(nav: Nav, session: Session, startAt: String? = null) {
             Spacer(Modifier.height(32.dp))
         }
     }
+}
+
+/**
+ * The Server pages with Plugins right after Downloads (the web's `server_nav`): the server's schema has no page for
+ * it. A server whose schema has one keeps its own; one without plugins (before 0.32) has none.
+ */
+private fun withPlugins(sections: List<Pair<String, String>>, plugins: Boolean): List<Pair<String, String>> {
+    if (!plugins || sections.any { it.first == "plugins" }) return sections
+    val at = sections.indexOfFirst { it.first == "downloads" }
+    val entry = "plugins" to (SECTION_TITLES["plugins"] ?: "Plugins")
+    return if (at < 0) sections + entry else sections.subList(0, at + 1) + entry + sections.subList(at + 1, sections.size)
 }
 
 /** The Server pages when the schema has not loaded (an older server, or an error): the web's ids and order. */

@@ -27,6 +27,9 @@ enum Step {
     Shot(&'static str),
     SignIn,
     Nav(Page),
+    /// Follow a web link (`#/settings?s=torznab`) when the step runs: a settings link to a card unfolds that card
+    /// in the section it opens.
+    NavHash(&'static str),
     /// Open the album that was played (skipped when none was).
     NavFirstAlbum,
     /// Soulseek, when the server has it.
@@ -154,6 +157,16 @@ impl State {
             Shot("settings-computer"),
             Nav(Page::Settings(Section::Downloads)),
             Shot("settings-downloads"),
+            // 0.32, the plugins: installed (with their status) and available; then an old link to a source card,
+            // which opens that plugin's card (Torrents & Usenet, when it is installed)
+            Nav(Page::Settings(Section::Plugins)),
+            Wait(3),
+            Shot("settings-plugins"),
+            NavHash("#/settings?s=torznab"),
+            Wait(3),
+            Shot("settings-plugins-card"),
+            ScrollToEnd,
+            Shot("settings-plugins-end"),
             // 0.33, the file manager: the roots, then the library's folder
             Nav(Page::Settings(Section::Files)),
             Wait(2),
@@ -339,6 +352,10 @@ fn step(app: &mut App) -> Task<AppMsg> {
         Step::Nav(page) => {
             t.wait = 3;
             app.update(AppMsg::Nav(page))
+        }
+        Step::NavHash(hash) => {
+            t.wait = 3;
+            app.update(AppMsg::Nav(Page::from_hash(hash).unwrap_or(Page::Home)))
         }
         Step::NavFirstAlbum => match t.first_album.clone() {
             Some(id) => {

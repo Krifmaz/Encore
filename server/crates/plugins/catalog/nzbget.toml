@@ -1,0 +1,41 @@
+# NZBGet: a download client of the torznab source (sources/dl). Encore's own code talks to it; nothing to download.
+# docs/contracts/plugin-manifest.md describes every key.
+
+[plugin]
+id = "nzbget"
+name = "NZBGet"
+version = "0.32.0"
+description = "Sends the Usenet releases Prowlarr finds to your NZBGet and imports the album when it is done."
+kind = "client"
+protocol = 1
+homepage = "https://nzbget.com"
+license = "MIT"
+commands = ["status", "test"]
+builtin = true
+
+[client]
+source = "torznab"
+protocol = "usenet"
+chosen_by = "nzb_client=nzbget"
+
+[[settings]]
+key = "nzbget_url"
+
+[[settings]]
+key = "nzbget_user"
+
+[[settings]]
+key = "nzbget_password"
+
+[[settings]]
+key = "nzbget_category"
+
+[[settings]]
+key = "nzbget_download_path"
+
+[permissions]
+network = true
+paths = [{ setting = "nzbget_download_path", access = "write" }]
+
+[migration]
+in_use = [["torznab_enabled", "nzb_client=nzbget", "nzbget_url"]]

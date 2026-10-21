@@ -130,6 +130,9 @@ impl Session {
 /// The client. One per process, shared as `Arc<Api>`; the base URL can change (Change server).
 pub struct Api {
     client: reqwest::Client,
+    /// The same cookies without the 60 s read limit: calls the server answers only when its work is done
+    /// (a plugin install or update, an uploaded plugin unpacked and checked). See [`Api::post_slow`].
+    slow: reqwest::Client,
     jar: Arc<Jar>,
     base: RwLock<String>,
 }
@@ -146,6 +149,10 @@ pub const COOKIE: &str = "encore_session";
 /// The longest a JSON call may take, start to end.
 const JSON_TIMEOUT: Duration = Duration::from_secs(60);
 
+/// The longest a slow call ([`Api::post_slow`]) may take: a plugin install fetches a program (slskd, a
+/// Python venv, a translation model of gigabytes) before the server answers.
+const SLOW_TIMEOUT: Duration = Duration::from_secs(3 * 3600);
+
 impl Api {
     pub fn new(base: &str) -> Arc<Api> {
         let jar = Arc::new(Jar::default());
@@ -158,8 +165,17 @@ impl Api {
             .read_timeout(Duration::from_secs(60))
             .build()
             .expect("reqwest client");
+        // the server says nothing until the install is done, so no read limit here; a dropped call would
+        // also stop the server's work half way
+        let slow = reqwest::Client::builder()
+            .user_agent(user_agent())
+            .cookie_provider(Arc::clone(&jar))
+            .connect_timeout(Duration::from_secs(8))
+            .build()
+            .expect("reqwest client");
         Arc::new(Api {
             client,
+            slow,
             jar,
             base: RwLock::new(crate::config::normalize(base)),
         })
@@ -344,6 +360,35 @@ impl Api {
         self.finish(req.send().await).await
     }
 
+    /// A POST the server answers only when its work is done (install, update or remove a plugin, install one
+    /// from a URL): the same as [`Api::post`] without the 60 s limits, up to [`SLOW_TIMEOUT`].
+    pub async fn post_slow(&self, path: &str, body: Value) -> ApiResult {
+        if self.base().is_empty() {
+            return Err(ApiError::new(0, "No server chosen"));
+        }
+        let req = self
+            .slow
+            .post(self.url(path))
+            .timeout(SLOW_TIMEOUT)
+            .headers(Self::headers(true, true))
+            .body(body.to_string());
+        self.finish(req.send().await).await
+    }
+
+    /// [`Api::post_form`] for an upload the server unpacks and checks before it answers (a plugin zip).
+    pub async fn post_form_slow(&self, path: &str, form: reqwest::multipart::Form) -> ApiResult {
+        if self.base().is_empty() {
+            return Err(ApiError::new(0, "No server chosen"));
+        }
+        let req = self
+            .slow
+            .post(self.url(path))
+            .timeout(SLOW_TIMEOUT)
+            .headers(Self::headers(true, false))
+            .multipart(form);
+        self.finish(req.send().await).await
+    }
+
     /// A multipart part from a file on disk (`field` is the form field name).
     pub async fn file_part(path: &std::path::Path) -> Result<reqwest::multipart::Part, ApiError> {
         let bytes = tokio::fs::read(path)
@@ -366,6 +411,7 @@ impl Api {
             Some("json") => "application/json",
             Some("m3u" | "m3u8") => "audio/x-mpegurl",
             Some("csv") => "text/csv",
+            Some("zip") => "application/zip",
             _ => "application/octet-stream",
         };
         reqwest::multipart::Part::bytes(bytes)

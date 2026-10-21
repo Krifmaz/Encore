@@ -1,0 +1,72 @@
+# Cadenza: server processing (encore_playback::dsp). The engine compiled into Encore works without a download;
+# Install fetches the newest `cadenza` program from Cadenza's releases and server processing runs that instead.
+# Its fields stay on Settings → Server processing. docs/contracts/plugin-manifest.md describes every key.
+
+[plugin]
+id = "cadenza"
+name = "Cadenza (server processing)"
+version = "0.32.0"
+description = "Lets permitted users have their streams upsampled on this server by Cadenza (long-filter upsampling, dither and noise shaping, lossless 24-bit FLAC out). The engine built into Encore works without a download; Install fetches the newest Cadenza program from its releases."
+kind = "playback"
+protocol = 1
+homepage = "https://github.com/Krifmaz/Cadenza"
+license = "MIT OR Apache-2.0"
+commands = ["status", "test", "update"]
+builtin = true
+settings_on = "processing"
+
+[update]
+github = "Krifmaz/Cadenza"
+tag = "v{version}"
+sums = "SHA256SUMS"
+auto = false
+
+[[binary]]
+arch = "x86_64"
+asset = "cadenza-{version}-linux-x86_64.tar.gz"
+bin = "cadenza"
+
+[[binary]]
+arch = "aarch64"
+asset = "cadenza-{version}-linux-aarch64.tar.gz"
+bin = "cadenza"
+
+# `cadenza render --describe` prints its version, the protocol it speaks and its settings as JSON
+[install]
+verify = ["{bin}", "render", "--describe"]
+version_from = "json:version"
+timeout = 30
+
+[[install.check]]
+json = "protocol"
+equals = 1
+message = "This Cadenza speaks another render protocol than this Encore (1) – update Encore; it keeps using the engine it has."
+
+[[settings]]
+key = "cadenza_server_enabled"
+
+[[settings]]
+key = "cadenza_max_streams"
+
+[[settings]]
+key = "cadenza_max_rate"
+
+[[settings]]
+key = "cadenza_max_taps"
+
+[[settings]]
+key = "cadenza_cache_mb"
+
+# internal: the engine's own settings, drawn from its description on the Server processing page
+[[settings]]
+key = "cadenza_engine_settings"
+
+[permissions]
+# audio comes in and goes out through pipes
+network = false
+
+[migration]
+from_tool = "cadenza"
+auto_key = "tools_auto_cadenza"
+adopt = ["tools/cadenza"]
+in_use = [["file:tools/cadenza/current"], ["cadenza_server_enabled"], ["saved:tools_auto_cadenza"]]

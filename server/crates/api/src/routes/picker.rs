@@ -56,25 +56,45 @@ fn state(state: &'static str, hint: impl Into<String>, section: &'static str) ->
 /// The settings link for a section, as the web UI addresses it, and its label.
 fn settings_link(section: &str) -> (String, &'static str) {
     let label = match section {
-        "slskd" => "Settings → Downloads → Soulseek",
-        "torznab" => "Settings → Downloads → Torrents & Usenet",
-        "streamrip" => "Settings → Downloads → Qobuz / Tidal / Deezer (streamrip)",
-        "ytdlp" => "Settings → Downloads → YouTube Music & links",
+        "plugins" => "Settings → Plugins",
+        "slskd" => "Settings → Plugins → Soulseek",
+        "torznab" => "Settings → Plugins → Torrents & Usenet",
+        "streamrip" => "Settings → Plugins → streamrip",
+        "ytdlp" => "Settings → Plugins → yt-dlp",
         "pipeline" => "Settings → Downloads → Download pipeline",
         _ => "Settings",
     };
     (format!("#/settings?s={section}"), label)
 }
 
-/// One streamrip service (Qobuz, Tidal, Deezer): streamrip on and installed, the service in the pipeline,
-/// its account signed in.
+/// The plugin a picker source belongs to (the registry: `deezer` → streamrip, `ytmusic` → ytdlp).
+fn plugin_of(id: &str) -> Option<&'static encore_plugins::Manifest> {
+    encore_plugins::catalog::for_source(id)
+}
+
+/// A builtin source whose plugin is not installed or is switched off: the state that says so, with the
+/// Plugins page to fix it on.
+fn plugin_state(st: &AppState, id: &str) -> Option<SourceState> {
+    let m = plugin_of(id)?;
+    let name = &m.plugin.name;
+    if !st.plugins.installed(m.id()) {
+        return Some(state("not_installed", format!("Install the {name} plugin under Settings → Plugins"), "plugins"));
+    }
+    if !st.plugins.enabled(m.id()) {
+        return Some(state("off", format!("The {name} plugin is switched off"), "plugins"));
+    }
+    None
+}
+
+/// One streamrip service (Qobuz, Tidal, Deezer), its plugin installed and on ([`source_state`]): streamrip on and
+/// its program there, the service in the pipeline, its account signed in.
 fn streamrip_state(st: &AppState, id: &str) -> SourceState {
     let name = source_name(id);
     if !st.cfg.bool("streamrip_enabled") {
         return state("off", format!("{name} downloads need streamrip switched on"), "streamrip");
     }
     if streamrip::binary(st).is_none() {
-        return state("not_installed", streamrip::NOT_INSTALLED_MSG, "streamrip");
+        return state("not_installed", streamrip::NOT_INSTALLED_MSG, "plugins");
     }
     if !streamrip::services(st).iter().any(|s| s == id) {
         return state("off", format!("{name} is not in the download pipeline"), "pipeline");
@@ -87,8 +107,12 @@ fn streamrip_state(st: &AppState, id: &str) -> SourceState {
     }
 }
 
-/// A source's state right now (see `SourceState`).
+/// A source's state right now (see `SourceState`): first its plugin (installed and switched on), then its own
+/// settings and service.
 pub fn source_state(st: &AppState, id: &str) -> SourceState {
+    if let Some(s) = plugin_state(st, id) {
+        return s;
+    }
     match id {
         "slskd" => {
             if !st.cfg.bool("slskd_enabled") {
@@ -98,7 +122,7 @@ pub fn source_state(st: &AppState, id: &str) -> SourceState {
                 return state("sign_in", "Soulseek needs a username and password", "slskd");
             }
             if encore_requests::slskd_managed::installed_version(st).is_none() {
-                return state("not_installed", "Soulseek is not installed – install it under Download tools", "slskd");
+                return state("not_installed", "Soulseek's program is not installed yet – Update the Soulseek (slskd) plugin under Settings → Plugins", "plugins");
             }
             if st.requests.slskd.status()["state"].as_str() == Some("running") {
                 // the engine runs; the session may not (Encore's reconnect schedule says when it is back)
@@ -125,18 +149,30 @@ pub fn source_state(st: &AppState, id: &str) -> SourceState {
         }
         "qobuz" | "tidal" | "deezer" => streamrip_state(st, id),
         "ytmusic" => if ytdlp::enabled(st) { state("ready", "", "ytdlp") } else { state("off", "YouTube Music is off (yt-dlp)", "ytdlp") },
-        _ => state("off", "Unknown source", "pipeline"),
+        other => match encore_requests::sources::plugin::find(st, other) {
+            Some(p) if p.enabled => state("ready", "", "plugins"),
+            Some(p) => state("off", format!("The {} plugin is switched off", p.name), "plugins"),
+            None => state("off", "Unknown source", "pipeline"),
+        },
     }
 }
 
 /// Every source the picker knows, with its state: nothing is hidden, so a signed-out or stopped source shows
-/// why and where to fix it. `{id, name, state, hint, settings, settings_label}`.
+/// why and where to fix it – the builtin ones in their tab order, then the sources of the plugin programs
+/// installed (uploaded or from a URL). `{id, name, state, hint, settings, settings_label}`.
 pub fn available(st: &AppState) -> Vec<Value> {
-    SOURCES.iter().map(|(id, name, _)| {
+    let row = |id: &str, name: &str| {
         let s = source_state(st, id);
         let (settings, label) = settings_link(s.section);
         json!({ "id": id, "name": name, "state": s.state, "hint": s.hint, "settings": settings, "settings_label": label })
-    }).collect()
+    };
+    let mut out: Vec<Value> = SOURCES.iter().map(|(id, name, _)| row(id, name)).collect();
+    for p in st.plugins.plugin_sources() {
+        if p.kinds.iter().any(|k| k == "track" || k == "album") && !out.iter().any(|x| x["id"] == p.picker) {
+            out.push(row(&p.picker, &p.name));
+        }
+    }
+    out
 }
 
 /// A search on a source that is not ready: 409 with the state and the settings link, so the client shows the
@@ -709,7 +745,7 @@ async fn tidal_read(req: reqwest::RequestBuilder) -> anyhow::Result<Value> {
     let r = req.send().await?;
     let code = r.status().as_u16();
     if code == 401 || code == 403 {
-        anyhow::bail!("Tidal rejected the sign-in token – sign in again in Settings → Downloads → Qobuz / Tidal / Deezer (streamrip)");
+        anyhow::bail!("Tidal rejected the sign-in token – sign in again in Settings → Plugins → streamrip");
     }
     tidal::read(r).await
 }
@@ -867,7 +903,11 @@ pub async fn run_search_for(st: &AppState, b: &SearchBody, req: Option<&ForReque
         return Err(err(400, "Manual search works for albums and songs"));
     }
     if !SOURCES.iter().any(|s| s.0 == b.source) {
-        return Err(err(400, format!("Unknown source {}", b.source)));
+        // a plugin program's source: searched through the registry
+        return match encore_requests::sources::plugin::find(st, &b.source) {
+            Some(p) => plugin_answer(st, b, &p).await,
+            None => Err(err(400, format!("Unknown source {}", b.source))),
+        };
     }
     let source = b.source.clone();
     let s = st.blocking(move |st| Ok(source_state(st, &source))).await?;
@@ -900,6 +940,30 @@ pub async fn run_search_for(st: &AppState, b: &SearchBody, req: Option<&ForReque
         _ => search_ytmusic(st, b, &q).await,
     };
     res.map(|items| Answer::live(items, q)).map_err(|e| search_error(st, &b.source, e))
+}
+
+/// A plugin program's search (uploaded or installed from a URL): the box's words or the names the picker was
+/// opened with, its results as rows (always live: the plugin keeps its own pace).
+async fn plugin_answer(st: &AppState, b: &SearchBody, p: &encore_requests::sources::plugin::PluginSource) -> ApiResult<Answer> {
+    use encore_requests::sources::plugin::{self as plug, Ask};
+    let s = source_state(st, &p.picker);
+    if s.state != "ready" {
+        return Err(state_error(&p.picker, &s));
+    }
+    if !p.kinds.contains(&b.kind) {
+        return Err(err(400, format!("{} does not search for {}s", p.name, if b.kind == "album" { "album" } else { "song" })));
+    }
+    let query = b.query.clone().map(|q| q.trim().to_string()).filter(|q| !q.is_empty());
+    let shown = query.clone().unwrap_or_else(|| [b.artist.as_str(), b.title.as_str()].iter().filter(|s| !s.is_empty()).cloned().collect::<Vec<_>>().join(" "));
+    let ask = Ask {
+        kind: b.kind.clone(), artist: b.artist.clone(), title: b.title.clone(), album: b.album.clone().unwrap_or_default(),
+        query: query.filter(|_| typed(b)), length: b.length, track_count: b.track_count, lossless_only: false, isrc: None, limit: 50,
+    };
+    match plug::search(st, p, &ask, None).await {
+        Ok(results) => Ok(Answer::live(plug::picker_rows(p, &results), shown)),
+        Err(f) if f.code == encore_plugins::Code::RateLimited => Err(err(429, format!("{}: {}", p.name, f.message))),
+        Err(f) => Err(err(502, format!("{} search failed: {}", p.name, f.message.chars().take(160).collect::<String>()))),
+    }
 }
 
 /// A failed search as the answer: Soulseek not connected is 409 with its state (the client shows the hint

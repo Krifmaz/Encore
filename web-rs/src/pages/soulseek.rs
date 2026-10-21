@@ -138,7 +138,7 @@ fn toast_html(html: &str, kind: &str) {
 
 /// "Signed in as X · sharing N files · port P" – or why it isn't working, linking to the settings.
 fn status_html(s: &Value, error: &str) -> String {
-    let settings = r##"<a href="#/settings?s=slskd" style="color:var(--accent)">Settings → Downloads → Soulseek</a>"##;
+    let settings = r##"<a href="#/settings?s=slskd" style="color:var(--accent)">Settings → Plugins → Soulseek</a>"##;
     if !error.is_empty() { return format!(r#"<span class="dot err"></span> {} · {settings}"#, esc(error)); }
     let state = s.s("state");
     if s.truthy("configured") && state == "not_installed" {
@@ -533,7 +533,7 @@ impl Page {
             dom::set_html(&self.results_el, &if self.forbidden.get() {
                 empty_state(&icon("users"), "Soulseek is for people who may pick downloads", "Ask an admin to allow manual download picking for your account.")
             } else {
-                empty_state(&icon("users"), "Soulseek is unavailable", r##"An admin can turn it on under <a href="#/settings?s=slskd" style="color:var(--accent)">Settings → Downloads → Soulseek</a>."##)
+                empty_state(&icon("users"), "Soulseek is unavailable", r##"An admin can turn it on under <a href="#/settings?s=slskd" style="color:var(--accent)">Settings → Plugins → Soulseek</a>."##)
             });
         }
     }
@@ -788,7 +788,7 @@ mod tests {
             "session": { "state": "waiting", "reason": "timeout", "text": "Disconnected – the login timed out (the Soulseek server did not answer in 5 s). Next attempt at 14:20 (attempt 3)." } });
         let h = status_html(&waiting, "");
         assert!(h.starts_with(r#"<span class="dot warn"></span> <span style="color:var(--warn)">Disconnected – the login timed out"#), "{h}");
-        assert!(h.ends_with("Settings → Downloads → Soulseek</a>"), "{h}");
+        assert!(h.ends_with("Settings → Plugins → Soulseek</a>"), "{h}");
         let rejected = json!({ "enabled": true, "state": "running", "logged_in": false,
             "session": { "state": "stopped", "reason": "rejected", "text": "Rejected: invalid username or password – fix them below" } });
         let h = status_html(&rejected, "");

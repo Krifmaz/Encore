@@ -19,6 +19,10 @@ pub async fn step<C: Ctx>(st: C, id: i64) {
         ("waiting", _) | ("queued", "slskd" | "slskd_lossless") if r.d["soulseek_wait"].is_object() && r.d["sources"].is_array() && !r.d["pick"].is_object() => next_source(&st, &mut r, "").await,
         // a picked Soulseek file asked for again
         ("waiting", _) if r.d["soulseek_wait"].is_object() && r.d["pick"].is_object() => start(&st, &mut r).await,
+        // waiting for a plugin the upgrade is still installing: a source step goes on where it stopped (it is
+        // first in its sources), a link or a pick starts again – each parks again while the install runs
+        ("waiting", _) if reason == storage::PLUGIN_INSTALL && r.d["install_wait"]["step"] == "source" && r.d["sources"].is_array() => next_source(&st, &mut r, "").await,
+        ("waiting", _) if reason == storage::PLUGIN_INSTALL => start(&st, &mut r).await,
         // never a new download for a waiting request
         ("waiting", _) => Ok(()),
         ("queued", _) => start(&st, &mut r).await,

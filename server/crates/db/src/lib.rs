@@ -150,13 +150,14 @@ pub const MIGRATIONS: &[(i64, &str, &str)] = &[
     (25, "translations", include_str!("../migrations/0025_translations.sql")),
     (26, "indexes", include_str!("../migrations/0026_indexes.sql")),
     (27, "loudness", include_str!("../migrations/0027_loudness.sql")),
+    (28, "plugins", include_str!("../migrations/0028_plugins.sql")),
 ];
 
 /// The schema this server writes, stamped into `PRAGMA user_version`: the number of the last file in
 /// MIGRATIONS. An older server that finds a higher number refuses to touch the file (it would otherwise
 /// fail half-way through and leave a database neither version can read), and a lower number means
 /// "back up, then migrate" (and ANALYZE after it: new indexes have no statistics yet).
-pub const SCHEMA_VERSION: i64 = 27;
+pub const SCHEMA_VERSION: i64 = 28;
 
 /// Exit code of the server when the database comes from a newer Encore.
 pub const EXIT_NEWER_DB: i32 = 3;
@@ -1260,6 +1261,44 @@ mod tests {
             migrate(&fresh, sql).unwrap();
         }
         assert_eq!(layout(&db.conn.lock().unwrap()), layout(&fresh));
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    /// Schema 28 (0.32): the plugins table, empty on an upgrade (nothing is installed until the first start of
+    /// 0.32 adopts what was in use), a backup first; the settings and songs stay; opening it again changes nothing.
+    #[test]
+    fn schema_28_adds_the_plugins_table_to_a_schema_27_database() {
+        const { assert!(SCHEMA_VERSION >= 28) };
+        let d = tmp("schema28");
+        {
+            std::fs::create_dir_all(&d).unwrap();
+            let c = Connection::open(d.join("encore.db")).unwrap();
+            c.pragma_update(None, "journal_mode", "WAL").unwrap();
+            for (n, _, sql) in MIGRATIONS.iter().filter(|(n, _, _)| *n <= 27) {
+                migrate(&c, sql).unwrap_or_else(|e| panic!("migration {n}: {e}"));
+            }
+            c.pragma_update(None, "user_version", 27).unwrap();
+            c.execute_batch("INSERT INTO settings VALUES ('ytdlp_enabled', 'true');").unwrap();
+            let has: i64 = c.query_row("SELECT COUNT(*) FROM sqlite_master WHERE name='plugins'", [], |r| r.get(0)).unwrap();
+            assert_eq!(has, 0, "a schema 27 database has no plugins table");
+        }
+        let db = Db::open(&d).unwrap();
+        assert_eq!(db.user_version().unwrap(), SCHEMA_VERSION);
+        let backups = crate::backup::list(&d);
+        assert_eq!(backups.len(), 1);
+        assert_eq!(crate::backup::validate_file(&backups[0].path).unwrap(), 27);
+        assert_eq!(db.one("SELECT COUNT(*) n FROM plugins", p![]).unwrap().unwrap().i("n"), 0);
+        let cols: Vec<String> = db.query("PRAGMA table_info(plugins)", p![]).unwrap().iter().map(|r| r.s("name")).collect();
+        assert_eq!(cols, ["id", "version", "enabled", "installed_at", "updated_at", "origin", "trust", "manifest", "sha256", "auto_update", "last_check", "last_error"]);
+        db.execute("INSERT INTO plugins (id, version, installed_at, updated_at, origin, trust, manifest, sha256) VALUES ('example-tone', '0.1.0', 1, 1, 'upload', 'third-party', '[plugin]', 'ab')", p![]).unwrap();
+        let r = db.one("SELECT * FROM plugins WHERE id='example-tone'", p![]).unwrap().unwrap();
+        assert_eq!((r.i("enabled"), r.i("auto_update"), r.s("origin"), r.get("last_error").cloned()), (1, 0, "upload".to_string(), Some(Value::Null)));
+        assert!(db.execute("INSERT INTO plugins (id) VALUES ('example-tone')", p![]).is_err(), "one row per plugin");
+        assert_eq!(db.one("SELECT value FROM settings WHERE key='ytdlp_enabled'", p![]).unwrap().unwrap().s("value"), "true");
+        drop(db);
+        let db = Db::open(&d).unwrap();
+        assert_eq!(crate::backup::list(&d).len(), 1);
+        assert_eq!(db.one("SELECT version FROM plugins WHERE id='example-tone'", p![]).unwrap().unwrap().s("version"), "0.1.0");
         let _ = std::fs::remove_dir_all(&d);
     }
 

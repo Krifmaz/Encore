@@ -38,6 +38,8 @@ pub const STORAGE_IMPORT: &str = "storage_import";
 pub const STORAGE_DOWNLOAD: &str = "storage_download";
 /// The reason a request waits for Soulseek.
 pub const SOULSEEK: &str = "soulseek";
+/// The reason a request waits for a source plugin the upgrade is still installing (streamrip, yt-dlp).
+pub const PLUGIN_INSTALL: &str = "plugin_install";
 /// What other users see while imports are paused.
 pub const PLAIN_BANNER: &str = "Imports are paused because of a storage problem on the server. Your downloads are kept and will be added when it is fixed.";
 
@@ -434,7 +436,8 @@ pub fn status(st: &impl Ctx, admin: bool) -> Value {
 /// How a download is imported and finished, kept on the request (`detail.kept`) with its files so the
 /// import can run again later exactly as it would have run now.
 pub(super) struct Spec {
-    /// the source that downloaded the files ("streamrip", "ytdlp", "slskd", "torznab")
+    /// the source that downloaded the files ("streamrip", "ytdlp", "slskd", "torznab"; "plugin" for a plugin
+    /// program's, named in `origin.plugin`)
     pub source: &'static str,
     /// "request": the album or song asked for; "url": a link's files by their own tags; "rip_url": a
     /// streamrip link's folders by their tags
@@ -922,7 +925,7 @@ pub(super) async fn import_kept(st: &impl Ctx, r: &mut Req) -> anyhow::Result<()
 }
 
 fn static_source(s: &str) -> &'static str {
-    ["streamrip", "ytdlp", "slskd", "slskd_lossless", "torznab"].into_iter().find(|x| *x == s).unwrap_or("import")
+    ["streamrip", "ytdlp", "slskd", "slskd_lossless", "torznab", "plugin"].into_iter().find(|x| *x == s).unwrap_or("import")
 }
 
 /// The kept files turned out to be the wrong audio when imported again: the normal path of their source
@@ -975,7 +978,7 @@ pub fn import_again(st: &impl Ctx, id: i64) -> Result<(), String> {
         return Err("Only a failed or waiting import can be imported again".into());
     }
     // a wait for Soulseek has nothing downloaded yet
-    if status == "waiting" && r.d["wait"]["reason"] == SOULSEEK {
+    if status == "waiting" && (r.d["wait"]["reason"] == SOULSEEK || r.d["wait"]["reason"] == PLUGIN_INSTALL) {
         return Err("There are no downloaded files to import".into());
     }
     if !has_files(&r.d) {

@@ -1,0 +1,39 @@
+# SABnzbd: a download client of the torznab source (sources/dl). Encore's own code talks to it; nothing to download.
+# docs/contracts/plugin-manifest.md describes every key.
+
+[plugin]
+id = "sabnzbd"
+name = "SABnzbd"
+version = "0.32.0"
+description = "Sends the Usenet releases Prowlarr finds to your SABnzbd and imports the album when it is done."
+kind = "client"
+protocol = 1
+homepage = "https://sabnzbd.org"
+license = "MIT"
+commands = ["status", "test"]
+builtin = true
+
+[client]
+source = "torznab"
+protocol = "usenet"
+chosen_by = "nzb_client=sabnzbd"
+
+[[settings]]
+key = "sab_url"
+
+[[settings]]
+key = "sab_api_key"
+
+[[settings]]
+key = "sab_category"
+
+[[settings]]
+key = "sab_download_path"
+
+[permissions]
+network = true
+paths = [{ setting = "sab_download_path", access = "write" }]
+
+[migration]
+# SABnzbd is the client for every nzb_client value that names no other one, as Encore picks it
+in_use = [["torznab_enabled", "nzb_client!=nzbget", "nzb_client!=blackhole", "sab_url"]]

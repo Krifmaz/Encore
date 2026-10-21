@@ -5,7 +5,7 @@ default-members = [".", "crates/*"]
 resolver = "2"
 
 [workspace.package]
-version = "2.0.0"
+version = "0.33.0"
 edition = "2021"
 license = "MIT"
 
@@ -26,6 +26,7 @@ encore-system = { path = "crates/system" }
 encore-requests = { path = "crates/requests" }
 encore-api = { path = "crates/api" }
 encore-files = { path = "crates/files" }
+encore-plugins = { path = "crates/plugins" }
 axum = { version = "0.8", features = ["multipart", "ws", "macros"] }
 axum-extra = { version = "0.10", features = ["cookie"] }
 tokio = { version = "1", features = ["full"] }

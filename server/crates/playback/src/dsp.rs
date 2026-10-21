@@ -1,8 +1,8 @@
 //! Server-side Cadenza processing: library streams upsampled on this server by cadenza-dsp
 //! (long-filter upsampling, dither / noise shaping) and sent as lossless 24-bit FLAC.
 //!
-//! The engine is the cadenza-dsp compiled into Encore ("built in"), or – once an admin updated it under
-//! Download tools – the downloaded `cadenza render` program (crate::cadenza). Both sit behind one trait
+//! The engine is the cadenza-dsp compiled into Encore ("built in"), or – once an admin installed the Cadenza
+//! plugin (Settings → Plugins) – the downloaded `cadenza render` program (crate::cadenza). Both sit behind one trait
 //! ([`engines::Renderer`]) and every job runs the same chain ([`spawn_chain`]): ffmpeg decodes, the engine
 //! upsamples, ffmpeg encodes FLAC. A downloaded engine that fails before it produced any audio falls back
 //! to the built-in one for that job. The admin's engine settings (`cadenza_engine_settings`) are drawn
@@ -299,7 +299,7 @@ impl Engine {
         if let Some(e) = st.playback().engine.get(key) {
             return e;
         }
-        let prog = st.playback().cadenza.external(st.data_dir());
+        let prog = st.playback().cadenza.external_of(st.plugins());
         let e = Engine::from_parts(prog, saved_values(st), Limits::of(st).max_taps);
         // worked out for `key`: a change in the meantime moved the key, so the next call works it out again
         st.playback().engine.put(key, e.clone());

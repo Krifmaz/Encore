@@ -1,0 +1,42 @@
+# rTorrent / ruTorrent: a download client of the torznab source (sources/dl). Encore's own code talks to it; nothing to download.
+# docs/contracts/plugin-manifest.md describes every key.
+
+[plugin]
+id = "rtorrent"
+name = "rTorrent / ruTorrent"
+version = "0.32.0"
+description = "Sends the torrents Prowlarr finds to your rTorrent (over XML-RPC, ruTorrent's address works too) and imports the album when it is done."
+kind = "client"
+protocol = 1
+homepage = "https://github.com/rakshasa/rtorrent"
+license = "MIT"
+commands = ["status", "test"]
+builtin = true
+
+[client]
+source = "torznab"
+protocol = "torrent"
+chosen_by = "torrent_client=rtorrent"
+
+[[settings]]
+key = "rtorrent_url"
+
+[[settings]]
+key = "rtorrent_user"
+
+[[settings]]
+key = "rtorrent_password"
+
+[[settings]]
+key = "rtorrent_label"
+
+[[settings]]
+key = "rtorrent_download_path"
+
+[permissions]
+network = true
+paths = [{ setting = "rtorrent_download_path", access = "write" }]
+
+[migration]
+# "rutorrent" picks rTorrent too
+in_use = [["torznab_enabled", "torrent_client=rtorrent", "rtorrent_url"], ["torznab_enabled", "torrent_client=rutorrent", "rtorrent_url"]]

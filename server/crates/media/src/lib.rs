@@ -28,6 +28,9 @@ pub trait Ctx: encore_http::Ctx + Clone + 'static {
     fn data_dir(&self) -> &Path {
         &self.db().data_dir
     }
+    /// The plugins (encore_plugins): what is installed and switched on, and where a builtin plugin's program
+    /// is. Every crate above this one reaches them here.
+    fn plugins(&self) -> &encore_plugins::Registry;
 }
 
 /// What the media helpers keep while the server runs. Clones share it.

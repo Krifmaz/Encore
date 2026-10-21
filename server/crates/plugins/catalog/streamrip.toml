@@ -1,0 +1,102 @@
+# streamrip: Qobuz, Tidal and Deezer with the owner's own accounts. Encore's own code (sources/streamrip.rs, the
+# Tidal sign-in) runs it; the plugin installs the streamrip fork into a venv of its own.
+# docs/contracts/plugin-manifest.md describes every key.
+
+[plugin]
+id = "streamrip"
+name = "streamrip"
+version = "0.32.0"
+description = "Searches Qobuz, Tidal and Deezer with your own accounts and downloads lossless (FLAC). Usually the best quality. streamrip is only used for these three: its SoundCloud support would give the same quality as yt-dlp, so SoundCloud links go through yt-dlp."
+kind = "source"
+protocol = 1
+homepage = "https://github.com/Stensel8/streamrip"
+license = "GPL-3.0"
+commands = ["status", "test", "search", "download", "update"]
+kinds = ["track", "album", "url"]
+lossless = true
+needs_sign_in = true
+builtin = true
+
+[[sources]]
+id = "qobuz"
+name = "Qobuz"
+
+[[sources]]
+id = "tidal"
+name = "Tidal"
+
+[[sources]]
+id = "deezer"
+name = "Deezer"
+
+[run.timeouts]
+search = 90
+download = 3600
+test = 90
+
+# Install puts in v2.4.10, the release this Encore was tested with (the image pinned it before 0.32); Update and
+# the scheduled task move to the fork's newest release or tag. The v2.4.10 tag still calls itself 2.4.9.
+[update]
+github = "Stensel8/streamrip"
+tag = "v{version}"
+tags = true
+pin = "v2.4.10"
+pin_reports = "2.4.9"
+auto = true
+
+[python]
+python = "3.14"
+packages = ["streamrip @ https://github.com/Stensel8/streamrip/archive/refs/tags/{tag}.zip"]
+bin = ["rip", "streamrip"]
+
+[install]
+verify = ["{bin}", "--version"]
+
+# The switch Encore turns streamrip's update check off with (sources/streamrip.rs reads it from this same file
+# at run time): without it streamrip asks GitHub before every command.
+[[install.check]]
+file = "lib/python3*/site-packages/streamrip/config.py"
+contains = "no_update_check"
+message = "This streamrip has no [cli] no_update_check switch, so it would ask GitHub for updates before every download. Encore needs the Stensel8 fork, v2.4.10 or newer."
+
+[[settings]]
+key = "streamrip_enabled"
+
+[[settings]]
+key = "streamrip_quality"
+
+[[settings]]
+key = "streamrip_deezer_arl"
+
+[[settings]]
+key = "streamrip_qobuz_user"
+
+[[settings]]
+key = "streamrip_qobuz_token"
+
+[[settings]]
+key = "streamrip_bin"
+
+[[settings]]
+key = "streamrip_command"
+
+# internal: the services used before the source order named them
+[[settings]]
+key = "streamrip_sources"
+
+[permissions]
+network = true
+filesystem = "folder"
+paths = [{ config = "streamrip", access = "write" }]
+
+[migration]
+from_tool = "streamrip"
+auto_key = "tools_auto_streamrip"
+adopt = ["tools/venv", "streamrip"]
+in_use = [
+    ["file:tools/venv/bin/rip"],
+    ["streamrip_enabled", "streamrip_deezer_arl"],
+    ["streamrip_enabled", "streamrip_qobuz_token"],
+    ["streamrip_enabled", "file:streamrip/config.toml"],
+    ["saved:tools_auto_streamrip"],
+]

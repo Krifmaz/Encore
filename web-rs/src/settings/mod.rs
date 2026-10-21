@@ -2,8 +2,9 @@
 //! The settings hub: the nav (You, People, Server, System), the page select for narrow screens, and the panel
 //! that shows one page. The Server pages are drawn from the server's settings schema
 //! (GET /api/admin/settings/schema, docs/contracts/settings-schema.md): groups.rs lays out a page's cards and
-//! schema_form.rs draws their fields. Every other page is a file of its own here; the cards' extras (Download
-//! tools, Tidal sign-in, the Soulseek status and VPN block, Cadenza's cache and engine settings) are in apps.rs.
+//! schema_form.rs draws their fields. Every other page is a file of its own here; the cards' extras (Tidal
+//! sign-in, the Soulseek status and VPN block, Cadenza's cache and engine settings) are in apps.rs. The Plugins
+//! page (plugins.rs, 0.32) holds the source cards that were on Downloads.
 
 pub mod account;
 pub mod appearance;
@@ -16,12 +17,15 @@ pub mod general;
 pub mod groups;
 pub mod invites;
 pub mod playback;
+pub mod plugins;
 pub mod schema_form;
 pub mod tasks;
 pub mod users;
 
 #[cfg(test)]
 mod form_tests;
+#[cfg(test)]
+mod plugins_tests;
 
 use crate::api;
 use crate::app::{self, Ctx, PageFuture};
@@ -71,6 +75,24 @@ fn embedded(id: &str) -> Option<app::PageFn> {
     })
 }
 
+/// The page `#/settings?s=<s>` opens: the Plugins page for its own names and the cards that moved there in
+/// 0.32 (streamrip, torznab, slskd, ytdlp, youtube, the old Download tools), else the schema's page for a page,
+/// an alias or a card (anything else comes back as it is).
+pub fn page_for(schema: &Schema, s: &str) -> String {
+    if plugins::opens_plugins(s) && schema.section(s).is_none() { "plugins".to_string() } else { schema.page_of(s) }
+}
+
+/// The Server pages in the nav: the schema's, with Plugins after Downloads (the page with the Download pipeline
+/// card), or at the end when there is no such page.
+pub fn server_nav(schema: &Schema) -> Vec<(&str, &str)> {
+    let mut items: Vec<(&str, &str)> = schema.sections.iter().map(|x| (x.id.as_str(), x.title.as_str())).collect();
+    if schema.section("plugins").is_none() {
+        let at = schema.sections.iter().position(|x| schema.holds(&x.id, "pipeline")).map(|i| i + 1).unwrap_or(items.len());
+        items.insert(at, ("plugins", "Plugins"));
+    }
+    items
+}
+
 /// `history.replaceState(null, '', url)`.
 fn replace_state(url: &str) {
     if let Ok(h) = dom::window().history() { let _ = h.replace_state_with_url(&JsValue::NULL, "", Some(url)); }
@@ -98,6 +120,7 @@ pub fn show(hub: &Rc<Hub>, id: String) -> Pin<Box<dyn Future<Output = ()>>> {
             return;
         }
         if id == "about" || id == "api" || id == "keys" { return show(&hub, "general".to_string()).await; }
+        if id == "plugins" { return plugins::show_page(&hub).await; }
         groups::show_page(&hub, &id).await;
     })
 }
@@ -112,13 +135,13 @@ pub fn render(view: Element, ctx: Ctx) -> PageFuture {
         } else { (json!({}), Schema::default()) };
         let schema = Rc::new(schema);
         let s = ctx.q("s");
-        let mut current = if s.is_empty() { "account".to_string() } else { schema.page_of(&s) };
+        let mut current = if s.is_empty() { "account".to_string() } else { page_for(&schema, &s) };
         let mut nav: Vec<(&str, Vec<(&str, &str)>)> = vec![
             ("You", vec![("account", "Account"), ("appearance", "Appearance"), ("language", "Language"), ("playback", "Playback"), ("connections", "Connections")]),
         ];
         if admin {
             nav.push(("People", vec![("users", "Users & permissions"), ("invites", "Invites")]));
-            nav.push(("Server", schema.sections.iter().map(|x| (x.id.as_str(), x.title.as_str())).collect()));
+            nav.push(("Server", server_nav(&schema)));
             nav.push(("System", vec![("diagnostics", "Diagnostics"), ("files", "Files")]));
         }
         let pages: Vec<&str> = nav.iter().flat_map(|(_, items)| items.iter().map(|(id, _)| *id)).collect();

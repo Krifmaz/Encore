@@ -41,31 +41,28 @@ LABEL org.opencontainers.image.title="Encore" \
       org.opencontainers.image.source="https://github.com/Krifmaz/Encore" \
       org.opencontainers.image.url="https://github.com/Krifmaz/Encore"
 RUN apt-get update \
- && apt-get install -y --no-install-recommends ffmpeg libchromaprint-tools ca-certificates curl tzdata tini python3 python3-venv nodejs \
+ && apt-get install -y --no-install-recommends ffmpeg libchromaprint-tools ca-certificates curl tzdata tini python3 python3-venv nodejs bubblewrap \
  && rm -rf /var/lib/apt/lists/*
-# download tools Encore runs as programs: yt-dlp (YouTube, SoundCloud, Bandcamp …) and, optionally,
-# streamrip (Qobuz/Tidal/Deezer with your own subscription). Build with --build-arg INSTALL_STREAMRIP=false to skip it.
-ARG INSTALL_STREAMRIP=true
-ARG STREAMRIP_REF=v2.4.10
-# what that tag says it is: the fork's v2.4.10 tag still declares 2.4.9 in its pyproject.toml, so the check
-# below also looks for the [cli] no_update_check switch that 2.4.10 brings (Encore turns the update check off)
-ARG STREAMRIP_VERSION=2.4.9
-# The streamrip fork needs Python 3.14+, newer than Debian's python3, so uv fetches a standalone 3.14 for the
-# tools' venv. No silent fallback to PyPI's streamrip 2.1.0: its Tidal client was revoked, so a failed install
-# must fail the build instead of shipping a streamrip that cannot sign in to Tidal.
-ENV UV_PYTHON_INSTALL_DIR=/opt/python UV_NO_CACHE=1
-RUN python3 -m venv /opt/uv && /opt/uv/bin/pip install --no-cache-dir uv \
- && /opt/uv/bin/uv venv --seed --python 3.14 /opt/tools \
- && /opt/uv/bin/uv pip install --python /opt/tools/bin/python "yt-dlp[default]" \
- && if [ "$INSTALL_STREAMRIP" = "true" ]; then \
-      /opt/uv/bin/uv pip install --python /opt/tools/bin/python "https://github.com/Stensel8/streamrip/archive/refs/tags/${STREAMRIP_REF}.zip" \
-      && { /opt/tools/bin/streamrip --version 2>/dev/null || /opt/tools/bin/rip --version; } | tee /dev/stderr | grep -q "version ${STREAMRIP_VERSION}" \
-      && grep -q no_update_check /opt/tools/lib/python3*/site-packages/streamrip/config.py \
-      || { echo "streamrip ${STREAMRIP_REF} failed to install"; exit 1; }; \
-    fi \
- && rm -rf /opt/uv
-ENV PATH=/opt/tools/bin:$PATH \
-    ENCORE_CONFIG_DIR=/config ENCORE_STATIC_DIR=/app/static ENCORE_PORT=8080 \
+# Plugins (Settings → Plugins) install the programs Encore runs – yt-dlp and streamrip into venvs of their own under
+# /config/plugins/<id>/, slskd, Cadenza and llama.cpp from their releases – so the image ships none of them. What it
+# keeps for them: a pinned uv (/opt/uv/bin/uv, the plugins' installer for Python programs) and the standalone
+# Python 3.14 uv fetches (/opt/python: the streamrip fork needs 3.14+, newer than Debian's python3), bubblewrap for
+# the plugins' sandbox, nodejs (yt-dlp's JavaScript runtime for YouTube) and ffmpeg.
+# A venv an Encore before 0.32 made in /config/tools/venv names the 3.14 it was made with by its full version
+# (/opt/python/cpython-3.14.N-…); every 3.14.N name points at the 3.14 installed here (one ABI within 3.14), so those
+# venvs keep running on this image and the plugins adopt them in place.
+ARG UV_VERSION=0.12.21
+ENV UV_PYTHON_INSTALL_DIR=/opt/python UV_NO_CACHE=1 UV_PYTHON_DOWNLOADS=never
+RUN python3 -m venv /opt/uv && /opt/uv/bin/pip install --no-cache-dir "uv==${UV_VERSION}" \
+ && UV_PYTHON_DOWNLOADS=automatic /opt/uv/bin/uv python install 3.14 \
+ && cd /opt/python && real="$(ls -d cpython-3.14.*-linux-*-gnu | grep -v '\.lock$' | sort -V | tail -1)" \
+ && [ -x "$real/bin/python3.14" ] || { echo "Python 3.14 failed to install"; exit 1; } \
+ && tail="${real#cpython-3.14.*-}" \
+ && for n in $(seq 0 30); do [ -e "cpython-3.14.$n-$tail" ] || ln -s "$real" "cpython-3.14.$n-$tail"; done \
+ && { [ -e "cpython-3.14-$tail" ] || ln -s "$real" "cpython-3.14-$tail"; } \
+ && chmod -R a+rX /opt/python /opt/uv \
+ && /opt/uv/bin/uv --version && "/opt/python/$real/bin/python3.14" --version
+ENV ENCORE_CONFIG_DIR=/config ENCORE_STATIC_DIR=/app/static ENCORE_PORT=8080 \
     PUID=1000 PGID=1000 TZ=UTC
 COPY --from=build /encore /usr/local/bin/encore
 # the Rust UI (trunk's dist: index.html, the hashed .js/.wasm, css, icons, manifest, share.html, sw.js) is the website

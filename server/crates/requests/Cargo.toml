@@ -15,6 +15,7 @@ encore-media = { workspace = true }
 encore-sync = { workspace = true }
 encore-system = { workspace = true }
 encore-vpn = { workspace = true }
+encore-plugins = { workspace = true }
 futures-util = { workspace = true }
 anyhow = { workspace = true }
 base64 = { workspace = true }

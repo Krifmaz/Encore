@@ -8,20 +8,48 @@ use tokio::process::Command;
 
 use encore_core::audio::YTDLP_EXTS as AUDIO;
 
+/// YouTube Music is a source now: the yt-dlp plugin is installed and switched on, and yt-dlp is on in its
+/// settings.
 pub fn enabled(st: &impl Ctx) -> bool {
-    st.cfg().bool("ytdlp_enabled")
+    st.plugins().enabled("ytdlp") && st.cfg().bool("ytdlp_enabled")
+}
+
+/// The yt-dlp plugin is installed and switched on (a link or the last-resort step may use it).
+pub fn plugin_on(st: &impl Ctx) -> bool {
+    st.plugins().enabled("ytdlp")
 }
 
 pub fn bin(st: &impl Ctx) -> String {
-    // the updated copy in the config dir when it's newer, else the image's /opt/tools/bin, else PATH
-    std::env::var("ENCORE_YTDLP").unwrap_or_else(|_| {
-        st.system().tools.path_in(st.data_dir(), "ytdlp").map(|p| p.to_string_lossy().into()).unwrap_or_else(|| "yt-dlp".into())
+    // the owner's own copy (ENCORE_YTDLP), else the newest that runs of the plugin's venv, the venv an Encore
+    // before plugins kept (adopted), an older image's /opt/tools/bin and PATH (encore_system::tools)
+    std::env::var("ENCORE_YTDLP").ok().filter(|v| !v.trim().is_empty()).unwrap_or_else(|| {
+        encore_system::tools::path(st, "ytdlp").map(|p| p.to_string_lossy().into()).unwrap_or_else(|| "yt-dlp".into())
     })
 }
 
+/// yt-dlp's environment: Encore's own (its proxy, its locale) without Encore's settings and without forced
+/// colours (encore_plugins::sandbox::program_env).
+fn env() -> Vec<(String, String)> {
+    encore_plugins::sandbox::program_env()
+}
+
+/// The command for a yt-dlp run, through the plugins' spawn builder (a session of its own without a terminal,
+/// no new privileges, no other open files).
+fn command(program: &str, args: &[String]) -> Command {
+    let spawn = encore_plugins::sandbox::Spawn::new(&encore_plugins::sandbox::Sandbox::limits_only(), Path::new(program)).args(args.iter().cloned()).env(env());
+    spawn.tokio_command()
+}
+
+/// A yt-dlp to run is there: the owner's own (ENCORE_YTDLP), or a copy of the plugin's, the adopted venv's,
+/// an older image's or the system's that runs.
+pub fn program_found(st: &impl Ctx) -> bool {
+    std::env::var("ENCORE_YTDLP").ok().is_some_and(|v| !v.trim().is_empty()) || encore_system::tools::path(st, "ytdlp").is_some()
+}
+
 pub async fn version(st: &impl Ctx) -> Option<String> {
-    let o = Command::new(bin(st)).arg("--version").output().await.ok()?;
-    Some(String::from_utf8_lossy(&o.stdout).trim().to_string()).filter(|s| !s.is_empty())
+    let (st, exe) = (st.clone(), bin(st));
+    let path = encore_core::which::which(&exe)?;
+    tokio::task::spawn_blocking(move || st.system().tools.version_of(&path)).await.ok().flatten()
 }
 
 /// `--cookies <file>` from the YouTube sign-in in use (the hand-off session, the extension or pasted
@@ -41,7 +69,7 @@ pub async fn test_cookies(st: &impl Ctx) -> anyhow::Result<Value> {
     let ver = version(st).await;
     let tool = match &ver {
         Some(v) => format!("yt-dlp {v}"),
-        None => "yt-dlp is not installed in this container".into(),
+        None => "yt-dlp is not installed – install or update the yt-dlp plugin under Settings → Plugins".into(),
     };
     let source = crate::ytauth::active(st).map(|k| format!(" ({})", k.label().to_lowercase())).unwrap_or_default();
     let raw = crate::ytauth::cookies_for_ytdlp(st).unwrap_or_default();
@@ -180,9 +208,9 @@ async fn run(st: &impl Ctx, args: &[String], outdir: &Path, before: &std::collec
     use encore_core::fsx::{self, Step};
     let program = bin(st);
     // a program that isn't there says so; any other start failure names the program and the errno
-    let mut child = match fsx::spawn(Step::Download, &program, || Command::new(&program).args(args).stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped()).kill_on_drop(true).spawn()) {
+    let mut child = match fsx::spawn(Step::Download, &program, || command(&program, args).stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped()).spawn()) {
         Ok(c) => c,
-        Err(e) if e.source.kind() == std::io::ErrorKind::NotFound => anyhow::bail!("yt-dlp is not installed ({})", e.source),
+        Err(e) if e.source.kind() == std::io::ErrorKind::NotFound => anyhow::bail!("yt-dlp is not installed ({}) – install or update the yt-dlp plugin under Settings → Plugins", e.source),
         Err(e) => return Err(e.into()),
     };
     let mut lines = BufReader::new(child.stdout.take().unwrap()).lines();
@@ -239,7 +267,8 @@ async fn run(st: &impl Ctx, args: &[String], outdir: &Path, before: &std::collec
 }
 
 async fn json_out(st: &impl Ctx, args: &[&str]) -> anyhow::Result<Value> {
-    let o = Command::new(bin(st)).args(args).kill_on_drop(true).output().await.map_err(|e| anyhow::anyhow!("yt-dlp is not installed ({e})"))?;
+    let args: Vec<String> = args.iter().map(|a| a.to_string()).collect();
+    let o = command(&bin(st), &args).stdin(Stdio::null()).output().await.map_err(|e| anyhow::anyhow!("yt-dlp is not installed ({e}) – install or update the yt-dlp plugin under Settings → Plugins"))?;
     if !o.status.success() {
         anyhow::bail!("{}", String::from_utf8_lossy(&o.stderr).lines().last().unwrap_or("yt-dlp failed").chars().take(300).collect::<String>());
     }

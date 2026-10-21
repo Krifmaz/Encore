@@ -12,21 +12,23 @@
 //! byte for byte; the schema renderer has to keep drawing it. When a change to the form is meant, run
 //! `ENCORE_WRITE_SETTINGS_CARDS=1 cargo test settings::` to write the file again and read its diff. R2 wrote it
 //! again when Apps & sources became Library, Downloads, Integrations and Server processing: the same cards, on
-//! those four pages, without the part headings, and the Tidal Client ID's help naming Downloads.
+//! those four pages, without the part headings, and the Tidal Client ID's help naming Downloads. 0.32 wrote it
+//! again when the source cards of Downloads became plugin cards: Downloads keeps Download pipeline and Release
+//! types (plugins_tests.rs holds the moved cards' fields to what this file had for them).
 //! (The schema fixture is recorded by the server's config tests: `ENCORE_WRITE_SETTINGS_SCHEMA=1 cargo test -p
 //! encore-config schema_fixture` in server/.)
 
 use super::apps::{cadenza_cache_block, engine_settings_block, soulseek_status_block, streamrip_config_block, tidal_block};
 use super::fields::{Schema, When};
-use super::groups::{cards_html, visible_cards};
+use super::groups::{cards_html, page_cards, visible_cards};
 use crate::json::J;
 use serde_json::{json, Map, Value};
 
 const SCHEMA_JSON: &str = include_str!("fixtures/settings-schema.json");
 const CARDS: &str = "src/settings/fixtures/settings-cards.html";
 
-fn schema_json() -> Value { serde_json::from_str(SCHEMA_JSON).expect("the schema fixture is JSON") }
-fn schema() -> Schema { Schema::from_json(&schema_json()) }
+pub(super) fn schema_json() -> Value { serde_json::from_str(SCHEMA_JSON).expect("the schema fixture is JSON") }
+pub(super) fn schema() -> Schema { Schema::from_json(&schema_json()) }
 
 /// Every field of the schema answer, as JSON.
 fn all_fields(v: &Value) -> Vec<Value> {
@@ -42,7 +44,7 @@ fn field_mut<'a>(v: &'a mut Value, key: &str) -> &'a mut Value {
 }
 
 /// GET /admin/settings for the cases: (name, values with `_meta`).
-fn cases() -> Vec<(&'static str, Value)> {
+pub(super) fn cases() -> Vec<(&'static str, Value)> {
     let mut values = Map::new();
     let mut meta = Map::new();
     for f in all_fields(&schema_json()) {
@@ -122,8 +124,8 @@ fn all_pages(page: impl Fn(&str, &Value, bool, Option<&str>) -> String) -> Strin
     }
     // a link that names a card opens that one instead of the first
     let values = &cases()[0].1;
-    out.push_str("<!-- page downloads, defaults, the Soulseek card asked for -->\n");
-    out.push_str(&page("downloads", values, false, Some("slskd")));
+    out.push_str("<!-- page downloads, defaults, the Release types card asked for -->\n");
+    out.push_str(&page("downloads", values, false, Some("releases")));
     out.push('\n');
     out
 }
@@ -132,7 +134,7 @@ fn all_pages(page: impl Fn(&str, &Value, bool, Option<&str>) -> String) -> Strin
 fn from_schema(schema: &Schema) -> impl Fn(&str, &Value, bool, Option<&str>) -> String + '_ {
     move |id, values, reveal, focus| {
         let page = schema.section(id).expect("a page of the schema");
-        cards_html(&visible_cards(&page.groups, values), values, reveal, focus)
+        cards_html(&page_cards(&page.groups, values), values, reveal, focus)
     }
 }
 
@@ -150,8 +152,8 @@ const NAV: &[(&str, &str)] = &[
 const LINKS: &[(&str, &str)] = &[
     ("general", "general"), ("grouplisten", "general"), ("apps", "downloads"), ("downloads", "downloads"), ("tagging", "library"), ("services", "integrations"),
     ("library", "library"), ("verify", "library"),
-    ("pipeline", "downloads"), ("releases", "downloads"), ("streamrip", "downloads"), ("torznab", "downloads"), ("slskd", "downloads"),
-    ("ytdlp", "downloads"), ("youtube", "downloads"),
+    ("pipeline", "downloads"), ("releases", "downloads"), ("streamrip", "plugins"), ("torznab", "plugins"), ("slskd", "plugins"),
+    ("ytdlp", "plugins"), ("youtube", "plugins"),
     ("integrations", "integrations"), ("spotify", "integrations"), ("media", "integrations"), ("roon", "integrations"),
     ("processing", "processing"), ("cadenza", "processing"),
     ("accounts", "accounts"), ("email", "accounts"), ("notify", "accounts"), ("autodownload", "autodownload"),
@@ -164,10 +166,10 @@ fn the_nav_is_the_split_one_and_old_links_still_open() {
     let schema = schema();
     let ours: Vec<(&str, &str)> = schema.sections.iter().map(|s| (s.id.as_str(), s.title.as_str())).collect();
     assert_eq!(ours, NAV);
-    for (id, page) in LINKS { assert_eq!(schema.page_of(id), *page, "?s={id}"); }
+    for (id, page) in LINKS { assert_eq!(super::page_for(&schema, id), *page, "?s={id}"); }
     // every card of the schema is one of them
     for g in schema.sections.iter().flat_map(|s| &s.groups) { assert!(LINKS.iter().any(|(id, _)| *id == g.id), "card {}", g.id); }
-    // the Download tools card and How requests are fulfilled go on the page with the Download pipeline card
+    // How requests are fulfilled goes on the page with the Download pipeline card (and Plugins after it in the nav)
     let with_tools: Vec<&str> = schema.sections.iter().map(|s| s.id.as_str()).filter(|id| schema.holds(id, "pipeline")).collect();
     assert_eq!(with_tools, ["downloads"]);
     // a page id wins over a card of the same name on another page (Library's own card is called library too)
@@ -242,6 +244,6 @@ fn every_field_type_of_the_schema_is_drawn() {
     let html = from_schema(&schema)("general", values, false, None);
     assert!(html.contains(r#"<input class="input" type="text" data-k="app_name" "#), "{html}");
     assert!(html.contains(r#"<input class="input" type="text" data-k="base_url" "#), "url as text");
-    let downloads = from_schema(&schema)("downloads", values, false, None);
-    assert!(downloads.contains(r#"<input class="input" type="text" data-k="streamrip_bin" "#), "path as text");
+    let library = from_schema(&schema)("library", values, false, None);
+    assert!(library.contains(r#"<input class="input" type="text" data-k="staging_path" "#), "path as text");
 }

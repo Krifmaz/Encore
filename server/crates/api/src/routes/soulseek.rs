@@ -93,7 +93,7 @@ async fn status(State(st): State<AppState>, User(u): User) -> ApiResult<Json<Val
         "logged_in": false, "username": "", "error": m["error"].as_str().unwrap_or(""), "warning": m["warning"], "download_dir": m["download_dir"],
         "shares": { "dirs": 0, "files": 0 }, "port": m["listen_port"], "scanning": m["scanning"], "parent": null, "downloads": 0, "uploads": 0 });
     if installed.is_none() {
-        out["hint"] = json!("Install or update it under Download tools");
+        out["hint"] = json!("Install or update the Soulseek (slskd) plugin under Settings → Plugins");
     }
 
     if !slskd::enabled(&st) || state != "running" {

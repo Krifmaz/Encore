@@ -28,8 +28,16 @@ import java.util.concurrent.TimeUnit
 class SettingsApi(private val api: EncoreApi, private val client: OkHttpClient) {
     private val jsonType = "application/json; charset=utf-8".toMediaType()
 
-    /** Tests, tool updates, a backup, Sync now and Update now can take a while. */
+    /** Tests, a backup, Sync now and Update now can take a while. */
     private val slow: OkHttpClient by lazy { client.newBuilder().readTimeout(300, TimeUnit.SECONDS).build() }
+
+    /**
+     * A plugin's install, update, removal or test, and an upload: the server answers only when the work is done (a
+     * program or a model of gigabytes on a slow line), so no read limit, at most 3 hours in all.
+     */
+    private val long: OkHttpClient by lazy {
+        client.newBuilder().readTimeout(0, TimeUnit.SECONDS).writeTimeout(0, TimeUnit.SECONDS).callTimeout(3, TimeUnit.HOURS).build()
+    }
 
     /** The base URL of the signed-in server, for links the server does not send ("" when signed out). */
     val base: String get() = api.base
@@ -179,17 +187,65 @@ class SettingsApi(private val api: EncoreApi, private val client: OkHttpClient) 
 
     fun runTask(key: String) { call("POST", "/api/admin/tasks/${enc(key)}/run", null) }
 
+    // ---- Plugins (0.32; web-rs/src/settings/plugins.rs, server/crates/api/src/routes/plugins.rs) ----------------
+
+    /**
+     * GET /api/plugins as a probe: true when this server has plugins, false when it is older than 0.32 (a 404, or
+     * its web page instead of the list), null when it could not tell (not reached, signed out).
+     */
+    fun pluginsProbe(): Boolean? = try {
+        if (api.base.isEmpty()) {
+            null
+        } else {
+            client.newCall(Request.Builder().url(api.url("/api/plugins")).header("Accept", "application/json").get().build()).execute().use { res ->
+                app.encore.android.features.settings.PluginRules.hasPlugins(res.code, res.body.string())
+            }
+        }
+    } catch (_: Exception) {
+        null
+    }
+
+    /** GET /api/plugins: `{sandbox: {level, text, reason}, encore_version, protocol, upload_max_mb, plugins: [card…]}`. */
+    fun plugins(): JsonObject = obj("GET", "/api/plugins")
+
+    /** GET /api/plugins/{id}: one card, with its status asked now when it is installed. */
+    fun plugin(id: String): JsonObject = obj("GET", "/api/plugins/${enc(id)}")
+
+    /**
+     * POST /api/plugins/{id}/{install|update|check|enable|disable|remove}: the card. The server answers when the work
+     * is done (an install downloads the program), so these wait without a read limit.
+     */
+    fun pluginAction(id: String, act: String): JsonObject = obj("POST", "/api/plugins/${enc(id)}/${enc(act)}", null, long = true)
+
+    /** POST /api/plugins/check: the list, after every installed plugin was checked for an update. */
+    fun pluginsCheck(): JsonObject = obj("POST", "/api/plugins/check", null, long = true)
+
+    /** POST /api/plugins/{id}/test: `{ok: true, message}` or `{ok: false, error, code, retry_after}`. */
+    fun pluginTest(id: String): JsonObject = obj("POST", "/api/plugins/${enc(id)}/test", null, long = true)
+
+    /** POST /api/plugins/{id}/auto-update {on}: the card. */
+    fun pluginAutoUpdate(id: String, on: Boolean): JsonObject = obj("POST", "/api/plugins/${enc(id)}/auto-update", buildJsonObject { put("on", on) })
+
+    /** GET /api/plugins/{id}/logs?lines=200: `{id, lines, file}`. */
+    fun pluginLogs(id: String, lines: Int = 200): JsonObject = obj("GET", "/api/plugins/${enc(id)}/logs?lines=$lines")
+
+    /** GET /api/plugins/{id}/settings: `{id, builtin, settings_on, fields, values}` (fields in the schema's shape plus `part`). */
+    fun pluginSettings(id: String): JsonObject = obj("GET", "/api/plugins/${enc(id)}/settings")
+
+    /** PUT /api/plugins/{id}/settings {values}: a plugin's own settings (a masked secret is left as it is); the settings answer. */
+    fun pluginSaveSettings(id: String, values: JsonObject): JsonObject =
+        obj("PUT", "/api/plugins/${enc(id)}/settings", buildJsonObject { put("values", values) })
+
+    /** POST /api/plugins/upload, the zip as the multipart field `file`: the new plugin's card. */
+    fun pluginUpload(fileName: String, body: RequestBody): JsonObject {
+        val form = MultipartBody.Builder().setType(MultipartBody.FORM).addFormDataPart("file", fileName, body).build()
+        return send(long, Request.Builder().url(api.url("/api/plugins/upload")).post(form)) as? JsonObject ?: JsonObject(emptyMap())
+    }
+
+    /** POST /api/plugins/install-url {url}: an https address of a zip or a plugin.toml, or `owner/repo@ref`; the card. */
+    fun pluginInstallUrl(url: String): JsonObject = obj("POST", "/api/plugins/install-url", buildJsonObject { put("url", url) }, long = true)
+
     // ---- Downloads and Server processing: the cards' extras ----------------------------------------------------
-
-    /** GET /api/system/tools: a list, or `{tools}`. */
-    fun tools(): JsonElement? = call("GET", "/api/system/tools", null)
-
-    fun toolsCheck(): JsonElement? = call("POST", "/api/system/tools/check", null, slow = true)
-
-    /** POST /api/system/tools/{id}/update: `{installed, latest}`. */
-    fun toolUpdate(id: String): JsonObject = obj("POST", "/api/system/tools/${enc(id)}/update", null, slow = true)
-
-    fun toolReset(id: String) { call("POST", "/api/system/tools/${enc(id)}/reset", null, slow = true) }
 
     fun soulseekStatus(): JsonObject = obj("GET", "/api/soulseek/status")
 
@@ -273,8 +329,8 @@ class SettingsApi(private val api: EncoreApi, private val client: OkHttpClient) 
 
     // ---- plumbing ------------------------------------------------------------------------------------------------
 
-    private fun obj(method: String, path: String, body: JsonElement? = null, slow: Boolean = false): JsonObject =
-        call(method, path, body, slow) as? JsonObject ?: JsonObject(emptyMap())
+    private fun obj(method: String, path: String, body: JsonElement? = null, slow: Boolean = false, long: Boolean = false): JsonObject =
+        call(method, path, body, slow, long) as? JsonObject ?: JsonObject(emptyMap())
 
     private fun rows(el: JsonElement?): List<JsonObject> = when (el) {
         is kotlinx.serialization.json.JsonArray -> el.filterIsInstance<JsonObject>()
@@ -282,13 +338,18 @@ class SettingsApi(private val api: EncoreApi, private val client: OkHttpClient) 
         else -> emptyList()
     }
 
-    private fun call(method: String, path: String, body: JsonElement?, slow: Boolean = false): JsonElement? {
+    private fun call(method: String, path: String, body: JsonElement?, slow: Boolean = false, long: Boolean = false): JsonElement? {
         val rb: RequestBody? = when {
             body != null -> api.json.encodeToString(JsonElement.serializer(), body).toRequestBody(jsonType)
             method != "GET" -> "".toRequestBody(jsonType)
             else -> null
         }
-        return send(if (slow) this.slow else client, Request.Builder().url(api.url(path)).method(method, rb))
+        val http = when {
+            long -> this.long
+            slow -> this.slow
+            else -> client
+        }
+        return send(http, Request.Builder().url(api.url(path)).method(method, rb))
     }
 
     private fun send(http: OkHttpClient, req: Request.Builder): JsonElement? {

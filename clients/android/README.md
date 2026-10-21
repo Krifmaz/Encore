@@ -25,6 +25,8 @@ What it does:
 - songs saved for offline in `Music/Encore`, offline mode, Downloaded in the Library tab and in Android Auto
 - updates itself from the GitHub releases (Settings → This device → Updates)
 - for admins, the file manager (Settings → Server → Files): browse, upload, move, rename, trash and import
+- for admins, the plugins (Settings → Server → Plugins, after Downloads): install, update, test, logs, disable and
+  remove, upload a plugin zip through the system file picker or install from a URL, and each plugin's settings card
 - bug reports: the list, a report with its replies, a new report with pictures (Home menu and Settings → This
   device)
 
@@ -158,6 +160,18 @@ where they are", and Upload: files (`OpenMultipleDocuments`) or a whole folder (
 through OkHttp multipart (never held in memory), in the app's scope so it goes on when the page is left, with a
 short foreground service (`UploadService`, type dataSync, the progress as its notification) so Android does not
 freeze or close the app halfway. A document whose size is not what the picker said is sent again without a length.
+
+### Plugins (admins)
+
+`features/settings/PluginsScreen.kt` and `PluginRules.kt` (0.32): Settings → Server → Plugins, after Downloads, on a
+server that has plugins (`GET /api/plugins`; an older server keeps its download sources on Downloads). The head card
+(Check for updates, the sandbox line), each installed plugin as a card (version, badges, status line, Update, Test,
+Logs, Disable or Enable, Remove, the auto-update switch, its settings drawn by `SchemaForm`), the plugins not
+installed under Available with Install, and Add a plugin: Upload plugin through the system's file picker (the zip
+streamed as multipart) or Install from URL, each after the third-party warning. The source cards that were on
+Downloads (streamrip, Torrents & Usenet, Soulseek, yt-dlp with YouTube sign-in) are plugin cards here. `PluginRules`
+holds what needs no Android (the card's words, badges and buttons, the checks before an upload or a URL install, the
+settings card's runs), tested in `PluginRulesTest.kt`; the web's page is `web-rs/src/settings/plugins.rs`.
 
 ## Code layout
 

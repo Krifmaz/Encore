@@ -45,7 +45,7 @@ pub fn router() -> Router<AppState> {
         .route("/api/system/restart", post(super::update::post_restart))
 }
 
-// ---- download tools (Settings → Downloads → Download tools) ------------------------------------
+// ---- the old Download tools card: answered from the plugins for one more release ---------------
 
 /// What is installed and what the last check found (no network).
 async fn tools_list(State(st): State<AppState>, Admin(_): Admin) -> ApiResult<Json<Vec<encore_system::tools::ToolInfo>>> {
@@ -57,8 +57,7 @@ async fn tools_check(State(st): State<AppState>, Admin(_): Admin) -> ApiResult<J
     Ok(Json(encore_system::tools::check(&st).await))
 }
 
-/// "Update to X" / "Install": the newest yt-dlp or streamrip into the config dir, Cadenza's or slskd's
-/// newest release.
+/// "Update to X" / "Install": the plugin's update, or its install when it is not installed.
 async fn tools_update(State(st): State<AppState>, Admin(u): Admin, Path(id): Path<String>) -> ApiResult<Json<encore_system::tools::ToolInfo>> {
     if !encore_system::tools::IDS.contains(&id.as_str()) {
         return Err(err(404, "Unknown tool"));
@@ -67,19 +66,20 @@ async fn tools_update(State(st): State<AppState>, Admin(u): Admin, Path(id): Pat
     encore_system::tools::update(&st, &id).await.map(Json).map_err(|e| err(400, e.to_string()))
 }
 
-/// "Use the bundled version" / "Use the built-in engine" (Cadenza) / "Remove slskd": removes the updated copy.
+/// "Use the bundled version" / "Use the built-in engine" (Cadenza) / "Remove slskd": removes the plugin (its own
+/// install; adopted folders and settings stay).
 async fn tools_reset(State(st): State<AppState>, Admin(u): Admin, Path(id): Path<String>) -> ApiResult<Json<Vec<encore_system::tools::ToolInfo>>> {
     if !encore_system::tools::IDS.contains(&id.as_str()) {
         return Err(err(404, "Unknown tool"));
     }
     let st2 = st.clone();
     let id2 = id.clone();
-    tokio::task::spawn_blocking(move || encore_system::tools::reset(&st2, &id2)).await.map_err(|e| err(500, e.to_string()))?.map_err(|e| err(400, e.to_string()))?;
+    encore_system::tools::reset(&st2, &id2).await.map_err(|e| err(400, e.to_string()))?;
     let what = match id.as_str() {
         "cadenza" => "went back to the built-in Cadenza engine".to_string(),
         "slskd" => "removed slskd".to_string(),
         "translator" => "removed the Translator and its model".to_string(),
-        _ => format!("went back to the bundled {}", encore_system::tools::label(&id)),
+        _ => format!("removed the {} plugin", encore_system::tools::label(&id)),
     };
     st.db.log("info", &format!("{} {what}", u.s("username")));
     Ok(Json(tokio::task::spawn_blocking(move || encore_system::tools::cached(&st)).await.map_err(|e| err(500, e.to_string()))?))
@@ -390,8 +390,21 @@ fn msg(ok: bool, m: impl Into<String>) -> Value {
 }
 
 async fn test(State(st): State<AppState>, Admin(u): Admin, Path(service): Path<String>) -> ApiResult<Json<Value>> {
-    let res: anyhow::Result<Value> = async {
-        Ok(match service.as_str() {
+    match run_test(&st, &service, Some(&u)).await {
+        Ok(v) => Ok(Json(v)),
+        Err(e) if e.to_string() == "__unknown" => Err(err(404, "Unknown service")),
+        // the whole chain, never cut: "streamrip config path: config failed: start /config/tools/venv/bin/rip: …"
+        Err(e) => Ok(Json(msg(false, format!("{e:#}")))),
+    }
+}
+
+/// A settings section's test (`{ok, message}`), as the admin `u` (the email test writes to them); the builtin
+/// plugins' Test buttons run the same ones (crate::builtins). Err("__unknown") for a service there is no test
+/// for.
+pub async fn run_test(st: &AppState, service: &str, u: Option<&encore_db::Row>) -> anyhow::Result<Value> {
+    let st = st.clone();
+    async {
+        Ok(match service {
             "slskd" => {
                 let m = st.requests.slskd.status();
                 let vpn = encore_vpn::summary(&st.vpn.status());
@@ -401,7 +414,7 @@ async fn test(State(st): State<AppState>, Admin(u): Admin, Path(service): Path<S
                     msg(false, format!("Soulseek is off or has no username and password · {vpn}"))
                 } else if state != "running" {
                     let what = match state {
-                        "not_installed" => "not installed – install or update it under Download tools (slskd – Soulseek engine)".to_string(),
+                        "not_installed" => "not installed – install the Soulseek (slskd) plugin under Settings → Plugins".to_string(),
                         "starting" => format!("engine{ver} starting"),
                         "waiting_vpn" => "waiting for the VPN".to_string(),
                         "crashed" => format!("engine{ver} crashed"),
@@ -428,7 +441,7 @@ async fn test(State(st): State<AppState>, Admin(u): Admin, Path(service): Path<S
             }
             "torznab" | "prowlarr" | "qbit" | "sab" => torznab::status(&st).await,
             "email" => {
-                let to = st.db.one("SELECT email FROM users WHERE id=?", p![u.i("id")])?.map(|r| r.s("email")).filter(|e| !e.is_empty()).unwrap_or(st.cfg.str("smtp_from"));
+                let to = st.db.one("SELECT email FROM users WHERE id=?", p![u.map(|u| u.i("id")).unwrap_or(0)])?.map(|r| r.s("email")).filter(|e| !e.is_empty()).unwrap_or(st.cfg.str("smtp_from"));
                 if to.is_empty() {
                     msg(false, "Add an email address to your account (Account page) to receive the test")
                 } else {
@@ -553,13 +566,7 @@ async fn test(State(st): State<AppState>, Admin(u): Admin, Path(service): Path<S
             }
             _ => return Err(anyhow::anyhow!("__unknown")),
         })
-    }.await;
-    match res {
-        Ok(v) => Ok(Json(v)),
-        Err(e) if e.to_string() == "__unknown" => Err(err(404, "Unknown service")),
-        // the whole chain, never cut: "streamrip config path: config failed: start /config/tools/venv/bin/rip: …"
-        Err(e) => Ok(Json(msg(false, format!("{e:#}")))),
-    }
+    }.await
 }
 
 async fn downloads(State(st): State<AppState>, Admin(viewer): Admin) -> ApiResult<Json<Value>> {

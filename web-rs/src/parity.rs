@@ -2,7 +2,8 @@
 //! JavaScript UI (web/js, frozen since 0.26). Every string web/js still ships has to appear in web-rs, so the
 //! two interfaces read the same – the rule of docs/archive/ui-rewrite/PORTING.md. The Settings → Server cards'
 //! words are counted where they live since 0.29, the server's settings table (server/crates/config/settings.toml),
-//! which the web app draws them from. Run with `cargo test` in web-rs.
+//! which the web app draws them from, and since 0.32 the plugins' manifests (server/crates/plugins/catalog).
+//! Run with `cargo test` in web-rs.
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -33,6 +34,8 @@ const LEGACY_ONLY: &[(&str, &str)] = &[
     ("Add a free AcoustID API key in Settings → Verification first", "there is no Verification page: the key is in Settings → Library → Verification & duplicates since R2, which the toast now names"),
     // 0.31 (p6 item 9, the owner on Oct 18): the Library's box searches the whole library, whatever the tab
     ("Filter library…", "the Library's search box reads \"Search artists, albums, songs in your library…\" since 0.31 (one search for the whole library)"),
+    // 0.32 (plugins): every download tool is a plugin with its own card, Update and auto-update switch
+    ("Download tools", "the card became Settings → Plugins in 0.32 (its Check for updates, Update to and the Translator's model moved there)"),
 ];
 
 /// Whole files of the JavaScript UI whose page web-rs no longer has, as (file, why). Like [`LEGACY_ONLY`], an
@@ -166,7 +169,12 @@ fn every_string_the_javascript_ui_ships_is_in_web_rs() {
     // since 0.29 the words of the Settings → Server cards (titles, labels, help, options) are in the server's
     // settings table: the web app draws those cards from GET /api/admin/settings/schema, which answers with them
     let table = std::fs::read_to_string(repo.join("server/crates/config/settings.toml")).expect("server/crates/config/settings.toml");
-    let rs_raw = read_all(&repo.join("web-rs/src"), "rs") + &table;
+    // since 0.32 the words of the plugin cards that the settings table has no field for (the Translator's model,
+    // once on the Download tools card) are in the plugins' manifests, which GET /api/plugins/{id}/settings
+    // answers with
+    let catalog = read_all(&repo.join("server/crates/plugins/catalog"), "toml");
+    assert!(catalog.contains("[plugin]"), "server/crates/plugins/catalog/*.toml read");
+    let rs_raw = read_all(&repo.join("web-rs/src"), "rs") + &table + &catalog;
     assert!(rs_raw.len() > 100_000, "web-rs sources read");
     let rs_norm = without_placeholders(&rs_raw);
     let rs_decoded = collapse(&decode_entities(&rs_norm));

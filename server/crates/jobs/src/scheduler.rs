@@ -20,7 +20,7 @@ pub const TASKS: [(&str, &str, &str); 14] = [
     ("quality", "Quality scan", "Check library songs for fake lossless (a lossy file saved as FLAC), upsampled hi-res, very quiet or clipped audio, a batch per run at low priority. Suspect songs show under Settings → Blocked with a Replace button; nothing is removed."),
     ("loudness", "Measure loudness", "Measure how loud each song is, for volume normalization in the apps. Songs with ReplayGain tags use them; the others are measured at low priority while nobody is using the app, and each run goes on where the last one stopped."),
     ("cleanup", "Clean up", "Remove finished downloads older than the cleanup age from the list and delete leftover staging files and reported files kept in the trash for 7 days."),
-    ("tools", "Update download tools", "Check yt-dlp, streamrip, Cadenza (server processing) and slskd (the Soulseek engine) for new versions, and install them for the tools switched to update automatically under Download tools – no new Encore image needed."),
+    ("tools", "Update plugins", "Check the installed plugins (yt-dlp, streamrip, Soulseek, Cadenza, the Translator and the ones you added) for new versions and install them for the plugins switched to update automatically under Settings → Plugins – no new Encore image needed. A plugin that is switched on but whose program is missing is installed again."),
     ("backup", "Back up the database", "Copy the database to config/backups (kept for 7 days, then one a week for 8 weeks, plus the last 3 pre-upgrade copies)."),
     ("update", "Check for Encore updates", "Look for a new Encore release on GitHub. Settings → Diagnostics shows what changed, with Restart server and, when the Docker socket is mounted, Update now."),
 ];

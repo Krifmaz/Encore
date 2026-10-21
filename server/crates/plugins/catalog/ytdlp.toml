@@ -1,0 +1,73 @@
+# yt-dlp: YouTube Music for requests, and links from YouTube, SoundCloud, Bandcamp and about 1,800 other sites.
+# Encore's own code (sources/ytdlp.rs) runs it; the plugin installs yt-dlp into a venv of its own.
+# docs/contracts/plugin-manifest.md describes every key.
+
+[plugin]
+id = "ytdlp"
+name = "yt-dlp"
+version = "0.32.0"
+description = "Last-resort source: finds the song on YouTube Music. yt-dlp also downloads SoundCloud links you paste in the Downloader, along with YouTube, Bandcamp, Mixcloud and about 1,800 other sites."
+kind = "source"
+protocol = 1
+homepage = "https://github.com/yt-dlp/yt-dlp"
+license = "Unlicense"
+commands = ["status", "test", "search", "download", "update"]
+kinds = ["track", "album", "url"]
+lossless = false
+needs_sign_in = false
+builtin = true
+
+[[sources]]
+id = "ytdlp"
+name = "YouTube Music"
+picker = "ytmusic"
+
+[run.timeouts]
+search = 60
+download = 3600
+test = 60
+
+# The newest yt-dlp on PyPI; sites change often, so it updates by itself unless switched off.
+[update]
+from = "pypi"
+pypi = "yt-dlp"
+auto = true
+
+[python]
+python = "3.14"
+packages = ["yt-dlp[default]=={version}"]
+bin = "yt-dlp"
+
+[install]
+verify = ["{bin}", "--version"]
+
+[[settings]]
+key = "ytdlp_enabled"
+
+[[settings]]
+key = "ytdlp_last_resort"
+
+[[settings]]
+key = "ytdlp_format"
+
+[[settings]]
+key = "ytdlp_quality"
+
+[[settings]]
+key = "ytdlp_cookies"
+part = "YouTube sign-in"
+
+[[settings]]
+key = "youtube_light_refresh"
+
+[permissions]
+network = true
+filesystem = "folder"
+
+[migration]
+from_tool = "ytdlp"
+auto_key = "tools_auto_ytdlp"
+adopt = ["tools/venv"]
+# Every image before plugins shipped yt-dlp and every pasted link went through it, whatever YouTube Music's
+# switch said: an upgrade always adopts it (the rule holds with ytdlp_enabled on and with it off).
+in_use = [["file:tools/venv/bin/yt-dlp"], ["ytdlp_enabled"], ["!ytdlp_enabled"]]

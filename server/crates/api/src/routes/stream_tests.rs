@@ -463,6 +463,8 @@ async fn processing_live_busy_and_from_the_render_cache() {
 #[tokio::test]
 async fn the_engine_is_kept_until_the_settings_or_the_program_change() {
     let e = setup("dsp-engine").await;
+    // the Cadenza plugin installed (adopted): its program runs server processing once it is there
+    e.st.plugins.adopt("cadenza", None).unwrap();
     crate::auth::create_user(&e.st, "boss", PW, "admin", None, None).unwrap();
     let boss = login(&e.app, "boss").await;
     let engine = || async { e.call("GET", "/api/playback/dsp", &boss, None, &[]).await.json()["engine"].clone() };

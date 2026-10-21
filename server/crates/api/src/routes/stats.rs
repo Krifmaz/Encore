@@ -330,7 +330,7 @@ async fn diagnostics(State(st): State<AppState>, Admin(_): Admin) -> ApiResult<J
     futs.push(Box::pin(http_check(&st, "YouTube Music", "https://music.youtube.com/".into(), vec![], &[200, 301, 302, 303])));
     let mut checks: Vec<Value> = futures_util::future::join_all(futs).await;
     // the Soulseek session as Encore keeps it (no call: the session's supervisor reads slskd all the time);
-    // the card's sentence, pointing at the card ("fix them in Settings → Downloads → Soulseek", not "below")
+    // the card's sentence, pointing at the card ("fix them in Settings → Plugins → Soulseek", not "below")
     if encore_requests::slskd_managed::configured(&st) {
         let s = encore_requests::slskd_session::status(&st);
         let detail = encore_requests::slskd_session::text_elsewhere(s["text"].as_str().unwrap_or(""));
