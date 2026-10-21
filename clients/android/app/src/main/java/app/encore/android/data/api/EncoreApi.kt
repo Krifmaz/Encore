@@ -13,6 +13,7 @@ import app.encore.android.core.str
 import app.encore.android.data.session.AuthKind
 import app.encore.android.data.session.Session
 import app.encore.android.data.session.SessionStore
+import app.encore.android.features.library.PlaylistLinkRules
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonElement
 import kotlinx.serialization.json.JsonObject
@@ -313,15 +314,24 @@ class EncoreApi(private val client: OkHttpClient, private val store: SessionStor
 
     fun unlike(trackId: Long) { call("DELETE", url("/api/likes/$trackId"), null) }
 
-    fun playlists(): List<Playlist> = get("/api/playlists").objects().mapNotNull { Playlist.from(it) }
+    fun playlists(): List<Playlist> = get("/api/playlists").objects().mapNotNull { Playlist.from(it)?.withFullCover() }
 
     fun playlist(id: Long): PlaylistDetail {
         val o = getObject("/api/playlists/$id")
-        val pl = Playlist.from(o) ?: Playlist(id, o.str("name"), o.str("kind"), 0, 0, "")
+        val pl = (Playlist.from(o) ?: Playlist(id, o.str("name"), o.str("kind"), 0, 0, "")).withFullCover()
         val rows = (o.arr("items") ?: o.arr("tracks")).objectsOf().map { r ->
             PlaylistRow(r.str("title"), r.str("artist"), Track.fromPlaylistItem(r), r.str("request_status"))
         }
         return PlaylistDetail(pl, rows)
+    }
+
+    /**
+     * An added playlist's picture is the link's public mosaic, a server path ("/api/share/<token>/cover"): made a full
+     * URL, so the tiles, the page and Android Auto load it like any other cover.
+     */
+    private fun Playlist.withFullCover(): Playlist {
+        val full = PlaylistLinkRules.absoluteCover(coverUrl) { url(it) }
+        return if (full == coverUrl) this else copy(coverUrl = full)
     }
 
     // ---- pick up where you left off (server/src/routes/remote.rs) -----------------------------------------

@@ -513,6 +513,23 @@ class FeaturesApi(private val api: EncoreApi, private val client: OkHttpClient) 
         call("DELETE", "/api/playlists/$id/share", null)
     }
 
+    // someone else's shared playlist in my playlists (features/library/PlaylistLinkRules): the link as pasted or shared,
+    // the server reads the token out of it
+
+    /** POST /api/playlists/shared/check {link}: what the link would add (nothing changes). */
+    fun checkSharedPlaylist(link: String): SharedPlaylistCheck =
+        (call("POST", "/api/playlists/shared/check", buildJsonObject { put("link", link) }) as? JsonObject ?: JsonObject(emptyMap())).page(SharedPlaylistCheck.serializer())
+
+    /** POST /api/playlists/shared {link}: Add to my playlists (a second add gives `added: false` and the same entry). */
+    fun addSharedPlaylist(link: String): LinkedAdd =
+        (call("POST", "/api/playlists/shared", buildJsonObject { put("link", link) }) as? JsonObject ?: JsonObject(emptyMap())).page(LinkedAdd.serializer())
+
+    /** POST /api/playlists/{id}/copy: Save a copy of an added playlist → the copy's id and name. */
+    fun copyLinkedPlaylist(id: Long): Pair<Long, String> {
+        val o = postObject("/api/playlists/$id/copy")
+        return o.long("id") to o.str("name")
+    }
+
     fun removePlaylistItem(playlistId: Long, itemId: Long) {
         call("DELETE", "/api/playlists/$playlistId/items/$itemId", null)
     }

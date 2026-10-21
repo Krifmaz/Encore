@@ -15,6 +15,7 @@ import app.encore.android.data.api.Album
 import app.encore.android.data.api.Artist
 import app.encore.android.data.api.EncoreApi
 import app.encore.android.data.api.Track
+import app.encore.android.features.library.PlaylistLinkRules
 import app.encore.android.features.offline.OfflineIndex
 import app.encore.android.features.offline.OfflineStore
 import app.encore.android.ui.components.libraryIndex
@@ -161,7 +162,8 @@ class BrowseTree(private val api: EncoreApi, private val offline: OfflineStore? 
                 val all = api.playlists()
                 val liked = all.firstOrNull { it.isLiked }
                 val head = if (liked != null) listOf(folder("liked", "Liked Songs", plural(liked.total, "song"), MediaMetadata.MEDIA_TYPE_PLAYLIST, grid = false)) else emptyList()
-                head + all.filter { !it.isLiked }.map { p ->
+                // someone else's playlist added from a link plays like an own one; once the link ended it has nothing to play
+                head + all.filter { !it.isLiked && PlaylistLinkRules.inCar(it.isLinked, it.linkedActive) }.map { p ->
                     folder("playlist:${p.id}", p.name, plural(p.total, "song"), MediaMetadata.MEDIA_TYPE_PLAYLIST, grid = true,
                         art = p.coverUrl.takeIf { it.startsWith("http") }?.let { Uri.parse(it) })
                 }

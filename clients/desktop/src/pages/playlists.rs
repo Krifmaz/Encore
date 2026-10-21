@@ -3,6 +3,11 @@
 //! The grid of playlist tiles (Liked Songs first), New, Import (the dialog with "From a link" and
 //! "Paste a list", a preview, Download missing tracks and the album choice) and Merge of the
 //! selected playlists. The import dialog is shared with the playlist page ("Add from link").
+//!
+//! "Add a shared playlist" takes a pasted share link of someone on this server
+//! (`POST /api/playlists/shared {link}`): their playlist, live and read-only, joins the grid as a
+//! `kind: linked` row ("12 tracks · by anna", or "anna stopped sharing this playlist" once the link
+//! ended). The texts are the web's (web-rs/src/pages/playlists.rs).
 
 use crate::api::ApiError;
 use crate::fmt;
@@ -37,8 +42,92 @@ pub fn src_name(k: &str) -> Option<&'static str> {
         "jellyfin" => "Jellyfin",
         "plex" => "Plex",
         "navidrome" => "Navidrome",
+        "share" => LINKED_SOURCE,
         _ => return None,
     })
+}
+
+// ----- someone else's playlist, added from its share link ----------------------------------
+
+pub const ADD_SHARED_TITLE: &str = "Add a shared playlist";
+pub const ADD_SHARED_HINT: &str = "Paste a playlist link from someone on this server. You get their playlist as it is now, and it changes when they change it.";
+pub const ADD_SHARED_PLACEHOLDER: &str = "https://…/s/…";
+pub const ADD_TO_MINE: &str = "Add to my playlists";
+pub const ADDED_TO_MINE: &str = "Added to your playlists";
+pub const ALREADY_MINE: &str = "Already in your playlists";
+pub const REMOVE_FROM_MINE: &str = "Remove from my playlists";
+pub const REMOVED_FROM_MINE: &str = "Removed from your playlists";
+pub const SAVED_COPY: &str = "Saved to your playlists";
+pub const SAVE_COPY: &str = "Save a copy";
+pub const LINKED_SOURCE: &str = "Added from a link";
+pub const LINKED_EMPTY: &str = "No songs here right now";
+
+/// Someone else's playlist added from its share link (`kind: linked`): read-only.
+pub fn is_linked(p: &Value) -> bool {
+    p["kind"].as_str() == Some("linked")
+}
+
+/// Whether an added playlist's link still works (`linked.active`).
+pub fn linked_active(p: &Value) -> bool {
+    fmt::truthy(&p["linked"], "active")
+}
+
+/// The owner of an added playlist (`linked.owner`).
+pub fn linked_owner(p: &Value) -> String {
+    fmt::s(&p["linked"], "owner")
+}
+
+/// "Playlist · by anna" / "Liked songs · by anna".
+pub fn linked_kicker(p: &Value) -> String {
+    let what = if fmt::truthy(&p["linked"], "liked") { "Liked songs" } else { "Playlist" };
+    format!("{what} · by {}", linked_owner(p))
+}
+
+/// The line under the count while the link works.
+pub fn linked_hint(owner: &str) -> String {
+    format!("Changes {owner} makes show here. Save a copy to make your own.")
+}
+
+/// An added playlist once its link ended.
+pub fn linked_stopped(owner: &str) -> String {
+    format!("{owner} stopped sharing this playlist")
+}
+
+/// The tile's first line: "12 tracks · by anna", or the ended line.
+pub fn linked_tile_line(p: &Value) -> String {
+    if linked_active(p) {
+        format!("{} tracks · by {}", fmt::i(p, "total"), linked_owner(p))
+    } else {
+        linked_stopped(&linked_owner(p))
+    }
+}
+
+/// The Remove from my playlists confirm.
+pub fn remove_text(name: &str) -> String {
+    format!("Remove “{name}” from your playlists? You can add it again from its link.")
+}
+
+/// The owner's count: "" / "added by 1 person" / "added by 3 people" (never who).
+pub fn added_by_text(n: i64) -> String {
+    match n {
+        n if n <= 0 => String::new(),
+        1 => "added by 1 person".into(),
+        n => format!("added by {n} people"),
+    }
+}
+
+/// The playlists songs can be added to: not someone else's added from a link.
+pub fn can_add_to(p: &Value) -> bool {
+    !fmt::truthy(p, "read_only") && !is_linked(p)
+}
+
+/// The toast after Add to my playlists (a second add does nothing new).
+pub fn add_toast(r: &Value) -> &'static str {
+    if fmt::truthy(r, "added") {
+        ADDED_TO_MINE
+    } else {
+        ALREADY_MINE
+    }
 }
 
 /// `TARGETS[k]`: the display name of a sync target.
@@ -379,6 +468,8 @@ pub struct Merge {
 pub enum Dialog {
     Import(Import),
     Merge(Merge),
+    /// Add a shared playlist: the pasted link, and the server's answer when it said no.
+    AddShared { link: String, busy: bool, error: Option<String> },
 }
 
 #[derive(Debug, Default)]
@@ -405,6 +496,10 @@ pub enum Message {
     MergeDelete(bool),
     MergeGo,
     Merged(Result<Value, ApiError>),
+    OpenAddShared,
+    AddSharedLink(String),
+    AddSharedGo,
+    AddSharedDone(Result<Value, ApiError>),
     CloseDialog,
 }
 
@@ -504,6 +599,37 @@ pub fn update(state: &mut State, msg: Message, ctx: &mut Ctx) -> Task<Message> {
             }
             ctx.toast_err(e.message);
         }
+        Message::OpenAddShared => {
+            state.dialog = Some(Dialog::AddShared { link: String::new(), busy: false, error: None });
+        }
+        Message::AddSharedLink(s) => {
+            if let Some(Dialog::AddShared { link, .. }) = state.dialog.as_mut() {
+                *link = s;
+            }
+        }
+        Message::AddSharedGo => {
+            if let Some(Dialog::AddShared { link, busy, error }) = state.dialog.as_mut() {
+                if *busy || link.trim().is_empty() {
+                    return Task::none();
+                }
+                *busy = true;
+                *error = None;
+                let api = ctx.api.clone();
+                let body = json!({ "link": link.trim() });
+                return Task::perform(async move { api.post("/playlists/shared", body).await }, Message::AddSharedDone);
+            }
+        }
+        Message::AddSharedDone(Ok(r)) => {
+            state.dialog = None;
+            ctx.toast_ok(add_toast(&r));
+            ctx.navigate(Page::Playlist(fmt::i(&r, "id")));
+        }
+        Message::AddSharedDone(Err(e)) => {
+            if let Some(Dialog::AddShared { busy, error, .. }) = state.dialog.as_mut() {
+                *busy = false;
+                *error = Some(e.message);
+            }
+        }
         Message::CloseDialog => state.dialog = None,
     }
     Task::none()
@@ -522,6 +648,9 @@ pub fn merged_text(r: &Value) -> String {
 /// The two lines under a playlist's name: "12 tracks · 80% in library · following · shared" and the
 /// source with its sync targets.
 pub fn tile_sub(p: &Value) -> String {
+    if is_linked(p) {
+        return format!("{}\n{LINKED_SOURCE}", linked_tile_line(p));
+    }
     let (total, matched) = (fmt::f(p, "total"), fmt::f(p, "matched"));
     let pct = if total > 0.0 { (matched / total * 100.0).round() as i64 } else { 0 };
     let follow = if fmt::truthy(p, "follow") { " · following" } else { "" };
@@ -561,6 +690,9 @@ fn tile<'a>(ctx: &Ctx<'a>, p: &Value, selected: bool) -> El<'a, Message> {
     let mut tile = Tile::new(fmt::s(p, "name"), TileKind::Playlist, Message::Open(id)).sub(tile_sub(p));
     if liked {
         tile = tile.art(heart_art(widgets::tile::WIDTH));
+    } else if is_linked(p) {
+        // someone else's playlist: the link's mosaic (a server path), and nothing to merge
+        tile = tile.cover(ctx.picture(&fmt::s(p, "cover_url")));
     } else {
         tile = tile
             .cover(ctx.picture(&fmt::s(p, "cover_url")))
@@ -595,6 +727,7 @@ pub fn view<'a>(state: &'a State, ctx: &Ctx<'a>) -> El<'a, Message> {
         )
         .into(),
     );
+    actions.push(btn_icon(Icon::Link, ADD_SHARED_TITLE, Btn::Default, Some(Message::OpenAddShared)).into());
     actions.push(btn_icon(Icon::Download, "Import", Btn::Primary, Some(Message::OpenImport)).into());
     let head = page_head(
         "Playlists",
@@ -653,6 +786,32 @@ pub fn overlay<'a>(state: &'a State, _ctx: &Ctx<'a>) -> Option<El<'a, Message>> 
             .spacing(10);
             Some(modal("Merge playlists", body, Some(footer.into()), false, Message::CloseDialog))
         }
+        Dialog::AddShared { link, busy, error } => {
+            let mut body = column![
+                small_muted(ADD_SHARED_HINT),
+                text_input(ADD_SHARED_PLACEHOLDER, link)
+                    .on_input(Message::AddSharedLink)
+                    .on_submit(Message::AddSharedGo)
+                    .padding([9, 12])
+                    .size(14)
+                    .style(theme::input),
+            ]
+            .spacing(14);
+            if let Some(e) = error {
+                body = body.push(error_box(e));
+            }
+            let footer = row![
+                btn("Cancel", Btn::Default, Some(Message::CloseDialog)),
+                btn_icon(
+                    Icon::Plus,
+                    if *busy { "Adding…" } else { ADD_TO_MINE },
+                    Btn::Primary,
+                    (!*busy && !link.trim().is_empty()).then_some(Message::AddSharedGo),
+                ),
+            ]
+            .spacing(10);
+            Some(modal(ADD_SHARED_TITLE, body, Some(footer.into()), false, Message::CloseDialog))
+        }
     }
 }
 
@@ -694,6 +853,65 @@ mod tests {
             merged_text(&json!({ "total": 40, "added": 36, "duplicates_skipped": 4 })),
             "Merged 40 tracks → 36 unique (4 duplicates removed)"
         );
+    }
+
+    #[test]
+    fn linked_tiles_and_pickers() {
+        let active = json!({ "id": 41, "name": "Road trip", "kind": "linked", "source": "share", "total": 12, "matched": 12,
+            "read_only": true, "share": null, "sync_targets": [], "linked": { "owner": "anna", "active": true, "liked": false } });
+        assert_eq!(tile_sub(&active), "12 tracks · by anna\nAdded from a link");
+        let mut ended = active.clone();
+        ended["linked"]["active"] = json!(false);
+        ended["total"] = json!(0);
+        assert_eq!(tile_sub(&ended), "anna stopped sharing this playlist\nAdded from a link");
+        assert!(!can_add_to(&active), "someone else's playlist takes no songs");
+        assert!(!can_add_to(&json!({ "kind": "playlist", "read_only": true })));
+        assert!(can_add_to(&json!({ "kind": "playlist", "read_only": false })));
+        assert!(can_add_to(&json!({ "kind": "liked" })));
+        assert!(can_add_to(&json!({ "kind": "playlist" })), "an older server has no read_only");
+        assert_eq!(src_name("share"), Some("Added from a link"));
+        assert!(is_linked(&active));
+        assert!(!is_linked(&json!({ "kind": "playlist" })));
+    }
+
+    #[test]
+    fn linked_texts_match_the_web() {
+        // web-rs/src/pages/playlists.rs: the constants and the linked helpers
+        assert_eq!(ADD_SHARED_TITLE, "Add a shared playlist");
+        assert_eq!(
+            ADD_SHARED_HINT,
+            "Paste a playlist link from someone on this server. You get their playlist as it is now, and it changes when they change it."
+        );
+        assert_eq!(ADD_SHARED_PLACEHOLDER, "https://…/s/…");
+        assert_eq!(ADD_TO_MINE, "Add to my playlists");
+        assert_eq!(ADDED_TO_MINE, "Added to your playlists");
+        assert_eq!(ALREADY_MINE, "Already in your playlists");
+        assert_eq!(REMOVE_FROM_MINE, "Remove from my playlists");
+        assert_eq!(REMOVED_FROM_MINE, "Removed from your playlists");
+        assert_eq!(SAVED_COPY, "Saved to your playlists");
+        assert_eq!(SAVE_COPY, "Save a copy");
+        assert_eq!(LINKED_SOURCE, "Added from a link");
+        assert_eq!(LINKED_EMPTY, "No songs here right now");
+        let pl = json!({ "kind": "linked", "total": 12, "linked": { "owner": "anna", "active": true, "liked": false } });
+        assert_eq!(linked_kicker(&pl), "Playlist · by anna");
+        let liked = json!({ "kind": "linked", "linked": { "owner": "anna", "active": true, "liked": true } });
+        assert_eq!(linked_kicker(&liked), "Liked songs · by anna");
+        assert_eq!(linked_hint("anna"), "Changes anna makes show here. Save a copy to make your own.");
+        assert_eq!(linked_stopped("anna"), "anna stopped sharing this playlist");
+        assert_eq!(linked_tile_line(&pl), "12 tracks · by anna");
+        assert_eq!(
+            linked_tile_line(&json!({ "kind": "linked", "linked": { "owner": "anna", "active": false } })),
+            "anna stopped sharing this playlist"
+        );
+        assert_eq!(
+            remove_text("Road trip"),
+            "Remove “Road trip” from your playlists? You can add it again from its link."
+        );
+        assert_eq!(added_by_text(0), "");
+        assert_eq!(added_by_text(1), "added by 1 person");
+        assert_eq!(added_by_text(3), "added by 3 people");
+        assert_eq!(add_toast(&json!({ "id": 4, "added": true })), "Added to your playlists");
+        assert_eq!(add_toast(&json!({ "id": 4, "added": false })), "Already in your playlists");
     }
 
     #[test]

@@ -35,6 +35,7 @@
   .btn:hover { background: #2c2c48; }
   .btn.accent { background: var(--accent); color: #fff; }
   .btn:disabled { opacity: .6; cursor: default; }
+  .btns .small { align-self: center; margin-top: 0; }
   .desc { display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
   .empty { padding: 24px 0 8px; }
 </style>
@@ -59,15 +60,38 @@
       const long = (d) => { const s = Math.round(d); return s < 3600 ? mmss(s) : `${Math.floor(s / 3600)} h ${Math.floor((s % 3600) / 60)} min`; };
       const head = `${n} ${n === 1 ? 'song' : 'songs'}${t.duration ? ' · ' + long(t.duration) : ''}`;
       const viewer = t.viewer || {};
+      // a signed-in listener who didn't make the link: Add to my playlists (live, read-only) and Save a copy
+      const other = viewer.signed_in && !viewer.own;
+      const openLink = (id) => ` · <a href="/#/playlists/${encodeURIComponent(id)}">Open</a>`;
+      const addPart = !other ? '' : viewer.added
+        ? `<span class="muted small" id="add-state">Already in your playlists${openLink(viewer.playlist_id)}</span>`
+        : '<button type="button" class="btn" id="add">Add to my playlists</button>';
       card.innerHTML = `<div class="art"><img src="/api/share/${tok}/cover" alt="" onerror="this.remove()"></div>
         <h1>${esc(t.title)}</h1><div class="muted">${t.liked ? 'Liked songs' : 'Playlist'} · ${esc(t.owner)}</div>
         ${t.description ? `<div class="muted small desc">${esc(t.description)}</div>` : ''}
         <div class="muted small">${esc(head)}</div>
-        ${n ? `<div class="btns"><button type="button" class="btn accent" id="play">Play</button><button type="button" class="btn" id="shuffle">Shuffle</button>${viewer.signed_in && !viewer.own ? '<button type="button" class="btn" id="copy">Save a copy</button>' : ''}</div>
+        ${n ? `<div class="btns"><button type="button" class="btn accent" id="play">Play</button><button type="button" class="btn" id="shuffle">Shuffle</button>${addPart}${other ? '<button type="button" class="btn" id="copy">Save a copy</button>' : ''}</div>
         <div class="muted small" id="copy-msg" hidden></div>
         <audio controls preload="none"></audio>
-        <ol class="songs"></ol>` : '<div class="muted empty">No songs here right now</div>'}
+        <ol class="songs"></ol>` : `${addPart ? `<div class="btns">${addPart}</div>
+        <div class="muted small" id="copy-msg" hidden></div>` : ''}<div class="muted empty">No songs here right now</div>`}
         <div class="foot muted">Shared from ${esc(t.app_name || 'Encore')}${viewer.signed_in ? '' : ' · <a href="/#/login">Sign in</a> for the whole library'}</div>`;
+      const add = card.querySelector('#add');
+      if (add) add.onclick = async () => {
+        const msg = card.querySelector('#copy-msg');
+        add.disabled = true;
+        msg.hidden = true;
+        try {
+          const r = await fetch(`/api/share/${tok}/add`, { method: 'POST', headers: { 'x-requested-with': 'encore', 'content-type': 'application/json' }, body: '{}' });
+          const j = await r.json().catch(() => ({}));
+          if (!r.ok) throw new Error(j.detail || 'Could not add it');
+          add.outerHTML = `<span class="muted small" id="add-state">${j.added ? 'Added to your playlists' : 'Already in your playlists'}${openLink(j.id)}</span>`;
+        } catch (e) {
+          msg.textContent = e.message;
+          msg.hidden = false;
+          add.disabled = false;
+        }
+      };
       if (!n) return;
       const a = card.querySelector('audio');
       const list = card.querySelector('.songs');

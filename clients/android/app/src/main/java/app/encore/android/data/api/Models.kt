@@ -9,6 +9,7 @@ import app.encore.android.core.obj
 import app.encore.android.core.objects
 import app.encore.android.core.objectsOf
 import app.encore.android.core.str
+import app.encore.android.features.library.PlaylistLinkRules
 import app.encore.android.features.library.PlaylistShareRules
 import kotlinx.serialization.SerialName
 import kotlinx.serialization.Serializable
@@ -232,16 +233,44 @@ data class ArtistSongs(val total: Int, val tracks: List<Track>) {
     }
 }
 
-/** [sharePath]: the public link's path ("/s/<token>") while the playlist is shared, else "". */
-data class Playlist(val id: Long, val name: String, val kind: String, val total: Int, val matched: Int, val coverUrl: String, val sharePath: String = "") {
+/**
+ * [sharePath]: the public link's path ("/s/<token>") while the playlist is shared, else "". [addedBy]: how many people
+ * added it to their playlists (the owner's count, never who).
+ *
+ * `kind: "linked"` is someone else's playlist added through its share link ([PlaylistLinkRules]): read-only
+ * ([readOnly]), by [linkedOwner], live while [linkedActive], [linkedLiked] when it is the owner's Liked Songs.
+ */
+data class Playlist(
+    val id: Long,
+    val name: String,
+    val kind: String,
+    val total: Int,
+    val matched: Int,
+    val coverUrl: String,
+    val sharePath: String = "",
+    val readOnly: Boolean = false,
+    val linkedOwner: String = "",
+    val linkedActive: Boolean = false,
+    val linkedLiked: Boolean = false,
+    val addedBy: Int = 0,
+) {
     val isLiked: Boolean get() = kind == "liked"
     val isShared: Boolean get() = sharePath.isNotEmpty()
+    val isLinked: Boolean get() = kind == "linked"
 
     companion object {
         fun from(o: JsonObject): Playlist? {
             val id = o.long("id")
             if (id <= 0L) return null
-            return Playlist(id, o.str("name"), o.str("kind"), o.int("total"), o.int("matched"), o.str("cover_url"), PlaylistShareRules.sharePathOf(o))
+            val linked = PlaylistLinkRules.linkedOf(o)
+            return Playlist(
+                id, o.str("name"), o.str("kind"), o.int("total"), o.int("matched"), o.str("cover_url"), PlaylistShareRules.sharePathOf(o),
+                readOnly = linked.readOnly,
+                linkedOwner = linked.owner,
+                linkedActive = linked.active,
+                linkedLiked = linked.liked,
+                addedBy = PlaylistShareRules.addedByOf(o),
+            )
         }
     }
 }

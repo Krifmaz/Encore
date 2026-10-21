@@ -57,6 +57,7 @@ import app.encore.android.ui.screens.AccountScreen
 import app.encore.android.ui.screens.AlbumScreen
 import app.encore.android.ui.screens.ArtistScreen
 import app.encore.android.ui.screens.AuthFlow
+import app.encore.android.features.library.PlaylistLinkHost
 import app.encore.android.features.library.SongFixHost
 import app.encore.android.features.library.SongFixUi
 import app.encore.android.features.requests.ActivityScreen
@@ -352,6 +353,8 @@ private fun MainScreen(graph: AppGraph, player: PlayerConnection, session: Sessi
         }
         // group listen: its sheet, Start, Join with a code, "Join <host>'s group listen?"
         GroupDialogs(nav)
+        // an Encore playlist link shared to the app: "Add to my playlists?" (kept until signed in, as group links are)
+        PlaylistLinkHost(nav, session)
         addToPlaylistIds?.let { ids ->
             AddToPlaylistSheet(graph.api, ids, onDismiss = { addToPlaylistIds = null })
         }

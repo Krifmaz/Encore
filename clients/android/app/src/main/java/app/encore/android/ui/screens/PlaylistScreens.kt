@@ -29,8 +29,12 @@ import androidx.compose.material3.Text
 import androidx.compose.material3.TopAppBarDefaults
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.collectAsState
+import androidx.compose.runtime.SideEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -45,6 +49,8 @@ import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import app.encore.android.features.library.OnSongFixed
+import app.encore.android.features.library.LinkedPlaylistMenu
+import app.encore.android.features.library.PlaylistLinkRules
 import app.encore.android.features.library.PlaylistShareRules
 import app.encore.android.R
 import app.encore.android.data.api.Playlist
@@ -54,6 +60,7 @@ import app.encore.android.ui.components.Badge
 import app.encore.android.ui.components.Collage
 import app.encore.android.ui.components.Cover
 import app.encore.android.ui.components.EmptyState
+import app.encore.android.ui.components.EncoreButton
 import app.encore.android.ui.components.EncoreTopBar
 import app.encore.android.ui.components.Gutter
 import app.encore.android.ui.components.Loadable
@@ -127,7 +134,9 @@ fun PlaylistsScreen(nav: Nav) {
                 items(sorted, key = { it.id }) { pl ->
                     Tile(
                         title = pl.name,
-                        subtitle = PlaylistShareRules.tileSubtitle(pl.total, pl.matched, pl.isShared),
+                        // someone else's playlist added from a link: "12 tracks · by anna", or that the link ended
+                        subtitle = if (pl.isLinked) PlaylistLinkRules.tileLine(pl.total, pl.linkedOwner, pl.linkedActive)
+                        else PlaylistShareRules.tileSubtitle(pl.total, pl.matched, pl.isShared),
                         onClick = { nav.open(Screen.Playlist(pl.id, pl.name)) },
                     ) { m ->
                         if (pl.isLiked) LikedArt(m, 12.dp, 48.dp) else PlaylistArt(nav, pl, m)
@@ -138,7 +147,13 @@ fun PlaylistsScreen(nav: Nav) {
     }
 }
 
-/** One playlist (web/js/pages/playlists.js `renderPlaylist`, read-only here; editing is the features part). */
+/**
+ * One playlist (web/js/pages/playlists.js `renderPlaylist`, read-only here; editing is the features part).
+ *
+ * Someone else's playlist added from its share link (`kind: linked`, features/library/PlaylistLinkRules) is read-only:
+ * no Share, no editing ⋯ (Save a copy and Remove from my playlists instead), "Playlist · by anna" and the owner's hint
+ * instead of the library counts; once the link ended, the "stopped sharing" line and Remove.
+ */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun PlaylistScreen(nav: Nav, id: Long, name: String) {
@@ -155,27 +170,42 @@ fun PlaylistScreen(nav: Nav, id: Long, name: String) {
     val scrollBehavior = TopAppBarDefaults.enterAlwaysScrollBehavior()
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
-    // the loaded playlist (its current name, and its link while it is shared)
-    val loaded = (loader.state.value as? Loadable.Ready)?.value?.playlist
+    // the loaded playlist (its current name, and its link while it is shared); the last one stays while it loads
+    // again, so the top bar keeps its actions
+    val ready = (loader.state.value as? Loadable.Ready)?.value?.playlist
+    var lastLoaded by remember(id) { mutableStateOf<Playlist?>(null) }
+    SideEffect { if (ready != null) lastLoaded = ready }
+    val loaded = ready ?: lastLoaded
+    // an added playlist's Remove confirm: from its ⋯, or from the page's button once the link ended
+    val confirmRemove = remember(id) { mutableStateOf(false) }
     Scaffold(
         modifier = Modifier.fillMaxSize().nestedScroll(scrollBehavior.nestedScrollConnection),
         containerColor = p.bg,
         contentWindowInsets = WindowInsets(0, 0, 0, 0),
         topBar = {
             EncoreTopBar("", scrollBehavior = scrollBehavior, onBack = nav.back, actions = {
-                // the playlist's public link (Liked Songs too): made, copied, then the system share sheet
-                IconButton(onClick = {
-                    val title = loaded?.name?.ifEmpty { null } ?: name
-                    shareLinkOf(context, scope, subject = title, text = title, toast = PlaylistShareRules.LINK_COPIED, after = { loader.refresh() }) {
-                        api.sharePlaylistLink(id)
+                when {
+                    // not known yet (first load, or it failed): an added playlist must not offer the own actions,
+                    // Delete included, so there are none until it has loaded
+                    loaded == null -> {}
+                    // someone else's playlist: Save a copy, Remove from my playlists
+                    loaded.isLinked -> LinkedPlaylistMenu(nav, id, loaded.name.ifEmpty { name }, loaded.linkedActive, confirmRemove)
+                    else -> {
+                        // the playlist's public link (Liked Songs too): made, copied, then the system share sheet
+                        IconButton(onClick = {
+                            val title = loaded.name.ifEmpty { name }
+                            shareLinkOf(context, scope, subject = title, text = title, toast = PlaylistShareRules.LINK_COPIED, after = { loader.refresh() }) {
+                                api.sharePlaylistLink(id)
+                            }
+                        }) {
+                            Icon(painterResource(R.drawable.ic_share), contentDescription = "Share link")
+                        }
+                        PlaylistMenu(
+                            nav, id, name, isLiked = name == "Liked Songs", onChanged = { loader.retry() },
+                            shareUrl = loaded.takeIf { it.isShared }?.let { api.url(it.sharePath) },
+                        )
                     }
-                }) {
-                    Icon(painterResource(R.drawable.ic_share), contentDescription = "Share link")
                 }
-                PlaylistMenu(
-                    nav, id, name, isLiked = name == "Liked Songs", onChanged = { loader.retry() },
-                    shareUrl = loaded?.takeIf { it.isShared }?.let { api.url(it.sharePath) },
-                )
             })
         },
     ) { padding ->
@@ -198,23 +228,37 @@ fun PlaylistScreen(nav: Nav, id: Long, name: String) {
                         }
                         Spacer(Modifier.height(18.dp))
                         Text(
-                            if (pl.isLiked) "LIKED SONGS · SYNCED EVERYWHERE" else "PLAYLIST",
+                            when {
+                                pl.isLinked -> PlaylistLinkRules.kicker(pl.linkedLiked, pl.linkedOwner).uppercase()
+                                pl.isLiked -> "LIKED SONGS · SYNCED EVERYWHERE"
+                                else -> "PLAYLIST"
+                            },
                             style = MaterialTheme.typography.labelSmall,
                             color = p.muted,
                             letterSpacing = 1.2.sp,
+                            textAlign = TextAlign.Center,
                         )
                         Text(pl.name.ifEmpty { name }, style = MaterialTheme.typography.headlineMedium, textAlign = TextAlign.Center, modifier = Modifier.padding(top = 6.dp))
-                        Row(Modifier.padding(top = 4.dp), verticalAlignment = Alignment.CenterVertically) {
-                            Text("${rows.size} tracks · ", style = MaterialTheme.typography.bodyMedium, color = p.muted)
-                            Text("${tracks.size}", style = MaterialTheme.typography.bodyMedium, fontWeight = FontWeight.Bold, color = EncoreColors.Ok)
-                            Text(" in library · $missing missing", style = MaterialTheme.typography.bodyMedium, color = p.muted)
-                        }
-                        // the web's Shared mark: anyone with the link can play these songs
-                        if (pl.isShared) Badge("Shared", "accent", Modifier.padding(top = 8.dp))
-                        // .progress
-                        val frac = if (rows.isNotEmpty()) tracks.size.toFloat() / rows.size else 0f
-                        Box(Modifier.padding(top = 12.dp).width(240.dp).height(6.dp).clip(RoundedCornerShape(99.dp)).background(p.panel2)) {
-                            Box(Modifier.fillMaxWidth(frac).fillMaxHeight().background(p.gradient))
+                        if (pl.isLinked) {
+                            LinkedHead(pl, rows.size) { confirmRemove.value = true }
+                        } else {
+                            Row(Modifier.padding(top = 4.dp), verticalAlignment = Alignment.CenterVertically) {
+                                Text("${rows.size} tracks · ", style = MaterialTheme.typography.bodyMedium, color = p.muted)
+                                Text("${tracks.size}", style = MaterialTheme.typography.bodyMedium, fontWeight = FontWeight.Bold, color = EncoreColors.Ok)
+                                Text(" in library · $missing missing", style = MaterialTheme.typography.bodyMedium, color = p.muted)
+                            }
+                            // the web's Shared mark: anyone with the link can play these songs; how many added it, never who
+                            if (pl.isShared) {
+                                Row(Modifier.padding(top = 8.dp), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                                    Badge("Shared", "accent")
+                                    if (pl.addedBy > 0) Text(PlaylistLinkRules.addedBy(pl.addedBy), style = MaterialTheme.typography.bodySmall, color = p.muted)
+                                }
+                            }
+                            // .progress
+                            val frac = if (rows.isNotEmpty()) tracks.size.toFloat() / rows.size else 0f
+                            Box(Modifier.padding(top = 12.dp).width(240.dp).height(6.dp).clip(RoundedCornerShape(99.dp)).background(p.panel2)) {
+                                Box(Modifier.fillMaxWidth(frac).fillMaxHeight().background(p.gradient))
+                            }
                         }
                     }
                 }
@@ -229,7 +273,12 @@ fun PlaylistScreen(nav: Nav, id: Long, name: String) {
                     }
                 }
                 if (rows.isEmpty()) {
-                    item { EmptyState(R.drawable.ic_note, "Empty playlist", "Add tracks from an album page or from a link.") }
+                    when {
+                        // an added playlist whose link ended: the head says so, nothing to list
+                        pl.isLinked && !pl.linkedActive -> {}
+                        pl.isLinked -> item { EmptyState(R.drawable.ic_note, PlaylistLinkRules.EMPTY) }
+                        else -> item { EmptyState(R.drawable.ic_note, "Empty playlist", "Add tracks from an album page or from a link.") }
+                    }
                 }
                 items(rows.size) { i ->
                     val row = rows[i]
@@ -273,5 +322,33 @@ fun PlaylistScreen(nav: Nav, id: Long, name: String) {
                 item { Spacer(Modifier.height(24.dp)) }
             }
         }
+    }
+}
+
+/**
+ * The head of an added playlist under its name: "12 tracks" and the owner's hint while the link works; once it ended,
+ * "<owner> stopped sharing this playlist" and Remove from my playlists (no songs, nothing to copy).
+ */
+@Composable
+private fun LinkedHead(pl: Playlist, count: Int, onRemove: () -> Unit) {
+    val p = MaterialTheme.palette
+    if (pl.linkedActive) {
+        Text("$count tracks", style = MaterialTheme.typography.bodyMedium, color = p.muted, modifier = Modifier.padding(top = 4.dp))
+        Text(
+            PlaylistLinkRules.hint(pl.linkedOwner),
+            style = MaterialTheme.typography.bodySmall,
+            color = p.muted,
+            textAlign = TextAlign.Center,
+            modifier = Modifier.padding(top = 6.dp),
+        )
+    } else {
+        Text(
+            PlaylistLinkRules.stopped(pl.linkedOwner),
+            style = MaterialTheme.typography.bodyMedium,
+            color = p.muted,
+            textAlign = TextAlign.Center,
+            modifier = Modifier.padding(top = 4.dp),
+        )
+        EncoreButton(PlaylistLinkRules.REMOVE, modifier = Modifier.padding(top = 14.dp), iconRes = R.drawable.ic_delete, onClick = onRemove)
     }
 }

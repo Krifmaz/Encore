@@ -546,7 +546,8 @@ pub fn add_to_playlist<'a>(state: &'a State, ctx: &Ctx<'a>) -> El<'a, Message> {
         None => widgets::skeleton_rows(3),
         Some(list) => {
             let mut col = column![].spacing(0);
-            for pl in list {
+            // not someone else's playlist added from a link: only its owner adds songs to it
+            for pl in list.iter().filter(|pl| crate::pages::playlists::can_add_to(pl)) {
                 let id = fmt::i(pl, "id");
                 let left: El<'a, Message> = if fmt::s(pl, "kind") == "liked" {
                     icon(Icon::Heart, 16.0, p.accent)

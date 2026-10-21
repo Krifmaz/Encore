@@ -135,8 +135,10 @@
     }
   ],
   "kind": "liked",
+  "linked": null,
   "matched": 4,
   "name": "Liked Songs",
+  "read_only": false,
   "remote_ids": {},
   "share": null,
   "source": "manual",

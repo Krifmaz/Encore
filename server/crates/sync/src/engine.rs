@@ -640,7 +640,8 @@ pub async fn sync_user(st: &impl Ctx, uid: i64, log: &mut Vec<String>) -> Value 
         save_snap(st, cid, "likes", &snapv);
     }
     // 3. mirror playlists to their targets
-    for pl in st.db().query("SELECT * FROM playlists WHERE user_id=?", p![uid]).unwrap_or_default() {
+    // the user's own playlists and Liked Songs: someone else's added from a link is never mirrored
+    for pl in st.db().query("SELECT * FROM playlists WHERE user_id=? AND kind IN ('playlist','liked')", p![uid]).unwrap_or_default() {
         let targets: Vec<String> = serde_json::from_str(&pl.s("sync_targets")).unwrap_or_default();
         if targets.is_empty() {
             continue;

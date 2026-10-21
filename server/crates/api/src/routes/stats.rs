@@ -64,7 +64,7 @@ fn ranking_now(st: &AppState) -> Vec<Row> {
         (SELECT COUNT(*) FROM plays p WHERE p.user_id=u.id) plays,
         (SELECT COALESCE(SUM(seconds),0) FROM plays p WHERE p.user_id=u.id) listened,
         (SELECT COUNT(*) FROM playlist_items i JOIN playlists pl ON pl.id=i.playlist_id WHERE pl.user_id=u.id AND pl.kind='liked') likes,
-        (SELECT COUNT(*) FROM playlists pl WHERE pl.user_id=u.id AND pl.kind!='liked') playlists
+        (SELECT COUNT(*) FROM playlists pl WHERE pl.user_id=u.id AND pl.kind='playlist') playlists
         FROM users u WHERE u.disabled=0", p![]).unwrap_or_default()
 }
 

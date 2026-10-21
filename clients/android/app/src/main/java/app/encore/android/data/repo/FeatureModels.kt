@@ -1042,6 +1042,27 @@ data class PlaylistPage(
     val isLiked: Boolean get() = kind == "liked"
 }
 
+/** POST /api/playlists/shared/check: what a share link would add (`own`: the caller's playlist, `id` is it then). */
+@Serializable
+data class SharedPlaylistCheck(
+    val name: LString = "",
+    val title: LString = "",
+    val owner: LString = "",
+    val liked: LBool = false,
+    val count: LInt = 0,
+    val own: LBool = false,
+    val added: LBool = false,
+    val id: LLong = 0L,
+)
+
+/** POST /api/playlists/shared and /api/share/{token}/add: the entry, and whether this call added it. */
+@Serializable
+data class LinkedAdd(
+    val id: LLong = 0L,
+    val name: LString = "",
+    val added: LBool = false,
+)
+
 /** POST /api/playlists/preview. */
 @Serializable
 data class ImportPreview(

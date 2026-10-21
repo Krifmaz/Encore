@@ -47,6 +47,8 @@ import app.encore.android.data.repo.ImportPreview
 import app.encore.android.data.repo.PLAYLIST_SOURCES
 import app.encore.android.data.repo.PlaylistItem
 import app.encore.android.data.repo.PlaylistPage
+import app.encore.android.features.library.AddSharedPlaylistDialog
+import app.encore.android.features.library.PlaylistLinkRules
 import app.encore.android.features.library.PlaylistShareRules
 import app.encore.android.features.settings.copyToClipboard
 import app.encore.android.ui.Nav
@@ -128,13 +130,20 @@ fun AlbumChoiceDialog(title: String, onDismiss: () -> Unit, onPick: (albumMode: 
     )
 }
 
-/** The Playlists page's New / Import buttons (the web's header buttons), for the design part's top bar. */
+/**
+ * The Playlists page's New / Add a shared playlist / Import buttons (the web's header buttons), for the design part's
+ * top bar.
+ */
 @Composable
 fun PlaylistsActions(nav: Nav) {
     val scope = rememberCoroutineScope()
     var newName by remember { mutableStateOf(false) }
+    var addShared by remember { mutableStateOf(false) }
     IconButton(onClick = { newName = true }) { Icon(painterResource(R.drawable.ic_add), contentDescription = "New") }
+    // someone else's playlist from its share link, live and read-only (features/library/PlaylistLinkUi)
+    IconButton(onClick = { addShared = true }) { Icon(painterResource(R.drawable.ic_link), contentDescription = PlaylistLinkRules.ADD_SHARED_TITLE) }
     IconButton(onClick = { nav.open(Screen.PlaylistImport(null)) }) { Icon(painterResource(R.drawable.ic_download), contentDescription = "Import") }
+    if (addShared) AddSharedPlaylistDialog(nav) { addShared = false }
     if (newName) {
         NameDialog("New playlist", "New playlist", "Create", onDismiss = { newName = false }) { name ->
             scope.launch {

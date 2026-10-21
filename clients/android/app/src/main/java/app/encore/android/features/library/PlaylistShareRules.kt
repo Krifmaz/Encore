@@ -1,5 +1,6 @@
 package app.encore.android.features.library
 
+import app.encore.android.core.int
 import app.encore.android.core.obj
 import app.encore.android.core.str
 import kotlinx.serialization.json.JsonObject
@@ -32,4 +33,7 @@ object PlaylistShareRules {
 
     /** `share.path` of a playlist object ("/s/<token>"), "" when it is not shared. */
     fun sharePathOf(o: JsonObject): String = o.obj("share")?.str("path") ?: ""
+
+    /** `share.added_by` of an own playlist: how many people added it to their playlists (0 when missing). */
+    fun addedByOf(o: JsonObject): Int = o.obj("share")?.int("added_by")?.coerceAtLeast(0) ?: 0
 }

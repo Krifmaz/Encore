@@ -1103,7 +1103,8 @@ fn dialog_view<'a>(d: &'a Dialog, ctx: &Ctx<'a>) -> El<'a, Act> {
                 None => skeleton_rows(3),
                 Some(pls) => {
                     let mut col = column![];
-                    for pl in pls {
+                    // not someone else's playlist added from a link: only its owner adds songs to it
+                    for pl in pls.iter().filter(|pl| crate::pages::playlists::can_add_to(pl)) {
                         let id = fmt::s(pl, "id");
                         let left: El<'a, Act> = if fmt::s(pl, "kind") == "liked" {
                             icon(Icon::Heart, 16.0, p.accent)

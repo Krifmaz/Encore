@@ -55,7 +55,8 @@ fun AddToPlaylistSheet(api: EncoreApi, trackIds: List<Long>, onDismiss: () -> Un
     val p = MaterialTheme.palette
     val scope = rememberCoroutineScope()
     val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
-    val loader = rememberLoad("playlists-for-add") { api.playlists().filter { !it.isLiked } }
+    // not Liked Songs (liking does that), nor someone else's playlist added from a link (only its owner changes it)
+    val loader = rememberLoad("playlists-for-add") { api.playlists().filter { !it.isLiked && !it.readOnly } }
     var newName by remember { mutableStateOf("") }
     var busy by remember { mutableStateOf(false) }
 

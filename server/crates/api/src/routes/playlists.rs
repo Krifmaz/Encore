@@ -3,6 +3,7 @@ use crate::enrich::enrich_now;
 use crate::auth::{MaybeUser, User};
 use crate::signin;
 use super::library;
+use super::playlist_links::{self, is_linked, read_only};
 use encore_db::{now, Row, RowExt};
 use encore_core::error::{err, ApiResult};
 use encore_requests::sources::links;
@@ -45,35 +46,64 @@ pub fn router() -> Router<AppState> {
         .route("/api/sync", post(sync_me_all))
 }
 
-fn own(st: &AppState, pid: i64, u: &Row) -> ApiResult<Row> {
+/// One of the user's playlists: their own, Liked Songs, or someone else's added from a link (kind `linked`).
+pub(super) fn own(st: &AppState, pid: i64, u: &Row) -> ApiResult<Row> {
     st.db.one("SELECT * FROM playlists WHERE id=?", p![pid])?.filter(|p| p.i("user_id") == u.i("id")).ok_or_else(|| err(404, "Playlist not found"))
+}
+
+/// [`own`] for a route that changes the playlist: someone else's playlist added from a link is read-only (403).
+fn own_writable(st: &AppState, pid: i64, u: &Row) -> ApiResult<Row> {
+    let pl = own(st, pid, u)?;
+    read_only(&pl)?;
+    Ok(pl)
 }
 
 fn bad(e: anyhow::Error) -> encore_core::error::ApiError {
     err(400, e.to_string())
 }
 
-/// Your playlists with their counts (one GROUP BY for all of them) and their share links, on the
-/// blocking pool.
+/// Your playlists with their counts (one GROUP BY for all of them) and their share links (with how many
+/// people added each one), on the blocking pool. Someone else's playlist added from a link shows that
+/// playlist as it is now (`playlist_links::linked_summary`).
 async fn list(State(st): State<AppState>, User(u): User) -> ApiResult<Json<Value>> {
     st.blocking(move |st| {
         playlists::get_liked(st, u.i("id")).map_err(bad)?;
         let rows = st.db.query("SELECT * FROM playlists WHERE user_id=? ORDER BY kind='liked' DESC, updated_at DESC", p![u.i("id")])?;
         let links: std::collections::HashMap<String, String> = st.db.query("SELECT ref, token FROM shares WHERE user_id=? AND kind='playlist'", p![u.i("id")])?
             .into_iter().map(|r| (r.s("ref"), r.s("token"))).collect();
-        let mut list = playlists::summaries(st, &rows);
-        for v in &mut list {
-            let pid = v["id"].as_i64().unwrap_or(0).to_string();
-            v["share"] = links.get(&pid).map_or(Value::Null, |t| library::share_json(st, t));
+        let added = playlist_links::added_by_all(st, u.i("id"))?;
+        let mine: Vec<Row> = rows.iter().filter(|r| !is_linked(r)).cloned().collect();
+        let mut summaries = playlists::summaries(st, &mine).into_iter();
+        let mut list = Vec::with_capacity(rows.len());
+        for row in &rows {
+            if is_linked(row) {
+                list.push(playlist_links::linked_summary(st, row)?);
+                continue;
+            }
+            let Some(mut v) = summaries.next() else { break };
+            let pid = row.i("id").to_string();
+            v["share"] = links.get(&pid).map_or(Value::Null, |t| share_with_count(st, t, added.get(t).copied().unwrap_or(0)));
+            v["read_only"] = json!(false);
+            v["linked"] = Value::Null;
+            list.push(v);
         }
         Ok(Json(json!(list)))
     }).await
 }
 
-/// A playlist's share link (`{token, path, url}`), or null when it isn't shared.
+/// A share link as the owner's list and detail show it: `{token, path, url, added_by}`.
+fn share_with_count(st: &AppState, token: &str, added_by: i64) -> Value {
+    let mut v = library::share_json(st, token);
+    v["added_by"] = json!(added_by);
+    v
+}
+
+/// A playlist's share link (`{token, path, url, added_by}`), or null when it isn't shared.
 fn share_of(st: &AppState, pid: i64, uid: i64) -> ApiResult<Value> {
-    Ok(st.db.one("SELECT token FROM shares WHERE kind='playlist' AND ref=? AND user_id=?", p![pid.to_string(), uid])?
-        .map_or(Value::Null, |r| library::share_json(st, &r.s("token"))))
+    Ok(match st.db.one("SELECT token FROM shares WHERE kind='playlist' AND ref=? AND user_id=?", p![pid.to_string(), uid])? {
+        Some(r) => share_with_count(st, &r.s("token"), playlist_links::added_by(st, &r.s("token"))?),
+        None => Value::Null,
+    })
 }
 
 /// Ends a playlist's share link for good: sharing it again makes a new one.
@@ -85,13 +115,13 @@ fn unshare_now(st: &AppState, pid: i64, uid: i64) -> ApiResult<()> {
 /// Share: a public link that always shows the playlist as it is now (Liked Songs too; only its owner may
 /// share it). Asking again gives the same link: `{token, path, url}`.
 async fn share(State(st): State<AppState>, User(u): User, Path(pid): Path<i64>) -> ApiResult<Json<Value>> {
-    own(&st, pid, &u)?;
+    own_writable(&st, pid, &u)?;
     library::share_link(&st, u.i("id"), "playlist", 0, &pid.to_string())
 }
 
 /// Stop sharing: the link stops working for everyone who has it. A playlist that isn't shared answers ok too.
 async fn unshare(State(st): State<AppState>, User(u): User, Path(pid): Path<i64>) -> ApiResult<Json<Value>> {
-    own(&st, pid, &u)?;
+    own_writable(&st, pid, &u)?;
     unshare_now(&st, pid, u.i("id"))?;
     Ok(Json(json!({ "ok": true })))
 }
@@ -130,6 +160,10 @@ async fn preview(State(st): State<AppState>, User(u): User, Json(b): Json<Import
 }
 
 async fn import_inner(st: &AppState, u: &Row, b: ImportBody) -> ApiResult<Value> {
+    // adding to a playlist that can't take songs is refused before the link is fetched
+    if let Some(pid) = b.into {
+        own_writable(st, pid, u)?;
+    }
     let data = fetch_source(st, &b, u.i("id")).await?;
     // matching against the library, the inserts and the requests for missing songs: on the blocking pool
     let u = u.clone();
@@ -141,7 +175,7 @@ fn import_now(st: &AppState, u: &Row, b: ImportBody, data: Value) -> ApiResult<V
     let source = data["source"].as_str().unwrap_or("web").to_string();
     let mut res = match b.into {
         Some(pid) => {
-            let pl = own(st, pid, u)?;
+            let pl = own_writable(st, pid, u)?;
             let (added, dupes) = playlists::add_tracks(st, pl.i("id"), &tracks, &source).map_err(bad)?;
             json!({ "id": pid, "added": added, "duplicates_skipped": dupes })
         }
@@ -179,23 +213,29 @@ async fn create(State(st): State<AppState>, User(u): User, Json(b): Json<Patch>)
     st.blocking(move |st| Ok(Json(playlists::create(st, u.i("id"), &name, &[], "manual", None, b.description.as_deref().unwrap_or(""), None, false).map_err(bad)?))).await
 }
 
-/// One playlist with its songs, read and enriched on the blocking pool.
+/// One playlist with its songs, read and enriched on the blocking pool. Someone else's playlist added from a
+/// link shows that playlist as it is now (`playlist_links::linked_detail`).
 async fn detail(State(st): State<AppState>, User(u): User, Path(pid): Path<i64>) -> ApiResult<Json<Value>> {
     st.blocking(move |st| {
         let pl = own(st, pid, &u)?;
+        if is_linked(&pl) {
+            return Ok(Json(playlist_links::linked_detail(st, &u, &pl)?));
+        }
         let mut v = playlists::summary(st, &pl);
         v["items"] = json!(st.db.query("SELECT i.*, t.album_id, t.format, t.bitrate, t.verify_status, r.status AS request_status, r.message AS request_message
             FROM playlist_items i LEFT JOIN tracks t ON t.id=i.track_id LEFT JOIN requests r ON r.id=i.request_id
             WHERE i.playlist_id=? ORDER BY i.position, i.id", p![pid])?);
         v["remote_ids"] = serde_json::from_str(&pl.s("remote_ids")).unwrap_or(json!({}));
         v["share"] = share_of(st, pid, u.i("id"))?;
+        v["read_only"] = json!(false);
+        v["linked"] = Value::Null;
         enrich_now(st, Some(&u), &mut v);
         Ok(Json(v))
     }).await
 }
 
 async fn patch(State(st): State<AppState>, User(u): User, Path(pid): Path<i64>, Json(b): Json<Patch>) -> ApiResult<Json<Value>> {
-    let pl = own(&st, pid, &u)?;
+    let pl = own_writable(&st, pid, &u)?;
     let mut sets: Vec<(&str, Value)> = vec![];
     if let (Some(n), false) = (b.name, pl.s("kind") == "liked") {
         sets.push(("name", json!(if n.trim().is_empty() { pl.s("name") } else { n.trim().to_string() })));
@@ -221,9 +261,16 @@ async fn patch(State(st): State<AppState>, User(u): User, Path(pid): Path<i64>, 
     Ok(Json(playlists::summary(&st, &own(&st, pid, &u)?)))
 }
 
+/// Delete a playlist. For someone else's playlist added from a link this is Remove from my playlists: only
+/// the entry goes (it has no items, and the owner's playlist and link are untouched).
 async fn remove(State(st): State<AppState>, User(u): User, Path(pid): Path<i64>) -> ApiResult<Json<Value>> {
-    if own(&st, pid, &u)?.s("kind") == "liked" {
+    let pl = own(&st, pid, &u)?;
+    if pl.s("kind") == "liked" {
         return Err(err(400, "Liked Songs can't be deleted"));
+    }
+    if is_linked(&pl) {
+        st.db.execute("DELETE FROM playlists WHERE id=? AND kind='linked'", p![pid])?;
+        return Ok(Json(json!({ "ok": true })));
     }
     st.db.execute("DELETE FROM playlist_items WHERE playlist_id=?", p![pid])?;
     st.db.execute("DELETE FROM playlists WHERE id=?", p![pid])?;
@@ -234,7 +281,7 @@ async fn remove(State(st): State<AppState>, User(u): User, Path(pid): Path<i64>)
 /// Matching against the library (its index of every song) and the writes run on the blocking pool.
 async fn dedupe(State(st): State<AppState>, User(u): User, Path(pid): Path<i64>) -> ApiResult<Json<Value>> {
     st.blocking(move |st| {
-        own(st, pid, &u)?;
+        own_writable(st, pid, &u)?;
         playlists::rematch(st, Some(pid), false);
         Ok(Json(json!({ "removed": playlists::dedupe(st, pid) })))
     }).await
@@ -242,7 +289,7 @@ async fn dedupe(State(st): State<AppState>, User(u): User, Path(pid): Path<i64>)
 
 async fn rematch(State(st): State<AppState>, User(u): User, Path(pid): Path<i64>) -> ApiResult<Json<Value>> {
     st.blocking(move |st| {
-        own(st, pid, &u)?;
+        own_writable(st, pid, &u)?;
         Ok(Json(json!({ "matched": playlists::rematch(st, Some(pid), false) })))
     }).await
 }
@@ -251,7 +298,7 @@ async fn request_missing(State(st): State<AppState>, User(u): User, Path(pid): P
     let mode = body.and_then(|b| b["album_mode"].as_str().map(String::from));
     // every song of the playlist is looked up: on the blocking pool
     st.blocking(move |st| {
-        own(st, pid, &u)?;
+        own_writable(st, pid, &u)?;
         encore_requests::create::quota(st, &u, 1)?;
         // {requested, in_progress, failed: [{title, reason}]}
         Ok(Json(json!(encore_requests::missing::request_missing(st, &u, pid, false, mode).map_err(bad)?)))
@@ -259,7 +306,7 @@ async fn request_missing(State(st): State<AppState>, User(u): User, Path(pid): P
 }
 
 async fn refresh(State(st): State<AppState>, User(u): User, Path(pid): Path<i64>) -> ApiResult<Json<Value>> {
-    let pl = own(&st, pid, &u)?;
+    let pl = own_writable(&st, pid, &u)?;
     if pl.s("source_url").is_empty() {
         return Err(err(400, "This playlist has no source to refresh from"));
     }
@@ -274,21 +321,21 @@ struct AddTracks {
 
 async fn add_tracks(State(st): State<AppState>, User(u): User, Path(pid): Path<i64>, Json(b): Json<AddTracks>) -> ApiResult<Json<Value>> {
     st.blocking(move |st| {
-        own(st, pid, &u)?;
+        own_writable(st, pid, &u)?;
         let (added, dupes) = playlists::add_library_tracks(st, pid, &b.track_ids).map_err(bad)?;
         Ok(Json(json!({ "added": added, "duplicates_skipped": dupes })))
     }).await
 }
 
 async fn remove_item(State(st): State<AppState>, User(u): User, Path((pid, iid)): Path<(i64, i64)>) -> ApiResult<Json<Value>> {
-    own(&st, pid, &u)?;
+    own_writable(&st, pid, &u)?;
     st.db.execute("DELETE FROM playlist_items WHERE id=? AND playlist_id=?", p![iid, pid])?;
     playlists::renumber(&st, pid);
     Ok(Json(json!({ "ok": true })))
 }
 
 async fn move_item(State(st): State<AppState>, User(u): User, Path(pid): Path<i64>, Json(b): Json<Value>) -> ApiResult<Json<Value>> {
-    own(&st, pid, &u)?;
+    own_writable(&st, pid, &u)?;
     let mut ids: Vec<i64> = playlists::items(&st, pid).iter().map(|r| r.i("id")).collect();
     let iid = b["item_id"].as_i64().or(b["item_id"].as_str().and_then(|x| x.parse().ok())).unwrap_or(0);
     let to = b["to"].as_i64().or(b["to"].as_str().and_then(|x| x.parse().ok())).unwrap_or(0).max(0) as usize;
@@ -315,6 +362,13 @@ async fn merge(State(st): State<AppState>, User(u): User, Json(b): Json<MergeBod
     }
     let name = if b.name.trim().is_empty() { "Merged playlist".to_string() } else { b.name.trim().to_string() };
     st.blocking(move |st| {
+        // someone else's playlist added from a link is not the user's to merge (or delete with it): a copy is
+        for pid in &b.ids {
+            if let Some(pl) = st.db.one("SELECT * FROM playlists WHERE id=? AND user_id=? AND kind='linked'", p![pid, u.i("id")])? {
+                let owner = playlist_links::LinkSnapshot::of(&pl).map(|s| s.owner).filter(|o| !o.is_empty()).unwrap_or_else(|| "someone else".into());
+                return Err(err(403, format!("“{}” is {owner}'s playlist. Save a copy to merge it.", pl.s("name"))));
+            }
+        }
         let res = playlists::merge(st, u.i("id"), &b.ids, &name).map_err(bad)?;
         if b.delete_sources {
             for pid in &b.ids {
@@ -330,7 +384,7 @@ async fn merge(State(st): State<AppState>, User(u): User, Json(b): Json<MergeBod
 }
 
 async fn sync_me(State(st): State<AppState>, User(u): User, Path(pid): Path<i64>) -> ApiResult<Json<Value>> {
-    own(&st, pid, &u)?;
+    own_writable(&st, pid, &u)?;
     let mut log = vec![];
     let mut s = encore_sync::sync_user(&st, u.i("id"), &mut log).await;
     s["log"] = json!(log);

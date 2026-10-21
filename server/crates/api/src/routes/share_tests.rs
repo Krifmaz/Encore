@@ -688,7 +688,7 @@ async fn save_a_copy_makes_a_playlist_for_the_viewer() {
     // who is looking
     assert_eq!(e.public(&url).await.json()["viewer"], json!({ "signed_in": false, "own": false }));
     assert_eq!(e.get(&url).await.json()["viewer"], json!({ "signed_in": true, "own": true }));
-    assert_eq!(call(&e.app, "GET", &url, &other, None).await.json()["viewer"], json!({ "signed_in": true, "own": false }));
+    assert_eq!(call(&e.app, "GET", &url, &other, None).await.json()["viewer"], json!({ "signed_in": true, "own": false, "added": false, "playlist_id": null }));
 
     let r = call(&e.app, "POST", &format!("{url}/copy"), &other, Some(json!({}))).await;
     assert_eq!(r.status, StatusCode::OK, "{}", r.text());

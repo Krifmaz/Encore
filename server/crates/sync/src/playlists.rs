@@ -1,4 +1,7 @@
 //! Playlists & liked songs: import, match against the library, de-duplicate, merge, request missing.
+//!
+//! `playlists.kind`: playlist | liked | linked (someone else's playlist added through its share link;
+//! read-only, it has no items of its own: the API shows the owner's playlist through the link).
 use encore_db::{now, Row, RowExt};
 use encore_library::matcher::{compare, describe, key, Desc, LibraryIndex};
 use encore_db::p;
@@ -222,7 +225,9 @@ pub fn rematch(st: &impl Ctx, pid: Option<i64>, only_unmatched: bool) -> usize {
 pub fn merge(st: &impl Ctx, uid: i64, ids: &[i64], name: &str) -> anyhow::Result<Value> {
     let mut tracks = vec![];
     for pid in ids {
-        if st.db().one("SELECT 1 FROM playlists WHERE id=? AND user_id=?", p![pid, uid])?.is_none() {
+        // only the user's own playlists and Liked Songs (not someone else's added from a link: it has no items
+        // of its own, and it isn't the user's to merge)
+        if st.db().one("SELECT 1 FROM playlists WHERE id=? AND user_id=? AND kind IN ('playlist','liked')", p![pid, uid])?.is_none() {
             continue;
         }
         for r in items(st, *pid) {

@@ -4,6 +4,7 @@ import android.content.Intent
 import android.os.Bundle
 import android.widget.Toast
 import androidx.activity.ComponentActivity
+import app.encore.android.features.library.PlaylistLinkRules
 import app.encore.android.graph
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
@@ -12,7 +13,8 @@ import kotlinx.coroutines.withContext
 /**
  * "Share → Request in Encore": takes the first link from shared text (Spotify, Deezer, YouTube, Bandcamp …) and
  * asks the server to get it (POST /api/requests/link, the same box as the web's Requests page). No UI of its
- * own: a toast says what happened.
+ * own: a toast says what happened. A group listen invite and an Encore playlist link open the app instead (join the
+ * group; add the playlist to my playlists).
  */
 class ShareActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -27,6 +29,16 @@ class ShareActivity : ComponentActivity() {
             val open = Intent(this, MainActivity::class.java)
                 .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_SINGLE_TOP)
                 .putExtra(MainActivity.EXTRA_GROUP_LINK, text.trim())
+            try { startActivity(open) } catch (_: Exception) {}
+            finish()
+            return
+        }
+        // an Encore playlist link (https://<server>/s/<token>): the app opens and offers "Add to my playlists"; a link of
+        // another site that only looks like one comes back to the requests box from there
+        if (PlaylistLinkRules.shareToken(text) != null) {
+            val open = Intent(this, MainActivity::class.java)
+                .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_SINGLE_TOP)
+                .putExtra(MainActivity.EXTRA_PLAYLIST_LINK, text.trim())
             try { startActivity(open) } catch (_: Exception) {}
             finish()
             return

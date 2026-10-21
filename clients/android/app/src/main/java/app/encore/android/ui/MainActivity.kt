@@ -17,6 +17,7 @@ import androidx.compose.runtime.getValue
 import app.encore.android.AppGraph
 import app.encore.android.data.session.ThemeChoice
 import app.encore.android.features.group.GroupListen
+import app.encore.android.features.library.PlaylistLinkUi
 import app.encore.android.features.update.Updater
 import app.encore.android.graph
 import app.encore.android.ui.theme.EncoreTheme
@@ -57,9 +58,18 @@ class MainActivity : ComponentActivity() {
         handleIntent(intent)
     }
 
-    /** `https://<server>/#/group/<code>` (from ShareActivity): the root asks "Join <host>'s group listen?" once signed in. */
+    /**
+     * `https://<server>/#/group/<code>` (from ShareActivity): the root asks "Join <host>'s group listen?" once signed in.
+     * An Encore playlist link (`…/s/<token>`, from ShareActivity): the root offers "Add to my playlists" once signed in.
+     */
     private fun handleIntent(i: Intent?) {
         if (i == null) return
+        val playlist = i.getStringExtra(EXTRA_PLAYLIST_LINK)
+        if (playlist != null) {
+            i.removeExtra(EXTRA_PLAYLIST_LINK)
+            PlaylistLinkUi.pendingLink.value = playlist
+            return
+        }
         val link = i.getStringExtra(EXTRA_GROUP_LINK) ?: i.dataString?.takeIf { it.contains("#/group/") } ?: return
         i.removeExtra(EXTRA_GROUP_LINK)
         GroupListen.pendingLink.value = link
@@ -89,6 +99,8 @@ class MainActivity : ComponentActivity() {
     companion object {
         /** A group listen link or code for the root to open (ShareActivity). */
         const val EXTRA_GROUP_LINK = "app.encore.android.GROUP_LINK"
+        /** An Encore playlist link for the root to offer "Add to my playlists" (ShareActivity). */
+        const val EXTRA_PLAYLIST_LINK = "app.encore.android.PLAYLIST_LINK"
     }
 
     private fun askForNotifications() {

@@ -6,11 +6,22 @@
 //!
 //! Share makes the playlist's public link (`POST /api/playlists/{id}/share`) and copies it; the
 //! link always shows the playlist as it is now, Liked Songs too. While shared, a line under the
-//! progress bar has Copy link and Stop sharing (`DELETE /api/playlists/{id}/share`).
+//! progress bar has Copy link and Stop sharing (`DELETE /api/playlists/{id}/share`), and how many
+//! people added it to their playlists ("added by 3 people", never who).
+//!
+//! Someone else's playlist added from its share link (`kind: linked`) is read-only: its owner's
+//! songs as they are now, Play and Save for offline, Save a copy (`POST /api/playlists/{id}/copy`)
+//! and Remove from my playlists (`DELETE /api/playlists/{id}`). No rename, sync, share, Add from
+//! link, Download missing or per-song Remove. Once the link ended, only the "stopped sharing" line
+//! and Remove.
 
 use crate::api::ApiError;
 use crate::fmt;
-use crate::pages::playlists::{self, src_label, src_name, target_name, Import, ImportMsg};
+use crate::pages::playlists::{
+    self, added_by_text, is_linked, linked_active, linked_hint, linked_kicker, linked_owner, linked_stopped, remove_text,
+    src_label, src_name, target_name, Import, ImportMsg, LINKED_EMPTY, REMOVED_FROM_MINE, REMOVE_FROM_MINE, SAVED_COPY,
+    SAVE_COPY,
+};
 use crate::pages::{Ctx, El, Page, Section};
 use crate::theme::{self, Badge, Btn};
 use crate::widgets::catalog;
@@ -88,6 +99,17 @@ pub const STOP_TEXT: &str = "The link stops working for everyone who has it. Sha
 /// The toast once the link is gone.
 pub const STOPPED: &str = "Sharing stopped";
 
+/// The hint beside the Shared mark, with how many people added the playlist when any did:
+/// "Anyone with the link can play these songs · added by 3 people".
+pub fn shared_hint(p: &Value) -> String {
+    let added = added_by_text(fmt::i(&p["share"], "added_by"));
+    if added.is_empty() {
+        SHARED_HINT.to_string()
+    } else {
+        format!("{SHARED_HINT} · {added}")
+    }
+}
+
 /// The playlist's share path (`share.path`, "/s/<token>") when it is shared, else None.
 pub fn shared_path(p: &Value) -> Option<String> {
     p["share"]["path"].as_str().filter(|s| !s.is_empty()).map(str::to_string)
@@ -144,6 +166,8 @@ pub enum Dialog {
     Delete(String),
     /// "Stop sharing": the link stops working.
     StopSharing,
+    /// "Remove from my playlists" (someone else's playlist): the confirm's text.
+    RemoveLinked(String),
 }
 
 #[derive(Debug, Default)]
@@ -195,6 +219,13 @@ pub enum Message {
     StopSharing,
     StopSharingConfirmed,
     Unshared(Result<Value, ApiError>),
+    /// Someone else's playlist: an editable copy of it as it is now.
+    SaveCopy,
+    CopySaved(Result<Value, ApiError>),
+    /// Someone else's playlist: ask, then take it out of my playlists.
+    RemoveLinked,
+    RemoveLinkedConfirmed,
+    RemovedLinked(Result<Value, ApiError>),
     RemoveItem(i64),
     ItemRemoved(i64, Result<Value, ApiError>),
     Menu(i64),
@@ -428,6 +459,41 @@ pub fn update(state: &mut State, msg: Message, ctx: &mut Ctx) -> Task<Message> {
             return load(state, ctx);
         }
         Message::Unshared(Err(e)) => ctx.toast_err(e.message),
+        Message::SaveCopy => {
+            if state.busy {
+                return Task::none();
+            }
+            state.busy = true;
+            let api = ctx.api.clone();
+            let path = format!("/playlists/{}/copy", state.id);
+            return Task::perform(async move { api.post_empty(&path).await }, Message::CopySaved);
+        }
+        Message::CopySaved(r) => {
+            state.busy = false;
+            match r {
+                Ok(v) => {
+                    ctx.toast_ok(SAVED_COPY);
+                    ctx.navigate(Page::Playlist(fmt::i(&v, "id")));
+                }
+                Err(e) => ctx.toast_err(e.message),
+            }
+        }
+        Message::RemoveLinked => {
+            if let Some(p) = state.playlist() {
+                state.dialog = Some(Dialog::RemoveLinked(remove_text(&fmt::s(p, "name"))));
+            }
+        }
+        Message::RemoveLinkedConfirmed => {
+            state.dialog = None;
+            let api = ctx.api.clone();
+            let path = format!("/playlists/{}", state.id);
+            return Task::perform(async move { api.del(&path).await }, Message::RemovedLinked);
+        }
+        Message::RemovedLinked(Ok(_)) => {
+            ctx.toast_ok(REMOVED_FROM_MINE);
+            ctx.navigate(Page::Playlists);
+        }
+        Message::RemovedLinked(Err(e)) => ctx.toast_err(e.message),
         Message::RemoveItem(iid) => {
             state.menu = None;
             let api = ctx.api.clone();
@@ -603,7 +669,7 @@ fn header<'a>(state: &'a State, p: &'a Value, ctx: &Ctx<'a>) -> El<'a, Message> 
         right = right.push(
             row![
                 badge("Shared", Badge::Accent),
-                small_muted(SHARED_HINT),
+                small_muted(shared_hint(p)),
                 btn_icon(Icon::Copy, "Copy link", Btn::Default, Some(Message::CopyLink)),
                 btn_icon(Icon::X, STOP_TITLE, Btn::Ghost, Some(Message::StopSharing)),
             ]
@@ -681,7 +747,34 @@ fn sync_card<'a>(state: &'a State, p: &'a Value, _ctx: &Ctx<'a>) -> El<'a, Messa
     .into()
 }
 
+/// The head of someone else's playlist: its picture, "Playlist · by anna", the name (no rename),
+/// "12 tracks" and the owner's hint, then Play, Save for offline, Save a copy and Remove from my
+/// playlists. Once the link ended: the "stopped sharing" line and Remove only.
+fn linked_header<'a>(state: &'a State, p: &'a Value, ctx: &Ctx<'a>) -> El<'a, Message> {
+    let owner = linked_owner(p);
+    let active = linked_active(p);
+    let cover = catalog::art(ctx, if active { p["cover_url"].as_str().unwrap_or("") } else { "" }, 180.0, false, Icon::List);
+    let mut right = column![catalog::kicker(linked_kicker(p)), h1(fmt::s(p, "name"))].spacing(8).width(Length::Fill);
+    let mut actions = row![].spacing(8).align_y(Alignment::Center);
+    if active {
+        right = right.push(muted(format!("{} tracks", fmt::i(p, "total"))).size(14));
+        right = right.push(small_muted(linked_hint(&owner)));
+        if !playable(&state.items()).is_empty() {
+            actions = actions.push(btn_icon(Icon::Play, "Play", Btn::Primary, Some(Message::Play(0))));
+            actions = actions.push(btn_icon(Icon::Download, "Save for offline", Btn::Default, Some(Message::SaveOffline)));
+        }
+        actions = actions.push(btn_icon(Icon::Copy, SAVE_COPY, Btn::Default, (!state.busy).then_some(Message::SaveCopy)));
+    } else {
+        right = right.push(muted(linked_stopped(&owner)).size(14));
+    }
+    actions = actions.push(btn_icon(Icon::X, REMOVE_FROM_MINE, Btn::Ghost, Some(Message::RemoveLinked)));
+    let right = right.push(container(actions.wrap()).padding([6, 0]));
+    row![cover, right].spacing(24).align_y(Alignment::End).into()
+}
+
 fn track_rows<'a>(state: &'a State, items: &[Value], ctx: &Ctx<'a>) -> El<'a, Message> {
+    // someone else's playlist: every song is in the library, and only its owner takes songs out
+    let read_only = state.playlist().is_some_and(is_linked);
     let current = ctx.player.current_id();
     let mut play_index = 0usize;
     let mut rows: Vec<El<'a, Message>> = Vec::with_capacity(items.len());
@@ -699,8 +792,10 @@ fn track_rows<'a>(state: &'a State, items: &[Value], ctx: &Ctx<'a>) -> El<'a, Me
             .sub(sub)
             .duration(Some(fmt::f(it, "duration")).filter(|d| *d > 0.0))
             .playing(in_library && current == Some(fmt::i(it, "track_id")))
-            .extra(icon_btn(Icon::X, "Remove", Some(Message::RemoveItem(iid))))
             .on_menu(Message::Menu(iid));
+        if !read_only {
+            r = r.extra(icon_btn(Icon::X, "Remove", Some(Message::RemoveItem(iid))));
+        }
         if in_library {
             r = r.quality(fmt::quality(it)).on_play(Message::Play(play_index));
             play_index += 1;
@@ -708,8 +803,10 @@ fn track_rows<'a>(state: &'a State, items: &[Value], ctx: &Ctx<'a>) -> El<'a, Me
         if let Some(m) = it["request_message"].as_str().filter(|m| !m.is_empty() && !in_library) {
             r = r.note(m.to_string());
         }
-        for b in status_badges(it) {
-            r = r.badge(b);
+        if !read_only {
+            for b in status_badges(it) {
+                r = r.badge(b);
+            }
         }
         rows.push(r.view());
     }
@@ -721,6 +818,18 @@ pub fn view<'a>(state: &'a State, ctx: &Ctx<'a>) -> El<'a, Message> {
     match &state.pl {
         None => column![skeleton_rows(8)].into(),
         Some(Err(e)) => column![h1("Playlist"), error_box(e)].spacing(16).into(),
+        Some(Ok(p)) if is_linked(p) => {
+            let items = state.items();
+            let mut col = column![linked_header(state, p, ctx)].spacing(18);
+            if !linked_active(p) {
+                // the link ended: the head says so, there is nothing to list
+            } else if items.is_empty() {
+                col = col.push(empty(Icon::Music, LINKED_EMPTY, ""));
+            } else {
+                col = col.push(track_rows(state, &items, ctx));
+            }
+            col.width(Length::Fill).into()
+        }
         Some(Ok(p)) => {
             let items = state.items();
             let mut col = column![header(state, p, ctx), sync_card(state, p, ctx)].spacing(18);
@@ -750,7 +859,9 @@ pub fn overlay<'a>(state: &'a State, ctx: &Ctx<'a>) -> Option<El<'a, Message>> {
         if fmt::truthy(&it, "album_id") {
             items.push(MenuItem::new("View album", Message::ViewAlbum(fmt::s(&it, "album_id"))).icon(Icon::Disc));
         }
-        items.push(MenuItem::new("Remove", Message::RemoveItem(iid)).icon(Icon::X).danger());
+        if !state.playlist().is_some_and(is_linked) {
+            items.push(MenuItem::new("Remove", Message::RemoveItem(iid)).icon(Icon::X).danger());
+        }
         return Some(pop_menu(at, items, Message::CloseMenu, ctx.size));
     }
     match state.dialog.as_ref()? {
@@ -791,6 +902,14 @@ pub fn overlay<'a>(state: &'a State, ctx: &Ctx<'a>) -> Option<El<'a, Message>> {
             STOP_TITLE,
             true,
             Message::StopSharingConfirmed,
+            Message::CloseDialog,
+        )),
+        Dialog::RemoveLinked(text) => Some(confirm(
+            REMOVE_FROM_MINE,
+            text,
+            "Remove",
+            true,
+            Message::RemoveLinkedConfirmed,
             Message::CloseDialog,
         )),
     }
@@ -871,6 +990,19 @@ mod tests {
         assert_eq!(shared_path(&json!({ "share": null })), None);
         assert_eq!(shared_path(&json!({ "name": "Road trip" })), None);
         assert_eq!(shared_path(&json!({ "share": { "path": "" } })), None);
+    }
+
+    #[test]
+    fn the_owner_line_counts_who_added_it() {
+        let shared = |n: i64| json!({ "share": { "token": "abc", "path": "/s/abc", "url": "u", "added_by": n } });
+        assert_eq!(shared_hint(&shared(0)), "Anyone with the link can play these songs");
+        assert_eq!(shared_hint(&shared(1)), "Anyone with the link can play these songs · added by 1 person");
+        assert_eq!(shared_hint(&shared(3)), "Anyone with the link can play these songs · added by 3 people");
+        assert_eq!(
+            shared_hint(&json!({ "share": { "path": "/s/abc" } })),
+            "Anyone with the link can play these songs",
+            "an older server has no added_by"
+        );
     }
 
     #[test]

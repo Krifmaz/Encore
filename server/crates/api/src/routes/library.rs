@@ -1028,7 +1028,7 @@ async fn unlike(State(st): State<AppState>, User(u): User, Path(id): Path<i64>) 
 
 // ---- share links ----------------------------------------------------------------------------------
 
-fn link_gone() -> encore_core::error::ApiError {
+pub(super) fn link_gone() -> encore_core::error::ApiError {
     err(404, "This link doesn't work any more")
 }
 
@@ -1101,14 +1101,14 @@ async fn share_artist(State(st): State<AppState>, User(u): User, Json(b): Json<S
 
 /// What a token points at: kind "track" (track_id), "album" (ref = album id), "artist" (ref = name) or
 /// "playlist" (ref = playlist id). `user_id` is who made the link.
-struct Shared {
-    kind: String,
-    r: String,
-    track_id: i64,
-    user_id: i64,
+pub(super) struct Shared {
+    pub(super) kind: String,
+    pub(super) r: String,
+    pub(super) track_id: i64,
+    pub(super) user_id: i64,
 }
 
-fn share_row(st: &AppState, token: &str) -> ApiResult<Shared> {
+pub(super) fn share_row(st: &AppState, token: &str) -> ApiResult<Shared> {
     let s = st.db.one("SELECT track_id, user_id, COALESCE(kind,'track') kind, COALESCE(ref,'') ref FROM shares WHERE token=?", p![token])?.ok_or_else(link_gone)?;
     Ok(Shared { kind: s.s("kind"), r: s.s("ref"), track_id: s.i("track_id"), user_id: s.i("user_id") })
 }
@@ -1123,24 +1123,25 @@ const SHARE_PAGE: usize = 200;
 const SHARE_PAGE_MAX: usize = 500;
 
 /// A shared playlist as it is now.
-struct SharedPlaylist {
-    id: i64,
+pub(super) struct SharedPlaylist {
+    pub(super) id: i64,
     /// "Liked Songs" for the liked list
-    name: String,
-    liked: bool,
-    description: String,
+    pub(super) name: String,
+    pub(super) liked: bool,
+    pub(super) description: String,
     /// the owner's user name (the page shows it)
-    owner: String,
+    pub(super) owner: String,
 }
 
 /// The playlist a link shares, looked at every time: it is still there, still the link maker's, and its
 /// owner is not disabled or deleted (the page names the owner, so a link doesn't outlive them). Otherwise
-/// the link is gone.
-fn shared_playlist(st: &AppState, s: &Shared) -> ApiResult<SharedPlaylist> {
+/// the link is gone. Only the owner's own playlists and Liked Songs are shared: someone else's playlist added
+/// to theirs (kind `linked`, see [`super::playlist_links`]) never is, even through an old shares row.
+pub(super) fn shared_playlist(st: &AppState, s: &Shared) -> ApiResult<SharedPlaylist> {
     let pid: i64 = s.r.parse().map_err(|_| link_gone())?;
     let r = st.db.one(
         "SELECT p.id, p.name, p.kind, COALESCE(p.description,'') description, u.username FROM playlists p JOIN users u ON u.id = p.user_id
-         WHERE p.id = ? AND p.user_id = ? AND u.disabled = 0", p![pid, s.user_id])?.ok_or_else(link_gone)?;
+         WHERE p.id = ? AND p.user_id = ? AND p.kind IN ('playlist','liked') AND u.disabled = 0", p![pid, s.user_id])?.ok_or_else(link_gone)?;
     let liked = r.s("kind") == "liked";
     Ok(SharedPlaylist { id: r.i("id"), name: if liked { "Liked Songs".into() } else { r.s("name") }, liked, description: public_description(&r.s("description")), owner: r.s("username") })
 }
@@ -1166,7 +1167,7 @@ pub(crate) fn public_description(d: &str) -> String {
 /// The order a playlist link lists its songs in: Liked Songs newest first (a like goes to the end of the
 /// list and an unlike numbers it again, so the highest position is the latest like), any other playlist in
 /// its own order.
-fn playlist_order(pl: &SharedPlaylist) -> &'static str {
+pub(super) fn playlist_order(pl: &SharedPlaylist) -> &'static str {
     if pl.liked { "i.position DESC, i.id DESC" } else { "i.position, i.id" }
 }
 
@@ -1420,12 +1421,20 @@ async fn shared_meta(st: &AppState, token: &str, q: &SharePageQ) -> ApiResult<(V
 
 /// A share link's data, for anyone who has the link: a signed-in listener who has translations on gets
 /// theirs too. A playlist link answers one page of its songs ([`SharePageQ`]) and `viewer`: whether the
-/// viewer is signed in on this server and made the link (the page offers Save a copy to the others). The
-/// owner's id is never in the answer.
+/// viewer is signed in on this server and made the link (the page offers Add to my playlists and Save a copy
+/// to the others), and for a signed-in viewer who didn't make it, whether they added it to their playlists
+/// already (`added`, `playlist_id`: their entry). The owner's id is never in the answer.
 async fn shared(State(st): State<AppState>, MaybeUser(me): MaybeUser, Path(token): Path<String>, Query(q): Query<SharePageQ>) -> ApiResult<Json<Value>> {
     let (mut v, owner) = shared_meta(&st, &token, &q).await?;
     if v["kind"] == "playlist" {
-        v["viewer"] = json!({ "signed_in": me.is_some(), "own": me.as_ref().is_some_and(|u| u.i("id") == owner) });
+        v["viewer"] = match &me {
+            Some(u) if u.i("id") != owner => {
+                let entry = super::playlist_links::entry_for(&st, u.i("id"), &token)?;
+                json!({ "signed_in": true, "own": false, "added": entry.is_some(), "playlist_id": entry })
+            }
+            Some(_) => json!({ "signed_in": true, "own": true }),
+            None => json!({ "signed_in": false, "own": false }),
+        };
     }
     enrich(&st, me.as_ref(), &mut v).await;
     Ok(Json(v))
@@ -1502,15 +1511,22 @@ async fn shared_copy(State(st): State<AppState>, User(u): User, Path(token): Pat
             return Err(err(400, "Only playlists can be copied"));
         }
         let pl = shared_playlist(st, &s)?;
-        let ids = playlist_song_ids(st, &pl, None)?;
-        let name = name.unwrap_or_else(|| if pl.liked { format!("Liked Songs · {}", pl.owner) } else { pl.name.clone() });
-        let bad = |e: anyhow::Error| err(400, e.to_string());
-        let made = encore_sync::playlists::create(st, u.i("id"), &name, &[], "library", None, &format!("Shared by {}", pl.owner), None, false).map_err(bad)?;
-        let pid = made["id"].as_i64().unwrap_or(0);
-        let (added, dupes) = encore_sync::playlists::add_library_tracks(st, pid, &ids).map_err(bad)?;
-        st.db.log("info", &format!("{} saved a copy of {}'s playlist '{}' ({added} songs)", u.s("username"), pl.owner, pl.name));
-        Ok(Json(json!({ "id": pid, "name": name, "added": added, "duplicates_skipped": dupes })))
+        copy_link(st, &u, &pl, name).map(Json)
     }).await
+}
+
+/// Save a copy of a shared playlist as it is now (from its link, or from the viewer's entry for it): a new
+/// playlist of `u`'s with every listed song in the link's order, described "Shared by <owner>". Liked Songs is
+/// named "Liked Songs · <owner>" unless `name` says otherwise. → `{id, name, added, duplicates_skipped}`
+pub(super) fn copy_link(st: &AppState, u: &encore_db::Row, pl: &SharedPlaylist, name: Option<String>) -> ApiResult<Value> {
+    let ids = playlist_song_ids(st, pl, None)?;
+    let name = name.unwrap_or_else(|| super::playlist_links::link_playlist_name(pl));
+    let bad = |e: anyhow::Error| err(400, e.to_string());
+    let made = encore_sync::playlists::create(st, u.i("id"), &name, &[], "library", None, &format!("Shared by {}", pl.owner), None, false).map_err(bad)?;
+    let pid = made["id"].as_i64().unwrap_or(0);
+    let (added, dupes) = encore_sync::playlists::add_library_tracks(st, pid, &ids).map_err(bad)?;
+    st.db.log("info", &format!("{} saved a copy of {}'s playlist '{}' ({added} songs)", u.s("username"), pl.owner, pl.name));
+    Ok(json!({ "id": pid, "name": name, "added": added, "duplicates_skipped": dupes }))
 }
 
 /// Largest preview video: chat apps (Discord) embed files up to 8 MB.

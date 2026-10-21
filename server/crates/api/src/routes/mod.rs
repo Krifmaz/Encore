@@ -8,6 +8,7 @@ pub mod perf;
 pub mod picker;
 pub mod playback;
 pub mod playlists;
+pub mod playlist_links;
 pub mod plugins;
 pub mod remote;
 pub mod roon;

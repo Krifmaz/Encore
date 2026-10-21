@@ -167,8 +167,10 @@
     }
   ],
   "kind": "playlist",
+  "linked": null,
   "matched": 5,
   "name": "P4 sample",
+  "read_only": false,
   "remote_ids": {},
   "share": null,
   "source": "manual",
