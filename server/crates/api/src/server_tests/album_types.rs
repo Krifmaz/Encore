@@ -46,8 +46,8 @@ async fn musicbrainz() -> (String, Arc<Mutex<Vec<String>>>) {
 
 fn add(ts: &TestServer, album_id: &str, album: &str, n: usize, rgid: &str, rec: &str) {
     for i in 0..n {
-        ts.st.db.execute("INSERT INTO tracks (path, album_id, album, albumartist, title, track, mb_releasegroupid, mb_trackid, releasetype, tracktotal, compilation, added_via)
-                          VALUES (?,?,?,?,?,?,?,?,'',0,0,'scan')",
+        ts.st.db.execute("INSERT INTO tracks (path, album_id, album, albumartist, title, track, mb_releasegroupid, mb_trackid, releasetype, tracktotal, compilation, added_via, artist_credit, albumartist_credit)
+                          VALUES (?,?,?,?,?,?,?,?,'',0,0,'scan','[]','[]')",
             p![format!("/m/{album_id}/{i}.flac"), album_id, album, "Solo", format!("Song {i}"), i as i64 + 1, rgid, rec]).unwrap();
     }
 }

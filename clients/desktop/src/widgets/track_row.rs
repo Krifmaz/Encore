@@ -11,6 +11,8 @@ pub struct TrackRow<'a, M> {
     index: Option<String>,
     title: String,
     sub: String,
+    /// The sub line as pieces, the artists among them links (see [`TrackRow::sub_links`]).
+    sub_links: Vec<(String, Option<M>)>,
     /// Faint small lines under the title (the admin's file path, the source line).
     notes: Vec<String>,
     cover: Option<image::Handle>,
@@ -31,6 +33,7 @@ impl<'a, M: Clone + 'a> TrackRow<'a, M> {
             index: None,
             title: title.into(),
             sub: String::new(),
+            sub_links: Vec::new(),
             notes: Vec::new(),
             cover: None,
             duration: None,
@@ -59,6 +62,21 @@ impl<'a, M: Clone + 'a> TrackRow<'a, M> {
     /// `artist · album`.
     pub fn sub(mut self, sub: impl Into<String>) -> Self {
         self.sub = sub.into();
+        self
+    }
+
+    /// The sub line with each artist of the song as its own link (`parts` from
+    /// [`crate::widgets::catalog::credit_parts`], mapped to this page's messages), then `tail` (" · album").
+    pub fn sub_links(mut self, parts: Vec<(String, Option<M>)>, tail: impl Into<String>) -> Self {
+        if parts.is_empty() {
+            self.sub = tail.into().trim_start_matches(" · ").to_string();
+            return self;
+        }
+        self.sub_links = parts;
+        let tail = tail.into();
+        if !tail.is_empty() {
+            self.sub_links.push((tail, None));
+        }
         self
     }
 
@@ -154,7 +172,16 @@ impl<'a, M: Clone + 'a> TrackRow<'a, M> {
             );
         }
         let mut lines = column![t(self.title).size(14).font(theme::semibold()).color(color)].spacing(2);
-        if !self.sub.is_empty() {
+        if !self.sub_links.is_empty() {
+            let mut sub = row![].align_y(Alignment::Center);
+            for (text, on) in self.sub_links {
+                sub = sub.push(match on {
+                    Some(m) => button(small_muted(text).size(12.5)).padding(0).style(theme::btn(Btn::Row)).on_press(m).into(),
+                    None => El::from(small_muted(text).size(12.5)),
+                });
+            }
+            lines = lines.push(sub.clip(true));
+        } else if !self.sub.is_empty() {
             lines = lines.push(small_muted(self.sub).size(12.5));
         }
         for n in self.notes {

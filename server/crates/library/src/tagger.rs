@@ -739,6 +739,31 @@ pub fn map_files(files: &[Row], tracks: &[Value]) -> (Vec<Option<usize>>, f64) {
     (assign, (conf * 1000.0).round() / 1000.0)
 }
 
+/// The ARTISTS (or ALBUMARTISTS) tag of a MusicBrainz credit (`[{name, mbid}]`, see `encore_http::mb::credit_list`)
+/// and the artists' MusicBrainz ids when every one has one (written one value each, in the same order).
+pub fn credit_tags(credit: &Value) -> Option<(Value, Option<Value>)> {
+    let list = credit.as_array().filter(|a| !a.is_empty())?;
+    let names: Vec<Value> = list.iter().filter_map(|c| c["name"].as_str().filter(|n| !n.trim().is_empty()).map(|n| json!(n))).collect();
+    let ids: Vec<Value> = list.iter().filter_map(|c| c["mbid"].as_str().filter(|m| encore_core::ids::is_mbid(m)).map(|m| json!(m))).collect();
+    if names.len() != list.len() {
+        return None;
+    }
+    let ids = (ids.len() == list.len() && list.len() >= 2).then_some(Value::Array(ids));
+    Some((Value::Array(names), ids))
+}
+
+/// Adds the ARTISTS / ALBUMARTISTS tags (and every artist's MusicBrainz id) of these credits to `m`.
+pub fn insert_credits(m: &mut Row, artists: &Value, albumartists: &Value) {
+    for (credit, names, ids) in [(artists, "artists", "musicbrainz_artistid"), (albumartists, "albumartists", "musicbrainz_albumartistid")] {
+        if let Some((n, i)) = credit_tags(credit) {
+            m.insert(names.into(), n);
+            if let Some(i) = i {
+                m.insert(ids.into(), i);
+            }
+        }
+    }
+}
+
 pub fn release_values(rel: &Value, t: &Value) -> Row {
     let artist = { let a = encore_core::json::text(&t["artist"]); if a.is_empty() { encore_core::json::text(&rel["artist"]) } else { a } };
     let mut m = Row::new();
@@ -754,6 +779,9 @@ pub fn release_values(rel: &Value, t: &Value) -> Row {
     ] {
         m.insert(k.into(), v);
     }
+    // every artist of the song and of the album, so "A & B" is two artists in the library
+    let song = if t["artists"].as_array().is_some_and(|a| !a.is_empty()) { &t["artists"] } else { &rel["artists"] };
+    insert_credits(&mut m, song, &rel["artists"]);
     if rel["provider"].as_str().is_some_and(|p| p != "MusicBrainz") {
         // Deezer/Apple/Discogs metadata: no MusicBrainz ids
         m.retain(|k, _| !k.starts_with("musicbrainz_"));
@@ -991,6 +1019,7 @@ pub async fn import_single(st: &impl Ctx, path: &Path, artist: &str, title: &str
                        ("musicbrainz_albumartistid", &r["artist_id"])] {
             vals.insert(k.into(), v.clone());
         }
+        insert_credits(&mut vals, &r["artists"], &r["artists"]);
         progress::step("finding the cover");
         cover = fetch_cover(st, r["release_id"].as_str(), r["release_group_id"].as_str()).await;
     }

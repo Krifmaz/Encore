@@ -60,6 +60,11 @@ pub fn verify_badge<'a, M: 'a>(t: &Value) -> Option<El<'a, M>> {
 
 /// A name the way the account's Language setting wants it (web `tr_inline`): the original, its
 /// translation or romanization instead, or "Original (Translation)".
+/// A song's artists as links of this page (see [`crate::widgets::catalog::credit_parts`]).
+pub(crate) fn artist_links(ctx: &Ctx, v: &Value) -> Vec<(String, Option<Message>)> {
+    crate::widgets::catalog::credit_parts(v, &tr(ctx, v, "artist")).into_iter().map(|(text, page)| (text, page.map(Message::OpenPage))).collect()
+}
+
 pub fn tr(ctx: &Ctx, v: &Value, field: &str) -> String {
     let orig = fmt::s(v, field);
     let mode = fmt::s(&ctx.session.user["prefs"], "translate_mode");
@@ -1729,6 +1734,8 @@ pub enum Message {
     AlbumTracks(String, Result<Value, ApiError>),
     /// (MusicBrainz id, name).
     OpenArtist(String, String),
+    /// One artist of a song (its line links each one).
+    OpenPage(Page),
     RemoveArtistAsk(String),
     RemoveArtist(String),
     ArtistRemoved(Result<Value, ApiError>),
@@ -2586,6 +2593,7 @@ pub fn update(state: &mut State, msg: Message, ctx: &mut Ctx) -> Task<Message> {
             }
         }
         Message::AlbumTracks(_, Err(e)) => ctx.toast_err(e.message),
+        Message::OpenPage(p) => ctx.navigate(p),
         Message::OpenArtist(mbid, name) => {
             if !mbid.is_empty() {
                 ctx.navigate(Page::Artist(mbid));
@@ -3292,15 +3300,12 @@ fn body<'a>(state: &'a State, ctx: &Ctx<'a>) -> El<'a, Message> {
                 let mut col = column![];
                 for (i, v) in rows.iter().enumerate() {
                     let id = fmt::i(v, "id");
-                    let mut sub = tr(ctx, v, "artist");
-                    if fmt::truthy(v, "album") {
-                        sub.push_str(&format!(" · {}", tr(ctx, v, "album")));
-                    }
+                    let tail = if fmt::truthy(v, "album") { format!(" · {}", tr(ctx, v, "album")) } else { String::new() };
                     col = col.push(mark_row(
                         state,
                         i,
                         TrackRow::new(tr(ctx, v, "title"))
-                            .sub(sub)
+                            .sub_links(artist_links(ctx, v), tail)
                             .cover(ctx.cover(&fmt::s(v, "album_id"), &v["cover_v"], 80))
                             .quality(format_text(v))
                             .badge_maybe(verify_badge(v))
@@ -3385,13 +3390,10 @@ fn results_body<'a>(state: &'a State, ctx: &Ctx<'a>) -> El<'a, Message> {
         let mut list = column![];
         for (i, v) in songs.iter().enumerate() {
             let id = fmt::i(v, "id");
-            let mut sub = tr(ctx, v, "artist");
-            if fmt::truthy(v, "album") {
-                sub.push_str(&format!(" · {}", tr(ctx, v, "album")));
-            }
+            let tail = if fmt::truthy(v, "album") { format!(" · {}", tr(ctx, v, "album")) } else { String::new() };
             list = list.push(
                 TrackRow::new(tr(ctx, v, "title"))
-                    .sub(sub)
+                    .sub_links(artist_links(ctx, v), tail)
                     .cover(ctx.cover(&fmt::s(v, "album_id"), &v["cover_v"], 80))
                     .quality(format_text(v))
                     .badge_maybe(verify_badge(v))

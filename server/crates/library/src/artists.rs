@@ -2,8 +2,10 @@
 //! turns those names into real artists and keeps the result in memory (rebuilt when the tracks change):
 //! - spellings with the same key ("The Black Eyed Peas" / "black eyed peas") or the same MusicBrainz id
 //!   are one artist, shown with the spelling that has the most songs;
-//! - collaborations ("Kanye West & XXXTENTACION") are split into their artists when every part is an
-//!   artist of its own in the library (or a known alias), and then count under each part;
+//! - collaborations ("Kanye West & XXXTENTACION") are split into their artists, and then count under each
+//!   part: by the artists the files' ARTISTS / ALBUMARTISTS tags or MusicBrainz credit (one credited artist
+//!   keeps "Simon & Garfunkel" whole), else when every part is an artist in the library (an album artist, a
+//!   song's artist, a credited artist or a known alias), and always around "feat.";
 //! - aliases from MusicBrainz (Ye ↔ Kanye West), looked up in the background after scans.
 //!
 //! It also ranks searches: exact > starts with > a word starts with > contains, case- and accent-blind.
@@ -123,6 +125,18 @@ pub fn credit_names(s: &str, known: &dyn Fn(&str) -> bool) -> Vec<String> {
     if s.is_empty() {
         return vec![];
     }
+    // a library artist whose own name has " ft " / " feat " in it stays whole
+    let whole = key(s);
+    if !whole.is_empty() && known(&whole) {
+        return vec![s.to_string()];
+    }
+    feat_split(s, known)
+}
+
+/// `credit_names` without the whole text's own check: the pieces around "feat.", each split again when every
+/// part is known.
+fn feat_split(s: &str, known: &dyn Fn(&str) -> bool) -> Vec<String> {
+    let s = s.trim();
     let one = |part: &str| -> Vec<String> {
         let k = key(part);
         if !k.is_empty() && known(&k) {
@@ -130,11 +144,6 @@ pub fn credit_names(s: &str, known: &dyn Fn(&str) -> bool) -> Vec<String> {
         }
         split(part, known).unwrap_or_else(|| vec![part.to_string()])
     };
-    // a library artist whose own name has " ft " / " feat " in it stays whole
-    let whole = key(s);
-    if !whole.is_empty() && known(&whole) {
-        return vec![s.to_string()];
-    }
     let low = s.to_ascii_lowercase();
     let b = low.as_bytes();
     let (mut start, mut i, mut out) = (0, 0, vec![]);
@@ -158,6 +167,35 @@ pub fn credit_names(s: &str, known: &dyn Fn(&str) -> bool) -> Vec<String> {
         out.extend(one(part));
     }
     out
+}
+
+/// The artists a credit names, in order: (name, MusicBrainz id or "").
+pub(crate) type Credit = Vec<(String, String)>;
+
+/// A credit (`tracks.artist_credit`, `mb_credits.credit`: JSON `[{name, mbid?}]`) for the artist text `text`,
+/// kept only when it fits that text: one name that is the whole text (one artist, never split), or several
+/// that each appear in it as words. Anything else (a credit under other names, a stale tag) is left out.
+pub(crate) fn credit_for(text: &str, json: &str) -> Option<Credit> {
+    if json.len() < 4 {
+        return None; // NULL, "" or "[]"
+    }
+    let v: Value = serde_json::from_str(json).ok()?;
+    let list: Credit = v.as_array()?.iter().filter_map(|c| {
+        let n = c["name"].as_str()?.trim();
+        let m = c["mbid"].as_str().filter(|m| is_mbid(m)).unwrap_or("");
+        (!n.is_empty()).then(|| (n.to_string(), m.to_string()))
+    }).collect();
+    match list.len() {
+        0 => None,
+        1 => (key(&list[0].0) == key(text)).then_some(list),
+        _ => {
+            let whole = format!(" {} ", fold(text));
+            list.iter().all(|(n, _)| {
+                let f = fold(n);
+                !f.is_empty() && whole.contains(&format!(" {f} "))
+            }).then_some(list)
+        }
+    }
 }
 
 // ---- matching ------------------------------------------------------------------------------------
@@ -303,6 +341,8 @@ pub struct Index {
     pub(crate) names: Vec<Name>, // albumartist and artist values (one entry per distinct value)
     pub(crate) tracks: Vec<Track>,
     pub(crate) albums: Vec<Album>,
+    /// artist texts with a credit that fits them (from the files' tags, or MusicBrainz): see `credit_for`
+    credit_of: HashMap<String, Credit>,
 }
 
 struct Uf(HashMap<String, String>);
@@ -347,10 +387,42 @@ struct RawAa {
 impl Index {
     pub fn build(db: &Db) -> anyhow::Result<Index> {
         let rows = db.query(
-            "SELECT id, title, artist, album, albumartist, album_id, disc, track, year, duration, format, bitrate, size, added_at, mb_albumartistid FROM tracks",
+            "SELECT id, title, artist, album, albumartist, album_id, disc, track, year, duration, format, bitrate, size, added_at, mb_albumartistid,
+                    mb_trackid, mb_albumid, artist_credit, albumartist_credit FROM tracks",
             p![],
         )?;
         let aliases = db.query("SELECT artist_key, alias, alias_key FROM artist_alias", p![])?;
+        let mb_credits: HashMap<String, String> = db.query("SELECT mbid, credit FROM mb_credits", p![])?.into_iter().map(|r| (r.s("mbid"), r.s("credit"))).collect();
+
+        // the credits that fit their texts: a song's own tags first, then what MusicBrainz said for its
+        // recording (the song's artist) or release (the album artist)
+        let mut credit_of: HashMap<String, Credit> = HashMap::new();
+        for r in &rows {
+            for (text, tag, id) in [("artist", "artist_credit", "mb_trackid"), ("albumartist", "albumartist_credit", "mb_albumid")] {
+                let text = r.s(text);
+                if text.trim().is_empty() || credit_of.contains_key(&text) {
+                    continue;
+                }
+                let c = credit_for(&text, &r.s(tag)).or_else(|| mb_credits.get(&r.s(id)).and_then(|j| credit_for(&text, j)));
+                if let Some(c) = c {
+                    credit_of.insert(text, c);
+                }
+            }
+        }
+        // the artists credits name beside others (key → name, MusicBrainz id), and every song artist's name
+        let mut credited: BTreeMap<String, (String, String)> = BTreeMap::new();
+        for c in credit_of.values().filter(|c| c.len() >= 2) {
+            for (n, m) in c {
+                let k = key(n);
+                if !k.is_empty() {
+                    let e = credited.entry(k).or_insert_with(|| (n.clone(), m.clone()));
+                    if e.1.is_empty() {
+                        e.1 = m.clone();
+                    }
+                }
+            }
+        }
+        let song_keys: HashSet<String> = rows.iter().map(|r| key(&r.s("artist"))).filter(|k| !k.is_empty()).collect();
 
         // albumartist values
         let mut raw: BTreeMap<String, RawAa> = BTreeMap::new();
@@ -373,22 +445,54 @@ impl Index {
                 alias_of.entry(a.s("alias_key")).or_default().push((a.s("artist_key"), a.s("alias")));
             }
         }
-        let known = |k: &str| own_keys.contains(k) || alias_of.contains_key(k);
+        let known = |k: &str| own_keys.contains(k) || alias_of.contains_key(k) || credited.contains_key(k) || song_keys.contains(k);
 
-        // collaborations among the albumartist values
-        let mut collab: HashMap<String, Vec<String>> = HashMap::new(); // albumartist → part names
+        // collaborations among the albumartist values: (part names, whether a credit named them)
+        let mut collab: HashMap<String, (Vec<String>, bool)> = HashMap::new();
         for name in raw.keys() {
-            if let Some(parts) = split(name, &known) {
+            let parts = match credit_of.get(name) {
+                Some(c) if c.len() == 1 => continue, // one artist, by its tags or MusicBrainz
+                Some(c) => (c.iter().map(|x| x.0.clone()).collect(), true),
+                None => match split(name, &known) {
+                    Some(p) => (p, false),
+                    None => (feat_split(name, &known), false),
+                },
+            };
+            if parts.0.len() >= 2 {
                 collab.insert(name.clone(), parts);
             }
         }
-        // a part may be known only through an alias of a name that turned out to be a collaboration
-        // itself: such a name couldn't be split into artists below, so it stays an artist of its own
+        // a part that is no album artist of its own nor an alias becomes an artist of its own (its key → name);
+        // a part known only through an alias of a name that turned out to be a collaboration itself couldn't
+        // be split into artists, so such a collaboration stays an artist of its own
+        let mut extra: BTreeMap<String, String> = BTreeMap::new();
         loop {
-            let nodes: HashSet<String> = raw.keys().filter(|n| !collab.contains_key(*n)).map(|n| key(n)).filter(|k| !k.is_empty()).collect();
+            extra.clear();
+            for (parts, _) in collab.values() {
+                for p in parts {
+                    let k = key(p);
+                    if !k.is_empty() && !own_keys.contains(&k) && !alias_of.contains_key(&k) {
+                        extra.entry(k).or_insert_with(|| credited.get(&key(p)).map(|c| c.0.clone()).unwrap_or_else(|| p.clone()));
+                    }
+                }
+            }
+            let nodes: HashSet<String> = raw.keys().filter(|n| !collab.contains_key(*n)).map(|n| key(n)).filter(|k| !k.is_empty()).chain(extra.keys().cloned()).collect();
             let alias_keys: HashSet<&String> = alias_of.iter().filter(|(_, owners)| owners.iter().any(|(o, _)| nodes.contains(o))).map(|(k, _)| k).collect();
+            let ok = |k: &str| nodes.contains(k) || alias_keys.contains(&k.to_string());
             let before = collab.len();
-            collab.retain(|name, _| split(name, &|k: &str| nodes.contains(k) || alias_keys.contains(&k.to_string())).is_some());
+            collab.retain(|name, (parts, by_credit)| {
+                if parts.iter().all(|p| ok(&key(p))) {
+                    return true;
+                }
+                // a split of its own may still be had from the artists that are left
+                match (*by_credit, split(name, &ok)) {
+                    (false, Some(p)) => {
+                        *parts = p;
+                        true
+                    }
+                    _ => false,
+                }
+            });
             if collab.len() == before {
                 break;
             }
@@ -404,6 +508,12 @@ impl Index {
             uf.0.entry(k.clone()).or_insert_with(|| k.clone());
             if !r.mbid.is_empty() {
                 node_mbid.entry(k).or_insert_with(|| r.mbid.clone());
+            }
+        }
+        for k in extra.keys() {
+            uf.0.entry(k.clone()).or_insert_with(|| k.clone());
+            if let Some((_, m)) = credited.get(k).filter(|(_, m)| !m.is_empty()) {
+                node_mbid.entry(k.clone()).or_insert_with(|| m.clone());
             }
         }
         let mut by_mbid: HashMap<String, String> = HashMap::new();
@@ -456,6 +566,18 @@ impl Index {
                 }
             }
         }
+        // a credited artist without albums of its own goes by its name in the credit
+        for (k, name) in &extra {
+            if let Some(&ix) = by_key.get(k) {
+                let a = &mut artists[ix];
+                if !a.spellings.iter().any(|x| key(x) == *k) {
+                    a.spellings.push(name.clone());
+                }
+                if a.mbid.is_empty() {
+                    a.mbid = node_mbid.get(k).cloned().unwrap_or_default();
+                }
+            }
+        }
         for (alias_key, owners) in &alias_of {
             for (artist_key, alias) in owners {
                 if let Some(&ix) = by_key.get(artist_key) {
@@ -467,7 +589,8 @@ impl Index {
                 }
             }
         }
-        // what a name stands for: an artist, an alias, or a collaboration of them
+        // what a name stands for: an artist, an alias, or a collaboration of them (as its credit names them,
+        // split into artists of the library, or around "feat.")
         let resolve = |name: &str, by_key: &HashMap<String, usize>| -> Vec<usize> {
             let k = key(name);
             if k.is_empty() {
@@ -477,7 +600,16 @@ impl Index {
                 return vec![ix];
             }
             let mut out = vec![];
-            if let Some(parts) = split(name, &|pk: &str| by_key.contains_key(pk)) {
+            let in_lib = |pk: &str| by_key.contains_key(pk);
+            let parts = match collab.get(name) {
+                Some((p, _)) => Some(p.clone()),
+                None => match credit_of.get(name) {
+                    Some(c) if c.len() >= 2 => Some(c.iter().map(|x| x.0.clone()).collect()),
+                    Some(_) => None,
+                    None => split(name, &in_lib).or_else(|| Some(feat_split(name, &in_lib))),
+                },
+            };
+            if let Some(parts) = parts {
                 for p in parts {
                     if let Some(&ix) = by_key.get(&key(&p)) {
                         if !out.contains(&ix) {
@@ -582,12 +714,17 @@ impl Index {
         for (g, a) in artists.iter_mut().enumerate() {
             a.albums = album_sets[g].len() as i64;
             a.name = own_best[g].1.clone();
+            if a.name.is_empty() {
+                // an artist only on collaborations: its name in the credit, the cover of its first album
+                a.name = a.spellings.first().cloned().unwrap_or_default();
+                a.cover_album = album_sets[g].iter().next().cloned().unwrap_or_default();
+            }
             a.key = key(&a.name);
             a.aliases.retain(|x| key(x) != a.key && !a.spellings.iter().any(|s| key(s) == key(x)));
             a.aliases.sort();
             a.folds = a.spellings.iter().map(|s| (s.clone(), fold(s), false)).chain(a.aliases.iter().map(|s| (s.clone(), fold(s), true))).collect();
         }
-        Ok(Index { artists, by_key, names, tracks, albums })
+        Ok(Index { artists, by_key, names, tracks, albums, credit_of })
     }
 
     /// (title, artist, album, album artist) of every song, in the order of the songs table (the
@@ -603,11 +740,17 @@ impl Index {
 
     /// `artists` for a song: each name in its artist text with the artist's MusicBrainz id when known and
     /// whether it is a library artist (see `credit_names`).
+    /// A credit from the song's tags or MusicBrainz names them as it says (and keeps "Simon & Garfunkel" one).
     pub fn credits(&self, artist: &str) -> Value {
-        let names = credit_names(artist, &|k: &str| self.by_key.contains_key(k));
-        Value::Array(names.into_iter().map(|n| match self.find(&n) {
+        let names: Credit = match self.credit_of.get(artist) {
+            Some(c) => c.clone(),
+            None => credit_names(artist, &|k: &str| self.by_key.contains_key(k)).into_iter().map(|n| (n, String::new())).collect(),
+        };
+        Value::Array(names.into_iter().map(|(n, m)| match self.find(&n) {
             Some(a) if !a.mbid.is_empty() => json!({ "name": n, "mbid": a.mbid, "in_library": true }),
+            Some(_) if !m.is_empty() => json!({ "name": n, "mbid": m, "in_library": true }),
             Some(_) => json!({ "name": n, "in_library": true }),
+            None if !m.is_empty() => json!({ "name": n, "mbid": m, "in_library": false }),
             None => json!({ "name": n, "in_library": false }),
         }).collect())
     }
@@ -837,10 +980,12 @@ fn fingerprint(db: &Db) -> String {
     // their cached answers (routes/library.rs) live as long as this index does
     let t = db.one("SELECT COUNT(*) n, COALESCE(MAX(id),0) m, TOTAL(mtime) t, TOTAL(length(albumartist)) + TOTAL(length(artist)) * 3 + TOTAL(length(title)) * 7 + TOTAL(length(album)) * 11 + TOTAL(length(mb_albumartistid)) * 13 l,
                     TOTAL(length(year)) + TOTAL(length(format)) * 3 + TOTAL(length(mb_albumid)) * 7 + TOTAL(length(genre)) * 11 + TOTAL(length(verify_status)) * 13 + TOTAL(length(album_id)) * 17 l2,
+                    TOTAL(length(artist_credit)) + TOTAL(length(albumartist_credit)) * 3 l3,
                     TOTAL(duration) d, TOTAL(size) s, TOTAL(added_at) a, TOTAL(disc * 1000 + track) o FROM tracks", p![]).ok().flatten();
     let a = db.one("SELECT COUNT(*) n, TOTAL(length(alias_key)) l FROM artist_alias", p![]).ok().flatten();
+    let c = db.one("SELECT COUNT(*) n, TOTAL(length(credit)) l FROM mb_credits", p![]).ok().flatten();
     let f = |r: &Option<encore_db::Row>| r.as_ref().map(|r| serde_json::to_string(r).unwrap_or_default()).unwrap_or_default();
-    format!("{}|{}", f(&t), f(&a))
+    format!("{}|{}|{}", f(&t), f(&a), f(&c))
 }
 
 /// The artist index of one library: built from its database, rebuilt when the songs or aliases change.
@@ -1137,7 +1282,115 @@ pub async fn refresh_aliases(st: &impl Ctx) {
     }
 }
 
-/// Runs `refresh_aliases` after every library scan (including the one at start).
+// ---- artist credits from MusicBrainz --------------------------------------------------------------
+
+/// Releases whose credits are saved together, in one transaction (the credits are part of the library).
+const CREDIT_BATCH: usize = 25;
+
+/// Whether an artist text may name several artists ("A & B", "A feat. B", "A, B").
+fn may_be_several(s: &str) -> bool {
+    segments(s.trim()).len() >= 2
+}
+
+/// The MusicBrainz releases in the library whose credits are due: a song or its album artist reads like several
+/// artists while the file has no ARTISTS / ALBUMARTISTS tag, and the release wasn't looked up yet (a failed
+/// look-up is tried again after a day). Files tagged by Encore before 0.36 are the usual case.
+fn due_for_credits(db: &Db) -> Vec<String> {
+    let rows = db.query("SELECT DISTINCT mb_albumid id, artist, albumartist, artist_credit, albumartist_credit FROM tracks
+                         WHERE length(mb_albumid)=36 AND (artist_credit='[]' OR albumartist_credit='[]')", p![]).unwrap_or_default();
+    let last: HashMap<String, (f64, i64)> = db.query("SELECT release_id, looked_up_at, ok FROM mb_credit_lookups", p![]).unwrap_or_default()
+        .into_iter().map(|r| (r.s("release_id"), (r.f("looked_up_at"), r.i("ok")))).collect();
+    let now = now();
+    let mut out: BTreeSet<String> = BTreeSet::new();
+    for r in rows {
+        let several = (r.s("artist_credit") == "[]" && may_be_several(&r.s("artist"))) || (r.s("albumartist_credit") == "[]" && may_be_several(&r.s("albumartist")));
+        let id = r.s("id");
+        if several && is_mbid(&id) && last.get(&id).is_none_or(|(at, ok)| *ok == 0 && now - at > RETRY_SECS) {
+            out.insert(id);
+        }
+    }
+    out.into_iter().collect()
+}
+
+/// One release's look-up: its id and the credits MusicBrainz gave (the release's own, and each recording's),
+/// as (mbid, credit JSON); None when the look-up failed.
+type CreditsLooked = (String, Option<Vec<(String, String)>>);
+
+/// The credits of one release as `mb::release` gives them: the release's under its id, each song's under its recording id.
+pub(crate) fn release_credits(rel: &Value) -> Vec<(String, String)> {
+    let mut out = vec![];
+    let mut add = |id: &str, c: &Value| {
+        if is_mbid(id) && c.as_array().is_some_and(|a| !a.is_empty()) {
+            out.push((id.to_string(), c.to_string()));
+        }
+    };
+    add(rel["id"].as_str().unwrap_or(""), &rel["artists"]);
+    for t in rel["tracks"].as_array().into_iter().flatten() {
+        add(t["recording_id"].as_str().unwrap_or(""), &t["artists"]);
+    }
+    out
+}
+
+async fn save_credits(db: &Db, batch: Vec<CreditsLooked>) -> bool {
+    if batch.is_empty() {
+        return false;
+    }
+    let at = now();
+    let saved = db.write(move |c| c.transaction(|c| {
+        let mut changed = false;
+        for (rid, credits) in &batch {
+            for (id, credit) in credits.iter().flatten() {
+                if c.one("SELECT credit FROM mb_credits WHERE mbid=?", p![id])?.is_none_or(|r| r.s("credit") != *credit) {
+                    c.execute("INSERT OR REPLACE INTO mb_credits (mbid, credit) VALUES (?,?)", p![id, credit])?;
+                    changed = true;
+                }
+            }
+            c.execute("INSERT OR REPLACE INTO mb_credit_lookups (release_id, looked_up_at, ok) VALUES (?,?,?)", p![rid, at, credits.is_some() as i64])?;
+        }
+        Ok::<_, rusqlite::Error>(changed)
+    })).await;
+    saved.unwrap_or_else(|e| {
+        tracing::warn!("artist credits: could not save {e}");
+        false
+    })
+}
+
+/// Looks up the MusicBrainz artist credits of releases whose files have only the joined artist text ("A & B"),
+/// so the library can tell their artists apart without touching the files. A run stops after a few failures in
+/// a row (an outage doesn't mark every release).
+pub async fn refresh_credits(st: &impl Ctx) {
+    let db = st.db().clone();
+    let due = tokio::task::spawn_blocking(move || due_for_credits(&db)).await.unwrap_or_default();
+    let (mut changed, mut fails) = (false, 0);
+    let mut batch: Vec<CreditsLooked> = vec![];
+    for rid in due {
+        let credits = match encore_http::mb::release(st, &rid).await {
+            Ok(rel) => {
+                fails = 0;
+                Some(release_credits(&rel))
+            }
+            Err(e) => {
+                tracing::debug!("artist credits for {rid}: {e}");
+                fails += 1;
+                None
+            }
+        };
+        batch.push((rid, credits));
+        if batch.len() >= CREDIT_BATCH {
+            changed |= save_credits(st.db(), std::mem::take(&mut batch)).await;
+        }
+        if fails >= MAX_FAILS_IN_A_ROW {
+            tracing::info!("artist credits: MusicBrainz isn't answering, trying again after the next scan");
+            break;
+        }
+    }
+    changed |= save_credits(st.db(), batch).await;
+    if changed {
+        st.library().artists.invalidate();
+    }
+}
+
+/// Runs `refresh_aliases` and `refresh_credits` after every library scan (including the one at start).
 pub async fn alias_worker(st: impl Ctx) {
     let mut done: Option<f64> = None;
     loop {
@@ -1152,6 +1405,7 @@ pub async fn alias_worker(st: impl Ctx) {
         done = last;
         st.library().artists.invalidate();
         refresh_aliases(&st).await;
+        refresh_credits(&st).await;
     }
 }
 
@@ -1254,6 +1508,113 @@ mod tests {
         // the same names again: nothing changed
         let again: Vec<Looked> = vec![("ye".into(), "m1".into(), Some(vec!["Kanye West".into()]), t)];
         assert!(!save_looked(&db, again).await);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Songs of a test library: (artist, albumartist, album, artist_credit, albumartist_credit, mb_trackid, mb_albumid).
+    fn library(name: &str, songs: &[(&str, &str, &str, &str, &str, &str, &str)]) -> (std::path::PathBuf, Db) {
+        let dir = encore_core::tmp::dir(name);
+        let db = Db::open(&dir).unwrap();
+        for (i, (artist, aa, album, ac, aac, rec, rel)) in songs.iter().enumerate() {
+            db.execute("INSERT INTO tracks (path, album_id, title, artist, albumartist, album, artist_credit, albumartist_credit, mb_trackid, mb_albumid, size, added_at)
+                        VALUES (?,?,?,?,?,?,?,?,?,?,1,1)", p![format!("/m/{i}.flac"), crate::scan::album_key(aa, album, ""), format!("Song {i}"), artist, aa, album, ac, aac, rec, rel]).unwrap();
+        }
+        (dir, db)
+    }
+
+    fn names_of(ix: &Index) -> Vec<String> {
+        let mut v: Vec<String> = ix.artists.iter().filter(|a| a.tracks > 0).map(|a| format!("{} ({})", a.name, a.albums)).collect();
+        v.sort();
+        v
+    }
+
+    #[test]
+    fn credits_from_tags_split_collaborations_and_keep_bands_whole() {
+        let two = json!([{ "name": "Kanye West" }, { "name": "Ty Dolla $ign" }]).to_string();
+        let sg = json!([{ "name": "Simon & Garfunkel" }]).to_string();
+        let (dir, db) = library("credits-tags", &[
+            ("Kanye West & Ty Dolla $ign", "Kanye West & Ty Dolla $ign", "Vultures 1", &two, &two, "", ""),
+            ("Kanye West", "Kanye West", "Graduation", "[]", "[]", "", ""),
+            // one credited artist: never split, even with both halves in the library
+            ("Simon & Garfunkel", "Simon & Garfunkel", "Bookends", &sg, &sg, "", ""),
+            ("Simon", "Simon", "Solo", "[]", "[]", "", ""),
+            ("Garfunkel", "Garfunkel", "Solo 2", "[]", "[]", "", ""),
+        ]);
+        let ix = Index::build(&db).unwrap();
+        assert_eq!(names_of(&ix), vec!["Garfunkel (1)", "Kanye West (2)", "Simon & Garfunkel (1)", "Simon (1)", "Ty Dolla $ign (1)"]);
+        assert!(ix.find("Kanye West & Ty Dolla $ign").is_none(), "not an artist of its own");
+        let c = ix.credits("Kanye West & Ty Dolla $ign");
+        assert_eq!(c, json!([{ "name": "Kanye West", "in_library": true }, { "name": "Ty Dolla $ign", "in_library": true }]));
+        assert_eq!(ix.credits("Simon & Garfunkel"), json!([{ "name": "Simon & Garfunkel", "in_library": true }]));
+        // songs of Ty Dolla $ign: the collaboration's album
+        assert_eq!(ix.find("ty dolla $ign").unwrap().aa_names, vec!["Kanye West & Ty Dolla $ign".to_string()]);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn untagged_collaborations_split_by_song_artists_and_feat() {
+        let (dir, db) = library("credits-fallback", &[
+            // the guest is a song artist elsewhere (a compilation): a part of its own
+            ("Drake & Future", "Drake & Future", "What a Time to Be Alive", "[]", "[]", "", ""),
+            ("Drake", "Drake", "Views", "[]", "[]", "", ""),
+            ("Future", "Various Artists", "Hits", "[]", "[]", "", ""),
+            // "feat." always splits, known or not
+            ("Travis Scott feat. The Weeknd", "Travis Scott feat. The Weeknd", "Single", "[]", "[]", "", ""),
+            // nobody knows either half: stays whole
+            ("Hall & Oates", "Hall & Oates", "H2O", "[]", "[]", "", ""),
+            // not read yet (NULL): the text alone
+            ("Earth, Wind & Fire", "Earth, Wind & Fire", "Gratitude", "", "", "", ""),
+        ]);
+        let ix = Index::build(&db).unwrap();
+        assert_eq!(names_of(&ix), vec!["Drake (2)", "Earth, Wind & Fire (1)", "Future (1)", "Hall & Oates (1)", "The Weeknd (1)", "Travis Scott (1)", "Various Artists (1)"]);
+        assert_eq!(ix.credits("Travis Scott feat. The Weeknd"), json!([{ "name": "Travis Scott", "in_library": true }, { "name": "The Weeknd", "in_library": true }]));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn musicbrainz_credits_apply_to_untagged_songs_and_bad_credits_are_left_out() {
+        let (rec, rel) = ("11111111-1111-1111-1111-111111111111", "22222222-2222-2222-2222-222222222222");
+        let m = "33333333-3333-3333-3333-333333333333";
+        let (dir, db) = library("credits-mb", &[
+            ("Silk Sonic & Friend", "Bruno Mars & Anderson .Paak", "An Evening", "[]", "[]", rec, rel),
+            // a tag that doesn't fit its text is ignored
+            ("Someone", "Someone", "Other", &json!([{ "name": "Somebody Else" }, { "name": "X" }]).to_string(), "[]", "", ""),
+        ]);
+        db.execute("INSERT INTO mb_credits (mbid, credit) VALUES (?,?)", p![rel, json!([{ "name": "Bruno Mars" }, { "name": "Anderson .Paak", "mbid": m }]).to_string()]).unwrap();
+        db.execute("INSERT INTO mb_credits (mbid, credit) VALUES (?,?)", p![rec, json!([{ "name": "Silk Sonic" }, { "name": "Friend" }]).to_string()]).unwrap();
+        let ix = Index::build(&db).unwrap();
+        assert_eq!(names_of(&ix), vec!["Anderson .Paak (1)", "Bruno Mars (1)", "Someone (1)"]);
+        assert_eq!(ix.find("Anderson .Paak").unwrap().mbid, m);
+        assert_eq!(ix.credits("Silk Sonic & Friend"), json!([{ "name": "Silk Sonic", "in_library": false }, { "name": "Friend", "in_library": false }]));
+        assert_eq!(ix.credits("Someone"), json!([{ "name": "Someone", "in_library": true }]));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Only releases whose songs read like several artists and whose files have no credit tags are looked up,
+    /// once (a failed look-up again after a day); the answers become the songs' credits.
+    #[tokio::test]
+    async fn musicbrainz_credits_are_looked_up_for_joined_names_only() {
+        let (a, b, c, d) = ("aaaaaaaa-1111-1111-1111-111111111111", "bbbbbbbb-1111-1111-1111-111111111111",
+                            "cccccccc-1111-1111-1111-111111111111", "dddddddd-1111-1111-1111-111111111111");
+        let tagged = json!([{ "name": "X" }, { "name": "Y" }]).to_string();
+        let (dir, db) = library("credits-due", &[
+            ("X & Y", "X & Y", "Joined", "[]", "[]", "", a),
+            ("Solo", "Solo", "One", "[]", "[]", "", b),
+            ("X & Y", "X & Y", "Tagged", &tagged, &tagged, "", c),
+            ("P feat. Q", "P", "Feature", "[]", "[]", "", d),
+        ]);
+        db.execute("INSERT INTO mb_credit_lookups (release_id, looked_up_at, ok) VALUES (?,?,0)", p![d, now() - 10.0]).unwrap();
+        assert_eq!(due_for_credits(&db), vec![a.to_string()]);
+        let rec = "eeeeeeee-1111-1111-1111-111111111111";
+        let rel = json!({ "id": a, "artists": [{ "name": "X", "mbid": "" }, { "name": "Y", "mbid": "" }],
+                          "tracks": [{ "recording_id": rec, "artists": [{ "name": "X" }, { "name": "Y" }] }, { "recording_id": null, "artists": [] }] });
+        let credits = release_credits(&rel);
+        assert_eq!(credits.len(), 2);
+        assert!(save_credits(&db, vec![(a.to_string(), Some(credits.clone())), (d.to_string(), None)]).await);
+        assert!(!save_credits(&db, vec![(a.to_string(), Some(credits))]).await, "the same credits again: nothing changed");
+        assert!(due_for_credits(&db).is_empty());
+        let ix = Index::build(&db).unwrap();
+        assert_eq!(names_of(&ix), vec!["P (1)", "Solo (1)", "X (2)", "Y (2)"]);
         let _ = std::fs::remove_dir_all(&dir);
     }
 

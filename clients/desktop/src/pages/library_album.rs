@@ -116,6 +116,8 @@ pub enum Message {
     Like(i64),
     Liked(i64, bool, Result<Value, ApiError>),
     OpenArtist(String),
+    /// One artist of a song (its line links each one).
+    OpenPage(Page),
     Share,
     /// Save the album's songs on this computer.
     SaveOffline,
@@ -498,6 +500,7 @@ pub fn update(state: &mut State, msg: Message, ctx: &mut Ctx) -> Task<Message> {
         }
         Message::Liked(_, _, Err(e)) => ctx.toast_err(e.message),
         Message::OpenArtist(name) => ctx.navigate(Page::ArtistName(name)),
+        Message::OpenPage(p) => ctx.navigate(p),
         Message::Share => {
             state.menu = None;
             let api = ctx.api.clone();
@@ -1189,7 +1192,7 @@ pub fn view<'a>(state: &'a State, ctx: &Ctx<'a>) -> El<'a, Message> {
         );
         let mut r = TrackRow::new(tr(ctx, tr_, "title"))
             .label(number)
-            .sub(tr(ctx, tr_, "artist"))
+            .sub_links(crate::widgets::catalog::credit_parts(tr_, &tr(ctx, tr_, "artist")).into_iter().map(|(x, p)| (x, p.map(Message::OpenPage))).collect(), "")
             .quality(if surround && fmt::truthy(tr_, "quality") { fmt::s(tr_, "quality") } else { format_text(tr_) })
             .duration(Some(fmt::f(tr_, "duration")))
             .playing(cur == Some(id))

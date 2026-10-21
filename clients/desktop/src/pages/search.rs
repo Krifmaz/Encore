@@ -412,7 +412,10 @@ fn library_row<'a>(ctx: &Ctx<'a>, lib: &Value, typ: &str) -> Option<El<'a, Messa
             let id = fmt::i(tr, "id");
             list = list.push(
                 TrackRow::new(fmt::s(tr, "title"))
-                    .sub(catalog::join_truthy(&[fmt::s(tr, "artist"), fmt::s(tr, "album")], " · "))
+                    .sub_links(
+                        catalog::credit_parts(tr, &fmt::s(tr, "artist")).into_iter().map(|(x, p)| (x, p.map(Message::Open))).collect(),
+                        if fmt::truthy(tr, "album") { format!(" · {}", fmt::s(tr, "album")) } else { String::new() },
+                    )
                     .cover(ctx.cover(&fmt::s(tr, "album_id"), &tr["cover_v"], 80))
                     .duration(Some(fmt::f(tr, "duration")).filter(|d| *d > 0.0))
                     .quality(fmt::quality(tr))

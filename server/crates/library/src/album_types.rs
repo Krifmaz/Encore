@@ -672,25 +672,27 @@ impl Run {
     }
 }
 
-/// Step A: the type tags of songs scanned before 0.36 (`releasetype IS NULL`), [`TAG_BATCH`] songs per
-/// transaction, waiting while the app is in use. A file that can't be read gets '' / 0 / 0: it isn't read again.
+/// Step A: the type tags and artist credits of songs scanned before 0.36 (`releasetype` or `artist_credit` NULL),
+/// [`TAG_BATCH`] songs per transaction, waiting while the app is in use. A file that can't be read gets
+/// '' / 0 / 0 / '[]': it isn't read again.
 pub fn read_missing_tags(db: &Db, busy: &encore_jobs::Busy) -> usize {
     let mut n = 0;
     loop {
         busy.wait_out_groups_blocking();
         busy.wait_while_in_use(std::time::Duration::from_secs(600));
-        let rows = match db.query(&format!("SELECT id, path FROM tracks WHERE releasetype IS NULL ORDER BY id LIMIT {TAG_BATCH}"), p![]) {
+        let rows = match db.query(&format!("SELECT id, path FROM tracks WHERE releasetype IS NULL OR artist_credit IS NULL ORDER BY id LIMIT {TAG_BATCH}"), p![]) {
             Ok(r) if !r.is_empty() => r,
             _ => break,
         };
-        let read: Vec<(i64, Value, Value, Value)> = rows.iter().map(|r| {
+        let read: Vec<(i64, [Value; 5])> = rows.iter().map(|r| {
             let t = encore_media::tags::read_tags(&r.s("path"));
             let get = |k: &str, d: Value| t.get(k).cloned().filter(|v| !v.is_null()).unwrap_or(d);
-            (r.i("id"), get("releasetype", json!("")), get("tracktotal", json!(0)), get("compilation", json!(0)))
+            (r.i("id"), [get("releasetype", json!("")), get("tracktotal", json!(0)), get("compilation", json!(0)),
+                         get("artist_credit", json!("[]")), get("albumartist_credit", json!("[]"))])
         }).collect();
         let done = db.write_now(|c| c.transaction(|c| {
-            for (id, rt, tt, comp) in &read {
-                c.execute("UPDATE tracks SET releasetype=?, tracktotal=?, compilation=? WHERE id=?", p![rt, tt, comp, id])?;
+            for (id, [rt, tt, comp, ac, aac]) in &read {
+                c.execute("UPDATE tracks SET releasetype=?, tracktotal=?, compilation=?, artist_credit=?, albumartist_credit=? WHERE id=?", p![rt, tt, comp, ac, aac, id])?;
             }
             Ok::<_, rusqlite::Error>(())
         }));

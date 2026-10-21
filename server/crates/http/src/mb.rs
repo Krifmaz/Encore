@@ -152,6 +152,15 @@ pub fn credit(ac: &Value) -> String {
     }).collect()).unwrap_or_default()
 }
 
+/// Every artist of a credit, as credited, with its MusicBrainz id: `[{name, mbid}]` (what Encore writes into the
+/// ARTISTS tags and keeps in `mb_credits`).
+pub fn credit_list(ac: &Value) -> Value {
+    Value::Array(ac.as_array().map(|a| a.iter().filter_map(|c| {
+        let n = c.get("name").and_then(|x| x.as_str()).filter(|x| !x.is_empty()).map(String::from).unwrap_or_else(|| s(&c["artist"]["name"]));
+        (!n.trim().is_empty()).then(|| json!({ "name": n.trim(), "mbid": s(&c["artist"]["id"]) }))
+    }).collect()).unwrap_or_default())
+}
+
 pub fn credit_id(ac: &Value) -> Value {
     ac.as_array().and_then(|a| a.first()).and_then(|c| c["artist"].get("id")).cloned().unwrap_or(Value::Null)
 }
@@ -284,7 +293,7 @@ pub async fn release(st: &impl Ctx, rid: &str) -> anyhow::Result<Value> {
             let title = { let x = s(&t["title"]); if x.is_empty() { s(&rec["title"]) } else { x } };
             tracks.push(json!({
                 "disc": m["position"].as_i64().unwrap_or(1), "track": pos, "title": title,
-                "artist": credit(ac), "artist_id": credit_id(ac),
+                "artist": credit(ac), "artist_id": credit_id(ac), "artists": credit_list(ac),
                 "length": t["length"].as_f64().or(rec["length"].as_f64()).unwrap_or(0.0) / 1000.0,
                 "recording_id": rec.get("id").cloned().unwrap_or(Value::Null), "track_id": t.get("id").cloned().unwrap_or(Value::Null),
                 "isrc": rec["isrcs"].as_array().and_then(|a| a.first()).cloned().unwrap_or(Value::Null),
@@ -300,7 +309,7 @@ pub async fn release(st: &impl Ctx, rid: &str) -> anyhow::Result<Value> {
     let genre = genres.first().map(|x| { let mut c = x.1.chars(); c.next().map(|f| f.to_uppercase().collect::<String>() + c.as_str()).unwrap_or_default() }).unwrap_or_default();
     Ok(json!({
         "id": s(&r["id"]), "title": s(&r["title"]), "artist": credit(&r["artist-credit"]), "artist_id": credit_id(&r["artist-credit"]),
-        "date": date, "year": year, "country": s(&r["country"]), "status": s(&r["status"]), "release_group_id": g.get("id").cloned().unwrap_or(Value::Null),
+        "artists": credit_list(&r["artist-credit"]), "date": date, "year": year, "country": s(&r["country"]), "status": s(&r["status"]), "release_group_id": g.get("id").cloned().unwrap_or(Value::Null),
         "type": s(&g["primary-type"]), "label": labels.join(", "), "barcode": s(&r["barcode"]), "disc_count": media.len(),
         // the release group's secondary types (["Live"], ["Compilation", "Remix"]) and its songs over all media:
         // what the library's album types are told at import
@@ -369,6 +378,7 @@ pub async fn recording(st: &impl Ctx, rid: &str) -> anyhow::Result<Value> {
     let year: String = { let d = s(&r["first-release-date"]); if d.is_empty() { s(&rel["date"]) } else { d } }.chars().take(4).collect();
     let g = &rel["release-group"];
     Ok(json!({ "id": s(&r["id"]), "title": s(&r["title"]), "artist": credit(&r["artist-credit"]), "artist_id": credit_id(&r["artist-credit"]),
+        "artists": credit_list(&r["artist-credit"]),
         "length": r["length"].as_f64().unwrap_or(0.0) / 1000.0, "album": s(&rel["title"]), "release_id": rel.get("id").cloned().unwrap_or(Value::Null),
         "release_group_id": g.get("id").cloned().unwrap_or(Value::Null), "year": year,
         // what the release it picked is: its group's types and its songs (0 when MusicBrainz didn't say)

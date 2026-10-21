@@ -190,6 +190,8 @@ pub struct State {
 #[derive(Clone, Debug)]
 pub enum Message {
     Loaded(Result<Value, ApiError>),
+    /// One artist of a song (its line links each one).
+    OpenPage(Page),
     Connections(Result<Value, ApiError>),
     /// Save the songs that are in the library on this computer.
     SaveOffline,
@@ -317,6 +319,7 @@ pub fn update(state: &mut State, msg: Message, ctx: &mut Ctx) -> Task<Message> {
         }
         Message::Connections(Err(_)) => {}
         Message::OpenConnections => ctx.navigate(Page::Settings(Section::Connections)),
+        Message::OpenPage(p) => ctx.navigate(p),
         Message::Play(index) => {
             let rows = playable(&state.items());
             if !rows.is_empty() {
@@ -811,15 +814,11 @@ fn track_rows<'a>(state: &'a State, items: &[Value], ctx: &Ctx<'a>) -> El<'a, Me
     for (i, it) in items.iter().enumerate() {
         let iid = fmt::i(it, "id");
         let in_library = fmt::truthy(it, "track_id");
-        let sub = [fmt::s(it, "artist"), fmt::s(it, "album")]
-            .iter()
-            .filter(|x| !x.is_empty())
-            .cloned()
-            .collect::<Vec<_>>()
-            .join(" · ");
+        let tail = if fmt::truthy(it, "album") { format!(" · {}", fmt::s(it, "album")) } else { String::new() };
+        let artists = crate::widgets::catalog::credit_parts(it, &fmt::s(it, "artist")).into_iter().map(|(x, p)| (x, p.map(Message::OpenPage))).collect();
         let mut r = TrackRow::new(fmt::s(it, "title"))
             .index(i + 1)
-            .sub(sub)
+            .sub_links(artists, tail)
             .duration(Some(fmt::f(it, "duration")).filter(|d| *d > 0.0))
             .playing(in_library && current == Some(fmt::i(it, "track_id")))
             .on_menu(Message::Menu(iid));

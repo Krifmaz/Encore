@@ -14,6 +14,40 @@ fn first(tag: Option<&Tag>, keys: &[ItemKey]) -> Option<String> {
     keys.iter().find_map(|k| tag.get_string(*k).map(|s| s.trim().to_string()).filter(|s| !s.is_empty()))
 }
 
+/// Every value of a multi-value tag (ARTISTS, MUSICBRAINZ_ARTISTID …), in order, without blanks or repeats.
+fn all(tag: Option<&Tag>, key: ItemKey) -> Vec<String> {
+    let mut out: Vec<String> = vec![];
+    for v in tag.into_iter().flat_map(|t| t.get_strings(key)).flat_map(|v| v.split('\0')) {
+        let v = v.trim();
+        if !v.is_empty() && !out.iter().any(|x| x == v) {
+            out.push(v.to_string());
+        }
+    }
+    out
+}
+
+/// The MusicBrainz artist ids of a tag that holds several (one per value, or joined with "/" or ";").
+fn ids(tag: Option<&Tag>, key: ItemKey) -> Vec<String> {
+    let mut out: Vec<String> = vec![];
+    for v in all(tag, key).iter().flat_map(|v| v.split(['/', ';', ','])) {
+        let v = v.trim().to_lowercase();
+        if encore_core::ids::is_mbid(&v) && !out.contains(&v) {
+            out.push(v);
+        }
+    }
+    out
+}
+
+/// The artists a song (or its album) credits, from the multi-value ARTISTS / ALBUMARTISTS tags MusicBrainz
+/// Picard and Encore write, with their MusicBrainz ids when the id tag lists as many: `[{name, mbid?}]`.
+/// Empty when the file has no such tag (the library splits the artist text itself then).
+pub fn credit_of(names: &[String], ids: &[String]) -> serde_json::Value {
+    let paired = names.len() == ids.len();
+    serde_json::Value::Array(names.iter().enumerate().map(|(i, n)| {
+        if paired { json!({ "name": n, "mbid": ids[i] }) } else { json!({ "name": n }) }
+    }).collect())
+}
+
 fn num(s: Option<String>) -> Option<i64> {
     s.and_then(|v| v.split('/').next().and_then(|n| n.trim().parse().ok()))
 }
@@ -65,8 +99,9 @@ fn tags_of(tagged: Option<&TaggedFile>, path: &str) -> Row {
     m.insert("mb_trackid".into(), json!(first(tag, &[ItemKey::MusicBrainzRecordingId])));
     m.insert("mb_albumid".into(), json!(first(tag, &[ItemKey::MusicBrainzReleaseId])));
     m.insert("mb_releasegroupid".into(), json!(first(tag, &[ItemKey::MusicBrainzReleaseGroupId])));
-    m.insert("mb_artistid".into(), json!(first(tag, &[ItemKey::MusicBrainzArtistId])));
-    m.insert("mb_albumartistid".into(), json!(first(tag, &[ItemKey::MusicBrainzReleaseArtistId])));
+    // the first artist's id (a tag joining several with "/" gives that one)
+    m.insert("mb_artistid".into(), json!(ids(tag, ItemKey::MusicBrainzArtistId).into_iter().next().or_else(|| first(tag, &[ItemKey::MusicBrainzArtistId]))));
+    m.insert("mb_albumartistid".into(), json!(ids(tag, ItemKey::MusicBrainzReleaseArtistId).into_iter().next().or_else(|| first(tag, &[ItemKey::MusicBrainzReleaseArtistId]))));
     m.insert("isrc".into(), json!(isrc));
     // the release's type, as Picard and the stores write it ('' / 0 when the file has none: read, so a later
     // pass doesn't read it again)
@@ -74,6 +109,10 @@ fn tags_of(tagged: Option<&TaggedFile>, path: &str) -> Row {
     m.insert("releasetype".into(), json!(releasetype));
     m.insert("tracktotal".into(), json!(tracktotal));
     m.insert("compilation".into(), json!(compilation));
+    let (artist_ids, aa_ids) = (ids(tag, ItemKey::MusicBrainzArtistId), ids(tag, ItemKey::MusicBrainzReleaseArtistId));
+    // stored as text: "[]" means the file was read and has no credit tags
+    m.insert("artist_credit".into(), json!(credit_of(&all(tag, ItemKey::TrackArtists), &artist_ids).to_string()));
+    m.insert("albumartist_credit".into(), json!(credit_of(&all(tag, ItemKey::AlbumArtists), &aa_ids).to_string()));
     m
 }
 
@@ -226,6 +265,8 @@ fn key(k: &str) -> Option<ItemKey> {
         "artist" => ItemKey::TrackArtist,
         "album" => ItemKey::AlbumTitle,
         "albumartist" => ItemKey::AlbumArtist,
+        "artists" => ItemKey::TrackArtists,
+        "albumartists" => ItemKey::AlbumArtists,
         "date" => ItemKey::RecordingDate,
         "genre" => ItemKey::Genre,
         "musicbrainz_trackid" => ItemKey::MusicBrainzRecordingId,
@@ -270,6 +311,17 @@ fn set_tags(f: &mut lofty::file::TaggedFile, vals: &Row, cover: Option<&[u8]>) {
     }
     let tag = f.primary_tag_mut().unwrap();
     for (k, v) in vals {
+        // a list (ARTISTS, the artists' MusicBrainz ids) is one value each
+        if let (Some(list), Some(ik)) = (v.as_array(), key(k)) {
+            let items: Vec<String> = list.iter().map(encore_core::json::text).filter(|s| !s.is_empty()).collect();
+            if !items.is_empty() {
+                tag.remove_key(ik);
+                for s in items {
+                    tag.push(lofty::tag::TagItem::new(ik, lofty::tag::ItemValue::Text(s)));
+                }
+            }
+            continue;
+        }
         let s = encore_core::json::text(v);
         if s.is_empty() {
             continue;
@@ -354,6 +406,40 @@ mod tests {
 
     /// ReplayGain and R128 tags as taggers write them, in the formats people have (written with lofty into
     /// files ffmpeg made), come back as ReplayGain values relative to -18 LUFS with the audio properties.
+    #[test]
+    fn artist_credits_are_written_and_read_back() {
+        use encore_db::RowExt;
+        let d = encore_core::tmp::dir("credit-tags");
+        let (a, b) = ("6f1a58bf-9b1b-49cf-a44a-6cefad7ae04f", "0b30341b-b59d-4979-8130-b66c0e475321");
+        let mut vals = Row::new();
+        vals.insert("artist".into(), json!("Kanye West & Ty Dolla $ign"));
+        vals.insert("artists".into(), json!(["Kanye West", "Ty Dolla $ign"]));
+        vals.insert("albumartist".into(), json!("Kanye West & Ty Dolla $ign"));
+        vals.insert("albumartists".into(), json!(["Kanye West", "Ty Dolla $ign"]));
+        vals.insert("musicbrainz_artistid".into(), json!([a, b]));
+        vals.insert("musicbrainz_albumartistid".into(), json!([a, b]));
+        let want = json!([{ "name": "Kanye West", "mbid": a }, { "name": "Ty Dolla $ign", "mbid": b }]).to_string();
+        for (name, args) in [("c.flac", &["-c:a", "flac"][..]), ("c.mp3", &["-c:a", "libmp3lame"][..]), ("c.m4a", &["-c:a", "aac"][..])] {
+            let Some(f) = audio(&d, name, args) else { return };
+            write_tags(&f, &vals, None).unwrap();
+            let t = read_tags(&f.to_string_lossy());
+            assert_eq!(t.s("artist"), "Kanye West & Ty Dolla $ign", "{name}");
+            assert_eq!(t.s("artist_credit"), want, "{name}");
+            assert_eq!(t.s("albumartist_credit"), want, "{name}");
+            assert_eq!(t.s("mb_artistid"), a, "{name}");
+        }
+        // a file without the tags: read, and empty
+        let Some(plain) = audio(&d, "p.flac", &["-c:a", "flac"]) else { return };
+        tag_file(&plain, TagType::VorbisComments, &[(ItemKey::TrackArtist, "Simon & Garfunkel")]);
+        assert_eq!(read_tags(&plain.to_string_lossy()).s("artist_credit"), "[]");
+        // ids joined in one value ("a/b", ID3v2.3 style) are split; names and ids that don't pair keep only the names
+        tag_file(&plain, TagType::VorbisComments, &[(ItemKey::TrackArtists, "Simon & Garfunkel"), (ItemKey::MusicBrainzArtistId, &format!("{a}/{b}"))]);
+        let t = read_tags(&plain.to_string_lossy());
+        assert_eq!(t.s("mb_artistid"), a);
+        assert_eq!(t.s("artist_credit"), json!([{ "name": "Simon & Garfunkel" }]).to_string());
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
     #[test]
     fn loudness_tags_and_audio_properties_are_read() {
         let d = encore_core::tmp::dir("gain-tags");

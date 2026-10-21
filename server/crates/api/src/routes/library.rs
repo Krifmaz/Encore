@@ -881,6 +881,9 @@ async fn album(State(st): State<AppState>, User(u): User, Path(id): Path<String>
             r.remove("path");
         }
         who_added(&mut r);
+        // the raw credit tags: songs carry `artists` (each artist, split) instead
+        r.remove("artist_credit");
+        r.remove("albumartist_credit");
         Value::Object(r)
     }).collect();
     let f = &rows[0];

@@ -283,7 +283,7 @@ fn the_tags_pass_reads_old_songs_once() {
             c.execute("INSERT INTO tracks (path, album_id, title) VALUES (?,?,?)", p![format!("/nowhere/{i}.flac"), "a", format!("S{i}")])?;
         }
         // a song scanned by 0.36 already
-        c.execute("INSERT INTO tracks (path, album_id, title, releasetype, tracktotal, compilation) VALUES ('/x.flac', 'b', 'X', 'album', 3, 0)", p![])?;
+        c.execute("INSERT INTO tracks (path, album_id, title, releasetype, tracktotal, compilation, artist_credit, albumartist_credit) VALUES ('/x.flac', 'b', 'X', 'album', 3, 0, '[]', '[]')", p![])?;
         Ok::<_, rusqlite::Error>(())
     })).unwrap();
     let v0 = db.library_version();
@@ -291,6 +291,8 @@ fn the_tags_pass_reads_old_songs_once() {
     assert_eq!(n, 450);
     assert_eq!(db.library_version(), v0 + 3, "three batches of up to 200");
     assert_eq!(db.one("SELECT COUNT(*) n FROM tracks WHERE releasetype=''", p![]).unwrap().unwrap().i("n"), 450);
+    // the artist credits are read in the same pass (none in a file that can't be read)
+    assert_eq!(db.one("SELECT COUNT(*) n FROM tracks WHERE artist_credit='[]' AND albumartist_credit='[]'", p![]).unwrap().unwrap().i("n"), 451);
     assert_eq!(db.one("SELECT releasetype FROM tracks WHERE path='/x.flac'", p![]).unwrap().unwrap().s("releasetype"), "album");
     assert_eq!(read_missing_tags(&db, &encore_jobs::Busy::default()), 0, "read once");
     // the candidates for MusicBrainz: likely one-offs first; albums with a type tag or facts left out

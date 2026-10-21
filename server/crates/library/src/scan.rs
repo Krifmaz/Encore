@@ -13,7 +13,7 @@ use encore_core::audio::AUDIO_EXTS;
 /// beside them, see [`crate::loudness::tag_columns`]).
 pub(crate) const COLS: &[&str] = &["title", "artist", "album", "albumartist", "track", "disc", "year", "genre", "duration", "bitrate", "format",
     "mb_trackid", "mb_albumid", "mb_releasegroupid", "mb_artistid", "mb_albumartistid", "isrc", "sample_rate", "bit_depth",
-    "releasetype", "tracktotal", "compilation"];
+    "releasetype", "tracktotal", "compilation", "artist_credit", "albumartist_credit"];
 
 /// Who brought a new song into the library (`tracks.added_by`, `added_via`), written when its row is made and
 /// never by a rescan: a scan ([`Added::SCAN`]), a Files upload or import (the admin who did it). A request's

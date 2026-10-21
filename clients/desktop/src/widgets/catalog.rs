@@ -298,6 +298,49 @@ pub fn artist_page(x: &Value) -> Page {
     }
 }
 
+/// `artistUrl(a)` for one artist of a song's `artists`: its MusicBrainz page when the id is known, else by name.
+pub fn credit_page(a: &Value) -> Page {
+    if fmt::truthy(a, "mbid") {
+        Page::Artist(fmt::s(a, "mbid"))
+    } else {
+        Page::ArtistName(fmt::s(a, "name"))
+    }
+}
+
+/// `artistLinks(t)`: a song's artist line cut into its artists (the server's `artists`: "Travis Scott feat. The
+/// Weeknd" → two) and the words between them, each artist with the page it opens. `shown` is the line as shown
+/// (a translation is one link to the artist as written); without `artists` the whole line is one link.
+pub fn credit_parts(t: &Value, shown: &str) -> Vec<(String, Option<Page>)> {
+    let s = fmt::s(t, "artist");
+    if s.is_empty() {
+        return vec![];
+    }
+    let whole = || vec![(shown.to_string(), Some(Page::ArtistName(s.clone())))];
+    if shown != s {
+        return whole();
+    }
+    let (mut out, mut at) = (vec![], 0usize);
+    for a in fmt::items(&t["artists"]) {
+        let name = fmt::s(&a, "name");
+        if name.is_empty() {
+            continue;
+        }
+        let Some(i) = s[at..].find(&name).map(|i| i + at) else { continue };
+        if i > at {
+            out.push((s[at..i].to_string(), None));
+        }
+        out.push((name.clone(), Some(credit_page(&a))));
+        at = i + name.len();
+    }
+    if at == 0 {
+        return whole();
+    }
+    if at < s.len() {
+        out.push((s[at..].to_string(), None));
+    }
+    out
+}
+
 /// `albumHref(a)`: a catalogue album's page, or (Deezer / Apple only) its artist.
 pub fn album_page(a: &Value) -> Page {
     if fmt::truthy(a, "ext") {
@@ -721,6 +764,22 @@ pub fn apply_live(items: &mut [Value], key: impl Fn(&Value) -> String, ev: &Live
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn each_artist_of_a_song_is_a_link() {
+        let t = json!({ "artist": "Travis Scott feat. The Weeknd", "artists": [{ "name": "Travis Scott", "mbid": "m1" }, { "name": "The Weeknd" }] });
+        let parts = credit_parts(&t, "Travis Scott feat. The Weeknd");
+        assert_eq!(parts, vec![
+            ("Travis Scott".to_string(), Some(Page::Artist("m1".into()))),
+            (" feat. ".to_string(), None),
+            ("The Weeknd".to_string(), Some(Page::ArtistName("The Weeknd".into()))),
+        ]);
+        // no split from the server, or a translated line: one link
+        let one = json!({ "artist": "Simon & Garfunkel" });
+        assert_eq!(credit_parts(&one, "Simon & Garfunkel"), vec![("Simon & Garfunkel".to_string(), Some(Page::ArtistName("Simon & Garfunkel".into())))]);
+        assert_eq!(credit_parts(&t, "Translated").len(), 1);
+        assert!(credit_parts(&json!({}), "").is_empty());
+    }
 
     #[test]
     fn keys_match_the_web() {
