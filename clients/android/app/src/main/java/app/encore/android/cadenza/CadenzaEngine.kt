@@ -142,6 +142,9 @@ class CadenzaEngine(
         /** `{filters: [[id, label]…], dithers: [[id, label]…], default_filter, default_dither}` as JSON, "" without the library. */
         fun catalog(): String = CadenzaNative.catalog()
 
+        /** The equalizer graph's curves (Cadenza's own response, so the graph shows what plays); "" without the library. */
+        fun eqCurve(bandsJson: String, points: Int): String = CadenzaNative.eqCurve(bandsJson, points)
+
         /**
          * Position 0, limit `n`. Through java.nio.Buffer: the FloatBuffer overrides with their own return type exist
          * only from Android 14 on, so calling them would fail on older phones.

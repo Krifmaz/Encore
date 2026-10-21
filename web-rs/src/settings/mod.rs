@@ -11,6 +11,7 @@ pub mod appearance;
 pub mod apps;
 pub mod autodownload;
 pub mod connections;
+pub mod eq_graph;
 pub mod diagnostics;
 pub mod fields;
 pub mod general;

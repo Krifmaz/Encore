@@ -14,6 +14,7 @@ use crate::engine::{self, normalize as norm, settings as es};
 use crate::fmt;
 use crate::pages::{Ctx, El};
 use crate::theme::{self, Badge, Btn};
+use crate::widgets::eq_graph::{self, GraphEvent};
 use crate::widgets::{self, badge, btn_sm, icon_btn, seg, Icon};
 use cadenza::config::{RateSetting, Settings};
 use cadenza::engine::Status;
@@ -111,14 +112,16 @@ fn phase_id(phase: Phase, apodizing: bool) -> &'static str {
 
 const FAMILIES: [Family; 6] = [Family::Sinc, Family::ClosedForm, Family::PolySincGauss, Family::SincXtr, Family::SincMx, Family::PolySincExt3];
 
+/// Cadenza's names and order, low to high.
 const BAND_KINDS: [(BandKind, &str, &str); 6] = [
-    (BandKind::Peaking, "peaking", "Peaking"),
+    (BandKind::HighPass, "high-pass", "Low cut"),
     (BandKind::LowShelf, "low-shelf", "Low shelf"),
-    (BandKind::HighShelf, "high-shelf", "High shelf"),
-    (BandKind::LowPass, "low-pass", "Low-pass"),
-    (BandKind::HighPass, "high-pass", "High-pass"),
+    (BandKind::Peaking, "peaking", "Bell"),
     (BandKind::Notch, "notch", "Notch"),
+    (BandKind::HighShelf, "high-shelf", "High shelf"),
+    (BandKind::LowPass, "low-pass", "High cut"),
 ];
+const EQ_SLOPES: [u32; 4] = [12, 24, 36, 48];
 
 fn band_kind_id(k: BandKind) -> &'static str {
     BAND_KINDS.iter().find(|(x, _, _)| *x == k).map(|(_, id, _)| *id).unwrap_or("peaking")
@@ -151,6 +154,11 @@ pub struct State {
     devices: Option<Vec<DeviceInfo>>,
     gpu: Option<(bool, Option<String>)>,
     bands: Vec<BandEdit>,
+    /// The EQ graph: the band picked, the gain it shows (±dB), and while a handle is dragged
+    /// the bands as dragged with when the engine last got them.
+    eq_sel: Option<usize>,
+    eq_range: f32,
+    eq_live: Option<(Vec<Band>, Instant)>,
     convolution: String,
     test_busy: bool,
     /// A slider is being dragged: the 2 s re-read leaves the settings alone.
@@ -171,6 +179,9 @@ impl Default for State {
             devices: None,
             gpu: None,
             bands: Vec::new(),
+            eq_sel: None,
+            eq_range: 12.0,
+            eq_live: None,
             convolution: String::new(),
             test_busy: false,
             dragging: false,
@@ -221,6 +232,14 @@ pub enum Message {
     /// `(band, column 0 freq / 1 gain / 2 q, text)`.
     EqEdit(usize, u8, String),
     EqCommit(usize),
+    EqGraph(GraphEvent),
+    EqSelect(usize),
+    EqEnabled(usize, bool),
+    EqSlope(usize, String),
+    EqRange(String),
+    /// Every gain back to 0 dB.
+    EqFlat,
+    EqClear,
     ConvInput(String),
     ConvPick,
     ConvPicked(Option<PathBuf>),
@@ -297,6 +316,69 @@ fn apply(state: &mut State, ctx: &mut Ctx, f: impl FnOnce(&mut Settings)) {
             state.bands = state.settings.dsp.eq.iter().map(band_edit).collect();
         }
     }
+}
+
+/// The bands the EQ shows: the dragged copy while a handle is dragged, else the engine's.
+fn eq_bands(state: &State) -> Vec<Band> {
+    match &state.eq_live {
+        Some((b, _)) => b.clone(),
+        None => state.settings.dsp.eq.clone(),
+    }
+}
+
+/// A band of the EQ graph was picked, dragged, scrolled on, or a bell added (as on Cadenza's
+/// Sound page). While a handle moves the engine gets the bands about 15 times a second.
+fn eq_graph_event(state: &mut State, ctx: &mut Ctx, e: GraphEvent) -> Task<Message> {
+    match e {
+        GraphEvent::Select(i) => state.eq_sel = Some(i),
+        GraphEvent::Drag(i, f, g) => {
+            let mut b = eq_bands(state);
+            if let Some(band) = b.get_mut(i) {
+                band.freq = (f * 10.0).round() / 10.0;
+                if eq_graph::has_gain(band.kind) {
+                    band.gain_db = (g * 10.0).round() / 10.0;
+                }
+            }
+            state.eq_sel = Some(i);
+            let send = state.eq_live.as_ref().is_none_or(|(_, t)| t.elapsed() > Duration::from_millis(66));
+            if send {
+                let s = b.clone();
+                apply(state, ctx, move |x| x.dsp.eq = s);
+                state.eq_live = Some((b, Instant::now()));
+            } else if let Some((live, _)) = state.eq_live.as_mut() {
+                *live = b;
+            }
+            // the 2 s re-read leaves the bands alone until the drag ends
+            state.dragging = true;
+        }
+        GraphEvent::DragEnd => {
+            if let Some((b, _)) = state.eq_live.take() {
+                apply(state, ctx, move |x| x.dsp.eq = b);
+            }
+            state.bands = state.settings.dsp.eq.iter().map(band_edit).collect();
+        }
+        GraphEvent::Wheel(i, dy) => {
+            let f = if dy > 0.0 { 1.1 } else { 1.0 / 1.1 };
+            state.eq_sel = Some(i);
+            apply(state, ctx, |s| {
+                if let Some(b) = s.dsp.eq.get_mut(i) {
+                    b.q = ((b.q * f).clamp(0.1, 18.0) * 100.0).round() / 100.0;
+                }
+            });
+            state.bands = state.settings.dsp.eq.iter().map(band_edit).collect();
+        }
+        GraphEvent::Add(f, g) => {
+            if state.settings.dsp.eq.len() >= MAX_BANDS {
+                ctx.toast_err(format!("Up to {MAX_BANDS} bands"));
+                return Task::none();
+            }
+            let band = Band { kind: BandKind::Peaking, freq: f.round(), gain_db: (g * 10.0).round() / 10.0, q: 1.0, enabled: true, slope_db: 12 };
+            apply(state, ctx, |s| s.dsp.eq.push(band));
+            state.eq_sel = Some(state.settings.dsp.eq.len() - 1);
+            state.bands = state.settings.dsp.eq.iter().map(band_edit).collect();
+        }
+    }
+    Task::none()
 }
 
 /// The shared (OS mixer) and the exclusive backend of this build, when it has both.
@@ -530,6 +612,7 @@ pub fn update(state: &mut State, msg: Message, ctx: &mut Ctx) -> Task<Message> {
             if i < state.bands.len() {
                 state.bands.remove(i);
             }
+            state.eq_sel = None;
             apply(state, ctx, |s| {
                 if i < s.dsp.eq.len() {
                     s.dsp.eq.remove(i);
@@ -564,6 +647,35 @@ pub fn update(state: &mut State, msg: Message, ctx: &mut Ctx) -> Task<Message> {
                 }
             });
             state.bands = state.settings.dsp.eq.iter().map(band_edit).collect();
+        }
+        Message::EqGraph(e) => return eq_graph_event(state, ctx, e),
+        Message::EqSelect(i) => state.eq_sel = Some(i),
+        Message::EqEnabled(i, on) => apply(state, ctx, |s| {
+            if let Some(b) = s.dsp.eq.get_mut(i) {
+                b.enabled = on;
+            }
+        }),
+        Message::EqSlope(i, v) => {
+            let slope = v.parse().unwrap_or(12);
+            apply(state, ctx, |s| {
+                if let Some(b) = s.dsp.eq.get_mut(i) {
+                    b.slope_db = slope;
+                }
+            });
+        }
+        Message::EqRange(v) => state.eq_range = v.parse().unwrap_or(12.0),
+        Message::EqFlat => {
+            apply(state, ctx, |s| {
+                for b in s.dsp.eq.iter_mut().filter(|b| eq_graph::has_gain(b.kind)) {
+                    b.gain_db = 0.0;
+                }
+            });
+            state.bands = state.settings.dsp.eq.iter().map(band_edit).collect();
+        }
+        Message::EqClear => {
+            state.eq_sel = None;
+            state.bands.clear();
+            apply(state, ctx, |s| s.dsp.eq.clear());
         }
         Message::ConvInput(s) => state.convolution = s,
         Message::ConvPick => {
@@ -923,12 +1035,36 @@ fn cadenza_card<'a>(state: &'a State, ctx: &Ctx<'a>) -> El<'a, Message> {
         let modes: Vec<Opt> = HeadphoneMode::ALL.iter().map(|(_, id, label)| Opt::new(*id, *label)).collect();
         lines.push(widgets::field("Headphones (crossfeed)", select(modes, s.dsp.headphones.id(), Message::Headphones)));
 
-        // EQ
+        // EQ: Cadenza's graph, then one row per band
+        let shown = eq_bands(state);
         let mut eq: Vec<El<'a, Message>> = vec![switch(s.dsp.eq_enabled, "Parametric EQ", Message::EqOn)];
-        if s.dsp.eq.is_empty() {
-            eq.push(help("No bands.").into());
+        eq.push(
+            row![
+                btn_sm("Add band", Btn::Default, (s.dsp.eq.len() < MAX_BANDS).then_some(Message::EqAdd)),
+                btn_sm("Flat", Btn::Default, Some(Message::EqFlat)),
+                btn_sm("Clear", Btn::Default, (!s.dsp.eq.is_empty()).then_some(Message::EqClear)),
+                iced::widget::space().width(Length::Fill),
+                widgets::small_muted("Range"),
+                seg(&[("6", "±6"), ("12", "±12"), ("24", "±24")], &format!("{}", state.eq_range as u32), Message::EqRange),
+            ]
+            .spacing(8)
+            .align_y(Alignment::Center)
+            .into(),
+        );
+        let l = theme::look();
+        eq.push(
+            container(eq_graph::eq_graph(shown.clone(), s.dsp.eq_enabled, state.eq_range as f64, state.eq_sel, 270.0, Message::EqGraph))
+                .style(move |_| container::Style {
+                    background: Some(iced::Background::Color(l.bg2)),
+                    border: iced::Border { color: l.border, width: 1.0, radius: 12.0.into() },
+                    ..Default::default()
+                })
+                .into(),
+        );
+        if shown.is_empty() {
+            eq.push(help("No bands yet. Press Add band, or double-click the graph.").into());
         }
-        for (i, b) in s.dsp.eq.iter().enumerate() {
+        for (i, b) in shown.iter().enumerate() {
             let e = state.bands.get(i).cloned().unwrap_or_else(|| band_edit(b));
             let kinds: Vec<Opt> = BAND_KINDS.iter().map(|(_, id, l)| Opt::new(*id, *l)).collect();
             let num = |value: &str, col: u8, label: &'a str| -> El<'a, Message> {
@@ -939,21 +1075,31 @@ fn cadenza_card<'a>(state: &'a State, ctx: &Ctx<'a>) -> El<'a, Message> {
                         .width(90),
                 )
             };
-            eq.push(
-                row![
-                    container(widgets::field("Type", select(kinds, band_kind_id(b.kind), move |k| Message::EqKind(i, k)))).width(170),
-                    num(&e.freq, 0, "Frequency (Hz)"),
-                    num(&e.gain, 1, "Gain (dB)"),
-                    num(&e.q, 2, "Q"),
-                    container(icon_btn(Icon::X, "Remove band", Some(Message::EqRemove(i)))).padding([18, 0]),
-                ]
-                .spacing(10)
-                .align_y(Alignment::End)
-                .into(),
-            );
+            let c = eq_graph::color(i);
+            let sel = state.eq_sel == Some(i);
+            let mut cols = row![
+                iced::widget::checkbox(b.enabled).on_toggle(move |v| Message::EqEnabled(i, v)).size(16),
+                iced::widget::button(iced::widget::text(format!("{}", i + 1)).font(theme::bold()).size(13).color(c))
+                    .padding([2, 6])
+                    .style(theme::btn(if sel { Btn::Default } else { Btn::Ghost }))
+                    .on_press(Message::EqSelect(i)),
+                container(widgets::field("Type", select(kinds, band_kind_id(b.kind), move |k| Message::EqKind(i, k)))).width(150),
+                num(&e.freq, 0, "Frequency (Hz)"),
+            ]
+            .spacing(10)
+            .align_y(Alignment::End);
+            if eq_graph::has_gain(b.kind) {
+                cols = cols.push(num(&e.gain, 1, "Gain (dB)"));
+            }
+            cols = cols.push(num(&e.q, 2, "Q (width)"));
+            if matches!(b.kind, BandKind::LowPass | BandKind::HighPass) {
+                let slopes: Vec<Opt> = EQ_SLOPES.iter().map(|v| Opt::new(v.to_string(), format!("{v} dB/oct"))).collect();
+                cols = cols.push(container(widgets::field("Slope", select(slopes, &b.slope_db.to_string(), move |v| Message::EqSlope(i, v)))).width(120));
+            }
+            cols = cols.push(container(icon_btn(Icon::X, "Remove band", Some(Message::EqRemove(i)))).padding([18, 0]));
+            eq.push(cols.into());
         }
-        eq.push(help("Press Enter in a box to apply its number.").into());
-        eq.push(container(btn_sm("Add band", Btn::Default, (s.dsp.eq.len() < MAX_BANDS).then_some(Message::EqAdd))).into());
+        eq.push(help("Drag a point on the graph to move it (left/right = frequency, up/down = gain), scroll on it to change the width (Q), double-click the graph to add a bell there. Or type the numbers and press Enter. Up to 16 bands.").into());
         lines.push(block("Equalizer", eq));
 
         // convolution

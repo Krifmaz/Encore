@@ -19,7 +19,7 @@ default = []
 cuda = ["cadenza/cuda"]
 
 [dependencies]
-iced = { version = "0.14", features = ["tokio", "image", "svg", "advanced"] }
+iced = { version = "0.14", features = ["tokio", "image", "svg", "advanced", "canvas"] }
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "rustls-tls-native-roots", "json", "cookies", "stream", "multipart"] }
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time", "fs", "io-util"] }
 futures-util = "0.3"

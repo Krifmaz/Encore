@@ -218,6 +218,8 @@ fn sound_html(p: &Value) -> String {
       <fieldset class="stack" id="pb-fx-box" style="gap:8px;border:0;padding:0;margin:0;min-width:0;{fx_style}" {fx_disabled}>
         <label class="stack" style="gap:4px"><span class="small muted">Equalizer preset</span><select class="input" id="pb-eq-preset">{presets}</select></label>
         <label class="stack" style="gap:4px"><span class="small muted">Preamp <b id="pb-eq-preamp-v">{preamp_text}</b></span><input type="range" id="pb-eq-preamp" min="-24" max="12" step="0.5" value="{preamp}"></label>
+        {graph}
+        <span class="small muted">Drag a point to move it (left/right = frequency, up/down = gain), scroll on a bell to change its width (Q), double-click the graph to add a bell there.</span>
         <div style="overflow-x:auto"><table class="eq-bands" style="width:100%;border-collapse:collapse">
           <thead><tr class="small muted" style="text-align:left"><th>Type</th><th>Frequency (Hz)</th><th>Gain (dB)</th><th>Q</th><th></th></tr></thead>
           <tbody>{rows}</tbody></table></div>
@@ -228,11 +230,12 @@ fn sound_html(p: &Value) -> String {
         <label class="row" style="gap:8px;align-items:center"><input type="checkbox" id="pb-mono" {mono}> Mono</label>
       </fieldset>
       <span class="small muted">Runs in this browser or app – it costs your server nothing. Works with every quality setting. Turning it on means the sound is no longer the untouched file (the Signal path says so).</span>"#,
+        graph = super::eq_graph::html(&list, on),
         fx_checked = if on { "checked" } else { "" },
         fx_style = if on { "" } else { "opacity:.45" },
         fx_disabled = if on { "" } else { "disabled" },
         preamp_text = sign_db(p.f("eq_preamp")), preamp = js_string(p.g("eq_preamp")),
-        add_disabled = if list.len() >= 10 { "disabled" } else { "" }, plus = icon("plus"),
+        add_disabled = if list.len() >= super::eq_graph::MAX { "disabled" } else { "" }, plus = icon("plus"),
         crossfeed = crate::playback::CROSSFEED.iter().map(|(v, l)| dsp_opt(&json!(v), &json!(l), p.g("crossfeed"))).collect::<String>(),
         balance_text = crate::playback::balance_text(p.f("balance")), balance = js_string(p.g("balance")),
         mono = if p.truthy("mono") { "checked" } else { "" })
@@ -296,6 +299,10 @@ fn bind_sound(st: &Rc<Look>) {
     slider("#pb-balance", "#pb-balance-v", "balance", crate::playback::balance_text);
     slider("#pb-crossfade", "#pb-crossfade-v", "crossfade", fade_text);
     {
+        let (p, st2) = (st.p.borrow().clone(), st.clone());
+        super::eq_graph::bind(&el, sound_bands(&p), p.truthy("fx_on"), move |list| set_playback(&st2, json!({ "eq_preset": "custom", "eq_bands": list })));
+    }
+    {
         let st2 = st.clone();
         dom::on_each(&el, ".eq-bands tr[data-i] [data-f]", "change", move |c, _| {
             let mut list = sound_bands(&st2.p.borrow());
@@ -320,7 +327,7 @@ fn bind_sound(st: &Rc<Look>) {
         let st2 = st.clone();
         dom::on(&b, "click", move |_| {
             let mut list = sound_bands(&st2.p.borrow());
-            if list.len() < 10 {
+            if list.len() < super::eq_graph::MAX {
                 list.push(json!({ "type": "peaking", "freq": 1000, "gain": 0, "q": 1 }));
                 set_playback(&st2, json!({ "eq_preset": "custom", "eq_bands": list }));
             }

@@ -475,6 +475,33 @@ fn balance_text(v: i32) -> String {
     }
 }
 
+/// The equalizer graph of Settings → Sound effects (the curves Cadenza's own Sound page draws): `bands_json` is the
+/// phone's band list (`[{"type","freq","gain","q"}]`), `points` frequencies log-spaced from 20 Hz to 20 kHz. Returns
+/// `{"freqs": […], "total": [dB…], "bands": [[dB…] per band], "handles": [dB per band]}`, each band's own curve and
+/// where its handle sits (its gain, or for the cuts and the notch its response at its frequency). Drawn at 48 kHz.
+pub fn eq_curve_json(bands_json: &str, points: usize) -> String {
+    let list: Vec<BandIn> = serde_json::from_str(bands_json).unwrap_or_default();
+    let n = points.clamp(2, 2000);
+    let freqs: Vec<f64> = (0..n).map(|k| 20.0 * 1000f64.powf(k as f64 / (n - 1) as f64)).collect();
+    let mapped: Vec<Option<Band>> = list.iter().map(band_of).collect();
+    let curve = |bands: &[Band]| -> Vec<f64> {
+        let eq = Equalizer::new(48_000, 1, bands);
+        freqs.iter().map(|f| eq.response_db(*f)).collect()
+    };
+    let all: Vec<Band> = mapped.iter().flatten().copied().collect();
+    let per: Vec<Vec<f64>> = mapped.iter().map(|b| b.map(|b| curve(&[b])).unwrap_or_else(|| vec![0.0; n])).collect();
+    let handles: Vec<f64> = mapped
+        .iter()
+        .zip(&list)
+        .map(|(b, raw)| match b {
+            Some(b) if matches!(b.kind, BandKind::Peaking | BandKind::LowShelf | BandKind::HighShelf) => raw.gain,
+            Some(b) => Equalizer::new(48_000, 1, &[*b]).response_db(b.freq),
+            None => 0.0,
+        })
+        .collect();
+    serde_json::json!({ "freqs": freqs, "total": curve(&all), "bands": per, "handles": handles }).to_string()
+}
+
 /// What the engine offers, like the server's GET /api/playback/dsp: `{filters: [[id,label]…], dithers: [[id,label]…],
 /// default_filter, default_dither}`.
 pub fn catalog_json() -> String {
@@ -648,5 +675,30 @@ mod tests {
         assert_eq!(e.process(&input[..7], 10).len(), 6);
         assert_eq!(e.process(&input, 0).len(), 0);
         assert!(e.process(&[], 5).is_empty());
+    }
+
+    #[test]
+    fn eq_curve_is_cadenzas_response() {
+        let v: serde_json::Value = serde_json::from_str(&eq_curve_json(
+            r#"[{"type":"peaking","freq":1000,"gain":6,"q":1},{"type":"highpass","freq":80,"gain":0,"q":0.7}]"#,
+            61,
+        ))
+        .unwrap();
+        let freqs = v["freqs"].as_array().unwrap();
+        assert_eq!(freqs.len(), 61);
+        assert!((freqs[0].as_f64().unwrap() - 20.0).abs() < 1e-9);
+        assert!((freqs[60].as_f64().unwrap() - 20_000.0).abs() < 1e-6);
+        // the bell peaks at its +6 dB (between grid points, so a little under), the high-pass is far away there
+        let peak = |k: &str| v[k].as_array().map(|a| a.iter().filter_map(|x| x.as_f64()).fold(f64::MIN, f64::max)).unwrap();
+        let bell = v["bands"][0].as_array().unwrap().iter().filter_map(|x| x.as_f64()).fold(f64::MIN, f64::max);
+        assert!(bell <= 6.0 + 1e-9 && bell > 5.5, "{bell}");
+        assert!((peak("total") - bell).abs() < 0.05);
+        assert_eq!(v["handles"][0].as_f64().unwrap(), 6.0);
+        // a cut's handle sits on its curve: Web Audio's Q of 0.7 dB is +0.7 dB at the corner
+        assert!((v["handles"][1].as_f64().unwrap() - 0.7).abs() < 0.01);
+        // a broken list draws a flat line
+        let flat: serde_json::Value = serde_json::from_str(&eq_curve_json("not json", 3)).unwrap();
+        assert_eq!(flat["total"], serde_json::json!([0.0, 0.0, 0.0]));
+        assert_eq!(flat["bands"], serde_json::json!([]));
     }
 }

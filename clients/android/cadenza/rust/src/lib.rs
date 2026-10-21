@@ -17,7 +17,7 @@
 
 pub mod engine;
 
-pub use engine::{catalog_json, Engine, Params};
+pub use engine::{catalog_json, eq_curve_json, Engine, Params};
 
 use jni::objects::{JByteBuffer, JClass, JObject, JString};
 use jni::sys::{jfloatArray, jint, jlong, jstring};
@@ -309,6 +309,19 @@ pub extern "system" fn Java_app_encore_android_cadenza_CadenzaNative_nativeCatal
     string(&mut env, &s)
 }
 
+/// `nativeEqCurve(bandsJson, points): String` (static) – the equalizer graph's curves as JSON ([`eq_curve_json`]).
+#[no_mangle]
+pub extern "system" fn Java_app_encore_android_cadenza_CadenzaNative_nativeEqCurve<'a>(
+    mut env: JNIEnv<'a>,
+    _class: JClass<'a>,
+    bands: JString<'a>,
+    points: jint,
+) -> jstring {
+    let bands: String = env.get_string(&bands).map(Into::into).unwrap_or_default();
+    let s = catch_unwind(|| eq_curve_json(&bands, points.max(0) as usize)).unwrap_or_default();
+    string(&mut env, &s)
+}
+
 /// `nativeDestroy(handle)`.
 #[no_mangle]
 pub extern "system" fn Java_app_encore_android_cadenza_CadenzaNative_nativeDestroy<'a>(
@@ -473,6 +486,7 @@ mod tests {
             "Java_app_encore_android_cadenza_CadenzaNative_nativeFlush",
             "Java_app_encore_android_cadenza_CadenzaNative_nativeSignalPath",
             "Java_app_encore_android_cadenza_CadenzaNative_nativeCatalog",
+            "Java_app_encore_android_cadenza_CadenzaNative_nativeEqCurve",
             "Java_app_encore_android_cadenza_CadenzaNative_nativeDestroy",
         ];
         let src = include_str!("lib.rs");

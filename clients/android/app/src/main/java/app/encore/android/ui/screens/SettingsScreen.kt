@@ -70,6 +70,7 @@ import app.encore.android.features.settings.BlockedScreen
 import app.encore.android.features.settings.ConnectionsScreen
 import app.encore.android.features.settings.ContributeScreen
 import app.encore.android.features.settings.DiagnosticsScreen
+import app.encore.android.features.settings.EqGraph
 import app.encore.android.features.settings.InvitesScreen
 import app.encore.android.features.settings.LanguageScreen
 import app.encore.android.features.settings.PluginRules
@@ -530,6 +531,9 @@ private fun SoundSection(prefs: PlaybackPrefs, bitPerfect: Boolean, set: ((Playb
         }
         // the bands on screen are the preset's own until you edit one (then the preset is Custom)
         val bands = prefs.bands()
+        // Cadenza's graph: drag a point (frequency left/right, gain up/down), double-tap for a bell
+        EqGraph(bands, enabled = on, maxBands = 10) { nb -> set { it.copy(eqPreset = "custom", eqBands = nb) } }
+        Help("Drag a point to move it (left/right = frequency, up/down = gain), double-tap the graph to add a bell there.")
         Row(Modifier.fillMaxWidth().padding(top = 4.dp)) {
             Text("Type", Modifier.weight(1.3f), style = MaterialTheme.typography.bodySmall, color = p.muted)
             Text("Frequency (Hz)", Modifier.weight(1f), style = MaterialTheme.typography.bodySmall, color = p.muted)

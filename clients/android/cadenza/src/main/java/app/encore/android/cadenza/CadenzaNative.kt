@@ -132,5 +132,17 @@ class CadenzaNative {
         /** Static JNI entry point (public only because JNI links to the outer class's static method). */
         @JvmStatic
         external fun nativeCatalog(): String?
+
+        /**
+         * The equalizer graph's curves for `bandsJson` (`[{type, freq, gain, q}]`) at `points` frequencies from 20 Hz to
+         * 20 kHz: `{freqs, total, bands: [[dB…]…], handles: [dB…]}` as JSON; "" without the library.
+         */
+        @JvmStatic
+        fun eqCurve(bandsJson: String, points: Int): String =
+            if (available) (try { nativeEqCurve(bandsJson, points) } catch (_: Throwable) { null }) ?: "" else ""
+
+        /** Static JNI entry point (public only because JNI links to the outer class's static method). */
+        @JvmStatic
+        external fun nativeEqCurve(bandsJson: String, points: Int): String?
     }
 }

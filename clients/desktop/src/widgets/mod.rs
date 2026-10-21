@@ -8,6 +8,7 @@ pub mod choice;
 pub mod cover;
 pub mod details;
 pub mod empty;
+pub mod eq_graph;
 pub mod icons;
 pub mod list_row;
 pub mod marquee;
