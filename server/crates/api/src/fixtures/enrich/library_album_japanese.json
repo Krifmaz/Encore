@@ -10,6 +10,12 @@
   "mb_albumid": null,
   "mb_releasegroupid": null,
   "size": 265496,
+  "surround": {
+    "available": null,
+    "can_fetch": false,
+    "have": [],
+    "request": null
+  },
   "tracks": [
     {
       "acoustid_id": null,

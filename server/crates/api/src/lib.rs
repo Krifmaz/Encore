@@ -105,6 +105,7 @@ pub fn app(st: AppState) -> Router {
         .merge(routes::requests::router())
         .merge(routes::report::router())
         .merge(routes::picker::router())
+        .merge(routes::surround::router())
         .merge(routes::soulseek::router())
         .merge(routes::system::router())
         .merge(routes::tagging::router())

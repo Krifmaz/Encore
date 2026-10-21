@@ -33,7 +33,7 @@ impl Tasks for AppState {
 async fn run(st: &AppState, key: &str) -> anyhow::Result<String> {
     Ok(match key {
         "scan" => {
-            st.library.scan_all(st.db.clone(), encore_library::folders::scan_roots(&st.cfg), false).await;
+            st.library.scan_library(st.db.clone(), &st.cfg, false).await;
             st.library.scan.lock().unwrap().message.clone()
         }
         "sync" => {

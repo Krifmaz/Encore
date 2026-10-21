@@ -17,6 +17,7 @@ pub mod request_events;
 pub mod requests;
 pub mod soulseek;
 pub mod stats;
+pub mod surround;
 pub mod system;
 pub mod update;
 pub mod tagging;

@@ -92,13 +92,13 @@ pub fn create_request(st: &impl Ctx, u: &Row, b: &NewRequest, parent: Option<i64
 fn failed_twin(st: &impl Ctx, b: &NewRequest, artist: Option<&str>, title: Option<&str>) -> ApiResult<Option<Row>> {
     let ended = "status IN ('failed','cancelled') AND parent_id IS NULL ORDER BY id DESC LIMIT 1";
     if let Some(m) = nz(&b.mbid) {
-        return Ok(st.db().one(&format!("SELECT * FROM requests WHERE kind=? AND mbid=? AND {ended}"), p![b.kind, m])?);
+        return Ok(st.db().one(&format!("SELECT * FROM requests WHERE kind=? AND mbid=? AND class='stereo' AND {ended}"), p![b.kind, m])?);
     }
     if !matches!(b.kind.as_str(), "album" | "track") {
         return Ok(None);
     }
     let (Some(a), Some(t)) = (artist, title) else { return Ok(None) };
-    Ok(st.db().one(&format!("SELECT * FROM requests WHERE kind=? AND mbid IS NULL AND lower(artist)=lower(?) AND lower(title)=lower(?) AND {ended}"), p![b.kind, a, t])?)
+    Ok(st.db().one(&format!("SELECT * FROM requests WHERE kind=? AND mbid IS NULL AND lower(artist)=lower(?) AND lower(title)=lower(?) AND class='stereo' AND {ended}"), p![b.kind, a, t])?)
 }
 
 /// The `detail` of a request that is asked for again: the new request's detail plus the attempt count and
@@ -176,7 +176,7 @@ pub fn create_or_reuse(st: &impl Ctx, u: &Row, b: &NewRequest, parent: Option<i6
             }
             if !has_extra {
                 dup(st, "SELECT id, status FROM requests WHERE kind='album' AND mbid IS NULL AND lower(artist)=lower(?) AND lower(title)=lower(?)
-                         AND status NOT IN ('failed','denied','cancelled')", p![artist, title])?;
+                         AND class='stereo' AND status NOT IN ('failed','denied','cancelled')", p![artist, title])?;
             }
         }
         "artist" | "album" if nz(&b.mbid).is_none() => return Err(err(400, "A MusicBrainz id is required")),
@@ -185,11 +185,11 @@ pub fn create_or_reuse(st: &impl Ctx, u: &Row, b: &NewRequest, parent: Option<i6
         _ => return Err(err(400, "Invalid request kind")),
     }
     if b.kind == "track" && nz(&b.mbid).is_none() && !has_extra {
-        dup(st, "SELECT id, status FROM requests WHERE kind='track' AND lower(artist)=lower(?) AND lower(title)=lower(?) AND status NOT IN ('failed','denied','cancelled')",
+        dup(st, "SELECT id, status FROM requests WHERE kind='track' AND lower(artist)=lower(?) AND lower(title)=lower(?) AND class='stereo' AND status NOT IN ('failed','denied','cancelled')",
             p![artist, b.title])?;
     }
     if let (Some(m), false) = (nz(&b.mbid), has_extra) {
-        dup(st, "SELECT id, status FROM requests WHERE mbid=? AND kind=? AND status NOT IN ('failed','denied','cancelled')", p![m, b.kind])?;
+        dup(st, "SELECT id, status FROM requests WHERE mbid=? AND kind=? AND class='stereo' AND status NOT IN ('failed','denied','cancelled')", p![m, b.kind])?;
     }
     let twin = match reuse {
         Some(id) => st.db().one("SELECT * FROM requests WHERE id=?", p![id])?,

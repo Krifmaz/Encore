@@ -8,6 +8,7 @@ mod plugins;
 mod rejected;
 mod soulseek;
 mod storage;
+mod surround;
 mod streamrip;
 mod torrents;
 mod translate_tiers;

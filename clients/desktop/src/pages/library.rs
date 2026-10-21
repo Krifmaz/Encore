@@ -1,7 +1,8 @@
-//! Library: Albums, Singles, Artists, Songs, Duplicates, Wrong audio. Behaviour reference:
+//! Library: Albums, Singles, Artists, Songs, Surround, Duplicates, Wrong audio. Behaviour reference:
 //! web-rs/src/pages/library.rs `render` (tabs, sorting, filters, Load more, Shuffle, the
 //! admin's Scan / Auto-tag / Organize / Verify / Find artwork with the progress card, the
-//! duplicates and wrong-audio lists).
+//! duplicates and wrong-audio lists). The Surround tab (0.35, the server's `surround` feature) lists the
+//! Dolby Atmos and 5.1/7.1 albums, kept apart from the stereo library (web `render_surround`).
 //!
 //! The search box searches the whole library whatever tab is selected (p6 item 9, client-shapes
 //! §3.4): while it has a query the page shows one results view – Artists, Albums (singles too)
@@ -193,6 +194,34 @@ pub fn request_toast(r: &Value) -> &'static str {
     }
 }
 
+/// Surround song ids start here (0.35): the server numbers them apart from the stereo ones.
+pub const SURROUND_IDS: i64 = 1_000_000_000;
+
+/// A song or album of the Surround library: `class: "surround"`, or a song id from [`SURROUND_IDS`].
+/// Likes, playlists, editing and deleting don't apply to them.
+pub fn is_surround(v: &Value) -> bool {
+    fmt::s(v, "class") == "surround" || fmt::i(v, "id") >= SURROUND_IDS
+}
+
+/// The words for a surround version: "Dolby Atmos" when its quality says so, else the quality
+/// ("E-AC-3 5.1").
+pub fn surround_label(quality: &str) -> String {
+    if quality.contains("Atmos") {
+        "Dolby Atmos".into()
+    } else {
+        quality.into()
+    }
+}
+
+/// The corner of a Surround album's tile: "Dolby Atmos", else its quality.
+pub fn surround_corner(a: &Value) -> String {
+    if fmt::truthy(a, "atmos") {
+        "Dolby Atmos".into()
+    } else {
+        fmt::s(a, "quality")
+    }
+}
+
 /// The request status words and badge colours (web `status_info`).
 pub fn status_badge<'a, M: 'a>(status: &str) -> El<'a, M> {
     let (kind, label) = match status {
@@ -345,6 +374,12 @@ pub enum Act {
     /// The "Suspect quality" badge: the quality issues decide the report's reason.
     SuspectQuality(Box<Value>),
     QualityInfo(Box<Value>, Result<Value, ApiError>),
+    /// Play a stereo song's surround version (its `surround_id`).
+    PlaySurround(i64),
+    SurroundGot(Result<Value, ApiError>),
+    /// Ask for the Dolby Atmos version: `POST <path>` (an album's or a song's `/surround`, admins).
+    GetAtmos(String),
+    AtmosAsked(Result<Value, ApiError>),
 }
 
 /// Edit song details.
@@ -436,6 +471,9 @@ impl Shared {
 
 /// Build the ⋯ menu of one song at the pointer (web `track_menu`).
 pub fn track_menu(sh: &mut Shared, t: &Value, ctx: &Ctx) {
+    if is_surround(t) {
+        return surround_track_menu(sh, t, ctx);
+    }
     let admin = ctx.is_admin();
     let can_fix = admin || (ctx.session.perm("fix") && fmt::truthy(t, "request_id"));
     let b = || Box::new(t.clone());
@@ -452,6 +490,17 @@ pub fn track_menu(sh: &mut Shared, t: &Value, ctx: &Ctx) {
     ];
     if fmt::truthy(t, "album_id") {
         items.push(MenuItem::new("Go to album", Act::GoAlbum(fmt::s(t, "album_id"))).icon(Icon::Disc));
+    }
+    // its surround version (0.35): play it, or (admins) fetch the Dolby Atmos version
+    if fmt::truthy(t, "surround_id") {
+        items.push(
+            MenuItem::new("Play the surround version", Act::PlaySurround(fmt::i(t, "surround_id"))).icon(Icon::Play),
+        );
+    } else if admin && ctx.has_feature("surround") {
+        items.push(
+            MenuItem::new("Get Dolby Atmos version", Act::GetAtmos(format!("/library/tracks/{id}/surround")))
+                .icon(Icon::Download),
+        );
     }
     items.push(
         MenuItem::new(
@@ -499,6 +548,27 @@ pub fn track_menu(sh: &mut Shared, t: &Value, ctx: &Ctx) {
             )
             .icon(Icon::Trash)
             .danger(),
+        );
+    }
+    sh.menu = Some((ctx.cursor, items));
+}
+
+/// "⋯" for a Surround song (web `surround_track_menu`): playing it, its lyrics and file, and its
+/// stereo version; likes, playlists, editing and deleting don't apply.
+fn surround_track_menu(sh: &mut Shared, t: &Value, ctx: &Ctx) {
+    let b = || Box::new(t.clone());
+    let mut items = vec![
+        MenuItem::new("Play next", Act::PlayNext(b())).icon(Icon::Next),
+        MenuItem::new("Add to queue", Act::Enqueue(b())).icon(Icon::List),
+        MenuItem::new("Lyrics", Act::Lyrics(b())).icon(Icon::Music),
+        MenuItem::new("Download this song", Act::DownloadFile(b())).icon(Icon::Download),
+    ];
+    if fmt::truthy(t, "album_id") {
+        items.push(MenuItem::new("Go to album", Act::GoAlbum(fmt::s(t, "album_id"))).icon(Icon::Disc));
+    }
+    if fmt::truthy(t, "stereo_album_id") {
+        items.push(
+            MenuItem::new("Go to the stereo version", Act::GoAlbum(fmt::s(t, "stereo_album_id"))).icon(Icon::Disc),
         );
     }
     sh.menu = Some((ctx.cursor, items));
@@ -1064,6 +1134,35 @@ pub fn shared_update(sh: &mut Shared, act: Act, ctx: &mut Ctx) -> Task<Act> {
                 .unwrap_or_default();
             open_report(sh, "track", t["id"].clone(), &fmt::s(&t, "title"), reason_for(&codes));
         }
+        Act::PlaySurround(id) => {
+            sh.menu = None;
+            let api = ctx.api.clone();
+            return Task::perform(
+                async move { api.get(&format!("/library/tracks/{id}")).await },
+                Act::SurroundGot,
+            );
+        }
+        Act::SurroundGot(Ok(t)) => ctx.play(vec![t], 0),
+        Act::SurroundGot(Err(e)) => ctx.toast_err(e.message),
+        Act::GetAtmos(path) => {
+            sh.menu = None;
+            ctx.toast("Looking for a Dolby Atmos version on Apple Music…");
+            let api = ctx.api.clone();
+            return Task::perform(async move { api.post_empty(&path).await }, Act::AtmosAsked);
+        }
+        Act::AtmosAsked(Ok(r)) => {
+            sh.changed = true;
+            ctx.refresh_shell();
+            ctx.toast_ok(format!("Dolby Atmos version requested (#{})", fmt::s(&r, "request_id")));
+        }
+        // 404: Apple Music has no Dolby Atmos version; 409: already asked, or gamdl has no wrapper
+        Act::AtmosAsked(Err(e)) => {
+            if e.status == 404 {
+                ctx.toast_warn(e.message);
+            } else {
+                ctx.toast_err(e.message);
+            }
+        }
     }
     Task::none()
 }
@@ -1403,6 +1502,13 @@ pub fn sort_opts(tab: &str) -> Option<&'static [(&'static str, &'static str)]> {
             ("album", "Album A–Z"),
             ("duration", "Length"),
         ]),
+        // the server sorts these one way only (no `dir`)
+        "surround" => Some(&[
+            ("added", "Date added"),
+            ("name", "Title A–Z"),
+            ("artist", "Artist A–Z"),
+            ("year", "Year"),
+        ]),
         _ => None,
     }
 }
@@ -1482,6 +1588,9 @@ pub struct State {
     pub tracks: Option<Vec<Value>>,
     pub dups: Option<Vec<Value>>,
     pub issues: Option<Vec<Value>>,
+    /// The Surround tab's albums and `/surround/albums`' `stats`.
+    pub surround: Option<Vec<Value>>,
+    pub surround_stats: Value,
     pub error: String,
     /// Another page can be loaded.
     pub more: bool,
@@ -1549,6 +1658,11 @@ pub enum Message {
     },
     Dups(u64, Result<Value, ApiError>),
     Issues(u64, Result<Value, ApiError>),
+    Surround {
+        seq: u64,
+        append: bool,
+        res: Result<Value, ApiError>,
+    },
     OpenAlbum(String),
     PlayAlbum(String),
     AlbumTracks(String, Result<Value, ApiError>),
@@ -1611,7 +1725,9 @@ fn open_inner(
 ) -> Task<Message> {
     state.admin = ctx.is_admin();
     let mut tab = if tab.is_empty() { "albums".to_string() } else { tab };
-    if !state.admin && matches!(tab.as_str(), "duplicates" | "issues") {
+    if (!state.admin && matches!(tab.as_str(), "duplicates" | "issues"))
+        || (tab == "surround" && !ctx.has_feature("surround"))
+    {
         tab = "albums".into();
     }
     state.tab = tab;
@@ -1743,6 +1859,7 @@ fn loaded_rows(state: &State) -> usize {
         "albums" | "singles" => state.albums.as_ref().map_or(0, Vec::len),
         "artists" => state.artists.as_ref().map_or(0, Vec::len),
         "tracks" => state.tracks.as_ref().map_or(0, Vec::len),
+        "surround" => state.surround.as_ref().map_or(0, Vec::len),
         _ => 0,
     }
 }
@@ -1899,6 +2016,7 @@ fn load_list(state: &mut State, ctx: &Ctx, append: bool) -> Task<Message> {
             "tracks" => state.tracks = None,
             "duplicates" => state.dups = None,
             "issues" => state.issues = None,
+            "surround" => state.surround = None,
             _ => {}
         }
     }
@@ -1935,6 +2053,15 @@ fn load_list(state: &mut State, ctx: &Ctx, append: bool) -> Task<Message> {
         "issues" => Task::perform(async move { api.get("/library/mismatches").await }, move |res| {
             Message::Issues(seq, res)
         }),
+        "surround" => {
+            let url = format!(
+                "/surround/albums?q={}&sort={}&limit={PAGE}&offset={}",
+                urlencode(&state.q),
+                state.sort,
+                state.offset
+            );
+            Task::perform(async move { api.get(&url).await }, move |res| Message::Surround { seq, append, res })
+        }
         _ => {
             let limit = if want > 0 { want.clamp(SONGS_PAGE, 1000) } else { SONGS_PAGE };
             state.songs_limit = limit;
@@ -2160,6 +2287,35 @@ pub fn update(state: &mut State, msg: Message, ctx: &mut Ctx) -> Task<Message> {
                 Err(e) => {
                     state.issues = Some(Vec::new());
                     state.error = e.message;
+                }
+            }
+        }
+        Message::Surround { seq, append, res } => {
+            if seq != state.seq {
+                return Task::none();
+            }
+            state.loading_more = false;
+            match res {
+                Ok(v) => {
+                    let items = fmt::items(&v["albums"]);
+                    // no total: a full page means there may be more
+                    state.more = items.len() >= PAGE;
+                    state.surround_stats = v["stats"].clone();
+                    let list = state.surround.get_or_insert_with(Vec::new);
+                    if append {
+                        list.extend(items);
+                    } else {
+                        *list = items;
+                    }
+                    state.offset = list.len();
+                }
+                Err(e) => {
+                    if !append {
+                        state.surround = Some(Vec::new());
+                        state.error = e.message;
+                    } else {
+                        ctx.toast_err(e.message);
+                    }
                 }
             }
         }
@@ -2405,6 +2561,11 @@ fn sub_line(state: &State) -> String {
             .as_ref()
             .map(|d| format!("{} file(s) whose audio doesn't match their tags", d.len()))
             .unwrap_or_default(),
+        "surround" if state.surround.is_some() => format!(
+            "{} surround albums · {} in Dolby Atmos",
+            num(fmt::f(&state.surround_stats, "albums")),
+            num(fmt::f(&state.surround_stats, "atmos"))
+        ),
         _ => String::new(),
     }
 }
@@ -2575,6 +2736,9 @@ pub fn view<'a>(state: &'a State, ctx: &Ctx<'a>) -> El<'a, Message> {
         ("artists", "Artists"),
         ("tracks", "Songs"),
     ];
+    if ctx.has_feature("surround") {
+        tab_items.push(("surround", "Surround"));
+    }
     if state.admin {
         tab_items.extend([("duplicates", "Duplicates"), ("issues", "Wrong audio")]);
     }
@@ -2599,23 +2763,25 @@ pub fn view<'a>(state: &'a State, ctx: &Ctx<'a>) -> El<'a, Message> {
             })
             .collect();
         let selected = options.iter().find(|o| o.key == state.sort).cloned();
-        tools = tools.push(
-            row![
-                pick_list(options, selected, Message::Sort)
-                    .text_size(13)
-                    .padding([7, 10])
-                    .style(theme::pick)
-                    .menu_style(theme::pick_menu),
+        let mut sort = row![pick_list(options, selected, Message::Sort)
+            .text_size(13)
+            .padding([7, 10])
+            .style(theme::pick)
+            .menu_style(theme::pick_menu)]
+        .spacing(6)
+        .align_y(Alignment::Center);
+        // the Surround list has one direction per sort
+        if state.tab != "surround" {
+            sort = sort.push(
                 tooltip(
                     btn_sm(if state.dir == "asc" { "↑" } else { "↓" }, Btn::Default, Some(Message::Dir)),
                     widgets::tip_box("Ascending / descending"),
                     tooltip::Position::Bottom,
                 )
                 .gap(4),
-            ]
-            .spacing(6)
-            .align_y(Alignment::Center),
-        );
+            );
+        }
+        tools = tools.push(sort);
     }
     if !results && matches!(state.tab.as_str(), "albums" | "singles") {
         let options: Vec<Opt> = FILTERS
@@ -2760,6 +2926,23 @@ fn body<'a>(state: &'a State, ctx: &Ctx<'a>) -> El<'a, Message> {
                 }
                 col.into()
             }
+        },
+        "surround" => match &state.surround {
+            None => skeleton_tiles(12, widgets::tile::WIDTH),
+            Some(list) if list.is_empty() => {
+                if !state.error.is_empty() {
+                    return widgets::error_box(&state.error);
+                }
+                if !state.q.trim().is_empty() {
+                    return widgets::catalog::empty_text(Icon::Disc, format!("No surround albums match “{}”", state.q.trim()), String::new());
+                }
+                empty(
+                    Icon::Disc,
+                    "No surround albums yet",
+                    "Dolby Atmos and 5.1 albums show here. Put them in the Surround folder, or use Get Dolby Atmos version on an album.",
+                )
+            }
+            Some(list) => grid(list.iter().map(|a| album_tile(a, ctx)).collect()),
         },
         "issues" => match &state.issues {
             None => skeleton_rows(6),
@@ -2943,7 +3126,10 @@ pub fn album_tile<'a>(a: &Value, ctx: &Ctx<'a>) -> El<'a, Message> {
         .sub(sub)
         .cover(ctx.cover(&id, &a["cover_v"], 400))
         .play(Message::PlayAlbum(id));
-    if fmt::truthy(a, "untagged") {
+    // a Surround album names its format in the corner: Dolby Atmos, 5.1, 7.1
+    if is_surround(a) {
+        tile = tile.corner(badge(surround_corner(a), Badge::Accent));
+    } else if fmt::truthy(a, "untagged") {
         tile = tile.corner(
             tooltip(badge("Untagged", Badge::Warn), widgets::tip_box("Some tracks lack MusicBrainz tags"), tooltip::Position::Top)
                 .gap(4)
@@ -3244,5 +3430,65 @@ mod tests {
         let labels: Vec<String> = sh.menu.as_ref().unwrap().1.iter().map(|m| m.label.clone()).collect();
         assert!(!labels.iter().any(|l| l.contains("Delete")));
         assert!(!labels.contains(&"Go to album".to_string()));
+    }
+    #[test]
+    fn surround_songs_and_albums_are_told_apart() {
+        assert!(is_surround(&json!({ "id": "s0123456789abcde", "class": "surround" })));
+        assert!(is_surround(&json!({ "id": 1_000_000_007 })));
+        assert!(!is_surround(&json!({ "id": 42, "surround_id": 1_000_000_007 })));
+        assert!(!is_surround(&json!({ "id": "0123456789abcdef" })));
+        assert_eq!(surround_label("Dolby Atmos (E-AC-3 5.1)"), "Dolby Atmos");
+        assert_eq!(surround_label("E-AC-3 5.1"), "E-AC-3 5.1");
+        assert_eq!(surround_corner(&json!({ "atmos": true, "quality": "Dolby Atmos (E-AC-3 5.1)" })), "Dolby Atmos");
+        assert_eq!(surround_corner(&json!({ "atmos": false, "quality": "AC-3 5.1" })), "AC-3 5.1");
+        let keys: Vec<&str> = sort_opts("surround").unwrap().iter().map(|o| o.0).collect();
+        assert_eq!(keys, ["added", "name", "artist", "year"]);
+    }
+
+    #[test]
+    fn surround_songs_have_their_own_menu() {
+        let api = crate::api::Api::new("http://s");
+        let config = crate::config::Config::default();
+        let ctx_for = |role: &str, features: Value| crate::api::Session {
+            user: json!({ "username": "a", "role": role, "perms": {} }),
+            info: json!({ "features": features }),
+        };
+        let covers = widgets::Covers::new();
+        let labels = |session: &crate::api::Session, t: Value| -> Vec<String> {
+            let ctx = Ctx::new(
+                api.clone(),
+                &config,
+                session,
+                Default::default(),
+                &covers,
+                theme::look(),
+                iced::Size::new(1000.0, 700.0),
+                Point::ORIGIN,
+            );
+            let mut sh = Shared::default();
+            track_menu(&mut sh, &t, &ctx);
+            sh.menu.unwrap().1.iter().map(|m| m.label.clone()).collect()
+        };
+        let admin = ctx_for("admin", json!(["surround"]));
+        // a Surround song: no likes, playlists, editing or deleting; a way to its stereo album
+        let l = labels(
+            &admin,
+            json!({ "id": 1_000_000_001, "class": "surround", "album_id": "s1", "stereo_album_id": "ab" }),
+        );
+        assert!(l.contains(&"Go to the stereo version".to_string()));
+        assert!(l.contains(&"Play next".to_string()));
+        for gone in ["Add to playlist", "Edit song details…", "Delete song from disk", "Share link"] {
+            assert!(!l.contains(&gone.to_string()), "{gone}");
+        }
+        // a stereo song with a surround version plays it; without one an admin can fetch it
+        let l = labels(&admin, json!({ "id": 5, "surround_id": 1_000_000_001 }));
+        assert!(l.contains(&"Play the surround version".to_string()));
+        assert!(!l.contains(&"Get Dolby Atmos version".to_string()));
+        let l = labels(&admin, json!({ "id": 5 }));
+        assert!(l.contains(&"Get Dolby Atmos version".to_string()));
+        // not for members, nor on a server without the feature
+        assert!(!labels(&ctx_for("user", json!(["surround"])), json!({ "id": 5 }))
+            .contains(&"Get Dolby Atmos version".to_string()));
+        assert!(!labels(&ctx_for("admin", json!([])), json!({ "id": 5 })).contains(&"Get Dolby Atmos version".to_string()));
     }
 }

@@ -154,11 +154,9 @@ async fn scan(State(st): State<AppState>, Admin(_): Admin, Query(q): Query<ScanQ
     if st.library.scan.lock().unwrap().scanning {
         return Err(err(409, "A scan is already running"));
     }
-    let l = st.library.clone();
-    let db = st.db.clone();
-    // the library folder and the extra library folders, in one scanning session
-    let roots = encore_library::folders::scan_roots(&st.cfg);
-    tokio::spawn(async move { l.scan_all(db, roots, q.full).await });
+    // the library folder, the extra library folders and the Surround folder, in one scanning session
+    let st2 = st.clone();
+    tokio::spawn(async move { st2.library.scan_library(st2.db.clone(), &st2.cfg, q.full).await });
     Ok(Json(json!({ "ok": true })))
 }
 
@@ -518,6 +516,10 @@ async fn plays(State(st): State<AppState>, User(u): User, Json(b): Json<Value>) 
     let known: HashMap<i64, encore_db::Row> = st.db.query("SELECT id, artist, title, album FROM tracks WHERE id IN (SELECT value FROM json_each(?))", p![json!(ids).to_string()])?
         .into_iter().map(|r| (r.i("id"), r)).collect();
     if single && known.is_empty() {
+        // a Surround song: played, but not counted (plays, stats and scrobbles are the stereo library's)
+        if list.iter().all(|p| encore_library::surround::is_track(p.track_id)) {
+            return Ok(Json(json!({ "ok": true, "saved": 0, "skipped": list.len() })));
+        }
         return Err(err(404, "Track not found"));
     }
     let now = now();
@@ -601,8 +603,13 @@ async fn delete_track(State(st): State<AppState>, User(u): User, Path(id): Path<
     Ok(Json(json!({ "ok": true })))
 }
 
+/// The table a song id is in: the Surround library's ids start at a billion (encore_library::surround).
+fn table_of(id: i64) -> &'static str {
+    if encore_library::surround::is_track(id) { "surround_tracks" } else { "tracks" }
+}
+
 async fn track_file(State(st): State<AppState>, User(_): User, Path(id): Path<i64>, req: Request) -> ApiResult<Response> {
-    let t = st.db.one("SELECT path, artist, title FROM tracks WHERE id=?", p![id])?.ok_or_else(|| err(404, "File not found"))?;
+    let t = st.db.one(&format!("SELECT path, artist, title FROM {} WHERE id=?", table_of(id)), p![id])?.ok_or_else(|| err(404, "File not found"))?;
     let path = t.s("path");
     let ext = FsPath::new(&path).extension().map(|e| format!(".{}", e.to_string_lossy())).unwrap_or_default();
     serve_file(&path, req, None, Some(encore_core::fs::safe_file_name(&format!("{} - {}{ext}", t.s("artist"), t.s("title"))))).await
@@ -615,7 +622,8 @@ use encore_media::Ffmpeg;
 /// made on the fly, or server processing by Cadenza). `user` is None for share links, which never get
 /// server processing.
 pub async fn stream_track(st: &AppState, id: i64, q: &StreamQ, req: Request, user: Option<&encore_db::Row>) -> ApiResult<Response> {
-    let tr = st.db.one("SELECT path, format FROM tracks WHERE id=?", p![id])?.ok_or_else(|| err(404, "Track not found"))?;
+    // a Surround song's format is its codec (eac3, truehd …): no browser plays those, so they are converted
+    let tr = st.db.one(&format!("SELECT path, format FROM {} WHERE id=?", table_of(id)), p![id])?.ok_or_else(|| err(404, "Track not found"))?;
     // the permission is only looked at when processing is asked for
     let listener = user.map(|u| Listener { user: u.i("id"), may_process: q.dsp && auth::can(st, u, "server_dsp") });
     serve_stream(st, id, &tr.s("path"), &tr.s("format"), q, req, listener).await
@@ -627,6 +635,10 @@ async fn stream(State(st): State<AppState>, User(u): User, Path(id): Path<i64>, 
 
 /// One song as the lists return it (the car player rebuilds its queue from ids).
 async fn track(State(st): State<AppState>, User(u): User, Path(id): Path<i64>) -> ApiResult<Json<Value>> {
+    if encore_library::surround::is_track(id) {
+        let r = encore_library::surround::track(&st.db, id).ok_or_else(|| err(404, "Track not found"))?;
+        return Ok(Json(encore_library::surround::track_json(&r)));
+    }
     let mut t = st.db.one("SELECT id, title, artist, album, albumartist, album_id, track, disc, year, duration, format, bitrate, path FROM tracks WHERE id=?", p![id])?.ok_or_else(|| err(404, "Track not found"))?;
     if !encore_config::perms::is_admin(&u) { t.remove("path"); }
     let mut v = Value::Object(t);
@@ -667,7 +679,8 @@ struct InfoQ {
 /// `gain` (0.31, when anything is known): the song's loudness as its track rows carry it, with `source`
 /// ("tags" | "measured") and `lufs` (see encore_library::loudness).
 async fn track_info(State(st): State<AppState>, User(_): User, Path(id): Path<i64>, Query(q): Query<InfoQ>, headers: axum::http::HeaderMap) -> ApiResult<Json<Value>> {
-    let t = st.db.one("SELECT id, path, format, size, bitrate, duration FROM tracks WHERE id=?", p![id])?.ok_or_else(|| err(404, "Track not found"))?;
+    let surround = encore_library::surround::is_track(id);
+    let t = st.db.one(&format!("SELECT id, path, format, size, bitrate, duration FROM {} WHERE id=?", table_of(id)), p![id])?.ok_or_else(|| err(404, "Track not found"))?;
     let (path, media) = (t.s("path"), st.media.clone());
     let mut info = tokio::task::spawn_blocking(move || media.audio_info(&path)).await.unwrap_or(json!({}));
     let plan = plan(&t.s("format"), &info, decoders(&headers, &q.codecs).as_deref());
@@ -679,6 +692,14 @@ async fn track_info(State(st): State<AppState>, User(_): User, Path(id): Path<i6
     info["size"] = json!(t.i("size"));
     if info["bitrate"].is_null() { info["bitrate"] = json!(t.i("bitrate")); }
     if info["duration"].is_null() { info["duration"] = json!(t.f("duration")); }
+    if surround {
+        // what the receiver gets: "Dolby Atmos (E-AC-3 5.1)"; no quality check or loudness for surround songs
+        info["class"] = json!("surround");
+        if let Some(r) = encore_library::surround::track(&st.db, id) {
+            info["surround"] = json!({ "label": encore_library::surround::track_json(&r)["quality"], "layout": r.s("layout"), "atmos": r.i("atmos") == 1 });
+        }
+        return Ok(Json(info));
+    }
     info["quality"] = encore_media::quality::for_track(&st, id); // "Fake lossless? cutoff 16 kHz" in the signal path
     if let Some(gain) = encore_library::loudness::info_gain(&st.db, id) {
         info["gain"] = gain;
@@ -695,6 +716,21 @@ struct LyricsQ {
 
 /// Lyrics next to the song (.lrc synced, .txt plain), looked up on LRCLIB and saved when missing.
 async fn lyrics(State(st): State<AppState>, User(_): User, Path(id): Path<i64>, Query(q): Query<LyricsQ>) -> ApiResult<Json<Value>> {
+    if encore_library::surround::is_track(id) {
+        // a Surround song: the .lrc beside it (gamdl writes one), else its stereo song's
+        let r = encore_library::surround::track(&st.db, id).ok_or_else(|| err(404, "Track not found"))?;
+        if let Some((text, synced)) = encore_library::lyrics::sidecar(FsPath::new(&r.s("path"))) {
+            return Ok(Json(json!({ "lyrics": text, "synced": synced, "source": "file" })));
+        }
+        if r.i("stereo_track_id") <= 0 {
+            return Ok(Json(json!({ "lyrics": null, "synced": false, "source": null })));
+        }
+    }
+    let id = if encore_library::surround::is_track(id) {
+        encore_library::surround::track(&st.db, id).map(|r| r.i("stereo_track_id")).unwrap_or(0)
+    } else {
+        id
+    };
     let t = st.db.one("SELECT id, path, artist, title, album, duration FROM tracks WHERE id=?", p![id])?.ok_or_else(|| err(404, "Track not found"))?;
     if !q.fetch.unwrap_or(true) {
         return Ok(Json(match encore_library::lyrics::sidecar(FsPath::new(&t.s("path"))) {
@@ -706,6 +742,9 @@ async fn lyrics(State(st): State<AppState>, User(_): User, Path(id): Path<i64>, 
 }
 
 async fn album(State(st): State<AppState>, User(u): User, Path(id): Path<String>) -> ApiResult<Json<Value>> {
+    if encore_library::surround::is_album(&id) {
+        return surround_album(&st, &u, &id).await;
+    }
     // who asked for it: the request that brought the file in, when there was one
     let aid = id.clone();
     let rows = st.db.read(move |c| c.query("SELECT t.*, u.username requested_by, r.created_at requested_at, q.status quality_status, q.summary quality_note FROM tracks t LEFT JOIN requests r ON r.id=t.request_id
@@ -731,7 +770,44 @@ async fn album(State(st): State<AppState>, User(u): User, Path(id): Path<String>
         "tracks": tracks, "duration": rows.iter().map(|r| r.f("duration")).sum::<f64>(), "size": rows.iter().map(|r| r.i("size")).sum::<i64>(),
     });
     enrich(&st, Some(&u), &mut v).await;
+    // its Surround versions (0.35): the surround albums, the request fetching one, whether Apple has one; and
+    // each song's surround version
+    v["surround"] = encore_requests::surround::album_state(&st, &id);
+    let ids: Vec<i64> = rows.iter().map(|r| r.i("id")).collect();
+    let versions = encore_library::surround::for_stereo_tracks(&st.db, &ids);
+    if let Some(ts) = v["tracks"].as_array_mut() {
+        for t in ts {
+            if let Some(s) = t["id"].as_i64().and_then(|i| versions.get(&i)) {
+                t["surround_id"] = json!(s);
+            }
+        }
+    }
     Ok(Json(v))
+}
+
+/// A Surround album: its songs (what each file is: "Dolby Atmos (E-AC-3 5.1)") and the stereo album it belongs to.
+async fn surround_album(st: &AppState, u: &encore_db::Row, id: &str) -> ApiResult<Json<Value>> {
+    let mut tracks = encore_library::surround::album_tracks(&st.db, id);
+    if tracks.is_empty() {
+        return Err(err(404, "Album not found"));
+    }
+    let admin = encore_config::perms::is_admin(u);
+    if admin {
+        for t in tracks.iter_mut() {
+            if let Some(r) = t["id"].as_i64().and_then(|i| encore_library::surround::track(&st.db, i)) {
+                t["path"] = json!(r.s("path"));
+            }
+        }
+    }
+    let f = tracks[0].clone();
+    let stereo = tracks.iter().find_map(|t| t["stereo_album_id"].as_str().filter(|s| !s.is_empty()).map(String::from));
+    Ok(Json(json!({
+        "id": id, "class": "surround", "album": f["album"], "albumartist": f["albumartist"], "year": f["year"],
+        "quality": f["quality"], "atmos": tracks.iter().any(|t| t["atmos"] == true),
+        "stereo": stereo.map(|s| json!({ "album_id": s })),
+        "duration": tracks.iter().filter_map(|t| t["duration"].as_f64()).sum::<f64>(),
+        "tracks": tracks,
+    })))
 }
 
 #[derive(Deserialize, Default)]

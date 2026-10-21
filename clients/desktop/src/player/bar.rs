@@ -5,6 +5,7 @@
 use super::{cover_handle, signal, Message, Now, Pane, State};
 use crate::config::{BAR_ACTIONS, BAR_DEFAULT};
 use crate::fmt;
+use crate::pages::library::SURROUND_IDS;
 use crate::pages::{Ctx, El};
 use crate::theme::{self, Badge, Btn};
 use crate::widgets::marquee::marquee;
@@ -190,7 +191,8 @@ fn right_buttons<'a>(state: &'a State, ctx: &Ctx<'a>, now: Option<&Now>) -> Vec<
             Message::SetRepeat(repeat.next()),
         ));
     }
-    if has("like") && lib.is_some() {
+    // Surround songs (0.35) have no likes
+    if has("like") && lib.is_some_and(|id| id < SURROUND_IDS) {
         let liked = state.is_liked(lib);
         out.push(mode_btn(
             Icon::Heart,
@@ -458,14 +460,17 @@ pub fn more_menu<'a>(state: &'a State, ctx: &Ctx<'a>, at: Point) -> El<'a, Messa
         }
     }
     if let Some(id) = lib {
-        items.push(
-            MenuItem::new(
-                if state.is_liked(Some(id)) { "Remove from Liked Songs" } else { "Like" },
-                Message::LikeTrack(id),
-            )
-            .icon(Icon::Heart),
-        );
-        items.push(MenuItem::new("Add to playlist", Message::AddToPlaylist(vec![id])).icon(Icon::Plus));
+        // Surround songs (0.35) have no likes and are in no playlist
+        if id < SURROUND_IDS {
+            items.push(
+                MenuItem::new(
+                    if state.is_liked(Some(id)) { "Remove from Liked Songs" } else { "Like" },
+                    Message::LikeTrack(id),
+                )
+                .icon(Icon::Heart),
+            );
+            items.push(MenuItem::new("Add to playlist", Message::AddToPlaylist(vec![id])).icon(Icon::Plus));
+        }
         items.push(MenuItem::new("Lyrics", Message::OpenFull(Pane::Lyrics)).icon(Icon::Music));
         items.push(MenuItem::new("Share link", Message::Share).icon(Icon::External));
         items.push(MenuItem::new("Download this song", Message::DownloadSong).icon(Icon::Download));

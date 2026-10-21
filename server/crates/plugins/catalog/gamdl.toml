@@ -54,17 +54,17 @@ help = "Sign in at music.apple.com in a browser, open the developer tools (Appli
 key = "gamdl_codec"
 label = "Format"
 type = "select"
-options = [["aac-web", "AAC 256k"], ["aac-he-web", "HE-AAC 64k"], ["alac", "ALAC lossless (needs the wrapper)"], ["atmos", "Dolby Atmos (needs the wrapper)"]]
+options = [["aac-web", "AAC 256k"], ["aac-he-web", "HE-AAC 64k"], ["alac", "ALAC lossless (needs the wrapper)"]]
 default = "aac-web"
 part = "Downloads"
-help = "ALAC and Atmos fall back to AAC 256k for songs Apple has no such stream for."
+help = "ALAC falls back to AAC 256k for songs Apple has no lossless stream for. Dolby Atmos goes to the Surround library: Get Dolby Atmos version on an album or song (Settings → Library → Surround)."
 
 [[settings]]
 key = "gamdl_wrapper_url"
 label = "Wrapper URL"
 type = "url"
 default = ""
-help = "A wrapper-v2 server signed in to Apple Music, for example http://wrapper:30020. Needed for ALAC and Atmos; with it the media-user-token is optional."
+help = "A wrapper-v2 server signed in to Apple Music, for example http://wrapper:30020. Needed for ALAC and for Dolby Atmos versions in the Surround library; with it the media-user-token is optional."
 
 [[settings]]
 key = "gamdl_wrapper_decrypt"

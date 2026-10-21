@@ -146,6 +146,7 @@ fn source_line(t: &Value) -> String {
 
 /// "⋯" for one song: play next / queue / playlist / download the file / more like this / delete.
 pub fn track_menu(anchor: &Element, t: &Value, admin: bool, on_deleted: Option<Rc<dyn Fn()>>) {
+    if t.s("class") == "surround" { return surround_track_menu(anchor, t); }
     let t = Rc::new(t.clone());
     let done: Rc<dyn Fn()> = Rc::new(move || { if let Some(f) = &on_deleted { f(); } });
     let fix_perm = app::user().map(|u| u.g("perms").truthy("fix")).unwrap_or(false);
@@ -161,6 +162,17 @@ pub fn track_menu(anchor: &Element, t: &Value, admin: bool, on_deleted: Option<R
     // this browser's own downloads (0.28): "Download for offline" / "Remove download"
     items.extend(crate::pages::downloads::menu_items(&[(*t).clone()]));
     if t.truthy("album_id") { items.push(MenuItem::link("Go to album", &icon("disc"), &format!("#/library/album/{}", t.s("album_id")), false)); }
+    // its surround version (0.35): play it, or (admins) fetch the Dolby Atmos version
+    if t.truthy("surround_id") {
+        let sid = t.s("surround_id");
+        items.push(MenuItem::new("Play the surround version", &icon("play"), move || {
+            let sid = sid.clone();
+            dom::spawn(async move { if let Ok(s) = api::get(&format!("/library/tracks/{sid}")).await { player::play_queue(vec![s], 0, "album"); } });
+        }));
+    } else if admin {
+        let (id, done) = (t.s("id"), done.clone());
+        items.push(MenuItem::new("Get Dolby Atmos version", &icon("download"), move || get_atmos(format!("/library/tracks/{id}/surround"), done.clone())));
+    }
     { let (t, done) = (t.clone(), done.clone()); items.push(MenuItem::new("Report a problem", &icon("shield"), move || { let done = done.clone(); crate::pages::report::report_modal("track", t.g("id").clone(), &t.s("title"), "", Some(Rc::new(move |_| done()))) })); }
     if ui::translate_mode() != "off" { let (t, done) = (t.clone(), done.clone()); items.push(MenuItem::new("Edit translation", &icon("edit"), move || crate::pages::translate::edit_translation(t.s("title"), "title", Some(done.clone())))); }
     if admin { let t = t.clone(); items.push(MenuItem::new("Edit song details…", &icon("edit"), move || fix_song_modal(&t))); }
@@ -201,6 +213,19 @@ pub fn track_menu(anchor: &Element, t: &Value, admin: bool, on_deleted: Option<R
             });
         }));
     }
+    pop_menu(anchor, items);
+}
+
+/// "⋯" for a Surround song: playing it, its lyrics and file, and its stereo version.
+fn surround_track_menu(anchor: &Element, t: &Value) {
+    let t = Rc::new(t.clone());
+    let mut items: Vec<Option<MenuItem>> = Vec::new();
+    { let t = t.clone(); items.push(MenuItem::new("Play next", &icon("next"), move || { player::play_next(vec![(*t).clone()]); toast("Plays next", "ok"); })); }
+    { let t = t.clone(); items.push(MenuItem::new("Add to queue", &icon("list"), move || { player::enqueue(vec![(*t).clone()]); toast("Added to queue", "ok"); })); }
+    { let t = t.clone(); items.push(MenuItem::new("Lyrics", &icon("music"), move || lyrics::lyrics_modal(&t))); }
+    items.push(MenuItem::link("Download this song", &icon("download"), &format!("/api/library/tracks/{}/file", t.s("id")), true));
+    if t.truthy("album_id") { items.push(MenuItem::link("Go to album", &icon("disc"), &format!("#/library/album/{}", t.s("album_id")), false)); }
+    if t.truthy("stereo_album_id") { items.push(MenuItem::link("Go to the stereo version", &icon("disc"), &format!("#/library/album/{}", t.s("stereo_album_id")), false)); }
     pop_menu(anchor, items);
 }
 
@@ -297,6 +322,7 @@ fn sort_opts(tab: &str) -> Option<&'static [(&'static str, &'static str)]> {
         "albums" | "singles" => Some(&[("added", "Date added"), ("released", "Release date"), ("album", "Title A–Z"), ("artist", "Artist A–Z"), ("duration", "Length"), ("size", "Size")]),
         "artists" => Some(&[("name", "Name A–Z"), ("added", "Date added"), ("albums", "Most albums"), ("tracks", "Most songs")]),
         "tracks" => Some(&[("added", "Date added"), ("released", "Release date"), ("title", "Title A–Z"), ("artist", "Artist A–Z"), ("album", "Album A–Z"), ("duration", "Length")]),
+        "surround" => Some(&[("added", "Date added"), ("name", "Title A–Z"), ("artist", "Artist A–Z"), ("year", "Year")]),
         _ => None,
     }
 }
@@ -516,6 +542,7 @@ impl Lib {
             let s = self.st.borrow();
             (s.q.clone(), s.sort.clone(), s.dir.clone(), s.filter.clone(), s.artist.clone(), s.offset)
         };
+        if tab == "surround" { return self.render_surround(mine, &q, &sort, append).await; }
         if tab == "albums" || tab == "singles" {
             let kind = album_kind(&tab, &q);
             let page_url = |offset: usize, limit: usize| format!("/library/albums?q={}&sort={sort}&dir={dir}&kind={kind}&filter={filter}&artist={}&limit={limit}&offset={offset}", enc(&q), enc(&artist));
@@ -574,6 +601,27 @@ impl Lib {
             set_sub(&self.view, "");
         }
         if let Some(scrub) = self.scrub.borrow().as_ref() { scrub.refresh(); }
+        Ok(())
+    }
+
+    /// The Surround tab (0.35): the Dolby Atmos and 5.1/7.1 albums, kept apart from the stereo library.
+    async fn render_surround(&self, mine: u32, q: &str, sort: &str, append: bool) -> Result<(), ApiError> {
+        let offset = if append { self.st.borrow().offset } else { 0 };
+        let res = api::get(&format!("/surround/albums?q={}&sort={sort}&limit={PAGE}&offset={offset}", enc(q))).await?;
+        if self.load_seq.get() != mine { return Ok(()); }
+        let items = res.a("albums");
+        let html: String = items.iter().map(common::library_tile).collect();
+        if append {
+            if let Some(g) = dom::qs_in(&self.body, ".grid") { let _ = g.insert_adjacent_html("beforeend", &html); }
+        } else {
+            dom::set_html(&self.body, &if !items.is_empty() { format!(r##"<div class="grid">{html}</div>"##) }
+                else if !q.is_empty() { empty_state(&icon("disc"), &format!("No surround albums match “{q}”"), "") }
+                else { empty_state(&icon("disc"), "No surround albums yet", "Dolby Atmos and 5.1 albums show here. Put them in the Surround folder, or use Get Dolby Atmos version on an album.") });
+        }
+        self.st.borrow_mut().offset = offset + items.len();
+        dom::toggle_class(&self.more, "hidden", items.len() < PAGE);
+        let stats = res.o("stats");
+        set_sub(&self.view, &format!("{} surround albums · {} in Dolby Atmos", ui::fmt::num(stats.f("albums")), ui::fmt::num(stats.f("atmos"))));
         Ok(())
     }
 
@@ -718,7 +766,7 @@ pub fn render(view: Element, ctx: Ctx) -> PageFuture {
         // `#/library?q=` opens the results view of that search; with a `tab` too, that tab filtered by it
         let results = ctx.q("tab").is_empty();
         let st = St { tab, q: ctx.q("q").trim().to_string(), sort: ctx.q("sort"), dir: ctx.q("dir"), filter: ctx.q("filter"), artist: ctx.q("artist"), offset: 0, results };
-        let mut tabs: Vec<(&str, &str)> = vec![("albums", "Albums"), ("singles", "Singles"), ("artists", "Artists"), ("tracks", "Songs")];
+        let mut tabs: Vec<(&str, &str)> = vec![("albums", "Albums"), ("singles", "Singles"), ("artists", "Artists"), ("tracks", "Songs"), ("surround", "Surround")];
         if admin { tabs.extend([("duplicates", "Duplicates"), ("issues", "Wrong audio")]); }
         let tabs_html: String = tabs.iter().map(|(k, l)| format!(r##"<button data-t="{k}" class="{}">{l}</button>"##, if *k == st.tab { "active" } else { "" })).collect();
         let admin_html = if admin {
@@ -1002,6 +1050,8 @@ pub fn render_album(view: Element, ctx: Ctx) -> PageFuture {
         let admin = matches!(ctx.user.s("role").as_str(), "admin" | "owner");
         let id = ctx.param(0);
         let a = api::get(&format!("/library/albums/{id}")).await.map_err(|e| e.message)?;
+        // a Surround album (0.35): its own songs, linked to the stereo album; the stereo library's tools stay off
+        let surround = a.s("class") == "surround";
         let tracks = a.a("tracks");
         let multi = tracks.iter().map(|t| t.g("disc").to_string()).collect::<HashSet<_>>().len() > 1;
         let mut formats: Vec<String> = Vec::new();
@@ -1022,20 +1072,21 @@ pub fn render_album(view: Element, ctx: Ctx) -> PageFuture {
         <td class="hide-sm muted">{artist}</td>
         <td class="hide-sm"><span class="badge">{fmt}</span>{nomb} {vb}{qb}</td>
         <td class="muted">{dur}</td>
-        <td style="text-align:right;white-space:nowrap"><button class="btn sm ghost" data-like="{id}" title="Like (syncs to Finamp/Plexamp)">{heart}</button><button class="btn sm ghost icon" data-tmenu="{i}" aria-label="More">{more}</button></td></tr>"##,
+        <td style="text-align:right;white-space:nowrap">{like}<button class="btn sm ghost icon" data-tmenu="{i}" aria-label="More">{more}</button></td></tr>"##,
             // no track number in the tags (a YouTube download): the row's place in the album instead of a dash
             disc = if multi { format!("{}-", t.s("disc")) } else { String::new() }, track = if t.truthy("track") { t.s("track") } else { (i + 1).to_string() }, rowplay = icon("play"),
             title = esc(&ui::tr(t, "title")), title_sub = ui::tr_sub(t, "title"),
             relpath = if admin { format!(r##"<div class="small faint ellipsis" style="max-width:520px">{}</div>"##, esck(t, "relpath")) } else { String::new() },
             source = source_line(t), artist = ui::artist_links(t), fmt = format_text(t),
-            nomb = if t.truthy("mb_trackid") { "" } else { r##" <span class="badge warn" title="No MusicBrainz id">?</span>"## },
-            vb = verify_badge(t), dur = ui::fmt::dur(t.f("duration")), id = t.s("id"), heart = icon("heart"), more = icon("more"),
+            nomb = if surround || t.truthy("mb_trackid") { "" } else if t.truthy("surround_id") { r##" <span class="badge accent" title="Has a surround version (⋯ → Play the surround version)">Surround</span>"## } else { r##" <span class="badge warn" title="No MusicBrainz id">?</span>"## },
+            vb = verify_badge(t), dur = ui::fmt::dur(t.f("duration")), more = icon("more"),
+            like = if surround { String::new() } else { format!(r##"<button class="btn sm ghost" data-like="{}" title="Like (syncs to Finamp/Plexamp)">{}</button>"##, t.s("id"), icon("heart")) },
             qb = if t.s("quality_status") == "suspect" { format!(r##" <button class="badge warn" data-qfix="{i}" title="{} – tap to replace" style="cursor:pointer">Suspect quality</button>"##, esck(t, "quality_note")) } else { String::new() })).collect();
         dom::set_html(&view, &format!(r##"
     <div class="detail-head">
       <div class="cover">{cover}</div>
       <div class="grow">
-        <div class="kicker">Album · In your library</div>
+        <div class="kicker">{kicker}</div>
         <h1>{album}</h1>{album_sub}
         <div class="muted"><a href="#/artist-name/{artist_enc}" style="color:var(--text);font-weight:650">{artist}</a>
           {year} · {n} tracks · {dur} · {size}</div>
@@ -1044,12 +1095,14 @@ pub fn render_album(view: Element, ctx: Ctx) -> PageFuture {
           <span class="badge">{formats}</span>
           {genre}
           {tagged}
+          {versions}
         </div>
         <div class="row wrap mt">
           <button class="btn primary" id="play-all">{play}Play</button>
           <button class="btn" id="shuffle-all">{shuffle}Shuffle</button>
           <button class="btn" id="album-share" title="Share link">{external}Share</button>
           {edit}
+          {atmos}
           <button class="btn icon" id="album-menu" aria-label="More options" title="More options">{more}</button>
         </div>
       </div>
@@ -1063,11 +1116,13 @@ pub fn render_album(view: Element, ctx: Ctx) -> PageFuture {
             year = if a.truthy("year") { format!(" · {}", esck(&a, "year")) } else { String::new() },
             n = tracks.len(), dur = ui::fmt::long_dur(a.f("duration")), size = ui::fmt::size(a.f("size")),
             requested = if history.is_empty() { String::new() } else { format!(r##"<div class="small muted" style="margin-top:4px">{history}</div>"##) },
-            formats = esc(&formats),
+            formats = esc(&if surround { a.s("quality") } else { formats }),
+            kicker = if surround { "Surround album · In your library" } else { "Album · In your library" },
+            versions = album_versions(&a, surround), atmos = if surround { String::new() } else { atmos_button(&a, admin) },
             genre = if a.truthy("genre") { format!(r##"<span class="badge">{}</span>"##, esck(&a, "genre")) } else { String::new() },
-            tagged = if untagged > 0 { format!(r##"<span class="badge warn">{untagged} track(s) not MusicBrainz-tagged</span>"##) } else { r##"<span class="badge ok">MusicBrainz tagged</span>"##.to_string() },
+            tagged = if surround { String::new() } else if untagged > 0 { format!(r##"<span class="badge warn">{untagged} track(s) not MusicBrainz-tagged</span>"##) } else { r##"<span class="badge ok">MusicBrainz tagged</span>"##.to_string() },
             play = icon("play"), shuffle = icon("shuffle"), external = icon("external"),
-            edit = if admin { format!(r##"<button class="btn" id="album-edit" title="Change the album, artist and song names">{}Edit details</button>"##, icon("edit")) } else { String::new() },
+            edit = if admin && !surround { format!(r##"<button class="btn" id="album-edit" title="Change the album, artist and song names">{}Edit details</button>"##, icon("edit")) } else { String::new() },
             more = icon("more")));
         let queue_tracks = Rc::new(with_album_id(&tracks, &id));
         { let qt = queue_tracks.clone(); dom::on_sel(&view, "#play-all", "click", move |_| player::play_queue((*qt).clone(), 0, "album")); }
@@ -1076,9 +1131,13 @@ pub fn render_album(view: Element, ctx: Ctx) -> PageFuture {
         { let (id, a) = (id.clone(), a.clone()); dom::on_sel(&view, "#album-edit", "click", move |_| edit_modal(&id, &a)); }
         { let (id, a) = (id.clone(), a.clone()); dom::on_sel(&view, "#album-share", "click", move |_| dom::spawn(ui::share_album(id.clone(), a.clone()))); }
         {
+            let (id, reload) = (id.clone(), reload.clone());
+            dom::on_sel(&view, "#get-atmos", "click", move |_| get_atmos(format!("/library/albums/{id}/surround"), reload.clone()));
+        }
+        {
             let menu_btn = need(&view, "#album-menu")?;
             let (mb, a, id, qt, reload) = (menu_btn.clone(), a.clone(), id.clone(), queue_tracks.clone(), reload.clone());
-            dom::on(&menu_btn, "click", move |_| album_menu(&mb, &a, &id, &qt, admin, &reload));
+            dom::on(&menu_btn, "click", move |_| if surround { surround_album_menu(&mb, &a, &qt) } else { album_menu(&mb, &a, &id, &qt, admin, &reload) });
         }
         let highlight: Rc<dyn Fn(Option<Value>)> = {
             let (view, tracks) = (view.clone(), tracks.clone());
@@ -1148,6 +1207,52 @@ pub fn render_album(view: Element, ctx: Ctx) -> PageFuture {
         }
         Ok(())
     })
+}
+
+/// The album page's links between its stereo and surround versions (0.35): a Surround album names its stereo
+/// album; a stereo album its surround ones and a Dolby Atmos version being fetched.
+fn album_versions(a: &Value, surround: bool) -> String {
+    if surround {
+        let stereo = a.o("stereo").s("album_id");
+        let atmos = if a.truthy("atmos") { r##"<span class="badge accent">Dolby Atmos</span>"## } else { "" };
+        return if stereo.is_empty() { atmos.to_string() }
+            else { format!(r##"{atmos}<a class="badge" href="#/library/album/{}" title="The stereo version of this album">Stereo version →</a>"##, esc(&stereo)) };
+    }
+    let sur = a.o("surround");
+    let mut out: String = sur.a("have").iter().map(|h| format!(r##"<a class="badge accent" href="#/library/album/{}" title="{} song(s) in the Surround library">{} version →</a>"##,
+        esc(&h.s("album_id")), h.s("tracks"), esc(&if h.s("quality").contains("Atmos") { "Dolby Atmos".to_string() } else { h.s("quality") }))).collect();
+    let req = sur.o("request");
+    if req.truthy("id") { out.push_str(&format!(r##"<a class="badge" href="#/requests" title="Request #{}">Dolby Atmos version: {}</a>"##, req.s("id"), esc(&req.s("status")))); }
+    out
+}
+
+/// "Get Dolby Atmos version" on a stereo album, for admins when gamdl can fetch Atmos and none is here or coming.
+fn atmos_button(a: &Value, admin: bool) -> String {
+    let sur = a.o("surround");
+    if !admin || !sur.truthy("can_fetch") || !sur.a("have").is_empty() || sur.o("request").truthy("id") { return String::new(); }
+    let title = if sur.g("available") == &json!(false) { "Apple Music had no Dolby Atmos version when last asked – ask again" } else { "Download the Dolby Atmos version from Apple Music into the Surround library" };
+    format!(r##"<button class="btn" id="get-atmos" title="{title}">{}Get Dolby Atmos version</button>"##, icon("download"))
+}
+
+/// Asks for the Dolby Atmos version (`POST …/surround`) and says how it went.
+fn get_atmos(url: String, done: Rc<dyn Fn()>) {
+    dom::spawn(async move {
+        toast("Looking for a Dolby Atmos version on Apple Music…", "");
+        match api::post_empty(&url).await {
+            Ok(r) => { toast(&format!("Dolby Atmos version requested (#{})", r.s("request_id")), "ok"); done(); }
+            Err(e) => toast(&e.message, if e.status == 404 { "warn" } else { "err" }),
+        }
+    });
+}
+
+/// A Surround album's ⋯ menu: playing it; the stereo library's tools don't apply.
+fn surround_album_menu(anchor: &Element, a: &Value, qt: &Rc<Vec<Value>>) {
+    let mut items: Vec<Option<MenuItem>> = Vec::new();
+    { let qt = qt.clone(); items.push(MenuItem::new("Add to queue", &icon("list"), move || { player::enqueue((*qt).clone()); toast("Added to queue", "ok"); })); }
+    { let qt = qt.clone(); items.push(MenuItem::new("Play next", &icon("next"), move || { player::play_next((*qt).clone()); toast("Plays next", "ok"); })); }
+    let stereo = a.o("stereo").s("album_id");
+    if !stereo.is_empty() { items.push(MenuItem::link("Go to the stereo version", &icon("disc"), &format!("#/library/album/{stereo}"), false)); }
+    pop_menu(anchor, items);
 }
 
 /// The album page's ⋯ menu.

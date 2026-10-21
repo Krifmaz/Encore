@@ -182,7 +182,7 @@ fn apps_and_sources_is_four_pages_and_old_links_still_open() {
     };
     let cards = |id: &str| SCHEMA.iter().find(|s| s.id == id).unwrap().groups.iter().map(|g| g.id).collect::<Vec<_>>();
     // 0.33: the sources of translated titles on the Library page
-    assert_eq!(cards("library"), ["library", "verify", "translations"]);
+    assert_eq!(cards("library"), ["library", "verify", "translations", "surround"]);
     assert_eq!(cards("downloads"), ["pipeline", "releases", "streamrip", "torznab", "slskd", "ytdlp", "youtube"]);
     assert_eq!(cards("integrations"), ["spotify", "media", "roon"]);
     assert_eq!(cards("processing"), ["cadenza"]);

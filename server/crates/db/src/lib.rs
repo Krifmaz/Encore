@@ -152,13 +152,14 @@ pub const MIGRATIONS: &[(i64, &str, &str)] = &[
     (27, "loudness", include_str!("../migrations/0027_loudness.sql")),
     (28, "plugins", include_str!("../migrations/0028_plugins.sql")),
     (29, "translation_tiers", include_str!("../migrations/0029_translation_tiers.sql")),
+    (30, "surround", include_str!("../migrations/0030_surround.sql")),
 ];
 
 /// The schema this server writes, stamped into `PRAGMA user_version`: the number of the last file in
 /// MIGRATIONS. An older server that finds a higher number refuses to touch the file (it would otherwise
 /// fail half-way through and leave a database neither version can read), and a lower number means
 /// "back up, then migrate" (and ANALYZE after it: new indexes have no statistics yet).
-pub const SCHEMA_VERSION: i64 = 29;
+pub const SCHEMA_VERSION: i64 = 30;
 
 /// Exit code of the server when the database comes from a newer Encore.
 pub const EXIT_NEWER_DB: i32 = 3;
@@ -1624,6 +1625,43 @@ mod tests {
         let v = read.expect("the read waited for the write").unwrap().unwrap();
         assert_eq!(v.s("value"), "2", "the write connection commits each statement");
         writer.await.unwrap().unwrap();
+        drop(db);
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn schema_30_adds_the_surround_library_to_a_schema_29_database() {
+        const { assert!(SCHEMA_VERSION >= 30) };
+        let d = tmp("surround");
+        drop(Db::open(&d).unwrap());
+        // what a schema 29 server left: no surround tables, requests without a class
+        {
+            let c = Connection::open(d.join("encore.db")).unwrap();
+            c.execute_batch(
+                "DROP TABLE surround_tracks; DROP TABLE surround_checks; DELETE FROM sqlite_sequence WHERE name='surround_tracks';
+                 DROP INDEX idx_requests_class; ALTER TABLE requests DROP COLUMN class;
+                 INSERT INTO tracks (path, title) VALUES ('/music/a.flac', 'A');
+                 INSERT INTO requests (user_id, kind, status, created_at, updated_at) VALUES (1, 'track', 'completed', 1, 1);",
+            )
+            .unwrap();
+            c.pragma_update(None, "user_version", 29).unwrap();
+        }
+        let db = Db::open(&d).unwrap();
+        assert_eq!(db.user_version().unwrap(), SCHEMA_VERSION);
+        // an old request is a stereo one; surround ids start at a billion, apart from every stereo id
+        assert_eq!(db.one("SELECT class FROM requests", p![]).unwrap().unwrap().s("class"), "stereo");
+        let id = db.execute("INSERT INTO surround_tracks (path, title, channels, atmos) VALUES ('/music/Surround/a.m4a', 'A', 6, 1)", p![]).unwrap();
+        assert_eq!(id, 1_000_000_000);
+        // every column of tracks is a column of surround_tracks (the scanner writes either)
+        let cols = |t: &str| -> Vec<String> { db.query(&format!("PRAGMA table_info({t})"), p![]).unwrap().iter().map(|r| r.s("name")).collect() };
+        let surround = cols("surround_tracks");
+        for c in cols("tracks") {
+            assert!(surround.contains(&c), "surround_tracks has no {c}");
+        }
+        drop(db);
+        // opening again changes nothing (the seed runs once)
+        let db = Db::open(&d).unwrap();
+        assert_eq!(db.execute("INSERT INTO surround_tracks (path) VALUES ('/music/Surround/b.m4a')", p![]).unwrap(), 1_000_000_001);
         drop(db);
         let _ = std::fs::remove_dir_all(&d);
     }

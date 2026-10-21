@@ -83,7 +83,9 @@ pub fn library_tile(a: &Value) -> String {
   </div>"#,
         id = esc(&id),
         art = ui::art(&format!("/api/library/albums/{}/cover{}", a.s("id"), ui::cover_q(a)), &a.s("album"), ""),
-        untagged = if a.truthy("untagged") { r#"<div class="corner"><span class="badge warn" title="Some tracks lack MusicBrainz tags">Untagged</span></div>"# } else { "" },
+        // a Surround album (0.35) names its format in the corner: Dolby Atmos, 5.1, 7.1
+        untagged = if a.s("class") == "surround" { format!(r#"<div class="corner"><span class="badge accent">{}</span></div>"#, esc(&if a.truthy("atmos") { "Dolby Atmos".to_string() } else { a.s("quality") })) }
+            else if a.truthy("untagged") { r#"<div class="corner"><span class="badge warn" title="Some tracks lack MusicBrainz tags">Untagged</span></div>"#.to_string() } else { String::new() },
         play = icon("play"),
         album = esck(a, "album"),
         album_or = if a.truthy("album") { esc(&ui::tr(a, "album")) } else { "Unknown album".to_string() },

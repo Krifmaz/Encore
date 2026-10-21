@@ -146,7 +146,7 @@ pub fn icon_btn<'a, M: Clone + 'a>(i: Icon, tip: &'a str, on: Option<M>) -> El<'
 }
 
 /// The small dark box a tooltip shows.
-pub fn tip_box<'a, M: 'a>(tip: &'a str) -> El<'a, M> {
+pub fn tip_box<'a, M: 'a>(tip: impl IntoFragment<'a>) -> El<'a, M> {
     container(t(tip).size(12))
         .padding([5, 9])
         .style(theme::menu_pop)

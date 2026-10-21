@@ -102,6 +102,10 @@ impl Req {
     fn hint(&self) -> Option<String> {
         self.opt("cover_url")
     }
+    /// `stereo` (every request before 0.35) or `surround`: a request for the Surround library.
+    fn surround(&self) -> bool {
+        self.s("class") == "surround"
+    }
 }
 
 pub fn get(st: &impl Ctx, id: i64) -> Option<Req> {

@@ -2,6 +2,10 @@
 //! `render_album` (the header with Play / Shuffle / Share / Edit details and the ⋯ menu, the song
 //! rows with likes and the song menu), `album_menu`, `match_modal` (Tag this album), `edit_modal`
 //! (Edit details) and web-rs/src/pages/artwork.rs (Change artwork).
+//!
+//! A Surround album (0.35, an `s…` id) has its own songs, a link to its stereo album and none of
+//! the stereo library's tools; a stereo album links to its surround versions and, for admins,
+//! has "Get Dolby Atmos version" (web `album_versions`, `atmos_button`, `surround_album_menu`).
 
 use super::library::{self, format_text, long_dur, size_text, tr, verify_badge, Act, Shared};
 use crate::api::ApiError;
@@ -168,6 +172,8 @@ pub enum Message {
     Deleted(Result<Value, ApiError>),
     TrackMenu(usize),
     Suspect(usize),
+    /// The other version of this album (stereo or surround).
+    OpenVersion(String),
     CloseDialog,
     Shared(Act),
 }
@@ -376,6 +382,56 @@ fn set_art(state: &mut State, body: Value, ctx: &Ctx) -> Task<Message> {
     let api = ctx.api.clone();
     let path = format!("/library/albums/{}/art", state.id);
     Task::perform(async move { api.post(&path, body).await }, Message::ArtSet)
+}
+
+/// The links between an album's stereo and surround versions (web `album_versions`): a Surround
+/// album names its stereo album; a stereo album its surround ones and a Dolby Atmos version being
+/// fetched. (label, tooltip, the album it opens – None for a label only.)
+fn version_links(a: &Value) -> Vec<(String, String, Option<String>)> {
+    let mut out = Vec::new();
+    if library::is_surround(a) {
+        let stereo = fmt::s(&a["stereo"], "album_id");
+        if !stereo.is_empty() {
+            out.push(("Stereo version →".into(), "The stereo version of this album".into(), Some(stereo)));
+        }
+        return out;
+    }
+    let sur = &a["surround"];
+    for h in fmt::items(&sur["have"]) {
+        out.push((
+            format!("{} version →", library::surround_label(&fmt::s(&h, "quality"))),
+            format!("{} song(s) in the Surround library", fmt::s(&h, "tracks")),
+            Some(fmt::s(&h, "album_id")),
+        ));
+    }
+    let req = &sur["request"];
+    if fmt::truthy(req, "id") {
+        out.push((
+            format!("Dolby Atmos version: {}", fmt::s(req, "status")),
+            format!("Request #{}", fmt::s(req, "id")),
+            None,
+        ));
+    }
+    out
+}
+
+/// "Get Dolby Atmos version" on a stereo album (web `atmos_button`): its tooltip, for admins when
+/// gamdl can fetch Atmos and no version is here or coming; None for no button.
+fn atmos_button_tip(a: &Value, admin: bool) -> Option<&'static str> {
+    let sur = &a["surround"];
+    if !admin
+        || library::is_surround(a)
+        || !fmt::truthy(sur, "can_fetch")
+        || !fmt::items(&sur["have"]).is_empty()
+        || fmt::truthy(&sur["request"], "id")
+    {
+        return None;
+    }
+    Some(if sur["available"] == json!(false) {
+        "Apple Music had no Dolby Atmos version when last asked – ask again"
+    } else {
+        "Download the Dolby Atmos version from Apple Music into the Surround library"
+    })
 }
 
 /// `t.key || fallback`.
@@ -879,6 +935,7 @@ pub fn update(state: &mut State, msg: Message, ctx: &mut Ctx) -> Task<Message> {
                 library::track_menu(&mut state.shared, t, ctx);
             }
         }
+        Message::OpenVersion(id) => ctx.navigate(Page::LibraryAlbum(id)),
         Message::Suspect(i) => {
             if let Some(t) = queue_tracks(state).get(i).cloned() {
                 return library::shared_update(&mut state.shared, Act::SuspectQuality(Box::new(t)), ctx)
@@ -940,6 +997,8 @@ pub fn view<'a>(state: &'a State, ctx: &Ctx<'a>) -> El<'a, Message> {
         Some(Value::Null) => return widgets::error_box(&state.error),
         Some(a) => a,
     };
+    // a Surround album: its own songs, linked to the stereo album; the stereo library's tools stay off
+    let surround = library::is_surround(a);
     let tracks = fmt::items(&a["tracks"]);
     let multi = tracks
         .iter()
@@ -1022,15 +1081,33 @@ pub fn view<'a>(state: &'a State, ctx: &Ctx<'a>) -> El<'a, Message> {
     ]
     .spacing(0)
     .align_y(Alignment::Center);
-    let mut chips = row![badge(formats.join(" / "), Badge::Plain)].spacing(6);
+    let quality = if surround { fmt::s(a, "quality") } else { formats.join(" / ") };
+    let mut chips = row![badge(quality, Badge::Plain)].spacing(6);
     if fmt::truthy(a, "genre") {
         chips = chips.push(badge(fmt::s(a, "genre"), Badge::Plain));
     }
-    chips = chips.push(if untagged > 0 {
-        badge(format!("{untagged} track(s) not MusicBrainz-tagged"), Badge::Warn)
+    if surround {
+        if fmt::truthy(a, "atmos") {
+            chips = chips.push(badge("Dolby Atmos", Badge::Accent));
+        }
     } else {
-        badge("MusicBrainz tagged", Badge::Ok)
-    });
+        chips = chips.push(if untagged > 0 {
+            badge(format!("{untagged} track(s) not MusicBrainz-tagged"), Badge::Warn)
+        } else {
+            badge("MusicBrainz tagged", Badge::Ok)
+        });
+    }
+    for (label, tip, to) in version_links(a) {
+        let chip: El<'a, Message> = match to {
+            Some(id) => button(badge(label, if surround { Badge::Plain } else { Badge::Accent }))
+                .padding(0)
+                .style(theme::btn(Btn::Row))
+                .on_press(Message::OpenVersion(id))
+                .into(),
+            None => badge(label, Badge::Plain),
+        };
+        chips = chips.push(tooltip(chip, widgets::tip_box(tip), tooltip::Position::Top).gap(4));
+    }
     let mut actions = row![
         btn_icon(Icon::Play, "Play", Btn::Primary, Some(Message::PlayAll)),
         btn_icon(Icon::Shuffle, "Shuffle", Btn::Default, Some(Message::ShuffleAll)),
@@ -1043,7 +1120,7 @@ pub fn view<'a>(state: &'a State, ctx: &Ctx<'a>) -> El<'a, Message> {
     ]
     .spacing(8)
     .align_y(Alignment::Center);
-    if admin {
+    if admin && !surround {
         actions = actions.push(
             tooltip(
                 btn_icon(Icon::Edit, "Edit details", Btn::Default, Some(Message::EditOpen)),
@@ -1053,9 +1130,21 @@ pub fn view<'a>(state: &'a State, ctx: &Ctx<'a>) -> El<'a, Message> {
             .gap(4),
         );
     }
+    if let Some(tip) = atmos_button_tip(a, admin) {
+        let path = format!("/library/albums/{}/surround", state.id);
+        actions = actions.push(
+            tooltip(
+                btn_icon(Icon::Download, "Get Dolby Atmos version", Btn::Default, Some(Message::Shared(Act::GetAtmos(path)))),
+                widgets::tip_box(tip),
+                tooltip::Position::Bottom,
+            )
+            .gap(4),
+        );
+    }
     actions = actions.push(icon_btn(Icon::More, "More options", Some(Message::Menu)));
+    let kicker = if surround { "Surround album · In your library" } else { "Album · In your library" };
     let mut info = column![
-        small_muted("Album · In your library").font(theme::semibold()),
+        small_muted(kicker).font(theme::semibold()),
         h1(album_name),
         artist_line,
     ]
@@ -1082,17 +1171,31 @@ pub fn view<'a>(state: &'a State, ctx: &Ctx<'a>) -> El<'a, Message> {
         let mut r = TrackRow::new(tr(ctx, tr_, "title"))
             .label(number)
             .sub(tr(ctx, tr_, "artist"))
-            .quality(format_text(tr_))
+            .quality(if surround && fmt::truthy(tr_, "quality") { fmt::s(tr_, "quality") } else { format_text(tr_) })
             .duration(Some(fmt::f(tr_, "duration")))
             .playing(cur == Some(id))
-            .liked(state.liked.contains(&id), Message::Like(id))
             .on_play(Message::Play(i))
             .on_menu(Message::TrackMenu(i));
+        // Surround songs have no likes
+        if !surround {
+            r = r.liked(state.liked.contains(&id), Message::Like(id));
+        }
         if admin {
             r = r.note(fmt::s(tr_, "relpath"));
         }
         r = r.note(source_line(tr_));
-        if !fmt::truthy(tr_, "mb_trackid") {
+        if fmt::truthy(tr_, "surround_id") {
+            r = r.badge(
+                tooltip(
+                    badge("Surround", Badge::Accent),
+                    widgets::tip_box("Has a surround version (⋯ → Play the surround version)"),
+                    tooltip::Position::Top,
+                )
+                .gap(4)
+                .into(),
+            );
+        }
+        if !surround && !fmt::truthy(tr_, "mb_trackid") {
             r = r.badge(
                 tooltip(badge("?", Badge::Warn), widgets::tip_box("No MusicBrainz id"), tooltip::Position::Top)
                     .gap(4)
@@ -1123,6 +1226,18 @@ pub fn view<'a>(state: &'a State, ctx: &Ctx<'a>) -> El<'a, Message> {
 fn album_menu<'a>(state: &State, ctx: &Ctx<'a>, at: Point) -> El<'a, Message> {
     let admin = ctx.is_admin();
     let a = state.album.clone().unwrap_or(Value::Null);
+    // a Surround album's (web `surround_album_menu`): playing it; the stereo library's tools don't apply
+    if library::is_surround(&a) {
+        let mut items = vec![
+            MenuItem::new("Add to queue", Message::AddToQueue).icon(Icon::List),
+            MenuItem::new("Play next", Message::PlayNext).icon(Icon::Next),
+        ];
+        let stereo = fmt::s(&a["stereo"], "album_id");
+        if !stereo.is_empty() {
+            items.push(MenuItem::new("Go to the stereo version", Message::OpenVersion(stereo)).icon(Icon::Disc));
+        }
+        return pop_menu(at, items, Message::CloseMenu, ctx.size);
+    }
     let mut items = vec![
         MenuItem::new("Add to queue", Message::AddToQueue).icon(Icon::List),
         MenuItem::new("Play next", Message::PlayNext).icon(Icon::Next),
@@ -1493,5 +1608,48 @@ mod tests {
         assert_eq!(source_line(&json!({})), "");
         let s = source_line(&json!({ "source": "soulseek", "source_detail": "user1", "requested_by": "ann" }));
         assert_eq!(s, "⬇ soulseek · user1 · requested by ann");
+    }
+    #[test]
+    fn stereo_and_surround_versions_link_to_each_other() {
+        // a Surround album names its stereo album
+        let sur = json!({ "id": "s0123456789abcde", "class": "surround", "stereo": { "album_id": "ab12" } });
+        assert_eq!(
+            version_links(&sur),
+            vec![("Stereo version →".to_string(), "The stereo version of this album".to_string(), Some("ab12".to_string()))]
+        );
+        assert!(version_links(&json!({ "class": "surround", "stereo": null })).is_empty());
+        assert_eq!(atmos_button_tip(&sur, true), None);
+        // a stereo album: its surround versions and the request on its way
+        let stereo = json!({
+            "id": "ab12",
+            "surround": {
+                "have": [
+                    { "album_id": "s1", "tracks": 10, "quality": "Dolby Atmos (E-AC-3 5.1)" },
+                    { "album_id": "s2", "tracks": 3, "quality": "AC-3 5.1" }
+                ],
+                "request": { "id": 7, "status": "queued" },
+                "available": true,
+                "can_fetch": true
+            }
+        });
+        let links = version_links(&stereo);
+        assert_eq!(links[0].0, "Dolby Atmos version →");
+        assert_eq!(links[0].1, "10 song(s) in the Surround library");
+        assert_eq!(links[0].2.as_deref(), Some("s1"));
+        assert_eq!(links[1].0, "AC-3 5.1 version →");
+        assert_eq!(links[2], ("Dolby Atmos version: queued".to_string(), "Request #7".to_string(), None));
+        assert_eq!(atmos_button_tip(&stereo, true), None, "already here and requested");
+        // nothing here or coming: admins can ask, again when Apple had none last time
+        let none = json!({ "surround": { "have": [], "request": null, "available": null, "can_fetch": true } });
+        assert!(atmos_button_tip(&none, true).is_some_and(|t| t.starts_with("Download")));
+        assert_eq!(atmos_button_tip(&none, false), None);
+        let missing = json!({ "surround": { "have": [], "request": null, "available": false, "can_fetch": true } });
+        assert!(atmos_button_tip(&missing, true).is_some_and(|t| t.contains("ask again")));
+        let no_gamdl = json!({ "surround": { "have": [], "request": null, "available": null, "can_fetch": false } });
+        assert_eq!(atmos_button_tip(&no_gamdl, true), None);
+        // an older server sends no `surround`: no links, no button
+        let old = json!({ "id": "ab12", "album": "X", "tracks": [] });
+        assert!(version_links(&old).is_empty());
+        assert_eq!(atmos_button_tip(&old, true), None);
     }
 }

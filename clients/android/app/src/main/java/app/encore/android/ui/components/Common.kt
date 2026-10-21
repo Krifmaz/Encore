@@ -62,6 +62,7 @@ import app.encore.android.R
 import app.encore.android.data.api.Album
 import app.encore.android.data.api.CoverVersions
 import app.encore.android.data.api.Track
+import app.encore.android.features.library.SurroundRules
 import app.encore.android.ui.theme.EncoreColors
 import app.encore.android.ui.theme.palette
 import coil3.ImageLoader
@@ -482,16 +483,29 @@ fun Tile(
     }
 }
 
-/** An album tile (the web's `libraryTile`): cover, title, "artist · year". */
+/**
+ * An album tile (the web's `libraryTile`): cover, title, "artist · year". A Surround album (0.35) names its format in
+ * the corner: Dolby Atmos, E-AC-3 5.1 …
+ */
 @Composable
 fun AlbumCard(album: Album, coverUrl: String, imageLoader: ImageLoader, modifier: Modifier = Modifier, onClick: () -> Unit) {
+    val corner = if (album.isSurround) SurroundRules.badge(album.atmos, album.quality) else ""
     Tile(
         title = album.shownTitle(),
         subtitle = listOf(album.shownArtist(), album.year).filter { it.isNotEmpty() }.joinToString(" · "),
         subtitle2 = album.titleUnder(),
         modifier = modifier,
         onClick = onClick,
-    ) { m -> Cover(coverUrl, imageLoader, m, corner = 12.dp, label = album.title) }
+    ) { m ->
+        if (corner.isEmpty()) {
+            Cover(coverUrl, imageLoader, m, corner = 12.dp, label = album.title)
+        } else {
+            Box(m) {
+                Cover(coverUrl, imageLoader, Modifier.fillMaxSize(), corner = 12.dp, label = album.title)
+                Badge(corner, kind = "accent", modifier = Modifier.align(Alignment.TopEnd).padding(8.dp))
+            }
+        }
+    }
 }
 
 /**
@@ -506,7 +520,8 @@ fun TrackRow(
     liked: Boolean,
     playing: Boolean,
     onClick: () -> Unit,
-    onLike: () -> Unit,
+    /** null: no heart (Surround songs have no likes) */
+    onLike: (() -> Unit)?,
     number: Int? = null,
     subtitle: String? = null,
     onMore: (() -> Unit)? = null,
@@ -582,7 +597,7 @@ fun TrackRow(
                 modifier = Modifier.padding(start = 8.dp),
             )
         }
-        LikeButton(liked, onLike)
+        if (onLike != null) LikeButton(liked, onLike)
         if (onMore != null) {
             IconButton(onClick = onMore) {
                 Icon(painterResource(R.drawable.ic_more_vert), contentDescription = "More", tint = p.muted)

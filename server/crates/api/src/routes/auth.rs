@@ -60,7 +60,8 @@ fn time_dur(secs: i64) -> cookie::time::Duration {
 }
 
 async fn info(State(st): State<AppState>) -> Json<Value> {
-    let mut features = vec!["owner", "totp", "email_login", "logout_all", "avatar", "theme", "remote", "rename", "reveal", "app_tokens", "engine_token"];
+    // "surround" (0.35): the Surround library (its tab, the album pages' Stereo/Surround links, /api/surround/…)
+    let mut features = vec!["owner", "totp", "email_login", "logout_all", "avatar", "theme", "remote", "rename", "reveal", "app_tokens", "engine_token", "surround"];
     if encore_requests::sources::slskd::enabled(&st) {
         features.push("soulseek"); // the Soulseek page (search, browse, transfers)
     }

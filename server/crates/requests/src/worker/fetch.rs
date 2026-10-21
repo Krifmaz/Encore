@@ -1051,7 +1051,10 @@ pub(super) async fn start_plugin(st: &impl Ctx, r: &mut Req, source: &crate::sou
     upd(st, r, &[("status", json!("downloading")), ("progress", json!(0)), ("message", json!(format!("{name}: {title}").trim_end_matches(": ").to_string()))]);
     let cb = progress_cb(st, r.id);
     let call = encore_plugins::Call { progress: Some(std::sync::Arc::new(move |pct: f64, _: Option<String>| cb(pct))), ..Default::default() };
-    let req = p::download_request(&source.id, &ask, &chosen);
+    let mut req = p::download_request(&source.id, &ask, &chosen);
+    if r.surround() {
+        req["surround"] = json!(true); // the Surround library's download: surround audio only (gamdl: Dolby Atmos, no fallback)
+    }
     let dl = match st.plugins().download(&source.plugin, &req, &out, Some(call)).await {
         Ok(d) => d,
         Err(f) => {

@@ -102,6 +102,11 @@ section = "library"
 title = "Translated titles"
 desc = "Where translated and romanized titles come from, strongest first: corrections by hand, official names, romanization built into the server, DeepL with your API key, and the local model when the Translator plugin is installed. Each listener turns translations on under Settings → Language, which also shows admins the state of each source."
 
+[groups.surround]
+section = "library"
+title = "Surround (Dolby Atmos)"
+desc = "Dolby Atmos and other 5.1 and 7.1 versions of songs, in a Surround library of their own: never in the stereo lists, shuffle, playlists or stats. Admins fetch an album's or a song's Atmos version from its page (gamdl with a wrapper-v2 server); a surround file a normal request downloads lands here too. Kodi, Plex or Jellyfin can read the folder as a library of its own."
+
 [groups.pipeline]
 section = "downloads"
 title = "Download pipeline"
@@ -1045,6 +1050,30 @@ group = "library"
 label = "Music library path"
 type = "path"
 help = "Inside the container (mount your music folder here)"
+
+[keys.surround_path]
+env = "ENCORE_SURROUND_PATH"
+default = ""
+group = "surround"
+label = "Surround folder"
+type = "path"
+help = "Where surround versions are filed. Empty: Surround inside the music library path (/music/Surround)."
+
+[keys.surround_auto_atmos]
+env = "ENCORE_SURROUND_AUTO_ATMOS"
+default = false
+group = "surround"
+label = "Fetch the Dolby Atmos version after each request"
+type = "bool"
+help = "When a song or album request is done and Apple Music has it in Dolby Atmos, its Atmos version is fetched into Surround too. Needs the gamdl plugin with a wrapper-v2 server."
+
+[keys.surround_hide_from_stereo]
+env = "ENCORE_SURROUND_HIDE_FROM_STEREO"
+default = true
+group = "surround"
+label = "Hide the Surround folder from stereo media-server libraries"
+type = "bool"
+help = "When the Surround folder is inside the music library, writes .plexignore and .ndignore there so Plex and Navidrome libraries over /music don't show the surround albums twice. Add the Surround folder to them as a library of its own."
 
 [keys.library_extra_roots]
 env = "ENCORE_LIBRARY_EXTRA_ROOTS"

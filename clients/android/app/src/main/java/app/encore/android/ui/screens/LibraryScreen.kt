@@ -70,6 +70,7 @@ import app.encore.android.data.api.LibrarySearch
 import app.encore.android.data.api.Track
 import app.encore.android.features.library.OnSongFixed
 import app.encore.android.features.library.SongFixUi
+import app.encore.android.features.library.SurroundUi
 import app.encore.android.features.library.WrongAudioList
 import app.encore.android.features.offline.DownloadedList
 import app.encore.android.features.offline.OfflineLibraryScreen
@@ -211,9 +212,9 @@ private fun SortChip(tab: String, sort: LibSort, onChange: (LibSort) -> Unit, mo
 }
 
 /**
- * Library: Albums / Artists / Songs (the web's #/library tabs), Downloaded once songs are saved on this phone
- * (features/offline), and for admins Wrong audio (the songs the audio check flagged). In offline mode the saved songs
- * are the whole library.
+ * Library: Albums / Artists / Songs (the web's #/library tabs), Surround on servers with the Surround library (0.35),
+ * Downloaded once songs are saved on this phone (features/offline), and for admins Wrong audio (the songs the audio
+ * check flagged). In offline mode the saved songs are the whole library.
  *
  * The search box (0.31) searches the whole library whatever tab is selected: while it has a query the page shows
  * one results view (Artists, Albums, Songs, each with "Show all N" that opens its tab filtered by the query); a
@@ -234,13 +235,16 @@ fun LibraryScreen(nav: Nav) {
     val savedAll by saved.all.collectAsState()
     // admins: the web's Wrong audio tab (after Downloaded, so that one keeps its place)
     val me by SongFixUi.me.collectAsState()
-    val tabs = TABS + (if (saved.songs(savedAll).isNotEmpty()) listOf("downloaded" to "Downloaded") else emptyList()) +
+    // the Surround library's albums (after Songs, for everyone, when the server has it)
+    val surround by SurroundUi.available.collectAsState()
+    val tabs = TABS + (if (surround) listOf("surround" to "Surround") else emptyList()) +
+        (if (saved.songs(savedAll).isNotEmpty()) listOf("downloaded" to "Downloaded") else emptyList()) +
         (if (me?.isAdmin == true) listOf("issues" to "Wrong audio") else emptyList())
     val labels = tabs.map { it.second }
     val shown = if (tab < labels.size) tab else 0
     // every tab's sort, remembered per tab
     var sorts by remember { mutableStateOf(TABS.associate { (k, _) -> k to store.get(k) }) }
-    // (Downloaded has no sort: it keeps the albums as they were saved)
+    // (Downloaded has no sort: it keeps the albums as they were saved; Surround lists the newest first)
     val tabKey = TABS.getOrNull(shown)?.first ?: TABS[0].first
     val sort = sorts.getValue(tabKey)
     val scope = rememberCoroutineScope()
@@ -294,6 +298,7 @@ fun LibraryScreen(nav: Nav) {
                 "albums" -> AlbumsTab(nav, sort, q)
                 "artists" -> ArtistsTab(nav, sort, q)
                 "tracks" -> SongsTab(nav, sort, q)
+                "surround" -> SurroundTab(nav, q)
                 "issues" -> WrongAudioList(nav, q)
                 else -> DownloadedList(nav)
             }
@@ -504,6 +509,54 @@ private fun AlbumsTab(nav: Nav, sort: LibSort, q: String = "") {
                 modifier = Modifier.align(Alignment.CenterEnd),
                 onJump = { paged.jumpTo(it) },
             )
+        }
+    }
+}
+
+/**
+ * The Surround tab (0.35): the Dolby Atmos and 5.1 / 7.1 albums, kept apart from the stereo library (GET
+ * /api/surround/albums, newest first). Each tile names its format in the corner; a tap opens its album page.
+ */
+@Composable
+private fun SurroundTab(nav: Nav, q: String = "") {
+    val api = nav.graph.api
+    val scope = rememberCoroutineScope()
+    val paged = remember(q) { Paged<Album>(120) }
+    paged.scope = scope
+    paged.fetch = { offset, limit -> api.surroundAlbums(offset = offset, limit = limit, q = q).albums }
+    val grid = rememberLazyGridState()
+    LaunchedEffect(q) { if (grid.firstVisibleItemIndex > 0) grid.scrollToItem(0) }
+    PreloadCoversAhead(grid, paged.rows.size, 400) { i -> paged.rows.getOrNull(i)?.id }
+    if (paged.done && paged.rows.isEmpty()) {
+        if (q.isEmpty()) {
+            EmptyState(
+                R.drawable.ic_disc,
+                "No surround albums yet",
+                "Dolby Atmos and 5.1 albums show here. Put them in the Surround folder, or use Get Dolby Atmos version on an album.",
+            )
+        } else {
+            EmptyState(R.drawable.ic_disc, "No surround albums match “$q”")
+        }
+        return
+    }
+    LazyVerticalGrid(
+        columns = GridCells.Adaptive(140.dp),
+        state = grid,
+        modifier = Modifier.fillMaxSize(),
+        contentPadding = PaddingValues(start = Gutter, end = Gutter, top = 4.dp, bottom = 24.dp),
+        horizontalArrangement = Arrangement.spacedBy(14.dp),
+        verticalArrangement = Arrangement.spacedBy(14.dp),
+    ) {
+        items(paged.rows.size) { i ->
+            val a = paged.rows[i]
+            if (a == null) {
+                Placeholder(paged, i) { AlbumPlaceholder() }
+            } else {
+                AlbumCard(a, api.coverUrl(a.id, 400), nav.graph.imageLoader) { nav.open(Screen.Album(a.id)) }
+            }
+        }
+        if (!paged.done) {
+            item(span = { GridItemSpan(maxLineSpan) }) { PageLoader(paged) }
         }
     }
 }

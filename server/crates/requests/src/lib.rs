@@ -20,6 +20,7 @@ pub mod search_cache;
 pub mod slskd_managed;
 pub mod slskd_session;
 pub mod sources;
+pub mod surround;
 pub mod upkeep;
 pub mod worker;
 pub mod ytauth;

@@ -452,13 +452,13 @@ fun FullPlayer(nav: Nav, actions: PlayerMenuActions, onClose: () -> Unit) {
                     // linked: the other device's volume
                     LinkedVolume(nav, Modifier.fillMaxWidth().padding(horizontal = 48.dp))
 
-                    // .np-actions: like, share, lyrics, ⋯
+                    // .np-actions: like, share, lyrics, ⋯ (a Surround song has no like and no playlists)
                     Row(
                         Modifier.fillMaxWidth().padding(bottom = 12.dp),
                         horizontalArrangement = Arrangement.spacedBy(18.dp, Alignment.CenterHorizontally),
                         verticalAlignment = Alignment.CenterVertically,
                     ) {
-                        LikeButton(track.id in liked, { nav.graph.likes.toggle(track.id) })
+                        if (!track.isSurround) LikeButton(track.id in liked, { nav.graph.likes.toggle(track.id) })
                         IconButton(onClick = { actions.shareLink() }) {
                             Icon(painterResource(R.drawable.ic_share), contentDescription = "Share link", tint = p.text)
                         }
@@ -469,7 +469,7 @@ fun FullPlayer(nav: Nav, actions: PlayerMenuActions, onClose: () -> Unit) {
                             entries = listOf(
                                 if (track.artist.isNotEmpty() || track.albumArtist.isNotEmpty()) MenuEntry("Go to artist", R.drawable.ic_person) { actions.goToArtist() } else null,
                                 if (track.albumId.isNotEmpty()) MenuEntry("View album", R.drawable.ic_album) { actions.viewAlbum() } else null,
-                                MenuEntry("Add to playlist", R.drawable.ic_playlist_add) { actions.addToPlaylist() },
+                                if (!track.isSurround) MenuEntry("Add to playlist", R.drawable.ic_playlist_add) { actions.addToPlaylist() } else null,
                                 MenuEntry("Lyrics", R.drawable.ic_lyrics) { toLyrics() },
                                 MenuEntry("Share link", R.drawable.ic_share) { actions.shareLink() },
                                 MenuEntry("Signal path", R.drawable.ic_signal) { actions.signalPath() },
@@ -478,7 +478,7 @@ fun FullPlayer(nav: Nav, actions: PlayerMenuActions, onClose: () -> Unit) {
                                     groupsHere == true && link == null -> MenuEntry("Start a group listen", R.drawable.ic_group) { GroupListen.startOpen.value = true }
                                     else -> null
                                 },
-                                *(if (link == null) offlineMenu.entries(listOf(track)) else emptyList()).toTypedArray(),
+                                *(if (link == null && !track.isSurround) offlineMenu.entries(listOf(track)) else emptyList()).toTypedArray(),
                             ),
                             tint = p.text,
                         )

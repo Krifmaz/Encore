@@ -60,6 +60,7 @@ import app.encore.android.ui.screens.AuthFlow
 import app.encore.android.features.library.PlaylistLinkHost
 import app.encore.android.features.library.SongFixHost
 import app.encore.android.features.library.SongFixUi
+import app.encore.android.features.library.SurroundUi
 import app.encore.android.features.requests.ActivityScreen
 import app.encore.android.data.repo.Me
 import app.encore.android.data.repo.features
@@ -221,6 +222,8 @@ private fun MainScreen(graph: AppGraph, player: PlayerConnection, session: Sessi
         SongFixUi.setMe(null)
         SongFixUi.setMe(try { withContext(Dispatchers.IO) { graph.features.me() } } catch (e: CancellationException) { throw e } catch (_: Exception) { null })
     }
+    // whether the server has the Surround library (0.35): the Library's Surround tab, the song menu's surround entries
+    LaunchedEffect(session) { SurroundUi.probe(graph) }
     val fixScope = rememberCoroutineScope()
     LaunchedEffect(offline) {
         if (offline) {
@@ -372,13 +375,15 @@ private fun MainScreen(graph: AppGraph, player: PlayerConnection, session: Sessi
 
 /**
  * The "⋯" of one song in a list (web/js/pages/library.js `trackMenu`): Play next, Add to queue, Add to playlist,
- * Lyrics, Share link, Go to album, Report a problem, and for those who may correct the song: Edit song details…,
- * This is the right song, Delete song from disk. Shown as a bottom-anchored popup at the root so every list shares one.
+ * Lyrics, Share link, Go to album, its surround version (0.35), Report a problem, and for those who may correct the
+ * song: Edit song details…, This is the right song, Delete song from disk. Shown as a bottom-anchored popup at the root
+ * so every list shares one. A Surround song (library.rs `surround_track_menu`) keeps playing, Lyrics and its albums.
  */
 @Composable
 private fun TrackMenu(nav: Nav, req: TrackMenuRequest, offlineMenu: OfflineMenu, me: Me?, fixScope: CoroutineScope, onDismiss: () -> Unit) {
     val t = req.track
     val player = nav.player
+    val surround = t.isSurround
     Box(Modifier.fillMaxSize(), contentAlignment = Alignment.BottomCenter) {
         PopMenu(
             expanded = true,
@@ -386,21 +391,24 @@ private fun TrackMenu(nav: Nav, req: TrackMenuRequest, offlineMenu: OfflineMenu,
             entries = listOf(
                 MenuEntry("Play next", R.drawable.ic_skip_next) { player.playNext(t); Toasts.show("Plays next", "ok") },
                 MenuEntry("Add to queue", R.drawable.ic_queue_music) { player.addToQueue(t); Toasts.show("Added to queue", "ok") },
-                MenuEntry("Add to playlist", R.drawable.ic_playlist_add) { nav.addToPlaylist(listOf(t.id)) },
-                *offlineMenu.entries(listOf(t)).toTypedArray(),
+                if (!surround) MenuEntry("Add to playlist", R.drawable.ic_playlist_add) { nav.addToPlaylist(listOf(t.id)) } else null,
+                *(if (!surround) offlineMenu.entries(listOf(t)) else emptyList()).toTypedArray(),
                 MenuEntry("Lyrics", R.drawable.ic_lyrics) {
                     val d = player.menuActions
                     if (d != null && player.nowPlaying.value?.id == t.id) d.lyrics() else Toasts.show("Play the song, then open Lyrics from the player", "info")
                 },
-                MenuEntry("Share link", R.drawable.ic_share) {
+                if (!surround) MenuEntry("Share link", R.drawable.ic_share) {
                     val d = player.menuActions
                     if (d != null && player.nowPlaying.value?.id == t.id) d.shareLink() else Toasts.show("Play the song, then share it from the player", "info")
-                },
+                } else null,
                 if (t.albumId.isNotEmpty() && !req.onAlbumPage) MenuEntry("Go to album", R.drawable.ic_album) { nav.open(Screen.Album(t.albumId)) } else null,
+                if (surround) SurroundUi.stereoEntry(nav, t) else null,
                 if (t.albumArtist.isNotEmpty() || t.artist.isNotEmpty()) MenuEntry("Go to artist", R.drawable.ic_person) { app.encore.android.ui.screens.openTrackArtist(nav, t) } else null,
-                MenuEntry("Report a problem", R.drawable.ic_flag) { ReportUi.track(t.id, t.title) },
+                // its surround version: play it, or (admins) fetch the Dolby Atmos version
+                *SurroundUi.entries(nav, t, me, fixScope).toTypedArray(),
+                if (!surround) MenuEntry("Report a problem", R.drawable.ic_flag) { ReportUi.track(t.id, t.title) } else null,
                 // admins, and members with "fix" on a song their request brought in (library.rs `track_menu`)
-                *SongFixUi.entries(nav, t, me, fixScope, req.onAlbumPage).toTypedArray(),
+                *(if (!surround) SongFixUi.entries(nav, t, me, fixScope, req.onAlbumPage) else emptyList()).toTypedArray(),
             ),
         )
     }

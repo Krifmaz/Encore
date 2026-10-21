@@ -11,10 +11,12 @@ import app.encore.android.core.objectsOf
 import app.encore.android.core.str
 import app.encore.android.features.library.PlaylistLinkRules
 import app.encore.android.features.library.PlaylistShareRules
+import app.encore.android.features.library.SurroundRules
 import kotlinx.serialization.SerialName
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonElement
+import kotlinx.serialization.json.JsonNull
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
 
@@ -74,7 +76,19 @@ data class Track(
     val verifyDetail: String = "",
     /** who requested the song (only the album page's rows say; "" elsewhere) */
     val requestedBy: String = "",
+    /**
+     * the Surround library (0.35): `class` ("surround" on its songs), their [quality] ("Dolby Atmos (E-AC-3 5.1)")
+     * and stereo album; on a stereo album page's rows, the song's surround version ([surroundId], 0: none)
+     */
+    val trackClass: String = "",
+    val quality: String = "",
+    val atmos: Boolean = false,
+    val stereoAlbumId: String = "",
+    val surroundId: Long = 0L,
 ) {
+    /** A song of the Surround library (by its class, or its id after a trip through the player): no likes or playlists. */
+    val isSurround: Boolean get() = trackClass == "surround" || SurroundRules.isSurroundTrack(id)
+
     /** The artists to link: the server's split, or the artist text as one. */
     fun credits(): List<ArtistCredit> = artists.ifEmpty { if (artist.isNotEmpty()) listOf(ArtistCredit(artist)) else emptyList() }
 
@@ -122,6 +136,11 @@ data class Track(
             verifyStatus = o.str("verify_status"),
             verifyDetail = o.str("verify_detail"),
             requestedBy = o.str("requested_by"),
+            trackClass = o.str("class"),
+            quality = o.str("quality"),
+            atmos = o.bool("atmos"),
+            stereoAlbumId = o.str("stereo_album_id"),
+            surroundId = o.long("surround_id"),
         )
     }
 }
@@ -135,10 +154,17 @@ data class Album(
     val formats: String,
     val titleTr: Tr = Tr.NONE,
     val artistTr: Tr = Tr.NONE,
+    /** a Surround album's (0.35) format ("Dolby Atmos (E-AC-3 5.1)", "E-AC-3 5.1") and its stereo album ("" when none) */
+    val atmos: Boolean = false,
+    val quality: String = "",
+    val stereoAlbumId: String = "",
 ) {
     fun shownTitle(): String = Translations.shown(title, titleTr)
     fun titleUnder(): String? = Translations.under(titleTr)
     fun shownArtist(): String = Translations.inline(artist, artistTr)
+
+    /** An album of the Surround library (its id starts with "s"). */
+    val isSurround: Boolean get() = SurroundRules.isSurroundAlbum(id)
 
     companion object {
         fun from(o: JsonObject): Album? {
@@ -153,12 +179,55 @@ data class Album(
                 formats = o.str("formats"),
                 titleTr = Tr.of(o, "album"),
                 artistTr = Tr.of(o, "albumartist"),
+                atmos = o.bool("atmos"),
+                quality = o.str("quality"),
+                stereoAlbumId = o.str("stereo_album_id"),
             )
         }
     }
 }
 
 data class AlbumDetail(val album: Album, val tracks: List<Track>, val durationSec: Double)
+
+/** GET /api/surround/albums (0.35): a page of the Surround library's albums, and the library's totals. */
+data class SurroundAlbums(val albums: List<Album>, val stats: SurroundStats) {
+    companion object {
+        fun from(o: JsonObject): SurroundAlbums {
+            val s = o.obj("stats")
+            val stats = SurroundStats(s?.int("albums") ?: 0, s?.int("atmos") ?: 0, s?.int("tracks") ?: 0, s?.long("size") ?: 0L, s?.dbl("duration") ?: 0.0)
+            return SurroundAlbums(o.arr("albums").objectsOf().mapNotNull { Album.from(it) }, stats)
+        }
+    }
+}
+
+/** `stats` of GET /api/surround/albums: albums (of them in Dolby Atmos), songs, bytes, seconds. */
+data class SurroundStats(val albums: Int, val atmos: Int, val tracks: Int, val size: Long, val durationSec: Double)
+
+/** One surround version of a stereo album (`surround.have[]`): its album in the Surround library. */
+data class SurroundVersion(val albumId: String, val tracks: Int, val quality: String)
+
+/** The request fetching a Dolby Atmos version (`surround.request`), with its status ("pending", "downloading" …). */
+data class SurroundRequest(val id: Long, val status: String)
+
+/**
+ * A stereo album's `surround` (0.35): its versions in the Surround library, the request fetching one, whether Apple
+ * Music has one ([available]: null when never asked) and whether the server can fetch one (gamdl with wrapper-v2).
+ */
+data class SurroundState(val have: List<SurroundVersion>, val request: SurroundRequest?, val available: Boolean?, val canFetch: Boolean) {
+    companion object {
+        /** Null for an older server's album (no `surround`). */
+        fun from(e: JsonElement?): SurroundState? {
+            val o = e as? JsonObject ?: return null
+            val have = o.arr("have").objectsOf().mapNotNull { h ->
+                val id = h.str("album_id")
+                if (id.isEmpty()) null else SurroundVersion(id, h.int("tracks"), h.str("quality"))
+            }
+            val request = o.obj("request")?.let { r -> if (r.long("id") > 0L) SurroundRequest(r.long("id"), r.str("status")) else null }
+            val available = (o["available"] as? JsonPrimitive)?.takeIf { it !is JsonNull }?.let { o.bool("available") }
+            return SurroundState(have, request, available, o.bool("can_fetch"))
+        }
+    }
+}
 
 data class Artist(val name: String, val albums: Int, val tracks: Int, val coverAlbum: String, val nameTr: Tr = Tr.NONE) {
     fun shownName(): String = Translations.inline(name, nameTr)

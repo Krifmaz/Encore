@@ -11,6 +11,9 @@ What it does:
   and Settings; one artist page (MusicBrainz, or the library's albums for an artist known by name only) with "Liked
   from this artist" and "In your library"; one search box on the Library page for artists, albums and songs, and
   Discover's search asks the library too
+- the Surround library (0.35): the Library's Surround tab (Dolby Atmos and 5.1 albums), the album pages' links
+  between the stereo and surround versions, "Play the surround version" in a song's menu, and for admins "Get Dolby
+  Atmos version" on an album or a song
 - playback in one `MediaLibraryService` (ExoPlayer): queue, mini and full player, gapless, notification and lock
   screen, resume and crash recovery, "Keep going with a shuffle of the whole library", plays and now playing
 - the web player's playback settings: quality Auto / Original / Data saver with the bandwidth estimate, the server's

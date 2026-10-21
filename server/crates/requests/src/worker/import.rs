@@ -9,6 +9,22 @@ use super::*;
 /// file or another artist's album is turned away all the same. A title that asks for a nightcore, sped up, slowed …
 /// version is not fingerprinted (the request's log says so): only its length and title are checked.
 pub(super) async fn import(st: &impl Ctx, r: &mut Req, files: &[PathBuf], root: &Path, hint: Option<&str>) -> anyhow::Result<(Vec<PathBuf>, String)> {
+    if r.surround() {
+        return import_surround(st, r, files).await;
+    }
+    // a 5.1 or Atmos file that came with a stereo download goes to the Surround library; the request goes on
+    // with the stereo files, or looks further when there are none
+    let (surround, stereo) = encore_library::surround::split(files).await;
+    if !surround.is_empty() {
+        let (filed, _) = encore_library::surround::import(st, &surround, &surround_want(r)).await?;
+        let src = r.opt("source").unwrap_or("import".into());
+        log_push(r, format!("{src}: {} surround file{} filed in the Surround library", filed.len(), if filed.len() == 1 { "" } else { "s" }));
+        if stereo.is_empty() {
+            return Err(tagger::Rejected::quality("Only a surround version (filed in the Surround library), no stereo copy".into()).into());
+        }
+    }
+    let files = if surround.is_empty() { files.to_vec() } else { stereo };
+    let files = files.as_slice();
     let hint = r.hint().or(hint.map(String::from));
     let check = !rejected::skips_check(&r.d);
     let album = r.s("kind") == "album";
@@ -42,9 +58,32 @@ pub(super) async fn import(st: &impl Ctx, r: &mut Req, files: &[PathBuf], root: 
     Ok((new, if note.is_empty() { skipped } else { format!("{note}; {skipped}") }))
 }
 
+/// What a Surround import knows of the request: its names and the stereo album and songs it was asked for.
+fn surround_want(r: &Req) -> encore_library::surround::Import {
+    encore_library::surround::Import {
+        artist: r.s("artist"),
+        album: r.album_title(),
+        stereo_album_id: r.d["stereo_album_id"].as_str().map(String::from),
+        stereo_track_ids: r.d["stereo_track_ids"].as_array().map(|a| a.iter().filter_map(|v| v.as_i64()).collect()).unwrap_or_default(),
+    }
+}
+
+/// A request for the Surround library: the surround files go to the Surround folder; a download without any
+/// (no Atmos stream after all) is turned away.
+async fn import_surround(st: &impl Ctx, r: &mut Req, files: &[PathBuf]) -> anyhow::Result<(Vec<PathBuf>, String)> {
+    let (new, others) = encore_library::surround::import(st, files, &surround_want(r)).await?;
+    if new.is_empty() {
+        return Err(tagger::Rejected::quality("The download has no surround audio (no Dolby Atmos stream)".into()).into());
+    }
+    let note = if others > 0 { format!("{others} without a surround stream left out") } else { String::new() };
+    Ok((new, note))
+}
+
 /// Remember where each new file came from (shown on the album page).
 pub(super) fn record_origin(st: &impl Ctx, paths: &[PathBuf], origin: &Value, rid: i64, since: f64) {
     for pth in paths {
+        let _ = st.db().execute("UPDATE surround_tracks SET source=?, source_detail=?, source_url=?, request_id=?, downloaded_at=? WHERE path=?",
+            p![origin["source"], origin["detail"], origin["url"], rid, now(), pth.to_string_lossy()]);
         let _ = st.db().execute("UPDATE tracks SET source=?, source_detail=?, source_url=?, request_id=?, downloaded_at=?
                                WHERE path=? AND (downloaded_at IS NULL OR downloaded_at >= ?) AND added_at >= ?",
             p![origin["source"], origin["detail"], origin["url"], rid, now(), pth.to_string_lossy(), since, since - 1.0]);
@@ -61,8 +100,19 @@ pub(super) async fn complete(st: &impl Ctx, r: &mut Req, message: &str, new: &[P
         crate::report::finish(st, &r.d, new, r.row.f("created_at"));
     }
     upd(st, r, &[("status", json!("completed")), ("progress", json!(100)), ("message", json!(message))]);
+    if r.surround() {
+        // the Surround library: no playlists or lyrics task (they read the stereo library), the media servers
+        // see the new folder
+        st.db().log("info", &format!("Surround request completed: {} ({message})", r.label()));
+        notify::send(st, "✅ Dolby Atmos version available", &format!("{}\n{message}", r.label()), r.hint().as_deref()).await;
+        if !new.is_empty() {
+            notify::refresh_media_servers(st).await;
+        }
+        return;
+    }
     if !new.is_empty() {
         encore_sync::playlists::rematch(st, None, true); // playlists pick up the new songs
+        crate::surround::after_stereo(st, r, new); // the Atmos version too, when the setting says so
     }
     st.db().log("info", &format!("Request completed: {} ({message})", r.label()));
     notify::send(st, "✅ Now available", &format!("{}\n{message}", r.label()), r.hint().as_deref()).await;
@@ -87,6 +137,9 @@ pub(super) async fn fail(st: &impl Ctx, r: &mut Req, message: &str) {
         return;
     }
     upd(st, r, &[("status", json!("failed")), ("message", json!(message))]);
+    if r.surround() {
+        crate::surround::failed(st, &r.d);
+    }
     tracing::warn!("request {} failed: {} – {message}", r.id, r.label());
     st.db().log("error", &format!("Request failed: {} – {message}", r.label()));
     notify::send(st, "❌ Request failed", &format!("{}\n{message}", r.label()), r.hint().as_deref()).await;

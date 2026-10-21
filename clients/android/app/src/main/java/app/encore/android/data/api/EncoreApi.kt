@@ -283,6 +283,31 @@ class EncoreApi(private val client: OkHttpClient, private val store: SessionStor
         return post("/api/library/shuffle", body).objects().mapNotNull { Track.from(it) }
     }
 
+    // ---- the Surround library (0.35, docs/contracts/surround.md) -----------------------------------------
+
+    /**
+     * GET /api/surround/albums: a page of the Surround library's albums (sort: added | name | artist | year). Its
+     * songs and albums play and open through the library's own routes, told apart by id.
+     */
+    fun surroundAlbums(sort: String = "added", offset: Int = 0, limit: Int = 120, q: String = ""): SurroundAlbums {
+        val qs = StringBuilder("/api/surround/albums?sort=").append(enc(sort)).append("&limit=").append(limit).append("&offset=").append(offset)
+        if (q.isNotEmpty()) qs.append("&q=").append(enc(q))
+        val page = SurroundAlbums.from(getObject(qs.toString()))
+        if (offset > 0 || page.albums.size > 24) onAlbumPage?.invoke(page.albums.map { it.id })
+        return page
+    }
+
+    /**
+     * POST /api/library/albums/{id}/surround (admins): fetch the stereo album's Dolby Atmos version; the request's id.
+     * 404 when Apple Music has none, 409 when one is already requested or gamdl can't fetch Atmos (the `detail` says).
+     */
+    fun requestAlbumSurround(albumId: String): Long =
+        (post("/api/library/albums/${enc(albumId)}/surround", JsonObject(emptyMap())) as? JsonObject)?.long("request_id") ?: 0L
+
+    /** POST /api/library/tracks/{id}/surround (admins): the same for one song. */
+    fun requestTrackSurround(trackId: Long): Long =
+        (post("/api/library/tracks/$trackId/surround", JsonObject(emptyMap())) as? JsonObject)?.long("request_id") ?: 0L
+
     /** Made for you (ListenBrainz playlists): raw rows, `tracks[].library` is the library match. */
     fun madeForYou(): List<JsonObject> = getObject("/api/discover/made-for-you").arr("playlists").objectsOf()
 

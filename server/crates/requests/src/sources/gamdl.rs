@@ -30,10 +30,20 @@ fn net(e: impl std::fmt::Display) -> Failure {
 
 /// The codec setting: (gamdl's --song-codec-priority, the format shown, its bitrate, lossless, needs the wrapper).
 fn codec(st: &impl Ctx) -> (&'static str, &'static str, i64, bool, bool) {
+    codec_for(st, false)
+}
+
+/// [`codec`] for a request: one for the Surround library (`surround` in the request) is Dolby Atmos only, never
+/// the AAC fallback; a stereo one never takes Atmos (a saved "atmos" Format reads as ALAC since 0.35: Atmos files
+/// belong in the Surround library).
+fn codec_for(st: &impl Ctx, surround: bool) -> (&'static str, &'static str, i64, bool, bool) {
+    if surround {
+        return ("atmos", "atmos", 768, false, true);
+    }
     match st.cfg().str("gamdl_codec").as_str() {
         "aac-he-web" => ("aac-he-web", "aac", 64, false, false),
         "alac" => ("alac,aac-web", "alac", 0, true, true),
-        "atmos" => ("atmos,aac-web", "atmos", 768, false, true),
+        "atmos" => ("alac,aac-web", "alac", 0, true, true),
         _ => ("aac-web", "aac", 256, false, false),
     }
 }
@@ -189,8 +199,8 @@ fn cover(a: &Value) -> Value {
 }
 
 /// What gamdl delivers for an item with these audio traits: (format, bitrate, lossless, bit depth).
-fn quality_for(st: &impl Ctx, traits: &Value) -> (&'static str, i64, bool, i64) {
-    let (_, fmt, rate, lossless, wrapped) = codec(st);
+fn quality_for(st: &impl Ctx, traits: &Value, surround: bool) -> (&'static str, i64, bool, i64) {
+    let (_, fmt, rate, lossless, wrapped) = codec_for(st, surround);
     let has = |t: &str| traits.as_array().is_some_and(|a| a.iter().any(|x| x.as_str().is_some_and(|s| s.eq_ignore_ascii_case(t))));
     match fmt {
         "alac" if has("lossless") => ("alac", 0, true, if has("hi-res-lossless") { 24 } else { 16 }),
@@ -199,6 +209,10 @@ fn quality_for(st: &impl Ctx, traits: &Value) -> (&'static str, i64, bool, i64) 
         _ if wrapped => ("aac", 256, false, 0),
         _ => (fmt, rate, lossless, 0),
     }
+}
+
+fn has_trait(traits: &Value, t: &str) -> bool {
+    traits.as_array().is_some_and(|a| a.iter().any(|x| x.as_str().is_some_and(|s| s.eq_ignore_ascii_case(t))))
 }
 
 fn label(fmt: &str, rate: i64, depth: i64) -> String {
@@ -227,7 +241,11 @@ fn song_result(st: &impl Ctx, req: &Value, s: &Value, sf: &str, by_isrc: bool) -
     if rel < 0.5 && !by_isrc {
         return None;
     }
-    let (fmt, rate, lossless, depth) = quality_for(st, &a["audioTraits"]);
+    let surround = req["surround"] == true;
+    if surround && !has_trait(&a["audioTraits"], "atmos") {
+        return None; // a Surround request takes Dolby Atmos only
+    }
+    let (fmt, rate, lossless, depth) = quality_for(st, &a["audioTraits"], surround);
     if req["lossless_only"] == true && !lossless {
         return None;
     }
@@ -268,7 +286,11 @@ fn album_result(st: &impl Ctx, req: &Value, al: &Value, sf: &str) -> Option<Valu
     if rel < 0.5 {
         return None;
     }
-    let (fmt, rate, lossless, depth) = quality_for(st, &a["audioTraits"]);
+    let surround = req["surround"] == true;
+    if surround && !has_trait(&a["audioTraits"], "atmos") {
+        return None; // a Surround request takes Dolby Atmos only
+    }
+    let (fmt, rate, lossless, depth) = quality_for(st, &a["audioTraits"], surround);
     if req["lossless_only"] == true && !lossless {
         return None;
     }
@@ -340,9 +362,12 @@ fn write_cookies(st: &impl Ctx) -> Result<String, Failure> {
     Ok(p.to_string_lossy().into_owned())
 }
 
-fn args(st: &impl Ctx, folder: &Path, ffmpeg: &str) -> Result<Vec<String>, Failure> {
-    let (prio, _, _, _, wrapped) = codec(st);
+fn args(st: &impl Ctx, folder: &Path, ffmpeg: &str, surround: bool) -> Result<Vec<String>, Failure> {
+    let (prio, _, _, _, wrapped) = codec_for(st, surround);
     let w = wrapper(st);
+    if surround && w.is_none() {
+        return Err(Failure::unsupported("Dolby Atmos needs a wrapper-v2 server: set \"Wrapper URL\" on the gamdl card"));
+    }
     if wrapped && w.is_none() {
         return Err(Failure::unsupported("ALAC and Dolby Atmos need a wrapper-v2 server: set \"Wrapper URL\" on the gamdl card, or choose AAC"));
     }
@@ -410,11 +435,25 @@ pub async fn download(st: &impl Ctx, call: &Call, req: &Value, folder: &Path) ->
     encore_core::fsx::mkdir_all(folder, encore_core::fsx::Step::Stage).map_err(|e| Failure::internal(e.to_string()))?;
     let expected = payload["tracks"].as_u64().unwrap_or(1).max(1) as usize;
     let hook = |line: &str| (track_line(line).map(|(n, total)| (n - 1.0) / total.max(1.0) * 100.0), true);
-    let mut a = args(st, folder, &ffmpeg.to_string_lossy())?;
+    let surround = req["surround"] == true;
+    let mut a = args(st, folder, &ffmpeg.to_string_lossy(), surround)?;
     a.push(url.clone());
     let secrets = vec![media_user_token(st)];
     let run = pytool::run(st, Spec { id: ID, program, args: a, folder, expected, hook: Some(&hook), secrets, call }).await?;
-    let files: Vec<_> = run.files.iter().filter(|p| !matches!(p.extension().and_then(|x| x.to_str()), Some("lrc" | "srt" | "ttml"))).cloned().collect();
+    let mut files: Vec<_> = run.files.iter().filter(|p| !matches!(p.extension().and_then(|x| x.to_str()), Some("lrc" | "srt" | "ttml"))).cloned().collect();
+    let mut not_atmos = 0;
+    if surround {
+        // only what really holds surround audio (should gamdl ever fall back to stereo, that copy goes)
+        let (keep, stereo) = encore_library::surround::split(&files).await;
+        not_atmos = stereo.len();
+        for f in &stereo {
+            let _ = std::fs::remove_file(f);
+        }
+        files = keep;
+        if files.is_empty() && not_atmos > 0 {
+            return Err(Failure::new(Code::NotFound, "Apple Music sent no Dolby Atmos stream for this"));
+        }
+    }
     if files.is_empty() {
         return Err(classify(run.success, run.code, &run.tail));
     }
@@ -426,7 +465,9 @@ pub async fn download(st: &impl Ctx, call: &Call, req: &Value, folder: &Path) ->
         duration: None, format: None, isrc: None,
     }).collect::<Vec<_>>();
     let (n, missing) = (entries.len(), expected.saturating_sub(entries.len()));
-    let message = format!("Downloaded {n} file{} with gamdl{}", if n == 1 { "" } else { "s" }, if expected > 1 && missing > 0 { format!(" ({missing} skipped, see the log)") } else { String::new() });
+    let message = format!("Downloaded {n} file{} with gamdl{}{}", if n == 1 { "" } else { "s" },
+        if surround { " in Dolby Atmos" } else { "" },
+        if expected > 1 && missing > 0 { format!(" ({missing} without Dolby Atmos or skipped, see the log)") } else if not_atmos > 0 { format!(" ({not_atmos} without Dolby Atmos left out)") } else { String::new() });
     Ok(Downloaded { files: entries, source_url: Some(url), message: Some(message), cover_url: None })
 }
 
@@ -439,6 +480,20 @@ fn quality_label(st: &impl Ctx) -> &'static str {
         "atmos" => "Dolby Atmos through the wrapper",
         _ => "AAC 256k",
     }
+}
+
+/// The gamdl plugin can fetch Dolby Atmos: installed and on, signed in, with a wrapper.
+pub fn atmos_ready(st: &impl Ctx) -> bool {
+    st.plugins().enabled(ID) && wrapper(st).is_some() && pytool::program(st, ID).is_some()
+}
+
+/// The Dolby Atmos version of a song or album (the SDK's request fields): the best matching Atmos result, if
+/// Apple has one.
+pub async fn atmos_for(st: &impl Ctx, ask: &Value) -> Result<Option<Value>, Failure> {
+    let mut req = ask.clone();
+    req["surround"] = json!(true);
+    let results = search(st, &req).await?;
+    Ok(results.into_iter().next())
 }
 
 pub fn signed_in(st: &impl Ctx) -> bool {

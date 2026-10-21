@@ -62,7 +62,7 @@ async fn main() -> anyhow::Result<()> {
 fn start_library(st: &AppState) {
     st.library.warm_covers(st.db.clone());
     let st = st.clone();
-    tokio::spawn(async move { st.library.scan_all(st.db.clone(), encore_library::folders::scan_roots(&st.cfg), false).await });
+    tokio::spawn(async move { st.library.scan_library(st.db.clone(), &st.cfg, false).await });
 }
 
 /// The loops that run beside the web server, each from the crate it belongs to. Before a restart the

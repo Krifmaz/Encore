@@ -153,8 +153,11 @@ fn main_column<'a>(state: &'a State, ctx: &Ctx<'a>, now: &Now, art_size: f32) ->
 
     let mut actions = row![].spacing(6).align_y(Alignment::Center);
     if let Some(id) = lib {
-        let liked = state.is_liked(Some(id));
-        actions = actions.push(bar_mode(Icon::Heart, liked, None, Message::LikeTrack(id)));
+        // Surround songs (0.35) have no likes
+        if id < crate::pages::library::SURROUND_IDS {
+            let liked = state.is_liked(Some(id));
+            actions = actions.push(bar_mode(Icon::Heart, liked, None, Message::LikeTrack(id)));
+        }
         actions = actions.push(icon_btn(Icon::External, "Share link", Some(Message::Share)));
     }
     actions = actions.push(bar_mode(

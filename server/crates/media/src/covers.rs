@@ -359,7 +359,8 @@ impl CoverIndex {
         }
         // colours of albums gone from the library
         if whole {
-            let _ = db.execute("DELETE FROM cover_color WHERE album_id NOT IN (SELECT DISTINCT album_id FROM tracks WHERE album_id IS NOT NULL)", p![]);
+            let _ = db.execute("DELETE FROM cover_color WHERE album_id NOT IN (SELECT DISTINCT album_id FROM tracks WHERE album_id IS NOT NULL)
+                                AND album_id NOT IN (SELECT DISTINCT album_id FROM surround_tracks WHERE album_id IS NOT NULL)", p![]);
         } else {
             let gone: Vec<&String> = asked.iter().filter(|a| !ids.contains(*a)).collect();
             for chunk in gone.chunks(500) {
@@ -718,7 +719,10 @@ fn album_ids_in_library(db: &Db, ids: &[String]) -> std::collections::HashSet<St
     for chunk in ids.chunks(500) {
         let marks = vec!["?"; chunk.len()].join(",");
         let params: Vec<Value> = chunk.iter().map(|a| json!(a)).collect();
-        match db.query(&format!("SELECT DISTINCT album_id FROM tracks WHERE album_id IN ({marks})"), params) {
+        let both = format!("SELECT DISTINCT album_id FROM tracks WHERE album_id IN ({marks}) UNION SELECT DISTINCT album_id FROM surround_tracks WHERE album_id IN ({marks})");
+        let mut params = params;
+        params.extend(params.clone());
+        match db.query(&both, params) {
             Ok(rows) => out.extend(rows.iter().map(|r| r.s("album_id"))),
             // can't tell: treat them all as library albums (the pass decides)
             Err(_) => out.extend(chunk.iter().cloned()),
@@ -735,7 +739,9 @@ const COVER_NAMES: &[&str] = &["cover", "folder", "front", "album", "artwork"];
 /// Folder picture (cover.jpg, folder.png, …) or the art embedded in the first file, read from the disk
 /// every time ([`CoverIndex::get`] keeps the answer).
 pub fn find_cover_uncached(db: &Db, album_id: &str) -> Option<PathBuf> {
-    let tracks = db.query("SELECT path FROM tracks WHERE album_id=? ORDER BY disc, track LIMIT 50", p![album_id]).ok()?;
+    // a Surround album ("s…", encore_library::surround) has its songs in their own table
+    let table = if album_id.starts_with('s') { "surround_tracks" } else { "tracks" };
+    let tracks = db.query(&format!("SELECT path FROM {table} WHERE album_id=? ORDER BY disc, track LIMIT 50"), p![album_id]).ok()?;
     let mut dirs: Vec<PathBuf> = vec![];
     for t in &tracks {
         let d = Path::new(&t.s("path")).parent()?.to_path_buf();
@@ -747,7 +753,7 @@ pub fn find_cover_uncached(db: &Db, album_id: &str) -> Option<PathBuf> {
         // a range on the path index (`dir/` ≤ path < `dir0`, '0' being the character after '/'), not a
         // LIKE that reads every song: this runs for every album in the thumbnail pass. Bytes, not
         // characters, after the folder: no further '/'.
-        let shared = db.one("SELECT COUNT(*) n FROM (SELECT DISTINCT album_id FROM tracks WHERE path >= ? AND path < ? AND instr(substr(CAST(path AS BLOB), ?), CAST('/' AS BLOB)) = 0 LIMIT 2)",
+        let shared = db.one(&format!("SELECT COUNT(*) n FROM (SELECT DISTINCT album_id FROM {table} WHERE path >= ? AND path < ? AND instr(substr(CAST(path AS BLOB), ?), CAST('/' AS BLOB)) = 0 LIMIT 2)"),
             p![format!("{ds}/"), format!("{ds}0"), ds.len() as i64 + 2])
             .ok().flatten().map(|r| r.i("n") > 1).unwrap_or(false);
         if !shared {

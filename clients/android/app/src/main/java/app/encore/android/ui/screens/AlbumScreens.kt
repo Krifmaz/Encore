@@ -3,6 +3,8 @@ package app.encore.android.ui.screens
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.ExperimentalLayoutApi
+import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
@@ -42,11 +44,14 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import app.encore.android.R
+import app.encore.android.core.bool
 import app.encore.android.core.dbl
+import app.encore.android.core.obj
 import app.encore.android.core.str
 import app.encore.android.data.api.Album
 import app.encore.android.data.api.AlbumDetail
 import app.encore.android.data.api.EncoreApi
+import app.encore.android.data.api.SurroundState
 import app.encore.android.data.api.Track
 import app.encore.android.data.api.Tr
 import app.encore.android.features.offline.rememberOfflineMenu
@@ -61,6 +66,7 @@ import app.encore.android.ui.components.LoadableContent
 import app.encore.android.ui.components.MenuEntry
 import app.encore.android.ui.components.ReportUi
 import app.encore.android.ui.components.MoreButton
+import app.encore.android.ui.components.SmallButton
 import app.encore.android.ui.components.Toasts
 import app.encore.android.ui.components.TrackRow
 import app.encore.android.ui.components.formatDay
@@ -76,6 +82,9 @@ import app.encore.android.features.library.AlbumMatchSheet
 import app.encore.android.features.library.LibraryFixRules
 import app.encore.android.features.library.OnSongFixed
 import app.encore.android.features.library.SongFixUi
+import app.encore.android.features.library.SurroundRules
+import app.encore.android.features.library.SurroundUi
+import app.encore.android.features.library.SurroundVersions
 import app.encore.android.features.library.VerifyBadge
 import app.encore.android.ui.Screen
 import app.encore.android.ui.components.MenuSeparator
@@ -108,10 +117,18 @@ fun PlayButtons(nav: Nav, tracks: List<Track>, modifier: Modifier = Modifier, tr
 // ---- album -----------------------------------------------------------------------------------------------------
 
 /**
- * What the album page shows beyond [AlbumDetail]: size, the history line, per-track "requested by" notes, and the
- * MusicBrainz release group ("" when the album has none) for "Get the rest of the album" and "Release info".
+ * What the album page shows beyond [AlbumDetail]: size, the history line, per-track "requested by" notes, the
+ * MusicBrainz release group ("" when the album has none) for "Get the rest of the album" and "Release info", and a
+ * stereo album's surround versions (0.35; null on a Surround album and from older servers).
  */
-private class AlbumPage(val detail: AlbumDetail, val size: Long, val history: String, val notes: Map<Long, String>, val rgid: String = "")
+private class AlbumPage(
+    val detail: AlbumDetail,
+    val size: Long,
+    val history: String,
+    val notes: Map<Long, String>,
+    val rgid: String = "",
+    val surround: SurroundState? = null,
+)
 
 /**
  * GET /api/library/albums/{id} (server/src/routes/library.rs `album`): the rows carry `requested_by`,
@@ -130,6 +147,10 @@ private fun loadAlbumPage(nav: Nav, id: String): AlbumPage {
         formats = tracks.map { it.format }.distinct().joinToString(","),
         titleTr = Tr.of(o, "album"),
         artistTr = Tr.of(o, "albumartist"),
+        // a Surround album: its format and its stereo album
+        atmos = o.bool("atmos"),
+        quality = o.str("quality"),
+        stereoAlbumId = o.obj("stereo")?.str("album_id").orEmpty(),
     )
     val detail = AlbumDetail(album, tracks, o.dbl("duration"))
 
@@ -149,13 +170,18 @@ private fun loadAlbumPage(nav: Nav, id: String): AlbumPage {
         val id2 = r.dbl("id").toLong()
         notes[id2] = "requested by $who" + if (at > 0) " on ${formatDay(at)}" else ""
     }
-    return AlbumPage(detail, o.dbl("size").toLong(), history, notes, o.str("mb_releasegroupid"))
+    return AlbumPage(detail, o.dbl("size").toLong(), history, notes, o.str("mb_releasegroupid"), SurroundState.from(o["surround"]))
 }
 
-@OptIn(ExperimentalMaterial3Api::class)
+/**
+ * One album of the library. A Surround album (0.35, library.rs: "the stereo library's tools stay off") plays and
+ * queues, names its format and links to its stereo album; it has no likes, playlists, sharing or correcting tools.
+ */
+@OptIn(ExperimentalMaterial3Api::class, ExperimentalLayoutApi::class)
 @Composable
 fun AlbumScreen(nav: Nav, albumId: String) {
     val api = nav.graph.api
+    val surround = SurroundRules.isSurroundAlbum(albumId)
     val liked by nav.graph.likes.liked.collectAsState()
     val nowPlaying by nav.player.nowPlaying.collectAsState()
     val loader = rememberLoad(albumId) { loadAlbumPage(nav, albumId) }
@@ -214,11 +240,13 @@ fun AlbumScreen(nav: Nav, albumId: String) {
         contentWindowInsets = WindowInsets(0, 0, 0, 0),
         topBar = {
             EncoreTopBar("", scrollBehavior = scrollBehavior, onBack = nav.back) {
-                IconButton(onClick = {
-                    val a = (loader.state.value as? Loadable.Ready)?.value?.detail?.album
-                    shareAlbum(a?.title ?: "", a?.artist ?: "")
-                }) {
-                    Icon(painterResource(R.drawable.ic_share), contentDescription = "Share link")
+                if (!surround) {
+                    IconButton(onClick = {
+                        val a = (loader.state.value as? Loadable.Ready)?.value?.detail?.album
+                        shareAlbum(a?.title ?: "", a?.artist ?: "")
+                    }) {
+                        Icon(painterResource(R.drawable.ic_share), contentDescription = "Share link")
+                    }
                 }
             }
         },
@@ -228,7 +256,8 @@ fun AlbumScreen(nav: Nav, albumId: String) {
             val album = detail.album
             val tracks = detail.tracks
             val multiDisc = tracks.map { it.disc }.distinct().size > 1
-            val formats = tracks.map { it.format.uppercase() }.filter { it.isNotEmpty() }.distinct().joinToString(" / ")
+            val formats = if (surround && album.quality.isNotEmpty()) album.quality
+                else tracks.map { it.format.uppercase() }.filter { it.isNotEmpty() }.distinct().joinToString(" / ")
             LazyColumn(Modifier.fillMaxSize().padding(padding)) {
                 // .detail-head
                 item {
@@ -237,7 +266,7 @@ fun AlbumScreen(nav: Nav, albumId: String) {
                             Cover(api.coverUrl(albumId, 1000), nav.graph.imageLoader, Modifier.fillMaxSize(), corner = 16.dp, label = album.title)
                         }
                         Spacer(Modifier.height(18.dp))
-                        Text("ALBUM · IN YOUR LIBRARY", style = MaterialTheme.typography.labelSmall, color = p.muted, letterSpacing = 1.2.sp)
+                        Text(if (surround) "SURROUND ALBUM · IN YOUR LIBRARY" else "ALBUM · IN YOUR LIBRARY", style = MaterialTheme.typography.labelSmall, color = p.muted, letterSpacing = 1.2.sp)
                         Text(
                             album.shownTitle(),
                             style = MaterialTheme.typography.headlineMedium,
@@ -268,15 +297,35 @@ fun AlbumScreen(nav: Nav, albumId: String) {
                         if (page.history.isNotEmpty()) {
                             Text(page.history, style = MaterialTheme.typography.bodySmall, color = p.muted, textAlign = TextAlign.Center, modifier = Modifier.padding(top = 4.dp))
                         }
-                        if (formats.isNotEmpty()) {
-                            Row(Modifier.padding(top = 12.dp), horizontalArrangement = Arrangement.spacedBy(6.dp)) { Badge(formats) }
+                        // the format, and the links between the stereo and surround versions (0.35)
+                        if (formats.isNotEmpty() || surround || page.surround != null) {
+                            FlowRow(
+                                Modifier.padding(top = 12.dp),
+                                horizontalArrangement = Arrangement.spacedBy(6.dp, Alignment.CenterHorizontally),
+                                verticalArrangement = Arrangement.spacedBy(6.dp),
+                            ) {
+                                if (formats.isNotEmpty()) Badge(formats, kind = if (surround) "accent" else "")
+                                SurroundVersions(nav, album, page.surround)
+                            }
+                        }
+                        if (SurroundRules.canFetch(page.surround, me?.isAdmin == true)) {
+                            SmallButton("Get Dolby Atmos version", iconRes = R.drawable.ic_download, modifier = Modifier.padding(top = 10.dp)) {
+                                SurroundUi.getAtmos(scope, { api.requestAlbumSurround(albumId) }) { loader.refresh() }
+                            }
                         }
                     }
                 }
                 item {
                     Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.Center) {
                         PlayButtons(nav, tracks) {
-                            MoreButton(
+                            // a Surround album: playing it and its stereo version (library.rs `surround_album_menu`)
+                            if (surround) MoreButton(
+                                entries = listOf(
+                                    MenuEntry("Add to queue", R.drawable.ic_queue_music) { tracks.forEach { nav.player.addToQueue(it) }; Toasts.show("Added to queue", "ok") },
+                                    MenuEntry("Play next", R.drawable.ic_skip_next) { tracks.asReversed().forEach { nav.player.playNext(it) }; Toasts.show("Plays next", "ok") },
+                                    if (album.stereoAlbumId.isNotEmpty()) MenuEntry("Go to the stereo version", R.drawable.ic_disc) { nav.open(Screen.Album(album.stereoAlbumId)) } else null,
+                                ),
+                            ) else MoreButton(
                                 entries = listOf(
                                     MenuEntry("Add to queue", R.drawable.ic_queue_music) { tracks.forEach { nav.player.addToQueue(it) }; Toasts.show("Added to queue", "ok") },
                                     MenuEntry("Play next", R.drawable.ic_skip_next) { tracks.asReversed().forEach { nav.player.playNext(it) }; Toasts.show("Plays next", "ok") },
@@ -330,7 +379,8 @@ fun AlbumScreen(nav: Nav, albumId: String) {
                             modifier = Modifier.padding(start = Gutter, end = Gutter, top = 14.dp, bottom = 4.dp),
                         )
                     }
-                    val fmt = (t.format.uppercase() + if (t.bitrate > 0) " ${t.bitrate}k" else "").trim()
+                    val fmt = if (t.isSurround && t.quality.isNotEmpty()) t.quality else (t.format.uppercase() + if (t.bitrate > 0) " ${t.bitrate}k" else "").trim()
+                    val verified = LibraryFixRules.verifyBadge(t.verifyStatus) != null
                     TrackRow(
                         track = t,
                         imageLoader = null,
@@ -338,13 +388,18 @@ fun AlbumScreen(nav: Nav, albumId: String) {
                         liked = t.id in liked,
                         playing = nowPlaying?.id == t.id,
                         onClick = { nav.player.play(tracks, i) },
-                        onLike = { nav.graph.likes.toggle(t.id) },
+                        // Surround songs have no likes
+                        onLike = if (t.isSurround) null else ({ nav.graph.likes.toggle(t.id) }),
                         number = t.trackNo,
                         subtitle = if (t.artist.isNotEmpty() && t.artist != album.artist) "${t.artist} · $fmt" else fmt,
                         subtitleLinks = if (t.artist.isNotEmpty() && t.artist != album.artist) rememberSongLinks(nav, t, withAlbum = false, suffix = " · $fmt") else null,
                         note = page.notes[t.id],
-                        // the audio check's verdict: "wrong audio" marks the songs to correct (library.rs `verify_badge`)
-                        badge = if (LibraryFixRules.verifyBadge(t.verifyStatus) != null) ({ VerifyBadge(t) }) else null,
+                        // the audio check's verdict: "wrong audio" marks the songs to correct (library.rs `verify_badge`);
+                        // "Surround" on a song with a surround version (⋯ → Play the surround version)
+                        badge = if (verified || t.surroundId > 0L) ({
+                            if (verified) VerifyBadge(t)
+                            if (t.surroundId > 0L) Badge("Surround", kind = "accent")
+                        }) else null,
                         onMore = { nav.trackMenu(t, onAlbumPage = true) },
                     )
                 }

@@ -53,7 +53,7 @@ impl Rejected {
     fn audio(why: String, heard: Option<String>, text: String) -> Rejected {
         Rejected { why, check: Check::Audio, heard, text }
     }
-    fn quality(why: String) -> Rejected {
+    pub fn quality(why: String) -> Rejected {
         Rejected { text: why.clone(), why, check: Check::Quality, heard: None }
     }
     fn release(why: String) -> Rejected {
