@@ -310,7 +310,8 @@ pub(super) fn load_opts(o: LoadOpts) {
 /// "now playing" on Last.fm / ListenBrainz – once per song start.
 pub(super) fn announce(t: &Rc<Value>) {
     if no_server() { return; }
-    if t.g("id").is_number() && !st(|s| s.announced.as_ref().is_some_and(|a| Rc::ptr_eq(a, t))) {
+    // a song from the listener's own folders that the library does not have (id below zero) is not the server's
+    if t.g("id").is_number() && t.i("id") > 0 && !st(|s| s.announced.as_ref().is_some_and(|a| Rc::ptr_eq(a, t))) {
         st_mut(|s| s.announced = Some(t.clone()));
         let id = t.g("id").clone();
         dom::spawn(async move { let _ = api::post("/library/now-playing", json!({ "track_id": id })).await; });
@@ -524,7 +525,7 @@ fn blocked() {
 
 pub(super) fn log_play() {
     let Some(t) = cur() else { return };
-    if t.truthy("preview") || st(|s| s.logged) || !t.g("id").is_number() { return; }
+    if t.truthy("preview") || st(|s| s.logged) || !t.g("id").is_number() || t.i("id") <= 0 { return; }
     let p = position();
     let d = duration();
     // counts (and scrobbles) like Last.fm: half the song or 4 minutes, whichever comes first; very short songs at the end

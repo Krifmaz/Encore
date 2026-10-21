@@ -23,6 +23,8 @@ gloo-events = "0.3"
 gloo-timers = { version = "0.4", features = ["futures"] }
 gloo-net = { version = "0.6", features = ["http"] }
 futures = "0.3"
+# Your folders (src/offline/folders.rs): the tags of the songs in folders on this computer, the reader the server uses
+lofty = "0.25"
 web-sys = { version = "0.3", features = [
   "Window", "Document", "Element", "HtmlElement", "HtmlInputElement", "HtmlSelectElement", "HtmlTextAreaElement",
   "HtmlImageElement", "HtmlMediaElement", "HtmlFormElement",
