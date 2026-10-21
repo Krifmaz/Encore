@@ -602,6 +602,44 @@ pub fn download_dir(st: &impl Ctx) -> PathBuf {
     st.requests().slskd.download_dir(st.cfg())
 }
 
+/// The folder slskd saves in for the downloads-folder probe: the running plan's folder, else the one the
+/// next start would pick (`downloads_dir_for`: the default folder that Encore can't write is replaced by
+/// the fallback, so requests don't wait for a folder slskd won't use), else the configured one, whose
+/// problem the probe then reports.
+pub fn probe_download_dir(st: &impl Ctx) -> PathBuf {
+    if let Some(d) = st.requests().slskd.0.status.lock().unwrap().downloads.clone() {
+        return PathBuf::from(d);
+    }
+    let configured = PathBuf::from(st.cfg().str("slskd_download_path"));
+    if configured.as_os_str().is_empty() || !configured.is_absolute() {
+        return configured;
+    }
+    // looked at without writing (the probe writes; this runs for every status answer too)
+    if downloads_chosen(st.cfg()) || could_write(&configured) {
+        return configured;
+    }
+    let fallback = fallback_dir(st.data_dir());
+    if could_write(&fallback) { fallback } else { configured }
+}
+
+/// Could Encore make and write in `dir`: the folder, or the nearest one above it that exists, is a folder
+/// Encore has write access to (access(2), which also answers EROFS on a read-only mount). Writes nothing.
+fn could_write(dir: &Path) -> bool {
+    use std::os::unix::ffi::OsStrExt;
+    let mut p = dir;
+    loop {
+        if p.exists() {
+            let Ok(c) = std::ffi::CString::new(p.as_os_str().as_bytes()) else { return false };
+            // SAFETY: a NUL-terminated path; access(2) only reads it.
+            return p.is_dir() && unsafe { libc::access(c.as_ptr(), libc::W_OK | libc::X_OK) } == 0;
+        }
+        match p.parent() {
+            Some(q) => p = q,
+            None => return false,
+        }
+    }
+}
+
 /// What a downloads-folder probe looked at: (configured folder, chosen, fallback folder).
 type ProbeKey = (PathBuf, bool, PathBuf);
 /// What it found: the folder to use and a note, or why none works.

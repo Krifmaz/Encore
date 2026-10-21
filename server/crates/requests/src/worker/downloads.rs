@@ -370,7 +370,7 @@ pub fn roots(st: &impl Ctx) -> Vec<Root> {
     // never a download's, so they are not probed here
     add("staging_path", "Staging folder (yt-dlp, streamrip, links, plugins)", cfg("staging_path"), &["ytdlp", "streamrip", "url", PLUGINS], true, None, false);
     if slskd::enabled(st) {
-        add("slskd_download_path", "Soulseek downloads", crate::slskd_managed::download_dir(st), &["slskd", "slskd_lossless"], true, None, false);
+        add("slskd_download_path", "Soulseek downloads", crate::slskd_managed::probe_download_dir(st), &["slskd", "slskd_lossless"], true, None, false);
     }
     if torznab::enabled(st) {
         for (c, what, proto) in [(Client::torrent(st), "Torrent", "torrent"), (Client::usenet(st), "Usenet", "usenet")] {
