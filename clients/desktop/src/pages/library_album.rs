@@ -474,9 +474,9 @@ pub fn update(state: &mut State, msg: Message, ctx: &mut Ctx) -> Task<Message> {
             }
         }
         Message::ShuffleAll => {
-            let q = library::shuffled(&queue_tracks(state));
+            let q = queue_tracks(state);
             if !q.is_empty() {
-                ctx.play(q, 0);
+                ctx.play_shuffled(q);
             }
         }
         Message::Like(id) => {

@@ -262,6 +262,27 @@ pub fn remove_at(st: &Status, i: usize) {
     engine::send(Command::Remove(i));
 }
 
+/// Up next's Clear: every song after the current one goes (the order kept for shuffle forgets
+/// them too). Returns what went, for Undo.
+pub fn clear_rest(st: &Status) -> Vec<Track> {
+    let Some(i) = st.index else {
+        return Vec::new();
+    };
+    let gone: Vec<Track> = st.queue.get(i + 1..).map(<[Track]>::to_vec).unwrap_or_default();
+    // from the end, so the indices before stay
+    for k in ((i + 1)..st.queue.len()).rev() {
+        engine::send(Command::Remove(k));
+    }
+    if let Some(o) = ORDER.lock().unwrap_or_else(|e| e.into_inner()).as_mut() {
+        for t in &gone {
+            if let Some(p) = o.iter().position(|x| x == t) {
+                o.remove(p);
+            }
+        }
+    }
+    gone
+}
+
 /// Play the song at `i`.
 pub fn jump(i: usize) {
     engine::send(Command::PlayIndex(i));

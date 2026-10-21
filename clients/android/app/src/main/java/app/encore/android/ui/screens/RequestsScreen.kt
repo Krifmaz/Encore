@@ -92,8 +92,8 @@ private object AlbumModePref {
 /**
  * Requests (web-rs/src/pages/requests.rs, with the web Downloader's link box and bulk actions, download.rs): the list
  * with status filters, every row's buttons (common.rs), a tap for the whole message and log, a link box with the
- * album choice, Preview, Import as playlist and Exactly this link, Retry failed and Clear… beside Only mine (as the
- * web shows them), the admin's Download all now (servers with Download now), the storage banner while imports are
+ * album choice, Preview, Import as playlist and Exactly this link, Retry failed, Clear… and Clear waiting beside Only
+ * mine (as the web shows them), the admin's Download all now (servers with Download now), the storage banner while imports are
  * paused, and for admins Activity in ⋯.
  */
 @OptIn(ExperimentalMaterial3Api::class, ExperimentalLayoutApi::class)
@@ -121,6 +121,9 @@ fun RequestsScreen(nav: Nav) {
     var retrying by remember { mutableStateOf(false) }
     // Download all now on its way (its button waits)
     var downloadingAll by remember { mutableStateOf(false) }
+    // Clear waiting: counting (its button waits), then "Cancel N waiting requests?"
+    var countingWaiting by remember { mutableStateOf(false) }
+    var confirmWaiting by remember { mutableStateOf<Int?>(null) }
     val scrollBehavior = TopAppBarDefaults.enterAlwaysScrollBehavior()
     fun reload() { generation += 1 }
     val actions = rememberRequestActions(nav) { reload() }
@@ -151,6 +154,35 @@ fun RequestsScreen(nav: Nav) {
             try {
                 val (removed, deleted) = withContext(Dispatchers.IO) { features.clearRequests(statuses, files, mine) }
                 Toasts.show(RequestRules.clearToast(removed, deleted, files), "ok")
+                reload()
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                Toasts.show(e.message ?: "That didn't work", "err")
+            }
+        }
+    }
+    // Clear waiting (Oct 21: hundreds of requests still waiting): the server counts first (a dry run), then asks
+    fun clearWaiting() {
+        if (countingWaiting) return
+        countingWaiting = true
+        scope.launch {
+            try {
+                val r = withContext(Dispatchers.IO) { features.clearWaiting(mine, dryRun = true) }
+                if (r.count > 0) confirmWaiting = r.count else Toasts.show(RequestRules.clearWaitingToast(r), "info")
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                Toasts.show(e.message ?: "That didn't work", "err")
+            }
+            countingWaiting = false
+        }
+    }
+    fun clearWaitingNow() {
+        scope.launch {
+            try {
+                val r = withContext(Dispatchers.IO) { features.clearWaiting(mine, dryRun = false) }
+                Toasts.show(RequestRules.clearWaitingToast(r), if (r.count > 0) "ok" else "info")
                 reload()
             } catch (e: CancellationException) {
                 throw e
@@ -332,6 +364,8 @@ fun RequestsScreen(nav: Nav) {
                                     ),
                                 )
                             }
+                            // every request still waiting (admins: everyone's unless Only mine is on; members: their own)
+                            SmallButton("Clear waiting", iconRes = R.drawable.ic_close, enabled = !countingWaiting, modifier = Modifier.align(Alignment.CenterVertically)) { clearWaiting() }
                         }
                     }
                 }
@@ -435,6 +469,15 @@ fun RequestsScreen(nav: Nav) {
     }
 
     RequestSheets(actions, rows ?: emptyList())
+    confirmWaiting?.let { n ->
+        ConfirmDialog(
+            title = "Clear waiting",
+            text = RequestRules.clearWaitingQuestion(n),
+            okLabel = "Clear waiting",
+            danger = true,
+            onDismiss = { confirmWaiting = null },
+        ) { clearWaitingNow() }
+    }
     confirmClear?.let { (statuses, label) ->
         ConfirmDialog(
             title = "Delete files",

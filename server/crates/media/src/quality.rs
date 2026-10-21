@@ -306,8 +306,9 @@ pub async fn gate(st: &impl Ctx, path: &Path, expected: Option<f64>) -> (Report,
     if !on_import(st) {
         return (Report::default(), Ok(()));
     }
+    // background work (an import): ffmpeg at idle priority, so it never competes with the music being played
     encore_http::progress::step("checking the sound quality");
-    let rep = analyze(st.media(), path, expected, min_lufs(st), false).await;
+    let rep = analyze(st.media(), path, expected, min_lufs(st), true).await;
     let res = match rep.rejection() {
         Some(i) => Err(i.text.clone()),
         None => Ok(()),
@@ -324,7 +325,7 @@ pub async fn gate_album(st: &impl Ctx, paths: &[std::path::PathBuf]) -> (Vec<(st
     let mut out = vec![];
     for (i, p) in paths.iter().enumerate() {
         encore_http::progress::step(&format!("checking the sound quality ({} of {})", i + 1, paths.len()));
-        out.push((p.clone(), analyze(st.media(), p, None, min_lufs(st), false).await));
+        out.push((p.clone(), analyze(st.media(), p, None, min_lufs(st), true).await));
     }
     let bad: Vec<&Issue> = out.iter().filter_map(|(_, r)| r.rejection()).collect();
     let res = if !bad.is_empty() && bad.len() * 2 >= paths.len().max(1) {

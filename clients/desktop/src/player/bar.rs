@@ -167,10 +167,10 @@ fn right_buttons<'a>(state: &'a State, ctx: &Ctx<'a>, now: Option<&Now>) -> Vec<
     let grouped = state.group.state.is_some();
     if grouped && now.is_some() && (has("shuffle") || has("repeat")) {
         if has("shuffle") {
-            out.push(super::group::view::off(Icon::Shuffle, super::group::view::NO_MODES, 16.0));
+            out.push(super::group::view::shuffle(state, 16.0));
         }
         if has("repeat") {
-            out.push(super::group::view::off(Icon::Refresh, super::group::view::NO_MODES, 16.0));
+            out.push(super::group::view::off(Icon::Refresh, super::group::view::REPEAT_OFF, 16.0));
         }
     }
     if has("shuffle") && now.is_some() && !grouped {

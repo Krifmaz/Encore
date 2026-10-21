@@ -11,6 +11,7 @@ import app.encore.android.data.api.TrackGain
 import app.encore.android.data.prefs.DspInfo
 import app.encore.android.data.prefs.PlaybackPrefs
 import app.encore.android.data.prefs.Quality
+import app.encore.android.features.group.GroupQuality
 import java.util.concurrent.ConcurrentHashMap
 
 /** How one song is being streamed: the web player's `state.rung / dsp / transcoded / offset` for one track. */
@@ -229,11 +230,17 @@ class StreamResolver(private val api: EncoreApi, private val estimator: Bandwidt
     /** kbit/s the song needs as the "original" rung: the Cadenza stream's when the server upsamples it, else the file's. */
     fun origKbps(t: StreamTrack): Int = if (wantDsp(false)) dspKbps(dspOutRate()) else fileKbps(t)
 
-    /** Which rung a song starts on: Original never converts, Data saver is fixed at 96 kbps, Auto follows the estimated bandwidth. */
+    /** set by the service: in a group listen now (any thread) */
+    @Volatile var grouped: () -> Boolean = { false }
+
+    /**
+     * Which rung a song starts on: Original never converts, Data saver is fixed at 96 kbps, Auto follows the estimated
+     * bandwidth – in a group listen preferring the original file whenever the estimate covers it ([GroupQuality]).
+     */
     fun rungFor(t: StreamTrack): Int = when (prefs.quality) {
         "original" -> 0
         "saver" -> Quality.SAVER_KBPS
-        else -> Quality.chooseRung(estimator.kbps, origKbps(t))
+        else -> if (grouped()) GroupQuality.startRung(estimator.kbps, origKbps(t)) else Quality.chooseRung(estimator.kbps, origKbps(t))
     }
 
     /** The variant a song starts with. */

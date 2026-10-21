@@ -83,6 +83,7 @@ import app.encore.android.ui.components.LikeButton
 import app.encore.android.ui.components.MenuEntry
 import app.encore.android.ui.components.MoreButton
 import app.encore.android.ui.components.PlayerMenuActions
+import app.encore.android.ui.components.SmallButton
 import app.encore.android.ui.components.Toasts
 import app.encore.android.ui.components.formatDuration
 import app.encore.android.ui.components.rememberMotionOn
@@ -526,7 +527,10 @@ private fun ThinSeek(positionMs: Long, durationMs: Long, onSeek: (Long) -> Unit,
     }
 }
 
-/** The "Up next" sheet (the web's `.np-queue`): what plays after this song, with "Then shuffle library". */
+/**
+ * The "Up next" sheet (the web's `.np-queue`): what plays after this song, with Clear (every song after this one, with
+ * Undo for 6 s) and "Then shuffle library".
+ */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun UpNextSheet(nav: Nav, onDismiss: () -> Unit) {
@@ -542,6 +546,8 @@ fun UpNextSheet(nav: Nav, onDismiss: () -> Unit) {
     ModalBottomSheet(onDismissRequest = onDismiss, sheetState = sheetState, containerColor = p.panel, contentColor = p.text) {
         Row(Modifier.fillMaxWidth().padding(start = 22.dp, end = 12.dp, bottom = 6.dp), verticalAlignment = Alignment.CenterVertically) {
             Text("Up next", style = MaterialTheme.typography.titleMedium, modifier = Modifier.weight(1f))
+            SmallButton("Clear", iconRes = R.drawable.ic_delete, enabled = upNext.isNotEmpty()) { nav.player.clearUpNext() }
+            Spacer(Modifier.width(4.dp))
             Row(
                 Modifier.clickable { nav.graph.store.setAutoplay(!settings.autoplay) },
                 verticalAlignment = Alignment.CenterVertically,

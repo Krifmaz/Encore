@@ -300,3 +300,46 @@ async fn a_row_no_source_can_stamp_does_not_hold_the_pass() {
     assert_eq!(shown(&st, "アイウ").romanization.as_deref(), Some("Aiu"));
     ts.remove();
 }
+
+/// A group listen playing holds the Translator's model: the model's work does not start (its server is not even
+/// started), the rows that wait for it stay waiting (never marked as asked), and the first pass after the last group
+/// listen stopped starts it.
+#[tokio::test]
+async fn a_group_listen_holds_the_model_until_it_stops() {
+    use std::os::unix::fs::PermissionsExt;
+    let ts = TestServer::new("tiers-group").with_plugins(&["translator"]).with(json!({
+        "translate_local_model": true, "translate_background": true,
+        "translate_official": false, "translate_romanize": false, "translate_deepl": false,
+    }));
+    let st = ts.st.clone();
+    let u = user(&st, "ann", "user");
+    st.db.execute("UPDATE users SET prefs=? WHERE id=?", p![r#"{"translate_mode":"under","translate_lang":"en"}"#, u.i("id")]).unwrap();
+    // a stand-in llama-server: notes that it was started, then stops (the start fails, so the model is never asked)
+    let started = ts.dir.join("llama-started");
+    let exe = ts.dir.join("tools/translator/llama/b6800/build/bin/llama-server");
+    std::fs::create_dir_all(exe.parent().unwrap()).unwrap();
+    std::fs::write(&exe, format!("#!/bin/sh\necho started >> '{}'\n", started.display())).unwrap();
+    std::fs::set_permissions(&exe, std::fs::Permissions::from_mode(0o755)).unwrap();
+    std::fs::write(ts.dir.join("tools/translator/llama/current"), "b6800\n").unwrap();
+    std::fs::create_dir_all(ts.dir.join("tools/translator/models")).unwrap();
+    std::fs::write(ts.dir.join("tools/translator/models/Qwen3-4B-Instruct-2507-Q4_K_M.gguf"), b"GGUF\x03").unwrap();
+    assert!(encore_library::translate::llama::ready(&st));
+    // the official sources found nothing for this title: it waits for the model
+    store::mark(&st.db, "群青", "en", "title", Source::Official).unwrap();
+    let waiting = |st: &crate::state::AppState| store::waiting_for_model(&st.db, "en", 10);
+    assert_eq!(waiting(&st).len(), 1);
+
+    st.busy.set_group_playing(true);
+    // the background pass and a new title on screen: neither starts the model meanwhile
+    pass_now(&st).await;
+    st.library.translator.enqueue("en", vec![("夜に駆ける".into(), Kind::Title, None)]);
+    pass_now(&st).await;
+    assert!(!started.exists(), "the model's server was started while a group listen played");
+    assert_eq!(waiting(&st), vec![("群青".to_string(), "title".to_string())], "still waiting, not marked as asked");
+
+    // the last group listen stops: the next pass starts the model for what waits
+    assert!(st.busy.set_group_playing(false));
+    pass_now(&st).await;
+    assert!(started.exists(), "the model's work goes on after the group listen");
+    ts.remove();
+}

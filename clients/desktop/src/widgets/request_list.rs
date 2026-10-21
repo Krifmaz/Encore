@@ -739,6 +739,32 @@ pub fn cleared_toast(r: &Value, files: bool) -> String {
     )
 }
 
+/// The question before Clear waiting (`n` counted by the server's dry run).
+pub fn waiting_question(n: i64) -> String {
+    if n == 1 {
+        "Cancel 1 waiting request? Downloads and imports already running keep going.".to_string()
+    } else {
+        format!("Cancel {n} waiting requests? Downloads and imports already running keep going.")
+    }
+}
+
+/// What Clear waiting did, when the server's own words are missing.
+pub fn waiting_done(n: i64) -> String {
+    match n {
+        0 => "Nothing is waiting".to_string(),
+        1 => "Cancelled 1 waiting request".to_string(),
+        n => format!("Cancelled {n} waiting requests"),
+    }
+}
+
+/// The server's words of a Clear waiting answer (`{count, text}`), else ours.
+pub fn waiting_text(r: &Value) -> String {
+    match fmt::s(r, "text") {
+        t if t.is_empty() => waiting_done(fmt::i(r, "count")),
+        t => t,
+    }
+}
+
 /// The words after Retry failed, and whether they are a warning.
 pub fn retry_failed_toast(r: &Value) -> (String, bool) {
     let (n, skipped) = (fmt::i(r, "retried"), fmt::i(r, "skipped"));
@@ -770,6 +796,8 @@ enum Then {
     /// Cancel, the kept files going with it
     Cancel(i64),
     Clear(Clear),
+    /// Clear waiting: every request still waiting is cancelled.
+    ClearWaiting,
 }
 
 #[derive(Debug)]
@@ -812,6 +840,8 @@ pub struct List {
     storage_loads: u64,
     /// Download all now is running.
     downloading_all: bool,
+    /// Clear waiting is counting or cancelling.
+    clearing_waiting: bool,
 }
 
 #[derive(Clone, Debug)]
@@ -853,6 +883,10 @@ pub enum Msg {
     /// Download all now (admins): wake every waiting request, move requests up in their lines.
     DownloadAllNow,
     DownloadedAllNow(Result<Value, ApiError>),
+    /// Clear waiting: the server counts first (a dry run), then it is asked.
+    ClearWaiting,
+    WaitingCounted(Result<Value, ApiError>),
+    ClearedWaiting(Result<Value, ApiError>),
 }
 
 impl List {
@@ -869,6 +903,7 @@ impl List {
         self.checking = false;
         self.storage_loads = 0;
         self.downloading_all = false;
+        self.clearing_waiting = false;
     }
 
     pub fn rows(&self) -> &[Value] {
@@ -1080,7 +1115,54 @@ pub fn update(l: &mut List, msg: Msg, ctx: &mut Ctx) -> Task<Msg> {
                         |r| Msg::Cleared(true, r),
                     )
                 }
+                Then::ClearWaiting => {
+                    l.clearing_waiting = true;
+                    let body = json!({ "mine": l.mine });
+                    Task::perform(
+                        async move { api.post("/requests/clear-waiting", body).await },
+                        Msg::ClearedWaiting,
+                    )
+                }
             };
+        }
+        // Clear waiting: admins everyone's (unless Only mine), members their own (the server
+        // decides); counted first for the question
+        Msg::ClearWaiting => {
+            if l.clearing_waiting {
+                return Task::none();
+            }
+            l.clearing_waiting = true;
+            let api = ctx.api.clone();
+            let body = json!({ "mine": l.mine, "dry_run": true });
+            return Task::perform(
+                async move { api.post("/requests/clear-waiting", body).await },
+                Msg::WaitingCounted,
+            );
+        }
+        Msg::WaitingCounted(r) => {
+            l.clearing_waiting = false;
+            match r {
+                Ok(v) if fmt::i(&v, "count") > 0 => {
+                    l.confirm = Some(Confirm {
+                        title: "Clear waiting",
+                        text: waiting_question(fmt::i(&v, "count")),
+                        ok: "Clear waiting",
+                        then: Then::ClearWaiting,
+                    });
+                }
+                Ok(v) => ctx.toast(waiting_text(&v)),
+                Err(e) => ctx.toast_err(e.message),
+            }
+        }
+        Msg::ClearedWaiting(r) => {
+            l.clearing_waiting = false;
+            match r {
+                Ok(v) => {
+                    ctx.toast_ok(waiting_text(&v));
+                    return l.load(ctx);
+                }
+                Err(e) => ctx.toast_err(e.message),
+            }
         }
         Msg::CloseDialog => l.confirm = None,
         Msg::Removed(files, r) => match r {
@@ -1497,6 +1579,18 @@ pub fn download_all_now_btn<'a>(l: &List) -> El<'a, Msg> {
     .into()
 }
 
+/// "Clear waiting": cancel every request still waiting (pending, queued, waiting, searching);
+/// downloads and imports already running keep going.
+pub fn clear_waiting_btn<'a>(l: &List) -> El<'a, Msg> {
+    tooltip(
+        super::btn_icon(Icon::X, "Clear waiting", Btn::Default, (!l.clearing_waiting).then_some(Msg::ClearWaiting)),
+        tip_box("Cancel every request that is still waiting"),
+        tooltip::Position::Bottom,
+    )
+    .gap(4)
+    .into()
+}
+
 /// The Clear button that opens the Clear menu ("Clear finished" or "Clear…").
 pub fn clear_btn<'a>(label: &'a str) -> El<'a, Msg> {
     super::btn_icon(Icon::Trash, label, Btn::Default, Some(Msg::ClearMenu)).into()
@@ -1525,6 +1619,18 @@ pub fn overlay<'a>(l: &'a List, ctx: &Ctx<'a>) -> Option<El<'a, Msg>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn clear_waiting_asks_with_the_count_and_says_what_it_did() {
+        assert_eq!(waiting_question(612), "Cancel 612 waiting requests? Downloads and imports already running keep going.");
+        assert_eq!(waiting_question(1), "Cancel 1 waiting request? Downloads and imports already running keep going.");
+        // the server's words first
+        assert_eq!(waiting_text(&json!({ "count": 612, "text": "Cancelled 612 waiting requests" })), "Cancelled 612 waiting requests");
+        assert_eq!(waiting_text(&json!({ "count": 0, "text": "Nothing is waiting" })), "Nothing is waiting");
+        // ours when it has none
+        assert_eq!(waiting_text(&json!({ "count": 3 })), "Cancelled 3 waiting requests");
+        assert_eq!(waiting_text(&json!({ "count": 0 })), "Nothing is waiting");
+    }
 
     #[test]
     fn words_follow_the_web() {

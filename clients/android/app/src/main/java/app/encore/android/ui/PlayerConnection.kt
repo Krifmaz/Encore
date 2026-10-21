@@ -362,14 +362,20 @@ class PlayerConnection(private val context: Context, private val api: EncoreApi)
      */
     private fun groupDenied(): Boolean = GroupListen.inGroup && GroupListen.deniedHere()
 
-    private fun notInGroup(): Boolean {
+    /** Repeat in a group listen: refused, and said why (a group has none). */
+    private fun noRepeatInGroup(): Boolean {
         if (!GroupListen.inGroup) return false
-        Toasts.show("Shuffle and repeat are off during a group listen", "info")
+        Toasts.show("Repeat is off during a group listen", "info")
         return true
     }
 
+    /**
+     * Play a list here. [shuffle] (a playlist's, album's or artist's Shuffle): in a group listen it becomes the group's
+     * queue shuffled, or for those who don't control it goes to the group's Up next shuffled (GroupListen.shuffleList).
+     */
     fun play(tracks: List<Track>, startIndex: Int = 0, shuffle: Boolean = false) {
         if (tracks.isEmpty()) return
+        if (shuffle && GroupListen.shuffleList(tracks)) return
         val list = if (shuffle) tracks.shuffled() else tracks
         val start = if (shuffle) 0 else startIndex.coerceIn(0, list.size - 1)
         if (GroupListen.playList(list, start)) return
@@ -495,10 +501,11 @@ class PlayerConnection(private val context: Context, private val api: EncoreApi)
 
     /**
      * Shuffle mode (player.js setShuffle): on shuffles the rest of the queue, off puts its order back. It is the
-     * session's app shuffle, so the car, the lock screen and the other devices see the same state.
+     * session's app shuffle, so the car, the lock screen and the other devices see the same state. In a group listen it
+     * shuffles the group's Up next once, for everyone (those who control).
      */
     fun setShuffle(on: Boolean) {
-        if (notInGroup()) return
+        if (GroupListen.inGroup) { GroupListen.shuffleUpNext(); return }
         if (viaLink("shuffle") { put("value", on) }) { _shuffle.value = on; return }
         withController { c -> c.shuffleModeEnabled = on }
     }
@@ -506,7 +513,7 @@ class PlayerConnection(private val context: Context, private val api: EncoreApi)
     /** Repeat (player.js setRepeat): "off" | "all" | "one". */
     fun setRepeat(mode: String) {
         if (mode != "off" && mode != "all" && mode != "one") return
-        if (notInGroup()) return
+        if (noRepeatInGroup()) return
         if (viaLink("repeat") { put("value", mode) }) { _repeat.value = mode; return }
         withController { c ->
             c.repeatMode = when (mode) {
@@ -520,9 +527,9 @@ class PlayerConnection(private val context: Context, private val api: EncoreApi)
     /** The next repeat setting on a tap: off → all → one → off. */
     fun cycleRepeat() = setRepeat(when (_repeat.value) { "off" -> "all"; "all" -> "one"; else -> "off" })
 
-    /** Shuffle what comes after the current song. */
+    /** Shuffle what comes after the current song (in a group listen: the group's Up next, for everyone). */
     fun shuffleUpNext() {
-        if (notInGroup()) return
+        if (GroupListen.inGroup) { GroupListen.shuffleUpNext(); return }
         if (notWhileLinked()) return
         withController { c ->
             val cur = c.currentMediaItemIndex
@@ -533,6 +540,29 @@ class PlayerConnection(private val context: Context, private val api: EncoreApi)
             rest.shuffle()
             c.removeMediaItems(cur + 1, n)
             c.addMediaItems(rest)
+        }
+    }
+
+    /**
+     * Up next's Clear (not in a group): every song after the playing one goes, with "Up next cleared" and its Undo for
+     * 6 s, which puts them back after the song playing then.
+     */
+    fun clearUpNext() {
+        if (GroupListen.inGroup) return
+        if (notWhileLinked()) return
+        withController { c ->
+            val cur = c.currentMediaItemIndex
+            val n = c.mediaItemCount
+            if (cur < 0 || cur + 1 >= n) return@withController
+            val removed = ArrayList<MediaItem>()
+            for (i in cur + 1 until n) removed.add(c.getMediaItemAt(i))
+            c.removeMediaItems(cur + 1, n)
+            Toasts.show("Up next cleared", "ok", action = "Undo", showMs = UNDO_MS) {
+                mainHandler.post {
+                    if (GroupListen.inGroup || linked() != null) return@post
+                    withController { c2 -> c2.addMediaItems((c2.currentMediaItemIndex + 1).coerceIn(0, c2.mediaItemCount), removed) }
+                }
+            }
         }
     }
 
@@ -666,5 +696,10 @@ class PlayerConnection(private val context: Context, private val api: EncoreApi)
         updateQuality()
         mainHandler.removeCallbacks(positionTick)
         if (c.isPlaying) mainHandler.postDelayed(positionTick, 500L)
+    }
+
+    private companion object {
+        /** how long "Up next cleared" and its Undo stay */
+        const val UNDO_MS = 6_000L
     }
 }

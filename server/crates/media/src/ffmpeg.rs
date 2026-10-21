@@ -151,4 +151,19 @@ mod tests {
         assert_eq!(argv(&mut f), ["ffmpeg", "-v", "error", "-nostdin", "-i", "x"]);
         assert_eq!(argv(&mut Ffmpeg::probe().arg("-v")), ["ffprobe", "-v"]);
     }
+
+    /// The nice value a run gets: the background's at 19, a stream's as the server's own.
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn background_runs_at_idle_priority_and_streams_at_the_normal_one() {
+        let nice = |low: bool| async move {
+            // (field 19 of /proc/self/stat is the nice value; `cut` inherits it from the shell)
+            let out = Ffmpeg::program("sh").low_priority_if(low).args(["-c", "cut -d' ' -f19 /proc/self/stat"]).pipe_out().spawn().ok()?.wait_with_output().await.ok()?;
+            String::from_utf8_lossy(&out.stdout).trim().parse::<i32>().ok()
+        };
+        let own = std::fs::read_to_string("/proc/self/stat").ok().and_then(|s| s.rsplit(')').next()?.split_whitespace().nth(16)?.parse::<i32>().ok());
+        let (Some(low), Some(normal), Some(own)) = (nice(true).await, nice(false).await, own) else { return };
+        assert_eq!(low, 19);
+        assert_eq!(normal, own, "a stream is not lowered");
+    }
 }

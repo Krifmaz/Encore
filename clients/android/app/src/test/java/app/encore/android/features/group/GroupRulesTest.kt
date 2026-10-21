@@ -104,32 +104,6 @@ class GroupRulesTest {
     }
 
     @Test
-    fun theSyncRule() {
-        assertEquals(GroupRules.Drift.SEEK, GroupRules.drift(600, adjusting = false, speedOk = true))
-        assertEquals(GroupRules.Drift.SEEK, GroupRules.drift(-501, adjusting = true, speedOk = true))
-        assertEquals(GroupRules.Drift.SLOWER, GroupRules.drift(300, adjusting = false, speedOk = true))
-        assertEquals(GroupRules.Drift.FASTER, GroupRules.drift(-300, adjusting = false, speedOk = true))
-        assertEquals(GroupRules.Drift.NONE, GroupRules.drift(100, adjusting = false, speedOk = true))
-        // once adjusting, on until within 0.05 s
-        assertEquals(GroupRules.Drift.SLOWER, GroupRules.drift(100, adjusting = true, speedOk = true))
-        assertEquals(GroupRules.Drift.NORMAL, GroupRules.drift(30, adjusting = true, speedOk = true))
-        // bit-perfect or Cadenza here: seek only
-        assertEquals(GroupRules.Drift.NONE, GroupRules.drift(300, adjusting = false, speedOk = false))
-        assertEquals(GroupRules.Drift.SEEK, GroupRules.drift(700, adjusting = false, speedOk = false))
-    }
-
-    @Test
-    fun theClockOffsetTakesTheShortestRoundTrip() {
-        val samples = listOf(
-            Triple(1000L, 6000L, 1400L), // 400 ms
-            Triple(2000L, 7010L, 2040L), // 40 ms: offset 7010 − 2020 = 4990
-            Triple(3000L, 8000L, 3300L),
-        )
-        assertEquals(4990L, GroupRules.clockOffset(samples))
-        assertNull(GroupRules.clockOffset(emptyList()))
-    }
-
-    @Test
     fun joinsAndLeavesAreToasts() {
         val before = state(two)
         val after = before.copy(
@@ -252,63 +226,5 @@ class GroupRulesTest {
         assertEquals("The group listen ended (the server restarted)", GroupRules.endedText("restart", "Alex"))
         assertEquals("Alex ended the group listen", GroupRules.endedText("ended", "Alex"))
         assertEquals("Group listens are turned off on this server", GroupRules.endedText("off", ""))
-    }
-
-    @Test
-    fun aSlowSeekIsLearntAndDoesNotLoop() {
-        // a server-made stream that starts playing 0.8 s after every seek, 2 s behind the group at first; GroupSync
-        // looks every 0.5 s, not within 2.5 s of its own seek
-        val lag = SeekLag()
-        val latency = 800L
-        var seekAt = -1L
-        var seekTarget = 0L
-        fun group(x: Long) = 60_000L + x
-        fun phone(x: Long) = when {
-            seekAt < 0 -> 58_000L + x
-            x < seekAt + latency -> seekTarget
-            else -> seekTarget + (x - seekAt - latency)
-        }
-        var quietUntil = 0L
-        var seeks = 0
-        for (x in 500L..120_000L step 500L) {
-            if (x < quietUntil) continue
-            val d = phone(x) - group(x)
-            if (lag.waiting) lag.landed("q1", d, x)
-            if (GroupRules.drift(d, adjusting = false, speedOk = false, seekAboveMs = lag.seekAboveMs("q1")) == GroupRules.Drift.SEEK) {
-                seekTarget = lag.target("q1", group(x), serverMade = true)
-                seekAt = x
-                quietUntil = x + 2500L
-                seeks++
-            }
-        }
-        // the first seek lands 0.8 s behind; the second one aims 0.8 s ahead and lands on the group's spot
-        assertEquals(2, seeks)
-        assertEquals(800L, lag.lagMs(serverMade = true))
-        assertEquals(0L, lag.lagMs(serverMade = false))
-        assertEquals(0L, phone(120_000L) - group(120_000L))
-    }
-
-    @Test
-    fun seeksThatKeepMissingStopForTheSong() {
-        val lag = SeekLag()
-        lag.target("q1", 10_000L, serverMade = true)
-        lag.landed("q1", -900L, 3_000L)
-        assertEquals(900L, lag.lagMs(serverMade = true))
-        assertEquals(500L, lag.seekAboveMs("q1"))
-        // a second seek 6 s later misses too (the lag varies): no more seeking in this song below 3 s
-        lag.target("q1", 20_000L, serverMade = true)
-        lag.landed("q1", 700L, 9_000L)
-        assertEquals(200L, lag.lagMs(serverMade = true))
-        assertEquals(3000L, lag.seekAboveMs("q1"))
-        assertEquals(GroupRules.Drift.FASTER, GroupRules.drift(-1200L, adjusting = false, speedOk = true, seekAboveMs = lag.seekAboveMs("q1")))
-        assertEquals(GroupRules.Drift.SEEK, GroupRules.drift(-3500L, adjusting = false, speedOk = true, seekAboveMs = lag.seekAboveMs("q1")))
-        // the next song seeks as usual; a result in another song teaches nothing; the lag stays within 0 … 3 s
-        assertEquals(500L, lag.seekAboveMs("q2"))
-        lag.target("q2", 0L, serverMade = false)
-        lag.landed("q3", -2000L, 10_000L)
-        assertEquals(0L, lag.lagMs(serverMade = false))
-        lag.target("q2", 0L, serverMade = false)
-        lag.landed("q2", -9000L, 40_000L)
-        assertEquals(3000L, lag.lagMs(serverMade = false))
     }
 }

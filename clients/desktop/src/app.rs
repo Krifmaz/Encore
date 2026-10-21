@@ -65,6 +65,8 @@ pub enum Message {
     DismissToast(u64),
     /// Copy an error toast's text.
     CopyToast(u64),
+    /// A toast's action ("Undo").
+    ToastAction(u64),
     /// The details dialog (an error or a request in full, with Copy).
     Details(details::Msg),
     /// The details dialog's action was sent (Keep anyway, Download anyway): its toast when it
@@ -285,6 +287,16 @@ impl App {
     }
 
     pub fn toast(&mut self, text: impl Into<String>, kind: ToastKind) {
+        self.toast_with(text, kind, None);
+    }
+
+    /// A toast with one action ("Up next cleared · Undo"): it stays `ms`, its button sends `then`
+    /// to the player.
+    pub fn toast_action(&mut self, text: impl Into<String>, label: &str, then: player::Message, ms: u64) {
+        self.toast_with(text, ToastKind::Ok, Some((label.to_string(), then, std::time::Duration::from_millis(ms))));
+    }
+
+    fn toast_with(&mut self, text: impl Into<String>, kind: ToastKind, action: Option<(String, player::Message, std::time::Duration)>) {
         let text = text.into();
         // an error stays until it is dismissed: the same error again (a page that polls) does not
         // pile up a second copy
@@ -298,6 +310,7 @@ impl App {
             text,
             kind,
             at: std::time::Instant::now(),
+            action,
         });
         // at most three errors stay: a new one pushes out the oldest
         while self.toasts.iter().filter(|t| t.stays()).count() > Toast::STAYING {
@@ -324,6 +337,19 @@ impl App {
             self.toast(e, ToastKind::Err);
         }
         self.group_flush()
+    }
+
+    /// A Shuffle button: the rows in a random order; in a group listen the server shuffles them
+    /// (player::group::forward_shuffle).
+    pub fn play_shuffled(&mut self, tracks: Vec<Value>) -> Task<Message> {
+        if player::group::active() {
+            let auth = link::auth(&self.config, &self.api);
+            let list = engine::tracks::many(&self.api.base(), &auth, &tracks);
+            if player::group::forward_shuffle(&list) {
+                return self.group_flush();
+            }
+        }
+        self.play(pages::library::shuffled(&tracks), 0)
     }
 
     /// In a group listen a play goes to the group (player::group): sent at once.
@@ -529,7 +555,9 @@ impl App {
                     }
                 }
                 Effect::Toast(t, k) => self.toast(t, k),
+                Effect::ToastAction { text, label, then, ms } => self.toast_action(text, &label, then, ms),
                 Effect::Play { tracks, index } => tasks.push(self.play(tracks, index)),
+                Effect::PlayShuffled(tracks) => tasks.push(self.play_shuffled(tracks)),
                 Effect::PlayNext(t) => tasks.push(self.queue(t, true)),
                 Effect::Enqueue(t) => tasks.push(self.queue(t, false)),
                 Effect::Clipboard(s) => tasks.push(iced::clipboard::write(s)),
@@ -659,6 +687,14 @@ impl App {
                 Some(t) => Self::copy_checked(t.text.clone()),
                 None => Task::none(),
             },
+            Message::ToastAction(id) => {
+                let then = self.toasts.iter().find(|t| t.id == id).and_then(|t| t.action.as_ref()).map(|a| a.1.clone());
+                self.toasts.retain(|t| t.id != id);
+                match then {
+                    Some(m) => self.update(Message::Player(m)),
+                    None => Task::none(),
+                }
+            }
             Message::Details(m) => {
                 if matches!(m, details::Msg::Close) {
                     self.details = None;
@@ -886,7 +922,7 @@ impl App {
             layers = layers.push(details::view(d).map(Message::Details));
         }
         if !self.toasts.is_empty() {
-            layers = layers.push(widgets::toast::view(&self.toasts, Message::DismissToast, Message::CopyToast));
+            layers = layers.push(widgets::toast::view(&self.toasts, Message::DismissToast, Message::CopyToast, Message::ToastAction));
         }
         layers.into()
     }

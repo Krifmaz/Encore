@@ -411,3 +411,42 @@ async fn without_ffmpeg_and_out_of_time() {
     assert!(r.line().ends_with("(the run's time was up; the next run goes on)"), "{}", r.line());
     let _ = std::fs::remove_dir_all(&d);
 }
+
+/// While a group listen plays the measuring waits (no ffmpeg runs), and goes on once the last one stopped – also
+/// when the group played longer than the run's time: the wait does not count against it.
+#[tokio::test]
+async fn measuring_waits_while_a_group_listen_plays() {
+    let d = encore_core::tmp::dir("loudness-group");
+    let db = Db::open(&d.join("cfg")).unwrap();
+    for id in 1..=3 {
+        // sample_rate set: the tags pass has nothing to read
+        db.execute("INSERT INTO tracks (id, path, title, album_id, format, duration, mtime, sample_rate) VALUES (?, ?, ?, 'al', 'flac', 100, 5, 44100)",
+            p![id, format!("/nowhere/{id}.flac"), format!("S{id}")]).unwrap();
+    }
+    let calls: Arc<Mutex<Vec<(String, bool)>>> = Arc::new(Mutex::new(vec![]));
+    let busy = Busy::default();
+    let fake = |calls: Arc<Mutex<Vec<(String, bool)>>>, busy: Busy| move |path: PathBuf| {
+        let (calls, busy) = (calls.clone(), busy.clone());
+        async move {
+            calls.lock().unwrap().push((path.to_string_lossy().to_string(), busy.group_playing()));
+            (Some(-14.0), Some(-1.0))
+        }
+    };
+    // a group plays three times as long as the run's whole time: the run waits for it, then measures everything
+    // (never while it played) with the time it had left
+    busy.set_group_playing(true);
+    let b2 = busy.clone();
+    tokio::spawn(async move {
+        tokio::time::sleep(Duration::from_millis(1500)).await;
+        b2.set_group_playing(false);
+    });
+    let lim = Limits { slice: 2, budget: Duration::from_millis(500), busy_max: Duration::from_millis(50) };
+    let t0 = std::time::Instant::now();
+    let r = run(&db, &busy, true, fake(calls.clone(), busy.clone()), lim).await.unwrap();
+    assert!(t0.elapsed() >= Duration::from_millis(1400), "it waited for the group: {:?}", t0.elapsed());
+    assert_eq!((r.stopped, r.measured, r.left), (None, 3, 0), "{r:?}");
+    let got = calls.lock().unwrap().clone();
+    assert_eq!(got.len(), 3);
+    assert!(got.iter().all(|(_, playing)| !playing), "{got:?}");
+    let _ = std::fs::remove_dir_all(&d);
+}

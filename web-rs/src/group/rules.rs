@@ -78,27 +78,183 @@ pub fn at_end(state: &Value, index: i64, pos: f64) -> bool {
     index as usize + 1 >= q.len() && e.f("duration") > 0.0 && pos >= e.f("duration") - 0.3
 }
 
-/// What to do about the distance between this device and the group.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Drift { None, Seek, Faster, Slower, Normal }
+// ---- the sync rule (client-shapes §5.6: the same on web, phone and desktop) -----------------------------------------
 
-/// The sync rule (the same on web, desktop and phone): above 0.5 s → seek; between 0.15 and 0.5 s → play at 0.97
-/// (ahead) or 1.03 (behind) until within 0.05 s; `rate_ok` false (the browser would change the pitch) → seek only.
-/// `drift_ms` = this device's position − the group's (positive: ahead); `adjusting`: the rate is off 1.0 now;
-/// `seek_above_ms`: 3 s instead of 0.5 s in a song where seeks kept missing ([`SeekLag`]).
-pub fn drift(drift_ms: f64, adjusting: bool, rate_ok: bool, seek_above_ms: f64) -> Drift {
-    let d = drift_ms.abs();
-    if d > seek_above_ms { return Drift::Seek; }
-    if !rate_ok { return if adjusting { Drift::Normal } else { Drift::None }; }
-    if d > 150.0 || (adjusting && d > 50.0) { return if drift_ms > 0.0 { Drift::Slower } else { Drift::Faster }; }
-    if adjusting { Drift::Normal } else { Drift::None }
+/// Below this drift (ms) nothing is done …
+pub const DEAD_MS: f64 = 40.0;
+/// … a nudge goes on until the drift is below this …
+pub const SETTLED_MS: f64 = 20.0;
+/// … and above this one hard seek is made (never for less: the nudge closes it) …
+pub const SEEK_MS: f64 = 1500.0;
+/// … above this for a server-made stream (anything but the original file served with Range): its seek is a new
+/// stream, which the server has to start again …
+pub const SERVER_MADE_SEEK_MS: f64 = 3000.0;
+/// … and after a hard seek none again for this long (ms): nudges only.
+pub const SEEK_GAP_MS: f64 = 8000.0;
+/// The most the playback rate moves off 1.0 (0.98–1.02).
+pub const MAX_NUDGE: f64 = 0.02;
+/// The rate's distance from 1.0 per second of drift: proportional, 0.2 s off is the whole 2 %.
+pub const NUDGE_PER_S: f64 = 0.1;
+/// The most the rate changes from one look (every 500 ms) to the next: eased in and out, never a jump.
+pub const EASE_STEP: f64 = 0.004;
+
+/// What to do about the distance between this device and the group.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum Act {
+    /// leave it as it is
+    Keep,
+    /// play at this rate (1.0: the nudge is over)
+    Rate(f64),
+    /// one hard seek to where the group is (aimed ahead by the seek lag)
+    Seek,
 }
 
-/// The clock offset (server − this device, ms) from round trips `(sent, server now, received)`, local times in ms:
-/// the one with the smallest round trip wins, the server's time taken as its middle.
-pub fn clock_offset(samples: &[(f64, f64, f64)]) -> Option<f64> {
-    let best = samples.iter().filter(|s| s.2 >= s.0 && s.1 > 0.0).min_by(|a, b| (a.2 - a.0).total_cmp(&(b.2 - b.0)))?;
-    Some(best.1 - (best.0 + best.2) / 2.0)
+/// The sync rule. `drift_ms` = this device's position − the group's (positive: ahead); `rate`: the playback rate
+/// now; `since_seek_ms`: how long ago this device's last hard seek (or song load) was; `server_made`: the stream is
+/// made by the server (a conversion, a lighter rung, server processing), whose seek starts a new stream.
+/// Under 40 ms nothing; from 40 ms to the seek threshold a rate nudge proportional to the drift (at most ±2 %,
+/// eased in and out, kept until under 20 ms); above 1.5 s (3 s for a server-made stream) one hard seek, then none
+/// for 8 s (nudges only).
+pub fn sync_step(drift_ms: f64, rate: f64, since_seek_ms: f64, server_made: bool) -> Act {
+    let d = drift_ms.abs();
+    let seek_above = if server_made { SERVER_MADE_SEEK_MS } else { SEEK_MS };
+    if d > seek_above && since_seek_ms >= SEEK_GAP_MS { return Act::Seek; }
+    let nudging = (rate - 1.0).abs() > 1e-9;
+    let target = if d < SETTLED_MS || (!nudging && d < DEAD_MS) { 1.0 } else { 1.0 - (drift_ms / 1000.0 * NUDGE_PER_S).clamp(-MAX_NUDGE, MAX_NUDGE) };
+    let next = ease(rate, target);
+    if (next - rate).abs() < 1e-9 { Act::Keep } else { Act::Rate(next) }
+}
+
+/// One look's step of the rate towards `target`, at most [`EASE_STEP`]; within the ±2 % and on a round value.
+pub fn ease(rate: f64, target: f64) -> f64 {
+    let r = rate + (target - rate).clamp(-EASE_STEP, EASE_STEP);
+    let r = r.clamp(1.0 - MAX_NUDGE, 1.0 + MAX_NUDGE);
+    (r * 10_000.0).round() / 10_000.0
+}
+
+/// The median of `v` (the middle two averaged); None when empty.
+pub fn median(v: &[f64]) -> Option<f64> {
+    if v.is_empty() { return None; }
+    let mut s = v.to_vec();
+    s.sort_by(f64::total_cmp);
+    let m = s.len() / 2;
+    Some(if s.len() % 2 == 1 { s[m] } else { (s[m - 1] + s[m]) / 2.0 })
+}
+
+// ---- the server's clock ------------------------------------------------------------------------------------------
+
+/// Round trips to `/api/time` when joining …
+pub const CLOCK_JOIN_SAMPLES: usize = 8;
+/// … and at each refresh, this often (ms) while in a group.
+pub const CLOCK_REFRESH_SAMPLES: usize = 3;
+pub const CLOCK_REFRESH_MS: u32 = 60_000;
+/// The estimate: the median of the offsets of this many round trips with the shortest round trip.
+pub const CLOCK_KEEP: usize = 3;
+/// A refresh ignores round trips longer than this many times the shortest seen …
+pub const CLOCK_RTT_LIMIT: f64 = 2.0;
+/// … but never turns away one this short (ms): on a fast network twice 1–2 ms would refuse every refresh. After
+/// [`CLOCK_RESET_AFTER`] refreshes in a row with nothing kept (the network changed: Wi-Fi to mobile data) the
+/// shortest round trip seen becomes the shortest of the last refresh. (The same rule on the phone and the desktop.)
+pub const CLOCK_MIN_BAR_MS: f64 = 20.0;
+pub const CLOCK_RESET_AFTER: u32 = 5;
+/// … and moves the offset by this share of the difference (an exponentially weighted average) …
+pub const CLOCK_BLEND: f64 = 0.3;
+/// … never by more than this (ms) at once.
+pub const CLOCK_MAX_STEP_MS: f64 = 50.0;
+
+/// The offset between the server's clock and this device's (server − device, ms), from round trips
+/// `(sent, server now, received)` in this device's ms: at join the median of the 3 shortest of 8; then every
+/// minute 3 more, those over twice the shortest round trip seen (at least 20 ms) left out, blended in (weight 0.3)
+/// and never moved by more than 50 ms at once – a slow answer of a busy server can't throw the group off.
+#[derive(Debug, Clone, Default)]
+pub struct Clock {
+    pub offset: Option<f64>,
+    best_rtt: Option<f64>,
+    /// refreshes in a row that kept nothing
+    empty: u32,
+}
+
+impl Clock {
+    /// The usable round trips as (offset, round trip): the server's time taken at the middle of each.
+    fn usable(samples: &[(f64, f64, f64)]) -> Vec<(f64, f64)> {
+        samples.iter().filter(|s| s.2 >= s.0 && s.1 > 0.0).map(|s| (s.1 - (s.0 + s.2) / 2.0, s.2 - s.0)).collect()
+    }
+
+    /// The estimate of `samples`: the median offset of the [`CLOCK_KEEP`] with the shortest round trip, and the
+    /// shortest round trip; None without a usable one.
+    pub fn estimate(samples: &[(f64, f64, f64)]) -> Option<(f64, f64)> {
+        let mut u = Self::usable(samples);
+        u.sort_by(|a, b| a.1.total_cmp(&b.1));
+        u.truncate(CLOCK_KEEP);
+        let best = u.first()?.1;
+        Some((median(&u.iter().map(|x| x.0).collect::<Vec<_>>())?, best))
+    }
+
+    /// Joining: the estimate as it is (8 round trips), which replaces what was measured before. False when none
+    /// was usable.
+    pub fn join(&mut self, samples: &[(f64, f64, f64)]) -> bool {
+        let Some((o, rtt)) = Self::estimate(samples) else { return false };
+        self.offset = Some(o);
+        self.best_rtt = Some(rtt);
+        self.empty = 0;
+        true
+    }
+
+    /// A refresh (3 round trips): those over twice the shortest seen (at least [`CLOCK_MIN_BAR_MS`]) left out, the
+    /// estimate blended in, at most 50 ms of change. After [`CLOCK_RESET_AFTER`] refreshes in a row with nothing
+    /// kept, the shortest seen becomes the last refresh's, so a network that got slower for good is followed.
+    pub fn refresh(&mut self, samples: &[(f64, f64, f64)]) {
+        let Some(old) = self.offset else { self.join(samples); return };
+        let Some(newest) = Self::usable(samples).iter().map(|u| u.1).min_by(f64::total_cmp) else { return };
+        let best = self.best_rtt.map_or(newest, |b| b.min(newest));
+        self.best_rtt = Some(best);
+        let bar = (best * CLOCK_RTT_LIMIT).max(CLOCK_MIN_BAR_MS);
+        let kept: Vec<(f64, f64, f64)> = samples.iter().copied().filter(|s| s.2 - s.0 <= bar).collect();
+        let Some((est, _)) = Self::estimate(&kept) else {
+            self.empty += 1;
+            if self.empty >= CLOCK_RESET_AFTER { self.best_rtt = Some(newest); self.empty = 0; }
+            return;
+        };
+        self.empty = 0;
+        self.offset = Some(old + (CLOCK_BLEND * (est - old)).clamp(-CLOCK_MAX_STEP_MS, CLOCK_MAX_STEP_MS));
+    }
+}
+
+// ---- quality while in a group --------------------------------------------------------------------------------------
+
+/// Auto quality in a group listen: the rung is chosen when a song starts and kept for the whole song – no change
+/// from the bandwidth estimate mid-song (a reload lands behind the group and costs a second one). A real stall (the
+/// buffer ran empty) may drop it once per song. The original file is preferred when this device plays it; after a
+/// song that had to drop, the next one starts where the estimate says.
+#[derive(Debug, Clone, Default)]
+pub struct QualityLock {
+    song: String,
+    dropped: bool,
+    dropped_before: bool,
+}
+
+impl QualityLock {
+    /// A song (its queue entry id) starts.
+    pub fn start(&mut self, song: &str) {
+        if self.song == song { return; }
+        self.dropped_before = self.dropped;
+        self.song = song.to_string();
+        self.dropped = false;
+    }
+    /// The rung `song` starts on with Auto: the original when this device plays the file (`can_play`) and the song
+    /// before it did not have to drop, else `auto_rung` (what the estimate allows). Asked for the song playing, or
+    /// ahead of time for the next one (its pre-buffer), it gives what that song will start on.
+    pub fn start_rung(&self, song: &str, can_play: bool, auto_rung: i64) -> i64 {
+        let dropped_before = if song == self.song { self.dropped_before } else { self.dropped };
+        if can_play && !dropped_before { 0 } else { auto_rung }
+    }
+    /// May the rung change now, in `song`? `stall`: a real stall. Only a stall, and only once per song.
+    pub fn may_change(&mut self, song: &str, stall: bool) -> bool {
+        self.start(song);
+        if !stall || self.dropped { return false; }
+        self.dropped = true;
+        true
+    }
 }
 
 /// The host's name ("the host" when the state has none).
@@ -185,49 +341,72 @@ pub fn window(ids: &[i64], index: usize, max: usize) -> (Vec<i64>, usize) {
     (ids[from..from + max].to_vec(), index - from)
 }
 
-/// What a seek made to catch up with the group costs on this device (the phone's `SeekLag`): a seek starts playing
-/// some time after it was asked (a whole file buffers at the new spot, a server-made stream is asked for again at
-/// `t=`), so it is aimed ahead by what the last ones took – learnt from where each one landed, for whole files and
-/// server-made streams apart, at most 3 s. When two seeks within 15 s still land more than 0.5 s off, that song only
-/// seeks for a drift above 3 s and the rate nudge closes the rest.
+/// A list's Shuffle in a group: the songs in a random order (Fisher–Yates; `rand` gives 0 ≤ x < 1), at most `max`
+/// of them, so a list longer than that sends `max` songs picked from all of it (as the phone does), not its first.
+pub fn pick_shuffled(ids: &[i64], max: usize, mut rand: impl FnMut() -> f64) -> Vec<i64> {
+    let mut v = ids.to_vec();
+    for i in (1..v.len()).rev() {
+        let j = ((rand() * (i + 1) as f64).floor() as usize).min(i);
+        v.swap(i, j);
+    }
+    v.truncate(max);
+    v
+}
+
+/// What a seek made to catch up with the group costs on this device: a seek starts playing some time after it was
+/// asked (a whole file buffers at the new spot, a server-made stream is asked for again at `t=`), so it is aimed
+/// ahead by the running median of what the last 5 took – learnt from where each one landed, for whole files and
+/// server-made streams apart, at most 5 s. It also remembers when the last seek was ([`SEEK_GAP_MS`]).
 #[derive(Default)]
 pub struct SeekLag {
-    lag: [f64; 2],
-    wait: Option<(usize, String)>,
-    miss_at: Option<f64>,
-    off_for: Option<String>,
+    took: [Vec<f64>; 2],
+    /// the seek awaited: (kind, song, the lag it was aimed with)
+    wait: Option<(usize, String, f64)>,
+    /// when the last one was made (this device's ms)
+    last_at: Option<f64>,
 }
 
 impl SeekLag {
-    pub const SEEK_MS: f64 = 500.0;
-    pub const BACKED_OFF_MS: f64 = 3000.0;
-    pub const MAX_LAG_MS: f64 = 3000.0;
-    pub const MISS_WINDOW_MS: f64 = 15000.0;
+    pub const KEEP: usize = 5;
+    pub const MAX_LAG_MS: f64 = 5000.0;
 
     /// A seek's result is awaited: the next look while playing calls [`SeekLag::landed`].
     pub fn waiting(&self) -> bool { self.wait.is_some() }
-    /// Where to seek in `song` (its queue entry id) for the group's `expected_ms`: ahead by the lag of that kind.
-    pub fn target(&mut self, song: &str, expected_ms: f64, server_made: bool) -> f64 {
+    /// Where to seek in `song` (its queue entry id) for the group's `expected_ms`, at `now_ms`: ahead by the lag of
+    /// that kind of stream.
+    pub fn target(&mut self, song: &str, expected_ms: f64, server_made: bool, now_ms: f64) -> f64 {
         let k = usize::from(server_made);
-        self.wait = Some((k, song.to_string()));
-        expected_ms + self.lag[k]
+        let lag = self.lag_ms(server_made);
+        self.wait = Some((k, song.to_string(), lag));
+        self.last_at = Some(now_ms);
+        expected_ms + lag
     }
-    /// The first look while playing after a seek: `drift_ms` = this device − the group, in `song`, at `now_ms`.
-    pub fn landed(&mut self, song: &str, drift_ms: f64, now_ms: f64) {
-        let Some((k, waited)) = self.wait.take() else { return };
+    /// The first look while playing after a seek: `drift_ms` = this device − the group, in `song`. What the seek
+    /// really took is the lag it was aimed with less the drift.
+    pub fn landed(&mut self, song: &str, drift_ms: f64) {
+        let Some((k, waited, aimed)) = self.wait.take() else { return };
         if waited != song { return; }
-        self.lag[k] = (self.lag[k] - drift_ms).clamp(0.0, Self::MAX_LAG_MS);
-        if drift_ms.abs() > Self::SEEK_MS {
-            if self.miss_at.is_some_and(|at| now_ms - at <= Self::MISS_WINDOW_MS) { self.off_for = Some(song.to_string()); }
-            self.miss_at = Some(now_ms);
-        }
+        let v = &mut self.took[k];
+        v.push((aimed - drift_ms).clamp(0.0, Self::MAX_LAG_MS));
+        if v.len() > Self::KEEP { v.remove(0); }
     }
     /// The seek awaited is not one to learn from (a pause, the listener's own seek, leaving the group).
     pub fn cancel(&mut self) { self.wait = None; }
-    /// Above this drift (ms) a seek is made.
-    pub fn seek_above_ms(&self, song: &str) -> f64 { if self.off_for.as_deref() == Some(song) { Self::BACKED_OFF_MS } else { Self::SEEK_MS } }
-    pub fn lag_ms(&self, server_made: bool) -> f64 { self.lag[usize::from(server_made)] }
+    /// The running median of what the last seeks of this kind took (0 before the first).
+    pub fn lag_ms(&self, server_made: bool) -> f64 { median(&self.took[usize::from(server_made)]).unwrap_or(0.0) }
+    /// How long ago the last seek (or song load) was, at `now_ms` (infinite before the first).
+    pub fn since_ms(&self, now_ms: f64) -> f64 { self.last_at.map_or(f64::INFINITY, |t| (now_ms - t).max(0.0)) }
 }
+
+/// A song change near the boundary settles by itself (the pre-buffered next song plays): this device is on the next
+/// entry within 3 s of its start while the group still ends the one before, or it still plays the last moments of
+/// the one before (within 3 s of its end) while the group started the next. `cur_dur`: the length of the song here.
+pub fn near_boundary(cur_i: i64, pos: f64, cur_dur: f64, ei: i64, epos: f64) -> bool {
+    (cur_i == ei + 1 && pos < BOUNDARY_S) || (cur_i + 1 == ei && (epos < BOUNDARY_S || (cur_dur > 0.0 && cur_dur - pos < BOUNDARY_S)))
+}
+
+/// How close (s) to the expected end of a song a song change uses the pre-buffered next song.
+pub const BOUNDARY_S: f64 = 3.0;
 
 #[cfg(test)]
 mod tests {
@@ -273,27 +452,160 @@ mod tests {
         assert_eq!(expected(&s, 999_000.0), (0, 90.0));
     }
 
-    #[test]
-    fn the_sync_rule() {
-        assert_eq!(drift(600.0, false, true, 500.0), Drift::Seek);
-        assert_eq!(drift(-600.0, false, false, 500.0), Drift::Seek);
-        assert_eq!(drift(300.0, false, true, 500.0), Drift::Slower);
-        assert_eq!(drift(-300.0, false, true, 500.0), Drift::Faster);
-        assert_eq!(drift(100.0, false, true, 500.0), Drift::None);
-        assert_eq!(drift(100.0, true, true, 500.0), Drift::Slower);
-        assert_eq!(drift(40.0, true, true, 500.0), Drift::Normal);
-        // a browser that would change the pitch: seek only
-        assert_eq!(drift(300.0, false, false, 500.0), Drift::None);
-        assert_eq!(drift(300.0, true, false, 500.0), Drift::Normal);
-        // a song where seeks kept missing: only above 3 s
-        assert_eq!(drift(2000.0, false, true, 3000.0), Drift::Slower);
+    /// Runs the rule every 500 ms on a device `drift0` ms off, with the drift closing at the rate's distance from 1.0:
+    /// the rates it played at, and the drift at the end.
+    fn run(drift0: f64, server_made: bool, looks: usize) -> (Vec<f64>, f64, usize) {
+        let (mut d, mut rate, mut seeks) = (drift0, 1.0, 0);
+        let mut rates = vec![];
+        for _ in 0..looks {
+            match sync_step(d, rate, f64::INFINITY, server_made) {
+                Act::Seek => { seeks += 1; d = 0.0; rate = 1.0; }
+                Act::Rate(r) => rate = r,
+                Act::Keep => {}
+            }
+            rates.push(rate);
+            d += (rate - 1.0) * 500.0;
+        }
+        (rates, d, seeks)
     }
 
     #[test]
-    fn clock_offset_takes_the_shortest_round_trip() {
-        assert_eq!(clock_offset(&[(0.0, 1000.0, 100.0), (200.0, 1210.0, 220.0), (300.0, 1400.0, 500.0)]), Some(1000.0));
-        assert_eq!(clock_offset(&[]), None);
-        assert_eq!(clock_offset(&[(10.0, 0.0, 20.0)]), None);
+    fn drift_to_action() {
+        // under 40 ms: nothing
+        assert_eq!(sync_step(39.0, 1.0, f64::INFINITY, false), Act::Keep);
+        assert_eq!(sync_step(-39.0, 1.0, f64::INFINITY, false), Act::Keep);
+        // 40 ms – 1.5 s: a nudge, eased in (one step of 0.4 % at a time), slower when ahead, faster when behind
+        assert_eq!(sync_step(300.0, 1.0, f64::INFINITY, false), Act::Rate(0.996));
+        assert_eq!(sync_step(-300.0, 1.0, f64::INFINITY, false), Act::Rate(1.004));
+        assert_eq!(sync_step(-1400.0, 1.016, f64::INFINITY, false), Act::Rate(1.02), "never past 2 %");
+        assert_eq!(sync_step(-1400.0, 1.02, f64::INFINITY, false), Act::Keep);
+        // proportional: 60 ms ahead wants 0.6 % slower
+        assert_eq!(sync_step(60.0, 0.996, f64::INFINITY, false), Act::Rate(0.994));
+        assert_eq!(sync_step(60.0, 0.994, f64::INFINITY, false), Act::Keep);
+        // kept until under 20 ms, then eased out
+        assert_eq!(sync_step(25.0, 0.998, f64::INFINITY, false), Act::Rate(0.9975));
+        assert_eq!(sync_step(15.0, 0.99, f64::INFINITY, false), Act::Rate(0.994));
+        assert_eq!(sync_step(15.0, 0.998, f64::INFINITY, false), Act::Rate(1.0));
+        // above 1.5 s: one hard seek – never for less, whatever happened before
+        assert_eq!(sync_step(1501.0, 1.0, f64::INFINITY, false), Act::Seek);
+        assert_eq!(sync_step(-1501.0, 1.0, 9000.0, false), Act::Seek);
+        assert_ne!(sync_step(1499.0, 1.0, f64::INFINITY, false), Act::Seek);
+        // no seek again within 8 s of the last one: a nudge (at most 2 %) instead
+        assert_eq!(sync_step(2500.0, 1.0, 7999.0, false), Act::Rate(0.996));
+        assert_eq!(sync_step(2500.0, 1.0, 8000.0, false), Act::Seek);
+        // a server-made stream is never seeked for under 3 s
+        assert_eq!(sync_step(2900.0, 1.0, f64::INFINITY, true), Act::Rate(0.996));
+        assert_eq!(sync_step(3001.0, 1.0, f64::INFINITY, true), Act::Seek);
+    }
+
+    #[test]
+    fn a_nudge_closes_the_drift_smoothly_and_never_seeks() {
+        for start in [45.0f64, 150.0, -400.0, 1400.0, -2900.0] {
+            let server_made = start.abs() > 1500.0;
+            let (rates, end, seeks) = run(start, server_made, 600);
+            assert_eq!(seeks, 0, "{start}");
+            assert!(end.abs() < SETTLED_MS, "{start}: still {end} ms off");
+            assert!(rates.iter().all(|r| (0.98..=1.02).contains(r)), "{start}");
+            // eased: no step of more than 0.4 % from one look to the next, and it ends at 1.0
+            let mut last = 1.0;
+            for r in &rates { assert!((r - last).abs() <= EASE_STEP + 1e-9, "{start}: {last} → {r}"); last = *r; }
+            assert_eq!(*rates.last().unwrap(), 1.0, "{start}");
+        }
+        // 1.6 s off a whole file: one seek, then nothing more
+        let (_, end, seeks) = run(1600.0, false, 50);
+        assert_eq!((seeks, end), (1, 0.0));
+    }
+
+    #[test]
+    fn the_median() {
+        assert_eq!(median(&[]), None);
+        assert_eq!(median(&[3.0]), Some(3.0));
+        assert_eq!(median(&[9.0, 1.0, 5.0]), Some(5.0));
+        assert_eq!(median(&[4.0, 1.0, 3.0, 2.0]), Some(2.5));
+    }
+
+    #[test]
+    fn the_clock_estimate() {
+        // (sent, server now, received): offsets 1000 (rtt 100), 1000 (rtt 20), 990 (rtt 30), 1010 (rtt 40), 2000 (rtt 900)
+        let samples = [(0.0, 1050.0, 100.0), (200.0, 1210.0, 220.0), (300.0, 1305.0, 330.0), (400.0, 1430.0, 440.0), (500.0, 2950.0, 1400.0)];
+        // the 3 shortest round trips (20, 30, 40): the median of their offsets (1000, 990, 1010)
+        assert_eq!(Clock::estimate(&samples), Some((1000.0, 20.0)));
+        assert_eq!(Clock::estimate(&[]), None);
+        assert_eq!(Clock::estimate(&[(10.0, 0.0, 20.0), (30.0, 5.0, 20.0)]), None, "no server time, or received before sent");
+        let mut c = Clock::default();
+        assert!(c.join(&samples));
+        assert_eq!(c.offset, Some(1000.0));
+        // a refresh 100 ms off: blended in at 0.3, and never more than 50 ms at once
+        c.refresh(&[(0.0, 1110.0, 20.0), (100.0, 1210.0, 120.0), (200.0, 1310.0, 220.0)]);
+        assert_eq!(c.offset, Some(1030.0));
+        c.refresh(&[(0.0, 1530.0, 20.0)]);
+        assert_eq!(c.offset, Some(1080.0), "500 ms off moves it 50 ms");
+        // round trips over twice the shortest seen (20 ms) are left out
+        c.refresh(&[(0.0, 9000.0, 41.0), (0.0, 9000.0, 300.0)]);
+        assert_eq!(c.offset, Some(1080.0));
+        // … but a network that stays slower is followed: after 5 refreshes in a row with nothing kept, the shortest
+        // round trip seen is the last refresh's (100 ms), and the next one counts
+        let mut n = 0;
+        while c.offset == Some(1080.0) && n < 10 { c.refresh(&[(0.0, 1250.0, 100.0)]); n += 1; }
+        assert_eq!(n, 5, "the 41/300 ms refresh and 4 more keep nothing (the 5th in a row resets), the next counts: {:?}", c.offset);
+        assert!(c.offset.unwrap() > 1080.0 && c.offset.unwrap() <= 1130.0, "{:?}", c.offset);
+        // on a fast network the bar is at least 20 ms: a 1 ms best does not turn a 3 ms round trip away
+        let mut lan = Clock::default();
+        assert!(lan.join(&[(0.0, 501.0, 1.0)]));
+        assert_eq!(lan.offset, Some(500.5));
+        lan.refresh(&[(0.0, 602.0, 3.0)]);
+        assert_eq!(lan.offset, Some(530.5), "kept and blended in");
+        // a join replaces the shortest round trip seen (a reload on another network)
+        let mut again = Clock::default();
+        again.join(&[(0.0, 501.0, 1.0)]);
+        again.join(&[(0.0, 550.0, 100.0)]);
+        again.refresh(&[(0.0, 570.0, 120.0)]);
+        assert_eq!(again.offset, Some(503.0), "120 ms is within twice the new join's 100 ms");
+        // a refresh before any join is a join
+        let mut fresh = Clock::default();
+        fresh.refresh(&[(0.0, 500.0, 10.0)]);
+        assert_eq!(fresh.offset, Some(495.0));
+    }
+
+    #[test]
+    fn the_quality_lock() {
+        let mut q = QualityLock::default();
+        q.start("q1");
+        // the original when this device plays the file; what the estimate says when it can't
+        assert_eq!((q.start_rung("q1", true, 256), q.start_rung("q1", false, 256)), (0, 256));
+        // the estimate never changes the rung mid-song; a real stall once
+        assert!(!q.may_change("q1", false));
+        assert!(q.may_change("q1", true));
+        assert!(!q.may_change("q1", true), "at most once per song");
+        // the next song, asked ahead (its pre-buffer) and once it starts: after a song that had to drop, the estimate
+        // decides where it starts
+        assert_eq!(q.start_rung("q2", true, 128), 128);
+        q.start("q2");
+        assert_eq!(q.start_rung("q2", true, 128), 128);
+        assert_eq!(q.start_rung("q3", true, 128), 0, "q2 has not dropped (yet)");
+        assert!(q.may_change("q2", true));
+        // a song without a drop: the one after it prefers the original again
+        q.start("q3");
+        q.start("q4");
+        assert_eq!(q.start_rung("q4", true, 128), 0);
+        // the same song started again (a reload) keeps its one drop used
+        assert!(q.may_change("q4", true));
+        q.start("q4");
+        assert!(!q.may_change("q4", true));
+    }
+
+    #[test]
+    fn song_changes_near_the_boundary_settle_by_themselves() {
+        // here on the next entry's start, the group still ending the one before
+        assert!(near_boundary(1, 2.5, 180.0, 0, 179.0));
+        // the group 2.9 s into the next one, here still on the one before
+        assert!(near_boundary(0, 120.0, 180.0, 1, 2.9));
+        // here 2 s before the end of the song (by its own length), the group moved on
+        assert!(near_boundary(0, 178.5, 180.5, 1, 4.0));
+        // further: no
+        assert!(!near_boundary(1, 3.5, 180.0, 0, 176.0));
+        assert!(!near_boundary(0, 100.0, 180.0, 1, 4.0));
+        assert!(!near_boundary(0, 10.0, 180.0, 2, 1.0));
     }
 
     #[test]
@@ -343,18 +655,62 @@ mod tests {
     }
 
     #[test]
-    fn the_seek_lag_is_learnt() {
+    fn a_shuffle_of_a_long_list_picks_from_all_of_it() {
+        // a steady stand-in for the random numbers
+        let mut x = 0.5f64;
+        let mut rand = move || { x = (x * 9301.0 + 0.49297).fract(); x };
+        let ids: Vec<i64> = (0..3000).collect();
+        let got = pick_shuffled(&ids, 1000, &mut rand);
+        assert_eq!(got.len(), 1000);
+        let mut seen = got.clone();
+        seen.sort_unstable();
+        seen.dedup();
+        assert_eq!(seen.len(), 1000, "no song twice");
+        assert!(got.iter().filter(|i| **i >= 1000).count() > 500, "songs past the first 1000 come too");
+        // a short list: every song once, in another order
+        let short: Vec<i64> = (0..20).collect();
+        let mixed = pick_shuffled(&short, 1000, &mut rand);
+        let mut back = mixed.clone();
+        back.sort_unstable();
+        assert_eq!(back, short);
+        assert_ne!(mixed, short);
+        assert!(pick_shuffled(&[], 1000, &mut rand).is_empty());
+    }
+
+    #[test]
+    fn the_seek_lag_is_a_running_median() {
         let mut l = SeekLag::default();
-        assert_eq!(l.target("q1", 10_000.0, true), 10_000.0);
-        // landed 800 ms behind: the next seek aims 800 ms ahead
-        l.landed("q1", -800.0, 1000.0);
-        assert_eq!(l.lag_ms(true), 800.0);
+        assert_eq!(l.since_ms(0.0), f64::INFINITY);
+        assert_eq!(l.target("q1", 10_000.0, true, 1000.0), 10_000.0);
+        assert!(l.waiting());
+        assert_eq!(l.since_ms(4000.0), 3000.0);
+        // landed 800 ms behind: that seek took 800 ms
+        l.landed("q1", -800.0);
+        assert_eq!((l.lag_ms(true), l.lag_ms(false)), (800.0, 0.0));
+        // one slow seek among quick ones doesn't throw the aim off: the median of the last 5
+        for took in [700.0, 2900.0, 750.0, 820.0, 760.0] {
+            let aimed = l.lag_ms(true);
+            l.target("q1", 0.0, true, 0.0);
+            l.landed("q1", aimed - took);
+        }
+        assert_eq!(l.lag_ms(true), 760.0, "the last 5: 700, 2900, 750, 820, 760");
+        // a seek in another song, or one cancelled, teaches nothing
+        l.target("q1", 0.0, false, 0.0);
+        l.landed("q2", -500.0);
         assert_eq!(l.lag_ms(false), 0.0);
-        assert_eq!(l.target("q1", 20_000.0, true), 20_800.0);
-        // two misses within 15 s: that song seeks only above 3 s
-        l.landed("q1", 900.0, 5000.0);
-        assert_eq!(l.seek_above_ms("q1"), 3000.0);
-        assert_eq!(l.seek_above_ms("q2"), 500.0);
-        assert!(!l.waiting());
+        l.target("q1", 0.0, false, 0.0);
+        l.cancel();
+        l.landed("q1", -500.0);
+        assert_eq!(l.lag_ms(false), 0.0);
+        // never under 0 or over 5 s
+        l.target("q1", 0.0, false, 0.0);
+        l.landed("q1", 900.0);
+        assert_eq!(l.lag_ms(false), 0.0);
+        l.target("q1", 0.0, false, 0.0);
+        l.landed("q1", -20_000.0);
+        assert_eq!(l.lag_ms(false), 2500.0, "the median of 0 and 5000");
+        l.target("q1", 0.0, false, 0.0);
+        l.landed("q1", -20_000.0);
+        assert_eq!(l.lag_ms(false), 5000.0, "the median of 0, 5000 and 5000");
     }
 }

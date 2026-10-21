@@ -1126,7 +1126,7 @@ pub fn render_album(view: Element, ctx: Ctx) -> PageFuture {
             more = icon("more")));
         let queue_tracks = Rc::new(with_album_id(&tracks, &id));
         { let qt = queue_tracks.clone(); dom::on_sel(&view, "#play-all", "click", move |_| player::play_queue((*qt).clone(), 0, "album")); }
-        { let qt = queue_tracks.clone(); dom::on_sel(&view, "#shuffle-all", "click", move |_| player::play_queue(shuffled(&qt), 0, "album")); }
+        { let qt = queue_tracks.clone(); dom::on_sel(&view, "#shuffle-all", "click", move |_| { if !player::group_shuffle(&qt) { player::play_queue(shuffled(&qt), 0, "album"); } }); }
         let reload: Rc<dyn Fn()> = Rc::new(hashchange);
         { let (id, a) = (id.clone(), a.clone()); dom::on_sel(&view, "#album-edit", "click", move |_| edit_modal(&id, &a)); }
         { let (id, a) = (id.clone(), a.clone()); dom::on_sel(&view, "#album-share", "click", move |_| dom::spawn(ui::share_album(id.clone(), a.clone()))); }

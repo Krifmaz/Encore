@@ -126,9 +126,16 @@ impl Translator {
         self.0.queue.lock().unwrap().0.len()
     }
 
-    /// Start a pass now (a listener turned translations on, the Translator was installed).
+    /// Start a pass now (a listener turned translations on, the Translator was installed, the last group listen
+    /// stopped).
     pub fn wake(&self) {
         self.0.wake.notify_one();
+    }
+
+    /// Until the next [`Translator::wake`] (one made while nothing waited counts: the worker's next wait ends at
+    /// once).
+    pub async fn woken(&self) {
+        self.0.wake.notified().await
     }
 
     /// Why DeepL pauses now, if it does (DeepL's settings at `generation`, `Tiers::deepl_generation`: a change
@@ -431,9 +438,19 @@ async fn deepl_pass(st: &impl Ctx, target: &'static str, items: &[Pending]) {
     }
 }
 
+/// A group listen is playing: the model's work waits (the rows stay waiting for it, and the worker is woken
+/// when the last group listen stops), and its server goes now, so its memory and cores are free for the music.
+async fn hold_for_groups(st: &impl Ctx) -> bool {
+    if !st.library().busy.group_playing() {
+        return false;
+    }
+    llama::stop(st).await;
+    true
+}
+
 /// Ask the model for the items whose row still misses a translation or a romanization.
 async fn model_pass(st: &impl Ctx, target: &'static str, items: Vec<Pending>, model_ok: &mut bool) {
-    if !*model_ok || items.is_empty() || !st.cfg().bool("translate_local_model") || !llama::ready(st) {
+    if !*model_ok || items.is_empty() || !st.cfg().bool("translate_local_model") || !llama::ready(st) || hold_for_groups(st).await {
         return;
     }
     let db = st.db().clone();
@@ -448,6 +465,9 @@ async fn model_pass(st: &impl Ctx, target: &'static str, items: Vec<Pending>, mo
     }).collect();
     let thinking = llama::model(st).thinking;
     for chunk in todo.chunks(prompt::BATCH) {
+        if hold_for_groups(st).await {
+            return;
+        }
         let batch: Vec<Item> = chunk.iter().enumerate().map(|(i, p)| Item { id: i + 1, kind: p.kind, text: p.text.clone(), artist: p.artist.clone() }).collect();
         let reply = match llama::chat(st, prompt::messages(&batch, target, thinking), thinking).await {
             Ok(r) => r,
@@ -569,7 +589,8 @@ async fn run_pass(st: &impl Ctx) {
     if st.cfg().bool("translate_background") && st.cfg().bool("translate_local_model") && llama::ready(st) {
         for &t in &targets {
             loop {
-                if !model_ok {
+                // (a group listen playing: these wait for the pass after it, which its end starts)
+                if !model_ok || hold_for_groups(st).await {
                     return;
                 }
                 let db = st.db().clone();
@@ -580,8 +601,8 @@ async fn run_pass(st: &impl Ctx) {
                 let items: Vec<Pending> = rows.into_iter().map(|(text, kind)| Pending { text, kind: Kind::parse(&kind), artist: None, target: t }).collect();
                 let texts: Vec<String> = items.iter().map(|p| p.text.clone()).collect();
                 model_pass(st, t, items, &mut model_ok).await;
-                if !model_ok {
-                    // the Translator failed: leave these waiting for a later pass
+                if !model_ok || st.library().busy.group_playing() {
+                    // the Translator failed, or a group listen started: leave these waiting for a later pass
                     return;
                 }
                 // whatever the answer, these were asked
@@ -663,7 +684,7 @@ pub async fn worker(st: impl Ctx) {
     loop {
         run_pass(&st).await;
         tokio::select! {
-            _ = tr.0.wake.notified() => tokio::time::sleep(Duration::from_secs(2)).await,
+            _ = tr.woken() => tokio::time::sleep(Duration::from_secs(2)).await,
             _ = tokio::time::sleep(Duration::from_secs(1800)) => {}
         }
     }

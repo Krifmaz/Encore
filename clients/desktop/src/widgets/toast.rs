@@ -1,5 +1,7 @@
 //! `.toast`: short messages bottom right, gone after four seconds. An error stays until it is
-//! dismissed and carries a Copy button, so it can be read in full and pasted into a report.
+//! dismissed and carries a Copy button, so it can be read in full and pasted into a report. A toast
+//! can carry one action ("Up next cleared · Undo", the web's `toast_action`) and then stays as long
+//! as the action can be taken.
 
 use super::{t, El};
 use crate::theme;
@@ -22,6 +24,8 @@ pub struct Toast {
     pub text: String,
     pub kind: ToastKind,
     pub at: Instant,
+    /// Its button ("Undo") and what it does, and how long the toast stays then.
+    pub action: Option<(String, crate::player::Message, Duration)>,
 }
 
 impl Toast {
@@ -37,18 +41,21 @@ impl Toast {
         self.kind == ToastKind::Err && self.text != super::details::COPY_FAILED
     }
 
-    /// Errors stay until they are dismissed (a click on the toast); the rest go after [`Self::LIFE`].
+    /// Errors stay until they are dismissed (a click on the toast); the rest go after [`Self::LIFE`]
+    /// (a toast with an action: as long as the action can be taken).
     pub fn expired(&self) -> bool {
-        !self.stays() && self.at.elapsed() > Self::LIFE
+        let life = self.action.as_ref().map_or(Self::LIFE, |a| a.2);
+        !self.stays() && self.at.elapsed() > life
     }
 }
 
 /// The toast column, to be laid over the shell bottom right. `on_dismiss(id)` closes one early;
-/// `on_copy(id)` copies an error's text.
+/// `on_copy(id)` copies an error's text; `on_action(id)` takes a toast's action.
 pub fn view<'a, M: Clone + 'a>(
     toasts: &'a [Toast],
     on_dismiss: impl Fn(u64) -> M,
     on_copy: impl Fn(u64) -> M,
+    on_action: impl Fn(u64) -> M,
 ) -> El<'a, M> {
     let p = theme::look();
     let mut col = column![].spacing(8).align_x(Alignment::End);
@@ -64,6 +71,14 @@ pub fn view<'a, M: Clone + 'a>(
             column![words, row![space().width(Length::Fill), super::details::copy_btn(on_copy(toast.id))]]
                 .spacing(4)
                 .into()
+        } else if let Some((label, _, _)) = toast.action.as_ref() {
+            row![
+                words,
+                space().width(Length::Fixed(12.0)),
+                super::btn_sm(label.as_str(), theme::Btn::Default, Some(on_action(toast.id)))
+            ]
+            .align_y(Alignment::Center)
+            .into()
         } else {
             words.into()
         };
@@ -106,11 +121,21 @@ mod tests {
     #[test]
     fn errors_stay_until_closed_and_the_rest_go() {
         let at = Instant::now() - Duration::from_secs(60);
-        let toast = |text: &str, kind| Toast { id: 1, text: text.into(), kind, at };
+        let toast = |text: &str, kind| Toast { id: 1, text: text.into(), kind, at, action: None };
         assert!(toast("x", ToastKind::Err).stays() && !toast("x", ToastKind::Err).expired());
         assert!(toast("Copied to clipboard", ToastKind::Ok).expired());
         // the failed copy says what to do instead: it goes like any other toast
         let failed = toast(super::super::details::COPY_FAILED, ToastKind::Err);
         assert!(!failed.stays() && failed.expired());
+        // a toast with Undo stays as long as Undo can be pressed
+        let recent = Instant::now() - Duration::from_secs(5);
+        let undo = Toast {
+            at: recent,
+            action: Some(("Undo".into(), crate::player::Message::UndoClear, Duration::from_millis(6000))),
+            ..toast("Up next cleared", ToastKind::Ok)
+        };
+        assert!(!undo.expired());
+        assert!(Toast { action: None, ..undo.clone() }.expired());
+        assert!(Toast { at, ..undo }.expired());
     }
 }

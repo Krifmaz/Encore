@@ -19,6 +19,8 @@ import app.encore.android.car.CarNowPlaying
 import app.encore.android.car.LyricsCache
 import app.encore.android.car.LyricsCard
 import app.encore.android.car.NowPlaying
+import app.encore.android.features.group.GroupListen
+import app.encore.android.features.group.GroupRules
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -140,9 +142,14 @@ object CarPrefs {
  * changes; the queue's items keep their real titles, so the phone app's own player, scrobbling, the remote
  * snapshot and resume (which read the items or the ExoPlayer itself) never see it. And shuffle is the app's
  * shuffle (the rest of the queue in a new order, the old order back when it goes off), not ExoPlayer's
- * shuffle order, so "Up next" on the phone shows what really comes next.
+ * shuffle order, so "Up next" on the phone shows what really comes next. Every seek through it is a person's own (the
+ * app, the notification, the lock screen, headphones, the car), so it runs inside [aroundUser]: in a group listen only
+ * those go to the group, never the service's own seeks on the ExoPlayer itself.
  */
 class CarPlayer(private val exo: Player) : ForwardingPlayer(exo) {
+    /** set by the service: runs a person's seek or skip (GroupSync.fromUser in a group listen) */
+    var aroundUser: (() -> Unit) -> Unit = { it() }
+
     private val listeners = ArrayList<Player.Listener>()
     private var shownFor: String? = null
     private var shown: MediaMetadata? = null
@@ -171,6 +178,17 @@ class CarPlayer(private val exo: Player) : ForwardingPlayer(exo) {
     }
 
     override fun getShuffleModeEnabled(): Boolean = shuffled
+
+    override fun seekTo(positionMs: Long) = aroundUser { super.seekTo(positionMs) }
+    override fun seekTo(mediaItemIndex: Int, positionMs: Long) = aroundUser { super.seekTo(mediaItemIndex, positionMs) }
+    override fun seekToDefaultPosition() = aroundUser { super.seekToDefaultPosition() }
+    override fun seekToDefaultPosition(mediaItemIndex: Int) = aroundUser { super.seekToDefaultPosition(mediaItemIndex) }
+    override fun seekBack() = aroundUser { super.seekBack() }
+    override fun seekForward() = aroundUser { super.seekForward() }
+    override fun seekToPrevious() = aroundUser { super.seekToPrevious() }
+    override fun seekToNext() = aroundUser { super.seekToNext() }
+    override fun seekToPreviousMediaItem() = aroundUser { super.seekToPreviousMediaItem() }
+    override fun seekToNextMediaItem() = aroundUser { super.seekToNextMediaItem() }
 
     override fun setShuffleModeEnabled(shuffleModeEnabled: Boolean) {
         onShuffle?.invoke(shuffleModeEnabled)
@@ -598,7 +616,8 @@ class CarControls(
 
     /**
      * In a group listen or not (the service's GroupSync, before it takes the group's queue): the car's subtitle says
-     * so, and repeat and the app shuffle go off (a group has neither: client-shapes §2.2). Main thread.
+     * so, and repeat and the app shuffle go off (a group has no repeat; its Shuffle is a one-time shuffle of its Up
+     * next, [setShuffle]). Main thread.
      */
     fun setGroup(on: Boolean) {
         if (group == on) return
@@ -613,10 +632,22 @@ class CarControls(
         refreshText()
     }
 
-    /** In a group listen (the car's, notification's or lock screen's Shuffle / Repeat): refused, and said why. */
+    /** In a group listen (the car's, notification's or lock screen's Repeat): refused, and said why. */
     private fun groupRefused(): Boolean {
-        if (!group && !app.encore.android.features.group.GroupListen.inGroup) return false
-        note("Shuffle and repeat are off during a group listen")
+        if (!group && !GroupListen.inGroup) return false
+        note("Repeat is off during a group listen")
+        return true
+    }
+
+    /**
+     * In a group listen the Shuffle button shuffles the group's Up next once, for everyone (those who control; the
+     * others are told who does). True when in a group.
+     */
+    private fun groupShuffle(): Boolean {
+        if (!group && !GroupListen.inGroup) return false
+        val s = GroupListen.state.value ?: return true
+        if (!s.youCanControl) { note(GroupRules.onlyHost(s)); return true }
+        GroupListen.shuffleUpNext()
         return true
     }
 
@@ -689,8 +720,8 @@ class CarControls(
     // ---- shuffle: the app's shuffle of what comes next -------------------------------------------------------
 
     private fun setShuffle(on: Boolean) {
+        if (groupShuffle()) return
         if (on == player.shuffled) return
-        if (on && groupRefused()) return
         val cur = exo.currentMediaItemIndex
         val n = exo.mediaItemCount
         val rest = ArrayList<MediaItem>()

@@ -88,6 +88,10 @@ pub fn play_queue(tracks: Vec<Value>, start: usize, context: &str) {
     load(false, 0.0, None, None);
 }
 
+/// A Shuffle button of an album, an artist or a playlist, in a group listen: the songs go to the group shuffled (as its
+/// queue for those who control it, else added to its Up next). False outside a group: the page shuffles as usual.
+pub fn group_shuffle(tracks: &[Value]) -> bool { g_shuffle_play(tracks) }
+
 pub fn enqueue(tracks: Vec<Value>) {
     if g_add("enqueue", &tracks) { return; }
     if is_linked() && !is_local() {
@@ -225,7 +229,7 @@ fn unshuffled(s: &State) -> Vec<Rc<Value>> {
 }
 /// `setShuffle(on)`: shuffle mode – on shuffles the rest of the queue, off puts the original order back (the song playing stays).
 pub(super) fn set_shuffle(on: bool) {
-    if g_modes() { return; }
+    if g_shuffle() { return; }
     if via_link(json!({ "action": "shuffle", "value": on })) {
         LINK.with(|l| if let Some(l) = l.borrow_mut().as_mut() { if let Some(o) = l.state.as_object_mut() { o.insert("shuffle".into(), json!(on)); } });
         render();
@@ -247,7 +251,7 @@ pub(super) fn set_shuffle(on: bool) {
 }
 /// `setRepeat(v)`: 'off' | 'all' | 'one'.
 pub(super) fn set_repeat(v: &str) {
-    if g_modes() { return; }
+    if g_repeat() { return; }
     if !["off", "all", "one"].contains(&v) { return; }
     if via_link(json!({ "action": "repeat", "value": v })) {
         LINK.with(|l| if let Some(l) = l.borrow_mut().as_mut() { if let Some(o) = l.state.as_object_mut() { o.insert("repeat".into(), json!(v)); } });
@@ -259,6 +263,30 @@ pub(super) fn set_repeat(v: &str) {
     render();
     if st(|s| s.full) { render_full(); }
     emit(); save_spot(true);
+}
+/// Up next's Clear: everything after the song playing goes (the group's, asked first, in a group listen). Here the
+/// toast "Up next cleared" offers Undo for 6 s, which puts the songs back after the song playing.
+pub(super) fn clear_up_next() {
+    if g_clear() { return; }
+    if is_linked() { return; }
+    let (gone, playing) = st_mut(|s| {
+        let at = ((s.index + 1).max(0) as usize).min(s.queue.len());
+        (s.queue.split_off(at), s.queue.get(s.index.max(0) as usize).cloned())
+    });
+    if gone.is_empty() { return; }
+    cancel_preload();
+    render(); emit(); save_spot(true);
+    if st(|s| s.full) { render_full(); }
+    crate::ui::toast_action("Up next cleared", "Undo", 6000, move || {
+        st_mut(|s| {
+            // after the song playing (the same one, when it still is), before anything added since
+            let at = playing.as_ref().and_then(|p| s.queue.iter().position(|x| Rc::ptr_eq(x, p))).map(|i| i + 1)
+                .unwrap_or_else(|| ((s.index + 1).max(0) as usize).min(s.queue.len()));
+            s.queue.splice(at..at, gone);
+        });
+        render(); emit(); preload_next(); save_spot(true);
+        if st(|s| s.full) { render_full(); }
+    });
 }
 pub(super) fn next_repeat(r: &str) -> &'static str { match r { "off" => "all", "all" => "one", "one" => "off", _ => "all" } }
 pub(super) fn repeat_title(r: &str) -> &'static str { match r { "one" => "Repeat: this song", "all" => "Repeat: the queue", _ => "Repeat: off" } }

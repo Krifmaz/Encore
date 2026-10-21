@@ -283,8 +283,13 @@ pub enum Effect {
     /// Back keeps it).
     Route(Page),
     Toast(String, ToastKind),
+    /// A toast with one action (`label`, e.g. "Undo") that sends `then` to the player; it stays
+    /// `ms`.
+    ToastAction { text: String, label: String, then: player::Message, ms: u64 },
     /// Play these Encore track rows (JSON as the server sends them) from `index`.
     Play { tracks: Vec<Value>, index: usize },
+    /// A Shuffle button's rows: played in a random order (the group's, in a group listen).
+    PlayShuffled(Vec<Value>),
     PlayNext(Vec<Value>),
     Enqueue(Vec<Value>),
     /// Copy to the clipboard.
@@ -324,7 +329,9 @@ impl std::fmt::Debug for Effect {
             Effect::Replace(p) => write!(f, "Replace({p:?})"),
             Effect::Route(p) => write!(f, "Route({p:?})"),
             Effect::Toast(t, k) => write!(f, "Toast({t:?}, {k:?})"),
+            Effect::ToastAction { text, label, .. } => write!(f, "ToastAction({text:?}, {label:?})"),
             Effect::Play { tracks, index } => write!(f, "Play({} tracks, {index})", tracks.len()),
+            Effect::PlayShuffled(t) => write!(f, "PlayShuffled({})", t.len()),
             Effect::PlayNext(t) => write!(f, "PlayNext({})", t.len()),
             Effect::Enqueue(t) => write!(f, "Enqueue({})", t.len()),
             Effect::Clipboard(s) => write!(f, "Clipboard({s:?})"),
@@ -463,6 +470,12 @@ impl<'a> Ctx<'a> {
         self.push(Effect::Toast(text.into(), ToastKind::Err));
     }
 
+    /// `toast_action(msg, label, ms, then)`: a toast with one button that sends `then` to the
+    /// player ("Up next cleared · Undo").
+    pub fn toast_action(&mut self, text: impl Into<String>, label: &str, then: player::Message, ms: u64) {
+        self.push(Effect::ToastAction { text: text.into(), label: label.to_string(), then, ms });
+    }
+
     /// Go to a page (the current one goes on the history).
     pub fn navigate(&mut self, page: Page) {
         self.push(Effect::Navigate(page));
@@ -481,6 +494,13 @@ impl<'a> Ctx<'a> {
     /// Play these track rows (as the server sends them) from `index`, through the engine.
     pub fn play(&mut self, tracks: Vec<Value>, index: usize) {
         self.push(Effect::Play { tracks, index });
+    }
+
+    /// A Shuffle button: these rows in a random order. In a group listen the server shuffles
+    /// them, the same order for everyone (the group's queue for those who control it, else added
+    /// to its Up next).
+    pub fn play_shuffled(&mut self, tracks: Vec<Value>) {
+        self.push(Effect::PlayShuffled(tracks));
     }
 
     pub fn play_next(&mut self, tracks: Vec<Value>) {

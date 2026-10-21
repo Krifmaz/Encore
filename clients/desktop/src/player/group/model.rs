@@ -392,17 +392,6 @@ pub fn expected(s: &GroupState, server_now_ms: i64) -> Option<(usize, f64)> {
     Some((index, pos.max(0.0)))
 }
 
-/// The clock offset (server − this computer, ms) from round trips: (sent, server now, received)
-/// each, local times in ms. The one with the smallest round trip wins; the server's time is
-/// taken as its middle.
-pub fn clock_offset(samples: &[(i64, i64, i64)]) -> Option<i64> {
-    samples
-        .iter()
-        .filter(|(sent, now, got)| got >= sent && *now > 0)
-        .min_by_key(|(sent, _, got)| got - sent)
-        .map(|(sent, now, got)| now - (sent + got) / 2)
-}
-
 // ----- words -----------------------------------------------------------------------------
 
 /// "Only Alex controls playback": why a member's control is off.
@@ -509,6 +498,18 @@ pub fn window(ids: &[Option<i64>], index: usize, max: usize) -> (Vec<i64>, usize
     (lib[from..from + max].to_vec(), idx - from)
 }
 
+/// A list's Shuffle in a group: its library songs in a random order, at most `max` of them, so a
+/// list longer than that sends `max` songs picked from all of it (as the phone does), not its
+/// first ones.
+pub fn pick_shuffled(ids: &[Option<i64>], max: usize, rng: &mut crate::player::queue::Rng) -> Vec<i64> {
+    let mut lib: Vec<i64> = ids.iter().flatten().copied().collect();
+    for i in (1..lib.len()).rev() {
+        lib.swap(i, rng.below(i + 1));
+    }
+    lib.truncate(max);
+    lib
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -608,14 +609,6 @@ mod tests {
         assert_eq!(expected(&paused, 5_000_000), Some((0, 50.0)));
         let empty = GroupState { queue: vec![], index: None, ..s };
         assert_eq!(expected(&empty, 0), None);
-    }
-
-    #[test]
-    fn the_clock_offset_takes_the_shortest_round_trip() {
-        let samples = [(1000, 6000, 1400), (2000, 7010, 2040), (3000, 8000, 3300)];
-        assert_eq!(clock_offset(&samples), Some(4990));
-        assert_eq!(clock_offset(&[]), None);
-        assert_eq!(clock_offset(&[(10, 0, 20)]), None);
     }
 
     #[test]
@@ -729,5 +722,26 @@ mod tests {
         assert_eq!(w.len(), 1000);
         assert_eq!(w[at], 1100);
         assert_eq!(w[0], 200);
+    }
+
+    #[test]
+    fn a_shuffle_of_a_long_list_picks_from_all_of_it() {
+        let mut rng = crate::player::queue::Rng::seeded(7);
+        let many: Vec<Option<i64>> = (0..3000).map(Some).collect();
+        let got = pick_shuffled(&many, 1000, &mut rng);
+        assert_eq!(got.len(), 1000);
+        let mut seen = got.clone();
+        seen.sort_unstable();
+        seen.dedup();
+        assert_eq!(seen.len(), 1000, "no song twice");
+        assert!(got.iter().filter(|i| **i >= 1000).count() > 500, "songs past the first 1000 come too");
+        // a short list: every library song once (files left out), in another order
+        let short: Vec<Option<i64>> = (0..20).map(|i| (i != 3).then_some(i)).collect();
+        let mixed = pick_shuffled(&short, 1000, &mut rng);
+        let mut back = mixed.clone();
+        back.sort_unstable();
+        assert_eq!(back, short.iter().flatten().copied().collect::<Vec<_>>());
+        assert_ne!(mixed, back);
+        assert!(pick_shuffled(&[None], 1000, &mut rng).is_empty());
     }
 }

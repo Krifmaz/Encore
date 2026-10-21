@@ -145,4 +145,26 @@ class ToastRulesTest {
         // a small keyboard below the usual place does not bring the toasts down
         assertEquals(150f, ToastRules.lift(150f, 120f, 48f), 0.01f)
     }
+
+    @Test
+    fun anUndoToastHasItsButtonAndItsOwnTime() {
+        var undone = 0
+        var s = ToastRules.add(emptyList(), 1, 1, "Up next cleared", "ok", action = "Undo", onAction = { undone++ }, showMs = 6000L)
+        val t = s.single()
+        assertEquals("Undo", t.action)
+        assertEquals(6000L, t.showMs)
+        assertFalse(t.stays)
+        t.onAction!!()
+        assertEquals(1, undone)
+        // cleared again before it went: one toast, whose Undo undoes the latest
+        s = ToastRules.add(s, 2, 2, "Up next cleared", "ok", action = "Undo", onAction = { undone += 10 }, showMs = 6000L)
+        assertEquals(1, s.size)
+        assertEquals(1L, s.single().id)
+        s.single().onAction!!()
+        assertEquals(11, undone)
+        // a toast without one: no button, the usual time
+        val plain = ToastRules.add(emptyList(), 3, 3, "Saved", "info", action = "Undo").single()
+        assertEquals("", plain.action)
+        assertEquals(ToastRules.SHOW_MS, plain.showMs)
+    }
 }

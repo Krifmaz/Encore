@@ -308,7 +308,9 @@ pub async fn original(path: &str, req: Request, content_type: &str) -> ApiResult
 }
 
 /// `path` made into `c` by ffmpeg from `seek` seconds on. The ffmpeg process is killed when the response
-/// (and with it the stream) is dropped.
+/// (and with it the stream) is dropped. It runs at normal priority on purpose: someone is listening to it (a
+/// group listen's member too), while every background ffmpeg (loudness, the import's audio check, the song
+/// edges) runs at idle priority ([`encore_media::Ffmpeg::low_priority`]).
 pub fn convert(path: &str, seek: f64, c: &Convert) -> ApiResult<Response> {
     let mut child = Ffmpeg::new().quiet().seek(seek).input(path).args(["-map", "0:a:0"]).args(c.args()).pipe_out().spawn().map_err(|e| err(500, format!("ffmpeg: {e}")))?;
     let out = child.stdout.take().ok_or_else(|| err(500, "ffmpeg gave no output"))?;

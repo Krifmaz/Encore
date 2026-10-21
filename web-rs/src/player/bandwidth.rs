@@ -52,6 +52,8 @@ pub(super) fn step_down_now() {
     let rung = st(|s| s.rung);
     let lower = playback::step_down(rung, orig, st(|s| s.floor));
     if lower == rung { return; }   // already at the floor
+    // in a group listen the rung is kept for the song: a real stall drops it once at most
+    if !group_may_drop() { return; }
     EST.with(|e| {
         let mut e = e.borrow_mut();
         e.kbps = Some(0.6 * playback::needed(rung, orig));
@@ -62,10 +64,10 @@ pub(super) fn step_down_now() {
     st_mut(|s| { s.stalls.clear(); s.step_at = now_ms(); });
     switch_rung(lower);
 }
-/// Reload the song at the current position on another rung.
+/// Reload the song at the current position on another rung (in a group: where the group is by then).
 fn switch_rung(rung: i64) {
-    if cur().is_none() { return; }
-    let at = position();
+    let Some(t) = cur() else { return };
+    let at = group_spot(rung > 0 || convert(&t)).unwrap_or_else(position);
     note_rung_change(st(|s| s.rung), rung);
     let now = now_ms();
     st_mut(|s| { s.switched_at = now; s.seek_at = now; });
@@ -212,7 +214,9 @@ pub(super) fn adapt_tick() {
     if prefs().s("quality") == "auto" { decide(); }
 }
 /// Auto: follow the estimate – down at once (when the buffer is short), up when it has held 1.5× the higher rung's need for 7.5 s.
+/// Never in a group listen: the rung stays for the whole song there, and the next song starts where the estimate says.
 fn decide() {
+    if grouped() { return; }
     let t = cur();
     let orig = orig_kbps(t.as_deref());
     let floor = st(|s| s.floor);

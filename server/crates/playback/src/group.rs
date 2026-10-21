@@ -511,18 +511,26 @@ impl Group {
                 self.set_at(0.0, now_ms);
             }
             "set_queue" => {
-                let tracks = ids(body)?;
+                let mut tracks = ids(body)?;
                 if tracks.len() > START_MAX {
                     return Err(err(400, format!("A group listen's queue can be set to at most {START_MAX} songs at once")));
                 }
-                let at = index.unwrap_or(0).max(0) as usize;
-                let pos = body["position"].as_f64().unwrap_or(0.0);
-                self.set_queue(&tracks, rows, At { index: at, position: pos, playing: true }, by, now_ms);
+                // "shuffle": the songs in a random order made here (the same for everyone), from the first of it
+                let at = if shuffled(body) {
+                    encore_core::ids::shuffle(&mut tracks);
+                    At { index: 0, position: 0.0, playing: true }
+                } else {
+                    At { index: index.unwrap_or(0).max(0) as usize, position: body["position"].as_f64().unwrap_or(0.0), playing: true }
+                };
+                self.set_queue(&tracks, rows, at, by, now_ms);
             }
             "enqueue" | "play_next" => {
-                let tracks: Vec<i64> = ids(body)?.into_iter().filter(|t| rows.contains_key(t)).collect();
+                let mut tracks: Vec<i64> = ids(body)?.into_iter().filter(|t| rows.contains_key(t)).collect();
                 if tracks.is_empty() {
                     return Err(err(400, "Only songs from your library can be played in a group listen"));
+                }
+                if shuffled(body) {
+                    encore_core::ids::shuffle(&mut tracks);
                 }
                 self.room(tracks.len())?;
                 let was_empty = self.queue.is_empty();
@@ -568,6 +576,21 @@ impl Group {
                         self.set_at(0.0, now_ms);
                     }
                 }
+            }
+            "shuffle" => {
+                // the songs after the one playing, in a random order made here (the same for everyone); the one
+                // playing plays on, and "play next" songs are shuffled in with the rest
+                if self.index + 1 < self.queue.len() {
+                    let after = &mut self.queue[self.index + 1..];
+                    encore_core::ids::shuffle(after);
+                    for e in after.iter_mut() {
+                        e.next = false;
+                    }
+                }
+            }
+            "clear" => {
+                // everything after the song playing goes; that song plays on
+                self.queue.truncate(self.index + 1);
             }
             "move" => {
                 let from = self.pick(qid, body["from"].as_i64().or(index))?;
@@ -627,6 +650,11 @@ fn entry_json(e: &Entry) -> Value {
     Value::Object(o)
 }
 
+/// A `set_queue`, `enqueue` or `play_next` that asks for its songs in a random order (`"shuffle": true`).
+fn shuffled(body: &Value) -> bool {
+    body["shuffle"].as_bool().unwrap_or(false)
+}
+
 /// The song ids of a command's `tracks`.
 pub fn ids(body: &Value) -> ApiResult<Vec<i64>> {
     let a = body["tracks"].as_array().ok_or_else(|| err(400, "The command doesn't list any songs"))?;
@@ -634,11 +662,12 @@ pub fn ids(body: &Value) -> ApiResult<Vec<i64>> {
 }
 
 /// Whether an op needs control (the host, or everyone when "Everyone can control"); None for an unknown op.
-/// Adding songs (enqueue, play_next) is for every member with an account.
+/// Adding songs (enqueue, play_next, also shuffled) is for every member with an account; Shuffle and Clear of
+/// the group's Up next need control, like set_queue.
 pub fn needs_control(op: &str) -> Option<bool> {
     match op {
         "enqueue" | "play_next" => Some(false),
-        "play" | "pause" | "seek" | "next" | "prev" | "jump" | "set_queue" | "remove" | "move" => Some(true),
+        "play" | "pause" | "seek" | "next" | "prev" | "jump" | "set_queue" | "remove" | "move" | "shuffle" | "clear" => Some(true),
         _ => None,
     }
 }

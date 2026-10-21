@@ -46,8 +46,12 @@ pub fn overlay<'a>(st: &'a State, ctx: &Ctx<'a>) -> Option<El<'a, Message>> {
             g(Msg::End),
             g(Msg::OpenSheet),
         ),
+        Dialog::ConfirmClear => widgets::confirm(CLEAR_ASK, "", "Clear", true, g(Msg::Clear), g(Msg::Close)),
     })
 }
+
+/// The question before Up next's Clear in a group.
+pub const CLEAR_ASK: &str = "Clear the group's Up next?";
 
 fn switch_row<'a>(label: &'a str, help: &'a str, on: bool, f: impl Fn(bool) -> Message + 'a) -> El<'a, Message> {
     let mut col = column![toggler(on).label(label).text_size(14).spacing(10).on_toggle(f).style(theme::switch)].spacing(2);
@@ -336,8 +340,27 @@ pub fn off<'a>(i: Icon, reason: &'a str, size: f32) -> El<'a, Message> {
     .into()
 }
 
-/// Shuffle and repeat in a group: off, with the reason.
-pub const NO_MODES: &str = "Shuffle and repeat are off during a group listen";
+/// Repeat in a group: off, with the reason.
+pub const REPEAT_OFF: &str = "Repeat is off during a group listen";
+
+/// Shuffle in a group: the group's Up next in a random order, once, for those who control it
+/// (the server makes the order, the same for everyone); off with the reason for anyone else.
+pub fn shuffle<'a>(st: &'a State, size: f32) -> El<'a, Message> {
+    let Some(s) = st.group.state.as_ref() else {
+        return column![].into();
+    };
+    if !s.you_can_control {
+        return off(Icon::Shuffle, st.group.deny.as_str(), size);
+    }
+    let p = theme::look();
+    tooltip(
+        button(icon(Icon::Shuffle, size, p.text)).padding(8).style(theme::btn(Btn::Icon)).on_press(g(Msg::Shuffle)),
+        tip_box("Shuffle"),
+        tooltip::Position::Top,
+    )
+    .gap(4)
+    .into()
+}
 
 /// The Your devices panel's "Group listens": the group this computer is in, the others on the
 /// server, "Start a group listen" and "Join with a code". Nothing on a server without them.
@@ -407,7 +430,7 @@ pub fn up_next<'a>(st: &'a State, ctx: &Ctx<'a>) -> El<'a, Message> {
     };
     let ctl = s.you_can_control;
     let index = st.group.expected().map(|(i, _)| i).unwrap_or(0);
-    let head = row![
+    let mut head = row![
         column![
             widgets::h3("Up next"),
             small_muted(if ctl {
@@ -419,8 +442,16 @@ pub fn up_next<'a>(st: &'a State, ctx: &Ctx<'a>) -> El<'a, Message> {
         .spacing(2)
         .width(Length::Fill)
     ]
-    .spacing(12)
+    .spacing(8)
     .align_y(Alignment::Center);
+    // Shuffle (two songs or more) and Clear of the group's Up next, for those who control it
+    let next = s.queue.len().saturating_sub(index + 1);
+    if ctl && next >= 2 {
+        head = head.push(btn_sm("Shuffle", Btn::Ghost, Some(g(Msg::Shuffle))));
+    }
+    if ctl && next >= 1 {
+        head = head.push(btn_sm("Clear", Btn::Ghost, Some(g(Msg::AskClear))));
+    }
     let rest: Vec<(usize, &model::Entry)> = s.queue.iter().enumerate().skip(index + 1).take(300).collect();
     let list: El<'a, Message> = if rest.is_empty() {
         small_muted("Nothing queued. Anyone in the group can add songs with Add to queue.").size(13).into()

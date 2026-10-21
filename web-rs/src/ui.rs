@@ -101,6 +101,23 @@ pub fn toast(msg: &str, kind: &str) {
 }
 fn keep_app(x: impl std::any::Any + 'static) { dom::keep_forever(x) }
 
+/// A toast with one button (`label`, "Undo") that stays `ms`: a click runs `f` once and the toast goes.
+pub fn toast_action(msg: &str, label: &str, ms: u32, f: impl FnOnce() + 'static) {
+    let Some(t) = by_id("toasts") else { return };
+    let el = create("div");
+    el.set_class_name("toast act");
+    set_html(&el, &format!(r#"<div class="toast-text">{}</div><div class="toast-acts"><button type="button" class="btn sm ghost" data-toast-action>{}</button></div>"#, esc(msg), esc(label)));
+    let _ = t.append_child(&el);
+    let f = Rc::new(RefCell::new(Some(f)));
+    if let Some(b) = qs_in(&el, "[data-toast-action]") {
+        let el2 = el.clone();
+        on(&b, "click", move |_| { el2.remove(); if let Some(f) = f.borrow_mut().take() { f(); } });
+    }
+    let (e1, e2) = (el.clone(), el);
+    keep_app(gloo_timers::callback::Timeout::new(ms.saturating_sub(400), move || { dom::set_style(&e1, "opacity", "0"); dom::set_style(&e1, "transition", "opacity .3s"); }));
+    keep_app(gloo_timers::callback::Timeout::new(ms, move || e2.remove()));
+}
+
 /// The error toast's HTML: the whole message, Copy and Close.
 pub fn error_toast_html(msg: &str) -> String {
     format!(r#"<div class="toast-text">{m}</div><div class="toast-acts"><button type="button" class="btn sm ghost" data-copy-text="{m}">{copy}Copy</button><button type="button" class="btn sm ghost icon" data-toast-close title="Close" aria-label="Close">{x}</button></div>"#,

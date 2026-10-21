@@ -12,8 +12,6 @@ use iced::futures::{SinkExt, Stream, StreamExt};
 use iced::widget::{button, column, container, hover, image, row, space, stack};
 use iced::{Alignment, ContentFit, Length, Subscription};
 use serde_json::{json, Map, Value};
-use std::collections::hash_map::RandomState;
-use std::hash::{BuildHasher, Hasher};
 use std::time::Duration;
 
 // ----- words and badges ------------------------------------------------------------------
@@ -179,17 +177,6 @@ pub fn and_join(names: &[String]) -> String {
         1 => names[0].clone(),
         n => format!("{} and {}", names[..n - 1].join(", "), names[n - 1]),
     }
-}
-
-/// A random order (the web's `sort(() => Math.random() - 0.5)`).
-pub fn shuffle(mut list: Vec<Value>) -> Vec<Value> {
-    let mut h = RandomState::new().build_hasher();
-    for i in (1..list.len()).rev() {
-        h.write_usize(i);
-        let j = (h.finish() % (i as u64 + 1)) as usize;
-        list.swap(i, j);
-    }
-    list
 }
 
 /// `{ dst: src.key }` the JSON.stringify way: a missing field is left out, null stays null.
@@ -815,6 +802,5 @@ mod tests {
         let apple = mb_seed_body(&json!({ "ext": { "apple": "7" } }), "", "A");
         assert_eq!(apple.map(|b| b["key"].clone()), Some(json!("apple-7")));
         assert_eq!(mb_seed_body(&json!({ "ext": { "bandcamp": "x" } }), "aid", "A"), None);
-        assert_eq!(shuffle(vec![json!(1), json!(2), json!(3)]).len(), 3);
     }
 }

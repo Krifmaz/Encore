@@ -289,7 +289,7 @@ async fn who_may_do_what_and_every_command_bumps_rev_by_one() {
     // mistakes
     let r = e.command(&e.alex, "pc", &id, "jump", json!({ "qid": "q999", "index": 0 })).await;
     assert_eq!((r.status, r.json()["detail"].clone()), (StatusCode::CONFLICT, json!("That song is no longer in the queue")));
-    assert_eq!(e.command(&e.alex, "pc", &id, "shuffle", json!({})).await.status, StatusCode::BAD_REQUEST);
+    assert_eq!(e.command(&e.alex, "pc", &id, "dance", json!({})).await.status, StatusCode::BAD_REQUEST);
     assert_eq!(e.command(&e.alex, "pc", &id, "seek", json!({})).await.status, StatusCode::BAD_REQUEST);
     assert_eq!(e.ok("GET", "/api/group/current?device_id=pc", &e.alex, None).await["rev"].as_u64().unwrap(), rev, "a refused command changes nothing");
     // the host ends it
@@ -353,6 +353,92 @@ async fn the_event_stream_sends_states_in_rev_order_and_ends() {
     let (name, v) = ev.next().await.unwrap();
     assert_eq!((name.as_str(), v), ("ended", json!({ "reason": "ended" })));
     assert!(ev.next().await.is_none(), "closed after ended");
+}
+
+/// Shuffle and Clear of the group's Up next (they need control, like set_queue), and set_queue / enqueue with
+/// `"shuffle": true`: the server makes the order once, so every member's state has the same one.
+#[tokio::test]
+async fn shuffle_and_clear_the_groups_up_next() {
+    let e = setup("shuffle");
+    // more songs: 6..=45 (a shuffle of 40 coming back in order is a 1 in 40! chance)
+    for id in 6..=45 {
+        e.st().db.execute("INSERT INTO tracks (id, path, title, artist, album, albumartist, album_id, track, disc, year, duration, format, bitrate) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            p![id, format!("/nowhere/{id}.mp3"), format!("Song {id}"), "Band", "Big", "Band", "al3", id, 1, "2006", 100.0, "mp3", 320]).unwrap();
+    }
+    let ids = |v: &Value| v["queue"].as_array().unwrap().iter().map(|t| t["id"].as_i64().unwrap()).collect::<Vec<_>>();
+    let sorted = |mut v: Vec<i64>| { v.sort_unstable(); v };
+    let g = e.start(json!({})).await;
+    let (id, code) = (id_of(&g), code_of(&g));
+    e.join(&e.sam, "phone", &code).await;
+    // a member who may not control: the usual 403 words; an op nobody knows: 400
+    for op in ["shuffle", "clear"] {
+        let r = e.command(&e.sam, "phone", &id, op, json!({})).await;
+        assert_eq!((r.status, r.json()["detail"].clone()), (StatusCode::FORBIDDEN, json!("Only alex controls playback")), "{op}");
+    }
+    let r = e.command(&e.sam, "phone", &id, "set_queue", json!({ "tracks": [4, 5], "shuffle": true })).await;
+    assert_eq!(r.status, StatusCode::FORBIDDEN);
+    // a member adds songs shuffled: at the end, in a random order
+    let list: Vec<i64> = (6..=45).collect();
+    let s = e.command(&e.sam, "phone", &id, "enqueue", json!({ "tracks": list, "shuffle": true })).await.json();
+    let got = ids(&s);
+    assert_eq!(got[..3], [1, 2, 3]);
+    assert_eq!(sorted(got[3..].to_vec()), list);
+    assert_ne!(got[3..], list[..]);
+    // the host: Shuffle mixes what comes after the song playing; every member's state has the same order
+    let before = e.command(&e.alex, "pc", &id, "next", json!({})).await.json();
+    let s = e.command(&e.alex, "pc", &id, "shuffle", json!({})).await.json();
+    assert_eq!(s["rev"].as_u64().unwrap(), before["rev"].as_u64().unwrap() + 1);
+    let (b, a) = (ids(&before), ids(&s));
+    assert_eq!((a[..2].to_vec(), s["index"].clone(), s["track"]["id"].clone()), (b[..2].to_vec(), json!(1), json!(2)));
+    assert_eq!(s["anchor_ms"], before["anchor_ms"], "the song playing plays on");
+    assert_eq!(sorted(a[2..].to_vec()), sorted(b[2..].to_vec()));
+    assert_ne!(a[2..], b[2..]);
+    let sams = e.ok("GET", "/api/group/current?device_id=phone", &e.sam, None).await;
+    assert_eq!(ids(&sams), a, "the same order for everyone");
+    // Clear: everything after the song playing goes
+    let s = e.command(&e.alex, "pc", &id, "clear", json!({})).await.json();
+    assert_eq!((ids(&s), s["index"].clone(), s["playing"].clone()), (vec![1, 2], json!(1), json!(true)));
+    // set_queue with shuffle starts at the first of the shuffled order
+    let s = e.command(&e.alex, "pc", &id, "set_queue", json!({ "tracks": list, "index": 5, "position": 30.0, "shuffle": true })).await.json();
+    let got = ids(&s);
+    assert_eq!(sorted(got.clone()), list);
+    assert_ne!(got, list);
+    assert_eq!((s["index"].clone(), s["position"].clone(), s["track"]["id"].clone()), (json!(0), json!(0.0), json!(got[0])));
+}
+
+/// While a group listen plays the background work that waits for it (measuring loudness, the Translator's
+/// model) is told so; once it is paused (or ended) it goes on, and the Translator is woken for it.
+#[tokio::test]
+async fn the_background_work_knows_when_a_group_listen_plays() {
+    let e = setup("busy");
+    // whether the Translator was woken since the last look (a wake made while nothing waited is kept)
+    let woken = |e: &Env| {
+        let tr = e.st().library.translator.clone();
+        async move { tokio::time::timeout(std::time::Duration::from_millis(50), tr.woken()).await.is_ok() }
+    };
+    tick_once(e.st(), false);
+    assert!(!e.st().busy.group_playing());
+    let _ = woken(&e).await;
+    let g = e.start(json!({})).await;
+    let id = id_of(&g);
+    tick_once(e.st(), false);
+    assert!(e.st().busy.group_playing());
+    assert!(e.st().library.busy.group_playing(), "the library's gate is the same one");
+    assert!(!woken(&e).await, "a group listen starting wakes nothing");
+    e.command(&e.alex, "pc", &id, "pause", json!({})).await;
+    tick_once(e.st(), false);
+    assert!(!e.st().busy.group_playing(), "a paused group listen holds nothing up");
+    assert!(woken(&e).await, "the last group listen stopping wakes the Translator");
+    tick_once(e.st(), false);
+    assert!(!woken(&e).await, "once");
+    e.command(&e.alex, "pc", &id, "play", json!({})).await;
+    tick_once(e.st(), false);
+    assert!(e.st().busy.group_playing());
+    let r = e.call("POST", &format!("/api/group/{id}/end"), &e.alex, Some(json!({ "device_id": "pc" }))).await;
+    assert_eq!(r.status, StatusCode::NO_CONTENT);
+    tick_once(e.st(), false);
+    assert!(!e.st().busy.group_playing());
+    assert!(woken(&e).await);
 }
 
 #[tokio::test]

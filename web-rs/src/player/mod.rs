@@ -43,7 +43,7 @@ pub use load::{seek_to, set_volume, toggle};
 pub(crate) use load::can_play;
 pub use local::{offline_setting, prefer_local, set_prefer_local};
 pub use norm::norm_setting;
-pub use queue::{enqueue, next, play_next, play_queue, prev, preview, queue, restore, saved_spot, shuffle_library};
+pub use queue::{enqueue, group_shuffle, next, play_next, play_queue, prev, preview, queue, restore, saved_spot, shuffle_library};
 pub(crate) use crate::num::{khz, to_fixed1};
 
 use bandwidth::*;

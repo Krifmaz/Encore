@@ -141,7 +141,7 @@ pub fn update(state: &mut State, msg: Message, ctx: &mut Ctx) -> Task<Message> {
             if queue.is_empty() {
                 ctx.toast_err("None of these songs are in your library yet");
             } else if shuffle {
-                ctx.play(catalog::shuffle(queue), 0);
+                ctx.play_shuffled(queue);
             } else {
                 let at = start.min(queue.len() - 1);
                 ctx.play(queue, at);

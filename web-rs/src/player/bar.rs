@@ -266,11 +266,11 @@ fn right_html(t: Option<&Value>, closable: bool) -> String {
     let (shuffle_on, repeat) = mode_state();
     let shuffle = if bar_has("shuffle") && t.is_some() {
         format!(r#"<button class="btn ghost icon mode {}" id="p-shuffle" title="{}" aria-label="Shuffle" aria-pressed="{shuffle_on}"{}>{}</button>"#,
-            if shuffle_on { "on" } else { "" }, mode_title(if shuffle_on { "Shuffle: on" } else { "Shuffle: off" }), mode_attr(), icon("shuffle"))
+            if shuffle_on { "on" } else { "" }, shuffle_tip(if shuffle_on { "Shuffle: on" } else { "Shuffle: off" }), shuffle_attr(), icon("shuffle"))
     } else { String::new() };
     let repeat_btn = if bar_has("repeat") && t.is_some() {
         format!(r#"<button class="btn ghost icon mode {}" id="p-repeat" title="{}" aria-label="Repeat" aria-pressed="{}"{}>{}{}</button>"#,
-            if repeat != "off" { "on" } else { "" }, mode_title(repeat_title(&repeat)), repeat != "off", mode_attr(), icon("refresh"), if repeat == "one" { "<sup>1</sup>" } else { "" })
+            if repeat != "off" { "on" } else { "" }, repeat_tip(repeat_title(&repeat)), repeat != "off", repeat_attr(), icon("refresh"), if repeat == "one" { "<sup>1</sup>" } else { "" })
     } else { String::new() };
     let like = if bar_has("like") && can_like(t) { like_button("p-like", if t.is_some_and(is_liked) { "on" } else { "" }) } else { String::new() };
     let album = if bar_has("album") && t.is_some_and(|t| t.truthy("album_id")) { btn("album", "View album", "disc") } else { String::new() };

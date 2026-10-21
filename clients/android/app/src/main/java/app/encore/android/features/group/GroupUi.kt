@@ -73,6 +73,7 @@ import app.encore.android.ui.components.SectionHead
 import app.encore.android.ui.components.SmallButton
 import app.encore.android.ui.components.Toasts
 import app.encore.android.ui.components.formatDuration
+import app.encore.android.ui.screens.ConfirmDialog
 import app.encore.android.ui.theme.EncoreColors
 import app.encore.android.ui.theme.palette
 import kotlinx.coroutines.Dispatchers
@@ -616,7 +617,11 @@ fun GroupLinkNote(modifier: Modifier = Modifier) {
 
 // ---- Up next ----------------------------------------------------------------------------------------------------
 
-/** Up next in a group: the group's queue with who added each song; the controls follow what this device may do. */
+/**
+ * Up next in a group: the group's queue with who added each song; the controls follow what this device may do. Those
+ * who control get Shuffle (the songs after the playing one, in a new order for everyone) and Clear (after "Clear the
+ * group's Up next?").
+ */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun GroupUpNextSheet(nav: Nav, s: GroupState, onDismiss: () -> Unit) {
@@ -624,6 +629,7 @@ fun GroupUpNextSheet(nav: Nav, s: GroupState, onDismiss: () -> Unit) {
     val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
     val (index, _) = GroupRules.expected(s, GroupListen.serverNow())
     val upNext = if (index + 1 <= s.queue.lastIndex) s.queue.subList(index + 1, s.queue.size) else emptyList()
+    var confirmClear by remember { mutableStateOf(false) }
     ModalBottomSheet(onDismissRequest = onDismiss, sheetState = sheetState, containerColor = p.panel, contentColor = p.text) {
         Row(Modifier.fillMaxWidth().padding(start = 22.dp, end = 12.dp, bottom = 6.dp), verticalAlignment = Alignment.CenterVertically) {
             Column(Modifier.weight(1f)) {
@@ -635,6 +641,12 @@ fun GroupUpNextSheet(nav: Nav, s: GroupState, onDismiss: () -> Unit) {
                 )
             }
             GroupPill()
+        }
+        if (s.youCanControl) {
+            Row(Modifier.fillMaxWidth().padding(start = 22.dp, end = 12.dp, bottom = 6.dp), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                SmallButton("Shuffle", iconRes = R.drawable.ic_shuffle, enabled = upNext.size >= 2) { GroupListen.shuffleUpNext() }
+                SmallButton("Clear", iconRes = R.drawable.ic_delete, enabled = upNext.isNotEmpty()) { confirmClear = true }
+            }
         }
         LazyColumn(Modifier.fillMaxWidth().fillMaxHeight(0.7f)) {
             itemsIndexed(upNext, key = { _, e -> e.qid }) { k, e ->
@@ -689,5 +701,14 @@ fun GroupUpNextSheet(nav: Nav, s: GroupState, onDismiss: () -> Unit) {
             }
             item { Spacer(Modifier.height(24.dp)) }
         }
+    }
+    if (confirmClear) {
+        ConfirmDialog(
+            title = "Clear the group's Up next?",
+            text = "",
+            okLabel = "Clear",
+            danger = true,
+            onDismiss = { confirmClear = false },
+        ) { GroupListen.clearUpNext() }
     }
 }

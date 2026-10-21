@@ -2,9 +2,18 @@ package app.encore.android.ui.components
 
 /**
  * One toast on screen. [id] names it (its Close, its place in the list); [seq] goes up each time its message
- * arrives, so a repeat moves it to the newest place and starts its time again.
+ * arrives, so a repeat moves it to the newest place and starts its time again. [action] is a button on it ("Undo")
+ * that runs [onAction] and closes it; [showMs] how long it stays when it is not an error.
  */
-data class ToastItem(val id: Long, val seq: Long, val message: String, val kind: String) {
+data class ToastItem(
+    val id: Long,
+    val seq: Long,
+    val message: String,
+    val kind: String,
+    val action: String = "",
+    val onAction: (() -> Unit)? = null,
+    val showMs: Long = ToastRules.SHOW_MS,
+) {
     /** An error that stays until its Close, with Copy. */
     val stays: Boolean get() = ToastRules.stays(message, kind)
 }
@@ -52,11 +61,23 @@ object ToastRules {
 
     fun stays(message: String, kind: String): Boolean = kind == "err" && message != COPY_FAILED
 
-    /** The toasts after [message] arrived ([id] and [seq] are new numbers; a repeat keeps its id). */
-    fun add(stack: List<ToastItem>, id: Long, seq: Long, message: String, kind: String): List<ToastItem> {
+    /**
+     * The toasts after [message] arrived ([id] and [seq] are new numbers; a repeat keeps its id, and takes the new
+     * [action], so an "Undo" undoes the latest).
+     */
+    fun add(
+        stack: List<ToastItem>,
+        id: Long,
+        seq: Long,
+        message: String,
+        kind: String,
+        action: String = "",
+        onAction: (() -> Unit)? = null,
+        showMs: Long = SHOW_MS,
+    ): List<ToastItem> {
         if (message.isBlank()) return stack
         val same = stack.firstOrNull { it.message == message && it.kind == kind }
-        val item = ToastItem(same?.id ?: id, seq, message, kind)
+        val item = ToastItem(same?.id ?: id, seq, message, kind, if (onAction != null) action else "", onAction, showMs)
         val out = stack.filter { it.id != same?.id }.toMutableList()
         out += item
         val max = if (item.stays) MAX_ERRORS else MAX_OTHERS

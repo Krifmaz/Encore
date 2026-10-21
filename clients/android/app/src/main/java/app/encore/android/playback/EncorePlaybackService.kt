@@ -288,7 +288,8 @@ class EncorePlaybackService : MediaLibraryService() {
             player = car.player,
             positionMs = { current.absPositionMs() },
             durationSec = { current.durationSec() },
-            seekTo = { ms -> seekAbs(ms) },
+            // another device's seek is a person's own: in a group listen it is the group's (as the app's, CMD_SEEK)
+            seekTo = { ms -> personSeek(ms) },
             signal = {
                 val i = lastPublished
                 val out = effects.configuredOutputRate
@@ -317,6 +318,12 @@ class EncorePlaybackService : MediaLibraryService() {
             serverMade = { t -> (resolver.variantOf(t.id) ?: resolver.startVariant(resolver.track(t.id) ?: StreamTrack.of(t))).serverStream },
             onActive = { on -> car.setGroup(on) },
         ).also { it.start() }
+        // only a person's own seek or skip (through the session's player) goes to the group, never the service's own
+        car.player.aroundUser = { block -> group?.fromUser(block) ?: block() }
+        // in a group the rung is fixed for a song and the original file preferred (SyncRules.kt, GroupQuality)
+        adaptive.inGroup = { group?.active == true }
+        adaptive.reloadAt = { serverMade -> group?.takeIf { it.active }?.reloadAt(serverMade) }
+        resolver.grouped = { GroupListen.inGroup }
         GroupListen.restore()
     }
 
@@ -613,31 +620,35 @@ class EncorePlaybackService : MediaLibraryService() {
             val bufferedNothing = (error.cause as? StuckPlayerException)?.stuckType == StuckPlayerException.STUCK_BUFFERING_NO_PROGRESS
             val action = PlayerErrors.decide(error.errorCode, status, bufferedNothing, v, transcodeRetried == t.id, brokenTries)
             CrashLog.log("song ${t.id}: ${action.name.lowercase()}" + (if (status > 0) " (HTTP $status)" else ""))
+            // the spot it reopens at: its own, or in a playing group where the group will be once it plays (the position
+            // stood still while ExoPlayer retried, so its own spot is seconds behind). Never a seek sent to the group
+            val spot = if (at > 0.5) at else 0.0
             when (action) {
                 PlayerErrors.Action.STREAM -> {
                     // the downloaded copy would not play: this session the song streams from the server, from the same spot
                     resolver.copyFailed(t.id)
                     app.encore.android.ui.components.Toasts.show("This download would not play – playing the song from the server", "info")
-                    current.reopen(t, rung = null, dsp = null, offsetSec = if (at > 0.5) at else 0.0, prepareFirst = true)
+                    current.reopen(t, rung = null, dsp = null, offsetSec = groupSpot(spot, resolver.reopenVariant(t, null, null, 0.0)), prepareFirst = true)
                 }
                 PlayerErrors.Action.NO_DSP -> {
                     // the server's Cadenza is off, busy or failed → the same spot again without processing, and no
                     // more processing this session
                     serverCadenza.failed()
-                    current.reopen(t, rung = v.rung, dsp = false, offsetSec = if (at > 0.5) at else 0.0, prepareFirst = true)
+                    current.reopen(t, rung = v.rung, dsp = false, offsetSec = groupSpot(spot, resolver.reopenVariant(t, v.rung, false, 0.0)), prepareFirst = true)
                 }
                 PlayerErrors.Action.REOPEN -> {
                     // the same spot again at once: the player buffers (holding its wake and Wi-Fi locks) and
                     // ExoPlayer's own waits pace the tries, so no timer has to run while the phone sleeps
                     brokenTries++
-                    resolver.force(t.id, v.copy(offsetSec = if (at > 0.5) at else 0.0))
+                    resolver.force(t.id, v.copy(offsetSec = groupSpot(spot, v)))
                     current.switchingTo = t.id
                     current.replace(prepare = true)
                 }
                 PlayerErrors.Action.TRANSCODE -> {
                     // the phone couldn't decode the original (e.g. an odd M4A) → ask the server for FLAC
                     transcodeRetried = t.id
-                    resolver.force(t.id, v.copy(transcode = true, offsetSec = at))
+                    val tv = v.copy(transcode = true)
+                    resolver.force(t.id, tv.copy(offsetSec = groupSpot(at, tv)))
                     current.switchingTo = t.id
                     current.replace(prepare = true)
                 }
@@ -650,6 +661,13 @@ class EncorePlaybackService : MediaLibraryService() {
             if (reason == Player.DISCONTINUITY_REASON_SEEK) adaptive.noteSeek()
         }
     }
+
+    /**
+     * Where a song the service opens again by itself starts (seconds): [own] (its own spot), or in a playing group
+     * where the group will be once it plays, ahead by the seek lag of [next]'s kind of stream (GroupSync.reloadAt).
+     */
+    private fun groupSpot(own: Double, next: StreamVariant): Double =
+        group?.takeIf { it.active }?.reloadAt(next.serverStream)?.let { it / 1000.0 } ?: own
 
     /** The song won't play: on to the next one (once round the queue at most, then it stays stopped). */
     private fun skip(id: Long) {
@@ -682,6 +700,21 @@ class EncorePlaybackService : MediaLibraryService() {
         val id = MediaItems.trackId(item.mediaId) ?: return null
         val v = resolver.variantOf(id) ?: return null
         return item.buildUpon().setUri(resolver.url(id, v)).build()
+    }
+
+    /**
+     * A person's own seek in song time (the app's seek bar, another device's command): in a group listen it is the
+     * group's (or refused when only the host controls playback), else [seekAbs].
+     */
+    private fun personSeek(ms: Long) {
+        val g = group
+        if (g != null && g.active) {
+            if (GroupListen.deniedHere()) return
+            g.userSeek(ms)
+            g.applying { seekAbs(ms) }
+        } else {
+            seekAbs(ms)
+        }
     }
 
     /** A seek asked by the UI in song time: whole files seek in the player, server-made streams restart at the point. */
@@ -740,16 +773,7 @@ class EncorePlaybackService : MediaLibraryService() {
         override fun onCustomCommand(session: MediaSession, controller: MediaSession.ControllerInfo, customCommand: SessionCommand, args: Bundle): ListenableFuture<SessionResult> {
             car.result(customCommand.customAction)?.let { return Futures.immediateFuture(it) }
             if (customCommand.customAction == CMD_SEEK) {
-                val ms = args.getLong(ARG_POSITION_MS, 0L)
-                val g = group
-                if (g != null && g.active) {
-                    // in a group listen the seek is the group's (or refused when only the host controls playback)
-                    if (GroupListen.deniedHere()) return Futures.immediateFuture(SessionResult(SessionResult.RESULT_SUCCESS))
-                    g.userSeek(ms)
-                    g.applying { seekAbs(ms) }
-                } else {
-                    seekAbs(ms)
-                }
+                personSeek(args.getLong(ARG_POSITION_MS, 0L))
                 return Futures.immediateFuture(SessionResult(SessionResult.RESULT_SUCCESS))
             }
             return Futures.immediateFuture(SessionResult(SessionResult.RESULT_ERROR_NOT_SUPPORTED))

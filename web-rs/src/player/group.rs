@@ -4,11 +4,16 @@
 //! may not control (or headphones taken out, another app taking the sound) pauses only this browser: "Paused here ·
 //! Catch up".
 //!
-//! Sync rule (the same on web, desktop and phone, client-shapes §5.6): expected position = position + (server_now −
-//! anchor_ms) / 1000 while playing. Drift above 0.5 s → seek; between 0.15 and 0.5 s → `playbackRate` 0.97 (ahead) /
-//! 1.03 (behind) until within 0.05 s, only where the browser keeps the pitch (`preservesPitch`); elsewhere seek only.
-//! A seek aims ahead by what this browser's seeks have been taking (rules::SeekLag). Crossfade, the library shuffle
-//! after the queue, shuffle and repeat are off in a group; gapless stays (the next song is pre-buffered as always).
+//! Sync rule (the same on web, desktop and phone, client-shapes §5.6, rules::sync_step): expected position = position +
+//! (server_now − anchor_ms) / 1000 while playing. Under 40 ms nothing; 40 ms – 1.5 s a `playbackRate` nudge
+//! proportional to the drift (0.98–1.02, eased in and out, the pitch kept) until within 20 ms, never a seek; above
+//! 1.5 s one hard seek aimed ahead by the running median of what this browser's last 5 seeks took (rules::SeekLag),
+//! then none for 8 s. A server-made stream (a conversion, Auto's lighter rung, Data saver, server processing) is
+//! never seeked for less than 3 s: its seek is a new stream. Auto quality keeps its rung for the whole song
+//! (rules::QualityLock): the original when this browser plays the file, one drop at most on a real stall. Only the
+//! listener's own seek goes to the group as "seek" – reloads, recovery and corrections never do. Crossfade, the
+//! library shuffle after the queue and repeat are off in a group; Shuffle shuffles the group's Up next (for those who
+//! control it); gapless stays, and a song change within 3 s of the expected end uses the pre-buffered next song.
 
 use super::*;
 use crate::group::{self as g, rules};
@@ -17,8 +22,10 @@ thread_local! {
     /// the group the player follows now
     static ACTIVE: RefCell<Option<String>> = const { RefCell::new(None) };
     static TICK: RefCell<Option<Interval>> = const { RefCell::new(None) };
-    /// the playback rate is off 1.0 (closing a small drift)
-    static ADJUSTING: Cell<bool> = const { Cell::new(false) };
+    /// Auto quality's rung, kept for the whole song
+    static QLOCK: RefCell<rules::QualityLock> = RefCell::new(rules::QualityLock::default());
+    /// the group's last (entry, position, anchor): a new one (the host seeked, played, jumped) is followed at once
+    static LAST_ANCHOR: RefCell<(String, f64, f64)> = const { RefCell::new((String::new(), 0.0, 0.0)) };
     /// no drift check before then (performance.now() ms): a seek or a new song needs a moment to buffer
     static QUIET_UNTIL: Cell<f64> = const { Cell::new(0.0) };
     /// a change made here went to the group: until its answer (a rev above this) or the time, the older state is not followed
@@ -60,10 +67,12 @@ fn enter_mode(s: &Value) {
     let id = s.s("id");
     if ACTIVE.with(|a| a.borrow().as_deref() == Some(id.as_str())) { return; }
     ACTIVE.with(|a| *a.borrow_mut() = Some(id));
-    // no repeat and no shuffle in a group; a running crossfade ends
+    // no repeat and no shuffle mode in a group (Shuffle shuffles the group's Up next once); a running crossfade ends
     st_mut(|x| { x.repeat = "off".into(); x.shuffle = false; x.order = None; x.context = "list".into(); });
     end_fade();
     LAG.with(|l| *l.borrow_mut() = rules::SeekLag::default());
+    QLOCK.with(|q| *q.borrow_mut() = rules::QualityLock::default());
+    LAST_ANCHOR.with(|a| *a.borrow_mut() = (String::new(), 0.0, 0.0));
     HOLD.with(|h| h.set((0.0, -1)));
     TICK.with(|t| *t.borrow_mut() = Some(Interval::new(500, check)));
 }
@@ -116,7 +125,8 @@ fn set_queue(q: &[Value], ei: i64) {
         };
         s.order = None;
     });
-    preload_next();
+    // (the next song is fetched once this one is safely ahead, not at every change of the queue)
+    maybe_preload(false);
 }
 
 /// Where the song is here (for a song held before its file has loaded: where it was put).
@@ -153,20 +163,36 @@ fn place(sec: f64, play: bool) {
     if play && !st(|s| s.transcoded) && a.paused() { play_el(&a); }
 }
 
-/// To where the playing group is in entry `ei`, ahead by what a seek here has been taking.
+/// Whether a seek to entry `ei` would be a new stream made by the server: the stream playing when it is the same
+/// entry, else the one that entry starts with.
+fn made_by_server(ei: i64, e: &Value) -> bool {
+    if st(|x| x.index) == ei && cur().is_some() { here_server_made() } else { starts_server_made(e) }
+}
+
+/// To where the playing group is in entry `ei`, ahead by what a seek of that kind has been taking here.
 fn seek_group(s: &Value, ei: i64, epos: f64) {
     let q = s.a("queue");
     let Some(e) = q.get(ei.max(0) as usize) else { return };
-    let server_made = st(|x| x.transcoded);
-    let target = LAG.with(|l| l.borrow_mut().target(&qid(e), epos * 1000.0, server_made)) / 1000.0;
+    let server_made = made_by_server(ei, e);
+    let target = LAG.with(|l| l.borrow_mut().target(&qid(e), epos * 1000.0, server_made, mono())) / 1000.0;
     if st(|x| x.index) == ei { place(target, true); } else { load_entry(ei, target, true); }
     quiet(2500.0);
 }
 
-/// The player on entry `ei` at `at` seconds, playing or held.
+/// The player on entry `ei` at `at` seconds, playing or held. Within 3 s of a song's start the pre-buffered next song
+/// plays (a whole file is then put at `at` in what it has buffered; a server-made stream starts at its start and the
+/// nudge closes the rest).
 fn load_entry(ei: i64, at: f64, play: bool) {
     st_mut(|x| x.index = ei);
     set_rate(1.0);
+    let at = match cur() {
+        Some(t) if at > 0.0 && at <= rules::BOUNDARY_S && spare_has(&t) && starts_server_made(&t) => {
+            // (not the seek it was aimed as: nothing to learn from where it lands)
+            LAG.with(|l| l.borrow_mut().cancel());
+            0.0
+        }
+        _ => at,
+    };
     load_opts(LoadOpts { offset: if at > 0.3 { at } else { 0.0 }, hold: !play, ..Default::default() });
     quiet(2500.0);
 }
@@ -195,8 +221,9 @@ fn follow(s: &Value) {
     if !same_queue(&q) { set_queue(&q, ei); }
     if st(|x| x.index) != ei || cur().is_none() {
         // a song change a moment before (or after) the group's settles by itself (the tick looks again)
-        if want && cur().is_some() && audio().is_some_and(|a| !a.paused()) && near_boundary(st(|x| x.index), here(), ei, epos) { return; }
-        let target = if want { LAG.with(|l| l.borrow_mut().target(&qid(&q[ei as usize]), epos * 1000.0, false)) / 1000.0 } else { epos };
+        if want && cur().is_some() && audio().is_some_and(|a| !a.paused()) && rules::near_boundary(st(|x| x.index), here(), duration(), ei, epos) { return; }
+        let e = &q[ei as usize];
+        let target = if want { LAG.with(|l| l.borrow_mut().target(&qid(e), epos * 1000.0, starts_server_made(e), mono())) / 1000.0 } else { epos };
         load_entry(ei, target, want);
         return;
     }
@@ -211,18 +238,23 @@ fn follow(s: &Value) {
         LAG.with(|l| l.borrow_mut().cancel());
         media_state();
     } else if want && !a.paused() && mono() >= QUIET_UNTIL.with(|x| x.get()) && a.ready_state() >= 3 && !a.seeking() {
-        // the host seeked: there at once (a smaller drift is the tick's)
+        // the host seeked: there at once when it is past the seek threshold (a smaller drift is the tick's nudge); a new
+        // anchor is followed even right after a correction seek
         let song = qid(&q[ei as usize]);
         let d = (position() - epos) * 1000.0;
-        let above = LAG.with(|l| { let mut l = l.borrow_mut(); if l.waiting() { l.landed(&song, d, mono()); } l.seek_above_ms(&song) });
-        if d.abs() > above { set_rate(1.0); seek_group(s, ei, epos); }
+        if LAG.with(|l| l.borrow().waiting()) { LAG.with(|l| l.borrow_mut().landed(&song, d)); }
+        let since = if new_anchor(s, &song) { f64::INFINITY } else { LAG.with(|l| l.borrow().since_ms(mono())) };
+        if rules::sync_step(d, a.playback_rate(), since, here_server_made()) == rules::Act::Seek { set_rate(1.0); seek_group(s, ei, epos); }
     }
     // a paused group: everyone at the same spot
     if !s.truthy("playing") && !a.seeking() && (here() - epos).abs() > 0.5 && !rec_need() { place(epos, false); }
 }
 
-/// This device on the next entry at its start while the group ends the one before, or the other way round.
-fn near_boundary(cur_i: i64, pos: f64, ei: i64, epos: f64) -> bool { (cur_i == ei + 1 && pos < 1.5) || (cur_i + 1 == ei && epos < 1.5) }
+/// Whether the group's (entry, position, anchor) changed since the last look: the host seeked, played or jumped.
+fn new_anchor(s: &Value, song: &str) -> bool {
+    let now = (song.to_string(), s.f("position"), s.f("anchor_ms"));
+    LAST_ANCHOR.with(|a| { let mut a = a.borrow_mut(); let fresh = *a != now; *a = now; fresh })
+}
 
 /// Every half second while in a group: the song, the drift, the rate.
 fn check() {
@@ -233,7 +265,6 @@ fn check() {
     let (ei, epos) = rules::expected(&s, g::server_now());
     if ei < 0 { return; }
     let Some(a) = audio() else { return };
-    if !ADJUSTING.with(|x| x.get()) && a.playback_rate() != 1.0 { a.set_playback_rate(1.0); }
     if !wants_play(&s, ei, epos) {
         set_rate(1.0);
         LAG.with(|l| l.borrow_mut().cancel());
@@ -248,36 +279,33 @@ fn check() {
     let pos = position();
     if cur_i != ei {
         // gapless into the next song a little before (or after) the group: wait for the song change to settle
-        if !near_boundary(cur_i, pos, ei, epos) { seek_group(&s, ei, epos); render(); }
+        if !rules::near_boundary(cur_i, pos, duration(), ei, epos) { seek_group(&s, ei, epos); render(); }
         return;
     }
     let song = qid(&q[ei as usize]);
     let d = (pos - epos) * 1000.0;
-    let above = LAG.with(|l| { let mut l = l.borrow_mut(); if l.waiting() { l.landed(&song, d, mono()); } l.seek_above_ms(&song) });
-    match rules::drift(d, ADJUSTING.with(|x| x.get()), rate_ok(&a), above) {
-        rules::Drift::Seek => { set_rate(1.0); seek_group(&s, ei, epos); }
-        rules::Drift::Faster => set_rate(1.03),
-        rules::Drift::Slower => set_rate(0.97),
-        rules::Drift::Normal => set_rate(1.0),
-        rules::Drift::None => {}
+    if LAG.with(|l| l.borrow().waiting()) { LAG.with(|l| l.borrow_mut().landed(&song, d)); }
+    let since = if new_anchor(&s, &song) { f64::INFINITY } else { LAG.with(|l| l.borrow().since_ms(mono())) };
+    match rules::sync_step(d, a.playback_rate(), since, here_server_made()) {
+        rules::Act::Seek => { set_rate(1.0); seek_group(&s, ei, epos); }
+        rules::Act::Rate(r) => set_rate(r),
+        rules::Act::Keep => {}
     }
 }
 
-/// Whether the browser changes the rate without changing the pitch (`preservesPitch`, on by default where it exists).
-fn rate_ok(a: &HtmlMediaElement) -> bool {
+/// The pitch stays when the rate moves (`preservesPitch`, on by default where it exists; set again to be sure).
+fn keep_pitch(a: &HtmlMediaElement) {
     for k in ["preservesPitch", "mozPreservesPitch", "webkitPreservesPitch"] {
         if js_sys::Reflect::has(a, &k.into()).unwrap_or(false) {
             let _ = js_sys::Reflect::set(a, &k.into(), &JsValue::TRUE);
-            return js_get(a, k).as_bool() == Some(true);
+            return;
         }
     }
-    false
 }
 
 /// The playing element's rate (the spare stays at 1.0, so the next song starts at normal speed).
 fn set_rate(r: f64) {
-    ADJUSTING.with(|x| x.set(r != 1.0));
-    if let Some(a) = audio() { if a.playback_rate() != r { a.set_playback_rate(r); } }
+    if let Some(a) = audio() { if a.playback_rate() != r { if r != 1.0 { keep_pitch(&a); } a.set_playback_rate(r); } }
     if let Some(sp) = spare() { if sp.playback_rate() != 1.0 { sp.set_playback_rate(1.0); } }
 }
 
@@ -396,11 +424,84 @@ pub(super) fn g_add(op: &str, tracks: &[Value]) -> bool {
     true
 }
 
-/// Shuffle and repeat: off during a group listen.
-pub(super) fn g_modes() -> bool {
+/// What the player's Repeat says in a group.
+pub(super) const REPEAT_OFF: &str = "Repeat is off during a group listen";
+
+/// Repeat: off during a group listen.
+pub(super) fn g_repeat() -> bool {
     if !grouped() { return false; }
-    toast("Shuffle and repeat are off during a group listen", "");
+    toast(REPEAT_OFF, "");
     true
+}
+
+/// Shuffle in a group: the group's Up next in a random order, once (the server makes it, the same for everyone) –
+/// for those who control the group.
+pub(super) fn g_shuffle() -> bool {
+    if !grouped() { return false; }
+    if !g::can_control() { deny(); return true; }
+    g::command("shuffle", json!({}));
+    true
+}
+
+/// Clear of the group's Up next (for those who control it): asked first, then everything after the song playing goes.
+pub(super) fn g_clear() -> bool {
+    if !grouped() { return false; }
+    if !g::can_control() { deny(); return true; }
+    dom::spawn(async {
+        if crate::ui::confirm_dialog("Clear the group's Up next?", "", "Clear", true).await { g::command("clear", json!({})); }
+    });
+    true
+}
+
+/// A Shuffle button of an album, an artist or a playlist in a group: the songs become the group's queue in a random
+/// order (`set_queue` with `shuffle`) for those who control it; anyone else adds them to the group's Up next,
+/// shuffled. At most 1000 songs, picked at random from the whole list. False outside a group.
+pub(super) fn g_shuffle_play(tracks: &[Value]) -> bool {
+    if !grouped() { return false; }
+    let ids = lib_ids(tracks);
+    if ids.is_empty() { toast("Only songs from your library can be played in a group listen", "err"); return true; }
+    // shuffled here too, and a long list sends 1000 songs picked from all of it (the server shuffles them again)
+    let win = rules::pick_shuffled(&ids, 1000, js_sys::Math::random);
+    if g::can_control() {
+        g::command("set_queue", json!({ "tracks": win, "index": 0, "position": 0.0, "shuffle": true }));
+    } else {
+        // said once the group took them (a full queue or an ended group refuses)
+        g::command_then("enqueue", json!({ "tracks": win, "shuffle": true }), || toast("Added to the group's Up next, shuffled", "ok"));
+    }
+    true
+}
+
+// ---- quality and recovery in a group ----------------------------------------------------------------------------------
+
+/// The rung a song starts on in a group with Auto quality: the original when this browser plays the file (and the song
+/// before had no stall), else what the estimate allows. None outside a group or with another quality setting.
+pub(super) fn group_start_rung(t: &Value, auto_rung: i64) -> Option<i64> {
+    if !grouped() || prefs().s("quality") != "auto" { return None; }
+    Some(QLOCK.with(|q| q.borrow().start_rung(&qid(t), !convert(t), auto_rung)))
+}
+
+/// A song starts on this player (its rung is kept for the whole song in a group).
+pub(super) fn group_song_started(t: &Value) {
+    if grouped() { QLOCK.with(|q| q.borrow_mut().start(&qid(t))); }
+}
+
+/// May Auto quality drop the rung now? Outside a group always; in one only for a real stall, once per song.
+pub(super) fn group_may_drop() -> bool {
+    if !grouped() { return true; }
+    let song = cur().map(|t| qid(&t)).unwrap_or_default();
+    QLOCK.with(|q| q.borrow_mut().may_change(&song, true))
+}
+
+/// Where a reload of the song playing (a stream picked up again, a rung dropped) should start in a group: where the
+/// group is now, ahead by what such a reload takes – not where it broke off, which would land behind and cost a second
+/// seek. None outside a group, or when the group is on another song (or paused).
+pub(super) fn group_spot(server_made: bool) -> Option<f64> {
+    let s = g::current()?;
+    let (ei, epos) = rules::expected(&s, g::server_now());
+    let e = s.a("queue").get(ei.max(0) as usize).cloned()?;
+    if ei < 0 || st(|x| x.index) != ei || !s.truthy("playing") || g::local_paused() { return None; }
+    quiet(2500.0);
+    Some(LAG.with(|l| l.borrow_mut().target(&qid(&e), epos * 1000.0, server_made, mono())) / 1000.0)
 }
 
 // ---- what the bar and the full player show ----------------------------------------------------------------------------
@@ -411,10 +512,17 @@ pub(super) fn ctl_attr() -> String {
     format!(r#" disabled title="{}""#, esc(&g::only_host()))
 }
 
-/// Shuffle and repeat in a group: off (` disabled`, else "").
-pub(super) fn mode_attr() -> &'static str { if grouped() { " disabled" } else { "" } }
-/// Their tooltip: the reason in a group, else `title`.
-pub(super) fn mode_title(title: &str) -> String { if grouped() { "Shuffle and repeat are off during a group listen".into() } else { title.to_string() } }
+/// Repeat in a group: off (` disabled`, else "").
+pub(super) fn repeat_attr() -> &'static str { if grouped() { " disabled" } else { "" } }
+/// Its tooltip: the reason in a group, else `title`.
+pub(super) fn repeat_tip(title: &str) -> String { if grouped() { REPEAT_OFF.into() } else { title.to_string() } }
+/// Shuffle in a group: Shuffle of the group's Up next for those who control it (` disabled` for anyone else).
+pub(super) fn shuffle_attr() -> &'static str { if grouped() && !g::can_control() { " disabled" } else { "" } }
+/// Its tooltip: "Shuffle" (the group's Up next, once) in a group, or why it is off; else `title`.
+pub(super) fn shuffle_tip(title: &str) -> String {
+    if !grouped() { return title.to_string(); }
+    if g::can_control() { "Shuffle".into() } else { g::only_host() }
+}
 
 /// The pill "Group · 3" that opens the group listen (nothing outside a group).
 pub(super) fn pill_html(id: &str) -> String {
@@ -442,6 +550,17 @@ pub(super) fn added_by(t: &Value) -> String {
     let by = t.g("added_by");
     let name = if by.is_object() { by.s("name") } else { by.as_str().unwrap_or("").to_string() };
     if name.is_empty() { String::new() } else { format!(r#"<div class="small faint ellipsis">added by {}</div>"#, esc(&name)) }
+}
+
+/// The buttons over Up next (`next`: how many songs it has): Shuffle (two or more) and Clear of the group's, for those
+/// who control it; Clear of this player's outside a group; none when it is empty or another device's queue.
+pub(super) fn queue_buttons(linked: bool, next: usize) -> String {
+    if linked || next == 0 { return String::new(); }
+    let clear = r#"<button class="btn sm ghost" id="f-q-clear" type="button">Clear</button>"#;
+    if !grouped() { return clear.to_string(); }
+    if !g::can_control() { return String::new(); }
+    let shuffle = if next >= 2 { format!(r#"<button class="btn sm ghost" id="f-q-shuffle" type="button">{}Shuffle</button>"#, icon_attr("shuffle", r#"width="14" height="14""#)) } else { String::new() };
+    format!("{shuffle}{clear}")
 }
 
 /// The line over the group's Up next: who may change it.

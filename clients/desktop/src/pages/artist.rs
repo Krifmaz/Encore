@@ -547,12 +547,11 @@ pub fn update(state: &mut State, msg: Message, ctx: &mut Ctx) -> Task<Message> {
             }
         }
         Message::LibraryTracks(shuffle, Ok(v)) => {
-            let mut tracks = fmt::items(&v);
-            if shuffle {
-                tracks = catalog::shuffle(tracks);
-            }
+            let tracks = fmt::items(&v);
             if tracks.is_empty() {
                 ctx.toast_err("Nothing from this artist in the library yet");
+            } else if shuffle {
+                ctx.play_shuffled(tracks);
             } else {
                 ctx.play(tracks, 0);
             }
@@ -612,7 +611,7 @@ pub fn update(state: &mut State, msg: Message, ctx: &mut Ctx) -> Task<Message> {
                     return Task::none();
                 }
                 if shuffle {
-                    ctx.play(catalog::shuffle(queue), 0);
+                    ctx.play_shuffled(queue);
                 } else {
                     ctx.play(queue, pos);
                 }

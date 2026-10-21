@@ -1,6 +1,8 @@
 //! Requests: Your requests and, for admins, everyone's. Behaviour reference: web-rs/src/pages/requests.rs.
 //! The tabs filter by status, admins see everyone's requests with an "Only mine" switch, Retry
-//! failed and Clear finished; the list reloads every 4 s. The rows, their buttons and menus
+//! failed and Clear finished; everyone has Clear waiting (admins: everyone's waiting requests
+//! unless Only mine is on; members: their own), counted by the server before it asks "Cancel N
+//! waiting requests?"; the list reloads every 4 s. The rows, their buttons and menus
 //! live in `widgets::request_list` (the Downloader shares them), and so does the banner that says
 //! imports are paused while the library can't be written. "Active" includes waiting requests
 //! (the server's `status=active`). Admins also get Download all now beside Retry failed, on a
@@ -162,6 +164,8 @@ pub fn view<'a>(state: &'a State, ctx: &Ctx<'a>) -> El<'a, Message> {
     if state.admin {
         controls = controls.push(request_list::clear_btn("Clear finished").map(Message::List));
     }
+    // admins: everyone's waiting requests unless Only mine is on; members: their own
+    controls = controls.push(request_list::clear_waiting_btn(&state.list).map(Message::List));
     // the controls wrap onto a second line in a narrow window (four of them for an admin)
     let head = row![title, space().width(Length::Fill), controls.wrap()]
         .align_y(Alignment::Center)

@@ -806,6 +806,9 @@ data class LinkProbe(
 /** POST /api/requests/retry-failed: how many were queued again, how many the server refused and why. */
 data class RetryFailedResult(val retried: Int, val skipped: Int, val why: String)
 
+/** POST /api/requests/clear-waiting: how many requests (would) go, and the server's sentence for the toast. */
+data class ClearWaitingResult(val count: Int, val text: String)
+
 // ---- Download now (Oct 21: "for the que can i get a download now button") -------------------------------------
 
 /**

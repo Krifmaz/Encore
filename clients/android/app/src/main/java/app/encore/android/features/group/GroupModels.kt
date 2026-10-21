@@ -196,8 +196,8 @@ data class GroupSummary(
 data class GroupInvite(val code: String, val summary: GroupSummary?)
 
 /**
- * The rules of a group listen that need no Android: reading codes and links, where the song should be now, what to
- * do about drift, the clock offset and the words. Pure Kotlin (tested in GroupRulesTest).
+ * The rules of a group listen that need no Android: reading codes and links, where the song should be now and the
+ * words. Pure Kotlin (tested in GroupRulesTest); what to do about drift, the clock and the rung are in SyncRules.kt.
  */
 object GroupRules {
     /** Codes are 6 characters from an unambiguous alphabet (typed: spaces and dashes left out); links may carry 4–12. */
@@ -244,35 +244,6 @@ object GroupRules {
             index++
         }
         return index to pos.coerceAtLeast(0.0)
-    }
-
-    /** What to do about the distance between this phone and the group. */
-    enum class Drift { NONE, SEEK, FASTER, SLOWER, NORMAL }
-
-    /**
-     * The sync rule (the same on web, desktop and phone): above 0.5 s → seek; between 0.15 and 0.5 s → play at 0.97
-     * (ahead) or 1.03 (behind) until within 0.05 s; [speedOk] false (bit-perfect, Cadenza on the phone) → seek only.
-     * [driftMs] = this phone's position − the group's (positive: ahead). [adjusting]: the speed is off 1.0 now.
-     * [seekAboveMs]: 3 s instead of 0.5 s in a song where seeks kept missing ([SeekLag]); the nudge does the rest.
-     */
-    fun drift(driftMs: Long, adjusting: Boolean, speedOk: Boolean, seekAboveMs: Long = SeekLag.SEEK_MS): Drift {
-        val d = Math.abs(driftMs)
-        return when {
-            d > seekAboveMs -> Drift.SEEK
-            !speedOk -> if (adjusting) Drift.NORMAL else Drift.NONE
-            d > 150 || (adjusting && d > 50) -> if (driftMs > 0) Drift.SLOWER else Drift.FASTER
-            adjusting -> Drift.NORMAL
-            else -> Drift.NONE
-        }
-    }
-
-    /**
-     * The clock offset (server − this phone, ms) from round trips: (sent, server now, received) each, local times in
-     * ms. The one with the smallest round trip wins; the server's time is taken as the middle of it.
-     */
-    fun clockOffset(samples: List<Triple<Long, Long, Long>>): Long? {
-        val best = samples.filter { it.third >= it.first && it.second > 0 }.minByOrNull { it.third - it.first } ?: return null
-        return best.second - (best.first + best.third) / 2
     }
 
     /** "Only Alex controls playback": why a member's control is off. */

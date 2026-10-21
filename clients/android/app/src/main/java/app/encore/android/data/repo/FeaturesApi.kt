@@ -277,6 +277,17 @@ class FeaturesApi(private val api: EncoreApi, private val client: OkHttpClient) 
         return (o?.int("removed") ?: 0) to (o?.int("deleted_files") ?: 0)
     }
 
+    /**
+     * POST /api/requests/clear-waiting {mine, dry_run} (Clear waiting): cancels every request still waiting – pending,
+     * queued, waiting or searching; never one downloading, monitored or importing, never a finished one – the caller's
+     * own, or everyone's for an admin unless [mine]. [dryRun] only counts. Answers the count and the server's
+     * sentence ("Cancelled 612 waiting requests", "Nothing is waiting").
+     */
+    fun clearWaiting(mine: Boolean, dryRun: Boolean): ClearWaitingResult {
+        val o = call("POST", "/api/requests/clear-waiting", buildJsonObject { put("mine", mine); put("dry_run", dryRun) }) as? JsonObject
+        return ClearWaitingResult(o?.int("count") ?: 0, o?.str("text") ?: "")
+    }
+
     /** POST /api/requests/link {url}: request whatever a link points at (same as "Share to Encore"). */
     fun requestLink(url: String): String = api.requestLink(url)
 

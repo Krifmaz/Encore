@@ -26,6 +26,7 @@ pub fn router() -> Router<AppState> {
         .route("/api/requests/from-link", post(from_link))
         .route("/api/requests/link", post(link))
         .route("/api/requests/clear", post(clear))
+        .route("/api/requests/clear-waiting", post(clear_waiting))
         .route("/api/requests/retry-failed", post(retry_failed))
         .route("/api/requests/download-now", post(download_all_now))
         .route("/api/requests/events", get(crate::routes::request_events::events))
@@ -548,6 +549,83 @@ async fn clear(State(st): State<AppState>, User(u): User, body: Option<Json<Clea
     }
     Ok(Json(json!({ "ok": true, "removed": removed, "deleted_files": files })))
 }
+
+/// What "Clear waiting" cancels: requests nothing has started downloading yet. Never one downloading,
+/// monitoring or importing (that work keeps going), never a finished one, and never a waiting one that holds
+/// downloaded files ([`holds_files`]).
+pub const WAITING: [&str; 4] = ["pending", "queued", "waiting", "searching"];
+
+/// A waiting request whose download finished and whose import waits (for the library storage, or with files kept
+/// to import again): cancelling it gives up its downloaded files, so Clear waiting leaves it alone (its own Cancel
+/// asks first). Read from the row's `detail` alone, without looking at the disk (the storage may be what is down).
+fn holds_files(detail: &str) -> bool {
+    let d: Value = serde_json::from_str(detail).unwrap_or(Value::Null);
+    d["kept"].is_object() || d["wait"]["reason"] == worker::storage::STORAGE_IMPORT
+}
+
+#[derive(Deserialize, Default)]
+#[serde(default)]
+struct ClearWaitingBody {
+    mine: bool,
+    dry_run: bool,
+}
+
+/// "Cancelled 612 waiting requests" (`done`), "612 waiting requests" (a dry run), "Nothing is waiting".
+pub fn waiting_text(n: usize, done: bool) -> String {
+    let what = if n == 1 { "1 waiting request".to_string() } else { format!("{n} waiting requests") };
+    match (n, done) {
+        (0, _) => "Nothing is waiting".into(),
+        (_, true) => format!("Cancelled {what}"),
+        (_, false) => what,
+    }
+}
+
+/// Clear waiting (`POST /api/requests/clear-waiting {mine?, dry_run?}`): cancels every request that waits
+/// ([`WAITING`]: pending, queued, waiting, searching; not one that [`holds_files`]) – the caller's own, or
+/// everyone's for an admin unless `mine`. Each one the way Cancel does it: its place in the worker's queue held
+/// while it is written (a search under way stops), then "Cancelled by <name>". `dry_run` only counts (the
+/// question before it). → `{count, text}`
+async fn clear_waiting(State(st): State<AppState>, User(u): User, body: Option<Json<ClearWaitingBody>>) -> ApiResult<Json<Value>> {
+    let b = body.map(|j| j.0).unwrap_or_default();
+    let marks = vec!["?"; WAITING.len()].join(",");
+    let mut sql = format!("SELECT id, detail FROM requests WHERE status IN ({marks})");
+    let mut params: Vec<Value> = WAITING.iter().map(|s| json!(s)).collect();
+    if !encore_config::perms::is_admin(&u) || b.mine {
+        sql += " AND user_id=?";
+        params.push(json!(u.i("id")));
+    }
+    sql += " ORDER BY id";
+    let ids: Vec<i64> = st.db.query(&sql, params)?.into_iter().filter(|r| !holds_files(&r.s("detail"))).map(|r| r.i("id")).collect();
+    if b.dry_run {
+        return Ok(Json(json!({ "count": ids.len(), "text": waiting_text(ids.len(), false) })));
+    }
+    let by = format!("Cancelled by {}", u.s("username"));
+    let mut n = 0;
+    for id in ids {
+        // (it may have moved on since the list was read: a download that started keeps going)
+        let waits = |st: &AppState| {
+            st.db.one("SELECT status, detail FROM requests WHERE id=?", p![id]).ok().flatten()
+                .is_some_and(|r| WAITING.contains(&r.s("status").as_str()) && !holds_files(&r.s("detail")))
+        };
+        if !waits(&st) {
+            continue;
+        }
+        let _hold = worker::cancel_holding(&st, id).await;
+        if !waits(&st) {
+            continue;
+        }
+        set(&st, id, "cancelled", &by)?;
+        n += 1;
+    }
+    if n > 0 {
+        st.db.log("info", &format!("{} cancelled {n} waiting request(s)", u.s("username")));
+    }
+    Ok(Json(json!({ "count": n, "text": waiting_text(n, true) })))
+}
+
+#[cfg(test)]
+#[path = "requests_clear_tests.rs"]
+mod requests_clear_tests;
 
 #[cfg(test)]
 #[path = "labels_tests.rs"]

@@ -192,6 +192,9 @@ pub enum Message {
     /// Save the songs that are in the library on this computer.
     SaveOffline,
     Play(usize),
+    /// Shuffle: the songs in a random order (in a group listen the server's, the same for
+    /// everyone).
+    Shuffle,
     DownloadMissing,
     AlbumChoice(Option<String>),
     Dedupe,
@@ -314,6 +317,12 @@ pub fn update(state: &mut State, msg: Message, ctx: &mut Ctx) -> Task<Message> {
             let rows = playable(&state.items());
             if !rows.is_empty() {
                 ctx.play(rows, index);
+            }
+        }
+        Message::Shuffle => {
+            let rows = playable(&state.items());
+            if !rows.is_empty() {
+                ctx.play_shuffled(rows);
             }
         }
         Message::SaveOffline => {
@@ -621,6 +630,7 @@ fn header<'a>(state: &'a State, p: &'a Value, ctx: &Ctx<'a>) -> El<'a, Message> 
     let mut actions = row![].spacing(8).align_y(Alignment::Center);
     if has_matched {
         actions = actions.push(btn_icon(Icon::Play, "Play", Btn::Primary, Some(Message::Play(0))));
+        actions = actions.push(btn_icon(Icon::Shuffle, "Shuffle", Btn::Default, Some(Message::Shuffle)));
         actions = actions.push(btn_icon(Icon::Download, "Save for offline", Btn::Default, Some(Message::SaveOffline)));
     }
     actions = actions.push(
@@ -761,6 +771,7 @@ fn linked_header<'a>(state: &'a State, p: &'a Value, ctx: &Ctx<'a>) -> El<'a, Me
         right = right.push(small_muted(linked_hint(&owner)));
         if !playable(&state.items()).is_empty() {
             actions = actions.push(btn_icon(Icon::Play, "Play", Btn::Primary, Some(Message::Play(0))));
+            actions = actions.push(btn_icon(Icon::Shuffle, "Shuffle", Btn::Default, Some(Message::Shuffle)));
             actions = actions.push(btn_icon(Icon::Download, "Save for offline", Btn::Default, Some(Message::SaveOffline)));
         }
         actions = actions.push(btn_icon(Icon::Copy, SAVE_COPY, Btn::Default, (!state.busy).then_some(Message::SaveCopy)));

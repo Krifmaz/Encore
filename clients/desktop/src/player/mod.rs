@@ -164,7 +164,22 @@ pub struct State {
     last_save: f64,
     last_error: Option<String>,
     ticks: u64,
+    /// Up next's Clear: what went, for Undo.
+    cleared: Option<Cleared>,
 }
+
+/// The songs Up next's Clear took out (Undo puts them back after the song playing).
+#[derive(Debug)]
+struct Cleared {
+    tracks: Vec<Track>,
+    at: std::time::Instant,
+}
+
+/// How long Up next's Clear can be undone.
+pub const UNDO_MS: u64 = 6000;
+
+/// The toast after Up next's Clear (with Undo).
+pub const UP_NEXT_CLEARED: &str = "Up next cleared";
 
 impl Default for State {
     fn default() -> Self {
@@ -215,6 +230,7 @@ impl Default for State {
             last_save: 0.0,
             last_error: None,
             ticks: 0,
+            cleared: None,
         }
     }
 }
@@ -368,6 +384,10 @@ pub enum Message {
     Jump(usize),
     RemoveAt(usize),
     MoveUp(usize),
+    /// Up next's Clear: everything after the song playing goes ("Up next cleared", with Undo).
+    ClearUpNext,
+    /// Undo of Up next's Clear.
+    UndoClear,
     /// The library shuffle that keeps the music going (`true` = the queue had ended).
     More(bool, Result<Value, ApiError>),
     Signal,
@@ -509,7 +529,7 @@ fn on_event(state: &mut State, ev: Event, ctx: &mut Ctx) -> Task<Message> {
             group::on_status(state, &prev);
             // in a group the group's queue plays as it is: no repeat, no library shuffle after it
             let grouped = group::active();
-            let mut tasks = Vec::new();
+            let mut tasks = vec![group::count_play(state, ctx)];
             if let Some(e) = now.error.as_ref() {
                 if state.last_error.as_ref() != Some(e) {
                     state.last_error = Some(e.clone());
@@ -595,8 +615,9 @@ fn on_event(state: &mut State, ev: Event, ctx: &mut Ctx) -> Task<Message> {
                 tasks.push(likes_task(ctx));
             }
             // "now playing" on Last.fm / ListenBrainz: the device link reports it while it
-            // runs; before a token exists the app does it itself.
-            if let Some(id) = id.filter(|_| !crate::link::connected()) {
+            // runs; before a token exists the app does it itself (and always for a group
+            // listen's songs, which the link does not see as library songs)
+            if let Some(id) = id.filter(|_| !crate::link::connected() || group::relay::live_of(&t).is_some()) {
                 let api = ctx.api.clone();
                 tasks.push(Task::perform(
                     async move { api.post("/library/now-playing", json!({ "track_id": id })).await },
@@ -611,7 +632,11 @@ fn on_event(state: &mut State, ev: Event, ctx: &mut Ctx) -> Task<Message> {
         }
         Event::TrackPlayed { track, seconds } => {
             // Counted like the web player (half the song or four minutes, the engine's
-            // threshold); the link logs it while it runs.
+            // threshold); the link logs it while it runs. A group listen's songs are counted by
+            // `group::count_play` (the engine counts a live stream only after four minutes).
+            if group::relay::live_of(&track).is_some() {
+                return Task::none();
+            }
             match engine::tracks::encore_id(&track).filter(|_| !crate::link::connected()) {
                 Some(id) => {
                     let api = ctx.api.clone();
@@ -734,9 +759,14 @@ pub fn update(state: &mut State, msg: Message, ctx: &mut Ctx) -> Task<Message> {
             return group::skip(state, matches!(msg, Message::Next), ctx)
         }
         Message::SeekTo(v) if state.group.state.is_some() => return group::seek(state, v, ctx),
-        Message::SetShuffle(_) | Message::SetRepeat(_) if state.group.state.is_some() => group::no_modes(ctx),
+        // Shuffle in a group: the group's Up next in a random order, once (those who control it);
+        // repeat is off
+        Message::SetShuffle(_) if state.group.state.is_some() => return group::update(state, group::Msg::Shuffle, ctx),
+        Message::SetRepeat(_) if state.group.state.is_some() => group::no_repeat(ctx),
         // Up next shows the group's queue (its own messages): the engine's indices mean nothing
         Message::Jump(_) | Message::RemoveAt(_) | Message::MoveUp(_) if state.group.state.is_some() => {}
+        Message::ClearUpNext if state.group.state.is_some() => return group::update(state, group::Msg::AskClear, ctx),
+        Message::UndoClear if state.group.state.is_some() => state.cleared = None,
         Message::LinkTo(_) | Message::PlayHere(_) | Message::SendThere(_) if state.group.state.is_some() => {
             group::no_linking(ctx)
         }
@@ -1122,6 +1152,31 @@ pub fn update(state: &mut State, msg: Message, ctx: &mut Ctx) -> Task<Message> {
         }
         Message::RemoveAt(i) => queue::remove_at(&state.status, i),
         Message::MoveUp(i) => queue::move_up(&state.status, i),
+        Message::ClearUpNext => {
+            // another device's queue is that device's
+            if state.devices.linked.is_some() {
+                return Task::none();
+            }
+            let gone = queue::clear_rest(&state.status);
+            if gone.is_empty() {
+                return Task::none();
+            }
+            state.cleared = Some(Cleared { tracks: gone, at: std::time::Instant::now() });
+            ctx.toast_action(UP_NEXT_CLEARED, "Undo", Message::UndoClear, UNDO_MS);
+            save_spot(state, true);
+        }
+        Message::UndoClear => {
+            let Some(c) = state.cleared.take() else {
+                return Task::none();
+            };
+            if c.at.elapsed().as_millis() as u64 > UNDO_MS + 500 || state.devices.linked.is_some() {
+                return Task::none();
+            }
+            // after the song playing, before anything added since
+            queue::order_insert_after(&state.status, &c.tracks);
+            engine::send(Command::PlayNext(c.tracks));
+            save_spot(state, true);
+        }
         Message::More(start, r) => {
             state.topping = false;
             match r {

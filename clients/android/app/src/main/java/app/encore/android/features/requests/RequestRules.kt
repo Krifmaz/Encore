@@ -1,6 +1,7 @@
 package app.encore.android.features.requests
 
 import app.encore.android.data.repo.CANCELLABLE_STATUSES
+import app.encore.android.data.repo.ClearWaitingResult
 import app.encore.android.data.repo.DownloadAllNowResult
 import app.encore.android.data.repo.DownloadNowResult
 import app.encore.android.data.repo.LinkProbe
@@ -569,6 +570,15 @@ object RequestRules {
             else -> "Retrying ${r.retried} · ${r.skipped} couldn't be retried" + if (r.why.isNotEmpty()) " (${r.why})" else ""
         }
         return msg to if (r.skipped > 0) "warn" else "ok"
+    }
+
+    /** Clear waiting's question for [count] requests (the server's dry run counted them), as the web asks it. */
+    fun clearWaitingQuestion(count: Int): String =
+        "Cancel $count waiting request${if (count == 1) "" else "s"}? Downloads and imports already running keep going."
+
+    /** Clear waiting's toast: the server's sentence, or the same words when an answer has none. */
+    fun clearWaitingToast(r: ClearWaitingResult): String = r.text.trim().ifEmpty {
+        if (r.count <= 0) "Nothing is waiting" else "Cancelled ${r.count} waiting request${if (r.count == 1) "" else "s"}"
     }
 
     /** The toast after a Clear (common.rs `clear_menu`). */

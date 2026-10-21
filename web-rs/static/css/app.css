@@ -331,6 +331,9 @@ table.table { width: 100%; border-collapse: collapse; }
 .toast.stays { display: flex; flex-direction: column; gap: 6px; padding-bottom: 8px; }
 .toast .toast-text { white-space: pre-wrap; overflow-wrap: anywhere; user-select: text; -webkit-user-select: text; max-height: 40vh; overflow: auto; }
 .toast .toast-acts { display: flex; justify-content: flex-end; gap: 4px; margin-right: -8px; }
+/* a toast with one button on its line ("Up next cleared · Undo", ui.rs `toast_action`) */
+.toast.act { display: flex; align-items: center; gap: 12px; padding-top: 6px; padding-bottom: 6px; }
+.toast.act .toast-text { flex: 1; }
 
 /* ---------- player ---------- */
 body.has-player { --player: var(--player-h); }
@@ -554,6 +557,7 @@ body.np-open { overflow: hidden; }
 .np-lyrics .np-plain { white-space: pre-wrap; font-size: 18px; line-height: 1.6; }
 .np-lyrics .np-empty { padding-top: 10vh; text-align: center; }
 .np-queue h3 { margin: 6px 0 10px; }
+.np-q-acts { gap: 6px; justify-content: flex-end; }
 .np-item { display: flex; align-items: center; gap: 10px; padding: 8px; border-radius: 10px; cursor: pointer; }
 .np-item:hover { background: color-mix(in srgb, var(--panel-2) 80%, transparent); }
 .np-item .thumb { width: 42px; height: 42px; }

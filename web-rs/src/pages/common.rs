@@ -741,6 +741,45 @@ pub fn clear_menu(anchor: &Element, reload: Rc<dyn Fn()>, mine: bool) {
     ui::pop_menu(anchor, items);
 }
 
+/// The question before Clear waiting: "Cancel 612 waiting requests? Downloads and imports already running keep going."
+pub fn waiting_question(n: i64) -> String {
+    if n == 1 { "Cancel 1 waiting request? Downloads and imports already running keep going.".to_string() }
+    else { format!("Cancel {n} waiting requests? Downloads and imports already running keep going.") }
+}
+
+/// What Clear waiting did, when the server's own words are missing: "Cancelled 612 waiting requests", "Nothing is
+/// waiting" (the server's sentences, the same).
+pub fn waiting_done(n: i64) -> String {
+    match n {
+        0 => "Nothing is waiting".to_string(),
+        1 => "Cancelled 1 waiting request".to_string(),
+        n => format!("Cancelled {n} waiting requests"),
+    }
+}
+
+/// Clear waiting: every request still waiting (pending, queued, waiting, searching) is cancelled – admins: everyone's
+/// unless `mine`; members: their own (the server decides). Counted first (a dry run) for the question; the server's
+/// words after ("Cancelled 612 waiting requests", "Nothing is waiting").
+pub fn clear_waiting(mine: bool, reload: Rc<dyn Fn()>) {
+    dom::spawn(async move {
+        let n = match api::post("/requests/clear-waiting", json!({ "mine": mine, "dry_run": true })).await {
+            Ok(r) if r.i("count") > 0 => r.i("count"),
+            Ok(r) => { let text = r.s("text"); toast(if text.is_empty() { waiting_done(0) } else { text }.as_str(), ""); return; }
+            Err(e) => { toast(&e.message, "err"); return; }
+        };
+        if !ui::confirm_dialog("Clear waiting", &waiting_question(n), "Clear waiting", true).await { return; }
+        match api::post("/requests/clear-waiting", json!({ "mine": mine })).await {
+            Ok(r) => {
+                let text = r.s("text");
+                toast(if text.is_empty() { waiting_done(r.i("count")) } else { text }.as_str(), "ok");
+                dom::dispatch("encore:requests-changed", None);
+                reload();
+            }
+            Err(e) => toast(&e.message, "err"),
+        }
+    });
+}
+
 /// Retry failed: queue every failed request again (admins: everyone's, unless `mine`), say how many, reload.
 pub fn retry_failed(mine: bool, reload: Rc<dyn Fn()>) {
     dom::spawn(async move {

@@ -55,6 +55,11 @@ fn query() -> String {
     QUERY.read().unwrap_or_else(|e| e.into_inner()).clone()
 }
 
+/// The query library streams get now (empty: the original file).
+pub fn current_query() -> String {
+    query()
+}
+
 /// What this engine decodes (symphonia with every codec, plus cadenza's DSD readers), in the
 /// words of the server's `X-Encore-Decoders` list (server/src/routes/library.rs).
 pub const DECODERS: &str = "flac,mp3,aac,alac,vorbis,wav,aiff,dsf,dff";
@@ -159,13 +164,42 @@ pub fn from_file(path: std::path::PathBuf, v: &Value) -> Track {
     }
 }
 
-/// The Encore track id of a queue entry (None for files and other sources).
+/// The live streams a group listen plays through (`player::group::relay`): `encore-group/<qid>`.
+pub const GROUP_LIVE: &str = "encore-group/";
+
+/// The Encore track id of a queue entry (None for files and other sources). A group listen's
+/// entry is the library song it streams.
 pub fn encore_id(t: &Track) -> Option<i64> {
     let id = t.id.as_deref()?.parse::<i64>().ok()?;
     match &t.source {
         Source::Url { url, .. } if url.contains("/api/library/tracks/") => Some(id),
+        Source::Live { live } if live.starts_with(GROUP_LIVE) => Some(id),
         _ => None,
     }
+}
+
+/// A library stream asked for with the query of now (the account's quality may have changed
+/// since the entry was made); any other source as it is.
+pub fn refresh_query(t: &mut Track) {
+    with_query(t, &query());
+}
+
+fn with_query(t: &mut Track, q: &str) {
+    let Source::Url { url, .. } = &mut t.source else {
+        return;
+    };
+    let Some(at) = url.find("/api/library/tracks/") else {
+        return;
+    };
+    let rest = &url[at + "/api/library/tracks/".len()..];
+    let Some(id) = rest.split('/').next().and_then(|i| i.parse::<i64>().ok()) else {
+        return;
+    };
+    if !rest[id.to_string().len()..].starts_with("/stream") {
+        return;
+    }
+    let plain = stream_url(&url[..at], id);
+    *url = if q.is_empty() { plain } else { format!("{plain}?{q}") };
 }
 
 #[cfg(test)]
@@ -193,6 +227,11 @@ mod tests {
             _ => panic!("expected a URL"),
         }
         assert_eq!(encore_id(&t), Some(12));
+        // a group listen's entry is the same library song
+        let live = Track { source: Source::Live { live: format!("{GROUP_LIVE}q7") }, ..t.clone() };
+        assert_eq!(encore_id(&live), Some(12));
+        let other = Track { source: Source::Live { live: "airplay".into() }, ..t.clone() };
+        assert_eq!(encore_id(&other), None);
         assert!(from_encore("http://e", &auth, &serde_json::json!({ "title": "no id" })).is_none());
         assert_eq!(cookie("abc").1, "encore_session=abc");
     }
@@ -211,5 +250,18 @@ mod tests {
         let fixed = json!({ "dsp": true, "dsp_rate": 192000, "dsp_filter": "sinc-m", "dsp_dither": "ns 5" });
         assert_eq!(stream_query(&fixed, &allowed, 0), "dsp=1&rate=192000&filter=sinc%2Dm&dither=ns%205");
         assert_eq!(stream_query(&json!({ "dsp": true, "dsp_rate": "auto" }), &allowed, 44100), "dsp=1&rate=0&dither=tpdf");
+    }
+
+    #[test]
+    fn a_song_opened_later_asks_with_the_quality_of_now() {
+        let mut t = from_encore("http://e:8080", &bearer("tok"), &serde_json::json!({ "id": 5, "title": "x" })).unwrap();
+        with_query(&mut t, "q=aac&kbps=96");
+        assert!(matches!(&t.source, Source::Url { url, .. } if url == "http://e:8080/api/library/tracks/5/stream?q=aac&kbps=96"));
+        with_query(&mut t, "");
+        assert!(matches!(&t.source, Source::Url { url, .. } if url == "http://e:8080/api/library/tracks/5/stream"));
+        // anything else stays
+        let mut f = Track { source: Source::Path { path: "/m/a.flac".into() }, ..Default::default() };
+        with_query(&mut f, "q=aac&kbps=96");
+        assert_eq!(f.source, Source::Path { path: "/m/a.flac".into() });
     }
 }

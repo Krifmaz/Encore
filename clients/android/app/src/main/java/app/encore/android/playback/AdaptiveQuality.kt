@@ -7,6 +7,7 @@ import androidx.media3.exoplayer.analytics.AnalyticsListener
 import app.encore.android.data.api.EncoreApi
 import app.encore.android.data.prefs.PlaybackPrefs
 import app.encore.android.data.prefs.Quality
+import app.encore.android.features.group.GroupQuality
 import app.encore.android.ui.components.Toasts
 import okhttp3.OkHttpClient
 import okhttp3.Request
@@ -17,6 +18,11 @@ import java.util.concurrent.ExecutorService
  * `stepDownNow` / `decide`): the bandwidth estimate from ExoPlayer's transfers and from timed probes while nothing
  * downloads, a stall or a slow start steps the stream one rung down at once, and the estimate holding 1.5× a higher
  * rung's need for 15 s steps it back up. A switch reopens the song at its spot ([CurrentStream.reopen]).
+ *
+ * In a group listen the rung is fixed for the length of a song ([GroupQuality]): the estimate changes nothing mid-song
+ * (the next song starts on what it says), and only a real stall drops the rung, once per song, reopened where the
+ * group will be ([reloadAt]). Every reload there was a gap and then a correction seek.
+ *
  * Main thread only (the probes run on `io`).
  */
 class AdaptiveQuality(
@@ -39,6 +45,16 @@ class AdaptiveQuality(
     private var switchedAt = 0L
     private var slowToastAt = 0L
     private var previousRung = 0
+    /** in a group listen this song already dropped a rung for a stall (the one drop a song gets) */
+    private var droppedThisSong = false
+
+    /** set by the service: in a group listen now */
+    var inGroup: () -> Boolean = { false }
+    /**
+     * set by the service: in a playing group, where to reopen the song playing (ms, song time) so it lands where the
+     * group will be, for a stream of that kind (true: server-made); null: at its own spot
+     */
+    var reloadAt: (Boolean) -> Long? = { null }
 
     /** ExoPlayer's transfers feed the estimate. */
     val analytics = object : AnalyticsListener {
@@ -72,6 +88,7 @@ class AdaptiveQuality(
     fun songChanged() {
         stalls.clear()
         stepAt = 0L
+        droppedThisSong = false
     }
 
     /**
@@ -116,10 +133,14 @@ class AdaptiveQuality(
         }, 4000L)
     }
 
-    /** Auto: a stall forces one rung down right away, and the estimate drops to 60 % of what the rung needed. */
+    /**
+     * Auto: a stall forces one rung down right away, and the estimate drops to 60 % of what the rung needed. In a group
+     * once per song ([GroupQuality.mayChange]).
+     */
     private fun stepDownNow() {
         val t = current.track() ?: return
         if (!auto) return
+        if (!GroupQuality.mayChange(inGroup(), stall = true, droppedThisSong = droppedThisSong)) return
         main.removeCallbacks(slowStart)
         val v = resolver.variantOf(t.id) ?: resolver.startVariant(t)
         // a downloaded copy plays from the phone: nothing to step down
@@ -130,17 +151,19 @@ class AdaptiveQuality(
         estimator.dropTo(0.6 * Quality.needed(v.rung, orig))
         stalls.clear()
         stepAt = System.currentTimeMillis()
+        if (inGroup()) droppedThisSong = true
         switchRung(t, lower)
     }
 
-    /** Reload the song at the current position on another rung. */
+    /** Reload the song at the current position on another rung (in a playing group: where the group will be). */
     private fun switchRung(t: StreamTrack, rung: Int) {
         val v = resolver.variantOf(t.id) ?: resolver.startVariant(t)
         noteRungChange(v.rung, rung)
         previousRung = rung
         switchedAt = System.currentTimeMillis()
         seekAt = switchedAt
-        current.reopen(t, rung = rung, dsp = null, offsetSec = current.absPositionMs() / 1000.0)
+        val at = reloadAt(resolver.reopenVariant(t, rung, null, 0.0).serverStream) ?: current.absPositionMs()
+        current.reopen(t, rung = rung, dsp = null, offsetSec = at / 1000.0)
     }
 
     private fun noteRungChange(was: Int, now: Int) {
@@ -223,6 +246,8 @@ class AdaptiveQuality(
 
     /** Auto: follow the estimate – down at once (when the buffer is short), up when it has held 1.5× the higher rung's need for 15 s. */
     private fun decide(t: StreamTrack) {
+        // in a group the rung stays for the song: the next one starts on what the estimate says
+        if (!GroupQuality.mayChange(inGroup(), stall = false, droppedThisSong = droppedThisSong)) return
         val v = resolver.variantOf(t.id) ?: return
         if (v.local.isNotEmpty()) return
         val orig = resolver.origKbps(t)

@@ -100,10 +100,14 @@ object Toasts {
     /** The toasts on screen, oldest first; drawn by [ToastHost]. */
     val stack: StateFlow<List<ToastItem>> = items.asStateFlow()
 
-    fun show(message: String, kind: String = "info") {
+    /**
+     * A toast; with [action] and [onAction] it has that button ("Undo"), which runs [onAction] and closes it. A toast
+     * that is not an error goes after [showMs].
+     */
+    fun show(message: String, kind: String = "info", action: String = "", showMs: Long = ToastRules.SHOW_MS, onAction: (() -> Unit)? = null) {
         if (message.isBlank()) return
         val n = counter.incrementAndGet()
-        items.update { ToastRules.add(it, n, n, message, kind) }
+        items.update { ToastRules.add(it, n, n, message, kind, action, onAction, showMs) }
     }
 
     /** An error toast's Close. */
@@ -133,7 +137,7 @@ fun ToastHost(bottomPadding: Dp) {
         if (!t.stays) {
             key(t.id, t.seq) {
                 LaunchedEffect(Unit) {
-                    delay(ToastRules.SHOW_MS)
+                    delay(t.showMs)
                     Toasts.expire(t.id, t.seq)
                 }
             }
@@ -344,14 +348,20 @@ private fun ToastCard(t: ToastItem) {
         shadowElevation = 6.dp,
         modifier = Modifier.fillMaxWidth().semantics { liveRegion = if (t.stays) LiveRegionMode.Assertive else LiveRegionMode.Polite },
     ) {
+        val act = t.onAction
         Row(
-            Modifier.padding(start = 12.dp, end = if (t.stays) 4.dp else 12.dp, top = 6.dp, bottom = 6.dp),
+            Modifier.padding(start = 12.dp, end = if (t.stays || act != null) 4.dp else 12.dp, top = 6.dp, bottom = 6.dp),
             verticalAlignment = Alignment.CenterVertically,
         ) {
             Box(Modifier.width(4.dp).height(22.dp).clip(RoundedCornerShape(2.dp)).background(edge))
             // the whole message; a long one scrolls
             Box(Modifier.weight(1f).padding(start = 12.dp, top = 8.dp, bottom = 8.dp).heightIn(max = 160.dp).verticalScroll(rememberScrollState())) {
                 Text(t.message, style = MaterialTheme.typography.bodyMedium)
+            }
+            if (act != null && t.action.isNotEmpty()) {
+                TextButton(onClick = { Toasts.close(t.id); act() }) {
+                    Text(t.action, color = p.accent, fontWeight = FontWeight.SemiBold)
+                }
             }
             if (t.stays) {
                 // Copy keeps the error on screen; the toast "Copied to clipboard" says it worked

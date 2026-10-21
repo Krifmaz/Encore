@@ -70,6 +70,17 @@ pub fn missing_report_text(r: &Value) -> String {
 }
 
 /// `window.dispatchEvent(new HashChangeEvent('hashchange'))`: re-render the current page.
+/// Shuffle on a playlist: in a group listen its songs go to the group shuffled; else they play here in a random order.
+fn shuffle_play(tracks: &[Value]) {
+    if player::group_shuffle(tracks) { return; }
+    let mut v = tracks.to_vec();
+    for i in (1..v.len()).rev() {
+        let j = (js_sys::Math::random() * (i as f64 + 1.0)).floor() as usize;
+        v.swap(i, j);
+    }
+    player::play_queue(v, 0, "list");
+}
+
 fn reload() {
     if let Ok(ev) = web_sys::HashChangeEvent::new("hashchange") { let _ = dom::window().dispatch_event(&ev); }
 }
@@ -198,7 +209,7 @@ fn linked_page_html(pl: &Value, downloads: bool) -> String {
         album = if it.truthy("album_id") { format!(r##"<a href="#/library/album/{}">{}</a>"##, esc(&it.s("album_id")), esc(&it.s("album"))) } else { esc(&it.s("album")) },
         more = icon("more"),
     )).collect();
-    let play = if has { format!(r#"<button class="btn primary" id="pl-play">{}Play</button>"#, icon("play")) } else { String::new() };
+    let play = if has { format!(r#"<button class="btn primary" id="pl-play">{}Play</button><button class="btn" id="pl-shuffle">{}Shuffle</button>"#, icon("play"), icon("shuffle")) } else { String::new() };
     let menu = if has && downloads { format!(r#"<button class="btn icon" id="pl-menu" aria-label="More options" title="More options">{}</button>"#, icon("more")) } else { String::new() };
     let body = format!(r#"<div class="muted">{total} tracks</div>
         <div class="small muted mt">{hint}</div>
@@ -244,6 +255,7 @@ fn render_linked(view: &Element, id: &str, pl: &Value) {
             crate::pages::library::track_menu(&b, &as_track(it), app::is_admin(), Some(Rc::new(reload)));
         });
     }
+    { let p = playable.clone(); dom::on_sel(view, "#pl-shuffle", "click", move |_| shuffle_play(&p)); }
     dom::on_sel(view, "#pl-play", "click", move |_| player::play_queue(playable.clone(), 0, "list"));
     {
         let id2 = id.to_string();
@@ -620,7 +632,7 @@ pub fn render_playlist(view: Element, ctx: Ctx) -> PageFuture {
             name = esc(&pl.s("name")),
             total = pl.s("total"), matched = pl.s("matched"), missing_n = js_string(&json!(total - matched)),
             pct = if pl.truthy("total") { js_string(&json!(matched / total * 100.0)) } else { "0".to_string() },
-            play = if pl.truthy("matched") { format!(r#"<button class="btn primary" id="pl-play">{}Play</button>"#, icon("play")) } else { String::new() },
+            play = if pl.truthy("matched") { format!(r#"<button class="btn primary" id="pl-play">{}Play</button><button class="btn" id="pl-shuffle">{}Shuffle</button>"#, icon("play"), icon("shuffle")) } else { String::new() },
             shared = share_line(&pl),
             external = icon("external"),
             pl_menu = if pl.truthy("matched") && crate::pages::downloads::enabled() { format!(r#"<button class="btn icon" id="pl-menu" aria-label="More options" title="More options">{}</button>"#, icon("more")) } else { String::new() },
@@ -660,6 +672,7 @@ pub fn render_playlist(view: Element, ctx: Ctx) -> PageFuture {
                 crate::pages::library::track_menu(&b, &as_track(it), app::is_admin(), Some(Rc::new(reload)));
             });
         }
+        { let p = playable.clone(); dom::on_sel(&view, "#pl-shuffle", "click", move |_| shuffle_play(&p)); }
         dom::on_sel(&view, "#pl-play", "click", move |_| player::play_queue(playable.clone(), 0, "list"));
         // Share: the system share sheet (or the clipboard), then the Shared line
         {

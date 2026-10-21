@@ -178,6 +178,87 @@ fn the_queue_commands() {
     assert_eq!(cmd(&mut s, "set_queue", json!({ "tracks": too_many }), T0).unwrap_err().status.as_u16(), 400);
 }
 
+/// A group of `n` songs (ids 1..=n, 100 s each) playing song 1 at 0, and rows for ids 1..=n+50.
+fn long_group(n: i64) -> (Group, HashMap<i64, Arc<Row>>) {
+    let r: HashMap<i64, Arc<Row>> = (1..=n + 50).map(|i| (i, row(i, 100.0))).collect();
+    let mut g = Group::new(NewGroup { id: "g_2".into(), code: "K7QM4Y".into(), visibility: ANYONE.into(), everyone_controls: false, guests_allowed: false, max_members: 20 }, T0);
+    g.add(account(3, "Alex", "pc", 1000.0));
+    let ids: Vec<i64> = (1..=n).collect();
+    g.set_queue(&ids, &r, At { index: 0, position: 0.0, playing: true }, &alex(), T0);
+    (g, r)
+}
+
+fn tracks(g: &Group) -> Vec<i64> {
+    g.queue.iter().map(|e| e.track).collect()
+}
+
+fn sorted(mut v: Vec<i64>) -> Vec<i64> {
+    v.sort_unstable();
+    v
+}
+
+#[test]
+fn shuffle_mixes_the_songs_after_the_one_playing_and_clear_takes_them_out() {
+    let (mut g, r) = long_group(40);
+    g.command("next", &json!({}), &r, &alex(), T0 + 1000).unwrap();
+    g.command("seek", &json!({ "position": 42.0 }), &r, &alex(), T0 + 2000).unwrap();
+    g.command("play_next", &json!({ "tracks": [77] }), &r, &alex(), T0 + 2000).unwrap();
+    assert!(g.queue[2].next);
+    let before = tracks(&g);
+    let playing = g.queue[1].qid.clone();
+    let (anchor, position) = (g.anchor_ms, g.position);
+    g.command("shuffle", &json!({}), &r, &alex(), T0 + 3000).unwrap();
+    let after = tracks(&g);
+    // the song before and the one playing stay where they are, and it plays on where it was
+    assert_eq!((&after[..2], g.index, g.queue[1].qid.clone()), (&before[..2], 1, playing.clone()));
+    assert_eq!((g.anchor_ms, g.position, g.playing), (anchor, position, true), "the song playing is not touched");
+    // the rest: the same songs (and entries) in another order; 39 songs coming back in order is a 1 in 39! chance
+    assert_eq!(sorted(after[2..].to_vec()), sorted(before[2..].to_vec()));
+    assert_ne!(after[2..], before[2..]);
+    assert!(g.queue.iter().all(|e| !e.next), "after a shuffle the next Play next goes right after the song playing");
+    // nothing after the last one: a shuffle changes nothing
+    let (mut one, r1) = long_group(1);
+    one.command("shuffle", &json!({}), &r1, &alex(), T0).unwrap();
+    assert_eq!(tracks(&one), vec![1]);
+    // clear: everything after the song playing goes; that song plays on
+    g.command("clear", &json!({}), &r, &alex(), T0 + 4000).unwrap();
+    assert_eq!((tracks(&g), g.index, g.queue[1].qid.clone()), (before[..2].to_vec(), 1, playing));
+    assert_eq!((g.anchor_ms, g.position, g.playing), (anchor, position, true));
+    // songs added after a clear come right after the one playing
+    g.command("enqueue", &json!({ "tracks": [5] }), &r, &alex(), T0 + 5000).unwrap();
+    assert_eq!(tracks(&g)[2], 5);
+    // an empty queue: clear and shuffle change nothing
+    let mut e = Group::new(NewGroup { id: "g_3".into(), code: "K7QM4Z".into(), visibility: ANYONE.into(), everyone_controls: false, guests_allowed: false, max_members: 20 }, T0);
+    e.command("clear", &json!({}), &r, &alex(), T0).unwrap();
+    e.command("shuffle", &json!({}), &r, &alex(), T0).unwrap();
+    assert!(e.queue.is_empty() && !e.playing);
+}
+
+#[test]
+fn set_queue_and_enqueue_with_shuffle_mix_the_songs_first() {
+    let (mut g, r) = long_group(3);
+    let list: Vec<i64> = (10..50).collect();
+    // set_queue with shuffle: the songs in a random order, playing from the first of it (index and position ignored)
+    g.command("set_queue", &json!({ "tracks": list, "index": 7, "position": 30.0, "shuffle": true }), &r, &alex(), T0 + 1000).unwrap();
+    let got = tracks(&g);
+    assert_eq!(sorted(got.clone()), list);
+    assert_ne!(got, list, "40 songs coming back in order is a 1 in 40! chance");
+    assert_eq!((g.index, g.position, g.anchor_ms, g.playing), (0, 0.0, T0 + 1000, true));
+    // without it the order and the place asked for stay
+    g.command("set_queue", &json!({ "tracks": [10, 11, 12], "index": 2, "position": 5.0, "shuffle": false }), &r, &alex(), T0 + 2000).unwrap();
+    assert_eq!((tracks(&g), g.index, g.position), (vec![10, 11, 12], 2, 5.0));
+    // enqueue with shuffle: added at the end, in a random order, the song playing not touched
+    let more: Vec<i64> = (13..53).collect();
+    g.command("enqueue", &json!({ "tracks": more, "shuffle": true }), &r, &alex(), T0 + 3000).unwrap();
+    let got = tracks(&g);
+    assert_eq!((&got[..3], g.index, g.position), (&[10, 11, 12][..], 2, 5.0));
+    assert_eq!(sorted(got[3..].to_vec()), more);
+    assert_ne!(got[3..], more[..]);
+    // unknown songs are still left out
+    g.command("enqueue", &json!({ "tracks": [999, 20], "shuffle": true }), &r, &alex(), T0 + 4000).unwrap();
+    assert_eq!(*tracks(&g).last().unwrap(), 20);
+}
+
 #[test]
 fn every_change_bumps_rev_in_order_and_is_announced() {
     let mut g = group();
@@ -218,7 +299,7 @@ fn who_may_do_what() {
     // adding songs is for every account member; the rest needs control
     assert_eq!(needs_control("enqueue"), Some(false));
     assert_eq!(needs_control("play_next"), Some(false));
-    for op in ["play", "pause", "seek", "next", "prev", "jump", "set_queue", "remove", "move"] {
+    for op in ["play", "pause", "seek", "next", "prev", "jump", "set_queue", "remove", "move", "shuffle", "clear"] {
         assert_eq!(needs_control(op), Some(true), "{op}");
     }
     assert_eq!(needs_control("ended"), None);

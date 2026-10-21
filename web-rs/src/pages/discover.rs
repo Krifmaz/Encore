@@ -956,6 +956,8 @@ pub fn render_artist(view: Element, ctx: Ctx) -> PageFuture {
                 dom::spawn(async move {
                     let Ok(t) = api::get(&format!("/discover/artist/{}/library-tracks?name={}", a.s("id"), encode(&a.s("name")))).await else { return };
                     let mut t = t.items();
+                    // in a group listen the songs go to the group shuffled
+                    if shuffle && player::group_shuffle(&t) { return; }
                     if shuffle { t = shuffled(t); }
                     player::play_queue(t, 0, "list");
                 });
@@ -1410,6 +1412,7 @@ fn ext_sheet(m: &Value, tracks: Vec<Value>, artist: &str) {
     bind_request_buttons(&md.el);
     let tracks = Rc::new(tracks);
     let play = move |i: usize, shuffle: bool| {
+        if shuffle && player::group_shuffle(&queue) { return; }
         let q = if shuffle { shuffled((*queue).clone()) } else { (*queue).clone() };
         player::play_queue(q, i, "album");
     };
@@ -1572,6 +1575,7 @@ pub fn render_album(view: Element, ctx: Ctx) -> PageFuture {
             let queue = queue.clone();
             move |i: usize, shuffle: bool| {
                 if queue.is_empty() { toast("None of these songs are in your library yet", "err"); return; }
+                if shuffle && player::group_shuffle(&queue) { return; }
                 let q = if shuffle { shuffled((*queue).clone()) } else { (*queue).clone() };
                 player::play_queue(q, i, "album");
             }

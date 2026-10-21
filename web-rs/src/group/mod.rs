@@ -25,8 +25,6 @@ use wasm_bindgen::JsCast;
 const KEEP_ID: &str = "encore.group.id";
 /// A group link opened while signed out: asked again once signed in (sessionStorage).
 pub(crate) const PENDING: &str = "encore.group.join";
-/// The clock is measured again this often while in a group (client-shapes §5.6).
-const CLOCK_EVERY_MS: u32 = 600_000;
 /// A server without group listens (before 0.31, or turned off) is asked again after this long.
 const NO_GROUPS_ASK_MS: f64 = 600_000.0;
 
@@ -36,8 +34,8 @@ thread_local! {
     static STATE: RefCell<Option<Value>> = const { RefCell::new(None) };
     /// this member paused here only ("Paused here · Catch up"); the group plays on
     static LOCAL_PAUSED: Cell<bool> = const { Cell::new(false) };
-    /// the server's clock minus `performance.now()`, ms (None: not measured, the wall clock stands in)
-    static OFFSET: Cell<Option<f64>> = const { Cell::new(None) };
+    /// the server's clock minus `performance.now()`, ms (no offset: not measured, the wall clock stands in)
+    static CLOCK: RefCell<rules::Clock> = RefCell::new(rules::Clock::default());
     /// the server process the group was last seen on: another one after a restart
     static BOOT: RefCell<String> = const { RefCell::new(String::new()) };
     /// the group's event stream and its listeners
@@ -78,7 +76,7 @@ pub fn only_host() -> String { current().map(|s| rules::only_host(&s)).unwrap_or
 fn mono_ms() -> f64 { dom::window().performance().map(|p| p.now()).unwrap_or_else(dom::now_ms) }
 
 /// The server's clock now (Unix ms).
-pub fn server_now() -> f64 { OFFSET.with(|o| o.get()).map(|o| mono_ms() + o).unwrap_or_else(dom::now_ms) }
+pub fn server_now() -> f64 { CLOCK.with(|c| c.borrow().offset).map(|o| mono_ms() + o).unwrap_or_else(dom::now_ms) }
 
 /// This device's id and name, as the remote knows them (`/api/remote/*`).
 fn device() -> (String, String) { crate::remote::device() }
@@ -293,14 +291,19 @@ pub fn remove_member(member: &str, name: &str) {
 
 /// POST /api/group/{id}/command {op, …}: a refusal shows the server's reason and the player follows the group again.
 pub fn command(op: &str, fields: Value) {
+    command_then(op, fields, || {});
+}
+
+/// [`command`], then `done` once the group took it (not when it was refused).
+pub fn command_then(op: &str, fields: Value, done: impl FnOnce() + 'static) {
     let Some(s) = current() else { return };
     let id = s.s("id");
     let mut b = body(fields);
     b["op"] = json!(op);
     dom::spawn(async move {
         match api::post(&format!("/group/{}/command", enc(&id)), b).await {
-            Ok(s) if s.truthy("id") => apply(s),
-            Ok(_) => {}
+            Ok(s) if s.truthy("id") => { apply(s); done(); }
+            Ok(_) => done(),
             Err(e) => {
                 toast(if e.message.is_empty() { "Couldn't change the group listen" } else { &e.message }, "err");
                 crate::player::group_resync();
@@ -361,10 +364,24 @@ fn stop(message: Option<String>) {
 
 // ---- the server's clock ----------------------------------------------------------------------------------------------
 
-/// Three round trips to GET /api/time; the one with the smallest round trip sets the offset (the guest page too).
+/// Joining (the guest page too, also after a reload): 8 round trips to GET /api/time, the median offset of the 3
+/// quickest (rules::Clock).
 pub(crate) async fn clock() {
+    let samples = time_samples(rules::CLOCK_JOIN_SAMPLES).await;
+    CLOCK.with(|c| { c.borrow_mut().join(&samples); });
+}
+
+/// Every minute while in a group: 3 round trips, blended in (rules::Clock::refresh – a slow answer of a busy server
+/// can't move the offset by more than 50 ms).
+pub(crate) async fn clock_refresh() {
+    let samples = time_samples(rules::CLOCK_REFRESH_SAMPLES).await;
+    CLOCK.with(|c| c.borrow_mut().refresh(&samples));
+}
+
+/// `n` round trips to GET /api/time: (sent, the server's now, received) in this device's ms.
+async fn time_samples(n: usize) -> Vec<(f64, f64, f64)> {
     let mut samples = vec![];
-    for _ in 0..3 {
+    for _ in 0..n {
         let t0 = mono_ms();
         match api::get("/time").await {
             Ok(v) if v.f("now_ms") > 0.0 => {
@@ -376,12 +393,13 @@ pub(crate) async fn clock() {
             Err(_) => {}
         }
     }
-    if let Some(o) = rules::clock_offset(&samples) { OFFSET.with(|x| x.set(Some(o))); }
+    samples
 }
 
-/// The computer's clock may move under a running group: measured again every 10 minutes while in one.
+/// The computer's clock may move under a running group (and one answer can be slow): measured again every minute
+/// while in one.
 fn keep_clock() {
-    let t = dom::Interval::new(CLOCK_EVERY_MS, || { if in_group() { dom::spawn(clock()); } });
+    let t = dom::Interval::new(rules::CLOCK_REFRESH_MS, || { if in_group() { dom::spawn(clock_refresh()); } });
     CLOCK_TIMER.with(|c| *c.borrow_mut() = Some(t));
 }
 

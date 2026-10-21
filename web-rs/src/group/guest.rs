@@ -5,12 +5,14 @@
 //! /api/group), so the event stream, the songs (`/api/group/{id}/tracks/{track}/stream`) and the covers
 //! (`/api/group/{id}/albums/{album}/cover`) need nothing else. Guests listen, see the queue and the people, and can
 //! leave; they can't add songs or control playback (a pause pauses only here: "Paused here · Catch up"). Every name
-//! on the page is escaped: guests choose their own.
+//! on the page is escaped: guests choose their own. The page keeps in time with the same rules as the player
+//! (rules::sync_step, SeekLag, Clock: 8 round trips at join – also after a reload – then 3 every minute), and
+//! pre-buffers the next song on a second <audio>, so a song change within 3 s of the expected end has no gap.
 //!
 //! When guests can't join (or the code is wrong; the server doesn't say which), the sign-in page shows with the
 //! reason, and the link is asked about again once signed in.
 
-use super::rules::{self, SeekLag};
+use super::rules::{self, Act, SeekLag};
 use crate::api;
 use crate::dom::{self, EventListener};
 use crate::json::J;
@@ -23,26 +25,32 @@ use web_sys::{Element, HtmlMediaElement};
 /// The name a guest last joined with, offered again.
 const NAME_KEY: &str = "encore.group.guestName";
 
-/// The page while listening: the group, its <audio>, the event stream, the clock and the sync's own state.
+/// The page while listening: the group, its <audio> (and the spare one that pre-buffers the next song), the event
+/// stream, the clock and the sync's own state.
 struct Guest {
     root: Element,
     code: String,
     state: Value,
     audio: HtmlMediaElement,
+    /// the next song, pre-buffered: the element, its entry and its URL ("" when empty)
+    spare: HtmlMediaElement,
+    spare_qid: String,
     /// the queue entry loaded on the <audio>, and where its stream starts (a server-made stream starts at `t=`)
     loaded: String,
     offset: f64,
     server_made: bool,
     local_paused: bool,
-    adjusting: bool,
     quiet_until: f64,
+    /// the group's last (entry, position, anchor): a new one is followed at once
+    last_anchor: (String, f64, f64),
     /// when this page last paused the <audio> itself (its 'pause' event is not the listener's)
     own_pause_at: f64,
     lag: SeekLag,
     es: Option<web_sys::EventSource>,
     keep: Vec<EventListener>,
-    /// the half-second look at the drift (dropping it stops it)
+    /// the half-second look at the drift, and the clock's refresh every minute (dropping them stops them)
     _tick: Option<dom::Interval>,
+    _clock: Option<dom::Interval>,
     drawn: String,
 }
 
@@ -163,34 +171,46 @@ fn sign_in_text(why: &str, notice: Option<String>) -> String {
 async fn listen(root: Element, code: String, s: Value, quiet: bool) {
     stop();
     if rules::host_name(&s).is_empty() { return; }
-    let audio: HtmlMediaElement = match dom::by_id("guest-audio").and_then(|e| e.dyn_into().ok()) {
-        Some(a) => a,
-        None => {
-            let a = dom::create("audio");
-            a.set_id("guest-audio");
-            let _ = dom::body().append_child(&a);
-            a.dyn_into().expect("audio")
+    // back after a reload: the clock is measured again (a join measured it already)
+    if quiet { super::clock().await; }
+    let element = |id: &str| -> HtmlMediaElement {
+        match dom::by_id(id).and_then(|e| e.dyn_into().ok()) {
+            Some(a) => a,
+            None => {
+                let a = dom::create("audio");
+                a.set_id(id);
+                let _ = dom::body().append_child(&a);
+                a.dyn_into().expect("audio")
+            }
         }
     };
-    audio.set_preload("auto");
+    let (audio, spare) = (element("guest-audio"), element("guest-spare"));
     let vol = js_sys::parse_float(&dom::ls_get("encore.volume").unwrap_or_else(|| "0.9".into()));
-    audio.set_volume(if vol.is_finite() { vol.clamp(0.0, 1.0) } else { 0.9 });
+    for a in [&audio, &spare] {
+        a.set_preload("auto");
+        a.set_volume(if vol.is_finite() { vol.clamp(0.0, 1.0) } else { 0.9 });
+    }
     shell(&root, "");
     let mut keep = vec![];
-    // the song reached its end here: on to the next entry, as the server does at the same moment
-    keep.push(dom::listener(&audio, "ended", |_| { roll_over(); draw(); }));
-    keep.push(dom::listener(&audio, "timeupdate", |_| paint_time()));
-    // a pause nobody here asked for (headphones out, another app took the sound): only here
-    keep.push(dom::listener(&audio, "pause", |_| {
-        let mine = with(|g| {
-            if g.audio.ended() || mono() - g.own_pause_at < 1000.0 { return true; }
-            if g.state.truthy("playing") { g.local_paused = true; }
-            false
-        }).unwrap_or(true);
-        if !mine { draw(); }
-    }));
-    let g = Guest { root, code, state: s, audio, loaded: String::new(), offset: 0.0, server_made: false, local_paused: quiet, adjusting: false,
-        quiet_until: 0.0, own_pause_at: f64::NEG_INFINITY, lag: SeekLag::default(), es: None, keep, _tick: Some(dom::Interval::new(500, check)), drawn: String::new() };
+    // (both elements: they swap at a song change; only the one playing counts)
+    for a in [&audio, &spare] {
+        // the song reached its end here: on to the next entry, as the server does at the same moment
+        keep.push(dom::listener(a, "ended", |e| { if playing_el(e) { roll_over(); draw(); } }));
+        keep.push(dom::listener(a, "timeupdate", |e| { if playing_el(e) { paint_time(); } }));
+        // a pause nobody here asked for (headphones out, another app took the sound): only here
+        keep.push(dom::listener(a, "pause", |e| {
+            if !playing_el(e) { return; }
+            let mine = with(|g| {
+                if g.audio.ended() || mono() - g.own_pause_at < 1000.0 { return true; }
+                if g.state.truthy("playing") { g.local_paused = true; }
+                false
+            }).unwrap_or(true);
+            if !mine { draw(); }
+        }));
+    }
+    let g = Guest { root, code, state: s, audio, spare, spare_qid: String::new(), loaded: String::new(), offset: 0.0, server_made: false, local_paused: quiet,
+        quiet_until: 0.0, last_anchor: (String::new(), 0.0, 0.0), own_pause_at: f64::NEG_INFINITY, lag: SeekLag::default(), es: None, keep,
+        _tick: Some(dom::Interval::new(500, check)), _clock: Some(dom::Interval::new(rules::CLOCK_REFRESH_MS, || dom::spawn(super::clock_refresh()))), drawn: String::new() };
     let id = g.state.s("id");
     G.with(|x| *x.borrow_mut() = Some(g));
     open_events(&id);
@@ -198,13 +218,21 @@ async fn listen(root: Element, code: String, s: Value, quiet: bool) {
     follow();
 }
 
+/// Whether an event comes from the element playing now (not the spare).
+fn playing_el(e: &web_sys::Event) -> bool {
+    let Some(t) = e.target() else { return false };
+    with(|g| { let a: &web_sys::EventTarget = g.audio.as_ref(); *a == t }).unwrap_or(false)
+}
+
 /// Out of the group: the audio stops, the stream closes.
 fn stop() {
     if let Some(g) = G.with(|x| x.borrow_mut().take()) {
         if let Some(es) = &g.es { es.close(); }
-        let _ = g.audio.pause();
-        let _ = g.audio.remove_attribute("src");
-        g.audio.load();
+        for a in [&g.audio, &g.spare] {
+            let _ = a.pause();
+            let _ = a.remove_attribute("src");
+            a.load();
+        }
     }
 }
 
@@ -258,28 +286,66 @@ fn open_events(id: &str) {
 /// Where this page is in the song (a server-made stream's offset included).
 fn position(g: &Guest) -> f64 { g.offset + g.audio.current_time() }
 
-/// The stream of entry `e` at `at` seconds: the original file where this browser plays its format, else FLAC made
-/// by the server (asked for at `t=`, as it can't seek in itself).
+/// Whether this browser plays entry `e`'s file itself (else the server converts it to FLAC: a server-made stream).
+fn whole_file(e: &Value) -> bool { crate::player::can_play(&e.s("format")) }
+
+/// The URL of entry `e` from `at` seconds in group `group` (its id, URL-encoded): the original file where this browser
+/// plays its format, else FLAC made by the server (asked for at `t=`, as it can't seek in itself); and where its clock
+/// starts.
+fn url_of(group: &str, e: &Value, at: f64) -> (String, f64) {
+    let mut url = format!("/api/group/{group}/tracks/{}/stream", e.s("id"));
+    if whole_file(e) { return (url, 0.0); }
+    url.push_str("?transcode=1");
+    if at > 0.5 { url.push_str(&format!("&t={}", crate::num::to_fixed1(at))); return (url, at); }
+    (url, 0.0)
+}
+
+/// The stream of entry `e` at `at` seconds. Within 3 s of its start the pre-buffered spare plays (a whole file put at
+/// `at` in what it has buffered; a server-made stream from its start, the nudge closing the rest).
 fn load(g: &mut Guest, e: &Value, at: f64, play: bool) {
-    let id = g.state.s("id");
-    let convert = !crate::player::can_play(&e.s("format"));
-    let mut url = format!("/api/group/{}/tracks/{}/stream", enc(&id), e.s("id"));
-    g.server_made = convert;
-    g.offset = 0.0;
-    if convert {
-        url.push_str("?transcode=1");
-        if at > 0.5 { url.push_str(&format!("&t={}", crate::num::to_fixed1(at))); g.offset = at; }
-    }
+    let id = enc(&g.state.s("id"));
+    let whole = whole_file(e);
+    g.server_made = !whole;
     g.loaded = e.s("qid");
-    g.audio.set_src(&url);
-    if !convert && at > 0.3 {
-        let a = g.audio.clone();
-        EventListener::once(&g.audio, "loadedmetadata", move |_| a.set_current_time(at)).forget();
+    if g.spare_qid == g.loaded && at <= rules::BOUNDARY_S {
+        // the next song is buffered already: the elements swap
+        let old = std::mem::replace(&mut g.audio, g.spare.clone());
+        g.spare = old;
+        let _ = g.spare.pause();
+        let _ = g.spare.remove_attribute("src");
+        g.spare.load();
+        g.spare_qid.clear();
+        g.offset = 0.0;
+        if whole && at > 0.3 { g.audio.set_current_time(at); }
+    } else {
+        let (url, offset) = url_of(&id, e, at);
+        g.offset = offset;
+        g.audio.set_src(&url);
+        if whole && at > 0.3 {
+            let a = g.audio.clone();
+            EventListener::once(&g.audio, "loadedmetadata", move |_| a.set_current_time(at)).forget();
+        }
     }
-    g.adjusting = false;
     g.audio.set_playback_rate(1.0);
     g.quiet_until = mono() + 2500.0;
     if play { play_now(&g.audio); }
+}
+
+/// The next entry buffered on the spare element once this song is near its end (30 s before for a whole file, 40 s
+/// for a server-made stream), as the player does.
+fn prebuffer(g: &mut Guest) {
+    let q = g.state.a("queue");
+    let Some(i) = q.iter().position(|e| e.s("qid") == g.loaded) else { return };
+    let Some(next) = q.get(i + 1) else { return };
+    if g.spare_qid == next.s("qid") { return; }
+    let d = q[i].f("duration");
+    let left = d - position(g);
+    if d <= 0.0 || left > if g.server_made { 40.0 } else { 30.0 } { return; }
+    let (url, _) = url_of(&enc(&g.state.s("id")), next, 0.0);
+    g.spare_qid = next.s("qid");
+    g.spare.set_playback_rate(1.0);
+    g.spare.set_src(&url);
+    g.spare.load();
 }
 
 /// A pause this page makes (never counted as the listener's own).
@@ -297,12 +363,11 @@ fn roll_over() {
     });
 }
 
-/// A song change a moment before (or after) the group's: the page is on the next entry at its start, or the
-/// group just started the next one while this song still plays its last moment. It settles by itself.
+/// A song change a moment before (or after) the group's settles by itself (rules::near_boundary): the page is on the
+/// next entry within 3 s of its start, or still plays the last 3 s of the one before.
 fn near_boundary(q: &[Value], loaded: &str, pos: f64, ei: i64, epos: f64) -> bool {
     let Some(li) = q.iter().position(|e| e.s("qid") == loaded) else { return false };
-    let li = li as i64;
-    (li == ei + 1 && pos < 1.5) || (li + 1 == ei && epos < 1.5)
+    rules::near_boundary(li as i64, pos, q[li].f("duration"), ei, epos)
 }
 
 /// Within the song: to `at`, playing or not.
@@ -327,6 +392,14 @@ fn play_now(a: &HtmlMediaElement) {
 
 fn wants_play(s: &Value, i: i64, pos: f64, local_paused: bool) -> bool { s.truthy("playing") && !local_paused && !rules::at_end(s, i, pos) }
 
+/// Whether the group's (entry, position, anchor) changed since the last look: the host seeked, played or jumped.
+fn new_anchor(g: &mut Guest, song: &str) -> bool {
+    let now = (song.to_string(), g.state.f("position"), g.state.f("anchor_ms"));
+    let fresh = g.last_anchor != now;
+    g.last_anchor = now;
+    fresh
+}
+
 /// The page follows the group: its song, position and play / pause.
 fn follow() {
     let changed = with(|g| {
@@ -339,12 +412,12 @@ fn follow() {
         let want = wants_play(&g.state, ei, epos, g.local_paused);
         if g.loaded != e.s("qid") {
             if want && !g.audio.paused() && near_boundary(&q, &g.loaded, position(g), ei, epos) { return false; }
-            let at = if want { g.lag.target(&e.s("qid"), epos * 1000.0, !crate::player::can_play(&e.s("format"))) / 1000.0 } else { epos };
+            let at = if want { g.lag.target(&e.s("qid"), epos * 1000.0, !whole_file(&e), mono()) / 1000.0 } else { epos };
             load(g, &e, at, want);
             return true;
         }
         if want && g.audio.paused() {
-            if (position(g) - epos).abs() > 0.5 { let at = g.lag.target(&e.s("qid"), epos * 1000.0, g.server_made) / 1000.0; place(g, &e, at, true); } else { play_now(&g.audio); }
+            if (position(g) - epos).abs() > 0.5 { let at = g.lag.target(&e.s("qid"), epos * 1000.0, g.server_made, mono()) / 1000.0; place(g, &e, at, true); } else { play_now(&g.audio); }
         } else if !want && !g.audio.paused() {
             own_pause(g);
         }
@@ -354,17 +427,18 @@ fn follow() {
     if changed { draw(); }
 }
 
-/// Every half second: the song, the drift, the rate.
+/// Every half second: the song, the drift, the rate (rules::sync_step), and the next song's pre-buffer.
 fn check() {
     let redraw = with(|g| {
         let (ei, epos) = rules::expected(&g.state, super::server_now());
         let q = g.state.a("queue");
         let Some(e) = q.get(ei.max(0) as usize).filter(|_| ei >= 0).cloned() else { return false };
         if !wants_play(&g.state, ei, epos, g.local_paused) {
-            if g.adjusting { g.adjusting = false; g.audio.set_playback_rate(1.0); }
+            if g.audio.playback_rate() != 1.0 { g.audio.set_playback_rate(1.0); }
             g.lag.cancel();
             return !g.audio.paused() || g.loaded != e.s("qid");
         }
+        prebuffer(g);
         if g.loaded != e.s("qid") {
             // gapless into the next song a little before (or after) the group: wait for the song change to settle
             return g.audio.paused() || mono() >= g.quiet_until && !near_boundary(&q, &g.loaded, position(g), ei, epos);
@@ -373,18 +447,16 @@ fn check() {
         if mono() < g.quiet_until || g.audio.ready_state() < 3 || g.audio.seeking() { return false; }
         let d = (position(g) - epos) * 1000.0;
         let song = e.s("qid");
-        if g.lag.waiting() { g.lag.landed(&song, d, mono()); }
-        match rules::drift(d, g.adjusting, rate_ok(&g.audio), g.lag.seek_above_ms(&song)) {
-            rules::Drift::Seek => {
-                g.adjusting = false;
+        if g.lag.waiting() { g.lag.landed(&song, d); }
+        let since = if new_anchor(g, &song) { f64::INFINITY } else { g.lag.since_ms(mono()) };
+        match rules::sync_step(d, g.audio.playback_rate(), since, g.server_made) {
+            Act::Seek => {
                 g.audio.set_playback_rate(1.0);
-                let at = g.lag.target(&song, epos * 1000.0, g.server_made) / 1000.0;
+                let at = g.lag.target(&song, epos * 1000.0, g.server_made, mono()) / 1000.0;
                 place(g, &e, at, true);
             }
-            rules::Drift::Faster => { g.adjusting = true; g.audio.set_playback_rate(1.03); }
-            rules::Drift::Slower => { g.adjusting = true; g.audio.set_playback_rate(0.97); }
-            rules::Drift::Normal => { g.adjusting = false; g.audio.set_playback_rate(1.0); }
-            rules::Drift::None => {}
+            Act::Rate(r) => { keep_pitch(&g.audio); g.audio.set_playback_rate(r); }
+            Act::Keep => {}
         }
         false
     }).unwrap_or(false);
@@ -392,15 +464,14 @@ fn check() {
     paint_time();
 }
 
-/// Whether the browser changes the rate without changing the pitch.
-fn rate_ok(a: &HtmlMediaElement) -> bool {
+/// The pitch stays when the rate moves (`preservesPitch`, set again to be sure).
+fn keep_pitch(a: &HtmlMediaElement) {
     for k in ["preservesPitch", "mozPreservesPitch", "webkitPreservesPitch"] {
         if js_sys::Reflect::has(a, &k.into()).unwrap_or(false) {
             let _ = js_sys::Reflect::set(a, &k.into(), &wasm_bindgen::JsValue::TRUE);
-            return js_sys::Reflect::get(a, &k.into()).ok().and_then(|v| v.as_bool()) == Some(true);
+            return;
         }
     }
-    false
 }
 
 // ---- the page --------------------------------------------------------------------------------------------------
@@ -465,7 +536,7 @@ fn draw() {
         draw();
     });
     dom::on_sel(&body, "#g-vol", "input", |e| {
-        if let Some(v) = dom::target_el(e) { let x = crate::num::num(&dom::value(&v)).clamp(0.0, 1.0); with(|g| g.audio.set_volume(x)); dom::ls_set("encore.volume", &crate::num::js_num(x)); }
+        if let Some(v) = dom::target_el(e) { let x = crate::num::num(&dom::value(&v)).clamp(0.0, 1.0); with(|g| { g.audio.set_volume(x); g.spare.set_volume(x); }); dom::ls_set("encore.volume", &crate::num::js_num(x)); }
     });
     paint_time();
 }
@@ -506,15 +577,24 @@ mod tests {
 
     #[test]
     fn a_song_change_at_the_boundary_settles_by_itself() {
-        let q = vec![json!({"qid": "a"}), json!({"qid": "b"}), json!({"qid": "c"})];
+        let q = vec![json!({"qid": "a", "duration": 180.0}), json!({"qid": "b", "duration": 200.0}), json!({"qid": "c", "duration": 90.0})];
         // here on b's start, the group still at a's end
         assert!(near_boundary(&q, "b", 0.4, 0, 179.8));
-        // the group on b's start, here still at a's end
+        assert!(near_boundary(&q, "b", 2.9, 0, 179.8), "within 3 s");
+        // the group on b's start, here still at a's end (or within 3 s of it)
         assert!(near_boundary(&q, "a", 179.9, 1, 0.3));
+        assert!(near_boundary(&q, "a", 177.5, 1, 3.5), "2.5 s before a's end");
         // far apart: no
         assert!(!near_boundary(&q, "a", 50.0, 2, 10.0));
         assert!(!near_boundary(&q, "c", 30.0, 1, 10.0));
         assert!(!near_boundary(&q, "x", 0.1, 0, 0.1));
+    }
+
+    #[test]
+    fn a_whole_file_is_never_asked_for_at_t_and_a_conversion_is() {
+        let e = json!({"id": 7, "format": "ape"});
+        assert_eq!(url_of("g1", &e, 12.34), ("/api/group/g1/tracks/7/stream?transcode=1&t=12.3".to_string(), 12.34));
+        assert_eq!(url_of("g1", &e, 0.2), ("/api/group/g1/tracks/7/stream?transcode=1".to_string(), 0.0));
     }
 
     #[test]

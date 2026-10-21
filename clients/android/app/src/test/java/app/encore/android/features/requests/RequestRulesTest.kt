@@ -2,6 +2,7 @@ package app.encore.android.features.requests
 
 import app.encore.android.core.EncoreJson
 import app.encore.android.core.decodeModel
+import app.encore.android.data.repo.ClearWaitingResult
 import app.encore.android.data.repo.DownloadAllNowResult
 import app.encore.android.data.repo.DownloadNowResult
 import app.encore.android.data.repo.DownloadsHealth
@@ -161,6 +162,17 @@ class RequestRulesTest {
         assertEquals("Retrying 0 · 3 couldn't be retried" to "warn", RequestRules.retryFailedToast(RetryFailedResult(0, 3, "")))
         assertEquals("5 cleared", RequestRules.clearToast(5, 0, files = false))
         assertEquals("5 cleared · 12 file(s) deleted", RequestRules.clearToast(5, 12, files = true))
+    }
+
+    @Test
+    fun clearWaitingAsksWithTheCountAndSaysTheServersWords() {
+        assertEquals("Cancel 612 waiting requests? Downloads and imports already running keep going.", RequestRules.clearWaitingQuestion(612))
+        assertEquals("Cancel 1 waiting request? Downloads and imports already running keep going.", RequestRules.clearWaitingQuestion(1))
+        assertEquals("Cancelled 612 waiting requests", RequestRules.clearWaitingToast(ClearWaitingResult(612, "Cancelled 612 waiting requests")))
+        assertEquals("Nothing is waiting", RequestRules.clearWaitingToast(ClearWaitingResult(0, "Nothing is waiting")))
+        // an answer without its sentence
+        assertEquals("Nothing is waiting", RequestRules.clearWaitingToast(ClearWaitingResult(0, "")))
+        assertEquals("Cancelled 3 waiting requests", RequestRules.clearWaitingToast(ClearWaitingResult(3, " ")))
     }
 
     @Test

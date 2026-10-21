@@ -1,10 +1,12 @@
 //! Keeps background work (cover thumbnails, quality checks, the translator) out of the way of people
 //! using the app: every API call marks the server as in use, and background passes slow down to one
-//! low-priority thread while it is (and for a few seconds after).
+//! low-priority thread while it is (and for a few seconds after). While a group listen plays (the group loop
+//! says so, [`Busy::set_group_playing`]) the heaviest work – measuring loudness, the Translator's model – waits
+//! altogether, and goes on after the last group listen stopped playing.
 use axum::extract::{Request, State};
 use axum::middleware::Next;
 use axum::response::Response;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -19,11 +21,13 @@ struct Clock {
     start: Instant,
     /// milliseconds since `start` of the last API call (0 = none yet)
     last: AtomicU64,
+    /// a group listen is playing now
+    group: AtomicBool,
 }
 
 impl Default for Busy {
     fn default() -> Self {
-        Busy(Arc::new(Clock { start: Instant::now(), last: AtomicU64::new(0) }))
+        Busy(Arc::new(Clock { start: Instant::now(), last: AtomicU64::new(0), group: AtomicBool::new(false) }))
     }
 }
 
@@ -42,6 +46,36 @@ impl Busy {
         used_within(self.0.last.load(Ordering::Relaxed), self.ms())
     }
 
+    /// Whether a group listen is playing now: measuring loudness and the Translator's model wait meanwhile.
+    pub fn group_playing(&self) -> bool {
+        self.0.group.load(Ordering::Relaxed)
+    }
+
+    /// The group loop says whether any group listen is playing now. True when the last one just stopped (the
+    /// work that waited may go on).
+    pub fn set_group_playing(&self, on: bool) -> bool {
+        self.0.group.swap(on, Ordering::Relaxed) && !on
+    }
+
+    /// Waits (a second at a time) while a group listen plays, however long it plays; how long it waited. The
+    /// work that waited does not count that against its own time: it goes on after the last group listen.
+    pub async fn wait_out_groups(&self) -> Duration {
+        let t0 = Instant::now();
+        while self.group_playing() {
+            tokio::time::sleep(GROUP_LOOK).await;
+        }
+        t0.elapsed()
+    }
+
+    /// [`Busy::wait_out_groups`] on a thread of its own (not the async runtime).
+    pub fn wait_out_groups_blocking(&self) -> Duration {
+        let t0 = Instant::now();
+        while self.group_playing() {
+            std::thread::sleep(GROUP_LOOK);
+        }
+        t0.elapsed()
+    }
+
     /// Waits (sleeping, a little at a time) while the app is in use; for the extra workers of a background
     /// pass, so only one keeps going meanwhile. Gives up waiting after `max`.
     pub fn wait_while_in_use(&self, max: Duration) {
@@ -51,6 +85,9 @@ impl Busy {
         }
     }
 }
+
+/// How often a wait for the group listens looks again.
+const GROUP_LOOK: Duration = if cfg!(test) { Duration::from_millis(20) } else { Duration::from_secs(1) };
 
 fn used_within(last: u64, now: u64) -> bool {
     last != 0 && now.saturating_sub(last) < QUIET_AFTER.as_millis() as u64
@@ -106,5 +143,34 @@ mod tests {
         assert!(used_within(1000, 1000 + q - 1));
         assert!(!used_within(1000, 1000 + q + 1));
         assert!(!used_within(0, 5));
+    }
+
+    #[tokio::test]
+    async fn group_listens_hold_the_heavy_work_until_the_last_stops() {
+        let busy = Busy::default();
+        assert!(!busy.group_playing());
+        assert!(!busy.set_group_playing(true), "started: nothing to wake");
+        assert!(busy.group_playing() && busy.clone().group_playing(), "clones share it");
+        assert!(!busy.set_group_playing(true), "still playing");
+        // a wait lasts as long as the group plays, and says how long that was (not counted against the work's
+        // own time)
+        let b2 = busy.clone();
+        let stopper = tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(80)).await;
+            b2.set_group_playing(false)
+        });
+        let waited = busy.wait_out_groups().await;
+        assert!(waited >= Duration::from_millis(70), "{waited:?}");
+        assert!(stopper.await.unwrap(), "the last one stopping says so once");
+        assert!(!busy.set_group_playing(false));
+        // nothing playing: no wait
+        assert!(busy.wait_out_groups_blocking() < Duration::from_millis(20));
+        // the same on a thread of its own
+        busy.set_group_playing(true);
+        let b3 = busy.clone();
+        let waiter = std::thread::spawn(move || b3.wait_out_groups_blocking());
+        tokio::time::sleep(Duration::from_millis(60)).await;
+        busy.set_group_playing(false);
+        assert!(waiter.join().unwrap() >= Duration::from_millis(50));
     }
 }

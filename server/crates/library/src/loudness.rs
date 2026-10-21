@@ -380,7 +380,8 @@ impl Run {
 
 /// Settings → Scheduled tasks → Measure loudness: the songs whose loudness nobody has looked at yet
 /// (`loudness_source IS NULL`, so a run goes on where the last one stopped), at the lowest priority and
-/// only while nobody uses the app. First their tags are read again, once (songs scanned before 0.31, which
+/// only while nobody uses the app; while a group listen plays it waits altogether, and goes on after the last one
+/// stopped (the wait does not count against the run's time). First their tags are read again, once (songs scanned before 0.31, which
 /// have no `sample_rate` yet: a track gain tag is used as it is, and the sample rate — 0 when the file does
 /// not say — and the bit depth are filled in), then the rest are measured
 /// with ffmpeg's EBU R128 filter (`ebur128=peak=true`) one at a time at nice 19 and idle disk priority, a
@@ -415,6 +416,7 @@ where
     F: Fn(PathBuf) -> Fut,
     Fut: Future<Output = (Option<f64>, Option<f64>)>,
 {
+    // moved on by the time spent waiting for group listens: only the work counts against the run's time
     let deadline = Instant::now() + lim.budget;
     let mut out = Run { no_ffmpeg: !ffmpeg, ..Default::default() };
     // 1. tags: a light read of each file, no ffmpeg
@@ -426,7 +428,7 @@ where
             let _ = tx.send(tags_pass(&db, &busy, &lim, deadline));
         })?;
     }
-    let (from_tags, stopped) = rx.await.map_err(|_| anyhow::anyhow!("the tags pass stopped unexpectedly"))??;
+    let (from_tags, stopped, mut deadline) = rx.await.map_err(|_| anyhow::anyhow!("the tags pass stopped unexpectedly"))??;
     out.from_tags = from_tags;
     out.stopped = stopped;
     // 2. measuring, slice by slice
@@ -448,6 +450,9 @@ where
             if let Some(lufs) = quality {
                 done.push(Measured { id, mtime, lufs: Some(lufs), peak_db: opt_f(r, "q_peak"), from_quality: true });
             } else if ffmpeg {
+                // a group listen playing: the measuring waits for it to stop, however long it plays (the run
+                // goes on after it with the time it had left)
+                deadline += busy.wait_out_groups().await;
                 if !quiet(busy, lim.busy_max).await {
                     out.stopped = Some(Stop::Busy);
                     break;
@@ -471,23 +476,25 @@ where
 /// its file's tags read again ([`encore_media::tags::read_facts`]); a track gain tag makes it 'tags', and the
 /// album tags, sample rate and bit depth are written. What a run read stays read: a run the busy gate stops
 /// here leaves the next run only the songs after it, and once every older song was read the pass finds
-/// nothing (songs scanned since have theirs). Runs on a thread of its own; (songs that got their loudness from
-/// tags, why it stopped early).
-fn tags_pass(db: &Db, busy: &Busy, lim: &Limits, deadline: Instant) -> anyhow::Result<(usize, Option<Stop>)> {
+/// nothing (songs scanned since have theirs). A group listen playing: it waits, and the run's `deadline` moves
+/// on by the time waited. Runs on a thread of its own; (songs that got their loudness from tags, why it stopped
+/// early, the deadline).
+fn tags_pass(db: &Db, busy: &Busy, lim: &Limits, mut deadline: Instant) -> anyhow::Result<(usize, Option<Stop>, Instant)> {
     let mut after = 0i64;
     let mut found = 0;
     loop {
         if Instant::now() >= deadline {
-            return Ok((found, Some(Stop::Time)));
+            return Ok((found, Some(Stop::Time), deadline));
         }
         let rows = db.query("SELECT id, path, mtime, rg_album_gain, rg_album_peak, sample_rate, bit_depth FROM tracks
             WHERE loudness_source IS NULL AND sample_rate IS NULL AND id > ? ORDER BY id LIMIT ?", p![after, lim.slice as i64])?;
         if rows.is_empty() {
-            return Ok((found, None));
+            return Ok((found, None, deadline));
         }
         let mut read: Vec<(&Row, AudioFacts)> = Vec::with_capacity(rows.len());
         let mut stopped = None;
         for r in &rows {
+            deadline += busy.wait_out_groups_blocking();
             busy.wait_while_in_use(lim.busy_max);
             if busy.in_use() {
                 stopped = Some(Stop::Busy);
@@ -498,7 +505,7 @@ fn tags_pass(db: &Db, busy: &Busy, lim: &Limits, deadline: Instant) -> anyhow::R
         }
         found += write_tags(db, &read)?;
         if stopped.is_some() {
-            return Ok((found, stopped));
+            return Ok((found, stopped, deadline));
         }
     }
 }

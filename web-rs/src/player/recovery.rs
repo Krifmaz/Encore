@@ -105,7 +105,8 @@ pub(super) fn really_ended() -> bool {
         if step { r.stepped = true; }
         step
     });
-    if step {
+    // (in a group listen the rung is kept for the song: one drop at most)
+    if step && group_may_drop() {
         // it keeps breaking off: one rung down (once), the reload asks for the lighter stream
         let (rung, floor) = st(|s| (s.rung, s.floor));
         let lower = playback::step_down(rung, orig_kbps(Some(&t)), floor);
@@ -173,6 +174,8 @@ pub(super) fn retry_now() {
     // the reload's own waiting is not a slow link
     st_mut(|s| s.seek_at = now_ms());
     let (transcoded, rung, dsp) = st(|s| (s.transcoded, s.rung, s.dsp));
+    // in a group listen: where the group is by now (never a seek sent to the group)
+    let at = group_spot(transcoded || rung > 0 || dsp).unwrap_or(at);
     load_opts(LoadOpts { offset: at, resume: true, transcode: transcoded, rung: Some(rung), dsp: Some(dsp), ..Default::default() });
 }
 /// Six failures in a row: move on, and say so.
@@ -213,7 +216,7 @@ fn stall_retry_step(t: &Rc<Value>, at: f64) {
     let (rung, floor) = st(|s| (s.rung, s.floor));
     if !(at < 1.0 || floor != was) { return; }
     let lower = playback::step_down(rung, orig_kbps(Some(t)), floor);
-    if lower != rung { note_rung_change(rung, lower); st_mut(|s| { s.rung = lower; s.step_at = now_ms(); }); }
+    if lower != rung && group_may_drop() { note_rung_change(rung, lower); st_mut(|s| { s.rung = lower; s.step_at = now_ms(); }); }
 }
 /// The page is visible again (phone unlocked, app back in front): music you wanted and nobody paused plays on. A pause the
 /// browser made itself (headphones unplugged, another app took the sound) counts as yours: see the 'pause' listener.

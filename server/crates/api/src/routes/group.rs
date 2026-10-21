@@ -775,8 +775,11 @@ async fn patch(State(st): State<AppState>, User(u): User, Path(id): Path<String>
     answer(&st, &id, &Viewer::account(&st, &u, &dev, &c)).await
 }
 
-/// POST /api/group/{id}/command {op, …}: play, pause, seek, next, prev, jump, set_queue, remove, move (the
-/// host, or everyone with "Everyone can control"), enqueue and play_next (every account member).
+/// POST /api/group/{id}/command {op, …}: play, pause, seek, next, prev, jump, set_queue, remove, move, shuffle (the
+/// songs after the one playing, in a random order made here – the same for everyone) and clear (every song after
+/// the one playing goes) – the host, or everyone with "Everyone can control" –, enqueue and play_next (every account
+/// member). set_queue, enqueue and play_next take `"shuffle": true`: the songs are shuffled here first, and a
+/// shuffled set_queue starts at the first of them.
 async fn command(State(st): State<AppState>, User(u): User, Path(id): Path<String>, c: ClientInfo, Json(b): Json<Value>) -> ApiResult<Json<Value>> {
     on(&st)?;
     let dev = b["device_id"].as_str().unwrap_or("").trim().to_string();
@@ -1015,8 +1018,9 @@ async fn cover(State(st): State<AppState>, who: Who, Path((id, album)): Path<(St
 // ---- the loop ------------------------------------------------------------------------------------------------
 
 /// Moves every group on (a song ended: the next one; a member gone 2 minutes, a guest whose 12 hours are over,
-/// every guest once an admin turned guests off: out; idle 12 hours: ended) and saves what changed while
-/// `group_listen_keep` is on. Runs beside the web server, four times a second.
+/// every guest once an admin turned guests off: out; idle 12 hours: ended), tells the background work whether a
+/// group listen is playing, and saves what changed while `group_listen_keep` is on. Runs beside the web
+/// server, four times a second.
 pub async fn run(st: AppState) {
     let mut tick = tokio::time::interval(Duration::from_millis(250));
     tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
@@ -1044,7 +1048,7 @@ pub fn tick_once(st: &AppState, force: bool) {
     let guests_on = guests_possible(st);
     let mut outs: Vec<(String, String, Out)> = vec![];
     let mut ended: Vec<String> = vec![];
-    {
+    let playing = {
         let mut inner = st.playback.groups.lock();
         let ids: Vec<String> = inner.groups.keys().cloned().collect();
         for id in ids {
@@ -1082,6 +1086,12 @@ pub fn tick_once(st: &AppState, force: bool) {
                 }
             }
         }
+        inner.groups.values().any(|g| g.playing && !g.queue.is_empty())
+    };
+    // while a group listen plays, measuring loudness and the Translator's model wait (encore_jobs::busy); once
+    // the last one stopped the Translator goes on (measuring looks again by itself)
+    if st.busy.set_group_playing(playing) {
+        encore_library::translate::wake(st);
     }
     for id in ended {
         drop_guest_tokens(st, &id, None);

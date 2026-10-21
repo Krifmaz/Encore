@@ -129,12 +129,29 @@ pub(super) fn file_kbps(t: Option<&Value>) -> f64 {
     if t.f("size") > 0.0 && t.f("duration") > 0.0 { playback::js_round(t.f("size") * 8.0 / 1000.0 / t.f("duration")) } else { 0.0 }
 }
 
-/// Which rung a song starts on: Original never converts, Data saver is fixed at 96 kbps, Auto follows the estimated bandwidth.
+/// Which rung a song starts on: Original never converts, Data saver is fixed at 96 kbps, Auto follows the estimated
+/// bandwidth – in a group listen the original whenever this browser plays the file (group.rs: kept for the song).
 fn rung_for(t: &Value) -> i64 {
     let q = prefs().s("quality");
     if t.truthy("preview") || q == "original" { return 0; }
     if q == "saver" { return playback::SAVER_KBPS; }
-    playback::choose_rung(est_kbps(), orig_kbps(Some(t)), st(|s| s.floor))
+    let auto = playback::choose_rung(est_kbps(), orig_kbps(Some(t)), st(|s| s.floor));
+    group_start_rung(t, auto).unwrap_or(auto)
+}
+/// Whether song `t` starts as a stream the server makes (a conversion, a lighter rung, server processing not
+/// rendered yet): a seek in it is a new stream. A saved copy or a pre-rendered file is a whole file.
+pub(super) fn starts_server_made(t: &Value) -> bool {
+    if t.truthy("preview") || use_local(t) { return false; }
+    let rung = rung_for(t);
+    rung > 0 || convert(t) || (want_dsp(t, false) && dsp_state(t.i("id")) != "cached")
+}
+/// Whether the stream playing now is made by the server (its seek is a new stream): a pre-rendered Cadenza file is not.
+pub(super) fn here_server_made() -> bool {
+    st(|s| s.transcoded) && !(st(|s| s.dsp) && cur().is_some_and(|t| dsp_state(t.i("id")) == "cached") && st(|s| s.offset) == 0.0)
+}
+/// The spare element holds song `t` from its start (pre-buffered).
+pub(super) fn spare_has(t: &Value) -> bool {
+    spare().is_some_and(|sp| dom::data_opt(&sp, "url").as_deref() == Some(start_url(t).as_str()))
 }
 /// The URL a song starts with (what the spare element pre-loads, and what load() asks for at a song start).
 fn start_url(t: &Value) -> String {
@@ -177,6 +194,8 @@ pub(super) fn load_opts(o: LoadOpts) {
     let now = now_ms();
     st_mut(|s| { s.want = !o.hold; s.at = offset; s.src_at = now; });
     mark_played(&t);
+    // a song (not a reload of it) starts: in a group its rung is chosen now and kept for the song
+    if !o.resume { group_song_started(&t); }
     // the saved copy is a whole file: no conversion, no lighter rung, no Cadenza
     let transcode = !local && (o.transcode || convert(&t));
     let prev_rung = st(|s| s.rung);
@@ -218,7 +237,10 @@ pub(super) fn load_opts(o: LoadOpts) {
     let url = if local { url_for(t.i("id")).unwrap_or_default() } else { stream_url(&t, transcoded && !is_lossy && !is_dsp, rung, is_dsp, server_offset) };
     let (Some(mut a), Some(sp)) = (audio(), spare()) else { return };
     let use_plain = t.truthy("preview") && fx_built();
-    let swap = !truthy_num(offset) && !use_plain && dom::data_opt(&sp, "url").as_deref() == Some(url.as_str());
+    // the pre-buffered spare plays: from the start, or – a song change in a group within 3 s of the start – a whole
+    // file put a moment in, where it has buffered already
+    let near_start = !truthy_num(offset) || (grouped() && !o.resume && !truthy_num(server_offset) && offset <= crate::group::rules::BOUNDARY_S);
+    let swap = near_start && !use_plain && dom::data_opt(&sp, "url").as_deref() == Some(url.as_str());
     // a transition needs the pre-buffered element; without it the old song stops and this one starts plainly
     if o.fade && !swap { end_fade(); }
     if swap {

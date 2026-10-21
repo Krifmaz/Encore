@@ -23,6 +23,13 @@ pub fn random_alnum(n: usize) -> String {
     (0..n).map(|_| ABC[r.random_range(0..ABC.len())] as char).collect()
 }
 
+/// `v` in a random order (Fisher–Yates): a group listen's Shuffle, made once on the server so every device has
+/// the same order.
+pub fn shuffle<T>(v: &mut [T]) {
+    use rand::seq::SliceRandom;
+    v.shuffle(&mut rand::rng());
+}
+
 /// The SHA-256 of `data` as lowercase hex: how tokens are kept (never the token itself) and downloads checked.
 pub fn sha256_hex(data: impl AsRef<[u8]>) -> String {
     use sha2::Digest;
@@ -49,6 +56,18 @@ mod tests {
     fn sha256_of_abc() {
         assert_eq!(super::sha256_hex(b"abc"), "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad");
         assert_eq!(super::sha256_hex("abc"), super::sha256_hex(String::from("abc")));
+    }
+
+    #[test]
+    fn shuffle_keeps_every_item() {
+        let mut v: Vec<u32> = (0..200).collect();
+        super::shuffle(&mut v);
+        assert_ne!(v, (0..200).collect::<Vec<_>>(), "200 items coming back in order is a one in 200! chance");
+        v.sort_unstable();
+        assert_eq!(v, (0..200).collect::<Vec<_>>());
+        let mut none: Vec<u32> = vec![];
+        super::shuffle(&mut none);
+        assert!(none.is_empty());
     }
 
     #[test]

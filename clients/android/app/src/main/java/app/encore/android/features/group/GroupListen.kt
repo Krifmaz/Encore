@@ -82,19 +82,18 @@ object GroupListen {
     val busy = MutableStateFlow(false)
 
     /**
-     * The server's clock minus this phone's time since boot (SystemClock.elapsedRealtime), ms, from GET /api/time.
-     * Not the wall clock: Android steps that when it sets the time from the network, and every expected position would
-     * jump with it. Until measured (or on a server without /api/time) the phone's wall clock stands in ([measured]).
+     * The server's clock minus this phone's time since boot (SystemClock.elapsedRealtime), ms, from GET /api/time
+     * ([GroupClock]: 8 round trips at a join, 3 every minute after, blended in). Not the wall clock: Android steps that
+     * when it sets the time from the network, and every expected position would jump with it. Until measured (or on a
+     * server without /api/time) the phone's wall clock stands in.
      */
-    @Volatile var offsetMs: Long = 0L
-        private set
-    @Volatile private var measured = false
-    @Volatile private var clockAt: Long = 0L
+    private val clock = GroupClock()
+    val offsetMs: Long get() = clock.offsetMs
     /** the server process the group was last seen on: another one after a restart */
     @Volatile private var boot: String = ""
     @Volatile private var restored = false
     private var eventsJob: Job? = null
-    /** the clock measured again every 10 minutes while in a group (client-shapes §5.6) */
+    /** the clock measured again every minute while in a group (GroupClock) */
     private var clockJob: Job? = null
     @Volatile private var eventsCall: Call? = null
 
@@ -102,7 +101,7 @@ object GroupListen {
     val inGroup: Boolean get() = _state.value != null
 
     /** The server's clock now (Unix ms). */
-    fun serverNow(): Long = if (measured) SystemClock.elapsedRealtime() + offsetMs else System.currentTimeMillis()
+    fun serverNow(): Long = if (clock.measured) SystemClock.elapsedRealtime() + clock.offsetMs else System.currentTimeMillis()
 
     /** Ready to use; called by the UI and the playback service (either may come first). */
     fun init(context: Context) {
@@ -145,7 +144,7 @@ object GroupListen {
                 return@launch
             }
             if (s != null && s.id == saved) {
-                clock()
+                measureClock()
                 // back in, but quiet: this also runs when Android or the car starts the service, maybe hours later, so
                 // the listener chooses to hear the group ("Paused here · Catch up"); only start and join play at once
                 _localPaused.value = true
@@ -200,7 +199,7 @@ object GroupListen {
         busy.value = true
         scope.launch {
             try {
-                clock()
+                measureClock()
                 val s = api.start(visibility, everyoneControls, win.map { it.id }, at, if (win.isEmpty()) 0.0 else positionSec, playing && win.isNotEmpty())
                 unlinkFirst()
                 adopt(s)
@@ -275,7 +274,7 @@ object GroupListen {
         busy.value = true
         scope.launch {
             try {
-                clock()
+                measureClock()
                 // in another group: out of it first
                 _state.value?.let { old -> try { api.leave(old.id) } catch (_: Exception) {} ; stop(null) }
                 val s = call()
@@ -370,12 +369,16 @@ object GroupListen {
         return true
     }
 
-    /** POST /api/group/{id}/command {op, …}; a refusal shows the server's reason and the player follows the group again. */
-    fun command(op: String, build: JsonObjectBuilder.() -> Unit = {}) {
+    /**
+     * POST /api/group/{id}/command {op, …}; a refusal shows the server's reason and the player follows the group again.
+     * [onDone] runs once the group took it.
+     */
+    fun command(op: String, onDone: () -> Unit = {}, build: JsonObjectBuilder.() -> Unit = {}) {
         val s = _state.value ?: return
         scope.launch {
             try {
                 api.command(s.id, op, build)?.let { apply(it) }
+                onDone()
             } catch (e: CancellationException) {
                 throw e
             } catch (e: ApiException) {
@@ -402,6 +405,37 @@ object GroupListen {
         val (win, at) = RemoteDevice.window(lib, idx, 1000)
         command("set_queue") { ids(win); put("index", at); put("position", positionSec) }
         return true
+    }
+
+    /**
+     * A list's Shuffle (a playlist, an album, an artist) in a group: it becomes the group's queue, shuffled by the
+     * server, from its first song (`set_queue` with `shuffle`) for those who control; the others add it to the group's
+     * Up next, shuffled (`enqueue` with `shuffle`). The list is shuffled here too (an older server plays it as sent),
+     * and a list of more than 1000 songs sends 1000 of them, picked at random. True when the group took it.
+     */
+    fun shuffleList(tracks: List<Track>): Boolean {
+        if (!inGroup) return false
+        val lib = tracks.filter { it.id > 0L }
+        if (lib.isEmpty()) { Toasts.show("Only songs from your library can be played in a group listen", "err"); return true }
+        val mixed = lib.shuffled().take(1000)
+        if (canControl()) {
+            command("set_queue") { ids(mixed); put("index", 0); put("position", 0.0); put("shuffle", true) }
+        } else {
+            command("enqueue", onDone = { Toasts.show("Added to the group's Up next, shuffled", "ok") }) { ids(mixed); put("shuffle", true) }
+        }
+        return true
+    }
+
+    /** Up next's Shuffle in a group (those who control): the songs after the playing one, in a new order for everyone. */
+    fun shuffleUpNext() {
+        if (!inGroup || deniedHere()) return
+        command("shuffle")
+    }
+
+    /** Up next's Clear in a group (those who control, after "Clear the group's Up next?"): every song after the playing one goes. */
+    fun clearUpNext() {
+        if (!inGroup || deniedHere()) return
+        command("clear")
     }
 
     /** "Add to queue": every member may. True when the group took it. */
@@ -491,16 +525,16 @@ object GroupListen {
 
     // ---- the server's clock ----------------------------------------------------------------------------------
 
-    /** Three round trips to GET /api/time; the one with the smallest round trip sets [offsetMs]. Blocking. */
-    private fun clock() {
-        val samples = ArrayList<Triple<Long, Long, Long>>(3)
-        for (i in 0 until 3) {
+    /** [n] round trips to GET /api/time, one after the other; stops at a server without it. Blocking. */
+    private fun samples(n: Int): List<ClockSample> {
+        val out = ArrayList<ClockSample>(n)
+        for (i in 0 until n) {
             try {
                 // the phone's side in time since boot, which no clock setting moves
                 val t0 = SystemClock.elapsedRealtime()
                 val (now, b) = api.time()
                 val t1 = SystemClock.elapsedRealtime()
-                samples.add(Triple(t0, now, t1))
+                out.add(ClockSample(t0, now, t1))
                 if (b.isNotEmpty() && boot.isEmpty()) boot = b
             } catch (e: ApiException) {
                 // a server without /api/time: its clock is taken as this phone's
@@ -508,12 +542,21 @@ object GroupListen {
             } catch (_: Exception) {
             }
         }
-        GroupRules.clockOffset(samples)?.let {
-            offsetMs = it
-            measured = true
-            clockAt = SystemClock.elapsedRealtime()
-        }
+        return out
     }
+
+    /** At a start or join (and back in the group after a restart of the app): 8 round trips, the offset set anew. Blocking. */
+    private fun measureClock() {
+        if (clock.join(samples(GroupClock.JOIN_SAMPLES))) clockAt = SystemClock.elapsedRealtime()
+    }
+
+    /** Every minute in a group: 3 round trips, blended into the offset (never more than 50 ms at once). Blocking. */
+    private fun refreshClock() {
+        clock.refresh(samples(GroupClock.REFRESH_SAMPLES))
+        clockAt = SystemClock.elapsedRealtime()
+    }
+
+    @Volatile private var clockAt: Long = 0L
 
     // ---- the event stream ------------------------------------------------------------------------------------
 
@@ -568,8 +611,8 @@ object GroupListen {
     }
 
     /**
-     * The phone's clock may move under a running group (NTP after sleep, the user setting it): the offset is measured
-     * again every 10 minutes while in [id] (start and join measure it first), whether or not the stream dropped.
+     * The offset is measured again every minute while in [id] (start and join measure it first), whether or not the
+     * stream dropped: 3 round trips, slow ones left out, blended in ([GroupClock]).
      */
     @Synchronized
     private fun keepClock(id: String) {
@@ -578,9 +621,9 @@ object GroupListen {
         clockFor = id
         clockJob = scope.launch {
             while (currentCoroutineContext().isActive && _state.value?.id == id) {
-                delay(CLOCK_EVERY_MS)
+                delay(GroupClock.REFRESH_EVERY_MS)
                 if (_state.value?.id != id) return@launch
-                if (SystemClock.elapsedRealtime() - clockAt >= CLOCK_EVERY_MS - 1000L) clock()
+                if (SystemClock.elapsedRealtime() - clockAt >= GroupClock.REFRESH_EVERY_MS - 1000L) refreshClock()
             }
         }
     }
@@ -703,7 +746,6 @@ object GroupListen {
     }
 
     private const val K_ID = "group_id"
-    private const val CLOCK_EVERY_MS = 600_000L
     /** a server without group listens is asked again after this long */
     private const val NO_GROUPS_ASK_MS = 600_000L
     /** answers that mean "no such group here" (or turned off) */

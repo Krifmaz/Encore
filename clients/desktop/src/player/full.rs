@@ -128,17 +128,17 @@ fn main_column<'a>(state: &'a State, ctx: &Ctx<'a>, now: &Now, art_size: f32) ->
         meta = meta.push(q);
     }
 
-    // in a group listen shuffle and repeat are off, with the reason
+    // in a group listen Shuffle shuffles the group's Up next once and repeat is off, with the reason
     let grouped = state.group.state.is_some();
     let controls = row![
         if grouped {
-            super::group::view::off(Icon::Shuffle, super::group::view::NO_MODES, 18.0)
+            super::group::view::shuffle(state, 18.0)
         } else {
             bar_mode(Icon::Shuffle, shuffle_on, None, Message::SetShuffle(!shuffle_on))
         },
         bar::transport(state, Some(now), true),
         if grouped {
-            super::group::view::off(Icon::Refresh, super::group::view::NO_MODES, 18.0)
+            super::group::view::off(Icon::Refresh, super::group::view::REPEAT_OFF, 18.0)
         } else {
             bar_mode(
                 Icon::Refresh,
@@ -208,6 +208,11 @@ fn queue_pane<'a>(state: &'a State, ctx: &Ctx<'a>) -> El<'a, Message> {
     .spacing(12)
     .align_y(Alignment::Center);
     head = head.push(space().width(Length::Fill));
+    // Clear: everything after the song playing ("Up next cleared", with Undo); not for another
+    // device's queue
+    if linked.is_none() && rows.len() > idx + 1 {
+        head = head.push(widgets::btn_sm("Clear", Btn::Ghost, Some(Message::ClearUpNext)));
+    }
     if linked.is_none() {
         head = head.push(
             iced::widget::tooltip(toggler(state.autoplay(ctx))

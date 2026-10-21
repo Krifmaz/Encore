@@ -161,9 +161,9 @@ pub(super) fn render_full() {
         icon("more"));
     let on_name = link.as_ref().map(|l| format!(" on {}", esc(&l.name))).unwrap_or_default();
     let shuffle = format!(r#"<button class="btn ghost icon {}" id="f-shuffle" title="{}" aria-label="Shuffle" aria-pressed="{shuffle_on}"{}>{}</button>"#,
-        if shuffle_on { "on" } else { "" }, mode_title(if shuffle_on { "Shuffle: on" } else { "Shuffle: off" }), mode_attr(), icon("shuffle"));
+        if shuffle_on { "on" } else { "" }, shuffle_tip(if shuffle_on { "Shuffle: on" } else { "Shuffle: off" }), shuffle_attr(), icon("shuffle"));
     let repeat_btn = format!(r#"<button class="btn ghost icon {}" id="f-repeat" title="{}" aria-label="Repeat" aria-pressed="{}"{}>{}{}</button>"#,
-        if repeat != "off" { "on" } else { "" }, mode_title(repeat_title(&repeat)), repeat != "off", mode_attr(), icon("refresh"), if repeat == "one" { "<sup>1</sup>" } else { "" });
+        if repeat != "off" { "on" } else { "" }, repeat_tip(repeat_title(&repeat)), repeat != "off", repeat_attr(), icon("refresh"), if repeat == "one" { "<sup>1</sup>" } else { "" });
     let auto = if link.is_some() { String::new() } else if group { queue_note() } else { format!(r#"<label class="row small muted" style="gap:6px" title="When the queue ends, keep playing a shuffle of the whole library"><input type="checkbox" id="f-auto" {}> Then shuffle library</label>"#, if autoplay { "checked" } else { "" }) };
     let html = format!(r##"
     <div class="np-backdrop"></div>
@@ -205,7 +205,7 @@ pub(super) fn render_full() {
       <div class="np-back"><button type="button" class="btn sm" id="f-back">Back to the cover</button></div>
       <section class="np-queue">
         <div class="row between"><h3>Up next{on_name}</h3>
-          {auto}</div>
+          <div class="row wrap np-q-acts">{q_btns}{auto}</div></div>
         <div class="np-list">{list}</div>
       </section>
     </div>"##,
@@ -214,7 +214,7 @@ pub(super) fn render_full() {
         mini_art = crate::ui::art_sized(&cover(&t), &album_or_title(&t), "", 200), mini_artist = esc(&crate::ui::tr_inline(&t, "artist")),
         shuffle = shuffle, prev = icon("prev"), pp = PP, next = icon("next"), repeat = repeat_btn,
         volume_ic = icon_attr("volume", r#"width="18""#), vol = volume,
-        on_name = on_name, auto = auto,
+        on_name = on_name, auto = auto, q_btns = queue_buttons(link.is_some(), up_next.len()),
         pill = if link.is_none() { pill_html("f-group") } else { String::new() }, paused = paused_html("f-catchup"), ctl = ctl_attr(), ctl_title = ctl_attr().replace(" disabled", ""));
     let drawn = draw(View::Full, &f, "#f-toggle, #f-mini-toggle", &html, &if playing { icon("pause") } else { icon("play") });
     show_paused(&f, "f-catchup");
@@ -242,6 +242,8 @@ pub(super) fn render_full() {
     wire(&mut ls, &f, "#f-shuffle", "click", move |_| set_shuffle(!shuffle_on));
     { let r = repeat.clone(); wire(&mut ls, &f, "#f-repeat", "click", move |_| set_repeat(next_repeat(&r))); }
     wire(&mut ls, &f, "#f-lyrics", "click", |_| set_pane(if st(|s| s.pane == "lyrics") { "now" } else { "lyrics" }));
+    wire(&mut ls, &f, "#f-q-clear", "click", |_| clear_up_next());
+    wire(&mut ls, &f, "#f-q-shuffle", "click", |_| { g_shuffle(); });
     wire(&mut ls, &f, "#f-auto", "change", |e| {
         let on = dom::target_el(e).map(|c| dom::checked(&c)).unwrap_or(false);
         let mut p = prefs();

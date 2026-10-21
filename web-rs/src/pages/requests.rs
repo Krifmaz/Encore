@@ -75,6 +75,11 @@ pub fn render(view: Element, ctx: Ctx) -> PageFuture {
             let (mine, reload) = (mine.clone(), reload.clone());
             dom::on(&btn, "click", move |_| common::download_all_now(mine.get(), reload.clone()));
         }
+        // Clear waiting: admins everyone's (unless Only mine), members their own
+        if let Some(btn) = dom::qs_in(&view, "#clear-waiting") {
+            let (mine, reload) = (mine.clone(), reload.clone());
+            dom::on(&btn, "click", move |_| common::clear_waiting(mine.get(), reload.clone()));
+        }
         // members have the button too (their own failed requests): it was only wired for admins
         if let Some(btn) = dom::qs_in(&view, "#retry-failed") {
             let (mine, reload) = (mine.clone(), reload.clone());
@@ -96,18 +101,22 @@ pub fn render(view: Element, ctx: Ctx) -> PageFuture {
     })
 }
 
-/// The buttons over the list: admins get Only mine, Retry failed, Download all now and Clear finished; members who
-/// may fix their downloads Retry failed (the others would only be told "Ask an admin to retry").
+/// The buttons over the list: admins get Only mine, Retry failed, Download all now, Clear finished and Clear waiting;
+/// members Clear waiting (their own), and Retry failed when they may fix their downloads (the others would only be
+/// told "Ask an admin to retry").
 fn header_controls(admin: bool, may_fix: bool) -> String {
+    let waiting = format!(r#"<button class="btn sm" id="clear-waiting" title="Cancel every request that is still waiting">{}Clear waiting</button>"#, icon("x"));
     if admin {
         format!(r#"<label class="switch"><input type="checkbox" id="mine"><i></i>Only mine</label>
           <button class="btn sm" id="retry-failed" title="Queue every failed request again">{}Retry failed</button>
           <button class="btn sm" id="download-all-now" title="{}">{}Download all now</button>
-          <button class="btn sm" id="clear">{}Clear finished</button>"#, icon("refresh"), common::DOWNLOAD_ALL_NOW_TITLE, icon("download"), icon("trash"))
+          <button class="btn sm" id="clear">{}Clear finished</button>
+          {waiting}"#, icon("refresh"), common::DOWNLOAD_ALL_NOW_TITLE, icon("download"), icon("trash"))
     } else if may_fix {
-        format!(r#"<button class="btn sm" id="retry-failed" title="Queue every failed request again">{}Retry failed</button>"#, icon("refresh"))
+        format!(r#"<button class="btn sm" id="retry-failed" title="Queue every failed request again">{}Retry failed</button>
+          {waiting}"#, icon("refresh"))
     } else {
-        String::new()
+        waiting
     }
 }
 
@@ -150,6 +159,22 @@ mod tests {
         assert!(admin.find("retry-failed").unwrap() < admin.find("download-all-now").unwrap(), "beside Retry failed: {admin}");
         assert!(!header_controls(false, true).contains("download-all-now"));
         assert!(header_controls(false, true).contains("retry-failed"));
-        assert_eq!(header_controls(false, false), "");
+        assert!(!header_controls(false, false).contains("retry-failed"));
+    }
+
+    /// Clear waiting: next to Clear finished for admins, and there for every member (their own requests).
+    #[test]
+    fn clear_waiting_is_next_to_clear_finished_and_for_everyone() {
+        let admin = header_controls(true, true);
+        let (finished, waiting) = (admin.find(r#"id="clear""#).unwrap(), admin.find(r#"id="clear-waiting""#).unwrap());
+        assert!(finished < waiting && admin[finished..waiting].matches("<button").count() == 1, "right after Clear finished: {admin}");
+        for member in [header_controls(false, true), header_controls(false, false)] {
+            assert!(member.contains("Clear waiting</button>") && !member.contains("Clear finished"), "{member}");
+        }
+        assert_eq!(crate::pages::common::waiting_question(612), "Cancel 612 waiting requests? Downloads and imports already running keep going.");
+        assert_eq!(crate::pages::common::waiting_question(1), "Cancel 1 waiting request? Downloads and imports already running keep going.");
+        assert_eq!(crate::pages::common::waiting_done(612), "Cancelled 612 waiting requests");
+        assert_eq!(crate::pages::common::waiting_done(1), "Cancelled 1 waiting request");
+        assert_eq!(crate::pages::common::waiting_done(0), "Nothing is waiting");
     }
 }

@@ -11,15 +11,22 @@
 //! - play / pause, next, previous, seek and Up next go to the group when this device may control
 //!   it, else the control is off with the reason ("Only Alex controls playback"); a pause by a
 //!   member who may not control pauses only this computer ("Paused here · Catch up");
-//! - shuffle, repeat and the library shuffle after the queue are off; linking to another device
-//!   is off ("Leave the group listen to control another device");
-//! - the desktop seeks only (Cadenza has no rate control) and has no crossfade (gapless stays).
+//! - repeat and the library shuffle after the queue are off; Shuffle shuffles the group's Up next
+//!   once (those who control it), and a page's Shuffle plays the songs in a random order the
+//!   server makes, the same for everyone; linking to another device is off ("Leave the group
+//!   listen to control another device");
+//! - every song plays through the relay (`relay.rs`): small drift is closed with crossfaded
+//!   slices of samples (Cadenza has no rate control), a large one with a seek spliced in while the
+//!   music plays on; no crossfade between songs (gapless stays).
 //!
 //! Accounts only: guests join through the web page. A server without group listens (before 0.31,
 //! or turned off) answers 404 / 403: every entry hides, with no error shown.
 
+pub mod clock;
 pub mod events;
 pub mod model;
+pub mod relay;
+pub mod slice;
 pub mod sync;
 pub mod view;
 
@@ -49,6 +56,9 @@ enum Pend {
     Play { ids: Vec<Option<i64>>, index: usize, position: f64 },
     /// Add to queue (`next` false) or Play next.
     Queue { ids: Vec<Option<i64>>, next: bool },
+    /// A page's Shuffle: the songs in a random order the server makes (the group's queue for
+    /// those who control it, else added to its Up next).
+    Shuffle { ids: Vec<Option<i64>> },
 }
 
 /// Whether this computer is in a group listen.
@@ -75,6 +85,16 @@ pub fn forward_play(tracks: &[Track], index: usize, position: f64) -> bool {
         index,
         position,
     });
+    true
+}
+
+/// A page's Shuffle while in a group (see [`Pend::Shuffle`]). False when this computer is in no
+/// group.
+pub fn forward_shuffle(tracks: &[Track]) -> bool {
+    if !active() {
+        return false;
+    }
+    PENDING.lock().unwrap_or_else(|e| e.into_inner()).push(Pend::Shuffle { ids: ids_of(tracks) });
     true
 }
 
@@ -115,24 +135,22 @@ pub fn wall_ms() -> i64 {
         .unwrap_or(0)
 }
 
-/// The clock is measured again this often while in a group (§5.6).
-const CLOCK_EVERY_MS: i64 = 600_000;
 /// A server without group listens is asked again after this long.
 const NO_GROUPS_ASK_MS: i64 = 600_000;
 
-/// A measurement of the server's clock: the offset (server − [`mono_ms`]) and the server
-/// process's id.
+/// Round trips to the server's clock: (sent, the server's `now_ms`, received) each, local times
+/// in [`mono_ms`], and the server process's id. `clock.rs` makes the offset of them.
 #[derive(Clone, Debug, Default)]
-pub struct Clock {
-    pub offset: Option<i64>,
+pub struct Measured {
+    pub samples: Vec<clock::Sample>,
     pub boot: String,
 }
 
-/// Three round trips to `GET /api/time`; the one with the smallest round trip sets the offset.
-async fn measure_clock(api: &Api) -> Clock {
+/// `n` round trips to `GET /api/time` (8 at join, 3 for a refresh, see `clock.rs`).
+async fn measure_clock(api: &Api, n: usize) -> Measured {
     let mut samples = Vec::new();
     let mut boot = String::new();
-    for _ in 0..3 {
+    for _ in 0..n {
         let sent = mono_ms();
         match api.get("/time").await {
             Ok(v) => {
@@ -146,10 +164,7 @@ async fn measure_clock(api: &Api) -> Clock {
             Err(_) => {}
         }
     }
-    Clock {
-        offset: model::clock_offset(&samples),
-        boot,
-    }
+    Measured { samples, boot }
 }
 
 // ----- state -----------------------------------------------------------------------------
@@ -166,6 +181,8 @@ pub enum Dialog {
     Invite { code: String, summary: Option<Box<Summary>> },
     /// "End the group listen?".
     ConfirmEnd,
+    /// "Clear the group's Up next?".
+    ConfirmClear,
 }
 
 /// How a group became this computer's.
@@ -211,7 +228,8 @@ pub struct Group {
     /// The host's "Limit to N people" while it is being changed (sent once the presses stop).
     pub limit: Option<u32>,
     limit_seq: u64,
-    offset: Option<i64>,
+    /// The server's clock as measured (`clock.rs`), and when it was last measured.
+    clock: clock::Clock,
     clock_at: i64,
     boot: String,
     /// The event stream (None outside a group); a new epoch opens a new one.
@@ -225,6 +243,18 @@ pub struct Group {
     pub mem: sync::Mem,
     /// "Only Alex controls playback" (the tooltips of the controls that are off borrow it).
     pub deny: String,
+    /// The group song playing here and how much of it has played (the relay's songs are counted
+    /// here: the engine counts a live stream's plays only after four minutes).
+    plays: Plays,
+}
+
+/// A group song's play: its relay id, the seconds heard, the position last seen, reported yet.
+#[derive(Debug, Default)]
+struct Plays {
+    live: String,
+    heard: f64,
+    last: f64,
+    reported: bool,
 }
 
 impl Group {
@@ -235,7 +265,7 @@ impl Group {
 
     /// The server's clock now (Unix ms).
     pub fn server_now(&self) -> i64 {
-        match self.offset {
+        match self.clock.offset {
             Some(o) => mono_ms() + o,
             None => wall_ms(),
         }
@@ -269,7 +299,7 @@ pub enum Msg {
     JoinCode(String),
     /// Join an "anyone" group from the list (or open it when this computer is in it).
     JoinId(String),
-    Adopted(How, Clock, Result<Value, ApiError>),
+    Adopted(How, Measured, Result<Value, ApiError>),
     Leave,
     AskEnd,
     End,
@@ -278,6 +308,9 @@ pub enum Msg {
     Patch(Value),
     /// A state answer (a command, the host's settings, a removal).
     Answer(Result<Value, ApiError>),
+    /// The answer to a member's Shuffle of a list (added to the group's Up next): said once the
+    /// group took the songs.
+    Shuffled(Result<Value, ApiError>),
     LimitDown,
     LimitUp,
     LimitSend(u64),
@@ -290,12 +323,18 @@ pub enum Msg {
     Jump(usize),
     RemoveEntry(usize),
     MoveUp(usize),
+    /// Up next's Shuffle: the group's Up next in a random order, once (the server's).
+    Shuffle,
+    /// Up next's Clear: asked first ("Clear the group's Up next?"), then everything after the
+    /// song playing goes.
+    AskClear,
+    Clear,
     Event(events::Ev),
     Rejoined(Rejoin),
     /// Open the event stream again.
     Reopen,
     List(String, Result<Value, ApiError>),
-    Clocked(Clock),
+    Clocked(Measured),
     /// Twice a second while in a group: the engine follows, plays go out.
     Tick,
     /// Send the plays asked for since the last look.
@@ -354,6 +393,11 @@ fn none_here(e: &ApiError) -> bool {
 }
 
 fn command(gr: &Group, ctx: &Ctx, op: &str, fields: Value) -> Task<Message> {
+    send(gr, ctx, op, fields, Msg::Answer)
+}
+
+/// [`command`] with the answer as `done`'s message.
+fn send(gr: &Group, ctx: &Ctx, op: &str, fields: Value, done: fn(Result<Value, ApiError>) -> Msg) -> Task<Message> {
     let Some(s) = gr.state.as_ref() else {
         return Task::none();
     };
@@ -366,7 +410,7 @@ fn command(gr: &Group, ctx: &Ctx, op: &str, fields: Value) -> Task<Message> {
     let b = body(ctx, extra);
     let p = path(&s.id, "/command");
     let api = ctx.api.clone();
-    Task::perform(async move { api.post(&p, b).await }, |r| g(Msg::Answer(r)))
+    Task::perform(async move { api.post(&p, b).await }, move |r| g(done(r)))
 }
 
 /// The key of the event stream for the group (a new `epoch` opens a new stream).
@@ -384,10 +428,11 @@ fn stream_key(gr: &mut Group, ctx: &Ctx) {
 // ----- in and out ------------------------------------------------------------------------
 
 /// Now in `s`: its event stream opens and the engine follows it.
-fn adopt(st: &mut State, s: GroupState, how: How, clock: Clock, ctx: &mut Ctx) -> Task<Message> {
+fn adopt(st: &mut State, s: GroupState, how: How, clock: Measured, ctx: &mut Ctx) -> Task<Message> {
     let gr = &mut st.group;
-    if clock.offset.is_some() {
-        gr.offset = clock.offset;
+    let measured = clock::Clock::join(&clock.samples);
+    if measured.offset.is_some() {
+        gr.clock = measured;
         gr.clock_at = mono_ms();
     }
     gr.boot = if s.boot.is_empty() { clock.boot } else { s.boot.clone() };
@@ -462,12 +507,14 @@ fn stop(st: &mut State, words: Option<String>, ctx: &mut Ctx) -> Task<Message> {
     gr.rejoining = false;
     gr.limit = None;
     gr.mem.reset();
-    if matches!(gr.dialog, Some(Dialog::Sheet | Dialog::ConfirmEnd)) {
+    gr.plays = Plays::default();
+    if matches!(gr.dialog, Some(Dialog::Sheet | Dialog::ConfirmEnd | Dialog::ConfirmClear)) {
         gr.dialog = None;
     }
     if st.status.state == PlayState::Playing {
         engine::send(Command::Pause);
     }
+    end_relay();
     engine::set_shuffle(st.shuffle);
     if let Some(w) = words {
         ctx.toast(w);
@@ -481,6 +528,7 @@ pub fn sign_out(st: &mut State, server: &str) -> Option<(String, Value)> {
     let s = st.group.state.take()?;
     set_active(false);
     take_pending();
+    end_relay();
     st.group = Group::default();
     engine::set_shuffle(st.shuffle);
     Some((
@@ -491,6 +539,33 @@ pub fn sign_out(st: &mut State, server: &str) -> Option<(String, Value)> {
 
 // ----- following the group -----------------------------------------------------------------
 
+/// The relay of the group this computer is in: started with the first song it plays here,
+/// stopped when it leaves.
+static RELAY: Mutex<Option<Arc<relay::Relay>>> = Mutex::new(None);
+
+fn relay_now() -> Option<Arc<relay::Relay>> {
+    RELAY.lock().unwrap_or_else(|e| e.into_inner()).clone()
+}
+
+fn relay_for(e: &engine::Engine) -> Arc<relay::Relay> {
+    RELAY
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .get_or_insert_with(|| Arc::new(relay::Relay::start(e.clone())))
+        .clone()
+}
+
+/// Out of the group: the engine's queue gets its real songs back (paused) and the relay stops.
+fn end_relay() {
+    let Some(r) = RELAY.lock().unwrap_or_else(|e| e.into_inner()).take() else {
+        return;
+    };
+    match engine::engine() {
+        Some(e) => r.leave(&e, &e.status()),
+        None => r.stop(),
+    }
+}
+
 /// The engine follows the group's queue, song, position and play / pause.
 fn follow(st: &mut State, ctx: &mut Ctx) {
     let Some(s) = st.group.state.as_ref() else {
@@ -499,71 +574,144 @@ fn follow(st: &mut State, ctx: &mut Ctx) {
     let exp = model::expected(s, st.group.server_now());
     let w = sync::Want {
         ids: s.queue.iter().map(|e| e.id).collect(),
+        durs: s.queue.iter().map(|e| e.duration()).collect(),
         qid: exp.map(|(i, _)| s.queue[i].qid.clone()).unwrap_or_default(),
         index: exp.map(|(i, _)| i).unwrap_or(0),
         position: exp.map(|(_, p)| p).unwrap_or(0.0),
         group_playing: s.playing,
         play: s.playing && !st.group.local_paused,
+        server_made: !engine::tracks::current_query().is_empty(),
     };
     let status = &st.status;
     let playing = status.state == PlayState::Playing;
-    let ran = if playing { (mono_ms() - st.group.status_at).max(0) as f64 / 1000.0 } else { 0.0 };
+    // the position runs on from the last status while playing; a status too old to say where
+    // the engine is (it publishes twice a second) measures no drift rather than a guessed one
+    let age = (mono_ms() - st.group.status_at).max(0);
+    let relay = relay_now();
     let l = sync::Local {
-        ids: status.queue.iter().map(super::queue::lib_id).collect(),
+        // only the relay's entries count as the group's: anything else is loaded again
+        ids: status
+            .queue
+            .iter()
+            .map(|t| relay::live_of(t).and(super::queue::lib_id(t)))
+            .collect(),
         index: status.index,
         state: status.state,
-        position: status.position + ran.min(1.0),
-        server_made: status.track.as_ref().is_some_and(server_made),
+        position: status.position + if playing { age as f64 / 1000.0 } else { 0.0 },
+        fresh: !playing || age <= sync::STALE_MS,
+        server_made: match status.track.as_ref() {
+            Some(t) if relay::live_of(t).is_some() => relay.as_ref().is_some_and(|r| r.server_made()),
+            Some(t) => relay::server_made(t),
+            None => false,
+        },
+        busy: relay.as_ref().is_some_and(|r| r.busy()),
     };
     let acts = sync::decide(&w, &l, &mut st.group.mem, mono_ms());
     if acts.is_empty() {
         return;
     }
     let s = st.group.state.as_ref().expect("checked above");
-    log::info!(
-        "group listen: following the group (entry {}, {:.1} s, {}): {acts:?}",
-        w.index,
-        w.position,
-        if w.play { "playing" } else { "paused" }
-    );
-    if let Err(e) = run(&acts, s, ctx) {
+    // corrections with slices go by twice a second: only the rest is worth a line
+    if acts.iter().any(|a| !matches!(a, sync::Act::Nudge(_))) {
+        log::info!(
+            "group listen: following the group (entry {}, {:.1} s, {}): {acts:?}",
+            w.index,
+            w.position,
+            if w.play { "playing" } else { "paused" }
+        );
+    }
+    if let Err(e) = run(&acts, s, &st.status, ctx) {
         ctx.toast_err(e);
     }
 }
 
-/// A stream the server makes (a transcode, Data saver, the server's Cadenza): it has a query.
-fn server_made(t: &Track) -> bool {
-    matches!(&t.source, cadenza::decode::Source::Url { url, .. } if url.contains("/stream?"))
-}
-
-/// The group's entries as engine queue entries, with this server's credential.
-fn tracks(s: &GroupState, ctx: &Ctx, at: impl Iterator<Item = usize>) -> Vec<Track> {
+/// The group's entries as engine queue entries (the relay's streams), with this server's
+/// credential; the relay learns the real songs behind them.
+fn tracks(s: &GroupState, ctx: &Ctx, r: &relay::Relay, at: impl Iterator<Item = usize>) -> Vec<Track> {
     let auth = crate::link::auth(ctx.config, &ctx.api);
-    let rows: Vec<Value> = at.filter_map(|i| s.queue.get(i).map(|e| e.row.clone())).collect();
-    engine::tracks::many(&ctx.base(), &auth, &rows)
+    let base = ctx.base();
+    let mut out = Vec::new();
+    let mut real = Vec::new();
+    for e in at.filter_map(|i| s.queue.get(i)) {
+        if let Some(t) = engine::tracks::from_encore(&base, &auth, &e.row) {
+            out.push(relay::live_track(&t, &e.qid));
+            real.push((relay::live_id(&e.qid), t));
+        }
+    }
+    r.add(real);
+    out
 }
 
-/// Turn what `sync` decided into engine commands (the engine itself, never `engine::play`, which
-/// would send the list to the group).
-fn run(acts: &[sync::Act], s: &GroupState, ctx: &Ctx) -> Result<(), String> {
+/// Turn what `sync` decided into engine and relay commands (the engine itself, never
+/// `engine::play`, which would send the list to the group).
+fn run(acts: &[sync::Act], s: &GroupState, status: &engine::Status, ctx: &Ctx) -> Result<(), String> {
+    use sync::Act;
     let e = engine::start()?;
+    let r = relay_for(&e);
     for a in acts {
         match a {
-            sync::Act::Enqueue(at) => e.send(Command::Enqueue(tracks(s, ctx, at.iter().copied()))),
-            sync::Act::Remove(k) => e.send(Command::Remove(*k)),
-            sync::Act::Full { from, position, play } => {
-                e.play_queue(tracks(s, ctx, *from..s.queue.len()), 0, *position);
-                if !play {
-                    e.send(Command::Pause);
+            Act::Enqueue(at) => e.send(Command::Enqueue(tracks(s, ctx, &r, at.iter().copied()))),
+            Act::Remove(k) => e.send(Command::Remove(*k)),
+            Act::Full { from, aim, play } => {
+                let list = tracks(s, ctx, &r, *from..s.queue.len());
+                if let Some(live) = list.first().and_then(relay::live_of).map(str::to_string) {
+                    r.load(live, *aim, relay::Then::Queue { tracks: list, play: *play });
                 }
             }
-            sync::Act::PlayIndex(i) => e.send(Command::PlayIndex(*i)),
-            sync::Act::Seek(v) => e.send(Command::Seek(v.max(0.0))),
-            sync::Act::Play => e.send(Command::Play),
-            sync::Act::Pause => e.send(Command::Pause),
+            Act::PlayAt { local, aim, play } => {
+                if let Some(live) = status.queue.get(*local).and_then(relay::live_of) {
+                    r.load(live.to_string(), *aim, relay::Then::Index { index: *local, play: *play });
+                }
+            }
+            Act::Seek { aim, play } => {
+                let live = status.track.as_ref().and_then(relay::live_of).map(str::to_string);
+                r.seek(live, status.index.unwrap_or(0), *aim, *play);
+            }
+            Act::Nudge(d) => r.correct(*d),
+            Act::Play => e.send(Command::Play),
+            Act::Pause => e.send(Command::Pause),
         }
     }
     Ok(())
+}
+
+/// A group song played here: counted like the web player (half the song or four minutes) and
+/// reported once. The engine counts a live stream only after four minutes and the device link
+/// reports no live stream, so the relay's songs are counted here.
+pub fn count_play(st: &mut State, ctx: &Ctx) -> Task<Message> {
+    let Some(t) = st.status.track.as_ref() else {
+        return Task::none();
+    };
+    let Some(live) = relay::live_of(t) else {
+        return Task::none();
+    };
+    let pos = st.status.position;
+    let p = &mut st.group.plays;
+    if p.live != live {
+        *p = Plays { live: live.to_string(), heard: 0.0, last: pos, reported: false };
+        return Task::none();
+    }
+    if st.status.state == PlayState::Playing {
+        let d = pos - p.last;
+        if d > 0.0 && d < 2.0 {
+            p.heard += d;
+        }
+    }
+    p.last = pos;
+    let need = match t.duration {
+        Some(d) if d > 0.0 => (d / 2.0).min(240.0),
+        _ => 240.0,
+    };
+    let Some(id) = engine::tracks::encore_id(t).filter(|_| !p.reported && p.heard >= need) else {
+        return Task::none();
+    };
+    p.reported = true;
+    let seconds = p.heard;
+    let api = ctx.api.clone();
+    Task::perform(
+        async move { api.post("/library/plays", json!({ "track_id": id, "seconds": seconds })).await },
+        |_| g(Msg::Nothing),
+    )
 }
 
 /// The engine's status changed: note when (its position runs on from there), and an engine pause
@@ -575,17 +723,22 @@ pub fn on_status(st: &mut State, prev: &engine::Status) {
     let Some(s) = gr.state.as_ref() else {
         return;
     };
+    let relay_paused = relay_now().is_some_and(|r| mono_ms() - r.paused_at() < 2000);
     if s.playing
         && !gr.local_paused
         && prev.state == PlayState::Playing
         && st.status.state == PlayState::Paused
         && !gr.mem.paused_by_us(mono_ms())
+        && !relay_paused
     {
         gr.local_paused = true;
     }
 }
 
 // ----- the player's controls in a group --------------------------------------------------------
+
+/// What a member who may not control the group hears after a page's Shuffle.
+pub const SHUFFLED_IN: &str = "Added to the group's Up next, shuffled";
 
 /// Play / pause: the group's when this device may control it; else a pause here only.
 pub fn toggle(st: &mut State, ctx: &mut Ctx) -> Task<Message> {
@@ -631,9 +784,9 @@ pub fn seek(st: &mut State, position: f64, ctx: &mut Ctx) -> Task<Message> {
     command(&st.group, ctx, "seek", json!({ "position": position.max(0.0) }))
 }
 
-/// Shuffle and repeat are off in a group.
-pub fn no_modes(ctx: &mut Ctx) {
-    ctx.toast("Shuffle and repeat are off during a group listen");
+/// Repeat is off in a group.
+pub fn no_repeat(ctx: &mut Ctx) {
+    ctx.toast(view::REPEAT_OFF);
 }
 
 /// Linking to another device (and Play here, Send my music there) is off in a group.
@@ -661,8 +814,8 @@ pub fn on_tick(st: &mut State, ticks: u64, ctx: &mut Ctx) -> Task<Message> {
             async move {
                 let r = api.get(&p).await;
                 let clock = match &r {
-                    Ok(v) if v.is_object() => measure_clock(&api).await,
-                    _ => Clock::default(),
+                    Ok(v) if v.is_object() => measure_clock(&api, clock::JOIN_SAMPLES).await,
+                    _ => Measured::default(),
                 };
                 (clock, r)
             },
@@ -738,7 +891,7 @@ pub fn update(st: &mut State, msg: Msg, ctx: &mut Ctx) -> Task<Message> {
             let api = ctx.api.clone();
             return Task::perform(
                 async move {
-                    let c = measure_clock(&api).await;
+                    let c = measure_clock(&api, clock::JOIN_SAMPLES).await;
                     (c, api.post("/group", b).await)
                 },
                 |(c, r)| g(Msg::Adopted(How::Start, c, r)),
@@ -880,6 +1033,14 @@ pub fn update(st: &mut State, msg: Msg, ctx: &mut Ctx) -> Task<Message> {
                 follow(st, ctx);
             }
         },
+        Msg::Shuffled(r) => {
+            let took = r.is_ok();
+            let t = update(st, Msg::Answer(r), ctx);
+            if took {
+                ctx.toast_ok(SHUFFLED_IN);
+            }
+            return t;
+        }
         Msg::LimitDown | Msg::LimitUp => {
             let Some(s) = st.group.state.as_ref() else {
                 return Task::none();
@@ -952,6 +1113,27 @@ pub fn update(st: &mut State, msg: Msg, ctx: &mut Ctx) -> Task<Message> {
                 _ => Task::none(),
             };
         }
+        Msg::Shuffle => {
+            if st.group.denied() {
+                ctx.toast(st.group.deny.clone());
+                return Task::none();
+            }
+            return command(&st.group, ctx, "shuffle", json!({}));
+        }
+        Msg::AskClear => {
+            if st.group.denied() {
+                ctx.toast(st.group.deny.clone());
+                return Task::none();
+            }
+            st.group.dialog = Some(Dialog::ConfirmClear);
+        }
+        Msg::Clear => {
+            st.group.dialog = None;
+            if st.group.denied() {
+                return Task::none();
+            }
+            return command(&st.group, ctx, "clear", json!({}));
+        }
         Msg::Event(ev) => return on_event(st, ev, ctx),
         Msg::Rejoined(r) => {
             st.group.rejoining = false;
@@ -1000,23 +1182,21 @@ pub fn update(st: &mut State, msg: Msg, ctx: &mut Ctx) -> Task<Message> {
                 Err(_) => {}
             }
         }
-        Msg::Clocked(c) => {
-            if c.offset.is_some() {
-                st.group.offset = c.offset;
-                st.group.clock_at = mono_ms();
-            }
-        }
+        Msg::Clocked(m) => st.group.clock.refresh(&m.samples),
         Msg::Tick => {
             if st.group.state.is_none() {
                 return Task::none();
             }
             let mut tasks = vec![update(st, Msg::Flush, ctx)];
             follow(st, ctx);
-            // the clock is measured again every 10 minutes while in a group
-            if mono_ms() - st.group.clock_at >= CLOCK_EVERY_MS {
+            // the clock is measured again every minute while in a group (and blended in)
+            if mono_ms() - st.group.clock_at >= clock::REFRESH_EVERY_MS {
                 st.group.clock_at = mono_ms();
                 let api = ctx.api.clone();
-                tasks.push(Task::perform(async move { measure_clock(&api).await }, |c| g(Msg::Clocked(c))));
+                tasks.push(Task::perform(
+                    async move { measure_clock(&api, clock::REFRESH_SAMPLES).await },
+                    |c| g(Msg::Clocked(c)),
+                ));
             }
             return Task::batch(tasks);
         }
@@ -1049,6 +1229,26 @@ pub fn update(st: &mut State, msg: Msg, ctx: &mut Ctx) -> Task<Message> {
                         }
                         tasks.push(command(&st.group, ctx, if next { "play_next" } else { "enqueue" }, json!({ "tracks": lib })));
                     }
+                    Pend::Shuffle { ids } => {
+                        // shuffled here too, and a long list sends 1000 songs picked from all of it
+                        let win = model::pick_shuffled(&ids, 1000, &mut super::queue::Rng::new());
+                        if win.is_empty() {
+                            ctx.toast_err("Only songs from your library can be played in a group listen");
+                            continue;
+                        }
+                        // the server shuffles, the same order for everyone: the group's queue for
+                        // those who control it, else added to its Up next (said once it took them)
+                        if st.group.denied() {
+                            tasks.push(send(&st.group, ctx, "enqueue", json!({ "tracks": win, "shuffle": true }), Msg::Shuffled));
+                        } else {
+                            tasks.push(command(
+                                &st.group,
+                                ctx,
+                                "set_queue",
+                                json!({ "tracks": win, "index": 0, "position": 0.0, "shuffle": true }),
+                            ));
+                        }
+                    }
                 }
             }
             return Task::batch(tasks);
@@ -1074,7 +1274,7 @@ fn join(st: &mut State, ctx: &mut Ctx, p: String, extra: Value) -> Task<Message>
     let api = ctx.api.clone();
     tasks.push(Task::perform(
         async move {
-            let c = measure_clock(&api).await;
+            let c = measure_clock(&api, clock::JOIN_SAMPLES).await;
             (c, api.post(&p, b).await)
         },
         |(c, r)| g(Msg::Adopted(How::Join, c, r)),
@@ -1190,11 +1390,11 @@ mod tests {
     #[test]
     fn a_stream_the_server_makes_is_told_by_its_query() {
         let mut t = track(3);
-        assert!(!server_made(&t));
+        assert!(!relay::server_made(&t));
         t.source = cadenza::decode::Source::Url {
             url: "http://s/api/library/tracks/3/stream?q=aac&kbps=96".into(),
             headers: vec![],
         };
-        assert!(server_made(&t));
+        assert!(relay::server_made(&t));
     }
 }

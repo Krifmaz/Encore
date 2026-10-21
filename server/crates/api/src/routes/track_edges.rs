@@ -48,7 +48,8 @@ pub async fn edges(State(st): State<AppState>, User(_): User, Path(id): Path<i64
 
 /// Run silencedetect over the whole file: (start_s, end_s), or None when ffmpeg is missing or fails.
 pub async fn analyse(path: &str, duration: f64) -> Option<(f64, f64)> {
-    let out = tokio::time::timeout(Duration::from_secs(120), encore_media::Ffmpeg::new()
+    // worked out ahead of the song, never what plays: ffmpeg at idle priority, like every background run
+    let out = tokio::time::timeout(Duration::from_secs(120), encore_media::Ffmpeg::new().low_priority()
         .args(["-hide_banner", "-nostdin", "-v", "info", "-i"]).arg(path)
         .args(["-vn", "-af", &format!("silencedetect=noise={SILENCE_DB}dB:d={MIN_SILENCE_S}"), "-f", "null", "-"])
         .output()).await.ok()?.ok()?;
