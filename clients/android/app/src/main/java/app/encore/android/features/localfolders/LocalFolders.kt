@@ -99,8 +99,9 @@ class LocalFolders private constructor(private val app: Context) {
     val folders: List<String> get() = _state.value.folders
     val songs: List<LocalSong> get() = _state.value.songs
 
-    /** Changes with every scan and match (screens collect it). */
-    val changes: StateFlow<*> get() = _state.asStateFlow()
+    private val _changes = MutableStateFlow(0L)
+    /** Grows with every scan, match and folder change (screens collect it). */
+    val changes: StateFlow<Long> = _changes.asStateFlow()
 
     fun matches(server: String): Map<String, JsonObject> = _state.value.matches[server] ?: emptyMap()
 
@@ -141,8 +142,10 @@ class LocalFolders private constructor(private val app: Context) {
 
     /** Scan every folder again; a file's tags are read again only when its size or time changed. Blocking. */
     fun scan() {
-        if (_scanning.value) return
-        _scanning.value = true
+        synchronized(lock) {
+            if (_scanning.value) return
+            _scanning.value = true
+        }
         try {
             val before = songs.associateBy { it.uri }
             val found = ArrayList<LocalSong>()
@@ -259,6 +262,7 @@ class LocalFolders private constructor(private val app: Context) {
             byId = null
             write(index)
             _state.value = index
+            _changes.value += 1
         }
     }
 

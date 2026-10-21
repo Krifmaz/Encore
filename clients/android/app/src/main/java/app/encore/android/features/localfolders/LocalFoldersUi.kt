@@ -95,6 +95,7 @@ fun LocalFoldersTab(nav: Nav) {
 
     val matches = remember(changes, server) { store.matches(server) }
     val songs = remember(changes) { store.songs }
+    val folders = remember(changes) { store.folders }
     val rest = remember(songs, matches) { songs.filter { it.uri !in matches } }
     val items: () -> List<MediaItem> = {
         songs.map { s -> matches[s.uri]?.let { Track.from(it) }?.let { MediaItems.track(api, it) } ?: MediaItems.local(s) }
@@ -116,11 +117,11 @@ fun LocalFoldersTab(nav: Nav) {
                         nav.player.playLocal(items(), shuffle = true)
                     }
                     SmallButton("Add folder", iconRes = R.drawable.ic_create_folder) { pick.launch(null) }
-                    SmallButton("Scan", iconRes = R.drawable.ic_refresh, enabled = store.folders.isNotEmpty() && !scanning) { rescan() }
+                    SmallButton("Scan", iconRes = R.drawable.ic_refresh, enabled = folders.isNotEmpty() && !scanning) { rescan() }
                 }
             }
         }
-        if (store.folders.isEmpty()) {
+        if (folders.isEmpty()) {
             item(key = "empty") {
                 EmptyState(
                     R.drawable.ic_folder,
@@ -129,7 +130,7 @@ fun LocalFoldersTab(nav: Nav) {
                 )
             }
         }
-        items(store.folders, key = { "folder:$it" }) { f ->
+        items(folders, key = { "folder:$it" }) { f ->
             Row(Modifier.fillMaxWidth().padding(start = Gutter, end = 4.dp), verticalAlignment = Alignment.CenterVertically) {
                 Icon(painterResource(R.drawable.ic_folder), contentDescription = null, tint = p.muted)
                 Text(
