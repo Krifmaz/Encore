@@ -25,8 +25,11 @@ object BugRules {
     /** … or one that would decode to more than this (MAX_PIXEL_BYTES; counted here as 4 bytes a pixel). */
     const val MAX_PIXEL_BYTES = 128L * 1024 * 1024
 
-    /** The three kinds, as the server stores them and as people read them. */
-    val KINDS: List<Pair<String, String>> = listOf("bug" to "Bug", "not_bug" to "Not a bug", "howto" to "How do I…")
+    /** The kinds a new report can pick, as the server stores them and as people read them. */
+    val PICK_KINDS: List<Pair<String, String>> = listOf("bug" to "Bug", "not_bug" to "Not a bug", "howto" to "How do I…")
+
+    /** Every kind (the list's chips): [PICK_KINDS] and the crash logs the app sends (This device → App crashes). */
+    val KINDS: List<Pair<String, String>> = PICK_KINDS + ("crash" to "Crash log")
 
     /** The five statuses: key, label, badge colour (the web's badge classes). */
     val STATUSES: List<Triple<String, String, String>> = listOf(
@@ -63,11 +66,16 @@ object BugRules {
     val TABS: List<Pair<String, String>> =
         listOf("all" to "All") + STATUSES.map { (k, l, _) -> k to if (k == "looking") "Looking" else l }
 
+    /** A sent crash log's title: "Crash log: " and the newest report's first line, on one line, at most 200 characters. */
+    fun crashTitle(summary: String): String =
+        ("Crash log: " + summary.lines().joinToString(" ") { it.trim() }.trim()).take(200)
+
     fun kindLabel(kind: String): String = KINDS.firstOrNull { it.first == kind }?.second ?: "Bug"
 
     fun kindBadge(kind: String): String = when (kind) {
         "bug" -> "err"
         "howto" -> "info"
+        "crash" -> "warn"
         else -> ""
     }
 
@@ -108,18 +116,15 @@ object BugRules {
         return if (p.isEmpty()) "" else "?" + p.joinToString("&")
     }
 
-    /** The query of GET /api/bug-reports/export for the list: its status and kind, as the web's Export link. */
-    fun exportQuery(f: Filter): String {
-        val p = params(f)
-        return if (p.isEmpty()) "" else "?" + p.joinToString("&")
-    }
+    /** The query of GET /api/bug-reports/export for the list: its status and kind, as the web's Export link; a plain text file. */
+    fun exportQuery(f: Filter): String = "?" + (params(f) + "format=txt").joinToString("&")
 
-    /** The query of GET /api/bug-reports/export for one report ("Export this report"). */
-    fun exportOneQuery(id: Long): String = "?ids=$id"
+    /** The query of GET /api/bug-reports/export for one report ("Export this report"); a plain text file. */
+    fun exportOneQuery(id: Long): String = "?ids=$id&format=txt"
 
-    /** The zip's name on the phone (built here, never taken from the server). */
+    /** The export's name on the phone (built here, never taken from the server). */
     fun exportName(day: String, id: Long? = null): String =
-        if (id != null) "encore-bug-report-$id-$day.zip" else "encore-bug-reports-$day.zip"
+        if (id != null) "encore-bug-report-$id-$day.txt" else "encore-bug-reports-$day.txt"
 
     // ---- the words the list and a report show ------------------------------------------------------------------
 

@@ -6,6 +6,7 @@
 //!                                              updated_at, message_count, file_count, unread}]}
 //! GET    /api/bug-reports/unread               → {count}
 //! GET    /api/bug-reports/export?status=&kind=&ids=  (admin) → application/zip (reports.md, reports.json, files/…)
+//!        …&format=txt → text/plain: the same reports as one plain text file (files listed by name)
 //! GET    /api/bug-reports/{id}                 → {report: {…, files: […]}, messages: [{…, files: […]}]}
 //! POST   /api/bug-reports/{id}/messages        multipart body, file… → {ok, id}
 //! POST   /api/bug-reports/{id}/status          {status} (admin) → {ok}
@@ -55,7 +56,8 @@ const MAX_USER_BYTES: i64 = 500 * 1024 * 1024;
 /// Files an export may hold: the zip is built in memory.
 const MAX_EXPORT_BYTES: i64 = 512 * 1024 * 1024;
 
-pub const KINDS: [&str; 3] = ["bug", "not_bug", "howto"];
+/// `crash`: a crash log the phone app sends (This device → App crashes), the Crash logs section of the list.
+pub const KINDS: [&str; 4] = ["bug", "not_bug", "howto", "crash"];
 pub const STATUSES: [&str; 5] = ["new", "looking", "fixed", "wontfix", "answered"];
 
 pub fn router() -> Router<AppState> {
@@ -123,6 +125,7 @@ pub fn kind_label(kind: &str) -> &'static str {
     match kind {
         "not_bug" => "Not a bug",
         "howto" => "How do I…",
+        "crash" => "Crash log",
         _ => "Bug",
     }
 }
@@ -391,6 +394,8 @@ pub struct ListQ {
     mine: String,
     /// export only: `1,2,3`
     ids: String,
+    /// export only: `txt` for one plain text file instead of the zip
+    format: String,
 }
 
 /// WHERE … for a list: the filters that are set, and the viewer's own reports unless an admin asks for all.
@@ -668,6 +673,49 @@ fn render_md(reports: &[Full], exported: &str) -> String {
     out
 }
 
+/// A text file (.txt, .log: a crash log) written into the `format=txt` export: at most this many bytes of each.
+const TXT_INLINE_MAX: usize = 1 << 20;
+
+/// The `format=txt` export: every report as plain text, its files and its thread's files listed by name, and the
+/// text files (a crash log) written in whole under the name.
+fn render_txt(reports: &[Full], exported: &str, base: &std::path::Path) -> String {
+    let rule = "=".repeat(72);
+    let names = |files: &[Row]| {
+        let mut out = files.iter().map(|f| f.s("name")).collect::<Vec<_>>().join(", ");
+        for f in files.iter().filter(|f| f.s("mime").starts_with("text/") && !f.s("path").is_empty()) {
+            let Ok(data) = std::fs::read(base.join(f.s("path"))) else { continue };
+            let text = String::from_utf8_lossy(&data[..data.len().min(TXT_INLINE_MAX)]).into_owned();
+            let more = if data.len() > TXT_INLINE_MAX { "\n… (cut)" } else { "" };
+            out.push_str(&format!("\n\n----- {} -----\n{}{more}\n----- end of {} -----", f.s("name"), text.trim_end(), f.s("name")));
+        }
+        out
+    };
+    let mut out = format!("Encore bug reports ({}, exported {exported})\n", crate::VERSION);
+    for full in reports {
+        let r = &full.report;
+        out.push_str(&format!("\n{rule}\n#{} [{}] {} - {}\n", r.i("id"), kind_label(&r.s("kind")), r.s("title"), status_label(&r.s("status"))));
+        out.push_str(&format!("By: {}\nCreated: {}\n", r.s("username"), when(r.f("created_at"))));
+        for (label, key) in [("Page", "page"), ("App", "app_version"), ("Device", "device")] {
+            let v = r.s(key);
+            if !v.trim().is_empty() {
+                out.push_str(&format!("{label}: {}\n", v.trim()));
+            }
+        }
+        out.push_str(&format!("{rule}\n\n{}\n", r.s("body").trim()));
+        if !full.files.is_empty() {
+            out.push_str(&format!("\nFiles: {}\n", names(&full.files)));
+        }
+        for (m, files) in &full.messages {
+            let who = if m.b("is_admin") { format!("{} (admin)", m.s("username")) } else { m.s("username") };
+            out.push_str(&format!("\n--- {who}, {} ---\n{}\n", when(m.f("created_at")), m.s("body").trim()));
+            if !files.is_empty() {
+                out.push_str(&format!("Files: {}\n", names(files)));
+            }
+        }
+    }
+    out
+}
+
 /// reports.json: the same shapes as the detail endpoint, with each file's `path` inside the zip.
 fn render_json(reports: &[Full], exported: &str) -> Value {
     let file = |rid: i64, f: &Row| json!({ "id": f.i("id"), "name": f.s("name"), "mime": f.s("mime"), "size": f.i("size"), "path": zip_path(rid, f) });
@@ -700,6 +748,16 @@ pub async fn export(State(st): State<AppState>, Admin(u): Admin, Query(q): Query
     let rows = st.db.query(&format!("SELECT * FROM bug_reports r WHERE {where_} ORDER BY r.id"), params)?;
     let reports: Vec<Full> = rows.into_iter().map(|r| load_full(&st, r)).collect::<ApiResult<_>>()?;
     let exported = encore_core::time::ymd(now());
+    if q.format.eq_ignore_ascii_case("txt") {
+        let name = format!("encore-bug-reports-{exported}.txt");
+        let text = render_txt(&reports, &exported, &reports_dir(&st));
+        let mut resp = Body::from(text).into_response();
+        let h = resp.headers_mut();
+        h.insert(header::CONTENT_TYPE, HeaderValue::from_static("text/plain; charset=utf-8"));
+        h.insert(header::CONTENT_DISPOSITION, HeaderValue::from_str(&format!("attachment; filename=\"{name}\"")).unwrap_or(HeaderValue::from_static("attachment")));
+        h.insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
+        return Ok(resp);
+    }
     let base = reports_dir(&st);
     let bytes = tokio::task::spawn_blocking(move || -> anyhow::Result<Vec<u8>> {
         let mut z = zip::ZipWriter::new(std::io::Cursor::new(Vec::new()));

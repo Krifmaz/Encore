@@ -107,7 +107,7 @@ fun NewBugReportSheet(nav: Nav, page: String, onDismiss: () -> Unit) {
             verticalArrangement = Arrangement.spacedBy(12.dp),
         ) {
             Text("New report", style = MaterialTheme.typography.titleLarge, modifier = Modifier.padding(top = 8.dp))
-            Segmented(BugRules.KINDS, kind) { kind = it }
+            Segmented(BugRules.PICK_KINDS, kind) { kind = it }
             EncoreField(
                 title,
                 { title = it.take(BugRules.MAX_TITLE) },

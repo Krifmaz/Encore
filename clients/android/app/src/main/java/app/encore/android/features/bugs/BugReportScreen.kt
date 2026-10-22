@@ -189,7 +189,7 @@ fun BugReportScreen(nav: Nav, id: Long) {
                 val file = withContext(Dispatchers.IO) {
                     nav.graph.bugReports.export(BugRules.exportOneQuery(id), File(exportDir(context), BugRules.exportName(day, id)))
                 }
-                shareZip(context, file)
+                shareFile(context, file)
             } catch (e: CancellationException) {
                 throw e
             } catch (e: Exception) {

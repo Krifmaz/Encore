@@ -26,6 +26,15 @@ import app.encore.android.CrashLog
 import app.encore.android.R
 import app.encore.android.data.session.AuthKind
 import app.encore.android.features.bugs.BugReportsEntry
+import app.encore.android.features.bugs.BugRules
+import app.encore.android.features.bugs.CrashLogReport
+import app.encore.android.features.bugs.shareFile
+import app.encore.android.ui.components.Toasts
+import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.ui.platform.LocalContext
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.launch
 import app.encore.android.features.offline.OfflineStorageSection
 import app.encore.android.features.update.UpdatesSection
 import app.encore.android.remote.RemoteDevice
@@ -112,10 +121,17 @@ fun DeviceNameRow(nav: Nav) {
     }
 }
 
-/** The crash reports this phone keeps until the server has them (admins read them under Diagnostics → App crashes). */
+/**
+ * The crash reports this phone keeps until the server has them (admins read them under Diagnostics → App crashes),
+ * Send crash log (a bug report of the kind Crash log: the admin's Bug reports → Crash log) and Save as .txt (the share
+ * sheet), for anyone signed in.
+ */
 @Composable
 private fun CrashReports(nav: Nav) {
     val p = MaterialTheme.palette
+    val context = LocalContext.current
+    val scope = rememberCoroutineScope()
+    var sending by remember { mutableStateOf(false) }
     var version by remember { mutableIntStateOf(0) }
     // the count lists a folder: read off the main thread
     var waiting by remember { mutableIntStateOf(0) }
@@ -125,7 +141,35 @@ private fun CrashReports(nav: Nav) {
     }
     Column(Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 12.dp)) {
         Text("App crashes", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold)
-        Muted("The phone app sends a report the next time it opens after it crashed or the system closed it.")
+        Muted("If Encore closed or the music stopped by itself, send the crash log: it goes to the admin's Bug reports under Crash log.")
+        Row(Modifier.padding(top = 6.dp), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            SmallButton(if (sending) "Sending…" else "Send crash log", iconRes = R.drawable.ic_bug, enabled = !sending) {
+                sending = true
+                scope.launch {
+                    try {
+                        withContext(Dispatchers.IO) { CrashLogReport.send(nav.graph) }
+                        Toasts.show("Crash log sent to the admin")
+                    } catch (e: CancellationException) {
+                        throw e
+                    } catch (e: Exception) {
+                        Toasts.show(BugRules.errorWords(e), "err")
+                    } finally {
+                        sending = false
+                    }
+                }
+            }
+            SmallButton("Save as .txt", iconRes = R.drawable.ic_download) {
+                scope.launch {
+                    try {
+                        shareFile(context, withContext(Dispatchers.IO) { CrashLog.exportText(context) })
+                    } catch (e: CancellationException) {
+                        throw e
+                    } catch (e: Exception) {
+                        Toasts.show("The crash log couldn't be saved: ${e.message ?: e.javaClass.simpleName}", "err")
+                    }
+                }
+            }
+        }
         if (waiting > 0) {
             Row(Modifier.padding(top = 6.dp), verticalAlignment = Alignment.CenterVertically) {
                 Muted("Waiting to send: $waiting", Modifier.weight(1f), color = p.text)

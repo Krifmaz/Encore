@@ -14,7 +14,10 @@ use wasm_bindgen::JsCast;
 use web_sys::{Element, File, FileList, FormData, HtmlInputElement};
 
 /// The three kinds, as the server stores them and as the user reads them.
-pub const KINDS: [(&str, &str); 3] = [("bug", "Bug"), ("not_bug", "Not a bug"), ("howto", "How do I…")];
+/// Every kind: the list's chips and the labels; `crash` is a crash log the phone app sends (the Crash logs section).
+pub const KINDS: [(&str, &str); 4] = [("bug", "Bug"), ("not_bug", "Not a bug"), ("howto", "How do I…"), ("crash", "Crash log")];
+/// The kinds a new report can pick (a crash log comes from the app).
+const PICK_KINDS: &[(&str, &str)] = &[("bug", "Bug"), ("not_bug", "Not a bug"), ("howto", "How do I…")];
 /// The five statuses: key, label, badge class.
 pub const STATUSES: [(&str, &str, &str); 5] = [
     ("new", "New", "warn"),
@@ -29,7 +32,7 @@ const FILTER_KEY: &str = "encore.bugFilter";
 
 fn kind_label(k: &str) -> &'static str { KINDS.iter().find(|(key, _)| *key == k).map(|(_, l)| *l).unwrap_or("Bug") }
 fn kind_badge(k: &str) -> String {
-    let cls = match k { "bug" => "err", "howto" => "info", _ => "" };
+    let cls = match k { "bug" => "err", "howto" => "info", "crash" => "warn", _ => "" };
     format!(r#"<span class="badge {cls} bug-kind" data-kind="{}">{}</span>"#, esc(k), kind_label(k))
 }
 fn status_label(s: &str) -> &'static str { STATUSES.iter().find(|(key, _, _)| *key == s).map(|(_, l, _)| *l).unwrap_or("New") }
@@ -172,8 +175,10 @@ impl Filter {
 }
 
 fn export_href(f: &Filter) -> String {
-    let p = f.params();
-    format!("/api/bug-reports/export{}", if p.is_empty() { String::new() } else { format!("?{}", p.join("&")) })
+    let mut p = f.params();
+    // a plain text file (the zip with the pictures: without format=txt)
+    p.push("format=txt".into());
+    format!("/api/bug-reports/export?{}", p.join("&"))
 }
 
 fn report_row(r: &Value) -> String {
@@ -327,7 +332,7 @@ pub fn render(view: Element, ctx: Ctx) -> PageFuture {
 pub fn new_report_modal() {
     let page = app::previous_hash();
     let version = app_version();
-    let seg: String = KINDS.iter().enumerate().map(|(i, (k, l))| format!(r#"<button type="button" data-v="{k}" class="{}">{l}</button>"#, if i == 0 { "on" } else { "" })).collect();
+    let seg: String = PICK_KINDS.iter().enumerate().map(|(i, (k, l))| format!(r#"<button type="button" data-v="{k}" class="{}">{l}</button>"#, if i == 0 { "on" } else { "" })).collect();
     let body = format!(r#"<div class="stack" style="gap:12px">
       <div class="seg" id="br-kind">{seg}</div>
       <label class="field"><span>Title</span><input class="input" id="br-title" maxlength="200" placeholder="A short name for it"></label>
@@ -427,7 +432,7 @@ pub fn render_one(view: Element, ctx: Ctx) -> PageFuture {
         let page = r.s("page");
         let page_html = if page.is_empty() { String::new() } else if page.starts_with("#/") { format!(r#" · page <a href="{0}">{0}</a>"#, esc(&page)) } else { format!(" · page {}", esc(&page)) };
         let admin_tools = if admin {
-            format!(r#"<a class="btn sm" id="bug-export" href="/api/bug-reports/export?ids={id}" download>{}Export this report</a><button class="btn sm danger" id="bug-delete">{}Delete</button>"#, icon("download"), icon("trash"))
+            format!(r#"<a class="btn sm" id="bug-export" href="/api/bug-reports/export?ids={id}&format=txt" download>{}Export this report</a><button class="btn sm danger" id="bug-delete">{}Delete</button>"#, icon("download"), icon("trash"))
         } else { String::new() };
         let thread = if msgs.is_empty() { r#"<div class="empty" style="padding:24px"><p class="muted small" style="margin:0">No replies yet.</p></div>"#.to_string() }
             else { format!(r#"<div class="list">{}</div>"#, msgs.iter().map(message_html).collect::<String>()) };

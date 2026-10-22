@@ -215,11 +215,12 @@ class BugReportsApi(private val api: EncoreApi, private val client: OkHttpClient
     }
 
     /**
-     * GET /api/bug-reports/export[query] (admins) into [into]: the zip with reports.md, reports.json and the files.
+     * GET /api/bug-reports/export[query] (admins) into [into]: a plain text file with `format=txt` (the phone's
+     * exports), else the zip with reports.md, reports.json and the files.
      * A file left from an earlier export in the same folder is replaced.
      */
     fun export(query: String, into: File): File {
-        val req = Request.Builder().url(api.url("/api/bug-reports/export$query")).header("Accept", "application/zip, application/json").build()
+        val req = Request.Builder().url(api.url("/api/bug-reports/export$query")).header("Accept", "text/plain, application/zip, application/json").build()
         slow.newCall(req).execute().use { res ->
             if (!res.isSuccessful) throw failure(res.code, res.body.string())
             into.parentFile?.mkdirs()

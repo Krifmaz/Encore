@@ -21,7 +21,10 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 /// The three kinds, as the server stores them and as the user reads them.
-pub const KINDS: [(&str, &str); 3] = [("bug", "Bug"), ("not_bug", "Not a bug"), ("howto", "How do I…")];
+/// Every kind: the list's chips and the labels; `crash` is a crash log the phone app sends (the Crash logs section).
+pub const KINDS: [(&str, &str); 4] = [("bug", "Bug"), ("not_bug", "Not a bug"), ("howto", "How do I…"), ("crash", "Crash log")];
+/// The kinds a new report can pick (a crash log comes from the app).
+pub const PICK_KINDS: [(&str, &str); 3] = [("bug", "Bug"), ("not_bug", "Not a bug"), ("howto", "How do I…")];
 /// The five statuses: key, label, badge.
 pub const STATUSES: [(&str, &str, Badge); 5] = [
     ("new", "New", Badge::Warn),
@@ -41,6 +44,7 @@ pub fn kind_badge<'a, M: 'a>(k: &str) -> El<'a, M> {
     let kind = match k {
         "bug" => Badge::Err,
         "howto" => Badge::Info,
+        "crash" => Badge::Warn,
         _ => Badge::Plain,
     };
     badge(kind_label(k), kind)
@@ -308,7 +312,7 @@ pub fn new_dialog<'a, M: Clone + 'a>(
     let send = wrap(NewMsg::Send);
     let version = app_version(ctx);
     let body = column![
-        seg(&KINDS, &d.kind, NewMsg::Kind),
+        seg(&PICK_KINDS, &d.kind, NewMsg::Kind),
         field(
             "Title",
             text_input("A short name for it", &d.title)
@@ -422,11 +426,10 @@ impl Filter {
 
     /// `/api/bug-reports/export?...` under the server's base.
     pub fn export_url(&self, base: &str) -> String {
-        let p = self.params();
-        format!(
-            "{base}/api/bug-reports/export{}",
-            if p.is_empty() { String::new() } else { format!("?{}", p.join("&")) }
-        )
+        let mut p = self.params();
+        // a plain text file (the zip with the pictures: without format=txt)
+        p.push("format=txt".into());
+        format!("{base}/api/bug-reports/export?{}", p.join("&"))
     }
 }
 
@@ -528,7 +531,7 @@ pub fn update(state: &mut State, msg: Message, ctx: &mut Ctx) -> Task<Message> {
             let api = ctx.api.clone();
             let url = state.filter.export_url(&ctx.base());
             return Task::perform(
-                crate::pages::library::save_as(api, url, "encore-bug-reports.zip".into()),
+                crate::pages::library::save_as(api, url, "encore-bug-reports.txt".into()),
                 Message::Exported,
             );
         }
@@ -707,7 +710,7 @@ mod tests {
         assert_eq!(Filter::from_json(&f.to_json()), f);
         assert_eq!(Filter::from_json(&serde_json::Value::Null), f, "nothing saved: the default");
         assert_eq!(f.list_query(true), "");
-        assert_eq!(f.export_url("http://s"), "http://s/api/bug-reports/export");
+        assert_eq!(f.export_url("http://s"), "http://s/api/bug-reports/export?format=txt");
         f.status = "looking".into();
         f.kind = "bug".into();
         f.q = " hi ".into();
@@ -715,7 +718,7 @@ mod tests {
         assert!(f.active());
         assert_eq!(f.list_query(true), "?status=looking&kind=bug&q=hi&mine=1");
         assert_eq!(f.list_query(false), "?status=looking&kind=bug&q=hi");
-        assert_eq!(f.export_url("http://s"), "http://s/api/bug-reports/export?status=looking&kind=bug");
+        assert_eq!(f.export_url("http://s"), "http://s/api/bug-reports/export?status=looking&kind=bug&format=txt");
     }
 
     #[test]

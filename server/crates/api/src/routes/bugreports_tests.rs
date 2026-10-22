@@ -336,6 +336,20 @@ async fn report_reply_status_export_and_delete() {
     let mut img = Vec::new();
     zip.by_name(&format!("files/{id}/{fid}-shot one.png")).unwrap().read_to_end(&mut img).unwrap();
     assert_eq!(img, shot);
+    // format=txt: one plain text file, the files named
+    let (status, headers, bytes) = send(&e.app, "GET", &format!("/api/bug-reports/export?ids={id}&format=txt"), &e.admin, "", vec![]).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(headers.get("content-type").unwrap(), "text/plain; charset=utf-8");
+    let cd = headers.get("content-disposition").unwrap().to_str().unwrap();
+    assert!(cd.starts_with("attachment; filename=\"encore-bug-reports-") && cd.ends_with(".txt\""), "{cd}");
+    let txt = String::from_utf8(bytes).unwrap();
+    assert!(txt.starts_with(&format!("Encore bug reports ({}, exported ", crate::VERSION)), "{txt}");
+    assert!(txt.contains(&format!("#{id} [Bug] Play button does nothing - Looking into it")), "{txt}");
+    assert!(txt.contains("By: phone\n") && txt.contains("Page: #/album/12\n") && txt.contains("App: 0.26.4\n"), "{txt}");
+    assert!(txt.contains("Files: shot one.png") && txt.contains("console.log"), "{txt}");
+    // a text file is written in whole under its name
+    assert!(txt.contains("----- console.log -----\nTypeError: x is undefined\n----- end of console.log -----"), "{txt}");
+    assert!(txt.contains("--- boss (admin), ") && txt.contains("--- phone, "), "{txt}");
     // a filter that matches nothing still gives a zip, with an empty reports.md body
     let (status, _, bytes) = send(&e.app, "GET", "/api/bug-reports/export?status=fixed", &e.admin, "", vec![]).await;
     assert_eq!(status, StatusCode::OK);
@@ -530,4 +544,23 @@ fn huge_images_are_refused_on_their_header() {
     // and so is one side over 8192
     assert!(super::check_file("wide.png", &huge_png(8193, 2)).is_err());
     assert!(super::check_file("fine.png", &huge_png(8192, 2)).is_ok());
+}
+
+#[tokio::test]
+async fn a_crash_log_is_its_own_kind_and_exports_as_text() {
+    let e = setup("crashlog").await;
+    let (status, body) = post_form(&e.app, "/api/bug-reports", &e.user,
+        &[("kind", "crash"), ("title", "Crash log: Closed while in use"), ("body", "Sent from the phone."), ("app_version", "0.36.0"), ("device", "Pixel 9")],
+        &[("encore-crash-log.txt", "text/plain", b"java.lang.IllegalStateException: boom\n\tat app.encore.X\n")]).await;
+    assert_eq!(status, StatusCode::OK, "{body:?}");
+    // the admin's Crash logs section is the kind filter
+    let r = call(&e.app, "GET", "/api/bug-reports?kind=crash", &e.admin, None).await;
+    assert_eq!(r.1["reports"].as_array().unwrap().len(), 1, "{:?}", r.1);
+    let r = call(&e.app, "GET", "/api/bug-reports?kind=bug", &e.admin, None).await;
+    assert_eq!(r.1["reports"].as_array().unwrap().len(), 0, "{:?}", r.1);
+    let (status, _, bytes) = send(&e.app, "GET", "/api/bug-reports/export?kind=crash&format=txt", &e.admin, "", vec![]).await;
+    assert_eq!(status, StatusCode::OK);
+    let txt = String::from_utf8(bytes).unwrap();
+    assert!(txt.contains("[Crash log] Crash log: Closed while in use - New"), "{txt}");
+    assert!(txt.contains("----- encore-crash-log.txt -----\njava.lang.IllegalStateException: boom\n\tat app.encore.X\n----- end of encore-crash-log.txt -----"), "{txt}");
 }

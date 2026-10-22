@@ -202,7 +202,7 @@ fun BugReportsScreen(nav: Nav, from: String) {
                 val file = withContext(Dispatchers.IO) {
                     nav.graph.bugReports.export(BugRules.exportQuery(filter), File(exportDir(context), BugRules.exportName(day)))
                 }
-                shareZip(context, file)
+                shareFile(context, file)
             } catch (e: CancellationException) {
                 throw e
             } catch (e: Exception) {
@@ -351,8 +351,8 @@ internal fun exportDir(context: Context): File = File(context.cacheDir, "shared/
     dir.listFiles()?.forEach { if (it.isFile) it.delete() }
 }
 
-/** Offers the zip to other apps (mail, a chat, Files) through Android's share sheet. */
-internal fun shareZip(context: Context, file: File) {
+/** Offers the file (an export's .txt, a crash log) to other apps (mail, a chat, Files) through Android's share sheet. */
+internal fun shareFile(context: Context, file: File) {
     val uri = try {
         FileProvider.getUriForFile(context, context.packageName + ".files", file)
     } catch (_: IllegalArgumentException) {
@@ -360,7 +360,7 @@ internal fun shareZip(context: Context, file: File) {
         return
     }
     val send = Intent(Intent.ACTION_SEND)
-        .setType("application/zip")
+        .setType(if (file.name.endsWith(".zip")) "application/zip" else "text/plain")
         .putExtra(Intent.EXTRA_STREAM, uri)
         .putExtra(Intent.EXTRA_SUBJECT, file.name)
         .addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)

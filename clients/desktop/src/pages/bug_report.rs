@@ -138,8 +138,8 @@ pub fn update(state: &mut State, msg: Message, ctx: &mut Ctx) -> Task<Message> {
         Message::StatusSet(_, Err(e)) => ctx.toast_err(e.message),
         Message::Export => {
             let api = ctx.api.clone();
-            let path = format!("/bug-reports/export?ids={}", state.id);
-            let name = format!("bug-report-{}.zip", state.id);
+            let path = format!("/bug-reports/export?ids={}&format=txt", state.id);
+            let name = format!("bug-report-{}.txt", state.id);
             return Task::perform(crate::pages::library::save_as(api, path, name), Message::Exported);
         }
         Message::Exported(Ok(path)) => {

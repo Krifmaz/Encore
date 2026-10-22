@@ -41,11 +41,11 @@ class BugRulesTest {
     @Test
     fun exportTakesStatusAndKindOnly() {
         val f = Filter(status = "new", kind = "bug", q = "crash", mine = true)
-        assertEquals("?status=new&kind=bug", BugRules.exportQuery(f))
-        assertEquals("", BugRules.exportQuery(Filter(q = "crash")))
-        assertEquals("?ids=12", BugRules.exportOneQuery(12))
-        assertEquals("encore-bug-reports-2026-10-19.zip", BugRules.exportName("2026-10-19"))
-        assertEquals("encore-bug-report-12-2026-10-19.zip", BugRules.exportName("2026-10-19", 12))
+        assertEquals("?status=new&kind=bug&format=txt", BugRules.exportQuery(f))
+        assertEquals("?format=txt", BugRules.exportQuery(Filter(q = "crash")))
+        assertEquals("?ids=12&format=txt", BugRules.exportOneQuery(12))
+        assertEquals("encore-bug-reports-2026-10-19.txt", BugRules.exportName("2026-10-19"))
+        assertEquals("encore-bug-report-12-2026-10-19.txt", BugRules.exportName("2026-10-19", 12))
     }
 
     @Test
