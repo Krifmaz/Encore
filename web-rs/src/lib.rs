@@ -24,6 +24,7 @@ pub mod scrubber;
 pub mod settings;
 pub mod sw;
 pub mod ui;
+pub mod whats_new;
 
 #[cfg(test)]
 mod parity;

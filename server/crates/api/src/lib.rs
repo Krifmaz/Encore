@@ -124,6 +124,7 @@ pub fn app(st: AppState) -> Router {
         .merge(routes::perf::router())
         .merge(routes::files::router())
         .merge(routes::plugins::router())
+        .merge(routes::changelog::router())
         // the handlers add covers, credits and translations to their answers themselves (crate::enrich)
         .with_state(st)
         // someone waits for every API call: its MusicBrainz lookups go first in the line (encore_http::mb)

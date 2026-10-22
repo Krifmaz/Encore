@@ -25,5 +25,6 @@ pub mod ytauth;
 pub mod discover;
 pub mod foryou;
 pub mod catalog;
+pub mod changelog;
 #[cfg(test)]
 mod plugins_tests;

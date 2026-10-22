@@ -86,6 +86,8 @@ pub enum Message {
     /// The mini player, a seek from the OS media controls, the tray's update line.
     DesktopUi(crate::desktop::Msg),
     Tour(crate::tour::Message),
+    /// The What's new popup after an update.
+    WhatsNew(crate::whats_new::Message),
     Login(pages::login::Message),
     Home(pages::home::Message),
     Search(pages::search::Message),
@@ -133,6 +135,7 @@ pub struct App {
     /// The saved session is being checked; the window shows the logo meanwhile.
     pub booting: bool,
     pub tour: Option<crate::tour::State>,
+    pub whats_new: crate::whats_new::State,
     ticks: u64,
     // one state per page
     pub login: pages::login::State,
@@ -220,6 +223,7 @@ impl App {
             system_dark: true,
             booting: false,
             tour: flags.tour.map(|(dir, login)| crate::tour::State::new(dir, login)),
+            whats_new: Default::default(),
             ticks: 0,
             login,
             home: Default::default(),
@@ -422,6 +426,14 @@ impl App {
         }
     }
 
+    /// Signed in: ask whether the What's new popup has something to show (not during the screenshot tour).
+    fn whats_new_check(&self) -> Task<Message> {
+        if self.tour.is_some() {
+            return Task::none();
+        }
+        crate::whats_new::check(&self.ctx()).map(Message::WhatsNew)
+    }
+
     /// Go to `page`; `push` keeps the current one in the history.
     pub fn navigate(&mut self, page: Page, push: bool) -> Task<Message> {
         if page == Page::Login {
@@ -505,6 +517,7 @@ impl App {
             self.load_shell(),
             Task::perform(async move { api.session().await }, Message::Session),
             revoke,
+            self.whats_new_check(),
         ])
     }
 
@@ -538,6 +551,7 @@ impl App {
         self.covers.clear();
         self.history.clear();
         self.shell = Shell::default();
+        self.whats_new = Default::default();
         Task::batch([logout, self.navigate(Page::Login, false)])
     }
 
@@ -639,6 +653,7 @@ impl App {
                         self.navigate(Page::Home, false),
                         link::start(self.api.clone(), &self.config).map(Message::Link),
                         self.load_shell(),
+                        self.whats_new_check(),
                     ])
                 } else {
                     Task::none()
@@ -789,6 +804,12 @@ impl App {
             Message::Desktop(m) => crate::desktop::handle(self, m),
             Message::DesktopUi(m) => crate::desktop::update(self, m),
             Message::Tour(m) => crate::tour::update(self, m),
+            Message::WhatsNew(m) => {
+                let mut ctx = ctx!(self);
+                let task = crate::whats_new::update(&mut self.whats_new, m, &mut ctx).map(Message::WhatsNew);
+                let fx = ctx.take_effects();
+                Task::batch([task, self.apply(fx)])
+            }
             Message::Login(m) => page_update!(self, m, login, login, Login),
             Message::Home(m) => page_update!(self, m, home, home, Home),
             Message::Search(m) => page_update!(self, m, search, search, Search),
@@ -918,6 +939,9 @@ impl App {
         if let Some(o) = self.overlay_view(&ctx) {
             layers = layers.push(o);
         }
+        if let Some(w) = crate::whats_new::view(&self.whats_new) {
+            layers = layers.push(w.map(Message::WhatsNew));
+        }
         if let Some(d) = &self.details {
             layers = layers.push(details::view(d).map(Message::Details));
         }
@@ -971,6 +995,16 @@ impl App {
         });
         if self.tour.is_some() {
             subs.push(crate::tour::subscription().map(Message::Tour));
+        }
+        if crate::whats_new::open(&self.whats_new) && self.details.is_none() {
+            // Escape closes the What's new popup
+            subs.push(iced::event::listen_with(|e, _, _| match e {
+                iced::Event::Keyboard(iced::keyboard::Event::KeyPressed {
+                    key: iced::keyboard::Key::Named(iced::keyboard::key::Named::Escape),
+                    ..
+                }) => Some(Message::WhatsNew(crate::whats_new::Message::Close)),
+                _ => None,
+            }));
         }
         if self.details.is_some() {
             // Escape closes the details dialog

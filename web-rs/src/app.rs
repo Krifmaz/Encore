@@ -375,6 +375,7 @@ pub async fn boot() {
         dom::interval_forever(30000, || dom::spawn(refresh_pending_badge()));
         dom::interval_forever(60000, || dom::spawn(refresh_bugs_badge()));
         crate::notice::start();
+        crate::whats_new::start();
     }
     route();
 }

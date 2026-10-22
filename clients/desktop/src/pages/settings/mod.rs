@@ -21,6 +21,7 @@ pub mod tasks;
 pub mod this_computer;
 pub mod tools;
 pub mod users;
+pub mod whats_new;
 
 use crate::api::{Api, ApiResult};
 use crate::pages::{Ctx, El, Page};
@@ -59,10 +60,12 @@ pub enum Section {
     Files,
     /// Desktop only: autostart, hotkeys, mini player, updates, offline songs.
     Computer,
+    /// The changelog and the switch for the popup after updates.
+    WhatsNew,
 }
 
 impl Section {
-    pub const ALL: [Section; 21] = [
+    pub const ALL: [Section; 22] = [
         Section::Account,
         Section::Appearance,
         Section::Language,
@@ -84,6 +87,7 @@ impl Section {
         Section::Diagnostics,
         Section::Files,
         Section::Computer,
+        Section::WhatsNew,
     ];
 
     /// The web's page id (`#/settings?s=<id>`).
@@ -110,6 +114,7 @@ impl Section {
             Section::Diagnostics => "diagnostics",
             Section::Files => "files",
             Section::Computer => "computer",
+            Section::WhatsNew => "whats-new",
         }
     }
 
@@ -168,10 +173,11 @@ impl Section {
             Section::Diagnostics => "Diagnostics",
             Section::Files => "Files",
             Section::Computer => "This computer",
+            Section::WhatsNew => "What's new",
         }
     }
 
-    /// The nav group: You, People, Server, System, This computer.
+    /// The nav group: You, People, Server, System, This computer, Encore.
     pub fn group(self) -> &'static str {
         match self {
             Section::Account | Section::Appearance | Section::Language | Section::Playback | Section::Connections => "You",
@@ -189,17 +195,18 @@ impl Section {
             | Section::Tasks => "Server",
             Section::Diagnostics | Section::Files => "System",
             Section::Computer => "This computer",
+            Section::WhatsNew => "Encore",
         }
     }
 
     /// Only admins see People, Server and System.
     pub fn admin_only(self) -> bool {
-        !matches!(self.group(), "You" | "This computer")
+        !matches!(self.group(), "You" | "This computer" | "Encore")
     }
 }
 
 /// The nav groups in order.
-pub const GROUPS: [&str; 5] = ["You", "People", "Server", "System", "This computer"];
+pub const GROUPS: [&str; 6] = ["You", "People", "Server", "System", "This computer", "Encore"];
 
 /// The card a link asked for (`#/settings?s=slskd`), until its section opens.
 static FOCUS: std::sync::Mutex<Option<&'static str>> = std::sync::Mutex::new(None);
@@ -224,6 +231,7 @@ pub struct State {
     pub diagnostics: diagnostics::State,
     pub files: crate::pages::files::State,
     pub computer: this_computer::State,
+    pub whats_new: whats_new::State,
 }
 
 #[derive(Clone, Debug)]
@@ -241,6 +249,7 @@ pub enum Message {
     Diagnostics(diagnostics::Message),
     Files(crate::pages::files::Message),
     Computer(this_computer::Message),
+    WhatsNew(whats_new::Message),
 }
 
 pub fn open(state: &mut State, section: Section, ctx: &mut Ctx) -> Task<Message> {
@@ -268,6 +277,7 @@ pub fn open(state: &mut State, section: Section, ctx: &mut Ctx) -> Task<Message>
         Section::Diagnostics => diagnostics::open(&mut state.diagnostics, ctx).map(Message::Diagnostics),
         Section::Files => crate::pages::files::open(&mut state.files, ctx).map(Message::Files),
         Section::Computer => this_computer::open(&mut state.computer, ctx).map(Message::Computer),
+        Section::WhatsNew => whats_new::open(&mut state.whats_new, ctx).map(Message::WhatsNew),
     }
 }
 
@@ -289,6 +299,7 @@ pub fn update(state: &mut State, msg: Message, ctx: &mut Ctx) -> Task<Message> {
         Message::Diagnostics(m) => diagnostics::update(&mut state.diagnostics, m, ctx).map(Message::Diagnostics),
         Message::Files(m) => crate::pages::files::update(&mut state.files, m, ctx).map(Message::Files),
         Message::Computer(m) => this_computer::update(&mut state.computer, m, ctx).map(Message::Computer),
+        Message::WhatsNew(m) => whats_new::update(&mut state.whats_new, m, ctx).map(Message::WhatsNew),
     }
 }
 
@@ -342,6 +353,7 @@ pub fn view<'a>(state: &'a State, ctx: &Ctx<'a>) -> El<'a, Message> {
         Section::Diagnostics => diagnostics::view(&state.diagnostics, ctx).map(Message::Diagnostics),
         Section::Files => crate::pages::files::view(&state.files, ctx).map(Message::Files),
         Section::Computer => this_computer::view(&state.computer, ctx).map(Message::Computer),
+        Section::WhatsNew => whats_new::view(&state.whats_new, ctx).map(Message::WhatsNew),
     };
     column![
         widgets::h1("Settings"),
@@ -375,6 +387,7 @@ pub fn overlay<'a>(state: &'a State, ctx: &Ctx<'a>) -> Option<El<'a, Message>> {
         Section::Diagnostics => diagnostics::overlay(&state.diagnostics, ctx).map(|e| e.map(Message::Diagnostics)),
         Section::Files => crate::pages::files::overlay(&state.files, ctx).map(|e| e.map(Message::Files)),
         Section::Computer => this_computer::overlay(&state.computer, ctx).map(|e| e.map(Message::Computer)),
+        Section::WhatsNew => None,
     }
 }
 

@@ -17,6 +17,8 @@ COPY server/Cargo.toml server/Cargo.lock ./
 COPY server/crates ./crates
 COPY server/benches ./benches
 COPY server/src ./src
+# the release notes the server builds in for What's new (crates/api/build.rs reads ../../../docs/releases)
+COPY docs/releases /docs/releases
 RUN case "$TARGETARCH" in arm64) T=aarch64-unknown-linux-gnu ;; *) T=x86_64-unknown-linux-gnu ;; esac \
  && { [ -n "$ENCORE_VERSION" ] || unset ENCORE_VERSION; } \
  && cargo build --release --locked --target "$T" && cp "target/$T/release/encore" /encore

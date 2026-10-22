@@ -16,6 +16,7 @@ mod pages;
 mod player;
 mod theme;
 mod tour;
+mod whats_new;
 mod widgets;
 
 use app::{App, Flags};

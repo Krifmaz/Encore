@@ -72,6 +72,7 @@ fn embedded(id: &str) -> Option<app::PageFn> {
         "blocked" => crate::pages::report::render,
         "diagnostics" => diagnostics::render,
         "files" => crate::pages::files::render,
+        "whats-new" => crate::whats_new::render,
         _ => return None,
     })
 }
@@ -145,6 +146,7 @@ pub fn render(view: Element, ctx: Ctx) -> PageFuture {
             nav.push(("Server", server_nav(&schema)));
             nav.push(("System", vec![("diagnostics", "Diagnostics"), ("files", "Files")]));
         }
+        nav.push(("Encore", vec![("whats-new", "What's new")]));
         let pages: Vec<&str> = nav.iter().flat_map(|(_, items)| items.iter().map(|(id, _)| *id)).collect();
         if !pages.iter().any(|p| *p == current) { current = "account".to_string(); }
         let select_html: String = nav.iter().map(|(label, items)| format!(r##"<optgroup label="{}">{}</optgroup>"##,
