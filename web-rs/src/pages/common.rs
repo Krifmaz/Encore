@@ -309,6 +309,40 @@ pub fn request_row(r: &Value, admin: bool) -> String {
         menu = if !active { format!(r#"<button class="btn sm ghost icon" data-act="menu" data-status="{}"{} aria-label="More">{}</button>"#, esc(&status), if r.truthy("has_files") { r#" data-files="1""# } else { "" }, icon("more")) } else { String::new() })
 }
 
+/// A request as a tile for Home's sideways row (like Recently added): the cover with the status in the corner and
+/// Download now / Keep anyway / Cancel over it on hover, what and who, the progress. A click opens the details.
+pub fn request_tile(r: &Value) -> String {
+    ROWS.with(|m| m.borrow_mut().insert(r.s("id"), r.clone()));
+    let kind = r.s("kind");
+    let status = r.s("status");
+    let (what, by) = match kind.as_str() {
+        "album" => (or(r, "title", "album"), r.s("artist")),
+        "artist" => (r.s("artist"), "full discography".to_string()),
+        "url" => (or(r, "title", "url"), String::new()),
+        "playlist" => (r.s("title"), "playlist import".to_string()),
+        _ => (r.s("title"), r.s("artist")),
+    };
+    let active = matches!(status.as_str(), "searching" | "downloading" | "importing" | "monitoring");
+    let keep = match anyway(r) { Some(a) if may_fix() => anyway_button(&a, "btn sm"), _ => String::new() };
+    let cancel = if matches!(status.as_str(), "pending" | "queued" | "searching" | "downloading" | "monitoring" | "importing" | "waiting") { format!(r#"<button class="btn sm" data-act="cancel" title="Cancel">{}</button>"#, icon("x")) } else { String::new() };
+    format!(r#"<div class="tile req-tile" data-id="{id}">
+  <div class="art" data-act="details">{art}
+    <div class="corner">{badge}</div>
+    <div class="overlay">{now}{keep}{cancel}</div>
+  </div>
+  <div class="t ellipsis" data-act="details" title="{what}">{what}</div>
+  <div class="s ellipsis">{sub}</div>
+  {progress}
+</div>"#,
+        id = r.s("id"),
+        art = ui::art(&r.s("cover_url"), &or(r, "title", "artist"), ""),
+        badge = request_badge(r),
+        now = download_now_button(r),
+        what = esc(&what),
+        sub = esc(&[by, kind].into_iter().filter(|x| !x.is_empty()).collect::<Vec<_>>().join(" · ")),
+        progress = if active && r.truthy("progress") { format!(r#"<div class="progress" style="margin-top:6px"><i style="width:{}%"></i></div>"#, r.s("progress")) } else { String::new() })
+}
+
 /// Download now (the owner on Oct 21: "for the que can i get a download now button"): the row's button, where the
 /// server offers it (`can_download_now`, with what it does as the tooltip: "Go first in line for Deezer"). An older
 /// server has no such field: no button.
@@ -903,6 +937,20 @@ mod tests {
             "message": "Downloaded 1 of 2 file(s) – the rest could not be imported: …" });
         assert!(can_import_again(&c) && request_row(&c, true).contains("Import again</button>"));
         assert!(!can_import_again(&json!({ "status": "completed", "has_files": false })));
+    }
+
+    /// Home's downloads are tiles: the status in the corner, Cancel over the cover, the progress under the title.
+    #[test]
+    fn a_request_tile_has_its_status_cancel_and_progress() {
+        let r = json!({ "id": 21, "kind": "track", "status": "downloading", "title": "In Time", "artist": "JustWarrenPeace", "created_at": 0,
+            "attempts": 1, "progress": 40, "has_files": false });
+        let html = request_tile(&r);
+        assert!(html.contains(r#"class="tile req-tile" data-id="21""#) && html.contains(r#"data-act="details""#), "{html}");
+        assert!(html.contains(r#"data-act="cancel""#) && html.contains(r#"style="width:40%""#), "{html}");
+        assert!(html.contains("JustWarrenPeace · track"), "{html}");
+        let done = json!({ "id": 22, "kind": "album", "status": "completed", "title": "", "album": "Hold", "artist": "HOME", "created_at": 0 });
+        let html = request_tile(&done);
+        assert!(html.contains(">Hold<") && !html.contains(r#"data-act="cancel""#) && !html.contains("progress"), "{html}");
     }
 
     /// An import that hasn't moved for 15 minutes offers Import again, with why; one that moves doesn't.

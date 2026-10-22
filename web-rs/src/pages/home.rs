@@ -3,7 +3,7 @@ use crate::api::{self, ApiError};
 use crate::app::{self, Ctx, PageFuture};
 use crate::dom::{self, EventListener};
 use crate::json::{json, J};
-use crate::pages::common::{bind_request_actions, bind_tiles, library_tile, request_row};
+use crate::pages::common::{bind_request_actions, bind_tiles, library_tile, request_tile};
 use crate::player;
 use crate::pages::foryou;
 use crate::ui::{self, art, empty_state, esc, icon, modal, toast, ModalOpts};
@@ -18,13 +18,13 @@ fn on_submit<F: FnMut(&Event) + 'static>(form: &Element, f: F) {
     dom::keep(EventListener::new_with_options(form, "submit", EventListenerOptions::enable_prevent_default(), f));
 }
 
-/// `loadReqs`: the user's active downloads into #reqs; the wrap stays hidden while there are none.
+/// `loadReqs`: the user's active downloads into #reqs, one sideways row of tiles like Recently added; the wrap stays hidden while there are none.
 async fn load_reqs(view: &Element) -> Result<(), ApiError> {
-    let rows = api::get("/requests?status=active&mine=true&limit=8").await?.items();
+    let rows = api::get("/requests?status=active&mine=true&limit=12").await?.items();
     if let Some(wrap) = dom::qs_in(view, "#reqs-wrap") { dom::toggle_class(&wrap, "hidden", rows.is_empty()); }
     if let Some(reqs) = dom::qs_in(view, "#reqs") {
         dom::set_html(&reqs, &if rows.is_empty() { String::new() } else {
-            format!(r#"<div class="list">{}</div>"#, rows.iter().map(|r| request_row(r, false)).collect::<String>())
+            format!(r#"<div class="hscroll">{}</div>"#, rows.iter().map(request_tile).collect::<String>())
         });
     }
     Ok(())
@@ -47,7 +47,7 @@ pub fn render(view: Element, ctx: Ctx) -> PageFuture {
     <div id="new-releases"></div>
     <div id="fy-preview"></div>
     <div id="reqs-wrap" class="hidden"><div class="section-head"><h2>Your downloads in progress</h2><a class="btn sm" href="#/requests">All requests</a></div>
-      <div class="card flat" id="reqs"></div></div>
+      <div id="reqs"></div></div>
     <div class="section-head"><h2>Recently added</h2><a class="btn sm" href="#/library?tab=albums&sort=added&dir=desc">Library</a></div>
     <div id="recent"></div>"##,
             username = esc(&ctx.user.s("username")), search = icon("search"), link = icon("link")));

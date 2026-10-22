@@ -42,7 +42,11 @@ import app.encore.android.core.str
 import app.encore.android.data.api.Album
 import app.encore.android.data.api.Track
 import app.encore.android.data.api.User
+import app.encore.android.data.repo.RequestRow
 import app.encore.android.data.session.Session
+import app.encore.android.features.requests.RequestCard
+import app.encore.android.features.requests.RequestSheets
+import app.encore.android.features.requests.rememberRequestActions
 import app.encore.android.features.files.FilesAccess
 import app.encore.android.features.group.ListeningTogetherRow
 import app.encore.android.ui.Nav
@@ -119,20 +123,30 @@ fun HomeScreen(nav: Nav, session: Session) {
     // a song corrected or deleted from its ⋯ (Recently played): Home loads again in place
     OnSongFixed { loader.refresh() }
 
-    // admins: the count of requests awaiting approval on the avatar (the web's sidebar badge, every 30 s). Downloads
-    // in progress live under Requests, not on Home.
+    // "Your downloads in progress" (home.rs `load_reqs`): this user's active requests as a sideways row of cards; and
+    // for admins the count of requests awaiting approval (the web's sidebar badge, every 30 s)
+    var reqGen by remember { mutableIntStateOf(0) }
+    var active by remember { mutableStateOf<List<RequestRow>>(emptyList()) }
     var pending by remember { mutableIntStateOf(0) }
+    val reqActions = rememberRequestActions(nav) { reqGen += 1 }
+    LaunchedEffect(session, reqGen) {
+        try {
+            val features = nav.features
+            if (reqActions.me == null) reqActions.me = withContext(Dispatchers.IO) { features.me() }
+            active = withContext(Dispatchers.IO) { features.requests("active", mine = true, limit = 12) }
+            if (reqActions.admin) pending = withContext(Dispatchers.IO) { features.pendingCount() }
+        } catch (e: CancellationException) {
+            throw e
+        } catch (_: Exception) {
+        }
+    }
     LaunchedEffect(session) {
-        val features = nav.features
-        val admin = try { withContext(Dispatchers.IO) { features.me() }.isAdmin } catch (e: CancellationException) { throw e } catch (_: Exception) { false }
-        while (admin) {
-            try {
-                pending = withContext(Dispatchers.IO) { features.pendingCount() }
-            } catch (e: CancellationException) {
-                throw e
-            } catch (_: Exception) {
-            }
-            delay(30_000)
+        var ticks = 0
+        while (true) {
+            delay(10_000)
+            ticks += 1
+            // the progress of downloads on their way; the approval count every 30 s
+            if (active.isNotEmpty() || (reqActions.admin && ticks % 3 == 0)) reqGen += 1
         }
     }
 
@@ -240,6 +254,15 @@ fun HomeScreen(nav: Nav, session: Session) {
                 }
             }
 
+            if (active.isNotEmpty()) {
+                item { SectionHead("Your downloads in progress", action = "All requests") { nav.open(Screen.Requests) } }
+                item {
+                    LazyRow(contentPadding = PaddingValues(horizontal = Gutter), horizontalArrangement = Arrangement.spacedBy(14.dp)) {
+                        items(active, key = { it.id }) { r -> RequestCard(reqActions, r, Modifier.width(150.dp)) }
+                    }
+                }
+            }
+
             item { SectionHead("Recently added", action = "Library") { nav.showTab(Tab.LIBRARY) } }
             if (data.recent.isEmpty()) {
                 item { EmptyState(R.drawable.ic_library, "Your library is empty", "Search above or paste a link to get started.") }
@@ -301,4 +324,5 @@ fun HomeScreen(nav: Nav, session: Session) {
             item { Spacer(Modifier.height(24.dp)) }
         }
     }
+    RequestSheets(reqActions, active)
 }

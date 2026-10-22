@@ -13,7 +13,7 @@ use crate::widgets::{
     self, badge, btn_icon, btn_sm, grid, h1, h2, icon, icon_btn, modal, muted, search_box, section_head, skeleton_tiles,
     small_muted, t, Icon, Tile, TileKind,
 };
-use iced::widget::{button, column, container, image, progress_bar, row, space, text_input, toggler};
+use iced::widget::{button, column, container, image, row, scrollable, space, text_input, toggler};
 use iced::{Alignment, ContentFit, Length, Subscription, Task};
 use serde_json::Value;
 use std::time::Duration;
@@ -544,85 +544,41 @@ fn stats_row<'a>(s: &'a Value) -> El<'a, Message> {
     iced::widget::row(boxes).spacing(12).wrap().into()
 }
 
-/// A request of "Your downloads in progress" (web `request_row`, the home's part of it).
-fn request_row<'a>(r: &'a Value, ctx: &Ctx<'a>) -> El<'a, Message> {
-    let p = ctx.look;
+/// A request of "Your downloads in progress" as a tile for the sideways row (like Recently added): the cover with
+/// the status in the corner, what, and the kind with the progress; Cancel on hover. A click opens Requests.
+fn request_tile<'a>(r: &'a Value, ctx: &Ctx<'a>) -> El<'a, Message> {
     let kind = fmt::s(r, "kind");
     let status = fmt::s(r, "status");
     let or = |a: &str, b: &str| if fmt::truthy(r, a) { fmt::s(r, a) } else { fmt::s(r, b) };
-    let what = match kind.as_str() {
-        "album" => format!("{} · {}", or("title", "album"), fmt::s(r, "artist")),
-        "artist" => format!("{} · full discography", fmt::s(r, "artist")),
-        "url" => or("title", "url"),
-        "playlist" => format!("{} · playlist import", fmt::s(r, "title")),
-        _ => format!("{} · {}", fmt::s(r, "title"), fmt::s(r, "artist")),
+    let (what, by) = match kind.as_str() {
+        "album" => (or("title", "album"), fmt::s(r, "artist")),
+        "artist" => (fmt::s(r, "artist"), "full discography".to_string()),
+        "url" => (or("title", "url"), String::new()),
+        "playlist" => (fmt::s(r, "title"), "playlist import".to_string()),
+        _ => (fmt::s(r, "title"), fmt::s(r, "artist")),
     };
     let active = matches!(status.as_str(), "searching" | "downloading" | "importing" | "monitoring");
-    let thumb: El<'a, Message> = match ctx.picture(&fmt::s(r, "cover_url")) {
-        Some(h) => image(h)
-            .width(40)
-            .height(40)
-            .content_fit(ContentFit::Cover)
-            .border_radius(6.0)
-            .into(),
-        None => container(icon(Icon::Download, 16.0, p.faint))
-            .width(40)
-            .height(40)
-            .center(40)
-            .style(theme::art)
-            .into(),
-    };
-    let mut line = row![badge(kind.clone(), Badge::Plain)].spacing(6).align_y(Alignment::Center);
-    let attempts = fmt::i(r, "attempts");
-    if attempts > 1 {
-        line = line.push(widgets::faint(format!("{attempts} attempts ·")).size(12));
-    }
-    // a download the audio check turned away: the reason in full on a line of its own (shown once)
-    let offer = request_list::anyway(r);
-    let message = request_list::shows_message(r, offer.as_ref());
-    if fmt::truthy(r, "source") {
-        line = line.push(widgets::faint(format!("via {}{}", fmt::s(r, "source"), if message { " ·" } else { "" })).size(12));
-    }
-    if message {
-        line = line.push(small_muted(fmt::s(r, "message")));
-    }
-    line = line.push(widgets::faint(format!("· {}", fmt::ago(fmt::f(r, "created_at")))).size(12));
-    let mut lines = column![t(what).size(14).font(theme::semibold()), line].spacing(3);
-    if let Some(a) = offer.as_ref().filter(|a| !a.text.is_empty()) {
-        lines = lines.push(request_list::anyway_reason(a));
-    }
+    let mut sub: Vec<String> = [by, kind].into_iter().filter(|x| !x.is_empty()).collect();
     if active && fmt::truthy(r, "progress") {
-        lines = lines.push(
-            container(
-                progress_bar(0.0..=100.0, fmt::f(r, "progress") as f32)
-                    .girth(5)
-                    .style(theme::progress),
-            )
-            .max_width(420),
-        );
+        sub.push(format!("{}%", fmt::i(r, "progress")));
     }
-    let mut right = row![status_badge(&status)].spacing(6).align_y(Alignment::Center);
-    // Keep anyway / Download anyway beside Cancel, for those who may (admins, members with `fix`)
-    if let Some(a) = offer.filter(|_| request_list::may_fix(ctx.is_admin(), ctx.session.perm("fix"))) {
-        let on = Message::Anyway(fmt::i(r, "id"), a.clone());
-        right = right.push(request_list::anyway_btn(&a, Some(on)));
-    }
-    if matches!(
+    let mut tile = Tile::new(what, TileKind::Album, Message::AllRequests)
+        .sub(sub.join(" · "))
+        .cover(ctx.picture(&fmt::s(r, "cover_url")))
+        .corner(status_badge(&status));
+    // a download the audio check turned away: Keep anyway / Download anyway on hover, for those who may (admins,
+    // members with `fix`); otherwise Cancel
+    let offer = request_list::anyway(r).filter(|_| request_list::may_fix(ctx.is_admin(), ctx.session.perm("fix")));
+    if let Some(a) = offer {
+        let (i, tip) = if a.keep { (Icon::Check, "Keep anyway") } else { (Icon::Download, "Download anyway") };
+        tile = tile.action(i, tip, Message::Anyway(fmt::i(r, "id"), a));
+    } else if matches!(
         status.as_str(),
         "pending" | "queued" | "searching" | "downloading" | "monitoring" | "importing" | "waiting"
     ) {
-        right = right.push(icon_btn(Icon::X, "Cancel", Some(Message::CancelReq(fmt::i(r, "id")))));
+        tile = tile.action(Icon::X, "Cancel", Message::CancelReq(fmt::i(r, "id")));
     }
-    column![
-        container(
-            row![thumb, lines.width(Length::Fill), right]
-                .spacing(14)
-                .align_y(Alignment::Center)
-        )
-        .padding([11, 16]),
-        widgets::divider(),
-    ]
-    .into()
+    tile.view()
 }
 
 pub fn view<'a>(state: &'a State, ctx: &Ctx<'a>) -> El<'a, Message> {
@@ -788,19 +744,18 @@ pub fn view<'a>(state: &'a State, ctx: &Ctx<'a>) -> El<'a, Message> {
         );
     }
 
-    // downloads in progress
+    // downloads in progress: one sideways row of tiles, like Recently added, so it stays short
     if let Some(reqs) = state.reqs.as_ref().filter(|r| !r.is_empty()) {
-        let mut list = column![];
-        for r in reqs {
-            list = list.push(request_row(r, ctx));
-        }
+        let tiles: Vec<El<'a, Message>> = reqs.iter().map(|r| request_tile(r, ctx)).collect();
         page = page.push(
             column![
                 section_head(
                     "Your downloads in progress",
                     Some(btn_sm("All requests", Btn::Default, Some(Message::AllRequests)).into())
                 ),
-                widgets::card_flat(list).width(Length::Fill),
+                scrollable(container(iced::widget::row(tiles).spacing(16)).padding(iced::Padding { bottom: 12.0, ..Default::default() }))
+                    .direction(scrollable::Direction::Horizontal(scrollable::Scrollbar::new()))
+                    .style(theme::scroll),
             ]
             .spacing(14),
         );

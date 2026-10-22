@@ -219,6 +219,9 @@ label.field small { color: var(--faint); font-size: 12px; }
 
 .grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(168px, 1fr)); gap: 18px; }
 .tile { position: relative; cursor: pointer; min-width: 0; }
+/* one sideways row of tiles (Home's downloads in progress): as wide as a grid cell, scrolls instead of wrapping */
+.hscroll { display: grid; grid-auto-flow: column; grid-auto-columns: 168px; gap: 18px; overflow-x: auto; padding-bottom: 8px; scroll-snap-type: x proximity; }
+.hscroll > .tile { scroll-snap-align: start; }
 .tile .art {
   position: relative; aspect-ratio: 1; border-radius: 12px; overflow: hidden; background: var(--panel-2);
   box-shadow: var(--shadow); transition: transform .18s;

@@ -13,6 +13,7 @@ import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxHeight
+import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
@@ -64,6 +65,7 @@ import app.encore.android.ui.components.rememberCopied
 import app.encore.android.ui.components.Gutter
 import app.encore.android.ui.components.MenuEntry
 import app.encore.android.ui.components.PopMenu
+import app.encore.android.ui.components.Tile
 import app.encore.android.ui.components.SmallButton
 import app.encore.android.ui.components.Toasts
 import app.encore.android.ui.screens.ConfirmDialog
@@ -363,6 +365,30 @@ fun RequestItem(a: RequestActions, r: RequestRow, indent: Dp = 0.dp) {
                 }
             }
         }
+    }
+}
+
+/**
+ * A request as a card for Home's sideways row (like Recently added): cover with the status and progress over it,
+ * what and who. A tap opens the details sheet with the buttons, a long press opens ⋯.
+ */
+@Composable
+fun RequestCard(a: RequestActions, r: RequestRow, modifier: Modifier = Modifier) {
+    var menu by remember { mutableStateOf(false) }
+    Box(modifier) {
+        Tile(
+            title = r.what,
+            subtitle = listOf(if (r.kind == "artist") "" else r.artist, r.kind).filter { it.isNotEmpty() }.joinToString(" · "),
+            onLongClick = { menu = true },
+            onClick = { a.showDetails(r) },
+        ) { m ->
+            Box(m) {
+                Cover(r.coverUrl.ifEmpty { null }, a.nav.graph.imageLoader, Modifier.fillMaxSize(), corner = 12.dp, label = r.title.ifEmpty { r.artist })
+                StatusBadge(r.status, Modifier.align(Alignment.TopStart).padding(8.dp), label = RequestRules.badgeLabel(r))
+                if (r.isActive && r.progress > 0) ProgressBar(r.progress, Modifier.align(Alignment.BottomCenter).padding(8.dp).fillMaxWidth())
+            }
+        }
+        PopMenu(menu, { menu = false }, a.menuEntries(r))
     }
 }
 
