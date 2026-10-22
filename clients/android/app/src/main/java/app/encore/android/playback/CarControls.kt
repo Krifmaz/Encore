@@ -34,7 +34,7 @@ import java.util.concurrent.Executors
  * the playback service and Settings → Playback. On / off (the Lyrics button), and how: a lyrics card as the
  * artwork ([MODE_CARD], the default) or the current line as the title ([MODE_TITLE]). Also the Car buttons page
  * (CarButtonsScreen): which buttons Android Auto gets in what order ([carButtons]) and the car's number of spots
- * for its preview ([carSpots]).
+ * for its preview ([carSpots]), and the Encore Lyrics car app's control strip ([lyricsStrip]).
  */
 object CarPrefs {
     const val MODE_CARD = "card"
@@ -44,10 +44,33 @@ object CarPrefs {
     private const val MODE = "lyrics_mode"
     private const val BUTTONS = "buttons"
     private const val SPOTS = "spots"
+    private const val LYRICS_STRIP = "lyrics_strip"
     @Volatile private var flow: MutableStateFlow<Boolean>? = null
     @Volatile private var modeFlow: MutableStateFlow<String>? = null
     @Volatile private var buttonsFlow: MutableStateFlow<CarButtonRules.Layout>? = null
     @Volatile private var spotsFlow: MutableStateFlow<Int>? = null
+    @Volatile private var stripFlow: MutableStateFlow<List<LyricsStripRules.Btn>>? = null
+
+    /** The Encore Lyrics car app's control strip (LyricsStripRules.encode in the file); an open car app follows at once. */
+    fun lyricsStrip(context: Context): StateFlow<List<LyricsStripRules.Btn>> = stripState(context).asStateFlow()
+
+    fun setLyricsStrip(context: Context, strip: List<LyricsStripRules.Btn>) {
+        val f = stripState(context)
+        if (f.value == strip) return
+        f.value = strip
+        try {
+            context.applicationContext.getSharedPreferences(FILE, Context.MODE_PRIVATE).edit().putString(LYRICS_STRIP, LyricsStripRules.encode(strip)).apply()
+        } catch (_: Exception) {}
+    }
+
+    @Synchronized
+    private fun stripState(context: Context): MutableStateFlow<List<LyricsStripRules.Btn>> {
+        stripFlow?.let { return it }
+        val s = try {
+            context.applicationContext.getSharedPreferences(FILE, Context.MODE_PRIVATE).getString(LYRICS_STRIP, null)
+        } catch (_: Exception) { null }
+        return MutableStateFlow(LyricsStripRules.decode(s)).also { stripFlow = it }
+    }
 
     /** The car's buttons in their three groups (CarButtonRules.encode in the file); the service follows changes at once. */
     fun carButtons(context: Context): StateFlow<CarButtonRules.Layout> = buttonsState(context).asStateFlow()

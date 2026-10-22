@@ -13,6 +13,7 @@ import androidx.car.app.Screen
 import androidx.car.app.Session
 import androidx.car.app.model.Action
 import androidx.car.app.model.ActionStrip
+import androidx.car.app.model.CarColor
 import androidx.car.app.model.CarIcon
 import androidx.car.app.model.ItemList
 import androidx.car.app.model.ListTemplate
@@ -26,6 +27,7 @@ import androidx.core.graphics.drawable.IconCompat
 import androidx.lifecycle.DefaultLifecycleObserver
 import androidx.lifecycle.LifecycleOwner
 import androidx.media3.common.MediaItem
+import androidx.media3.common.Player
 import androidx.media3.session.LibraryResult
 import androidx.media3.session.MediaBrowser
 import androidx.media3.session.MediaController
@@ -36,13 +38,18 @@ import app.encore.android.features.group.GroupListen
 import app.encore.android.graph
 import app.encore.android.playback.ArtistNode
 import app.encore.android.playback.CarRules
+import app.encore.android.playback.CarPrefs
 import app.encore.android.playback.EncorePlaybackService
+import app.encore.android.playback.LyricsStripRules
 import app.encore.android.playback.MediaItems
 import com.google.common.util.concurrent.ListenableFuture
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
 import java.util.concurrent.Executors
 
@@ -82,6 +89,21 @@ class LyricsCarSession : Session() {
     private var surface: LyricsSurface? = null
     /** browse requests made before the browser connected */
     private val waiting = ArrayList<(MediaBrowser?) -> Unit>()
+    private val modesFlow = MutableStateFlow(Modes())
+
+    /** Shuffle and repeat as the player has them, for the strip's Shuffle and Repeat buttons. */
+    data class Modes(val shuffle: Boolean = false, val repeat: Int = Player.REPEAT_MODE_OFF)
+
+    val modes: StateFlow<Modes> = modesFlow.asStateFlow()
+    private val modesListener = object : Player.Listener {
+        override fun onShuffleModeEnabledChanged(shuffleModeEnabled: Boolean) = readModes()
+        override fun onRepeatModeChanged(repeatMode: Int) = readModes()
+    }
+
+    private fun readModes() {
+        val c = controller ?: return
+        modesFlow.value = Modes(c.shuffleModeEnabled, c.repeatMode)
+    }
 
     override fun onCreateScreen(intent: Intent): Screen {
         val ctx = carContext
@@ -90,6 +112,8 @@ class LyricsCarSession : Session() {
         controllerFuture = future
         future.addListener({
             controller = try { future.get() } catch (_: Exception) { null }
+            controller?.addListener(modesListener)
+            readModes()
             val pending = ArrayList(waiting)
             waiting.clear()
             for (w in pending) w(controller)
@@ -105,6 +129,7 @@ class LyricsCarSession : Session() {
                 try { ctx.getCarService(AppManager::class.java).setSurfaceCallback(null) } catch (_: Exception) {}
                 s.release()
                 surface = null
+                controller?.removeListener(modesListener)
                 controllerFuture?.let { MediaController.releaseFuture(it) }
                 controllerFuture = null
                 controller = null
@@ -122,6 +147,30 @@ class LyricsCarSession : Session() {
     fun next() { controller?.seekToNext() }
 
     fun previous() { controller?.seekToPrevious() }
+
+    /** Shuffle on or off; [onDone] gets "Shuffle on" / "Shuffle off". */
+    fun toggleShuffle(onDone: (String) -> Unit) {
+        val c = controller ?: return
+        c.shuffleModeEnabled = !c.shuffleModeEnabled
+        onDone(if (c.shuffleModeEnabled) "Shuffle on" else "Shuffle off")
+    }
+
+    /** Repeat off → all → one → off, as the phone's player; [onDone] gets the new mode in words. */
+    fun cycleRepeat(onDone: (String) -> Unit) {
+        val c = controller ?: return
+        c.repeatMode = when (c.repeatMode) {
+            Player.REPEAT_MODE_OFF -> Player.REPEAT_MODE_ALL
+            Player.REPEAT_MODE_ALL -> Player.REPEAT_MODE_ONE
+            else -> Player.REPEAT_MODE_OFF
+        }
+        onDone(
+            when (c.repeatMode) {
+                Player.REPEAT_MODE_ALL -> "Repeat all"
+                Player.REPEAT_MODE_ONE -> "Repeat one"
+                else -> "Repeat off"
+            },
+        )
+    }
 
     /** Like or unlike the song (the same likes the phone, the car's media buttons and the web use). */
     fun toggleLike(trackId: Long) { carContext.graph.likes.toggle(trackId) }
@@ -192,7 +241,8 @@ class LyricsCarSession : Session() {
 
 /**
  * The one screen: the lyrics on the map surface (all the free area), the song in a one-row card with Like, the
- * controls in the action strip.
+ * controls in the action strip: the buttons and order picked on the phone (Settings → Android Auto → Encore Lyrics
+ * screen, [LyricsStripRules]; up to four, Android Auto's limit).
  */
 class LyricsScreen(
     carContext: CarContext,
@@ -208,6 +258,8 @@ class LyricsScreen(
     private var coverFor: String? = null
     private var cover: Bitmap? = null
     private var liked = false
+    private var strip: List<LyricsStripRules.Btn> = CarPrefs.lyricsStrip(carContext).value
+    private var modes = LyricsCarSession.Modes()
 
     init {
         lifecycle.addObserver(object : DefaultLifecycleObserver {
@@ -226,13 +278,25 @@ class LyricsScreen(
             }
         }
         scope.launch { carContext.graph.likes.liked.collect { refresh() } }
+        scope.launch {
+            CarPrefs.lyricsStrip(carContext).collect {
+                strip = it
+                refresh()
+            }
+        }
+        scope.launch {
+            session.modes.collect {
+                modes = it
+                refresh()
+            }
+        }
     }
 
     /** A new template when what it shows changed. */
     private fun refresh() {
         val now = np
         liked = now?.trackId?.let { carContext.graph.likes.isLiked(it) } == true
-        val key = listOf(now?.mediaId, now?.title, now?.artist, now?.album, now?.artistNode, now?.playing, liked, coverFor == now?.artworkUri?.toString() && cover != null)
+        val key = listOf(now?.mediaId, now?.title, now?.artist, now?.album, now?.artistNode, now?.playing, liked, coverFor == now?.artworkUri?.toString() && cover != null, strip, modes)
         if (key != shownKey) {
             shownKey = key
             invalidate()
@@ -293,30 +357,41 @@ class LyricsScreen(
             .setSingleList(ItemList.Builder().addItem(row.build()).build())
             .build()
         val playing = now?.playing == true
-        val strip = ActionStrip.Builder()
-            .addAction(iconAction(R.drawable.ic_skip_previous) { session.previous() })
-            .addAction(iconAction(if (playing) R.drawable.ic_pause else R.drawable.ic_play) { session.playPause() })
-            .addAction(iconAction(R.drawable.ic_skip_next) { session.next() })
-        // the icon alone, like the other three, so the strip stays small on wide screens too; the message after a
-        // tap names the artist and what was added
-        now?.artistNode?.let { a ->
-            strip.addAction(
-                iconAction(R.drawable.ic_person) {
-                    session.moreBy(a) { msg -> CarToast.makeText(carContext, msg, CarToast.LENGTH_SHORT).show() }
-                },
-            )
+        val toast: (String) -> Unit = { msg -> CarToast.makeText(carContext, msg, CarToast.LENGTH_SHORT).show() }
+        // the listener's buttons in their order (icons alone, so the strip stays small on wide screens too); a button
+        // with nothing to act on (no song, no artist) is left out for now
+        val actions = strip.mapNotNull { b ->
+            when (b) {
+                LyricsStripRules.Btn.PREVIOUS -> iconAction(R.drawable.ic_skip_previous) { session.previous() }
+                LyricsStripRules.Btn.PLAY -> iconAction(if (playing) R.drawable.ic_pause else R.drawable.ic_play) { session.playPause() }
+                LyricsStripRules.Btn.NEXT -> iconAction(R.drawable.ic_skip_next) { session.next() }
+                LyricsStripRules.Btn.ARTIST -> now?.artistNode?.let { a -> iconAction(R.drawable.ic_person) { session.moreBy(a, toast) } }
+                LyricsStripRules.Btn.LIKE -> now?.trackId?.let { id ->
+                    iconAction(if (liked) R.drawable.ic_favorite else R.drawable.ic_favorite_border) { session.toggleLike(id) }
+                }
+                LyricsStripRules.Btn.SHUFFLE -> iconAction(R.drawable.ic_shuffle, on = modes.shuffle) { session.toggleShuffle(toast) }
+                LyricsStripRules.Btn.REPEAT -> iconAction(
+                    if (modes.repeat == Player.REPEAT_MODE_ONE) R.drawable.ic_repeat_one else R.drawable.ic_repeat,
+                    on = modes.repeat != Player.REPEAT_MODE_OFF,
+                ) { session.cycleRepeat(toast) }
+            }
         }
-        return MapWithContentTemplate.Builder()
-            .setContentTemplate(content)
-            .setActionStrip(strip.build())
-            .build()
+        val template = MapWithContentTemplate.Builder().setContentTemplate(content)
+        if (actions.isNotEmpty()) {
+            val b = ActionStrip.Builder()
+            for (a in actions.take(LyricsStripRules.MAX)) b.addAction(a)
+            template.setActionStrip(b.build())
+        }
+        return template.build()
     }
 
-    private fun icon(res: Int): CarIcon = CarIcon.Builder(IconCompat.createWithResource(carContext, res)).build()
+    private fun icon(res: Int, tint: CarColor? = null): CarIcon =
+        CarIcon.Builder(IconCompat.createWithResource(carContext, res)).apply { tint?.let { setTint(it) } }.build()
 
-    private fun iconAction(res: Int, onClick: () -> Unit): Action =
+    /** [on]: a mode that is on (Shuffle, Repeat) shows in the car's accent colour. */
+    private fun iconAction(res: Int, on: Boolean = false, onClick: () -> Unit): Action =
         Action.Builder()
-            .setIcon(icon(res))
+            .setIcon(icon(res, if (on) CarColor.SECONDARY else null))
             .setOnClickListener { onClick() }
             .build()
 }

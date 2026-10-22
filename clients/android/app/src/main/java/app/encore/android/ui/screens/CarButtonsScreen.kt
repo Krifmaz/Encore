@@ -21,6 +21,7 @@ import androidx.compose.foundation.ScrollState
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
+import androidx.compose.material3.Checkbox
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.Icon
@@ -73,12 +74,14 @@ import app.encore.android.playback.CarButtonRules.Id
 import app.encore.android.playback.CarButtonRules.Layout
 import app.encore.android.playback.CarPrefs
 import app.encore.android.playback.CarRules
+import app.encore.android.playback.LyricsStripRules
 import app.encore.android.ui.theme.EncoreColors
 import app.encore.android.ui.theme.palette
 
-// Settings → Playback → In the car → Car buttons. The rules (what is sent, what a car shows, the tags and lines) are
+// Settings → Android Auto (and Settings → Playback → In the car → Car buttons). The rules (what is sent, what a car shows, the tags and lines) are
 // in playback/CarButtonRules.kt; the setting is stored on this phone (CarPrefs.carButtons / carSpots) and a connected
-// car follows it at once (CarControls collects CarPrefs.carButtons).
+// car follows it at once (CarControls collects CarPrefs.carButtons). Below them, the Encore Lyrics screen's strip
+// (LyricsStripRules, CarPrefs.lyricsStrip), which the open car app follows at once too.
 
 private const val EXPLAIN =
     "Android Auto fills its spots in the order below and puts the rest behind ⋯, so while there are free spots the first buttons in the ⋯ menu show on the screen too."
@@ -143,7 +146,7 @@ fun CarButtonsRow(onOpen: () -> Unit) {
  * exactly; the preview shows, for the car's number of spots, what the car will show and what lands behind ⋯.
  */
 @Composable
-fun CarButtonsScreen(onBack: () -> Unit) {
+fun CarButtonsScreen(onBack: () -> Unit, title: String = "Car buttons") {
     val context = LocalContext.current
     val p = MaterialTheme.palette
     val layout by remember { CarPrefs.carButtons(context) }.collectAsState()
@@ -164,7 +167,7 @@ fun CarButtonsScreen(onBack: () -> Unit) {
     val scroll = rememberScrollState()
 
     Column(Modifier.fillMaxSize()) {
-        BackBar("Car buttons", onBack)
+        BackBar(title, onBack)
         Column(Modifier.fillMaxSize().verticalScroll(scroll).padding(horizontal = 16.dp)) {
             HelpLine(EXPLAIN)
             SpotsRow(spots) { n -> CarPrefs.setCarSpots(context, n) }
@@ -203,6 +206,7 @@ fun CarButtonsScreen(onBack: () -> Unit) {
                 }
             }
             HelpLine(FOOTER)
+            LyricsStripSection()
             Spacer(Modifier.height(32.dp))
         }
     }
@@ -497,4 +501,94 @@ private fun ButtonRow(id: Id, layout: Layout, tag: CarButtonRules.Tag?, held: Bo
             }
         }
     }
+}
+
+private const val LYRICS_HELP =
+    "Encore Lyrics (in the car's app list) draws the lyrics over the whole screen itself. Android Auto still adds a song card and one strip of up to 4 buttons, so pick them and their order here."
+private const val LYRICS_MEDIA_HELP =
+    "The player Android Auto shows for Encore (above) is drawn by Android Auto, not by Encore: only its buttons can be changed."
+
+/** The Encore Lyrics strip's buttons on this page. */
+private fun stripIconOf(b: LyricsStripRules.Btn): Int = when (b) {
+    LyricsStripRules.Btn.PREVIOUS -> R.drawable.ic_skip_previous
+    LyricsStripRules.Btn.PLAY -> R.drawable.ic_play
+    LyricsStripRules.Btn.NEXT -> R.drawable.ic_skip_next
+    LyricsStripRules.Btn.ARTIST -> R.drawable.ic_person
+    LyricsStripRules.Btn.LIKE -> R.drawable.ic_favorite
+    LyricsStripRules.Btn.SHUFFLE -> R.drawable.ic_shuffle
+    LyricsStripRules.Btn.REPEAT -> R.drawable.ic_repeat
+}
+
+/**
+ * "Encore Lyrics screen": which of [LyricsStripRules.Btn] the Encore Lyrics car app's strip has (up to
+ * [LyricsStripRules.MAX]) and in what order. A tick turns one on or off; ▲ / ▼ move the ones that are on.
+ */
+@Composable
+private fun LyricsStripSection() {
+    val context = LocalContext.current
+    val p = MaterialTheme.palette
+    val strip by remember { CarPrefs.lyricsStrip(context) }.collectAsState()
+    val set: (List<LyricsStripRules.Btn>) -> Unit = { CarPrefs.setLyricsStrip(context, it) }
+
+    Text(
+        "Encore Lyrics screen",
+        style = MaterialTheme.typography.titleMedium,
+        fontWeight = FontWeight.SemiBold,
+        modifier = Modifier.padding(top = 24.dp, bottom = 4.dp).semantics { heading() },
+    )
+    HelpLine(LYRICS_HELP)
+    HelpLine(LYRICS_MEDIA_HELP)
+    // a picture of the strip; the summary says the same in words
+    Column(
+        Modifier
+            .fillMaxWidth()
+            .padding(vertical = 10.dp)
+            .clip(RoundedCornerShape(12.dp))
+            .background(p.panel)
+            .border(1.dp, p.border, RoundedCornerShape(12.dp))
+            .padding(12.dp),
+    ) {
+        Row(horizontalArrangement = Arrangement.spacedBy(4.dp), verticalAlignment = Alignment.CenterVertically) {
+            if (strip.isEmpty()) Text("No buttons", style = MaterialTheme.typography.bodySmall, color = p.faint)
+            for (b in strip) Chip(stripIconOf(b))
+        }
+        val summary = LyricsStripRules.summary(strip)
+        Text(summary, style = MaterialTheme.typography.bodyMedium, fontWeight = FontWeight.SemiBold, modifier = Modifier.padding(top = 10.dp).said(summary, live = true))
+    }
+    for (b in LyricsStripRules.rows(strip)) {
+        key(b) {
+            val on = b in strip
+            val canToggle = LyricsStripRules.canAdd(strip, b)
+            Row(
+                Modifier
+                    .fillMaxWidth()
+                    .clickable(enabled = canToggle, role = Role.Checkbox) { set(LyricsStripRules.toggle(strip, b)) }
+                    .padding(vertical = 2.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Checkbox(checked = on, onCheckedChange = null, enabled = canToggle)
+                Row(
+                    Modifier.weight(1f).alpha(if (on) 1f else 0.5f).said(b.label + if (on) ", on the strip" else ""),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    Icon(painterResource(stripIconOf(b)), contentDescription = null, tint = p.text, modifier = Modifier.size(22.dp))
+                    Spacer(Modifier.width(12.dp))
+                    Text(b.label, style = MaterialTheme.typography.bodyLarge)
+                }
+                if (on) {
+                    val i = strip.indexOf(b)
+                    val canUp = i > 0
+                    val canDown = i < strip.lastIndex
+                    IconButton(onClick = { set(LyricsStripRules.up(strip, b)) }, enabled = canUp) {
+                        Icon(painterResource(R.drawable.ic_arrow_upward), contentDescription = "Move ${b.label} left", tint = if (canUp) p.muted else p.border)
+                    }
+                    IconButton(onClick = { set(LyricsStripRules.down(strip, b)) }, enabled = canDown) {
+                        Icon(painterResource(R.drawable.ic_arrow_downward), contentDescription = "Move ${b.label} right", tint = if (canDown) p.muted else p.border)
+                    }
+                }
+            }
+        }
+    }
+    HelpLine(LyricsStripRules.roomLine(strip))
+    TextButton(onClick = { set(LyricsStripRules.DEFAULT) }, enabled = strip != LyricsStripRules.DEFAULT) { Text("Reset to default") }
 }

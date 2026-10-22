@@ -223,6 +223,7 @@ fun SettingsScreen(nav: Nav, session: Session, startAt: String? = null) {
             "appearance" -> AppearanceScreen(nav, serverPrefs = "theme" in features, onBack = back)
             "language" -> LanguageScreen(nav, onBack = back)
             "playback" -> PlaybackSettingsScreen(nav, onBack = back)
+            "androidauto" -> CarButtonsScreen(onBack = back, title = "Android Auto")
             "connections" -> ConnectionsScreen(nav, admin, onBack = back)
             "device" -> ThisDeviceScreen(nav, onBack = back)
             "users" -> UsersScreen(nav, me?.long("id") ?: 0L, onBack = back, onOpenInvites = { open("invites") })
@@ -265,6 +266,8 @@ fun SettingsScreen(nav: Nav, session: Session, startAt: String? = null) {
             NavRow("Appearance", appearanceSummary(settings)) { open("appearance") }
             NavRow("Language") { open("language") }
             NavRow("Playback", playbackSummary(prefs)) { open("playback") }
+            // the car's buttons (the media player's row and the Encore Lyrics screen's strip): one tap from Settings
+            NavRow("Android Auto", "Car buttons and the Encore Lyrics screen") { open("androidauto") }
             NavRow("Connections") { open("connections") }
             NavRow("This device") { open("device") }
             if (admin) {
