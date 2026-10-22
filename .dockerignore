@@ -18,3 +18,6 @@ data
 docker-compose*.yml
 *.md
 .env
+# the release notes the server builds in (What's new, crates/api/build.rs)
+!docs/releases
+!docs/releases/*.md
