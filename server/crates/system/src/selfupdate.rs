@@ -292,14 +292,18 @@ pub async fn run_helper(d: &Docker, target: &str, image: &str, t: Timing, log: &
         anyhow::bail!("{why}: nothing was changed");
     }
     let mut body = plan_create_body(&inspect, image);
+    let mut old_image = Value::Null;
     if let Some(old) = inspect["Image"].as_str().filter(|i| !i.is_empty()) {
         match d.get(&format!("/images/{old}/json")).await {
-            Ok((200, img)) => body = without_image_defaults(body, &img),
+            Ok((200, img)) => {
+                body = without_image_defaults(body, &img);
+                old_image = img;
+            }
             _ => log("the old image is gone: its settings are copied as the container had them"),
         }
     }
     // image references go into the path as they are, like the docker CLI sends them
-    let (code, _) = d.get(&format!("/images/{image}/json")).await?;
+    let (code, new_image) = d.get(&format!("/images/{image}/json")).await?;
     if code != 200 {
         anyhow::bail!("{image} is not on this host (Docker answered {code}): nothing was changed");
     }
@@ -343,8 +347,55 @@ pub async fn run_helper(d: &Docker, target: &str, image: &str, t: Timing, log: &
     if let Err(e) = step(d, "remove the old container", "DELETE", &format!("/containers/{id}?v=false&force=true"), None).await {
         log(&format!("{e} – remove it by hand: docker rm {old_name}"));
     }
+    clean_images(d, &old_image, new_image["Id"].as_str().unwrap_or(""), log).await;
     log("done");
     Ok(new_id)
+}
+
+/// What goes after a swap to free the disk: the old image's tags of Encore's image (untagging lets Docker drop
+/// the image once nothing uses it), then the image itself by id. Nothing when the old image is the new one or is
+/// unknown. Tags of other repositories are left alone: someone else put them there.
+pub fn plan_image_cleanup(old_image: &Value, new_id: &str) -> Vec<String> {
+    let Some(old_id) = old_image["Id"].as_str().filter(|i| !i.is_empty() && *i != new_id) else { return vec![] };
+    let mut out: Vec<String> = old_image["RepoTags"].as_array().into_iter().flatten().filter_map(|t| t.as_str())
+        .filter(|t| parse_image(t).0 == IMAGE).map(String::from).collect();
+    out.push(old_id.to_string());
+    out
+}
+
+/// The untagged leftovers of Encore's image (`<none>` after a newer :latest or :hotfix was pulled over them).
+pub fn dangling_encore_images(list: &Value) -> Vec<String> {
+    list.as_array().into_iter().flatten()
+        .filter(|i| i["RepoDigests"].as_array().into_iter().flatten().filter_map(|d| d.as_str()).any(|d| parse_image(d).0 == IMAGE))
+        .filter(|i| i["RepoTags"].as_array().into_iter().flatten().filter_map(|t| t.as_str()).all(|t| t == "<none>:<none>"))
+        .filter_map(|i| i["Id"].as_str().map(String::from))
+        .collect()
+}
+
+/// The old image and Encore's untagged leftovers go (never forced: an image a container still uses stays).
+/// A failure only logs: the update itself is done.
+async fn clean_images(d: &Docker, old_image: &Value, new_id: &str, log: &mut dyn FnMut(&str)) {
+    let mut gone = 0;
+    for r in plan_image_cleanup(old_image, new_id) {
+        match d.delete(&format!("/images/{r}")).await {
+            Ok((code, _)) if ok(code) || code == 404 => gone += 1,
+            Ok((code, v)) => log(&format!("kept the old image {r} (Docker answered {code}: {})", docker::message(&v))),
+            Err(e) => log(&format!("kept the old image {r}: {e}")),
+        }
+    }
+    let filters = urlencoding::encode(r#"{"dangling":["true"]}"#).into_owned();
+    if let Ok((200, list)) = d.get(&format!("/images/json?filters={filters}")).await {
+        for id in dangling_encore_images(&list).into_iter().filter(|i| i != new_id) {
+            if let Ok((code, _)) = d.delete(&format!("/images/{id}")).await {
+                if ok(code) {
+                    gone += 1;
+                }
+            }
+        }
+    }
+    if gone > 0 {
+        log("old Encore images removed");
+    }
 }
 
 /// `encore self-update-helper …`: Some(exit code) when the program was started as the helper, None otherwise

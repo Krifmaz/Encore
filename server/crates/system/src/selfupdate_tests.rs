@@ -260,6 +260,11 @@ async fn mock_handler(axum::extract::State(m): axum::extract::State<Mock>, metho
                 reply(404, json!({ "message": format!("No such container: {c}") }))
             }
         }
+        ("GET", ["images", "json"]) => reply(200, json!([
+            { "Id": "sha256:left", "RepoTags": ["<none>:<none>"], "RepoDigests": ["ghcr.io/krifmaz/encore@sha256:abc"] },
+            { "Id": "sha256:other", "RepoTags": ["<none>:<none>"], "RepoDigests": ["postgres@sha256:def"] },
+        ])),
+        ("DELETE", ["images", ..]) => reply(200, json!([{ "Deleted": "x" }])),
         ("GET", ["images", ..]) => {
             let name = path.trim_start_matches("/images/").trim_end_matches("/json");
             if name == ins["Image"].as_str().unwrap() {
@@ -363,7 +368,11 @@ async fn the_helper_swaps_the_container() {
                   &format!("GET /images/{NEW}/json"), "POST /containers/OLD/stop?t=30", "POST /containers/OLD/rename", "POST /containers/create?name=encore",
                   "POST /containers/NEW/start", "GET /containers/NEW/json"];
     assert_eq!(&calls[..expect.len()], &expect.map(String::from)[..], "{calls:#?}");
-    assert_eq!(calls.last().unwrap(), "DELETE /containers/OLD?v=false&force=true", "{calls:#?}");
+    let old_image = fixture()["Image"].as_str().unwrap().to_string();
+    let i = calls.iter().position(|c| c == "DELETE /containers/OLD?v=false&force=true").expect("the old container goes");
+    // then the old image and Encore's untagged leftovers (never another repository's)
+    assert_eq!(&calls[i + 1..], &[format!("DELETE /images/{old_image}"), "GET /images/json?filters=%7B%22dangling%22%3A%5B%22true%22%5D%7D".into(),
+                                   "DELETE /images/sha256:left".into()], "{calls:#?}");
     let body = m.body("/containers/create?name=encore").unwrap();
     assert_eq!(body["Image"], json!(NEW));
     assert!(!body.to_string().contains("ENCORE_BUILD"), "the old image's own values gave way: {body}");
@@ -371,6 +380,21 @@ async fn the_helper_swaps_the_container() {
     assert!(lines.iter().any(|l| l.starts_with("renaming encore to encore-old-")), "{lines:?}");
     assert_eq!(lines.last().map(String::as_str), Some("done"));
     let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn the_old_image_and_its_encore_tags_go() {
+    let old = json!({ "Id": "sha256:old", "RepoTags": ["ghcr.io/krifmaz/encore:0.35.2", "ghcr.io/krifmaz/encore:latest", "myfork/encore:keep"] });
+    assert_eq!(plan_image_cleanup(&old, "sha256:new"), ["ghcr.io/krifmaz/encore:0.35.2", "ghcr.io/krifmaz/encore:latest", "sha256:old"]);
+    assert!(plan_image_cleanup(&old, "sha256:old").is_empty(), "the same image: nothing goes");
+    assert!(plan_image_cleanup(&Value::Null, "sha256:new").is_empty(), "an unknown old image: nothing goes");
+    let list = json!([
+        { "Id": "sha256:a", "RepoTags": ["<none>:<none>"], "RepoDigests": ["ghcr.io/krifmaz/encore@sha256:1"] },
+        { "Id": "sha256:b", "RepoTags": null, "RepoDigests": ["ghcr.io/krifmaz/encore@sha256:2"] },
+        { "Id": "sha256:c", "RepoTags": ["ghcr.io/krifmaz/encore:0.30.0"], "RepoDigests": ["ghcr.io/krifmaz/encore@sha256:3"] },
+        { "Id": "sha256:d", "RepoTags": ["<none>:<none>"], "RepoDigests": ["redis@sha256:4"] },
+    ]);
+    assert_eq!(dangling_encore_images(&list), ["sha256:a", "sha256:b"]);
 }
 
 /// Creating the new container fails: the old one gets its name back and starts again.

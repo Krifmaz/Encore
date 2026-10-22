@@ -1670,6 +1670,11 @@ env = "ENCORE_CHECK_UPDATES"
 default = true
 help = "Check for Encore updates task on/off."
 
+[keys.update_channel]
+env = "ENCORE_UPDATE_CHANNEL"
+default = "stable"
+help = "Which Encore builds Diagnostics offers (its Updates card): stable = full releases only; hotfix = also the build of every push to the main branch (a GitHub prerelease, image tag :<version> and :hotfix). A full release always counts as newer than the hotfixes before it."
+
 [keys.task_update_minutes]
 default = 1440
 help = "How often the Check for Encore updates task runs, in minutes."

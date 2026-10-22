@@ -3,6 +3,10 @@
 //!        restart: "ready", self_update: "ready" | "unavailable", self_update_reason, image, …}
 //!   POST /api/system/update {tag?}     (admin) → 202: the new image is pulled and the helper container started
 //!   POST /api/system/restart           (admin) → 202: the server stops gracefully and exits with code 75
+//! The `update_channel` setting picks what counts: `stable` = the newest full release (GitHub's latest), `hotfix`
+//! = the newest of those and the hotfix prereleases CI publishes on every push to the main branch (tag
+//! `hotfix-<last release>.<run>`, e.g. hotfix-0.35.2.17, image :0.35.2.17); a full release is newer than every
+//! hotfix before it (0.35.3 > 0.35.2.17).
 //! The newest release comes from GitHub (`encore_http::github`, ETags and the token setting) and is kept
 //! in the database, so the Diagnostics page and its banner show it without waiting; the scheduler looks once a
 //! day (`check_updates`). "Update now" needs the Docker socket mounted into the container; selfupdate.rs does
@@ -30,8 +34,35 @@ pub const DEV: bool = option_env!("ENCORE_VERSION").is_none();
 const FIRST_SELF_UPDATING: &str = "0.28.0";
 const FRESH_SECS: f64 = 3600.0;
 const NOTES_MAX: usize = 4000;
-/// Where the last answer from GitHub is kept (sync_state, connection 0).
+/// Where the last answer from GitHub is kept (sync_state, connection 0), one per channel.
 const SCOPE: &str = "encore:update";
+const SCOPE_HOTFIX: &str = "encore:update:hotfix";
+/// The tag prefix of the builds CI publishes on every push (.github/workflows/hotfix.yml).
+pub const HOTFIX_PREFIX: &str = "hotfix-";
+/// How many releases the hotfix channel looks through (newest first).
+const HOTFIX_PAGE: usize = 30;
+
+/// Which builds Update now offers (the `update_channel` setting).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Channel {
+    Stable,
+    Hotfix,
+}
+
+impl Channel {
+    pub fn parse(s: &str) -> Channel {
+        if s.trim().eq_ignore_ascii_case("hotfix") { Channel::Hotfix } else { Channel::Stable }
+    }
+    pub fn of(st: &impl Ctx) -> Channel {
+        Channel::parse(&st.cfg().str("update_channel"))
+    }
+    pub fn name(self) -> &'static str {
+        match self { Channel::Stable => "stable", Channel::Hotfix => "hotfix" }
+    }
+    fn scope(self) -> &'static str {
+        match self { Channel::Stable => SCOPE, Channel::Hotfix => SCOPE_HOTFIX }
+    }
+}
 const DOCKER_CACHE: &str = "update:docker";
 /// Requests still open this long after "Restart server" are cut off.
 const GRACE: Duration = Duration::from_secs(10);
@@ -44,18 +75,34 @@ const PULL_TIMEOUT: Duration = Duration::from_secs(20 * 60);
 /// GitHub's release JSON → what is kept: {tag, latest, notes, notes_cut, url, published_at, checked_at}.
 pub fn parse_release(v: &Value, now: f64) -> Option<Value> {
     let tag = v["tag_name"].as_str().map(str::trim).filter(|t| !t.is_empty())?;
+    let hotfix = tag.starts_with(HOTFIX_PREFIX);
     let body = v["body"].as_str().unwrap_or("").replace("\r\n", "\n");
     let cut = body.chars().count() > NOTES_MAX;
     let notes: String = body.chars().take(NOTES_MAX).collect();
     Some(json!({
         "tag": tag,
-        "latest": tag.trim_start_matches(['v', 'V']),
+        "latest": tag.trim_start_matches(HOTFIX_PREFIX).trim_start_matches(['v', 'V']),
+        "hotfix": hotfix,
         "notes": notes.trim_end(),
         "notes_cut": cut,
         "url": v["html_url"].as_str().map(String::from).unwrap_or_else(|| format!("https://github.com/{REPO}/releases/tag/{tag}")),
         "published_at": v["published_at"],
         "checked_at": now as i64,
     }))
+}
+
+/// The hotfix channel's pick from GitHub's release list: the highest version among the full releases and the
+/// hotfix prereleases (drafts and other prereleases don't count).
+pub fn pick_newest(list: &Value, now: f64) -> Option<Value> {
+    list.as_array()?.iter()
+        .filter(|v| v["draft"] != true)
+        .filter(|v| {
+            let hotfix = v["tag_name"].as_str().is_some_and(|t| t.starts_with(HOTFIX_PREFIX));
+            if v["prerelease"] == true { hotfix } else { !hotfix }
+        })
+        .filter_map(|v| parse_release(v, now))
+        .filter(|r| !encore_core::version::parts(r["latest"].as_str().unwrap_or("")).is_empty())
+        .max_by(|a, b| encore_core::version::compare(a["latest"].as_str().unwrap_or(""), b["latest"].as_str().unwrap_or("")))
 }
 
 /// Whether `latest` is newer than the running version (a dev build: any release is).
@@ -66,23 +113,31 @@ pub fn is_newer(latest: &str, current: &str, dev: bool) -> bool {
     dev || encore_core::version::newer(latest, current)
 }
 
-/// The last answer from GitHub kept in the database.
+/// The last answer from GitHub kept in the database, for the channel the settings name.
 pub fn stored(st: &impl Ctx) -> Option<Value> {
-    let row = st.db().one("SELECT value FROM sync_state WHERE connection_id=0 AND scope=?", p![SCOPE]).ok().flatten()?;
+    let row = st.db().one("SELECT value FROM sync_state WHERE connection_id=0 AND scope=?", p![Channel::of(st).scope()]).ok().flatten()?;
     serde_json::from_str::<Value>(row.get("value")?.as_str()?).ok().filter(|v| v["latest"].is_string())
 }
 
-fn store(st: &impl Ctx, release: &Value) {
-    let _ = st.db().execute("INSERT OR REPLACE INTO sync_state (connection_id, scope, value) VALUES (0,?,?)", p![SCOPE, release.to_string()]);
+fn store(st: &impl Ctx, channel: Channel, release: &Value) {
+    let _ = st.db().execute("INSERT OR REPLACE INTO sync_state (connection_id, scope, value) VALUES (0,?,?)", p![channel.scope(), release.to_string()]);
 }
 
 /// Ask GitHub (the ETag makes an unchanged answer free) and keep the answer.
 pub async fn fetch(st: &impl Ctx) -> anyhow::Result<Value> {
-    let (code, v) = encore_http::github::get(st, &format!("{}/repos/{REPO}/releases/latest", st.system().github_api)).await?;
+    let channel = Channel::of(st);
+    let path = match channel {
+        Channel::Stable => format!("{}/repos/{REPO}/releases/latest", st.system().github_api),
+        Channel::Hotfix => format!("{}/repos/{REPO}/releases?per_page={HOTFIX_PAGE}", st.system().github_api),
+    };
+    let (code, v) = encore_http::github::get(st, &path).await?;
     match code {
         200 => {
-            let r = parse_release(&v, db::now()).ok_or_else(|| anyhow::anyhow!("GitHub's answer has no release tag"))?;
-            store(st, &r);
+            let r = match channel {
+                Channel::Stable => parse_release(&v, db::now()).ok_or_else(|| anyhow::anyhow!("GitHub's answer has no release tag"))?,
+                Channel::Hotfix => pick_newest(&v, db::now()).ok_or_else(|| anyhow::anyhow!("GitHub shows no Encore release or hotfix yet"))?,
+            };
+            store(st, channel, &r);
             Ok(r)
         }
         // GitHub answers 404 for a private repository too, without a token or with one that can't read it
@@ -254,6 +309,7 @@ pub fn answer(release: Option<&Value>, su: &SelfUpdate, current: &str, dev: bool
         "dev": dev,
         "latest": latest,
         "tag": r["tag"],
+        "hotfix": r["hotfix"] == true,
         "is_newer": latest.as_deref().is_some_and(|l| is_newer(l, current, dev)),
         "notes": r["notes"].as_str().unwrap_or(""),
         "notes_cut": r["notes_cut"] == true,
@@ -273,6 +329,7 @@ pub async fn status(st: &impl Ctx, force: bool) -> Value {
     let mut out = answer(release.as_ref(), &su, VERSION, DEV);
     out["error"] = json!(error);
     out["check_updates"] = json!(st.cfg().bool("check_updates"));
+    out["channel"] = json!(Channel::of(st).name());
     out
 }
 

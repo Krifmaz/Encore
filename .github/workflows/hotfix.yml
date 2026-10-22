@@ -1,0 +1,26 @@
+name: hotfix
+
+# A hotfix build on every push to the default branch: release.yml with channel = hotfix (its header says what that
+# makes – a prerelease hotfix-<version> with the server and the image :<version> / :hotfix, the newest three kept).
+# Full releases are unchanged: Actions → release → Run workflow. A push that only touches docs makes none, and
+# neither does one whose head commit says [skip hotfix].
+on:
+  push:
+    paths-ignore:
+      - "docs/**"
+      - "**/*.md"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  packages: write
+
+jobs:
+  hotfix:
+    if: >-
+      github.ref_name == github.event.repository.default_branch &&
+      !contains(github.event.head_commit.message, '[skip hotfix]')
+    uses: ./.github/workflows/release.yml
+    with:
+      only: all
+      channel: hotfix
