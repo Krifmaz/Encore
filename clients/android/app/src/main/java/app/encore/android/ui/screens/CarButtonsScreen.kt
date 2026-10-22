@@ -4,7 +4,10 @@ import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.aspectRatio
+import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
@@ -33,6 +36,9 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.rotate
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.unit.sp
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.semantics.LiveRegionMode
@@ -44,6 +50,7 @@ import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import app.encore.android.R
+import app.encore.android.car.CarNowPlaying
 import app.encore.android.playback.ButtonShelfRules
 import app.encore.android.playback.CarButtonRules
 import app.encore.android.playback.CarButtonRules.Id
@@ -116,6 +123,11 @@ fun CarButtonsScreen(onBack: () -> Unit, title: String = "Android Auto") {
     val context = LocalContext.current
     val layout by remember { CarPrefs.carButtons(context) }.collectAsState()
     val strip by remember { CarPrefs.lyricsStrip(context) }.collectAsState()
+    val spots by remember { CarPrefs.carSpots(context) }.collectAsState()
+    val now by CarNowPlaying.state.collectAsState()
+    // the previews show the playing song when there is one, a sample otherwise
+    val song = now?.title?.takeIf { it.isNotEmpty() } ?: "Song title"
+    val artist = now?.artist?.takeIf { it.isNotEmpty() } ?: "Artist"
     BackHandler(onBack = onBack)
 
     // the car gets the buttons in this one order; Android Auto itself decides how many fit before ⋯
@@ -130,6 +142,7 @@ fun CarButtonsScreen(onBack: () -> Unit, title: String = "Android Auto") {
         BackBar(title, onBack)
         Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState())) {
             SectionHead("Car player buttons", subtitle = CAR_HELP)
+            CarPlayerPreview(CarButtonRules.preview(shown, spots), song, artist)
             Shelf(
                 shown = shown,
                 all = Id.entries,
@@ -141,6 +154,7 @@ fun CarButtonsScreen(onBack: () -> Unit, title: String = "Android Auto") {
             ResetButton(enabled = shown != carDefault || layout.menu.isNotEmpty()) { setCar(carDefault) }
 
             SectionHead("Encore Lyrics buttons", subtitle = LYRICS_HELP)
+            LyricsPreview(strip, song, artist)
             Shelf(
                 shown = strip,
                 all = LyricsStripRules.Btn.entries,
@@ -273,4 +287,100 @@ private fun stripIconOf(b: LyricsStripRules.Btn): Int = when (b) {
     LyricsStripRules.Btn.LIKE -> R.drawable.ic_favorite
     LyricsStripRules.Btn.SHUFFLE -> R.drawable.ic_shuffle
     LyricsStripRules.Btn.REPEAT -> R.drawable.ic_repeat
+}
+
+// ---- previews: roughly what the car screen looks like, drawn on the phone (no car needed) -------------------------
+
+private val CarBg = Color(0xFF101114)
+private val CarPanel = Color(0xFF202227)
+private val CarText = Color(0xFFF2F2F2)
+private val CarMuted = Color(0xFF9A9CA3)
+
+/** A wide car screen (about 2.2 : 1, like most Android Auto displays) with a "Preview" caption under it. */
+@Composable
+private fun CarScreen(caption: String, content: @Composable () -> Unit) {
+    Column(Modifier.padding(horizontal = Gutter).fillMaxWidth()) {
+        Box(
+            Modifier
+                .fillMaxWidth()
+                .aspectRatio(2.2f)
+                .clip(RoundedCornerShape(16.dp))
+                .background(CarBg)
+                .clearAndSetSemantics { contentDescription = caption },
+        ) { content() }
+        Text(caption, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.palette.muted, modifier = Modifier.padding(top = 6.dp, bottom = 8.dp))
+    }
+}
+
+@Composable
+private fun CarGlyph(res: Int, size: Int = 22, tint: Color = CarText) {
+    Icon(painterResource(res), contentDescription = null, tint = tint, modifier = Modifier.size(size.dp))
+}
+
+/**
+ * Android Auto's media player: the cover, the song, a progress bar, then Previous, Play, Next and the shown buttons
+ * in [p] (with ⋯ when some don't fit the car's spots).
+ */
+@Composable
+private fun CarPlayerPreview(p: CarButtonRules.Preview, song: String, artist: String) {
+    val words = CarButtonRules.previewLine(p) + if (p.behind.isEmpty()) "" else ". " + CarButtonRules.behindLine(p)
+    CarScreen("Preview – your car may fit more or fewer before ⋯. $words") {
+        Row(Modifier.fillMaxSize().padding(14.dp), verticalAlignment = Alignment.CenterVertically) {
+            Box(
+                Modifier.fillMaxHeight(0.8f).aspectRatio(1f).clip(RoundedCornerShape(10.dp)).background(CarPanel),
+                contentAlignment = Alignment.Center,
+            ) { CarGlyph(R.drawable.ic_album, 36, CarMuted) }
+            Spacer(Modifier.width(14.dp))
+            Column(Modifier.weight(1f)) {
+                Text(song, color = CarText, fontSize = 15.sp, fontWeight = FontWeight.SemiBold, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                Text(artist, color = CarMuted, fontSize = 12.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                Spacer(Modifier.height(8.dp))
+                Box(Modifier.fillMaxWidth().height(3.dp).clip(RoundedCornerShape(2.dp)).background(CarPanel)) {
+                    Box(Modifier.fillMaxWidth(0.35f).height(3.dp).background(CarText))
+                }
+                Spacer(Modifier.height(10.dp))
+                Row(horizontalArrangement = Arrangement.spacedBy(10.dp), verticalAlignment = Alignment.CenterVertically) {
+                    CarGlyph(R.drawable.ic_skip_previous)
+                    CarGlyph(R.drawable.ic_play, 26)
+                    CarGlyph(R.drawable.ic_skip_next)
+                    for (id in p.shown) CarGlyph(iconOf(id), 20, CarMuted)
+                    if (p.behind.isNotEmpty()) CarGlyph(R.drawable.ic_more_horiz, 20, CarMuted)
+                }
+            }
+        }
+    }
+}
+
+/** Encore Lyrics: the lyrics over the whole screen, Android Auto's song card at the top left, the strip at the top right. */
+@Composable
+private fun LyricsPreview(strip: List<LyricsStripRules.Btn>, song: String, artist: String) {
+    CarScreen("Preview – Encore Lyrics with " + LyricsStripRules.summary(strip)) {
+        Box(Modifier.fillMaxSize().padding(10.dp)) {
+            Column(Modifier.align(Alignment.CenterStart).padding(start = 8.dp, top = 28.dp).fillMaxWidth(0.9f)) {
+                Text("The line before", color = CarMuted, fontSize = 11.sp, maxLines = 1)
+                Text("The line playing now, large", color = CarText, fontSize = 17.sp, fontWeight = FontWeight.Bold, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                Text("The next line", color = CarMuted, fontSize = 11.sp, maxLines = 1)
+            }
+            Row(
+                Modifier.align(Alignment.TopStart).clip(RoundedCornerShape(8.dp)).background(CarPanel).padding(horizontal = 8.dp, vertical = 5.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                CarGlyph(R.drawable.ic_album, 16, CarMuted)
+                Spacer(Modifier.width(6.dp))
+                Column(Modifier.width(96.dp)) {
+                    Text(song, color = CarText, fontSize = 10.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                    Text(artist, color = CarMuted, fontSize = 9.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                }
+                CarGlyph(R.drawable.ic_favorite_border, 14, CarMuted)
+            }
+            if (strip.isNotEmpty()) {
+                Row(
+                    Modifier.align(Alignment.TopEnd).clip(RoundedCornerShape(8.dp)).background(CarPanel).padding(horizontal = 6.dp, vertical = 5.dp),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                ) {
+                    for (b in strip) CarGlyph(stripIconOf(b), 16)
+                }
+            }
+        }
+    }
 }
