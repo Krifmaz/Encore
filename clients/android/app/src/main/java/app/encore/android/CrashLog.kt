@@ -321,8 +321,8 @@ object CrashLog {
     /** The newest report's first line (kept here, sent or not), else Android's newest exit reason; "" for none. */
     fun latestSummary(context: Context): String {
         val d = dir
-        val files = (d?.listFiles { f -> f.name.endsWith(".json") }.orEmpty() +
-            (d?.let { File(it, "sent").listFiles { f -> f.name.endsWith(".json") } }.orEmpty()))
+        val files: List<File> = d?.listFiles { f -> f.name.endsWith(".json") }.orEmpty().toList() +
+            d?.let { File(it, "sent").listFiles { f -> f.name.endsWith(".json") } }.orEmpty().toList()
         val newest = files.maxByOrNull { it.lastModified() }
         newest?.let { f -> try { JSONObject(f.readText()).optString("summary") } catch (_: Exception) { null } }?.takeIf { it.isNotBlank() }?.let { return it }
         if (Build.VERSION.SDK_INT < Build.VERSION_CODES.R) return ""
