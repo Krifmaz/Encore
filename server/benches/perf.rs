@@ -146,6 +146,16 @@ async fn start(dir: &Path, mb: &str) -> Server {
 }
 
 impl Server {
+    /// One call with any method; returns (ms, status).
+    async fn call(&self, method: &str, uri: &str) -> (f64, u16) {
+        let req = Request::builder().method(method).uri(uri).header("x-requested-with", "encore").header("cookie", &self.cookie).body(Body::empty()).unwrap();
+        let t = Instant::now();
+        let resp = self.app.clone().oneshot(req).await.unwrap();
+        let status = resp.status().as_u16();
+        let _ = axum::body::to_bytes(resp.into_body(), 64 << 20).await;
+        (t.elapsed().as_secs_f64() * 1000.0, status)
+    }
+
     /// One GET; returns (ms, status, body bytes).
     async fn get(&self, uri: &str) -> (f64, u16, usize) {
         let req = Request::builder().method("GET").uri(uri).header("x-requested-with", "encore").header("cookie", &self.cookie)
@@ -271,6 +281,13 @@ async fn perf_bench() {
         ("/api/translate/status".into(), "/api/translate/status".into()),
     ]);
 
+    // BENCH_AFTER_DELETE=1: every page warm, then an artist removed, then each page once (what the next
+    // page load after a delete costs)
+    if std::env::var("BENCH_AFTER_DELETE").is_ok() {
+        after_delete(&base, &seed, &mb, &eps).await;
+        let _ = std::fs::remove_dir_all(&base);
+        return;
+    }
     // cold: a fresh server (empty in-memory caches) on a copy of the database, one call.
     // BENCH_COLD=main measures only the calls the main pages make (each cold server's cover pass is
     // waited for, which took a minute per server before 0.25.3)
@@ -365,4 +382,34 @@ async fn perf_bench() {
     }
     drop(s);
     let _ = std::fs::remove_dir_all(&base);
+}
+
+/// Each page once after an artist is removed, with every page warm before: three rounds (three artists).
+async fn after_delete(base: &Path, seed: &Path, mb: &str, eps: &[(String, String)]) {
+    let d = base.join("after-delete");
+    copy_dir(seed, &d);
+    let s = start(&d, mb).await;
+    let mut rows: Vec<(String, Vec<f64>)> = eps.iter().map(|(n, _)| (n.clone(), vec![])).collect();
+    let mut deletes = vec![];
+    let mut totals = vec![];
+    for round in 0..3 {
+        for (_, uri) in eps {
+            s.get(uri).await;
+        }
+        quiesce(&s.st).await;
+        let (ms, status) = s.call("DELETE", &format!("/api/library/artists?name={}", urlencoding::encode(&artist_name(100 + round)))).await;
+        assert_eq!(status, 200);
+        deletes.push(ms);
+        let t = Instant::now();
+        for (i, (_, uri)) in eps.iter().enumerate() {
+            rows[i].1.push(s.get(uri).await.0);
+        }
+        totals.push(t.elapsed().as_secs_f64() * 1000.0);
+    }
+    println!("\n| after an artist is removed | round 1 ms | round 2 ms | round 3 ms |\n|---|---|---|---|");
+    println!("| **DELETE /api/library/artists** | {:.1} | {:.1} | {:.1} |", deletes[0], deletes[1], deletes[2]);
+    for (name, v) in rows {
+        println!("| {name} | {:.1} | {:.1} | {:.1} |", v[0], v[1], v[2]);
+    }
+    println!("| **every page once (total)** | {:.1} | {:.1} | {:.1} |", totals[0], totals[1], totals[2]);
 }

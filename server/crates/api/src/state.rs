@@ -6,7 +6,7 @@ use encore_http::mb::Mb;
 use encore_core::cache::{json_bytes, ByteCache};
 pub(crate) use encore_jobs::Refreshed;
 use serde_json::Value;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::Mutex;
 use std::time::Duration;
 use std::path::PathBuf;
@@ -72,6 +72,8 @@ pub struct Web {
     /// whole library list answers by list key, stamped with the library version they were made at
     /// (routes::library::cached_list), held to `LIST_CACHE_BYTES`
     pub(crate) lists: Arc<ByteCache<Arc<Value>>>,
+    /// list keys being made again in the background while their older answer is given (routes::library::cached_list)
+    pub(crate) list_builds: Arc<Mutex<HashSet<String>>>,
     /// share preview videos made at the same time (each runs ffmpeg for up to a few minutes)
     pub(crate) share_video_slots: Arc<tokio::sync::Semaphore>,
     /// one preview video build per link at a time: later requests for the link wait for it
@@ -110,6 +112,7 @@ impl Default for Web {
     fn default() -> Self {
         Web {
             lists: Arc::new(ByteCache::new(LIST_CACHE_BYTES, LIST_CACHE_ENTRIES)),
+            list_builds: Default::default(),
             share_video_slots: Arc::new(tokio::sync::Semaphore::new(2)),
             share_video_builds: Default::default(),
             track_edges: Arc::new(tokio::sync::Semaphore::new(2)),

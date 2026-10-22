@@ -126,7 +126,7 @@ fun <T> rememberLoad(vararg keys: Any?, block: () -> T): Loader<T> {
         if (!quiet.value || state.value !is Loadable.Ready) state.value = Loadable.Loading
         quiet.value = false
         state.value = try {
-            Loadable.Ready(withContext(Dispatchers.IO) { block() })
+            Loadable.Ready(withContext(Dispatchers.IO) { loadRetryingTimeout(block) })
         } catch (e: CancellationException) {
             throw e
         } catch (e: Exception) {
@@ -135,6 +135,17 @@ fun <T> rememberLoad(vararg keys: Any?, block: () -> T): Loader<T> {
     }
     return Loader(state, retry, quiet)
 }
+
+/**
+ * [block], asked once more when the server didn't answer in time: after a delete or an import the server builds
+ * its library lists again, and the second ask usually finds them made.
+ */
+private fun <T> loadRetryingTimeout(block: () -> T): T =
+    try {
+        block()
+    } catch (e: java.io.InterruptedIOException) {
+        block()
+    }
 
 @Composable
 fun <T> LoadableContent(loader: Loader<T>, content: @Composable (T) -> Unit) {

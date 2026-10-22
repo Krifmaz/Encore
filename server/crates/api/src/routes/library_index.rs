@@ -28,7 +28,7 @@ use encore_library::sections::{sections_for, Spec};
 #[cfg(test)]
 use encore_library::sections::{label, letters, By};
 
-#[derive(Deserialize, Default)]
+#[derive(Deserialize, Default, Clone)]
 #[serde(default)]
 pub struct IndexQ {
     kind: String,
@@ -50,8 +50,11 @@ pub async fn index(State(st): State<AppState>, User(_): User, Query(a): Query<In
     // the same sections until the songs change (see super::cached_list); built on the blocking pool
     st.blocking(move |st| {
         let key = format!("index\u{1f}{}\u{1f}{}\u{1f}{}\u{1f}{}\u{1f}{}\u{1f}{}\u{1f}{}", a.kind, a.sort, a.dir, a.artist, a.filter, a.album_kind, a.types);
-        let spec = Spec { kind: &a.kind, sort: &a.sort, dir: &a.dir, artist: &a.artist, filter: &a.filter, album_kind: &a.album_kind, album_type: &a.types };
-        let v = super::cached_list(st, &key, || sections_for(&st.db, &st.library.artists, &st.library.types, &spec))?;
+        let st2 = st.clone();
+        let v = super::cached_list(st, &key, move || {
+            let spec = Spec { kind: &a.kind, sort: &a.sort, dir: &a.dir, artist: &a.artist, filter: &a.filter, album_kind: &a.album_kind, album_type: &a.types };
+            sections_for(&st2.db, &st2.library.artists, &st2.library.types, &spec)
+        })?;
         Ok(Json((*v).clone()))
     }).await
 }

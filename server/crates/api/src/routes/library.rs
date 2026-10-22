@@ -88,13 +88,37 @@ mod library_types_tests;
 /// How long a cached list answer is kept at most (a safety net: any write to the songs drops it anyway).
 const LIST_TTL: std::time::Duration = std::time::Duration::from_secs(600);
 
+/// How long a page waits for a list that is being made again (after a delete, an import or a scan) before it
+/// is given the list as it was: on a slow server a big library's lists take seconds each, and the apps give
+/// up after 30.
+const LIST_WAIT: std::time::Duration = std::time::Duration::from_secs(3);
+
 /// A library list's whole answer (albums, songs, artists, the side bar's sections) for as long as the
-/// songs are unchanged: `Db::library_version` moves with every write to them, so a list is never older
-/// than the library. With 57k songs these are GROUP BYs over every row – once per change, not per page.
-pub(super) fn cached_list(st: &AppState, key: &str, make: impl FnOnce() -> ApiResult<Value>) -> ApiResult<Arc<Value>> {
+/// songs are unchanged: `Db::library_version` moves with every write to them. With 57k songs these are
+/// GROUP BYs over every row – once per change, not per page. After a change the list is made again on the
+/// blocking pool; a page that would wait longer than `LIST_WAIT` for it gets the answer as it was (once,
+/// while it is made), so a delete never makes every page load slow at once.
+pub(super) fn cached_list<F>(st: &AppState, key: &str, make: F) -> ApiResult<Arc<Value>>
+where
+    F: FnOnce() -> ApiResult<Value> + Send + 'static,
+{
     let version = st.db.library_version();
     if let Some(v) = cached_at(st, key, version) {
         return Ok(v);
+    }
+    if let (Some(old), Ok(rt)) = (st.web.lists.get(key), tokio::runtime::Handle::try_current()) {
+        let Some(building) = start_build(st, key) else { return Ok(old) };
+        let (tx, rx) = std::sync::mpsc::channel();
+        let (st2, k) = (st.clone(), key.to_string());
+        rt.spawn_blocking(move || {
+            let _building = building;
+            let r = make().map(Arc::new);
+            if let Ok(v) = &r {
+                keep_list(&st2, k, version, v.clone());
+            }
+            let _ = tx.send(r);
+        });
+        return rx.recv_timeout(LIST_WAIT).unwrap_or(Ok(old));
     }
     let value = Arc::new(make()?);
     keep_list(st, key.to_string(), version, value.clone());
@@ -111,9 +135,38 @@ where
     if let Some(v) = cached_at(st, &key, version) {
         return Ok(v);
     }
+    if let Some(old) = st.web.lists.get(&key) {
+        let Some(building) = start_build(st, &key) else { return Ok(old) };
+        let st2 = st.clone();
+        let task = tokio::spawn(async move {
+            let _building = building;
+            let value = Arc::new(st2.db.read(make).await?);
+            keep_list(&st2, key, version, value.clone());
+            ApiResult::Ok(value)
+        });
+        return match tokio::time::timeout(LIST_WAIT, task).await {
+            Ok(Ok(r)) => r,
+            _ => Ok(old),
+        };
+    }
     let value = Arc::new(st.db.read(make).await?);
     keep_list(st, key, version, value.clone());
     Ok(value)
+}
+
+/// A list being made again in the background; the mark goes when it is dropped (also when the build panicked).
+struct Building(AppState, String);
+
+impl Drop for Building {
+    fn drop(&mut self) {
+        self.0.web.list_builds.lock().unwrap_or_else(|e| e.into_inner()).remove(&self.1);
+    }
+}
+
+/// Marks `key` as being made again, or None when that is running already.
+fn start_build(st: &AppState, key: &str) -> Option<Building> {
+    let mut b = st.web.list_builds.lock().unwrap_or_else(|e| e.into_inner());
+    b.insert(key.to_string()).then(|| Building(st.clone(), key.to_string()))
 }
 
 /// The cached answer for `key` when it was made at this library version.
@@ -122,12 +175,60 @@ fn cached_at(st: &AppState, key: &str, version: u64) -> Option<Arc<Value>> {
 }
 
 /// Keeps a list answer made at `version` (read before its rows: a write meanwhile makes the next call
-/// build it again). Answers of an older state of the library can't be used again and go first; then the
-/// cache's byte bound (`state::LIST_CACHE_BYTES`) pushes out the least recently used ones.
+/// build it again), in place of the key's older one. Answers of an older state of the library stay until
+/// they are made again (they are what a page gets while that runs); the cache's byte bound
+/// (`state::LIST_CACHE_BYTES`) pushes out the least recently used ones.
 fn keep_list(st: &AppState, k: String, version: u64, value: Arc<Value>) {
-    st.web.lists.retain(|v| v >= version);
     let bytes = k.len() + encore_core::cache::json_bytes(&value);
     st.web.lists.insert(k, value, bytes, Some(LIST_TTL), version);
+}
+
+#[cfg(test)]
+mod list_wait_tests {
+    use super::*;
+    use crate::test_support::TempState;
+    use std::time::{Duration, Instant};
+
+    fn songs_written(st: &AppState) {
+        st.db.execute("UPDATE tracks SET bitrate=bitrate WHERE id=0", p![]).unwrap();
+    }
+
+    async fn list(st: &AppState, make: impl FnOnce() -> ApiResult<Value> + Send + 'static) -> (Value, Duration) {
+        let st = st.clone();
+        let t = Instant::now();
+        let v = tokio::task::spawn_blocking(move || cached_list(&st, "k", make)).await.unwrap().unwrap();
+        ((*v).clone(), t.elapsed())
+    }
+
+    /// After a write to the songs a list is made again: a quick build is waited for; a slow one gives the
+    /// list as it was after `LIST_WAIT` (and at once to pages that come while it runs), and the pages after
+    /// it the new list.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_slow_rebuild_gives_the_old_list_meanwhile() {
+        let tmp = TempState::new("list-wait");
+        let st: AppState = (*tmp).clone();
+        assert_eq!(list(&st, || Ok(json!(1))).await.0, json!(1));
+        songs_written(&st);
+        assert_eq!(list(&st, || Ok(json!(2))).await.0, json!(2), "a quick build is waited for");
+
+        songs_written(&st);
+        let slow = list(&st, || {
+            std::thread::sleep(LIST_WAIT + Duration::from_millis(1500));
+            Ok(json!(3))
+        });
+        let meanwhile = async {
+            tokio::time::sleep(Duration::from_millis(300)).await;
+            list(&st, || panic!("one build at a time")).await
+        };
+        let ((v, waited), (v2, waited2)) = tokio::join!(slow, meanwhile);
+        assert_eq!(v, json!(2), "the list as it was");
+        assert!(waited >= LIST_WAIT && waited < LIST_WAIT + Duration::from_millis(1000), "{waited:?}");
+        assert_eq!(v2, json!(2));
+        assert!(waited2 < Duration::from_millis(500), "a page during the build doesn't wait: {waited2:?}");
+
+        tokio::time::sleep(Duration::from_millis(2000)).await;
+        assert_eq!(list(&st, || panic!("made already")).await.0, json!(3), "the new list once it is made");
+    }
 }
 
 /// Items `offset..offset+limit` of a cached JSON array.
@@ -277,10 +378,11 @@ fn album_list(st: &AppState, artist: &str, filter: &str, sort: &str, dir: &str) 
         order(ALBUM_SORTS, sort, dir, "name")
     );
     let key = format!("albums\u{1f}{sql}\u{1f}{}", Value::Array(params.clone()));
-    cached_list(st, &key, || {
-        let mut rows = st.db.query(&sql, params)?;
+    let st2 = st.clone();
+    cached_list(st, &key, move || {
+        let mut rows = st2.db.query(&sql, params)?;
         // the type is part of the list: both follow the library's state
-        let types = st.library.types.get(&st.db);
+        let types = st2.library.types.get(&st2.db);
         for r in rows.iter_mut() {
             let key = types.get(r.get("id").and_then(|v| v.as_str()).unwrap_or("")).map(|c| c.key()).unwrap_or("album");
             r.insert("type".into(), json!(key));
@@ -437,7 +539,8 @@ async fn artists(State(st): State<AppState>, User(u): User, Query(a): Query<Simp
         let idx = st.library.artists.index(&st.db);
         let limit = a.limit.unwrap_or(ARTISTS_MAX as i64).clamp(1, ARTISTS_MAX as i64) as usize;
         let mut v = if a.q.trim().is_empty() {
-            let all = cached_list(st, &format!("artists\u{1f}{}\u{1f}{}", a.sort, a.dir), || Ok(json!(idx.list(&a.sort, &a.dir))))?;
+            let (ix, sort, dir) = (idx.clone(), a.sort.clone(), a.dir.clone());
+            let all = cached_list(st, &format!("artists\u{1f}{}\u{1f}{}", a.sort, a.dir), move || Ok(json!(ix.list(&sort, &dir))))?;
             json!(page(&all, a.offset, limit))
         } else {
             json!(encore_library::search::library_artists(&idx, &a.q, limit))
@@ -479,7 +582,8 @@ fn rows_by_id(db: &impl encore_db::Query, cols: &str, ids: &[i64]) -> rusqlite::
 /// the table per sort, and every page of the list is a slice of it. `order_by` is empty for "any order".
 fn track_ids(st: &AppState, order_by: &str) -> ApiResult<Arc<Value>> {
     let sql = if order_by.is_empty() { "SELECT id FROM tracks".to_string() } else { format!("SELECT id FROM tracks ORDER BY {order_by}") };
-    cached_list(st, &format!("track-ids\u{1f}{order_by}"), || Ok(json!(st.db.query(&sql, p![])?.iter().map(|r| r.i("id")).collect::<Vec<i64>>())))
+    let db = st.db.clone();
+    cached_list(st, &format!("track-ids\u{1f}{order_by}"), move || Ok(json!(db.query(&sql, p![])?.iter().map(|r| r.i("id")).collect::<Vec<i64>>())))
 }
 
 /// Items `offset..offset+limit` of a cached id list.
@@ -1218,6 +1322,8 @@ fn delete_artist_now(st: &AppState, u: &encore_db::Row, q: &NameQ) -> ApiResult<
         st.db.execute("UPDATE requests SET status='cancelled', message='Artist removed', updated_at=? WHERE id=?", p![now(), id])?;
     }
     st.library.artists.invalidate();
+    // the artist index made again now, by the delete, instead of by the next page someone opens
+    let _ = st.library.artists.index(&st.db);
     st.db.log("info", &format!("{} removed artist {} ({} songs)", u.s("username"), q.name, rows.len()));
     Ok((Json(json!({ "ok": true, "removed": rows.len() })), open))
 }
