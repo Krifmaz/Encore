@@ -9,6 +9,7 @@ import android.provider.Settings
 import android.util.Log
 import app.encore.android.BuildConfig
 import app.encore.android.CrashLog
+import app.encore.android.core.parseJson
 import app.encore.android.core.parseJsonObject
 import app.encore.android.data.api.USER_AGENT
 import app.encore.android.features.update.UpdateRules.Check
@@ -24,6 +25,7 @@ import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import kotlinx.serialization.json.JsonArray
 import okhttp3.OkHttpClient
 import okhttp3.Request
 import java.io.File
@@ -220,8 +222,9 @@ object Updater {
                 }
                 if (code == 404) throw Refused("Couldn't check for updates: no release found")
                 if (code !in 200..299) throw Refused("Couldn't check for updates: GitHub answered $code")
-                val body = parseJsonObject(res.body.string())
+                val list = parseJson(res.body.string()) as? JsonArray
                     ?: throw Refused("Couldn't check for updates: GitHub's answer could not be read")
+                val body = UpdateRules.fullRelease(list) ?: throw Refused("Couldn't check for updates: no release found")
                 val trimmed = UpdateRules.trim(body)
                 prefs.edit()
                     .putString(K_RELEASE, trimmed.toString())

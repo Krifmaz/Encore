@@ -20,8 +20,9 @@ name: release
 #   SHA256SUMS covers every file of the release; the desktop app checks its updates against it.
 #   Hotfixes: hotfix.yml calls this file with channel = hotfix on every push to the default branch. Version
 #   <newest release>.<run number> (0.35.2.17), the server and Docker image only (no apps, no speed table), image
-#   tags :<version> and :hotfix (never :latest), a GitHub *prerelease* tagged hotfix-<version> that is never
-#   "Latest" – so the stable channel, the desktop app and the version bump above never see it. Only the newest
+#   tags :<version>, :hotfix and :latest, a normal GitHub release tagged hotfix-<version> that becomes "Latest" –
+#   so :latest and the stable channel get it too. The desktop and Android apps and the version bump above only
+#   look at v<version> releases, so they never pick a hotfix. Only the newest
 #   three hotfixes are kept (their releases, tags and images); a full release counts as newer than all of them.
 #   Servers on Settings → Diagnostics → Updates → "Hotfixes" (update_channel = hotfix) are offered them.
 on:
@@ -270,8 +271,8 @@ jobs:
         id: tags
         run: |
           I="ghcr.io/${GITHUB_REPOSITORY_OWNER,,}/encore"
-          # a hotfix moves :hotfix, a release :latest
-          T="$I:${{ needs.version.outputs.version }},$I:${{ inputs.channel == 'hotfix' && 'hotfix' || 'latest' }}"
+          # every build moves :latest, a hotfix :hotfix as well
+          T="$I:${{ needs.version.outputs.version }},$I:latest${{ inputs.channel == 'hotfix' && format(',{0}:hotfix', '$I') || '' }}"
           echo "tags=$T" >> "$GITHUB_OUTPUT"
       - uses: docker/build-push-action@v6
         with:
@@ -297,7 +298,7 @@ jobs:
     # the Android release key lives in repository secrets; a called workflow only sees them when passed on
     secrets: inherit
 
-  # a hotfix: a prerelease of the server and the image, then only the newest three hotfixes stay
+  # a hotfix: a release (the new Latest) of the server and the image, then only the newest three hotfixes stay
   hotfix:
     needs: [version, server, docker]
     if: inputs.channel == 'hotfix'
@@ -320,17 +321,17 @@ jobs:
           (cd out && sha256sum -- * > SHA256SUMS)
           PREV=$(git tag -l 'v[0-9]*' --sort=-creatordate | head -1)
           {
-            echo "Hotfix build of \`${GITHUB_SHA::7}\` (the main branch after ${PREV:-the first release}). Servers on the hotfix channel"
-            echo "(Settings → Diagnostics → Updates → Hotfixes) are offered it; the next full release replaces it."
+            echo "Hotfix build of \`${GITHUB_SHA::7}\` (the main branch after ${PREV:-the first release}). Servers are offered it on"
+            echo "Settings → Diagnostics → Updates; the next full release replaces it."
             echo; echo "## Changes since ${PREV:-the start}"
             git log --no-merges --pretty='- %s' ${PREV:+$PREV..}HEAD | head -60
             echo; echo "---"
-            echo "* **Docker**: \`ghcr.io/krifmaz/encore:hotfix\` (\`:$V\` pins this build)"
+            echo "* **Docker**: \`ghcr.io/krifmaz/encore:latest\` or \`:hotfix\` (\`:$V\` pins this build)"
             echo "* **Linux without Docker**: \`encore-$V-linux-x86_64.tar.gz\` / \`-aarch64\`"
             echo "* The desktop and Android apps are built for full releases only."
           } > notes.md
           gh release delete "hotfix-$V" --yes --cleanup-tag 2>/dev/null || true
-          gh release create "hotfix-$V" out/* --title "Encore $V (hotfix)" --notes-file notes.md --target "$GITHUB_SHA" --prerelease --latest=false
+          gh release create "hotfix-$V" out/* --title "Encore $V (hotfix)" --notes-file notes.md --target "$GITHUB_SHA" --latest
       - uses: docker/login-action@v3
         with:
           registry: ghcr.io
@@ -405,7 +406,9 @@ jobs:
           if [ "$ONLY" = android ]; then
             # Android only: keep every other file of the newest release, swap in the new APK (SHA256SUMS is
             # written again when publishing)
-            mkdir -p keep && gh release download --dir keep 2>/dev/null || true   # the newest release
+            # the newest full release (a hotfix can be "Latest" and has no apps)
+            PREV=$(gh release list --limit 200 --json tagName -q '.[].tagName' | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' | sort -V | tail -1)
+            mkdir -p keep && [ -n "$PREV" ] && gh release download "$PREV" --dir keep 2>/dev/null || true
             rm -f keep/Encore-android-*.apk keep/docker-compose.yml keep/SHA256SUMS
             # the classic Tauri desktop app (removed in 0.29) and its update manifest are not carried over
             (cd keep && rm -f Encore-Setup-* Encore-classic-* Encore-*-mac.dmg Encore-*-mac.app.tar.gz* Encore-*-linux-amd64.deb Encore-*-linux-x86_64.rpm latest.json)
@@ -461,7 +464,8 @@ jobs:
           # (encore_*.deb is the desktop app's Debian package)
           if [ "$APPS" != success ] && ! compgen -G "out/Encore-android-*.apk" >/dev/null && ! compgen -G "out/Encore-*-windows-*.exe" >/dev/null \
             && ! compgen -G "out/Encore-*-linux-x86_64.AppImage" >/dev/null && ! compgen -G "out/Encore-*-macos-universal.dmg" >/dev/null; then
-            mkdir -p prev && gh release download --dir prev --pattern 'Encore-*' --pattern 'encore_*.deb' 2>/dev/null || true
+            PREV=$(gh release list --limit 200 --json tagName -q '.[].tagName' | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' | grep -vx "v$V" | sort -V | tail -1)
+            mkdir -p prev && [ -n "$PREV" ] && gh release download "$PREV" --dir prev --pattern 'Encore-*' --pattern 'encore_*.deb' 2>/dev/null || true
             rm -f prev/Encore-youtube-extension-*.zip   # built fresh above
             # the classic Tauri desktop app (removed in 0.29) is not carried over
             (cd prev && rm -f Encore-Setup-* Encore-classic-* Encore-*-mac.dmg Encore-*-mac.app.tar.gz* Encore-*-linux-amd64.deb Encore-*-linux-x86_64.rpm)

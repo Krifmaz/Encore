@@ -25,8 +25,8 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
-/// The GitHub API answer for the newest release.
-pub const LATEST: &str = "https://api.github.com/repos/Krifmaz/Encore/releases/latest";
+/// The GitHub API answer for the newest releases (a hotfix can be "Latest" and carries no apps: [full_release]).
+pub const LATEST: &str = "https://api.github.com/repos/Krifmaz/Encore/releases?per_page=30";
 /// The releases page.
 pub const RELEASES: &str = "https://github.com/Krifmaz/Encore/releases";
 /// Every file the updater fetches is under this.
@@ -390,9 +390,27 @@ async fn fetch_latest() -> Result<Value, String> {
             "Couldn't check for updates: GitHub answered {status}"
         ));
     }
-    res.json::<Value>()
+    let list = res
+        .json::<Value>()
         .await
-        .map_err(|e| format!("Couldn't check for updates: {e}"))
+        .map_err(|e| format!("Couldn't check for updates: {e}"))?;
+    full_release(&list).ok_or_else(|| "Couldn't check for updates: no release found".into())
+}
+
+/// The newest full release (tag v<major>.<minor>.<patch>, not a draft or prerelease) of GitHub's release list,
+/// which is newest first. Hotfixes (hotfix-<version>) are the server's only.
+pub fn full_release(list: &Value) -> Option<Value> {
+    list.as_array()?
+        .iter()
+        .find(|r| {
+            let tag = r.get("tag_name").and_then(Value::as_str).unwrap_or("").trim();
+            r.get("draft").and_then(Value::as_bool) != Some(true)
+                && r.get("prerelease").and_then(Value::as_bool) != Some(true)
+                && tag
+                    .strip_prefix('v')
+                    .is_some_and(|v| v.split('.').count() == 3 && semver::Version::parse(v).is_ok())
+        })
+        .cloned()
 }
 
 /// Look for a newer version now.
@@ -815,6 +833,16 @@ mod tests {
                 "size": 10,
             })).collect::<Vec<_>>(),
         })
+    }
+
+    #[test]
+    fn hotfixes_and_prereleases_are_passed_over_for_the_newest_full_release() {
+        let mut pre = release("v0.36.0", &[]);
+        pre["prerelease"] = json!(true);
+        let list = json!([release("hotfix-0.35.2.17", &[]), pre, release("v0.35.2", &[]), release("v0.35.1", &[])]);
+        assert_eq!(full_release(&list).unwrap()["tag_name"], "v0.35.2");
+        assert!(full_release(&json!([release("hotfix-0.35.2.17", &[])])).is_none());
+        assert!(full_release(&json!({"message": "Not Found"})).is_none());
     }
 
     #[test]

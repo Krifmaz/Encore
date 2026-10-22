@@ -5,6 +5,7 @@ import app.encore.android.core.bool
 import app.encore.android.core.long
 import app.encore.android.core.objectsOf
 import app.encore.android.core.str
+import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.buildJsonArray
 import kotlinx.serialization.json.buildJsonObject
@@ -15,7 +16,8 @@ import okhttp3.HttpUrl.Companion.toHttpUrlOrNull
  * The rules of the phone's own update, without Android (the unit tests run them on the JVM). [Updater] does the
  * network, the files and the installing.
  *
- * - The newest release is GitHub's `releases/latest` of Krifmaz/Encore. Its Android app is the asset
+ * - The newest release is the newest full release (`v<version>`, [fullRelease]) of Krifmaz/Encore's release list:
+ *   a hotfix (`hotfix-<version>`) can be GitHub's "Latest" but carries no apps. Its Android app is the asset
  *   `Encore-android-<version>.apk` (apps.yml android-native, release.yml, scripts/release-apps.sh). A release made
  *   without the apps carries the last APK over under its own version, so the version is read from the file name,
  *   not from the tag.
@@ -25,7 +27,13 @@ import okhttp3.HttpUrl.Companion.toHttpUrlOrNull
  * - The words are the web's (Settings → This computer, Diagnostics → Updates) and the desktop app's updater.
  */
 object UpdateRules {
-    const val LATEST = "https://api.github.com/repos/Krifmaz/Encore/releases/latest"
+    const val LATEST = "https://api.github.com/repos/Krifmaz/Encore/releases?per_page=30"
+    private val FULL_TAG = Regex("""^v\d+\.\d+\.\d+$""")
+
+    /** The newest full release (tag v<major>.<minor>.<patch>, not a draft or prerelease) of GitHub's list, newest first. */
+    fun fullRelease(list: JsonArray?): JsonObject? = list.objectsOf().firstOrNull {
+        !it.bool("draft") && !it.bool("prerelease") && FULL_TAG.matches(it.str("tag_name").trim())
+    }
     const val RELEASES = "https://github.com/Krifmaz/Encore/releases"
 
     /** Every file the updater fetches is under this ([isReleaseFile]). */
@@ -153,7 +161,7 @@ object UpdateRules {
     }
 
     /**
-     * The newer release in GitHub's answer for `releases/latest` ([Check.None] when there is none for this phone),
+     * The newer release in the [fullRelease] of GitHub's answer ([Check.None] when there is none for this phone),
      * with its APK and checksum file, both only from the project's release downloads.
      */
     fun newest(release: JsonObject, current: String): Check {

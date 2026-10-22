@@ -1,9 +1,12 @@
 package app.encore.android.features.update
 
+import app.encore.android.core.parseJson
 import app.encore.android.core.parseJsonObject
+import app.encore.android.core.str
 import app.encore.android.features.update.UpdateRules.Asset
 import app.encore.android.features.update.UpdateRules.Check
 import app.encore.android.features.update.UpdateRules.Phase
+import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonObject
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
@@ -203,5 +206,14 @@ class UpdateRulesTest {
         assertFalse(UpdateRules.busy(Phase.NeedsPermission("1.0.0")))
         assertFalse(UpdateRules.busy(Phase.Failed("no")))
         assertEquals("00ff10", UpdateRules.hex(byteArrayOf(0, -1, 16)))
+    }
+
+    @Test
+    fun hotfixesAndPrereleasesArePassedOverForTheNewestFullRelease() {
+        val list = parseJson(
+            """[{"tag_name":"hotfix-0.35.2.17"},{"tag_name":"v0.36.0","prerelease":true},{"tag_name":"v0.35.2"},{"tag_name":"v0.35.1"}]""",
+        ) as JsonArray
+        assertEquals("v0.35.2", UpdateRules.fullRelease(list)?.str("tag_name"))
+        assertNull(UpdateRules.fullRelease(parseJson("""[{"tag_name":"hotfix-0.35.2.17"}]""") as JsonArray))
     }
 }
