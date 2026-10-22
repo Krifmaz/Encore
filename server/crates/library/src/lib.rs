@@ -19,6 +19,7 @@ pub mod lists;
 pub mod lookup;
 pub mod loudness;
 pub mod lyrics;
+pub mod merge;
 pub mod matcher;
 pub mod meta;
 pub mod nlsearch;

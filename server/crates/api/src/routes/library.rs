@@ -975,6 +975,11 @@ async fn album(State(st): State<AppState>, User(u): User, Path(id): Path<String>
     if rows.is_empty() {
         return Err(err(404, "Album not found"));
     }
+    // an album merged from copies (encore_library::merge): each song once, in its best copy
+    // (its size and when it came are of every copy)
+    let copies = encore_library::merge::other_copies(&rows);
+    let (size, added_at) = (rows.iter().map(|r| r.i("size")).sum::<i64>(), rows.iter().filter_map(|r| r.get("added_at").and_then(|v| v.as_f64())).reduce(f64::min));
+    let rows: Vec<_> = rows.into_iter().filter(|r| !copies.contains(&r.i("id"))).collect();
     let libp = format!("{}/", st.cfg.str("library_path").trim_end_matches('/'));
     let admin = encore_config::perms::is_admin(&u);
     let tracks: Vec<Value> = rows.iter().map(|r| {
@@ -990,7 +995,8 @@ async fn album(State(st): State<AppState>, User(u): User, Path(id): Path<String>
         r.remove("albumartist_credit");
         Value::Object(r)
     }).collect();
-    let f = &rows[0];
+    // the album's name and ids from its MusicBrainz copy when it has one
+    let f = rows.iter().find(|r| !r.s("mb_releasegroupid").is_empty()).unwrap_or(&rows[0]);
     let class = {
         let id = id.clone();
         st.blocking(move |st| Ok(st.library.types.of(&st.db, &id))).await?
@@ -998,9 +1004,8 @@ async fn album(State(st): State<AppState>, User(u): User, Path(id): Path<String>
     let mut v = json!({
         "id": id, "album": f.get("album"), "albumartist": f.get("albumartist"), "year": f.get("year"), "genre": f.get("genre"),
         "mb_albumid": f.get("mb_albumid"), "mb_releasegroupid": f.get("mb_releasegroupid"), "mb_albumartistid": f.get("mb_albumartistid"),
-        "tracks": tracks, "duration": rows.iter().map(|r| r.f("duration")).sum::<f64>(), "size": rows.iter().map(|r| r.i("size")).sum::<i64>(),
-        "type": class.json(), "history": history(&tracks_of(&rows)),
-        "added_at": rows.iter().filter_map(|r| r.get("added_at").and_then(|v| v.as_f64())).reduce(f64::min),
+        "tracks": tracks, "duration": rows.iter().map(|r| r.f("duration")).sum::<f64>(), "size": size,
+        "type": class.json(), "history": history(&tracks_of(&rows)), "other_copies": copies.len(), "added_at": added_at,
     });
     enrich(&st, Some(&u), &mut v).await;
     // its Surround versions (0.35): the surround albums, the request fetching one, whether Apple has one; and

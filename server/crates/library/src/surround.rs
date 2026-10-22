@@ -120,7 +120,7 @@ fn read_file(path: &str) -> std::io::Result<FileRow> {
 
 /// The stereo album and song a surround file belongs to (None, None when the stereo library has neither).
 fn link(c: &Conn, f: &FileRow) -> rusqlite::Result<(Option<String>, Option<i64>)> {
-    let album = stereo_album_key(&f.albumartist, &stereo_name(&f.album), &f.path);
+    let album = crate::merge::resolve(c, &stereo_album_key(&f.albumartist, &stereo_name(&f.album), &f.path))?;
     let album = c.one("SELECT 1 FROM tracks WHERE album_id=? LIMIT 1", p![album])?.map(|_| album);
     if !f.isrc.trim().is_empty() {
         if let Some(r) = c.one("SELECT id FROM tracks WHERE isrc=? COLLATE NOCASE ORDER BY album_id=? DESC LIMIT 1", p![f.isrc.trim(), album.clone().unwrap_or_default()])? {

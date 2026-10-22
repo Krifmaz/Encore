@@ -118,10 +118,12 @@ fn read_file(path: &str, meta: Option<std::fs::Metadata>) -> std::io::Result<Fil
 /// album, and the one it was in before when its tags moved it.
 fn store_file(c: &Conn, f: &FileRow, added: Added) -> rusqlite::Result<Vec<String>> {
     use crate::loudness::{keeps_measurement, tag_columns, tag_values, TagColumns, COLUMNS};
-    let mut albums = vec![f.album_id.clone()];
+    // an album merged into another (encore_library::merge) is written as that one
+    let album_id = crate::merge::resolve(c, &f.album_id)?;
+    let mut albums = vec![album_id.clone()];
     if let Some(ex) = c.one("SELECT id, mtime, size, verified_at, album_id, duration, loudness_source FROM tracks WHERE path=?", p![f.path])? {
         let mut sets = COLS.iter().map(|c| format!("{c}=?")).collect::<Vec<_>>().join(", ");
-        let mut params = vec![json!(f.album_id), json!(f.mtime), json!(f.size)];
+        let mut params = vec![json!(album_id), json!(f.mtime), json!(f.size)];
         params.extend(f.vals.iter().cloned());
         // the loudness: a track gain tag wins; a measurement of the same audio stays; else measured again
         let (cols, vals): (&[&str], Vec<Value>) = match tag_columns(&f.gain, keeps_measurement(&ex.s("loudness_source"), ex.f("duration"), f.duration)) {
@@ -140,11 +142,11 @@ fn store_file(c: &Conn, f: &FileRow, added: Added) -> rusqlite::Result<Vec<Strin
             c.execute("UPDATE tracks SET verify_status=NULL WHERE id=? AND verify_status IS NOT 'manual'", p![ex.i("id")])?;
         }
         let before = ex.s("album_id");
-        if !before.is_empty() && before != f.album_id {
+        if !before.is_empty() && before != album_id {
             albums.push(before);
         }
     } else {
-        let mut params = vec![json!(f.path), json!(f.album_id), json!(f.mtime), json!(f.size)];
+        let mut params = vec![json!(f.path), json!(album_id), json!(f.mtime), json!(f.size)];
         params.extend(f.vals.iter().cloned());
         params.extend(tag_values(&f.gain));
         // stamped as it is written, in the order the files come: `added_at` keeps the order the files were found in
@@ -218,6 +220,16 @@ pub fn index_files_as(db: &Db, paths: &[String], added: Added) -> Indexed {
             }
         }
         write_batch(db, &rows, added, &mut out);
+    }
+    // an import of a release the library has from another source joins that album (encore_library::merge)
+    if out.changed > 0 {
+        if let Ok(m) = db.write_now(crate::merge::merge_albums) {
+            for (from, to) in m {
+                if out.albums.remove(&from) {
+                    out.albums.insert(to);
+                }
+            }
+        }
     }
     out
 }
@@ -424,6 +436,16 @@ impl Library {
                 all.0.changed += n.changed;
                 all.0.removed += n.removed;
                 all.0.albums.extend(n.albums);
+            }
+            // the same release from MusicBrainz and from another source: one album (no file is touched)
+            match db2.write_now(crate::merge::merge_albums) {
+                Ok(m) if !m.is_empty() => {
+                    db2.log("info", &format!("Merged {} duplicate album{} into their MusicBrainz or fuller copy", m.len(), if m.len() == 1 { "" } else { "s" }));
+                    all.0.changed += m.len();
+                    all.0.albums.extend(m.into_iter().map(|(_, to)| to));
+                }
+                Ok(_) => {}
+                Err(e) => tracing::warn!("scan: merging duplicate albums failed: {e}"),
             }
             // the planner's statistics follow what the scan's queries wanted (cheap when there is nothing to do)
             db2.optimize();

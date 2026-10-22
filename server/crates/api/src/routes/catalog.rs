@@ -11,6 +11,7 @@ use axum::routing::{get, post};
 use axum::{Json, Router};
 use encore_core::json::s;
 use encore_library::catalog::*;
+use encore_db::{p, RowExt};
 use serde_json::{json, Value};
 
 pub fn router() -> Router<AppState> {
@@ -77,10 +78,18 @@ async fn artist_catalog_answer(State(st): State<AppState>, User(_): User, Path(m
     }
     let a = mb::artist(&st, &mbid).await.map_err(|e| err(502, format!("MusicBrainz error: {e}")))?;
     let found = merged(&st, &a).await;
+    let rgs: std::collections::HashSet<String> = a["release_groups"].as_array().into_iter().flatten().map(|g| s(&g["id"])).collect();
     // the library and the requests for every release: on the blocking pool
     let mut rel = st.blocking(move |st| {
         let mut rel = found;
         annotate(st, &mut rel);
+        // a release whose library album is one of the artist's MusicBrainz release groups (its copy from this
+        // service was merged into the MusicBrainz album, encore_library::merge) is in MusicBrainz: not shown twice
+        let in_mb = |m: &Value| m["library_album_id"].as_str().is_some_and(|id| {
+            st.db.query("SELECT DISTINCT mb_releasegroupid rg FROM tracks WHERE album_id=? AND mb_releasegroupid IS NOT NULL", p![id])
+                .unwrap_or_default().iter().any(|r| rgs.contains(&r.s("rg")))
+        });
+        rel.retain(|m| !in_mb(m));
         Ok(rel)
     }).await?;
     let filter = encore_config::release_types::ReleaseFilter::from_cfg(&st.cfg);

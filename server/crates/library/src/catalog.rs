@@ -16,13 +16,17 @@ use std::collections::HashMap;
 use std::sync::LazyLock;
 
 static RE_SUFFIX: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"\s+-\s+(single|ep)$").unwrap());
+static RE_FEAT: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"[\(\[]\s*(feat\.?|ft\.?|featuring|with)\s[^\)\]]*[\)\]]|\s+(feat\.|ft\.|featuring)\s.*$").unwrap());
 static RE_EDITION: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"[\(\[][^\)\]]*(deluxe|edition|remaster|version|expanded|anniversary|explicit|clean|bonus)[^\)\]]*[\)\]]").unwrap());
 
-/// The key a release title is compared by: without " - Single" / " - EP" and edition notes ("(Deluxe
-/// Edition)", "[Remastered]" …), "&" read as "and", then letters, digits and underscores.
+/// The key a release title is compared by: without " - Single" / " - EP", featured artists ("(feat. X)") and
+/// edition notes ("(Deluxe Edition)", "[Remastered]" …), accents dropped, "&" read as "and", then letters,
+/// digits and underscores.
 pub fn title_key(title: &str) -> String {
-    let t = title.to_lowercase();
+    use unicode_normalization::UnicodeNormalization;
+    let t: String = title.to_lowercase().nfkd().filter(|c| !unicode_normalization::char::is_combining_mark(*c)).collect();
     let t = RE_SUFFIX.replace(&t, "");
+    let t = RE_FEAT.replace_all(&t, "");
     let t = RE_EDITION.replace_all(&t, "").replace('&', "and");
     encore_core::text::norm_keep_underscore(&t)
 }
@@ -389,8 +393,10 @@ fn fuzzy<'a>(ext: &Value, rgs: &'a [Value]) -> Option<&'a Value> {
     let et = s(&ext["type"]);
     rgs.iter().find(|rg| {
         let rt = s(&rg["type"]);
-        if (et == "Single" || rt == "Single") && et != rt {
-            return false; // a title-track single isn't the album
+        // a title-track single isn't the album (Deezer and Apple call many EPs singles: those two may meet)
+        let small = |t: &str| t == "Single" || t == "EP";
+        if (et == "Single" || rt == "Single") && et != rt && !(small(&et) && small(&rt)) {
+            return false;
         }
         let sim = similar(&s(&ext["title"]), &s(&rg["title"]));
         sim >= 0.92 || (sim >= 0.8 && !y.is_empty() && s(&rg["year"]) == y)
@@ -527,6 +533,9 @@ mod tests {
     fn titles() {
         assert_eq!(title_key("Folklore (Deluxe Edition)"), "folklore");
         assert_eq!(title_key("Hello - Single"), "hello");
+        assert_eq!(title_key("Café (feat. Someone) [Remastered]"), "cafe");
+        assert_eq!(title_key("Song ft. Guest"), "song");
+        assert_eq!(title_key("With You"), "withyou");
         assert!(similar("Rock & Roll", "rock and roll") == 1.0);
         let r = similar("abcd", "bcde");
         assert!((r - 0.75).abs() < 1e-9, "{r}");

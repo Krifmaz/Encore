@@ -174,6 +174,21 @@ pub fn album_ids_for(db: &Db, items: &[(String, String, String)]) -> Vec<Option<
                 .min_by_key(|r| r.i("id")).map(|r| r.s("album_id"));
         }
     }
+    // the titles as the merge compares them (encore_library::merge): "Lemonade (Deluxe)" by "Beyonce" is the
+    // library's "Lemonade" by "Beyonce" (the artist's albums are read by its spelling, any case)
+    let rest: Vec<usize> = (0..items.len()).filter(|i| out[*i].is_none() && !items[*i].2.is_empty()).collect();
+    if !rest.is_empty() {
+        let keys = params(rest.iter().map(|i| lower(&items[*i].1)));
+        let rows = rows_in(db, "SELECT MIN(id) id, album_id, MAX(album) album, MAX(COALESCE(NULLIF(albumartist,''), artist)) _a FROM tracks
+                                WHERE lower(COALESCE(NULLIF(albumartist,''), artist)) IN ({in}) GROUP BY album_id", &keys);
+        for i in rest {
+            let (_, artist, album) = &items[i];
+            let (tk, ak) = (crate::catalog::title_key(album), crate::merge::artist_key(artist));
+            out[i] = rows.iter()
+                .filter(|r| !tk.is_empty() && crate::catalog::title_key(&r.s("album")) == tk && crate::merge::artist_key(&r.s("_a")) == ak)
+                .min_by_key(|r| r.i("id")).map(|r| r.s("album_id"));
+        }
+    }
     out
 }
 
