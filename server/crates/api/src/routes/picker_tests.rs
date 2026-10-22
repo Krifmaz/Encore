@@ -441,13 +441,13 @@ async fn indexer_answers_are_kept_for_the_picker() {
     let db = SearchBody { source: "torznab".into(), kind: "album".into(), artist: "Travis Scott".into(), title: "Days Before Rodeo".into(), query: Some("Travis Scott Days Before Rodeo".into()), ..Default::default() };
     let a = run_search_for(&st, &db, Some(&req8)).await.unwrap();
     assert_eq!((calls(), a.json()["from"].as_str(), a.query.as_str(), a.items.len()), (2, Some("cache"), "Days Before Rodeo", 1), "{:?}", a.items);
-    // without the request, the empty answer kept for the box's words
+    // without the request, the empty answer kept for the box's words is no answer: Prowlarr is asked again
     let a = run_search(&st, &db).await.unwrap();
-    assert_eq!((calls(), a.json()["from"].as_str(), a.items.len()), (2, Some("cache"), 0));
+    assert_eq!((calls(), a.json()["from"].as_str()), (3, Some("live")));
     // typed words are searched as typed
     let typed = SearchBody { query: Some("Rodeo Travis Scott FLAC".into()), ..eb };
     let a = run_search_for(&st, &typed, Some(&req)).await.unwrap();
-    assert_eq!((calls(), a.cached_at), (3, None));
+    assert_eq!((calls(), a.cached_at), (4, None));
     // a song: both of its Prowlarr searches are kept
     let sb = SearchBody { source: "torznab".into(), kind: "track".into(), artist: "Travis Scott".into(), title: "90210".into(), album: Some("Rodeo".into()), query: Some("Travis Scott 90210".into()), ..Default::default() };
     run_search(&st, &sb).await.unwrap();

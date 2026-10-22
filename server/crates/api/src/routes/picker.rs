@@ -522,7 +522,9 @@ impl<'a> Prowlarr<'a> {
             let key = search_cache::torznab_key(q, cats);
             let mine = self.mine.clone().filter(|_| own);
             let k = key.clone();
-            let found = self.st.blocking(move |st| Ok(kept_for(st, "torznab", &k, mine))).await.ok().flatten();
+            // an answer with no releases is searched again: an indexer that was down or slow then, or a search
+            // made before the song could be searched, would otherwise read as "nothing on your indexers"
+            let found = self.st.blocking(move |st| Ok(kept_for(st, "torznab", &k, mine))).await.ok().flatten().filter(|f| !f.results.is_empty());
             if let Some(f) = found {
                 let mut kept = self.kept.lock().unwrap_or_else(|e| e.into_inner());
                 if kept.as_ref().is_none_or(|(at, _)| f.searched_at < *at) {
