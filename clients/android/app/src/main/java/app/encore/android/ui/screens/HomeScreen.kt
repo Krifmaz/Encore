@@ -36,16 +36,13 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import app.encore.android.features.library.OnSongFixed
 import app.encore.android.R
+import app.encore.android.core.bool
 import app.encore.android.core.int
 import app.encore.android.core.str
 import app.encore.android.data.api.Album
 import app.encore.android.data.api.Track
 import app.encore.android.data.api.User
-import app.encore.android.data.repo.RequestRow
 import app.encore.android.data.session.Session
-import app.encore.android.features.requests.RequestItem
-import app.encore.android.features.requests.RequestSheets
-import app.encore.android.features.requests.rememberRequestActions
 import app.encore.android.features.files.FilesAccess
 import app.encore.android.features.group.ListeningTogetherRow
 import app.encore.android.ui.Nav
@@ -55,6 +52,7 @@ import app.encore.android.ui.components.AlbumCard
 import app.encore.android.ui.components.Avatar
 import app.encore.android.ui.components.Badge
 import app.encore.android.ui.components.Collage
+import app.encore.android.ui.components.Cover
 import app.encore.android.ui.components.EmptyState
 import app.encore.android.ui.components.EncoreButton
 import app.encore.android.ui.components.Gutter
@@ -65,7 +63,6 @@ import app.encore.android.ui.components.PopMenu
 import app.encore.android.ui.components.SectionHead
 import app.encore.android.ui.components.Tile
 import app.encore.android.ui.components.Toasts
-import app.encore.android.ui.components.TrackRow
 import app.encore.android.ui.components.rememberLoad
 import app.encore.android.ui.theme.palette
 import androidx.compose.foundation.layout.offset
@@ -75,6 +72,7 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import kotlinx.serialization.json.JsonArray
+import kotlinx.serialization.json.JsonNull
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
 import java.util.Calendar
@@ -108,8 +106,6 @@ private fun greeting(): String {
 @Composable
 fun HomeScreen(nav: Nav, session: Session) {
     val api = nav.graph.api
-    val liked by nav.graph.likes.liked.collectAsState()
-    val nowPlaying by nav.player.nowPlaying.collectAsState()
     val scope = rememberCoroutineScope()
     val p = MaterialTheme.palette
     val loader = rememberLoad(session.server, session.username) {
@@ -123,30 +119,33 @@ fun HomeScreen(nav: Nav, session: Session) {
     // a song corrected or deleted from its ⋯ (Recently played): Home loads again in place
     OnSongFixed { loader.refresh() }
 
-    // "Your downloads in progress" (home.rs `load_reqs`): this user's active requests, with their buttons; and for
-    // admins the count of requests awaiting approval (the web's sidebar badge, every 30 s)
-    var reqGen by remember { mutableIntStateOf(0) }
-    var active by remember { mutableStateOf<List<RequestRow>>(emptyList()) }
+    // admins: the count of requests awaiting approval on the avatar (the web's sidebar badge, every 30 s). Downloads
+    // in progress live under Requests, not on Home.
     var pending by remember { mutableIntStateOf(0) }
-    val reqActions = rememberRequestActions(nav) { reqGen += 1 }
-    LaunchedEffect(session, reqGen) {
-        try {
-            val features = nav.features
-            if (reqActions.me == null) reqActions.me = withContext(Dispatchers.IO) { features.me() }
-            active = withContext(Dispatchers.IO) { features.requests("active", mine = true, limit = 8) }
-            if (reqActions.admin) pending = withContext(Dispatchers.IO) { features.pendingCount() }
+    LaunchedEffect(session) {
+        val features = nav.features
+        val admin = try { withContext(Dispatchers.IO) { features.me() }.isAdmin } catch (e: CancellationException) { throw e } catch (_: Exception) { false }
+        while (admin) {
+            try {
+                pending = withContext(Dispatchers.IO) { features.pendingCount() }
+            } catch (e: CancellationException) {
+                throw e
+            } catch (_: Exception) {
+            }
+            delay(30_000)
+        }
+    }
+
+    // New releases from library artists (home.rs): loaded on their own, the first answer after a server start can
+    // take a while; kinds Settings → Release types skips stay off Home
+    var releases by remember { mutableStateOf<List<JsonObject>>(emptyList()) }
+    LaunchedEffect(session) {
+        releases = try {
+            withContext(Dispatchers.IO) { api.newReleases(12) }.filter { it["skipped"] == null || it["skipped"] is JsonNull }
         } catch (e: CancellationException) {
             throw e
         } catch (_: Exception) {
-        }
-    }
-    LaunchedEffect(session) {
-        var ticks = 0
-        while (true) {
-            delay(10_000)
-            ticks += 1
-            // the progress of downloads on their way; the approval count every 30 s
-            if (active.isNotEmpty() || (reqActions.admin && ticks % 3 == 0)) reqGen += 1
+            emptyList()
         }
     }
 
@@ -241,11 +240,6 @@ fun HomeScreen(nav: Nav, session: Session) {
                 }
             }
 
-            if (active.isNotEmpty()) {
-                item { SectionHead("Your downloads in progress", action = "All requests") { nav.open(Screen.Requests) } }
-                for (r in active) item(key = "req-${r.id}") { RequestItem(reqActions, r) }
-            }
-
             item { SectionHead("Recently added", action = "Library") { nav.showTab(Tab.LIBRARY) } }
             if (data.recent.isEmpty()) {
                 item { EmptyState(R.drawable.ic_library, "Your library is empty", "Search above or paste a link to get started.") }
@@ -261,24 +255,50 @@ fun HomeScreen(nav: Nav, session: Session) {
                 }
             }
 
+            if (releases.isNotEmpty()) {
+                item { SectionHead("New releases", subtitle = "From artists in your library") }
+                item {
+                    LazyRow(contentPadding = PaddingValues(horizontal = Gutter), horizontalArrangement = Arrangement.spacedBy(14.dp)) {
+                        items(releases) { r ->
+                            val type = r.str("type")
+                            Tile(
+                                title = r.str("title"),
+                                subtitle = listOf(r.str("artist"), r.str("date"), if (type != "Album") type else "").filter { it.isNotEmpty() }.joinToString(" · "),
+                                modifier = Modifier.width(150.dp),
+                                onClick = {
+                                    val mbid = r.str("mbid")
+                                    if (mbid.isNotEmpty()) nav.open(Screen.CatalogAlbum(mbid)) else openCatalogArtist(nav, "", r.str("artist"), scope)
+                                },
+                            ) { m ->
+                                Box(m) {
+                                    Cover(r.str("cover").ifEmpty { null }, nav.graph.imageLoader, Modifier.fillMaxSize(), corner = 12.dp, label = r.str("title"))
+                                    if (r.bool("in_library")) Badge("In library", kind = "ok", modifier = Modifier.padding(8.dp))
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
             if (data.played.isNotEmpty()) {
                 item { SectionHead("Recently played") }
-                itemsIndexed(data.played, key = { i, t -> "${t.id}-$i" }) { i, t ->
-                    TrackRow(
-                        track = t,
-                        imageLoader = nav.graph.imageLoader,
-                        coverUrl = if (t.albumId.isNotEmpty()) api.coverUrl(t.albumId, 96) else null,
-                        liked = t.id in liked,
-                        playing = nowPlaying?.id == t.id,
-                        onClick = { nav.player.play(data.played, i) },
-                        onLike = { nav.graph.likes.toggle(t.id) },
-                        subtitleLinks = rememberSongLinks(nav, t, withAlbum = false),
-                        onMore = { nav.trackMenu(t) },
-                    )
+                item {
+                    LazyRow(contentPadding = PaddingValues(horizontal = Gutter), horizontalArrangement = Arrangement.spacedBy(14.dp)) {
+                        itemsIndexed(data.played, key = { i, t -> "${t.id}-$i" }) { i, t ->
+                            Tile(
+                                title = t.title,
+                                subtitle = t.artist,
+                                modifier = Modifier.width(150.dp),
+                                onLongClick = { nav.trackMenu(t) },
+                                onClick = { nav.player.play(data.played, i) },
+                            ) { m ->
+                                Cover(if (t.albumId.isNotEmpty()) api.coverUrl(t.albumId, 400) else null, nav.graph.imageLoader, m, corner = 12.dp, label = t.title)
+                            }
+                        }
+                    }
                 }
             }
             item { Spacer(Modifier.height(24.dp)) }
         }
     }
-    RequestSheets(reqActions, active)
 }

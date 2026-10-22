@@ -350,6 +350,9 @@ class EncoreApi(private val client: OkHttpClient, private val store: SessionStor
     /** Made for you (ListenBrainz playlists): raw rows, `tracks[].library` is the library match. */
     fun madeForYou(): List<JsonObject> = getObject("/api/discover/made-for-you").arr("playlists").objectsOf()
 
+    /** New releases from the library's artists (GET /api/discover/new-releases, Home's "New releases"): raw rows. */
+    fun newReleases(limit: Int = 12): List<JsonObject> = getObject("/api/discover/new-releases?limit=$limit").arr("releases").objectsOf()
+
     // ---- play log (same rules and endpoints as web/js/player.js) -----------------------------------------
 
     fun nowPlaying(trackId: Long) {
