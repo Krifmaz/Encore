@@ -7,8 +7,8 @@ inside the app through a small Rust library. It replaced the Tauri APK from `cli
 What it does:
 
 - server picker, sign-in with an authenticator code (2FA), app tokens, sign out
-- tabs Home, Search, Library, Playlists and Discover; For you, Requests, the download picker, Leaderboard, Account
-  and Settings; one artist page (MusicBrainz, or the library's albums for an artist known by name only) with "Liked
+- tabs Home, Discover (the one search: the library first, then the catalogue), Library and Playlists; For you,
+  Requests, the download picker, Leaderboard, Account and Settings; one artist page (MusicBrainz, or the library's albums for an artist known by name only) with "Liked
   from this artist" and "In your library"; one search box on the Library page for artists, albums and songs, and
   Discover's search asks the library too
 - the Surround library (0.35): the Library's Surround tab (Dolby Atmos and 5.1 albums), the album pages' links

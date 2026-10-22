@@ -89,7 +89,6 @@ import app.encore.android.ui.screens.SignalPathSheet
 import app.encore.android.ui.screens.MiniPlayer
 import app.encore.android.ui.screens.PlaylistScreen
 import app.encore.android.ui.screens.PlaylistsScreen
-import app.encore.android.ui.screens.SearchScreen
 import app.encore.android.ui.screens.SettingsScreen
 import app.encore.android.ui.screens.UpNextSheet
 import app.encore.android.ui.screens.rememberPlayerMenuActions
@@ -149,13 +148,15 @@ sealed interface Screen {
     data class Files(val startRoot: String = "") : Screen
 }
 
-/** The bottom tabs (the web's main nav on phones): Home, Search, Library, Playlists, Discover. */
+/**
+ * The bottom tabs (the web's main nav on phones): Home, Discover, Library, Playlists. Discover is the one search:
+ * what the library has first, then the catalogue (it took over the old Search tab).
+ */
 enum class Tab(val label: String, val icon: Int) {
     HOME("Home", R.drawable.ic_home),
-    SEARCH("Search", R.drawable.ic_search),
+    DISCOVER("Discover", R.drawable.ic_search),
     LIBRARY("Library", R.drawable.ic_library),
     PLAYLISTS("Playlists", R.drawable.ic_queue_music),
-    DISCOVER("Discover", R.drawable.ic_explore),
 }
 
 /** Everything a screen needs to move around and play. */
@@ -337,7 +338,6 @@ private fun MainScreen(graph: AppGraph, player: PlayerConnection, session: Sessi
                     is Screen.Files -> FilesScreen(nav, top.startRoot)
                     null -> when (tab) {
                         Tab.HOME -> HomeScreen(nav, session)
-                        Tab.SEARCH -> SearchScreen(nav)
                         Tab.LIBRARY -> LibraryScreen(nav)
                         Tab.PLAYLISTS -> PlaylistsScreen(nav)
                         Tab.DISCOVER -> DiscoverScreen(nav)

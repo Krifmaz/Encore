@@ -445,7 +445,7 @@ pub fn render_search(view: Element, ctx: Ctx) -> PageFuture {
       <h1>Discover</h1>
       <a class="btn sm" href="#/for-you">{}For you</a>
     </div>
-    <form class="search" id="s-form" style="max-width:720px">{}<input class="input" name="q" type="search" enterkeyhint="search" value="{}" placeholder="Search MusicBrainz for artists, albums, songs…" autocomplete="off"></form>
+    <form class="search" id="s-form" style="max-width:720px">{}<input class="input" name="q" type="search" enterkeyhint="search" value="{}" placeholder="Search your library and MusicBrainz…" autocomplete="off"></form>
     <div class="tabs mt" id="s-tabs">
       {tabs}
     </div>
@@ -477,7 +477,7 @@ pub fn render_search(view: Element, ctx: Ctx) -> PageFuture {
                     seq.set(seq.get() + 1);
                     let mine = seq.get();
                     if qv.is_empty() {
-                        set_html(&results, &empty_state(&icon("search"), "Search the entire MusicBrainz catalogue", "Everything you find can be requested with one click."));
+                        set_html(&results, &empty_state(&icon("search"), "Search your library and the whole catalogue", "What you already have shows first; anything else can be requested with one click."));
                         return;
                     }
                     set_html(&results, &skeleton_grid(12));

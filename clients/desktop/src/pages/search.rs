@@ -433,8 +433,8 @@ fn results<'a>(state: &'a State, ctx: &Ctx<'a>) -> El<'a, Message> {
     if state.q.is_empty() {
         return empty(
             Icon::Search,
-            "Search the entire MusicBrainz catalogue",
-            "Everything you find can be requested with one click.",
+            "Search your library and the whole catalogue",
+            "What you already have shows first; anything else can be requested with one click.",
         );
     }
     let mut col = column![].spacing(22);
@@ -514,7 +514,7 @@ pub fn view<'a>(state: &'a State, ctx: &Ctx<'a>) -> El<'a, Message> {
     ]
     .align_y(Alignment::Center);
     let search = container(search_box(
-        "Search MusicBrainz for artists, albums, songs…",
+        "Search your library and MusicBrainz…",
         &state.input,
         Message::Input,
         Some(Message::Submit),

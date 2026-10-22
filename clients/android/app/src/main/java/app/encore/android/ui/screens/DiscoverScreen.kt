@@ -538,7 +538,7 @@ fun CatalogTrackRow(nav: Nav, t: CatalogTrack, statuses: RequestStatuses) {
 private val SEARCH_TYPES = listOf("all" to "Top results", "artist" to "Artists", "album" to "Albums", "track" to "Songs")
 
 /**
- * The Discover tab: search MusicBrainz for artists, albums and songs; everything can be requested. Stacked with
+ * The Discover tab (the only search; it took over the Search tab): search MusicBrainz for artists, albums and songs; everything can be requested. Stacked with
  * [initialQuery] it opens as a page with a back arrow (the For you album tiles and library links use that).
  *
  * Every search also asks the library (GET /api/library/search, in parallel; the newest query wins, 0.31): Top
@@ -624,7 +624,7 @@ fun DiscoverScreen(nav: Nav, initialQuery: String = "", initialType: String = "a
         EncoreField(
             value = input,
             onValueChange = { input = it },
-            placeholder = "Search MusicBrainz for artists, albums, songs…",
+            placeholder = "Search your library and MusicBrainz…",
             leadingIcon = R.drawable.ic_search,
             imeAction = ImeAction.Search,
             onAction = { q = input.trim(); generation += 1 },
@@ -640,7 +640,7 @@ fun DiscoverScreen(nav: Nav, initialQuery: String = "", initialType: String = "a
         val libSongs = when (type) { 0 -> lib?.songs.orEmpty().take(5); 3 -> lib?.songs.orEmpty().take(3); else -> emptyList() }
         val libHas = libArtists.isNotEmpty() || libAlbums.isNotEmpty() || libSongs.isNotEmpty()
         when {
-            q.isEmpty() -> EmptyState(R.drawable.ic_search, "Search the entire MusicBrainz catalogue", "Everything you find can be requested with one click.")
+            q.isEmpty() -> EmptyState(R.drawable.ic_search, "Search your library and the whole catalogue", "What you already have shows first; anything else can be requested with one click.")
             err != null && !libHas -> ErrorBox(err) { generation += 1 }
             busy && r == null && !libHas -> Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) { CircularProgressIndicator(color = p.accent, trackColor = p.border) }
             r == null && !libHas -> Spacer(Modifier.height(1.dp))

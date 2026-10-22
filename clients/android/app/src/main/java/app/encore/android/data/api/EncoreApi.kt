@@ -268,7 +268,7 @@ class EncoreApi(private val client: OkHttpClient, private val store: SessionStor
         get("/api/library/artists?sort=" + enc(sort) + (if (dir.isNotEmpty()) "&dir=${enc(dir)}" else "") + if (q.isNotEmpty()) "&q=${enc(q)}" else "")
             .objects().mapNotNull { Artist.from(it) }
 
-    /** The Search tab: songs, albums and artists for a query, with a Top result (GET /api/library/search). */
+    /** Discover's library part: songs, albums and artists for a query, with a Top result (GET /api/library/search). */
     fun search(q: String, limit: Int = 30): LibrarySearch = LibrarySearch.from(getObject("/api/library/search?q=${enc(q)}&limit=$limit"))
 
     fun tracks(q: String = "", offset: Int = 0, limit: Int = 200, sort: String = "artist", dir: String = ""): List<Track> {
