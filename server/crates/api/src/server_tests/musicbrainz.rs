@@ -375,7 +375,8 @@ async fn a_restart_keeps_what_musicbrainz_said() {
     let (ts, _, _) = server("recover").await;
     let st = ts.st.clone();
     let admin = user(&st, "boss", "admin").i("id");
-    let t = now();
+    // whole seconds: serde_json reads some fractions back one ulp off (1792641925.3096 → …5.3095999)
+    let t = now().floor();
     let kept = json!({ "no_album": true, "recording": "rec-1", "album_checked_at": t, "album_lookup": { "tries": 1 }, "album_note": "n",
                        "release": { "id": "rel-1", "tracks": [] }, "lossless_only": true, "auto": true, "isrc": "X", "attempts": 2 });
     let mut d = kept.clone();
