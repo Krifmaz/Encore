@@ -115,6 +115,8 @@ pub async fn run<C: Ctx>(st: C) {
             ACTIVE.iter().map(|s| json!(s)).collect()).unwrap_or_default().into_iter().map(|r| r.i("id")).collect();
         // the download folders' probe: every minute while requests are active, started and not waited for
         let _ = downloads::tick(&st, !ids.is_empty());
+        // finished downloads in Encore's category that Encore didn't start: every two minutes, not waited for
+        outside::tick(&st);
         // Download now's presses last while their request is active
         st.requests().lines.retain(&ids.iter().copied().collect());
         {

@@ -156,11 +156,12 @@ pub const SECTIONS: &[Card] = &[
         s("auto_request_followed", "Automatically download new tracks in followed playlists (more rules under Admin → Auto-download)", "bool"),
     ] },
     Card { id: "torznab", title: "Torrents & Usenet (Prowlarr)", desc: "Searches your torrent and Usenet indexers (through Prowlarr) for whole albums and sends them to your torrent client (qBittorrent, Transmission, Deluge or rTorrent) or Usenet client (SABnzbd or NZBGet), or drops them into a watch folder.", test: Some("torznab"), test_label: None, fields: &[
-        s("torznab_enabled", "Search torrent and Usenet indexers through Prowlarr", "bool").help("Albums only (a song can still be picked from them by hand with Pick). Prowlarr searches every indexer you added there; torrents go to the torrent client below, Usenet to the Usenet client."),
+        s("torznab_enabled", "Search torrent and Usenet indexers through Prowlarr", "bool").help("Albums and songs: a song is searched on its own and on the album it is on, and from an album only the song's file is downloaded (torrents) or imported (Usenet). Prowlarr searches every indexer you added there; torrents go to the torrent client below, Usenet to the Usenet client."),
         s("prowlarr_url", "Prowlarr URL", "text").help("Internal address, e.g. http://prowlarr:9696"),
         s("prowlarr_api_key", "Prowlarr API key", "password").help("Prowlarr → Settings → General → API Key"),
         s("torznab_min_seeders", "Minimum seeders", "number"),
         s("torznab_timeout_minutes", "Try the next release after a stall of (minutes)", "number"),
+        s("import_client_downloads", "Import downloads Encore didn't start", "bool").help("Finished downloads in Encore's category of qBittorrent or SABnzbd that you (or another app) added are imported too, from a copy: the download stays in the client as it is and keeps seeding."),
         s("torrent_client", "Torrent client", "select").options(&[("qbittorrent", "qBittorrent"), ("transmission", "Transmission"), ("deluge", "Deluge"), ("rtorrent", "rTorrent / ruTorrent"), ("blackhole", "Blackhole folder (any client with a watch folder)")]),
         s("qbit_url", "qBittorrent URL", "text").help("e.g. http://qbittorrent:8080 (leave empty to skip torrents)").when("torrent_client", &["qbittorrent"]),
         s("qbit_user", "qBittorrent user", "text").when("torrent_client", &["qbittorrent"]),

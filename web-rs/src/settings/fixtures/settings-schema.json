@@ -1198,7 +1198,7 @@
               "env": "TORZNAB_ENABLED",
               "env_locked": false,
               "full": false,
-              "help": "Albums only (a song can still be picked from them by hand with Pick). Prowlarr searches every indexer you added there; torrents go to the torrent client below, Usenet to the Usenet client.",
+              "help": "Albums and songs: a song is searched on its own and on the album it is on, and from an album only the song's file is downloaded (torrents) or imported (Usenet). Prowlarr searches every indexer you added there; torrents go to the torrent client below, Usenet to the Usenet client.",
               "key": "torznab_enabled",
               "label": "Search torrent and Usenet indexers through Prowlarr",
               "max": null,
@@ -1280,6 +1280,24 @@
               "step": null,
               "type": "number",
               "unit": "minutes",
+              "when": null
+            },
+            {
+              "advanced": false,
+              "default": true,
+              "env": "IMPORT_CLIENT_DOWNLOADS",
+              "env_locked": false,
+              "full": false,
+              "help": "Finished downloads in Encore's category of qBittorrent or SABnzbd that you (or another app) added are imported too, from a copy: the download stays in the client as it is and keeps seeding.",
+              "key": "import_client_downloads",
+              "label": "Import downloads Encore didn't start",
+              "max": null,
+              "min": null,
+              "options": [],
+              "secret": false,
+              "step": null,
+              "type": "bool",
+              "unit": null,
               "when": null
             },
             {

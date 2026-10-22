@@ -492,7 +492,7 @@ default = false
 group = "torznab"
 label = "Search torrent and Usenet indexers through Prowlarr"
 type = "bool"
-help = "Albums only (a song can still be picked from them by hand with Pick). Prowlarr searches every indexer you added there; torrents go to the torrent client below, Usenet to the Usenet client."
+help = "Albums and songs: a song is searched on its own and on the album it is on, and from an album only the song's file is downloaded (torrents) or imported (Usenet). Prowlarr searches every indexer you added there; torrents go to the torrent client below, Usenet to the Usenet client."
 
 [keys.prowlarr_url]
 env = "PROWLARR_URL"
@@ -527,6 +527,14 @@ label = "Try the next release after a stall of (minutes)"
 type = "number"
 unit = "minutes"
 min = 1
+
+[keys.import_client_downloads]
+env = "IMPORT_CLIENT_DOWNLOADS"
+default = true
+group = "torznab"
+label = "Import downloads Encore didn't start"
+type = "bool"
+help = "Finished downloads in Encore's category of qBittorrent or SABnzbd that you (or another app) added are imported too, from a copy: the download stays in the client as it is and keeps seeding."
 
 [keys.torrent_client]
 env = "TORRENT_CLIENT"

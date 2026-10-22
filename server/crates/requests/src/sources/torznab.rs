@@ -467,6 +467,53 @@ pub fn score_song(title: &str, size: f64, seeders: Option<i64>, proto: &str, art
     Some(((score * 10.0).round() / 10.0, single))
 }
 
+/// Best releases for one song, best first (at most 5): the song's own releases ([`score_song`]), then
+/// releases of the album it is on (`album`: its name and that search's results, ranked as [`rank_album`]
+/// ranks them, below the song's own) – of those only the song's file downloads (torrents) or is imported
+/// (Usenet). A release its kind of client can't take, a torrent below the minimum seeders, and with
+/// `lossless_only` a lossy release are left out.
+pub fn rank_song(st: &impl Ctx, songs: &[Value], album: Option<(&str, &[Value])>, artist: &str, song: &str, lossless_only: bool) -> Vec<Value> {
+    let min_seed = st.cfg().int("torznab_min_seeders");
+    let mut out = vec![];
+    for r in songs {
+        let title = r["title"].as_str().unwrap_or("");
+        let proto = r["protocol"].as_str().unwrap_or("torrent");
+        if (proto == "torrent" && !Client::torrent(st).ready(st)) || (proto == "usenet" && !Client::usenet(st).ready(st)) {
+            continue;
+        }
+        if proto == "torrent" && r["seeders"].as_i64().unwrap_or(0) < min_seed {
+            continue;
+        }
+        let lossless = LOSSLESS.is_match(title);
+        if lossless_only && !lossless {
+            continue;
+        }
+        let Some((score, _)) = score_song(title, r["size"].as_f64().unwrap_or(0.0), r["seeders"].as_i64(), proto, artist, song) else { continue };
+        let url = r["magnetUrl"].as_str().filter(|m| !m.is_empty()).or(r["downloadUrl"].as_str()).unwrap_or("").to_string();
+        if url.is_empty() {
+            continue;
+        }
+        out.push(json!({ "title": title, "indexer": r["indexer"], "protocol": proto, "size": r["size"], "seeders": r["seeders"],
+            "url": url, "guid": r["guid"], "lossless": lossless, "score": score }));
+    }
+    if let Some((name, results)) = album {
+        let want = Want { artist, album: name, year: None, tracks: None, lossless_only };
+        for mut c in rank_album(st, results, &want) {
+            if out.iter().any(|o| o["guid"] == c["guid"] && !c["guid"].is_null()) {
+                continue;
+            }
+            // the whole album has to arrive first: below the song's own releases of the same quality
+            c["score"] = json!(((c["score"].as_f64().unwrap_or(0.0) - 10.0) * 10.0).round() / 10.0);
+            c["album"] = json!(name);
+            c["song_only"] = json!(true);
+            out.push(c);
+        }
+    }
+    out.sort_by(|x, y| y["score"].as_f64().partial_cmp(&x["score"].as_f64()).unwrap_or(std::cmp::Ordering::Equal));
+    out.truncate(5);
+    out
+}
+
 pub fn is_audio(name: &str) -> bool {
     encore_core::audio::DOWNLOAD_EXTS.contains(&super::slskd::ext(name).as_str())
 }
@@ -531,8 +578,17 @@ pub async fn add(st: &impl Ctx, cand: &Value, rid: i64) -> anyhow::Result<String
     c.add(st, &url, cand["title"].as_str().unwrap_or(""), rid).await
 }
 
+/// The id prefix of a finished download Encore found in its category but didn't add ([`crate::worker`]'s
+/// client scan): it is imported from a copy and never removed from its client (it may still seed).
+pub const KEEP: &str = "keep:";
+
+/// The client and its own id behind a download id, a kept one's too.
+fn client_of(id: &str) -> (Client, &str) {
+    Client::for_id(id.strip_prefix(KEEP).unwrap_or(id))
+}
+
 pub async fn poll(st: &impl Ctx, id: &str) -> anyhow::Result<Poll> {
-    let (c, own) = Client::for_id(id);
+    let (c, own) = client_of(id);
     c.poll(st, own).await
 }
 
@@ -549,7 +605,7 @@ pub enum SongFile {
 
 /// A song from a release with several files: tell the torrent client to download only the song's file.
 pub async fn select_song(st: &impl Ctx, id: &str, artist: &str, song: &str, track_no: Option<u32>) -> anyhow::Result<SongFile> {
-    let (c, own) = Client::for_id(id);
+    let (c, own) = client_of(id);
     if !c.can_select() {
         return Ok(SongFile::Whole);
     }
@@ -562,8 +618,12 @@ pub async fn select_song(st: &impl Ctx, id: &str, artist: &str, song: &str, trac
     Ok(SongFile::Only(names[i].clone()))
 }
 
-/// Remove the download (and what's left of its files) from the client.
+/// Remove the download (and what's left of its files) from the client – never one added outside Encore
+/// ([`KEEP`]).
 pub async fn remove(st: &impl Ctx, id: &str) {
+    if id.starts_with(KEEP) {
+        return;
+    }
     let (c, own) = Client::for_id(id);
     c.remove(st, own).await
 }

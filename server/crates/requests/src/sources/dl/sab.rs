@@ -117,6 +117,23 @@ pub async fn poll(st: &impl Ctx, nzo: &str) -> anyhow::Result<Poll> {
     })
 }
 
+/// Completed jobs in Encore's category of SABnzbd's history (the latest 100) that Encore didn't add (Encore
+/// names its jobs "encore-<request>"): (nzo id, name, folder as Encore sees it).
+pub async fn finished_outside(st: &impl Ctx) -> anyhow::Result<Vec<(String, String, std::path::PathBuf)>> {
+    let cat = st.cfg().str("sab_category").trim().to_string();
+    if cat.is_empty() {
+        return Ok(vec![]);
+    }
+    let h = sab(st, &[("mode", "history"), ("category", &cat), ("limit", "100")]).await?;
+    Ok(h["history"]["slots"].as_array().cloned().unwrap_or_default().iter().filter(|s| {
+        let name = s["name"].as_str().unwrap_or("");
+        s["status"] == "Completed" && !name.starts_with("encore-") && s["category"].as_str().is_none_or(|c| c.eq_ignore_ascii_case(&cat))
+    }).filter_map(|s| {
+        let nzo = s["nzo_id"].as_str()?.to_string();
+        Some((nzo, s["name"].as_str().unwrap_or("").to_string(), local(st, s["storage"].as_str().unwrap_or(""), "sab_download_path")))
+    }).collect())
+}
+
 pub async fn remove(st: &impl Ctx, nzo: &str) {
     let _ = sab(st, &[("mode", "queue"), ("name", "delete"), ("value", nzo), ("del_files", "1")]).await;
     let _ = sab(st, &[("mode", "history"), ("name", "delete"), ("value", nzo), ("del_files", "1"), ("archive", "0")]).await;

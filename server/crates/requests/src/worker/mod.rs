@@ -14,6 +14,7 @@ pub mod downloads;
 mod fetch;
 mod import;
 pub mod now;
+mod outside;
 mod pick;
 mod queue;
 pub mod rejected;

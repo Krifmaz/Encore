@@ -351,3 +351,22 @@ fn prowlarrs_key_never_reaches_the_apps() {
     st.cfg.set_many(&json!({ "prowlarr_api_key": "fedcba9876543210fedcba9876543210" }));
     assert_eq!(unseal_key(&st, &sealed), sealed);
 }
+
+/// A song request's releases: its own first, then its album's (only the song's file is taken from those),
+/// lossy ones left out for a lossless-only request.
+#[test]
+fn song_requests_rank_their_own_and_their_albums_releases() {
+    let st = ready("rank_song");
+    let songs = [rel("Travis Scott - 90210 (2015) [FLAC]", 40.0, 9), rel("Travis Scott - 90210 [MP3 320]", 10.0, 9), rel("Travis Scott - Antidote [FLAC]", 40.0, 9)];
+    let albums = [rel("Travis Scott - Rodeo (2015) [FLAC]", 600.0, 9)];
+    let got = rank_song(&st, &songs, Some(("Rodeo", &albums)), "Travis Scott", "90210", false);
+    assert_eq!(titles(&got), ["Travis Scott - 90210 (2015) [FLAC]", "Travis Scott - 90210 [MP3 320]", "Travis Scott - Rodeo (2015) [FLAC]"]);
+    assert_eq!(got[2]["song_only"], true);
+    assert_eq!(got[2]["album"], "Rodeo");
+    assert!(got[0]["song_only"].is_null());
+    let lossless = rank_song(&st, &songs, None, "Travis Scott", "90210", true);
+    assert_eq!(titles(&lossless), ["Travis Scott - 90210 (2015) [FLAC]"]);
+    // no torrent client: no torrent
+    let none = crate::test_ctx::TestCtx::new("rank_song_none");
+    assert!(rank_song(&none, &songs, Some(("Rodeo", &albums)), "Travis Scott", "90210", false).is_empty());
+}

@@ -174,6 +174,37 @@ pub async fn poll(st: &impl Ctx, id: &str) -> anyhow::Result<Poll> {
     Ok(if busy { Poll::Busy(pct, msg) } else { Poll::Progress(pct, msg) })
 }
 
+/// The tag of a torrent Encore didn't add that it imported a copy of ([`finished_outside`] passes it by).
+pub const IMPORTED_TAG: &str = "encore-imported";
+
+/// Finished torrents in Encore's category with no "encore-…" tag (Encore tags what it adds, and what it
+/// imported a copy of): (info hash, name, content path as Encore sees it). Not while qBittorrent checks or
+/// moves the files.
+pub async fn finished_outside(st: &impl Ctx) -> anyhow::Result<Vec<(String, String, std::path::PathBuf)>> {
+    let cat = st.cfg().str("qbit_category").trim().to_string();
+    if cat.is_empty() {
+        return Ok(vec![]);
+    }
+    let list: Value = qbit(st, "torrents/info", None, &[("category", cat), ("filter", "completed".into())]).await?.json().await?;
+    Ok(list.as_array().cloned().unwrap_or_default().iter().filter(|t| {
+        let state = t["state"].as_str().unwrap_or("");
+        let busy = state.starts_with("checking") || state == "moving" || state == "allocating" || state == "error" || state == "missingFiles";
+        let ours = t["tags"].as_str().unwrap_or("").split(',').any(|x| x.trim().starts_with("encore-"));
+        t["progress"].as_f64().unwrap_or(0.0) >= 1.0 && !busy && !ours
+    }).filter_map(|t| {
+        let hash = t["hash"].as_str()?.to_lowercase();
+        Some((hash, t["name"].as_str().unwrap_or("").to_string(), local(st, t["content_path"].as_str().unwrap_or(""), "qbit_download_path")))
+    }).collect())
+}
+
+/// Tag a torrent Encore didn't add as imported ([`IMPORTED_TAG`]); it stays in qBittorrent as it is.
+pub async fn mark_imported(st: &impl Ctx, hash: &str) {
+    let f = || reqwest::multipart::Form::new().text("hashes", hash.to_string()).text("tags", IMPORTED_TAG);
+    if let Err(e) = qbit(st, "torrents/addTags", Some(&f), &[]).await {
+        tracing::warn!("qBittorrent: couldn't tag {hash} as imported: {e:#}");
+    }
+}
+
 pub async fn remove(st: &impl Ctx, id: &str) {
     let (k, v) = by(id);
     if let Ok(r) = qbit(st, "torrents/info", None, &[(k, v)]).await {

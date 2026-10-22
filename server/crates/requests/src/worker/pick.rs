@@ -320,7 +320,8 @@ pub(super) fn source_order(st: &impl Ctx, r: &Req) -> Vec<String> {
     let album = kind == "album";
     // every source through its plugin: installed and switched on (the registry), then set up
     let avail = |s: &str| match s {
-        "torznab" => torznab::enabled(st) && album,
+        // an album, or a song: its own releases and its album's, of which only the song's file is taken
+        "torznab" => torznab::enabled(st) && (album || kind == "track"),
         "slskd" | "slskd_lossless" => slskd::enabled(st),
         "ytdlp" => ytdlp::plugin_on(st) && (ytdlp::enabled(st) || st.cfg().bool("ytdlp_last_resort")),
         // still being installed after the upgrade: kept in its place, the request waits for it there

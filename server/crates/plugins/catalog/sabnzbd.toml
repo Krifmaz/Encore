@@ -5,7 +5,7 @@
 id = "sabnzbd"
 name = "SABnzbd"
 version = "0.32.0"
-description = "Sends the Usenet releases Prowlarr finds to your SABnzbd and imports the album when it is done."
+description = "Sends the Usenet releases Prowlarr finds to your SABnzbd and imports the album or song when it is done, and what you add to its Encore category yourself."
 kind = "client"
 protocol = 1
 homepage = "https://sabnzbd.org"

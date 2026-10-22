@@ -29,6 +29,17 @@ pub enum Poll {
     Missing(String),
 }
 
+/// A finished download in Encore's category that Encore didn't add (by hand in the client, or another app
+/// with Encore's category).
+#[derive(Debug, Clone)]
+pub struct Outside {
+    /// the prefixed id ("qbit:<hash>", "sab:<nzo id>")
+    pub id: String,
+    pub name: String,
+    /// its files as Encore sees them ([`local`])
+    pub path: PathBuf,
+}
+
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Client {
     Qbit,
@@ -180,6 +191,25 @@ impl Client {
             Client::TorrentHole | Client::NzbHole => blackhole::remove(st, self, id),
             Client::Sab => sab::remove(st, id).await,
             Client::NzbGet => nzbget::remove(st, id).await,
+        }
+    }
+
+    /// The finished downloads in Encore's category that Encore didn't add (qBittorrent and SABnzbd; the other
+    /// clients: none). Nothing without a category: every download of the client would be in it.
+    pub async fn finished_outside(self, st: &impl Ctx) -> anyhow::Result<Vec<Outside>> {
+        let with = |list: Vec<(String, String, PathBuf)>| list.into_iter().map(|(id, name, path)| Outside { id: format!("{}:{id}", self.prefix()), name, path }).collect();
+        Ok(match self {
+            Client::Qbit => with(qbit::finished_outside(st).await?),
+            Client::Sab => with(sab::finished_outside(st).await?),
+            _ => vec![],
+        })
+    }
+
+    /// Mark a download [`Client::finished_outside`] found as taken care of, where the client can (a qBittorrent
+    /// tag); `id` is the client's own id.
+    pub async fn mark_imported(self, st: &impl Ctx, id: &str) {
+        if self == Client::Qbit {
+            qbit::mark_imported(st, id).await;
         }
     }
 

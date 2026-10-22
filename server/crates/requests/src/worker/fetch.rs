@@ -440,6 +440,9 @@ pub(super) async fn start_torznab(st: &impl Ctx, r: &mut Req, lossless_only: boo
         return Ok(Out::Wait);
     }
     upd(st, r, &[("status", json!("searching")), ("message", json!(searching))]);
+    if r.s("kind") == "track" {
+        return torznab_song(st, r, lossless_only).await;
+    }
     let rel = release_info(st, r).await;
     let album = r.album_title();
     let (artist, year) = (r.s("artist"), r.s("year").get(..4).and_then(|y| y.parse::<i32>().ok()));
@@ -457,6 +460,32 @@ pub(super) async fn start_torznab(st: &impl Ctx, r: &mut Req, lossless_only: boo
         }
     }
     check(st, r.id)?;
+    cands.retain(|c| !crate::report::release_blocked(st, c)); // reported releases are never picked again
+    torznab_drop_old(st, r).await;
+    if cands.is_empty() {
+        return Ok(Out::Next("no matching release on your indexers".into()));
+    }
+    r.d["torznab"] = json!({ "candidates": cands, "idx": -1 });
+    torznab_try_next(st, r, "").await
+}
+
+/// A song's indexer releases: the song's own (in the audio, MP3 and lossless categories) and, when the
+/// request names the album it is on, that album's, from which only the song's file is taken
+/// ([`torznab::rank_song`]).
+async fn torznab_song(st: &impl Ctx, r: &mut Req, lossless_only: bool) -> anyhow::Result<Out> {
+    let (artist, title) = (r.s("artist"), r.s("title"));
+    let album = r.opt("album").filter(|a| !a.trim().is_empty() && !a.eq_ignore_ascii_case(&title));
+    let query = q(&[&artist, &title]);
+    let songs = torznab::search_in(st, &query, &torznab::SONG_CATS).await?;
+    crate::search_cache::keep_releases(st, &query, &torznab::SONG_CATS, Some(r.id), &songs).await;
+    let mut albums = vec![];
+    if let Some(a) = &album {
+        let query = q(&[&artist, a]);
+        albums = torznab::search(st, &query).await?;
+        crate::search_cache::keep_releases(st, &query, &["3000"], Some(r.id), &albums).await;
+    }
+    check(st, r.id)?;
+    let mut cands = torznab::rank_song(st, &songs, album.as_deref().map(|a| (a, &albums[..])), &artist, &title, lossless_only);
     cands.retain(|c| !crate::report::release_blocked(st, c)); // reported releases are never picked again
     torznab_drop_old(st, r).await;
     if cands.is_empty() {
@@ -682,6 +711,9 @@ pub(super) async fn poll_torznab(st: &impl Ctx, r: &mut Req) -> anyhow::Result<(
                 let why = packed(&path, via, usenet).unwrap_or_else(|| "the download had no audio files".to_string());
                 let o = torznab_try_next(st, r, &why).await?;
                 return after_slskd(st, r, o).await;
+            }
+            if r.d["torznab"]["outside"].as_bool() == Some(true) {
+                return outside::import_copy(st, r, &files, &path, via).await;
             }
             let root = path.parent().map(|p| p.to_path_buf()).unwrap_or(path.clone());
             let cand = r.d["torznab"]["candidates"][r.d["torznab"]["idx"].as_u64().unwrap_or(0) as usize].clone();
