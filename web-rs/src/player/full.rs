@@ -3,7 +3,7 @@
 //! Lyrics mode (the Lyrics tab, the Lyrics button, ⋯ → Lyrics; remembered on this device as `encore.lyricsMode`): the
 //! big cover gives way to a compact bar at the top – a 56 px thumbnail, the title and artist, play / pause and a thin
 //! seek line – and the lyrics take the column, the line sung now in the middle, the ones already sung dimmed; a tap on a
-//! line seeks there (synced lyrics). "Back to the cover", a tap on the thumbnail, the Now playing tab and Escape go back.
+//! line seeks there (synced lyrics). "Back to the cover", a tap on the compact bar (thumbnail, title, artist; play / pause still just pauses), the Now playing tab and Escape go back.
 //! Switching panes only changes classes (`paint_pane`): the view is not drawn again, so no cover flashes.
 
 use super::*;
@@ -194,7 +194,7 @@ pub(super) fn render_full() {
       </section>
       <section class="np-mini">
         <button type="button" class="np-mini-art" id="f-cover" aria-label="Back to the cover" title="Back to the cover"><div class="thumb">{mini_art}</div></button>
-        <div class="np-mini-meta">
+        <div class="np-mini-meta" id="f-mini-meta" title="Back to the cover">
           <div class="ellipsis mq np-mini-title"><span class="mq-in">{title}</span></div>
           <div class="ellipsis mq small muted"><span class="mq-in">{mini_artist}</span></div>
         </div>
@@ -237,6 +237,7 @@ pub(super) fn render_full() {
     wire(&mut ls, &f, "#f-mini-toggle", "click", |_| toggle());
     wire(&mut ls, &f, "#f-cover", "click", |_| set_pane("now"));
     wire(&mut ls, &f, "#f-back", "click", |_| set_pane("now"));
+    wire(&mut ls, &f, "#f-mini-meta", "click", |_| set_pane("now"));
     wire(&mut ls, &f, "#f-next", "click", |_| next(false));
     wire(&mut ls, &f, "#f-prev", "click", |_| prev());
     wire(&mut ls, &f, "#f-shuffle", "click", move |_| set_shuffle(!shuffle_on));

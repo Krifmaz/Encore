@@ -536,7 +536,7 @@ body.np-open { overflow: hidden; }
 .np-body.pane-lyrics .np-mini-art { animation: np-thumb-in .36s ease-out; transform-origin: top left; }
 .np-mini-art .thumb { width: 56px; height: 56px; border-radius: 8px; }
 .np-mini-art:hover .thumb, .np-mini-art:focus-visible .thumb { outline: 2px solid var(--accent); }
-.np-mini-meta { min-width: 0; }
+.np-mini-meta { min-width: 0; cursor: pointer; align-self: stretch; display: flex; flex-direction: column; justify-content: center; }
 .np-mini-title { font-weight: 650; font-size: 17px; }
 .np-mini .play-btn { width: 44px; height: 44px; }
 #lseek { grid-column: 1 / -1; -webkit-appearance: none; appearance: none; width: 100%; height: 14px; margin: 0; background: transparent; cursor: pointer; touch-action: none; --p: 0%; }

@@ -213,7 +213,8 @@ private val THUMB = 56.dp
  *
  * Lyrics mode (the Lyrics button, ⋯ → Lyrics; remembered as [LyricsMode]): the cover glides into a 56 dp thumbnail
  * beside the title, artist, play / pause and a thin seek line, and the lyrics take the rest of the screen ([LyricsPane]).
- * "Back to the cover", a tap on the thumbnail or Back return to the big art.
+ * "Back to the cover", a tap on the compact bar (thumbnail, title, artist; play / pause still just pauses), the ⌄ in the
+ * top bar or Back return to the big art.
  */
 @Composable
 fun FullPlayer(nav: Nav, actions: PlayerMenuActions, onClose: () -> Unit) {
@@ -286,7 +287,10 @@ fun FullPlayer(nav: Nav, actions: PlayerMenuActions, onClose: () -> Unit) {
         Column(Modifier.fillMaxSize().safeDrawingPadding()) {
             // .np-top
             Row(Modifier.fillMaxWidth().padding(horizontal = 6.dp, vertical = 4.dp), verticalAlignment = Alignment.CenterVertically) {
-                IconButton(onClick = onClose) { Icon(painterResource(R.drawable.ic_expand_more), contentDescription = "Close", tint = p.text) }
+                // in lyrics mode the ⌄ goes back to the cover first, as Back does
+                IconButton(onClick = { if (lyricsMode) toCover() else onClose() }) {
+                    Icon(painterResource(R.drawable.ic_expand_more), contentDescription = if (lyricsMode) "Back to the cover" else "Close", tint = p.text)
+                }
                 Text(
                     link?.let { "Controlling ${it.name}" + if (!it.online) " · offline" else "" } ?: "Now playing",
                     style = MaterialTheme.typography.titleSmall,
@@ -310,9 +314,15 @@ fun FullPlayer(nav: Nav, actions: PlayerMenuActions, onClose: () -> Unit) {
                 val corner = lerp(20.dp, 8.dp, prog)
                 if (prog > 0f) {
                     Column(Modifier.fillMaxSize().alpha(prog)) {
-                        // the compact bar: the thumbnail's place, title / artist, play / pause
+                        // the compact bar: the thumbnail's place, title / artist, play / pause; a tap anywhere on it
+                        // (but play / pause) goes back to the cover, as the thumbnail does
                         Row(
-                            Modifier.fillMaxWidth().padding(start = 20.dp + THUMB + 12.dp, end = 8.dp, top = 4.dp).height(THUMB),
+                            Modifier
+                                .fillMaxWidth()
+                                .padding(top = 4.dp)
+                                .height(THUMB)
+                                .clickable(enabled = lyricsMode, onClickLabel = "Back to the cover") { toCover() }
+                                .padding(start = 20.dp + THUMB + 12.dp, end = 8.dp),
                             verticalAlignment = Alignment.CenterVertically,
                         ) {
                             Column(Modifier.weight(1f)) {

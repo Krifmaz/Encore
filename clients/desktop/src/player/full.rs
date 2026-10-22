@@ -3,7 +3,7 @@
 //! Lyrics is lyrics mode (p6 item 4, the web's player/full.rs, the phone's PlayerScreens.kt):
 //! the cover becomes a 56 px thumbnail in a compact bar at the top (title and artist, play /
 //! pause, a thin seek line) and the lyrics take the column, the current line in the middle.
-//! "Back to the cover" (or a click on the thumbnail) goes back to Now playing; the mode is
+//! "Back to the cover" (or a click on the compact bar: thumbnail, title, artist) goes back to Now playing; the mode is
 //! remembered (`encore.lyricsMode`). Long titles scroll sideways (widgets::marquee).
 
 use super::{bar, cover_handle, Message, Now, Pane, State};
@@ -12,7 +12,7 @@ use crate::pages::{Ctx, El};
 use crate::theme::{self, Btn};
 use crate::widgets::marquee::marquee;
 use crate::widgets::{self, icon, icon_btn, t, tip_box, Icon};
-use iced::widget::{button, column, container, image, opaque, row, scrollable, slider, space, toggler, tooltip};
+use iced::widget::{button, column, container, image, mouse_area, opaque, row, scrollable, slider, space, toggler, tooltip};
 use iced::{Alignment, ContentFit, Length};
 
 /// A row of Up next, from the engine's queue or the linked device's.
@@ -307,6 +307,8 @@ fn lyrics_mode<'a>(state: &'a State, ctx: &Ctx<'a>, now: &Now) -> El<'a, Message
     ]
     .spacing(3)
     .width(Length::Fill);
+    // a click on the title or the space around it goes back to the cover too (the artist link still opens the artist)
+    let words = mouse_area(words).on_press(Message::SetPane(Pane::Now)).interaction(iced::mouse::Interaction::Pointer);
     let play = button(
         container(icon(if now.playing { Icon::Pause } else { Icon::Play }, 18.0, p.on_accent)).center(40.0),
     )
