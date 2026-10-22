@@ -270,8 +270,17 @@ async fn removing_an_artist_removes_every_merged_spelling() {
     assert_eq!(collab["tracks"], 2);
     // an artist named with symbols only is still an artist
     e.many(2, "!!!", "Thr!!!er", "");
-    let all = e.get("/api/library/artists?sort=name").await;
-    let chk = all.as_array().unwrap().iter().find(|a| a["name"] == "!!!").expect("!!! listed");
+    // another request may still be rebuilding the artist index and is served the previous one meanwhile
+    let mut chk = None;
+    for _ in 0..50 {
+        let all = e.get("/api/library/artists?sort=name").await;
+        chk = all.as_array().unwrap().iter().find(|a| a["name"] == "!!!").cloned();
+        if chk.is_some() {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
+    let chk = chk.expect("!!! listed");
     assert_eq!(chk["tracks"], 2);
     assert_eq!(e.artist_names("/api/library/artists?q=!!!").await, vec!["!!!"]);
 }
