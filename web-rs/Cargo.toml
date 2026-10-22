@@ -17,7 +17,7 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 serde-wasm-bindgen = "0.6"
 # the equalizer: Cadenza's bands and maths (the same as the desktop app and the phone)
-cadenza-eq = { path = "../../Cadenza/crates/cadenza-eq" }
+cadenza-eq = { git = "https://github.com/Krifmaz/cadenza", rev = "fc57f0c" }
 console_error_panic_hook = "0.1"
 gloo-events = "0.3"
 gloo-timers = { version = "0.4", features = ["futures"] }

@@ -17,6 +17,7 @@ checksum = "fc652a48c352aef3ea3aed32080501cf3ef6ed5da78602a020c991775b0aff04"
 [[package]]
 name = "cadenza-eq"
 version = "3.0.6"
+source = "git+https://github.com/Krifmaz/cadenza?rev=fc57f0c#fc57f0c97e1069148c24460107c6c05e8f3a8ac2"
 dependencies = [
  "serde",
 ]
