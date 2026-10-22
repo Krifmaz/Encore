@@ -1730,6 +1730,7 @@ help = "zotify: the Client ID of the owner's Spotify developer app, which search
 [keys.zotify_sign_in_link]
 env = "ZOTIFY_SIGN_IN_LINK"
 default = ""
+secret = true
 help = "zotify: the address the browser ended on after a Spotify sign-in (Test reads it once)."
 
 [keys.zotify_format]

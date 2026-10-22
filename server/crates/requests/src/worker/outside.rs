@@ -55,7 +55,14 @@ async fn adopt(st: &impl Ctx, c: Client, o: &Outside) -> anyhow::Result<()> {
         return Ok(());
     }
     if !o.path.exists() {
-        tracing::debug!("{}: {} finished at {}, which Encore can't see", c.name(), o.name, o.path.display());
+        // said in the log once a day per download (the next look tries again): mount the client's folder at
+        // the same path, or correct the download folder on the client's card
+        let said = format!("outside_unseen:{}", o.id);
+        if st.cache_get(&said).is_none() {
+            st.cache_put(&said, json!(true), 86_400);
+            st.db().log("warning", &format!("{}: {} finished at {}, which Encore can't see – mount the client's download folder in Encore's container \
+                at the same path, or correct the download folder on the {} card under Settings → Plugins", c.name(), o.name, o.path.display(), c.name()));
+        }
         return Ok(());
     }
     let Some(admin) = st.db().one("SELECT id FROM users WHERE role='admin' ORDER BY created_at, id LIMIT 1", p![])? else { return Ok(()) };
