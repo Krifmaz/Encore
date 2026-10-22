@@ -38,6 +38,9 @@ const LEGACY_ONLY: &[(&str, &str)] = &[
     ("Download tools", "the card became Settings → Plugins in 0.32 (its Check for updates, Update to and the Translator's model moved there)"),
     // 0.36 (the owner on Oct 21): an album goes to the Trash of Files, restorable, instead of being deleted for good
     ("Album deleted", "the album ⋯ \"Delete album from disk\" became \"Move album to Trash\" in 0.36; its toast is \"Moved 1 album to the Trash\""),
+    // 0.36 (Oct 22): Discover is the one search on every client, the library's matches first
+    ("Search MusicBrainz for artists, albums, songs…", "Discover's box reads \"Search your library and MusicBrainz…\" since 0.36 (Search and Discover are one)"),
+    ("Search the entire MusicBrainz catalogue", "Discover's empty state reads \"Search your library and the whole catalogue\" since 0.36"),
 ];
 
 /// Whole files of the JavaScript UI whose page web-rs no longer has, as (file, why). Like [`LEGACY_ONLY`], an
