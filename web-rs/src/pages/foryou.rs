@@ -190,6 +190,44 @@ pub fn artist_card(a: &Value) -> String {
         esc(&name))
 }
 
+/// Discover before anything is typed: the For you picks as horizontal rows (like Home's Recently added), each with
+/// "See all" for the For you page. Owned songs play from their tile; the rest open a search for them.
+pub(crate) fn discover_rows(d: &Value) -> String {
+    let see_all = r##"<a class="btn sm" href="#/for-you">See all</a>"##;
+    let head = |title: &str, sub: &str| format!(r#"<div class="section-head"><div><h2>{}</h2>{}</div>{see_all}</div>"#,
+        esc(title), if sub.is_empty() { String::new() } else { format!(r#"<div class="small muted">{}</div>"#, esc(sub)) });
+    let search = |q: String, t: &str| format!("/search?q={}&type={t}", String::from(js_sys::encode_uri_component(&q)));
+    let lf = d.g("lastfm").clone();
+    let mut out = String::new();
+    let artists = lf.a("artists");
+    if !artists.is_empty() {
+        out += &head("Artists for you", "");
+        out += &format!(r#"<div class="grid rail">{}</div>"#, artists.iter().map(artist_card).collect::<String>());
+    }
+    let albums = lf.a("albums");
+    if !albums.is_empty() {
+        out += &head("Albums for you", "");
+        out += &format!(r#"<div class="grid rail">{}</div>"#,
+            albums.iter().map(|a| album_tile(a, &search(format!("{} {}", a.s("artist"), a.s("title")), "album"), "", None)).collect::<String>());
+    }
+    let mut playlists = d.a("playlists");
+    if !lf.a("tracks").is_empty() { playlists.insert(0, json!({ "title": "Songs for you", "tracks": lf.g("tracks").clone() })); }
+    for p in playlists.iter().filter(|p| !p.a("tracks").is_empty()) {
+        let tracks = p.a("tracks");
+        let owned = tracks.iter().filter(|t| t.truthy("library")).count();
+        out += &head(&p.s("title"), &format!("{owned}/{} in library", tracks.len()));
+        out += &format!(r#"<div class="grid rail">{}</div>"#, tracks.iter().map(|t| {
+            let tile = json!({ "title": t.s("title"), "artist": t.s("artist"), "cover": t.s("cover"),
+                "in_library": t.truthy("library"), "request_status": t.s("request_status") });
+            let play = if t.truthy("library") {
+                format!(r#"<button class="fab" data-play-song='{}' aria-label="Play">{}</button>"#, esc(&t.g("library").to_string()), icon("play"))
+            } else { String::new() };
+            album_tile(&tile, &search(format!("{} {}", t.s("artist"), t.s("title")), "track"), &play, Some(&esc(&t.s("artist"))))
+        }).collect::<String>());
+    }
+    out
+}
+
 pub fn render(view: Element, ctx: Ctx) -> PageFuture {
     Box::pin(async move {
         set_html(&view, r#"<h1>For you</h1><p class="muted" style="margin:6px 0 20px">Recommendations from your ListenBrainz and Last.fm listening. Songs you already have play right here; request the rest in one click.</p>

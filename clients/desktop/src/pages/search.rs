@@ -46,6 +46,8 @@ pub struct State {
     sending: HashSet<String>,
     /// The live request stream's identity (server + session).
     live: Option<(String, String)>,
+    /// `GET /api/discover/for-you`, shown while the box is empty (asked once per visit).
+    picks: Option<Result<Value, String>>,
 }
 
 #[derive(Clone, Debug)]
@@ -68,6 +70,8 @@ pub enum Message {
     Requested(String, Result<Value, ApiError>),
     Live(Live),
     ForYou,
+    /// The For you picks for the empty page.
+    Picks(Result<Value, ApiError>),
 }
 
 /// Called when the app navigates here (with the route's parameters).
@@ -78,7 +82,10 @@ pub fn open(state: &mut State, q: String, ctx: &mut Ctx) -> Task<Message> {
         state.typ = "all".into();
     }
     state.live = catalog::live_key(ctx);
-    run(state, ctx)
+    state.picks = None;
+    let api = ctx.api.clone();
+    let picks = Task::perform(async move { api.get("/discover/for-you").await }, Message::Picks);
+    Task::batch([run(state, ctx), picks])
 }
 
 /// Start the search for `state.q` (the library answers at once, the catalogue takes a moment).
@@ -213,6 +220,7 @@ pub fn update(state: &mut State, msg: Message, ctx: &mut Ctx) -> Task<Message> {
         Message::Live(Live::Resync) => return run(state, ctx),
         Message::Live(ev) => patch(state, &ev),
         Message::ForYou => ctx.navigate(Page::ForYou),
+        Message::Picks(r) => state.picks = Some(r.map_err(|e| e.message)),
     }
     Task::none()
 }
@@ -429,13 +437,99 @@ fn library_row<'a>(ctx: &Ctx<'a>, lib: &Value, typ: &str) -> Option<El<'a, Messa
     Some(col.into())
 }
 
+/// A section head with "See all" (the For you page) over a sideways row of tiles.
+fn pick_row<'a>(title: String, sub: String, tiles: Vec<El<'a, Message>>) -> El<'a, Message> {
+    let mut head = column![widgets::h2(title)].spacing(2);
+    if !sub.is_empty() {
+        head = head.push(small_muted(sub));
+    }
+    let head = row![head, space().width(Length::Fill), btn_icon(Icon::Spark, "See all", Btn::Default, Some(Message::ForYou))].align_y(Alignment::Center);
+    column![head, widgets::rail(tiles)].spacing(12).into()
+}
+
+/// Nothing typed: the For you picks as sideways rows (like Home's Recently added); owned songs
+/// play from their tile, the rest open a search for them. None when there are none.
+fn picks<'a>(d: &Value, ctx: &Ctx<'a>) -> Option<El<'a, Message>> {
+    let lf = &d["lastfm"];
+    let search = |q: String| Message::Open(Page::Search { q });
+    let mut col = column![].spacing(26);
+    let mut any = false;
+    let artists = fmt::items(&lf["artists"]);
+    if !artists.is_empty() {
+        let tiles = artists
+            .iter()
+            .map(|a| {
+                let open = if fmt::truthy(a, "mbid") { Page::Artist(fmt::s(a, "mbid")) } else { Page::ArtistName(fmt::s(a, "name")) };
+                catalog::artist_tile(ctx, a, String::new(), Message::Open(open))
+            })
+            .collect();
+        col = col.push(pick_row("Artists for you".into(), String::new(), tiles));
+        any = true;
+    }
+    let albums = fmt::items(&lf["albums"]);
+    if !albums.is_empty() {
+        let tiles = albums
+            .iter()
+            .map(|a| {
+                AlbumTile {
+                    title: fmt::s(a, "title"),
+                    sub: catalog::join_truthy(&[fmt::s(a, "artist"), fmt::s(a, "year")], " · "),
+                    cover: fmt::s(a, "cover"),
+                    corner: fmt::truthy(a, "in_library").then(catalog::in_library),
+                    on_open: search(format!("{} {}", fmt::s(a, "artist"), fmt::s(a, "title"))),
+                    on_play: None,
+                    on_request: None,
+                }
+                .view(ctx)
+            })
+            .collect();
+        col = col.push(pick_row("Albums for you".into(), String::new(), tiles));
+        any = true;
+    }
+    let mut lists: Vec<(String, Vec<Value>)> = fmt::items(&d["playlists"]).iter().map(|p| (fmt::s(p, "title"), fmt::items(&p["tracks"]))).collect();
+    let lf_songs = fmt::items(&lf["tracks"]);
+    if !lf_songs.is_empty() {
+        lists.insert(0, ("Songs for you".into(), lf_songs));
+    }
+    for (title, tracks) in lists.into_iter().filter(|(_, t)| !t.is_empty()) {
+        let owned = tracks.iter().filter(|t| fmt::truthy(t, "library")).count();
+        let sub = format!("{owned}/{} in library", tracks.len());
+        let tiles = tracks
+            .iter()
+            .map(|t| {
+                let lib = fmt::truthy(t, "library");
+                AlbumTile {
+                    title: fmt::s(t, "title"),
+                    sub: fmt::s(t, "artist"),
+                    cover: fmt::s(t, "cover"),
+                    corner: lib.then(catalog::in_library),
+                    on_open: search(format!("{} {}", fmt::s(t, "artist"), fmt::s(t, "title"))),
+                    on_play: lib.then(|| Message::PlaySong(Box::new(t["library"].clone()))),
+                    on_request: None,
+                }
+                .view(ctx)
+            })
+            .collect();
+        col = col.push(pick_row(title, sub, tiles));
+        any = true;
+    }
+    any.then(|| col.into())
+}
+
 fn results<'a>(state: &'a State, ctx: &Ctx<'a>) -> El<'a, Message> {
     if state.q.is_empty() {
-        return empty(
-            Icon::Search,
-            "Search your library and the whole catalogue",
-            "What you already have shows first; anything else can be requested with one click.",
-        );
+        return match &state.picks {
+            None => Some(skeleton_tiles(6, widgets::tile::WIDTH)),
+            Some(Ok(d)) => picks(d, ctx),
+            Some(Err(_)) => None,
+        }
+        .unwrap_or_else(|| {
+            empty(
+                Icon::Search,
+                "Search your library and the whole catalogue",
+                "What you already have shows first; anything else can be requested with one click.",
+            )
+        });
     }
     let mut col = column![].spacing(22);
     let lib = state.lib.as_ref().filter(|_| state.lib_for == state.q).and_then(|l| library_row(ctx, l, &state.typ));

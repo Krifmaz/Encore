@@ -14,7 +14,9 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.ExperimentalLayoutApi
+import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.ModalBottomSheet
@@ -173,6 +175,116 @@ private fun GenreChips(nav: Nav, tags: Tags) {
     val all = lib.map { it to true } + tags.top.filter { it.lowercase() !in lower }.map { it to false }
     FlowRow(Modifier.fillMaxWidth().padding(horizontal = Gutter), horizontalArrangement = Arrangement.spacedBy(6.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
         for ((g, mine) in all) Badge(g, kind = if (mine) "accent" else "", onClick = { nav.open(Screen.Tag(g)) })
+    }
+}
+
+/**
+ * Discover before anything is typed: the For you picks as short horizontal rows (like Home's Recently added), each
+ * with "See all" for the full For you page, then the genres. Owned songs play, the rest open a search for them.
+ */
+@Composable
+fun ForYouRows(nav: Nav) {
+    val features = nav.features
+    val p = MaterialTheme.palette
+    val loader = rememberLoad("for-you-rows") { features.forYou() }
+    val tagsLoader = rememberLoad("tags") { try { features.tags() } catch (_: Exception) { Tags(emptyList(), emptyList()) } }
+    val tags = (tagsLoader.state.value as? Loadable.Ready)?.value
+    val seeAll = { nav.open(Screen.ForYou) }
+    LazyColumn(Modifier.fillMaxSize()) {
+        when (val s = loader.state.value) {
+            is Loadable.Loading -> item { Row(Modifier.padding(horizontal = Gutter, vertical = 16.dp)) { Spinner() } }
+            is Loadable.Failed -> item { NoteText("Couldn't load your picks: ${s.message}", Modifier.padding(vertical = 12.dp)) }
+            is Loadable.Ready -> {
+                val d = s.value
+                val lf = d.lastfm
+                val playlists = buildList {
+                    if (lf != null && lf.tracks.isNotEmpty()) add(app.encore.android.data.repo.FyPlaylist("", "Songs for you", "lastfm", lf.tracks))
+                    addAll(d.playlists.filter { it.tracks.isNotEmpty() })
+                }
+                val nothing = playlists.isEmpty() && lf?.artists.isNullOrEmpty() && lf?.albums.isNullOrEmpty()
+                if (!d.connected || nothing) {
+                    item {
+                        EmptyState(
+                            R.drawable.ic_search,
+                            "Search your library and the whole catalogue",
+                            if (!d.connected) "Connect Last.fm or ListenBrainz to get picks for you here." else "What you already have shows first; anything else can be requested with one click.",
+                        )
+                    }
+                }
+                if (lf != null && lf.artists.isNotEmpty()) {
+                    item { SectionHead("Artists for you", action = "See all", onAction = seeAll) }
+                    item {
+                        LazyRow(contentPadding = PaddingValues(horizontal = Gutter), horizontalArrangement = Arrangement.spacedBy(14.dp)) {
+                            items(lf.artists.size, key = { i -> "fy-artist-$i" }) { i -> CatalogArtistTile(nav, lf.artists[i], Modifier.width(120.dp), subtitle = " ") }
+                        }
+                    }
+                }
+                if (lf != null && lf.albums.isNotEmpty()) {
+                    item { SectionHead("Albums for you", action = "See all", onAction = seeAll) }
+                    item {
+                        LazyRow(contentPadding = PaddingValues(horizontal = Gutter), horizontalArrangement = Arrangement.spacedBy(14.dp)) {
+                            items(lf.albums.size, key = { i -> "fy-album-$i" }) { i ->
+                                val a = lf.albums[i]
+                                Tile(
+                                    title = a.title,
+                                    subtitle = listOf(a.artist, a.year).filter { it.isNotEmpty() }.joinToString(" · ").ifEmpty { " " },
+                                    modifier = Modifier.width(150.dp),
+                                    onClick = { nav.open(Screen.DiscoverSearch("${a.artist} ${a.title}", "album")) },
+                                ) { m ->
+                                    Box(m) {
+                                        Cover(a.cover.ifEmpty { null }, nav.graph.imageLoader, Modifier.fillMaxSize(), corner = 12.dp, label = a.title)
+                                        Availability(a.inLibrary, a.requestStatus, Modifier.padding(8.dp))
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+                playlists.forEachIndexed { pi, pl ->
+                    val owned = pl.tracks.mapNotNull { it.library }
+                    item(key = "fy-pl-head-$pi") {
+                        SectionHead(pl.title, subtitle = "${owned.size}/${pl.tracks.size} in library", action = "See all", onAction = seeAll)
+                    }
+                    item(key = "fy-pl-$pi") {
+                        LazyRow(contentPadding = PaddingValues(horizontal = Gutter), horizontalArrangement = Arrangement.spacedBy(14.dp)) {
+                            items(pl.tracks.size, key = { i -> "fy-pl-$pi-$i" }) { i ->
+                                val t = pl.tracks[i]
+                                val lib = t.library
+                                Tile(
+                                    title = t.title,
+                                    subtitle = t.artist.ifEmpty { " " },
+                                    modifier = Modifier.width(150.dp),
+                                    onClick = {
+                                        if (lib != null) nav.player.play(owned, owned.indexOf(lib).coerceAtLeast(0))
+                                        else nav.open(Screen.DiscoverSearch("${t.artist} ${t.title}", "track"))
+                                    },
+                                ) { m ->
+                                    Box(m) {
+                                        Cover(t.cover.ifEmpty { null }, nav.graph.imageLoader, Modifier.fillMaxSize(), corner = 12.dp, label = t.album.ifEmpty { t.title })
+                                        Availability(lib != null, t.requestStatus, Modifier.padding(8.dp))
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        if (tags != null && (tags.library.isNotEmpty() || tags.top.isNotEmpty())) {
+            item { SectionHead("Browse by genre") }
+            item {
+                val lib = tags.library.take(15)
+                val lower = lib.map { it.lowercase() }.toSet()
+                val all = lib.map { it to true } + tags.top.filter { it.lowercase() !in lower }.map { it to false }
+                LazyRow(contentPadding = PaddingValues(horizontal = Gutter), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                    items(all.size, key = { i -> "fy-tag-$i" }) { i ->
+                        val (g, mine) = all[i]
+                        Badge(g, kind = if (mine) "accent" else "", onClick = { nav.open(Screen.Tag(g)) })
+                    }
+                }
+            }
+        }
+        item { Spacer(Modifier.height(24.dp)) }
     }
 }
 

@@ -179,6 +179,17 @@ pub fn grid<'a, M: 'a>(tiles: Vec<El<'a, M>>) -> El<'a, M> {
     iced::widget::row(tiles).spacing(16).wrap().into()
 }
 
+/// One row of tiles that scrolls sideways (Discover's For you picks), the web's `.grid.rail`.
+pub fn rail<'a, M: 'a>(tiles: Vec<El<'a, M>>) -> El<'a, M> {
+    use iced::widget::scrollable::{Direction, Scrollbar};
+    let strip = iced::widget::row(tiles).spacing(16).padding(iced::Padding { bottom: 12.0, ..iced::Padding::ZERO });
+    iced::widget::scrollable(strip)
+        .direction(Direction::Horizontal(Scrollbar::default()))
+        .width(Length::Fill)
+        .style(theme::scroll)
+        .into()
+}
+
 /// Up to four pictures in a 2 × 2 collage of `size` px (the web's `.collage`); fewer than four
 /// fall back to the first one, none to the icon.
 pub fn collage<'a, M: 'a>(pictures: Vec<Option<image::Handle>>, size: f32, fallback: Icon) -> El<'a, M> {

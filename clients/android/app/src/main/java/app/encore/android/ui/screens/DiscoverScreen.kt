@@ -640,7 +640,8 @@ fun DiscoverScreen(nav: Nav, initialQuery: String = "", initialType: String = "a
         val libSongs = when (type) { 0 -> lib?.songs.orEmpty().take(5); 3 -> lib?.songs.orEmpty().take(3); else -> emptyList() }
         val libHas = libArtists.isNotEmpty() || libAlbums.isNotEmpty() || libSongs.isNotEmpty()
         when {
-            q.isEmpty() -> EmptyState(R.drawable.ic_search, "Search your library and the whole catalogue", "What you already have shows first; anything else can be requested with one click.")
+            // nothing typed: the For you picks (the search replaces them as you type)
+            q.isEmpty() -> ForYouRows(nav)
             err != null && !libHas -> ErrorBox(err) { generation += 1 }
             busy && r == null && !libHas -> Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) { CircularProgressIndicator(color = p.accent, trackColor = p.border) }
             r == null && !libHas -> Spacer(Modifier.height(1.dp))

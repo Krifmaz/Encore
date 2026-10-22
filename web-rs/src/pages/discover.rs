@@ -465,10 +465,12 @@ pub fn render_search(view: Element, ctx: Ctx) -> PageFuture {
         // the library's answer for a query (asked once per query, whatever the tab; p6 item 9)
         let lib_cache: Rc<RefCell<Option<(String, Value)>>> = Rc::new(RefCell::new(None));
         // results update in place – the page (and the search box with the phone keyboard) is never rebuilt while typing
+        // the For you rows shown while the box is empty
+        let picks: Rc<RefCell<Option<String>>> = Rc::new(RefCell::new(None));
         let run: Rc<dyn Fn() -> Pin<Box<dyn Future<Output = ()>>>> = {
-            let (view, results, q, typ, seq, lib_cache) = (view.clone(), results.clone(), q.clone(), typ.clone(), seq.clone(), lib_cache.clone());
+            let (view, results, q, typ, seq, lib_cache, picks) = (view.clone(), results.clone(), q.clone(), typ.clone(), seq.clone(), lib_cache.clone(), picks.clone());
             Rc::new(move || {
-                let (view, results, q, typ, seq, lib_cache) = (view.clone(), results.clone(), q.clone(), typ.clone(), seq.clone(), lib_cache.clone());
+                let (view, results, q, typ, seq, lib_cache, picks) = (view.clone(), results.clone(), q.clone(), typ.clone(), seq.clone(), lib_cache.clone(), picks.clone());
                 Box::pin(async move {
                     let t = typ.borrow().clone();
                     let qv = q.borrow().clone();
@@ -477,7 +479,20 @@ pub fn render_search(view: Element, ctx: Ctx) -> PageFuture {
                     seq.set(seq.get() + 1);
                     let mine = seq.get();
                     if qv.is_empty() {
-                        set_html(&results, &empty_state(&icon("search"), "Search your library and the whole catalogue", "What you already have shows first; anything else can be requested with one click."));
+                        // nothing typed: the For you picks (asked once per visit); the search replaces them as you type
+                        let hint = empty_state(&icon("search"), "Search your library and the whole catalogue", "What you already have shows first; anything else can be requested with one click.");
+                        let cached = picks.borrow().clone();
+                        let rows = match cached {
+                            Some(r) => r,
+                            None => {
+                                set_html(&results, &skeleton_grid(6));
+                                let r = api::get("/discover/for-you").await.map(|d| foryou::discover_rows(&d)).unwrap_or_default();
+                                *picks.borrow_mut() = Some(r.clone());
+                                r
+                            }
+                        };
+                        if mine != seq.get() || !view.is_connected() { return; }
+                        set_html(&results, &if rows.is_empty() { hint } else { rows });
                         return;
                     }
                     set_html(&results, &skeleton_grid(12));

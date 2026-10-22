@@ -218,6 +218,10 @@ label.field small { color: var(--faint); font-size: 12px; }
 .hero .search .input { padding: 14px 16px 14px 44px; font-size: 15px; border-radius: 14px; }
 
 .grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(168px, 1fr)); gap: 18px; }
+/* one row that scrolls sideways (Discover's For you picks) */
+.grid.rail { grid-template-columns: none; grid-auto-flow: column; grid-auto-columns: 168px; overflow-x: auto; overscroll-behavior-x: contain; scroll-snap-type: x proximity; padding-bottom: 8px; }
+.grid.rail > * { scroll-snap-align: start; }
+@media (max-width: 760px) { .grid.rail { grid-auto-columns: 140px; gap: 14px; } }
 .tile { position: relative; cursor: pointer; min-width: 0; }
 /* one sideways row of tiles (Home's downloads in progress): as wide as a grid cell, scrolls instead of wrapping */
 .hscroll { display: grid; grid-auto-flow: column; grid-auto-columns: 168px; gap: 18px; overflow-x: auto; padding-bottom: 8px; scroll-snap-type: x proximity; }
