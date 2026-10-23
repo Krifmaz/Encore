@@ -307,6 +307,17 @@ fn add_shared_modal() {
             if let Some(b) = &btn { dom::set_disabled(b, true); }
             let (m3, busy2) = (m2.clone(), busy.clone());
             dom::spawn(async move {
+                if super::collab::is_invite_link(&link) {
+                    match super::collab::join_link(&link).await {
+                        Ok(id) => { m3.close(); app::navigate(&format!("/playlists/{id}")); }
+                        Err(e) => {
+                            if let Some(out) = m3.qs("#sh-out") { dom::set_html(&out, &format!(r#"<div class="error-box">{}</div>"#, esc(&e))); }
+                            if let Some(b) = &btn { dom::set_disabled(b, false); }
+                            busy2.set(false);
+                        }
+                    }
+                    return;
+                }
                 match api::post("/playlists/shared", json!({ "link": link })).await {
                     Ok(r) => {
                         toast(add_toast(&r), "ok");
@@ -344,7 +355,7 @@ fn pl_card(p: &Value) -> String {
     <label class="corner" style="z-index:2" onclick="event.stopPropagation()">{check}</label>
     <div class="art">{art}</div>
     <div class="t ellipsis">{name}</div>
-    <div class="s ellipsis">{total} tracks · {pct}% in library{follow}{shared}</div>
+    <div class="s ellipsis">{total} tracks · {pct}% in library{follow}{shared}{collab}</div>
     <div class="s ellipsis faint">{src}{sync}</div>
   </div>"#,
         id = p.s("id"),
@@ -354,6 +365,7 @@ fn pl_card(p: &Value) -> String {
         total = p.s("total"),
         follow = if p.truthy("follow") { " · following" } else { "" },
         shared = shared_suffix(p),
+        collab = super::collab::tile_suffix(p),
         src = esc(&src_label(p)),
         sync = if targets.is_empty() { String::new() } else {
             format!(" → {}", targets.iter().map(|t| { let t = js_string(t); esc(target_name(&t).unwrap_or(&t)) }).collect::<Vec<_>>().join(", "))
@@ -549,7 +561,13 @@ pub fn render(view: Element, _ctx: Ctx) -> PageFuture {
             });
         }
         // load()
-        let rows = api::get("/playlists").await.map_err(|e| e.message)?.items();
+        let (rows, invites) = futures::join!(api::get("/playlists"), api::get("/collab/invites"));
+        let rows = rows.map_err(|e| e.message)?.items();
+        let invites = invites.map(|v| v.items()).unwrap_or_default();
+        if !invites.is_empty() {
+            let _ = bx.insert_adjacent_html("beforebegin", &super::collab::invites_html(&invites));
+            super::collab::bind_invites(&view, reload);
+        }
         dom::set_html(&bx, &if rows.is_empty() { empty_state(&icon("list"), "No playlists yet", "") } else { format!(r#"<div class="grid">{}</div>"#, rows.iter().map(pl_card).collect::<String>()) });
         Ok(())
     })
@@ -576,6 +594,8 @@ pub fn render_playlist(view: Element, ctx: Ctx) -> PageFuture {
         let items = pl.a("items");
         let missing = items.iter().filter(|i| requestable(i)).count();
         let liked = pl.s("kind") == "liked";
+        // someone else's collaborative playlist: the songs are theirs to change, the playlist is the owner's
+        let member = super::collab::is_member(&pl);
         let source = pl.s("source");
         let (total, matched) = (pl.f("total"), pl.f("matched"));
         let sync_targets = pl.a("sync_targets");
@@ -613,10 +633,11 @@ pub fn render_playlist(view: Element, ctx: Ctx) -> PageFuture {
         <div class="muted">{total} tracks · <b style="color:var(--ok)">{matched}</b> in library · {missing_n} missing</div>
         <div class="progress mt" style="max-width:360px"><i style="width:{pct}%"></i></div>
         {shared}
+        {collab}
         <div class="row wrap mt">
           {play}
           {pl_menu}
-          <button class="btn" id="pl-share" title="Share link">{external}Share</button>
+          {share_btn}
           {req}
           <button class="btn" id="add">{plus}Add from link</button>
           <button class="btn" id="dedupe">{check}Remove duplicates</button>
@@ -626,7 +647,7 @@ pub fn render_playlist(view: Element, ctx: Ctx) -> PageFuture {
         </div>
       </div>
     </div>
-    <div class="card row wrap between" style="margin-bottom:16px">
+    <div class="card row wrap between {sync_hidden}" style="margin-bottom:16px">
       <div class="row wrap">
         <b>Sync to</b>
         {sync_to}
@@ -643,20 +664,23 @@ pub fn render_playlist(view: Element, ctx: Ctx) -> PageFuture {
       </tbody></table></div></div>
     {empty}"##,
             cover = if liked { r#"<div class="ph" style="background:var(--grad);color:#fff;font-size:80px">♥</div>"#.to_string() } else { art(&pl.s("cover_url"), &pl.s("name"), "") },
-            kicker = if liked { "Liked songs · synced everywhere" } else { "Playlist" },
+            kicker = if liked { "Liked songs · synced everywhere".to_string() } else if member { format!("Collaborative playlist · by {}", esc(&pl.g("collab").s("owner"))) } else { "Playlist".to_string() },
             src = esc(&src_label(&pl)),
-            h1attr = if !liked { r#"contenteditable="true" spellcheck="false" id="pl-name" title="Click to rename""# } else { "" },
+            collab = super::collab::line(&pl),
+            share_btn = if member { String::new() } else { format!(r#"<button class="btn" id="pl-share" title="Share link">{}Share</button>"#, icon("external")) },
+            sync_hidden = if member { "hidden" } else { "" },
+            h1attr = if !liked && !member { r#"contenteditable="true" spellcheck="false" id="pl-name" title="Click to rename""# } else { "" },
             name = esc(&pl.s("name")),
             total = pl.s("total"), matched = pl.s("matched"), missing_n = js_string(&json!(total - matched)),
             pct = if pl.truthy("total") { js_string(&json!(matched / total * 100.0)) } else { "0".to_string() },
             play = if pl.truthy("matched") { format!(r#"<button class="btn primary" id="pl-play">{}Play</button><button class="btn" id="pl-shuffle">{}Shuffle</button>"#, icon("play"), icon("shuffle")) } else { String::new() },
             shared = share_line(&pl),
-            external = icon("external"),
             pl_menu = if pl.truthy("matched") && crate::pages::downloads::enabled() { format!(r#"<button class="btn icon" id="pl-menu" aria-label="More options" title="More options">{}</button>"#, icon("more")) } else { String::new() },
-            req = if missing > 0 { format!(r#"<button class="btn {}" id="req">{}Download {missing} missing</button>"#, if pl.truthy("matched") { "" } else { "primary" }, icon("download")) } else { String::new() },
+            req = if missing > 0 && !member { format!(r#"<button class="btn {}" id="req">{}Download {missing} missing</button>"#, if pl.truthy("matched") { "" } else { "primary" }, icon("download")) } else { String::new() },
             plus = icon("plus"), check = icon("check"), refresh = icon("refresh"),
-            pull = if pl.truthy("source_url") { format!(r#"<button class="btn" id="refresh">{}Pull from {}</button>"#, icon("refresh"), esc(src_name(&source).unwrap_or("source"))) } else { String::new() },
-            del = if !liked { format!(r#"<button class="btn danger ghost" id="del">{}</button>"#, icon("trash")) } else { String::new() },
+            pull = if pl.truthy("source_url") && !member { format!(r#"<button class="btn" id="refresh">{}Pull from {}</button>"#, icon("refresh"), esc(src_name(&source).unwrap_or("source"))) } else { String::new() },
+            del = if member { format!(r#"<button class="btn danger ghost" id="leave">{}Leave</button>"#, icon("x")) }
+                else if !liked { format!(r#"<button class="btn danger ghost" id="del">{}</button>"#, icon("trash")) } else { String::new() },
             sync_to = if !connected.is_empty() {
                 connected.iter().filter(|s| **s != source).map(|s| format!(r#"<label class="switch"><input type="checkbox" data-target="{s}" {}><i></i>{}</label>"#,
                     if sync_targets.iter().any(|t| t.as_str() == Some(s)) { "checked" } else { "" }, esc(target_name(s).unwrap_or("")))).collect::<String>()
@@ -669,6 +693,14 @@ pub fn render_playlist(view: Element, ctx: Ctx) -> PageFuture {
             rows = rows,
             empty = if items.is_empty() { empty_state(&icon("music"), "Empty playlist", "Add tracks from an album page or from a link.") } else { String::new() },
         ));
+        super::collab::bind(&view, &id, reload);
+        {
+            let (id2, pl_name) = (id.clone(), pl.s("name"));
+            dom::on_sel(&view, "#leave", "click", move |_| {
+                let (id3, n) = (id2.clone(), pl_name.clone());
+                dom::spawn(async move { super::collab::leave(&id3, &n).await; });
+            });
+        }
         let playable: Vec<Value> = items.iter().filter(|i| i.truthy("track_id")).map(as_track).collect();
         {
             let playable = playable.clone();

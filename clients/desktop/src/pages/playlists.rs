@@ -16,7 +16,7 @@ use crate::theme::{self, Badge, Btn};
 use crate::widgets::choice::select;
 use crate::widgets::text_area::text_area;
 use crate::widgets::{
-    self, badge, btn, btn_icon, empty, error_box, field, grid, icon, modal, muted, page_head, skeleton_tiles, small,
+    self, badge, btn, btn_icon, btn_sm, card, empty, error_box, field, grid, icon, modal, muted, page_head, skeleton_tiles, small,
     small_muted, t, Icon, Tile, TileKind,
 };
 use iced::widget::{checkbox, column, container, row, text_editor, text_input, toggler};
@@ -498,6 +498,8 @@ pub enum Dialog {
 pub struct State {
     /// None while loading; Err(message) when the server said no.
     rows: Option<Result<Vec<Value>, String>>,
+    /// Invites to collaborate waiting for the user (`/api/collab/invites`).
+    invites: Vec<Value>,
     /// Playlists ticked for a merge.
     selected: Vec<i64>,
     dialog: Option<Dialog>,
@@ -523,11 +525,32 @@ pub enum Message {
     AddSharedGo,
     AddSharedDone(Result<Value, ApiError>),
     CloseDialog,
+    Invites(Result<Value, ApiError>),
+    /// Join / Decline an invite (the playlist's id).
+    AcceptInvite(i64),
+    DeclineInvite(i64),
+    Answered(Option<i64>, Result<Value, ApiError>),
+    /// Joined with an invite link pasted into Add a shared playlist.
+    Joined(Result<Value, ApiError>),
 }
 
 fn load(ctx: &Ctx) -> Task<Message> {
     let api = ctx.api.clone();
-    Task::perform(async move { api.get("/playlists").await }, Message::Loaded)
+    let api2 = ctx.api.clone();
+    Task::batch([
+        Task::perform(async move { api.get("/playlists").await }, Message::Loaded),
+        Task::perform(async move { api2.get("/collab/invites").await }, Message::Invites),
+    ])
+}
+
+/// A pasted text that is a collaborative playlist's invite link rather than a share link.
+pub fn is_invite_link(text: &str) -> bool {
+    text.contains("collab/")
+}
+
+/// "anna invited you to collaborate on Road trip · 12 tracks".
+pub fn invite_text(i: &Value) -> String {
+    format!("{} invited you to collaborate on {} · {} tracks", fmt::s(i, "owner"), fmt::s(i, "name"), fmt::i(i, "count"))
 }
 
 /// Called when the app navigates here (with the route's parameters).
@@ -638,6 +661,9 @@ pub fn update(state: &mut State, msg: Message, ctx: &mut Ctx) -> Task<Message> {
                 *error = None;
                 let api = ctx.api.clone();
                 let body = json!({ "link": link.trim() });
+                if is_invite_link(link) {
+                    return Task::perform(async move { api.post("/collab/join", body).await }, Message::Joined);
+                }
                 return Task::perform(async move { api.post("/playlists/shared", body).await }, Message::AddSharedDone);
             }
         }
@@ -653,6 +679,42 @@ pub fn update(state: &mut State, msg: Message, ctx: &mut Ctx) -> Task<Message> {
             }
         }
         Message::CloseDialog => state.dialog = None,
+        Message::Invites(r) => state.invites = r.map(|v| fmt::items(&v)).unwrap_or_default(),
+        Message::AcceptInvite(pid) => {
+            let api = ctx.api.clone();
+            return Task::perform(async move { api.post_empty(&format!("/collab/invites/{pid}/accept")).await }, move |r| {
+                Message::Answered(Some(pid), r)
+            });
+        }
+        Message::DeclineInvite(pid) => {
+            state.invites.retain(|i| fmt::i(i, "playlist_id") != pid);
+            let api = ctx.api.clone();
+            return Task::perform(async move { api.post_empty(&format!("/collab/invites/{pid}/decline")).await }, |r| {
+                Message::Answered(None, r)
+            });
+        }
+        Message::Answered(joined, r) => match (joined, r) {
+            (Some(pid), Ok(_)) => {
+                ctx.toast_ok("Joined: you can change its songs now");
+                ctx.navigate(Page::Playlist(pid));
+            }
+            (_, Err(e)) => {
+                ctx.toast_err(e.message);
+                return load(ctx);
+            }
+            _ => {}
+        },
+        Message::Joined(Ok(r)) => {
+            state.dialog = None;
+            ctx.toast_ok(format!("Joined {}'s playlist", fmt::s(&r, "owner")));
+            ctx.navigate(Page::Playlist(fmt::i(&r, "id")));
+        }
+        Message::Joined(Err(e)) => {
+            if let Some(Dialog::AddShared { busy, error, .. }) = state.dialog.as_mut() {
+                *busy = false;
+                *error = Some(e.message);
+            }
+        }
     }
     Task::none()
 }
@@ -677,6 +739,11 @@ pub fn tile_sub(p: &Value) -> String {
     let pct = if total > 0.0 { (matched / total * 100.0).round() as i64 } else { 0 };
     let follow = if fmt::truthy(p, "follow") { " · following" } else { "" };
     let shared = if p["share"].is_object() { " · shared" } else { "" };
+    let collab = match p["collab"]["role"].as_str() {
+        Some("collaborator") => format!(" · by {}", fmt::s(&p["collab"], "owner")),
+        _ if fmt::truthy(p, "collaborative") => " · collaborative".to_string(),
+        _ => String::new(),
+    };
     let targets: Vec<String> = fmt::items(&p["sync_targets"])
         .iter()
         .filter_map(|t| t.as_str().map(|t| target_name(t).unwrap_or(t).to_string()))
@@ -687,7 +754,7 @@ pub fn tile_sub(p: &Value) -> String {
         format!(" → {}", targets.join(", "))
     };
     let second = format!("{}{sync}", src_label(p));
-    let first = format!("{} tracks · {pct}% in library{follow}{shared}", fmt::s(p, "total"));
+    let first = format!("{} tracks · {pct}% in library{follow}{shared}{collab}", fmt::s(p, "total"));
     if second.is_empty() {
         first
     } else {
@@ -766,7 +833,24 @@ pub fn view<'a>(state: &'a State, ctx: &Ctx<'a>) -> El<'a, Message> {
                 .collect(),
         ),
     };
-    column![head, body].spacing(20).width(Length::Fill).into()
+    let mut col = column![head].spacing(20).width(Length::Fill);
+    if !state.invites.is_empty() {
+        let mut list = column![].spacing(8);
+        for i in &state.invites {
+            let pid = fmt::i(i, "playlist_id");
+            list = list.push(
+                row![
+                    container(t(invite_text(i)).size(14)).width(Length::Fill),
+                    btn_sm("Join", Btn::Primary, Some(Message::AcceptInvite(pid))),
+                    btn_sm("Decline", Btn::Ghost, Some(Message::DeclineInvite(pid))),
+                ]
+                .spacing(8)
+                .align_y(Alignment::Center),
+            );
+        }
+        col = col.push(card(list).width(Length::Fill));
+    }
+    col.push(body).into()
 }
 
 /// A modal or ⋯ menu to lay over the whole window, when one is open.

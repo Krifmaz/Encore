@@ -4,6 +4,7 @@ pub mod activity;
 pub mod artwork;
 pub mod auth;
 pub mod bugreports;
+pub mod collab;
 pub mod common;
 pub mod contribute;
 pub mod discover;

@@ -1,5 +1,7 @@
 [
   {
+    "collab": null,
+    "collaborative": 0,
     "cover_url": null,
     "created_at": 1792279903.5730236,
     "description": null,
@@ -20,6 +22,8 @@
     "user_id": 1
   },
   {
+    "collab": null,
+    "collaborative": 0,
     "cover_url": null,
     "created_at": 1792365179.1262372,
     "description": "",

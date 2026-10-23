@@ -14,6 +14,12 @@
 //! and Remove from my playlists (`DELETE /api/playlists/{id}`). No rename, sync, share, Add from
 //! link, Download missing or per-song Remove. Once the link ended, only the "stopped sharing" line
 //! and Remove.
+//!
+//! Collaborative (0.37): the owner's Collaborative switch (`PATCH {collaborative}`) and Invite window
+//! (by user name, the invite link, members with Remove). Someone else's collaborative playlist the
+//! user joined (`collab.role: collaborator`) works like their own for its songs (add, remove,
+//! reorder, de-duplicate), without rename, share, sync, follow or Download missing; its Delete is
+//! Leave. docs/contracts/collaborative-playlists.md.
 
 use crate::api::ApiError;
 use crate::fmt;
@@ -168,6 +174,37 @@ pub enum Dialog {
     StopSharing,
     /// "Remove from my playlists" (someone else's playlist): the confirm's text.
     RemoveLinked(String),
+    /// Collaborative: invite by user name, the invite link, who's in it.
+    Members(Members),
+    /// "Leave playlist" (someone else's collaborative playlist): the confirm's text.
+    Leave(String),
+}
+
+/// The members window: the server's `/collaborators` answer, the user name being typed, its error.
+#[derive(Debug, Default)]
+pub struct Members {
+    data: Option<Value>,
+    username: String,
+    error: Option<String>,
+    busy: bool,
+}
+
+/// What a member may do, under the name of someone else's collaborative playlist.
+pub const MEMBER_HINT: &str = "You can add, remove and reorder songs";
+pub const LEAVE_TEXT: &str = "You stop seeing it and can't change it any more. The owner can invite you again.";
+
+/// Someone else's collaborative playlist the user joined.
+pub fn is_member(p: &Value) -> bool {
+    p["collab"]["role"].as_str() == Some("collaborator")
+}
+
+/// "1 member" / "3 members" ("" for none).
+pub fn members_text(n: i64) -> String {
+    match n {
+        n if n <= 0 => String::new(),
+        1 => "1 member".to_string(),
+        n => format!("{n} members"),
+    }
 }
 
 #[derive(Debug, Default)]
@@ -245,6 +282,23 @@ pub enum Message {
     /// The "Connections" link of the sync card.
     OpenConnections,
     CloseDialog,
+    /// Collaborative on or off (the owner).
+    Collaborative(bool),
+    CollaborativeSet(bool, Result<Value, ApiError>),
+    OpenMembers,
+    MembersLoaded(Result<Value, ApiError>),
+    InviteName(String),
+    Invite,
+    Invited(Result<Value, ApiError>),
+    MakeInviteLink,
+    CopyInviteLink,
+    DropInviteLink,
+    RemoveMember(i64),
+    /// After a change in the members window: load it (and the page) again.
+    MembersChanged(Result<Value, ApiError>),
+    Leave,
+    LeaveConfirmed,
+    Left(Result<Value, ApiError>),
 }
 
 fn load(state: &State, ctx: &Ctx) -> Task<Message> {
@@ -566,8 +620,241 @@ pub fn update(state: &mut State, msg: Message, ctx: &mut Ctx) -> Task<Message> {
             ctx.navigate(Page::LibraryAlbum(id));
         }
         Message::CloseDialog => state.dialog = None,
+        Message::Collaborative(on) => {
+            if let Some(Ok(p)) = state.pl.as_mut() {
+                p["collaborative"] = json!(on as i64);
+            }
+            let api = ctx.api.clone();
+            let path = format!("/playlists/{}", state.id);
+            return Task::perform(async move { api.patch(&path, json!({ "collaborative": on })).await }, move |r| {
+                Message::CollaborativeSet(on, r)
+            });
+        }
+        Message::CollaborativeSet(on, r) => match r {
+            Ok(_) => {
+                ctx.toast_ok(if on {
+                    "Collaborative: people you invite can change the songs"
+                } else {
+                    "Collaborative off: members can't see it until it's on again"
+                });
+                if on {
+                    state.dialog = Some(Dialog::Members(Members::default()));
+                    return Task::batch([load(state, ctx), load_members(state, ctx)]);
+                }
+                return load(state, ctx);
+            }
+            Err(e) => {
+                ctx.toast_err(e.message);
+                return load(state, ctx);
+            }
+        },
+        Message::OpenMembers => {
+            state.dialog = Some(Dialog::Members(Members::default()));
+            return load_members(state, ctx);
+        }
+        Message::MembersLoaded(r) => {
+            if let Some(Dialog::Members(m)) = state.dialog.as_mut() {
+                m.busy = false;
+                match r {
+                    Ok(v) => m.data = Some(v),
+                    Err(e) => m.error = Some(e.message),
+                }
+            }
+        }
+        Message::InviteName(s) => {
+            if let Some(Dialog::Members(m)) = state.dialog.as_mut() {
+                m.username = s;
+            }
+        }
+        Message::Invite => {
+            if let Some(Dialog::Members(m)) = state.dialog.as_mut() {
+                let name = m.username.trim().to_string();
+                if name.is_empty() || m.busy {
+                    return Task::none();
+                }
+                m.busy = true;
+                m.error = None;
+                let api = ctx.api.clone();
+                let path = format!("/playlists/{}/collaborators", state.id);
+                return Task::perform(async move { api.post(&path, json!({ "username": name })).await }, Message::Invited);
+            }
+        }
+        Message::Invited(r) => {
+            if let Some(Dialog::Members(m)) = state.dialog.as_mut() {
+                m.busy = false;
+                match r {
+                    Ok(v) => {
+                        ctx.toast_ok(format!("Invited {}", m.username.trim()));
+                        m.username.clear();
+                        m.data = Some(v);
+                        return load(state, ctx);
+                    }
+                    Err(e) => m.error = Some(e.message),
+                }
+            }
+        }
+        Message::MakeInviteLink => {
+            let api = ctx.api.clone();
+            let path = format!("/playlists/{}/invite-link", state.id);
+            return Task::perform(async move { api.post_empty(&path).await }, Message::MembersChanged);
+        }
+        Message::CopyInviteLink => {
+            if let Some(Dialog::Members(m)) = state.dialog.as_ref() {
+                if let Some(link) = m.data.as_ref().map(|d| &d["invite_link"]).filter(|l| l.is_object()) {
+                    let url = fmt::s(link, "url");
+                    ctx.copy_text(if url.starts_with("http") { url } else { format!("{}{}", ctx.base(), fmt::s(link, "path")) });
+                }
+            }
+        }
+        Message::DropInviteLink => {
+            let api = ctx.api.clone();
+            let path = format!("/playlists/{}/invite-link", state.id);
+            return Task::perform(async move { api.del(&path).await }, Message::MembersChanged);
+        }
+        Message::RemoveMember(uid) => {
+            let api = ctx.api.clone();
+            let path = format!("/playlists/{}/collaborators/{uid}", state.id);
+            return Task::perform(async move { api.del(&path).await }, Message::MembersChanged);
+        }
+        Message::MembersChanged(r) => {
+            if let Err(e) = r {
+                ctx.toast_err(e.message);
+            }
+            return Task::batch([load(state, ctx), load_members(state, ctx)]);
+        }
+        Message::Leave => {
+            if let Some(p) = state.playlist() {
+                state.dialog = Some(Dialog::Leave(format!("Leave “{}”? {LEAVE_TEXT}", fmt::s(p, "name"))));
+            }
+        }
+        Message::LeaveConfirmed => {
+            state.dialog = None;
+            let api = ctx.api.clone();
+            let path = format!("/playlists/{}", state.id);
+            return Task::perform(async move { api.del(&path).await }, Message::Left);
+        }
+        Message::Left(Ok(_)) => {
+            ctx.toast_ok("You left the playlist");
+            ctx.navigate(Page::Playlists);
+        }
+        Message::Left(Err(e)) => ctx.toast_err(e.message),
     }
     Task::none()
+}
+
+fn load_members(state: &State, ctx: &Ctx) -> Task<Message> {
+    let api = ctx.api.clone();
+    let path = format!("/playlists/{}/collaborators", state.id);
+    Task::perform(async move { api.get(&path).await }, Message::MembersLoaded)
+}
+
+/// The line under the header: the owner's Collaborative switch with Invite, or a member's badge, owner and
+/// Members. None for Liked Songs.
+fn collab_line<'a>(p: &'a Value) -> Option<El<'a, Message>> {
+    if fmt::s(p, "kind") != "playlist" {
+        return None;
+    }
+    if is_member(p) {
+        return Some(
+            row![
+                badge("Collaborative", Badge::Accent),
+                small_muted(format!("by {} · {MEMBER_HINT}", fmt::s(&p["collab"], "owner"))),
+                btn_icon(Icon::User, "Members", Btn::Default, Some(Message::OpenMembers)),
+            ]
+            .spacing(8)
+            .align_y(Alignment::Center)
+            .wrap()
+            .into(),
+        );
+    }
+    let on = fmt::truthy(p, "collaborative");
+    let mut r = row![tooltip(
+        toggler(on).label("Collaborative").text_size(13.5).spacing(8).on_toggle(Message::Collaborative).style(theme::switch),
+        widgets::tip_box("Let people you invite add, remove and reorder songs"),
+        tooltip::Position::Bottom,
+    )
+    .gap(4)]
+    .spacing(10)
+    .align_y(Alignment::Center);
+    if on {
+        r = r.push(small_muted(members_text(fmt::i(&p["collab"], "members"))));
+        r = r.push(btn_icon(Icon::Plus, "Invite", Btn::Default, Some(Message::OpenMembers)));
+    }
+    Some(r.wrap().into())
+}
+
+/// The members window's body: invite by name, the invite link and the list for the owner; who's in it and
+/// Leave for a member.
+fn members_dialog<'a>(m: &'a Members) -> El<'a, Message> {
+    let Some(d) = &m.data else {
+        return match &m.error {
+            Some(e) => error_box(e),
+            None => muted("Loading…").size(14).into(),
+        };
+    };
+    let owner = fmt::s(d, "role") == "owner";
+    let mut col = column![].spacing(12);
+    if owner {
+        col = col.push(small_muted("People you invite can add, remove and reorder songs. Only you can rename, share or delete the playlist."));
+        col = col.push(
+            row![
+                text_input("User name on this server", &m.username)
+                    .on_input(Message::InviteName)
+                    .on_submit(Message::Invite)
+                    .padding([9, 12])
+                    .size(14)
+                    .style(theme::input),
+                btn_icon(Icon::Plus, "Invite", Btn::Primary, (!m.busy && !m.username.trim().is_empty()).then_some(Message::Invite)),
+            ]
+            .spacing(8)
+            .align_y(Alignment::Center),
+        );
+        if let Some(e) = &m.error {
+            col = col.push(error_box(e));
+        }
+        let link = &d["invite_link"];
+        col = col.push(if link.is_object() {
+            row![
+                small_muted(fmt::s(link, "url")),
+                btn_icon(Icon::Copy, "Copy link", Btn::Default, Some(Message::CopyInviteLink)),
+                btn_sm("Turn off link", Btn::Ghost, Some(Message::DropInviteLink)),
+            ]
+            .spacing(8)
+            .align_y(Alignment::Center)
+            .wrap()
+        } else {
+            row![
+                btn_icon(Icon::Link, "Create invite link", Btn::Default, Some(Message::MakeInviteLink)),
+                small_muted("Anyone on this server with the link can join."),
+            ]
+            .spacing(8)
+            .align_y(Alignment::Center)
+            .wrap()
+        });
+    } else {
+        col = col.push(small_muted(format!("{MEMBER_HINT}. Only {} can rename, share or delete it.", fmt::s(d, "owner"))));
+    }
+    col = col.push(t("Members").size(14).font(theme::bold()));
+    col = col.push(small_muted(format!("Owner: {}", fmt::s(d, "owner"))));
+    let members = fmt::items(&d["members"]);
+    if members.is_empty() {
+        col = col.push(small("Nobody yet.").color(theme::look().faint));
+    }
+    for p in members {
+        let mut r = row![t(fmt::s(&p, "username")).size(14)].spacing(8).align_y(Alignment::Center);
+        if fmt::s(&p, "status") == "invited" {
+            r = r.push(badge("invited", Badge::Plain));
+        }
+        let mut line = row![container(r).width(Length::Fill)].align_y(Alignment::Center);
+        if owner {
+            line = line.push(icon_btn(Icon::X, "Remove", Some(Message::RemoveMember(fmt::i(&p, "user_id")))));
+        }
+        col = col.push(line);
+    }
+    if !owner {
+        col = col.push(btn_icon(Icon::X, "Leave playlist", Btn::Ghost, Some(Message::Leave)));
+    }
+    col.into()
 }
 
 /// The status badges of one item: in library (+ verified / wrong audio), the request's state,
@@ -603,6 +890,8 @@ fn heart_art<'a>(size: f32, ctx: &Ctx<'a>) -> El<'a, Message> {
 fn header<'a>(state: &'a State, p: &'a Value, ctx: &Ctx<'a>) -> El<'a, Message> {
     let look = ctx.look;
     let liked = fmt::s(p, "kind") == "liked";
+    // someone else's collaborative playlist: its songs are the user's to change, the rest is the owner's
+    let member = is_member(p);
     let items = state.items();
     let missing = items.iter().filter(|i| requestable(i)).count();
     let (total, matched) = (fmt::f(p, "total"), fmt::f(p, "matched"));
@@ -612,11 +901,11 @@ fn header<'a>(state: &'a State, p: &'a Value, ctx: &Ctx<'a>) -> El<'a, Message> 
     } else {
         catalog::art(ctx, &fmt::s(p, "cover_url"), 180.0, false, Icon::List)
     };
-    let kicker = format!(
-        "{} · {}",
-        if liked { "Liked songs · synced everywhere" } else { "Playlist" },
-        src_label(p)
-    );
+    let kicker = if member {
+        format!("Collaborative playlist · by {}", fmt::s(&p["collab"], "owner"))
+    } else {
+        format!("{} · {}", if liked { "Liked songs · synced everywhere" } else { "Playlist" }, src_label(p))
+    };
     let title: El<'a, Message> = match &state.rename {
         Some(name) => row![
             text_input("Playlist name", name)
@@ -634,7 +923,7 @@ fn header<'a>(state: &'a State, p: &'a Value, ctx: &Ctx<'a>) -> El<'a, Message> 
         .into(),
         None => {
             let mut r = row![h1(fmt::s(p, "name"))].spacing(8).align_y(Alignment::Center);
-            if !liked {
+            if !liked && !member {
                 r = r.push(icon_btn(Icon::Edit, "Click to rename", Some(Message::Rename)));
             }
             r.into()
@@ -655,15 +944,17 @@ fn header<'a>(state: &'a State, p: &'a Value, ctx: &Ctx<'a>) -> El<'a, Message> 
         actions = actions.push(btn_icon(Icon::Shuffle, "Shuffle", Btn::Default, Some(Message::Shuffle)));
         actions = actions.push(btn_icon(Icon::Download, "Save for offline", Btn::Default, Some(Message::SaveOffline)));
     }
-    actions = actions.push(
-        tooltip(
-            btn_icon(Icon::External, "Share", Btn::Default, Some(Message::Share)),
-            widgets::tip_box("Share link"),
-            tooltip::Position::Bottom,
-        )
-        .gap(4),
-    );
-    if missing > 0 {
+    if !member {
+        actions = actions.push(
+            tooltip(
+                btn_icon(Icon::External, "Share", Btn::Default, Some(Message::Share)),
+                widgets::tip_box("Share link"),
+                tooltip::Position::Bottom,
+            )
+            .gap(4),
+        );
+    }
+    if missing > 0 && !member {
         actions = actions.push(btn_icon(
             Icon::Download,
             format!("Download {missing} missing"),
@@ -684,7 +975,7 @@ fn header<'a>(state: &'a State, p: &'a Value, ctx: &Ctx<'a>) -> El<'a, Message> 
         Btn::Default,
         (!state.busy).then_some(Message::Rematch),
     ));
-    if fmt::truthy(p, "source_url") {
+    if fmt::truthy(p, "source_url") && !member {
         let src = fmt::s(p, "source");
         actions = actions.push(btn_icon(
             Icon::Refresh,
@@ -693,7 +984,9 @@ fn header<'a>(state: &'a State, p: &'a Value, ctx: &Ctx<'a>) -> El<'a, Message> 
             (!state.busy).then_some(Message::Pull),
         ));
     }
-    if !liked {
+    if member {
+        actions = actions.push(btn_icon(Icon::X, "Leave", Btn::Ghost, Some(Message::Leave)));
+    } else if !liked {
         actions = actions.push(icon_btn(Icon::Trash, "Delete playlist", Some(Message::Delete)));
     }
     let mut right = column![catalog::kicker(kicker), title, counts, progress].spacing(8).width(Length::Fill);
@@ -709,6 +1002,9 @@ fn header<'a>(state: &'a State, p: &'a Value, ctx: &Ctx<'a>) -> El<'a, Message> 
             .align_y(Alignment::Center)
             .wrap(),
         );
+    }
+    if let Some(line) = collab_line(p) {
+        right = right.push(line);
     }
     let right = right.push(container(actions.wrap()).padding([6, 0]));
     row![cover, right].spacing(24).align_y(Alignment::End).into()
@@ -861,7 +1157,10 @@ pub fn view<'a>(state: &'a State, ctx: &Ctx<'a>) -> El<'a, Message> {
         }
         Some(Ok(p)) => {
             let items = state.items();
-            let mut col = column![header(state, p, ctx), sync_card(state, p, ctx)].spacing(18);
+            let mut col = column![header(state, p, ctx)].spacing(18);
+            if !is_member(p) {
+                col = col.push(sync_card(state, p, ctx));
+            }
             if items.is_empty() {
                 col = col.push(empty(
                     Icon::Music,
@@ -937,6 +1236,21 @@ pub fn overlay<'a>(state: &'a State, ctx: &Ctx<'a>) -> Option<El<'a, Message>> {
             STOP_TITLE,
             true,
             Message::StopSharingConfirmed,
+            Message::CloseDialog,
+        )),
+        Dialog::Members(m) => Some(modal(
+            if is_member(state.playlist()?) { "Members" } else { "Invite collaborators" },
+            members_dialog(m),
+            Some(btn("Done", Btn::Default, Some(Message::CloseDialog)).into()),
+            false,
+            Message::CloseDialog,
+        )),
+        Dialog::Leave(text) => Some(confirm(
+            "Leave playlist",
+            text,
+            "Leave",
+            true,
+            Message::LeaveConfirmed,
             Message::CloseDialog,
         )),
         Dialog::RemoveLinked(text) => Some(confirm(

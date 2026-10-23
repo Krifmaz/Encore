@@ -116,6 +116,8 @@ fn match_route(path: &str) -> Option<(&'static str, Vec<String>)> {
             if let Some(r) = p("/playlists/") { return if r.chars().all(|c| c.is_ascii_digit()) { Some(("playlist", vec![r])) } else { None }; }
             // a group listen's invite link (0.31): "Join <host>'s group listen?"
             if let Some(r) = p("/group/") { return seg(&r).map(|s| ("group", vec![s])); }
+            // a collaborative playlist's invite link (0.37): "Join <owner>'s playlist?"
+            if let Some(r) = p("/collab/") { return seg(&r).map(|s| ("collab", vec![s])); }
             return None;
         }
     })
@@ -144,6 +146,7 @@ fn page_for(name: &str) -> Option<PageFn> {
         "bug-reports" => pages::bugreports::render,
         "bug-report" => pages::bugreports::render_one,
         "group" => crate::group::ui::render_link,
+        "collab" => pages::collab::render_link,
         _ => return None,
     })
 }

@@ -4,6 +4,7 @@ use crate::auth::{MaybeUser, User};
 use crate::signin;
 use super::library;
 use super::playlist_links::{self, is_linked, read_only};
+use super::playlist_collab::{self, Role};
 use encore_db::{now, Row, RowExt};
 use encore_core::error::{err, ApiResult};
 use encore_requests::sources::links;
@@ -58,6 +59,14 @@ fn own_writable(st: &AppState, pid: i64, u: &Row) -> ApiResult<Row> {
     Ok(pl)
 }
 
+/// A playlist whose songs the user may change: their own (not one added from a link), or a collaborative one
+/// they joined.
+fn editable(st: &AppState, pid: i64, u: &Row) -> ApiResult<Row> {
+    let (pl, _) = playlist_collab::member(st, pid, u)?;
+    read_only(&pl)?;
+    Ok(pl)
+}
+
 fn bad(e: anyhow::Error) -> encore_core::error::ApiError {
     err(400, e.to_string())
 }
@@ -68,7 +77,15 @@ fn bad(e: anyhow::Error) -> encore_core::error::ApiError {
 async fn list(State(st): State<AppState>, User(u): User) -> ApiResult<Json<Value>> {
     st.blocking(move |st| {
         playlists::get_liked(st, u.i("id")).map_err(bad)?;
-        let rows = st.db.query("SELECT * FROM playlists WHERE user_id=? ORDER BY kind='liked' DESC, updated_at DESC", p![u.i("id")])?;
+        let mut rows = st.db.query("SELECT * FROM playlists WHERE user_id=? ORDER BY kind='liked' DESC, updated_at DESC", p![u.i("id")])?;
+        // collaborative playlists the user joined sit among their own, by when they last changed
+        let joined = playlist_collab::joined_rows(st, u.i("id"))?;
+        let theirs: std::collections::HashSet<i64> = joined.iter().map(|r| r.i("id")).collect();
+        if !joined.is_empty() {
+            rows.extend(joined);
+            rows.sort_by(|a, b| (b.s("kind") == "liked").cmp(&(a.s("kind") == "liked"))
+                .then(b.f("updated_at").partial_cmp(&a.f("updated_at")).unwrap_or(std::cmp::Ordering::Equal)));
+        }
         let links: std::collections::HashMap<String, String> = st.db.query("SELECT ref, token FROM shares WHERE user_id=? AND kind='playlist'", p![u.i("id")])?
             .into_iter().map(|r| (r.s("ref"), r.s("token"))).collect();
         let added = playlist_links::added_by_all(st, u.i("id"))?;
@@ -81,8 +98,16 @@ async fn list(State(st): State<AppState>, User(u): User) -> ApiResult<Json<Value
                 continue;
             }
             let Some(mut v) = summaries.next() else { break };
-            let pid = row.i("id").to_string();
-            v["share"] = links.get(&pid).map_or(Value::Null, |t| share_with_count(st, t, added.get(t).copied().unwrap_or(0)));
+            if theirs.contains(&row.i("id")) {
+                v["share"] = Value::Null;
+                v["sync_targets"] = json!([]);
+                v["collab"] = playlist_collab::collab_json(st, row, Role::Collaborator)?;
+            } else {
+                let pid = row.i("id").to_string();
+                v["share"] = links.get(&pid).map_or(Value::Null, |t| share_with_count(st, t, added.get(t).copied().unwrap_or(0)));
+                v["collab"] = playlist_collab::collab_json(st, row, Role::Owner)?;
+            }
+            v.as_object_mut().map(|o| o.remove("invite_token"));
             v["read_only"] = json!(false);
             v["linked"] = Value::Null;
             list.push(v);
@@ -162,7 +187,7 @@ async fn preview(State(st): State<AppState>, User(u): User, Json(b): Json<Import
 async fn import_inner(st: &AppState, u: &Row, b: ImportBody) -> ApiResult<Value> {
     // adding to a playlist that can't take songs is refused before the link is fetched
     if let Some(pid) = b.into {
-        own_writable(st, pid, u)?;
+        editable(st, pid, u)?;
     }
     let data = fetch_source(st, &b, u.i("id")).await?;
     // matching against the library, the inserts and the requests for missing songs: on the blocking pool
@@ -175,7 +200,7 @@ fn import_now(st: &AppState, u: &Row, b: ImportBody, data: Value) -> ApiResult<V
     let source = data["source"].as_str().unwrap_or("web").to_string();
     let mut res = match b.into {
         Some(pid) => {
-            let pl = own_writable(st, pid, u)?;
+            let pl = editable(st, pid, u)?;
             let (added, dupes) = playlists::add_tracks(st, pl.i("id"), &tracks, &source).map_err(bad)?;
             json!({ "id": pid, "added": added, "duplicates_skipped": dupes })
         }
@@ -206,6 +231,7 @@ struct Patch {
     description: Option<String>,
     follow: Option<bool>,
     sync_targets: Option<Vec<String>>,
+    collaborative: Option<bool>,
 }
 
 async fn create(State(st): State<AppState>, User(u): User, Json(b): Json<Patch>) -> ApiResult<Json<Value>> {
@@ -217,7 +243,7 @@ async fn create(State(st): State<AppState>, User(u): User, Json(b): Json<Patch>)
 /// link shows that playlist as it is now (`playlist_links::linked_detail`).
 async fn detail(State(st): State<AppState>, User(u): User, Path(pid): Path<i64>) -> ApiResult<Json<Value>> {
     st.blocking(move |st| {
-        let pl = own(st, pid, &u)?;
+        let (pl, role) = playlist_collab::member(st, pid, &u)?;
         if is_linked(&pl) {
             return Ok(Json(playlist_links::linked_detail(st, &u, &pl)?));
         }
@@ -225,8 +251,17 @@ async fn detail(State(st): State<AppState>, User(u): User, Path(pid): Path<i64>)
         v["items"] = json!(st.db.query("SELECT i.*, t.album_id, t.format, t.bitrate, t.verify_status, r.status AS request_status, r.message AS request_message
             FROM playlist_items i LEFT JOIN tracks t ON t.id=i.track_id LEFT JOIN requests r ON r.id=i.request_id
             WHERE i.playlist_id=? ORDER BY i.position, i.id", p![pid])?);
-        v["remote_ids"] = serde_json::from_str(&pl.s("remote_ids")).unwrap_or(json!({}));
-        v["share"] = share_of(st, pid, u.i("id"))?;
+        v.as_object_mut().map(|o| o.remove("invite_token"));
+        if role == Role::Owner {
+            v["remote_ids"] = serde_json::from_str(&pl.s("remote_ids")).unwrap_or(json!({}));
+            v["share"] = share_of(st, pid, u.i("id"))?;
+        } else {
+            // a member sees the songs, not the owner's links, services or imports
+            v["remote_ids"] = json!({});
+            v["share"] = Value::Null;
+            v["sync_targets"] = json!([]);
+        }
+        v["collab"] = playlist_collab::collab_json(st, &pl, role)?;
         v["read_only"] = json!(false);
         v["linked"] = Value::Null;
         enrich_now(st, Some(&u), &mut v);
@@ -251,6 +286,9 @@ async fn patch(State(st): State<AppState>, User(u): User, Path(pid): Path<i64>, 
         let ok: Vec<String> = t.into_iter().filter(|x| ["jellyfin", "plex", "navidrome", "listenbrainz", "ytmusic"].contains(&x.as_str()) && *x != src).collect();
         sets.push(("sync_targets", json!(json!(ok).to_string())));
     }
+    if let Some(c) = b.collaborative {
+        playlist_collab::set_collaborative(&st, &pl, c)?;
+    }
     if !sets.is_empty() {
         sets.push(("updated_at", json!(now())));
         let sql = format!("UPDATE playlists SET {} WHERE id=?", sets.iter().map(|(k, _)| format!("{k}=?")).collect::<Vec<_>>().join(", "));
@@ -258,12 +296,21 @@ async fn patch(State(st): State<AppState>, User(u): User, Path(pid): Path<i64>, 
         params.push(json!(pid));
         st.db.execute(&sql, params)?;
     }
-    Ok(Json(playlists::summary(&st, &own(&st, pid, &u)?)))
+    let pl = own(&st, pid, &u)?;
+    let mut v = playlists::summary(&st, &pl);
+    v.as_object_mut().map(|o| o.remove("invite_token"));
+    v["collab"] = playlist_collab::collab_json(&st, &pl, Role::Owner)?;
+    Ok(Json(v))
 }
 
 /// Delete a playlist. For someone else's playlist added from a link this is Remove from my playlists: only
 /// the entry goes (it has no items, and the owner's playlist and link are untouched).
 async fn remove(State(st): State<AppState>, User(u): User, Path(pid): Path<i64>) -> ApiResult<Json<Value>> {
+    // for a member of someone's collaborative playlist this is Leave: the playlist stays the owner's
+    if let (_, Role::Collaborator) = playlist_collab::member(&st, pid, &u)? {
+        st.db.execute("DELETE FROM playlist_collaborators WHERE playlist_id=? AND user_id=?", p![pid, u.i("id")])?;
+        return Ok(Json(json!({ "ok": true })));
+    }
     let pl = own(&st, pid, &u)?;
     if pl.s("kind") == "liked" {
         return Err(err(400, "Liked Songs can't be deleted"));
@@ -275,13 +322,14 @@ async fn remove(State(st): State<AppState>, User(u): User, Path(pid): Path<i64>)
     st.db.execute("DELETE FROM playlist_items WHERE playlist_id=?", p![pid])?;
     st.db.execute("DELETE FROM playlists WHERE id=?", p![pid])?;
     unshare_now(&st, pid, u.i("id"))?;
+    playlist_collab::forget(&st, pid)?;
     Ok(Json(json!({ "ok": true })))
 }
 
 /// Matching against the library (its index of every song) and the writes run on the blocking pool.
 async fn dedupe(State(st): State<AppState>, User(u): User, Path(pid): Path<i64>) -> ApiResult<Json<Value>> {
     st.blocking(move |st| {
-        own_writable(st, pid, &u)?;
+        editable(st, pid, &u)?;
         playlists::rematch(st, Some(pid), false);
         Ok(Json(json!({ "removed": playlists::dedupe(st, pid) })))
     }).await
@@ -289,7 +337,7 @@ async fn dedupe(State(st): State<AppState>, User(u): User, Path(pid): Path<i64>)
 
 async fn rematch(State(st): State<AppState>, User(u): User, Path(pid): Path<i64>) -> ApiResult<Json<Value>> {
     st.blocking(move |st| {
-        own_writable(st, pid, &u)?;
+        editable(st, pid, &u)?;
         Ok(Json(json!({ "matched": playlists::rematch(st, Some(pid), false) })))
     }).await
 }
@@ -321,21 +369,21 @@ struct AddTracks {
 
 async fn add_tracks(State(st): State<AppState>, User(u): User, Path(pid): Path<i64>, Json(b): Json<AddTracks>) -> ApiResult<Json<Value>> {
     st.blocking(move |st| {
-        own_writable(st, pid, &u)?;
+        editable(st, pid, &u)?;
         let (added, dupes) = playlists::add_library_tracks(st, pid, &b.track_ids).map_err(bad)?;
         Ok(Json(json!({ "added": added, "duplicates_skipped": dupes })))
     }).await
 }
 
 async fn remove_item(State(st): State<AppState>, User(u): User, Path((pid, iid)): Path<(i64, i64)>) -> ApiResult<Json<Value>> {
-    own_writable(&st, pid, &u)?;
+    editable(&st, pid, &u)?;
     st.db.execute("DELETE FROM playlist_items WHERE id=? AND playlist_id=?", p![iid, pid])?;
     playlists::renumber(&st, pid);
     Ok(Json(json!({ "ok": true })))
 }
 
 async fn move_item(State(st): State<AppState>, User(u): User, Path(pid): Path<i64>, Json(b): Json<Value>) -> ApiResult<Json<Value>> {
-    own_writable(&st, pid, &u)?;
+    editable(&st, pid, &u)?;
     let mut ids: Vec<i64> = playlists::items(&st, pid).iter().map(|r| r.i("id")).collect();
     let iid = b["item_id"].as_i64().or(b["item_id"].as_str().and_then(|x| x.parse().ok())).unwrap_or(0);
     let to = b["to"].as_i64().or(b["to"].as_str().and_then(|x| x.parse().ok())).unwrap_or(0).max(0) as usize;
@@ -376,6 +424,7 @@ async fn merge(State(st): State<AppState>, User(u): User, Json(b): Json<MergeBod
                     st.db.execute("DELETE FROM playlist_items WHERE playlist_id=?", p![pid])?;
                     st.db.execute("DELETE FROM playlists WHERE id=?", p![pid])?;
                     unshare_now(st, *pid, u.i("id"))?;
+                    playlist_collab::forget(st, *pid)?;
                 }
             }
         }

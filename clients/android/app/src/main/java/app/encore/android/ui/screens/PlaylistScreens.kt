@@ -17,6 +17,7 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.grid.GridCells
+import androidx.compose.foundation.lazy.grid.GridItemSpan
 import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
 import androidx.compose.foundation.lazy.grid.items
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -49,7 +50,9 @@ import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import app.encore.android.features.library.OnSongFixed
+import app.encore.android.features.library.CollabInvites
 import app.encore.android.features.library.LinkedPlaylistMenu
+import app.encore.android.features.library.PlaylistCollabRules
 import app.encore.android.features.library.PlaylistLinkRules
 import app.encore.android.features.library.PlaylistShareRules
 import app.encore.android.R
@@ -109,7 +112,10 @@ private fun PlaylistArt(nav: Nav, pl: Playlist, modifier: Modifier, corner: Dp =
 @Composable
 fun PlaylistsScreen(nav: Nav) {
     val api = nav.graph.api
-    val loader = rememberLoad("playlists") { api.playlists() }
+    // the playlists, and the invites to collaborate waiting for the user (none when that ask fails)
+    val loader = rememberLoad("playlists") {
+        api.playlists() to try { nav.features.collabInvites() } catch (e: Exception) { emptyList() }
+    }
     val p = MaterialTheme.palette
     val scrollBehavior = TopAppBarDefaults.enterAlwaysScrollBehavior()
     Scaffold(
@@ -118,9 +124,9 @@ fun PlaylistsScreen(nav: Nav) {
         contentWindowInsets = WindowInsets(0, 0, 0, 0),
         topBar = { EncoreTopBar("Playlists", scrollBehavior = scrollBehavior, actions = { PlaylistsActions(nav) }) },
     ) { padding ->
-        LoadableContent(loader) { playlists ->
+        LoadableContent(loader) { (playlists, invites) ->
             val sorted = playlists.sortedByDescending { it.isLiked }
-            if (sorted.isEmpty()) {
+            if (sorted.isEmpty() && invites.isEmpty()) {
                 EmptyState(R.drawable.ic_queue_music, "No playlists yet", modifier = Modifier.padding(padding))
                 return@LoadableContent
             }
@@ -131,12 +137,18 @@ fun PlaylistsScreen(nav: Nav) {
                 horizontalArrangement = Arrangement.spacedBy(14.dp),
                 verticalArrangement = Arrangement.spacedBy(14.dp),
             ) {
+                if (invites.isNotEmpty()) {
+                    item(key = "collab-invites", span = { GridItemSpan(maxLineSpan) }) {
+                        CollabInvites(nav, invites) { loader.refresh() }
+                    }
+                }
                 items(sorted, key = { it.id }) { pl ->
                     Tile(
                         title = pl.name,
                         // someone else's playlist added from a link: "12 tracks · by anna", or that the link ended
                         subtitle = if (pl.isLinked) PlaylistLinkRules.tileLine(pl.total, pl.linkedOwner, pl.linkedActive)
-                        else PlaylistShareRules.tileSubtitle(pl.total, pl.matched, pl.isShared),
+                        else PlaylistShareRules.tileSubtitle(pl.total, pl.matched, pl.isShared) +
+                            PlaylistCollabRules.tileSuffix(pl.collab.collaborative, pl.isMember, pl.collab.owner),
                         onClick = { nav.open(Screen.Playlist(pl.id, pl.name)) },
                     ) { m ->
                         if (pl.isLiked) LikedArt(m, 12.dp, 48.dp) else PlaylistArt(nav, pl, m)
@@ -190,6 +202,8 @@ fun PlaylistScreen(nav: Nav, id: Long, name: String) {
                     loaded == null -> {}
                     // someone else's playlist: Save a copy, Remove from my playlists
                     loaded.isLinked -> LinkedPlaylistMenu(nav, id, loaded.name.ifEmpty { name }, loaded.linkedActive, confirmRemove)
+                    // someone else's collaborative playlist: its songs, Members and Leave (no Share, no Rename / Delete)
+                    loaded.isMember -> PlaylistMenu(nav, id, loaded.name.ifEmpty { name }, isLiked = false, onChanged = { loader.retry() }, member = true)
                     else -> {
                         // the playlist's public link (Liked Songs too): made, copied, then the system share sheet
                         IconButton(onClick = {
@@ -203,6 +217,7 @@ fun PlaylistScreen(nav: Nav, id: Long, name: String) {
                         PlaylistMenu(
                             nav, id, name, isLiked = name == "Liked Songs", onChanged = { loader.retry() },
                             shareUrl = loaded.takeIf { it.isShared }?.let { api.url(it.sharePath) },
+                            collaborative = loaded.collab.collaborative,
                         )
                     }
                 }
@@ -230,6 +245,7 @@ fun PlaylistScreen(nav: Nav, id: Long, name: String) {
                         Text(
                             when {
                                 pl.isLinked -> PlaylistLinkRules.kicker(pl.linkedLiked, pl.linkedOwner).uppercase()
+                                pl.isMember -> PlaylistCollabRules.kicker(pl.collab.owner).uppercase()
                                 pl.isLiked -> "LIKED SONGS · SYNCED EVERYWHERE"
                                 else -> "PLAYLIST"
                             },
@@ -252,6 +268,14 @@ fun PlaylistScreen(nav: Nav, id: Long, name: String) {
                                 Row(Modifier.padding(top = 8.dp), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                                     Badge("Shared", "accent")
                                     if (pl.addedBy > 0) Text(PlaylistLinkRules.addedBy(pl.addedBy), style = MaterialTheme.typography.bodySmall, color = p.muted)
+                                }
+                            }
+                            // Collaborative: the owner's count of members, or what a member may do
+                            if (pl.isMember || pl.collab.collaborative) {
+                                Row(Modifier.padding(top = 8.dp), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                                    Badge(PlaylistCollabRules.TOGGLE, "accent")
+                                    val line = if (pl.isMember) PlaylistCollabRules.MEMBER_HINT else PlaylistCollabRules.membersText(pl.collab.members)
+                                    if (line.isNotEmpty()) Text(line, style = MaterialTheme.typography.bodySmall, color = p.muted)
                                 }
                             }
                             // .progress

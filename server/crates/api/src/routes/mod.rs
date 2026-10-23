@@ -9,6 +9,7 @@ pub mod picker;
 pub mod playback;
 pub mod playlists;
 pub mod playlist_links;
+pub mod playlist_collab;
 pub mod plugins;
 pub mod remote;
 pub mod roon;

@@ -194,6 +194,7 @@ async fn delete_user(State(st): State<AppState>, Admin(me): Admin, Path(uid): Pa
     may_manage(&me, &u)?;
     st.db.execute("DELETE FROM sessions WHERE user_id=?", p![uid])?;
     st.db.execute("DELETE FROM users WHERE id=?", p![uid])?;
+    super::playlist_collab::forget_user(&st, uid)?;
     st.db.log("info", &format!("{} deleted user {}", me.s("username"), u.s("username")));
     Ok(Json(json!({ "ok": true })))
 }

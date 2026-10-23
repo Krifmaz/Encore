@@ -67,6 +67,14 @@ fun AddSharedPlaylistDialog(nav: Nav, onDismiss: () -> Unit) {
         busy = true
         scope.launch {
             try {
+                // a collaborative playlist's invite link joins it instead (PlaylistCollabRules)
+                if (PlaylistCollabRules.isInviteLink(text)) {
+                    val (id, name) = withContext(Dispatchers.IO) { nav.features.joinCollab(text) }
+                    Toasts.show(PlaylistCollabRules.JOINED, "ok")
+                    if (id > 0L) nav.open(Screen.Playlist(id, name))
+                    onDismiss()
+                    return@launch
+                }
                 val r = withContext(Dispatchers.IO) { nav.features.addSharedPlaylist(text) }
                 Toasts.show(PlaylistLinkRules.addToast(r.added), "ok")
                 if (r.id > 0L) nav.open(Screen.Playlist(r.id, r.name))

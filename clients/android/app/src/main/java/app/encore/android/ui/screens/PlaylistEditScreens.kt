@@ -50,6 +50,8 @@ import app.encore.android.data.repo.PLAYLIST_SOURCES
 import app.encore.android.data.repo.PlaylistItem
 import app.encore.android.data.repo.PlaylistPage
 import app.encore.android.features.library.AddSharedPlaylistDialog
+import app.encore.android.features.library.CollabMembersDialog
+import app.encore.android.features.library.PlaylistCollabRules
 import app.encore.android.features.library.PlaylistLinkRules
 import app.encore.android.features.library.PlaylistShareRules
 import app.encore.android.features.settings.copyToClipboard
@@ -166,11 +168,35 @@ fun PlaylistsActions(nav: Nav) {
  * [shareUrl] is the public link while the playlist is shared: Copy link and Stop sharing join the menu.
  */
 @Composable
-fun PlaylistMenu(nav: Nav, id: Long, name: String, isLiked: Boolean, onChanged: () -> Unit = {}, shareUrl: String? = null) {
+fun PlaylistMenu(
+    nav: Nav,
+    id: Long,
+    name: String,
+    isLiked: Boolean,
+    onChanged: () -> Unit = {},
+    shareUrl: String? = null,
+    collaborative: Boolean = false,
+    member: Boolean = false,
+) {
     val scope = rememberCoroutineScope()
     val context = LocalContext.current
     val features = nav.features
     var rename by remember { mutableStateOf(false) }
+    var members by remember { mutableStateOf(false) }
+    var confirmLeave by remember { mutableStateOf(false) }
+    // Collaborative (features/library/PlaylistCollabRules): the owner's switch and Invite; a member's Members and Leave
+    val collabEntries = PlaylistCollabRules.menuEntries(isLiked, member, collaborative).map { e ->
+        when (e) {
+            PlaylistCollabRules.Entry.TURN_ON -> MenuEntry(e.label, R.drawable.ic_group) {
+                act(scope, { features.setPlaylistCollaborative(id, true); PlaylistCollabRules.ON }) { onChanged(); members = true }
+            }
+            PlaylistCollabRules.Entry.TURN_OFF -> MenuEntry(e.label, R.drawable.ic_person_off) {
+                act(scope, { features.setPlaylistCollaborative(id, false); PlaylistCollabRules.OFF }, onChanged)
+            }
+            PlaylistCollabRules.Entry.INVITE, PlaylistCollabRules.Entry.MEMBERS -> MenuEntry(e.label, R.drawable.ic_group) { members = true }
+            PlaylistCollabRules.Entry.LEAVE -> MenuEntry(e.label, R.drawable.ic_close, danger = true) { confirmLeave = true }
+        }
+    }
     var confirmDelete by remember { mutableStateOf(false) }
     var confirmStop by remember { mutableStateOf(false) }
     var missingChoice by remember { mutableStateOf(false) }
@@ -178,7 +204,7 @@ fun PlaylistMenu(nav: Nav, id: Long, name: String, isLiked: Boolean, onChanged: 
         entries = listOf(
             MenuEntry("Edit songs", R.drawable.ic_edit) { nav.open(Screen.PlaylistEdit(id)) },
             MenuEntry("Add from link", R.drawable.ic_link) { nav.open(Screen.PlaylistImport(id)) },
-            MenuEntry("Download missing", R.drawable.ic_download) { missingChoice = true },
+            if (!member) MenuEntry("Download missing", R.drawable.ic_download) { missingChoice = true } else null,
             MenuEntry("Remove duplicates", R.drawable.ic_check) {
                 act(scope, { val n = features.dedupePlaylist(id); if (n > 0) "Removed $n duplicate(s)" else "No duplicates" }, onChanged)
             },
@@ -189,11 +215,19 @@ fun PlaylistMenu(nav: Nav, id: Long, name: String, isLiked: Boolean, onChanged: 
                     PlaylistShareRules.ShareEntry.STOP -> MenuEntry(e.label, R.drawable.ic_close, danger = true) { confirmStop = true }
                 }
             }.toTypedArray(),
-            if (!isLiked) MenuSeparator else null,
-            if (!isLiked) MenuEntry("Rename", R.drawable.ic_edit) { rename = true } else null,
-            if (!isLiked) MenuEntry("Delete playlist", R.drawable.ic_delete, danger = true) { confirmDelete = true } else null,
+            if (collabEntries.isNotEmpty()) MenuSeparator else null,
+            *collabEntries.toTypedArray(),
+            if (!isLiked && !member) MenuSeparator else null,
+            if (!isLiked && !member) MenuEntry("Rename", R.drawable.ic_edit) { rename = true } else null,
+            if (!isLiked && !member) MenuEntry("Delete playlist", R.drawable.ic_delete, danger = true) { confirmDelete = true } else null,
         ),
     )
+    if (members) CollabMembersDialog(nav, id, onChanged = onChanged, onLeft = { members = false; nav.back() }) { members = false }
+    if (confirmLeave) {
+        ConfirmDialog(PlaylistCollabRules.LEAVE, PlaylistCollabRules.leaveText(name), "Leave", danger = true, onDismiss = { confirmLeave = false }) {
+            act(scope, { features.deletePlaylist(id); PlaylistCollabRules.LEFT }) { nav.back() }
+        }
+    }
     if (rename) {
         NameDialog("Rename playlist", name, "Save", onDismiss = { rename = false }) { n ->
             if (n.isNotBlank() && n.trim() != name) act(scope, { features.renamePlaylist(id, n.trim()); "Renamed" }, onChanged)

@@ -9,6 +9,7 @@ import app.encore.android.core.obj
 import app.encore.android.core.objects
 import app.encore.android.core.objectsOf
 import app.encore.android.core.str
+import app.encore.android.features.library.PlaylistCollabRules
 import app.encore.android.features.library.PlaylistLinkRules
 import app.encore.android.features.library.PlaylistShareRules
 import app.encore.android.features.library.SurroundRules
@@ -342,10 +343,14 @@ data class Playlist(
     val linkedActive: Boolean = false,
     val linkedLiked: Boolean = false,
     val addedBy: Int = 0,
+    /** Collaborative (features/library/PlaylistCollabRules): on for the owner's, or someone else's the user joined. */
+    val collab: PlaylistCollabRules.Collab = PlaylistCollabRules.Collab(false, "", "", 0),
 ) {
     val isLiked: Boolean get() = kind == "liked"
     val isShared: Boolean get() = sharePath.isNotEmpty()
     val isLinked: Boolean get() = kind == "linked"
+    /** Someone else's collaborative playlist the user joined: its songs are theirs to change, the rest is the owner's. */
+    val isMember: Boolean get() = collab.isMember
 
     companion object {
         fun from(o: JsonObject): Playlist? {
@@ -359,6 +364,7 @@ data class Playlist(
                 linkedActive = linked.active,
                 linkedLiked = linked.liked,
                 addedBy = PlaylistShareRules.addedByOf(o),
+                collab = PlaylistCollabRules.collabOf(o),
             )
         }
     }

@@ -11,6 +11,7 @@ import app.encore.android.data.api.ApiException
 import app.encore.android.data.api.AuthInfo
 import app.encore.android.data.api.EncoreApi
 import app.encore.android.data.api.Track
+import app.encore.android.features.library.PlaylistCollabRules
 import kotlinx.serialization.json.JsonElement
 import kotlinx.serialization.json.JsonNull
 import kotlinx.serialization.json.JsonObject
@@ -567,6 +568,53 @@ class FeaturesApi(private val api: EncoreApi, private val client: OkHttpClient) 
     /** POST /api/playlists/{id}/copy: Save a copy of an added playlist → the copy's id and name. */
     fun copyLinkedPlaylist(id: Long): Pair<Long, String> {
         val o = postObject("/api/playlists/$id/copy")
+        return o.long("id") to o.str("name")
+    }
+
+    // collaborative playlists (features/library/PlaylistCollabRules)
+
+    /** PATCH /api/playlists/{id} {collaborative}: the owner turns Collaborative on or off. */
+    fun setPlaylistCollaborative(id: Long, on: Boolean) {
+        call("PATCH", "/api/playlists/$id", buildJsonObject { put("collaborative", on) })
+    }
+
+    /** GET /api/playlists/{id}/collaborators: `{name, collaborative, role, owner, members, invite_link}`. */
+    fun collaborators(id: Long): JsonObject = getObject("/api/playlists/$id/collaborators")
+
+    /** POST /api/playlists/{id}/collaborators {username}: invite an account on this server (turns Collaborative on). */
+    fun inviteCollaborator(id: Long, username: String) {
+        call("POST", "/api/playlists/$id/collaborators", buildJsonObject { put("username", username) })
+    }
+
+    /** DELETE /api/playlists/{id}/collaborators/{uid}: the owner removes a member or takes an invite back. */
+    fun removeCollaborator(id: Long, userId: Long) {
+        call("DELETE", "/api/playlists/$id/collaborators/$userId", null)
+    }
+
+    /** POST /api/playlists/{id}/invite-link: the invite link (the same one again; turns Collaborative on). */
+    fun makeInviteLink(id: Long) {
+        postObject("/api/playlists/$id/invite-link")
+    }
+
+    /** DELETE /api/playlists/{id}/invite-link: the link stops working; members stay. */
+    fun dropInviteLink(id: Long) {
+        call("DELETE", "/api/playlists/$id/invite-link", null)
+    }
+
+    /** GET /api/collab/invites: the invites waiting for the user. */
+    fun collabInvites(): List<PlaylistCollabRules.Invite> = call("GET", "/api/collab/invites", null).objects().map { PlaylistCollabRules.Invite.from(it) }
+
+    fun acceptCollabInvite(playlistId: Long) {
+        postObject("/api/collab/invites/$playlistId/accept")
+    }
+
+    fun declineCollabInvite(playlistId: Long) {
+        postObject("/api/collab/invites/$playlistId/decline")
+    }
+
+    /** POST /api/collab/join {link}: join with an invite link → the playlist's id and name. */
+    fun joinCollab(link: String): Pair<Long, String> {
+        val o = call("POST", "/api/collab/join", buildJsonObject { put("link", link) }) as? JsonObject ?: JsonObject(emptyMap())
         return o.long("id") to o.str("name")
     }
 
