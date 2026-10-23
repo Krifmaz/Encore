@@ -388,6 +388,26 @@ class PlayerConnection(private val context: Context, private val api: EncoreApi)
         }
     }
 
+    /**
+     * Play songs from the listener's own folders (features/localfolders) here: each one the library has as that
+     * song (its plays and likes count, and the resolver plays the file), the others as their files. They stay on
+     * this phone: not sent to a linked device or a group listen.
+     */
+    fun playLocal(items: List<MediaItem>, startIndex: Int = 0, shuffle: Boolean = false) {
+        if (items.isEmpty() || notWhileLinked()) return
+        if (GroupListen.inGroup) {
+            Toasts.show("Songs from this phone's folders don't play in a group listen", "info")
+            return
+        }
+        val list = if (shuffle) items.shuffled() else items
+        val start = if (shuffle) 0 else startIndex.coerceIn(0, list.size - 1)
+        withController { c ->
+            c.setMediaItems(list, start, 0L)
+            c.prepare()
+            c.play()
+        }
+    }
+
     /** Play `tracks` from `index` at `positionMs` (picking up another device's spot). */
     fun playFrom(tracks: List<Track>, index: Int, positionMs: Long) {
         if (tracks.isEmpty()) return

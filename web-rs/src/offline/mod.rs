@@ -8,6 +8,7 @@
 //! "Download for offline" menu entries are in pages/downloads.rs.
 
 pub mod download;
+pub mod folders;
 pub mod mode;
 pub mod outbox;
 pub mod store;

@@ -44,6 +44,7 @@ import app.encore.android.data.prefs.Quality
 import app.encore.android.features.group.GroupListen
 import app.encore.android.features.group.GroupSync
 import app.encore.android.features.offline.OfflineMode
+import app.encore.android.features.localfolders.LocalFolders
 import app.encore.android.features.offline.OfflineStore
 import app.encore.android.playback.output.EffectsAudioProcessor
 import app.encore.android.playback.output.EffectsChain
@@ -151,7 +152,12 @@ class EncorePlaybackService : MediaLibraryService() {
         resolver = StreamResolver(graph.api, estimator)
         // "Play downloaded songs from this device" (Settings → This device → Downloads, on by default); without a
         // server to ask a copy always plays
-        resolver.localCopy = { id -> if (offline.preferLocal.value || OfflineMode.noServer()) offline.localUri(id) else null }
+        // a song in one of the listener's own folders (features/localfolders) always plays from that file
+        val folders = LocalFolders.of(this)
+        resolver.localCopy = { id ->
+            folders.uriFor(graph.api.base, id)
+                ?: if (offline.preferLocal.value || OfflineMode.noServer()) offline.localUri(id) else null
+        }
         // offline mode and the outbox also when only the car is in use (MainActivity never opens)
         OfflineMode.start(this)
         // Cadenza on this phone + bit-perfect USB: the device's own settings (PrefsRepository.phone)

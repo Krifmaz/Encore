@@ -8,7 +8,7 @@
 use crate::app::{Ctx, PageFuture};
 use crate::dom::{self, set_html};
 use crate::json::J;
-use crate::offline::{self, mode, outbox, Progress, Record, Summary};
+use crate::offline::{self, folders, mode, outbox, Progress, Record, Summary};
 use crate::ui::{self, confirm_dialog, empty_state, esc, fmt, icon, pop_menu, toast, MenuItem};
 use crate::player;
 use serde_json::{json, Value};
@@ -452,6 +452,103 @@ impl Page {
     }
 }
 
+// ---- Your folders ------------------------------------------------------------------------------------------
+
+/// Most folder songs the page lists (Play and Shuffle take them all).
+const FOLDER_SONGS_SHOWN: usize = 300;
+
+/// "1,204 songs · 980 already in your library, played from these files" and what runs now.
+pub fn folders_summary(not_in_library: usize, in_library: usize, scanning: Option<usize>, matching: bool) -> String {
+    if let Some(n) = scanning { return format!("Looking for music… {n} file(s) so far"); }
+    let total = not_in_library + in_library;
+    if total == 0 { return "No music found in these folders yet.".into(); }
+    let mut out = songs(total);
+    if in_library > 0 { out.push_str(&format!(" · {in_library} already in your library, played from these files")); }
+    if matching { out.push_str(" · comparing with your library…"); }
+    out
+}
+
+/// The section: the folders, their buttons and the songs the library does not have. `shown` keeps the
+/// queue rows of every folder song (the library's row for the ones it has) for Play, Shuffle and the rows.
+fn paint_folders(el: &Element, shown: &Rc<RefCell<Vec<Value>>>) {
+    if !folders::supported() {
+        set_html(el, &format!(r#"<h2>Your folders</h2><p class="small muted">{}</p>"#, esc(folders::UNSUPPORTED)));
+        return;
+    }
+    let list = folders::folders();
+    let all = folders::songs();
+    let matched = folders::matches();
+    let rest: Vec<&folders::Song> = all.iter().filter(|s| !matched.contains_key(&s.key)).collect();
+    *shown.borrow_mut() = all.iter().map(|s| folders::row_of(s, &matched)).collect();
+    let has = !all.is_empty();
+    let folder_rows: String = list.iter().map(|f| format!(
+        r#"<div class="row between" style="gap:8px"><span class="ellipsis">{ic} {name}</span><button class="btn sm ghost icon" data-lf-remove="{name}" aria-label="Remove this folder (its files stay)" title="Remove this folder (its files stay)">{x}</button></div>"#,
+        ic = icon("library"), name = esc(f), x = icon("x"))).collect();
+    let songs_html: String = rest.iter().take(FOLDER_SONGS_SHOWN).map(|s| format!(
+        r#"<tr data-lf-key="{key}" data-id="{id}"><td class="num"><span class="n">{n}</span><span class="rowplay" aria-hidden="true">{play}</span></td>
+        <td><div class="ellipsis" style="font-weight:600">{title}</div><div class="small muted ellipsis">{sub}</div></td>
+        <td class="hide-sm"><span class="badge">{q}</span></td><td class="muted">{dur}</td></tr>"#,
+        key = esc(&s.key), id = s.local_id(), n = if s.track > 0 { s.track.to_string() } else { "–".into() }, play = icon("play"),
+        title = esc(&s.title), sub = esc(&[s.artist.as_str(), s.album.as_str()].iter().filter(|x| !x.is_empty()).copied().collect::<Vec<_>>().join(" · ")),
+        q = esc(&s.quality), dur = if s.duration > 0.0 { fmt::dur(s.duration) } else { String::new() })).collect();
+    let more = if rest.len() > FOLDER_SONGS_SHOWN { format!(r#"<p class="small muted">and {} more – Play and Shuffle play them too</p>"#, rest.len() - FOLDER_SONGS_SHOWN) } else { String::new() };
+    let body = if list.is_empty() {
+        empty_state(&icon("library"), "No folders yet", "Add a folder of music on this computer to play it here. Songs your library already has play from your files; nothing is uploaded.")
+    } else {
+        format!(r#"{folder_rows}<p class="small muted" id="lf-sum">{sum}</p><button class="btn sm" id="lf-allow" hidden>Allow access</button>
+        <div class="table-wrap"><table class="table tracklist"><tbody>{songs_html}</tbody></table></div>{more}"#,
+            sum = esc(&folders_summary(rest.len(), all.len() - rest.len(), folders::scanning(), folders::matching())))
+    };
+    set_html(el, &format!(r#"<div class="row between wrap" style="gap:8px"><h2>Your folders</h2><div class="row wrap">
+      <button class="btn sm primary" data-lf-play{dis}>{play}Play</button>
+      <button class="btn sm" data-lf-shuffle{dis}>{shuffle}Shuffle</button>
+      <button class="btn sm" data-lf-scan{scan_dis}>{refresh}Scan again</button>
+      <button class="btn sm" data-lf-add>{plus}Add folder…</button></div></div>{body}"#,
+        dis = if has { "" } else { " disabled" }, scan_dis = if list.is_empty() || folders::scanning().is_some() { " disabled" } else { "" },
+        play = icon("play"), shuffle = icon("shuffle"), refresh = icon("refresh"), plus = icon("plus")));
+    highlight_folders(el, player::current());
+    let el2 = el.clone();
+    dom::spawn(async move {
+        let ask = folders::needs_permission().await;
+        if let Some(b) = dom::qs_in(&el2, "#lf-allow") { dom::hide(&b, !ask); }
+    });
+}
+
+fn highlight_folders(el: &Element, cur: Option<Value>) {
+    let id = cur.and_then(|c| c.g("id").as_i64());
+    for tr in dom::qsa_in(el, "tr[data-id]") {
+        dom::toggle_class(&tr, "playing", id.is_some_and(|id| dom::data(&tr, "id") == id.to_string()));
+    }
+}
+
+fn folders_click(e: &web_sys::Event, shown: &Rc<RefCell<Vec<Value>>>) {
+    let rows = shown.borrow().clone();
+    if dom::closest(e, "[data-lf-add]").is_some() {
+        dom::spawn(async move { if let Err(m) = folders::add_folder().await { toast(&m, "err"); } });
+    } else if dom::closest(e, "#lf-allow").is_some() {
+        dom::spawn(folders::ask_permission());
+    } else if dom::closest(e, "[data-lf-scan]").is_some() {
+        dom::spawn(folders::scan());
+    } else if let Some(b) = dom::closest(e, "[data-lf-remove]") {
+        let name = dom::data(&b, "lfRemove");
+        dom::spawn(async move { folders::remove_folder(&name).await; toast("Folder removed. Its files stay where they are.", "ok"); });
+    } else if dom::closest(e, "[data-lf-play]").is_some() {
+        if !rows.is_empty() { player::play_queue(rows, 0, "list"); }
+    } else if dom::closest(e, "[data-lf-shuffle]").is_some() {
+        let mut rows = rows;
+        for i in (1..rows.len()).rev() {
+            let j = (js_sys::Math::random() * (i as f64 + 1.0)).floor() as usize;
+            rows.swap(i, j.min(i));
+        }
+        if !rows.is_empty() { player::play_queue(rows, 0, "list"); }
+    } else if let Some(tr) = dom::closest(e, "tr[data-id]") {
+        let id: i64 = dom::data(&tr, "id").parse().unwrap_or(0);
+        let rest: Vec<Value> = rows.into_iter().filter(|r| r.truthy("local")).collect();
+        let at = rest.iter().position(|r| r.i("id") == id).unwrap_or(0);
+        player::play_queue(rest, at, "list");
+    }
+}
+
 fn shuffled(mut v: Vec<Record>) -> Vec<Record> {
     for i in (1..v.len()).rev() {
         let j = (js_sys::Math::random() * (i as f64 + 1.0)).floor() as usize;
@@ -483,6 +580,7 @@ pub fn render(view: Element, ctx: Ctx) -> PageFuture {
     <div class="dl-note" id="dl-ios" hidden>{phone}<span>{ios}</span></div>
     <div class="dl-note" id="dl-outbox" hidden></div>
     <div class="search dl-search" id="dl-search" hidden>{search}<input class="input" id="dl-q" type="search" placeholder="Search downloads" autocomplete="off" aria-label="Search downloads"></div>
+    <section class="card lf" id="lf"></section>
     <div id="dl-list"><div class="skeleton" style="height:120px"></div></div>"#,
             play = icon("play"), shuffle = icon("shuffle"), trash = icon("trash"), refused = esc(PERSIST_REFUSED),
             phone = icon("download"), ios = esc(IOS_HINT), search = icon("search")));
@@ -496,6 +594,16 @@ pub fn render(view: Element, ctx: Ctx) -> PageFuture {
         if let Some(el) = dom::qs_in(&view, "#dl-ios") { dom::hide(&el, !ios_hint_here()); }
         if !mode::can_play() {
             for id in ["#dl-play", "#dl-shuffle"] { if let Some(b) = dom::qs_in(&view, id) { mode::mark_disabled(&b); } }
+        }
+
+        // Your folders (offline/folders.rs): painted now and whenever the folders, their songs or the answers change
+        if let Some(lf) = dom::qs_in(&view, "#lf") {
+            let shown: Rc<RefCell<Vec<Value>>> = Rc::default();
+            paint_folders(&lf, &shown);
+            { let (lf2, s2) = (lf.clone(), shown.clone()); ctx.on_leave(dom::listener(&dom::window(), folders::CHANGED_EVENT, move |_| paint_folders(&lf2, &s2))); }
+            { let lf2 = lf.clone(); ctx.on_leave(player::on_change(move |cur| highlight_folders(&lf2, cur))); }
+            { let s2 = shown.clone(); ctx.on_leave(dom::listener(&lf, "click", move |e| folders_click(e, &s2))); }
+            dom::spawn(folders::ensure_scanned());
         }
 
         // the saved songs or the outbox changed
@@ -568,6 +676,14 @@ mod tests {
     fn rec(id: i64, album: &str, album_id: &str, artist: &str, track: i64, saved_at: i64) -> Record {
         Record { id, title: format!("Song {id}"), artist: artist.into(), album: album.into(), album_id: album_id.into(), ext: "flac".into(), bytes: 1000,
             quality: "FLAC 16/44.1".into(), saved_at, track, ..Default::default() }
+    }
+
+    #[test]
+    fn the_folder_summary_says_what_is_in_the_library() {
+        assert_eq!(folders_summary(0, 0, None, false), "No music found in these folders yet.");
+        assert_eq!(folders_summary(3, 0, None, false), "3 songs");
+        assert_eq!(folders_summary(3, 2, None, true), "5 songs · 2 already in your library, played from these files · comparing with your library…");
+        assert_eq!(folders_summary(0, 0, Some(40), false), "Looking for music… 40 file(s) so far");
     }
 
     #[test]

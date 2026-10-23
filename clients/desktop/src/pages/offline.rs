@@ -3,7 +3,12 @@
 //! and its words. Reachable from the sign-in page when the server
 //! can't be reached (then it has its own Retry, Change server and player, since the app shows no
 //! sidebar or player bar there) and from Settings → This computer.
+//!
+//! Signed in, the page also holds *Your folders* (desktop/local.rs): music folders on this computer,
+//! scanned here and matched against the library. Songs the library has play from these files
+//! wherever they appear; the rest are listed here.
 
+use crate::desktop::local::{self, LocalSong};
 use crate::desktop::offline::{self, Song};
 use crate::engine::PlayState;
 use crate::fmt;
@@ -28,7 +33,15 @@ pub struct State {
     confirm: bool,
     /// The signed-out player's seek bar while it is held.
     drag: Option<f64>,
+    /// The songs in the local folders the library does not have, and how many it has.
+    local: Vec<LocalSong>,
+    local_in_library: usize,
+    /// The local store's revision the list was read at.
+    local_revision: u64,
 }
+
+/// Most local songs the page lists (Play all and Shuffle take them all).
+const LOCAL_SHOWN: usize = 300;
 
 #[derive(Clone, Debug)]
 pub enum Message {
@@ -50,6 +63,16 @@ pub enum Message {
     /// Signed out: its seek bar held at a place, and let go.
     Seek(f64),
     SeekDone,
+    /// Your folders: add one (the folder picker), its answer, remove one, scan again.
+    AddFolder,
+    FolderPicked(Option<String>),
+    RemoveFolder(usize),
+    Rescan,
+    /// The server said which local songs the library has (how many).
+    Matched(Result<usize, String>),
+    PlayLocal(usize),
+    PlayAllLocal,
+    ShuffleLocal,
 }
 
 /// The songs, newest first.
@@ -60,11 +83,34 @@ fn load(state: &mut State) {
     state.songs = songs;
 }
 
+/// The local songs the library does not have (the others show in the library).
+fn load_local(state: &mut State, base: &str) {
+    state.local_revision = local::revision();
+    let matched = local::matches(base);
+    let (inlib, rest): (Vec<LocalSong>, Vec<LocalSong>) =
+        local::list().into_iter().partition(|s| matched.contains_key(&s.path));
+    state.local_in_library = inlib.len();
+    state.local = rest;
+}
+
+/// Ask the server which local songs it has, when its answers are older than the scan.
+fn match_if_needed(ctx: &Ctx) -> Task<Message> {
+    if !ctx.session.signed_in() || !local::needs_match(&ctx.base()) {
+        return Task::none();
+    }
+    let api = ctx.api.clone();
+    Task::perform(local::match_with(api), Message::Matched)
+}
+
 /// Called when the app navigates here (with the route's parameters).
-pub fn open(state: &mut State, _ctx: &mut Ctx) -> Task<Message> {
+pub fn open(state: &mut State, ctx: &mut Ctx) -> Task<Message> {
     state.confirm = false;
     load(state);
-    Task::none()
+    load_local(state, &ctx.base());
+    if local::list().is_empty() && !ctx.config.local_folders.is_empty() {
+        local::scan(ctx.config.local_folders.clone());
+    }
+    match_if_needed(ctx)
 }
 
 /// A random order (xorshift seeded by the clock; good enough for a shuffle).
@@ -87,6 +133,69 @@ pub fn update(state: &mut State, msg: Message, ctx: &mut Ctx) -> Task<Message> {
         Message::Poll => {
             if offline::revision() != state.revision {
                 load(state);
+            }
+            if local::revision() != state.local_revision {
+                load_local(state, &ctx.base());
+            }
+            return match_if_needed(ctx);
+        }
+        Message::AddFolder => {
+            return Task::perform(
+                async {
+                    rfd::AsyncFileDialog::new()
+                        .set_title("Add a music folder")
+                        .pick_folder()
+                        .await
+                        .map(|f| f.path().to_string_lossy().into_owned())
+                },
+                Message::FolderPicked,
+            );
+        }
+        Message::FolderPicked(Some(f)) => {
+            if ctx.config.local_folders.contains(&f) {
+                ctx.toast("That folder is already on the list");
+            } else {
+                let mut folders = ctx.config.local_folders.clone();
+                folders.push(f);
+                ctx.edit_config({
+                    let folders = folders.clone();
+                    move |c| c.local_folders = folders
+                });
+                local::scan(folders);
+                ctx.toast_ok("Folder added – looking for music…");
+            }
+        }
+        Message::FolderPicked(None) => {}
+        Message::RemoveFolder(i) => {
+            let mut folders = ctx.config.local_folders.clone();
+            if i < folders.len() {
+                folders.remove(i);
+                ctx.edit_config({
+                    let folders = folders.clone();
+                    move |c| c.local_folders = folders
+                });
+                local::scan(folders);
+                ctx.toast_ok("Folder removed. Its files stay where they are.");
+            }
+        }
+        Message::Rescan => local::scan(ctx.config.local_folders.clone()),
+        Message::Matched(Err(e)) => ctx.toast_err(format!("Couldn't compare your folders with the library: {e}")),
+        Message::Matched(Ok(_)) => load_local(state, &ctx.base()),
+        Message::PlayLocal(i) => {
+            if let Err(e) = local::play(&ctx.base(), &state.local, i) {
+                ctx.toast_err(e);
+            }
+        }
+        Message::PlayAllLocal => {
+            if let Err(e) = local::play(&ctx.base(), &state.local, 0) {
+                ctx.toast_err(e);
+            }
+        }
+        Message::ShuffleLocal => {
+            let mut list = state.local.clone();
+            shuffle(&mut list);
+            if let Err(e) = local::play(&ctx.base(), &list, 0) {
+                ctx.toast_err(e);
             }
         }
         Message::Play(i) => {
@@ -318,7 +427,7 @@ pub fn view<'a>(state: &'a State, ctx: &Ctx<'a>) -> El<'a, Message> {
     ];
     page = page.push(widgets::page_head(
         if signed_in {
-            "Offline music"
+            "On this device"
         } else {
             "Offline"
         },
@@ -350,6 +459,12 @@ pub fn view<'a>(state: &'a State, ctx: &Ctx<'a>) -> El<'a, Message> {
             )
             .width(Length::Fill),
         );
+    }
+    if signed_in {
+        page = page.push(folders_view(state, ctx));
+        if !state.songs.is_empty() || offline::progress().is_some() {
+            page = page.push(widgets::section_head("Saved for offline", None));
+        }
     }
     if has {
         // Songs without a cover get a plain square, so the rows line up.
@@ -414,6 +529,114 @@ pub fn view<'a>(state: &'a State, ctx: &Ctx<'a>) -> El<'a, Message> {
     page.into()
 }
 
+/// Whether the engine plays this local file now.
+fn is_playing_file(path: &str, ctx: &Ctx) -> bool {
+    ctx.player.track().is_some_and(|t| match &t.source {
+        Source::Path { path: p } => p.as_os_str() == std::ffi::OsStr::new(path),
+        _ => false,
+    })
+}
+
+/// "1,204 songs · 980 already in your library" and what runs now.
+pub fn local_summary(not_in_library: usize, in_library: usize, scanning: Option<u64>, matching: bool) -> String {
+    if let Some(n) = scanning {
+        return format!("Looking for music… {n} file(s) so far");
+    }
+    let total = not_in_library + in_library;
+    if total == 0 {
+        return "No music found in these folders yet.".into();
+    }
+    let mut out = format!("{total} song(s)");
+    if in_library > 0 {
+        out.push_str(&format!(" · {in_library} already in your library, played from these files"));
+    }
+    if matching {
+        out.push_str(" · comparing with your library…");
+    }
+    out
+}
+
+/// Your folders: the folder list, its buttons and the songs the library does not have.
+fn folders_view<'a>(state: &'a State, ctx: &Ctx<'a>) -> El<'a, Message> {
+    let folders = &ctx.config.local_folders;
+    let has = !state.local.is_empty();
+    let busy = local::scanning().is_some();
+    let head = widgets::section_head(
+        "Your folders",
+        Some(
+            row![
+                btn_icon(Icon::Play, "Play all", Btn::Primary, has.then_some(Message::PlayAllLocal)),
+                btn_icon(Icon::Shuffle, "Shuffle", Btn::Default, has.then_some(Message::ShuffleLocal)),
+                btn_icon(
+                    Icon::Refresh,
+                    "Scan again",
+                    Btn::Default,
+                    (!folders.is_empty() && !busy).then_some(Message::Rescan)
+                ),
+                btn_icon(Icon::Plus, "Add folder…", Btn::Default, Some(Message::AddFolder)),
+            ]
+            .spacing(8)
+            .into(),
+        ),
+    );
+    let mut col = column![head].spacing(12);
+    if folders.is_empty() {
+        col = col.push(empty(
+            Icon::Library,
+            "No folders yet",
+            "Add a folder of music on this computer to play it here. Songs your library already has play from your files; nothing is uploaded.",
+        ));
+        return col.into();
+    }
+    let mut list = column![].spacing(4);
+    for (i, f) in folders.iter().enumerate() {
+        list = list.push(
+            row![
+                t(f.clone()).size(13).width(Length::Fill),
+                icon_btn(Icon::X, "Remove this folder (its files stay)", Some(Message::RemoveFolder(i))),
+            ]
+            .spacing(8)
+            .align_y(Alignment::Center),
+        );
+    }
+    col = col.push(card(list).width(Length::Fill));
+    col = col.push(small_muted(local_summary(
+        state.local.len(),
+        state.local_in_library,
+        local::scanning(),
+        local::matching(),
+    )));
+    if has {
+        let blank = blank(ctx.look.panel2);
+        let mut rows = column![];
+        for (i, s) in state.local.iter().enumerate().take(LOCAL_SHOWN) {
+            let art = if s.art.is_empty() {
+                blank.clone()
+            } else {
+                image::Handle::from_path(&s.art)
+            };
+            rows = rows.push(
+                TrackRow::new(s.title.clone())
+                    .sub(s.sub())
+                    .cover(Some(art))
+                    .quality(s.quality.clone())
+                    .duration((s.duration > 0.0).then_some(s.duration))
+                    .playing(is_playing_file(&s.path, ctx))
+                    .on_play(Message::PlayLocal(i))
+                    .view(),
+            );
+        }
+        col = col.push(card_flat(rows).width(Length::Fill));
+        if state.local.len() > LOCAL_SHOWN {
+            col = col.push(small_muted(format!(
+                "and {} more – Play all and Shuffle play them too",
+                state.local.len() - LOCAL_SHOWN
+            )));
+        }
+    }
+    col.into()
+}
+
 /// A modal or ⋯ menu to lay over the whole window, when one is open.
 pub fn overlay<'a>(state: &'a State, _ctx: &Ctx<'a>) -> Option<El<'a, Message>> {
     state.confirm.then(|| {
@@ -447,6 +670,17 @@ mod tests {
             summary(&[s.clone(), s]),
             "2 song(s) saved on this computer · 60.0 MB"
         );
+    }
+
+    #[test]
+    fn the_folder_summary_says_what_is_in_the_library() {
+        assert_eq!(local_summary(0, 0, None, false), "No music found in these folders yet.");
+        assert_eq!(local_summary(3, 0, None, false), "3 song(s)");
+        assert_eq!(
+            local_summary(3, 2, None, true),
+            "5 song(s) · 2 already in your library, played from these files · comparing with your library…"
+        );
+        assert_eq!(local_summary(0, 0, Some(40), false), "Looking for music… 40 file(s) so far");
     }
 
     #[test]

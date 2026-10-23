@@ -131,6 +131,7 @@ pub fn view(app: &App) -> El<'_, Message> {
     nav = nav.push(nav_button(app, Page::Search { q: String::new() }, Icon::Search, "Discover", None));
     nav = nav.push(nav_button(app, Page::ForYou, Icon::Spark, "For you", None));
     nav = nav.push(nav_button(app, Page::library(""), Icon::Library, "Library", None));
+    nav = nav.push(nav_button(app, Page::Offline, Icon::Devices, "On this device", None));
     nav = nav.push(nav_button(app, Page::Requests, Icon::Inbox, "Requests", admin.then_some(app.shell.pending)));
     nav = nav.push(nav_button(app, Page::Playlists, Icon::List, "Playlists", None));
     nav = nav.push(nav_button(app, Page::Download, Icon::Download, "Downloader", None));

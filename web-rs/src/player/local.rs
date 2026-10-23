@@ -8,7 +8,7 @@
 //! as soon as it answers again. Covers and lyrics fall back to the saved ones.
 
 use super::*;
-use crate::offline::{self, mode, outbox};
+use crate::offline::{self, folders, mode, outbox};
 
 /// An answer that means the server could not be reached: no connection, or a proxy in front saying it is down.
 pub(super) use crate::offline::mode::unreachable;
@@ -53,8 +53,11 @@ pub(super) fn no_server() -> bool { mode::active() || !dom::window().navigator()
 /// Does this song play from its saved copy? Library songs saved here; in offline mode only while the grace
 /// lasts (after 30 days without the server the downloads wait for a new sign-in).
 pub(super) fn use_local(t: &Value) -> bool {
-    if t.truthy("preview") || !t.g("id").is_number() || !offline::available() { return false; }
+    if t.truthy("preview") || !t.g("id").is_number() { return false; }
     let id = t.i("id");
+    // a file in one of the listener's own folders (offline/folders.rs) always plays from that file
+    if folders::has(id) && !BROKEN.with(|b| b.borrow().contains(&id)) { return true; }
+    if !offline::available() { return false; }
     if BROKEN.with(|b| b.borrow().contains(&id)) || !offline::has(id) { return false; }
     if mode::active() { return mode::can_play(); }
     no_server() || prefer_local()
@@ -78,7 +81,8 @@ pub(super) fn prepare(id: i64, then: impl FnOnce() + 'static) {
     });
     if !first { return; }
     dom::spawn(async move {
-        match offline::audio_url(id).await {
+        let url = if folders::has(id) { folders::audio_url(id).await } else { offline::audio_url(id).await };
+        match url {
             Some(u) => {
                 let old = URLS.with(|m| m.borrow_mut().insert(id, u));
                 if let Some(old) = old { let _ = web_sys::Url::revoke_object_url(&old); }
@@ -116,6 +120,7 @@ pub(super) fn copy_failed(t: &Value) {
 /// What the player shows for a song playing from its saved copy: the record's quality ("FLAC 16/44.1",
 /// "AAC 256k (converted)"), or the file format when the record has none.
 pub(super) fn copy_quality(t: &Value) -> String {
+    if let Some(q) = folders::quality(t.i("id")).filter(|q| !q.is_empty()) { return q; }
     let q = offline::record(t.i("id")).map(|r| r.quality).unwrap_or_default();
     if q.trim().is_empty() { t.s("format").to_uppercase() } else { q }
 }

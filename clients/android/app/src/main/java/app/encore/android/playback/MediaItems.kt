@@ -41,6 +41,46 @@ object MediaItems {
     /** the song's loudness for volume normalization: [track, album, track_peak, album_peak] in dB / linear, NaN = unknown */
     const val EXTRA_GAIN = "gain"
 
+    /** A song from a folder on this phone (features/localfolders): `local:<content uri>`, played from that file. */
+    const val LOCAL_PREFIX = "local:"
+
+    fun isLocal(mediaId: String): Boolean = mediaId.startsWith(LOCAL_PREFIX)
+
+    /** A song from a local folder the library does not have: its file, with its own tags. */
+    fun local(song: app.encore.android.features.localfolders.LocalSong): MediaItem {
+        val t = song.asTrack()
+        val extras = Bundle().apply {
+            putLong(EXTRA_TRACK_ID, t.id)
+            putString(EXTRA_FORMAT, t.format)
+            putDouble(EXTRA_DURATION, t.durationSec)
+            putString(EXTRA_ALBUM_ARTIST, t.albumArtist)
+            putInt(EXTRA_BITRATE, t.bitrate)
+            putString(EXTRA_YEAR, t.year)
+            if (t.sampleRate > 0) putInt(EXTRA_SAMPLE_RATE, t.sampleRate)
+            if (t.bitDepth > 0) putInt(EXTRA_BIT_DEPTH, t.bitDepth)
+            putString(EXTRA_TITLE, t.title)
+            putString(EXTRA_ARTIST, t.artist)
+            putString(EXTRA_ALBUM, t.album)
+        }
+        val md = MediaMetadata.Builder()
+            .setTitle(t.title)
+            .setArtist(t.artist)
+            .setAlbumTitle(t.album)
+            .setAlbumArtist(t.albumArtist)
+            .setTrackNumber(if (t.trackNo > 0) t.trackNo else null)
+            .setDiscNumber(if (t.disc > 0) t.disc else null)
+            .setDurationMs(if (t.durationSec > 0) (t.durationSec * 1000).toLong() else null)
+            .setIsBrowsable(false)
+            .setIsPlayable(true)
+            .setMediaType(MediaMetadata.MEDIA_TYPE_MUSIC)
+            .setExtras(extras)
+        return MediaItem.Builder()
+            .setMediaId(LOCAL_PREFIX + song.uri)
+            .setUri(song.uri)
+            .setMediaMetadata(md.build())
+            .build()
+    }
+
     fun trackId(mediaId: String): Long? =
         if (mediaId.startsWith("track:")) mediaId.removePrefix("track:").substringBefore("|").toLongOrNull() else null
 
@@ -103,6 +143,7 @@ object MediaItems {
      */
     fun withUri(api: EncoreApi, item: MediaItem): MediaItem? {
         if (item.localConfiguration != null) return item
+        if (isLocal(item.mediaId)) return item.buildUpon().setUri(item.mediaId.removePrefix(LOCAL_PREFIX)).build()
         val id = trackId(item.mediaId) ?: return null
         if (item.mediaMetadata.extras?.getString(EXTRA_FORMAT) == null) return null
         return item.buildUpon().setUri(api.streamUrl(id, "")).build()
@@ -110,7 +151,7 @@ object MediaItems {
 
     /** The song as a Track again (queue snapshots, resumption). */
     fun toTrack(item: MediaItem): Track? {
-        val id = trackId(item.mediaId) ?: return null
+        val id = trackId(item.mediaId) ?: item.mediaMetadata.extras?.getLong(EXTRA_TRACK_ID)?.takeIf { isLocal(item.mediaId) && it < 0 } ?: return null
         val m = item.mediaMetadata
         val x = m.extras
         val tr = x?.getStringArrayList(EXTRA_TR)?.takeIf { it.size == 6 }

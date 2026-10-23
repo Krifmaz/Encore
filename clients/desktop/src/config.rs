@@ -58,6 +58,8 @@ pub struct Config {
     /// library sort per tab), `encore.hideSkipped`, `encore.artistFilter`, `encore.albumMode`
     /// (the Downloader), `encore.bugFilter`.
     pub local: BTreeMap<String, Value>,
+    /// The listener's own music folders on this computer (On this device; desktop/local.rs).
+    pub local_folders: Vec<String>,
 }
 
 impl Default for Config {
@@ -76,6 +78,7 @@ impl Default for Config {
             repeat: "off".into(),
             shuffle: false,
             local: BTreeMap::new(),
+            local_folders: Vec::new(),
         }
     }
 }

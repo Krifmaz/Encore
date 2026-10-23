@@ -18,6 +18,7 @@ pub mod autostart;
 pub mod hotkeys;
 pub mod media;
 pub mod mini;
+pub mod local;
 pub mod offline;
 pub mod single;
 pub mod tray;
