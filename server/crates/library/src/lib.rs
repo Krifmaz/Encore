@@ -27,6 +27,7 @@ pub mod organize;
 pub mod scan;
 pub mod search;
 pub mod sections;
+pub mod split;
 pub mod surround;
 pub mod tagger;
 pub mod translate;

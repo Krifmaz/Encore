@@ -10,9 +10,10 @@
 //! - the same album artist and title once folded ([`artist_key`], [`crate::catalog::title_key`]: accents,
 //!   "the", "feat." and edition notes like "(Deluxe Edition)" or " - EP" left out), when the release types the
 //!   tags give don't disagree. An album without a release group goes into the one MusicBrainz album of that
-//!   name; with two MusicBrainz albums of that name (a self-titled album and single) it is left alone.
+//!   name; with two MusicBrainz albums of that name (a self-titled album and single) it is left alone. Albums
+//!   without a song in common are never the same release (Weezer's self-titled albums: [`crate::split`]).
 use encore_db::{now, p, Conn, Row, RowExt};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 /// One library album as the merge sees it.
 #[derive(Clone, Debug)]
@@ -27,6 +28,8 @@ pub struct Album {
     pub tracks: i64,
     /// its first song's row id: the older album wins a tie
     pub first: i64,
+    /// its songs' titles ([`crate::catalog::title_key`]); none known: any album
+    pub songs: HashSet<String>,
 }
 
 /// The artist part of the key: the folded name without "the" and without featured artists.
@@ -42,6 +45,12 @@ fn kind_of(releasetype: &str) -> String {
 
 fn kinds_agree(a: &Album, b: &Album) -> bool {
     a.kind.is_empty() || b.kind.is_empty() || a.kind == b.kind
+}
+
+/// Copies of one release have songs in common: two albums of one name without any (Weezer's Blue and Green
+/// albums, [`crate::split`]) are two albums.
+fn share_a_song(a: &Album, b: &Album) -> bool {
+    a.songs.is_empty() || b.songs.is_empty() || !a.songs.is_disjoint(&b.songs)
 }
 
 /// The best album of a group: one from MusicBrainz, then the most songs, then the oldest.
@@ -90,7 +99,7 @@ pub fn plan(albums: &[Album]) -> Vec<(String, String)> {
             _ => continue,
         };
         for a in other {
-            if a.id != to.id && kinds_agree(a, to) {
+            if a.id != to.id && kinds_agree(a, to) && share_a_song(a, to) {
                 out.push((a.id.clone(), to.id.clone()));
             }
         }
@@ -110,9 +119,14 @@ pub fn albums(c: &Conn) -> rusqlite::Result<Vec<Album>> {
     for r in &rgs {
         rg_of.entry(r.s("album_id")).or_insert_with(|| r.s("rg"));
     }
+    let mut songs_of: HashMap<String, HashSet<String>> = HashMap::new();
+    for r in c.query("SELECT DISTINCT album_id, title FROM tracks WHERE album_id IS NOT NULL AND COALESCE(title,'') != ''", p![])? {
+        songs_of.entry(r.s("album_id")).or_default().insert(crate::catalog::title_key(&r.s("title")));
+    }
     Ok(rows.iter().map(|r: &Row| Album {
         id: r.s("album_id"), artist: r.s("artist"), title: r.s("album"), rg: rg_of.get(&r.s("album_id")).cloned().unwrap_or_default(),
         kind: kind_of(&r.s("releasetype")), tracks: r.i("n"), first: r.i("first"),
+        songs: songs_of.remove(&r.s("album_id")).unwrap_or_default(),
     }).collect())
 }
 
@@ -179,7 +193,22 @@ mod tests {
     use super::*;
 
     fn al(id: &str, artist: &str, title: &str, rg: &str, kind: &str, tracks: i64, first: i64) -> Album {
-        Album { id: id.into(), artist: artist.into(), title: title.into(), rg: rg.into(), kind: kind.into(), tracks, first }
+        Album { id: id.into(), artist: artist.into(), title: title.into(), rg: rg.into(), kind: kind.into(), tracks, first, songs: HashSet::new() }
+    }
+
+    fn with_songs(mut a: Album, songs: &[&str]) -> Album {
+        a.songs = songs.iter().map(|s| s.to_string()).collect();
+        a
+    }
+
+    #[test]
+    fn albums_of_one_name_without_a_song_in_common_stay_apart() {
+        let a = [with_songs(al("blue", "Weezer", "Weezer", "rg1", "album", 10, 1), &["buddy holly"]),
+                 with_songs(al("green", "Weezer", "Weezer", "", "album", 10, 2), &["hash pipe"])];
+        assert!(plan(&a).is_empty());
+        let b = [with_songs(al("mb", "Weezer", "Weezer", "rg1", "", 10, 1), &["buddy holly"]),
+                 with_songs(al("dz", "Weezer", "Weezer (Deluxe Edition)", "", "", 20, 2), &["buddy holly", "jamie"])];
+        assert_eq!(plan(&b), vec![pair("dz", "mb")]);
     }
 
     fn sorted(mut v: Vec<(String, String)>) -> Vec<(String, String)> {

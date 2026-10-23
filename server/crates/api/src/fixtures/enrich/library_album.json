@@ -1,10 +1,12 @@
 {
   "added_at": 1792280084.9141605,
   "album": "First Album",
+  "album_title": "First Album",
   "albumartist": "Alpha Artist",
   "cover_color": "#b7cb00",
   "cover_v": "<cover_v>",
   "duration": 12.0,
+  "edition": "",
   "genre": null,
   "history": [],
   "id": "150c2e63e67a8f86",

@@ -202,6 +202,8 @@ data class CatalogAlbum(
     @SerialName("artist_id") val artistId: LString = "",
     val type: LString = "",
     val secondary: LTexts = emptyList(),
+    /** MusicBrainz's name for one of an artist's albums of one title ("Blue Album"), or "". */
+    val disambiguation: LString = "",
     val year: LYear = "",
     val date: LString = "",
     val cover: LString = "",

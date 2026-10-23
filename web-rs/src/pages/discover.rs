@@ -864,7 +864,8 @@ pub fn render_artist(view: Element, ctx: Ctx) -> PageFuture {
                         format!(r#"<button class="btn sm" data-req-missing="{}">{}Request {} missing</button>"#, esc(k), icon("download"), missing)
                     } else { String::new() };
                     let tiles: String = list.iter().map(|rg| {
-                        let sub = esc(&join_truthy(&[first_truthy(rg, &["date", "year"]), if rg.a("secondary").is_empty() { String::new() } else { rg.s("type") }], " · "));
+                        // MusicBrainz's name for one of several albums of one title ("Blue Album") first
+                        let sub = esc(&join_truthy(&[rg.s("disambiguation"), first_truthy(rg, &["date", "year"]), if rg.a("secondary").is_empty() { String::new() } else { rg.s("type") }], " · "));
                         common::album_tile_with(rg, &format!("/album/{}", rg.s("id")), &album_actions(rg), Some(&sub), Some(&album_key(rg)), Some(&album_badge(rg)))
                     }).collect();
                     format!(r#"<div class="section-head"><h3>{}s <span class="faint small">{}</span></h3>

@@ -857,6 +857,8 @@ pub async fn scheduled(st: &impl crate::Ctx) -> anyhow::Result<String> {
         read_missing_tags(&db, &busy)
     }).await?;
     let (looked_up, not_found) = look_up_missing(st, LOOKUPS_PER_RUN).await;
+    // and MusicBrainz's names of albums that share their name with another ("Blue Album")
+    crate::split::look_up_names(st, LOOKUPS_PER_RUN).await;
     let db = st.db().clone();
     tokio::task::spawn_blocking(move || forget_gone(&db)).await?;
     let r = Run { tags_read, looked_up, not_found };

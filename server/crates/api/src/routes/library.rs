@@ -381,6 +381,8 @@ fn album_list(st: &AppState, artist: &str, filter: &str, sort: &str, dir: &str) 
     let st2 = st.clone();
     cached_list(st, &key, move || {
         let mut rows = st2.db.query(&sql, params)?;
+        // albums of one name (Weezer's self-titled ones) say which they are: "Weezer (Blue Album)"
+        encore_library::split::stamp(&mut rows, &encore_library::split::editions(&st2.db));
         // the type is part of the list: both follow the library's state
         let types = st2.library.types.get(&st2.db);
         for r in rows.iter_mut() {
@@ -1001,8 +1003,24 @@ async fn album(State(st): State<AppState>, User(u): User, Path(id): Path<String>
         let id = id.clone();
         st.blocking(move |st| Ok(st.library.types.of(&st.db, &id))).await?
     };
+    // an album of one name with others (Weezer's self-titled ones): which it is, "Weezer (Blue Album)"
+    let (title, rg) = (f.s("album"), f.s("mb_releasegroupid"));
+    let edition = {
+        let (id, title, rg) = (id.clone(), title.clone(), rg.clone());
+        st.blocking(move |st| {
+            let e = encore_library::split::edition_of(&st.db, &id, &title);
+            // not named by MusicBrainz yet: asked in the background, the next look shows it
+            let asked = st.db.one("SELECT 1 x FROM rg_names WHERE rg=?", p![rg])?.is_some();
+            Ok((e, !rg.is_empty() && !asked))
+        }).await?
+    };
+    if edition.1 {
+        let st2 = st.clone();
+        tokio::spawn(async move { encore_library::split::look_up_names(&st2, 12).await });
+    }
     let mut v = json!({
-        "id": id, "album": f.get("album"), "albumartist": f.get("albumartist"), "year": f.get("year"), "genre": f.get("genre"),
+        "id": id, "album": encore_library::split::shown_title(&title, &edition.0), "album_title": title, "edition": edition.0,
+        "albumartist": f.get("albumartist"), "year": f.get("year"), "genre": f.get("genre"),
         "mb_albumid": f.get("mb_albumid"), "mb_releasegroupid": f.get("mb_releasegroupid"), "mb_albumartistid": f.get("mb_albumartistid"),
         "tracks": tracks, "duration": rows.iter().map(|r| r.f("duration")).sum::<f64>(), "size": size,
         "type": class.json(), "history": history(&tracks_of(&rows)), "other_copies": copies.len(), "added_at": added_at,

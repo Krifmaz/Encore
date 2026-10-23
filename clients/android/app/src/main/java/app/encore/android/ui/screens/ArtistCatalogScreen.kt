@@ -658,7 +658,7 @@ private fun ArtistPageScreen(nav: Nav, mbid: String, name: String) {
                         tileRows(list, 2, key = "rg-$k") { rg ->
                             CatalogAlbumTile(
                                 nav, rg, statuses,
-                                subtitle = listOf(rg.date.ifEmpty { rg.year }, if (rg.secondary.isNotEmpty()) rg.type else "").filter { it.isNotEmpty() }.joinToString(" · "),
+                                subtitle = listOf(rg.disambiguation, rg.date.ifEmpty { rg.year }, if (rg.secondary.isNotEmpty()) rg.type else "").filter { it.isNotEmpty() }.joinToString(" · "),
                             )
                         }
                     }

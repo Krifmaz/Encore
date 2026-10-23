@@ -1175,8 +1175,10 @@ fn discography<'a>(state: &'a State, ctx: &Ctx<'a>, n_rg: usize) -> El<'a, Messa
         let tiles = list
             .iter()
             .map(|rg| {
+                // MusicBrainz's name for one of several albums of one title ("Blue Album") first
                 let sub = catalog::join_truthy(
                     &[
+                        fmt::s(rg, "disambiguation"),
                         catalog::first_truthy(rg, &["date", "year"]),
                         if fmt::items(&rg["secondary"]).is_empty() { String::new() } else { fmt::s(rg, "type") },
                     ],

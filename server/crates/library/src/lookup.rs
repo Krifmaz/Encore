@@ -151,11 +151,20 @@ pub fn library_tracks_for(db: &Db, items: &[(String, String, String, Option<f64>
     out.into_iter().map(|r| r.map(clean)).collect()
 }
 
+/// May a release group be a library album found by its title? Not one tagged from another release group that
+/// is asked about too for the same artist: an artist's albums of one name (Weezer's self-titled ones, [`crate::split`]) are other
+/// albums. A release group of the library's albums not asked about may be the same album under another id.
+fn other_release(asked: &std::collections::HashSet<(String, &str)>, artist: &str, rg: &str, album_rg: &str) -> bool {
+    rg.is_empty() || album_rg.is_empty() || rg == album_rg || !asked.contains(&(crate::merge::artist_key(artist), album_rg))
+}
+
 /// The library album for each (MusicBrainz release group, artist, album title): by release group, else by
 /// album title and album artist or artist ([`crate::scan::album_id_for`]).
 pub fn album_ids_for(db: &Db, items: &[(String, String, String)]) -> Vec<Option<String>> {
     let by_rg = rows_in(db, "SELECT id, album_id, mb_releasegroupid _rg FROM tracks WHERE mb_releasegroupid IN ({in})",
         &params(items.iter().map(|i| i.0.clone()).filter(|r| !r.is_empty())));
+    // the release groups asked about, by artist
+    let asked: std::collections::HashSet<(String, &str)> = items.iter().filter(|i| !i.0.is_empty()).map(|i| (crate::merge::artist_key(&i.1), i.0.as_str())).collect();
     let mut out: Vec<Option<String>> = items.iter().map(|(rg, _, _)| {
         if rg.is_empty() {
             return None;
@@ -165,12 +174,14 @@ pub fn album_ids_for(db: &Db, items: &[(String, String, String)]) -> Vec<Option<
     let rest: Vec<usize> = (0..items.len()).filter(|i| out[*i].is_none() && !items[*i].2.is_empty()).collect();
     if !rest.is_empty() {
         let keys = params(rest.iter().map(|i| lower(&items[*i].2)));
-        let rows = rows_in(db, "SELECT id, album_id, lower(album) _lal, lower(albumartist) _laa, lower(artist) _la FROM tracks WHERE lower(album) IN ({in})", &keys);
+        let rows = rows_in(db, "SELECT id, album_id, lower(album) _lal, lower(albumartist) _laa, lower(artist) _la, mb_releasegroupid _rg FROM tracks
+                                WHERE lower(album) IN ({in})", &keys);
         for i in rest {
-            let (_, artist, album) = &items[i];
+            let (rg, artist, album) = &items[i];
             let (al, a) = (lower(album), lower(artist));
             out[i] = rows.iter()
                 .filter(|r| text(r, "_lal") == Some(al.as_str()) && (text(r, "_laa") == Some(a.as_str()) || text(r, "_la") == Some(a.as_str())))
+                .filter(|r| other_release(&asked, artist, rg, &r.s("_rg")))
                 .min_by_key(|r| r.i("id")).map(|r| r.s("album_id"));
         }
     }
@@ -179,13 +190,15 @@ pub fn album_ids_for(db: &Db, items: &[(String, String, String)]) -> Vec<Option<
     let rest: Vec<usize> = (0..items.len()).filter(|i| out[*i].is_none() && !items[*i].2.is_empty()).collect();
     if !rest.is_empty() {
         let keys = params(rest.iter().map(|i| lower(&items[*i].1)));
-        let rows = rows_in(db, "SELECT MIN(id) id, album_id, MAX(album) album, MAX(COALESCE(NULLIF(albumartist,''), artist)) _a FROM tracks
+        let rows = rows_in(db, "SELECT MIN(id) id, album_id, MAX(album) album, MAX(COALESCE(NULLIF(albumartist,''), artist)) _a,
+                                       MAX(COALESCE(mb_releasegroupid,'')) _rg FROM tracks
                                 WHERE lower(COALESCE(NULLIF(albumartist,''), artist)) IN ({in}) GROUP BY album_id", &keys);
         for i in rest {
-            let (_, artist, album) = &items[i];
+            let (rg, artist, album) = &items[i];
             let (tk, ak) = (crate::catalog::title_key(album), crate::merge::artist_key(artist));
             out[i] = rows.iter()
                 .filter(|r| !tk.is_empty() && crate::catalog::title_key(&r.s("album")) == tk && crate::merge::artist_key(&r.s("_a")) == ak)
+                .filter(|r| other_release(&asked, artist, rg, &r.s("_rg")))
                 .min_by_key(|r| r.i("id")).map(|r| r.s("album_id"));
         }
     }
@@ -371,6 +384,9 @@ mod tests {
         assert_eq!(album_ids_for(&db, &albums), single);
         assert_eq!(single[5].as_deref(), Some("a5"), "an unknown release group: by album title and artist");
         assert_eq!(single[2].as_deref(), Some("a1"), "by album artist, case ignored");
+        // an artist's albums of one name: a release group asked about with another one the library has isn't it
+        let same_name = strs(&[("rg5", "Band", "Album"), ("rg6", "Band", "Album")]);
+        assert_eq!(album_ids_for(&db, &same_name), vec![Some("a5".to_string()), None]);
         let _ = std::fs::remove_dir_all(dir);
     }
 

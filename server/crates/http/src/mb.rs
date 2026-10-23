@@ -179,6 +179,7 @@ pub fn rg(v: &Value) -> Value {
     json!({
         "id": id, "title": s(&v["title"]), "artist": credit(&v["artist-credit"]), "artist_id": credit_id(&v["artist-credit"]),
         "type": s(&v["primary-type"]), "secondary": v.get("secondary-types").cloned().unwrap_or(json!([])),
+        "disambiguation": s(&v["disambiguation"]),
         "year": date.chars().take(4).collect::<String>(), "date": date, "score": v.get("score").cloned().unwrap_or(json!(0)),
         "cover": cover_rg(&id, 250),
     })

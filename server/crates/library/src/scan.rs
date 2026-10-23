@@ -118,8 +118,15 @@ fn read_file(path: &str, meta: Option<std::fs::Metadata>) -> std::io::Result<Fil
 /// album, and the one it was in before when its tags moved it.
 fn store_file(c: &Conn, f: &FileRow, added: Added) -> rusqlite::Result<Vec<String>> {
     use crate::loudness::{keeps_measurement, tag_columns, tag_values, TagColumns, COLUMNS};
-    // an album merged into another (encore_library::merge) is written as that one
+    // an album merged into another (encore_library::merge) is written as that one, and an album of one name
+    // split by release (encore_library::split) as its part
     let album_id = crate::merge::resolve(c, &f.album_id)?;
+    let col = |k: &str| COLS.iter().position(|c| *c == k).and_then(|i| f.vals.get(i)).map(|v| match v {
+        Value::String(s) => s.clone(),
+        Value::Null => String::new(),
+        v => v.to_string(),
+    }).unwrap_or_default();
+    let album_id = crate::split::resolve(c, &album_id, &col("mb_releasegroupid"), &col("year"))?;
     let mut albums = vec![album_id.clone()];
     if let Some(ex) = c.one("SELECT id, mtime, size, verified_at, album_id, duration, loudness_source FROM tracks WHERE path=?", p![f.path])? {
         let mut sets = COLS.iter().map(|c| format!("{c}=?")).collect::<Vec<_>>().join(", ");
@@ -223,6 +230,10 @@ pub fn index_files_as(db: &Db, paths: &[String], added: Added) -> Indexed {
     }
     // an import of a release the library has from another source joins that album (encore_library::merge)
     if out.changed > 0 {
+        // albums of one name split by release first (encore_library::split): their parts are never merged back
+        if let Ok(m) = db.write_now(crate::split::split_albums) {
+            out.albums.extend(m.into_iter().map(|(_, to)| to));
+        }
         if let Ok(m) = db.write_now(crate::merge::merge_albums) {
             for (from, to) in m {
                 if out.albums.remove(&from) {
@@ -436,6 +447,16 @@ impl Library {
                 all.0.changed += n.changed;
                 all.0.removed += n.removed;
                 all.0.albums.extend(n.albums);
+            }
+            // albums of one name (Weezer's self-titled albums): one album per release (no file is touched)
+            match db2.write_now(crate::split::split_albums) {
+                Ok(m) if !m.is_empty() => {
+                    db2.log("info", &format!("Split {} album{} that shared a name with another release", m.len(), if m.len() == 1 { "" } else { "s" }));
+                    all.0.changed += m.len();
+                    all.0.albums.extend(m.into_iter().flat_map(|(from, to)| [from, to]));
+                }
+                Ok(_) => {}
+                Err(e) => tracing::warn!("scan: splitting albums of one name failed: {e}"),
             }
             // the same release from MusicBrainz and from another source: one album (no file is touched)
             match db2.write_now(crate::merge::merge_albums) {
