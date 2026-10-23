@@ -31,10 +31,13 @@ use tokio::time::Instant;
 /// One way to read a query: this artist, this title.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Split {
+    /// the artist part
     pub artist: String,
+    /// the title part
     pub title: String,
 }
 
+/// Add a reading unless it is empty or there already.
 fn add_split(out: &mut Vec<Split>, a: &str, t: &str) {
     let (a, t) = (a.trim(), t.trim());
     if fold(a).is_empty() || fold(t).is_empty() || out.iter().any(|s| s.artist == a && s.title == t) {
@@ -71,7 +74,9 @@ pub fn splits(q: &str) -> Vec<Split> {
 
 // ---- comparing names ------------------------------------------------------------------------------
 
+/// A bracketed part of a title.
 static BRACKETS: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"\s*[\(\[][^\)\]]*[\)\]]").unwrap());
+/// " - …" to the end of a title.
 static DASH_SUFFIX: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"\s+-\s+.*$").unwrap());
 /// Karaoke, tributes, parodies and other versions nobody searching for the song means.
 static JUNK: LazyLock<Regex> = LazyLock::new(|| Regex::new(
@@ -79,7 +84,7 @@ static JUNK: LazyLock<Regex> = LazyLock::new(|| Regex::new(
 /// Uploader-style artist names ("user-177634521").
 static USERISH: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"(?i)^(user|artist|unknown)[-_ ]?\d{3,}|^\d{6,}$").unwrap());
 
-/// A title without "(feat. …)", "[Live]" or " - Remastered 2011", folded.
+/// A title without "(feat. …)", "\[Live\]" or " - Remastered 2011", folded.
 pub fn base_title(s: &str) -> String {
     let t = BRACKETS.replace_all(s, "");
     let t = DASH_SUFFIX.replace(&t, "");
@@ -260,7 +265,9 @@ pub struct Found {
     pub deezer_albums: Value,
     /// iTunes entity=song / album / musicArtist
     pub itunes_songs: Value,
+    /// iTunes albums
     pub itunes_albums: Value,
+    /// iTunes artists
     pub itunes_artists: Value,
     /// Deezer track id → ISRC (looked up for the top few)
     pub isrcs: HashMap<String, String>,
@@ -296,23 +303,38 @@ pub fn evidence_hits(f: &Found) -> Vec<(String, String)> {
     out
 }
 
+/// A song result while it is ranked.
 #[derive(Clone, Debug)]
 struct Song {
+    /// the song as the answer gives it
     v: Value,
+    /// its artist credit
     artist: String,
+    /// its title
     title: String,
+    /// its release's title
     album: String,
+    /// its length, seconds
     length: f64,
+    /// its ISRCs
     isrcs: Vec<String>,
+    /// it is from MusicBrainz
     mb: bool,
+    /// MusicBrainz's search score, 0..100
     mb_score: f64,
+    /// Deezer's popularity rank
     rank: f64,
+    /// points for being found by Deezer and iTunes too
     bonus: f64,
+    /// its release is an official one
     official: bool,
+    /// its release group's primary type
     rg_type: String,
+    /// its release group's secondary types
     secondary: Vec<String>,
 }
 
+/// How good a release is to show a recording on: official, an album over an EP over the rest, fewer secondary types, then the earliest date.
 fn release_rank(r: &Value) -> (i32, std::cmp::Reverse<String>) {
     let rg = &r["release-group"];
     let sec = rg["secondary-types"].as_array().map(|a| a.len()).unwrap_or(0) as i32;
@@ -321,6 +343,7 @@ fn release_rank(r: &Value) -> (i32, std::cmp::Reverse<String>) {
     (i32::from(r["status"] == "Official") * 4 + typ - sec * 4, std::cmp::Reverse(if date.is_empty() { "9999".into() } else { date }))
 }
 
+/// A MusicBrainz recording as a result (shown on its best release).
 fn song_from_mb(r: &Value) -> Song {
     let rels = r["releases"].as_array().cloned().unwrap_or_default();
     let rel = rels.iter().max_by_key(|x| release_rank(x)).cloned().unwrap_or(json!({}));
@@ -345,18 +368,29 @@ fn song_from_mb(r: &Value) -> Song {
 
 /// A song only Deezer / Apple know, before it becomes a `Song`.
 struct ExtSong<'a> {
+    /// its title
     title: String,
+    /// its artist
     artist: String,
+    /// its album
     album: String,
+    /// its length, seconds
     length: f64,
+    /// its release year
     year: String,
+    /// its cover image
     cover: Value,
+    /// its ISRC
     isrc: Option<String>,
+    /// its ids on the service (`ext`)
     ext: Value,
+    /// the service's name
     source: &'a str,
+    /// the service's popularity rank
     rank: f64,
 }
 
+/// A Deezer or iTunes song as a result.
 fn ext_song(e: ExtSong) -> Song {
     let ExtSong { title, artist, album, length, year, cover, isrc, ext, source, rank } = e;
     let v = json!({
@@ -366,6 +400,7 @@ fn ext_song(e: ExtSong) -> Song {
     Song { v, artist, title, album, length, isrcs: isrc.into_iter().collect(), mb: false, mb_score: 0.0, rank, bonus: 0.0, official: false, rg_type: String::new(), secondary: vec![] }
 }
 
+/// A Deezer track as a result (its ISRC from `isrcs` when the search left it out).
 fn song_from_deezer(t: &Value, isrcs: &HashMap<String, String>) -> Song {
     let id = t["id"].to_string();
     let isrc = t["isrc"].as_str().map(String::from).or_else(|| isrcs.get(&id).cloned());
@@ -376,6 +411,7 @@ fn song_from_deezer(t: &Value, isrcs: &HashMap<String, String>) -> Song {
     })
 }
 
+/// An iTunes song as a result.
 fn song_from_itunes(t: &Value) -> Song {
     let cover = s(&t["artworkUrl100"]).replace("100x100bb", "600x600bb");
     ext_song(ExtSong {
@@ -385,6 +421,7 @@ fn song_from_itunes(t: &Value) -> Song {
     })
 }
 
+/// The same song: a shared ISRC, or the same artist and base title with lengths within 3 s.
 fn same_song(a: &Song, b: &Song) -> bool {
     if !a.isrcs.is_empty() && b.isrcs.iter().any(|i| a.isrcs.contains(i)) {
         return true;
@@ -400,7 +437,9 @@ fn coverage(qf: &str, parts: &[&str]) -> f64 {
     words.iter().filter(|w| has_words(&hay, w)).count() as f64 / words.len().max(1) as f64
 }
 
+/// Points per artist grade (none, close, exact).
 const ARTIST_W: [f64; 3] = [0.0, 50.0, 100.0];
+/// Points per title grade (none … exact).
 const TITLE_W: [f64; 4] = [0.0, 25.0, 60.0, 100.0];
 
 /// How well a name pair answers the query: the split's artist and title, or the words of the query.
@@ -431,6 +470,7 @@ fn match_score(artist: &str, title: &str, extra: &str, sp: Option<&Split>, qf: &
     }
 }
 
+/// A song result's score for the query.
 fn score_song(x: &Song, sp: Option<&Split>, qf: &str) -> f64 {
     let (mut sc, _, _) = match_score(&x.artist, &x.title, &x.album, sp, qf);
     if USERISH.is_match(x.artist.trim()) {
@@ -453,19 +493,30 @@ fn score_song(x: &Song, sp: Option<&Split>, qf: &str) -> f64 {
     sc
 }
 
+/// An album result while it is ranked.
 #[derive(Clone, Debug)]
 struct Alb {
+    /// the album as the answer gives it
     v: Value,
+    /// its artist
     artist: String,
+    /// its title
     title: String,
+    /// its type: Album, EP, Single …
     typ: String,
+    /// its secondary types
     secondary: Vec<String>,
+    /// it is from MusicBrainz
     mb: bool,
+    /// MusicBrainz's search score, 0..100
     mb_score: f64,
+    /// points for being found by Deezer and iTunes too
     bonus: f64,
+    /// the score of a top song on it: the album ranks at least near it
     fixed: Option<f64>,
 }
 
+/// A MusicBrainz release group as a result.
 fn alb_from_mb(g: &Value) -> Alb {
     let v = mb::rg(g);
     Alb {
@@ -486,6 +537,7 @@ fn ext_album(title: &str, artist: &str, typ: &str, date: &str, cover: Value, tra
     Alb { v, artist: artist.into(), title: title.into(), typ: typ.into(), secondary: vec![], mb: false, mb_score: 0.0, bonus: 0.0, fixed: None }
 }
 
+/// A Deezer album as a result.
 fn alb_from_deezer(a: &Value) -> Alb {
     let title = s(&a["title"]);
     let cover = a.get("cover_xl").filter(|c| !c.is_null()).or(a.get("cover_medium")).cloned().unwrap_or(Value::Null);
@@ -493,6 +545,7 @@ fn alb_from_deezer(a: &Value) -> Alb {
         ("Deezer", "deezer", a["id"].clone(), format!("https://www.deezer.com/album/{}", a["id"])))
 }
 
+/// An iTunes album as a result (" - Single" / " - EP" taken off).
 fn alb_from_itunes(a: &Value) -> Alb {
     let raw = s(&a["collectionName"]);
     let title = raw.trim_end_matches(" - Single").trim_end_matches(" - EP").to_string();
@@ -502,11 +555,13 @@ fn alb_from_itunes(a: &Value) -> Alb {
         if cover.is_empty() { Value::Null } else { json!(cover) }, a["trackCount"].clone(), ("Apple Music", "apple", a["collectionId"].clone(), url))
 }
 
+/// The same album: close artists, the same title key, and types that don't put a single against an album.
 fn same_album(a: &Alb, b: &Alb) -> bool {
     let ag = artist_grade(&a.artist, &b.artist).max(artist_grade(&b.artist, &a.artist));
     ag > 0 && catalog::title_key(&a.title) == catalog::title_key(&b.title) && (a.typ == b.typ || (a.typ != "Single" && b.typ != "Single"))
 }
 
+/// An album result's score for the query.
 fn score_album(x: &Alb, sp: Option<&Split>, qf: &str) -> f64 {
     let (mut sc, _, _) = match_score(&x.artist, &x.title, "", sp, qf);
     if USERISH.is_match(x.artist.trim()) {
@@ -527,6 +582,7 @@ fn score_album(x: &Alb, sp: Option<&Split>, qf: &str) -> f64 {
     x.fixed.map_or(sc, |f| f.max(sc))
 }
 
+/// An artist result's score: the query is its name (or an alias), the split's artist, or one of its words; MusicBrainz's score, and being in the library, add to it.
 fn score_artist(name: &str, aliases: &[String], mb_score: f64, sp: Option<&Split>, qf: &str, in_library: bool) -> f64 {
     let f = fold(name);
     let is = |want: &str| f == want || strip_the(&f) == strip_the(want) || aliases.iter().any(|a| fold(a) == want);
@@ -742,6 +798,7 @@ async fn mb_search(st: &impl Ctx, path: &str, query: String, limit: usize, until
     }
 }
 
+/// A Deezer track's ISRC (cached for a day), when Deezer answers before `until`.
 async fn deezer_isrc(st: &impl Ctx, id: String, until: Instant) -> Option<(String, String)> {
     let key = format!("dzisrc:{id}");
     if let Some(v) = st.cache_get(&key) {
@@ -908,6 +965,7 @@ fn artist_matches(idx: &Index, name: &str) -> Vec<(usize, f64)> {
     }).collect()
 }
 
+/// A library title's grade against `want`, typos counted as close (2).
 fn lib_title_grade(title: &str, want: &str) -> usize {
     let g = title_grade(title, want);
     if g > 0 {
@@ -1059,7 +1117,7 @@ fn may_spell(w: &str, name: &str) -> bool {
     name.chars().next() == w.chars().next() || name.starts_with("the ") || name.starts_with("and ")
 }
 
-/// `spells` for a song's album title without "(Deluxe)", "[Live]" or " - Remastered" (`base_of`), and without
+/// `spells` for a song's album title without "(Deluxe)", "\[Live\]" or " - Remastered" (`base_of`), and without
 /// the regexes for the titles that cannot spell it.
 fn title_spells(w: &str, raw: &str, folded: &str) -> bool {
     // base_of keeps the first word unless the title opens with a bracket
@@ -1231,20 +1289,26 @@ pub fn library_track_ids(idx: &Index, q: &str, sort: &str, dir: &str) -> Vec<i64
 /// `library_fuzzy` worked out once, when first needed (library_search shares it between songs, albums and
 /// artists).
 struct Fuzzy<'a> {
+    /// the library index
     idx: &'a Index,
+    /// the query
     q: &'a str,
+    /// the typo matches, once worked out
     cell: std::cell::OnceCell<LibHits<'a>>,
 }
 
 impl<'a> Fuzzy<'a> {
+    /// Typo matching of `q` in `idx`, not worked out yet.
     fn new(idx: &'a Index, q: &'a str) -> Self {
         Fuzzy { idx, q, cell: std::cell::OnceCell::new() }
     }
+    /// The typo matches (worked out on first use).
     fn get(&self) -> &LibHits<'a> {
         self.cell.get_or_init(|| library_fuzzy(self.idx, self.q))
     }
 }
 
+/// [`library_track_ids`] with the splits, initials and typo matches given.
 fn track_ids_with(idx: &Index, q: &str, sort: &str, dir: &str, split: &LibHits, initials: &LibHits, fuzzy: &Fuzzy) -> Vec<i64> {
     let plain = idx.search_track_refs(q, sort, dir);
     let mut seq: Vec<&Track> = split.tracks.iter().map(|x| x.1).collect();
@@ -1274,6 +1338,7 @@ fn album_of<'a>(idx: &'a Index, t: &Track) -> Option<&'a crate::artists::Album> 
     idx.albums.iter().find(|al| al.aa_ix == t.aa_ix && al.title_f == t.album_f)
 }
 
+/// [`library_album_ranks`] with the splits, initials and typo matches given: (album id, rank; lower first).
 fn album_ranks_with(idx: &Index, q: &str, split: &LibHits, initials: &LibHits, fuzzy: &Fuzzy) -> Vec<(String, u8)> {
     let mut out: Vec<(String, u8)> = split.albums.iter().map(|(_, i, _)| (idx.albums[*i].id.clone(), 0)).collect();
     for (_, t) in split.tracks.iter().take(3) {
@@ -1330,6 +1395,7 @@ fn artist_rows(idx: &Index, found: &[(usize, &'static str)], limit: usize) -> Ve
     }).collect()
 }
 
+/// The album columns of a library search answer (per `album_id`).
 const ALBUM_COLS: &str = "album_id AS id, MAX(album) album, MAX(albumartist) albumartist, MAX(year) year, MAX(genre) genre,
     COUNT(*) tracks, SUM(duration) duration, SUM(size) size, MAX(added_at) added,
     GROUP_CONCAT(DISTINCT format) formats, MAX(mb_albumid) mb_albumid, MAX(mb_releasegroupid) mb_releasegroupid,

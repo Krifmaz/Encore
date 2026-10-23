@@ -78,20 +78,33 @@ const OWN: [&str; 5] = ["codec", "profile", "channels", "layout", "atmos"];
 
 /// What one file's row will hold.
 struct FileRow {
+    /// the file
     path: String,
+    /// its surround album id
     album_id: String,
+    /// its modification time
     mtime: f64,
+    /// its size in bytes
     size: i64,
+    /// the stereo columns' values ([`COLS`])
     vals: Vec<Value>,
+    /// the surround columns' values (codec, profile, channels, layout, atmos)
     own: Vec<Value>,
+    /// its album artist
     albumartist: String,
+    /// its album
     album: String,
+    /// its title
     title: String,
+    /// its track number
     track: i64,
+    /// its disc number
     disc: i64,
+    /// its ISRC
     isrc: String,
 }
 
+/// Read one file: its tags, stream facts and the values its row will hold.
 fn read_file(path: &str) -> std::io::Result<FileRow> {
     let meta = std::fs::metadata(path)?;
     let (mtime, size) = mtime_size(&meta);
@@ -264,9 +277,13 @@ pub fn stereo_gone(c: &Conn, ids: &[i64], replacement: Option<i64>) -> rusqlite:
 /// tags) and the stereo album and songs it was asked for.
 #[derive(Default, Clone)]
 pub struct Import {
+    /// the request's artist, for files without tags
     pub artist: String,
+    /// the request's album, for files without tags
     pub album: String,
+    /// the stereo album it was asked for
     pub stereo_album_id: Option<String>,
+    /// the stereo songs it was asked for
     pub stereo_track_ids: Vec<i64>,
 }
 

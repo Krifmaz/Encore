@@ -6,12 +6,16 @@ use std::collections::HashMap;
 /// What one item is, for the model.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum Kind {
+    /// a song title
     Title,
+    /// an album title
     Album,
+    /// an artist name
     Artist,
 }
 
 impl Kind {
+    /// Its name in the database.
     pub fn as_str(self) -> &'static str {
         match self {
             Kind::Title => "title",
@@ -19,6 +23,7 @@ impl Kind {
             Kind::Artist => "artist",
         }
     }
+    /// The kind a stored name stands for (song title for anything unknown).
     pub fn parse(s: &str) -> Kind {
         match s {
             "album" => Kind::Album,
@@ -26,6 +31,7 @@ impl Kind {
             _ => Kind::Title,
         }
     }
+    /// What the prompt calls it.
     fn describe(self) -> &'static str {
         match self {
             Kind::Title => "song title",
@@ -38,15 +44,20 @@ impl Kind {
 /// One text to translate, with the artist as context.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Item {
+    /// its number in the request
     pub id: usize,
+    /// what it is
     pub kind: Kind,
+    /// the text to translate
     pub text: String,
+    /// the artist, as context
     pub artist: Option<String>,
 }
 
 /// Items per request: small enough that a 4B model keeps the ids straight.
 pub const BATCH: usize = 16;
 
+/// The system prompt for translating into `target`.
 pub fn system_prompt(target: &str) -> String {
     let lang = script::language_name(target);
     format!(
@@ -62,6 +73,7 @@ Answer with JSON only, in this shape: {{\"items\":[{{\"id\":1,\"translation\":\"
     )
 }
 
+/// The request's text: the items as JSON (and `/no_think` for a thinking model).
 pub fn user_prompt(items: &[Item], thinking_model: bool) -> String {
     let list: Vec<Value> = items.iter().map(|i| {
         let mut v = json!({ "id": i.id, "kind": i.kind.describe(), "text": i.text });
@@ -108,6 +120,7 @@ fn json_part(reply: &str) -> Option<Value> {
     None
 }
 
+/// A model's answer cleaned: quotes trimmed; None when empty, a "null"/"none"/"n/a", too long, or the original again.
 fn clean(v: &Value, original: &str) -> Option<String> {
     let s = v.as_str()?.trim().trim_matches(['"', '\u{201C}', '\u{201D}']).trim();
     if s.is_empty() || s.eq_ignore_ascii_case("null") || s.eq_ignore_ascii_case("none") || s.eq_ignore_ascii_case("n/a") || s.len() > 500 {

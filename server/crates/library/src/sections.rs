@@ -25,28 +25,44 @@ use serde_json::{json, Value};
 /// Which list the sections are for (the query of GET /api/library/index).
 #[derive(Clone, Copy, Default)]
 pub struct Spec<'a> {
+    /// `kind=`: albums, singles, artists or tracks
     pub kind: &'a str,
+    /// `sort=`: the list's sort key
     pub sort: &'a str,
+    /// `dir=`: asc or desc
     pub dir: &'a str,
+    /// `artist=`: only this artist's albums
     pub artist: &'a str,
+    /// `filter=`: untagged, tagged or lossless
     pub filter: &'a str,
+    /// `album_kind=`: albums for the web's Albums tab
     pub album_kind: &'a str,
     /// the Type filter (`type=`), as /albums takes it
     pub album_type: &'a str,
 }
 
+/// What the sections step by.
 #[derive(Clone, Copy, PartialEq, Debug)]
 pub enum By {
+    /// the first letter (# for digits and symbols)
     Letter,
+    /// the year
     Year,
+    /// the month (date added; finer when one month holds everything)
     Month,
+    /// a song's length
     TrackLength,
+    /// an album's length
     AlbumLength,
+    /// the size on disk
     Size,
+    /// an artist's album count
     AlbumCount,
+    /// an artist's song count
     TrackCount,
 }
 
+/// The sections of the list `a` names: `{sections: [{label, offset, short?}]}`.
 pub fn sections_for(db: &Db, artists: &Artists, types: &crate::album_types::Types, a: &Spec) -> ApiResult<Value> {
     let values: Vec<(Value, By)> = match a.kind {
         "artists" => {
@@ -164,6 +180,7 @@ fn sections(labels: impl Iterator<Item = (String, Option<String>)>) -> Vec<Value
 /// Finer steps for date added: 0 month, 1 day, 2 hour, 3 minute, 4 second.
 const FINEST: u8 = 4;
 
+/// The step of time `t` at `level` (see [`FINEST`]); unknown times first.
 fn time_key(t: f64, level: u8) -> i64 {
     if t <= 0.0 {
         return i64::MIN;
@@ -260,6 +277,7 @@ fn time_label(t: f64, level: u8) -> (String, Option<String>) {
     }
 }
 
+/// A value as a number (a numeric string too; 0 otherwise).
 fn num(v: &Value) -> f64 {
     match v {
         Value::Number(n) => n.as_f64().unwrap_or(0.0),
@@ -268,6 +286,7 @@ fn num(v: &Value) -> f64 {
     }
 }
 
+/// The section label of one list value.
 pub fn label(v: &Value, by: By) -> String {
     match by {
         By::Letter => letter(v.as_str().unwrap_or("")).unwrap_or_else(|| folded(v.as_str().unwrap_or(""))),
@@ -318,6 +337,7 @@ fn folded(s: &str) -> String {
     }
 }
 
+/// Month names for the labels.
 const MONTHS: [&str; 12] = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
 
 /// "Oct 2026" for epoch seconds (UTC).

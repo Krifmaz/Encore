@@ -3,28 +3,42 @@
 use regex::Regex;
 use std::sync::LazyLock;
 
+/// A spoken or typed search taken apart ("play Yellow by Coldplay").
 pub struct Parsed {
+    /// what is left to search for
     pub q: String,
+    /// the title, when it says "… by …"
     pub title: String,
+    /// the artist, when it says "… by …"
     pub artist: String,
+    /// what it asks for: "track", "album" or "artist"
     pub kind: Option<&'static str>,
+    /// lyrics it quotes ("the song that goes …")
     pub lyrics: Option<String>,
+    /// it read as a sentence, not keywords
     pub sentence: bool,
 }
 
+/// Words that ask for a kind: (word, kind).
 const KINDS: &[(&str, &str)] = &[("song", "track"), ("songs", "track"), ("track", "track"), ("tracks", "track"), ("single", "track"),
     ("album", "album"), ("albums", "album"), ("ep", "album"), ("record", "album"), ("lp", "album"),
     ("artist", "artist"), ("band", "artist"), ("singer", "artist"), ("rapper", "artist"), ("group", "artist")];
 
+/// Words a request is padded with.
 static FILLER: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"(?i)\b(play|find|search( for)?|look( for| up)?|get|download|i('m| am)? looking for|i want( to hear)?|can you|could you|please|the|a|an|that|which|called|named|titled|some|me|music|from|of)\b").unwrap());
+/// Words that bring in lyrics.
 static LYRIC: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"(?i)\b(that goes|goes like|lyrics?|which goes|where (he|she|they) (says?|sings?))\b").unwrap());
+/// A quoted part.
 static QUOTED: LazyLock<Regex> = LazyLock::new(|| Regex::new(r#""([^"]+)""#).unwrap());
+/// Runs of white space.
 static SPACES: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"\s+").unwrap());
 
+/// One space between words, no punctuation at the ends.
 fn tidy(s: &str) -> String {
     SPACES.replace_all(s, " ").trim_matches(|c: char| " ,.?!".contains(c)).to_string()
 }
 
+/// Take a request apart.
 pub fn parse(raw: &str) -> Parsed {
     let raw = raw.trim();
     let quoted = QUOTED.captures(raw).map(|c| c[1].to_string());

@@ -27,22 +27,30 @@ pub const SHOWN: &str = "(copy_of IS NULL OR NOT EXISTS (SELECT 1 FROM tracks k 
 /// One song as this pass sees it.
 #[derive(Clone, Debug, Default)]
 pub struct Song {
+    /// the song's row id
     pub id: i64,
+    /// its album id
     pub album_id: String,
     /// the album tag ('' none: a folder of loose songs)
     pub album: String,
+    /// its title
     pub title: String,
+    /// its artist
     pub artist: String,
+    /// its length, seconds
     pub duration: f64,
     /// its MusicBrainz recording ('' none)
     pub mbid: String,
     /// its MusicBrainz release group ('' none)
     pub rg: String,
+    /// the file is lossless
     pub lossless: bool,
+    /// its bitrate, kbps
     pub bitrate: i64,
 }
 
 impl Song {
+    /// It has a MusicBrainz recording.
     fn has_mbid(&self) -> bool {
         !self.mbid.is_empty()
     }
@@ -51,6 +59,7 @@ impl Song {
 /// What the pass decides: each copy and the song shown in its place, and the albums that go into another.
 #[derive(Debug, Default, PartialEq)]
 pub struct Plan {
+    /// each copy's row id → the song shown in its place
     pub copies: HashMap<i64, i64>,
     /// `(from, to)`: albums without MusicBrainz whose every song is a copy of a song on `to`
     pub merges: Vec<(String, String)>,
@@ -91,6 +100,7 @@ fn groups(songs: &[Song]) -> Vec<Vec<&Song>> {
     out
 }
 
+/// Decide the copies and merges of these songs.
 pub fn plan(songs: &[Song]) -> Plan {
     let mut copies: HashMap<i64, i64> = HashMap::new();
     // each song without MusicBrainz → the MusicBrainz albums (with a release group) its song is on

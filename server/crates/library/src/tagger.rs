@@ -21,6 +21,7 @@ use std::sync::LazyLock;
 pub struct Rejected {
     /// the check's own words ("audio is “Diase – Sun” (different song)", "Bad quality: …", "Wrong release: …")
     pub why: String,
+    /// which check it was
     pub check: Check,
     /// what the fingerprint heard ("Diase – Sun"), for the audio check
     pub heard: Option<String>,
@@ -40,6 +41,7 @@ pub enum Check {
 }
 
 impl Check {
+    /// Its name in the API ("audio", "quality", "release").
     pub fn as_str(self) -> &'static str {
         match self {
             Check::Audio => "audio",
@@ -50,12 +52,15 @@ impl Check {
 }
 
 impl Rejected {
+    /// A rejection by the fingerprint check.
     fn audio(why: String, heard: Option<String>, text: String) -> Rejected {
         Rejected { why, check: Check::Audio, heard, text }
     }
+    /// A rejection by the quality checks.
     pub fn quality(why: String) -> Rejected {
         Rejected { text: why.clone(), why, check: Check::Quality, heard: None }
     }
+    /// A rejection by the album's tags.
     fn release(why: String) -> Rejected {
         Rejected { text: why.clone(), why, check: Check::Release, heard: None }
     }
@@ -81,6 +86,7 @@ fn heard_of(c: &Value) -> Option<String> {
 
 use encore_core::audio::LOSSLESS;
 
+/// A "(feat. …)", "[ft …]" or "(with …)" part of a title.
 static FEAT: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"\s*[\(\[](feat|ft|with)\.?[^\)\]]*[\)\]]").unwrap());
 
 /// The words of a title or name without its "(feat. …)" part ([`encore_core::text::ascii_words`]).
@@ -88,6 +94,7 @@ fn tnorm(s: &str) -> String {
     encore_core::text::ascii_words(&FEAT.replace_all(&s.to_lowercase(), ""))
 }
 
+/// How alike two titles or names are, 0..1, without their featured artists.
 pub fn sim(a: &str, b: &str) -> f64 {
     let (a, b) = (tnorm(a), tnorm(b));
     if a.is_empty() || b.is_empty() {
@@ -109,6 +116,7 @@ pub fn will_verify(st: &impl Ctx, path: &Path) -> bool {
     st.cfg().bool("verify_on_import") && acoustid::can_check(st, path)
 }
 
+/// Fingerprint-check `path` when imports verify (None when they don't, or the check failed: logged).
 async fn verify(st: &impl Ctx, path: &Path, title: &str, artist: &str, length: Option<f64>, rid: Option<&str>) -> Option<Value> {
     if !will_verify(st, path) {
         return None;
@@ -122,6 +130,7 @@ async fn verify(st: &impl Ctx, path: &Path, title: &str, artist: &str, length: O
     }
 }
 
+/// Save the fingerprint verdicts on the songs' rows (and queue AcoustID submissions).
 fn record_verification(st: &impl Ctx, results: &[(PathBuf, Option<Value>)]) {
     for (p, r) in results {
         if let Some(r) = r {
@@ -176,6 +185,7 @@ fn io_error_of(e: &anyhow::Error) -> Option<std::io::Error> {
 
 // ---- cover art ----------------------------------------------------------------------------------
 
+/// An image from `url` (JPEG, PNG or WebP of more than 1.5 KB), else None.
 pub async fn get_image(st: &impl Ctx, url: &str) -> Option<Vec<u8>> {
     let r = st.http().get(url).timeout(std::time::Duration::from_secs(15)).send().await.ok()?;
     if !r.status().is_success() {
@@ -186,6 +196,7 @@ pub async fn get_image(st: &impl Ctx, url: &str) -> Option<Vec<u8>> {
     (ok && b.len() > 1500).then(|| b.to_vec())
 }
 
+/// The Cover Art Archive's front cover of the release, else of the release group.
 pub async fn fetch_cover(st: &impl Ctx, release_id: Option<&str>, rgid: Option<&str>) -> Option<Vec<u8>> {
     let mut urls = vec![];
     if let Some(r) = release_id.filter(|r| !r.is_empty()) {
@@ -267,6 +278,7 @@ pub async fn find_art(st: &impl Ctx, artist: &str, album: Option<&str>, title: O
 
 // ---- naming -------------------------------------------------------------------------------------
 
+/// A name that is safe as a file or folder name: no reserved or control characters, no trailing dots, at most 120 characters ("_" when nothing is left).
 pub fn clean(s: &str) -> String {
     let c: String = s.chars().map(|c| if "<>:\"/\\|?*".contains(c) || (c as u32) < 32 { '_' } else { c }).collect();
     let c = c.trim().trim_end_matches('.').to_string();
@@ -274,6 +286,7 @@ pub fn clean(s: &str) -> String {
     if c.is_empty() { "_".into() } else { c }
 }
 
+/// Fill `{field}` and `{field:02d}` in a naming template; None when a number field is unknown.
 fn format_template(tpl: &str, data: &std::collections::HashMap<&str, String>, nums: &std::collections::HashMap<&str, i64>) -> Option<String> {
     let re = Regex::new(r"\{(\w+)(?::0?(\d+)d)?\}").unwrap();
     let mut bad = false;
@@ -294,6 +307,7 @@ fn format_template(tpl: &str, data: &std::collections::HashMap<&str, String>, nu
     (!bad).then_some(out)
 }
 
+/// Where a song goes in the library: the naming template (`single_template` for a loose single) filled from its tags.
 pub fn render_path(st: &impl Ctx, v: &Row, ext: &str, single: bool) -> PathBuf {
     let tpl = st.cfg().str(if single { "single_template" } else { "naming_template" });
     let disc_count = v.get("disccount").and_then(|x| x.as_i64().or(x.as_str().and_then(|s| s.parse().ok()))).unwrap_or(1);
@@ -317,6 +331,7 @@ pub fn render_path(st: &impl Ctx, v: &Row, ext: &str, single: bool) -> PathBuf {
     out
 }
 
+/// How good a file is: (lossless, bitrate, size).
 fn file_rank(path: &Path) -> (bool, i64, u64) {
     let t = read_tags(&path.to_string_lossy());
     (LOSSLESS.contains(&t.s("format").as_str()), t.i("bitrate"), std::fs::metadata(path).map(|m| m.len()).unwrap_or(0))
@@ -626,6 +641,7 @@ pub fn is_manual(st: &impl Ctx, artist: &str, album: &str) -> bool {
     st.db().one("SELECT 1 x FROM manual_albums WHERE key=?", p![manual_key(artist, album)]).ok().flatten().is_some()
 }
 
+/// Mark an album as fixed by hand, so automatic re-tagging leaves it alone.
 pub fn mark_manual(st: &impl Ctx, artist: &str, album: &str) {
     let _ = st.db().execute("INSERT OR REPLACE INTO manual_albums (key, edited_at) VALUES (?,?)", p![manual_key(artist, album), now()]);
 }
@@ -659,6 +675,7 @@ pub async fn rename_to_tags(st: &impl Ctx, paths: &[PathBuf]) -> Vec<PathBuf> {
     out
 }
 
+/// Write the editable fields (title, artist, album, album artist, numbers, date, genre) into the songs' files → their paths.
 pub fn edit_tags(st: &impl Ctx, ids: &[i64], values: &serde_json::Map<String, Value>) -> anyhow::Result<Vec<PathBuf>> {
     const ALLOWED: [&str; 8] = ["title", "artist", "album", "albumartist", "tracknumber", "discnumber", "date", "genre"];
     let vals: Row = values.iter().filter(|(k, v)| ALLOWED.contains(&k.as_str()) && !v.is_null()).map(|(k, v)| (k.clone(), v.clone())).collect();
@@ -764,6 +781,7 @@ pub fn insert_credits(m: &mut Row, artists: &Value, albumartists: &Value) {
     }
 }
 
+/// The tags to write for track `t` of release `rel` (a tagger preview's release): names, numbers, date, label, ids and credits.
 pub fn release_values(rel: &Value, t: &Value) -> Row {
     let artist = { let a = encore_core::json::text(&t["artist"]); if a.is_empty() { encore_core::json::text(&rel["artist"]) } else { a } };
     let mut m = Row::new();
@@ -945,6 +963,7 @@ pub async fn auto_match(st: &impl Ctx, paths: &[PathBuf], artist: &str, album: &
 /// before a request's in MusicBrainz's line, so this is only reached when MusicBrainz is very busy or slow).
 pub const IMPORT_MB_WAIT: std::time::Duration = std::time::Duration::from_secs(300);
 
+/// Every song row with what the import's replace and copy checks read.
 fn all_tracks(st: &impl Ctx) -> Vec<Row> {
     st.db().query("SELECT id, path, title, artist, album, album_id, duration, isrc, mb_trackid, format, bitrate, verify_status FROM tracks", p![]).unwrap_or_default()
 }
@@ -1182,7 +1201,9 @@ pub fn check_album_tags(files: &[Row], artist: &str, album: &str) -> Result<(), 
 
 /// What `import_album_files` is importing: the album asked for and where the files came from.
 pub struct AlbumImport<'a> {
+    /// the artist asked for
     pub artist: &'a str,
+    /// the album asked for
     pub album: &'a str,
     /// the MusicBrainz release group, when known
     pub rgid: Option<&'a str>,
@@ -1193,10 +1214,13 @@ pub struct AlbumImport<'a> {
     /// refuse files the fingerprint says are other songs (off when a person said to take the download:
     /// Keep anyway, Download anyway, "Don't check the audio")
     pub audio: bool,
+    /// the source's own album listing (its track titles count as the album's)
     pub source_meta: Option<&'a Value>,
+    /// a cover image URL the source gave
     pub hint: Option<&'a str>,
 }
 
+/// Import an album's downloaded files: check them, tag them (from MusicBrainz when found), move them into the library and index them → their library paths.
 pub async fn import_album_files(st: &impl Ctx, paths: &[PathBuf], what: AlbumImport<'_>) -> anyhow::Result<Vec<PathBuf>> {
     let AlbumImport { artist, album, rgid, source_root, reject, audio, source_meta, hint } = what;
     let mut paths = paths.to_vec();
@@ -1369,12 +1393,15 @@ pub async fn import_album_files(st: &impl Ctx, paths: &[PathBuf], what: AlbumImp
 pub struct Superseded {
     /// the copy that goes, and its path
     pub old: i64,
+    /// its path
     pub old_path: PathBuf,
     /// the imported song that takes its place (its playlist entries and likes)
     pub new: i64,
     /// a loose single (an album of one song), else a lower-quality copy
     pub loose: bool,
+    /// its artist
     pub artist: String,
+    /// its title
     pub title: String,
 }
 

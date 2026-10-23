@@ -127,8 +127,10 @@ fn sign(c: char) -> Option<&'static str> {
     })
 }
 
+/// Writes kana as Hepburn romaji, syllable by syllable.
 #[derive(Default)]
 struct Writer {
+    /// the romaji so far
     out: String,
     /// where the last syllable starts in `out` (a small kana changes it)
     syl: usize,
@@ -136,7 +138,9 @@ struct Writer {
     sokuon: bool,
     /// the last character was a kana, and whether it was written in hiragana; the last one was ん
     after_kana: bool,
+    /// the last kana was hiragana
     hira: bool,
+    /// the last kana was ん
     after_n: bool,
     /// the last kana written as a syllable of its own (folded to hiragana), '\0' after anything else
     prev: char,
@@ -188,6 +192,7 @@ impl Writer {
         self.out.push_str(add);
     }
 
+    /// Write one character.
     fn push(&mut self, c: char) {
         let (h, kata) = fold(c);
         let was_n = std::mem::take(&mut self.after_n);
@@ -297,6 +302,7 @@ impl Writer {
         }
     }
 
+    /// The romaji, with the capitals put in.
     fn finish(mut self) -> String {
         // capitals from the end, so the positions before stay where they are
         self.caps.sort_unstable();

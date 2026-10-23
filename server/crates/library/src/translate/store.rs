@@ -28,8 +28,10 @@ pub enum Source {
 }
 
 impl Source {
+    /// Every source, weakest first.
     pub const ALL: [Source; 5] = [Source::Letters, Source::Model, Source::Deepl, Source::Romanized, Source::Official];
 
+    /// Its name in the database.
     pub fn as_str(self) -> &'static str {
         match self {
             Source::Letters => "letters",
@@ -39,6 +41,7 @@ impl Source {
             Source::Official => "official",
         }
     }
+    /// The strength of a stored source name (0 for none or unknown).
     fn rank(s: &str) -> u8 {
         Source::ALL.iter().position(|x| x.as_str() == s).map(|i| i as u8 + 1).unwrap_or(0)
     }
@@ -66,12 +69,15 @@ pub fn key(text: &str) -> (String, &'static str) {
 /// What a listener sees for one text.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct Shown {
+    /// the translation shown
     pub translation: Option<String>,
+    /// the romanization shown
     pub romanization: Option<String>,
     /// official | romanized | letters | deepl | model | manual (of the translation, or of the romanization when there is none)
     pub source: String,
 }
 
+/// Make the row for `text` when there is none yet.
 fn ensure_row(db: &Db, text: &str, src: &str, target: &str, kind: &str) -> rusqlite::Result<()> {
     db.execute(
         "INSERT INTO translations (text, src_lang, target, kind, updated_at) VALUES (?,?,?,?,?) ON CONFLICT(text, src_lang, target) DO NOTHING",
@@ -128,6 +134,7 @@ pub fn set_manual(db: &Db, text: &str, target: &str, kind: &str, translation: Op
     Ok(())
 }
 
+/// What a row shows: a manual correction over the automatic text, for each of the two.
 fn shown(r: &encore_db::Row) -> Shown {
     let pick = |manual: &str, auto: &str| -> (Option<String>, bool) {
         match r.get(manual) {

@@ -21,7 +21,7 @@ pub fn cadenza_bin(data: &Path, ver: &str) -> PathBuf {
     cadenza_dir(data).join(ver).join("cadenza")
 }
 
-/// The version `current` points at (it may not work: see [`Programs::external`]).
+/// The version `current` points at (it may not work: see [`Programs::external_of`]).
 pub fn cadenza_current(data: &Path) -> Option<String> {
     let v = std::fs::read_to_string(cadenza_dir(data).join("current")).ok()?;
     let v = v.trim();

@@ -1,4 +1,4 @@
-//! Plugins: the `plugin.toml` manifest ([`manifest`]), the catalog Encore ships ([`catalog`]), the registry of
+//! Plugins: the `plugin.toml` manifest ([`manifest`]), the catalog Encore ships ([`catalog`](mod@catalog)), the registry of
 //! what is installed ([`registry`], the plugins table), the `Plugin` trait ([`plugin`]), the one installer
 //! ([`install`] with [`fetch`], [`archive`] and [`releases`]), the sandbox and spawn builder ([`sandbox`]), the
 //! plugins' logs ([`logs`]) and the process protocol ([`process`]).

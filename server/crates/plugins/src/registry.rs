@@ -1394,7 +1394,7 @@ pub fn github_ref(input: &str) -> Option<(String, Option<String>, String)> {
     Some((format!("{}/{}", parts[0], parts[1]), sub, git_ref.to_string()))
 }
 
-/// Text that reads as TOML with a [plugin] table.
+/// Text that reads as TOML with a `[plugin]` table.
 fn toml_like(text: &str) -> Option<()> {
     let v: toml::Value = toml::from_str(text).ok()?;
     v.get("plugin").map(|_| ())

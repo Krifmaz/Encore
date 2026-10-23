@@ -20,7 +20,9 @@ pub(crate) const COLS: &[&str] = &["title", "artist", "album", "albumartist", "t
 /// songs are stamped by the request worker right after the import (`record_origin`), as `request_id` is.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Added {
+    /// the admin who added it (None for a scan)
     pub by: Option<i64>,
+    /// how: "scan", "upload" or "import"
     pub via: &'static str,
 }
 
@@ -35,17 +37,25 @@ impl Default for Added {
     }
 }
 
+/// The library scan's progress, for the API.
 #[derive(Default, Clone, serde::Serialize)]
 pub struct ScanState {
+    /// a scan runs now
     pub scanning: bool,
+    /// files read so far
     pub progress: usize,
+    /// files to read
     pub total: usize,
+    /// when the last scan finished, Unix seconds
     pub last_scan: Option<f64>,
+    /// what it is doing, or how it ended
     pub message: String,
 }
 
+/// What the library keeps while the server runs. Clones share it.
 #[derive(Clone, Default)]
 pub struct Library {
+    /// the scan's progress
     pub scan: Arc<Mutex<ScanState>>,
     /// album → cover file + version (see encore_media::covers)
     pub covers: encore_media::covers::CoverIndex,
@@ -67,6 +77,7 @@ pub struct Library {
     pub types: crate::album_types::Types,
 }
 
+/// An album's id: the first 16 hex digits of a SHA-1 of "album artist|album" (lower case), or of the folder for songs without an album tag.
 pub fn album_key(albumartist: &str, album: &str, path: &str) -> String {
     let key = if !album.is_empty() {
         format!("{}|{}", albumartist.trim().to_lowercase(), album.trim().to_lowercase())
@@ -78,6 +89,7 @@ pub fn album_key(albumartist: &str, album: &str, path: &str) -> String {
 
 use encore_media::tags::{read_tags_and_facts, GainTags};
 
+/// A file's modification time (Unix seconds) and size.
 pub(crate) fn mtime_size(meta: &std::fs::Metadata) -> (f64, i64) {
     let mt = meta.modified().ok().and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok()).map(|d| d.as_secs_f64()).unwrap_or(0.0);
     (mt, meta.len() as i64)
@@ -89,13 +101,19 @@ pub const SCAN_BATCH: usize = 200;
 
 /// What one file's row will hold: read from the file (its tags), before the database is touched.
 pub struct FileRow {
+    /// the file
     path: String,
+    /// its album id
     album_id: String,
+    /// its modification time
     mtime: f64,
+    /// its size in bytes
     size: i64,
+    /// the column values ([`COLS`])
     vals: Vec<Value>,
     /// its ReplayGain / R128 tags
     gain: GainTags,
+    /// its length, seconds
     duration: f64,
 }
 
@@ -264,7 +282,9 @@ pub fn index_file(db: &Db, path: &str) -> anyhow::Result<()> {
 /// What a scan did.
 #[derive(Default)]
 pub struct Scanned {
+    /// files read in again (new or changed)
     pub changed: usize,
+    /// rows removed (their files gone)
     pub removed: usize,
     /// albums whose songs were added, changed or removed
     pub albums: BTreeSet<String>,
@@ -515,6 +535,7 @@ impl Library {
 
     // ---- covers --------------------------------------------------------------------------------
 
+    /// Forget an album's cover (all of them with None), so it is looked up again.
     pub fn forget_cover(&self, album_id: Option<&str>) {
         self.covers.forget(album_id);
     }
@@ -631,10 +652,12 @@ pub fn prune_empty(path: &Path, stop: &Path) {
     }
 }
 
+/// The library has songs of this MusicBrainz release group.
 pub fn has_release_group(db: &Db, rgid: &str) -> bool {
     !rgid.is_empty() && db.one("SELECT 1 FROM tracks WHERE mb_releasegroupid=? LIMIT 1", p![rgid]).ok().flatten().is_some()
 }
 
+/// The library has an album of this title by this artist (album artist or artist, any case).
 pub fn has_album(db: &Db, artist: &str, album: &str) -> bool {
     !album.is_empty() && db.one("SELECT 1 FROM tracks WHERE lower(album)=lower(?) AND (lower(albumartist)=lower(?) OR lower(artist)=lower(?)) LIMIT 1", p![album, artist, artist]).ok().flatten().is_some()
 }

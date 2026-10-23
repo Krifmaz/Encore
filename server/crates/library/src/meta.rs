@@ -10,14 +10,17 @@ use serde_json::{json, Value};
 use std::collections::HashMap;
 use std::path::PathBuf;
 
+/// The places the tagger searches for a release: (id, name).
 pub const PROVIDERS: [(&str, &str); 5] = [("musicbrainz", "MusicBrainz"), ("deezer", "Deezer"), ("apple", "Apple Music"), ("discogs", "Discogs"), ("fingerprint", "Audio fingerprint (AcoustID)")];
 
 
+/// First letter upper case, the rest lower case.
 fn title_case(x: &str) -> String {
     let mut c = x.chars();
     c.next().map(|f| f.to_uppercase().collect::<String>() + &c.as_str().to_lowercase()).unwrap_or_default()
 }
 
+/// A release as the tagger lists it.
 #[allow(clippy::too_many_arguments)]
 fn rel(id: &str, title: &str, artist: &str, date: &str, tracks: Vec<Value>, provider: &str, extra: Value) -> Value {
     let discs: std::collections::HashSet<i64> = tracks.iter().map(|t| t["disc"].as_i64().unwrap_or(1)).collect();
@@ -28,10 +31,12 @@ fn rel(id: &str, title: &str, artist: &str, date: &str, tracks: Vec<Value>, prov
         "cover_url": extra.get("cover_big").or(extra.get("cover")).cloned().unwrap_or(Value::Null), "provider": provider })
 }
 
+/// A track of such a release.
 fn trk(title: &str, artist: &str, track: i64, disc: i64, length: f64, isrc: Value) -> Value {
     json!({ "title": title, "artist": artist, "artist_id": null, "track": track, "disc": disc.max(1), "length": length, "recording_id": null, "track_id": null, "isrc": isrc })
 }
 
+/// Search `provider` for releases of `album` by `artist` (`fingerprint`: by the files' fingerprints; anything else: MusicBrainz).
 pub async fn search(st: &impl Ctx, provider: &str, artist: &str, album: &str, n: usize, paths: &[PathBuf]) -> anyhow::Result<Vec<Value>> {
     match provider {
         "deezer" => {
@@ -106,6 +111,7 @@ async fn by_fingerprint(st: &impl Ctx, paths: &[PathBuf], n: usize) -> anyhow::R
     Ok(out)
 }
 
+/// A release by its id (`deezer:…`, `apple:…`, `discogs:…`, else a MusicBrainz id) with its tracks.
 pub async fn release(st: &impl Ctx, id: &str) -> anyhow::Result<Value> {
     let (kind, rid) = id.split_once(':').unwrap_or(("", id));
     match kind {

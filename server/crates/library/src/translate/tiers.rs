@@ -21,16 +21,22 @@ use serde_json::{json, Value};
 /// The sources' switches and DeepL's key and budget, as the settings have them now.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Tiers {
+    /// official translations (MusicBrainz pseudo-releases)
     pub official: bool,
+    /// the built-in romanization
     pub romanize: bool,
+    /// DeepL is switched on
     pub deepl: bool,
+    /// DeepL's key
     pub deepl_key: String,
     /// characters a month; 0: no limit
     pub deepl_budget: i64,
+    /// the local model
     pub model: bool,
 }
 
 impl Tiers {
+    /// The switches as the settings have them now.
     pub fn read(cfg: &encore_config::Config) -> Tiers {
         Tiers {
             official: cfg.bool("translate_official"),

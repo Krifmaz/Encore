@@ -18,7 +18,9 @@ use std::time::Duration;
 
 /// Texts per request.
 pub const BATCH: usize = 50;
+/// DeepL's API for free keys (they end in ":fx").
 pub const FREE_API: &str = "https://api-free.deepl.com";
+/// DeepL's API for paid keys.
 pub const PRO_API: &str = "https://api.deepl.com";
 /// The name of the service in translate_usage.
 pub const SERVICE: &str = "deepl";
@@ -207,7 +209,9 @@ async fn count(st: &impl Ctx, month: &str, n: i64) {
 /// budget, the switch; `Tiers::deepl_generation`). Other settings leave the hold as it is.
 #[derive(Clone, Debug)]
 pub struct Hold {
+    /// the error that started it
     pub error: Error,
+    /// until when, Unix seconds
     pub until: f64,
     /// DeepL's settings when it failed (`Tiers::deepl_generation`): a change lifts the hold
     pub generation: u64,

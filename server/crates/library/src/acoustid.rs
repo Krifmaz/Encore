@@ -6,14 +6,17 @@ use serde_json::{json, Value};
 use std::path::Path;
 use tokio::process::Command;
 
+/// fpcalc (Chromaprint) is on PATH.
 pub fn can_fingerprint() -> bool {
     encore_core::which::which("fpcalc").is_some()
 }
 
+/// Fingerprint checks can run: an AcoustID key is set and fpcalc is there.
 pub fn available(st: &impl Ctx) -> bool {
     !st.cfg().str("acoustid_api_key").is_empty() && can_fingerprint()
 }
 
+/// The first 120 s of `path` fingerprinted: (its duration, the compressed fingerprint).
 pub async fn fingerprint(path: &Path) -> Option<(f64, String)> {
     let o = Command::new("fpcalc").args(["-json", "-length", "120"]).arg(path).output().await.ok()?;
     if !o.status.success() {
@@ -113,6 +116,7 @@ pub mod fake {
     use std::path::{Path, PathBuf};
     use std::sync::Mutex;
 
+    /// (folder, artist, title) the stand-in fingerprints say files under the folder sound like.
     static HEARD: Mutex<Vec<(PathBuf, String, String)>> = Mutex::new(Vec::new());
 
     /// Files under `dir` sound like `artist – title` to the fingerprint check.
@@ -142,6 +146,7 @@ fn latin(s: &str) -> bool {
 
 // ---- same recording? (before replacing a file with a "better" copy) -------------------------------
 
+/// The raw fingerprint of the first 90 s of `path` (for comparing two files).
 async fn raw_fp(path: &Path) -> Option<Vec<u32>> {
     let o = Command::new("fpcalc").args(["-raw", "-json", "-length", "90"]).arg(path).output().await.ok()?;
     if !o.status.success() {

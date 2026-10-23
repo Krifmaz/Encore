@@ -41,6 +41,7 @@ pub fn fold(s: &str) -> String {
     out.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
+/// A folded name without a leading "the " (unless that is all of it).
 pub(crate) fn strip_the(f: &str) -> &str {
     match f.strip_prefix("the ") {
         Some(rest) if !rest.is_empty() => rest,
@@ -202,14 +203,20 @@ pub(crate) fn credit_for(text: &str, json: &str) -> Option<Credit> {
 
 /// A search query, folded once.
 pub struct Q {
+    /// the query folded
     f: String,
+    /// folded, without a leading "the "
     k: String,
+    /// folded, with a space in front (a word start)
     word: String,
+    /// folded, without spaces
     compact: String,
+    /// the query as typed, lower case
     raw: String,
 }
 
 impl Q {
+    /// Fold a query once.
     pub fn new(q: &str) -> Q {
         let f = fold(q);
         let k = strip_the(&f).to_string();
@@ -263,6 +270,7 @@ impl Q {
     }
 }
 
+/// The better (lower) of two tiers.
 fn best(a: Option<u8>, b: Option<u8>) -> Option<u8> {
     match (a, b) {
         (Some(x), Some(y)) => Some(x.min(y)),
@@ -276,77 +284,122 @@ fn best(a: Option<u8>, b: Option<u8>) -> Option<u8> {
 /// How `Index::list` compares two artists for one sort column.
 type ArtistCmp = Box<dyn Fn(&Artist, &Artist) -> Ordering>;
 
+/// One artist of the library (an albumartist and its other spellings, aliases and collaborations).
 #[derive(Clone, Debug, Default)]
 pub struct Artist {
+    /// the name shown
     pub name: String,
+    /// its key ([`key`] of the name)
     pub key: String,
+    /// its MusicBrainz id, when the files carry one
     pub mbid: String,
     /// albumartist spellings of this artist itself
     pub spellings: Vec<String>,
     /// other names (MusicBrainz aliases)
     pub aliases: Vec<String>,
+    /// songs
     pub tracks: i64,
+    /// albums
     pub albums: i64,
+    /// bytes of its files
     pub size: i64,
+    /// when a song of it was last added, Unix seconds
     pub added: f64,
+    /// the album its picture comes from
     pub cover_album: String,
     /// every albumartist value whose albums belong here (own spellings and collaborations)
     pub aa_names: Vec<String>,
     /// every track artist value whose songs belong here
     pub artist_names: Vec<String>,
+    /// every name it matches by: (as written, folded, is an alias)
     pub(crate) folds: Vec<(String, String, bool)>, // (raw, fold, is alias)
 }
 
 /// A name as it appears in the tracks table, with the artists it stands for.
 pub(crate) struct Name {
+    /// the value as written
     pub(crate) raw: String,
+    /// lower case, for sorting
     lower: String,
+    /// folded, for matching
     pub(crate) fold: String,
+    /// the artists it stands for (indexes into `artists`)
     pub(crate) groups: Vec<usize>,
 }
 
+/// One song as the index holds it.
 pub struct Track {
+    /// its row id
     pub id: i64,
+    /// its title
     pub(crate) title: String,
+    /// its title, folded
     pub(crate) title_f: String,
+    /// its title, lower case
     title_l: String,
+    /// its album, folded
     pub(crate) album_f: String,
+    /// its album, lower case
     album_l: String,
+    /// its album as written
     pub(crate) album_raw: String,
+    /// its artist value (index into `names`)
     pub(crate) artist_ix: usize,
+    /// its albumartist value (index into `names`)
     pub(crate) aa_ix: usize,
+    /// its disc number
     disc: i64,
+    /// its track number
     track: i64,
+    /// its year
     year: String,
+    /// its length, seconds
     duration: f64,
+    /// when it was added, Unix seconds
     added: f64,
+    /// the file is lossless
     lossless: bool,
+    /// its bitrate, kbps
     bitrate: i64,
 }
 
+/// One album as the index holds it.
 pub struct Album {
+    /// its album id
     pub id: String,
+    /// its title
     pub(crate) title: String,
+    /// its title, folded
     pub(crate) title_f: String,
-    /// `title_f` without "(Deluxe)", "[Live]" or " - Remastered" (search::base_of), worked out once per index
+    /// `title_f` without "(Deluxe)", "\[Live\]" or " - Remastered" (search::base_of), worked out once per index
     pub(crate) base_f: String,
+    /// its albumartist value (index into `names`)
     pub(crate) aa_ix: usize,
+    /// the artists it belongs to
     pub(crate) artist_ixs: Vec<usize>,
 }
 
+/// The library's artists, names, songs and albums, built from the database for searching and listing.
 #[derive(Default)]
 pub struct Index {
+    /// the artists
     pub artists: Vec<Artist>,
+    /// artists by key
     by_key: HashMap<String, usize>,
+    /// every albumartist and artist value, one entry each
     pub(crate) names: Vec<Name>, // albumartist and artist values (one entry per distinct value)
+    /// every song
     pub(crate) tracks: Vec<Track>,
+    /// every album
     pub(crate) albums: Vec<Album>,
     /// artist texts with a credit that fits them (from the files' tags, or MusicBrainz): see `credit_for`
     credit_of: HashMap<String, Credit>,
 }
 
+/// Union-find over artist keys (collaborations and spellings join one artist).
 struct Uf(HashMap<String, String>);
 impl Uf {
+    /// The group `k` is in (with path compression).
     fn find(&mut self, k: &str) -> String {
         let mut cur = k.to_string();
         while let Some(p) = self.0.get(&cur) {
@@ -366,6 +419,7 @@ impl Uf {
         }
         cur
     }
+    /// Join the groups of `a` and `b` (the smaller key leads).
     fn union(&mut self, a: &str, b: &str) {
         let (ra, rb) = (self.find(a), self.find(b));
         if ra != rb {
@@ -375,16 +429,23 @@ impl Uf {
     }
 }
 
+/// What one albumartist value adds up to.
 #[derive(Default)]
 struct RawAa {
+    /// songs
     tracks: i64,
+    /// bytes
     size: i64,
+    /// the latest added time
     added: f64,
+    /// the MusicBrainz id its songs carry
     mbid: String,
+    /// its album ids
     albums: BTreeSet<String>,
 }
 
 impl Index {
+    /// Build the index from the database.
     pub fn build(db: &Db) -> anyhow::Result<Index> {
         // a copy of a song the library has from MusicBrainz is that song (crate::twins): searched and counted once
         let rows = db.query(
@@ -756,6 +817,7 @@ impl Index {
         }).collect())
     }
 
+    /// An artist as the API lists it.
     pub fn to_json(a: &Artist) -> Value {
         let mut v = json!({
             "name": a.name, "albums": a.albums, "tracks": a.tracks, "mbid": if a.mbid.is_empty() { Value::Null } else { json!(a.mbid) },
@@ -783,6 +845,7 @@ impl Index {
         v.into_iter().map(Self::to_json).collect()
     }
 
+    /// Each artist's best tier for `q` over its names: (tier, matched by an alias).
     fn artist_tiers(&self, q: &Q) -> Vec<Option<(u8, bool)>> {
         self.artists.iter().map(|a| {
             let mut out: Option<(u8, bool)> = None;
@@ -949,9 +1012,13 @@ impl Index {
 
 // ---- cache ---------------------------------------------------------------------------------------
 
+/// A built index and when it was last checked.
 struct Cached {
+    /// when it was last checked against the database
     checked: Instant,
+    /// the database's [`fingerprint`] then
     print: String,
+    /// the index
     index: Arc<Index>,
     /// `Db::library_version` when it was checked: unchanged means nothing was written since
     version: u64,
@@ -968,14 +1035,17 @@ impl Cached {
 /// One database's index, and the lock its rebuild runs under (so only one request rebuilds it).
 #[derive(Default)]
 struct Slot {
+    /// the index once built
     cached: Option<Cached>,
     /// changed or forgotten since `cached` was made: check again before using it
     dirty: bool,
     /// counts `invalidate` calls, so a rebuild that read the tables before one doesn't count as fresh
     generation: u64,
+    /// held by the one rebuild that runs
     build: Arc<Mutex<()>>,
 }
 
+/// What the songs, aliases and credits look like now, cheaply (counts and sums): a change moves it.
 fn fingerprint(db: &Db) -> String {
     // also the columns the library lists sort and filter on (year, length, size, added, format, tags):
     // their cached answers (routes/library.rs) live as long as this index does
@@ -995,6 +1065,7 @@ fn fingerprint(db: &Db) -> String {
 pub struct Artists(Arc<Mutex<Slot>>);
 
 impl Artists {
+    /// Run `f` on the slot, locked.
     fn with_slot<T>(&self, f: impl FnOnce(&mut Slot) -> T) -> T {
         let mut guard = self.0.lock().unwrap_or_else(|e| e.into_inner());
         f(&mut guard)
@@ -1122,6 +1193,7 @@ pub fn marks(n: usize) -> String {
 
 // ---- aliases from MusicBrainz ---------------------------------------------------------------------
 
+/// An artist's aliases are looked up again after this long.
 const RELOOK_SECS: f64 = 30.0 * 86400.0;
 /// A lookup that failed (MusicBrainz or the network down) is tried again after a day.
 const RETRY_SECS: f64 = 86400.0;
@@ -1332,6 +1404,7 @@ pub(crate) fn release_credits(rel: &Value) -> Vec<(String, String)> {
     out
 }
 
+/// Save looked-up credits and mark their releases looked up (in one transaction). True when a credit changed.
 async fn save_credits(db: &Db, batch: Vec<CreditsLooked>) -> bool {
     if batch.is_empty() {
         return false;

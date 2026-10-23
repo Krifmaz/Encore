@@ -42,6 +42,7 @@ pub fn target(code: &str) -> &'static str {
     LANGUAGES.iter().find(|(k, _, _)| *k == c).map(|(k, _, _)| *k).unwrap_or(DEFAULT_TARGET)
 }
 
+/// The English name of a target language code ("English" for an unknown one).
 pub fn language_name(code: &str) -> &'static str {
     LANGUAGES.iter().find(|(k, _, _)| *k == code).map(|(_, n, _)| *n).unwrap_or("English")
 }

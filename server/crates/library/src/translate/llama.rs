@@ -17,9 +17,13 @@ const LOAD_LIMIT: Duration = Duration::from_secs(300);
 /// A model the settings offer.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Model {
+    /// its id in the settings
     pub id: &'static str,
+    /// its name in the settings
     pub label: &'static str,
+    /// its Hugging Face repository
     pub repo: &'static str,
+    /// its file there
     pub file: &'static str,
     /// rough download size, for the settings text
     pub gb: f32,
@@ -39,10 +43,12 @@ pub fn model(st: &impl Ctx) -> Model {
     model_by_id(&st.cfg().str("translator_model"))
 }
 
+/// The model with this id (the first one for an unknown id).
 pub fn model_by_id(id: &str) -> Model {
     MODELS.iter().copied().find(|m| m.id == id).unwrap_or(MODELS[0])
 }
 
+/// Where a model is downloaded from.
 pub fn model_url(m: &Model) -> String {
     format!("https://huggingface.co/{}/resolve/main/{}", m.repo, m.file)
 }
@@ -67,16 +73,19 @@ pub fn model_path(st: &impl Ctx, m: &Model) -> PathBuf {
     if !own.is_file() && adopted.is_file() { adopted } else { own }
 }
 
+/// Where the adopted llama.cpp server versions are.
 fn server_root(data: &Path) -> PathBuf {
     dir(data).join("llama")
 }
 
+/// The version folder `current` names in it.
 fn current(data: &Path) -> Option<String> {
     let v = std::fs::read_to_string(server_root(data).join("current")).ok()?;
     let v = v.trim();
     (!v.is_empty() && !v.contains('/') && !v.starts_with('.')).then(|| v.to_string())
 }
 
+/// The `llama-server` program under `dir`.
 fn find_server(dir: &Path) -> Option<PathBuf> {
     walkdir::WalkDir::new(dir).max_depth(4).into_iter().flatten()
         .find(|e| e.file_type().is_file() && e.file_name() == "llama-server")
@@ -171,9 +180,13 @@ fn command(exe: &Path) -> tokio::process::Command {
 
 /// The model server while it runs.
 pub(crate) struct Running {
+    /// the llama-server process
     child: tokio::process::Child,
+    /// the port it listens on, on 127.0.0.1
     port: u16,
+    /// the model it serves
     model: PathBuf,
+    /// its last request, for the idle stop
     last: Instant,
 }
 
@@ -182,6 +195,7 @@ fn local(st: &impl Ctx) -> &reqwest::Client {
     st.library().translator.0.local.get_or_init(|| encore_http::client::local().unwrap_or_default())
 }
 
+/// A free TCP port on 127.0.0.1.
 fn free_port() -> anyhow::Result<u16> {
     Ok(std::net::TcpListener::bind("127.0.0.1:0")?.local_addr()?.port())
 }
@@ -198,6 +212,7 @@ pub async fn stop(st: &impl Ctx) {
     }
 }
 
+/// Start llama-server with the chosen model and wait until it answers.
 async fn start(st: &impl Ctx) -> anyhow::Result<Running> {
     let (exe, _) = installed(st).ok_or_else(|| anyhow::anyhow!("The Translator is not installed (Settings → Plugins → Translator)"))?;
     let m = model(st);

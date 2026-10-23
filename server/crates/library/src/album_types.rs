@@ -37,10 +37,12 @@ pub const VA_MBID: &str = "89ad4ac3-39f7-470e-963a-56509c546377";
 /// Album artist names that mean "various artists" (folded by [`encore_core::text::words`]).
 const VA_NAMES: [&str; 6] = ["various artists", "various", "va", "v a", "verschiedene interpreten", "artistes divers"];
 
+/// The word of a format key ("Album" for an unknown one).
 pub fn format_word(f: &str) -> &'static str {
     FORMATS.iter().find(|x| x.0 == f).map(|x| x.1).unwrap_or("Album")
 }
 
+/// The chip word of a kind key ("" for studio or an unknown one).
 pub fn kind_word(k: &str) -> &'static str {
     KINDS.iter().find(|x| x.0 == k).map(|x| x.1).unwrap_or("")
 }
@@ -92,6 +94,7 @@ pub fn kind_of_extra(extra: &str) -> &'static str {
     }
 }
 
+/// A MusicBrainz primary type Encore knows.
 fn is_primary(k: &str) -> bool {
     rt::KINDS.iter().any(|x| x.0 == k)
 }
@@ -128,7 +131,9 @@ pub fn is_various(albumartist: &str, albumartist_id: &str) -> bool {
 /// One song of an album, as the classification reads it.
 #[derive(Clone, Debug, Default)]
 pub struct Song {
+    /// its title
     pub title: String,
+    /// its track number
     pub track: i64,
     /// the file's RELEASETYPE ('' none)
     pub releasetype: String,
@@ -147,6 +152,7 @@ pub struct Stored {
     pub source: String,
     /// the release's primary type (None: not known – never looked up, or MusicBrainz didn't know it)
     pub release_type: Option<String>,
+    /// the release's secondary types
     pub secondary: Vec<String>,
     /// songs on the release (0 unknown)
     pub tracks: i64,
@@ -155,17 +161,24 @@ pub struct Stored {
 /// An album as the classification reads it.
 #[derive(Clone, Debug, Default)]
 pub struct AlbumIn {
+    /// its album title
     pub album: String,
+    /// its album artist
     pub albumartist: String,
+    /// the album artist's MusicBrainz id
     pub albumartist_id: String,
+    /// its songs
     pub songs: Vec<Song>,
+    /// what `album_types` holds for it
     pub stored: Option<Stored>,
 }
 
 /// An album's type: what it is, why, and what the automatic answer would be.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Class {
+    /// its format: Album, EP, Single, One-off …
     pub format: &'static str,
+    /// what is on it: studio, live, compilation …
     pub kind: &'static str,
     /// the owner's choice, when there is one
     pub chosen: Option<&'static str>,
@@ -179,6 +192,7 @@ pub struct Class {
     pub provider: &'static str,
     /// songs here and on the release (0 unknown), for the "Only N of its M songs" text
     pub present: usize,
+    /// songs on the release
     pub total: i64,
     /// a One-off's sub-line on the artist page: its kind's word, "Various artists" or its primary type
     pub release_label: String,
@@ -197,6 +211,7 @@ impl Class {
         filter_key(self.format, self.kind)
     }
 
+    /// The chip's text.
     pub fn label(&self) -> String {
         chip_label(self.format, self.kind)
     }
@@ -230,6 +245,7 @@ pub fn why_text(why: &str, provider: &str, present: usize, total: i64) -> String
     }
 }
 
+/// A regex that is known to be valid.
 fn re(p: &str) -> regex::Regex {
     regex::Regex::new(p).unwrap()
 }
@@ -244,13 +260,18 @@ static SONG_MARKS: LazyLock<[(regex::Regex, &'static str); 3]> = LazyLock::new(|
 /// Where the facts came from.
 #[derive(Clone, Copy, PartialEq, Debug)]
 enum Src {
+    /// MusicBrainz's release group
     Mb,
+    /// a provider's release (deezer, apple, discogs)
     Provider(&'static str),
+    /// the files' type tags
     Tags,
+    /// nothing: the titles alone
     None,
 }
 
 impl Src {
+    /// The rule key for [`why_text`].
     fn why(self) -> &'static str {
         match self {
             Src::Mb => "musicbrainz",
@@ -261,6 +282,7 @@ impl Src {
     }
 }
 
+/// The provider key of a facts source.
 fn provider_key(source: &str) -> &'static str {
     match source {
         "apple" => "apple",
@@ -409,6 +431,7 @@ pub fn classify(a: &AlbumIn) -> Class {
 /// Which albums a list shows (`type=`, `kind=` of GET /api/library/albums and /index).
 #[derive(Clone, Debug, PartialEq)]
 pub enum Pick {
+    /// every album
     All,
     /// every album but the One-offs (the phone's list, the side index without a tab)
     NoOneOffs,
@@ -440,6 +463,7 @@ impl Pick {
         })
     }
 
+    /// An album with this class is in the list (one with no class counts as an album).
     pub fn wants(&self, c: Option<&Class>) -> bool {
         let d = Class::default();
         let c = c.unwrap_or(&d);
@@ -460,13 +484,17 @@ impl Pick {
 /// Every album's class, by album id.
 pub type Classes = Arc<HashMap<String, Class>>;
 
+/// The album classes, worked out once per state of the library.
 #[derive(Clone, Default)]
 pub struct Types {
+    /// the classes and the library version they were made at
     kept: Arc<Mutex<Option<(u64, Classes)>>>,
+    /// one build at a time
     building: Arc<Mutex<()>>,
 }
 
 impl Types {
+    /// The classes for the library as it is now (built when the library changed).
     pub fn get(&self, db: &Db) -> Classes {
         let fresh = |v: u64| self.kept.lock().unwrap_or_else(|e| e.into_inner()).as_ref().filter(|(at, _)| *at == v).map(|(_, m)| m.clone());
         if let Some(m) = fresh(db.library_version()) {
@@ -530,10 +558,13 @@ pub fn build(db: &Db) -> HashMap<String, Class> {
 pub struct Facts {
     /// musicbrainz | deezer | apple | discogs
     pub source: &'static str,
+    /// the release (group)'s id there
     pub id: String,
     /// Album | EP | Single | Broadcast | Other ('' none given)
     pub primary: String,
+    /// its secondary types
     pub secondary: Vec<String>,
+    /// songs on it (0 unknown)
     pub tracks: i64,
 }
 
@@ -660,8 +691,11 @@ pub const LOOK_AGAIN_AFTER: f64 = 30.0 * 86400.0;
 /// What one run did.
 #[derive(Default, Debug, PartialEq)]
 pub struct Run {
+    /// songs whose type tags were read
     pub tags_read: usize,
+    /// albums looked up on MusicBrainz
     pub looked_up: usize,
+    /// of those, albums MusicBrainz didn't know
     pub not_found: usize,
 }
 
@@ -711,10 +745,15 @@ pub fn read_missing_tags(db: &Db, busy: &encore_jobs::Busy) -> usize {
 /// An album step B may look up.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Candidate {
+    /// its album id
     pub album_id: String,
+    /// its title
     pub album: String,
+    /// songs it has here
     pub songs: i64,
+    /// its release group, when its songs carry one
     pub rgid: String,
+    /// one of its songs' MusicBrainz recording, to find its releases by
     pub recording: String,
     /// max(tracktotal, highest track number): the release group itself has no one count of songs
     pub total: i64,
@@ -775,10 +814,13 @@ pub async fn look_up(st: &impl crate::Ctx, c: &Candidate) -> anyhow::Result<Opti
 
 /// One looked-up album's answer, waiting to be written.
 enum Found {
+    /// an album's facts
     Facts(String, Facts),
+    /// an album MusicBrainz didn't know
     Unknown(String),
 }
 
+/// Write the looked-up answers in one transaction, then clear them.
 fn write_found(db: &Db, found: &mut Vec<Found>) {
     if found.is_empty() {
         return;

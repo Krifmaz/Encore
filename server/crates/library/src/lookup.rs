@@ -229,6 +229,7 @@ pub fn songs_owned(db: &Db, pairs: &[(String, String)]) -> Vec<bool> {
 /// Requests of one kind for these (artist, title) pairs and these MusicBrainz ids, newest first, without the
 /// denied and cancelled ones (a caller that skips failed ones too filters them).
 pub struct Requests {
+    /// the matching request rows, newest first
     rows: Vec<Row>,
 }
 

@@ -15,6 +15,7 @@ pub fn order(table: &[(&str, &str, &str)], key: &str, dir: &str, default: &str) 
     expr.replace("{d}", &d.to_uppercase())
 }
 
+/// The album list's sorts: (key, ORDER BY with `{d}` for the direction, default direction).
 pub const ALBUM_SORTS: &[(&str, &str, &str)] = &[
     ("name", "lower(albumartist) {d}, year, lower(album), album_id", "asc"),
     ("artist", "lower(albumartist) {d}, year, album_id", "asc"),
@@ -27,6 +28,7 @@ pub const ALBUM_SORTS: &[(&str, &str, &str)] = &[
     ("duration", "duration {d}, album_id", "desc"),
     ("size", "size {d}, album_id", "desc"),
 ];
+/// The song list's sorts: (key, ORDER BY with `{d}` for the direction, default direction).
 pub const TRACK_SORTS: &[(&str, &str, &str)] = &[
     ("artist", "lower(artist) {d}, lower(album), disc, track, id", "asc"),
     ("title", "lower(title) {d}, id", "asc"),

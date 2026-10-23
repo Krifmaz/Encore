@@ -15,12 +15,15 @@ use serde_json::{json, Value};
 use std::collections::HashMap;
 use std::sync::LazyLock;
 
+/// " - Single" / " - EP" at the end of a title (lower case).
 static RE_SUFFIX: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"\s+-\s+(single|ep)$").unwrap());
+/// A featured-artist note: "(feat. X)", "[with X]", or " feat. X" to the end.
 static RE_FEAT: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"[\(\[]\s*(feat\.?|ft\.?|featuring|with)\s[^\)\]]*[\)\]]|\s+(feat\.|ft\.|featuring)\s.*$").unwrap());
+/// An edition note in brackets: "(Deluxe Edition)", "[Remastered 2011]" …
 static RE_EDITION: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"[\(\[][^\)\]]*(deluxe|edition|remaster|version|expanded|anniversary|explicit|clean|bonus)[^\)\]]*[\)\]]").unwrap());
 
 /// The key a release title is compared by: without " - Single" / " - EP", featured artists ("(feat. X)") and
-/// edition notes ("(Deluxe Edition)", "[Remastered]" …), accents dropped, "&" read as "and", then letters,
+/// edition notes ("(Deluxe Edition)", "\[Remastered\]" …), accents dropped, "&" read as "and", then letters,
 /// digits and underscores.
 pub fn title_key(title: &str) -> String {
     use unicode_normalization::UnicodeNormalization;
@@ -31,6 +34,7 @@ pub fn title_key(title: &str) -> String {
     encore_core::text::norm_keep_underscore(&t)
 }
 
+/// How alike two release titles are by their [`title_key`]s, 0..1.
 pub fn similar(a: &str, b: &str) -> f64 {
     let (a, b) = (title_key(a), title_key(b));
     if a.is_empty() || b.is_empty() {
@@ -39,6 +43,7 @@ pub fn similar(a: &str, b: &str) -> f64 {
     crate::matcher::sim(&a, &b)
 }
 
+/// A Harmony link that looks these releases up (`url=` each, and the barcode as `gtin=`).
 pub fn harmony_url(urls: &[String], upc: Option<&str>) -> String {
     let mut q: Vec<String> = urls.iter().map(|u| format!("url={}", urlencoding::encode(u))).collect();
     if let Some(u) = upc.filter(|u| !u.is_empty()) {
@@ -48,6 +53,7 @@ pub fn harmony_url(urls: &[String], upc: Option<&str>) -> String {
     format!("https://harmony.pulsewidth.org.uk/release?{}", q.join("&"))
 }
 
+/// "EP", "Single", "Compilation" or "Album" from a service's type and its title's suffix.
 pub fn kind_of(kind: &str, title: &str) -> &'static str {
     let k = kind.to_lowercase();
     if k == "ep" || title.ends_with(" - EP") {
@@ -61,6 +67,7 @@ pub fn kind_of(kind: &str, title: &str) -> &'static str {
     }
 }
 
+/// A length in seconds from a number, an ISO 8601 duration ("PT3M25S") or "m:ss" / "h:mm:ss"; null when none.
 pub fn dur(v: &Value) -> Value {
     if let Some(n) = v.as_f64() {
         return json!(n);
@@ -82,18 +89,22 @@ pub fn dur(v: &Value) -> Value {
 
 // ---- the catalogue merge: Deezer, Apple Music, Bandcamp and Discogs onto MusicBrainz ---------------
 
+/// Deezer album lookups (UPC and ISRC) per artist.
 const MAX_DEEP: i32 = 25; // Deezer album lookups (UPC + ISRC) per artist
+/// MusicBrainz ISRC lookups per artist.
 const MAX_ISRC: i32 = 8; // MusicBrainz ISRC lookups per artist
 
 
 
 // ---- finding the artist on each service ------------------------------------------------------
 
+/// The first capture of `re` in any of the URLs.
 fn from_urls(urls: &[String], re: &str) -> Option<String> {
     let re = Regex::new(re).unwrap();
     urls.iter().find_map(|u| re.captures(u).map(|c| c[1].to_string()))
 }
 
+/// The artist's Deezer id: from MusicBrainz's links, else a search by name.
 async fn deezer_artist(st: &impl Ctx, name: &str, urls: &[String]) -> anyhow::Result<Option<String>> {
     if let Some(id) = from_urls(urls, r"deezer\.com/(?:\w+/)?artist/(\d+)") {
         return Ok(Some(id));
@@ -103,6 +114,7 @@ async fn deezer_artist(st: &impl Ctx, name: &str, urls: &[String]) -> anyhow::Re
         .max_by_key(|a| a["nb_fan"].as_i64().unwrap_or(0)).map(|a| a["id"].to_string()))
 }
 
+/// The artist's Apple Music id: from MusicBrainz's links, else a search by name.
 async fn apple_artist(st: &impl Ctx, name: &str, urls: &[String]) -> anyhow::Result<Option<String>> {
     if let Some(id) = from_urls(urls, r"(?:music|itunes)\.apple\.com/.*?/artist/(?:[^/]+/)?(?:id)?(\d+)") {
         return Ok(Some(id));
@@ -111,6 +123,7 @@ async fn apple_artist(st: &impl Ctx, name: &str, urls: &[String]) -> anyhow::Res
     Ok(d["results"].as_array().cloned().unwrap_or_default().into_iter().find(|a| title_key(&s(&a["artistName"])) == title_key(name)).map(|a| a["artistId"].to_string()))
 }
 
+/// The artist's Discogs id: from MusicBrainz's links, else a search by name (with a Discogs token).
 async fn discogs_artist(st: &impl Ctx, name: &str, urls: &[String]) -> anyhow::Result<Option<String>> {
     if let Some(id) = from_urls(urls, r"discogs\.com/(?:\w+/)?artist/(\d+)") {
         return Ok(Some(id));
@@ -124,6 +137,7 @@ async fn discogs_artist(st: &impl Ctx, name: &str, urls: &[String]) -> anyhow::R
         .find(|a| title_key(&num.replace(&s(&a["title"]), "")) == title_key(name)).map(|a| a["id"].to_string()))
 }
 
+/// The artist's Bandcamp site: from MusicBrainz's links, else a search by name.
 async fn bandcamp_artist(st: &impl Ctx, name: &str, urls: &[String]) -> anyhow::Result<Option<String>> {
     if let Some(b) = from_urls(urls, r"^(https?://[\w-]+\.bandcamp\.com)") {
         return Ok(Some(b));
@@ -136,10 +150,12 @@ async fn bandcamp_artist(st: &impl Ctx, name: &str, urls: &[String]) -> anyhow::
 
 // ---- their discographies --------------------------------------------------------------------
 
+/// A `sources` list of one: the service, its id and the release's page.
 fn src(name: &str, id: Value, url: String) -> Value {
     json!([{ "name": name, "id": id, "url": url }])
 }
 
+/// The artist's albums on Deezer, as catalogue entries.
 async fn deezer_albums(st: &impl Ctx, aid: &str) -> anyhow::Result<Vec<Value>> {
     let d = getj(deezer::artist_albums(st, aid, 300)).await?;
     Ok(d["data"].as_array().cloned().unwrap_or_default().iter().map(|a| {
@@ -150,6 +166,7 @@ async fn deezer_albums(st: &impl Ctx, aid: &str) -> anyhow::Result<Vec<Value>> {
     }).collect())
 }
 
+/// The artist's albums on Apple Music, as catalogue entries.
 async fn apple_albums(st: &impl Ctx, aid: &str) -> anyhow::Result<Vec<Value>> {
     let d = getj(apple::lookup(st, aid, "album", Some(200))).await?;
     Ok(d["results"].as_array().cloned().unwrap_or_default().iter().filter(|a| a["wrapperType"] == "collection").map(|a| {
@@ -162,8 +179,10 @@ async fn apple_albums(st: &impl Ctx, aid: &str) -> anyhow::Result<Vec<Value>> {
                 "explicit": a["collectionExplicitness"] == "explicit", "sources": src("Apple Music", id, url) })
     }).collect())
 }
+/// " - Single" / " - EP" at the end of a title, as Apple writes it.
 static RE_SUFFIX_CASE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"\s+-\s+(Single|EP)$").unwrap());
 
+/// A Discogs format's type: "Single", "EP", "Compilation" or "Album".
 fn discogs_type(fmt: &str) -> &'static str {
     let f = fmt.to_lowercase();
     if f.contains("single") {
@@ -177,6 +196,7 @@ fn discogs_type(fmt: &str) -> &'static str {
     }
 }
 
+/// The artist's releases on Discogs (up to three pages), as catalogue entries.
 async fn discogs_albums(st: &impl Ctx, aid: &str) -> anyhow::Result<Vec<Value>> {
     let mut out = vec![];
     for page in 1..=3 {
@@ -200,6 +220,7 @@ async fn discogs_albums(st: &impl Ctx, aid: &str) -> anyhow::Result<Vec<Value>> 
     Ok(out)
 }
 
+/// The first JSON-LD block of a page.
 fn ld(html: &str) -> Value {
     let re = Regex::new(r#"(?s)<script type="application/ld\+json"[^>]*>(.*?)</script>"#).unwrap();
     for c in re.captures_iter(html) {
@@ -212,8 +233,10 @@ fn ld(html: &str) -> Value {
     json!({})
 }
 
+/// Month names as Bandcamp writes them.
 const MONTHS: [&str; 12] = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
 
+/// A Bandcamp date as YYYY-MM-DD.
 fn bc_date(d: &str) -> String {
     // "05 Mar 2021 00:00:00 GMT" or "2021-03-05"
     let p: Vec<&str> = d.split_whitespace().collect();
@@ -225,6 +248,7 @@ fn bc_date(d: &str) -> String {
     if d.len() >= 10 && d.as_bytes()[4] == b'-' { d[..10].to_string() } else { String::new() }
 }
 
+/// A Bandcamp release as a catalogue entry, from its page's JSON-LD.
 fn bc_album(url: &str, ld: &Value, fallback_title: &str, cover: Option<String>) -> Value {
     let n = ld["numTracks"].as_i64()
         .or_else(|| ld["track"]["itemListElement"].as_array().map(|a| a.len() as i64).filter(|n| *n > 0))
@@ -236,6 +260,7 @@ fn bc_album(url: &str, ld: &Value, fallback_title: &str, cover: Option<String>) 
             "tracks": n, "explicit": false, "sources": src("Bandcamp", json!(url), url.into()) })
 }
 
+/// The releases on a Bandcamp site's /music page, as catalogue entries.
 async fn bandcamp_albums(st: &impl Ctx, base: &str) -> anyhow::Result<Vec<Value>> {
     let r = st.http().get(format!("{base}/music")).send().await?;
     let final_url = r.url().to_string();
@@ -265,6 +290,7 @@ async fn bandcamp_albums(st: &impl Ctx, base: &str) -> anyhow::Result<Vec<Value>
 
 // ---- tracklists (requesting a release MusicBrainz doesn't have) --------------------------------
 
+/// The tracks of a release MusicBrainz doesn't have, from the service the entry came from.
 pub async fn tracklist(st: &impl Ctx, ext: &Value) -> anyhow::Result<Vec<Value>> {
     let t = |title: Value, artist: Value, length: Value, isrc: Value, n: Value, disc: Value| json!({
         "title": title, "artist": artist, "length": length, "isrc": isrc, "track": n, "disc": disc, "recording_id": null });
@@ -388,6 +414,7 @@ pub fn grouped(filter: &ReleaseFilter, items: &[Value]) -> Vec<Value> {
 
 // ---- merging --------------------------------------------------------------------------------
 
+/// The release group a service's release is: same type (EPs and singles may meet), and a title that matches (a close one in the same year).
 fn fuzzy<'a>(ext: &Value, rgs: &'a [Value]) -> Option<&'a Value> {
     let y: String = s(&ext["date"]).chars().take(4).collect();
     let et = s(&ext["type"]);
@@ -403,11 +430,15 @@ fn fuzzy<'a>(ext: &Value, rgs: &'a [Value]) -> Option<&'a Value> {
     })
 }
 
+/// What the deep matching may still ask per artist.
 struct Budget {
+    /// Deezer album lookups left
     deep: i32,
+    /// MusicBrainz ISRC lookups left
     isrc: i32,
 }
 
+/// Match a Deezer release by its barcode, else by its first ISRC's release groups. True when it is one MusicBrainz has.
 async fn deep_match(st: &impl Ctx, ext: &mut Value, barcodes: &HashMap<String, String>, rgs_by_id: &HashMap<String, Value>, b: &mut Budget) -> anyhow::Result<bool> {
     let Some(dz) = ext["sources"].as_array().and_then(|a| a.iter().find(|s| s["name"] == "Deezer")).map(|s| s["id"].to_string()) else { return Ok(false) };
     if b.deep <= 0 {
@@ -442,8 +473,10 @@ async fn deep_match(st: &impl Ctx, ext: &mut Value, barcodes: &HashMap<String, S
     Ok(false)
 }
 
+/// The services merged onto MusicBrainz: (their name in `sources`, their key).
 const EXT_KEYS: [(&str, &str); 4] = [("Deezer", "deezer"), ("Apple Music", "apple"), ("Bandcamp", "bandcamp"), ("Discogs", "discogs")];
 
+/// The artist's catalogue: MusicBrainz's release groups plus the releases only Deezer, Apple Music, Bandcamp or Discogs have (cached).
 pub async fn merged(st: &impl Ctx, artist: &Value) -> Vec<Value> {
     let aid = s(&artist["id"]);
     let key = format!("catalog:{aid}");

@@ -150,6 +150,7 @@ pub fn greek(text: &str) -> String {
     out
 }
 
+/// A Greek letter in Latin letters (modern Greek sounds); None for anything else.
 fn greek_letter(c: char) -> Option<&'static str> {
     Some(match c {
         'α' => "a", 'β' => "v", 'γ' => "g", 'δ' => "d", 'ε' => "e", 'ζ' => "z", 'η' => "i", 'θ' => "th",

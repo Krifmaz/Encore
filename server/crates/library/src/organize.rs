@@ -12,8 +12,10 @@ use regex::Regex;
 use serde_json::{json, Value};
 use std::path::{Path, PathBuf};
 
+/// The columns organize reads.
 const COLS: &str = "SELECT id, path, title, artist, album, albumartist, track, disc, year, genre, album_id FROM tracks";
 
+/// A tag value that says nothing ("", "Unknown Artist", "_", "0", …).
 fn unknown(v: &Value) -> bool {
     let s = match v { Value::String(s) => s.trim().to_lowercase(), Value::Null => String::new(), x => x.to_string() };
     ["", "unknown artist", "unknown album", "_", "0"].contains(&s.as_str())
@@ -37,6 +39,7 @@ pub fn from_filename(path: &Path) -> Row {
     out
 }
 
+/// Album, album artist, year, track and genre for a song, from Deezer's first match (empty when none).
 async fn deezer(st: &impl Ctx, artist: &str, title: &str) -> Row {
     let mut out = Row::new();
     let Ok(r) = encore_http::deezer::search(st, "track", &format!("artist:\"{artist}\" track:\"{title}\""), 3).send().await else { return out };
@@ -121,6 +124,7 @@ async fn fill(st: &impl Ctx, t: &Row) -> (Row, Row) {
     (fix, t)
 }
 
+/// The file extension with its dot ("" for none).
 fn ext(p: &Path) -> String {
     p.extension().map(|e| format!(".{}", e.to_string_lossy())).unwrap_or_default()
 }
@@ -150,6 +154,7 @@ pub async fn organize_track(st: &impl Ctx, id: i64) -> Option<PathBuf> {
     Some(new)
 }
 
+/// The Organize job: every song in the library folder moved to where its tags say (`fill_missing`: missing tags filled in first).
 pub async fn organize_library(st: impl Ctx, fill_missing: bool) {
     let rows = st.db().query(&format!("{COLS} ORDER BY album_id, disc, track"), p![]).unwrap_or_default();
     if !st.jobs().start("organize", json!({ "done": 0, "total": rows.len(), "moved": 0, "fixed": 0, "current": "", "message": "" })) {

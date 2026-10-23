@@ -16,7 +16,9 @@
 //!
 //! Each word made from Hangul starts with a capital letter; other characters stay as they are.
 
+/// The initial consonants in Unicode order, romanized (ㅇ silent).
 const INITIALS: [&str; 19] = ["g", "kk", "n", "d", "tt", "r", "m", "b", "pp", "s", "ss", "", "j", "jj", "ch", "k", "t", "p", "h"];
+/// The vowels in Unicode order, romanized.
 const VOWELS: [&str; 21] = ["a", "ae", "ya", "yae", "eo", "e", "yeo", "ye", "o", "wa", "wae", "oe", "yo", "u", "wo", "we", "wi", "yu", "eu", "ui", "i"];
 /// The final consonant before another consonant or at the end (index 0: none).
 const FINALS: [&str; 28] = ["", "k", "k", "k", "n", "n", "n", "t", "l", "k", "m", "l", "l", "l", "p", "l", "m", "p", "p", "t", "t", "ng", "t", "t", "k", "t", "p", "t"];
@@ -27,6 +29,7 @@ const JAMO_CONSONANTS: [&str; 30] = ["g", "kk", "gs", "n", "nj", "nh", "d", "tt"
 
 /// ㄹ as an initial, ㅇ as an initial.
 const RIEUL: usize = 5;
+/// The index of ㅇ among the initials.
 const IEUNG: usize = 11;
 
 /// The finals with ㅎ (ㄶ, ㅀ, ㅎ): before ㄱ, ㄷ or ㅈ they make it k, t or ch, and leave what they write

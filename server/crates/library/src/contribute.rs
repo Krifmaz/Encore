@@ -341,26 +341,39 @@ pub async fn worker(st: impl Ctx) {
 
 // ---- MusicBrainz release editor seeding ------------------------------------------------------------
 
+/// A track of a MusicBrainz seed.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct SeedTrack {
+    /// its title
     pub title: String,
+    /// its artist credit
     pub artist: String,
+    /// its length, ms
     pub length_ms: Option<i64>,
+    /// its disc number
     pub disc: i64,
+    /// its track number
     pub number: i64,
 }
 
+/// What a MusicBrainz "add release" seed carries.
 #[derive(Debug, Clone, Default)]
 pub struct SeedAlbum {
+    /// the release title
     pub title: String,
     /// credited artists in order (name, MusicBrainz id when known)
     pub artists: Vec<(String, Option<String>)>,
     /// MusicBrainz primary type ("album", "ep", "single") and secondary types ("compilation")
     pub types: Vec<String>,
+    /// the release date (YYYY-MM-DD, or part of it)
     pub date: String,
+    /// the label
     pub label: String,
+    /// the catalog number
     pub catalog_number: String,
+    /// the barcode
     pub barcode: String,
+    /// the tracks
     pub tracks: Vec<SeedTrack>,
     /// (url, MusicBrainz release-url link type id)
     pub urls: Vec<(String, u32)>,
@@ -370,7 +383,9 @@ pub struct SeedAlbum {
 
 /// Release-url link types: free streaming (Deezer), streaming (Apple Music), purchase for download (iTunes).
 pub const LINK_FREE_STREAMING: u32 = 85;
+/// Release-url link type: streaming.
 pub const LINK_STREAMING: u32 = 980;
+/// Release-url link type: purchase for download.
 pub const LINK_PURCHASE_DOWNLOAD: u32 = 74;
 
 /// (ISO 639-3 language, ISO 15924 script) from the titles – only when the guess is a safe one.

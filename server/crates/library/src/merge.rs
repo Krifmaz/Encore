@@ -18,13 +18,17 @@ use std::collections::{HashMap, HashSet};
 /// One library album as the merge sees it.
 #[derive(Clone, Debug)]
 pub struct Album {
+    /// the album id
     pub id: String,
+    /// its album artist
     pub artist: String,
+    /// its title
     pub title: String,
     /// the release group most of its songs carry ('' none)
     pub rg: String,
     /// the first word of the RELEASETYPE tag, lower case ('' none)
     pub kind: String,
+    /// how many songs it has
     pub tracks: i64,
     /// its first song's row id: the older album wins a tie
     pub first: i64,
@@ -39,10 +43,12 @@ pub fn artist_key(s: &str) -> String {
     crate::artists::key(&s[..cut.min(s.len())])
 }
 
+/// The first word of a RELEASETYPE tag, lower case.
 fn kind_of(releasetype: &str) -> String {
     releasetype.to_lowercase().split(|c: char| !c.is_alphanumeric()).find(|w| !w.is_empty()).unwrap_or("").to_string()
 }
 
+/// Two albums' release types don't disagree (an unknown one agrees with any).
 fn kinds_agree(a: &Album, b: &Album) -> bool {
     a.kind.is_empty() || b.kind.is_empty() || a.kind == b.kind
 }

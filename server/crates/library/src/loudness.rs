@@ -27,6 +27,7 @@ pub const REFERENCE_LUFS: f64 = -18.0;
 /// worked out from it.
 const SILENCE_LUFS: f64 = -70.0;
 
+/// `v` rounded to `places` decimals.
 fn round(v: f64, places: i32) -> f64 {
     let m = 10f64.powi(places);
     (v * m).round() / m
@@ -37,6 +38,7 @@ fn gain2(v: f64) -> f64 {
     round(v, 2)
 }
 
+/// A peak to four decimals.
 fn peak4(v: f64) -> f64 {
     round(v, 4)
 }
@@ -56,6 +58,7 @@ pub enum TagColumns {
     AlbumOnly([Value; 2]),
 }
 
+/// What the scan writes into [`COLUMNS`] for a file whose tags say `g` (see [`TagColumns`]).
 pub fn tag_columns(g: &GainTags, keep_measured: bool) -> TagColumns {
     match g.track_gain {
         None if keep_measured => TagColumns::AlbumOnly([json!(g.album_gain.map(gain2)), json!(g.album_peak.map(peak4))]),
@@ -84,26 +87,38 @@ pub fn keeps_measurement(old_source: &str, old_duration: f64, duration: f64) -> 
 /// One song's loudness columns.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct SongLoudness {
+    /// its album id
     pub album_id: String,
+    /// track gain, dB
     pub track_gain: Option<f64>,
+    /// track peak, linear
     pub track_peak: Option<f64>,
+    /// album gain, dB
     pub album_gain: Option<f64>,
+    /// album peak, linear
     pub album_peak: Option<f64>,
+    /// integrated loudness, LUFS
     pub lufs: Option<f64>,
+    /// where the loudness came from ('tags', 'measured', …)
     pub source: Option<String>,
+    /// its sample rate, Hz
     pub sample_rate: Option<i64>,
+    /// its bit depth
     pub bit_depth: Option<i64>,
 }
 
+/// A finite number column, else None.
 fn opt_f(r: &Row, k: &str) -> Option<f64> {
     r.get(k).and_then(Value::as_f64).filter(|v| v.is_finite())
 }
 
+/// A positive whole number column, else None.
 fn opt_i(r: &Row, k: &str) -> Option<i64> {
     r.get(k).and_then(|v| v.as_i64().or_else(|| v.as_f64().map(|f| f as i64))).filter(|v| *v > 0)
 }
 
 impl SongLoudness {
+    /// The loudness of a song row ([`SONG_COLS`]).
     fn from_row(r: &Row) -> Self {
         SongLoudness {
             album_id: r.s("album_id"),
@@ -119,15 +134,19 @@ impl SongLoudness {
     }
 }
 
+/// The columns [`SongLoudness::from_row`] reads.
 const SONG_COLS: &str = "id, album_id, rg_track_gain, rg_track_peak, rg_album_gain, rg_album_peak, loudness_lufs, loudness_source, sample_rate, bit_depth";
 
 /// What an album's songs say together (every song with the same `album_id` counts once).
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct AlbumLoudness {
+    /// songs counted
     pub songs: usize,
     /// songs with an album gain tag / an album peak tag / a loudness
     pub with_album_gain: usize,
+    /// songs with an album peak tag
     pub with_album_peak: usize,
+    /// songs with a loudness
     pub with_lufs: usize,
     /// sum of 10^(LUFS / 10) over the songs with a loudness
     pub energy: f64,
@@ -136,6 +155,7 @@ pub struct AlbumLoudness {
 }
 
 impl AlbumLoudness {
+    /// Count one song of the album.
     pub fn add(&mut self, s: &SongLoudness) {
         self.songs += 1;
         self.with_album_gain += s.album_gain.is_some() as usize;
@@ -230,6 +250,7 @@ fn song_of(o: &Map<String, Value>) -> Option<i64> {
     .filter(|id| *id > 0)
 }
 
+/// The song ids in `v`.
 fn collect(v: &Value, out: &mut Vec<i64>) {
     match v {
         Value::Array(a) => a.iter().for_each(|x| collect(x, out)),
@@ -244,6 +265,7 @@ fn collect(v: &Value, out: &mut Vec<i64>) {
 /// The raw columns a row may carry (`SELECT t.*`): the stamp puts `gain` in their place.
 const RAW: [&str; 6] = COLUMNS;
 
+/// Put each song's `gain` object (and sample rate, bit depth) in its JSON, in place of the raw columns.
 fn apply(v: &mut Value, songs: &HashMap<i64, SongLoudness>, albums: &HashMap<String, AlbumLoudness>) {
     match v {
         Value::Array(a) => a.iter_mut().for_each(|x| apply(x, songs, albums)),
@@ -327,7 +349,9 @@ impl Default for Limits {
 /// Why a run stopped before the end.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Stop {
+    /// it used its time budget
     Time,
+    /// the app was in use too long
     Busy,
 }
 
@@ -344,6 +368,7 @@ pub struct Run {
     pub failed: usize,
     /// songs still to measure after the run
     pub left: i64,
+    /// why it stopped early, if it did
     pub stopped: Option<Stop>,
     /// ffmpeg is missing: only tags were read
     pub no_ffmpeg: bool,
@@ -556,9 +581,13 @@ fn measurable(lufs: Option<f64>) -> bool {
 
 /// One song's measurement: (integrated LUFS, true peak dBTP) and the mtime of the file it was made of.
 struct Measured {
+    /// the song's row id
     id: i64,
+    /// the file's modification time it was measured at
     mtime: f64,
+    /// integrated loudness, LUFS
     lufs: Option<f64>,
+    /// true peak, dBTP
     peak_db: Option<f64>,
     /// taken from the quality scan's report of the same file
     from_quality: bool,

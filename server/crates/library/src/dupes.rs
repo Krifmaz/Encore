@@ -9,6 +9,7 @@ use serde_json::{json, Value};
 use std::collections::HashMap;
 use std::path::Path;
 
+/// Fingerprint-check one song and save the verdict (verified, mismatch or unknown) on its row.
 pub async fn verify_track(st: &impl Ctx, t: &Row) -> anyhow::Result<Value> {
     let dur = Some(t.f("duration")).filter(|d| *d > 0.0);
     let res = acoustid::check_file(st, Path::new(&t.s("path")), &t.s("title"), &t.s("artist"), dur, Some(&t.s("mb_trackid"))).await?;
@@ -18,6 +19,7 @@ pub async fn verify_track(st: &impl Ctx, t: &Row) -> anyhow::Result<Value> {
     Ok(res)
 }
 
+/// The Verify job: fingerprint-check every song (`only_new`: only those never checked); a song confirmed by hand is skipped.
 pub async fn verify_library(st: impl Ctx, only_new: bool) {
     // songs confirmed by hand ("manual") are never second-guessed by the fingerprint check
     let w = if only_new { "WHERE verify_status IS NULL" } else { "WHERE verify_status IS NOT 'manual'" };

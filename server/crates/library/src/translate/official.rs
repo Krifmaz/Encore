@@ -19,9 +19,12 @@ use std::collections::HashMap;
 /// One official result: (kind, original text, translation, romanization).
 pub type Found = (Kind, String, Option<String>, Option<String>);
 
+/// What an official pseudo-release gives.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Role {
+    /// a translation of the titles
     Translation,
+    /// a transliteration (romanization) of the titles
     Transliteration,
 }
 

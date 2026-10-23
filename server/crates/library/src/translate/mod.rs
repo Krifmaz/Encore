@@ -40,12 +40,15 @@ use std::time::Duration;
 #[derive(Clone, Default)]
 pub struct Translator(Arc<Inner>);
 
+/// The translator's shared state.
 #[derive(Default)]
 struct Inner {
     /// `active_targets` with the `Db::users_version` it was read at: looked up again only after a write
     /// to the accounts
     active: Mutex<Option<(u64, Vec<&'static str>)>>,
+    /// the titles waiting for the background pass
     queue: Mutex<Queue>,
+    /// wakes the background pass
     wake: tokio::sync::Notify,
     /// the model server while it runs
     server: tokio::sync::Mutex<Option<llama::Running>>,
@@ -63,8 +66,11 @@ struct Inner {
 /// makes a new one), and how many of the first ones are known to have a row already: each batch starts there
 /// instead of reading the whole songs table again.
 struct Backlog {
+    /// the artist index the candidates were worked out from
     index: Arc<crate::artists::Index>,
+    /// the texts that could need a translation, in order
     cands: Vec<Pending>,
+    /// how many of the first candidates are known to have a row
     known_upto: usize,
 }
 
@@ -111,6 +117,7 @@ impl Translator {
         }
     }
 
+    /// Take up to `n` titles off the queue.
     fn take_queued(&self, n: usize) -> Vec<Pending> {
         let mut q = self.0.queue.lock().unwrap();
         let n = n.min(q.0.len());
@@ -163,15 +170,21 @@ impl Translator {
 
 // ---- listener settings --------------------------------------------------------------------------
 
+/// How a listener sees translations (`translate_mode`).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Mode {
+    /// not at all
     Off,
+    /// the translation under the original
     Under,
+    /// the translation in place of the original
     Instead,
+    /// only a romanization of non-Latin text
     Romanized,
 }
 
 impl Mode {
+    /// The mode a stored name stands for (off for anything unknown).
     pub fn parse(s: &str) -> Mode {
         match s {
             "under" => Mode::Under,
@@ -221,12 +234,14 @@ fn is_artist(o: &serde_json::Map<String, Value>) -> bool {
     !o.contains_key("username") && !o.contains_key("title") && ["cover_album", "albums", "aliases", "disambiguation"].iter().any(|k| o.contains_key(*k))
 }
 
+/// The texts of one JSON object worth stamping: (field, kind, text).
 fn texts_of(o: &serde_json::Map<String, Value>) -> impl Iterator<Item = (&'static str, Kind, &str)> {
     let artist_name = is_artist(o);
     FIELDS.iter().map(|(f, k)| (*f, *k)).chain(artist_name.then_some(("name", Kind::Artist)))
         .filter_map(move |(f, k)| o.get(f).and_then(|v| v.as_str()).filter(|s| !s.trim().is_empty()).map(|s| (f, k, s)))
 }
 
+/// Every text in `v` worth translating: (text, kind, artist for context).
 fn collect(v: &Value, out: &mut Vec<(String, Kind, Option<String>)>) {
     match v {
         Value::Array(a) => a.iter().for_each(|x| collect(x, out)),
@@ -241,6 +256,7 @@ fn collect(v: &Value, out: &mut Vec<(String, Kind, Option<String>)>) {
     }
 }
 
+/// Add `<field>_t` / `<field>_r` to every object of `v` whose text has a known translation (never over a field that is there).
 fn apply(v: &mut Value, found: &HashMap<String, store::Shown>) {
     match v {
         Value::Array(a) => a.iter_mut().for_each(|x| apply(x, found)),
@@ -285,14 +301,20 @@ pub fn stamp(db: &Db, target: &str, v: &mut Value) -> Vec<(String, Kind, Option<
 
 // ---- the work queue -----------------------------------------------------------------------------
 
+/// One title waiting for the background pass.
 #[derive(Clone, Debug, PartialEq)]
 struct Pending {
+    /// the text
     text: String,
+    /// what it is
     kind: Kind,
+    /// its artist, as context
     artist: Option<String>,
+    /// the language it goes into
     target: &'static str,
 }
 
+/// The most titles the queue holds.
 const QUEUE_MAX: usize = 2000;
 /// The waiting titles in order, and the (text, target) pairs among them so nothing is queued twice.
 type Queue = (VecDeque<Pending>, HashSet<(String, &'static str)>);
@@ -304,6 +326,7 @@ pub fn wake(st: &impl Ctx) {
 
 /// Items per background batch, and the pause between batches (the work stays in the background).
 const BATCH: usize = 40;
+/// The pause between background batches.
 const PAUSE: Duration = Duration::from_secs(2);
 
 /// Library rows that mention any of these texts (title, album, artist or album artist).

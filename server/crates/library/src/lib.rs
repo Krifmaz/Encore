@@ -38,6 +38,7 @@ pub use scan::*;
 
 /// What the library functions need from the server.
 pub trait Ctx: encore_media::Ctx {
+    /// The library state the server keeps.
     fn library(&self) -> &Library;
     /// progress of the long jobs (verify, organize …)
     fn jobs(&self) -> &encore_jobs::Jobs;

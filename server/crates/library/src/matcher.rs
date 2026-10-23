@@ -7,6 +7,7 @@ use std::sync::LazyLock;
 use unicode_normalization::UnicodeNormalization;
 
 // version markers → category. Categories in IGNORED don't change the song's identity.
+/// Version markers in titles and the category each stands for.
 const VERSION_PATTERNS: [(&str, &str); 15] = [
     (r"\bslowed\b|\breverb\b|\bsped[\s-]*up\b|\bnightcore\b|\b8d\b|\bdaycore\b|\bchopped\b|\bbass[\s-]?boost(?:ed)?\b|\blo[\s-]?fi\b|\bpitched\b|\btik[\s-]?tok version\b|\bchipmunk(?:ed|s)?\b", "altered"),
     (r"\bkaraoke\b", "karaoke"),
@@ -24,19 +25,29 @@ const VERSION_PATTERNS: [(&str, &str); 15] = [
     (r"\bclean\b|\bexplicit\b|\bcensored\b", "explicitness"),
     (r"\bremaster(?:ed)?\b|\bmono\b|\bstereo\b|\bdeluxe\b|\bbonus\b|\banniversary\b|\boriginal mix\b|\balbum version\b|\bsingle version\b|\bfrom .*\b|\bsoundtrack\b|\bofficial\b|\bmusic video\b|\blyric(s| video)?\b|\bvisuali[sz]er\b|\baudio\b|\bvideo\b|\bhd\b|\bhq\b|\b4k\b|\bmv\b", "ignored"),
 ];
+/// Categories that don't change a song's identity.
 const IGNORED: [&str; 2] = ["ignored", "explicitness"];
 
+/// Each version pattern compiled twice: anywhere in a title, and at its end after a space.
 static PATS: LazyLock<Vec<(FRegex, FRegex, &'static str)>> = LazyLock::new(|| {
     VERSION_PATTERNS.iter().map(|(p, c)| (FRegex::new(p).unwrap(), FRegex::new(&format!(r"(?i)\s({p})\s*$")).unwrap(), *c)).collect()
 });
+/// A featured-artist note.
 static FEAT: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"(?i)\s*[\(\[]?\b(?:feat\.?|ft\.?|featuring|with)\s+[^\)\]]*[\)\]]?").unwrap());
+/// A bracketed part of a title.
 static GROUP: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"[\(\[\{]([^\)\]\}]*)[\)\]\}]").unwrap());
+/// A bracketed part that names featured artists.
 static FEAT_START: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"^\s*(feat|ft|featuring|with)\b").unwrap());
+/// What comes before "remix", "mix", "bootleg" … (the remixer).
 static REMIXER: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"^(.*?)\s*\b(?:remix|rmx|rework|re-work|bootleg|flip|vip|mix|dub)\b").unwrap());
+/// Words that are no part of a remixer's name.
 static REMIXER_CLEAN: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"\b(official|the|feat.*)\b").unwrap());
+/// Anything but letters, digits, white space and apostrophes.
 static NONWORD: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"[^\w\s']").unwrap());
+/// What separates artists in a credit (",", "&", "feat.", "x", "vs." …).
 static SPLIT_ARTISTS: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"(?i)\s*(?:,|;|/|&|\+|\bx\b|\band\b|\bfeat\.?|\bft\.?|\bfeaturing\b|\bvs\.?|\bwith\b)\s*").unwrap());
 
+/// Fold a text for comparing: accents dropped, lower case, "&" as "and", punctuation as spaces, one space between words.
 pub fn fold(s: &str) -> String {
     let s: String = s.nfkd().filter(|c| !unicode_normalization::char::is_combining_mark(*c)).collect::<String>().to_lowercase();
     let s = s.replace('&', " and ").replace('’', "'").replace('$', "s");
@@ -44,22 +55,32 @@ pub fn fold(s: &str) -> String {
     s.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
+/// A song as the matcher compares it.
 #[derive(Debug, Clone, Default)]
 pub struct Desc {
+    /// its length, seconds
     pub length: Option<f64>,
+    /// its ISRC, upper case without dashes
     pub isrc: Option<String>,
+    /// its MusicBrainz recording
     pub mbid: Option<String>,
+    /// the title without its version markers and featured artists, folded
     pub base: String,
+    /// the version categories its title names
     pub versions: BTreeSet<&'static str>,
+    /// who remixed it, folded
     pub remixer: String,
+    /// its artists, each folded
     pub artists: Vec<String>,
 }
 
+/// The artists of a credit, each folded.
 pub fn split_artists(artist: &str) -> Vec<String> {
     let out: Vec<String> = SPLIT_ARTISTS.split(artist).map(fold).filter(|p| !p.is_empty()).collect();
     if out.is_empty() { vec![fold(artist)] } else { out }
 }
 
+/// A fancy-regex match that counts an error as no match.
 fn is_match(re: &FRegex, s: &str) -> bool {
     re.is_match(s).unwrap_or(false)
 }
@@ -191,6 +212,7 @@ pub fn from_title_on(title: &str, candidate: &str) -> String {
     }
 }
 
+/// Describe a song for [`compare`].
 pub fn describe(title: &str, artist: &str, length: Option<f64>, isrc: Option<&str>, mbid: Option<&str>) -> Desc {
     let (base, versions, remixer) = parse_title(title);
     Desc {
@@ -229,6 +251,7 @@ pub fn ratio(a: &[char], b: &[char]) -> f64 {
     if total == 0 { 1.0 } else { 2.0 * matches(a, b) as f64 / total as f64 }
 }
 
+/// How alike two folded texts are, 0..1.
 pub fn sim(a: &str, b: &str) -> f64 {
     if a.is_empty() || b.is_empty() {
         return 0.0;
@@ -236,6 +259,7 @@ pub fn sim(a: &str, b: &str) -> f64 {
     if a == b { 1.0 } else { ratio(&a.chars().collect::<Vec<_>>(), &b.chars().collect::<Vec<_>>()) }
 }
 
+/// The best similarity between any of their artists (one name inside the other, 4+ letters, counts as 1).
 fn artist_score(a: &Desc, b: &Desc) -> f64 {
     let mut best: f64 = 0.0;
     for x in &a.artists {
@@ -247,12 +271,17 @@ fn artist_score(a: &Desc, b: &Desc) -> f64 {
     best
 }
 
+/// Whether two songs are the same recording, and why.
 #[derive(Debug, Clone)]
 pub struct Verdict {
+    /// they are
     pub matched: bool,
+    /// how sure, 0..1
     pub score: f64,
+    /// why, in words
     pub reason: String,
 }
+/// A verdict.
 fn v(m: bool, s: f64, r: impl Into<String>) -> Verdict {
     Verdict { matched: m, score: s, reason: r.into() }
 }
@@ -301,13 +330,18 @@ pub fn key(d: &Desc) -> String {
 
 /// In-memory index of library tracks for fast matching.
 pub struct LibraryIndex {
+    /// the songs
     pub rows: Vec<encore_db::Row>,
+    /// the first song of each MusicBrainz recording
     by_mbid: HashMap<String, usize>,
+    /// the first song of each ISRC
     by_isrc: HashMap<String, usize>,
+    /// the songs by the first word of their base title
     by_word: HashMap<String, Vec<(Desc, usize)>>,
 }
 
 impl LibraryIndex {
+    /// An index of these rows.
     pub fn new(rows: Vec<encore_db::Row>) -> Self {
         use encore_db::RowExt;
         let mut ix = LibraryIndex { rows: vec![], by_mbid: HashMap::new(), by_isrc: HashMap::new(), by_word: HashMap::new() };
@@ -326,10 +360,12 @@ impl LibraryIndex {
         ix
     }
 
+    /// An index of every library song.
     pub fn load(db: &encore_db::Db) -> Self {
         Self::new(db.query("SELECT id, path, title, artist, album, albumartist, album_id, duration, isrc, mb_trackid, format, bitrate FROM tracks", encore_db::p![]).unwrap_or_default())
     }
 
+    /// The library song `want` is, when there is one: by MusicBrainz recording, ISRC, then the title's first word and [`compare`].
     pub fn find(&self, want: &Desc) -> Option<(&encore_db::Row, Verdict)> {
         if let Some(i) = want.mbid.as_ref().and_then(|m| self.by_mbid.get(m)) {
             return Some((&self.rows[*i], v(true, 1.0, "same MusicBrainz recording")));
@@ -360,8 +396,10 @@ const SONGS_IDLE: std::time::Duration = std::time::Duration::from_secs(300);
 #[derive(Clone, Default)]
 pub struct Songs(std::sync::Arc<SongsInner>);
 
+/// The shared state of [`Songs`].
 #[derive(Default)]
 struct SongsInner {
+    /// the index while it is kept
     kept: std::sync::Mutex<Option<KeptSongs>>,
     /// one build at a time: callers that arrive meanwhile wait for it and use it
     build: std::sync::Mutex<()>,
@@ -369,14 +407,18 @@ struct SongsInner {
     reaping: std::sync::atomic::AtomicBool,
 }
 
+/// The index the library had at one version.
 struct KeptSongs {
     /// `Db::library_version` read before the songs were
     version: u64,
+    /// the index
     index: std::sync::Arc<LibraryIndex>,
+    /// when it was last used (it is dropped once idle)
     used: std::time::Instant,
 }
 
 impl Songs {
+    /// The kept index, locked.
     fn kept(&self) -> std::sync::MutexGuard<'_, Option<KeptSongs>> {
         self.0.kept.lock().unwrap_or_else(|e| e.into_inner())
     }

@@ -19,13 +19,19 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 /// One song as the split sees it.
 #[derive(Clone, Debug)]
 pub struct Song {
+    /// its row id
     pub id: i64,
+    /// its album id
     pub album_id: String,
+    /// its MusicBrainz release group ('' none)
     pub rg: String,
     /// the first four characters of its year tag ('' none)
     pub year: String,
+    /// its disc number
     pub disc: i64,
+    /// its track number
     pub track: i64,
+    /// its title
     pub title: String,
     /// another copy of a song the library has from MusicBrainz ([`crate::twins`]): it stays with the album it
     /// was merged into, whatever its year
@@ -35,10 +41,13 @@ pub struct Song {
 /// Songs of an album that become another album: `part` names them for the next scan.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Part {
+    /// the album it leaves
     pub album_id: String,
     /// 'rg:<release group>' or 'y:<year>'
     pub part: String,
+    /// the album id it becomes
     pub to_id: String,
+    /// its songs' row ids
     pub songs: Vec<i64>,
     /// other names the scan finds the same album by ('y:<year>' of a release group's songs)
     pub aliases: Vec<String>,
@@ -49,6 +58,7 @@ pub fn part_id(album_id: &str, part: &str) -> String {
     hex::encode(Sha1::digest(format!("{album_id}|{part}").as_bytes()))[..16].to_string()
 }
 
+/// A real four-digit year from a tag ("" for none or 0000).
 fn year_of(s: &str) -> String {
     let y: String = s.trim().chars().take(4).collect();
     if y.len() == 4 && y.chars().all(|c| c.is_ascii_digit()) && y != "0000" { y } else { String::new() }
@@ -201,6 +211,7 @@ pub fn edition_of(db: &impl encore_db::Query, album_id: &str, album: &str) -> St
     editions_named(db, Some(album)).remove(album_id).unwrap_or_default()
 }
 
+/// The editions of the albums that share a name (all, or only those titled `title`): album id → its MusicBrainz disambiguation, else its year when no other one of the name has it, else "".
 fn editions_named(db: &impl encore_db::Query, title: Option<&str>) -> HashMap<String, String> {
     let (cond, ps) = match title {
         Some(t) => ("AND lower(t.album)=lower(?)", p![t.trim()]),
@@ -256,6 +267,7 @@ pub fn names_wanted(db: &Db, limit: usize) -> Vec<String> {
     rows.iter().filter(|r| eds.contains_key(&r.s("album_id"))).map(|r| r.s("rg")).filter(|rg| seen.insert(rg.clone())).take(limit).collect()
 }
 
+/// Keep a release group's disambiguation (looked up now).
 pub fn store_name(db: &Db, rg: &str, disambiguation: &str) {
     if let Err(e) = db.execute("INSERT OR REPLACE INTO rg_names (rg, disambiguation, looked_up_at) VALUES (?,?,?)", p![rg, disambiguation.trim(), now()]) {
         tracing::warn!("album names: {e}");
