@@ -20,6 +20,8 @@ What it does:
   Cadenza (render ahead), volume normalization (Off / Track / Album, this device only), sound effects (EQ,
   crossfeed, balance, mono), song transitions, the Signal path
 - the full player's lyrics mode: the cover becomes a thumbnail and the lyrics take the screen (tap a line to seek)
+- the full player sideways: the lyrics fill the left half, the cover, title, seek bar and buttons the right; it
+  stays open when the phone is turned back upright
 - group listen: several people on the server hear the same queue at the same time, each on their own device
 - Cadenza on this phone (upsampling) and bit-perfect output to a USB DAC (Android 14+)
 - this phone as an Encore remote device (play here, send there, control another device)

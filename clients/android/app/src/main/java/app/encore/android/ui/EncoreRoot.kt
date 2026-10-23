@@ -201,8 +201,10 @@ private fun MainScreen(graph: AppGraph, player: PlayerConnection, session: Sessi
     // the activity through, or the system closing the app in the background)
     var tab by rememberSaveable { mutableStateOf(Tab.HOME) }
     val stack = remember { mutableStateListOf<Screen>() }
-    var showPlayer by remember { mutableStateOf(false) }
-    var showUpNext by remember { mutableStateOf(false) }
+    // saveable for the same reason: the open full player (and its Up next sheet) stays open when the phone is turned
+    // either way, even if the activity is made again, instead of dropping back to the page underneath
+    var showPlayer by rememberSaveable { mutableStateOf(false) }
+    var showUpNext by rememberSaveable { mutableStateOf(false) }
     var addToPlaylistIds by remember { mutableStateOf<List<Long>?>(null) }
     var trackMenuFor by remember { mutableStateOf<TrackMenuRequest?>(null) }
     val nowPlaying by player.nowPlaying.collectAsState()
