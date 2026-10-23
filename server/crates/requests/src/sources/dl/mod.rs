@@ -13,8 +13,10 @@ pub mod rtorrent;
 pub mod sab;
 pub mod transmission;
 
+/// What a download client says about one download.
 #[derive(Debug)]
 pub enum Poll {
+    /// Downloading: the share done (0–1) and a status line.
     Progress(f64, String),
     /// Waiting in the client's own queue (its limit of downloads at once is reached): not a stall, the
     /// download starts when the client's turn comes.
@@ -22,7 +24,9 @@ pub enum Poll {
     /// The client works on the files it has – it checks, repairs, unpacks or moves them (a finished
     /// download, mostly): progress as [`Poll::Progress`], but no stall Download now may give up.
     Busy(f64, String),
+    /// Finished: where its files are, as Encore sees them.
     Done(PathBuf),
+    /// Failed in the client, with the client's reason.
     Failed(String),
     /// The client doesn't list the download (yet): right after it was added the client may still be
     /// taking it in, later it is gone.
@@ -35,23 +39,34 @@ pub enum Poll {
 pub struct Outside {
     /// the prefixed id ("qbit:<hash>", "sab:<nzo id>")
     pub id: String,
+    /// the name the client shows
     pub name: String,
     /// its files as Encore sees them ([`local`])
     pub path: PathBuf,
 }
 
+/// The download clients Encore can hand releases to.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Client {
+    /// qBittorrent (Web API)
     Qbit,
+    /// Transmission (RPC)
     Transmission,
+    /// Deluge (Web JSON-RPC)
     Deluge,
+    /// rTorrent (XML-RPC)
     Rtorrent,
+    /// a torrent blackhole folder
     TorrentHole,
+    /// SABnzbd
     Sab,
+    /// NZBGet (JSON-RPC)
     NzbGet,
+    /// a usenet blackhole folder
     NzbHole,
 }
 
+/// Every client, for looking one up by its plugin id.
 const ALL: [Client; 8] = [Client::Qbit, Client::Transmission, Client::Deluge, Client::Rtorrent, Client::TorrentHole, Client::Sab, Client::NzbGet, Client::NzbHole];
 
 impl Client {
@@ -90,6 +105,7 @@ impl Client {
     pub fn of_plugin(id: &str) -> Option<Client> {
         ALL.into_iter().find(|c| c.plugin_id() == id)
     }
+    /// The prefix of this client's download ids ("qbit:<hash>").
     fn prefix(self) -> &'static str {
         match self {
             Client::Qbit => "qbit",
@@ -112,6 +128,7 @@ impl Client {
         }
         (Client::Qbit, id)
     }
+    /// The client's name as Settings shows it.
     pub fn name(self) -> &'static str {
         match self {
             Client::Qbit => "qBittorrent",
@@ -262,6 +279,7 @@ impl Client {
     }
 }
 
+/// The configured address under `key`, trimmed and without its trailing slash.
 pub(crate) fn base(st: &impl Ctx, key: &str) -> String {
     st.cfg().str(key).trim().trim_end_matches('/').to_string()
 }
@@ -301,6 +319,7 @@ pub(crate) fn delete_inside(st: &impl Ctx, path: &std::path::Path, key: &str) {
     }
 }
 
+/// A "<client> unreachable: …" error, the HTTP error in words without its query.
 pub(crate) fn unreachable(name: &str, e: reqwest::Error) -> anyhow::Error {
     anyhow::anyhow!("{name} unreachable: {}", http_error(e))
 }
@@ -331,8 +350,11 @@ pub fn http_error(e: reqwest::Error) -> String {
 
 // ---- torrents: files and magnets -----------------------------------------------------------------
 
+/// A release as a torrent client takes it.
 pub(crate) enum Fetched {
+    /// a magnet link
     Magnet(String),
+    /// the .torrent file's bytes
     File(Vec<u8>),
 }
 
@@ -450,6 +472,7 @@ pub(crate) fn magnet_info(m: &str) -> Option<(String, String)> {
     Some((hash?, name))
 }
 
+/// Decode RFC 4648 base32 (a magnet's 32-character info hash); `None` on a character outside the alphabet.
 fn base32(s: &str) -> Option<Vec<u8>> {
     let mut out = vec![];
     let (mut buf, mut bits) = (0u64, 0);

@@ -22,8 +22,11 @@ use tokio::sync::watch;
 
 /// The line keys (`line.source` in the API).
 pub const STREAMRIP: &str = "streamrip";
+/// yt-dlp's line.
 pub const YTDLP: &str = "ytdlp";
+/// The torrent and usenet indexers' line.
 pub const INDEXERS: &str = "indexers";
+/// Soulseek's line.
 pub const SOULSEEK: &str = "soulseek";
 /// The line of a plugin program's sources (one per plugin, [`Lines::plugin`]).
 pub const PLUGIN: &str = "plugin";
@@ -34,8 +37,11 @@ pub const PLUGIN_LIMIT: usize = 1;
 /// A request someone asked to download now: who, when (unix seconds), and the order of the presses.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Press {
+    /// who pressed
     pub by: String,
+    /// when (unix seconds)
     pub at: f64,
+    /// the order of the presses
     pub seq: u64,
 }
 
@@ -43,15 +49,19 @@ pub struct Press {
 #[derive(Clone, Default)]
 pub struct Pressed(Arc<Mutex<PressState>>);
 
+/// The presses and what was served, behind [`Pressed`]'s lock.
 #[derive(Default)]
 struct PressState {
+    /// the press per request id
     map: HashMap<i64, Press>,
+    /// the last press's number
     seq: u64,
     /// pressed requests that waited in a line and got its slot: (request id, line), until the worker logs it
     served: Vec<(i64, &'static str)>,
 }
 
 impl Pressed {
+    /// The state, even after a panic poisoned the lock.
     fn lock(&self) -> MutexGuard<'_, PressState> {
         self.0.lock().unwrap_or_else(|p| p.into_inner())
     }
@@ -108,6 +118,7 @@ impl Pressed {
 
 /// One request waiting in a line.
 struct Waiter {
+    /// the request's id
     id: i64,
     /// its place in the order of arrival
     ticket: u64,
@@ -115,11 +126,14 @@ struct Waiter {
     label: String,
 }
 
+/// A line's slots and waiters.
 #[derive(Default)]
 struct LineState {
     /// the slots in use: (ticket, request id)
     running: Vec<(u64, i64)>,
+    /// the requests waiting, in arrival order
     waiters: Vec<Waiter>,
+    /// the last ticket handed out
     seq: u64,
 }
 
@@ -127,14 +141,19 @@ struct LineState {
 pub struct Line {
     /// the line's key ([`STREAMRIP`], [`YTDLP`], [`INDEXERS`], [`SOULSEEK`], [`PLUGIN`])
     pub source: &'static str,
+    /// how many at once
     pub limit: usize,
+    /// the slots and waiters
     state: Mutex<LineState>,
+    /// bumped on every change, for waiters to look again
     version: watch::Sender<u64>,
 }
 
 /// A slot of a line, held while the source runs for the request; dropping it lets the next one go.
 pub struct Slot {
+    /// the line it belongs to
     line: Arc<Line>,
+    /// the ticket it was given in the line
     ticket: u64,
 }
 
@@ -150,8 +169,11 @@ impl Drop for Slot {
 
 /// A waiter's place, given up when its future is dropped before it got a slot (Cancel aborts the task).
 struct Leave<'a> {
+    /// the line waited in
     line: &'a Line,
+    /// the waiter's ticket
     ticket: u64,
+    /// still waiting (disarmed once it got a slot)
     armed: bool,
 }
 
@@ -176,11 +198,13 @@ fn ordered<'a>(waiters: &'a [Waiter], presses: &HashMap<i64, u64>) -> Vec<&'a Wa
 }
 
 impl Line {
+    /// A line of `source` with `limit` slots (at least 1).
     pub fn new(source: &'static str, limit: usize) -> Line {
         let (version, _) = watch::channel(0);
         Line { source, limit: limit.max(1), state: Mutex::new(LineState::default()), version }
     }
 
+    /// The state, even after a panic poisoned the lock.
     fn lock(&self) -> MutexGuard<'_, LineState> {
         self.state.lock().unwrap_or_else(|p| p.into_inner())
     }
@@ -283,12 +307,17 @@ impl Line {
 /// Where a request stands in a line (`line` of a request row in `GET /api/requests`).
 #[derive(Clone, Debug, PartialEq)]
 pub struct Place {
+    /// the line's key
     pub source: &'static str,
+    /// what the line is for this request ("Deezer", "bandcamp.com")
     pub label: String,
     /// 1 = next
     pub position: usize,
+    /// how many wait in the line
     pub waiting: usize,
+    /// how many slots are in use
     pub running: usize,
+    /// how many at once
     pub limit: usize,
     /// someone pressed Download now on it
     pub first: bool,
@@ -300,6 +329,7 @@ impl Place {
         line_text(self.position, &self.label)
     }
 
+    /// "1 at a time" in words, as [`limit_text`] gives it.
     pub fn limit_text(&self) -> String {
         limit_text(self.source, self.limit)
     }
@@ -327,6 +357,7 @@ pub struct Lines {
     pub soulseek: Arc<Line>,
     /// each plugin program's line, by plugin id, made when a request first needs it ([`Lines::plugin`])
     plugins: Arc<Mutex<std::collections::BTreeMap<String, Arc<Line>>>>,
+    /// who pressed Download now on which request
     pub pressed: Pressed,
 }
 

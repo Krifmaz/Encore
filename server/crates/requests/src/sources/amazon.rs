@@ -12,6 +12,7 @@ use regex::Regex;
 use serde_json::{json, Value};
 use std::sync::LazyLock;
 
+/// The desktop browser User-Agent sent with every request, so Amazon serves the full page.
 const UA: &str = "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0 Safari/537.36";
 
 /// What a link points at.
@@ -19,6 +20,7 @@ const UA: &str = "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, lik
 pub struct Link {
     /// "playlist", "album", "user-playlist" or "track"
     pub kind: String,
+    /// the album, playlist or track id (an ASIN)
     pub id: String,
     /// the song on an album link (`?trackAsin=`), or the id of a track link
     pub track: Option<String>,
@@ -26,6 +28,7 @@ pub struct Link {
     pub host: String,
 }
 
+/// Read a music.amazon.<tld> (or amazon.<tld>/music/player) link into what it points at; `None` for anything else.
 pub fn parse_url(url: &str) -> Option<Link> {
     let re = Regex::new(r"(?i)(?:https?://)?(?:www\.)?(music\.amazon\.[a-z.]+|amazon\.[a-z.]+/music/player)/(playlists|albums|user-playlists|tracks)/([A-Za-z0-9]+)").unwrap();
     let c = re.captures(url.trim())?;
@@ -114,17 +117,24 @@ pub fn api_body(cfg: &Value, link: &Link, page_url: &str, now_ms: u128) -> Value
 /// One song row as the page shows it: its title, the other texts in display order, and its link.
 #[derive(Debug, Clone, Default)]
 pub struct Cell {
+    /// the song's title
     pub title: String,
+    /// the row's other texts in display order (artist, album, time …)
     pub texts: Vec<String>,
+    /// the row's link, which carries the track ASIN
     pub href: String,
+    /// the ISRC, when the API row has one
     pub isrc: Option<String>,
 }
 
 /// The page header: name, artist (albums), cover.
 #[derive(Debug, Clone, Default)]
 pub struct Header {
+    /// the playlist or album name
     pub name: String,
+    /// the album's artist; empty for playlists
     pub artist: String,
+    /// the cover image URL
     pub cover: Option<String>,
 }
 
@@ -148,10 +158,12 @@ fn unescape(s: &str) -> String {
     }).replace('\u{a0}', " ")
 }
 
+/// Every `name="value"` attribute of an HTML tag, names lowercased and values unescaped.
 fn attrs(tag: &str) -> Vec<(String, String)> {
     Regex::new(r#"([a-zA-Z0-9_-]+)="([^"]*)""#).unwrap().captures_iter(tag).map(|c| (c[1].to_lowercase(), unescape(&c[2]))).collect()
 }
 
+/// The value of attribute `k`, or "" when the tag lacks it.
 fn attr<'a>(a: &'a [(String, String)], k: &str) -> &'a str {
     a.iter().find(|(n, _)| n == k).map(|(_, v)| v.as_str()).unwrap_or("")
 }
@@ -239,6 +251,7 @@ fn txt(v: &Value) -> String {
     }
 }
 
+/// The first value in a JSON tree (depth first, the node itself included) that `pred` accepts.
 fn find<'a>(v: &'a Value, pred: &dyn Fn(&Value) -> bool) -> Option<&'a Value> {
     if pred(v) {
         return Some(v);
@@ -250,6 +263,7 @@ fn find<'a>(v: &'a Value, pred: &dyn Fn(&Value) -> bool) -> Option<&'a Value> {
     }
 }
 
+/// Collect every value in a JSON tree that `pred` accepts; a match isn't searched further down.
 fn all<'a>(v: &'a Value, pred: &dyn Fn(&Value) -> bool, out: &mut Vec<&'a Value>) {
     if pred(v) {
         out.push(v);
@@ -262,6 +276,7 @@ fn all<'a>(v: &'a Value, pred: &dyn Fn(&Value) -> bool, out: &mut Vec<&'a Value>
     }
 }
 
+/// A row's link: the first deeplink / url / href under primaryLink, primaryTextLink or link; "" when none.
 fn link_of(x: &Value) -> String {
     for k in ["primaryLink", "primaryTextLink", "link"] {
         let l = &x[k];
@@ -299,6 +314,7 @@ pub fn api_rows(d: &Value) -> (Header, Vec<Cell>) {
     (h, cells)
 }
 
+/// The track ASIN in a link (`trackAsin=…` or `/tracks/…`).
 fn asin_of(href: &str) -> Option<String> {
     Regex::new(r"(?:trackAsin=|/tracks/)([A-Za-z0-9]+)").unwrap().captures(href).map(|c| c[1].to_string())
 }
@@ -334,6 +350,7 @@ pub fn rows_to_tracks(link: &Link, h: &Header, cells: &[Cell]) -> Vec<Value> {
     out
 }
 
+/// The import answer: name (the album's artist appended for albums), cover and tracks.
 fn result(h: &Header, tracks: Vec<Value>, link: &Link) -> Value {
     let name = if h.name.is_empty() { "Amazon Music import".to_string() } else { h.name.clone() };
     let name = if link.kind == "album" && !h.artist.is_empty() && !name.contains(&h.artist) { format!("{name} – {}", h.artist) } else { name };
@@ -342,6 +359,7 @@ fn result(h: &Header, tracks: Vec<Value>, link: &Link) -> Value {
 
 // ---- fetching -----------------------------------------------------------------------------------
 
+/// Follow an amzn.to short link to the page it redirects to; other links are returned as they are.
 async fn resolve_short(st: &impl Ctx, url: &str) -> String {
     if Regex::new(r"(?i)amzn\.to/").unwrap().is_match(url) {
         if let Ok(r) = st.http().get(url.trim()).header("User-Agent", UA).send().await {
@@ -351,6 +369,7 @@ async fn resolve_short(st: &impl Ctx, url: &str) -> String {
     url.trim().to_string()
 }
 
+/// Read the song list from the public web page: its HTML rows first, then its schema.org data.
 async fn from_page(st: &impl Ctx, url: &str, link: &Link) -> anyhow::Result<Value> {
     let r = st.http().get(url).header("User-Agent", UA).header("Accept-Language", "en-US,en;q=0.9").send().await?;
     if r.status().as_u16() >= 400 {
@@ -372,6 +391,7 @@ async fn from_page(st: &impl Ctx, url: &str, link: &Link) -> anyhow::Result<Valu
     Ok(result(&head, tracks, link))
 }
 
+/// Read the song list through the web player's API, using the token from the site's config.json.
 async fn from_api(st: &impl Ctx, url: &str, link: &Link) -> anyhow::Result<Value> {
     let cfg: Value = st.http().get(format!("https://{}/config.json", link.host)).header("User-Agent", UA).send().await?.json().await?;
     if cfg["csrf"]["token"].as_str().unwrap_or("").is_empty() {

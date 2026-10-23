@@ -79,8 +79,10 @@ impl std::error::Error for Busy {}
 #[derive(Clone, Default)]
 pub struct Session(Arc<Inner>);
 
+/// The session's shared state.
 #[derive(Default)]
 struct Inner {
+    /// the connection and its schedule
     conn: Mutex<Conn>,
     /// wakes the supervisor (a log line, a search that found the session gone, Reconnect now)
     wake: Notify,
@@ -88,6 +90,7 @@ struct Inner {
     lines: Mutex<VecDeque<(Line, Instant)>>,
     /// the door to the Soulseek server
     door: Mutex<door::DoorState>,
+    /// one search at a time
     gate: gate::Limiter,
     /// one read of the server state at a time (many parked requests may find it old together)
     refreshing: tokio::sync::Mutex<()>,
@@ -117,6 +120,7 @@ pub fn unix_at(at: Instant) -> f64 {
 }
 
 impl Session {
+    /// The connection state, locked.
     fn conn(&self) -> MutexGuard<'_, Conn> {
         self.0.conn.lock().unwrap_or_else(|e| e.into_inner())
     }
@@ -144,6 +148,7 @@ impl Session {
         }
     }
 
+    /// The log lines heard since the supervisor last looked.
     fn take_lines(&self) -> Vec<(Line, Instant)> {
         self.0.lines.lock().unwrap_or_else(|e| e.into_inner()).drain(..).collect()
     }
@@ -298,6 +303,7 @@ impl Session {
 /// The worker's answer from [`Session::for_worker`].
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ForWorker {
+    /// go ahead
     Go,
     /// wait (in words: "next attempt at 14:20", "connecting now")
     Wait(String),

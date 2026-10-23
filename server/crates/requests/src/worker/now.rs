@@ -30,22 +30,35 @@ pub const NO_PROGRESS: f64 = 300.0;
 /// How many users with a free slot are asked, best first, before the switch gives up.
 const ASK_USERS: usize = 3;
 
+/// Download now refused: another step holds the request.
 pub const BUSY: &str = "The request is busy – try again in a moment";
+/// Download now refused: the request changed while it was looked at.
 pub const CHANGED: &str = "The request changed meanwhile – try again";
+/// Download now refused: the request isn't waiting.
 pub const ONLY_WAITING: &str = "Only a request that waits can be downloaded now";
+/// Why it can't: it waits for approval.
 pub const PENDING: &str = "It waits for an admin's approval";
+/// Why it can't: it is searching.
 pub const SEARCHING: &str = "It is searching now";
+/// Why it can't: it is downloading.
 pub const DOWNLOADING: &str = "It is downloading now";
+/// Why it can't: it is being imported.
 pub const IMPORTING: &str = "It is being imported now";
+/// Why it can't: its files are in, and Import again is the button for that.
 pub const IMPORT_AGAIN: &str = "Its files are downloaded – Import again tries the import now";
+/// Why it can't: a stalled download has no other source to go to.
 pub const NO_NEXT_SOURCE: &str = "No other source to try – the download keeps waiting for seeds";
+/// The answer when the request started downloading before the press got to it.
 pub const STARTED_MEANWHILE: &str = "It started downloading meanwhile";
+/// The answer when the press started the request.
 pub const STARTING: &str = "Starting now";
 
 /// Where Soulseek stands for a request waiting for it.
 #[derive(Clone, Debug, PartialEq)]
 pub enum Sk {
+    /// signed in to the server
     LoggedIn,
+    /// an attempt is under way
     Connecting,
     /// Encore's own schedule holds it (a lost connection, nothing planned): an attempt can be made due
     Attempt,
@@ -77,12 +90,18 @@ pub enum Act {
     /// a Soulseek download queued at the user: a user with a free upload slot
     Switch,
     /// a torrent or Usenet download with no progress: the next source (its words), after `minutes`
-    NextSource { next: String, minutes: i64 },
+    NextSource {
+        /// the next source, in words
+        next: String,
+        /// how long without progress before it is tried
+        minutes: i64,
+    },
 }
 
 /// The button a request row offers, and what pressing it does.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Offer {
+    /// what pressing does
     pub act: Act,
     /// the button's tooltip ("Go first in line for Deezer")
     pub title: String,
@@ -93,6 +112,7 @@ pub struct Offer {
 }
 
 impl Offer {
+    /// An offer with a button and no time.
     fn new(act: Act, title: impl Into<String>) -> Offer {
         Offer { act, title: title.into(), until: None, button: true }
     }
@@ -108,6 +128,7 @@ impl Offer {
     }
 }
 
+/// Download now isn't possible: 409 with these words.
 fn no(text: impl Into<String>) -> Result<Offer, (u16, String)> {
     Err((409, text.into()))
 }
@@ -247,6 +268,7 @@ pub fn stalled_since(r: &Req, t: f64) -> Option<f64> {
     (ok && t - last >= NO_PROGRESS).then_some(last)
 }
 
+/// What Download now does for a torrent or usenet download: the next source once it has stalled, else why not.
 fn torrent_offer(st: &impl Ctx, r: &Req) -> Result<Offer, (u16, String)> {
     let tz = &r.d["torznab"];
     if tz["id"].is_string() && tz["err_since"].is_null() && !tz["queued_since"].is_null() {
@@ -363,10 +385,12 @@ pub(crate) fn left_line_row(st: &impl Ctx, id: i64, status: &str, message: &str)
 
 // ---- pressing it ---------------------------------------------------------------------------------------
 
+/// The answer to a press that did something.
 fn done(action: &str, text: impl Into<String>) -> Value {
     json!({ "ok": true, "action": action, "text": text.into() })
 }
 
+/// The answer to a press that can't act yet: what happens instead, and when (unix seconds) when known.
 fn later(action: &str, text: impl Into<String>, at: Option<f64>) -> Value {
     json!({ "ok": false, "action": action, "text": text.into(), "at": at })
 }
@@ -549,6 +573,7 @@ async fn soulseek_step<C: Ctx>(st: &C, id: i64, who: &str, sk: Sk) -> Result<(Va
     Ok(soulseek_answer(&sk))
 }
 
+/// Download now for a request waiting for Soulseek: search now when signed in, else a sign-in attempt or when the next one can be.
 async fn soulseek_now<C: Ctx>(st: &C, id: i64, who: &str, sk: Sk) -> Result<(Value, String), (u16, String)> {
     match sk {
         Sk::LoggedIn | Sk::Stopped(_) => soulseek_step(st, id, who, sk).await,
@@ -582,7 +607,9 @@ async fn soulseek_now<C: Ctx>(st: &C, id: i64, who: &str, sk: Sk) -> Result<(Val
 /// What a request asked for, for ranking Soulseek answers as its own search ranks them.
 #[derive(Clone, Debug)]
 pub struct Want {
+    /// an album (else a song)
     pub album: bool,
+    /// the artist asked for
     pub artist: String,
     /// the album's title, or the song's
     pub name: String,
@@ -595,6 +622,7 @@ pub struct Want {
 }
 
 impl Want {
+    /// What request `r` asks for.
     pub fn of(r: &Req) -> Want {
         let album = r.s("kind") == "album";
         let lossless_only = r.s("source") == "slskd_lossless" || r.d["lossless_only"].as_bool().unwrap_or(false);
@@ -603,6 +631,7 @@ impl Want {
     }
 }
 
+/// Whether a Soulseek answer's format is lossless.
 fn lossless(c: &Value) -> bool {
     encore_core::audio::DOWNLOAD_LOSSLESS.contains(&c["format"].as_str().unwrap_or(""))
 }
@@ -742,6 +771,7 @@ async fn switch<C: Ctx>(st: &C, id: i64, who: &str) -> Switched {
         format!("switched from {alice} to {bob}"))
 }
 
+/// Switch a Soulseek download queued at a busy user to one with a free slot, waiting a moment for the answer.
 async fn switch_now<C: Ctx>(st: &C, id: i64, who: &str) -> Result<(Value, String), (u16, String)> {
     let hold = hold_same(st, id, &Act::Switch).await?;
     let (tx, rx) = tokio::sync::oneshot::channel();

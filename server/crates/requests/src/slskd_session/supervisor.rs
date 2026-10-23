@@ -94,6 +94,7 @@ fn jitter() -> f64 {
     rand::random::<f64>() * 2.0 - 1.0
 }
 
+/// slskd's server state says it is logged in to Soulseek.
 fn logged_in(server: &Value) -> bool {
     server["isLoggedIn"].as_bool().unwrap_or_else(|| server["state"].as_str().unwrap_or("").contains("LoggedIn"))
 }
@@ -216,6 +217,7 @@ impl Session {
         self.door_seen().passed_at.filter(|p| *p >= started)
     }
 
+    /// Act on one line of slskd's log (logged in, kicked, disconnected, …).
     async fn on_event(&self, st: &impl Ctx, line: Line, at: Instant, round: &mut Round) {
         match line {
             Line::LoggedIn(user) => {

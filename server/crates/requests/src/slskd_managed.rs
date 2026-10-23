@@ -26,25 +26,34 @@ pub const WEB_PORT: u16 = 5031;
 pub const API_KEY_SETTING: &str = "slskd_managed_api_key";
 /// slskd's default Soulseek server.
 const SERVER: (&str, u16) = ("vps.slsknet.org", 2271);
+/// encore-run.log is rotated past this size.
 const LOG_MAX: u64 = 5 * 1024 * 1024;
 /// slskd's `soulseek.connection.timeout.connect`: how long it waits to reach the Soulseek server.
 pub const CONNECT_TIMEOUT_MS: u64 = 30_000;
 /// The empty folder slskd.yml names as the web UI's content (beside the binary; wwwroot is deleted).
 const NO_WEB_UI: &str = "no-web-ui";
 
+/// The state line while the VPN kill switch holds Soulseek back.
 pub const WAITING_FOR_VPN: &str = "Waiting for the VPN – Soulseek stays off until it is connected";
+/// The error while the slskd plugin isn't installed.
 pub const NOT_INSTALLED: &str = "Soulseek is not installed – install the Soulseek (slskd) plugin under Settings → Plugins";
 
 // ---- status ---------------------------------------------------------------------------------------
 
+/// What the Soulseek card shows about the slskd process.
 #[derive(Clone, Debug, Default)]
 struct Status {
     /// off | not_installed | starting | running | crashed | waiting_vpn | blocked
     state: &'static str,
+    /// the slskd version running
     version: Option<String>,
+    /// the process id while it runs
     pid: Option<u32>,
+    /// why it isn't running, or what it last complained about
     error: Option<String>,
+    /// the port slskd listens on for peers
     listen_port: Option<u16>,
+    /// whether slskd's traffic goes through the VPN
     vpn: bool,
     /// the share scan's progress (percent) while slskd builds its share list
     scan: Option<u8>,
@@ -61,11 +70,14 @@ struct Status {
 #[derive(Clone)]
 pub struct Managed(Arc<Inner>);
 
+/// The shared state behind [`Managed`].
 struct Inner {
+    /// the state the card shows
     status: Mutex<Status>,
     /// the last lines slskd printed (also written to encore-run.log): shown on the Soulseek card to
     /// admins, so a sign-in problem can be read without opening the container
     log_tail: Mutex<VecDeque<String>>,
+    /// wakes the supervisor for a check now
     wake: tokio::sync::Notify,
     /// an install is running
     /// set by Start now: the next check starts slskd at once instead of waiting out the backoff
@@ -169,6 +181,7 @@ impl Managed {
                 || self.0.running_at.lock().unwrap().is_some_and(|t| t.elapsed() >= Duration::from_secs(20)))
     }
 
+    /// slskd answers: note when, and let the Soulseek session go ahead.
     fn now_running(&self) {
         *self.0.running_at.lock().unwrap() = Some(Instant::now());
         self.0.session.wake();
@@ -218,6 +231,7 @@ impl Managed {
         Ok(port)
     }
 
+    /// Change the status in place.
     fn set_status(&self, f: impl FnOnce(&mut Status)) {
         f(&mut self.0.status.lock().unwrap());
     }
@@ -348,11 +362,13 @@ pub fn server_hint(line: &str) -> Option<Option<String>> {
 /// of Encore's attempts is under way. slskd's own reconnect attempts are reset at once and never reach
 /// the server. (On the VPN route Encore's SOCKS proxy keeps the same door.)
 struct Relay {
+    /// the local port slskd connects to as its "server"
     port: u16,
     /// the Soulseek server (host, port)
     upstream: Mutex<(String, u16)>,
     /// the connection to the server made for the attempt under way: (its number, the stream)
     ready: Mutex<Option<(u64, tokio::net::TcpStream)>>,
+    /// connections dialled for Encore's attempts, numbering the `ready` one
     dialled: AtomicU64,
 }
 
@@ -367,6 +383,8 @@ async fn dial(up: &(String, u16)) -> std::io::Result<tokio::net::TcpStream> {
     Ok(s)
 }
 
+/// Accept slskd's server connections: only through an open door, then pipe it to the server (the connection
+/// dialled ahead when there is one); connections outside a door are reset at once.
 async fn relay_loop(l: tokio::net::TcpListener, r: Arc<Relay>, session: crate::slskd_session::Session) {
     loop {
         let s = match l.accept().await {
@@ -406,10 +424,12 @@ async fn relay_loop(l: tokio::net::TcpListener, r: Arc<Relay>, session: crate::s
 
 // ---- paths ----------------------------------------------------------------------------------------
 
+/// Where Encore before plugins installed slskd (`<data>/tools/slskd`).
 fn tools_dir(data: &Path) -> PathBuf {
     data.join("tools").join("slskd")
 }
 
+/// slskd's own folder: slskd.yml, its database and encore-run.log.
 fn app_dir(data: &Path) -> PathBuf {
     data.join("slskd")
 }
@@ -438,6 +458,7 @@ pub fn program(st: &impl Ctx) -> Option<(String, PathBuf)> {
     installed_in(st.data_dir())
 }
 
+/// The version of the slskd that would run.
 pub fn installed_version(st: &impl Ctx) -> Option<String> {
     program(st).map(|(v, _)| v)
 }
@@ -448,6 +469,7 @@ pub fn configured(st: &impl Ctx) -> bool {
     st.plugins().enabled("slskd") && st.cfg().bool("slskd_enabled") && !st.cfg().str("soulseek_username").trim().is_empty() && !st.cfg().str("soulseek_password").is_empty()
 }
 
+/// slskd's API address on localhost.
 pub fn base_url() -> String {
     format!("http://127.0.0.1:{WEB_PORT}")
 }
@@ -507,6 +529,7 @@ pub async fn api(st: &impl Ctx, method: reqwest::Method, path: &str, body: Optio
     Ok((status, r.text().await.unwrap_or_default()))
 }
 
+/// Send a request to the in-process stand-in slskd (tests), as [`Target::App`].
 #[cfg(any(test, feature = "test-support"))]
 async fn call_app(app: axum::Router, st: &impl Ctx, method: reqwest::Method, path: &str, body: Option<&Value>, query: &[(&str, &str)]) -> anyhow::Result<(u16, String)> {
     use tower::ServiceExt;
@@ -729,17 +752,27 @@ fn switch_to(root: &Path, ver: &str) -> anyhow::Result<()> {
 /// Everything slskd.yml says, from Encore's settings.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Yml {
+    /// the Soulseek login
     pub username: String,
+    /// the Soulseek password
     pub password: String,
+    /// the Soulseek server (host, port)
     pub server: (String, u16),
+    /// the address slskd listens on for peers
     pub listen_ip: String,
+    /// the port slskd listens on for peers
     pub listen_port: u16,
+    /// where finished downloads go
     pub downloads: String,
+    /// where downloads are written while they run
     pub incomplete: String,
+    /// the shared folders (the library, when sharing is on)
     pub shares: Vec<String>,
+    /// how many uploads at once
     pub upload_slots: i64,
     /// relative to the binary's folder (slskd insists): an empty folder, as there is no web UI
     pub content_path: String,
+    /// the API key Encore calls slskd's API with
     pub api_key: String,
     /// (port, username, password) of the local SOCKS5 proxy into the VPN
     pub proxy: Option<(u16, String, String)>,
@@ -750,6 +783,7 @@ fn q(s: &str) -> String {
     serde_json::to_string(s).unwrap_or_else(|_| "\"\"".into())
 }
 
+/// slskd.yml for these settings.
 pub fn render_yml(y: &Yml) -> String {
     let mut o = String::from("# Written by Encore from its settings – edits here are overwritten.\n");
     o += "headless: true\nremote_configuration: false\nremote_file_management: false\ninstance_name: encore\n";
@@ -797,6 +831,7 @@ fn server() -> (String, u16) {
     }
 }
 
+/// slskd.yml's values from Encore's settings (the proxy is filled in later, when the VPN route needs one).
 fn yml_from_settings(st: &impl Ctx) -> Yml {
     let downloads = st.cfg().str("slskd_download_path");
     let library = st.cfg().str("library_path");
@@ -817,6 +852,7 @@ fn yml_from_settings(st: &impl Ctx) -> Yml {
     }
 }
 
+/// The Soulseek peer port setting, as a port.
 fn configured_port(st: &impl Ctx) -> u16 {
     st.cfg().int("soulseek_port").clamp(1, 65535) as u16
 }
@@ -847,6 +883,7 @@ pub fn route_for(vpn_on: bool, usable: bool, active: bool, kill_switch: bool, fo
     }
 }
 
+/// The route slskd's traffic takes now, from the VPN settings and state.
 fn route(st: &impl Ctx) -> Route {
     let on = st.cfg().bool("vpn_enabled");
     if !on {
@@ -861,13 +898,19 @@ fn route(st: &impl Ctx) -> Route {
 /// What should run.
 #[derive(Clone, Debug)]
 pub struct Plan {
+    /// the slskd binary
     pub bin: PathBuf,
+    /// slskd's own folder
     pub app_dir: PathBuf,
+    /// the slskd version
     pub version: String,
+    /// slskd.yml's text
     pub yml: String,
     /// folders slskd needs to exist before it starts
     pub dirs: Vec<PathBuf>,
+    /// the port slskd listens on for peers
     pub listen_port: u16,
+    /// whether the traffic goes through the VPN
     pub vpn: bool,
     /// where downloads land (the fallback when the configured folder can't be written)
     pub downloads: PathBuf,
@@ -876,6 +919,7 @@ pub struct Plan {
 }
 
 impl Plan {
+    /// A hash of what a restart is needed for: the binary, the folder, the version and slskd.yml.
     fn key(&self) -> u64 {
         let mut h = std::collections::hash_map::DefaultHasher::new();
         (&self.bin, &self.app_dir, &self.version, &self.yml).hash(&mut h);
@@ -883,23 +927,31 @@ impl Plan {
     }
 }
 
+/// What the supervisor should make of slskd now.
 #[derive(Debug)]
 pub enum Want {
+    /// Soulseek is switched off
     Off,
+    /// the plugin isn't installed
     NotInstalled,
+    /// the kill switch holds it back until the VPN connects
     WaitingVpn,
     /// can't start right now (shown as the error, retried at the next check)
     Blocked(String),
+    /// run slskd as this plan says
     Run(Plan),
 }
 
 /// encore-run.log: slskd's console output, rotated at 5 MB; the last lines are kept for errors.
 struct RunLog {
+    /// the log file
     path: PathBuf,
+    /// the last 20 lines
     tail: Mutex<VecDeque<String>>,
 }
 
 impl RunLog {
+    /// Keep a line of slskd's output: in the tail, and appended to the log (rotated past [`LOG_MAX`]).
     fn line(&self, l: &str) {
         {
             let mut t = self.tail.lock().unwrap();
@@ -924,6 +976,7 @@ impl RunLog {
     }
 }
 
+/// Read slskd's output line by line into the run log and [`Managed::on_line`] (the card's tail and state).
 fn pipe<R: AsyncRead + Unpin + Send + 'static>(r: R, log: Arc<RunLog>, managed: Managed) {
     tokio::spawn(async move {
         let mut lines = BufReader::new(r).lines();
@@ -944,29 +997,39 @@ fn scan_percent(l: &str) -> Option<u8> {
     n.trim().parse::<u8>().ok()
 }
 
+/// Send `sig` ("TERM", "KILL") to process `pid`.
 fn signal(pid: u32, sig: &str) {
     let _ = std::process::Command::new("kill").arg(format!("-{sig}")).arg(pid.to_string()).stdout(Stdio::null()).stderr(Stdio::null()).status();
 }
 
 /// Starts, watches, restarts and stops one slskd process.
 pub struct Runner {
+    /// the slskd process, while it runs
     child: Option<Child>,
+    /// the key of the plan running (0 when none)
     key: u64,
     /// the key of the plan last started (or that failed to start): a different one is new settings,
     /// tried at once instead of after the old plan's backoff
     tried: u64,
+    /// when the process was last started
     started: Instant,
+    /// how long to wait before the next restart after a crash
     backoff: Duration,
+    /// when a crashed slskd may start again
     next_start: Option<Instant>,
+    /// the run log of the process
     log: Option<Arc<RunLog>>,
     /// where the state it reaches is kept
     managed: Managed,
 }
 
+/// The first wait before restarting a crashed slskd.
 const BACKOFF_MIN: Duration = Duration::from_secs(5);
+/// The longest wait between restarts (the wait doubles per quick crash).
 const BACKOFF_MAX: Duration = Duration::from_secs(300);
 
 impl Runner {
+    /// A runner with nothing started.
     pub fn new(managed: Managed) -> Runner {
         Runner { child: None, key: 0, tried: 0, started: Instant::now(), backoff: BACKOFF_MIN, next_start: None, log: None, managed }
     }
@@ -1078,6 +1141,7 @@ impl Runner {
         self.managed.0.log_tail.lock().unwrap().clear();
     }
 
+    /// Start slskd for `plan`: create its folders, write slskd.yml (mode 600), spawn it and pipe its output to the log.
     fn start(&mut self, plan: &Plan) -> anyhow::Result<()> {
         use std::os::unix::fs::PermissionsExt;
         std::fs::create_dir_all(&plan.app_dir)?;

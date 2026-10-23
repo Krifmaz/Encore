@@ -6,11 +6,13 @@ use super::{base, delete_inside, local, unreachable, Poll};
 use base64::Engine;
 use serde_json::{json, Value};
 
+/// NZBGet's JSON-RPC address.
 fn endpoint(st: &impl Ctx) -> String {
     let b = base(st, "nzbget_url");
     if b.ends_with("/jsonrpc") { b } else { format!("{b}/jsonrpc") }
 }
 
+/// One JSON-RPC call (with the login, when set).
 async fn rpc(st: &impl Ctx, method: &str, params: Value) -> anyhow::Result<Value> {
     let mut rb = st.http().post(endpoint(st)).json(&json!({ "version": "1.1", "method": method, "params": params, "id": 1 })).timeout(std::time::Duration::from_secs(60));
     let user = st.cfg().str("nzbget_user");
@@ -30,11 +32,13 @@ async fn rpc(st: &impl Ctx, method: &str, params: Value) -> anyhow::Result<Value
     Ok(v["result"].clone())
 }
 
+/// NZBGet's version, for the status line.
 pub async fn status(st: &impl Ctx) -> anyhow::Result<String> {
     let v = rpc(st, "version", json!([])).await?;
     Ok(v.as_str().map(|s| format!(" {s}")).unwrap_or_default())
 }
 
+/// Hand NZBGet an NZB URL → its NZBID.
 pub async fn add(st: &impl Ctx, url: &str, rid: i64) -> anyhow::Result<String> {
     // append(NZBFilename, NZBContent (a URL works since v13), Category, Priority, AddToTop, AddPaused, DupeKey, DupeScore, DupeMode, PPParameters).
     // Every release for a request has the same name: with DupeMode SCORE, NZBGet's duplicate check would
@@ -56,6 +60,7 @@ pub async fn add(st: &impl Ctx, url: &str, rid: i64) -> anyhow::Result<String> {
     }
 }
 
+/// The group with this NZBID in a list.
 fn find(list: &Value, id: &str) -> Option<Value> {
     list.as_array()?.iter().find(|g| g["NZBID"].as_i64().is_some_and(|n| n.to_string() == id)).cloned()
 }
@@ -65,6 +70,7 @@ fn dest(h: &Value) -> String {
     h["FinalDir"].as_str().filter(|d| !d.is_empty()).or(h["DestDir"].as_str()).unwrap_or("").to_string()
 }
 
+/// Where NZBGet is with the download `id` (its queue, else its history).
 pub async fn poll(st: &impl Ctx, id: &str) -> anyhow::Result<Poll> {
     if let Some(g) = find(&rpc(st, "listgroups", json!([0])).await?, id) {
         let total = g["FileSizeMB"].as_f64().unwrap_or(0.0);
@@ -90,6 +96,7 @@ pub async fn poll(st: &impl Ctx, id: &str) -> anyhow::Result<Poll> {
     Ok(Poll::Failed(format!("NZBGet: {}", status.to_lowercase())))
 }
 
+/// Delete the download and its files from NZBGet.
 pub async fn remove(st: &impl Ctx, id: &str) {
     let Ok(n) = id.parse::<i64>() else { return };
     let finished = rpc(st, "history", json!([false])).await.ok().and_then(|l| find(&l, id)).map(|h| dest(&h));

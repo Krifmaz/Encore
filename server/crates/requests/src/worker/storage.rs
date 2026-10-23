@@ -35,6 +35,7 @@ const PROBE_SECS: f64 = 60.0;
 const STATE_KEY: &str = "storage_health";
 /// The reasons a request waits for the storage (`detail.wait.reason`, `wait_reason` in the API).
 pub const STORAGE_IMPORT: &str = "storage_import";
+/// The reason a download waits for the staging folder.
 pub const STORAGE_DOWNLOAD: &str = "storage_download";
 /// The reason a request waits for Soulseek.
 pub const SOULSEEK: &str = "soulseek";
@@ -46,6 +47,7 @@ pub const PLAIN_BANNER: &str = "Imports are paused because of a storage problem 
 /// The storage health while the server runs (kept in [`crate::Requests`]). Clones share it.
 #[derive(Clone, Default)]
 pub struct Health {
+    /// the problem and the last check, shared by clones
     state: Arc<Mutex<HealthState>>,
     /// held while a check runs: one at a time (two exact probes of one folder would trip over each other)
     checking: Arc<Mutex<()>>,
@@ -55,6 +57,7 @@ pub struct Health {
     pub(super) downloads: Arc<super::downloads::Roots>,
 }
 
+/// The storage's state behind [`Health`].
 #[derive(Default)]
 struct HealthState {
     /// the settings row was read
@@ -70,18 +73,26 @@ struct HealthState {
 /// A failed probe or file step, kept without its io::Error (which can't be cloned).
 #[derive(Clone, Debug)]
 struct Probe {
+    /// the file step that failed
     step: Step,
+    /// the operation ("write", "mkdir" …)
     op: &'static str,
+    /// the path it worked on
     path: PathBuf,
+    /// the second path (a rename's or copy's target)
     to: Option<PathBuf>,
+    /// the OS error number
     errno: Option<i32>,
+    /// the error's text (when there is no errno)
     error: String,
 }
 
 impl Probe {
+    /// What a failed step said, to keep.
     fn of(e: &StepError) -> Probe {
         Probe { step: e.step, op: e.op, path: e.path.clone(), to: e.to.clone(), errno: e.errno, error: e.source.to_string() }
     }
+    /// The step error again, for its words.
     fn error(&self) -> StepError {
         let io = match self.errno {
             Some(n) => std::io::Error::from_raw_os_error(n),
@@ -96,9 +107,13 @@ impl Probe {
 struct Problem {
     /// the folder that is not writable
     dir: PathBuf,
+    /// what the failing step said
     probe: Probe,
+    /// when it was first found (unix seconds)
     since: f64,
+    /// when it was last checked
     checked_at: f64,
+    /// when it is checked next
     next_check_at: f64,
     /// a probe found it (a passing probe of the folder means it is fixed); false: an import's file step did,
     /// which a probe may not see (a write that fails where a new folder doesn't)
@@ -106,12 +121,14 @@ struct Problem {
 }
 
 impl Problem {
+    /// The problem for the API and the settings row.
     fn json(&self) -> Value {
         let e = self.probe.error();
         json!({ "ok": false, "path": self.dir.to_string_lossy(), "op": e.op, "op_path": e.path.to_string_lossy(), "to": e.to.as_ref().map(|t| t.to_string_lossy()),
                 "error": e.source.to_string(), "errno": e.errno, "step": e.step.as_str(), "what": e.what(), "since": self.since, "checked_at": self.checked_at,
                 "next_check_at": self.next_check_at, "by_probe": self.by_probe })
     }
+    /// The problem from its settings row; `None` for an `ok` row.
     fn from_json(v: &Value) -> Option<Problem> {
         if v["ok"].as_bool() != Some(false) {
             return None;
@@ -131,6 +148,7 @@ impl Problem {
     }
 }
 
+/// `s` as one of the known operation names ("write" for anything else).
 fn static_op(s: &str) -> &'static str {
     ["mkdir", "write", "rename", "copy", "link", "remove", "open", "read", "stat", "start", "fsync", "set times"].into_iter().find(|o| *o == s).unwrap_or("write")
 }
@@ -143,6 +161,7 @@ fn problem_dir(e: &StepError) -> PathBuf {
     if probe || e.op != "mkdir" { p.parent().map(Path::to_path_buf).unwrap_or_else(|| p.to_path_buf()) } else { p.to_path_buf() }
 }
 
+/// The storage's state, read from its settings row the first time.
 fn lock(st: &impl Ctx) -> std::sync::MutexGuard<'_, HealthState> {
     let mut h = st.requests().storage.state.lock().unwrap_or_else(|p| p.into_inner());
     if !h.loaded {
@@ -155,6 +174,7 @@ fn lock(st: &impl Ctx) -> std::sync::MutexGuard<'_, HealthState> {
     h
 }
 
+/// Keep the state in its settings row.
 fn save(st: &impl Ctx, h: &HealthState) {
     let v = match &h.problem {
         Some(p) => p.json(),
@@ -176,10 +196,12 @@ pub fn register_roots(st: &impl Ctx) {
     fsx::roots::add(roots);
 }
 
+/// The library folder setting.
 fn library_root(st: &impl Ctx) -> PathBuf {
     PathBuf::from(st.cfg().str("library_path"))
 }
 
+/// The staging folder setting.
 fn staging_root(st: &impl Ctx) -> PathBuf {
     PathBuf::from(st.cfg().str("staging_path"))
 }
@@ -478,6 +500,7 @@ pub(super) struct Spec {
 }
 
 impl Spec {
+    /// An import of `source`'s files; `done` is the message once they are in.
     pub fn new(source: &'static str, own: bool, origin: Value, done: impl Into<String>) -> Spec {
         Spec { source, how: "request", own, origin, done: done.into(), hint: None, entries: vec![], torznab_id: None }
     }
@@ -947,6 +970,7 @@ pub(super) async fn import_kept(st: &impl Ctx, r: &mut Req) -> anyhow::Result<()
     }
 }
 
+/// `s` as one of the known source names ("import" for anything else).
 fn static_source(s: &str) -> &'static str {
     ["streamrip", "ytdlp", "slskd", "slskd_lossless", "torznab", "plugin"].into_iter().find(|x| *x == s).unwrap_or("import")
 }
@@ -1156,8 +1180,10 @@ pub fn hide_folders(text: &str) -> String {
 /// and what everyone else reads.
 pub const LINKS_NEED_YTDLP: (&str, &str) = ("Links need the yt-dlp plugin – install it under Settings → Plugins",
     "Links can't be downloaded on this server yet – an admin needs to install the yt-dlp plugin");
+/// A YouTube Music pick or link that needs yt-dlp: what admins read and what everyone else reads.
 pub const PICKS_NEED_YTDLP: (&str, &str) = ("YouTube Music and links need the yt-dlp plugin – install it under Settings → Plugins",
     "YouTube Music and links can't be downloaded on this server yet – an admin needs to install the yt-dlp plugin");
+/// A Qobuz / Tidal / Deezer link that needs streamrip: what admins read and what everyone else reads.
 pub const LINKS_NEED_STREAMRIP: (&str, &str) = ("Qobuz/Tidal/Deezer links need the streamrip plugin switched on in Settings → Plugins → streamrip",
     "Qobuz/Tidal/Deezer links can't be downloaded on this server yet – an admin needs to switch on the streamrip plugin");
 

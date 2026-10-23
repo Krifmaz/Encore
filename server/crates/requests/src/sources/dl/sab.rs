@@ -82,6 +82,7 @@ pub async fn add(st: &impl Ctx, url: &str, rid: i64) -> anyhow::Result<String> {
     Ok(id.to_string())
 }
 
+/// Where SABnzbd is with the download `nzo` (its queue, else its history).
 pub async fn poll(st: &impl Ctx, nzo: &str) -> anyhow::Result<Poll> {
     let q = sab(st, &[("mode", "queue"), ("nzo_ids", nzo)]).await?;
     if let Some(s) = q["queue"]["slots"].as_array().and_then(|a| a.first()) {
@@ -134,6 +135,7 @@ pub async fn finished_outside(st: &impl Ctx) -> anyhow::Result<Vec<(String, Stri
     }).collect())
 }
 
+/// Delete the download and its files from SABnzbd's queue and history.
 pub async fn remove(st: &impl Ctx, nzo: &str) {
     let _ = sab(st, &[("mode", "queue"), ("name", "delete"), ("value", nzo), ("del_files", "1")]).await;
     let _ = sab(st, &[("mode", "history"), ("name", "delete"), ("value", nzo), ("del_files", "1"), ("archive", "0")]).await;

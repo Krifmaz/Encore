@@ -2,6 +2,7 @@
 use crate::Ctx;
 use serde_json::json;
 
+/// Tell the owner about a request: a Discord webhook embed and/or an ntfy message, as the settings name them.
 pub async fn send(st: &impl Ctx, title: &str, message: &str, image: Option<&str>) {
     let hook = st.cfg().str("discord_webhook");
     if !hook.is_empty() {

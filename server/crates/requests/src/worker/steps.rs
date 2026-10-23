@@ -21,8 +21,11 @@ const BATCH_EVERY: Duration = Duration::from_secs(1);
 /// How long a step's end waits for its last write at most (a backup can hold the database for minutes).
 const END_WAIT: Duration = Duration::from_secs(30);
 
+/// One running step's words.
 struct Entry {
+    /// its request
     id: i64,
+    /// the request's status while it runs
     status: String,
     /// the message the row had when the step began: written again when it ends
     before: String,
@@ -38,11 +41,16 @@ struct Entry {
     ended: Arc<Notify>,
 }
 
+/// The steps' shared state.
 #[derive(Default)]
 struct Inner {
+    /// the running steps, by key
     entries: Mutex<HashMap<u64, Entry>>,
+    /// the next step's key
     next: Mutex<u64>,
+    /// wakes the writer task
     wake: Notify,
+    /// the writer task, once started
     task: Mutex<Option<tokio::task::JoinHandle<()>>>,
     /// request → when a step of it last said anything (new words, a wait, the same words again): an import
     /// that says nothing for a long while hasn't moved ([`super::stall`])
@@ -56,12 +64,17 @@ pub struct Steps(Arc<Inner>);
 /// A running step's words ([`Steps::begin`]). Dropped without [`Scope::end`] (its request's task was
 /// stopped), the step still ends: the row gets its message back unless something else wrote one.
 pub(super) struct Scope {
+    /// the steps it belongs to
     steps: Steps,
+    /// its key
     key: u64,
+    /// told once its last write is done
     ended: Arc<Notify>,
+    /// [`Scope::end`] ran
     finished: bool,
 }
 
+/// Lock a mutex, taking it over when poisoned.
 fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
     m.lock().unwrap_or_else(|p| p.into_inner())
 }
@@ -109,6 +122,7 @@ impl Steps {
         }
     }
 
+    /// End the step `key`: its row gets the message it had before.
     fn finish(&self, key: u64) {
         let mut entries = lock(&self.0.entries);
         if let Some(e) = entries.get_mut(&key) {
@@ -179,6 +193,7 @@ impl Inner {
         lock(&self.entries).values().any(|e| e.want != e.have && !e.lost)
     }
 
+    /// Note which writes landed (a write that didn't found another message: the step's words stop).
     fn wrote(&self, writes: &[Write], landed: &[bool]) {
         let mut entries = lock(&self.entries);
         for ((key, .., want), ok) in writes.iter().zip(landed) {

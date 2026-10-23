@@ -3,6 +3,7 @@
 //! someone picked by hand.
 use super::*;
 
+/// A request's first step: by its kind (a playlist, a link, an artist, an album, a song), what it asks for next.
 pub(super) async fn start(st: &impl Ctx, r: &mut Req) -> anyhow::Result<()> {
     let kind = r.s("kind");
     if kind == "playlist" {
@@ -180,6 +181,7 @@ pub(super) fn storage_error<'a>(st: &impl Ctx, e: &'a anyhow::Error) -> Option<&
 
 /// Whether a Soulseek step can search now.
 pub(super) enum Turn {
+    /// search now
     Go,
     /// wait for the session ("next attempt at 14:20")
     Wait(String),
@@ -314,6 +316,7 @@ pub(super) fn park_download(st: &impl Ctx, r: &mut Req, when: &str) -> anyhow::R
     park_for_soulseek(st, r, &src, when)
 }
 
+/// The sources this request tries, in order (the settings' order, lossless ones first when asked, unavailable ones left out).
 pub(super) fn source_order(st: &impl Ctx, r: &Req) -> Vec<String> {
     let lossless_only = r.d["lossless_only"].as_bool().unwrap_or(false);
     // the sources of plugin programs: the lossless ones count with the lossless options
@@ -471,6 +474,7 @@ pub(super) async fn start_pick(st: &impl Ctx, r: &mut Req) -> anyhow::Result<()>
     Ok(())
 }
 
+/// An artist request: look up the discography and make a request for each release the filters tick.
 pub(super) async fn expand_artist(st: &impl Ctx, r: &mut Req) -> anyhow::Result<()> {
     const LOOKING: &str = "Looking up discography…";
     upd(st, r, &[("status", json!("searching")), ("message", json!(LOOKING))]);
@@ -626,12 +630,14 @@ pub(super) async fn single_on_album(st: &impl Ctx, r: &mut Req) -> anyhow::Resul
 /// The album lookup's words while it runs (and its base for what it waits for: "Looking up which album this
 /// song is on – waiting for MusicBrainz (about 2 minutes, 120 lookups ahead)").
 pub(super) const LOOKING_UP_ALBUM: &str = "Looking up which album this song is on…";
+/// [`LOOKING_UP_ALBUM`] without its ellipsis, for the longer messages.
 const LOOKING_UP_ALBUM_BASE: &str = "Looking up which album this song is on";
 /// How long one try of the album lookup waits for its first turn in MusicBrainz's line before it stops
 /// waiting, and how long the rest of it may take after that turn (its next calls keep the first one's place).
 pub const ALBUM_WAIT: std::time::Duration = std::time::Duration::from_secs(300);
 /// The tries before the song goes on without its album, and the time between two of them (seconds).
 pub const ALBUM_TRIES: u64 = 3;
+/// Seconds between two tries of the album lookup.
 pub const ALBUM_RETRY_SECS: f64 = 300.0;
 /// A try that gave up in the line looks this often whether the line has got short, so its next try can start
 /// sooner (seconds; a little more for some requests, so they don't all come back at once).
@@ -648,6 +654,7 @@ enum Lookup {
     Failed(String),
 }
 
+/// The HTTP status of an error, when it came from an HTTP answer.
 fn status_of(e: &anyhow::Error) -> Option<reqwest::StatusCode> {
     e.chain().find_map(|c| c.downcast_ref::<reqwest::Error>().and_then(|r| r.status()))
 }
@@ -908,6 +915,7 @@ pub(super) async fn try_album_upgrade(st: &impl Ctx, r: &mut Req) -> anyhow::Res
     }
 }
 
+/// A song waiting for its album's request: completed when the album brought it, else on to its own search.
 pub(super) async fn poll_album(st: &impl Ctx, r: &mut Req) -> anyhow::Result<()> {
     let a = get(st, r.d["album_request"].as_i64().unwrap_or(0));
     let reason = match &a {

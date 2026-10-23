@@ -14,6 +14,7 @@ use tokio::time::Instant;
 /// How long an open door waits for slskd's connection.
 pub const DOOR_WINDOW: Duration = Duration::from_secs(15);
 
+/// Whether the door is open, and the connections it let through.
 #[derive(Default, Debug)]
 pub(super) struct DoorState {
     /// the door lets the next connection through until then
@@ -26,6 +27,7 @@ pub(super) struct DoorState {
     closed_at: Option<Instant>,
     /// connections let through, and turned away, since the server started
     passed: u64,
+    /// connections turned away since the server started
     refused: u64,
 }
 
@@ -56,10 +58,12 @@ pub struct DoorSeen {
     pub live: usize,
     /// connections let through, and turned away, since the server started
     pub passed: u64,
+    /// connections turned away since the server started
     pub refused: u64,
 }
 
 impl Session {
+    /// The door's state, locked.
     fn door_state(&self) -> std::sync::MutexGuard<'_, DoorState> {
         self.0.door.lock().unwrap_or_else(|e| e.into_inner())
     }

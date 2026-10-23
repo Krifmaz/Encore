@@ -2,25 +2,33 @@
 //! and `chrome.cookies.getAll` (the extension).
 use serde_json::Value;
 
+/// One cookie of the jar.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Cookie {
     /// ".youtube.com" for a domain cookie, "music.youtube.com" for a host-only one
     pub domain: String,
+    /// the path it is for
     pub path: String,
+    /// sent over https only
     pub secure: bool,
+    /// hidden from scripts
     pub http_only: bool,
     /// unix seconds; 0 = a session cookie
     pub expires: i64,
+    /// its name
     pub name: String,
+    /// its value
     pub value: String,
 }
 
 /// The cookies that keep a Google account signed in: their expiry is the jar's expiry.
 pub const AUTH_NAMES: [&str; 6] = ["SAPISID", "__Secure-3PAPISID", "__Secure-1PSID", "__Secure-3PSID", "SID", "LOGIN_INFO"];
 
+/// A set of cookies, in the order they were read.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct Jar(pub Vec<Cookie>);
 
+/// "TRUE" in a Netscape cookie file.
 fn tf(s: &str) -> bool {
     s.trim().eq_ignore_ascii_case("true")
 }
@@ -108,10 +116,12 @@ impl Jar {
         }
     }
 
+    /// No cookies.
     pub fn is_empty(&self) -> bool {
         self.0.is_empty()
     }
 
+    /// The cookie `name` that would be sent to `host`.
     pub fn get(&self, host: &str, name: &str) -> Option<&Cookie> {
         self.0.iter().find(|c| c.name == name && matches_host(&c.domain, host))
     }

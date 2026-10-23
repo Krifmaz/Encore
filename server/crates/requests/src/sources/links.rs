@@ -6,8 +6,10 @@ use encore_http::{deezer, tidal};
 use regex::Regex;
 use serde_json::{json, Value};
 
+/// The desktop browser User-Agent sent with page requests, so sites serve the full page.
 const UA: &str = "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0 Safari/537.36";
 
+/// One track in the import shape: trimmed title and artist, the ISRC uppercased without dashes, and no zero durations.
 #[allow(clippy::too_many_arguments)]
 fn t(title: &str, artist: &str, album: Option<&str>, duration: Option<f64>, isrc: Option<&str>, mbid: Option<&str>, source_id: Option<String>, cover: Option<&str>) -> Value {
     let isrc = isrc.map(|i| i.to_uppercase().replace('-', "")).filter(|i| !i.is_empty());
@@ -15,6 +17,7 @@ fn t(title: &str, artist: &str, album: Option<&str>, duration: Option<f64>, isrc
             "mbid": mbid, "source_id": source_id, "cover": cover })
 }
 
+/// The service a link belongs to ("spotify", "deezer", "tidal", "qobuz", "apple", "listenbrainz", "amazon" or "ytdlp"), or `None`.
 pub fn detect(url: &str) -> Option<&'static str> {
     let rules = [
         ("spotify", r"(?i)open\.spotify\.com|^spotify:|spotify\.link"), ("deezer", r"(?i)deezer\.com|deezer\.page\.link|link\.deezer\.com"),
@@ -132,6 +135,7 @@ fn split_outside_brackets(line: &str, sep: char) -> Option<(&str, &str)> {
     None
 }
 
+/// Follow a spotify.link / Deezer short link to the page it redirects to; other links are returned as they are.
 async fn resolve_short(st: &impl Ctx, url: &str) -> String {
     if Regex::new(r"spotify\.link|deezer\.page\.link|link\.deezer\.com").unwrap().is_match(url) {
         if let Ok(r) = st.http().get(url).header("User-Agent", UA).send().await {
@@ -141,6 +145,7 @@ async fn resolve_short(st: &impl Ctx, url: &str) -> String {
     url.to_string()
 }
 
+/// The first value in a JSON tree (depth first, the node itself included) that `pred` accepts.
 fn walk_find<'a>(v: &'a Value, pred: &dyn Fn(&Value) -> bool) -> Option<&'a Value> {
     if pred(v) {
         return Some(v);
@@ -152,6 +157,7 @@ fn walk_find<'a>(v: &'a Value, pred: &dyn Fn(&Value) -> bool) -> Option<&'a Valu
     }
 }
 
+/// Collect every value in a JSON tree that `pred` accepts, including matches nested inside matches.
 fn walk_all<'a>(v: &'a Value, pred: &dyn Fn(&Value) -> bool, out: &mut Vec<&'a Value>) {
     if pred(v) {
         out.push(v);
@@ -165,6 +171,7 @@ fn walk_all<'a>(v: &'a Value, pred: &dyn Fn(&Value) -> bool, out: &mut Vec<&'a V
 
 // ---- Spotify ------------------------------------------------------------------------------------
 
+/// A Spotify API track as an import track; `album` stands in for the track's own album (album tracks have none).
 fn sp_track(x: &Value, album: Option<&Value>) -> Value {
     let alb = album.unwrap_or(&x["album"]);
     let artists = x["artists"].as_array().map(|a| a.iter().map(|a| s(&a["name"])).collect::<Vec<_>>().join(", ")).unwrap_or_default();
@@ -173,6 +180,7 @@ fn sp_track(x: &Value, album: Option<&Value>) -> Value {
       x["id"].as_str().map(String::from), cover)
 }
 
+/// A Spotify client credentials token from the configured client id and secret; `None` when they're not set or Spotify refuses.
 async fn spotify_app_token(st: &impl Ctx) -> Option<String> {
     let (cid, sec) = (st.cfg().str("spotify_client_id"), st.cfg().str("spotify_client_secret"));
     if cid.is_empty() || sec.is_empty() {
@@ -182,6 +190,8 @@ async fn spotify_app_token(st: &impl Ctx) -> Option<String> {
     r.json::<Value>().await.ok()?["access_token"].as_str().map(String::from)
 }
 
+/// Every track of a Spotify playlist, album, track or the user's Liked Songs (`collection`) through the Web API,
+/// following pages up to 10 000 tracks and waiting out 429 Retry-After answers.
 pub async fn spotify_api(st: &impl Ctx, token: &str, kind: &str, id: &str) -> anyhow::Result<Value> {
     let base = "https://api.spotify.com/v1";
     let get = |u: String| async move {
@@ -236,6 +246,7 @@ pub async fn spotify_api(st: &impl Ctx, token: &str, kind: &str, id: &str) -> an
     Ok(json!({ "name": meta["name"], "description": html_unescape(s(&meta["description"])), "cover": meta["images"][0]["url"], "tracks": items }))
 }
 
+/// Undo the HTML entities pages put in embedded JSON (`&amp;`, `&quot;`, `&#39;`, `&lt;`, `&gt;`).
 fn html_unescape(s: &str) -> String {
     s.replace("&amp;", "&").replace("&quot;", "\"").replace("&#x27;", "'").replace("&#39;", "'").replace("&lt;", "<").replace("&gt;", ">")
 }
@@ -263,6 +274,7 @@ async fn spotify_embed(st: &impl Ctx, kind: &str, id: &str) -> anyhow::Result<Va
     Ok(json!({ "name": name, "description": "", "cover": entity["coverArt"]["sources"][0]["url"], "tracks": tracks }))
 }
 
+/// Import a Spotify link: through the Web API (the user's token, then the app token), else the public embed player.
 async fn spotify(st: &impl Ctx, url: &str, uid: Option<i64>) -> anyhow::Result<Value> {
     let url = resolve_short(st, url).await;
     let re = Regex::new(r"(?:open\.spotify\.com/(?:intl-[\w-]+/)?(?:user/[^/]+/)?|spotify:)(playlist|album|track|artist|collection)[/:]?([A-Za-z0-9]*)").unwrap();
@@ -308,6 +320,7 @@ async fn spotify(st: &impl Ctx, url: &str, uid: Option<i64>) -> anyhow::Result<V
 
 // ---- Deezer -------------------------------------------------------------------------------------
 
+/// Import a Deezer playlist, album, track or profile's favourites through Deezer's public API.
 async fn deezer(st: &impl Ctx, url: &str) -> anyhow::Result<Value> {
     let url = resolve_short(st, url).await;
     let re = Regex::new(r"deezer\.com/(?:[a-z]{2}/)?(playlist|album|track|profile)/(\d+)").unwrap();
@@ -358,6 +371,7 @@ async fn deezer(st: &impl Ctx, url: &str) -> anyhow::Result<Value> {
 
 // ---- Tidal (developer API, client credentials) ---------------------------------------------------
 
+/// Import a Tidal playlist, album or track through Tidal's developer API with client credentials.
 async fn tidal(st: &impl Ctx, url: &str) -> anyhow::Result<Value> {
     let c = Regex::new(r"tidal\.com/(?:browse/)?(playlist|album|track|mix)/([\w-]+)").unwrap().captures(url)
         .ok_or_else(|| anyhow::anyhow!("Not a Tidal playlist/album/track link"))?;
@@ -414,6 +428,7 @@ async fn tidal(st: &impl Ctx, url: &str) -> anyhow::Result<Value> {
 
 // ---- Apple Music / Qobuz / any page with schema.org data ------------------------------------------
 
+/// The first schema.org MusicPlaylist / MusicAlbum with tracks in a page's ld+json scripts.
 fn jsonld(html: &str) -> Option<Value> {
     let re = Regex::new(r#"(?s)<script[^>]+type="application/ld\+json"[^>]*>(.*?)</script>"#).unwrap();
     for c in re.captures_iter(html) {
@@ -425,6 +440,7 @@ fn jsonld(html: &str) -> Option<Value> {
     None
 }
 
+/// The tracks of a schema.org playlist or album, whether `track` is an ItemList or a plain array.
 fn ld_tracks(ld: &Value) -> Vec<Value> {
     let tr = match &ld["track"] {
         Value::Object(_) => ld["track"]["itemListElement"].as_array().cloned().unwrap_or_else(|| vec![ld["track"].clone()]),
@@ -439,6 +455,7 @@ fn ld_tracks(ld: &Value) -> Vec<Value> {
     }).collect()
 }
 
+/// GET a page as a browser would; `what` names the site in the error when it answers 4xx/5xx.
 async fn page(st: &impl Ctx, url: &str, what: &str) -> anyhow::Result<String> {
     let r = st.http().get(url).header("User-Agent", UA).header("Accept-Language", "en-US,en;q=0.9").send().await?;
     if r.status().as_u16() >= 400 {
@@ -447,6 +464,7 @@ async fn page(st: &impl Ctx, url: &str, what: &str) -> anyhow::Result<String> {
     Ok(r.text().await?)
 }
 
+/// Import any page that carries the playlist as schema.org data (Qobuz and others).
 async fn web_jsonld(st: &impl Ctx, url: &str) -> anyhow::Result<Value> {
     let html = page(st, url, "Page").await?;
     let ld = jsonld(&html).ok_or_else(|| anyhow::anyhow!("No track list found on that page"))?;
@@ -454,6 +472,7 @@ async fn web_jsonld(st: &impl Ctx, url: &str) -> anyhow::Result<Value> {
     Ok(json!({ "name": name, "description": s(&ld["description"]), "cover": ld["image"].as_str(), "tracks": ld_tracks(&ld) }))
 }
 
+/// Import an Apple Music page: its schema.org data, else the track list in its embedded state.
 async fn apple(st: &impl Ctx, url: &str) -> anyhow::Result<Value> {
     let html = page(st, url, "Apple Music").await?;
     if let Some(ld) = jsonld(&html) {
@@ -474,6 +493,7 @@ async fn apple(st: &impl Ctx, url: &str) -> anyhow::Result<Value> {
 
 // ---- ListenBrainz -------------------------------------------------------------------------------
 
+/// Import a ListenBrainz playlist (JSPF) by its MBID.
 async fn listenbrainz(st: &impl Ctx, url: &str) -> anyhow::Result<Value> {
     let c = Regex::new(r"playlist/([0-9a-f-]{36})").unwrap().captures(url).ok_or_else(|| anyhow::anyhow!("Not a ListenBrainz playlist link"))?;
     let r = encore_http::listenbrainz::playlist(st, &c[1], None).send().await?;
@@ -491,6 +511,7 @@ async fn listenbrainz(st: &impl Ctx, url: &str) -> anyhow::Result<Value> {
 
 // ---- YouTube / SoundCloud / Bandcamp / … via yt-dlp ------------------------------------------------
 
+/// Import a YouTube / SoundCloud / Bandcamp / … playlist through yt-dlp, cleaning "(Official Video)" style tags from titles.
 async fn ytdlp_playlist(st: &impl Ctx, url: &str) -> anyhow::Result<Value> {
     let info = super::ytdlp::playlist(st, url).await.map_err(|e| anyhow::anyhow!("Couldn't read that link: {}", e.to_string().chars().take(200).collect::<String>()))?;
     let entries = info["entries"].as_array().cloned().unwrap_or_else(|| vec![info.clone()]);

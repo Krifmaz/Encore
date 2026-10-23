@@ -38,6 +38,7 @@ pub const FILE: &str = "search-cache.db";
 
 /// What the Soulseek answers keep: per user, and per audio file.
 const ANSWER_KEYS: [&str; 4] = ["username", "hasFreeUploadSlot", "uploadSpeed", "queueLength"];
+/// What a kept audio file keeps (slskd's names).
 const FILE_KEYS: [&str; 6] = ["filename", "size", "bitRate", "bitDepth", "sampleRate", "length"];
 /// What an indexer release keeps (Prowlarr's names).
 const RELEASE_KEYS: [&str; 9] = ["title", "guid", "size", "seeders", "age", "indexer", "protocol", "magnetUrl", "downloadUrl"];
@@ -50,6 +51,7 @@ pub fn path(data_dir: &Path) -> PathBuf {
 /// A kept answer.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Found {
+    /// the key it is kept under
     pub key: String,
     /// the text it was searched with
     pub query: String,
@@ -65,12 +67,16 @@ pub struct Found {
 /// back into the typed errors with [`Failure::into_error`], so a person still gets 409 or 429.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Failure {
+    /// slskd has no Soulseek session ([`crate::slskd_session::NotConnected`])
     NotConnected(String),
+    /// slskd is busy with another search ([`crate::slskd_session::Busy`])
     Busy(String),
+    /// any other error, in words
     Other(String),
 }
 
 impl Failure {
+    /// The shareable form of an error.
     pub fn of(e: &anyhow::Error) -> Failure {
         if let Some(n) = e.downcast_ref::<crate::slskd_session::NotConnected>() {
             return Failure::NotConnected(n.0.clone());
@@ -81,6 +87,7 @@ impl Failure {
         Failure::Other(format!("{e:#}"))
     }
 
+    /// The typed error again.
     pub fn into_error(self) -> anyhow::Error {
         match self {
             Failure::NotConnected(m) => crate::slskd_session::NotConnected(m).into(),
@@ -90,31 +97,44 @@ impl Failure {
     }
 }
 
+/// A live search several callers can wait on.
 type Flight = Shared<BoxFuture<'static, Result<Arc<Found>, Failure>>>;
 
 /// The kept answers, and the live searches running for the picker. Clones share it.
 #[derive(Clone, Default)]
 pub struct Cache(Arc<Inner>);
 
+/// The shared state behind [`Cache`].
 #[derive(Default)]
 struct Inner {
+    /// the SQLite file, opened on first use
     file: Mutex<File>,
     /// one live search per key: a second caller waits for the first one's answer
     flights: Mutex<HashMap<String, (u64, Flight)>>,
+    /// numbers the flights, so a finished one removes only itself
     next: AtomicU64,
     /// limits other than the constants (tests)
     limits: Mutex<Option<(i64, usize)>>,
 }
 
+/// The cache file's state.
 #[derive(Default)]
 enum File {
+    /// not opened yet
     #[default]
     Closed,
-    Open { conn: Connection, dir: PathBuf },
+    /// open
+    Open {
+        /// the connection
+        conn: Connection,
+        /// the folder the file is in
+        dir: PathBuf,
+    },
     /// it could not be opened or broke: off until the next start
     Off,
 }
 
+/// The cache table: per key its kind, query, searched time, request and gzipped answers.
 const SCHEMA: &str = "
 CREATE TABLE IF NOT EXISTS search_cache (
   key         TEXT PRIMARY KEY,
@@ -129,10 +149,12 @@ CREATE TABLE IF NOT EXISTS search_cache (
 CREATE INDEX IF NOT EXISTS search_cache_request ON search_cache(request_id, searched_at);
 CREATE INDEX IF NOT EXISTS search_cache_age ON search_cache(searched_at);";
 
+/// Whether an SQLite error means the file is damaged (and should be replaced).
 fn damaged(e: &rusqlite::Error) -> bool {
     matches!(e.sqlite_error_code(), Some(rusqlite::ErrorCode::DatabaseCorrupt | rusqlite::ErrorCode::NotADatabase))
 }
 
+/// Open the cache file: a 2 s busy timeout, synchronous=NORMAL, and the schema.
 fn open_at(file: &Path) -> rusqlite::Result<Connection> {
     let conn = Connection::open(file)?;
     conn.busy_timeout(std::time::Duration::from_secs(2))?;
@@ -161,6 +183,7 @@ fn open(dir: &Path) -> Result<Connection, String> {
     }
 }
 
+/// The answers gzipped as JSON.
 fn gzip(results: &[Value]) -> Vec<u8> {
     let json = serde_json::to_vec(results).unwrap_or_else(|_| b"[]".to_vec());
     let mut enc = flate2::write::GzEncoder::new(Vec::with_capacity(json.len() / 4), flate2::Compression::default());
@@ -168,6 +191,7 @@ fn gzip(results: &[Value]) -> Vec<u8> {
     enc.finish().unwrap_or_default()
 }
 
+/// The answers from their gzipped JSON; `None` when it doesn't read.
 fn gunzip(blob: &[u8]) -> Option<Vec<Value>> {
     let mut json = vec![];
     flate2::read::GzDecoder::new(blob).read_to_end(&mut json).ok()?;
@@ -180,10 +204,12 @@ fn fresh(count: i64, at: f64, now: f64) -> bool {
 }
 
 impl Cache {
+    /// The file's state, even after a panic poisoned the lock.
     fn file(&self) -> MutexGuard<'_, File> {
         self.0.file.lock().unwrap_or_else(|e| e.into_inner())
     }
 
+    /// The size limits: (whole file in bytes, one entry).
     fn limits(&self) -> (i64, usize) {
         self.0.limits.lock().unwrap_or_else(|e| e.into_inner()).unwrap_or((MAX_BYTES, MAX_ENTRY))
     }
@@ -405,6 +431,7 @@ pub fn worker_texts(kind: &str, artist: &str, title: &str, album: &str) -> Vec<S
 
 // ---- what is kept -----------------------------------------------------------------------------------
 
+/// The fields of `v` named in `keys` that are set.
 fn pick(v: &Value, keys: &[&str]) -> Map<String, Value> {
     keys.iter().filter_map(|k| v.get(*k).filter(|x| !x.is_null()).map(|x| (k.to_string(), x.clone()))).collect()
 }
@@ -446,6 +473,7 @@ pub async fn keep_releases(st: &impl Ctx, text: &str, cats: &[&str], request_id:
     keep(st, "torznab", torznab_key(text, cats), text.to_string(), request_id, results).await
 }
 
+/// Keep a search's answers (on a blocking thread); false when they weren't kept.
 async fn keep(st: &impl Ctx, kind: &'static str, key: String, query: String, request_id: Option<i64>, results: Vec<Value>) -> bool {
     let cache = st.requests().search_cache.clone();
     let dir = st.data_dir().to_path_buf();

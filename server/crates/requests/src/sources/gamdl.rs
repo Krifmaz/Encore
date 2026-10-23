@@ -11,19 +11,25 @@ use serde_json::{json, Value};
 use std::path::Path;
 use std::time::Duration;
 
+/// The plugin and program id.
 pub const ID: &str = "gamdl";
+/// Apple Music's web player, the origin the AMP API expects.
 const HOME: &str = "https://music.apple.com";
+/// Apple's AMP catalog and account API.
 const AMP: &str = "https://amp-api.music.apple.com";
+/// The cookie domain gamdl's cookies file names.
 const COOKIE_DOMAIN: &str = ".music.apple.com";
 /// the catalog search's most per type
 const SEARCH_LIMIT: usize = 25;
 /// the wrapper-v2 API version gamdl 3.9 checks for
 const WRAPPER_API: &str = "0.0.2";
 
+/// A sign-in failure with this message.
 fn auth(message: impl Into<String>) -> Failure {
     Failure::new(Code::Auth, message)
 }
 
+/// A network failure: Apple Music couldn't be reached.
 fn net(e: impl std::fmt::Display) -> Failure {
     Failure::new(Code::Network, format!("Apple Music can't be reached: {e}"))
 }
@@ -53,6 +59,7 @@ pub fn media_user_token(st: &impl Ctx) -> String {
     token_in(&st.cfg().str("gamdl_media_user_token"))
 }
 
+/// The media-user-token from what the user pasted: a bare token, or a cookie line / cookies.txt row holding it.
 fn token_in(raw: &str) -> String {
     let raw = raw.trim();
     let after = raw.find("media-user-token").map(|i| &raw[i + "media-user-token".len()..]);
@@ -79,6 +86,7 @@ fn wrapper(st: &impl Ctx) -> Option<(String, String, u16)> {
     Some((url, host, port))
 }
 
+/// A JWT's `exp` claim (seconds since the epoch); 0 when it can't be read.
 fn jwt_exp(token: &str) -> f64 {
     let Some(part) = token.split('.').nth(1) else { return 0.0 };
     base64::engine::general_purpose::URL_SAFE_NO_PAD.decode(part.trim_end_matches('=')).ok()
@@ -133,6 +141,7 @@ fn find_jwt(script: &str) -> Option<String> {
     })
 }
 
+/// GET `uri` on Apple's AMP API with the developer token and the language; with `user`, the media-user-token too.
 async fn amp(st: &impl Ctx, uri: &str, query: &[(&str, String)], user: bool) -> Result<Value, Failure> {
     let token = developer_token(st).await?;
     let lang = Some(st.cfg().str("gamdl_language")).filter(|l| !l.trim().is_empty()).unwrap_or_else(|| "en-US".into());
@@ -177,6 +186,7 @@ async fn account(st: &impl Ctx, fresh: bool) -> Result<(bool, String), Failure> 
     Ok((active, sf))
 }
 
+/// The storefront to search: the setting, else the signed-in account's, else "us".
 async fn storefront(st: &impl Ctx) -> String {
     let sf = st.cfg().str("gamdl_storefront").trim().to_lowercase();
     if !sf.is_empty() {
@@ -194,6 +204,7 @@ async fn storefront(st: &impl Ctx) -> String {
 
 // ---- search ----------------------------------------------------------------------------------------------
 
+/// An item's artwork URL at 1200×1200 JPEG, or null.
 fn cover(a: &Value) -> Value {
     a["artwork"]["url"].as_str().map(|u| json!(u.replace("{w}", "1200").replace("{h}", "1200").replace("{f}", "jpg").replace("{c}", ""))).unwrap_or(Value::Null)
 }
@@ -211,10 +222,12 @@ fn quality_for(st: &impl Ctx, traits: &Value, surround: bool) -> (&'static str, 
     }
 }
 
+/// Whether Apple's `audioTraits` list holds `t` (any case).
 fn has_trait(traits: &Value, t: &str) -> bool {
     traits.as_array().is_some_and(|a| a.iter().any(|x| x.as_str().is_some_and(|s| s.eq_ignore_ascii_case(t))))
 }
 
+/// The quality shown for a format: "ALAC 24-bit", "Dolby Atmos", "HE-AAC 64k" or "AAC 256k".
 fn label(fmt: &str, rate: i64, depth: i64) -> String {
     match fmt {
         "alac" if depth > 0 => format!("ALAC {depth}-bit"),
@@ -225,10 +238,12 @@ fn label(fmt: &str, rate: i64, depth: i64) -> String {
     }
 }
 
+/// How much of `needle`'s words `hay` holds (as torznab scores); 1 when there's nothing to match.
 fn share(hay: &str, needle: &str) -> f64 {
     if needle.trim().is_empty() { 1.0 } else { super::torznab::share(hay, needle) }
 }
 
+/// A song from the catalog search as a search result; `None` when it can't be streamed in this storefront.
 fn song_result(st: &impl Ctx, req: &Value, s: &Value, sf: &str, by_isrc: bool) -> Option<Value> {
     let id = s["id"].as_str()?;
     let a = &s["attributes"];
@@ -273,6 +288,7 @@ fn song_result(st: &impl Ctx, req: &Value, s: &Value, sf: &str, by_isrc: bool) -
     }))
 }
 
+/// An album from the catalog search as a search result; `None` when it can't be streamed in this storefront.
 fn album_result(st: &impl Ctx, req: &Value, al: &Value, sf: &str) -> Option<Value> {
     let id = al["id"].as_str()?;
     let a = &al["attributes"];
@@ -362,6 +378,7 @@ fn write_cookies(st: &impl Ctx) -> Result<String, Failure> {
     Ok(p.to_string_lossy().into_owned())
 }
 
+/// gamdl's command line: the codec, the wrapper when the codec needs it, cookies, ffmpeg and the output layout.
 fn args(st: &impl Ctx, folder: &Path, ffmpeg: &str, surround: bool) -> Result<Vec<String>, Failure> {
     let (prio, _, _, _, wrapped) = codec_for(st, surround);
     let w = wrapper(st);
@@ -427,6 +444,7 @@ fn classify(success: bool, code: Option<i32>, tail: &[String]) -> Failure {
     Failure::internal(format!("gamdl produced no file ({}): {last}", if success { "it finished".to_string() } else { format!("exit code {}", code.unwrap_or(-1)) }))
 }
 
+/// Download a result's Apple Music link with gamdl into `folder`; with surround, only the Dolby Atmos files are kept.
 pub async fn download(st: &impl Ctx, call: &Call, req: &Value, folder: &Path) -> Result<Downloaded, Failure> {
     let payload = &req["payload"];
     let url = payload["url"].as_str().or(req["url"].as_str()).filter(|u| u.starts_with(HOME)).ok_or_else(|| Failure::new(Code::NotFound, "Nothing to download: the result has no Apple Music link"))?.to_string();
@@ -473,6 +491,7 @@ pub async fn download(st: &impl Ctx, call: &Call, req: &Value, folder: &Path) ->
 
 // ---- status and test -------------------------------------------------------------------------------------
 
+/// The quality the codec setting gives, as the card shows it.
 fn quality_label(st: &impl Ctx) -> &'static str {
     match st.cfg().str("gamdl_codec").as_str() {
         "aac-he-web" => "HE-AAC 64k",
@@ -496,10 +515,12 @@ pub async fn atmos_for(st: &impl Ctx, ask: &Value) -> Result<Option<Value>, Fail
     Ok(results.into_iter().next())
 }
 
+/// Whether gamdl can download as a subscriber: a media-user-token is set, or a wrapper server is.
 pub fn signed_in(st: &impl Ctx) -> bool {
     !media_user_token(st).is_empty() || wrapper(st).is_some()
 }
 
+/// The card's status line: the gamdl version, whether the subscription is active, and the quality.
 pub async fn status(st: &impl Ctx) -> Result<Status, Failure> {
     let v = st.plugins().program(ID).filter(|_| pytool::program(st, ID).is_some()).map(|(v, _)| v).ok_or_else(|| pytool::not_installed("gamdl"))?;
     if !signed_in(st) {
@@ -514,6 +535,7 @@ pub async fn status(st: &impl Ctx) -> Result<Status, Failure> {
     Ok(Status { message: format!("gamdl {v} · {sub} · {}", quality_label(st)), signed_in: Some(acct.is_none_or(|a| a["active"] == true)) })
 }
 
+/// The card's test: gamdl and ffmpeg are installed, and the token (or the wrapper) is accepted.
 pub async fn test(st: &impl Ctx) -> Result<String, Failure> {
     let v = st.plugins().program(ID).filter(|_| pytool::program(st, ID).is_some()).map(|(v, _)| v).ok_or_else(|| pytool::not_installed("gamdl"))?;
     if encore_core::which::which("ffmpeg").is_none() {

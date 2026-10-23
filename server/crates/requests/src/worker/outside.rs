@@ -19,6 +19,7 @@ pub(super) fn tick<C: Ctx>(st: &C) {
     tokio::spawn(async move { scan(&st).await });
 }
 
+/// Look at the torrent and Usenet clients' finished downloads and import those Encore didn't start.
 async fn scan(st: &impl Ctx) {
     for c in [Client::torrent(st), Client::usenet(st)] {
         if !(st.plugins().enabled(c.plugin_id()) && c.ready(st)) {

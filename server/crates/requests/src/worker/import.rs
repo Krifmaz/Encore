@@ -109,6 +109,7 @@ pub fn record_origin(st: &impl Ctx, paths: &[PathBuf], origin: &Value, rid: i64,
     crate::report::record_origin(st, paths, origin); // the exact source, for Report a problem
 }
 
+/// Finish a request as completed: record where its files came from, notify, and start what follows (playlists, Atmos, lyrics).
 pub(super) async fn complete(st: &impl Ctx, r: &mut Req, message: &str, new: &[PathBuf], origin: Value) {
     if !new.is_empty() {
         record_origin(st, new, &origin, r.id, r.row.f("created_at"), adder_of(&r.row, &r.d));
@@ -146,6 +147,7 @@ pub(super) async fn complete(st: &impl Ctx, r: &mut Req, message: &str, new: &[P
     }
 }
 
+/// Finish a request as failed: log it and notify (a lossless-only or automatic request waits to try again instead).
 pub(super) async fn fail(st: &impl Ctx, r: &mut Req, message: &str) {
     if r.d["replace"].is_object() {
         crate::report::replacement_failed(st, &r.d, message);

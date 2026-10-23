@@ -5,11 +5,13 @@ use super::{base, fetch_torrent, local, unreachable, Fetched, Poll};
 use base64::Engine;
 use serde_json::{json, Value};
 
+/// Transmission's RPC address.
 fn endpoint(st: &impl Ctx) -> String {
     let b = base(st, "transmission_url");
     if b.ends_with("/rpc") { b } else { format!("{b}/transmission/rpc") }
 }
 
+/// One RPC call, with the login; a 409 hands out the session id, kept for the retry and the next calls.
 async fn rpc(st: &impl Ctx, method: &str, args: Value) -> anyhow::Result<Value> {
     let url = endpoint(st);
     let user = st.cfg().str("transmission_user");
@@ -46,6 +48,7 @@ async fn rpc(st: &impl Ctx, method: &str, args: Value) -> anyhow::Result<Value> 
     anyhow::bail!("Transmission kept asking for a new session id")
 }
 
+/// Transmission's version, for the status line.
 pub async fn status(st: &impl Ctx) -> anyhow::Result<String> {
     let v = rpc(st, "session-get", json!({ "fields": ["version"] })).await?;
     Ok(v["version"].as_str().map(|s| format!(" {}", s.split_whitespace().next().unwrap_or(s))).unwrap_or_default())
@@ -74,8 +77,10 @@ pub async fn add(st: &impl Ctx, url: &str) -> anyhow::Result<String> {
     Ok(hash.to_string())
 }
 
+/// The torrent fields a poll reads.
 const FIELDS: [&str; 9] = ["hashString", "name", "percentDone", "status", "error", "errorString", "rateDownload", "downloadDir", "peersSendingToUs"];
 
+/// Where Transmission is with the torrent `hash`.
 pub async fn poll(st: &impl Ctx, hash: &str) -> anyhow::Result<Poll> {
     let v = rpc(st, "torrent-get", json!({ "ids": [hash], "fields": FIELDS })).await?;
     let Some(t) = v["torrents"].as_array().and_then(|a| a.first()).cloned() else { return Ok(Poll::Failed("torrent disappeared from Transmission".into())) };
@@ -110,6 +115,7 @@ pub async fn poll(st: &impl Ctx, hash: &str) -> anyhow::Result<Poll> {
     Ok(if status == 1 || status == 2 { Poll::Busy(pct, msg) } else { Poll::Progress(pct, msg) })
 }
 
+/// Delete the torrent and its files from Transmission.
 pub async fn remove(st: &impl Ctx, hash: &str) {
     let _ = rpc(st, "torrent-remove", json!({ "ids": [hash], "delete-local-data": true })).await;
 }
@@ -121,6 +127,7 @@ pub async fn files(st: &impl Ctx, hash: &str) -> anyhow::Result<Option<Vec<Strin
     Ok(if names.is_empty() { None } else { Some(names) })
 }
 
+/// Download only the files at `keep` (Transmission's order).
 pub async fn select(st: &impl Ctx, hash: &str, keep: &[usize]) -> anyhow::Result<()> {
     let n = files(st, hash).await?.map(|f| f.len()).unwrap_or(0);
     let skip: Vec<usize> = (0..n).filter(|i| !keep.contains(i)).collect();

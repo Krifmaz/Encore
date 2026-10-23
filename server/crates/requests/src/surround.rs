@@ -8,7 +8,9 @@ use encore_core::error::{err, ApiResult};
 use encore_db::{now, p, Row, RowExt};
 use serde_json::{json, Value};
 
+/// A yes (Apple Music has Atmos) is believed this long.
 const YES_FOR: f64 = 7.0 * 86400.0;
+/// A no is believed this long.
 const NO_FOR: f64 = 2.0 * 86400.0;
 
 /// The search a stereo album asks Apple Music (the SDK's request fields).
@@ -86,10 +88,12 @@ fn create(st: &impl Ctx, user_id: i64, key: &str, found: &Value, stereo_album: O
     Ok(id)
 }
 
+/// The error when gamdl can't fetch Atmos versions.
 fn not_ready() -> encore_core::error::ApiError {
     err(409, "Dolby Atmos versions need the gamdl plugin with a wrapper-v2 server (Settings → Plugins → gamdl)")
 }
 
+/// A search failure as the API's error (sign-in 409, rate limit 429, else 502).
 fn search_failed(f: encore_plugins::Failure) -> encore_core::error::ApiError {
     match f.code {
         encore_plugins::Code::Auth => err(409, f.message),

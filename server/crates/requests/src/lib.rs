@@ -46,7 +46,7 @@ pub struct Requests {
     /// the live request events of open pages
     pub events: events::Events,
     /// the sources' lines: streamrip one release at a time per service, yt-dlp two, the indexers two searches, the
-    /// worker's Soulseek searches one – and the requests someone asked to download now ([`line`])
+    /// worker's Soulseek searches one – and the requests someone asked to download now ([`line`](mod@line))
     pub lines: line::Lines,
     /// wakes the queue's loop before its 5 s are up (Download now on a queued request)
     pub wake: Arc<Notify>,

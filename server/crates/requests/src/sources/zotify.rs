@@ -17,34 +17,50 @@ use serde_json::{json, Value};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
+/// The plugin and program id.
 pub const ID: &str = "zotify";
+/// Spotify's sign-in page.
 const AUTH: &str = "https://accounts.spotify.com/authorize";
+/// Spotify's token endpoint.
 const TOKEN: &str = "https://accounts.spotify.com/api/token";
+/// Spotify's Web API.
 const API: &str = "https://api.spotify.com/v1/";
+/// Spotify's web player: result links start with it.
 const OPEN: &str = "https://open.spotify.com/";
+/// The redirect URI the user's Spotify app must list; the sign-in link lands on it (nothing listens there).
 pub const REDIRECT: &str = "http://127.0.0.1:4381/login";
 /// the client zotify and librespot sign the account in with (librespot's MercuryRequests.keymaster_client_id)
 const KEYMASTER: &str = "65b708073fc0480ea92a077233ca87bd";
+/// What the sign-in asks for: playback (for zotify's downloads) and the library and playlists.
 const SCOPES: &str = "streaming playlist-read-private playlist-read-collaborative user-follow-read user-read-playback-position \
 user-top-read user-read-recently-played user-library-read user-read-email user-read-private";
 /// the most a Development Mode app may ask a search for since February 2026
 const SEARCH_LIMIT: usize = 10;
+/// The Python helper that turns the Web API sign-in into zotify's saved session.
 const HELPER: &str = include_str!("assets/zotify_session.py");
 
+/// zotify's saved Spotify session.
 const CREDS: &str = "credentials.json";
+/// The Web API token of the user's app, in zotify's format.
 const API_CREDS: &str = "api_credentials.json";
+/// The sign-in under way: its PKCE verifier and client id.
 const PENDING: &str = "sign_in.json";
+/// The signed-in account's name and plan, as last checked.
 const ACCOUNT: &str = "account.json";
+/// Hashes of the sign-in codes already used (a code works once).
 const USED: &str = "used_codes.json";
 
+/// A file in zotify's data folder.
 fn file(st: &impl Ctx, name: &str) -> PathBuf {
     pytool::data(st, ID).join(name)
 }
 
+/// The Spotify app's client id from Settings.
 fn client_id(st: &impl Ctx) -> String {
     st.cfg().str("zotify_client_id").trim().to_string()
 }
 
+/// A sign-in failure with this message.
 fn auth(message: impl Into<String>) -> Failure {
     Failure::new(Code::Auth, message)
 }
@@ -62,6 +78,7 @@ pub fn search_ready(st: &impl Ctx) -> bool {
 
 // ---- signing in ----------------------------------------------------------------------------------------
 
+/// A PKCE pair: a random verifier and its S256 challenge.
 fn pkce_pair() -> (String, String) {
     use rand::Rng;
     let verifier: String = rand::rng().sample_iter(&rand::distr::Alphanumeric).take(96).map(char::from).collect();
@@ -112,11 +129,13 @@ pub fn code_from(link: &str) -> Result<Option<String>, Failure> {
     Ok((link.len() >= 20 && link.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')).then(|| link.to_string()))
 }
 
+/// Whether this sign-in code was already used.
 fn used(st: &impl Ctx, code: &str) -> bool {
     let h = encore_core::ids::sha256_hex(code);
     pytool::read_json(&file(st, USED)).and_then(|v| v.as_array().cloned()).unwrap_or_default().iter().any(|x| *x == h.as_str())
 }
 
+/// Remember a sign-in code as used (its hash; the last 20 are kept).
 fn mark_used(st: &impl Ctx, code: &str) {
     let mut seen = pytool::read_json(&file(st, USED)).and_then(|v| v.as_array().cloned()).unwrap_or_default();
     seen.push(json!(encore_core::ids::sha256_hex(code)));
@@ -124,10 +143,12 @@ fn mark_used(st: &impl Ctx, code: &str) {
     let _ = pytool::write_json(&file(st, USED), &Value::Array(seen.split_off(keep)));
 }
 
+/// `fields` as an x-www-form-urlencoded body.
 fn form(fields: &[(&str, &str)]) -> String {
     fields.iter().map(|(k, v)| format!("{k}={}", urlencoding::encode(v))).collect::<Vec<_>>().join("&")
 }
 
+/// POST to Spotify's token endpoint; its error in words when it refuses.
 async fn token_request(st: &impl Ctx, fields: &[(&str, &str)]) -> Result<Value, Failure> {
     let r = st.http().post(TOKEN).header("Content-Type", "application/x-www-form-urlencoded").header("Accept", "application/json")
         .body(form(fields)).timeout(Duration::from_secs(20)).send().await
@@ -163,6 +184,7 @@ async fn finish_sign_in(st: &impl Ctx, code: &str) -> Result<&'static str, Failu
     Ok("app")
 }
 
+/// Keep the account's name and plan for the card.
 fn save_account(st: &impl Ctx, acct: &Value) {
     let _ = pytool::write_json(&file(st, ACCOUNT), &json!({ "username": acct["username"], "product": acct["product"], "checked": encore_db::now() }));
 }
@@ -221,6 +243,7 @@ async fn api_token(st: &impl Ctx) -> Result<String, Failure> {
     Ok(save_api_token(st, &client, &tok, Some(&creds))["access_token"].as_str().unwrap_or("").to_string())
 }
 
+/// GET `endpoint` on the Web API with the app's token and the language setting.
 async fn spotify(st: &impl Ctx, endpoint: &str, query: &[(&str, String)]) -> Result<Value, Failure> {
     let token = api_token(st).await?;
     let lang = Some(st.cfg().str("zotify_language")).filter(|l| !l.trim().is_empty()).unwrap_or_else(|| "en".into());
@@ -295,23 +318,28 @@ fn quality_of(st: &impl Ctx) -> (&'static str, i64) {
     (fmt, rate)
 }
 
+/// The quality shown for a format: "AAC 160k", "OGG 320k".
 fn label(fmt: &str, rate: i64) -> String {
     let name = if fmt == "m4a" { "AAC" } else { fmt };
     format!("{} {rate}k", name.to_uppercase())
 }
 
+/// The artists' names, comma separated.
 fn names(artists: &Value) -> String {
     artists.as_array().map(|a| a.iter().filter_map(|x| x["name"].as_str()).collect::<Vec<_>>().join(", ")).unwrap_or_default()
 }
 
+/// The largest image's URL, or null.
 fn cover(images: &Value) -> Value {
     images.as_array().and_then(|a| a.iter().max_by_key(|i| i["width"].as_i64().unwrap_or(0))).map(|i| i["url"].clone()).unwrap_or(Value::Null)
 }
 
+/// How much of `needle`'s words `hay` holds (as torznab scores); 1 when there's nothing to match.
 fn share(hay: &str, needle: &str) -> f64 {
     if needle.trim().is_empty() { 1.0 } else { super::torznab::share(hay, needle) }
 }
 
+/// A Web API track as a search result; `None` when it can't be played.
 pub fn track_result(req: &Value, t: &Value, fmt: &str, rate: i64, by_isrc: bool) -> Option<Value> {
     let id = t["id"].as_str()?;
     if t["is_playable"] == false {
@@ -345,6 +373,7 @@ pub fn track_result(req: &Value, t: &Value, fmt: &str, rate: i64, by_isrc: bool)
     }))
 }
 
+/// A Web API album as a search result.
 pub fn album_result(req: &Value, a: &Value, fmt: &str, rate: i64) -> Option<Value> {
     let id = a["id"].as_str()?;
     let (title, artist) = (a["name"].as_str().unwrap_or(""), names(&a["artists"]));
@@ -398,6 +427,7 @@ pub async fn search(st: &impl Ctx, req: &Value) -> Result<Vec<Value>, Failure> {
 
 // ---- download --------------------------------------------------------------------------------------------
 
+/// zotify's command line: its saved credentials, `folder` as the root, the output layout and the settings.
 fn args(st: &impl Ctx, folder: &Path) -> Vec<String> {
     let cfg = |k: &str, d: &str| Some(st.cfg().str(k)).filter(|v| !v.trim().is_empty()).unwrap_or_else(|| d.to_string());
     let p = |n: &str| file(st, n).to_string_lossy().into_owned();
@@ -430,6 +460,7 @@ fn bar_percent(line: &str) -> Option<f64> {
     digits.parse().ok()
 }
 
+/// Download a result's Spotify link with zotify into `folder`.
 pub async fn download(st: &impl Ctx, call: &Call, req: &Value, folder: &Path) -> Result<Downloaded, Failure> {
     let payload = &req["payload"];
     let url = payload["url"].as_str().or(req["url"].as_str()).filter(|u| u.starts_with(OPEN)).ok_or_else(|| Failure::new(Code::NotFound, "Nothing to download: the result has no Spotify link"))?.to_string();
@@ -477,10 +508,12 @@ pub async fn download(st: &impl Ctx, call: &Call, req: &Value, folder: &Path) ->
 
 // ---- status and test -------------------------------------------------------------------------------------
 
+/// The zotify version installed.
 pub async fn version(st: &impl Ctx) -> Option<String> {
     st.plugins().program(ID).map(|(v, _)| v)
 }
 
+/// The card's status line: the zotify version and the account and its plan.
 pub async fn status(st: &impl Ctx) -> Result<Status, Failure> {
     let Some(v) = version(st).await.filter(|_| pytool::program(st, ID).is_some()) else {
         return Err(pytool::not_installed("zotify"));
@@ -495,6 +528,7 @@ pub async fn status(st: &impl Ctx) -> Result<Status, Failure> {
     Ok(Status { message: format!("zotify {v} · {who} · {app}"), signed_in: Some(search_ready(st)) })
 }
 
+/// The card's test: finish a pasted sign-in link, else check the saved sign-in (or give the link to sign in with).
 pub async fn test(st: &impl Ctx) -> Result<String, Failure> {
     let v = version(st).await.filter(|_| pytool::program(st, ID).is_some()).ok_or_else(|| pytool::not_installed("zotify"))?;
     if let Some(code) = code_from(&st.cfg().str("zotify_sign_in_link"))? {

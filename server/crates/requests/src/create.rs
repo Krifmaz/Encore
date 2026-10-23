@@ -8,22 +8,36 @@ use encore_db::{now, p, Row, RowExt};
 use serde::Deserialize;
 use serde_json::{json, Value};
 
+/// Discover's sources an "ext" release can come from.
 const EXT_SOURCES: [&str; 5] = ["deezer", "apple", "ytm", "bandcamp", "discogs"];
 
+/// What a person asks for (POST /api/requests).
 #[derive(Deserialize, Default, Clone)]
 #[serde(default)]
 pub struct NewRequest {
+    /// "track", "album", "artist", "playlist" or "url"
     pub kind: String,
+    /// the MusicBrainz id (recording, release group or artist)
     pub mbid: Option<String>,
+    /// the artist
     pub artist: Option<String>,
+    /// the song or album title
     pub title: Option<String>,
+    /// the album a song is on
     pub album: Option<String>,
+    /// the release year
     pub year: Option<String>,
+    /// a cover image URL
     pub cover_url: Option<String>,
+    /// the link, for a url request
     pub url: Option<String>,
+    /// the song's length, seconds
     pub length: Option<f64>,
+    /// the song's ISRC
     pub isrc: Option<String>,
+    /// a song request: "song" (only it) or "album" (its whole album)
     pub album_mode: Option<String>,
+    /// a release only another service has (Discover's "ext" entries)
     pub ext: Option<Value>,
     /// "Request discography": this request's release types ({"kinds": [...], "skip": [...]}), else the setting's
     pub release_filter: Option<Value>,
@@ -34,10 +48,12 @@ pub struct NewRequest {
 }
 
 
+/// A string that is set and not empty.
 fn nz(s: &Option<String>) -> Option<&str> {
     s.as_deref().filter(|x| !x.is_empty())
 }
 
+/// Refuse when the user's weekly request limit would be passed (admins have none).
 pub fn quota(st: &impl Ctx, u: &Row, n: i64) -> ApiResult<()> {
     if is_admin(u) {
         return Ok(());
@@ -136,6 +152,7 @@ pub const ALBUM_CHECK_KEEP_SECS: f64 = 86_400.0;
 
 /// How many of the previous attempt's log lines a reused row keeps, and how long each may be.
 pub const KEPT_LOG_LINES: usize = 40;
+/// The longest a kept log line may be.
 pub const KEPT_LOG_CHARS: usize = 500;
 
 /// A new request row – or, when the same song was asked for before and that request failed or was

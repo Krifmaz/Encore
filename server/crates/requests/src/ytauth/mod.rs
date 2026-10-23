@@ -35,17 +35,22 @@ pub const RETRY_AFTER: f64 = 1800.0;
 /// How often the supervisor looks.
 const TICK: Duration = Duration::from_secs(600);
 
+/// Where a set of YouTube cookies came from.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Kind {
     /// cookies handed over by the extension from a private window: the server's own session
     Handoff,
+    /// cookies the extension sends from the everyday browser
     Extension,
+    /// cookies pasted in Settings (Netscape cookies.txt)
     Pasted,
 }
 
 impl Kind {
+    /// Every source, in precedence order.
     pub const ALL: [Kind; 3] = [Kind::Handoff, Kind::Extension, Kind::Pasted];
+    /// The source's key in state.json and the API.
     pub fn key(self) -> &'static str {
         match self {
             Kind::Handoff => "handoff",
@@ -53,6 +58,7 @@ impl Kind {
             Kind::Pasted => "pasted",
         }
     }
+    /// The source's name in Settings.
     pub fn label(self) -> &'static str {
         match self {
             Kind::Handoff => "Handed-over sign-in",
@@ -71,7 +77,9 @@ pub struct SourceState {
     pub checked_at: Option<f64>,
     /// the last check's verdict (None: not checked)
     pub ok: Option<bool>,
+    /// the account name the check found
     pub account: Option<String>,
+    /// what the last check or refresh said (an error, mostly)
     pub message: Option<String>,
     /// the extension's browser ("Chrome 141", "Firefox 143")
     pub agent: Option<String>,
@@ -89,16 +97,20 @@ pub struct SourceState {
 pub struct AuthState {
     /// the server-owned session (`managed` before 0.25.3, when it came from Encore's own browser)
     pub handoff: SourceState,
+    /// the cookies from the extension
     pub extension: SourceState,
+    /// the pasted cookies
     pub pasted: SourceState,
     /// sha256 of the extension's token
     pub ext_token: Option<String>,
+    /// when the extension's token was made
     pub ext_token_at: Option<f64>,
     /// admins were told the sign-in ended (once, until it works again)
     pub signed_out_notified: bool,
 }
 
 impl AuthState {
+    /// The state of source `k`.
     pub fn get(&self, k: Kind) -> &SourceState {
         match k {
             Kind::Handoff => &self.handoff,
@@ -106,6 +118,7 @@ impl AuthState {
             Kind::Pasted => &self.pasted,
         }
     }
+    /// The state of source `k`, to change.
     pub fn get_mut(&mut self, k: Kind) -> &mut SourceState {
         match k {
             Kind::Handoff => &mut self.handoff,
@@ -131,6 +144,7 @@ pub fn home(data: &Path) -> PathBuf {
     data.join("youtube-browser")
 }
 
+/// state.json in the sign-in folder.
 fn state_path(data: &Path) -> PathBuf {
     home(data).join("state.json")
 }
@@ -156,6 +170,7 @@ pub fn write_private(path: &Path, text: &str) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// The state file; the default when there is none or it doesn't parse.
 pub fn load(data: &Path) -> AuthState {
     std::fs::read_to_string(state_path(data)).ok().and_then(|t| serde_json::from_str(&t).ok()).unwrap_or_default()
 }
@@ -196,8 +211,11 @@ pub fn jar_of(st: &impl Ctx, k: Kind) -> Jar {
 /// One source as the chooser sees it.
 #[derive(Clone, Debug)]
 pub struct Candidate {
+    /// which source
     pub kind: Kind,
+    /// its cookies
     pub jar: Jar,
+    /// what Encore knows about it
     pub state: SourceState,
 }
 
@@ -217,6 +235,7 @@ pub fn choose(cands: &[Candidate], now: i64) -> Option<Kind> {
         .map(|c| c.kind)
 }
 
+/// Every source with its cookies and state, in precedence order.
 fn candidates(st: &impl Ctx, s: &AuthState) -> Vec<Candidate> {
     Kind::ALL.iter().map(|k| Candidate { kind: *k, jar: jar_of(st, *k), state: s.get(*k).clone() }).collect()
 }
@@ -330,6 +349,7 @@ pub async fn verify(st: &impl Ctx, jar: &Jar, ua: &str) -> anyhow::Result<bool> 
 /// What a refresh found.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Refresh {
+    /// the cookies are signed in
     pub signed_in: bool,
     /// cookies Google renewed (None: nothing was rotated on purpose – the extension's cookies, or pasted
     /// cookies that are only checked – or the rotation call itself failed; the status's message says)
@@ -511,6 +531,7 @@ async fn signed_out(st: &impl Ctx, k: Kind) {
     }
 }
 
+/// The sign-in works again: admins are told again the next time it ends.
 fn signed_in_again(st: &impl Ctx) {
     update(st, |s| s.signed_out_notified = false);
 }
@@ -542,6 +563,7 @@ pub async fn supervisor(st: impl Ctx) {
     }
 }
 
+/// The supervisor's look: refresh the handed-over session and the pasted cookies when they are due.
 async fn tick(st: &impl Ctx) {
     let t = now();
     let s = load(st.data_dir());
@@ -584,6 +606,7 @@ pub fn status(st: &impl Ctx) -> Value {
     })
 }
 
+/// A unix time as "just now", "12 min ago", "3 h ago" or "2 days ago".
 fn ago(secs: f64) -> String {
     let s = (now() - secs).max(0.0);
     if s < 90.0 { "just now".into() } else if s < 5400.0 { format!("{} min ago", (s / 60.0).round()) } else if s < 129600.0 { format!("{} h ago", (s / 3600.0).round()) } else { format!("{} days ago", (s / 86400.0).round()) }
@@ -668,6 +691,7 @@ pub fn token_ok(headers: &HeaderMap, stored: Option<&str>) -> bool {
     token_hash(&given).as_bytes().ct_eq(stored.as_bytes()).into()
 }
 
+/// The cookies in an extension upload (`{cookies: [chrome.cookies.getAll shape]}`), at most 2000.
 fn cookie_list(body: &Value) -> anyhow::Result<Jar> {
     let list = body["cookies"].as_array().cloned().unwrap_or_default();
     if list.len() > 2000 {
@@ -676,6 +700,7 @@ fn cookie_list(body: &Value) -> anyhow::Result<Jar> {
     Ok(Jar::from_extension(&list))
 }
 
+/// The extension's browser name, without control characters, at most 80 characters.
 fn agent_of(body: &Value) -> Option<String> {
     body["agent"].as_str().map(|a| a.chars().filter(|c| !c.is_control()).take(80).collect())
 }
@@ -709,6 +734,7 @@ pub async fn accept_handoff(st: &impl Ctx, body: &Value) -> anyhow::Result<Value
         "message": "Encore has its own YouTube sign-in now and keeps it alive by itself. The private window can close." }))
 }
 
+/// Take the cookies the extension sent from the everyday browser: kept when they are signed in, the account looked up again when it changed.
 pub async fn accept_extension(st: &impl Ctx, body: &Value) -> anyhow::Result<Value> {
     let j = cookie_list(body)?;
     let t = now();

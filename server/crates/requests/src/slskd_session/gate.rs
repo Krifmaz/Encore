@@ -31,6 +31,7 @@ pub enum Who {
     Person,
 }
 
+/// Lets one Soulseek search run at a time, spaced out, people before the worker.
 pub(super) struct Limiter {
     /// the one search that may run
     turn: Arc<Semaphore>,
@@ -47,10 +48,12 @@ impl Default for Limiter {
 }
 
 impl Limiter {
+    /// A search runs now.
     pub(super) fn busy(&self) -> bool {
         self.turn.available_permits() == 0
     }
 
+    /// Searches waiting for their turn.
     pub(super) fn queued(&self) -> usize {
         self.queued.load(Ordering::SeqCst)
     }
@@ -59,6 +62,7 @@ impl Limiter {
 /// The right to search, held until the search is over (dropping it – also when the task is cancelled –
 /// lets the next one go).
 pub struct Turn {
+    /// the search's turn: the next one waits until it goes
     _turn: OwnedSemaphorePermit,
     /// the worker's slot of the Soulseek line (at most one worker search stands in front of a person)
     _line: Option<crate::line::Slot>,
@@ -78,6 +82,7 @@ impl Turn {
 struct Queued(Arc<AtomicUsize>);
 
 impl Queued {
+    /// Count one more waiting search (one less when dropped).
     fn new(n: &Arc<AtomicUsize>) -> Queued {
         n.fetch_add(1, Ordering::SeqCst);
         Queued(n.clone())

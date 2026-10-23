@@ -10,7 +10,9 @@ use std::time::Duration;
 use tokio::time::Instant;
 
 use encore_core::audio::{DOWNLOAD_EXTS, DOWNLOAD_LOSSLESS};
+/// slskd's state of a transfer that finished well.
 pub const DONE_OK: &str = "Succeeded";
+/// slskd's states of a transfer that ended without the file.
 pub const DONE_BAD: [&str; 6] = ["Errored", "Rejected", "TimedOut", "Cancelled", "Aborted", "Failed"];
 /// slskd runs but has no Soulseek server session yet (its API answers 409 to searches and transfers).
 pub const NOT_CONNECTED: &str = "Soulseek isn't connected yet";
@@ -39,6 +41,7 @@ pub fn not_ready(st: &impl Ctx) -> Option<String> {
     }
 }
 
+/// Call slskd's API at `path` (under /api/v0) with the http client's timeout.
 async fn req(st: &impl Ctx, method: reqwest::Method, path: &str, body: Option<Value>, query: &[(&str, &str)]) -> anyhow::Result<Value> {
     req_within(st, method, path, body, query, None).await
 }
@@ -83,10 +86,12 @@ pub async fn status(st: &impl Ctx) -> anyhow::Result<Value> {
     req(st, reqwest::Method::GET, "application", None, &[]).await
 }
 
+/// How long a Soulseek search runs (seconds, at least 5).
 pub fn search_timeout(st: &impl Ctx) -> i64 {
     st.cfg().int("slskd_search_timeout").max(5)
 }
 
+/// slskd's search request: up to 200 answers, only answers with a file.
 fn search_body(sid: &str, text: &str, timeout: i64) -> Value {
     json!({ "id": sid, "searchText": text, "searchTimeout": timeout * 1000, "responseLimit": 200, "fileLimit": 20000,
         "filterResponses": true, "minimumResponseFileCount": 1 })
@@ -194,8 +199,11 @@ fn engine_lost(e: &anyhow::Error) -> bool {
 /// the search is over (a cancelled request, a closed picker), dropping this stops the search in slskd
 /// before the turn passes on, so the next search never runs beside it.
 struct Running<C: Ctx> {
+    /// the context, to stop the search with
     st: C,
+    /// the search's id in slskd
     sid: String,
+    /// the turn it holds, passed on when this is dropped
     turn: Option<crate::slskd_session::Turn>,
     /// the search may be running in slskd (posted, or on its way)
     armed: bool,
@@ -268,6 +276,7 @@ async fn post_search(st: &impl Ctx, sid: &str, text: &str, timeout: i64, deadlin
     }
 }
 
+/// A random version 4 UUID (slskd wants its search ids as UUIDs).
 fn uuid() -> String {
     let b: [u8; 16] = rand::random();
     let h = hex::encode(b);
@@ -360,6 +369,7 @@ pub async fn browse(st: &impl Ctx, user: &str) -> anyhow::Result<Vec<Value>> {
 const ENQUEUE_WAIT: Duration = Duration::from_secs(90);
 /// slskd is taking other downloads (429): ask again this long after, this many times.
 pub const ENQUEUE_PAUSE: Duration = Duration::from_secs(2);
+/// How many times a 429 is asked again.
 pub const ENQUEUE_TRIES: u32 = 5;
 
 /// slskd kept answering that it is taking other downloads (429 "Only one concurrent operation is
@@ -424,11 +434,13 @@ pub async fn place_in_queue(st: &impl Ctx, username: &str, id: &str) -> Option<u
     v.as_u64().or_else(|| v["placeInQueue"].as_u64()).filter(|p| *p > 0)
 }
 
+/// The files slskd is downloading (or downloaded) from `username`; empty when slskd can't say.
 pub async fn user_downloads(st: &impl Ctx, username: &str) -> Vec<Value> {
     let Ok(d) = req(st, reqwest::Method::GET, &format!("transfers/downloads/{}", urlencoding::encode(username)), None, &[]).await else { return vec![] };
     d["directories"].as_array().cloned().unwrap_or_default().iter().flat_map(|d| d["files"].as_array().cloned().unwrap_or_default()).collect()
 }
 
+/// The file name of a Soulseek path (either slash).
 fn tail(s: &str) -> String {
     s.replace('\\', "/").rsplit('/').next().unwrap_or("").to_string()
 }
@@ -452,6 +464,7 @@ fn flatten_transfers(d: &Value) -> Vec<Value> {
     out
 }
 
+/// Every download on slskd's list, one entry per file.
 pub async fn all_downloads(st: &impl Ctx) -> anyhow::Result<Vec<Value>> {
     Ok(flatten_transfers(&req(st, reqwest::Method::GET, "transfers/downloads", None, &[]).await?))
 }
@@ -461,6 +474,7 @@ pub async fn all_uploads(st: &impl Ctx) -> anyhow::Result<Vec<Value>> {
     Ok(flatten_transfers(&req(st, reqwest::Method::GET, "transfers/uploads", None, &[]).await?))
 }
 
+/// Cancel a download in slskd and take it off its list (errors ignored).
 pub async fn cancel(st: &impl Ctx, username: &str, file_id: &str) {
     let _ = req(st, reqwest::Method::DELETE, &format!("transfers/downloads/{}/{file_id}", urlencoding::encode(username)), None, &[("remove", "true")]).await;
 }
@@ -540,16 +554,22 @@ pub fn transfer_error(user: &str, state: &str, exception: &str) -> String {
     }
 }
 
+/// Take the finished downloads off slskd's list.
 pub async fn clear_completed(st: &impl Ctx) -> anyhow::Result<()> {
     req(st, reqwest::Method::DELETE, "transfers/downloads/all/completed", None, &[]).await.map(|_| ())
 }
 
 // ---- ranking ------------------------------------------------------------------------------------
 
+/// Anything in brackets, for names compared without it.
 static BRACKETS: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"[\(\[].*?[\)\]]").unwrap());
+/// Album folder words that mark another version (live, remix …): a folder with one is left out unless the album asks for it.
 static ALBUM_BAD: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"(?i)\b(live|remix|karaoke|instrumental|8d|nightcore)\b").unwrap());
+/// Album title words that make those versions wanted.
 static ALBUM_OK: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"(?i)\b(live|remix|karaoke|instrumental)\b").unwrap());
+/// File name words that mark another version of a song (live, remix, cover …): left out unless the title asks for it.
 static TRACK_BAD: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"(?i)\b(live|remix|karaoke|instrumental|8d|nightcore|cover)\b").unwrap());
+/// Title words that make those versions wanted.
 static TRACK_OK: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"(?i)\b(live|remix|instrumental)\b").unwrap());
 
 /// The words of a name without anything in brackets ([`encore_core::text::ascii_words`]).
@@ -557,10 +577,12 @@ fn plain_words(s: &str) -> String {
     ascii_words(&BRACKETS.replace_all(&s.to_lowercase(), " "))
 }
 
+/// A file name's extension, lowercase; "" when it has none.
 pub fn ext(f: &str) -> String {
     f.rsplit_once('.').map(|(_, e)| e.to_lowercase()).unwrap_or_default()
 }
 
+/// The share of `needle`'s words (brackets left out) found as whole words in `hay`.
 fn contains(hay: &str, needle: &str) -> f64 {
     let n = plain_words(needle);
     let words: Vec<&str> = n.split_whitespace().collect();
@@ -571,6 +593,8 @@ fn contains(hay: &str, needle: &str) -> f64 {
     words.iter().filter(|w| h.contains(&format!(" {w} "))).count() as f64 / words.len() as f64
 }
 
+/// The score of a folder's or file's format by the preferred format and the minimum bit rate; `None` when it
+/// mixes formats or falls short (not lossless when `lossless_only`, under the minimum bit rate).
 fn format_score(st: &impl encore_http::Ctx, files: &[&Value], lossless_only: bool) -> Option<f64> {
     let pref = st.cfg().str("slskd_preferred_format");
     let min_br = st.cfg().int("slskd_min_bitrate");
@@ -601,10 +625,12 @@ fn format_score(st: &impl encore_http::Ctx, files: &[&Value], lossless_only: boo
     Some(base)
 }
 
+/// `x` rounded to one decimal.
 fn round1(x: f64) -> f64 {
     (x * 10.0).round() / 10.0
 }
 
+/// Soulseek answers ranked for an album: each user's best folder, best first.
 pub fn rank_album(st: &impl encore_http::Ctx, responses: &[Value], artist: &str, album: &str, track_count: Option<usize>, lossless_only: bool) -> Vec<Value> {
     rank_album_where(st, responses, artist, album, track_count, lossless_only, |_| true)
 }
@@ -667,6 +693,7 @@ pub fn rank_album_where(st: &impl encore_http::Ctx, responses: &[Value], artist:
     cands
 }
 
+/// Soulseek answers ranked for a song: the matching files, best first.
 pub fn rank_track(st: &impl encore_http::Ctx, responses: &[Value], artist: &str, title: &str, length: Option<f64>, lossless_only: bool) -> Vec<Value> {
     rank_track_where(st, responses, artist, title, length, lossless_only, |_| true)
 }

@@ -27,6 +27,7 @@ pub fn python(st: &impl Ctx, id: &str) -> Option<PathBuf> {
     program(st, id).and_then(|p| p.parent().map(|d| d.join("python"))).filter(|p| p.exists())
 }
 
+/// The failure when a plugin's program isn't installed.
 pub fn not_installed(name: &str) -> Failure {
     Failure::new(Code::NotFound, format!("{name} is not installed here – Update on its card under Settings → Plugins installs it"))
 }
@@ -42,10 +43,12 @@ pub fn write_private(path: &Path, text: &str) -> std::io::Result<()> {
     std::fs::rename(&tmp, path)
 }
 
+/// A JSON file, when it is there and parses.
 pub fn read_json(path: &Path) -> Option<serde_json::Value> {
     serde_json::from_str(&std::fs::read_to_string(path).ok()?).ok()
 }
 
+/// Write a JSON file readable by Encore's user only.
 pub fn write_json(path: &Path, v: &serde_json::Value) -> std::io::Result<()> {
     write_private(path, &serde_json::to_string_pretty(v).unwrap_or_default())
 }
@@ -77,8 +80,11 @@ pub fn audio_files(folder: &Path) -> HashMap<PathBuf, SystemTime> {
 /// What a line of the program's output means: a progress percent, and whether it goes to the log.
 pub type Hook<'a> = &'a (dyn Fn(&str) -> (Option<f64>, bool) + Send + Sync);
 
+/// What a program run did.
 pub struct Run {
+    /// it exited with status 0
     pub success: bool,
+    /// its exit code (None: killed by a signal)
     pub code: Option<i32>,
     /// the new audio files, in name order
     pub files: Vec<PathBuf>,
@@ -115,14 +121,21 @@ fn clean(line: &str, secrets: &[String]) -> String {
     s
 }
 
+/// One program run for a download.
 pub struct Spec<'a> {
+    /// the plugin's id (its data folder and log)
     pub id: &'a str,
+    /// the program
     pub program: PathBuf,
+    /// its arguments
     pub args: Vec<String>,
+    /// the folder it downloads into
     pub folder: &'a Path,
     /// files the download should deliver (1 for a song, an album's track count)
     pub expected: usize,
+    /// reads each line it prints: a progress percent, and whether the line goes to the log
     pub hook: Option<Hook<'a>>,
+    /// texts masked in the log
     pub secrets: Vec<String>,
     /// the cancel switch and the progress bar
     pub call: &'a encore_plugins::Call,

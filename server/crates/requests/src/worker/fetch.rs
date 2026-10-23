@@ -79,6 +79,7 @@ pub(super) fn enqueue_failure(user: &str, said: &str) -> String {
     said.to_string()
 }
 
+/// Search Soulseek and start the first good candidate's download.
 pub(super) async fn start_slskd(st: &impl Ctx, r: &mut Req, lossless_only: bool) -> anyhow::Result<Out> {
     let searching = if lossless_only { "Searching Soulseek for lossless…" } else { "Searching Soulseek…" };
     upd(st, r, &[("status", json!("searching")), ("message", json!(searching))]);
@@ -117,6 +118,7 @@ pub(super) async fn start_slskd(st: &impl Ctx, r: &mut Req, lossless_only: bool)
     slskd_try_next(st, r, "").await
 }
 
+/// Cancel the current Soulseek candidate's downloads (and clear the failed ones from slskd's list).
 pub(super) async fn slskd_cancel_current(st: &impl Ctx, c: &Value) {
     let wanted: Vec<&str> = c["files"].as_array().map(|a| a.iter().filter_map(|f| f["filename"].as_str()).collect()).unwrap_or_default();
     let user = c["username"].as_str().unwrap_or("");
@@ -136,6 +138,7 @@ fn file_id(f: &Value) -> String {
 /// How many times a user's files are asked for again after a [`slskd::Failure::Transient`] failure before
 /// the next user is tried; and after slskd restarted under them ([`slskd::Failure::Restart`]).
 const SLSKD_RETRIES: i64 = 1;
+/// Times a candidate is asked for again after slskd restarted under it.
 const SLSKD_RESTARTS: i64 = 3;
 
 /// The current user's failed files (`bad`), asked for again from the same user when the failure says it is
@@ -296,6 +299,7 @@ pub(super) fn remote_queue<'a>(files: impl IntoIterator<Item = &'a Value>) -> Op
     any.then_some(place)
 }
 
+/// After a Soulseek or indexer step: on to the next source when it says so.
 pub(super) async fn after_slskd(st: &impl Ctx, r: &mut Req, out: Out) -> anyhow::Result<()> {
     if let Out::Next(why) = out {
         next_source(st, r, &why).await?;
@@ -333,6 +337,7 @@ async fn parked_for_the_session(st: &impl Ctx, r: &mut Req) -> anyhow::Result<bo
     }
 }
 
+/// One look at the Soulseek download: its progress, a stalled or failed user (the next candidate), or the import.
 async fn poll_slskd_once(st: &impl Ctx, r: &mut Req) -> anyhow::Result<()> {
     if r.d["slskd"]["pending"].is_object() {
         // slskd didn't take the download yet (it was busy): ask again
@@ -445,6 +450,7 @@ async fn poll_slskd_once(st: &impl Ctx, r: &mut Req) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// Import the finished Soulseek download's files.
 pub(super) async fn import_slskd(st: &impl Ctx, r: &mut Req, c: &Value) -> anyhow::Result<()> {
     let names: Vec<String> = c["files"].as_array().map(|a| a.iter().filter_map(|f| f["filename"].as_str().map(String::from)).collect()).unwrap_or_default();
     let mut paths = vec![];
@@ -486,6 +492,7 @@ pub(super) async fn import_slskd(st: &impl Ctx, r: &mut Req, c: &Value) -> anyho
     }
 }
 
+/// Search the indexers (Prowlarr) and hand the best release to the torrent or Usenet client.
 pub(super) async fn start_torznab(st: &impl Ctx, r: &mut Req, lossless_only: bool) -> anyhow::Result<Out> {
     let lossless_only = lossless_only || r.d["lossless_only"].as_bool().unwrap_or(false);
     let searching = "Searching torrent and Usenet indexers (Prowlarr)…";
@@ -554,6 +561,7 @@ async fn torznab_song(st: &impl Ctx, r: &mut Req, lossless_only: bool) -> anyhow
     torznab_try_next(st, r, "").await
 }
 
+/// Drop the current indexer release and try the next one (`reason`: why the last one went).
 pub(super) async fn torznab_try_next(st: &impl Ctx, r: &mut Req, reason: &str) -> anyhow::Result<Out> {
     let mut reason = reason.to_string();
     if let Some(id) = r.d["torznab"]["id"].as_str().map(String::from) {
@@ -635,6 +643,7 @@ fn packed(path: &Path, via: &str, usenet: bool) -> Option<String> {
     })
 }
 
+/// One look at the torrent or Usenet download: its progress, a stall, or the import.
 pub(super) async fn poll_torznab(st: &impl Ctx, r: &mut Req) -> anyhow::Result<()> {
     let Some(id) = r.d["torznab"]["id"].as_str().map(String::from) else {
         let o = torznab_try_next(st, r, "lost track of the download").await?;
@@ -837,6 +846,7 @@ pub(super) async fn torznab_drop_old(st: &impl Ctx, r: &mut Req) {
     }
 }
 
+/// The song's ISRC: the request's own, else MusicBrainz's.
 pub(super) async fn isrc_for(st: &impl Ctx, r: &mut Req) -> Option<String> {
     if let Some(i) = r.d["isrc"].as_str() {
         return Some(i.to_string());
@@ -849,6 +859,7 @@ pub(super) async fn isrc_for(st: &impl Ctx, r: &mut Req) -> Option<String> {
     r.d["isrc"].as_str().map(String::from)
 }
 
+/// Find an exact lossless match on the streaming services and download it with streamrip.
 pub(super) async fn start_streamrip(st: &impl Ctx, r: &mut Req, urls: Option<Vec<String>>) -> anyhow::Result<Out> {
     // the lookups one at a time; each download then waits for its service's line below
     let looking = "Looking for an exact lossless match…";
@@ -953,6 +964,7 @@ pub(super) async fn start_streamrip(st: &impl Ctx, r: &mut Req, urls: Option<Vec
     Ok(Out::Next(last))
 }
 
+/// A progress callback that writes the request's percent (and tells the event stream).
 pub(super) fn progress_cb(st: &impl Ctx, id: i64) -> impl Fn(f64) + Send + Sync {
     let (db, events) = (st.db().clone(), st.requests().events.clone());
     move |pct| {
@@ -961,6 +973,7 @@ pub(super) fn progress_cb(st: &impl Ctx, id: i64) -> impl Fn(f64) + Send + Sync 
     }
 }
 
+/// Download from YouTube (or a link) with yt-dlp.
 pub(super) async fn start_ytdlp(st: &impl Ctx, r: &mut Req, pick_url: Option<String>) -> anyhow::Result<Out> {
     // two at a time: its turn in the yt-dlp line ("In line for YouTube" meanwhile)
     let label = match (r.d["pick"]["source"].as_str(), pick_url.as_deref()) {

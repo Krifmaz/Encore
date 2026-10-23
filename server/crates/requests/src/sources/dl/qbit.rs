@@ -134,6 +134,7 @@ pub async fn add(st: &impl Ctx, url: &str, rid: i64) -> anyhow::Result<String> {
     Ok(hash)
 }
 
+/// Where qBittorrent is with the torrent `id`.
 pub async fn poll(st: &impl Ctx, id: &str) -> anyhow::Result<Poll> {
     let Some(t) = lookup(st, id).await? else { return Ok(Poll::Missing("torrent disappeared from qBittorrent".into())) };
     let state = t["state"].as_str().unwrap_or("");
@@ -205,6 +206,7 @@ pub async fn mark_imported(st: &impl Ctx, hash: &str) {
     }
 }
 
+/// Delete the torrent and its files from qBittorrent.
 pub async fn remove(st: &impl Ctx, id: &str) {
     let (k, v) = by(id);
     if let Ok(r) = qbit(st, "torrents/info", None, &[(k, v)]).await {
@@ -218,6 +220,7 @@ pub async fn remove(st: &impl Ctx, id: &str) {
     }
 }
 
+/// The torrent's hash.
 async fn hash(st: &impl Ctx, id: &str) -> anyhow::Result<Option<String>> {
     Ok(lookup(st, id).await?.and_then(|t| t["hash"].as_str().map(String::from)))
 }

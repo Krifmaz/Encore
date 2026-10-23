@@ -8,6 +8,7 @@
 //! (`user_agent`): Google ties a sign-in to its browser, so the refresh presents the same one.
 use super::jar::Jar;
 
+/// The body of a rotation call.
 pub const BODY: &str = r#"[000,"-0000000000000000000"]"#;
 /// The browser Encore presents when it knows nothing better (pasted cookies, a hand-off from an extension
 /// older than 0.26 that reported no User-Agent): Chrome on Linux.
@@ -29,11 +30,16 @@ pub fn user_agent(reported: Option<&str>, agent: Option<&str>) -> String {
     }
 }
 
+/// One rotation call.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Request {
+    /// the accounts host it goes to
     pub host: &'static str,
+    /// the RotateCookies URL
     pub url: String,
+    /// its headers
     pub headers: Vec<(String, String)>,
+    /// its body ([`BODY`])
     pub body: &'static str,
 }
 
@@ -59,11 +65,14 @@ pub fn build(jar: &Jar, now: i64, ua: &str) -> Vec<Request> {
     out
 }
 
+/// How a rotation went.
 #[derive(Debug, PartialEq)]
 pub enum Outcome {
     /// new cookies merged (how many Set-Cookie headers; 0: Google answered but renewed nothing)
     Rotated(usize),
+    /// Google answered 401: the account is signed out
     SignedOut,
+    /// it failed (the network, another answer)
     Failed(String),
 }
 

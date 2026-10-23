@@ -18,19 +18,30 @@ pub fn find(st: &impl Ctx, source: &str) -> Option<PluginSource> {
 /// What a search asks a plugin: the request's fields as the SDK reads them (empty ones left out).
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct Ask {
+    /// "track" or "album"
     pub kind: String,
+    /// the artist
     pub artist: String,
+    /// the song or album title
     pub title: String,
+    /// the album a song is on
     pub album: String,
+    /// a free-text query, when the person typed one
     pub query: Option<String>,
+    /// the song's length, seconds
     pub length: Option<f64>,
+    /// the album's track count
     pub track_count: Option<usize>,
+    /// only lossless results
     pub lossless_only: bool,
+    /// the song's ISRC
     pub isrc: Option<String>,
+    /// results wanted (1..200)
     pub limit: usize,
 }
 
 impl Ask {
+    /// The `search` request for `source`.
     pub fn json(&self, source: &str) -> Value {
         let mut m = Map::new();
         m.insert("kind".into(), json!(self.kind));
@@ -66,6 +77,7 @@ pub async fn search(st: &impl Ctx, source: &PluginSource, ask: &Ask, call: Optio
     st.plugins().search(&source.plugin, &ask.json(&source.id), call).await
 }
 
+/// A JSON value as text (null as "").
 fn text(v: &Value) -> String {
     match v {
         Value::String(s) => s.clone(),

@@ -5,6 +5,7 @@ use super::{base, fetch_torrent, local, torrent_info, unreachable, Fetched, Poll
 use base64::Engine;
 use serde_json::{json, Value};
 
+/// Deluge Web UI's JSON-RPC address.
 fn endpoint(st: &impl Ctx) -> String {
     let b = base(st, "deluge_url");
     if b.ends_with("/json") { b } else { format!("{b}/json") }
@@ -27,6 +28,7 @@ async fn raw(st: &impl Ctx, cookie: &str, method: &str, params: Value) -> anyhow
     Ok((v, set))
 }
 
+/// Log in to the Web UI (and connect it to a daemon) → the session cookie, kept for half an hour.
 async fn login(st: &impl Ctx) -> anyhow::Result<String> {
     if let Some(v) = st.cache_get("deluge_sid").filter(|v| v.is_string()) {
         return Ok(v.as_str().unwrap_or("").to_string());
@@ -50,6 +52,7 @@ async fn login(st: &impl Ctx) -> anyhow::Result<String> {
     Ok(cookie)
 }
 
+/// One call, logging in again once when the session expired.
 async fn rpc(st: &impl Ctx, method: &str, params: Value) -> anyhow::Result<Value> {
     for attempt in 0..2 {
         let cookie = login(st).await?;
@@ -66,12 +69,14 @@ async fn rpc(st: &impl Ctx, method: &str, params: Value) -> anyhow::Result<Value
     anyhow::bail!("Deluge: not authenticated")
 }
 
+/// Deluge's version, for the status line.
 pub async fn status(st: &impl Ctx) -> anyhow::Result<String> {
     login(st).await?;
     let v = rpc(st, "daemon.info", json!([])).await.unwrap_or(Value::Null);
     Ok(v.as_str().map(|s| format!(" {s}")).unwrap_or_default())
 }
 
+/// Add a torrent (or magnet), started at once → its hash.
 pub async fn add(st: &impl Ctx, url: &str) -> anyhow::Result<String> {
     // started at once, whatever "Add torrents in Paused state" says
     let mut opts = json!({ "add_paused": false });
@@ -98,6 +103,7 @@ pub async fn add(st: &impl Ctx, url: &str) -> anyhow::Result<String> {
     Ok(hash)
 }
 
+/// Where Deluge is with the torrent `hash`.
 pub async fn poll(st: &impl Ctx, hash: &str) -> anyhow::Result<Poll> {
     let t = rpc(st, "core.get_torrent_status", json!([hash, ["name", "progress", "state", "save_path", "download_payload_rate", "message"]])).await?;
     if t.as_object().map(|o| o.is_empty()).unwrap_or(true) {
@@ -129,6 +135,7 @@ pub async fn poll(st: &impl Ctx, hash: &str) -> anyhow::Result<Poll> {
     Ok(if matches!(state, "Checking" | "Moving" | "Allocating") { Poll::Busy(pct, msg) } else { Poll::Progress(pct, msg) })
 }
 
+/// Delete the torrent and its files from Deluge.
 pub async fn remove(st: &impl Ctx, hash: &str) {
     let _ = rpc(st, "core.remove_torrent", json!([hash, true])).await;
 }

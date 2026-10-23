@@ -24,10 +24,12 @@ pub const REASONS: [(&str, &str); 7] = [
     ("other", "Other"),
 ];
 
+/// Days a reported file stays in the trash once its replacement arrived.
 const TRASH_DAYS: f64 = 7.0;
 /// A report still 'filing' after this long was interrupted (server stopped while parking files).
 const FILING_STUCK_SECS: f64 = 3600.0;
 
+/// Where reported files are parked.
 pub fn trash_dir(st: &impl Ctx) -> PathBuf {
     st.data_dir().join("trash")
 }
@@ -119,6 +121,7 @@ fn origin_of_track(st: &impl Ctx, t: &Row) -> Option<(String, String, String)> {
     None
 }
 
+/// A block of this kind and key is set.
 pub fn blocked(st: &impl Ctx, kind: &str, key: &str) -> bool {
     st.db().one("SELECT 1 FROM source_block WHERE kind=? AND key=?", p![kind, key]).ok().flatten().is_some()
 }
@@ -141,6 +144,7 @@ pub fn slskd_blocked(st: &impl Ctx, c: &Value) -> bool {
     })
 }
 
+/// A text without LIKE's wildcards (% and _ dropped).
 fn like_escape(s: &str) -> String {
     s.replace(['%', '_'], "")
 }
@@ -156,6 +160,7 @@ pub fn release_blocked(st: &impl Ctx, c: &Value) -> bool {
     blocked(st, kind, &format!("title:{}", c["title"].as_str().unwrap_or("").to_lowercase()))
 }
 
+/// The link's site, account or video is blocked.
 pub fn url_blocked(st: &impl Ctx, url: &str) -> bool {
     block_of_url(url).is_some_and(|(k, key, _)| blocked(st, &k, &key))
 }
@@ -179,6 +184,7 @@ pub fn avoid_source(d: &Value, order: &mut Vec<String>) {
 
 // ---- parking the reported file -------------------------------------------------------------------
 
+/// Move a file (a copy and delete across file systems), making the folder.
 fn mv(src: &FsPath, dest: &FsPath) -> std::io::Result<()> {
     if let Some(d) = dest.parent() {
         std::fs::create_dir_all(d)?;
@@ -279,10 +285,12 @@ fn adopt(st: &impl Ctx, existing: i64, old_id: i64) {
     }
 }
 
+/// Set a report's status and message.
 fn set_report(st: &impl Ctx, id: i64, status: &str, message: &str) {
     let _ = st.db().execute("UPDATE reports SET status=?, message=?, updated_at=? WHERE id=?", p![status, message, now(), id]);
 }
 
+/// The library row ids parked for a report.
 fn parked_ids(st: &impl Ctx, report_id: i64) -> Vec<i64> {
     st.db().query("SELECT id FROM track_parked WHERE report_id=?", p![report_id]).unwrap_or_default().iter().map(|r| r.i("id")).collect()
 }
@@ -395,13 +403,19 @@ pub fn purge_trash(st: &impl Ctx) -> usize {
 
 // ---- the report itself ---------------------------------------------------------------------------
 
+/// A report as someone files it: what is wrong with a song or an album.
 #[derive(Deserialize, Default, Clone)]
 #[serde(default)]
 pub struct ReportBody {
+    /// "track" or "album"
     pub kind: String,
+    /// the song reported
     pub track_id: Option<i64>,
+    /// the album reported
     pub album_id: Option<String>,
+    /// what is wrong (a key of the reasons list)
     pub reason: String,
+    /// the person's own words
     pub note: Option<String>,
 }
 
@@ -485,6 +499,7 @@ pub fn file_report(st: &impl Ctx, u: &Row, b: &ReportBody) -> ApiResult<Value> {
     report_json(st, rid)
 }
 
+/// Request a replacement for the reported songs, avoiding the source that brought them → the request's id.
 fn request_replacement(st: &impl Ctx, u: &Row, rid: i64, kind: &str, tracks: &[Row], origins: &[(String, String, String)]) -> ApiResult<i64> {
     let first = &tracks[0];
     let src_kind = origins.first().map(|o| o.0.as_str()).unwrap_or("");
@@ -516,6 +531,7 @@ fn request_replacement(st: &impl Ctx, u: &Row, rid: i64, kind: &str, tracks: &[R
     Ok(id)
 }
 
+/// A report as the API gives it (with its user and its replacement request).
 pub fn report_json(st: &impl Ctx, id: i64) -> ApiResult<Value> {
     let r = st.db().one("SELECT r.*, u.username, q.status request_status, q.message request_message FROM reports r LEFT JOIN users u ON u.id=r.user_id
                        LEFT JOIN requests q ON q.id=r.request_id WHERE r.id=?", p![id])?.ok_or_else(|| err(404, "Report not found"))?;

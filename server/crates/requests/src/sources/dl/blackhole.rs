@@ -10,6 +10,7 @@ use super::{fetch_torrent, magnet_info, torrent_info, Client, Fetched, Poll};
 use serde_json::json;
 use std::path::{Path, PathBuf};
 
+/// The watch and completed folder settings of a black-hole client.
 fn keys(c: Client) -> (&'static str, &'static str) {
     if c == Client::NzbHole { ("nzb_blackhole_watch", "nzb_blackhole_completed") } else { ("torrent_blackhole_watch", "torrent_blackhole_completed") }
 }
@@ -19,6 +20,7 @@ pub(crate) fn safe_name(s: &str) -> String {
     encore_core::fs::safe_file_name(s).trim_matches('.').trim().chars().take(150).collect()
 }
 
+/// Write `file` into the watch folder `dir`, under a temporary name first.
 fn write(dir: &str, file: &str, data: &[u8]) -> anyhow::Result<()> {
     let dir = PathBuf::from(dir);
     std::fs::create_dir_all(&dir).map_err(|e| anyhow::anyhow!("can't use the watch folder {}: {e}", dir.display()))?;
@@ -29,6 +31,7 @@ fn write(dir: &str, file: &str, data: &[u8]) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// Drop a torrent (or a magnet) into the torrent watch folder → the name to find it by.
 pub async fn add_torrent(st: &impl Ctx, url: &str, title: &str, rid: i64) -> anyhow::Result<String> {
     let fallback = if safe_name(title).is_empty() { format!("encore-{rid}") } else { safe_name(title) };
     let watch = st.cfg().str("torrent_blackhole_watch");
@@ -46,6 +49,7 @@ pub async fn add_torrent(st: &impl Ctx, url: &str, title: &str, rid: i64) -> any
     }
 }
 
+/// Drop an NZB into the Usenet watch folder → the name to find it by.
 pub async fn add_nzb(st: &impl Ctx, url: &str, title: &str, rid: i64) -> anyhow::Result<String> {
     let name = if safe_name(title).is_empty() { format!("encore-{rid}") } else { safe_name(title) };
     let data = super::fetch_nzb(st, url).await?;
@@ -66,6 +70,7 @@ pub(crate) fn find(completed: &Path, name: &str) -> Option<PathBuf> {
     entries.iter().find(|p| words(&full(p)) == want).or_else(|| entries.iter().find(|p| p.is_file() && words(&stem(p)) == want)).cloned()
 }
 
+/// File extensions of downloads that aren't finished.
 const PARTIAL: [&str; 6] = ["part", "!qb", "!ut", "tmp", "partial", "crdownload"];
 
 /// How long (seconds) a download must stay unchanged before it counts as finished.
@@ -92,6 +97,7 @@ fn measure(p: &Path) -> (u64, bool, f64) {
     (size, partial, changed)
 }
 
+/// Where the download `name` is: not in the completed folder yet, still growing, or there and quiet.
 pub fn poll(st: &impl Ctx, c: Client, name: &str) -> Poll {
     let (_, done_key) = keys(c);
     let waiting = Poll::Progress(0.0, format!("{}: waiting for the download to show up in {}", c.name(), st.cfg().str(done_key)));
@@ -116,6 +122,7 @@ pub fn poll(st: &impl Ctx, c: Client, name: &str) -> Poll {
     Poll::Progress(pct, format!("{}: {} MB arrived, waiting until it stops changing", c.name(), size / 1_000_000))
 }
 
+/// Remove the download's files from the watch and completed folders.
 pub fn remove(st: &impl Ctx, c: Client, name: &str) {
     let (watch_key, done_key) = keys(c);
     for ext in ["torrent", "magnet", "nzb"] {
@@ -126,6 +133,7 @@ pub fn remove(st: &impl Ctx, c: Client, name: &str) {
     }
 }
 
+/// Check both folders are usable.
 pub fn status(st: &impl Ctx, c: Client) -> anyhow::Result<String> {
     let (watch_key, done_key) = keys(c);
     let watch = PathBuf::from(st.cfg().str(watch_key));

@@ -5,7 +5,7 @@
 //! import again later (the `waiting` status), with the health check that pauses imports. [`rejected`]
 //! keeps a download the audio check turned away, for Keep anyway and Download anyway. [`downloads`] probes
 //! the folders downloads are saved in every minute; a request whose source saves in one that can't be
-//! written waits for it (the `waiting` status again) instead of failing. [`now`] is Download now: what a
+//! written waits for it (the `waiting` status again) instead of failing. [`now`](mod@now) is Download now: what a
 //! waiting or queued request offers, and doing it without breaking a source's limit or a ban
 //! (the lines are [`crate::line`]). [`steps`] writes what a long step is at into its request's message.
 //! [`stall`] finds an import that hasn't moved for 15 minutes (Import again stops it and imports the kept
@@ -55,6 +55,7 @@ pub const ACTIVE: [&str; 6] = ["queued", "searching", "downloading", "monitoring
 pub use steps::Steps;
 pub use storage::Health;
 
+/// A link streamrip downloads (Qobuz, Tidal, Deezer).
 static RIP_LINK: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"qobuz\.com|tidal\.com|deezer\.com").unwrap());
 
 /// Running request tasks, so a cancel can stop them.
@@ -83,24 +84,32 @@ impl std::error::Error for Cancelled {}
 
 /// A request as the worker sees it: its row and its parsed `detail`.
 pub struct Req {
+    /// the request's id
     pub id: i64,
+    /// its row
     pub row: Row,
+    /// its parsed `detail`
     pub d: Value,
 }
 
 impl Req {
+    /// A column as text.
     fn s(&self, k: &str) -> String {
         self.row.s(k)
     }
+    /// A column, when it is not empty.
     fn opt(&self, k: &str) -> Option<String> {
         Some(self.row.s(k)).filter(|x| !x.is_empty())
     }
+    /// The album's title (an album request's title when it has no album).
     fn album_title(&self) -> String {
         self.opt("album").unwrap_or_else(|| self.s("title"))
     }
+    /// The song's length, when known.
     fn length(&self) -> Option<f64> {
         self.d["length"].as_f64().filter(|l| *l > 0.0)
     }
+    /// How the request reads in logs and notifications ("Artist – Title").
     fn label(&self) -> String {
         match self.s("kind").as_str() {
             "album" => format!("{} – {}", self.s("artist"), self.album_title()),
@@ -109,6 +118,7 @@ impl Req {
             _ => format!("{} – {}", self.s("artist"), self.s("title")),
         }
     }
+    /// Its cover image URL.
     fn hint(&self) -> Option<String> {
         self.opt("cover_url")
     }
@@ -118,6 +128,7 @@ impl Req {
     }
 }
 
+/// The request `id`, its detail parsed.
 pub fn get(st: &impl Ctx, id: i64) -> Option<Req> {
     let row = st.db().one("SELECT * FROM requests WHERE id=?", p![id]).ok()??;
     let d = serde_json::from_str(&row.s("detail")).unwrap_or(json!({}));
@@ -145,6 +156,7 @@ fn upd(st: &impl Ctx, r: &mut Req, fields: &[(&str, Value)]) {
     }
 }
 
+/// Go on only while the request is still active (cancelled otherwise).
 fn check(st: &impl Ctx, id: i64) -> anyhow::Result<()> {
     match get(st, id) {
         Some(r) if ACTIVE.contains(&r.s("status").as_str()) => Ok(()),
@@ -152,21 +164,27 @@ fn check(st: &impl Ctx, id: i64) -> anyhow::Result<()> {
     }
 }
 
+/// The request's staging folder.
 fn staging(st: &impl Ctx, r: &Req) -> PathBuf {
     PathBuf::from(st.cfg().str("staging_path")).join(format!("request-{}", r.id))
 }
 
+/// Remove a folder and everything in it, quietly.
 fn rm(p: &Path) {
     let _ = std::fs::remove_dir_all(p);
 }
 
 /// What happened when trying a source.
 enum Out {
+    /// it worked
     Done,
+    /// it waits (the download runs)
     Wait,
+    /// on to the next source, for this reason
     Next(String),
 }
 
+/// Add a line to the request's log.
 fn log_push(r: &mut Req, line: String) {
     if !r.d["log"].is_array() {
         r.d["log"] = json!([]);
@@ -174,6 +192,7 @@ fn log_push(r: &mut Req, line: String) {
     r.d["log"].as_array_mut().unwrap().push(json!(line));
 }
 
+/// "msg – note", or `msg` without a note.
 fn with_note(msg: &str, note: &str) -> String {
     if note.is_empty() { msg.into() } else { format!("{msg} – {note}") }
 }

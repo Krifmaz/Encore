@@ -26,6 +26,7 @@ pub fn enabled(st: &impl crate::Ctx) -> bool {
     st.plugins().enabled("torznab") && st.cfg().bool("torznab_enabled") && !st.cfg().str("prowlarr_url").is_empty() && !st.cfg().str("prowlarr_api_key").is_empty() && (qbit_ready(st) || sab_ready(st))
 }
 
+/// The Prowlarr base URL a setting names.
 fn base(st: &impl Ctx, key: &str) -> String {
     prowlarr_base(&st.cfg().str(key))
 }
@@ -44,7 +45,9 @@ pub fn prowlarr_base(url: &str) -> String {
 /// What stands in a release link for Prowlarr's API key, which Prowlarr writes into every download link
 /// it hands out ("…/download?apikey=<key>&link=…"): followed by the link's seal ([`seal_key`]).
 const SEAL: &str = "encore-seal";
+/// An `apikey=` query parameter.
 static APIKEY: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"(?i)([?&]apikey=)([^&#]*)").unwrap());
+/// A sealed link's seal.
 static SEALED: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"=encore-seal-([0-9a-f]{40})").unwrap());
 
 /// HMAC-SHA1 of `msg` with `key`, in hex.
@@ -151,6 +154,7 @@ pub fn music_indexers(list: &Value) -> (usize, usize) {
     (on.len(), music)
 }
 
+/// Prowlarr's state: reachable, its music indexers, and the clients.
 pub async fn status(st: &impl Ctx) -> Value {
     let p = st.http().get(format!("{}/api/v1/indexer", base(st, "prowlarr_url"))).header("X-Api-Key", st.cfg().str("prowlarr_api_key")).send().await;
     let indexers = match p {
@@ -182,17 +186,23 @@ pub async fn status(st: &impl Ctx) -> Value {
     json!({ "ok": ok, "message": parts.join(" · ") })
 }
 
+/// Lossless words in a release name.
 static LOSSLESS: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"(?i)\b(flac|lossless|alac|24[\s-]?bit|16[\s-]?bit|wav|hi-?res)\b").unwrap());
+/// 320 kbps / V0 words.
 static MP3_320: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"(?i)\b(320|v0)\b").unwrap());
+/// Versions nobody asking for the album means.
 static BAD: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"(?i)\b(live|remix(es)?|karaoke|instrumental|8d|nightcore|tribute|cover)\b").unwrap());
+/// Several albums in one release.
 static BIG: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"(?i)\b(discography|collection|anthology|complete works|box ?set)\b").unwrap());
 /// A whole CD as one file with a cue sheet ("[FLAC image+cue]"): Encore doesn't split it, so it would arrive
 /// as one long song.
 static IMAGE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"(?i)\b(image|img)\b").unwrap());
 
+/// A bracketed part.
 static BRACKET: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"\s*[\(\[][^\)\]]*[\)\]]").unwrap());
 /// Extras of a catalogue title that file and release names often leave out.
 static EXTRA: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"(?i)\b(feat|ft|featuring|with|remaster(ed)?|version|mono|stereo|edit|bonus|deluxe|edition|expanded|anniversary|reissue|special|collector'?s)\b").unwrap());
+/// A featured-artist tail.
 static FEAT_TAIL: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"(?i)\s+(feat\.?|ft\.?|featuring)\s.*$").unwrap());
 
 /// A song or album title without "(feat. X)", "(Remastered 2011)", " - 2009 Version" or "(Expanded
@@ -271,6 +281,7 @@ fn contains(hay: &str, needle: &str) -> f64 {
     contains_with(hay, needle, title_words).max(contains_with(hay, needle, match_words))
 }
 
+/// The share of `needle`'s words (as `words` makes them) in `hay`.
 fn contains_with(hay: &str, needle: &str, words: fn(&str) -> String) -> f64 {
     let n = words(needle);
     let w: Vec<&str> = n.split_whitespace().collect();
@@ -288,15 +299,19 @@ fn contains_with(hay: &str, needle: &str, words: fn(&str) -> String) -> f64 {
 /// What an album request looks for in the indexers' releases.
 #[derive(Debug, Default, Clone, Copy)]
 pub struct Want<'a> {
+    /// the artist asked for
     pub artist: &'a str,
+    /// the album asked for
     pub album: &'a str,
     /// the release's year, when known: a release named with another year ranks lower
     pub year: Option<i32>,
     /// the release's number of tracks, when known: the sizes a release of it can have
     pub tracks: Option<usize>,
+    /// only lossless releases
     pub lossless_only: bool,
 }
 
+/// A year in a name.
 static YEAR: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"\b(19\d\d|20\d\d)\b").unwrap());
 /// Words of release names that say nothing about which album it is: formats, sources, editions.
 static NOISE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"^(flac|mp3|aac|alac|ogg|opus|wav|m4a|ape|wv|dsd|dsf|lossless|lossy|cbr|vbr|v0|v2|kbps|khz|bit|\d+bit|\d+khz|hi|res|hires|24|16|44|48|88|96|176|192|320|256|web|webflac|webrip|cd|cdrip|cdda|2cd|3cd|vinyl|vinylrip|lp|ep|sacd|dvd|bluray|rip|dl|scene|remaster|remastered|deluxe|edition|expanded|anniversary|reissue|bonus|tracks?|album|the|and|of|a|ost|retail|proper|repack|disc|discs|cue|log|tag|tagged|mixed|stereo|mono|[a-z]?\d{1,3})$").unwrap());
@@ -514,10 +529,12 @@ pub fn rank_song(st: &impl Ctx, songs: &[Value], album: Option<(&str, &[Value])>
     out
 }
 
+/// A file name with an audio extension.
 pub fn is_audio(name: &str) -> bool {
     encore_core::audio::DOWNLOAD_EXTS.contains(&super::slskd::ext(name).as_str())
 }
 
+/// A file name's leading track number ("03 - …", "CD2 - 05 …", "1-04 …").
 static LEAD_NO: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"^\s*(?:(?:cd|disc)\s*\d+\s*[-_. ]\s*)?(?:\d-)?(\d{1,3})(?:\D|$)").unwrap());
 
 /// The file of `names` (paths inside a release) that is this song: its name holds every word of the
@@ -587,11 +604,13 @@ fn client_of(id: &str) -> (Client, &str) {
     Client::for_id(id.strip_prefix(KEEP).unwrap_or(id))
 }
 
+/// Where the client is with the download `id`.
 pub async fn poll(st: &impl Ctx, id: &str) -> anyhow::Result<Poll> {
     let (c, own) = client_of(id);
     c.poll(st, own).await
 }
 
+/// Which files of a release are the song.
 pub enum SongFile {
     /// The client doesn't know the files yet (a magnet's metadata is loading): ask again later.
     Pending,

@@ -104,6 +104,7 @@ pub(super) fn restart_detail(old: &Value) -> Value {
     d
 }
 
+/// The request worker: picks up what was running at start, then runs the queue forever.
 pub async fn run<C: Ctx>(st: C) {
     recover(&st);
     loop {
@@ -225,6 +226,7 @@ pub async fn cancel_holding(st: &impl Ctx, id: i64) -> Hold {
     stop(st, id, true).await
 }
 
+/// Stop the request's task and its download (`hold`: keep its place taken; see [`cancel_holding`]).
 async fn stop(st: &impl Ctx, id: i64, hold: bool) -> Hold {
     let Some(r) = get(st, id) else { return Hold(None) };
     let held = {

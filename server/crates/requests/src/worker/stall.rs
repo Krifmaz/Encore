@@ -40,6 +40,7 @@ fn has_import(r: &Req) -> bool {
     r.d["kept"].is_object() || CLIENTS.contains(&r.s("source").as_str())
 }
 
+/// The request's import has not moved for too long and no task runs it.
 fn is_stalled(st: &impl Ctx, r: &Req) -> bool {
     stalled(&r.s("status"), moved_at(st, r), st.requests().tasks.taken(r.id), now())
 }

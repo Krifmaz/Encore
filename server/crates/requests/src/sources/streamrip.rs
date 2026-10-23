@@ -9,6 +9,7 @@ use regex::Regex;
 use serde_json::Value;
 use std::path::{Path, PathBuf};
 
+/// The command line streamrip runs with unless Settings give another: the placeholders are filled in per run.
 const DEFAULT_CMD: &str = "{bin} --config-path {config} --folder {folder} --quality {quality} --no-db --no-progress url {url}";
 
 /// The streamrip to run: the owner's own copy (streamrip_bin) when set, else the newest that runs of the
@@ -29,6 +30,7 @@ pub fn plugin_on(st: &impl Ctx) -> bool {
     st.plugins().enabled("streamrip")
 }
 
+/// Where streamrip's config.toml is kept.
 pub fn config_path(st: &impl Ctx) -> PathBuf {
     st.data_dir().join("streamrip").join("config.toml")
 }
@@ -45,6 +47,7 @@ pub fn set_toml(text: &str, section: &str, key: &str, val: &str) -> String {
     format!("{}{}{}", &text[..start], body, &text[end..])
 }
 
+/// `s` as a TOML basic string.
 fn tstr(s: &str) -> String {
     format!("\"{}\"", s.replace('\\', "\\\\").replace('"', "\\\""))
 }
@@ -56,9 +59,11 @@ fn tstr(s: &str) -> String {
 // aside and writes a fresh one, carrying the sign-ins over. The credentials from Encore's settings go
 // in before every run, not only when the file is new.
 
+/// The error while the streamrip plugin isn't installed.
 pub const NOT_INSTALLED_MSG: &str = "streamrip is not installed – install the streamrip plugin under Settings → Plugins (or set its path)";
 /// Deezer runs need the ARL cookie; streamrip would ask for it on a terminal, which a server has none of.
 pub const ARL_MSG: &str = "Deezer needs an ARL cookie – Settings → Plugins → streamrip";
+/// The error while streamrip's config doesn't load.
 pub const CONFIG_BROKEN_MSG: &str = "streamrip can't load its config – press Reset streamrip config in Settings → Plugins → streamrip";
 /// The line streamrip prints when its config does not load (the text after the colon says why).
 const CONFIG_ERROR: &str = "Error loading config";
@@ -216,6 +221,7 @@ pub struct RunOutput {
 }
 
 impl RunOutput {
+    /// streamrip exited 0.
     pub fn success(&self) -> bool {
         self.status.is_some_and(|s| s.success())
     }
@@ -227,12 +233,16 @@ pub const OUTPUT_KEEP: usize = 1 << 20;
 /// A run's output as it comes, from both pipes: whole lines, in the order they came.
 #[derive(Default)]
 struct Collected {
+    /// the first [`OUTPUT_KEEP`] bytes
     head: Vec<u8>,
+    /// the last [`OUTPUT_KEEP`] bytes after them
     tail: std::collections::VecDeque<u8>,
+    /// how many bytes in the middle were dropped
     left_out: usize,
 }
 
 impl Collected {
+    /// Take in output: the head first, then the tail, dropping from the tail's front past its size.
     fn push(&mut self, bytes: &[u8]) {
         let room = OUTPUT_KEEP.saturating_sub(self.head.len());
         let (h, rest) = bytes.split_at(room.min(bytes.len()));
@@ -244,6 +254,7 @@ impl Collected {
         }
     }
 
+    /// The output as text, a note where the middle was left out.
     fn text(&self) -> String {
         let mut out = String::from_utf8_lossy(&self.head).into_owned();
         if self.left_out > 0 {
@@ -289,6 +300,7 @@ async fn pump(mut r: impl tokio::io::AsyncRead + Unpin, sink: std::sync::Arc<std
 struct Session(Option<i32>);
 
 impl Session {
+    /// Kill the run's whole process group, once.
     fn stop(&mut self) {
         if let Some(pid) = self.0.take() {
             // the run's pid is still ours (not waited for yet), or its group still has members: never another's
@@ -442,20 +454,24 @@ fn carry_over(old: &str, fresh: &str) -> String {
 /// What `check_config` found and did.
 #[derive(Debug, Default)]
 pub struct ConfigCheck {
+    /// the config.toml checked
     pub path: PathBuf,
     /// A fresh file was written (the old one, if any, is `backup`).
     pub regenerated: bool,
+    /// the copy of the old file, when a fresh one was written
     pub backup: Option<PathBuf>,
     /// Why the config still does not load (or why it could not be checked), when it does not.
     pub problem: Option<String>,
 }
 
 impl ConfigCheck {
+    /// The check for the API: `{ok, path, regenerated, backup, message}`.
     pub fn json(&self) -> Value {
         serde_json::json!({ "ok": self.problem.is_none(), "path": self.path.to_string_lossy(), "regenerated": self.regenerated,
             "backup": self.backup.as_ref().map(|b| b.to_string_lossy().to_string()), "message": self.message() })
     }
 
+    /// The check in words.
     pub fn message(&self) -> String {
         let where_ = self.path.display();
         match (&self.problem, self.regenerated) {
@@ -614,6 +630,7 @@ fn log_records(text: &str) -> String {
         .join("\n")
 }
 
+/// `s` cut to `max` characters, "…" at the end when it was longer.
 fn cap(s: &str, max: usize) -> String {
     if s.chars().count() <= max { s.to_string() } else { s.chars().take(max.saturating_sub(1)).collect::<String>() + "…" }
 }
@@ -676,7 +693,9 @@ fn run_failure(run: &RunOutput, secs: u64) -> String {
 /// the request's log.
 #[derive(Debug)]
 pub struct RipError {
+    /// what went wrong, in words
     pub message: String,
+    /// the run's output for the request's log
     pub log: String,
 }
 
@@ -695,11 +714,13 @@ pub fn run_log(e: &anyhow::Error) -> Option<&str> {
 
 // ---- resolving a request to a service link ------------------------------------------------------
 
+/// The Deezer track with this ISRC, or `None`.
 pub async fn deezer_isrc(st: &impl Ctx, isrc: &str) -> Option<Value> {
     let d: Value = encore_http::deezer::track_by_isrc(st, isrc).send().await.ok()?.json().await.ok()?;
     d["error"].is_null().then_some(d)
 }
 
+/// Deezer's search for `q` in `kind` ("track", "album"): its first 15 hits.
 async fn deezer_search(st: &impl Ctx, kind: &str, q: &str) -> Vec<Value> {
     let Ok(r) = encore_http::deezer::search(st, kind, q, 15).send().await else { return vec![] };
     r.json::<Value>().await.ok().and_then(|d| d["data"].as_array().cloned()).unwrap_or_default()
@@ -724,6 +745,7 @@ pub async fn tidal_token(st: &impl Ctx) -> anyhow::Result<String> {
     Ok(tok)
 }
 
+/// The Tidal track (or with `albums`, its album) with this ISRC, as a tidal.com link.
 async fn tidal_by_isrc(st: &impl Ctx, isrc: &str, albums: bool) -> anyhow::Result<Option<String>> {
     let tok = tidal_token(st).await?;
     let mut q = vec![("countryCode", "US"), ("filter[isrc]", isrc)];
@@ -739,6 +761,7 @@ async fn tidal_by_isrc(st: &impl Ctx, isrc: &str, albums: bool) -> anyhow::Resul
     })
 }
 
+/// The services streamrip downloads from.
 pub const SERVICES: [&str; 3] = crate::line::SERVICES;
 
 /// The streamrip services to search, in the order they appear in the one Source order setting
@@ -753,6 +776,8 @@ pub fn services(st: &impl Ctx) -> Vec<String> {
     if legacy.is_empty() { vec!["tidal".into(), "deezer".into()] } else { legacy }
 }
 
+/// Links for an album on each streamrip service, in the source order: by its first song's ISRC, else the best
+/// match of a search.
 pub async fn resolve_album(st: &impl Ctx, artist: &str, album: &str, track_count: Option<usize>, first_isrc: Option<&str>) -> Vec<String> {
     let mut urls = vec![];
     let want = describe(album, artist, None, None, None);
@@ -793,6 +818,7 @@ pub async fn resolve_album(st: &impl Ctx, artist: &str, album: &str, track_count
     urls
 }
 
+/// Links for a song on each streamrip service, in the source order: by its ISRC, else the best match of a search.
 pub async fn resolve_track(st: &impl Ctx, artist: &str, title: &str, isrc: Option<&str>, length: Option<f64>) -> Vec<String> {
     let mut urls = vec![];
     let want = describe(title, artist, length, isrc, None);
@@ -852,6 +878,7 @@ pub fn audio_files_checked(dir: &Path, exts: &[&str]) -> Result<Vec<PathBuf>, St
     Ok(f)
 }
 
+/// The files under `dir` with one of these extensions (lowercase), sorted.
 pub fn audio_files(dir: &Path, exts: &[&str]) -> Vec<PathBuf> {
     let mut f: Vec<PathBuf> = walkdir::WalkDir::new(dir).into_iter().flatten().filter(|e| e.file_type().is_file())
         .map(|e| e.into_path()).filter(|p| p.extension().is_some_and(|x| exts.contains(&x.to_string_lossy().to_lowercase().as_str()))).collect();
@@ -862,6 +889,7 @@ pub fn audio_files(dir: &Path, exts: &[&str]) -> Vec<PathBuf> {
 /// What a streamrip download left: the audio files, and streamrip's output for the request's log.
 #[derive(Debug, Default)]
 pub struct Ripped {
+    /// the audio files it left
     pub files: Vec<PathBuf>,
     /// stdout and stderr together, in the order they came ([`cap_log`] at 20 000 characters)
     pub log: String,
@@ -941,6 +969,7 @@ pub fn split_words(line: &str) -> Option<Vec<String>> {
     Some(out)
 }
 
+/// Download `url` into `folder` with streamrip: the files it left.
 pub async fn download(st: &impl Ctx, url: &str, folder: &Path) -> anyhow::Result<Vec<PathBuf>> {
     Ok(download_run(st, url, folder).await?.files)
 }
@@ -1034,6 +1063,7 @@ pub fn qobuz_login(st: &impl Ctx) -> Option<(String, String, bool)> {
     Some((user, secret, v("use_auth_token").trim() != "false"))
 }
 
+/// The error when Qobuz's app id can't be found.
 pub const QOBUZ_APP_ID_MSG: &str = "Qobuz's web player has changed and its app id can't be read – run one Qobuz download so streamrip stores the id in config.toml";
 
 /// The app id Qobuz's API wants in `X-App-Id`: the one streamrip stored in config.toml after its first run,
@@ -1120,6 +1150,7 @@ fn http_error_without_url(e: reqwest::Error) -> String {
     s
 }
 
+/// The error when the Tidal sign-in has lapsed and can't be refreshed.
 pub const TIDAL_LAPSED_MSG: &str = "Tidal sign-in has lapsed – sign in again in Settings → Plugins → streamrip";
 
 /// The signed-in Tidal account's token for Encore's own API calls (the picker's Tidal search), as

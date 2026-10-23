@@ -26,6 +26,7 @@ pub const PRESS_GAP: Duration = Duration::from_secs(120);
 pub enum AttemptNow {
     /// the planned attempt is due now (the schedule's count stays: a new failure backs off further)
     Due,
+    /// already logged in
     LoggedIn,
     /// an attempt is under way (or the supervisor is looking at a session that may be gone)
     Connecting,
@@ -64,6 +65,7 @@ pub fn span(d: Duration) -> String {
 pub enum State {
     /// An attempt is under way.
     Connecting,
+    /// logged in to Soulseek
     LoggedIn,
     /// Not logged in and nothing planned yet (the engine has just come up, or the session was just seen
     /// to end): an attempt follows shortly.
@@ -76,6 +78,7 @@ pub enum State {
 }
 
 impl State {
+    /// Its name in the API.
     pub fn as_str(self) -> &'static str {
         match self {
             State::Connecting => "connecting",
@@ -105,10 +108,12 @@ pub enum Reason {
 }
 
 impl Reason {
+    /// The reason a stored name stands for.
     pub fn parse(s: &str) -> Option<Reason> {
         [Reason::Timeout, Reason::Rejected, Reason::Kicked, Reason::Banned, Reason::RateLimited, Reason::Network].into_iter().find(|r| r.as_str() == s)
     }
 
+    /// Its name in the API.
     pub fn as_str(self) -> &'static str {
         match self {
             Reason::Timeout => "timeout",
@@ -227,7 +232,9 @@ pub fn waited(msg: &str) -> Option<Duration> {
 /// The session as Encore sees it, and its schedule. Changes return the one log line they are worth.
 #[derive(Clone, Debug)]
 pub struct Conn {
+    /// where the session is
     pub state: State,
+    /// why it isn't logged in, when known
     pub reason: Option<Reason>,
     /// slskd's or the server's words about the reason (or what keeps the engine from running)
     pub message: Option<String>,
@@ -241,7 +248,9 @@ pub struct Conn {
     pub last_attempt: Option<Instant>,
     /// the attempt under way started then
     pub attempt_started: Option<Instant>,
+    /// when it logged in
     pub logged_in_at: Option<Instant>,
+    /// the Soulseek user it logged in as
     pub username: Option<String>,
     /// the one retry after "another client logged in" has been used
     pub kicked_retry: bool,
@@ -273,6 +282,7 @@ impl Default for Conn {
 }
 
 impl Conn {
+    /// Change the state (and `since` when anything changed).
     fn set(&mut self, state: State, reason: Option<Reason>, message: Option<String>, unix: f64) {
         if self.state != state || self.reason != reason || self.message != message {
             self.since = unix;
@@ -343,6 +353,7 @@ impl Conn {
             && self.next_at.is_some_and(|t| t <= now) && self.earliest(now) <= now
     }
 
+    /// An attempt starts now → its log line.
     pub fn attempt_begins(&mut self, now: Instant, unix: f64) -> String {
         self.held = None;
         self.attempts += 1;
@@ -354,6 +365,7 @@ impl Conn {
         format!("soulseek: connecting (attempt {})", self.attempts)
     }
 
+    /// The session logged in as `user` → the log line, when it is news.
     pub fn logged_in(&mut self, user: &str, now: Instant, unix: f64) -> Option<String> {
         self.held = None;
         self.attempt_started = None;
@@ -467,6 +479,7 @@ impl Conn {
         }
     }
 
+    /// A new run of attempts: the count and the kicked retry start again.
     fn start_over(&mut self, _now: Instant, unix: f64) {
         self.held = None;
         self.attempts = 0;
@@ -559,6 +572,7 @@ impl Conn {
 /// Why Reconnect now was refused.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Refused {
+    /// already logged in
     LoggedIn,
     /// an attempt is under way
     Connecting,

@@ -2,6 +2,7 @@
 //! found in), used to rank candidates, to tell a complete download from a partial one and to tag the files.
 use super::*;
 
+/// The release a request is for, with its tracks (looked up and kept on the request when missing).
 pub(super) async fn release_info(st: &impl Ctx, r: &mut Req) -> Option<Value> {
     if r.d.get("release").is_none() && r.s("kind") == "album" {
         if r.s("mbid").is_empty() && r.d["ext"].is_object() {
@@ -36,6 +37,7 @@ pub(super) async fn release_info(st: &impl Ctx, r: &mut Req) -> Option<Value> {
     r.d.get("release").filter(|v| !v.is_null()).cloned()
 }
 
+/// How many tracks the release has.
 pub(super) fn n_tracks(rel: &Option<Value>) -> Option<usize> {
     rel.as_ref().and_then(|r| r["tracks"].as_array().map(|a| a.len()))
 }

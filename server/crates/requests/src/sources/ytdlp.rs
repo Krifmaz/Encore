@@ -19,6 +19,7 @@ pub fn plugin_on(st: &impl Ctx) -> bool {
     st.plugins().enabled("ytdlp")
 }
 
+/// The yt-dlp program to run.
 pub fn bin(st: &impl Ctx) -> String {
     // the owner's own copy (ENCORE_YTDLP), else the newest that runs of the plugin's venv, the venv an Encore
     // before plugins kept (adopted), an older image's /opt/tools/bin and PATH (encore_system::tools)
@@ -46,6 +47,7 @@ pub fn program_found(st: &impl Ctx) -> bool {
     std::env::var("ENCORE_YTDLP").ok().is_some_and(|v| !v.trim().is_empty()) || encore_system::tools::path(st, "ytdlp").is_some()
 }
 
+/// The installed yt-dlp's version.
 pub async fn version(st: &impl Ctx) -> Option<String> {
     let (st, exe) = (st.clone(), bin(st));
     let path = encore_core::which::which(&exe)?;
@@ -113,8 +115,11 @@ pub async fn test_cookies(st: &impl Ctx) -> anyhow::Result<Value> {
     } }))
 }
 
+/// What a download left behind.
 pub struct Download {
+    /// the files it made
     pub files: Vec<PathBuf>,
+    /// the entries it downloaded, as yt-dlp described them
     pub entries: Vec<Value>,
 }
 
@@ -204,6 +209,7 @@ async fn js_runtime_args(st: &impl Ctx) -> Vec<String> {
     if has_node && !has_deno && new_enough { vec!["--js-runtimes".into(), "node".into()] } else { vec![] }
 }
 
+/// Run yt-dlp with `args`, reading its progress, → the files that are new in `outdir`.
 async fn run(st: &impl Ctx, args: &[String], outdir: &Path, before: &std::collections::HashSet<PathBuf>, progress: Option<&(dyn Fn(f64) + Send + Sync)>) -> anyhow::Result<Download> {
     use encore_core::fsx::{self, Step};
     let program = bin(st);
@@ -266,6 +272,7 @@ async fn run(st: &impl Ctx, args: &[String], outdir: &Path, before: &std::collec
     Ok(Download { files, entries })
 }
 
+/// Run yt-dlp and read its JSON output.
 async fn json_out(st: &impl Ctx, args: &[&str]) -> anyhow::Result<Value> {
     let args: Vec<String> = args.iter().map(|a| a.to_string()).collect();
     let o = command(&bin(st), &args).stdin(Stdio::null()).output().await.map_err(|e| anyhow::anyhow!("yt-dlp is not installed ({e}) – install or update the yt-dlp plugin under Settings → Plugins"))?;
@@ -275,6 +282,7 @@ async fn json_out(st: &impl Ctx, args: &[&str]) -> anyhow::Result<Value> {
     Ok(serde_json::from_slice(&o.stdout)?)
 }
 
+/// Search YouTube: the first `n` results as `{url, title, …}`.
 pub async fn search(st: &impl Ctx, query: &str, n: usize) -> anyhow::Result<Vec<Value>> {
     let info = json_out(st, &["-J", "--flat-playlist", "--no-warnings", &format!("ytsearch{n}:{query}")]).await?;
     Ok(info["entries"].as_array().cloned().unwrap_or_default().iter().map(|e| json!({
@@ -312,6 +320,7 @@ pub async fn find_best(st: &impl Ctx, artist: &str, title: &str, length: Option<
     best.map(|(_, u)| u)
 }
 
+/// What a link is: a video or a playlist, with its title, uploader and entries.
 pub async fn probe(st: &impl Ctx, url: &str) -> anyhow::Result<Value> {
     let info = json_out(st, &["-J", "--flat-playlist", "--no-warnings", "--", url]).await?;
     let entries = info["entries"].as_array();

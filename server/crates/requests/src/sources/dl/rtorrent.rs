@@ -8,9 +8,13 @@ use base64::Engine;
 use regex::Regex;
 use std::sync::LazyLock;
 
+/// An XML-RPC parameter.
 pub(crate) enum X {
+    /// a string
     S(String),
+    /// bytes, sent as base64
     B64(Vec<u8>),
+    /// an integer
     I(i64),
 }
 
@@ -19,10 +23,12 @@ pub(crate) enum X {
 fn esc(s: &str) -> String {
     s.replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;")
 }
+/// XML entities back to text.
 fn unesc(s: &str) -> String {
     s.replace("&lt;", "<").replace("&gt;", ">").replace("&quot;", "\"").replace("&apos;", "'").replace("&amp;", "&")
 }
 
+/// An XML-RPC call's body.
 pub(crate) fn body(method: &str, params: &[X]) -> String {
     let ps: String = params.iter().map(|p| match p {
         X::S(s) => format!("<param><value><string>{}</string></value></param>", esc(s)),
@@ -32,8 +38,11 @@ pub(crate) fn body(method: &str, params: &[X]) -> String {
     format!(r#"<?xml version="1.0"?><methodCall><methodName>{method}</methodName><params>{ps}</params></methodCall>"#)
 }
 
+/// An XML-RPC fault's message.
 static FAULT: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"(?s)<name>faultString</name>\s*<value>\s*(?:<string>)?(.*?)(?:</string>)?\s*</value>").unwrap());
+/// The first value of an answer.
 static VALUE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"(?s)<params>\s*<param>\s*<value>(.*?)</value>").unwrap());
+/// A typed scalar inside a value.
 static TYPED: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"(?s)^\s*<(i4|i8|int|string|boolean|double)>(.*)</(?:i4|i8|int|string|boolean|double)>\s*$").unwrap());
 
 /// The single value of an XML-RPC answer as text ("" for an empty string), or the fault.
@@ -50,6 +59,7 @@ pub(crate) fn parse(xml: &str) -> anyhow::Result<String> {
     Ok(unesc(&TYPED.captures(inner).map(|t| t[2].to_string()).unwrap_or_else(|| inner.to_string())))
 }
 
+/// One XML-RPC call to rTorrent (with the login, when set).
 async fn call(st: &impl Ctx, method: &str, params: &[X]) -> anyhow::Result<String> {
     let mut rb = st.http().post(base(st, "rtorrent_url")).header("Content-Type", "text/xml").body(body(method, params)).timeout(std::time::Duration::from_secs(60));
     let user = st.cfg().str("rtorrent_user");
@@ -65,10 +75,12 @@ async fn call(st: &impl Ctx, method: &str, params: &[X]) -> anyhow::Result<Strin
     parse(&r.text().await?)
 }
 
+/// A string parameter.
 fn s(v: &str) -> X {
     X::S(v.to_string())
 }
 
+/// rTorrent's version, for the status line.
 pub async fn status(st: &impl Ctx) -> anyhow::Result<String> {
     let v = call(st, "system.client_version", &[]).await?;
     Ok(if v.is_empty() { String::new() } else { format!(" {v}") })
@@ -88,6 +100,7 @@ fn load_cmds(st: &impl Ctx) -> Vec<X> {
     out
 }
 
+/// Add a torrent (or magnet), started, in the download folder and with the label set → its hash.
 pub async fn add(st: &impl Ctx, url: &str) -> anyhow::Result<String> {
     let (method, payload, hash) = match fetch_torrent(st, url).await? {
         Fetched::Magnet(m) => {
@@ -105,6 +118,7 @@ pub async fn add(st: &impl Ctx, url: &str) -> anyhow::Result<String> {
     Ok(hash)
 }
 
+/// An integer property of the torrent `hash`.
 async fn int(st: &impl Ctx, method: &str, hash: &str) -> anyhow::Result<i64> {
     Ok(call(st, method, &[s(hash)]).await?.trim().parse().unwrap_or(0))
 }
@@ -122,6 +136,7 @@ async fn path(st: &impl Ctx, hash: &str) -> anyhow::Result<String> {
     Ok(format!("{}/{}", dir.trim_end_matches('/'), call(st, "d.name", &[s(hash)]).await?))
 }
 
+/// Where rTorrent is with the torrent `hash`.
 pub async fn poll(st: &impl Ctx, hash: &str) -> anyhow::Result<Poll> {
     let size = match call(st, "d.size_bytes", &[s(hash)]).await {
         Ok(v) => v.trim().parse::<f64>().unwrap_or(0.0),

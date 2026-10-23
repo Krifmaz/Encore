@@ -68,6 +68,7 @@ const NOT_ANSWERING: &str = "it doesn't answer";
 /// What a probe of a folder found.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Found {
+    /// the folder is writable
     Ok,
     /// EROFS
     ReadOnly,
@@ -123,7 +124,9 @@ impl Found {
 pub struct Root {
     /// the setting that names it
     pub key: &'static str,
+    /// its name as shown
     pub label: String,
+    /// the folder
     pub path: PathBuf,
     /// the request sources that save here ("ytdlp", "streamrip", "url" for links, [`PLUGINS`] for every plugin
     /// program's source, "slskd", "slskd_lossless", "torznab")
@@ -140,7 +143,9 @@ pub struct Root {
 /// A folder and what its last probe found.
 #[derive(Clone, Debug)]
 pub struct Probed {
+    /// the folder
     pub root: Root,
+    /// what the probe found
     pub found: Found,
     /// the failed step (`{step, op, path, to, errno, error, storage, text}`), null when the folder is writable
     pub error: Value,
@@ -148,6 +153,7 @@ pub struct Probed {
     pub blocks: bool,
     /// a remark on a result that holds nothing up
     pub note: Option<&'static str>,
+    /// when it was probed, Unix seconds
     pub checked_at: f64,
     /// since when it holds them up (its first such probe in a row)
     pub since: Option<f64>,
@@ -157,6 +163,7 @@ pub struct Probed {
 }
 
 impl Probed {
+    /// The probe's error text.
     fn io_error(&self) -> String {
         self.error["error"].as_str().unwrap_or("").to_string()
     }
@@ -276,15 +283,18 @@ pub fn banner(probed: &[Probed]) -> Option<String> {
 /// What the probe passes keep while the server runs (in [`super::storage::Health`]).
 #[derive(Default)]
 pub struct Roots {
+    /// the last pass and what it found
     state: Mutex<State>,
     /// held while a pass runs: one at a time (two probes of a folder would write the same file)
     probing: Mutex<()>,
     /// the background pass is running (the worker's loop starts it and goes on)
     ticking: AtomicBool,
+    /// tests: a stand-in for the probe
     #[cfg(any(test, feature = "test-support"))]
     fake: Mutex<Option<FakeProbe>>,
 }
 
+/// What the passes found.
 #[derive(Default)]
 struct State {
     /// the last pass's folders, in the order of [`roots`]
@@ -330,10 +340,12 @@ pub fn fake_probe(st: &impl Ctx, f: Option<FakeProbe>) {
     *roots_of(st).fake.lock().unwrap_or_else(|p| p.into_inner()) = f;
 }
 
+/// The probe passes' state.
 fn roots_of(st: &impl Ctx) -> &Roots {
     &st.requests().storage.downloads
 }
 
+/// Their found state, locked.
 fn state(st: &impl Ctx) -> std::sync::MutexGuard<'_, State> {
     roots_of(st).state.lock().unwrap_or_else(|p| p.into_inner())
 }
@@ -561,6 +573,7 @@ fn waiting_count(st: &impl Ctx) -> i64 {
         .ok().flatten().map(|r| r.i("n")).unwrap_or(0)
 }
 
+/// Log a line of the passes at `level` (warnings also to the server log).
 fn log(st: &impl Ctx, level: &str, line: &str) {
     if level == "warning" {
         tracing::warn!("{line}");

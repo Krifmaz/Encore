@@ -11,29 +11,44 @@ use serde_json::Value;
 // one "lane" per OAuth client – the default client (16/44.1 FLAC) in the plain fields and, when
 // `hires_client` is on, the hi-res client in the `hires_*` fields.
 
+/// Tidal's OAuth endpoint.
 pub(super) const TIDAL_AUTH: &str = "https://auth.tidal.com/v1/oauth2";
+/// The scopes the sign-in asks for.
 pub(super) const TIDAL_SCOPE: &str = "r_usr+w_usr+w_sub";
+/// The default client (16/44.1 FLAC): (id, secret).
 pub(super) const TIDAL_DEFAULT_CLIENT: (&str, &str) = ("4N3n6Q1x95LL5K7p", "oKOXfJW371cX6xaZ0PyhgGNBdNLlBZd4AKKYougMjik=");
+/// The hi-res client: (id, secret).
 pub(super) const TIDAL_HIRES_CLIENT: (&str, &str) = ("fX2JxdmntZWK0ixT", "1Nm5AfDAjxrgJFJbKNWLeAyKGVGmINuXPPLHVXAvxAg=");
+/// The browser Tidal's sign-in calls present.
 pub(super) const TIDAL_UA: &str = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36";
 /// The [tidal] keys a pasted config may carry, in the order they are written.
 pub(super) const TIDAL_TOKEN_KEYS: [&str; 10] = ["user_id", "country_code", "access_token", "refresh_token", "token_expiry", "token_client_id",
     "hires_access_token", "hires_refresh_token", "hires_token_expiry", "hires_token_client_id"];
+/// The keys of the hi-res lane.
 pub(super) const TIDAL_HIRES_KEYS: [&str; 4] = ["hires_access_token", "hires_refresh_token", "hires_token_expiry", "hires_token_client_id"];
+/// The message while the first lane waits for approval.
 pub(super) const TIDAL_STEP1_MSG: &str = "Step 1 of 2: open the link, approve in your Tidal account, then come back here.";
+/// The message while the second (hi-res) lane waits for approval.
 pub(super) const TIDAL_STEP2_MSG: &str = "Step 2 of 2: open the new link, approve in your Tidal account, then come back here.";
+/// The message when only one lane is signed in.
 pub(super) const TIDAL_ONE_STEP_MSG: &str = "Open the link, approve in your Tidal account, then come back here.";
+/// The message once signed in.
 pub(super) const TIDAL_DONE_MSG: &str = "Signed in to Tidal – downloads from Tidal use this account now.";
+/// The message when the hi-res lane wasn't finished.
 pub(super) const TIDAL_PARTIAL_MSG: &str = "Signed in for 16/44.1 FLAC only – sign in again for hi-res (step 2 was not finished).";
 
+/// Where the Tidal sign-in is.
 #[derive(Clone, Debug, Default)]
 pub struct TidalLogin {
     /// "starting" | "waiting" | "done" | "failed"
     pub status: String,
+    /// the link to approve
     pub url: Option<String>,
+    /// what the settings page shows
     pub message: String,
     /// 1-based lane being approved, and how many lanes there are (1 or 2).
     pub step: u8,
+    /// how many lanes there are
     pub steps: u8,
 }
 
@@ -42,10 +57,12 @@ pub struct TidalLogin {
 #[derive(Clone, Default)]
 pub struct TidalLogins(std::sync::Arc<std::sync::Mutex<Option<TidalLogin>>>);
 
+/// The sign-in's state now.
 pub(super) fn tidal_state(st: &impl Ctx) -> TidalLogin {
     st.requests().tidal.0.lock().map(|g| g.clone().unwrap_or_default()).unwrap_or_default()
 }
 
+/// Change the sign-in's state.
 pub(super) fn tidal_set(st: &impl Ctx, f: impl FnOnce(&mut TidalLogin)) {
     if let Ok(mut g) = st.requests().tidal.0.lock() {
         let mut s = g.take().unwrap_or_default();
@@ -90,6 +107,7 @@ pub(super) fn tidal_config(st: &impl Ctx) -> std::collections::BTreeMap<String, 
     std::fs::read_to_string(config_path(st)).map(|t| parse_tidal_toml(&t)).unwrap_or_default()
 }
 
+/// The hi-res client is used (`hires_client`, on unless "false").
 pub(super) fn tidal_hires_client(cfg: &std::collections::BTreeMap<String, String>) -> bool {
     cfg.get("hires_client").map(|v| v.trim() != "false").unwrap_or(true)
 }
@@ -295,6 +313,7 @@ pub async fn tidal_login_start(st: &impl Ctx) -> anyhow::Result<Value> {
     Ok(tidal_login_status(st))
 }
 
+/// The error when a paste has no access_token.
 pub const TIDAL_NO_TOKEN_MSG: &str = "No access_token found in the pasted text. Paste the [tidal] section of streamrip's config.toml, including its access_token line.";
 
 /// Does a pasted `[tidal]` section (or whole config.toml) carry a default-lane access_token? Anything
