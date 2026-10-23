@@ -4,6 +4,7 @@ import android.content.Context
 import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -71,6 +72,7 @@ import app.encore.android.ui.components.Toasts
 import app.encore.android.ui.screens.ConfirmDialog
 import app.encore.android.ui.screens.StatusBadge
 import app.encore.android.ui.screens.features
+import app.encore.android.ui.screens.openArtistPage
 import app.encore.android.ui.theme.EncoreColors
 import app.encore.android.ui.theme.palette
 import kotlinx.coroutines.CancellationException
@@ -253,6 +255,44 @@ class RequestActions(val nav: Nav, private val scope: CoroutineScope, private va
     fun pick(r: RequestRow) {
         detailsFor = 0L
         nav.open(Screen.Picker(PickerOpts(kind = r.kind, mbid = r.mbid, artist = r.artist, title = r.title, album = r.album, lengthSec = r.lengthSec, requestId = r.id)))
+    }
+
+    /** The title in the details sheet: the album (library or catalogue) or a search for it ([RequestRules.titleTarget]). */
+    fun openTitle(r: RequestRow) {
+        if (r.kind == "artist") return openArtist(r)
+        val target = RequestRules.titleTarget(r) ?: return
+        detailsFor = 0L
+        when (target) {
+            is RequestTarget.LibraryAlbum -> nav.open(Screen.Album(target.id))
+            is RequestTarget.CatalogAlbum -> nav.open(Screen.CatalogAlbum(target.rgid))
+            is RequestTarget.Search -> nav.open(Screen.DiscoverSearch(target.query, target.type))
+        }
+    }
+
+    /** The artist in the details sheet: their page (the catalogue's, looked up by name; the library's offline). */
+    fun openArtist(r: RequestRow) {
+        val name = RequestRules.artistTarget(r)
+        if (name.isEmpty()) return
+        detailsFor = 0L
+        openArtistPage(nav, name)
+    }
+
+    /** Play in the details sheet: the downloaded song, or the downloaded album from its first song. */
+    fun play(r: RequestRow) {
+        if (!RequestRules.canPlay(r)) return
+        scope.launch {
+            try {
+                val tracks = withContext(Dispatchers.IO) {
+                    if (r.libraryTrackId > 0L) listOfNotNull(nav.graph.api.track(r.libraryTrackId))
+                    else nav.graph.api.album(r.libraryAlbumId).tracks
+                }
+                if (tracks.isEmpty()) Toasts.show("Nothing to play", "err") else nav.player.play(tracks)
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                Toasts.show(e.message ?: "That didn't work", "err")
+            }
+        }
     }
 
     fun showDetails(r: RequestRow) {
@@ -442,13 +482,23 @@ private fun RequestDetailsSheet(a: RequestActions, r: RequestRow, onDismiss: () 
                 Cover(r.coverUrl.ifEmpty { null }, a.nav.graph.imageLoader, size = 56.dp, corner = 8.dp, label = r.title.ifEmpty { r.artist })
                 Spacer(Modifier.width(14.dp))
                 Column(Modifier.weight(1f)) {
-                    Text(d.title, style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold)
-                    if (d.note.isNotEmpty()) Text(d.note, style = MaterialTheme.typography.bodyMedium, color = p.muted)
+                    // the title opens the album (or the artist, for a discography), the artist line the artist's page
+                    val titleLinks = r.kind == "artist" || RequestRules.titleTarget(r) != null
+                    Text(
+                        d.title, style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold,
+                        modifier = if (titleLinks) Modifier.clickable(onClickLabel = if (r.kind == "artist") "Open artist" else "Open") { a.openTitle(r) } else Modifier,
+                    )
+                    val noteLinks = d.note.isNotEmpty() && r.kind != "artist" && d.note == RequestRules.artistTarget(r)
+                    if (d.note.isNotEmpty()) Text(
+                        d.note, style = MaterialTheme.typography.bodyMedium, color = p.muted,
+                        modifier = if (noteLinks) Modifier.clickable(onClickLabel = "Open artist") { a.openArtist(r) } else Modifier,
+                    )
                 }
             }
             FlowRow(Modifier.padding(top = 10.dp), horizontalArrangement = Arrangement.spacedBy(6.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
                 Badge(r.kind, modifier = Modifier.align(Alignment.CenterVertically))
                 StatusBadge(r.status, Modifier.align(Alignment.CenterVertically), label = RequestRules.badgeLabel(r))
+                if (RequestRules.canPlay(r)) SmallButton("Play", iconRes = R.drawable.ic_play, primary = true) { a.play(r) }
                 SmallButton(copyLabel(copied.value), iconRes = if (copied.value == true) R.drawable.ic_check else R.drawable.ic_content_copy) {
                     a.copy(r, context) { copied.value = it }
                 }

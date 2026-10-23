@@ -309,6 +309,7 @@ pub enum Effect {
         text: String,
         lead: Option<crate::widgets::details::Lead>,
         act: Option<crate::widgets::details::Act>,
+        links: Box<crate::widgets::details::Links>,
     },
     /// Open in the browser.
     OpenUrl(String),
@@ -541,11 +542,25 @@ impl<'a> Ctx<'a> {
         lead: Option<crate::widgets::details::Lead>,
         act: Option<crate::widgets::details::Act>,
     ) {
+        self.request_details(title, text, lead, act, Default::default());
+    }
+
+    /// [`Ctx::details_with`] for a request: its title and artist as links, and Play once it is
+    /// in the library (`links`).
+    pub fn request_details(
+        &mut self,
+        title: impl Into<String>,
+        text: impl Into<String>,
+        lead: Option<crate::widgets::details::Lead>,
+        act: Option<crate::widgets::details::Act>,
+        links: crate::widgets::details::Links,
+    ) {
         self.push(Effect::Details {
             title: title.into(),
             text: text.into(),
             lead,
             act,
+            links: Box::new(links),
         });
     }
 

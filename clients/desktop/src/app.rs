@@ -72,6 +72,8 @@ pub enum Message {
     /// The details dialog's action was sent (Keep anyway, Download anyway): its toast when it
     /// worked.
     DetailsActed(String, Result<Value, ApiError>),
+    /// A request's Play: the library song or album it brought in.
+    DetailsPlay(Result<Value, ApiError>),
     /// A copy was checked against the clipboard: whether it took.
     Copied(bool),
     WindowOpened(window::Id),
@@ -576,7 +578,7 @@ impl App {
                 Effect::Enqueue(t) => tasks.push(self.queue(t, false)),
                 Effect::Clipboard(s) => tasks.push(iced::clipboard::write(s)),
                 Effect::CopyText(s) => tasks.push(Self::copy_checked(s)),
-                Effect::Details { title, text, lead, act } => self.details = Some(Details::new(title, text, lead, act)),
+                Effect::Details { title, text, lead, act, links } => self.details = Some(Details::new(title, text, lead, act).with_links(*links)),
                 Effect::OpenUrl(u) => {
                     if let Err(e) = open::that_detached(&u) {
                         self.toast(format!("Could not open the browser: {e}"), ToastKind::Err);
@@ -726,9 +728,34 @@ impl App {
                             Message::DetailsActed(done.clone(), r)
                         })
                     }
+                    Some(details::Out::Open(page)) => {
+                        self.details = None;
+                        self.navigate(page, true)
+                    }
+                    Some(details::Out::Play(path)) => {
+                        self.details = None;
+                        let api = self.api.clone();
+                        Task::perform(async move { api.get(&path).await }, Message::DetailsPlay)
+                    }
                     None => Task::none(),
                 }
             }
+            // a request's Play: the song, or the album from its first song
+            Message::DetailsPlay(r) => match r {
+                Ok(v) => {
+                    let tracks = crate::widgets::request_list::playable(&v);
+                    if tracks.is_empty() {
+                        self.toast("Nothing to play", ToastKind::Err);
+                        Task::none()
+                    } else {
+                        self.play(tracks, 0)
+                    }
+                }
+                Err(e) => {
+                    self.toast(e.message, ToastKind::Err);
+                    Task::none()
+                }
+            },
             Message::DetailsActed(done, r) => {
                 match r {
                     Ok(_) => self.toast(done, ToastKind::Ok),

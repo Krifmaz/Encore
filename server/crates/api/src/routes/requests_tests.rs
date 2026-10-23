@@ -202,3 +202,29 @@ fn a_discography_request_keeps_the_ticked_releases() {
     let id = create_request(&*st, &u, &artist("cccccccc-2222-3333-4444-555555555555", None), None, None).unwrap();
     assert!(row(&st, id)["detail"]["release_ids"].is_null());
 }
+
+/// A finished album or song request names its library copy (the details' Play and links, the owner on Oct 23);
+/// a queued one and one whose music isn't there name none.
+#[test]
+fn a_finished_request_names_its_library_copy() {
+    let st = state("library-links");
+    let u = user(&st, "owner1", "admin");
+    st.db.execute("INSERT INTO tracks (id, path, album_id, mtime, size, title, artist, album, albumartist, mb_releasegroupid, added_at)
+                   VALUES (5, '/m/a.flac', 'alb1', 0, 1, 'Love Buzz', 'Nirvana', 'Love Buzz', 'Nirvana', 'rg-1', 0)", p![]).unwrap();
+    let album = create_request(&*st, &u, &NewRequest { kind: "album".into(), artist: Some("Nirvana".into()), title: Some("Love Buzz".into()), mbid: Some("rg-1".into()), ..Default::default() }, None, None).unwrap();
+    let track = create_request(&*st, &u, &song("Nirvana", "Love Buzz"), None, None).unwrap();
+    let gone = create_request(&*st, &u, &song("Nirvana", "Blew"), None, None).unwrap();
+    let rows = |st: &AppState| {
+        let all = st.db.query("SELECT * FROM requests ORDER BY id", p![]).unwrap();
+        list_rows(st, all, true).into_iter().map(|r| (r["id"].as_i64().unwrap(), r)).collect::<std::collections::HashMap<_, _>>()
+    };
+    let r = rows(&st);
+    assert!(r[&album]["library_album_id"].is_null(), "queued: {}", r[&album]);
+    st.db.execute("UPDATE requests SET status='completed'", p![]).unwrap();
+    let r = rows(&st);
+    assert_eq!(r[&album]["library_album_id"], "alb1");
+    assert!(r[&album]["library_track_id"].is_null());
+    assert_eq!(r[&track]["library_album_id"], "alb1");
+    assert_eq!(r[&track]["library_track_id"], 5);
+    assert!(r[&gone]["library_album_id"].is_null() && r[&gone]["library_track_id"].is_null());
+}

@@ -820,4 +820,27 @@ class RequestRulesTest {
         assertEquals(3, RequestRules.userOptions(users, 7L to "Caz").size)
         assertEquals("Caz (612)", RequestRules.userLabel("Caz", 612))
     }
+
+    @Test
+    fun theDetailsLinkTheAlbumTheArtistAndPlayWhatIsDownloaded() {
+        // the Love Buzz card of the Oct 23 screenshot: queued, asked for by its release group
+        val queued = row("""{"id": 7, "kind": "album", "artist": "Nirvana", "title": "Love Buzz", "mbid": "rg-1", "status": "queued"}""")
+        assertEquals(RequestTarget.CatalogAlbum("rg-1"), RequestRules.titleTarget(queued))
+        assertEquals("Nirvana", RequestRules.artistTarget(queued))
+        assertFalse(RequestRules.canPlay(queued))
+        val done = row("""{"id": 7, "kind": "album", "artist": "Nirvana", "title": "Love Buzz", "mbid": "rg-1", "status": "completed",
+            "library_album_id": "abc", "library_track_id": null}""")
+        assertEquals(RequestTarget.LibraryAlbum("abc"), RequestRules.titleTarget(done))
+        assertTrue(RequestRules.canPlay(done))
+        val song = row("""{"id": 8, "kind": "track", "artist": "Nirvana", "title": "Blew", "status": "failed"}""")
+        assertEquals(RequestTarget.Search("Nirvana Blew", "track"), RequestRules.titleTarget(song))
+        val songDone = song.copy(status = "completed", libraryAlbumId = "x", libraryTrackId = 12L)
+        assertEquals(RequestTarget.LibraryAlbum("x"), RequestRules.titleTarget(songDone))
+        assertTrue(RequestRules.canPlay(songDone))
+        // a finished request whose music isn't in the library (deleted since): nothing to play
+        assertFalse(RequestRules.canPlay(song.copy(status = "completed")))
+        val link = row("""{"id": 9, "kind": "url", "url": "https://example.com/a", "artist": "x", "status": "completed"}""")
+        assertNull(RequestRules.titleTarget(link))
+        assertEquals("", RequestRules.artistTarget(link))
+    }
 }

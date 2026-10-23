@@ -24,6 +24,8 @@
     "kept_path": null,
     "kind": "track",
     "length": null,
+    "library_album_id": "52b52b2323b5df9d",
+    "library_track_id": 13,
     "line": null,
     "log": [],
     "mbid": null,
@@ -73,6 +75,8 @@
     "kept_path": null,
     "kind": "track",
     "length": null,
+    "library_album_id": null,
+    "library_track_id": null,
     "line": null,
     "log": [
       "ytdlp: no match on YouTube"
@@ -124,6 +128,8 @@
     "kept_path": null,
     "kind": "track",
     "length": null,
+    "library_album_id": null,
+    "library_track_id": null,
     "line": null,
     "log": [
       "ytdlp: no match on YouTube"
@@ -175,6 +181,8 @@
     "kept_path": null,
     "kind": "track",
     "length": null,
+    "library_album_id": null,
+    "library_track_id": null,
     "line": null,
     "log": [
       "ytdlp: no match on YouTube"

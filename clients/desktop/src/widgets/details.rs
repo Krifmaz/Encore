@@ -5,6 +5,7 @@
 //! that fixes it ([`Act`]: Keep anyway or Download anyway), which the app sends itself.
 
 use super::{btn, btn_icon, El, Icon};
+use crate::pages::Page;
 use crate::theme::{self, Btn};
 use iced::widget::text::Wrapping;
 use iced::widget::text_editor::{self, Action, Content};
@@ -36,6 +37,17 @@ pub struct Lead {
     pub from: String,
 }
 
+/// What a request's details link to and play (the owner on Oct 23: "from the download i should
+/// be able to click on the artist song or album or play it if its downloaded"): the title and the
+/// artist as links to their pages, and Play with the library path of what it brought in
+/// (`/library/tracks/<id>` or `/library/albums/<id>`).
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct Links {
+    pub title: Option<(String, Page)>,
+    pub artist: Option<(String, Page)>,
+    pub play: Option<String>,
+}
+
 /// The text a dialog shows, in an editor that selects but never edits.
 #[derive(Debug)]
 pub struct Details {
@@ -43,6 +55,7 @@ pub struct Details {
     pub text: String,
     pub lead: Option<Lead>,
     pub act: Option<Act>,
+    pub links: Links,
     content: Content,
 }
 
@@ -53,6 +66,10 @@ pub enum Msg {
     Copy,
     /// The dialog's [`Act`] button.
     Act,
+    /// A link of the [`Links`]: open that page.
+    Open(Page),
+    /// The [`Links`]' Play.
+    Play,
     Close,
 }
 
@@ -63,12 +80,22 @@ pub enum Out {
     Copy(String),
     /// Close the dialog and send this.
     Act(Act),
+    /// Close the dialog and open this page.
+    Open(Page),
+    /// Close the dialog and play what this library path holds (a song or an album).
+    Play(String),
 }
 
 impl Details {
     pub fn new(title: String, text: String, lead: Option<Lead>, act: Option<Act>) -> Details {
         let content = Content::with_text(&text);
-        Details { title, text, lead, act, content }
+        Details { title, text, lead, act, links: Links::default(), content }
+    }
+
+    /// The same dialog with a request's [`Links`].
+    pub fn with_links(mut self, links: Links) -> Details {
+        self.links = links;
+        self
     }
 
     /// Apply a message; `Some(out)` asks the app to copy the text or to send the action.
@@ -78,6 +105,8 @@ impl Details {
             Msg::Text(_) | Msg::Close => {}
             Msg::Copy => return Some(Out::Copy(self.text.clone())),
             Msg::Act => return self.act.clone().map(Out::Act),
+            Msg::Open(p) => return Some(Out::Open(p)),
+            Msg::Play => return self.links.play.clone().map(Out::Play),
         }
         None
     }
@@ -102,6 +131,28 @@ pub fn view(d: &Details) -> El<'_, Msg> {
         .height(Length::Fixed((lines * 19.0 + 24.0).clamp(60.0, 480.0)))
         .style(super::text_area::style);
     let mut body = column![].spacing(12).width(Length::Fill);
+    // what was asked for, as links: the album (or song's album) · the artist
+    let links: Vec<El<'_, Msg>> = [(&d.links.title, true), (&d.links.artist, false)]
+        .into_iter()
+        .filter_map(|(l, title)| l.as_ref().map(|(label, page)| (label.clone(), page.clone(), title)))
+        .map(|(label, page, title)| {
+            if title {
+                super::catalog::link(label, 14.0, Msg::Open(page))
+            } else {
+                super::catalog::muted_link(label, 14.0, Msg::Open(page))
+            }
+        })
+        .collect();
+    if !links.is_empty() {
+        let mut r = row![].spacing(6).align_y(Alignment::Center);
+        for (i, l) in links.into_iter().enumerate() {
+            if i > 0 {
+                r = r.push(super::small_muted("·"));
+            }
+            r = r.push(l);
+        }
+        body = body.push(r);
+    }
     if let Some(l) = &d.lead {
         let mut words = column![super::t(l.text.clone())
             .size(14)
@@ -120,12 +171,16 @@ pub fn view(d: &Details) -> El<'_, Msg> {
     }
     body = body.push(editor);
     // the action (Keep anyway) is the dialog's main button; Copy is then a plain one
+    let main = d.act.is_some() || d.links.play.is_some();
     let mut footer = row![
         btn("Close", Btn::Default, Some(Msg::Close)),
-        btn_icon(Icon::Copy, COPY, if d.act.is_some() { Btn::Default } else { Btn::Primary }, Some(Msg::Copy)),
+        btn_icon(Icon::Copy, COPY, if main { Btn::Default } else { Btn::Primary }, Some(Msg::Copy)),
     ]
     .spacing(10)
     .align_y(Alignment::Center);
+    if d.links.play.is_some() {
+        footer = footer.push(btn_icon(Icon::Play, "Play", Btn::Primary, Some(Msg::Play)));
+    }
     if let Some(a) = &d.act {
         footer = footer.push(btn(a.label.clone(), Btn::Primary, Some(Msg::Act)));
     }

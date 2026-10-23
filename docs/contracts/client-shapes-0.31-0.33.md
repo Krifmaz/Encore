@@ -958,6 +958,12 @@ their own device."
   (or whose task is gone: the list's `import_stalled`, with `import_moved_at`) offers "Import again" ("The import hasn't
   moved for 15 minutes"): `POST /api/requests/{id}/import-again` on an `importing` request stops it and imports the
   kept files at once (409 "It is being imported now" while it moves).
+- **Links and Play in a request's details** (Oct 23, the owner: "from the download i should be able to click on the
+  artist song or album or play it if its downloaded"): every row of `GET /api/requests` has `library_album_id` and
+  `library_track_id` – a completed album request's library album, a completed song request's library song and its
+  album; null otherwise (and while the music isn't in the library). The details (web dialog, desktop dialog, phone
+  sheet) show the title as a link (the library album, else `#/album/<mbid>` for an album, else a Discover search) and
+  the artist as one (`#/artist-name/<name>`), and Play when a link to the library is there.
 
 **Files** (Settings → Server → Files on the phone; System → Files on the web): "Files", "Server", "Browse, upload,
 move, rename and import in the library and download folders" (the entry's line), "The folders Encore may change.

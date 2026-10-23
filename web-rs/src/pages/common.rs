@@ -547,17 +547,96 @@ fn show_request_details(id: &str, reload: Rc<dyn Fn()>) {
     let text = request_text(&r, &app::info().s("version"), &ui::fmt::date);
     let what = request_what(&r);
     let title = if what.is_empty() { "Details" } else { &what };
-    let Some(a) = anyway(&r) else { return details::show(title, &text) };
-    let take = if may_fix() { anyway_button(&a, "btn primary") } else { String::new() };
-    let body = format!("{}{}", anyway_box_html(&r, &a), details::body_html(&text));
-    let footer = format!(r#"<button class="btn" data-close>Close</button><button class="btn" data-copy-text="{}">{}Copy</button>{take}"#, esc(&text), icon("copy"));
+    let offer = anyway(&r);
+    let take = match &offer { Some(a) if may_fix() => anyway_button(a, "btn primary"), _ => String::new() };
+    let play = if can_play(&r) { format!(r#"<button class="btn primary" data-act="play">{}Play</button>"#, icon("play")) } else { String::new() };
+    let body = format!("{}{}{}", request_links_html(&r), offer.as_ref().map(|a| anyway_box_html(&r, a)).unwrap_or_default(), details::body_html(&text));
+    let footer = format!(r#"<button class="btn" data-close>Close</button><button class="btn{}" data-copy-text="{}">{}Copy</button>{play}{take}"#,
+        if play.is_empty() && take.is_empty() { " primary" } else { "" }, esc(&text), icon("copy"));
     let m = Rc::new(ui::modal(ui::ModalOpts::new(&esc(title), &body).footer(&footer).wide(true)));
     let (el, id, m2) = (m.el.clone(), id.to_string(), m.clone());
     dom::on(&el, "click", move |e| {
         let Some(b) = dom::closest(e, "[data-act]") else { return };
         let act = dom::data(&b, "act");
+        if act == "play" {
+            m2.close();
+            if let Some(r) = drawn_row(&id) { play_request(&r); }
+            return;
+        }
         take_anyway(&id, &act, b, reload.clone(), Some(m2.clone()));
     });
+}
+
+/// Where a request's title goes in its details (the owner on Oct 23: "from the download i should be able to click on
+/// the artist song or album or play it if its downloaded"): the library album once it is there (a song's album), else
+/// the catalogue's album page for an album asked for by its release group, else a search for it.
+#[derive(Debug, PartialEq)]
+pub enum RequestTarget {
+    LibraryAlbum(String),
+    CatalogAlbum(String),
+    /// (what to search for, the search's type: `album` or `track`)
+    Search(String, String),
+}
+
+/// The request's title as a link; None for an artist (its name is the link), a link or a playlist.
+pub fn title_target(r: &Value) -> Option<RequestTarget> {
+    let kind = r.s("kind");
+    if kind != "album" && kind != "track" { return None; }
+    if r.truthy("library_album_id") { return Some(RequestTarget::LibraryAlbum(r.s("library_album_id"))); }
+    if kind == "album" && r.truthy("mbid") { return Some(RequestTarget::CatalogAlbum(r.s("mbid"))); }
+    let title = if kind == "album" { or(r, "title", "album") } else { r.s("title") };
+    if title.is_empty() { return None; }
+    let q = [r.s("artist"), title].into_iter().filter(|x| !x.is_empty()).collect::<Vec<_>>().join(" ");
+    Some(RequestTarget::Search(q, kind))
+}
+
+/// The artist a request's details link to ("" for a link or a playlist, which name none).
+pub fn artist_target(r: &Value) -> String {
+    if matches!(r.s("kind").as_str(), "url" | "playlist") { String::new() } else { r.s("artist") }
+}
+
+/// Play in a request's details: a finished album or song request whose music is in the library.
+pub fn can_play(r: &Value) -> bool {
+    r.s("status") == "completed" && (r.i("library_track_id") > 0 || (r.s("kind") == "album" && r.truthy("library_album_id")))
+}
+
+/// The top of a request's details: what was asked for as links – the album (or song's album) and the artist.
+fn request_links_html(r: &Value) -> String {
+    let enc = |s: &str| String::from(js_sys::encode_uri_component(s));
+    let artist = artist_target(r);
+    let artist_link = if artist.is_empty() { String::new() } else {
+        format!(r##"<a class="artist-link" data-close href="#/artist-name/{}">{}</a>"##, enc(&artist), esc(&artist))
+    };
+    let title = match title_target(r) {
+        Some(t) => {
+            let href = match &t {
+                RequestTarget::LibraryAlbum(id) => format!("#/library/album/{}", enc(id)),
+                RequestTarget::CatalogAlbum(rg) => format!("#/album/{}", enc(rg)),
+                RequestTarget::Search(q, kind) => format!("#/search?q={}&type={kind}", enc(q)),
+            };
+            let what = if r.s("kind") == "album" { or(r, "title", "album") } else { r.s("title") };
+            format!(r##"<a data-close href="{href}" style="font-weight:600">{}</a>"##, esc(&what))
+        }
+        None => String::new(),
+    };
+    let parts: Vec<String> = [title, artist_link].into_iter().filter(|x| !x.is_empty()).collect();
+    if parts.is_empty() { return String::new(); }
+    format!(r#"<div class="req-links" style="margin-bottom:10px">{}</div>"#, parts.join(r#" <span class="muted">·</span> "#))
+}
+
+/// Plays what a finished request brought into the library: the song, or the album from its first song.
+fn play_request(r: &Value) {
+    if r.i("library_track_id") > 0 {
+        let id = r.i("library_track_id");
+        dom::spawn(async move {
+            match api::get(&format!("/library/tracks/{id}")).await {
+                Ok(t) => player::play_queue(vec![t], 0, "list"),
+                Err(e) => toast(&e.message, "err"),
+            }
+        });
+    } else if r.truthy("library_album_id") {
+        pages::library::play_album(&r.s("library_album_id"), 0);
+    }
 }
 
 /// The top of a request's details when the audio check turned a download away: why, in full, and where it came from.
@@ -979,6 +1058,28 @@ mod tests {
         assert_eq!(Whose::default().query(), "");
         assert_eq!(Whose { mine: false, user: Some(12) }.query(), "&user=12");
         assert_eq!(Whose::mine().query(), "&mine=true");
+    }
+
+    #[test]
+    fn the_details_link_the_album_the_artist_and_play_what_is_downloaded() {
+        // the Love Buzz card of the Oct 23 screenshot: queued, asked for by its release group
+        let queued = json!({ "kind": "album", "artist": "Nirvana", "title": "Love Buzz", "mbid": "rg-1", "status": "queued" });
+        assert_eq!(title_target(&queued), Some(RequestTarget::CatalogAlbum("rg-1".into())));
+        assert_eq!(artist_target(&queued), "Nirvana");
+        assert!(!can_play(&queued));
+        let done = json!({ "kind": "album", "artist": "Nirvana", "title": "Love Buzz", "mbid": "rg-1", "status": "completed", "library_album_id": "abc", "library_track_id": null });
+        assert_eq!(title_target(&done), Some(RequestTarget::LibraryAlbum("abc".into())));
+        assert!(can_play(&done));
+        let song = json!({ "kind": "track", "artist": "Nirvana", "title": "Blew", "status": "failed" });
+        assert_eq!(title_target(&song), Some(RequestTarget::Search("Nirvana Blew".into(), "track".into())));
+        let song_done = json!({ "kind": "track", "artist": "Nirvana", "title": "Blew", "status": "completed", "library_album_id": "x", "library_track_id": 12 });
+        assert_eq!(title_target(&song_done), Some(RequestTarget::LibraryAlbum("x".into())));
+        assert!(can_play(&song_done));
+        // finished, but no longer in the library: nothing to play
+        assert!(!can_play(&json!({ "kind": "track", "title": "Blew", "status": "completed", "library_track_id": null })));
+        let link = json!({ "kind": "url", "url": "https://example.com/a", "artist": "x", "status": "completed" });
+        assert_eq!(title_target(&link), None);
+        assert_eq!(artist_target(&link), "");
     }
 
     #[test]

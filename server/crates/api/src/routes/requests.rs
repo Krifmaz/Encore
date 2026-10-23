@@ -123,8 +123,11 @@ async fn users(State(st): State<AppState>, Admin(_): Admin) -> ApiResult<Json<Va
 /// `line`, `remote_queue`, `stalled_since`, `pressed`; a request waiting in a source's line reads where it
 /// stands, "2nd in line for Deezer", as its message) and an import that hasn't moved for 15 minutes
 /// ([`worker::stall::row_fields`]: `import_stalled`, `import_moved_at`). Other users than admins see no server folders: a wait for
-/// the storage in plain words.
+/// the storage in plain words. A finished album or song request also names its library copy
+/// ([`library_links`]: `library_album_id`, `library_track_id`), so the details can open and play it.
 fn list_rows(st: &AppState, rows: Vec<Row>, admin: bool) -> Vec<Value> {
+    let mut rows = rows;
+    library_links(st, &mut rows);
     rows.into_iter().map(|mut r| {
         let d: Value = serde_json::from_str(&r.s("detail")).unwrap_or(json!({}));
         r.remove("detail");
@@ -167,6 +170,37 @@ fn list_rows(st: &AppState, rows: Vec<Row>, admin: bool) -> Vec<Value> {
         r.extend(now_fields);
         Value::Object(r)
     }).collect()
+}
+
+/// The library copy of each completed album or song request (one batch per kind): `library_album_id` (the
+/// album, or the song's album) and `library_track_id` (songs). Null while it isn't in the library, and on every
+/// other kind and status.
+fn library_links(st: &AppState, rows: &mut [Row]) {
+    let done = |r: &Row, kind: &str| r.s("status") == "completed" && r.s("kind") == kind;
+    let albums: Vec<usize> = (0..rows.len()).filter(|i| done(&rows[*i], "album")).collect();
+    let songs: Vec<usize> = (0..rows.len()).filter(|i| done(&rows[*i], "track")).collect();
+    let keys: Vec<(String, String, String)> = albums.iter().map(|i| {
+        let r = &rows[*i];
+        // the worker's `album_title`: the album, else the title
+        let title = if r.s("album").is_empty() { r.s("title") } else { r.s("album") };
+        (r.s("mbid"), r.s("artist"), title)
+    }).collect();
+    let found = if keys.is_empty() { vec![] } else { encore_library::lookup::album_ids_for(&st.db, &keys) };
+    let mut links: Vec<(usize, Value, Value)> = albums.into_iter().zip(found).map(|(i, a)| (i, json!(a), Value::Null)).collect();
+    let keys: Vec<(String, String, String)> = songs.iter().map(|i| (rows[*i].s("mbid"), rows[*i].s("artist"), rows[*i].s("title"))).collect();
+    let found = if keys.is_empty() { vec![] } else { encore_library::lookup::find_tracks(&st.db, &keys) };
+    links.extend(songs.into_iter().zip(found).map(|(i, t)| match t {
+        Some(t) => (i, json!(t.s("album_id")), json!(t.i("id"))),
+        None => (i, Value::Null, Value::Null),
+    }));
+    for r in rows.iter_mut() {
+        r.insert("library_album_id".into(), Value::Null);
+        r.insert("library_track_id".into(), Value::Null);
+    }
+    for (i, album, track) in links {
+        rows[i].insert("library_album_id".into(), album);
+        rows[i].insert("library_track_id".into(), track);
+    }
 }
 
 async fn create(State(st): State<AppState>, User(u): User, Json(b): Json<NewRequest>) -> ApiResult<Json<Value>> {

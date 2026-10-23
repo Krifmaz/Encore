@@ -18,6 +18,17 @@ import app.encore.android.data.repo.SlskTransfer
 import app.encore.android.data.repo.StorageHealth
 import app.encore.android.data.repo.statusLabel
 
+/**
+ * Where a request's title goes in its details sheet (the owner on Oct 23: "from the download i should be able to click
+ * on the artist song or album or play it if its downloaded"): the library album once it is there, else the
+ * catalogue's album page for an album asked for by its release group, else a Discover search for it.
+ */
+sealed interface RequestTarget {
+    data class LibraryAlbum(val id: String) : RequestTarget
+    data class CatalogAlbum(val rgid: String) : RequestTarget
+    data class Search(val query: String, val type: String) : RequestTarget
+}
+
 /** One line of a request's log as the details sheet shows it: the source in plain words (or "") and what happened. */
 data class LogEntry(val source: String, val text: String)
 
@@ -69,6 +80,23 @@ data class RequestDetails(
  * `clear_menu`, `retry_failed`; requests.rs; download.rs). Pure, so the unit tests check the words and the gates.
  */
 object RequestRules {
+    /** The request's title as a link ([RequestTarget]); null for an artist (its name is the link), a link or a playlist. */
+    fun titleTarget(r: RequestRow): RequestTarget? {
+        if (r.kind != "album" && r.kind != "track") return null
+        if (r.libraryAlbumId.isNotEmpty()) return RequestTarget.LibraryAlbum(r.libraryAlbumId)
+        if (r.kind == "album" && r.mbid.isNotEmpty()) return RequestTarget.CatalogAlbum(r.mbid)
+        val title = r.what
+        if (title.isEmpty()) return null
+        return RequestTarget.Search(listOf(r.artist, title).filter { it.isNotEmpty() }.joinToString(" "), r.kind)
+    }
+
+    /** The artist the details sheet links to ("" for a link or a playlist, which name none). */
+    fun artistTarget(r: RequestRow): String = if (r.kind == "url" || r.kind == "playlist") "" else r.artist
+
+    /** Play in the details sheet: a finished album or song request whose music is in the library. */
+    fun canPlay(r: RequestRow): Boolean =
+        r.status == "completed" && (r.libraryTrackId > 0L || (r.kind == "album" && r.libraryAlbumId.isNotEmpty()))
+
     /**
      * The worker's source ids (log lines start with them) in plain words; anything else is shown as it is. `ytdlp`
      * fetches YouTube Music searches and every direct link (YouTube, SoundCloud, Bandcamp…), so it keeps the name

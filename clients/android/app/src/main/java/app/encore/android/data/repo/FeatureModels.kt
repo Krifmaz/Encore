@@ -647,6 +647,10 @@ data class RequestRow(
     @SerialName("import_stalled") val importStalled: LBool = false,
     /** When an import last moved (unix seconds; 0 when the request isn't importing). */
     @SerialName("import_moved_at") val importMovedAt: LDouble = 0.0,
+    /** A finished album or song request's library album (the song's album for a song); "" while it isn't there. */
+    @SerialName("library_album_id") val libraryAlbumId: LString = "",
+    /** A finished song request's library song; 0 while it isn't there (and on every other kind). */
+    @SerialName("library_track_id") val libraryTrackId: LLong = 0L,
 ) : Checked<RequestRow> {
     val isActive: Boolean get() = status in ACTIVE_STATUSES
 

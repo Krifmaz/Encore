@@ -28,7 +28,8 @@ use super::{
 };
 use crate::api::ApiError;
 use crate::fmt;
-use crate::pages::Ctx;
+use super::details::Links;
+use crate::pages::{Ctx, Page};
 use crate::theme::{self, Badge, Btn};
 use iced::widget::{button, column, container, image, progress_bar, row, tooltip};
 use iced::{Alignment, ContentFit, Length, Point, Task};
@@ -89,6 +90,78 @@ pub fn can_retry(r: &Value, admin: bool, fix: bool) -> bool {
 /// What Cancel and Remove from list say first when a request keeps downloaded files (the web's
 /// words): they go with it, and Import again is gone.
 pub const KEPT_FILES_LOST: &str = "Its downloaded files have not been imported yet and can't be imported after this.";
+
+/// Where a request's title goes in its details: the library album once it is there (a song's
+/// album), else the catalogue's album page for an album asked for by its release group, else
+/// Discover searching for it; None for an artist (its name is the link), a link or a playlist.
+pub fn title_page(r: &Value) -> Option<Page> {
+    let kind = fmt::s(r, "kind");
+    if kind != "album" && kind != "track" {
+        return None;
+    }
+    if fmt::truthy(r, "library_album_id") {
+        return Some(Page::LibraryAlbum(fmt::s(r, "library_album_id")));
+    }
+    if kind == "album" && fmt::truthy(r, "mbid") {
+        return Some(Page::Album(fmt::s(r, "mbid")));
+    }
+    let title = asked_title(r);
+    if title.is_empty() {
+        return None;
+    }
+    let q = [fmt::s(r, "artist"), title].into_iter().filter(|x| !x.is_empty()).collect::<Vec<_>>().join(" ");
+    Some(Page::Search { q })
+}
+
+/// The artist a request's details link to (None for a link or a playlist, which name none).
+pub fn artist_page(r: &Value) -> Option<(String, Page)> {
+    let artist = fmt::s(r, "artist");
+    (!artist.is_empty() && !matches!(fmt::s(r, "kind").as_str(), "url" | "playlist"))
+        .then(|| (artist.clone(), Page::ArtistName(artist)))
+}
+
+/// What Play in a request's details plays: a finished song request's library song, a finished
+/// album request's library album; None while it isn't in the library.
+pub fn play_path(r: &Value) -> Option<String> {
+    if fmt::s(r, "status") != "completed" {
+        return None;
+    }
+    let track = r["library_track_id"].as_i64().unwrap_or(0);
+    if track > 0 {
+        return Some(format!("/library/tracks/{track}"));
+    }
+    (fmt::s(r, "kind") == "album" && fmt::truthy(r, "library_album_id")).then(|| format!("/library/albums/{}", fmt::s(r, "library_album_id")))
+}
+
+/// The album or song a request asked for, without its artist.
+fn asked_title(r: &Value) -> String {
+    if fmt::s(r, "kind") == "album" { or(r, "title", "album") } else { fmt::s(r, "title") }
+}
+
+/// A request's details links (the owner on Oct 23: "from the download i should be able to click
+/// on the artist song or album or play it if its downloaded").
+pub fn links(r: &Value) -> Links {
+    let title = if fmt::s(r, "kind") == "artist" { artist_page(r) } else { title_page(r).map(|p| (asked_title(r), p)) };
+    let artist = if fmt::s(r, "kind") == "artist" { None } else { artist_page(r) };
+    Links { title, artist, play: play_path(r) }
+}
+
+/// The songs a Play answer holds: an album's (`tracks`, each with the album's id) or the one song.
+pub fn playable(v: &Value) -> Vec<Value> {
+    if v.get("tracks").is_some() {
+        let id = fmt::s(v, "id");
+        return fmt::items(&v["tracks"])
+            .into_iter()
+            .map(|mut t| {
+                if !fmt::truthy(&t, "album_id") && !id.is_empty() {
+                    t["album_id"] = Value::String(id.clone());
+                }
+                t
+            })
+            .collect();
+    }
+    if v.get("id").is_some_and(|i| !i.is_null()) { vec![v.clone()] } else { vec![] }
+}
 
 /// The candidate being fetched, as the web's details say it: "from alice: Illuminate EP (FLAC,
 /// 4 files)".
@@ -1241,7 +1314,8 @@ pub fn update(l: &mut List, msg: Msg, ctx: &mut Ctx) -> Task<Msg> {
                 let act = offer
                     .filter(|_| may_fix(ctx.is_admin(), ctx.session.perm("fix")))
                     .map(|a| a.act(id));
-                ctx.details_with(if title.is_empty() { "Details".to_string() } else { title }, text, lead, act);
+                let links = links(r);
+                ctx.request_details(if title.is_empty() { "Details".to_string() } else { title }, text, lead, act, links);
             }
         }
         Msg::Reload => return l.load(ctx),
@@ -1657,6 +1731,29 @@ pub fn overlay<'a>(l: &'a List, ctx: &Ctx<'a>) -> Option<El<'a, Msg>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_details_link_the_album_the_artist_and_play_what_is_downloaded() {
+        // the Love Buzz card of the Oct 23 screenshot: queued, asked for by its release group
+        let queued = json!({ "kind": "album", "artist": "Nirvana", "title": "Love Buzz", "mbid": "rg-1", "status": "queued" });
+        let l = links(&queued);
+        assert_eq!(l.title, Some(("Love Buzz".into(), Page::Album("rg-1".into()))));
+        assert_eq!(l.artist, Some(("Nirvana".into(), Page::ArtistName("Nirvana".into()))));
+        assert_eq!(l.play, None);
+        let done = json!({ "kind": "album", "artist": "Nirvana", "title": "Love Buzz", "status": "completed", "library_album_id": "abc", "library_track_id": null });
+        assert_eq!(links(&done).title, Some(("Love Buzz".into(), Page::LibraryAlbum("abc".into()))));
+        assert_eq!(links(&done).play.as_deref(), Some("/library/albums/abc"));
+        let song = json!({ "kind": "track", "artist": "Nirvana", "title": "Blew", "status": "failed" });
+        assert_eq!(title_page(&song), Some(Page::Search { q: "Nirvana Blew".into() }));
+        let song_done = json!({ "kind": "track", "artist": "Nirvana", "title": "Blew", "status": "completed", "library_album_id": "x", "library_track_id": 12 });
+        assert_eq!(links(&song_done).play.as_deref(), Some("/library/tracks/12"));
+        assert_eq!(play_path(&json!({ "kind": "track", "status": "completed", "library_track_id": null })), None);
+        let link = json!({ "kind": "url", "url": "https://example.com/a", "artist": "x", "status": "completed" });
+        assert_eq!(links(&link), Links::default());
+        // an album answer plays its songs with the album's id; a song answer plays the song
+        assert_eq!(playable(&json!({ "id": "abc", "tracks": [{ "id": 1 }] })), vec![json!({ "id": 1, "album_id": "abc" })]);
+        assert_eq!(playable(&json!({ "id": 12, "title": "Blew" })).len(), 1);
+    }
 
     #[test]
     fn clear_waiting_asks_with_the_count_and_says_what_it_did() {
