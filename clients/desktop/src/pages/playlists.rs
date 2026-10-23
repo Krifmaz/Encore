@@ -220,6 +220,9 @@ pub enum ImportMsg {
     Mode(String),
     Link(String),
     Lines(text_editor::Action),
+    /// "Choose a .txt file": its lines go into the list as if they were pasted.
+    PickFile,
+    Picked(Option<String>),
     Name(String),
     Follow(bool),
     RequestMissing(bool),
@@ -248,6 +251,24 @@ pub fn import_update(imp: &mut Import, msg: ImportMsg, ctx: &mut Ctx) -> (Task<I
         ImportMsg::Mode(m) => imp.mode = m,
         ImportMsg::Link(s) => imp.link = s,
         ImportMsg::Lines(a) => imp.lines.perform(a),
+        ImportMsg::PickFile => {
+            return (
+                Task::perform(
+                    async move {
+                        let f = rfd::AsyncFileDialog::new()
+                            .set_title("Choose a list")
+                            .add_filter("Text", &["txt"])
+                            .pick_file()
+                            .await?;
+                        Some(String::from_utf8_lossy(&f.read().await).into_owned())
+                    },
+                    ImportMsg::Picked,
+                ),
+                None,
+            );
+        }
+        ImportMsg::Picked(Some(t)) => imp.lines = text_editor::Content::with_text(&t),
+        ImportMsg::Picked(None) => {}
         ImportMsg::Name(s) => imp.name = s,
         ImportMsg::Follow(b) => imp.follow = b,
         ImportMsg::RequestMissing(b) => imp.request_missing = b,
@@ -389,6 +410,7 @@ fn import_body<'a>(imp: &'a Import) -> El<'a, ImportMsg> {
         );
     } else {
         col = col.push(text_area(&imp.lines, "One per line:  Artist - Title", 8, ImportMsg::Lines));
+        col = col.push(btn_icon(Icon::Plus, "Choose a .txt file", Btn::Default, Some(ImportMsg::PickFile)));
     }
     let mut opts = row![].spacing(14).align_y(Alignment::Center);
     if !imp.has_into() {

@@ -9,7 +9,8 @@ use serde_json::{json, Value};
 use std::cell::RefCell;
 use std::future::Future;
 use std::rc::Rc;
-use web_sys::Element;
+use wasm_bindgen::JsCast;
+use web_sys::{Element, HtmlInputElement};
 
 /// `SRC[k]`: the display name of a playlist source.
 fn src_name(k: &str) -> Option<&'static str> {
@@ -367,7 +368,8 @@ pub fn import_modal(url: &str, into: Option<i64>) {
         &format!(r#"<div class="tabs" id="imp-tabs"><button data-m="url" class="active">From a link</button><button data-m="text">Paste a list</button></div>
       <div class="mt" id="imp-url"><input class="input" id="imp-link" value="{url}" placeholder="YouTube Music, Spotify, Deezer, Tidal, Apple Music, Amazon Music, Qobuz, YouTube (Music), SoundCloud, Bandcamp, ListenBrainz…">
         <p class="small faint" style="margin:6px 0 0">Connect Spotify/Tidal on the Connections page to import private playlists and Liked Songs (e.g. <span class="mono">https://music.youtube.com/playlist?list=LM</span> or <span class="mono">https://open.spotify.com/collection/tracks</span>). Amazon Music playlists and albums import from their public share links.</p></div>
-      <div class="mt hidden" id="imp-text"><textarea class="input" id="imp-lines" rows="8" placeholder="One per line:  Artist - Title"></textarea></div>
+      <div class="mt hidden" id="imp-text"><textarea class="input" id="imp-lines" rows="8" placeholder="One per line:  Artist - Title"></textarea>
+        <label class="btn sm mt">{file}Choose a .txt file<input type="file" id="imp-file" accept=".txt,text/plain" hidden></label></div>
       <div class="row wrap mt">
         {name_follow}
         <label class="switch"><input type="checkbox" id="imp-req"><i></i>Download missing tracks</label>
@@ -381,6 +383,7 @@ pub fn import_modal(url: &str, into: Option<i64>) {
             name_follow = if has_into { "" } else { r#"<input class="input" id="imp-name" placeholder="Playlist name (optional)" style="max-width:280px">
         <label class="switch"><input type="checkbox" id="imp-follow"><i></i>Keep following (pull new tracks)</label>"# },
             search = icon("search"),
+            file = icon("plus"),
         ),
     )
     .wide(true)
@@ -396,6 +399,20 @@ pub fn import_modal(url: &str, into: Option<i64>) {
             if let Some(u) = m2.qs("#imp-url") { dom::toggle_class(&u, "hidden", md != "url"); }
             if let Some(t) = m2.qs("#imp-text") { dom::toggle_class(&t, "hidden", md != "text"); }
             if let Some(l) = m2.qs("#imp-follow").and_then(|f| dom::closest_of(&f, "label")) { dom::toggle_class(&l, "hidden", md != "url"); }
+        });
+    }
+    // a .txt file fills the list as if it was pasted
+    if let Some(f) = m.qs("#imp-file") {
+        let m2 = m.clone();
+        dom::on(&f, "change", move |e| {
+            let Some(file) = dom::target_el(e).and_then(|t| t.dyn_into::<HtmlInputElement>().ok()).and_then(|i| i.files()).and_then(|l| l.get(0)) else { return };
+            let m3 = m2.clone();
+            dom::spawn(async move {
+                match wasm_bindgen_futures::JsFuture::from(file.text()).await.ok().and_then(|t| t.as_string()) {
+                    Some(t) => { if let Some(l) = m3.qs("#imp-lines") { dom::set_value(&l, &t); } }
+                    None => toast("Could not read that file", "err"),
+                }
+            });
         });
     }
     let body: Rc<dyn Fn() -> Value> = {

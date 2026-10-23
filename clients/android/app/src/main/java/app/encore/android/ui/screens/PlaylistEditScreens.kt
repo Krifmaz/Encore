@@ -1,5 +1,7 @@
 package app.encore.android.ui.screens
 
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -341,6 +343,18 @@ fun PlaylistImportScreen(nav: Nav, into: Long?, startUrl: String = "", startRequ
     var text by remember { mutableStateOf("") }
     var name by remember { mutableStateOf("") }
     var follow by remember { mutableStateOf(false) }
+    // "Choose a .txt file": its lines go into the list as if they were pasted
+    val resolver = LocalContext.current.contentResolver
+    val pickText = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
+        if (uri == null) return@rememberLauncherForActivityResult
+        scope.launch {
+            try {
+                text = withContext(Dispatchers.IO) { resolver.openInputStream(uri)?.use { it.readBytes().decodeToString() } ?: "" }
+            } catch (e: Exception) {
+                Toasts.show("Could not read that file", "err")
+            }
+        }
+    }
     val albumModes = listOf("" to "Albums: admin default", "song" to "Just the songs", "album" to "Whole albums")
     // the Requests link box's "Import as playlist" (the web Downloader's): missing songs requested, its album choice
     var requestMissing by remember { mutableStateOf(startRequestMissing) }
@@ -409,6 +423,7 @@ fun PlaylistImportScreen(nav: Nav, into: Long?, startUrl: String = "", startRequ
                         )
                     } else {
                         EncoreField(text, { text = it }, placeholder = "One per line:  Artist - Title", singleLine = false, minLines = 6, imeAction = ImeAction.Default, modifier = Modifier.fillMaxWidth())
+                        SmallButton("Choose a .txt file", iconRes = R.drawable.ic_upload, modifier = Modifier.padding(top = 8.dp)) { pickText.launch(arrayOf("text/plain")) }
                     }
                 }
             }
