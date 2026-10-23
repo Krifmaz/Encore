@@ -32,7 +32,11 @@ pub(super) fn transport() -> Option<(String, String)> {
         let r = st(|s| s.dsp_rate);
         return Some((format!("cadenza-{}", js_num(r)), format!("Upsampled on the server by Cadenza to 24-bit / {} kHz (lossless FLAC){}", khz(r), dsp_note(&dsp_state(t.i("id"))))));
     }
-    if st(|s| s.transcoded) { return Some(("flac".into(), format!("Converted to FLAC by the server (lossless) – browsers can't play {}", t.s("format").to_uppercase()))); }
+    if st(|s| s.transcoded) {
+        // Safari gets AAC instead of a FLAC pipe it can't start (load.rs: detect_flac_pipe)
+        if !convert_is_flac() { return Some(("aac-320".into(), format!("Converted to {} by the server (lossy) – Safari can't play {} or a FLAC stream", convert_name(), t.s("format").to_uppercase()))); }
+        return Some(("flac".into(), format!("Converted to FLAC by the server (lossless) – browsers can't play {}", t.s("format").to_uppercase())));
+    }
     Some(("original".into(), "The original file, byte for byte – nothing was converted or resampled on the way".into()))
 }
 

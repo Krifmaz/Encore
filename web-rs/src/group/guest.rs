@@ -286,16 +286,18 @@ fn open_events(id: &str) {
 /// Where this page is in the song (a server-made stream's offset included).
 fn position(g: &Guest) -> f64 { g.offset + g.audio.current_time() }
 
-/// Whether this browser plays entry `e`'s file itself (else the server converts it to FLAC: a server-made stream).
+/// Whether this browser plays entry `e`'s file itself (else the server converts it, to FLAC or in Safari to AAC: a
+/// server-made stream).
 fn whole_file(e: &Value) -> bool { crate::player::can_play(&e.s("format")) }
 
 /// The URL of entry `e` from `at` seconds in group `group` (its id, URL-encoded): the original file where this browser
-/// plays its format, else FLAC made by the server (asked for at `t=`, as it can't seek in itself); and where its clock
-/// starts.
+/// plays its format, else a conversion made by the server ([`crate::player::convert_query`]: FLAC, AAC in Safari;
+/// asked for at `t=`, as it can't seek in itself); and where its clock starts.
 fn url_of(group: &str, e: &Value, at: f64) -> (String, f64) {
     let mut url = format!("/api/group/{group}/tracks/{}/stream", e.s("id"));
     if whole_file(e) { return (url, 0.0); }
-    url.push_str("?transcode=1");
+    url.push('?');
+    url.push_str(&crate::player::convert_query());
     if at > 0.5 { url.push_str(&format!("&t={}", crate::num::to_fixed1(at))); return (url, at); }
     (url, 0.0)
 }

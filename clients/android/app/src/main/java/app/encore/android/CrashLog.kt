@@ -34,9 +34,10 @@ import java.util.TimeZone
  * - An uncaught exception on any thread writes a report (stack, app version, device, OS and the last 200 lines
  *   of [log]) to filesDir/crashes/<ts>.json before the previous handler (the system's) ends the process.
  * - On the next start, crashes the system saw but the app couldn't catch (native crashes with their tombstone,
- *   ANRs with their trace, and every close while in use or playing: for memory, by a signal, for an update of the
- *   app or of a part it uses, by the user or by Android for another reason) are read from ApplicationExitInfo
- *   (Android 11+) into the same folder.
+ *   ANRs with their trace, and every close while in use or playing: for memory, by a signal, for an update of a
+ *   part it uses, by the user or by Android for another reason) are read from ApplicationExitInfo (Android 11+)
+ *   into the same folder. Android stopping the app to install its own update is not a crash and files nothing
+ *   ([CrashRules]).
  * - [exportText] writes the phone's own crash log as a .txt to share (This device → App crashes), without the
  *   server: Android's exit records, the reports kept here and the recent log.
  * - Every report is sent to POST /api/diagnostics/client-crash (Diagnostics → App crashes for admins) and deleted
@@ -215,6 +216,8 @@ object CrashLog {
         for (e in exits) {
             if (e.timestamp <= seen) continue
             newest = maxOf(newest, e.timestamp)
+            // Android stopping the app to install an update is not a crash ([CrashRules]); the record stays in the log
+            if (CrashRules.isUpdateKill(e.reason, e.description)) continue
             val kind = when (e.reason) {
                 ApplicationExitInfo.REASON_CRASH_NATIVE -> "native"
                 ApplicationExitInfo.REASON_ANR -> "anr"
@@ -256,14 +259,11 @@ object CrashLog {
      */
     @RequiresApi(Build.VERSION_CODES.R)
     private fun inUseKind(reason: Int): String = when (reason) {
-        REASON_PACKAGE_UPDATED, ApplicationExitInfo.REASON_DEPENDENCY_DIED, REASON_PACKAGE_STATE_CHANGE -> "updated"
+        // an update of the app itself never gets here ([CrashRules.isUpdateKill]); a part it uses (WebView) still does
+        ApplicationExitInfo.REASON_DEPENDENCY_DIED -> "updated"
         ApplicationExitInfo.REASON_USER_REQUESTED, ApplicationExitInfo.REASON_USER_STOPPED -> "stopped"
         else -> "closed"
     }
-
-    /** ApplicationExitInfo.REASON_PACKAGE_STATE_CHANGE and REASON_PACKAGE_UPDATED (Android 14), by their values. */
-    private const val REASON_PACKAGE_STATE_CHANGE = 15
-    private const val REASON_PACKAGE_UPDATED = 16
 
     /** Android's name of an exit reason, for the reports and the crash log. */
     private fun reasonName(reason: Int): String = when (reason) {

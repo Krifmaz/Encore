@@ -15,6 +15,7 @@ import androidx.compose.animation.core.MutableTransitionState
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.slideInVertically
 import androidx.compose.foundation.background
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -88,7 +89,7 @@ import java.util.concurrent.atomic.AtomicLong
  *
  * `kind` is the web's type: "info" (the default, accent border), "ok" (green), "err" (red), "warn" (amber). A toast
  * goes after about four seconds; an error stays until its Close and has **Copy** (the whole message, for a bug
- * report), and new toasts stack below it ([ToastRules]).
+ * report; a tap on its text copies it too), and new toasts stack below it ([ToastRules]).
  */
 object Toasts {
     /** The words when the clipboard refuses (the toast says what to do instead, so it has no Copy). */
@@ -356,8 +357,9 @@ private fun ToastCard(t: ToastItem) {
             verticalAlignment = Alignment.CenterVertically,
         ) {
             Box(Modifier.width(4.dp).height(22.dp).clip(RoundedCornerShape(2.dp)).background(edge))
-            // the whole message; a long one scrolls
-            Box(Modifier.weight(1f).padding(start = 12.dp, top = 8.dp, bottom = 8.dp).heightIn(max = 160.dp).verticalScroll(rememberScrollState())) {
+            // the whole message; a long one scrolls. An error's text copies with a tap too, not only with Copy
+            val copyTap = if (t.stays) Modifier.clickable(onClickLabel = "Copy") { copyToClipboard(context, t.message) } else Modifier
+            Box(Modifier.weight(1f).then(copyTap).padding(start = 12.dp, top = 8.dp, bottom = 8.dp).heightIn(max = 160.dp).verticalScroll(rememberScrollState())) {
                 Text(t.message, style = MaterialTheme.typography.bodyMedium)
             }
             if (act != null && t.action.isNotEmpty()) {

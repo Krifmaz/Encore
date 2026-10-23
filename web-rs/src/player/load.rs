@@ -9,6 +9,8 @@ thread_local! {
     static PLAYABLE: RefCell<HashMap<String, bool>> = RefCell::new(HashMap::new());
     /// the lighter streams' codec: AAC where the browser decodes it, Opus elsewhere (Chromium builds, Firefox on Linux)
     static LOSSY: String = detect_lossy();
+    /// whether a conversion here is the lossless FLAC pipe (false in Apple's WebKit, see [`detect_flac_pipe`])
+    static FLAC_PIPE: bool = detect_flac_pipe();
     /// GET /api/playback/dsp: is server-side Cadenza processing on, and may this account use it
     static DSP_INFO: RefCell<Option<Value>> = const { RefCell::new(None) };
     /// a processed stream failed this session: play originals until the page reloads
@@ -24,6 +26,35 @@ pub(super) fn lossy_codec() -> String { LOSSY.with(|l| l.clone()) }
 
 fn detect_lossy() -> String {
     if can_play_type("audio/aac") { "aac".into() } else if can_play_type("audio/ogg; codecs=opus") { "opus".into() } else { "aac".into() }
+}
+
+/// The bitrate of the AAC stream that stands in for the FLAC conversion where a FLAC pipe doesn't play.
+const CONVERT_AAC_KBPS: u32 = 320;
+
+/// Whether this browser plays the FLAC the server makes on the fly (a stream without a length that can't answer
+/// Range requests). Safari's media stack (desktop Safari and every iPhone and iPad browser, all Apple's WebKit)
+/// plays FLAC files but never starts such a pipe, so an Opus or WavPack file went silent there (bug report
+/// "Opus files", iPhone Safari): there a conversion is AAC at [`CONVERT_AAC_KBPS`], which Safari streams.
+/// Apple's WebKit is told by `navigator.vendor` ("Apple Computer, Inc."); Chromium says "Google Inc.", Firefox "".
+fn detect_flac_pipe() -> bool {
+    // the native unit tests have no browser to ask: they see the FLAC answer
+    if cfg!(not(target_arch = "wasm32")) { return true; }
+    let vendor = js_sys::Reflect::get(&dom::window().navigator(), &"vendor".into()).ok().and_then(|v| v.as_string()).unwrap_or_default();
+    !vendor.starts_with("Apple")
+}
+
+/// Whether a conversion in this browser is lossless FLAC (else AAC at [`CONVERT_AAC_KBPS`], Safari).
+pub(crate) fn convert_is_flac() -> bool { FLAC_PIPE.with(|f| *f) }
+
+/// The query that asks the server for a conversion of a file this browser can't play: `transcode=1` (FLAC), or
+/// in Safari `q=aac&kbps=320` (see [`detect_flac_pipe`]). Library and group-listen streams take the same query.
+pub(crate) fn convert_query() -> String {
+    if convert_is_flac() { "transcode=1".into() } else { format!("q=aac&kbps={CONVERT_AAC_KBPS}") }
+}
+
+/// What a conversion is called on the player bar and in the signal path: "FLAC" or "AAC 320k".
+pub(super) fn convert_name() -> String {
+    if convert_is_flac() { "FLAC".into() } else { format!("AAC {CONVERT_AAC_KBPS}k") }
 }
 
 pub(super) fn fetch_dsp() {
@@ -105,7 +136,8 @@ pub(super) fn stream_url(t: &Value, transcode: bool, rung: i64, dsp: bool, offse
         if p.truthy("dsp_filter") { q.push(format!("filter={}", String::from(js_sys::encode_uri_component(&p.s("dsp_filter"))))); }
         q.push(format!("dither={}", String::from(js_sys::encode_uri_component(&p.s("dsp_dither")))));
     }
-    else if transcode { q.push("transcode=1".into()); }
+    // FLAC, or AAC where a FLAC pipe doesn't play (Safari)
+    else if transcode { q.push(convert_query()); }
     if truthy_num(offset) { q.push(format!("t={}", to_fixed1(offset))); }
     format!("/api/library/tracks/{}/stream{}", t.s("id"), if q.is_empty() { String::new() } else { format!("?{}", q.join("&")) })
 }

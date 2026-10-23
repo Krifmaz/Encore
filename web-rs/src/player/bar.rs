@@ -137,7 +137,7 @@ pub(super) fn quality(t: &Value) -> String {
     let rung = st(|s| s.rung);
     if rung > 0 { return format!("{f} → {} {rung}k", lossy_codec().to_uppercase()); }
     if st(|s| s.dsp) { return format!("{f} → Cadenza {} kHz", khz(st(|s| s.dsp_rate))); }
-    if st(|s| s.transcoded) { format!("{f} → FLAC") }
+    if st(|s| s.transcoded) { format!("{f} → {}", convert_name()) }
     else { format!("{f}{}", if t.truthy("bitrate") { format!(" {}k", t.s("bitrate")) } else { String::new() }) }
 }
 fn quality_title(t: &Value) -> String {
@@ -147,7 +147,7 @@ fn quality_title(t: &Value) -> String {
     let rung = st(|s| s.rung);
     if rung > 0 { return if prefs().s("quality") == "saver" { "Data saver: a small 96 kbps stream".into() } else { format!("Adaptive quality: {rung} kbps while the connection can't keep up with the original") }; }
     if st(|s| s.dsp) { return "Upsampled on the server by Cadenza (lossless 24-bit FLAC)".into(); }
-    if st(|s| s.transcoded) { "Converted to FLAC for your browser (lossless)".into() } else { "Original file, no conversion".into() }
+    if st(|s| s.transcoded) { if convert_is_flac() { "Converted to FLAC for your browser (lossless)".into() } else { format!("Converted to {} for your browser (Safari doesn't play a FLAC stream)", convert_name()) } } else { "Original file, no conversion".into() }
 }
 
 /// `link ? (link.state?.duration || 0) : duration()`.
