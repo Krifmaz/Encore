@@ -39,7 +39,7 @@ listed_last = [
     "nzbget_password", "nzbget_category", "nzbget_download_path", "nzb_blackhole_watch", "nzb_blackhole_completed",
     "task_backup_enabled", "task_backup_minutes", "youtube_light_refresh", "release_types", "release_skip",
     "quality_check_on_import", "quality_min_lufs", "task_quality_enabled", "task_quality_minutes", "translator_model",
-    "tools_auto_translator", "translate_background",
+    "tools_auto_translator", "translate_background", "single_to_album",
 ]
 
 [sections.general]
@@ -416,7 +416,15 @@ options = [
     ["Covers", "Covers / Tributes"],
 ]
 full = true
-help = "A release with any ticked extra is left out. Instrumental, acoustic, sped up, karaoke and covers are read from the titles."
+help = "A release with any ticked extra is left out. Instrumental, acoustic, sped up, karaoke and covers are read from the titles. An artist can have their own: Release types on the artist’s page."
+
+[keys.single_to_album]
+env = "ENCORE_SINGLE_TO_ALBUM"
+default = true
+group = "releases"
+label = "Singles on an album: get the album"
+type = "bool"
+help = "A single whose song is on one of the artist’s studio albums is downloaded with that album instead of on its own (once, even when both are requested). Singles of songs on no album are downloaded as singles."
 
 # ---- Downloads → Qobuz / Tidal / Deezer (streamrip)
 

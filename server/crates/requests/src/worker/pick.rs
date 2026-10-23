@@ -57,6 +57,10 @@ pub(super) async fn start(st: &impl Ctx, r: &mut Req) -> anyhow::Result<()> {
         complete(st, r, "Already in library", &[], Value::Null).await;
         return Ok(());
     }
+    // a single whose song is on one of the artist's albums: that album instead
+    if kind == "album" && !lossless_only && !replacing && Box::pin(single_on_album(st, r)).await? {
+        return Ok(());
+    }
     if kind == "track" && !replacing && track_in_library(st, r).await {
         complete(st, r, "Already in library", &[], Value::Null).await;
         return Ok(());
@@ -473,9 +477,9 @@ pub(super) async fn expand_artist(st: &impl Ctx, r: &mut Req) -> anyhow::Result<
     // (while MusicBrainz's line is long the message says so: "Looking up discography – waiting for MusicBrainz …")
     let mbid = r.s("mbid");
     let art = with_steps(st, r.id, "searching", "Looking up discography", LOOKING, mb::artist(st, &mbid)).await?;
-    // the request's own boxes (Request discography panel), else Settings → Release types; the releases ticked
+    // the request's own boxes (Request discography panel), else the artist's own, else Settings → Release types; the releases ticked
     // in the dialog (`release_ids`) take the place of the filter altogether
-    let filter = encore_config::release_types::ReleaseFilter::from_value(&r.d["release_filter"], &encore_config::release_types::ReleaseFilter::from_cfg(st.cfg()));
+    let filter = encore_config::release_types::ReleaseFilter::from_value(&r.d["release_filter"], &encore_config::release_types::ReleaseFilter::for_artist(st.cfg(), &mbid));
     let only: Option<Vec<String>> = r.d["release_ids"].as_array().map(|a| a.iter().filter_map(|v| v.as_str().map(String::from)).collect());
 
     // the merged catalog: MusicBrainz plus the Deezer / Apple Music releases MusicBrainz doesn't list
@@ -501,7 +505,11 @@ pub(super) async fn expand_artist(st: &impl Ctx, r: &mut Req) -> anyhow::Result<
     let (mut n, mut n_ext) = (0, 0);
     for g in plan {
         let is_ext = g["ext"].is_object();
-        let detail = if is_ext { json!({ "ext": g["ext"] }) } else { json!({}) };
+        let mut detail = if is_ext { json!({ "ext": g["ext"] }) } else { json!({}) };
+        // its type, so a single whose song is on an album doesn't ask MusicBrainz again (single_on_album)
+        if !g["type"].as_str().unwrap_or("").is_empty() {
+            detail["type"] = json!(encore_config::release_types::primary(&g));
+        }
         let mbid = if is_ext { Value::Null } else { g["id"].clone() };
         let year = g["year"].as_str().filter(|y| !y.is_empty()).map(|y| json!(y)).unwrap_or(Value::Null);
         let id = st.db().execute("INSERT INTO requests (user_id, kind, mbid, artist, title, album, year, cover_url, status, detail, parent_id, created_at, updated_at)
@@ -527,9 +535,92 @@ pub(super) async fn expand_artist(st: &impl Ctx, r: &mut Req) -> anyhow::Result<
 /// Is the requested song (this version of it) in the library? The library's index of every song is kept
 /// while the songs are unchanged and built on the blocking pool when they changed (encore_library's `Songs`).
 pub(super) async fn track_in_library(st: &impl Ctx, r: &Req) -> bool {
-    let mbid = r.opt("mbid").or(r.d["recording"].as_str().map(String::from));
-    let want = encore_library::matcher::describe(&r.s("title"), &r.s("artist"), r.length(), r.d["isrc"].as_str(), mbid.as_deref());
+    // (a single's request is an album request: its mbid is the release group, its title the single's – the song's)
+    let (mbid, title) = if r.s("kind") == "album" {
+        (r.d["recording"].as_str().map(String::from), song_of_single(&r.album_title()))
+    } else {
+        (r.opt("mbid").or(r.d["recording"].as_str().map(String::from)), r.s("title"))
+    };
+    let want = encore_library::matcher::describe(&title, &r.s("artist"), r.length(), r.d["isrc"].as_str(), mbid.as_deref());
     st.library().songs.load(st.db()).await.find(&want).is_some()
+}
+
+/// The song a single is named after: its title without " - Single" ("Dreams - Single" → "Dreams").
+fn song_of_single(title: &str) -> String {
+    static SINGLE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"(?i)\s*(?:-\s*single|[\(\[]single[\)\]])\s*$").unwrap());
+    SINGLE.replace(title, "").trim().to_string()
+}
+
+/// A single whose song is on one of the artist's studio albums is had with that album (Settings → Release types →
+/// "Singles on an album"): the album request (one already there – the same discography's, say – or a new one),
+/// the single following it like a song follows its album, and done once the song is in the library. With the
+/// song in the library already (from its album) the single is done at once. A single of songs on no album, or
+/// one MusicBrainz can't tell about now, is downloaded as the single; so is one whose album came without its
+/// song ([`poll_album`] sets `no_album`).
+pub(super) async fn single_on_album(st: &impl Ctx, r: &mut Req) -> anyhow::Result<bool> {
+    if !st.cfg().bool("single_to_album") || r.d["no_album"].as_bool() == Some(true) || r.d["single_checked"].as_bool() == Some(true) {
+        return Ok(false);
+    }
+    let mbid = r.opt("mbid");
+    // the release's type: the discography's plan says it; else MusicBrainz's release group
+    let typ = match (r.d["type"].as_str(), &mbid) {
+        (Some(t), _) => t.to_string(),
+        (None, Some(m)) => match tokio::time::timeout(ALBUM_WAIT, mb::release_group(st, m)).await {
+            Ok(Ok(g)) => g["type"].as_str().unwrap_or("").to_string(),
+            _ => String::new(),
+        },
+        (None, None) => String::new(),
+    };
+    r.d["single_checked"] = json!(true);
+    if typ != "Single" {
+        upd(st, r, &[]);
+        return Ok(false);
+    }
+    let (artist, title) = (r.s("artist"), song_of_single(&r.album_title()));
+    if track_in_library(st, r).await {
+        complete(st, r, &format!("“{title}” is in the library already, on its album"), &[], Value::Null).await;
+        return Ok(true);
+    }
+    upd(st, r, &[("status", json!("searching")), ("message", json!(LOOKING_UP_ALBUM))]);
+    let lookup = async {
+        // the single's song: the track named like the single, else its first
+        let rid = match &mbid {
+            Some(m) => match mb::best_release_for_group(st, m, None).await? {
+                Some(rel) => {
+                    let tracks = mb::release(st, &rel).await?["tracks"].as_array().cloned().unwrap_or_default();
+                    let want = encore_library::matcher::describe(&title, &artist, None, None, None);
+                    tracks.iter().find(|t| encore_library::matcher::compare(&want, &encore_library::matcher::describe(t["title"].as_str().unwrap_or(""), &artist, None, None, None), false).matched)
+                        .or(tracks.first()).and_then(|t| t["recording_id"].as_str().map(String::from))
+                }
+                None => None,
+            },
+            None => encore_library::matcher::resolve_recording(st, &artist, &title, None, None).await?,
+        };
+        let alb = match &rid {
+            Some(id) => mb::album_for_recording(st, id, false).await?,
+            None => None,
+        };
+        anyhow::Ok((rid, alb))
+    };
+    let found = with_steps(st, r.id, "searching", LOOKING_UP_ALBUM_BASE, LOOKING_UP_ALBUM, mb::one_place_within(ALBUM_WAIT, ALBUM_WAIT, Box::pin(lookup))).await;
+    check(st, r.id)?;
+    match found {
+        Some(Ok((rid, alb))) => {
+            if let Some(rid) = rid {
+                r.d["recording"] = json!(rid);
+            }
+            if let Some(alb) = alb.filter(|a| a["id"].as_str() != mbid.as_deref()) {
+                if follow_album(st, r, &alb)?.is_some() {
+                    st.db().log("info", &format!("Single {}: its song is on the album “{}” – getting the album", r.label(), alb["title"].as_str().unwrap_or("")));
+                    return Ok(true);
+                }
+            }
+        }
+        Some(Err(e)) => log_push(r, format!("album lookup: {e} – the single is downloaded")),
+        None => log_push(r, "album lookup: MusicBrainz is busy – the single is downloaded".into()),
+    }
+    upd(st, r, &[]);
+    Ok(false)
 }
 
 /// The album lookup's words while it runs (and its base for what it waits for: "Looking up which album this
@@ -653,32 +744,6 @@ async fn deezer_album(st: &impl Ctx, isrc: &str, artist: &str, allow_ep: bool) -
     Some(json!({ "title": title, "artist": name, "type": typ, "year": year, "cover": cover, "ext": ext }))
 }
 
-/// An album request already there for this album, whichever way it was made: the same release group, the same
-/// Deezer album or barcode, or the same artist and title (edition notes aside: "Discovery" and "Discovery
-/// (Remastered)"). MusicBrainz's answer for one song and Deezer's for another song of the same album (while
-/// MusicBrainz was busy) used to make two album requests, and both downloaded.
-fn album_request_for(st: &impl Ctx, mbid: Option<&str>, artist: &str, title: &str, ext: &Value) -> anyhow::Result<Option<i64>> {
-    let deezer = ext["deezer"].as_i64().map(|d| d.to_string()).or_else(|| ext["deezer"].as_str().map(String::from)).filter(|d| !d.is_empty());
-    let upc = ext["upc"].as_str().filter(|u| !u.is_empty());
-    let rows = st.db().query("SELECT id, mbid, artist, title, album, detail FROM requests WHERE kind='album' AND status NOT IN ('failed','denied','cancelled')
-                              AND (mbid=? OR lower(artist)=lower(?) OR CAST(json_extract(detail, '$.ext.deezer') AS TEXT)=? OR json_extract(detail, '$.ext.upc')=?)
-                              ORDER BY id", p![mbid, artist, deezer, upc])?;
-    let same_ext = |row: &Row| {
-        let d: Value = serde_json::from_str(&row.s("detail")).unwrap_or(json!({}));
-        let theirs = d["ext"]["deezer"].as_i64().map(|x| x.to_string()).or_else(|| d["ext"]["deezer"].as_str().map(String::from));
-        (deezer.is_some() && theirs == deezer) || (upc.is_some() && d["ext"]["upc"].as_str() == upc)
-    };
-    let key = encore_library::catalog::title_key(title);
-    let same_name = |row: &Row| {
-        let theirs = Some(row.s("album")).filter(|a| !a.is_empty()).unwrap_or_else(|| row.s("title"));
-        !key.is_empty() && encore_library::catalog::title_key(&theirs) == key && encore_core::text::norm(&row.s("artist")) == encore_core::text::norm(artist)
-    };
-    let found = rows.iter().find(|row| mbid.is_some_and(|m| row.s("mbid") == m))
-        .or_else(|| rows.iter().find(|row| same_ext(row)))
-        .or_else(|| rows.iter().find(|row| same_name(row)));
-    Ok(found.map(|row| row.i("id")))
-}
-
 /// The whole album instead of the song: the album request (one that is already there, or a new one) and the
 /// song following it. `alb`: {title, artist, type, year, cover} with `id` (a MusicBrainz release group) or
 /// `ext` (the album only Deezer named). None: the album is in the library already (the song isn't on it in
@@ -695,7 +760,7 @@ fn follow_album(st: &impl Ctx, r: &mut Req, alb: &Value) -> anyhow::Result<Optio
         return Ok(None);
     }
     let typ = alb["type"].as_str().unwrap_or("album").to_lowercase();
-    let aid = match album_request_for(st, mbid, &artist, &title, &alb["ext"])? {
+    let aid = match crate::create::album_request_for(st, mbid, &artist, &title, &alb["ext"])? {
         Some(e) => e,
         None => {
             let t = now();

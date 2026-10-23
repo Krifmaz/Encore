@@ -228,3 +228,34 @@ fn a_finished_request_names_its_library_copy() {
     assert_eq!(r[&track]["library_track_id"], 5);
     assert!(r[&gone]["library_album_id"].is_null() && r[&gone]["library_track_id"].is_null());
 }
+
+/// The same song asked for another way – a .txt import line and a MusicBrainz request, "feat." and punctuation
+/// aside – is one request (409 with its id, so an import links to it); another version is another song. Albums:
+/// a Deezer copy and its MusicBrainz release group are one request, two MusicBrainz albums of one name two.
+#[test]
+fn the_same_song_or_album_by_other_names_is_one_request() {
+    let st = state("same-song");
+    let u = user(&st, "owner9", "admin");
+    let mb = NewRequest { kind: "track".into(), mbid: Some("aaaaaaaa-2222-3333-4444-555555555555".into()), artist: Some("Fleetwood Mac".into()),
+        title: Some("Don't Stop".into()), length: Some(193.0), ..Default::default() };
+    let first = create_request(&*st, &u, &mb, None, None).unwrap();
+    for (artist, title) in [("Fleetwood Mac", "Dont Stop"), ("Fleetwood Mac feat. Nobody", "Don't Stop (2004 Remaster)"), ("fleetwood mac", "DON'T STOP")] {
+        let txt = NewRequest { kind: "track".into(), artist: Some(artist.into()), title: Some(title.into()), ..Default::default() };
+        let e = create_request(&*st, &u, &txt, None, None).expect_err(title);
+        assert_eq!((e.status.as_u16(), e.extra.as_ref().unwrap()["id"].as_i64()), (409, Some(first)), "{title}");
+    }
+    for title in ["Don't Stop (Live)", "Don't Stop (Instrumental)", "Go Your Own Way"] {
+        let other = NewRequest { kind: "track".into(), artist: Some("Fleetwood Mac".into()), title: Some(title.into()), ..Default::default() };
+        create_request(&*st, &u, &other, None, None).expect(title);
+    }
+
+    let ext = NewRequest { kind: "album".into(), artist: Some("Fleetwood Mac".into()), title: Some("Rumours (Super Deluxe)".into()),
+        ext: Some(json!({ "deezer": 302127 })), ..Default::default() };
+    let dz = create_request(&*st, &u, &ext, None, None).unwrap();
+    let rumours = NewRequest { kind: "album".into(), mbid: Some("bbbbbbbb-2222-3333-4444-555555555555".into()), artist: Some("Fleetwood Mac".into()), title: Some("Rumours".into()), ..Default::default() };
+    let e = create_request(&*st, &u, &rumours, None, None).expect_err("the Deezer copy is requested");
+    assert_eq!(e.extra.as_ref().unwrap()["id"].as_i64(), Some(dz));
+    let weezer = |id: &str| NewRequest { kind: "album".into(), mbid: Some(format!("{id}-2222-3333-4444-555555555555")), artist: Some("Weezer".into()), title: Some("Weezer".into()), ..Default::default() };
+    create_request(&*st, &u, &weezer("cccccccc"), None, None).unwrap();
+    create_request(&*st, &u, &weezer("dddddddd"), None, None).expect("the Green Album is another album than the Blue");
+}

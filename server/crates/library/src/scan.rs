@@ -241,6 +241,14 @@ pub fn index_files_as(db: &Db, paths: &[String], added: Added) -> Indexed {
                 }
             }
         }
+        // a song the library has from MusicBrainz too: shown once (encore_library::twins)
+        if let Ok(f) = db.write_now(crate::twins::find_copies) {
+            for (from, to) in f.merged {
+                if out.albums.remove(&from) {
+                    out.albums.insert(to);
+                }
+            }
+        }
     }
     out
 }
@@ -467,6 +475,18 @@ impl Library {
                 }
                 Ok(_) => {}
                 Err(e) => tracing::warn!("scan: merging duplicate albums failed: {e}"),
+            }
+            // songs without MusicBrainz's tags that the library has from MusicBrainz: shown once (no file is touched)
+            match db2.write_now(crate::twins::find_copies) {
+                Ok(f) if f.changed > 0 || !f.merged.is_empty() => {
+                    if f.changed > 0 {
+                        db2.log("info", &format!("{} song{} without MusicBrainz tags matched a MusicBrainz song (shown once)", f.changed, if f.changed == 1 { "" } else { "s" }));
+                    }
+                    all.0.changed += f.changed + f.merged.len();
+                    all.0.albums.extend(f.merged.into_iter().map(|(_, to)| to));
+                }
+                Ok(_) => {}
+                Err(e) => tracing::warn!("scan: finding copies of songs failed: {e}"),
             }
             // the planner's statistics follow what the scan's queries wanted (cheap when there is nothing to do)
             db2.optimize();

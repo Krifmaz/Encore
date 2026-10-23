@@ -717,6 +717,67 @@ async fn discography_dialog(a: &Value, releases: &[Value]) -> Option<Value> {
     rx.await.ok().flatten()
 }
 
+/// An artist's own release types (admins): the kinds and the extras to skip – compilations, greatest hits, live
+/// albums … – for this artist alone, or back to Settings → Release types. → true when something was saved.
+async fn release_types_dialog(a: &Value) -> bool {
+    let rt = a.get("release_types").cloned().unwrap_or(Value::Null);
+    let boxes = |list: &str| -> String {
+        rt.get(list).and_then(|l| l.as_array()).map(|l| l.iter().map(|o| format!(
+            r#"<label class="row" style="gap:6px;align-items:center;min-width:160px"><input type="checkbox" data-{list} value="{}"{}> {}</label>"#,
+            esck(o, "key"), if o.truthy("on") { " checked" } else { "" }, esck(o, "label"))).collect::<String>()).unwrap_or_default()
+    };
+    let own = a.truthy("release_types_own");
+    let body = format!(r#"<p class="small muted" style="margin:0 0 10px">What counts for {} alone: Request discography and the hidden releases on this page. {}</p>
+        <h3 style="margin:8px 0 4px">Kinds to request</h3><div class="row wrap" style="gap:4px 14px">{}</div>
+        <h3 style="margin:14px 0 4px">Skip releases that are</h3><div class="row wrap" style="gap:4px 14px">{}</div>"#,
+        esck(a, "name"), if own { "These are the artist's own." } else { "Now: Settings → Release types." }, boxes("kinds"), boxes("skip"));
+    let footer = format!(r#"{}<button class="btn" data-close>Cancel</button><button class="btn primary" data-ok>Save for this artist</button>"#,
+        if own { r#"<button class="btn ghost" data-reset>Use Settings → Release types</button>"# } else { "" });
+    let m = ui::modal(ModalOpts::new("Release types", &body).footer(&footer));
+    let (tx, rx) = futures::channel::oneshot::channel::<bool>();
+    let tx = Rc::new(RefCell::new(Some(tx)));
+    let path = format!("/discover/artist/{}/release-types", a.s("id"));
+    if let Some(ok) = m.qs("[data-ok]") {
+        let (m2, tx2, path) = (m.clone(), tx.clone(), path.clone());
+        dom::on(&ok, "click", move |_| {
+            let pick = |list: &str| -> Vec<Value> { m2.qsa(&format!("input[data-{list}]:checked")).iter().map(|i| Value::String(i.get_attribute("value").unwrap_or_default())).collect() };
+            let (kinds, skip) = (pick("kinds"), pick("skip"));
+            if kinds.is_empty() { toast("Tick at least one kind", "err"); return; }
+            let (m3, tx3, path) = (m2.clone(), tx2.clone(), path.clone());
+            dom::spawn(async move {
+                match api::put(&path, json!({ "kinds": kinds, "skip": skip })).await {
+                    Ok(_) => { m3.close(); toast("Release types saved for this artist", "ok"); if let Some(t) = tx3.borrow_mut().take() { let _ = t.send(true); } }
+                    Err(e) => toast(&e.message, "err"),
+                }
+            });
+        });
+    }
+    if let Some(reset) = m.qs("[data-reset]") {
+        let (m2, tx2, path) = (m.clone(), tx.clone(), path.clone());
+        dom::on(&reset, "click", move |_| {
+            let (m3, tx3, path) = (m2.clone(), tx2.clone(), path.clone());
+            dom::spawn(async move {
+                match api::del(&path).await {
+                    Ok(_) => { m3.close(); toast("This artist uses Settings → Release types again", "ok"); if let Some(t) = tx3.borrow_mut().take() { let _ = t.send(true); } }
+                    Err(e) => toast(&e.message, "err"),
+                }
+            });
+        });
+    }
+    // dismissed: nothing saved
+    let el = m.el.clone();
+    let tx4 = tx.clone();
+    let obs = web_sys::MutationObserver::new(wasm_bindgen::closure::Closure::<dyn FnMut(js_sys::Array, web_sys::MutationObserver)>::new(move |_m, o: web_sys::MutationObserver| {
+        if !el.is_connected() { o.disconnect(); if let Some(t) = tx4.borrow_mut().take() { let _ = t.send(false); } }
+    }).into_js_value().unchecked_ref()).ok();
+    if let (Some(o), Some(root)) = (obs, dom::by_id("modal-root")) {
+        let init = web_sys::MutationObserverInit::new();
+        init.set_child_list(true);
+        let _ = o.observe_with_options(&root, &init);
+    }
+    rx.await.unwrap_or(false)
+}
+
 const ORDER: [&str; 15] = ["Album", "EP", "Single", "Compilation", "Live", "Soundtrack", "Remix", "DJ-mix", "Mixtape/Street", "Demo", "Other", "Broadcast", "Interview", "Spokenword", "Audiobook"];
 const LINK_KEYS: [&str; 9] = ["official homepage", "bandcamp", "soundcloud", "youtube", "streaming", "free streaming", "wikidata", "discogs", "last.fm"];
 
@@ -786,6 +847,11 @@ pub fn render_artist(view: Element, ctx: Ctx) -> PageFuture {
             format!(r#"<button class="btn" id="req-disco" title="Every release you don't have, from MusicBrainz{}">{}Request discography</button>"#,
                 if a.truthy("catalog_merge") { ", Deezer and Apple Music" } else { "" }, icon("download"))
         });
+        // the artist's own release types (admins; servers from 0.37 on)
+        let types_btn = if app::is_admin() && a.has("release_types_own") {
+            format!(r#"<button class="btn" id="artist-types" title="Which kinds of release count for this artist: Request discography and this page">Release types{}</button>"#,
+                if a.truthy("release_types_own") { r#" <span class="badge">own</span>"# } else { "" })
+        } else { String::new() };
         let tracks_badge = if a.truthy("library_tracks") { format!(r#"<span class="badge">{} tracks</span>"#, a.s("library_tracks")) } else { String::new() };
         let link_btns: String = links.iter().map(|(k, u)| format!(r#"<a class="btn sm ghost" target="_blank" rel="noopener noreferrer" href="{}">{}</a>"#, esc(u), esc(k))).collect();
         // "Liked from this artist" and "In your library" (its songs and albums) between Popular and the
@@ -811,6 +877,7 @@ pub fn render_artist(view: Element, ctx: Ctx) -> PageFuture {
         <div class="row wrap mt">
           {play_btns}
           {request}
+          {types_btn}
         </div>
         <div class="row wrap mt small">
           <span class="badge {owned_cls}">{owned} / {n_rg} releases in library</span>
@@ -966,6 +1033,7 @@ pub fn render_artist(view: Element, ctx: Ctx) -> PageFuture {
                 });
             });
         }
+        { let a = a.clone(); dom::on_sel(&view, "#artist-types", "click", move |_| { let a = a.clone(); dom::spawn(async move { if release_types_dialog(&a).await { app::route(); } }); }); }
         let play_all = {
             let a = a.clone();
             move |shuffle: bool| {

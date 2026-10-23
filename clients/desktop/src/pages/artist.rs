@@ -58,6 +58,21 @@ enum Dialog {
     Missing { kind: String, items: Vec<(usize, Value)> },
     /// The track list of a release only Deezer / Apple Music know.
     Ext { m: Box<Value>, tracks: Vec<Value> },
+    /// The artist's own release types (admins): `(key, label, ticked)` per kind and per extra to skip.
+    Types { kinds: Vec<TypeBox>, skip: Vec<TypeBox>, own: bool, sending: bool },
+}
+
+/// A box of the Release types dialog.
+#[derive(Debug, Clone)]
+struct TypeBox {
+    key: String,
+    label: String,
+    on: bool,
+}
+
+/// The boxes of the artist answer's `release_types.<list>` (`[{key, label, on}]`).
+fn type_boxes(a: &Value, list: &str) -> Vec<TypeBox> {
+    a["release_types"][list].as_array().map(|l| l.iter().map(|o| TypeBox { key: fmt::s(o, "key"), label: fmt::s(o, "label"), on: fmt::truthy(o, "on") }).collect()).unwrap_or_default()
 }
 
 #[derive(Debug)]
@@ -166,6 +181,13 @@ pub enum Message {
     /// `(kind, [(row, status)], how many, the limit error)`.
     MissingDone(String, Vec<(usize, Value)>, usize, Option<String>),
     OpenDiscography,
+    /// The artist's own release types: open the dialog, tick a box (true: an extra to skip), save, back to the
+    /// setting's, and the server's answer.
+    OpenTypes,
+    TypeTick(bool, usize, bool),
+    SaveTypes,
+    ResetTypes,
+    TypesSaved(bool, Result<Value, ApiError>),
     Tick(usize, bool),
     SelectAll(bool),
     SelectGroup(String, bool),
@@ -921,6 +943,46 @@ pub fn update(state: &mut State, msg: Message, ctx: &mut Ctx) -> Task<Message> {
                 return task;
             }
         }
+        Message::OpenTypes => {
+            if let Some(a) = artist(state) {
+                state.dialog = Some(Dialog::Types { kinds: type_boxes(a, "kinds"), skip: type_boxes(a, "skip"), own: fmt::truthy(a, "release_types_own"), sending: false });
+            }
+        }
+        Message::TypeTick(extra, i, on) => {
+            if let Some(Dialog::Types { kinds, skip, .. }) = state.dialog.as_mut() {
+                if let Some(b) = if extra { skip.get_mut(i) } else { kinds.get_mut(i) } {
+                    b.on = on;
+                }
+            }
+        }
+        Message::SaveTypes | Message::ResetTypes => {
+            let reset = matches!(msg, Message::ResetTypes);
+            let (Some(a), Some(Dialog::Types { kinds, skip, sending, .. })) = (state.a.as_ref().and_then(|a| a.as_ref().ok()), state.dialog.as_mut()) else {
+                return Task::none();
+            };
+            let ticked = |l: &[TypeBox]| l.iter().filter(|b| b.on).map(|b| b.key.clone()).collect::<Vec<_>>();
+            let body = json!({ "kinds": ticked(kinds), "skip": ticked(skip) });
+            if !reset && body["kinds"].as_array().is_none_or(|k| k.is_empty()) {
+                ctx.toast_err("Tick at least one kind");
+                return Task::none();
+            }
+            if *sending {
+                return Task::none();
+            }
+            *sending = true;
+            let (api, path) = (ctx.api.clone(), format!("/discover/artist/{}/release-types", fmt::s(a, "id")));
+            return Task::perform(async move { if reset { api.del(&path).await } else { api.put(&path, body).await } }, move |r| Message::TypesSaved(reset, r));
+        }
+        Message::TypesSaved(reset, r) => {
+            state.dialog = None;
+            match r {
+                Ok(_) => {
+                    ctx.toast_ok(if reset { "This artist uses Settings → Release types again" } else { "Release types saved for this artist" });
+                    return load(state, ctx);
+                }
+                Err(e) => ctx.toast_err(e.to_string()),
+            }
+        }
         Message::CloseDialog => state.dialog = None,
         Message::Live(Live::Resync) => return load(state, ctx),
         Message::Live(ev) => patch(state, &ev),
@@ -1026,6 +1088,11 @@ fn head<'a>(state: &'a State, ctx: &Ctx<'a>, a: &'a Value) -> El<'a, Message> {
         actions = actions.push(catalog::live_badge(&fmt::s(a, "request_status"), &fmt::s(a, "request_label")));
     } else {
         actions = actions.push(btn_icon(Icon::Download, "Request discography", Btn::Default, Some(Message::OpenDiscography)));
+    }
+    // the artist's own release types (admins; servers from 0.37 on)
+    if ctx.is_admin() && a.get("release_types_own").is_some() {
+        let label = if fmt::truthy(a, "release_types_own") { "Release types (own)" } else { "Release types" };
+        actions = actions.push(btn(label, Btn::Default, Some(Message::OpenTypes)));
     }
     text = text.push(container(actions).padding([6, 0]));
     let mut facts = row![badge(
@@ -1551,6 +1618,26 @@ fn discography_dialog<'a>(a: &'a Value, rows: &'a [DiscoRow], sending: bool) -> 
     modal("Request discography", body, Some(footer.into()), false, Message::CloseDialog)
 }
 
+/// The artist's own release types: the kinds to request and the extras to skip (compilations, greatest hits, live …).
+fn types_dialog<'a>(a: &'a Value, kinds: &'a [TypeBox], skip: &'a [TypeBox], own: bool, sending: bool) -> El<'a, Message> {
+    let boxes = |l: &'a [TypeBox], extra: bool| {
+        let items: Vec<El<'a, Message>> = l.iter().enumerate()
+            .map(|(i, b)| container(checkbox(b.on).label(b.label.as_str()).text_size(14).size(18).on_toggle(move |on| Message::TypeTick(extra, i, on))).width(170).into())
+            .collect();
+        iced::widget::row(items).spacing(8).wrap()
+    };
+    let intro = format!("What counts for {} alone: Request discography and the hidden releases on this page. {}", fmt::s(a, "name"),
+        if own { "These are the artist's own." } else { "Now: Settings → Release types." });
+    let body = column![small_muted(intro), h3("Kinds to request"), boxes(kinds, false), h3("Skip releases that are"), boxes(skip, true)].spacing(10);
+    let mut footer = row![].spacing(10);
+    if own {
+        footer = footer.push(btn("Use Settings → Release types", Btn::Ghost, (!sending).then_some(Message::ResetTypes)));
+    }
+    footer = footer.push(btn("Cancel", Btn::Default, Some(Message::CloseDialog)));
+    footer = footer.push(btn("Save for this artist", Btn::Primary, (!sending).then_some(Message::SaveTypes)));
+    modal("Release types", body, Some(footer.into()), false, Message::CloseDialog)
+}
+
 fn ext_sheet<'a>(state: &'a State, a: &'a Value, m: &'a Value, tracks: &'a [Value]) -> El<'a, Message> {
     let name = fmt::s(a, "name");
     let owned_n = tracks.iter().filter(|t| fmt::truthy(t, "library")).count();
@@ -1641,6 +1728,7 @@ pub fn overlay<'a>(state: &'a State, ctx: &Ctx<'a>) -> Option<El<'a, Message>> {
             Some(modal(title, muted(text).size(14), Some(footer.into()), false, Message::CloseDialog))
         }
         Dialog::Ext { m, tracks } => Some(ext_sheet(state, a, m, tracks)),
+        Dialog::Types { kinds, skip, own, sending } => Some(types_dialog(a, kinds, skip, *own, *sending)),
     }
 }
 

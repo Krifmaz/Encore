@@ -96,7 +96,7 @@ pub fn recover(st: &impl Ctx) {
 pub(super) fn restart_detail(old: &Value) -> Value {
     let mut d = json!({});
     for k in ["replace", "avoid", "album_mode", "release_filter", "release_ids", "length", "isrc", "ext", "attempts", "log", "pick", "kept",
-              "rejected", "rejected_seq", "skip_check", "no_album", "recording", "album_checked_at", "album_lookup", "album_note", "release", "lossless_only", "auto"] {
+              "rejected", "rejected_seq", "skip_check", "no_album", "recording", "album_checked_at", "album_lookup", "album_note", "release", "lossless_only", "auto", "type"] {
         if !old[k].is_null() {
             d[k] = old[k].clone();
         }

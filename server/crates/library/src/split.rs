@@ -27,6 +27,9 @@ pub struct Song {
     pub disc: i64,
     pub track: i64,
     pub title: String,
+    /// another copy of a song the library has from MusicBrainz ([`crate::twins`]): it stays with the album it
+    /// was merged into, whatever its year
+    pub copy: bool,
 }
 
 /// Songs of an album that become another album: `part` names them for the next scan.
@@ -108,8 +111,8 @@ fn plan_album(album_id: &str, songs: &[&Song]) -> Vec<Part> {
     }
     let mut by_year: BTreeMap<String, Vec<&Song>> = BTreeMap::new();
     for s in loose {
-        // a song of the release group's year, or of none, is with it
-        let y = if s.year == rg_year { String::new() } else { s.year.clone() };
+        // a song of the release group's year, or of none, or a copy of one of its songs, is with it
+        let y = if s.year == rg_year || s.copy { String::new() } else { s.year.clone() };
         by_year.entry(y).or_default().push(s);
     }
     for (y, g) in by_year {
@@ -140,12 +143,12 @@ pub fn plan(songs: &[Song]) -> Vec<Part> {
 /// The songs of albums that may hold more than one: more than one release group, or more than one year.
 pub fn songs(c: &Conn) -> rusqlite::Result<Vec<Song>> {
     let rows = c.query("SELECT id, album_id, COALESCE(mb_releasegroupid,'') rg, COALESCE(year,'') year, COALESCE(disc,1) disc, COALESCE(track,0) track,
-                               COALESCE(title,'') title FROM tracks WHERE album_id IN (
+                               COALESCE(title,'') title, copy_of IS NOT NULL copy FROM tracks WHERE album_id IN (
                             SELECT album_id FROM tracks WHERE album_id IS NOT NULL AND album IS NOT NULL AND album != '' GROUP BY album_id
                             HAVING COUNT(DISTINCT NULLIF(mb_releasegroupid,'')) > 1 OR COUNT(DISTINCT substr(NULLIF(year,''),1,4)) > 1)", p![])?;
     Ok(rows.iter().map(|r: &Row| Song {
         id: r.i("id"), album_id: r.s("album_id"), rg: r.s("rg"), year: year_of(&r.s("year")), disc: r.i("disc"), track: r.i("track"),
-        title: crate::catalog::title_key(&r.s("title")),
+        title: crate::catalog::title_key(&r.s("title")), copy: r.i("copy") != 0,
     }).collect())
 }
 
@@ -289,7 +292,7 @@ mod tests {
     use super::*;
 
     fn song(id: i64, rg: &str, year: &str, track: i64, title: &str) -> Song {
-        Song { id, album_id: "w".into(), rg: rg.into(), year: year.into(), disc: 1, track, title: title.into() }
+        Song { id, album_id: "w".into(), rg: rg.into(), year: year.into(), disc: 1, track, title: title.into(), copy: false }
     }
 
     #[test]
@@ -320,6 +323,12 @@ mod tests {
         assert!(plan(&s).is_empty());
         // one release group with a song of another year but the same title in its slot: left alone
         let s = [song(1, "blue", "1994", 1, "my name is jonas"), song(2, "", "2004", 1, "my name is jonas")];
+        assert!(plan(&s).is_empty());
+        // a copy of one of its songs from YouTube (encore_library::twins merged it in): its year and track
+        // number don't take it out again
+        let mut yt = song(3, "", "2019", 2, "buddy holly (official video)");
+        yt.copy = true;
+        let s = [song(1, "blue", "1994", 1, "my name is jonas"), song(2, "blue", "1994", 2, "no one else"), yt];
         assert!(plan(&s).is_empty());
     }
 

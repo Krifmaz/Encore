@@ -114,6 +114,29 @@ impl ReleaseFilter {
         Self::from_csv(&cfg.str("release_types"), &cfg.str("release_skip"))
     }
 
+    /// An artist's own release types (`artist_release_types`, set from Request discography's "Use these for this
+    /// artist from now on"), when they have them.
+    pub fn artist_own(cfg: &crate::Config, mbid: &str) -> Option<Self> {
+        use encore_db::RowExt;
+        let r = cfg.db.one("SELECT kinds, skip FROM artist_release_types WHERE mbid=?", encore_db::p![mbid]).ok().flatten()?;
+        Some(Self::from_value(&json!({ "kinds": r.s("kinds"), "skip": r.s("skip") }), &Self::from_cfg(cfg)))
+    }
+
+    /// What counts for this artist: their own release types, else the setting's.
+    pub fn for_artist(cfg: &crate::Config, mbid: &str) -> Self {
+        Self::artist_own(cfg, mbid).unwrap_or_else(|| Self::from_cfg(cfg))
+    }
+
+    /// Keeps `f` as the artist's own release types, or (None) goes back to the setting's for them.
+    pub fn save_for_artist(cfg: &crate::Config, mbid: &str, f: Option<&Self>) -> anyhow::Result<()> {
+        match f {
+            Some(f) => cfg.db.execute("INSERT OR REPLACE INTO artist_release_types (mbid, kinds, skip, updated_at) VALUES (?,?,?,?)",
+                encore_db::p![mbid, f.kinds.join(","), f.skip.join(","), encore_db::now()])?,
+            None => cfg.db.execute("DELETE FROM artist_release_types WHERE mbid=?", encore_db::p![mbid])?,
+        };
+        Ok(())
+    }
+
     /// A request's own filter ({"kinds": [...], "skip": [...]}, arrays or CSV); what's missing comes from `base`.
     pub fn from_value(v: &Value, base: &ReleaseFilter) -> Self {
         let mut f = base.clone();

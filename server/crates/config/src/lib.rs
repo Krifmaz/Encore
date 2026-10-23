@@ -227,6 +227,25 @@ mod settings_tests;
 mod release_type_tests {
     use super::*;
 
+    /// An artist's own boxes count for them alone; going back to the setting forgets them.
+    #[test]
+    fn an_artist_can_have_their_own_release_types() {
+        use crate::release_types::ReleaseFilter;
+        let d = tmp("artist-own");
+        let cfg = Config::load(Db::open(&d).unwrap()).unwrap();
+        assert_eq!(ReleaseFilter::artist_own(&cfg, "a1"), None);
+        let own = ReleaseFilter::from_csv("Album,Single", "Compilation,Live");
+        ReleaseFilter::save_for_artist(&cfg, "a1", Some(&own)).unwrap();
+        assert_eq!(ReleaseFilter::for_artist(&cfg, "a1"), own);
+        assert_eq!(ReleaseFilter::for_artist(&cfg, "a2"), ReleaseFilter::from_cfg(&cfg));
+        // nothing skipped for them: kept as nothing, not as the setting's
+        ReleaseFilter::save_for_artist(&cfg, "a1", Some(&ReleaseFilter::from_csv("Album", ""))).unwrap();
+        assert!(ReleaseFilter::for_artist(&cfg, "a1").skip.is_empty());
+        ReleaseFilter::save_for_artist(&cfg, "a1", None).unwrap();
+        assert_eq!(ReleaseFilter::for_artist(&cfg, "a1"), ReleaseFilter::from_cfg(&cfg));
+        let _ = std::fs::remove_dir_all(d);
+    }
+
     fn tmp(name: &str) -> std::path::PathBuf {
         encore_core::tmp::dir(&format!("cfg-{name}"))
     }

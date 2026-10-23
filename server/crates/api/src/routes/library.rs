@@ -560,7 +560,7 @@ async fn artist_tracks(State(st): State<AppState>, User(u): User, Query(q): Quer
     st.blocking(move |st| {
         let (cond, params) = st.library.artists.track_filter(&st.db, &q.name);
         let mut v = json!(st.db.query(&format!(
-            "SELECT {TRACK_COLS} FROM tracks WHERE {cond} ORDER BY year DESC, lower(album), disc, track LIMIT 5000"), params)?);
+            "SELECT {TRACK_COLS} FROM tracks WHERE ({cond}) AND {} ORDER BY year DESC, lower(album), disc, track LIMIT 5000", encore_library::twins::SHOWN), params)?);
         enrich_now(st, Some(&u), &mut v);
         Ok(Json(v))
     }).await
@@ -583,7 +583,9 @@ fn rows_by_id(db: &impl encore_db::Query, cols: &str, ids: &[i64]) -> rusqlite::
 /// Every song's id in list order, kept until the songs change (see `cached_list`): one sorted pass over
 /// the table per sort, and every page of the list is a slice of it. `order_by` is empty for "any order".
 fn track_ids(st: &AppState, order_by: &str) -> ApiResult<Arc<Value>> {
-    let sql = if order_by.is_empty() { "SELECT id FROM tracks".to_string() } else { format!("SELECT id FROM tracks ORDER BY {order_by}") };
+    // each song once: not the copies of a song the library has from MusicBrainz (encore_library::twins)
+    let shown = encore_library::twins::SHOWN;
+    let sql = if order_by.is_empty() { format!("SELECT id FROM tracks WHERE {shown}") } else { format!("SELECT id FROM tracks WHERE {shown} ORDER BY {order_by}") };
     let db = st.db.clone();
     cached_list(st, &format!("track-ids\u{1f}{order_by}"), move || Ok(json!(db.query(&sql, p![])?.iter().map(|r| r.i("id")).collect::<Vec<i64>>())))
 }

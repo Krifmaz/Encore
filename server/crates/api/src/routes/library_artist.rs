@@ -94,11 +94,13 @@ pub(super) async fn songs(State(st): State<AppState>, User(u): User, Path(path):
         let Some((cond, params)) = artist_filter(st, &name, &q.mbid) else {
             return Ok(Json(json!({ "total": 0, "offset": offset, "tracks": [] })));
         };
-        let total = st.db.one(&format!("SELECT COUNT(*) n FROM tracks WHERE {cond}"), params.clone())?.map(|r| r.i("n")).unwrap_or(0);
+        // each song once (encore_library::twins)
+        let shown = encore_library::twins::SHOWN;
+        let total = st.db.one(&format!("SELECT COUNT(*) n FROM tracks WHERE ({cond}) AND {shown}"), params.clone())?.map(|r| r.i("n")).unwrap_or(0);
         let mut ps = params;
         ps.extend(p![limit, offset]);
         let rows = st.db.query(&format!(
-            "SELECT {TRACK_COLS} FROM tracks WHERE {cond}
+            "SELECT {TRACK_COLS} FROM tracks WHERE ({cond}) AND {shown}
              ORDER BY CASE WHEN year IS NULL OR trim(year) IN ('', '0') THEN 1 ELSE 0 END, year, lower(album), album_id, disc, track, id
              LIMIT ? OFFSET ?"), ps)?;
         let mut v = json!({ "total": total, "offset": offset, "tracks": rows });

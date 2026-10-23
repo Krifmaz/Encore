@@ -227,6 +227,56 @@ private fun DiscographySheet(a: ArtistPage, ext: List<ExtRelease>, statuses: Req
     }
 }
 
+/**
+ * The artist's own release types (admins): the kinds to request and the extras to skip – compilations, greatest
+ * hits, live albums … – for this artist alone (Request discography and the hidden releases on the page).
+ * [onSave] gets the ticked keys, or null kinds for "Use Settings → Release types".
+ */
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+private fun ReleaseTypesSheet(a: ArtistPage, onDismiss: () -> Unit, onSave: (List<String>?, List<String>) -> Unit) {
+    val p = MaterialTheme.palette
+    val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
+    var kinds by remember { mutableStateOf(a.releaseKinds.filter { it.on }.map { it.key }.toSet()) }
+    var skip by remember { mutableStateOf(a.releaseSkip.filter { it.on }.map { it.key }.toSet()) }
+    ModalBottomSheet(onDismissRequest = onDismiss, sheetState = sheetState, containerColor = p.panel, contentColor = p.text) {
+        Column(Modifier.fillMaxWidth().padding(horizontal = 22.dp)) {
+            Text("Release types", style = MaterialTheme.typography.titleLarge, modifier = Modifier.padding(vertical = 8.dp))
+            Row(Modifier.fillMaxWidth().padding(bottom = 10.dp), horizontalArrangement = Arrangement.spacedBy(8.dp, Alignment.End)) {
+                if (a.releaseTypesOwn) EncoreButton("Use settings") { onSave(null, emptyList()) }
+                EncoreButton("Cancel") { onDismiss() }
+                EncoreButton("Save", primary = true) {
+                    if (kinds.isEmpty()) Toasts.show("Tick at least one kind", "err")
+                    else onSave(a.releaseKinds.map { it.key }.filter { it in kinds }, a.releaseSkip.map { it.key }.filter { it in skip })
+                }
+            }
+        }
+        Column(Modifier.fillMaxWidth().weight(1f, fill = false).verticalScroll(rememberScrollState()).padding(horizontal = 22.dp).padding(bottom = 24.dp)) {
+            Text(
+                "What counts for ${a.name} alone: Request discography and the hidden releases on this page. " +
+                    if (a.releaseTypesOwn) "These are the artist's own." else "Now: Settings → Release types.",
+                style = MaterialTheme.typography.bodySmall, color = p.muted,
+            )
+            Text("Kinds to request", style = MaterialTheme.typography.titleMedium, modifier = Modifier.padding(top = 14.dp, bottom = 2.dp))
+            for (o in a.releaseKinds) {
+                TypeBox(o.label, o.key in kinds) { on -> kinds = if (on) kinds + o.key else kinds - o.key }
+            }
+            Text("Skip releases that are", style = MaterialTheme.typography.titleMedium, modifier = Modifier.padding(top = 14.dp, bottom = 2.dp))
+            for (o in a.releaseSkip) {
+                TypeBox(o.label, o.key in skip) { on -> skip = if (on) skip + o.key else skip - o.key }
+            }
+        }
+    }
+}
+
+@Composable
+private fun TypeBox(label: String, checked: Boolean, onChange: (Boolean) -> Unit) {
+    Row(Modifier.fillMaxWidth().clickable { onChange(!checked) }, verticalAlignment = Alignment.CenterVertically) {
+        Checkbox(checked = checked, onCheckedChange = { onChange(it) })
+        Text(label, style = MaterialTheme.typography.bodyMedium)
+    }
+}
+
 /** A release's box: title, year and why it starts unticked (owned, requested, or off in Release types). */
 @Composable
 private fun ReleaseBox(e: DiscoEntry, checked: Boolean, onChange: (Boolean) -> Unit) {
@@ -326,12 +376,14 @@ private fun ArtistPageScreen(nav: Nav, mbid: String, name: String) {
     var extTracks by remember { mutableStateOf<ExtRelease?>(null) }
     var moreLike by remember { mutableStateOf<Pair<String, String>?>(null) }
     var discoSheet by remember { mutableStateOf(false) }
+    var typesSheet by remember { mutableStateOf(false) }
     val scrollBehavior = TopAppBarDefaults.enterAlwaysScrollBehavior()
-    // admins, on a library artist: "Remove artist" (library.rs, for artists a wrong download added)
+    // admins: "Remove artist" on a library artist (library.rs, for artists a wrong download added), and the
+    // artist's own release types on a catalogue artist
     var me by remember { mutableStateOf<Me?>(null) }
     var confirmRemove by remember { mutableStateOf(false) }
     LaunchedEffect(byName) {
-        if (byName) me = try { withContext(Dispatchers.IO) { features.me() } } catch (e: CancellationException) { throw e } catch (_: Exception) { null }
+        me = try { withContext(Dispatchers.IO) { features.me() } } catch (e: CancellationException) { throw e } catch (_: Exception) { null }
     }
 
     Scaffold(
@@ -519,6 +571,11 @@ private fun ArtistPageScreen(nav: Nav, mbid: String, name: String) {
                                             }
                                         }
                                     }
+                                }
+                                // the artist's own release types: compilations, greatest hits, live … off for them alone
+                                if (me?.isAdmin == true && a.releaseKinds.isNotEmpty()) {
+                                    Spacer(Modifier.width(8.dp))
+                                    EncoreButton(if (a.releaseTypesOwn) "Release types (own)" else "Release types") { typesSheet = true }
                                 }
                             }
                             if (!byName) Row(Modifier.padding(top = 12.dp), horizontalArrangement = Arrangement.spacedBy(6.dp), verticalAlignment = Alignment.CenterVertically) {
@@ -729,6 +786,24 @@ private fun ArtistPageScreen(nav: Nav, mbid: String, name: String) {
                 }
             }
 
+            if (typesSheet) {
+                ReleaseTypesSheet(a, onDismiss = { typesSheet = false }) { kinds, skip ->
+                    typesSheet = false
+                    scope.launch {
+                        try {
+                            withContext(Dispatchers.IO) {
+                                if (kinds == null) features.resetArtistReleaseTypes(a.id) else features.setArtistReleaseTypes(a.id, kinds, skip)
+                            }
+                            Toasts.show(if (kinds == null) "This artist uses Settings → Release types again" else "Release types saved for this artist", "ok")
+                            loader.refresh()
+                        } catch (e: CancellationException) {
+                            throw e
+                        } catch (e: Exception) {
+                            Toasts.show(e.message ?: "Couldn't save the release types", "err")
+                        }
+                    }
+                }
+            }
             if (discoSheet) {
                 DiscographySheet(a, extReleases ?: emptyList(), statuses, onDismiss = { discoSheet = false }) { picked ->
                     discoSheet = false

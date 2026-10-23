@@ -76,6 +76,7 @@ async fn artist_catalog_answer(State(st): State<AppState>, User(_): User, Path(m
     if !st.cfg.bool("discover_catalog_merge") {
         return Ok(json!({ "enabled": false, "releases": [] }));
     }
+    let filter = encore_config::release_types::ReleaseFilter::for_artist(&st.cfg, &mbid);
     let a = mb::artist(&st, &mbid).await.map_err(|e| err(502, format!("MusicBrainz error: {e}")))?;
     let found = merged(&st, &a).await;
     let rgs: std::collections::HashSet<String> = a["release_groups"].as_array().into_iter().flatten().map(|g| s(&g["id"])).collect();
@@ -92,7 +93,6 @@ async fn artist_catalog_answer(State(st): State<AppState>, User(_): User, Path(m
         rel.retain(|m| !in_mb(m));
         Ok(rel)
     }).await?;
-    let filter = encore_config::release_types::ReleaseFilter::from_cfg(&st.cfg);
     crate::routes::discover::mark_skipped(&filter, &mut rel);
     // `releases` flat for the tiles, `groups` by canonical kind (with `allowed` per release) for the dialog
     let groups = grouped(&filter, &rel);

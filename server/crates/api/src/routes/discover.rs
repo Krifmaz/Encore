@@ -1,6 +1,6 @@
 //! /api/discover: search (words or whole sentences), artist and album pages, new releases.
 use crate::enrich::{enrich, enrich_now};
-use crate::auth::User;
+use crate::auth::{Admin, User};
 use encore_db::RowExt;
 use encore_core::error::{err, ApiError, ApiResult};
 use crate::state::AppState;
@@ -20,6 +20,7 @@ pub fn router() -> Router<AppState> {
         .route("/api/discover/search", get(search))
         .route("/api/discover/artist/{mbid}", get(artist))
         .route("/api/discover/artist/{mbid}/library-tracks", get(artist_library_tracks))
+        .route("/api/discover/artist/{mbid}/release-types", axum::routing::put(set_artist_release_types).delete(reset_artist_release_types))
         .route("/api/discover/artist-lookup", get(artist_lookup))
         .route("/api/discover/album-lookup", get(album_lookup))
         .route("/api/discover/album/{rgid}", get(album))
@@ -203,7 +204,10 @@ async fn search_answer(State(st): State<AppState>, User(_): User, Query(sq): Que
 async fn artist(State(st): State<AppState>, User(u): User, Path(mbid): Path<String>) -> ApiResult<Json<Value>> {
     let mut a = mb::artist(&st, &mbid).await.map_err(mb_err)?;
     st.blocking(move |st| {
-        let filter = encore_config::release_types::ReleaseFilter::from_cfg(&st.cfg);
+        // the artist's own release types, else the setting's
+        let own = encore_config::release_types::ReleaseFilter::artist_own(&st.cfg, &mbid);
+        a["release_types_own"] = json!(own.is_some());
+        let filter = own.unwrap_or_else(|| encore_config::release_types::ReleaseFilter::from_cfg(&st.cfg));
         if let Some(groups) = a["release_groups"].as_array_mut() {
             annotate_albums(st, groups);
             mark_skipped(&filter, groups);
@@ -373,6 +377,26 @@ async fn album(State(st): State<AppState>, User(viewer): User, Path(rgid): Path<
     g["release"] = rel.unwrap_or(Value::Null);
     enrich(&st, Some(&viewer), &mut g).await;
     Ok(Json(g))
+}
+
+/// PUT /api/discover/artist/{mbid}/release-types `{kinds: [...], skip: [...]}` (arrays or CSV, admin): the artist's
+/// own release types – what their page, catalogue and discography requests count, instead of Settings → Release
+/// types. → `{release_types, release_types_own: true}`, the artist page's fields.
+async fn set_artist_release_types(State(st): State<AppState>, Admin(_): Admin, Path(mbid): Path<String>, Json(b): Json<Value>) -> ApiResult<Json<Value>> {
+    use encore_config::release_types::ReleaseFilter;
+    if !is_mbid(&mbid) {
+        return Err(err(400, "That isn't a MusicBrainz id"));
+    }
+    let f = ReleaseFilter::from_value(&b, &ReleaseFilter::for_artist(&st.cfg, &mbid));
+    ReleaseFilter::save_for_artist(&st.cfg, &mbid, Some(&f)).map_err(|e| err(500, e.to_string()))?;
+    Ok(Json(json!({ "release_types": f.options(), "release_types_own": true })))
+}
+
+/// DELETE /api/discover/artist/{mbid}/release-types (admin): the artist goes back to Settings → Release types.
+async fn reset_artist_release_types(State(st): State<AppState>, Admin(_): Admin, Path(mbid): Path<String>) -> ApiResult<Json<Value>> {
+    use encore_config::release_types::ReleaseFilter;
+    ReleaseFilter::save_for_artist(&st.cfg, &mbid, None).map_err(|e| err(500, e.to_string()))?;
+    Ok(Json(json!({ "release_types": ReleaseFilter::from_cfg(&st.cfg).options(), "release_types_own": false })))
 }
 
 /// Settings → Release types on a list of releases: `skipped` is why one is left out ("Live", "Single" …)

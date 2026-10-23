@@ -40,6 +40,7 @@
         }
       ],
       "bitrate": 111,
+      "copy_of": null,
       "cover_color": "#b7cb00",
       "cover_v": 2907780667060,
       "disc": 1,
@@ -91,6 +92,7 @@
         }
       ],
       "bitrate": 113,
+      "copy_of": null,
       "cover_color": "#b7cb00",
       "cover_v": 2907780667060,
       "disc": 1,
@@ -142,6 +144,7 @@
         }
       ],
       "bitrate": 110,
+      "copy_of": null,
       "cover_color": "#b7cb00",
       "cover_v": 2907780667060,
       "disc": 1,

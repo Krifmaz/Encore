@@ -62,6 +62,59 @@ fn dup(st: &impl Ctx, sql: &str, params: Vec<Value>) -> ApiResult<()> {
     Ok(())
 }
 
+/// An album request already there for this album, whichever way it was made: the same release group, the same
+/// Deezer album or barcode, or the same artist and title (edition notes aside: "Discovery" and "Discovery
+/// (Remastered)"). MusicBrainz's answer for one song and Deezer's for another song of the same album (while
+/// MusicBrainz was busy) used to make two album requests, and both downloaded.
+pub fn album_request_for(st: &impl Ctx, mbid: Option<&str>, artist: &str, title: &str, ext: &Value) -> anyhow::Result<Option<i64>> {
+    let deezer = ext["deezer"].as_i64().map(|d| d.to_string()).or_else(|| ext["deezer"].as_str().map(String::from)).filter(|d| !d.is_empty());
+    let upc = ext["upc"].as_str().filter(|u| !u.is_empty());
+    let rows = st.db().query("SELECT id, mbid, artist, title, album, detail FROM requests WHERE kind='album' AND status NOT IN ('failed','denied','cancelled')
+                              AND (mbid=? OR lower(artist)=lower(?) OR CAST(json_extract(detail, '$.ext.deezer') AS TEXT)=? OR json_extract(detail, '$.ext.upc')=?)
+                              ORDER BY id", p![mbid, artist, deezer, upc])?;
+    let same_ext = |row: &Row| {
+        let d: Value = serde_json::from_str(&row.s("detail")).unwrap_or(json!({}));
+        let theirs = d["ext"]["deezer"].as_i64().map(|x| x.to_string()).or_else(|| d["ext"]["deezer"].as_str().map(String::from));
+        (deezer.is_some() && theirs == deezer) || (upc.is_some() && d["ext"]["upc"].as_str() == upc)
+    };
+    let key = encore_library::catalog::title_key(title);
+    // (two MusicBrainz release groups of one name are two albums – Weezer's self-titled albums, encore_library::split –
+    // so the name counts only when one of the two has no release group)
+    let same_name = |row: &Row| {
+        let theirs = Some(row.s("album")).filter(|a| !a.is_empty()).unwrap_or_else(|| row.s("title"));
+        (mbid.is_none() || row.s("mbid").is_empty())
+            && !key.is_empty() && encore_library::catalog::title_key(&theirs) == key && encore_core::text::norm(&row.s("artist")) == encore_core::text::norm(artist)
+    };
+    let found = rows.iter().find(|row| mbid.is_some_and(|m| row.s("mbid") == m))
+        .or_else(|| rows.iter().find(|row| same_ext(row)))
+        .or_else(|| rows.iter().find(|row| same_name(row)));
+    Ok(found.map(|row| row.i("id")))
+}
+
+/// 409 when a running track request is for the same song by other names or ids ([`encore_library::matcher`]:
+/// "Song (feat. X)" and "Song", "Don't" and "Dont", a MusicBrainz request and a .txt import line, the album and
+/// single recordings of one song) – the same song and version, lengths close when both are known. Other
+/// versions (live, remix, sped up …) are other songs.
+fn same_song_requested(st: &impl Ctx, b: &NewRequest, artist: Option<&str>) -> ApiResult<()> {
+    use encore_library::matcher::{compare, describe};
+    let (Some(artist), Some(title)) = (artist, nz(&b.title)) else { return Ok(()) };
+    let want = describe(title, artist, b.length, nz(&b.isrc), nz(&b.mbid));
+    // only the requests whose title has the song's longest word go through the comparison
+    let Some(word) = want.base.split_whitespace().filter(|w| w.chars().all(|c| c.is_alphanumeric())).max_by_key(|w| w.chars().count()) else { return Ok(()) };
+    let rows = st.db().query("SELECT id, status, artist, title, mbid, detail FROM requests WHERE kind='track' AND class='stereo'
+                              AND status NOT IN ('failed','denied','cancelled') AND lower(title) LIKE ? ORDER BY id LIMIT 500",
+                             p![format!("%{}%", word.to_lowercase())])?;
+    for r in rows {
+        let d: Value = serde_json::from_str(&r.s("detail")).unwrap_or(json!({}));
+        let mbid = Some(r.s("mbid")).filter(|m| !m.is_empty()).or_else(|| d["recording"].as_str().map(String::from));
+        let theirs = describe(&r.s("title"), &r.s("artist"), d["length"].as_f64(), d["isrc"].as_str(), mbid.as_deref());
+        if compare(&want, &theirs, true).matched {
+            return Err(err(409, format!("Already requested (#{}, {})", r.i("id"), r.s("status"))).with(json!({ "id": r.i("id"), "status": r.s("status") })));
+        }
+    }
+    Ok(())
+}
+
 /// The catalogue ids in a Discover "ext-…" album id ("ext-d302127", "ext-d2-a3": Deezer 2, Apple 3).
 pub fn ext_from_id(id: &str) -> Option<Value> {
     let rest = id.strip_prefix("ext-")?;
@@ -206,6 +259,22 @@ pub fn create_or_reuse(st: &impl Ctx, u: &Row, b: &NewRequest, parent: Option<i6
     if let (Some(m), false) = (nz(&b.mbid), has_extra) {
         dup(st, "SELECT id, status FROM requests WHERE mbid=? AND kind=? AND class='stereo' AND status NOT IN ('failed','denied','cancelled')", p![m, b.kind])?;
     }
+    // the same song or album asked for another way: by name from a .txt or playlist import and from MusicBrainz,
+    // or as a Deezer album and its MusicBrainz release group – one download
+    if !has_extra {
+        match b.kind.as_str() {
+            "track" => same_song_requested(st, b, artist)?,
+            "album" => {
+                let ext = b.ext.clone().unwrap_or(json!({}));
+                if let (Some(a), Some(t)) = (artist, title) {
+                    if let Some(id) = album_request_for(st, nz(&b.mbid), a, t, &ext).map_err(|e| err(500, e.to_string()))? {
+                        dup(st, "SELECT id, status FROM requests WHERE id=?", p![id])?;
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
     let twin = match reuse {
         Some(id) => st.db().one("SELECT * FROM requests WHERE id=?", p![id])?,
         None if parent.is_none() => failed_twin(st, b, artist, title)?,
@@ -222,8 +291,12 @@ pub fn create_or_reuse(st: &impl Ctx, u: &Row, b: &NewRequest, parent: Option<i6
     if let Some(m) = b.album_mode.as_deref().filter(|m| *m == "song" || *m == "album") {
         detail["album_mode"] = json!(m);
     }
-    if let (true, Some(f)) = (b.kind == "artist", b.release_filter.as_ref().filter(|f| f.is_object())) {
-        detail["release_filter"] = encore_config::release_types::ReleaseFilter::from_value(f, &encore_config::release_types::ReleaseFilter::from_cfg(st.cfg())).to_value();
+    if b.kind == "artist" {
+        use encore_config::release_types::ReleaseFilter;
+        // (the request's own boxes over the artist's own release types, else the setting's)
+        if let Some(f) = b.release_filter.as_ref().filter(|f| f.is_object()) {
+            detail["release_filter"] = ReleaseFilter::from_value(f, &ReleaseFilter::for_artist(st.cfg(), nz(&b.mbid).unwrap_or(""))).to_value();
+        }
     }
     if let (true, Some(ids)) = (b.kind == "artist", b.release_ids.as_ref()) {
         let mut seen: Vec<&str> = vec![];

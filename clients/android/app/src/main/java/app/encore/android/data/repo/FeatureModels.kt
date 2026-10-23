@@ -350,6 +350,8 @@ data class ArtistPage(
     @SerialName("discography_singles") val discographySingles: LBool = false,
     @SerialName("catalog_merge") val catalogMerge: LBool = false,
     @SerialName("release_types") @Serializable(with = ReleaseTypes.OrNull::class) val releaseTypes: ReleaseTypes? = null,
+    /** 0.37: the boxes are the artist's own release types, not Settings → Release types. */
+    @SerialName("release_types_own") val releaseTypesOwn: LBool = false,
 ) {
     /** The Request discography panel's boxes (Settings → Release types, ticked as set): kinds, then extras to skip. */
     val releaseKinds: List<ReleaseTypeOption> get() = releaseTypes?.kinds ?: emptyList()

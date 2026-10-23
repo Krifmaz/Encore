@@ -386,9 +386,10 @@ struct RawAa {
 
 impl Index {
     pub fn build(db: &Db) -> anyhow::Result<Index> {
+        // a copy of a song the library has from MusicBrainz is that song (crate::twins): searched and counted once
         let rows = db.query(
-            "SELECT id, title, artist, album, albumartist, album_id, disc, track, year, duration, format, bitrate, size, added_at, mb_albumartistid,
-                    mb_trackid, mb_albumid, artist_credit, albumartist_credit FROM tracks",
+            &format!("SELECT id, title, artist, album, albumartist, album_id, disc, track, year, duration, format, bitrate, size, added_at, mb_albumartistid,
+                    mb_trackid, mb_albumid, artist_credit, albumartist_credit FROM tracks WHERE {}", crate::twins::SHOWN),
             p![],
         )?;
         let aliases = db.query("SELECT artist_key, alias, alias_key FROM artist_alias", p![])?;

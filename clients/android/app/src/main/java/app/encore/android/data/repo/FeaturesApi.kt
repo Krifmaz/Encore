@@ -12,6 +12,7 @@ import app.encore.android.data.api.AuthInfo
 import app.encore.android.data.api.EncoreApi
 import app.encore.android.data.api.Track
 import app.encore.android.features.library.PlaylistCollabRules
+import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonElement
 import kotlinx.serialization.json.JsonNull
 import kotlinx.serialization.json.JsonObject
@@ -110,6 +111,19 @@ class FeaturesApi(private val api: EncoreApi, private val client: OkHttpClient) 
         getObject("/api/discover/search?q=${EncoreApi.enc(q)}&type=${EncoreApi.enc(type)}").page(SearchResults.serializer())
 
     fun artist(mbid: String): ArtistPage = getObject("/api/discover/artist/${EncoreApi.enc(mbid)}").page(ArtistPage.serializer())
+
+    /** PUT /api/discover/artist/{mbid}/release-types {kinds, skip} (admins, 0.37): the artist's own release types. */
+    fun setArtistReleaseTypes(mbid: String, kinds: List<String>, skip: List<String>) {
+        call("PUT", "/api/discover/artist/${EncoreApi.enc(mbid)}/release-types", buildJsonObject {
+            put("kinds", JsonArray(kinds.map { JsonPrimitive(it) }))
+            put("skip", JsonArray(skip.map { JsonPrimitive(it) }))
+        })
+    }
+
+    /** DELETE /api/discover/artist/{mbid}/release-types (admins): the artist goes back to Settings → Release types. */
+    fun resetArtistReleaseTypes(mbid: String) {
+        call("DELETE", "/api/discover/artist/${EncoreApi.enc(mbid)}/release-types", null)
+    }
 
     fun artistExtras(mbid: String): ArtistExtras = getObject("/api/discover/artist/${EncoreApi.enc(mbid)}/extras").page(ArtistExtras.serializer())
 

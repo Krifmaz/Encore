@@ -948,7 +948,7 @@
               "env": "RELEASE_SKIP",
               "env_locked": false,
               "full": true,
-              "help": "A release with any ticked extra is left out. Instrumental, acoustic, sped up, karaoke and covers are read from the titles.",
+              "help": "A release with any ticked extra is left out. Instrumental, acoustic, sped up, karaoke and covers are read from the titles. An artist can have their own: Release types on the artist’s page.",
               "key": "release_skip",
               "label": "Skip releases that are",
               "max": null,
@@ -1026,6 +1026,24 @@
               "secret": false,
               "step": null,
               "type": "checks",
+              "unit": null,
+              "when": null
+            },
+            {
+              "advanced": false,
+              "default": true,
+              "env": "ENCORE_SINGLE_TO_ALBUM",
+              "env_locked": false,
+              "full": false,
+              "help": "A single whose song is on one of the artist’s studio albums is downloaded with that album instead of on its own (once, even when both are requested). Singles of songs on no album are downloaded as singles.",
+              "key": "single_to_album",
+              "label": "Singles on an album: get the album",
+              "max": null,
+              "min": null,
+              "options": [],
+              "secret": false,
+              "step": null,
+              "type": "bool",
               "unit": null,
               "when": null
             }

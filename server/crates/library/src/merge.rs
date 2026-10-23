@@ -139,12 +139,19 @@ pub fn resolve(c: &Conn, album_id: &str) -> rusqlite::Result<String> {
 /// chosen type and the Surround link follow when the target has none. → `(from, to)` merged.
 pub fn merge_albums(c: &Conn) -> rusqlite::Result<Vec<(String, String)>> {
     let moves = plan(&albums(c)?);
+    apply(c, &moves)?;
+    Ok(moves)
+}
+
+/// Moves the songs of each `from` album into its `to` album and remembers it for the next scan, in one
+/// transaction (what [`merge_albums`] and [`crate::twins`] merge).
+pub fn apply(c: &Conn, moves: &[(String, String)]) -> rusqlite::Result<()> {
     if moves.is_empty() {
-        return Ok(moves);
+        return Ok(());
     }
     c.transaction(|c| {
         let t = now();
-        for (from, to) in &moves {
+        for (from, to) in moves {
             c.execute("UPDATE tracks SET album_id=? WHERE album_id=?", p![to, from])?;
             c.execute("INSERT OR REPLACE INTO album_merges (from_id, to_id, merged_at) VALUES (?,?,?)", p![from, to, t])?;
             // what pointed at the merged album points at the one it went into
@@ -153,8 +160,7 @@ pub fn merge_albums(c: &Conn) -> rusqlite::Result<Vec<(String, String)>> {
             c.execute("UPDATE OR IGNORE album_types SET album_id=? WHERE album_id=?", p![to, from])?;
         }
         Ok::<_, rusqlite::Error>(())
-    })?;
-    Ok(moves)
+    })
 }
 
 /// The songs of a merged album that are another copy of one of its songs (same title and artist, lengths

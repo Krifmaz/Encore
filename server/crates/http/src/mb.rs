@@ -373,9 +373,33 @@ pub async fn search_releases(st: &impl Ctx, artist: &str, album: &str, limit: us
 /// What a recording is asked for with (by [`recording`] and [`album_for_recording`] alike: one cache entry).
 const RECORDING_INC: &str = "artist-credits+releases+release-groups+isrcs";
 
+/// The release a song belongs to, of the releases a recording is on: an official one of the song's own artist,
+/// a plain studio album before an EP before a single, and a compilation ("Greatest Hits"), live album,
+/// soundtrack or remix album only when the song is on nothing else; the first released of those. MusicBrainz
+/// lists the releases in no useful order, and its first was often a best-of or the single, so a song imported
+/// on its own went into "Greatest Hits" instead of the album it is from.
+pub fn album_release(r: &Value) -> Value {
+    let ids = |ac: &Value| -> std::collections::HashSet<String> {
+        ac.as_array().map(|a| a.iter().filter_map(|c| c["artist"]["id"].as_str().map(String::from)).collect()).unwrap_or_default()
+    };
+    let artist_ids = ids(&r["artist-credit"]);
+    let rels = r["releases"].as_array().map(|a| a.as_slice()).unwrap_or(&[]);
+    let key = |rel: &Value| {
+        let g = &rel["release-group"];
+        let official = rel["status"].is_null() || rel["status"] == "Official";
+        let ra = ids(&rel["artist-credit"]);
+        let own = ra.is_empty() || artist_ids.is_empty() || !ra.is_disjoint(&artist_ids);
+        let plain = g["secondary-types"].as_array().is_none_or(|a| a.is_empty());
+        let kind = match s(&g["primary-type"]).as_str() { "Album" => 0, "EP" => 1, "Single" => 2, _ => 3 };
+        let date = [s(&g["first-release-date"]), s(&rel["date"])].into_iter().find(|d| !d.is_empty()).unwrap_or_else(|| "9999".into());
+        (!official, !own, !plain, kind, date)
+    };
+    rels.iter().min_by_key(|rel| key(rel)).cloned().unwrap_or_default()
+}
+
 pub async fn recording(st: &impl Ctx, rid: &str) -> anyhow::Result<Value> {
     let r = st.mb().get(st, &format!("recording/{rid}"), &[("inc", RECORDING_INC.into())]).await?;
-    let rel = r["releases"].as_array().and_then(|a| a.first()).cloned().unwrap_or_default();
+    let rel = album_release(&r);
     let year: String = { let d = s(&r["first-release-date"]); if d.is_empty() { s(&rel["date"]) } else { d } }.chars().take(4).collect();
     let g = &rel["release-group"];
     Ok(json!({ "id": s(&r["id"]), "title": s(&r["title"]), "artist": credit(&r["artist-credit"]), "artist_id": credit_id(&r["artist-credit"]),
@@ -444,4 +468,37 @@ pub async fn album_for_recording(st: &impl Ctx, rid: &str, allow_ep: bool) -> an
         json!({ "id": id, "title": s(&g["title"]), "type": s(&g["primary-type"]), "artist": credit(&d["artist-credit"]),
             "year": s(&g["first-release-date"]).chars().take(4).collect::<String>(), "cover": cover_rg(&id, 250) })
     }))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn rel(id: &str, status: &str, typ: &str, secondary: &[&str], date: &str, artist: &str) -> Value {
+        json!({ "id": id, "status": status, "date": date, "artist-credit": [{ "artist": { "id": artist } }],
+                "release-group": { "id": format!("rg-{id}"), "primary-type": typ, "secondary-types": secondary, "first-release-date": date } })
+    }
+
+    /// The album the song is from, not the best-of MusicBrainz lists first, nor the single, nor another
+    /// artist's compilation; a best-of only when the song is on nothing else.
+    #[test]
+    fn a_song_goes_into_the_album_it_is_from() {
+        let r = json!({ "artist-credit": [{ "artist": { "id": "fm" } }], "releases": [
+            rel("hits", "Official", "Album", &["Compilation"], "1988-11-21", "fm"),
+            rel("single", "Official", "Single", &[], "1977-03-24", "fm"),
+            rel("various", "Official", "Album", &[], "1970-01-01", "va"),
+            rel("bootleg", "Bootleg", "Album", &[], "1976-01-01", "fm"),
+            rel("deluxe", "Official", "Album", &[], "2004-03-22", "fm"),
+            rel("lp", "Official", "Album", &[], "1977-02-04", "fm"),
+            rel("live", "Official", "Album", &["Live"], "1980-12-08", "fm"),
+        ]});
+        assert_eq!(album_release(&r)["id"], "lp");
+        let only = json!({ "artist-credit": [{ "artist": { "id": "fm" } }], "releases": [
+            rel("hits", "Official", "Album", &["Compilation"], "1988-11-21", "fm"), rel("single", "Official", "Single", &[], "1977-03-24", "fm"),
+        ]});
+        assert_eq!(album_release(&only)["id"], "single");
+        let best_of = json!({ "releases": [rel("hits", "Official", "Album", &["Compilation"], "1988-11-21", "fm")] });
+        assert_eq!(album_release(&best_of)["id"], "hits");
+        assert_eq!(album_release(&json!({})), json!(null));
+    }
 }

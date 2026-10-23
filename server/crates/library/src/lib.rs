@@ -31,6 +31,7 @@ pub mod split;
 pub mod surround;
 pub mod tagger;
 pub mod translate;
+pub mod twins;
 pub mod ytmusic;
 
 pub use scan::*;

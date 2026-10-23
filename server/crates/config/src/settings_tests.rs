@@ -45,7 +45,7 @@ fn table_order_is_a_to_z_then_the_later_keys() {
     let first_late = keys.iter().position(|k| *k == "email_login").unwrap();
     assert!(keys[..first_late].windows(2).all(|w| w[0] < w[1]), "the first run is A to Z");
     assert_eq!(&keys[first_late..first_late + 3], &["email_login", "app_session_days", "lastfm_shared_secret"]);
-    assert_eq!(keys.last(), Some(&"translate_background"));
+    assert_eq!(keys.last(), Some(&"single_to_album"));
 }
 
 #[test]
