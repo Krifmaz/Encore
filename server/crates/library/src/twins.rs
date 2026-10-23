@@ -43,7 +43,7 @@ pub struct Song {
 }
 
 impl Song {
-    fn from_mb(&self) -> bool {
+    fn has_mbid(&self) -> bool {
         !self.mbid.is_empty()
     }
 }
@@ -58,7 +58,7 @@ pub struct Plan {
 
 /// The shown copy first: lossless, then the bitrate, then MusicBrainz's, then the oldest.
 fn rank(s: &Song) -> (bool, i64, bool, i64) {
-    (s.lossless, s.bitrate, s.from_mb(), -s.id)
+    (s.lossless, s.bitrate, s.has_mbid(), -s.id)
 }
 
 /// The groups of copies of one song (two or more songs each, at least one from MusicBrainz and one not).
@@ -87,7 +87,7 @@ fn groups(songs: &[Song]) -> Vec<Vec<&Song>> {
         }
         out.push(run);
     }
-    out.retain(|g| g.len() >= 2 && g.iter().any(|s| s.from_mb()) && g.iter().any(|s| !s.from_mb()));
+    out.retain(|g| g.len() >= 2 && g.iter().any(|s| s.has_mbid()) && g.iter().any(|s| !s.has_mbid()));
     out
 }
 
@@ -102,8 +102,8 @@ pub fn plan(songs: &[Song]) -> Plan {
                 copies.insert(s.id, shown.id);
             }
         }
-        let albums: HashSet<&str> = g.iter().filter(|s| s.from_mb() && !s.rg.is_empty()).map(|s| s.album_id.as_str()).collect();
-        for s in g.iter().filter(|s| !s.from_mb()) {
+        let albums: HashSet<&str> = g.iter().filter(|s| s.has_mbid() && !s.rg.is_empty()).map(|s| s.album_id.as_str()).collect();
+        for s in g.iter().filter(|s| !s.has_mbid()) {
             on_albums.insert(s.id, albums.clone());
         }
     }
@@ -185,6 +185,7 @@ pub fn find_copies(c: &Conn) -> rusqlite::Result<Found> {
 mod tests {
     use super::*;
 
+    #[allow(clippy::too_many_arguments)]
     fn song(id: i64, album_id: &str, album: &str, title: &str, artist: &str, duration: f64, mbid: &str, rg: &str) -> Song {
         Song { id, album_id: album_id.into(), album: album.into(), title: title.into(), artist: artist.into(), duration, mbid: mbid.into(), rg: rg.into(), lossless: false, bitrate: 320 }
     }
