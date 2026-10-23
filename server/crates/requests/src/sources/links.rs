@@ -53,14 +53,18 @@ pub async fn fetch_as(st: &impl Ctx, url: &str, uid: Option<i64>) -> anyhow::Res
     Ok(data)
 }
 
-/// "Artist - Title" (or "Title by Artist", or CSV artist,title) per line.
+/// "Artist - Title" (or "Title by Artist", or CSV artist,title) per line. Every other non-empty line is still a
+/// song: "- Title" or "Title -" (no artist), "Artist -Title" (a dash spaced on one side only) or a bare title.
 pub fn parse_text(text: &str) -> anyhow::Result<Value> {
-    let num = Regex::new(r"^\d+[\.\)]\s*").unwrap();
+    // "1. " / "12) " numbering; a name like "10.000 Maniacs" keeps its digits
+    let num = Regex::new(r"^\d+[\.\)]\s+").unwrap();
     let dash = Regex::new(r"\s[-–—]\s").unwrap();
+    let loose_dash = Regex::new(r"\s[-–—]|[-–—]\s").unwrap();
     let by = Regex::new(r"(?i)\sby\s").unwrap();
+    let edge_dash: &[char] = &['-', '–', '—'];
     let mut tracks = vec![];
     for line in text.lines() {
-        let line = line.trim().trim_matches('\u{feff}');
+        let line = line.trim_matches(|c: char| c.is_whitespace() || c == '\u{feff}');
         if line.is_empty() || line.starts_with('#') {
             continue;
         }
@@ -68,17 +72,27 @@ pub fn parse_text(text: &str) -> anyhow::Result<Value> {
         let (artist, title) = if dash.is_match(&line) {
             let mut it = dash.splitn(&line, 2);
             (it.next().unwrap_or("").to_string(), it.next().unwrap_or("").to_string())
+        } else if line.starts_with(edge_dash) || line.ends_with(edge_dash) {
+            (String::new(), line.trim_matches(edge_dash).to_string())
         } else if by.is_match(&line) {
             let mut it = by.splitn(&line, 2);
             let title = it.next().unwrap_or("").to_string();
             (it.next().unwrap_or("").to_string(), title)
-        } else if let Some((a, b)) = line.split_once(',') {
-            (a.trim().trim_matches('"').to_string(), b.trim().trim_matches('"').to_string())
         } else if let Some((a, b)) = line.split_once('\t') {
             (a.to_string(), b.to_string())
+        } else if let Some((a, b)) = line.split_once(',') {
+            (a.trim().trim_matches('"').to_string(), b.trim().trim_matches('"').to_string())
+        } else if loose_dash.is_match(&line) {
+            let mut it = loose_dash.splitn(&line, 2);
+            (it.next().unwrap_or("").to_string(), it.next().unwrap_or("").to_string())
         } else {
-            continue;
+            (String::new(), line.clone())
         };
+        // "Artist - " with nothing after it: the one name there is the song's
+        let (artist, title) = if title.trim().is_empty() { (String::new(), artist) } else { (artist, title) };
+        if title.trim().is_empty() {
+            continue;
+        }
         tracks.push(t(&title, &artist, None, None, None, None, None, None));
     }
     if tracks.is_empty() {
@@ -480,5 +494,14 @@ mod tests {
         assert_eq!(t[1]["artist"], "Adele");
         assert_eq!(t[2]["title"], "Uprising");
         assert_eq!(super::detect("https://open.spotify.com/playlist/x"), Some("spotify"));
+    }
+
+    #[test]
+    fn text_lists_keep_every_song_line() {
+        let v = super::parse_text("\u{feff}Aesop Rock - 39 Thieves\r\n - No Artist Song\r\nLonely Title -\r\nArtist -Glued\r\nJust A Title\r\n10.000 Maniacs - Trouble Me\r\n\r\n米津玄師 - Lemon\r\nTab\tSeparated").unwrap();
+        let t = v["tracks"].as_array().unwrap();
+        let got: Vec<(&str, &str)> = t.iter().map(|x| (x["artist"].as_str().unwrap(), x["title"].as_str().unwrap())).collect();
+        assert_eq!(got, vec![("Aesop Rock", "39 Thieves"), ("", "No Artist Song"), ("", "Lonely Title"), ("Artist", "Glued"), ("", "Just A Title"),
+                             ("10.000 Maniacs", "Trouble Me"), ("米津玄師", "Lemon"), ("Tab", "Separated")]);
     }
 }

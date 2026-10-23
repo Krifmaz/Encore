@@ -43,7 +43,17 @@ pub fn identity(r: &Row, by_track: bool) -> String {
     if let Some(i) = opt(r, "isrc") {
         return format!("i:{i}");
     }
-    format!("k:{}", key(&item_desc(r)))
+    let d = item_desc(r);
+    // a title that is only symbols ("★", "...") folds to nothing: its own text tells such songs apart
+    if d.base.is_empty() {
+        return format!("k:{}|{}", key(&d), r.s("title").trim().to_lowercase());
+    }
+    format!("k:{}", key(&d))
+}
+
+/// The numbers in a folded title ("part 2", "interlude ii"): songs whose numbers differ are different songs.
+fn numbers(base: &str) -> Vec<&str> {
+    base.split_whitespace().filter(|w| w.chars().all(|c| c.is_ascii_digit()) || ["i", "ii", "iii", "iv", "v", "vi", "vii", "viii", "ix", "x"].contains(w)).collect()
 }
 
 /// Drop rows that are the same song+version as an earlier row (version-aware).
@@ -58,7 +68,8 @@ pub fn dedupe_rows(rows: Vec<Row>) -> (Vec<Row>, usize) {
         }
         let d = item_desc(&r);
         let pre = |x: &str| x.chars().take(4).collect::<String>();
-        if r.i("track_id") == 0 && kept.iter().any(|kd| pre(&kd.base) == pre(&d.base) && compare(&d, kd, true).matched) {
+        if r.i("track_id") == 0 && !d.base.is_empty()
+            && kept.iter().any(|kd| pre(&kd.base) == pre(&d.base) && numbers(&kd.base) == numbers(&d.base) && compare(&d, kd, true).matched) {
             dropped += 1;
             continue;
         }
@@ -301,4 +312,25 @@ pub async fn refresh_followed(st: &impl Ctx, pl: &Row) -> anyhow::Result<(usize,
     // matching against the library and the inserts on the blocking pool
     let (st, pid, source) = (st.clone(), pl.i("id"), pl.s("source"));
     tokio::task::spawn_blocking(move || add_tracks(&st, pid, data["tracks"].as_array().map(|a| a.as_slice()).unwrap_or(&[]), &source)).await?
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn row(title: &str, artist: &str) -> Row {
+        let mut r = Row::new();
+        r.insert("title".into(), json!(title));
+        r.insert("artist".into(), json!(artist));
+        r
+    }
+
+    #[test]
+    fn dedupe_keeps_numbered_parts_and_symbol_titles() {
+        let rows = vec![row("Song Part 1", "A"), row("Song Part 2", "A"), row("Interlude I", "B"), row("Interlude II", "B"),
+                        row("★", "C"), row("☆", "C"), row("Song Part 1", "A"), row("Hello", "D"), row("Hello (feat. E)", "D")];
+        let (kept, dropped) = dedupe_rows(rows);
+        assert_eq!(dropped, 2);
+        assert_eq!(kept.len(), 7);
+    }
 }
