@@ -176,6 +176,8 @@ pub struct Import {
     pub mode: String,
     pub link: String,
     pub lines: text_editor::Content,
+    /// "Show all": the pasted list at its full height instead of [`LIST_ROWS`] rows.
+    pub lines_open: bool,
     pub name: String,
     pub follow: bool,
     pub request_missing: bool,
@@ -192,6 +194,7 @@ impl Import {
             mode: "url".into(),
             link: url.to_string(),
             lines: text_editor::Content::new(),
+            lines_open: false,
             name: String::new(),
             follow: false,
             request_missing: false,
@@ -223,6 +226,8 @@ pub enum ImportMsg {
     /// "Choose a .txt file": its lines go into the list as if they were pasted.
     PickFile,
     Picked(Option<String>),
+    /// "Show all" / "Collapse" on a long pasted list.
+    LinesOpen(bool),
     Name(String),
     Follow(bool),
     RequestMissing(bool),
@@ -231,6 +236,19 @@ pub enum ImportMsg {
     Previewed(Result<Value, ApiError>),
     Go,
     Done(Result<Value, ApiError>),
+}
+
+/// The pasted list's height until "Show all", in rows.
+pub const LIST_ROWS: u16 = 8;
+
+/// The lines with something on them: the count next to Show all / Collapse.
+pub fn list_lines(text: &str) -> usize {
+    text.lines().filter(|l| !l.trim().is_empty()).count()
+}
+
+/// A paste of more lines than the box shows: the list folds back to [`LIST_ROWS`].
+fn is_long_paste(a: &text_editor::Action) -> bool {
+    matches!(a, text_editor::Action::Edit(text_editor::Edit::Paste(s)) if s.lines().count() > usize::from(LIST_ROWS))
 }
 
 /// "Imported 12 track(s), skipped 2 duplicate(s), requested 3".
@@ -250,7 +268,12 @@ pub fn import_update(imp: &mut Import, msg: ImportMsg, ctx: &mut Ctx) -> (Task<I
     match msg {
         ImportMsg::Mode(m) => imp.mode = m,
         ImportMsg::Link(s) => imp.link = s,
-        ImportMsg::Lines(a) => imp.lines.perform(a),
+        ImportMsg::Lines(a) => {
+            if is_long_paste(&a) {
+                imp.lines_open = false;
+            }
+            imp.lines.perform(a)
+        }
         ImportMsg::PickFile => {
             return (
                 Task::perform(
@@ -267,7 +290,11 @@ pub fn import_update(imp: &mut Import, msg: ImportMsg, ctx: &mut Ctx) -> (Task<I
                 None,
             );
         }
-        ImportMsg::Picked(Some(t)) => imp.lines = text_editor::Content::with_text(&t),
+        ImportMsg::Picked(Some(t)) => {
+            imp.lines = text_editor::Content::with_text(&t);
+            imp.lines_open = false;
+        }
+        ImportMsg::LinesOpen(b) => imp.lines_open = b,
         ImportMsg::Picked(None) => {}
         ImportMsg::Name(s) => imp.name = s,
         ImportMsg::Follow(b) => imp.follow = b,
@@ -409,8 +436,24 @@ fn import_body<'a>(imp: &'a Import) -> El<'a, ImportMsg> {
             .spacing(6),
         );
     } else {
-        col = col.push(text_area(&imp.lines, "One per line:  Artist - Title", 8, ImportMsg::Lines));
-        col = col.push(btn_icon(Icon::Plus, "Choose a .txt file", Btn::Default, Some(ImportMsg::PickFile)));
+        // a long list stays in a box of LIST_ROWS rows until Show all
+        let rows = imp.lines.line_count();
+        let long = rows > usize::from(LIST_ROWS);
+        let height = if long && imp.lines_open { u16::try_from(rows).unwrap_or(u16::MAX) } else { LIST_ROWS };
+        col = col.push(text_area(&imp.lines, "One per line:  Artist - Title", height, ImportMsg::Lines));
+        let mut under = row![btn_icon(Icon::Plus, "Choose a .txt file", Btn::Default, Some(ImportMsg::PickFile))]
+            .spacing(12)
+            .align_y(Alignment::Center);
+        if long {
+            under = under
+                .push(btn_sm(
+                    if imp.lines_open { "Collapse" } else { "Show all" },
+                    Btn::Ghost,
+                    Some(ImportMsg::LinesOpen(!imp.lines_open)),
+                ))
+                .push(small_muted(format!("{} lines", list_lines(&imp.lines.text()))));
+        }
+        col = col.push(under);
     }
     let mut opts = row![].spacing(14).align_y(Alignment::Center);
     if !imp.has_into() {
@@ -1085,5 +1128,14 @@ mod tests {
         imp.lines = text_editor::Content::with_text("A - B");
         assert_eq!(imp.body(), json!({ "text": "A - B" }));
         assert!(Import::new("", Some(4)).has_into());
+    }
+
+    #[test]
+    fn a_long_pasted_list_folds() {
+        assert_eq!(list_lines("A - B\n\n  \nC - D\n"), 2);
+        let short = text_editor::Action::Edit(text_editor::Edit::Paste(std::sync::Arc::new("A\nB".into())));
+        assert!(!is_long_paste(&short));
+        let long = text_editor::Action::Edit(text_editor::Edit::Paste(std::sync::Arc::new("x\n".repeat(20))));
+        assert!(is_long_paste(&long));
     }
 }

@@ -409,6 +409,15 @@ fun PlaylistEditScreen(nav: Nav, id: Long) {
     }
 }
 
+/** The pasted list's height until "Show all", in lines. */
+const val ImportListRows = 8
+
+/** The lines with something on them: the count next to Show all / Collapse. */
+fun listLines(text: String): Int = text.lines().count { it.isNotBlank() }
+
+/** A paste (or any one change) that adds more lines than the box shows: the list folds back. */
+fun isLongPaste(before: String, after: String): Boolean = after.lines().size > before.lines().size + ImportListRows
+
 /**
  * playlists.js `importModal`: a playlist from a link or a pasted list, with a preview; `into` adds the songs to an
  * existing playlist ("Add tracks from a link") instead of making a new one; [startUrl] fills the link in.
@@ -423,6 +432,8 @@ fun PlaylistImportScreen(nav: Nav, into: Long?, startUrl: String = "", startRequ
     // Settings → Connections → Import Liked Songs opens this with the service's liked-songs link filled in
     var url by remember { mutableStateOf(startUrl) }
     var text by remember { mutableStateOf("") }
+    // a long list stays in a box of ImportListRows lines until Show all; a file or a long paste folds it again
+    var listOpen by remember { mutableStateOf(false) }
     var name by remember { mutableStateOf("") }
     var follow by remember { mutableStateOf(false) }
     // "Choose a .txt file": its lines go into the list as if they were pasted
@@ -432,6 +443,7 @@ fun PlaylistImportScreen(nav: Nav, into: Long?, startUrl: String = "", startRequ
         scope.launch {
             try {
                 text = withContext(Dispatchers.IO) { resolver.openInputStream(uri)?.use { it.readBytes().decodeToString() } ?: "" }
+                listOpen = false
             } catch (e: Exception) {
                 Toasts.show("Could not read that file", "err")
             }
@@ -504,8 +516,24 @@ fun PlaylistImportScreen(nav: Nav, into: Long?, startUrl: String = "", startRequ
                             style = MaterialTheme.typography.bodySmall, color = p.faint, modifier = Modifier.padding(top = 6.dp),
                         )
                     } else {
-                        EncoreField(text, { text = it }, placeholder = "One per line:  Artist - Title", singleLine = false, minLines = 6, imeAction = ImeAction.Default, modifier = Modifier.fillMaxWidth())
-                        SmallButton("Choose a .txt file", iconRes = R.drawable.ic_upload, modifier = Modifier.padding(top = 8.dp)) { pickText.launch(arrayOf("text/plain")) }
+                        val long = text.lines().size > ImportListRows
+                        EncoreField(
+                            text,
+                            {
+                                if (isLongPaste(text, it)) listOpen = false
+                                text = it
+                            },
+                            placeholder = "One per line:  Artist - Title", singleLine = false, minLines = 6,
+                            maxLines = if (long && listOpen) Int.MAX_VALUE else ImportListRows,
+                            imeAction = ImeAction.Default, modifier = Modifier.fillMaxWidth(),
+                        )
+                        Row(Modifier.padding(top = 8.dp), horizontalArrangement = Arrangement.spacedBy(10.dp), verticalAlignment = Alignment.CenterVertically) {
+                            SmallButton("Choose a .txt file", iconRes = R.drawable.ic_upload) { pickText.launch(arrayOf("text/plain")) }
+                            if (long) {
+                                SmallButton(if (listOpen) "Collapse" else "Show all") { listOpen = !listOpen }
+                                Text("${listLines(text)} lines", style = MaterialTheme.typography.bodySmall, color = p.muted)
+                            }
+                        }
                     }
                 }
             }

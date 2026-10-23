@@ -373,6 +373,12 @@ fn pl_card(p: &Value) -> String {
     )
 }
 
+/// The pasted list's height until "Show all", in rows (`<textarea rows>`).
+pub const LIST_ROWS: usize = 8;
+
+/// The lines with something on them: the count next to Show all / Collapse.
+pub fn list_lines(text: &str) -> usize { text.lines().filter(|l| !l.trim().is_empty()).count() }
+
 pub fn import_modal(url: &str, into: Option<i64>) {
     let has_into = into.is_some_and(|i| i != 0);
     let m = modal(ModalOpts::new(
@@ -381,7 +387,8 @@ pub fn import_modal(url: &str, into: Option<i64>) {
       <div class="mt" id="imp-url"><input class="input" id="imp-link" value="{url}" placeholder="YouTube Music, Spotify, Deezer, Tidal, Apple Music, Amazon Music, Qobuz, YouTube (Music), SoundCloud, Bandcamp, ListenBrainz…">
         <p class="small faint" style="margin:6px 0 0">Connect Spotify/Tidal on the Connections page to import private playlists and Liked Songs (e.g. <span class="mono">https://music.youtube.com/playlist?list=LM</span> or <span class="mono">https://open.spotify.com/collection/tracks</span>). Amazon Music playlists and albums import from their public share links.</p></div>
       <div class="mt hidden" id="imp-text"><textarea class="input" id="imp-lines" rows="8" placeholder="One per line:  Artist - Title"></textarea>
-        <label class="btn sm mt">{file}Choose a .txt file<input type="file" id="imp-file" accept=".txt,text/plain" hidden></label></div>
+        <div class="row wrap mt"><label class="btn sm">{file}Choose a .txt file<input type="file" id="imp-file" accept=".txt,text/plain" hidden></label>
+        <span class="row hidden" id="imp-fold"><button class="btn sm" id="imp-fold-btn">Show all</button><span class="small faint" id="imp-count"></span></span></div></div>
       <div class="row wrap mt">
         {name_follow}
         <label class="switch"><input type="checkbox" id="imp-req"><i></i>Download missing tracks</label>
@@ -413,15 +420,48 @@ pub fn import_modal(url: &str, into: Option<i64>) {
             if let Some(l) = m2.qs("#imp-follow").and_then(|f| dom::closest_of(&f, "label")) { dom::toggle_class(&l, "hidden", md != "url"); }
         });
     }
+    // a long list stays in a box of LIST_ROWS rows until Show all; a file or a long paste folds it again
+    let open = Rc::new(std::cell::Cell::new(false));
+    let fold: Rc<dyn Fn()> = {
+        let (m2, open2) = (m.clone(), open.clone());
+        Rc::new(move || {
+            let Some(ta) = m2.qs("#imp-lines") else { return };
+            let v = dom::value(&ta);
+            let rows = v.lines().count();
+            let long = rows > LIST_ROWS;
+            let _ = ta.set_attribute("rows", &if long && open2.get() { rows } else { LIST_ROWS }.to_string());
+            if let Some(f) = m2.qs("#imp-fold") { dom::toggle_class(&f, "hidden", !long); }
+            if let Some(b) = m2.qs("#imp-fold-btn") { dom::set_text(&b, if open2.get() { "Collapse" } else { "Show all" }); }
+            if let Some(c) = m2.qs("#imp-count") { dom::set_text(&c, &format!("{} lines", list_lines(&v))); }
+        })
+    };
+    if let Some(ta) = m.qs("#imp-lines") {
+        let (fold2, open2) = (fold.clone(), open.clone());
+        let before = Rc::new(std::cell::Cell::new(0usize));
+        dom::on(&ta, "input", move |e| {
+            let rows = dom::target_el(e).map(|t| dom::value(&t).lines().count()).unwrap_or(0);
+            if rows > before.get() + LIST_ROWS { open2.set(false); }
+            before.set(rows);
+            fold2();
+        });
+    }
+    if let Some(b) = m.qs("#imp-fold-btn") {
+        let (fold2, open2) = (fold.clone(), open.clone());
+        dom::on(&b, "click", move |_| { open2.set(!open2.get()); fold2(); });
+    }
     // a .txt file fills the list as if it was pasted
     if let Some(f) = m.qs("#imp-file") {
-        let m2 = m.clone();
+        let (m2, fold2, open2) = (m.clone(), fold.clone(), open.clone());
         dom::on(&f, "change", move |e| {
             let Some(file) = dom::target_el(e).and_then(|t| t.dyn_into::<HtmlInputElement>().ok()).and_then(|i| i.files()).and_then(|l| l.get(0)) else { return };
-            let m3 = m2.clone();
+            let (m3, fold3, open3) = (m2.clone(), fold2.clone(), open2.clone());
             dom::spawn(async move {
                 match wasm_bindgen_futures::JsFuture::from(file.text()).await.ok().and_then(|t| t.as_string()) {
-                    Some(t) => { if let Some(l) = m3.qs("#imp-lines") { dom::set_value(&l, &t); } }
+                    Some(t) => {
+                        if let Some(l) = m3.qs("#imp-lines") { dom::set_value(&l, &t); }
+                        open3.set(false);
+                        fold3();
+                    }
                     None => toast("Could not read that file", "err"),
                 }
             });
@@ -966,6 +1006,12 @@ mod missing_report_tests {
         assert_eq!(missing_report_text(&json!({ "requested": 0, "failed": failed })), "Requested 0 · 5 couldn't be requested (reason 0; reason 1; reason 2; 2 more)");
         // an old server that only sends the count
         assert_eq!(missing_report_text(&json!({ "requested": 3 })), "Requested 3");
+    }
+
+    #[test]
+    fn the_pasted_list_counts_lines_with_something_on_them() {
+        assert_eq!(list_lines("A - B\n\n  \nC - D\n"), 2);
+        assert_eq!(list_lines(""), 0);
     }
 
     #[test]
