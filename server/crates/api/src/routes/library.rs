@@ -2145,11 +2145,20 @@ async fn share_page(State(st): State<AppState>, Path(token): Path<String>, req: 
     // being made in the background) next time
     let video = mode.trim() == "playable"
         && tokio::time::timeout(std::time::Duration::from_secs(SHARE_PAGE_VIDEO_WAIT), share_video(&st, &token)).await.ok().flatten().is_some();
-    Ok(([(header::CONTENT_TYPE, "text/html; charset=utf-8"), (header::CACHE_CONTROL, "no-cache")], share_page_html(&html, &meta, &base, &token, mode.trim(), video)).into_response())
+    let discord = req.headers().get(header::USER_AGENT).and_then(|v| v.to_str().ok()).is_some_and(is_discord_bot);
+    Ok(([(header::CONTENT_TYPE, "text/html; charset=utf-8"), (header::CACHE_CONTROL, "no-cache"), (header::VARY, "User-Agent")],
+        share_page_html(&html, &meta, &base, &token, mode.trim(), video, discord)).into_response())
 }
 
-/// The page with its preview tags (see `share_page`); `video`: the preview video exists.
-pub(crate) fn share_page_html(html: &str, meta: &Value, base: &str, token: &str, mode: &str, video: bool) -> String {
+/// Discord's link-preview crawler. Given `og:audio` or a `music.*` type it builds an "audio" embed that its
+/// Android app can't read ("EmbedType does not contain element with name 'audio'"), and the whole chat crashes.
+pub(crate) fn is_discord_bot(ua: &str) -> bool {
+    ua.to_ascii_lowercase().contains("discordbot")
+}
+
+/// The page with its preview tags (see `share_page`); `video`: the preview video exists; `discord`: for
+/// Discord's crawler, a plain picture (or video) card with no audio or music tags (see `is_discord_bot`).
+pub(crate) fn share_page_html(html: &str, meta: &Value, base: &str, token: &str, mode: &str, video: bool, discord: bool) -> String {
     use encore_core::text::html_escape as esc;
     let e = |v: &Value| esc(v.as_str().unwrap_or(""));
     let kind = meta["kind"].as_str().unwrap_or("track");
@@ -2186,7 +2195,7 @@ pub(crate) fn share_page_html(html: &str, meta: &Value, base: &str, token: &str,
     let tok = esc(token);
     let base = esc(base);
     let app = e(&meta["app_name"]);
-    let og_type = if video { "video.other" } else { match kind { "album" => "music.album", "artist" => "profile", "playlist" => "music.playlist", _ => "music.song" } };
+    let og_type = if video { "video.other" } else if discord { "website" } else { match kind { "album" => "music.album", "artist" => "profile", "playlist" => "music.playlist", _ => "music.song" } };
     let card = if video { "player" } else if mode == "large" { "summary_large_image" } else { "summary" };
     let mime = browser_type(meta["format"].as_str().unwrap_or("")).unwrap_or("audio/flac");
     // a playlist with no song in the library has nothing to play and no picture
@@ -2203,11 +2212,16 @@ pub(crate) fn share_page_html(html: &str, meta: &Value, base: &str, token: &str,
         tags.push_str(&format!(
             r#"<meta property="og:image" content="{base}/api/share/{tok}/cover?s=600">
 <meta property="og:image:width" content="600"><meta property="og:image:height" content="600">
-<meta property="og:audio" content="{base}/api/share/{tok}/stream">
+"#));
+        if !discord {
+            tags.push_str(&format!(
+                r#"<meta property="og:audio" content="{base}/api/share/{tok}/stream">
 <meta property="og:audio:type" content="{mime}">
 "#));
+        }
     }
     match kind {
+        _ if discord => {}
         "album" => tags.push_str(&format!("<meta property=\"music:musician\" content=\"{}\">\n", e(&meta["artist"]))),
         "artist" | "playlist" => {}
         _ => tags.push_str(&format!(

@@ -230,16 +230,16 @@ fn meta_playlist() -> Value {
 #[test]
 fn preview_tags_follow_the_setting() {
     let html = "<title>Shared song</title>\n<!--META-->";
-    let small = share_page_html(html, &meta_song(), "https://m.example", "tok", "small", false);
+    let small = share_page_html(html, &meta_song(), "https://m.example", "tok", "small", false, false);
     assert!(small.contains(r#"<meta name="twitter:card" content="summary">"#), "{small}");
     assert!(small.contains(r#"<meta property="og:audio" content="https://m.example/api/share/tok/stream">"#));
     assert!(small.contains(r#"<meta property="og:type" content="music.song">"#));
     assert!(small.contains("Elephunk (2003) · MP3 · 320 kbps · 3:34 · Shared from Encore"), "{small}");
     assert!(!small.contains("og:video"));
-    let large = share_page_html(html, &meta_song(), "https://m.example", "tok", "large", false);
+    let large = share_page_html(html, &meta_song(), "https://m.example", "tok", "large", false, false);
     assert!(large.contains(r#"<meta name="twitter:card" content="summary_large_image">"#), "{large}");
     // playable, made: a video card that keeps the audio
-    let play = share_page_html(html, &meta_song(), "https://m.example", "tok", "playable", true);
+    let play = share_page_html(html, &meta_song(), "https://m.example", "tok", "playable", true, false);
     for tag in [
         r#"<meta name="twitter:card" content="player">"#,
         r#"<meta property="og:video" content="https://m.example/api/share/tok/video.mp4">"#,
@@ -252,18 +252,18 @@ fn preview_tags_follow_the_setting() {
         assert!(play.contains(tag), "{tag} missing: {play}");
     }
     // playable but ffmpeg failed: the small card
-    let failed = share_page_html(html, &meta_song(), "https://m.example", "tok", "playable", false);
+    let failed = share_page_html(html, &meta_song(), "https://m.example", "tok", "playable", false, false);
     assert!(failed.contains(r#"<meta name="twitter:card" content="summary">"#) && !failed.contains("og:video"), "{failed}");
     // an unknown value: small
-    assert!(share_page_html(html, &meta_song(), "b", "tok", "huge", false).contains(r#"content="summary">"#));
+    assert!(share_page_html(html, &meta_song(), "b", "tok", "huge", false, false).contains(r#"content="summary">"#));
     // text is escaped
     let mut m = meta_song();
     m["title"] = json!("<b>\"x\"</b>");
-    let esc = share_page_html(html, &m, "b", "tok", "small", false);
+    let esc = share_page_html(html, &m, "b", "tok", "small", false, false);
     assert!(!esc.contains("<b>") && esc.contains("&lt;b&gt;"), "{esc}");
 
     // a playlist: its name and owner, and how many songs (not how long)
-    let pl = share_page_html(html, &meta_playlist(), "https://m.example", "tok", "small", false);
+    let pl = share_page_html(html, &meta_playlist(), "https://m.example", "tok", "small", false, false);
     for tag in [
         "<title>Road trip · anna</title>",
         r#"<meta property="og:title" content="Road trip · anna">"#,
@@ -280,15 +280,15 @@ fn preview_tags_follow_the_setting() {
     assert!(!pl.contains("music:musician") && !pl.contains("music:duration"), "{pl}");
     let mut one = meta_playlist();
     one["count"] = json!(1);
-    assert!(share_page_html(html, &one, "b", "tok", "small", false).contains("1 song · Shared from Encore"));
+    assert!(share_page_html(html, &one, "b", "tok", "small", false, false).contains("1 song · Shared from Encore"));
     // the playable card works as for the others
-    let play = share_page_html(html, &meta_playlist(), "b", "tok", "playable", true);
+    let play = share_page_html(html, &meta_playlist(), "b", "tok", "playable", true, false);
     assert!(play.contains(r#"<meta property="og:type" content="video.other">"#) && play.contains(r#"content="player">"#), "{play}");
     // nothing in the library: no audio and no picture, the rest as usual
     let mut empty = meta_playlist();
     empty["count"] = json!(0);
     empty["tracks"] = json!([]);
-    let empty = share_page_html(html, &empty, "b", "tok", "large", false);
+    let empty = share_page_html(html, &empty, "b", "tok", "large", false, false);
     assert!(empty.contains(r#"<meta property="og:title" content="Road trip · anna">"#) && empty.contains("0 songs · Shared from Encore"), "{empty}");
     assert!(!empty.contains("og:audio") && !empty.contains("og:image") && !empty.contains("twitter:image"), "{empty}");
     assert!(empty.contains(r#"<meta name="twitter:card" content="summary_large_image">"#) && empty.contains(r#"<meta name="description""#), "{empty}");
@@ -296,8 +296,26 @@ fn preview_tags_follow_the_setting() {
     let mut m = meta_playlist();
     m["title"] = json!("<i>Mix</i>");
     m["owner"] = json!("\"a&b\"");
-    let esc = share_page_html(html, &m, "b", "tok", "small", false);
+    let esc = share_page_html(html, &m, "b", "tok", "small", false, false);
     assert!(esc.contains("<title>&lt;i&gt;Mix&lt;/i&gt; · &quot;a&amp;b&quot;</title>") && !esc.contains("<i>"), "{esc}");
+}
+
+#[test]
+fn discord_gets_a_card_without_audio() {
+    use super::is_discord_bot;
+    assert!(is_discord_bot("Mozilla/5.0 (compatible; Discordbot/2.0; +https://discordapp.com)"));
+    assert!(!is_discord_bot("WhatsApp/2.23") && !is_discord_bot("facebookexternalhit/1.1"));
+    let html = "<title>Shared song</title>\n<!--META-->";
+    for meta in [meta_song(), meta_playlist()] {
+        for (mode, video) in [("small", false), ("large", false), ("playable", true)] {
+            let d = share_page_html(html, &meta, "https://m.example", "tok", mode, video, true);
+            assert!(!d.contains("og:audio") && !d.contains("music:") && !d.contains("music."), "{d}");
+            assert!(d.contains(r#"<meta property="og:image" content="https://m.example/api/share/tok/cover?s=600">"#), "{d}");
+            assert!(d.contains(if video { r#"content="video.other">"# } else { r#"<meta property="og:type" content="website">"# }), "{d}");
+        }
+    }
+    // everyone else keeps the audio
+    assert!(share_page_html(html, &meta_song(), "b", "tok", "small", false, false).contains("og:audio"));
 }
 
 #[test]
