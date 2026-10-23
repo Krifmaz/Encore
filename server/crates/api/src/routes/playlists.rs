@@ -407,17 +407,29 @@ async fn move_item(State(st): State<AppState>, User(u): User, Path(pid): Path<i6
 #[derive(Deserialize)]
 struct MergeBody {
     ids: Vec<i64>,
+    #[serde(default)]
     name: String,
     #[serde(default)]
     delete_sources: bool,
+    /// Merge into…: add the songs to this playlist (Liked Songs too) instead of making a new one.
+    #[serde(default)]
+    into: Option<i64>,
 }
 
 async fn merge(State(st): State<AppState>, User(u): User, Json(b): Json<MergeBody>) -> ApiResult<Json<Value>> {
-    if b.ids.len() < 2 {
+    let into = b.into.filter(|i| *i != 0);
+    let sources = b.ids.iter().filter(|i| Some(**i) != into).count();
+    if into.is_some() && sources == 0 {
+        return Err(err(400, "Pick a playlist to merge"));
+    }
+    if into.is_none() && b.ids.len() < 2 {
         return Err(err(400, "Pick at least two playlists"));
     }
     let name = if b.name.trim().is_empty() { "Merged playlist".to_string() } else { b.name.trim().to_string() };
     st.blocking(move |st| {
+        if let Some(pid) = into {
+            editable(st, pid, &u)?;
+        }
         // someone else's playlist added from a link is not the user's to merge (or delete with it): a copy is
         for pid in &b.ids {
             if let Some(pl) = st.db.one("SELECT * FROM playlists WHERE id=? AND user_id=? AND kind='linked'", p![pid, u.i("id")])? {
@@ -425,9 +437,12 @@ async fn merge(State(st): State<AppState>, User(u): User, Json(b): Json<MergeBod
                 return Err(err(403, format!("“{}” is {owner}'s playlist. Save a copy to merge it.", pl.s("name"))));
             }
         }
-        let res = playlists::merge(st, u.i("id"), &b.ids, &name).map_err(bad)?;
+        let res = match into {
+            Some(pid) => playlists::merge_into(st, u.i("id"), &b.ids, pid).map_err(bad)?,
+            None => playlists::merge(st, u.i("id"), &b.ids, &name).map_err(bad)?,
+        };
         if b.delete_sources {
-            for pid in &b.ids {
+            for pid in b.ids.iter().filter(|i| Some(**i) != into) {
                 if st.db.one("SELECT kind FROM playlists WHERE id=? AND user_id=?", p![pid, u.i("id")])?.is_some_and(|p| p.s("kind") != "liked") {
                     st.db.execute("DELETE FROM playlist_items WHERE playlist_id=?", p![pid])?;
                     st.db.execute("DELETE FROM playlists WHERE id=?", p![pid])?;

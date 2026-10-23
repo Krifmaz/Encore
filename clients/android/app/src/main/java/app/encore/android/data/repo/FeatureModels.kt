@@ -1236,6 +1236,8 @@ data class ImportResult(
     val added: LInt = 0,
     @SerialName("duplicates_skipped") val duplicatesSkipped: LInt = 0,
     val requested: LInt = 0,
+    /** Merge: how many songs the merged playlists had. */
+    val total: LInt = 0,
 )
 
 /** A song "Download missing" couldn't request, and why. */

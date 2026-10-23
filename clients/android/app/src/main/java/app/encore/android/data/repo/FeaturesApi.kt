@@ -653,6 +653,16 @@ class FeaturesApi(private val api: EncoreApi, private val client: OkHttpClient) 
         return (call("POST", "/api/playlists/import", body) as? JsonObject ?: JsonObject(emptyMap())).page(ImportResult.serializer())
     }
 
+    /** POST /api/playlists/merge {ids, into, delete_sources}: Merge into… (Liked Songs too), duplicates skipped. */
+    fun mergeInto(ids: List<Long>, into: Long, deleteSources: Boolean): ImportResult {
+        val body = buildJsonObject {
+            put("ids", buildJsonArray { ids.forEach { add(JsonPrimitive(it)) } })
+            put("into", into)
+            put("delete_sources", deleteSources)
+        }
+        return (call("POST", "/api/playlists/merge", body) as? JsonObject ?: JsonObject(emptyMap())).page(ImportResult.serializer())
+    }
+
     private fun importBody(url: String?, text: String?): JsonObject = buildJsonObject {
         if (!text.isNullOrBlank()) put("text", text) else put("url", (url ?: "").trim())
     }

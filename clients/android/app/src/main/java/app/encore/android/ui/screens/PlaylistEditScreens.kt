@@ -57,6 +57,7 @@ import app.encore.android.features.library.AddSharedPlaylistDialog
 import app.encore.android.features.library.CollabMembersDialog
 import app.encore.android.features.library.PlaylistCollabRules
 import app.encore.android.features.library.PlaylistLinkRules
+import app.encore.android.features.library.PlaylistMergeRules
 import app.encore.android.features.library.PlaylistShareRules
 import app.encore.android.features.settings.copyToClipboard
 import app.encore.android.ui.Nav
@@ -67,6 +68,7 @@ import app.encore.android.ui.components.EmptyState
 import app.encore.android.ui.components.EncoreButton
 import app.encore.android.ui.components.EncoreTopBar
 import app.encore.android.ui.components.Gutter
+import app.encore.android.ui.components.Loadable
 import app.encore.android.ui.components.LoadableContent
 import app.encore.android.ui.components.MenuEntry
 import app.encore.android.ui.components.MenuSeparator
@@ -177,6 +179,61 @@ fun AlbumChoiceDialog(title: String, onDismiss: () -> Unit, onPick: (albumMode: 
 }
 
 /**
+ * Merge into…: the songs of playlist [id] go into another playlist or Liked Songs (duplicates skipped, songs not in
+ * the library kept as missing so they still download); opens the target afterwards.
+ */
+@Composable
+fun MergeIntoDialog(nav: Nav, id: Long, name: String, onDismiss: () -> Unit) {
+    val p = MaterialTheme.palette
+    val scope = rememberCoroutineScope()
+    val loader = rememberLoad("merge-into", id) { PlaylistMergeRules.targets(nav.graph.api.playlists(), skip = id) }
+    var deleteSource by remember { mutableStateOf(false) }
+    var busy by remember { mutableStateOf(false) }
+    fun merge(into: Long, intoName: String) {
+        if (busy) return
+        busy = true
+        scope.launch {
+            try {
+                val r = withContext(Dispatchers.IO) { nav.features.mergeInto(listOf(id), into, deleteSource) }
+                Toasts.show(PlaylistMergeRules.mergedText(r.added, r.total, r.duplicatesSkipped), "ok")
+                onDismiss()
+                if (deleteSource) nav.back()
+                nav.open(Screen.Playlist(into, intoName))
+            } catch (e: Exception) {
+                Toasts.show(e.message ?: "Couldn't merge", "err")
+                busy = false
+            }
+        }
+    }
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        containerColor = p.panel,
+        titleContentColor = p.text,
+        textContentColor = p.muted,
+        title = { Text(PlaylistMergeRules.TITLE) },
+        text = {
+            Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                Text(PlaylistMergeRules.hint(name), style = MaterialTheme.typography.bodyMedium)
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Switch(checked = deleteSource, onCheckedChange = { deleteSource = it })
+                    Spacer(Modifier.width(8.dp)); Text(PlaylistMergeRules.DELETE_SOURCE, color = p.text)
+                }
+                LoadableContent(loader) { targets ->
+                    LazyColumn(Modifier.fillMaxWidth().height(if (targets.size > 5) 280.dp else (targets.size.coerceAtLeast(1) * 52).dp)) {
+                        items(targets.size) { i ->
+                            val pl = targets[i]
+                            EncoreButton(PlaylistMergeRules.label(pl), enabled = !busy, modifier = Modifier.fillMaxWidth().padding(vertical = 3.dp)) { merge(pl.id, pl.name) }
+                        }
+                    }
+                }
+            }
+        },
+        confirmButton = {},
+        dismissButton = { TextButton(onClick = onDismiss) { Text("Cancel", color = p.muted) } },
+    )
+}
+
+/**
  * The Playlists page's New / Add a shared playlist / Import buttons (the web's header buttons), for the design part's
  * top bar.
  */
@@ -248,10 +305,12 @@ fun PlaylistMenu(
     var confirmDelete by remember { mutableStateOf(false) }
     var confirmStop by remember { mutableStateOf(false) }
     var missingChoice by remember { mutableStateOf(false) }
+    var mergeInto by remember { mutableStateOf(false) }
     MoreButton(
         entries = listOf(
             MenuEntry("Edit songs", R.drawable.ic_edit) { nav.open(Screen.PlaylistEdit(id)) },
             MenuEntry("Add from link", R.drawable.ic_link) { nav.open(Screen.PlaylistImport(id)) },
+            if (!isLiked && !member) MenuEntry(PlaylistMergeRules.TITLE, R.drawable.ic_queue_music) { mergeInto = true } else null,
             if (!member) MenuEntry("Download missing", R.drawable.ic_download) { missingChoice = true } else null,
             MenuEntry("Remove duplicates", R.drawable.ic_check) {
                 act(scope, { val n = features.dedupePlaylist(id); if (n > 0) "Removed $n duplicate(s)" else "No duplicates" }, onChanged)
@@ -270,6 +329,7 @@ fun PlaylistMenu(
             if (!isLiked && !member) MenuEntry("Delete playlist", R.drawable.ic_delete, danger = true) { confirmDelete = true } else null,
         ),
     )
+    if (mergeInto) MergeIntoDialog(nav, id, name) { mergeInto = false }
     if (members) CollabMembersDialog(nav, id, onChanged = onChanged, onLeft = { members = false; nav.back() }) { members = false }
     if (confirmLeave) {
         ConfirmDialog(PlaylistCollabRules.LEAVE, PlaylistCollabRules.leaveText(name), "Leave", danger = true, onDismiss = { confirmLeave = false }) {
@@ -457,6 +517,11 @@ fun PlaylistImportScreen(nav: Nav, into: Long?, startUrl: String = "", startRequ
     var previewError by remember { mutableStateOf<String?>(null) }
     var previewing by remember { mutableStateOf(false) }
     var importing by remember { mutableStateOf(false) }
+    // Save to (a new import): a new playlist, Liked Songs or one of yours
+    var saveTo by remember { mutableStateOf<Long?>(null) }
+    val targets = rememberLoad("import-targets", into) { if (into == null) PlaylistMergeRules.targets(nav.graph.api.playlists()) else emptyList() }
+    val targetList = (targets.state.value as? Loadable.Ready)?.value.orEmpty()
+    val dest = into ?: saveTo
     val scrollBehavior = TopAppBarDefaults.enterAlwaysScrollBehavior()
 
     fun bodyUrl(): String? = if (mode == 0) url.trim() else null
@@ -484,14 +549,14 @@ fun PlaylistImportScreen(nav: Nav, into: Long?, startUrl: String = "", startRequ
         scope.launch {
             try {
                 val r = withContext(Dispatchers.IO) {
-                    features.importPlaylist(bodyUrl(), bodyText(), if (into == null) name else null, follow && mode == 0 && into == null, into, requestMissing, albumModes[albumMode].first.ifEmpty { null })
+                    features.importPlaylist(bodyUrl(), bodyText(), if (dest == null) name else null, follow && mode == 0 && dest == null, dest, requestMissing, albumModes[albumMode].first.ifEmpty { null })
                 }
                 Toasts.show(
                     "Imported ${r.added} track(s)" + (if (r.duplicatesSkipped > 0) ", skipped ${r.duplicatesSkipped} duplicate(s)" else "") + (if (r.requested > 0) ", requested ${r.requested}" else ""),
                     "ok",
                 )
                 nav.back()
-                if (into == null && r.id > 0L) nav.open(Screen.Playlist(r.id, name.ifEmpty { preview?.name ?: "Imported playlist" }))
+                if (into == null && r.id > 0L) nav.open(Screen.Playlist(r.id, if (saveTo != null) targetList.firstOrNull { it.id == saveTo }?.name.orEmpty() else name.ifEmpty { preview?.name ?: "Imported playlist" }))
             } catch (e: Exception) {
                 Toasts.show(e.message ?: "Import failed", "err")
                 importing = false
@@ -540,6 +605,16 @@ fun PlaylistImportScreen(nav: Nav, into: Long?, startUrl: String = "", startRequ
             item {
                 Column(Modifier.padding(horizontal = Gutter, vertical = 10.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
                     if (into == null) {
+                        val list = targetList
+                        if (list.isNotEmpty()) {
+                            Text("Save to", style = MaterialTheme.typography.bodySmall, color = p.muted)
+                            FlowRow(horizontalArrangement = Arrangement.spacedBy(6.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                                Badge(PlaylistMergeRules.NEW_PLAYLIST, kind = if (saveTo == null) "accent" else "", onClick = { saveTo = null })
+                                list.forEach { pl -> Badge(PlaylistMergeRules.label(pl), kind = if (saveTo == pl.id) "accent" else "", onClick = { saveTo = pl.id }) }
+                            }
+                        }
+                    }
+                    if (dest == null) {
                         EncoreField(name, { name = it }, placeholder = "Playlist name (optional)", modifier = Modifier.fillMaxWidth())
                         if (mode == 0) {
                             Row(verticalAlignment = Alignment.CenterVertically) {

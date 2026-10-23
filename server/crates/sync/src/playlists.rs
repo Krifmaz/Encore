@@ -253,11 +253,11 @@ pub fn rematch(st: &impl Ctx, pid: Option<i64>, only_unmatched: bool) -> usize {
     n
 }
 
-pub fn merge(st: &impl Ctx, uid: i64, ids: &[i64], name: &str) -> anyhow::Result<Value> {
+/// The songs of the user's own playlists and Liked Songs among `ids` (not someone else's added from a link: it
+/// has no items of its own, and it isn't the user's to merge), in order, as tracks for [`add_tracks`].
+fn merge_tracks(st: &impl Ctx, uid: i64, ids: &[i64]) -> anyhow::Result<Vec<Value>> {
     let mut tracks = vec![];
     for pid in ids {
-        // only the user's own playlists and Liked Songs (not someone else's added from a link: it has no items
-        // of its own, and it isn't the user's to merge)
         if st.db().one("SELECT 1 FROM playlists WHERE id=? AND user_id=? AND kind IN ('playlist','liked')", p![pid, uid])?.is_none() {
             continue;
         }
@@ -267,10 +267,26 @@ pub fn merge(st: &impl Ctx, uid: i64, ids: &[i64], name: &str) -> anyhow::Result
             tracks.push(v);
         }
     }
+    Ok(tracks)
+}
+
+pub fn merge(st: &impl Ctx, uid: i64, ids: &[i64], name: &str) -> anyhow::Result<Value> {
+    let tracks = merge_tracks(st, uid, ids)?;
     let total = tracks.len();
     let mut res = create(st, uid, name, &tracks, "merged", None, &format!("Merged from {} playlists", ids.len()), None, false)?;
     res["total"] = json!(total);
     Ok(res)
+}
+
+/// Merge into…: the songs of `ids` are added to the end of playlist `into` (Liked Songs too), skipping what it
+/// already has (same song + version). Songs not in the library stay as missing items, so they can still be
+/// downloaded (and Liked Songs' auto-download picks them up). The caller checks that `into` takes songs.
+pub fn merge_into(st: &impl Ctx, uid: i64, ids: &[i64], into: i64) -> anyhow::Result<Value> {
+    let ids: Vec<i64> = ids.iter().copied().filter(|i| *i != into).collect();
+    let tracks = merge_tracks(st, uid, &ids)?;
+    let total = tracks.len();
+    let (added, dupes) = add_tracks(st, into, &tracks, "merged")?;
+    Ok(json!({ "id": into, "added": added, "duplicates_skipped": dupes, "total": total }))
 }
 
 /// What "Download missing" did, song by song: requested now, already on its way, or not requestable (and why).

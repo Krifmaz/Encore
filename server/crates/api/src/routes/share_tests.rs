@@ -873,3 +873,34 @@ async fn playlist_cover_is_a_mosaic_of_four_albums() {
     let left = files();
     assert!(left.len() == 1 && left[0].starts_with(&format!("{otok}.")), "{left:?}");
 }
+
+#[tokio::test]
+async fn merge_into_liked_songs_skips_dupes_and_keeps_missing_songs() {
+    let mut e = setup("pl-merge-into").await;
+    let a = e.add("One", "A", "First", "A", "2001");
+    let b = e.add("Two", "B", "Second", "B", "2002");
+    assert_eq!(e.post(&format!("/api/likes/{a}"), None).await.status, StatusCode::OK);
+    let liked = e.get("/api/playlists").await.json().as_array().unwrap().iter().find(|p| p["kind"] == "liked").unwrap()["id"].as_i64().unwrap();
+    let src = e.playlist("Imported list", &[a, b]).await;
+    let r = e.post("/api/playlists/import", Some(json!({ "text": "Nobody Here - Not In The Library", "into": src, "follow": false, "request_missing": false }))).await;
+    assert_eq!(r.status, StatusCode::OK, "{}", r.text());
+
+    // nothing to merge, or a target that isn't the user's: refused
+    let r = e.post("/api/playlists/merge", Some(json!({ "ids": [liked], "into": liked }))).await;
+    assert_eq!(r.status, StatusCode::BAD_REQUEST, "{}", r.text());
+    let other = e.login("other").await;
+    let theirs = call(&e.app, "POST", "/api/playlists", &other, Some(json!({ "name": "Theirs" }))).await.json()["id"].as_i64().unwrap();
+    assert_eq!(e.post("/api/playlists/merge", Some(json!({ "ids": [src], "into": theirs }))).await.status, StatusCode::NOT_FOUND);
+
+    let r = e.post("/api/playlists/merge", Some(json!({ "ids": [src], "into": liked, "delete_sources": true }))).await;
+    assert_eq!(r.status, StatusCode::OK, "{}", r.text());
+    let j = r.json();
+    assert_eq!((j["id"].as_i64(), j["total"].as_i64(), j["added"].as_i64(), j["duplicates_skipped"].as_i64()), (Some(liked), Some(3), Some(2), Some(1)), "{j}");
+    let d = e.get(&format!("/api/playlists/{liked}")).await.json();
+    let items = d["items"].as_array().unwrap();
+    assert_eq!(items.len(), 3, "{d}");
+    assert!(items.iter().any(|i| i["track_id"].is_null() && i["title"] == "Not In The Library"), "the missing song stays: {d}");
+    // the source is gone, Liked Songs is not
+    assert_eq!(e.get(&format!("/api/playlists/{src}")).await.status, StatusCode::NOT_FOUND);
+    assert_eq!(e.get(&format!("/api/playlists/{liked}")).await.status, StatusCode::OK);
+}

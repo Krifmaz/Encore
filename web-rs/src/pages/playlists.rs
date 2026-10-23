@@ -163,6 +163,57 @@ pub fn added_by_text(n: i64) -> String {
 pub fn can_add_to(p: &Value) -> bool {
     !p.truthy("read_only") && !is_linked(p)
 }
+
+/// The `<option>`s of a "Merge into" / "Save to" list: the playlists that take songs (Liked Songs first, as the
+/// list comes), leaving out `skip`.
+pub fn target_options(rows: &[Value], skip: &[i64]) -> String {
+    rows.iter().filter(|p| can_add_to(p) && !skip.contains(&p.i("id"))).map(|p| format!(r#"<option value="{}">{}{}</option>"#,
+        p.s("id"), if p.s("kind") == "liked" { "♥ " } else { "" }, esc(&p.s("name")))).collect()
+}
+
+/// Fills the `<select>` `sel` of a dialog with [`target_options`] once the playlists are in.
+fn fill_targets(m: &crate::ui::Modal, sel: &'static str, skip: Vec<i64>) {
+    let el = m.el.clone();
+    dom::spawn(async move {
+        let Ok(rows) = api::get("/playlists").await else { return };
+        if let Some(s) = dom::qs_in(&el, sel) { let _ = s.insert_adjacent_html("beforeend", &target_options(&rows.items(), &skip)); }
+    });
+}
+
+/// The toast after a merge.
+fn merged_text(r: &Value, into: bool) -> String {
+    if into {
+        format!("Added {} of {} tracks ({} already there)", r.s("added"), r.s("total"), r.s("duplicates_skipped"))
+    } else {
+        format!("Merged {} tracks → {} unique ({} duplicates removed)", r.s("total"), r.s("added"), r.s("duplicates_skipped"))
+    }
+}
+
+/// Merge into… on a playlist's page: its songs go into another playlist or Liked Songs, without duplicates;
+/// songs not in the library come along as missing, so they still download.
+fn merge_into_modal(pid: i64, name: &str) {
+    let m = modal(ModalOpts::new("Merge into…", &format!(r#"<p class="muted" style="margin-top:0">The songs of “{}” are added to the playlist you pick. Songs it already has are skipped (remixes, live versions and covers stay separate); songs not in the library come along as missing, so they still download.</p>
+        <label class="field"><span>Merge into</span><select class="input" id="minto"></select></label>
+        <label class="switch mt"><input type="checkbox" id="mdel"><i></i>Delete this playlist afterwards</label>"#, esc(name)))
+        .footer(r#"<button class="btn" data-close>Cancel</button><button class="btn primary" id="ok">Merge</button>"#));
+    fill_targets(&m, "#minto", vec![pid]);
+    if let Some(ok) = m.qs("#ok") {
+        let m2 = m.clone();
+        dom::on(&ok, "click", move |_| {
+            let m3 = m2.clone();
+            dom::spawn(async move {
+                let Ok(into) = dom::value_of(&m3.el, "#minto").parse::<i64>() else { return };
+                let r = match api::post("/playlists/merge", json!({ "ids": [pid], "into": into, "delete_sources": dom::checked_of(&m3.el, "#mdel") })).await {
+                    Ok(r) => r,
+                    Err(e) => return toast(&e.message, "err"),
+                };
+                toast(&merged_text(&r, true), "ok");
+                m3.close();
+                app::navigate(&format!("/playlists/{into}"));
+            });
+        });
+    }
+}
 /// The toast after Add to my playlists.
 pub fn add_toast(r: &Value) -> &'static str {
     if r.truthy("added") { ADDED_TO_MINE } else { ALREADY_MINE }
@@ -399,7 +450,8 @@ pub fn import_modal(url: &str, into: Option<i64>) {
       </div>
       <div id="imp-out" class="mt"></div>"#,
             url = esc(url),
-            name_follow = if has_into { "" } else { r#"<input class="input" id="imp-name" placeholder="Playlist name (optional)" style="max-width:280px">
+            name_follow = if has_into { "" } else { r#"<select class="input" id="imp-to" style="width:auto" title="Where the songs go"><option value="">Save to: a new playlist</option></select>
+        <input class="input" id="imp-name" placeholder="Playlist name (optional)" style="max-width:280px">
         <label class="switch"><input type="checkbox" id="imp-follow"><i></i>Keep following (pull new tracks)</label>"# },
             search = icon("search"),
             file = icon("plus"),
@@ -408,6 +460,19 @@ pub fn import_modal(url: &str, into: Option<i64>) {
     .wide(true)
     .footer(&format!(r#"<button class="btn" data-close>Cancel</button><button class="btn primary" id="imp-go">{}Import</button>"#, icon("download"))));
     let mode = Rc::new(RefCell::new("url".to_string()));
+    // Save to: a new playlist, Liked Songs or one of yours (the name and Keep following are for a new one)
+    if !has_into {
+        fill_targets(&m, "#imp-to", vec![]);
+        if let Some(sel) = m.qs("#imp-to") {
+            let m2 = m.clone();
+            dom::on(&sel, "change", move |_| {
+                let new = dom::value_of(&m2.el, "#imp-to").is_empty();
+                for x in [m2.qs("#imp-name"), m2.qs("#imp-follow").and_then(|f| dom::closest_of(&f, "label"))].into_iter().flatten() {
+                    dom::toggle_class(&x, "hidden", !new);
+                }
+            });
+        }
+    }
     if let Some(tabs) = m.qs("#imp-tabs") {
         let (m2, mode2) = (m.clone(), mode.clone());
         dom::on(&tabs, "click", move |e| {
@@ -417,7 +482,8 @@ pub fn import_modal(url: &str, into: Option<i64>) {
             for x in m2.qsa("#imp-tabs button") { dom::toggle_class(&x, "active", x == b); }
             if let Some(u) = m2.qs("#imp-url") { dom::toggle_class(&u, "hidden", md != "url"); }
             if let Some(t) = m2.qs("#imp-text") { dom::toggle_class(&t, "hidden", md != "text"); }
-            if let Some(l) = m2.qs("#imp-follow").and_then(|f| dom::closest_of(&f, "label")) { dom::toggle_class(&l, "hidden", md != "url"); }
+            let new = dom::value_of(&m2.el, "#imp-to").is_empty();
+            if let Some(l) = m2.qs("#imp-follow").and_then(|f| dom::closest_of(&f, "label")) { dom::toggle_class(&l, "hidden", md != "url" || !new); }
         });
     }
     // a long list stays in a box of LIST_ROWS rows until Show all; a file or a long paste folds it again
@@ -516,10 +582,11 @@ pub fn import_modal(url: &str, into: Option<i64>) {
             let (m3, body3) = (m2.clone(), body2.clone());
             dom::spawn(async move {
                 let mut b = body3();
+                let to = into.filter(|i| *i != 0).or_else(|| dom::value_of(&m3.el, "#imp-to").parse::<i64>().ok());
                 if let Some(o) = b.as_object_mut() {
-                    o.insert("into".into(), json!(into));
+                    o.insert("into".into(), json!(to));
                     o.insert("name".into(), json!(m3.qs("#imp-name").map(|n| dom::value(&n).trim().to_string()).filter(|s| !s.is_empty())));
-                    o.insert("follow".into(), json!(m3.qs("#imp-follow").map(|f| dom::checked(&f)).unwrap_or(false)));
+                    o.insert("follow".into(), json!(to.is_none() && m3.qs("#imp-follow").map(|f| dom::checked(&f)).unwrap_or(false)));
                     o.insert("request_missing".into(), json!(dom::checked_of(&m3.el, "#imp-req")));
                     let album = dom::value_of(&m3.el, "#imp-album");
                     o.insert("album_mode".into(), if album.is_empty() { Value::Null } else { Value::String(album) });
@@ -531,7 +598,7 @@ pub fn import_modal(url: &str, into: Option<i64>) {
                             if r.truthy("requested") { format!(", requested {}", r.s("requested")) } else { String::new() }), "ok");
                         m3.close();
                         app::navigate(&format!("/playlists/{}", r.s("id")));
-                        if has_into { reload(); }
+                        if to.is_some() { reload(); }
                     }
                     Err(err) => {
                         toast(&err.message, "err");
@@ -581,16 +648,29 @@ pub fn render(view: Element, _ctx: Ctx) -> PageFuture {
                 let ids: Vec<Value> = dom::qsa_in(&bx2, "[data-merge]:checked").iter()
                     .map(|i| dom::data(i, "merge").parse::<i64>().map(Value::from).unwrap_or(Value::Null)).collect();
                 let m = modal(ModalOpts::new("Merge playlists", &format!(r#"<p class="muted" style="margin-top:0">Tracks from {} playlists are combined into one. The same song + version is only kept once – remixes, live versions and covers stay separate.</p>
-        <label class="field"><span>Name</span><input class="input" id="mname" value="Merged playlist"></label>
+        <label class="field"><span>Merge into</span><select class="input" id="minto"><option value="">A new playlist</option></select></label>
+        <label class="field" id="mname-f"><span>Name</span><input class="input" id="mname" value="Merged playlist"></label>
         <label class="switch mt"><input type="checkbox" id="mdel"><i></i>Delete the original playlists</label>"#, ids.len()))
                     .footer(r#"<button class="btn" data-close>Cancel</button><button class="btn primary" id="ok">Merge</button>"#));
+                fill_targets(&m, "#minto", ids.iter().filter_map(|v| v.as_i64()).collect());
+                if let Some(sel) = m.qs("#minto") {
+                    let m2 = m.clone();
+                    dom::on(&sel, "change", move |_| {
+                        let new = dom::value_of(&m2.el, "#minto").is_empty();
+                        if let Some(f) = m2.qs("#mname-f") { dom::toggle_class(&f, "hidden", !new); }
+                    });
+                }
                 if let Some(ok) = m.qs("#ok") {
                     let m2 = m.clone();
                     dom::on(&ok, "click", move |_| {
                         let (m3, ids) = (m2.clone(), ids.clone());
                         dom::spawn(async move {
-                            let Ok(r) = api::post("/playlists/merge", json!({ "ids": ids, "name": dom::value_of(&m3.el, "#mname"), "delete_sources": dom::checked_of(&m3.el, "#mdel") })).await else { return };
-                            toast(&format!("Merged {} tracks → {} unique ({} duplicates removed)", r.s("total"), r.s("added"), r.s("duplicates_skipped")), "ok");
+                            let into = dom::value_of(&m3.el, "#minto").parse::<i64>().ok();
+                            let r = match api::post("/playlists/merge", json!({ "ids": ids, "into": into, "name": dom::value_of(&m3.el, "#mname"), "delete_sources": dom::checked_of(&m3.el, "#mdel") })).await {
+                                Ok(r) => r,
+                                Err(e) => return toast(&e.message, "err"),
+                            };
+                            toast(&merged_text(&r, into.is_some()), "ok");
                             m3.close();
                             app::navigate(&format!("/playlists/{}", r.s("id")));
                         });
@@ -678,6 +758,7 @@ pub fn render_playlist(view: Element, ctx: Ctx) -> PageFuture {
           {share_btn}
           {req}
           <button class="btn" id="add">{plus}Add from link</button>
+          {merge_into}
           <button class="btn" id="dedupe">{check}Remove duplicates</button>
           <button class="btn" id="rematch">{refresh}Re-check library</button>
           {pull}
@@ -716,6 +797,7 @@ pub fn render_playlist(view: Element, ctx: Ctx) -> PageFuture {
             pl_menu = if pl.truthy("matched") && crate::pages::downloads::enabled() { format!(r#"<button class="btn icon" id="pl-menu" aria-label="More options" title="More options">{}</button>"#, icon("more")) } else { String::new() },
             req = if missing > 0 && !member { format!(r#"<button class="btn {}" id="req">{}Download {missing} missing</button>"#, if pl.truthy("matched") { "" } else { "primary" }, icon("download")) } else { String::new() },
             plus = icon("plus"), check = icon("check"), refresh = icon("refresh"),
+            merge_into = if !liked && !member && !items.is_empty() { format!(r#"<button class="btn" id="merge-into" title="Add these songs to another playlist or Liked Songs">{}Merge into…</button>"#, icon("list")) } else { String::new() },
             pull = if pl.truthy("source_url") && !member { format!(r#"<button class="btn" id="refresh">{}Pull from {}</button>"#, icon("refresh"), esc(src_name(&source).unwrap_or("source"))) } else { String::new() },
             del = if member { format!(r#"<button class="btn danger ghost" id="leave">{}Leave</button>"#, icon("x")) }
                 else if !liked { format!(r#"<button class="btn danger ghost" id="del">{}</button>"#, icon("trash")) } else { String::new() },
@@ -826,6 +908,10 @@ pub fn render_playlist(view: Element, ctx: Ctx) -> PageFuture {
         {
             let into = id.parse::<i64>().unwrap_or(0);
             dom::on_sel(&view, "#add", "click", move |_| import_modal("", Some(into)));
+        }
+        {
+            let (pid, name) = (id.parse::<i64>().unwrap_or(0), pl.s("name"));
+            dom::on_sel(&view, "#merge-into", "click", move |_| merge_into_modal(pid, &name));
         }
         {
             let id2 = id.clone();
@@ -1121,5 +1207,28 @@ mod linked_tests {
         assert!(can_add_to(&json!({ "kind": "playlist", "read_only": false })));
         assert!(can_add_to(&json!({ "kind": "liked" })));
         assert!(can_add_to(&json!({ "kind": "playlist" })), "an older server sends no read_only");
+    }
+}
+
+#[cfg(test)]
+mod merge_into_tests {
+    use super::*;
+
+    #[test]
+    fn targets_take_songs_liked_first_and_skip_the_source() {
+        let rows = vec![
+            json!({ "id": 1, "kind": "liked", "name": "Liked Songs" }),
+            json!({ "id": 2, "kind": "playlist", "name": "Imported list" }),
+            json!({ "id": 3, "kind": "linked", "name": "Theirs" }),
+            json!({ "id": 4, "kind": "playlist", "name": "Road <trip>" }),
+        ];
+        assert_eq!(target_options(&rows, &[2]), r#"<option value="1">♥ Liked Songs</option><option value="4">Road &lt;trip&gt;</option>"#);
+    }
+
+    #[test]
+    fn the_toast_says_what_was_added() {
+        let r = json!({ "total": 3100, "added": 3000, "duplicates_skipped": 100 });
+        assert_eq!(merged_text(&r, true), "Added 3000 of 3100 tracks (100 already there)");
+        assert_eq!(merged_text(&r, false), "Merged 3100 tracks → 3000 unique (100 duplicates removed)");
     }
 }

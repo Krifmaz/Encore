@@ -19,7 +19,7 @@ use crate::widgets::{
     self, badge, btn, btn_icon, btn_sm, card, empty, error_box, field, grid, icon, modal, muted, page_head, skeleton_tiles, small,
     small_muted, t, Icon, Tile, TileKind,
 };
-use iced::widget::{checkbox, column, container, row, text_editor, text_input, toggler};
+use iced::widget::{checkbox, column, container, pick_list, row, text_editor, text_input, toggler};
 use iced::{Alignment, Length, Subscription, Task};
 use serde_json::{json, Value};
 
@@ -185,6 +185,9 @@ pub struct Import {
     pub album_mode: String,
     pub preview: Preview,
     pub importing: bool,
+    /// Save to (a new import only): None makes a new playlist, Some(id) adds to that one or Liked Songs.
+    pub to: Option<i64>,
+    pub targets: Vec<Target>,
 }
 
 impl Import {
@@ -201,7 +204,19 @@ impl Import {
             album_mode: String::new(),
             preview: Preview::Idle,
             importing: false,
+            to: None,
+            targets: vec![],
         }
+    }
+
+    /// A new import with Save to listing these playlists.
+    pub fn with_targets(url: &str, rows: &[Value]) -> Self {
+        Self { targets: targets(rows, &[], Some("Save to: a new playlist")), ..Self::new(url, None) }
+    }
+
+    /// Where the songs go: the playlist the dialog was opened on, or the one picked in Save to.
+    pub fn dest(&self) -> Option<i64> {
+        self.into.or(self.to)
     }
 
     pub fn has_into(&self) -> bool {
@@ -232,6 +247,8 @@ pub enum ImportMsg {
     Follow(bool),
     RequestMissing(bool),
     AlbumMode(String),
+    /// Save to: None a new playlist, Some(id) an existing one or Liked Songs.
+    To(Option<i64>),
     Preview,
     Previewed(Result<Value, ApiError>),
     Go,
@@ -300,6 +317,7 @@ pub fn import_update(imp: &mut Import, msg: ImportMsg, ctx: &mut Ctx) -> (Task<I
         ImportMsg::Follow(b) => imp.follow = b,
         ImportMsg::RequestMissing(b) => imp.request_missing = b,
         ImportMsg::AlbumMode(m) => imp.album_mode = m,
+        ImportMsg::To(to) => imp.to = to,
         ImportMsg::Preview => {
             imp.preview = Preview::Loading;
             let api = ctx.api.clone();
@@ -323,10 +341,10 @@ pub fn import_update(imp: &mut Import, msg: ImportMsg, ctx: &mut Ctx) -> (Task<I
             imp.importing = true;
             let mut b = imp.body();
             if let Some(o) = b.as_object_mut() {
-                o.insert("into".into(), json!(imp.into));
+                o.insert("into".into(), json!(imp.dest()));
                 let name = imp.name.trim();
                 o.insert("name".into(), if name.is_empty() { Value::Null } else { json!(name) });
-                o.insert("follow".into(), json!(imp.follow && !imp.has_into()));
+                o.insert("follow".into(), json!(imp.follow && imp.dest().is_none()));
                 o.insert("request_missing".into(), json!(imp.request_missing));
                 o.insert(
                     "album_mode".into(),
@@ -456,7 +474,10 @@ fn import_body<'a>(imp: &'a Import) -> El<'a, ImportMsg> {
         col = col.push(under);
     }
     let mut opts = row![].spacing(14).align_y(Alignment::Center);
-    if !imp.has_into() {
+    if !imp.has_into() && !imp.targets.is_empty() {
+        opts = opts.push(target_pick(&imp.targets, imp.to, ImportMsg::To));
+    }
+    if imp.dest().is_none() {
         opts = opts.push(
             text_input("Playlist name (optional)", &imp.name)
                 .on_input(ImportMsg::Name)
@@ -527,6 +548,9 @@ pub struct Merge {
     pub name: String,
     pub delete_sources: bool,
     pub busy: bool,
+    /// Merge into: None makes a new playlist, Some(id) adds to that one or Liked Songs.
+    pub into: Option<i64>,
+    pub targets: Vec<Target>,
 }
 
 #[derive(Debug)]
@@ -569,6 +593,7 @@ pub enum Message {
     OpenMerge,
     MergeName(String),
     MergeDelete(bool),
+    MergeInto(Option<i64>),
     MergeGo,
     Merged(Result<Value, ApiError>),
     OpenAddShared,
@@ -663,7 +688,10 @@ pub fn update(state: &mut State, msg: Message, ctx: &mut Ctx) -> Task<Message> {
                 Err(e) => ctx.toast_err(e.message),
             }
         }
-        Message::OpenImport => state.dialog = Some(Dialog::Import(Import::new("", None))),
+        Message::OpenImport => {
+            let rows = state.rows.as_ref().and_then(|r| r.as_ref().ok()).cloned().unwrap_or_default();
+            state.dialog = Some(Dialog::Import(Import::with_targets("", &rows)));
+        }
         Message::Import(m) => {
             if let Some(Dialog::Import(imp)) = state.dialog.as_mut() {
                 let (task, done) = import_update(imp, m, ctx);
@@ -676,10 +704,13 @@ pub fn update(state: &mut State, msg: Message, ctx: &mut Ctx) -> Task<Message> {
         }
         Message::OpenMerge => {
             if state.selected.len() >= 2 {
+                let rows = state.rows.as_ref().and_then(|r| r.as_ref().ok()).cloned().unwrap_or_default();
                 state.dialog = Some(Dialog::Merge(Merge {
                     name: "Merged playlist".into(),
                     delete_sources: false,
                     busy: false,
+                    into: None,
+                    targets: targets(&rows, &state.selected, Some("A new playlist")),
                 }));
             }
         }
@@ -693,6 +724,11 @@ pub fn update(state: &mut State, msg: Message, ctx: &mut Ctx) -> Task<Message> {
                 m.delete_sources = b;
             }
         }
+        Message::MergeInto(into) => {
+            if let Some(Dialog::Merge(m)) = state.dialog.as_mut() {
+                m.into = into;
+            }
+        }
         Message::MergeGo => {
             if let Some(Dialog::Merge(m)) = state.dialog.as_mut() {
                 if m.busy {
@@ -700,14 +736,15 @@ pub fn update(state: &mut State, msg: Message, ctx: &mut Ctx) -> Task<Message> {
                 }
                 m.busy = true;
                 let api = ctx.api.clone();
-                let body = json!({ "ids": state.selected, "name": m.name, "delete_sources": m.delete_sources });
+                let body = json!({ "ids": state.selected, "into": m.into, "name": m.name, "delete_sources": m.delete_sources });
                 return Task::perform(async move { api.post("/playlists/merge", body).await }, Message::Merged);
             }
         }
         Message::Merged(Ok(r)) => {
+            let into = matches!(state.dialog.as_ref(), Some(Dialog::Merge(m)) if m.into.is_some());
             state.dialog = None;
             state.selected.clear();
-            ctx.toast_ok(merged_text(&r));
+            ctx.toast_ok(if into { merged_into_text(&r) } else { merged_text(&r) });
             ctx.navigate(Page::Playlist(fmt::i(&r, "id")));
         }
         Message::Merged(Err(e)) => {
@@ -799,6 +836,104 @@ pub fn merged_text(r: &Value) -> String {
         fmt::s(r, "added"),
         fmt::s(r, "duplicates_skipped")
     )
+}
+
+/// The toast after Merge into…: "Added 3000 of 3100 tracks (100 already there)".
+pub fn merged_into_text(r: &Value) -> String {
+    format!(
+        "Added {} of {} tracks ({} already there)",
+        fmt::s(r, "added"),
+        fmt::s(r, "total"),
+        fmt::s(r, "duplicates_skipped")
+    )
+}
+
+// ----- Merge into / Save to: where songs go ------------------------------------------------
+
+/// One choice of a "Merge into" / "Save to" list: a playlist that takes songs, or (None) a new one.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Target {
+    pub id: Option<i64>,
+    pub label: String,
+}
+
+impl std::fmt::Display for Target {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.label)
+    }
+}
+
+/// The playlists that take songs (Liked Songs first, as the server lists them), leaving out `skip`;
+/// `new` puts "a new playlist" in front.
+pub fn targets(rows: &[Value], skip: &[i64], new: Option<&str>) -> Vec<Target> {
+    let mut out: Vec<Target> = new.map(|l| Target { id: None, label: l.to_string() }).into_iter().collect();
+    out.extend(
+        rows.iter()
+            .filter(|p| !is_linked(p) && !fmt::truthy(p, "read_only") && !skip.contains(&fmt::i(p, "id")))
+            .map(|p| Target {
+                id: Some(fmt::i(p, "id")),
+                label: format!("{}{}", if fmt::s(p, "kind") == "liked" { "♥ " } else { "" }, fmt::s(p, "name")),
+            }),
+    );
+    out
+}
+
+/// The pick list of [`targets`], with `cur` chosen.
+pub fn target_pick<'a, M: Clone + 'a>(opts: &'a [Target], cur: Option<i64>, on_pick: impl Fn(Option<i64>) -> M + 'a) -> El<'a, M> {
+    let current = opts.iter().find(|o| o.id == cur).cloned();
+    pick_list(opts, current, move |o: Target| on_pick(o.id))
+        .placeholder("Loading playlists…")
+        .text_size(13)
+        .padding([7, 10])
+        .style(theme::pick)
+        .menu_style(theme::pick_menu)
+        .into()
+}
+
+/// Merge into… on a playlist's page: its songs go into another playlist or Liked Songs.
+#[derive(Debug, Default)]
+pub struct MergeInto {
+    pub targets: Vec<Target>,
+    pub into: Option<i64>,
+    pub delete_source: bool,
+    pub busy: bool,
+}
+
+/// What Merge into… says first.
+pub fn merge_into_hint(name: &str) -> String {
+    format!("The songs of “{name}” are added to the playlist you pick. Songs it already has are skipped (remixes, live versions and covers stay separate); songs not in the library come along as missing, so they still download.")
+}
+
+/// The Merge into… window, in the page's message type.
+pub fn merge_into_dialog<'a, M: Clone + 'a>(
+    m: &'a MergeInto,
+    name: &str,
+    pick: impl Fn(Option<i64>) -> M + 'a,
+    delete: impl Fn(bool) -> M + 'a,
+    go: M,
+    on_close: M,
+) -> El<'a, M> {
+    let body = column![
+        muted(merge_into_hint(name)).size(14),
+        field("Merge into", target_pick(&m.targets, m.into, pick)),
+        toggler(m.delete_source)
+            .label("Delete this playlist afterwards")
+            .text_size(14)
+            .spacing(10)
+            .on_toggle(delete)
+            .style(theme::switch),
+    ]
+    .spacing(14);
+    let footer = row![
+        btn("Cancel", Btn::Default, Some(on_close.clone())),
+        btn(
+            if m.busy { "Merging…" } else { "Merge" },
+            Btn::Primary,
+            (!m.busy && m.into.is_some()).then_some(go)
+        ),
+    ]
+    .spacing(10);
+    modal("Merge into…", body, Some(footer.into()), false, on_close)
 }
 
 /// The two lines under a playlist's name: "12 tracks · 80% in library · following · shared" and the
@@ -930,29 +1065,34 @@ pub fn overlay<'a>(state: &'a State, _ctx: &Ctx<'a>) -> Option<El<'a, Message>> 
     match state.dialog.as_ref()? {
         Dialog::Import(imp) => Some(import_dialog(imp, Message::Import, Message::CloseDialog)),
         Dialog::Merge(m) => {
-            let body = column![
+            let mut body = column![
                 muted(format!(
                     "Tracks from {} playlists are combined into one. The same song + version is only kept once – remixes, live versions and covers stay separate.",
                     state.selected.len()
                 ))
                 .size(14),
-                field(
+                field("Merge into", target_pick(&m.targets, m.into, Message::MergeInto)),
+            ]
+            .spacing(14);
+            if m.into.is_none() {
+                body = body.push(field(
                     "Name",
                     text_input("Merged playlist", &m.name)
                         .on_input(Message::MergeName)
                         .on_submit(Message::MergeGo)
                         .padding([9, 12])
                         .size(14)
-                        .style(theme::input)
-                ),
+                        .style(theme::input),
+                ));
+            }
+            let body = body.push(
                 toggler(m.delete_sources)
                     .label("Delete the original playlists")
                     .text_size(14)
                     .spacing(10)
                     .on_toggle(Message::MergeDelete)
                     .style(theme::switch),
-            ]
-            .spacing(14);
+            );
             let footer = row![
                 btn("Cancel", Btn::Default, Some(Message::CloseDialog)),
                 btn(
@@ -1137,5 +1277,44 @@ mod tests {
         assert!(!is_long_paste(&short));
         let long = text_editor::Action::Edit(text_editor::Edit::Paste(std::sync::Arc::new("x\n".repeat(20))));
         assert!(is_long_paste(&long));
+    }
+}
+
+#[cfg(test)]
+mod merge_into_tests {
+    use super::*;
+
+    fn rows() -> Vec<Value> {
+        vec![
+            json!({ "id": 1, "kind": "liked", "name": "Liked Songs" }),
+            json!({ "id": 2, "kind": "playlist", "name": "Imported list" }),
+            json!({ "id": 3, "kind": "linked", "name": "Theirs" }),
+            json!({ "id": 4, "kind": "playlist", "name": "Road trip" }),
+        ]
+    }
+
+    #[test]
+    fn targets_take_songs_liked_first_and_skip_the_source() {
+        let labels: Vec<(Option<i64>, String)> = targets(&rows(), &[2], Some("A new playlist")).into_iter().map(|t| (t.id, t.label)).collect();
+        assert_eq!(
+            labels,
+            vec![(None, "A new playlist".into()), (Some(1), "♥ Liked Songs".into()), (Some(4), "Road trip".into())]
+        );
+    }
+
+    #[test]
+    fn import_saves_to_the_picked_playlist() {
+        let mut imp = Import::with_targets("", &rows());
+        assert_eq!(imp.dest(), None);
+        assert_eq!(imp.targets.len(), 4);
+        imp.to = Some(1);
+        assert_eq!(imp.dest(), Some(1));
+        assert_eq!(Import::new("", Some(4)).dest(), Some(4));
+    }
+
+    #[test]
+    fn the_toast_says_what_was_added() {
+        let r = json!({ "total": 3100, "added": 3000, "duplicates_skipped": 100 });
+        assert_eq!(merged_into_text(&r), "Added 3000 of 3100 tracks (100 already there)");
     }
 }

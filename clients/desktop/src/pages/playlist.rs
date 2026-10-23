@@ -25,7 +25,7 @@ use crate::api::ApiError;
 use crate::fmt;
 use crate::pages::playlists::{
     self, added_by_text, is_linked, linked_active, linked_hint, linked_kicker, linked_owner, linked_stopped, remove_text,
-    src_label, src_name, target_name, Import, ImportMsg, LINKED_EMPTY, REMOVED_FROM_MINE, REMOVE_FROM_MINE, SAVED_COPY,
+    src_label, src_name, target_name, Import, ImportMsg, MergeInto, LINKED_EMPTY, REMOVED_FROM_MINE, REMOVE_FROM_MINE, SAVED_COPY,
     SAVE_COPY,
 };
 use crate::pages::{Ctx, El, Page, Section};
@@ -178,6 +178,8 @@ pub enum Dialog {
     Members(Members),
     /// "Leave playlist" (someone else's collaborative playlist): the confirm's text.
     Leave(String),
+    /// Merge into…: the songs go into another playlist or Liked Songs.
+    MergeInto(MergeInto),
 }
 
 /// The members window: the server's `/collaborators` answer, the user name being typed, its error.
@@ -244,6 +246,13 @@ pub enum Message {
     Sync,
     AddFromLink,
     Import(ImportMsg),
+    /// Merge into…: the window, the playlists it lists, the choice, Go and the answer.
+    OpenMergeInto,
+    MergeTargets(Result<Value, ApiError>),
+    MergeIntoPick(Option<i64>),
+    MergeIntoDelete(bool),
+    MergeIntoGo,
+    MergedInto(Result<Value, ApiError>),
     Follow(bool),
     Target(String, bool),
     Acted(Act, Result<Value, ApiError>),
@@ -399,6 +408,49 @@ pub fn update(state: &mut State, msg: Message, ctx: &mut Ctx) -> Task<Message> {
         Message::Pull => return act(state, ctx, Act::Pull, "refresh", None),
         Message::Sync => return act(state, ctx, Act::Sync, "sync", None),
         Message::AddFromLink => state.dialog = Some(Dialog::Import(Import::new("", Some(state.id)))),
+        Message::OpenMergeInto => {
+            state.dialog = Some(Dialog::MergeInto(MergeInto::default()));
+            let api = ctx.api.clone();
+            return Task::perform(async move { api.get("/playlists").await }, Message::MergeTargets);
+        }
+        Message::MergeTargets(r) => {
+            if let Some(Dialog::MergeInto(m)) = state.dialog.as_mut() {
+                match r {
+                    Ok(v) => m.targets = playlists::targets(&fmt::items(&v), &[state.id], None),
+                    Err(e) => ctx.toast_err(e.message),
+                }
+            }
+        }
+        Message::MergeIntoPick(into) => {
+            if let Some(Dialog::MergeInto(m)) = state.dialog.as_mut() {
+                m.into = into;
+            }
+        }
+        Message::MergeIntoDelete(on) => {
+            if let Some(Dialog::MergeInto(m)) = state.dialog.as_mut() {
+                m.delete_source = on;
+            }
+        }
+        Message::MergeIntoGo => {
+            if let Some(Dialog::MergeInto(m)) = state.dialog.as_mut() {
+                let Some(into) = m.into.filter(|_| !m.busy) else { return Task::none() };
+                m.busy = true;
+                let body = json!({ "ids": [state.id], "into": into, "delete_sources": m.delete_source });
+                let api = ctx.api.clone();
+                return Task::perform(async move { api.post("/playlists/merge", body).await }, Message::MergedInto);
+            }
+        }
+        Message::MergedInto(Ok(r)) => {
+            state.dialog = None;
+            ctx.toast_ok(playlists::merged_into_text(&r));
+            ctx.navigate(Page::Playlist(fmt::i(&r, "id")));
+        }
+        Message::MergedInto(Err(e)) => {
+            if let Some(Dialog::MergeInto(m)) = state.dialog.as_mut() {
+                m.busy = false;
+            }
+            ctx.toast_err(e.message);
+        }
         Message::Import(m) => {
             if let Some(Dialog::Import(imp)) = state.dialog.as_mut() {
                 let (task, done) = playlists::import_update(imp, m, ctx);
@@ -963,6 +1015,9 @@ fn header<'a>(state: &'a State, p: &'a Value, ctx: &Ctx<'a>) -> El<'a, Message> 
         ));
     }
     actions = actions.push(btn_icon(Icon::Plus, "Add from link", Btn::Default, Some(Message::AddFromLink)));
+    if !liked && !member && !items.is_empty() {
+        actions = actions.push(btn_icon(Icon::List, "Merge into…", Btn::Default, Some(Message::OpenMergeInto)));
+    }
     actions = actions.push(btn_icon(
         Icon::Check,
         "Remove duplicates",
@@ -1200,6 +1255,14 @@ pub fn overlay<'a>(state: &'a State, ctx: &Ctx<'a>) -> Option<El<'a, Message>> {
     }
     match state.dialog.as_ref()? {
         Dialog::Import(imp) => Some(playlists::import_dialog(imp, Message::Import, Message::CloseDialog)),
+        Dialog::MergeInto(m) => Some(playlists::merge_into_dialog(
+            m,
+            &state.playlist().map(|p| fmt::s(p, "name")).unwrap_or_default(),
+            Message::MergeIntoPick,
+            Message::MergeIntoDelete,
+            Message::MergeIntoGo,
+            Message::CloseDialog,
+        )),
         Dialog::AlbumChoice => {
             let body = column![
                 muted("When a song is part of an album:").size(14),
