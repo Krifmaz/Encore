@@ -32,13 +32,27 @@ import java.util.concurrent.Executors
 /**
  * "Live lyrics in the car": device-only settings (SharedPreferences "encore_car"), shared in this process by
  * the playback service and Settings → Playback. On / off (the Lyrics button), and how: a lyrics card as the
- * artwork ([MODE_CARD], the default) or the current line as the title ([MODE_TITLE]). Also the Car buttons page
+ * artwork ([MODE_CARD]), the current line as the title ([MODE_TITLE]) or both ([MODE_WIDE], the default). Also the Car buttons page
  * (CarButtonsScreen): which buttons Android Auto gets in what order ([carButtons]) and the car's number of spots
  * for its preview ([carSpots]), and the Encore Lyrics car app's control strip ([lyricsStrip]).
  */
 object CarPrefs {
     const val MODE_CARD = "card"
     const val MODE_TITLE = "title"
+    /** Wide: the card as the artwork and the lyrics on the title lines too, so the lyrics run across the player. */
+    const val MODE_WIDE = "wide"
+
+    /** A stored or picked mode, one of the three; anything else (nothing stored yet included) is [MODE_WIDE]. */
+    fun modeOf(m: String?): String = when (m) {
+        MODE_TITLE, MODE_CARD -> m
+        else -> MODE_WIDE
+    }
+
+    /** Whether [m] draws the lyrics card as the artwork. */
+    fun cardMode(m: String): Boolean = m == MODE_CARD || m == MODE_WIDE
+
+    /** Whether [m] puts the line playing on the title. */
+    fun titleMode(m: String): Boolean = m == MODE_TITLE || m == MODE_WIDE
     private const val FILE = "encore_car"
     private const val LIVE_LYRICS = "live_lyrics"
     private const val MODE = "lyrics_mode"
@@ -115,11 +129,11 @@ object CarPrefs {
         return MutableStateFlow(CarButtonRules.spots(n)).also { spotsFlow = it }
     }
 
-    /** [MODE_CARD] or [MODE_TITLE]. */
+    /** [MODE_WIDE] (the default), [MODE_CARD] or [MODE_TITLE]. */
     fun lyricsMode(context: Context): StateFlow<String> = modeState(context).asStateFlow()
 
     fun setLyricsMode(context: Context, mode: String) {
-        val m = if (mode == MODE_TITLE) MODE_TITLE else MODE_CARD
+        val m = modeOf(mode)
         val f = modeState(context)
         if (f.value == m) return
         f.value = m
@@ -132,9 +146,9 @@ object CarPrefs {
     private fun modeState(context: Context): MutableStateFlow<String> {
         modeFlow?.let { return it }
         val m = try {
-            context.applicationContext.getSharedPreferences(FILE, Context.MODE_PRIVATE).getString(MODE, MODE_CARD)
-        } catch (_: Exception) { MODE_CARD }
-        return MutableStateFlow(if (m == MODE_TITLE) MODE_TITLE else MODE_CARD).also { modeFlow = it }
+            context.applicationContext.getSharedPreferences(FILE, Context.MODE_PRIVATE).getString(MODE, null)
+        } catch (_: Exception) { null }
+        return MutableStateFlow(modeOf(m)).also { modeFlow = it }
     }
 
     fun liveLyrics(context: Context): StateFlow<Boolean> = state(context).asStateFlow()
@@ -856,7 +870,7 @@ class CarControls(
      * subtitle for 3 s, once per song (the card leaves title and artist alone).
      */
     private fun noSyncedLyrics(id: Long) {
-        if (mode != CarPrefs.MODE_TITLE) return
+        if (!CarPrefs.titleMode(mode)) return
         if (!noLyricsToasted.add(id)) return
         note("No synced lyrics for this song")
     }
@@ -881,7 +895,7 @@ class CarControls(
         val at = LyricsCache.lineAt(lines, positionMs())
         if (at == lineAt) return
         lineAt = at
-        if (mode == CarPrefs.MODE_CARD) { showCard(item, at); return }
+        if (CarPrefs.cardMode(mode)) { showCard(item, at); return }
         if (at < 0) { plain(); return }
         val base = exo.mediaMetadata
         val title = base.title?.toString() ?: ""
@@ -913,15 +927,25 @@ class CarControls(
                 val r = try { card.render(coverKey, coverUri, snapshot, at) } catch (_: Throwable) { null }
                 if (r == null) return@execute
                 main.post {
-                    if (released || cardWanted != seq || !lyricsOn || mode != CarPrefs.MODE_CARD) return@post
+                    if (released || cardWanted != seq || !lyricsOn || !CarPrefs.cardMode(mode)) return@post
                     if (exo.currentMediaItem?.mediaId != item.mediaId) return@post
                     val base = exo.mediaMetadata
-                    val md = base.buildUpon()
+                    val b = base.buildUpon()
                         .setArtworkData(r.bytes, MediaMetadata.PICTURE_TYPE_FRONT_COVER)
                         .setArtworkUri(r.uri)
                         .setArtist(subtitleOf(base.artist?.toString() ?: ""))
-                        .build()
-                    show(item, md)
+                    // Wide: the lyrics run across the player too. The line playing is the title (Android Auto's
+                    // largest text, the wide space beside the card) and the next line sits under it; before the
+                    // first line the song stays as it is
+                    if (mode == CarPrefs.MODE_WIDE && at >= 0 && at < snapshot.size) {
+                        val text = snapshot[at].text.ifBlank { "♪" }
+                        val next = snapshot.getOrNull(at + 1)?.text?.takeIf { it.isNotBlank() }
+                        val title = base.title?.toString() ?: ""
+                        val artist = base.artist?.toString() ?: ""
+                        b.setTitle(text).setDisplayTitle(text)
+                            .setArtist(next ?: CarRules.lineSubtitle(title, artist, detail(), group && cars > 0))
+                    }
+                    show(item, b.build())
                 }
             }
         } catch (_: java.util.concurrent.RejectedExecutionException) {}

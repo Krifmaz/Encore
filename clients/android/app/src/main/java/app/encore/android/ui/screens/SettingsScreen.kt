@@ -417,11 +417,13 @@ fun PlaybackSettingsScreen(nav: Nav, onBack: () -> Unit) {
             CheckRow("Live lyrics in the car", carLyrics) { on -> CarPrefs.setLiveLyrics(context, on) }
             val carLyricsMode by remember { CarPrefs.lyricsMode(context) }.collectAsState()
             Seg(
-                listOf(CarPrefs.MODE_CARD to "Card", CarPrefs.MODE_TITLE to "Title line"),
+                listOf(CarPrefs.MODE_WIDE to "Wide", CarPrefs.MODE_CARD to "Card", CarPrefs.MODE_TITLE to "Title line"),
                 carLyricsMode,
             ) { v -> CarPrefs.setLyricsMode(context, v) }
             Help(
-                if (carLyricsMode == CarPrefs.MODE_TITLE) {
+                if (carLyricsMode == CarPrefs.MODE_WIDE) {
+                    "Android Auto shows the lyrics across its player: the line playing as large as the title and the next line under it, beside a lyrics card in place of the cover. Android Auto draws the player itself and keeps a gap between the two; Encore Lyrics in the car's app list fills the whole screen. The Lyrics button (Car buttons, below) turns it on and off. Only on this phone."
+                } else if (carLyricsMode == CarPrefs.MODE_TITLE) {
                     "Android Auto shows the current line of a song's synced lyrics in place of its title. The Lyrics button (Car buttons, below) turns it on and off. Only on this phone."
                 } else {
                     "Android Auto shows a lyrics card in place of the cover: the current line of a song's synced lyrics, large, with the lines around it, over the blurred cover. Title and artist stay as they are. The Lyrics button (Car buttons, below) turns it on and off. Only on this phone."
