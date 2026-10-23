@@ -3,7 +3,7 @@
 //! `playlists.kind`: playlist | liked | linked (someone else's playlist added through its share link;
 //! read-only, it has no items of its own: the API shows the owner's playlist through the link).
 use encore_db::{now, Row, RowExt};
-use encore_library::matcher::{compare, describe, key, Desc, LibraryIndex};
+use encore_library::matcher::{altered_words, compare, describe, key, parse_title, sim, Desc, LibraryIndex};
 use encore_db::p;
 use crate::Ctx;
 use serde_json::{json, Value};
@@ -48,17 +48,37 @@ pub fn identity(r: &Row, by_track: bool) -> String {
     if d.base.is_empty() {
         return format!("k:{}|{}", key(&d), r.s("title").trim().to_lowercase());
     }
-    format!("k:{}", key(&d))
+    // "Sped Up" and "Slowed" are both re-pitched versions, and two songs
+    match altered_words(&r.s("title")) {
+        Some(w) => format!("k:{}|{w}", key(&d)),
+        None => format!("k:{}", key(&d)),
+    }
 }
 
-/// The numbers in a folded title ("part 2", "interlude ii"): songs whose numbers differ are different songs.
+/// The numbers in a folded title ("part 2", "teardrop 2nd", "interlude ii"): songs whose numbers differ are
+/// different songs.
 fn numbers(base: &str) -> Vec<&str> {
-    base.split_whitespace().filter(|w| w.chars().all(|c| c.is_ascii_digit()) || ["i", "ii", "iii", "iv", "v", "vi", "vii", "viii", "ix", "x"].contains(w)).collect()
+    base.split_whitespace().filter(|w| w.chars().any(|c| c.is_ascii_digit()) || ["i", "ii", "iii", "iv", "v", "vi", "vii", "viii", "ix", "x"].contains(w)).collect()
+}
+
+static BRACKETED: std::sync::LazyLock<regex::Regex> = std::sync::LazyLock::new(|| regex::Regex::new(r"[\(\[\{（【][^\)\]\}）】]*[\)\]\}）】]").unwrap());
+
+/// A title without its brackets, folded: "INTERNET YAMERO (Official Music Video) [Theme for …]" → "internet yamero".
+fn head(title: &str) -> String {
+    parse_title(&BRACKETED.replace_all(title, " ")).0
+}
+
+/// Two rows the matcher calls one song that a playlist still keeps apart: their numbers, their re-pitched
+/// versions ("Sped Up" against "Slowed") or the titles outside their brackets differ.
+fn kept_apart(a: &Row, b: &Row, da: &Desc, db: &Desc) -> bool {
+    let (ha, hb) = (head(&a.s("title")), head(&b.s("title")));
+    numbers(&da.base) != numbers(&db.base) || altered_words(&a.s("title")) != altered_words(&b.s("title"))
+        || (!ha.is_empty() && !hb.is_empty() && sim(&ha, &hb) < 0.85)
 }
 
 /// Drop rows that are the same song+version as an earlier row (version-aware).
 pub fn dedupe_rows(rows: Vec<Row>) -> (Vec<Row>, usize) {
-    let (mut out, mut seen, mut kept): (Vec<Row>, HashSet<String>, Vec<Desc>) = (vec![], HashSet::new(), vec![]);
+    let (mut out, mut seen, mut kept): (Vec<Row>, HashSet<String>, Vec<(Desc, Row)>) = (vec![], HashSet::new(), vec![]);
     let mut dropped = 0;
     for r in rows {
         let k = identity(&r, true);
@@ -69,14 +89,14 @@ pub fn dedupe_rows(rows: Vec<Row>) -> (Vec<Row>, usize) {
         let d = item_desc(&r);
         let pre = |x: &str| x.chars().take(4).collect::<String>();
         if r.i("track_id") == 0 && !d.base.is_empty()
-            && kept.iter().any(|kd| pre(&kd.base) == pre(&d.base) && numbers(&kd.base) == numbers(&d.base) && compare(&d, kd, true).matched) {
+            && kept.iter().any(|(kd, kr)| pre(&kd.base) == pre(&d.base) && compare(&d, kd, true).matched && !kept_apart(&r, kr, &d, kd)) {
             dropped += 1;
             continue;
         }
         seen.insert(k);
         // an item with a library match also blocks its other identities (isrc/mbid/key)
         seen.insert(identity(&r, false));
-        kept.push(d);
+        kept.push((d, r.clone()));
         out.push(r);
     }
     (out, dropped)
@@ -328,9 +348,12 @@ mod tests {
     #[test]
     fn dedupe_keeps_numbered_parts_and_symbol_titles() {
         let rows = vec![row("Song Part 1", "A"), row("Song Part 2", "A"), row("Interlude I", "B"), row("Interlude II", "B"),
-                        row("★", "C"), row("☆", "C"), row("Song Part 1", "A"), row("Hello", "D"), row("Hello (feat. E)", "D")];
+                        row("★", "C"), row("☆", "C"), row("Song Part 1", "A"), row("Hello", "D"), row("Hello (feat. E)", "D"),
+                        row("Tek It (Slowed)", "F"), row("Tek It (Sped Up)", "F"), row("teardrop (Prod. G)", "G"), row("teardrop 2nd (Prod. G)", "G"),
+                        row("INTERNET YAMERO (Official Music Video) [Theme for NEEDY GIRL OVERDOSE]", "H"),
+                        row("INTERNET OVERDOSE (Official Music Video) [Theme for NEEDY GIRL OVERDOSE]", "H"), row("Paris (Official Video)", "I"), row("Paris", "I")];
         let (kept, dropped) = dedupe_rows(rows);
-        assert_eq!(dropped, 2);
-        assert_eq!(kept.len(), 7);
+        assert_eq!(dropped, 3);
+        assert_eq!(kept.len(), 14);
     }
 }

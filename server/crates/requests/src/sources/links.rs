@@ -53,44 +53,61 @@ pub async fn fetch_as(st: &impl Ctx, url: &str, uid: Option<i64>) -> anyhow::Res
     Ok(data)
 }
 
-/// "Artist - Title" (or "Title by Artist", or CSV artist,title) per line. Every other non-empty line is still a
-/// song: "- Title" or "Title -" (no artist), "Artist -Title" (a dash spaced on one side only) or a bare title.
+/// "Artist - Title" (or "Title / Artist", "Title | Artist", "Title by Artist", tab- or comma-separated) per
+/// line. Every other line with text is still a song: "- Title" or "Title -" (no artist), "Artist -「Title」"
+/// (a dash spaced on one side only) or a bare title. Lines of only invisible characters are left out.
 pub fn parse_text(text: &str) -> anyhow::Result<Value> {
     // "1. " / "12) " numbering; a name like "10.000 Maniacs" keeps its digits
     let num = Regex::new(r"^\d+[\.\)]\s+").unwrap();
-    let dash = Regex::new(r"\s[-–—]\s").unwrap();
-    let loose_dash = Regex::new(r"\s[-–—]|[-–—]\s").unwrap();
+    let dash = Regex::new(r"\s[-–—‐−˗]\s").unwrap();
+    let loose_dash = Regex::new(r"\s[-–—‐−˗]|[-–—‐−˗]\s").unwrap();
+    // "Title / Artist" and "Title | Artist", the way video titles name their singer
+    let slash = Regex::new(r"\s[/|｜／]\s").unwrap();
+    let loose_slash = Regex::new(r"\s[/|｜／]|[/|｜／]\s").unwrap();
+    let double_slash = Regex::new(r"\s//\s").unwrap();
     let by = Regex::new(r"(?i)\sby\s").unwrap();
-    let edge_dash: &[char] = &['-', '–', '—'];
+    let edge_dash: &[char] = &['-', '–', '—', '‐', '−', '˗'];
+    let invisible = |c: char| c.is_whitespace() || matches!(c, '\u{feff}' | '\u{200b}'..='\u{200f}' | '\u{2060}' | '\u{00ad}');
+    let split2 = |re: &Regex, line: &str| {
+        let mut it = re.splitn(line, 2);
+        (it.next().unwrap_or("").to_string(), it.next().unwrap_or("").to_string())
+    };
     let mut tracks = vec![];
     for line in text.lines() {
-        let line = line.trim_matches(|c: char| c.is_whitespace() || c == '\u{feff}');
-        if line.is_empty() || line.starts_with('#') {
+        let line = line.trim_matches(invisible);
+        // "# a comment" and m3u "#EXTINF" lines; a song may start with "#" ("#電音部 - DIVE")
+        if line.is_empty() || line == "#" || line.starts_with("# ") || line.starts_with("#EXT") {
             continue;
         }
         let line = num.replace(line, "").to_string();
         let (artist, title) = if dash.is_match(&line) {
-            let mut it = dash.splitn(&line, 2);
-            (it.next().unwrap_or("").to_string(), it.next().unwrap_or("").to_string())
+            split2(&dash, &line)
+        } else if double_slash.is_match(&line) {
+            split2(&double_slash, &line)
         } else if line.starts_with(edge_dash) || line.ends_with(edge_dash) {
             (String::new(), line.trim_matches(edge_dash).to_string())
+        } else if slash.is_match(&line) {
+            let (title, artist) = split2(&slash, &line);
+            (artist, title)
         } else if by.is_match(&line) {
-            let mut it = by.splitn(&line, 2);
-            let title = it.next().unwrap_or("").to_string();
-            (it.next().unwrap_or("").to_string(), title)
+            let (title, artist) = split2(&by, &line);
+            (artist, title)
         } else if let Some((a, b)) = line.split_once('\t') {
             (a.to_string(), b.to_string())
-        } else if let Some((a, b)) = line.split_once(',') {
-            (a.trim().trim_matches('"').to_string(), b.trim().trim_matches('"').to_string())
+        } else if loose_slash.is_match(&line) {
+            let (title, artist) = split2(&loose_slash, &line);
+            (artist, title)
         } else if loose_dash.is_match(&line) {
-            let mut it = loose_dash.splitn(&line, 2);
-            (it.next().unwrap_or("").to_string(), it.next().unwrap_or("").to_string())
+            split2(&loose_dash, &line)
+        } else if let Some((a, b)) = split_outside_brackets(&line, ',') {
+            (a.trim().trim_matches('"').to_string(), b.trim().trim_matches('"').to_string())
         } else {
             (String::new(), line.clone())
         };
+        let (artist, title) = (artist.trim_matches(invisible).to_string(), title.trim_matches(invisible).to_string());
         // "Artist - " with nothing after it: the one name there is the song's
-        let (artist, title) = if title.trim().is_empty() { (String::new(), artist) } else { (artist, title) };
-        if title.trim().is_empty() {
+        let (artist, title) = if title.is_empty() { (String::new(), artist) } else { (artist, title) };
+        if title.is_empty() {
             continue;
         }
         tracks.push(t(&title, &artist, None, None, None, None, None, None));
@@ -99,6 +116,20 @@ pub fn parse_text(text: &str) -> anyhow::Result<Value> {
         anyhow::bail!("Couldn't read any 'Artist - Title' lines");
     }
     Ok(json!({ "name": "Imported list", "description": "", "cover": null, "source": "text", "tracks": tracks }))
+}
+
+/// `line` split at the first `sep` that isn't inside brackets: "Song (feat. A, B)" has none.
+fn split_outside_brackets(line: &str, sep: char) -> Option<(&str, &str)> {
+    let mut depth = 0i32;
+    for (i, c) in line.char_indices() {
+        match c {
+            '(' | '[' | '{' | '（' | '【' | '「' | '『' => depth += 1,
+            ')' | ']' | '}' | '）' | '】' | '」' | '』' => depth -= 1,
+            _ if c == sep && depth <= 0 => return Some((&line[..i], &line[i + c.len_utf8()..])),
+            _ => {}
+        }
+    }
+    None
 }
 
 async fn resolve_short(st: &impl Ctx, url: &str) -> String {
@@ -498,10 +529,13 @@ mod tests {
 
     #[test]
     fn text_lists_keep_every_song_line() {
-        let v = super::parse_text("\u{feff}Aesop Rock - 39 Thieves\r\n - No Artist Song\r\nLonely Title -\r\nArtist -Glued\r\nJust A Title\r\n10.000 Maniacs - Trouble Me\r\n\r\n米津玄師 - Lemon\r\nTab\tSeparated").unwrap();
+        let v = super::parse_text("\u{feff}Aesop Rock - 39 Thieves\r\n - No Artist Song\r\nLonely Title -\r\nArtist -Glued\r\nJust A Title\r\n10.000 Maniacs - Trouble Me\r\n\r\n米津玄師 - Lemon\r\nTab\tSeparated\r\n\u{200d}\r\nNO EULOGIES / JAMIE PAIGE + UNBEATABLE\r\nど～ぱみん -「アポカリゴットタレント」feat.初音ミク\r\nNEWLY HUMAN FEELING | Moe Shop\r\nミクだし/ 初音ミク\r\nAC/DC\r\nMac DeMarco // On the Level\r\ndialing+darling (feat. A (CV:B), C &...\r\n#電音部 - DIVE\r\n# a comment").unwrap();
         let t = v["tracks"].as_array().unwrap();
         let got: Vec<(&str, &str)> = t.iter().map(|x| (x["artist"].as_str().unwrap(), x["title"].as_str().unwrap())).collect();
         assert_eq!(got, vec![("Aesop Rock", "39 Thieves"), ("", "No Artist Song"), ("", "Lonely Title"), ("Artist", "Glued"), ("", "Just A Title"),
-                             ("10.000 Maniacs", "Trouble Me"), ("米津玄師", "Lemon"), ("Tab", "Separated")]);
+                             ("10.000 Maniacs", "Trouble Me"), ("米津玄師", "Lemon"), ("Tab", "Separated"),
+                             ("JAMIE PAIGE + UNBEATABLE", "NO EULOGIES"), ("ど～ぱみん", "「アポカリゴットタレント」feat.初音ミク"), ("Moe Shop", "NEWLY HUMAN FEELING"),
+                             ("初音ミク", "ミクだし"), ("", "AC/DC"), ("Mac DeMarco", "On the Level"),
+                             ("", "dialing+darling (feat. A (CV:B), C &..."), ("#電音部", "DIVE")]);
     }
 }
