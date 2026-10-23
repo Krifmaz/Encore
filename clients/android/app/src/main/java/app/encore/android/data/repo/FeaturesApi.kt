@@ -535,7 +535,18 @@ class FeaturesApi(private val api: EncoreApi, private val client: OkHttpClient) 
     fun playlistPage(id: Long): PlaylistPage = getObject("/api/playlists/$id").page(PlaylistPage.serializer())
 
     /** POST /api/playlists {name} → the new playlist's id. */
-    fun createPlaylist(name: String): Long = (call("POST", "/api/playlists", buildJsonObject { put("name", name) }) as? JsonObject)?.long("id") ?: 0L
+    fun createPlaylist(name: String): Long = createPlaylist(name, false).first
+
+    /**
+     * POST /api/playlists {name, collaborative} → the new playlist's id, and its invite link (url, or path when the
+     * server has no public URL) when it starts collaborative, else "".
+     */
+    fun createPlaylist(name: String, collaborative: Boolean): Pair<Long, String> {
+        val o = call("POST", "/api/playlists", buildJsonObject { put("name", name); if (collaborative) put("collaborative", true) }) as? JsonObject
+            ?: return 0L to ""
+        val link = o.obj("invite_link")
+        return o.long("id") to (link?.str("url")?.takeIf { it.startsWith("http") } ?: link?.str("path") ?: "")
+    }
 
     fun renamePlaylist(id: Long, name: String) {
         call("PATCH", "/api/playlists/$id", buildJsonObject { put("name", name) })

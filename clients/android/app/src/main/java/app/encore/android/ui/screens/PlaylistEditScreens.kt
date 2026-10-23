@@ -17,6 +17,10 @@ import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.ExperimentalLayoutApi
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.material3.AlertDialog
+import androidx.compose.ui.semantics.Role
+import androidx.compose.foundation.selection.toggleable
+import androidx.compose.material3.CheckboxDefaults
+import androidx.compose.material3.Checkbox
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
@@ -95,6 +99,44 @@ private fun act(scope: CoroutineScope, call: () -> String, after: () -> Unit = {
     }
 }
 
+/**
+ * New playlist: its name and the Collaborative box. Ticked, the playlist starts collaborative and the server makes its
+ * invite link with it (features/library/PlaylistCollabRules), which [onOk] gets to copy.
+ */
+@Composable
+fun NewPlaylistDialog(onDismiss: () -> Unit, onOk: (name: String, collaborative: Boolean) -> Unit) {
+    val p = MaterialTheme.palette
+    var name by remember { mutableStateOf("New playlist") }
+    var collaborative by remember { mutableStateOf(false) }
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        containerColor = p.panel,
+        titleContentColor = p.text,
+        textContentColor = p.muted,
+        title = { Text("New playlist") },
+        text = {
+            Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                EncoreField(name, { name = it }, imeAction = ImeAction.Done, onAction = { onDismiss(); onOk(name, collaborative) }, modifier = Modifier.fillMaxWidth())
+                Row(
+                    Modifier.fillMaxWidth().toggleable(value = collaborative, role = Role.Checkbox, onValueChange = { collaborative = it }),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    Checkbox(
+                        checked = collaborative,
+                        onCheckedChange = null,
+                        colors = CheckboxDefaults.colors(checkedColor = p.accent, checkmarkColor = p.onAccent, uncheckedColor = p.muted),
+                    )
+                    Spacer(Modifier.width(8.dp))
+                    Text(PlaylistCollabRules.TOGGLE, color = p.text, style = MaterialTheme.typography.bodyLarge)
+                }
+                Text(PlaylistCollabRules.NEW_HINT, style = MaterialTheme.typography.bodySmall)
+            }
+        },
+        confirmButton = { TextButton(onClick = { onDismiss(); onOk(name, collaborative) }) { Text("Create", color = p.text, fontWeight = FontWeight.SemiBold) } },
+        dismissButton = { TextButton(onClick = onDismiss) { Text("Cancel", color = p.muted) } },
+    )
+}
+
 /** A one-field dialog (new playlist name, rename). */
 @Composable
 fun NameDialog(title: String, initial: String, okLabel: String, placeholder: String = "", onDismiss: () -> Unit, onOk: (String) -> Unit) {
@@ -141,6 +183,7 @@ fun AlbumChoiceDialog(title: String, onDismiss: () -> Unit, onPick: (albumMode: 
 @Composable
 fun PlaylistsActions(nav: Nav) {
     val scope = rememberCoroutineScope()
+    val context = LocalContext.current
     var newName by remember { mutableStateOf(false) }
     var addShared by remember { mutableStateOf(false) }
     IconButton(onClick = { newName = true }) { Icon(painterResource(R.drawable.ic_add), contentDescription = "New") }
@@ -149,10 +192,15 @@ fun PlaylistsActions(nav: Nav) {
     IconButton(onClick = { nav.open(Screen.PlaylistImport(null)) }) { Icon(painterResource(R.drawable.ic_download), contentDescription = "Import") }
     if (addShared) AddSharedPlaylistDialog(nav) { addShared = false }
     if (newName) {
-        NameDialog("New playlist", "New playlist", "Create", onDismiss = { newName = false }) { name ->
+        NewPlaylistDialog(onDismiss = { newName = false }) { name, collaborative ->
             scope.launch {
                 try {
-                    val id = withContext(Dispatchers.IO) { nav.features.createPlaylist(name.ifBlank { "New playlist" }) }
+                    val (id, link) = withContext(Dispatchers.IO) { nav.features.createPlaylist(name.ifBlank { "New playlist" }, collaborative) }
+                    // Collaborative was ticked: its invite link goes to the clipboard, ready to send
+                    if (link.isNotEmpty()) {
+                        copyToClipboard(context, if (link.startsWith("http")) link else nav.graph.api.url(link))
+                        Toasts.show(PlaylistCollabRules.LINK_COPIED, "ok")
+                    }
                     if (id > 0L) nav.open(Screen.Playlist(id, name.ifBlank { "New playlist" }))
                 } catch (e: Exception) {
                     Toasts.show(e.message ?: "Couldn't create the playlist", "err")

@@ -27,6 +27,8 @@ object PlaylistCollabRules {
     const val LEAVE = "Leave playlist"
     const val LEFT = "You left the playlist"
     const val JOINED = "Joined: you can change its songs now"
+    const val NEW_HINT = "Makes an invite link: people on this server who open it can add, remove and reorder songs."
+    const val LINK_COPIED = "Invite link copied"
     const val LEAVE_TEXT = "You stop seeing it and can't change it any more. The owner can invite you again."
 
     /** "COLLABORATIVE · BY ANNA" over a member's playlist (the phone shows it in capitals). */

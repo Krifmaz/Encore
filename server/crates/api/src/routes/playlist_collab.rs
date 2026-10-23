@@ -192,17 +192,23 @@ async fn remove_member(State(st): State<AppState>, User(u): User, Path((pid, uid
 async fn make_link(State(st): State<AppState>, User(u): User, Path(pid): Path<i64>) -> ApiResult<Json<Value>> {
     st.blocking(move |st| {
         let pl = owned_playlist(st, pid, &u)?;
-        set_collaborative(st, &pl, true)?;
-        let token = match pl.s("invite_token") {
-            t if !t.is_empty() => t,
-            _ => {
-                let t = encore_core::ids::random_token(12);
-                st.db.execute("UPDATE playlists SET invite_token=? WHERE id=?", p![t, pid])?;
-                t
-            }
-        };
-        Ok(Json(link_json(st, &token)))
+        Ok(Json(invite_link(st, &pl)?))
     }).await
+}
+
+/// Turns Collaborative on and gives the playlist's invite link (made the first time): `{token, path, url}`.
+/// Also New playlist's Collaborative box (`POST /api/playlists {collaborative: true}`).
+pub(crate) fn invite_link(st: &AppState, pl: &Row) -> ApiResult<Value> {
+    set_collaborative(st, pl, true)?;
+    let token = match pl.s("invite_token") {
+        t if !t.is_empty() => t,
+        _ => {
+            let t = encore_core::ids::random_token(12);
+            st.db.execute("UPDATE playlists SET invite_token=? WHERE id=?", p![t, pl.i("id")])?;
+            t
+        }
+    };
+    Ok(link_json(st, &token))
 }
 
 /// `DELETE /api/playlists/{pid}/invite-link`: the link stops working; those who joined with it stay. A new

@@ -200,6 +200,22 @@ async fn liked_songs_disabled_owner_and_delete() {
     assert!(e.listed(&e.ben, pid).await.is_none());
 }
 
+#[tokio::test]
+async fn a_new_playlist_can_start_collaborative_with_its_link() {
+    let e = setup("new").await;
+    let r = e.ok(&e.anna, "POST", "/api/playlists", Some(json!({ "name": "Party", "collaborative": true }))).await;
+    let pid = r["id"].as_i64().unwrap();
+    let token = r["invite_link"]["token"].as_str().unwrap().to_string();
+    assert_eq!(r["invite_link"]["path"], json!(format!("/#/collab/{token}")));
+    assert_eq!(e.listed(&e.anna, pid).await.unwrap()["collab"]["role"], json!("owner"));
+    e.ok(&e.ben, "POST", "/api/collab/join", Some(json!({ "link": token }))).await;
+    assert!(e.listed(&e.ben, pid).await.is_some());
+    // without the box: an ordinary playlist, no link
+    let r = e.ok(&e.anna, "POST", "/api/playlists", Some(json!({ "name": "Solo" }))).await;
+    assert!(r.get("invite_link").is_none());
+    assert_eq!(e.listed(&e.anna, r["id"].as_i64().unwrap()).await.unwrap()["collab"], Value::Null);
+}
+
 #[test]
 fn invite_tokens_in_pasted_text() {
     assert_eq!(invite_token_of("https://x.example/#/collab/AbCdEfGh12_-").as_deref(), Some("AbCdEfGh12_-"));

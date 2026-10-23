@@ -503,7 +503,7 @@ pub fn copy_text(t: &str) {
 }
 
 /// [`copy_text`] with `copied` as the toast when it worked (a share link says what the link does instead).
-fn copy_then(t: &str, copied: &str) {
+pub fn copy_then(t: &str, copied: &str) {
     let has_api = js_sys::Reflect::get(&dom::window().navigator(), &"clipboard".into()).map(|c| !c.is_undefined() && !c.is_null()).unwrap_or(false);
     if !has_api {
         // no await before this: the browser still counts the click that asked for it

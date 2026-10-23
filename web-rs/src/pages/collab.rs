@@ -214,6 +214,53 @@ fn link_url(link: &Value) -> String {
     if url.starts_with("http") { url } else { crate::ui::absolute_url(&link.s("path")).unwrap_or_default() }
 }
 
+// ---- New playlist -----------------------------------------------------------------------------------
+
+/// The Collaborative box under New playlist's name.
+pub const NEW_COLLAB_LABEL: &str = "Collaborative";
+pub const NEW_COLLAB_HINT: &str = "Makes an invite link: people on this server who open it can add, remove and reorder songs.";
+
+/// New playlist: its name and the Collaborative box. Checked, the playlist starts collaborative and its invite
+/// link is copied (the server makes it with the playlist).
+pub fn new_playlist_modal() {
+    let m = modal(ModalOpts::new("New playlist", &format!(r#"<label class="field"><span>Name</span><input class="input" id="np-name" value="New playlist"></label>
+        <label class="switch mt"><input type="checkbox" id="np-collab"><i></i>{NEW_COLLAB_LABEL}</label>
+        <div class="small muted" style="margin-top:6px">{}</div>"#, esc(NEW_COLLAB_HINT)))
+        .footer(r#"<button class="btn" data-close>Cancel</button><button class="btn primary" id="np-go">Create</button>"#));
+    let busy = Rc::new(std::cell::Cell::new(false));
+    let go: Rc<dyn Fn()> = {
+        let m = m.clone();
+        Rc::new(move || {
+            if busy.get() { return; }
+            busy.set(true);
+            let name = dom::value_of(&m.el, "#np-name");
+            let collab = dom::checked_of(&m.el, "#np-collab");
+            let (m, busy) = (m.clone(), busy.clone());
+            dom::spawn(async move {
+                let name = if name.trim().is_empty() { "New playlist".to_string() } else { name.trim().to_string() };
+                match api::post("/playlists", json!({ "name": name, "collaborative": collab })).await {
+                    Ok(r) => {
+                        if collab {
+                            // copied now (the clipboard may refuse once the click is long gone; the Invite window has it too)
+                            let url = link_url(r.g("invite_link"));
+                            crate::ui::copy_then(&url, "Invite link copied");
+                        }
+                        m.close();
+                        app::navigate(&format!("/playlists/{}", r.s("id")));
+                    }
+                    Err(e) => { toast(&e.message, "err"); busy.set(false); }
+                }
+            });
+        })
+    };
+    { let go = go.clone(); dom::on_sel(&m.el, "#np-go", "click", move |_| go()); }
+    if let Some(input) = m.qs("#np-name") {
+        dom::on(&input, "keydown", move |e| { if dom::key(e) == "Enter" { dom::prevent(e); go(); } });
+        dom::focus(&input);
+        if let Some(i) = wasm_bindgen::JsCast::dyn_ref::<web_sys::HtmlInputElement>(&input) { i.select(); }
+    }
+}
+
 // ---- the invited -------------------------------------------------------------------------------------
 
 /// The invites waiting for the user, on top of the Playlists page (empty when there are none).

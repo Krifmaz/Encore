@@ -534,9 +534,7 @@ pub fn render(view: Element, _ctx: Ctx) -> PageFuture {
         }
         dom::on_sel(&view, "#import", "click", |_| import_modal("", None));
         dom::on_sel(&view, "#add-shared", "click", |_| add_shared_modal());
-        dom::on_sel(&view, "#new", "click", |_| dom::spawn(async {
-            if let Ok(r) = api::post("/playlists", json!({ "name": "New playlist" })).await { app::navigate(&format!("/playlists/{}", r.s("id"))); }
-        }));
+        dom::on_sel(&view, "#new", "click", |_| super::collab::new_playlist_modal());
         {
             let bx2 = bx.clone();
             dom::on_sel(&view, "#merge", "click", move |_| {

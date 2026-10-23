@@ -236,7 +236,15 @@ struct Patch {
 
 async fn create(State(st): State<AppState>, User(u): User, Json(b): Json<Patch>) -> ApiResult<Json<Value>> {
     let name = b.name.filter(|n| !n.trim().is_empty()).unwrap_or("New playlist".into());
-    st.blocking(move |st| Ok(Json(playlists::create(st, u.i("id"), &name, &[], "manual", None, b.description.as_deref().unwrap_or(""), None, false).map_err(bad)?))).await
+    st.blocking(move |st| {
+        let mut res = playlists::create(st, u.i("id"), &name, &[], "manual", None, b.description.as_deref().unwrap_or(""), None, false).map_err(bad)?;
+        // New playlist's Collaborative box: on from the start, with its invite link to hand out
+        if b.collaborative == Some(true) {
+            let pl = own(st, res["id"].as_i64().unwrap_or(0), &u)?;
+            res["invite_link"] = playlist_collab::invite_link(st, &pl)?;
+        }
+        Ok(Json(res))
+    }).await
 }
 
 /// One playlist with its songs, read and enriched on the blocking pool. Someone else's playlist added from a

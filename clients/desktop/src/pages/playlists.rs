@@ -492,7 +492,12 @@ pub enum Dialog {
     Merge(Merge),
     /// Add a shared playlist: the pasted link, and the server's answer when it said no.
     AddShared { link: String, busy: bool, error: Option<String> },
+    /// New playlist: its name, and Collaborative (which also makes the invite link).
+    New { name: String, collaborative: bool },
 }
+
+/// The Collaborative box under New playlist's name.
+pub const NEW_COLLAB_HINT: &str = "Makes an invite link: people on this server who open it can add, remove and reorder songs.";
 
 #[derive(Debug, Default)]
 pub struct State {
@@ -512,6 +517,9 @@ pub enum Message {
     Open(i64),
     Select(i64, bool),
     New,
+    NewName(String),
+    NewCollab(bool),
+    NewGo,
     Created(Result<Value, ApiError>),
     OpenImport,
     Import(ImportMsg),
@@ -573,21 +581,42 @@ pub fn update(state: &mut State, msg: Message, ctx: &mut Ctx) -> Task<Message> {
                 state.selected.push(id);
             }
         }
-        Message::New => {
-            if state.creating {
-                return Task::none();
+        Message::New => state.dialog = Some(Dialog::New { name: "New playlist".into(), collaborative: false }),
+        Message::NewName(s) => {
+            if let Some(Dialog::New { name, .. }) = state.dialog.as_mut() {
+                *name = s;
             }
-            state.creating = true;
-            let api = ctx.api.clone();
-            return Task::perform(
-                async move { api.post("/playlists", json!({ "name": "New playlist" })).await },
-                Message::Created,
-            );
+        }
+        Message::NewCollab(on) => {
+            if let Some(Dialog::New { collaborative, .. }) = state.dialog.as_mut() {
+                *collaborative = on;
+            }
+        }
+        Message::NewGo => {
+            if let Some(Dialog::New { name, collaborative }) = state.dialog.as_ref() {
+                if state.creating {
+                    return Task::none();
+                }
+                state.creating = true;
+                let name = if name.trim().is_empty() { "New playlist".to_string() } else { name.trim().to_string() };
+                let body = json!({ "name": name, "collaborative": collaborative });
+                let api = ctx.api.clone();
+                return Task::perform(async move { api.post("/playlists", body).await }, Message::Created);
+            }
         }
         Message::Created(r) => {
             state.creating = false;
             match r {
-                Ok(v) => ctx.navigate(Page::Playlist(fmt::i(&v, "id"))),
+                Ok(v) => {
+                    state.dialog = None;
+                    // Collaborative was ticked: the invite link to hand out goes to the clipboard
+                    let link = &v["invite_link"];
+                    if link.is_object() {
+                        let url = fmt::s(link, "url");
+                        ctx.copy_text(if url.starts_with("http") { url } else { format!("{}{}", ctx.base(), fmt::s(link, "path")) });
+                    }
+                    ctx.navigate(Page::Playlist(fmt::i(&v, "id")));
+                }
                 Err(e) => ctx.toast_err(e.message),
             }
         }
@@ -891,6 +920,33 @@ pub fn overlay<'a>(state: &'a State, _ctx: &Ctx<'a>) -> Option<El<'a, Message>> 
             ]
             .spacing(10);
             Some(modal("Merge playlists", body, Some(footer.into()), false, Message::CloseDialog))
+        }
+        Dialog::New { name, collaborative } => {
+            let body = column![
+                field(
+                    "Name",
+                    text_input("New playlist", name)
+                        .on_input(Message::NewName)
+                        .on_submit(Message::NewGo)
+                        .padding([9, 12])
+                        .size(14)
+                        .style(theme::input)
+                ),
+                toggler(*collaborative)
+                    .label("Collaborative")
+                    .text_size(14)
+                    .spacing(10)
+                    .on_toggle(Message::NewCollab)
+                    .style(theme::switch),
+                small_muted(NEW_COLLAB_HINT),
+            ]
+            .spacing(14);
+            let footer = row![
+                btn("Cancel", Btn::Default, Some(Message::CloseDialog)),
+                btn(if state.creating { "Creating…" } else { "Create" }, Btn::Primary, (!state.creating).then_some(Message::NewGo)),
+            ]
+            .spacing(10);
+            Some(modal("New playlist", body, Some(footer.into()), false, Message::CloseDialog))
         }
         Dialog::AddShared { link, busy, error } => {
             let mut body = column![

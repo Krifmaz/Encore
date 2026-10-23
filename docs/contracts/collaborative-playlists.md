@@ -30,6 +30,7 @@ Only kind `playlist` can be collaborative (not Liked Songs, not someone else's p
 
 | Route | Who | |
 |---|---|---|
+| `POST /api/playlists {name, collaborative: true}` | anyone | New playlist's Collaborative box: the playlist starts collaborative and the answer has its `invite_link` (the apps copy it) |
 | `PATCH /api/playlists/{id} {collaborative: bool}` | owner | the toggle |
 | `GET /api/playlists/{id}/collaborators` | owner, member | `{name, collaborative, role, owner, members: [{user_id, username, status}], invite_link}` — a member sees only who joined, and `invite_link: null` |
 | `POST /api/playlists/{id}/collaborators {username}` | owner | invite (case-insensitive, `@` allowed); 404 unknown account, 400 yourself → the members view |
