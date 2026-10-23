@@ -52,6 +52,7 @@ impl Step {
         }
     }
 
+    /// The step named `s` (the inverse of `as_str`).
     pub fn parse(s: &str) -> Option<Step> {
         [Step::Download, Step::Stage, Step::Import, Step::Config, Step::Start, Step::Files, Step::Plugin].into_iter().find(|x| x.as_str() == s)
     }
@@ -85,13 +86,17 @@ pub fn is_storage(errno: i32) -> bool {
 /// error chain holding it doesn't say the io error twice.
 #[derive(Debug)]
 pub struct StepError {
+    /// what Encore was doing
     pub step: Step,
     /// "mkdir", "write", "rename", "copy", "link", "remove", "open", "read", "stat", "start", "fsync", "set times"
     pub op: &'static str,
+    /// the path the operation was on
     pub path: PathBuf,
     /// where a rename, copy or link went
     pub to: Option<PathBuf>,
+    /// the OS error number, when the error has one
     pub errno: Option<i32>,
+    /// the underlying error
     pub source: io::Error,
     /// a copy or link that failed because its source could not be read (see [`copy`]): the source is the
     /// failing side, not the destination
@@ -99,6 +104,7 @@ pub struct StepError {
 }
 
 impl StepError {
+    /// An error of `op` on `path` (and `to`) during `step`.
     pub fn new(step: Step, op: &'static str, path: &Path, to: Option<&Path>, source: io::Error) -> StepError {
         StepError { step, op, path: path.to_path_buf(), to: to.map(Path::to_path_buf), errno: source.raw_os_error(), source, source_failed: false }
     }
@@ -197,6 +203,7 @@ pub fn fault_point(step: Step, op: &'static str, path: &Path) -> Result<(), Step
     }
 }
 
+/// Run `f` as operation `op` on `path` (and `to`) of `step`; an injected fault (test builds) fails it first.
 fn run<T>(step: Step, op: &'static str, path: &Path, to: Option<&Path>, f: impl FnOnce() -> io::Result<T>) -> Result<T, StepError> {
     if let Some(e) = fault::check(op, path, to) {
         return Err(StepError::new(step, op, path, to, e));
@@ -358,6 +365,7 @@ pub fn spawn<T>(step: Step, program: impl AsRef<Path>, f: impl FnOnce() -> io::R
     run(step, "start", program.as_ref(), None, f)
 }
 
+/// Numbers the probe folders of [`probe`] so concurrent probes never share one.
 static PROBES: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
 /// Can Encore write in `dir`? Creates the folder `.encore-probe-<pid>-<n>` in it, writes 4 KiB into a file
@@ -401,6 +409,7 @@ pub mod roots {
     use std::path::{Path, PathBuf};
     use std::sync::RwLock;
 
+    /// the registered folders
     static ROOTS: RwLock<Vec<PathBuf>> = RwLock::new(Vec::new());
 
     /// Register folders (empty and relative paths are left out).
@@ -450,9 +459,12 @@ pub mod fault {
     use std::path::{Path, PathBuf};
     use std::sync::{Mutex, Once};
 
+    /// registered faults: `(path prefix, op or "*", errno)`
     static FAULTS: Mutex<Vec<(PathBuf, String, i32)>> = Mutex::new(Vec::new());
+    /// reads `ENCORE_FAULT_IO` once
     static ENV: Once = Once::new();
 
+    /// Add the faults listed in `ENCORE_FAULT_IO` (once per process).
     fn from_env() {
         ENV.call_once(|| {
             let Ok(v) = std::env::var("ENCORE_FAULT_IO") else { return };
@@ -490,6 +502,7 @@ pub mod fault {
         FAULTS.lock().unwrap().clone()
     }
 
+    /// The injected fault for `op` on `path` (or `to`), if one matches.
     pub(crate) fn check(op: &str, path: &Path, to: Option<&Path>) -> Option<io::Error> {
         from_env();
         let faults = FAULTS.lock().unwrap();

@@ -7,11 +7,13 @@ use serde_json::{json, Value};
 
 use encore_http::lastfm::signed as lastfm_signed;
 
+/// The connection's data, when it scrobbles (on unless switched off).
 fn wants(c: &Row) -> Option<Value> {
     let d: Value = serde_json::from_str(&c.s("data")).unwrap_or(json!({}));
     (d["scrobble"] != json!(false)).then_some(d)
 }
 
+/// Scrobble track `t` for user `uid` to every connection that scrobbles (`listened_at`: when, or now-playing).
 async fn send(st: &impl Ctx, uid: i64, t: &Row, listened_at: Option<i64>) {
     let (artist, title, album) = (t.s("artist"), t.s("title"), t.s("album"));
     if artist.is_empty() || title.is_empty() {
@@ -70,6 +72,7 @@ async fn send(st: &impl Ctx, uid: i64, t: &Row, listened_at: Option<i64>) {
     }
 }
 
+/// The fields a scrobble needs of track `id`.
 fn track(st: &impl Ctx, id: i64) -> Option<Row> {
     st.db().one("SELECT artist, title, album, albumartist, duration, mb_trackid, mb_albumid FROM tracks WHERE id=?", encore_db::p![id]).ok().flatten()
 }

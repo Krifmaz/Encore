@@ -17,7 +17,9 @@ use std::path::{Path, PathBuf};
 
 /// An open folder and the path it was reached by (for messages, and for the library's rows).
 pub struct Dir {
+    /// the folder's descriptor (O_RDONLY | O_DIRECTORY)
     fd: OwnedFd,
+    /// the path it was reached by
     pub path: PathBuf,
 }
 
@@ -30,26 +32,37 @@ impl std::fmt::Debug for Dir {
 /// What `lstat` says about a name in a folder.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Kind {
+    /// a folder
     Dir,
+    /// a regular file
     File,
+    /// a symbolic link
     Link,
     /// a socket, a device, a pipe
     Other,
 }
 
+/// What lstat says about an entry.
 #[derive(Clone, Copy, Debug)]
 pub struct Stat {
+    /// what it is
     pub kind: Kind,
+    /// its size in bytes
     pub size: u64,
+    /// its modification time, Unix seconds
     pub mtime: i64,
+    /// the device it is on
     pub dev: u64,
+    /// its inode
     pub ino: u64,
 }
 
+/// A C string of `name`; EINVAL when it holds a NUL.
 fn cstr(name: &str) -> io::Result<CString> {
     CString::new(name).map_err(|_| io::Error::from_raw_os_error(libc::EINVAL))
 }
 
+/// A libc return value as a Result: negative means errno.
 fn check(r: libc::c_int) -> io::Result<libc::c_int> {
     if r < 0 {
         Err(io::Error::last_os_error())
@@ -58,6 +71,7 @@ fn check(r: libc::c_int) -> io::Result<libc::c_int> {
     }
 }
 
+/// The parts of a libc stat we use.
 fn stat_of(st: &libc::stat) -> Stat {
     let kind = match st.st_mode & libc::S_IFMT {
         libc::S_IFDIR => Kind::Dir,
@@ -68,10 +82,12 @@ fn stat_of(st: &libc::stat) -> Stat {
     Stat { kind, size: st.st_size as u64, mtime: st.st_mtime, dev: st.st_dev, ino: st.st_ino }
 }
 
+/// The injected-fault check (test builds) for a file operation on `path`.
 fn fault(op: &'static str, path: &Path) -> Result<(), StepError> {
     fsx::fault_point(Step::Files, op, path)
 }
 
+/// A closure that wraps an io error into a [`StepError`] for `op` on `path` (and `to`).
 fn step<'a>(op: &'static str, path: &'a Path, to: Option<&'a Path>) -> impl FnOnce(io::Error) -> StepError + 'a {
     move |e| StepError::new(Step::Files, op, path, to, e)
 }
@@ -226,6 +242,7 @@ impl Dir {
         Ok(self.raw_names()?.len())
     }
 
+    /// The entry names, without "." and "..", as the disk has them.
     fn raw_names(&self) -> Result<Vec<std::ffi::OsString>, StepError> {
         fault("read", &self.path)?;
         // a second handle for the listing: fdopendir takes over the descriptor it is given
@@ -303,14 +320,18 @@ impl Dir {
 /// time), so the original is removed only as far as it was copied and hasn't changed since.
 #[derive(Debug)]
 pub struct Copied {
+    /// the bytes copied
     pub bytes: u64,
+    /// what was copied, entry by entry
     tree: Node,
 }
 
+/// One entry of a [`Copied`] tree.
 #[derive(Debug)]
 enum Node {
     /// a file or link and its (dev, ino, size, mtime) when it was copied
     Leaf(String, (u64, u64, u64, i64)),
+    /// a folder and what was copied inside it
     Dir(String, Vec<Node>),
     /// not copied (a socket, a device, a pipe)
     Skipped(String),
@@ -327,6 +348,7 @@ impl Copied {
     }
 }
 
+/// Remove what `node` copied from `from`, depth first; anything that stayed goes into `left`.
 fn remove_node(from: &Dir, node: &Node, left: &mut Vec<PathBuf>) {
     match node {
         Node::Leaf(name, was) => match from.lstat(name) {
@@ -370,6 +392,7 @@ pub fn copy_tree(from: &Dir, name: &str, to: &Dir, to_name: &str) -> Result<Copi
     }
 }
 
+/// Copy one entry, recursively for a folder, adding the bytes copied to `bytes`.
 fn copy_inner(from: &Dir, name: &str, to: &Dir, to_name: &str, bytes: &mut u64) -> Result<Node, StepError> {
     let st = from.lstat(name)?.ok_or_else(|| StepError::new(Step::Files, "copy", &from.path.join(name), Some(&to.path.join(to_name)), io::Error::from_raw_os_error(libc::ENOENT)))?;
     let was = (st.dev, st.ino, st.size, st.mtime);

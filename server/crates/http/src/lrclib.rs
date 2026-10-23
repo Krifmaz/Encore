@@ -5,6 +5,7 @@ use reqwest::RequestBuilder;
 use serde_json::Value;
 use std::sync::LazyLock;
 
+/// The LRCLIB lyrics API.
 pub const API: &str = "https://lrclib.net/api";
 
 /// A title without "(feat. …)", "[with …]" or "(… remaster)", the way LRCLIB files songs.

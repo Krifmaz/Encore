@@ -31,6 +31,7 @@ use tokio::sync::{mpsc, Notify};
 pub const MTU: usize = 1420;
 /// Per TCP socket, each way – room for Soulseek file transfers over a high-latency tunnel.
 pub const TCP_BUF: usize = 256 * 1024;
+/// At most this many TCP sockets at once (streams, closing orphans and listening pools).
 pub const MAX_SOCKETS: usize = 512;
 /// Listening sockets kept ready per port (each takes one incoming connection).
 pub const LISTEN_POOL: usize = 8;
@@ -38,8 +39,10 @@ pub const LISTEN_POOL: usize = 8;
 const TICK: Duration = Duration::from_millis(25);
 /// A tunnel counts as up while its last handshake is younger than this.
 pub const HANDSHAKE_FRESH: Duration = Duration::from_secs(180);
+/// The error shown when the server never answers the handshake.
 pub const NO_ANSWER: &str = "No answer from the VPN server – check the Endpoint and that this WireGuard config is still active in your VPN account";
 
+/// The error for anything tried while the tunnel is down.
 pub fn not_connected() -> io::Error {
     io::Error::new(io::ErrorKind::NotConnected, "VPN is not connected")
 }
@@ -57,13 +60,18 @@ pub fn udp_socket(bind: SocketAddr) -> io::Result<UdpSocket> {
 
 // ---- the virtual network card -------------------------------------------------------------------
 
+/// smoltcp's device: IP packets waiting to go into the stack and out of it.
 #[derive(Default)]
 struct Queues {
+    /// packets from the tunnel, decrypted, for the stack to read
     rx: VecDeque<Vec<u8>>,
+    /// packets from the stack, to be encrypted and sent
     tx: VecDeque<Vec<u8>>,
 }
 
+/// smoltcp receive token: one inbound packet.
 struct RxTok(Vec<u8>);
+/// smoltcp transmit token: pushes the packet onto the outbound queue.
 struct TxTok<'a>(&'a mut VecDeque<Vec<u8>>);
 
 impl smoltcp::phy::RxToken for RxTok {
@@ -101,29 +109,42 @@ impl Device for Queues {
 
 // ---- the stack ----------------------------------------------------------------------------------
 
+/// Listening on one port: a pool of sockets waiting for a connection each.
 struct Listener {
+    /// tells this listener apart from a later one on the same port
     id: u64,
+    /// the listening sockets, topped up as connections arrive
     pool: Vec<SocketHandle>,
+    /// where accepted connections go: (socket, the far end)
     tx: mpsc::UnboundedSender<(SocketHandle, SocketAddr)>,
 }
 
+/// The userspace TCP/IP stack and everything the engine tracks in it.
 struct Stack {
+    /// the smoltcp interface on the tunnel address
     iface: Interface,
+    /// the packet queues the interface reads and writes
     dev: Queues,
+    /// every socket: TCP and UDP
     sockets: SocketSet<'static>,
     /// TCP sockets in the set (streams, orphans and listening pools)
     tcp_count: usize,
+    /// the listeners by local port
     listeners: HashMap<u16, Listener>,
     /// streams dropped by their owner: closing gracefully, removed once closed (or after 30 s)
     orphans: Vec<(SocketHandle, Instant)>,
     /// TCP sockets that got the far end's FIN: once Closed they read as a clean end, the others
     /// (reset, timed out) as an error
     fin: std::collections::HashSet<SocketHandle>,
+    /// the last ephemeral port handed out (49152..65535)
     next_port: u16,
+    /// the last listener id handed out
     next_listener: u64,
+    /// the engine has stopped: every call fails as not connected
     dead: bool,
 }
 
+/// A TCP socket with roomy buffers, no Nagle and CUBIC congestion control.
 fn new_tcp() -> tcp::Socket<'static> {
     let mut s = tcp::Socket::new(tcp::SocketBuffer::new(vec![0u8; TCP_BUF]), tcp::SocketBuffer::new(vec![0u8; TCP_BUF]));
     s.set_nagle_enabled(false);
@@ -134,11 +155,13 @@ fn new_tcp() -> tcp::Socket<'static> {
     s
 }
 
+/// A smoltcp endpoint as a std address.
 fn to_sockaddr(e: IpEndpoint) -> SocketAddr {
     SocketAddr::new(IpAddr::from(e.addr), e.port)
 }
 
 impl Stack {
+    /// Every local port in use: listeners, TCP sockets and UDP sockets.
     fn local_ports(&self) -> std::collections::HashSet<u16> {
         let mut used: std::collections::HashSet<u16> = self.listeners.keys().copied().collect();
         for (_, s) in self.sockets.iter() {
@@ -158,6 +181,7 @@ impl Stack {
         used
     }
 
+    /// The next free ephemeral port (49152..65535), wrapping around.
     fn alloc_port(&mut self) -> u16 {
         let used = self.local_ports();
         for _ in 0..16384 {
@@ -169,12 +193,14 @@ impl Stack {
         self.next_port
     }
 
+    /// Take a TCP socket out of the set and the counts.
     fn remove_tcp(&mut self, h: SocketHandle) {
         self.fin.remove(&h);
         self.sockets.remove(h);
         self.tcp_count = self.tcp_count.saturating_sub(1);
     }
 
+    /// A new socket listening on `port`, unless the socket limit is reached.
     fn listen_socket(&mut self, port: u16) -> Option<SocketHandle> {
         if self.tcp_count >= MAX_SOCKETS {
             return None;
@@ -271,32 +297,48 @@ impl Stack {
 
 // ---- status shared with the API -----------------------------------------------------------------
 
+/// The tunnel's status for the API.
 pub struct Info {
+    /// when the engine started
     pub started: Instant,
+    /// the last completed handshake
     pub last_handshake: Option<Instant>,
+    /// bytes received through the tunnel
     pub rx_bytes: u64,
+    /// bytes sent through the tunnel
     pub tx_bytes: u64,
     /// the resolved server address
     pub peer: Option<SocketAddr>,
     /// a problem that keeps the tunnel from working (endpoint not found, …)
     pub error: Option<String>,
+    /// the public port the VPN server forwards to us (NAT-PMP)
     pub forwarded_port: Option<u16>,
+    /// the public IPv4 address the VPN server reports (NAT-PMP)
     pub public_ip: Option<Ipv4Addr>,
     /// the last NAT-PMP problem, cleared on success
     pub natpmp_error: Option<String>,
 }
 
+/// One WireGuard tunnel with a TCP/IP stack on top: connections, listeners and UDP sockets.
 pub struct Engine {
+    /// the config it was started with
     pub cfg: WgConfig,
+    /// port forwarding (NAT-PMP) is wanted
     pub natpmp: bool,
+    /// the TCP/IP stack, shared with the streams
     stack: Mutex<Stack>,
+    /// wakes the run loop when there is something to send
     notify: Notify,
+    /// set by [`Engine::shutdown`]
     stop: AtomicBool,
+    /// time zero for the stack's clock
     epoch: Instant,
+    /// status for the API
     pub info: Mutex<Info>,
 }
 
 impl Engine {
+    /// A new engine for `cfg`; nothing runs until [`Engine::run`].
     pub fn new(cfg: WgConfig, natpmp: bool) -> Arc<Engine> {
         let epoch = Instant::now();
         let mut dev = Queues::default();
@@ -313,19 +355,23 @@ impl Engine {
         Arc::new(Engine { cfg, natpmp, stack: Mutex::new(stack), notify: Notify::new(), stop: AtomicBool::new(false), epoch, info: Mutex::new(info) })
     }
 
+    /// The stack's clock: time since the engine was made.
     fn now(&self) -> SInstant {
         SInstant::from_micros(self.epoch.elapsed().as_micros() as i64)
     }
 
+    /// The engine was told to stop.
     pub fn stopped(&self) -> bool {
         self.stop.load(Ordering::Relaxed)
     }
 
+    /// Stop the run loop; every socket then fails.
     pub fn shutdown(&self) {
         self.stop.store(true, Ordering::Relaxed);
         self.notify.notify_one();
     }
 
+    /// How long ago the last handshake completed.
     pub fn handshake_age(&self) -> Option<Duration> {
         self.info.lock().unwrap().last_handshake.map(|t| t.elapsed())
     }
@@ -351,10 +397,12 @@ impl Engine {
         if since.elapsed() > limit { ("error", Some(NO_ANSWER.to_string())) } else { ("connecting", None) }
     }
 
+    /// Set or clear the problem shown in the status.
     pub fn set_error(&self, e: Option<String>) {
         self.info.lock().unwrap().error = e;
     }
 
+    /// Wake the run loop so it sends what is queued.
     fn kick(&self) {
         self.notify.notify_one();
     }
@@ -497,6 +545,7 @@ impl Engine {
 
     // ---- TCP ------------------------------------------------------------------------------------
 
+    /// Open a TCP connection to `addr` (IPv4 only) through the tunnel.
     pub async fn connect(self: &Arc<Self>, addr: SocketAddr) -> io::Result<VpnStream> {
         let SocketAddr::V4(v4) = addr else { return Err(io::Error::new(io::ErrorKind::Unsupported, "The VPN tunnel carries IPv4 only")) };
         let handle = {
@@ -537,6 +586,7 @@ impl Engine {
         }
     }
 
+    /// Listen for TCP connections on `port` of the tunnel address.
     pub fn listen(self: &Arc<Self>, port: u16) -> io::Result<VpnListener> {
         if port == 0 {
             return Err(io::Error::new(io::ErrorKind::InvalidInput, "listen port 0"));
@@ -576,6 +626,7 @@ impl Engine {
 
     // ---- UDP ------------------------------------------------------------------------------------
 
+    /// Bind a UDP socket on `port` of the tunnel address (0 picks a free one).
     pub fn udp_bind(self: &Arc<Self>, port: u16) -> io::Result<VpnUdp> {
         let mut s = self.stack.lock().unwrap();
         if s.dead {
@@ -631,6 +682,7 @@ impl Engine {
         res.map(|(p, _)| p)
     }
 
+    /// One NAT-PMP round: map UDP and TCP, then ask for the public address. Gives the forwarded port and the address if it answered.
     async fn natpmp_try(self: &Arc<Self>) -> Result<(u16, Option<Ipv4Addr>), String> {
         let gw = self.cfg.dns_v4().ok_or("Port forwarding needs the DNS line of the WireGuard config (the NAT-PMP gateway)")?;
         let to = SocketAddrV4::new(gw, natpmp::PORT);
@@ -680,8 +732,11 @@ impl Engine {
 
 /// A TCP connection through the tunnel.
 pub struct VpnStream {
+    /// the engine the socket lives in
     engine: Arc<Engine>,
+    /// the socket in the stack
     handle: SocketHandle,
+    /// the far end
     peer: SocketAddr,
 }
 
@@ -807,13 +862,18 @@ impl AsyncWrite for VpnStream {
 
 /// Inbound TCP on the tunnel address.
 pub struct VpnListener {
+    /// the engine the sockets live in
     engine: Arc<Engine>,
+    /// this listener's id, so a drop doesn't remove a newer one on the same port
     id: u64,
+    /// the local port
     port: u16,
+    /// accepted connections from the run loop
     rx: tokio::sync::Mutex<mpsc::UnboundedReceiver<(SocketHandle, SocketAddr)>>,
 }
 
 impl VpnListener {
+    /// Wait for the next incoming connection.
     pub async fn accept(&self) -> io::Result<(VpnStream, SocketAddr)> {
         let (handle, peer) = self.rx.lock().await.recv().await.ok_or_else(not_connected)?;
         Ok((VpnStream { engine: self.engine.clone(), handle, peer }, peer))
@@ -854,11 +914,14 @@ impl Drop for VpnListener {
 
 /// A UDP socket on the tunnel (DNS, NAT-PMP).
 pub struct VpnUdp {
+    /// the engine the socket lives in
     engine: Arc<Engine>,
+    /// the socket in the stack
     handle: SocketHandle,
 }
 
 impl VpnUdp {
+    /// Send `data` to `to`.
     pub fn send_to(&self, data: &[u8], to: SocketAddrV4) -> io::Result<()> {
         let mut s = self.engine.stack.lock().unwrap();
         if s.dead {
@@ -870,6 +933,7 @@ impl VpnUdp {
         Ok(())
     }
 
+    /// Wait for the next datagram and its sender.
     pub async fn recv_from(&self) -> io::Result<(Vec<u8>, SocketAddr)> {
         poll_fn(|cx| {
             let mut s = self.engine.stack.lock().unwrap();

@@ -10,34 +10,52 @@ use std::collections::{BTreeMap, HashMap};
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
+/// One cached answer.
 struct Entry<V> {
+    /// the cached value (cloned out on a hit)
     value: V,
+    /// its size as counted against `max_bytes`
     bytes: usize,
+    /// when it stops being served (`None`: never)
     expires: Option<Instant>,
+    /// the owner's stamp (a library version, say), checked by the reader's `fresh`
     stamp: u64,
     /// when it was last used (a counter, not a clock): the key of `Inner::order`
     used: u64,
 }
 
+/// The cache behind its mutex.
 struct Inner<V> {
+    /// key → entry
     map: HashMap<String, Entry<V>>,
     /// last use → key: the first one is the least recently used
     order: BTreeMap<u64, String>,
+    /// total size of the entries
     bytes: usize,
+    /// the use counter (bumped on every insert and hit)
     tick: u64,
+    /// lookups that found a usable entry
     hits: u64,
+    /// lookups that found none (or one out of time or stamp)
     misses: u64,
+    /// entries dropped to make room
     evictions: u64,
 }
 
 /// What a cache holds and how it went, for `/api/admin/perf`.
 #[derive(Clone, Debug, Default, PartialEq, Eq, serde::Serialize)]
 pub struct CacheStats {
+    /// entries held
     pub entries: usize,
+    /// their total size
     pub bytes: usize,
+    /// the size limit
     pub max_bytes: usize,
+    /// the entry limit
     pub max_entries: usize,
+    /// lookups answered
     pub hits: u64,
+    /// lookups not answered
     pub misses: u64,
     /// entries dropped to make room (not those that ran out of time or were replaced)
     pub evictions: u64,
@@ -45,8 +63,11 @@ pub struct CacheStats {
 
 /// See the module. Values are cloned out on a hit, so a large value is best kept behind an `Arc`.
 pub struct ByteCache<V> {
+    /// entries and counters
     inner: Mutex<Inner<V>>,
+    /// the size the entries may add up to
     max_bytes: usize,
+    /// the most entries kept
     max_entries: usize,
 }
 
@@ -60,6 +81,7 @@ impl<V: Clone> ByteCache<V> {
         }
     }
 
+    /// The inner state; a poisoned lock is taken over (the cache holds no invariant a panic could break).
     fn lock(&self) -> std::sync::MutexGuard<'_, Inner<V>> {
         self.inner.lock().unwrap_or_else(|e| e.into_inner())
     }
@@ -164,14 +186,17 @@ impl<V: Clone> ByteCache<V> {
         self.lock().map.keys().cloned().collect()
     }
 
+    /// Entries held.
     pub fn len(&self) -> usize {
         self.lock().map.len()
     }
 
+    /// `true` when nothing is held.
     pub fn is_empty(&self) -> bool {
         self.len() == 0
     }
 
+    /// Sizes and counters, for `/api/admin/perf`.
     pub fn stats(&self) -> CacheStats {
         let g = self.lock();
         CacheStats { entries: g.map.len(), bytes: g.bytes, max_bytes: self.max_bytes, max_entries: self.max_entries, hits: g.hits, misses: g.misses, evictions: g.evictions }

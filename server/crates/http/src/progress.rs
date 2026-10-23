@@ -8,12 +8,15 @@
 use std::future::Future;
 use std::sync::{Arc, Mutex};
 
+/// A function that shows a line of progress to whoever waits.
 type Say = dyn Fn(&str) + Send + Sync;
 
 /// Where the words go, and the step they are at.
 #[derive(Clone)]
 struct Sink {
+    /// shows a line
     say: Arc<Say>,
+    /// the step the work is at now
     step: Arc<Mutex<String>>,
 }
 

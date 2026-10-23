@@ -56,7 +56,9 @@ pub fn confine(root: &Path, rel: &str) -> Result<PathBuf, ApiError> {
 /// A path in a root, checked by [`names::parse_rel`].
 #[derive(Clone, Debug)]
 pub struct Target {
+    /// the root it lies in
     pub root: Root,
+    /// the path from the root, one name per part
     pub parts: Vec<String>,
 }
 
@@ -80,6 +82,7 @@ pub fn io_error(e: StepError) -> ApiError {
 }
 
 impl Target {
+    /// `rel` in `root`, checked.
     pub fn new(root: &Root, rel: &str) -> Result<Target, ApiError> {
         Ok(Target { root: root.clone(), parts: names::parse_rel(rel)? })
     }
@@ -89,6 +92,7 @@ impl Target {
         names::join(&self.parts)
     }
 
+    /// The root itself.
     pub fn is_root(&self) -> bool {
         self.parts.is_empty()
     }
@@ -114,6 +118,7 @@ impl Target {
         t
     }
 
+    /// Refuse anything but Move to trash in the Trash root.
     fn refuse_trash(&self) -> Result<(), ApiError> {
         if self.root.kind == RootKind::Trash {
             return Err(err(403, "Files go to the trash with Move to trash"));

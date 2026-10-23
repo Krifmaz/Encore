@@ -14,15 +14,18 @@ use std::path::Path;
 
 pub use crate::loudness::parse_ebur128;
 
+/// FFT length of the spectrum analysis (frames of the cutoff check).
 const FFT: usize = 4096;
 /// Genres that are meant to be quiet: the loudness check leaves them alone.
 const QUIET_GENRES: [&str; 16] = ["classical", "klassik", "classique", "baroque", "orchestra", "symphon", "piano", "score", "ambient", "drone",
     "field recording", "soundtrack", "new age", "opera", "chamber", "choral"];
 
+/// One problem the quality check found.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Issue {
     /// fake_lossless | upsampled | low_bitrate | quiet | clipped | wrong_length
     pub code: &'static str,
+    /// what the UI shows
     pub text: String,
 }
 
@@ -35,23 +38,31 @@ impl Issue {
     }
 }
 
+/// What the quality check found in one file.
 #[derive(Debug, Clone, Default)]
 pub struct Report {
+    /// the problems, in the order found
     pub issues: Vec<Issue>,
+    /// where the spectrum falls off, when it does before the format's limit
     pub cutoff_hz: Option<f64>,
+    /// integrated loudness (LUFS)
     pub lufs: Option<f64>,
+    /// true peak (dBTP)
     pub true_peak: Option<f64>,
     /// false when nothing could be measured (no ffmpeg, unreadable file)
     pub checked: bool,
 }
 
 impl Report {
+    /// The issues' texts, joined with "; ".
     pub fn summary(&self) -> String {
         self.issues.iter().map(|i| i.text.clone()).collect::<Vec<_>>().join("; ")
     }
+    /// The issue that turns the download away, if any.
     pub fn rejection(&self) -> Option<&Issue> {
         self.issues.iter().find(|i| i.rejects())
     }
+    /// The report as stored and sent (`status` ok, suspect or unchecked; `issues`; measurements).
     pub fn to_json(&self) -> Value {
         json!({
             "status": if !self.checked { "unchecked" } else if self.issues.is_empty() { "ok" } else { "suspect" },
@@ -96,6 +107,7 @@ pub fn spectrum(mono: &[f32], rate: u32) -> (Vec<f64>, f64) {
     (acc, bin_hz)
 }
 
+/// Power as dB (never minus infinity).
 fn db(p: f64) -> f64 {
     10.0 * (p + 1e-30).log10()
 }
@@ -143,6 +155,7 @@ pub fn find_cutoff(power: &[f64], bin_hz: f64, search_to: f64) -> Option<f64> {
     None
 }
 
+/// A frequency in kHz rounded to the half: `16 kHz`, `19.5 kHz`.
 fn khz(hz: f64) -> String {
     let k = (hz / 500.0).round() * 0.5;
     if (k - k.round()).abs() < 0.01 { format!("{} kHz", k.round() as i64) } else { format!("{k:.1} kHz") }
@@ -204,6 +217,7 @@ pub fn clip_runs(interleaved: &[f32], channels: usize) -> usize {
     runs
 }
 
+/// A `quiet` issue when the loudness is under `min_lufs` (and not silence, and not a quiet genre).
 pub fn loudness_issue(lufs: Option<f64>, genre: &str, min_lufs: f64) -> Option<Issue> {
     let l = lufs?;
     let g = genre.to_lowercase();
@@ -213,11 +227,13 @@ pub fn loudness_issue(lufs: Option<f64>, genre: &str, min_lufs: f64) -> Option<I
     None
 }
 
+/// A `clipped` issue when there are as many flattened peaks as seconds (in more than 5 s).
 pub fn clip_issue(runs: usize, seconds: f64) -> Option<Issue> {
     // a few clipped peaks are normal in loud masters; one every second is not
     (seconds > 5.0 && runs as f64 >= seconds).then(|| Issue { code: "clipped", text: format!("Clipped: {runs} flattened peaks in {} s", seconds.round()) })
 }
 
+/// Seconds as `m:ss`.
 fn mmss(s: f64) -> String {
     let s = s.abs().round() as i64;
     format!("{}:{:02}", s / 60, s % 60)
@@ -292,10 +308,12 @@ pub async fn analyze(media: &Media, path: &Path, expected: Option<f64>, min_lufs
 
 // ---- import gate, storage, library scan ----------------------------------------------------------
 
+/// Whether imports are checked (`quality_check_on_import`).
 pub fn on_import(st: &impl Ctx) -> bool {
     st.cfg().bool("quality_check_on_import")
 }
 
+/// The loudness under which a file counts as quiet (`quality_min_lufs`, −28 when 0).
 pub fn min_lufs(st: &impl Ctx) -> f64 {
     let v = st.cfg().float("quality_min_lufs");
     if v == 0.0 { -28.0 } else { v }
@@ -345,6 +363,7 @@ pub fn store(st: &impl Ctx, path: &Path, rep: &Report) {
     store_id(st, t.i("id"), t.f("mtime"), rep);
 }
 
+/// Store the report of track `id` (and the file time it was made for).
 fn store_id(st: &impl Ctx, id: i64, mtime: f64, rep: &Report) {
     let j = rep.to_json();
     let _ = st.db().execute("INSERT OR REPLACE INTO track_quality (track_id, status, issues, summary, cutoff_hz, lufs, true_peak, mtime, checked_at) VALUES (?,?,?,?,?,?,?,?,?)",

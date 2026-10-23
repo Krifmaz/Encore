@@ -14,6 +14,7 @@ pub const SERVICES: [(&str, &str, &str); 9] = [
     ("listenbrainz", "ListenBrainz", "scrobble"), ("lastfm", "Last.fm", "scrobble"),
 ];
 
+/// The connection of user `uid` to `service`, with its `data` read from JSON.
 pub fn get(st: &impl Ctx, uid: i64, service: &str) -> Option<Row> {
     let mut c = st.db().one("SELECT * FROM connections WHERE user_id=? AND service=?", p![uid, service]).ok()??;
     let d: Value = serde_json::from_str(&c.s("data")).unwrap_or(json!({}));
@@ -21,6 +22,7 @@ pub fn get(st: &impl Ctx, uid: i64, service: &str) -> Option<Row> {
     Some(c)
 }
 
+/// Every connection of user `uid`, by service, each with its `data` read.
 pub fn list_for(st: &impl Ctx, uid: i64) -> Vec<Row> {
     st.db().query("SELECT * FROM connections WHERE user_id=? ORDER BY service", p![uid]).unwrap_or_default().into_iter().map(|mut c| {
         let d: Value = serde_json::from_str(&c.s("data")).unwrap_or(json!({}));
@@ -29,6 +31,7 @@ pub fn list_for(st: &impl Ctx, uid: i64) -> Vec<Row> {
     }).collect()
 }
 
+/// Store a connection (a new one, or new credentials for an existing one, clearing its error); its id.
 pub fn save(st: &impl Ctx, uid: i64, service: &str, account: &str, data: &Value) -> anyhow::Result<i64> {
     if let Some(c) = get(st, uid, service) {
         st.db().execute("UPDATE connections SET account=?, data=?, last_error=NULL WHERE id=?", p![account, data.to_string(), c.i("id")])?;
@@ -37,10 +40,12 @@ pub fn save(st: &impl Ctx, uid: i64, service: &str, account: &str, data: &Value)
     Ok(st.db().execute("INSERT INTO connections (user_id, service, account, data, created_at) VALUES (?,?,?,?,?)", p![uid, service, account, data.to_string(), now()])?)
 }
 
+/// Replace a connection's stored `data` (fresh tokens, settings).
 pub fn update_data(st: &impl Ctx, id: i64, data: &Value) {
     let _ = st.db().execute("UPDATE connections SET data=? WHERE id=?", p![data.to_string(), id]);
 }
 
+/// A connection as the API sends it: label, kind, sync switches and state, never the credentials.
 pub fn public(c: &Row) -> Value {
     let svc = c.s("service");
     let (label, kind) = SERVICES.iter().find(|x| x.0 == svc).map(|x| (x.1, x.2)).unwrap_or((svc.as_str(), ""));
@@ -57,6 +62,7 @@ pub fn public(c: &Row) -> Value {
     v
 }
 
+/// The OAuth redirect address for `service` (`base_url` must be set).
 fn redirect_uri(st: &impl Ctx, service: &str) -> anyhow::Result<String> {
     let base = st.cfg().str("base_url").trim_end_matches('/').to_string();
     if base.is_empty() {
@@ -146,6 +152,8 @@ pub async fn oauth_exchange(st: &impl Ctx, service: &str, code: &str, verifier: 
     }
 }
 
+/// A fresh OAuth access token for connection `c`: the stored one while it lasts another minute, else one from
+/// the refresh token at `url` (stored; a refusal marks the connection as needing a reconnect).
 async fn refresh(st: &impl Ctx, c: &Row, url: &str, client_id: &str) -> Option<String> {
     let mut d = c["data"].clone();
     if d["expires"].as_f64().unwrap_or(0.0) > now() + 60.0 {
@@ -166,11 +174,13 @@ async fn refresh(st: &impl Ctx, c: &Row, url: &str, client_id: &str) -> Option<S
     Some(access.to_string())
 }
 
+/// A fresh Spotify access token for user `uid`.
 pub async fn spotify_token(st: &impl Ctx, uid: i64) -> Option<String> {
     let c = get(st, uid, "spotify")?;
     refresh(st, &c, "https://accounts.spotify.com/api/token", &st.cfg().str("spotify_client_id")).await
 }
 
+/// A fresh TIDAL access token for user `uid`.
 pub async fn tidal_token(st: &impl Ctx, uid: i64) -> Option<String> {
     let c = get(st, uid, "tidal")?;
     refresh(st, &c, "https://auth.tidal.com/v1/oauth2/token", &st.cfg().str("tidal_client_id")).await
@@ -178,6 +188,7 @@ pub async fn tidal_token(st: &impl Ctx, uid: i64) -> Option<String> {
 
 // ---- Jellyfin -----------------------------------------------------------------------------------
 
+/// The `X-Emby-Authorization` header (and the token header, when signed in) Jellyfin wants.
 pub fn jellyfin_headers(token: Option<&str>, device: &str) -> Vec<(String, String)> {
     let mut v = format!("MediaBrowser Client=\"Encore\", Device=\"Encore\", DeviceId=\"{device}\", Version=\"1.0\"");
     if let Some(t) = token {
@@ -190,6 +201,7 @@ pub fn jellyfin_headers(token: Option<&str>, device: &str) -> Vec<(String, Strin
     h
 }
 
+/// Sign user `uid` in to the configured Jellyfin server and store the connection.
 pub async fn connect_jellyfin(st: &impl Ctx, uid: i64, user: &str, password: &str) -> anyhow::Result<Value> {
     let url = st.cfg().str("jellyfin_url").trim_end_matches('/').to_string();
     if url.is_empty() {
@@ -211,6 +223,7 @@ pub async fn connect_jellyfin(st: &impl Ctx, uid: i64, user: &str, password: &st
 
 // ---- Plex (PIN sign-in) --------------------------------------------------------------------------
 
+/// The id Encore introduces itself to Plex with (`plex_client_id`, generated once when empty).
 pub fn plex_client_id(st: &impl Ctx) -> String {
     let cid = st.cfg().str("plex_client_id");
     if !cid.is_empty() {
@@ -223,6 +236,7 @@ pub fn plex_client_id(st: &impl Ctx) -> String {
     cid
 }
 
+/// The headers Plex wants: product, client id, version, JSON, and the token when signed in.
 pub fn plex_headers(st: &impl Ctx, token: Option<&str>) -> Vec<(String, String)> {
     let mut h = vec![("X-Plex-Product".to_string(), "Encore".to_string()), ("X-Plex-Client-Identifier".into(), plex_client_id(st)),
                      ("X-Plex-Version".into(), "1.0".into()), ("Accept".into(), "application/json".into())];
@@ -232,6 +246,7 @@ pub fn plex_headers(st: &impl Ctx, token: Option<&str>) -> Vec<(String, String)>
     h
 }
 
+/// `rb` with every header of `h`.
 pub fn with_headers(mut rb: reqwest::RequestBuilder, h: &[(String, String)]) -> reqwest::RequestBuilder {
     for (k, v) in h {
         rb = rb.header(k, v);
@@ -239,6 +254,7 @@ pub fn with_headers(mut rb: reqwest::RequestBuilder, h: &[(String, String)]) -> 
     rb
 }
 
+/// Start a Plex PIN sign-in: the PIN and the address the user opens to approve it.
 pub async fn plex_pin_start(st: &impl Ctx) -> anyhow::Result<Value> {
     let d: Value = with_headers(st.http().post("https://plex.tv/api/v2/pins").query(&[("strong", "true")]), &plex_headers(st, None)).send().await?.json().await?;
     let mut q = vec![("clientID", plex_client_id(st)), ("code", d["code"].as_str().unwrap_or("").to_string()), ("context[device][product]", "Encore".into())];
@@ -250,6 +266,7 @@ pub async fn plex_pin_start(st: &impl Ctx) -> anyhow::Result<Value> {
     Ok(json!({ "pin_id": d["id"], "url": format!("https://app.plex.tv/auth#?{qs}") }))
 }
 
+/// Whether PIN `pin` was approved; once it is, store the connection for user `uid`.
 pub async fn plex_pin_check(st: &impl Ctx, uid: i64, pin: i64) -> anyhow::Result<Value> {
     let d: Value = with_headers(st.http().get(format!("https://plex.tv/api/v2/pins/{pin}")), &plex_headers(st, None)).send().await?.json().await?;
     let Some(tok) = d["authToken"].as_str().filter(|t| !t.is_empty()) else { return Ok(json!({ "done": false })) };
@@ -274,11 +291,13 @@ pub async fn plex_pin_check(st: &impl Ctx, uid: i64, pin: i64) -> anyhow::Result
 
 // ---- Navidrome / Subsonic ------------------------------------------------------------------------
 
+/// Subsonic token authentication parameters (salted MD5 of the password, a fresh salt each time).
 pub fn subsonic_params(user: &str, password: &str) -> Vec<(&'static str, String)> {
     let salt = hex::encode(rand::random::<[u8; 6]>());
     vec![("u", user.into()), ("t", format!("{:x}", md5::compute(format!("{password}{salt}")))), ("s", salt), ("v", "1.16.1".into()), ("c", "encore".into()), ("f", "json".into())]
 }
 
+/// Sign user `uid` in to the configured Navidrome / Subsonic server and store the connection.
 pub async fn connect_navidrome(st: &impl Ctx, uid: i64, user: &str, password: &str) -> anyhow::Result<Value> {
     let url = st.cfg().str("navidrome_url").trim_end_matches('/').to_string();
     if url.is_empty() {
@@ -294,6 +313,7 @@ pub async fn connect_navidrome(st: &impl Ctx, uid: i64, user: &str, password: &s
 
 // ---- ListenBrainz / Last.fm / Deezer -------------------------------------------------------------
 
+/// Check a ListenBrainz token and store the connection for user `uid`.
 pub async fn connect_listenbrainz(st: &impl Ctx, uid: i64, token: &str) -> anyhow::Result<Value> {
     let token = token.trim().trim_matches('"');
     if token.is_empty() {
@@ -341,6 +361,7 @@ pub async fn lastfm_session(st: &impl Ctx, token: &str) -> anyhow::Result<(Strin
     Ok((name.to_string(), json!({ "user": name, "sk": sk, "scrobble": true })))
 }
 
+/// Connect user `uid` to a Last.fm user name (signing in for scrobbling comes later).
 pub async fn connect_lastfm(st: &impl Ctx, uid: i64, user: &str) -> anyhow::Result<Value> {
     let key = st.cfg().str("lastfm_api_key");
     if key.is_empty() {
@@ -352,6 +373,7 @@ pub async fn connect_lastfm(st: &impl Ctx, uid: i64, user: &str) -> anyhow::Resu
     Ok(json!({ "account": name }))
 }
 
+/// Connect user `uid` to a public Deezer profile (its link or id).
 pub async fn connect_deezer(st: &impl Ctx, uid: i64, profile: &str) -> anyhow::Result<Value> {
     let id = regex::Regex::new(r"(\d{3,})").unwrap().captures(profile).map(|c| c[1].to_string())
         .ok_or_else(|| anyhow::anyhow!("Paste your Deezer profile link or user id (your favourites must be public)"))?;
@@ -366,6 +388,7 @@ pub async fn connect_deezer(st: &impl Ctx, uid: i64, profile: &str) -> anyhow::R
 
 // ---- YouTube Music (Google device sign-in, or pasted browser headers) -----------------------------
 
+/// Start the Google device sign-in for YouTube Music: the code the user types in and where.
 pub async fn ytmusic_oauth_start(st: &impl Ctx) -> anyhow::Result<Value> {
     let cid = st.cfg().str("ytmusic_client_id");
     if cid.is_empty() || st.cfg().str("ytmusic_client_secret").is_empty() {
@@ -376,6 +399,7 @@ pub async fn ytmusic_oauth_start(st: &impl Ctx) -> anyhow::Result<Value> {
                "interval": d["interval"].as_i64().unwrap_or(5) }))
 }
 
+/// Whether the device sign-in was approved; once it is, store the connection for user `uid`.
 pub async fn ytmusic_oauth_check(st: &impl Ctx, uid: i64, device_code: &str) -> anyhow::Result<Value> {
     let d: Value = st.http().post("https://oauth2.googleapis.com/token").form(&[("client_id", st.cfg().str("ytmusic_client_id")), ("client_secret", st.cfg().str("ytmusic_client_secret")),
         ("device_code", device_code.into()), ("grant_type", "urn:ietf:params:oauth:grant-type:device_code".into())]).send().await?.json().await?;

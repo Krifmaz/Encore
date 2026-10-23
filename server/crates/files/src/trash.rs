@@ -29,6 +29,7 @@ pub fn valid_id(id: &str) -> bool {
     ok(parts.next()) && ok(parts.next()) && parts.next().is_none()
 }
 
+/// Encore's Trash folder, made when it isn't there, opened.
 fn trash_root(st: &impl Ctx) -> Result<Dir, ApiError> {
     let dir = roots::trash_dir(st.data_dir());
     encore_core::fsx::mkdir_all(&dir, encore_core::fsx::Step::Files).map_err(io_error)?;
@@ -226,6 +227,7 @@ pub fn restore(st: &impl Ctx, who: &Who, roots: &[Root], ids: &[String]) -> Resu
     Ok(json!({ "restored": restored, "failed": failed }))
 }
 
+/// Put the trash item `id` back where it came from, and its library rows with it.
 fn restore_one(st: &impl Ctx, who: &Who, roots: &[Root], trash: &Dir, dirs: &LibraryDirs, id: &str) -> Result<(), ApiError> {
     let o = origin_of(trash, id).ok_or_else(|| err(404, "That isn't in the trash"))?;
     // the note names the stored item by one plain name, never a path out of its folder

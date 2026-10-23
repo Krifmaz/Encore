@@ -10,6 +10,7 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
 
+/// One result row: column name → value.
 pub type Row = Map<String, Value>;
 
 /// One connection for writes (they are serialized here, as SQLite would anyway) and a few for reads:
@@ -21,8 +22,11 @@ pub type Row = Map<String, Value>;
 /// or the write connection lent to it ([`Conn`]), so an async handler never holds up the runtime.
 #[derive(Clone)]
 pub struct Db {
+    /// the write connection
     conn: Arc<Mutex<Connection>>,
+    /// the read connections (none on a network file system)
     readers: Arc<Vec<Mutex<Connection>>>,
+    /// round-robin index of the next read connection to try
     next_reader: Arc<AtomicUsize>,
     /// goes up with every write to the songs or the artist aliases (see `library_version`)
     library_writes: Arc<AtomicU64>,
@@ -34,6 +38,7 @@ pub struct Db {
     readers_source: ReadersSource,
     /// how often and how long statements waited for a connection (`/api/admin/perf`)
     waits: Arc<PoolWaits>,
+    /// the folder `encore.db` (and the backups) are in
     pub data_dir: PathBuf,
 }
 
@@ -41,15 +46,22 @@ pub struct Db {
 /// read connections (all of them busy) and for the write connection (another write held it).
 #[derive(Default)]
 struct PoolWaits {
+    /// reads that waited for a connection
     read_n: AtomicU64,
+    /// their total wait (µs)
     read_us: AtomicU64,
+    /// the longest read wait (µs)
     read_max_us: AtomicU64,
+    /// writes that waited for the connection
     write_n: AtomicU64,
+    /// their total wait (µs)
     write_us: AtomicU64,
+    /// the longest write wait (µs)
     write_max_us: AtomicU64,
 }
 
 impl PoolWaits {
+    /// Count one wait that started at `since` into `n`, `total` and `max`.
     fn note(n: &AtomicU64, total: &AtomicU64, max: &AtomicU64, since: std::time::Instant) {
         let us = since.elapsed().as_micros().min(u64::MAX as u128) as u64;
         n.fetch_add(1, Ordering::Relaxed);
@@ -70,6 +82,7 @@ pub enum ReadersSource {
 }
 
 impl ReadersSource {
+    /// The source as `/api/admin/perf` names it.
     pub fn as_str(&self) -> &'static str {
         match self {
             ReadersSource::Env => "env",
@@ -87,6 +100,8 @@ fn readers_wanted(data_dir: &Path) -> (usize, ReadersSource) {
     readers_for(std::env::var("ENCORE_DB_READERS").ok().as_deref(), fsinfo::of(data_dir))
 }
 
+/// How many read connections to open: `ENCORE_DB_READERS` (at most 16), none on a network file system,
+/// otherwise 4.
 fn readers_for(env: Option<&str>, fs: Option<fsinfo::FsInfo>) -> (usize, ReadersSource) {
     if let Some(n) = env.and_then(|v| v.trim().parse::<usize>().ok()) {
         return (n.min(16), ReadersSource::Env);
@@ -115,6 +130,7 @@ fn tune(conn: &Connection) -> rusqlite::Result<()> {
     Ok(())
 }
 
+/// Open `n` tuned read connections on the database at `path`.
 fn open_readers(path: &Path, n: usize) -> rusqlite::Result<Vec<Connection>> {
     (0..n).map(|_| {
         let c = Connection::open(path)?;
@@ -173,8 +189,11 @@ pub const EXIT_NEWER_DB: i32 = 3;
 /// The database was written by a newer Encore than this one.
 #[derive(Debug)]
 pub struct NewerDatabase {
+    /// the schema version in the file
     pub found: i64,
+    /// the newest schema this server knows
     pub known: i64,
+    /// where the backups are, to restore one from
     pub backups: PathBuf,
 }
 
@@ -346,6 +365,7 @@ const STATS_TABLES: &[&str] = &["requests", "plays", "playlists", "playlist_item
 /// Seconds since 1970-01-01 UTC, what every time column holds.
 pub use encore_core::time::now;
 
+/// A JSON value as an SQL parameter (booleans as 0/1, arrays and objects as JSON text).
 fn to_sql(v: &Value) -> SqlValue {
     match v {
         Value::Null => SqlValue::Null,
@@ -356,6 +376,7 @@ fn to_sql(v: &Value) -> SqlValue {
     }
 }
 
+/// An SQL value as JSON (text and blobs as strings, lossily decoded; a non-finite real as null).
 fn from_sql(v: ValueRef) -> Value {
     match v {
         ValueRef::Null => Value::Null,
@@ -378,6 +399,8 @@ macro_rules! p {
 }
 
 impl Db {
+    /// Open (or create) `encore.db` in `data_dir`: refuse a newer schema, back up before an upgrade, run the
+    /// migrations and open the read connections.
     pub fn open(data_dir: &Path) -> anyhow::Result<Db> {
         std::fs::create_dir_all(data_dir)?;
         let path = data_dir.join("encore.db");
@@ -434,6 +457,7 @@ impl Db {
         self.stats_writes.load(Ordering::SeqCst)
     }
 
+    /// Move the versions the statement `sql` writes.
     fn note_write(&self, sql: &str) {
         self.bump(writes_of(sql));
     }
@@ -626,6 +650,7 @@ impl Db {
         }
     }
 
+    /// Replace the read connections with fresh ones (after a restore swapped the file under them).
     fn reopen_readers(path: &Path, readers: &mut [MutexGuard<'_, Connection>]) {
         match open_readers(path, readers.len()) {
             Ok(fresh) => {
@@ -637,12 +662,14 @@ impl Db {
         }
     }
 
+    /// Run several statements (write connection).
     pub fn execute_batch(&self, sql: &str) -> rusqlite::Result<()> {
         let r = self.writer().execute_batch(sql);
         self.note_write(sql);
         r
     }
 
+    /// Rows of a statement: reads on a read connection, anything else on the write connection.
     pub fn query(&self, sql: &str, params: Vec<Value>) -> rusqlite::Result<Vec<Row>> {
         let read = is_read(sql);
         if !read {
@@ -652,6 +679,7 @@ impl Db {
         rows_of(&conn, sql, &params)
     }
 
+    /// The first row of a statement, if any.
     pub fn one(&self, sql: &str, params: Vec<Value>) -> rusqlite::Result<Option<Row>> {
         Ok(self.query(sql, params)?.into_iter().next())
     }
@@ -666,6 +694,7 @@ impl Db {
         Ok(conn.last_insert_rowid())
     }
 
+    /// Add a line to the activity log, keeping the newest 2000.
     pub fn log(&self, level: &str, message: &str) {
         let _ = self.execute("INSERT INTO activity (ts, level, message) VALUES (?,?,?)", p![now(), level, message]);
         let _ = self.execute("DELETE FROM activity WHERE id < (SELECT MAX(id) - 2000 FROM activity)", p![]);
@@ -773,6 +802,7 @@ fn lend<T, E: From<rusqlite::Error>>(c: &Conn, f: impl FnOnce(&Conn) -> Result<T
     r
 }
 
+/// The result of a blocking-pool task; a task that panicked or was cancelled becomes an `SQLITE_ABORT` error.
 fn joined<T, E: From<rusqlite::Error>>(r: Result<Result<T, E>, tokio::task::JoinError>) -> Result<T, E> {
     r.unwrap_or_else(|e| Err(E::from(other_error(rusqlite::ffi::SQLITE_ABORT, format!("database work did not finish: {e}")))))
 }
@@ -780,7 +810,9 @@ fn joined<T, E: From<rusqlite::Error>>(r: Result<Result<T, E>, tokio::task::Join
 /// Statements on a [`Db`] (each on a fitting connection) or on a lent [`Conn`]: a helper that only runs
 /// SQL takes `&impl Query` and works with both.
 pub trait Query {
+    /// Rows of a statement.
     fn query(&self, sql: &str, params: Vec<Value>) -> rusqlite::Result<Vec<Row>>;
+    /// The first row of a statement, if any.
     fn one(&self, sql: &str, params: Vec<Value>) -> rusqlite::Result<Option<Row>> {
         Ok(self.query(sql, params)?.into_iter().next())
     }
@@ -802,15 +834,20 @@ impl Query for Conn<'_> {
 /// connection). Inside the closure use only this handle: the `Db` methods would wait for the very
 /// connection the closure holds.
 pub struct Conn<'a> {
+    /// the connection lent to the closure
     conn: &'a Connection,
+    /// the database it belongs to (for the versions)
     db: &'a Db,
+    /// whether this is the write connection
     write: bool,
     /// inside `transaction`: the versions its statements move wait for the COMMIT (see `note`)
     in_tx: std::cell::Cell<bool>,
+    /// the versions waiting for the COMMIT (bit set of `writes_of`)
     pending: std::cell::Cell<u8>,
 }
 
 impl<'a> Conn<'a> {
+    /// A lent connection; `write` says whether it may run writes.
     fn new(conn: &'a Connection, db: &'a Db, write: bool) -> Self {
         Conn { conn, db, write, in_tx: Default::default(), pending: Default::default() }
     }
@@ -844,6 +881,7 @@ impl<'a> Conn<'a> {
         rows_of(self.conn, sql, &params)
     }
 
+    /// The first row of a statement, if any.
     pub fn one(&self, sql: &str, params: Vec<Value>) -> rusqlite::Result<Option<Row>> {
         Ok(self.query(sql, params)?.into_iter().next())
     }
@@ -885,6 +923,7 @@ impl<'a> Conn<'a> {
         r
     }
 
+    /// An error unless this connection may run `sql` (only the write connection runs writes).
     fn writable(&self, sql: &str) -> rusqlite::Result<()> {
         if self.write {
             return Ok(());
@@ -896,9 +935,13 @@ impl<'a> Conn<'a> {
 
 /// Small accessors for JSON rows.
 pub trait RowExt {
+    /// The column as text (empty for null or missing; other values as JSON).
     fn s(&self, k: &str) -> String;
+    /// The column as an integer (0 for null, missing or not a number; reals truncated).
     fn i(&self, k: &str) -> i64;
+    /// The column as a real (0 when not a number).
     fn f(&self, k: &str) -> f64;
+    /// The column as a boolean (`true`, or a non-zero number).
     fn b(&self, k: &str) -> bool;
 }
 

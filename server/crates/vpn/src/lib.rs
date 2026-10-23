@@ -29,10 +29,13 @@ use tokio::task::JoinHandle;
 
 /// What the settings asked for last, and the tunnel that runs for it.
 struct Tunnel {
+    /// a hash of the settings this tunnel was made for, so an unchanged config is left alone
     key: u64,
+    /// the tunnel is turned on in the settings
     enabled: bool,
     /// the config doesn't parse (shown as the error)
     error: Option<String>,
+    /// the running tunnel, when there is one
     engine: Option<Arc<Engine>>,
 }
 
@@ -44,9 +47,12 @@ type DnsCache = HashMap<String, (Vec<IpAddr>, Instant)>;
 #[derive(Clone, Default)]
 pub struct Vpn(Arc<Inner>);
 
+/// The shared state behind [`Vpn`].
 #[derive(Default)]
 struct Inner {
+    /// the tunnel for the current settings
     current: Mutex<Option<Tunnel>>,
+    /// names looked up through the tunnel
     dns: Mutex<DnsCache>,
     /// the relay that runs: (port, its task)
     relay: Mutex<Option<(u16, JoinHandle<()>)>>,
@@ -64,6 +70,7 @@ fn settings_key(cfg: &Config) -> u64 {
     h.finish()
 }
 
+/// Port forwarding (NAT-PMP) is wanted unless the setting says "off".
 fn natpmp_wanted(cfg: &Config) -> bool {
     cfg.str("vpn_port_forwarding").trim().to_lowercase() != "off"
 }
@@ -74,10 +81,12 @@ pub fn enabled(cfg: &Config) -> bool {
 }
 
 impl Vpn {
+    /// The running tunnel, up or not.
     fn engine(&self) -> Option<Arc<Engine>> {
         self.0.current.lock().unwrap().as_ref().and_then(|v| v.engine.clone())
     }
 
+    /// The tunnel, but only when it is up; otherwise a "not connected" error.
     fn up_engine(&self) -> io::Result<Arc<Engine>> {
         self.engine().filter(|e| e.is_up()).ok_or_else(not_connected)
     }

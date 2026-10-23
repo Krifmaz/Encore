@@ -7,6 +7,7 @@ use reqwest::RequestBuilder;
 use serde_json::Value;
 use std::time::Duration;
 
+/// The iTunes Search API.
 pub const API: &str = "https://itunes.apple.com";
 
 /// The iTunes Search API allows about 20 calls a minute: paced calls are spaced by this much.

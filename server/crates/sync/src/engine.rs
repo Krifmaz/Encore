@@ -18,11 +18,15 @@ use std::collections::{HashMap, HashSet};
 /// Library track ids ↔ a server's item ids (by file path, else by metadata).
 #[derive(Default)]
 pub struct ItemMap {
+    /// server item id → library track id
     pub to_track: HashMap<String, i64>,
+    /// library track id → server item id (the first one seen)
     pub to_item: HashMap<i64, String>,
 }
 
 impl ItemMap {
+    /// Match every item of a server to the library: by path (whatever the server's mount prefix), else by title,
+    /// artist, length and MusicBrainz id.
     fn new(st: &impl Ctx, items: &[Value]) -> Self {
         let lib = st.db().query("SELECT id, path, title, artist, album, duration, isrc, mb_trackid FROM tracks", p![]).unwrap_or_default();
         let root = format!("{}/", st.cfg().str("library_path").trim_end_matches('/'));
@@ -50,39 +54,52 @@ impl ItemMap {
 
 /// One connected service, able to read likes/playlists and (for some) push them.
 pub struct Adapter<'a, S: Ctx> {
+    /// the server
     st: &'a S,
+    /// the connection's row (its `data` read)
     pub conn: Row,
+    /// the connection's stored data (tokens, user)
     d: Value,
+    /// the server's items matched to the library, once worked out
     map: Option<ItemMap>,
+    /// every audio item on the server, once fetched
     items: Option<Vec<Value>>,
+    /// lookups made on the service this run
     lookups: usize,
 }
 
 impl<'a, S: Ctx> Adapter<'a, S> {
+    /// An adapter for connection `conn`.
     pub fn new(st: &'a S, conn: Row) -> Self {
         let d = conn["data"].clone();
         Adapter { st, conn, d, map: None, items: None, lookups: 0 }
     }
+    /// The service's name.
     fn svc(&self) -> String {
         self.conn.s("service")
     }
+    /// Whether likes and playlists can be sent to this service (not only read from it).
     pub fn can_push(&self) -> bool {
         ["jellyfin", "plex", "navidrome", "listenbrainz", "ytmusic"].contains(&self.svc().as_str())
     }
+    /// A server address setting without its trailing slash.
     fn base(&self, key: &str) -> String {
         self.st.cfg().str(key).trim_end_matches('/').to_string()
     }
 
     // -- low-level calls
+    /// GET `path` on the Jellyfin server as the signed-in user.
     async fn jf(&self, path: &str, q: &[(&str, String)]) -> anyhow::Result<Value> {
         let h = jellyfin_headers(self.d["token"].as_str(), &format!("encore-{}", self.conn.i("user_id")));
         Ok(with_headers(self.st.http().get(format!("{}{path}", self.base("jellyfin_url"))).query(q), &h).send().await?.error_for_status()?.json().await?)
     }
+    /// GET `path` on the Plex server; its `MediaContainer`.
     async fn plex(&self, path: &str, q: &[(&str, String)]) -> anyhow::Result<Value> {
         let h = plex_headers(self.st, self.d["token"].as_str());
         let v: Value = with_headers(self.st.http().get(format!("{}{path}", self.base("plex_url"))).query(q), &h).send().await?.error_for_status()?.json().await?;
         Ok(v["MediaContainer"].clone())
     }
+    /// Call Subsonic `method` on the Navidrome server (signed); its `subsonic-response`.
     async fn sub(&self, method: &str, q: &[(&str, String)]) -> anyhow::Result<Value> {
         let mut params = subsonic_params(self.d["user"].as_str().unwrap_or(""), self.d["password"].as_str().unwrap_or(""));
         params.extend(q.iter().map(|(k, v)| (*k, v.clone())));
@@ -93,11 +110,13 @@ impl<'a, S: Ctx> Adapter<'a, S> {
         }
         Ok(r)
     }
+    /// The YouTube Music session data, refreshed when needed.
     async fn yt(&self) -> anyhow::Result<Value> {
         crate::ytmusic::fresh_data(self.st, &self.conn).await
     }
 
     // -- every audio item on a media server
+    /// Every audio item on the media server (Jellyfin, Plex or Navidrome), fetched once per adapter.
     async fn all_items(&mut self) -> anyhow::Result<Vec<Value>> {
         if let Some(i) = &self.items {
             return Ok(i.clone());
@@ -158,6 +177,7 @@ impl<'a, S: Ctx> Adapter<'a, S> {
         Ok(out)
     }
 
+    /// The server's items matched to the library (worked out once).
     pub async fn item_map(&mut self) -> anyhow::Result<&ItemMap> {
         if self.map.is_none() {
             let items = self.all_items().await?;
@@ -223,6 +243,7 @@ impl<'a, S: Ctx> Adapter<'a, S> {
         })
     }
 
+    /// The songs liked on TIDAL.
     async fn tidal_likes(&self) -> anyhow::Result<Vec<Value>> {
         let Some(tok) = connections::tidal_token(self.st, self.conn.i("user_id")).await else { return Ok(vec![]) };
         let uid = self.d["user_id"].as_str().filter(|x| !x.is_empty()).unwrap_or("me").to_string();
@@ -278,6 +299,7 @@ impl<'a, S: Ctx> Adapter<'a, S> {
         vid
     }
 
+    /// Like (or unlike) library track `tid` on the service; whether it was sent.
     pub async fn set_like(&mut self, tid: i64, liked: bool) -> anyhow::Result<bool> {
         let svc = self.svc();
         if svc == "listenbrainz" {
@@ -446,6 +468,8 @@ impl<'a, S: Ctx> Adapter<'a, S> {
         }
     }
 
+    /// Send playlist `name` to ListenBrainz (its songs by MusicBrainz id): replace the songs of `remote`, or create
+    /// it; its id.
     async fn push_lb(&self, name: &str, tids: &[i64], remote: Option<String>) -> anyhow::Result<Option<String>> {
         let token = s(&self.d["token"]);
         let tracks: Vec<Value> = tids.iter().filter_map(|t| self.st.db().one("SELECT mb_trackid FROM tracks WHERE id=?", p![t]).ok().flatten())
@@ -468,6 +492,7 @@ impl<'a, S: Ctx> Adapter<'a, S> {
         Ok(d["playlist_mbid"].as_str().map(String::from))
     }
 
+    /// Send playlist `name` to YouTube Music: replace the songs of `remote` when they differ, or create it; its id.
     async fn push_ytm(&mut self, name: &str, tids: &[i64], remote: Option<String>) -> anyhow::Result<Option<String>> {
         let mut vids = vec![];
         for t in tids {
@@ -493,23 +518,27 @@ impl<'a, S: Ctx> Adapter<'a, S> {
     }
 }
 
+/// A Subsonic song as Encore's server item.
 fn sub_song(x: &Value) -> Value {
     json!({ "id": x["id"], "path": x["path"], "title": x["title"], "artist": x["artist"], "album": x["album"], "duration": x["duration"], "mbid": x["musicBrainzId"] })
 }
 
 // ---- snapshots ----------------------------------------------------------------------------------
 
+/// What the last sync saw under `scope` (likes, a playlist) of connection `cid`.
 fn snap(st: &impl Ctx, cid: i64, scope: &str) -> HashSet<String> {
     st.db().one("SELECT value FROM sync_state WHERE connection_id=? AND scope=?", p![cid, scope]).ok().flatten()
         .and_then(|r| serde_json::from_str::<Vec<String>>(&r.s("value")).ok()).unwrap_or_default().into_iter().collect()
 }
 
+/// Keep what this sync saw under `scope`.
 fn save_snap(st: &impl Ctx, cid: i64, scope: &str, v: &HashSet<String>) {
     let mut v: Vec<&String> = v.iter().collect();
     v.sort();
     let _ = st.db().execute("INSERT OR REPLACE INTO sync_state VALUES (?,?,?)", p![cid, scope, json!(v).to_string()]);
 }
 
+/// What identifies a like across syncs: its library track, else the song itself.
 fn like_key(r: &Row) -> String {
     if r.i("track_id") > 0 { format!("t:{}", r.i("track_id")) } else { playlists::identity(r, false) }
 }
@@ -528,12 +557,15 @@ fn new_likes(rows: &[Row], prev: &HashSet<String>) -> Vec<Value> {
     out
 }
 
+/// Record a connection's last error (cut to 220 characters).
 fn set_error(st: &impl Ctx, cid: i64, msg: String) {
     let _ = st.db().execute("UPDATE connections SET last_error=? WHERE id=?", p![msg.chars().take(220).collect::<String>(), cid]);
 }
 
 // ---- engine -------------------------------------------------------------------------------------
 
+/// Sync every connection of user `uid`: read likes and playlists into Encore, send them out where the service
+/// takes them; what happened goes into `log`.
 pub async fn sync_user(st: &impl Ctx, uid: i64, log: &mut Vec<String>) -> Value {
     let conns = connections::list_for(st, uid);
     let Ok(liked) = playlists::get_liked(st, uid) else { return json!({}) };

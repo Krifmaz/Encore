@@ -17,6 +17,7 @@ pub use tools::ToolInfo;
 
 /// What the update and tool functions need from the server.
 pub trait Ctx: encore_playback::Ctx {
+    /// The update and tools state.
     fn system(&self) -> &System;
     /// The old card's row of a program run by another crate ("slskd", "translator"), with what the last check
     /// found (`last`: {latest, checked_at, error}).

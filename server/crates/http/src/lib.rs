@@ -34,6 +34,7 @@ pub trait Ctx: Send + Sync {
     fn http_no_redirects(&self) -> &reqwest::Client;
     /// Where the services tests stand in for live (the real hosts in use).
     fn urls(&self) -> &Urls;
+    /// The settings.
     fn cfg(&self) -> &encore_config::Config;
     /// MusicBrainz: its rate limit and its hour-long answer cache.
     fn mb(&self) -> &mb::Mb;
@@ -41,6 +42,7 @@ pub trait Ctx: Send + Sync {
     fn pace(&self) -> &Pace;
     /// The small in-memory cache for slow lookups.
     fn cache_get(&self, key: &str) -> Option<Value>;
+    /// Keep `v` under `key` in the in-memory cache for `secs` seconds.
     fn cache_put(&self, key: &str, v: Value, secs: u64);
 }
 

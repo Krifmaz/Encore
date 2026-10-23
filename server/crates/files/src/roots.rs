@@ -12,23 +12,31 @@ use encore_core::error::{err, ApiError};
 use serde_json::{json, Value};
 use std::path::{Path, PathBuf};
 
+/// What a root is for.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum RootKind {
+    /// a library folder
     Library,
+    /// the staging folder new downloads wait in
     Staging,
+    /// a download client's folder
     Download,
+    /// Encore's Trash
     Trash,
 }
 
 /// One folder the file manager may touch.
 #[derive(Clone, Debug)]
 pub struct Root {
+    /// its id in the API ("library", "staging", …)
     pub id: String,
+    /// its name as shown
     pub name: String,
     /// the folder as the settings name it
     pub path: PathBuf,
     /// the folder with every link in its own path resolved (None while it isn't there)
     pub canon: Option<PathBuf>,
+    /// what it is for
     pub kind: RootKind,
     /// Encore's config folder (database, backups, Trash), resolved, when it lies in this folder: nothing
     /// under it is listed, read or changed through this root
@@ -36,6 +44,7 @@ pub struct Root {
 }
 
 impl Root {
+    /// A root for `path`, resolved now.
     pub fn new(id: &str, name: &str, path: PathBuf, kind: RootKind) -> Root {
         let canon = std::fs::canonicalize(&path).ok().filter(|p| p.is_dir());
         Root { id: id.into(), name: name.into(), path, canon, kind, fence: None }
@@ -125,10 +134,12 @@ pub fn with_extra(library: &Path, extra: &[PathBuf], dir: &Path) -> Option<Vec<P
 /// the settings' form of that folder joined with the rest (what the scan writes).
 #[derive(Clone, Debug, Default)]
 pub struct LibraryDirs {
+    /// each folder: (as the settings name it, resolved)
     dirs: Vec<(PathBuf, PathBuf)>,
 }
 
 impl LibraryDirs {
+    /// The library folders the settings name.
     pub fn of(cfg: &Config) -> LibraryDirs {
         let mut all = vec![];
         let lib = cfg.str("library_path");
@@ -139,6 +150,7 @@ impl LibraryDirs {
         LibraryDirs::from(all)
     }
 
+    /// These folders, resolved now.
     pub fn from(dirs: Vec<PathBuf>) -> LibraryDirs {
         let dirs = dirs.into_iter().map(|d| {
             let c = std::fs::canonicalize(&d).unwrap_or_else(|_| d.clone());
@@ -156,16 +168,21 @@ impl LibraryDirs {
             .map(|(conf, _, rest)| if rest.as_os_str().is_empty() { conf.clone() } else { conf.join(rest) })
     }
 
+    /// `real` (a resolved path) lies in the library.
     pub fn contains(&self, real: &Path) -> bool {
         self.db_path(real).is_some()
     }
 }
 
+/// A download folder setting: its key and the name it shows as.
 struct Folder {
+    /// the setting holding the path
     key: &'static str,
+    /// the root's name
     name: &'static str,
 }
 
+/// The download clients' folders, by the setting that turns the client on.
 const TORRENT: [(&str, &[Folder]); 5] = [
     ("qbittorrent", &[Folder { key: "qbit_download_path", name: "Torrents (qBittorrent)" }]),
     ("transmission", &[Folder { key: "transmission_download_path", name: "Torrents (Transmission)" }]),
@@ -174,6 +191,7 @@ const TORRENT: [(&str, &[Folder]); 5] = [
     ("blackhole", &[Folder { key: "torrent_blackhole_completed", name: "Finished torrents" }, Folder { key: "torrent_blackhole_watch", name: "Torrent watch folder" }]),
 ];
 
+/// The Usenet clients' folders, by the setting that turns the client on.
 const USENET: [(&str, &[Folder]); 3] = [
     ("sabnzbd", &[Folder { key: "sab_download_path", name: "Usenet (SABnzbd)" }]),
     ("nzbget", &[Folder { key: "nzbget_download_path", name: "Usenet (NZBGet)" }]),

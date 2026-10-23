@@ -5,7 +5,9 @@
 /// A parsed rule.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct When<'a> {
+    /// the setting the rule looks at
     pub key: &'a str,
+    /// the value it compares with
     pub value: &'a str,
     /// true for `=`, false for `!=`
     pub equal: bool,

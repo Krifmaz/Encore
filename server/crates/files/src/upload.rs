@@ -19,14 +19,19 @@ use encore_library::Ctx;
 use serde_json::{json, Value};
 use std::fs::File;
 
+/// What an upload does when the name is taken.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Conflict {
+    /// give it a free name ("Song (2).flac")
     Rename,
+    /// replace the file that is there
     Replace,
+    /// leave the one that is there and drop this one
     Skip,
 }
 
 impl Conflict {
+    /// "rename" (the default), "replace" or "skip".
     pub fn parse(s: Option<&str>) -> Result<Conflict, ApiError> {
         match s.unwrap_or("rename") {
             "" | "rename" => Ok(Conflict::Rename),
@@ -44,9 +49,13 @@ pub struct Incoming {
     pub sent: String,
     /// the folder it goes to, from the root
     at: Target,
+    /// the folder, open
     dir: Dir,
+    /// the name it gets
     name: String,
+    /// the part file it is written to first
     part: String,
+    /// the part file, open for writing
     pub file: File,
     /// the device and inode of the part file this upload made
     made: (u64, u64),
@@ -77,6 +86,7 @@ impl Drop for Incoming {
 
 /// What [`begin`] decided for one part.
 pub enum Begin {
+    /// written to a part file: the upload goes on
     Write(Box<Incoming>),
     /// not written (its bytes are read and dropped): the name as sent and why
     Skip(String, String),
@@ -85,8 +95,23 @@ pub enum Begin {
 /// What happened to one file, for the answer.
 pub enum Outcome {
     /// written: the name as sent, its path from the root, its size, and the name it got when that differs
-    Uploaded { sent: String, path: String, size: u64, renamed: Option<String> },
-    Skipped { sent: String, reason: String },
+    Uploaded {
+        /// the name as sent
+        sent: String,
+        /// its path from the root
+        path: String,
+        /// its size in bytes
+        size: u64,
+        /// the name it got, when the sent one was taken
+        renamed: Option<String>,
+    },
+    /// not written: the name as sent and why
+    Skipped {
+        /// the name as sent
+        sent: String,
+        /// why it was skipped
+        reason: String,
+    },
 }
 
 /// A part file name of this upload's own next to `name`: hidden, with a random piece (a short one when the

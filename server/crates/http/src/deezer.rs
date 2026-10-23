@@ -9,6 +9,7 @@ use serde_json::Value;
 use std::fmt::Display;
 use std::time::Duration;
 
+/// Deezer's public API.
 pub const API: &str = "https://api.deezer.com";
 
 /// At most ~8 Deezer requests a second from this server.

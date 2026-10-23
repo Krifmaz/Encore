@@ -4,6 +4,7 @@ use crate::Ctx;
 use reqwest::RequestBuilder;
 use serde_json::Value;
 
+/// The Last.fm API.
 pub const API: &str = "https://ws.audioscrobbler.com/2.0/";
 
 /// Last.fm request signature: every parameter (except format) sorted by name, then the shared secret, md5.

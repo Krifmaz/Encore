@@ -17,7 +17,9 @@ pub const QUIET_AFTER: Duration = Duration::from_secs(3);
 #[derive(Clone)]
 pub struct Busy(Arc<Clock>);
 
+/// The shared clock behind [`Busy`].
 struct Clock {
+    /// the reference instant the millisecond counters count from
     start: Instant,
     /// milliseconds since `start` of the last API call (0 = none yet)
     last: AtomicU64,
@@ -32,6 +34,7 @@ impl Default for Busy {
 }
 
 impl Busy {
+    /// Milliseconds since `start`, plus one (so 0 stays free to mean "never").
     fn ms(&self) -> u64 {
         self.0.start.elapsed().as_millis() as u64 + 1
     }
@@ -89,6 +92,7 @@ impl Busy {
 /// How often a wait for the group listens looks again.
 const GROUP_LOOK: Duration = if cfg!(test) { Duration::from_millis(20) } else { Duration::from_secs(1) };
 
+/// Whether a call at `last` (0 = none) was within [`QUIET_AFTER`] of `now`.
 fn used_within(last: u64, now: u64) -> bool {
     last != 0 && now.saturating_sub(last) < QUIET_AFTER.as_millis() as u64
 }
@@ -121,6 +125,7 @@ pub fn idle_io_for_child() {
     }
 }
 
+/// Put thread or process `who` (0 = the calling one) in the idle I/O class.
 #[cfg(target_os = "linux")]
 unsafe fn idle_io(who: i32) {
     const IOPRIO_WHO_PROCESS: libc::c_long = 1;

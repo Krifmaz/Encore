@@ -3,6 +3,7 @@
 //! Diagnostics shows the type of /config and /music so the owner can report it.
 use std::path::Path;
 
+/// The file system a folder is on.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct FsInfo {
     /// The file system as the owner knows it ("ext4", "NFS", "SMB", "FUSE", …; "unknown" for a magic

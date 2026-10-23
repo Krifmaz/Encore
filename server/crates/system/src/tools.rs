@@ -32,17 +32,26 @@ pub const IDS: [&str; 5] = ["ytdlp", "streamrip", "cadenza", "slskd", "translato
 /// How long a `--version` answer is trusted.
 const VERSION_TTL: Duration = Duration::from_secs(600);
 
+/// One program on the tools card.
 #[derive(Debug, Clone, Serialize, PartialEq)]
 pub struct ToolInfo {
+    /// its id (`ffmpeg`, `yt-dlp`, …)
     pub id: String,
+    /// its name on the card
     pub name: String,
+    /// the version installed, if any
     pub installed: Option<String>,
     /// "bundled" | "updated" | "system" | "missing"
     pub source: String,
+    /// the newest version, when a check found one
     pub latest: Option<String>,
+    /// `latest` is newer than `installed`
     pub update_available: bool,
+    /// when the newest version was last looked up
     pub checked_at: Option<f64>,
+    /// why the last check or update failed
     pub error: Option<String>,
+    /// a line shown under it
     pub note: String,
     /// Encore can install updates of it (Update / Install button)
     pub updatable: bool,
@@ -64,7 +73,9 @@ type AnswerCache = HashMap<ProbeKey, (Instant, Option<SystemTime>, Option<Answer
 pub struct Answer {
     /// it exited cleanly
     pub ok: bool,
+    /// what it printed on stdout
     pub stdout: String,
+    /// what it printed on stderr
     pub stderr: String,
 }
 
@@ -73,8 +84,10 @@ pub struct Answer {
 #[derive(Clone, Default)]
 pub struct Tools(Arc<ToolsInner>);
 
+/// The cache and locks behind [`Tools`].
 #[derive(Default)]
 struct ToolsInner {
+    /// the answers so far
     answers: Mutex<AnswerCache>,
     /// One lock per program and argument, so callers that arrive together run a probe once and share its answer.
     gates: Mutex<HashMap<ProbeKey, Arc<Mutex<()>>>>,
@@ -313,6 +326,7 @@ pub fn last_check(st: &impl Ctx, id: &str) -> Value {
     json!({ "latest": card["latest"], "checked_at": card["last_check"], "error": card["last_error"] })
 }
 
+/// The card row of program `id` as known locally (installed version, source), with what the last check found.
 fn local_info(st: &impl Ctx, id: &str) -> ToolInfo {
     match id {
         "cadenza" => return cadenza_info(st),
@@ -442,17 +456,27 @@ fn env_allows_ytdlp() -> bool {
 pub enum Plan {
     /// a result line, nothing to install
     Say(String),
+    /// the check failed (the reason)
     Error(String),
     /// update `to` (from: installed version, if any)
-    Install { from: Option<String>, to: String },
+    Install {
+        /// the version installed now, if any
+        from: Option<String>,
+        /// the version to install
+        to: String,
+    },
 }
 
 /// One installed plugin as the task sees it (from its card).
 #[derive(Debug, Clone, PartialEq, Default)]
 pub struct Seen {
+    /// its name
     pub name: String,
+    /// the version installed, if any
     pub installed: Option<String>,
+    /// the newest version the check found
     pub latest: Option<String>,
+    /// the check found a newer version
     pub update_available: bool,
     /// what its last check or update said when it failed
     pub error: Option<String>,
@@ -461,6 +485,7 @@ pub struct Seen {
 }
 
 impl Seen {
+    /// What a plugin card says about the plugin.
     pub fn of(card: &Value) -> Seen {
         let s = |k: &str| card[k].as_str().filter(|v| !v.is_empty()).map(String::from);
         Seen { name: s("name").unwrap_or_default(), installed: s("installed_version"), latest: s("latest"), update_available: card["update_available"].as_bool().unwrap_or(false),

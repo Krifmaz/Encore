@@ -5,9 +5,12 @@ use crate::Ctx;
 use reqwest::RequestBuilder;
 use serde_json::Value;
 
+/// The ListenBrainz API.
 pub const API: &str = "https://api.listenbrainz.org/1";
+/// ListenBrainz Labs (similar artists, recommendations).
 pub const LABS: &str = "https://labs.api.listenbrainz.org";
 
+/// `r` with a ListenBrainz user token.
 fn with_token(r: RequestBuilder, token: &str) -> RequestBuilder {
     r.header("Authorization", format!("Token {token}"))
 }

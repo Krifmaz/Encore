@@ -38,8 +38,11 @@ pub struct Change {
 /// What [`Change::apply`] did.
 #[derive(Default, Debug)]
 pub struct Applied {
+    /// rows whose path changed
     pub moved: usize,
+    /// ids of rows removed (gone, or replaced by a clash)
     pub removed: Vec<i64>,
+    /// files read in as new rows
     pub indexed: usize,
 }
 
@@ -49,6 +52,7 @@ impl Change {
         Change { added, ..Default::default() }
     }
 
+    /// Nothing to do.
     pub fn is_empty(&self) -> bool {
         self.moves.is_empty() && self.removals.is_empty() && self.arrivals.is_empty()
     }

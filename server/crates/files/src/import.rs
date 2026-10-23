@@ -34,13 +34,17 @@ pub const MATCH_MAX: usize = 25;
 /// Album folders one preview lists.
 pub const ALBUMS_MAX: usize = 200;
 
+/// How an import treats the files.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Mode {
+    /// match, retag and move them into the library folder
     Move,
+    /// keep them where they are, unchanged: the folder joins the library's folders
     InPlace,
 }
 
 impl Mode {
+    /// "move" (the default) or "in_place".
     pub fn parse(s: &str) -> Result<Mode, ApiError> {
         match s {
             "" | "move" => Ok(Mode::Move),
@@ -53,15 +57,20 @@ impl Mode {
 /// One album folder: where it is, its audio files (resolved paths, in name order), and what the folder and
 /// its files were when they were listed.
 pub struct Folder {
+    /// the folder
     pub at: Target,
+    /// its audio files, resolved, in name order
     pub files: Vec<PathBuf>,
+    /// what the folder and files were when listed, checked again before anything moves
     seen: Seen,
 }
 
 /// A folder as it was listed: its device and inode, and each audio file's name, device, inode, size and time.
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct Seen {
+    /// the folder's (device, inode)
     dir: (u64, u64),
+    /// each audio file: (name, device, inode, size, mtime)
     files: Vec<(String, u64, u64, u64, i64)>,
 }
 
@@ -85,6 +94,7 @@ fn list(at: &Target) -> Result<(Dir, Seen), ApiError> {
     Ok((dir, Seen { dir: (me.dev, me.ino), files }))
 }
 
+/// List the folder `at` names, as a [`Folder`].
 fn listed(at: Target) -> Result<Folder, ApiError> {
     let (dir, seen) = list(&at)?;
     let files = seen.files.iter().map(|(n, ..)| dir.path.join(n)).collect();
@@ -157,6 +167,7 @@ fn guess(files: &[PathBuf], folder_name: &str) -> (String, String, Vec<Row>) {
     (artist, album, tags)
 }
 
+/// `path` without the `base/` it starts with (unchanged when it doesn't).
 fn rel_to(path: &str, base: &Path) -> String {
     let b = format!("{}/", base.to_string_lossy().trim_end_matches('/'));
     path.strip_prefix(&b).unwrap_or(path).to_string()

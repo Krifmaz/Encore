@@ -23,14 +23,21 @@ const WARM_SIZES: &[u32] = &[200, 400];
 const RECHECK: Duration = Duration::from_secs(600);
 /// Covers a JSON response may look up on the spot (the rest come from the background pass).
 const INLINE_LOOKUPS: usize = 6;
+/// Quality of the WebP thumbnails.
 const WEBP_QUALITY: f32 = 82.0;
+/// Quality of the JPEG thumbnails (for clients without WebP).
 const JPEG_QUALITY: u8 = 85;
 
+/// What the index knows about one album's cover.
 #[derive(Clone)]
 struct Entry {
+    /// the cover file (`None`: the album has none)
     path: Option<PathBuf>,
+    /// the cover's version (changes when the file does)
     v: u64,
+    /// when the file was last looked at
     checked: Instant,
+    /// must be looked up again before it is trusted (its songs changed, or a lookup raced a change)
     stale: bool,
     /// its artwork changed: lists must not use the old version any more
     forgotten: bool,
@@ -42,19 +49,27 @@ type ColorMap = HashMap<String, (u64, String)>;
 /// What the thumbnail pass has still to do: every album, or only these (their songs changed).
 #[derive(Default)]
 struct WarmQueue {
+    /// every album is due
     all: bool,
+    /// only these albums are due
     albums: Vec<String>,
 }
 
+/// Album → cover file and version, kept in memory, with the background pass that makes the thumbnails and
+/// finds each cover's colour. Clones share it.
 #[derive(Clone, Default)]
 pub struct CoverIndex {
+    /// album → what is known about its cover
     memo: Arc<Mutex<HashMap<String, Entry>>>,
+    /// set while the thumbnail pass runs
     warming: Arc<AtomicBool>,
+    /// what the pass has still to do
     queue: Arc<Mutex<WarmQueue>>,
     /// goes up with every `forget`: a lookup that saw it change may have read the old file
     generation: Arc<AtomicU64>,
     /// album → (cover version, "#rrggbb"), read from the cover_color table on first use
     colors: Arc<Mutex<Option<ColorMap>>>,
+    /// how far the pass is
     progress: Arc<WarmProgress>,
     /// the pass waits while somebody uses the app
     busy: encore_jobs::Busy,
@@ -63,7 +78,9 @@ pub struct CoverIndex {
 /// How far the thumbnail pass is (Diagnostics: "Cover thumbnails: 12 340 / 18 000").
 #[derive(Default)]
 struct WarmProgress {
+    /// albums the pass has done
     done: AtomicUsize,
+    /// albums it has to do
     total: AtomicUsize,
 }
 
@@ -92,10 +109,12 @@ pub fn version_of(path: &Path) -> Option<u64> {
     Some(u64::from_be_bytes(b).max(1))
 }
 
+/// Where the thumbnails are kept.
 fn thumbs_dir(db: &Db) -> PathBuf {
     db.data_dir.join("covers").join("thumbs")
 }
 
+/// The thumbnail file of `album_id`'s cover version `v` at `size` px.
 pub fn thumb_path(db: &Db, album_id: &str, size: u32, v: u64, webp: bool) -> PathBuf {
     thumbs_dir(db).join(format!("{album_id}_{size}_{v:x}.{}", if webp { "webp" } else { "jpg" }))
 }
@@ -382,6 +401,7 @@ impl CoverIndex {
 
     // ---- placeholder colours --------------------------------------------------------------------
 
+    /// Read the colours from the `cover_color` table, once.
     fn load_colors(&self, db: &Db) {
         let mut c = self.colors.lock().unwrap();
         if c.is_some() {
@@ -402,6 +422,7 @@ impl CoverIndex {
         self.color_of(album_id).filter(|c| c.0 == v).map(|c| c.1)
     }
 
+    /// Store the colour of version `v` of the album's cover (table and memory).
     fn set_color(&self, db: &Db, album_id: &str, v: u64, color: &str) {
         let _ = db.execute("INSERT OR REPLACE INTO cover_color (album_id, v, color) VALUES (?, ?, ?)", p![album_id, v as i64, color]);
         if let Some(m) = self.colors.lock().unwrap().as_mut() {
@@ -488,13 +509,16 @@ pub fn dominant_color(img: &image::RgbImage) -> Option<String> {
     Some(format!("#{r:02x}{g:02x}{b:02x}"))
 }
 
+/// Squared distance of two Lab colours.
 fn dist2(a: &[f64; 3], b: &[f64; 3]) -> f64 {
     (a[0] - b[0]).powi(2) + (a[1] - b[1]).powi(2) + (a[2] - b[2]).powi(2)
 }
 
 // sRGB (D65) ↔ CIE Lab
+/// The D65 white point (XYZ).
 const WHITE: [f64; 3] = [0.95047, 1.0, 1.08883];
 
+/// An sRGB colour as CIE Lab.
 fn srgb_to_lab(c: [u8; 3]) -> [f64; 3] {
     let lin = |v: u8| {
         let v = v as f64 / 255.0;
@@ -511,6 +535,7 @@ fn srgb_to_lab(c: [u8; 3]) -> [f64; 3] {
     [116.0 * fy - 16.0, 500.0 * (fx - fy), 200.0 * (fy - fz)]
 }
 
+/// A CIE Lab colour as sRGB (clamped).
 fn lab_to_srgb(lab: [f64; 3]) -> [u8; 3] {
     let fy = (lab[0] + 16.0) / 116.0;
     let (fx, fz) = (fy + lab[1] / 500.0, fy - lab[2] / 200.0);
@@ -625,6 +650,7 @@ pub fn thumbnail(db: &Db, src: &Path, album_id: &str, v: u64, size: u32, webp: b
 
 // ---- cover_v in JSON ----------------------------------------------------------------------------
 
+/// Whether `s` looks like an album id (16 hex digits).
 fn is_album_id(s: &str) -> bool {
     s.len() == 16 && s.bytes().all(|b| b.is_ascii_hexdigit())
 }
@@ -643,6 +669,7 @@ fn album_of(o: &serde_json::Map<String, Value>) -> Option<String> {
     (is_album_id(id) && (o.contains_key("album") || o.contains_key("albumartist"))).then(|| id.to_string())
 }
 
+/// Collect the albums every object in `v` (at any depth) shows the cover of.
 fn collect(v: &Value, out: &mut Vec<String>) {
     match v {
         Value::Array(a) => a.iter().for_each(|x| collect(x, out)),
@@ -656,6 +683,7 @@ fn collect(v: &Value, out: &mut Vec<String>) {
     }
 }
 
+/// Add `cover_v` (and `cover_color`) to every object in `v` that shows an album's cover.
 fn apply(v: &mut Value, vs: &HashMap<String, (u64, Option<String>)>) {
     match v {
         Value::Array(a) => a.iter_mut().for_each(|x| apply(x, vs)),

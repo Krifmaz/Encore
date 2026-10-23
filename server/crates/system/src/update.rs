@@ -25,6 +25,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
+/// The GitHub repository releases are looked up in.
 pub const REPO: &str = "Krifmaz/Encore";
 /// The exit code that asks for a restart (docker/entrypoint.sh starts the server again).
 pub const EXIT_RESTART: i32 = 75;
@@ -32,10 +33,13 @@ pub const EXIT_RESTART: i32 = 75;
 pub const DEV: bool = option_env!("ENCORE_VERSION").is_none();
 /// The oldest image that has the self-update helper in it.
 const FIRST_SELF_UPDATING: &str = "0.28.0";
+/// How long a release check is trusted before GitHub is asked again (seconds).
 const FRESH_SECS: f64 = 3600.0;
+/// The longest release notes kept (characters; longer ones are cut).
 const NOTES_MAX: usize = 4000;
 /// Where the last answer from GitHub is kept (sync_state, connection 0), one per channel.
 const SCOPE: &str = "encore:update";
+/// Where the last answer of the hotfix channel is kept.
 const SCOPE_HOTFIX: &str = "encore:update:hotfix";
 /// The tag prefix of the builds CI publishes on every push (.github/workflows/hotfix.yml).
 pub const HOTFIX_PREFIX: &str = "hotfix-";
@@ -45,24 +49,31 @@ const HOTFIX_PAGE: usize = 30;
 /// Which builds Update now offers (the `update_channel` setting).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Channel {
+    /// tagged releases
     Stable,
+    /// the builds of every push to main (`hotfix-…` tags)
     Hotfix,
 }
 
 impl Channel {
+    /// The channel a setting value names (anything but `hotfix` is stable).
     pub fn parse(s: &str) -> Channel {
         if s.trim().eq_ignore_ascii_case("hotfix") { Channel::Hotfix } else { Channel::Stable }
     }
+    /// The channel the `update_channel` setting names.
     pub fn of(st: &impl Ctx) -> Channel {
         Channel::parse(&st.cfg().str("update_channel"))
     }
+    /// The channel's name in the API.
     pub fn name(self) -> &'static str {
         match self { Channel::Stable => "stable", Channel::Hotfix => "hotfix" }
     }
+    /// Where the channel's last answer is kept (`sync_state` scope).
     fn scope(self) -> &'static str {
         match self { Channel::Stable => SCOPE, Channel::Hotfix => SCOPE_HOTFIX }
     }
 }
+/// Cache key of the self-update check (an hour).
 const DOCKER_CACHE: &str = "update:docker";
 /// Requests still open this long after "Restart server" are cut off.
 const GRACE: Duration = Duration::from_secs(10);
@@ -119,6 +130,7 @@ pub fn stored(st: &impl Ctx) -> Option<Value> {
     serde_json::from_str::<Value>(row.get("value")?.as_str()?).ok().filter(|v| v["latest"].is_string())
 }
 
+/// Keep `release` as the channel's last answer.
 fn store(st: &impl Ctx, channel: Channel, release: &Value) {
     let _ = st.db().execute("INSERT OR REPLACE INTO sync_state (connection_id, scope, value) VALUES (0,?,?)", p![channel.scope(), release.to_string()]);
 }
@@ -181,23 +193,31 @@ pub fn machine_fields(st: &impl Ctx) -> (bool, Option<String>) {
 
 // ---- can this container replace itself -----------------------------------------------------------------
 
+/// Whether "Update now" can replace this container, and the facts it needs to.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct SelfUpdate {
+    /// the container can update itself
     pub ready: bool,
+    /// why not, when it can't
     pub reason: Option<String>,
     /// this container's full id, its name and the image it was created from (when ready)
     pub id: Option<String>,
+    /// the container's name
     pub name: Option<String>,
+    /// the image it was created from
     pub image: Option<String>,
 }
 
 impl SelfUpdate {
+    /// A "cannot update" answer with `reason`.
     fn no(reason: impl Into<String>) -> SelfUpdate {
         SelfUpdate { reason: Some(reason.into()), ..Default::default() }
     }
+    /// The answer as cached.
     fn json(&self) -> Value {
         json!({ "ready": self.ready, "reason": self.reason, "id": self.id, "name": self.name, "image": self.image })
     }
+    /// The answer from its cached JSON.
     fn from_json(v: &Value) -> SelfUpdate {
         let s = |k: &str| v[k].as_str().map(String::from);
         SelfUpdate { ready: v["ready"] == true, reason: s("reason"), id: s("id"), name: s("name"), image: s("image") }
@@ -220,12 +240,14 @@ pub fn container_id_from_mountinfo(text: &str) -> Option<String> {
     None
 }
 
+/// This machine's host name (the container id inside Docker).
 fn hostname() -> String {
     ["/proc/sys/kernel/hostname", "/etc/hostname"].iter().filter_map(|p| std::fs::read_to_string(p).ok())
         .map(|h| h.trim().to_string()).find(|h| !h.is_empty())
         .or_else(|| std::env::var("HOSTNAME").ok()).unwrap_or_default()
 }
 
+/// Whether this process may write `path` (`access(W_OK)`).
 fn writable(path: &Path) -> bool {
     use std::os::unix::ffi::OsStrExt;
     let Ok(c) = std::ffi::CString::new(path.as_os_str().as_bytes()) else { return false };
@@ -324,6 +346,8 @@ pub fn answer(release: Option<&Value>, su: &SelfUpdate, current: &str, dev: bool
     })
 }
 
+/// The update card: installed and newest version, release notes, whether "Update now" works (`force` asks
+/// GitHub and Docker again).
 pub async fn status(st: &impl Ctx, force: bool) -> Value {
     let ((release, error), su) = tokio::join!(release(st, force), self_update(st, force));
     let mut out = answer(release.as_ref(), &su, VERSION, DEV);
@@ -436,8 +460,11 @@ pub async fn update_now(st: &impl Ctx, who: &str, tag: Option<String>) -> Result
 #[derive(Clone)]
 pub struct Restart(Arc<RestartInner>);
 
+/// The state behind [`Restart`].
 struct RestartInner {
+    /// a restart is scheduled
     pending: AtomicBool,
+    /// turns true when the restart is due
     tx: tokio::sync::watch::Sender<bool>,
 }
 
@@ -461,10 +488,12 @@ impl Restart {
         true
     }
 
+    /// Whether the restart is due now.
     pub fn is_requested(&self) -> bool {
         *self.0.tx.borrow()
     }
 
+    /// Wait until the restart is due.
     pub async fn requested(&self) {
         let mut rx = self.0.tx.subscribe();
         let _ = rx.wait_for(|r| *r).await;

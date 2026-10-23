@@ -9,6 +9,7 @@ use lofty::tag::{Accessor, ItemKey, Tag};
 use serde_json::json;
 use std::path::Path;
 
+/// The first non-empty value of `keys` in `tag`.
 fn first(tag: Option<&Tag>, keys: &[ItemKey]) -> Option<String> {
     let tag = tag?;
     keys.iter().find_map(|k| tag.get_string(*k).map(|s| s.trim().to_string()).filter(|s| !s.is_empty()))
@@ -48,6 +49,7 @@ pub fn credit_of(names: &[String], ids: &[String]) -> serde_json::Value {
     }).collect())
 }
 
+/// The number before a `/` (`3/12` is 3).
 fn num(s: Option<String>) -> Option<i64> {
     s.and_then(|v| v.split('/').next().and_then(|n| n.trim().parse().ok()))
 }
@@ -64,6 +66,7 @@ pub fn read_tags_and_facts(path: &str) -> (Row, AudioFacts) {
     (tags_of(tagged.as_ref(), path), facts)
 }
 
+/// The library row of a file's tags; the title falls back to the file name.
 fn tags_of(tagged: Option<&TaggedFile>, path: &str) -> Row {
     let tag = tagged.and_then(|t| t.primary_tag().or_else(|| t.first_tag()));
     let stem = Path::new(path).file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default();
@@ -138,15 +141,20 @@ fn type_tags(tag: Option<&Tag>) -> (String, i64, i64) {
 /// full scale). REPLAYGAIN_* tags win over R128_* ones when a file has both.
 #[derive(Debug, Clone, Copy, Default, PartialEq)]
 pub struct GainTags {
+    /// ReplayGain track gain (dB)
     pub track_gain: Option<f64>,
+    /// ReplayGain track peak (linear)
     pub track_peak: Option<f64>,
+    /// ReplayGain album gain (dB)
     pub album_gain: Option<f64>,
+    /// ReplayGain album peak (linear)
     pub album_peak: Option<f64>,
 }
 
 /// What the scan keeps beside a file's tags.
 #[derive(Debug, Clone, Copy, Default, PartialEq)]
 pub struct AudioFacts {
+    /// the ReplayGain tags
     pub gain: GainTags,
     /// Hz (2822400 for DSD64)
     pub sample_rate: Option<u32>,
@@ -162,6 +170,7 @@ pub fn read_facts(path: &str) -> AudioFacts {
 /// Formats without a bit depth: a number lofty might give for them is not one.
 const LOSSY: &[&str] = &["mp3", "mp2", "aac", "ogg", "oga", "opus", "wma", "mpc", "webm"];
 
+/// Format facts of a file (rate, depth, gain tags), from its tags and properties.
 fn facts_of(tagged: Option<&TaggedFile>, path: &str) -> AudioFacts {
     let ext = Path::new(path).extension().map(|e| e.to_string_lossy().to_lowercase()).unwrap_or_default();
     let mut f = AudioFacts::default();
@@ -259,6 +268,7 @@ pub fn embedded_art(path: &str) -> Option<Vec<u8>> {
 
 // ---- writing ------------------------------------------------------------------------------------
 
+/// The tag item the editor's field `k` writes.
 fn key(k: &str) -> Option<ItemKey> {
     Some(match k {
         "title" => ItemKey::TrackTitle,
@@ -304,6 +314,7 @@ pub fn write_tags_to(file: &mut std::fs::File, vals: &Row, cover: Option<&[u8]>)
     Ok(())
 }
 
+/// Write the edited fields `vals` (and `cover`) into the file's primary tag, creating one when it has none.
 fn set_tags(f: &mut lofty::file::TaggedFile, vals: &Row, cover: Option<&[u8]>) {
     if f.primary_tag().is_none() {
         let t = f.primary_tag_type();

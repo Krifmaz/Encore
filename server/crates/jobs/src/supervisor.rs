@@ -23,8 +23,11 @@ pub trait Supervisor: Send + Sync + 'static {
 
 /// A supervisor made of two closures: the loop, and what stops its helper program.
 pub struct Loop<R, S> {
+    /// its name in the log
     name: &'static str,
+    /// the loop
     run: R,
+    /// what stops its helper program before a restart
     stop: S,
 }
 

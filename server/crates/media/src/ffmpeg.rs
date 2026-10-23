@@ -7,6 +7,7 @@ use std::process::Stdio;
 /// An ffmpeg run being put together. `Ffmpeg::new().quiet().seek(t).input(path).args([...])` gives
 /// `ffmpeg -v error -nostdin -ss <t> -i <path> ...`.
 pub struct Ffmpeg {
+    /// the command being built
     cmd: tokio::process::Command,
 }
 
@@ -28,6 +29,7 @@ impl Ffmpeg {
         Self::program("ffprobe")
     }
 
+    /// `name` (`ffmpeg`, `ffprobe`) with stdin closed, killed when dropped.
     fn program(name: &str) -> Self {
         let mut cmd = tokio::process::Command::new(name);
         cmd.kill_on_drop(true).stdin(Stdio::null());
@@ -54,11 +56,13 @@ impl Ffmpeg {
         self.arg("-i").arg(path)
     }
 
+    /// Add one argument.
     pub fn arg(mut self, a: impl AsRef<OsStr>) -> Self {
         self.cmd.arg(a);
         self
     }
 
+    /// Add several arguments.
     pub fn args<I, S>(mut self, args: I) -> Self
     where
         I: IntoIterator<Item = S>,
@@ -114,6 +118,7 @@ impl Ffmpeg {
         &mut self.cmd
     }
 
+    /// Starts it without waiting.
     pub fn spawn(mut self) -> std::io::Result<tokio::process::Child> {
         self.cmd.spawn()
     }
@@ -123,6 +128,7 @@ impl Ffmpeg {
         self.cmd.output().await
     }
 
+    /// Runs it to the end, its output inherited (or as set); returns the exit status.
     pub async fn status(mut self) -> std::io::Result<std::process::ExitStatus> {
         self.cmd.status().await
     }

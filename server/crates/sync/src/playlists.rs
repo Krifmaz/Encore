@@ -9,6 +9,7 @@ use crate::Ctx;
 use serde_json::{json, Value};
 use std::collections::{HashMap, HashSet};
 
+/// User `uid`'s Liked Songs playlist (created the first time).
 pub fn get_liked(st: &impl Ctx, uid: i64) -> anyhow::Result<Row> {
     if let Some(r) = st.db().one("SELECT * FROM playlists WHERE user_id=? AND kind='liked'", p![uid])? {
         return Ok(r);
@@ -19,6 +20,7 @@ pub fn get_liked(st: &impl Ctx, uid: i64) -> anyhow::Result<Row> {
     Ok(st.db().one("SELECT * FROM playlists WHERE id=?", p![id])?.unwrap())
 }
 
+/// The songs of playlist `pid` in order.
 pub fn items(st: &impl Ctx, pid: i64) -> Vec<Row> {
     st.db().query("SELECT * FROM playlist_items WHERE playlist_id=? ORDER BY position, id", p![pid]).unwrap_or_default()
 }
@@ -28,6 +30,7 @@ pub fn opt(r: &Row, k: &str) -> Option<String> {
     Some(r.s(k)).filter(|x| !x.is_empty())
 }
 
+/// What identifies a playlist song when it is matched (title, artist, length, ISRC, MusicBrainz id).
 pub fn item_desc(r: &Row) -> Desc {
     describe(&r.s("title"), &r.s("artist"), Some(r.f("duration")), opt(r, "isrc").as_deref(), opt(r, "mbid").as_deref())
 }
@@ -61,6 +64,7 @@ fn numbers(base: &str) -> Vec<&str> {
     base.split_whitespace().filter(|w| w.chars().any(|c| c.is_ascii_digit()) || ["i", "ii", "iii", "iv", "v", "vi", "vii", "viii", "ix", "x"].contains(w)).collect()
 }
 
+/// A bracketed part of a title, in ASCII or full-width brackets.
 static BRACKETED: std::sync::LazyLock<regex::Regex> = std::sync::LazyLock::new(|| regex::Regex::new(r"[\(\[\{（【][^\)\]\}）】]*[\)\]\}）】]").unwrap());
 
 /// A title without its brackets, folded: "INTERNET YAMERO (Official Music Video) [Theme for …]" → "internet yamero".
@@ -172,11 +176,13 @@ pub fn add_tracks(st: &impl Ctx, pid: i64, tracks: &[Value], source: &str) -> an
     Ok((new_rows.len(), dropped))
 }
 
+/// Add library songs `ids` to playlist `pid`: how many were added and how many were already in it.
 pub fn add_library_tracks(st: &impl Ctx, pid: i64, ids: &[i64]) -> anyhow::Result<(usize, usize)> {
     let tracks: Vec<Value> = ids.iter().map(|i| json!({ "track_id": i, "title": "" })).collect();
     add_tracks(st, pid, &tracks, "library")
 }
 
+/// Create a playlist for user `uid` with `tracks` (`follow`: keep it in sync with `source_url`); the new playlist.
 #[allow(clippy::too_many_arguments)]
 pub fn create(st: &impl Ctx, uid: i64, name: &str, tracks: &[Value], source: &str, source_url: Option<&str>, description: &str, cover: Option<&str>, follow: bool) -> anyhow::Result<Value> {
     let t = now();
@@ -186,6 +192,7 @@ pub fn create(st: &impl Ctx, uid: i64, name: &str, tracks: &[Value], source: &st
     Ok(json!({ "id": pid, "added": added, "duplicates_skipped": dupes }))
 }
 
+/// Number the songs of playlist `pid` 0, 1, 2 … again in their order.
 pub fn renumber(st: &impl Ctx, pid: i64) {
     for (i, r) in items(st, pid).iter().enumerate() {
         if r.i("position") != i as i64 {
@@ -194,6 +201,7 @@ pub fn renumber(st: &impl Ctx, pid: i64) {
     }
 }
 
+/// Drop the songs of playlist `pid` that are in it twice; how many went.
 pub fn dedupe(st: &impl Ctx, pid: i64) -> usize {
     let rows = items(st, pid);
     let (kept, dropped) = dedupe_rows(rows.clone());
@@ -270,6 +278,7 @@ fn merge_tracks(st: &impl Ctx, uid: i64, ids: &[i64]) -> anyhow::Result<Vec<Valu
     Ok(tracks)
 }
 
+/// Merge the user's playlists `ids` into a new playlist `name` (see [`merge_tracks`]); its answer, with the song total.
 pub fn merge(st: &impl Ctx, uid: i64, ids: &[i64], name: &str) -> anyhow::Result<Value> {
     let tracks = merge_tracks(st, uid, ids)?;
     let total = tracks.len();
@@ -292,14 +301,20 @@ pub fn merge_into(st: &impl Ctx, uid: i64, ids: &[i64], into: i64) -> anyhow::Re
 /// What "Download missing" did, song by song: requested now, already on its way, or not requestable (and why).
 #[derive(Debug, Default, Clone, PartialEq, serde::Serialize)]
 pub struct MissingReport {
+    /// songs requested now
     pub requested: usize,
+    /// songs already on their way
     pub in_progress: usize,
+    /// songs that could not be requested
     pub failed: Vec<MissingFailure>,
 }
 
+/// A song "Download missing" could not request.
 #[derive(Debug, Clone, PartialEq, serde::Serialize)]
 pub struct MissingFailure {
+    /// the song as listed
     pub title: String,
+    /// why not
     pub reason: String,
 }
 
@@ -332,6 +347,7 @@ fn with_counts(pl: &Row, total: i64, matched: i64) -> Value {
     v
 }
 
+/// Playlist `pl` as the lists show it, with its song counts.
 pub fn summary(st: &impl Ctx, pl: &Row) -> Value {
     let s = st.db().one("SELECT COUNT(*) total, SUM(CASE WHEN track_id IS NOT NULL THEN 1 ELSE 0 END) matched FROM playlist_items WHERE playlist_id=?", p![pl.i("id")])
         .ok().flatten().unwrap_or_default();

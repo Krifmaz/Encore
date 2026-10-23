@@ -4,14 +4,17 @@ use crate::Config;
 use encore_db::{Row, RowExt};
 use serde_json::{json, Map, Value};
 
+/// Whether account `u` is an admin (the owner counts as one).
 pub fn is_admin(u: &Row) -> bool {
     matches!(u.s("role").as_str(), "admin" | "owner")
 }
 
+/// Whether account `u` is the owner.
 pub fn is_owner(u: &Row) -> bool {
     u.s("role") == "owner"
 }
 
+/// Every permission an account can be given, with its description in the UI.
 pub const PERMS: &[(&str, &str)] = &[
     ("auto_approve", "Requests skip the approval queue"),
     ("auto_approve_playlists", "Playlist downloads skip the approval queue"),

@@ -33,6 +33,7 @@ pub fn parse_image(reference: &str) -> (String, String) {
     }
 }
 
+/// Whether a JSON value holds something (not null, not an empty string, array or object).
 fn nonempty(v: &Value) -> bool {
     match v {
         Value::Null => false,
@@ -242,6 +243,7 @@ impl Default for Timing {
     }
 }
 
+/// Whether an HTTP status counts as success (2xx, or 304 Not Modified).
 fn ok(code: u16) -> bool {
     (200..300).contains(&code) || code == 304
 }

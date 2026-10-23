@@ -14,21 +14,31 @@ use std::time::UNIX_EPOCH;
 /// The most entries one answer has.
 pub const PAGE: usize = 500;
 
+/// The order a listing is sorted in.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Sort {
+    /// by name, case-insensitively
     Name,
+    /// by size
     Size,
+    /// by modification time
     Mtime,
 }
 
+/// How to list a folder: the order and the page.
 pub struct Query {
+    /// what it is sorted by
     pub sort: Sort,
+    /// largest / newest / Z first
     pub desc: bool,
+    /// the entries to skip
     pub offset: usize,
+    /// the entries to give at most
     pub limit: usize,
 }
 
 impl Query {
+    /// From the query string: sort (name, size, mtime/date), dir (asc, desc), offset and limit.
     pub fn parse(sort: Option<&str>, dir: Option<&str>, offset: Option<usize>, limit: Option<usize>) -> Result<Query, ApiError> {
         let sort = match sort.unwrap_or("name") {
             "" | "name" => Sort::Name,
@@ -45,19 +55,28 @@ impl Query {
     }
 }
 
+/// One folder entry as the listing gives it.
 struct Entry {
+    /// its name
     name: String,
+    /// "dir", "file" or "link"
     kind: &'static str,
+    /// size in bytes (a link: its target's)
     size: u64,
+    /// modification time, Unix seconds
     mtime: i64,
+    /// a link's target, as written
     target: Option<String>,
+    /// a link's target kind: "dir", "file" or "missing"
     target_kind: Option<&'static str>,
 }
 
+/// The modification time in Unix seconds (0 when unknown).
 fn secs(m: &std::fs::Metadata) -> i64 {
     m.modified().ok().and_then(|t| t.duration_since(UNIX_EPOCH).ok()).map(|d| d.as_secs() as i64).unwrap_or(0)
 }
 
+/// Every entry of `dir` whose name is UTF-8, links not followed.
 fn read(dir: &Path) -> Result<Vec<Entry>, ApiError> {
     let rd = std::fs::read_dir(dir).map_err(|e| err(500, format!("Couldn't read the folder: {e}")))?;
     let mut out = vec![];
@@ -89,6 +108,7 @@ fn name_key(n: &str) -> (String, String) {
     (n.to_lowercase(), n.to_string())
 }
 
+/// Sort the entries as `q` asks, folders first.
 fn sort(entries: &mut [Entry], q: &Query) {
     let is_dir = |e: &Entry| e.kind == "dir" || (e.kind == "link" && e.target_kind == Some("dir"));
     entries.sort_by(|a, b| {

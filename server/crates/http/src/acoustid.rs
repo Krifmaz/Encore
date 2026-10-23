@@ -3,8 +3,11 @@ use crate::Ctx;
 use reqwest::RequestBuilder;
 use serde_json::{json, Value};
 
+/// The AcoustID fingerprint lookup.
 pub const LOOKUP: &str = "https://api.acoustid.org/v2/lookup";
+/// Where fingerprints are submitted.
 pub const SUBMIT: &str = "https://api.acoustid.org/v2/submit";
+/// Where a submission's status is asked.
 pub const SUBMISSION_STATUS: &str = "https://api.acoustid.org/v2/submission_status";
 /// A track id every AcoustID database has: looking it up only proves the client key.
 const KNOWN_TRACK: &str = "9ff43b6a-4f16-427c-93c2-92307ca505e0";

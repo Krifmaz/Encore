@@ -20,7 +20,9 @@ pub use ffmpeg::Ffmpeg;
 
 /// What the media functions need from the server.
 pub trait Ctx: encore_http::Ctx + Clone + 'static {
+    /// The database.
     fn db(&self) -> &Db;
+    /// The media tools: the `audio_info` cache, the quality-check slots, whether ffmpeg runs.
     fn media(&self) -> &Media;
     /// album → cover file and version
     fn covers(&self) -> &CoverIndex;

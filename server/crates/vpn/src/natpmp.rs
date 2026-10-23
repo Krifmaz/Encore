@@ -3,9 +3,13 @@
 //! port is the forwarded one (Proton maps the same port number inside).
 use std::net::Ipv4Addr;
 
+/// The NAT-PMP port on the gateway.
 pub const PORT: u16 = 5351;
+/// Opcode: ask for the public address.
 pub const OP_ADDRESS: u8 = 0;
+/// Opcode: map a UDP port.
 pub const OP_UDP: u8 = 1;
+/// Opcode: map a TCP port.
 pub const OP_TCP: u8 = 2;
 
 /// Request the public address (opcode 0).
@@ -22,6 +26,7 @@ pub fn map_request(op: u8, internal: u16, external: u16, lifetime: u32) -> Vec<u
     out
 }
 
+/// The message for a NAT-PMP result code.
 fn result_text(code: u16) -> String {
     match code {
         1 => "the VPN server doesn't support this NAT-PMP version".into(),
@@ -33,6 +38,7 @@ fn result_text(code: u16) -> String {
     }
 }
 
+/// Check an answer's header: version 0, the reply to `op`, at least `len` bytes, result 0.
 fn header(p: &[u8], op: u8, len: usize) -> Result<(), String> {
     if p.len() < 4 || p[0] != 0 || p[1] != 128 + op {
         return Err("not a NAT-PMP answer".into());
@@ -53,10 +59,14 @@ pub fn parse_address(p: &[u8]) -> Result<Ipv4Addr, String> {
     Ok(Ipv4Addr::new(p[8], p[9], p[10], p[11]))
 }
 
+/// A port mapping the gateway granted.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Mapping {
+    /// our port
     pub internal: u16,
+    /// the public port the gateway forwards to it
     pub external: u16,
+    /// seconds the mapping lasts unless renewed
     pub lifetime: u32,
 }
 

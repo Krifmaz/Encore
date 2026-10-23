@@ -22,6 +22,7 @@ pub fn query(id: u16, host: &str) -> Result<Vec<u8>, String> {
     Ok(out)
 }
 
+/// The index just past the DNS name that starts at `i` (labels or a compression pointer); None when it runs off the end.
 fn skip_name(p: &[u8], mut i: usize) -> Option<usize> {
     loop {
         let len = *p.get(i)? as usize;

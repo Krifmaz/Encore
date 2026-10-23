@@ -5,6 +5,7 @@ use crate::Ctx;
 use reqwest::{RequestBuilder, Response};
 use serde_json::Value;
 
+/// The TIDAL API (v2).
 pub const API: &str = "https://openapi.tidal.com/v2";
 
 /// A GET on the API with `token`: `path` is a path of the API (`/tracks`, `/albums/1/relationships/items`)

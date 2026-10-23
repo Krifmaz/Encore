@@ -28,24 +28,33 @@ pub const MAX_REAL: usize = 100;
 /// What a Trash on another disk must have free beyond the albums' size.
 const SPARE: u64 = 1 << 30;
 
+/// Why an album stays: its files aren't under any root.
 pub const OUTSIDE_ROOTS: &str = "Its files are outside the folders Encore manages";
+/// Why an album stays: none of its files are on the disk.
 pub const FILE_MISSING: &str = "Its files aren't there any more";
 
 /// One song of an album to move: its row's id, path (as the settings name the folder) and size.
 #[derive(Clone, Debug)]
 struct Song {
+    /// the file, as the settings name its folder
     path: PathBuf,
+    /// its size in bytes
     size: u64,
 }
 
+/// An album to move: its row and its songs' files.
 #[derive(Clone, Debug)]
 struct Album {
+    /// the album row's id
     id: String,
+    /// its title, for messages
     title: String,
+    /// its songs with files
     songs: Vec<Song>,
 }
 
 impl Album {
+    /// The size of all its songs' files.
     fn bytes(&self) -> u64 {
         self.songs.iter().map(|s| s.size).sum()
     }
@@ -208,16 +217,21 @@ struct Moved {
     items: Vec<String>,
     /// albums all of whose songs went
     gone: BTreeSet<String>,
+    /// albums that couldn't be moved: `{id, album, reason}` each
     failed: Vec<Value>,
 }
 
 /// One planned Trash item: a folder (of one or more albums) or one song with its lyrics files.
 struct Item {
+    /// the file or folder to move, resolved
     real: PathBuf,
+    /// the albums it holds
     albums: Vec<String>,
+    /// files next to a song that go with it (its .lrc and .txt lyrics)
     extras: Vec<String>,
 }
 
+/// Move the albums' files to the Trash: whole folders when an album (or several) fills one, single songs otherwise.
 fn move_albums(st: &impl Ctx, who: &Who, roots: &[Root], go: &[&Album]) -> Moved {
     let mut out = Moved::default();
     let library = roots.iter().find(|r| r.kind == RootKind::Library).and_then(|r| r.canon.clone());

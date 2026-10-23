@@ -86,14 +86,18 @@ const LOOK_AGAIN: Duration = Duration::from_secs(10);
 /// had its turn.
 #[derive(Default)]
 struct TicketState {
+    /// the place its first call took
     place: Option<Place>,
+    /// when its first call had its turn
     first_turn: Option<Instant>,
 }
 
+/// The place shared by the calls of one [`one_place`] scope.
 #[derive(Clone, Default)]
 struct Ticket(Arc<Mutex<TicketState>>);
 
 impl Ticket {
+    /// Its state; a poisoned lock is taken over.
     fn state(&self) -> MutexGuard<'_, TicketState> {
         self.0.lock().unwrap_or_else(|p| p.into_inner())
     }
@@ -131,22 +135,30 @@ pub async fn one_place_within<F: Future>(first: Duration, rest: Duration, f: F) 
     }
 }
 
+/// One caller waiting for its turn.
 struct Waiter {
     /// this waiter alone (calls of one piece of work can share `seq`)
     id: u64,
     /// its place: the lower goes first in its class
     seq: u64,
+    /// its priority class
     class: Priority,
+    /// when it joined the line
     since: Instant,
+    /// woken when it may be next
     wake: Arc<Notify>,
 }
 
+/// The line's state.
 #[derive(Default)]
 struct State {
     /// the earliest moment the next call may go out
     next: Option<Instant>,
+    /// everyone waiting, in no order (`head` picks)
     waiters: Vec<Waiter>,
+    /// the next place handed out
     seq: u64,
+    /// the next waiter id
     ids: u64,
     /// when each class last had a turn
     served: [Option<Instant>; 5],
@@ -173,6 +185,7 @@ impl State {
         self.waiters.iter().enumerate().filter(|(_, w)| w.class == class).min_by_key(|(_, w)| (w.seq, w.id)).map(|(i, _)| i)
     }
 
+    /// Where waiter `id` is in `waiters`.
     fn position(&self, id: u64) -> Option<usize> {
         self.waiters.iter().position(|w| w.id == id)
     }
@@ -182,6 +195,7 @@ impl State {
         self.waiters.iter().filter(|w| w.class < class || (w.class == class && (w.seq, w.id) < (seq, id))).count()
     }
 
+    /// The wake handle of whoever is next, if anyone.
     fn wake_head(&self, now: Instant) -> Option<Arc<Notify>> {
         self.head(now).map(|i| self.waiters[i].wake.clone())
     }
@@ -191,7 +205,9 @@ impl State {
 /// inside [`one_place`]) so it doesn't go to the back.
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct Place {
+    /// its place in the line
     seq: u64,
+    /// when it took it
     since: Instant,
 }
 
@@ -201,8 +217,11 @@ pub struct Line(Arc<Mutex<State>>);
 
 /// Takes a waiter that gave up (its future was dropped) out of the line and hands the turn on.
 struct Leave<'a> {
+    /// the line it waits in
     line: &'a Line,
+    /// its waiter id
     id: u64,
+    /// set once it had its turn (nothing to undo)
     done: bool,
 }
 
@@ -238,6 +257,7 @@ pub fn wait_words(ahead: usize, secs: f64) -> String {
 }
 
 impl Line {
+    /// The state; a poisoned lock is taken over.
     fn lock(&self) -> MutexGuard<'_, State> {
         self.0.lock().unwrap_or_else(|p| p.into_inner())
     }

@@ -2,6 +2,7 @@
 use crate::Ctx;
 use reqwest::RequestBuilder;
 
+/// The Discogs API.
 pub const API: &str = "https://api.discogs.com";
 
 /// A GET on `url` with the `discogs_token` setting, when there is one.

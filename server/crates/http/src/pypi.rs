@@ -3,6 +3,7 @@ use crate::Ctx;
 use serde_json::Value;
 use std::time::Duration;
 
+/// PyPI's JSON API.
 pub const API: &str = "https://pypi.org/pypi";
 
 /// The newest version of `package` on PyPI: the answer's HTTP status, and the version when the answer

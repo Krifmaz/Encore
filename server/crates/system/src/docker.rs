@@ -14,12 +14,15 @@ pub const SOCKET: &str = "/var/run/docker.sock";
 /// Most calls answer at once; stopping a container waits up to its stop timeout (30 s) first.
 const TIMEOUT: Duration = Duration::from_secs(60);
 
+/// A Docker Engine API client on one unix socket.
 #[derive(Clone, Debug)]
 pub struct Docker {
+    /// the socket's path
     sock: PathBuf,
 }
 
 impl Docker {
+    /// A client for the socket at `sock` (nothing is opened until a call).
     pub fn new(sock: impl AsRef<Path>) -> Docker {
         Docker { sock: sock.as_ref().to_path_buf() }
     }
@@ -55,14 +58,17 @@ impl Docker {
         Ok((code, serde_json::from_slice(&bytes).unwrap_or(Value::Null)))
     }
 
+    /// `GET path`: the status and the JSON answer.
     pub async fn get(&self, path: &str) -> anyhow::Result<(u16, Value)> {
         self.call("GET", path, None).await
     }
 
+    /// `POST path` with an optional JSON body: the status and the JSON answer.
     pub async fn post(&self, path: &str, body: Option<&Value>) -> anyhow::Result<(u16, Value)> {
         self.call("POST", path, body).await
     }
 
+    /// `DELETE path`: the status and the JSON answer.
     pub async fn delete(&self, path: &str) -> anyhow::Result<(u16, Value)> {
         self.call("DELETE", path, None).await
     }

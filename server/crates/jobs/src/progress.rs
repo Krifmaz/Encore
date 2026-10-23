@@ -7,10 +7,12 @@ use std::sync::{Arc, Mutex};
 pub struct Jobs(Arc<Mutex<Map<String, Value>>>);
 
 impl Jobs {
+    /// The state of `job` (`{"running": false}` when it never ran).
     pub fn get(&self, job: &str) -> Value {
         self.0.lock().unwrap().get(job).cloned().unwrap_or(json!({ "running": false }))
     }
 
+    /// Whether `job` is running now.
     pub fn running(&self, job: &str) -> bool {
         self.get(job)["running"].as_bool().unwrap_or(false)
     }

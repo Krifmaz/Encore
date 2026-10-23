@@ -9,7 +9,9 @@ use toml::{Table, Value};
 #[path = "src/when.rs"]
 mod when;
 
+/// The field types a key's `type` may name.
 const TYPES: &[&str] = &["text", "password", "number", "bool", "select", "checks", "textarea", "path", "url"];
+/// The attributes a `[keys.*]` entry may have.
 const KEY_ATTRS: &[&str] =
     &["env", "default", "secret", "group", "label", "help", "type", "options", "when", "unit", "min", "max", "step", "full", "advanced"];
 /// Names an accessor cannot take: Config's own methods, and Rust keywords.
@@ -32,12 +34,17 @@ fn main() {
     std::fs::write(path, out).unwrap();
 }
 
+/// One `[keys.*]` entry being generated.
 struct Key<'a> {
+    /// the setting's name
     name: &'a str,
+    /// its attributes
     t: &'a Table,
+    /// its field type (given, or worked out from the default)
     kind: String,
 }
 
+/// String attribute `attr` of `t` (`None` when absent; an error naming `at` when not a string).
 fn s<'a>(t: &'a Table, attr: &str, at: &str) -> Result<Option<&'a str>, String> {
     match t.get(attr) {
         None => Ok(None),
@@ -46,6 +53,7 @@ fn s<'a>(t: &'a Table, attr: &str, at: &str) -> Result<Option<&'a str>, String> 
     }
 }
 
+/// Boolean attribute `attr` of `t` (`false` when absent).
 fn flag(t: &Table, attr: &str, at: &str) -> Result<bool, String> {
     match t.get(attr) {
         None => Ok(false),
@@ -54,6 +62,7 @@ fn flag(t: &Table, attr: &str, at: &str) -> Result<bool, String> {
     }
 }
 
+/// Number attribute `attr` of `t`, integer or float (`None` when absent).
 fn num(t: &Table, attr: &str, at: &str) -> Result<Option<f64>, String> {
     match t.get(attr) {
         None => Ok(None),
@@ -63,6 +72,7 @@ fn num(t: &Table, attr: &str, at: &str) -> Result<Option<f64>, String> {
     }
 }
 
+/// The `[name.*]` table of the file.
 fn table<'a>(root: &'a Table, name: &str) -> Result<&'a Table, String> {
     match root.get(name) {
         Some(Value::Table(t)) => Ok(t),
@@ -70,6 +80,7 @@ fn table<'a>(root: &'a Table, name: &str) -> Result<&'a Table, String> {
     }
 }
 
+/// The entries of table `t`, each of which must itself be a table (`what` names them in errors).
 fn entries<'a>(t: &'a Table, what: &str) -> Result<Vec<(&'a str, &'a Table)>, String> {
     t.iter()
         .map(|(k, v)| match v {
@@ -79,6 +90,7 @@ fn entries<'a>(t: &'a Table, what: &str) -> Result<Vec<(&'a str, &'a Table)>, St
         .collect()
 }
 
+/// The `options` list of a key: `[value, label]` pairs.
 fn options(t: &Table, at: &str) -> Result<Vec<(String, String)>, String> {
     let Some(v) = t.get("options") else { return Ok(vec![]) };
     let Value::Array(items) = v else { return Err(format!("{at}: options must be a list of [value, label]")) };
@@ -99,14 +111,17 @@ fn lit(v: &str) -> String {
     format!("{v:?}")
 }
 
+/// An `Option<&str>` as Rust source.
 fn opt_lit(v: Option<&str>) -> String {
     v.map(|v| format!("Some({v:?})")).unwrap_or_else(|| "None".into())
 }
 
+/// An `Option<f64>` as Rust source.
 fn opt_num(v: Option<f64>) -> String {
     v.map(|v| format!("Some({v:?})")).unwrap_or_else(|| "None".into())
 }
 
+/// Check settings.toml and turn it into the Rust source of settings_gen.rs.
 fn generate(text: &str) -> Result<String, String> {
     let root: Table = text.parse().map_err(|e| format!("{e}"))?;
     for k in root.keys() {
@@ -282,6 +297,11 @@ fn generate(text: &str) -> Result<String, String> {
     // Keys
     o.push_str("/// Every setting's name: `Keys::APP_NAME` is `\"app_name\"`.\npub struct Keys;\n\nimpl Keys {\n");
     for name in &order {
+        // the same one-line description the accessor gets: the label, or the help when there is none
+        let k = by_name[name];
+        let what = s(k.t, "label", name)?.or(s(k.t, "help", name)?).unwrap_or("");
+        let doc = if what.is_empty() { format!("The `{name}` setting.") } else { format!("The `{name}` setting: {what}") };
+        writeln!(o, "    #[doc = {}]", lit(&doc)).unwrap();
         writeln!(o, "    pub const {}: &'static str = {};", name.to_uppercase(), lit(name)).unwrap();
     }
     o.push_str("}\n\n");

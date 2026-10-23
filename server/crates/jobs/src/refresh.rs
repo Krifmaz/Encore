@@ -8,9 +8,11 @@ use std::future::Future;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
+/// The kept answer and what it was made from.
 struct Slot<T> {
     /// what the answer was made from (paths, a program file and its time); another key is another answer
     key: String,
+    /// the answer and when it was made
     value: Option<(Instant, T)>,
     /// what the caller's stamp was when the answer was started (a library version): another stamp makes the
     /// kept answer old at once, but it is still shown while the fresh one is made
@@ -21,9 +23,11 @@ struct Slot<T> {
 
 /// One kept answer. Clones share it.
 pub struct Refreshed<T> {
+    /// the kept answer, shared by the clones
     slot: Arc<Mutex<Slot<T>>>,
     /// held while the first answer for a key is made, so callers that arrive together make it once
     first: Arc<tokio::sync::Mutex<()>>,
+    /// how long an answer stays fresh
     period: Duration,
 }
 
@@ -48,6 +52,7 @@ impl<T: Clone + Send + 'static> Refreshed<T> {
         Refreshed { slot: Arc::new(Mutex::new(Slot { key: String::new(), value: None, stamp: 0, running: false })), first: Default::default(), period }
     }
 
+    /// The slot; a poisoned lock is taken over.
     fn lock(&self) -> std::sync::MutexGuard<'_, Slot<T>> {
         self.slot.lock().unwrap_or_else(|e| e.into_inner())
     }

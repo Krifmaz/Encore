@@ -25,7 +25,9 @@ pub type Pass = Box<dyn Send + Sync>;
 
 /// A stream that keeps its door's pass until it is dropped.
 pub struct Guarded<T> {
+    /// the stream itself
     inner: T,
+    /// held only to keep the door open while the stream lives
     _pass: Option<Pass>,
 }
 
@@ -52,18 +54,28 @@ impl<T: AsyncWrite + Unpin> AsyncWrite for Guarded<T> {
 /// Where a client wants to go.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Target {
+    /// an IPv4 address and port
     V4(SocketAddrV4),
+    /// a host name and port, resolved through the VPN
     Domain(String, u16),
 }
 
 // RFC 1928 reply codes
+/// succeeded
 const REP_OK: u8 = 0;
+/// general failure
 const REP_FAILURE: u8 = 1;
+/// network unreachable
 const REP_NET_UNREACHABLE: u8 = 3;
+/// host unreachable
 const REP_HOST_UNREACHABLE: u8 = 4;
+/// connection refused
 const REP_REFUSED: u8 = 5;
+/// TTL expired (used for timeouts)
 const REP_TTL: u8 = 6;
+/// command not supported
 const REP_COMMAND: u8 = 7;
+/// address type not supported
 const REP_ADDRESS_TYPE: u8 = 8;
 
 impl Vpn {
@@ -107,6 +119,7 @@ impl Vpn {
     }
 }
 
+/// Accept SOCKS5 clients forever, serving each on its own task through the tunnel.
 async fn accept_loop(vpn: Vpn, l: TcpListener, user: String, pass: String) {
     loop {
         match l.accept().await {
@@ -143,10 +156,12 @@ async fn through_vpn(vpn: Vpn, t: Target) -> io::Result<Guarded<VpnStream>> {
     Ok(Guarded { inner: vpn.connect_tcp(addr).await?, _pass: pass })
 }
 
+/// An InvalidData error with message `m`.
 fn bad(m: &str) -> io::Error {
     io::Error::new(io::ErrorKind::InvalidData, m.to_string())
 }
 
+/// The SOCKS5 reply code for a connect error.
 fn reply_code(e: &io::Error) -> u8 {
     match e.kind() {
         io::ErrorKind::ConnectionRefused => REP_REFUSED,

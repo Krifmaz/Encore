@@ -19,6 +19,7 @@ use std::fs::File;
 /// The fields, in the order the editor shows them (the keys `tagger::edit_tags` takes).
 pub const FIELDS: [&str; 8] = ["title", "artist", "album", "albumartist", "tracknumber", "discnumber", "date", "genre"];
 
+/// The tag keys a text field reads and writes (date sets two; the numbers have their own calls, so none).
 fn item_keys(field: &str) -> &'static [ItemKey] {
     match field {
         "title" => &[ItemKey::TrackTitle],

@@ -4,25 +4,33 @@ use axum::response::{IntoResponse, Response};
 use axum::Json;
 use serde_json::{json, Value};
 
+/// A failed request: the HTTP status and the `detail` the client shows.
 #[derive(Debug)]
 pub struct ApiError {
+    /// HTTP status of the response
     pub status: StatusCode,
+    /// the message, sent as `{"detail": …}`
     pub detail: String,
+    /// more fields merged into the error body
     pub extra: Option<Value>,
 }
 
+/// What a handler returns.
 pub type ApiResult<T> = Result<T, ApiError>;
 
 impl ApiError {
+    /// An error with HTTP `status` (500 when not a valid code) and `detail`.
     pub fn new(status: u16, detail: impl Into<String>) -> Self {
         ApiError { status: StatusCode::from_u16(status).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR), detail: detail.into(), extra: None }
     }
+    /// The same error with `extra` fields in its body.
     pub fn with(mut self, extra: Value) -> Self {
         self.extra = Some(extra);
         self
     }
 }
 
+/// Shorthand for [`ApiError::new`].
 pub fn err(status: u16, detail: impl Into<String>) -> ApiError {
     ApiError::new(status, detail)
 }

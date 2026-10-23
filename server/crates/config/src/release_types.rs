@@ -34,6 +34,7 @@ pub const EXTRAS: [(&str, &str); 17] = [
     ("Covers", "Covers / Tributes"),
 ];
 
+/// The release kinds requested when nothing is set.
 pub const DEFAULT_KINDS: &str = "Album,EP";
 
 /// Every extra is skipped by default: only plain studio releases are requested.
@@ -73,6 +74,7 @@ pub fn canon(s: &str) -> Option<&'static str> {
     })
 }
 
+/// Whether `k` is one of [`KINDS`].
 fn is_kind(k: &str) -> bool {
     KINDS.iter().any(|x| x.0 == k)
 }
@@ -92,7 +94,9 @@ fn keys(v: &Value, kinds: bool) -> Vec<&'static str> {
 /// What is wanted: these kinds, without releases that carry any of `skip`.
 #[derive(Debug, Clone, PartialEq)]
 pub struct ReleaseFilter {
+    /// the kinds wanted ("Album", "EP", …)
     pub kinds: Vec<&'static str>,
+    /// the extras that rule a release out ("Live", "Remix", …)
     pub skip: Vec<&'static str>,
 }
 
@@ -110,6 +114,7 @@ impl ReleaseFilter {
         ReleaseFilter { kinds: if k.is_empty() { Self::default().kinds } else { k }, skip: keys(&json!(skip), false) }
     }
 
+    /// The filter the `release_types` and `release_skip` settings describe.
     pub fn from_cfg(cfg: &crate::Config) -> Self {
         Self::from_csv(&cfg.str("release_types"), &cfg.str("release_skip"))
     }
@@ -152,6 +157,7 @@ impl ReleaseFilter {
         f
     }
 
+    /// The filter as the API sends it.
     pub fn to_value(&self) -> Value {
         json!({ "kinds": self.kinds, "skip": self.skip })
     }
@@ -174,6 +180,7 @@ impl ReleaseFilter {
         marks(rg).into_iter().find(|m| self.skip.contains(m))
     }
 
+    /// Whether a release (MusicBrainz group, or Deezer / Apple album) is wanted.
     pub fn wants(&self, rg: &Value) -> bool {
         self.reason(rg).is_none()
     }
@@ -227,6 +234,7 @@ pub fn group_kind(rg: &Value) -> &'static str {
     primary(rg)
 }
 
+/// A case-insensitive regex (the patterns are fixed, so a bad one is a bug).
 fn re(p: &str) -> Regex {
     Regex::new(&format!("(?i){p}")).unwrap()
 }
@@ -289,6 +297,7 @@ pub fn marks(rg: &Value) -> Vec<&'static str> {
     out
 }
 
+/// A bracketed part of a title: `(…)` or `[…]`.
 static BRACKETS: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"[\(\[][^\)\]]*[\)\]]").unwrap());
 
 /// The bracketed and trailing " - …" parts of a title, plus the disambiguation.

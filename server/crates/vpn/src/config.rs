@@ -3,20 +3,28 @@
 use base64::Engine as _;
 use std::net::{IpAddr, Ipv4Addr};
 
+/// A parsed WireGuard config: the parts the tunnel needs.
 #[derive(Clone, Debug, PartialEq)]
 pub struct WgConfig {
+    /// our private key (Interface PrivateKey)
     pub private_key: [u8; 32],
     /// The tunnel address (first IPv4 one in Address).
     pub address: Ipv4Addr,
+    /// the tunnel address's prefix length (the /n in Address)
     pub prefix: u8,
     /// DNS servers, IPv4 ones first.
     pub dns: Vec<IpAddr>,
+    /// the server's public key (Peer PublicKey)
     pub public_key: [u8; 32],
+    /// the extra pre-shared key, if the config has one
     pub preshared_key: Option<[u8; 32]>,
     /// host:port as written; the host may be a name.
     pub endpoint_host: String,
+    /// the server's port
     pub endpoint_port: u16,
+    /// the AllowedIPs entries as written
     pub allowed_ips: Vec<String>,
+    /// seconds between keepalives, 0 for none (PersistentKeepalive)
     pub keepalive: u16,
 }
 
@@ -26,11 +34,13 @@ impl WgConfig {
         self.dns.iter().find_map(|d| match d { IpAddr::V4(v) => Some(*v), _ => None })
     }
 
+    /// The endpoint as `host:port`, with an IPv6 host in brackets.
     pub fn endpoint(&self) -> String {
         if self.endpoint_host.contains(':') { format!("[{}]:{}", self.endpoint_host, self.endpoint_port) } else { format!("{}:{}", self.endpoint_host, self.endpoint_port) }
     }
 }
 
+/// Decode one base64 key; `name` names it in the error.
 fn key(v: &str, name: &str) -> Result<[u8; 32], String> {
     let b = base64::engine::general_purpose::STANDARD.decode(v.trim()).map_err(|_| format!("{name} in the WireGuard config isn't a valid key (it should be 44 characters of base64)"))?;
     b.try_into().map_err(|_| format!("{name} in the WireGuard config isn't a valid key (it should be 44 characters of base64)"))

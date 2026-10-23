@@ -34,16 +34,20 @@ use std::sync::{Mutex, MutexGuard};
 /// Who does an operation (for the activity log and Trash's "by").
 #[derive(Clone, Debug)]
 pub struct Who {
+    /// the user's id
     pub id: i64,
+    /// their username, for the log
     pub name: String,
 }
 
 impl Who {
+    /// The user a request came from.
     pub fn of(user: &Row) -> Who {
         Who { id: user.i("id"), name: user.s("username") }
     }
 }
 
+/// The lock behind [`lock`].
 static LOCK: Mutex<()> = Mutex::new(());
 
 /// One file operation at a time (a move and a restore can't pick the same free name, two uploads can't
@@ -66,6 +70,7 @@ pub fn audit(st: &impl Ctx, who: &Who, what: &str, from: &Target, to: Option<&Ta
     audit_text(st, who, &line);
 }
 
+/// Log one file-manager action of `who` ("File manager: alice moved …").
 pub fn audit_text(st: &impl Ctx, who: &Who, what: &str) {
     st.db().log("info", &format!("File manager: {} {what}", who.name));
 }

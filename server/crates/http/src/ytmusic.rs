@@ -6,9 +6,12 @@ use serde_json::{json, Value};
 
 /// The web API's base (in use; the server's [`crate::Urls`] carry the one its calls go to).
 pub const API: &str = "https://music.youtube.com/youtubei/v1";
+/// Search filter: songs only.
 const SONGS: &str = "EgWKAQIIAWoMEA4QChADEAQQCRAF";
+/// Search filter: albums only.
 const ALBUMS: &str = "EgWKAQIYAWoMEA4QChADEAQQCRAF";
 
+/// POST `body` to a web API `endpoint` as the web client does (signed out).
 async fn call(st: &impl Ctx, endpoint: &str, mut body: Value) -> anyhow::Result<Value> {
     body["context"] = json!({ "client": { "clientName": "WEB_REMIX", "clientVersion": "1.20250101.01.00", "hl": "en", "gl": "US" } });
     let r = st.http().post(format!("{}/{endpoint}?prettyPrint=false", st.urls().ytmusic)).header("Origin", "https://music.youtube.com")
@@ -16,6 +19,7 @@ async fn call(st: &impl Ctx, endpoint: &str, mut body: Value) -> anyhow::Result<
     Ok(r.error_for_status()?.json().await?)
 }
 
+/// Every value under `key` anywhere in `v` (a match is not searched further).
 fn walk<'a>(v: &'a Value, key: &str, out: &mut Vec<&'a Value>) {
     match v {
         Value::Object(m) => {
@@ -31,12 +35,14 @@ fn walk<'a>(v: &'a Value, key: &str, out: &mut Vec<&'a Value>) {
         _ => {}
     }
 }
+/// The first value under `key` anywhere in `v`.
 fn find<'a>(v: &'a Value, key: &str) -> Option<&'a Value> {
     let mut o = vec![];
     walk(v, key, &mut o);
     o.into_iter().next()
 }
 
+/// `m:ss` or `h:mm:ss` as seconds.
 fn secs(s: &str) -> Option<f64> {
     let p: Vec<&str> = s.split(':').collect();
     if p.len() < 2 || p.iter().any(|x| x.is_empty() || !x.chars().all(|c| c.is_ascii_digit())) {
@@ -78,6 +84,7 @@ fn item(r: &Value) -> Value {
             "browseId": r["navigationEndpoint"]["browseEndpoint"]["browseId"], "cover": cover })
 }
 
+/// Search YouTube Music for songs (or albums): one row per result (see [`item`]).
 pub async fn search(st: &impl Ctx, q: &str, songs: bool) -> anyhow::Result<Vec<Value>> {
     let d = call(st, "search", json!({ "query": q, "params": if songs { SONGS } else { ALBUMS } })).await?;
     let mut rows = vec![];
@@ -127,6 +134,7 @@ pub async fn authed(st: &impl Ctx, data: &Value, endpoint: &str, mut body: Value
     Ok(r.json().await?)
 }
 
+/// The next page's continuation token in an answer, if any.
 fn continuation(v: &Value) -> Option<String> {
     let mut c = vec![];
     walk(v, "continuation", &mut c);
@@ -153,6 +161,7 @@ pub async fn browse_rows(st: &impl Ctx, data: &Value, browse_id: &str, max_pages
     Ok(out)
 }
 
+/// The signed-in account's playlists.
 pub async fn library_playlists(st: &impl Ctx, data: &Value) -> anyhow::Result<Vec<Value>> {
     let d = authed(st, data, "browse", json!({ "browseId": "FEmusic_liked_playlists" })).await?;
     let mut items = vec![];
@@ -167,15 +176,18 @@ pub async fn library_playlists(st: &impl Ctx, data: &Value) -> anyhow::Result<Ve
     }).collect())
 }
 
+/// Like a video (or take the like away).
 pub async fn rate(st: &impl Ctx, data: &Value, video: &str, like: bool) -> anyhow::Result<()> {
     authed(st, data, if like { "like/like" } else { "like/removelike" }, json!({ "target": { "videoId": video } })).await.map(|_| ())
 }
 
+/// Create a private playlist of `videos`; its id.
 pub async fn create_playlist(st: &impl Ctx, data: &Value, name: &str, videos: &[String]) -> anyhow::Result<Option<String>> {
     let d = authed(st, data, "playlist/create", json!({ "title": name, "description": "Synced by Encore", "privacyStatus": "PRIVATE", "videoIds": videos })).await?;
     Ok(d["playlistId"].as_str().map(String::from))
 }
 
+/// Apply `actions` (add or remove videos) to playlist `id`.
 pub async fn edit_playlist(st: &impl Ctx, data: &Value, id: &str, actions: Vec<Value>) -> anyhow::Result<()> {
     if actions.is_empty() {
         return Ok(());

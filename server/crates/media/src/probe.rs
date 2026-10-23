@@ -100,13 +100,17 @@ pub struct Stream {
     pub codec: String,
     /// "Dolby Digital Plus + Dolby Atmos", "Dolby TrueHD + Dolby Atmos", "DTS-HD MA" … (empty when none)
     pub profile: String,
+    /// channel count
     pub channels: u32,
     /// "5.1(side)", "7.1", "stereo" …
     pub layout: String,
+    /// Hz
     pub sample_rate: u32,
     /// bits per second, 0 when ffprobe does not say
     pub bitrate: u32,
+    /// bits per sample (0 when not known, as for lossy codecs)
     pub bit_depth: u32,
+    /// seconds
     pub duration: f64,
 }
 
@@ -121,6 +125,7 @@ impl Stream {
         self.channels > 2 || self.atmos()
     }
 
+    /// Whether the codec is lossless (FLAC, ALAC, TrueHD, WavPack, APE, PCM, or DTS-HD MA).
     pub fn lossless(&self) -> bool {
         matches!(self.codec.as_str(), "flac" | "alac" | "truehd" | "mlp" | "wavpack" | "ape") || self.codec.starts_with("pcm_") || self.profile.contains("DTS-HD MA")
     }

@@ -2,6 +2,7 @@
 use crate::Ctx;
 use reqwest::RequestBuilder;
 
+/// The Cover Art Archive.
 pub const BASE: &str = "https://coverartarchive.org";
 
 /// Every image the archive has of a `kind` ("release", "release-group") with this id, as JSON.

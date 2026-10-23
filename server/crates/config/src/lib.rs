@@ -14,30 +14,41 @@ use std::sync::{Arc, RwLock};
 /// One setting as the loader keeps it (built from `settings::TABLE`).
 #[derive(Clone)]
 pub struct Def {
+    /// the environment variable that sets it (and locks it in the UI)
     pub env: Option<String>,
+    /// the value until one is saved, as JSON
     pub default: Value,
+    /// never sent to a browser
     pub secret: bool,
 }
 
 /// Where the environment variables come from: the process's own in use, a fixed set in tests.
 pub type EnvLookup = Arc<dyn Fn(&str) -> Option<String> + Send + Sync>;
 
+/// The settings in effect: defaults, then the values saved in the UI, then the environment. Clones share them.
 #[derive(Clone)]
 pub struct Config {
+    /// every setting's definition, in `settings::TABLE` order
     pub defs: Arc<Vec<(String, Def)>>,
+    /// the saved value (or the default) of every key
     cache: Arc<RwLock<HashMap<String, Value>>>,
+    /// the keys an environment variable sets, with its value
     env: Arc<RwLock<HashMap<String, Value>>>,
     /// moves on every reload and every save, so what is worked out from the settings can be kept until then
     generation: Arc<AtomicU64>,
+    /// where the saved values are
     db: Db,
     /// reads an environment variable (on every reload)
     lookup: EnvLookup,
 }
 
+/// Sent to the browser in place of a secret's value; a value that starts with it was not changed in the UI.
 pub const MASK: &str = "••••";
 /// settings row that marks the one-time discography_singles → release_types migration as done
 const RELEASE_TYPES_MIGRATED: &str = "release_types_migrated";
 
+/// `raw` (saved, or from the environment) as the type of `default`: "1"/"yes" for a boolean, a numeric string
+/// for a number, any value as text; the default when it cannot be read as that type.
 fn coerce(default: &Value, raw: &Value) -> Value {
     match default {
         Value::Bool(_) => match raw {
@@ -93,6 +104,7 @@ impl Config {
         Ok(cfg)
     }
 
+    /// Read the saved values and the environment again (and generate an API key on first start).
     pub fn reload(&self) -> anyhow::Result<()> {
         let mut stored: HashMap<String, Value> = self
             .db
@@ -141,16 +153,19 @@ impl Config {
         Ok(())
     }
 
+    /// The definition of `key`.
     pub fn def(&self, key: &str) -> Option<&Def> {
         self.defs.iter().find(|(k, _)| k == key).map(|(_, d)| d)
     }
 
+    /// The value in effect for `key` (environment first, then saved or default; null for an unknown key).
     pub fn get(&self, key: &str) -> Value {
         if let Some(v) = self.env.read().unwrap().get(key) {
             return v.clone();
         }
         self.cache.read().unwrap().get(key).cloned().unwrap_or(Value::Null)
     }
+    /// `key` as text (empty for null).
     pub fn str(&self, key: &str) -> String {
         match self.get(key) {
             Value::String(s) => s,
@@ -158,6 +173,7 @@ impl Config {
             v => v.to_string(),
         }
     }
+    /// `key` as a boolean (a non-zero number counts as true).
     pub fn bool(&self, key: &str) -> bool {
         match self.get(key) {
             Value::Bool(b) => b,
@@ -166,16 +182,20 @@ impl Config {
             _ => false,
         }
     }
+    /// `key` as an integer (0 when not a number).
     pub fn int(&self, key: &str) -> i64 {
         self.get(key).as_f64().map(|f| f as i64).unwrap_or(0)
     }
+    /// `key` as a real (0 when not a number).
     pub fn float(&self, key: &str) -> f64 {
         self.get(key).as_f64().unwrap_or(0.0)
     }
+    /// Whether an environment variable sets `key` (the UI shows it locked).
     pub fn env_locked(&self, key: &str) -> bool {
         self.env.read().unwrap().contains_key(key)
     }
 
+    /// Save `values` (`{key: value}`), each coerced to its setting's type; unknown keys are skipped.
     pub fn set_many(&self, values: &Value) {
         let Some(obj) = values.as_object() else { return };
         for (key, val) in obj {
@@ -193,6 +213,7 @@ impl Config {
         self.generation.load(Ordering::SeqCst)
     }
 
+    /// Whether `v` is the masked form of a secret (sent back unchanged from the UI).
     pub fn is_masked(v: &Value) -> bool {
         v.as_str().map(|s| s.starts_with(MASK)).unwrap_or(false)
     }

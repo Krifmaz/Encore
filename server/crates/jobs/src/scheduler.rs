@@ -31,6 +31,7 @@ const TICK: Duration = Duration::from_secs(5);
 
 /// What runs the tasks: the server, which knows every crate's jobs.
 pub trait Tasks: Clone + Send + Sync + 'static {
+    /// The scheduler the server runs.
     fn scheduler(&self) -> &Scheduler;
     /// Run task `key` to the end: Ok(the result line for Settings → Tasks) or the error.
     fn run_task(&self, key: &str) -> impl Future<Output = anyhow::Result<String>> + Send;
@@ -40,8 +41,11 @@ pub trait Tasks: Clone + Send + Sync + 'static {
 /// which task runs now. Clones share them.
 #[derive(Clone)]
 pub struct Scheduler {
+    /// where task runs are recorded
     db: Db,
+    /// the settings that switch tasks on and set their intervals
     cfg: Config,
+    /// progress of the running jobs
     jobs: crate::Jobs,
     /// when the server started: the first runs after a start are counted from here
     boot: f64,
@@ -69,10 +73,12 @@ fn keys(key: &str) -> (&'static str, &'static str, i64) {
 }
 
 impl Scheduler {
+    /// A scheduler over `db`, `cfg` and `jobs`, counting from now.
     pub fn new(db: Db, cfg: Config, jobs: crate::Jobs) -> Scheduler {
         Scheduler { db, cfg, jobs, boot: now() }
     }
 
+    /// Whether task `key` is switched on (scan and sync: when their interval is above 0).
     fn enabled(&self, key: &str) -> bool {
         let (flag, mins, _) = keys(key);
         match key {
@@ -82,6 +88,7 @@ impl Scheduler {
         }
     }
 
+    /// Task `key`'s interval in minutes (0 or more).
     fn minutes(&self, key: &str) -> i64 {
         let (_, mins, scale) = keys(key);
         self.cfg.int(mins).max(0) * scale
@@ -113,6 +120,7 @@ impl Scheduler {
         }
     }
 
+    /// The last run of task `key` as recorded in `task_runs` (empty when it never ran).
     fn state(&self, key: &str) -> Row {
         self.db.one("SELECT * FROM task_runs WHERE key=?", p![key]).ok().flatten().unwrap_or_default()
     }

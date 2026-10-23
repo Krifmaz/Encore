@@ -24,6 +24,7 @@ pub enum Kind {
 }
 
 impl Kind {
+    /// What a backup of this kind adds to its file name (nothing for a scheduled one).
     fn suffix(self) -> &'static str {
         match self {
             Kind::Scheduled => "",
@@ -32,6 +33,7 @@ impl Kind {
             Kind::Uploaded => "-uploaded",
         }
     }
+    /// The kind as the API and the UI name it.
     pub fn label(self) -> &'static str {
         match self {
             Kind::Scheduled => "scheduled",
@@ -40,6 +42,7 @@ impl Kind {
             Kind::Uploaded => "uploaded",
         }
     }
+    /// The kind a file name's suffix stands for (the inverse of `suffix`).
     fn from_suffix(s: &str) -> Option<Kind> {
         match s {
             "" => Some(Kind::Scheduled),
@@ -51,25 +54,32 @@ impl Kind {
     }
 }
 
+/// The first 16 bytes of every SQLite database file (checked before a file is restored).
 pub const SQLITE_HEADER: &[u8; 16] = b"SQLite format 3\0";
 
 /// One backup file.
 #[derive(Clone, Debug)]
 pub struct Info {
+    /// file name (`encore-YYYYMMDD-HHMMSS[-suffix].db`)
     pub name: String,
+    /// where the file is
     pub path: PathBuf,
+    /// size in bytes
     pub size: u64,
     /// Unix time the copy was taken (from the name; the file's mtime when the name has none).
     pub time: f64,
+    /// why it was taken
     pub kind: Kind,
 }
 
 impl Info {
+    /// The backup as the API lists it.
     pub fn json(&self) -> Value {
         json!({ "name": self.name, "size": self.size, "time": self.time, "kind": self.kind.label() })
     }
 }
 
+/// The folder the backups are kept in.
 pub fn dir(data_dir: &Path) -> PathBuf {
     data_dir.join("backups")
 }
@@ -114,6 +124,7 @@ pub fn valid_name(name: &str) -> bool {
     parse_name(name).is_some()
 }
 
+/// The file name of a `kind` backup taken at `unix` time.
 pub fn file_name(kind: Kind, unix: f64) -> String {
     format!("encore-{}{}.db", stamp(unix), kind.suffix())
 }
