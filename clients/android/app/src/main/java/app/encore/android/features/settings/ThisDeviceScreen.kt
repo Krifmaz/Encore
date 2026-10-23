@@ -28,7 +28,7 @@ import app.encore.android.data.session.AuthKind
 import app.encore.android.features.bugs.BugReportsEntry
 import app.encore.android.features.bugs.BugRules
 import app.encore.android.features.bugs.CrashLogReport
-import app.encore.android.features.bugs.shareFile
+import app.encore.android.features.bugs.saveExport
 import app.encore.android.ui.components.Toasts
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.runtime.rememberCoroutineScope
@@ -123,8 +123,8 @@ fun DeviceNameRow(nav: Nav) {
 
 /**
  * The crash reports this phone keeps until the server has them (admins read them under Diagnostics → App crashes),
- * Send crash log (a bug report of the kind Crash log: the admin's Bug reports → Crash log) and Save as .txt (the share
- * sheet), for anyone signed in.
+ * Send crash log (a bug report of the kind Crash log: the admin's Bug reports → Crash log) and Save as .txt (straight
+ * into Downloads, with Share on the toast), for anyone signed in.
  */
 @Composable
 private fun CrashReports(nav: Nav) {
@@ -161,7 +161,7 @@ private fun CrashReports(nav: Nav) {
             SmallButton("Save as .txt", iconRes = R.drawable.ic_download) {
                 scope.launch {
                     try {
-                        shareFile(context, withContext(Dispatchers.IO) { CrashLog.exportText(context) })
+                        saveExport(context, withContext(Dispatchers.IO) { CrashLog.exportText(context) })
                     } catch (e: CancellationException) {
                         throw e
                     } catch (e: Exception) {

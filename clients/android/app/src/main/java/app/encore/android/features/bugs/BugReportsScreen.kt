@@ -48,6 +48,7 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.core.content.FileProvider
 import app.encore.android.R
+import app.encore.android.core.DownloadsFolder
 import app.encore.android.core.bool
 import app.encore.android.core.parseJsonObject
 import app.encore.android.core.str
@@ -202,7 +203,7 @@ fun BugReportsScreen(nav: Nav, from: String) {
                 val file = withContext(Dispatchers.IO) {
                     nav.graph.bugReports.export(BugRules.exportQuery(filter), File(exportDir(context), BugRules.exportName(day)))
                 }
-                shareFile(context, file)
+                saveExport(context, file)
             } catch (e: CancellationException) {
                 throw e
             } catch (e: Exception) {
@@ -343,13 +344,33 @@ private fun ReportRow(r: BugReportRow, onClick: () -> Unit) {
     RowDivider()
 }
 
-// ---- export: the zip goes to the share sheet ----------------------------------------------------------------------
+// ---- export: the file goes straight into Downloads, with Share on the toast ---------------------------------------
 
-/** Where exports wait to be shared: `cacheDir/shared/bug-reports` (the FileProvider's `shared` path). */
+/** Where exports are written first: `cacheDir/shared/bug-reports` (the FileProvider's `shared` path, for Share). */
 internal fun exportDir(context: Context): File = File(context.cacheDir, "shared/bug-reports").also { dir ->
     // one export at a time is enough: older ones go
     dir.listFiles()?.forEach { if (it.isFile) it.delete() }
 }
+
+/**
+ * Saves an export (a bug report .txt, a crash log) straight into the phone's Downloads folder and says so in a toast
+ * ("Saved in Downloads: name") that has a **Share** button for sending it on (mail, a chat). No picker, no share sheet.
+ *
+ * Android 8–9 without the storage permission cannot write Downloads, so there the share sheet opens instead (as
+ * before), where Files can still take it.
+ */
+internal suspend fun saveExport(context: Context, file: File) {
+    if (!DownloadsFolder.canSave(context)) {
+        shareFile(context, file)
+        return
+    }
+    val saved = withContext(Dispatchers.IO) { DownloadsFolder.save(context, file, DownloadsFolder.mimeOf(file)) }
+    // longer than a plain toast, so there is time to press Share
+    Toasts.show("Saved in Downloads: $saved", "ok", action = "Share", showMs = SAVED_TOAST_MS) { shareFile(context, file) }
+}
+
+/** How long the "Saved in Downloads" toast stays, in ms (time to read the name and press Share). */
+private const val SAVED_TOAST_MS = 8_000L
 
 /** Offers the file (an export's .txt, a crash log) to other apps (mail, a chat, Files) through Android's share sheet. */
 internal fun shareFile(context: Context, file: File) {
