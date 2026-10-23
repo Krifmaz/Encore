@@ -160,7 +160,8 @@ private fun primaryOf(type: String): String = when (type) {
  * The Request discography sheet (the web's dialog): every release on the page – MusicBrainz, and the Deezer /
  * Apple Music ones that have loaded – grouped by kind, a box per release, ticked to start when Settings →
  * Release types allows it and it isn't owned or requested; Select all / Deselect all per group and overall;
- * the button counts the ticks. Only the ticked releases are requested.
+ * the button (pinned at the top with Cancel, so a long list needs no scrolling) counts the ticks. Only the
+ * ticked releases are requested.
  */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -182,8 +183,22 @@ private fun DiscographySheet(a: ArtistPage, ext: List<ExtRelease>, statuses: Req
     var ticked by remember { mutableStateOf(entries.filter { it.allowed && !it.fixed }.map { it.id }.toSet()) }
     fun selectable(list: List<DiscoEntry>): Set<String> = list.filter { !it.fixed }.map { it.id }.toSet()
     ModalBottomSheet(onDismissRequest = onDismiss, sheetState = sheetState, containerColor = p.panel, contentColor = p.text) {
-        Column(Modifier.fillMaxWidth().verticalScroll(rememberScrollState()).padding(horizontal = 22.dp).padding(bottom = 24.dp)) {
+        // the title and Cancel / Request stay pinned at the top; only the list below them scrolls
+        Column(Modifier.fillMaxWidth().padding(horizontal = 22.dp)) {
             Text("Request discography", style = MaterialTheme.typography.titleLarge, modifier = Modifier.padding(vertical = 8.dp))
+            Row(Modifier.fillMaxWidth().padding(bottom = 10.dp), horizontalArrangement = Arrangement.spacedBy(8.dp, Alignment.End)) {
+                EncoreButton("Cancel") { onDismiss() }
+                val n = ticked.size
+                EncoreButton("Request $n release${if (n == 1) "" else "s"}", iconRes = R.drawable.ic_download, primary = true) {
+                    if (ticked.isEmpty()) {
+                        Toasts.show("Tick at least one release", "err")
+                    } else {
+                        onRequest(entries.filter { it.id in ticked }) // in the page's order
+                    }
+                }
+            }
+        }
+        Column(Modifier.fillMaxWidth().weight(1f, fill = false).verticalScroll(rememberScrollState()).padding(horizontal = 22.dp).padding(bottom = 24.dp)) {
             Text(
                 "Every release of ${a.name} on this page, from MusicBrainz${if (a.catalogMerge) ", Deezer and Apple Music" else ""}. Ticked to start: what Settings → Release types allows and you don't have or haven't requested yet.",
                 style = MaterialTheme.typography.bodySmall, color = p.muted,
@@ -206,17 +221,6 @@ private fun DiscographySheet(a: ArtistPage, ext: List<ExtRelease>, statuses: Req
                 }
                 for (e in list) {
                     ReleaseBox(e, e.id in ticked) { on -> ticked = if (on) ticked + e.id else ticked - e.id }
-                }
-            }
-            Row(Modifier.fillMaxWidth().padding(top = 16.dp), horizontalArrangement = Arrangement.spacedBy(8.dp, Alignment.End)) {
-                EncoreButton("Cancel") { onDismiss() }
-                val n = ticked.size
-                EncoreButton("Request $n release${if (n == 1) "" else "s"}", iconRes = R.drawable.ic_download, primary = true) {
-                    if (ticked.isEmpty()) {
-                        Toasts.show("Tick at least one release", "err")
-                    } else {
-                        onRequest(entries.filter { it.id in ticked }) // in the page's order
-                    }
                 }
             }
         }
