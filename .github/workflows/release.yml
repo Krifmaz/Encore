@@ -346,7 +346,7 @@ jobs:
         run: |
           # releases and their tags: hotfix-<a>.<b>.<c>.<n>, newest version first
           OLD=$(gh release list --limit 200 --json tagName -q '.[].tagName' | sed -n 's/^hotfix-\([0-9]*\.[0-9]*\.[0-9]*\.[0-9]*\)$/\1/p' \
-                | sort -t. -k1,1n -k2,2n -k3,3n -k4,4n -r | tail -n +$((KEEP + 1)))
+                | sort -rV | tail -n +$((KEEP + 1)))
           for v in $OLD; do echo "deleting release hotfix-$v"; gh release delete "hotfix-$v" --yes --cleanup-tag || true; done
           # images: a package version whose tags are all hotfix versions not kept, and the per-platform manifests
           # under it (they show as untagged versions; another image's untagged ones are never touched)
@@ -354,7 +354,7 @@ jobs:
           API="/users/$OWNER/packages/container/encore/versions"
           gh api --paginate "$API?per_page=100" > versions.json 2>/dev/null || { echo "can't list the image's versions"; exit 0; }
           jq -s 'add' versions.json > all.json
-          KEPT=$(jq -r '.[].metadata.container.tags[]' all.json | grep -E '^[0-9]+(\.[0-9]+){3}$' | sort -t. -k1,1n -k2,2n -k3,3n -k4,4n -r | head -n "$KEEP")
+          KEPT=$(jq -r '.[].metadata.container.tags[]' all.json | grep -E '^[0-9]+(\.[0-9]+){3}$' | sort -rV | head -n "$KEEP")
           jq -c '.[] | select((.metadata.container.tags | length) > 0)' all.json | while read -r ver; do
             TAGS=$(echo "$ver" | jq -r '.metadata.container.tags[]')
             # only versions tagged with hotfix numbers alone (never :latest, :hotfix or a release's)

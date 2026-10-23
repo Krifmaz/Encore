@@ -166,6 +166,9 @@ async fn update_now_pulls_and_starts_the_helper() {
     assert_eq!(e, "Could not pull ghcr.io/krifmaz/encore:9.9.9: manifest unknown");
     let e = start_update(&d, &id, "denied").await.unwrap_err();
     assert!(e.starts_with("Could not pull ghcr.io/krifmaz/encore:denied: pull access denied"), "{e}");
+    assert!(e.contains("must be public"), "{e}");
+    assert!(pull_error("i:1", "error from registry: unauthorized").contains("must be public"));
+    assert_eq!(pull_error("i:1", "manifest unknown"), "Could not pull i:1: manifest unknown");
     assert_eq!(m.calls().iter().filter(|c| c.starts_with("POST /containers/create")).count(), 1, "no helper after a failed pull");
     let _ = std::fs::remove_dir_all(&dir);
 }
