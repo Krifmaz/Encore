@@ -97,9 +97,11 @@ import app.encore.android.ui.components.rememberLibraryIndex
 import app.encore.android.ui.components.rememberLoad
 import app.encore.android.ui.components.shareLinkOf
 import app.encore.android.ui.theme.palette
+import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.withTimeoutOrNull
 import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonNull
 import kotlinx.serialization.json.JsonObject
@@ -267,6 +269,24 @@ fun CatalogArtistScreen(nav: Nav, mbid: String) = ArtistPageScreen(nav, mbid = m
 fun ArtistScreen(nav: Nav, name: String) = ArtistPageScreen(nav, mbid = "", name = name)
 
 /** What the artist page shows: the MusicBrainz page (only the name for a library-only artist) and the library's albums by name. */
+/**
+ * "Go to discography" of a library artist: the catalogue page (every release, Request discography) by the
+ * artist's MusicBrainz id, looked up by name; a toast when MusicBrainz doesn't know the artist (this page is
+ * already the library view, so there is nowhere else to go).
+ */
+private fun openDiscography(nav: Nav, name: String, scope: CoroutineScope) {
+    scope.launch {
+        val id = try {
+            withTimeoutOrNull(8_000L) { withContext(Dispatchers.IO) { nav.features.artistLookup(name) } } ?: ""
+        } catch (e: CancellationException) {
+            throw e
+        } catch (_: Exception) {
+            ""
+        }
+        if (id.isNotEmpty()) nav.open(Screen.CatalogArtist(id)) else Toasts.show("No discography found for $name", "err")
+    }
+}
+
 private class ArtistPageData(val page: ArtistPage, val libraryAlbums: List<Album>)
 
 /**
@@ -327,9 +347,10 @@ private fun ArtistPageScreen(nav: Nav, mbid: String, name: String) {
                     }) {
                         Icon(painterResource(R.drawable.ic_share), contentDescription = "Share link")
                     }
-                    if (me?.isAdmin == true) {
-                        MoreButton(entries = listOf(MenuEntry("Remove artist", R.drawable.ic_delete, danger = true) { confirmRemove = true }))
-                    }
+                    MoreButton(entries = listOf(
+                        MenuEntry("Go to discography", R.drawable.ic_disc) { openDiscography(nav, name, scope) },
+                        if (me?.isAdmin == true) MenuEntry("Remove artist", R.drawable.ic_delete, danger = true) { confirmRemove = true } else null,
+                    ))
                 }
             } else {
                 EncoreTopBar("", scrollBehavior = scrollBehavior, onBack = nav.back)
